@@ -1,0 +1,162 @@
+[   0.012] boot: Initialize (pid=6336)
+[   0.057] SetWindow bounds=1920x1080
+[   0.059] Activated kind=0 (activation args ignored)
+[   0.060] Run: entering
+[   0.067] loaded separate host and test PE DLLs, ABI v1
+[   0.067] PASS CreateFile2 err=0
+[   0.068] PASS WriteFile err=0
+[   0.069] PASS FlushFileBuffers err=0
+[   0.069] PASS GetFileSizeEx err=0
+[   0.069] PASS SetFilePointerEx err=0
+[   0.069] PASS ReadFile err=0
+[   0.069] PASS CloseHandle err=0
+[   0.069] PASS GetFileAttributesW err=0
+[   0.069] PASS MoveFileExW err=0
+[   0.069] PASS DeleteFileW err=0
+[   0.069] PASS CreateDirectoryW err=0
+[   0.069] PASS RemoveDirectoryW err=0
+[   0.069] PASS missing file error err=2
+[   0.069] PASS GetCurrentProcessId err=0
+[   0.069] PASS GetCurrentThreadId err=0
+[   0.069] PASS CreateThread err=0
+[   0.070] PASS thread join err=0
+[   0.070] PASS CloseHandle err=0
+[   0.070] PASS CreateEventExW err=0
+[   0.070] PASS event timeout err=0
+[   0.070] PASS SetEvent err=0
+[   0.070] PASS event wait err=0
+[   0.070] PASS ResetEvent err=0
+[   0.070] PASS CloseHandle err=0
+[   0.070] PASS CreateMutexExW err=0
+[   0.070] PASS mutex wait err=0
+[   0.070] PASS ReleaseMutex err=0
+[   0.070] PASS CloseHandle err=0
+[   0.070] PASS CreateSemaphoreExW err=0
+[   0.070] PASS ReleaseSemaphore err=0
+[   0.070] PASS semaphore wait err=0
+[   0.070] PASS CloseHandle err=0
+[   0.070] PASS TlsAlloc err=0
+[   0.070] PASS TlsSetValue err=0
+[   0.070] PASS TlsGetValue err=0
+[   0.070] PASS TlsFree err=0
+[   0.070] PASS QueryPerformanceFrequency err=0
+[   0.070] PASS QueryPerformanceCounter err=0
+[   0.090] PASS GetTickCount64/Sleep err=0
+[   0.090] PASS CreateProcess clean failure err=5
+[   0.090] PASS RWX allocation refused err=5
+[   0.090] PASS VirtualAllocFromApp RW err=0
+[   0.090] PASS VirtualQuery err=0
+[   0.090] PASS VirtualProtectFromApp RX err=0
+[   0.090] PASS FlushInstructionCache err=0
+[   0.091] PASS execute RX value=42 err=0
+[   0.091] PASS VirtualFree err=0
+[   0.091] PASS invalid opcode rejected err=0
+[   0.091] PASS Wine10 system_time_precise err=0
+[   0.091] PASS Wine10 dbg_write byte count err=0
+[   0.091] PASS Wine10 server call unsupported err=0
+[   0.091] PASS invalid handle rejected err=0
+[   0.091] WS two-thread sync begin (main + native worker)
+[   0.091] PASS WS CreateEventW ready/go/done err=0
+[   0.091] PASS WS DuplicateHandle distinct entry err=0
+[   0.091] PASS WS close original err=0
+[   0.091] PASS WS stale handle rejected err=6
+[   0.091] PASS WS CreateThread err=0
+[   0.091] PASS WS worker ready WaitForSingleObject err=0
+[   0.091] WS sequence: worker ready; main signals duplicated go handle
+[   0.091] PASS WS SetEvent duplicate survives close err=0
+[   0.091] PASS WS WaitForMultipleObjects all err=0
+[   0.091] WS sequence: worker received go; done and thread signaled
+[   0.091] PASS WS auto-reset consumed err=0
+[   0.091] PASS WS wait-any index err=0
+[   0.091] PASS WS wrong object type rejected err=6
+[   0.091] PASS WS invalid wait count err=87
+[   0.091] PASS CloseHandle err=0
+[   0.091] PASS WS duplicated thread join err=0
+[   0.091] PASS CloseHandle err=0
+[   0.091] PASS CloseHandle err=0
+[   0.091] PASS CloseHandle err=0
+[   0.091] PASS CloseHandle err=0
+[   0.091] PASS WS double close rejected err=6
+[   0.091] WS two-thread sync end
+[   0.091] checks=71 failures=0
+[   0.091] K32 RESULT failures=0
+[   0.092] WXL VirtualAllocFromApp initial=0x4 (RW)
+[   0.092] WXL mapped LocalState PE relocations=1 imports=3 delta=0x1f228e90000
+[   0.092] WXL VirtualProtectFromApp rva=0x0 size=0x5000 old=0x4 new=0x1 ok=1 err=0
+[   0.092] WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.092] WXL VirtualProtectFromApp rva=0x1000 size=0x1000 old=0x1 new=0x20 ok=1 err=0
+[   0.092] WXL VirtualProtectFromApp rva=0x2000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.092] WXL VirtualProtectFromApp rva=0x3000 size=0x1000 old=0x1 new=0x4 ok=1 err=0
+[   0.092] WXL VirtualProtectFromApp rva=0x4000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.092] WXL-OK 6342
+[   0.092] WXL RESULT entry=42 failures=0
+[   0.094] HidD_GetHidGuid
+[   0.094] SetupDiGetClassDevsA
+[   0.094] SetupDiGetClassDevsW
+[   0.094] HID CHECK SetupDiGetClassDevsA PASS
+[   0.094] HID CHECK SetupDiGetClassDevsW PASS
+[   0.094] SetupDiEnumDeviceInterfaces
+[   0.094] HID CHECK SetupDiEnumDeviceInterfaces PASS
+[   0.094] SetupDiEnumDeviceInfo
+[   0.094] HID CHECK SetupDiEnumDeviceInfo PASS
+[   0.094] SetupDiGetDeviceInterfaceDetailW
+[   0.094] HID CHECK SetupDiGetDeviceInterfaceDetailW PASS
+[   0.094] SetupDiDestroyDeviceInfoList
+[   0.094] HID CHECK SetupDiDestroyDeviceInfoList PASS
+[   0.094] HidD_GetSerialNumberString
+[   0.094] HID CHECK HidD_GetSerialNumberString PASS
+[   0.094] HidD_GetManufacturerString
+[   0.094] HID CHECK HidD_GetManufacturerString PASS
+[   0.094] HidD_GetProductString
+[   0.094] HID CHECK HidD_GetProductString PASS
+[   0.094] HidD_FreePreparsedData
+[   0.094] HID CHECK HidD_FreePreparsedData PASS
+[   0.094] HidD_GetPreparsedData
+[   0.094] HID CHECK HidD_GetPreparsedData PASS
+[   0.094] HidD_GetAttributes
+[   0.094] HID CHECK HidD_GetAttributes PASS
+[   0.094] HidP_GetData
+[   0.094] HID CHECK HidP_GetData PASS
+[   0.094] HidP_MaxDataListLength
+[   0.094] HID CHECK HidP_MaxDataListLength PASS
+[   0.094] HidP_SetUsages
+[   0.094] HID CHECK HidP_SetUsages PASS
+[   0.094] HidP_SetUsageValue
+[   0.095] HID CHECK HidP_SetUsageValue PASS
+[   0.095] HidP_GetButtonCaps
+[   0.095] HID CHECK HidP_GetButtonCaps PASS
+[   0.095] HidP_GetValueCaps
+[   0.095] HID CHECK HidP_GetValueCaps PASS
+[   0.095] HidP_GetCaps
+[   0.095] HID CHECK HidP_GetCaps PASS
+[   0.095] HidD_GetHidGuid
+[   0.095] HID CHECK HidD_GetHidGuid PASS
+[   0.095] SetupDiDestroyDeviceInfoList
+[   0.095] HID CHECK destroy W set PASS
+[   0.095] SetupDiEnumDeviceInfo
+[   0.095] HID CHECK stale set rejected PASS
+[   0.095] SetupDiDestroyDeviceInfoList
+[   0.095] HID CHECK double destroy rejected PASS
+[   0.095] HID-STUB-OK symbols=20 checks=23
+[   0.095] HID RESULT failures=0
+[   0.101] D3DT get swapchain target hr=0x00000000
+[   0.150] D3DT system D3D11CreateDevice hr=0x00000000
+[   0.150] D3DT feature_level=0xb000 separate x64 PE
+[   0.150] D3DT QueryInterface IDXGIDevice hr=0x00000000
+[   0.150] D3DT GetAdapter hr=0x00000000
+[   0.150] D3DT GetParent IDXGIFactory2 hr=0x00000000
+[   0.161] D3DT system CreateSwapChainForCoreWindow hr=0x00000000
+[   0.162] D3DT GetBuffer hr=0x00000000
+[   0.162] D3DT CreateRenderTargetView hr=0x00000000
+[   0.162] D3DT CreateVertexShader DXBC hr=0x00000000
+[   0.162] D3DT CreatePixelShader DXBC hr=0x00000000
+[   0.162] D3DT CreateInputLayout hr=0x00000000
+[   0.162] D3DT CreateBuffer triangle hr=0x00000000
+[   0.163] D3DT triangle pipeline ready: precompiled DXBC, Draw(3,0) each frame
+[   1.238] D3DT presented=60 hr=0x00000000 elapsed=1.075 fps=55.80
+[   2.239] D3DT presented=120 hr=0x00000000 elapsed=2.076 fps=57.80
+[   3.240] D3DT presented=180 hr=0x00000000 elapsed=3.077 fps=58.49
+[   4.241] D3DT presented=240 hr=0x00000000 elapsed=4.078 fps=58.85
+[   5.242] D3DT presented=300 hr=0x00000000 elapsed=5.079 fps=59.06
+[   5.242] D3DT RESULT presented=300 hr=0x00000000 final_clear=0.90,0.12,0.65,1.00
+[   5.242] D3DT RETURN hr=0x00000000

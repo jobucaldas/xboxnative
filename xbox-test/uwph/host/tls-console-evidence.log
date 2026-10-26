@@ -1,0 +1,167 @@
+[   0.012] boot: Initialize (pid=5132)
+[   0.122] SetWindow bounds=1920x1080
+[   0.123] Activated kind=0 (activation args ignored)
+[   0.125] Run: entering
+[   0.133] loaded separate host and test PE DLLs, ABI v1
+[   0.134] PASS CreateFile2 err=0
+[   0.134] PASS WriteFile err=0
+[   0.135] PASS FlushFileBuffers err=0
+[   0.135] PASS GetFileSizeEx err=0
+[   0.135] PASS SetFilePointerEx err=0
+[   0.135] PASS ReadFile err=0
+[   0.135] PASS CloseHandle err=0
+[   0.136] PASS GetFileAttributesW err=0
+[   0.136] PASS MoveFileExW err=0
+[   0.136] PASS DeleteFileW err=0
+[   0.136] PASS CreateDirectoryW err=0
+[   0.136] PASS RemoveDirectoryW err=0
+[   0.136] PASS missing file error err=2
+[   0.136] PASS GetCurrentProcessId err=0
+[   0.136] PASS GetCurrentThreadId err=0
+[   0.136] PASS CreateThread err=0
+[   0.137] PASS thread join err=0
+[   0.137] PASS CloseHandle err=0
+[   0.137] PASS CreateEventExW err=0
+[   0.137] PASS event timeout err=0
+[   0.137] PASS SetEvent err=0
+[   0.137] PASS event wait err=0
+[   0.137] PASS ResetEvent err=0
+[   0.137] PASS CloseHandle err=0
+[   0.137] PASS CreateMutexExW err=0
+[   0.137] PASS mutex wait err=0
+[   0.137] PASS ReleaseMutex err=0
+[   0.137] PASS CloseHandle err=0
+[   0.137] PASS CreateSemaphoreExW err=0
+[   0.137] PASS ReleaseSemaphore err=0
+[   0.137] PASS semaphore wait err=0
+[   0.137] PASS CloseHandle err=0
+[   0.137] PASS TlsAlloc err=0
+[   0.137] PASS TlsSetValue err=0
+[   0.137] PASS TlsGetValue err=0
+[   0.137] PASS TlsFree err=0
+[   0.137] PASS QueryPerformanceFrequency err=0
+[   0.137] PASS QueryPerformanceCounter err=0
+[   0.157] PASS GetTickCount64/Sleep err=0
+[   0.158] PASS CreateProcess clean failure err=5
+[   0.158] PASS RWX allocation refused err=5
+[   0.158] PASS VirtualAllocFromApp RW err=0
+[   0.158] PASS VirtualQuery err=0
+[   0.159] PASS VirtualProtectFromApp RX err=0
+[   0.159] PASS FlushInstructionCache err=0
+[   0.159] PASS execute RX value=42 err=0
+[   0.159] PASS VirtualFree err=0
+[   0.159] PASS invalid opcode rejected err=0
+[   0.159] PASS Wine10 system_time_precise err=0
+[   0.159] PASS Wine10 dbg_write byte count err=0
+[   0.159] PASS Wine10 server call unsupported err=0
+[   0.159] PASS invalid handle rejected err=0
+[   0.159] WS two-thread sync begin (main + native worker)
+[   0.160] PASS WS CreateEventW ready/go/done err=0
+[   0.160] PASS WS DuplicateHandle distinct entry err=0
+[   0.160] PASS WS close original err=0
+[   0.160] PASS WS stale handle rejected err=6
+[   0.160] PASS WS CreateThread err=0
+[   0.160] PASS WS worker ready WaitForSingleObject err=0
+[   0.160] WS sequence: worker ready; main signals duplicated go handle
+[   0.160] PASS WS SetEvent duplicate survives close err=0
+[   0.160] PASS WS WaitForMultipleObjects all err=0
+[   0.160] WS sequence: worker received go; done and thread signaled
+[   0.160] PASS WS auto-reset consumed err=0
+[   0.160] PASS WS wait-any index err=0
+[   0.160] PASS WS wrong object type rejected err=6
+[   0.160] PASS WS invalid wait count err=87
+[   0.160] PASS CloseHandle err=0
+[   0.160] PASS WS duplicated thread join err=0
+[   0.160] PASS CloseHandle err=0
+[   0.160] PASS CloseHandle err=0
+[   0.160] PASS CloseHandle err=0
+[   0.160] PASS CloseHandle err=0
+[   0.160] PASS WS double close rejected err=6
+[   0.160] WS two-thread sync end
+[   0.160] checks=71 failures=0
+[   0.160] K32 RESULT failures=0
+[   0.161] WXL VirtualAllocFromApp initial=0x4 (RW)
+[   0.161] WXL mapped LocalState PE relocations=1 imports=3 delta=0x2196fe50000
+[   0.161] WXL VirtualProtectFromApp rva=0x0 size=0x5000 old=0x4 new=0x1 ok=1 err=0
+[   0.161] WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.161] WXL VirtualProtectFromApp rva=0x1000 size=0x1000 old=0x1 new=0x20 ok=1 err=0
+[   0.161] WXL VirtualProtectFromApp rva=0x2000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.161] WXL VirtualProtectFromApp rva=0x3000 size=0x1000 old=0x1 new=0x4 ok=1 err=0
+[   0.161] WXL VirtualProtectFromApp rva=0x4000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.161] WXL-OK 5133
+[   0.161] WXL RESULT entry=42 failures=0
+[   0.162] WXL VirtualAllocFromApp initial=0x4 (RW)
+[   0.162] WXL mapped LocalState PE relocations=1 imports=3 delta=0x2192fe50000
+[   0.162] WXL VirtualProtectFromApp rva=0x0 size=0x6000 old=0x4 new=0x1 ok=1 err=0
+[   0.162] WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.162] WXL VirtualProtectFromApp rva=0x1000 size=0x1000 old=0x1 new=0x20 ok=1 err=0
+[   0.162] WXL VirtualProtectFromApp rva=0x2000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.162] WXL VirtualProtectFromApp rva=0x3000 size=0x1000 old=0x1 new=0x4 ok=1 err=0
+[   0.162] WXL VirtualProtectFromApp rva=0x4000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.162] WXL VirtualProtectFromApp rva=0x5000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.162] WXL RtlAddFunctionTable count=1 ok=1
+[   0.162] LIFECYCLE unwind lookup ok
+[   0.162] LIFECYCLE attach
+[   0.162] WXL DllMain DLL_PROCESS_ATTACH ok=1
+[   0.162] LIFECYCLE detach
+[   0.162] WXL DllMain DLL_PROCESS_DETACH
+[   0.162] WXL RtlDeleteFunctionTable ok=1
+[   0.162] LIFECYCLE RESULT failures=0
+[   0.162] WXL native TLS startup anchors A=3 B=4
+[   0.162] WXL carrier A module=00007FFAD4120000 error=0
+[   0.163] WXL carrier B module=00007FFAC7410000 error=0
+[   0.163] WXL carrier A indexfn=00007FFAD4121000 blockfn=00007FFAD4121010 index=3 B indexfn=00007FFAC7411000 blockfn=00007FFAC7411010 index=4
+[   0.163] WXL VirtualAllocFromApp initial=0x4 (RW)
+[   0.163] WXL mapped LocalState PE relocations=9 imports=6 delta=0x2192fe50000
+[   0.163] WXL TLS native-index=3 dynamic-key=22 template=4 zero=4 callbacks=1
+[   0.163] WXL VirtualProtectFromApp rva=0x0 size=0x7000 old=0x4 new=0x1 ok=1 err=0
+[   0.163] WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.163] WXL VirtualProtectFromApp rva=0x1000 size=0x1000 old=0x1 new=0x20 ok=1 err=0
+[   0.163] WXL VirtualProtectFromApp rva=0x2000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.163] WXL VirtualProtectFromApp rva=0x3000 size=0x1000 old=0x1 new=0x4 ok=1 err=0
+[   0.163] WXL VirtualProtectFromApp rva=0x4000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.163] WXL VirtualProtectFromApp rva=0x5000 size=0x1000 old=0x1 new=0x4 ok=1 err=0
+[   0.163] WXL VirtualProtectFromApp rva=0x6000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.163] WXL RtlAddFunctionTable count=6 ok=1
+[   0.163] WXL TLS DllMain attach follows callback
+[   0.163] WXL DllMain DLL_PROCESS_ATTACH ok=1
+[   0.164] WXL VirtualAllocFromApp initial=0x4 (RW)
+[   0.164] WXL mapped LocalState PE relocations=9 imports=6 delta=0x2196fe60000
+[   0.164] WXL TLS native-index=4 dynamic-key=23 template=4 zero=4 callbacks=1
+[   0.164] WXL VirtualProtectFromApp rva=0x0 size=0x7000 old=0x4 new=0x1 ok=1 err=0
+[   0.164] WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.164] WXL VirtualProtectFromApp rva=0x1000 size=0x1000 old=0x1 new=0x20 ok=1 err=0
+[   0.164] WXL VirtualProtectFromApp rva=0x2000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.164] WXL VirtualProtectFromApp rva=0x3000 size=0x1000 old=0x1 new=0x4 ok=1 err=0
+[   0.164] WXL VirtualProtectFromApp rva=0x4000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.164] WXL VirtualProtectFromApp rva=0x5000 size=0x1000 old=0x1 new=0x4 ok=1 err=0
+[   0.164] WXL VirtualProtectFromApp rva=0x6000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.164] WXL RtlAddFunctionTable count=7 ok=1
+[   0.165] WXL CXX mapped DLL destructor ran
+[   0.165] WXL CXX mapped EXE caught 73
+[   0.165] WXL TLS native template and callback correct on current thread
+[   0.165] WXL TLS DllMain attach follows callback
+[   0.165] WXL CXX mapped DLL destructor ran
+[   0.165] WXL CXX mapped EXE caught 73
+[   0.165] WXL TLS native template and callback correct on current thread
+[   0.165] WXL-TLS-OK: TLS value correct on two threads, callback ran, exception caught
+[   0.165] WXL RtlDeleteFunctionTable ok=1
+[   0.165] WXL DllMain DLL_PROCESS_DETACH
+[   0.165] WXL RtlDeleteFunctionTable ok=1
+[   0.165] WXL TLS RESULT failures=0
+[   0.173] D3DT get swapchain target hr=0x00000000
+[   0.238] D3DT system D3D11CreateDevice hr=0x00000000
+[   0.238] D3DT feature_level=0xb000 separate x64 PE
+[   0.238] D3DT QueryInterface IDXGIDevice hr=0x00000000
+[   0.238] D3DT GetAdapter hr=0x00000000
+[   0.238] D3DT GetParent IDXGIFactory2 hr=0x00000000
+[   0.262] D3DT system CreateSwapChainForCoreWindow hr=0x00000000
+[   0.262] D3DT GetBuffer hr=0x00000000
+[   0.262] D3DT CreateRenderTargetView hr=0x00000000
+[   1.761] D3DT presented=60 hr=0x00000000 elapsed=1.499 fps=40.04
+[   2.762] D3DT presented=120 hr=0x00000000 elapsed=2.500 fps=48.00
+[   3.763] D3DT presented=180 hr=0x00000000 elapsed=3.501 fps=51.42
+[   4.764] D3DT presented=240 hr=0x00000000 elapsed=4.502 fps=53.31
+[   5.765] D3DT presented=300 hr=0x00000000 elapsed=5.503 fps=54.52
+[   5.765] D3DT RESULT presented=300 hr=0x00000000 final_clear=0.90,0.12,0.65,1.00
+[   5.765] D3DT RETURN hr=0x00000000

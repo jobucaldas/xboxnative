@@ -1,0 +1,66 @@
+[   0.014] boot: Initialize (pid=7156)
+[   0.068] SetWindow bounds=1920x1080
+[   0.069] Activated kind=0 (activation args ignored)
+[   0.070] Run: entering
+[   0.075] loaded separate host and test PE DLLs, ABI v1
+[   0.076] PASS CreateFile2 err=0
+[   0.076] PASS WriteFile err=0
+[   0.078] PASS FlushFileBuffers err=0
+[   0.078] PASS GetFileSizeEx err=0
+[   0.078] PASS SetFilePointerEx err=0
+[   0.078] PASS ReadFile err=0
+[   0.078] PASS CloseHandle err=0
+[   0.078] PASS GetFileAttributesW err=0
+[   0.078] PASS MoveFileExW err=0
+[   0.079] PASS DeleteFileW err=0
+[   0.079] PASS CreateDirectoryW err=0
+[   0.079] PASS RemoveDirectoryW err=0
+[   0.079] PASS missing file error err=2
+[   0.080] PASS GetCurrentProcessId err=0
+[   0.080] PASS GetCurrentThreadId err=0
+[   0.080] PASS CreateThread err=0
+[   0.081] PASS thread join err=0
+[   0.081] PASS CloseHandle err=0
+[   0.081] PASS CreateEventExW err=0
+[   0.081] PASS event timeout err=0
+[   0.081] PASS SetEvent err=0
+[   0.081] PASS event wait err=0
+[   0.081] PASS ResetEvent err=0
+[   0.081] PASS CloseHandle err=0
+[   0.081] PASS CreateMutexExW err=0
+[   0.081] PASS mutex wait err=0
+[   0.081] PASS ReleaseMutex err=0
+[   0.081] PASS CloseHandle err=0
+[   0.081] PASS CreateSemaphoreExW err=0
+[   0.081] PASS ReleaseSemaphore err=0
+[   0.081] PASS semaphore wait err=0
+[   0.081] PASS CloseHandle err=0
+[   0.081] PASS TlsAlloc err=0
+[   0.081] PASS TlsSetValue err=0
+[   0.081] PASS TlsGetValue err=0
+[   0.081] PASS TlsFree err=0
+[   0.081] PASS QueryPerformanceFrequency err=0
+[   0.081] PASS QueryPerformanceCounter err=0
+[   0.102] PASS GetTickCount64/Sleep err=0
+[   0.102] PASS CreateProcess clean failure err=5
+[   0.102] PASS RWX allocation refused err=5
+[   0.102] PASS VirtualAllocFromApp RW err=0
+[   0.102] PASS VirtualQuery err=0
+[   0.103] PASS VirtualProtectFromApp RX err=0
+[   0.103] PASS FlushInstructionCache err=0
+[   0.103] PASS execute RX value=42 err=0
+[   0.103] PASS VirtualFree err=0
+[   0.103] PASS invalid opcode rejected err=0
+[   0.103] PASS Wine10 system_time_precise err=0
+[   0.103] PASS Wine10 dbg_write byte count err=0
+[   0.103] PASS Wine10 server call unsupported err=0
+[   0.103] PASS invalid handle rejected err=0
+[   0.103] checks=52 failures=0
+[   0.103] K32 RESULT failures=0
+[   0.155] D3D11CreateDevice hr=0x00000000 fl=0xb000
+[   0.168] CreateSwapChainForCoreWindow hr=0x00000000
+[   0.170] frame=1 t=0.2
+[  10.173] frame=572 t=10.2
+[  20.183] frame=1172 t=20.2
+[  30.193] frame=1772 t=30.2
+[  40.203] frame=2372 t=40.2

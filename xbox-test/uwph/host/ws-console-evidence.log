@@ -1,0 +1,85 @@
+[   0.012] boot: Initialize (pid=6776)
+[   0.072] SetWindow bounds=1920x1080
+[   0.073] Activated kind=0 (activation args ignored)
+[   0.074] Run: entering
+[   0.080] loaded separate host and test PE DLLs, ABI v1
+[   0.081] PASS CreateFile2 err=0
+[   0.081] PASS WriteFile err=0
+[   0.083] PASS FlushFileBuffers err=0
+[   0.083] PASS GetFileSizeEx err=0
+[   0.083] PASS SetFilePointerEx err=0
+[   0.083] PASS ReadFile err=0
+[   0.083] PASS CloseHandle err=0
+[   0.083] PASS GetFileAttributesW err=0
+[   0.083] PASS MoveFileExW err=0
+[   0.084] PASS DeleteFileW err=0
+[   0.084] PASS CreateDirectoryW err=0
+[   0.084] PASS RemoveDirectoryW err=0
+[   0.084] PASS missing file error err=2
+[   0.084] PASS GetCurrentProcessId err=0
+[   0.084] PASS GetCurrentThreadId err=0
+[   0.084] PASS CreateThread err=0
+[   0.084] PASS thread join err=0
+[   0.084] PASS CloseHandle err=0
+[   0.084] PASS CreateEventExW err=0
+[   0.084] PASS event timeout err=0
+[   0.085] PASS SetEvent err=0
+[   0.085] PASS event wait err=0
+[   0.085] PASS ResetEvent err=0
+[   0.085] PASS CloseHandle err=0
+[   0.085] PASS CreateMutexExW err=0
+[   0.085] PASS mutex wait err=0
+[   0.085] PASS ReleaseMutex err=0
+[   0.085] PASS CloseHandle err=0
+[   0.085] PASS CreateSemaphoreExW err=0
+[   0.085] PASS ReleaseSemaphore err=0
+[   0.085] PASS semaphore wait err=0
+[   0.085] PASS CloseHandle err=0
+[   0.085] PASS TlsAlloc err=0
+[   0.085] PASS TlsSetValue err=0
+[   0.085] PASS TlsGetValue err=0
+[   0.085] PASS TlsFree err=0
+[   0.085] PASS QueryPerformanceFrequency err=0
+[   0.085] PASS QueryPerformanceCounter err=0
+[   0.106] PASS GetTickCount64/Sleep err=0
+[   0.106] PASS CreateProcess clean failure err=5
+[   0.106] PASS RWX allocation refused err=5
+[   0.106] PASS VirtualAllocFromApp RW err=0
+[   0.106] PASS VirtualQuery err=0
+[   0.106] PASS VirtualProtectFromApp RX err=0
+[   0.106] PASS FlushInstructionCache err=0
+[   0.106] PASS execute RX value=42 err=0
+[   0.106] PASS VirtualFree err=0
+[   0.106] PASS invalid opcode rejected err=0
+[   0.106] PASS Wine10 system_time_precise err=0
+[   0.106] PASS Wine10 dbg_write byte count err=0
+[   0.106] PASS Wine10 server call unsupported err=0
+[   0.106] PASS invalid handle rejected err=0
+[   0.106] WS two-thread sync begin (main + native worker)
+[   0.106] PASS WS CreateEventW ready/go/done err=0
+[   0.106] PASS WS DuplicateHandle distinct entry err=0
+[   0.107] PASS WS close original err=0
+[   0.107] PASS WS stale handle rejected err=6
+[   0.107] PASS WS CreateThread err=0
+[   0.107] PASS WS worker ready WaitForSingleObject err=0
+[   0.107] WS sequence: worker ready; main signals duplicated go handle
+[   0.107] PASS WS SetEvent duplicate survives close err=0
+[   0.107] PASS WS WaitForMultipleObjects all err=0
+[   0.107] WS sequence: worker received go; done and thread signaled
+[   0.107] PASS WS auto-reset consumed err=0
+[   0.107] PASS WS wait-any index err=0
+[   0.107] PASS WS wrong object type rejected err=6
+[   0.107] PASS WS invalid wait count err=87
+[   0.107] PASS CloseHandle err=0
+[   0.107] PASS WS duplicated thread join err=0
+[   0.107] PASS CloseHandle err=0
+[   0.107] PASS CloseHandle err=0
+[   0.107] PASS CloseHandle err=0
+[   0.107] PASS CloseHandle err=0
+[   0.107] PASS WS double close rejected err=6
+[   0.107] WS two-thread sync end
+[   0.107] checks=71 failures=0
+[   0.107] K32 RESULT failures=0
+[   0.174] D3D11CreateDevice hr=0x00000000 fl=0xb000
+[   0.190] CreateSwapChainForCoreWindow hr=0x00000000
+[   0.193] frame=1 t=0.2

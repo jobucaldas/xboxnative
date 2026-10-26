@@ -1,0 +1,67 @@
+
+File: xbox-test/uwph/display/out/layout/window-test.dll
+Format: COFF-x86-64
+Arch: x86_64
+AddressSize: 64bit
+Import {
+  Name: bcrypt.dll
+  ImportLookupTableRVA: 0x70B8
+  ImportAddressTableRVA: 0x71A8
+  Symbol: BCryptGenRandom (29)
+}
+Import {
+  Name: d3d11.dll
+  ImportLookupTableRVA: 0x70C8
+  ImportAddressTableRVA: 0x71B8
+  Symbol: D3D11CreateDevice (6)
+}
+Import {
+  Name: dxgi.dll
+  ImportLookupTableRVA: 0x70D8
+  ImportAddressTableRVA: 0x71C8
+  Symbol: CreateDXGIFactory1 (4)
+}
+Import {
+  Name: KERNEL32.dll
+  ImportLookupTableRVA: 0x70E8
+  ImportAddressTableRVA: 0x71D8
+  Symbol: SetLastError (1364)
+}
+Import {
+  Name: ole32.dll
+  ImportLookupTableRVA: 0x70F8
+  ImportAddressTableRVA: 0x71E8
+  Symbol: CoCreateGuid (29)
+}
+Import {
+  Name: VERSION.dll
+  ImportLookupTableRVA: 0x7108
+  ImportAddressTableRVA: 0x71F8
+  Symbol: GetFileVersionInfoSizeW (7)
+}
+Import {
+  Name: WS2_32.dll
+  ImportLookupTableRVA: 0x7118
+  ImportAddressTableRVA: 0x7208
+  Symbol: WSACleanup (31)
+  Symbol: WSAStartup (89)
+}
+Import {
+  Name: uwph-user32.dll
+  ImportLookupTableRVA: 0x7130
+  ImportAddressTableRVA: 0x7220
+  Symbol: CreateWindowExW (0)
+  Symbol: DefWindowProcW (1)
+  Symbol: DestroyWindow (2)
+  Symbol: DispatchMessageW (3)
+  Symbol: GetClientRect (4)
+  Symbol: GetMessageW (5)
+  Symbol: PeekMessageW (6)
+  Symbol: PostMessageW (7)
+  Symbol: PostQuitMessage (8)
+  Symbol: RegisterClassExW (9)
+  Symbol: ShowWindow (10)
+  Symbol: TranslateMessage (11)
+  Symbol: XInputGetState (12)
+  Symbol: uwph_corewindow (13)
+}

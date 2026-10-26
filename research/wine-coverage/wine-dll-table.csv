@@ -1,0 +1,62 @@
+dll,verdict,has_unixlib,WINE_UNIX_CALL_sites,nt_syscall_imports(Wine10 PE),win32u_imports,makefile_IMPORTS,bundled_PE_libs,UNIX_LIBS,static_import_closure_hits(unix-side or window-system dlls)
+ntdll,UNIX_SIDE_REQUIRED,yes,8,0,0,$(TOMCRYPT_PE_LIBS) $(MUSL_PE_LIBS),TOMCRYPT MUSL,$(IOKIT_LIBS) $(COREFOUNDATION_LIBS) $(CORESERVICES_LIBS) $(RT_LIBS) $(PTHREAD_LIBS) $(UNWIND_LIBS) $(I386_LIBS) $(PROCSTAT_LIBS) $(HWLOC_LIBS),
+kernel32,PE_ONLY_NEEDS_SYSCALLS,no,0,28,0,kernelbase ntdll,,,ntdll
+kernelbase,PE_ONLY_NEEDS_SYSCALLS,no,0,131,0,uuid ntdll,,,ntdll
+win32u,UNIX_SIDE_REQUIRED,yes,1,1,0,ntdll,,$(CORETEXT_LIBS) $(APPKIT_LIBS) $(PTHREAD_LIBS) -lm,ntdll
+user32,PE_ONLY_NEEDS_SYSCALLS,no,0,2,220,$(PNG_PE_LIBS) gdi32 sechost advapi32 kernelbase win32u uuid,PNG,,gdi32 ntdll win32u
+gdi32,PE_ONLY_NEEDS_SYSCALLS,no,0,0,160,user32 advapi32 win32u,,,ntdll user32 win32u
+gdi32full,NO_SOURCE_DIR,,,,,,,,
+advapi32,PE_ONLY_NEEDS_SYSCALLS,no,0,7,0,kernelbase sechost msvcrt,,,ntdll
+sechost,PE_ONLY_NEEDS_SYSCALLS,no,0,2,0,kernelbase,,,ntdll
+ole32,PE_ONLY_NEEDS_SYSCALLS,no,0,3,0,uuid advapi32 user32 gdi32 combase rpcrt4 kernelbase coml2,,,gdi32 ntdll user32 win32u
+combase,PE_ONLY_NEEDS_SYSCALLS,no,0,3,0,advapi32 ole32 user32 gdi32 uuid rpcrt4,,,gdi32 ntdll user32 win32u
+oleaut32,PE_ONLY,no,0,0,0,uuid ole32 rpcrt4 user32 gdi32 advapi32,,,gdi32 ntdll user32 win32u
+rpcrt4,PE_ONLY_NEEDS_SYSCALLS,no,0,4,0,uuid advapi32,,,ntdll
+msvcrt,PE_ONLY_NEEDS_SYSCALLS,no,0,2,0,$(MUSL_PE_LIBS) ntdll,MUSL,,ntdll
+ucrtbase,PE_ONLY_NEEDS_SYSCALLS,no,0,2,0,$(MUSL_PE_LIBS) ntdll,MUSL,,ntdll
+msvcp140,PE_ONLY,no,0,0,0,vcruntime140,,,ntdll
+vcruntime140,PE_ONLY,no,0,0,0,,,,ntdll
+xaudio2_9,PE_ONLY,no,0,0,0,$(FAUDIO_PE_LIBS) advapi32 ole32 user32 uuid,FAUDIO,,gdi32 ntdll user32 win32u
+xaudio2_7,PE_ONLY,no,0,0,0,$(FAUDIO_PE_LIBS) advapi32 ole32 user32 uuid,FAUDIO,,gdi32 ntdll user32 win32u
+xactengine3_7,PE_ONLY,no,0,0,0,$(FAUDIO_PE_LIBS) ole32 uuid,FAUDIO,,gdi32 ntdll user32 win32u
+x3daudio1_7,PE_ONLY,no,0,0,0,$(FAUDIO_PE_LIBS),FAUDIO,,ntdll
+mmdevapi,PE_ONLY_NEEDS_SYSCALLS,no,0,1,0,ole32 oleaut32 user32 advapi32 version,,,gdi32 ntdll user32 win32u
+winmm,PE_ONLY,no,0,0,0,uuid user32 advapi32 ole32 msacm32,,,gdi32 ntdll user32 win32u
+dsound,PE_ONLY,no,0,0,0,dxguid uuid winmm ole32 advapi32 user32,,,gdi32 ntdll user32 win32u
+dinput,PE_ONLY,no,0,0,0,dinput dxguid uuid comctl32 ole32 user32 advapi32 hid setupapi,,,gdi32 ntdll user32 win32u
+dinput8,PE_ONLY,no,0,0,0,dinput8 dxguid uuid comctl32 ole32 user32 advapi32 hid setupapi,,,gdi32 ntdll user32 win32u
+xinput1_3,PE_ONLY,no,0,0,0,hid setupapi advapi32 user32,,,gdi32 ntdll user32 win32u
+xinput1_4,PE_ONLY,no,0,0,0,hid setupapi advapi32 user32,,,gdi32 ntdll user32 win32u
+hid,PE_ONLY,no,0,0,0,,,,ntdll
+setupapi,PE_ONLY_NEEDS_SYSCALLS,no,0,3,0,uuid advapi32 rpcrt4 kernelbase,,,ntdll
+imm32,PE_ONLY_NEEDS_SYSCALLS,no,0,0,12,user32 gdi32 advapi32 kernelbase win32u,,,gdi32 ntdll user32 win32u
+shell32,PE_ONLY,no,0,0,0,uuid shlwapi user32 gdi32 advapi32,,,gdi32 ntdll user32 win32u
+shlwapi,PE_ONLY,no,0,0,0,uuid shcore user32 gdi32 advapi32 kernelbase,,,gdi32 ntdll user32 win32u
+shcore,PE_ONLY,no,0,0,0,advapi32,,,ntdll
+comctl32,PE_ONLY,no,0,0,0,uuid user32 gdi32 advapi32 imm32 kernelbase oleaut32,,,gdi32 ntdll user32 win32u
+comdlg32,PE_ONLY,no,0,0,0,uuid shell32 shlwapi comctl32 user32 gdi32 advapi32,,,gdi32 ntdll user32 win32u
+version,PE_ONLY,no,0,0,0,kernelbase,,,ntdll
+d3d9,PE_ONLY,no,0,0,0,dxguid uuid wined3d,,,gdi32 ntdll opengl32 user32 win32u
+d3d11,PE_ONLY,no,0,0,0,dxguid uuid dxgi wined3d,,,gdi32 ntdll opengl32 user32 win32u
+dxgi,PE_ONLY,no,0,0,0,gdi32 dxguid uuid wined3d user32 win32u,,,gdi32 ntdll opengl32 user32 win32u
+wined3d,PE_ONLY_NEEDS_SYSCALLS,no,0,2,0,$(VKD3D_PE_LIBS) dxguid opengl32 user32 gdi32 advapi32,VKD3D,,gdi32 ntdll opengl32 user32 win32u
+d3d12,PE_ONLY,no,0,0,0,dxgi dxguid wined3d gdi32 user32 uuid win32u,,,gdi32 ntdll opengl32 user32 win32u
+d3dcompiler_47,PE_ONLY,no,0,0,0,wined3d,,,gdi32 ntdll opengl32 user32 win32u
+opengl32,UNIX_SIDE_REQUIRED,yes,0,1,0,user32 gdi32 advapi32 win32u,,-lwin32u,gdi32 ntdll user32 win32u
+dwmapi,PE_ONLY,no,0,0,0,user32,,,gdi32 ntdll user32 win32u
+dwrite,UNIX_SIDE_REQUIRED,yes,0,1,0,user32 gdi32 advapi32,,,gdi32 ntdll user32 win32u
+gdiplus,PE_ONLY,no,0,0,0,uuid shlwapi ole32 oleaut32 user32 gdi32,,,gdi32 ntdll user32 win32u
+windowscodecs,PE_ONLY,no,0,0,0,$(TIFF_PE_LIBS) $(JPEG_PE_LIBS) $(PNG_PE_LIBS) windowscodecs uuid ole32 oleaut32 propsys rpcrt4 shlwapi user32 gdi32 advapi32,TIFF JPEG PNG,,gdi32 ntdll user32 win32u
+ws2_32,UNIX_SIDE_REQUIRED,yes,1,4,0,,,$(PTHREAD_LIBS),ntdll
+iphlpapi,PE_ONLY_NEEDS_SYSCALLS,no,0,1,0,advapi32 dnsapi nsi uuid ws2_32,,,ntdll ws2_32
+bcrypt,UNIX_SIDE_REQUIRED,yes,1,1,0,$(TOMCRYPT_PE_LIBS) advapi32,TOMCRYPT,,ntdll
+crypt32,UNIX_SIDE_REQUIRED,yes,0,1,0,user32 advapi32 bcrypt,,$(SECURITY_LIBS),bcrypt gdi32 ntdll user32 win32u
+secur32,UNIX_SIDE_REQUIRED,yes,1,1,0,advapi32,,,ntdll
+winhttp,PE_ONLY,no,0,0,0,uuid jsproxy user32 advapi32 ws2_32,,,gdi32 ntdll user32 win32u ws2_32
+wininet,PE_ONLY_NEEDS_SYSCALLS,no,0,1,0,$(ZLIB_PE_LIBS) mpr shlwapi shell32 user32 ws2_32 advapi32,ZLIB,,gdi32 ntdll user32 win32u ws2_32
+uxtheme,PE_ONLY,no,0,0,0,user32 gdi32 advapi32,,,gdi32 ntdll user32 win32u
+avrt,PE_ONLY,no,0,0,0,user32,,,ntdll
+psapi,PE_ONLY,no,0,0,0,,,,ntdll
+dbghelp,PE_ONLY_NEEDS_SYSCALLS,no,0,4,0,kernelbase $(ZLIB_PE_LIBS),ZLIB,,ntdll
+mscoree,PE_ONLY,no,0,0,0,dbghelp uuid shell32 advapi32 ole32 oleaut32 shlwapi,,,gdi32 ntdll user32 win32u
+mfplat,PE_ONLY,no,0,0,0,advapi32 ole32 dmoguids mfuuid propsys rtworkq kernelbase,,,gdi32 ntdll user32 win32u

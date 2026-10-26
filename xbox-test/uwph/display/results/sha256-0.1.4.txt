@@ -1,0 +1,4 @@
+43dbb362925115eb34e2ab5c92ddbf9cf50d6648eacff7eabdcc49b9ef0f1641  xbox-test/uwph/display/out/layout/uwph-user32.dll
+78cce88677c77e629942930a667c56ebcf7bb518f1a45a3c20103613094f605f  xbox-test/uwph/display/out/layout/window-test.dll
+ab478ebbf63ff116260a916bd1bfb9d96bd6c0e37ec8f8f088b7f370a1e8d762  xbox-test/uwph/display/out/layout/w32u.exe
+14baba191753d9eca62df11cc37f2f2a77f6dbc8088b0cc449009af3482e095f  xbox-test/uwph/display/out/w32u.msix

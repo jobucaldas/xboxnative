@@ -1,0 +1,147 @@
+[   0.019] boot: Initialize (pid=6096)
+[   0.096] SetWindow bounds=1920x1080
+[   0.100] Activated kind=0 (activation args ignored)
+[   0.104] Run: entering
+[   0.108] loaded separate host and test PE DLLs, ABI v1
+[   0.109] PASS CreateFile2 err=0
+[   0.109] PASS WriteFile err=0
+[   0.112] PASS FlushFileBuffers err=0
+[   0.112] PASS GetFileSizeEx err=0
+[   0.112] PASS SetFilePointerEx err=0
+[   0.112] PASS ReadFile err=0
+[   0.112] PASS CloseHandle err=0
+[   0.112] PASS GetFileAttributesW err=0
+[   0.112] PASS MoveFileExW err=0
+[   0.112] PASS DeleteFileW err=0
+[   0.113] PASS CreateDirectoryW err=0
+[   0.113] PASS RemoveDirectoryW err=0
+[   0.113] PASS missing file error err=2
+[   0.113] PASS GetCurrentProcessId err=0
+[   0.113] PASS GetCurrentThreadId err=0
+[   0.113] PASS CreateThread err=0
+[   0.113] PASS thread join err=0
+[   0.113] PASS CloseHandle err=0
+[   0.113] PASS CreateEventExW err=0
+[   0.113] PASS event timeout err=0
+[   0.113] PASS SetEvent err=0
+[   0.113] PASS event wait err=0
+[   0.114] PASS ResetEvent err=0
+[   0.114] PASS CloseHandle err=0
+[   0.114] PASS CreateMutexExW err=0
+[   0.114] PASS mutex wait err=0
+[   0.114] PASS ReleaseMutex err=0
+[   0.114] PASS CloseHandle err=0
+[   0.114] PASS CreateSemaphoreExW err=0
+[   0.114] PASS ReleaseSemaphore err=0
+[   0.114] PASS semaphore wait err=0
+[   0.114] PASS CloseHandle err=0
+[   0.114] PASS TlsAlloc err=0
+[   0.114] PASS TlsSetValue err=0
+[   0.114] PASS TlsGetValue err=0
+[   0.114] PASS TlsFree err=0
+[   0.114] PASS QueryPerformanceFrequency err=0
+[   0.114] PASS QueryPerformanceCounter err=0
+[   0.135] PASS GetTickCount64/Sleep err=0
+[   0.135] PASS CreateProcess clean failure err=5
+[   0.135] PASS RWX allocation refused err=5
+[   0.135] PASS VirtualAllocFromApp RW err=0
+[   0.135] PASS VirtualQuery err=0
+[   0.135] PASS VirtualProtectFromApp RX err=0
+[   0.135] PASS FlushInstructionCache err=0
+[   0.135] PASS execute RX value=42 err=0
+[   0.135] PASS VirtualFree err=0
+[   0.135] PASS invalid opcode rejected err=0
+[   0.135] PASS Wine10 system_time_precise err=0
+[   0.135] PASS Wine10 dbg_write byte count err=0
+[   0.135] PASS Wine10 server call unsupported err=0
+[   0.135] PASS invalid handle rejected err=0
+[   0.136] WS two-thread sync begin (main + native worker)
+[   0.136] PASS WS CreateEventW ready/go/done err=0
+[   0.136] PASS WS DuplicateHandle distinct entry err=0
+[   0.136] PASS WS close original err=0
+[   0.136] PASS WS stale handle rejected err=6
+[   0.136] PASS WS CreateThread err=0
+[   0.136] PASS WS worker ready WaitForSingleObject err=0
+[   0.136] WS sequence: worker ready; main signals duplicated go handle
+[   0.136] PASS WS SetEvent duplicate survives close err=0
+[   0.136] PASS WS WaitForMultipleObjects all err=0
+[   0.136] WS sequence: worker received go; done and thread signaled
+[   0.136] PASS WS auto-reset consumed err=0
+[   0.136] PASS WS wait-any index err=0
+[   0.136] PASS WS wrong object type rejected err=6
+[   0.136] PASS WS invalid wait count err=87
+[   0.136] PASS CloseHandle err=0
+[   0.136] PASS WS duplicated thread join err=0
+[   0.136] PASS CloseHandle err=0
+[   0.136] PASS CloseHandle err=0
+[   0.136] PASS CloseHandle err=0
+[   0.136] PASS CloseHandle err=0
+[   0.136] PASS WS double close rejected err=6
+[   0.136] WS two-thread sync end
+[   0.136] checks=71 failures=0
+[   0.136] K32 RESULT failures=0
+[   0.137] HidD_GetHidGuid
+[   0.137] SetupDiGetClassDevsA
+[   0.137] SetupDiGetClassDevsW
+[   0.137] HID CHECK SetupDiGetClassDevsA PASS
+[   0.137] HID CHECK SetupDiGetClassDevsW PASS
+[   0.137] SetupDiEnumDeviceInterfaces
+[   0.137] HID CHECK SetupDiEnumDeviceInterfaces PASS
+[   0.137] SetupDiEnumDeviceInfo
+[   0.137] HID CHECK SetupDiEnumDeviceInfo PASS
+[   0.137] SetupDiGetDeviceInterfaceDetailW
+[   0.137] HID CHECK SetupDiGetDeviceInterfaceDetailW PASS
+[   0.138] SetupDiDestroyDeviceInfoList
+[   0.138] HID CHECK SetupDiDestroyDeviceInfoList PASS
+[   0.138] HidD_GetSerialNumberString
+[   0.138] HID CHECK HidD_GetSerialNumberString PASS
+[   0.138] HidD_GetManufacturerString
+[   0.138] HID CHECK HidD_GetManufacturerString PASS
+[   0.138] HidD_GetProductString
+[   0.138] HID CHECK HidD_GetProductString PASS
+[   0.138] HidD_FreePreparsedData
+[   0.138] HID CHECK HidD_FreePreparsedData PASS
+[   0.138] HidD_GetPreparsedData
+[   0.138] HID CHECK HidD_GetPreparsedData PASS
+[   0.138] HidD_GetAttributes
+[   0.138] HID CHECK HidD_GetAttributes PASS
+[   0.138] HidP_GetData
+[   0.138] HID CHECK HidP_GetData PASS
+[   0.138] HidP_MaxDataListLength
+[   0.138] HID CHECK HidP_MaxDataListLength PASS
+[   0.138] HidP_SetUsages
+[   0.138] HID CHECK HidP_SetUsages PASS
+[   0.138] HidP_SetUsageValue
+[   0.138] HID CHECK HidP_SetUsageValue PASS
+[   0.138] HidP_GetButtonCaps
+[   0.138] HID CHECK HidP_GetButtonCaps PASS
+[   0.138] HidP_GetValueCaps
+[   0.138] HID CHECK HidP_GetValueCaps PASS
+[   0.138] HidP_GetCaps
+[   0.138] HID CHECK HidP_GetCaps PASS
+[   0.138] HidD_GetHidGuid
+[   0.138] HID CHECK HidD_GetHidGuid PASS
+[   0.138] SetupDiDestroyDeviceInfoList
+[   0.138] HID CHECK destroy W set PASS
+[   0.138] SetupDiEnumDeviceInfo
+[   0.138] HID CHECK stale set rejected PASS
+[   0.138] SetupDiDestroyDeviceInfoList
+[   0.138] HID CHECK double destroy rejected PASS
+[   0.138] HID-STUB-OK symbols=20 checks=23
+[   0.138] HID RESULT failures=0
+[   0.141] D3DT get swapchain target hr=0x00000000
+[   0.218] D3DT system D3D11CreateDevice hr=0x00000000
+[   0.218] D3DT feature_level=0xb000 separate x64 PE
+[   0.218] D3DT QueryInterface IDXGIDevice hr=0x00000000
+[   0.218] D3DT GetAdapter hr=0x00000000
+[   0.218] D3DT GetParent IDXGIFactory2 hr=0x00000000
+[   0.230] D3DT system CreateSwapChainForCoreWindow hr=0x00000000
+[   0.230] D3DT GetBuffer hr=0x00000000
+[   0.230] D3DT CreateRenderTargetView hr=0x00000000
+[   1.284] D3DT presented=60 hr=0x00000000 elapsed=1.054 fps=56.92
+[   2.285] D3DT presented=120 hr=0x00000000 elapsed=2.055 fps=58.39
+[   3.286] D3DT presented=180 hr=0x00000000 elapsed=3.056 fps=58.90
+[   4.287] D3DT presented=240 hr=0x00000000 elapsed=4.057 fps=59.16
+[   5.288] D3DT presented=300 hr=0x00000000 elapsed=5.058 fps=59.31
+[   5.288] D3DT RESULT presented=300 hr=0x00000000 final_clear=0.90,0.12,0.65,1.00
+[   5.288] D3DT RETURN hr=0x00000000

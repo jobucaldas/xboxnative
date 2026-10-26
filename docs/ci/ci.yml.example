@@ -1,0 +1,31 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  offline-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shell syntax
+        run: |
+          set -e
+          find . -name '*.sh' -not -path './.git/*' -print0 | xargs -0 -n1 bash -n
+      - name: python compile
+        run: |
+          set -e
+          find . -name '*.py' -not -path './.git/*' -print0 | xargs -0 -n1 python3 -m py_compile
+      - name: offline unit tests
+        run: |
+          set -e
+          bash xbox-test/app/tests/session-restore.sh
+          python3 -m unittest xbox-test/dp/test-verify-depot.py
+      - name: no secrets / binaries committed
+        run: |
+          set -e
+          ! git ls-files | grep -E '\.(pfx|key|pem|exe|dll|msix|appx|zip)$'
+          ! git grep -nIE 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|gh[pousr]_[A-Za-z0-9]{30,}|tskey-[A-Za-z0-9-]{10,}|7656119[0-9]{10}' -- . ':!.github'
+  # TODO: on-device sections of xbox-test/smoke-all.sh need a console and cannot run in GitHub Actions.

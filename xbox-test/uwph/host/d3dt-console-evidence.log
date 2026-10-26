@@ -1,0 +1,98 @@
+[   0.014] boot: Initialize (pid=3176)
+[   0.077] SetWindow bounds=1920x1080
+[   0.078] Activated kind=0 (activation args ignored)
+[   0.079] Run: entering
+[   0.087] loaded separate host and test PE DLLs, ABI v1
+[   0.088] PASS CreateFile2 err=0
+[   0.088] PASS WriteFile err=0
+[   0.089] PASS FlushFileBuffers err=0
+[   0.089] PASS GetFileSizeEx err=0
+[   0.089] PASS SetFilePointerEx err=0
+[   0.090] PASS ReadFile err=0
+[   0.090] PASS CloseHandle err=0
+[   0.090] PASS GetFileAttributesW err=0
+[   0.090] PASS MoveFileExW err=0
+[   0.090] PASS DeleteFileW err=0
+[   0.090] PASS CreateDirectoryW err=0
+[   0.090] PASS RemoveDirectoryW err=0
+[   0.090] PASS missing file error err=2
+[   0.090] PASS GetCurrentProcessId err=0
+[   0.090] PASS GetCurrentThreadId err=0
+[   0.091] PASS CreateThread err=0
+[   0.091] PASS thread join err=0
+[   0.091] PASS CloseHandle err=0
+[   0.091] PASS CreateEventExW err=0
+[   0.091] PASS event timeout err=0
+[   0.091] PASS SetEvent err=0
+[   0.091] PASS event wait err=0
+[   0.091] PASS ResetEvent err=0
+[   0.091] PASS CloseHandle err=0
+[   0.091] PASS CreateMutexExW err=0
+[   0.091] PASS mutex wait err=0
+[   0.091] PASS ReleaseMutex err=0
+[   0.091] PASS CloseHandle err=0
+[   0.091] PASS CreateSemaphoreExW err=0
+[   0.091] PASS ReleaseSemaphore err=0
+[   0.091] PASS semaphore wait err=0
+[   0.091] PASS CloseHandle err=0
+[   0.091] PASS TlsAlloc err=0
+[   0.091] PASS TlsSetValue err=0
+[   0.091] PASS TlsGetValue err=0
+[   0.091] PASS TlsFree err=0
+[   0.091] PASS QueryPerformanceFrequency err=0
+[   0.091] PASS QueryPerformanceCounter err=0
+[   0.112] PASS GetTickCount64/Sleep err=0
+[   0.112] PASS CreateProcess clean failure err=5
+[   0.112] PASS RWX allocation refused err=5
+[   0.112] PASS VirtualAllocFromApp RW err=0
+[   0.112] PASS VirtualQuery err=0
+[   0.112] PASS VirtualProtectFromApp RX err=0
+[   0.112] PASS FlushInstructionCache err=0
+[   0.112] PASS execute RX value=42 err=0
+[   0.112] PASS VirtualFree err=0
+[   0.112] PASS invalid opcode rejected err=0
+[   0.112] PASS Wine10 system_time_precise err=0
+[   0.112] PASS Wine10 dbg_write byte count err=0
+[   0.112] PASS Wine10 server call unsupported err=0
+[   0.112] PASS invalid handle rejected err=0
+[   0.112] WS two-thread sync begin (main + native worker)
+[   0.112] PASS WS CreateEventW ready/go/done err=0
+[   0.112] PASS WS DuplicateHandle distinct entry err=0
+[   0.112] PASS WS close original err=0
+[   0.112] PASS WS stale handle rejected err=6
+[   0.112] PASS WS CreateThread err=0
+[   0.112] PASS WS worker ready WaitForSingleObject err=0
+[   0.112] WS sequence: worker ready; main signals duplicated go handle
+[   0.112] PASS WS SetEvent duplicate survives close err=0
+[   0.112] PASS WS WaitForMultipleObjects all err=0
+[   0.112] WS sequence: worker received go; done and thread signaled
+[   0.112] PASS WS auto-reset consumed err=0
+[   0.112] PASS WS wait-any index err=0
+[   0.112] PASS WS wrong object type rejected err=6
+[   0.112] PASS WS invalid wait count err=87
+[   0.112] PASS CloseHandle err=0
+[   0.112] PASS WS duplicated thread join err=0
+[   0.112] PASS CloseHandle err=0
+[   0.113] PASS CloseHandle err=0
+[   0.113] PASS CloseHandle err=0
+[   0.113] PASS CloseHandle err=0
+[   0.113] PASS WS double close rejected err=6
+[   0.113] WS two-thread sync end
+[   0.113] checks=71 failures=0
+[   0.113] K32 RESULT failures=0
+[   0.117] D3DT get swapchain target hr=0x00000000
+[   0.167] D3DT system D3D11CreateDevice hr=0x00000000
+[   0.167] D3DT feature_level=0xb000 separate x64 PE
+[   0.167] D3DT QueryInterface IDXGIDevice hr=0x00000000
+[   0.167] D3DT GetAdapter hr=0x00000000
+[   0.167] D3DT GetParent IDXGIFactory2 hr=0x00000000
+[   0.178] D3DT system CreateSwapChainForCoreWindow hr=0x00000000
+[   0.178] D3DT GetBuffer hr=0x00000000
+[   0.179] D3DT CreateRenderTargetView hr=0x00000000
+[   1.258] D3DT presented=60 hr=0x00000000 elapsed=1.080 fps=55.57
+[   2.259] D3DT presented=120 hr=0x00000000 elapsed=2.081 fps=57.68
+[   3.744] D3DT presented=180 hr=0x00000000 elapsed=3.566 fps=50.48
+[   4.745] D3DT presented=240 hr=0x00000000 elapsed=4.567 fps=52.56
+[   5.746] D3DT presented=300 hr=0x00000000 elapsed=5.567 fps=53.88
+[   5.746] D3DT RESULT presented=300 hr=0x00000000 final_clear=0.90,0.12,0.65,1.00
+[   5.746] D3DT RETURN hr=0x00000000

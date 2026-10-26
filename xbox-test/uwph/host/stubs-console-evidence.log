@@ -1,0 +1,797 @@
+[   0.012] boot: Initialize (pid=708)
+[   0.083] SetWindow bounds=1920x1080
+[   0.086] Activated kind=0 (activation args ignored)
+[   0.088] Run: entering
+[   0.091] MLP PROBE begin; NO entry/DllMain/TLS callbacks; zero RWX; every import requires a real export or named x64 ABI
+[   0.092] MLP IMAGE baselib.dll
+[   0.092] WXL VirtualAllocFromApp initial=0x4 (RW)
+[   0.093] MLP SYSTEM ws2_32.dll loaded=1 error=0
+[   0.093] MLP ROUTE ws2_32.dll!#21 kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!#10 kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!#20 kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!#7 kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!#16 kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!#151 kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!#1 kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!#2 kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!WSAIoctl kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!#3 kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!#18 kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!#22 kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!#13 kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!WSACloseEvent kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!WSACreateEvent kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!WSASocketW kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!#6 kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!#19 kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!#4 kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!WSAWaitForMultipleEvents kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!#17 kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE ws2_32.dll!#111 kind=system provider=system abi=named-x64
+[   0.093] MLP SYSTEM api-ms-win-core-synch-l1-2-0.dll loaded=1 error=0
+[   0.093] MLP ROUTE api-ms-win-core-synch-l1-2-0.dll!WaitOnAddress kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE api-ms-win-core-synch-l1-2-0.dll!WakeByAddressAll kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE api-ms-win-core-synch-l1-2-0.dll!WakeByAddressSingle kind=system provider=system abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!WriteConsoleW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!GetStringTypeW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!SetStdHandle kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!GetProcessHeap kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!FreeEnvironmentStringsW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!GetEnvironmentStringsW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!WideCharToMultiByte kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!MultiByteToWideChar kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!GetCommandLineW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!GetCommandLineA kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!GetCPInfo kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!GetOEMCP kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!GetACP kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!IsValidCodePage kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!FindNextFileW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!FindFirstFileExW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!FindClose kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!HeapQueryInformation kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!HeapSize kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!HeapReAlloc kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.093] MLP ROUTE kernel32.dll!GetConsoleMode kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!GetConsoleOutputCP kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!ReadFile kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!GetFileSizeEx kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!CreateSemaphoreExW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!VirtualFree kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!ReleaseSemaphore kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!WriteFile kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!VirtualAlloc kind=uwph provider=uwph:entry-kernel abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!SetEndOfFile kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!WaitForSingleObject kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!CreateFileW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!GetFileAttributesW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!GetCurrentThreadId kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!ResumeThread kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!FormatMessageW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!GetLastError kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!WaitForSingleObjectEx kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!TlsAlloc kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!QueryPerformanceFrequency kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!CloseHandle kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!GetNativeSystemInfo kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!RaiseException kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!LoadLibraryW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!CreateThread kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!SwitchToThread kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!GetProcAddress kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!SetFilePointerEx kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!GetThreadId kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!GetModuleHandleW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!FreeLibrary kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!TlsFree kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!QueryPerformanceCounter kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!VirtualQuery kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!IsDebuggerPresent kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!FlushFileBuffers kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!Sleep kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!FlsAlloc kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!FlsGetValue kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!FlsSetValue kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!FlsFree kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!InitializeCriticalSectionEx kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!GetSystemTimeAsFileTime kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!EnterCriticalSection kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!LeaveCriticalSection kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!DeleteCriticalSection kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!InitializeCriticalSectionAndSpinCount kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!SetEvent kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!ResetEvent kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!CreateEventW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!RtlCaptureContext kind=system provider=system:api-ms-win-core-rtlsupport-l1-1-0.dll abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!RtlLookupFunctionEntry kind=uwph provider=uwph abi=named-x64
+[   0.094] MLP ROUTE kernel32.dll!RtlVirtualUnwind kind=system provider=system:api-ms-win-core-rtlsupport-l1-1-0.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!UnhandledExceptionFilter kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!SetUnhandledExceptionFilter kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!GetStartupInfoW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!IsProcessorFeaturePresent kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!GetCurrentProcessId kind=uwph provider=uwph abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!InitializeSListHead kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!GetCurrentProcess kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!TerminateProcess kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!GetFileType kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!RtlUnwindEx kind=system provider=system:api-ms-win-core-rtlsupport-l1-1-0.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!RtlPcToFileHeader kind=system provider=system:api-ms-win-core-rtlsupport-l1-1-0.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!InterlockedFlushSList kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!SetLastError kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!TlsGetValue kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!TlsSetValue kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!LoadLibraryExW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!EncodePointer kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!GetModuleHandleExW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!ExitProcess kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!GetModuleFileNameW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!HeapAlloc kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!HeapFree kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!LCMapStringW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] MLP ROUTE kernel32.dll!GetStdHandle kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.095] WXL mapped LocalState PE relocations=808 imports=122 delta=0x1af05070000
+[   0.095] WXL VirtualProtectFromApp rva=0x0 size=0x3a000 old=0x4 new=0x1 ok=1 err=0
+[   0.095] WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.095] WXL VirtualProtectFromApp rva=0x1000 size=0x22000 old=0x1 new=0x20 ok=1 err=0
+[   0.095] WXL VirtualProtectFromApp rva=0x23000 size=0x10000 old=0x1 new=0x2 ok=1 err=0
+[   0.095] WXL VirtualProtectFromApp rva=0x33000 size=0x3000 old=0x1 new=0x4 ok=1 err=0
+[   0.095] WXL VirtualProtectFromApp rva=0x36000 size=0x2000 old=0x1 new=0x2 ok=1 err=0
+[   0.095] WXL VirtualProtectFromApp rva=0x38000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.095] WXL VirtualProtectFromApp rva=0x39000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.095] MLP mapped: TLS/unwind/load-config retained but NOT initialized; entry NOT called
+[   0.095] MLP SUMMARY image=baselib.dll dll=api-ms-win-core-synch-l1-2-0.dll resolved=3 stubbed=0 first-missing=none
+[   0.095] MLP SUMMARY image=baselib.dll dll=kernel32.dll resolved=97 stubbed=0 first-missing=none
+[   0.095] MLP SUMMARY image=baselib.dll dll=ws2_32.dll resolved=22 stubbed=0 first-missing=none
+[   0.095] MLP IMAGE UnityPlayer.dll
+[   0.113] WXL VirtualAllocFromApp initial=0x4 (RW)
+[   0.120] MLP ROUTE api-ms-win-core-synch-l1-2-0.dll!WakeByAddressSingle kind=system provider=system abi=named-x64
+[   0.120] MLP ROUTE api-ms-win-core-synch-l1-2-0.dll!WakeByAddressAll kind=system provider=system abi=named-x64
+[   0.120] MLP ROUTE api-ms-win-core-synch-l1-2-0.dll!WaitOnAddress kind=system provider=system abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!ResumeThread kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!RtlLookupFunctionEntry kind=uwph provider=uwph abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!RtlVirtualUnwind kind=system provider=system:api-ms-win-core-rtlsupport-l1-1-0.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!ReadProcessMemory kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!OutputDebugStringA kind=uwph provider=uwph abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!CreateWaitableTimerExW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!SetWaitableTimer kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!WaitForSingleObjectEx kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!SleepEx kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!SetThreadDescription kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!GetLogicalProcessorInformationEx kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!LocalFree kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!K32GetProcessMemoryInfo kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!Thread32First kind=uwph provider=uwph:entry-kernel abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!Thread32Next kind=uwph provider=uwph:entry-kernel abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!GetNativeSystemInfo kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!VirtualQuery kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!GetSystemInfo kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!CreateThread kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!SetThreadPriority kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!GetThreadPriority kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!GetCurrentThreadId kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.120] MLP ROUTE kernel32.dll!SwitchToThread kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!LocalAlloc kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!CreateEventW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!SetUnhandledExceptionFilter kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!SetErrorMode kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!GetErrorMode kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!OutputDebugStringW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!GetCommandLineW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!InitializeProcThreadAttributeList kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!HeapAlloc kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!GetProcessHeap kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!UpdateProcThreadAttribute kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!DeleteProcThreadAttributeList kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!HeapFree kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!CreateProcessW kind=uwph provider=uwph:entry-kernel abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!CreatePipe kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!FlushFileBuffers kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!GetProcessId kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!WaitForMultipleObjects kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!GetExitCodeProcess kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!WriteFile kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!VirtualAlloc kind=uwph provider=uwph:entry-kernel abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!VirtualProtect kind=uwph provider=uwph:entry-kernel abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!VirtualFree kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!GetFileAttributesExW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!CreateFileW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!CreateDirectoryW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!DeleteFileW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!RemoveDirectoryW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!SetFileAttributesW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!CopyFileW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!MoveFileExW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!FindFirstFileExW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!FindFirstFileW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!FindNextFileW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!FindClose kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!SetFilePointerEx kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!SetFilePointer kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!ReadFile kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!SetEndOfFile kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!GetFileSizeEx kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!GetTempFileNameW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!ReplaceFileW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!GetFullPathNameW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!GetSystemTime kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!SystemTimeToFileTime kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!SetFileTime kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!GetDiskFreeSpaceExW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!CreateMutexA kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!GetSystemTimeAsFileTime kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!ExpandEnvironmentStringsW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!GetCurrentDirectoryW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!DebugBreak kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!GetTickCount kind=uwph provider=uwph abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!GetOverlappedResult kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!ResetEvent kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!CancelIo kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!FormatMessageA kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.121] MLP ROUTE kernel32.dll!GetWindowsDirectoryW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!InitializeCriticalSection kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!QueryPerformanceFrequency kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!EnterCriticalSection kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!LeaveCriticalSection kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!GetCurrentDirectoryA kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!GetLocalTime kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!GetTimeZoneInformation kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!ReleaseSemaphore kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!CreateSemaphoreExW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!SuspendThread kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!CloseHandle kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!IsDebuggerPresent kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!InitializeCriticalSectionAndSpinCount kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!GetStdHandle kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!SetThreadAffinityMask kind=uwph provider=uwph:entry-kernel abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!GetDateFormatW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!ExitThread kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!InitializeSListHead kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!InterlockedPopEntrySList kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!InterlockedPushEntrySList kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!InterlockedFlushSList kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!GetFileSize kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!CreateWaitableTimerA kind=uwph provider=uwph:entry-kernel abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!ReleaseSRWLockExclusive kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!AcquireSRWLockExclusive kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!InitializeCriticalSectionEx kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!GetSystemDirectoryW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!LoadLibraryExA kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!InitOnceComplete kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!InitOnceBeginInitialize kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!InitializeSRWLock kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!TryAcquireSRWLockExclusive kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!EncodePointer kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!DecodePointer kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!LCMapStringEx kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!GetCPInfo kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!FlsAlloc kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!FlsGetValue kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!FlsSetValue kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!FlsFree kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!QueryPerformanceCounter kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!VerifyVersionInfoW kind=uwph provider=uwph:entry-kernel abi=named-x64
+[   0.122] MLP ROUTE kernel32.dll!VerSetConditionMask kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!LoadLibraryA kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetCurrentProcess kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!TerminateProcess kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!SetConsoleCtrlHandler kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!WaitForSingleObject kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!CompareStringW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!LCMapStringW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetLocaleInfoW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!IsValidLocale kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetUserDefaultLCID kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!EnumSystemLocalesW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!SetStdHandle kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!IsValidCodePage kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetACP kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetOEMCP kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetCommandLineA kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetEnvironmentStringsW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!FreeEnvironmentStringsW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!SetEnvironmentVariableW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!WriteConsoleW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetEnvironmentVariableA kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetTimeFormatW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetFileAttributesA kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetModuleFileNameA kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetComputerNameW kind=uwph provider=uwph:entry-kernel abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!CreateFileA kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetSystemDirectoryA kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetUserDefaultLocaleName kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetTempPathW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!CreateToolhelp32Snapshot kind=uwph provider=uwph:entry-kernel abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GlobalMemoryStatusEx kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetSystemPowerStatus kind=uwph provider=uwph:entry-kernel abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetThreadContext kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!RtlCaptureContext kind=system provider=system:api-ms-win-core-rtlsupport-l1-1-0.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!TlsAlloc kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetCurrentThread kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GlobalAlloc kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GlobalUnlock kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GlobalLock kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!Sleep kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetModuleHandleA kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!WaitForMultipleObjectsEx kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!CreateEventExW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!AttachConsole kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!SetEvent kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!OpenThread kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!CreateEventA kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!GetStartupInfoA kind=uwph provider=uwph:entry-kernel abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!DeleteCriticalSection kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.123] MLP ROUTE kernel32.dll!SetLastError kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!GetFileAttributesW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!GetModuleFileNameW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!RaiseException kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!GetModuleHandleW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!SetHandleInformation kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!FormatMessageW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!GetProcAddress kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!FreeLibrary kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!LoadLibraryW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!SetDllDirectoryW kind=uwph provider=uwph:entry-kernel abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!GetDriveTypeW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!ReadConsoleW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!GetFileType kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!FreeLibraryAndExitThread kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!GetConsoleMode kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!GetConsoleOutputCP kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!DuplicateHandle kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!GetModuleHandleExW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!ExitProcess kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!HeapQueryInformation kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!HeapReAlloc kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!HeapSize kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!LoadLibraryExW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!RtlUnwind kind=system provider=system:api-ms-win-core-rtlsupport-l1-1-0.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!RtlPcToFileHeader kind=system provider=system:api-ms-win-core-rtlsupport-l1-1-0.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!RtlUnwindEx kind=system provider=system:api-ms-win-core-rtlsupport-l1-1-0.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!IsProcessorFeaturePresent kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!GetStartupInfoW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!UnhandledExceptionFilter kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!GetStringTypeW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!WideCharToMultiByte kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!GetCurrentProcessId kind=uwph provider=uwph abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!MultiByteToWideChar kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!GetLastError kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!TlsGetValue kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!TlsSetValue kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!GetFileInformationByHandle kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!PeekNamedPipe kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!SystemTimeToTzSpecificLocalTime kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!TlsFree kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.124] MLP ROUTE kernel32.dll!FileTimeToSystemTime kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.128] MLP ROUTE user32.dll!GetRawInputData kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!GetRawInputBuffer kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!EnumDisplaySettingsA kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!GetDC kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!TranslateMessage kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.128] MLP ROUTE user32.dll!SystemParametersInfoW kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!UnregisterDeviceNotification kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!SetWindowLongA kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!LoadIconW kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!GetWindowPlacement kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!AdjustWindowRectEx kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.128] MLP ROUTE user32.dll!GetForegroundWindow kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.128] MLP ROUTE user32.dll!EnumDisplaySettingsW kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!PtInRect kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!GetWindowLongA kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!DispatchMessageA kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.128] MLP ROUTE user32.dll!RegisterDeviceNotificationW kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!SetCapture kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!ReleaseCapture kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!DestroyIcon kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!DestroyCursor kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!SetCursor kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!LoadCursorA kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!LoadImageW kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!GetRawInputDeviceList kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!RegisterRawInputDevices kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!GetKeyNameTextW kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!MapVirtualKeyW kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!ToUnicode kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!GetKeyboardLayoutNameW kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!MapVirtualKeyA kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!GetKeyState kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!GetMessageExtraInfo kind=stub provider=named-stub abi=named-x64
+[   0.128] MLP ROUTE user32.dll!GetRawInputDeviceInfoW kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!GetKeyboardLayout kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!MapVirtualKeyExA kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!GetAsyncKeyState kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!ScreenToClient kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.129] MLP ROUTE user32.dll!TrackMouseEvent kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!GetSystemMetrics kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!RegisterClassExW kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.129] MLP ROUTE user32.dll!DialogBoxParamW kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!EndDialog kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!SetDlgItemTextW kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!SetDlgItemTextA kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!SendDlgItemMessageW kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!OffsetRect kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!CopyRect kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!SendMessageTimeoutA kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!SetForegroundWindow kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.129] MLP ROUTE user32.dll!EnumWindows kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!GetUserObjectInformationA kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!GetThreadDesktop kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!RegisterWindowMessageA kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!AllowSetForegroundWindow kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!SetClipboardData kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!EmptyClipboard kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!CloseClipboard kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!GetClipboardData kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!IsClipboardFormatAvailable kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!OpenClipboard kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!ReleaseDC kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!GetDesktopWindow kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!DisplayConfigGetDeviceInfo kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!QueryDisplayConfig kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!GetDisplayConfigBufferSizes kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!UpdateWindow kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!SendMessageW kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!GetMessageA kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.129] MLP ROUTE user32.dll!SetWindowTextW kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!DragDetect kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!ShowWindow kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.129] MLP ROUTE user32.dll!GetActiveWindow kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.129] MLP ROUTE user32.dll!GetParent kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!ValidateRect kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!IsIconic kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!MonitorFromRect kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!SetWindowLongPtrA kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!IsWindowVisible kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.129] MLP ROUTE user32.dll!SetWindowPos kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!EnumDisplayMonitors kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!EnumDisplayDevicesA kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!GetMonitorInfoA kind=stub provider=named-stub abi=named-x64
+[   0.129] MLP ROUTE user32.dll!PostQuitMessage kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.129] MLP ROUTE user32.dll!DefWindowProcW kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.129] MLP ROUTE user32.dll!SetWindowLongPtrW kind=stub provider=named-stub abi=named-x64
+[   0.130] MLP ROUTE user32.dll!GetWindowLongPtrW kind=stub provider=named-stub abi=named-x64
+[   0.130] MLP ROUTE user32.dll!DestroyWindow kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.130] MLP ROUTE user32.dll!UnregisterClassW kind=stub provider=named-stub abi=named-x64
+[   0.130] MLP ROUTE user32.dll!RegisterClassW kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.130] MLP ROUTE user32.dll!SetCursorPos kind=stub provider=named-stub abi=named-x64
+[   0.130] MLP ROUTE user32.dll!ClientToScreen kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.130] MLP ROUTE user32.dll!ClipCursor kind=stub provider=named-stub abi=named-x64
+[   0.130] MLP ROUTE user32.dll!MonitorFromWindow kind=stub provider=named-stub abi=named-x64
+[   0.130] MLP ROUTE user32.dll!ShowCursor kind=stub provider=named-stub abi=named-x64
+[   0.130] MLP ROUTE user32.dll!GetClientRect kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.130] MLP ROUTE user32.dll!MoveWindow kind=stub provider=named-stub abi=named-x64
+[   0.130] MLP ROUTE user32.dll!GetWindowRect kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.130] MLP ROUTE user32.dll!GetMonitorInfoW kind=stub provider=named-stub abi=named-x64
+[   0.130] MLP ROUTE user32.dll!SetFocus kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.130] MLP ROUTE user32.dll!GetFocus kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.130] MLP ROUTE user32.dll!CreateWindowExW kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.130] MLP ROUTE user32.dll!KillTimer kind=stub provider=named-stub abi=named-x64
+[   0.130] MLP ROUTE user32.dll!MessageBoxA kind=stub provider=named-stub abi=named-x64
+[   0.130] MLP ROUTE user32.dll!SetTimer kind=stub provider=named-stub abi=named-x64
+[   0.130] MLP ROUTE user32.dll!PeekMessageA kind=uwph provider=uwph-corewindow abi=named-x64
+[   0.130] MLP ROUTE user32.dll!MsgWaitForMultipleObjects kind=stub provider=named-stub abi=named-x64
+[   0.130] MLP ROUTE user32.dll!GetCaretBlinkTime kind=stub provider=named-stub abi=named-x64
+[   0.130] MLP ROUTE user32.dll!GetDoubleClickTime kind=stub provider=named-stub abi=named-x64
+[   0.130] MLP ROUTE user32.dll!GetCursorPos kind=stub provider=named-stub abi=named-x64
+[   0.130] MLP ROUTE user32.dll!LoadIconA kind=stub provider=named-stub abi=named-x64
+[   0.131] MLP SYSTEM version.dll loaded=1 error=0
+[   0.131] MLP ROUTE version.dll!GetFileVersionInfoA kind=system provider=system abi=named-x64
+[   0.131] MLP ROUTE version.dll!VerQueryValueA kind=system provider=system abi=named-x64
+[   0.131] MLP ROUTE version.dll!GetFileVersionInfoSizeA kind=system provider=system abi=named-x64
+[   0.131] MLP SYSTEM ole32.dll loaded=1 error=0
+[   0.131] MLP ROUTE ole32.dll!CoUninitialize kind=system provider=system abi=named-x64
+[   0.131] MLP ROUTE ole32.dll!CoInitialize kind=system provider=system abi=named-x64
+[   0.131] MLP ROUTE ole32.dll!PropVariantCopy kind=system provider=system abi=named-x64
+[   0.131] MLP ROUTE ole32.dll!PropVariantClear kind=system provider=system abi=named-x64
+[   0.131] MLP ROUTE ole32.dll!RoGetAgileReference kind=system provider=system abi=named-x64
+[   0.131] MLP ROUTE ole32.dll!CoTaskMemAlloc kind=system provider=system abi=named-x64
+[   0.131] MLP ROUTE ole32.dll!CoCreateFreeThreadedMarshaler kind=system provider=system abi=named-x64
+[   0.132] MLP ROUTE ole32.dll!CoCreateGuid kind=system provider=system abi=named-x64
+[   0.132] MLP ROUTE ole32.dll!CoSetProxyBlanket kind=system provider=system abi=named-x64
+[   0.132] MLP ROUTE ole32.dll!CoCreateInstance kind=system provider=system abi=named-x64
+[   0.132] MLP ROUTE ole32.dll!CoTaskMemFree kind=system provider=system abi=named-x64
+[   0.132] MLP ROUTE ole32.dll!StringFromGUID2 kind=system provider=system abi=named-x64
+[   0.132] MLP ROUTE shlwapi.dll!SHDeleteKeyW kind=stub provider=named-stub abi=named-x64
+[   0.132] MLP ROUTE shlwapi.dll!PathCanonicalizeW kind=stub provider=named-stub abi=named-x64
+[   0.132] MLP ROUTE setupapi.dll!SetupDiEnumDeviceInterfaces kind=stub provider=named-stub-hid abi=named-x64
+[   0.132] MLP ROUTE setupapi.dll!SetupDiGetClassDevsA kind=stub provider=named-stub-hid abi=named-x64
+[   0.132] MLP ROUTE setupapi.dll!SetupDiGetDeviceInterfaceDetailW kind=stub provider=named-stub-hid abi=named-x64
+[   0.132] MLP ROUTE setupapi.dll!SetupDiEnumDeviceInfo kind=stub provider=named-stub-hid abi=named-x64
+[   0.132] MLP ROUTE setupapi.dll!SetupDiDestroyDeviceInfoList kind=stub provider=named-stub-hid abi=named-x64
+[   0.132] MLP SYSTEM advapi32.dll loaded=1 error=0
+[   0.132] MLP ROUTE advapi32.dll!RegOpenKeyExW kind=system provider=system abi=named-x64
+[   0.132] MLP ROUTE advapi32.dll!RegCloseKey kind=system provider=system abi=named-x64
+[   0.132] MLP ROUTE advapi32.dll!RegQueryValueExA kind=system provider=system abi=named-x64
+[   0.132] MLP ROUTE advapi32.dll!RegSetValueExA kind=system provider=system abi=named-x64
+[   0.132] MLP ROUTE advapi32.dll!RegDeleteValueA kind=system provider=system abi=named-x64
+[   0.132] MLP ROUTE advapi32.dll!RegQueryValueExW kind=system provider=system abi=named-x64
+[   0.132] MLP ROUTE advapi32.dll!GetUserNameA kind=system provider=system abi=named-x64
+[   0.133] MLP ROUTE advapi32.dll!OpenProcessToken kind=system provider=system abi=named-x64
+[   0.133] MLP ROUTE advapi32.dll!GetTokenInformation kind=system provider=system abi=named-x64
+[   0.133] MLP ROUTE advapi32.dll!GetSidSubAuthority kind=system provider=system abi=named-x64
+[   0.133] MLP ROUTE advapi32.dll!RegCreateKeyExW kind=system provider=system abi=named-x64
+[   0.133] MLP ROUTE advapi32.dll!RegSetValueExW kind=system provider=system abi=named-x64
+[   0.133] MLP ROUTE advapi32.dll!CryptReleaseContext kind=system provider=system abi=named-x64
+[   0.133] MLP ROUTE advapi32.dll!CryptGenRandom kind=system provider=system abi=named-x64
+[   0.133] MLP ROUTE advapi32.dll!CryptAcquireContextA kind=system provider=system abi=named-x64
+[   0.133] MLP ROUTE advapi32.dll!CryptAcquireContextW kind=system provider=system abi=named-x64
+[   0.133] MLP ROUTE advapi32.dll!CryptGetHashParam kind=system provider=system abi=named-x64
+[   0.133] MLP ROUTE advapi32.dll!CryptCreateHash kind=system provider=system abi=named-x64
+[   0.133] MLP ROUTE advapi32.dll!CryptHashData kind=system provider=system abi=named-x64
+[   0.133] MLP ROUTE advapi32.dll!CryptDestroyHash kind=system provider=system abi=named-x64
+[   0.133] MLP ROUTE advapi32.dll!RegCreateKeyW kind=system provider=system abi=named-x64
+[   0.133] MLP ROUTE gdi32.dll!ChoosePixelFormat kind=stub provider=named-stub abi=named-x64
+[   0.133] MLP ROUTE gdi32.dll!SetPixelFormat kind=stub provider=named-stub abi=named-x64
+[   0.133] MLP ROUTE gdi32.dll!GetDeviceCaps kind=stub provider=named-stub abi=named-x64
+[   0.133] MLP ROUTE gdi32.dll!SwapBuffers kind=stub provider=named-stub abi=named-x64
+[   0.133] MLP ROUTE shell32.dll!SHGetKnownFolderPath kind=stub provider=named-stub abi=named-x64
+[   0.133] MLP ROUTE shell32.dll!ShellExecuteW kind=stub provider=named-stub abi=named-x64
+[   0.133] MLP ROUTE shell32.dll!SHGetFolderPathW kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE shell32.dll!SHFileOperationW kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE shell32.dll!CommandLineToArgvW kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE opengl32.dll!wglGetProcAddress kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE opengl32.dll!wglDeleteContext kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE opengl32.dll!wglMakeCurrent kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE opengl32.dll!wglGetCurrentDC kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE opengl32.dll!wglCreateContext kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE opengl32.dll!wglGetCurrentContext kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveInOpen kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveInGetDevCapsW kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveInClose kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveInGetNumDevs kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveOutGetPosition kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveOutReset kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveOutWrite kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveOutUnprepareHeader kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveOutPrepareHeader kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveOutClose kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!timeBeginPeriod kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!timeEndPeriod kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveInPrepareHeader kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveInStart kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveInUnprepareHeader kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveInAddBuffer kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveInGetDevCapsA kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveOutOpen kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveOutGetDevCapsW kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveOutGetDevCapsA kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveOutGetNumDevs kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!timeGetTime kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE winmm.dll!waveInReset kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP SYSTEM oleaut32.dll loaded=1 error=0
+[   0.134] MLP ROUTE oleaut32.dll!#2 kind=system provider=system abi=named-x64
+[   0.134] MLP ROUTE oleaut32.dll!#9 kind=system provider=system abi=named-x64
+[   0.134] MLP ROUTE oleaut32.dll!#6 kind=system provider=system abi=named-x64
+[   0.134] MLP ROUTE oleaut32.dll!#8 kind=system provider=system abi=named-x64
+[   0.134] MLP ROUTE oleaut32.dll!#12 kind=system provider=system abi=named-x64
+[   0.134] MLP ROUTE imm32.dll!ImmSetCompositionStringW kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE imm32.dll!ImmNotifyIME kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE imm32.dll!ImmGetCompositionStringW kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE imm32.dll!ImmAssociateContextEx kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE imm32.dll!ImmAssociateContext kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE imm32.dll!ImmGetConversionStatus kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE imm32.dll!ImmReleaseContext kind=stub provider=named-stub abi=named-x64
+[   0.134] MLP ROUTE imm32.dll!ImmGetContext kind=stub provider=named-stub abi=named-x64
+[   0.135] MLP SYSTEM winhttp.dll loaded=1 error=0
+[   0.135] MLP ROUTE winhttp.dll!WinHttpOpen kind=system provider=system abi=named-x64
+[   0.135] MLP ROUTE winhttp.dll!WinHttpGetIEProxyConfigForCurrentUser kind=system provider=system abi=named-x64
+[   0.135] MLP ROUTE winhttp.dll!WinHttpGetProxyForUrl kind=system provider=system abi=named-x64
+[   0.135] MLP ROUTE winhttp.dll!WinHttpCloseHandle kind=system provider=system abi=named-x64
+[   0.135] MLP SYSTEM bcrypt.dll loaded=1 error=0
+[   0.135] MLP ROUTE bcrypt.dll!BCryptGenRandom kind=system provider=system abi=named-x64
+[   0.135] MLP ROUTE hid.dll!HidP_GetData kind=stub provider=named-stub-hid abi=named-x64
+[   0.135] MLP ROUTE hid.dll!HidP_MaxDataListLength kind=stub provider=named-stub-hid abi=named-x64
+[   0.135] MLP ROUTE hid.dll!HidD_GetSerialNumberString kind=stub provider=named-stub-hid abi=named-x64
+[   0.135] MLP ROUTE hid.dll!HidD_GetManufacturerString kind=stub provider=named-stub-hid abi=named-x64
+[   0.135] MLP ROUTE hid.dll!HidD_GetProductString kind=stub provider=named-stub-hid abi=named-x64
+[   0.135] MLP ROUTE hid.dll!HidD_FreePreparsedData kind=stub provider=named-stub-hid abi=named-x64
+[   0.135] MLP ROUTE hid.dll!HidD_GetPreparsedData kind=stub provider=named-stub-hid abi=named-x64
+[   0.135] MLP ROUTE hid.dll!HidD_GetHidGuid kind=stub provider=named-stub-hid abi=named-x64
+[   0.135] MLP ROUTE hid.dll!HidP_SetUsages kind=stub provider=named-stub-hid abi=named-x64
+[   0.135] MLP ROUTE hid.dll!HidP_SetUsageValue kind=stub provider=named-stub-hid abi=named-x64
+[   0.135] MLP ROUTE hid.dll!HidP_GetButtonCaps kind=stub provider=named-stub-hid abi=named-x64
+[   0.135] MLP ROUTE hid.dll!HidP_GetValueCaps kind=stub provider=named-stub-hid abi=named-x64
+[   0.135] MLP ROUTE hid.dll!HidD_GetAttributes kind=stub provider=named-stub-hid abi=named-x64
+[   0.135] MLP ROUTE hid.dll!HidP_GetCaps kind=stub provider=named-stub-hid abi=named-x64
+[   0.135] MLP SYSTEM api-ms-win-core-winrt-l1-1-0.dll loaded=1 error=0
+[   0.135] MLP ROUTE api-ms-win-core-winrt-l1-1-0.dll!RoActivateInstance kind=system provider=system abi=named-x64
+[   0.135] MLP ROUTE api-ms-win-core-winrt-l1-1-0.dll!RoGetActivationFactory kind=system provider=system abi=named-x64
+[   0.135] MLP ROUTE api-ms-win-core-winrt-l1-1-0.dll!RoUninitialize kind=system provider=system abi=named-x64
+[   0.136] MLP ROUTE api-ms-win-core-winrt-l1-1-0.dll!RoInitialize kind=system provider=system abi=named-x64
+[   0.136] MLP SYSTEM api-ms-win-core-winrt-string-l1-1-0.dll loaded=1 error=0
+[   0.136] MLP ROUTE api-ms-win-core-winrt-string-l1-1-0.dll!WindowsGetStringRawBuffer kind=system provider=system abi=named-x64
+[   0.136] MLP ROUTE api-ms-win-core-winrt-string-l1-1-0.dll!WindowsCompareStringOrdinal kind=system provider=system abi=named-x64
+[   0.136] MLP ROUTE api-ms-win-core-winrt-string-l1-1-0.dll!WindowsDeleteString kind=system provider=system abi=named-x64
+[   0.136] MLP ROUTE api-ms-win-core-winrt-string-l1-1-0.dll!WindowsCreateStringReference kind=system provider=system abi=named-x64
+[   0.136] MLP ROUTE api-ms-win-core-winrt-string-l1-1-0.dll!WindowsCreateString kind=system provider=system abi=named-x64
+[   0.136] MLP ROUTE api-ms-win-core-winrt-string-l1-1-0.dll!WindowsDuplicateString kind=system provider=system abi=named-x64
+[   0.139] MLP SYSTEM d3d11.dll loaded=1 error=0
+[   0.139] MLP ROUTE d3d11.dll!D3D11On12CreateDevice kind=system provider=system abi=named-x64
+[   0.139] MLP ROUTE d3d11.dll!D3D11CreateDevice kind=system provider=system abi=named-x64
+[   0.139] MLP SYSTEM dxgi.dll loaded=1 error=0
+[   0.139] MLP ROUTE dxgi.dll!CreateDXGIFactory kind=system provider=system abi=named-x64
+[   0.139] MLP ROUTE dxgi.dll!CreateDXGIFactory2 kind=system provider=system abi=named-x64
+[   0.140] MLP SYSTEM crypt32.dll loaded=1 error=0
+[   0.140] MLP ROUTE crypt32.dll!CertFreeCertificateContext kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE crypt32.dll!CertFreeCertificateChain kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE crypt32.dll!CertVerifyCertificateChainPolicy kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE crypt32.dll!CertCloseStore kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE crypt32.dll!CertOpenStore kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE crypt32.dll!CertAddEncodedCertificateToStore kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE crypt32.dll!CertGetCertificateChain kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#111 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#23 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#3 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#116 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#115 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#6 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#8 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#11 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#9 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#21 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!WSAIoctl kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#112 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#57 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#13 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#15 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#1 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#22 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#18 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#151 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#10 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#20 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#4 kind=system provider=system abi=named-x64
+[   0.140] MLP ROUTE ws2_32.dll!#19 kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!#17 kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!#16 kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!WSASocketA kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!getaddrinfo kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!freeaddrinfo kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!#14 kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!#52 kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!#53 kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!#5 kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!#7 kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!WSAWaitForMultipleEvents kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!WSASocketW kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!WSACreateEvent kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!WSAResetEvent kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!WSAEventSelect kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!WSAEnumNetworkEvents kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!#108 kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!#103 kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!WSASendDisconnect kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!#51 kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!#2 kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE ws2_32.dll!WSACloseEvent kind=system provider=system abi=named-x64
+[   0.141] MLP SYSTEM dwmapi.dll loaded=1 error=0
+[   0.141] MLP ROUTE dwmapi.dll!DwmSetWindowAttribute kind=system provider=system abi=named-x64
+[   0.141] MLP ROUTE dwmapi.dll!DwmGetWindowAttribute kind=system provider=system abi=named-x64
+[   0.142] MLP SYSTEM d3d12.dll loaded=1 error=0
+[   0.142] MLP ROUTE d3d12.dll!#101 kind=system provider=system abi=named-x64
+[   0.142] MLP ROUTE d3d12.dll!#102 kind=system provider=system abi=named-x64
+[   0.142] MLP ROUTE d3d12.dll!D3D12SerializeRootSignature kind=system provider=system abi=named-x64
+[   0.142] WXL mapped LocalState PE relocations=59761 imports=513 delta=0x1af07000000
+[   0.147] WXL VirtualProtectFromApp rva=0x0 size=0x1e46000 old=0x4 new=0x1 ok=1 err=0
+[   0.147] WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.148] WXL VirtualProtectFromApp rva=0x1000 size=0x17f4000 old=0x1 new=0x20 ok=1 err=0
+[   0.148] WXL VirtualProtectFromApp rva=0x17f5000 size=0x3cb000 old=0x1 new=0x2 ok=1 err=0
+[   0.148] WXL VirtualProtectFromApp rva=0x1bc0000 size=0x13f000 old=0x1 new=0x4 ok=1 err=0
+[   0.148] WXL VirtualProtectFromApp rva=0x1cff000 size=0x115000 old=0x1 new=0x2 ok=1 err=0
+[   0.148] WXL VirtualProtectFromApp rva=0x1e14000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.148] WXL VirtualProtectFromApp rva=0x1e15000 size=0x12000 old=0x1 new=0x2 ok=1 err=0
+[   0.148] WXL VirtualProtectFromApp rva=0x1e27000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.148] WXL VirtualProtectFromApp rva=0x1e28000 size=0x1e000 old=0x1 new=0x2 ok=1 err=0
+[   0.148] MLP mapped: TLS/unwind/load-config retained but NOT initialized; entry NOT called
+[   0.149] MLP SUMMARY image=UnityPlayer.dll dll=advapi32.dll resolved=21 stubbed=0 first-missing=none
+[   0.149] MLP SUMMARY image=UnityPlayer.dll dll=api-ms-win-core-synch-l1-2-0.dll resolved=3 stubbed=0 first-missing=none
+[   0.149] MLP SUMMARY image=UnityPlayer.dll dll=api-ms-win-core-winrt-l1-1-0.dll resolved=4 stubbed=0 first-missing=none
+[   0.149] MLP SUMMARY image=UnityPlayer.dll dll=api-ms-win-core-winrt-string-l1-1-0.dll resolved=6 stubbed=0 first-missing=none
+[   0.149] MLP SUMMARY image=UnityPlayer.dll dll=bcrypt.dll resolved=1 stubbed=0 first-missing=none
+[   0.149] MLP SUMMARY image=UnityPlayer.dll dll=crypt32.dll resolved=7 stubbed=0 first-missing=none
+[   0.149] MLP SUMMARY image=UnityPlayer.dll dll=d3d11.dll resolved=2 stubbed=0 first-missing=none
+[   0.149] MLP SUMMARY image=UnityPlayer.dll dll=d3d12.dll resolved=3 stubbed=0 first-missing=none
+[   0.149] MLP SUMMARY image=UnityPlayer.dll dll=dwmapi.dll resolved=2 stubbed=0 first-missing=none
+[   0.149] MLP SUMMARY image=UnityPlayer.dll dll=dxgi.dll resolved=2 stubbed=0 first-missing=none
+[   0.150] MLP SUMMARY image=UnityPlayer.dll dll=gdi32.dll resolved=0 stubbed=4 first-missing=none
+[   0.150] MLP SUMMARY image=UnityPlayer.dll dll=hid.dll resolved=0 stubbed=14 first-missing=none
+[   0.150] MLP SUMMARY image=UnityPlayer.dll dll=imm32.dll resolved=0 stubbed=8 first-missing=none
+[   0.150] MLP SUMMARY image=UnityPlayer.dll dll=kernel32.dll resolved=215 stubbed=0 first-missing=none
+[   0.150] MLP SUMMARY image=UnityPlayer.dll dll=ole32.dll resolved=12 stubbed=0 first-missing=none
+[   0.150] MLP SUMMARY image=UnityPlayer.dll dll=oleaut32.dll resolved=5 stubbed=0 first-missing=none
+[   0.150] MLP SUMMARY image=UnityPlayer.dll dll=opengl32.dll resolved=0 stubbed=6 first-missing=none
+[   0.150] MLP SUMMARY image=UnityPlayer.dll dll=setupapi.dll resolved=0 stubbed=5 first-missing=none
+[   0.150] MLP SUMMARY image=UnityPlayer.dll dll=shell32.dll resolved=0 stubbed=5 first-missing=none
+[   0.150] MLP SUMMARY image=UnityPlayer.dll dll=shlwapi.dll resolved=0 stubbed=2 first-missing=none
+[   0.150] MLP SUMMARY image=UnityPlayer.dll dll=user32.dll resolved=22 stubbed=89 first-missing=none
+[   0.150] MLP SUMMARY image=UnityPlayer.dll dll=version.dll resolved=3 stubbed=0 first-missing=none
+[   0.150] MLP SUMMARY image=UnityPlayer.dll dll=winhttp.dll resolved=4 stubbed=0 first-missing=none
+[   0.150] MLP SUMMARY image=UnityPlayer.dll dll=winmm.dll resolved=0 stubbed=23 first-missing=none
+[   0.150] MLP SUMMARY image=UnityPlayer.dll dll=ws2_32.dll resolved=45 stubbed=0 first-missing=none
+[   0.150] MLP IMAGE Megabonk.exe
+[   0.150] WXL VirtualAllocFromApp initial=0x4 (RW)
+[   0.151] MLP ROUTE unityplayer.dll!UnityMain2 kind=uwph provider=uwph abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!CloseHandle kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!QueryPerformanceCounter kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!GetCurrentProcessId kind=uwph provider=uwph abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!GetCurrentThreadId kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!GetSystemTimeAsFileTime kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!InitializeSListHead kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!RtlCaptureContext kind=system provider=system:api-ms-win-core-rtlsupport-l1-1-0.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!RtlLookupFunctionEntry kind=uwph provider=uwph abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!RtlVirtualUnwind kind=system provider=system:api-ms-win-core-rtlsupport-l1-1-0.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!IsDebuggerPresent kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!UnhandledExceptionFilter kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!SetUnhandledExceptionFilter kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!GetStartupInfoW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!IsProcessorFeaturePresent kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!GetModuleHandleW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!CreateFileW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!RtlUnwindEx kind=system provider=system:api-ms-win-core-rtlsupport-l1-1-0.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!GetLastError kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!SetLastError kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!EnterCriticalSection kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!LeaveCriticalSection kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!DeleteCriticalSection kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!InitializeCriticalSectionAndSpinCount kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!TlsAlloc kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!TlsGetValue kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!TlsSetValue kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!TlsFree kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!FreeLibrary kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!GetProcAddress kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!LoadLibraryExW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!EncodePointer kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!RaiseException kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!RtlPcToFileHeader kind=system provider=system:api-ms-win-core-rtlsupport-l1-1-0.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!GetStdHandle kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!WriteFile kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!GetModuleFileNameW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!GetCurrentProcess kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.151] MLP ROUTE kernel32.dll!ExitProcess kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!TerminateProcess kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!GetModuleHandleExW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!WriteConsoleW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!HeapAlloc kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!HeapFree kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!FindClose kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!FindFirstFileExW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!FindNextFileW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!IsValidCodePage kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!GetACP kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!GetOEMCP kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!GetCPInfo kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!GetCommandLineA kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!GetCommandLineW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!MultiByteToWideChar kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!WideCharToMultiByte kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!GetEnvironmentStringsW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!FreeEnvironmentStringsW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!SetStdHandle kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!GetFileType kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!GetStringTypeW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!FlsAlloc kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!FlsGetValue kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!FlsSetValue kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!FlsFree kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!LCMapStringW kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!GetProcessHeap kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!HeapSize kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!HeapReAlloc kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!FlushFileBuffers kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!GetConsoleOutputCP kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!GetConsoleMode kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] MLP ROUTE kernel32.dll!SetFilePointerEx kind=system provider=system:kernelbase.dll abi=named-x64
+[   0.152] WXL mapped LocalState PE relocations=777 imports=72 delta=0x1af450b0000
+[   0.152] WXL VirtualProtectFromApp rva=0x0 size=0xa8000 old=0x4 new=0x1 ok=1 err=0
+[   0.152] WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.152] WXL VirtualProtectFromApp rva=0x1000 size=0xd000 old=0x1 new=0x20 ok=1 err=0
+[   0.152] WXL VirtualProtectFromApp rva=0xe000 size=0xa000 old=0x1 new=0x2 ok=1 err=0
+[   0.152] WXL VirtualProtectFromApp rva=0x18000 size=0x2000 old=0x1 new=0x4 ok=1 err=0
+[   0.153] WXL VirtualProtectFromApp rva=0x1a000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.153] WXL VirtualProtectFromApp rva=0x1b000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.153] WXL VirtualProtectFromApp rva=0x1c000 size=0x8b000 old=0x1 new=0x2 ok=1 err=0
+[   0.153] WXL VirtualProtectFromApp rva=0xa7000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.153] MLP mapped: TLS/unwind/load-config retained but NOT initialized; entry NOT called
+[   0.153] MLP SUMMARY image=Megabonk.exe dll=kernel32.dll resolved=71 stubbed=0 first-missing=none
+[   0.153] MLP SUMMARY image=Megabonk.exe dll=unityplayer.dll resolved=1 stubbed=0 first-missing=none
+[   0.153] MLP-PROBE-DONE no guest code executed; TLS/unwind deferred; zero RWX requested

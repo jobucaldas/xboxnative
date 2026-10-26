@@ -1,0 +1,5 @@
+4350a7ae25ba7aec35677c213fdceabbb638676bb00ab59131d7d9c37b6e3d9e  /workspace/megabonk-from-console/GameAssembly.dll
+e2fa5120fbf41837891e0ca372210865b0edd3826abdb0e36d263b0f40fd5f01  /workspace/megabonk-from-console/Megabonk.exe
+0720b89f6ff8499ab07e698097bd40b5343c2a0f2b757367d98286a1ac655777  /workspace/megabonk-from-console/UnityCrashHandler64.exe
+df965f4ba87ce9976d55b0699671779e0ef921f75d5407689ac0ddd514fef1bc  /workspace/megabonk-from-console/UnityPlayer.dll
+1e0630594eab2a11f83db76eb156e02cd35b95f548c1b38375462b7abdb9c619  /workspace/megabonk-from-console/baselib.dll

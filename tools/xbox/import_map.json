@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "scope": [
+    "Megabonk.exe",
+    "UnityPlayer.dll",
+    "GameAssembly.dll",
+    "baselib.dll"
+  ],
+  "policy_source": "/workspace/x64-run/LANES.md \u00a71 (table takes precedence over contradictory \u00a74 WINHTTP stub list)",
+  "classification_semantics": {
+    "system": "Resolve to the real OS DLL or API-set contract; planned routing does not certify export availability.",
+    "uwph": "Resolve through the uwph/Wine loader: host-backed builtins or unchanged game-supplied modules as specified by reason.",
+    "stub": "Resolve imports via Wine builtin/stub backends; successful loading and runtime tolerance remain separate work."
+  },
+  "dlls": {
+    "advapi32.dll": {
+      "class": "system",
+      "reason": "Provisional native registry/crypto/ETW route per LANES \u00a71; exact imported exports need AppContainer validation."
+    },
+    "api-ms-win-core-synch-l1-2-0.dll": {
+      "class": "system",
+      "reason": "Resolve the native synchronization API-set contract; do not treat this forwarder as a game-provided DLL."
+    },
+    "api-ms-win-core-winrt-error-l1-1-0.dll": {
+      "class": "system",
+      "reason": "Resolve the native WinRT API-set contract for UWP runtime services; console export compatibility remains to be checked."
+    },
+    "api-ms-win-core-winrt-l1-1-0.dll": {
+      "class": "system",
+      "reason": "Resolve the native WinRT API-set contract for UWP runtime services; console export compatibility remains to be checked."
+    },
+    "api-ms-win-core-winrt-robuffer-l1-1-0.dll": {
+      "class": "system",
+      "reason": "Resolve the native WinRT API-set contract for UWP runtime services; console export compatibility remains to be checked."
+    },
+    "api-ms-win-core-winrt-string-l1-1-0.dll": {
+      "class": "system",
+      "reason": "Resolve the native WinRT API-set contract for UWP runtime services; console export compatibility remains to be checked."
+    },
+    "baselib.dll": {
+      "class": "uwph",
+      "reason": "Unmodified game-supplied x64 PE loaded through the uwph/Wine loader; this is a game asset, not a replacement host DLL."
+    },
+    "bcrypt.dll": {
+      "class": "system",
+      "reason": "Native crypto/COM/version passthrough planned by LANES \u00a71; imported export behavior still needs game-level validation."
+    },
+    "crypt32.dll": {
+      "class": "system",
+      "reason": "Native crypto/COM/version passthrough planned by LANES \u00a71; imported export behavior still needs game-level validation."
+    },
+    "d3d11.dll": {
+      "class": "system",
+      "reason": "Native Xbox graphics passthrough per LANES \u00a71; basic devices/swap chain have console evidence, full game use remains unverified."
+    },
+    "d3d12.dll": {
+      "class": "system",
+      "reason": "Native Xbox graphics passthrough per LANES \u00a71; basic devices/swap chain have console evidence, full game use remains unverified."
+    },
+    "dbghelp.dll": {
+      "class": "stub",
+      "reason": "GameAssembly directly imports SymInitialize/SymFromAddr despite LANES \u00a71 crash-handler-only claim; planned clean-failure symbolization stubs need validation."
+    },
+    "dwmapi.dll": {
+      "class": "system",
+      "reason": "Provisional native WinHTTP/compositor-query route from the LANES \u00a71 table; validate exact exports on console."
+    },
+    "dxgi.dll": {
+      "class": "system",
+      "reason": "Native Xbox graphics passthrough per LANES \u00a71; basic devices/swap chain have console evidence, full game use remains unverified."
+    },
+    "gdi32.dll": {
+      "class": "stub",
+      "reason": "Named x64 ABI failure/empty adapters in entry-stubs.dll for the three-image probe; runtime tolerance remains unverified."
+    },
+    "hid.dll": {
+      "class": "stub",
+      "reason": "Named uwph-hid.dll HID failure/empty adapters, existing console-tested item 24 backend; guest runtime tolerance unverified."
+    },
+    "imm32.dll": {
+      "class": "stub",
+      "reason": "Named x64 ABI failure/empty adapters in entry-stubs.dll for the three-image probe; runtime tolerance remains unverified."
+    },
+    "iphlpapi.dll": {
+      "class": "system",
+      "reason": "Provisional native network-query route for GetIfEntry/GetAdaptersAddresses/GetNetworkParams; absent from LANES \u00a71 and not console-verified."
+    },
+    "kernel32.dll": {
+      "class": "uwph",
+      "reason": "uwph import boundary: console-verified kernelbase/app API-set exports; FromApp W^X memory overrides, clean CreateProcessW failure and named adapters for APIs absent from the app partition."
+    },
+    "ntdll.dll": {
+      "class": "uwph",
+      "reason": "Indirect Wine builtin boundary; resolve through the uwph/Wine loader, never the native desktop DLL."
+    },
+    "ole32.dll": {
+      "class": "system",
+      "reason": "Native crypto/COM/version passthrough planned by LANES \u00a71; imported export behavior still needs game-level validation."
+    },
+    "oleaut32.dll": {
+      "class": "system",
+      "reason": "Native crypto/COM/version passthrough planned by LANES \u00a71; imported export behavior still needs game-level validation."
+    },
+    "opengl32.dll": {
+      "class": "stub",
+      "reason": "Named x64 ABI failure/empty adapters in entry-stubs.dll for the three-image probe; runtime tolerance remains unverified."
+    },
+    "setupapi.dll": {
+      "class": "stub",
+      "reason": "Named uwph-hid.dll typed empty device sets, existing console-tested item 24 backend; guest runtime tolerance unverified."
+    },
+    "shell32.dll": {
+      "class": "stub",
+      "reason": "Named x64 ABI failure/empty adapters in entry-stubs.dll for the three-image probe; runtime tolerance remains unverified."
+    },
+    "shlwapi.dll": {
+      "class": "stub",
+      "reason": "Named x64 ABI failure/empty adapters in entry-stubs.dll for the three-image probe; runtime tolerance remains unverified."
+    },
+    "unityplayer.dll": {
+      "class": "uwph",
+      "reason": "Unmodified game-supplied x64 PE loaded through the uwph/Wine loader; this is a game asset, not a replacement host DLL."
+    },
+    "user32.dll": {
+      "class": "uwph",
+      "reason": "uwph single-CoreWindow driver for supported window/message imports; remaining imports use named x64 ABI failure/empty adapters, never desktop user32."
+    },
+    "version.dll": {
+      "class": "system",
+      "reason": "Native crypto/COM/version passthrough planned by LANES \u00a71; imported export behavior still needs game-level validation."
+    },
+    "win32u.dll": {
+      "class": "uwph",
+      "reason": "Indirect Wine builtin boundary; resolve through the uwph/Wine loader, never the native desktop DLL."
+    },
+    "winhttp.dll": {
+      "class": "system",
+      "reason": "Provisional native WinHTTP/compositor-query route from the LANES \u00a71 table; validate exact exports on console."
+    },
+    "winmm.dll": {
+      "class": "stub",
+      "reason": "Named x64 wave adapters enumerate zero devices and return MMRESULT failures; timeGetTime uses GetTickCount64, period requests delegate to system winmm if available or return TIMERR_NOCANDO."
+    },
+    "ws2_32.dll": {
+      "class": "system",
+      "reason": "Native Winsock passthrough per LANES \u00a71; console TCP works, while AF_UNIX remains unavailable."
+    }
+  }
+}

@@ -1,0 +1,11 @@
+dll,total,PE_PURE,PE_NEEDS_NT,PE_NEEDS_WIN32U,WINE_STUB,NOT_IN_WINE,IMPORT_UNRESOLVED,DATA
+kernel32.dll,213,79,134,0,0,0,0,0
+user32.dll,111,20,0,91,0,0,0,0
+winmm.dll,23,10,6,7,0,0,0,0
+hid.dll,14,9,5,0,0,0,0,0
+imm32.dll,8,2,0,6,0,0,0,0
+opengl32.dll,6,6,0,0,0,0,0,0
+setupapi.dll,5,2,3,0,0,0,0,0
+shell32.dll,5,4,0,1,0,0,0,0
+gdi32.dll,4,3,0,1,0,0,0,0
+shlwapi.dll,2,2,0,0,0,0,0,0

@@ -1,0 +1,5 @@
+- qrcodegen.cpp/.hpp: Nayuki QR Code generator library, MIT License, Copyright (c) Project Nayuki (https://www.nayuki.io/page/qr-code-generator-library). License text is in the file headers.
+- font8x8_basic.h: dhepper/font8x8, Public Domain.
+- vendor/zlib: zlib 1.2.11 (inflate subset), zlib license, (C) Jean-loup Gailly and Mark Adler.
+- vendor/lzma: LZMA SDK LzmaDec (2023-04-02), Igor Pavlov, public domain.
+- vendor/zstd: zstd 1.5.7 single-file decoder (zstddeclib.c, built with build/single_file_libs/combine.py), Meta, BSD-3-Clause option of the dual license.

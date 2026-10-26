@@ -1,0 +1,786 @@
+MLP PROBE begin; NO entry/DllMain/TLS callbacks; zero RWX; failure placeholders are probe-only
+MLP IMAGE baselib.dll
+WXL VirtualAllocFromApp initial=0x4 (RW)
+MLP SYSTEM ws2_32.dll loaded=1 error=0
+K32T CHECK toolhelp-exports pass=1 error=0
+K32T CHECK snapshot-real-threads pass=1 error=0
+K32T CHECK thread-size-error pass=1 error=122
+K32T CHECK thread-first pass=1 error=122
+K32T CHECK thread-enumeration-end pass=1 error=18
+K32T CHECK snapshot-contains-calling-thread pass=1 error=18
+K32T CHECK thread-first-rewinds pass=1 error=18
+K32T CHECK snapshot-close pass=1 error=18
+K32T CHECK snapshot-closed-error pass=1 error=6
+K32T CHECK timer-export pass=1 error=6
+K32T CHECK timer-create pass=1 error=0
+K32T CHECK timer-arm pass=1 error=0
+K32T CHECK timer-signals pass=1 error=0
+K32T CHECK timer-manual-reset pass=1 error=0
+K32T CHECK timer-close pass=1 error=0
+K32T CHECK computer-export pass=1 error=0
+K32T CHECK computer-required-size pass=1 error=111
+K32T CHECK computer-name-copy pass=1 error=203
+K32T CHECK startup-export pass=1 error=203
+K32T CHECK startup-size pass=1 error=203
+K32T CHECK startup-process-flags pass=1 error=203
+K32T CHECK startup-geometry pass=1 error=203
+K32T CHECK startup-stable-strings pass=1 error=203
+K32T CHECK power-export pass=1 error=203
+K32T CHECK power-query pass=1 error=203
+K32T CHECK power-valid-values pass=1 error=203
+K32T CHECK dll-directory-exports pass=1 error=203
+K32T CHECK dll-directory-set pass=1 error=203
+K32T CHECK dll-directory-observed pass=1 error=203
+K32T CHECK dll-directory-restore pass=1 error=203
+K32T CHECK affinity-exports pass=1 error=203
+K32T CHECK affinity-query pass=1 error=203
+K32T CHECK affinity-return-previous pass=1 error=203
+K32T CHECK affinity-applied pass=1 error=203
+K32T CHECK affinity-restored pass=1 error=203
+K32T CHECK affinity-zero-rejected pass=1 error=87
+K32T CHECK version-export pass=1 error=87
+K32T CHECK version-old-minimum pass=1 error=87
+K32T CHECK version-future-rejected pass=1 error=1150
+K32T CHECK version-bad-arguments pass=1 error=160
+K32T SELFTEST checks=40 failures=0 synthetic-host-calls no-guest-code
+K32T SEARCH-CHECK package-path pass=1 error=0
+K32T SEARCH-CHECK set-packaged-subdirectory pass=1 error=0
+K32T SEARCH-CHECK load-from-directory pass=1 error=126
+K32T SEARCH-CHECK loaded-export-executes pass=1 error=126
+K32T SEARCH-CHECK unload-fixture pass=1 error=126
+K32T SEARCH-CHECK restore-search-state pass=1 error=126
+K32T SEARCH-SELFTEST checks=6 failures=0 packaged-fixture no-game-code
+K32T TAIL kernel32.dll!Thread32First system-route=1
+K32T TAIL kernel32.dll!Thread32Next system-route=1
+K32T TAIL kernel32.dll!SetThreadAffinityMask system-route=1
+K32T TAIL kernel32.dll!CreateWaitableTimerA system-route=1
+K32T TAIL kernel32.dll!VerifyVersionInfoW system-route=1
+K32T TAIL kernel32.dll!GetComputerNameW system-route=1
+K32T TAIL kernel32.dll!CreateToolhelp32Snapshot system-route=1
+K32T TAIL kernel32.dll!GetSystemPowerStatus system-route=1
+K32T TAIL kernel32.dll!GetStartupInfoA system-route=1
+K32T TAIL kernel32.dll!SetDllDirectoryW system-route=1
+K32T TAIL user32.dll!UnregisterDeviceNotification system-route=0
+K32T TAIL user32.dll!PtInRect system-route=1
+K32T TAIL user32.dll!GetWindowLongA system-route=0
+K32T TAIL user32.dll!RegisterDeviceNotificationW system-route=0
+K32T TAIL user32.dll!ScreenToClient system-route=0
+K32T TAIL user32.dll!GetSystemMetrics system-route=0
+K32T TAIL user32.dll!OffsetRect system-route=1
+K32T TAIL user32.dll!CopyRect system-route=1
+K32T TAIL user32.dll!AllowSetForegroundWindow system-route=0
+K32T TAIL user32.dll!GetDesktopWindow system-route=0
+K32T TAIL user32.dll!GetParent system-route=0
+K32T TAIL user32.dll!IsIconic system-route=0
+K32T TAIL user32.dll!MonitorFromRect system-route=0
+K32T TAIL user32.dll!IsWindowVisible system-route=0
+K32T TAIL user32.dll!GetMonitorInfoA system-route=0
+K32T TAIL user32.dll!DefWindowProcW system-route=0
+K32T TAIL user32.dll!GetWindowLongPtrW system-route=0
+K32T TAIL user32.dll!ClientToScreen system-route=0
+K32T TAIL user32.dll!MonitorFromWindow system-route=0
+K32T TAIL user32.dll!GetMonitorInfoW system-route=0
+K32T TAIL shlwapi.dll!SHDeleteKeyW system-route=1
+K32T TAIL shlwapi.dll!PathCanonicalizeW system-route=1
+K32T TAIL setupapi.dll!SetupDiEnumDeviceInterfaces system-route=1
+K32T TAIL setupapi.dll!SetupDiGetClassDevsA system-route=1
+K32T TAIL setupapi.dll!SetupDiGetDeviceInterfaceDetailW system-route=1
+K32T TAIL setupapi.dll!SetupDiEnumDeviceInfo system-route=1
+K32T TAIL setupapi.dll!SetupDiDestroyDeviceInfoList system-route=1
+K32T TAIL gdi32.dll!ChoosePixelFormat system-route=0
+K32T TAIL gdi32.dll!SetPixelFormat system-route=0
+K32T TAIL gdi32.dll!SwapBuffers system-route=0
+K32T TAIL shell32.dll!SHGetKnownFolderPath system-route=1
+K32T TAIL shell32.dll!ShellExecuteW system-route=1
+K32T TAIL shell32.dll!SHGetFolderPathW system-route=1
+K32T TAIL shell32.dll!CommandLineToArgvW system-route=1
+K32T TAIL opengl32.dll!wglGetProcAddress system-route=0
+K32T TAIL opengl32.dll!wglDeleteContext system-route=0
+K32T TAIL opengl32.dll!wglMakeCurrent system-route=0
+K32T TAIL opengl32.dll!wglGetCurrentDC system-route=0
+K32T TAIL opengl32.dll!wglCreateContext system-route=0
+K32T TAIL opengl32.dll!wglGetCurrentContext system-route=0
+K32T TAIL winmm.dll!waveInGetDevCapsW system-route=1
+K32T TAIL winmm.dll!waveInGetNumDevs system-route=1
+K32T TAIL winmm.dll!waveOutGetPosition system-route=1
+K32T TAIL winmm.dll!waveOutUnprepareHeader system-route=1
+K32T TAIL winmm.dll!waveOutPrepareHeader system-route=1
+K32T TAIL winmm.dll!timeBeginPeriod system-route=1
+K32T TAIL winmm.dll!timeEndPeriod system-route=1
+K32T TAIL winmm.dll!waveInPrepareHeader system-route=1
+K32T TAIL winmm.dll!waveInStart system-route=1
+K32T TAIL winmm.dll!waveInUnprepareHeader system-route=1
+K32T TAIL winmm.dll!waveInAddBuffer system-route=1
+K32T TAIL winmm.dll!waveInGetDevCapsA system-route=1
+K32T TAIL winmm.dll!waveOutGetDevCapsW system-route=1
+K32T TAIL winmm.dll!waveOutGetDevCapsA system-route=1
+K32T TAIL winmm.dll!waveOutGetNumDevs system-route=1
+K32T TAIL winmm.dll!timeGetTime system-route=1
+K32T TAIL imm32.dll!ImmReleaseContext system-route=0
+K32T TAIL imm32.dll!ImmGetContext system-route=0
+K32T TAIL hid.dll!HidP_GetData system-route=1
+K32T TAIL hid.dll!HidP_MaxDataListLength system-route=1
+K32T TAIL hid.dll!HidD_GetSerialNumberString system-route=1
+K32T TAIL hid.dll!HidD_GetManufacturerString system-route=1
+K32T TAIL hid.dll!HidD_GetProductString system-route=1
+K32T TAIL hid.dll!HidD_FreePreparsedData system-route=1
+K32T TAIL hid.dll!HidD_GetPreparsedData system-route=1
+K32T TAIL hid.dll!HidD_GetHidGuid system-route=1
+K32T TAIL hid.dll!HidP_SetUsages system-route=1
+K32T TAIL hid.dll!HidP_SetUsageValue system-route=1
+K32T TAIL hid.dll!HidP_GetButtonCaps system-route=1
+K32T TAIL hid.dll!HidP_GetValueCaps system-route=1
+K32T TAIL hid.dll!HidD_GetAttributes system-route=1
+K32T TAIL hid.dll!HidP_GetCaps system-route=1
+K32T PE-CHECK rectangle-exports pass=1 error=126
+K32T PE-CHECK rectangle-half-open-bounds pass=1 error=126
+K32T PE-CHECK rectangle-copy pass=1 error=126
+K32T PE-CHECK rectangle-offset pass=1 error=126
+K32T PE-CHECK path-export pass=1 error=126
+K32T PE-CHECK path-canonicalize pass=1 error=126
+K32T PE-CHECK command-line-export pass=1 error=126
+K32T PE-CHECK command-line-quoted-arguments pass=1 error=0
+K32T PE-CHECK command-line-free pass=1 error=0
+K32T PE-CHECK hid-guid-export pass=1 error=0
+K32T PE-CHECK hid-standard-guid pass=1 error=0
+K32T PE-CHECK multimedia-time-export pass=1 error=0
+K32T PE-CHECK multimedia-time-progress pass=1 error=0
+K32T PE-SELFTEST checks=13 failures=0 synthetic-host-calls no-guest-code
+MLP SYSTEM api-ms-win-core-synch-l1-2-0.dll loaded=1 error=0
+K32T ROUTE kernel32.dll!WriteConsoleW found=1
+K32T ROUTE kernel32.dll!GetStringTypeW found=1
+K32T ROUTE kernel32.dll!SetStdHandle found=1
+K32T ROUTE kernel32.dll!GetProcessHeap found=1
+K32T ROUTE kernel32.dll!FreeEnvironmentStringsW found=1
+K32T ROUTE kernel32.dll!GetEnvironmentStringsW found=1
+K32T ROUTE kernel32.dll!WideCharToMultiByte found=1
+K32T ROUTE kernel32.dll!MultiByteToWideChar found=1
+K32T ROUTE kernel32.dll!GetCommandLineW found=1
+K32T ROUTE kernel32.dll!GetCommandLineA found=1
+K32T ROUTE kernel32.dll!GetCPInfo found=1
+K32T ROUTE kernel32.dll!GetOEMCP found=1
+K32T ROUTE kernel32.dll!GetACP found=1
+K32T ROUTE kernel32.dll!IsValidCodePage found=1
+K32T ROUTE kernel32.dll!FindNextFileW found=1
+K32T ROUTE kernel32.dll!FindFirstFileExW found=1
+K32T ROUTE kernel32.dll!FindClose found=1
+K32T ROUTE kernel32.dll!HeapQueryInformation found=1
+K32T ROUTE kernel32.dll!HeapSize found=1
+K32T ROUTE kernel32.dll!HeapReAlloc found=1
+K32T ROUTE kernel32.dll!GetConsoleMode found=1
+K32T ROUTE kernel32.dll!GetConsoleOutputCP found=1
+K32T ROUTE kernel32.dll!ReadFile found=1
+K32T ROUTE kernel32.dll!GetFileSizeEx found=1
+K32T ROUTE kernel32.dll!CreateSemaphoreExW found=1
+K32T ROUTE kernel32.dll!VirtualFree found=1
+K32T ROUTE kernel32.dll!ReleaseSemaphore found=1
+K32T ROUTE kernel32.dll!WriteFile found=1
+K32T ROUTE kernel32.dll!VirtualAlloc found=1
+K32T ROUTE kernel32.dll!SetEndOfFile found=1
+K32T ROUTE kernel32.dll!WaitForSingleObject found=1
+K32T ROUTE kernel32.dll!CreateFileW found=1
+K32T ROUTE kernel32.dll!GetFileAttributesW found=1
+K32T ROUTE kernel32.dll!GetCurrentThreadId found=1
+K32T ROUTE kernel32.dll!ResumeThread found=1
+K32T ROUTE kernel32.dll!FormatMessageW found=1
+K32T ROUTE kernel32.dll!GetLastError found=1
+K32T ROUTE kernel32.dll!WaitForSingleObjectEx found=1
+K32T ROUTE kernel32.dll!TlsAlloc found=1
+K32T ROUTE kernel32.dll!QueryPerformanceFrequency found=1
+K32T ROUTE kernel32.dll!CloseHandle found=1
+K32T ROUTE kernel32.dll!GetNativeSystemInfo found=1
+K32T ROUTE kernel32.dll!RaiseException found=1
+K32T ROUTE kernel32.dll!LoadLibraryW found=1
+K32T ROUTE kernel32.dll!CreateThread found=1
+K32T ROUTE kernel32.dll!SwitchToThread found=1
+K32T ROUTE kernel32.dll!GetProcAddress found=1
+K32T ROUTE kernel32.dll!SetFilePointerEx found=1
+K32T ROUTE kernel32.dll!GetThreadId found=1
+K32T ROUTE kernel32.dll!GetModuleHandleW found=1
+K32T ROUTE kernel32.dll!FreeLibrary found=1
+K32T ROUTE kernel32.dll!TlsFree found=1
+K32T ROUTE kernel32.dll!QueryPerformanceCounter found=1
+K32T ROUTE kernel32.dll!VirtualQuery found=1
+K32T ROUTE kernel32.dll!IsDebuggerPresent found=1
+K32T ROUTE kernel32.dll!FlushFileBuffers found=1
+K32T ROUTE kernel32.dll!Sleep found=1
+K32T ROUTE kernel32.dll!FlsAlloc found=1
+K32T ROUTE kernel32.dll!FlsGetValue found=1
+K32T ROUTE kernel32.dll!FlsSetValue found=1
+K32T ROUTE kernel32.dll!FlsFree found=1
+K32T ROUTE kernel32.dll!InitializeCriticalSectionEx found=1
+K32T ROUTE kernel32.dll!GetSystemTimeAsFileTime found=1
+K32T ROUTE kernel32.dll!EnterCriticalSection found=1
+K32T ROUTE kernel32.dll!LeaveCriticalSection found=1
+K32T ROUTE kernel32.dll!DeleteCriticalSection found=1
+K32T ROUTE kernel32.dll!InitializeCriticalSectionAndSpinCount found=1
+K32T ROUTE kernel32.dll!SetEvent found=1
+K32T ROUTE kernel32.dll!ResetEvent found=1
+K32T ROUTE kernel32.dll!CreateEventW found=1
+K32T ROUTE kernel32.dll!RtlCaptureContext found=1
+K32T ROUTE kernel32.dll!RtlVirtualUnwind found=1
+K32T ROUTE kernel32.dll!UnhandledExceptionFilter found=1
+K32T ROUTE kernel32.dll!SetUnhandledExceptionFilter found=1
+K32T ROUTE kernel32.dll!GetStartupInfoW found=1
+K32T ROUTE kernel32.dll!IsProcessorFeaturePresent found=1
+K32T ROUTE kernel32.dll!InitializeSListHead found=1
+K32T ROUTE kernel32.dll!GetCurrentProcess found=1
+K32T ROUTE kernel32.dll!TerminateProcess found=1
+K32T ROUTE kernel32.dll!GetFileType found=1
+K32T ROUTE kernel32.dll!RtlUnwindEx found=1
+K32T ROUTE kernel32.dll!RtlPcToFileHeader found=1
+K32T ROUTE kernel32.dll!InterlockedFlushSList found=1
+K32T ROUTE kernel32.dll!SetLastError found=1
+K32T ROUTE kernel32.dll!TlsGetValue found=1
+K32T ROUTE kernel32.dll!TlsSetValue found=1
+K32T ROUTE kernel32.dll!LoadLibraryExW found=1
+K32T ROUTE kernel32.dll!EncodePointer found=1
+K32T ROUTE kernel32.dll!GetModuleHandleExW found=1
+K32T ROUTE kernel32.dll!ExitProcess found=1
+K32T ROUTE kernel32.dll!GetModuleFileNameW found=1
+K32T ROUTE kernel32.dll!HeapAlloc found=1
+K32T ROUTE kernel32.dll!HeapFree found=1
+K32T ROUTE kernel32.dll!LCMapStringW found=1
+K32T ROUTE kernel32.dll!GetStdHandle found=1
+WXL mapped LocalState PE relocations=808 imports=122 delta=0x1e082f90000
+WXL VirtualProtectFromApp rva=0x0 size=0x3a000 old=0x4 new=0x1 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1000 size=0x22000 old=0x1 new=0x20 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x23000 size=0x10000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x33000 size=0x3000 old=0x1 new=0x4 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x36000 size=0x2000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x38000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x39000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+MLP mapped: TLS/unwind/load-config retained but NOT initialized; entry NOT called
+MLP SUMMARY image=baselib.dll dll=api-ms-win-core-synch-l1-2-0.dll resolved=3 stubbed=0 first-missing=none
+MLP SUMMARY image=baselib.dll dll=kernel32.dll resolved=97 stubbed=0 first-missing=none
+MLP SUMMARY image=baselib.dll dll=ws2_32.dll resolved=22 stubbed=0 first-missing=none
+K32T SUMMARY kernel32 missing=0 resolved=97
+MLP IMAGE UnityPlayer.dll
+WXL VirtualAllocFromApp initial=0x4 (RW)
+K32T ROUTE kernel32.dll!ResumeThread found=1
+K32T ROUTE kernel32.dll!RtlVirtualUnwind found=1
+K32T ROUTE kernel32.dll!ReadProcessMemory found=1
+K32T ROUTE kernel32.dll!CreateWaitableTimerExW found=1
+K32T ROUTE kernel32.dll!SetWaitableTimer found=1
+K32T ROUTE kernel32.dll!WaitForSingleObjectEx found=1
+K32T ROUTE kernel32.dll!SleepEx found=1
+K32T ROUTE kernel32.dll!SetThreadDescription found=1
+K32T ROUTE kernel32.dll!GetLogicalProcessorInformationEx found=1
+K32T ROUTE kernel32.dll!LocalFree found=1
+K32T ROUTE kernel32.dll!K32GetProcessMemoryInfo found=1
+K32T ROUTE kernel32.dll!Thread32First found=1
+K32T ROUTE kernel32.dll!Thread32Next found=1
+K32T ROUTE kernel32.dll!GetNativeSystemInfo found=1
+K32T ROUTE kernel32.dll!VirtualQuery found=1
+K32T ROUTE kernel32.dll!GetSystemInfo found=1
+K32T ROUTE kernel32.dll!CreateThread found=1
+K32T ROUTE kernel32.dll!SetThreadPriority found=1
+K32T ROUTE kernel32.dll!GetThreadPriority found=1
+K32T ROUTE kernel32.dll!GetCurrentThreadId found=1
+K32T ROUTE kernel32.dll!SwitchToThread found=1
+K32T ROUTE kernel32.dll!LocalAlloc found=1
+K32T ROUTE kernel32.dll!CreateEventW found=1
+K32T ROUTE kernel32.dll!SetUnhandledExceptionFilter found=1
+K32T ROUTE kernel32.dll!SetErrorMode found=1
+K32T ROUTE kernel32.dll!GetErrorMode found=1
+K32T ROUTE kernel32.dll!OutputDebugStringW found=1
+K32T ROUTE kernel32.dll!GetCommandLineW found=1
+K32T ROUTE kernel32.dll!InitializeProcThreadAttributeList found=1
+K32T ROUTE kernel32.dll!HeapAlloc found=1
+K32T ROUTE kernel32.dll!GetProcessHeap found=1
+K32T ROUTE kernel32.dll!UpdateProcThreadAttribute found=1
+K32T ROUTE kernel32.dll!DeleteProcThreadAttributeList found=1
+K32T ROUTE kernel32.dll!HeapFree found=1
+K32T ROUTE kernel32.dll!CreateProcessW found=1
+K32T ROUTE kernel32.dll!CreatePipe found=1
+K32T ROUTE kernel32.dll!FlushFileBuffers found=1
+K32T ROUTE kernel32.dll!GetProcessId found=1
+K32T ROUTE kernel32.dll!WaitForMultipleObjects found=1
+K32T ROUTE kernel32.dll!GetExitCodeProcess found=1
+K32T ROUTE kernel32.dll!WriteFile found=1
+K32T ROUTE kernel32.dll!VirtualAlloc found=1
+K32T ROUTE kernel32.dll!VirtualProtect found=1
+K32T ROUTE kernel32.dll!VirtualFree found=1
+K32T ROUTE kernel32.dll!GetFileAttributesExW found=1
+K32T ROUTE kernel32.dll!CreateFileW found=1
+K32T ROUTE kernel32.dll!CreateDirectoryW found=1
+K32T ROUTE kernel32.dll!DeleteFileW found=1
+K32T ROUTE kernel32.dll!RemoveDirectoryW found=1
+K32T ROUTE kernel32.dll!SetFileAttributesW found=1
+K32T ROUTE kernel32.dll!CopyFileW found=1
+K32T ROUTE kernel32.dll!MoveFileExW found=1
+K32T ROUTE kernel32.dll!FindFirstFileExW found=1
+K32T ROUTE kernel32.dll!FindFirstFileW found=1
+K32T ROUTE kernel32.dll!FindNextFileW found=1
+K32T ROUTE kernel32.dll!FindClose found=1
+K32T ROUTE kernel32.dll!SetFilePointerEx found=1
+K32T ROUTE kernel32.dll!SetFilePointer found=1
+K32T ROUTE kernel32.dll!ReadFile found=1
+K32T ROUTE kernel32.dll!SetEndOfFile found=1
+K32T ROUTE kernel32.dll!GetFileSizeEx found=1
+K32T ROUTE kernel32.dll!GetTempFileNameW found=1
+K32T ROUTE kernel32.dll!ReplaceFileW found=1
+K32T ROUTE kernel32.dll!GetFullPathNameW found=1
+K32T ROUTE kernel32.dll!GetSystemTime found=1
+K32T ROUTE kernel32.dll!SystemTimeToFileTime found=1
+K32T ROUTE kernel32.dll!SetFileTime found=1
+K32T ROUTE kernel32.dll!GetDiskFreeSpaceExW found=1
+K32T ROUTE kernel32.dll!CreateMutexA found=1
+K32T ROUTE kernel32.dll!GetSystemTimeAsFileTime found=1
+K32T ROUTE kernel32.dll!ExpandEnvironmentStringsW found=1
+K32T ROUTE kernel32.dll!GetCurrentDirectoryW found=1
+K32T ROUTE kernel32.dll!DebugBreak found=1
+K32T ROUTE kernel32.dll!GetOverlappedResult found=1
+K32T ROUTE kernel32.dll!ResetEvent found=1
+K32T ROUTE kernel32.dll!CancelIo found=1
+K32T ROUTE kernel32.dll!FormatMessageA found=1
+K32T ROUTE kernel32.dll!GetWindowsDirectoryW found=1
+K32T ROUTE kernel32.dll!InitializeCriticalSection found=1
+K32T ROUTE kernel32.dll!QueryPerformanceFrequency found=1
+K32T ROUTE kernel32.dll!EnterCriticalSection found=1
+K32T ROUTE kernel32.dll!LeaveCriticalSection found=1
+K32T ROUTE kernel32.dll!GetCurrentDirectoryA found=1
+K32T ROUTE kernel32.dll!GetLocalTime found=1
+K32T ROUTE kernel32.dll!GetTimeZoneInformation found=1
+K32T ROUTE kernel32.dll!ReleaseSemaphore found=1
+K32T ROUTE kernel32.dll!CreateSemaphoreExW found=1
+K32T ROUTE kernel32.dll!SuspendThread found=1
+K32T ROUTE kernel32.dll!CloseHandle found=1
+K32T ROUTE kernel32.dll!IsDebuggerPresent found=1
+K32T ROUTE kernel32.dll!InitializeCriticalSectionAndSpinCount found=1
+K32T ROUTE kernel32.dll!GetStdHandle found=1
+K32T ROUTE kernel32.dll!SetThreadAffinityMask found=1
+K32T ROUTE kernel32.dll!GetDateFormatW found=1
+K32T ROUTE kernel32.dll!ExitThread found=1
+K32T ROUTE kernel32.dll!InitializeSListHead found=1
+K32T ROUTE kernel32.dll!InterlockedPopEntrySList found=1
+K32T ROUTE kernel32.dll!InterlockedPushEntrySList found=1
+K32T ROUTE kernel32.dll!InterlockedFlushSList found=1
+K32T ROUTE kernel32.dll!GetFileSize found=1
+K32T ROUTE kernel32.dll!CreateWaitableTimerA found=1
+K32T ROUTE kernel32.dll!ReleaseSRWLockExclusive found=1
+K32T ROUTE kernel32.dll!AcquireSRWLockExclusive found=1
+K32T ROUTE kernel32.dll!InitializeCriticalSectionEx found=1
+K32T ROUTE kernel32.dll!GetSystemDirectoryW found=1
+K32T ROUTE kernel32.dll!LoadLibraryExA found=1
+K32T ROUTE kernel32.dll!InitOnceComplete found=1
+K32T ROUTE kernel32.dll!InitOnceBeginInitialize found=1
+K32T ROUTE kernel32.dll!InitializeSRWLock found=1
+K32T ROUTE kernel32.dll!TryAcquireSRWLockExclusive found=1
+K32T ROUTE kernel32.dll!EncodePointer found=1
+K32T ROUTE kernel32.dll!DecodePointer found=1
+K32T ROUTE kernel32.dll!LCMapStringEx found=1
+K32T ROUTE kernel32.dll!GetCPInfo found=1
+K32T ROUTE kernel32.dll!FlsAlloc found=1
+K32T ROUTE kernel32.dll!FlsGetValue found=1
+K32T ROUTE kernel32.dll!FlsSetValue found=1
+K32T ROUTE kernel32.dll!FlsFree found=1
+K32T ROUTE kernel32.dll!QueryPerformanceCounter found=1
+K32T ROUTE kernel32.dll!VerifyVersionInfoW found=1
+K32T ROUTE kernel32.dll!VerSetConditionMask found=1
+K32T ROUTE kernel32.dll!LoadLibraryA found=1
+K32T ROUTE kernel32.dll!GetCurrentProcess found=1
+K32T ROUTE kernel32.dll!TerminateProcess found=1
+K32T ROUTE kernel32.dll!SetConsoleCtrlHandler found=1
+K32T ROUTE kernel32.dll!WaitForSingleObject found=1
+K32T ROUTE kernel32.dll!CompareStringW found=1
+K32T ROUTE kernel32.dll!LCMapStringW found=1
+K32T ROUTE kernel32.dll!GetLocaleInfoW found=1
+K32T ROUTE kernel32.dll!IsValidLocale found=1
+K32T ROUTE kernel32.dll!GetUserDefaultLCID found=1
+K32T ROUTE kernel32.dll!EnumSystemLocalesW found=1
+K32T ROUTE kernel32.dll!SetStdHandle found=1
+K32T ROUTE kernel32.dll!IsValidCodePage found=1
+K32T ROUTE kernel32.dll!GetACP found=1
+K32T ROUTE kernel32.dll!GetOEMCP found=1
+K32T ROUTE kernel32.dll!GetCommandLineA found=1
+K32T ROUTE kernel32.dll!GetEnvironmentStringsW found=1
+K32T ROUTE kernel32.dll!FreeEnvironmentStringsW found=1
+K32T ROUTE kernel32.dll!SetEnvironmentVariableW found=1
+K32T ROUTE kernel32.dll!WriteConsoleW found=1
+K32T ROUTE kernel32.dll!GetEnvironmentVariableA found=1
+K32T ROUTE kernel32.dll!GetTimeFormatW found=1
+K32T ROUTE kernel32.dll!GetFileAttributesA found=1
+K32T ROUTE kernel32.dll!GetModuleFileNameA found=1
+K32T ROUTE kernel32.dll!GetComputerNameW found=1
+K32T ROUTE kernel32.dll!CreateFileA found=1
+K32T ROUTE kernel32.dll!GetSystemDirectoryA found=1
+K32T ROUTE kernel32.dll!GetUserDefaultLocaleName found=1
+K32T ROUTE kernel32.dll!GetTempPathW found=1
+K32T ROUTE kernel32.dll!CreateToolhelp32Snapshot found=1
+K32T ROUTE kernel32.dll!GlobalMemoryStatusEx found=1
+K32T ROUTE kernel32.dll!GetSystemPowerStatus found=1
+K32T ROUTE kernel32.dll!GetThreadContext found=1
+K32T ROUTE kernel32.dll!RtlCaptureContext found=1
+K32T ROUTE kernel32.dll!TlsAlloc found=1
+K32T ROUTE kernel32.dll!GetCurrentThread found=1
+K32T ROUTE kernel32.dll!GlobalAlloc found=1
+K32T ROUTE kernel32.dll!GlobalUnlock found=1
+K32T ROUTE kernel32.dll!GlobalLock found=1
+K32T ROUTE kernel32.dll!Sleep found=1
+K32T ROUTE kernel32.dll!GetModuleHandleA found=1
+K32T ROUTE kernel32.dll!WaitForMultipleObjectsEx found=1
+K32T ROUTE kernel32.dll!CreateEventExW found=1
+K32T ROUTE kernel32.dll!AttachConsole found=1
+K32T ROUTE kernel32.dll!SetEvent found=1
+K32T ROUTE kernel32.dll!OpenThread found=1
+K32T ROUTE kernel32.dll!CreateEventA found=1
+K32T ROUTE kernel32.dll!GetStartupInfoA found=1
+K32T ROUTE kernel32.dll!DeleteCriticalSection found=1
+K32T ROUTE kernel32.dll!SetLastError found=1
+K32T ROUTE kernel32.dll!GetFileAttributesW found=1
+K32T ROUTE kernel32.dll!GetModuleFileNameW found=1
+K32T ROUTE kernel32.dll!RaiseException found=1
+K32T ROUTE kernel32.dll!GetModuleHandleW found=1
+K32T ROUTE kernel32.dll!SetHandleInformation found=1
+K32T ROUTE kernel32.dll!FormatMessageW found=1
+K32T ROUTE kernel32.dll!GetProcAddress found=1
+K32T ROUTE kernel32.dll!FreeLibrary found=1
+K32T ROUTE kernel32.dll!LoadLibraryW found=1
+K32T ROUTE kernel32.dll!SetDllDirectoryW found=1
+K32T ROUTE kernel32.dll!GetDriveTypeW found=1
+K32T ROUTE kernel32.dll!ReadConsoleW found=1
+K32T ROUTE kernel32.dll!GetFileType found=1
+K32T ROUTE kernel32.dll!FreeLibraryAndExitThread found=1
+K32T ROUTE kernel32.dll!GetConsoleMode found=1
+K32T ROUTE kernel32.dll!GetConsoleOutputCP found=1
+K32T ROUTE kernel32.dll!DuplicateHandle found=1
+K32T ROUTE kernel32.dll!GetModuleHandleExW found=1
+K32T ROUTE kernel32.dll!ExitProcess found=1
+K32T ROUTE kernel32.dll!HeapQueryInformation found=1
+K32T ROUTE kernel32.dll!HeapReAlloc found=1
+K32T ROUTE kernel32.dll!HeapSize found=1
+K32T ROUTE kernel32.dll!LoadLibraryExW found=1
+K32T ROUTE kernel32.dll!RtlUnwind found=1
+K32T ROUTE kernel32.dll!RtlPcToFileHeader found=1
+K32T ROUTE kernel32.dll!RtlUnwindEx found=1
+K32T ROUTE kernel32.dll!IsProcessorFeaturePresent found=1
+K32T ROUTE kernel32.dll!GetStartupInfoW found=1
+K32T ROUTE kernel32.dll!UnhandledExceptionFilter found=1
+K32T ROUTE kernel32.dll!GetStringTypeW found=1
+K32T ROUTE kernel32.dll!WideCharToMultiByte found=1
+K32T ROUTE kernel32.dll!MultiByteToWideChar found=1
+K32T ROUTE kernel32.dll!GetLastError found=1
+K32T ROUTE kernel32.dll!TlsGetValue found=1
+K32T ROUTE kernel32.dll!TlsSetValue found=1
+K32T ROUTE kernel32.dll!GetFileInformationByHandle found=1
+K32T ROUTE kernel32.dll!PeekNamedPipe found=1
+K32T ROUTE kernel32.dll!SystemTimeToTzSpecificLocalTime found=1
+K32T ROUTE kernel32.dll!TlsFree found=1
+K32T ROUTE kernel32.dll!FileTimeToSystemTime found=1
+MLP MISSING user32.dll!GetRawInputData route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetRawInputBuffer route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!EnumDisplaySettingsA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetDC route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!TranslateMessage route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SystemParametersInfoW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!UnregisterDeviceNotification route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetWindowLongA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!LoadIconW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetWindowPlacement route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!AdjustWindowRectEx route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetForegroundWindow route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!EnumDisplaySettingsW route=uwph return=0 error=120 probe-only
+K32T SYSTEM user32.dll!PtInRect
+MLP MISSING user32.dll!GetWindowLongA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!DispatchMessageA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!RegisterDeviceNotificationW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetCapture route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!ReleaseCapture route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!DestroyIcon route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!DestroyCursor route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetCursor route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!LoadCursorA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!LoadImageW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetRawInputDeviceList route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!RegisterRawInputDevices route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetKeyNameTextW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!MapVirtualKeyW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!ToUnicode route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetKeyboardLayoutNameW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!MapVirtualKeyA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetKeyState route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetMessageExtraInfo route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetRawInputDeviceInfoW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetKeyboardLayout route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!MapVirtualKeyExA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetAsyncKeyState route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!ScreenToClient route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!TrackMouseEvent route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetSystemMetrics route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!RegisterClassExW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!DialogBoxParamW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!EndDialog route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetDlgItemTextW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetDlgItemTextA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SendDlgItemMessageW route=uwph return=0 error=120 probe-only
+K32T SYSTEM user32.dll!OffsetRect
+K32T SYSTEM user32.dll!CopyRect
+MLP MISSING user32.dll!SendMessageTimeoutA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetForegroundWindow route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!EnumWindows route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetUserObjectInformationA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetThreadDesktop route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!RegisterWindowMessageA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!AllowSetForegroundWindow route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetClipboardData route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!EmptyClipboard route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!CloseClipboard route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetClipboardData route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!IsClipboardFormatAvailable route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!OpenClipboard route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!ReleaseDC route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetDesktopWindow route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!DisplayConfigGetDeviceInfo route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!QueryDisplayConfig route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetDisplayConfigBufferSizes route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!UpdateWindow route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SendMessageW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetMessageA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetWindowTextW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!DragDetect route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!ShowWindow route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetActiveWindow route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetParent route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!ValidateRect route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!IsIconic route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!MonitorFromRect route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetWindowLongPtrA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!IsWindowVisible route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetWindowPos route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!EnumDisplayMonitors route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!EnumDisplayDevicesA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetMonitorInfoA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!PostQuitMessage route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!DefWindowProcW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetWindowLongPtrW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetWindowLongPtrW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!DestroyWindow route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!UnregisterClassW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!RegisterClassW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetCursorPos route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!ClientToScreen route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!ClipCursor route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!MonitorFromWindow route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!ShowCursor route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetClientRect route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!MoveWindow route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetWindowRect route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetMonitorInfoW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetFocus route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetFocus route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!CreateWindowExW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!KillTimer route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!MessageBoxA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetTimer route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!PeekMessageA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!MsgWaitForMultipleObjects route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetCaretBlinkTime route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetDoubleClickTime route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetCursorPos route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!LoadIconA route=uwph return=0 error=120 probe-only
+MLP SYSTEM version.dll loaded=1 error=0
+MLP SYSTEM ole32.dll loaded=1 error=0
+K32T SYSTEM shlwapi.dll!SHDeleteKeyW
+K32T SYSTEM shlwapi.dll!PathCanonicalizeW
+K32T SYSTEM setupapi.dll!SetupDiEnumDeviceInterfaces
+K32T SYSTEM setupapi.dll!SetupDiGetClassDevsA
+K32T SYSTEM setupapi.dll!SetupDiGetDeviceInterfaceDetailW
+K32T SYSTEM setupapi.dll!SetupDiEnumDeviceInfo
+K32T SYSTEM setupapi.dll!SetupDiDestroyDeviceInfoList
+MLP SYSTEM advapi32.dll loaded=1 error=0
+MLP STUB gdi32.dll!ChoosePixelFormat route=stub return=0 error=120 probe-only
+MLP STUB gdi32.dll!SetPixelFormat route=stub return=0 error=120 probe-only
+MLP STUB gdi32.dll!GetDeviceCaps route=stub return=0 error=120 probe-only
+MLP STUB gdi32.dll!SwapBuffers route=stub return=0 error=120 probe-only
+K32T SYSTEM shell32.dll!SHGetKnownFolderPath
+K32T SYSTEM shell32.dll!ShellExecuteW
+K32T SYSTEM shell32.dll!SHGetFolderPathW
+MLP STUB shell32.dll!SHFileOperationW route=stub return=0 error=120 probe-only
+K32T SYSTEM shell32.dll!CommandLineToArgvW
+MLP STUB opengl32.dll!wglGetProcAddress route=stub return=0 error=120 probe-only
+MLP STUB opengl32.dll!wglDeleteContext route=stub return=0 error=120 probe-only
+MLP STUB opengl32.dll!wglMakeCurrent route=stub return=0 error=120 probe-only
+MLP STUB opengl32.dll!wglGetCurrentDC route=stub return=0 error=120 probe-only
+MLP STUB opengl32.dll!wglCreateContext route=stub return=0 error=120 probe-only
+MLP STUB opengl32.dll!wglGetCurrentContext route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveInOpen route=stub return=0 error=120 probe-only
+K32T SYSTEM winmm.dll!waveInGetDevCapsW
+MLP STUB winmm.dll!waveInClose route=stub return=0 error=120 probe-only
+K32T SYSTEM winmm.dll!waveInGetNumDevs
+K32T SYSTEM winmm.dll!waveOutGetPosition
+MLP STUB winmm.dll!waveOutReset route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveOutWrite route=stub return=0 error=120 probe-only
+K32T SYSTEM winmm.dll!waveOutUnprepareHeader
+K32T SYSTEM winmm.dll!waveOutPrepareHeader
+MLP STUB winmm.dll!waveOutClose route=stub return=0 error=120 probe-only
+K32T SYSTEM winmm.dll!timeBeginPeriod
+K32T SYSTEM winmm.dll!timeEndPeriod
+K32T SYSTEM winmm.dll!waveInPrepareHeader
+K32T SYSTEM winmm.dll!waveInStart
+K32T SYSTEM winmm.dll!waveInUnprepareHeader
+K32T SYSTEM winmm.dll!waveInAddBuffer
+K32T SYSTEM winmm.dll!waveInGetDevCapsA
+MLP STUB winmm.dll!waveOutOpen route=stub return=0 error=120 probe-only
+K32T SYSTEM winmm.dll!waveOutGetDevCapsW
+K32T SYSTEM winmm.dll!waveOutGetDevCapsA
+K32T SYSTEM winmm.dll!waveOutGetNumDevs
+K32T SYSTEM winmm.dll!timeGetTime
+MLP STUB winmm.dll!waveInReset route=stub return=0 error=120 probe-only
+MLP SYSTEM oleaut32.dll loaded=1 error=0
+MLP STUB imm32.dll!ImmSetCompositionStringW route=stub return=0 error=120 probe-only
+MLP STUB imm32.dll!ImmNotifyIME route=stub return=0 error=120 probe-only
+MLP STUB imm32.dll!ImmGetCompositionStringW route=stub return=0 error=120 probe-only
+MLP STUB imm32.dll!ImmAssociateContextEx route=stub return=0 error=120 probe-only
+MLP STUB imm32.dll!ImmAssociateContext route=stub return=0 error=120 probe-only
+MLP STUB imm32.dll!ImmGetConversionStatus route=stub return=0 error=120 probe-only
+MLP STUB imm32.dll!ImmReleaseContext route=stub return=0 error=120 probe-only
+MLP STUB imm32.dll!ImmGetContext route=stub return=0 error=120 probe-only
+MLP SYSTEM winhttp.dll loaded=1 error=0
+MLP SYSTEM bcrypt.dll loaded=1 error=0
+K32T SYSTEM hid.dll!HidP_GetData
+K32T SYSTEM hid.dll!HidP_MaxDataListLength
+K32T SYSTEM hid.dll!HidD_GetSerialNumberString
+K32T SYSTEM hid.dll!HidD_GetManufacturerString
+K32T SYSTEM hid.dll!HidD_GetProductString
+K32T SYSTEM hid.dll!HidD_FreePreparsedData
+K32T SYSTEM hid.dll!HidD_GetPreparsedData
+K32T SYSTEM hid.dll!HidD_GetHidGuid
+K32T SYSTEM hid.dll!HidP_SetUsages
+K32T SYSTEM hid.dll!HidP_SetUsageValue
+K32T SYSTEM hid.dll!HidP_GetButtonCaps
+K32T SYSTEM hid.dll!HidP_GetValueCaps
+K32T SYSTEM hid.dll!HidD_GetAttributes
+K32T SYSTEM hid.dll!HidP_GetCaps
+MLP SYSTEM api-ms-win-core-winrt-l1-1-0.dll loaded=1 error=0
+MLP SYSTEM api-ms-win-core-winrt-string-l1-1-0.dll loaded=1 error=0
+MLP SYSTEM d3d11.dll loaded=1 error=0
+MLP SYSTEM dxgi.dll loaded=1 error=0
+MLP SYSTEM crypt32.dll loaded=1 error=0
+MLP SYSTEM dwmapi.dll loaded=1 error=0
+MLP SYSTEM d3d12.dll loaded=1 error=0
+WXL mapped LocalState PE relocations=59761 imports=513 delta=0x1e086e00000
+WXL VirtualProtectFromApp rva=0x0 size=0x1e46000 old=0x4 new=0x1 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1000 size=0x17f4000 old=0x1 new=0x20 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x17f5000 size=0x3cb000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1bc0000 size=0x13f000 old=0x1 new=0x4 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1cff000 size=0x115000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1e14000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1e15000 size=0x12000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1e27000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1e28000 size=0x1e000 old=0x1 new=0x2 ok=1 err=0
+MLP mapped: TLS/unwind/load-config retained but NOT initialized; entry NOT called
+MLP SUMMARY image=UnityPlayer.dll dll=advapi32.dll resolved=21 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=api-ms-win-core-synch-l1-2-0.dll resolved=3 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=api-ms-win-core-winrt-l1-1-0.dll resolved=4 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=api-ms-win-core-winrt-string-l1-1-0.dll resolved=6 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=bcrypt.dll resolved=1 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=crypt32.dll resolved=7 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=d3d11.dll resolved=2 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=d3d12.dll resolved=3 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=dwmapi.dll resolved=2 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=dxgi.dll resolved=2 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=gdi32.dll resolved=0 stubbed=4 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=hid.dll resolved=14 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=imm32.dll resolved=0 stubbed=8 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=kernel32.dll resolved=215 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=ole32.dll resolved=12 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=oleaut32.dll resolved=5 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=opengl32.dll resolved=0 stubbed=6 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=setupapi.dll resolved=5 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=shell32.dll resolved=4 stubbed=1 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=shlwapi.dll resolved=2 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=user32.dll resolved=3 stubbed=108 first-missing=GetRawInputData
+MLP SUMMARY image=UnityPlayer.dll dll=version.dll resolved=3 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=winhttp.dll resolved=4 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=winmm.dll resolved=16 stubbed=7 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=ws2_32.dll resolved=45 stubbed=0 first-missing=none
+K32T SUMMARY kernel32 missing=0 resolved=215
+MLP IMAGE Megabonk.exe
+WXL VirtualAllocFromApp initial=0x4 (RW)
+K32T ROUTE kernel32.dll!CloseHandle found=1
+K32T ROUTE kernel32.dll!QueryPerformanceCounter found=1
+K32T ROUTE kernel32.dll!GetCurrentThreadId found=1
+K32T ROUTE kernel32.dll!GetSystemTimeAsFileTime found=1
+K32T ROUTE kernel32.dll!InitializeSListHead found=1
+K32T ROUTE kernel32.dll!RtlCaptureContext found=1
+K32T ROUTE kernel32.dll!RtlVirtualUnwind found=1
+K32T ROUTE kernel32.dll!IsDebuggerPresent found=1
+K32T ROUTE kernel32.dll!UnhandledExceptionFilter found=1
+K32T ROUTE kernel32.dll!SetUnhandledExceptionFilter found=1
+K32T ROUTE kernel32.dll!GetStartupInfoW found=1
+K32T ROUTE kernel32.dll!IsProcessorFeaturePresent found=1
+K32T ROUTE kernel32.dll!GetModuleHandleW found=1
+K32T ROUTE kernel32.dll!CreateFileW found=1
+K32T ROUTE kernel32.dll!RtlUnwindEx found=1
+K32T ROUTE kernel32.dll!GetLastError found=1
+K32T ROUTE kernel32.dll!SetLastError found=1
+K32T ROUTE kernel32.dll!EnterCriticalSection found=1
+K32T ROUTE kernel32.dll!LeaveCriticalSection found=1
+K32T ROUTE kernel32.dll!DeleteCriticalSection found=1
+K32T ROUTE kernel32.dll!InitializeCriticalSectionAndSpinCount found=1
+K32T ROUTE kernel32.dll!TlsAlloc found=1
+K32T ROUTE kernel32.dll!TlsGetValue found=1
+K32T ROUTE kernel32.dll!TlsSetValue found=1
+K32T ROUTE kernel32.dll!TlsFree found=1
+K32T ROUTE kernel32.dll!FreeLibrary found=1
+K32T ROUTE kernel32.dll!GetProcAddress found=1
+K32T ROUTE kernel32.dll!LoadLibraryExW found=1
+K32T ROUTE kernel32.dll!EncodePointer found=1
+K32T ROUTE kernel32.dll!RaiseException found=1
+K32T ROUTE kernel32.dll!RtlPcToFileHeader found=1
+K32T ROUTE kernel32.dll!GetStdHandle found=1
+K32T ROUTE kernel32.dll!WriteFile found=1
+K32T ROUTE kernel32.dll!GetModuleFileNameW found=1
+K32T ROUTE kernel32.dll!GetCurrentProcess found=1
+K32T ROUTE kernel32.dll!ExitProcess found=1
+K32T ROUTE kernel32.dll!TerminateProcess found=1
+K32T ROUTE kernel32.dll!GetModuleHandleExW found=1
+K32T ROUTE kernel32.dll!WriteConsoleW found=1
+K32T ROUTE kernel32.dll!HeapAlloc found=1
+K32T ROUTE kernel32.dll!HeapFree found=1
+K32T ROUTE kernel32.dll!FindClose found=1
+K32T ROUTE kernel32.dll!FindFirstFileExW found=1
+K32T ROUTE kernel32.dll!FindNextFileW found=1
+K32T ROUTE kernel32.dll!IsValidCodePage found=1
+K32T ROUTE kernel32.dll!GetACP found=1
+K32T ROUTE kernel32.dll!GetOEMCP found=1
+K32T ROUTE kernel32.dll!GetCPInfo found=1
+K32T ROUTE kernel32.dll!GetCommandLineA found=1
+K32T ROUTE kernel32.dll!GetCommandLineW found=1
+K32T ROUTE kernel32.dll!MultiByteToWideChar found=1
+K32T ROUTE kernel32.dll!WideCharToMultiByte found=1
+K32T ROUTE kernel32.dll!GetEnvironmentStringsW found=1
+K32T ROUTE kernel32.dll!FreeEnvironmentStringsW found=1
+K32T ROUTE kernel32.dll!SetStdHandle found=1
+K32T ROUTE kernel32.dll!GetFileType found=1
+K32T ROUTE kernel32.dll!GetStringTypeW found=1
+K32T ROUTE kernel32.dll!FlsAlloc found=1
+K32T ROUTE kernel32.dll!FlsGetValue found=1
+K32T ROUTE kernel32.dll!FlsSetValue found=1
+K32T ROUTE kernel32.dll!FlsFree found=1
+K32T ROUTE kernel32.dll!LCMapStringW found=1
+K32T ROUTE kernel32.dll!GetProcessHeap found=1
+K32T ROUTE kernel32.dll!HeapSize found=1
+K32T ROUTE kernel32.dll!HeapReAlloc found=1
+K32T ROUTE kernel32.dll!FlushFileBuffers found=1
+K32T ROUTE kernel32.dll!GetConsoleOutputCP found=1
+K32T ROUTE kernel32.dll!GetConsoleMode found=1
+K32T ROUTE kernel32.dll!SetFilePointerEx found=1
+WXL mapped LocalState PE relocations=777 imports=72 delta=0x1e0c5000000
+WXL VirtualProtectFromApp rva=0x0 size=0xa8000 old=0x4 new=0x1 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1000 size=0xd000 old=0x1 new=0x20 ok=1 err=0
+WXL VirtualProtectFromApp rva=0xe000 size=0xa000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x18000 size=0x2000 old=0x1 new=0x4 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1a000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1b000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1c000 size=0x8b000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0xa7000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+MLP mapped: TLS/unwind/load-config retained but NOT initialized; entry NOT called
+MLP SUMMARY image=Megabonk.exe dll=kernel32.dll resolved=71 stubbed=0 first-missing=none
+MLP SUMMARY image=Megabonk.exe dll=unityplayer.dll resolved=1 stubbed=0 first-missing=none
+K32T SUMMARY kernel32 missing=0 resolved=71
+MLP-PROBE-DONE no guest code executed; TLS/unwind deferred; zero RWX requested

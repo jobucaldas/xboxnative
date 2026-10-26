@@ -1,0 +1,95 @@
+[   0.016] boot: Initialize (pid=4788)
+[   0.077] SetWindow bounds=1920x1080
+[   0.079] Activated kind=0 (activation args ignored)
+[   0.080] Run: entering
+[   0.081] loaded separate host and test PE DLLs, ABI v1
+[   0.081] PASS CreateFile2 err=0
+[   0.082] PASS WriteFile err=0
+[   0.083] PASS FlushFileBuffers err=0
+[   0.083] PASS GetFileSizeEx err=0
+[   0.083] PASS SetFilePointerEx err=0
+[   0.083] PASS ReadFile err=0
+[   0.083] PASS CloseHandle err=0
+[   0.083] PASS GetFileAttributesW err=0
+[   0.084] PASS MoveFileExW err=0
+[   0.084] PASS DeleteFileW err=0
+[   0.084] PASS CreateDirectoryW err=0
+[   0.084] PASS RemoveDirectoryW err=0
+[   0.084] PASS missing file error err=2
+[   0.084] PASS GetCurrentProcessId err=0
+[   0.084] PASS GetCurrentThreadId err=0
+[   0.084] PASS CreateThread err=0
+[   0.085] PASS thread join err=0
+[   0.085] PASS CloseHandle err=0
+[   0.085] PASS CreateEventExW err=0
+[   0.085] PASS event timeout err=0
+[   0.085] PASS SetEvent err=0
+[   0.085] PASS event wait err=0
+[   0.085] PASS ResetEvent err=0
+[   0.086] PASS CloseHandle err=0
+[   0.086] PASS CreateMutexExW err=0
+[   0.086] PASS mutex wait err=0
+[   0.086] PASS ReleaseMutex err=0
+[   0.086] PASS CloseHandle err=0
+[   0.086] PASS CreateSemaphoreExW err=0
+[   0.086] PASS ReleaseSemaphore err=0
+[   0.086] PASS semaphore wait err=0
+[   0.086] PASS CloseHandle err=0
+[   0.086] PASS TlsAlloc err=0
+[   0.086] PASS TlsSetValue err=0
+[   0.086] PASS TlsGetValue err=0
+[   0.086] PASS TlsFree err=0
+[   0.086] PASS QueryPerformanceFrequency err=0
+[   0.086] PASS QueryPerformanceCounter err=0
+[   0.107] PASS GetTickCount64/Sleep err=0
+[   0.107] PASS CreateProcess clean failure err=5
+[   0.107] PASS RWX allocation refused err=5
+[   0.107] PASS VirtualAllocFromApp RW err=0
+[   0.107] PASS VirtualQuery err=0
+[   0.107] PASS VirtualProtectFromApp RX err=0
+[   0.107] PASS FlushInstructionCache err=0
+[   0.107] PASS execute RX value=42 err=0
+[   0.107] PASS VirtualFree err=0
+[   0.107] PASS invalid opcode rejected err=0
+[   0.107] PASS Wine10 system_time_precise err=0
+[   0.107] PASS Wine10 dbg_write byte count err=0
+[   0.107] PASS Wine10 server call unsupported err=0
+[   0.107] PASS invalid handle rejected err=0
+[   0.107] WS two-thread sync begin (main + native worker)
+[   0.107] PASS WS CreateEventW ready/go/done err=0
+[   0.107] PASS WS DuplicateHandle distinct entry err=0
+[   0.107] PASS WS close original err=0
+[   0.107] PASS WS stale handle rejected err=6
+[   0.107] PASS WS CreateThread err=0
+[   0.107] PASS WS worker ready WaitForSingleObject err=0
+[   0.107] WS sequence: worker ready; main signals duplicated go handle
+[   0.107] PASS WS SetEvent duplicate survives close err=0
+[   0.108] PASS WS WaitForMultipleObjects all err=0
+[   0.108] WS sequence: worker received go; done and thread signaled
+[   0.108] PASS WS auto-reset consumed err=0
+[   0.108] PASS WS wait-any index err=0
+[   0.108] PASS WS wrong object type rejected err=6
+[   0.108] PASS WS invalid wait count err=87
+[   0.108] PASS CloseHandle err=0
+[   0.108] PASS WS duplicated thread join err=0
+[   0.108] PASS CloseHandle err=0
+[   0.108] PASS CloseHandle err=0
+[   0.108] PASS CloseHandle err=0
+[   0.108] PASS CloseHandle err=0
+[   0.108] PASS WS double close rejected err=6
+[   0.108] WS two-thread sync end
+[   0.108] checks=71 failures=0
+[   0.108] K32 RESULT failures=0
+[   0.109] WXL VirtualAllocFromApp initial=0x4 (RW)
+[   0.109] WXL mapped LocalState PE relocations=1 imports=3 delta=0x15a77f70000
+[   0.109] WXL VirtualProtectFromApp rva=0x0 size=0x5000 old=0x4 new=0x1 ok=1 err=0
+[   0.109] WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.109] WXL VirtualProtectFromApp rva=0x1000 size=0x1000 old=0x1 new=0x20 ok=1 err=0
+[   0.109] WXL VirtualProtectFromApp rva=0x2000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.109] WXL VirtualProtectFromApp rva=0x3000 size=0x1000 old=0x1 new=0x4 ok=1 err=0
+[   0.109] WXL VirtualProtectFromApp rva=0x4000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.109] WXL-OK 4791
+[   0.109] WXL RESULT entry=42 failures=0
+[   0.174] D3D11CreateDevice hr=0x00000000 fl=0xb000
+[   1.020] CreateSwapChainForCoreWindow hr=0x00000000
+[   1.023] frame=1 t=1.0

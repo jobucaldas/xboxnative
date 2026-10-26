@@ -1,0 +1,32 @@
+xboxnative
+Copyright (C) 2026 the xboxnative authors (see git history).
+Licensed under the GNU General Public License, version 2 or (at your option) any later version. See LICENSE.
+
+This repository contains only original work plus the third-party files listed below. It does NOT contain any
+Boxedwine, Wine, Valve/Steam, Unity or game files, nor any Microsoft SDK/toolchain binaries.
+
+Included third-party files (kept under their own licences)
+  xbox-test/app/qrcodegen.cpp, qrcodegen.hpp   Nayuki QR Code generator library, MIT License,
+                                               Copyright (c) Project Nayuki. Licence text in the file headers.
+  xbox-test/app/font8x8_basic.h                dhepper/font8x8 (Daniel Hepper; based on Marcel Sondaar's font8x8), Public Domain.
+  xbox-test/app/vendor/zlib/                   zlib 1.2.11 (inflate subset), zlib License,
+                                               Copyright (C) 1995-2017 Jean-loup Gailly and Mark Adler. Altered source versions are
+                                               marked in-file where applicable.
+  xbox-test/app/vendor/lzma/                   LZMA SDK LzmaDec (2023-04-07), Igor Pavlov, Public Domain.
+  xbox-test/app/vendor/zstd/zstddeclib.c       Zstandard 1.5.7 single-file decoder, Copyright (c) Meta Platforms, Inc. and affiliates;
+                                               used here under the BSD-style option of its BSD/GPLv2 dual licence.
+                                               (Combined files carry the licence text in their headers.)
+
+External dependencies fetched at build time (never copied here; pinned in deps.pin)
+  Boxedwine (danoon2/Boxedwine)                GPL-2.0-or-later. Only needed for future work reusing its x86 CPU core; not needed
+                                               by the current builds. The future engine integration will make the combined
+                                               program GPL-2.0-or-later, which this repository already is.
+  uwp-crossbuild (gianlucamazza/uwp-crossbuild)  MIT. Build wrapper used by the build scripts (clang-cl/lld-link + xwin).
+  Microsoft Windows SDK/CRT via xwin           Downloaded by the toolchain under Microsoft's own licence terms; never redistributed here.
+
+Reference only (no code copied)
+  Wine (LGPL-2.1-or-later): its *.spec export lists are used as a checklist; research/ and tools/xbox/wine_gap*.py read
+  a local Wine checkout/build to produce coverage tables of function names. No Wine source is included.
+
+Generated data: the Direct3D triangle shader bytecode in xbox-test/uwph/host/shaders/ is compiled from our own
+triangle.hlsl (using Wine's d3dcompiler_47 on a Linux dev machine) and embedded as a byte array; no Wine code ships.

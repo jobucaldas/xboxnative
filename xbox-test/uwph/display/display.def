@@ -1,0 +1,26 @@
+LIBRARY uwph-user32.dll
+EXPORTS
+ RegisterClassExW=u_RegisterClassExW
+ DefWindowProcW=u_DefWindowProcW
+ CreateWindowExW=u_CreateWindowExW
+ PeekMessageW=u_PeekMessageW
+ GetMessageW=u_GetMessageW
+ DispatchMessageW=u_DispatchMessageW
+ TranslateMessage=u_TranslateMessage
+ PostQuitMessage=u_PostQuitMessage
+ PostMessageW=u_PostMessageW
+ GetClientRect=u_GetClientRect
+ ShowWindow=u_ShowWindow
+ DestroyWindow=u_DestroyWindow
+ XInputGetState=u_XInputGetState
+ RegisterClassW=u_RegisterClassW
+ GetActiveWindow=u_GetActiveWindow
+ GetFocus=u_GetFocus
+ GetForegroundWindow=u_GetForegroundWindow
+ GetWindowRect=u_GetWindowRect
+ IsWindowVisible=u_IsWindowVisible
+ ClientToScreen=u_ClientToScreen
+ ScreenToClient=u_ScreenToClient
+ AdjustWindowRectEx=u_AdjustWindowRectEx
+ SetFocus=u_SetFocus
+ SetForegroundWindow=u_SetForegroundWindow

@@ -1,0 +1,6 @@
+98be41f0f2f50221c07dca30ead87fd96cd57a59c62771a706ca4b8b19d2cea4  xbox-test/uwph/display/results/console-0.1.5.log
+db84a6f143dd434108c3104d8d83d7e910df37116263a719c97eb2579723eb54  xbox-test/uwph/display/results/green-frame-0.1.5.png
+ea161168ec6ca5e69553c9b9c00acadf0b8a8440af2210feda171ff86d75be9f  xbox-test/uwph/display/out/w32u.msix
+a985093fcb0766e8c127f42278861f3df5c7b67c530cbe39762b3b4b5854cb3b  xbox-test/uwph/display/out/layout/w32u.exe
+c47b4f02fdb7dbede6650ed82d5da568a4d2dd596b6879e00e8d07409a3cbe00  xbox-test/uwph/display/out/layout/uwph-user32.dll
+78cce88677c77e629942930a667c56ebcf7bb518f1a45a3c20103613094f605f  xbox-test/uwph/display/out/layout/window-test.dll

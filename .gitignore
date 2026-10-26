@@ -1,0 +1,23 @@
+# build output
+out/
+out-*/
+third_party/
+__pycache__/
+*.pyc
+# signing material / secrets: never commit
+*.pfx
+*.key
+*.pem
+*.cer
+.env
+.env.*
+steam_session.bin
+*.token
+# game files and binaries
+*.exe
+*.dll
+*.msix
+*.appx
+*.zip
+runs/
+LANE_NOTES.md

@@ -1,0 +1,739 @@
+MLP PROBE begin; NO entry/DllMain/TLS callbacks; zero RWX; failure placeholders are probe-only
+U32C user32 AdjustWindowRect missing
+U32C user32 AdjustWindowRectEx missing
+U32C user32 AllowSetForegroundWindow implemented
+U32C user32 ClientToScreen implemented
+U32C user32 ClipCursor missing
+U32C user32 CloseClipboard missing
+U32C user32 CopyRect implemented
+U32C user32 CreateIconFromResourceEx missing
+U32C user32 CreateWindowExW implemented
+U32C user32 DefWindowProcW implemented
+U32C user32 DestroyCursor missing
+U32C user32 DestroyIcon missing
+U32C user32 DestroyWindow implemented
+U32C user32 DialogBoxParamA missing
+U32C user32 DialogBoxParamW missing
+U32C user32 DispatchMessageA missing
+U32C user32 DisplayConfigGetDeviceInfo missing
+U32C user32 DragDetect missing
+U32C user32 EmptyClipboard missing
+U32C user32 EndDialog missing
+U32C user32 EnumDisplayDevicesA missing
+U32C user32 EnumDisplayMonitors missing
+U32C user32 EnumDisplaySettingsA missing
+U32C user32 EnumDisplaySettingsW missing
+U32C user32 EnumWindows implemented
+U32C user32 GetActiveWindow missing
+U32C user32 GetAsyncKeyState missing
+U32C user32 GetCaretBlinkTime missing
+U32C user32 GetClientRect implemented
+U32C user32 GetClipboardData missing
+U32C user32 GetCursorPos missing
+U32C user32 GetDC missing
+U32C user32 GetDesktopWindow implemented
+U32C user32 GetDisplayConfigBufferSizes missing
+U32C user32 GetDlgItem implemented
+U32C user32 GetDoubleClickTime missing
+U32C user32 GetFocus missing
+U32C user32 GetForegroundWindow missing
+U32C user32 GetIconInfo missing
+U32C user32 GetKeyNameTextW missing
+U32C user32 GetKeyState missing
+U32C user32 GetKeyboardLayout missing
+U32C user32 GetKeyboardLayoutNameW missing
+U32C user32 GetMessageA missing
+U32C user32 GetMessageExtraInfo missing
+U32C user32 GetMonitorInfoA implemented
+U32C user32 GetMonitorInfoW implemented
+U32C user32 GetParent implemented
+U32C user32 GetRawInputBuffer missing
+U32C user32 GetRawInputData missing
+U32C user32 GetRawInputDeviceInfoW missing
+U32C user32 GetRawInputDeviceList missing
+U32C user32 GetSystemMetrics implemented
+U32C user32 GetThreadDesktop missing
+U32C user32 GetUserObjectInformationA missing
+U32C user32 GetWindowLongA implemented
+U32C user32 GetWindowLongPtrW implemented
+U32C user32 GetWindowPlacement missing
+U32C user32 GetWindowRect implemented
+U32C user32 InflateRect implemented
+U32C user32 IsClipboardFormatAvailable missing
+U32C user32 IsIconic implemented
+U32C user32 IsWindowVisible implemented
+U32C user32 KillTimer missing
+U32C user32 LoadCursorA missing
+U32C user32 LoadIconA missing
+U32C user32 LoadIconW missing
+U32C user32 LoadImageA missing
+U32C user32 LoadImageW missing
+U32C user32 LookupIconIdFromDirectoryEx missing
+U32C user32 MapVirtualKeyA missing
+U32C user32 MapVirtualKeyExA missing
+U32C user32 MapVirtualKeyW missing
+U32C user32 MessageBoxA missing
+U32C user32 MonitorFromRect implemented
+U32C user32 MonitorFromWindow implemented
+U32C user32 MoveWindow implemented
+U32C user32 MsgWaitForMultipleObjects missing
+U32C user32 OffsetRect implemented
+U32C user32 OpenClipboard missing
+U32C user32 PeekMessageA missing
+U32C user32 PostQuitMessage missing
+U32C user32 PtInRect implemented
+U32C user32 QueryDisplayConfig missing
+U32C user32 RegisterClassExW implemented
+U32C user32 RegisterClassW implemented
+U32C user32 RegisterDeviceNotificationW missing
+U32C user32 RegisterRawInputDevices missing
+U32C user32 RegisterWindowMessageA missing
+U32C user32 ReleaseCapture missing
+U32C user32 ReleaseDC missing
+U32C user32 ScreenToClient implemented
+U32C user32 SendDlgItemMessageA missing
+U32C user32 SendDlgItemMessageW implemented
+U32C user32 SendMessageTimeoutA missing
+U32C user32 SendMessageW implemented
+U32C user32 SetCapture missing
+U32C user32 SetClipboardData missing
+U32C user32 SetCursor missing
+U32C user32 SetCursorPos missing
+U32C user32 SetDlgItemTextA missing
+U32C user32 SetDlgItemTextW implemented
+U32C user32 SetFocus missing
+U32C user32 SetForegroundWindow missing
+U32C user32 SetTimer missing
+U32C user32 SetWindowLongA implemented
+U32C user32 SetWindowLongPtrA implemented
+U32C user32 SetWindowLongPtrW implemented
+U32C user32 SetWindowPos missing
+U32C user32 SetWindowTextW implemented
+U32C user32 ShowCursor missing
+U32C user32 ShowWindow implemented
+U32C user32 SystemParametersInfoW missing
+U32C user32 ToUnicode missing
+U32C user32 TrackMouseEvent missing
+U32C user32 TranslateMessage missing
+U32C user32 UnionRect implemented
+U32C user32 UnregisterClassW implemented
+U32C user32 UnregisterDeviceNotification missing
+U32C user32 UpdateWindow missing
+U32C user32 ValidateRect missing
+U32C user32 total=121 implemented=38 missing=83 (complete direct+delay PE set)
+WXL VirtualAllocFromApp initial=0x4 (RW)
+WXL mapped LocalState PE relocations=1 imports=44 delta=0x224dbf90000
+WXL VirtualProtectFromApp rva=0x0 size=0x7000 old=0x4 new=0x1 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1000 size=0x2000 old=0x1 new=0x20 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x3000 size=0x2000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x5000 size=0x1000 old=0x1 new=0x4 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x6000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+MLP mapped: TLS/unwind/load-config retained but NOT initialized; entry NOT called
+U32C mapped regression PE
+U32C RegisterClassExW/CreateWindowExW/GetWindowLongPtrW roundtrip OK
+U32C TEST PASS class/long/property/geometry/lifecycle
+U32C own mapped test entry=42; game entries remain uncalled
+MLP IMAGE baselib.dll
+WXL VirtualAllocFromApp initial=0x4 (RW)
+MLP SYSTEM ws2_32.dll loaded=1 error=0
+MLP SYSTEM api-ms-win-core-synch-l1-2-0.dll loaded=1 error=0
+MLP MISSING kernel32.dll!WriteConsoleW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetStringTypeW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetStdHandle route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetProcessHeap route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FreeEnvironmentStringsW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetEnvironmentStringsW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!WideCharToMultiByte route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!MultiByteToWideChar route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCommandLineW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCommandLineA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCPInfo route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetOEMCP route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetACP route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!IsValidCodePage route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FindNextFileW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FindFirstFileExW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FindClose route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!HeapQueryInformation route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!HeapSize route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!HeapReAlloc route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetConsoleMode route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetConsoleOutputCP route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!ReadFile route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetFileSizeEx route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateSemaphoreExW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!VirtualFree route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!ReleaseSemaphore route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!WriteFile route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!VirtualAlloc route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetEndOfFile route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!WaitForSingleObject route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateFileW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetFileAttributesW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCurrentThreadId route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!ResumeThread route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FormatMessageW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetLastError route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!WaitForSingleObjectEx route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!TlsAlloc route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!QueryPerformanceFrequency route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CloseHandle route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetNativeSystemInfo route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RaiseException route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!LoadLibraryW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateThread route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SwitchToThread route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetProcAddress route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetFilePointerEx route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetThreadId route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetModuleHandleW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FreeLibrary route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!TlsFree route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!QueryPerformanceCounter route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!VirtualQuery route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!IsDebuggerPresent route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FlushFileBuffers route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!Sleep route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FlsAlloc route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FlsGetValue route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FlsSetValue route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FlsFree route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InitializeCriticalSectionEx route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetSystemTimeAsFileTime route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!EnterCriticalSection route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!LeaveCriticalSection route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!DeleteCriticalSection route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InitializeCriticalSectionAndSpinCount route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetEvent route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!ResetEvent route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateEventW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RtlCaptureContext route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RtlVirtualUnwind route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!UnhandledExceptionFilter route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetUnhandledExceptionFilter route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetStartupInfoW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!IsProcessorFeaturePresent route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InitializeSListHead route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCurrentProcess route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!TerminateProcess route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetFileType route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RtlUnwindEx route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RtlPcToFileHeader route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InterlockedFlushSList route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetLastError route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!TlsGetValue route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!TlsSetValue route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!LoadLibraryExW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!EncodePointer route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetModuleHandleExW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!ExitProcess route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetModuleFileNameW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!HeapAlloc route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!HeapFree route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!LCMapStringW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetStdHandle route=uwph return=0 error=120 probe-only
+WXL mapped LocalState PE relocations=808 imports=122 delta=0x2249bf90000
+WXL VirtualProtectFromApp rva=0x0 size=0x3a000 old=0x4 new=0x1 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1000 size=0x22000 old=0x1 new=0x20 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x23000 size=0x10000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x33000 size=0x3000 old=0x1 new=0x4 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x36000 size=0x2000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x38000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x39000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+MLP mapped: TLS/unwind/load-config retained but NOT initialized; entry NOT called
+MLP SUMMARY image=baselib.dll dll=api-ms-win-core-synch-l1-2-0.dll resolved=3 stubbed=0 first-missing=none
+MLP SUMMARY image=baselib.dll dll=kernel32.dll resolved=2 stubbed=95 first-missing=WriteConsoleW
+MLP SUMMARY image=baselib.dll dll=ws2_32.dll resolved=22 stubbed=0 first-missing=none
+MLP IMAGE UnityPlayer.dll
+WXL VirtualAllocFromApp initial=0x4 (RW)
+MLP MISSING kernel32.dll!ResumeThread route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RtlVirtualUnwind route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!ReadProcessMemory route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateWaitableTimerExW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetWaitableTimer route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!WaitForSingleObjectEx route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SleepEx route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetThreadDescription route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetLogicalProcessorInformationEx route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!LocalFree route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!K32GetProcessMemoryInfo route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!Thread32First route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!Thread32Next route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetNativeSystemInfo route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!VirtualQuery route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetSystemInfo route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateThread route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetThreadPriority route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetThreadPriority route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCurrentThreadId route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SwitchToThread route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!LocalAlloc route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateEventW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetUnhandledExceptionFilter route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetErrorMode route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetErrorMode route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!OutputDebugStringW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCommandLineW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InitializeProcThreadAttributeList route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!HeapAlloc route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetProcessHeap route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!UpdateProcThreadAttribute route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!DeleteProcThreadAttributeList route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!HeapFree route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateProcessW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreatePipe route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FlushFileBuffers route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetProcessId route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!WaitForMultipleObjects route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetExitCodeProcess route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!WriteFile route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!VirtualAlloc route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!VirtualProtect route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!VirtualFree route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetFileAttributesExW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateFileW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateDirectoryW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!DeleteFileW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RemoveDirectoryW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetFileAttributesW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CopyFileW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!MoveFileExW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FindFirstFileExW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FindFirstFileW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FindNextFileW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FindClose route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetFilePointerEx route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetFilePointer route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!ReadFile route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetEndOfFile route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetFileSizeEx route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetTempFileNameW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!ReplaceFileW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetFullPathNameW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetSystemTime route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SystemTimeToFileTime route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetFileTime route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetDiskFreeSpaceExW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateMutexA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetSystemTimeAsFileTime route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!ExpandEnvironmentStringsW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCurrentDirectoryW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!DebugBreak route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetOverlappedResult route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!ResetEvent route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CancelIo route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FormatMessageA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetWindowsDirectoryW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InitializeCriticalSection route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!QueryPerformanceFrequency route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!EnterCriticalSection route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!LeaveCriticalSection route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCurrentDirectoryA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetLocalTime route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetTimeZoneInformation route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!ReleaseSemaphore route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateSemaphoreExW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SuspendThread route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CloseHandle route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!IsDebuggerPresent route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InitializeCriticalSectionAndSpinCount route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetStdHandle route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetThreadAffinityMask route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetDateFormatW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!ExitThread route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InitializeSListHead route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InterlockedPopEntrySList route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InterlockedPushEntrySList route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InterlockedFlushSList route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetFileSize route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateWaitableTimerA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!ReleaseSRWLockExclusive route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!AcquireSRWLockExclusive route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InitializeCriticalSectionEx route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetSystemDirectoryW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!LoadLibraryExA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InitOnceComplete route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InitOnceBeginInitialize route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InitializeSRWLock route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!TryAcquireSRWLockExclusive route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!EncodePointer route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!DecodePointer route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!LCMapStringEx route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCPInfo route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FlsAlloc route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FlsGetValue route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FlsSetValue route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FlsFree route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!QueryPerformanceCounter route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!VerifyVersionInfoW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!VerSetConditionMask route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!LoadLibraryA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCurrentProcess route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!TerminateProcess route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetConsoleCtrlHandler route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!WaitForSingleObject route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CompareStringW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!LCMapStringW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetLocaleInfoW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!IsValidLocale route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetUserDefaultLCID route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!EnumSystemLocalesW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetStdHandle route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!IsValidCodePage route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetACP route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetOEMCP route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCommandLineA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetEnvironmentStringsW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FreeEnvironmentStringsW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetEnvironmentVariableW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!WriteConsoleW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetEnvironmentVariableA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetTimeFormatW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetFileAttributesA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetModuleFileNameA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetComputerNameW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateFileA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetSystemDirectoryA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetUserDefaultLocaleName route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetTempPathW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateToolhelp32Snapshot route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GlobalMemoryStatusEx route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetSystemPowerStatus route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetThreadContext route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RtlCaptureContext route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!TlsAlloc route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCurrentThread route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GlobalAlloc route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GlobalUnlock route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GlobalLock route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!Sleep route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetModuleHandleA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!WaitForMultipleObjectsEx route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateEventExW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!AttachConsole route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetEvent route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!OpenThread route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateEventA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetStartupInfoA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!DeleteCriticalSection route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetLastError route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetFileAttributesW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetModuleFileNameW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RaiseException route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetModuleHandleW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetHandleInformation route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FormatMessageW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetProcAddress route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FreeLibrary route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!LoadLibraryW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetDllDirectoryW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetDriveTypeW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!ReadConsoleW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetFileType route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FreeLibraryAndExitThread route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetConsoleMode route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetConsoleOutputCP route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!DuplicateHandle route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetModuleHandleExW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!ExitProcess route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!HeapQueryInformation route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!HeapReAlloc route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!HeapSize route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!LoadLibraryExW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RtlUnwind route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RtlPcToFileHeader route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RtlUnwindEx route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!IsProcessorFeaturePresent route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetStartupInfoW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!UnhandledExceptionFilter route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetStringTypeW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!WideCharToMultiByte route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!MultiByteToWideChar route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetLastError route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!TlsGetValue route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!TlsSetValue route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetFileInformationByHandle route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!PeekNamedPipe route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SystemTimeToTzSpecificLocalTime route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!TlsFree route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FileTimeToSystemTime route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetRawInputData route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetRawInputBuffer route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!EnumDisplaySettingsA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetDC route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!TranslateMessage route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SystemParametersInfoW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!UnregisterDeviceNotification route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!LoadIconW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetWindowPlacement route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!AdjustWindowRectEx route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetForegroundWindow route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!EnumDisplaySettingsW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!DispatchMessageA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!RegisterDeviceNotificationW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetCapture route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!ReleaseCapture route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!DestroyIcon route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!DestroyCursor route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetCursor route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!LoadCursorA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!LoadImageW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetRawInputDeviceList route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!RegisterRawInputDevices route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetKeyNameTextW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!MapVirtualKeyW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!ToUnicode route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetKeyboardLayoutNameW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!MapVirtualKeyA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetKeyState route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetMessageExtraInfo route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetRawInputDeviceInfoW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetKeyboardLayout route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!MapVirtualKeyExA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetAsyncKeyState route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!TrackMouseEvent route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!DialogBoxParamW route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!EndDialog route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetDlgItemTextA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SendMessageTimeoutA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetForegroundWindow route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetUserObjectInformationA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetThreadDesktop route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!RegisterWindowMessageA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetClipboardData route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!EmptyClipboard route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!CloseClipboard route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetClipboardData route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!IsClipboardFormatAvailable route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!OpenClipboard route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!ReleaseDC route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!DisplayConfigGetDeviceInfo route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!QueryDisplayConfig route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetDisplayConfigBufferSizes route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!UpdateWindow route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetMessageA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!DragDetect route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetActiveWindow route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!ValidateRect route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetWindowPos route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!EnumDisplayMonitors route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!EnumDisplayDevicesA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!PostQuitMessage route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetCursorPos route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!ClipCursor route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!ShowCursor route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetFocus route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetFocus route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!KillTimer route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!MessageBoxA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!SetTimer route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!PeekMessageA route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!MsgWaitForMultipleObjects route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetCaretBlinkTime route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetDoubleClickTime route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!GetCursorPos route=uwph return=0 error=120 probe-only
+MLP MISSING user32.dll!LoadIconA route=uwph return=0 error=120 probe-only
+MLP SYSTEM version.dll loaded=1 error=0
+MLP SYSTEM ole32.dll loaded=1 error=0
+MLP STUB shlwapi.dll!SHDeleteKeyW route=stub return=0 error=120 probe-only
+MLP STUB shlwapi.dll!PathCanonicalizeW route=stub return=0 error=120 probe-only
+MLP STUB setupapi.dll!SetupDiEnumDeviceInterfaces route=stub return=0 error=120 probe-only
+MLP STUB setupapi.dll!SetupDiGetClassDevsA route=stub return=0 error=120 probe-only
+MLP STUB setupapi.dll!SetupDiGetDeviceInterfaceDetailW route=stub return=0 error=120 probe-only
+MLP STUB setupapi.dll!SetupDiEnumDeviceInfo route=stub return=0 error=120 probe-only
+MLP STUB setupapi.dll!SetupDiDestroyDeviceInfoList route=stub return=0 error=120 probe-only
+MLP SYSTEM advapi32.dll loaded=1 error=0
+MLP STUB gdi32.dll!ChoosePixelFormat route=stub return=0 error=120 probe-only
+MLP STUB gdi32.dll!SetPixelFormat route=stub return=0 error=120 probe-only
+MLP STUB gdi32.dll!GetDeviceCaps route=stub return=0 error=120 probe-only
+MLP STUB gdi32.dll!SwapBuffers route=stub return=0 error=120 probe-only
+MLP STUB shell32.dll!SHGetKnownFolderPath route=stub return=0 error=120 probe-only
+MLP STUB shell32.dll!ShellExecuteW route=stub return=0 error=120 probe-only
+MLP STUB shell32.dll!SHGetFolderPathW route=stub return=0 error=120 probe-only
+MLP STUB shell32.dll!SHFileOperationW route=stub return=0 error=120 probe-only
+MLP STUB shell32.dll!CommandLineToArgvW route=stub return=0 error=120 probe-only
+MLP STUB opengl32.dll!wglGetProcAddress route=stub return=0 error=120 probe-only
+MLP STUB opengl32.dll!wglDeleteContext route=stub return=0 error=120 probe-only
+MLP STUB opengl32.dll!wglMakeCurrent route=stub return=0 error=120 probe-only
+MLP STUB opengl32.dll!wglGetCurrentDC route=stub return=0 error=120 probe-only
+MLP STUB opengl32.dll!wglCreateContext route=stub return=0 error=120 probe-only
+MLP STUB opengl32.dll!wglGetCurrentContext route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveInOpen route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveInGetDevCapsW route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveInClose route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveInGetNumDevs route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveOutGetPosition route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveOutReset route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveOutWrite route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveOutUnprepareHeader route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveOutPrepareHeader route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveOutClose route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!timeBeginPeriod route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!timeEndPeriod route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveInPrepareHeader route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveInStart route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveInUnprepareHeader route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveInAddBuffer route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveInGetDevCapsA route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveOutOpen route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveOutGetDevCapsW route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveOutGetDevCapsA route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveOutGetNumDevs route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!timeGetTime route=stub return=0 error=120 probe-only
+MLP STUB winmm.dll!waveInReset route=stub return=0 error=120 probe-only
+MLP SYSTEM oleaut32.dll loaded=1 error=0
+MLP STUB imm32.dll!ImmSetCompositionStringW route=stub return=0 error=120 probe-only
+MLP STUB imm32.dll!ImmNotifyIME route=stub return=0 error=120 probe-only
+MLP STUB imm32.dll!ImmGetCompositionStringW route=stub return=0 error=120 probe-only
+MLP STUB imm32.dll!ImmAssociateContextEx route=stub return=0 error=120 probe-only
+MLP STUB imm32.dll!ImmAssociateContext route=stub return=0 error=120 probe-only
+MLP STUB imm32.dll!ImmGetConversionStatus route=stub return=0 error=120 probe-only
+MLP STUB imm32.dll!ImmReleaseContext route=stub return=0 error=120 probe-only
+MLP STUB imm32.dll!ImmGetContext route=stub return=0 error=120 probe-only
+MLP SYSTEM winhttp.dll loaded=1 error=0
+MLP SYSTEM bcrypt.dll loaded=1 error=0
+MLP STUB hid.dll!HidP_GetData route=stub return=0 error=120 probe-only
+MLP STUB hid.dll!HidP_MaxDataListLength route=stub return=0 error=120 probe-only
+MLP STUB hid.dll!HidD_GetSerialNumberString route=stub return=0 error=120 probe-only
+MLP STUB hid.dll!HidD_GetManufacturerString route=stub return=0 error=120 probe-only
+MLP STUB hid.dll!HidD_GetProductString route=stub return=0 error=120 probe-only
+MLP STUB hid.dll!HidD_FreePreparsedData route=stub return=0 error=120 probe-only
+MLP STUB hid.dll!HidD_GetPreparsedData route=stub return=0 error=120 probe-only
+MLP STUB hid.dll!HidD_GetHidGuid route=stub return=0 error=120 probe-only
+MLP STUB hid.dll!HidP_SetUsages route=stub return=0 error=120 probe-only
+MLP STUB hid.dll!HidP_SetUsageValue route=stub return=0 error=120 probe-only
+MLP STUB hid.dll!HidP_GetButtonCaps route=stub return=0 error=120 probe-only
+MLP STUB hid.dll!HidP_GetValueCaps route=stub return=0 error=120 probe-only
+MLP STUB hid.dll!HidD_GetAttributes route=stub return=0 error=120 probe-only
+MLP STUB hid.dll!HidP_GetCaps route=stub return=0 error=120 probe-only
+MLP SYSTEM api-ms-win-core-winrt-l1-1-0.dll loaded=1 error=0
+MLP SYSTEM api-ms-win-core-winrt-string-l1-1-0.dll loaded=1 error=0
+MLP SYSTEM d3d11.dll loaded=1 error=0
+MLP SYSTEM dxgi.dll loaded=1 error=0
+MLP SYSTEM crypt32.dll loaded=1 error=0
+MLP SYSTEM dwmapi.dll loaded=1 error=0
+MLP SYSTEM d3d12.dll loaded=1 error=0
+WXL mapped LocalState PE relocations=59761 imports=513 delta=0x224a4e00000
+WXL VirtualProtectFromApp rva=0x0 size=0x1e46000 old=0x4 new=0x1 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1000 size=0x17f4000 old=0x1 new=0x20 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x17f5000 size=0x3cb000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1bc0000 size=0x13f000 old=0x1 new=0x4 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1cff000 size=0x115000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1e14000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1e15000 size=0x12000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1e27000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1e28000 size=0x1e000 old=0x1 new=0x2 ok=1 err=0
+MLP mapped: TLS/unwind/load-config retained but NOT initialized; entry NOT called
+MLP SUMMARY image=UnityPlayer.dll dll=advapi32.dll resolved=21 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=api-ms-win-core-synch-l1-2-0.dll resolved=3 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=api-ms-win-core-winrt-l1-1-0.dll resolved=4 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=api-ms-win-core-winrt-string-l1-1-0.dll resolved=6 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=bcrypt.dll resolved=1 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=crypt32.dll resolved=7 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=d3d11.dll resolved=2 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=d3d12.dll resolved=3 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=dwmapi.dll resolved=2 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=dxgi.dll resolved=2 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=gdi32.dll resolved=0 stubbed=4 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=hid.dll resolved=0 stubbed=14 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=imm32.dll resolved=0 stubbed=8 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=kernel32.dll resolved=4 stubbed=211 first-missing=ResumeThread
+MLP SUMMARY image=UnityPlayer.dll dll=ole32.dll resolved=12 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=oleaut32.dll resolved=5 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=opengl32.dll resolved=0 stubbed=6 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=setupapi.dll resolved=0 stubbed=5 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=shell32.dll resolved=0 stubbed=5 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=shlwapi.dll resolved=0 stubbed=2 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=user32.dll resolved=35 stubbed=76 first-missing=GetRawInputData
+MLP SUMMARY image=UnityPlayer.dll dll=version.dll resolved=3 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=winhttp.dll resolved=4 stubbed=0 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=winmm.dll resolved=0 stubbed=23 first-missing=none
+MLP SUMMARY image=UnityPlayer.dll dll=ws2_32.dll resolved=45 stubbed=0 first-missing=none
+MLP IMAGE Megabonk.exe
+WXL VirtualAllocFromApp initial=0x4 (RW)
+MLP MISSING kernel32.dll!CloseHandle route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!QueryPerformanceCounter route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCurrentThreadId route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetSystemTimeAsFileTime route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InitializeSListHead route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RtlCaptureContext route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RtlVirtualUnwind route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!IsDebuggerPresent route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!UnhandledExceptionFilter route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetUnhandledExceptionFilter route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetStartupInfoW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!IsProcessorFeaturePresent route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetModuleHandleW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!CreateFileW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RtlUnwindEx route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetLastError route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetLastError route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!EnterCriticalSection route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!LeaveCriticalSection route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!DeleteCriticalSection route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!InitializeCriticalSectionAndSpinCount route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!TlsAlloc route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!TlsGetValue route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!TlsSetValue route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!TlsFree route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FreeLibrary route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetProcAddress route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!LoadLibraryExW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!EncodePointer route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RaiseException route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!RtlPcToFileHeader route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetStdHandle route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!WriteFile route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetModuleFileNameW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCurrentProcess route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!ExitProcess route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!TerminateProcess route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetModuleHandleExW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!WriteConsoleW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!HeapAlloc route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!HeapFree route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FindClose route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FindFirstFileExW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FindNextFileW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!IsValidCodePage route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetACP route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetOEMCP route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCPInfo route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCommandLineA route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetCommandLineW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!MultiByteToWideChar route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!WideCharToMultiByte route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetEnvironmentStringsW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FreeEnvironmentStringsW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetStdHandle route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetFileType route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetStringTypeW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FlsAlloc route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FlsGetValue route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FlsSetValue route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FlsFree route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!LCMapStringW route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetProcessHeap route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!HeapSize route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!HeapReAlloc route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!FlushFileBuffers route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetConsoleOutputCP route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!GetConsoleMode route=uwph return=0 error=120 probe-only
+MLP MISSING kernel32.dll!SetFilePointerEx route=uwph return=0 error=120 probe-only
+WXL mapped LocalState PE relocations=777 imports=72 delta=0x224e1e90000
+WXL VirtualProtectFromApp rva=0x0 size=0xa8000 old=0x4 new=0x1 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1000 size=0xd000 old=0x1 new=0x20 ok=1 err=0
+WXL VirtualProtectFromApp rva=0xe000 size=0xa000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x18000 size=0x2000 old=0x1 new=0x4 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1a000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1b000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0x1c000 size=0x8b000 old=0x1 new=0x2 ok=1 err=0
+WXL VirtualProtectFromApp rva=0xa7000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+MLP mapped: TLS/unwind/load-config retained but NOT initialized; entry NOT called
+MLP SUMMARY image=Megabonk.exe dll=kernel32.dll resolved=2 stubbed=69 first-missing=CloseHandle
+MLP SUMMARY image=Megabonk.exe dll=unityplayer.dll resolved=1 stubbed=0 first-missing=none
+MLP-PROBE-DONE no guest code executed; TLS/unwind deferred; zero RWX requested

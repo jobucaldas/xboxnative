@@ -1,0 +1,18 @@
+[   0.014] boot: Initialize (pid=5616)
+[   0.058] SetWindow bounds=1920x1080
+[   0.060] Activated kind=0 (activation args ignored)
+[   0.061] Run: entering
+[   0.061] CS32 selectors CS=0033 SS=002b DS=002b ES=002b FS=0053 GS=002b
+[   0.062] CS32 packaged WoW64 wow64.dll module=0000000000000000 error=126
+[   0.062] CS32 packaged WoW64 wow64cpu.dll module=0000000000000000 error=126
+[   0.062] CS32 packaged WoW64 wow64win.dll module=0000000000000000 error=126
+[   0.062] CS32 WoW64 directory/process desktop probes omitted: no documented UWP contract; no private WowTebOffset access
+[   0.062] CS32 low alloc=0000000010000000 attempts=1 error=0
+[   0.063] CS32 W^X RX=1 old=0x4 error=0 targetCS=0023 returnCS=0033
+[   0.063] CS32 x64 control survived=1 result=42
+[   0.063] CS32 entering ljmp 0x23; FS selector=0053; no FS descriptor mutation
+[   0.063] CS32 EXCEPTION code=0xc0000005 address=0000000010000000 RIP=0x10000000 CS=0033 SS=002b DS=002b ES=002b FS=0053 GS=002b
+[   0.063] CS32 fault access=0 target=0xffffffffffffffff
+[   0.063] CS32 roundtrip survived=0 result=0
+[   0.063] CS32 RESULT native-32=no selector transition denied
+[   0.064] CS32 DONE

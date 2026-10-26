@@ -1,0 +1,12 @@
+[   0.018] boot: Initialize (pid=6304)
+[   0.077] SetWindow bounds=1920x1080
+[   0.078] Activated kind=0 (activation args ignored)
+[   0.079] Run: entering
+[   0.079] vrx: running 3 cases (AppContainer RWX / RW+VirtualProtect / VirtualAllocFromApp+VirtualProtectFromApp)
+[   0.079] caseA VirtualAlloc(PAGE_EXECUTE_READWRITE)+exec: ALLOC_FAILED err=87
+[   0.079] caseB VirtualAlloc(RW)+VirtualProtect(RX)+exec: OK value=42
+[   0.080] caseC VirtualAllocFromApp(RW)+VirtualProtectFromApp(RX)+exec: OK value=42
+[   0.080] vrx: all cases done
+[   0.183] D3D11CreateDevice hr=0x00000000 fl=0xb000
+[   0.195] CreateSwapChainForCoreWindow hr=0x00000000
+[   0.197] frame=1 t=0.2

@@ -1,0 +1,23 @@
+[   0.013] boot: Initialize (pid=4396)
+[   0.067] SetWindow bounds=1920x1080
+[   0.071] Activated kind=0 (activation args ignored)
+[   0.071] Run: entering
+[   0.074] WXL VirtualAllocFromApp initial=0x4 (RW)
+[   0.075] WXL mapped LocalState PE relocations=1 imports=9 delta=0x127f7e50000
+[   0.075] WXL VirtualProtectFromApp rva=0x0 size=0x5000 old=0x4 new=0x1 ok=1 err=0
+[   0.075] WXL VirtualProtectFromApp rva=0x0 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.075] WXL VirtualProtectFromApp rva=0x1000 size=0x1000 old=0x1 new=0x20 ok=1 err=0
+[   0.075] WXL VirtualProtectFromApp rva=0x2000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.075] WXL VirtualProtectFromApp rva=0x3000 size=0x1000 old=0x1 new=0x4 ok=1 err=0
+[   0.075] WXL VirtualProtectFromApp rva=0x4000 size=0x1000 old=0x1 new=0x2 ok=1 err=0
+[   0.075] MLP mapped: TLS/unwind/load-config retained but NOT initialized; entry NOT called
+[   0.075] SWC mapped pages=5 RWX=0
+[   0.075] SWC mapped guest
+[   0.076] SWC RegisterClassExW + CreateWindowExW OK
+[   0.196] SWC route HWND -> CoreWindow hr=0x00000000
+[   0.196] SWC CreateSwapChainForHwnd hr=0x00000000
+[   5.791] SWC hwnd presented=300 hr=0x00000000
+[   5.848] SWC route HWND -> CoreWindow hr=0x00000000
+[   5.849] SWC CreateSwapChain legacy hr=0x00000000
+[  11.279] SWC legacy presented=300 hr=0x00000000
+[  11.280] SWC RESULT entry=42 failures=0

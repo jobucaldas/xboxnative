@@ -1,0 +1,36 @@
+[   0.013] boot: Initialize (pid=3288)
+[   0.072] SetWindow bounds=1920x1080
+[   0.074] Activated kind=0 (activation args ignored)
+[   0.075] Run: entering
+[   0.088] PASS native route d3d11.dll!D3D11CreateDevice
+[   0.088] PASS native route dxgi.dll!CreateDXGIFactory1
+[   0.088] PASS native route ws2_32.dll!WSAStartup
+[   0.088] PASS native route bcrypt.dll!BCryptGenRandom
+[   0.088] PASS native route ole32.dll!CoCreateGuid
+[   0.088] PASS native route version.dll!GetFileVersionInfoSizeW
+[   0.088] PASS native cache retains exports across failed lookups
+[   0.088] PASS builtin boundary user32.dll: native fallback denied
+[   0.088] PASS builtin boundary win32u.dll: native fallback denied
+[   0.088] PASS builtin boundary kernel32.dll: native fallback denied
+[   0.088] PASS builtin boundary ntdll.dll: native fallback denied
+[   0.089] PASS synthetic WGI conversion, clamp, XInput packets/reconnect and worker polling (no physical input proof)
+[   0.089] mingw x64 window PE entered
+[   0.092] PASS UI thread guard, child rejection, WM_CLOSE and reentrant destroy
+[   0.093] PASS real ws2_32 WSAStartup
+[   0.093] PASS real bcrypt BCryptGenRandom
+[   0.094] PASS real ole32 CoCreateGuid
+[   0.094] called real version GetFileVersionInfoSizeW (missing file expected)
+[   0.094] PASS duplicate class rejected
+[   0.094] PASS invalid HWND rejected
+[   0.147] PASS real D3D11CreateDevice FL11_0
+[   0.147] PASS real dxgi CreateDXGIFactory1
+[   0.166] PASS real DXGI swapchain mapped from HWND
+[   0.167] WM_SIZE
+[   0.168] WM_ACTIVATE
+[   0.168] WM_PAINT
+[   0.168] WM_ACTIVATE
+[   0.168] XInput pad 0 disconnected (no controller proof)
+[   3.616] PASS presented 180 colored frames; HWND client bounds stable
+[   3.616] WM_DESTROY
+[   3.616] PASS WM_SIZE WM_ACTIVATE WM_PAINT and WM_QUIT
+[   3.616] W32U RESULT failures=0

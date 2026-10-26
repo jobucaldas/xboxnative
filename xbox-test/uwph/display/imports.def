@@ -1,0 +1,16 @@
+LIBRARY uwph-user32.dll
+EXPORTS
+ RegisterClassExW
+ DefWindowProcW
+ CreateWindowExW
+ PeekMessageW
+ GetMessageW
+ DispatchMessageW
+ TranslateMessage
+ PostQuitMessage
+ PostMessageW
+ GetClientRect
+ ShowWindow
+ DestroyWindow
+ XInputGetState
+ uwph_corewindow
