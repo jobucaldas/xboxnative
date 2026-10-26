@@ -6,7 +6,7 @@
 # Wine is LGPL-2.1-or-later. The DLLs are build outputs: they are git-ignored (out/ and *.dll) and must never be committed;
 # pr-lane.sh refuses DLLs. Output: <outdir>/*.dll, SHA256SUMS, SOURCE.txt (default: out/wine-donors).
 # Needs: x86_64-w64-mingw32-gcc, make, flex, bison, curl, xz, sha256sum (Debian: apt install gcc-mingw-w64-x86-64 flex bison make curl xz-utils).
-# Cache/scratch dir: third_party/wine-donors-build (git-ignored). Env: JOBS (default nproc).
+# Cache/scratch dir: third_party/wine-donors-build/<pin hash>/ (git-ignored). Env: JOBS (default nproc).
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 out=; dry=0
@@ -14,21 +14,25 @@ for a in "$@"; do case "$a" in --dry-run) dry=1 ;; *) out=$a ;; esac; done
 out=${out:-$root/out/wine-donors}
 DLLS=(avrt hid setupapi shcore version)
 read -r _ url sha < <(grep -E '^wine-src[[:space:]]' "$root/deps.pin") || { echo "wine-src missing from deps.pin" >&2; exit 2; }
-work=$root/third_party/wine-donors-build; tar=$work/$(basename "$url")
+base=$root/third_party/wine-donors-build; work=$base/${sha:0:16}   # keyed by the pinned hash: a bumped pin never reuses an old tree
+tar=$work/$(basename "$url")
 echo "wine-src url=$url sha256=$sha out=$out dlls=${DLLS[*]}"
 (( dry )) && exit 0
 for t in x86_64-w64-mingw32-gcc make flex bison curl xz sha256sum; do
   command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 2; }
 done
 mkdir -p "$work" "$out"
+rm -f "$out"/*.dll "$out"/SHA256SUMS "$out"/SOURCE.txt   # never leave DLLs from an older pin next to new labels
 if [[ ! -f $tar ]]; then curl -fsSL -o "$tar.part" "$url"; mv "$tar.part" "$tar"; fi
 echo "$sha  $tar" | sha256sum -c - >/dev/null || { echo "SHA-256 mismatch for $tar; deleting" >&2; rm -f "$tar"; exit 1; }
 src=$work/$(basename "$tar" .tar.xz)
-[[ -d $src ]] || tar -C "$work" -xf "$tar"
+if [[ ! -f $work/.extracted ]]; then   # marker written only after a complete extract; an interrupted one is redone
+  rm -rf "$src" "$work/build"; tar -C "$work" -xf "$tar"; touch "$work/.extracted"
+fi
 bld=$work/build; mkdir -p "$bld"; cd "$bld"
-[[ -f Makefile ]] || "$src/configure" --enable-win64 --without-x --disable-tests --without-freetype --without-gstreamer \
+[[ -f $bld/.configured ]] || { "$src/configure" --enable-win64 --without-x --disable-tests --without-freetype --without-gstreamer \
   --without-pulse --without-alsa --without-oss --without-cups --without-sane --without-usb --without-v4l2 \
-  --without-wayland --without-vulkan >configure.log 2>&1 || { tail -20 configure.log >&2; exit 1; }
+  --without-wayland --without-vulkan >configure.log 2>&1 && touch "$bld/.configured"; } || { tail -20 configure.log >&2; exit 1; }
 targets=(); for d in "${DLLS[@]}"; do targets+=("dlls/$d/all"); done
 make -j"${JOBS:-$(nproc)}" "${targets[@]}" >make.log 2>&1 || { tail -30 make.log >&2; exit 1; }
 for d in "${DLLS[@]}"; do cp "dlls/$d/x86_64-windows/$d.dll" "$out/$d.dll"; done
