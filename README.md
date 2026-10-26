@@ -42,6 +42,12 @@ bash xbox-test/uwph/host/build.sh        # uwph host test package -> xbox-test/u
 The current builds do **not** need Boxedwine sources. `tools/fetch-boxedwine.sh` fetches the pinned upstream
 (`deps.pin`) for future work (x86 engine); see [patches/README.md](patches/README.md).
 
+Wine-built donor DLLs (avrt, hid, setupapi, shcore, version) are never committed. Build them from the pinned Wine 10.0 source
+(needs mingw-w64, flex, bison; about a minute):
+```sh
+bash tools/build-wine-donors.sh          # -> out/wine-donors/*.dll + SHA256SUMS + SOURCE.txt (git-ignored)
+```
+
 ## Test
 ```sh
 python3 -m unittest discover -s tools/xbox/tests -p 'test_*.py'   # some tests skip without local game fixtures
@@ -59,10 +65,12 @@ No DRM bypass, no emulators/cracks (no Steamless, no gbe_fork), no Xbox security
 No game files, Valve/Microsoft binaries, or credentials in this repository. See [AGENTS.md](AGENTS.md).
 
 ## Licence
-GPL-2.0-or-later ([LICENSE](LICENSE), [NOTICE](NOTICE)). Originated in the fork `jobucaldas/Boxedwine-xbox-64`
-(a fork of Boxedwine, GPL-2.0-or-later); only our own additions were imported here.
+GPL-3.0-or-later ([LICENSE](LICENSE), [NOTICE](NOTICE) for third-party pieces and the compatibility notes). Originated in the
+fork `jobucaldas/Boxedwine-xbox-64` (a fork of Boxedwine, GPL-2.0-or-later, compatible through "or later"); only our own
+additions were imported here. No third-party binaries are committed: anything built from other projects' source is built at
+setup time from a pinned source (see `deps.pin`, `tools/fetch-*.sh`, `tools/build-wine-donors.sh`).
 
 ## CI
-A GitHub Actions workflow is drafted in `docs/ci/ci.yml.example` (shell/python syntax, offline unit tests, secret/binary
-guards). It is not enabled yet because the `gh` token on the build box lacks the `workflow` scope; copy it to
-`.github/workflows/ci.yml` from an account that can push workflows. On-device smoke sections cannot run in Actions.
+`.github/workflows/ci.yml` runs offline checks on every pull request: shell syntax, Python compile, the offline unit tests,
+and guards against committed secrets and binaries. The on-device sections of `xbox-test/smoke-all.sh` need a console and
+cannot run in Actions; state their result in the PR.

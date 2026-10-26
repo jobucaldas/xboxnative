@@ -1,6 +1,7 @@
 xboxnative
 Copyright (C) 2026 the xboxnative authors (see git history).
-Licensed under the GNU General Public License, version 2 or (at your option) any later version. See LICENSE.
+Licensed under the GNU General Public License, version 3 or (at your option) any later version
+(SPDX: GPL-3.0-or-later). See LICENSE (the official GNU GPL v3 text).
 
 This repository contains only original work plus the third-party files listed below. It does NOT contain any
 Boxedwine, Wine, Valve/Steam, Unity or game files, nor any Microsoft SDK/toolchain binaries.
@@ -18,11 +19,29 @@ Included third-party files (kept under their own licences)
                                                (Combined files carry the licence text in their headers.)
 
 External dependencies fetched at build time (never copied here; pinned in deps.pin)
-  Boxedwine (danoon2/Boxedwine)                GPL-2.0-or-later. Only needed for future work reusing its x86 CPU core; not needed
-                                               by the current builds. The future engine integration will make the combined
-                                               program GPL-2.0-or-later, which this repository already is.
+  Boxedwine (danoon2/Boxedwine)                GPL-2.0-or-later. Not shipped here; only needed for future work reusing its x86 CPU
+                                               core, and not needed by the current builds. Its "or (at your option) any later version"
+                                               grant lets a combined program be distributed under GPL-3.0-or-later, which is this
+                                               repository's licence.
+  Wine 10.0 source tarball (wine-src)          LGPL-2.1-or-later. Downloaded and built by tools/build-wine-donors.sh into the
+                                               git-ignored out/wine-donors/ (avrt, hid, setupapi, shcore, version). The built DLLs are
+                                               never committed. LGPL-2.1-or-later is generally read as combinable with GPLv3 code (LGPLv2.1 s.3 lets a
+                                               recipient apply the GPL instead).
   uwp-crossbuild (gianlucamazza/uwp-crossbuild)  MIT. Build wrapper used by the build scripts (clang-cl/lld-link + xwin).
   Microsoft Windows SDK/CRT via xwin           Downloaded by the toolchain under Microsoft's own licence terms; never redistributed here.
+
+Licence compatibility with GPL-3.0-or-later (a good-faith reading, NOT legal advice or a legal guarantee)
+  qrcodegen (MIT), zlib (zlib licence), LZMA SDK LzmaDec (public domain), font8x8 (public domain): permissive, generally
+  regarded as GPLv3-compatible (the FSF lists MIT/Expat and zlib as GPL-compatible). Keep their notices.
+  zstd: dual-licensed BSD-3-Clause / GPL-2.0-only. We use the BSD-3-Clause option only (GPLv2-only would NOT be
+  GPLv3-compatible, so do not rely on that option). BSD-3-Clause is GPLv3-compatible.
+  uwp-crossbuild (MIT): a build tool fetched at setup time, not shipped or linked into our binaries.
+  Boxedwine (GPL-2.0-or-later): compatible via "or later" (see above); not shipped. Check the exact per-file headers
+  before reusing any file, since a file stating "version 2 only" would not be.
+  Wine (LGPL-2.1-or-later): fine to build and use alongside GPLv3 code; keep its licence texts with any DLLs you redistribute
+  and offer the corresponding source (the pinned tarball). We do not redistribute Wine binaries from this repository.
+  Microsoft SDK/CRT (via xwin): downloaded under Microsoft's terms at build time, not distributed here.
+  If you add third-party code, list it here and check its licence first.
 
 Reference only (no code copied)
   Wine (LGPL-2.1-or-later): its *.spec export lists are used as a checklist; research/ and tools/xbox/wine_gap*.py read
