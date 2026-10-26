@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 # fetch-dep.sh <name> [dest] [--dry-run]  -- clone a pinned dependency from deps.pin at its exact commit.
 # Applies patches/<name>/*.patch (if any) with `git apply --3way`. Never copies upstream code into this repo.
 set -euo pipefail
@@ -14,7 +15,7 @@ if [[ -z "$dest" ]]; then
   esac
 fi
 echo "dep=$name url=$url commit=$sha dest=$dest"
-(( dry )) && { ls "$root/patches/$name" 2>/dev/null | sed "s/^/would apply patch: /"; exit 0; }
+(( dry )) && { { ls "$root/patches/$name" 2>/dev/null || true; } | sed "s/^/would apply patch: /"; exit 0; }
 if [[ ! -d "$dest/.git" ]]; then git init -q "$dest"; git -C "$dest" remote add origin "$url"; fi
 git -C "$dest" fetch -q --depth 1 origin "$sha"
 git -C "$dest" checkout -q --detach FETCH_HEAD

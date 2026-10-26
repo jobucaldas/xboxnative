@@ -23,9 +23,17 @@ jobs:
           set -e
           bash xbox-test/app/tests/session-restore.sh
           python3 -m unittest xbox-test/dp/test-verify-depot.py
-      - name: no secrets / binaries committed
+      - name: build scripts parse their pins (offline)
         run: |
           set -e
-          ! git ls-files | grep -E '\.(pfx|key|pem|exe|dll|msix|appx|zip)$'
-          ! git grep -nIE 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|gh[pousr]_[A-Za-z0-9]{30,}|tskey-[A-Za-z0-9-]{10,}|7656119[0-9]{10}' -- . ':!.github'
+          bash tools/build-wine-donors.sh --dry-run
+          bash tools/fetch-boxedwine.sh --dry-run
+      - name: no secrets / binaries committed
+        run: |
+          if git ls-files | grep -E '\.(pfx|key|pem|exe|dll|so|msix|appx|zip|7z|tar|gz|xz)$'; then
+            echo "forbidden binary/secret file types are committed (build third-party binaries with tools/build-*.sh instead)"; exit 1
+          fi
+          if git grep -nIE 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|gh[pousr]_[A-Za-z0-9]{30,}|tskey-[A-Za-z0-9-]{10,}|7656119[0-9]{10}' -- . ':!.github'; then
+            echo "possible secret or SteamID committed"; exit 1
+          fi
   # TODO: on-device sections of xbox-test/smoke-all.sh need a console and cannot run in GitHub Actions.

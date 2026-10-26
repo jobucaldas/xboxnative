@@ -8,4 +8,5 @@
 6. **No game files, Valve/Microsoft/Unity binaries, or large binaries (>5 MB).** External code is pinned in `deps.pin` and fetched, not copied (see `patches/`).
 7. **Acceptance test is the launcher:** `xbox-test/tools/play-test.sh <appid>` ("Play Megabonk via the launcher"). Evidence goes in the PR (file names and summary), not raw captures with account data.
 8. Console access is shared: take the console lock (`dp-lib.sh` does it); bump the package version before reinstalling.
-9. Keep third-party code under its own licence and listed in `NOTICE`. Repo licence is GPL-2.0-or-later.
+9. Keep third-party code under its own licence and listed in `NOTICE`. Repo licence is GPL-3.0-or-later (SPDX `GPL-3.0-or-later` in new scripts/sources is welcome).
+10. **Never commit third-party binaries** (e.g. Wine-built DLLs). Build them from a pinned source at setup time: add a `deps.pin` entry and a `tools/fetch-*.sh` / `tools/build-*.sh` script (see `tools/build-wine-donors.sh`).

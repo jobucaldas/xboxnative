@@ -2,3 +2,5 @@
 # format: NAME REPO_URL COMMIT
 boxedwine  https://github.com/danoon2/Boxedwine           4cf85336b0bb4a1e301d136b6a18d8ac82070466
 uwp-crossbuild  https://github.com/gianlucamazza/uwp-crossbuild  e692f28ea613bba9bc08715ef111ad48992bf6a3
+# Source tarballs: NAME URL SHA256 (verified by the build script; nothing here is copied into the repo)
+wine-src  https://dl.winehq.org/wine/source/10.0/wine-10.0.tar.xz  c5e0b3f5f7efafb30e9cd4d9c624b85c583171d33549d933cd3402f341ac3601
