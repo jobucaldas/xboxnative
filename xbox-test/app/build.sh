@@ -6,6 +6,7 @@ here="$(cd "$(dirname "$0")" && pwd)"; cd "$here"; out="${1:-out}"; mkdir -p "$o
 python3 "$here/../../tools/xbox/gen-gap-routes.py"
 CB="${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}"
 UWP_OBJ_DIR="$out/obj" "$CB/scripts/build.sh" --uwp --out "$out/layout/xbtest.exe" --jobs 4 main.cpp qrcodegen.cpp vendor/zlib/inflate.c vendor/zlib/inftrees.c vendor/zlib/inffast.c vendor/zlib/adler32.c vendor/zlib/crc32.c vendor/zlib/zutil.c vendor/lzma/LzmaDec.c vendor/zstd/zstddeclib.c --link-arg bcrypt.lib -- /MT /O2 /DNDEBUG
+bash ../audio/build.sh "$out/layout"
 bash ../uwph/user32/build.sh
 cp ../uwph/user32/out/layout/{uwph-u32c.dll,u32c-test.exe} "$out/layout/"
 # Nested packaged DLL proves SetDllDirectory affects an actual load.
