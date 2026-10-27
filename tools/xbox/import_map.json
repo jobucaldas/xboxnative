@@ -139,7 +139,8 @@
     },
     "winmm.dll": {
       "class": "stub",
-      "reason": "Named x64 wave adapters enumerate zero devices and return MMRESULT failures; timeGetTime uses GetTickCount64, period requests delegate to system winmm if available or return TIMERR_NOCANDO."
+      "reason": "Historical stub policy is retained for the frozen Wine research oracle. The launcher audio provider resolves the 23 real Unity WINMM imports from System32 with per-export console diagnostics; export availability and output playback are verified separately. No successful-return shim replaces a missing native export.",
+      "runtime_provider": "xbox-test/audio/routes.h"
     },
     "ws2_32.dll": {
       "class": "system",

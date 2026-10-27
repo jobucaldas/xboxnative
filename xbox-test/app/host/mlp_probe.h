@@ -8,6 +8,8 @@
 #include "../../shared/kernel_tail_search_test.h"
 #include "../../shared/pe_tail.h"
 #include "../../shared/pe_tail_test.h"
+#include "../../audio/probe.h"
+#include "../../audio/routes.h"
 namespace mlp {
 struct Route { const char* dll; const char* kind; };
 static const Route routes[] = {
@@ -75,6 +77,7 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
         if(it!=assets.end()) address=asset_export(*it->second,name,ordinal);
         else if(name) for(auto& b:wxl::builtins) if(!_stricmp(dll,b.dll)&&!strcmp(name,b.name)) address=b.address;
     }
+    if(auto audio=audio_routes::resolve(dll,name)) address=audio;
     if(auto core=user32_core::resolve(dll,name)) address=core;
     if(key=="kernel32.dll" && name && !address) {
         address=kernel_tail::resolve(name);
@@ -85,7 +88,7 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
         if(address)log(("K32T SYSTEM "+key+"!"+symbol).c_str());
     }
     static bool tested=false;
-    if(!tested) { tested=true; kernel_tail::test(log); kernel_tail::test_search(log); pe_tail::discover(log); pe_tail::test(log); }
+    if(!tested) { tested=true; audio_routes::discover(log); audio_probe::run(log); kernel_tail::test(log); kernel_tail::test_search(log); pe_tail::discover(log); pe_tail::test(log); }
     auto& sum=summaries[key];
     if(address) { ++sum.resolved; return address; }
     ++sum.stubbed;
