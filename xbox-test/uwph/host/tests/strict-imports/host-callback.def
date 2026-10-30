@@ -1,0 +1,3 @@
+LIBRARY strict-host-callback.dll
+EXPORTS
+    entry_marker
