@@ -11,3 +11,7 @@ digest with `f.sha` at `steamdl.h:467-480`. The missing/empty-hash vectors
 describe desired fail-closed test outcomes, not verified current behavior.
 `steamdl.h:481-484` only writes the marker if opening succeeds but sets state
 to done regardless; this fixture prep does not change that implementation.
+
+Run `python3 xbox-test/app/depot-fixtures/validate-vectors.py` to validate the
+JSON shape, case set, encoded bytes and declared digest expectations. This
+checks fixture data only; it does not run the production downloader/verifier.
