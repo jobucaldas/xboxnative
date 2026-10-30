@@ -33,3 +33,21 @@ output.writeUInt32LE(end,data+8);
 output.writeUInt32LE(rva(0),optional+112+13*8);
 output.writeUInt32LE(64,optional+116+13*8);
 fs.writeFileSync(process.argv[3],output);
+// Optional malformed fixtures: preserve ordinal flag while setting ordinal #0.
+const mode=process.argv[4];
+if (mode === 'delay-zero') {
+  output.writeBigUInt64LE(0x8000000000000000n,raw+start+120);
+  fs.writeFileSync(process.argv[3],output);
+} else if (mode === 'ordinary-zero') {
+  const importRva=output.readUInt32LE(optional+112+8);
+  function fileOffset(r) {
+    for (let i=0;i<output.readUInt16LE(pe+6);++i) {
+      const s=sections+i*40, v=output.readUInt32LE(s+12), n=output.readUInt32LE(s+16);
+      if (r>=v && r-v<n) return output.readUInt32LE(s+20)+(r-v);
+    }
+    throw Error('RVA outside raw section');
+  }
+  const descriptor=fileOffset(importRva), lookup=output.readUInt32LE(descriptor);
+  output.writeBigUInt64LE(0x8000000000000000n,fileOffset(lookup));
+  fs.writeFileSync(process.argv[3],output);
+} else if (mode) throw Error('unknown fixture mode');

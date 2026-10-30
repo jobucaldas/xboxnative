@@ -8,17 +8,19 @@
 #define VirtualProtectFromApp VirtualProtect
 #include "../wxl_mapper.h"
 
-static unsigned marker_calls, tls_callbacks, dll_attaches, named_calls, ordinal_calls;
+static unsigned marker_calls, tls_callbacks, dll_attaches, named_calls, ordinal_calls, invalid_calls, invalid_diagnostics;
 static int delay_reject=0;
 static int marker_value;
 static char last_missing[256];
+static uintptr_t probe_resolve(const char*,const char* name,WORD ordinal) { if (!name && !ordinal) ++invalid_calls; return (uintptr_t)&GetTickCount; }
 static int WINAPI callable_marker(int value);
 static int WINAPI callable_named(int value) { return value + 10; }
 static int WINAPI callable_ordinal(int value) { return value + 20; }
-static void log_line(const char* s) { puts(s); if (!strcmp(s,"TLS callback attach")) ++tls_callbacks; if (!strcmp(s,"TLS DllMain attach")) ++dll_attaches; }
+static void log_line(const char* s) { puts(s); if (strstr(s,"!#0 reason=invalid-request")) ++invalid_diagnostics; if (!strcmp(s,"TLS callback attach")) ++tls_callbacks; if (!strcmp(s,"TLS DllMain attach")) ++dll_attaches; }
 static bool injected_zero=false;
 static wxl::strict_policy::Classification injected_class=wxl::strict_policy::Classification::callable;
 static wxl::strict_policy::Decision resolve_fixture(const char* dll, const char* name, WORD ordinal) {
+    if (!name && !ordinal) ++invalid_calls;
     char request[256]; snprintf(request, sizeof(request), "RESOLVE %s!%s ordinal=%u", dll, name ? name : "<ordinal>", (unsigned)ordinal); log_line(request);
     if (_stricmp(dll, "strict-host-callback.dll") == 0 && name && strcmp(name, "entry_marker") == 0)
         return {injected_class,(uintptr_t)&callable_marker};
@@ -47,9 +49,9 @@ static bool arg_path(const char* arg, wchar_t* out, size_t cap) {
     return MultiByteToWideChar(CP_UTF8, 0, arg, -1, out, (int)cap) != 0;
 }
 int main(int argc, char** argv) {
-    if (argc != 5) return 2;
-    wchar_t paths[4][1024];
-    for (int i=0;i<4;i++) if (!arg_path(argv[i+1], paths[i], 1024)) return 2;
+    if (argc != 7) return 2;
+    wchar_t paths[6][1024];
+    for (int i=0;i<6;i++) if (!arg_path(argv[i+1], paths[i], 1024)) return 2;
     if (!run_case(paths[0], true)) { puts("FAIL named/ordinal positive"); return 1; }
     puts("PASS named/ordinal positive imports");
     if (!run_case(paths[1], false, "strict-provider.dll!absent_name")) { puts("FAIL missing named import diagnostic/marker"); return 1; }
@@ -73,6 +75,17 @@ int main(int argc, char** argv) {
         else if (ok || tls_callbacks || dll_attaches || image.base) return 1;
     }
     puts("PASS delay named and ordinal callable; probe-only unknown zero missing rejected before TLS and DllMain");
+    delay_reject=0;
+    for (int i=4;i<6;++i) {
+        marker_calls=tls_callbacks=dll_attaches=invalid_calls=invalid_diagnostics=0;
+        wxl::Image image;
+        if (wxl::load(image,paths[i],log_line,carrier,nullptr,false,resolve_fixture) || image.base || image.functions || image.tlsKey!=TLS_OUT_OF_INDEXES || marker_calls || tls_callbacks || dll_attaches || invalid_calls || invalid_diagnostics!=1) return 1;
+    }
+    for (int i=4;i<6;++i) {
+        invalid_calls=invalid_diagnostics=0; wxl::Image image;
+        if (wxl::load(image,paths[i],log_line,{},probe_resolve,true) || image.base || invalid_calls || invalid_diagnostics!=1) return 1;
+    }
+    puts("PASS ordinary and delay ordinal #0 rejected before resolver and callbacks with cleanup, including probe mode");
     puts("STRICT-IMPORTS-HARNESS-PASS");
     return 0;
 }

@@ -53,7 +53,9 @@ if [[ "$mode" == --run ]]; then
   kernel32=$("$clang" -print-file-name=libkernel32.a)
   "$tc/lld-link" /dll /nodefaultlib /entry:test_dll_entry /include:_tls_used /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/delay-source.dll" "$out/delay-source.obj" "$kernel32"
   node tests/make-delay-fixture.js "$out/delay-source.dll" "$out/delay-tls.dll"
+  node tests/make-delay-fixture.js "$out/delay-source.dll" "$out/ordinary-zero.dll" ordinary-zero
+  node tests/make-delay-fixture.js "$out/delay-source.dll" "$out/delay-zero.dll" delay-zero
   "$clang++" -std=c++17 -O2 -static tests/strict-imports-host.cpp -o "$out/strict-imports-host.exe"
   env -u DP_PASS -u TS_AUTHKEY WINEDEBUG=-all wine "$out/strict-imports-host.exe" \
-    "$out/importer.dll" "$out/missing-name.dll" "$out/missing-ordinal.dll" "$out/delay-tls.dll"
+    "$out/importer.dll" "$out/missing-name.dll" "$out/missing-ordinal.dll" "$out/delay-tls.dll" "$out/ordinary-zero.dll" "$out/delay-zero.dll"
 fi

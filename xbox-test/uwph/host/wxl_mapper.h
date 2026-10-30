@@ -189,8 +189,13 @@ inline bool load_impl(Image& image, const wchar_t* path, Log log, Carrier carrie
     // Only built-in exports or explicitly classified callable addresses may execute.
     auto resolve_import = [&](const char* dll, const char* name, WORD ordinal, uintptr_t& address) {
         address=0;
+        // An ordinal-flagged zero is invalid in both execution and probe mode.
+        if (!name && ordinal==0) {
+            char reason[320]; snprintf(reason,sizeof reason,"IMPORT FAIL %s!#0 reason=invalid-request",dll);
+            log(reason); return false;
+        }
         if (mapped && resolve) { address=resolve(dll,name,ordinal); return address!=0; }
-        if (!ordinal) for (auto& b:builtins)
+        if (name) for (auto& b:builtins)
             if (!_stricmp(dll,b.dll) && !strcmp(name,b.name)) address=b.address;
         if (!address && execution) {
             auto decision=execution(dll,name,ordinal);
