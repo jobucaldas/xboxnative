@@ -1,5 +1,13 @@
 # lane/k32
 
+2026-10-29: LR-2-CONTRACT-REVIEW (proposal only). Added `docs/xbox/strict-import-contract.md` based on `wxl_mapper.h:26,162-180,193-205`, `mlp_probe.h:57-121,126-138`, `STUBS.md:3-6,43`, `launch.h:66-84,119-120,140-144`; read-only inspected `wt/k32` mapper diff. Spec separates callable from probe-only and defines named/ordinal failure/entry-marker fixture. No mapper/app implementation or test run; LR-2 remains unimplemented.
+
+2026-10-29: LR-2-FIXTURES (build-only). Added synthetic provider/importer fixtures and `xbox-test/uwph/host/tests/run-strict-imports.sh`. `bash xbox-test/uwph/host/tests/run-strict-imports.sh --build-only` passed using shared LLVM-MinGW; toolchain `objdump -p` verified `strict-provider.dll` exports and `importer.dll` imports named `fixture_named` and ordinal 7. `objdump -r` confirmed unresolved `absent_name` and `absent_ordinal` object references; these are not PE imports yet. `git diff --check` passed. No mapper adapter/resolver or guest-entry test exists; failure diagnostics and entry-marker absence remain pending runtime/harness integration. The script does not claim `llvm-readobj` (not in toolchain) or runtime success.
+
+2026-10-29: DEPOT-INTEGRITY-REVIEW (source-only). Added `docs/xbox/depot-integrity-review.md`. `steamdl.h:317-325,438-448,467-484` contains chunk/download and final file SHA1 checks; the `.done` marker is best-effort and does not include manifest identity (`:481`). No owned-depot runtime evidence was reviewed or claimed. Proposed a synthetic valid/mutated/missing-hash verifier test. `rg -n -i 'manifest|sha|hash|verify|complete' xbox-test/app` run and `git diff --check` passed.
+
+2026-10-30: LR-2 strict-import fixture accepted off-device under Wine 11 using desktop aliases for FromApp memory APIs. `bash xbox-test/uwph/host/tests/run-strict-imports.sh --run` passed: named plus ordinal #7 imports called into fixture host functions and DllMain marker recorded; exact missing `strict-provider.dll!absent_name` and `strict-provider.dll!#9` resolver requests returned zero, mapper rejected before DllMain, and marker count remained zero. no-CRT direct `lld-link` fixtures include genuine DIR64 relocations and omit unsupported Load Config metadata; no mapper gate changed. This proves only the current raw resolver contract and fixture lifecycle. Production probe provenance, LR-1 cleanup reconciliation, UWP FromApp and console acceptance remain pending.
+
 2026-10-25: Read lane prompt, REBUILD.md, sd dispatch evidence and vrx notes.
 Branch started clean at c18b4cc6. No inherited lane notes existed at root.
 

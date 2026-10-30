@@ -23,16 +23,21 @@ static void __stdcall mappedThrow(void* object,void* info) {
     RaiseException(0xe06d7363,EXCEPTION_NONCONTINUABLE,4,args);
     __std_terminate();
 }
-static uintptr_t tlsResolve(const char* dll,const char* name, WORD ordinal) {
-    if (ordinal || !name) return 0;
+static strict_policy::Decision tlsResolve(const char* dll,const char* name, WORD ordinal) {
+    using strict_policy::Classification;
+    auto missing=[]() { return strict_policy::Decision{Classification::missing,0}; };
+    auto callable=[](uintptr_t p) { return strict_policy::Decision{Classification::callable,p}; };
+    if (ordinal || !name) return missing();
     if (!_stricmp(dll,"uwph-cxx.dll")) {
-        if (!strcmp(name,"_CxxThrowException")) return (uintptr_t)&mappedThrow;
-        if (!strcmp(name,"__CxxFrameHandler3")) return (uintptr_t)&__CxxFrameHandler3;
-        if (!strcmp(name,"__std_terminate")) return (uintptr_t)&__std_terminate;
-        if (!strcmp(name,"wxl_delete")) return (uintptr_t)&cxxDelete;
+        if (!strcmp(name,"_CxxThrowException")) return callable((uintptr_t)&mappedThrow);
+        if (!strcmp(name,"__CxxFrameHandler3")) return callable((uintptr_t)&__CxxFrameHandler3);
+        if (!strcmp(name,"__std_terminate")) return callable((uintptr_t)&__std_terminate);
+        if (!strcmp(name,"wxl_delete")) return callable((uintptr_t)&cxxDelete);
     }
-    if (!_stricmp(dll,"tls-test.dll") && tlsDependency) return tlsDependency->symbol(name);
-    return 0;
+    if (!_stricmp(dll,"tls-test.dll") && tlsDependency &&
+        (!strcmp(name,"tls_dll_check") || !strcmp(name,"cxx_throw")))
+        return callable(tlsDependency->symbol(name));
+    return missing();
 }
 inline Carrier getCarrier(HMODULE module) {
     Carrier c;
@@ -53,9 +58,9 @@ inline bool runTls(const wchar_t* directory,Log log,HMODULE carrierA,HMODULE car
     if (!ca.index || !ca.block || !cb.index || !cb.block || ca.index()==cb.index()) {
         log("WXL FAIL separate native TLS carriers"); return false;
     }
-    if (!load(dll,(std::wstring(directory)+L"\\tls-test.dll").c_str(),log,ca,tlsResolve)) return false;
+    if (!load(dll,(std::wstring(directory)+L"\\tls-test.dll").c_str(),log,ca,nullptr,false,tlsResolve)) return false;
     tlsDependency=&dll;
-    if (!load(exe,(std::wstring(directory)+L"\\tls-test.exe").c_str(),log,cb,tlsResolve)) return false;
+    if (!load(exe,(std::wstring(directory)+L"\\tls-test.exe").c_str(),log,cb,nullptr,false,tlsResolve)) return false;
     DWORD main=((DWORD(*)())(exe.base+exe.entry))();
     struct Work { Image* dll; Image* exe; DWORD result; } work{&dll,&exe,0};
     HANDLE thread=CreateThread(nullptr,0,[](void* p)->DWORD {
