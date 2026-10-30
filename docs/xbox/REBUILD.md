@@ -84,3 +84,15 @@ makemsix `sign` produced no output file in a quick test; osslsigncode works.
 - `x64-run/backup-loop.sh` runs backup every 6 h (no cron here; restart it after a box reset).
 - Local branch `x64-spike` in Boxedwine-xbox-64 holds all local work. NEVER push. Upstream ref: Boxedwine-uwp-upstream
   (worleydl/Boxedwine-uwp); fork parent is danoon2/Boxedwine.
+
+## Linux UWP app build preflight
+
+Run `tools/check-uwp-build-env.sh` before `xbox-test/app/build.sh`. The checker follows that
+script's actual Python, MinGW, linker, OpenSSL, packer and signer commands and requires
+`UWP_CROSSBUILD` (or an adjacent `../uwp-crossbuild`) to contain executable `scripts/build.sh`.
+Tool paths can be overridden with `PYTHON3_PATH`, `MINGW_GCC_PATH`, `MINGW_GXX_PATH`,
+`MINGW_DLLTOOL_PATH`, `LLD_LINK_PATH`, `OPENSSL_PATH`, `MAKEMSIX_PATH` and `OSSLSIGNCODE_PATH`.
+The shared wrapper checkout, when available, can be selected with `UWP_CROSSBUILD`.
+The checker reports tools present; it does not prove SDK/CRT usability, compilation, package
+validity or Xbox runtime acceptance. See `docs/xbox/package-input-audit.md` for build inputs.
+Wine is used by off-device runtime tests, not by this app/MSIX build path.
