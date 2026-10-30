@@ -11,7 +11,7 @@ if [[ "$mode" != --build-only && "$mode" != --run ]]; then
 fi
 tc=/data/OpenBot/Shared/toolchains/llvm-mingw-20260908-ucrt-ubuntu-22.04-x86_64/bin
 export PATH="/data/OpenBot/Shared/toolchains/winehq-noble/bin:$tc:$PATH"
-export WINEPREFIX=/data/OpenBot/Agents/agent-fb2e31d9-cf59-41da-b641-a7693a10395e/wine-prefix-strict-imports
+export WINEPREFIX="${WINEPREFIX:-/data/OpenBot/Agents/agent-fb2e31d9-cf59-41da-b641-a7693a10395e/wine-prefix-strict-imports}"
 export WINEARCH=win64
 clang="$tc/x86_64-w64-mingw32-clang"
 objdump="$tc/x86_64-w64-mingw32-objdump"
@@ -49,7 +49,11 @@ if grep -q 'absent_name\|absent_ordinal' "$out/provider-tables.txt"; then
 fi
 echo "BUILD-ONLY PASS: provider and positive/negative PE tables inspected; negative imports absent from provider exports; no resolver execution or guest entry tested"
 if [[ "$mode" == --run ]]; then
+  "$clang" -O1 -c tests/lifecycle-tls.c -o "$out/delay-source.obj"
+  kernel32=$("$clang" -print-file-name=libkernel32.a)
+  "$tc/lld-link" /dll /nodefaultlib /entry:test_dll_entry /include:_tls_used /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/delay-source.dll" "$out/delay-source.obj" "$kernel32"
+  node tests/make-delay-fixture.js "$out/delay-source.dll" "$out/delay-tls.dll"
   "$clang++" -std=c++17 -O2 -static tests/strict-imports-host.cpp -o "$out/strict-imports-host.exe"
   env -u DP_PASS -u TS_AUTHKEY WINEDEBUG=-all wine "$out/strict-imports-host.exe" \
-    "$out/importer.dll" "$out/missing-name.dll" "$out/missing-ordinal.dll"
+    "$out/importer.dll" "$out/missing-name.dll" "$out/missing-ordinal.dll" "$out/delay-tls.dll"
 fi

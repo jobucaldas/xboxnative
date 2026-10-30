@@ -2,6 +2,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
+#include "../strict-policy/resolve-policy.h"
 // Minimal trusted-image loader: Wine virtual.c map_image_into_view's sequence
 // (copy, DIR64 relocation, protections) and loader.c import thunk fixup model.
 // No Wine code copied. Native static TLS uses a bounded packaged carrier slot.
@@ -24,6 +25,7 @@ struct Carrier {
     size_t capacity = 65536;
 };
 using Resolver = uintptr_t (*)(const char*,const char*, WORD);
+using ExecutionResolver = strict_policy::Decision (*)(const char*,const char*, WORD);
 struct Image {
     BYTE* base = nullptr; size_t size = 0;
     PRUNTIME_FUNCTION functions = nullptr;
@@ -135,7 +137,7 @@ struct Image {
         return !!ok;
     }
 };
-inline bool load_impl(Image& image, const wchar_t* path, Log log, Carrier carrier, Resolver resolve, bool mapped) {
+inline bool load_impl(Image& image, const wchar_t* path, Log log, Carrier carrier, Resolver resolve, bool mapped, ExecutionResolver execution) {
     logger = log;
     auto fail = [&](const char* why) { log(why); return false; };
     FILE* f = _wfopen(path, L"rb"); if (!f) return fail("WXL FAIL open LocalState image");
@@ -150,7 +152,7 @@ inline bool load_impl(Image& image, const wchar_t* path, Log log, Carrier carrie
     size_t secOff = size_t(dos->e_lfanew)+offsetof(IMAGE_NT_HEADERS64,OptionalHeader)+nt->FileHeader.SizeOfOptionalHeader;
     if (nt->Signature!=IMAGE_NT_SIGNATURE || nt->FileHeader.Machine!=IMAGE_FILE_MACHINE_AMD64 || h.Magic!=IMAGE_NT_OPTIONAL_HDR64_MAGIC || nt->FileHeader.SizeOfOptionalHeader!=sizeof h || h.NumberOfRvaAndSizes!=IMAGE_NUMBEROF_DIRECTORY_ENTRIES || !nt->FileHeader.NumberOfSections || !range(secOff,nt->FileHeader.NumberOfSections*sizeof(IMAGE_SECTION_HEADER),file.size())) return fail("WXL FAIL NT header");
     if (h.SectionAlignment!=4096 || !h.SizeOfImage || h.SizeOfImage> (mapped ? 512u : 32u)*1024*1024 || h.SizeOfImage%4096 || h.SizeOfHeaders<secOff+nt->FileHeader.NumberOfSections*sizeof(IMAGE_SECTION_HEADER) || h.SizeOfHeaders>file.size() || pages(h.SizeOfHeaders)>h.SizeOfImage) return fail("WXL FAIL image layout");
-    for (unsigned d : {IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR, IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG})
+    for (unsigned d : {IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR, IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG})
         if (!mapped && h.DataDirectory[d].Size) return fail("WXL FAIL unsupported runtime directory");
     auto sections=(const IMAGE_SECTION_HEADER*)(file.data()+secOff);
     size_t end=pages(h.SizeOfHeaders); bool entryCode=false;
@@ -184,6 +186,22 @@ inline bool load_impl(Image& image, const wchar_t* path, Log log, Carrier carrie
         }
         pos+=b->SizeOfBlock;
     }
+    // Only built-in exports or explicitly classified callable addresses may execute.
+    auto resolve_import = [&](const char* dll, const char* name, WORD ordinal, uintptr_t& address) {
+        address=0;
+        if (mapped && resolve) { address=resolve(dll,name,ordinal); return address!=0; }
+        if (!ordinal) for (auto& b:builtins)
+            if (!_stricmp(dll,b.dll) && !strcmp(name,b.name)) address=b.address;
+        if (!address && execution) {
+            auto decision=execution(dll,name,ordinal);
+            if (strict_policy::may_call(decision)) address=decision.address;
+        }
+        if (address) return true;
+        char reason[320];
+        if (name) snprintf(reason,sizeof reason,"IMPORT FAIL %s!%s reason=noncallable",dll,name);
+        else snprintf(reason,sizeof reason,"IMPORT FAIL %s!#%u reason=noncallable",dll,(unsigned)ordinal);
+        log(reason); return false;
+    };
     auto id=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT]; bool terminated=false;
     if (!id.Size || !image.valid(id.VirtualAddress,id.Size)) return fail("WXL FAIL import directory");
     for(size_t pos=id.VirtualAddress;range(pos,sizeof(IMAGE_IMPORT_DESCRIPTOR),size_t(id.VirtualAddress)+id.Size);pos+=sizeof(IMAGE_IMPORT_DESCRIPTOR)) {
@@ -202,18 +220,13 @@ inline bool load_impl(Image& image, const wchar_t* path, Log log, Carrier carrie
                 if(!name) return fail("WXL FAIL import name");
             }
             uintptr_t address=0;
-            if (mapped && resolve) address=resolve(dll,name,ordinal ? WORD(thunk) : 0);
-            else {
-                if (!ordinal) for(auto& b:builtins) if(!_stricmp(dll,b.dll)&&!strcmp(name,b.name)) address=b.address;
-                if (!address && resolve) address=resolve(dll,name,ordinal ? WORD(thunk) : 0);
-            }
-            if(!address) return fail("WXL FAIL unresolved builtin");
+            if (!resolve_import(dll,name,ordinal ? WORD(thunk) : 0,address)) return false;
             memcpy(image.base+dst,&address,8); imports++;
         }
     }
-    // Probe eagerly fixes RVA-based delay imports too; no delay helper executes.
+    // Eagerly fix RVA-based delay imports before guest callbacks or entry.
     auto delay=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
-    if(mapped && delay.Size) {
+    if(delay.Size) {
         struct Delay { DWORD attributes,name,module,iat,intab,bound,unload,timestamp; };
         if(!image.valid(delay.VirtualAddress,delay.Size)) return fail("WXL FAIL delay directory");
         bool ended=false;
@@ -221,7 +234,7 @@ inline bool load_impl(Image& image, const wchar_t* path, Log log, Carrier carrie
             auto d=(Delay*)(image.base+pos);
             if(!d->name && !d->iat && !d->intab) { ended=true; break; }
             auto dll=image.str(d->name);
-            if(d->attributes!=1 || !dll || !d->iat || !d->intab || !resolve) return fail("WXL FAIL delay descriptor");
+            if(d->attributes!=1 || !dll || !d->iat || !d->intab) return fail("WXL FAIL delay descriptor");
             for(size_t j=0;;j+=8) {
                 size_t src=size_t(d->intab)+j,dst=size_t(d->iat)+j;
                 if(!image.valid(src,8)||!image.valid(dst,8)) return fail("WXL FAIL delay thunk bounds");
@@ -231,8 +244,8 @@ inline bool load_impl(Image& image, const wchar_t* path, Log log, Carrier carrie
                     if(thunk>image.size || !image.valid(size_t(thunk),3)) return fail("WXL FAIL delay name bounds");
                     name=image.str(size_t(thunk)+2); if(!name) return fail("WXL FAIL delay name");
                 }
-                uintptr_t address=resolve(dll,name,ordinal?WORD(thunk):0);
-                if(!address) return fail("WXL FAIL unresolved delay import");
+                uintptr_t address=0;
+                if (!resolve_import(dll,name,ordinal?WORD(thunk):0,address)) return false;
                 memcpy(image.base+dst,&address,8); ++imports;
             }
         }
@@ -357,9 +370,10 @@ inline bool load_impl(Image& image, const wchar_t* path, Log log, Carrier carrie
     return true;
 }
 // Failed loads clean up immediately; live images cannot be overwritten.
-inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={}, Resolver resolve=nullptr, bool mapped=false) {
+inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={}, Resolver resolve=nullptr, bool mapped=false, ExecutionResolver execution=nullptr) {
+    if (!mapped && resolve) { log("WXL FAIL raw resolver requires probe mode"); return false; }
     if (image.base || image.functions || image.tlsKey!=TLS_OUT_OF_INDEXES) { log("WXL FAIL image already live"); return false; }
-    if (load_impl(image,path,log,carrier,resolve,mapped)) return true;
+    if (load_impl(image,path,log,carrier,resolve,mapped,execution)) return true;
     if (!image.close()) log("WXL FAIL cleanup incomplete");
     return false;
 }
