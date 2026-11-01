@@ -49,3 +49,31 @@ postlaunch list matched PID 6096. Inherited kernel checks and 300 native D3D11
 presents also passed. The process was absent at final cleanup (termination
 request returned HTTP 400); long-term host stability is not established.
 Off-device dispatch/Wine and import checks are separate from this console proof.
+
+# Pure launcher route
+
+`HidD_GetHidGuid` writes the documented `GUID_DEVINTERFACE_HID` class GUID,
+preserving last error. Its signature and behavior follow Wine 10 `hid.spec`
+and `dlls/hid/hidd.c`. Like Wine, it requires a valid writable GUID pointer.
+The function is pure and requires no host HID access or device registry.
+
+The launcher also resolves `HidD_GetAttributes` and `HidD_GetPreparsedData`.
+This route issues no HID collection handles,
+so these queries return FALSE with ERROR_INVALID_HANDLE and preserve all
+output bytes (including the preparsed-data output pointer). Wine 10 hidd.c
+performs its device query before writing these outputs. This differs from
+the older standalone stub above, which clears the preparsed-data pointer.
+No device, descriptor, report, or controller support is claimed. Guest
+handles never reach host HID services through this route. Other exports,
+including descriptor release, and ordinals remain unresolved. A future HID
+handle backend must replace the two unavailable-device routes together.
+
+`bash test.sh` runs off-device under Wine. It calls the resolved WINAPI
+pointer and compares the GUID and last error with Wine's HID export, checks
+buffer guards, and verifies resolver isolation. Query tests compare invalid
+handles and null outputs with Wine, including output bytes and last error.
+It does not test Xbox input.
+
+String queries remain unresolved: Wine probes the complete output span before
+validating most handles. Matching that order requires guest memory validation;
+a blanket invalid-handle result would hide invalid-user-buffer failures.

@@ -18,7 +18,7 @@ inline bool test(wxl::Log log) {
  unsigned implemented=0;
  for(auto name:imports){bool found=resolve("user32.dll",name)!=0;implemented+=found;std::string line=std::string("U32C user32 ")+name+(found?" implemented":" missing");log(line.c_str());}
  char summary[160];snprintf(summary,sizeof(summary),"U32C user32 total=%u implemented=%u missing=%u (complete direct+delay PE set)",unsigned(sizeof(imports)/sizeof(*imports)),implemented,unsigned(sizeof(imports)/sizeof(*imports))-implemented);log(summary);
- if(unsigned(sizeof(imports)/sizeof(*imports))-implemented>91){log("U32C FAIL missing-import gate");return false;}
+ if(unsigned(sizeof(imports)/sizeof(*imports))-implemented>15){log("U32C FAIL missing-import gate");return false;}
 
  WCHAR path[2048];DWORD n=GetModuleFileNameW(nullptr,path,2048);
  if(!n||n>=2048){log("U32C FAIL package path");return false;}

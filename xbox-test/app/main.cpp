@@ -43,6 +43,7 @@ extern "C" {
 extern "C" size_t ZSTD_decompress(void* dst, size_t dstCapacity, const void* src, size_t compressedSize);
 extern "C" unsigned ZSTD_isError(size_t code);
 #include "font8x8_basic.h"
+#include "../uwph/user32/corewindow_keyboard.h"
 
 using namespace winrt;
 using namespace winrt::Windows::ApplicationModel::Core;
@@ -652,6 +653,7 @@ static bool has(GamepadButtons b, GamepadButtons m) { return (b & m) != GamepadB
 
 struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     CoreWindow m_window{nullptr};
+    user32_core::CoreWindowKeyboard m_keyboard;
     bool m_closed = false;
     com_ptr<ID3D11Device> m_dev; com_ptr<ID3D11DeviceContext> m_ctx; com_ptr<IDXGISwapChain1> m_sc; com_ptr<ID3D11Texture2D> m_bb;
     Pad m_pad; int m_prevPads = -1; uint64_t m_frame = 0;
@@ -831,7 +833,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             CoreWindow::GetForCurrentThread().Activate();
         });
     }
-    void SetWindow(CoreWindow const& w) { m_window = w; w.Closed([this](auto&&, auto&&) { m_closed = true; g_quit = true; logf("window closed"); }); logf("SetWindow bounds=%.0fx%.0f", w.Bounds().Width, w.Bounds().Height); }
+    void SetWindow(CoreWindow const& w) { m_window = w; w.Closed([this](auto&&, auto&&) { m_closed = true; g_quit = true; logf("window closed"); }); logf("SetWindow bounds=%.0fx%.0f", w.Bounds().Width, w.Bounds().Height); logf("CoreWindow keyboard polling feed: %s", m_keyboard.attach(w) ? "attached" : "unavailable"); }
     void Load(hstring const&) {}
     void Uninitialize() { logf("Uninitialize"); }
 

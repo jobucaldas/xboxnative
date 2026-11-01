@@ -1,5 +1,12 @@
 #pragma once
 #include "../../uwph/user32/route.h"
+#include "../../uwph/winmm/route.h"
+#include "../../uwph/shlwapi/route.h"
+#include "../../uwph/shell32/route.h"
+#include "../../uwph/imm32/route.h"
+#include "../../uwph/hid/route.h"
+#include "../../uwph/gdi32/route.h"
+#include "../../uwph/opengl32/route.h"
 #include <map>
 #include <array>
 #include <utility>
@@ -83,6 +90,21 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     }
     if(auto audio=audio_routes::resolve(dll,name)) address=audio;
     if(auto core=user32_core::resolve(dll,name)) address=core;
+    if(!address && !_stricmp(dll,"winmm.dll")) address=winmm_core::resolve(dll,name, reinterpret_cast<winmm_core::WindowValidator>(
+        user32_core::resolve("user32.dll","IsWindow")));
+    if(!address) address=shlwapi_core::resolve(dll,name);
+    if(!address) address=shell32_core::resolve(dll,name);
+    if(!address) address=imm32_core::resolve(dll,name);
+    if(!address) address=hid_core::resolve(dll,name);
+    if(!address) address=opengl32_core::resolve(dll,name);
+    if(!address && !_stricmp(dll,"gdi32.dll")) {
+        static const auto caps=[]() -> gdi32_core::DeviceCaps {
+            HMODULE records=LoadPackagedLibrary(L"uwph-u32c.dll",0);
+            return records?reinterpret_cast<gdi32_core::DeviceCaps>(
+                GetProcAddress(records,"uwph_u32c_device_caps")):nullptr;
+        }();
+        address=gdi32_core::resolve(dll,name,caps);
+    }
     if(key=="kernel32.dll" && name && !address) {
         address=kernel_tail::resolve(name);
         log(("K32T ROUTE kernel32.dll!"+symbol+" found="+std::to_string(!!address)).c_str());
