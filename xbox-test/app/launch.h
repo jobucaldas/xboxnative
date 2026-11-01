@@ -68,7 +68,7 @@ static void lp_run_impl(LpCtx& c) {
     if(c.names.empty()) {c.failName="no executable";return;}
     auto exe=c.names.back();
     if(pe_machine(c.root+L"\\"+exe)==IMAGE_FILE_MACHINE_I386) {c.failName="32-bit x86 PE (the loader maps x64 images only)";lp_sink("PRUN FAIL 32-bit x86 PE (the loader maps x64 images only)");return;}
-    if(!play_runtime::start(c.root,exe,L"-screen-fullscreen 1 -force-d3d11 -logFile vis-player.log",lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
+    if(!play_runtime::start(c.root,exe,L"-screen-fullscreen 0 -force-d3d11 -logFile vis-player.log",lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
     auto r=play_runtime::state;
     if(r->worker) {
         ULONGLONG end=GetTickCount64()+110000;
@@ -127,7 +127,7 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
     }
     int gen = ++g_launch.gen; g_launch.appid = appid; g_launch.started = now_s();
     { std::lock_guard<std::mutex> l(g_launch.m); g_launch.result.clear(); } g_launch.phase = 1;
-    std::string args = appid == 3405340 ? "-screen-fullscreen 1 -force-d3d11 -logFile vis-player.log" : "";
+    std::string args = appid == 3405340 ? "-screen-fullscreen 0 -force-d3d11 -logFile vis-player.log" : "";
     char b[1500]; snprintf(b, sizeof b, "{\"appid\":%u,\"name\":\"%s\",\"installDir\":\"%s\",\"time\":\"%s\",\"args\":\"%s\",\"via\":\"%s\"}\n", appid, json_esc(name).c_str(), json_esc(dir).c_str(), utc_iso().c_str(), args.c_str(), via);
     write_text(g_dir + L"\\launch_request.json", b);
     logf("launch: request written LocalState\\launch_request.json appid=%u dir=%s via=%s", appid, dir.c_str(), via);

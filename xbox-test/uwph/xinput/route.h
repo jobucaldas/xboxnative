@@ -1,0 +1,119 @@
+#pragma once
+#include <windows.h>
+#include <xinput.h>
+#include <array>
+#include <mutex>
+#include <functional>
+#include <cstring>
+#include <cstdint>
+namespace xinput_core {
+using Rumble=std::function<DWORD(WORD,WORD)>;
+inline DWORD error_to_win32(HRESULT error) {
+    if(SUCCEEDED(error))return ERROR_SUCCESS;
+    if(error==E_ACCESSDENIED)return ERROR_ACCESS_DENIED;
+    if(error==E_NOTIMPL)return ERROR_NOT_SUPPORTED;
+    if(error==E_INVALIDARG)return ERROR_INVALID_PARAMETER;
+    if(error==HRESULT(0x80000013L))return ERROR_DEVICE_NOT_CONNECTED; // RO_E_CLOSED
+    if(HRESULT_FACILITY(error)==FACILITY_WIN32)return HRESULT_CODE(error);
+    return ERROR_GEN_FAILURE;
+}
+struct Slot {
+    bool connected=false;
+    XINPUT_STATE state{};
+    XINPUT_GAMEPAD hardware{};
+    XINPUT_VIBRATION vibration{};
+    Rumble rumble;
+};
+inline std::array<Slot,4> slots;
+inline std::mutex mutex;
+inline bool enabled=true;
+inline bool active=true;
+inline bool equal(const XINPUT_GAMEPAD& a,const XINPUT_GAMEPAD& b) {
+    return a.wButtons==b.wButtons && a.bLeftTrigger==b.bLeftTrigger &&
+        a.bRightTrigger==b.bRightTrigger && a.sThumbLX==b.sThumbLX &&
+        a.sThumbLY==b.sThumbLY && a.sThumbRX==b.sThumbRX && a.sThumbRY==b.sThumbRY;
+}
+// Called by the UI WGI poller. Slots retain controller identity across list
+// reordering; a disconnected slot is never reported as a neutral live device.
+inline void publish(unsigned index,const XINPUT_GAMEPAD* pad,Rumble rumble={}) {
+    if(index>=slots.size())return;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& slot=slots[index];
+    if(!pad){slot=Slot{};return;}
+    slot.hardware=*pad;
+    XINPUT_GAMEPAD visible=enabled && active?*pad:XINPUT_GAMEPAD{};
+    if(!slot.connected){slot.connected=true;slot.state.dwPacketNumber=1;}
+    else if(!equal(slot.state.Gamepad,visible))++slot.state.dwPacketNumber;
+    slot.state.Gamepad=visible;slot.rumble=std::move(rumble);
+}
+inline DWORD WINAPI get_state(DWORD index,XINPUT_STATE* state) {
+    if(index>=slots.size() || !state)return ERROR_BAD_ARGUMENTS;
+    std::lock_guard<std::mutex> lock(mutex);
+    if(!slots[index].connected)return ERROR_DEVICE_NOT_CONNECTED;
+    *state=slots[index].state;
+    state->Gamepad.wButtons&=~WORD(0x0400); // Guide is not exposed by GetState.
+    return ERROR_SUCCESS;
+}
+inline DWORD WINAPI set_state(DWORD index,XINPUT_VIBRATION* vibration) {
+    if(index>=slots.size() || !vibration)return ERROR_BAD_ARGUMENTS;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& slot=slots[index];
+    if(!slot.connected)return ERROR_DEVICE_NOT_CONNECTED;
+    if(!slot.rumble)return ERROR_NOT_SUPPORTED;
+    if(!enabled || !active){slot.vibration=*vibration;return ERROR_SUCCESS;}
+    DWORD result=slot.rumble(vibration->wLeftMotorSpeed,vibration->wRightMotorSpeed);
+    if(!result)slot.vibration=*vibration;
+    return result;
+}
+// Called under mutex when either guest feedback policy or CoreWindow focus
+// changes. Losing focus mutes feedback and input without losing guest policy.
+inline void refresh_locked() {
+    const bool visible=enabled && active;
+    for(auto& slot:slots)if(slot.connected) {
+        XINPUT_GAMEPAD pad=visible?slot.hardware:XINPUT_GAMEPAD{};
+        if(!equal(slot.state.Gamepad,pad))++slot.state.dwPacketNumber;
+        slot.state.Gamepad=pad;
+        if(slot.rumble)slot.rumble(visible?slot.vibration.wLeftMotorSpeed:0,visible?slot.vibration.wRightMotorSpeed:0);
+    }
+}
+inline void WINAPI enable(BOOL value) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if(enabled==!!value)return;
+    enabled=!!value;refresh_locked();
+}
+inline void set_active(bool value) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if(active==value)return;
+    active=value;refresh_locked();
+}
+inline DWORD WINAPI capabilities(DWORD index,DWORD,XINPUT_CAPABILITIES* caps) {
+    if(index>=slots.size() || !caps)return ERROR_BAD_ARGUMENTS;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& slot=slots[index];
+    if(!slot.connected)return ERROR_DEVICE_NOT_CONNECTED;
+    *caps={};caps->Type=XINPUT_DEVTYPE_GAMEPAD;caps->SubType=XINPUT_DEVSUBTYPE_GAMEPAD;
+    caps->Gamepad.wButtons=0xf3ff;
+    caps->Gamepad.bLeftTrigger=caps->Gamepad.bRightTrigger=255;
+    caps->Gamepad.sThumbLX=caps->Gamepad.sThumbLY=caps->Gamepad.sThumbRX=caps->Gamepad.sThumbRY=32767;
+    if(slot.rumble){caps->Flags=XINPUT_CAPS_FFB_SUPPORTED;caps->Vibration={65535,65535};}
+    return ERROR_SUCCESS;
+}
+inline DWORD WINAPI battery(DWORD index,BYTE,XINPUT_BATTERY_INFORMATION*) {
+    if(index>=slots.size())return ERROR_BAD_ARGUMENTS;
+    std::lock_guard<std::mutex> lock(mutex);
+    // No battery-report backend yet. Match Wine's honest unsupported path.
+    return slots[index].connected?ERROR_NOT_SUPPORTED:ERROR_DEVICE_NOT_CONNECTED;
+}
+inline uintptr_t resolve(const char* dll,const char* name) {
+    if(!dll || !name || (_stricmp(dll,"xinput1_4.dll") && _stricmp(dll,"xinput1_3.dll") &&
+        _stricmp(dll,"xinput9_1_0.dll")))return 0;
+    if(!strcmp(name,"XInputGetState"))return reinterpret_cast<uintptr_t>(&get_state);
+    if(!strcmp(name,"XInputSetState"))return reinterpret_cast<uintptr_t>(&set_state);
+    if(!strcmp(name,"XInputGetCapabilities"))return reinterpret_cast<uintptr_t>(&capabilities);
+    if(_stricmp(dll,"xinput9_1_0.dll")) {
+        if(!strcmp(name,"XInputEnable"))return reinterpret_cast<uintptr_t>(&enable);
+        if(!strcmp(name,"XInputGetBatteryInformation"))return reinterpret_cast<uintptr_t>(&battery);
+    }
+    return 0;
+}
+}

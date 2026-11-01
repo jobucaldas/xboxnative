@@ -66,3 +66,21 @@ independently checked 628-pair full Megabonk import set. Game entries, DllMain a
 TLS callbacks remain uncalled. Off-device Wine is only a development check;
 console evidence is required separately. `offdevice.cpp` deliberately substitutes
 desktop VM calls and cannot establish Xbox W^X behavior.
+
+Play integration also supplies a guest message queue (`message_queue.h`).
+`PeekMessageA/W` reads the calling thread's queue, supports window/child and
+message-range filters, PM_NOREMOVE/PM_REMOVE, thread-only filters, posted-message
+category masks and WM_QUIT. An empty queue leaves the caller's MSG unchanged.
+`PostMessageW`, `PostThreadMessageW` and `PostQuitMessage` enqueue real records;
+`DispatchMessageW` calls the record window procedure on its owning thread, or
+the supplied WM_TIMER callback. Destroyed-window messages are discarded.
+The queue never passes record HWNDs to native user32 and does not pump the UI's
+CoreDispatcher from a guest worker. The launcher continues that UI pump.
+
+This is a posted-message backend, not a complete Wine message server. Cross-thread
+synchronous sends, automatic timer/paint generation, keyboard translation,
+text/pointer marshalling and ANSI multibyte character delivery remain unsupported.
+PostMessageW rejects known pointer messages and non-ASCII character messages
+rather than claiming delivery with corrupted text. No native input is generated
+by the queue test. Run `message-queue-test.sh` against the packaged DLL for the
+off-device filtering, dispatch, destruction and thread-isolation regression.
