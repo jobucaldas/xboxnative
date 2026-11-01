@@ -14,7 +14,7 @@ assert 'U32C own mapped test entry=42; game entries remain uncalled' in probe
 rows = re.findall(r'^U32C user32 (\w+) (implemented|missing)$', probe, re.M)
 assert len(rows) == 121 and len(dict(rows)) == 121
 missing = sum(state == 'missing' for _, state in rows)
-assert missing <= 91
+assert missing <= 15
 assert dict(rows)['RegisterDeviceNotificationW'] == 'missing'
 assert dict(rows)['UnregisterDeviceNotification'] == 'missing'
 assert f'U32C user32 total=121 implemented={121-missing} missing={missing}' in probe

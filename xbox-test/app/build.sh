@@ -8,6 +8,11 @@ python3 "$here/donors/inspect.py"
 CB="${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}"
 UWP_OBJ_DIR="$out/obj" "$CB/scripts/build.sh" --uwp --out "$out/layout/xbtest.exe" --jobs 4 main.cpp qrcodegen.cpp vendor/zlib/inflate.c vendor/zlib/inftrees.c vendor/zlib/inffast.c vendor/zlib/adler32.c vendor/zlib/crc32.c vendor/zlib/zutil.c vendor/lzma/LzmaDec.c vendor/zstd/zstddeclib.c --link-arg bcrypt.lib -- /MT /O2 /DNDEBUG
 bash ../audio/build.sh "$out/layout"
+# Separate native TLS slots for mapped guest modules. Windows initializes each
+# carrier's static storage on every native guest thread; never replace GS/TEB.
+for slot in $(seq -w 0 15); do
+  UWP_OBJ_DIR="$out/carrier-$slot-obj" "$CB/scripts/build.sh" --uwp --out "$out/layout/play-tls-$slot.dll" --link-arg /dll ../uwph/host/tls_carrier.cpp -- /MT /O2 /GS-
+done
 bash ../uwph/user32/build.sh
 cp ../uwph/user32/out/layout/{uwph-u32c.dll,u32c-test.exe} "$out/layout/"
 # Nested packaged DLL proves SetDllDirectory affects an actual load.

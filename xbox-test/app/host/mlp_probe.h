@@ -1,5 +1,7 @@
+#include "../../uwph/gdi32/route.h"
 #pragma once
 #include "../../uwph/user32/route.h"
+#include "../../uwph/imm32/route.h"
 #include <map>
 #include <array>
 #include <utility>
@@ -22,6 +24,9 @@ static std::map<std::string, HMODULE> systems;
 static std::vector<std::string> stub_names;
 static wxl::Log log;
 static wxl::Resolver donor_resolve=nullptr;
+// Execution callers provide non-returning missing-import traps. Probe callers
+// retain their existing placeholders and never enter guest code.
+static uintptr_t (*missingResolver)(const char*,const char*,WORD) = nullptr;
 // Probe-only ABI: integer zero plus ERROR_CALL_NOT_IMPLEMENTED. These placeholders
 // are not a runnable implementation of arbitrary Win32 signatures (e.g. HRESULT,
 // floating returns or output parameters). No guest code may execute in this mode.
@@ -83,6 +88,15 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     }
     if(auto audio=audio_routes::resolve(dll,name)) address=audio;
     if(auto core=user32_core::resolve(dll,name)) address=core;
+    if(!address) address=imm32_core::resolve(dll,name);
+    if(!address && name && key=="gdi32.dll") {
+        static const auto caps=[]() -> gdi32_core::DeviceCaps {
+            HMODULE records=LoadPackagedLibrary(L"uwph-u32c.dll",0);
+            return records?reinterpret_cast<gdi32_core::DeviceCaps>(
+                GetProcAddress(records,"uwph_u32c_device_caps")):nullptr;
+        }();
+        address=gdi32_core::resolve(dll,name,caps);
+    }
     if(key=="kernel32.dll" && name && !address) {
         address=kernel_tail::resolve(name);
         log(("K32T ROUTE kernel32.dll!"+symbol+" found="+std::to_string(!!address)).c_str());
@@ -98,8 +112,9 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     ++sum.stubbed;
     bool planned=!strcmp(kind,"stub");
     if(!planned && sum.first=="none") sum.first=symbol;
-    std::string msg=std::string(planned?"MLP STUB ":"MLP MISSING ")+key+"!"+symbol+" route="+kind+" return=0 error=120 probe-only";
+    std::string msg=std::string(planned?"MLP STUB ":"MLP MISSING ")+key+"!"+symbol+" route="+kind+(missingResolver?" execution=fail-stop-trap":" return=0 error=120 probe-only");
     log(msg.c_str());
+    if(missingResolver) return missingResolver(dll,name,ordinal);
     if(stub_names.size()>=stub_functions.size()) { log("MLP FAIL stub capacity"); return 0; }
     stub_names.push_back(key+"!"+symbol);
     return stub_functions[stub_names.size()-1];
