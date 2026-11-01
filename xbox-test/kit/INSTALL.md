@@ -27,9 +27,9 @@ source in this repo or Microsoft docs.
    in Dev Home, "Games & Apps", highlight the app, press the Select/View
    button, choose view details, change App to Game.
 4. The kit files per package are `<name>.msix` plus its public `<name>.cer`
-   (publisher `CN=grok-xbox-dev`). Packages: `uwph`, `wxl`, `w32u`, `vrx`,
-   `launcher` (only present if the launcher worktree existed at build time),
-   plus the extra `wxl-test.exe`. The kit never contains a private key.
+   (publisher `CN=grok-xbox-dev`). Packages: `uwph`, `wxl`, `hid`, `mlp`, `tls`, `swc`, `w32u`,
+   `vrx`, `launcher` (only present if the launcher worktree existed at build
+   time), plus the extras `wxl-test.exe` and `swc-test.exe`. The kit never contains a private key.
 
 ## Install (pick route A or B)
 
@@ -42,7 +42,7 @@ file or log.
 1. For each package run
    `bash xbox-test/dp/install.sh <kit>/<name>.msix <kit>/<name>.cer`
    and wait for `INSTALL OK`. Order does not matter between `uwph`, `wxl`,
-   `w32u` and `vrx`. Installing does not launch anything.
+   `hid`, `mlp`, `tls`, `swc`, `w32u` and `vrx`. Installing does not launch anything.
 2. Do not uninstall `launcher` (`Grok.XboxTest`) to "reinstall": it holds the
    Steam login. Installing `launcher.msix` over the same identity upgrades in
    place (see `xbox-test/kit/README.md`). The uninstall script
@@ -77,6 +77,10 @@ TV. Full package name: `<Identity>_<Version>_x64__dk715arakrne0`; launch id:
 | --- | --- | --- | --- |
 | `uwph` | `k32.log` | `K32 RESULT failures=0` and `D3DT RESULT presented=300 hr=0x00000000` | window cycles colors for 300 frames, ends solid magenta |
 | `wxl` | `k32.log` | `WXL RESULT entry=42 failures=0` (first launch shows `WXL FAIL open` until step 4 below) | same window as `uwph` |
+| `hid` | `k32.log` | `HID RESULT failures=0` (and `HID-STUB-OK symbols=20 checks=23`) | same window as `uwph` |
+| `mlp` | `k32.log` | `MLP-PROBE-DONE` (only after the Megabonk files are uploaded, see step 6) | same window as `uwph` |
+| `tls` | `k32.log` | `WXL TLS RESULT failures=0` and `LIFECYCLE RESULT failures=0` | same window as `uwph` |
+| `swc` | `k32.log` | `SWC RESULT entry=42 failures=0` (after step 4b) | solid green frame |
 | `w32u` | `w32u.log` | `W32U RESULT failures=0` | 180 frames then solid green |
 | `vrx` | `vrx.log` | `vrx: all cases done`, and `caseC` line must say OK | window idles on a heartbeat frame |
 | `launcher` | `boot.log` | boot reaches the QR or library screen | Steam QR login or your library |
@@ -90,8 +94,14 @@ grep-checked in the source by `check-install-guide.sh`.
    stop the app with `bash xbox-test/dp/kill.sh '<wxl full name>'` (confirm with
    `bash xbox-test/dp/ps.sh wxl`; the HTTP status of kill is unreliable), then
    launch again.
+4b. `swc` guest upload: same as step 4 with `<kit>/swc-test.exe` and the `swc`
+   full name (sequence in `xbox-test/uwph/host/run-swc.sh`).
 5. Screenshot of what the TV shows (**[verified]**):
    `bash xbox-test/dp/screenshot.sh /tmp/shot.png`.
+
+6. `mlp` needs `Megabonk.exe`, `UnityPlayer.dll` and `baselib.dll` from your own
+   Steam install uploaded to `LocalState` first (they are not in the kit; the
+   sequence is in `xbox-test/uwph/host/run-mlp.sh`).
 
 ## Collect logs back
 

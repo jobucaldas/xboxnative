@@ -2,8 +2,8 @@
 # build-kit.sh [OUT_ROOT=/workspace/x64-run/kit]
 #
 # Builds every current signed test package into OUT_ROOT/<timestamp>/:
-# the merged uwph host (k32+ws+d3dt+wxl-mapper checks), the isolated wxl
-# identity, the w32u display-adapter spike, the vrx W^X probe, and (read-only,
+# the merged uwph host (k32+ws+d3dt+wxl-mapper checks), the isolated wxl,
+# hid, mlp, tls and swc host identities, the w32u display-adapter spike, the vrx W^X probe, and (read-only,
 # from the lane/dl worktree) the Grok.XboxTest launcher, if that worktree is
 # present. Each package gets its own self-signed .msix + public .cer (never
 # a .pfx). Writes manifest.json (identity, version, sha256 per package) and
@@ -60,6 +60,28 @@ echo "=== kit: wxl (isolated mapper identity) ==="
 bash xbox-test/uwph/host/build.sh "$tmp/host-wxl" wxl
 add_package wxl "$tmp/host-wxl/k32.msix" "$tmp/host-wxl/test.cer" xbox-test/uwph/host/AppxManifest.Wxl.xml
 
+# Every other host mode that build.sh produces (the modes smoke-all.sh and the
+# lane run scripts exercise). Same binaries, one isolated identity per mode.
+# cs32 (throwaway 32-bit compat-mode spike, concluded negative, uninstalled
+# from the console) is intentionally not shipped.
+echo "=== kit: hid (HID/SetupAPI stub identity) ==="
+bash xbox-test/uwph/host/build.sh "$tmp/host-hid" hid
+add_package hid "$tmp/host-hid/k32.msix" "$tmp/host-hid/test.cer" xbox-test/uwph/host/AppxManifest.Hid.xml
+
+echo "=== kit: mlp (Megabonk load probe identity) ==="
+bash xbox-test/uwph/host/build.sh "$tmp/host-mlp" mlp
+add_package mlp "$tmp/host-mlp/k32.msix" "$tmp/host-mlp/test.cer" xbox-test/uwph/host/AppxManifest.Mlp.xml
+
+echo "=== kit: tls (TLS / unwind / DllMain lifecycle identity) ==="
+bash xbox-test/uwph/host/build.sh "$tmp/host-tls" tls
+add_package tls "$tmp/host-tls/k32.msix" "$tmp/host-tls/test.cer" xbox-test/uwph/host/AppxManifest.Tls.xml
+
+echo "=== kit: swc (HWND swap chain on the CoreWindow identity) ==="
+bash xbox-test/uwph/host/build.sh "$tmp/host-swc" swc
+add_package swc "$tmp/host-swc/k32.msix" "$tmp/host-swc/test.cer" xbox-test/uwph/host/AppxManifest.Swc.xml
+# swc_test.exe guest is uploaded to LocalState (see run-swc.sh), like wxl-test.exe.
+add_extra swc-test.exe "$tmp/host-swc/layout/swc-test.exe" swc-test.exe
+
 echo "=== kit: w32u (CoreWindow display adapter) ==="
 bash xbox-test/uwph/display/build.sh "$tmp/display"
 add_package w32u "$tmp/display/w32u.msix" "$tmp/display/test.cer" xbox-test/uwph/display/AppxManifest.xml
@@ -74,6 +96,10 @@ add_package vrx "$tmp/vrx/vrx.msix" "$tmp/vrx/test.cer" xbox-test/vrx/AppxManife
 # anything else found is built best-effort and never aborts the whole kit.
 known_manifests="xbox-test/uwph/host/AppxManifest.xml
 xbox-test/uwph/host/AppxManifest.Wxl.xml
+xbox-test/uwph/host/AppxManifest.Hid.xml
+xbox-test/uwph/host/AppxManifest.Mlp.xml
+xbox-test/uwph/host/AppxManifest.Tls.xml
+xbox-test/uwph/host/AppxManifest.Swc.xml
 xbox-test/uwph/display/AppxManifest.xml
 xbox-test/vrx/AppxManifest.xml"
 while IFS= read -r manifest_xml; do
@@ -112,6 +138,9 @@ branch="$(git rev-parse --abbrev-ref HEAD)"
 py write-manifest "$kitdir/manifest.json" "$generated_at" "$commit" "$branch" < "$manifest_rows"
 
 ln -sfn "$stamp" "$out_root/latest"
+
+# Keep README's version table equal to what was just built.
+bash "$here/sync-readme-versions.sh" "$kitdir/manifest.json"
 
 echo "=== kit: built $kitdir ==="
 ls -l "$kitdir"
