@@ -23,6 +23,12 @@ jobs:
           set -e
           bash xbox-test/app/tests/session-restore.sh
           python3 -m unittest xbox-test/dp/test-verify-depot.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: offline VRX log reviewer tests
+        run: |
+          node --test xbox-test/vrx/tests/check-vrx-log.test.mjs xbox-test/vrx/tests/review-vrx-log.test.mjs
       - name: build scripts parse their pins (offline)
         run: |
           set -e
