@@ -2,6 +2,7 @@
 #pragma once
 #include "../../uwph/user32/route.h"
 #include "../../uwph/imm32/route.h"
+#include "../../uwph/kernel32/route.h"
 #include <map>
 #include <array>
 #include <utility>
@@ -67,11 +68,11 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     std::string symbol=name ? name : "#"+std::to_string(ordinal);
     const char* kind="unclassified";
     for(auto& route:routes) if(key==route.dll) kind=route.kind;
-    uintptr_t address=0;
-    if(!strcmp(kind,"wine-pe")) {
+    uintptr_t address=kernel32_core::resolve(dll,name);
+    if(!address && !strcmp(kind,"wine-pe")) {
         if(donor_resolve)address=donor_resolve(key.c_str(),name,ordinal);
         if(address)log(("DWPE ROUTE "+key+"!"+symbol).c_str());
-    } else if(!strcmp(kind,"system")) {
+    } else if(!address && !strcmp(kind,"system")) {
         auto it=systems.find(key);
         if(it==systems.end()) {
             std::wstring wide(key.begin(),key.end());
@@ -81,7 +82,7 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
             char msg[512]; snprintf(msg,sizeof msg,"MLP SYSTEM %s loaded=%d error=%lu",key.c_str(),!!module,module?0:GetLastError()); log(msg);
         }
         if(it->second) address=(uintptr_t)GetProcAddress(it->second,name ? name : MAKEINTRESOURCEA(ordinal));
-    } else if(!strcmp(kind,"uwph")) {
+    } else if(!address && !strcmp(kind,"uwph")) {
         auto it=assets.find(key);
         if(it!=assets.end()) address=asset_export(*it->second,name,ordinal);
         else if(name) for(auto& b:wxl::builtins) if(!_stricmp(dll,b.dll)&&!strcmp(name,b.name)) address=b.address;

@@ -3,9 +3,19 @@ extern "C" {
 thread_local int tls_value=73;
 thread_local int tls_count=0;
 DWORD _tls_index;
+#include "../../uwph/kernel32/guest_thread_exit_test.h"
+#include "../../uwph/kernel32/guest_loader_lifetime_test.h"
+#include "../../uwph/kernel32/guest_loader_thread_test.h"
+#include "../../uwph/kernel32/guest_loader_search_test.h"
 extern BYTE tls_raw[8];
 #pragma comment(linker,"/alternatename:tls_raw=tls_value")
-static void NTAPI callback(void*,DWORD reason,void*) {
+static void NTAPI callback(void* image,DWORD reason,void*) {
+#ifdef PLAY_DLL
+    observeLoaderDetach(image,reason,false);
+#else
+    (void)image;
+#endif
+    observeThreadTlsDetach(reason);
     if(reason==DLL_PROCESS_ATTACH||reason==DLL_THREAD_ATTACH){
         ++tls_value;++tls_count;
 #ifdef PLAY_DLL
@@ -23,7 +33,10 @@ extern const IMAGE_TLS_DIRECTORY64 _tls_used={
 #ifdef PLAY_DLL
 static int processAttached;
 __declspec(dllexport) int dependency_check(){return tls_value==74&&tls_count==1&&processAttached;}
-BOOL WINAPI guest_dll_entry(HINSTANCE,DWORD reason,void*) {
+BOOL WINAPI guest_dll_entry(HINSTANCE image,DWORD reason,void*) {
+    observeLoaderThread(image,reason);
+    observeLoaderDetach(image,reason,true);
+    observeThreadDllDetach(reason);
     if(reason==DLL_PROCESS_ATTACH){
 #ifdef PLAY_REJECT_ATTACH
         return FALSE;
@@ -39,6 +52,11 @@ __declspec(dllimport) int ForwardName();
 __declspec(dllimport) void ForwardSteam();
 static DWORD WINAPI child(void*){return tls_value==74&&tls_count==1&&dependency_check()?42:1;}
 static bool contains(const wchar_t* s,const wchar_t* p){for(;*s;++s){auto a=s,b=p;while(*b&&*a==*b){++a;++b;}if(!*b)return true;}return false;}
+static BOOL CALLBACK resourceName(HMODULE module,LPCSTR type,LPSTR name,LONG_PTR opaque) {
+    auto count=(unsigned*)opaque;
+    if(module!=GetModuleHandleW(nullptr)||type!=MAKEINTRESOURCEA(10)||name!=MAKEINTRESOURCEA(101))return FALSE;
+    ++*count;return TRUE;
+}
 DWORD guest_exe_entry(){
     if(tls_value!=74||tls_count!=1||!dependency_check())return 1;
     HMODULE main=GetModuleHandleW(nullptr);wchar_t path[512];
@@ -49,6 +67,54 @@ DWORD guest_exe_entry(){
     auto init=(Init)GetProcAddress(kernel,"InitializeCriticalSectionEx");
     if(!init||GetProcAddress(kernel,"DeliberatelyAbsentOptionalExport"))return 6;
     CRITICAL_SECTION section;if(!init(&section,0,0))return 7;DeleteCriticalSection(&section);
+    if(contains(GetCommandLineW(),L"loader-lifetime"))return testLoaderLifetime();
+    if(contains(GetCommandLineW(),L"loader-search"))return testLoaderSearch();
+    if(contains(GetCommandLineW(),L"loader-thread"))return testLoaderThreadNotifications();
+    if(contains(GetCommandLineW(),L"thread-exit")) {
+        DWORD result=testExplicitThreadExit();
+        if(result==42&&contains(GetCommandLineW(),L"thread-exit-main"))ExitThread(42);
+        return result;
+    }
+    if(contains(GetCommandLineW(),L"resource-query")) {
+        HRSRC resource=FindResourceA(nullptr,MAKEINTRESOURCEA(101),MAKEINTRESOURCEA(10));
+        if(!resource)return 28;
+        if(resource!=FindResourceA(main,MAKEINTRESOURCEA(101),MAKEINTRESOURCEA(10)))return 29;
+        if(resource!=FindResourceW(nullptr,MAKEINTRESOURCEW(101),MAKEINTRESOURCEW(10)))return 34;
+        if(SizeofResource(nullptr,resource)!=4||SizeofResource(main,resource)!=4)return 30;
+        HGLOBAL loaded=LoadResource(nullptr,resource);
+        auto data=(WORD*)LockResource(loaded);
+        if(!data||data[0]!=0x1234||data[1]!=0x5678)return 31;
+        unsigned count=0;
+        if(!EnumResourceNamesA(nullptr,MAKEINTRESOURCEA(10),resourceName,(LONG_PTR)&count)||count!=1)return 32;
+        SetLastError(0);
+        if(FindResourceA(nullptr,MAKEINTRESOURCEA(102),MAKEINTRESOURCEA(10))||GetLastError()!=ERROR_RESOURCE_NAME_NOT_FOUND)return 33;
+        resource=FindResourceA(nullptr,"Alpha","DataType");
+        if(!resource||SizeofResource(nullptr,resource)!=2)return 35;
+        data=(WORD*)LockResource(LoadResource(nullptr,resource));
+        if(!data||*data!=0xabcd)return 36;
+        if(resource!=FindResourceW(main,L"Alpha",L"DataType"))return 38;
+        return 42;
+    }
+    if(contains(GetCommandLineW(),L"loader-query")) {
+        using Header=void*(WINAPI*)(void*,void**);
+        auto header=(Header)GetProcAddress(kernel,"RtlPcToFileHeader");
+        void* base=nullptr;
+        if(!header||header((void*)&guest_exe_entry,&base)!=main||base!=main)return 19;
+        using BaseName=DWORD(WINAPI*)(HANDLE,HMODULE,LPWSTR,DWORD);
+        auto basename=(BaseName)GetProcAddress(kernel,"K32GetModuleBaseNameW");
+        wchar_t name[64]{};
+        if(!basename||basename(GetCurrentProcess(),main,name,64)!=14||!contains(name,L"play-guest.exe"))return 20;
+        if(basename(GetCurrentProcess(),nullptr,name,64)!=14||!contains(name,L"play-guest.exe"))return 21;
+        wchar_t shortName[5]={L'?',L'?',L'?',L'?',L'!'};
+        if(basename(GetCurrentProcess(),main,shortName,3)!=3||shortName[0]!=L'p'||shortName[1]!=L'l'||shortName[2]!=L'a'||shortName[3]!=L'?'||shortName[4]!=L'!')return 22;
+        if(basename(GetCurrentProcess(),main,shortName,0)||shortName[3]!=L'?')return 23;
+        SetLastError(0); if(basename(nullptr,main,name,64)||GetLastError()!=ERROR_INVALID_HANDLE)return 24;
+        void* native=(void*)GetProcAddress(kernel,"GetLastError");
+        if(!header(native,&base)||base==main)return 25;
+        base=main;if(header((void*)1,&base)||base)return 26;
+        SetLastError(73); if(header((void*)&guest_exe_entry,&base)!=main||GetLastError()!=73)return 27;
+        return 42;
+    }
     if(contains(GetCommandLineW(),L"reject-attach")) {
         SetLastError(0);
         if(LoadLibraryW(L"play-reject.dll"))return 16;
