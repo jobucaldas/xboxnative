@@ -8,13 +8,16 @@
 #define VirtualProtectFromApp VirtualProtect
 #include "../wxl_mapper.h"
 
-static unsigned marker_calls;
+static unsigned marker_calls, named_calls, ordinal_calls, resolver_misses, mapper_rejections;
 static int marker_value;
 static char last_missing[256];
 static int WINAPI callable_marker(int value);
-static int WINAPI callable_named(int value) { return value + 10; }
-static int WINAPI callable_ordinal(int value) { return value + 20; }
-static void log_line(const char* s) { puts(s); }
+static int WINAPI callable_named(int value) { ++named_calls; return value + 10; }
+static int WINAPI callable_ordinal(int value) { ++ordinal_calls; return value + 20; }
+static void log_line(const char* s) {
+    puts(s);
+    if (strcmp(s, "WXL FAIL unresolved builtin") == 0) ++mapper_rejections;
+}
 static uintptr_t resolve_fixture(const char* dll, const char* name, WORD ordinal) {
     char request[256]; snprintf(request, sizeof(request), "RESOLVE %s!%s ordinal=%u", dll, name ? name : "<ordinal>", (unsigned)ordinal); log_line(request);
     if (_stricmp(dll, "strict-host-callback.dll") == 0 && name && strcmp(name, "entry_marker") == 0)
@@ -23,6 +26,7 @@ static uintptr_t resolve_fixture(const char* dll, const char* name, WORD ordinal
     if (name && strcmp(name, "fixture_named") == 0) return (uintptr_t)&callable_named;
     if (!name && ordinal == 7) return (uintptr_t)&callable_ordinal;
 missing:
+    ++resolver_misses;
     char symbol[256];
     if (name) snprintf(symbol, sizeof(symbol), "%s!%s", dll, name);
     else snprintf(symbol, sizeof(symbol), "%s!#%u", dll, (unsigned)ordinal);
@@ -33,12 +37,16 @@ missing:
 }
 static int WINAPI callable_marker(int value) { ++marker_calls; marker_value = value; return value; }
 static bool run_case(const wchar_t* path, bool should_succeed, const char* expected_missing=nullptr) {
-    marker_calls = 0; marker_value = 0; last_missing[0]=0;
+    marker_calls = named_calls = ordinal_calls = resolver_misses = mapper_rejections = 0;
+    marker_value = 0; last_missing[0]=0;
     wxl::Image image;
     bool ok = wxl::load(image, path, log_line, {}, resolve_fixture, false);
     if (ok != should_succeed) return false;
-    return should_succeed ? (marker_calls == 1 && marker_value == 33)
-                          : (marker_calls == 0 && expected_missing && strcmp(last_missing, expected_missing)==0);
+    return should_succeed ? (marker_calls == 1 && marker_value == 33 && named_calls == 1 &&
+                             ordinal_calls == 1 && resolver_misses == 0 && mapper_rejections == 0)
+                          : (marker_calls == 0 && named_calls == 0 && ordinal_calls == 0 &&
+                             resolver_misses == 1 && mapper_rejections == 1 && expected_missing &&
+                             strcmp(last_missing, expected_missing)==0);
 }
 static bool arg_path(const char* arg, wchar_t* out, size_t cap) {
     return MultiByteToWideChar(CP_UTF8, 0, arg, -1, out, (int)cap) != 0;
