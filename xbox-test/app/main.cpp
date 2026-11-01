@@ -26,6 +26,8 @@
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.ApplicationModel.Activation.h>
 #include <winrt/Windows.UI.Core.h>
+#include <winrt/Windows.UI.Input.h>
+#include <winrt/Windows.Devices.Input.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Gaming.Input.h>
@@ -43,6 +45,10 @@ extern "C" {
 extern "C" size_t ZSTD_decompress(void* dst, size_t dstCapacity, const void* src, size_t compressedSize);
 extern "C" unsigned ZSTD_isError(size_t code);
 #include "font8x8_basic.h"
+#include <xinput.h>
+#include "../uwph/display/gamepad.h"
+#include "../uwph/keyboard/feed.h"
+#include "../uwph/pointer/feed.h"
 
 using namespace winrt;
 using namespace winrt::Windows::ApplicationModel::Core;
@@ -655,6 +661,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     bool m_closed = false;
     com_ptr<ID3D11Device> m_dev; com_ptr<ID3D11DeviceContext> m_ctx; com_ptr<IDXGISwapChain1> m_sc; com_ptr<ID3D11Texture2D> m_bb;
     Pad m_pad; int m_prevPads = -1; uint64_t m_frame = 0;
+    keyboard_core::Feed m_guestKeyboard;
+    pointer_core::Feed m_guestPointer;
+    std::atomic<bool> m_guestPresentation{false}; // Guest Release may run on a worker thread.
     int m_sel = 0, m_top = 0; double m_scroll = 0, m_scrollT = 0; bool m_btnFocus = true, m_confirmLogout = false;
     static constexpr int COLS = 6;
 
@@ -829,6 +838,131 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         });
     }
     void SetWindow(CoreWindow const& w) { m_window = w; w.Closed([this](auto&&, auto&&) { m_closed = true; g_quit = true; logf("window closed"); }); logf("SetWindow bounds=%.0fx%.0f", w.Bounds().Width, w.Bounds().Height); }
+    void PollGuestControllers() {
+        static std::array<Gamepad,4> assigned{nullptr,nullptr,nullptr,nullptr};
+        try {
+            auto pads=Gamepad::Gamepads();
+            for(auto& pad:assigned)if(pad) {
+                bool found=false;
+                for(auto const& current:pads)if(current==pad){found=true;break;}
+                if(!found)pad=nullptr;
+            }
+            for(auto const& pad:pads) {
+                bool found=false;
+                for(auto const& current:assigned)if(current==pad){found=true;break;}
+                if(!found)for(unsigned i=0;i<assigned.size();++i)if(!assigned[i]){xinput_core::publish(i,nullptr);assigned[i]=pad;break;}
+            }
+            for(unsigned i=0;i<assigned.size();++i) {
+                auto pad=assigned[i];
+                if(!pad){xinput_core::publish(i,nullptr);continue;}
+                try {
+                    auto state=convert_pad(pad.GetCurrentReading());
+                    xinput_core::publish(i,&state,[pad](WORD left,WORD right)->DWORD {
+                        try {
+                            GamepadVibration motors{};
+                            motors.LeftMotor=double(left)/65535.;motors.RightMotor=double(right)/65535.;
+                            pad.Vibration(motors);return ERROR_SUCCESS;
+                        } catch(winrt::hresult_error const& error){return xinput_core::error_to_win32(error.code());}
+                    });
+                } catch(winrt::hresult_error const&){xinput_core::publish(i,nullptr);}
+            }
+        } catch(winrt::hresult_error const&) {
+            for(unsigned i=0;i<assigned.size();++i)xinput_core::publish(i,nullptr);
+        }
+    }
+
+    void ConfigureGuestGraphics() {
+        graphics_core::trace=[](const char* message){logf("%s",message);};
+        HMODULE records = LoadPackagedLibrary(L"uwph-u32c.dll", 0);
+        m_guestKeyboard.sink=records?reinterpret_cast<keyboard_core::KeyEvent>(GetProcAddress(records,"uwph_u32c_key_event")):nullptr;
+        m_guestKeyboard.focus=records?reinterpret_cast<keyboard_core::TargetWindow>(GetProcAddress(records,"GetFocus")):nullptr;
+        m_guestKeyboard.foreground=records?reinterpret_cast<keyboard_core::TargetWindow>(GetProcAddress(records,"GetForegroundWindow")):nullptr;
+        m_guestKeyboard.post=records?reinterpret_cast<keyboard_core::PostMessage>(GetProcAddress(records,"PostMessageW")):nullptr;
+        m_guestPointer.foreground=m_guestKeyboard.foreground;
+        m_guestPointer.post=m_guestKeyboard.post;
+        m_guestPointer.key=m_guestKeyboard.sink;
+#define GFXIN_POINTER_EXPORT(field,name) m_guestPointer.field=records?reinterpret_cast<decltype(m_guestPointer.field)>(GetProcAddress(records,name)):nullptr
+        GFXIN_POINTER_EXPORT(client_rect,"GetClientRect");
+        GFXIN_POINTER_EXPORT(to_screen,"ClientToScreen");
+        GFXIN_POINTER_EXPORT(to_client,"ScreenToClient");
+        GFXIN_POINTER_EXPORT(set_position,"SetCursorPos");
+        GFXIN_POINTER_EXPORT(get_position,"GetCursorPos");
+        GFXIN_POINTER_EXPORT(key_state,"GetKeyState");
+#undef GFXIN_POINTER_EXPORT
+        auto pointer=[this](auto&&,PointerEventArgs const& event) {
+            auto point=event.CurrentPoint();
+            if(point.PointerDevice().PointerDeviceType()!=winrt::Windows::Devices::Input::PointerDeviceType::Mouse)return;
+            auto position=point.Position();auto properties=point.Properties();auto bounds=m_window.Bounds();
+            unsigned buttons=(properties.IsLeftButtonPressed()?MK_LBUTTON:0)|
+                (properties.IsRightButtonPressed()?MK_RBUTTON:0)|(properties.IsMiddleButtonPressed()?MK_MBUTTON:0)|
+                (properties.IsXButton1Pressed()?MK_XBUTTON1:0)|(properties.IsXButton2Pressed()?MK_XBUTTON2:0);
+            // A refused owner queue leaves the event unhandled. Cursor/key state
+            // still comes from the owning record backend, never native USER.
+            if(m_guestPointer.update(position.X,position.Y,bounds.Width,bounds.Height,buttons))event.Handled(true);
+        };
+        m_window.PointerMoved(pointer);
+        m_window.PointerPressed(pointer);
+        m_window.PointerReleased(pointer);
+        m_window.PointerCaptureLost([this](auto&&,PointerEventArgs const&){m_guestPointer.deactivate();});
+        m_window.KeyDown([this](auto&&,KeyEventArgs const& event){
+            auto status=event.KeyStatus();
+            m_guestKeyboard.key((unsigned)event.VirtualKey(),status.ScanCode,status.IsExtendedKey,true,status.RepeatCount);
+        });
+        m_window.KeyUp([this](auto&&,KeyEventArgs const& event){
+            auto status=event.KeyStatus();
+            m_guestKeyboard.key((unsigned)event.VirtualKey(),status.ScanCode,status.IsExtendedKey,false,status.RepeatCount);
+        });
+        m_window.CharacterReceived([this](auto&&,CharacterReceivedEventArgs const& event){
+            auto status=event.KeyStatus();
+            if(m_guestKeyboard.character(event.KeyCode(),status.ScanCode,status.IsExtendedKey,
+                status.IsMenuKeyDown,status.WasKeyDown,status.IsKeyReleased,status.RepeatCount))
+                event.Handled(true);
+        });
+        m_window.Activated([this](auto&&,WindowActivatedEventArgs const& event){
+            const bool active=event.WindowActivationState()!=CoreWindowActivationState::Deactivated;
+            if(!active){m_guestKeyboard.deactivate();m_guestPointer.deactivate();}
+            xinput_core::set_active(active);
+        });
+        logf("GFXIN keyboard state feed available=%d message queue=%d",!!m_guestKeyboard.sink,!!m_guestKeyboard.post);
+        auto valid = records ? reinterpret_cast<graphics_core::ValidWindow>(GetProcAddress(records, "IsWindow")) : nullptr;
+        graphics_core::configure(valid, [this](IDXGIFactory2* factory, ::IUnknown* device, HWND,
+            const DXGI_SWAP_CHAIN_DESC1* desc, IDXGIOutput* output, IDXGISwapChain1** chain) -> HRESULT {
+            // Keep all captured COM objects alive through dispatch completion.
+            struct Request {
+                com_ptr<IDXGIFactory2> factory;
+                com_ptr<::IUnknown> device;
+                com_ptr<IDXGIOutput> output;
+                com_ptr<IDXGISwapChain1> chain;
+                DXGI_SWAP_CHAIN_DESC1 desc;
+                HRESULT result = E_FAIL;
+            };
+            auto request = std::make_shared<Request>();
+            request->factory.copy_from(factory); request->device.copy_from(device);
+            request->output.copy_from(output); request->desc = *desc;
+            auto create = [this, request] {
+                // DXGI permits one flip chain per CoreWindow. Unbind and release
+                // every launcher backbuffer reference before handing it over.
+                if (m_guestPresentation) { request->result = DXGI_ERROR_INVALID_CALL; return; }
+                m_ctx->ClearState(); m_bb = nullptr; m_sc = nullptr; m_ctx->Flush();
+                request->result = request->factory->CreateSwapChainForCoreWindow(request->device.get(),
+                    (::IUnknown*)winrt::get_abi(m_window), &request->desc, request->output.get(), request->chain.put());
+                m_guestPresentation = SUCCEEDED(request->result);
+                logf("GFXIN CoreWindow handoff hr=0x%08lx guest=%d", (unsigned long)request->result, m_guestPresentation.load());
+                if (!m_guestPresentation) {
+                    m_ctx = nullptr; m_dev = nullptr;
+                    if (!InitD3D()) logf("GFXIN launcher swapchain restoration failed");
+                }
+            };
+            try {
+                auto dispatcher = m_window.Dispatcher();
+                if (dispatcher.HasThreadAccess()) create();
+                else dispatcher.RunAsync(CoreDispatcherPriority::Normal, create).get();
+            } catch (winrt::hresult_error const& error) { return error.code(); }
+            if (SUCCEEDED(request->result)) *chain = request->chain.detach();
+            return request->result;
+        }, [this] { m_guestPresentation.store(false); });
+        logf("GFXIN record-window validator available=%d", !!valid);
+    }
     void Load(hstring const&) {}
     void Uninitialize() { logf("Uninitialize"); }
 
@@ -1004,16 +1138,23 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void Run() {
         logf("Run: entering"); m_window.Activate();
         if (!InitD3D()) { logf("D3D init FAILED; idling"); while (!m_closed) { m_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessOneAndAllPending); Sleep(50); } return; }
+        ConfigureGuestGraphics();
         std::thread(net_thread).detach();
         double lastBeat = 0;
         while (!m_closed) {
             m_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
+            PollGuestControllers();
             auto pads = Gamepad::Gamepads(); size_t n = pads.Size(); GamepadReading rd{};
             if ((int)n != m_prevPads) { logf("gamepads connected: %zu", n); m_prevPads = (int)n; }
             double t = now_s();
             if (n) rd = pads.GetAt(0).GetCurrentReading();
-            input(t, rd, n > 0);
-            autotest(t); cmdhook(t); detail_tick(t);
+            // After handoff, the controller belongs to the guest. Hidden
+            // launcher navigation must not consume B/Menu or start downloads.
+            if (!m_guestPresentation) {
+                input(t, rd, n > 0);
+                autotest(t); cmdhook(t); detail_tick(t);
+            }
+            if (m_guestPresentation || !m_bb || !m_sc) { Sleep(10); continue; }
             draw(t);
             m_ctx->UpdateSubresource(m_bb.get(), 0, nullptr, g_fb.data(), W * 4, 0);
             HRESULT hr = m_sc->Present(1, 0);

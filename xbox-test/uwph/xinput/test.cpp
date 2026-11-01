@@ -1,0 +1,82 @@
+#include "modules.h"
+#include <cstdio>
+#define CHECK(x) do { if(!(x)){printf("FAIL %d: %s\n",__LINE__,#x);return 1;} } while(0)
+int main() {
+    using namespace xinput_core;
+    CHECK(error_to_win32(E_ACCESSDENIED)==ERROR_ACCESS_DENIED);
+    CHECK(error_to_win32(E_NOTIMPL)==ERROR_NOT_SUPPORTED);
+    CHECK(error_to_win32(HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED))==ERROR_DEVICE_NOT_CONNECTED);
+    CHECK(error_to_win32(E_FAIL)==ERROR_GEN_FAILURE);
+    XINPUT_STATE state;memset(&state,0xa5,sizeof state);
+    CHECK(get_state(0,&state)==ERROR_DEVICE_NOT_CONNECTED && state.dwPacketNumber==0xa5a5a5a5);
+    CHECK(get_state(4,&state)==ERROR_BAD_ARGUMENTS);
+    CHECK(get_state(0,nullptr)==ERROR_BAD_ARGUMENTS);
+    // Differential: Wine 10's disconnected and invalid-index ABI/error paths.
+    HMODULE wine=LoadLibraryW(L"xinput1_3.dll");CHECK(wine);
+    auto reference=reinterpret_cast<decltype(&get_state)>(GetProcAddress(wine,"XInputGetState"));CHECK(reference);
+    CHECK(reference(4,&state)==get_state(4,&state));
+    CHECK(reference(0,nullptr)==get_state(0,nullptr));
+    // Host regression: a real WGI poller is replaced by explicit readings here.
+    XINPUT_GAMEPAD pad{};pad.wButtons=XINPUT_GAMEPAD_A;pad.sThumbLX=-32768;pad.bRightTrigger=255;
+    unsigned writes=0;WORD left=0,right=0;DWORD failure=0;
+    auto rumble=[&](WORD a,WORD b){++writes;left=a;right=b;return failure;};
+    publish(0,&pad,rumble);
+    CHECK(get_state(0,&state)==0 && state.dwPacketNumber==1 && equal(state.Gamepad,pad));
+    publish(0,&pad,rumble);CHECK(get_state(0,&state)==0 && state.dwPacketNumber==1);
+    pad.wButtons|=XINPUT_GAMEPAD_B;publish(0,&pad,rumble);
+    CHECK(get_state(0,&state)==0 && state.dwPacketNumber==2 && equal(state.Gamepad,pad));
+    XINPUT_CAPABILITIES caps{};CHECK(capabilities(0,0,&caps)==0);
+    CHECK(caps.Type==XINPUT_DEVTYPE_GAMEPAD && caps.SubType==XINPUT_DEVSUBTYPE_GAMEPAD);
+    CHECK(caps.Flags & XINPUT_CAPS_FFB_SUPPORTED);
+    CHECK(caps.Vibration.wLeftMotorSpeed==65535);
+    XINPUT_VIBRATION motors{1234,65535};
+    CHECK(set_state(0,&motors)==0 && writes==1 && left==1234 && right==65535);
+    enable(FALSE);CHECK(writes==2 && !left && !right);
+    CHECK(get_state(0,&state)==0 && equal(state.Gamepad,XINPUT_GAMEPAD{}));
+    motors={222,333};CHECK(set_state(0,&motors)==0 && writes==2);
+    pad.wButtons=XINPUT_GAMEPAD_X;publish(0,&pad,rumble);
+    CHECK(get_state(0,&state)==0 && !state.Gamepad.wButtons);
+    enable(TRUE);CHECK(writes==3 && left==222 && right==333);
+    CHECK(get_state(0,&state)==0 && equal(state.Gamepad,pad));
+    auto packet=state.dwPacketNumber;
+    set_active(false);CHECK(!left && !right);
+    CHECK(get_state(0,&state)==0 && !state.Gamepad.wButtons && state.dwPacketNumber==packet+1);
+    motors={444,555};auto writesBefore=writes;
+    CHECK(set_state(0,&motors)==0 && writes==writesBefore);
+    pad.wButtons=XINPUT_GAMEPAD_Y;publish(0,&pad,rumble);
+    CHECK(get_state(0,&state)==0 && !state.Gamepad.wButtons);
+    enable(FALSE);set_active(true);
+    CHECK(get_state(0,&state)==0 && !state.Gamepad.wButtons && !left && !right);
+    enable(TRUE);CHECK(left==444 && right==555);
+    CHECK(get_state(0,&state)==0 && equal(state.Gamepad,pad));
+        failure=ERROR_DEVICE_NOT_CONNECTED;
+    CHECK(set_state(0,&motors)==ERROR_DEVICE_NOT_CONNECTED);
+    CHECK(battery(0,0,nullptr)==ERROR_NOT_SUPPORTED);
+    publish(0,nullptr);
+    CHECK(get_state(0,&state)==ERROR_DEVICE_NOT_CONNECTED);
+    CHECK(set_state(0,&motors)==ERROR_DEVICE_NOT_CONNECTED);
+    CHECK(battery(0,0,nullptr)==ERROR_DEVICE_NOT_CONNECTED);
+    publish(1,&pad);
+    CHECK(capabilities(1,0,&caps)==0 && !caps.Flags && !caps.Vibration.wLeftMotorSpeed);
+    CHECK(set_state(1,&motors)==ERROR_NOT_SUPPORTED);
+    CHECK(resolve("XINPUT1_4.DLL","XInputGetState"));
+    CHECK(resolve("xinput1_3.dll","XInputSetState"));
+    CHECK(resolve("xinput9_1_0.dll","XInputGetCapabilities"));
+    CHECK(!resolve("xinput9_1_0.dll","XInputEnable"));
+    CHECK(!resolve("xinput1_4.dll","XInputGetKeystroke"));
+    CHECK(!resolve(nullptr,"XInputGetState"));
+    CHECK(!resolve("xinput1_4.dll",nullptr));
+    CHECK(!find_module("xinput1_4.dll",false));
+    HMODULE handle=find_module("XINPUT1_4.DLL",true);CHECK(handle);
+    CHECK(find_module("xinput1_4.dll",false)==handle);
+    CHECK(find_module("xinput1_4.dll",true)==handle);
+    auto identity=module(handle);CHECK(identity && identity->references==2);
+    CHECK(module_proc(identity,"XInputGetState")==reinterpret_cast<FARPROC>(&get_state));
+    SetLastError(0);CHECK(!module_proc(identity,"XInputGetKeystroke") && GetLastError()==ERROR_PROC_NOT_FOUND);
+    CHECK(!module_proc(identity,MAKEINTRESOURCEA(100)));
+    CHECK(release_module(identity) && identity->references==1);
+    CHECK(release_module(identity) && !find_module("xinput1_4.dll",false));
+    SetLastError(0);CHECK(!release_module(identity) && GetLastError()==ERROR_INVALID_HANDLE);
+    CHECK(!module(reinterpret_cast<HMODULE>(0x1234)));
+    puts("XInput: Wine invalid arguments; host packets, buttons, axes, disconnect, capabilities, feedback and enable PASS");
+}

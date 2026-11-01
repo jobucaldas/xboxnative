@@ -1,4 +1,5 @@
 #pragma once
+#include "../../uwph/xinput/modules.h"
 // Play owns mapped images for the application's lifetime. Windows owns the
 // actual AppContainer PEB/TEB, native threads and static TLS carrier slots.
 // Guest process APIs below expose the guest identity without rewriting the
@@ -100,6 +101,7 @@ static void WINAPI rtlExit(LONG code) { exitProcess(UINT(code)); }
 static LPWSTR WINAPI commandW() { return state->command.data(); }
 static LPSTR WINAPI commandA() { return state->commandA.data(); }
 static HMODULE WINAPI moduleW(LPCWSTR name) {
+    if(name)if(auto input=xinput_core::find_module(basename(name).c_str(),false))return input;
     if(!name) return (HMODULE)state->exe->image.base;
     if(auto m=named(name)) return (HMODULE)m->image.base;
     using Fn=HMODULE(WINAPI*)(LPCWSTR); auto fn=(Fn)kernel_tail::native("GetModuleHandleW");
@@ -112,6 +114,7 @@ static DWORD copyPath(const std::wstring& path,LPWSTR out,DWORD capacity) {
     if(path.size()>=capacity) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return capacity; } return DWORD(n);
 }
 static DWORD WINAPI filenameW(HMODULE handle,LPWSTR out,DWORD size) {
+    if(xinput_core::module(handle)){SetLastError(ERROR_NOT_SUPPORTED);return 0;}
     auto m=handle?find(handle):state->exe;
     if(m) return copyPath(m->path,out,size);
     using Fn=DWORD(WINAPI*)(HMODULE,LPWSTR,DWORD); auto fn=(Fn)kernel_tail::native("GetModuleFileNameW"); return fn?fn(handle,out,size):0;
@@ -123,6 +126,13 @@ static DWORD WINAPI filenameA(HMODULE handle,LPSTR out,DWORD size) {
 }
 static BOOL WINAPI moduleExW(DWORD flags,LPCWSTR name,HMODULE* out) {
     if(!out || ((flags&GET_MODULE_HANDLE_EX_FLAG_PIN)&&(flags&GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT))) {SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
+    if(!(flags&GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS) && name) {
+        if(auto input=xinput_core::find_module(basename(name).c_str(),false)) {
+            if(flags & ~(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT)) {SetLastError(ERROR_NOT_SUPPORTED);return FALSE;}
+            if(!(flags&GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT))xinput_core::find_module(basename(name).c_str(),true);
+            *out=input;return TRUE;
+        }
+    }
     if(flags&GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS) {
         for(auto& m:state->modules) if((uintptr_t)name>=(uintptr_t)m->image.base && (uintptr_t)name-(uintptr_t)m->image.base<m->image.size) {*out=(HMODULE)m->image.base;return TRUE;}
     } else { auto m=name?named(name):state->exe; if(m){*out=(HMODULE)m->image.base;return TRUE;} }
@@ -145,6 +155,7 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
      m=named(requested);if(!m){std::wstring p=requested;if(p.find(L':')==std::wstring::npos && (p.empty()||p[0]!=L'\\'))p=state->root+L"\\"+p;if(exists(p))m=map(p);}
     }
     if(m) { if(!initializePending()) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;} return (HMODULE)m->image.base; }
+    if(auto input=xinput_core::find_module(key.c_str(),true))return input;
     // Restrict fallback to documented system DLL search, never desktop paths.
     auto result=LoadLibraryExW(requested.c_str(),nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
     if(!result) {DWORD error=GetLastError();state->event("LoadLibrary failed name="+narrow(requested)+" error="+std::to_string(error));SetLastError(error);}
@@ -153,7 +164,7 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
 static HMODULE WINAPI loadW(LPCWSTR name) { return loadExW(name,nullptr,0); }
 static HMODULE WINAPI loadExA(LPCSTR name,HANDLE f,DWORD flags) { auto w=wide(name);return loadExW(name?w.c_str():nullptr,f,flags); }
 static HMODULE WINAPI loadA(LPCSTR name) { return loadExA(name,nullptr,0); }
-static BOOL WINAPI freeLibrary(HMODULE h) { if(find(h)) return TRUE; return FreeLibrary(h); }
+static BOOL WINAPI freeLibrary(HMODULE h) { if(auto input=xinput_core::module(h))return xinput_core::release_module(input); if(find(h)) return TRUE; return FreeLibrary(h); }
 // Wine ntdll/loader.c find_forwarded_export resolves the last dot as the
 // DLL/symbol separator, supports #ordinals and records a module dependency.
 // Keep this execution behavior separate from the non-executing import probe.
@@ -208,6 +219,7 @@ static bool isMissingTrap(uintptr_t p) {
     return std::find(trapFunctions.begin(),trapFunctions.end(),p)!=trapFunctions.end();
 }
 static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
+    if(auto input=xinput_core::module(h))return xinput_core::module_proc(input,name);
     if(auto m=find(h)) {
         WORD ordinal=IS_INTRESOURCE(name)?WORD((uintptr_t)name):0;
         std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);

@@ -2,6 +2,12 @@
 #pragma once
 #include "../../uwph/user32/route.h"
 #include "../../uwph/imm32/route.h"
+#include "../../uwph/graphics/route.h"
+#include "../../uwph/xinput/route.h"
+#include "../../uwph/hid/route.h"
+#include "../../uwph/dinput/route.h"
+#include "../../uwph/rawinput/route.h"
+#include "../../uwph/keyboard/route.h"
 #include <map>
 #include <array>
 #include <utility>
@@ -87,8 +93,16 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
         else if(name) for(auto& b:wxl::builtins) if(!_stricmp(dll,b.dll)&&!strcmp(name,b.name)) address=b.address;
     }
     if(auto audio=audio_routes::resolve(dll,name)) address=audio;
+    if(auto graphics=graphics_core::resolve(dll,name,ordinal)) address=graphics;
+    if(auto input=xinput_core::resolve(dll,name)) address=input;
     if(auto core=user32_core::resolve(dll,name)) address=core;
+    // Production has no raw packet handles. Supersede the older record DLL's
+    // size-query placeholders with typed, Wine-tested no-endpoint semantics.
+    if(auto raw=rawinput_core::resolve(dll,name)) address=raw;
     if(!address) address=imm32_core::resolve(dll,name);
+    if(!address) address=hid_core::resolve(dll,name);
+    if(!address) address=dinput_core::resolve(dll,name);
+    if(!address) address=keyboard_core::resolve(dll,name);
     if(!address && name && key=="gdi32.dll") {
         static const auto caps=[]() -> gdi32_core::DeviceCaps {
             HMODULE records=LoadPackagedLibrary(L"uwph-u32c.dll",0);
