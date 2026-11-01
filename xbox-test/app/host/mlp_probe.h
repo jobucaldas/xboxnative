@@ -2,6 +2,8 @@
 #pragma once
 #include "../../uwph/user32/route.h"
 #include "../../uwph/imm32/route.h"
+#include "../../uwph/sysx/native.h"
+#include "../../uwph/dwmapi/route.h"
 #include <map>
 #include <array>
 #include <utility>
@@ -88,7 +90,14 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     }
     if(auto audio=audio_routes::resolve(dll,name)) address=audio;
     if(auto core=user32_core::resolve(dll,name)) address=core;
-    if(!address) address=imm32_core::resolve(dll,name);
+    if(!address) address=imm32_core::resolve(dll,name, reinterpret_cast<imm32_core::IsWindow>(
+        user32_core::resolve("user32.dll","IsWindow")));
+    // Override system DWM before a guest record HWND can reach desktop DWM.
+    if(key=="dwmapi.dll" && name) address=dwmapi_core::resolve(dll,name,
+        reinterpret_cast<dwmapi_core::IsWindow>(user32_core::resolve("user32.dll","IsWindow")),
+        reinterpret_cast<dwmapi_core::WindowRect>(user32_core::resolve("user32.dll","GetWindowRect")),
+        reinterpret_cast<dwmapi_core::WindowLong>(user32_core::resolve("user32.dll","GetWindowLongPtrW")));
+    if(!address) address=sysx_native::resolve(dll,name);
     if(!address && name && key=="gdi32.dll") {
         static const auto caps=[]() -> gdi32_core::DeviceCaps {
             HMODULE records=LoadPackagedLibrary(L"uwph-u32c.dll",0);
@@ -106,7 +115,7 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
         if(address)log(("K32T SYSTEM "+key+"!"+symbol).c_str());
     }
     static bool tested=false;
-    if(!tested) { tested=true; audio_routes::discover(log); audio_probe::run(log); kernel_tail::test(log); kernel_tail::test_search(log); pe_tail::discover(log); pe_tail::test(log); }
+    if(!tested) { tested=true; audio_routes::discover(log); audio_probe::run(log); kernel_tail::test(log); kernel_tail::test_search(log); pe_tail::discover(log); pe_tail::test(log); sysx_native::discover(log); }
     auto& sum=summaries[key];
     if(address) { ++sum.resolved; return address; }
     ++sum.stubbed;
