@@ -350,3 +350,19 @@ Wine's own dependencies; native dependency routing can avoid that Unix closure.
 They do not forbid every export from executing, nor certify arbitrary exports.
 The original CSVs remain unchanged. All eight classification tests pass with
 exact-byte historical-oracle proof and a separate current-policy routing check.
+
+
+### D / item 43 — upmp prerequisite correction (2026-10-26)
+
+Items 37 and 42 alone do not enable the Unity message-pump acceptance gate.
+At lane/upmp base 86960ae8, launcher launch.h lp_run_impl passes a non-null Image
+output to wxl::run. wxl_mapper.h's mapped branch returns before TLS/unwind
+initialization and guest entry; launch_result.json reports gameCodeExecuted=false.
+Standalone mapper/test-PE execution and the SWC triangle are separate paths.
+A real Play runtime that initializes dependencies and enters UnityPlayer is an
+additional prerequisite. Host dispatcher iterations or the launcher UI screenshot
+cannot substitute for Unity calling GetMessage/PeekMessage 300 times.
+Wine user32/message.c delegates queue operations to NtUser; win32u/message.c
+implements driver-event processing, filtering, blocking waits, errors and WM_QUIT.
+DispatchMessage also has timer callback and paint semantics. CSV export presence
+or static reachability does not establish these runtime behaviors.
