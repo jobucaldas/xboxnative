@@ -1,0 +1,1 @@
+DWPE PASS donors=5 donor-IAT=22 historical-STUB-gap=26 hid/setupapi/winmm=7

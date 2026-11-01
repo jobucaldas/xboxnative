@@ -538,6 +538,7 @@ static void dl_thread() {
 }
 
 #include "launch.h"
+#include "apibadge.h"
 
 // definitive refusals mean the saved token is bad; anything else (network, CM busy) keeps the token and retries
 #include "session_restore.h"
@@ -746,6 +747,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (si && si->img == 1) blit(si->hdr.pix, si->hdr.iw, si->hdr.ih, 60 + (616 - si->hdr.iw) / 2, 130 + (353 - si->hdr.ih) / 2);
         else text(60 + 308 - twidth(si && si->img == 2 ? "no image" : "loading image...", 3) / 2, 290, si && si->img == 2 ? "no image" : "loading image...", 3, DIM);
         frame(60, 130, 616, 353, 3, C3(60, 70, 88));
+        apib::Result gfx = apib::combine(apib::lookup(m_dApp), si && st == 1 ? si->dxKind : 0, si ? si->dxNote : std::string()); apib::draw(70, 140, 3, gfx);
         // install state
         int dl = g_dl.state; bool mine = g_dl.appid == m_dApp, down = mine && dl == 1, queued = !down && is_queued(m_dApp), launching = g_launch.phase == 1 && g_launch.appid == m_dApp;
         std::string status; uint32_t sc = TXT;
@@ -774,7 +776,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (st == 1) { addm("Price: ", si->price); addm("Released: ", si->release); addm("Developer: ", si->dev); addm("Genres: ", si->genres); }
         std::string lib = owned(m_dApp) ? "Owned (in your library)" : g_demo ? "" : "Not in your library list";
         if (!lib.empty()) meta.insert(meta.begin() + (st == 1 && !meta.empty() ? 1 : 0), "Library: " + lib);
-        int y = 130; for (size_t i = 0; i < meta.size() && i < 7; i++, y += 36) text(740, y, meta[i], 3, i == 0 && st == 1 ? YEL : TXT);
+        { std::string gl = "Graphics: " + apib::describe(gfx); if (!gfx.note.empty() && gfx.src == 1 && gfx.kind != apib::K_D3D11) gl += " [" + gfx.note + "]"; for (auto& l : wrap_lines(gl, 46)) meta.push_back(l); }
+        int y = 130; for (size_t i = 0; i < meta.size() && i < 8; i++, y += 36) text(740, y, meta[i], 3, i == 0 && st == 1 ? YEL : meta[i].rfind("Graphics: ", 0) == 0 ? (gfx.kind == apib::K_D3D11 ? GRN : gfx.kind == apib::K_LEGACY || gfx.kind == apib::K_D3D12 ? DIM : TXT) : TXT);
         y += 14; int dy0 = y, dy1 = 790;
         if (st == 0) text(740, dy0, "Loading store info...", 3, DIM);
         else if (st == 2) { text(740, dy0, "Store info unavailable", 3, RED); text(740, dy0 + 40, "You can still install and play.", 3, DIM); if (si && !si->why.empty()) text(740, dy0 + 80, clip(si->why, 70), 2, DIM); }
@@ -906,6 +909,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 text(cx + 8, cy + COVER_H - 56, sb, 1, C3(255, 255, 255));
                 std::string dm; { std::lock_guard<std::mutex> ml(g_dl.m); dm = g_dl.msg; } text(cx + 8, cy + COVER_H - 40, clip(dm, 32), 1, C3(190, 200, 215));
             }
+            { auto br = apib::lookup(g.appid); apib::draw(cx + 6, cy + 6, 2, br); }
             std::string l1, l2; wrap2(g.name, 16, l1, l2);
             text(x + 10, y + COVER_H + 16, l1, 2, C3(255, 255, 255));
             if (!l2.empty()) text(x + 10, y + COVER_H + 16 + 20, l2, 2, C3(190, 200, 215));

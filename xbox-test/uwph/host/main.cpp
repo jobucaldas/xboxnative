@@ -41,6 +41,7 @@ static void open_log() {
 #include "backend.h"
 #include "wxl_mapper.h"
 #include "mlp_probe.h"
+#include "reg_probe.h"
 #ifdef WXL_TLS_LANE
 #include "tls_test_runner.h"
 extern "C" __declspec(dllimport) DWORD carrier_anchor_a();
@@ -109,12 +110,20 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 init((IUnknown*)winrt::get_abi(m_window), [] {
                     CoreWindow::GetForCurrentThread().Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
                 },1920,1080);
+            regb::init(probe_root, test_log);
             mlp::run(probe_root, test_log);
             while (!m_closed) m_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessOneAndAllPending);
             return;
         }
         if (probe_root.find(L"Joao.XboxSteam.Swc_") != std::wstring::npos) {
             swc::run((IUnknown*)winrt::get_abi(m_window), (probe_root+L"\\swc-test.exe").c_str());
+            while (!m_closed) m_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessOneAndAllPending);
+            return;
+        }
+        if (probe_root.find(L"Joao.XboxSteam.Reg_") != std::wstring::npos) {
+            wchar_t self[MAX_PATH]; GetModuleFileNameW(nullptr,self,MAX_PATH);
+            std::wstring dir(self); dir.resize(dir.find_last_of(L'\\'));
+            reg::run(dir+L"\\reg-test.exe", probe_root, test_log);
             while (!m_closed) m_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessOneAndAllPending);
             return;
         }

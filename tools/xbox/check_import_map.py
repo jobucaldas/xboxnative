@@ -24,8 +24,14 @@ def main():
     try:
         mapping = json.loads(args.map.read_text())['dlls']
         for name, entry in mapping.items():
-            if name != name.lower() or entry['class'] not in ('system', 'uwph', 'stub') or not entry['reason'].strip():
+            if name != name.lower() or entry['class'] not in ('system', 'uwph', 'stub', 'wine-pe') or not entry['reason'].strip():
                 raise ValueError(f'invalid map entry: {name}')
+            for ov in entry.get('overrides', []):
+                names = ov.get('exports')
+                if (ov.get('class') not in ('system', 'uwph', 'stub') or not str(ov.get('reason', '')).strip()
+                        or not isinstance(names, list) or not names or not all(isinstance(n, str) and n for n in names)
+                        or len(set(names)) != len(names)):
+                    raise ValueError(f'invalid override in map entry: {name}')
         candidates = ['llvm-readobj'] + [f'llvm-readobj-{v}' for v in range(30, 13, -1)]
         reader = args.llvm_readobj or next((p for c in candidates if (p := shutil.which(c))), None)
         if not reader:
@@ -51,6 +57,8 @@ def main():
         if not scanned:
             raise ValueError('none of the target binaries exist')
         unknown = seen - mapping.keys()
+        overridden = sum(len(ov['exports']) for e in mapping.values() for ov in e.get('overrides', []))
+        print(f'{overridden} per-export overrides validated')
         print(f'{len(unknown)} unclassified DLLs ({len(seen)} unique DLLs, {scanned}/{len(TARGETS)} binaries scanned)')
         return 1 if unknown else 0
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:

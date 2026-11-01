@@ -1,7 +1,8 @@
 // Launch step of the detail screen ("Play"): launch_request.json + a REAL in-process attempt via the wxl PE mapper + MLP probe
 // (host/*.h, vendored unchanged from lane/tlm xbox-test/uwph/host). What it does today, honestly:
 //   - maps the game's x64 PE images (relocations, imports resolved against real system DLLs / mapped siblings / probe-only stubs, final page protections),
-//   - NEVER calls an entry point / DllMain / TLS callback: no game code executes. There is no Wine loader/process environment in the launcher yet.
+//   - NEVER calls a game entry point / DllMain / TLS callback: no game code executes. There is no Wine process environment yet.
+//   - initializes five pinned Wine donor DLLs and executes focused donor behavior checks before mapping game imports.
 // Everything is logged to boot.log (key lines) and LocalState\launch_probe.log (all lines); the result is shown on screen as "Launch attempted: ...".
 #pragma once
 #include <memory>
@@ -54,6 +55,7 @@ static void lp_sink(const char* s) {
 #include "wine_gap.h"
 #include "host/wxl_pe32.h"
 #include "pe32_probe.h"
+#include "donors/probe.h"
 
 struct LpCtx { std::wstring root; std::vector<std::wstring> names; int mapped = 0; unsigned resolved = 0, stubbed = 0; std::string firstMissing, failName, fault, pe32Summary; bool ok = false; };
 static int pe_machine(const std::wstring& p) {   // 0 = unreadable/not PE, else IMAGE_FILE_MACHINE_*
@@ -63,7 +65,9 @@ static int pe_machine(const std::wstring& p) {   // 0 = unreadable/not PE, else 
 static void lp_run_impl(LpCtx& c) {
     mlp::log = lp_sink; wxl::logger = lp_sink; mlp::summaries.clear(); mlp::assets.clear(); mlp::stub_names.clear();
     wine_gap::report(c.root);
-    lp_sink("MLP PROBE begin; NO entry/DllMain/TLS callbacks; zero RWX; failure placeholders are probe-only");
+    if(!donor_pe::probe(lp_sink)){c.failName="Wine donor initialization/behavior";lp_sink("DWPE FAIL donor behavior gate");return;}
+    mlp::donor_resolve=donor_pe::exported;
+    lp_sink("MLP PROBE begin; NO game entry/DllMain/TLS callbacks; donor checks executed separately; zero RWX; failure placeholders are probe-only");
     if(!user32_core::test(lp_sink)){ c.failName="u32c-test.exe"; lp_sink("U32C FAIL regression PE"); return; }
     std::vector<std::unique_ptr<wxl::Image>> imgs;
     for (auto& nm : c.names) {
