@@ -9,13 +9,14 @@
 #include "host/wxl_mapper.h"
 #include "host/mlp_probe.h"
 #include "../uwph/user32/probe.h"
+#include "launch_status.h"
 
 struct LaunchState {
-    std::atomic<int> phase{0};          // 0 never, 1 running, 2 finished
+    std::atomic<int> phase{0};          // 0 never, 1 starting, 2 finished, 3 guest running
     std::atomic<uint32_t> appid{0};
     std::atomic<int> gen{0};
     double started = 0;                 // render-thread read only (set before phase=1)
-    std::mutex m; std::string result;   // result text (after "Launch attempted: ")
+    std::mutex m; std::string result, attempt; bool ok=false;
 };
 static LaunchState g_launch;
 
@@ -58,7 +59,8 @@ static void lp_sink(const char* s) {
 
 #include "host/play_runtime.h"
 
-struct LpCtx { std::wstring root; std::vector<std::wstring> names; int mapped = 0; unsigned resolved = 0, stubbed = 0; std::string firstMissing, failName, fault; bool ok = false; };
+static void lp_publish(int gen,uint32_t appid,const std::string& result,bool ok,int mapped,int total,const char* status,bool terminal);
+struct LpCtx { std::wstring root; std::vector<std::wstring> names; int gen = 0; uint32_t appid = 0; int mapped = 0; unsigned resolved = 0, stubbed = 0; std::string firstMissing, failName, fault; bool ok = false, timedOut = false; };
 static int pe_machine(const std::wstring& p) {   // 0 = unreadable/not PE, else IMAGE_FILE_MACHINE_*
     FILE* f = _wfopen(p.c_str(), L"rb"); if (!f) return 0; unsigned char h[1024]; size_t n = fread(h, 1, sizeof h, f); fclose(f);
     if (n < 0x40 || h[0] != 'M' || h[1] != 'Z') return 0; uint32_t o = *(uint32_t*)(h + 0x3c); if (o + 6 > n || memcmp(h + o, "PE\0\0", 4)) return 0; return *(uint16_t*)(h + o + 4);
@@ -70,15 +72,23 @@ static void lp_run_impl(LpCtx& c) {
     if(pe_machine(c.root+L"\\"+exe)==IMAGE_FILE_MACHINE_I386) {c.failName="32-bit x86 PE (the loader maps x64 images only)";lp_sink("PRUN FAIL 32-bit x86 PE (the loader maps x64 images only)");return;}
     if(!play_runtime::start(c.root,exe,L"-screen-fullscreen 0 -force-d3d11 -logFile vis-player.log",lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
     auto r=play_runtime::state;
-    if(r->worker) {
-        ULONGLONG end=GetTickCount64()+110000;
-        while(!r->finished && !r->milestone && GetTickCount64()<end) {
-            if(WaitForSingleObject(r->worker,50)==WAIT_OBJECT_0)break;
+    ULONGLONG end=GetTickCount64()+110000; bool reportedRunning=false;
+    for(;;) {
+        bool finished=r->finished.load(std::memory_order_acquire);
+        auto outcome=launch_status::observe(finished,finished&&r->success&&r->code==0,r->milestone.load(),GetTickCount64()>=end);
+        if(launch_status::terminal(outcome)) {
+            c.ok=outcome==launch_status::Outcome::completed;
+            c.timedOut=outcome==launch_status::Outcome::timedOut;
+            c.fault=finished?r->result:"watchdog timeout 110 s; last event: "+r->snapshot();
+            break;
         }
+        if(outcome==launch_status::Outcome::running && !reportedRunning) {
+            lp_publish(c.gen,c.appid,r->snapshot(),false,r->mappedCount,r->moduleCount,"running",false);
+            reportedRunning=true;
+        }
+        if(r->worker)WaitForSingleObject(r->worker,50);else Sleep(50);
     }
     c.mapped=r->mappedCount;
-    c.ok=(r->finished && r->success)||r->milestone;
-    c.fault=r->finished?r->result:r->milestone?r->snapshot():"watchdog timeout 110 s; last event: "+r->snapshot();
     for(auto& row:mlp::summaries) {
         c.resolved+=row.second.resolved;c.stubbed+=row.second.stubbed;
         char line[512];snprintf(line,sizeof line,"MLP SUMMARY dll=%s resolved=%u stubbed=%u first-missing=%s",row.first.c_str(),row.second.resolved,row.second.stubbed,row.second.first.c_str());lp_sink(line);
@@ -99,23 +109,29 @@ static std::vector<std::wstring> pick_targets(uint32_t appid, const std::wstring
     why = "largest top-level .exe"; return {best};
 }
 
-// One publication path for worker completion and render-thread watchdog.
-static void lp_finish(int gen,uint32_t appid,const std::string& result,bool ok,int mapped,int total) {
-    if(g_launch.gen!=gen || g_launch.phase!=1)return;
+// Serialize progress, completion and watchdog publication. A terminal result
+// cannot be replaced by a late milestone or an obsolete loader generation.
+static void lp_publish(int gen,uint32_t appid,const std::string& result,bool ok,int mapped,int total,const char* status,bool terminal) {
+    std::lock_guard<std::mutex> lock(g_launch.m);
+    if(g_launch.gen!=gen || (g_launch.phase!=1 && g_launch.phase!=3))return;
     auto runtime=play_runtime::observed.load(std::memory_order_acquire);
     bool executed=runtime && runtime->executed;
+    bool finished=runtime && runtime->finished.load(std::memory_order_acquire);
     std::string last=runtime?runtime->snapshot():result;
-    std::string json="{\"appid\":"+std::to_string(appid)+",\"time\":\""+utc_iso()+"\",\"stage\":\""+(executed?"guest-execution":"loader")+"\",\"ok\":"+(ok?"true":"false")+",\"mapped\":"+std::to_string(mapped)+",\"total\":"+std::to_string(total)+",\"gameCodeExecuted\":"+(executed?"true":"false")+",\"exitCode\":"+(runtime&&runtime->success?std::to_string(runtime->code):"null")+",\"lastEvent\":\""+json_esc(last)+"\",\"result\":\""+json_esc(result)+"\"}\n";
+    std::string json="{\"appid\":"+std::to_string(appid)+",\"attemptId\":\""+g_launch.attempt+"\",\"time\":\""+utc_iso()+"\",\"stage\":\""+(executed?"guest-execution":"loader")+"\",\"state\":\""+status+"\",\"terminal\":"+(terminal?"true":"false")+",\"ok\":"+(ok?"true":"false")+",\"mapped\":"+std::to_string(mapped)+",\"total\":"+std::to_string(total)+",\"gameCodeExecuted\":"+(executed?"true":"false")+",\"exitCode\":"+(finished&&runtime->success?std::to_string(runtime->code):"null")+",\"lastEvent\":\""+json_esc(last)+"\",\"result\":\""+json_esc(result)+"\"}\n";
     write_text(g_dir+L"\\launch_result.json",json);
-    {std::lock_guard<std::mutex> lock(g_launch.m);g_launch.result=result;}
-    logf("launch: RESULT ok=%d mapped=%d/%d gameCodeExecuted=%s: %s",ok?1:0,mapped,total,executed?"true":"false",result.c_str());
-    g_launch.phase=2;
+    g_launch.result=result;g_launch.ok=ok;
+    logf("launch: %s attempt=%s ok=%d mapped=%d/%d gameCodeExecuted=%s: %s",terminal?"RESULT":"RUNNING",g_launch.attempt.c_str(),ok?1:0,mapped,total,executed?"true":"false",result.c_str());
+    g_launch.phase=terminal?2:3;
+}
+static void lp_finish(int gen,uint32_t appid,const std::string& result,bool ok,int mapped,int total,const char* status=nullptr) {
+    lp_publish(gen,appid,result,ok,mapped,total,status?status:ok?"completed":"failed",true);
 }
 static void lp_watchdog() {
     if(g_launch.phase!=1 || now_s()-g_launch.started<=120)return;
     auto r=play_runtime::observed.load(std::memory_order_acquire);
-    lp_finish(g_launch.gen,g_launch.appid,"watchdog timeout 120 s; last event: "+(r?r->snapshot():std::string("preparing guest loader")),false,0,0);
-    ++g_launch.gen;
+    if(r && (r->finished.load(std::memory_order_acquire) || r->milestone.load()))return;
+    lp_finish(g_launch.gen,g_launch.appid,"watchdog timeout 120 s; last event: "+(r?r->snapshot():std::string("preparing guest loader")),false,0,0,"timeout");
 }
 
 // Entry: called on the render thread; returns immediately (work happens on a worker thread).
@@ -126,11 +142,11 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
         logf("launch: Play rejected: guest retained; restart launcher before another Play");return;
     }
     int gen = ++g_launch.gen; g_launch.appid = appid; g_launch.started = now_s();
-    { std::lock_guard<std::mutex> l(g_launch.m); g_launch.result.clear(); } g_launch.phase = 1;
+    { std::lock_guard<std::mutex> l(g_launch.m); g_launch.result.clear();g_launch.ok=false;g_launch.attempt=std::to_string(GetCurrentProcessId())+":"+std::to_string(gen); } g_launch.phase = 1;
     std::string args = appid == 3405340 ? "-screen-fullscreen 0 -force-d3d11 -logFile vis-player.log" : "";
-    char b[1500]; snprintf(b, sizeof b, "{\"appid\":%u,\"name\":\"%s\",\"installDir\":\"%s\",\"time\":\"%s\",\"args\":\"%s\",\"via\":\"%s\"}\n", appid, json_esc(name).c_str(), json_esc(dir).c_str(), utc_iso().c_str(), args.c_str(), via);
+    char b[1500]; snprintf(b, sizeof b, "{\"appid\":%u,\"attemptId\":\"%s\",\"name\":\"%s\",\"installDir\":\"%s\",\"time\":\"%s\",\"args\":\"%s\",\"via\":\"%s\"}\n", appid, g_launch.attempt.c_str(), json_esc(name).c_str(), json_esc(dir).c_str(), utc_iso().c_str(), args.c_str(), via);
     write_text(g_dir + L"\\launch_request.json", b);
-    logf("launch: request written LocalState\\launch_request.json appid=%u dir=%s via=%s", appid, dir.c_str(), via);
+    logf("launch: request written LocalState\\launch_request.json appid=%u attempt=%s dir=%s via=%s", appid, g_launch.attempt.c_str(), dir.c_str(), via);
     std::thread([=] {
         init_apartment(apartment_type::multi_threaded);
         auto finish = [&](const std::string& r,bool ok,int mapped,int total) {lp_finish(gen,appid,r,ok,mapped,total);};
@@ -139,18 +155,18 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
             try { winrt::Windows::Foundation::Uri uri(L"xboxsteam-host://launch");
                   auto q = winrt::Windows::System::Launcher::QueryUriSupportAsync(uri, winrt::Windows::System::LaunchQuerySupportType::Uri).get();
                   logf("launch: activation query xboxsteam-host:// -> %d (0=Available,1=AppNotInstalled,2=AppUnavailable,3=NotSupported,4=Unknown); %s", (int)q, (int)q == 0 ? "would activate host" : "no host package registers it, using in-process guest runtime");
-                  if ((int)q == 0) { std::wstring u = L"xboxsteam-host://launch?appid=" + widen(std::to_string(appid)) + L"&dir=" + widen(dir); bool ok = winrt::Windows::System::Launcher::LaunchUriAsync(winrt::Windows::Foundation::Uri(u)).get(); logf("launch: host activation LaunchUriAsync ok=%d", ok ? 1 : 0); if (ok) { finish("handed over to host package via xboxsteam-host://", true, 0, 0); return; } }
+                  if ((int)q == 0) { std::wstring u = L"xboxsteam-host://launch?appid=" + widen(std::to_string(appid)) + L"&dir=" + widen(dir); bool ok = winrt::Windows::System::Launcher::LaunchUriAsync(winrt::Windows::Foundation::Uri(u)).get(); logf("launch: host activation LaunchUriAsync ok=%d", ok ? 1 : 0); if (ok) { lp_finish(gen,appid,"handed over to host package via xboxsteam-host://; guest execution unverified",false,0,0,"handed-off"); return; } }
             } catch (winrt::hresult_error const& e) { logf("launch: activation query failed hr=0x%08x", (unsigned)e.code().value); } catch (...) { logf("launch: activation query failed"); }
             // 2. in-process guest runtime
             std::wstring root = g_dir + L"\\" + widen(dir); std::string why; auto names = pick_targets(appid, root, why);
             logf("launch: runtime root=LocalState\\%s targets=%zu (%s)", dir.c_str(), names.size(), why.c_str());
             if (dir.empty() || names.empty()) { finish("cannot start: " + (dir.empty() ? std::string("install directory unknown") : why), false, 0, 0); return; }
             { std::lock_guard<std::mutex> l(g_lpm); if (g_lpf) fclose(g_lpf); g_lpf = _wfopen((g_dir + L"\\launch_probe.log").c_str(), L"wb"); g_lpMissing = g_lpStubbed = g_lpStubCalls = g_lpLines = 0; g_lpLastFail.clear(); }
-            LpCtx c; c.root = root; c.names = names; bool noFault = lp_run_seh(&c);
+            LpCtx c; c.root = root; c.names = names;c.gen=gen;c.appid=appid; bool noFault = lp_run_seh(&c);
             { std::lock_guard<std::mutex> l(g_lpm); if (g_lpf) { fclose(g_lpf); g_lpf = nullptr; } }
             int total=play_runtime::state?int(play_runtime::state->moduleCount):int(names.size());
             if(!noFault) {finish("loader SEH exception; last event: "+(play_runtime::state?play_runtime::state->snapshot():std::string("loader not entered")),false,c.mapped,total);return;}
-            finish(c.fault.empty()?c.failName:c.fault,c.ok,c.mapped,total);
+            lp_finish(gen,appid,c.fault.empty()?c.failName:c.fault,c.ok,c.mapped,total,c.timedOut?"timeout":nullptr);
         } catch (std::exception const& e) { finish(std::string("loader threw: ") + e.what(), false, 0, 0); }
         catch (...) { finish("loader threw an unknown exception.", false, 0, 0); }
     }).detach();

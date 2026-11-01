@@ -17,6 +17,7 @@ static HMODULE WINAPI hostPackaged(LPCWSTR name,DWORD) {
 #include "../host/wxl_mapper.h"
 #include "../host/mlp_probe.h"
 #include "../host/play_runtime.h"
+#include "../launch_status.h"
 static FILE* hostEvents=nullptr;
 static bool injectLogException=false;
 static void handledLogException() {
@@ -37,7 +38,11 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         logline("OFF-DEVICE Wine diagnostic only; no console or Steam client success claim");
     }
     if(!play_runtime::start(root,game?L"Megabonk.exe":L"play-guest.exe",game?L"-force-d3d11":play_runtime::wide(args),logline))return 1;
-    auto r=play_runtime::state;if(r->worker)WaitForSingleObject(r->worker,game?10000:2000);
+    auto r=play_runtime::state;
+    // Inject an already reached graphics milestone, then exercise the real
+    // Steam prerequisite failure. Progress must never mask that terminal stop.
+    if(std::string(args)=="steam-api-milestone")r->milestone=1;
+    if(r->worker)WaitForSingleObject(r->worker,game?10000:2000);
     auto last=r->snapshot();char summary[8192];snprintf(summary,sizeof summary,"PLAY-TEST executed=%d finished=%d success=%d code=%lu last=%s",int(r->executed),int(r->finished),r->success,r->code,last.c_str());
     logline(summary);
     std::string mode=args;
@@ -45,7 +50,10 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     if(game)ok=ok&&r->finished;
     else if(mode=="observer-log")ok=ok&&r->finished&&r->success&&r->code==42&&r->firstChanceCount.load()>0&&r->firstChanceCode.load()==0x40010006&&r->firstChanceAddress.load()!=0;
     else if(mode=="steam-forward")ok=ok&&r->finished&&!r->success&&last.find("steam_api64.dll!SteamAPI_Init")!=std::string::npos&&last.find("caller=0x")!=std::string::npos;
-    else if(mode=="steam-api"||mode=="steam-client")ok=ok&&r->finished&&!r->success&&last.find(mode=="steam-api"?"steam_api64.dll!LoadLibrary (real client prerequisite item 36)":"steamclient64.dll!LoadLibrary (real client prerequisite item 36)")!=std::string::npos&&last.find("caller=0x")!=std::string::npos;
+    else if(mode=="steam-api"||mode=="steam-client"||mode=="steam-api-milestone") {
+        ok=ok&&r->finished&&!r->success&&last.find(mode=="steam-client"?"steamclient64.dll!LoadLibrary (real client prerequisite item 36)":"steam_api64.dll!LoadLibrary (real client prerequisite item 36)")!=std::string::npos&&last.find("caller=0x")!=std::string::npos;
+        if(mode=="steam-api-milestone")ok=ok&&r->milestone==1&&launch_status::observe(r->finished,r->success,r->milestone,true)==launch_status::Outcome::failed;
+    }
     else if(mode=="missing")ok=ok&&r->finished&&!r->success&&last.find("play-missing.dll!DeliberatelyMissingPlayImport")!=std::string::npos;
     else if(mode=="wide-long") {
         std::string expected;for(int i=0;i<2047;++i)expected+="\xc3\xa7";
