@@ -31,10 +31,30 @@ test('CLI rejects contradictory outcomes with nonzero exit', async () => inTemp(
   assert.equal(result.status, 1);
   assert.match(result.stderr, /Invalid VRX log/);
 }));
+test('CLI rejects malformed timestamps and hidden contradictory results', async () => inTemp(async dir => {
+  const path = join(dir, 'malformed.log');
+  const logs = [
+    valid.replace('0.079', '0..079'),
+    `${valid}\n[   0.100] caseA\tVirtualAlloc(PAGE_EXECUTE_READWRITE)+exec: OK value=42`,
+  ];
+  for (const log of logs) {
+    await writeFile(path, log);
+    const result = run([path]);
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /Invalid VRX log/);
+    assert.doesNotMatch(result.stdout, /VRX outcomes:/);
+  }
+}));
 test('CLI reports a missing log and exits nonzero', async () => inTemp(async dir => {
   const result = run([join(dir, 'missing.log')]);
   assert.equal(result.status, 2);
   assert.match(result.stderr, /Cannot read log/);
+}));
+test('CLI reports a directory path as a read error, not valid log text', async () => inTemp(async dir => {
+  const result = run([dir]);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /Cannot read log/);
+  assert.doesNotMatch(result.stdout, /VRX outcomes:/);
 }));
 test('CLI requires one explicit log path', () => {
   const result = run([]);
@@ -58,8 +78,8 @@ test('CLI rejects an empty log without reporting successful outcomes', async () 
   assert.doesNotMatch(result.stdout, /VRX outcomes:/);
 }));
 test('CLI resolves a relative log path from outside the repository', async () => inTemp(async dir => {
-  await writeFile(join(dir, 'relative.log'), valid.replaceAll('\n', '\r\n'));
-  const result = run(['relative.log'], { cwd: dir });
+  await writeFile(join(dir, 'relative log.log'), valid.replaceAll('\n', '\r\n'));
+  const result = run(['relative log.log'], { cwd: dir });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /freshness\/device identity unverified/);
   assert.match(result.stdout, /B=RW→RX executed; C=FromApp RW→RX executed/);

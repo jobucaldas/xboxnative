@@ -21,8 +21,11 @@ Run both test files explicitly from the repository root:
 node --test xbox-test/vrx/tests/check-vrx-log.test.mjs xbox-test/vrx/tests/review-vrx-log.test.mjs
 ```
 
-The suite has 10 tests (3 parser tests and 7 CLI tests), all using synthetic
-inputs. CI runs this command in addition to the existing offline checks. The
+The suite has 16 tests (7 parser tests and 9 CLI tests), all using synthetic
+inputs. Coverage includes each case's missing/duplicate results and native
+failure forms, malformed timestamps and result labels, LF/CRLF logs, usage/read
+errors, and working directories and log paths independent of the repository.
+CI runs this command in addition to the existing offline checks. The
 CLI tests locate the script relative to their own module, not the working
 directory, so they also work with `cd xbox-test/vrx/tests && node --test`.
 
@@ -43,7 +46,7 @@ identify the device, or prove a new device or guest execution.
   0.1.0.0 package. This is a historical repository claim, not independently
   verified device identity.
 - The log was imported in commit `bd208bf` (2026-10-26). Its timestamps are
-  elapsed times only; it has no wall-clock capture date, run identifier, or
+  elapsed times only; it has no wall-clock capture date, unique run identifier, or
   device identifier. Git dates and checkout file modification times do not
   establish when or where it ran.
 - The committed log SHA-256 is
