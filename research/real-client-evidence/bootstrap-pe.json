@@ -1,0 +1,60 @@
+{
+  "files": [
+    {
+      "path": "$PLUGINSDIR/StdUtils.dll",
+      "machine": "0x014c",
+      "architecture": "i386",
+      "sha256": "c602c44a4d4088dbf5a659f36ba1c3a9d81f8367577de0cb940c0b8afee5c376",
+      "bytes": 113000
+    },
+    {
+      "path": "$PLUGINSDIR/System.dll",
+      "machine": "0x014c",
+      "architecture": "i386",
+      "sha256": "fa367ae36bfbe7c989c24c7abbb13482fc20bc35e7812dc377aa1c281ee14cc0",
+      "bytes": 23400
+    },
+    {
+      "path": "$PLUGINSDIR/nsDialogs.dll",
+      "machine": "0x014c",
+      "architecture": "i386",
+      "sha256": "91a484dc79be64dd11bf5acb62c893e57505fcd8809483aa92b04f10d81f9de0",
+      "bytes": 21352
+    },
+    {
+      "path": "$PLUGINSDIR/nsExec.dll",
+      "machine": "0x014c",
+      "architecture": "i386",
+      "sha256": "3e2399ae5ce16dd69f7e2c71d928cf54a1024afced8155f1fd663a3e123d9226",
+      "bytes": 18280
+    },
+    {
+      "path": "$PLUGINSDIR/nsProcess.dll",
+      "machine": "0x014c",
+      "architecture": "i386",
+      "sha256": "bb6ce83ddaad4f530a66a1048fac868dfc3b86f5e7b8e240d84d1633e385aee8",
+      "bytes": 16232
+    },
+    {
+      "path": "Steam.exe",
+      "machine": "0x014c",
+      "architecture": "i386",
+      "sha256": "12222b0908eb69581985f7e04aa6240e928fb08aa5a3ec36acae3440633c9eb1",
+      "bytes": 4379496
+    },
+    {
+      "path": "bin/SteamService.exe",
+      "machine": "0x014c",
+      "architecture": "i386",
+      "sha256": "ce177dc8cf42513ff819c7b8597c7be290f9e98632a34ecd868dc76003421f0d",
+      "bytes": 2654568
+    },
+    {
+      "path": "uninstall.exe",
+      "machine": "0x014c",
+      "architecture": "i386",
+      "sha256": "72ffe8859eaa63637f5a62b7c454241db35938f8326f6ccf20352e00f8df2fe5",
+      "bytes": 159480
+    }
+  ]
+}

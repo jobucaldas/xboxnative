@@ -1,0 +1,87 @@
+{
+  "offDevice": true,
+  "pointInTimeOnly": true,
+  "completeProcessSetProven": false,
+  "processes": [
+    {
+      "pid": 1241500,
+      "name": "steam.exe",
+      "memoryKiB": {
+        "Rss": 323052,
+        "Pss": 242765,
+        "Private_Clean": 3736,
+        "Private_Dirty": 222972,
+        "Swap": 0
+      }
+    },
+    {
+      "pid": 1241516,
+      "name": "CrBrowserMain",
+      "memoryKiB": {
+        "Rss": 499928,
+        "Pss": 417127,
+        "Private_Clean": 1192,
+        "Private_Dirty": 398144,
+        "Swap": 0
+      }
+    },
+    {
+      "pid": 1241585,
+      "name": "CrGpuMain",
+      "memoryKiB": {
+        "Rss": 473372,
+        "Pss": 394729,
+        "Private_Clean": 5796,
+        "Private_Dirty": 373596,
+        "Swap": 0
+      }
+    },
+    {
+      "pid": 1241595,
+      "name": "network.CrUtili",
+      "memoryKiB": {
+        "Rss": 297468,
+        "Pss": 274316,
+        "Private_Clean": 116,
+        "Private_Dirty": 271816,
+        "Swap": 0
+      }
+    },
+    {
+      "pid": 1241600,
+      "name": "storage.CrUtili",
+      "memoryKiB": {
+        "Rss": 288672,
+        "Pss": 264767,
+        "Private_Clean": 0,
+        "Private_Dirty": 261984,
+        "Swap": 0
+      }
+    },
+    {
+      "pid": 1241606,
+      "name": "steamservice.ex",
+      "memoryKiB": {
+        "Rss": 29464,
+        "Pss": 29397,
+        "Private_Clean": 5996,
+        "Private_Dirty": 23396,
+        "Swap": 0
+      }
+    },
+    {
+      "pid": 1241930,
+      "name": "CrRendererMain",
+      "memoryKiB": {
+        "Rss": 431000,
+        "Pss": 397252,
+        "Private_Clean": 11920,
+        "Private_Dirty": 380524,
+        "Swap": 0
+      }
+    }
+  ],
+  "sumPssKiB": 2020353,
+  "sumRssKiB": 2342956,
+  "xboxBudgetProven": false
+}

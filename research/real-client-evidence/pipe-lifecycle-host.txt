@@ -1,0 +1,1 @@
+pipeLifecycle=true connectCancellation=true readCancellation=true reconnect=true peerClose=true

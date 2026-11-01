@@ -1,0 +1,46 @@
+{
+  "offDevice": true,
+  "configuration": "genuine updated client; -cef-disable-gpu; service Start=4; fresh prefix wineserver restart",
+  "serviceQuery": "SERVICE_NAME: Steam Client Service\n        TYPE               : 10  WIN32_OWN_PROCESS\n        STATE              : 1  STOPPED\n        WIN32_EXIT_CODE    : 1077  (0x435)\n        SERVICE_EXIT_CODE  : 0  (0x0)\n        CHECKPOINT         : 0x0\n        WAIT_HINT          : 0x0",
+  "serviceStartQuery": "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\Steam Client Service\n    Start    REG_DWORD    0x4",
+  "steamMappedProcesses": [
+    {
+      "pid": 1274042,
+      "name": "steam.exe"
+    },
+    {
+      "pid": 1274063,
+      "name": "CrBrowserMain"
+    },
+    {
+      "pid": 1274149,
+      "name": "CrGpuMain"
+    },
+    {
+      "pid": 1274152,
+      "name": "network.CrUtili"
+    },
+    {
+      "pid": 1274160,
+      "name": "storage.CrUtili"
+    },
+    {
+      "pid": 1274387,
+      "name": "CrRendererMain"
+    }
+  ],
+  "visualObservation": "Genuine login surface rendered; QR refresh overlay expired; no authenticated session",
+  "probe": {
+    "appid": 3405340,
+    "callbackPumpFrames": 0,
+    "loggedOn": false,
+    "nativeInitResult": 1,
+    "offDevice": true,
+    "steamInitProven": false,
+    "subscribed": false
+  },
+  "x64OnlyLoginProven": false,
+  "serviceFreeLoginSurfaceObserved": true,
+  "libraryDownloadProven": false,
+  "xboxExecutionProven": false
+}
