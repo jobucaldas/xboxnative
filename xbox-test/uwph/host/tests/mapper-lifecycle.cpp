@@ -20,7 +20,13 @@ static LPVOID WINAPI test_tls_get(DWORD k) { if (injected==READ_TLS) { injected=
 #define VirtualProtectFromApp VirtualProtect
 #include "../wxl_mapper.h"
 static std::vector<std::string> events;
-static void log_line(const char* s) { puts(s); events.emplace_back(s); }
+static Failure attach_cleanup=NONE;
+static void log_line(const char* s) {
+    puts(s); events.emplace_back(s);
+    if (!strcmp(s,"WXL FAIL DllMain process attach") && attach_cleanup!=NONE) {
+        injected=attach_cleanup; attach_cleanup=NONE;
+    }
+}
 static int find(const char* s) {
     for (size_t i=0;i<events.size();++i) if (events[i]==s) return (int)i;
     return -1;
@@ -63,6 +69,18 @@ int main(int argc,char** argv) {
         if (!image.close()) return 1;
     }
     if (count("LIFECYCLE detach")!=0 || count("WXL RtlDeleteFunctionTable ok=1")!=1) return 1;
+    // A failed attach can also fail cleanup. Keep ownership until a retry,
+    // reject replacement while live, then allow reuse after cleanup succeeds.
+    for (Failure f : {UNWIND, FREE_MEM}) {
+        events.clear(); wxl::Image image; attach_cleanup=f;
+        if (wxl::load(image,bad,log_line) || injected!=NONE || !image.base || image.attached) return 1;
+        if ((f==UNWIND)!=!!image.functions || count("WXL FAIL cleanup incomplete")!=1) return 1;
+        auto base=image.base;
+        if (wxl::load(image,good,log_line) || image.base!=base || count("LIFECYCLE attach")!=1 ||
+            count("WXL FAIL image already live")!=1) return 1;
+        if (!image.close() || !image.close() || image.base || image.functions || count("LIFECYCLE detach")!=0) return 1;
+        if (!wxl::load(image,good,log_line) || !image.close() || count("LIFECYCLE detach")!=1) return 1;
+    }
     for (Failure f : {UNWIND, FREE_MEM}) {
         events.clear(); wxl::Image image;
         if (!wxl::load(image,good,log_line)) return 1;
@@ -117,5 +135,20 @@ int main(int argc,char** argv) {
         if (wxl::load(image,tls_bad,log_line,carrier) || image.base || !image.close()) return 1;
     }
     if (!sequence({"TLS callback attach","TLS DllMain attach","TLS callback detach"})) return 1;
+    for (Failure f : {READ_TLS, CLEAR_TLS, FREE_TLS}) {
+        events.clear(); wxl::Image image; attach_cleanup=f;
+        if (wxl::load(image,tls_bad,log_line,carrier) || injected!=NONE || !image.base || image.attached ||
+            image.tlsKey==TLS_OUT_OF_INDEXES || count("WXL FAIL cleanup incomplete")!=1) return 1;
+        auto base=image.base; auto key=image.tlsKey;
+        if (wxl::load(image,tls,log_line,carrier) || image.base!=base || image.tlsKey!=key ||
+            count("TLS callback attach")!=1 || count("WXL FAIL image already live")!=1) return 1;
+        if (!image.close() || !image.close() || image.base || image.functions ||
+            image.tlsKey!=TLS_OUT_OF_INDEXES || image.tlsAttached) return 1;
+        if (!sequence({"TLS callback attach","TLS DllMain attach","TLS callback detach"})) return 1;
+        events.clear();
+        if (!wxl::load(image,tls,log_line,carrier) || !image.close()) return 1;
+        if (!sequence({"TLS callback attach","TLS DllMain attach","TLS DllMain detach","TLS callback detach"})) return 1;
+    }
+    puts("LIFECYCLE failed-load cleanup retry/reuse ok");
     puts("LIFECYCLE-OK"); return 0;
 }
