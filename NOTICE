@@ -28,6 +28,9 @@ External dependencies fetched at build time (never copied here; pinned in deps.p
                                                never committed. LGPL-2.1-or-later is generally read as combinable with GPLv3 code (LGPLv2.1 s.3 lets a
                                                recipient apply the GPL instead).
   uwp-crossbuild (gianlucamazza/uwp-crossbuild)  MIT. Build wrapper used by the build scripts (clang-cl/lld-link + xwin).
+  Microsoft MSIX Packaging SDK                MIT; its bundled dependencies retain their own licences (see upstream LICENSE and
+                                               THIRD PARTY CODE NOTICE). Built by tools/build-msix-packaging.sh as a host-only
+                                               packaging tool; never linked into our code or committed as a binary.
   Microsoft Windows SDK/CRT via xwin           Downloaded by the toolchain under Microsoft's own licence terms; never redistributed here.
 
 Licence compatibility with GPL-3.0-or-later (a good-faith reading, NOT legal advice or a legal guarantee)
