@@ -41,11 +41,11 @@ static void walk(const std::wstring& dir, int depth, std::set<std::string>& dlls
 static std::string store_text_for(uint32_t appid) {   // pc_requirements minimum+recommended of the cached store response ("" when no cache / no text)
     std::string body; if (!read_file_s(g_dir + L"\\storecache\\" + widen(std::to_string(appid)) + L".json", body) || body.size() < 10) return "";
     try {
-        auto root = Windows::Data::Json::JsonObject::Parse(winrt::to_hstring(body)); auto key = winrt::to_hstring(std::to_string(appid)); if (!root.HasKey(key)) return "";
+        auto root = winrt::Windows::Data::Json::JsonObject::Parse(winrt::to_hstring(body)); auto key = winrt::to_hstring(std::to_string(appid)); if (!root.HasKey(key)) return "";
         auto e = root.GetNamedObject(key); if (!e.GetNamedBoolean(L"success", false) || !e.HasKey(L"data")) return ""; auto d = e.GetNamedObject(L"data");
-        if (!d.HasKey(L"pc_requirements") || d.GetNamedValue(L"pc_requirements").ValueType() != Windows::Data::Json::JsonValueType::Object) return "";
+        if (!d.HasKey(L"pc_requirements") || d.GetNamedValue(L"pc_requirements").ValueType() != winrt::Windows::Data::Json::JsonValueType::Object) return "";
         auto pr = d.GetNamedObject(L"pc_requirements"); std::string t;
-        for (auto k : {L"minimum", L"recommended"}) if (pr.HasKey(k) && pr.GetNamedValue(k).ValueType() == Windows::Data::Json::JsonValueType::String) t += winrt::to_string(pr.GetNamedString(k)) + "\n";
+        for (auto k : {L"minimum", L"recommended"}) if (pr.HasKey(k) && pr.GetNamedValue(k).ValueType() == winrt::Windows::Data::Json::JsonValueType::String) t += winrt::to_string(pr.GetNamedString(k)) + "\n";
         return t;
     } catch (...) { return ""; }
 }
