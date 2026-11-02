@@ -1,28 +1,22 @@
-# Native compiler recovery checkpoint
+# Checking the native C++ test toolchain
 
-Scope: provision a user-local host C++ compiler for the portable `launch-result.test.cpp`
-fixture. The vrx-owned source was read only; its test was not compiled or run.
+Portable tests run on the development host, not on the Xbox. Use a **native**
+C++ compiler and standard library; a MinGW compiler creates Windows executables
+and cannot establish that the host toolchain works.
 
-## Provisioned toolchain
+Select a compiler with `CXX` (default `c++`). Install it using your development
+environment's package manager, or provide a wrapper on `PATH`. Keep downloaded
+toolchains, local wrappers, credentials and validation logs outside the source
+tree. The repository does not require a particular host distribution or private
+shared directory.
 
-- Host: Ubuntu 24.04.5 x86_64, UID 1000; no native `c++`, `g++`, or `clang++` was initially on
-  `PATH`.
-- Downloaded compiler, C++ standard library headers, libc development headers, binutils and
-  required shared libraries as `.deb` packages from the configured Ubuntu Noble archive with
-  `apt-get download`; extracted them with `dpkg-deb -x` without sudo or system installation.
-- Toolchain root: `/data/OpenBot/Shared/toolchains/native-cxx/root`.
-- Reusable compiler wrapper: `/data/OpenBot/Shared/toolchains/native-cxx/bin/cxx`. It sets the
-  local library search path, sysroot, include paths and compiler/binutils prefixes; call it as
-  `CXX=/data/OpenBot/Shared/toolchains/native-cxx/bin/cxx`.
-- Compiler identity: `g++-13 (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0`.
-- Downloaded package hashes: `/data/OpenBot/Shared/toolchains/native-cxx/logs/package-sha256.txt`.
+## Check compilation, the standard library and threads
 
-## Validation evidence
-
-A temporary C++17 program using `std::string`, `assert`, and `std::thread` was compiled and run
-successfully. Recreate it and invoke the same wrapper with these commands:
+From a shell with a native compiler available:
 
 ```sh
+set -eu
+CXX=${CXX:-c++}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cat > "$tmp/smoke.cpp" <<'CPP'
@@ -36,30 +30,28 @@ int main() {
   assert(value == "native-cxx-ok-thread");
 }
 CPP
-CXX=/data/OpenBot/Shared/toolchains/native-cxx/bin/cxx
 "$CXX" --version
-timeout 12s "$CXX" -std=c++17 -O0 -pthread "$tmp/smoke.cpp" -o "$tmp/smoke"
-timeout 10s "$tmp/smoke"
+"$CXX" -std=c++17 -O0 -pthread "$tmp/smoke.cpp" -o "$tmp/smoke"
+"$tmp/smoke"
 ```
 
-Observed output was `g++-13 (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0`; compile and run both
-exited 0. Captured version, validation statuses, build log, run log and package hashes are under
-`/data/OpenBot/Shared/toolchains/native-cxx/logs/` and are not included in this repository.
-The packages were extracted from Ubuntu Noble apt packages into the user-local toolchain; no
-system installation was performed. This verifies a native Linux C++ compiler path only; it says
-nothing about the MinGW or MSVC/UWP toolchain.
+Both compilation and execution must exit zero. An executable-format error often
+means a cross-compiler was selected. Missing C++ headers, startup objects or
+shared libraries mean the selected compiler's development/runtime dependencies
+are incomplete; repair the development environment rather than removing test
+assertions or substituting a cross-build for a native run.
 
-## Next bounded use
+## Run the application tests
 
-The vrx owner can now run its own portable fixture when ready, from
-`/data/OpenBot/Shared/xboxnative/wt/vrx/xbox-test/app`:
+Run each test using its checked-in runner from the repository root. Runners that
+support `CXX` accept a compiler executable or wrapper path, not a string of
+compiler flags. Consult the test's source and runner for its language standard
+and library requirements.
 
-```sh
-CXX=/data/OpenBot/Shared/toolchains/native-cxx/bin/cxx
-"$CXX" -std=c++17 -O0 -pthread tests/launch-result.test.cpp -o /tmp/launch-result.test
-timeout 10s /tmp/launch-result.test
-```
-
-That test has not been built or run by this task. The shared LLVM-MinGW compiler's earlier
-slow compile was not retried. Native test readiness is separate from UWP/MSIX packaging and
-Xbox runtime acceptance.
+A working native compiler is only a prerequisite: run the relevant application
+tests themselves. This smoke program does not test the launcher, PE mapper,
+Windows/MSVC ABI, UWP FromApp APIs, MSIX packaging or real controller input.
+Console-affecting changes still require the full `xbox-test/smoke-all.sh` run;
+launcher acceptance is `xbox-test/tools/play-test.sh <appid>` and the criteria in
+[`docs/PLAYABLE.md`](../PLAYABLE.md). Keep private evidence local and summarize
+actual results, including failures, in the pull request.
