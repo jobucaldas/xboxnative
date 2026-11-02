@@ -37,7 +37,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         root.assign(gameRoot,n);
         logline("OFF-DEVICE Wine diagnostic only; no console or Steam client success claim");
     }
-    if(!play_runtime::start(root,game?L"Megabonk.exe":L"play-guest.exe",game?L"-force-d3d11":play_runtime::wide(args),logline))return 1;
+    if(!play_runtime::start(root,game?L"Megabonk.exe":std::string(args)=="missing"?L"play-missing.exe":L"play-guest.exe",game?L"-force-d3d11":play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise the real
     // Steam prerequisite failure. Progress must never mask that terminal stop.
@@ -54,7 +54,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         ok=ok&&r->finished&&!r->success&&last.find(mode=="steam-client"?"steamclient64.dll!LoadLibrary (real client prerequisite item 36)":"steam_api64.dll!LoadLibrary (real client prerequisite item 36)")!=std::string::npos&&last.find("caller=0x")!=std::string::npos;
         if(mode=="steam-api-milestone")ok=ok&&r->milestone==1&&launch_status::observe(r->finished,r->success,r->milestone,true)==launch_status::Outcome::failed;
     }
-    else if(mode=="missing")ok=ok&&r->finished&&!r->success&&last.find("play-missing.dll!DeliberatelyMissingPlayImport")!=std::string::npos;
+    else if(mode=="missing")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&r->missing.empty()&&last.find("mapping failed: play-missing.exe; guest initialization blocked")!=std::string::npos&&last.find("play-missing.dll!DeliberatelyMissingPlayImport")!=std::string::npos;
     else if(mode=="wide-long") {
         std::string expected;for(int i=0;i<2047;++i)expected+="\xc3\xa7";
         ok=ok&&r->finished&&!r->success&&last.find("user32.dll!MessageBoxW")!=std::string::npos&&last.find(expected+"<truncated>\"")!=std::string::npos&&last.find("\xef\xbf\xbd")==std::string::npos;

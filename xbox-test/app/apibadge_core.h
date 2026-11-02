@@ -66,7 +66,9 @@ static inline bool pe_dlls(FILE* f, std::set<std::string>& out) {
 }
 static inline bool is_vendor_gfx_name(const std::string& lower) {   // a shipped d3d*.dll/dxgi.dll is a replacement implementation, not evidence of what the game imports
     static const char* n[] = {"d3d8.dll", "d3d9.dll", "d3d10.dll", "d3d10_1.dll", "d3d10core.dll", "d3d11.dll", "d3d12.dll", "d3d12core.dll", "dxgi.dll", "ddraw.dll", "opengl32.dll", "dxcompiler.dll", "dxil.dll"};
-    for (auto s : n) if (lower == s) return true; return false; }
+    for (auto s : n) if (lower == s) return true;
+    return false;
+}
 static inline int classify_dlls(const std::set<std::string>& d) {
     auto has = [&](const char* s) { return d.count(s) > 0; };
     if (has("d3d11.dll")) return K_D3D11;
@@ -87,9 +89,13 @@ static inline int classify_store_text(const std::string& text, std::string* note
         if (i >= l.size() || !(l[i] >= '0' && l[i] <= '9') || skip >= 40) continue;
         int v = 0; size_t j = i; while (j < l.size() && l[j] >= '0' && l[j] <= '9' && j < i + 3) v = v * 10 + (l[j++] - '0');
         if (v == 11) v11 = true; else if (v >= 12 && v <= 13) v12 = true; else if (v >= 7 && v <= 10) vold = true; else continue;
-        if (!seen.empty()) seen += "/"; seen += std::to_string(v);
+        if (!seen.empty()) seen += "/";
+        seen += std::to_string(v);
     }
     if (note) *note = seen.empty() ? "" : "DirectX " + seen;
-    if (v11) return K_D3D11; if (v12) return K_D3D12; if (vold) return K_LEGACY; return K_UNKNOWN;
+    if (v11) return K_D3D11;
+    if (v12) return K_D3D12;
+    if (vold) return K_LEGACY;
+    return K_UNKNOWN;
 }
 }

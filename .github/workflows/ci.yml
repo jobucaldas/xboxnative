@@ -24,6 +24,11 @@ jobs:
           bash xbox-test/app/tests/session-restore.sh
           bash xbox-test/app/tests/launch-status.sh
           python3 -m unittest xbox-test/dp/test-verify-depot.py
+          python3 -m unittest discover -s xbox-test/app/donors -p 'test_*.py'
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror xbox-test/app/tests/apibadge_test.cpp -o /tmp/apibadge-test
+          /tmp/apibadge-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror xbox-test/shared/tests/wine_load_config_test.cpp -o /tmp/wine-config-test
+          /tmp/wine-config-test
       - name: build scripts parse their pins (offline)
         run: |
           set -e
@@ -37,4 +42,16 @@ jobs:
           if git grep -nIE 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|gh[pousr]_[A-Za-z0-9]{30,}|tskey-[A-Za-z0-9-]{10,}|7656119[0-9]{10}' -- . ':!.github'; then
             echo "possible secret or SteamID committed"; exit 1
           fi
+  registry-persistence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install registry test toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 wine64 wine lld
+      - name: Registry persistence and write-failure regression
+        run: bash xbox-test/uwph/host/run-reg-selftest.sh
+      - name: Registry crash consistency (eight cycles)
+        run: bash xbox-test/uwph/host/run-reg-killtest.sh
+      - name: Inert Wine config opt-in and active-config rejection
+        run: bash xbox-test/uwph/host/tests/run-load-config.sh
   # TODO: on-device sections of xbox-test/smoke-all.sh need a console and cannot run in GitHub Actions.
