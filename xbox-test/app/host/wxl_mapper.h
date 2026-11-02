@@ -2,6 +2,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
+#include "../../shared/wine_load_config.h"
 // Minimal trusted-image loader: Wine virtual.c map_image_into_view's sequence
 // (copy, DIR64 relocation, protections) and loader.c import thunk fixup model.
 // No Wine code copied. Native static TLS uses a bounded packaged carrier slot.
@@ -225,7 +226,7 @@ inline bool prepareUnwind(Image& image, Log log) {
     }
     return true;
 }
-inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={}, Resolver resolve=nullptr, bool mapped=false) {
+inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={}, Resolver resolve=nullptr, bool mapped=false, LoadConfig config=LoadConfig::reject) {
     logger = log;
     auto fail = [&](const char* why) { log(why); return false; };
     FILE* f = _wfopen(path, L"rb"); if (!f) return fail("WXL FAIL open LocalState image");
@@ -240,8 +241,11 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
     size_t secOff = size_t(dos->e_lfanew)+offsetof(IMAGE_NT_HEADERS64,OptionalHeader)+nt->FileHeader.SizeOfOptionalHeader;
     if (nt->Signature!=IMAGE_NT_SIGNATURE || nt->FileHeader.Machine!=IMAGE_FILE_MACHINE_AMD64 || h.Magic!=IMAGE_NT_OPTIONAL_HDR64_MAGIC || nt->FileHeader.SizeOfOptionalHeader!=sizeof h || h.NumberOfRvaAndSizes!=IMAGE_NUMBEROF_DIRECTORY_ENTRIES || !nt->FileHeader.NumberOfSections || !range(secOff,nt->FileHeader.NumberOfSections*sizeof(IMAGE_SECTION_HEADER),file.size())) return fail("WXL FAIL NT header");
     if (h.SectionAlignment!=4096 || !h.SizeOfImage || h.SizeOfImage> (mapped ? 512u : 32u)*1024*1024 || h.SizeOfImage%4096 || h.SizeOfHeaders<secOff+nt->FileHeader.NumberOfSections*sizeof(IMAGE_SECTION_HEADER) || h.SizeOfHeaders>file.size() || pages(h.SizeOfHeaders)>h.SizeOfImage) return fail("WXL FAIL image layout");
-    for (unsigned d : {IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR, IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG})
+    for (unsigned d : {IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR})
         if (!mapped && h.DataDirectory[d].Size) return fail("WXL FAIL unsupported runtime directory");
+    auto configDir=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG];
+    if (!mapped && (configDir.VirtualAddress || configDir.Size) && config!=LoadConfig::inert_wine)
+        return fail("WXL FAIL unsupported runtime directory");
     auto sections=(const IMAGE_SECTION_HEADER*)(file.data()+secOff);
     size_t end=pages(h.SizeOfHeaders); bool entryCode=false;
     for (unsigned i=0;i<nt->FileHeader.NumberOfSections;i++) {
@@ -251,6 +255,20 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
         if ((s.Characteristics&IMAGE_SCN_MEM_EXECUTE) && h.AddressOfEntryPoint>=s.VirtualAddress && h.AddressOfEntryPoint-s.VirtualAddress<n) entryCode=true;
     }
     if (!entryCode && !(mapped && (nt->FileHeader.Characteristics&IMAGE_FILE_DLL) && !h.AddressOfEntryPoint)) return fail("WXL FAIL entry outside code");
+    if (!mapped && (configDir.VirtualAddress || configDir.Size)) {
+        bool inert=false;
+        for (unsigned i=0;i<nt->FileHeader.NumberOfSections;i++) {
+            auto s=sections[i];
+            if (configDir.VirtualAddress<s.VirtualAddress) continue;
+            size_t offset=size_t(configDir.VirtualAddress)-s.VirtualAddress;
+            if (!range(offset,configDir.Size,s.SizeOfRawData) ||
+                (s.Characteristics&(IMAGE_SCN_MEM_WRITE|IMAGE_SCN_MEM_EXECUTE))) continue;
+            inert=inert_wine_load_config(file.data()+s.PointerToRawData+offset,
+                                        configDir.Size,h.DllCharacteristics);
+        }
+        if (!inert) return fail("WXL FAIL non-inert Wine load configuration");
+        log("WXL inert Wine load configuration validated; no loader work requested");
+    }
     image.log=log; image.size=h.SizeOfImage; image.carrier=carrier;
     image.entry=h.AddressOfEntryPoint; image.dll=!!(nt->FileHeader.Characteristics & IMAGE_FILE_DLL);
     image.base=(BYTE*)VirtualAllocFromApp(nullptr,image.size,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);

@@ -98,7 +98,7 @@ inline bool probe(wxl::Log log) {
     root.resize(slash+1);root+=L"donors\\";
     struct Import {const char* donor;const char* dll;const char* name;WORD ordinal;};
     static const Import imports[]={
-#include "imports.h"
+#include "donor_imports.generated.h"
     };
     unsigned failures=0;
     for(auto name:{L"hid.dll",L"setupapi.dll",L"version.dll",L"shcore.dll",L"avrt.dll"}) {
@@ -107,7 +107,7 @@ inline bool probe(wxl::Log log) {
         for(auto& i:imports) if(label==i.donor) resolve(i.dll,i.name,i.ordinal);
         unsigned preflightMissing=missing;
         std::unique_ptr<wxl::Image> image(new wxl::Image());
-        bool ok=!preflightMissing&&wxl::load(*image,path.c_str(),log,{},resolve,false);
+        bool ok=!preflightMissing&&wxl::load(*image,path.c_str(),log,{},resolve,false,wxl::LoadConfig::inert_wine);
         bool tested=ok&&behavior(label,*image,path);
         if(tested) {
             images.emplace(label,std::move(image));
