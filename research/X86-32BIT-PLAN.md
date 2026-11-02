@@ -165,9 +165,14 @@ First deliverables, concretely: (1) `x32cpu` builds as a static library for the 
 - **First 32-bit target:** Spacewar only (recommended), or also LIMBO/Undertale (+3-4 weeks each, LIMBO has a possible DRM wrapper)? All three wait on the D3D9 layer (48b).
 - **Engine/licence:** accept GPL-2-or-later Boxedwine core (personal sideload only) as the engine, with Unicorn-TCI as plan B?
 
-## x86e M0 source corrections (2026-10-26)
+## M0 implementation constraints
 
-At fork 75b719bc, FE /7 imm8 is not a callback registry: DecodeGrp4_8 accepts
+**Execution work is deferred until genuine Megabonk playability through the
+launcher is demonstrated.** The earlier parallel-M0 scheduling suggestions above
+are not authorization to start extraction or execution. Mapping-only results,
+a standalone fixture, or a launcher screenshot do not satisfy that prerequisite.
+
+The source audit at fork 75b719bc found that FE /7 imm8 is not a callback registry: DecodeGrp4_8 accepts
 only index 1, hardwired to onExitSignal. KMemoryData::addCallback also rejects
 all other functions. A standalone trap adapter must explicitly provide its own
 handling. The CPU unit harness retains host KProcess/KThread/KMemory dependencies;
@@ -180,3 +185,11 @@ Use an own freestanding i686 C hello fixture to bound startup requirements;
 default static MinGW CRT startup needs substantially more than three APIs.
 Any Play-480 hello fixture proof must say which PE ran: it is not proof that
 Spacewar's original entry executes. All M0 execution/performance remains pending.
+
+When the prerequisite is met, reuse the decoder and selected normal integer
+handlers behind an isolated, bounded CPU/memory adapter. `NormalCPU` is not a
+standalone library: `boxedwine.h`, segment/exception paths and memory handling
+retain process, thread, scheduler and file interfaces. Unsupported instructions
+and APIs must fail explicitly; a milestone subset does not establish support for
+the entire normal core or a commercial game. Native selector transitions and
+security-restriction bypasses are not an alternative implementation path.
