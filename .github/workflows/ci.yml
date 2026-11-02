@@ -18,6 +18,8 @@ jobs:
         run: |
           set -e
           find . -name '*.py' -not -path './.git/*' -print0 | xargs -0 -n1 python3 -m py_compile
+      - name: synthetic input routing fixture
+        run: bash xbox-test/uwph/input/tests/run-route-test.sh
       - name: offline unit tests
         run: |
           set -e
@@ -28,6 +30,9 @@ jobs:
           /tmp/apibadge-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror xbox-test/shared/tests/wine_load_config_test.cpp -o /tmp/wine-config-test
           /tmp/wine-config-test
+          python3 xbox-test/app/depot-fixtures/validate-vectors.py
+      - name: strict resolver policy unit test
+        run: bash xbox-test/uwph/strict-policy/tests/run-policy-test.sh
       - name: build scripts parse their pins (offline)
         run: |
           set -e
@@ -53,4 +58,20 @@ jobs:
         run: bash xbox-test/uwph/host/run-reg-killtest.sh
       - name: Inert Wine config opt-in and active-config rejection
         run: bash xbox-test/uwph/host/tests/run-load-config.sh
+  strict-imports:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install cross compiler and Wine
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 llvm lld wine64
+      - name: exercise strict named and ordinal imports
+        run: bash xbox-test/uwph/host/tests/run-strict-imports.sh --run
+  guest-pe-inspection:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install PE inspection tools
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 llvm lld
+      - name: inspect synthetic no-CRT guest
+        run: bash xbox-test/uwph/guest-fixture/check-pe.sh
   # TODO: on-device sections of xbox-test/smoke-all.sh need a console and cannot run in GitHub Actions.
