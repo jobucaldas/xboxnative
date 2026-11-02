@@ -44,6 +44,7 @@ extern "C" {
 extern "C" size_t ZSTD_decompress(void* dst, size_t dstCapacity, const void* src, size_t compressedSize);
 extern "C" unsigned ZSTD_isError(size_t code);
 #include "font8x8_basic.h"
+#include "launch_button.h"
 #include <xinput.h>
 #include "../uwph/display/gamepad.h"
 
@@ -800,8 +801,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         bool retained=play_runtime::observed.load(std::memory_order_acquire)!=nullptr;
         const char* label = launching ? (g_launch.phase==3?"GUEST RUNNING":"LAUNCHING...") : retained ? "RESTART REQUIRED" : (down || queued) ? "INSTALLING..." : m_dInst.installed ? "PLAY" : "INSTALL";
         bool busy = launching || retained || down || queued;
-        fill(60, 650, 616, 120, busy ? C3(60, 66, 78) : m_dInst.installed ? C3(40, 150, 80) : C3(45, 90, 200)); frame(60, 650, 616, 120, 8, YEL);
-        text(60 + 308 - twidth(label, 5) / 2, 678, label, 5, TXT);
+        fill(60, 650, launch_button::width, 120, busy ? C3(60, 66, 78) : m_dInst.installed ? C3(40, 150, 80) : C3(45, 90, 200)); frame(60, 650, launch_button::width, 120, 8, YEL);
+        auto labelLayout=launch_button::label_layout(std::char_traits<char>::length(label));
+        text(60 + labelLayout.x, 650 + labelLayout.y, label, labelLayout.scale, TXT);
         text(60 + 308 - twidth(down ? "B: cancel download" : "press A", 2) / 2, 734, down ? "B: cancel download" : "press A", 2, C3(210, 220, 240));
         // right column: meta + description
         std::vector<std::string> meta;

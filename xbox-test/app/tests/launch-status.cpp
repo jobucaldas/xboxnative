@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../launch_status.h"
+#include "../launch_button.h"
+#include <cstring>
 #include <cassert>
 #include <cstdio>
 #include <initializer_list>
@@ -21,4 +23,14 @@ int main() {
     assert(!terminal(Outcome::starting));assert(!terminal(Outcome::running));
     assert(terminal(Outcome::completed));assert(terminal(Outcome::failed));assert(terminal(Outcome::timedOut));
     puts("LAUNCH-STATUS-OK: progress is not success; terminal failure wins");
+    for(const char* label:{"GUEST RUNNING","LAUNCHING...","RESTART REQUIRED","INSTALLING...","PLAY","INSTALL"}) {
+        auto layout=launch_button::label_layout(std::strlen(label));
+        int textWidth=static_cast<int>(std::strlen(label))*8*layout.scale;
+        assert(layout.x>=launch_button::padding);
+        assert(layout.x+textWidth<=launch_button::width-launch_button::padding);
+        assert(layout.x*2+textWidth==launch_button::width);
+        assert(layout.y>=28 && layout.y+8*layout.scale<=68);
+        assert(layout.scale==(!std::strcmp(label,"RESTART REQUIRED")?4:5));
+    }
+    puts("LAUNCH-BUTTON-OK: every action label fits padding and stays centered");
 }
