@@ -36,7 +36,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         root.assign(gameRoot,n);
         logline("OFF-DEVICE Wine diagnostic only; no console or Steam client success claim");
     }
-    if(!play_runtime::start(root,game?L"Megabonk.exe":std::string(args)=="missing"?L"play-missing.exe":L"play-guest.exe",game?L"-force-d3d11":play_runtime::wide(args),logline))return 1;
+    if(!play_runtime::start(root,game?L"Megabonk.exe":std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="static-steam"?L"play-steam.exe":L"play-guest.exe",game?L"-force-d3d11":play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;if(r->worker)WaitForSingleObject(r->worker,game?10000:2000);
     auto last=r->snapshot();char summary[8192];snprintf(summary,sizeof summary,"PLAY-TEST executed=%d finished=%d success=%d code=%lu last=%s",int(r->executed),int(r->finished),r->success,r->code,last.c_str());
     logline(summary);
@@ -46,7 +46,12 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     else if(mode=="observer-log")ok=ok&&r->finished&&r->success&&r->code==42&&r->firstChanceCount.load()>0&&r->firstChanceCode.load()==0x40010006&&r->firstChanceAddress.load()!=0;
     else if(mode=="steam-forward")ok=ok&&r->finished&&!r->success&&last.find("steam_api64.dll!SteamAPI_Init")!=std::string::npos&&last.find("caller=0x")!=std::string::npos;
     else if(mode=="steam-api"||mode=="steam-client")ok=ok&&r->finished&&!r->success&&last.find(mode=="steam-api"?"steam_api64.dll!LoadLibrary (real client prerequisite item 36)":"steamclient64.dll!LoadLibrary (real client prerequisite item 36)")!=std::string::npos&&last.find("caller=0x")!=std::string::npos;
-    else if(mode=="missing")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&r->missing.empty()&&last.find("mapping failed: play-missing.exe; guest initialization blocked")!=std::string::npos&&last.find("play-missing.dll!DeliberatelyMissingPlayImport")!=std::string::npos;
+    else if(mode=="missing")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&mlp::stub_names.empty()&&last.find("mapping failed: play-missing.exe; guest initialization blocked")!=std::string::npos&&last.find("play-missing.dll!DeliberatelyMissingPlayImport")!=std::string::npos;
+    else if(mode=="static-steam")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&mlp::stub_names.empty()&&last.find("steam_api64.dll!SteamAPI_Init")!=std::string::npos;
+    else if(mode=="reject-mapping") {
+        auto failed=play_runtime::named(L"play-unresolved.dll");
+        ok=ok&&r->finished&&r->success&&r->code==42&&failed&&failed->mappingFailed&&!failed->prepared&&!failed->initialized;
+    }
     else if(mode=="wide-long") {
         std::string expected;for(int i=0;i<2047;++i)expected+="\xc3\xa7";
         ok=ok&&r->finished&&!r->success&&last.find("user32.dll!MessageBoxW")!=std::string::npos&&last.find(expected+"<truncated>\"")!=std::string::npos&&last.find("\xef\xbf\xbd")==std::string::npos;
