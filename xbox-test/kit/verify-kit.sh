@@ -1,5 +1,5 @@
 #!/bin/bash
-# verify-kit.sh [KITDIR=/workspace/x64-run/kit/latest]
+# verify-kit.sh [KITDIR]; defaults to KIT_OUT_ROOT/latest or out/kit/latest.
 #
 # Checks a kit produced by build-kit.sh:
 #   1. no .pfx (private key) anywhere in the kit
@@ -9,14 +9,14 @@
 #      not a system CA)
 # Exits 0 only if every check for every entry passes.
 set -euo pipefail
-export PATH="$HOME/.local/bin:$PATH"
 here="$(cd "$(dirname "$0")" && pwd)"
 
-out_root="/workspace/x64-run/kit"
+out_root="${KIT_OUT_ROOT:-$here/../../out/kit}"
 kitdir="${1:-$out_root/latest}"
 kitdir="$(cd "$kitdir" && pwd)"
 manifest="$kitdir/manifest.json"
 [ -f "$manifest" ] || { echo "verify-kit: no manifest.json in $kitdir" >&2; exit 2; }
+python3 "$here/kitlib.py" validate "$manifest"
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/kit-verify.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT

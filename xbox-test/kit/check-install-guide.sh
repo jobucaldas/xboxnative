@@ -24,9 +24,9 @@ bad() { echo "MISSING: $1"; fail=1; }
 good() { checked=$((checked + 1)); }
 
 # sources searched for log names / markers (never the guide itself, never evidence logs)
-src_has() { grep -rqF --include='*.c' --include='*.cpp' --include='*.h' --include='*.sh' --include='*.py' -e "$1" xbox-test /workspace/wt/dl/xbox-test/app 2>/dev/null; }
+src_has() { grep -rqF --include='*.c' --include='*.cpp' --include='*.h' --include='*.sh' --include='*.py' -e "$1" xbox-test; }
 kit_names() { grep -hoE '(add_package|add_extra) +[A-Za-z0-9._-]+' xbox-test/kit/build-kit.sh | awk '{print $2}'; }
-# any Appx-manifest auto-detected package is not statically named; skip nothing else.
+# Packages and guest extras must be explicitly named by the kit builder.
 
 grep -o '`[^`]*`' "$guide" | sed 's/^`//; s/`$//' | sort -u > /tmp/guide-tokens.$$
 trap 'rm -f /tmp/guide-tokens.$$' EXIT
@@ -39,7 +39,7 @@ check_word() {  # single space-free word taken from a command or a bare token
         *.msix|*.cer)
             local n="${w##*/}"; n="${n%.*}"
             if kit_names | grep -qx "$n"; then good; else bad "kit package '$n' not produced by build-kit.sh ($w)"; fi;;
-        wxl-test.exe|manifest.json)
+        wxl-test.exe|swc-test.exe|tls-test.exe|tls-test.dll|lifecycle.dll|manifest.json)
             grep -q "$w" xbox-test/kit/build-kit.sh xbox-test/kit/kitlib.py && good || bad "kit file $w";;
         *.log) src_has "$w" && good || bad "log file $w not written by any source";;
         *.sh) if [ -e "xbox-test/dp/$w" ] || [ -e "xbox-test/kit/$w" ]; then good; else bad "script $w"; fi;;

@@ -1,125 +1,95 @@
-# Installing the test kit on the Xbox Series S (for João)
+# Installing the test kit in Xbox Dev Mode
 
-Everything here is off the kit built by `xbox-test/kit/build-kit.sh`. Package
-versions change between builds, so read them from `manifest.json` in the kit
-directory instead of trusting any number in this file.
-`bash xbox-test/kit/check-install-guide.sh` checks that every file, script and
-log marker named in backticks in this guide still exists in the repo.
+Use only your own console with Dev Mode and Device Portal enabled. Kit versions
+change: read identity/version from `manifest.json`, not a copied example.
+`bash xbox-test/kit/check-install-guide.sh` checks guide paths and log markers;
+it does not prove that a package works on the console.
 
-Legend: **[verified]** = used successfully against the console by the scripts
-under `xbox-test/dp/` (see `xbox-test/dp/README.md`). **[community]** = taken
-from third-party Dev Mode guides, never run by us. **[not verified]** = no
-source in this repo or Microsoft docs.
+## Prepare and install
 
-## Before you start
+1. Build with `bash xbox-test/kit/build-kit.sh <output-root>`. Before sideloading,
+   `bash xbox-test/kit/verify-kit.sh <kit>` and
+   `bash xbox-test/kit/verify-kit-offline.sh <kit>` must both print `RESULT: PASS`.
+   `<kit>` is a completed build directory, or the output root's `latest` symlink.
+2. Configure Device Portal address, authentication and network access using
+   `xbox-test/dp/README.md`. Supply `DP_PASS` through your local secret setup;
+   never put it in a command transcript, committed file or log. Override
+   `DP_HOST`/`DP_SOCKS` for your network rather than using another developer's
+   address. Device Portal setup reference:
+   <https://xboxoneresearch.github.io/wiki/development/dev-portal-api/set-up-device-portal/>.
+3. Each package has `<name>.msix` and matching public `<name>.cer`. Names:
+   `uwph`, `wxl`, `hid`, `mlp`, `tls`, `swc`, `w32u`, `vrx`, and `launcher`
+   unless explicitly omitted at build time. Install each with
+   `bash xbox-test/dp/install.sh <kit>/<name>.msix <kit>/<name>.cer`, waiting for
+   `INSTALL OK`. The separate test identities may be installed in any order.
+   Installing does not launch them.
+4. **Do not uninstall `launcher` (`Grok.XboxTest`) to update it:** it holds Steam
+   login state. Bump the package version and install over the same identity.
+   Follow `docs/xbox/REBUILD.md` for package setup. In Dev Home, set the app type
+   to Game when required for the larger memory limit; the UI sequence varies
+   with console software. Do not use `xbox-test/dp/uninstall.sh` for this guide.
+5. Read the package's identity/version from `manifest.json`. For the default
+   manifests, full name is `<Identity>_<Version>_x64__dk715arakrne0` and launch ID
+   is `<Identity>_dk715arakrne0!App`. With alternate manifests, use the actual
+   architecture, publisher-family suffix and application ID.
 
-1. Check the kit first (on the PC/box, no console needed):
-   `bash xbox-test/kit/verify-kit.sh` and `bash xbox-test/kit/verify-kit-offline.sh`
-   must both print `RESULT: PASS`. Kit location: `/workspace/x64-run/kit/latest`
-   (symlink to the newest `<YYYYmmdd-HHMMSS>` directory).
-2. The console must be in Dev Mode with Device Portal enabled. **[community]**
-   Dev Home, Home tab, Remote Access, Remote Access Settings, tick
-   "Enable Xbox Device Portal", set a user name and password. The URL shown
-   under Remote Access (`https://<console-ip>:11443`) is the Device Portal
-   address. Source: <https://xboxoneresearch.github.io/wiki/development/dev-portal-api/set-up-device-portal/>.
-3. The apps must be of type Game (5 GB limit). Already confirmed for our
-   packages in `docs/xbox/REBUILD.md`. For a newly installed package: **[community]**
-   in Dev Home, "Games & Apps", highlight the app, press the Select/View
-   button, choose view details, change App to Game.
-4. The kit files per package are `<name>.msix` plus its public `<name>.cer`
-   (publisher `CN=grok-xbox-dev`). Packages: `uwph`, `wxl`, `hid`, `mlp`, `tls`, `swc`, `w32u`,
-   `vrx`, `launcher` (only present if the launcher worktree existed at build
-   time), plus the extras `wxl-test.exe` and `swc-test.exe`. The kit never contains a private key.
+Browser installation is an alternative, but menu names and certificate upload
+behavior vary. If the browser flow rejects the self-signed package, use the
+script route, which uploads the matching public certificate with the package.
 
-## Install (pick route A or B)
+## Upload guests and launch
 
-Route A, scripts (recommended, **[verified]**). Needs `DP_PASS` in the
-environment and the network path used by `xbox-test/dp/dp-lib.sh` (defaults:
-`DP_HOST=192.168.15.96`, `DP_SOCKS=localhost:1055`; override both if you are
-on the LAN directly, e.g. `DP_SOCKS=` empty). Never paste the password into a
-file or log.
+1. Upload `wxl-test.exe` to the WXL package:
+   `bash xbox-test/dp/put-file.sh '<wxl full name>' '\LocalState' <kit>/wxl-test.exe`.
+   Without it, `WXL FAIL open` is expected but is **not** a successful WXL test.
+2. Similarly upload `swc-test.exe` to the SWC package using
+   `bash xbox-test/dp/put-file.sh '<swc full name>' '\LocalState' <kit>/swc-test.exe`.
+   The source sequence is in `xbox-test/uwph/host/run-swc.sh`.
+3. For TLS, upload all three guests to the TLS package's `LocalState`:
+   `tls-test.exe`, `tls-test.dll`, `lifecycle.dll`. Use
+   `bash xbox-test/dp/put-file.sh '<tls full name>' '\LocalState' <kit>/tls-test.exe`
+   and repeat with each DLL. The native TLS carrier DLLs are already packaged;
+   they are not substitutes for these uploads.
+4. MLP requires `Megabonk.exe`, `UnityPlayer.dll`, `baselib.dll` from your own
+   legitimate Steam install in that package's `LocalState`. They are not in the
+   kit. See `xbox-test/uwph/host/run-mlp.sh`; this is a mapping probe, not game
+   execution or a substitute for launcher acceptance.
+5. If running, stop the app with `bash xbox-test/dp/kill.sh '<full name>'` and
+   confirm with `bash xbox-test/dp/ps.sh`. Kill's HTTP status alone is unreliable.
+   Launch using
+   `bash xbox-test/dp/launch.sh '<Identity>_dk715arakrne0!App' '<full name>'`.
+   Optional `bash xbox-test/dp/user-signin.sh` can report HTTP 400 when already
+   signed in; check the actual launch result rather than treating that as proof.
+6. Wait for the required log lines with
+   `bash xbox-test/dp/wait-log.sh '<full name>' <logfile> '<pattern>' 60 /tmp/out.log`.
 
-1. For each package run
-   `bash xbox-test/dp/install.sh <kit>/<name>.msix <kit>/<name>.cer`
-   and wait for `INSTALL OK`. Order does not matter between `uwph`, `wxl`,
-   `hid`, `mlp`, `tls`, `swc`, `w32u` and `vrx`. Installing does not launch anything.
-2. Do not uninstall `launcher` (`Grok.XboxTest`) to "reinstall": it holds the
-   Steam login. Installing `launcher.msix` over the same identity upgrades in
-   place (see `xbox-test/kit/README.md`). The uninstall script
-   `xbox-test/dp/uninstall.sh` is **not tested**; do not use it.
-
-Route B, browser (**[community]**, not run by us for these packages):
-
-1. Open the Device Portal URL in a browser, accept the certificate warning,
-   sign in.
-2. In "My games & apps" click Add, pick `<name>.msix`, follow the dialogs and
-   press Start/Launch to upload. Whether the dialog accepts our `<name>.cer`
-   is **not verified**; if it rejects the signature, use route A, which sends
-   the `.cer` in the same upload request as the `.msix`.
-3. The path `System -> Apps` shown in `xbox-test/kit/README.md` is **not
-   verified**.
-
-## Launch and what success looks like
-
-Each app writes a log into its own `LocalState` folder and also draws on the
-TV. Full package name: `<Identity>_<Version>_x64__dk715arakrne0`; launch id:
-`<Identity>_dk715arakrne0!App` (identity and version are in `manifest.json`).
-
-1. Optional, **[verified]** partially (HTTP 400 when already signed in, then
-   launch works anyway): `bash xbox-test/dp/user-signin.sh`.
-2. Launch with script (**[verified]**):
-   `bash xbox-test/dp/launch.sh '<Identity>_dk715arakrne0!App' '<Identity>_<Version>_x64__dk715arakrne0'`
-   and expect `launch HTTP 200`. Or start it from Games & Apps on the console.
-3. Wait for the success line in the log
-   (`bash xbox-test/dp/wait-log.sh '<full name>' <logfile> '<pattern>' 60 /tmp/out.log`):
-
-| Package | Log file | Success line (grep) | On the TV |
+| Package | Log file | Required markers | Expected display |
 | --- | --- | --- | --- |
-| `uwph` | `k32.log` | `K32 RESULT failures=0` and `D3DT RESULT presented=300 hr=0x00000000` | window cycles colors for 300 frames, ends solid magenta |
-| `wxl` | `k32.log` | `WXL RESULT entry=42 failures=0` (first launch shows `WXL FAIL open` until step 4 below) | same window as `uwph` |
-| `hid` | `k32.log` | `HID RESULT failures=0` (and `HID-STUB-OK symbols=20 checks=23`) | same window as `uwph` |
-| `mlp` | `k32.log` | `MLP-PROBE-DONE` (only after the Megabonk files are uploaded, see step 6) | same window as `uwph` |
-| `tls` | `k32.log` | `WXL TLS RESULT failures=0` and `LIFECYCLE RESULT failures=0` | same window as `uwph` |
-| `swc` | `k32.log` | `SWC RESULT entry=42 failures=0` (after step 4b) | solid green frame |
-| `w32u` | `w32u.log` | `W32U RESULT failures=0` | 180 frames then solid green |
-| `vrx` | `vrx.log` | `vrx: all cases done`, and `caseC` line must say OK | window idles on a heartbeat frame |
-| `launcher` | `boot.log` | boot reaches the QR or library screen | Steam QR login or your library |
+| `uwph` | `k32.log` | `K32 RESULT failures=0` and `D3DT RESULT presented=300 hr=0x00000000` | colored frames ending magenta |
+| `wxl` | `k32.log` | `WXL RESULT entry=42 failures=0` | host window |
+| `hid` | `k32.log` | `HID RESULT failures=0` and `HID-STUB-OK symbols=20 checks=23` | host window |
+| `mlp` | `k32.log` | `MLP-PROBE-DONE` | host window; no game execution |
+| `tls` | `k32.log` | `WXL TLS RESULT failures=0` and `LIFECYCLE RESULT failures=0` | host window |
+| `swc` | `k32.log` | `SWC RESULT entry=42 failures=0` | 300 frames ending green |
+| `w32u` | `w32u.log` | `W32U RESULT failures=0` | 180 frames ending green |
+| `vrx` | `vrx.log` | `vrx: all cases done`; inspect `caseC` for `OK value=42` | heartbeat frame; A/B intentionally fail or except |
+| `launcher` | `boot.log` | QR/library screen reached | login/library; not game playability |
 
-Screen descriptions come from `xbox-test/kit/README.md`; the log markers are
-grep-checked in the source by `check-install-guide.sh`.
+## Collect and review evidence
 
-4. `wxl` guest upload (**[verified]** script, see "Minimal PE mapper" in
-   `xbox-test/uwph/host/README.md`):
-   `bash xbox-test/dp/put-file.sh '<wxl full name>' '\LocalState' <kit>/wxl-test.exe`,
-   stop the app with `bash xbox-test/dp/kill.sh '<wxl full name>'` (confirm with
-   `bash xbox-test/dp/ps.sh wxl`; the HTTP status of kill is unreliable), then
-   launch again.
-4b. `swc` guest upload: same as step 4 with `<kit>/swc-test.exe` and the `swc`
-   full name (sequence in `xbox-test/uwph/host/run-swc.sh`).
-5. Screenshot of what the TV shows (**[verified]**):
-   `bash xbox-test/dp/screenshot.sh /tmp/shot.png`.
+1. List files with `bash xbox-test/dp/ls-dir.sh '<full name>' '\LocalState'`.
+2. Download a log with
+   `bash xbox-test/dp/get-file.sh '<full name>' '\LocalState' k32.log /tmp/k32.log`.
+3. Capture the display with `bash xbox-test/dp/screenshot.sh /tmp/shot.png`.
+4. Review logs and images before sharing: remove account details and never share
+   credentials, launcher session files or game binaries. Crash dumps may contain
+   sensitive data; `xbox-test/dp/logs.sh` can list them, but download support is
+   not established by this guide.
+5. Record which package/guest actually ran. Off-device kit checks, mapping probe
+   completion and a non-black launcher do not replace full console smoke or
+   `xbox-test/tools/play-test.sh <appid>` through the launcher.
 
-6. `mlp` needs `Megabonk.exe`, `UnityPlayer.dll` and `baselib.dll` from your own
-   Steam install uploaded to `LocalState` first (they are not in the kit; the
-   sequence is in `xbox-test/uwph/host/run-mlp.sh`).
-
-## Collect logs back
-
-1. List what is there: `bash xbox-test/dp/ls-dir.sh '<full name>' '\LocalState'`.
-2. Pull a file (resumable): `bash xbox-test/dp/get-file.sh '<full name>' '\LocalState' k32.log /tmp/k32.log`.
-3. Send the pulled `.log` files and screenshot back. Do not send `DP_PASS` or
-   anything under the launcher's session files in `LocalState`.
-4. Crash dumps: `bash xbox-test/dp/logs.sh list '<full name>'` lists them, but
-   downloading a dump is not solved (`xbox-test/dp/README.md`): treat as
-   **not verified**.
-5. Browser File Explorer route in `xbox-test/kit/README.md`
-   (File Explorer, LocalAppData) is **not verified**.
-
-## If something goes wrong
-
-- Install fails with 0x800B0100: package is unsigned or the certificate is not
-  accepted. Run `bash xbox-test/kit/verify-kit.sh`. **[community]**
-- App closes right after launch: see "What makes the app stay open" in
-  `docs/xbox/REBUILD.md`.
-- Console wedged: `POST /api/control/restart` on Device Portal (not wrapped in
-  a script here; restarting is a last resort).
+For an unsigned/untrusted-package error, re-run both kit verification scripts
+before attempting another install. If an app exits after launch, see
+`docs/xbox/REBUILD.md`; do not loosen test assertions or count a missing guest as
+success. Console access is shared: the Device Portal scripts acquire the lock.
