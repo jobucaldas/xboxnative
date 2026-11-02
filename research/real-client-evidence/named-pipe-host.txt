@@ -1,1 +1,0 @@
-namedPipeFixture=true inheritedHandles=false requestReply=true childExit=37

@@ -1,4 +1,0 @@
-package: Grok.XboxTest_0.5.157.4_x64__dk715arakrne0  app: 3405340  out: /workspace/x64-run/runs/stm/gamenative-play
-GAP: total=628 missing=458 win32u=120
-LAUNCH ATTEMPTED: [  28.485] launch: RESULT ok=1 mapped=4/4 gameCodeExecuted=true: missing import hit: gdi32.dll!GetDeviceCaps caller=0x2006b5389dd unityplayer.dll+0x7389dd (function RVA=0x7388e0; private symbols unavailable)
-evidence: /workspace/x64-run/runs/stm/gamenative-play

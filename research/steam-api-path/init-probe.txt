@@ -1,1 +1,0 @@
-Valve SteamInternal_SteamAPI_Init appid=3405340 result=1 error=Could not determine Steam client install directory.
