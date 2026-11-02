@@ -24,8 +24,8 @@ static std::map<std::string, HMODULE> systems;
 static std::vector<std::string> stub_names;
 static wxl::Log log;
 static wxl::Resolver donor_resolve=nullptr;
-// Execution callers provide non-returning missing-import traps. Probe callers
-// retain their existing placeholders and never enter guest code.
+// Execution callers reject unresolved addresses. Probe callers retain their
+// existing placeholders and never enter guest code.
 static uintptr_t (*missingResolver)(const char*,const char*,WORD) = nullptr;
 // Probe-only ABI: integer zero plus ERROR_CALL_NOT_IMPLEMENTED. These placeholders
 // are not a runnable implementation of arbitrary Win32 signatures (e.g. HRESULT,
@@ -112,7 +112,7 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     ++sum.stubbed;
     bool planned=!strcmp(kind,"stub");
     if(!planned && sum.first=="none") sum.first=symbol;
-    std::string msg=std::string(planned?"MLP STUB ":"MLP MISSING ")+key+"!"+symbol+" route="+kind+(missingResolver?" execution=fail-stop-trap":" return=0 error=120 probe-only");
+    std::string msg=std::string(planned?"MLP STUB ":"MLP MISSING ")+key+"!"+symbol+" route="+kind+(missingResolver?" execution=reject":" return=0 error=120 probe-only");
     log(msg.c_str());
     if(missingResolver) return missingResolver(dll,name,ordinal);
     if(stub_names.size()>=stub_functions.size()) { log("MLP FAIL stub capacity"); return 0; }

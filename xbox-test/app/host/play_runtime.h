@@ -15,7 +15,7 @@ struct Module {
     std::wstring path;
     std::string key;
     wxl::Image image;
-    bool mapped=false, prepared=false, initialized=false, initializing=false, initializationFailed=false;
+    bool mapped=false, mappingFailed=false, prepared=false, initialized=false, initializing=false, initializationFailed=false;
     std::vector<Module*> dependencies;
 };
 struct State {
@@ -78,17 +78,14 @@ static void stopMissing(const std::string& name,uintptr_t caller=0) {
     state->event(text);
     RaiseException(missingException,EXCEPTION_NONCONTINUABLE,0,nullptr);
 }
-template<size_t N> static uintptr_t WINAPI missingTrap() {
-    stopMissing(N<state->missing.size()?state->missing[N]:"invalid trap index",(uintptr_t)_ReturnAddress()); return 0;
-}
-template<size_t... I> static auto traps(std::index_sequence<I...>) { return std::array<uintptr_t,sizeof...(I)>{(uintptr_t)&missingTrap<I>...}; }
-static const auto trapFunctions=traps(std::make_index_sequence<2048>{});
 static uintptr_t missing(const char* dll,const char* name,WORD ordinal) {
     std::string full=lower(dll)+"!"+(name?name:"#"+std::to_string(ordinal));
-    if(mappingImports) {state->event("unresolved static import: "+full+"; guest initialization blocked");return 0;}
-    for(size_t i=0;i<state->missing.size();++i) if(state->missing[i]==full) return trapFunctions[i];
-    if(state->missing.size()==trapFunctions.size()) return 0;
-    state->missing.push_back(full); return trapFunctions[state->missing.size()-1];
+    if(mappingImports) {state->event("unresolved static import: "+full+"; guest initialization blocked; "+state->snapshot());return 0;}
+    // Optional dynamic feature detection observes NULL. No unresolved import
+    // receives executable code, including the probe-only failure stubs.
+    state->event("unresolved dynamic export: "+full);
+    if(state->missing.size()<2048) state->missing.push_back(full);
+    SetLastError(ERROR_PROC_NOT_FOUND);return 0;
 }
 static void WINAPI exitProcess(UINT code) {
     state->code=code; state->event("ExitProcess code="+std::to_string(code));
@@ -144,9 +141,9 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     }
     Module* m=nullptr;
     {std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
-     m=named(requested);if(!m){std::wstring p=requested;if(p.find(L':')==std::wstring::npos && (p.empty()||p[0]!=L'\\'))p=state->root+L"\\"+p;if(exists(p))m=map(p);}
+     m=named(requested);if(!m){std::wstring p=requested;if(p.find(L':')==std::wstring::npos && (p.empty()||p[0]!=L'\\'))p=state->root+L"\\"+p;if(exists(p)) {m=map(p);if(!m){SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}}}
     }
-    if(m) { if(!initializePending()) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;} return (HMODULE)m->image.base; }
+    if(m) { if(m->mappingFailed || !m->mapped || !initializePending() || !m->initialized) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;} return (HMODULE)m->image.base; }
     // Restrict fallback to documented system DLL search, never desktop paths.
     auto result=LoadLibraryExW(requested.c_str(),nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
     if(!result) {DWORD error=GetLastError();state->event("LoadLibrary failed name="+narrow(requested)+" error="+std::to_string(error));SetLastError(error);}
@@ -160,6 +157,7 @@ static BOOL WINAPI freeLibrary(HMODULE h) { if(find(h)) return TRUE; return Free
 // DLL/symbol separator, supports #ordinals and records a module dependency.
 // Keep this execution behavior separate from the non-executing import probe.
 static uintptr_t exported(Module& module,const char* name,WORD ordinal) {
+    if(module.mappingFailed || !module.image.base) return 0;
     auto& image=module.image;
     if(auto p=mlp::asset_export(image,name,ordinal)) return p;
     auto nt=(IMAGE_NT_HEADERS64*)(image.base+((IMAGE_DOS_HEADER*)image.base)->e_lfanew);
@@ -206,16 +204,12 @@ static uintptr_t exported(Module& module,const char* name,WORD ordinal) {
     }
     return result;
 }
-static bool isMissingTrap(uintptr_t p) {
-    return std::find(trapFunctions.begin(),trapFunctions.end(),p)!=trapFunctions.end();
-}
 static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
     if(auto m=find(h)) {
         WORD ordinal=IS_INTRESOURCE(name)?WORD((uintptr_t)name):0;
         std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
         size_t previousCount=state->modules.size();
         auto p=exported(*m,IS_INTRESOURCE(name)?nullptr:name,ordinal);
-        if(isMissingTrap(p))p=0;
         // A dynamically resolved forwarder may have mapped a new target DLL.
         // Initialize its TLS and DllMain before returning callable guest code.
         if(p&&state->modules.size()!=previousCount&&!initializePending())p=0;
@@ -225,9 +219,8 @@ static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
     wchar_t p[32768]{};using Fn=DWORD(WINAPI*)(HMODULE,LPWSTR,DWORD);auto fn=(Fn)kernel_tail::native("GetModuleFileNameW");
     if(fn && fn(h,p,32768)) {
         auto result=resolve(basename(p).c_str(),IS_INTRESOURCE(name)?nullptr:name,IS_INTRESOURCE(name)?WORD((uintptr_t)name):0);
-        // Optional feature detection must observe NULL for absent exports.
-        // Static IAT entries, in contrast, retain named fail-stop traps.
-        if(isMissingTrap(result)){SetLastError(ERROR_PROC_NOT_FOUND);return nullptr;}
+        // Static imports are rejected while mapping; dynamic feature detection
+        // observes NULL rather than a callable failure placeholder.
         return (FARPROC)result;
     }
     return GetProcAddress(h,name);
@@ -270,7 +263,7 @@ static wxl::Carrier carrier() {
     if(h){c.index=(DWORD(*)())GetProcAddress(h,"carrier_index");c.block=(BYTE*(*)())GetProcAddress(h,"carrier_block");}return c;
 }
 static Module* map(const std::wstring& path) {
-    if(auto m=named(path)) return m;
+    if(auto m=named(path)) return m->mappingFailed?nullptr:m;
     if(state->modules.size()>=128) {state->event("loader module capacity exceeded");return nullptr;}
     auto own=std::make_unique<Module>();auto m=own.get();m->path=path;m->key=basename(path);state->modules.push_back(std::move(own));state->moduleCount=int(state->modules.size());
     // Publish before fixing imports; circular imports can use the copied export
@@ -278,7 +271,7 @@ static Module* map(const std::wstring& path) {
     mlp::assets[m->key]=&m->image;
     state->event("mapping "+m->key);
     struct ImportScope {ImportScope(){++mappingImports;} ~ImportScope(){--mappingImports;}} imports;
-    if(!wxl::run(path.c_str(),state->log,&m->image,resolve)) {state->event("mapping failed: "+m->key+"; guest initialization blocked; "+state->snapshot());return nullptr;}
+    if(!wxl::run(path.c_str(),state->log,&m->image,resolve)) {m->mappingFailed=true;state->event("mapping failed: "+m->key+"; guest initialization blocked; "+state->snapshot());return nullptr;}
     m->mapped=true;++state->mappedCount;state->order.push_back(m);return m;
 }
 static bool prepare(Module& m) {
@@ -370,6 +363,7 @@ static HRESULT WINAPI createDevice(IDXGIAdapter* adapter,D3D_DRIVER_TYPE type,HM
     using Fn=decltype(&createDevice);
     auto fn=(Fn)mlp::resolve("d3d11.dll","D3D11CreateDevice",0);
     state->event("guest D3D11CreateDevice caller="+describe((uintptr_t)_ReturnAddress()));
+    if(!fn) {stopMissing("d3d11.dll!D3D11CreateDevice");return E_NOINTERFACE;}
     HRESULT hr=fn(adapter,type,software,flags,levels,count,version,device,level,context);
     char b[160];snprintf(b,sizeof b,"guest D3D11CreateDevice returned hr=0x%08lx device=%p",(unsigned long)hr,device?*device:nullptr);state->event(b);
     if(SUCCEEDED(hr)&&device&&*device)state->milestone=2;return hr;
@@ -423,7 +417,12 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxW")) return (uintptr_t)&messageBoxW;
     if(key=="user32.dll" && name && !strcmp(name,"CreateWindowExW")) return (uintptr_t)&createWindow;
     if(key=="d3d11.dll" && name && !strcmp(name,"D3D11CreateDevice")) return (uintptr_t)&createDevice;
-    if(key=="steam_api64.dll" || key=="steamclient64.dll") return missing(dll,name,ordinal);
+    if(key=="steam_api64.dll" || key=="steamclient64.dll") {
+        // Forwarded dynamic exports must obey the same real-client gate as
+        // LoadLibrary; never return a callable Steam placeholder.
+        if(!mappingImports) stopMissing(key+"!"+(name?name:"#"+std::to_string(ordinal))+" (real client prerequisite item 36)",(uintptr_t)_ReturnAddress());
+        return missing(dll,name,ordinal);
+    }
     Module* owner=nullptr;
     // Current mapper is the last incomplete module; capture it before recursion.
     for(auto& m:state->modules) if(!m->mapped) owner=m.get();
