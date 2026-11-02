@@ -56,6 +56,25 @@ int main(int argc,char** argv) {
     EXPECT(regb::RegOpenKeyExW((HKEY)0x1234,L"x",0,KEY_READ,&k)==ERROR_INVALID_HANDLE);
     EXPECT(regb::RegCreateKeyW(HKEY_CURRENT_USER,L"\\bad",&k)==ERROR_BAD_PATHNAME);
     EXPECT(regb::RegCreateKeyW(HKEY_CURRENT_USER,L"a",nullptr)==ERROR_INVALID_PARAMETER);
+    // Persistence failures must not report success or mutate the cached view.
+    EXPECT(regb::RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\VED\\megabonk",0,KEY_READ,&k)==0);
+    EXPECT(regb::sql("PRAGMA query_only=ON"));
+    DWORD replacement=99;
+    EXPECT(regb::RegSetValueExW(k,L"volume_H1234",0,REG_DWORD,(const BYTE*)&replacement,sizeof replacement)==ERROR_WRITE_FAULT);
+    EXPECT(regb::RegDeleteValueA(k,"volume_H1234")==ERROR_WRITE_FAULT);
+    HKEY rejected=0;
+    EXPECT(regb::RegCreateKeyW(HKEY_CURRENT_USER,L"WriteFailure\\Child",&rejected)==ERROR_WRITE_FAULT);
+    EXPECT(regb::RegOpenKeyExW(HKEY_CURRENT_USER,L"WriteFailure",0,KEY_READ,&rejected)==ERROR_FILE_NOT_FOUND);
+    n=sizeof b; EXPECT(regb::RegQueryValueExW(k,L"volume_H1234",0,&t,b,&n)==0 && n==4 && *(DWORD*)b==7);
+    EXPECT(regb::RegCloseKey(k)==0);
+    regb::init(dir,say);
+    EXPECT(regb::RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\VED\\megabonk",0,KEY_READ,&k)==0);
+    n=sizeof b; EXPECT(regb::RegQueryValueExW(k,L"volume_H1234",0,&t,b,&n)==0 && n==4 && *(DWORD*)b==7);
+    EXPECT(regb::RegCloseKey(k)==0);
+    // An unavailable backing database must not silently become a volatile store.
+    regb::init(dir+L"\\missing-parent\\registry",say);
+    EXPECT(regb::RegCreateKeyW(HKEY_CURRENT_USER,L"MustPersist",&rejected)==ERROR_WRITE_FAULT);
+    EXPECT(regb::RegOpenKeyExW(HKEY_CURRENT_USER,L"MustPersist",0,KEY_READ,&rejected)==ERROR_FILE_NOT_FOUND);
     printf(bad?"SELFTEST FAILED %d\n":"SELFTEST OK\n",bad);
     return bad!=0;
 }
