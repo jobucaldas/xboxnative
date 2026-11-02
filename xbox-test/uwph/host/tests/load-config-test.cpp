@@ -8,7 +8,10 @@
 #include <cassert>
 #define VirtualAllocFromApp VirtualAlloc
 #define VirtualProtectFromApp VirtualProtect
-#include "../wxl_mapper.h"
+#ifndef CONFIG_TEST_MAPPER
+#define CONFIG_TEST_MAPPER "../wxl_mapper.h"
+#endif
+#include CONFIG_TEST_MAPPER
 static unsigned entries, allocations, validated;
 static void log_line(const char* s) {
     if (!strcmp(s,"CONFIG attach")) ++entries;
@@ -16,11 +19,11 @@ static void log_line(const char* s) {
     if (strstr(s,"inert Wine load configuration validated")) ++validated;
     puts(s);
 }
-static bool load_file(const std::string& path, wxl::LoadConfig policy) {
+static bool load_file(const std::string& path, wxl::LoadConfig policy, bool mapped=false) {
     wchar_t wide[4096];
     assert(MultiByteToWideChar(CP_UTF8,0,path.c_str(),-1,wide,4096));
     wxl::Image image;
-    return wxl::load(image,wide,log_line,{},nullptr,false,policy);
+    return wxl::load(image,wide,log_line,{},nullptr,mapped,policy);
 }
 int main(int argc,char** argv) {
     assert(argc==3);
@@ -42,6 +45,10 @@ int main(int argc,char** argv) {
     assert(configOffset && configOffset+dir.Size<=original.size());
     assert(!load_file(argv[1],wxl::LoadConfig::reject));
     assert(entries==0 && allocations==0 && validated==0);
+#ifdef CONFIG_TEST_MAPPED
+    assert(!load_file(argv[1],wxl::LoadConfig::reject,true));
+    assert(entries==0 && allocations==0 && validated==0);
+#endif
     assert(load_file(argv[1],wxl::LoadConfig::inert_wine));
     assert(entries==1 && allocations==1 && validated==1);
     const size_t ntOffset=dos->e_lfanew;
@@ -66,6 +73,10 @@ int main(int argc,char** argv) {
         entries=allocations=validated=0;
         assert(!load_file(path,wxl::LoadConfig::inert_wine));
         assert(entries==0 && allocations==0 && validated==0);
+#ifdef CONFIG_TEST_MAPPED
+        assert(!load_file(path,wxl::LoadConfig::inert_wine,true));
+        assert(entries==0 && allocations==0 && validated==0);
+#endif
     }
     puts("WINE-CONFIG-MAPPER PASS: explicit inert opt-in, default rejection, 9 pre-allocation negatives");
 }
