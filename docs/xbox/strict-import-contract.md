@@ -99,41 +99,24 @@ individual worker's shared prefix. Outputs stay in ignored `out-strict-imports`.
 The desktop harness aliases `VirtualAllocFromApp`/`VirtualProtectFromApp` to
 `VirtualAlloc`/`VirtualProtect`; **no UWP FromApp behavior is exercised**.
 
-## Dependency reconciliation and open gates
+## Integration and acceptance boundaries
 
-As inspected on 2026-11-01, PR #6 started at `0a3a848` and has been reconciled
-with `main` at `5184a7a` (the Linux UWP app build preflight, PR #5). The following
-are existing draft work, not merged dependencies or results of this fixture:
+This fixture changes no production mapper, probe, launcher, or console gate.
+When integrating it with lifecycle cleanup or execution-policy work, retain both
+sets of regressions: import rejection does not establish resource cleanup, and
+an isolated classification unit test does not establish production enforcement.
+Execution-policy integration must additionally cover delay imports, ordinal zero,
+noncallable providers, TLS initialization and entry gating. Do not substitute the
+fixture's test-host functions for production providers.
 
-- **LR-1 cleanup:** [PR #3](https://github.com/jobucaldas/xboxnative/pull/3),
-  inspected at `678acd2`, adds retryable `Image::close()`, immediate failed-load
-  cleanup, live-image rejection and cleanup-failure propagation from `run`.
-  On this branch, failed loads may retain resources until `Image` destruction,
-  and destructor cleanup cannot change the result already returned by `run`.
-  The fixture's load result and marker checks do not establish cleanup/retry
-  correctness. LR-1 remains pending coordinated integration and review.
-- **LR-2 policy:** [PR #8](https://github.com/jobucaldas/xboxnative/pull/8),
-  inspected at `3c19bed`, is an isolated classification policy/unit test, not
-  production enforcement.
-- **LR-2 mapper integration:** [PR #12](https://github.com/jobucaldas/xboxnative/pull/12),
-  inspected at `ece6589`, already carries the #3/#6/#8 baseline, execution
-  classification, delay-import and ordinal-zero tests. Do not duplicate it here.
-  Its inspected mapper reports generic `reason=noncallable` for rejected
-  resolutions; review diagnostic/provenance coverage rather than assuming it
-  implements every proposed reason above. This PR's runner/harness changes need
-  reconciliation there; its earlier validation does not validate this new head.
-- **UWP build/FromApp:** `bash tools/check-uwp-build-env.sh` checks tools for the
-  app build, not SDK/CRT usability, package validity, or host execution. Even
-  `RESULT TOOLS PRESENT ONLY` is not acceptance. Coordinated UWP host/TLS builds
-  and real FromApp runtime validation remain required; desktop Wine aliases are
-  not a substitute.
-- **Console smoke and launcher:** full `xbox-test/smoke-all.sh` and
-  `xbox-test/tools/play-test.sh <appid>` acceptance remain unrun for this change.
-  Offline checks cannot replace console gates; SKIP is not PASS. Old lane-note
-  console results predate this fixture and must not be reused as its evidence.
-  Console access is outside this continuation; any future authorized run must
-  coordinate the shared lock and package version as required by `AGENTS.md`.
+`bash tools/check-uwp-build-env.sh` checks tool availability, not SDK/CRT usability,
+package validity or host execution. Even `RESULT TOOLS PRESENT ONLY` is not
+acceptance. Changes to on-device code still require a matching source-built
+host/TLS package and the full `xbox-test/smoke-all.sh` console run. Launcher
+acceptance is `xbox-test/tools/play-test.sh <appid>`; report actual guest execution
+separately from a probe or launch attempt. Desktop Wine's FromApp aliases and
+historical lane results cannot replace those checks. Use the shared console lock
+and advance package versions before reinstalling, as required by `AGENTS.md`.
 
-Keep the PR draft pending independent review and the outstanding integration and
-acceptance gates. No production mapper, probe, launcher, or console gate is
-changed by this continuation.
+Record tested source/package identities, current review status and evidence
+summaries in the PR rather than keeping machine-specific checkpoints here.
