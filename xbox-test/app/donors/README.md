@@ -2,13 +2,16 @@
 
 The launcher builds five diagnostic donor DLLs (`avrt`, `hid`, `setupapi`,
 `shcore`, `version`) from the `wine-src` source archive in `deps.pin`, using
-`tools/build-wine-donors.sh`. No DLLs are committed or copied from a system Wine
+`tools/build-wine-donors.sh`. The tracked `patches/wine-src/0001-pe-rodata.patch`
+corrects PE constant-data section flags for GNU MinGW builds; it does not alter
+load-config fields or remove security requirements. No DLLs are committed or copied from a system Wine
 installation. Wine is LGPL-2.1-or-later; retain `LICENSE`, `COPYING.LIB`, and the
 corresponding source URL when distributing the built DLLs.
 
 The source builder writes the DLLs, `SHA256SUMS` and `SOURCE.txt` into ignored
 `out/wine-donors/`. The app build verifies that provenance against the selected
-Wine source pin and checks every DLL digest. `inspect.py` then generates the
+Wine source pin, the selected source patch and every DLL digest. Inspection also
+rejects incompatible load configurations before packaging. `inspect.py` then generates the
 complete direct/delay import table in the app's ignored object directory:
 
 ```sh
