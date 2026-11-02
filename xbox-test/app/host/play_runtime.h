@@ -50,6 +50,7 @@ struct State {
 static State* state=nullptr; // One guest process per launcher lifetime.
 static std::atomic<State*> observed{nullptr};
 static thread_local bool guestThread=false;
+static thread_local unsigned mappingImports=0;
 static std::string lower(std::string s) { for(auto& c:s) if(c>='A'&&c<='Z') c+=32; return s; }
 static std::string narrow(const std::wstring& s) {
     if(s.empty()) return {}; int n=WideCharToMultiByte(CP_UTF8,0,s.data(),int(s.size()),nullptr,0,nullptr,nullptr);
@@ -84,6 +85,7 @@ template<size_t... I> static auto traps(std::index_sequence<I...>) { return std:
 static const auto trapFunctions=traps(std::make_index_sequence<2048>{});
 static uintptr_t missing(const char* dll,const char* name,WORD ordinal) {
     std::string full=lower(dll)+"!"+(name?name:"#"+std::to_string(ordinal));
+    if(mappingImports) {state->event("unresolved static import: "+full+"; guest initialization blocked");return 0;}
     for(size_t i=0;i<state->missing.size();++i) if(state->missing[i]==full) return trapFunctions[i];
     if(state->missing.size()==trapFunctions.size()) return 0;
     state->missing.push_back(full); return trapFunctions[state->missing.size()-1];
@@ -275,7 +277,8 @@ static Module* map(const std::wstring& path) {
     // table, but no initialization runs until the complete graph is mapped.
     mlp::assets[m->key]=&m->image;
     state->event("mapping "+m->key);
-    if(!wxl::run(path.c_str(),state->log,&m->image,resolve)) {state->event("mapping failed: "+m->key);return nullptr;}
+    struct ImportScope {ImportScope(){++mappingImports;} ~ImportScope(){--mappingImports;}} imports;
+    if(!wxl::run(path.c_str(),state->log,&m->image,resolve)) {state->event("mapping failed: "+m->key+"; guest initialization blocked; "+state->snapshot());return nullptr;}
     m->mapped=true;++state->mappedCount;state->order.push_back(m);return m;
 }
 static bool prepare(Module& m) {

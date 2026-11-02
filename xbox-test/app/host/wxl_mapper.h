@@ -244,7 +244,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
     for (unsigned d : {IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR})
         if (!mapped && h.DataDirectory[d].Size) return fail("WXL FAIL unsupported runtime directory");
     auto configDir=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG];
-    if (!mapped && (configDir.VirtualAddress || configDir.Size) && config!=LoadConfig::inert_wine)
+    if ((configDir.VirtualAddress || configDir.Size) && config!=LoadConfig::inert_wine)
         return fail("WXL FAIL unsupported runtime directory");
     auto sections=(const IMAGE_SECTION_HEADER*)(file.data()+secOff);
     size_t end=pages(h.SizeOfHeaders); bool entryCode=false;
@@ -255,7 +255,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
         if ((s.Characteristics&IMAGE_SCN_MEM_EXECUTE) && h.AddressOfEntryPoint>=s.VirtualAddress && h.AddressOfEntryPoint-s.VirtualAddress<n) entryCode=true;
     }
     if (!entryCode && !(mapped && (nt->FileHeader.Characteristics&IMAGE_FILE_DLL) && !h.AddressOfEntryPoint)) return fail("WXL FAIL entry outside code");
-    if (!mapped && (configDir.VirtualAddress || configDir.Size)) {
+    if ((configDir.VirtualAddress || configDir.Size)) {
         bool inert=false;
         for (unsigned i=0;i<nt->FileHeader.NumberOfSections;i++) {
             auto s=sections[i];

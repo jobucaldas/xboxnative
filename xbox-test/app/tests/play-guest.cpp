@@ -34,9 +34,10 @@ BOOL WINAPI guest_dll_entry(HINSTANCE,DWORD reason,void*) {
 #else
 __declspec(dllexport) int exe_storage_check(){return (tls_value==73&&tls_count==0)||(tls_value==74&&tls_count==1);}
 __declspec(dllimport) int dependency_check();
+#ifdef PLAY_STATIC_MISSING
 __declspec(dllimport) void DeliberatelyMissingPlayImport();
+#endif
 __declspec(dllimport) int ForwardName();
-__declspec(dllimport) void ForwardSteam();
 static DWORD WINAPI child(void*){return tls_value==74&&tls_count==1&&dependency_check()?42:1;}
 static bool contains(const wchar_t* s,const wchar_t* p){for(;*s;++s){auto a=s,b=p;while(*b&&*a==*b){++a;++b;}if(!*b)return true;}return false;}
 DWORD guest_exe_entry(){
@@ -58,7 +59,11 @@ DWORD guest_exe_entry(){
         if(firstError!=ERROR_DLL_INIT_FAILED||GetLastError()!=ERROR_DLL_INIT_FAILED)return 18;
         return 42;
     }
-    if(contains(GetCommandLineW(),L"steam-forward"))ForwardSteam();
+    if(contains(GetCommandLineW(),L"steam-forward")) {
+        auto call=(void(*)())GetProcAddress(GetModuleHandleW(L"play-forward.dll"),"ForwardSteam");
+        if(!call)return 19;
+        call();
+    }
     if(contains(GetCommandLineW(),L"steam-api"))LoadLibraryW(L"StEaM_ApI64");
     if(contains(GetCommandLineW(),L"steam-client"))LoadLibraryW(L"STEAMCLIENT64.DLL");
     if(contains(GetCommandLineW(),L"wide-long")) {
@@ -68,7 +73,9 @@ DWORD guest_exe_entry(){
     }
     if(contains(GetCommandLineW(),L"wide-dialog"))MessageBoxW(nullptr,L"Falha IL2CPP \u00e7\nprobe \"quoted\"",L"Erro \u00e7",MB_OK|MB_ICONERROR);
     if(contains(GetCommandLineW(),L"dialog"))MessageBoxA(nullptr,"Failed to initialize IL2CPP\nprobe \"quoted\"", "Fatal error",MB_OK|MB_ICONERROR);
-    if(contains(GetCommandLineW(),L"missing"))DeliberatelyMissingPlayImport();
+#ifdef PLAY_STATIC_MISSING
+    DeliberatelyMissingPlayImport(); // Must be rejected before TLS/DllMain/entry.
+#endif
     if(contains(GetCommandLineW(),L"crash"))RaiseException(0xe0424242,EXCEPTION_NONCONTINUABLE,0,nullptr);
     if(contains(GetCommandLineW(),L"exit"))ExitProcess(37);
     if(contains(GetCommandLineW(),L"hang"))for(;;)Sleep(100);
