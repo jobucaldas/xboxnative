@@ -24,6 +24,7 @@ jobs:
         run: |
           set -e
           bash xbox-test/app/tests/session-restore.sh
+          python3 -m unittest xbox-test/app/tests/test_store_badge.py
           python3 -m unittest xbox-test/dp/test-verify-depot.py
           python3 -m unittest discover -s xbox-test/app/donors -p 'test_*.py'
           c++ -std=c++17 -O2 -Wall -Wextra -Werror xbox-test/app/tests/apibadge_test.cpp -o /tmp/apibadge-test

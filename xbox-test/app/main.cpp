@@ -747,7 +747,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (si && si->img == 1) blit(si->hdr.pix, si->hdr.iw, si->hdr.ih, 60 + (616 - si->hdr.iw) / 2, 130 + (353 - si->hdr.ih) / 2);
         else text(60 + 308 - twidth(si && si->img == 2 ? "no image" : "loading image...", 3) / 2, 290, si && si->img == 2 ? "no image" : "loading image...", 3, DIM);
         frame(60, 130, 616, 353, 3, C3(60, 70, 88));
-        apib::Result gfx = apib::combine(apib::lookup(m_dApp), si && st == 1 ? si->dxKind : 0, si ? si->dxNote : std::string()); apib::draw(70, 140, 3, gfx);
+        apib::Result gfx = apib::combine(apib::lookup(m_dApp), si && st == 1 ? si->dxKind : 0, si && st == 1 ? si->dxNote : std::string()); apib::draw(70, 140, 3, gfx);
         // install state
         int dl = g_dl.state; bool mine = g_dl.appid == m_dApp, down = mine && dl == 1, queued = !down && is_queued(m_dApp), launching = g_launch.phase == 1 && g_launch.appid == m_dApp;
         std::string status; uint32_t sc = TXT;
