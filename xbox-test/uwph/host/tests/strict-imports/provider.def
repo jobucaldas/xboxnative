@@ -1,0 +1,4 @@
+LIBRARY strict-provider.dll
+EXPORTS
+    fixture_named
+    fixture_ordinal @7 NONAME
