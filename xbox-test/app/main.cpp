@@ -49,6 +49,7 @@ extern "C" unsigned ZSTD_isError(size_t code);
 #include "../uwph/display/gamepad.h"
 #include "../uwph/keyboard/feed.h"
 #include "../uwph/pointer/feed.h"
+#include "host/presentation_restore.h"
 
 using namespace winrt;
 using namespace winrt::Windows::ApplicationModel::Core;
@@ -942,7 +943,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             auto create = [this, request] {
                 // DXGI permits one flip chain per CoreWindow. Unbind and release
                 // every launcher backbuffer reference before handing it over.
-                if (m_guestPresentation) { request->result = DXGI_ERROR_INVALID_CALL; return; }
+                if (m_guestPresentation || !m_ctx) { request->result = DXGI_ERROR_INVALID_CALL; return; }
                 m_ctx->ClearState(); m_bb = nullptr; m_sc = nullptr; m_ctx->Flush();
                 request->result = request->factory->CreateSwapChainForCoreWindow(request->device.get(),
                     (::IUnknown*)winrt::get_abi(m_window), &request->desc, request->output.get(), request->chain.put());
@@ -1143,6 +1144,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         double lastBeat = 0;
         while (!m_closed) {
             m_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
+            if (!graphics_core::restore_launcher_presentation(m_guestPresentation.load(),
+                    m_dev, m_ctx, m_sc, m_bb, [this] { return InitD3D(); })) {
+                Sleep(100); continue;
+            }
             PollGuestControllers();
             auto pads = Gamepad::Gamepads(); size_t n = pads.Size(); GamepadReading rd{};
             if ((int)n != m_prevPads) { logf("gamepads connected: %zu", n); m_prevPads = (int)n; }
