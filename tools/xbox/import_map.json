@@ -16,11 +16,11 @@
   "dlls": {
     "advapi32.dll": {
       "class": "system",
-      "reason": "Native advapi32 from System32 for crypto/token/user-name imports (resolves in the AppContainer). The console refuses Reg* writes under HKCU (RegCreateKeyW/RegCreateKeyExW -> ERROR_ACCESS_DENIED, runs/reg/evidence), so the nine Reg* imports of UnityPlayer.dll are overridden to the uwph registry builtin backed by LocalState\\registry.json.",
+      "reason": "Native advapi32 from System32 for crypto/token/user-name imports (resolves in the AppContainer). The console refuses Reg* writes under HKCU (RegCreateKeyW/RegCreateKeyExW -> ERROR_ACCESS_DENIED, runs/reg/evidence), so the nine Reg* imports of UnityPlayer.dll are overridden to the uwph registry builtin backed by LocalState\\registry.sqlite (legacy registry.json import).",
       "overrides": [
         {
           "class": "uwph",
-          "reason": "uwph registry builtin (reg_builtin.h) backed by LocalState\\registry.json; same signatures and Win32 error codes; console refuses HKCU key creation/writes.",
+          "reason": "uwph registry builtin (reg_builtin.h) backed by LocalState\\registry.sqlite (legacy registry.json import); same signatures and Win32 error codes; console refuses HKCU key creation/writes.",
           "exports": [
             "RegCloseKey",
             "RegCreateKeyExW",
@@ -93,7 +93,7 @@
     },
     "hid.dll": {
       "class": "wine-pe",
-      "reason": "Pinned unmodified Debian Wine 10 PE donor; strict mapper initialization and focused behavior gate; full runtime export coverage remains unverified."
+      "reason": "Built from pinned Wine 10 source with the tracked read-only PE section patch; strict mapper initialization and focused behavior gate; full runtime export coverage remains unverified."
     },
     "imm32.dll": {
       "class": "stub",
@@ -125,7 +125,7 @@
     },
     "setupapi.dll": {
       "class": "wine-pe",
-      "reason": "Pinned unmodified Debian Wine 10 PE donor; strict mapper initialization and focused behavior gate; full runtime export coverage remains unverified."
+      "reason": "Built from pinned Wine 10 source with the tracked read-only PE section patch; strict mapper initialization and focused behavior gate; full runtime export coverage remains unverified."
     },
     "shell32.dll": {
       "class": "stub",
@@ -145,7 +145,7 @@
     },
     "version.dll": {
       "class": "wine-pe",
-      "reason": "Pinned unmodified Debian Wine 10 PE donor; strict mapper initialization and focused behavior gate; full runtime export coverage remains unverified."
+      "reason": "Built from pinned Wine 10 source with the tracked read-only PE section patch; strict mapper initialization and focused behavior gate; full runtime export coverage remains unverified."
     },
     "win32u.dll": {
       "class": "uwph",
@@ -166,11 +166,11 @@
     },
     "shcore.dll": {
       "class": "wine-pe",
-      "reason": "Pinned unmodified Debian Wine 10 PE donor; strict mapper initialization and focused behavior gate; full runtime export coverage remains unverified."
+      "reason": "Built from pinned Wine 10 source with the tracked read-only PE section patch; strict mapper initialization and focused behavior gate; full runtime export coverage remains unverified."
     },
     "avrt.dll": {
       "class": "wine-pe",
-      "reason": "Pinned unmodified Debian Wine 10 PE donor; strict mapper initialization and focused behavior gate; full runtime export coverage remains unverified."
+      "reason": "Built from pinned Wine 10 source with the tracked read-only PE section patch; strict mapper initialization and focused behavior gate; full runtime export coverage remains unverified."
     }
   }
 }
