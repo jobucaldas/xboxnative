@@ -21,7 +21,7 @@ static std::mutex lock;
 static std::wstring file;     // legacy registry.json (one-time import source)
 static std::wstring dbfile;   // registry.sqlite
 static sqlite3* db=nullptr;
-static bool db_ok=false;      // false: sqlite unavailable, registry works in memory only (logged loudly)
+static bool db_ok=false;      // false: persistent mutations fail with ERROR_WRITE_FAULT
 static std::map<std::wstring,Key> keys;          // lowercase full path "hkcu\software\..." -> key
 static std::map<uintptr_t,std::wstring> handles;  // fake handle -> lowercase full path
 static uintptr_t next_handle=0x5ED00004;
@@ -99,22 +99,24 @@ static bool put_value_row(const std::wstring& lk,const std::wstring& path,const 
     sqlite3_bind_int64(st,5,(sqlite3_int64)v.type); sqlite3_bind_blob(st,6,v.data.empty()?"":(const void*)v.data.data(),(int)v.data.size(),SQLITE_TRANSIENT);
     bool ok=sqlite3_step(st)==SQLITE_DONE; sqlite3_finalize(st); return ok;
 }
-static void db_put_keys(const std::vector<std::pair<std::wstring,std::wstring>>& ks) {   // (lowercase path, display path), one txn
-    if(!db_ok) return; Txn t; if(!t.open) return;
-    for(auto& k:ks) if(!put_key_row(k.first,k.second)) { note("REGB db: key insert failed"); return; }
-    if(!t.commit()) note("REGB db: key commit failed");
+static bool db_put_keys(const std::vector<std::pair<std::wstring,std::wstring>>& ks) {   // (lowercase path, display path), one txn
+    if(!db_ok) return false; Txn t; if(!t.open) return false;
+    for(auto& k:ks) if(!put_key_row(k.first,k.second)) { note("REGB db: key insert failed"); return false; }
+    return t.commit();
 }
-static void db_put_value(const std::wstring& lk,const Key& k,const Value& v) {
-    if(!db_ok) return; Txn t; if(!t.open) return;
-    if(!put_key_row(lk,k.path) || !put_value_row(lk,k.path,v)) { note("REGB db: value write failed"); return; }
-    if(!t.commit()) note("REGB db: value commit failed");
+static bool db_put_value(const std::wstring& lk,const Key& k,const Value& v) {
+    if(!db_ok) return false; Txn t; if(!t.open) return false;
+    if(!put_key_row(lk,k.path) || !put_value_row(lk,k.path,v)) { note("REGB db: value write failed"); return false; }
+    return t.commit();
 }
-static void db_del_value(const std::wstring& lk,const std::wstring& lname) {
-    if(!db_ok) return; sqlite3_stmt* st=nullptr;
-    if(sqlite3_prepare_v2(db,"DELETE FROM reg WHERE key_lc=?1 AND val_lc=?2 AND is_val=1",-1,&st,nullptr)!=SQLITE_OK) { note("REGB db: delete prepare failed"); return; }
+static bool db_del_value(const std::wstring& lk,const std::wstring& lname) {
+    if(!db_ok) return false; sqlite3_stmt* st=nullptr;
+    if(sqlite3_prepare_v2(db,"DELETE FROM reg WHERE key_lc=?1 AND val_lc=?2 AND is_val=1",-1,&st,nullptr)!=SQLITE_OK) { note("REGB db: delete prepare failed"); return false; }
     std::string a=utf8(lk), b=utf8(lname);
     sqlite3_bind_text(st,1,a.data(),(int)a.size(),SQLITE_TRANSIENT); sqlite3_bind_text(st,2,b.data(),(int)b.size(),SQLITE_TRANSIENT);
-    if(sqlite3_step(st)!=SQLITE_DONE) note("REGB db: delete failed"); sqlite3_finalize(st);   // single statement = implicit transaction
+    bool ok=sqlite3_step(st)==SQLITE_DONE;
+    if(!ok) note("REGB db: delete failed"); sqlite3_finalize(st);   // single statement = implicit transaction
+    return ok;
 }
 struct Parser {
     const std::string& s; size_t i=0; bool bad=false;
@@ -207,7 +209,7 @@ static void open_db() {
         char m[200]; snprintf(m,sizeof m,"REGB sqlite WAL setup failed (journal_mode=%s, attempt %d)%s",jm.c_str(),attempt,attempt?"":"; retrying with exclusive locking"); note(m);
         sqlite3_close(db); db=nullptr;
     }
-    note("REGB sqlite UNAVAILABLE: registry is in-memory only this run");
+    note("REGB sqlite UNAVAILABLE: persistent registry writes will fail");
 }
 // One-time import of the old registry.json into an empty database (PRAGMA user_version 0 -> 1, same transaction).
 static void import_legacy_json() {
@@ -291,7 +293,10 @@ static LONG create(HKEY parent,LPCWSTR sub,PHKEY out,DWORD* disp) {
         full+=L"\\"+comp; lfull+=L"\\"+lower(comp);
         if(!keys.count(lfull)) { Key k; k.path=full; keys[lfull]=k; created=true; newkeys.push_back({lfull,full}); }
     }
-    if(created) db_put_keys(newkeys);   // all new path components in ONE transaction
+    if(created && !db_put_keys(newkeys)) {   // all new path components in ONE transaction
+        for(auto& k:newkeys) keys.erase(k.first);
+        return ERROR_WRITE_FAULT;
+    }
     if(disp) *disp=created?REG_CREATED_NEW_KEY:REG_OPENED_EXISTING_KEY;
     *out=new_handle(lfull); return ERROR_SUCCESS;
 }
@@ -323,7 +328,8 @@ static LONG set_value(HKEY h,const std::wstring& name,DWORD type,const BYTE* dat
     if(!data && cb) return ERROR_NOACCESS;
     Key* k=open_key(h); if(!k) return ERROR_INVALID_HANDLE;
     Value v; v.name=name; v.type=type; if(cb) v.data.assign(data,data+cb);
-    k->values[lower(name)]=v; db_put_value(lower(k->path),*k,v); return ERROR_SUCCESS;
+    if(!db_put_value(lower(k->path),*k,v)) return ERROR_WRITE_FAULT;
+    k->values[lower(name)]=v; return ERROR_SUCCESS;
 }
 static LONG WINAPI RegSetValueExW(HKEY h,LPCWSTR name,DWORD,DWORD type,const BYTE* data,DWORD cb) {
     std::lock_guard<std::mutex> g(lock); ensure();
@@ -367,8 +373,9 @@ static LONG WINAPI RegDeleteValueA(HKEY h,LPCSTR name) {
     std::lock_guard<std::mutex> g(lock); ensure();
     Key* k=open_key(h); if(!k) return ERROR_INVALID_HANDLE;
     std::wstring n; if(name&&*name) { int c=MultiByteToWideChar(CP_ACP,0,name,-1,nullptr,0); if(c>0) { n.resize(c); MultiByteToWideChar(CP_ACP,0,name,-1,&n[0],c); n.resize(c-1); } }
-    if(!k->values.erase(lower(n))) return ERROR_FILE_NOT_FOUND;
-    db_del_value(lower(k->path),lower(n)); return ERROR_SUCCESS;
+    auto it=k->values.find(lower(n)); if(it==k->values.end()) return ERROR_FILE_NOT_FOUND;
+    if(!db_del_value(lower(k->path),lower(n))) return ERROR_WRITE_FAULT;
+    k->values.erase(it); return ERROR_SUCCESS;
 }
 struct Export { const char* name; uintptr_t address; };
 static const Export exports[]={

@@ -1,11 +1,17 @@
 #pragma once
+#include <mutex>
 // Strict donor probe: never bind an import to a failure placeholder. Mapping
 // success alone is insufficient: initialize with the runtime mapper, then check
 // donor behavior before exposing its exports. Game entries remain uncalled.
 namespace donor_pe {
 static wxl::Log sink;
 static unsigned missing;
-static thread_local std::map<std::string,std::unique_ptr<wxl::Image>> images;
+// Executable guests may retain donor addresses after launcher supervision
+// ends. Publish immutable successful donors across threads and retain their
+// mappings until process exit, just like play_runtime::State.
+static auto& images=*new std::map<std::string,std::unique_ptr<wxl::Image>>;
+static std::mutex probeMutex;
+static bool ready=false;
 static uintptr_t resolve(const char* dll,const char* name,WORD ordinal);
 inline uintptr_t exported(const char* dll,const char* name,WORD ordinal) {
     auto it=images.find(dll);if(it==images.end())return 0;
@@ -91,6 +97,8 @@ static bool behavior(const std::string& label,wxl::Image& image,const std::wstri
     return false;
 }
 inline bool probe(wxl::Log log) {
+    std::lock_guard<std::mutex> lock(probeMutex);
+    if(ready) return true; // Never unload/reinitialize published executable code.
     sink=log;images.clear();
     WCHAR file[2048];DWORD n=GetModuleFileNameW(nullptr,file,2048);
     if(!n||n>=2048)return false;
@@ -98,7 +106,7 @@ inline bool probe(wxl::Log log) {
     root.resize(slash+1);root+=L"donors\\";
     struct Import {const char* donor;const char* dll;const char* name;WORD ordinal;};
     static const Import imports[]={
-#include "imports.h"
+#include "donor_imports.generated.h"
     };
     unsigned failures=0;
     for(auto name:{L"hid.dll",L"setupapi.dll",L"version.dll",L"shcore.dll",L"avrt.dll"}) {
@@ -107,7 +115,7 @@ inline bool probe(wxl::Log log) {
         for(auto& i:imports) if(label==i.donor) resolve(i.dll,i.name,i.ordinal);
         unsigned preflightMissing=missing;
         std::unique_ptr<wxl::Image> image(new wxl::Image());
-        bool ok=!preflightMissing&&wxl::load(*image,path.c_str(),log,{},resolve,false);
+        bool ok=!preflightMissing&&wxl::load(*image,path.c_str(),log,{},resolve,false,wxl::LoadConfig::inert_wine);
         bool tested=ok&&behavior(label,*image,path);
         if(tested) {
             images.emplace(label,std::move(image));
@@ -120,6 +128,8 @@ inline bool probe(wxl::Log log) {
         char text[256];snprintf(text,sizeof text,"DWPE RUN %s initialized=%u missing=%u behavior=%u",label.c_str(),ok,preflightMissing,tested);log(text);
         failures+=!tested;
     }
-    return failures==0;
+    ready=failures==0;
+    if(!ready) images.clear(); // Partial results are not executable routes.
+    return ready;
 }
 }

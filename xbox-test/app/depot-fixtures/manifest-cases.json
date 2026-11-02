@@ -1,0 +1,10 @@
+{
+  "schema": "xboxnative.synthetic-depot-hash-cases.v1",
+  "source": "steamdl.h DlFile{path,size,sha}; file verification compares Sha1::fin() to f.sha",
+  "cases": [
+    {"id":"valid-matching-digest","path":"fixture.bin","bytes_hex":"616263","declared_sha1":"a9993e364706816aba3e25717850c26c9cd0d89d","expected":"accept_file"},
+    {"id":"mutated-bytes","path":"fixture.bin","bytes_hex":"616264","declared_sha1":"a9993e364706816aba3e25717850c26c9cd0d89d","expected":"reject_file_no_marker_state_failed"},
+    {"id":"missing-hash","path":"fixture.bin","bytes_hex":"616263","declared_sha1":null,"expected":"reject_file_no_marker_state_failed"},
+    {"id":"empty-hash","path":"fixture.bin","bytes_hex":"616263","declared_sha1":"","expected":"reject_file_no_marker_state_failed"}
+  ]
+}
