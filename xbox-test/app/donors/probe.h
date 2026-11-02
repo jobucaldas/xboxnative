@@ -107,7 +107,7 @@ inline bool probe(wxl::Log log) {
         for(auto& i:imports) if(label==i.donor) resolve(i.dll,i.name,i.ordinal);
         unsigned preflightMissing=missing;
         std::unique_ptr<wxl::Image> image(new wxl::Image());
-        bool ok=!preflightMissing&&wxl::load(*image,path.c_str(),log,{},resolve,false);
+        bool ok=!preflightMissing&&wxl::load(*image,path.c_str(),log,{},resolve,false,wxl::LoadConfig::inert_wine);
         bool tested=ok&&behavior(label,*image,path);
         if(tested) {
             images.emplace(label,std::move(image));

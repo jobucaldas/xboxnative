@@ -29,6 +29,14 @@ behavior check before its exports are offered to the game-import probe. `avrt`
 is checked only for the documented invalid-task failure; a scheduling backend
 is not claimed. Game entry points remain uncalled by this diagnostic path.
 
+Only the donor loader opts into Wine 10's inert x64 load-configuration record:
+exactly 320 file-backed read-only bytes, with the size field set and every other
+byte zero. Security cookies, CFG/XFG, dynamic relocations and unknown extensions
+remain unsupported and rejected before allocation or entry. The general mapper
+still rejects load configurations by default; no directory is stripped or
+patched out of a donor. Test both this opt-in and rejection boundaries with
+`bash xbox-test/uwph/host/tests/run-load-config.sh`.
+
 Validate a fresh console log with:
 
 ```sh
