@@ -4,7 +4,7 @@
 # Applies patches/<name>/*.patch (if any) with `git apply --3way`. Never copies upstream code into this repo.
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-name=${1:?usage: fetch-dep.sh <boxedwine|uwp-crossbuild> [dest] [--dry-run]}; dest=${2:-}; dry=0
+name=${1:?usage: fetch-dep.sh <boxedwine|uwp-crossbuild|msix-packaging> [dest] [--dry-run]}; dest=${2:-}; dry=0
 [[ "${2:-}" == --dry-run || "${3:-}" == --dry-run ]] && dry=1
 [[ "$dest" == --dry-run ]] && dest=
 read -r _ url sha < <(grep -E "^$name[[:space:]]" "$root/deps.pin") || { echo "unknown dependency: $name" >&2; exit 2; }

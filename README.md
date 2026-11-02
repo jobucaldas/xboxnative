@@ -44,6 +44,18 @@ src/tools/fetch-uwp-crossbuild.sh            # clones the pinned build wrapper (
 bash src/xbox-test/app/build.sh              # launcher -> src/xbox-test/app/out/xbtest.msix (signed with a throwaway local test cert)
 bash src/xbox-test/uwph/host/build.sh        # uwph host test package -> src/xbox-test/uwph/host/out/k32.msix
 ```
+If `makemsix` is missing, build the pinned Microsoft packer from source (native Clang,
+CMake 3.29+, Ninja, pkg-config, Python 3 and ICU development files are required):
+```sh
+bash src/tools/build-msix-packaging.sh       # -> out/msix-packaging/bin/makemsix (git-ignored)
+export PATH="$PWD/out/msix-packaging/bin:$PATH"
+```
+Packaging and XML validation stay enabled. The local C++17 compatibility patch supports
+current ICU headers. `MSIX_SOURCE_DIR` / `MSIX_BUILD_DIR` can move the source/build caches;
+`CC`, `CXX` and `JOBS` select the native compiler and parallelism. On split-output systems
+such as NixOS, expose ICU's development `.pc` files through `PKG_CONFIG_PATH`, and ensure
+`clang-cl` uses its real builtin-header resource directory (including `cpuid.h`).
+
 The current builds do **not** need Boxedwine sources. `src/tools/fetch-boxedwine.sh` fetches the pinned upstream
 (`deps.pin`) for future work (x86 engine); see [patches/README.md](patches/README.md).
 

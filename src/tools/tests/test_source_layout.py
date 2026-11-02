@@ -35,6 +35,7 @@ class SourceLayoutTest(unittest.TestCase):
                      'deps.pin', 'patches', 'NOTICE', 'LICENSE', 'docs', 'research'):
             self.assertTrue((ROOT / path).exists(), path)
         scripts = ['src/tools/fetch-dep.sh', 'src/tools/build-wine-donors.sh',
+                   'src/tools/build-msix-packaging.sh',
                    'src/tools/check-uwp-build-env.sh', 'src/xbox-test/smoke-all.sh',
                    'src/xbox-test/kit/build-kit.sh', 'src/xbox-test/kit/check-install-guide.sh']
         scripts += [f'src/xbox-test/uwph/host/run-{lane}.sh'
@@ -59,6 +60,11 @@ class SourceLayoutTest(unittest.TestCase):
                 self.assertIn(value, output)
         self.assertIn(str(ROOT / 'out/wine-donors'), self.run_command(
             'bash', str(ROOT / 'src/tools/build-wine-donors.sh'), '--dry-run'))
+        output = self.run_command('bash', str(ROOT / 'src/tools/fetch-dep.sh'),
+                                  'msix-packaging', '--dry-run')
+        for value in pins['msix-packaging']:
+            self.assertIn(value, output)
+        self.assertIn(str(ROOT / 'third_party/msix-packaging'), output)
 
     def test_generated_source_paths(self):
         sandbox = self.cwd / 'repo'
