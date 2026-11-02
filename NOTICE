@@ -33,6 +33,9 @@ External dependencies fetched at build time (never copied here; pinned in deps.p
   SQLite amalgamation (sqlite-src)             Public domain (https://sqlite.org/copyright.html). Source archive pinned in deps.pin,
                                                verified and fetched by xbox-test/uwph/host/fetch-sqlite.sh into git-ignored
                                                third_party/sqlite; compiled into the host registry backend. Not committed here.
+  Microsoft MSIX Packaging SDK                MIT; its bundled dependencies retain their own licences (see upstream LICENSE and
+                                               THIRD PARTY CODE NOTICE). Built by tools/build-msix-packaging.sh as a host-only
+                                               packaging tool; never linked into our code or committed as a binary.
   Microsoft Windows SDK/CRT via xwin           Downloaded by the toolchain under Microsoft's own licence terms; never redistributed here.
 
 Licence compatibility with GPL-3.0-or-later (a good-faith reading, NOT legal advice or a legal guarantee)
