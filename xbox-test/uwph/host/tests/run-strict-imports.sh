@@ -9,20 +9,22 @@ if (( $# > 1 )) || [[ "$mode" != --build-only && "$mode" != --run ]]; then
   echo "usage: $0 [--build-only|--run]" >&2
   exit 2
 fi
-tc=${LLVM_MINGW_ROOT:-/data/OpenBot/Shared/toolchains/llvm-mingw-20260908-ucrt-ubuntu-22.04-x86_64}/bin
-export PATH="$tc:$PATH"
-clang="$tc/x86_64-w64-mingw32-clang"
-clangxx="$tc/x86_64-w64-mingw32-clang++"
-objdump="$tc/x86_64-w64-mingw32-objdump"
-dlltool="$tc/llvm-dlltool"
-linker="$tc/lld-link"
+if [[ -n ${LLVM_MINGW_ROOT:-} ]]; then export PATH="$LLVM_MINGW_ROOT/bin:$PATH"; fi
+clang=${STRICT_CC:-x86_64-w64-mingw32-clang}
+clangxx=${STRICT_CXX:-x86_64-w64-mingw32-clang++}
+if [[ -z ${STRICT_CC:-} ]] && ! command -v "$clang" >/dev/null 2>&1; then clang=x86_64-w64-mingw32-gcc; fi
+if [[ -z ${STRICT_CXX:-} ]] && ! command -v "$clangxx" >/dev/null 2>&1; then clangxx=x86_64-w64-mingw32-g++; fi
+# The PE-table assertions use LLVM's output format, including ordinal-only rows.
+objdump=${STRICT_OBJDUMP:-llvm-objdump}
+dlltool=${STRICT_DLLTOOL:-llvm-dlltool}
+linker=${STRICT_LINKER:-lld-link}
 required=("$clang" "$objdump" "$dlltool" "$linker")
 if [[ "$mode" == --run ]]; then
   required+=("$clangxx")
 fi
 for tool in "${required[@]}"; do
-  if [[ ! -x "$tool" ]]; then
-    echo "FAIL missing tool: $tool (set LLVM_MINGW_ROOT to an LLVM-MinGW checkout)" >&2
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "FAIL missing tool: $tool (add MinGW/LLVM to PATH or set LLVM_MINGW_ROOT)" >&2
     exit 1
   fi
 done

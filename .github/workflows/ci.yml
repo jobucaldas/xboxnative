@@ -36,4 +36,12 @@ jobs:
           if git grep -nIE 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|gh[pousr]_[A-Za-z0-9]{30,}|tskey-[A-Za-z0-9-]{10,}|7656119[0-9]{10}' -- . ':!.github'; then
             echo "possible secret or SteamID committed"; exit 1
           fi
+  strict-imports:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install cross compiler and Wine
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 llvm lld wine64
+      - name: exercise strict named and ordinal imports
+        run: bash xbox-test/uwph/host/tests/run-strict-imports.sh --run
   # TODO: on-device sections of xbox-test/smoke-all.sh need a console and cannot run in GitHub Actions.

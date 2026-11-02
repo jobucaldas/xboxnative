@@ -76,9 +76,12 @@ Never use `entry-stubs.dll` as a guest execution provider.
 
 ## Reproducing off-device checks
 
-Use LLVM-MinGW (the original fixture used the 20260908 UCRT x86_64 Linux release)
-and Wine for runtime execution. Select an absolute toolchain root if it is not at
-the historical shared default. Build-only mode does not need Wine or a prefix:
+Use LLVM-MinGW or MinGW GCC plus LLVM tools on PATH, and Wine for runtime
+execution. `LLVM_MINGW_ROOT` optionally prepends a toolchain's `bin` directory.
+The runner falls back from MinGW Clang to MinGW GCC and uses `llvm-objdump`
+(the table assertions require LLVM's output format). Individual executables can
+be selected with `STRICT_CC`, `STRICT_CXX`, `STRICT_OBJDUMP`, `STRICT_DLLTOOL`,
+and `STRICT_LINKER`. Build-only mode does not need Wine or a prefix:
 
 ```sh
 LLVM_MINGW_ROOT=/absolute/path/to/llvm-mingw \
