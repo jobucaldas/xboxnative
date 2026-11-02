@@ -25,6 +25,7 @@ jobs:
           set -e
           bash xbox-test/app/tests/session-restore.sh
           python3 -m unittest xbox-test/dp/test-verify-depot.py
+          python3 xbox-test/app/depot-fixtures/validate-vectors.py
       - name: strict resolver policy unit test
         run: bash xbox-test/uwph/strict-policy/tests/run-policy-test.sh
       - name: build scripts parse their pins (offline)
