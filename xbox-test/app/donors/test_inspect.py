@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 spec = importlib.util.spec_from_file_location("donor_inspect", Path(__file__).with_name("inspect.py"))
@@ -57,6 +58,41 @@ class DonorProvenanceTests(unittest.TestCase):
         self.manifest()
         with self.assertRaises(ValueError):
             self.check()
+
+    def test_source_patch_digest(self):
+        patch = self.root / "0001-pe-rodata.patch"
+        patch.write_bytes(b"selected source patch")
+        digest = hashlib.sha256(patch.read_bytes()).hexdigest()
+        source = self.root / "SOURCE.txt"
+        source.write_text(source.read_text() + f"Patch: 0001-pe-rodata.patch sha256 {digest}\n")
+        self.assertEqual(set(donor_inspect.checksums(self.root, self.url, self.pin, digest)), set(donor_inspect.DONORS))
+        patch.write_bytes(b"changed patch")
+        with self.assertRaisesRegex(ValueError, "source patch"):
+            donor_inspect.checksums(self.root, self.url, self.pin, digest)
+
+    def test_load_config_build_gate(self):
+        data = bytearray((0x140).to_bytes(4, "little") + bytes(316))
+        directory = SimpleNamespace(VirtualAddress=0x1000, Size=0x140)
+        section = SimpleNamespace(VirtualAddress=0x1000, SizeOfRawData=0x140, Characteristics=0x40000040)
+        pe = SimpleNamespace(OPTIONAL_HEADER=SimpleNamespace(DATA_DIRECTORY=[None]*10+[directory], DllCharacteristics=0),
+                             get_section_by_rva=lambda rva: section,
+                             get_data=lambda rva, size: bytes(data[:size]))
+        donor_inspect.validate_load_config(pe, "fixture.dll")
+        mutations = [(section, "Characteristics", 0xC0000040),
+                     (section, "Characteristics", 0x60000040),
+                     (section, "SizeOfRawData", 319),
+                     (directory, "Size", 319),
+                     (pe.OPTIONAL_HEADER, "DllCharacteristics", 0x4000)]
+        for obj, field, value in mutations:
+            with self.subTest(field=field, value=value):
+                previous = getattr(obj, field)
+                setattr(obj, field, value)
+                with self.assertRaisesRegex(ValueError, "load configuration"):
+                    donor_inspect.validate_load_config(pe, "fixture.dll")
+                setattr(obj, field, previous)
+        data[0x58] = 1
+        with self.assertRaisesRegex(ValueError, "load configuration"):
+            donor_inspect.validate_load_config(pe, "fixture.dll")
 
 
 if __name__ == "__main__":
