@@ -39,7 +39,7 @@ struct State {
     std::recursive_mutex loaderMutex;
     std::string last="loader not entered", result;
     DWORD code=0;
-    unsigned carrierCount=0;
+    std::array<wxl::Carrier,16> carriers;
     std::atomic<int> mappedCount{0}, moduleCount{0};
     bool success=false;
     HANDLE worker=nullptr;
@@ -273,10 +273,24 @@ static LONG CALLBACK vectored(EXCEPTION_POINTERS* ep) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 static wxl::Carrier carrier() {
-    wxl::Carrier c; if(state->carrierCount>=16) return c;
-    wchar_t name[64];swprintf(name,64,L"play-tls-%02u.dll",state->carrierCount++);
-    HMODULE h=LoadPackagedLibrary(name,0);
-    if(h){c.index=(DWORD(*)())GetProcAddress(h,"carrier_index");c.block=(BYTE*(*)())GetProcAddress(h,"carrier_block");}return c;
+    // Native carrier DLLs stay loaded, but a retired guest no longer owns its
+    // slot. Bound simultaneous TLS images, rather than all loads ever made.
+    for(size_t slot=0;slot<state->carriers.size();++slot) {
+        auto& c=state->carriers[slot];
+        if(c.index) {
+            bool used=false;
+            for(auto& module:state->modules)
+                if(module->image.carrier.index==c.index) {used=true;break;}
+            if(used)continue;
+        } else {
+            wchar_t name[64];swprintf(name,64,L"play-tls-%02u.dll",unsigned(slot));
+            HMODULE h=LoadPackagedLibrary(name,0);
+            if(h){c.index=(DWORD(*)())GetProcAddress(h,"carrier_index");c.block=(BYTE*(*)())GetProcAddress(h,"carrier_block");}
+            if(!c.index || !c.block)return {};
+        }
+        return c;
+    }
+    return {};
 }
 static Module* map(const std::wstring& path) {
     if(auto m=named(path)) return m;

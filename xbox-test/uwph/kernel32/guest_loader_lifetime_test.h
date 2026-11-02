@@ -97,6 +97,17 @@ static DWORD testLoaderLifetime() {
     if(GetModuleHandleW(L"play-dynamic.dll")||loaderDetachDll!=1||loaderDetachTls!=1||loaderDetachBad)return 75;
     if(loaderNestedLoaded!=1||GetModuleHandleW(L"play-detach-target.dll"))return 85;
     loaderTracked=nullptr;
+    // Unloading releases the mapped image's TLS carrier for later loads. The
+    // packaged pool bounds simultaneous TLS images, not lifetime load count.
+    for(unsigned cycle=0;cycle<32;++cycle) {
+        HMODULE repeated=LoadLibraryW(L"play-detach-target.dll");
+        if(!repeated)return 111;
+        auto repeatedCheck=(int(*)())GetProcAddress(repeated,"dependency_check");
+        if(!repeatedCheck||!repeatedCheck()||!dependency_check())return 112;
+        if(!FreeLibrary(repeated)||GetModuleHandleW(L"play-detach-target.dll"))return 113;
+        MEMORY_BASIC_INFORMATION released{};
+        if(!VirtualQuery(repeated,&released,sizeof released)||released.State!=MEM_FREE)return 114;
+    }
     dynamic=LoadLibraryW(L"play-dynamic.dll");
     if(!dynamic||!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN,L"play-dynamic.dll",&result)||result!=dynamic)return 66;
     if(!FreeLibrary(dynamic)||GetModuleHandleW(L"play-dynamic.dll")!=dynamic)return 67;
