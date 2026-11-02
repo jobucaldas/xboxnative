@@ -113,6 +113,15 @@ extern "C" DWORD WINAPI u32c_entry(){
  ICONINFO ii{};check(GetIconInfo(custom,&ii)&&ii.fIcon&&ii.xHotspot==8&&ii.yHotspot==8&&!ii.hbmMask&&!ii.hbmColor);
  check(DestroyIcon(custom));check(!DestroyIcon(custom)&&GetLastError()==ERROR_INVALID_CURSOR_HANDLE); // own (non-shared) handle is actually freed.
  check(!CreateIconFromResourceEx(nullptr,0,TRUE,0,0,0,0)&&GetLastError()==ERROR_INVALID_PARAMETER);
+ // The API must respect the declared byte count, even with readable backing
+ // storage. Cursor resources need a hotspot prefix before the bitmap header.
+ BYTE truncated[sizeof(BITMAPINFOHEADER)+4]={};
+ for(int icon=0;icon<=1;++icon)for(DWORD bytes=0;bytes<sizeof(BITMAPINFOHEADER)+(icon?0:4);++bytes){
+  SetLastError(0);
+  HICON invalid=CreateIconFromResourceEx(truncated,bytes,icon,0x00030000,0,0,0);
+  check(!invalid&&GetLastError()==ERROR_INVALID_PARAMETER);
+  if(invalid)DestroyIcon(invalid);
+ }
  check(!CreateIconFromResourceEx((BYTE*)"RIFFxxxxACONxxxx",16,TRUE,0x00030000,0,0,0)&&GetLastError()==ERROR_NOT_SUPPORTED);
  #pragma pack(push,1)
  struct DirEntry{BYTE w,h,c,r;WORD planes,bits;DWORD bytes;WORD id;};

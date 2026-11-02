@@ -28,7 +28,11 @@ extern "C" HANDLE WINAPI c_ImmAssociateContext(HWND hwnd, HANDLE context) {
 extern "C" BOOL WINAPI c_ImmAssociateContextEx(HWND hwnd, HANDLE context, DWORD flags) {
     if (!hwnd) return FALSE;
     // Wine's IACE_CHILDREN branch ignores individual association failures and
-    // returns TRUE. All descendants already have no context in this backend.
-    if (flags == 1) return TRUE;
+    // returns TRUE. Its child-list lookup still reports an invalid parent.
+    // All descendants already have no context in this backend.
+    if (flags == 1) {
+        if (!c_IsWindow(hwnd)) SetLastError(ERROR_INVALID_HANDLE);
+        return TRUE;
+    }
     return ime_associate(hwnd, context, flags);
 }

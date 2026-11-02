@@ -440,9 +440,13 @@ extern "C" HICON WINAPI c_CreateIconFromResourceEx(BYTE* bits,DWORD cbSize,BOOL 
  std::lock_guard<std::recursive_mutex> l(mutex);
  if(!bits||version==0x00020000){SetLastError(ERROR_INVALID_PARAMETER);return nullptr;} // 2.xx resources: unsupported in Wine too.
  if(cbSize>=4&&!memcmp(bits,"RIFF",4)){SetLastError(ERROR_NOT_SUPPORTED);return nullptr;} // animated .ani resources: no decoder here.
+ // Validate the declared resource length before reading either the bitmap
+ // dimensions or the cursor hotspot prefix. The caller need not provide any
+ // accessible bytes beyond cbSize.
+ if(cbSize<sizeof(BITMAPINFOHEADER)+(isIcon?0:4)){SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}
  POINT hotspot{0,0};const BITMAPINFOHEADER* bmi;
  if(isIcon)bmi=(const BITMAPINFOHEADER*)bits;
- else{if(cbSize<4){SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}auto pt=(const SHORT*)bits;hotspot={pt[0],pt[1]};bmi=(const BITMAPINFOHEADER*)(pt+2);}
+ else{auto pt=(const SHORT*)bits;hotspot={pt[0],pt[1]};bmi=(const BITMAPINFOHEADER*)(pt+2);}
  int cx=width,cy=height;
  if(!cx)cx=bmi->biWidth;
  if(!cy)cy=std::abs((long)bmi->biHeight)/(isIcon?2:1); // icon DIBs stack XOR+AND masks, doubling biHeight; matches Wine's create_icon_from_bmi halving.

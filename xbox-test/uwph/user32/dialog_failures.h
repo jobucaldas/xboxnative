@@ -3,14 +3,10 @@
 // before looking up a template. No guest HINSTANCE is passed to host resources.
 extern "C" INT_PTR WINAPI c_DialogBoxParamW(HINSTANCE, LPCWSTR, HWND owner,
                                            DLGPROC, LPARAM) {
-    DWORD error = GetLastError();
-    if (owner && !c_IsWindow(owner)) {
-        // Wine get_user_handle_ptr rejects values outside its USER handle
-        // low-word range without a server request (and preserves last error).
-        WORD low = LOWORD(reinterpret_cast<UINT_PTR>(owner));
-        SetLastError(low < 0x20 || low >= 0xfff0 ? error : ERROR_INVALID_WINDOW_HANDLE);
-        return 0;
-    }
+    // Guest handles are record identities, not native USER handle-table
+    // indices. Preserve the registry's invalid-window error for every unknown
+    // owner, including small integers and all-bits-set pseudo handles.
+    if (owner && !c_IsWindow(owner)) return 0;
     // There is no dialog template/loop backend yet. -1 is the documented
     // creation-failure result; never report IDOK without displaying a dialog.
     SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
