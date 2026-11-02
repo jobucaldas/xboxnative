@@ -23,6 +23,7 @@ jobs:
           set -e
           bash xbox-test/app/tests/session-restore.sh
           python3 -m unittest xbox-test/dp/test-verify-depot.py
+          python3 xbox-test/app/depot-fixtures/validate-vectors.py
       - name: build scripts parse their pins (offline)
         run: |
           set -e
