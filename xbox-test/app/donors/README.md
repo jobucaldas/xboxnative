@@ -1,27 +1,43 @@
 # Wine PE donor experiment
 
-These five DLLs are unmodified Debian libwine 10.0~repack-6 x86-64 Windows
-artifacts. SHA256.json pins the bytes copied from
-/usr/lib/x86_64-linux-gnu/wine/x86_64-windows. They are diagnostic inputs until
-strict import closure and initialization succeed on Xbox; they are not shipped
-as working donor routes merely because the mapper accepts their sections.
+The launcher builds five diagnostic donor DLLs (`avrt`, `hid`, `setupapi`,
+`shcore`, `version`) from the `wine-src` source archive in `deps.pin`, using
+`tools/build-wine-donors.sh`. No DLLs are committed or copied from a system Wine
+installation. Wine is LGPL-2.1-or-later; retain `LICENSE`, `COPYING.LIB`, and the
+corresponding source URL when distributing the built DLLs.
 
-License: LGPL-2.1-or-later (LICENSE and COPYING.LIB). Corresponding Debian source:
-https://deb.debian.org/debian/pool/main/w/wine/wine_10.0~repack.orig.tar.xz
-https://deb.debian.org/debian/pool/main/w/wine/wine_10.0~repack-6.debian.tar.xz
-Wine 11 source in /workspace/research/wine is a behavior reference, not the
-corresponding source for these Wine 10 binaries.
+The source builder writes the DLLs, `SHA256SUMS` and `SOURCE.txt` into ignored
+`out/wine-donors/`. The app build verifies that provenance against the selected
+Wine source pin and checks every DLL digest. `inspect.py` then generates the
+complete direct/delay import table in the app's ignored object directory:
 
-imports.h includes both direct and delay imports parsed from these exact PEs.
-The strict probe reports every unresolved dependency before mapping and never
-uses MLP failure placeholders. The runtime gate initializes each donor through
-the existing W^X/unwind mapper and checks a representative behavior. Game entry
-points remain uncalled. avrt is checked only for its documented invalid-task
-failure; Wine scheduling success placeholders are not claimed as a backend.
+```sh
+bash tools/build-wine-donors.sh
+python3 -I xbox-test/app/donors/inspect.py \
+  --output xbox-test/app/out/obj/donor_imports.generated.h
+python3 -m unittest discover -s xbox-test/app/donors -p 'test_*.py'
+```
 
-Acceptance on Xbox Series S, launcher 0.5.51.0:
-`python3 xbox-test/app/donors/check.py xbox-test/app/donors/evidence/console-launch-probe.log`
-requires all five executed behavior checks, exactly 22 donor IAT routes and a
-remaining historical STUB/MISSING surface <=40. Final result: 26 overall, 7 for
-hid/setupapi/winmm. The count reduction includes inherited native tail work;
-donor execution is verified independently. See LANE_NOTES.md for full limits.
+Inspection requires Python's `pefile` package. `app/build.sh` performs the build
+and generation automatically and packages the DLLs with their licence and source
+metadata. Generated tables and binaries must not be committed.
+
+The strict probe resolves every required dependency before initialization. It
+never uses MLP failure placeholders. Mapping alone is insufficient: each donor
+must initialize through the W^X/unwind mapper and pass its representative
+behavior check before its exports are offered to the game-import probe. `avrt`
+is checked only for the documented invalid-task failure; a scheduling backend
+is not claimed. Game entry points remain uncalled by this diagnostic path.
+
+Validate a fresh console log with:
+
+```sh
+python3 xbox-test/app/donors/check.py /path/to/private/launch_probe.log
+```
+
+The checker requires all five executed behavior checks, exactly 22 donor IAT
+routes and a historical STUB/MISSING surface of at most 40. These gates are not
+relaxed for a rebuilt donor. Old evidence for Debian Wine binaries does not
+certify a current source-built package. Keep raw logs, accounts and captures
+private; record exact source/package identity and the actual result in the PR.
+Passing this donor diagnostic is not launcher/game-playability acceptance.

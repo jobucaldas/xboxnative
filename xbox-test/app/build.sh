@@ -4,9 +4,12 @@ set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 here="$(cd "$(dirname "$0")" && pwd)"; cd "$here"; out="${1:-out}"; mkdir -p "$out/layout" "$out/obj"   # relative paths: clang-cl treats /abs/paths as options
 python3 "$here/../../tools/xbox/gen-gap-routes.py"
-python3 "$here/donors/inspect.py"
+# Donors are always built from deps.pin, never copied from a host Wine install.
+donors="$here/../../out/wine-donors"
+bash "$here/../../tools/build-wine-donors.sh" "$donors"
+python3 -I "$here/donors/inspect.py" --donor-dir "$donors" --output "$out/obj/donor_imports.generated.h"
 CB="${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}"
-UWP_OBJ_DIR="$out/obj" "$CB/scripts/build.sh" --uwp --out "$out/layout/xbtest.exe" --jobs 4 main.cpp qrcodegen.cpp vendor/zlib/inflate.c vendor/zlib/inftrees.c vendor/zlib/inffast.c vendor/zlib/adler32.c vendor/zlib/crc32.c vendor/zlib/zutil.c vendor/lzma/LzmaDec.c vendor/zstd/zstddeclib.c --link-arg bcrypt.lib -- /MT /O2 /DNDEBUG
+UWP_OBJ_DIR="$out/obj" "$CB/scripts/build.sh" --uwp --out "$out/layout/xbtest.exe" --jobs 4 main.cpp qrcodegen.cpp vendor/zlib/inflate.c vendor/zlib/inftrees.c vendor/zlib/inffast.c vendor/zlib/adler32.c vendor/zlib/crc32.c vendor/zlib/zutil.c vendor/lzma/LzmaDec.c vendor/zstd/zstddeclib.c --link-arg bcrypt.lib -- /MT /O2 /DNDEBUG "/I$out/obj"
 bash ../audio/build.sh "$out/layout"
 bash ../uwph/user32/build.sh
 cp ../uwph/user32/out/layout/{uwph-u32c.dll,u32c-test.exe} "$out/layout/"
@@ -15,7 +18,8 @@ mkdir -p "$out/layout/k32t"
 x86_64-w64-mingw32-gcc -c -Os -fno-stack-protector ../shared/tests/search-dll.c -o "$out/obj/search-dll.obj"
 lld-link-19 /dll /noentry /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/layout/k32t/directory-test.dll" "$out/obj/search-dll.obj"
 mkdir -p "$out/layout/donors"
-cp "$here"/donors/*.dll "$out/layout/donors/"
+cp "$donors"/{avrt,hid,setupapi,shcore,version}.dll "$out/layout/donors/"
+cp "$donors"/{SHA256SUMS,SOURCE.txt} "$here/donors/COPYING.LIB" "$here/donors/LICENSE" "$out/layout/donors/"
 cp -r "$here/Assets" "$here/AppxManifest.xml" "$out/layout/"
 # test certificate (subject must equal manifest Publisher); created once, never committed
 if [ ! -f "$out/test.pfx" ]; then

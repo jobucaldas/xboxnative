@@ -98,7 +98,7 @@ inline bool probe(wxl::Log log) {
     root.resize(slash+1);root+=L"donors\\";
     struct Import {const char* donor;const char* dll;const char* name;WORD ordinal;};
     static const Import imports[]={
-#include "imports.h"
+#include "donor_imports.generated.h"
     };
     unsigned failures=0;
     for(auto name:{L"hid.dll",L"setupapi.dll",L"version.dll",L"shcore.dll",L"avrt.dll"}) {
