@@ -24,7 +24,6 @@ struct State {
     wxl::Log log=nullptr;
     std::vector<std::unique_ptr<Module>> modules;
     std::vector<Module*> order;
-    std::vector<std::string> missing;
     Module* exe=nullptr;
     std::atomic<bool> executed{false}, finished{false};
     std::atomic<int> milestone{0};
@@ -83,8 +82,8 @@ static uintptr_t missing(const char* dll,const char* name,WORD ordinal) {
     if(mappingImports) {state->event("unresolved static import: "+full+"; guest initialization blocked; "+state->snapshot());return 0;}
     // Optional dynamic feature detection observes NULL. No unresolved import
     // receives executable code, including the probe-only failure stubs.
-    state->event("unresolved dynamic export: "+full);
-    if(state->missing.size()<2048) state->missing.push_back(full);
+    // Optional detection is diagnostic, not a new execution milestone/result.
+    if(state->log) state->log(("PRUN OPTIONAL unresolved dynamic export: "+full).c_str());
     SetLastError(ERROR_PROC_NOT_FOUND);return 0;
 }
 static void WINAPI exitProcess(UINT code) {

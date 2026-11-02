@@ -46,8 +46,8 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     else if(mode=="observer-log")ok=ok&&r->finished&&r->success&&r->code==42&&r->firstChanceCount.load()>0&&r->firstChanceCode.load()==0x40010006&&r->firstChanceAddress.load()!=0;
     else if(mode=="steam-forward")ok=ok&&r->finished&&!r->success&&last.find("steam_api64.dll!SteamAPI_Init")!=std::string::npos&&last.find("caller=0x")!=std::string::npos;
     else if(mode=="steam-api"||mode=="steam-client")ok=ok&&r->finished&&!r->success&&last.find(mode=="steam-api"?"steam_api64.dll!LoadLibrary (real client prerequisite item 36)":"steamclient64.dll!LoadLibrary (real client prerequisite item 36)")!=std::string::npos&&last.find("caller=0x")!=std::string::npos;
-    else if(mode=="missing")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&r->missing.empty()&&last.find("mapping failed: play-missing.exe; guest initialization blocked")!=std::string::npos&&last.find("play-missing.dll!DeliberatelyMissingPlayImport")!=std::string::npos;
-    else if(mode=="static-steam")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&r->missing.empty()&&last.find("steam_api64.dll!SteamAPI_Init")!=std::string::npos;
+    else if(mode=="missing")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&mlp::stub_names.empty()&&last.find("mapping failed: play-missing.exe; guest initialization blocked")!=std::string::npos&&last.find("play-missing.dll!DeliberatelyMissingPlayImport")!=std::string::npos;
+    else if(mode=="static-steam")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&mlp::stub_names.empty()&&last.find("steam_api64.dll!SteamAPI_Init")!=std::string::npos;
     else if(mode=="reject-mapping") {
         auto failed=play_runtime::named(L"play-unresolved.dll");
         ok=ok&&r->finished&&r->success&&r->code==42&&failed&&failed->mappingFailed&&!failed->prepared&&!failed->initialized;
