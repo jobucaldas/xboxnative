@@ -54,7 +54,7 @@ Verified 0.5.158.4 Play with -screen-fullscreen 0 still reaches exactly the
 same resolution fatal, now fs=0. Thus the option alone does not fix graphics;
 retain it for the CoreWindow bridge's supported windowed presentation contract.
 No swapchain/menu/frame is claimed. Found the existing validated SWC factory
-adapter in xbox-test/uwph/host/swc_dxgi.h: it already translates validated guest
+adapter in src/xbox-test/uwph/host/swc_dxgi.h: it already translates validated guest
 HWND requests to CreateSwapChainForCoreWindow. Play currently routes DXGI to the
 native system factory instead, so the existing record HWND has no such bridge.
 Next: extract/reuse that adapter, bind it to this runtime's record registry and
@@ -245,7 +245,7 @@ Retrying the failed bundle with a unique store name and SHA-256 verification.
 Resumed at 7b44f00d with a clean lane/vis worktree. Re-read REBUILD.md,
 PLAYABLE.md, prun handoff, current vis evidence and stm owner notes. Existing
 console evidence remains the latest result; no new console execution occurred
-in this audit. The production guard in xbox-test/app/host/play_runtime.h still
+in this audit. The production guard in src/xbox-test/app/host/play_runtime.h still
 matches play-xinput/boot-late.log: steam_api64.dll!LoadLibrary (real client
 prerequisite item 36), UnityPlayer+0x4f4398. The stm owner still requires the
 isolated guest process/IPC execution seam before its genuine-client work.
@@ -646,7 +646,7 @@ SoftFloat build-file deletions remain untouched and unstaged.
 
 Verified required runbooks, prun handoff, integrated GetDeviceCaps ancestor
 fb037384, and current owner refs stm ce3fde3e / upmp a69e6383. No new
-client/process source handoff exists. Production xbox-test/app/host/play_runtime.h
+client/process source handoff exists. Production src/xbox-test/app/host/play_runtime.h
 still enforces the real-client prerequisite. Saved Xbox evidence in
 runs/vis/play-resume-20261028/boot-late.log records D3D11 device and CoreWindow
 swapchain S_OK, then steam_api64.dll!LoadLibrary at UnityPlayer+0x4f4398.

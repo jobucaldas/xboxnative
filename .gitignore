@@ -19,5 +19,27 @@ steam_session.bin
 *.msix
 *.appx
 *.zip
+*.7z
+*.tar
+*.gz
+*.xz
+*.bz2
+*.zst
+*.so
+*.a
+*.o
+*.obj
+*.lib
+*.pdb
+*.appxbundle
+*.msixbundle
+*.appxupload
+*.msixupload
+# local logs, dumps, and console captures at any source depth
+*.log
+*.dmp
+captures/
+screenshots/
+evidence/
 runs/
 LANE_NOTES.md

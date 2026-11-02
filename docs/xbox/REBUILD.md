@@ -87,7 +87,7 @@ makemsix `sign` produced no output file in a quick test; osslsigncode works.
 
 ## Linux UWP app build preflight
 
-Run `tools/check-uwp-build-env.sh` before `xbox-test/app/build.sh`. The checker follows that
+Run `src/tools/check-uwp-build-env.sh` before `src/xbox-test/app/build.sh`. The checker follows that
 script's actual Python, MinGW, linker, OpenSSL, packer and signer commands and requires
 `UWP_CROSSBUILD` (or an adjacent `../uwp-crossbuild`) to contain executable `scripts/build.sh`.
 Tool paths can be overridden with `PYTHON3_PATH`, `MINGW_GCC_PATH`, `MINGW_GXX_PATH`,
