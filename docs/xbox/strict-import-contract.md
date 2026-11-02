@@ -1,34 +1,114 @@
-# Strict import resolver contract (review proposal)
+# Strict import resolver contract and fixture scope
 
-This is a proposal for the next implementation unit, not a resolver implementation or a passing test. Current mapper ownership remains with k32.
+## Implemented host-mapper boundary
 
-## Observed behavior
+The host mapper in `xbox-test/uwph/host/wxl_mapper.h` separates two resolver
+interfaces:
 
-- `xbox-test/uwph/host/wxl_mapper.h:26` defines `Resolver` as `uintptr_t (*)(const char*,const char*, WORD)`: null name denotes ordinal; zero means unresolved. It carries no provenance/callability classification.
-- `wxl_mapper.h:162-180` decodes named versus ordinal imports, calls the resolver, and fails closed with `WXL FAIL unresolved builtin` on zero. Delay imports similarly fail with `WXL FAIL unresolved delay import` at `:193-205`.
-- `xbox-test/uwph/host/mlp_probe.h:57-121` resolves system exports through restricted module lookup, UWP assets/builtins, named route tables, then explicitly categorized fallback providers. It logs `MLP ROUTE ... provider=... abi=named-x64`, increments stub and resolved counts separately, and logs `MLP MISSING <dll>!<symbol> route=<kind>` before returning zero. However the raw nonzero address contract itself cannot prevent callers using a probe stub as guest code.
-- `xbox-test/uwph/host/mlp_probe.h:109-110` admits `entry_stubs.dll` results as `named-stub`; `xbox-test/uwph/host/STUBS.md:3-6,43` says these are nonexecuting probe routes. `mlp_probe.h:126-138` says probe-only/no entry. `xbox-test/app/launch.h:66-84,119-120,140-144` explicitly records no entry, `gameCodeExecuted=false`, and that missing imports may be stubbed. These addresses cannot be execution targets.
-- The k32 worktree diff (`wt/k32/xbox-test/uwph/host/wxl_mapper.h`) adds `Image::close()` and calls it after `run`; it does not change the resolver signature. This was inspected read-only.
+- `Resolver` returns an address for mapped, nonexecuting probes only.
+- `ExecutionResolver` returns a `strict_policy::Decision` for executable loads.
+  `may_call` accepts only an explicit `callable` classification with a nonzero
+  address. Missing, probe-only, unknown classifications and callable-with-zero
+  results fail closed before TLS callbacks or DllMain.
 
-## Required contract
+The built-in execution exports remain an explicit host whitelist. A named stub,
+empty service, exported address or known x64 signature does not by itself make a
+provider callable. Production resolver owners must supply genuine behavior and
+must not relabel probe placeholders as executable implementations.
 
-1. A named request is `(dll, exact case-insensitive DLL identity, non-null exact symbol)`; ordinal is `(dll, null symbol, nonzero ordinal)`. Preserve the distinction in diagnostics as `DLL!Name` versus `DLL!#N`.
-2. A successful resolution must provide a nonzero address and a host-supplied `callable` classification whose target is a real test-host function with the declared x64 ABI. Resolver status must not treat a `named-stub`, empty service, or probe placeholder as callable.
-3. Missing name/ordinal, zero ordinal, provider-load failure, or a noncallable route fails closed. Emit deterministic `IMPORT FAIL dll!symbol reason=<missing|provider-load|probe-only|invalid-request>`; do not patch the IAT with a substitute address.
-4. The image is not eligible for entry, DllMain, or TLS invocation unless every required import resolves as callable. On any unresolved request the load result is failure; the fixture must observe its entry marker remains absent. This is a test contract; current probe mode intentionally never enters images.
+Ordinary imports and supported RVA-based delay imports pass through the same
+execution-policy check. Delay IAT binding is eager, before guest initialization.
+Ordinal zero is rejected before either resolver is called, including probe mode.
+Named requests preserve exact symbols; DLL identities are case-insensitive.
+Diagnostics preserve `DLL!Name` versus `DLL!#N`:
 
-## Bounded fixture proposal
+- Ordinal zero: `IMPORT FAIL dll!#0 reason=invalid-request`.
+- An execution request without an approved target:
+  `IMPORT FAIL dll!symbol reason=noncallable`.
+- The fixture resolver additionally records its exact missing request as
+  `IMPORT FAIL dll!symbol reason=missing`.
 
-The implemented fixture set uses no-CRT DLLs with explicit DllMain, named and ordinal imports, host callbacks, and missing name/ordinal variants. A fixture-only resolver maps only these exact imports to real host functions. The positive attach path calls both imports and records a marker; negative attach paths place a marker call before the missing import, and the harness requires the exact resolver failure and zero marker calls. Never use `entry-stubs.dll` as a guest execution provider.
+This is not a complete provider-load diagnostic taxonomy. It does not certify
+all production providers, the app's separate mapper copy, arbitrary guest
+execution or gameplay. `mlp::run` and the launcher's catchup-base Play path still
+use mapped probes; the latter reports `gameCodeExecuted=false`. A successful
+probe never authorizes later entry.
 
-Implemented fixture build and runtime command (off-device only; Wine 11 desktop API aliases):
+## Bounded synthetic fixtures
+
+`host/tests/strict-imports/` contains source-only no-CRT DLLs with explicit
+DllMain entrypoints and a volatile entry anchor to force relocations. The
+separately built `strict-provider.dll` is inspected for its export table; the
+harness does **not** execute that provider. Its classified resolver supplies
+real test-host functions instead. No donor or game binary is an input.
+
+The runner retains the merged fixture checks for named `fixture_named` and
+ordinal-only #7 imports, missing `absent_name` and #9 imports, absence of those
+negative exports from the provider, and nonempty guest relocation directories.
+Directory inspection is not a runtime relocation test; successful executable
+mapping also requires exercised DIR64 relocations.
+
+The harness requires:
+
+- Positive ordinary imports: exactly one actual call to each named and ordinal
+  host function, one DllMain marker with value 33, one binding of each import,
+  and no resolver miss or mapper rejection.
+- Each missing ordinary import: exactly the expected missing request, one
+  resolver miss, one mapper policy rejection, failed load and no host-function
+  or entry-marker call. The negative DllMain bodies place their marker before
+  the missing function call, so entering them cannot count as rejection.
+- Nonzero probe-only targets, unknown classifications and callable-with-zero
+  targets: failed load before entry.
+- A separate no-CRT TLS fixture with a constructed RVA delay directory: named
+  and ordinal bindings succeed before one TLS callback and one DllMain attach;
+  probe-only, unknown, zero and missing delay decisions fail before both.
+  Binding these delay imports is not proof that the guest invokes them.
+- Ordinary and delay ordinal-zero fixtures: rejection before resolver dispatch,
+  TLS callbacks and DllMain, with cleanup, in execution and mapped-probe modes.
+
+Never use `entry-stubs.dll` as a guest execution provider. These controlled
+fixtures validate the classification boundary, not the provenance or behavior
+of every future resolver implementation.
+
+## Reproducing off-device checks
+
+Use LLVM-MinGW or MinGW GCC plus LLVM tools on PATH, Wine for runtime execution,
+and Node.js for the synthetic delay/ordinal-zero fixture generator.
+`LLVM_MINGW_ROOT` optionally prepends a toolchain's `bin` directory. Individual
+executables can be selected with `STRICT_CC`, `STRICT_CXX`, `STRICT_OBJDUMP`,
+`STRICT_DLLTOOL`, `STRICT_LINKER` and `WINE_BIN`. Build-only mode needs neither
+Wine nor Node.js:
 
 ```sh
-bash xbox-test/uwph/host/tests/run-strict-imports.sh --run
+bash xbox-test/uwph/strict-policy/tests/run-policy-test.sh
+bash xbox-test/uwph/host/tests/run-strict-imports.sh --build-only
+WINEPREFIX=/absolute/path/to/dedicated-win64-prefix \
+  bash xbox-test/uwph/host/tests/run-strict-imports.sh --run
+bash xbox-test/uwph/host/tests/run-lifecycle.sh
 ```
 
-The command builds no-CRT DLLs with explicit DllMain and executes them through wxl::load under Wine. It validates import binding and fail-before-entry for synthetic test-host functions only; it does not validate probe provenance, production resolver integration, UWP FromApp semantics or Xbox behavior.
+The runner falls back from MinGW Clang to MinGW GCC and uses LLVM's objdump table
+format. `WINE_BIN` defaults to `wine`. A supplied `WINEPREFIX` is respected;
+otherwise strict-import execution uses ignored `host/out-strict-imports/wine-prefix`.
+The desktop harness aliases `VirtualAllocFromApp`/`VirtualProtectFromApp` to
+`VirtualAlloc`/`VirtualProtect`; **no UWP FromApp behavior is exercised**.
 
-## Smallest next implementation unit
+## Integration and acceptance boundaries
 
-Next integration unit: agree with mapper owner on a resolver result type separating `callable` from `probe_only`; current `Resolver` returns only address-or-zero, so this test does not prove production probe stubs are excluded from execution. This Wine fixture pass also does not establish UWP FromApp semantics or Xbox acceptance.
+The lifecycle baseline remains dependent on the separately owned PR #3. Merging
+current fixture/policy work into this branch does not resolve that ownership or
+replace its review and acceptance. Do not weaken either set of regressions:
+import rejection does not establish resource cleanup, and a classification unit
+test alone does not establish production enforcement.
+
+`bash tools/check-uwp-build-env.sh` checks tool availability, not SDK/CRT usability,
+package validity or host execution. Even `RESULT TOOLS PRESENT ONLY` is not
+acceptance. On-device changes still require matching source-built host/TLS
+packages and the full `xbox-test/smoke-all.sh` console run. Launcher acceptance is
+`xbox-test/tools/play-test.sh <appid>`; report actual guest execution separately
+from a probe or launch attempt. Historical lane/other-branch console results
+cannot certify this source. Use the shared lock and bump package versions before
+reinstalling, as required by `AGENTS.md`.
+
+Record exact source/package identities, current review status and evidence
+summaries in the PR, not machine-specific checkpoints in this guide.

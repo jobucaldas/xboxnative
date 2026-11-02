@@ -1,0 +1,3 @@
+LIBRARY guest-marker.dll
+EXPORTS
+    entry_marker
