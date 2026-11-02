@@ -352,12 +352,13 @@ The original CSVs remain unchanged. All eight classification tests pass with
 exact-byte historical-oracle proof and a separate current-policy routing check.
 
 
-### D / item 43 — upmp prerequisite correction (2026-10-26)
+### D / item 43 — Unity message-pump prerequisites
 
 Items 37 and 42 alone do not enable the Unity message-pump acceptance gate.
-At lane/upmp base 86960ae8, launcher launch.h lp_run_impl passes a non-null Image
-output to wxl::run. wxl_mapper.h's mapped branch returns before TLS/unwind
-initialization and guest entry; launch_result.json reports gameCodeExecuted=false.
+The launcher's `lp_run_impl` in `xbox-test/app/launch.h` passes a non-null `Image`
+output to `wxl::run`. The mapped-image path in `xbox-test/app/host/wxl_mapper.h`
+returns before TLS/unwind initialization and guest entry;
+`launch_result.json` reports `gameCodeExecuted=false`.
 Standalone mapper/test-PE execution and the SWC triangle are separate paths.
 A real Play runtime that initializes dependencies and enters UnityPlayer is an
 additional prerequisite. Host dispatcher iterations or the launcher UI screenshot
