@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <cstring>
 namespace wxl {
-enum class LoadConfig { reject, inert_wine };
+enum class LoadConfig { reject, inert_wine, msvc_x64_cookie };
 // Wine 10 winebuild emits a 0x140-byte x64 record even when it requests no
 // loader work. Do not accept a cookie, CFG/XFG, dynamic relocations, or unknown
 // extensions: supporting those requires actual initialization, not ignoring it.

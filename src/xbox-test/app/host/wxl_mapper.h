@@ -3,6 +3,11 @@
 #include <algorithm>
 #include <cstring>
 #include "../../shared/wine_load_config.h"
+#include "../../shared/msvc_load_config.h"
+#include <bcrypt.h>
+#ifdef _MSC_VER
+#pragma comment(lib, "bcrypt.lib")
+#endif
 // Minimal trusted-image loader: Wine virtual.c map_image_into_view's sequence
 // (copy, DIR64 relocation, protections) and loader.c import thunk fixup model.
 // No Wine code copied. Native static TLS uses a bounded packaged carrier slot.
@@ -29,8 +34,15 @@ struct Image {
     BYTE* base = nullptr; size_t size = 0;
     // Retain file-validated bounds: runtime headers may have been relocated.
     size_t configStart = 0, configEnd = 0;
+    // Only the explicit fixture policy populates these FILE-derived snapshots.
+    // Guest headers are never authority for a later TLS preparation call.
+    msvc_config::Plan msvc;
+    std::vector<BYTE> trustedHeaders, trustedConfig;
+    bool cookieInitialized = false;
+    uint64_t initializedCookie = 0;
     bool configWrite(size_t rva, size_t n) const {
-        return configEnd && rva<configEnd && configStart<rva+n;
+        return (configEnd && rva<configEnd && configStart<rva+n) ||
+               msvc.protectedWrite(rva,n);
     }
     PRUNTIME_FUNCTION functions = nullptr;
     using DllEntry = BOOL (WINAPI*)(HINSTANCE, DWORD, LPVOID);
@@ -119,9 +131,49 @@ struct Image {
         return !!ok;
     }
 };
+// The CRT, not the loader, sets __security_cookie_complement on entry when
+// the loader already changed __security_cookie. Never infer a complement RVA.
+inline bool systemCookieRandom(uint64_t& value) {
+    return BCryptGenRandom(nullptr,reinterpret_cast<PUCHAR>(&value),sizeof value,
+                           BCRYPT_USE_SYSTEM_PREFERRED_RNG)>=0;
+}
+inline bool msvcPointers(const Image& image) {
+    for(auto p:image.msvc.pointers) {
+        uint64_t value=0; memcpy(&value,image.base+p.rva,8);
+        if(value!=(p.null?0:uint64_t(uintptr_t(image.base)+p.target))) return false;
+    }
+    return true;
+}
+inline bool prepareMsvcTls(Image& image, Log log, Carrier carrier) {
+    auto fail=[&](){log("WXL FAIL explicit MSVC trusted TLS metadata/provider");return false;};
+    if(!image.cookieInitialized || image.trustedHeaders.empty() ||
+        memcmp(image.base,image.trustedHeaders.data(),image.trustedHeaders.size()) ||
+        memcmp(image.base+image.msvc.record.rva,image.trustedConfig.data(),image.trustedConfig.size()) ||
+        !msvcPointers(image)) return fail();
+    uint64_t cookie; memcpy(&cookie,image.base+image.msvc.cookie.rva,8);
+    if(cookie!=image.initializedCookie) return fail();
+    auto& t=image.msvc.tls;
+    if(!t.present) return true;
+    if(memcmp(image.base+t.directory,t.expected.data(),t.expected.size()) ||
+        !carrier.index || !carrier.block || carrier.capacity>65536 ||
+        t.raw+t.zero>carrier.capacity || image.tlsKey!=TLS_OUT_OF_INDEXES) return fail();
+    // All addresses, permissions and disjointness came from the immutable file.
+    // No header or TLS-directory mutation can redirect this index write.
+    image.carrier=carrier;
+    image.tlsTemplate.resize(t.raw+t.zero);
+    if(t.raw) memcpy(image.tlsTemplate.data(),image.base+t.start,t.raw);
+    image.tlsKey=TlsAlloc();
+    if(image.tlsKey==TLS_OUT_OF_INDEXES) return fail();
+    DWORD nativeIndex=carrier.index();
+    if(nativeIndex==TLS_OUT_OF_INDEXES) return fail();
+    memcpy(image.base+t.index,&nativeIndex,4);
+    for(auto rva:t.callbacks) image.tlsCallbacks.push_back((PIMAGE_TLS_CALLBACK)(image.base+rva));
+    return true;
+}
 // Runtime preparation is separate from mapping: all sibling exports must exist
 // before any TLS callback or DllMain can execute.
 inline bool prepareTls(Image& image, Log log, Carrier carrier) {
+    if(image.msvc.record.size) return prepareMsvcTls(image,log,carrier);
     auto fail=[&](const char* why){log(why);return false;};
     auto nt=(IMAGE_NT_HEADERS64*)(image.base+((IMAGE_DOS_HEADER*)image.base)->e_lfanew);
     auto h=nt->OptionalHeader;
@@ -182,6 +234,9 @@ inline bool prepareTls(Image& image, Log log, Carrier carrier) {
 }
 inline bool prepareUnwind(Image& image, Log log) {
     auto fail=[&](const char* why){log(why);return false;};
+    if(image.msvc.record.size && (image.trustedHeaders.empty() ||
+        memcmp(image.base,image.trustedHeaders.data(),image.trustedHeaders.size())))
+        return fail("WXL FAIL explicit MSVC trusted unwind headers");
     auto nt=(IMAGE_NT_HEADERS64*)(image.base+((IMAGE_DOS_HEADER*)image.base)->e_lfanew);
     auto h=nt->OptionalHeader;
     auto sections=IMAGE_FIRST_SECTION(nt);
@@ -250,8 +305,13 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
     for (unsigned d : {IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR})
         if (!mapped && h.DataDirectory[d].Size) return fail("WXL FAIL unsupported runtime directory");
     auto configDir=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG];
-    if ((configDir.VirtualAddress || configDir.Size) && config!=LoadConfig::inert_wine)
+    const bool explicitMsvc=config==LoadConfig::msvc_x64_cookie;
+    if ((configDir.VirtualAddress || configDir.Size) && config!=LoadConfig::inert_wine && !explicitMsvc)
         return fail("WXL FAIL unsupported runtime directory");
+    if (explicitMsvc && (image.base || !configDir.VirtualAddress || !configDir.Size ||
+        h.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].VirtualAddress ||
+        h.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].Size))
+        return fail("WXL FAIL explicit MSVC runtime directory/state");
     auto sections=(const IMAGE_SECTION_HEADER*)(file.data()+secOff);
     image.configStart=image.configEnd=0;
     size_t end=pages(h.SizeOfHeaders); bool entryCode=false;
@@ -262,7 +322,26 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
         if ((s.Characteristics&IMAGE_SCN_MEM_EXECUTE) && h.AddressOfEntryPoint>=s.VirtualAddress && h.AddressOfEntryPoint-s.VirtualAddress<n) entryCode=true;
     }
     if (!entryCode && !(mapped && (nt->FileHeader.Characteristics&IMAGE_FILE_DLL) && !h.AddressOfEntryPoint)) return fail("WXL FAIL entry outside code");
-    if ((configDir.VirtualAddress || configDir.Size)) {
+    if (explicitMsvc) {
+        msvc_config::File view;
+        view.bytes=file.data(); view.size=file.size(); view.headers=h.SizeOfHeaders;
+        view.imageSize=h.SizeOfImage; view.preferred=h.ImageBase;
+        view.dllCharacteristics=h.DllCharacteristics;
+        auto directory=[&](unsigned i) { auto d=h.DataDirectory[i]; return msvc_config::Directory{d.VirtualAddress,d.Size}; };
+        view.config=directory(IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG);
+        view.reloc=directory(IMAGE_DIRECTORY_ENTRY_BASERELOC);
+        view.imports=directory(IMAGE_DIRECTORY_ENTRY_IMPORT);
+        view.delay=directory(IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT);
+        view.tls=directory(IMAGE_DIRECTORY_ENTRY_TLS);
+        for(unsigned i=0;i<nt->FileHeader.NumberOfSections;++i) {
+            auto s=sections[i];
+            view.sections.push_back({s.VirtualAddress,s.Misc.VirtualSize,s.PointerToRawData,s.SizeOfRawData,s.Characteristics});
+        }
+        if((h.AddressOfEntryPoint && !view.at(h.AddressOfEntryPoint,1,msvc_config::read|msvc_config::execute,msvc_config::write)) ||
+            !msvc_config::validate(view,image.msvc)) return fail("WXL FAIL explicit MSVC file preflight");
+        image.trustedHeaders.assign(file.begin(),file.begin()+h.SizeOfHeaders);
+        log("WXL explicit MSVC file/write plan validated");
+    } else if ((configDir.VirtualAddress || configDir.Size)) {
         bool inert=false;
         for (unsigned i=0;i<nt->FileHeader.NumberOfSections;i++) {
             auto s=sections[i];
@@ -285,6 +364,45 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
     memcpy(image.base,file.data(),h.SizeOfHeaders);
     for (unsigned i=0;i<nt->FileHeader.NumberOfSections;i++) { auto s=sections[i]; if(s.SizeOfRawData) memcpy(image.base+s.VirtualAddress,file.data()+s.PointerToRawData,s.SizeOfRawData); }
     uintptr_t delta=(uintptr_t)image.base-h.ImageBase; unsigned relocations=0, imports=0;
+    bool terminated=false;
+    if(explicitMsvc) {
+        for(auto r:image.msvc.relocations) {
+            uint64_t value=r.value+delta;
+            memcpy(image.base+r.rva,&value,8); ++relocations;
+        }
+        if(!msvcPointers(image)) return fail("WXL FAIL explicit MSVC relocated pointer mismatch");
+        auto& t=image.msvc.tls;
+        if(t.present) {
+            for(size_t off:{size_t(0),size_t(8),size_t(16),size_t(24)}) {
+                uint64_t value; memcpy(&value,t.expected.data()+off,8);
+                if(value) { value+=delta; memcpy(t.expected.data()+off,&value,8); }
+            }
+            if(memcmp(image.base+t.directory,t.expected.data(),t.expected.size()))
+                return fail("WXL FAIL explicit MSVC relocated TLS mismatch");
+        }
+        image.trustedConfig.assign(image.base+image.msvc.record.rva,
+                                   image.base+image.msvc.record.rva+image.msvc.record.size);
+        uint64_t cookie;
+        if(!msvc_config::cookie(systemCookieRandom,cookie)) return fail("WXL FAIL explicit MSVC system RNG");
+        memcpy(image.base+image.msvc.cookie.rva,&cookie,8);
+        image.initializedCookie=cookie; image.cookieInitialized=true;
+        // This is deliberately before the first resolver: resolution may execute
+        // guest dependency initialization, not just return an address.
+        for(auto& imp:image.msvc.imports) {
+            uintptr_t address=0;
+            const char* name=imp.name.empty()?nullptr:imp.name.c_str();
+            if(mapped && resolve) address=resolve(imp.dll.c_str(),name,imp.ordinal);
+            else {
+                if(name) for(auto& b:builtins)
+                    if(!_stricmp(imp.dll.c_str(),b.dll) && !strcmp(name,b.name)) address=b.address;
+                if(!address && resolve) address=resolve(imp.dll.c_str(),name,imp.ordinal);
+            }
+            if(!address) return fail("WXL FAIL explicit MSVC unresolved import");
+            memcpy(image.base+imp.destination,&address,8); ++imports;
+        }
+        terminated=true;
+        log("WXL explicit MSVC cookie initialized; inactive guard slots unchanged");
+    } else {
     auto rd=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
     if (!rd.Size || !image.valid(rd.VirtualAddress,rd.Size)) return fail("WXL FAIL relocation directory");
     for (size_t pos=rd.VirtualAddress, stop=pos+rd.Size;pos<stop;) {
@@ -301,7 +419,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
         }
         pos+=b->SizeOfBlock;
     }
-    auto id=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT]; bool terminated=!id.Size;
+    auto id=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT]; terminated=!id.Size;
     if ((!id.Size && !mapped) || !image.valid(id.VirtualAddress,id.Size)) return fail("WXL FAIL import directory");
     for(size_t pos=id.VirtualAddress;range(pos,sizeof(IMAGE_IMPORT_DESCRIPTOR),size_t(id.VirtualAddress)+id.Size);pos+=sizeof(IMAGE_IMPORT_DESCRIPTOR)) {
         auto d=(IMAGE_IMPORT_DESCRIPTOR*)(image.base+pos);
@@ -357,6 +475,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
         }
         if(!ended) return fail("WXL FAIL delay terminator");
     }
+    } // Legacy/default/inert import and relocation path.
     if(!terminated || (!mapped && (!relocations || !delta))) return fail("WXL FAIL missing terminator/relocation exercise");
     char msg[200]; snprintf(msg,sizeof msg,"WXL mapped LocalState PE relocations=%u imports=%u delta=0x%llx",relocations,imports,(unsigned long long)delta); log(msg);
     if (!mapped && !prepareTls(image,log,carrier)) return false;
@@ -368,7 +487,8 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
     }
     if(!FlushInstructionCache(GetCurrentProcess(),image.base,image.size)) return fail("WXL FAIL cache flush");
     if (mapped) {
-        log("MLP mapped: TLS/unwind/load-config retained but NOT initialized; entry NOT called");
+        log(explicitMsvc ? "MLP mapped: explicit MSVC cookie initialized; TLS/unwind/entry NOT called" :
+                           "MLP mapped: TLS/unwind/load-config retained but NOT initialized; entry NOT called");
         return true;
     }
     if (!prepareUnwind(image,log)) return false;
