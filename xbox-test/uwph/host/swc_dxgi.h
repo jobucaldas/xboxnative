@@ -80,6 +80,8 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     return 0;
 }
 static void run(IUnknown* window,const wchar_t* path) {
+    // run(..., &image) maps only; this caller owns the guest execution scope.
+    wxl::LogScope logging(test_log);
     display=LoadPackagedLibrary(L"uwph-user32.dll",0);
     using Init=void(*)(IUnknown*,void(*)(),LONG,LONG);
     auto init=display?(Init)GetProcAddress(display,"uwph_display_init"):nullptr;
