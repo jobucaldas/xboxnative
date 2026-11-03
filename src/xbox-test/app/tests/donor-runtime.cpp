@@ -49,7 +49,9 @@ static bool donorIat(wxl::Image& image) {
 }
 int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int) {
     HANDLE thread=CreateThread(nullptr,0,probeThread,nullptr,0,nullptr);
-    if(!thread || WaitForSingleObject(thread,30000)!=WAIT_OBJECT_0)return 1;
+    // This is a disposable test process. An unjoined probe may still use
+    // static donor state, so do not run CRT teardown after a failed wait.
+    if(!thread || WaitForSingleObject(thread,30000)!=WAIT_OBJECT_0)ExitProcess(1);
     DWORD code=1;
     if(!GetExitCodeThread(thread,&code) || code)return 2;
     CloseHandle(thread);
