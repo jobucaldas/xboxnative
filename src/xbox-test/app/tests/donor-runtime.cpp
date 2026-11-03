@@ -48,42 +48,42 @@ static bool donorIat(wxl::Image& image) {
     return seen==expected;
 }
 int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int) {
+    // Disposable process: even a failed negative assertion can mean a worker
+    // unexpectedly exists. Never unwind CRT static state on a runner outcome.
     HANDLE thread=CreateThread(nullptr,0,probeThread,nullptr,0,nullptr);
-    // This is a disposable test process. An unjoined probe may still use
-    // static donor state, so do not run CRT teardown after a failed wait.
     if(!thread || WaitForSingleObject(thread,30000)!=WAIT_OBJECT_0)ExitProcess(1);
     DWORD code=1;
-    if(!GetExitCodeThread(thread,&code) || code)return 2;
+    if(!GetExitCodeThread(thread,&code) || code)ExitProcess(2);
     CloseHandle(thread);
     auto address=donor_pe::exported("hid.dll","HidD_GetHidGuid",0);
-    if(!address)return 3;
+    if(!address)ExitProcess(3);
     GUID guid{};
     ((void(WINAPI*)(GUID*))address)(&guid);
     const GUID expected={0x4d1e55b2,0xf16f,0x11cf,{0x88,0xcb,0,0x11,0x11,0,0,0x30}};
-    if(memcmp(&guid,&expected,sizeof guid))return 4;
+    if(memcmp(&guid,&expected,sizeof guid))ExitProcess(4);
     // A later probe must not unload code still held by a retained guest.
-    if(!donor_pe::probe(logline) || address!=donor_pe::exported("hid.dll","HidD_GetHidGuid",0))return 5;
+    if(!donor_pe::probe(logline) || address!=donor_pe::exported("hid.dll","HidD_GetHidGuid",0))ExitProcess(5);
     puts("DONOR-RUNTIME PASS: behavior gate, cross-thread publication, retained addresses; no game code");
     std::string mode=args;
-    if(mode!="normal"&&mode!="missing"&&mode!="disabled")return 6;
+    if(mode!="normal"&&mode!="missing"&&mode!="disabled")ExitProcess(6);
     wchar_t path[32768];DWORD n=GetModuleFileNameW(nullptr,path,32768);
-    if(!n||n>=32768)return 7;
+    if(!n||n>=32768)ExitProcess(7);
     std::wstring root=path;root.resize(root.find_last_of(L"\\/"));
     mlp::donor_resolve=mode=="disabled"?nullptr:donor_pe::exported;
-    if(!play_runtime::start(root,mode=="missing"?L"donor-missing.exe":L"donor-guest.exe",L"",logline))return 8;
+    if(!play_runtime::start(root,mode=="missing"?L"donor-missing.exe":L"donor-guest.exe",L"",logline))ExitProcess(8);
     auto r=play_runtime::state;
     if(mode!="normal") {
         bool blocked=r->finished.load()&&!r->executed.load()&&!r->worker&&!r->success&&mlp::stub_names.empty();
         auto last=r->snapshot();
         blocked=blocked&&last.find(mode=="missing"?"hid.dll!DeliberatelyAbsentDonorExport":"hid.dll!HidD_GetHidGuid")!=std::string::npos;
-        if(!blocked)return 9;
+        if(!blocked)ExitProcess(9);
         printf("DONOR-GUEST PASS mode=%s: rejected before guest initialization; no placeholders\n",args);
-        return 0;
+        fflush(stdout);ExitProcess(0);
     }
-    if(!r->worker) {printf("DONOR-GUEST FAIL: %s\n",r->snapshot().c_str());return 10;}
+    if(!r->worker) {printf("DONOR-GUEST FAIL: %s\n",r->snapshot().c_str());ExitProcess(10);}
     if(WaitForSingleObject(r->worker,30000)!=WAIT_OBJECT_0)ExitProcess(10);
-    if(!r->finished.load()||!r->executed.load()||!r->success||r->code!=42||!mlp::stub_names.empty()||!donorIat(r->exe->image))return 11;
-    if(address!=donor_pe::exported("hid.dll","HidD_GetHidGuid",0))return 12;
+    if(!r->finished.load()||!r->executed.load()||!r->success||r->code!=42||!mlp::stub_names.empty()||!donorIat(r->exe->image))ExitProcess(11);
+    if(address!=donor_pe::exported("hid.dll","HidD_GetHidGuid",0))ExitProcess(12);
     puts("DONOR-GUEST PASS: actual Play runtime; 8 verified donor IAT slots; behavior exit=42; owned fixture only");
-    return 0;
+    fflush(stdout);ExitProcess(0);
 }
