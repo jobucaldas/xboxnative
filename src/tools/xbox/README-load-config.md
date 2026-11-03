@@ -15,8 +15,9 @@ For each image the report shows:
 - the security cookie's target section, and whether it still holds the MSVC
   default value
 - `GuardFlags` and the `GUARD_CF` DLL characteristic
-- every nonzero field, with each pointer slot's target section
-- the base relocations that land inside the record
+- every nonzero field, with each VA field's direct target section (a target can
+  be metadata, a cookie or a function-pointer slot; it is not dereferenced)
+- the base relocations overlapping the record, including straddling DIR64 writes
 
 Delay-import (13) and CLR (14) directories get their own lines. Only unmapped
 loads reject those two with the generic gate, so they are a separate case from

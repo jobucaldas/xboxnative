@@ -227,7 +227,9 @@ def diagnose(image):
         if kind == 'va':
             target = value - image.image_base
             where = rva_text(image, target) if 0 <= target < image.size_of_image else 'outside image'
-            out.append(f'unsupported +0x{off:03x} {name}: pointer slot -> {where}')
+            # A VA can address metadata, a cookie or a function-pointer slot.
+            # Report its direct target without assuming another indirection.
+            out.append(f'unsupported +0x{off:03x} {name}: VA target -> {where}')
         else:
             out.append(f'unsupported +0x{off:03x} {name}=0x{value:x}')
     if limit > KNOWN_END:
