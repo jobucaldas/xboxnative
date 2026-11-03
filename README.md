@@ -13,6 +13,50 @@ loader plus our own POSIX/syscall host layer (`uwph`). Status: **early, experime
   32-bit execution (needs an x86 engine), Direct3D 9.
 - "Playable" is defined by evidence, not announcement: [docs/PLAYABLE.md](docs/PLAYABLE.md).
 
+## Game milestones
+
+**Confirmed working: 0.** Last evidence update: **2026-11-03**. Megabonk is the first target;
+any independently verified playable game is a milestone. These are the requested test targets,
+not a compatibility claim. A series is not marked working because one entry works.
+
+| Game | Steam app ID | Status | Latest evidence / next gate |
+|---|---:|---|---|
+| Megabonk | 3405340 | **Blocked before game execution** | Launcher 0.5.169.0, source `95cb0c7`, attempt `6924:1`: terminal loader failure, `gameCodeExecuted=false`. Active load configuration unsupported; donor-route acceptance also fails. Evidence: [#25](https://github.com/jobucaldas/xboxnative/pull/25). |
+| Danganronpa: Trigger Happy Havoc | 413410 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Danganronpa 2: Goodbye Despair | 413420 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Danganronpa Another Episode: Ultra Despair Girls | 555950 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Danganronpa V3: Killing Harmony | 567640 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Danganronpa V3: Killing Harmony Demo Ver. | 589120 | Queued — not tested (demo) | Demo evidence will not certify the full game. |
+| Hyperdimension Neptunia Re;Birth1 | 282900 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Hyperdimension Neptunia Re;Birth2 Sisters Generation | 351710 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Hyperdimension Neptunia Re;Birth3 V Generation | 353270 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Hyperdimension Neptunia U: Action Unleashed | 387340 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Megadimension Neptunia VII | 460120 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Cyberdimension Neptunia: 4 Goddesses Online | 632350 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Megadimension Neptunia VIIR | 774511 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Neptunia Shooter | 1037590 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Haven | 983970 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Hades | 1145360 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Going Under | 1154810 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+
+### What counts
+
+- **Queued / not tested:** no real launcher Play evidence. Ownership, downloading, store badges and
+  an assumed engine or graphics API do not establish compatibility.
+- **Blocked:** a real attempt reached a failing prerequisite; record the first observed blocker,
+  exact launcher version/source and evidence PR. Do not infer later failures that execution never reached.
+- **Launch progress:** game code, a window or a main menu has appeared, but the full playability
+  criteria are not yet met. Record the partial milestone without calling the game working.
+- **Confirmed working:** meet the existing [playability requirements](docs/PLAYABLE.md), applied to
+  the individual title: real launcher Play and correlated evidence; visible, stable menu for at least
+  five minutes; controller navigation into a run; nonzero audio output; successful legitimate Steam
+  integration; and at least five minutes of playable gameplay with measured frame rate.
+
+For every promotion, record the exact build/source, date, input method (real pad or labelled synthetic),
+observed duration, frame rate, audio/Steam checks, limitations and evidence PR. Raw account-bearing
+captures and game files stay private. Host smoke, Wine fixtures and CI are separate regression gates,
+not game milestones. Record failures honestly; never weaken a gate to increase the count.
+
 ## Design
 launcher → Wine-style loader → ELF/PE shim → `uwph` (POSIX/syscall host in UWP, in-process wineserver, no AF_UNIX).
 Rationale and checklists: [research/WINE-BASE-REPORT.md](research/WINE-BASE-REPORT.md) (use Wine's `*.spec` files as the
