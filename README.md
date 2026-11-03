@@ -21,7 +21,7 @@ not a compatibility claim. A series is not marked working because one entry work
 
 | Game | Steam app ID | Status | Latest evidence / next gate |
 |---|---:|---|---|
-| Megabonk | 3405340 | **Blocked before game execution** | Launcher 0.5.169.0, source `95cb0c7`, attempt `6924:1`: terminal loader failure, `gameCodeExecuted=false`. Active load configuration unsupported; donor-route acceptance also fails. Evidence: [#25](https://github.com/jobucaldas/xboxnative/pull/25). |
+| Megabonk | 3405340 | **Blocked before game execution** | Launcher 0.5.169.0, source `95cb0c7`, attempt `6924:1`: terminal loader failure, `gameCodeExecuted=false`. Active load configuration unsupported. Donor-route acceptance fails because required game IAT routes were not reached; this is not yet a separate routing diagnosis. Evidence: [#25](https://github.com/jobucaldas/xboxnative/pull/25). |
 | Danganronpa: Trigger Happy Havoc | 413410 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
 | Danganronpa 2: Goodbye Despair | 413420 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
 | Danganronpa Another Episode: Ultra Despair Girls | 555950 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
