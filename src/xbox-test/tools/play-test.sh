@@ -7,7 +7,8 @@
 # Env: PKG=<PackageFullName> (default: auto-detect Grok.XboxTest), PT_MAXMB=<n> (size guard via dlmax.txt: refuse download if
 #      bigger than n MB; 0 = dry run that only prints the manifest size), PT_NOKILL=1 (don't restart the app first).
 # Exit: 0 = fresh, clean guest completion plus GAP summary (visual/playable sign-off still required);
-#       1 = runtime/install failure, nonterminal progress, stale evidence, timeout or missing GAP; 2 = usage/setup.
+#       1 = runtime/install failure, nonterminal progress, stale evidence, timeout, missing GAP or a Device Portal
+#       transport error (any helper that cannot report its HTTP status fails the run; it never counts as "not yet").
 # Never touches steam_session.bin. DP_PASS comes from the env and is never printed. Needs PATH with $HOME/.local/bin.
 HERE="$(cd "$(dirname "$0")" && pwd)"; DP="$HERE/../dp"; . "$DP/dp-lib.sh"
 app="$1"; to="${2:-600}"; out="${3:-/workspace/x64-run/runs/play-$1-$(date +%Y%m%d-%H%M%S)}"
@@ -19,38 +20,67 @@ if [ -z "$full" ]; then
 fi
 [ -n "$full" ] || { echo "no Grok.XboxTest package found"; exit 2; }
 echo "package: $full  app: $app  out: $out"
-cmd() { printf '%s\n' "$@" > "$tmp/cmd.txt"; bash "$DP/put-file.sh" "$full" '\LocalState' "$tmp/cmd.txt" | tail -1; }
+tfail() { echo "TRANSPORT FAIL: $1 (no acceptance claimed; see $out)"; exit 1; }
+# dp_step LABEL HELPER ARGS...: helper must exit 0 with a 2xx "<op> HTTP nnn" status line.
+dp_step() {
+  local label="$1" r; shift
+  r=$(bash "$@" 2>/dev/null) || tfail "$label (${r##*$'\n'})"
+  r=${r##*$'\n'}; [[ $r =~ \ HTTP\ 2[0-9][0-9]($|[[:space:]]) ]] || tfail "$label (${r:-no response})"
+  echo "$r"
+}
+cmd() { printf '%s\n' "$@" > "$tmp/cmd.txt"; dp_step "upload cmd.txt '$*'" "$DP/put-file.sh" "$full" '\LocalState' "$tmp/cmd.txt"; }
 pull() {
   # Logs can be truncated or rewritten by a new app session. Resuming an old
   # local snapshot preserves stale bytes, including a previous launch result.
-  rm -f "$2"
-  bash "$DP/get-file.sh" "$full" '\LocalState' "$1" "$2" >/dev/null 2>&1
+  # Returns 0 = fetched, 2 = absent (HTTP 404), 1 = transport error. A failed
+  # fetch never leaves an error body or partial bytes behind as evidence.
+  local r; rm -f "$2"
+  r=$(bash "$DP/get-file.sh" "$full" '\LocalState' "$1" "$2" 2>/dev/null) && return 0
+  rm -f "$2"; [[ $r == *"get HTTP 404 "* ]] && return 2; return 1
 }
+need() { pull "$1" "$2" || tfail "download $1"; }                # must exist and be readable
+evidence() { pull "$1" "$2"; [ $? -ne 1 ] || tfail "download $1"; } # absent is judged by the checks below
+attempt_of() { python3 -I -c 'import json,sys
+try: v=json.load(open(sys.argv[1])).get("attemptId")
+except Exception: v=None
+print(v if isinstance(v,str) else "")' "$1" 2>/dev/null; }
+# The previous attempt identity, so evidence left by an earlier run (e.g. after a
+# refused stop or a launch that never happened) can never satisfy this one.
+pull launch_request.json "$tmp/prev_request.json"; rc=$?
+[ $rc -ne 1 ] || tfail "download previous launch_request.json"
+stale=""; [ $rc -eq 0 ] && stale=$(attempt_of "$tmp/prev_request.json")
 shot() { bash "$DP/screenshot.sh" "$out/$1.png" >/dev/null 2>&1 && echo "shot $1.png"; }
-if [ -z "$PT_NOKILL" ]; then bash "$DP/kill.sh" "$full" >/dev/null; sleep 3; fi
-: > "$tmp/cmd.txt"; bash "$DP/put-file.sh" "$full" '\LocalState' "$tmp/cmd.txt" | tail -1   # overwrite any stale cmd.txt with an empty (harmless) one
+if [ -z "$PT_NOKILL" ]; then
+  # A non-2xx answer is tolerated (nothing may be running); no answer at all is not.
+  r=$(bash "$DP/kill.sh" "$full" 2>/dev/null) && [[ ${r##*$'\n'} =~ \ HTTP\ [1-5][0-9][0-9]($|[[:space:]]) ]] || tfail "stop request (${r##*$'\n'})"
+  sleep 3
+fi
+: > "$tmp/cmd.txt"; dp_step "clear cmd.txt" "$DP/put-file.sh" "$full" '\LocalState' "$tmp/cmd.txt"   # overwrite any stale cmd.txt with an empty (harmless) one
 n0=0   # boot.log is truncated on every app start; with PT_NOKILL we count from the current length
-if [ -n "$PT_NOKILL" ]; then pull boot.log "$tmp/before.log"; n0=$(wc -l < "$tmp/before.log" 2>/dev/null || echo 0); fi
-if [ -n "$PT_MAXMB" ]; then printf '%s\n' "$PT_MAXMB" > "$tmp/dlmax.txt"; bash "$DP/put-file.sh" "$full" '\LocalState' "$tmp/dlmax.txt" | tail -1; fi
-bash "$DP/launch.sh" 'Grok.XboxTest_dk715arakrne0!App' "$full" | tail -1
-ok=1; for k in $(seq 1 40); do pull boot.log "$tmp/b.log"; tail -n +$((n0+1)) "$tmp/b.log" | grep -Eq 'library(\(cm\))?: owned=' && { ok=0; break; }; sleep 4; done
+if [ -n "$PT_NOKILL" ]; then evidence boot.log "$tmp/before.log"; n0=$(wc -l < "$tmp/before.log" 2>/dev/null || echo 0); fi
+if [ -n "$PT_MAXMB" ]; then printf '%s\n' "$PT_MAXMB" > "$tmp/dlmax.txt"; dp_step "upload dlmax.txt" "$DP/put-file.sh" "$full" '\LocalState' "$tmp/dlmax.txt"; fi
+dp_step "launch app" "$DP/launch.sh" 'Grok.XboxTest_dk715arakrne0!App' "$full"
+ok=1; for k in $(seq 1 40); do evidence boot.log "$tmp/b.log"; tail -n +$((n0+1)) "$tmp/b.log" | grep -Eq 'library(\(cm\))?: owned=' && { ok=0; break; }; sleep 4; done
 [ $ok -eq 0 ] || { echo "library never loaded"; cp "$tmp/b.log" "$out/boot.log" 2>/dev/null; exit 1; }
 sleep 5
 cmd "open $app"; sleep 8; shot 1-detail
 cmd "press"; sleep 1; shot 2-after-press
-end=$((SECONDS+to)); i=0; res=1
+end=$((SECONDS+to)); i=0; res=1; attempt=""
 while [ $SECONDS -lt $end ]; do
-  pull boot.log "$tmp/b.log"
-  if tail -n +$((n0+1)) "$tmp/b.log" | grep -q 'launch: RESULT'; then res=0; break; fi
+  need boot.log "$tmp/b.log"
+  # Only the newest request written in this session, and never the previous run's, is ours.
+  a=$(tail -n +$((n0+1)) "$tmp/b.log" | sed -nE 's/.*launch: request written .* attempt=([0-9]+:[0-9]+)([[:space:]].*)?$/\1/p' | tail -1)
+  [ -n "$a" ] && [ "$a" != "$stale" ] && attempt=$a
+  if [ -n "$attempt" ] && tail -n +$((n0+1)) "$tmp/b.log" | grep -Eq "launch: RESULT attempt=$attempt( |\$)"; then res=0; break; fi
   if tail -n +$((n0+1)) "$tmp/b.log" | grep -Eq 'dl: (FAILED|failed)|Test guard|Cannot reach Steam'; then echo "install did not complete"; break; fi
   i=$((i+1)); { [ $((i%6)) -eq 0 ] || [ $i -le 12 ]; } && shot "3-wait-$(printf %03d $i)"; sleep 1
 done
 sleep 4; shot 4-final
-pull boot.log "$out/boot.log"; pull launch_probe.log "$out/launch_probe.log"
+need boot.log "$out/boot.log"; evidence launch_probe.log "$out/launch_probe.log"
 if [[ "$app" == 480 || "$app" == 48000 ]]; then
-  pull "pe32-imports-$app.csv" "$out/pe32-imports-$app.csv"
+  evidence "pe32-imports-$app.csv" "$out/pe32-imports-$app.csv"
 fi
-pull launch_request.json "$out/launch_request.json"; pull launch_result.json "$out/launch_result.json"
+evidence launch_request.json "$out/launch_request.json"; evidence launch_result.json "$out/launch_result.json"
 tail -n +$((n0+1)) "$out/boot.log" > "$out/boot.session.log"
 echo "---- synthetic commands / store / launch lines ----"
 grep -E 'SYNTHETIC|store:|dl:|launch|GAP:' "$out/boot.session.log" | tail -30
@@ -61,5 +91,10 @@ if [[ "$app" == 480 || "$app" == 48000 ]]; then
   grep -q '^i386,' "$out/pe32-imports-$app.csv" || { echo "NO I386 IMPORT LIST"; exit 1; }
 fi
 echo "---- fps ----"; grep -E 'fps~' "$out/boot.session.log" | tail -2
-[ $res -eq 0 ] && { [ "$gap_ok" -eq 1 ] || { echo "NO GAP SUMMARY (see $out/launch_probe.log)"; exit 1; }; python3 -I "$HERE/check-play-result.py" "$app" "$out" || exit 1; echo "GUEST COMPLETED: $(grep 'launch: RESULT' "$out/boot.session.log" | tail -1)"; echo "evidence: $out (visual/playable sign-off still required)"; exit 0; }
+if [ $res -eq 0 ]; then
+  fresh=$(attempt_of "$out/launch_request.json")
+  [ -n "$fresh" ] && [ "$fresh" = "$attempt" ] && [ "$fresh" != "$stale" ] ||
+    { echo "STALE OR UNCORRELATED REQUEST: launch_request.json is not this run's attempt (see $out)"; exit 1; }
+fi
+[ $res -eq 0 ] && { [ "$gap_ok" -eq 1 ] || { echo "NO GAP SUMMARY (see $out/launch_probe.log)"; exit 1; }; python3 -I "$HERE/check-play-result.py" "$app" "$out" || exit 1; echo "GUEST COMPLETED: $(grep -E "launch: RESULT attempt=$attempt( |\$)" "$out/boot.session.log" | tail -1)"; echo "evidence: $out (visual/playable sign-off still required)"; exit 0; }
 echo "NO LAUNCH RESULT (see $out)"; exit 1
