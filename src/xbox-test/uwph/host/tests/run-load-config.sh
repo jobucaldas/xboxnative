@@ -14,3 +14,4 @@ lib=$($cc -print-file-name=libkernel32.a)
 export WINEDEBUG=-all WINEPREFIX=${WINEPREFIX:-$o/wine-prefix}
 env -u DP_PASS -u TS_AUTHKEY wine "$o/mapper-test.exe" "$o/guest.dll" "$o" | tr -d '\r' | tee "$o/result.log"
 grep -Fx 'WINE-CONFIG-MAPPER PASS: explicit inert opt-in, default rejection, 9 pre-allocation negatives' "$o/result.log"
+grep -Fx 'WINE-CONFIG-MAPPER PASS: 5 pre-DllMain write-into-record negatives, adjacent relocation, retry' "$o/result.log"

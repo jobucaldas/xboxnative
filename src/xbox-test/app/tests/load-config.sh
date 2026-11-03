@@ -13,3 +13,6 @@ link=${CONFIG_LINKER:-lld-link}
 "$cxx" -std=c++17 -O2 -static tests/load-config.cpp -o "$out/mapper-test.exe"
 WINEDEBUG=-all timeout -k 2 30 wine "$out/mapper-test.exe" "$out/guest.dll" "$out" | tr -d '\r' | tee "$out/result.log"
 grep -Fx 'WINE-CONFIG-MAPPER PASS: explicit inert opt-in, default rejection, 9 pre-allocation negatives' "$out/result.log"
+grep -Fx 'WINE-CONFIG-MAPPER PASS: 5 pre-DllMain write-into-record negatives, adjacent relocation, retry' "$out/result.log"
+grep -Fx 'WINE-CONFIG-MAPPER PASS: mapped delay write into inert record rejected and allocation released' "$out/result.log"
+grep -Fx 'WINE-CONFIG-MAPPER PASS: TLS index overlap rejected with mutable headers and allocation released' "$out/result.log"

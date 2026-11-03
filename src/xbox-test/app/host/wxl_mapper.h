@@ -27,6 +27,11 @@ struct Carrier {
 using Resolver = uintptr_t (*)(const char*,const char*, WORD);
 struct Image {
     BYTE* base = nullptr; size_t size = 0;
+    // Retain file-validated bounds: runtime headers may have been relocated.
+    size_t configStart = 0, configEnd = 0;
+    bool configWrite(size_t rva, size_t n) const {
+        return configEnd && rva<configEnd && configStart<rva+n;
+    }
     PRUNTIME_FUNCTION functions = nullptr;
     using DllEntry = BOOL (WINAPI*)(HINSTANCE, DWORD, LPVOID);
     DllEntry dllEntry = nullptr;
@@ -137,6 +142,7 @@ inline bool prepareTls(Image& image, Log log, Carrier carrier) {
             !vaRange(t->StartAddressOfRawData,size_t(raw)) || !vaRange(t->AddressOfIndex,4))
             return fail("WXL FAIL TLS template/index bounds");
         size_t indexRva=size_t(t->AddressOfIndex-(uintptr_t)image.base);
+        if (image.configWrite(indexRva,4)) return fail("WXL FAIL TLS write into inert load configuration");
         bool writable=false;
         for (unsigned j=0;j<nt->FileHeader.NumberOfSections;++j) {
             auto sec=sections[j];
@@ -247,6 +253,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
     if ((configDir.VirtualAddress || configDir.Size) && config!=LoadConfig::inert_wine)
         return fail("WXL FAIL unsupported runtime directory");
     auto sections=(const IMAGE_SECTION_HEADER*)(file.data()+secOff);
+    image.configStart=image.configEnd=0;
     size_t end=pages(h.SizeOfHeaders); bool entryCode=false;
     for (unsigned i=0;i<nt->FileHeader.NumberOfSections;i++) {
         auto s=sections[i]; size_t n=std::max(s.Misc.VirtualSize,s.SizeOfRawData);
@@ -267,6 +274,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
                                         configDir.Size,h.DllCharacteristics);
         }
         if (!inert) return fail("WXL FAIL non-inert Wine load configuration");
+        image.configStart=configDir.VirtualAddress; image.configEnd=image.configStart+configDir.Size;
         log("WXL inert Wine load configuration validated; no loader work requested");
     }
     image.log=log; image.size=h.SizeOfImage; image.carrier=carrier;
@@ -288,6 +296,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
             unsigned type=words[j]>>12; size_t target=size_t(b->VirtualAddress)+(words[j]&4095);
             if (!type) continue;
             if (type!=IMAGE_REL_BASED_DIR64 || !image.valid(target,8)) return fail("WXL FAIL relocation type/target");
+            if (image.configWrite(target,8)) return fail("WXL FAIL relocation into inert load configuration");
             uint64_t v; memcpy(&v,image.base+target,8); v+=delta; memcpy(image.base+target,&v,8); relocations++;
         }
         pos+=b->SizeOfBlock;
@@ -301,6 +310,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
         for(size_t j=0;;j+=8) {
             size_t src=size_t(d->OriginalFirstThunk)+j, dst=size_t(d->FirstThunk)+j;
             if (!image.valid(src,8)||!image.valid(dst,8)) return fail("WXL FAIL thunk bounds");
+            if (image.configWrite(dst,8)) return fail("WXL FAIL import write into inert load configuration");
             uint64_t thunk; memcpy(&thunk,image.base+src,8); if(!thunk) break;
             bool ordinal = !!(thunk & IMAGE_ORDINAL_FLAG64);
             const char* name = nullptr;
@@ -333,6 +343,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
             for(size_t j=0;;j+=8) {
                 size_t src=size_t(d->intab)+j,dst=size_t(d->iat)+j;
                 if(!image.valid(src,8)||!image.valid(dst,8)) return fail("WXL FAIL delay thunk bounds");
+                if(image.configWrite(dst,8)) return fail("WXL FAIL delay write into inert load configuration");
                 uint64_t thunk; memcpy(&thunk,image.base+src,8); if(!thunk) break;
                 bool ordinal=!!(thunk&IMAGE_ORDINAL_FLAG64); const char* name=nullptr;
                 if(!ordinal) {
