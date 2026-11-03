@@ -96,7 +96,8 @@ static bool processCreation(const char* name) {
     return name && (!strcmp(name,"CreateProcessA") || !strcmp(name,"CreateProcessW"));
 }
 static uintptr_t unavailableProcess(const char* dll,const char* name) {
-    state->event("guest child-process creation unavailable (no supported provider): "+lower(dll)+"!"+name);
+    // Optional dynamic detection must not replace real execution progress.
+    if(mappingImports)state->event("guest child-process creation unavailable (no supported provider): "+lower(dll)+"!"+name);
     return missing(dll,name,0);
 }
 static void WINAPI exitProcess(UINT code) {
@@ -245,7 +246,8 @@ static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
         if(processCreation(name)) return (FARPROC)unavailableProcess("native module",name);
         // Do not hand out raw GetProcAddress on the metadata-failure path:
         // a second lookup through it would bypass the unavailable-name gate.
-        if(!strcmp(name,"GetProcAddress")) return (FARPROC)&proc;
+        if(!strcmp(name,"GetProcAddress"))
+            return GetProcAddress(h,name)?(FARPROC)&proc:nullptr;
     }
     // Route dynamic lookups back through the same process wrappers and router.
     wchar_t p[32768]{};using Fn=DWORD(WINAPI*)(HMODULE,LPWSTR,DWORD);auto fn=(Fn)kernel_tail::native("GetModuleFileNameW");

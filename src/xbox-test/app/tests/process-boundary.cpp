@@ -48,14 +48,22 @@ static bool resolverTest(const std::wstring& root) {
     const char* dlls[]={"kernel32.dll","KeRnElBaSe.DlL",
         "api-ms-win-core-processthreads-l1-1-0.dll","API-MS-WIN-CORE-PROCESSTHREADS-L1-1-2.DLL"};
     const char* names[]={"CreateProcessA","CreateProcessW"};
+    const char* progress="owned execution progress retained";
     for(auto dll:dlls)for(auto name:names) {
+        state->event(progress);
         SetLastError(0);
-        if(resolve(dll,name,0) || GetLastError()!=ERROR_PROC_NOT_FOUND)return false;
+        if(resolve(dll,name,0) || GetLastError()!=ERROR_PROC_NOT_FOUND ||
+           state->snapshot()!=progress)return false;
         ++mappingImports;auto p=resolve(dll,name,0);--mappingImports;
         if(p || state->snapshot().find("unresolved static import:")==std::string::npos ||
            state->snapshot().find("no supported provider")==std::string::npos)return false;
     }
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll");if(!kernel)return false;
+    // A similarly named query is not evidence that an unrelated module has it.
+    HMODULE unrelated=GetModuleHandleW(L"ntdll.dll");if(!unrelated)return false;
+    state->event(progress);
+    SetLastError(0);
+    if(proc(unrelated,"GetProcAddress") || GetLastError()!=ERROR_PROC_NOT_FOUND)return false;
     for(auto name:names) {
         SetLastError(0);if(proc(kernel,name) || GetLastError()!=ERROR_PROC_NOT_FOUND)return false;
     }
@@ -66,6 +74,8 @@ static bool resolverTest(const std::wstring& root) {
     }
 #ifdef PROCESS_TEST_SENTINEL
     hideModuleName=true;
+    SetLastError(0);
+    if(proc(unrelated,"GetProcAddress") || GetLastError()!=ERROR_PROC_NOT_FOUND)return false;
     nested=(decltype(&proc))proc(kernel,"GetProcAddress");
     if(nested!=&proc)return false;
     for(auto name:names) {
@@ -77,7 +87,8 @@ static bool resolverTest(const std::wstring& root) {
     if(proc(kernel,"BoundarySentinel")!=(FARPROC)&sentinel || fallbackLookups!=1)return false;
     hideModuleName=false;
 #endif
-    return processApi("CreateThread")==uintptr_t(&createThread) && !state->worker &&
+    return state->snapshot()==progress &&
+        processApi("CreateThread")==uintptr_t(&createThread) && !state->worker &&
         !state->executed && state->thread==0 && !state->success &&
         state->modules.empty() && mlp::stub_names.empty();
 }
