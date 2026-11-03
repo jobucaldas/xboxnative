@@ -25,6 +25,8 @@ import sys
 MAX_FILE = 512 * 1024 * 1024
 READ_CHUNK = 64 * 1024
 MAX_RELOCATION_SAMPLES = 16
+# Bytes written by HIGH, LOW, HIGHLOW, HIGHADJ and DIR64 respectively.
+RELOCATION_WIDTHS = {1: 2, 2: 2, 3: 4, 4: 2, 10: 8}
 LOAD_CONFIG, DELAY_IMPORT, CLR = 10, 13, 14
 GUARD_CF = 0x4000  # IMAGE_DLLCHARACTERISTICS_GUARD_CF
 DEFAULT_COOKIE = 0x00002B992DDFA232  # MSVC x64 pre-initialization value
@@ -114,8 +116,10 @@ class Image:
             raise PEError('bad optional header')
         self.image_base = _get(data, opt + 24, '<Q')[0]
         self.size_of_image = _get(data, opt + 56, '<I')[0]
+        self.size_of_headers = _get(data, opt + 60, '<I')[0]
         self.dll_characteristics = _get(data, opt + 70, '<H')[0]
-        if opt + opt_size + 40 * nsec > len(data):
+        self.header_end = opt + opt_size + 40 * nsec
+        if self.header_end > len(data):
             raise PEError('optional header or section table beyond file')
         declared_count = _get(data, opt + 108, '<I')[0]
         if declared_count > (opt_size - 112) // 8:
@@ -152,9 +156,19 @@ class Image:
         return None
 
     def raw(self, rva, size):
-        """View file bytes without copying, only if wholly raw-backed in one section."""
+        """View backed header or single-section bytes without copying."""
+        if rva < 0 or size < 0:
+            return None
         s = self.section(rva, size)
-        if s is None or rva + size > s['va'] + s['rsize']:
+        if s is None:
+            # Header RVAs map directly to file offsets. Require complete,
+            # file/image-bounded headers with no virtual section alias.
+            if (self.header_end <= self.size_of_headers <= min(len(self.data), self.size_of_image)
+                    and rva + size <= self.size_of_headers
+                    and not any(s['vsize'] and s['va'] < self.size_of_headers for s in self.sections)):
+                return memoryview(self.data)[rva:rva + size]
+            return None
+        if rva + size > s['va'] + s['rsize']:
             return None
         start = s['rptr'] + rva - s['va']
         return memoryview(self.data)[start:start + size]
@@ -270,10 +284,13 @@ def diagnose(image):
         out.append(f'unknown extension +0x{KNOWN_END:x}..+0x{limit:x}: {extra} nonzero bytes (not certified)')
     hits = []
     hit_count = 0
+    unknown_widths = set()
     for target, kind in image.relocations():
-        # DIR64 writes can overlap a boundary even when their first byte is
-        # outside the record. Other types are reported by start, not certified.
-        width = 8 if kind == 10 else 1
+        # Known writes can overlap either edge even if they start outside.
+        # Unknown kinds are reported by start only; no type is certified here.
+        if kind not in RELOCATION_WIDTHS:
+            unknown_widths.add(kind)
+        width = RELOCATION_WIDTHS.get(kind, 1)
         if target < rva + size and rva < target + width:
             hit_count += 1
             if len(hits) >= MAX_RELOCATION_SAMPLES:
@@ -285,6 +302,10 @@ def diagnose(image):
             hits.append(f'{location}:{name}:{"DIR64" if kind == 10 else f"type{kind}"}{edge}')
     omitted = f' (showing first {len(hits)}; omitted {hit_count - len(hits)})' if hit_count > len(hits) else ''
     out.append(f'config field relocations={hit_count}' + (': ' + ' '.join(hits) if hits else '') + omitted)
+    if unknown_widths:
+        kinds = ','.join(str(kind) for kind in sorted(unknown_widths))
+        out.append(f'relocation widths unknown for types={kinds}; those entries counted by start only '
+                   '(overlap count not exhaustive)')
     out.append('VERDICT BLOCKED: unsupported runtime requirements remain; '
                'this report does not certify the record or claim the image runs')
     return out, True

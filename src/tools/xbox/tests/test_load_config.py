@@ -148,6 +148,73 @@ class LoadConfigDiagnosisTests(unittest.TestCase):
         self.assertIn('-0x004:unknown:DIR64:straddles-start', text)
         self.assertIn('+0x13c:GuardMemcpyFunctionPointer:DIR64:straddles-end', text)
 
+    def test_header_backed_relocations_are_bounded_and_config_stays_section_only(self):
+        original = pe(msvc_record(), relocs=(0x58, 0x100))
+        table = bytes(original.raw(*original.directories[5]))
+        data = bytearray(original.data)
+        header_rva = 0x1D0  # Padding after the complete section table (end 0x1C0).
+        struct.pack_into('<I', data, 0x58 + 60, 0x200)
+        struct.pack_into('<II', data, 0x58 + 112 + 8 * 5, header_rva, len(table))
+        data[header_rva:header_rva + len(table)] = table
+        image = lc.Image(bytes(data))
+        view = image.raw(header_rva, len(table))
+        self.assertIsNotNone(view)
+        self.assertIs(view.obj, image.data)
+        self.assertEqual(bytes(view), table)
+        text, blocked = self.report(image)
+        self.assertTrue(blocked)
+        self.assertIn('config field relocations=2:', text)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'header-relocations.exe'
+            path.write_bytes(data)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(lc.main([str(path)]), 1)
+            self.assertIn('VERDICT BLOCKED', output.getvalue())
+            self.assertNotIn('ERROR', output.getvalue())
+        for headers in (0x100, header_rva + len(table) - 1, len(data) + 1):
+            with self.subTest(headers=headers):
+                bad = bytearray(data)
+                struct.pack_into('<I', bad, 0x58 + 60, headers)
+                with self.assertRaisesRegex(lc.PEError, 'relocation directory not raw-backed'):
+                    self.report(lc.Image(bytes(bad)))
+        # A header-backed byte range is not permission to accept a config there.
+        struct.pack_into('<II', data, 0x58 + 112 + 8 * 10, header_rva, 4)
+        struct.pack_into('<I', data, header_rva, 4)
+        with self.assertRaisesRegex(lc.PEError, 'load-config directory not contained in one section'):
+            self.report(lc.Image(bytes(data)))
+
+    def test_known_relocation_widths_include_both_edges_but_not_adjacent_writes(self):
+        for kind, width in ((1, 2), (2, 2), (3, 4), (4, 2), (10, 8)):
+            with self.subTest(kind=kind):
+                words = []
+                for off in (0x40 - width + 1, 0x40 - width, 0x17F, 0x180):
+                    words.append((kind << 12) | off)
+                    if kind == 4:
+                        words.append(0)  # HIGHADJ addend, never another write.
+                data = bytearray(pe(msvc_record(), reloc_words=words).data)
+                data[0x240:0x380] = data[0x200:0x340]
+                image = lc.Image(bytes(data))
+                image.directories[10] = (RDATA + 0x40, 0x140)
+                text, blocked = self.report(image)
+                self.assertTrue(blocked)
+                self.assertIn('config field relocations=2:', text)
+                label = 'DIR64' if kind == 10 else f'type{kind}'
+                self.assertIn(f'-0x{width - 1:03x}:unknown:{label}:straddles-start', text)
+                self.assertIn(f'+0x13f:GuardMemcpyFunctionPointer:{label}:straddles-end', text)
+
+    def test_unknown_relocation_widths_are_not_advertised_as_exhaustive(self):
+        words = [(5 << 12) | 0x3F, (7 << 12) | 0x80, (10 << 12) | 0x58]
+        data = bytearray(pe(msvc_record(), reloc_words=words).data)
+        data[0x240:0x380] = data[0x200:0x340]
+        image = lc.Image(bytes(data))
+        image.directories[10] = (RDATA + 0x40, 0x140)
+        text, blocked = self.report(image)
+        self.assertTrue(blocked)
+        self.assertIn('config field relocations=2:', text)
+        self.assertIn('relocation widths unknown for types=5,7; those entries counted by start only '
+                      '(overlap count not exhaustive)', text)
+
     def test_inert_candidate_is_not_mapper_acceptance_even_with_relocations(self):
         record = bytearray(0x140)
         struct.pack_into('<I', record, 0, len(record))

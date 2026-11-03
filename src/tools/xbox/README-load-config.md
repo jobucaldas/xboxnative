@@ -10,7 +10,10 @@ most 64 KiB, so a tiny file does not cause a limit-sized allocation. Short reads
 do not imply EOF; input is accumulated without retaining a separate chunk list.
 Devices and FIFOs are rejected; opening a FIFO does not wait for a writer.
 Raw-backed ranges are memoryviews of that bounded input, not additional
-record-sized copies. Virtual-section overlap
+record-sized copies. Relocation tables may also occupy bounded header padding:
+header RVAs then map directly to file offsets, within complete `SizeOfHeaders`,
+file and image bounds, without a virtual-section alias. The load configuration
+itself must still belong to a single raw-backed section. Virtual-section overlap
 checks sort nonempty half-open ranges, so validation does not compare every
 section pair; adjacent ranges and empty sections do not overlap.
 
@@ -28,11 +31,13 @@ For each image the report shows:
   four bytes for each RVA plus the extra bytes encoded in the high nibble
 - every nonzero field, with each VA field's direct target section (a target can
   be metadata, a cookie or a function-pointer slot; it is not dereferenced)
-- the exact count of base relocations overlapping the record (including repeated
-  entries and straddling DIR64 writes), with at most the first 16 entries shown
-  and an explicit omitted count; the entire table is still checked for malformed
-  blocks; HIGHADJ's second WORD is consumed as an addend, not counted as a
-  relocation, and a missing in-block addend is malformed
+- the exact count of known-width base-relocation writes overlapping the record
+  (including repeated entries and straddling HIGH, LOW, HIGHLOW, HIGHADJ and DIR64
+  writes), with at most the first 16 entries shown and an explicit omitted count;
+  unknown types are counted by start only, with an explicit warning that the
+  overlap count is not exhaustive; the entire table is still checked for
+  malformed blocks; HIGHADJ's second WORD is consumed as an addend, not counted
+  as a relocation, and a missing in-block addend is malformed
 
 Delay-import (13) and CLR (14) directories get their own lines. Only unmapped
 loads reject those two with the generic gate, so they are a separate case from
