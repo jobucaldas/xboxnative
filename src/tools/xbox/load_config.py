@@ -15,11 +15,14 @@ means implementing what it asks for, such as cookie initialization, CFG and
 volatile metadata. Ignoring or stripping the record is not support.
 """
 import argparse
+import os
 from pathlib import Path
+import stat
 import struct
 import sys
 
 MAX_FILE = 512 * 1024 * 1024
+MAX_RELOCATION_SAMPLES = 16
 LOAD_CONFIG, DELAY_IMPORT, CLR = 10, 13, 14
 GUARD_CF = 0x4000  # IMAGE_DLLCHARACTERISTICS_GUARD_CF
 DEFAULT_COOKIE = 0x00002B992DDFA232  # MSVC x64 pre-initialization value
@@ -150,7 +153,7 @@ class Image:
             page, block = struct.unpack_from('<II', table, pos)
             if block < 8 or block % 2 or pos + block > len(table):
                 raise PEError('relocation block length')
-            for (word,) in struct.iter_unpack('<H', table[pos + 8:pos + block]):
+            for (word,) in struct.iter_unpack('<H', memoryview(table)[pos + 8:pos + block]):
                 if word >> 12:
                     yield page + (word & 0xFFF), word >> 12
             pos += block
@@ -181,33 +184,39 @@ def diagnose(image):
         return out, False
     out.append(f'dir={LOAD_CONFIG} LOAD_CONFIG BLOCKED: Play uses LoadConfig::reject -> "{GATE}"')
     out.append(f'directory rva=0x{rva:x} size=0x{size:x} end=0x{rva + size:x}')
+    if not rva or size < 4:
+        raise PEError('load-config directory missing RVA or too small for Size')
+    if rva + size > image.size_of_image:
+        raise PEError('load-config directory beyond SizeOfImage')
     section = image.section(rva, size)
     if section is None:
-        out.append('virtual bounds: directory not contained in one section (unsafe; fields not read)')
-        return out, True
+        raise PEError('load-config directory not contained in one section')
     out.append(f'virtual bounds: section={section["name"]} [0x{section["va"]:x},0x{section["va"] + section["vsize"]:x})')
     record = image.raw(rva, size)
     if record is None:
-        out.append('raw bounds: directory not fully raw-backed (fields not read)')
-        return out, True
+        raise PEError('load-config directory not fully raw-backed')
     start = section['rptr'] + rva - section['va']
     out.append(f'raw bounds: file [0x{start:x},0x{start + size:x}) within section raw size 0x{section["rsize"]:x}; '
                f'section flags=0x{section["flags"]:08x}')
-    declared = struct.unpack_from('<I', record)[0] if size >= 4 else None
-    out.append(f'declared size={"unreadable" if declared is None else hex(declared)} '
+    declared = struct.unpack_from('<I', record)[0]
+    if declared < 4 or declared > size:
+        raise PEError('load-config declared Size outside directory bounds')
+    out.append(f'declared size=0x{declared:x} '
                f'directory size=0x{size:x} known layout=0x{KNOWN_END:x}')
-    limit = min(size, declared or 0)
+    limit = declared
     values = {}
     for off, width, name, kind in FIELDS:
         if off + width <= limit:
             values[name] = (off, kind, int.from_bytes(record[off:off + width], 'little'))
     inert = (size == KNOWN_END and declared == size and not any(record[4:]) and not guard_cf
              and not section['flags'] & (SCN_WRITE | SCN_EXECUTE))
-    out.append(f'inert Wine record: {"yes (donor opt-in only)" if inert else "no"}')
+    out.append(f'inert Wine file-byte candidate: {"yes" if inert else "no"} '
+               '(structural only; loader writes and mapper acceptance not checked)')
     flags = values.get('GuardFlags', (0, '', 0))[2]
     names = [label for bit, label in GUARD_BITS if flags & bit]
     if flags >> 28:
-        names.append(f'FUNCTION_TABLE_STRIDE={flags >> 28}')
+        # The high nibble counts extra bytes after each four-byte function RVA.
+        names.append(f'FUNCTION_TABLE_STRIDE={4 + (flags >> 28)}')
     unknown = flags & ~(sum(b for b, _ in GUARD_BITS) | 0xF0000000)
     if unknown:
         names.append(f'UNKNOWN=0x{unknown:x}')
@@ -236,20 +245,42 @@ def diagnose(image):
         extra = sum(1 for b in record[KNOWN_END:limit] if b)
         out.append(f'unknown extension +0x{KNOWN_END:x}..+0x{limit:x}: {extra} nonzero bytes (not certified)')
     hits = []
+    hit_count = 0
     for target, kind in image.relocations():
         # DIR64 writes can overlap a boundary even when their first byte is
         # outside the record. Other types are reported by start, not certified.
         width = 8 if kind == 10 else 1
         if target < rva + size and rva < target + width:
+            hit_count += 1
+            if len(hits) >= MAX_RELOCATION_SAMPLES:
+                continue
             off = target - rva
             name = next((n for o, w, n, _ in FIELDS if o <= off < o + w), 'unknown')
             location = f'-0x{-off:03x}' if off < 0 else f'+0x{off:03x}'
             edge = ':straddles-start' if off < 0 else ':straddles-end' if target + width > rva + size else ''
             hits.append(f'{location}:{name}:{"DIR64" if kind == 10 else f"type{kind}"}{edge}')
-    out.append(f'config field relocations={len(hits)}' + (': ' + ' '.join(hits) if hits else ''))
+    omitted = f' (showing first {len(hits)}; omitted {hit_count - len(hits)})' if hit_count > len(hits) else ''
+    out.append(f'config field relocations={hit_count}' + (': ' + ' '.join(hits) if hits else '') + omitted)
     out.append('VERDICT BLOCKED: unsupported runtime requirements remain; '
                'this report does not certify the record or claim the image runs')
     return out, True
+
+
+def read_image(path):
+    """Open once, reject non-regular files, and cap reads even if the file grows."""
+    # Nonblocking open prevents waiting for a FIFO writer before fstat can reject
+    # it. It has no effect on regular files; Windows has no O_NONBLOCK/FIFO paths.
+    flags = os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0)
+    with os.fdopen(os.open(path, flags), 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise PEError('input is not a regular file')
+        if info.st_size > MAX_FILE:
+            raise PEError('file too large')
+        data = stream.read(MAX_FILE + 1)
+        if len(data) > MAX_FILE:
+            raise PEError('file too large')
+    return Image(data)
 
 
 def main(argv=None):
@@ -260,9 +291,7 @@ def main(argv=None):
     for path in args.pe:
         print(f'== {path.name}')
         try:
-            if path.stat().st_size > MAX_FILE:
-                raise PEError('file too large')
-            lines, blocked = diagnose(Image(path.read_bytes()))
+            lines, blocked = diagnose(read_image(path))
         except OSError as exc:
             # OSError's string includes the full input path; reports deliberately
             # expose only the base name printed above, not private directories.
