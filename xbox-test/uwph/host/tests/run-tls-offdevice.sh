@@ -11,3 +11,11 @@ grep -F 'WXL-TLS-OK: TLS value correct on two threads, callback ran, exception c
 test "$(grep -c 'WXL CXX mapped DLL destructor ran' out-tls/tests/tls-offdevice.log)" -eq 2
 test "$(grep -c 'WXL CXX mapped EXE caught 73' out-tls/tests/tls-offdevice.log)" -eq 2
 ! grep -E 'FAIL|new=0x(40|80) ' out-tls/tests/tls-offdevice.log
+# A successful guest check must not mask an explicit cleanup failure, even
+# when the destructor's subsequent best-effort retry succeeds.
+for operation in tls-free unwind memory; do
+  log="out-tls/tests/tls-cleanup-$operation.log"
+  env -u DP_PASS -u TS_AUTHKEY WINEDEBUG=-all wine out-tls/tests/tls-host-ms.exe "$operation" | tee "$log"
+  tr -d '\r' < "$log" | grep -Fx "TLS-CLEANUP-DETECTED operation=$operation injected=1"
+  ! grep -F 'WXL-TLS-OK' "$log"
+done

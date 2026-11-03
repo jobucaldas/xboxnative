@@ -73,7 +73,12 @@ inline bool runTls(const wchar_t* directory,Log log,HMODULE carrierA,HMODULE car
     GetExitCodeThread(thread,&exit); CloseHandle(thread);
     auto after=(int(*)())exe.symbol("tls_exe_after_worker");
     bool ok=main==42 && wait==WAIT_OBJECT_0 && exit==0 && work.result==42 && after && after();
-    log(ok?"WXL-TLS-OK: TLS value correct on two threads, callback ran, exception caught":"WXL FAIL TLS two threads");
+    // Destructors are only best effort. Report either explicit teardown failure,
+    // even if a later destructor retry succeeds; close the consumer first.
+    bool exeClosed=exe.close();
+    bool dllClosed=dll.close();
+    ok=ok && exeClosed && dllClosed;
+    log(ok?"WXL-TLS-OK: TLS value correct on two threads, callback ran, exception caught":"WXL FAIL TLS two threads or cleanup");
     return ok;
 }
 }
