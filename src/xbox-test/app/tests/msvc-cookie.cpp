@@ -9,9 +9,12 @@
 #include <vector>
 static BYTE* allocated;
 static size_t allocatedSize,cookieRva;
-static unsigned allocations,releases,resolutions,observations,rngCalls,indexCalls;
+static unsigned allocations,releases,resolutions,observations,rngCalls,indexCalls,allocationAttempts;
 static unsigned rngMode;
+static bool failAllocation;
 static LPVOID WINAPI allocate_image(LPVOID p,SIZE_T size,DWORD type,DWORD protection) {
+    ++allocationAttempts;
+    if(failAllocation) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return nullptr; }
     auto base=VirtualAlloc(p,size,type,protection);
     if(base) { allocated=(BYTE*)base; allocatedSize=size; ++allocations; }
     return base;
@@ -129,7 +132,10 @@ struct Fixture {
         return path;
     }
 };
-static void reset() { allocations=releases=resolutions=observations=rngCalls=indexCalls=0; rngMode=0; missingImport=false; }
+static void reset() {
+    allocations=releases=resolutions=observations=rngCalls=indexCalls=allocationAttempts=0;
+    rngMode=0; missingImport=failAllocation=false;
+}
 static void check_protections(const wxl::Image& image) {
     MEMORY_BASIC_INFORMATION info{};
     assert(VirtualQuery(image.base+image.msvc.cookie.rva,&info,sizeof info) && info.Protect==PAGE_READWRITE);
@@ -171,6 +177,49 @@ int main(int argc,char** argv) {
     for(auto mode:{wxl::LoadConfig::reject,wxl::LoadConfig::inert_wine}) for(bool mapped:{false,true})
         assert(!load_file(argv[1],mode,mapped));
     assert(!allocations && !observations && !rngCalls && !resolutions);
+    // A failed explicit allocation must not leak policy into a different load on
+    // the SAME Image. Both legacy policies have supported TLS metadata here;
+    // mapping alone would miss stale explicit prepareTls dispatch.
+    bool retriesPassed=true;
+    for(unsigned kind=0;kind<3;++kind) {
+        auto f=original;
+        auto mode=kind==2?wxl::LoadConfig::inert_wine:wxl::LoadConfig::reject;
+        if(kind!=0) {
+            for(size_t off:{0x58,0x70,0x78,0x118,0x120,0x128,0x130,0x138}) {
+                *f.relocation(f.record()+off)=0;
+                if(off!=0x58 && off!=0x130)
+                    *f.relocation(size_t(f.get<uint64_t>(f.record()+off)-f.nt().OptionalHeader.ImageBase))=0;
+            }
+            memset(f.at(f.record(),0x140),0,0x140); f.put<uint32_t>(f.record(),0x140);
+        }
+        if(mode==wxl::LoadConfig::reject) f.dir(IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)={};
+        // No imports or guest execution are needed for this TLS preparation test.
+        f.dir(IMAGE_DIRECTORY_ENTRY_IMPORT)={};
+        auto path=f.save(argv[2],11000+kind);
+        wchar_t originalWide[4096],retryWide[4096];
+        assert(MultiByteToWideChar(CP_UTF8,0,argv[1],-1,originalWide,4096));
+        assert(MultiByteToWideChar(CP_UTF8,0,path.c_str(),-1,retryWide,4096));
+        reset();
+        { wxl::Image image;
+          failAllocation=true;
+          assert(!wxl::load(image,originalWide,log_line,carrier,resolve,true,wxl::LoadConfig::msvc_x64_cookie));
+          assert(!image.base && allocationAttempts==1 && !allocations && !releases);
+          assert(!rngCalls && !resolutions && !observations && !indexCalls);
+          bool clean=!image.msvc.record.size && image.trustedHeaders.empty() && image.trustedConfig.empty() &&
+                     !image.cookieInitialized && !image.initializedCookie && !image.configEnd;
+          failAllocation=false;
+          bool loaded=wxl::load(image,retryWide,log_line,carrier,nullptr,true,mode);
+          bool prepared=loaded && wxl::prepareTls(image,log_line,carrier);
+          printf("MSVC-COOKIE allocation retry kind=%u clean=%d loaded=%d prepared=%d\n",kind,clean,loaded,prepared);
+          retriesPassed &= clean && loaded && prepared && !image.msvc.record.size &&
+                           image.trustedHeaders.empty() && !image.cookieInitialized &&
+                           image.tlsKey!=TLS_OUT_OF_INDEXES && !image.tlsCallbacks.empty() &&
+                           image.tlsTemplate.size()>0 && indexCalls==1 && !rngCalls && !observations && !resolutions;
+        }
+        assert(allocations==1 && releases==1 && allocationAttempts==2);
+    }
+    assert(retriesPassed);
+    puts("MSVC-COOKIE SAME-Image allocation failure retries passed: default spans, default TLS, inert TLS");
     reset();
     assert(load_file(argv[1],wxl::LoadConfig::msvc_x64_cookie,false,true));
     assert(rngCalls>=1 && rngCalls<=8 && resolutions>1 && observations==3);
@@ -273,6 +322,10 @@ int main(int argc,char** argv) {
       for(unsigned i=0;i<f.nt().FileHeader.NumberOfSections;++i) if(f.sections()[i].VirtualAddress==rd.VirtualAddress)
           f.sections()[i].Misc.VirtualSize=rd.Size+80;
       auto path=f.save(argv[2],10000); reset();
+      // Executable delay imports still hit the legacy gate, even in explicit mode.
+      assert(!load_file(path,explicitMode,false));
+      assert(!allocationAttempts && !rngCalls && !resolutions && !observations && !indexCalls);
+      reset();
       { wxl::Image image;
         wchar_t wide[4096]; assert(MultiByteToWideChar(CP_UTF8,0,path.c_str(),-1,wide,4096));
         assert(wxl::load(image,wide,log_line,carrier,resolve,true,explicitMode));
@@ -295,9 +348,11 @@ int main(int argc,char** argv) {
         assert(!load_file(argv[1],explicitMode,mapped));
         assert(allocations==1 && releases==1 && rngCalls && resolutions && !observations && !indexCalls);
     }
-    // A forged header/TLS directory must not redirect later explicit prepareTls.
-    for(unsigned kind=0;kind<5;++kind) {
-        reset(); unsigned before;
+    // Later preparation must reject directory, callback ENTRY and TERMINATOR
+    // mutations before touching the carrier, TLS key/template/callbacks or index.
+    bool metadataRejected=true;
+    for(unsigned kind=0;kind<7;++kind) {
+        reset();
         { wxl::Image image;
           wchar_t wide[4096]; assert(MultiByteToWideChar(CP_UTF8,0,argv[1],-1,wide,4096));
           assert(wxl::load(image,wide,log_line,carrier,resolve,true,explicitMode));
@@ -309,12 +364,29 @@ int main(int argc,char** argv) {
           if(kind==2) { auto tls=(IMAGE_TLS_DIRECTORY64*)(image.base+image.msvc.tls.directory); tls->AddressOfIndex=uintptr_t(image.base+cookieRva); }
           if(kind==3) image.base[image.msvc.record.rva+0x90]=1;
           if(kind==4) image.base[image.msvc.slots[0].rva]^=1;
-          auto value=current_cookie(); before=indexCalls;
-          assert(!wxl::prepareTls(image,log_line,carrier));
-          assert(current_cookie()==value && indexCalls==before && !observations);
+          if(kind>=5) {
+              auto tls=(IMAGE_TLS_DIRECTORY64*)(image.base+image.msvc.tls.directory);
+              auto callbacks=(uint64_t*)uintptr_t(tls->AddressOfCallBacks);
+              assert(callbacks && !image.msvc.tls.callbacks.empty());
+              if(kind==5) callbacks[0]^=1;
+              else { assert(!callbacks[image.msvc.tls.callbacks.size()]); callbacks[image.msvc.tls.callbacks.size()]=callbacks[0]; }
+          }
+          auto value=current_cookie();
+          DWORD indexBefore; memcpy(&indexBefore,image.base+image.msvc.tls.index,4);
+          auto rejectedCarrier=carrier; --rejectedCarrier.capacity;
+          bool prepared=wxl::prepareTls(image,log_line,rejectedCarrier);
+          DWORD indexAfter; memcpy(&indexAfter,image.base+image.msvc.tls.index,4);
+          bool unchanged=current_cookie()==value && !indexCalls && !observations &&
+                         indexAfter==indexBefore && image.tlsKey==TLS_OUT_OF_INDEXES &&
+                         image.tlsTemplate.empty() && image.tlsCallbacks.empty() &&
+                         image.carrier.capacity==carrier.capacity;
+          printf("MSVC-COOKIE deferred metadata kind=%u rejected=%d unchanged=%d\n",kind,!prepared,unchanged);
+          metadataRejected &= !prepared && unchanged;
         }
         assert(allocations==releases);
     }
+    assert(metadataRejected);
+    puts("MSVC-COOKIE deferred metadata mutations passed: headers/config/slots/TLS directory/callback entry/terminator, no preparation effects");
     // Untampered mapped-only load can be prepared later without consulting
     // mutable header permissions or repeating cookie/guard initialization.
     reset();

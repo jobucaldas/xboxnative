@@ -63,6 +63,24 @@ struct Fixture {
 int main() {
     Fixture base; assert(base.valid());
     { auto f=base; f.imports(false,0x3400); f.imports(true,0x3500); f.tls(); assert(f.valid()); }
+    // Retain the callback array location even when it contains only a terminator;
+    // distinguish that from an absent array for deferred mapped-image checks.
+    for(unsigned kind=0;kind<3;++kind) {
+        auto f=base; f.tls();
+        if(kind) {
+            f.put<uint64_t>(0x2780,0);
+            f.put<uint16_t>(0x4000+f.file.reloc.size-4,0); // no callback DIR64
+        }
+        if(kind==2) {
+            f.put<uint64_t>(0x2718,0);
+            f.put<uint16_t>(0x4000+f.file.reloc.size-16,0); // no array VA DIR64
+        }
+        assert(f.valid()); Plan plan;
+        assert(validate(f.file,plan) && plan.tls.present);
+        assert(plan.tls.callbackArray==(kind==2?0:0x2780));
+        assert(plan.tls.callbacks.size()==(kind==0?1:0));
+        if(!kind) assert(plan.tls.callbacks[0]==0x1100);
+    }
     // Every sensitive span is tested with an otherwise valid plan, including
     // overlaps at either end, exact adjacency, IAT terminators and TLS aliases.
     for(bool delay:{false,true}) for(size_t target:{0x30fc,0x3100,0x3104,0x2158,0x2300,0x2328,0x2329,0x30f8}) {

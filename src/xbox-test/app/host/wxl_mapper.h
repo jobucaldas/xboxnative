@@ -157,8 +157,15 @@ inline bool prepareMsvcTls(Image& image, Log log, Carrier carrier) {
     if(memcmp(image.base+t.directory,t.expected.data(),t.expected.size()) ||
         !carrier.index || !carrier.block || carrier.capacity>65536 ||
         t.raw+t.zero>carrier.capacity || image.tlsKey!=TLS_OUT_OF_INDEXES) return fail();
+    // Retained callback RVAs are execution authority, but the mapped array must
+    // still match the file plan, including its zero terminator, before ANY effect.
+    if(t.callbackArray) for(size_t i=0;i<=t.callbacks.size();++i) {
+        uint64_t value; memcpy(&value,image.base+t.callbackArray+i*8,8);
+        uint64_t expected=i<t.callbacks.size()?uint64_t(uintptr_t(image.base)+t.callbacks[i]):0;
+        if(value!=expected) return fail();
+    }
     // All addresses, permissions and disjointness came from the immutable file.
-    // No header or TLS-directory mutation can redirect this index write.
+    // No header, TLS-directory or callback-array mutation can authorize this write.
     image.carrier=carrier;
     image.tlsTemplate.resize(t.raw+t.zero);
     if(t.raw) memcpy(image.tlsTemplate.data(),image.base+t.start,t.raw);
@@ -313,7 +320,10 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
         h.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].Size))
         return fail("WXL FAIL explicit MSVC runtime directory/state");
     auto sections=(const IMAGE_SECTION_HEADER*)(file.data()+secOff);
-    image.configStart=image.configEnd=0;
+    // Preflight belongs to this attempt, not to Image until allocation succeeds.
+    // A failed explicit allocation may be retried with a different policy.
+    msvc_config::Plan msvcPlan;
+    size_t configStart=0, configEnd=0;
     size_t end=pages(h.SizeOfHeaders); bool entryCode=false;
     for (unsigned i=0;i<nt->FileHeader.NumberOfSections;i++) {
         auto s=sections[i]; size_t n=std::max(s.Misc.VirtualSize,s.SizeOfRawData);
@@ -338,8 +348,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
             view.sections.push_back({s.VirtualAddress,s.Misc.VirtualSize,s.PointerToRawData,s.SizeOfRawData,s.Characteristics});
         }
         if((h.AddressOfEntryPoint && !view.at(h.AddressOfEntryPoint,1,msvc_config::read|msvc_config::execute,msvc_config::write)) ||
-            !msvc_config::validate(view,image.msvc)) return fail("WXL FAIL explicit MSVC file preflight");
-        image.trustedHeaders.assign(file.begin(),file.begin()+h.SizeOfHeaders);
+            !msvc_config::validate(view,msvcPlan)) return fail("WXL FAIL explicit MSVC file preflight");
         log("WXL explicit MSVC file/write plan validated");
     } else if ((configDir.VirtualAddress || configDir.Size)) {
         bool inert=false;
@@ -353,13 +362,19 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
                                         configDir.Size,h.DllCharacteristics);
         }
         if (!inert) return fail("WXL FAIL non-inert Wine load configuration");
-        image.configStart=configDir.VirtualAddress; image.configEnd=image.configStart+configDir.Size;
+        configStart=configDir.VirtualAddress; configEnd=configStart+configDir.Size;
         log("WXL inert Wine load configuration validated; no loader work requested");
     }
+    auto base=(BYTE*)VirtualAllocFromApp(nullptr,h.SizeOfImage,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+    if (!base) return fail("WXL FAIL RW allocation");
+    image.base=base;
     image.log=log; image.size=h.SizeOfImage; image.carrier=carrier;
     image.entry=h.AddressOfEntryPoint; image.dll=!!(nt->FileHeader.Characteristics & IMAGE_FILE_DLL);
-    image.base=(BYTE*)VirtualAllocFromApp(nullptr,image.size,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
-    if (!image.base) return fail("WXL FAIL RW allocation");
+    image.configStart=configStart; image.configEnd=configEnd;
+    image.msvc=std::move(msvcPlan);
+    image.trustedHeaders.clear(); image.trustedConfig.clear();
+    image.cookieInitialized=false; image.initializedCookie=0;
+    if(explicitMsvc) image.trustedHeaders.assign(file.begin(),file.begin()+h.SizeOfHeaders);
     log("WXL VirtualAllocFromApp initial=0x4 (RW)");
     memcpy(image.base,file.data(),h.SizeOfHeaders);
     for (unsigned i=0;i<nt->FileHeader.NumberOfSections;i++) { auto s=sections[i]; if(s.SizeOfRawData) memcpy(image.base+s.VirtualAddress,file.data()+s.PointerToRawData,s.SizeOfRawData); }

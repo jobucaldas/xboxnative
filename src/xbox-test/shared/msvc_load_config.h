@@ -63,7 +63,7 @@ struct Import { size_t destination; std::string dll,name; uint16_t ordinal=0; };
 struct Pointer { size_t rva, target; bool null=false; };
 struct Tls {
     bool present=false;
-    size_t directory=0, start=0, raw=0, index=0, zero=0;
+    size_t directory=0, start=0, raw=0, index=0, zero=0, callbackArray=0;
     std::vector<size_t> callbacks;
     std::array<unsigned char,40> expected{};
 };
@@ -159,6 +159,7 @@ inline bool validate(const File& f,Plan& result) {
         if(callbacks) {
             size_t array;
             if(!f.va(callbacks,8,array,read,write|execute)) return false;
+            tls.callbackArray=array;
             bool ended=false;
             for(size_t i=0;i<256;++i) {
                 uint64_t cb; if(!f.get(array+i*8,cb) || !f.at(array+i*8,8,read,write|execute)) return false;

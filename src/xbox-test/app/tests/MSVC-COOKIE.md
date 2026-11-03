@@ -35,6 +35,11 @@ from copied names and destinations, not mapped mutable metadata. The mode is
 bounded to 96 sections, 256 descriptors per import directory, 4096 total imports,
 a 1 MiB relocation directory, 65536 DIR64 relocations, and 255 TLS callbacks.
 Unsupported CLR and non-RVA/auxiliary delay-import layouts are rejected.
+RVA-based delay imports are bound only in **mapped-only** loads. Executable
+loads still reject delay imports at the existing runtime-directory gate, even
+with this explicit policy. The mapped-only positive test is not evidence of
+executable delay-import support; an executable negative control preserves that
+gate.
 
 After relocations, pointers are verified against the file plan. Before the
 **first import resolver call** (which may itself execute a guest dependency),
@@ -45,9 +50,15 @@ or writes the CRT complement location. The real CRT sets its complement when
 it sees that the loader has already replaced the default cookie.
 
 Separate `prepareTls` calls use retained file-derived bounds/addresses and
-reject mutated headers, config, guard pointers or TLS directory bytes. They
-cannot acquire new authority from a forged writable section or copied TLS
-index. Existing W^X protections and unwind registration remain required.
+reject mutated headers, config, guard pointers, TLS directory bytes, relocated
+callback entries **and the callback-array zero terminator**. The array RVA is
+retained even for an empty array. These checks precede carrier assignment,
+TLS key/template/callback preparation and the TLS index write. They cannot
+acquire new authority from a forged writable section or copied TLS index.
+Preflight plans remain local until image allocation succeeds: allocation
+failure leaves no explicit-policy state to contaminate a default or inert
+retry on the same `Image`. Existing W^X protections and unwind registration
+remain required.
 
 **Not supported:** records with `GuardFlags=0x100`, nonzero VolatileMetadata,
 CFG tables or any other nonzero/unknown requirements. In particular, this mode
@@ -73,8 +84,10 @@ bash tests/load-config.sh
 
 The first script builds a pure native C++ assertion test, an owned MSVC-ABI
 static-CRT DLL and an owned native TLS carrier, then includes the **actual app
-mapper** in its Wine test. The fixture observes the nondefault cookie at import
-resolution, TLS, and pre-CRT entry; references the genuine CRT cookie/complement
+mapper** in its Wine test. The fixture toolchain is **clang-cl with the Microsoft
+static CRT**, not Microsoft's `cl.exe` compiler. The fixture observes the
+nondefault cookie at import resolution, TLS, and pre-CRT entry; references the
+genuine CRT cookie/complement
 symbols directly; checks the complement after CRT initialization; and exercises
 static-CRT throw/catch with registered unwind metadata. Its test-only resolver
 recognizes only that owned image for `RtlPcToFileHeader` and the fixture's finite
@@ -82,7 +95,12 @@ kernel32/observer import surface. That resolver is not used by Play.
 
 File mutation tests assert rejection before allocation/RNG/resolver/callbacks;
 RNG and missing-import failures assert cleanup with no guest callbacks. Later
-TLS preparation is tested with both intact and mutated mapped metadata.
+TLS preparation is tested with both intact and mutated mapped metadata,
+including callback-entry and terminator changes with assertions that no carrier,
+TLS state or index changes occur. Injected allocation failure is followed by
+same-`Image` default and inert retries; supported TLS preparation on both retries
+checks for stale policy dispatch as well as stale protected spans. Pure tests
+check retained populated, empty and absent callback arrays.
 These are **offline tests only**, not substitutes for the full console smoke
 run or launcher acceptance test. No generated DLLs, raw captures or private
 validation tooling belong in the repository.
