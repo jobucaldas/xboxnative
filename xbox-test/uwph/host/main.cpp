@@ -135,10 +135,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         logf("WXL carrier A module=%p error=%lu",ca,ca?0:GetLastError());
         HMODULE cb=LoadPackagedLibrary(L"tls-carrier-b.dll",0);
         logf("WXL carrier B module=%p error=%lu",cb,cb?0:GetLastError());
-        bool tls=wxl::runTls(local.c_str(),test_log,ca,cb);
+        bool tlsWorkerLive=false;
+        bool tls=wxl::runTls(local.c_str(),test_log,ca,cb,tlsWorkerLive);
         logf("WXL TLS RESULT failures=%d",tls?0:1);
-        if (cb) FreeLibrary(cb);
-        if (ca) FreeLibrary(ca);
+        // A possibly live worker still uses the carriers' TLS blocks.
+        if (!tlsWorkerLive) {
+            if (cb) FreeLibrary(cb);
+            if (ca) FreeLibrary(ca);
+        }
 #endif
         HMODULE backend = LoadPackagedLibrary(L"uwph-host.dll", 0);
         HMODULE guest = LoadPackagedLibrary(L"d3dt-test.dll", 0);
