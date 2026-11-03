@@ -41,8 +41,10 @@ for kind in guest missing;do
 UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --out "$out/runner.exe" tests/donor-runtime.cpp -- /MT /O2 /Iout/obj
 cp out/layout/donors/*.dll "$out/donors/"
 cp out/layout/uwph-u32c.dll "$out/"
+# Probe and guest each have a 30-second wait. Keep both gates intact and
+# allow startup/binding overhead before the outer process deadline.
 for mode in normal missing disabled;do
- WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 40 wine "$out/runner.exe" "$mode" | tr -d '\r' | tee "$out/$mode.log"
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 90 wine "$out/runner.exe" "$mode" | tr -d '\r' | tee "$out/$mode.log"
  grep -Fx 'DONOR-RUNTIME PASS: behavior gate, cross-thread publication, retained addresses; no game code' "$out/$mode.log"
  if [[ $mode == normal ]];then
   grep -Fx 'DONOR-GUEST PASS: actual Play runtime; 8 verified donor IAT slots; behavior exit=42; owned fixture only' "$out/$mode.log"
