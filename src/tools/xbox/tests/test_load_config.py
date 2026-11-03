@@ -358,6 +358,143 @@ class LoadConfigDiagnosisTests(unittest.TestCase):
         stream.read.assert_called_once_with(65)
         stream.__exit__.assert_called_once()
 
+    def test_small_regular_file_never_requests_limit_sized_allocation(self):
+        data = pe(msvc_record()).data
+        fdopen = lc.os.fdopen
+        requests = []
+
+        @contextlib.contextmanager
+        def bounded_fdopen(*args):
+            with fdopen(*args) as stream:
+                checked = mock.Mock(wraps=stream)
+
+                def read(size):
+                    requests.append(size)
+                    # Check before calling BufferedReader.read: the old request
+                    # must fail safely, without really allocating 512 MiB.
+                    self.assertGreater(size, 0)
+                    self.assertLessEqual(size, 64 * 1024)
+                    return stream.read(size)
+
+                checked.read.side_effect = read
+                yield checked
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'small.exe'
+            path.write_bytes(data)
+            with mock.patch.object(lc.os, 'fdopen', side_effect=bounded_fdopen):
+                tracemalloc.start()
+                try:
+                    image = lc.read_image(path)
+                    _, peak = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
+        self.assertTrue(requests)
+        self.assertEqual(image.data, data)
+        self.assertTrue(image.raw(RDATA, 4).readonly)
+        self.assertLess(peak, 256 * 1024)
+
+    def test_reader_does_not_retain_duplicate_whole_file_buffers(self):
+        # Scale the limit, so even the old single read is safe to regression-test.
+        data = pe(msvc_record()).data.ljust(2 * 1024 * 1024, b'\0')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'overlay.exe'
+            path.write_bytes(data)
+            with mock.patch.object(lc, 'MAX_FILE', 4 * 1024 * 1024):
+                tracemalloc.start()
+                try:
+                    image = lc.read_image(path)
+                    _, peak = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
+        self.assertEqual(image.data, data)
+        self.assertLess(peak, len(data) * 3 // 2)
+
+    def test_chunked_reader_handles_short_reads_growth_and_exact_limit(self):
+        for length in (64, 65):
+            with self.subTest(length=length):
+                source = io.BytesIO(b'x' * length)
+                stream = mock.MagicMock()
+                stream.__enter__.return_value = stream
+                stream.fileno.return_value = 42
+                requests = []
+
+                def read(size):
+                    requests.append(size)
+                    self.assertGreater(size, 0)
+                    self.assertLessEqual(size, min(16, 65 - source.tell()))
+                    # A short read is not EOF. Continue until empty or over cap.
+                    return source.read(min(size, 3))
+
+                stream.read.side_effect = read
+                info = mock.Mock(st_mode=0o100600, st_size=0)
+                with mock.patch.object(lc, 'MAX_FILE', 64), \
+                        mock.patch.object(lc, 'READ_CHUNK', 16, create=True), \
+                        mock.patch.object(lc.os, 'open', return_value=42) as opened, \
+                        mock.patch.object(lc.os, 'fdopen', return_value=stream), \
+                        mock.patch.object(lc.os, 'fstat', return_value=info), \
+                        mock.patch.object(lc, 'Image') as image:
+                    if length > 64:
+                        with self.assertRaisesRegex(lc.PEError, 'file too large'):
+                            lc.read_image(Path('growing.exe'))
+                        image.assert_not_called()
+                    else:
+                        lc.read_image(Path('exact.exe'))
+                        image.assert_called_once_with(b'x' * length)
+                opened.assert_called_once()
+                stream.__exit__.assert_called_once()
+                self.assertEqual(source.tell(), length)
+                self.assertGreater(len(requests), 1)
+
+    def test_untrusted_section_names_are_escaped_at_every_report_site(self):
+        for name, escaped in ((b'\x1b[2J\x1b[H', r'\x1b[2J\x1b[H'),
+                              (b'\nFORGED', r'\nFORGED'),
+                              (b'\r\t\0\x7f', r'\r\t\x00\x7f'),
+                              (b'\\n.txt', r'\\n.txt'),
+                              (b'\x9b[2J', r'\ufffd[2J')):
+            data = bytearray(pe(msvc_record()).data)
+            for offset in (0x58 + 240, 0x58 + 240 + 40):
+                data[offset:offset + 8] = name.ljust(8, b'\0')
+            with self.subTest(name=name):
+                text, blocked = self.report(lc.Image(bytes(data)))
+                self.assertTrue(blocked)
+                self.assertEqual(text.count(f'section={escaped}'), 4)
+                self.assertTrue(all(c == '\n' or ' ' <= c <= '~' for c in text))
+                self.assertEqual(len(text.splitlines()), 13)
+
+    def test_untrusted_basenames_and_error_fields_are_escaped(self):
+        name = 'input\x1b[2J\n\r\t\x7f\x9b\u2028\u2029\u202e\udcff\\n.exe'
+        escaped = r'input\x1b[2J\n\r\t\x7f\x9b\u2028\u2029\u202e\udcff\\n.exe'
+        error_text = 'bad\x1b[H\n\r\x9b\u202e\\n'
+        for result, status in ((pe(msvc_record()), 1),
+                               (OSError(5, error_text), 2), (lc.PEError(error_text), 2)):
+            output = io.StringIO()
+            with mock.patch.object(lc, 'read_image') as read, contextlib.redirect_stdout(output):
+                if isinstance(result, Exception):
+                    read.side_effect = result
+                else:
+                    read.return_value = result
+                self.assertEqual(lc.main(['/private/synthetic-only/' + name]), status)
+            text = output.getvalue()
+            self.assertTrue(text.startswith(f'== {escaped}\n'))
+            self.assertNotIn('/private/synthetic-only', text)
+            self.assertTrue(all(c == '\n' or ' ' <= c <= '~' for c in text))
+            if status == 2:
+                self.assertEqual(text.splitlines()[1], r'ERROR bad\x1b[H\n\r\x9b\u202e\\n')
+                self.assertEqual(len(text.splitlines()), 2)
+
+    def test_argument_errors_escape_untrusted_options_and_program_name(self):
+        output = io.StringIO()
+        with mock.patch.object(sys, 'argv', ['/private/synthetic-only/diagnostic\x1b[H.py']), \
+                contextlib.redirect_stderr(output), self.assertRaises(SystemExit) as raised:
+            lc.main(['--bad\x1b[2J\nFORGED', 'synthetic.exe'])
+        self.assertEqual(raised.exception.code, 2)
+        text = output.getvalue()
+        self.assertIn(r'diagnostic\x1b[H.py', text)
+        self.assertIn(r'--bad\x1b[2J\nFORGED', text)
+        self.assertNotIn('/private/synthetic-only', text)
+        self.assertTrue(all(c == '\n' or ' ' <= c <= '~' for c in text))
+
     def test_regular_file_limit_and_cli_statuses(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'synthetic.exe'

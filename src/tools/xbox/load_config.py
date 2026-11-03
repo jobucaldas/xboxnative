@@ -15,6 +15,7 @@ means implementing what it asks for, such as cookie initialization, CFG and
 volatile metadata. Ignoring or stripping the record is not support.
 """
 import argparse
+import io
 import os
 from pathlib import Path
 import stat
@@ -22,6 +23,7 @@ import struct
 import sys
 
 MAX_FILE = 512 * 1024 * 1024
+READ_CHUNK = 64 * 1024
 MAX_RELOCATION_SAMPLES = 16
 LOAD_CONFIG, DELAY_IMPORT, CLR = 10, 13, 14
 GUARD_CF = 0x4000  # IMAGE_DLLCHARACTERISTICS_GUARD_CF
@@ -74,6 +76,17 @@ GUARD_BITS = [
 
 class PEError(ValueError):
     pass
+
+
+def report_text(value):
+    """Render untrusted text as printable ASCII, with unambiguous backslashes."""
+    return value.encode('unicode_escape').decode('ascii')
+
+
+class ReportArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse echoes unrecognized arguments before they reach main's report.
+        super().error(report_text(message))
 
 
 def _get(data, offset, fmt):
@@ -177,7 +190,7 @@ def rva_text(image, rva, size=1):
     perms = ''.join(c for c, bit in (('R', 0x40000000), ('W', SCN_WRITE), ('X', SCN_EXECUTE))
                     if s['flags'] & bit)
     backed = 'raw' if rva + size <= s['va'] + s['rsize'] else 'virtual-only'
-    return f'rva=0x{rva:x} section={s["name"]}({perms or "-"}) {backed}'
+    return f'rva=0x{rva:x} section={report_text(s["name"])}({perms or "-"}) {backed}'
 
 
 def diagnose(image):
@@ -202,7 +215,7 @@ def diagnose(image):
     section = image.section(rva, size)
     if section is None:
         raise PEError('load-config directory not contained in one section')
-    out.append(f'virtual bounds: section={section["name"]} [0x{section["va"]:x},0x{section["va"] + section["vsize"]:x})')
+    out.append(f'virtual bounds: section={report_text(section["name"])} [0x{section["va"]:x},0x{section["va"] + section["vsize"]:x})')
     record = image.raw(rva, size)
     if record is None:
         raise PEError('load-config directory not fully raw-backed')
@@ -288,29 +301,41 @@ def read_image(path):
             raise PEError('input is not a regular file')
         if info.st_size > MAX_FILE:
             raise PEError('file too large')
-        data = stream.read(MAX_FILE + 1)
-        if len(data) > MAX_FILE:
-            raise PEError('file too large')
-    return Image(data)
+        # BufferedReader.read(n) may allocate n bytes before reading, even for a
+        # tiny file. Bound each request independently of the overall input cap.
+        # BytesIO retains only accumulated input, not a list of chunks plus a
+        # joined copy; getvalue() supplies the immutable backing bytes to Image.
+        data = io.BytesIO()
+        total = 0
+        while True:
+            chunk = stream.read(min(READ_CHUNK, MAX_FILE + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_FILE:
+                raise PEError('file too large')
+            data.write(chunk)
+    return Image(data.getvalue())
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    parser = ReportArgumentParser(prog=report_text(Path(sys.argv[0]).name),
+                                  description=__doc__.split('\n')[0])
     parser.add_argument('pe', nargs='+', type=Path)
     args = parser.parse_args(argv)
     status = 0
     for path in args.pe:
-        print(f'== {path.name}')
+        print(f'== {report_text(path.name)}')
         try:
             lines, blocked = diagnose(read_image(path))
         except OSError as exc:
             # OSError's string includes the full input path; reports deliberately
             # expose only the base name printed above, not private directories.
-            print(f'ERROR {exc.strerror or "input read failed"}')
+            print(f'ERROR {report_text(exc.strerror or "input read failed")}')
             status = 2
             continue
         except PEError as exc:
-            print(f'ERROR {exc}')
+            print(f'ERROR {report_text(str(exc))}')
             status = 2
             continue
         print('\n'.join(lines))

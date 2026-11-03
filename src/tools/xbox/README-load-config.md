@@ -5,9 +5,12 @@ configuration (data directory 10). It uses only the Python standard library and
 reads each file as untrusted bytes. It never loads, executes or modifies the file.
 Inputs must be regular files (including symlinks to regular files). The tool opens
 once, checks that descriptor's type and size, and reads at most 512 MiB plus one
-byte to enforce the limit even if a file grows. Devices and FIFOs are rejected;
-opening a FIFO does not wait for a writer. Raw-backed ranges are memoryviews of
-that bounded input, not additional record-sized copies. Virtual-section overlap
+byte to enforce the limit even if a file grows. Individual read requests are at
+most 64 KiB, so a tiny file does not cause a limit-sized allocation. Short reads
+do not imply EOF; input is accumulated without retaining a separate chunk list.
+Devices and FIFOs are rejected; opening a FIFO does not wait for a writer.
+Raw-backed ranges are memoryviews of that bounded input, not additional
+record-sized copies. Virtual-section overlap
 checks sort nonempty half-open ranges, so validation does not compare every
 section pair; adjacent ranges and empty sections do not overlap.
 
@@ -51,4 +54,8 @@ BLOCKED. The report does not certify a record, and it does not claim that an
 image can run. Supporting a real MSVC record means
 implementing what the record asks for (cookie initialization, CFG/XFG, volatile
 metadata), not ignoring or stripping it. The report prints only file base names.
+All untrusted text (base names, section names, error text and invalid CLI arguments)
+uses printable ASCII: controls and non-ASCII characters are backslash-escaped
+(e.g. `\n`, `\x1b`, `\u202e`), and literal backslashes are doubled. Such names cannot
+insert report lines, emit terminal controls or hide text with Unicode formatting.
 Keep reports from proprietary inputs private unless they have been reviewed.
