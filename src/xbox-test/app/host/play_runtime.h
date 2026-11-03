@@ -88,6 +88,17 @@ static uintptr_t missing(const char* dll,const char* name,WORD ordinal) {
     if(state->log) state->log(("PRUN OPTIONAL unresolved dynamic export: "+full).c_str());
     SetLastError(ERROR_PROC_NOT_FOUND);return 0;
 }
+// No supported guest child-process provider is installed here. These names
+// must not acquire native implementations or callable failure placeholders.
+// This is a feature boundary, not a sandbox: other launch APIs/ordinals and
+// arbitrary native export aliases are not proven blocked by this policy.
+static bool processCreation(const char* name) {
+    return name && (!strcmp(name,"CreateProcessA") || !strcmp(name,"CreateProcessW"));
+}
+static uintptr_t unavailableProcess(const char* dll,const char* name) {
+    state->event("guest child-process creation unavailable (no supported provider): "+lower(dll)+"!"+name);
+    return missing(dll,name,0);
+}
 static void WINAPI exitProcess(UINT code) {
     state->code=code; state->event("ExitProcess code="+std::to_string(code));
     ULONG_PTR arg=code; RaiseException(exitException,EXCEPTION_NONCONTINUABLE,1,&arg);
@@ -226,6 +237,15 @@ static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
         // Initialize its TLS and DllMain before returning callable guest code.
         if(p&&state->modules.size()!=previousCount&&!initializePending())p=0;
         if(!p) SetLastError(ERROR_PROC_NOT_FOUND);return (FARPROC)p;
+    }
+    // Native handles (including OS-resolved API sets/forwarders) must not
+    // expose these names even when GetModuleFileNameW cannot identify them.
+    // Keep owned mapped exports above separate from native fallback below.
+    if(!IS_INTRESOURCE(name)) {
+        if(processCreation(name)) return (FARPROC)unavailableProcess("native module",name);
+        // Do not hand out raw GetProcAddress on the metadata-failure path:
+        // a second lookup through it would bypass the unavailable-name gate.
+        if(!strcmp(name,"GetProcAddress")) return (FARPROC)&proc;
     }
     // Route dynamic lookups back through the same process wrappers and router.
     wchar_t p[32768]{};using Fn=DWORD(WINAPI*)(HMODULE,LPWSTR,DWORD);auto fn=(Fn)kernel_tail::native("GetModuleFileNameW");
@@ -497,6 +517,9 @@ static int WINAPI messageBoxW(HWND,LPCWSTR text,LPCWSTR caption,UINT type) {
 static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     std::string key=lower(dll);
     if(key=="kernelbase.dll") key="kernel32.dll";
+    // Reject static imports before map() can create a worker or initialize any
+    // guest TLS/DllMain/entry. Mapped forwarders recurse through this same gate.
+    if(processCreation(name) && (key=="kernel32.dll" || key.find("api-ms-win-core-")==0)) return unavailableProcess(dll,name);
     if(auto graphics=play_graphics::resolve(dll,name,ordinal))return graphics;
     if(name && (key=="kernel32.dll"||key=="kernelbase.dll"||key=="ntdll.dll"||key.find("api-ms-win-core-")==0)) if(auto p=processApi(name)) return p;
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxA")) return (uintptr_t)&messageBoxA;
