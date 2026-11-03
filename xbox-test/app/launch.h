@@ -67,7 +67,18 @@ static void lp_run_impl(LpCtx& c) {
     wine_gap::report(c.root);
     if(c.names.empty()) {c.failName="no executable";return;}
     auto exe=c.names.back();
-    if(pe_machine(c.root+L"\\"+exe)==IMAGE_FILE_MACHINE_I386) {c.failName="32-bit x86 PE (the loader maps x64 images only)";lp_sink("PRUN FAIL 32-bit x86 PE (the loader maps x64 images only)");return;}
+    if(pe_machine(c.root+L"\\"+exe)==IMAGE_FILE_MACHINE_I386) {
+        std::string summary;
+        bool inspected=pe32_probe::map(c.root+L"\\"+exe,c.root,summary);
+        c.mapped=inspected?1:0;
+        c.failName=inspected?summary+"; 32-bit execution unsupported":"PE32 data-only inspection failed; execution unsupported";
+        lp_sink("PRUN FAIL 32-bit execution unsupported; PE32 inspection is data-only");return;
+    }
+    // These are behavior/ABI prerequisites, not optional progress diagnostics.
+    // Never expose donor exports to executable guests after a failed probe.
+    if(!donor_pe::probe(lp_sink)) {c.failName="Wine donor initialization/behavior";lp_sink("DWPE FAIL donor behavior gate; no game code executed");return;}
+    mlp::donor_resolve=donor_pe::exported;
+    if(!user32_core::test(lp_sink)) {c.failName="u32c-test.exe";lp_sink("U32C FAIL regression PE; no game code executed");return;}
     if(!play_runtime::start(c.root,exe,L"-screen-fullscreen 0 -force-d3d11 -logFile vis-player.log",lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
     auto r=play_runtime::state;
     if(r->worker) {
