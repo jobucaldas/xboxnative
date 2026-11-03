@@ -111,6 +111,7 @@ class Image:
         self.directories = [_get(data, opt + 112 + 8 * i, '<II') for i in range(count)]
         self.directories += [(0, 0)] * (16 - count)
         self.sections = []
+        intervals = []
         for i in range(nsec):
             raw = opt + opt_size + 40 * i
             name, vsize, va, rsize, rptr = _get(data, raw, '<8sIIII')
@@ -121,11 +122,15 @@ class Image:
             extent = max(vsize, rsize)
             if va + extent > self.size_of_image:
                 raise PEError('section beyond SizeOfImage')
-            if extent and any(va < s['va'] + s['vsize'] and s['va'] < va + extent
-                              for s in self.sections):
-                raise PEError('overlapping virtual sections')
+            if extent:
+                intervals.append((va, va + extent))
             self.sections.append(dict(name=name, va=va, vsize=extent,
                                       rsize=rsize, rptr=rptr, flags=flags))
+        # Check nonempty half-open ranges in O(n log n), not all section pairs.
+        # Keep self.sections in header order for reporting and address lookup.
+        intervals.sort()
+        if any(intervals[i - 1][1] > intervals[i][0] for i in range(1, len(intervals))):
+            raise PEError('overlapping virtual sections')
 
     def section(self, rva, size=1):
         for s in self.sections:
@@ -134,12 +139,12 @@ class Image:
         return None
 
     def raw(self, rva, size):
-        """Return file bytes only when the whole range is raw-backed in one section."""
+        """View file bytes without copying, only if wholly raw-backed in one section."""
         s = self.section(rva, size)
         if s is None or rva + size > s['va'] + s['rsize']:
             return None
         start = s['rptr'] + rva - s['va']
-        return self.data[start:start + size]
+        return memoryview(self.data)[start:start + size]
 
     def relocations(self):
         rva, size = self.directories[5]
@@ -153,9 +158,15 @@ class Image:
             page, block = struct.unpack_from('<II', table, pos)
             if block < 8 or block % 2 or pos + block > len(table):
                 raise PEError('relocation block length')
-            for (word,) in struct.iter_unpack('<H', memoryview(table)[pos + 8:pos + block]):
-                if word >> 12:
-                    yield page + (word & 0xFFF), word >> 12
+            words = struct.iter_unpack('<H', table[pos + 8:pos + block])
+            for (word,) in words:
+                kind = word >> 12
+                # HIGHADJ occupies two WORDs. The second is a signed addend,
+                # not a relocation, and must be present in this same block.
+                if kind == 4 and next(words, None) is None:
+                    raise PEError('HIGHADJ relocation operand truncated')
+                if kind:
+                    yield page + (word & 0xFFF), kind
             pos += block
 
 

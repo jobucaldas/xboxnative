@@ -6,7 +6,10 @@ reads each file as untrusted bytes. It never loads, executes or modifies the fil
 Inputs must be regular files (including symlinks to regular files). The tool opens
 once, checks that descriptor's type and size, and reads at most 512 MiB plus one
 byte to enforce the limit even if a file grows. Devices and FIFOs are rejected;
-opening a FIFO does not wait for a writer.
+opening a FIFO does not wait for a writer. Raw-backed ranges are memoryviews of
+that bounded input, not additional record-sized copies. Virtual-section overlap
+checks sort nonempty half-open ranges, so validation does not compare every
+section pair; adjacent ranges and empty sections do not overlap.
 
 ```sh
 python3 -I src/tools/xbox/load_config.py /path/to/game/*.exe /path/to/game/*.dll
@@ -25,7 +28,8 @@ For each image the report shows:
 - the exact count of base relocations overlapping the record (including repeated
   entries and straddling DIR64 writes), with at most the first 16 entries shown
   and an explicit omitted count; the entire table is still checked for malformed
-  blocks
+  blocks; HIGHADJ's second WORD is consumed as an addend, not counted as a
+  relocation, and a missing in-block addend is malformed
 
 Delay-import (13) and CLR (14) directories get their own lines. Only unmapped
 loads reject those two with the generic gate, so they are a separate case from

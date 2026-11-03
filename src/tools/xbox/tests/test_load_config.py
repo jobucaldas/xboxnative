@@ -21,7 +21,8 @@ BASE = 0x180000000
 RDATA, DATA, RELOC = 0x1000, 0x2000, 0x3000
 
 
-def pe(record, guard_cf=False, relocs=(), rdata_flags=0x40000040, cookie=lc.DEFAULT_COOKIE, delay=False):
+def pe(record, guard_cf=False, relocs=(), rdata_flags=0x40000040, cookie=lc.DEFAULT_COOKIE, delay=False,
+       reloc_words=None):
     """Three sections at RVA 0x1000/0x2000/0x3000; .reloc grows for adversarial tables."""
     opt = bytearray(240)
     struct.pack_into('<HQ', opt, 0, 0x20B, 0)
@@ -30,8 +31,9 @@ def pe(record, guard_cf=False, relocs=(), rdata_flags=0x40000040, cookie=lc.DEFA
     struct.pack_into('<I', opt, 56, 0x4000)
     struct.pack_into('<H', opt, 70, 0x4000 if guard_cf else 0)
     struct.pack_into('<I', opt, 108, 16)
-    block = struct.pack('<II', RDATA, 8 + 2 * len(relocs)) + b''.join(
-        struct.pack('<H', (10 << 12) | off) for off in relocs)
+    words = [(10 << 12) | off for off in relocs] if reloc_words is None else reloc_words
+    block = struct.pack('<II', RDATA, 8 + 2 * len(words)) + b''.join(
+        struct.pack('<H', word) for word in words)
     reloc_size = max(0x200, (len(block) + 0x1FF) & ~0x1FF)
     struct.pack_into('<I', opt, 56, RELOC + ((reloc_size + 0xFFF) & ~0xFFF))
     struct.pack_into('<II', opt, 112 + 8 * 5, RELOC, len(block))
@@ -184,6 +186,141 @@ class LoadConfigDiagnosisTests(unittest.TestCase):
         image.directories[5] = (RELOC, image.directories[5][1] + 1)
         with self.assertRaisesRegex(lc.PEError, 'header truncated'):
             self.report(image)
+
+    def test_highadj_addend_is_not_a_relocation(self):
+        # The addend's high nibble is data, even when it resembles DIR64.
+        for addend in (0xA058, 0, 0xFFFF):
+            with self.subTest(addend=addend):
+                image = pe(msvc_record(), reloc_words=(0x4200, addend))
+                self.assertEqual(list(image.relocations()), [(RDATA + 0x200, 4)])
+                text, blocked = self.report(image)
+                self.assertTrue(blocked)
+                self.assertIn('config field relocations=0', text)
+        image = pe(msvc_record(), reloc_words=(0x4058, 0xA058, 0xA100, 0))
+        self.assertEqual(list(image.relocations()), [(RDATA + 0x58, 4), (RDATA + 0x100, 10)])
+        text, _ = self.report(image)
+        self.assertIn('config field relocations=2: +0x058:SecurityCookie:type4 '
+                      '+0x100:VolatileMetadataPointer:DIR64', text)
+        self.assertNotIn('SecurityCookie:DIR64', text)
+        image.directories[5] = (RELOC, image.directories[5][1] + 1)
+        with self.assertRaisesRegex(lc.PEError, 'header truncated'):
+            self.report(image)
+
+    def test_highadj_requires_an_addend_in_its_own_block_even_after_sample_cap(self):
+        images = [pe(msvc_record(), reloc_words=words)
+                  for words in ((0x4058,), (0xA058,) * 17 + (0x4058,))]
+        # A following block must not supply the preceding block's missing addend.
+        data = bytearray(images[0].data)
+        following = struct.pack('<IIH', RDATA, 10, 0xA100)
+        data[0x60A:0x60A + len(following)] = following
+        struct.pack_into('<II', data, 0x58 + 112 + 8 * 5, RELOC, 10 + len(following))
+        images.append(lc.Image(bytes(data)))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'truncated-highadj.exe'
+            for image in images:
+                with self.subTest(size=image.directories[5][1]):
+                    with self.assertRaisesRegex(lc.PEError, 'HIGHADJ.*truncated'):
+                        self.report(image)
+                    path.write_bytes(image.data)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(lc.main([str(path)]), 2)
+
+    def test_section_overlap_half_open_unsorted_and_empty_semantics(self):
+        original = pe(msvc_record()).data
+        table = 0x58 + 240
+        # Section order is not required to match virtual-address order.
+        for ranges, overlaps in (
+                (((0x1800, 0x200), (0x1000, 0x200), (0x1200, 0x200)), False),
+                (((0x1800, 0x200), (0x1000, 0x200), (0x11FF, 0x200)), True),
+                (((0x1000, 0x800), (0x1200, 0x100), (0x2000, 0x100)), True),
+                (((0x1200, 0), (0x1000, 0x800), (0x1800, 0)), False),
+                (((0x1000, 0x800), (0x1200, 0), (0x1800, 0)), False)):
+            data = bytearray(original)
+            for i, (va, extent) in enumerate(ranges):
+                struct.pack_into('<IIII', data, table + 40 * i + 8, extent, va, 0, 0)
+            with self.subTest(ranges=ranges):
+                if overlaps:
+                    with self.assertRaisesRegex(lc.PEError, 'overlapping virtual'):
+                        lc.Image(bytes(data))
+                else:
+                    self.assertEqual([s['va'] for s in lc.Image(bytes(data)).sections],
+                                     [va for va, _ in ranges])
+
+    def test_section_validation_work_shape_and_maximum_fanout(self):
+        comparisons = 0
+
+        class CountedRVA(int):
+            def __lt__(self, other):
+                nonlocal comparisons
+                comparisons += 1
+                return int.__lt__(self, other)
+
+            def __gt__(self, other):
+                nonlocal comparisons
+                comparisons += 1
+                return int.__gt__(self, other)
+
+        get = lc._get
+
+        def counted_get(data, offset, fmt):
+            values = get(data, offset, fmt)
+            if fmt == '<8sIIII':
+                values = (*values[:2], CountedRVA(values[2]), *values[3:])
+            return values
+
+        # Fail on a small discriminating case before attempting the maximum.
+        # This tests work rather than timing; an all-pairs check exceeds the cap.
+        for count in (256, 65535):
+            table = 0x58 + 240
+            data = bytearray(pe(b'').data[:table]) + bytearray(40 * count)
+            struct.pack_into('<H', data, 0x46, count)
+            struct.pack_into('<I', data, 0x58 + 56, RDATA + 16 * count)
+            for i in range(count):
+                struct.pack_into('<8sIIIIIIHHI', data, table + 40 * i,
+                                 b'.virtual', 1, RDATA + 16 * (count - i - 1),
+                                 0, 0, 0, 0, 0, 0, 0x40000040)
+            comparisons = 0
+            with mock.patch.object(lc, '_get', new=counted_get):
+                image = lc.Image(bytes(data))
+            self.assertEqual(len(image.sections), count)
+            self.assertLess(comparisons, count * 16)
+
+    def test_raw_ranges_are_read_only_views_of_input(self):
+        image = pe(msvc_record())
+        for rva, size in ((RDATA, 0x140), (DATA + 0x10, 8), image.directories[5]):
+            with self.subTest(rva=rva, size=size):
+                view = image.raw(rva, size)
+                self.assertIsInstance(view, memoryview)
+                self.assertIs(view.obj, image.data)
+                self.assertTrue(view.readonly)
+                section = image.section(rva, size)
+                start = section['rptr'] + rva - section['va']
+                self.assertEqual(view, image.data[start:start + size])
+
+    def test_large_unknown_extension_is_counted_without_record_sized_copies(self):
+        # Two MiB safely discriminates copies without allocating near MAX_FILE.
+        size = 2 * 1024 * 1024
+        data = bytearray(0x200 + size)
+        data[:0x200] = pe(b'').data[:0x200]
+        struct.pack_into('<H', data, 0x46, 1)
+        struct.pack_into('<I', data, 0x58 + 56, RDATA + size)
+        struct.pack_into('<II', data, 0x58 + 112 + 8 * 5, 0, 0)
+        struct.pack_into('<II', data, 0x58 + 112 + 8 * 10, RDATA, size)
+        struct.pack_into('<IIII', data, 0x58 + 240 + 8, size, RDATA, size, 0x200)
+        struct.pack_into('<I', data, 0x200, size)
+        for offset in (lc.KNOWN_END, size // 2, size - 1):
+            data[0x200 + offset] = 0xFF
+        image = lc.Image(bytes(data))
+        tracemalloc.start()
+        try:
+            text, blocked = self.report(image)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertTrue(blocked)
+        self.assertIn('unknown extension +0x140..+0x200000: 3 nonzero bytes (not certified)', text)
+        self.assertIn('VERDICT BLOCKED', text)
+        self.assertLess(peak, 256 * 1024)
 
     def test_guard_function_table_stride_includes_four_byte_rva(self):
         for extra in (1, 2, 15):
