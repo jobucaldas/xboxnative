@@ -8,8 +8,15 @@
 // No Wine code copied. Native static TLS uses a bounded packaged carrier slot.
 namespace wxl {
 using Log = void (*)(const char*);
-static Log logger;
-static void WINAPI debug_string(LPCSTR s) { logger(s); }
+// Guest debug imports use the executing image's sink, not the last load's.
+// A scoped, thread-local binding also survives nested image notifications.
+static thread_local Log logger;
+struct LogScope {
+    Log previous;
+    explicit LogScope(Log log) : previous(logger) { logger=log; }
+    ~LogScope() { logger=previous; }
+};
+static void WINAPI debug_string(LPCSTR s) { if (logger) logger(s); }
 struct Builtin { const char* dll; const char* name; uintptr_t address; };
 static const Builtin builtins[] = {
     {"kernel32.dll", "GetCurrentProcessId", (uintptr_t)&GetCurrentProcessId},
@@ -42,6 +49,7 @@ struct Image {
     bool tlsAttached = false;
     bool tlsCallbacksDetached = false;
     bool attachThread(DWORD reason) {
+        LogScope logging(log);
         if (tlsKey != TLS_OUT_OF_INDEXES) {
             BYTE* block=carrier.block();
             if (!block) return false;
@@ -56,15 +64,25 @@ struct Image {
         if (reason==DLL_THREAD_ATTACH && attached) dllEntry((HINSTANCE)base,reason,nullptr);
         return true;
     }
-    void detachThread(DWORD reason) {
-        void* slot=tlsKey!=TLS_OUT_OF_INDEXES?TlsGetValue(tlsKey):nullptr;
+    // False if this thread's TLS state cannot be read or released. A failed
+    // read runs no guest notification: attached and never-attached threads
+    // are indistinguishable, so guest TLS data may not exist.
+    bool detachThread(DWORD reason) {
+        LogScope logging(log);
+        void* slot=nullptr;
+        if (tlsKey!=TLS_OUT_OF_INDEXES) {
+            slot=TlsGetValue(tlsKey);
+            if (!slot && GetLastError()!=ERROR_SUCCESS) { log("WXL FAIL thread TLS read"); return false; }
+        }
         if (slot) for (auto cb:tlsCallbacks) cb(base,reason,nullptr);
         // TLS callbacks precede DllMain, but its TLS data remains live until
         // both notifications finish.
         if (reason==DLL_THREAD_DETACH && attached) dllEntry((HINSTANCE)base,reason,nullptr);
-        if (slot) TlsSetValue(tlsKey,nullptr);
+        if (slot && !TlsSetValue(tlsKey,nullptr)) { log("WXL FAIL thread TLS clear"); return false; }
+        return true;
     }
     void detachProcessEntry() {
+        LogScope logging(log);
         if (attached) {
             dllEntry((HINSTANCE)base,DLL_PROCESS_DETACH,nullptr);
             attached=false;
@@ -97,6 +115,7 @@ struct Image {
     // On failure retain resources for retry; destructor makes a final best-effort
     // attempt. Persistent OS failure intentionally leaks owned resources.
     bool close() {
+        LogScope logging(log);
         // Guest code, unwind records and TLS data remain live during detach.
         if (tlsAttached) {
             void* slot=nullptr;
@@ -145,11 +164,13 @@ struct Image {
     }
 };
 inline bool load_impl(Image& image, const wchar_t* path, Log log, Carrier carrier, Resolver resolve, bool mapped, ExecutionResolver execution) {
-    logger = log;
+    LogScope logging(log);
     auto fail = [&](const char* why) { log(why); return false; };
     FILE* f = _wfopen(path, L"rb"); if (!f) return fail("WXL FAIL open LocalState image");
-    fseek(f,0,SEEK_END); long len=ftell(f); rewind(f);
-    if (len < sizeof(IMAGE_DOS_HEADER) || len > (mapped ? 256 : 16)*1024*1024) { fclose(f); return fail("WXL FAIL file size"); }
+    // A failed seek/ftell (-1) must not reach the unsigned size checks.
+    long len=-1;
+    if (fseek(f,0,SEEK_END) || (len=ftell(f))<0 || fseek(f,0,SEEK_SET)) { fclose(f); return fail("WXL FAIL file size query"); }
+    if (size_t(len) < sizeof(IMAGE_DOS_HEADER) || size_t(len) > size_t(mapped ? 256 : 16)*1024*1024) { fclose(f); return fail("WXL FAIL file size"); }
     std::vector<BYTE> file(len); bool read = fread(file.data(),1,len,f)==size_t(len); fclose(f);
     if (!read) return fail("WXL FAIL read");
     auto dos = (const IMAGE_DOS_HEADER*)file.data();
@@ -397,6 +418,7 @@ inline bool run(const wchar_t* path, Log log, Image* mapped=nullptr, Resolver re
     if (!load(image,path,log,{},resolve)) return false;
     bool ok=true;
     if (!image.dll) {
+        LogScope logging(image.log);
         char msg[200];
         DWORD result=((DWORD(WINAPI*)())(image.base+image.entry))();
         snprintf(msg,sizeof msg,"WXL RESULT entry=%lu failures=%d",result,result==42?0:1); log(msg);

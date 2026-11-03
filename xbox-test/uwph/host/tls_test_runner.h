@@ -47,9 +47,28 @@ inline Carrier getCarrier(HMODULE module) {
     }
     return c;
 }
-inline bool runTls(const wchar_t* directory,Log log,HMODULE carrierA,HMODULE carrierB) {
-    Image dll,exe;
-    struct Reset { ~Reset() { tlsDependency=nullptr; } } reset;
+// workerLive is set when the worker's termination could not be established.
+// The mapped images, their TLS dependency and the worker state are then leaked,
+// and the caller must not release the carriers either: the worker may still
+// be using all of them.
+inline bool runTls(const wchar_t* directory,Log log,HMODULE carrierA,HMODULE carrierB,bool& workerLive) {
+    workerLive=false;
+    LogScope logging(log);
+    struct State { Image dll,exe; DWORD result=0; };
+    struct Owner {
+        State* state;
+        ~Owner() {
+            if (!state) return;
+            // Retry the consumer first, with its dependency binding intact.
+            // If retry still fails, retain the entire graph: member destructors
+            // must not release a dependency of pending consumer callbacks.
+            if (!state->exe.close()) return;
+            delete state;
+            tlsDependency=nullptr;
+        }
+    } owner{new State};
+    Image& dll=owner.state->dll;
+    Image& exe=owner.state->exe;
     auto ca=getCarrier(carrierA),cb=getCarrier(carrierB);
     char diagnostic[256];
     snprintf(diagnostic,sizeof diagnostic,"WXL carrier A indexfn=%p blockfn=%p index=%lu B indexfn=%p blockfn=%p index=%lu",
@@ -62,26 +81,35 @@ inline bool runTls(const wchar_t* directory,Log log,HMODULE carrierA,HMODULE car
     tlsDependency=&dll;
     if (!load(exe,(std::wstring(directory)+L"\\tls-test.exe").c_str(),log,cb,nullptr,false,tlsResolve)) return false;
     DWORD main=((DWORD(*)())(exe.base+exe.entry))();
-    struct Work { Image* dll; Image* exe; DWORD result; } work{&dll,&exe,0};
     HANDLE thread=CreateThread(nullptr,0,[](void* p)->DWORD {
-        auto& w=*(Work*)p;
-        if (!w.dll->attachThread(DLL_THREAD_ATTACH)) return 1;
-        if (!w.exe->attachThread(DLL_THREAD_ATTACH)) { w.dll->detachThread(DLL_THREAD_DETACH); return 1; }
-        auto check=(int(*)())w.exe->symbol("tls_exe_check");
+        auto& w=*(State*)p;
+        LogScope logging(w.exe.log);
+        if (!w.dll.attachThread(DLL_THREAD_ATTACH)) return 1;
+        if (!w.exe.attachThread(DLL_THREAD_ATTACH)) { w.dll.detachThread(DLL_THREAD_DETACH); return 1; }
+        auto check=(int(*)())w.exe.symbol("tls_exe_check");
         w.result=check?check():0;
-        w.exe->detachThread(DLL_THREAD_DETACH);
-        w.dll->detachThread(DLL_THREAD_DETACH);
-        return 0;
-    },&work,0,nullptr);
+        bool exeDetached=w.exe.detachThread(DLL_THREAD_DETACH);
+        bool dllDetached=w.dll.detachThread(DLL_THREAD_DETACH);
+        return exeDetached && dllDetached ? 0 : 1;
+    },owner.state,0,nullptr);
     if (!thread) return false;
     DWORD wait=WaitForSingleObject(thread,INFINITE),exit=1;
+    if (wait!=WAIT_OBJECT_0) {
+        // Termination is unproven: never release memory a live worker may use.
+        // Closing the handle does not affect the thread itself.
+        CloseHandle(thread);
+        owner.state=nullptr; workerLive=true;
+        log("WXL FAIL TLS worker wait; images and carriers left live");
+        return false;
+    }
     GetExitCodeThread(thread,&exit); CloseHandle(thread);
     auto after=(int(*)())exe.symbol("tls_exe_after_worker");
-    bool ok=main==42 && wait==WAIT_OBJECT_0 && exit==0 && work.result==42 && after && after();
+    bool ok=main==42 && exit==0 && owner.state->result==42 && after && after();
     // Destructors are only best effort. Report either explicit teardown failure,
-    // even if a later destructor retry succeeds; close the consumer first.
+    // even if a later destructor retry succeeds. The dependency stays mapped
+    // until its consumer has closed: a consumer retry may still call into it.
     bool exeClosed=exe.close();
-    bool dllClosed=dll.close();
+    bool dllClosed=exeClosed && dll.close();
     ok=ok && exeClosed && dllClosed;
     log(ok?"WXL-TLS-OK: TLS value correct on two threads, callback ran, exception caught":"WXL FAIL TLS two threads or cleanup");
     return ok;

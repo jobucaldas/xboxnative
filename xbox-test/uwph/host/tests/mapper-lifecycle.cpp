@@ -4,13 +4,22 @@
 #include <cstdint>
 #include <string>
 #include <vector>
-enum Failure { NONE, UNWIND, FREE_MEM, FREE_TLS, CLEAR_TLS, READ_TLS };
+enum Failure { NONE, UNWIND, FREE_MEM, FREE_TLS, CLEAR_TLS, READ_TLS, SEEK, TELL };
 static Failure injected=NONE;
 static BOOL WINAPI test_delete(PRUNTIME_FUNCTION p) { if (injected==UNWIND) { injected=NONE; return FALSE; } return RtlDeleteFunctionTable(p); }
 static BOOL WINAPI test_free(LPVOID p,SIZE_T n,DWORD t) { if (injected==FREE_MEM) { injected=NONE; return FALSE; } return VirtualFree(p,n,t); }
 static BOOL WINAPI test_tls_free(DWORD k) { if (injected==FREE_TLS) { injected=NONE; return FALSE; } return TlsFree(k); }
 static BOOL WINAPI test_tls_set(DWORD k,LPVOID v) { if (!v && injected==CLEAR_TLS) { injected=NONE; return FALSE; } return TlsSetValue(k,v); }
 static LPVOID WINAPI test_tls_get(DWORD k) { if (injected==READ_TLS) { injected=NONE; SetLastError(ERROR_INVALID_PARAMETER); return nullptr; } return TlsGetValue(k); }
+static int openFiles=0;
+static FILE* test_wfopen(const wchar_t* p,const wchar_t* m) { FILE* f=_wfopen(p,m); if (f) ++openFiles; return f; }
+static int test_fclose(FILE* f) { --openFiles; return fclose(f); }
+static int test_fseek(FILE* f,long o,int w) { if (injected==SEEK) { injected=NONE; return -1; } return fseek(f,o,w); }
+static long test_ftell(FILE* f) { if (injected==TELL) { injected=NONE; return -1L; } return ftell(f); }
+#define _wfopen test_wfopen
+#define fclose test_fclose
+#define fseek test_fseek
+#define ftell test_ftell
 #define TlsGetValue test_tls_get
 #define RtlDeleteFunctionTable test_delete
 #define VirtualFree test_free
@@ -19,6 +28,10 @@ static LPVOID WINAPI test_tls_get(DWORD k) { if (injected==READ_TLS) { injected=
 #define VirtualAllocFromApp VirtualAlloc
 #define VirtualProtectFromApp VirtualProtect
 #include "../wxl_mapper.h"
+#undef _wfopen
+#undef fclose
+#undef fseek
+#undef ftell
 static std::vector<std::string> events;
 static Failure attach_cleanup=NONE;
 static DWORD expectedDetachKey=TLS_OUT_OF_INDEXES;
@@ -31,6 +44,18 @@ static void log_line(const char* s) {
     if (!strcmp(s,"WXL FAIL DllMain process attach") && attach_cleanup!=NONE) {
         injected=attach_cleanup; attach_cleanup=NONE;
     }
+}
+static std::vector<std::string> guestLogsA,guestLogsB;
+static HANDLE notificationEntered=nullptr,notificationContinue=nullptr;
+static void log_a(const char* s) {
+    if (!strncmp(s,"TLS ",4)) guestLogsA.emplace_back(s);
+    if (notificationEntered && !strcmp(s,"TLS callback thread attach")) {
+        SetEvent(notificationEntered);
+        WaitForSingleObject(notificationContinue,INFINITE);
+    }
+}
+static void log_b(const char* s) {
+    if (!strncmp(s,"TLS ",4)) guestLogsB.emplace_back(s);
 }
 static int find(const char* s) {
     for (size_t i=0;i<events.size();++i) if (events[i]==s) return (int)i;
@@ -163,7 +188,7 @@ int main(int argc,char** argv) {
             auto& guest=*(wxl::Image*)p;
             if (!guest.attachThread(DLL_THREAD_ATTACH)) return 1;
             log_line("LIFECYCLE worker ran after FALSE thread attach");
-            guest.detachThread(DLL_THREAD_DETACH);
+            if (!guest.detachThread(DLL_THREAD_DETACH)) return 1;
             return 0;
         },&image,0,nullptr);
         if (!thread) return 1;
@@ -178,6 +203,76 @@ int main(int argc,char** argv) {
                    "TLS callback thread attach","TLS DllMain thread attach",
                    "TLS callback thread detach","TLS DllMain thread detach",
                    "TLS callback detach","TLS DllMain detach"})) return 1;
+    // Failed thread-detach TLS reads/clears are reported, never ignored.
+    // A failed read runs no thread notification: the slot state is unknown.
+    for (Failure f : {READ_TLS, CLEAR_TLS}) {
+        events.clear();
+        wxl::Image image;
+        if (!wxl::load(image,tls,log_line,carrier)) return 1;
+        static Failure detachFailure; detachFailure=f;
+        HANDLE thread=CreateThread(nullptr,0,[](void* p)->DWORD {
+            auto& guest=*(wxl::Image*)p;
+            if (!guest.attachThread(DLL_THREAD_ATTACH)) return 1;
+            injected=detachFailure;
+            return guest.detachThread(DLL_THREAD_DETACH) ? 0 : 2;
+        },&image,0,nullptr);
+        if (!thread) return 1;
+        DWORD status=1;
+        bool joined=WaitForSingleObject(thread,INFINITE)==WAIT_OBJECT_0 && GetExitCodeThread(thread,&status);
+        CloseHandle(thread);
+        if (!joined || status!=2 || injected!=NONE || !image.close()) return 1;
+        bool read=f==READ_TLS;
+        if (count(read?"WXL FAIL thread TLS read":"WXL FAIL thread TLS clear")!=1) return 1;
+        if (read ? !sequence({"TLS callback attach","TLS DllMain attach",
+                              "TLS callback thread attach","TLS DllMain thread attach",
+                              "TLS callback detach","TLS DllMain detach"})
+                 : !sequence({"TLS callback attach","TLS DllMain attach",
+                              "TLS callback thread attach","TLS DllMain thread attach",
+                              "TLS callback thread detach","TLS DllMain thread detach",
+                              "TLS callback detach","TLS DllMain detach"})) return 1;
+    }
+    // Loading B while A is executing must not steal A's callback logger.
+    // Close A first as well: it must not inherit the last-loaded B's sink.
+    {
+        wxl::Image a,b,missing;
+        if (!wxl::load(a,tls,log_a,carrier)) return 1;
+        notificationEntered=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+        notificationContinue=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+        if (!notificationEntered || !notificationContinue) return 1;
+        HANDLE thread=CreateThread(nullptr,0,[](void* p)->DWORD {
+            auto& image=*(wxl::Image*)p;
+            return image.attachThread(DLL_THREAD_ATTACH) && image.detachThread(DLL_THREAD_DETACH) ? 0 : 1;
+        },&a,0,nullptr);
+        if (!thread) return 1;
+        if (WaitForSingleObject(notificationEntered,INFINITE)!=WAIT_OBJECT_0) return 1;
+        bool loaded=wxl::load(b,tls,log_b,carrier);
+        bool rejected=!wxl::load(missing,L"out-tls/tests/missing-image.dll",log_b);
+        SetEvent(notificationContinue);
+        DWORD status=1;
+        bool joined=WaitForSingleObject(thread,INFINITE)==WAIT_OBJECT_0 && GetExitCodeThread(thread,&status);
+        CloseHandle(thread); CloseHandle(notificationEntered); CloseHandle(notificationContinue);
+        notificationEntered=notificationContinue=nullptr;
+        if (!loaded || !rejected || !joined || status || !a.close() || !b.close()) return 1;
+        const std::vector<std::string> wantA={"TLS callback attach","TLS DllMain attach",
+            "TLS callback thread attach","TLS DllMain thread attach",
+            "TLS callback thread detach","TLS DllMain thread detach",
+            "TLS callback detach","TLS DllMain detach"};
+        const std::vector<std::string> wantB={"TLS callback attach","TLS DllMain attach",
+            "TLS callback detach","TLS DllMain detach"};
+        if (guestLogsA!=wantA || guestLogsB!=wantB) return 1;
+    }
+    puts("LIFECYCLE concurrent per-image guest log routing ok");
+    // A failed size query (-1) must be rejected without allocating, throwing
+    // or leaking the file.
+    for (Failure f : {SEEK, TELL}) {
+        events.clear(); wxl::Image image; injected=f;
+        bool loaded=true;
+        try { loaded=wxl::load(image,good,log_line); } catch (...) { return 1; }
+        if (loaded || injected!=NONE || openFiles || image.base ||
+            count("WXL FAIL file size query")!=1 || count("LIFECYCLE attach")) return 1;
+        if (!wxl::load(image,good,log_line) || !image.close() || openFiles) return 1;
+    }
+    puts("LIFECYCLE thread-detach TLS failures and file size query failures rejected");
     puts("LIFECYCLE native notification ordering and ignored thread result ok");
     puts("LIFECYCLE failed-load cleanup retry/reuse ok");
     puts("LIFECYCLE-OK"); return 0;

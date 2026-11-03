@@ -19,8 +19,24 @@ guarantee. Persistent OS cleanup failure intentionally leaks remaining resources
 rather than freeing memory still registered with the unwinder. `run()` reports
 explicit cleanup failure even if its destructor subsequently succeeds. `runTls()`
 also closes its consumer and dependency explicitly and includes both cleanup
-results in its success result. Its off-device harness injects TLS-index, unwind
-and image-release failures to ensure none can be reported as a successful suite.
+results in its success result. The dependency is closed only after its consumer
+closed successfully, so a consumer cleanup retry can still call into it. The
+retry retains the dependency resolver binding; a persistent consumer cleanup
+failure retains the entire image graph instead of destructing its dependency.
+`detachThread()` returns false when the thread's TLS slot cannot be read or
+cleared; a failed read runs no thread notification. If the worker join fails,
+termination is unproven: `runTls()` fails, sets `workerLive` and leaves the
+images, their worker state and the TLS dependency allocated; the caller must
+then keep the carriers loaded too. The off-device harness injects TLS-index,
+unwind, image-release, transient/persistent TLS-read, worker TLS-read/clear and
+worker-join failures so none can be reported as a successful suite, and checks
+in every mode that the dependency image is released after its consumer.
+
+Guest debug imports are routed through a scoped, thread-local logger while the
+mapper invokes an image's entry or lifecycle notifications, including cleanup
+retries. Loading another image, even concurrently, does not replace that sink.
+Callers invoking exported symbols directly must establish `wxl::LogScope` for
+their execution context; arbitrary guest-created execution is not intercepted.
 
 Close on the process-attach thread, with all managed workers joined and carriers
 still alive. Guest callbacks must return normally; arbitrary guest faults and
