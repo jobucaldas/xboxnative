@@ -34,6 +34,11 @@ template/callback array, and every relocation destination. Imports are bound
 from copied names and destinations, not mapped mutable metadata. The mode is
 bounded to 96 sections, 256 descriptors per import directory, 4096 total imports,
 a 1 MiB relocation directory, 65536 DIR64 relocations, and 255 TLS callbacks.
+Import names have a 4096-byte budget including their terminator. Scanning uses
+bounded readable raw/virtual spans, including adjacent sections, rather than
+repeating a section lookup for each character. One-shot relocation/import plans
+stay local to `load`; retained images keep only the metadata needed for deferred
+preparation and runtime checks, not those vectors or copied import strings.
 Unsupported CLR and non-RVA/auxiliary delay-import layouts are rejected.
 RVA-based delay imports are bound only in **mapped-only** loads. Executable
 loads still reject delay imports at the existing runtime-directory gate, even
@@ -100,7 +105,10 @@ including callback-entry and terminator changes with assertions that no carrier,
 TLS state or index changes occur. Injected allocation failure is followed by
 same-`Image` default and inert retries; supported TLS preparation on both retries
 checks for stale policy dispatch as well as stale protected spans. Pure tests
-check retained populated, empty and absent callback arrays.
+check retained populated, empty and absent callback arrays, import-name span
+boundaries/holes/permissions and the maximum section/name fanout without a
+wall-clock assertion. Successful mapped and executable loads also assert that
+one-shot plan capacity is absent while deferred metadata authority is retained.
 These are **offline tests only**, not substitutes for the full console smoke
 run or launcher acceptance test. No generated DLLs, raw captures or private
 validation tooling belong in the repository.

@@ -371,6 +371,11 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
     image.log=log; image.size=h.SizeOfImage; image.carrier=carrier;
     image.entry=h.AddressOfEntryPoint; image.dll=!!(nt->FileHeader.Characteristics & IMAGE_FILE_DLL);
     image.configStart=configStart; image.configEnd=configEnd;
+    // Keep one-shot binding data local, including while resolvers reenter host
+    // code. Retained images need only the immutable deferred/runtime authority.
+    std::vector<msvc_config::Relocation> relocationPlan;
+    std::vector<msvc_config::Import> importPlan;
+    relocationPlan.swap(msvcPlan.relocations); importPlan.swap(msvcPlan.imports);
     image.msvc=std::move(msvcPlan);
     image.trustedHeaders.clear(); image.trustedConfig.clear();
     image.cookieInitialized=false; image.initializedCookie=0;
@@ -381,7 +386,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
     uintptr_t delta=(uintptr_t)image.base-h.ImageBase; unsigned relocations=0, imports=0;
     bool terminated=false;
     if(explicitMsvc) {
-        for(auto r:image.msvc.relocations) {
+        for(auto r:relocationPlan) {
             uint64_t value=r.value+delta;
             memcpy(image.base+r.rva,&value,8); ++relocations;
         }
@@ -403,7 +408,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
         image.initializedCookie=cookie; image.cookieInitialized=true;
         // This is deliberately before the first resolver: resolution may execute
         // guest dependency initialization, not just return an address.
-        for(auto& imp:image.msvc.imports) {
+        for(auto& imp:importPlan) {
             uintptr_t address=0;
             const char* name=imp.name.empty()?nullptr:imp.name.c_str();
             if(mapped && resolve) address=resolve(imp.dll.c_str(),name,imp.ordinal);

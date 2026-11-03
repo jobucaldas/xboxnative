@@ -136,7 +136,17 @@ static void reset() {
     allocations=releases=resolutions=observations=rngCalls=indexCalls=allocationAttempts=0;
     rngMode=0; missingImport=failAllocation=false;
 }
+static void check_retained_plan(const wxl::Image& image) {
+    assert(!image.msvc.imports.capacity() && !image.msvc.relocations.capacity());
+    assert(image.msvc.record.size==0x140 && image.msvc.cookie.size==8);
+    assert(image.msvc.slots.size()==7 && image.msvc.pointers.size()==15);
+    assert(image.trustedHeaders.size() && image.trustedConfig.size()==0x140);
+    const auto& t=image.msvc.tls;
+    assert(t.present && t.directory && t.start && t.raw && t.index && t.callbackArray && !t.callbacks.empty());
+    assert(wxl::msvcPointers(image));
+}
 static void check_protections(const wxl::Image& image) {
+    check_retained_plan(image);
     MEMORY_BASIC_INFORMATION info{};
     assert(VirtualQuery(image.base+image.msvc.cookie.rva,&info,sizeof info) && info.Protect==PAGE_READWRITE);
     assert(VirtualQuery(image.base+image.msvc.record.rva,&info,sizeof info) && info.Protect==PAGE_READONLY);
@@ -153,6 +163,7 @@ static bool load_file(const std::string& path,wxl::LoadConfig mode,bool mapped=f
     bool loaded;
     { wxl::Image image;
       loaded=wxl::load(image,wide,log_line,carrier,resolve,mapped,mode);
+      if(loaded && mode==wxl::LoadConfig::msvc_x64_cookie) check_retained_plan(image);
       if(check && loaded) {
           assert(image.cookieInitialized && wxl::msvcPointers(image));
           check_protections(image);

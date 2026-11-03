@@ -60,7 +60,55 @@ struct Fixture {
         bool accepted=validate(file,plan); assert(bytes==before); return accepted;
     }
 };
+static void strings() {
+    // Adjacent virtual sections need not be adjacent (or ordered) in the file.
+    std::vector<unsigned char> bytes(0x3000,'a');
+    File f; f.bytes=bytes.data(); f.size=bytes.size(); f.imageSize=0x3000;
+    f.sections={{0x1000,0x800,0x2000,0x800,read},
+                {0x1800,0x800,0,0x800,read},
+                {0x2000,0x1000,0x1000,0x1000,read}};
+    auto check=[&](size_t rva,bool accepted,size_t length) {
+        std::string out="stale";
+        assert(f.string(rva,out)==accepted && out==std::string(length,'a'));
+    };
+    bytes[0]=0;
+    check(0x17fe,true,2); // terminator in the next section
+    check(0x1800,false,0); // nonempty is mandatory
+    bytes[0]='a'; bytes[1]=0;
+    check(0x17fe,true,3);
+    bytes[1]='a'; bytes[0x27ff]=0;
+    check(0x17fe,true,1); // terminator at the last byte of a span
+    bytes[0x27ff]='a';
+    for(unsigned kind=0;kind<6;++kind) {
+        auto saved=f;
+        if(kind==0) ++f.sections[1].rva; // virtual hole, not a contiguous file scan
+        if(kind==1) f.sections[1].flags=write|execute; // no read permission
+        if(kind==2) --f.sections[0].rawSize; // virtual tail without raw bytes
+        if(kind==3) --f.sections[0].virtualSize; // raw padding without virtual bytes
+        if(kind==4) f.size=0x27ff; // physical file ends before the virtual span
+        if(kind==5) f.imageSize=0x17ff; // image ends before the section does
+        check(0x17fe,false,kind<2?2:1);
+        f=saved;
+    }
+    // Readable writable/executable names are not newly forbidden by scanning.
+    f.sections[1].flags=read|write|execute; bytes[0]=0;
+    check(0x17fe,true,2); bytes[0]='a';
+    // The 4096-byte budget INCLUDES the terminator, across three raw spans.
+    bytes[0x1001]=0; check(0x1002,true,4095);
+    bytes[0x1001]='a'; bytes[0x1002]=0; check(0x1002,false,4096);
+    check(0x1003,true,4095);
+    check(f.imageSize,false,0); check(SIZE_MAX,false,0);
+    // Maximum section/name fanout, without a machine-dependent timing gate.
+    std::vector<unsigned char> large(96*4096,'a'); large.back()=0;
+    File many; many.bytes=large.data(); many.size=large.size(); many.imageSize=0x1000+large.size();
+    for(unsigned i=0;i<96;++i) many.sections.push_back({0x1000+i*4096,4096,i*4096,4096,read});
+    std::string name;
+    for(unsigned i=0;i<4096;++i)
+        assert(many.string(0x1000+95*4096,name) && name==std::string(4095,'a'));
+    puts("MSVC-CONFIG strings PASS: nonempty, adjacent spans, holes, permissions, raw/virtual/file/image bounds, 4096-byte budget");
+}
 int main() {
+    strings();
     Fixture base; assert(base.valid());
     { auto f=base; f.imports(false,0x3400); f.imports(true,0x3500); f.tls(); assert(f.valid()); }
     // Retain the callback array location even when it contains only a terminator;

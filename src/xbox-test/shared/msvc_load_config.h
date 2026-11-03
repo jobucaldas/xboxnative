@@ -50,10 +50,25 @@ struct File {
     bool string(size_t rva,std::string& out) const {
         // Import names are bounded even for a huge otherwise-valid file.
         out.clear();
-        for(size_t i=0;i<4096;++i) {
-            auto p=at(rva+i,1); if(!p) return false;
-            if(!*p) return !out.empty();
-            out.push_back(char(*p));
+        size_t scanned=0;
+        while(scanned<4096) {
+            const unsigned char* p=nullptr; size_t n=0;
+            // Sections have already been checked for aliases. Scan one backed,
+            // readable span at a time, not one full section search per byte.
+            for(auto s:sections) {
+                if(rva<s.rva || !bounds(rva,1,imageSize)) continue;
+                size_t off=rva-s.rva;
+                if(!bounds(off,1,s.virtualSize) || !bounds(off,1,s.rawSize) ||
+                    !(s.flags&read) || !bounds(size_t(s.raw)+off,1,size)) continue;
+                n=std::min({size_t(s.virtualSize)-off,size_t(s.rawSize)-off,
+                            size-(size_t(s.raw)+off),imageSize-rva,4096-scanned});
+                p=bytes+size_t(s.raw)+off; break;
+            }
+            if(!p) return false;
+            auto end=static_cast<const unsigned char*>(memchr(p,0,n));
+            out.append(reinterpret_cast<const char*>(p),end?size_t(end-p):n);
+            if(end) return !out.empty();
+            rva+=n; scanned+=n;
         }
         return false;
     }
