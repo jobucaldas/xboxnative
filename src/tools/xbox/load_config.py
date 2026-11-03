@@ -99,7 +99,12 @@ class Image:
         self.image_base = _get(data, opt + 24, '<Q')[0]
         self.size_of_image = _get(data, opt + 56, '<I')[0]
         self.dll_characteristics = _get(data, opt + 70, '<H')[0]
-        count = min(_get(data, opt + 108, '<I')[0], 16, (opt_size - 112) // 8)
+        if opt + opt_size + 40 * nsec > len(data):
+            raise PEError('optional header or section table beyond file')
+        declared_count = _get(data, opt + 108, '<I')[0]
+        if declared_count > (opt_size - 112) // 8:
+            raise PEError('data directories exceed optional header')
+        count = min(declared_count, 16)
         self.directories = [_get(data, opt + 112 + 8 * i, '<II') for i in range(count)]
         self.directories += [(0, 0)] * (16 - count)
         self.sections = []
@@ -110,7 +115,13 @@ class Image:
             name = name.rstrip(b'\0').decode('ascii', 'replace') or '?'
             if rsize and rptr + rsize > len(data):
                 raise PEError('section raw data beyond file')
-            self.sections.append(dict(name=name, va=va, vsize=max(vsize, rsize),
+            extent = max(vsize, rsize)
+            if va + extent > self.size_of_image:
+                raise PEError('section beyond SizeOfImage')
+            if extent and any(va < s['va'] + s['vsize'] and s['va'] < va + extent
+                              for s in self.sections):
+                raise PEError('overlapping virtual sections')
+            self.sections.append(dict(name=name, va=va, vsize=extent,
                                       rsize=rsize, rptr=rptr, flags=flags))
 
     def section(self, rva, size=1):
@@ -224,10 +235,15 @@ def diagnose(image):
         out.append(f'unknown extension +0x{KNOWN_END:x}..+0x{limit:x}: {extra} nonzero bytes (not certified)')
     hits = []
     for target, kind in image.relocations():
-        if rva <= target < rva + size:
+        # DIR64 writes can overlap a boundary even when their first byte is
+        # outside the record. Other types are reported by start, not certified.
+        width = 8 if kind == 10 else 1
+        if target < rva + size and rva < target + width:
             off = target - rva
             name = next((n for o, w, n, _ in FIELDS if o <= off < o + w), 'unknown')
-            hits.append(f'+0x{off:03x}:{name}:{"DIR64" if kind == 10 else f"type{kind}"}')
+            location = f'-0x{-off:03x}' if off < 0 else f'+0x{off:03x}'
+            edge = ':straddles-start' if off < 0 else ':straddles-end' if target + width > rva + size else ''
+            hits.append(f'{location}:{name}:{"DIR64" if kind == 10 else f"type{kind}"}{edge}')
     out.append(f'config field relocations={len(hits)}' + (': ' + ' '.join(hits) if hits else ''))
     out.append('VERDICT BLOCKED: unsupported runtime requirements remain; '
                'this report does not certify the record or claim the image runs')
@@ -245,7 +261,13 @@ def main(argv=None):
             if path.stat().st_size > MAX_FILE:
                 raise PEError('file too large')
             lines, blocked = diagnose(Image(path.read_bytes()))
-        except (OSError, PEError) as exc:
+        except OSError as exc:
+            # OSError's string includes the full input path; reports deliberately
+            # expose only the base name printed above, not private directories.
+            print(f'ERROR {exc.strerror or "input read failed"}')
+            status = 2
+            continue
+        except PEError as exc:
             print(f'ERROR {exc}')
             status = 2
             continue

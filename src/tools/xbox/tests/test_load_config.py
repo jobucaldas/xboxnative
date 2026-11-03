@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Synthetic PE32+ fixtures for the offline load-config diagnosis."""
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
 import struct
 import unittest
+from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location('load_config', Path(__file__).parents[1] / 'load_config.py')
 lc = importlib.util.module_from_spec(SPEC)
@@ -102,6 +105,43 @@ class LoadConfigDiagnosisTests(unittest.TestCase):
         self.assertIn('dir=10 LOAD_CONFIG absent', text)
         text, _ = self.report(pe(msvc_record(), delay=True))
         self.assertIn('dir=13 DELAY_IMPORT rva=0x2100 size=0x40: generic gate applies only to unmapped loads', text)
+
+    def test_declared_directory_table_cannot_be_silently_truncated(self):
+        data = bytearray(pe(msvc_record()).data)
+        struct.pack_into('<H', data, 0x40 + 20, 112)
+        with self.assertRaisesRegex(lc.PEError, 'data directories exceed'):
+            lc.Image(bytes(data))
+
+    def test_virtual_sections_must_fit_and_not_alias(self):
+        original = pe(msvc_record()).data
+        data = bytearray(original)
+        struct.pack_into('<I', data, 0x58 + 56, 0x1100)
+        with self.assertRaisesRegex(lc.PEError, 'SizeOfImage'):
+            lc.Image(bytes(data))
+        data = bytearray(original)
+        struct.pack_into('<I', data, 0x58 + 240 + 40 + 12, RDATA)
+        with self.assertRaisesRegex(lc.PEError, 'overlapping virtual'):
+            lc.Image(bytes(data))
+
+    def test_dir64_straddling_record_edges_is_reported(self):
+        image = pe(msvc_record(), relocs=(0x3C, 0x17C))
+        data = bytearray(image.data)
+        data[0x240:0x380] = data[0x200:0x340]
+        image = lc.Image(bytes(data))
+        image.directories[10] = (RDATA + 0x40, 0x140)
+        text, blocked = self.report(image)
+        self.assertTrue(blocked)
+        self.assertIn('config field relocations=2:', text)
+        self.assertIn('-0x004:unknown:DIR64:straddles-start', text)
+        self.assertIn('+0x13c:GuardMemcpyFunctionPointer:DIR64:straddles-end', text)
+
+    def test_read_error_does_not_print_private_directories(self):
+        output = io.StringIO()
+        error = FileNotFoundError(2, 'No such file or directory', '/private/account/missing.exe')
+        with mock.patch.object(Path, 'stat', side_effect=error), contextlib.redirect_stdout(output):
+            self.assertEqual(lc.main(['/private/account/missing.exe']), 2)
+        self.assertIn('== missing.exe', output.getvalue())
+        self.assertNotIn('/private/account', output.getvalue())
 
     def test_untrusted_bounds(self):
         image = pe(msvc_record())
