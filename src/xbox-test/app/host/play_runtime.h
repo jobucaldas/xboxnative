@@ -180,7 +180,10 @@ static BOOL WINAPI freeLibrary(HMODULE h) { if(auto input=xinput_core::module(h)
 // DLL/symbol separator, supports #ordinals and records a module dependency.
 // Keep this execution behavior separate from the non-executing import probe.
 static uintptr_t exported(Module& module,const char* name,WORD ordinal) {
-    if(module.mappingFailed || !module.image.base) return 0;
+    // Retained failed images are diagnostic only, including forwarder sources
+    // and targets. Do not require initialized: circular imports/TLS setup may
+    // legitimately resolve exports before initialization has finished.
+    if(module.mappingFailed || module.initializationFailed || !module.image.base) return 0;
     auto& image=module.image;
     if(auto p=mlp::asset_export(image,name,ordinal)) return p;
     auto nt=(IMAGE_NT_HEADERS64*)(image.base+((IMAGE_DOS_HEADER*)image.base)->e_lfanew);
@@ -229,9 +232,12 @@ static uintptr_t exported(Module& module,const char* name,WORD ordinal) {
 }
 static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
     if(auto input=xinput_core::module(h))return xinput_core::module_proc(input,name);
+    // find() iterates vector storage that map() may reallocate. Native-handle
+    // resolution below can also inspect/map guest modules, so retain the lock
+    // for the entire lookup, not just the mapped-export branch.
+    std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
     if(auto m=find(h)) {
         WORD ordinal=IS_INTRESOURCE(name)?WORD((uintptr_t)name):0;
-        std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
         size_t previousCount=state->modules.size();
         auto p=exported(*m,IS_INTRESOURCE(name)?nullptr:name,ordinal);
         // A dynamically resolved forwarder may have mapped a new target DLL.

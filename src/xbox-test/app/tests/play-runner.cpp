@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <cstring>
+#include <new>
 // Wine 10 lacks VirtualProtectFromApp; this host-only alias preserves W^X.
 static BOOL WINAPI hostProtect(void* p,SIZE_T n,DWORD flags,DWORD* old) {
     using Fn=BOOL(WINAPI*)(void*,SIZE_T,DWORD,DWORD*);
@@ -12,12 +14,86 @@ static HMODULE WINAPI hostPackaged(LPCWSTR name,DWORD) {
     using Fn=HMODULE(WINAPI*)(LPCWSTR);
     auto f=(Fn)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"LoadLibraryW");return f(name);
 }
+// Observe ownership from a different native thread at native resolver calls.
+// This is deterministic contention, not a sleep-based vector crash race.
+static bool probeLoaderLock=false, hideModuleFilename=false;
+static unsigned loaderLockChecks=0, loaderLockFailures=0;
+static void observeLoaderLock();
+static DWORD WINAPI hostFilename(HMODULE h,LPWSTR out,DWORD size) {
+    if(probeLoaderLock)observeLoaderLock();
+    return hideModuleFilename?0:GetModuleFileNameW(h,out,size);
+}
+static FARPROC WINAPI hostProc(HMODULE h,LPCSTR name) {
+    if(!IS_INTRESOURCE(name)) {
+        if(!strcmp(name,"GetModuleFileNameW"))return (FARPROC)&hostFilename;
+        if(probeLoaderLock)observeLoaderLock();
+    }
+    return GetProcAddress(h,name);
+}
+#define GetProcAddress hostProc
 #define VirtualProtectFromApp hostProtect
 #define LoadPackagedLibrary hostPackaged
 #include "../host/wxl_mapper.h"
 #include "../host/mlp_probe.h"
 #include "../host/play_runtime.h"
 #include "../launch_status.h"
+#undef GetProcAddress
+static DWORD WINAPI tryLoaderLock(void*) {
+    auto& mutex=play_runtime::state->loaderMutex;
+    if(!mutex.try_lock())return ERROR_BUSY;
+    mutex.unlock();return 0;
+}
+static void observeLoaderLock() {
+    ++loaderLockChecks;
+    HANDLE thread=CreateThread(nullptr,0,tryLoaderLock,nullptr,0,nullptr);
+    DWORD code=0;
+    bool held=thread && WaitForSingleObject(thread,10000)==WAIT_OBJECT_0 &&
+        GetExitCodeThread(thread,&code) && code==ERROR_BUSY;
+    if(thread)CloseHandle(thread);
+    if(!held)++loaderLockFailures;
+}
+static void* guardedModule=nullptr;
+static unsigned registryReads=0;
+static LONG CALLBACK registryRead(EXCEPTION_POINTERS* ep) {
+    auto record=ep->ExceptionRecord;
+    if(record->ExceptionCode!=0x80000001 || record->NumberParameters<2 ||
+       record->ExceptionInformation[1]<(uintptr_t)guardedModule ||
+       record->ExceptionInformation[1]-(uintptr_t)guardedModule>=sizeof(play_runtime::Module))return EXCEPTION_CONTINUE_SEARCH;
+    // PAGE_GUARD clears on the first metadata read. Check lock ownership at
+    // find(), before any native resolver callback, then retry that same read.
+    ++registryReads;observeLoaderLock();return EXCEPTION_CONTINUE_EXECUTION;
+}
+static bool loaderLockTest() {
+    auto kernel=GetModuleHandleW(L"kernel32.dll");
+    auto add=(PVOID(WINAPI*)(ULONG,PVECTORED_EXCEPTION_HANDLER))GetProcAddress(kernel,"AddVectoredExceptionHandler");
+    auto remove=(ULONG(WINAPI*)(PVOID))GetProcAddress(kernel,"RemoveVectoredExceptionHandler");
+    if(!add||!remove)return false;
+    // A dedicated RW-only metadata page makes the registry's first read
+    // observable without a timing race or executable test stub.
+    guardedModule=VirtualAlloc(nullptr,sizeof(play_runtime::Module),MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+    if(!guardedModule)return false;
+    auto module=new(guardedModule) play_runtime::Module();
+    auto observer=add(1,registryRead);
+    if(!observer){module->~Module();VirtualFree(guardedModule,0,MEM_RELEASE);return false;}
+    {std::lock_guard<std::recursive_mutex> lock(play_runtime::state->loaderMutex);
+     play_runtime::state->modules.emplace_back(module);}
+    DWORD old=0;
+    bool guarded=VirtualProtect(guardedModule,sizeof(*module),PAGE_READWRITE|PAGE_GUARD,&old)!=FALSE;
+    probeLoaderLock=true;
+    bool ok=play_runtime::proc(kernel,"InitializeCriticalSectionEx")!=nullptr;
+    ok=play_runtime::proc(kernel,"GetProcAddress")==FARPROC(&play_runtime::proc)&&ok;
+    hideModuleFilename=true;
+    ok=play_runtime::proc(kernel,"InitializeCriticalSectionEx")!=nullptr&&ok;
+    hideModuleFilename=false;probeLoaderLock=false;
+    remove(observer);
+    // Clear any unconsumed guard before destroying test-only metadata.
+    VirtualProtect(guardedModule,sizeof(*module),PAGE_READWRITE,&old);
+    {std::lock_guard<std::recursive_mutex> lock(play_runtime::state->loaderMutex);
+     play_runtime::state->modules.back().release();play_runtime::state->modules.pop_back();}
+    module->~Module();VirtualFree(guardedModule,0,MEM_RELEASE);guardedModule=nullptr;
+    printf("PLAY-LOADER-LOCK registry-reads=%u checks=%u unlocked=%u\n",registryReads,loaderLockChecks,loaderLockFailures);fflush(stdout);
+    return ok && guarded && registryReads==1 && loaderLockChecks>=4 && !loaderLockFailures;
+}
 static FILE* hostEvents=nullptr;
 static bool injectLogException=false;
 static void handledLogException() {
@@ -56,6 +132,12 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     }
     else if(mode=="missing")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&mlp::stub_names.empty()&&last.find("mapping failed: play-missing.exe; guest initialization blocked")!=std::string::npos&&last.find("play-missing.dll!DeliberatelyMissingPlayImport")!=std::string::npos;
     else if(mode=="static-steam")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&mlp::stub_names.empty()&&last.find("steam_api64.dll!SteamAPI_Init")!=std::string::npos;
+    else if(mode=="loader-lock")ok=ok&&r->finished&&r->success&&r->code==42&&loaderLockTest();
+    else if(mode.find("reject-export-")==0) {
+        auto rejected=play_runtime::named(L"play-reject.dll");
+        ok=ok&&r->finished&&r->success&&r->code==42&&rejected&&rejected->initializationFailed&&
+            !rejected->initializing&&!rejected->initialized&&rejected->image.tlsAttached&&!rejected->image.attached;
+    }
     else if(mode=="reject-mapping") {
         auto failed=play_runtime::named(L"play-unresolved.dll");
         ok=ok&&r->finished&&r->success&&r->code==42&&failed&&failed->mappingFailed&&!failed->prepared&&!failed->initialized;

@@ -70,6 +70,33 @@ DWORD guest_exe_entry(){
         if(firstError!=ERROR_DLL_INIT_FAILED||GetLastError()!=ERROR_DLL_INIT_FAILED)return 18;
         return 42;
     }
+    if(contains(GetCommandLineW(),L"reject-export-")) {
+        auto forward=GetModuleHandleW(L"play-forward.dll");
+        bool lazy=contains(GetCommandLineW(),L"reject-export-lazy");
+        if(lazy) {
+            // The forwarder maps its target now; failed attach must discard the
+            // pointer computed before initializePending, without invoking it.
+            if(GetModuleHandleW(L"play-reject.dll"))return 22;
+        } else {
+            SetLastError(0);
+            if(LoadLibraryW(L"play-reject.dll")||GetLastError()!=ERROR_DLL_INIT_FAILED)return 23;
+        }
+        HMODULE owner=lazy?forward:GetModuleHandleW(L"play-reject.dll");
+        if(!owner)return 24;
+        LPCSTR symbol="dependency_check";
+        if(contains(GetCommandLineW(),L"reject-export-ordinal"))symbol=MAKEINTRESOURCEA(1);
+        if(contains(GetCommandLineW(),L"reject-export-source-forward"))symbol="RejectedForward";
+        if(lazy||contains(GetCommandLineW(),L"reject-export-target-name")) {owner=forward;symbol="ForwardRejected";}
+        if(contains(GetCommandLineW(),L"reject-export-target-ordinal")) {owner=forward;symbol="ForwardRejectedOrdinal";}
+        SetLastError(0);
+        if(GetProcAddress(owner,symbol)||GetLastError()!=ERROR_PROC_NOT_FOUND)return 25;
+        // Failure retention is intentional diagnostic state, not an unload or
+        // retry implementation. No rejected export is ever called by this test.
+        if(!GetModuleHandleW(L"play-reject.dll"))return 26;
+        SetLastError(0);
+        if(LoadLibraryW(L"play-reject.dll")||GetLastError()!=ERROR_DLL_INIT_FAILED)return 27;
+        return 42;
+    }
     if(contains(GetCommandLineW(),L"reject-mapping")) {
         for(int i=0;i<2;++i) {
             SetLastError(0);

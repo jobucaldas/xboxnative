@@ -18,6 +18,8 @@ EXPORTS
  ForwardOrdinal="play-forward-target.#1" @12
  ForwardDynamic=play-lazy-target.dependency_check @15
  ForwardSteam=steam_api64.SteamAPI_Init @16
+ ForwardRejected=play-reject.dependency_check @17
+ ForwardRejectedOrdinal="play-reject.#1" @18
  Loop=play-forward.Loop @13
  Absent=play-forward-target.DeliberatelyAbsentOptionalExport @14
 DEF
@@ -37,7 +39,13 @@ lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-guest.exe" "$o
 lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-missing.exe" "$out/obj/missing.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$out/obj/missing.lib" /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-steam.exe" "$out/obj/steam.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-unresolved.dll" "$out/obj/unresolved.obj" "$out/obj/missing.lib" /usr/x86_64-w64-mingw32/lib/libkernel32.a
-lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-reject.dll" "$out/obj/reject.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+cat > "$out/obj/reject.def" <<'DEF'
+LIBRARY play-reject.dll
+EXPORTS
+ dependency_check @1
+ RejectedForward=play-dependency.dependency_check @2
+DEF
+lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /def:"$out/obj/reject.def" /out:"$out/play-reject.dll" "$out/obj/reject.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
 cp "$out/play-dependency.dll" "$out/play-dynamic.dll"
 cp "$out/play-dependency.dll" "$out/play-forward-target.dll"
 cp "$out/play-dependency.dll" "$out/play-lazy-target.dll"
@@ -52,7 +60,7 @@ lld-link-19 "$out"/obj/cxx/tests_play-cxx.*.obj /dll /out:"$out/play-cxx.dll" \
 UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --out "$out/play-runner.exe" tests/play-runner.cpp -- /MT /O2
 # Use the exact packaged carriers from the launcher build.
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long steam-api steam-client steam-api-milestone steam-forward native-cxx;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long steam-api steam-client steam-api-milestone steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy native-cxx;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
