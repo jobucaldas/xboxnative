@@ -3,8 +3,12 @@
 `wxl::load(Image&, path, log, Carrier, Resolver)` retains the image until explicit
 `Image::close()` or owner destruction. DLL entry points receive process
 attach/detach. Registered `.pdata` remains valid through guest detach, then is
-deregistered before freeing memory. A failed process attach does not receive
-DllMain process detach; TLS callbacks that attached still receive detach.
+deregistered before freeing memory. A normal FALSE process-attach return still
+receives DllMain process detach to unwind partial initialization, as documented
+for dynamic loads by [Microsoft](https://learn.microsoft.com/windows/win32/dlls/dllmain).
+TLS callbacks precede DllMain on both process and thread detach, with TLS data
+remaining live until both finish. Non-process-attach DllMain return values are
+ignored; in particular, FALSE from thread attach must not suppress worker entry.
 
 `close()` reports cleanup failure and retains the remaining resources for retry.
 A failed `load()` attempts cleanup immediately but can likewise retain resources
@@ -13,7 +17,10 @@ Successful cleanup is idempotent and permits reuse; retries do not repeat guest
 detach callbacks. The destructor makes a final best-effort attempt, not a success
 guarantee. Persistent OS cleanup failure intentionally leaks remaining resources
 rather than freeing memory still registered with the unwinder. `run()` reports
-explicit cleanup failure even if its destructor subsequently succeeds.
+explicit cleanup failure even if its destructor subsequently succeeds. `runTls()`
+also closes its consumer and dependency explicitly and includes both cleanup
+results in its success result. Its off-device harness injects TLS-index, unwind
+and image-release failures to ensure none can be reported as a successful suite.
 
 Close on the process-attach thread, with all managed workers joined and carriers
 still alive. Guest callbacks must return normally; arbitrary guest faults and

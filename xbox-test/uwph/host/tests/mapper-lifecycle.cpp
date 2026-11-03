@@ -21,8 +21,13 @@ static LPVOID WINAPI test_tls_get(DWORD k) { if (injected==READ_TLS) { injected=
 #include "../wxl_mapper.h"
 static std::vector<std::string> events;
 static Failure attach_cleanup=NONE;
+static DWORD expectedDetachKey=TLS_OUT_OF_INDEXES;
+static bool missingDetachData=false;
 static void log_line(const char* s) {
     puts(s); events.emplace_back(s);
+    if (expectedDetachKey!=TLS_OUT_OF_INDEXES &&
+        (!strcmp(s,"TLS DllMain detach") || !strcmp(s,"TLS DllMain thread detach")) &&
+        !TlsGetValue(expectedDetachKey)) missingDetachData=true;
     if (!strcmp(s,"WXL FAIL DllMain process attach") && attach_cleanup!=NONE) {
         injected=attach_cleanup; attach_cleanup=NONE;
     }
@@ -63,12 +68,12 @@ int main(int argc,char** argv) {
     {
         wxl::Image image;
         if (wxl::load(image,bad,log_line) || image.base || image.functions || image.attached) return 1;
-        if (count("LIFECYCLE attach")!=1 || count("LIFECYCLE detach")!=0 ||
+        if (count("LIFECYCLE attach")!=1 || count("LIFECYCLE detach")!=1 ||
             find("WXL FAIL DllMain process attach")<0 ||
             find("WXL RtlDeleteFunctionTable ok=1")<find("WXL FAIL DllMain process attach")) return 1;
         if (!image.close()) return 1;
     }
-    if (count("LIFECYCLE detach")!=0 || count("WXL RtlDeleteFunctionTable ok=1")!=1) return 1;
+    if (count("LIFECYCLE detach")!=1 || count("WXL RtlDeleteFunctionTable ok=1")!=1) return 1;
     // A failed attach can also fail cleanup. Keep ownership until a retry,
     // reject replacement while live, then allow reuse after cleanup succeeds.
     for (Failure f : {UNWIND, FREE_MEM}) {
@@ -78,8 +83,8 @@ int main(int argc,char** argv) {
         auto base=image.base;
         if (wxl::load(image,good,log_line) || image.base!=base || count("LIFECYCLE attach")!=1 ||
             count("WXL FAIL image already live")!=1) return 1;
-        if (!image.close() || !image.close() || image.base || image.functions || count("LIFECYCLE detach")!=0) return 1;
-        if (!wxl::load(image,good,log_line) || !image.close() || count("LIFECYCLE detach")!=1) return 1;
+        if (!image.close() || !image.close() || image.base || image.functions || count("LIFECYCLE detach")!=1) return 1;
+        if (!wxl::load(image,good,log_line) || !image.close() || count("LIFECYCLE detach")!=2) return 1;
     }
     for (Failure f : {UNWIND, FREE_MEM}) {
         events.clear(); wxl::Image image;
@@ -111,7 +116,7 @@ int main(int argc,char** argv) {
         if (!wxl::load(image,tls,log_line,carrier)) return 1;
         if (!image.close() || !image.close()) return 1;
     }
-    if (!sequence({"TLS callback attach","TLS DllMain attach","TLS DllMain detach","TLS callback detach"})) return 1;
+    if (!sequence({"TLS callback attach","TLS DllMain attach","TLS callback detach","TLS DllMain detach"})) return 1;
     events.clear();
     {
         wxl::Image image;
@@ -119,7 +124,7 @@ int main(int argc,char** argv) {
         injected=CLEAR_TLS;
         if (image.close() || !image.close()) return 1;
     }
-    if (!sequence({"TLS callback attach","TLS DllMain attach","TLS DllMain detach","TLS callback detach"})) return 1;
+    if (!sequence({"TLS callback attach","TLS DllMain attach","TLS callback detach","TLS DllMain detach"})) return 1;
     events.clear();
     {
         wxl::Image image;
@@ -128,27 +133,52 @@ int main(int argc,char** argv) {
         if (image.close() || image.base!=base || image.tlsKey!=key || !image.tlsAttached) return 1;
         if (!image.close() || image.base || image.tlsKey!=TLS_OUT_OF_INDEXES) return 1;
     }
-    if (!sequence({"TLS callback attach","TLS DllMain attach","TLS DllMain detach","TLS callback detach"}) || count("WXL FAIL TLS read")!=1) return 1;
+    if (!sequence({"TLS callback attach","TLS DllMain attach","TLS callback detach","TLS DllMain detach"}) || count("WXL FAIL TLS read")!=1) return 1;
     events.clear();
     {
         wxl::Image image;
         if (wxl::load(image,tls_bad,log_line,carrier) || image.base || !image.close()) return 1;
     }
-    if (!sequence({"TLS callback attach","TLS DllMain attach","TLS callback detach"})) return 1;
+    if (!sequence({"TLS callback attach","TLS DllMain attach","TLS callback detach","TLS DllMain detach"})) return 1;
     for (Failure f : {READ_TLS, CLEAR_TLS, FREE_TLS}) {
         events.clear(); wxl::Image image; attach_cleanup=f;
-        if (wxl::load(image,tls_bad,log_line,carrier) || injected!=NONE || !image.base || image.attached ||
-            image.tlsKey==TLS_OUT_OF_INDEXES || count("WXL FAIL cleanup incomplete")!=1) return 1;
+        if (wxl::load(image,tls_bad,log_line,carrier) || injected!=NONE || !image.base ||
+            image.attached!=(f==READ_TLS) || image.tlsKey==TLS_OUT_OF_INDEXES || count("WXL FAIL cleanup incomplete")!=1) return 1;
         auto base=image.base; auto key=image.tlsKey;
         if (wxl::load(image,tls,log_line,carrier) || image.base!=base || image.tlsKey!=key ||
             count("TLS callback attach")!=1 || count("WXL FAIL image already live")!=1) return 1;
         if (!image.close() || !image.close() || image.base || image.functions ||
             image.tlsKey!=TLS_OUT_OF_INDEXES || image.tlsAttached) return 1;
-        if (!sequence({"TLS callback attach","TLS DllMain attach","TLS callback detach"})) return 1;
+        if (!sequence({"TLS callback attach","TLS DllMain attach","TLS callback detach","TLS DllMain detach"})) return 1;
         events.clear();
         if (!wxl::load(image,tls,log_line,carrier) || !image.close()) return 1;
-        if (!sequence({"TLS callback attach","TLS DllMain attach","TLS DllMain detach","TLS callback detach"})) return 1;
+        if (!sequence({"TLS callback attach","TLS DllMain attach","TLS callback detach","TLS DllMain detach"})) return 1;
     }
+    events.clear();
+    {
+        wxl::Image image;
+        if (!wxl::load(image,tls,log_line,carrier)) return 1;
+        expectedDetachKey=image.tlsKey;
+        HANDLE thread=CreateThread(nullptr,0,[](void* p)->DWORD {
+            auto& guest=*(wxl::Image*)p;
+            if (!guest.attachThread(DLL_THREAD_ATTACH)) return 1;
+            log_line("LIFECYCLE worker ran after FALSE thread attach");
+            guest.detachThread(DLL_THREAD_DETACH);
+            return 0;
+        },&image,0,nullptr);
+        if (!thread) return 1;
+        DWORD status=1;
+        bool joined=WaitForSingleObject(thread,INFINITE)==WAIT_OBJECT_0 && GetExitCodeThread(thread,&status);
+        CloseHandle(thread);
+        if (!joined || status!=0 || !image.close() || missingDetachData) return 1;
+        expectedDetachKey=TLS_OUT_OF_INDEXES;
+    }
+    if (count("LIFECYCLE worker ran after FALSE thread attach")!=1 ||
+        !sequence({"TLS callback attach","TLS DllMain attach",
+                   "TLS callback thread attach","TLS DllMain thread attach",
+                   "TLS callback thread detach","TLS DllMain thread detach",
+                   "TLS callback detach","TLS DllMain detach"})) return 1;
+    puts("LIFECYCLE native notification ordering and ignored thread result ok");
     puts("LIFECYCLE failed-load cleanup retry/reuse ok");
     puts("LIFECYCLE-OK"); return 0;
 }

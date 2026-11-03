@@ -51,14 +51,24 @@ struct Image {
             if (!TlsSetValue(tlsKey,block)) return false;
             for (auto cb:tlsCallbacks) cb(base,reason,nullptr);
         }
-        if (reason==DLL_THREAD_ATTACH && attached && !dllEntry((HINSTANCE)base,reason,nullptr)) return false;
+        // Only DLL_PROCESS_ATTACH may reject a load. Thread notification
+        // return values are ignored by the Windows loader.
+        if (reason==DLL_THREAD_ATTACH && attached) dllEntry((HINSTANCE)base,reason,nullptr);
         return true;
     }
     void detachThread(DWORD reason) {
+        void* slot=tlsKey!=TLS_OUT_OF_INDEXES?TlsGetValue(tlsKey):nullptr;
+        if (slot) for (auto cb:tlsCallbacks) cb(base,reason,nullptr);
+        // TLS callbacks precede DllMain, but its TLS data remains live until
+        // both notifications finish.
         if (reason==DLL_THREAD_DETACH && attached) dllEntry((HINSTANCE)base,reason,nullptr);
-        if (tlsKey!=TLS_OUT_OF_INDEXES && TlsGetValue(tlsKey)) {
-            for (auto cb:tlsCallbacks) cb(base,reason,nullptr);
-            TlsSetValue(tlsKey,nullptr);
+        if (slot) TlsSetValue(tlsKey,nullptr);
+    }
+    void detachProcessEntry() {
+        if (attached) {
+            dllEntry((HINSTANCE)base,DLL_PROCESS_DETACH,nullptr);
+            attached=false;
+            log("WXL DllMain DLL_PROCESS_DETACH");
         }
     }
     uintptr_t symbol(const char* name) const {
@@ -87,13 +97,7 @@ struct Image {
     // On failure retain resources for retry; destructor makes a final best-effort
     // attempt. Persistent OS failure intentionally leaks owned resources.
     bool close() {
-        // Guest code and its unwind records must remain alive during detach.
-        if (attached) {
-            // Windows ignores DllMain return values except PROCESS_ATTACH.
-            dllEntry((HINSTANCE)base, DLL_PROCESS_DETACH, nullptr);
-            attached=false;
-            log("WXL DllMain DLL_PROCESS_DETACH");
-        }
+        // Guest code, unwind records and TLS data remain live during detach.
         if (tlsAttached) {
             void* slot=nullptr;
             if (tlsKey!=TLS_OUT_OF_INDEXES) {
@@ -107,10 +111,13 @@ struct Image {
                     for (auto cb:tlsCallbacks) cb(base,DLL_PROCESS_DETACH,nullptr);
                     tlsCallbacksDetached=true;
                 }
-                if (!TlsSetValue(tlsKey,nullptr)) { log("WXL FAIL TLS clear"); return false; }
             }
+            // Native ordering is TLS callbacks, DllMain, then TLS release.
+            // On a failed clear, neither notification may replay on retry.
+            detachProcessEntry();
+            if (slot && !TlsSetValue(tlsKey,nullptr)) { log("WXL FAIL TLS clear"); return false; }
             tlsAttached=false;
-        }
+        } else detachProcessEntry();
         if (tlsKey!=TLS_OUT_OF_INDEXES) {
             if (!TlsFree(tlsKey)) { log("WXL FAIL TlsFree"); return false; }
             tlsKey=TLS_OUT_OF_INDEXES;
@@ -368,8 +375,10 @@ inline bool load_impl(Image& image, const wchar_t* path, Log log, Carrier carrie
         image.dllEntry=(Image::DllEntry)(image.base+h.AddressOfEntryPoint);
         BOOL ok=image.dllEntry((HINSTANCE)image.base,DLL_PROCESS_ATTACH,nullptr);
         snprintf(msg,sizeof msg,"WXL DllMain DLL_PROCESS_ATTACH ok=%d",ok); log(msg);
-        if (!ok) return fail("WXL FAIL DllMain process attach");
+        // A normal FALSE return still requires PROCESS_DETACH to unwind
+        // partial initialization (unlike an exception, outside this contract).
         image.attached=true;
+        if (!ok) return fail("WXL FAIL DllMain process attach");
         return true;
     }
     return true;
