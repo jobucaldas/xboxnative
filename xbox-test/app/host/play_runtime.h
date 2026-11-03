@@ -246,10 +246,63 @@ static std::string describe(uintptr_t address) {
     if(VirtualQuery((void*)address,&mbi,sizeof mbi)) { wchar_t path[32768]{};filenameW((HMODULE)mbi.AllocationBase,path,32768);snprintf(b,sizeof b,"%s+0x%llx",basename(path).c_str(),(unsigned long long)(address-(uintptr_t)mbi.AllocationBase));return b; }
     return "unknown module/symbol";
 }
+// Diagnostics only: inspect registered module metadata and unwind a copy of
+// the fault context. Never alter the real exception or choose a guest handler.
+static bool diagnosticUnwind(CONTEXT* context) {
+    __try {
+        DWORD64 base=0;auto function=RtlLookupFunctionEntry(context->Rip,&base,nullptr);
+        if(function) {
+            PVOID handler=nullptr;DWORD64 frame=0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER,base,context->Rip,function,context,&handler,&frame,nullptr);
+        } else {context->Rip=*(DWORD64*)context->Rsp;context->Rsp+=8;}
+        return context->Rip!=0;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+}
+static void exceptionDiagnostics(EXCEPTION_POINTERS* ep) {
+    auto record=ep->ExceptionRecord;
+    if(record->ExceptionCode==0xe06d7363 && record->NumberParameters>=4) {
+        char parameters[224];
+        snprintf(parameters,sizeof parameters,"C++ throw parameters magic=0x%llx object=0x%llx info=0x%llx imageBase=0x%llx",
+            (unsigned long long)record->ExceptionInformation[0],(unsigned long long)record->ExceptionInformation[1],
+            (unsigned long long)record->ExceptionInformation[2],(unsigned long long)record->ExceptionInformation[3]);
+        state->event(parameters);
+        auto module=find((HMODULE)record->ExceptionInformation[3]);
+        if(module) {
+            auto& image=module->image;auto pointer=record->ExceptionInformation[2];
+            if(pointer>=(uintptr_t)image.base && pointer-(uintptr_t)image.base<=MAXDWORD) {
+                DWORD info=DWORD(pointer-(uintptr_t)image.base);
+                if(image.valid(info,16)) {
+                    DWORD array=*(DWORD*)(image.base+info+12);
+                    if(image.valid(array,8) && *(DWORD*)(image.base+array)>0) {
+                        DWORD catchable=*(DWORD*)(image.base+array+4);
+                        if(image.valid(catchable,8)) {
+                            DWORD type=*(DWORD*)(image.base+catchable+4);
+                            if(image.valid(type,17)) {
+                                std::string name;
+                                for(unsigned n=16;n<272 && image.valid(type,n+1);++n) {
+                                    char ch=*(char*)(image.base+type+n);if(!ch)break;
+                                    name+=ch>=32&&ch<127?ch:'?';
+                                }
+                                state->event("C++ thrown type="+name+" metadata="+module->key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    CONTEXT context=*ep->ContextRecord;
+    for(unsigned frame=0;frame<20 && context.Rip;++frame) {
+        state->event("exception stack["+std::to_string(frame)+"] "+describe(context.Rip));
+        DWORD64 previousRip=context.Rip,previousRsp=context.Rsp;
+        if(!diagnosticUnwind(&context)||(context.Rip==previousRip&&context.Rsp==previousRsp))break;
+    }
+}
 static LONG filter(EXCEPTION_POINTERS* ep) {
     auto e=ep->ExceptionRecord;
     if(e->ExceptionCode==exitException) {state->success=true;return EXCEPTION_EXECUTE_HANDLER;}
     if(e->ExceptionCode==missingException) return EXCEPTION_EXECUTE_HANDLER;
+    exceptionDiagnostics(ep);
     char b[256];snprintf(b,sizeof b,"unhandled exception code=0x%08lx address=0x%llx ",e->ExceptionCode,(unsigned long long)(uintptr_t)e->ExceptionAddress);
     std::string text=b; text+=describe((uintptr_t)e->ExceptionAddress);
     if(e->ExceptionCode==EXCEPTION_ACCESS_VIOLATION && e->NumberParameters>=2) {snprintf(b,sizeof b," access=%llu target=0x%llx",(unsigned long long)e->ExceptionInformation[0],(unsigned long long)e->ExceptionInformation[1]);text+=b;}
@@ -348,6 +401,25 @@ static DWORD WINAPI child(void* data) {
 static HANDLE WINAPI createThread(LPSECURITY_ATTRIBUTES a,SIZE_T stack,LPTHREAD_START_ROUTINE entry,LPVOID arg,DWORD flags,LPDWORD id) {
     auto p=new ThreadStart{entry,arg};HANDLE h=CreateThread(a,std::max(stack,SIZE_T(16*1024*1024)),child,p,flags,id);if(!h)delete p;return h;
 }
+static PVOID WINAPI pcToFileHeader(PVOID pc,PVOID* base) {
+    // Like the native loader lookup, consult the owning image registry under
+    // its loader lock. RtlAddFunctionTable alone does not register an image
+    // with the OS loader; the static Microsoft CRT needs this base for EH RVAs.
+    {
+        std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
+        auto address=(uintptr_t)pc;
+        for(auto& module:state->modules) {
+            auto start=(uintptr_t)module->image.base;
+            if(start && address>=start && address-start<module->image.size) {
+                *base=(PVOID)start;return *base;
+            }
+        }
+    }
+    using Fn=PVOID(WINAPI*)(PVOID,PVOID*);
+    auto native=(Fn)kernel_tail::native("RtlPcToFileHeader");
+    if(native)return native(pc,base);
+    *base=nullptr;return nullptr;
+}
 static uintptr_t processApi(const char* name) {
 #define PLAY_API(n,f) if(!strcmp(name,n)) return (uintptr_t)&f
     PLAY_API("ExitProcess",exitProcess);PLAY_API("TerminateProcess",terminateProcess);PLAY_API("RtlExitUserProcess",rtlExit);
@@ -356,6 +428,7 @@ static uintptr_t processApi(const char* name) {
     PLAY_API("GetModuleFileNameW",filenameW);PLAY_API("GetModuleFileNameA",filenameA);
     PLAY_API("LoadLibraryW",loadW);PLAY_API("LoadLibraryA",loadA);PLAY_API("LoadLibraryExW",loadExW);PLAY_API("LoadLibraryExA",loadExA);
     PLAY_API("GetProcAddress",proc);PLAY_API("FreeLibrary",freeLibrary);PLAY_API("CreateThread",createThread);
+    PLAY_API("RtlPcToFileHeader",pcToFileHeader);
 #undef PLAY_API
     return 0;
 }
@@ -423,6 +496,9 @@ static int WINAPI messageBoxW(HWND,LPCWSTR text,LPCWSTR caption,UINT type) {
 static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     std::string key=lower(dll);
     if(key=="kernelbase.dll") key="kernel32.dll";
+    // Use the configured graphics bridge directly: nesting the legacy Play
+    // factory would give one CoreWindow two independent handoff owners.
+    if(key=="dxgi.dll") if(auto graphics=graphics_core::resolve(dll,name,ordinal))return graphics;
     if(name && (key=="kernel32.dll"||key=="kernelbase.dll"||key=="ntdll.dll"||key.find("api-ms-win-core-")==0)) if(auto p=processApi(name)) return p;
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxA")) return (uintptr_t)&messageBoxA;
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxW")) return (uintptr_t)&messageBoxW;

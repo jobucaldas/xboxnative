@@ -56,6 +56,11 @@ DWORD guest_exe_entry(){
     auto init=(Init)GetProcAddress(kernel,"InitializeCriticalSectionEx");
     if(!init||GetProcAddress(kernel,"DeliberatelyAbsentOptionalExport"))return 6;
     CRITICAL_SECTION section;if(!init(&section,0,0))return 7;DeleteCriticalSection(&section);
+    if(contains(GetCommandLineW(),L"native-cxx")) {
+        auto library=LoadLibraryW(L"play-cxx.dll");if(!library)return 31;
+        auto test=(int(*)())GetProcAddress(library,"native_cxx_test");
+        return test?test():32;
+    }
     if(contains(GetCommandLineW(),L"reject-attach")) {
         SetLastError(0);
         if(LoadLibraryW(L"play-reject.dll"))return 16;

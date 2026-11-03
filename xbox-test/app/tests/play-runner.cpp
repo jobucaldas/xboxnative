@@ -25,6 +25,19 @@ static void handledLogException() {
 }
 static void logline(const char* s){if(injectLogException)handledLogException();puts(s);fflush(stdout);if(hostEvents){fprintf(hostEvents,"%s\n",s);fflush(hostEvents);}}
 int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
+    if(std::string(args)=="graphics-route") {
+        play_runtime::State routing;
+        play_runtime::state=&routing;mlp::log=logline;
+        bool ok=true;
+        for(auto name:{"CreateDXGIFactory","CreateDXGIFactory1","CreateDXGIFactory2"}) {
+            auto expected=graphics_core::resolve("dxgi.dll",name,0);
+            auto actual=play_runtime::resolve("dxgi.dll",name,0);
+            ok=expected && actual==expected && ok;
+        }
+        play_runtime::state=nullptr;
+        logline(ok?"PLAY-GRAPHICS-ROUTE PASS: one configured factory bridge; no rendering claim":"PLAY-GRAPHICS-ROUTE FAIL");
+        return ok?0:1;
+    }
     wchar_t path[32768];GetModuleFileNameW(nullptr,path,32768);std::wstring root=path;root.resize(root.find_last_of(L"\\/"));
     bool game=std::string(args)=="game";
     injectLogException=std::string(args)=="observer-log";
