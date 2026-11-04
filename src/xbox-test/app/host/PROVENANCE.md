@@ -1,3 +1,12 @@
-wxl_mapper.h, mlp_probe.h, mlp_routes.h are vendored UNMODIFIED from lane/tlm commit 1e6b08d6 (src/xbox-test/uwph/host/).
-launch.h reuses mlp::resolve/summaries/assets/stub_names/log and runs wxl::run per image with its own target loop.
-The mapper never calls an entry point, DllMain or TLS callbacks: no guest code is executed.
+The app mapper originated in `lane/tlm` commit `1e6b08d6`
+(`src/xbox-test/uwph/host/`) and has subsequently diverged. It is not an
+unmodified copy. Mapping-only loads do not directly run that image's TLS
+callbacks or entry point; import resolvers may initialize guest dependencies.
+Executable callers prepare TLS/unwind state before guest entry.
+
+`wxl_mapper.h` follows Wine's image mapping, relocation and import-fixup sequence
+without copying Wine code. The bounded, explicit MSVC x64 cookie fixture mode
+uses the Wine 10.0 loader sequence pinned in `deps.pin` and SDK load-config
+structure definitions. See [the fixture contract and tests](../tests/MSVC-COOKIE.md).
+It does not enable launcher Play; default load-config rejection and the exact
+zero-bodied `inert_wine` policy remain distinct.
