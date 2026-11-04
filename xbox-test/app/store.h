@@ -1,9 +1,11 @@
 // Store info for the detail screen: Steam public store API over the same http() path as the covers, cached in LocalState\storecache\<appid>.json.
 #pragma once
+#include "apibadge_core.h"
 struct StoreInfo {
     uint32_t appid = 0;
     std::atomic<int> state{0};      // 0 loading, 1 ok (fields below immutable), 2 unavailable
     std::string name, desc, release, dev, genres, price, why; bool free = false;
+    int dxKind = 0; std::string dxNote;   // apib::Kind from the store pc_requirements text (0 = says nothing)
     std::atomic<int> img{0};        // 0 loading, 1 ok, 2 failed
     Game hdr;                       // header image pixels (iw, ih, pix)
 };
@@ -96,6 +98,10 @@ static bool store_parse(const std::string& body, uint32_t appid, StoreInfo& si, 
         if (d.HasKey(L"price_overview") && d.GetNamedValue(L"price_overview").ValueType() == Windows::Data::Json::JsonValueType::Object) {
             auto p = d.GetNamedObject(L"price_overview"); si.price = ascii_clean(winrt::to_string(p.GetNamedString(L"final_formatted", L"")));
             if (p.GetNamedNumber(L"discount_percent", 0) > 0) si.price += "  (-" + std::to_string((int)p.GetNamedNumber(L"discount_percent", 0)) + "%)"; }
+        if (d.HasKey(L"pc_requirements") && d.GetNamedValue(L"pc_requirements").ValueType() == Windows::Data::Json::JsonValueType::Object) {   // [] when the store lists none
+            auto pr = d.GetNamedObject(L"pc_requirements"); std::string t;
+            for (auto k : {L"minimum", L"recommended"}) if (pr.HasKey(k) && pr.GetNamedValue(k).ValueType() == Windows::Data::Json::JsonValueType::String) t += winrt::to_string(pr.GetNamedString(k)) + "\n";
+            si.dxKind = apib::classify_store_text(t, &si.dxNote); }
         if (si.price.empty()) si.price = si.free ? "Free to play" : "Price not listed";
         return true;
     } catch (winrt::hresult_error const& ex) { char b[64]; snprintf(b, sizeof b, "parse error hr=0x%08x", (unsigned)ex.code().value); why = b; return false; }
@@ -117,7 +123,7 @@ static void store_worker(std::shared_ptr<StoreInfo> si) {
     }
     if (!body.empty()) {
         StoreInfo tmp; ok = store_parse(body, id, tmp, why);
-        if (ok) { si->name = tmp.name; si->desc = tmp.desc; si->release = tmp.release; si->dev = tmp.dev; si->genres = tmp.genres; si->price = tmp.price; si->free = tmp.free; }
+        if (ok) { si->name = tmp.name; si->desc = tmp.desc; si->release = tmp.release; si->dev = tmp.dev; si->genres = tmp.genres; si->price = tmp.price; si->free = tmp.free; si->dxKind = tmp.dxKind; si->dxNote = tmp.dxNote; }
     }
     si->why = why; si->state = ok ? 1 : 2;
     logf("store: appid %u %s (%s) name='%s' desc=%zu chars genres='%s' release='%s' dev='%s' price='%s'%s", id, ok ? "info ready" : "info UNAVAILABLE", ok ? (fromCache ? "cache" : "network") : why.c_str(), si->name.c_str(), si->desc.size(), si->genres.c_str(), si->release.c_str(), si->dev.c_str(), si->price.c_str(), "");

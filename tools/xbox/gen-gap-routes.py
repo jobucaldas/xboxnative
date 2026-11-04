@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the gap diagnostic's policy table; no change to mapper routing."""
+"""Generate launcher diagnostic and mapper policy tables from one routing map."""
 import json
 from pathlib import Path
 
@@ -11,3 +11,4 @@ for name, entry in sorted(mapping.items()):
         raise ValueError(f'invalid route: {name}')
     output += '{%s, %s},\n' % (json.dumps(name), json.dumps(entry['class']))
 (root / 'xbox-test/app/wine_gap_routes.h').write_text(output)
+(root / 'xbox-test/app/host/mlp_routes.h').write_text(output)

@@ -78,13 +78,31 @@ class WineSourceTests(unittest.TestCase):
         if not root.exists() or not baseline.exists():
             self.skipTest('local research fixture absent')
         paths = sorted(p for p in root.iterdir() if p.suffix.lower() in ('.exe', '.dll'))
-        mapping = json.loads((Path(__file__).parents[1] / 'import_map.json').read_text())['dlls']
+        # The oracle records item 40's policy, before item 45 donor routing.
+        # Preserve exact-byte classification proof against that immutable policy.
+        mapping = json.loads((Path(__file__).parent / 'fixtures/wgap-import-map.json').read_text())['dlls']
         rows = gap.classify(gap.scan(paths), mapping, {p.name.lower() for p in paths}, self.graph)
         output = io.StringIO(newline='')
         writer = csv.DictWriter(output, gap.FIELDS)
         writer.writeheader()
         writer.writerows(rows)
         self.assertEqual(output.getvalue().encode(), baseline.read_bytes())
+
+    def test_donor_policy_changes_only_route_fields(self):
+        baseline = json.loads((Path(__file__).parent / 'fixtures/wgap-import-map.json').read_text())['dlls']
+        current = json.loads((Path(__file__).parents[1] / 'import_map.json').read_text())['dlls']
+        donors = {'hid.dll', 'setupapi.dll', 'version.dll', 'shcore.dll', 'avrt.dll'}
+        for dll in donors:
+            self.assertEqual(current[dll]['class'], 'wine-pe')
+        pairs = [('hid.dll', 'HidD_GetHidGuid'), ('setupapi.dll', 'SetupDiGetClassDevsA'),
+                 ('version.dll', 'VerQueryValueW'), ('shcore.dll', 'CommandLineToArgvW'),
+                 ('avrt.dll', 'AvSetMmThreadCharacteristicsW')]
+        old = gap.classify(pairs, baseline, set(), self.graph)
+        new = gap.classify(pairs, current, set(), self.graph)
+        for before, after in zip(old, new):
+            self.assertEqual(after['console_route'], 'wine-pe')
+            after['console_route'] = before['console_route']
+            self.assertEqual(after, before)
 
     def test_opengl_unix_wrapper_is_not_pure(self):
         rows = gap.classify([('opengl32.dll', 'wglGetProcAddress')], {}, set(), self.graph)

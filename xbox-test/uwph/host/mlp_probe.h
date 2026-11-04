@@ -5,10 +5,16 @@
 #include <utility>
 #include "entry_kernel.h"
 #include "../../shared/pe_tail.h"
+#include "reg_builtin.h"
 namespace mlp {
 struct Route { const char* dll; const char* kind; };
+struct Override { const char* dll; const char* name; const char* kind; };
 static const Route routes[] = {
 #include "mlp_routes.h"
+};
+static const Override overrides[] = {
+#include "mlp_overrides.h"
+    {nullptr,nullptr,nullptr}
 };
 struct Summary { unsigned resolved=0, stubbed=0; std::string first="none"; };
 static std::map<std::string, Summary> summaries;
@@ -75,6 +81,9 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
         auto it=assets.find(key);
         if(it!=assets.end()) address=asset_export(*it->second,name,ordinal);
         else if(name) for(auto& b:wxl::builtins) if(!_stricmp(dll,b.dll)&&!strcmp(name,b.name)) address=b.address;
+    }
+    if(name) for(auto& o:overrides) if(o.dll && key==o.dll && !strcmp(name,o.name)) {
+        if(!strcmp(o.kind,"uwph") && key=="advapi32.dll") if(auto p=regb::lookup(name)) { address=p; provider="uwph:registry-json"; }
     }
     if(key=="kernel32.dll" && name) {
         if(auto builtin=entry_kernel::resolve(name)) { address=builtin; provider="uwph:entry-kernel"; }

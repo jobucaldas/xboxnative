@@ -13,17 +13,22 @@ case "${2:-uwph}" in
   tls) manifest=AppxManifest.Tls.xml; lane_flags=(/DWXL_TLS_LANE) ;;
   cs32) manifest=AppxManifest.Cs32.xml; lane_flags=() ;;
   swc) manifest=AppxManifest.Swc.xml; lane_flags=() ;;
-  *) echo "usage: $0 [OUTDIR] [uwph|wxl|hid|mlp|tls|swc]" >&2; exit 2 ;;
+  reg) manifest=AppxManifest.Reg.xml; lane_flags=() ;;
+  *) echo "usage: $0 [OUTDIR] [uwph|wxl|hid|mlp|tls|swc|reg]" >&2; exit 2 ;;
 esac
-main_link=()
+bash fetch-sqlite.sh
+# SQLite amalgamation (public domain, pinned+checksummed by fetch-sqlite.sh) as a static lib linked into k32.exe: backs the uwph registry (reg_builtin.h).
+SQL_DEFS=(/DSQLITE_THREADSAFE=1 /DSQLITE_OMIT_LOAD_EXTENSION /DSQLITE_OMIT_SHARED_CACHE /DSQLITE_TEMP_STORE=3 /DSQLITE_DEFAULT_MEMSTATUS=0 /DSQLITE_OMIT_DEPRECATED)
+UWP_OBJ_DIR="$out/sqlite-obj" "$CB/scripts/build.sh" --uwp --static-lib --out "$out/obj/sqlite3.lib" --jobs 4 sqlite_uwp.c -- /Ithird_party/sqlite /MT /O2 /DNDEBUG /w "${SQL_DEFS[@]}"
+main_link=(--link-arg "$out/obj/sqlite3.lib")
 if [[ ${2:-uwph} == tls ]]; then
   bash tests/build-tls-guests.sh "$out"
-  main_link=(--link-arg "$out/layout/tls-carrier-a.lib" --link-arg "$out/layout/tls-carrier-b.lib")
+  main_link+=(--link-arg "$out/layout/tls-carrier-a.lib" --link-arg "$out/layout/tls-carrier-b.lib")
 fi
 UWP_OBJ_DIR="$out/host-obj" "$CB/scripts/build.sh" --uwp --out "$out/layout/uwph-host.dll" --link-arg /dll --link-arg /export:__wine_unixlib_handle,DATA --link-arg /export:__wine_unix_call_dispatcher,DATA backend.cpp -- /MT /O2 /DNDEBUG
 UWP_OBJ_DIR="$out/test-obj" "$CB/scripts/build.sh" --uwp --out "$out/layout/kernel-test.dll" --link-arg /dll kernel_test.cpp -- /MT /O2 /DNDEBUG
 UWP_OBJ_DIR="$out/d3dt-obj" "$CB/scripts/build.sh" --uwp --out "$out/layout/d3dt-test.dll" --link-arg /dll d3dt_test.cpp -- /MT /O2 /DNDEBUG
-UWP_OBJ_DIR="$out/obj" "$CB/scripts/build.sh" --uwp --out "$out/layout/k32.exe" "${main_link[@]}" --jobs 4 main.cpp -- /MT /O2 /DNDEBUG "${lane_flags[@]}"
+UWP_OBJ_DIR="$out/obj" "$CB/scripts/build.sh" --uwp --out "$out/layout/k32.exe" "${main_link[@]}" --jobs 4 main.cpp -- /MT /O2 /DNDEBUG /Ithird_party/sqlite "${lane_flags[@]}"
 bash "$here/../user32/build.sh"
 cp "$here/../user32/out/layout/uwph-u32c.dll" "$out/layout/"
 bash "$here/../hid/build.sh" "$out/layout"
@@ -42,6 +47,10 @@ lld-link-19 /nodefaultlib /entry:wxl_entry /subsystem:windows,6.02 /appcontainer
 if [[ ${2:-uwph} == tls ]]; then
   x86_64-w64-mingw32-gcc -O1 -c tests/lifecycle-dll.c -o "$out/obj/lifecycle.obj"
   lld-link-19 /dll /nodefaultlib /entry:test_dll_entry /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/layout/lifecycle.dll" "$out/obj/lifecycle.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+fi
+if [[ ${2:-uwph} == reg ]]; then
+  x86_64-w64-mingw32-gcc -c -Os -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-builtin reg_test.c -o "$out/obj/reg-test.obj"
+  lld-link-19 /nodefaultlib /entry:reg_entry /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/layout/reg-test.exe" "$out/obj/reg-test.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a /usr/x86_64-w64-mingw32/lib/libadvapi32.a
 fi
 if [[ ${2:-uwph} == swc ]]; then
   x86_64-w64-mingw32-g++ -c -Os -fno-stack-protector -fno-exceptions -fno-rtti -fno-asynchronous-unwind-tables -fno-unwind-tables swc_test.cpp -o "$out/obj/swc-test.obj"

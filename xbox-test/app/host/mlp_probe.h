@@ -21,6 +21,7 @@ static std::map<std::string, wxl::Image*> assets;
 static std::map<std::string, HMODULE> systems;
 static std::vector<std::string> stub_names;
 static wxl::Log log;
+static wxl::Resolver donor_resolve=nullptr;
 // Probe-only ABI: integer zero plus ERROR_CALL_NOT_IMPLEMENTED. These placeholders
 // are not a runnable implementation of arbitrary Win32 signatures (e.g. HRESULT,
 // floating returns or output parameters). No guest code may execute in this mode.
@@ -62,7 +63,10 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     const char* kind="unclassified";
     for(auto& route:routes) if(key==route.dll) kind=route.kind;
     uintptr_t address=0;
-    if(!strcmp(kind,"system")) {
+    if(!strcmp(kind,"wine-pe")) {
+        if(donor_resolve)address=donor_resolve(key.c_str(),name,ordinal);
+        if(address)log(("DWPE ROUTE "+key+"!"+symbol).c_str());
+    } else if(!strcmp(kind,"system")) {
         auto it=systems.find(key);
         if(it==systems.end()) {
             std::wstring wide(key.begin(),key.end());
@@ -83,7 +87,7 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
         address=kernel_tail::resolve(name);
         log(("K32T ROUTE kernel32.dll!"+symbol+" found="+std::to_string(!!address)).c_str());
     }
-    if(!address&&name&&key!="kernel32.dll") {
+    if(!address&&name&&key!="kernel32.dll"&&strcmp(kind,"wine-pe")) {
         address=pe_tail::resolve(key.c_str(),name);
         if(address)log(("K32T SYSTEM "+key+"!"+symbol).c_str());
     }

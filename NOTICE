@@ -25,9 +25,14 @@ External dependencies fetched at build time (never copied here; pinned in deps.p
                                                repository's licence.
   Wine 10.0 source tarball (wine-src)          LGPL-2.1-or-later. Downloaded and built by tools/build-wine-donors.sh into the
                                                git-ignored out/wine-donors/ (avrt, hid, setupapi, shcore, version). The built DLLs are
-                                               never committed. LGPL-2.1-or-later is generally read as combinable with GPLv3 code (LGPLv2.1 s.3 lets a
+                                               never committed. patches/wine-src/0001-pe-rodata.patch adjusts PE constant-data section flags;
+                                               its minimal Wine context is LGPL-2.1-or-later (Copyright 2000 Alexandre Julliard).
+                                               Retain that patch with the corresponding source. LGPL-2.1-or-later is generally read as combinable with GPLv3 code (LGPLv2.1 s.3 lets a
                                                recipient apply the GPL instead).
   uwp-crossbuild (gianlucamazza/uwp-crossbuild)  MIT. Build wrapper used by the build scripts (clang-cl/lld-link + xwin).
+  SQLite amalgamation (sqlite-src)             Public domain (https://sqlite.org/copyright.html). Source archive pinned in deps.pin,
+                                               verified and fetched by xbox-test/uwph/host/fetch-sqlite.sh into git-ignored
+                                               third_party/sqlite; compiled into the host registry backend. Not committed here.
   Microsoft MSIX Packaging SDK                MIT; its bundled dependencies retain their own licences (see upstream LICENSE and
                                                THIRD PARTY CODE NOTICE). Built by tools/build-msix-packaging.sh as a host-only
                                                packaging tool; never linked into our code or committed as a binary.

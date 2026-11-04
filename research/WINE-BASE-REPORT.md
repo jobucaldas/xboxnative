@@ -308,6 +308,24 @@ not 252, and `wine-dll-table.csv` has 61 DLL data rows, not 62. The report's
 larger counts included the header. Their static classifications remain research
 inputs; this correction does not regenerate those historical tables.
 
+### A1 dwpe source audit (2026-10-26)
+
+The item 45 premise "hid, setupapi, version, shcore, avrt need only Nt*" is
+incorrect as a complete dependency claim. setupapi/Makefile.in delay-imports
+cabinet, shell32, wintrust, ole32, comdlg32 and user32; shcore delay-imports user32
+and ole32; avrt imports user32 directly. avrt/main.c contains FIXME stubs returning
+fabricated handles (0x12345678) and unconditional success: those are not a
+multimedia scheduling implementation. version.spec imports most query functions
+from kernelbase and forwards VerLanguageNameA/W to kernel32, requiring real
+forwarder resolution. HID hidd.c uses DeviceIoControl and still needs a device
+backend. The source *.spec and C bodies, not a PE_ONLY label, determine behavior.
+
+The historical summary-by-dll.csv has 14 HID + 5 setupapi + 23 winmm pairs = 42.
+The historical 67 STUB pairs cover additional DLLs. Thus "hid/setupapi/winmm STUB
+67" combines two different metrics. The corrected 628-pair import oracle and a
+fresh console resolver log must be counted separately. These source corrections
+are off-device; they do not claim donor code ran on Xbox.
+
 ### A1 dwpe actual-console donor result (2026-10-26)
 
 Debian Wine 10.0~repack-6 hid/setupapi/version/shcore/avrt PEs all pass strict
