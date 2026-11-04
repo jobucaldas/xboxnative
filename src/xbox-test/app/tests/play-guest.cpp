@@ -70,6 +70,31 @@ DWORD guest_exe_entry(){
         if(firstError!=ERROR_DLL_INIT_FAILED||GetLastError()!=ERROR_DLL_INIT_FAILED)return 18;
         return 42;
     }
+    if(contains(GetCommandLineW(),L"pending-")) {
+        bool reject=contains(GetCommandLineW(),L"pending-reject-");
+        bool ordinal=contains(GetCommandLineW(),L"-ordinal");
+        auto forward=GetModuleHandleW(L"play-forward.dll");
+        auto target=reject?L"play-pending-reject.dll":L"play-pending-target.dll";
+        if(GetModuleHandleW(target))return 33;
+        SetLastError(0);
+        if(GetProcAddress(forward,reject?"MissingPendingReject":"MissingPending")||GetLastError()!=ERROR_PROC_NOT_FOUND)return 34;
+        auto retained=GetModuleHandleW(target);if(!retained)return 35;
+        LPCSTR symbol=reject?(ordinal?"PendingRejectOrdinal":"PendingRejectName"):(ordinal?"PendingOrdinal":"PendingName");
+        SetLastError(0);
+        auto pointer=GetProcAddress(forward,symbol);
+        if(reject) {
+            if(pointer||GetLastError()!=ERROR_PROC_NOT_FOUND)return 36;
+            SetLastError(0);
+            if(GetProcAddress(retained,ordinal?MAKEINTRESOURCEA(1):"dependency_check")||GetLastError()!=ERROR_PROC_NOT_FOUND)return 37;
+            SetLastError(0);
+            if(LoadLibraryW(target)||GetLastError()!=ERROR_DLL_INIT_FAILED)return 38;
+        } else if(!pointer)return 39;
+        // Never invoke the pending/rejected pointer: the host checks actual
+        // TLS/DllMain lifecycle state even for accepted targets. A retained
+        // failure must not poison lookups into an already initialized sibling.
+        auto healthy=(int(*)())GetProcAddress(forward,"ForwardName");
+        return healthy&&healthy()?42:40;
+    }
     if(contains(GetCommandLineW(),L"reject-export-")) {
         auto forward=GetModuleHandleW(L"play-forward.dll");
         bool lazy=contains(GetCommandLineW(),L"reject-export-lazy");

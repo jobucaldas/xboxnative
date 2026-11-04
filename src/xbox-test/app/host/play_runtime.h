@@ -52,6 +52,11 @@ static State* state=nullptr; // One guest process per launcher lifetime.
 static std::atomic<State*> observed{nullptr};
 static thread_local bool guestThread=false;
 static thread_local unsigned mappingImports=0;
+// Only the current dynamic lookup's export chain contributes pending work.
+// Historic dependencies (including retained failures) must not poison lookups
+// that reach only already initialized images. Nested callback lookups restore
+// their caller's collection scope.
+static thread_local bool* pendingExportLookup=nullptr;
 static std::string lower(std::string s) { for(auto& c:s) if(c>='A'&&c<='Z') c+=32; return s; }
 static std::string narrow(const std::wstring& s) {
     if(s.empty()) return {}; int n=WideCharToMultiByte(CP_UTF8,0,s.data(),int(s.size()),nullptr,0,nullptr,nullptr);
@@ -164,8 +169,8 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     Module* m=nullptr;
     {std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
      m=named(requested);if(!m){std::wstring p=requested;if(p.find(L':')==std::wstring::npos && (p.empty()||p[0]!=L'\\'))p=state->root+L"\\"+p;if(exists(p)) {m=map(p);if(!m){SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}}}
+     if(m) { if(m->mappingFailed || !m->mapped || !initializePending() || !m->initialized) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;} return (HMODULE)m->image.base; }
     }
-    if(m) { if(m->mappingFailed || !m->mapped || !initializePending() || !m->initialized) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;} return (HMODULE)m->image.base; }
     if(auto input=xinput_core::find_module(key.c_str(),true))return input;
     // Restrict fallback to documented system DLL search, never desktop paths.
     auto result=LoadLibraryExW(requested.c_str(),nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -184,6 +189,14 @@ static uintptr_t exported(Module& module,const char* name,WORD ordinal) {
     // and targets. Do not require initialized: circular imports/TLS setup may
     // legitimately resolve exports before initialization has finished.
     if(module.mappingFailed || module.initializationFailed || !module.image.base) return 0;
+    if(pendingExportLookup && !mappingImports && !module.initialized) {
+        // The recursive lock permits the initializing thread to resolve its
+        // prepared siblings (all TLS/unwind setup precedes callbacks). A new,
+        // unprepared dynamic target still needs initialization before return.
+        bool recursive=false;
+        if(module.prepared)for(auto m:state->order)if(m->initializing){recursive=true;break;}
+        if(!recursive)*pendingExportLookup=true;
+    }
     auto& image=module.image;
     if(auto p=mlp::asset_export(image,name,ordinal)) return p;
     auto nt=(IMAGE_NT_HEADERS64*)(image.base+((IMAGE_DOS_HEADER*)image.base)->e_lfanew);
@@ -230,20 +243,29 @@ static uintptr_t exported(Module& module,const char* name,WORD ordinal) {
     }
     return result;
 }
+struct ExportLookup {
+    bool pending=false;
+    bool* previous=pendingExportLookup;
+    ExportLookup() {pendingExportLookup=&pending;}
+    ~ExportLookup() {pendingExportLookup=previous;}
+    FARPROC finish(uintptr_t p) {
+        // Decide from every image reached by this export chain, even if an
+        // earlier failed lookup mapped its target. Resolve the complete chain
+        // (and record dependencies) before running any new guest callbacks.
+        if(p && pending && !mappingImports && !initializePending())p=0;
+        if(!p)SetLastError(ERROR_PROC_NOT_FOUND);return (FARPROC)p;
+    }
+};
 static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
     if(auto input=xinput_core::module(h))return xinput_core::module_proc(input,name);
     // find() iterates vector storage that map() may reallocate. Native-handle
     // resolution below can also inspect/map guest modules, so retain the lock
     // for the entire lookup, not just the mapped-export branch.
     std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
+    ExportLookup lookup;
     if(auto m=find(h)) {
         WORD ordinal=IS_INTRESOURCE(name)?WORD((uintptr_t)name):0;
-        size_t previousCount=state->modules.size();
-        auto p=exported(*m,IS_INTRESOURCE(name)?nullptr:name,ordinal);
-        // A dynamically resolved forwarder may have mapped a new target DLL.
-        // Initialize its TLS and DllMain before returning callable guest code.
-        if(p&&state->modules.size()!=previousCount&&!initializePending())p=0;
-        if(!p) SetLastError(ERROR_PROC_NOT_FOUND);return (FARPROC)p;
+        return lookup.finish(exported(*m,IS_INTRESOURCE(name)?nullptr:name,ordinal));
     }
     // Native handles (including OS-resolved API sets/forwarders) must not
     // expose these names even when GetModuleFileNameW cannot identify them.
@@ -261,7 +283,7 @@ static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
         auto result=resolve(basename(p).c_str(),IS_INTRESOURCE(name)?nullptr:name,IS_INTRESOURCE(name)?WORD((uintptr_t)name):0);
         // Static imports are rejected while mapping; dynamic feature detection
         // observes NULL rather than a callable failure placeholder.
-        return (FARPROC)result;
+        return lookup.finish(result);
     }
     return GetProcAddress(h,name);
 }
@@ -408,6 +430,10 @@ static bool initialize(Module& m) {
     m.initialized=true;m.initializing=false;return true;
 }
 static bool initializePending() {
+    // All entry paths, including initial runImpl(), publish initialization and
+    // failure while owning proc/loadExW's recursive loader lock. Other threads
+    // cannot observe initializing=true as permission to use pending exports.
+    std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
     // Register every unwind table and TLS index before any guest callback.
     for(auto m:state->order) if(!prepare(*m)) return false;
     // Every template must exist before the first callback can call a sibling.
