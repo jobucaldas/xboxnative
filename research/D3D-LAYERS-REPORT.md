@@ -43,7 +43,7 @@ Legend effort = to first working game on console, rough.
 Lane A: **glon12-uwp-dll** (parallel with item 37/42/43 prerequisites, no dependency on PE32 work)
 1. Rebase or build aerisarn/mesa-uwp (2c7c63e) `libgallium_wgl`/GLon12 for x64 (MSVC or mingw; see aerisarn/SDL-uwp-gl and glxgears-uwp for build recipe). No ICD loader, no Win32 window hooks: build as non-ICD GL (Jesse Natalie's advice on RetroArch issue 13462: avoid opengl32 ICD loader, strip window hooks).
 2. Our host loads it; provide a small "wgl glue" that creates the context offscreen and presents to the CoreWindow swapchain (route from lane swc).
-3. Acceptance: x64 test exe `gltri.exe` (GL 3.3 triangle via wglCreateContext path) runs `xbox-test/tools/play-test.sh <gltri-appid>`: log shows GL_RENDERER containing D3D12, 300 presents, hr=0, no RWX/VirtualProtect denials. Record DXIL signing method used.
+3. Acceptance: x64 test exe `gltri.exe` (GL 3.3 triangle via wglCreateContext path) runs `src/xbox-test/tools/play-test.sh <gltri-appid>`: log shows GL_RENDERER containing D3D12, 300 presents, hr=0, no RWX/VirtualProtect denials. Record DXIL signing method used.
 Lane B: **d3d9-wined3d-pe** (after A step 3)
 1. mingw-build wine d3d9.dll, wined3d.dll, vkd3d-shader (PE, GL path only; d3d8/ddraw optional) from /workspace/research/wine (wine-10.0). Route their imports (user32/gdi32/advapi32/opengl32) in import_map: opengl32 -> Lane A glue; gdi32 HDC/pixel format/SwapBuffers -> CoreWindow swapchain; window APIs from items 42/43.
 2. Write `d3d9tri.exe` (64-bit, D3D9 FFP + one SM3 shader triangle).

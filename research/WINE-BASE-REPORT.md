@@ -3,7 +3,7 @@
 Date: 2026-10-26 (America/Sao_Paulo). Author: Grok executor (research only; no product code changed, no console used).
 Requested by João in pt132u: "32 bit should work too though / … can't we use [wine] as a base? Or at least to know what might be missing because any windows game should boot".
 
-All coverage numbers come from `research/wine-coverage/analyze.py` + `dll-table.py` run on **Wine 11.0 source** (`/workspace/research/wine`) and the Debian **Wine 10** PE builtins on the box. They are produced by a regex/call-graph walk of the C sources, **not a compiler**: treat percentages as ±5 points and the win32u syscall count as an upper bound. Everything marked (UNVERIFIED) is reasoning, not measurement.
+All coverage numbers come from `src/research/wine-coverage/analyze.py` + `dll-table.py` run on **Wine 11.0 source** (`/workspace/research/wine`) and the Debian **Wine 10** PE builtins on the box. They are produced by a regex/call-graph walk of the C sources, **not a compiler**: treat percentages as ±5 points and the win32u syscall count as an upper bound. Everything marked (UNVERIFIED) is reasoning, not measurement.
 
 ## 0. TL;DR
 
@@ -131,7 +131,7 @@ Caveats: (1) static analysis ignores runtime-only paths (COM, delay-loads, `GetP
 6. D3D9→D3D11 decision (gates most older 32-bit games).
 
 ### What already exists in the repo / earlier lanes proved
-* wxl mapper (W^X via `VirtualAllocFromApp`/`VirtualProtectFromApp`, zero RWX), mlp import router (system/uwph/stub per `tools/xbox/import_map.json`; `mlp_routes.h` generated), uwph host private ABI v1, TLS lane (tls/tlm), HID stub 20/23, native D3D11 triangle (d3tri) 300 presents hr=0 on the Series S, smoke-all 8 PASS (BACKLOG watcher 06:30).
+* wxl mapper (W^X via `VirtualAllocFromApp`/`VirtualProtectFromApp`, zero RWX), mlp import router (system/uwph/stub per `src/tools/xbox/import_map.json`; `mlp_routes.h` generated), uwph host private ABI v1, TLS lane (tls/tlm), HID stub 20/23, native D3D11 triangle (d3tri) 300 presents hr=0 on the Series S, smoke-all 8 PASS (BACKLOG watcher 06:30).
 * smap lane: pinned steamclient map (340 entries validated, fail-closed validator); **Megabonk reached its main menu under Wine on the box** (BACKLOG item 5/16 DONE). Per the delegated brief: wine64 loader runs a 64-bit PE and Valheim server booted under wine64 — I found no artefact for the Valheim claim in /workspace notes, so I cite it as reported, not re-verified.
 * Both prove the *game* side is fine under a full Wine; the open problem is only our substitute for Wine's Unix half.
 * Prior art in /workspace/ref: dolphin-uwp, RetroArch, XBSX2, DuckStation-uwp, UnleashedRecomp-uwp (JIT/W^X on Xbox UWP is established practice), Boxedwine-uwp-upstream and Boxedwine-xbox-64.
@@ -174,11 +174,11 @@ Xbox UWP offers **D3D11/D3D12 only** (Microsoft Learn "Map DirectX 9 features to
 
 ## D. Next 10 backlog items (ranked; each fits one Codex/Grok lane)
 
-Conventions: appids Megabonk 3405340, Spacewar 480 (free, any account), LIMBO 48000, Undertale 391540 (the last two only if João owns/can install them). `play-test.sh` = `xbox-test/tools/play-test.sh <appid>` (lives in wt/gdet at the moment). Numbers continue after BACKLOG item 39.
+Conventions: appids Megabonk 3405340, Spacewar 480 (free, any account), LIMBO 48000, Undertale 391540 (the last two only if João owns/can install them). `play-test.sh` = `src/xbox-test/tools/play-test.sh <appid>` (lives in wt/gdet at the moment). Numbers continue after BACKLOG item 39.
 
 | # | Item | Work | Acceptance (all must hold) |
 |---|---|---|---|
-| 40 | **wine-gap-tool** | Productise `research/wine-coverage/analyze.py` as `tools/xbox/wine_gap.py`: input = any game dir (PE list) + `import_map.json` → CSV (route, wine class, needed Nt*/NtUser*) + one summary line; run on Megabonk, Spacewar, LIMBO, Undertale; wire the summary into `launch_probe` output | Offline: `wine_gap.py` exit 0 and CSV for 3405340 equals `megabonk-imports-vs-wine.csv` ±0 rows; then `play-test.sh 3405340` prints a `GAP: total=… missing=… win32u=…` line matching the CSV; the same for `play-test.sh 480` |
+| 40 | **wine-gap-tool** | Productise `src/research/wine-coverage/analyze.py` as `src/tools/xbox/wine_gap.py`: input = any game dir (PE list) + `import_map.json` → CSV (route, wine class, needed Nt*/NtUser*) + one summary line; run on Megabonk, Spacewar, LIMBO, Undertale; wire the summary into `launch_probe` output | Offline: `wine_gap.py` exit 0 and CSV for 3405340 equals `megabonk-imports-vs-wine.csv` ±0 rows; then `play-test.sh 3405340` prints a `GAP: total=… missing=… win32u=…` line matching the CSV; the same for `play-test.sh 480` |
 | 41 | **kernel32-nt-tail** | Implement the 10 kernel32 MISSING imports (Toolhelp32, CreateWaitableTimerA, GetComputerNameW, GetStartupInfoA, GetSystemPowerStatus, SetDllDirectoryW, SetThreadAffinityMask, VerifyVersionInfoW) and the other PE_PURE/NT-only symbols (≈82) using uwph/system calls, following Wine's behaviour | `play-test.sh 3405340` launch log shows `kernel32 missing=0`; smoke-all.sh exit 0 |
 | 42 | **user32-pure-and-class-core** | user32 PE_PURE 20 symbols + class/atom/window-property table in the host (no CoreWindow yet; windows are records) | `play-test.sh 3405340`: `user32 missing` drops from 111 to ≤ 91; a test PE doing RegisterClassExW/CreateWindowExW/GetWindowLongPtr round-trips (log lines) |
 | 43 | **user32-message-pump-corewindow** (builds on swc item 37) | Message queue (GetMessage/PeekMessage/PostMessage/SendMessage/Translate/Dispatch, timers, WM_PAINT/SIZE/ACTIVATE/CLOSE) driven by CoreWindow dispatcher events | `play-test.sh 3405340`: UnityPlayer reaches its first `GetMessage/PeekMessage` and log shows ≥300 pump iterations without the app being killed; screenshot (dp) shows non-black swap chain |
@@ -206,7 +206,7 @@ Keep the order **1 → 2 before 3**: the 64-bit path has no CPU or D3D9 unknowns
 ---
 
 ## Sources
-* This repo: `x64-run/PLAN-0600.md`, `REBUILD.md`, `BACKLOG.md`, `LANES.md`; `wt/gdet/LANE_NOTES.md`, `wt/stubs/LANE_NOTES.md`; `runs/stubs/native-discovery-console.log`; `runs/gdet/play-3405340/launch_probe.log`; `tools/xbox/import_map.json`.
+* This repo: `x64-run/PLAN-0600.md`, `REBUILD.md`, `BACKLOG.md`, `LANES.md`; `wt/gdet/LANE_NOTES.md`, `wt/stubs/LANE_NOTES.md`; `runs/stubs/native-discovery-console.log`; `runs/gdet/play-3405340/launch_probe.log`; `src/tools/xbox/import_map.json`.
 * Wine 11.0 source (shallow clone `/workspace/research/wine`; `dlls/*/*.spec`, `dlls/wow64cpu/cpu.c`, `dlls/ntdll/unix/signal_x86_64.c`, `dlls/wow64win/*.c`); Debian Wine 10 PE builtins `/usr/lib/x86_64-linux-gnu/wine/x86_64-windows` (note: `i386-windows` on the box has only zlib1.dll, so no 32-bit builtins are installed).
 * Hangover https://github.com/AndreRH/hangover (README, COMPILE.md); FEX https://wiki.fex-emu.com/index.php/Development:ARM64EC.
 * Boxedwine https://github.com/danoon2/Boxedwine (docs/CPUemulation.md, docs/Performance.md; GPL-2), https://github.com/worleydl/Boxedwine-uwp, https://xbdev.store/news/9/, issue #5.
@@ -258,7 +258,7 @@ package-loader resolution failure. FS:[18] test is not reached. No supported
 FS/TEB32 strategy was established. Native-32 viable: NO for this tested direct
 selector-transition approach under documented UWP constraints. This does not
 prove absence of x86 hardware capability or every possible OS mechanism.
-Exact committed evidence: xbox-test/uwph/host/cs32-console-evidence.log.
+Exact committed evidence: src/xbox-test/uwph/host/cs32-console-evidence.log.
 
 ### A1 dwpe source audit (2026-10-26)
 
@@ -350,3 +350,20 @@ Wine's own dependencies; native dependency routing can avoid that Unix closure.
 They do not forbid every export from executing, nor certify arbitrary exports.
 The original CSVs remain unchanged. All eight classification tests pass with
 exact-byte historical-oracle proof and a separate current-policy routing check.
+
+
+### D / item 43 — Unity message-pump prerequisites
+
+Items 37 and 42 alone do not enable the Unity message-pump acceptance gate.
+The launcher's `lp_run_impl` in `xbox-test/app/launch.h` passes a non-null `Image`
+output to `wxl::run`. The mapped-image path in `xbox-test/app/host/wxl_mapper.h`
+returns before TLS/unwind initialization and guest entry;
+`launch_result.json` reports `gameCodeExecuted=false`.
+Standalone mapper/test-PE execution and the SWC triangle are separate paths.
+A real Play runtime that initializes dependencies and enters UnityPlayer is an
+additional prerequisite. Host dispatcher iterations or the launcher UI screenshot
+cannot substitute for Unity calling GetMessage/PeekMessage 300 times.
+Wine user32/message.c delegates queue operations to NtUser; win32u/message.c
+implements driver-event processing, filtering, blocking waits, errors and WM_QUIT.
+DispatchMessage also has timer callback and paint semantics. CSV export presence
+or static reachability does not establish these runtime behaviors.
