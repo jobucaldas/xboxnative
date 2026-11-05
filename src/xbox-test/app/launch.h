@@ -239,6 +239,63 @@ static void cloud_uploader(uint32_t appid,std::wstring gameRoot) {
         } catch(...) {lp_sink("STEAM sync watcher: exception; retrying");Sleep(5000);}
     }).detach();
 }
+// ---- Diagnostic: cmd.txt "stacks" logs every other thread's call stack to
+// launch_probe.log (module+offset via Play's guest module map). Live process
+// dumps are unavailable on the console. Each thread is suspended only long
+// enough to copy its registers; the stack is walked after it resumes (a hung
+// thread's stack is unchanged), so nothing allocates while another thread is
+// stopped.
+static std::string stack_frame(uintptr_t address) {
+    char b[300];
+    if(auto st=play_runtime::state) for(auto& m:st->modules)
+        if(address>=(uintptr_t)m->image.base&&address-(uintptr_t)m->image.base<m->image.size){
+            snprintf(b,sizeof b,"%s+0x%llx",m->key.c_str(),(unsigned long long)(address-(uintptr_t)m->image.base));return b;}
+    MEMORY_BASIC_INFORMATION mbi{};
+    using File=DWORD(WINAPI*)(HMODULE,LPWSTR,DWORD);static auto file=(File)kernel_tail::native("GetModuleFileNameW");
+    wchar_t path[512]{};
+    if(VirtualQuery((void*)address,&mbi,sizeof mbi)&&file&&file((HMODULE)mbi.AllocationBase,path,512)){
+        const wchar_t* name=wcsrchr(path,L'\\');name=name?name+1:path;
+        snprintf(b,sizeof b,"%ls+0x%llx",name,(unsigned long long)(address-(uintptr_t)mbi.AllocationBase));return b;}
+    snprintf(b,sizeof b,"0x%llx",(unsigned long long)address);return b;
+}
+static void dump_thread_stacks() {
+    using Snapshot=HANDLE(WINAPI*)(DWORD,DWORD);
+    using Open=HANDLE(WINAPI*)(DWORD,BOOL,DWORD);
+    using Suspend=DWORD(WINAPI*)(HANDLE);
+    using Context=BOOL(WINAPI*)(HANDLE,CONTEXT*);
+    auto snapshot=(Snapshot)kernel_tail::native("CreateToolhelp32Snapshot");
+    auto open=(Open)kernel_tail::native("OpenThread");
+    auto suspend=(Suspend)kernel_tail::native("SuspendThread");
+    auto resume=(Suspend)kernel_tail::native("ResumeThread");
+    auto context=(Context)kernel_tail::native("GetThreadContext");
+    if(!snapshot||!open||!suspend||!resume||!context){lp_sink("STACKS unavailable: thread APIs missing");return;}
+    HANDLE snap=snapshot(4/*TH32CS_SNAPTHREAD*/,0);
+    if(snap==INVALID_HANDLE_VALUE){lp_sink("STACKS unavailable: snapshot failed");return;}
+    std::vector<DWORD> ids;
+    kernel_tail::ThreadEntry entry{};entry.size=sizeof entry;
+    for(BOOL ok=kernel_tail::first(snap,&entry);ok;ok=kernel_tail::next(snap,&entry))
+        if(entry.process==GetCurrentProcessId()&&entry.id!=GetCurrentThreadId())ids.push_back(entry.id);
+    CloseHandle(snap);
+    char line[512];snprintf(line,sizeof line,"STACKS begin threads=%zu",ids.size());lp_sink(line);
+    for(DWORD id:ids) {
+        HANDLE thread=open(0x0002|0x0008|0x0040,FALSE,id); // SUSPEND_RESUME|GET_CONTEXT|QUERY_INFORMATION
+        if(!thread)continue;
+        CONTEXT ctx{};ctx.ContextFlags=CONTEXT_FULL;
+        bool got=false;
+        if(suspend(thread)!=DWORD(-1)){got=context(thread,&ctx)!=FALSE;resume(thread);}
+        CloseHandle(thread);
+        if(!got)continue;
+        snprintf(line,sizeof line,"STACK tid=%lu",(unsigned long)id);lp_sink(line);
+        for(int frame=0;frame<24&&ctx.Rip;++frame) {
+            snprintf(line,sizeof line,"  #%02d %s",frame,stack_frame(ctx.Rip).c_str());lp_sink(line);
+            DWORD64 base=0;auto fn=RtlLookupFunctionEntry(ctx.Rip,&base,nullptr);
+            if(fn){void* handler=nullptr;DWORD64 frameBase=0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER,base,ctx.Rip,fn,&ctx,&handler,&frameBase,nullptr);}
+            else{if(!ctx.Rsp)break;ctx.Rip=*(DWORD64*)ctx.Rsp;ctx.Rsp+=8;}
+        }
+    }
+    lp_sink("STACKS end");
+}
 static void lp_run_impl(LpCtx& c) {
     wine_gap::report(c.root);
     if(c.names.empty()) {c.failName="no executable";return;}

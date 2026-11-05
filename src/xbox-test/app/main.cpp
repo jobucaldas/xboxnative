@@ -831,6 +831,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         logf("cmd.txt SYNTHETIC command: '%s' (screen=%d)", c.c_str(), (int)g_screen.load());
         if (c.rfind("open ", 0) == 0) { uint32_t id = (uint32_t)strtoul(c.c_str() + 5, nullptr, 10); if (id) open_detail(id, game_name(id), "cmd.txt open (synthetic)"); return; }
         if (c.rfind("sleep ", 0) == 0) { holdUntil = t + std::min(600.0, atof(c.c_str() + 6)); return; }
+        if (c == "stacks") { dump_thread_stacks(); logf("cmd.txt: thread stacks written to launch_probe.log"); return; }
         GamepadButtons m = GamepadButtons::None;
         if (c == "press" || c == "a") m = GamepadButtons::A; else if (c == "back" || c == "b") m = GamepadButtons::B; else if (c == "view") m = GamepadButtons::View;
         else if (c == "up") m = GamepadButtons::DPadUp; else if (c == "down") m = GamepadButtons::DPadDown; else if (c == "left") m = GamepadButtons::DPadLeft; else if (c == "right") m = GamepadButtons::DPadRight;
