@@ -79,6 +79,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 llvm lld wine64
       - name: exercise strict named and ordinal imports
         run: bash src/xbox-test/uwph/host/tests/run-strict-imports.sh --run
+      - name: retain logging in the SWC mapped-entry caller
+        run: bash src/xbox-test/uwph/host/tests/run-swc-logging.sh
   guest-pe-inspection:
     runs-on: ubuntu-latest
     steps:
