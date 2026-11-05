@@ -42,10 +42,44 @@ static BOOL WINAPI disable_thread_calls(HMODULE) {
     return TRUE;
 }
 static std::map<std::string, HMODULE> modules;
+// Wine donors delay-load user32/ole32/... through winecrt0's __delayLoadHelper2,
+// which calls kernel32!ResolveDelayLoadedAPI. The native API would load host
+// DLLs and pass guest record handles (HMONITOR, HWND) to host user32, so donors
+// resolve delay imports through the same router as their static imports (user32
+// goes to the record core). The IAT is left unpatched (this donor build puts it
+// in read-only .idata); each call returns the same cached address.
+struct DelayDescriptor { DWORD attributes,name,module,iat,names,bound,unload,timestamp; };
+using DelaySystemHook=FARPROC(WINAPI*)(LPCSTR,LPCSTR);
+static PVOID WINAPI resolve_delay_loaded(PVOID base,const DelayDescriptor* desc,PVOID,DelaySystemHook systemHook,
+                                         IMAGE_THUNK_DATA64* thunk,ULONG) {
+    static std::mutex mutex;static std::map<const void*,uintptr_t> cache;
+    std::lock_guard<std::mutex> lock(mutex);
+    if(auto it=cache.find(thunk);it!=cache.end())return (PVOID)it->second;
+    const wxl::Image* owner=nullptr;
+    for(auto& entry:images) if(entry.second->base==(BYTE*)base) owner=entry.second.get();
+    auto inside=[&](const void* p,size_t n){return owner&&(const BYTE*)p>=owner->base&&owner->valid(size_t((const BYTE*)p-owner->base),n);};
+    if(!inside(desc,sizeof *desc)||!inside(thunk,8)||desc->attributes!=1||
+       !owner->valid(desc->iat,8)||!owner->valid(desc->names,8))return nullptr;
+    auto iat=(IMAGE_THUNK_DATA64*)(owner->base+desc->iat);
+    if(thunk<iat||(thunk-iat)>=4096)return nullptr;
+    size_t id=size_t(thunk-iat);
+    if(!owner->valid(desc->names+id*8,8))return nullptr;
+    uint64_t entry=((const uint64_t*)(owner->base+desc->names))[id];
+    auto dll=owner->str(desc->name);if(!dll)return nullptr;
+    const char* function=nullptr;WORD ordinal=0;
+    if(entry&IMAGE_ORDINAL_FLAG64)ordinal=WORD(entry);
+    else if(entry<owner->size&&owner->valid(size_t(entry),3))function=owner->str(size_t(entry)+2);
+    if(!function&&!ordinal)return nullptr;
+    uintptr_t p=resolve(dll,function,ordinal);
+    // As Windows: an unresolvable delay import goes to the system failure hook.
+    if(!p) return systemHook?(PVOID)systemHook(dll,function?function:MAKEINTRESOURCEA(ordinal)):nullptr;
+    cache.emplace(thunk,p);return (PVOID)p;
+}
 static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     std::string key=dll; for(auto& c:key) if(c>='A'&&c<='Z') c+=32;
     uintptr_t p=0;
     if(key=="kernel32.dll"&&name&&!strcmp(name,"DisableThreadLibraryCalls")) p=(uintptr_t)&disable_thread_calls;
+    else if(key=="kernel32.dll"&&name&&!strcmp(name,"ResolveDelayLoadedAPI")) p=(uintptr_t)&resolve_delay_loaded;
     else if(key=="user32.dll") p=user32_core::resolve(dll,name);
     else if(key=="kernel32.dll"&&name) p=kernel_tail::resolve(name);
     else {

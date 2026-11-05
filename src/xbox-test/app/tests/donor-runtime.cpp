@@ -63,6 +63,19 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int) {
     if(memcmp(&guid,&expected,sizeof guid))ExitProcess(4);
     // A later probe must not unload code still held by a retained guest.
     if(!donor_pe::probe(logline) || address!=donor_pe::exported("hid.dll","HidD_GetHidGuid",0))ExitProcess(5);
+    // Delay imports resolve through the donor router: shcore's user32 DPI
+    // internals reach the record core, never host user32. Awareness set via
+    // shcore must be visible in the record core's own state.
+    using Dpi=HRESULT(WINAPI*)(HMONITOR,int,UINT*,UINT*);using SetAware=HRESULT(WINAPI*)(int);
+    using CoreAware=BOOL(WINAPI*)(HANDLE,int*);
+    auto dpi=(Dpi)donor_pe::exported("shcore.dll","GetDpiForMonitor",0);
+    auto setAware=(SetAware)donor_pe::exported("shcore.dll","SetProcessDpiAwareness",0);
+    auto coreAware=(CoreAware)user32_core::resolve("user32.dll","GetProcessDpiAwarenessInternal");
+    UINT dx=0,dy=0;int aware=-1;
+    if(!dpi||!setAware||!coreAware||dpi(nullptr,0,&dx,&dy)!=S_OK||dx!=96||dy!=96)ExitProcess(13);
+    if(dpi(nullptr,3,&dx,&dy)!=HRESULT_FROM_WIN32(ERROR_BAD_ARGUMENTS))ExitProcess(14);
+    if(setAware(2)!=S_OK||!coreAware(nullptr,&aware)||aware!=2)ExitProcess(15);
+    puts("DONOR-DELAY PASS: shcore delay-loaded user32 DPI internals resolve to the record core");
     puts("DONOR-RUNTIME PASS: behavior gate, cross-thread publication, retained addresses; no game code");
     std::string mode=args;
     if(mode!="normal"&&mode!="missing"&&mode!="disabled")ExitProcess(6);
