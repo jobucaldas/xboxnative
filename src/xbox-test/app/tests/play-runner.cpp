@@ -81,14 +81,52 @@ static bool create() {
     window=createWindow(0,cls.name,L"Play off-device surface",overlappedVisible,0,0,1280,720,nullptr,nullptr,cls.instance,nullptr);
     return window!=nullptr;
 }
+// Optional synthetic gamepad (PRUN_GAME_PAD="a@45,start@60"): pad 0 is
+// connected idle, then each button is pressed for 200 ms at its second. It
+// feeds the same xinput_core slots the launcher publishes from real pads.
+// Every press is logged as SYNTHETIC; without the variable nothing changes.
+struct PadPress {WORD buttons;ULONGLONG at;bool pressed=false,released=false;};
+static std::vector<PadPress> presses;
+static void (*padLog)(const char*)=nullptr;
+static void schedulePad(void (*log)(const char*)) {
+    wchar_t value[512];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_PAD",value,512);
+    if(!n||n>=512)return;
+    padLog=log;std::wstring text(value,n);
+    static const std::pair<const wchar_t*,WORD> names[]={{L"a",XINPUT_GAMEPAD_A},{L"b",XINPUT_GAMEPAD_B},
+        {L"x",XINPUT_GAMEPAD_X},{L"y",XINPUT_GAMEPAD_Y},{L"start",XINPUT_GAMEPAD_START},{L"back",XINPUT_GAMEPAD_BACK},
+        {L"up",XINPUT_GAMEPAD_DPAD_UP},{L"down",XINPUT_GAMEPAD_DPAD_DOWN},{L"left",XINPUT_GAMEPAD_DPAD_LEFT},
+        {L"right",XINPUT_GAMEPAD_DPAD_RIGHT}};
+    for(size_t pos=0;pos<text.size();) {
+        size_t comma=text.find(L',',pos);if(comma==std::wstring::npos)comma=text.size();
+        auto item=text.substr(pos,comma-pos);pos=comma+1;
+        auto at=item.find(L'@');if(at==std::wstring::npos)continue;
+        auto button=item.substr(0,at);
+        for(auto& name:names)if(button==name.first)presses.push_back({name.second,ULONGLONG(_wtoi(item.c_str()+at+1))*1000});
+    }
+    if(presses.empty())return;
+    XINPUT_GAMEPAD idle{};xinput_core::publish(0,&idle);
+    char line[96];snprintf(line,sizeof line,"SYNTHETIC PAD connected idle; %zu scheduled presses",presses.size());log(line);
+}
+static void drivePad(ULONGLONG elapsed) {
+    for(auto& p:presses) {
+        XINPUT_GAMEPAD pad{};
+        if(!p.pressed&&elapsed>=p.at) {
+            pad.wButtons=p.buttons;xinput_core::publish(0,&pad);p.pressed=true;
+            char line[96];snprintf(line,sizeof line,"SYNTHETIC PAD press buttons=0x%04x at %llu ms",p.buttons,elapsed);padLog(line);
+        } else if(p.pressed&&!p.released&&elapsed>=p.at+200) {
+            xinput_core::publish(0,&pad);p.released=true;padLog("SYNTHETIC PAD release");
+        }
+    }
+}
 // Pump the native surface window while the guest worker runs.
 static void wait(HANDLE worker,DWORD ms) {
     auto msgWait=user<DWORD(WINAPI*)(DWORD,const HANDLE*,BOOL,DWORD,DWORD)>("MsgWaitForMultipleObjects");
     auto peek=user<BOOL(WINAPI*)(HostMsg*,HWND,UINT,UINT,UINT)>("PeekMessageW");
     auto dispatch=user<LRESULT(WINAPI*)(const HostMsg*)>("DispatchMessageW");
-    ULONGLONG end=GetTickCount64()+ms;
+    ULONGLONG start=GetTickCount64(),end=start+ms;
     for(;;) {
         ULONGLONG now=GetTickCount64();if(now>=end)return;
+        drivePad(now-start);
         DWORD left=DWORD(std::min<ULONGLONG>(end-now,100));
         if(msgWait(worker?1:0,worker?&worker:nullptr,FALSE,left,allInput)==WAIT_OBJECT_0&&worker)return;
         HostMsg m;while(peek(&m,nullptr,0,0,1/*PM_REMOVE*/))dispatch(&m);
@@ -234,6 +272,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         mlp::donor_resolve=donor_pe::exported;
         if(!host_surface::create()) {logline("HOST SURFACE FAIL native Wine window unavailable");return 3;}
         play_graphics::configure(&host_surface::token,host_surface::present,logline);
+        host_surface::schedulePad(logline);
         logline("HOST SURFACE native Wine window stands in for the CoreWindow (off-device only)");
     }
     if(!play_runtime::start(root,game?L"Megabonk.exe":std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":L"play-guest.exe",game?play_runtime::wide(launch_arguments::for_app(3405340)):play_runtime::wide(args),logline))return 1;
