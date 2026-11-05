@@ -20,6 +20,7 @@
 #include "../../shared/pe_tail_test.h"
 #include "../../audio/probe.h"
 #include "../../audio/routes.h"
+#include "../../uwph/kernel32/desktop_policy.h"
 namespace mlp {
 struct Route { const char* dll; const char* kind; };
 static const Route routes[] = {
@@ -115,6 +116,9 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
         reinterpret_cast<dwmapi_core::IsWindow>(user32_core::resolve("user32.dll","IsWindow")),
         reinterpret_cast<dwmapi_core::WindowRect>(user32_core::resolve("user32.dll","GetWindowRect")),
         reinterpret_cast<dwmapi_core::WindowLong>(user32_core::resolve("user32.dll","GetWindowLongPtrW")));
+    // Desktop process policies and services (AppPolicy*, ktmw32): before the
+    // system loader, whose answers describe the UWP host package.
+    if(auto policy=desktop_policy::resolve(key.c_str(),name)) address=policy;
     if(!address) address=sysx_native::resolve(dll,name);
     // No guest OpenGL driver: Wine-equivalent no-context wgl answers.
     if(!address) address=opengl32_core::resolve(dll,name);

@@ -377,12 +377,18 @@ static LONG WINAPI RegDeleteValueA(HKEY h,LPCSTR name) {
     if(!db_del_value(lower(k->path),lower(n))) return ERROR_WRITE_FAULT;
     k->values.erase(it); return ERROR_SUCCESS;
 }
+// No transaction can be created here (ktmw32: desktop_policy.h), so any
+// transaction handle a caller passes is not one this process issued.
+static LONG WINAPI RegCreateKeyTransactedW(HKEY,LPCWSTR,DWORD,LPWSTR,DWORD,REGSAM,const SECURITY_ATTRIBUTES*,PHKEY,LPDWORD,HANDLE,PVOID) {
+    return ERROR_INVALID_HANDLE;
+}
 struct Export { const char* name; uintptr_t address; };
 static const Export exports[]={
     {"RegCreateKeyW",(uintptr_t)&RegCreateKeyW},{"RegCreateKeyExW",(uintptr_t)&RegCreateKeyExW},
     {"RegSetValueExA",(uintptr_t)&RegSetValueExA},{"RegSetValueExW",(uintptr_t)&RegSetValueExW},
     {"RegQueryValueExA",(uintptr_t)&RegQueryValueExA},{"RegQueryValueExW",(uintptr_t)&RegQueryValueExW},
     {"RegDeleteValueA",(uintptr_t)&RegDeleteValueA},{"RegOpenKeyExW",(uintptr_t)&RegOpenKeyExW},{"RegCloseKey",(uintptr_t)&RegCloseKey},
+    {"RegCreateKeyTransactedW",(uintptr_t)&RegCreateKeyTransactedW},
 };
 static uintptr_t lookup(const char* name) { for(auto& e:exports) if(!strcmp(e.name,name)) return e.address; return 0; }
 }
