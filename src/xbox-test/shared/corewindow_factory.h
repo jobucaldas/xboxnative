@@ -43,7 +43,7 @@ struct Output final : IDXGIOutput {
         if(!count)return DXGI_ERROR_INVALID_CALL;
         UINT n=displayable(f)?1:0;
         if(!modes){*count=n;return S_OK;}
-        if(*count<n){*count=0;return DXGI_ERROR_MORE_DATA;}
+        if(*count<n){*count=n;return DXGI_ERROR_MORE_DATA;}
         if(n)modes[0]=mode(f);
         *count=n;return S_OK;
     }
