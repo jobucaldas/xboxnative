@@ -8,7 +8,7 @@ search, or protocol substitute. The game remains responsible for DbgHelp's
 single-threaded calling contract. Native WinINet networking remains subject to
 AppContainer capabilities and Xbox policy; these routes grant no exemptions.
 
-`WINEPREFIX=<isolated-prefix> bash xbox-test/uwph/sysx/test.sh` runs off-device:
+`WINEPREFIX=<isolated-prefix> bash src/xbox-test/uwph/sysx/test.sh` runs off-device:
 
 - Resolver rejects null arguments, unapproved DLLs/exports, and wrong-case names.
 - SymInitialize opens a real symbol session. SymLoadModuleEx registers the
@@ -30,10 +30,10 @@ listener failure fails the test; neither is native-operation evidence.
 No Xbox export availability, deployment, UWP networking, frame, or gameplay
 milestone is established by these tests. Pending native exports remain in
 `research/sysx-todo.csv` until console verification. Regenerate inventory with
-`python3 research/sysx/audit.py`. Source CSV defaults to the shared research
+`python3 src/research/sysx/audit.py`. Source CSV defaults to the shared research
 input and can be supplied explicitly with `--source`.
 
-`WINEPREFIX=<isolated-prefix> bash xbox-test/uwph/sysx/system-test.sh` exercises
+`WINEPREFIX=<isolated-prefix> bash src/xbox-test/uwph/sysx/system-test.sh` exercises
 existing `system` routes from the actual launcher route table. Every tested
 export must belong to a system-routed DLL and load through System32. The test
 checks the SHA-256 `abc` vector, hash buffer sizing and destroyed-handle failure,
@@ -48,7 +48,7 @@ operation coverage only; they do not certify Xbox permissions or behavior.
 The runner bounds Wine to 30 seconds, with a five-second forced-kill grace;
 a timeout fails the regression without changing any API assertion.
 
-`WINEPREFIX=<isolated-prefix> bash xbox-test/uwph/sysx/network-test.sh` checks
+`WINEPREFIX=<isolated-prefix> bash src/xbox-test/uwph/sysx/network-test.sh` checks
 Winsock through the production `system` route and real System32 exports. The
 regression verifies the game's ordinal aliases, numeric address conversion and
 resolution, a real IPv4 TCP listener/client pair, select readiness, send/recv
@@ -59,7 +59,7 @@ Wine unhandled-fault diagnostics even if Wine exits zero. No external service,
 AF_UNIX socket, account, game file or console is used by the regression. This
 is host operation coverage, not Xbox/AppContainer networking permission proof.
 
-`WINEPREFIX=<isolated-prefix> bash xbox-test/uwph/sysx/certificate-test.sh`
+`WINEPREFIX=<isolated-prefix> bash src/xbox-test/uwph/sysx/certificate-test.sh`
 checks all seven game-imported crypt32 exports through the production system
 route. OpenSSL generates an ephemeral self-signed DER fixture, without adding
 it to any system trust store. The regression rejects malformed DER and duplicate
@@ -73,7 +73,7 @@ console access are used. Path conversion and Wine execution have deadlines;
 Wine unhandled-fault diagnostics fail the runner even with exit zero. This is
 host operation proof, not Xbox crypt32 or AppContainer permission proof.
 
-`WINEPREFIX=<isolated-prefix> bash xbox-test/uwph/sysx/proxy-test.sh` exercises
+`WINEPREFIX=<isolated-prefix> bash src/xbox-test/uwph/sysx/proxy-test.sh` exercises
 all four imported WinHTTP exports through the production system route. It
 checks invalid sessions/options, reads current-user proxy configuration and
 frees returned strings without changing settings, then serves a PAC script
@@ -86,7 +86,7 @@ establishes host proxy operation coverage, not Xbox permission or PAC support.
 The parameter-error oracle is Wine 10's `dlls/winhttp/tests/winhttp.c` and
 `dlls/winhttp/session.c`; production system exports are exercised directly.
 
-`WINEPREFIX=<isolated-prefix> bash xbox-test/uwph/sysx/path-test.sh` checks both
+`WINEPREFIX=<isolated-prefix> bash src/xbox-test/uwph/sysx/path-test.sh` checks both
 imported SHLWAPI exports through the production `pe_tail` resolver and verifies
 that their addresses equal the actual loaded System32 exports. Path checks
 cover absolute, relative and UNC normalization, parent traversal at a drive
@@ -99,7 +99,7 @@ Wine 10's `dlls/kernelbase/path.c` and `dlls/shlwapi/tests/path.c` provide the
 path oracle. Input/output buffers are distinct; overlapping buffers are not
 part of this contract. These are off-device operation checks, not Xbox proof.
 
-`WINEPREFIX=<isolated-prefix> bash xbox-test/uwph/sysx/version-test.sh` checks
+`WINEPREFIX=<isolated-prefix> bash src/xbox-test/uwph/sysx/version-test.sh` checks
 all three imported version APIs through the production DLL route classification
 and actual System32 exports. The runner embeds a deterministic VERSIONINFO
 resource into its temporary regression PE. Checks cover exact file/product
@@ -109,7 +109,7 @@ game or system file is modified. Wine execution has a 30-second deadline and
 five-second termination grace; unhandled faults fail even with exit zero.
 This is off-device operation proof, not Xbox export or AppContainer proof.
 
-`WINEPREFIX=<isolated-prefix> bash xbox-test/uwph/sysx/adapter-test.sh` checks
+`WINEPREFIX=<isolated-prefix> bash src/xbox-test/uwph/sysx/adapter-test.sh` checks
 all three imported IP Helper exports through the production system route and
 real System32 exports. It verifies adapter buffer sizing, IPv4 enumeration
 including loopback, and agreement with GetIfEntry on index, type, MTU and

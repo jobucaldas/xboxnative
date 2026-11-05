@@ -13,17 +13,17 @@ Review these local commits in order (do not copy lane notes over vis notes):
 - `f106736c`: DWM calls against validated guest window records.
 - `da6c9e2a`: foreign IME context errors.
 
-Production files are `xbox-test/app/host/mlp_probe.h`,
-`xbox-test/uwph/sysx/native.h`, `xbox-test/uwph/imm32/route.h`, and
-`xbox-test/uwph/dwmapi/route.h`. Keep the existing user32 record callbacks:
+Production files are `src/xbox-test/app/host/mlp_probe.h`,
+`src/xbox-test/uwph/sysx/native.h`, `src/xbox-test/uwph/imm32/route.h`, and
+`src/xbox-test/uwph/dwmapi/route.h`. Keep the existing user32 record callbacks:
 passing guest HWND values to desktop DWM is invalid. Resolve native symbols
 before the DLL-level stub fallback. Invoke `sysx_native::discover` from the
 existing one-time discovery path. Missing native exports must remain unresolved.
 
 ## Verification gates
 
-Before console installation, run the unchanged `xbox-test/smoke-all.sh --offline`
-and host regressions documented in `xbox-test/uwph/sysx/README.md`, plus IMM32
+Before console installation, run the unchanged `src/xbox-test/smoke-all.sh --offline`
+and host regressions documented in `src/xbox-test/uwph/sysx/README.md`, plus IMM32
 and DWM regressions. Host passes establish no Xbox API-operation claim.
 
 Console ownership remains with vis. Use `/workspace/x64-run/CONSOLE.lock`, a
@@ -42,7 +42,7 @@ Xbox native-operation result or whole-area completion is implied here.
 
 ## Pending inventory
 
-Regenerate with `python3 research/sysx/audit.py`. At this handoff there are
+Regenerate with `python3 src/research/sysx/audit.py`. At this handoff there are
 222 owned imports and 20 pending rows: eleven native-export/API checks, two
 partial DWM entries, and seven explicitly deferred audio entries. DWM policy
 changes return `E_NOTIMPL` because the guest backend has no policy renderer.

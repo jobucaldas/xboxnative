@@ -65,7 +65,7 @@ the test compares and preserves this failure, not working callback semantics.
 Signed launcher build passed. Unchanged offline smoke passed 2/2. Current
 vis notes report stuck console deployment and full-smoke failures predating
 these changes; no console was used by sysx and no Xbox availability is claimed.
-The reproducible research/sysx/audit.py reports 222 owned imports, with 18 still
+The reproducible src/research/sysx/audit.py reports 222 owned imports, with 18 still
 missing or Xbox-unverified (11 new native routes plus seven deferred audio).
 System/tail entries also remain unverified for operation-specific UWP behavior;
 that count is an import-route inventory, not a completion claim.

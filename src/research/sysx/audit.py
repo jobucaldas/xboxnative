@@ -9,7 +9,7 @@ import csv
 import pathlib
 import re
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+ROOT = pathlib.Path(__file__).resolve().parents[3]
 OWNED = {
     'advapi32.dll', 'crypt32.dll', 'ole32.dll', 'oleaut32.dll', 'version.dll',
     'dbghelp.dll', 'shlwapi.dll', 'setupapi.dll', 'iphlpapi.dll', 'ws2_32.dll',
@@ -22,13 +22,13 @@ FIELDS = ['dll', 'symbol', 'console_route', 'wine_class', 'verdict',
 
 def audit(source):
     routes = dict(re.findall(r'\{"([^"]+)", "([^"]+)"\}',
-        (ROOT / 'xbox-test/app/host/mlp_routes.h').read_text()))
+        (ROOT / 'src/xbox-test/app/host/mlp_routes.h').read_text()))
     tail = set(re.findall(r'\{"([^"]+)","([^"]+)"\}',
-        (ROOT / 'xbox-test/shared/pe_tail.h').read_text()))
+        (ROOT / 'src/xbox-test/shared/pe_tail.h').read_text()))
     imm = set(re.findall(r'!strcmp\(name, "([^"]+)"\)',
-        (ROOT / 'xbox-test/uwph/imm32/route.h').read_text()))
+        (ROOT / 'src/xbox-test/uwph/imm32/route.h').read_text()))
     native = set(re.findall(r'\{"([^"]+)", "([^"]+)"\}',
-        (ROOT / 'xbox-test/uwph/sysx/native.h').read_text()))
+        (ROOT / 'src/xbox-test/uwph/sysx/native.h').read_text()))
     result = []
     for row in csv.DictReader(source):
         dll, symbol = row['dll'], row['symbol']
