@@ -66,6 +66,36 @@ static int pe_machine(const std::wstring& p) {   // 0 = unreadable/not PE, else 
     FILE* f = _wfopen(p.c_str(), L"rb"); if (!f) return 0; unsigned char h[1024]; size_t n = fread(h, 1, sizeof h, f); fclose(f);
     if (n < 0x40 || h[0] != 'M' || h[1] != 'Z') return 0; uint32_t o = *(uint32_t*)(h + 0x3c); if (o + 6 > n || memcmp(h + o, "PE\0\0", 4)) return 0; return *(uint16_t*)(h + o + 4);
 }
+// Steam API provider for the signed-in account's game (AGENTS.md rule 3): the
+// packaged, pinned gbe_fork steam_api64.dll is copied to LocalState\steam\<appid>
+// with steam_settings for this account, and Play maps it in place of the game's
+// steam_api64.dll (the game's own file is untouched). The SteamID is written only
+// to that on-device settings file, never to a log. Without a packaged provider or
+// a signed-in account nothing is staged and Steam calls fail naturally.
+// TODO(ownership gate): verify the account owns appid before staging (parked).
+static bool stage_steam_provider(uint32_t appid) {
+    wchar_t exe[2048];DWORD n=GetModuleFileNameW(nullptr,exe,2048);
+    if(!n||n>=2048)return false;
+    std::wstring package(exe,n);package.resize(package.find_last_of(L"\\/")+1);
+    const std::wstring source=package+L"steam-provider\\gbe\\steam_api64.dll";
+    if(GetFileAttributesW(source.c_str())==INVALID_FILE_ATTRIBUTES){lp_sink("STEAM provider: none packaged; game Steam calls fail naturally");return false;}
+    auto session=user_session();
+    if(!session||session->anon||!session->steamid){lp_sink("STEAM provider: no signed-in account; not staged");return false;}
+    const std::wstring dir=g_dir+L"\\steam\\"+widen(std::to_string(appid));
+    for(auto d:{g_dir+L"\\steam",dir,dir+L"\\steam_settings",dir+L"\\saves"})CreateDirectoryW(d.c_str(),nullptr);
+    const std::wstring target=dir+L"\\steam_api64.dll";
+    COPYFILE2_EXTENDED_PARAMETERS copy{};copy.dwSize=sizeof copy;
+    HRESULT hr=CopyFile2(source.c_str(),target.c_str(),&copy);
+    if(FAILED(hr)){char line[96];snprintf(line,sizeof line,"STEAM provider: copy failed hr=0x%08lx; not staged",(unsigned long)hr);lp_sink(line);return false;}
+    write_text(dir+L"\\steam_settings\\steam_appid.txt",std::to_string(appid)+"\n");
+    write_text(dir+L"\\steam_settings\\configs.user.ini","[user::general]\naccount_name=Player\naccount_steamid="+
+        std::to_string(session->steamid)+"\nlanguage=english\n[user::saves]\nlocal_save_path=./saves\n");
+    // No LAN/peer networking yet: achievements and cloud saves sync through the launcher.
+    write_text(dir+L"\\steam_settings\\configs.main.ini","[main::connectivity]\ndisable_networking=1\n");
+    play_runtime::set_steam_provider(target);
+    char line[160];snprintf(line,sizeof line,"STEAM provider: gbe_fork staged in LocalState\\steam\\%u for the signed-in account",appid);lp_sink(line);
+    return true;
+}
 static void lp_run_impl(LpCtx& c) {
     wine_gap::report(c.root);
     if(c.names.empty()) {c.failName="no executable";return;}
@@ -82,6 +112,7 @@ static void lp_run_impl(LpCtx& c) {
     if(!donor_pe::probe(lp_sink)) {c.failName="Wine donor initialization/behavior";lp_sink("DWPE FAIL donor behavior gate; no game code executed");return;}
     mlp::donor_resolve=donor_pe::exported;
     if(!user32_core::test(lp_sink)) {c.failName="u32c-test.exe";lp_sink("U32C FAIL regression PE; no game code executed");return;}
+    stage_steam_provider(c.appid);
     if(!play_runtime::start(c.root,exe,c.args,lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
     auto r=play_runtime::state;
     ULONGLONG end=GetTickCount64()+110000; bool reportedRunning=false;
