@@ -68,7 +68,9 @@ lld-link-19 "$out"/obj/cxx/tests_play-cxx.*.obj /dll /out:"$out/play-cxx.dll" \
 UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --out "$out/play-runner.exe" tests/play-runner.cpp -- /MT /O2
 # Use the exact packaged carriers from the launcher build.
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long steam-api steam-client steam-api-milestone steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx;do
+# Owned stand-in so steam-client proves refusal of a present root client DLL.
+cp "$out/play-dependency.dll" "$out/steamclient64.dll"
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -97,3 +99,13 @@ for flags in 0x100 0x500;do
  fi
 done
 cp "$out/obj/play-cxx-cookie.dll" "$cxx"
+# Steam without a genuine client. A steamclient64.dll in the game root must be
+# refused (steam-client runs above with it present); a root steam_api64.dll is
+# an ordinary game DLL. Owned stand-ins only, removed afterwards.
+rm -f "$out/steamclient64.dll" "$out/steam_api64.dll"
+cp "$out/play-dependency.dll" "$out/steam_api64.dll"
+WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" root-steam > "$out/root-steam.log" 2>&1
+tail -1 "$out/root-steam.log"
+grep -q "steam_api64.dll is the game's original file, mapped unmodified" "$out/root-steam.log"
+rm -f "$out/steam_api64.dll"
+

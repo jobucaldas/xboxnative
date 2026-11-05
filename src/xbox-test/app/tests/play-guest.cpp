@@ -134,13 +134,21 @@ DWORD guest_exe_entry(){
 #ifdef PLAY_STATIC_STEAM
     ForwardSteam(); // Static forwarded Steam imports must block before TLS.
 #endif
-    if(contains(GetCommandLineW(),L"steam-forward")) {
-        auto call=(void(*)())GetProcAddress(GetModuleHandleW(L"play-forward.dll"),"ForwardSteam");
-        if(!call)return 19;
-        call();
+    // No genuine Steam client exists: Steam calls fail as on Windows without
+    // the files, and the guest carries on. Nothing answers in Steam's place.
+    if(contains(GetCommandLineW(),L"steam-forward") &&
+        GetProcAddress(GetModuleHandleW(L"play-forward.dll"),"ForwardSteam"))return 19;
+    if(contains(GetCommandLineW(),L"steam-api") &&
+        (LoadLibraryW(L"StEaM_ApI64") || GetLastError()!=ERROR_MOD_NOT_FOUND))return 40;
+    // A steamclient64.dll in the game root is refused, never mapped.
+    if(contains(GetCommandLineW(),L"steam-client") &&
+        (LoadLibraryW(L"STEAMCLIENT64.DLL") || GetLastError()!=ERROR_MOD_NOT_FOUND))return 41;
+    // A root steam_api64.dll is an ordinary game DLL (owned stand-in here).
+    if(contains(GetCommandLineW(),L"root-steam")) {
+        auto api=LoadLibraryW(L"steam_api64");
+        auto check=api?(int(*)())GetProcAddress(api,"dependency_check"):nullptr;
+        if(!check || !check())return 43;
     }
-    if(contains(GetCommandLineW(),L"steam-api"))LoadLibraryW(L"StEaM_ApI64");
-    if(contains(GetCommandLineW(),L"steam-client"))LoadLibraryW(L"STEAMCLIENT64.DLL");
     if(contains(GetCommandLineW(),L"wide-long")) {
         static wchar_t text[2050];for(int i=0;i<2047;++i)text[i]=L'\u00e7';
         text[2047]=0xd83d;text[2048]=0xde00;text[2049]=0;
