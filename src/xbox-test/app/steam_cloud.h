@@ -70,6 +70,9 @@ inline bool safe_relative(const std::string& path) {
     return true;
 }
 // "%WinAppDataLocalLow%Ved/Megabonk/Saves/CloudDir/<id>/" + "progression.json"
+// A link inside a save root may point anywhere: never read, write or descend
+// through one (the lexical checks above cannot see where it leads).
+inline bool linked(const fs::path& p) { std::error_code ec; return fs::is_symlink(fs::symlink_status(p,ec)); }
 inline std::optional<fs::path> local_path(const Roots& roots,const std::string& prefix,const std::string& name) {
     if(prefix.size()<2||prefix[0]!='%') return std::nullopt;
     size_t close=prefix.find('%',1);if(close==std::string::npos) return std::nullopt;
@@ -78,7 +81,8 @@ inline std::optional<fs::path> local_path(const Roots& roots,const std::string& 
     if(!safe_relative(relative)) return std::nullopt;
     fs::path out=it->second;
     size_t start=0;
-    while(start<relative.size()){size_t end=relative.find('/',start);if(end==std::string::npos)end=relative.size();out/=relative.substr(start,end-start);start=end+1;}
+    while(start<relative.size()){size_t end=relative.find('/',start);if(end==std::string::npos)end=relative.size();out/=relative.substr(start,end-start);start=end+1;
+        if(linked(out)) return std::nullopt;}
     return out;
 }
 struct Remote { std::string name, sha; uint32_t prefix=0, raw=0; uint64_t time=0; int persist=0; };
@@ -128,10 +132,10 @@ template<class F> inline void walk(const fs::path& dir,bool recursive,F&& visit)
     std::error_code ec;
     if(recursive) {
         fs::recursive_directory_iterator it(dir,fs::directory_options::skip_permission_denied,ec),end;
-        for(;!ec&&it!=end;it.increment(ec)) visit(*it);
+        for(;!ec&&it!=end;it.increment(ec)) if(!linked(it->path())) visit(*it);
     } else {
         fs::directory_iterator it(dir,fs::directory_options::skip_permission_denied,ec),end;
-        for(;!ec&&it!=end;it.increment(ec)) visit(*it);
+        for(;!ec&&it!=end;it.increment(ec)) if(!linked(it->path())) visit(*it);
     }
 }
 struct Result { unsigned downloaded=0, uploaded=0, unchanged=0, kept=0, busy=0, failed=0; };
@@ -209,8 +213,9 @@ inline Result upload(Io& io,uint32_t appid,const Roots& roots,const std::vector<
         auto it=roots.find(rule.root);if(it==roots.end()) continue;
         if(!rule.path.empty()&&!safe_relative(rule.path)) continue;
         fs::path base=it->second;std::string rel=rule.path;
-        for(size_t s=0;s<rel.size();){size_t e=rel.find('/',s);if(e==std::string::npos)e=rel.size();base/=rel.substr(s,e-s);s=e+1;}
-        std::error_code ec;if(!fs::is_directory(base,ec)) continue;
+        bool through=false;
+        for(size_t s=0;s<rel.size();){size_t e=rel.find('/',s);if(e==std::string::npos)e=rel.size();base/=rel.substr(s,e-s);s=e+1;through|=linked(base);}
+        std::error_code ec;if(through||!fs::is_directory(base,ec)) continue;
         auto visit=[&](const fs::directory_entry& entry) {
             std::error_code fileError;
             if(!entry.is_regular_file(fileError)) return;
