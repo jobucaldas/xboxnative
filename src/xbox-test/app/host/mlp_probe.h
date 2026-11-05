@@ -1,5 +1,6 @@
 #include "../../uwph/gdi32/route.h"
 #include "../../uwph/opengl32/route.h"
+#include "../../uwph/host/reg_builtin.h"
 #pragma once
 #include "../../uwph/xinput/route.h"
 #include "../../uwph/user32/route.h"
@@ -73,6 +74,9 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     const char* kind="unclassified";
     for(auto& route:routes) if(key==route.dll) kind=route.kind;
     uintptr_t address=kernel32_core::resolve(dll,name);
+    // The console refuses HKCU writes (ERROR_ACCESS_DENIED): Unity PlayerPrefs and
+    // other guests use the uwph registry (LocalState\registry.sqlite) instead.
+    if(!address && name && key=="advapi32.dll") address=regb::lookup(name);
     if(!address && !strcmp(kind,"wine-pe")) {
         if(donor_resolve)address=donor_resolve(key.c_str(),name,ordinal);
         if(address)log(("DWPE ROUTE "+key+"!"+symbol).c_str());

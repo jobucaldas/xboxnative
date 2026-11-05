@@ -126,6 +126,13 @@ int main() {
     assert(up.uploaded==2&&up.failed==0&&server.batches==1&&server.completed==1);
     assert(server.committed.size()==2&&server.uploads["/put/"+server.prefix+"localnewer.json"]=="mine");
     assert(server.uploads.count("/put/"+server.prefix+"slot/run.json")&&server.uploads.size()==2);
+    // Links inside the save root are never followed: not uploaded, not
+    // downloaded through.
+    auto outside=root.parent_path()/"steam-cloud-outside";fs::create_directories(outside);
+    write_file(outside/"secret.json","outside");
+    fs::create_symlink(outside/"secret.json",dir/"link.json");
+    fs::create_directory_symlink(outside,dir/"linkdir");
+    assert(!local_path(roots,"%WinAppDataLocalLow%Ved/Megabonk/Saves/CloudDir/1/","linkdir/x.json"));
     auto again=upload(io,3405340,roots,saveRules,"Xbox");      // nothing new: no batch
     assert(again.uploaded==0&&server.batches==1);
     // A save written just now waits for a later pass; an older one goes up.
@@ -136,6 +143,17 @@ int main() {
     set_unix_time(dir/"fresh.json",nowSeconds-60);
     auto later=upload(io,3405340,roots,saveRules,"Xbox",30);
     assert(later.uploaded==1&&later.busy==0&&server.batches==2);
-    fs::remove_all(root);
+    // Save-triggered sync: the signature changes when a matching save changes,
+    // not for files outside the rules.
+    auto before=signature(roots,saveRules);
+    write("notes.txt","changed",nowSeconds+5);
+    assert(signature(roots,saveRules)==before);
+    write("slot/run.json","run2",nowSeconds+5);
+    assert(signature(roots,saveRules)!=before);
+    auto extraDir=root/"extra";write_file(extraDir/"achievements.json","{}");
+    auto withExtra=signature(roots,saveRules,{extraDir});
+    write_file(extraDir/"achievements.json","{\"A\":{}}");
+    assert(signature(roots,saveRules,{extraDir})!=withExtra);
+    fs::remove_all(root);fs::remove_all(outside);
     puts("STEAM-CLOUD PASS: rules, paths, download policy/backup/traversal, upload batch/blocks/commit");
 }
