@@ -1,0 +1,3 @@
+LIBRARY strict-provider.dll
+EXPORTS
+    absent_name

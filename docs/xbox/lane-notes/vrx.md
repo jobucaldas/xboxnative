@@ -13,20 +13,20 @@ launcher package that lanes `app`/`dl` are actively using on the same shared con
 
 ## Resume state (2026-10-25, session start)
 Branch `lane/vrx` was freshly forked from `g/launcher` tip (`56acf688`) with no vrx-specific commits yet
-— `lanes/vrx.log` only had the "starting claude" line. `xbox-test/vrx/` did not exist. This session is
+— `lanes/vrx.log` only had the "starting claude" line. `src/xbox-test/vrx/` did not exist. This session is
 building it from scratch.
 
 ## Plan
-1. `xbox-test/vrx/main.cpp` — minimal CoreWindow+D3D11 UWP app (copied/trimmed from the M1 app,
+1. `src/xbox-test/vrx/main.cpp` — minimal CoreWindow+D3D11 UWP app (copied/trimmed from the M1 app,
    commit `2ab0b569`, not the full launcher) that on boot runs the 3 SEH-wrapped test cases once, logs
    `caseA/B/C: ... OK value=42 | FAILED err=N | EXCEPTION code=0x...` to `LocalState\vrx.log`, then idles
    rendering a heartbeat frame (so it behaves like a normal foreground UWP app and doesn't get reaped).
-2. `xbox-test/vrx/AppxManifest.xml` — Identity `Joao.XboxSteam.Vrx`, same Publisher CN convention as
-   `xbox-test/app` (`CN=grok-xbox-dev`, so the existing self-signed test cert flow in build.sh just works
+2. `src/xbox-test/vrx/AppxManifest.xml` — Identity `Joao.XboxSteam.Vrx`, same Publisher CN convention as
+   `src/xbox-test/app` (`CN=grok-xbox-dev`, so the existing self-signed test cert flow in build.sh just works
    unmodified — the prompt's example `CN=BoxedwineDev` was illustrative, what matters is a distinct
    package Name). `codeGeneration` capability included (needed for the FromApp JIT path, case c).
-3. `xbox-test/vrx/build.sh` — copy of `xbox-test/app/build.sh` pointed at the new dir/manifest/exe name.
-4. Build, `xbox-test/dp/install.sh`, find the new PackageFullName (list via Device Portal packagemanager
+3. `src/xbox-test/vrx/build.sh` — copy of `src/xbox-test/app/build.sh` pointed at the new dir/manifest/exe name.
+4. Build, `src/xbox-test/dp/install.sh`, find the new PackageFullName (list via Device Portal packagemanager
    endpoint — no existing dp script lists packages, may add a tiny one-off query), launch, `wait-log.sh`
    for `vrx.log`, `get-file.sh` to pull it to `x64-run/runs/vrx/vrx.log`.
 5. Write the verdict into this file (which path Wine's loader should use) and update
@@ -34,7 +34,7 @@ building it from scratch.
 
 ## Must NOT do
 - Never log/print `DP_PASS`/`TS_AUTHKEY`.
-- `xbox-test/dp/*.sh` take `CONSOLE.lock` themselves — don't double-wrap with an outer `flock`.
+- `src/xbox-test/dp/*.sh` take `CONSOLE.lock` themselves — don't double-wrap with an outer `flock`.
 - Console is shared with other running lanes (`app`, `deploy`/`dl`) — keep sessions short, only
   kill/uninstall the `Joao.XboxSteam.Vrx` package, never touch `Grok.XboxTest`.
 - Local-only branch, never push.
@@ -51,7 +51,7 @@ use MEM_COMMIT|MEM_RESERVE at a null address. Console testing is next.
 ## Final result — verified on real Xbox Series S (2026-10-25)
 Installed the signed isolated package successfully, launched via Device Portal (HTTP 200), and
 fetched LocalState\\vrx.log to `/workspace/x64-run/runs/vrx/vrx.log`. A copy is committed at
-`xbox-test/vrx/results/console-vrx.log`. Package full name:
+`src/xbox-test/vrx/results/console-vrx.log`. Package full name:
 `Joao.XboxSteam.Vrx_0.1.0.0_x64__dk715arakrne0`, publisher `CN=grok-xbox-dev`.
 
 - A: VirtualAlloc(MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE) failed, GetLastError=87.

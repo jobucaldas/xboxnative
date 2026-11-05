@@ -22,7 +22,7 @@ console" to "Megabonk's first frame", with an import-gap table and an architectu
    verified on console; launcher+QR login done; downloads still a stub; Megabonk only 24/69 files
    present) rather than the stale "queued" status in the old `x64-run/LANES.md`.
 4. Found prior art already in the repo I almost missed: `docs/daytona-wine11-gdi.md` and
-   `tools/buildWine/`/`tools/d3dToWebGL` show this fork already has a mature pipeline for building Wine
+   `src/tools/buildWine/`/`src/tools/d3dToWebGL` show this fork already has a mature pipeline for building Wine
    from source with custom patches and even compiling a standalone PE `wined3d.dll` targeting a
    non-standard backend (WebGL) — direct precedent for "PE DLL targeting a different backend", though
    that pipeline targets 32-bit (`-m32`) for Boxedwine's CPU-emulated guest, not the 64-bit native target

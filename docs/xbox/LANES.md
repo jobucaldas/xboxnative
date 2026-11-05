@@ -6,19 +6,19 @@ folded in below with real status; its "João idea" addendum is folded into §4, 
 Runner: `x64-run/lane.sh NAME WORKTREE PROMPTFILE [codex|claude]`, prompts in `x64-run/lanes/*.prompt`.
 Rule for every lane below: local worktree + `lane/<id>` branch, NEVER push, commit after each milestone,
 run `x64-run/backup.sh` after milestones, wrap console-touching commands in
-`flock /workspace/x64-run/CONSOLE.lock <cmd>` (the `xbox-test/dp/*.sh` scripts already take the lock
+`flock /workspace/x64-run/CONSOLE.lock <cmd>` (the `src/xbox-test/dp/*.sh` scripts already take the lock
 themselves — don't double-wrap those).
 
 ## 0. Current status (ground truth, not aspirational — read before planning more work)
 
 | Piece | State | Evidence |
 |---|---|---|
-| M1 minimal UWP test app | **DONE, verified on console** | `xbox-test/app/{main.cpp,AppxManifest.xml,build.sh}` (commit `2ab0b569`). Boots as `Grok.XboxTest_...!App`, ignores `-ServerName:`, MTA, AppContainer, static CRT. `runs/m1-boot2.log`: `D3D11CreateDevice hr=0 fl=0xb000 (11_0)`, `CreateSwapChainForCoreWindow` 1920x1080, ~57 fps steady. `runs/m1-shot1.png` confirms the frame on screen. Gamepad: `Windows.Gaming.Input` wired but reported 0 pads in that run (not yet confirmed with a controller present). |
-| Device Portal scripts | **DONE, verified on console** | `xbox-test/dp/*.sh` (commit `faf3f247`, hardened `2e8fc9ba`): install/uninstall/launch/kill/ps/get-file/put-file/ls-dir/screenshot/wait-log/user-signin/pull-megabonk. CSRF-token handshake solved (403 fix). |
-| Launcher UI + Steam QR login | **DONE for login; downloads are a stub** | `xbox-test/app/main.cpp` + `qrcodegen.cpp` (commits `438d0810`,`8ba34b94`,`59b7f2dc`,`56acf688`), branch history now on `lane/dl` (built from `g/launcher`). QR login works; sort/paging/covers work; refresh-token persistence works (access-token HTTP renewal is refused by Steam for `SteamClient` tokens — worked around by keeping both tokens and falling back to QR on expiry). **The A-button download path is still a stub.** |
+| M1 minimal UWP test app | **DONE, verified on console** | `src/xbox-test/app/{main.cpp,AppxManifest.xml,build.sh}` (commit `2ab0b569`). Boots as `Grok.XboxTest_...!App`, ignores `-ServerName:`, MTA, AppContainer, static CRT. `runs/m1-boot2.log`: `D3D11CreateDevice hr=0 fl=0xb000 (11_0)`, `CreateSwapChainForCoreWindow` 1920x1080, ~57 fps steady. `runs/m1-shot1.png` confirms the frame on screen. Gamepad: `Windows.Gaming.Input` wired but reported 0 pads in that run (not yet confirmed with a controller present). |
+| Device Portal scripts | **DONE, verified on console** | `src/xbox-test/dp/*.sh` (commit `faf3f247`, hardened `2e8fc9ba`): install/uninstall/launch/kill/ps/get-file/put-file/ls-dir/screenshot/wait-log/user-signin/pull-megabonk. CSRF-token handshake solved (403 fix). |
+| Launcher UI + Steam QR login | **DONE for login; downloads are a stub** | `src/xbox-test/app/main.cpp` + `qrcodegen.cpp` (commits `438d0810`,`8ba34b94`,`59b7f2dc`,`56acf688`), branch history now on `lane/dl` (built from `g/launcher`). QR login works; sort/paging/covers work; refresh-token persistence works (access-token HTTP renewal is refused by Steam for `SteamClient` tokens — worked around by keeping both tokens and falling back to QR on expiry). **The A-button download path is still a stub.** |
 | Megabonk game files on console | **Partial** | `/workspace/megabonk-from-console`: 24 of 69 files (248 MB of ~523 MB) pulled from the OLD package's `LocalState\megabonk`. Missing `steam_api64.dll`, `Megabonk_Data/il2cpp_data/Metadata/global-metadata.dat`, `StreamingAssets`, `MonoBleedingEdge`, etc. **Cannot boot as-is.** A real download (lane `dl`) is required before any "first frame" attempt. |
 | Steam CM / depot downloader | **In progress (lane `dl`)** | Reference implementation already works OFF-console: `/workspace/steam-login/dl/dl.js` (Node, `steam-user` over the CM websocket) downloaded Megabonk appid `3405340` depot `3405342`, 69 files, 499 MB, all SHA1-verified. Lane `dl` is porting the same CM-websocket protocol to C++/WinRT so the **console itself** does the download through the launcher's A button. Not done yet. |
-| Native x64 PE execution inside the UWP AppContainer (Wine/uwph path) | **Not started — this is what §1-§4 below plan** | No code exists yet under any `xbox-test/uwph` or similar path. |
+| Native x64 PE execution inside the UWP AppContainer (Wine/uwph path) | **Not started — this is what §1-§4 below plan** | No code exists yet under any `src/xbox-test/uwph` or similar path. |
 
 Implication for sequencing: lanes `dl` (downloads) and the uwph/Wine path (this document, §3-§4) are
 **independent and can run in parallel** — the uwph work does not need a finished downloader, it needs
@@ -48,7 +48,7 @@ its exports, even if most of it is dead code once `-force-d3d11` runs.
 |---|---|---|
 | `KERNEL32.dll` (all 5 binaries, 256 unique symbols incl. `VirtualAlloc/Protect`, `CreateThread`, `CreateFileW`, **`CreateProcessW`**) | Mostly fine; `VirtualAlloc`/`VirtualProtect` with `PAGE_EXECUTE_READWRITE` are the one hard blocker (AppContainer requires `VirtualAllocFromApp`/`VirtualProtectFromApp`); `CreateProcessW` is flat-out blocked in AppContainer | **Wine builtin, patched**: keep Wine's real `kernel32.dll` PE (already x86_64, already on this box at `/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/kernel32.dll`) but give it a new unixlib backend (`uwph`) whose `VirtualAlloc`/`VirtualProtect` call the `...FromApp` variants, and whose `CreateProcessW` returns a clean failure instead of crashing the caller |
 | `ntdll.dll` (used directly only by `D3D12Core.dll`, but Wine's kernel32 calls down into Wine's ntdll internally) | Same W^X constraint at the `Nt*VirtualMemory` level; most of the rest (handles, exceptions, TLS) is plain NT and fine | Wine builtin + `uwph` backend (same component as kernel32 work, §4 lane `uwph-kernel32-ntdll`) |
-| `USER32.dll` / implicitly `win32u.dll` (122 symbols: `CreateWindowExW`, `RegisterClassExW`, `DefWindowProcW`, `GetMessageA`/`DispatchMessageA`-style loop, clipboard, `GetDC`/`ReleaseDC`) | **Hard blocker.** True UWP/CoreApplication AppContainer apps get exactly one OS-owned `CoreWindow`, no window station, no classic `HWND` creation, no clipboard without the WinRT `Clipboard` API, no `GetDC` (no HDC without a window station) | Wine builtin `user32.dll`/`win32u.dll` + a **new Wine display driver** that maps every Wine "HWND" onto the single real `CoreWindow` the app already creates (reuse the exact CoreWindow+swapchain code verified working in `xbox-test/app/main.cpp`). Clipboard/`GetDC`/OpenGL-context calls become no-ops/stubs — Megabonk doesn't need them with `-force-d3d11` |
+| `USER32.dll` / implicitly `win32u.dll` (122 symbols: `CreateWindowExW`, `RegisterClassExW`, `DefWindowProcW`, `GetMessageA`/`DispatchMessageA`-style loop, clipboard, `GetDC`/`ReleaseDC`) | **Hard blocker.** True UWP/CoreApplication AppContainer apps get exactly one OS-owned `CoreWindow`, no window station, no classic `HWND` creation, no clipboard without the WinRT `Clipboard` API, no `GetDC` (no HDC without a window station) | Wine builtin `user32.dll`/`win32u.dll` + a **new Wine display driver** that maps every Wine "HWND" onto the single real `CoreWindow` the app already creates (reuse the exact CoreWindow+swapchain code verified working in `src/xbox-test/app/main.cpp`). Clipboard/`GetDC`/OpenGL-context calls become no-ops/stubs — Megabonk doesn't need them with `-force-d3d11` |
 | `d3d11.dll` / `dxgi.dll` / `d3d12.dll` | **Already verified working natively from AppContainer** (REBUILD.md: "D3D11 feature level 11_0 OK; D3D12 OK", and M1 app's own `CreateSwapChainForCoreWindow` success) | **Do NOT route through Wine's wined3d.** Resolve these imports straight to Xbox's real system `d3d11.dll`/`dxgi.dll`/`d3d12.dll`. This is the single biggest scope-cut vs. the original REBUILD.md sketch — no wined3d GL/Vulkan→D3D11 translation backend needs to be written at all |
 | `bcrypt.dll`, `CRYPT32.dll`, `ole32.dll`, `OLEAUT32.dll`, `VERSION.dll` | Fully supported UWP-side APIs | Same treatment as D3D: resolve to the **real system DLLs**, no Wine builtin needed |
 | `WS2_32.dll` (18 symbols: `WSASocketW`, `getaddrinfo`, `WSAIoctl`, ...) | TCP (incl. loopback) verified OK on console; only `AF_UNIX` is refused, and nothing here asks for `AF_UNIX` — that's a *Wine-internal* wineserver IPC detail (§ below), not a Megabonk/Steamworks networking need | Resolve to the **real system `ws2_32.dll`** directly. Zero new code for this DLL |
@@ -101,7 +101,7 @@ What's actually new/hard, after the above cuts: only four things—
 2. An in-process replacement for wineserver's AF_UNIX-based IPC (handles/sync objects/process-thread
    bookkeeping), since AppContainer refuses `AF_UNIX` outright and UWP forbids a second OS process.
 3. A new Wine display driver mapping every Wine "window" operation onto the single real `CoreWindow`
-   the app already owns (reusing the verified `xbox-test/app` CoreWindow+D3D11 code).
+   the app already owns (reusing the verified `src/xbox-test/app` CoreWindow+D3D11 code).
 4. Stubs (not full implementations) for the dead-at-runtime peripheral DLLs (`opengl32`, `setupapi`,
    `hid`, `winhttp`'s unused parts, IME) so they load without crashing, per the import-gap table in §1.
 
@@ -149,8 +149,8 @@ Format: **ID | objective | files/dirs | build+test commands | acceptance | conso
 
 ### Done (kept for the record; do not re-run)
 
-- **app (M1)** — minimal signed UWP test app. Files: `xbox-test/app/{main.cpp,AppxManifest.xml,build.sh,qrcodegen.{cpp,hpp},Assets/}`. **DONE**, see §0.
-- **deploy** — Device Portal scripts. Files: `xbox-test/dp/*.sh`. **DONE**, see §0.
+- **app (M1)** — minimal signed UWP test app. Files: `src/xbox-test/app/{main.cpp,AppxManifest.xml,build.sh,qrcodegen.{cpp,hpp},Assets/}`. **DONE**, see §0.
+- **deploy** — Device Portal scripts. Files: `src/xbox-test/dp/*.sh`. **DONE**, see §0.
 - **plan** — this document. **DONE** (this commit).
 - **launcher-login** (folds in the "João idea": on-console Steam QR login) — QR rendered in the
   CoreWindow via `BeginAuthSessionViaQR`-equivalent HTTPS calls + `qrcodegen.cpp`, gamepad-selectable
@@ -160,9 +160,9 @@ Format: **ID | objective | files/dirs | build+test commands | acceptance | conso
 ### In progress
 
 - **dl** | finish the on-console Steam CM/depot downloader so the launcher's A button fills in real
-  Megabonk files | `xbox-test/app/main.cpp` (CM client, protobuf, AES/LZMA chunk decode), evidence in
-  `x64-run/runs/dl/` | build: `xbox-test/app/build.sh`; test: install via `xbox-test/dp/install.sh`,
-  trigger via `LocalState\autotest.txt` hook, verify via `xbox-test/dp/ls-dir.sh` + SHA1 against the
+  Megabonk files | `src/xbox-test/app/main.cpp` (CM client, protobuf, AES/LZMA chunk decode), evidence in
+  `x64-run/runs/dl/` | build: `src/xbox-test/app/build.sh`; test: install via `src/xbox-test/dp/install.sh`,
+  trigger via `LocalState\autotest.txt` hook, verify via `src/xbox-test/dp/ls-dir.sh` + SHA1 against the
   manifest | acceptance: all 69 files present under `LocalState\megabonk`, sizes+SHA1 match
   `/workspace/megabonk-from-console/MANIFEST.sha256`'s source-of-truth manifest | console: yes | login:
   yes (João's QR, already scanned once) | size: large (most of a C++ Steam CM client) | deps: none
@@ -171,7 +171,7 @@ Format: **ID | objective | files/dirs | build+test commands | acceptance | conso
 ### New: the uwph / native-execution track (this plan's main contribution)
 
 1. **uwph-spike-dispatch** | prove Wine's `__wine_unix_call_dispatcher` substitution point works with a
-   pure-PE replacement, off-console first (spike #2) | new dir `xbox-test/uwph/spike-dispatch/` |
+   pure-PE replacement, off-console first (spike #2) | new dir `src/xbox-test/uwph/spike-dispatch/` |
    build: a small C++ shim exporting the same opcode handler signature `ntdll.so`'s real unixlib exports,
    linked so a copy of `/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/ntdll.dll` loads against it instead
    of `ntdll.so`, tested first under plain Wine on this Linux box (`WINEDLLOVERRIDES`, `WINEDLLPATH`
@@ -179,30 +179,30 @@ Format: **ID | objective | files/dirs | build+test commands | acceptance | conso
    (e.g. `NtQuerySystemTime`) gets correct answers from the new shim instead of the real `ntdll.so` |
    console: no | login: no | size: medium (research spike) | deps: none — **start first**
 2. **uwph-vrx-spike** | spike #1 — does AppContainer's real `kernel32.dll` hard-fail or coerce
-   `VirtualAlloc(..., PAGE_EXECUTE_READWRITE)` | extend `xbox-test/app/main.cpp` with one test path: call
+   `VirtualAlloc(..., PAGE_EXECUTE_READWRITE)` | extend `src/xbox-test/app/main.cpp` with one test path: call
    `VirtualAlloc` with RWX, write a `ret`, call through a function pointer, log the result | build/test:
-   `xbox-test/app/build.sh` + `xbox-test/dp/install.sh` + `xbox-test/dp/launch.sh` +
-   `xbox-test/dp/wait-log.sh` | acceptance: `boot.log` on LocalState shows whether RWX alloc+exec
+   `src/xbox-test/app/build.sh` + `src/xbox-test/dp/install.sh` + `src/xbox-test/dp/launch.sh` +
+   `src/xbox-test/dp/wait-log.sh` | acceptance: `boot.log` on LocalState shows whether RWX alloc+exec
    succeeded, failed cleanly, or crashed | console: yes | login: no | size: small | deps: none — can run
    in parallel with #1
 3. **uwph-kernel32-ntdll** | build the real `uwph` unixlib backend: memory (`VirtualAllocFromApp`/
    `VirtualProtectFromApp` under the hood), threads (map to real `CreateThread`, which works per
    REBUILD.md), file I/O (map to real `CreateFileW` et al., which work), sync primitives, and a
-   `CreateProcessW` stub that fails cleanly | new dir `xbox-test/uwph/host/` | build: extend
-   `xbox-test/app/build.sh`'s link step to pull in Wine's real `ntdll.dll`/`kernel32.dll` PE files from
+   `CreateProcessW` stub that fails cleanly | new dir `src/xbox-test/uwph/host/` | build: extend
+   `src/xbox-test/app/build.sh`'s link step to pull in Wine's real `ntdll.dll`/`kernel32.dll` PE files from
    `/usr/lib/x86_64-linux-gnu/wine/x86_64-windows/` plus this new backend; test: load a trivial test PE
    (not Megabonk yet) that calls a few dozen representative kernel32 functions and logs results | 
    acceptance: the test PE's log shows correct results for file I/O, threading, and RWX memory handling
    (via `VirtualAllocFromApp`) | console: yes | login: no | size: large | deps: #1, #2
 4. **uwph-wineserver-inprocess** | replace wineserver's AF_UNIX request/response IPC with in-process
    calls/shared state (same address space) for handle duplication, sync objects, process/thread
-   bookkeeping | new dir `xbox-test/uwph/server/` | build/test: same test-PE harness as #3, extended to
+   bookkeeping | new dir `src/xbox-test/uwph/server/` | build/test: same test-PE harness as #3, extended to
    exercise `CreateEventW`+`WaitForSingleObject`+`DuplicateHandle` across two threads | acceptance: the
    test PE's two threads correctly synchronize via the in-process server, logged | console: yes | login:
    no | size: medium-large | deps: #3
 5. **uwph-win32u-corewindow-driver** | new Wine display driver mapping every Wine window operation onto
-   the single real `CoreWindow` already created by `xbox-test/app/main.cpp` (spike #3 folds in here) |
-   new dir `xbox-test/uwph/display/` | build/test: a trivial Win32 test PE doing
+   the single real `CoreWindow` already created by `src/xbox-test/app/main.cpp` (spike #3 folds in here) |
+   new dir `src/xbox-test/uwph/display/` | build/test: a trivial Win32 test PE doing
    `RegisterClassExW`+`CreateWindowExW`+a `GetMessage`/`DispatchMessage` loop, logging `WM_SIZE`/
    `WM_ACTIVATE`-equivalent delivery | acceptance: the test PE's window survives for N frames without
    Wine's internal window state diverging from the real CoreWindow's actual size/focus, logged to
@@ -212,7 +212,7 @@ Format: **ID | objective | files/dirs | build+test commands | acceptance | conso
    resolve to Xbox's **real system DLLs**, while `user32.dll`/`win32u.dll`/`kernel32.dll`/`ntdll.dll`
    resolve to the `uwph`-backed Wine builtins, and `opengl32`/`setupapi`/`hid`/`winmm`/`imm32`/
    `shell32`/`shlwapi`/`winhttp` resolve to Wine's real builtin PE files with stub-only backends (per
-   §1's table) | new file `xbox-test/uwph/host/dll_map.cpp` (or a loader config table) | build/test:
+   §1's table) | new file `src/xbox-test/uwph/host/dll_map.cpp` (or a loader config table) | build/test:
    link the test PE from #5 plus a D3D11 `CreateSwapChainForCoreWindow` call directly against the real
    system `d3d11.dll` side-by-side with Wine-builtin `user32.dll` | acceptance: one process successfully
    uses both the real `d3d11.dll` (rendering a frame) and the `uwph`-backed `user32.dll` (owning the
@@ -225,8 +225,8 @@ Format: **ID | objective | files/dirs | build+test commands | acceptance | conso
    visible frame or a clean exit, logged | console: yes | login: no | size: medium | deps: #6
 8. **megabonk-boot** | boot `Megabonk.exe` (`-force-d3d11`) through the full `uwph` stack to the Unity
    splash screen | depends on lane `dl` having placed all 69 files, and on this track's #7 passing | 
-   build/test: `xbox-test/dp/install.sh` the combined app+uwph package pointed at
-   `LocalState\megabonk\Megabonk.exe`; `xbox-test/dp/screenshot.sh` | acceptance: DP screenshot shows the
+   build/test: `src/xbox-test/dp/install.sh` the combined app+uwph package pointed at
+   `LocalState\megabonk\Megabonk.exe`; `src/xbox-test/dp/screenshot.sh` | acceptance: DP screenshot shows the
    Unity splash (or further) | console: yes | login: needs `dl` lane's download to have completed | size:
    medium (integration, assuming #1-#7 succeeded) | deps: `dl`, #7
 

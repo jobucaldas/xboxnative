@@ -18,22 +18,76 @@ jobs:
         run: |
           set -e
           find . -name '*.py' -not -path './.git/*' -print0 | xargs -0 -n1 python3 -m py_compile
+      - name: synthetic input routing fixture
+        run: bash src/xbox-test/uwph/input/tests/run-route-test.sh
       - name: offline unit tests
         run: |
           set -e
-          bash xbox-test/app/tests/session-restore.sh
-          python3 -m unittest xbox-test/dp/test-verify-depot.py
+          python3 -I src/tools/tests/test_source_layout.py
+          bash src/xbox-test/app/tests/session-restore.sh
+          bash src/xbox-test/app/tests/launch-status.sh
+          python3 -I src/xbox-test/app/tests/launch-result-test.py
+          python3 -I src/xbox-test/tools/tests/test_play_test_transport.py
+          python3 -m unittest src/xbox-test/app/tests/test_store_badge.py
+          python3 -m unittest src/xbox-test/dp/test-verify-depot.py
+          python3 -m unittest discover -s src/xbox-test/app/donors -p 'test_*.py'
+          python3 -I -m unittest discover -s src/tools/xbox/tests -p 'test_load_config.py'
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/apibadge_test.cpp -o /tmp/apibadge-test
+          /tmp/apibadge-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/shared/tests/wine_load_config_test.cpp -o /tmp/wine-config-test
+          /tmp/wine-config-test
+          python3 src/xbox-test/app/depot-fixtures/validate-vectors.py
+      - name: strict resolver policy unit test
+        run: bash src/xbox-test/uwph/strict-policy/tests/run-policy-test.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: offline VRX log reviewer tests
+        run: |
+          node --test src/xbox-test/vrx/tests/check-vrx-log.test.mjs src/xbox-test/vrx/tests/review-vrx-log.test.mjs
       - name: build scripts parse their pins (offline)
         run: |
           set -e
-          bash tools/build-wine-donors.sh --dry-run
-          bash tools/fetch-boxedwine.sh --dry-run
+          bash src/tools/build-wine-donors.sh --dry-run
+          bash src/tools/fetch-boxedwine.sh --dry-run
       - name: no secrets / binaries committed
         run: |
           if git ls-files | grep -E '\.(pfx|key|pem|exe|dll|so|msix|appx|zip|7z|tar|gz|xz)$'; then
-            echo "forbidden binary/secret file types are committed (build third-party binaries with tools/build-*.sh instead)"; exit 1
+            echo "forbidden binary/secret file types are committed (build third-party binaries with src/tools/build-*.sh instead)"; exit 1
           fi
           if git grep -nIE 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|gh[pousr]_[A-Za-z0-9]{30,}|tskey-[A-Za-z0-9-]{10,}|7656119[0-9]{10}' -- . ':!.github'; then
             echo "possible secret or SteamID committed"; exit 1
           fi
-  # TODO: on-device sections of xbox-test/smoke-all.sh need a console and cannot run in GitHub Actions.
+  registry-persistence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install registry test toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 wine64 wine lld
+      - name: Registry persistence and write-failure regression
+        run: bash src/xbox-test/uwph/host/run-reg-selftest.sh
+      - name: Registry crash consistency (eight cycles)
+        run: bash src/xbox-test/uwph/host/run-reg-killtest.sh
+      - name: Inert Wine config opt-in and active-config rejection
+        run: bash src/xbox-test/uwph/host/tests/run-load-config.sh
+      - name: Launcher mapped-image load-config rejection
+        run: bash src/xbox-test/app/tests/load-config.sh
+  strict-imports:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install cross compiler and Wine
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 llvm lld wine64
+      - name: exercise strict named and ordinal imports
+        run: bash src/xbox-test/uwph/host/tests/run-strict-imports.sh --run
+      - name: retain logging in the SWC mapped-entry caller
+        run: bash src/xbox-test/uwph/host/tests/run-swc-logging.sh
+  guest-pe-inspection:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install PE inspection tools
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 llvm lld
+      - name: inspect synthetic no-CRT guest
+        run: bash src/xbox-test/uwph/guest-fixture/check-pe.sh
+  # TODO: on-device sections of src/xbox-test/smoke-all.sh need a console and cannot run in GitHub Actions.
