@@ -139,3 +139,17 @@ EXPORTS
  PostThreadMessageW=c_PostThreadMessageW
  PostQuitMessage=c_PostQuitMessage
  DispatchMessageW=c_DispatchMessageW
+ DispatchMessageA=c_DispatchMessageW
+ GetMessageW=c_GetMessageW
+ GetMessageA=c_GetMessageW
+ TranslateMessage=c_TranslateMessage
+ MsgWaitForMultipleObjects=c_MsgWaitForMultipleObjects
+ MsgWaitForMultipleObjectsEx=c_MsgWaitForMultipleObjectsEx
+ GetMessageExtraInfo=c_GetMessageExtraInfo
+ GetKeyNameTextW=c_GetKeyNameTextW
+ DialogBoxParamW=c_DialogBoxParamW
+ EndDialog=c_EndDialog
+ DragDetect=c_DragDetect
+ GetDpiForMonitorInternal=c_GetDpiForMonitorInternal
+ SetProcessDpiAwarenessInternal=c_SetProcessDpiAwarenessInternal
+ GetProcessDpiAwarenessInternal=c_GetProcessDpiAwarenessInternal

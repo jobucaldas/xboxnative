@@ -31,7 +31,25 @@ the SendMessageA-family entry points), full desktop destruction ordering,
 nonclient sizing or cross-thread SendMessage marshaling is claimed. Clipboard is
 a process-local store (open/empty/get/set/format-available only; no OS/X11
 clipboard sync). SetTimer/KillTimer/TrackMouseEvent are bookkeeping only: actual
-WM_TIMER/WM_MOUSELEAVE/WM_MOUSEHOVER delivery needs the message pump (item 43).
+WM_TIMER/WM_MOUSELEAVE/WM_MOUSEHOVER delivery is not provided (no timer or
+pointer source feeds the queue).
+
+Posted-message pump (`message_queue.h`): GetMessageW/A block on a per-thread
+wake bit that every post sets and every queue check clears, as Windows' QS bits;
+MsgWaitForMultipleObjects(Ex) waits on the caller's handles plus that bit
+(MWMO_WAITALL fails with ERROR_NOT_SUPPORTED; MWMO_INPUTAVAILABLE also reports
+messages already seen). Posted messages are the only wake source. TranslateMessage
+follows Wine's NtUserTranslateMessage over the US key table: key-down posts
+WM_CHAR/WM_SYSCHAR from the current key state, key-up returns TRUE. DispatchMessageA
+and GetMessageA share the W paths (scalar payloads only). GetMessageExtraInfo is 0.
+`HWND_MESSAGE` creates a parentless message-only record that EnumWindows skips.
+
+`dialog_keys.h`: GetKeyNameTextW returns the US-layout key names for the scan
+codes in `keymap.h` (extended and don't-care bits honoured, truncated to the
+buffer). DialogBoxParamW returns -1 with ERROR_NOT_SUPPORTED (no dialog manager or
+template loader); EndDialog fails, as no record is a dialog; DragDetect is FALSE
+(no pointer capture). `dpi.h`: the Wine-internal DPI exports shcore delay-imports
+report the single 96-DPI virtual display and a first-choice-wins process awareness.
 AdjustWindowRect(Ex) and SetWindowPos use fixed classic (96 DPI, unthemed)
 metrics; SetWindowPos tracks no z-order, same limitation as EnumWindows.
 A/W long aliases apply to these Unicode records.
