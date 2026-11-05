@@ -46,6 +46,13 @@ lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-guest.exe" "$o
 lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-missing.exe" "$out/obj/missing.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$out/obj/missing.lib" /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-steam.exe" "$out/obj/steam.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-unresolved.dll" "$out/obj/unresolved.obj" "$out/obj/missing.lib" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+# A static import from a DLL whose own mapping fails must stay unresolved: the
+# failed image is never published to resolve the importer (never executed).
+# baselib.dll is a game-DLL (uwph-routed) name, the route Megabonk exercised.
+printf 'LIBRARY baselib.dll\nEXPORTS\n dependency_check\n' > "$out/obj/unresolved-import.def"
+llvm-dlltool-19 -m i386:x86-64 -d "$out/obj/unresolved-import.def" -l "$out/obj/unresolved-import.lib"
+printf '__declspec(dllimport) int dependency_check(void);\nint failed_anchor; void *failed_relocation = &failed_anchor;\nint failed_dependency_entry(void) { return dependency_check() ? 42 : 43; }\n' | clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -x c -c - -o "$out/obj/failed-dependency.obj"
+lld-link-19 /nodefaultlib /entry:failed_dependency_entry /include:failed_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-failed-dependency.exe" "$out/obj/failed-dependency.obj" "$out/obj/unresolved-import.lib"
 cat > "$out/obj/reject.def" <<'DEF'
 LIBRARY play-reject.dll
 EXPORTS
@@ -111,6 +118,11 @@ for flags in 0x100 0x500;do
  fi
 done
 cp "$out/obj/play-cxx-cookie.dll" "$cxx"
+# Owned stand-in under a game-DLL name, present only for this run.
+cp "$out/play-unresolved.dll" "$out/baselib.dll"
+WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" failed-dependency > "$out/failed-dependency.log" 2>&1
+tail -1 "$out/failed-dependency.log"
+rm -f "$out/baselib.dll"
 # Steam without a genuine client. A steamclient64.dll in the game root must be
 # refused (steam-client runs above with it present); a root steam_api64.dll is
 # an ordinary game DLL. Owned stand-ins only, removed afterwards.

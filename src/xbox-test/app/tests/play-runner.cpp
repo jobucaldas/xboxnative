@@ -170,7 +170,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         root.assign(gameRoot,n);
         logline("OFF-DEVICE Wine diagnostic only; no console or Steam client success claim");
     }
-    if(!play_runtime::start(root,game?L"Megabonk.exe":std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="static-steam"?L"play-steam.exe":L"play-guest.exe",game?L"-force-d3d11":play_runtime::wide(args),logline))return 1;
+    if(!play_runtime::start(root,game?L"Megabonk.exe":std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":L"play-guest.exe",game?L"-force-d3d11":play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
     // guest stop (fatal dialog). Progress must never mask that failure.
@@ -191,6 +191,9 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     else if(mode=="dialog-milestone")ok=ok&&r->finished&&!r->success&&last.find("user32.dll!MessageBoxA caption=\"Fatal error\"")!=std::string::npos&&
         r->milestone==1&&launch_status::observe(r->finished,r->success,r->milestone,true)==launch_status::Outcome::failed;
     else if(mode=="missing")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&mlp::stub_names.empty()&&last.find("mapping failed: play-missing.exe; guest initialization blocked")!=std::string::npos&&last.find("play-missing.dll!DeliberatelyMissingPlayImport")!=std::string::npos;
+    else if(mode=="failed-dependency")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&
+        last.find("mapping failed: play-failed-dependency.exe; guest initialization blocked")!=std::string::npos&&
+        last.find("unresolved static import: baselib.dll!dependency_check")!=std::string::npos;
     else if(mode=="static-steam")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&mlp::stub_names.empty()&&last.find("steam_api64.dll!SteamAPI_Init")!=std::string::npos;
     else if(mode=="loader-lock")ok=ok&&r->finished&&r->success&&r->code==42&&loaderLockTest();
     else if(mode=="startup-lock") {

@@ -14,7 +14,7 @@ cc=${PROCESS_CC:-clang++-19}
 link=${PROCESS_LINKER:-lld-link-19}
 common=(/nodefaultlib /entry:process_entry /include:process_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat)
 kernel=/usr/x86_64-w64-mingw32/lib/libkernel32.a
-# All target exports below are references only, never called by any fixture.
+# Fixtures call these only through Play's refusal; no native process export is reached.
 cat > "$out/obj/forward.def" <<'DEF'
 LIBRARY process-forward.dll
 EXPORTS
@@ -47,12 +47,12 @@ for alias in Kernel32 Kernelbase Core Core2;do
         llvm-dlltool-19 -m i386:x86-64 -d "$out/obj/import.def" -l "$out/obj/import.lib"
         mode=static-$alias$encoding
         compile -DPROCESS_IMPORT="$symbol" -o "$out/obj/static.obj"
-        "$link" "${common[@]}" /include:process_reference /include:_tls_used /out:"$out/$mode.exe" \
+        "$link" "${common[@]}" /include:process_reference /out:"$out/$mode.exe" \
             "$out/obj/static.obj" "$out/obj/import.lib" "$kernel"
         modes+=("$mode")
         mode=forward-$alias$encoding
         compile -DPROCESS_FORWARD -DPROCESS_IMPORT="$alias$encoding" -o "$out/obj/static.obj"
-        "$link" "${common[@]}" /include:process_reference /include:_tls_used /out:"$out/$mode.exe" \
+        "$link" "${common[@]}" /include:process_reference /out:"$out/$mode.exe" \
             "$out/obj/static.obj" "$out/obj/forward.lib" "$kernel"
         modes+=("$mode")
     done
@@ -67,4 +67,4 @@ for adapter in native sentinel;do
         grep -F "PROCESS-BOUNDARY $mode PASS " "$logs/$adapter-$mode.log"
     done
 done
-printf 'PROCESS-BOUNDARY PASS: 36 offline cases; no process entrypoint called\n'
+printf 'PROCESS-BOUNDARY PASS: 36 offline cases; every call refused, no native process entrypoint reached\n'

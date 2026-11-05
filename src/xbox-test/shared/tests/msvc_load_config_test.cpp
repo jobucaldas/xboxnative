@@ -209,6 +209,57 @@ int main() {
     // before the template copy in Play; the TLS index never is.
     { auto f=base; f.tls(); f.reloc(0x3300); assert(!f.valid()); assert(f.valid(true)); }
     { auto f=base; f.tls(); f.reloc(0x3200); assert(!f.valid(true)); }
+    // Real game DLLs (UnityPlayer, baselib, steam_api64): the TLS index lives in
+    // the RW section's zero-filled tail. Play needs mapped RW extent only; the
+    // fixture contract stays file-backed. Unaligned, out-of-image, RO or RX reject.
+    {
+        auto bss=base; bss.tls(); bss.file.sections[2].rawSize=0x800;
+        bss.put<uint64_t>(0x2710,bss.file.preferred+0x3900);
+        assert(!bss.valid()); assert(bss.valid(true));
+        Plan plan; bss.file.bytes=bss.bytes.data();
+        assert(validate(bss.file,plan,true) && plan.tls.index==0x3900);
+        for(size_t index:{0x3902,0x5000,0x2900,0x1900}) {
+            auto f=bss; f.put<uint64_t>(0x2710,f.file.preferred+index); assert(!f.valid(true));
+        }
+    }
+    // Older MSVC records (discord_game_sdk: 0x100) carry only their own fields.
+    {
+        auto f=base; f.put<uint32_t>(0x2100,0x100); f.file.config.size=0x100;
+        assert(!f.valid()); assert(f.valid(true));
+        Plan plan; f.file.bytes=f.bytes.data();
+        assert(validate(f.file,plan,true) && plan.record.size==0x100 && !plan.volatileMetadata);
+        auto flagged=f; flagged.put<uint32_t>(0x2190,0x100); assert(flagged.valid(true));
+        auto stray=f; stray.put<uint8_t>(0x2108,1); assert(!stray.valid(true)); // non-pointer field
+        auto declared=f; declared.put<uint32_t>(0x2100,0x140); assert(!declared.valid(true));
+        auto small=f; small.put<uint32_t>(0x2100,0x90); small.file.config.size=0x90; assert(!small.valid(true));
+        auto large=base; large.put<uint32_t>(0x2100,0x148); large.file.config.size=0x148; assert(!large.valid(true));
+    }
+    // TLS alignment above 16 is not honoured by Windows/Wine heaps; Play accepts it.
+    {
+        auto f=base; f.tls(); f.put<uint32_t>(0x2724,6u<<20); assert(!f.valid()); assert(f.valid(true));
+        f.put<uint32_t>(0x2724,15u<<20); assert(!f.valid(true));
+    }
+    // Delay imports in Play are left to the image's own helper (UnityPlayer's
+    // d3d12.dll): no eager binding, a file-backed writable IAT that may be
+    // relocated, and an optional writable module-handle slot (may be zero-fill).
+    {
+        auto lazy=base; lazy.imports(true,0x3500); lazy.put<uint32_t>(0x2608,0x3600);
+        assert(!lazy.valid()); assert(lazy.valid(true));
+        Plan plan; lazy.file.bytes=lazy.bytes.data();
+        assert(validate(lazy.file,plan,true) && plan.imports.empty());
+        auto relocated=lazy; relocated.reloc(0x3500); assert(relocated.valid(true));
+        auto tail=lazy; tail.file.sections[2].rawSize=0x800; tail.put<uint32_t>(0x2608,0x3a00);
+        assert(tail.valid(true));
+        auto unbacked=tail; unbacked.imports(true,0x37f8); unbacked.put<uint32_t>(0x2608,0x3a00);
+        assert(!unbacked.valid(true)); // IAT entries carry initial thunk VAs: file bytes
+        for(uint32_t slot:{0x3604u,0x2600u,0x3100u,0x5000u}) { // unaligned, RO, cookie, beyond image
+            auto g=lazy; g.put<uint32_t>(0x2608,slot); assert(!g.valid(true));
+        }
+        auto readonly=base; readonly.imports(true,0x2a00); assert(!readonly.valid(true)); // helper writes the IAT
+        auto alias=base; alias.imports(false,0x3500); alias.imports(true,0x3500); assert(!alias.valid(true));
+        auto bound=lazy; bound.put<uint32_t>(0x2614,0x2a00); assert(bound.valid(true));
+        bound.put<uint32_t>(0x2614,0x1a00); assert(!bound.valid(true)); // executable bytes
+    }
     uint64_t value=17;
     assert(!cookie(nullptr,value) && value==17);
     assert(!cookie(+[](uint64_t&){return false;},value) && value==17);
@@ -217,4 +268,5 @@ int main() {
     assert(cookie(+[](uint64_t& v){v=0xffff123456789abcULL;return true;},value) && value==0x123456789abcULL);
     puts("MSVC-CONFIG pure PASS: immutable byte validation, bounds, writes, relocations, TLS and bounded entropy");
     puts("MSVC-CONFIG play PASS: CF_INSTRUMENTED + relocated read-only volatile pointer accepted only by msvc_x64; other flags/fields/targets reject");
+    puts("MSVC-CONFIG play PASS: zero-fill TLS index, 0x100 records, TLS alignment and helper-owned delay imports accepted only by msvc_x64");
 }
