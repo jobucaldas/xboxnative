@@ -76,44 +76,6 @@ static bool chunk_decompress(const std::string& d, size_t expect, std::string& o
     return false;
 }
 
-// ---------------------------------------------------------------- VDF text parser (PICS appinfo buffer)
-struct Vdf {
-    std::string val; bool obj = false; std::vector<std::string> keys; std::vector<Vdf> kids;
-    const Vdf* get(const std::string& k) const { for (size_t i = 0; i < keys.size(); i++) if (keys[i] == k) return &kids[i]; return nullptr; }
-    const Vdf* at(std::initializer_list<const char*> p) const { const Vdf* c = this; for (auto k : p) { if (!c) return nullptr; c = c->get(k); } return c; }
-    std::string str(std::initializer_list<const char*> p, const std::string& d = "") const { const Vdf* c = at(p); return c && !c->obj ? c->val : d; }
-};
-static bool vdf_tok(const std::string& s, size_t& i, std::string& tok, int& kind) {   // kind: 0 string, 1 '{', 2 '}'
-    for (;;) {
-        while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n' || s[i] == 0)) i++;
-        if (i + 1 < s.size() && s[i] == '/' && s[i + 1] == '/') { while (i < s.size() && s[i] != '\n') i++; continue; }
-        break;
-    }
-    if (i >= s.size()) return false;
-    if (s[i] == '{') { kind = 1; i++; return true; }
-    if (s[i] == '}') { kind = 2; i++; return true; }
-    kind = 0; tok.clear();
-    if (s[i] == '"') {
-        i++;
-        while (i < s.size() && s[i] != '"') { if (s[i] == '\\' && i + 1 < s.size()) { i++; char c = s[i]; tok += c == 'n' ? '\n' : c == 't' ? '\t' : c; } else tok += s[i]; i++; }
-        i++; return true;
-    }
-    while (i < s.size() && !strchr(" \t\r\n{}\"", s[i])) tok += s[i++];
-    return true;
-}
-static bool vdf_block(const std::string& s, size_t& i, Vdf& out, int depth) {   // parses until '}' or EOF
-    if (depth > 64) return false; out.obj = true;
-    for (;;) {
-        std::string k; int kind; if (!vdf_tok(s, i, k, kind)) return true;
-        if (kind == 2) return true; if (kind == 1) return false;
-        std::string v; if (!vdf_tok(s, i, v, kind)) return false;
-        out.keys.push_back(k); out.kids.emplace_back();
-        if (kind == 1) { if (!vdf_block(s, i, out.kids.back(), depth + 1)) return false; }
-        else if (kind == 0) { out.kids.back().val = v; }
-        else return false;
-    }
-}
-static bool vdf_parse(const std::string& s, Vdf& root) { size_t i = 0; return vdf_block(s, i, root, 0); }
 
 // ---------------------------------------------------------------- Steam CM session (persistent websocket, job dispatch, heartbeat)
 enum { EMSG_ServiceMethodResponse = 147, EMSG_ServiceMethodCall = 151, EMSG_ClientHeartBeat = 703, EMSG_GetDepotKey = 5438, EMSG_GetDepotKeyResp = 5439,
@@ -336,12 +298,8 @@ static void dl_worker(DlCtx* cx, int wid) {
 static std::string tolower_s(std::string s) { for (auto& c : s) c = (char)tolower((unsigned char)c); return s; }
 
 // Downloads one app (all Windows depots of the public branch) into LocalState\<installdir>. Returns true when every file is hash-verified.
-static bool download_app(CmSession& cm, uint32_t appid) {
-    g_dl.cancel = false; g_dl.appid = appid; g_dl.done = 0; g_dl.total = 0; g_dl.files = 0; g_dl.filesDone = 0; g_dl.speed = 0; g_dl.state = 1; { std::lock_guard<std::mutex> l(g_dl.m); g_dl.name.clear(); g_dl.msg = "Contacting Steam..."; }
-    double t0 = now_s();
-    auto fail = [&](const std::string& m) { logf("dl: FAILED appid %u: %s", appid, m.c_str()); dl_msg(m); g_dl.state = g_dl.cancel ? 4 : 3; return false; };
-    logf("dl: ===== start appid %u (session: %s) =====", appid, cm.anon ? "anonymous" : "user");
-    // 1. PICS access token + product info
+// PICS access token + product info: the app's appinfo VDF text (empty if none).
+static std::string pics_appinfo(CmSession& cm, uint32_t appid) {
     uint64_t token = 0; JobMsg m;
     { std::string b; pb_u(b, 2, appid); if (cm.call(EMSG_PICSAccessToken, b, "", 15000, m) && m.emsg == EMSG_PICSAccessTokenResp) { for (auto& f : pb_parse(m.body)) if (f.f == 3) for (auto& x : pb_parse(f.s)) if (x.f == 2) token = x.u; } }
     logf("dl: PICS access token %s", token ? "obtained" : "none (public app)");
@@ -354,6 +312,15 @@ static bool download_app(CmSession& cm, uint32_t appid) {
           if (!pending) break;
       }
       cm.end_job(id); }
+    return appBuf;
+}
+static bool download_app(CmSession& cm, uint32_t appid) {
+    g_dl.cancel = false; g_dl.appid = appid; g_dl.done = 0; g_dl.total = 0; g_dl.files = 0; g_dl.filesDone = 0; g_dl.speed = 0; g_dl.state = 1; { std::lock_guard<std::mutex> l(g_dl.m); g_dl.name.clear(); g_dl.msg = "Contacting Steam..."; }
+    double t0 = now_s();
+    auto fail = [&](const std::string& m) { logf("dl: FAILED appid %u: %s", appid, m.c_str()); dl_msg(m); g_dl.state = g_dl.cancel ? 4 : 3; return false; };
+    logf("dl: ===== start appid %u (session: %s) =====", appid, cm.anon ? "anonymous" : "user");
+    // 1. PICS access token + product info
+    std::string appBuf = pics_appinfo(cm, appid);
     if (appBuf.empty()) return fail("Steam has no product info for this app (not owned?)");
     Vdf root; while (!appBuf.empty() && appBuf.back() == 0) appBuf.pop_back();
     if (!vdf_parse(appBuf, root)) return fail("could not parse product info");

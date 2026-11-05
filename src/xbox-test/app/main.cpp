@@ -139,27 +139,7 @@ static std::string unb64url(const std::string& s) {
     return o;
 }
 
-// ---------------------------------------------------------------- minimal protobuf
-static void pb_varint(std::string& o, uint64_t v) { while (v >= 0x80) { o += (char)(v | 0x80); v >>= 7; } o += (char)v; }
-static void pb_u(std::string& o, int f, uint64_t v) { pb_varint(o, (uint64_t)f << 3); pb_varint(o, v); }
-static void pb_s(std::string& o, int f, const std::string& s) { pb_varint(o, ((uint64_t)f << 3) | 2); pb_varint(o, s.size()); o += s; }
-static void pb_fixed64(std::string& o, int f, uint64_t v) { pb_varint(o, ((uint64_t)f << 3) | 1); for (int i = 0; i < 8; i++) o += (char)(v >> (8 * i)); }
-struct PBField { int f, wt; uint64_t u; std::string s; };
-static std::vector<PBField> pb_parse(const std::string& d) {
-    std::vector<PBField> out; size_t i = 0;
-    auto rv = [&](uint64_t& v) { v = 0; int sh = 0; while (i < d.size()) { uint8_t b = d[i++]; v |= (uint64_t)(b & 0x7f) << sh; if (!(b & 0x80)) return true; sh += 7; } return false; };
-    while (i < d.size()) {
-        uint64_t tag; if (!rv(tag)) break; PBField p{(int)(tag >> 3), (int)(tag & 7), 0, {}};
-        if (p.wt == 0) { if (!rv(p.u)) break; }
-        else if (p.wt == 2) { uint64_t n; if (!rv(n) || i + n > d.size()) break; p.s = d.substr(i, (size_t)n); i += (size_t)n; }
-        else if (p.wt == 1) { if (i + 8 > d.size()) break; memcpy(&p.u, &d[i], 8); i += 8; }
-        else if (p.wt == 5) { if (i + 4 > d.size()) break; uint32_t v; memcpy(&v, &d[i], 4); p.u = v; i += 4; }
-        else break;
-        out.push_back(std::move(p));
-    }
-    return out;
-}
-static const PBField* pb_get(const std::vector<PBField>& v, int f) { for (auto& x : v) if (x.f == f) return &x; return nullptr; }
+#include "steam_wire.h"
 
 // ---------------------------------------------------------------- Steam auth (matches steam-session AuthenticationClient, platform SteamClient)
 static const std::string API = "https://api.steampowered.com/";

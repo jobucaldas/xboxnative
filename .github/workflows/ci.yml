@@ -38,6 +38,8 @@ jobs:
           /tmp/apibadge-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/shared/tests/wine_load_config_test.cpp -o /tmp/wine-config-test
           /tmp/wine-config-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_cloud_test.cpp -o /tmp/steam-cloud-test
+          /tmp/steam-cloud-test
           python3 src/xbox-test/app/depot-fixtures/validate-vectors.py
       - name: strict resolver policy unit test
         run: bash src/xbox-test/uwph/strict-policy/tests/run-policy-test.sh

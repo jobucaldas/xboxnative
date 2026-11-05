@@ -96,6 +96,89 @@ static bool stage_steam_provider(uint32_t appid) {
     char line[160];snprintf(line,sizeof line,"STEAM provider: gbe_fork staged in LocalState\\steam\\%u for the signed-in account",appid);lp_sink(line);
     return true;
 }
+// ---- Steam Auto-Cloud for the provider-served game (steam_cloud.h): download
+// the player's newer cloud saves before launch, then upload changed saves every
+// 5 minutes and once more when the guest finishes (the console can close the
+// app without notice). Saves written in the last 30 s wait for the next pass.
+#include "steam_cloud.h"
+static int cloud_http(bool put,bool https,const std::string& host,const std::string& path,
+                      const steam_cloud::Headers& headers,const std::string& upload,std::string& body) {
+    try {
+        Http::HttpRequestMessage req(put?Http::HttpMethod::Put():Http::HttpMethod::Get(),
+            winrt::Windows::Foundation::Uri(to_hstring((https?"https://":"http://")+host+path)));
+        std::string contentType;
+        for(auto& h:headers) {
+            if(!_stricmp(h.first.c_str(),"Content-Type")){contentType=h.second;continue;}
+            if(!_stricmp(h.first.c_str(),"Content-Length"))continue;
+            req.Headers().TryAppendWithoutValidation(to_hstring(h.first),to_hstring(h.second));
+        }
+        if(put) {
+            winrt::Windows::Storage::Streams::DataWriter writer;
+            writer.WriteBytes(array_view<const uint8_t>((const uint8_t*)upload.data(),(const uint8_t*)upload.data()+upload.size()));
+            Http::HttpBufferContent content(writer.DetachBuffer());
+            if(!contentType.empty())content.Headers().TryAppendWithoutValidation(L"Content-Type",to_hstring(contentType));
+            req.Content(content);
+        }
+        auto resp=client().SendRequestAsync(req).get();
+        auto buf=resp.Content().ReadAsBufferAsync().get();
+        body.resize(buf.Length());
+        if(buf.Length())winrt::Windows::Storage::Streams::DataReader::FromBuffer(buf).ReadBytes(
+            array_view<uint8_t>((uint8_t*)&body[0],(uint8_t*)&body[0]+body.size()));
+        return (int)resp.StatusCode();
+    } catch(...) {return 0;}
+}
+// The same known folders the game resolves in this process and container.
+static steam_cloud::Roots cloud_roots(const std::wstring& gameRoot) {
+    static const GUID localLow={0xA520A1A4,0x1780,0x4FF6,{0xBD,0x18,0x16,0x73,0x43,0xC5,0xAF,0x16}};
+    static const GUID local={0xF1B32785,0x6FBA,0x4FCF,{0x9D,0x55,0x7B,0x8E,0x7F,0x15,0x70,0x91}};
+    static const GUID roaming={0x3EB685DB,0x65F9,0x4CF6,{0xA0,0x3A,0xE3,0xEF,0x65,0x72,0x9F,0x3D}};
+    static const GUID documents={0xFDD39AD0,0x238F,0x46AF,{0xAD,0xB4,0x6C,0x85,0x48,0x03,0x69,0xC7}};
+    static const GUID savedGames={0x4C5C32FF,0xBB9D,0x43B0,{0xB5,0xB4,0x2D,0x72,0xE5,0x4E,0xAA,0xA4}};
+    using Known=HRESULT(WINAPI*)(const GUID&,DWORD,HANDLE,PWSTR*);
+    static HMODULE shell=LoadLibraryExW(L"shell32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    auto known=shell?(Known)GetProcAddress(shell,"SHGetKnownFolderPath"):nullptr;
+    steam_cloud::Roots roots;
+    auto add=[&](const char* name,const GUID& id){PWSTR path=nullptr;if(known&&SUCCEEDED(known(id,0,nullptr,&path))&&path)roots[name]=path;if(path)CoTaskMemFree(path);};
+    add("WinAppDataLocalLow",localLow);add("WinAppDataLocal",local);add("WinAppDataRoaming",roaming);
+    add("WinMyDocuments",documents);add("WinSavedGames",savedGames);
+    roots["GameInstall"]=gameRoot;
+    return roots;
+}
+static bool cloud_sync(uint32_t appid,const std::wstring& gameRoot,bool upload,uint64_t quiet) {
+    auto session=user_session();
+    if(!session||session->anon)return false;
+    std::string text=pics_appinfo(*session,appid);
+    while(!text.empty()&&text.back()==0)text.pop_back();
+    Vdf root;if(text.empty()||!vdf_parse(text,root)){lp_sink("STEAM cloud: no app info; not synced");return false;}
+    const Vdf* app=root.get("appinfo");if(!app)app=&root;
+    auto rules=steam_cloud::rules(*app);
+    if(rules.empty()){lp_sink("STEAM cloud: app has no Auto-Cloud save rules");return false;}
+    steam_cloud::Io io;
+    io.service=[session](const std::string& method,const std::string& request,int& eresult,std::string& response){
+        JobMsg m;if(!session->service(method,request,30000,m))return false;
+        eresult=m.eresult;response=m.body;return true;};
+    io.get=[](bool https,const std::string& host,const std::string& path,const steam_cloud::Headers& h,std::string& body){return cloud_http(false,https,host,path,h,{},body);};
+    io.put=[](bool https,const std::string& host,const std::string& path,const steam_cloud::Headers& h,const std::string& body){std::string ignored;return cloud_http(true,https,host,path,h,body,ignored);};
+    io.sha1=[](const std::string& data){return sha1_of(data.data(),data.size());};
+    io.log=[](const std::string& line){lp_sink(("STEAM "+line).c_str());};
+    auto roots=cloud_roots(gameRoot);
+    auto r=upload?steam_cloud::upload(io,appid,roots,rules,"Xbox",quiet):steam_cloud::download(io,appid,roots);
+    char line[200];snprintf(line,sizeof line,"STEAM cloud %s: downloaded=%u uploaded=%u unchanged=%u kept=%u busy=%u failed=%u",
+        upload?"upload":"download",r.downloaded,r.uploaded,r.unchanged,r.kept,r.busy,r.failed);lp_sink(line);
+    return r.failed==0;
+}
+static void cloud_uploader(uint32_t appid,std::wstring gameRoot) {
+    std::thread([appid,gameRoot]{
+        init_apartment(apartment_type::multi_threaded);
+        for(;;) {
+            auto r=play_runtime::observed.load(std::memory_order_acquire);
+            bool finished=!r||r->finished.load(std::memory_order_acquire);
+            for(int i=0;i<300&&!finished;++i){Sleep(1000);finished=!r||r->finished.load(std::memory_order_acquire);}
+            try{cloud_sync(appid,gameRoot,true,finished?0:30);}catch(...){lp_sink("STEAM cloud upload: exception");}
+            if(finished)return;
+        }
+    }).detach();
+}
 static void lp_run_impl(LpCtx& c) {
     wine_gap::report(c.root);
     if(c.names.empty()) {c.failName="no executable";return;}
@@ -112,8 +195,12 @@ static void lp_run_impl(LpCtx& c) {
     if(!donor_pe::probe(lp_sink)) {c.failName="Wine donor initialization/behavior";lp_sink("DWPE FAIL donor behavior gate; no game code executed");return;}
     mlp::donor_resolve=donor_pe::exported;
     if(!user32_core::test(lp_sink)) {c.failName="u32c-test.exe";lp_sink("U32C FAIL regression PE; no game code executed");return;}
-    stage_steam_provider(c.appid);
+    const bool steamProvider=stage_steam_provider(c.appid);
+    if(steamProvider) {
+        try{cloud_sync(c.appid,c.root,false,0);}catch(...){lp_sink("STEAM cloud download: exception");}
+    }
     if(!play_runtime::start(c.root,exe,c.args,lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
+    if(steamProvider)cloud_uploader(c.appid,c.root);
     auto r=play_runtime::state;
     ULONGLONG end=GetTickCount64()+110000; bool reportedRunning=false;
     for(;;) {
