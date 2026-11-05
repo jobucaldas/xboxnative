@@ -29,7 +29,13 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR,int) {
         auto p=kernel32_core::resolve_exception("kernel32.dll",name);CHECK(p);
         CHECK(p==kernel32_core::resolve_exception("ntdll.dll",name));
         CHECK(p==kernel32_core::resolve_exception("kernelbase.dll",name));
+        CHECK(p==kernel32_core::resolve_exception("api-ms-win-core-rtlsupport-l1-1-0.dll",name));
+        CHECK(p==kernel32_core::resolve_exception("API-MS-WIN-CORE-RTLSUPPORT-L1-2-0.DLL",name));
     }
+    for(const char* name : {"RtlVirtualUnwind","RtlCaptureContext","RtlLookupFunctionEntry"})
+        CHECK(kernel32_core::resolve_exception("api-ms-win-core-rtlsupport-l1-1-0.dll",name));
+    CHECK(!kernel32_core::resolve_exception("api-ms-win-core-rtlsupport-l1-1-0.dll","RaiseException"));
+    CHECK(!kernel32_core::resolve_exception("api-ms-win-core-rtlsupport-l1-3-0.dll","RtlUnwindEx"));
     for(ULONG_PTR useEx : {ULONG_PTR(0),ULONG_PTR(1),ULONG_PTR(2),ULONG_PTR(3)}) {
         cleanup=0;abnormal=0;
         CHECK(k32UnwindTarget(useEx)==42);CHECK(cleanup==1);CHECK(abnormal==1);

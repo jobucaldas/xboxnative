@@ -1,4 +1,5 @@
 #include "../../uwph/gdi32/route.h"
+#include "../../uwph/opengl32/route.h"
 #pragma once
 #include "../../uwph/xinput/route.h"
 #include "../../uwph/user32/route.h"
@@ -101,6 +102,8 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
         reinterpret_cast<dwmapi_core::WindowRect>(user32_core::resolve("user32.dll","GetWindowRect")),
         reinterpret_cast<dwmapi_core::WindowLong>(user32_core::resolve("user32.dll","GetWindowLongPtrW")));
     if(!address) address=sysx_native::resolve(dll,name);
+    // No guest OpenGL driver: Wine-equivalent no-context wgl answers.
+    if(!address) address=opengl32_core::resolve(dll,name);
     if(!address && name && key=="gdi32.dll") {
         static const auto caps=[]() -> gdi32_core::DeviceCaps {
             HMODULE records=LoadPackagedLibrary(L"uwph-u32c.dll",0);
@@ -112,6 +115,25 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     if(key=="kernel32.dll" && name && !address) {
         address=kernel_tail::resolve(name);
         log(("K32T ROUTE kernel32.dll!"+symbol+" found="+std::to_string(!!address)).c_str());
+    }
+    // Core API sets (api-ms-win-core-*) name kernel32/kernelbase functions for
+    // the most part: take the same guarded kernel32 route (W^X memory, loader
+    // wrappers, then native exports). Play's loader/process APIs were already
+    // matched for these names before this probe. Sets hosted elsewhere (COM in
+    // combase) resolve through the system loader's own API-set schema.
+    bool coreSet=key.rfind("api-ms-win-core-",0)==0 && strcmp(kind,"system");
+    if(coreSet && name && !address) {
+        address=kernel_tail::resolve(name);
+        if(!address) {
+            static std::map<std::string,HMODULE> sets;
+            auto it=sets.find(key);
+            if(it==sets.end()) {
+                std::wstring wide(key.begin(),key.end());
+                it=sets.emplace(key,LoadLibraryExW(wide.c_str(),nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32)).first;
+            }
+            if(it->second) address=(uintptr_t)GetProcAddress(it->second,name);
+        }
+        log(("K32T APISET "+key+"!"+symbol+" found="+std::to_string(!!address)).c_str());
     }
     if(!address&&name&&key!="kernel32.dll"&&strcmp(kind,"wine-pe")) {
         address=pe_tail::resolve(key.c_str(),name);
