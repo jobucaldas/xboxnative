@@ -743,7 +743,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
         m_menuPrev=b;
         frame_log(t);
-        if(m_quitDeadline&&t>=m_quitDeadline&&!m_leaving){m_quitDeadline=0;logf("overlay: game did not close in 15 s; force quitting");force_quit();}
+        if(m_quitDeadline&&t>=m_quitDeadline&&!m_leaving) {
+            m_quitDeadline=0;
+            // Once the game has exited, its final save upload is running and
+            // guest_ended() restarts afterwards: never cut that upload short.
+            auto r=play_runtime::observed.load(std::memory_order_acquire);
+            if(r&&r->finished.load(std::memory_order_acquire))logf("overlay: game closed; waiting for the save upload");
+            else {logf("overlay: game did not close in 15 s; force quitting");force_quit();}
+        }
     }
     // Frame times from the game's Present (guest_overlay.h): raw rows to
     // LocalState\frametimes.csv every 2 s, a stutter summary every 10 s.
@@ -976,6 +983,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 if(!pad){xinput_core::publish(i,nullptr);continue;}
                 try {
                     auto state=convert_pad(pad.GetCurrentReading());
+                    // The launcher menu owns the pad while it is open (XInput games too).
+                    if(guest_overlay::inputBlocked)state=XINPUT_GAMEPAD{};
                     xinput_core::publish(i,&state,[pad](WORD left,WORD right)->DWORD {
                         try {
                             GamepadVibration motors{};
