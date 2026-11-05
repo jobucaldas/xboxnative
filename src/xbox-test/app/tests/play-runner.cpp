@@ -256,6 +256,7 @@ static void logline(const char* s){
 }
 int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     wchar_t path[32768];GetModuleFileNameW(nullptr,path,32768);std::wstring root=path;root.resize(root.find_last_of(L"\\/"));
+    regb::init(root,logline); // guest registry: <runner dir>\registry.sqlite
     bool game=std::string(args)=="game";
     injectLogException=std::string(args)=="observer-log";
     checkStartupLock=std::string(args)=="startup-lock";
