@@ -42,10 +42,17 @@ cp "$out/play-dependency.dll" "$out/play-dynamic.dll"
 cp "$out/play-dependency.dll" "$out/play-forward-target.dll"
 cp "$out/play-dependency.dll" "$out/play-lazy-target.dll"
 CB=${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}
+UWP_OBJ_DIR="$out/obj/cxx" "$CB/scripts/build.sh" --out "$out/play-cxx.dll" --link-arg /dll tests/play-cxx.cpp -- /MT /O2 /EHsc
+# Relink against the desktop import names used by the owned game. WindowsApp
+# otherwise selects API-set names outside the production import allowlist.
+crt=${XWIN_ROOT:-$HOME/.cache/uwp-crossbuild/xwin}
+lld-link-19 "$out"/obj/cxx/tests_play-cxx.*.obj /dll /out:"$out/play-cxx.dll" \
+ /libpath:"$crt/crt/lib/x86_64" /libpath:"$crt/sdk/lib/um/x86_64" \
+ /libpath:"$crt/sdk/lib/ucrt/x86_64" kernel32.lib
 UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --out "$out/play-runner.exe" tests/play-runner.cpp -- /MT /O2
 # Use the exact packaged carriers from the launcher build.
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long steam-api steam-client steam-forward;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long steam-api steam-client steam-forward native-cxx;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done

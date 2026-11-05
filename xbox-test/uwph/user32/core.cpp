@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <string>
 #include <map>
+#include <deque>
 #include <vector>
 #include <memory>
 #include <mutex>
@@ -483,5 +484,6 @@ extern "C" int WINAPI c_LookupIconIdFromDirectoryEx(BYTE* xdir,BOOL isIcon,int w
  }
  return best>=0?dir->idEntries[best].wResId:0;
 }
+#include "message_queue.h"
 #include "device_notifications.h"
 } // namespace u32c

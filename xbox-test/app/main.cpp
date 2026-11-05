@@ -43,6 +43,8 @@ extern "C" {
 extern "C" size_t ZSTD_decompress(void* dst, size_t dstCapacity, const void* src, size_t compressedSize);
 extern "C" unsigned ZSTD_isError(size_t code);
 #include "font8x8_basic.h"
+#include <xinput.h>
+#include "../uwph/display/gamepad.h"
 
 using namespace winrt;
 using namespace winrt::Windows::ApplicationModel::Core;
@@ -652,6 +654,9 @@ static bool has(GamepadButtons b, GamepadButtons m) { return (b & m) != GamepadB
 
 struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     CoreWindow m_window{nullptr};
+    CoreDispatcher m_graphicsDispatcher{nullptr};
+    bool m_guestSurface=false;
+    inline static App* graphicsApp=nullptr;
     bool m_closed = false;
     com_ptr<ID3D11Device> m_dev; com_ptr<ID3D11DeviceContext> m_ctx; com_ptr<IDXGISwapChain1> m_sc; com_ptr<ID3D11Texture2D> m_bb;
     Pad m_pad; int m_prevPads = -1; uint64_t m_frame = 0;
@@ -828,9 +833,42 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             CoreWindow::GetForCurrentThread().Activate();
         });
     }
-    void SetWindow(CoreWindow const& w) { m_window = w; w.Closed([this](auto&&, auto&&) { m_closed = true; g_quit = true; logf("window closed"); }); logf("SetWindow bounds=%.0fx%.0f", w.Bounds().Width, w.Bounds().Height); }
+    void SetWindow(CoreWindow const& w) { m_window = w; w.Activated([](auto&&, WindowActivatedEventArgs const& e) { xinput_core::set_active(e.WindowActivationState()!=CoreWindowActivationState::Deactivated); }); w.Closed([this](auto&&, auto&&) { m_closed = true; g_quit = true; logf("window closed"); }); logf("SetWindow bounds=%.0fx%.0f", w.Bounds().Width, w.Bounds().Height); }
     void Load(hstring const&) {}
     void Uninitialize() { logf("Uninitialize"); }
+
+    void PollGuestControllers() {
+        static std::array<Gamepad,4> assigned{nullptr,nullptr,nullptr,nullptr};
+        try {
+            auto pads=Gamepad::Gamepads();
+            for(auto& pad:assigned)if(pad) {
+                bool found=false;
+                for(auto const& current:pads)if(current==pad){found=true;break;}
+                if(!found)pad=nullptr;
+            }
+            for(auto const& pad:pads) {
+                bool found=false;
+                for(auto const& current:assigned)if(current==pad){found=true;break;}
+                if(!found)for(unsigned i=0;i<assigned.size();++i)if(!assigned[i]){xinput_core::publish(i,nullptr);assigned[i]=pad;break;}
+            }
+            for(unsigned i=0;i<assigned.size();++i) {
+                auto pad=assigned[i];
+                if(!pad){xinput_core::publish(i,nullptr);continue;}
+                try {
+                    auto state=convert_pad(pad.GetCurrentReading());
+                    xinput_core::publish(i,&state,[pad](WORD left,WORD right)->DWORD {
+                        try {
+                            GamepadVibration motors{};
+                            motors.LeftMotor=double(left)/65535.;motors.RightMotor=double(right)/65535.;
+                            pad.Vibration(motors);return ERROR_SUCCESS;
+                        } catch(winrt::hresult_error const& error){return xinput_core::error_to_win32(error.code());}
+                    });
+                } catch(winrt::hresult_error const&){xinput_core::publish(i,nullptr);}
+            }
+        } catch(winrt::hresult_error const&) {
+            for(unsigned i=0;i<assigned.size();++i)xinput_core::publish(i,nullptr);
+        }
+    }
 
     bool InitD3D() {
         D3D_FEATURE_LEVEL fls[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0}; D3D_FEATURE_LEVEL got{};
@@ -843,6 +881,34 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         hr = fac->CreateSwapChainForCoreWindow(m_dev.get(), (::IUnknown*)winrt::get_abi(m_window), &sd, nullptr, m_sc.put());
         logf("CreateSwapChainForCoreWindow hr=0x%08lx %dx%d", (unsigned long)hr, W, H); if (FAILED(hr)) return false;
         return SUCCEEDED(m_sc->GetBuffer(0, __uuidof(ID3D11Texture2D), m_bb.put_void()));
+    }
+
+    static HRESULT GuestSurface(IDXGIFactory2* factory, ::IUnknown* device,
+            ::IUnknown* window, const DXGI_SWAP_CHAIN_DESC1* description,
+            IDXGIOutput* output, IDXGISwapChain1** chain) {
+        if(!graphicsApp)return E_NOTIMPL;
+        auto app=graphicsApp;
+        HANDLE done=CreateEventExW(nullptr,nullptr,0,EVENT_MODIFY_STATE|SYNCHRONIZE);
+        if(!done)return HRESULT_FROM_WIN32(GetLastError());
+        HRESULT result=E_FAIL;
+        // The guest worker retains all call arguments until this UI task ends.
+        // Release the launcher's flip chain before attaching the guest's chain
+        // to the same CoreWindow. No guest HWND reaches native DXGI.
+        try {
+            app->m_graphicsDispatcher.RunAsync(CoreDispatcherPriority::Normal,
+                [=,&result] {
+                    try {
+                        app->m_guestSurface=true;
+                        app->m_ctx->ClearState();app->m_ctx->Flush();
+                        app->m_bb=nullptr;app->m_sc=nullptr;
+                        result=factory->CreateSwapChainForCoreWindow(device,window,description,output,chain);
+                        logf("guest surface handoff native hr=0x%08lx",(unsigned long)result);
+                    } catch(hresult_error const& e) {result=e.code();}
+                    SetEvent(done);
+                });
+            WaitForSingleObject(done,INFINITE);
+        } catch(hresult_error const& e) {result=e.code();}
+        CloseHandle(done);return result;
     }
 
     // ---- drawing
@@ -1004,16 +1070,21 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void Run() {
         logf("Run: entering"); m_window.Activate();
         if (!InitD3D()) { logf("D3D init FAILED; idling"); while (!m_closed) { m_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessOneAndAllPending); Sleep(50); } return; }
+        graphicsApp=this;m_graphicsDispatcher=m_window.Dispatcher();
+        play_graphics::configure((::IUnknown*)winrt::get_abi(m_window),GuestSurface,
+            [](const char* message){if(play_runtime::state)play_runtime::state->event(message);});
         std::thread(net_thread).detach();
         double lastBeat = 0;
         while (!m_closed) {
             m_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
+            PollGuestControllers();
             auto pads = Gamepad::Gamepads(); size_t n = pads.Size(); GamepadReading rd{};
             if ((int)n != m_prevPads) { logf("gamepads connected: %zu", n); m_prevPads = (int)n; }
             double t = now_s();
             if (n) rd = pads.GetAt(0).GetCurrentReading();
             input(t, rd, n > 0);
             autotest(t); cmdhook(t); detail_tick(t);
+            if(m_guestSurface){Sleep(1);continue;}
             draw(t);
             m_ctx->UpdateSubresource(m_bb.get(), 0, nullptr, g_fb.data(), W * 4, 0);
             HRESULT hr = m_sc->Present(1, 0);

@@ -132,3 +132,10 @@ EXPORTS
 
  RegisterDeviceNotificationW=c_RegisterDeviceNotificationW
  UnregisterDeviceNotification=c_UnregisterDeviceNotification
+
+ PeekMessageW=c_PeekMessageW
+ PeekMessageA=c_PeekMessageA
+ PostMessageW=c_PostMessageW
+ PostThreadMessageW=c_PostThreadMessageW
+ PostQuitMessage=c_PostQuitMessage
+ DispatchMessageW=c_DispatchMessageW

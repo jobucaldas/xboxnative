@@ -1,4 +1,5 @@
 #pragma once
+#include "../../uwph/xinput/modules.h"
 // Play owns mapped images for the application's lifetime. Windows owns the
 // actual AppContainer PEB/TEB, native threads and static TLS carrier slots.
 // Guest process APIs below expose the guest identity without rewriting the
@@ -9,6 +10,7 @@
 #include <array>
 #include <d3d11.h>
 #include <intrin.h>
+#include "play_graphics.h"
 namespace play_runtime {
 constexpr DWORD missingException=0xe0520001, exitException=0xe0520002;
 struct Module {
@@ -98,6 +100,7 @@ static void WINAPI rtlExit(LONG code) { exitProcess(UINT(code)); }
 static LPWSTR WINAPI commandW() { return state->command.data(); }
 static LPSTR WINAPI commandA() { return state->commandA.data(); }
 static HMODULE WINAPI moduleW(LPCWSTR name) {
+    if(name)if(auto input=xinput_core::find_module(basename(name).c_str(),false))return input;
     if(!name) return (HMODULE)state->exe->image.base;
     if(auto m=named(name)) return (HMODULE)m->image.base;
     using Fn=HMODULE(WINAPI*)(LPCWSTR); auto fn=(Fn)kernel_tail::native("GetModuleHandleW");
@@ -110,6 +113,7 @@ static DWORD copyPath(const std::wstring& path,LPWSTR out,DWORD capacity) {
     if(path.size()>=capacity) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return capacity; } return DWORD(n);
 }
 static DWORD WINAPI filenameW(HMODULE handle,LPWSTR out,DWORD size) {
+    if(xinput_core::module(handle)){SetLastError(ERROR_NOT_SUPPORTED);return 0;}
     auto m=handle?find(handle):state->exe;
     if(m) return copyPath(m->path,out,size);
     using Fn=DWORD(WINAPI*)(HMODULE,LPWSTR,DWORD); auto fn=(Fn)kernel_tail::native("GetModuleFileNameW"); return fn?fn(handle,out,size):0;
@@ -121,6 +125,13 @@ static DWORD WINAPI filenameA(HMODULE handle,LPSTR out,DWORD size) {
 }
 static BOOL WINAPI moduleExW(DWORD flags,LPCWSTR name,HMODULE* out) {
     if(!out || ((flags&GET_MODULE_HANDLE_EX_FLAG_PIN)&&(flags&GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT))) {SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
+    if(!(flags&GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS) && name) {
+        if(auto input=xinput_core::find_module(basename(name).c_str(),false)) {
+            if(flags & ~(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT)) {SetLastError(ERROR_NOT_SUPPORTED);return FALSE;}
+            if(!(flags&GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT))xinput_core::find_module(basename(name).c_str(),true);
+            *out=input;return TRUE;
+        }
+    }
     if(flags&GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS) {
         for(auto& m:state->modules) if((uintptr_t)name>=(uintptr_t)m->image.base && (uintptr_t)name-(uintptr_t)m->image.base<m->image.size) {*out=(HMODULE)m->image.base;return TRUE;}
     } else { auto m=name?named(name):state->exe; if(m){*out=(HMODULE)m->image.base;return TRUE;} }
@@ -143,6 +154,7 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
      m=named(requested);if(!m){std::wstring p=requested;if(p.find(L':')==std::wstring::npos && (p.empty()||p[0]!=L'\\'))p=state->root+L"\\"+p;if(exists(p)) {m=map(p);if(!m){SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}}}
     }
     if(m) { if(m->mappingFailed || !m->mapped || !initializePending() || !m->initialized) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;} return (HMODULE)m->image.base; }
+    if(auto input=xinput_core::find_module(key.c_str(),true))return input;
     // Restrict fallback to documented system DLL search, never desktop paths.
     auto result=LoadLibraryExW(requested.c_str(),nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
     if(!result) {DWORD error=GetLastError();state->event("LoadLibrary failed name="+narrow(requested)+" error="+std::to_string(error));SetLastError(error);}
@@ -151,7 +163,7 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
 static HMODULE WINAPI loadW(LPCWSTR name) { return loadExW(name,nullptr,0); }
 static HMODULE WINAPI loadExA(LPCSTR name,HANDLE f,DWORD flags) { auto w=wide(name);return loadExW(name?w.c_str():nullptr,f,flags); }
 static HMODULE WINAPI loadA(LPCSTR name) { return loadExA(name,nullptr,0); }
-static BOOL WINAPI freeLibrary(HMODULE h) { if(find(h)) return TRUE; return FreeLibrary(h); }
+static BOOL WINAPI freeLibrary(HMODULE h) { if(auto input=xinput_core::module(h))return xinput_core::release_module(input); if(find(h)) return TRUE; return FreeLibrary(h); }
 // Wine ntdll/loader.c find_forwarded_export resolves the last dot as the
 // DLL/symbol separator, supports #ordinals and records a module dependency.
 // Keep this execution behavior separate from the non-executing import probe.
@@ -204,6 +216,7 @@ static uintptr_t exported(Module& module,const char* name,WORD ordinal) {
     return result;
 }
 static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
+    if(auto input=xinput_core::module(h))return xinput_core::module_proc(input,name);
     if(auto m=find(h)) {
         WORD ordinal=IS_INTRESOURCE(name)?WORD((uintptr_t)name):0;
         std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
@@ -234,10 +247,63 @@ static std::string describe(uintptr_t address) {
     if(VirtualQuery((void*)address,&mbi,sizeof mbi)) { wchar_t path[32768]{};filenameW((HMODULE)mbi.AllocationBase,path,32768);snprintf(b,sizeof b,"%s+0x%llx",basename(path).c_str(),(unsigned long long)(address-(uintptr_t)mbi.AllocationBase));return b; }
     return "unknown module/symbol";
 }
+// Diagnostics only: inspect registered module metadata and unwind a copy of
+// the fault context. Never alter the real exception or choose a guest handler.
+static bool diagnosticUnwind(CONTEXT* context) {
+    __try {
+        DWORD64 base=0;auto function=RtlLookupFunctionEntry(context->Rip,&base,nullptr);
+        if(function) {
+            PVOID handler=nullptr;DWORD64 frame=0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER,base,context->Rip,function,context,&handler,&frame,nullptr);
+        } else {context->Rip=*(DWORD64*)context->Rsp;context->Rsp+=8;}
+        return context->Rip!=0;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+}
+static void exceptionDiagnostics(EXCEPTION_POINTERS* ep) {
+    auto record=ep->ExceptionRecord;
+    if(record->ExceptionCode==0xe06d7363 && record->NumberParameters>=4) {
+        char parameters[224];
+        snprintf(parameters,sizeof parameters,"C++ throw parameters magic=0x%llx object=0x%llx info=0x%llx imageBase=0x%llx",
+            (unsigned long long)record->ExceptionInformation[0],(unsigned long long)record->ExceptionInformation[1],
+            (unsigned long long)record->ExceptionInformation[2],(unsigned long long)record->ExceptionInformation[3]);
+        state->event(parameters);
+        auto module=find((HMODULE)record->ExceptionInformation[3]);
+        if(module) {
+            auto& image=module->image;auto pointer=record->ExceptionInformation[2];
+            if(pointer>=(uintptr_t)image.base && pointer-(uintptr_t)image.base<=MAXDWORD) {
+                DWORD info=DWORD(pointer-(uintptr_t)image.base);
+                if(image.valid(info,16)) {
+                    DWORD array=*(DWORD*)(image.base+info+12);
+                    if(image.valid(array,8) && *(DWORD*)(image.base+array)>0) {
+                        DWORD catchable=*(DWORD*)(image.base+array+4);
+                        if(image.valid(catchable,8)) {
+                            DWORD type=*(DWORD*)(image.base+catchable+4);
+                            if(image.valid(type,17)) {
+                                std::string name;
+                                for(unsigned n=16;n<272 && image.valid(type,n+1);++n) {
+                                    char ch=*(char*)(image.base+type+n);if(!ch)break;
+                                    name+=ch>=32&&ch<127?ch:'?';
+                                }
+                                state->event("C++ thrown type="+name+" metadata="+module->key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    CONTEXT context=*ep->ContextRecord;
+    for(unsigned frame=0;frame<20 && context.Rip;++frame) {
+        state->event("exception stack["+std::to_string(frame)+"] "+describe(context.Rip));
+        DWORD64 previousRip=context.Rip,previousRsp=context.Rsp;
+        if(!diagnosticUnwind(&context)||(context.Rip==previousRip&&context.Rsp==previousRsp))break;
+    }
+}
 static LONG filter(EXCEPTION_POINTERS* ep) {
     auto e=ep->ExceptionRecord;
     if(e->ExceptionCode==exitException) {state->success=true;return EXCEPTION_EXECUTE_HANDLER;}
     if(e->ExceptionCode==missingException) return EXCEPTION_EXECUTE_HANDLER;
+    exceptionDiagnostics(ep);
     char b[256];snprintf(b,sizeof b,"unhandled exception code=0x%08lx address=0x%llx ",e->ExceptionCode,(unsigned long long)(uintptr_t)e->ExceptionAddress);
     std::string text=b; text+=describe((uintptr_t)e->ExceptionAddress);
     if(e->ExceptionCode==EXCEPTION_ACCESS_VIOLATION && e->NumberParameters>=2) {snprintf(b,sizeof b," access=%llu target=0x%llx",(unsigned long long)e->ExceptionInformation[0],(unsigned long long)e->ExceptionInformation[1]);text+=b;}
@@ -336,6 +402,25 @@ static DWORD WINAPI child(void* data) {
 static HANDLE WINAPI createThread(LPSECURITY_ATTRIBUTES a,SIZE_T stack,LPTHREAD_START_ROUTINE entry,LPVOID arg,DWORD flags,LPDWORD id) {
     auto p=new ThreadStart{entry,arg};HANDLE h=CreateThread(a,std::max(stack,SIZE_T(16*1024*1024)),child,p,flags,id);if(!h)delete p;return h;
 }
+static PVOID WINAPI pcToFileHeader(PVOID pc,PVOID* base) {
+    // Like the native loader lookup, consult the owning image registry under
+    // its loader lock. RtlAddFunctionTable alone does not register an image
+    // with the OS loader; the static Microsoft CRT needs this base for EH RVAs.
+    {
+        std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
+        auto address=(uintptr_t)pc;
+        for(auto& module:state->modules) {
+            auto start=(uintptr_t)module->image.base;
+            if(start && address>=start && address-start<module->image.size) {
+                *base=(PVOID)start;return *base;
+            }
+        }
+    }
+    using Fn=PVOID(WINAPI*)(PVOID,PVOID*);
+    auto native=(Fn)kernel_tail::native("RtlPcToFileHeader");
+    if(native)return native(pc,base);
+    *base=nullptr;return nullptr;
+}
 static uintptr_t processApi(const char* name) {
 #define PLAY_API(n,f) if(!strcmp(name,n)) return (uintptr_t)&f
     PLAY_API("ExitProcess",exitProcess);PLAY_API("TerminateProcess",terminateProcess);PLAY_API("RtlExitUserProcess",rtlExit);
@@ -344,6 +429,7 @@ static uintptr_t processApi(const char* name) {
     PLAY_API("GetModuleFileNameW",filenameW);PLAY_API("GetModuleFileNameA",filenameA);
     PLAY_API("LoadLibraryW",loadW);PLAY_API("LoadLibraryA",loadA);PLAY_API("LoadLibraryExW",loadExW);PLAY_API("LoadLibraryExA",loadExA);
     PLAY_API("GetProcAddress",proc);PLAY_API("FreeLibrary",freeLibrary);PLAY_API("CreateThread",createThread);
+    PLAY_API("RtlPcToFileHeader",pcToFileHeader);
 #undef PLAY_API
     return 0;
 }
@@ -411,6 +497,7 @@ static int WINAPI messageBoxW(HWND,LPCWSTR text,LPCWSTR caption,UINT type) {
 static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     std::string key=lower(dll);
     if(key=="kernelbase.dll") key="kernel32.dll";
+    if(auto graphics=play_graphics::resolve(dll,name,ordinal))return graphics;
     if(name && (key=="kernel32.dll"||key=="kernelbase.dll"||key=="ntdll.dll"||key.find("api-ms-win-core-")==0)) if(auto p=processApi(name)) return p;
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxA")) return (uintptr_t)&messageBoxA;
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxW")) return (uintptr_t)&messageBoxW;
