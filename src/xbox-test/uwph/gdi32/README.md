@@ -39,3 +39,13 @@ DCs, display reconfiguration, dimensions up to LONG_MAX, preserved last error,
 conservative capability bits, and driver-independent Wine display values.
 Launcher routing requires integration into the current runtime before real
 Play acceptance; building this older probe launcher is not console proof.
+
+`ChoosePixelFormat` returns zero and preserves last error because this backend
+has no OpenGL driver formats to select. Wine 10 `opengl32/wgl.c` returns zero
+before scoring the requested descriptor when `wglDescribePixelFormat` reports
+no formats; its `get_pixel_formats` failure path does not set last error.
+The route never forwards guest DCs to host GDI. This is an explicit failure,
+not a usable pixel format or OpenGL implementation. `test.sh` exercises 36
+readable descriptor requests through the resolved WINAPI pointer, checking
+unchanged descriptors and last error. These are null-driver contract tests;
+the host Wine display driver may expose formats and is not their oracle.
