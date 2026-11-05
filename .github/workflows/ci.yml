@@ -31,6 +31,8 @@ jobs:
           python3 -m unittest src/xbox-test/app/tests/test_store_badge.py
           python3 -m unittest src/xbox-test/dp/test-verify-depot.py
           python3 -m unittest discover -s src/xbox-test/app/donors -p 'test_*.py'
+          python3 -m unittest discover -s src/xbox-test/kit -p 'test_*.py'
+          python3 -m unittest discover -s src/xbox-test/uwph/display -p 'test_*.py'
           python3 -I -m unittest discover -s src/tools/xbox/tests -p 'test_load_config.py'
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/apibadge_test.cpp -o /tmp/apibadge-test
           /tmp/apibadge-test

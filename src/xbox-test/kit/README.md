@@ -1,98 +1,105 @@
-# Test kit — on-device Dev Mode sideload bundle
+# Test kit — Dev Mode sideload bundle
 
-`build-kit.sh` collects every current signed test package (plus the
-lane/dl launcher, if that worktree is present) into one directory:
+`build-kit.sh` builds the signed test packages and launcher into a unique
+subdirectory of `out/kit/`. Each package has a matching public certificate;
+private signing keys are never copied into the kit.
 
-```
-/workspace/x64-run/kit/<YYYYmmdd-HHMMSS>/
-  uwph.msix        uwph.cer
-  wxl.msix         wxl.cer
-  w32u.msix        w32u.cer
-  vrx.msix         vrx.cer
-  launcher.msix    launcher.cer   (only if /workspace/wt/dl exists)
-  wxl-test.exe                    (extra: guest PE for the WXL mapper check)
-  manifest.json                   (identity, version, sha256 per package)
-```
+## Build and verify
 
-`/workspace/x64-run/kit/latest` symlinks to the most recent run.
-`verify-kit.sh` checks the kit (no `.pfx`, hashes match, every `.msix`
-signature verifies against its own `.cer`) and exits non-zero on any
-problem. Run both before sideloading:
+Use the toolchains described in `src/xbox-test/uwph/host/README.md` and
+`docs/xbox/REBUILD.md`: Python 3, OpenSSL, MinGW, LLVM, the UWP cross-build
+SDK/CRT, `makemsix` and `osslsigncode`. Put tools on `PATH` and set
+`UWP_CROSSBUILD` to the cross-build checkout. Individual builders may need the
+additional setup documented in their directories.
 
 ```sh
-bash src/xbox-test/kit/build-kit.sh
-bash src/xbox-test/kit/verify-kit.sh
+bash src/xbox-test/kit/build-kit.sh /path/to/output/kit
+bash src/xbox-test/kit/verify-kit.sh /path/to/output/kit/latest
+bash src/xbox-test/kit/verify-kit-offline.sh /path/to/output/kit/latest
+bash src/xbox-test/kit/check-install-guide.sh
+python3 -m unittest discover -s src/xbox-test/kit -p 'test_*.py'
 ```
 
-These two commands plus `bash src/xbox-test/smoke-all.sh --offline` are this
-lane's acceptance gate and must all exit 0.
+The build runs all three kit/guide verification scripts before updating the
+`latest` symlink. Failures leave that symlink unchanged. Signature/hash checks,
+manifest identity and publisher checks, executable presence and block-map checks
+are off-device checks, **not console acceptance**. Full `src/xbox-test/smoke-all.sh`
+and `src/xbox-test/tools/play-test.sh <appid>` through the launcher still apply to
+on-device changes; an offline smoke run cannot replace them.
 
-## What's in the kit
+Configuration (all paths may be absolute):
 
-| Package | Identity | AppUserModelId (RID) | Logs to | Success line | On screen |
-| --- | --- | --- | --- | --- | --- |
-| `uwph` | `Joao.XboxSteam.Uwph` 0.1.6.0 | `Joao.XboxSteam.Uwph_dk715arakrne0!App` | `LocalState\k32.log` | `K32 RESULT failures=0` then `D3DT RESULT presented=300 hr=0x00000000` | Window flashes through 300 colored D3D11 clears, ends on a solid magenta frame |
-| `wxl` | `Joao.XboxSteam.Wxl` 0.1.1.0 | `Joao.XboxSteam.Wxl_dk715arakrne0!App` | `LocalState\k32.log` | First launch (no guest yet): `WXL FAIL open`. After uploading `wxl-test.exe` and relaunching: `WXL RESULT entry=42 failures=0` | Same k32/D3DT window behavior as `uwph`; this is the isolated-identity build of the same host |
-| `w32u` | `Joao.XboxSteam.W32u` 0.1.5.0 | `Joao.XboxSteam.W32u_dk715arakrne0!App` | `LocalState\w32u.log` | `W32U RESULT failures=0` | Window presents 180 frames then holds solid green (RGB-stable, no gamepad needed; it also exercises synthetic XInput conversion internally) |
-| `vrx` | `Joao.XboxSteam.Vrx` 0.1.0.0 | `Joao.XboxSteam.Vrx_dk715arakrne0!App` | `LocalState\vrx.log` | `vrx: all cases done` (check each of `caseA`/`caseB`/`caseC` individually — `caseA` and `caseB` are expected to fail/except under AppContainer, `caseC` via `*FromApp` is expected `OK value=42`) | Window opens, briefly renders, then idles on a heartbeat frame |
-| `launcher` | `Grok.XboxTest` 0.4.3.0 | `Grok.XboxTest_dk715arakrne0!App` | `LocalState\boot.log` (and its own session files — do not touch those) | boot reaches the QR/library screen | Steam QR login screen, or library view if already signed in |
+- Output: first argument, then `KIT_OUT_ROOT`, then this checkout's `out/kit`.
+- `KIT_SOURCE_ROOT`: source checkout for working directory and Git provenance;
+  defaults to the checkout containing this script.
+- `KIT_BUILD_ROOT`: root containing the `src/xbox-test/.../build.sh` builders;
+  defaults to `KIT_SOURCE_ROOT`. This can select local build adapters. Adapters
+  and alternate sources must be disclosed with build evidence; the recorded
+  source commit alone does not certify them.
+- `LAUNCHER_SOURCE_ROOT`: launcher checkout, defaulting to `KIT_BUILD_ROOT`.
+  Set it to an empty string to intentionally omit the launcher. A nonempty
+  missing path or a failed builder is an error, not a successful omission.
+- `PATH`, `UWP_CROSSBUILD` and other individual-builder settings are inherited.
 
-All five share publisher `CN=grok-xbox-dev` and therefore the same family
-suffix `dk715arakrne0`; only the `Name` part of the identity differs. `uwph`
-and `wxl` are two manifest variants of the **same binaries** (see
-`src/xbox-test/uwph/host/README.md`) — installing one does not remove the other,
-they are separate package families.
+The explicit package list avoids silently shipping an incomplete bundle after a
+failed auto-discovered builder. To add a package, add its required build and
+`add_package` call, then update the guide and tests.
 
-## Installing via Device Portal (manual "Add app")
+## Contents
 
-1. Open `https://192.168.15.96:11443` in a browser (or via the Tailscale
-   SOCKS proxy), sign in with the Device Portal credentials.
-2. Go to **System -> Apps**, click **Add** (the "+" above the app list).
-3. Choose **Local Storage**, pick the package's `.msix` from the kit
-   directory, add its matching `.cer` as a certificate file in the same
-   dialog, then **Add it**. Wait for "Installation of package ... completed."
-4. Repeat for each package. Installing does not launch it.
-5. To run: find the app under **Apps**, select it, press **Start**. To see
-   logs: **File Explorer -> LocalAppData -> `<PackageFamilyName>` ->
-   LocalState**, download the `.log` file named in the table above.
-   Screenshots: the Device Portal home page has a **Take Screenshot** button
-   (same image `src/xbox-test/dp/screenshot.sh` pulls from `/ext/screenshot`).
+Each of `uwph`, `wxl`, `hid`, `mlp`, `tls`, `swc`, `w32u`, `vrx` and, unless
+explicitly omitted, `launcher` has `<name>.msix` and `<name>.cer`.
 
-Equivalent command-line route (each `dp/*.sh` script takes
-`CONSOLE.lock` itself — do not wrap them in another `flock`):
+Additional files:
+
+- `wxl-test.exe` and `swc-test.exe`: guests uploaded to the corresponding
+  package's `LocalState` before its test can succeed.
+- `tls-test.exe`, `tls-test.dll`, `lifecycle.dll`: upload all three to the TLS
+  package's `LocalState`. Its native carrier DLLs stay inside the MSIX.
+- `manifest.json`: identity and version read from the **built MSIX**, SHA-256
+  for each package/guest, and source commit/branch.
+- `VERSIONS.md`: generated version table belonging to this artifact, not a
+  tracked snapshot of a developer's last build.
+
+Regenerate or check a kit's version document without changing source files:
 
 ```sh
-kit=/workspace/x64-run/kit/latest
-src/xbox-test/dp/install.sh "$kit/uwph.msix" "$kit/uwph.cer"
-src/xbox-test/dp/launch.sh 'Joao.XboxSteam.Uwph_dk715arakrne0!App' 'Joao.XboxSteam.Uwph_0.1.6.0_x64__dk715arakrne0'
-src/xbox-test/dp/wait-log.sh 'Joao.XboxSteam.Uwph_0.1.6.0_x64__dk715arakrne0' k32.log 'D3DT RESULT presented=300' 60 /tmp/uwph.log
+bash src/xbox-test/kit/sync-readme-versions.sh /path/to/kit/manifest.json
+bash src/xbox-test/kit/sync-readme-versions.sh --check /path/to/kit/manifest.json
+# Optional second argument selects another output document.
 ```
 
-## Install order and caveats
+### Packages and expected results
 
-- **Order does not matter** between `uwph`, `wxl`, `w32u` and `vrx` — they are
-  independent package families and do not conflict.
-- **`wxl` needs a one-time guest upload.** Its first launch logs
-  `WXL FAIL open` (expected — there's nothing in `LocalState` yet). Use
-  `src/xbox-test/dp/put-file.sh <wxl PackageFullName> '\LocalState' <kit>/wxl-test.exe`,
-  kill the app, relaunch, then check for `WXL RESULT entry=42 failures=0`. See
-  `src/xbox-test/uwph/host/README.md`'s "Minimal PE mapper" section for the full
-  sequence.
-- **`launcher` (`Grok.XboxTest`) may already be installed and in active use**
-  (QR login state, Steam session). Installing this kit's `launcher.msix` is
-  an in-place update of that same package family — if its version already
-  matches what's installed, Device Portal will report nothing to do; if it's
-  older, this upgrades it. Do **not** uninstall/reinstall it if someone has
-  an active signed-in session you don't want to clear; check its current
-  version first via **Apps** list or `/api/app/packagemanager/packages`.
-- **Do not uninstall any other package while verifying this kit.** This
-  lane's acceptance does not require installing anything; the on-device
-  steps above are for whoever (João) chooses to sideload and smoke-test.
+| Package | Identity | LocalState log | Required result |
+| --- | --- | --- | --- |
+| `uwph` | `Joao.XboxSteam.Uwph` | `k32.log` | `K32 RESULT failures=0` and `D3DT RESULT presented=300 hr=0x00000000`; colored clears ending magenta |
+| `wxl` | `Joao.XboxSteam.Wxl` | `k32.log` | After guest upload: `WXL RESULT entry=42 failures=0`; `WXL FAIL open` before upload is not a pass |
+| `hid` | `Joao.XboxSteam.Hid` | `k32.log` | `HID-STUB-OK symbols=20 checks=23` and `HID RESULT failures=0` |
+| `mlp` | `Joao.XboxSteam.Mlp` | `k32.log` | `MLP-PROBE-DONE` after uploading your own Megabonk PEs; mapping/import classification only, no game execution |
+| `tls` | `Joao.XboxSteam.Tls` | `k32.log` | After guest uploads: `WXL TLS RESULT failures=0` and `LIFECYCLE RESULT failures=0` |
+| `swc` | `Joao.XboxSteam.Swc` | `k32.log` | After guest upload: `SWC RESULT entry=42 failures=0`; 300 presents ending green |
+| `w32u` | `Joao.XboxSteam.W32u` | `w32u.log` | `W32U RESULT failures=0`; 180 frames ending green |
+| `vrx` | `Joao.XboxSteam.Vrx` | `vrx.log` | `vrx: all cases done`; inspect each case: A/B deliberately fail or except under AppContainer, C must report `OK value=42` |
+| `launcher` | `Grok.XboxTest` | `boot.log` | QR/library screen; this alone is not evidence of playable games |
 
-## No private keys
+For the default manifests, publisher is `CN=grok-xbox-dev`, package-family
+suffix is `dk715arakrne0`, application ID is `App`, and architecture is `x64`.
+Full package name is `<Identity>_<Version>_x64__dk715arakrne0`; launch ID is
+`<Identity>_dk715arakrne0!App`. Read versions from the kit, not this document.
+Alternate manifests/publishers require their actual package identifiers.
 
-Every `.cer` in the kit is the **public** self-signed test certificate used
-only so Windows/Xbox will accept the matching `.msix`'s signature. The
-private `.pfx`/`.key`/`.pem` used to produce each signature is never copied
-into the kit; `verify-kit.sh` fails the whole kit if it ever finds a `.pfx`
-anywhere under the kit directory.
+## Install and collect evidence
+
+Follow [INSTALL.md](INSTALL.md) for Device Portal commands, guest uploads and
+log collection. Configure the console address, credentials and network path for
+your environment using `src/xbox-test/dp/README.md`. Device Portal scripts take the
+console lock themselves; do not wrap them in another `flock`.
+
+Packages have separate identities and can coexist. **Do not uninstall the
+launcher to update it**: that can erase Steam login state. Install over the same
+identity with a newer version. Inspect the installed version before reinstalling
+and follow the repository's version-bump requirement.
+
+Before sharing evidence, remove account details and review logs/screenshots.
+Never include credentials, session files, private signing keys or game binaries.

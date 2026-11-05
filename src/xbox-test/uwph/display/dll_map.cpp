@@ -4,7 +4,7 @@
 #include <cwctype>
 #include <string>
 #include <vector>
-enum class RouteKind { system, uwph, stub };
+enum class RouteKind { system, uwph, stub, wine_pe };
 struct Route { const wchar_t* name; RouteKind kind; };
 #include "routes.generated.h"
 using BuiltinResolver = FARPROC (*)(LPCWSTR,LPCSTR);

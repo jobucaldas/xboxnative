@@ -6,7 +6,8 @@ mkdir -p "$out/obj" "$out/layout"
 llvm-dlltool-19 -m i386:x86-64 -d tests/cxx-runtime.def -l "$out/obj/cxx-runtime.lib"
 python3 - "$out" <<'PYCODE'
 import subprocess,pathlib,sys,os
-lib=os.path.expanduser('~/.cache/uwp-crossbuild/xwin/crt/lib/x86_64/libcmt.lib')
+xwin=pathlib.Path(os.environ.get('UWP_XWIN_ROOT', os.path.expanduser('~/.cache/uwp-crossbuild/xwin')))
+lib=str(xwin / 'crt/lib/x86_64/libcmt.lib')
 name=next(n for n in subprocess.check_output(['llvm-ar-19','t',lib],text=True).splitlines() if n.endswith('\\std_type_info_static.obj'))
 pathlib.Path(sys.argv[1]+'/obj/typeinfo.obj').write_bytes(subprocess.check_output(['llvm-ar-19','p',lib,name]))
 PYCODE
@@ -20,5 +21,5 @@ lld-link-19 "${common[@]}" /dll /entry:tls_dll_entry /out:"$out/layout/tls-test.
 lld-link-19 "${common[@]}" /entry:tls_exe_entry /out:"$out/layout/tls-test.exe" "$out/obj/tls-exe.obj" "$out/obj/cxx-exe.obj" "$out/obj/tls-test.lib" /usr/x86_64-w64-mingw32/lib/libkernel32.a
 for slot in a b; do
   define=/DCARRIER_A; [[ $slot == b ]] && define=/DCARRIER_B
-  UWP_OBJ_DIR="$out/carrier-$slot-obj" /workspace/ref/uwp-crossbuild/scripts/build.sh --uwp --out "$out/layout/tls-carrier-$slot.dll" --link-arg /dll tls_carrier.cpp -- /MT /O2 /GS- "$define"
+  UWP_OBJ_DIR="$out/carrier-$slot-obj" "${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}/scripts/build.sh" --uwp --out "$out/layout/tls-carrier-$slot.dll" --link-arg /dll tls_carrier.cpp -- /MT /O2 /GS- "$define"
 done

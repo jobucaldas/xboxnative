@@ -7,7 +7,9 @@ CB="${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}"
 python3 generate_routes.py "$out/routes.generated.h"
 UWP_OBJ_DIR="$out/driver-obj" "$CB/scripts/build.sh" --uwp --out "$out/layout/uwph-user32.dll" --link-arg /dll --link-arg /def:display.def display.cpp dll_map.cpp -- /MT /O2 /I"$out"
 x86_64-w64-mingw32-dlltool -d imports.def -l "$out/libuwph-user32.a"
-x86_64-w64-mingw32-g++ -shared -nostdlib -O2 -o "$out/layout/window-test.dll" window_test.cpp "$out/libuwph-user32.a" -ld3d11 -ldxgi -luuid -lws2_32 -lbcrypt -lole32 -lversion -lkernel32 -lgcc -Wl,--entry,0,--subsystem,windows:6.2,--nxcompat,--dynamicbase,--no-insert-timestamp -Wl,--major-os-version,6,--minor-os-version,2
+# Aggregate zero-initialization must stay inline in this CRT-free guest; newer
+# GCC versions otherwise emit a memset call that -nostdlib cannot resolve.
+x86_64-w64-mingw32-g++ -shared -nostdlib -O2 -minline-all-stringops -o "$out/layout/window-test.dll" window_test.cpp "$out/libuwph-user32.a" -ld3d11 -ldxgi -luuid -lws2_32 -lbcrypt -lole32 -lversion -lkernel32 -lgcc -Wl,--entry,0,--subsystem,windows:6.2,--nxcompat,--dynamicbase,--no-insert-timestamp -Wl,--major-os-version,6,--minor-os-version,2
 # GNU ld has no --appcontainer flag; set the documented PE characteristic.
 python3 - "$out/layout/window-test.dll" <<'PY'
 import struct,sys
