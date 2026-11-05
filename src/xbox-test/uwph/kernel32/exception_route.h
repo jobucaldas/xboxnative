@@ -11,9 +11,14 @@ inline uintptr_t resolve_exception(const char* dll,const char* name) {
     bool rtl=!_stricmp(dll,"ntdll.dll");
     bool error=!_stricmp(dll,"api-ms-win-core-errorhandling-l1-1-0.dll");
     bool debug=!_stricmp(dll,"api-ms-win-core-debug-l1-1-0.dll");
-    if (!kernel && !rtl && !error && !debug) return 0;
+    // The rtlsupport API set names the same native unwind runtime (Rewired's
+    // WindowsGamingInput plugin imports through it).
+    bool support=!_stricmp(dll,"api-ms-win-core-rtlsupport-l1-1-0.dll") ||
+                 !_stricmp(dll,"api-ms-win-core-rtlsupport-l1-2-0.dll");
+    if (!kernel && !rtl && !error && !debug && !support) return 0;
 #define K32_EXCEPTION(symbol) if (!strcmp(name,#symbol)) return reinterpret_cast<uintptr_t>(&::symbol)
-    if (kernel || rtl) {
+    if (support) K32_EXCEPTION(RtlLookupFunctionEntry);
+    if (kernel || rtl || support) {
         K32_EXCEPTION(RtlCaptureContext);
         K32_EXCEPTION(RtlCaptureStackBackTrace);
         K32_EXCEPTION(RtlVirtualUnwind);

@@ -84,7 +84,7 @@ crt=${XWIN_ROOT:-$HOME/.cache/uwp-crossbuild/xwin}
 lld-link-19 "$out"/obj/cxx/tests_play-cxx.*.obj /dll /out:"$out/play-cxx.dll" \
  /libpath:"$crt/crt/lib/x86_64" /libpath:"$crt/sdk/lib/um/x86_64" \
  /libpath:"$crt/sdk/lib/ucrt/x86_64" kernel32.lib
-UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --out "$out/play-runner.exe" tests/play-runner.cpp -- /MT /O2
+UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --out "$out/play-runner.exe" tests/play-runner.cpp -- /MT /O2 /Iout/obj
 # Use the exact packaged carriers from the launcher build.
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
 # Owned stand-in so steam-client proves refusal of a present root client DLL.

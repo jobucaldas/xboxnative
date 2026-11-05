@@ -12,6 +12,8 @@ export WINEPREFIX=${PRUN_WINEPREFIX:-/tmp/prun-wine}
 export WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d
 bash tests/play-runtime.sh
 out=out/play-tests
+# Source-built donors from the launcher layout, as packaged.
+mkdir -p "$out/donors"; cp out/layout/donors/*.dll "$out/donors/"
 # An explicit alternate DLL is for cross-lane diagnosis only. Restore our layout
 # afterward; this never changes the packaged launcher or its source files.
 trap 'cp out/layout/uwph-u32c.dll "$out/"' EXIT
@@ -21,7 +23,7 @@ export PRUN_GAME_ROOT
 PRUN_GAME_ROOT=$(winepath -w "$game_root")
 rm -f "$out/host-game-events.log"
 set +e
-timeout -k 2 25 wine "$out/play-runner.exe" game > "$out/host-game-stdout.log" 2>&1
+timeout -k 2 $(( ${PRUN_GAME_SECONDS:-10} + 15 )) wine "$out/play-runner.exe" game > "$out/host-game-stdout.log" 2>&1
 result=$?
 set -e
 [[ -f "$out/host-game-events.log" ]] && tail -8 "$out/host-game-events.log"

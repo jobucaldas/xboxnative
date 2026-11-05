@@ -35,7 +35,66 @@ static FARPROC WINAPI hostProc(HMODULE h,LPCSTR name) {
 #define LoadPackagedLibrary hostPackaged
 #include "../host/wxl_mapper.h"
 #include "../host/mlp_probe.h"
+#include "../donors/probe.h"
 #include "../host/play_runtime.h"
+#include "../launch_arguments.h"
+// OFF-DEVICE stand-in for the application's CoreWindow (game mode only). Play's
+// unchanged factory adapter still validates every guest HWND; only its final
+// CreateSwapChainForCoreWindow step presents to a native Wine window instead.
+namespace host_surface {
+static HWND window=nullptr;
+struct Token final : IUnknown {
+    LONG refs=1;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void** out) override {
+        if(!out)return E_POINTER;*out=nullptr;
+        if(id!=__uuidof(IUnknown))return E_NOINTERFACE;
+        *out=this;AddRef();return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override {return InterlockedIncrement(&refs);}
+    ULONG STDMETHODCALLTYPE Release() override {return InterlockedDecrement(&refs);}
+};
+static Token token;
+static HRESULT present(IDXGIFactory2* factory,IUnknown* device,IUnknown*,const DXGI_SWAP_CHAIN_DESC1* desc,IDXGIOutput* output,IDXGISwapChain1** chain) {
+    return factory->CreateSwapChainForHwnd(device,window,desc,nullptr,output,chain);
+}
+// The runner is a UWP build: desktop user32 is reached by name, with its
+// Win64 types declared here (WNDCLASSW, MSG and the constants used).
+using WndProc=LRESULT(CALLBACK*)(HWND,UINT,WPARAM,LPARAM);
+struct WndClass {UINT style;WndProc proc;int classExtra,windowExtra;HINSTANCE instance;HANDLE icon,cursor,background;LPCWSTR menu,name;};
+struct HostMsg {HWND hwnd;UINT message;WPARAM wParam;LPARAM lParam;DWORD time;POINT pt;};
+static_assert(sizeof(WndClass)==72&&sizeof(HostMsg)==48,"Win64 user32 layouts");
+constexpr DWORD overlappedVisible=0x00CF0000|0x10000000; // WS_OVERLAPPEDWINDOW|WS_VISIBLE
+constexpr DWORD allInput=0x04FF; // QS_ALLINPUT
+template<class F> static F user(const char* name) {
+    static HMODULE module=LoadLibraryW(L"user32.dll");
+    return module?(F)GetProcAddress(module,name):nullptr;
+}
+static LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM l) {
+    return user<WndProc>("DefWindowProcW")(h,m,w,l);
+}
+static bool create() {
+    auto registerClass=user<ATOM(WINAPI*)(const WndClass*)>("RegisterClassW");
+    auto createWindow=user<HWND(WINAPI*)(DWORD,LPCWSTR,LPCWSTR,DWORD,int,int,int,int,HWND,HANDLE,HINSTANCE,void*)>("CreateWindowExW");
+    if(!registerClass||!createWindow)return false;
+    WndClass cls{};cls.proc=proc;cls.instance=GetModuleHandleW(nullptr);cls.name=L"play-host-surface";
+    if(!registerClass(&cls))return false;
+    window=createWindow(0,cls.name,L"Play off-device surface",overlappedVisible,0,0,1280,720,nullptr,nullptr,cls.instance,nullptr);
+    return window!=nullptr;
+}
+// Pump the native surface window while the guest worker runs.
+static void wait(HANDLE worker,DWORD ms) {
+    auto msgWait=user<DWORD(WINAPI*)(DWORD,const HANDLE*,BOOL,DWORD,DWORD)>("MsgWaitForMultipleObjects");
+    auto peek=user<BOOL(WINAPI*)(HostMsg*,HWND,UINT,UINT,UINT)>("PeekMessageW");
+    auto dispatch=user<LRESULT(WINAPI*)(const HostMsg*)>("DispatchMessageW");
+    ULONGLONG end=GetTickCount64()+ms;
+    for(;;) {
+        ULONGLONG now=GetTickCount64();if(now>=end)return;
+        DWORD left=DWORD(std::min<ULONGLONG>(end-now,100));
+        if(msgWait(worker?1:0,worker?&worker:nullptr,FALSE,left,allInput)==WAIT_OBJECT_0&&worker)return;
+        HostMsg m;while(peek(&m,nullptr,0,0,1/*PM_REMOVE*/))dispatch(&m);
+    }
+}
+}
 #include "../launch_status.h"
 #undef GetProcAddress
 static DWORD WINAPI tryLoaderLock(void*) {
@@ -169,13 +228,24 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         if(!n||n>=32768)return 2;
         root.assign(gameRoot,n);
         logline("OFF-DEVICE Wine diagnostic only; no console or Steam client success claim");
+        // Same donor gate and routing as the launcher (launch.h): source-built
+        // Wine donors serve hid/setupapi/version/shcore/avrt imports.
+        if(!donor_pe::probe(logline)) {logline("DWPE FAIL donor behavior gate; no game code executed");return 3;}
+        mlp::donor_resolve=donor_pe::exported;
+        if(!host_surface::create()) {logline("HOST SURFACE FAIL native Wine window unavailable");return 3;}
+        play_graphics::configure(&host_surface::token,host_surface::present,logline);
+        logline("HOST SURFACE native Wine window stands in for the CoreWindow (off-device only)");
     }
-    if(!play_runtime::start(root,game?L"Megabonk.exe":std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":L"play-guest.exe",game?L"-force-d3d11":play_runtime::wide(args),logline))return 1;
+    if(!play_runtime::start(root,game?L"Megabonk.exe":std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":L"play-guest.exe",game?play_runtime::wide(launch_arguments::for_app(3405340)):play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
     // guest stop (fatal dialog). Progress must never mask that failure.
     if(std::string(args)=="dialog-milestone")r->milestone=1;
-    if(r->worker)WaitForSingleObject(r->worker,game?10000:2000);
+    if(game) {
+        wchar_t seconds[16];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_SECONDS",seconds,16);
+        DWORD limit=n&&n<16?DWORD(_wtoi(seconds)):10;
+        host_surface::wait(r->worker,limit*1000);
+    } else if(r->worker)WaitForSingleObject(r->worker,2000);
     auto last=r->snapshot();char summary[8192];snprintf(summary,sizeof summary,"PLAY-TEST executed=%d finished=%d success=%d code=%lu last=%s",int(r->executed),int(r->finished),r->success,r->code,last.c_str());
     logline(summary);
     std::string mode=args;
