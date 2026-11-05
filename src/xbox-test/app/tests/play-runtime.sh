@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# Off-device Wine proof for the same runtime used by launcher Play. No console claim.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+export PATH="$HOME/.local/bin:$PATH"
+export WINEPREFIX=${PRUN_WINEPREFIX:-/tmp/prun-wine}
+export WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d
+mkdir -p "$WINEPREFIX"
+if [[ ! -f "$WINEPREFIX/system.reg" ]];then timeout -k 2 60 wineboot -u;fi
+out=out/play-tests
+mkdir -p "$out/obj"
+printf 'LIBRARY play-missing.dll\nEXPORTS\nDeliberatelyMissingPlayImport\n' > "$out/obj/missing.def"
+llvm-dlltool-19 -m i386:x86-64 -d "$out/obj/missing.def" -l "$out/obj/missing.lib"
+cat > "$out/obj/forward.def" <<'DEF'
+LIBRARY play-forward.dll
+EXPORTS
+ ForwardName=play-forward-target.dependency_check @11
+ ForwardOrdinal="play-forward-target.#1" @12
+ ForwardDynamic=play-lazy-target.dependency_check @15
+ ForwardSteam=steam_api64.SteamAPI_Init @16
+ ForwardRejected=play-reject.dependency_check @17
+ ForwardRejectedOrdinal="play-reject.#1" @18
+ MissingPending=play-pending-target.DeliberatelyAbsentOptionalExport @19
+ PendingName=play-pending-target.dependency_check @20
+ PendingOrdinal="play-pending-target.#1" @21
+ MissingPendingReject=play-pending-reject.DeliberatelyAbsentOptionalExport @22
+ PendingRejectName=play-pending-reject.dependency_check @23
+ PendingRejectOrdinal="play-pending-reject.#1" @24
+ Loop=play-forward.Loop @13
+ Absent=play-forward-target.DeliberatelyAbsentOptionalExport @14
+DEF
+printf 'int forwarder_anchor; void *forwarder_relocation = &forwarder_anchor;\n' | clang++-19 --target=x86_64-w64-windows-gnu -x c -c - -o "$out/obj/forward.obj"
+lld-link-19 "$out/obj/forward.obj" /include:forwarder_anchor /include:forwarder_relocation /dll /noentry /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /def:"$out/obj/forward.def" /out:"$out/play-forward.dll" /implib:"$out/obj/forward.lib"
+for kind in dll exe;do
+ flags=();[[ $kind == dll ]]&&flags=(-DPLAY_DLL)
+ clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector "${flags[@]}" -c tests/play-guest.cpp -o "$out/obj/$kind.obj"
+done
+clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_STATIC_MISSING -c tests/play-guest.cpp -o "$out/obj/missing.obj"
+clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_STATIC_STEAM -c tests/play-guest.cpp -o "$out/obj/steam.obj"
+clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_DLL -DPLAY_STATIC_MISSING -c tests/play-guest.cpp -o "$out/obj/unresolved.obj"
+clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_DLL -DPLAY_REJECT_ATTACH -c tests/play-guest.cpp -o "$out/obj/reject.obj"
+common=(/nodefaultlib /include:_tls_used /alternatename:tls_raw=tls_value /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat)
+x86_64-w64-mingw32-windres ../uwph/kernel32/resource_fixture.rc -O coff -o "$out/obj/resources.obj"
+lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-dependency.dll" /implib:"$out/obj/dependency.lib" "$out/obj/dll.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-guest.exe" "$out/obj/exe.obj" "$out/obj/resources.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$out/obj/missing.lib" /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-missing.exe" "$out/obj/missing.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$out/obj/missing.lib" /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-steam.exe" "$out/obj/steam.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-unresolved.dll" "$out/obj/unresolved.obj" "$out/obj/missing.lib" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+cat > "$out/obj/reject.def" <<'DEF'
+LIBRARY play-reject.dll
+EXPORTS
+ dependency_check @1
+ RejectedForward=play-dependency.dependency_check @2
+DEF
+lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /def:"$out/obj/reject.def" /out:"$out/play-reject.dll" "$out/obj/reject.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+cp "$out/play-dependency.dll" "$out/play-dynamic.dll"
+cp "$out/play-dependency.dll" "$out/play-detach-target.dll"
+cp "$out/play-dependency.dll" "$out/play-forward-target.dll"
+cp "$out/play-dependency.dll" "$out/play-lazy-target.dll"
+mkdir -p "$out/loader-search"
+cp "$out/play-dependency.dll" "$out/loader-search/play-search.dll"
+cp "$out/play-dependency.dll" "$out/loader-search/café.dll"
+for role in dependency consumer;do
+ flags=();[[ $role == consumer ]]&&flags=(-DSEARCH_CONSUMER)
+ clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector "${flags[@]}" -c ../uwph/kernel32/guest_loader_search_dependency.cpp -o "$out/obj/search-$role.obj"
+done
+lld-link-19 /nodefaultlib /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /dll /entry:search_entry /out:"$out/loader-search/search-dependency.dll" /implib:"$out/obj/search-dependency.lib" "$out/obj/search-dependency.obj"
+lld-link-19 /nodefaultlib /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /dll /entry:search_entry /out:"$out/loader-search/search-consumer.dll" "$out/obj/search-consumer.obj" "$out/obj/search-dependency.lib"
+
+cp "$out/play-dependency.dll" "$out/play-pending-target.dll"
+cp "$out/play-reject.dll" "$out/play-pending-reject.dll"
+CB=${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}
+UWP_OBJ_DIR="$out/obj/cxx" "$CB/scripts/build.sh" --out "$out/play-cxx.dll" --link-arg /dll tests/play-cxx.cpp -- /MT /O2 /EHsc
+# Relink against the desktop import names used by the owned game. WindowsApp
+# otherwise selects API-set names outside the production import allowlist.
+crt=${XWIN_ROOT:-$HOME/.cache/uwp-crossbuild/xwin}
+lld-link-19 "$out"/obj/cxx/tests_play-cxx.*.obj /dll /out:"$out/play-cxx.dll" \
+ /libpath:"$crt/crt/lib/x86_64" /libpath:"$crt/sdk/lib/um/x86_64" \
+ /libpath:"$crt/sdk/lib/ucrt/x86_64" kernel32.lib
+UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --out "$out/play-runner.exe" tests/play-runner.cpp -- /MT /O2
+# Use the exact packaged carriers from the launcher build.
+cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
+# Owned stand-in so steam-client proves refusal of a present root client DLL.
+cp "$out/play-dependency.dll" "$out/steamclient64.dll"
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main;do
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
+ tail -1 "$out/$mode.log"
+done
+# Megabonk/Unity load-config shape (GuardFlags CF_INSTRUMENTED + volatile
+# metadata) through production Play, reusing the unchanged native C++ test.
+# A GuardFlags value outside the accepted contract must still be rejected.
+cxx=$out/play-cxx.dll
+cp "$cxx" "$out/obj/play-cxx-cookie.dll"
+for flags in 0x100 0x500;do
+ rm -rf "$out/obj/cxx-cf"
+ UWP_OBJ_DIR="$out/obj/cxx-cf" "$CB/scripts/build.sh" --out "$cxx" --link-arg /dll tests/play-cxx.cpp tests/play-cxx-instrumented-config.c -- /MT /O2 /EHsc -DPLAY_CXX_GUARD_FLAGS=$flags
+ lld-link-19 "$out"/obj/cxx-cf/*.obj /dll /out:"$cxx" \
+  /libpath:"$crt/crt/lib/x86_64" /libpath:"$crt/sdk/lib/um/x86_64" \
+  /libpath:"$crt/sdk/lib/ucrt/x86_64" kernel32.lib
+ config=$(llvm-readobj --coff-load-config "$cxx")
+ grep -q "GuardFlags \[ ($flags)" <<<"$config"
+ grep -Eq 'VolatileMetadataPointer: 0x[0-9A-F]*[1-9A-F]' <<<"$config"
+ log=$out/native-cxx-instrumented-$flags.log
+ status=0
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" native-cxx > "$log" 2>&1 || status=$?
+ tail -1 "$log"
+ if [[ $flags == 0x100 ]];then
+  [[ $status == 0 ]] && grep -q 'WXL Play MSVC load config GuardFlags=0x100 volatileMetadata=present' "$log"
+ else
+  [[ $status != 0 ]] && grep -q 'WXL FAIL explicit MSVC file preflight' "$log"
+ fi
+done
+cp "$out/obj/play-cxx-cookie.dll" "$cxx"
+# Steam without a genuine client. A steamclient64.dll in the game root must be
+# refused (steam-client runs above with it present); a root steam_api64.dll is
+# an ordinary game DLL. Owned stand-ins only, removed afterwards.
+rm -f "$out/steamclient64.dll" "$out/steam_api64.dll"
+cp "$out/play-dependency.dll" "$out/steam_api64.dll"
+WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" root-steam > "$out/root-steam.log" 2>&1
+tail -1 "$out/root-steam.log"
+grep -q "steam_api64.dll is the game's original file, mapped unmodified" "$out/root-steam.log"
+rm -f "$out/steam_api64.dll"
+

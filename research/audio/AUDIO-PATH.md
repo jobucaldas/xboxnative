@@ -41,14 +41,14 @@ resolves the 23 observed WINMM symbols directly from System32. Export discovery
 alone does not establish working WinMM playback or endpoint activation.
 
 Reproduce the static audit with:
-`python3 xbox-test/audio/audit-imports.py /workspace/steam-owned/games/megabonk`.
+`python3 src/xbox-test/audio/audit-imports.py /workspace/steam-owned/games/megabonk`.
 It compares per-image LLVM and pefile imports, the saved CSV, and the two route
 diagnostic symbol lists. It scans direct and delay imports from all top-level
 game PEs; dynamically selected libraries remain outside this check.
 
 ## Native diagnostic
 
-`xbox-test/audio/build.sh` builds an actual x64 PE DLL with mingw/lld; the signed
+`src/xbox-test/audio/build.sh` builds an actual x64 PE DLL with mingw/lld; the signed
 UWP launcher packages and loads it through the real Play mapper diagnostic hook.
 It initializes the worker's COM MTA, creates the real system XAudio2 engine,
 mastering and source voices, submits 24,000 stereo PCM frames with measured

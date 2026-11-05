@@ -40,7 +40,7 @@ Lines this lane added to the shared LANE_NOTES.md between 86960ae8a and 494a5402
 
 ### prun — first real Xbox guest execution, launcher 0.5.52.0
 - Installed signed launcher on actual Series S, then unchanged
-  `xbox-test/tools/play-test.sh 3405340 150 .../runs/prun/play-52.0` through the
+  `src/xbox-test/tools/play-test.sh 3405340 150 .../runs/prun/play-52.0` through the
   real detail/Play path with synthetic one-shot input. Test exits 0, GAP intact.
 - Real result: `mapped=2/2 gameCodeExecuted=true`, stopped precisely at
   `missing import hit: kernelbase.dll!InitializeCriticalSectionEx`.
@@ -510,7 +510,7 @@ play-observer-fixed/{boot.session.log,launch_probe.log,launch_result.json}.
 
 To fix this established blocker and reach the already diagnosed Unity window
 path, integrated existing owning-lane user32 commits d7a25e6b, 75377f16 and
-618c4c03 (only xbox-test/uwph/user32 files; their historical lane notes omitted).
+618c4c03 (only src/xbox-test/uwph/user32 files; their historical lane notes omitted).
 Also integrated imm32 owner 4d982f53 route, tests and README, wiring its resolver
 into mlp_probe.h after user32 routing. No files in the owner's worktree were
 written. These APIs are existing owner implementations, not duplicate code.

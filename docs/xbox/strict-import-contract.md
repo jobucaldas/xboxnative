@@ -5,14 +5,14 @@ The contract below remains an integration requirement. Mapper ownership remains 
 
 ## Observed behavior on this branch
 
-- `xbox-test/uwph/host/wxl_mapper.h` defines `Resolver` as
+- `src/xbox-test/uwph/host/wxl_mapper.h` defines `Resolver` as
   `uintptr_t (*)(const char*, const char*, WORD)`: null name denotes an ordinal;
   zero means unresolved. A nonzero address carries no callability classification.
 - `wxl::load` decodes ordinary name/ordinal imports and rejects a zero resolver
   result with `WXL FAIL unresolved builtin`. RVA delay imports are fixed only in
   mapped probe mode and reject zero with `WXL FAIL unresolved delay import`.
   Execution mode rejects the delay-import runtime directory on this branch.
-- `xbox-test/uwph/host/mlp_probe.h` resolves restricted system exports, mapped
+- `src/xbox-test/uwph/host/mlp_probe.h` resolves restricted system exports, mapped
   assets/builtins and named route tables, then categorized fallback providers.
   Its `MLP ROUTE ... provider=... abi=named-x64` diagnostics and separate stub
   counts are observations, not execution authorization. The raw nonzero result
@@ -22,7 +22,7 @@ The contract below remains an integration requirement. Mapper ownership remains 
   implementations of the required services. An exported address or known x64
   signature does not make a placeholder safe or semantically valid for execution.
 - `mlp::run` uses mapped mode. `wxl::load` returns from that mode without
-  initializing TLS/unwind or calling entry/DllMain. `xbox-test/app/launch.h`
+  initializing TLS/unwind or calling entry/DllMain. `src/xbox-test/app/launch.h`
   records probe-only behavior and `gameCodeExecuted=false`. Neither probe
   completion nor the fixture pass establishes arbitrary guest/Megabonk execution.
 
@@ -85,12 +85,12 @@ and `STRICT_LINKER`. Build-only mode does not need Wine or a prefix:
 
 ```sh
 LLVM_MINGW_ROOT=/absolute/path/to/llvm-mingw \
-  bash xbox-test/uwph/host/tests/run-strict-imports.sh --build-only
+  bash src/xbox-test/uwph/host/tests/run-strict-imports.sh --build-only
 
 LLVM_MINGW_ROOT=/absolute/path/to/llvm-mingw \
 WINE_BIN=/absolute/path/to/wine \
 WINEPREFIX=/absolute/path/to/dedicated-win64-prefix \
-  bash xbox-test/uwph/host/tests/run-strict-imports.sh --run
+  bash src/xbox-test/uwph/host/tests/run-strict-imports.sh --run
 ```
 
 `WINE_BIN` defaults to `wine` on PATH. `WINEPREFIX` is respected when supplied;
@@ -109,11 +109,11 @@ Execution-policy integration must additionally cover delay imports, ordinal zero
 noncallable providers, TLS initialization and entry gating. Do not substitute the
 fixture's test-host functions for production providers.
 
-`bash tools/check-uwp-build-env.sh` checks tool availability, not SDK/CRT usability,
+`bash src/tools/check-uwp-build-env.sh` checks tool availability, not SDK/CRT usability,
 package validity or host execution. Even `RESULT TOOLS PRESENT ONLY` is not
 acceptance. Changes to on-device code still require a matching source-built
-host/TLS package and the full `xbox-test/smoke-all.sh` console run. Launcher
-acceptance is `xbox-test/tools/play-test.sh <appid>`; report actual guest execution
+host/TLS package and the full `src/xbox-test/smoke-all.sh` console run. Launcher
+acceptance is `src/xbox-test/tools/play-test.sh <appid>`; report actual guest execution
 separately from a probe or launch attempt. Desktop Wine's FromApp aliases and
 historical lane results cannot replace those checks. Use the shared console lock
 and advance package versions before reinstalling, as required by `AGENTS.md`.
