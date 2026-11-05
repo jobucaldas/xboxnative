@@ -70,7 +70,7 @@ static void logf(const char* fmt, ...) {
 }
 static void open_log() {
     QueryPerformanceFrequency(&g_freq); QueryPerformanceCounter(&g_t0);
-    try { g_dir = Windows::Storage::ApplicationData::Current().LocalFolder().Path().c_str(); g_log = _wfopen((g_dir + L"\\boot.log").c_str(), L"wb"); } catch (...) {}
+    try { g_dir = winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path().c_str(); g_log = _wfopen((g_dir + L"\\boot.log").c_str(), L"wb"); } catch (...) {}
 }
 
 // ---------------------------------------------------------------- framebuffer + bitmap text
@@ -107,13 +107,13 @@ static Http::HttpClient& client() {
 static Resp http(bool post, const std::string& url, const std::string& form, const char* tag) {
     Resp r;
     try {
-        Http::HttpRequestMessage req(post ? Http::HttpMethod::Post() : Http::HttpMethod::Get(), Windows::Foundation::Uri(to_hstring(url)));
-        if (post) req.Content(Http::HttpStringContent(to_hstring(form), Windows::Storage::Streams::UnicodeEncoding::Utf8, L"application/x-www-form-urlencoded"));
+        Http::HttpRequestMessage req(post ? Http::HttpMethod::Post() : Http::HttpMethod::Get(), winrt::Windows::Foundation::Uri(to_hstring(url)));
+        if (post) req.Content(Http::HttpStringContent(to_hstring(form), winrt::Windows::Storage::Streams::UnicodeEncoding::Utf8, L"application/x-www-form-urlencoded"));
         auto resp = client().SendRequestAsync(req).get();
         r.status = (int)resp.StatusCode();
         auto hs = resp.Headers(); if (hs.HasKey(L"x-eresult")) r.eresult = _wtoi(hs.Lookup(L"x-eresult").c_str());
         auto buf = resp.Content().ReadAsBufferAsync().get();
-        auto rd = Windows::Storage::Streams::DataReader::FromBuffer(buf);
+        auto rd = winrt::Windows::Storage::Streams::DataReader::FromBuffer(buf);
         r.body.resize(buf.Length()); if (buf.Length()) rd.ReadBytes(array_view<uint8_t>((uint8_t*)&r.body[0], (uint8_t*)&r.body[0] + r.body.size()));
     } catch (hresult_error const& e) { r.err = to_string(e.message()); logf("http %s hresult_error 0x%08x %s", tag, (unsigned)e.code().value, r.err.c_str()); }
     catch (...) { r.err = "exception"; }
@@ -227,7 +227,7 @@ struct CmServer { std::string host; };
 static bool fetch_cm_list(std::vector<CmServer>& out) {
     Resp r = http(false, "https://api.steampowered.com/ISteamDirectory/GetCMListForConnect/v1/?cellid=0&cmtype=websockets&format=json", "", "GetCMListForConnect");
     if (r.status != 200) return false;
-    auto add_one = [&](Windows::Data::Json::JsonObject const& o) {
+    auto add_one = [&](winrt::Windows::Data::Json::JsonObject const& o) {
         std::string realm = o.HasKey(L"realm") ? to_string(o.GetNamedString(L"realm")) : "";
         std::string type = o.HasKey(L"type") ? to_string(o.GetNamedString(L"type")) : "";
         if (realm != "steamglobal" || type != "websockets" || !o.HasKey(L"endpoint")) return;
@@ -235,7 +235,7 @@ static bool fetch_cm_list(std::vector<CmServer>& out) {
         out.push_back({c == std::string::npos ? ep : ep.substr(0, c)});
     };
     try {
-        auto root = Windows::Data::Json::JsonObject::Parse(to_hstring(r.body)).GetNamedObject(L"response");
+        auto root = winrt::Windows::Data::Json::JsonObject::Parse(to_hstring(r.body)).GetNamedObject(L"response");
         if (!root.HasKey(L"serverlist")) return false;
         try { for (auto const& it : root.GetNamedArray(L"serverlist")) add_one(it.GetObject()); }
         catch (...) { for (auto const& kv : root.GetNamedObject(L"serverlist")) add_one(kv.Value().GetObject()); }
@@ -295,7 +295,7 @@ static void cm_flatten(const std::string& frame, std::vector<std::string>& out, 
 
 struct CmConn {
     Sock::MessageWebSocket ws{nullptr};
-    Windows::Storage::Streams::DataWriter writer{nullptr};
+    winrt::Windows::Storage::Streams::DataWriter writer{nullptr};
     std::mutex m; std::condition_variable cv;
     std::deque<std::string> inbox;
     bool closed = false;
@@ -308,8 +308,8 @@ struct CmConn {
             { std::lock_guard<std::mutex> l(m); inbox.push_back(std::move(s)); } cv.notify_all();
         });
         ws.Closed([this](auto&&, Sock::WebSocketClosedEventArgs const&) { { std::lock_guard<std::mutex> l(m); closed = true; } cv.notify_all(); });
-        ws.ConnectAsync(Windows::Foundation::Uri(to_hstring("wss://" + host + ":443/cmsocket/"))).get();
-        writer = Windows::Storage::Streams::DataWriter(ws.OutputStream());
+        ws.ConnectAsync(winrt::Windows::Foundation::Uri(to_hstring("wss://" + host + ":443/cmsocket/"))).get();
+        writer = winrt::Windows::Storage::Streams::DataWriter(ws.OutputStream());
     }
     void send(const std::string& buf) { writer.WriteBytes(array_view<const uint8_t>((const uint8_t*)buf.data(), (const uint8_t*)buf.data() + buf.size())); writer.StoreAsync().get(); }
     bool recv(std::string& out, int timeoutMs) {
@@ -449,7 +449,7 @@ static bool fetch_library(const std::string& access, const std::string& steamid)
     Resp r = http(false, url, "", "GetOwnedGames");
     if (r.status != 200) return false;
     try {
-        auto root = Windows::Data::Json::JsonObject::Parse(to_hstring(r.body)).GetNamedObject(L"response");
+        auto root = winrt::Windows::Data::Json::JsonObject::Parse(to_hstring(r.body)).GetNamedObject(L"response");
         int count = (int)root.GetNamedNumber(L"game_count", 0);
         std::vector<std::shared_ptr<Game>> v;
         if (root.HasKey(L"games")) for (auto const& it : root.GetNamedArray(L"games")) {
@@ -659,7 +659,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     CoreDispatcher m_graphicsDispatcher{nullptr};
     bool m_guestSurface=false;
     int m_guestFailureGen=0;
-    Windows::Foundation::IAsyncOperation<Windows::UI::Popups::IUICommand> m_guestDialog{nullptr};
+    winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::UI::Popups::IUICommand> m_guestDialog{nullptr};
     inline static App* graphicsApp=nullptr;
     bool m_closed = false;
     com_ptr<ID3D11Device> m_dev; com_ptr<ID3D11DeviceContext> m_ctx; com_ptr<IDXGISwapChain1> m_sc; com_ptr<ID3D11Texture2D> m_bb;
@@ -751,14 +751,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             "The game launch failed or timed out. No playable game was confirmed.";
         message+="\n\nClose and reopen the launcher before trying again.\n\n"+clip(result,500);
         try {
-            Windows::UI::Popups::MessageDialog dialog(to_hstring(message),L"Game could not start");
-            dialog.Commands().Append(Windows::UI::Popups::UICommand(L"Close launcher",[](auto&&) {
+            winrt::Windows::UI::Popups::MessageDialog dialog(to_hstring(message),L"Game could not start");
+            dialog.Commands().Append(winrt::Windows::UI::Popups::UICommand(L"Close launcher",[](auto&&) {
                 logf("launch: failure dialog close launcher selected");CoreApplication::Exit();
             }));
             dialog.DefaultCommandIndex(0);dialog.CancelCommandIndex(0);
             m_guestDialog=dialog.ShowAsync();
-            m_guestDialog.Completed([](auto const& operation,Windows::Foundation::AsyncStatus status) {
-                if(status==Windows::Foundation::AsyncStatus::Error)
+            m_guestDialog.Completed([](auto const& operation,winrt::Windows::Foundation::AsyncStatus status) {
+                if(status==winrt::Windows::Foundation::AsyncStatus::Error)
                     logf("launch: failure dialog async error hr=0x%08x",(unsigned)operation.ErrorCode().value);
             });
             logf("launch: failure dialog requested; guest resources retained");
