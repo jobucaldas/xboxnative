@@ -22,13 +22,21 @@ int main() {
 
     // only a single downloader-shaped folder under LocalState may be removed
     for (const char* ok : {"megabonk", "app480", "steamworks_sdk_redist", "game-1.2"}) assert(deletable_installdir(ok));
-    for (const char* bad : {"", ".", "..", "a..b", "steam", "Megabonk", "a\\b", "a/b", "c:", " x", "a b"}) assert(!deletable_installdir(bad));
+    for (const char* bad : {"", ".", "..", "a..b", "steam", "steam.", ".steam", "Megabonk", "a\\b", "a/b", "c:", " x", "a b", "x.",
+                            "con", "nul.txt", "aux", "com1", "lpt9.dat", "conin$"}) assert(!deletable_installdir(bad));
+    assert(deletable_installdir("console") && deletable_installdir("com10") && deletable_installdir("nullpointer"));
     assert(!deletable_installdir(std::string(129, 'a')));
 
     // another installed app on the same folder keeps the files
     std::vector<std::pair<uint32_t, std::string>> installs = {{1, "shared"}, {2, "shared"}, {3, "alone"}};
     assert(installdir_shared(1, "shared", installs));
     assert(!installdir_shared(3, "alone", installs));
+    assert(installdir_shared(3, "shared.", installs));                     // Win32 drops the trailing dot
+    std::vector<std::pair<uint32_t, std::string>> old = {{7, ""}, {8, ""}, {9, "x"}};
+    assert(!installdir_shared(7, "", old));                               // empty folder names nothing
+    assert(delete_kind(7, "", old) == DeleteKind::unknown_folder);
+    assert(delete_kind(9, "x", old) == DeleteKind::folder);
+    assert(delete_kind(1, "shared", installs) == DeleteKind::shared);
 
     // Installed filter keeps library order and is a no-op when off
     std::vector<std::shared_ptr<G>> all = {std::make_shared<G>(G{10}), std::make_shared<G>(G{20}), std::make_shared<G>(G{30})};

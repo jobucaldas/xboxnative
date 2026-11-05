@@ -69,13 +69,13 @@ inline void remove_tree(const std::wstring& dir, Progress& p, const std::atomic<
 }
 
 // Remove appid's marker first (an interrupted delete then never shows as installed;
-// a reinstall re-verifies what is left), then its folder unless another install
-// shares it. Only a game_library::deletable_installdir folder is touched.
-// Returns false (nothing removed) when the marker cannot be deleted.
-inline bool remove_install(const std::wstring& root, uint32_t appid, const std::string& dir, bool shared, Progress& p, const std::atomic<bool>* stop = nullptr) {
-    if (!shared && !game_library::deletable_installdir(dir)) { p.failed++; return false; }
+// a reinstall re-verifies what is left), then its folder unless keepFiles (folder
+// shared with another install, or unknown). Only a game_library::deletable_installdir
+// folder is touched. Returns false (nothing removed) when the marker cannot be deleted.
+inline bool remove_install(const std::wstring& root, uint32_t appid, const std::string& dir, bool keepFiles, Progress& p, const std::atomic<bool>* stop = nullptr) {
+    if (!keepFiles && !game_library::deletable_installdir(dir)) { p.failed++; return false; }
     if (!DeleteFileW(marker_path(root, appid).c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) { p.failed++; return false; }
-    if (shared) return true;
+    if (keepFiles) return true;
     const std::wstring folder = root + L"\\" + ascii(dir); const DWORD a = GetFileAttributesW(folder.c_str());
     if (a == INVALID_FILE_ATTRIBUTES) return true;
     if (a & FILE_ATTRIBUTE_REPARSE_POINT) { if (!RemoveDirectoryW(folder.c_str())) p.failed++; return true; }

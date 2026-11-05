@@ -491,11 +491,20 @@ static void enter_library_cm(CmSession& cm) {
 static std::mutex g_dqm; static std::condition_variable g_dqcv; static std::deque<uint32_t> g_dq;
 static void enqueue_download(uint32_t appid) { { std::lock_guard<std::mutex> l(g_dqm); if (std::find(g_dq.begin(), g_dq.end(), appid) != g_dq.end()) return; g_dq.push_back(appid); } g_dqcv.notify_all(); logf("download queued: appid %u", appid); }
 static bool is_queued(uint32_t appid) { std::lock_guard<std::mutex> l(g_dqm); return std::find(g_dq.begin(), g_dq.end(), appid) != g_dq.end(); }
-static bool queue_empty() { std::lock_guard<std::mutex> l(g_dqm); return g_dq.empty(); }
-// A delete (game_delete.h) and a download never overlap: another app may share the
-// install folder, and its marker must not appear while that folder is being removed.
-static std::atomic<bool> g_deleteRunning{false};
-static void wait_for_delete() { while (g_deleteRunning && !g_quit) Sleep(100); }
+// Install folders: one download or one delete (game_delete.h) at a time, never both,
+// because another app may share the folder and its marker must not appear while the
+// folder is removed. Both flags live under g_dqm, so popping a queued job and claiming
+// the folders is one step, and a delete only starts with nothing running or queued.
+static bool g_fsDownloading = false, g_fsDeleting = false;   // guarded by g_dqm
+static bool begin_download() {   // autodownload.txt path: wait out a running delete
+    std::unique_lock<std::mutex> l(g_dqm);
+    while (g_fsDeleting && !g_quit) g_dqcv.wait_for(l, std::chrono::milliseconds(200));
+    if (g_quit) return false; g_fsDownloading = true; return true;
+}
+static void end_download() { { std::lock_guard<std::mutex> l(g_dqm); g_fsDownloading = false; } g_dqcv.notify_all(); }
+static bool try_begin_delete() { std::lock_guard<std::mutex> l(g_dqm); if (g_fsDownloading || g_fsDeleting || !g_dq.empty()) return false; g_fsDeleting = true; return true; }
+static void end_delete() { { std::lock_guard<std::mutex> l(g_dqm); g_fsDeleting = false; } g_dqcv.notify_all(); }
+static bool deleting_now() { std::lock_guard<std::mutex> l(g_dqm); return g_fsDeleting; }
 static std::atomic<int> g_dlSeq{0}; static std::atomic<uint32_t> g_dlLastApp{0}; static std::atomic<bool> g_dlLastOk{false};   // bumped when a queued download finishes (detail screen auto-launch)
 static std::shared_ptr<CmSession> g_cmAnon;
 static std::shared_ptr<CmSession> session_for_download() {
@@ -514,16 +523,22 @@ static void dl_thread() {
         logf("autodownload.txt: %zu appids", ids.size());
         for (int k = 0; k < 600 && !g_authResolved && !g_quit; k++) Sleep(100);
         bool allOk = true;
-        for (uint32_t id : ids) { wait_for_delete(); if (g_quit) break; auto s = session_for_download(); if (!s) { allOk = false; logf("autodownload: no CM session for appid %u", id); continue; } if (!download_app(*s, id)) allOk = false; }
+        for (uint32_t id : ids) {
+            if (g_quit || !begin_download()) break;
+            auto s = session_for_download();
+            if (!s) { allOk = false; logf("autodownload: no CM session for appid %u", id); }
+            else if (!download_app(*s, id)) allOk = false;
+            end_download();
+        }
         logf("autodownload: finished (%s)", allOk ? "all ok" : "with failures");
         if (allOk) MoveFileExW(ap.c_str(), (g_dir + L"\\autodownload.done.txt").c_str(), MOVEFILE_REPLACE_EXISTING);
     }
     while (!g_quit) {
         uint32_t id = 0;
-        { std::unique_lock<std::mutex> l(g_dqm); g_dqcv.wait_for(l, std::chrono::milliseconds(500), [] { return !g_dq.empty() || g_quit; }); if (g_dq.empty()) continue; id = g_dq.front(); g_dq.pop_front(); }
-        wait_for_delete(); if (g_quit) break;
-        auto s = session_for_download(); if (!s) { g_dl.appid = id; g_dl.state = 3; dl_msg("Cannot reach Steam"); g_dlLastApp = id; g_dlLastOk = false; g_dlSeq++; continue; }
-        bool dok = download_app(*s, id); g_dlLastApp = id; g_dlLastOk = dok; g_dlSeq++;
+        { std::unique_lock<std::mutex> l(g_dqm); g_dqcv.wait_for(l, std::chrono::milliseconds(500), [] { return (!g_dq.empty() && !g_fsDeleting) || g_quit; });
+          if (g_quit || g_dq.empty() || g_fsDeleting) continue; id = g_dq.front(); g_dq.pop_front(); g_fsDownloading = true; }
+        auto s = session_for_download(); if (!s) { g_dl.appid = id; g_dl.state = 3; dl_msg("Cannot reach Steam"); g_dlLastApp = id; g_dlLastOk = false; end_download(); g_dlSeq++; continue; }
+        bool dok = download_app(*s, id); end_download(); g_dlLastApp = id; g_dlLastOk = dok; g_dlSeq++;
     }
 }
 
@@ -694,6 +709,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
 
     // ---------------------------------------------------------------- detail screen (store info + Install/Play)
     uint32_t m_dApp = 0; std::string m_dName, m_dNote; int m_dScroll = 0; std::shared_ptr<StoreInfo> m_dSi; bool m_confirmDelete = false;
+    game_library::DeleteKind m_delKind = game_library::DeleteKind::folder;   // decided when the confirm dialog opens
     InstallInfo m_dInst; double m_dInstT = -10;
     struct AutoLaunch { uint32_t app = 0; int seq = 0; } m_auto;
     std::string game_name(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return g->name; return id == 480 ? "Spacewar" : id == 3405340 ? "Megabonk" : id == 1007 ? "Steamworks SDK Redist" : ""; }
@@ -712,7 +728,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         m_dInst = read_install(m_dApp); m_dInstT = now_s();
         if (!m_dInst.installed || deleting_mine()) return;
         if (g_launch.phase == 1 || g_launch.phase == 3 || play_runtime::observed.load(std::memory_order_acquire) != nullptr) { m_dNote = "A game was started: reopen the app to delete."; return; }
-        m_dNote.clear(); m_confirmDelete = true; logf("detail: delete asked appid=%u (%s)", m_dApp, via);
+        m_delKind = delete_kind_for(m_dApp, m_dInst.dir); m_dNote.clear(); m_confirmDelete = true; logf("detail: delete asked appid=%u (%s)", m_dApp, via);
     }
     void detail_delete_confirm(const char* via) {
         m_confirmDelete = false; std::string why = start_delete(m_dApp);
@@ -726,7 +742,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (m_dInst.installed) { m_dNote.clear(); logf("detail: Play pressed appid=%u (%s)", m_dApp, via); start_launch(m_dApp, m_dName, m_dInst.dir, via); return; }
         if (dl_is_mine() || is_queued(m_dApp)) { logf("detail: A ignored, download already queued/running"); return; }
         if (g_demo) { m_dNote = "Demo list: installing is disabled."; return; }
-        if (g_deleteRunning) { m_dNote = "Wait for the delete to finish."; return; }
+        if (deleting_now()) { m_dNote = "Wait for the delete to finish."; return; }
         m_auto.app = m_dApp; m_auto.seq = g_dlSeq; m_dNote.clear();
         logf("detail: Install pressed appid=%u (%s) - will auto-launch when finished", m_dApp, via); enqueue_download(m_dApp);
     }
@@ -810,7 +826,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         } else if (!m_dNote.empty()) text(60, 548, clip(m_dNote, 38), 2, RED);
         else if (deleting) { char b[80]; snprintf(b, sizeof b, "%llu files removed", (unsigned long long)g_del.progress.removed.load()); text(60, 548, b, 2, DIM); }
         else if (delDone && !m_dInst.installed) {
-            if (g_del.state == 2) text(60, 548, g_del.keptShared ? "Removed. Shared files kept." : "Deleted. Saves were kept.", 2, GRN);
+            if (g_del.state == 2) { auto k = g_del.kind.load(); text(60, 548, k == game_library::DeleteKind::folder ? "Deleted. Saves were kept." : k == game_library::DeleteKind::shared ? "Removed. Shared files kept." : "Removed; folder unknown, files kept.", 2, GRN); }
             else { char b[80]; snprintf(b, sizeof b, "Deleted; %u items left behind.", g_del.progress.failed.load()); text(60, 548, b, 2, RED); }
         } else if (delDone && g_del.untouched) text(60, 548, "Delete failed. Nothing was removed.", 2, RED);
         // main button
@@ -853,7 +869,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         text(60, 1050, "A: Install / Play   X: Delete   B: back / cancel download   Menu: back   D-pad up/down: scroll", 2, C3(120, 130, 145));
         if (m_confirmDelete) {
             std::string q = "Delete " + clip(m_dName, 30) + "?"; char sz[96];
-            if (m_dInst.bytes >= 107374182) snprintf(sz, sizeof sz, "Frees %.2f GB on this console. Saves are kept.", m_dInst.bytes / 1073741824.0);
+            if (m_delKind == game_library::DeleteKind::shared) snprintf(sz, sizeof sz, "Its files are shared with another installed game and stay.");
+            else if (m_delKind == game_library::DeleteKind::unknown_folder) snprintf(sz, sizeof sz, "Leaves the installed list. Its folder is unknown, so files stay.");
+            else if (m_dInst.bytes >= 107374182) snprintf(sz, sizeof sz, "Frees %.2f GB on this console. Saves are kept.", m_dInst.bytes / 1073741824.0);
             else if (m_dInst.bytes) snprintf(sz, sizeof sz, "Frees %.1f MB on this console. Saves are kept.", m_dInst.bytes / 1048576.0); else snprintf(sz, sizeof sz, "Removes the game files from this console. Saves are kept.");
             fill(360, 380, 1200, 300, C3(10, 12, 16)); frame(360, 380, 1200, 300, 6, YEL);
             int qs = twidth(q, 5) <= 1120 ? 5 : 3; text(960 - twidth(q, qs) / 2, 420, q, qs, TXT);

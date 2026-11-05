@@ -55,6 +55,16 @@ int main(int argc, char** argv) {
     CHECK(!installs::remove_install(root, 300, "steam", false, pr));
     CHECK(exists(L"dl_300.done") && exists(L"steam\\300\\save.dat"));
 
+    installs::Progress pd;   // "steam." is the same folder as steam\ to Win32: refused, nothing touched
+    put(L"dl_301.done", "app 301 build 1 files 1 bytes 1 installdir steam.\n");
+    CHECK(!installs::remove_install(root, 301, "steam.", false, pd));
+    CHECK(exists(L"dl_301.done") && exists(L"steam\\300\\save.dat"));
+
+    installs::Progress pu;   // pre-0.5.0.0 marker without installdir: marker only, files kept
+    put(L"dl_500.done", "app 500 build 1 files 1 bytes 1\n"); mkdir(L"app500"); put(L"app500\\f.bin", "x");
+    CHECK(installs::read(root, 500).dir.empty());
+    CHECK(installs::remove_install(root, 500, "", true, pu) && !exists(L"dl_500.done") && exists(L"app500\\f.bin"));
+
     installs::Progress pm;   // folder already gone: marker still removed, nothing else touched
     put(L"dl_400.done", "app 400 build 1 files 1 bytes 1 installdir gone\n");
     CHECK(installs::remove_install(root, 400, "gone", false, pm) && !exists(L"dl_400.done") && pm.failed == 0);
