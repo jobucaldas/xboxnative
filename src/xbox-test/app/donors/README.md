@@ -40,6 +40,27 @@ still rejects load configurations by default; no directory is stripped or
 patched out of a donor. Test both this opt-in and rejection boundaries with
 `bash src/xbox-test/uwph/host/tests/run-load-config.sh`.
 
+### Off-device executable-route regression
+
+After building the launcher layout (including the generated donor import table), run:
+
+```sh
+bash src/xbox-test/app/tests/donor-runtime.sh
+```
+
+This uses the production donor probe/router and Play runtime, but executes only
+an owned, CRT-free test executable under Wine. It preserves the cross-thread
+publication/retained-address checks, then verifies eight actual IAT slots across
+all five donors against their initialized exports and calls their representative
+behaviors from the guest (exit 42). Separate fresh processes require an absent
+donor export and a disabled donor resolver to fail before guest initialization,
+without executable placeholders. The fixture has no active load configuration;
+it cannot establish support for real game metadata, Steam, controller, audio or
+graphics behavior. These eight fixture imports do not satisfy the separate
+22-route Megabonk oracle below.
+
+### Console acceptance
+
 Validate a fresh console log with:
 
 ```sh
