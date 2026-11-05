@@ -202,7 +202,7 @@ runtime run and console XInput integration Play remain pending.
 
 ### vis — current real-console integration checkpoint
 
-Fresh locked deployment verifies Grok.XboxTest_0.5.158.9_x64__dk715arakrne0.
+Fresh locked deployment verifies Xboxnative.Launcher_0.5.158.9_x64__dk715arakrne0.
 Unchanged play-test.sh 3405340 exits 0. Native guest D3D11 and CoreWindow
 swapchain return S_OK again; screenshot play-xinput/4-final.png still shows
 Loading.... Repeated XInput module-load failures from 0.5.158.8 are absent

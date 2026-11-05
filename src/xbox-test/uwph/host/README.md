@@ -1,7 +1,7 @@
 # UWPH kernel host foundation
 
 `./build.sh` produces a signed `out/k32.msix` with identity
-`Joao.XboxSteam.Uwph` version `0.1.23.0` (publisher `CN=grok-xbox-dev`). Requires the local
+`Joao.XboxSteam.Uwph` version `0.1.23.0` (publisher `CN=xboxnative-dev`). Requires the local
 uwp-crossbuild toolchain, makemsix, openssl and osslsigncode. Outputs and test
 certificates are ignored. No external runtime dependency is required.
 
@@ -31,7 +31,7 @@ The UWP executable loads five packaged x64 PE DLLs:
 A complete run logs `K32 RESULT failures=0` and
 `D3DT RESULT presented=300 hr=0x00000000`. Use `src/xbox-test/dp/install.sh`, `launch.sh`,
 then `wait-log.sh` to collect results. Those scripts take CONSOLE.lock themselves.
-Do not wrap them in another flock. Do not install over Grok.XboxTest.
+Do not wrap them in another flock. Do not install over Xboxnative.Launcher.
 
 ## ABI and limits
 
@@ -203,7 +203,7 @@ kernel/ws checks, the LocalState mapper, then the separate D3DT PE for 300
 frames. Run `build.sh out/wxl-variant wxl` to build the same host under the preserved
 Joao.XboxSteam.Wxl identity (0.1.1.0); its manifest is AppxManifest.Wxl.xml.
 The Wxl 0.1.0.0 reproduction/evidence above is historical. Neither identity is
-Grok.XboxTest. Upload wxl-test.exe to the selected package's LocalState before
+Xboxnative.Launcher. Upload wxl-test.exe to the selected package's LocalState before
 acceptance. The repository smoke-all.sh uploads and verifies this guest, clears
 stale logs, and checks WXL, k32/ws and D3DT under a single console lock.
 

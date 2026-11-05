@@ -23,7 +23,7 @@ it does not prove that a package works on the console.
    `bash src/xbox-test/dp/install.sh <kit>/<name>.msix <kit>/<name>.cer`, waiting for
    `INSTALL OK`. The separate test identities may be installed in any order.
    Installing does not launch them.
-4. **Do not uninstall `launcher` (`Grok.XboxTest`) to update it:** it holds Steam
+4. **Do not uninstall `launcher` (`Xboxnative.Launcher`) to update it:** it holds Steam
    login state. Bump the package version and install over the same identity.
    Follow `docs/xbox/REBUILD.md` for package setup. In Dev Home, set the app type
    to Game when required for the larger memory limit; the UI sequence varies

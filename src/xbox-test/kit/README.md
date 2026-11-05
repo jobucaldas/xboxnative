@@ -81,9 +81,9 @@ bash src/xbox-test/kit/sync-readme-versions.sh --check /path/to/kit/manifest.jso
 | `swc` | `Joao.XboxSteam.Swc` | `k32.log` | After guest upload: `SWC RESULT entry=42 failures=0`; 300 presents ending green |
 | `w32u` | `Joao.XboxSteam.W32u` | `w32u.log` | `W32U RESULT failures=0`; 180 frames ending green |
 | `vrx` | `Joao.XboxSteam.Vrx` | `vrx.log` | `vrx: all cases done`; inspect each case: A/B deliberately fail or except under AppContainer, C must report `OK value=42` |
-| `launcher` | `Grok.XboxTest` | `boot.log` | QR/library screen; this alone is not evidence of playable games |
+| `launcher` | `Xboxnative.Launcher` | `boot.log` | QR/library screen; this alone is not evidence of playable games |
 
-For the default manifests, publisher is `CN=grok-xbox-dev`, package-family
+For the default manifests, publisher is `CN=xboxnative-dev`, package-family
 suffix is `dk715arakrne0`, application ID is `App`, and architecture is `x64`.
 Full package name is `<Identity>_<Version>_x64__dk715arakrne0`; launch ID is
 `<Identity>_dk715arakrne0!App`. Read versions from the kit, not this document.
