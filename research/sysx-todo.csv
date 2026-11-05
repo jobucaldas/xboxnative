@@ -1,0 +1,21 @@
+dll,symbol,console_route,wine_class,verdict,tree_route,status,priority,evidence
+dbghelp.dll,SymFromAddr,stub,IMPL,PE_NEEDS_UNIXLIB,native-allowlist,native-export-unverified,2,uwph/sysx/native.h; operation regression passes on Wine; Xbox export/API availability pending
+dbghelp.dll,SymInitialize,stub,IMPL,PE_NEEDS_UNIXLIB,native-allowlist,native-export-unverified,2,uwph/sysx/native.h; operation regression passes on Wine; Xbox export/API availability pending
+dbghelp.dll,SymLoadModuleEx,stub,IMPL,PE_NEEDS_UNIXLIB,native-allowlist,native-export-unverified,2,uwph/sysx/native.h; operation regression passes on Wine; Xbox export/API availability pending
+dbghelp.dll,SymRegisterFunctionEntryCallback64,stub,IMPL,PE_PURE,native-allowlist,native-export-unverified,2,uwph/sysx/native.h; operation regression passes on Wine; Xbox export/API availability pending
+dwmapi.dll,DwmGetWindowAttribute,system,IMPL,PE_NEEDS_WIN32U,record-builtin,record-builtin-partial,1,"uwph/dwmapi/route.h; physical frame bounds use validated guest records; DWM policy changes unsupported; host regression passes, Xbox pending"
+dwmapi.dll,DwmSetWindowAttribute,system,IMPL,PE_PURE,record-builtin,record-builtin-partial,1,"uwph/dwmapi/route.h; physical frame bounds use validated guest records; DWM policy changes unsupported; host regression passes, Xbox pending"
+wininet.dll,HttpOpenRequestA,unclassified,IMPL,PE_PURE,native-allowlist,native-export-unverified,3,uwph/sysx/native.h; operation regression passes on Wine; Xbox export/API availability pending
+wininet.dll,HttpQueryInfoA,unclassified,IMPL,GRAPH_UNRESOLVED,native-allowlist,native-export-unverified,3,uwph/sysx/native.h; operation regression passes on Wine; Xbox export/API availability pending
+wininet.dll,HttpSendRequestA,unclassified,IMPL,GRAPH_UNRESOLVED,native-allowlist,native-export-unverified,3,uwph/sysx/native.h; operation regression passes on Wine; Xbox export/API availability pending
+wininet.dll,InternetCloseHandle,unclassified,IMPL,PE_PURE,native-allowlist,native-export-unverified,3,uwph/sysx/native.h; operation regression passes on Wine; Xbox export/API availability pending
+wininet.dll,InternetConnectA,unclassified,IMPL,PE_PURE,native-allowlist,native-export-unverified,3,uwph/sysx/native.h; operation regression passes on Wine; Xbox export/API availability pending
+wininet.dll,InternetCrackUrlA,unclassified,IMPL,PE_NEEDS_NT,native-allowlist,native-export-unverified,3,uwph/sysx/native.h; operation regression passes on Wine; Xbox export/API availability pending
+wininet.dll,InternetOpenA,unclassified,IMPL,PE_NEEDS_UNIXLIB,native-allowlist,native-export-unverified,3,uwph/sysx/native.h; operation regression passes on Wine; Xbox export/API availability pending
+winmm.dll,waveInClose,stub,IMPL,PE_NEEDS_WIN32U,stub,missing,deferred-audio,No production builtin or native allowlist entry
+winmm.dll,waveInOpen,stub,IMPL,PE_NEEDS_WIN32U,stub,missing,deferred-audio,No production builtin or native allowlist entry
+winmm.dll,waveInReset,stub,IMPL,PE_NEEDS_WIN32U,stub,missing,deferred-audio,No production builtin or native allowlist entry
+winmm.dll,waveOutClose,stub,IMPL,PE_NEEDS_WIN32U,stub,missing,deferred-audio,No production builtin or native allowlist entry
+winmm.dll,waveOutOpen,stub,IMPL,PE_NEEDS_WIN32U,stub,missing,deferred-audio,No production builtin or native allowlist entry
+winmm.dll,waveOutReset,stub,IMPL,PE_NEEDS_WIN32U,stub,missing,deferred-audio,No production builtin or native allowlist entry
+winmm.dll,waveOutWrite,stub,IMPL,PE_NEEDS_WIN32U,stub,missing,deferred-audio,No production builtin or native allowlist entry

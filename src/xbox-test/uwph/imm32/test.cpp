@@ -10,12 +10,13 @@ int main() {
     CHECK(!imm32_core::resolve(nullptr, names[0]));
     CHECK(!imm32_core::resolve("imm32.dll", nullptr));
     CHECK(!imm32_core::resolve("user32.dll", names[0]));
-    CHECK(!imm32_core::resolve("imm32.dll", "ImmAssociateContext"));
+    CHECK(imm32_core::resolve("imm32.dll", "ImmAssociateContext"));
     CHECK(!imm32_core::resolve("imm32.dll", "ImmCreateContext"));
     CHECK(!imm32_core::resolve("imm32.dll", "immgetcontext"));
     // Run the same typed ABI calls against our resolver and Wine's export.
-    // Null contexts cover the supported backend state without assuming that
+    // Null and foreign contexts cover the supported backend state without assuming that
     // host Wine HWNDs or IME contexts belong to the guest.
+    for (HIMC context : {HIMC(nullptr), reinterpret_cast<HIMC>(0x5678)})
     for (auto name : names) {
         auto candidate = imm32_core::resolve("IMM32.DLL", name);
         auto oracle = reinterpret_cast<uintptr_t>(GetProcAddress(reference, name));
@@ -31,15 +32,15 @@ int main() {
             if (!strcmp(name, "ImmGetContext"))
                 results[i] = reinterpret_cast<decltype(&ImmGetContext)>(address)(nullptr) != nullptr;
             else if (!strcmp(name, "ImmGetCompositionStringW"))
-                results[i] = reinterpret_cast<decltype(&ImmGetCompositionStringW)>(address)(nullptr, GCS_COMPSTR, buffers[i].data(), 16);
+                results[i] = reinterpret_cast<decltype(&ImmGetCompositionStringW)>(address)(context, GCS_COMPSTR, buffers[i].data(), 16);
             else if (!strcmp(name, "ImmGetConversionStatus"))
-                results[i] = reinterpret_cast<decltype(&ImmGetConversionStatus)>(address)(nullptr, &conversion[i], &sentence[i]);
+                results[i] = reinterpret_cast<decltype(&ImmGetConversionStatus)>(address)(context, &conversion[i], &sentence[i]);
             else if (!strcmp(name, "ImmSetCompositionStringW"))
-                results[i] = reinterpret_cast<decltype(&ImmSetCompositionStringW)>(address)(nullptr, SCS_SETSTR, composition, 2, nullptr, 0);
+                results[i] = reinterpret_cast<decltype(&ImmSetCompositionStringW)>(address)(context, SCS_SETSTR, composition, 2, nullptr, 0);
             else if (!strcmp(name, "ImmNotifyIME"))
-                results[i] = reinterpret_cast<decltype(&ImmNotifyIME)>(address)(nullptr, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+                results[i] = reinterpret_cast<decltype(&ImmNotifyIME)>(address)(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
             else
-                results[i] = reinterpret_cast<decltype(&ImmReleaseContext)>(address)(nullptr, nullptr);
+                results[i] = reinterpret_cast<decltype(&ImmReleaseContext)>(address)(nullptr, context);
             errors[i] = GetLastError();
         }
         if (results[0] != results[1] || errors[0] != errors[1])
@@ -56,6 +57,59 @@ int main() {
     CHECK(!imm32_core::get_conversion(nullptr, nullptr, nullptr));
     CHECK(!imm32_core::get_composition(nullptr, GCS_RESULTSTR, nullptr, 0));
     CHECK(imm32_core::release_context(reinterpret_cast<HWND>(0x1234), nullptr));
+    auto associate = reinterpret_cast<decltype(&ImmAssociateContext)>(
+        imm32_core::resolve("imm32.dll", "ImmAssociateContext"));
+    auto associate_ex = reinterpret_cast<decltype(&ImmAssociateContextEx)>(
+        imm32_core::resolve("imm32.dll", "ImmAssociateContextEx"));
+    auto oracle_associate = reinterpret_cast<decltype(&ImmAssociateContext)>(
+        GetProcAddress(reference, "ImmAssociateContext"));
+    auto oracle_ex = reinterpret_cast<decltype(&ImmAssociateContextEx)>(
+        GetProcAddress(reference, "ImmAssociateContextEx"));
+    CHECK(associate && associate_ex && oracle_associate && oracle_ex);
+    SetLastError(0xdead);
+    CHECK(!associate(nullptr, nullptr));
+    DWORD error = GetLastError();
+    SetLastError(0xdead);
+    CHECK(!oracle_associate(nullptr, nullptr));
+    CHECK(error == GetLastError());
+    for (DWORD flags : {DWORD(0), DWORD(IACE_CHILDREN), DWORD(IACE_DEFAULT),
+                        DWORD(IACE_IGNORENOCONTEXT), DWORD(0xffffffff)}) {
+        SetLastError(0xdead);
+        CHECK(!associate_ex(nullptr, nullptr, flags));
+        error = GetLastError();
+        SetLastError(0xdead);
+        CHECK(!oracle_ex(nullptr, nullptr, flags));
+        CHECK(error == GetLastError());
+    }
+    // A host regression supplies a guest-record validator, never host IsWindow.
+    HWND record = reinterpret_cast<HWND>(0x1234);
+    SetLastError(0xdead);
+    CHECK(!associate_ex(record, nullptr, 0));
+    CHECK(GetLastError() == ERROR_NOT_SUPPORTED);
+    imm32_core::window_validator = +[](HWND h) WINAPI -> BOOL {
+        return h == reinterpret_cast<HWND>(0x1234);
+    };
+    SetLastError(0xdead);
+    CHECK(!imm32_core::get_context(record) && GetLastError() == 0xdead);
+    CHECK(!imm32_core::get_context(reinterpret_cast<HWND>(0x9999)));
+    CHECK(GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
+    for (DWORD flags : {DWORD(0), DWORD(IACE_CHILDREN), DWORD(IACE_IGNORENOCONTEXT)}) {
+        SetLastError(0xdead);
+        CHECK(associate_ex(record, nullptr, flags));
+        CHECK(GetLastError() == 0xdead);
+    }
+    SetLastError(0xdead);
+    CHECK(!associate(record, nullptr) && GetLastError() == 0xdead);
+    CHECK(!associate_ex(record, nullptr, IACE_DEFAULT));
+    CHECK(GetLastError() == ERROR_NOT_SUPPORTED);
+    HIMC foreign = reinterpret_cast<HIMC>(0x5678);
+    CHECK(!associate(record, foreign) && GetLastError() == ERROR_INVALID_HANDLE);
+    CHECK(!associate_ex(record, foreign, 0) && GetLastError() == ERROR_INVALID_HANDLE);
+    CHECK(!associate_ex(reinterpret_cast<HWND>(0x9999), nullptr, 0));
+    CHECK(GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
+    SetLastError(0xdead);
+    CHECK(!associate_ex(record, nullptr, IACE_CHILDREN | IACE_DEFAULT));
+    CHECK(GetLastError() == 0xdead);
     FreeLibrary(reference);
-    std::puts("IMM32 OFFDEVICE PASS six exports, typed ABI, Wine null-context differential, errors, untouched outputs, resolver");
+    std::puts("IMM32 OFFDEVICE PASS eight exports, association regression, typed ABI, Wine null/foreign-context differential, errors, untouched outputs, resolver");
 }
