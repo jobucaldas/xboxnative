@@ -2,7 +2,7 @@
 
 1. **Pull requests only.** Never push to `main`. Branch `lane/<name>` or `feat/<name>`; open a PR; Cursor Bugbot reviews it.
 2. **Never weaken a gate.** Do not loosen assertions, skip sections, shorten timeouts, or count a SKIP as PASS to get green. A failing test is evidence.
-3. **Legitimate Steam path only.** No DRM bypass, no Steamless/gbe_fork/cracked or emulated Steam API, no patching of Valve or game files, no Xbox security/Dev-Mode restrictions bypass.
+3. **Owned games only; never enable piracy.** Play runs games the signed-in Steam account owns, installed from official depots. An emulated Steam API (e.g. gbe_fork, pinned and fetched, never committed) may answer an owned game's Steam calls; achievements and cloud saves must reach the player's real Steam account. Substitution happens in memory: never patch or strip game or Valve files on disk (no Steamless or cracks). No Xbox security/Dev-Mode restrictions bypass. A launch-time ownership check is required before an emulator ships to users.
 4. **No secrets or personal data.** Never commit or print `DP_PASS`, Tailscale keys, Steam refresh/access tokens, `steam_session.bin`, signing keys/pfx, SteamIDs, or screenshots showing accounts. Logs must be reviewed before commit.
 5. **No game files, Valve/Microsoft/Unity binaries, or large binaries (>5 MB).** External code is pinned in `deps.pin` and fetched, not copied (see `patches/`).
 6. **Acceptance test is the launcher:** `src/xbox-test/tools/play-test.sh <appid>` ("Play Megabonk via the launcher"). Evidence goes in the PR (file names and summary), not raw captures with account data.
