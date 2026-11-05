@@ -4,12 +4,15 @@ Run Windows x64 Steam games on an **Xbox Series S** (Dev Mode) inside a UWP "Gam
 loader plus our own POSIX/syscall host layer (`uwph`). Status: **early, experimental**.
 
 ## Honest current state
-- **Megabonk (Steam appid 3405340) is not running game code yet.** The launcher's Play button downloads and maps
-  the game's files and reports precisely what is missing; no Megabonk instruction has executed on the console.
+- **Megabonk (Steam appid 3405340) has not run on the console yet.** Off-device, under Wine, the Play runtime
+  (`src/xbox-test/app/tests/play-game-host.sh` with an owned install) now runs the game's own code to its first screen
+  (the photosensitivity warning) through Play's loader, user32 record core, Wine donors and CoreWindow DXGI adapter,
+  with a native Wine window standing in for the CoreWindow. Steam fails naturally (no client). That is evidence for
+  the runtime, not a console result: the console run, input, audio and genuine Steam remain open.
 - Working on the console today (see `docs/xbox/LANES.md`, `src/xbox-test/uwph/*/README.md`): the launcher with Steam QR
   login and its own downloader; the uwph host (threads, TLS, exceptions, files, loopback TCP, W^X via
   `VirtualProtectFromApp`); a PE mapper (64-bit and, as data only, 32-bit); CoreWindow D3D11 swap chain; gamepad; real
-  system `d3d11`/`dxgi`/`ws2_32`/`bcrypt`. Known gaps: user32 message loop, input, audio (zero samples), Steam API path,
+  system `d3d11`/`dxgi`/`ws2_32`/`bcrypt`. Known gaps: input delivery to the guest, audio (zero samples), Steam API path,
   32-bit execution (needs an x86 engine), Direct3D 9.
 - Steam: there is no genuine Steam client on the console yet. Play loads a game's original `steam_api64.dll` unmodified
   and its `SteamAPI_Init` fails naturally; `steamclient64.dll` is always refused, so nothing answers in Steam's place.
