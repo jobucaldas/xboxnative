@@ -167,6 +167,43 @@ static bool cloud_sync(uint32_t appid,const std::wstring& gameRoot,bool upload,u
         upload?"upload":"download",r.downloaded,r.uploaded,r.unchanged,r.kept,r.busy,r.failed);lp_sink(line);
     return r.failed==0;
 }
+// ---- Steam achievements/stats for the provider-served game (steam_achievements.h)
+#include "steam_achievements.h"
+static std::wstring provider_dir(uint32_t appid) { return g_dir+L"\\steam\\"+widen(std::to_string(appid)); }
+static steam_achievements::Io achievement_io(std::shared_ptr<CmSession> session) {
+    steam_achievements::Io io;
+    io.call=[session](uint32_t emsg,const std::string& body,std::string& out){
+        JobMsg m;if(!session->call(emsg,body,"",30000,m))return false;
+        out=m.body;return true;};
+    io.log=[](const std::string& line){lp_sink(("STEAM "+line).c_str());};
+    return io;
+}
+// The account is "in game" while the guest runs (status, playtime), as with the
+// real client; an empty list ends it.
+static void games_played(uint32_t appid) {
+    auto session=user_session();
+    if(!session||session->anon)return;
+    std::string body;
+    if(appid){std::string game;pb_fixed64(game,2,appid);pb_s(body,1,game);}
+    session->send_raw(5410,body,0,""); // ClientGamesPlayedWithDataBlob
+}
+static void achievements_sync(uint32_t appid,bool store) {
+    auto session=user_session();
+    if(!session||session->anon)return;
+    auto io=achievement_io(session);
+    auto user=steam_achievements::fetch(io,appid,session->steamid);
+    if(!user.ok)return;
+    auto schema=steam_achievements::parse_schema(user.schema);
+    if(!schema){lp_sink("STEAM achievements: schema unreadable");return;}
+    namespace fs=std::filesystem;
+    fs::path dir(provider_dir(appid));
+    fs::path saves=dir/"saves"/std::to_string(appid);
+    if(store){steam_achievements::store(io,appid,session->steamid,*schema,user,saves);return;}
+    unsigned unlocked=0;for(auto& [block,times]:user.unlocks)for(auto t:times)unlocked+=t!=0;
+    bool ok=steam_achievements::prepare(*schema,user,dir/"steam_settings",saves);
+    char line[160];snprintf(line,sizeof line,"STEAM achievements: %s achievements=%zu stats=%zu unlocked=%u",
+        ok?"prepared":"prepare failed",schema->achievements.size(),schema->stats.size(),unlocked);lp_sink(line);
+}
 static void cloud_uploader(uint32_t appid,std::wstring gameRoot) {
     std::thread([appid,gameRoot]{
         init_apartment(apartment_type::multi_threaded);
@@ -175,7 +212,8 @@ static void cloud_uploader(uint32_t appid,std::wstring gameRoot) {
             bool finished=!r||r->finished.load(std::memory_order_acquire);
             for(int i=0;i<300&&!finished;++i){Sleep(1000);finished=!r||r->finished.load(std::memory_order_acquire);}
             try{cloud_sync(appid,gameRoot,true,finished?0:30);}catch(...){lp_sink("STEAM cloud upload: exception");}
-            if(finished)return;
+            try{achievements_sync(appid,true);}catch(...){lp_sink("STEAM achievements store: exception");}
+            if(finished){games_played(0);return;}
         }
     }).detach();
 }
@@ -198,6 +236,8 @@ static void lp_run_impl(LpCtx& c) {
     const bool steamProvider=stage_steam_provider(c.appid);
     if(steamProvider) {
         try{cloud_sync(c.appid,c.root,false,0);}catch(...){lp_sink("STEAM cloud download: exception");}
+        try{achievements_sync(c.appid,false);}catch(...){lp_sink("STEAM achievements: exception");}
+        games_played(c.appid);
     }
     if(!play_runtime::start(c.root,exe,c.args,lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
     if(steamProvider)cloud_uploader(c.appid,c.root);
