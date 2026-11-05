@@ -788,7 +788,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // right column: meta + description
         std::vector<std::string> meta;
         auto addm = [&](const std::string& k, const std::string& v) { if (v.empty()) return; for (auto& l : wrap_lines(k + v, 46)) meta.push_back(l); };
-        if (st == 1) { addm("Price: ", si->price); addm("Released: ", si->release); addm("Developer: ", si->dev); addm("Genres: ", si->genres); }
+        if (st == 1) { addm("Released: ", si->release); addm("Developer: ", si->dev); addm("Genres: ", si->genres); }
         std::string lib = owned(m_dApp) ? "Owned (in your library)" : g_demo ? "" : "Not in your library list";
         if (!lib.empty()) meta.insert(meta.begin() + (st == 1 && !meta.empty() ? 1 : 0), "Library: " + lib);
         { std::string gl = "Graphics: " + apib::describe(gfx); if (!gfx.note.empty() && gfx.src == 1 && gfx.kind != apib::K_D3D11) gl += " [" + gfx.note + "]"; for (auto& l : wrap_lines(gl, 46)) meta.push_back(l); }
