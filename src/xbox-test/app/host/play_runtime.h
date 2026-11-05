@@ -1,6 +1,6 @@
 #pragma once
 #include "../../uwph/xinput/modules.h"
-// Play owns mapped images for the application's lifetime. Windows owns the
+// Play tracks mapped image ownership and dependencies. Windows owns the
 // actual AppContainer PEB/TEB, native threads and static TLS carrier slots.
 // Guest process APIs below expose the guest identity without rewriting the
 // launcher's PEB or installing a private segment/exception mechanism.
@@ -18,6 +18,9 @@ struct Module {
     std::string key;
     wxl::Image image;
     bool mapped=false, mappingFailed=false, prepared=false, initialized=false, initializing=false, initializationFailed=false;
+    size_t references=0;
+    size_t notifications=0;
+    bool pinned=false;
     std::vector<Module*> dependencies;
 };
 struct State {
@@ -37,7 +40,7 @@ struct State {
     std::recursive_mutex loaderMutex;
     std::string last="loader not entered", result;
     DWORD code=0;
-    unsigned carrierCount=0;
+    std::array<wxl::Carrier,16> carriers;
     std::atomic<int> mappedCount{0}, moduleCount{0};
     bool success=false;
     HANDLE worker=nullptr;
@@ -72,7 +75,10 @@ static Module* named(const std::wstring& name) {
     std::string key=basename(name); if(key.find('.')==std::string::npos) key+=".dll";
     for(auto& m:state->modules) if(m->key==key) return m.get(); return nullptr;
 }
+#include "../../uwph/kernel32/guest_loader_queries.h"
+#include "../../uwph/kernel32/guest_resource_queries.h"
 static bool exists(const std::wstring& path) { DWORD a=GetFileAttributesW(path.c_str()); return a!=INVALID_FILE_ATTRIBUTES && !(a&FILE_ATTRIBUTE_DIRECTORY); }
+#include "../../uwph/kernel32/guest_loader_search.h"
 static uintptr_t resolve(const char*,const char*,WORD);
 static Module* map(const std::wstring& path);
 static bool initialize(Module&);
@@ -123,40 +129,24 @@ static HMODULE WINAPI moduleW(LPCWSTR name) {
     using Fn=HMODULE(WINAPI*)(LPCWSTR); auto fn=(Fn)kernel_tail::native("GetModuleHandleW");
     return fn?fn(name):nullptr;
 }
-static HMODULE WINAPI moduleA(LPCSTR name) { auto w=wide(name); return moduleW(name?w.c_str():nullptr); }
-static DWORD copyPath(const std::wstring& path,LPWSTR out,DWORD capacity) {
-    if(!capacity) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return 0; }
-    size_t n=std::min(path.size(),size_t(capacity-1)); memcpy(out,path.data(),n*2); out[n]=0;
-    if(path.size()>=capacity) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return capacity; } return DWORD(n);
-}
-static DWORD WINAPI filenameW(HMODULE handle,LPWSTR out,DWORD size) {
-    if(xinput_core::module(handle)){SetLastError(ERROR_NOT_SUPPORTED);return 0;}
-    auto m=handle?find(handle):state->exe;
-    if(m) return copyPath(m->path,out,size);
-    using Fn=DWORD(WINAPI*)(HMODULE,LPWSTR,DWORD); auto fn=(Fn)kernel_tail::native("GetModuleFileNameW"); return fn?fn(handle,out,size):0;
-}
-static DWORD WINAPI filenameA(HMODULE handle,LPSTR out,DWORD size) {
-    wchar_t path[32768]; DWORD n=filenameW(handle,path,32768); if(!n) return 0;
-    std::string s=narrow(path); if(!size) return 0; size_t take=std::min(s.size(),size_t(size-1)); memcpy(out,s.data(),take);out[take]=0;
-    if(s.size()>=size) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return size; } return DWORD(take);
-}
-static BOOL WINAPI moduleExW(DWORD flags,LPCWSTR name,HMODULE* out) {
-    if(!out || ((flags&GET_MODULE_HANDLE_EX_FLAG_PIN)&&(flags&GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT))) {SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
-    if(!(flags&GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS) && name) {
-        if(auto input=xinput_core::find_module(basename(name).c_str(),false)) {
-            if(flags & ~(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT)) {SetLastError(ERROR_NOT_SUPPORTED);return FALSE;}
-            if(!(flags&GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT))xinput_core::find_module(basename(name).c_str(),true);
-            *out=input;return TRUE;
-        }
-    }
-    if(flags&GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS) {
-        for(auto& m:state->modules) if((uintptr_t)name>=(uintptr_t)m->image.base && (uintptr_t)name-(uintptr_t)m->image.base<m->image.size) {*out=(HMODULE)m->image.base;return TRUE;}
-    } else { auto m=name?named(name):state->exe; if(m){*out=(HMODULE)m->image.base;return TRUE;} }
-    using Fn=BOOL(WINAPI*)(DWORD,LPCWSTR,HMODULE*);auto fn=(Fn)kernel_tail::native("GetModuleHandleExW");return fn?fn(flags,name,out):FALSE;
-}
-static BOOL WINAPI moduleExA(DWORD flags,LPCSTR name,HMODULE* out) { auto w=(flags&GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS)?std::wstring():wide(name);return moduleExW(flags,flags&GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS?(LPCWSTR)name:name?w.c_str():nullptr,out); }
+#include "../../uwph/kernel32/guest_module_filename.h"
+#include "../../uwph/kernel32/guest_loader_lifetime.h"
 static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
-    if(!name || file || (flags&(LOAD_LIBRARY_AS_DATAFILE|LOAD_LIBRARY_AS_IMAGE_RESOURCE))) {SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
+    if(!name || file) {SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}
+    constexpr DWORD knownFlags= DONT_RESOLVE_DLL_REFERENCES|LOAD_LIBRARY_AS_DATAFILE|
+        LOAD_WITH_ALTERED_SEARCH_PATH|LOAD_IGNORE_CODE_AUTHZ_LEVEL|LOAD_LIBRARY_AS_IMAGE_RESOURCE|
+        LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE|LOAD_LIBRARY_REQUIRE_SIGNED_TARGET|
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_APPLICATION_DIR|
+        LOAD_LIBRARY_SEARCH_USER_DIRS|LOAD_LIBRARY_SEARCH_SYSTEM32|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS|
+        0x00002000|0x00004000|0x00008000; // SAFE_CURRENT_DIRS, SYSTEM32_NO_FORWARDER, OS_INTEGRITY_CONTINUITY
+    if(flags&~knownFlags) {SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}
+    // The mapper has no resource-only image handles or signature-policy
+    // verifier. Never turn either contract into an executable successful load.
+    if(flags&(LOAD_LIBRARY_AS_DATAFILE|LOAD_LIBRARY_AS_IMAGE_RESOURCE|
+              LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE|LOAD_IGNORE_CODE_AUTHZ_LEVEL)) {
+        SetLastError(ERROR_NOT_SUPPORTED);return nullptr;
+    }
+    std::lock_guard<std::recursive_mutex> loaderLock(state->loaderMutex);
     std::wstring requested=name;
     auto leaf=requested.substr(requested.find_last_of(L"\\/")+1);
     if(leaf.find(L'.')==std::wstring::npos) requested+=L".dll";
@@ -172,19 +162,34 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     }
     Module* m=nullptr;
     {std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
-     m=named(requested);if(!m){std::wstring p=requested;if(p.find(L':')==std::wstring::npos && (p.empty()||p[0]!=L'\\'))p=state->root+L"\\"+p;if(exists(p)) {m=map(p);if(!m){SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}}}
-     if(m) { if(m->mappingFailed || !m->mapped || !initializePending() || !m->initialized) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;} return (HMODULE)m->image.base; }
+     m=named(requested);
+     if(!m) {
+         auto p=guestLibraryPath(requested,!flags);
+         if(exists(p)) {
+             if(flags) {SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
+             m=map(p);
+             if(!m) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
+         }
+     }
+    }
+    if(m) {
+        if(flags) {SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
+        if(m->mappingFailed || !m->mapped) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
+        ++m->references;
+        if(!initializePending() || !m->initialized) {--m->references;SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
+        return (HMODULE)m->image.base;
     }
     if(auto input=xinput_core::find_module(key.c_str(),true))return input;
     // Restrict fallback to documented system DLL search, never desktop paths.
-    auto result=LoadLibraryExW(requested.c_str(),nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if(flags&~(LOAD_LIBRARY_SEARCH_SYSTEM32|LOAD_LIBRARY_REQUIRE_SIGNED_TARGET)) {
+        SetLastError(ERROR_NOT_SUPPORTED);return nullptr;
+    }
+    auto result=LoadLibraryExW(requested.c_str(),nullptr,flags|LOAD_LIBRARY_SEARCH_SYSTEM32);
     if(!result) {DWORD error=GetLastError();state->event("LoadLibrary failed name="+narrow(requested)+" error="+std::to_string(error));SetLastError(error);}
     return result;
 }
 static HMODULE WINAPI loadW(LPCWSTR name) { return loadExW(name,nullptr,0); }
-static HMODULE WINAPI loadExA(LPCSTR name,HANDLE f,DWORD flags) { auto w=wide(name);return loadExW(name?w.c_str():nullptr,f,flags); }
-static HMODULE WINAPI loadA(LPCSTR name) { return loadExA(name,nullptr,0); }
-static BOOL WINAPI freeLibrary(HMODULE h) { if(auto input=xinput_core::module(h))return xinput_core::release_module(input); if(find(h)) return TRUE; return FreeLibrary(h); }
+#include "../../uwph/kernel32/guest_loader_ansi.h"
 // Wine ntdll/loader.c find_forwarded_export resolves the last dot as the
 // DLL/symbol separator, supports #ordinals and records a module dependency.
 // Keep this execution behavior separate from the non-executing import probe.
@@ -376,10 +381,24 @@ static LONG CALLBACK vectored(EXCEPTION_POINTERS* ep) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 static wxl::Carrier carrier() {
-    wxl::Carrier c; if(state->carrierCount>=16) return c;
-    wchar_t name[64];swprintf(name,64,L"play-tls-%02u.dll",state->carrierCount++);
-    HMODULE h=LoadPackagedLibrary(name,0);
-    if(h){c.index=(DWORD(*)())GetProcAddress(h,"carrier_index");c.block=(BYTE*(*)())GetProcAddress(h,"carrier_block");}return c;
+    // Native carrier DLLs stay loaded, but a retired guest no longer owns its
+    // slot. Bound simultaneous TLS images, rather than all loads ever made.
+    for(size_t slot=0;slot<state->carriers.size();++slot) {
+        auto& c=state->carriers[slot];
+        if(c.index) {
+            bool used=false;
+            for(auto& module:state->modules)
+                if(module->image.carrier.index==c.index) {used=true;break;}
+            if(used)continue;
+        } else {
+            wchar_t name[64];swprintf(name,64,L"play-tls-%02u.dll",unsigned(slot));
+            HMODULE h=LoadPackagedLibrary(name,0);
+            if(h){c.index=(DWORD(*)())GetProcAddress(h,"carrier_index");c.block=(BYTE*(*)())GetProcAddress(h,"carrier_block");}
+            if(!c.index || !c.block)return {};
+        }
+        return c;
+    }
+    return {};
 }
 static Module* map(const std::wstring& path) {
     if(auto m=named(path)) return m->mappingFailed?nullptr:m;
@@ -415,7 +434,7 @@ static bool prepare(Module& m) {
 }
 static bool initialize(Module& m) {
     // Failed images stay mapped for diagnostics, but must never become callable
-    // on a later LoadLibrary. Full detach/unload/reload is not supported yet.
+    // on a later LoadLibrary. Successful images use the lifetime collector.
     if(m.initializationFailed) return false;
     if(m.initialized || m.initializing) return true;
     if(!m.mapped || !m.prepared) return false;m.initializing=true;
@@ -446,15 +465,15 @@ static bool initializePending() {
     // Dependencies added by LoadLibrary can extend order while DllMain runs.
     for(size_t i=0;i<state->order.size();++i) if(!initialize(*state->order[i])) return false;return true;
 }
+#include "../../uwph/kernel32/guest_thread_exit.h"
 struct ThreadStart { LPTHREAD_START_ROUTINE function;void* arg; };
 static DWORD WINAPI child(void* data) {
     auto p=(ThreadStart*)data;auto function=p->function;auto arg=p->arg;delete p;guestThread=true;
     DWORD code=0;
     __try {
-        for(auto m:state->order) if(m->initialized && !m->image.initThreadStorage()) RaiseException(missingException,EXCEPTION_NONCONTINUABLE,0,nullptr);
-        for(auto m:state->order) if(m->initialized && !m->image.notifyThread(DLL_THREAD_ATTACH)) RaiseException(missingException,EXCEPTION_NONCONTINUABLE,0,nullptr);
+        if(!attachGuestThread()) RaiseException(missingException,EXCEPTION_NONCONTINUABLE,0,nullptr);
         code=function(arg);
-        for(auto i=state->order.rbegin();i!=state->order.rend();++i) if((*i)->initialized)(*i)->image.detachThread(DLL_THREAD_DETACH);
+        detachGuestThread();
     } __except(filter(GetExceptionInformation())) {code=state->code;}
     guestThread=false;return code;
 }
@@ -482,6 +501,12 @@ static PVOID WINAPI pcToFileHeader(PVOID pc,PVOID* base) {
 }
 static uintptr_t processApi(const char* name) {
 #define PLAY_API(n,f) if(!strcmp(name,n)) return (uintptr_t)&f
+    PLAY_API("K32GetModuleBaseNameW",kernelModuleBaseName);
+    PLAY_API("FindResourceA",kernelFindResourceA);PLAY_API("FindResourceW",kernelFindResourceW);
+    PLAY_API("EnumResourceNamesA",kernelEnumResourceNamesA);PLAY_API("LoadResource",kernelLoadResource);
+    PLAY_API("SizeofResource",kernelSizeofResource);PLAY_API("LockResource",LockResource);
+    PLAY_API("ExitThread",kernelExitThread);
+    PLAY_API("FreeLibraryAndExitThread",kernelFreeLibraryAndExitThread);
     PLAY_API("ExitProcess",exitProcess);PLAY_API("TerminateProcess",terminateProcess);PLAY_API("RtlExitUserProcess",rtlExit);
     PLAY_API("GetCommandLineW",commandW);PLAY_API("GetCommandLineA",commandA);
     PLAY_API("GetModuleHandleW",moduleW);PLAY_API("GetModuleHandleA",moduleA);PLAY_API("GetModuleHandleExW",moduleExW);PLAY_API("GetModuleHandleExA",moduleExA);
@@ -573,7 +598,7 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // Current mapper is the last incomplete module; capture it before recursion.
     for(auto& m:state->modules) if(!m->mapped) owner=m.get();
     Module* dependency=named(wide(dll));
-    if(!dependency && exists(state->root+L"\\"+wide(dll))) dependency=map(state->root+L"\\"+wide(dll));
+    if(!dependency) {auto path=guestLibraryPath(wide(dll));if(exists(path))dependency=map(path);}
     if(dependency) {
         if(owner && owner!=dependency) owner->dependencies.push_back(dependency);
         auto p=exported(*dependency,name,ordinal);return p?p:missing(dll,name,ordinal);
