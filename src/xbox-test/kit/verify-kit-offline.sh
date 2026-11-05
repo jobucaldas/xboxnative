@@ -1,5 +1,5 @@
 #!/bin/bash
-# verify-kit-offline.sh [KITDIR=/workspace/x64-run/kit/latest]
+# verify-kit-offline.sh [KITDIR]; defaults to KIT_OUT_ROOT/latest or out/kit/latest.
 #
 # Deeper off-device check of a kit built by build-kit.sh. For every package
 # listed in manifest.json (kind "package"):
@@ -14,13 +14,13 @@
 # Also fails if any .pfx/.key/.pem is present in the kit.
 # Exits non-zero naming the failing package/file.
 set -uo pipefail
-export PATH="$HOME/.local/bin:$PATH"
 here="$(cd "$(dirname "$0")" && pwd)"
 
-kitdir="${1:-/workspace/x64-run/kit/latest}"
+kitdir="${1:-${KIT_OUT_ROOT:-$here/../../out/kit}/latest}"
 kitdir="$(cd "$kitdir" && pwd)" || { echo "verify-kit-offline: bad kit dir" >&2; exit 2; }
 manifest="$kitdir/manifest.json"
 [ -f "$manifest" ] || { echo "verify-kit-offline: no manifest.json in $kitdir" >&2; exit 2; }
+python3 "$here/kitlib.py" validate "$manifest" || exit 2
 command -v makemsix >/dev/null || { echo "verify-kit-offline: makemsix not found" >&2; exit 2; }
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/kit-offline.XXXXXX")"
