@@ -1047,6 +1047,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         for (auto m : {GamepadButtons::A, GamepadButtons::B, GamepadButtons::X, GamepadButtons::Y, GamepadButtons::DPadUp, GamepadButtons::DPadDown, GamepadButtons::DPadLeft, GamepadButtons::DPadRight})
             if (has(edge, m)) logf("button event mask=0x%x screen=%d", (unsigned)m, (int)g_screen);
         logf("input source=%s edge=0x%x buttons=0x%x stick=(%.3f,%.3f) held=%.3f", source, (unsigned)edge, (unsigned)rd.Buttons, rd.LeftThumbstickX, rd.LeftThumbstickY, t - m_pad.heldSince);
+        // A running guest owns the controller (it reads the same pad through XInput/WGI):
+        // the launcher screen behind it must not act on those presses.
+        if (auto guest = play_runtime::observed.load(std::memory_order_acquire); guest && !guest->finished.load(std::memory_order_acquire)) {
+            logf("input: guest running; launcher UI ignores controller"); return;
+        }
         int s = g_screen;
         if (s == S_LOGIN) { if (has(edge, GamepadButtons::A) || has(edge, GamepadButtons::X)) { g_refreshReq = true; set_status("Refreshing QR..."); logf("Refresh button pressed"); } }
         else if (s == S_DETAIL) {

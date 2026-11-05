@@ -144,6 +144,8 @@ static steam_cloud::Roots cloud_roots(const std::wstring& gameRoot) {
     roots["GameInstall"]=gameRoot;
     return roots;
 }
+static std::mutex g_cloudRulesM;
+static std::vector<steam_cloud::Rule> g_cloudRules;   // from the pre-launch download pass
 static bool cloud_sync(uint32_t appid,const std::wstring& gameRoot,bool upload,uint64_t quiet) {
     auto session=user_session();
     if(!session||session->anon)return false;
@@ -153,6 +155,7 @@ static bool cloud_sync(uint32_t appid,const std::wstring& gameRoot,bool upload,u
     const Vdf* app=root.get("appinfo");if(!app)app=&root;
     auto rules=steam_cloud::rules(*app);
     if(rules.empty()){lp_sink("STEAM cloud: app has no Auto-Cloud save rules");return false;}
+    {std::lock_guard<std::mutex> lock(g_cloudRulesM);g_cloudRules=rules;}
     steam_cloud::Io io;
     io.service=[session](const std::string& method,const std::string& request,int& eresult,std::string& response){
         JobMsg m;if(!session->service(method,request,30000,m))return false;
@@ -204,15 +207,33 @@ static void achievements_sync(uint32_t appid,bool store) {
     char line[160];snprintf(line,sizeof line,"STEAM achievements: %s achievements=%zu stats=%zu unlocked=%u",
         ok?"prepared":"prepare failed",schema->achievements.size(),schema->stats.size(),unlocked);lp_sink(line);
 }
+// Uploads must not depend on a clean exit (the console may end the app, or the
+// game may crash while quitting): watch the save files and the provider's
+// achievement state, and sync once a change has settled for 15 s, with a
+// 5-minute backstop and a final pass when the guest finishes.
 static void cloud_uploader(uint32_t appid,std::wstring gameRoot) {
     std::thread([appid,gameRoot]{
         init_apartment(apartment_type::multi_threaded);
+        namespace fs=std::filesystem;
+        auto roots=cloud_roots(gameRoot);
+        std::vector<fs::path> extra{fs::path(provider_dir(appid))/"saves"/std::to_string(appid)};
+        std::vector<steam_cloud::Rule> rules;{std::lock_guard<std::mutex> lock(g_cloudRulesM);rules=g_cloudRules;}
+        std::string synced=steam_cloud::signature(roots,rules,extra),seen=synced;
+        ULONGLONG changedAt=GetTickCount64(),lastPass=GetTickCount64();
         for(;;) {
             auto r=play_runtime::observed.load(std::memory_order_acquire);
             bool finished=!r||r->finished.load(std::memory_order_acquire);
-            for(int i=0;i<300&&!finished;++i){Sleep(1000);finished=!r||r->finished.load(std::memory_order_acquire);}
-            try{cloud_sync(appid,gameRoot,true,finished?0:30);}catch(...){lp_sink("STEAM cloud upload: exception");}
-            try{achievements_sync(appid,true);}catch(...){lp_sink("STEAM achievements store: exception");}
+            if(!finished)Sleep(5000);
+            ULONGLONG now=GetTickCount64();
+            std::string current=steam_cloud::signature(roots,rules,extra);
+            if(current!=seen){seen=current;changedAt=now;}
+            bool settled=current!=synced&&now-changedAt>=15000;
+            if(finished||settled||now-lastPass>=300000) {
+                if(settled)lp_sink("STEAM sync: saves changed; syncing");
+                try{cloud_sync(appid,gameRoot,true,finished?0:10);}catch(...){lp_sink("STEAM cloud upload: exception");}
+                try{achievements_sync(appid,true);}catch(...){lp_sink("STEAM achievements store: exception");}
+                synced=current;lastPass=now;
+            }
             if(finished){games_played(0);return;}
         }
     }).detach();
@@ -239,6 +260,7 @@ static void lp_run_impl(LpCtx& c) {
         try{achievements_sync(c.appid,false);}catch(...){lp_sink("STEAM achievements: exception");}
         games_played(c.appid);
     }
+    regb::init(g_dir,lp_sink); // guest registry (PlayerPrefs): LocalState\registry.sqlite
     if(!play_runtime::start(c.root,exe,c.args,lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
     if(steamProvider)cloud_uploader(c.appid,c.root);
     auto r=play_runtime::state;
