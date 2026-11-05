@@ -160,11 +160,15 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     std::wstring requested=name;
     auto leaf=requested.substr(requested.find_last_of(L"\\/")+1);
     if(leaf.find(L'.')==std::wstring::npos) requested+=L".dll";
-    // Apply the real-client prerequisite after Windows name normalization,
-    // including extensionless requests and the client DLL itself.
+    // There is no genuine Steam client (item 36). Refuse the client DLL after
+    // Windows name normalization, even when a copy ships in the game root, so
+    // nothing but a real client could ever answer the game's Steam API. The
+    // game's original steam_api64.dll maps unmodified like any other game DLL
+    // and its SteamAPI_Init fails naturally without a client.
     auto key=basename(requested);
-    if(key=="steam_api64.dll" || key=="steamclient64.dll") {
-        stopMissing(key+"!LoadLibrary (real client prerequisite item 36)",(uintptr_t)_ReturnAddress());return nullptr;
+    if(key=="steamclient64.dll") {
+        state->event("LoadLibrary refused name="+narrow(requested)+": no genuine Steam client (item 36)");
+        SetLastError(ERROR_MOD_NOT_FOUND);return nullptr;
     }
     Module* m=nullptr;
     {std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
@@ -385,6 +389,7 @@ static Module* map(const std::wstring& path) {
     // table, but no initialization runs until the complete graph is mapped.
     mlp::assets[m->key]=&m->image;
     state->event("mapping "+m->key);
+    if(m->key=="steam_api64.dll") state->event("steam_api64.dll is the game's original file, mapped unmodified; no Steam client, so SteamAPI_Init is expected to fail (item 36)");
     struct ImportScope {ImportScope(){++mappingImports;} ~ImportScope(){--mappingImports;}} imports;
     if(!wxl::run(path.c_str(),state->log,&m->image,resolve,wxl::LoadConfig::msvc_x64)) {m->mappingFailed=true;state->event("mapping failed: "+m->key+"; guest initialization blocked; "+state->snapshot());return nullptr;}
     m->mapped=true;++state->mappedCount;state->order.push_back(m);return m;
@@ -560,12 +565,10 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxW")) return (uintptr_t)&messageBoxW;
     if(key=="user32.dll" && name && !strcmp(name,"CreateWindowExW")) return (uintptr_t)&createWindow;
     if(key=="d3d11.dll" && name && !strcmp(name,"D3D11CreateDevice")) return (uintptr_t)&createDevice;
-    if(key=="steam_api64.dll" || key=="steamclient64.dll") {
-        // Forwarded dynamic exports must obey the same real-client gate as
-        // LoadLibrary; never return a callable Steam placeholder.
-        if(!mappingImports) stopMissing(key+"!"+(name?name:"#"+std::to_string(ordinal))+" (real client prerequisite item 36)",(uintptr_t)_ReturnAddress());
-        return missing(dll,name,ordinal);
-    }
+    // Same client gate as LoadLibrary, for static and forwarded imports. Never
+    // a callable Steam placeholder: the import stays unresolved, as on Windows
+    // without the DLL. steam_api64.dll resolves from the game's own file below.
+    if(key=="steamclient64.dll") return missing(dll,name,ordinal);
     Module* owner=nullptr;
     // Current mapper is the last incomplete module; capture it before recursion.
     for(auto& m:state->modules) if(!m->mapped) owner=m.get();

@@ -11,6 +11,9 @@ loader plus our own POSIX/syscall host layer (`uwph`). Status: **early, experime
   `VirtualProtectFromApp`); a PE mapper (64-bit and, as data only, 32-bit); CoreWindow D3D11 swap chain; gamepad; real
   system `d3d11`/`dxgi`/`ws2_32`/`bcrypt`. Known gaps: user32 message loop, input, audio (zero samples), Steam API path,
   32-bit execution (needs an x86 engine), Direct3D 9.
+- Steam: there is no genuine Steam client on the console yet. Play loads a game's original `steam_api64.dll` unmodified
+  and its `SteamAPI_Init` fails naturally; `steamclient64.dll` is always refused, so nothing answers in Steam's place.
+  Games that tolerate a missing client can proceed; genuine Steam remains an unmet [playability](docs/PLAYABLE.md) item.
 - "Playable" is defined by evidence, not announcement: [docs/PLAYABLE.md](docs/PLAYABLE.md).
 
 ## Design
