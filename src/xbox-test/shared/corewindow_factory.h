@@ -1,4 +1,5 @@
 #pragma once
+#include <dxgi1_6.h>
 // Shared native factory adapter; the owner validates every guest HWND.
 namespace corewindow_dxgi {
 // The console exposes no DXGI outputs to apps, so Unity's Screen.resolutions
@@ -61,14 +62,23 @@ struct Output final : IDXGIOutput {
     HRESULT STDMETHODCALLTYPE GetDisplaySurfaceData(IDXGISurface*) override { return DXGI_ERROR_UNSUPPORTED; }
     HRESULT STDMETHODCALLTYPE GetFrameStatistics(DXGI_FRAME_STATISTICS*) override { return DXGI_ERROR_FRAME_STATISTICS_DISJOINT; }
 };
-struct Adapter final : IDXGIAdapter1 {
-    ULONG refs=1; IDXGIAdapter1* real; UINT width, height;
-    Adapter(IDXGIAdapter1* a,UINT w,UINT h):real(a),width(w),height(h){}
-    ~Adapter(){real->Release();}
+// IDXGIAdapter1..4 (Unity QIs IDXGIAdapter3 for video memory and enumerates
+// outputs from that pointer): every level the real adapter supports is
+// answered by this wrapper, forwarding to the real one; GetParent returns the
+// wrapping factory, so no path leads back to an adapter without the output.
+struct Adapter final : IDXGIAdapter4 {
+    ULONG refs=1; IDXGIAdapter1* real; IUnknown* factory; UINT width, height;
+    Adapter(IDXGIAdapter1* a,IUnknown* f,UINT w,UINT h):real(a),factory(f),width(w),height(h){if(factory)factory->AddRef();}
+    ~Adapter(){real->Release();if(factory)factory->Release();}
+    template<class T> T* level() const {   // the real adapter at a higher interface level, or null
+        T* p=nullptr;if(FAILED(real->QueryInterface(__uuidof(T),(void**)&p)))return nullptr;p->Release();return p;
+    }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void** out) override {
         if(!out)return E_POINTER;*out=nullptr;
-        if(id==__uuidof(IUnknown)||id==__uuidof(IDXGIObject)||id==__uuidof(IDXGIAdapter)||id==__uuidof(IDXGIAdapter1)){
-            *out=static_cast<IDXGIAdapter1*>(this);AddRef();return S_OK;}
+        if(id==__uuidof(IUnknown)||id==__uuidof(IDXGIObject)||id==__uuidof(IDXGIAdapter)||id==__uuidof(IDXGIAdapter1)||
+           (id==__uuidof(IDXGIAdapter2)&&level<IDXGIAdapter2>())||(id==__uuidof(IDXGIAdapter3)&&level<IDXGIAdapter3>())||
+           (id==__uuidof(IDXGIAdapter4)&&level<IDXGIAdapter4>())){
+            *out=static_cast<IDXGIAdapter4*>(this);AddRef();return S_OK;}
         if(id==realAdapterId){real->AddRef();*out=real;return S_OK;}
         return real->QueryInterface(id,out);
     }
@@ -77,7 +87,10 @@ struct Adapter final : IDXGIAdapter1 {
     HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID a,UINT b,const void* c) override { return real->SetPrivateData(a,b,c); }
     HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID a,const IUnknown* b) override { return real->SetPrivateDataInterface(a,b); }
     HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID a,UINT* b,void* c) override { return real->GetPrivateData(a,b,c); }
-    HRESULT STDMETHODCALLTYPE GetParent(REFIID a,void** b) override { return real->GetParent(a,b); }
+    HRESULT STDMETHODCALLTYPE GetParent(REFIID a,void** b) override {
+        if(!b)return E_POINTER;*b=nullptr;
+        return factory?factory->QueryInterface(a,b):real->GetParent(a,b);
+    }
     HRESULT STDMETHODCALLTYPE EnumOutputs(UINT index,IDXGIOutput** out) override {
         if(!out)return E_INVALIDARG;*out=nullptr;
         IDXGIOutput* first=nullptr;HRESULT hr=real->EnumOutputs(0,&first);
@@ -89,6 +102,15 @@ struct Adapter final : IDXGIAdapter1 {
     HRESULT STDMETHODCALLTYPE GetDesc(DXGI_ADAPTER_DESC* d) override { return real->GetDesc(d); }
     HRESULT STDMETHODCALLTYPE CheckInterfaceSupport(REFGUID a,LARGE_INTEGER* b) override { return real->CheckInterfaceSupport(a,b); }
     HRESULT STDMETHODCALLTYPE GetDesc1(DXGI_ADAPTER_DESC1* d) override { return real->GetDesc1(d); }
+    // Higher levels: only reachable when level<T>() succeeded in QueryInterface.
+    HRESULT STDMETHODCALLTYPE GetDesc2(DXGI_ADAPTER_DESC2* d) override { auto r=level<IDXGIAdapter2>();return r?r->GetDesc2(d):E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE RegisterHardwareContentProtectionTeardownStatusEvent(HANDLE e,DWORD* c) override { auto r=level<IDXGIAdapter3>();return r?r->RegisterHardwareContentProtectionTeardownStatusEvent(e,c):E_NOTIMPL; }
+    void STDMETHODCALLTYPE UnregisterHardwareContentProtectionTeardownStatus(DWORD c) override { if(auto r=level<IDXGIAdapter3>())r->UnregisterHardwareContentProtectionTeardownStatus(c); }
+    HRESULT STDMETHODCALLTYPE QueryVideoMemoryInfo(UINT n,DXGI_MEMORY_SEGMENT_GROUP g,DXGI_QUERY_VIDEO_MEMORY_INFO* i) override { auto r=level<IDXGIAdapter3>();return r?r->QueryVideoMemoryInfo(n,g,i):E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetVideoMemoryReservation(UINT n,DXGI_MEMORY_SEGMENT_GROUP g,UINT64 v) override { auto r=level<IDXGIAdapter3>();return r?r->SetVideoMemoryReservation(n,g,v):E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE RegisterVideoMemoryBudgetChangeNotificationEvent(HANDLE e,DWORD* c) override { auto r=level<IDXGIAdapter3>();return r?r->RegisterVideoMemoryBudgetChangeNotificationEvent(e,c):E_NOTIMPL; }
+    void STDMETHODCALLTYPE UnregisterVideoMemoryBudgetChangeNotification(DWORD c) override { if(auto r=level<IDXGIAdapter3>())r->UnregisterVideoMemoryBudgetChangeNotification(c); }
+    HRESULT STDMETHODCALLTYPE GetDesc3(DXGI_ADAPTER_DESC3* d) override { auto r=level<IDXGIAdapter4>();return r?r->GetDesc3(d):E_NOTIMPL; }
 };
 // D3D11CreateDevice must receive the real adapter, not a wrapper.
 inline IDXGIAdapter* real_adapter(IDXGIAdapter* a) {
@@ -148,7 +170,7 @@ struct Factory final : IDXGIFactory2 {
     HRESULT STDMETHODCALLTYPE CreateSoftwareAdapter(HMODULE a,IDXGIAdapter** b) override { return real->CreateSoftwareAdapter(a,b); }
     HRESULT STDMETHODCALLTYPE EnumAdapters1(UINT a,IDXGIAdapter1** b) override {
         if(!b)return E_INVALIDARG;*b=nullptr;IDXGIAdapter1* adapter=nullptr;HRESULT hr=real->EnumAdapters1(a,&adapter);
-        if(FAILED(hr))return hr;*b=new Adapter(adapter,outputWidth,outputHeight);return S_OK; }
+        if(FAILED(hr))return hr;*b=new Adapter(adapter,static_cast<IDXGIFactory2*>(this),outputWidth,outputHeight);return S_OK; }
     BOOL STDMETHODCALLTYPE IsCurrent() override { return real->IsCurrent(); }
     BOOL STDMETHODCALLTYPE IsWindowedStereoEnabled() override { return real->IsWindowedStereoEnabled(); }
     HRESULT STDMETHODCALLTYPE CreateSwapChainForHwnd(IUnknown* d,HWND h,const DXGI_SWAP_CHAIN_DESC1* s,const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* f,IDXGIOutput* r,IDXGISwapChain1** out) override {
