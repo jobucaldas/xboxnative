@@ -19,7 +19,12 @@ fi
 [ -n "$full" ] || { echo "no Grok.XboxTest package found"; exit 2; }
 echo "package: $full  app: $app  out: $out"
 cmd() { printf '%s\n' "$@" > "$tmp/cmd.txt"; bash "$DP/put-file.sh" "$full" '\LocalState' "$tmp/cmd.txt" | tail -1; }
-pull() { bash "$DP/get-file.sh" "$full" '\LocalState' "$1" "$2" >/dev/null 2>&1; }
+pull() {
+  # Logs can be truncated or rewritten by a new app session. Resuming an old
+  # local snapshot preserves stale bytes, including a previous launch result.
+  rm -f "$2"
+  bash "$DP/get-file.sh" "$full" '\LocalState' "$1" "$2" >/dev/null 2>&1
+}
 shot() { bash "$DP/screenshot.sh" "$out/$1.png" >/dev/null 2>&1 && echo "shot $1.png"; }
 if [ -z "$PT_NOKILL" ]; then bash "$DP/kill.sh" "$full" >/dev/null; sleep 3; fi
 : > "$tmp/cmd.txt"; bash "$DP/put-file.sh" "$full" '\LocalState' "$tmp/cmd.txt" | tail -1   # overwrite any stale cmd.txt with an empty (harmless) one

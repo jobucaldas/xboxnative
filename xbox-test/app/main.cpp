@@ -726,10 +726,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 else logf("detail: auto-launch not started (ok=%d installed=%d onDetail=%d)", g_dlLastOk ? 1 : 0, ii.installed ? 1 : 0, (g_screen == S_DETAIL && m_dApp == app) ? 1 : 0);
             }
         }
-        if (g_launch.phase == 1 && now_s() - g_launch.started > 120) {
-            ++g_launch.gen; { std::lock_guard<std::mutex> l(g_launch.m); g_launch.result = "timed out after 120 s; probe thread abandoned, launcher still responsive. Game code NOT executed."; } g_launch.phase = 2;
-            logf("launch: RESULT watchdog timeout 120 s (probe thread abandoned)");
-        }
+        lp_watchdog();
     }
     static void blit(const std::vector<uint32_t>& pix, int iw, int ih, int x, int y) {
         for (int j = 0; j < ih; j++) { int yy = y + j; if (yy < 0 || yy >= H) continue; for (int i = 0; i < iw; i++) { int xx = x + i; if (xx < 0 || xx >= W) continue; g_fb[yy * W + xx] = pix[(size_t)j * iw + i] | 0xFF000000u; } }
@@ -791,7 +788,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // launch panel
         if (g_launch.phase != 0 && g_launch.appid == m_dApp) {
             fill(60, 810, 1800, 180, C3(10, 12, 16)); frame(60, 810, 1800, 180, 3, g_launch.phase == 1 ? YEL : C3(60, 70, 88));
-            if (g_launch.phase == 1) { char b[100]; snprintf(b, sizeof b, "Launching... (%.0f s) starting the loader probe", now_s() - g_launch.started); text(80, 826, b, 3, YEL); }
+            if (g_launch.phase == 1) { char b[100]; snprintf(b, sizeof b, "Launching... (%.0f s) running guest loader", now_s() - g_launch.started); text(80, 826, b, 3, YEL); }
             else { std::string r; { std::lock_guard<std::mutex> l(g_launch.m); r = g_launch.result; }
                 text(80, 822, "Launch attempted:", 3, YEL); auto ls = wrap_lines(r, 73); for (size_t i = 0; i < ls.size() && i < 4; i++) text(80, 858 + (int)i * 34, ls[i], 3, TXT); }
         }

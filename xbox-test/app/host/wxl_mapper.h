@@ -39,16 +39,25 @@ struct Image {
     std::vector<BYTE> tlsTemplate;
     std::vector<PIMAGE_TLS_CALLBACK> tlsCallbacks;
     bool tlsAttached = false;
-    bool attachThread(DWORD reason) {
+    bool initThreadStorage() {
         if (tlsKey != TLS_OUT_OF_INDEXES) {
             BYTE* block=carrier.block();
             if (!block || TlsGetValue(tlsKey)) return false;
             if (tlsTemplate.size()) memcpy(block,tlsTemplate.data(),tlsTemplate.size());
             if (!TlsSetValue(tlsKey,block)) return false;
+        }
+        return true;
+    }
+    bool notifyThread(DWORD reason) {
+        if (tlsKey != TLS_OUT_OF_INDEXES) {
+            if (!TlsGetValue(tlsKey)) return false;
             for (auto cb:tlsCallbacks) cb(base,reason,nullptr);
         }
-        if (reason==DLL_THREAD_ATTACH && attached && !dllEntry((HINSTANCE)base,reason,nullptr)) return false;
+        if (reason==DLL_THREAD_ATTACH && attached) dllEntry((HINSTANCE)base,reason,nullptr);
         return true;
+    }
+    bool attachThread(DWORD reason) {
+        return initThreadStorage() && notifyThread(reason);
     }
     void detachThread(DWORD reason) {
         if (reason==DLL_THREAD_DETACH && attached) dllEntry((HINSTANCE)base,reason,nullptr);
@@ -105,6 +114,118 @@ struct Image {
         return !!ok;
     }
 };
+// Runtime preparation is separate from mapping: all sibling exports must exist
+// before any TLS callback or DllMain can execute.
+inline bool prepareTls(Image& image, Log log, Carrier carrier) {
+    auto fail=[&](const char* why){log(why);return false;};
+    auto nt=(IMAGE_NT_HEADERS64*)(image.base+((IMAGE_DOS_HEADER*)image.base)->e_lfanew);
+    auto h=nt->OptionalHeader;
+    auto sections=IMAGE_FIRST_SECTION(nt);
+    image.carrier=carrier;
+    char msg[256];
+    auto td=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
+    if (td.Size || td.VirtualAddress) {
+        if (td.Size<sizeof(IMAGE_TLS_DIRECTORY64) || !image.valid(td.VirtualAddress,td.Size) ||
+            !carrier.index || !carrier.block || carrier.capacity>65536) return fail("WXL FAIL TLS directory/provider");
+        auto t=(IMAGE_TLS_DIRECTORY64*)(image.base+td.VirtualAddress);
+        auto vaRange=[&](ULONGLONG va,size_t n) {
+            return va>=(uintptr_t)image.base && image.valid(size_t(va-(uintptr_t)image.base),n);
+        };
+        if (t->EndAddressOfRawData<t->StartAddressOfRawData) return fail("WXL FAIL TLS template order");
+        ULONGLONG raw=t->EndAddressOfRawData-t->StartAddressOfRawData;
+        if (raw>carrier.capacity || t->SizeOfZeroFill>carrier.capacity-raw ||
+            !vaRange(t->StartAddressOfRawData,size_t(raw)) || !vaRange(t->AddressOfIndex,4))
+            return fail("WXL FAIL TLS template/index bounds");
+        size_t indexRva=size_t(t->AddressOfIndex-(uintptr_t)image.base);
+        bool writable=false;
+        for (unsigned j=0;j<nt->FileHeader.NumberOfSections;++j) {
+            auto sec=sections[j];
+            if ((sec.Characteristics&IMAGE_SCN_MEM_WRITE) && indexRva>=sec.VirtualAddress &&
+                range(indexRva-sec.VirtualAddress,4,std::max(sec.Misc.VirtualSize,sec.SizeOfRawData))) writable=true;
+        }
+        unsigned alignment=(t->Characteristics>>20)&15;
+        if (!writable || alignment>5) return fail("WXL FAIL TLS index permissions/alignment");
+        image.tlsTemplate.resize(size_t(raw)+t->SizeOfZeroFill);
+        if (raw) memcpy(image.tlsTemplate.data(),(void*)t->StartAddressOfRawData,size_t(raw));
+        DWORD nativeIndex=carrier.index();
+        memcpy((void*)t->AddressOfIndex,&nativeIndex,4);
+        image.tlsKey=TlsAlloc();
+        if (image.tlsKey==TLS_OUT_OF_INDEXES) return fail("WXL FAIL TlsAlloc");
+        if (t->AddressOfCallBacks) {
+            bool terminated=false;
+            for (size_t j=0;j<256;++j) {
+                ULONGLONG addr=t->AddressOfCallBacks+j*8;
+                if (addr<t->AddressOfCallBacks || !vaRange(addr,8)) return fail("WXL FAIL TLS callback array");
+                ULONGLONG cb; memcpy(&cb,(void*)addr,8);
+                if (!cb) { terminated=true; break; }
+                bool code=false;
+                for (unsigned k=0;k<nt->FileHeader.NumberOfSections;++k) {
+                    auto sec=sections[k];
+                    ULONGLONG start=(uintptr_t)image.base+sec.VirtualAddress;
+                    if ((sec.Characteristics&IMAGE_SCN_MEM_EXECUTE) && cb>=start &&
+                        cb-start<std::max(sec.Misc.VirtualSize,sec.SizeOfRawData)) code=true;
+                }
+                if (!code) return fail("WXL FAIL TLS callback outside code");
+                image.tlsCallbacks.push_back((PIMAGE_TLS_CALLBACK)cb);
+            }
+            if (!terminated) return fail("WXL FAIL TLS callback terminator");
+        }
+        snprintf(msg,sizeof msg,"WXL TLS native-index=%lu dynamic-key=%lu template=%zu zero=%lu callbacks=%zu",nativeIndex,image.tlsKey,size_t(raw),t->SizeOfZeroFill,image.tlsCallbacks.size()); log(msg);
+    }
+    return true;
+}
+inline bool prepareUnwind(Image& image, Log log) {
+    auto fail=[&](const char* why){log(why);return false;};
+    auto nt=(IMAGE_NT_HEADERS64*)(image.base+((IMAGE_DOS_HEADER*)image.base)->e_lfanew);
+    auto h=nt->OptionalHeader;
+    auto sections=IMAGE_FIRST_SECTION(nt);
+    char msg[256];
+    auto xd=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+    if (xd.Size || xd.VirtualAddress) {
+        if (!xd.Size || xd.Size % sizeof(RUNTIME_FUNCTION) || xd.VirtualAddress % 4 ||
+            !image.valid(xd.VirtualAddress,xd.Size)) return fail("WXL FAIL exception directory");
+        // The OS requires sorted function entries. Validate each range before
+        // publishing the table; the trusted compiler supplies unwind opcodes.
+        auto readableRange = [&](DWORD rva, size_t size) {
+            for (unsigned j=0;j<nt->FileHeader.NumberOfSections;++j) {
+                auto section=sections[j];
+                if ((section.Characteristics&IMAGE_SCN_MEM_READ) && rva>=section.VirtualAddress &&
+                    range(rva-section.VirtualAddress,size,
+                          std::max(section.Misc.VirtualSize,section.SizeOfRawData))) return true;
+            }
+            return false;
+        };
+        if (!readableRange(xd.VirtualAddress,xd.Size)) return fail("WXL FAIL unreadable function table");
+        auto table=(PRUNTIME_FUNCTION)(image.base+xd.VirtualAddress);
+        DWORD previousEnd=0;
+        for (size_t i=0; i<xd.Size/sizeof(*table); ++i) {
+            auto r=table[i];
+            if (r.BeginAddress>=r.EndAddress || r.BeginAddress<previousEnd ||
+                !image.valid(r.BeginAddress,r.EndAddress-r.BeginAddress) ||
+                r.UnwindData%4 || !image.valid(r.UnwindData,4) || !readableRange(r.UnwindData,4))
+                return fail("WXL FAIL runtime function bounds/order");
+            previousEnd=r.EndAddress;
+            bool executable=false, readable=false;
+            for (unsigned j=0;j<nt->FileHeader.NumberOfSections;++j) {
+                auto section=sections[j];
+                size_t n=std::max(section.Misc.VirtualSize,section.SizeOfRawData);
+                if (r.BeginAddress>=section.VirtualAddress &&
+                    range(r.BeginAddress-section.VirtualAddress,r.EndAddress-r.BeginAddress,n) &&
+                    (section.Characteristics&IMAGE_SCN_MEM_EXECUTE)) executable=true;
+                if (xd.VirtualAddress>=section.VirtualAddress &&
+                    range(xd.VirtualAddress-section.VirtualAddress,xd.Size,n) &&
+                    (section.Characteristics&IMAGE_SCN_MEM_READ)) readable=true;
+            }
+            if (!executable || !readable) return fail("WXL FAIL runtime function permissions");
+        }
+        BOOL ok=RtlAddFunctionTable(table,xd.Size/sizeof(*table),(DWORD64)image.base);
+        snprintf(msg,sizeof msg,"WXL RtlAddFunctionTable count=%lu ok=%d",
+                 (unsigned long)(xd.Size/sizeof(*table)),ok); log(msg);
+        if (!ok) return fail("WXL FAIL RtlAddFunctionTable");
+        image.functions=table;
+    }
+    return true;
+}
 inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={}, Resolver resolve=nullptr, bool mapped=false, LoadConfig config=LoadConfig::reject) {
     logger = log;
     auto fail = [&](const char* why) { log(why); return false; };
@@ -123,7 +244,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
     for (unsigned d : {IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR})
         if (!mapped && h.DataDirectory[d].Size) return fail("WXL FAIL unsupported runtime directory");
     auto configDir=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG];
-    if (!mapped && (configDir.VirtualAddress || configDir.Size) && config!=LoadConfig::inert_wine)
+    if ((configDir.VirtualAddress || configDir.Size) && config!=LoadConfig::inert_wine)
         return fail("WXL FAIL unsupported runtime directory");
     auto sections=(const IMAGE_SECTION_HEADER*)(file.data()+secOff);
     size_t end=pages(h.SizeOfHeaders); bool entryCode=false;
@@ -133,8 +254,8 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
         end=s.VirtualAddress+pages(n);
         if ((s.Characteristics&IMAGE_SCN_MEM_EXECUTE) && h.AddressOfEntryPoint>=s.VirtualAddress && h.AddressOfEntryPoint-s.VirtualAddress<n) entryCode=true;
     }
-    if (!entryCode) return fail("WXL FAIL entry outside code");
-    if (!mapped && (configDir.VirtualAddress || configDir.Size)) {
+    if (!entryCode && !(mapped && (nt->FileHeader.Characteristics&IMAGE_FILE_DLL) && !h.AddressOfEntryPoint)) return fail("WXL FAIL entry outside code");
+    if ((configDir.VirtualAddress || configDir.Size)) {
         bool inert=false;
         for (unsigned i=0;i<nt->FileHeader.NumberOfSections;i++) {
             auto s=sections[i];
@@ -171,8 +292,8 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
         }
         pos+=b->SizeOfBlock;
     }
-    auto id=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT]; bool terminated=false;
-    if (!id.Size || !image.valid(id.VirtualAddress,id.Size)) return fail("WXL FAIL import directory");
+    auto id=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT]; bool terminated=!id.Size;
+    if ((!id.Size && !mapped) || !image.valid(id.VirtualAddress,id.Size)) return fail("WXL FAIL import directory");
     for(size_t pos=id.VirtualAddress;range(pos,sizeof(IMAGE_IMPORT_DESCRIPTOR),size_t(id.VirtualAddress)+id.Size);pos+=sizeof(IMAGE_IMPORT_DESCRIPTOR)) {
         auto d=(IMAGE_IMPORT_DESCRIPTOR*)(image.base+pos);
         if (!d->Name && !d->FirstThunk && !d->OriginalFirstThunk) { terminated=true; break; }
@@ -227,55 +348,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
     }
     if(!terminated || (!mapped && (!relocations || !delta))) return fail("WXL FAIL missing terminator/relocation exercise");
     char msg[200]; snprintf(msg,sizeof msg,"WXL mapped LocalState PE relocations=%u imports=%u delta=0x%llx",relocations,imports,(unsigned long long)delta); log(msg);
-    auto td=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
-    if (!mapped && (td.Size || td.VirtualAddress)) {
-        if (td.Size<sizeof(IMAGE_TLS_DIRECTORY64) || !image.valid(td.VirtualAddress,td.Size) ||
-            !carrier.index || !carrier.block || carrier.capacity>65536) return fail("WXL FAIL TLS directory/provider");
-        auto t=(IMAGE_TLS_DIRECTORY64*)(image.base+td.VirtualAddress);
-        auto vaRange=[&](ULONGLONG va,size_t n) {
-            return va>=(uintptr_t)image.base && image.valid(size_t(va-(uintptr_t)image.base),n);
-        };
-        if (t->EndAddressOfRawData<t->StartAddressOfRawData) return fail("WXL FAIL TLS template order");
-        ULONGLONG raw=t->EndAddressOfRawData-t->StartAddressOfRawData;
-        if (raw>carrier.capacity || t->SizeOfZeroFill>carrier.capacity-raw ||
-            !vaRange(t->StartAddressOfRawData,size_t(raw)) || !vaRange(t->AddressOfIndex,4))
-            return fail("WXL FAIL TLS template/index bounds");
-        size_t indexRva=size_t(t->AddressOfIndex-(uintptr_t)image.base);
-        bool writable=false;
-        for (unsigned j=0;j<nt->FileHeader.NumberOfSections;++j) {
-            auto sec=sections[j];
-            if ((sec.Characteristics&IMAGE_SCN_MEM_WRITE) && indexRva>=sec.VirtualAddress &&
-                range(indexRva-sec.VirtualAddress,4,std::max(sec.Misc.VirtualSize,sec.SizeOfRawData))) writable=true;
-        }
-        unsigned alignment=(t->Characteristics>>20)&15;
-        if (!writable || alignment>5) return fail("WXL FAIL TLS index permissions/alignment");
-        image.tlsTemplate.resize(size_t(raw)+t->SizeOfZeroFill);
-        if (raw) memcpy(image.tlsTemplate.data(),(void*)t->StartAddressOfRawData,size_t(raw));
-        DWORD nativeIndex=carrier.index();
-        memcpy((void*)t->AddressOfIndex,&nativeIndex,4);
-        image.tlsKey=TlsAlloc();
-        if (image.tlsKey==TLS_OUT_OF_INDEXES) return fail("WXL FAIL TlsAlloc");
-        if (t->AddressOfCallBacks) {
-            bool terminated=false;
-            for (size_t j=0;j<256;++j) {
-                ULONGLONG addr=t->AddressOfCallBacks+j*8;
-                if (addr<t->AddressOfCallBacks || !vaRange(addr,8)) return fail("WXL FAIL TLS callback array");
-                ULONGLONG cb; memcpy(&cb,(void*)addr,8);
-                if (!cb) { terminated=true; break; }
-                bool code=false;
-                for (unsigned k=0;k<nt->FileHeader.NumberOfSections;++k) {
-                    auto sec=sections[k];
-                    ULONGLONG start=(uintptr_t)image.base+sec.VirtualAddress;
-                    if ((sec.Characteristics&IMAGE_SCN_MEM_EXECUTE) && cb>=start &&
-                        cb-start<std::max(sec.Misc.VirtualSize,sec.SizeOfRawData)) code=true;
-                }
-                if (!code) return fail("WXL FAIL TLS callback outside code");
-                image.tlsCallbacks.push_back((PIMAGE_TLS_CALLBACK)cb);
-            }
-            if (!terminated) return fail("WXL FAIL TLS callback terminator");
-        }
-        snprintf(msg,sizeof msg,"WXL TLS native-index=%lu dynamic-key=%lu template=%zu zero=%lu callbacks=%zu",nativeIndex,image.tlsKey,size_t(raw),t->SizeOfZeroFill,image.tlsCallbacks.size()); log(msg);
-    }
+    if (!mapped && !prepareTls(image,log,carrier)) return false;
     // Keep gaps inaccessible; headers and sections receive their final permissions.
     if(!image.protect(0,image.size,PAGE_NOACCESS,log) || !image.protect(0,pages(h.SizeOfHeaders),PAGE_READONLY,log)) return false;
     for(unsigned i=0;i<nt->FileHeader.NumberOfSections;i++) {
@@ -287,50 +360,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
         log("MLP mapped: TLS/unwind/load-config retained but NOT initialized; entry NOT called");
         return true;
     }
-    auto xd=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
-    if (xd.Size || xd.VirtualAddress) {
-        if (!xd.Size || xd.Size % sizeof(RUNTIME_FUNCTION) || xd.VirtualAddress % 4 ||
-            !image.valid(xd.VirtualAddress,xd.Size)) return fail("WXL FAIL exception directory");
-        // The OS requires sorted function entries. Validate each range before
-        // publishing the table; the trusted compiler supplies unwind opcodes.
-        auto readableRange = [&](DWORD rva, size_t size) {
-            for (unsigned j=0;j<nt->FileHeader.NumberOfSections;++j) {
-                auto section=sections[j];
-                if ((section.Characteristics&IMAGE_SCN_MEM_READ) && rva>=section.VirtualAddress &&
-                    range(rva-section.VirtualAddress,size,
-                          std::max(section.Misc.VirtualSize,section.SizeOfRawData))) return true;
-            }
-            return false;
-        };
-        if (!readableRange(xd.VirtualAddress,xd.Size)) return fail("WXL FAIL unreadable function table");
-        auto table=(PRUNTIME_FUNCTION)(image.base+xd.VirtualAddress);
-        DWORD previousEnd=0;
-        for (size_t i=0; i<xd.Size/sizeof(*table); ++i) {
-            auto r=table[i];
-            if (r.BeginAddress>=r.EndAddress || r.BeginAddress<previousEnd ||
-                !image.valid(r.BeginAddress,r.EndAddress-r.BeginAddress) ||
-                r.UnwindData%4 || !image.valid(r.UnwindData,4) || !readableRange(r.UnwindData,4))
-                return fail("WXL FAIL runtime function bounds/order");
-            previousEnd=r.EndAddress;
-            bool executable=false, readable=false;
-            for (unsigned j=0;j<nt->FileHeader.NumberOfSections;++j) {
-                auto section=sections[j];
-                size_t n=std::max(section.Misc.VirtualSize,section.SizeOfRawData);
-                if (r.BeginAddress>=section.VirtualAddress &&
-                    range(r.BeginAddress-section.VirtualAddress,r.EndAddress-r.BeginAddress,n) &&
-                    (section.Characteristics&IMAGE_SCN_MEM_EXECUTE)) executable=true;
-                if (xd.VirtualAddress>=section.VirtualAddress &&
-                    range(xd.VirtualAddress-section.VirtualAddress,xd.Size,n) &&
-                    (section.Characteristics&IMAGE_SCN_MEM_READ)) readable=true;
-            }
-            if (!executable || !readable) return fail("WXL FAIL runtime function permissions");
-        }
-        BOOL ok=RtlAddFunctionTable(table,xd.Size/sizeof(*table),(DWORD64)image.base);
-        snprintf(msg,sizeof msg,"WXL RtlAddFunctionTable count=%lu ok=%d",
-                 (unsigned long)(xd.Size/sizeof(*table)),ok); log(msg);
-        if (!ok) return fail("WXL FAIL RtlAddFunctionTable");
-        image.functions=table;
-    }
+    if (!prepareUnwind(image,log)) return false;
     if (!image.attachThread(DLL_PROCESS_ATTACH)) return fail("WXL FAIL TLS process attach");
     image.tlsAttached=true;
     if (image.dll) {

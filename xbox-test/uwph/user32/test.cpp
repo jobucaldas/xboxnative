@@ -4,6 +4,9 @@ static const char* volatile anchor="U32C mapped regression PE";
 extern "C" __declspec(dllimport) ATOM WINAPI uwph_atom_add(LPCWSTR);
 extern "C" __declspec(dllimport) ATOM WINAPI uwph_atom_find(LPCWSTR);
 extern "C" __declspec(dllimport) ATOM WINAPI uwph_atom_delete(ATOM);
+extern "C" __declspec(dllimport) void WINAPI uwph_u32c_key_event(int,BOOL);
+static bool streq(const char* a,const char* b){while(*a&&*b){if(*a++!=*b++)return false;}return *a==*b;}
+static bool wstreq(const wchar_t* a,const wchar_t* b){while(*a&&*b){if(*a++!=*b++)return false;}return *a==*b;}
 static int checks,failures,created,destroyed;
 static void check_result(bool ok,const char* expression){++checks;if(!ok){++failures;OutputDebugStringA(expression);}}
 #define check(...) check_result((__VA_ARGS__),"U32C CHECK FAIL " #__VA_ARGS__)
@@ -49,5 +52,83 @@ extern "C" DWORD WINAPI u32c_entry(){
  check(UnregisterClassW(wc.lpszClassName,0));check(!CreateWindowExW(0,MAKEINTATOM(a),0,0,0,0,1,1,0,0,0,0));
  wc.lpszClassName=L"U32cReject";wc.lpfnWndProc=reject;check(RegisterClassExW(&wc)!=0);check(!CreateWindowExW(0,wc.lpszClassName,0,0,0,0,1,1,0,0,0,0));check(rejectedDestroyed==1&&rejectedCreated==0);check(UnregisterClassW(wc.lpszClassName,0));
  HMONITOR monitor=MonitorFromWindow(h,MONITOR_DEFAULTTOPRIMARY);MONITORINFO mi={sizeof(mi)};check(GetMonitorInfoW(monitor,&mi)&&mi.rcMonitor.right==1920);check(GetSystemMetrics(SM_CMONITORS)==1);check(IsWindow(GetDesktopWindow()));
+ // item 44: input/cursor/focus
+ WNDCLASSEXW wc2={};wc2.cbSize=sizeof(wc2);wc2.lpfnWndProc=proc;wc2.lpszClassName=L"U32cItem44";
+ check(RegisterClassExW(&wc2)!=0);HWND h2=CreateWindowExW(0,wc2.lpszClassName,L"focus",WS_VISIBLE,0,0,10,10,0,0,0,(void*)0x12345678);check(h2!=0);
+ check(!GetFocus());check(SetFocus(h2)==0&&GetFocus()==h2);check(SetFocus(0)==h2&&!GetFocus());
+ check(!GetForegroundWindow()&&!GetActiveWindow());check(SetForegroundWindow(h2)&&GetForegroundWindow()==h2&&GetActiveWindow()==h2);
+ check(!SetCapture(0));check(SetCapture(h2)==0);check(ReleaseCapture());
+ check(!(GetAsyncKeyState('A')&0x8000));uwph_u32c_key_event('A',TRUE);
+ {SHORT s=GetAsyncKeyState('A');check((s&0x8000)&&(s&1));}check(!(GetAsyncKeyState('A')&1));check(GetKeyState('A')&0x8000);
+ uwph_u32c_key_event('A',FALSE);check(!(GetAsyncKeyState('A')&0x8000));check(!(GetKeyState('A')&0x8000));
+ POINT cp2; check(GetCursorPos(&cp2)&&cp2.x==960&&cp2.y==540);check(SetCursorPos(10,10)&&GetCursorPos(&cp2)&&cp2.x==10&&cp2.y==10);
+ RECT clip{0,0,5,5};check(ClipCursor(&clip));check(GetCursorPos(&cp2)&&cp2.x==4&&cp2.y==4);check(ClipCursor(0));
+ int shown=ShowCursor(TRUE);check(ShowCursor(FALSE)==shown-1);
+ check(MapVirtualKeyW('A',MAPVK_VK_TO_VSC)==0x1E);check(MapVirtualKeyW(0x1E,MAPVK_VSC_TO_VK)=='A');check(MapVirtualKeyW(VK_LEFT,MAPVK_VK_TO_VSC)==0x4B);
+ check(MapVirtualKeyA(VK_RETURN,MAPVK_VK_TO_VSC)==0x1C);check(MapVirtualKeyExA(VK_SHIFT,MAPVK_VK_TO_VSC,0)==0x2A);
+ WCHAR layoutName[KL_NAMELENGTH];check(GetKeyboardLayout(0)==(HKL)(ULONG_PTR)0x04090409);check(GetKeyboardLayoutNameW(layoutName)&&wstreq(layoutName,L"00000409"));
+ int monitors=0;check(EnumDisplayMonitors(0,0,[](HMONITOR,HDC,RECT* r,LPARAM p)->BOOL{++*(int*)p;return r->right==1920;},(LPARAM)&monitors)&&monitors==1);
+ DEVMODEW dm={};check(EnumDisplaySettingsW(0,0,&dm)&&dm.dmPelsWidth==1920&&dm.dmPelsHeight==1080);
+ DISPLAY_DEVICEA dd={};dd.cb=sizeof(dd);check(EnumDisplayDevicesA(0,0,&dd,0)&&streq(dd.DeviceName,"\\\\.\\DISPLAY1"));check(!EnumDisplayDevicesA(0,1,&dd,0));
+ WINDOWPLACEMENT wp={sizeof(wp)};check(GetWindowPlacement(h2,&wp)&&wp.showCmd==SW_SHOWNORMAL&&wp.rcNormalPosition.right==10);
+ RAWINPUTDEVICE rid={1,6,0,h2};check(RegisterRawInputDevices(&rid,1,sizeof(rid)));UINT rc=0;check(GetRawInputDeviceList(0,&rc,sizeof(RAWINPUTDEVICELIST))==0&&rc==0);
+ UINT32 npath=0,nmode=0;check(GetDisplayConfigBufferSizes(0,&npath,&nmode)==ERROR_NOT_SUPPORTED);check(QueryDisplayConfig(0,0,0,0,0,0)==ERROR_NOT_SUPPORTED);check(DisplayConfigGetDeviceInfo(0)==ERROR_NOT_SUPPORTED);
+ // batch 2: clipboard, timers/tracking, dialog/message helpers, metrics, geometry
+ check(!CloseClipboard());check(OpenClipboard(h2));check(!OpenClipboard(0)&&GetLastError()==ERROR_ACCESS_DENIED);
+ check(!IsClipboardFormatAvailable(CF_TEXT));check(SetClipboardData(CF_TEXT,(HANDLE)0xABCD)==(HANDLE)0xABCD);
+ check(IsClipboardFormatAvailable(CF_TEXT));check(GetClipboardData(CF_TEXT)==(HANDLE)0xABCD);
+ check(EmptyClipboard());check(!GetClipboardData(CF_TEXT));check(CloseClipboard());check(!CloseClipboard());
+ UINT_PTR t1=SetTimer(h2,0,100,0);check(t1!=0);UINT_PTR t2=SetTimer(h2,42,100,0);check(t2==42);
+ check(SetTimer(h2,42,200,0)==42);check(KillTimer(h2,42));check(!KillTimer(h2,42));check(KillTimer(h2,t1));
+ TRACKMOUSEEVENT tme{sizeof(tme),TME_LEAVE,h2,0};check(TrackMouseEvent(&tme));
+ tme.dwFlags=TME_CANCEL;check(TrackMouseEvent(&tme));
+ UINT wm=RegisterWindowMessageA("U32cCustomMessage");check(wm>=0xc000);check(RegisterWindowMessageA("u32ccustommessage")==wm);
+ HWND item=CreateWindowExW(0,wc2.lpszClassName,L"item",WS_CHILD,0,0,5,5,h2,(HMENU)77,0,(void*)0x12345678);check(item!=0);
+ check(SendDlgItemMessageA(h2,77,WM_APP,0,0)==0);check(SetDlgItemTextA(h2,77,"ansi text"));check(DestroyWindow(item));
+ DWORD_PTR smResult=0;check(SendMessageTimeoutA(h2,WM_APP+1,5,0,0,0,&smResult));check(smResult==0);
+ check(GetCaretBlinkTime()==530);check(GetDoubleClickTime()==500);
+ HANDLE desk=GetThreadDesktop(GetCurrentThreadId());check(desk!=0);
+ char uoiBuf[32];DWORD uoiNeed=0;check(GetUserObjectInformationA(desk,UOI_NAME,uoiBuf,sizeof(uoiBuf),&uoiNeed)&&streq(uoiBuf,"Default"));
+ check(!GetUserObjectInformationA((HANDLE)0x1,UOI_NAME,uoiBuf,sizeof(uoiBuf),&uoiNeed)&&GetLastError()==ERROR_INVALID_HANDLE);
+ RECT work{};check(SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0)&&work.right==1920);
+ SetLastError(0);check(!SystemParametersInfoW(9999,0,&work,0)&&GetLastError()==ERROR_NOT_SUPPORTED);
+ RECT adj{10,10,100,100};check(AdjustWindowRect(&adj,WS_OVERLAPPEDWINDOW,FALSE)&&adj.left<10&&adj.top<10&&adj.right>100);
+ check(SetWindowPos(h2,0,5,6,20,30,0));RECT wr{};check(GetWindowRect(h2,&wr)&&wr.left==5&&wr.top==6&&wr.right==25);
+ check(SetWindowPos(h2,0,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_HIDEWINDOW));check(!IsWindowVisible(h2));
+ check(ValidateRect(h2,0));check(UpdateWindow(h2));check(!ValidateRect((HWND)0x99999,0));
+ BYTE keyState[256]={};keyState[VK_SHIFT]=0x80;WCHAR tu[4]={};check(ToUnicode('A',0,keyState,tu,4,0)==1&&tu[0]==L'A');
+ keyState[VK_SHIFT]=0;check(ToUnicode('A',0,keyState,tu,4,0)==1&&tu[0]==L'a');check(ToUnicode(VK_F1,0,keyState,tu,4,0)==0);
+ // batch 3: GetDC/ReleaseDC, standard cursor/icon loading, CreateIconFromResourceEx+LookupIconIdFromDirectoryEx
+ HDC dc=GetDC(h2);check(dc!=0);check(ReleaseDC(h2,dc)==1);check(ReleaseDC(h2,dc)==0);check(GetDC((HWND)0x99999)==0);
+ HCURSOR arrow=LoadCursorA(0,MAKEINTRESOURCEA(32512));check(arrow!=0);check(LoadCursorA(0,MAKEINTRESOURCEA(32512))==arrow);
+ check(!LoadCursorA((HINSTANCE)0x1234,MAKEINTRESOURCEA(32512))&&GetLastError()==ERROR_RESOURCE_DATA_NOT_FOUND);
+ HICON appIcon=LoadIconA(0,MAKEINTRESOURCEA(32512));check(appIcon!=0);check(LoadIconW(0,MAKEINTRESOURCEW(32512))==appIcon);check(appIcon!=(HICON)arrow);
+ HANDLE img=LoadImageW(0,MAKEINTRESOURCEW(32513),IMAGE_CURSOR,0,0,LR_DEFAULTSIZE);check(img&&img!=arrow);
+ check(!LoadImageW(0,MAKEINTRESOURCEW(1),IMAGE_BITMAP,0,0,0)&&GetLastError()==ERROR_NOT_SUPPORTED);
+ check(!LoadImageW(0,L"file.cur",IMAGE_CURSOR,0,0,LR_LOADFROMFILE)&&GetLastError()==ERROR_FILE_NOT_FOUND);
+ check(DestroyIcon(appIcon));check(DestroyIcon(appIcon)); // shared/system icon destroy is always a TRUE no-op.
+ check(!DestroyIcon((HICON)0x7777)&&GetLastError()==ERROR_INVALID_CURSOR_HANDLE);
+ BITMAPINFOHEADER bmihdr{};bmihdr.biWidth=16;bmihdr.biHeight=32;BYTE iconBits[sizeof(BITMAPINFOHEADER)];memcpy(iconBits,&bmihdr,sizeof(bmihdr));
+ HICON custom=CreateIconFromResourceEx(iconBits,sizeof(iconBits),TRUE,0x00030000,0,0,0);check(custom!=0);
+ ICONINFO ii{};check(GetIconInfo(custom,&ii)&&ii.fIcon&&ii.xHotspot==8&&ii.yHotspot==8&&!ii.hbmMask&&!ii.hbmColor);
+ check(DestroyIcon(custom));check(!DestroyIcon(custom)&&GetLastError()==ERROR_INVALID_CURSOR_HANDLE); // own (non-shared) handle is actually freed.
+ check(!CreateIconFromResourceEx(nullptr,0,TRUE,0,0,0,0)&&GetLastError()==ERROR_INVALID_PARAMETER);
+ check(!CreateIconFromResourceEx((BYTE*)"RIFFxxxxACONxxxx",16,TRUE,0x00030000,0,0,0)&&GetLastError()==ERROR_NOT_SUPPORTED);
+ #pragma pack(push,1)
+ struct DirEntry{BYTE w,h,c,r;WORD planes,bits;DWORD bytes;WORD id;};
+ struct Dir{WORD reserved,type,count;DirEntry entries[2];};
+ #pragma pack(pop)
+ Dir dir{0,1,2,{{16,16,0,0,1,32,0,101},{64,64,0,0,1,32,0,102}}};
+ check(LookupIconIdFromDirectoryEx((BYTE*)&dir,TRUE,16,16,0)==101);
+ check(LookupIconIdFromDirectoryEx((BYTE*)&dir,TRUE,64,64,0)==102);
+ #pragma pack(push,1)
+ struct CursorEntry{WORD w,h;WORD planes,bits;DWORD bytes;WORD id;}; // CursorDir2's wWidth/wHeight, not the icon BYTE quad.
+ struct CDir{WORD reserved,type,count;CursorEntry entries[2];};
+ #pragma pack(pop)
+ CDir cdir{0,2,2,{{16,16,1,1,0,201},{64,64,1,1,0,202}}};
+ check(LookupIconIdFromDirectoryEx((BYTE*)&cdir,FALSE,20,20,0)==201);
+ check(LookupIconIdFromDirectoryEx((BYTE*)&cdir,FALSE,100,100,0)==202);
+ Dir bad{1,1,1,{{16,16,0,0,1,32,0,1}}};check(LookupIconIdFromDirectoryEx((BYTE*)&bad,TRUE,16,16,0)==0); // idReserved!=0: invalid directory.
+ check(DestroyWindow(h2));check(UnregisterClassW(wc2.lpszClassName,0));
  if(failures){OutputDebugStringA("U32C TEST FAILED");return 1;}OutputDebugStringA("U32C TEST PASS class/long/property/geometry/lifecycle");return 42;
 }

@@ -65,6 +65,8 @@ jobs:
         run: bash xbox-test/uwph/host/run-reg-killtest.sh
       - name: Inert Wine config opt-in and active-config rejection
         run: bash xbox-test/uwph/host/tests/run-load-config.sh
+      - name: Launcher mapped-image load-config rejection
+        run: bash xbox-test/app/tests/load-config.sh
   strict-imports:
     runs-on: ubuntu-latest
     steps:
