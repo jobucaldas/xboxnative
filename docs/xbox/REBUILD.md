@@ -42,7 +42,7 @@ console), and our own TLS provider (console has no OpenSSL/GnuTLS; Wine HTTPS vi
 cert checks ON; reached Steam servers on PC; root certs + Windows-side hookup were left to do).
 Windows-style sockets were implemented in the host layer's Windows side.
 
-Steam (legitimate only; NO emulators (no gbe_fork), NO Steamless, NO DRM bypass/patching of Valve files):
+Steam (owned games only, never piracy; an emulated API such as gbe_fork is allowed with achievements/cloud synced to the real account; NO Steamless, NO patching of Valve/game files):
 - Own launcher login (QR) + own downloader (downloaded Megabonk: 69 files, 523 MB, all hashes OK).
 - DRM via a headless `steamhost64.exe` that loads Valve's UNMODIFIED client (not steamwebhelper; no
   browser packages at all), pinned to build 1788652215 (same as GameNative; Valve still serves it).

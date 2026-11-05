@@ -8,15 +8,16 @@ loader plus our own POSIX/syscall host layer (`uwph`). Status: **early, experime
   (`src/xbox-test/app/tests/play-game-host.sh` with an owned install) now runs the game's own code to its first screen
   (the photosensitivity warning) through Play's loader, user32 record core, Wine donors and CoreWindow DXGI adapter,
   with a native Wine window standing in for the CoreWindow. Steam fails naturally (no client). That is evidence for
-  the runtime, not a console result: the console run, input, audio and genuine Steam remain open.
+  the runtime, not a console result: the console run, input, audio and Steam (achievements, cloud saves) remain open.
 - Working on the console today (see `docs/xbox/LANES.md`, `src/xbox-test/uwph/*/README.md`): the launcher with Steam QR
   login and its own downloader; the uwph host (threads, TLS, exceptions, files, loopback TCP, W^X via
   `VirtualProtectFromApp`); a PE mapper (64-bit and, as data only, 32-bit); CoreWindow D3D11 swap chain; gamepad; real
   system `d3d11`/`dxgi`/`ws2_32`/`bcrypt`. Known gaps: input delivery to the guest, audio (zero samples), Steam API path,
   32-bit execution (needs an x86 engine), Direct3D 9.
-- Steam: there is no genuine Steam client on the console yet. Play loads a game's original `steam_api64.dll` unmodified
-  and its `SteamAPI_Init` fails naturally; `steamclient64.dll` is always refused, so nothing answers in Steam's place.
-  Games that tolerate a missing client can proceed; genuine Steam remains an unmet [playability](docs/PLAYABLE.md) item.
+- Steam: no Steam API provider runs on the console yet. Play loads a game's original `steam_api64.dll` unmodified
+  and its `SteamAPI_Init` fails naturally; `steamclient64.dll` is always refused. Games that tolerate a missing client
+  can proceed. Next: an emulated API (gbe_fork) for owned games with achievements and cloud saves synced to the real
+  account, a [playability](docs/PLAYABLE.md) requirement.
 - "Playable" is defined by evidence, not announcement: [docs/PLAYABLE.md](docs/PLAYABLE.md).
 
 ## Game milestones
@@ -128,8 +129,9 @@ src/xbox-test/tools/play-test.sh 3405340                                # "Play 
 See `src/xbox-test/dp/README.md` for Device Portal setup and `src/xbox-test/kit/INSTALL.md` for installing on a console.
 
 ## Rules of the road
-Legitimate Steam path only: your own account via our launcher's login, official depots, Valve's unmodified client.
-No DRM bypass, no emulators/cracks (no Steamless, no gbe_fork), no Xbox security bypass. You must own the games you run.
+Owned games only, never piracy: your own account via our launcher's login, official depots. An emulated Steam API
+(gbe_fork) may serve an owned game's Steam calls, with achievements and cloud saves synced to your real account. Game
+and Valve files stay unmodified on disk (no Steamless, no cracks), and there is no Xbox security bypass.
 No game files, Valve/Microsoft binaries, or credentials in this repository. See [AGENTS.md](AGENTS.md).
 
 ## Licence

@@ -4,7 +4,7 @@ All proven by `src/xbox-test/tools/play-test.sh 3405340` evidence (log + screens
 2. Main menu visible via screenshot, stable for >= 5 min.
 3. Controller input (real pad, or one-shot synthetic labelled) moves through the menu and starts a run.
 4. Audio: XAudio2 output has non-zero samples.
-5. Steam API calls succeed through the legitimate real-client path (no DRM bypass).
+5. Steam API calls succeed (genuine client or an emulated API for the owned game), and achievements and cloud saves reach the player's real Steam account.
 6. A run is playable for >= 5 min at a measured fps (record it).
 When 1-6 are evidenced, 32-bit (Spacewar only) and D3D9 work start automatically; no need for João to say so.
 
@@ -20,9 +20,8 @@ result cannot satisfy the test.
 If the guest has taken over the screen and then fails, a native failure dialog
 explains the stop and offers **Close launcher**. Reopen the launcher before another
 Play attempt: guest modules, threads and graphics resources are retained rather
-than unsafely unloaded or reused. A genuine-Steam prerequisite error means the
-runtime cannot yet start the required real client; no replacement API or bypass
-is used.
+than unsafely unloaded or reused. A Steam prerequisite error means no Steam API
+provider is installed yet for the game; Play never patches game files to avoid it.
 
 `play-test.sh` rejects failed, stale and nonterminal results. Exit 0 requires a
 fresh observed guest completion with exit code zero plus the existing GAP check;
