@@ -99,17 +99,42 @@ static uintptr_t missing(const char* dll,const char* name,WORD ordinal) {
     if(state->log) state->log(("PRUN OPTIONAL unresolved dynamic export: "+full).c_str());
     SetLastError(ERROR_PROC_NOT_FOUND);return 0;
 }
-// No supported guest child-process provider is installed here. These names
-// must not acquire native implementations or callable failure placeholders.
+// No guest child-process provider exists: the console's UWP container cannot
+// start desktop processes, and Play never reaches a native process export.
+// As on Windows, the import itself resolves (UnityPlayer.dll statically
+// imports CreateProcessW for its optional out-of-process crash reporter); every
+// call fails with ERROR_NOT_SUPPORTED. A refused call is diagnostic only and
+// does not replace launch progress: the guest decides how to carry on.
 // This is a feature boundary, not a sandbox: other launch APIs/ordinals and
 // arbitrary native export aliases are not proven blocked by this policy.
 static bool processCreation(const char* name) {
     return name && (!strcmp(name,"CreateProcessA") || !strcmp(name,"CreateProcessW"));
 }
-static uintptr_t unavailableProcess(const char* dll,const char* name) {
-    // Optional dynamic detection must not replace real execution progress.
-    if(mappingImports)state->event("guest child-process creation unavailable (no supported provider): "+lower(dll)+"!"+name);
-    return missing(dll,name,0);
+static BOOL unsupportedProcess(const char* name,LPPROCESS_INFORMATION info) {
+    if(info) memset(info,0,sizeof *info);
+    if(state->log) state->log((std::string("PRUN OPTIONAL ")+name+" refused: no guest child-process provider (ERROR_NOT_SUPPORTED)").c_str());
+    SetLastError(ERROR_NOT_SUPPORTED);return FALSE;
+}
+static BOOL WINAPI createProcessA(LPCSTR,LPSTR,LPSECURITY_ATTRIBUTES,LPSECURITY_ATTRIBUTES,BOOL,DWORD,LPVOID,LPCSTR,LPSTARTUPINFOA,LPPROCESS_INFORMATION info) {
+    return unsupportedProcess("CreateProcessA",info);
+}
+static BOOL WINAPI createProcessW(LPCWSTR,LPWSTR,LPSECURITY_ATTRIBUTES,LPSECURITY_ATTRIBUTES,BOOL,DWORD,LPVOID,LPCWSTR,LPSTARTUPINFOW,LPPROCESS_INFORMATION info) {
+    return unsupportedProcess("CreateProcessW",info);
+}
+static uintptr_t processExport(const char* name) {
+    return !strcmp(name,"CreateProcessA")?uintptr_t(&createProcessA):uintptr_t(&createProcessW);
+}
+// Native modules that genuinely export the process names, identified without
+// any native process-export lookup: by handle, then by file name.
+static bool processModule(HMODULE h) {
+    using Handle=HMODULE(WINAPI*)(LPCWSTR);
+    if(auto handle=(Handle)kernel_tail::native("GetModuleHandleW"))
+        for(auto module:{L"kernel32.dll",L"kernelbase.dll"}) if(h && h==handle(module)) return true;
+    wchar_t p[32768]{};using File=DWORD(WINAPI*)(HMODULE,LPWSTR,DWORD);
+    auto file=(File)kernel_tail::native("GetModuleFileNameW");
+    if(!file || !file(h,p,32768)) return false;
+    auto key=basename(p);
+    return key=="kernel32.dll" || key=="kernelbase.dll" || key.find("api-ms-win-core-")==0;
 }
 static void WINAPI exitProcess(UINT code) {
     state->code=code; state->event("ExitProcess code="+std::to_string(code));
@@ -276,11 +301,16 @@ static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
         WORD ordinal=IS_INTRESOURCE(name)?WORD((uintptr_t)name):0;
         return lookup.finish(exported(*m,IS_INTRESOURCE(name)?nullptr:name,ordinal));
     }
-    // Native handles (including OS-resolved API sets/forwarders) must not
-    // expose these names even when GetModuleFileNameW cannot identify them.
+    // Native handles (including OS-resolved API sets/forwarders) never expose
+    // the native process exports, even when GetModuleFileNameW cannot identify
+    // them. Modules that genuinely provide the names return Play's refusal;
+    // others observe NULL, as Windows does for a name they do not export.
     // Keep owned mapped exports above separate from native fallback below.
     if(!IS_INTRESOURCE(name)) {
-        if(processCreation(name)) return (FARPROC)unavailableProcess("native module",name);
+        if(processCreation(name)) {
+            if(processModule(h)) return (FARPROC)processExport(name);
+            SetLastError(ERROR_PROC_NOT_FOUND);return nullptr;
+        }
         // Do not hand out raw GetProcAddress on the metadata-failure path:
         // a second lookup through it would bypass the unavailable-name gate.
         if(!strcmp(name,"GetProcAddress"))
@@ -410,7 +440,12 @@ static Module* map(const std::wstring& path) {
     state->event("mapping "+m->key);
     if(m->key=="steam_api64.dll") state->event("steam_api64.dll is the game's original file, mapped unmodified; no Steam client, so SteamAPI_Init is expected to fail (item 36)");
     struct ImportScope {ImportScope(){++mappingImports;} ~ImportScope(){--mappingImports;}} imports;
-    if(!wxl::run(path.c_str(),state->log,&m->image,resolve,wxl::LoadConfig::msvc_x64)) {m->mappingFailed=true;state->event("mapping failed: "+m->key+"; guest initialization blocked; "+state->snapshot());return nullptr;}
+    if(!wxl::run(path.c_str(),state->log,&m->image,resolve,wxl::LoadConfig::msvc_x64)) {
+        // Withdraw the early publication: a failed image's export table must
+        // never satisfy another import (it is never protected or initialized).
+        mlp::assets.erase(m->key);
+        m->mappingFailed=true;state->event("mapping failed: "+m->key+"; guest initialization blocked; "+state->snapshot());return nullptr;
+    }
     m->mapped=true;++state->mappedCount;state->order.push_back(m);return m;
 }
 static bool prepare(Module& m) {
@@ -581,9 +616,9 @@ static int WINAPI messageBoxW(HWND,LPCWSTR text,LPCWSTR caption,UINT type) {
 static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     std::string key=lower(dll);
     if(key=="kernelbase.dll") key="kernel32.dll";
-    // Reject static imports before map() can create a worker or initialize any
-    // guest TLS/DllMain/entry. Mapped forwarders recurse through this same gate.
-    if(processCreation(name) && (key=="kernel32.dll" || key.find("api-ms-win-core-")==0)) return unavailableProcess(dll,name);
+    // Process creation binds Play's refusal before any native lookup, for static,
+    // dynamic and mapped-forwarder imports alike (see processCreation).
+    if(processCreation(name) && (key=="kernel32.dll" || key.find("api-ms-win-core-")==0)) return processExport(name);
     if(auto graphics=play_graphics::resolve(dll,name,ordinal))return graphics;
     if(name && (key=="kernel32.dll"||key=="kernelbase.dll"||key=="ntdll.dll"||key.find("api-ms-win-core-")==0)) if(auto p=processApi(name)) return p;
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxA")) return (uintptr_t)&messageBoxA;
@@ -598,7 +633,13 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // Current mapper is the last incomplete module; capture it before recursion.
     for(auto& m:state->modules) if(!m->mapped) owner=m.get();
     Module* dependency=named(wide(dll));
-    if(!dependency) {auto path=guestLibraryPath(wide(dll));if(exists(path))dependency=map(path);}
+    // A dependency whose mapping failed leaves its imports unresolved, as on
+    // Windows; neither it nor the probe registry may supply an address.
+    if(dependency && dependency->mappingFailed) return missing(dll,name,ordinal);
+    if(!dependency) {
+        auto path=guestLibraryPath(wide(dll));
+        if(exists(path)) {dependency=map(path);if(!dependency)return missing(dll,name,ordinal);}
+    }
     if(dependency) {
         if(owner && owner!=dependency) owner->dependencies.push_back(dependency);
         auto p=exported(*dependency,name,ordinal);return p?p:missing(dll,name,ordinal);

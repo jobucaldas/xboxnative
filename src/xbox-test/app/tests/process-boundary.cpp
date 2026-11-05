@@ -49,15 +49,24 @@ static bool resolverTest(const std::wstring& root) {
         "api-ms-win-core-processthreads-l1-1-0.dll","API-MS-WIN-CORE-PROCESSTHREADS-L1-1-2.DLL"};
     const char* names[]={"CreateProcessA","CreateProcessW"};
     const char* progress="owned execution progress retained";
+    // Play's refusal: FALSE, ERROR_NOT_SUPPORTED, cleared output, progress kept.
+    auto refused=[&](uintptr_t p) {
+        using Fn=BOOL(WINAPI*)(const void*,void*,void*,void*,BOOL,DWORD,void*,const void*,void*,PROCESS_INFORMATION*);
+        PROCESS_INFORMATION info;memset(&info,0xcc,sizeof info);
+        SetLastError(0);
+        return p && !((Fn)p)(nullptr,nullptr,nullptr,nullptr,FALSE,0,nullptr,nullptr,nullptr,&info) &&
+            GetLastError()==ERROR_NOT_SUPPORTED && !info.hProcess && !info.hThread &&
+            !info.dwProcessId && !info.dwThreadId && state->snapshot()==progress;
+    };
     for(auto dll:dlls)for(auto name:names) {
         state->event(progress);
-        SetLastError(0);
-        if(resolve(dll,name,0) || GetLastError()!=ERROR_PROC_NOT_FOUND ||
-           state->snapshot()!=progress)return false;
-        ++mappingImports;auto p=resolve(dll,name,0);--mappingImports;
-        if(p || state->snapshot().find("unresolved static import:")==std::string::npos ||
-           state->snapshot().find("no supported provider")==std::string::npos)return false;
+        auto p=resolve(dll,name,0);
+        if(p!=processExport(name) || state->snapshot()!=progress || !refused(p))return false;
+        // A static import binds the same refusal and does not block the guest.
+        ++mappingImports;auto q=resolve(dll,name,0);--mappingImports;
+        if(q!=p || state->snapshot()!=progress)return false;
     }
+    if(processExport("CreateProcessA")==processExport("CreateProcessW"))return false;
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll");if(!kernel)return false;
     // A similarly named query is not evidence that an unrelated module has it.
     HMODULE unrelated=GetModuleHandleW(L"ntdll.dll");if(!unrelated)return false;
@@ -65,13 +74,12 @@ static bool resolverTest(const std::wstring& root) {
     SetLastError(0);
     if(proc(unrelated,"GetProcAddress") || GetLastError()!=ERROR_PROC_NOT_FOUND)return false;
     for(auto name:names) {
-        SetLastError(0);if(proc(kernel,name) || GetLastError()!=ERROR_PROC_NOT_FOUND)return false;
+        SetLastError(0);if(proc(unrelated,name) || GetLastError()!=ERROR_PROC_NOT_FOUND)return false;
+        if(!refused((uintptr_t)proc(kernel,name)))return false;
     }
     auto nested=(decltype(&proc))proc(kernel,"GetProcAddress");
     if(nested!=&proc)return false;
-    for(auto name:names) {
-        SetLastError(0);if(nested(kernel,name) || GetLastError()!=ERROR_PROC_NOT_FOUND)return false;
-    }
+    for(auto name:names) if((uintptr_t)nested(kernel,name)!=processExport(name))return false;
 #ifdef PROCESS_TEST_SENTINEL
     hideModuleName=true;
     SetLastError(0);
@@ -79,8 +87,10 @@ static bool resolverTest(const std::wstring& root) {
     nested=(decltype(&proc))proc(kernel,"GetProcAddress");
     if(nested!=&proc)return false;
     for(auto name:names) {
-        SetLastError(0);if(proc(kernel,name) || GetLastError()!=ERROR_PROC_NOT_FOUND)return false;
-        SetLastError(0);if(nested(kernel,name) || GetLastError()!=ERROR_PROC_NOT_FOUND)return false;
+        // Without module-name metadata the handle still identifies kernel32.
+        if((uintptr_t)proc(kernel,name)!=processExport(name))return false;
+        if((uintptr_t)nested(kernel,name)!=processExport(name))return false;
+        SetLastError(0);if(proc(unrelated,name) || GetLastError()!=ERROR_PROC_NOT_FOUND)return false;
     }
     // This control demonstrates that the failing metadata path and raw native
     // fallback are actually exercised, rather than trusting a wrapper list.
@@ -105,14 +115,11 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int) {
         if(r->worker)WaitForSingleObject(r->worker,10000);
         if(mode=="dynamic")ok=r->finished && r->executed && r->success && r->code==42;
         else {
+            // The import resolves as on Windows: TLS and the entry run, and the
+            // guest observes the refusal (code 42) instead of being blocked.
             auto last=r->snapshot();
-            ok=r->finished && !r->executed && !r->success && !r->worker && r->thread==0 && r->code==0 &&
-                last.find("unresolved static import:")!=std::string::npos &&
-                last.find("guest initialization blocked")!=std::string::npos &&
-                last.find("no supported provider")!=std::string::npos &&
-                (last.find("!CreateProcessA")!=std::string::npos || last.find("!CreateProcessW")!=std::string::npos);
-            for(auto& module:r->modules)ok=ok && !module->prepared && !module->initialized &&
-                !module->image.tlsAttached && !module->image.attached;
+            ok=r->finished && r->executed && r->success && r->code==42 &&
+                last=="EXE returned code=42";
         }
         // Retain the single-guest restriction; failure cannot enable a retry.
         ok=ok && !start(root,L"process-dynamic.exe",L"",logline) && state==r;
