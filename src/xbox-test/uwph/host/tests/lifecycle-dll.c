@@ -11,6 +11,9 @@ BOOL WINAPI test_dll_entry(HINSTANCE module, DWORD reason, LPVOID reserved) {
         if (!function || base!=(DWORD64)module) return FALSE;
         OutputDebugStringA("LIFECYCLE unwind lookup ok");
         OutputDebugStringA(attach_message);
+#ifdef FAIL_ATTACH
+        return FALSE;
+#endif
     }
     if (reason==DLL_PROCESS_DETACH) OutputDebugStringA("LIFECYCLE detach");
     return TRUE;
