@@ -1,13 +1,13 @@
-# LANE_NOTES — lane/deploy (xbox-test/dp Device Portal tooling)
+# LANE_NOTES — lane/deploy (src/xbox-test/dp Device Portal tooling)
 
 Objective (full text in `/workspace/x64-run/lanes/deploy.txt`): robust bash+curl Device Portal
 scripts (install/launch/kill/ps/uninstall/ls/get/put/screenshot/logs/wait-log), test each against
-the console, document findings in `xbox-test/dp/README.md`, save evidence under
+the console, document findings in `src/xbox-test/dp/README.md`, save evidence under
 `/workspace/x64-run/runs/deploy/`, and a `pull-megabonk.sh` mirror of the console's
 `LocalState\megabonk`.
 
 ## State at resume (2026-10-25 ~22:07 BRT)
-- Working tree was already clean at commit `faf3f247` ("xbox-test/dp: Device Portal scripts ...")
+- Working tree was already clean at commit `faf3f247` ("src/xbox-test/dp: Device Portal scripts ...")
   — all scripts existed and were committed, but `README.md` and `runs/deploy/` evidence were
   missing, and most scripts hadn't been exercised live from *this* worktree/session.
 - Note: this commit hash is identical to a parallel branch `g/dp` (a different agent track,
@@ -33,7 +33,7 @@ the console, document findings in `xbox-test/dp/README.md`, save evidence under
 - `uninstall.sh` deliberately NOT tested — no disposable package was safe to remove without
   risking console state other lanes depend on (per explicit instruction not to uninstall the
   Boxedwine DevMode package, and nothing else expendable was installed).
-- Wrote `xbox-test/dp/README.md` with the endpoint map, quirks, and per-script verification
+- Wrote `src/xbox-test/dp/README.md` with the endpoint map, quirks, and per-script verification
   status.
 - Evidence saved to `/workspace/x64-run/runs/deploy/`: `boxedwine-shot1.png` (screenshot),
   `put.txt`, `deploy-probe.txt`/`deploy-probe-roundtrip.txt` (get/put roundtrip),
@@ -81,7 +81,7 @@ covered verification + README, not these). Did them this session, each tested li
   session (`xbtest.exe`, 298 MB working set); `install` would've upgraded/downgraded it in place
   and `kill` would've killed another lane's live session (QR login state, `steam_session.bin`)
   for no verification benefit, since the pipeline was already proven against a real app.
-- Updated `xbox-test/dp/README.md` with all of the above (new rows + an ETW/crash-dump section).
+- Updated `src/xbox-test/dp/README.md` with all of the above (new rows + an ETW/crash-dump section).
 - Confirmed via `ps -ef`/`flock -n` during testing that the `CONSOLE.lock` contention I hit was
   real concurrent use by lane `app` (`install.sh` running against `Grok.XboxTest`), not a stuck
   process — the locking design works as intended across lanes, just budget for wait time.

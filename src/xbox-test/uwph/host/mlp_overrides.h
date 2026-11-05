@@ -1,0 +1,10 @@
+// Generated from src/tools/xbox/import_map.json by gen-mlp-map.py (per-export overrides).
+{"advapi32.dll", "RegCloseKey", "uwph"},
+{"advapi32.dll", "RegCreateKeyExW", "uwph"},
+{"advapi32.dll", "RegCreateKeyW", "uwph"},
+{"advapi32.dll", "RegDeleteValueA", "uwph"},
+{"advapi32.dll", "RegOpenKeyExW", "uwph"},
+{"advapi32.dll", "RegQueryValueExA", "uwph"},
+{"advapi32.dll", "RegQueryValueExW", "uwph"},
+{"advapi32.dll", "RegSetValueExA", "uwph"},
+{"advapi32.dll", "RegSetValueExW", "uwph"},
