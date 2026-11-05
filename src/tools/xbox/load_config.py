@@ -15,11 +15,18 @@ means implementing what it asks for, such as cookie initialization, CFG and
 volatile metadata. Ignoring or stripping the record is not support.
 """
 import argparse
+import io
+import os
 from pathlib import Path
+import stat
 import struct
 import sys
 
 MAX_FILE = 512 * 1024 * 1024
+READ_CHUNK = 64 * 1024
+MAX_RELOCATION_SAMPLES = 16
+# Bytes written by HIGH, LOW, HIGHLOW, HIGHADJ and DIR64 respectively.
+RELOCATION_WIDTHS = {1: 2, 2: 2, 3: 4, 4: 2, 10: 8}
 LOAD_CONFIG, DELAY_IMPORT, CLR = 10, 13, 14
 GUARD_CF = 0x4000  # IMAGE_DLLCHARACTERISTICS_GUARD_CF
 DEFAULT_COOKIE = 0x00002B992DDFA232  # MSVC x64 pre-initialization value
@@ -73,6 +80,17 @@ class PEError(ValueError):
     pass
 
 
+def report_text(value):
+    """Render untrusted text as printable ASCII, with unambiguous backslashes."""
+    return value.encode('unicode_escape').decode('ascii')
+
+
+class ReportArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse echoes unrecognized arguments before they reach main's report.
+        super().error(report_text(message))
+
+
 def _get(data, offset, fmt):
     size = struct.calcsize(fmt)
     if offset < 0 or offset + size > len(data):
@@ -98,8 +116,10 @@ class Image:
             raise PEError('bad optional header')
         self.image_base = _get(data, opt + 24, '<Q')[0]
         self.size_of_image = _get(data, opt + 56, '<I')[0]
+        self.size_of_headers = _get(data, opt + 60, '<I')[0]
         self.dll_characteristics = _get(data, opt + 70, '<H')[0]
-        if opt + opt_size + 40 * nsec > len(data):
+        self.header_end = opt + opt_size + 40 * nsec
+        if self.header_end > len(data):
             raise PEError('optional header or section table beyond file')
         declared_count = _get(data, opt + 108, '<I')[0]
         if declared_count > (opt_size - 112) // 8:
@@ -108,6 +128,7 @@ class Image:
         self.directories = [_get(data, opt + 112 + 8 * i, '<II') for i in range(count)]
         self.directories += [(0, 0)] * (16 - count)
         self.sections = []
+        intervals = []
         for i in range(nsec):
             raw = opt + opt_size + 40 * i
             name, vsize, va, rsize, rptr = _get(data, raw, '<8sIIII')
@@ -118,11 +139,15 @@ class Image:
             extent = max(vsize, rsize)
             if va + extent > self.size_of_image:
                 raise PEError('section beyond SizeOfImage')
-            if extent and any(va < s['va'] + s['vsize'] and s['va'] < va + extent
-                              for s in self.sections):
-                raise PEError('overlapping virtual sections')
+            if extent:
+                intervals.append((va, va + extent))
             self.sections.append(dict(name=name, va=va, vsize=extent,
                                       rsize=rsize, rptr=rptr, flags=flags))
+        # Check nonempty half-open ranges in O(n log n), not all section pairs.
+        # Keep self.sections in header order for reporting and address lookup.
+        intervals.sort()
+        if any(intervals[i - 1][1] > intervals[i][0] for i in range(1, len(intervals))):
+            raise PEError('overlapping virtual sections')
 
     def section(self, rva, size=1):
         for s in self.sections:
@@ -131,12 +156,22 @@ class Image:
         return None
 
     def raw(self, rva, size):
-        """Return file bytes only when the whole range is raw-backed in one section."""
+        """View backed header or single-section bytes without copying."""
+        if rva < 0 or size < 0:
+            return None
         s = self.section(rva, size)
-        if s is None or rva + size > s['va'] + s['rsize']:
+        if s is None:
+            # Header RVAs map directly to file offsets. Require complete,
+            # file/image-bounded headers with no virtual section alias.
+            if (self.header_end <= self.size_of_headers <= min(len(self.data), self.size_of_image)
+                    and rva + size <= self.size_of_headers
+                    and not any(s['vsize'] and s['va'] < self.size_of_headers for s in self.sections)):
+                return memoryview(self.data)[rva:rva + size]
+            return None
+        if rva + size > s['va'] + s['rsize']:
             return None
         start = s['rptr'] + rva - s['va']
-        return self.data[start:start + size]
+        return memoryview(self.data)[start:start + size]
 
     def relocations(self):
         rva, size = self.directories[5]
@@ -150,9 +185,15 @@ class Image:
             page, block = struct.unpack_from('<II', table, pos)
             if block < 8 or block % 2 or pos + block > len(table):
                 raise PEError('relocation block length')
-            for (word,) in struct.iter_unpack('<H', table[pos + 8:pos + block]):
-                if word >> 12:
-                    yield page + (word & 0xFFF), word >> 12
+            words = struct.iter_unpack('<H', table[pos + 8:pos + block])
+            for (word,) in words:
+                kind = word >> 12
+                # HIGHADJ occupies two WORDs. The second is a signed addend,
+                # not a relocation, and must be present in this same block.
+                if kind == 4 and next(words, None) is None:
+                    raise PEError('HIGHADJ relocation operand truncated')
+                if kind:
+                    yield page + (word & 0xFFF), kind
             pos += block
 
 
@@ -163,7 +204,7 @@ def rva_text(image, rva, size=1):
     perms = ''.join(c for c, bit in (('R', 0x40000000), ('W', SCN_WRITE), ('X', SCN_EXECUTE))
                     if s['flags'] & bit)
     backed = 'raw' if rva + size <= s['va'] + s['rsize'] else 'virtual-only'
-    return f'rva=0x{rva:x} section={s["name"]}({perms or "-"}) {backed}'
+    return f'rva=0x{rva:x} section={report_text(s["name"])}({perms or "-"}) {backed}'
 
 
 def diagnose(image):
@@ -181,33 +222,39 @@ def diagnose(image):
         return out, False
     out.append(f'dir={LOAD_CONFIG} LOAD_CONFIG BLOCKED: Play uses LoadConfig::reject -> "{GATE}"')
     out.append(f'directory rva=0x{rva:x} size=0x{size:x} end=0x{rva + size:x}')
+    if not rva or size < 4:
+        raise PEError('load-config directory missing RVA or too small for Size')
+    if rva + size > image.size_of_image:
+        raise PEError('load-config directory beyond SizeOfImage')
     section = image.section(rva, size)
     if section is None:
-        out.append('virtual bounds: directory not contained in one section (unsafe; fields not read)')
-        return out, True
-    out.append(f'virtual bounds: section={section["name"]} [0x{section["va"]:x},0x{section["va"] + section["vsize"]:x})')
+        raise PEError('load-config directory not contained in one section')
+    out.append(f'virtual bounds: section={report_text(section["name"])} [0x{section["va"]:x},0x{section["va"] + section["vsize"]:x})')
     record = image.raw(rva, size)
     if record is None:
-        out.append('raw bounds: directory not fully raw-backed (fields not read)')
-        return out, True
+        raise PEError('load-config directory not fully raw-backed')
     start = section['rptr'] + rva - section['va']
     out.append(f'raw bounds: file [0x{start:x},0x{start + size:x}) within section raw size 0x{section["rsize"]:x}; '
                f'section flags=0x{section["flags"]:08x}')
-    declared = struct.unpack_from('<I', record)[0] if size >= 4 else None
-    out.append(f'declared size={"unreadable" if declared is None else hex(declared)} '
+    declared = struct.unpack_from('<I', record)[0]
+    if declared < 4 or declared > size:
+        raise PEError('load-config declared Size outside directory bounds')
+    out.append(f'declared size=0x{declared:x} '
                f'directory size=0x{size:x} known layout=0x{KNOWN_END:x}')
-    limit = min(size, declared or 0)
+    limit = declared
     values = {}
     for off, width, name, kind in FIELDS:
         if off + width <= limit:
             values[name] = (off, kind, int.from_bytes(record[off:off + width], 'little'))
     inert = (size == KNOWN_END and declared == size and not any(record[4:]) and not guard_cf
              and not section['flags'] & (SCN_WRITE | SCN_EXECUTE))
-    out.append(f'inert Wine record: {"yes (donor opt-in only)" if inert else "no"}')
+    out.append(f'inert Wine file-byte candidate: {"yes" if inert else "no"} '
+               '(structural only; loader writes and mapper acceptance not checked)')
     flags = values.get('GuardFlags', (0, '', 0))[2]
     names = [label for bit, label in GUARD_BITS if flags & bit]
     if flags >> 28:
-        names.append(f'FUNCTION_TABLE_STRIDE={flags >> 28}')
+        # The high nibble counts extra bytes after each four-byte function RVA.
+        names.append(f'FUNCTION_TABLE_STRIDE={4 + (flags >> 28)}')
     unknown = flags & ~(sum(b for b, _ in GUARD_BITS) | 0xF0000000)
     if unknown:
         names.append(f'UNKNOWN=0x{unknown:x}')
@@ -236,41 +283,80 @@ def diagnose(image):
         extra = sum(1 for b in record[KNOWN_END:limit] if b)
         out.append(f'unknown extension +0x{KNOWN_END:x}..+0x{limit:x}: {extra} nonzero bytes (not certified)')
     hits = []
+    hit_count = 0
+    unknown_widths = set()
     for target, kind in image.relocations():
-        # DIR64 writes can overlap a boundary even when their first byte is
-        # outside the record. Other types are reported by start, not certified.
-        width = 8 if kind == 10 else 1
+        # Known writes can overlap either edge even if they start outside.
+        # Unknown kinds are reported by start only; no type is certified here.
+        if kind not in RELOCATION_WIDTHS:
+            unknown_widths.add(kind)
+        width = RELOCATION_WIDTHS.get(kind, 1)
         if target < rva + size and rva < target + width:
+            hit_count += 1
+            if len(hits) >= MAX_RELOCATION_SAMPLES:
+                continue
             off = target - rva
             name = next((n for o, w, n, _ in FIELDS if o <= off < o + w), 'unknown')
             location = f'-0x{-off:03x}' if off < 0 else f'+0x{off:03x}'
             edge = ':straddles-start' if off < 0 else ':straddles-end' if target + width > rva + size else ''
             hits.append(f'{location}:{name}:{"DIR64" if kind == 10 else f"type{kind}"}{edge}')
-    out.append(f'config field relocations={len(hits)}' + (': ' + ' '.join(hits) if hits else ''))
+    omitted = f' (showing first {len(hits)}; omitted {hit_count - len(hits)})' if hit_count > len(hits) else ''
+    out.append(f'config field relocations={hit_count}' + (': ' + ' '.join(hits) if hits else '') + omitted)
+    if unknown_widths:
+        kinds = ','.join(str(kind) for kind in sorted(unknown_widths))
+        out.append(f'relocation widths unknown for types={kinds}; those entries counted by start only '
+                   '(overlap count not exhaustive)')
     out.append('VERDICT BLOCKED: unsupported runtime requirements remain; '
                'this report does not certify the record or claim the image runs')
     return out, True
 
 
+def read_image(path):
+    """Open once, reject non-regular files, and cap reads even if the file grows."""
+    # Nonblocking open prevents waiting for a FIFO writer before fstat can reject
+    # it. It has no effect on regular files; Windows has no O_NONBLOCK/FIFO paths.
+    flags = os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0)
+    with os.fdopen(os.open(path, flags), 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise PEError('input is not a regular file')
+        if info.st_size > MAX_FILE:
+            raise PEError('file too large')
+        # BufferedReader.read(n) may allocate n bytes before reading, even for a
+        # tiny file. Bound each request independently of the overall input cap.
+        # BytesIO retains only accumulated input, not a list of chunks plus a
+        # joined copy; getvalue() supplies the immutable backing bytes to Image.
+        data = io.BytesIO()
+        total = 0
+        while True:
+            chunk = stream.read(min(READ_CHUNK, MAX_FILE + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_FILE:
+                raise PEError('file too large')
+            data.write(chunk)
+    return Image(data.getvalue())
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    parser = ReportArgumentParser(prog=report_text(Path(sys.argv[0]).name),
+                                  description=__doc__.split('\n')[0])
     parser.add_argument('pe', nargs='+', type=Path)
     args = parser.parse_args(argv)
     status = 0
     for path in args.pe:
-        print(f'== {path.name}')
+        print(f'== {report_text(path.name)}')
         try:
-            if path.stat().st_size > MAX_FILE:
-                raise PEError('file too large')
-            lines, blocked = diagnose(Image(path.read_bytes()))
+            lines, blocked = diagnose(read_image(path))
         except OSError as exc:
             # OSError's string includes the full input path; reports deliberately
             # expose only the base name printed above, not private directories.
-            print(f'ERROR {exc.strerror or "input read failed"}')
+            print(f'ERROR {report_text(exc.strerror or "input read failed")}')
             status = 2
             continue
         except PEError as exc:
-            print(f'ERROR {exc}')
+            print(f'ERROR {report_text(str(exc))}')
             status = 2
             continue
         print('\n'.join(lines))
