@@ -6,3 +6,6 @@ msix-packaging  https://github.com/microsoft/msix-packaging  25a65f5c1690930813b
 # Source tarballs: NAME URL SHA256 (verified by the build script; nothing here is copied into the repo)
 wine-src  https://dl.winehq.org/wine/source/10.0/wine-10.0.tar.xz  c5e0b3f5f7efafb30e9cd4d9c624b85c583171d33549d933cd3402f341ac3601
 sqlite-src  https://sqlite.org/2026/sqlite-amalgamation-3540100.zip  0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9
+# Prebuilt release artifacts: NAME URL SHA256 (verified by the fetch script; never committed). A from-source build is a follow-up.
+gbe-fork-win  https://github.com/Detanup01/gbe_fork/releases/download/release-2026_09_27/emu-win-release-vs22.7z  300186c34f49a9ea75b33ce2af299267cc1dad0225cf45e81a229578d4e11c85
+gbe-fork-license  https://raw.githubusercontent.com/Detanup01/gbe_fork/release-2026_09_27/LICENSE  e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118
