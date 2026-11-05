@@ -70,7 +70,9 @@ static void logf(const char* fmt, ...) {
 }
 static void open_log() {
     QueryPerformanceFrequency(&g_freq); QueryPerformanceCounter(&g_t0);
-    try { g_dir = winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path().c_str(); g_log = _wfopen((g_dir + L"\\boot.log").c_str(), L"wb"); } catch (...) {}
+    try { g_dir = winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path().c_str();
+          MoveFileExW((g_dir + L"\\boot.log").c_str(), (g_dir + L"\\boot.prev.log").c_str(), MOVEFILE_REPLACE_EXISTING); // keep the session before a restart
+          g_log = _wfopen((g_dir + L"\\boot.log").c_str(), L"wb"); } catch (...) {}
 }
 
 // ---------------------------------------------------------------- framebuffer + bitmap text
@@ -522,6 +524,7 @@ static void dl_thread() {
 }
 
 #include "launch.h"
+#include "guest_overlay.h"
 #include "apibadge.h"
 
 // definitive refusals mean the saved token is bad; anything else (network, CM busy) keeps the token and retries
@@ -638,7 +641,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     CoreWindow m_window{nullptr};
     CoreDispatcher m_graphicsDispatcher{nullptr};
     bool m_guestSurface=false;
-    int m_guestFailureGen=0;
+    int m_guestEndGen=0;
     winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::UI::Popups::IUICommand> m_guestDialog{nullptr};
     inline static App* graphicsApp=nullptr;
     bool m_closed = false;
@@ -716,33 +719,128 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
         }
         lp_watchdog();
-        guest_failure();
+        guest_ended();
     }
-    void guest_failure() {
-        if(!m_guestSurface || g_launch.phase!=2 || m_guestFailureGen==g_launch.gen)return;
-        std::string result;
-        {std::lock_guard<std::mutex> lock(g_launch.m);if(g_launch.ok)return;result=g_launch.result;}
-        m_guestFailureGen=g_launch.gen;
-        // Guest resources and other guest threads may still be live. Do not
-        // destroy their swapchain or attempt an in-process restart. Native UI
-        // can explain the failure above the retained guest surface safely.
-        std::string message=result.find("real client prerequisite item 36")!=std::string::npos?
-            "This game needs the genuine Steam client. This runtime cannot start that client yet. No playable game was reached.":
-            "The game launch failed or timed out. No playable game was confirmed.";
-        message+="\n\nClose and reopen the launcher before trying again.\n\n"+clip(result,500);
+    // ---- In-game launcher menu (guest_overlay.h): View+Menu toggles it.
+    GamepadButtons m_menuPrev=GamepadButtons::None; double m_quitDeadline=0; bool m_leaving=false;
+    static bool held(GamepadButtons b,GamepadButtons m){return (b&m)==m;}
+    bool m_inputHooks=false;
+    void guest_menu(double t,GamepadButtons b) {
+        if(!m_inputHooks) {
+            auto pads=Gamepad::Gamepads();
+            if(pads.Size()){m_inputHooks=true;logf("overlay: input capture hooks %s",guest_overlay::install_input_block(pads.GetAt(0))?"installed":"unavailable");}
+        }
+        // Unblock only once the menu is closed and every button is up.
+        if(guest_overlay::inputBlocked&&!guest_overlay::menuOpen&&b==GamepadButtons::None){guest_overlay::block_input(false);logf("overlay: game input restored");}
+        const auto combo=GamepadButtons::View|GamepadButtons::Menu;
+        auto pressed=[&](GamepadButtons m){return held(b,m)&&!held(m_menuPrev,m);};
+        if(held(b,combo)&&!held(m_menuPrev,combo))menu_command("toggle","controller");
+        else if(guest_overlay::menuOpen&&!guest_overlay::busy) {
+            if(pressed(GamepadButtons::DPadUp))guest_overlay::selection=(guest_overlay::selection+guest_overlay::ItemCount-1)%guest_overlay::ItemCount;
+            else if(pressed(GamepadButtons::DPadDown))guest_overlay::selection=(guest_overlay::selection+1)%guest_overlay::ItemCount;
+            else if(pressed(GamepadButtons::A))menu_command("select","controller");
+            else if(pressed(GamepadButtons::B))menu_command("toggle","controller");
+        }
+        m_menuPrev=b;
+        frame_log(t);
+        if(m_quitDeadline&&t>=m_quitDeadline&&!m_leaving){m_quitDeadline=0;logf("overlay: game did not close in 15 s; force quitting");force_quit();}
+    }
+    // Frame times from the game's Present (guest_overlay.h): raw rows to
+    // LocalState\frametimes.csv every 2 s, a stutter summary every 10 s.
+    double m_frameFlush=0,m_frameSummary=0;std::vector<guest_overlay::Frame> m_frameWindow;
+    void frame_log(double t) {
+        if(t<m_frameFlush)return;
+        m_frameFlush=t+2;
+        auto frames=guest_overlay::take_frames();
+        if(!frames.empty()) {
+            std::wstring path=g_dir+L"\\frametimes.csv";
+            bool fresh=GetFileAttributesW(path.c_str())==INVALID_FILE_ATTRIBUTES;
+            if(FILE* f=_wfopen(path.c_str(),L"ab")) {
+                if(fresh)fputs("at_ms,frame_ms,present_ms\n",f);
+                for(auto& x:frames)fprintf(f,"%.1f,%.2f,%.2f\n",x.atMs,x.frameMs,x.presentMs);
+                fclose(f);
+            }
+            m_frameWindow.insert(m_frameWindow.end(),frames.begin(),frames.end());
+        }
+        if(t<m_frameSummary||m_frameWindow.empty())return;
+        m_frameSummary=t+10;
+        std::vector<double> v;double sum=0,present=0;unsigned over25=0,over50=0;
+        for(auto& x:m_frameWindow){v.push_back(x.frameMs);sum+=x.frameMs;present+=x.presentMs;over25+=x.frameMs>25;over50+=x.frameMs>50;}
+        std::sort(v.begin(),v.end());
+        logf("frames: n=%zu avg=%.1fms p50=%.1f p99=%.1f max=%.1f >25ms=%u >50ms=%u present_avg=%.1fms resizes=%u (last count=%u hr=0x%08lx)",v.size(),sum/v.size(),
+             v[v.size()/2],v[std::min(v.size()-1,v.size()*99/100)],v.back(),over25,over50,present/v.size(),
+             guest_overlay::resizes.load(),guest_overlay::lastResizeCount.load(),(unsigned long)guest_overlay::lastResizeHr.load());
+        m_frameWindow.clear();
+    }
+    void menu_command(const std::string& c,const char* via) {
+        using namespace guest_overlay;
+        if(c=="toggle"){if(busy)return;menuOpen=!menuOpen;selection=Resume;if(menuOpen)block_input(true);logf("overlay: menu %s (%s)",menuOpen?"opened":"closed",via);return;}
+        int item=c=="select"?selection.load():c=="quit"?Quit:c=="force"?ForceQuit:c=="fps"?Fps:-1;
+        if(item<0||busy)return;
+        if(item!=Fps)logf("overlay: %s (%s)",label(item),via);
+        if(item==Resume){menuOpen=false;return;}   // input returns once buttons are released
+        if(item==Fps){fpsOn=!fpsOn;write_text(g_dir+L"\\overlay.txt",fpsOn?"fps=1\n":"fps=0\n");logf("overlay: FPS counter now %s",fpsOn?"on":"off");return;}
+        menuOpen=true;busy=true;
+        if(item==Quit) {
+            unsigned n=close_guest_windows();
+            logf("overlay: WM_CLOSE posted to %u guest window(s)",n);
+            guest_overlay::set_status(n?"Closing the game...":"No game window; force quitting");
+            if(!n){force_quit();return;}
+            m_quitDeadline=now_s()+15;return;
+        }
+        force_quit();
+    }
+    void force_quit() {
+        if(m_leaving)return;
+        m_leaving=true;guest_overlay::set_status("Uploading saves...");
+        auto sync=g_finalSync;
+        std::thread([this,sync]{
+            init_apartment(apartment_type::multi_threaded);
+            if(sync)sync();
+            m_window.Dispatcher().RunAsync(CoreDispatcherPriority::Normal,[this]{back_to_games("force quit");});
+        }).detach();
+    }
+    // Play does not restart a guest in-process: its modules, threads and
+    // swapchain stay loaded. When the game ends, restart the launcher so it
+    // comes back on the game list (Exit if the shell refuses a restart).
+    void back_to_games(const char* why) {
+        logf("launch: back to games (%s); requesting app restart",why);
+        auto dispatcher=m_window.Dispatcher();
+        auto exitOnUi=[dispatcher]{dispatcher.RunAsync(CoreDispatcherPriority::Normal,[]{logf("launch: closing launcher");CoreApplication::Exit();});};
         try {
-            winrt::Windows::UI::Popups::MessageDialog dialog(to_hstring(message),L"Game could not start");
-            dialog.Commands().Append(winrt::Windows::UI::Popups::UICommand(L"Close launcher",[](auto&&) {
-                logf("launch: failure dialog close launcher selected");CoreApplication::Exit();
-            }));
+            auto restart=CoreApplication::RequestRestartAsync(L"");
+            restart.Completed([exitOnUi](auto const& operation,winrt::Windows::Foundation::AsyncStatus status) {
+                auto reason=AppRestartFailureReason::Other;
+                try{if(status==winrt::Windows::Foundation::AsyncStatus::Completed)reason=operation.GetResults();}catch(...){}
+                logf("launch: restart request status=%d reason=%d",(int)status,(int)reason);
+                if(reason!=AppRestartFailureReason::RestartPending)exitOnUi();
+            });
+        } catch(hresult_error const& error) {logf("launch: restart unavailable hr=0x%08x",(unsigned)error.code().value);exitOnUi();}
+    }
+    void guest_ended() {
+        if(!m_guestSurface || g_launch.phase!=2 || m_guestEndGen==g_launch.gen)return;
+        std::string result;bool ok;
+        {std::lock_guard<std::mutex> lock(g_launch.m);ok=g_launch.ok;result=g_launch.result;}
+        m_guestEndGen=g_launch.gen;
+        if(m_leaving)return;   // Force quit is already syncing and restarting
+        m_leaving=true;m_quitDeadline=0;
+        if(ok){back_to_games("game quit");return;}
+        // A crash: explain it above the retained guest frame, then go back.
+        std::string message=result.find("real client prerequisite item 36")!=std::string::npos?
+            "This game needs the genuine Steam client. This runtime cannot start that client yet.":
+            "The game stopped unexpectedly. Saves and achievements were uploaded if Steam was reachable.";
+        message+="\n\n"+clip(result,500);
+        try {
+            winrt::Windows::UI::Popups::MessageDialog dialog(to_hstring(message),L"Game ended");
+            dialog.Commands().Append(winrt::Windows::UI::Popups::UICommand(L"Back to games",[this](auto&&){back_to_games("after crash dialog");}));
             dialog.DefaultCommandIndex(0);dialog.CancelCommandIndex(0);
             m_guestDialog=dialog.ShowAsync();
             m_guestDialog.Completed([](auto const& operation,winrt::Windows::Foundation::AsyncStatus status) {
                 if(status==winrt::Windows::Foundation::AsyncStatus::Error)
-                    logf("launch: failure dialog async error hr=0x%08x",(unsigned)operation.ErrorCode().value);
+                    logf("launch: crash dialog async error hr=0x%08x",(unsigned)operation.ErrorCode().value);
             });
-            logf("launch: failure dialog requested; guest resources retained");
-        } catch(hresult_error const& error) {logf("launch: failure dialog failed hr=0x%08x",(unsigned)error.code().value);}
+            logf("launch: crash dialog requested");
+        } catch(hresult_error const& error) {logf("launch: crash dialog failed hr=0x%08x",(unsigned)error.code().value);back_to_games("dialog unavailable");}
     }
     static void blit(const std::vector<uint32_t>& pix, int iw, int ih, int x, int y) {
         for (int j = 0; j < ih; j++) { int yy = y + j; if (yy < 0 || yy >= H) continue; for (int i = 0; i < iw; i++) { int xx = x + i; if (xx < 0 || xx >= W) continue; g_fb[yy * W + xx] = pix[(size_t)j * iw + i] | 0xFF000000u; } }
@@ -831,6 +929,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         logf("cmd.txt SYNTHETIC command: '%s' (screen=%d)", c.c_str(), (int)g_screen.load());
         if (c.rfind("open ", 0) == 0) { uint32_t id = (uint32_t)strtoul(c.c_str() + 5, nullptr, 10); if (id) open_detail(id, game_name(id), "cmd.txt open (synthetic)"); return; }
         if (c.rfind("sleep ", 0) == 0) { holdUntil = t + std::min(600.0, atof(c.c_str() + 6)); return; }
+        if (c == "gmenu" || c == "gquit" || c == "gforce" || c == "gfps") {   // in-game menu (guest_overlay.h)
+            if (!m_guestSurface) { logf("cmd.txt: no game running"); return; }
+            menu_command(c == "gmenu" ? "toggle" : c == "gquit" ? "quit" : c == "gforce" ? "force" : "fps", "cmd.txt (synthetic)"); return;
+        }
         if (c == "stacks") { dump_thread_stacks(); logf("cmd.txt: thread stacks written to launch_probe.log"); return; }
         GamepadButtons m = GamepadButtons::None;
         if (c == "press" || c == "a") m = GamepadButtons::A; else if (c == "back" || c == "b") m = GamepadButtons::B; else if (c == "view") m = GamepadButtons::View;
@@ -848,7 +950,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             CoreWindow::GetForCurrentThread().Activate();
         });
     }
-    void SetWindow(CoreWindow const& w) { m_window = w; w.Activated([](auto&&, WindowActivatedEventArgs const& e) { xinput_core::set_active(e.WindowActivationState()!=CoreWindowActivationState::Deactivated); }); w.Closed([this](auto&&, auto&&) { m_closed = true; g_quit = true; logf("window closed"); }); logf("SetWindow bounds=%.0fx%.0f", w.Bounds().Width, w.Bounds().Height); }
+    void SetWindow(CoreWindow const& w) { m_window = w; w.Activated([](auto&&, WindowActivatedEventArgs const& e) { xinput_core::set_active(e.WindowActivationState()!=CoreWindowActivationState::Deactivated); }); w.Closed([this](auto&&, auto&&) { m_closed = true; g_quit = true; logf("window closed"); });
+        // B on Xbox raises a system back request; unhandled, the shell sends the
+        // app to Home. B belongs to the launcher UI and the running game.
+        SystemNavigationManager::GetForCurrentView().BackRequested([](auto&&, BackRequestedEventArgs const& e) { e.Handled(true); }); logf("SetWindow bounds=%.0fx%.0f", w.Bounds().Width, w.Bounds().Height); }
     void Load(hstring const&) {}
     void Uninitialize() { logf("Uninitialize"); }
 
@@ -892,7 +997,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         auto dxgiDev = m_dev.as<IDXGIDevice>(); com_ptr<IDXGIAdapter> ad; dxgiDev->GetAdapter(ad.put());
         com_ptr<IDXGIFactory2> fac; if (FAILED(ad->GetParent(__uuidof(IDXGIFactory2), fac.put_void()))) return false;
         DXGI_SWAP_CHAIN_DESC1 sd{}; sd.Width = W; sd.Height = H; sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.SampleDesc.Count = 1;
-        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.BufferCount = 2; sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; sd.Scaling = DXGI_SCALING_STRETCH; sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.BufferCount = 3; sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; sd.Scaling = DXGI_SCALING_STRETCH; sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
         hr = fac->CreateSwapChainForCoreWindow(m_dev.get(), (::IUnknown*)winrt::get_abi(m_window), &sd, nullptr, m_sc.put());
         logf("CreateSwapChainForCoreWindow hr=0x%08lx %dx%d", (unsigned long)hr, W, H); if (FAILED(hr)) return false;
         return SUCCEEDED(m_sc->GetBuffer(0, __uuidof(ID3D11Texture2D), m_bb.put_void()));
@@ -921,11 +1026,29 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                         // the game's main thread hung forever waiting on it.
                         DXGI_SWAP_CHAIN_DESC1 desc=*description;
                         desc.Flags&=~UINT(DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
+                        // With two flip buffers, Present blocked ~1 s every ~2 s on the console
+                        // (d3d11on12 waiting for a buffer the compositor still held); three
+                        // buffers gave a steady 16.7 ms with no spikes.
+                        desc.BufferCount=std::max<UINT>(desc.BufferCount,3);
+                        // Test overrides (LocalState\swapchain.txt), e.g. "buffers=3 nomodeswitch sequential",
+                        // to compare presentation behaviour on the console without a rebuild.
+                        {std::string o;if(read_file_s(g_dir+L"\\swapchain.txt",o)) {
+                            if(auto at=o.find("buffers=");at!=std::string::npos)desc.BufferCount=UINT(atoi(o.c_str()+at+8));
+                            if(o.find("nomodeswitch")!=std::string::npos)desc.Flags&=~UINT(DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH);
+                            if(o.find("sequential")!=std::string::npos)desc.SwapEffect=DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+                            if(o.find("stretch")!=std::string::npos)desc.Scaling=DXGI_SCALING_STRETCH;
+                            logf("guest swapchain overrides: %s",o.c_str());
+                        }}
                         logf("guest swapchain %ux%u format=%u buffers=%u effect=%u scaling=%u alpha=%u flags=0x%x (requested 0x%x)",
                              desc.Width,desc.Height,(unsigned)desc.Format,desc.BufferCount,(unsigned)desc.SwapEffect,
                              (unsigned)desc.Scaling,(unsigned)desc.AlphaMode,desc.Flags,description->Flags);
                         result=factory->CreateSwapChainForCoreWindow(device,window,&desc,output,chain);
                         logf("guest surface handoff native hr=0x%08lx",(unsigned long)result);
+                        if(SUCCEEDED(result)&&chain&&*chain) {
+                            std::string saved;guest_overlay::fpsOn=read_file_s(g_dir+L"\\overlay.txt",saved)&&saved.find("fps=1")!=std::string::npos;
+                            DeleteFileW((g_dir+L"\\frametimes.csv").c_str());
+                            logf("overlay: present hooks %s (View+Menu opens the launcher menu)",guest_overlay::install(*chain)?"installed":"unavailable");
+                        }
                     } catch(hresult_error const& e) {result=e.code();}
                     SetEvent(done);
                 });
@@ -1112,7 +1235,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             if (n) rd = pads.GetAt(0).GetCurrentReading();
             input(t, rd, n > 0);
             autotest(t); cmdhook(t); detail_tick(t);
-            if(m_guestSurface){Sleep(1);continue;}
+            if(m_guestSurface){guest_menu(t,n?rd.Buttons:GamepadButtons::None);Sleep(1);continue;}
             draw(t);
             m_ctx->UpdateSubresource(m_bb.get(), 0, nullptr, g_fb.data(), W * 4, 0);
             HRESULT hr = m_sc->Present(1, 0);
