@@ -491,6 +491,11 @@ static void enter_library_cm(CmSession& cm) {
 static std::mutex g_dqm; static std::condition_variable g_dqcv; static std::deque<uint32_t> g_dq;
 static void enqueue_download(uint32_t appid) { { std::lock_guard<std::mutex> l(g_dqm); if (std::find(g_dq.begin(), g_dq.end(), appid) != g_dq.end()) return; g_dq.push_back(appid); } g_dqcv.notify_all(); logf("download queued: appid %u", appid); }
 static bool is_queued(uint32_t appid) { std::lock_guard<std::mutex> l(g_dqm); return std::find(g_dq.begin(), g_dq.end(), appid) != g_dq.end(); }
+static bool queue_empty() { std::lock_guard<std::mutex> l(g_dqm); return g_dq.empty(); }
+// A delete (game_delete.h) and a download never overlap: another app may share the
+// install folder, and its marker must not appear while that folder is being removed.
+static std::atomic<bool> g_deleteRunning{false};
+static void wait_for_delete() { while (g_deleteRunning && !g_quit) Sleep(100); }
 static std::atomic<int> g_dlSeq{0}; static std::atomic<uint32_t> g_dlLastApp{0}; static std::atomic<bool> g_dlLastOk{false};   // bumped when a queued download finishes (detail screen auto-launch)
 static std::shared_ptr<CmSession> g_cmAnon;
 static std::shared_ptr<CmSession> session_for_download() {
@@ -509,13 +514,14 @@ static void dl_thread() {
         logf("autodownload.txt: %zu appids", ids.size());
         for (int k = 0; k < 600 && !g_authResolved && !g_quit; k++) Sleep(100);
         bool allOk = true;
-        for (uint32_t id : ids) { if (g_quit) break; auto s = session_for_download(); if (!s) { allOk = false; logf("autodownload: no CM session for appid %u", id); continue; } if (!download_app(*s, id)) allOk = false; }
+        for (uint32_t id : ids) { wait_for_delete(); if (g_quit) break; auto s = session_for_download(); if (!s) { allOk = false; logf("autodownload: no CM session for appid %u", id); continue; } if (!download_app(*s, id)) allOk = false; }
         logf("autodownload: finished (%s)", allOk ? "all ok" : "with failures");
         if (allOk) MoveFileExW(ap.c_str(), (g_dir + L"\\autodownload.done.txt").c_str(), MOVEFILE_REPLACE_EXISTING);
     }
     while (!g_quit) {
         uint32_t id = 0;
         { std::unique_lock<std::mutex> l(g_dqm); g_dqcv.wait_for(l, std::chrono::milliseconds(500), [] { return !g_dq.empty() || g_quit; }); if (g_dq.empty()) continue; id = g_dq.front(); g_dq.pop_front(); }
+        wait_for_delete(); if (g_quit) break;
         auto s = session_for_download(); if (!s) { g_dl.appid = id; g_dl.state = 3; dl_msg("Cannot reach Steam"); g_dlLastApp = id; g_dlLastOk = false; g_dlSeq++; continue; }
         bool dok = download_app(*s, id); g_dlLastApp = id; g_dlLastOk = dok; g_dlSeq++;
     }
@@ -698,7 +704,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         m_confirmLogout = false; g_screen = S_DETAIL; logf("detail: open appid=%u name='%s' via=%s", id, m_dName.c_str(), via);
     }
     void close_detail(const char* why) { logf("detail: back to library (%s)", why); m_dSi.reset(); g_screen = S_LIBRARY; }
-    void refresh_install(double t) { if (t - m_dInstT > 0.5) { m_dInst = read_install(m_dApp); m_dInstT = t; } }
+    int m_dInstDel = -1;   // g_del.gen seen by m_dInst: a finished delete refreshes it at once
+    void refresh_install(double t) { if (t - m_dInstT > 0.5 || m_dInstDel != g_del.gen) { m_dInstDel = g_del.gen; m_dInst = read_install(m_dApp); m_dInstT = t; } }
     bool dl_is_mine() { return g_dl.appid == m_dApp && g_dl.state == 1; }
     bool deleting_mine() { return g_del.appid == m_dApp && g_del.state == 1; }
     void detail_delete(const char* via) {     // X: ask to delete an installed game
@@ -719,6 +726,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (m_dInst.installed) { m_dNote.clear(); logf("detail: Play pressed appid=%u (%s)", m_dApp, via); start_launch(m_dApp, m_dName, m_dInst.dir, via); return; }
         if (dl_is_mine() || is_queued(m_dApp)) { logf("detail: A ignored, download already queued/running"); return; }
         if (g_demo) { m_dNote = "Demo list: installing is disabled."; return; }
+        if (g_deleteRunning) { m_dNote = "Wait for the delete to finish."; return; }
         m_auto.app = m_dApp; m_auto.seq = g_dlSeq; m_dNote.clear();
         logf("detail: Install pressed appid=%u (%s) - will auto-launch when finished", m_dApp, via); enqueue_download(m_dApp);
     }
