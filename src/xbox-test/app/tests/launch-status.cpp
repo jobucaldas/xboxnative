@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../launch_status.h"
 #include "../launch_button.h"
+#include "../launch_arguments.h"
 #include <cstring>
 #include <cassert>
 #include <cstdio>
@@ -33,4 +34,12 @@ int main() {
         assert(layout.scale==(!std::strcmp(label,"RESTART REQUIRED")?4:5));
     }
     puts("LAUNCH-BUTTON-OK: every action label fits padding and stays centered");
+    assert(!std::strcmp(launch_arguments::for_app(3405340),
+        "-screen-fullscreen 0 -force-d3d11 -logFile vis-player.log"));
+    // Queued titles (including the separate demo) get no assumed engine flags.
+    for(std::uint32_t appid:{0u,480u,1007u,413410u,413420u,555950u,567640u,589120u,
+                            282900u,351710u,353270u,387340u,460120u,632350u,774511u,
+                            1037590u,983970u,1145360u,1154810u,3405339u,3405341u,UINT32_MAX})
+        assert(!*launch_arguments::for_app(appid));
+    puts("LAUNCH-ARGS-OK: exact Megabonk options; no title-specific defaults for other app IDs");
 }
