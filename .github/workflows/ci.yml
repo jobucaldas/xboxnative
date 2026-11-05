@@ -25,6 +25,7 @@ jobs:
           set -e
           bash xbox-test/app/tests/session-restore.sh
           bash xbox-test/app/tests/launch-status.sh
+          python3 -m unittest xbox-test/app/tests/test_store_badge.py
           python3 -m unittest xbox-test/dp/test-verify-depot.py
           python3 -m unittest discover -s xbox-test/app/donors -p 'test_*.py'
           c++ -std=c++17 -O2 -Wall -Wextra -Werror xbox-test/app/tests/apibadge_test.cpp -o /tmp/apibadge-test
@@ -34,6 +35,12 @@ jobs:
           python3 xbox-test/app/depot-fixtures/validate-vectors.py
       - name: strict resolver policy unit test
         run: bash xbox-test/uwph/strict-policy/tests/run-policy-test.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: offline VRX log reviewer tests
+        run: |
+          node --test xbox-test/vrx/tests/check-vrx-log.test.mjs xbox-test/vrx/tests/review-vrx-log.test.mjs
       - name: build scripts parse their pins (offline)
         run: |
           set -e
@@ -69,6 +76,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 llvm lld wine64
       - name: exercise strict named and ordinal imports
         run: bash xbox-test/uwph/host/tests/run-strict-imports.sh --run
+      - name: retain logging in the SWC mapped-entry caller
+        run: bash xbox-test/uwph/host/tests/run-swc-logging.sh
   guest-pe-inspection:
     runs-on: ubuntu-latest
     steps:
