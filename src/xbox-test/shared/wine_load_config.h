@@ -4,7 +4,12 @@
 #include <cstdint>
 #include <cstring>
 namespace wxl {
-enum class LoadConfig { reject, inert_wine, msvc_x64_cookie };
+// msvc_x64 is Play's policy: an inert Wine record, the cookie-only MSVC record,
+// or an MSVC record whose only extras are GuardFlags==CF_INSTRUMENTED and a
+// VolatileMetadataPointer. Wine 10 (dlls/ntdll/loader.c update_load_config)
+// initializes only the security cookie on x86_64 and never touches guard
+// slots, GuardFlags or volatile metadata; msvc_x64 does exactly the same.
+enum class LoadConfig { reject, inert_wine, msvc_x64_cookie, msvc_x64 };
 // Wine 10 winebuild emits a 0x140-byte x64 record even when it requests no
 // loader work. Do not accept a cookie, CFG/XFG, dynamic relocations, or unknown
 // extensions: supporting those requires actual initialization, not ignoring it.

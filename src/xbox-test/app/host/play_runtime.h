@@ -386,7 +386,7 @@ static Module* map(const std::wstring& path) {
     mlp::assets[m->key]=&m->image;
     state->event("mapping "+m->key);
     struct ImportScope {ImportScope(){++mappingImports;} ~ImportScope(){--mappingImports;}} imports;
-    if(!wxl::run(path.c_str(),state->log,&m->image,resolve)) {m->mappingFailed=true;state->event("mapping failed: "+m->key+"; guest initialization blocked; "+state->snapshot());return nullptr;}
+    if(!wxl::run(path.c_str(),state->log,&m->image,resolve,wxl::LoadConfig::msvc_x64)) {m->mappingFailed=true;state->event("mapping failed: "+m->key+"; guest initialization blocked; "+state->snapshot());return nullptr;}
     m->mapped=true;++state->mappedCount;state->order.push_back(m);return m;
 }
 static bool prepare(Module& m) {

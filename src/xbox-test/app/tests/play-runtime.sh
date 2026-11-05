@@ -72,3 +72,28 @@ for mode in observer-log reject-attach reject-mapping normal missing static-stea
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
+# Megabonk/Unity load-config shape (GuardFlags CF_INSTRUMENTED + volatile
+# metadata) through production Play, reusing the unchanged native C++ test.
+# A GuardFlags value outside the accepted contract must still be rejected.
+cxx=$out/play-cxx.dll
+cp "$cxx" "$out/obj/play-cxx-cookie.dll"
+for flags in 0x100 0x500;do
+ rm -rf "$out/obj/cxx-cf"
+ UWP_OBJ_DIR="$out/obj/cxx-cf" "$CB/scripts/build.sh" --out "$cxx" --link-arg /dll tests/play-cxx.cpp tests/play-cxx-instrumented-config.c -- /MT /O2 /EHsc -DPLAY_CXX_GUARD_FLAGS=$flags
+ lld-link-19 "$out"/obj/cxx-cf/*.obj /dll /out:"$cxx" \
+  /libpath:"$crt/crt/lib/x86_64" /libpath:"$crt/sdk/lib/um/x86_64" \
+  /libpath:"$crt/sdk/lib/ucrt/x86_64" kernel32.lib
+ config=$(llvm-readobj --coff-load-config "$cxx")
+ grep -q "GuardFlags \[ ($flags)" <<<"$config"
+ grep -Eq 'VolatileMetadataPointer: 0x[0-9A-F]*[1-9A-F]' <<<"$config"
+ log=$out/native-cxx-instrumented-$flags.log
+ status=0
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" native-cxx > "$log" 2>&1 || status=$?
+ tail -1 "$log"
+ if [[ $flags == 0x100 ]];then
+  [[ $status == 0 ]] && grep -q 'WXL Play MSVC load config GuardFlags=0x100 volatileMetadata=present' "$log"
+ else
+  [[ $status != 0 ]] && grep -q 'WXL FAIL explicit MSVC file preflight' "$log"
+ fi
+done
+cp "$out/obj/play-cxx-cookie.dll" "$cxx"

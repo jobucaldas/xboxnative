@@ -55,9 +55,16 @@ struct Fixture {
         put<uint64_t>(0x2780,file.preferred+0x1100);
         for(size_t rva:{0x2700,0x2708,0x2710,0x2718,0x2780}) reloc(rva);
     }
-    bool valid() {
+    bool valid(bool play=false) {
         file.bytes=bytes.data(); Plan plan; auto before=bytes;
-        bool accepted=validate(file,plan); assert(bytes==before); return accepted;
+        bool accepted=validate(file,plan,play); assert(bytes==before); return accepted;
+    }
+    // Megabonk/Unity shape: GuardFlags CF_INSTRUMENTED plus a relocated
+    // VolatileMetadataPointer into read-only data (structural, owned bytes).
+    void instrumented(size_t metadata=0x2400,bool relocate=true) {
+        put<uint32_t>(0x2190,0x100);
+        put<uint64_t>(0x2200,file.preferred+metadata);
+        if(relocate) reloc(0x2200);
     }
 };
 static void strings() {
@@ -176,6 +183,32 @@ int main() {
     { auto f=base; f.put<uint64_t>(0x2158,f.file.preferred+0x5000); assert(!f.valid()); }
     { auto f=base; f.file.dllCharacteristics=0x4000; assert(!f.valid()); }
     { auto f=base; f.put<uint32_t>(0x2190,0x100); f.put<uint64_t>(0x2200,f.file.preferred+0x2400); assert(!f.valid()); }
+    // Play profile (LoadConfig::msvc_x64): the owned cookie-only record still
+    // passes; the instrumented record passes ONLY in Play; everything else rejects.
+    assert(base.valid(true));
+    {
+        auto f=base; f.instrumented(); assert(!f.valid()); assert(f.valid(true));
+        Plan plan; f.file.bytes=f.bytes.data();
+        assert(validate(f.file,plan,true) && plan.guardFlags==0x100 && plan.volatileMetadata==0x2400);
+        Plan strict; assert(!validate(f.file,strict));
+    }
+    { auto f=base; f.put<uint32_t>(0x2190,0x100); assert(!f.valid()); assert(f.valid(true)); }
+    { auto f=base; f.instrumented(); f.imports(false,0x3400); f.imports(true,0x3500); f.tls(); assert(f.valid(true)); }
+    for(uint32_t flags:{0x101u,0x200u,0x500u,0x10500u,0x4100u}) {
+        auto f=base; f.instrumented(); f.put<uint32_t>(0x2190,flags); assert(!f.valid(true));
+    }
+    { auto f=base; f.instrumented(0x2400,false); assert(!f.valid(true)); } // no DIR64
+    for(size_t metadata:{0x3200,0x1200,0x2120,0x2ffc,0x5000,0x4ffc}) { // RW, code, record, straddle, beyond image
+        auto f=base; f.instrumented(metadata); assert(!f.valid(true));
+    }
+    { auto f=base; f.instrumented(); f.file.dllCharacteristics=0x4000; assert(!f.valid(true)); } // GUARD_CF
+    for(size_t field:{0x2180,0x2188,0x2198,0x21a0,0x2208}) { // GuardCF table/count, after flags, after metadata
+        auto f=base; f.instrumented(); f.put<uint8_t>(field,1); assert(!f.valid(true));
+    }
+    // Relocated thread_local initializers inside the TLS template are applied
+    // before the template copy in Play; the TLS index never is.
+    { auto f=base; f.tls(); f.reloc(0x3300); assert(!f.valid()); assert(f.valid(true)); }
+    { auto f=base; f.tls(); f.reloc(0x3200); assert(!f.valid(true)); }
     uint64_t value=17;
     assert(!cookie(nullptr,value) && value==17);
     assert(!cookie(+[](uint64_t&){return false;},value) && value==17);
@@ -183,4 +216,5 @@ int main() {
     assert(!cookie(+[](uint64_t& v){v=default_cookie;return true;},value) && value==17);
     assert(cookie(+[](uint64_t& v){v=0xffff123456789abcULL;return true;},value) && value==0x123456789abcULL);
     puts("MSVC-CONFIG pure PASS: immutable byte validation, bounds, writes, relocations, TLS and bounded entropy");
+    puts("MSVC-CONFIG play PASS: CF_INSTRUMENTED + relocated read-only volatile pointer accepted only by msvc_x64; other flags/fields/targets reject");
 }
