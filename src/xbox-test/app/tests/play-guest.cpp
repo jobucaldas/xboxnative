@@ -70,6 +70,58 @@ DWORD guest_exe_entry(){
         if(firstError!=ERROR_DLL_INIT_FAILED||GetLastError()!=ERROR_DLL_INIT_FAILED)return 18;
         return 42;
     }
+    if(contains(GetCommandLineW(),L"pending-")) {
+        bool reject=contains(GetCommandLineW(),L"pending-reject-");
+        bool ordinal=contains(GetCommandLineW(),L"-ordinal");
+        auto forward=GetModuleHandleW(L"play-forward.dll");
+        auto target=reject?L"play-pending-reject.dll":L"play-pending-target.dll";
+        if(GetModuleHandleW(target))return 33;
+        SetLastError(0);
+        if(GetProcAddress(forward,reject?"MissingPendingReject":"MissingPending")||GetLastError()!=ERROR_PROC_NOT_FOUND)return 34;
+        auto retained=GetModuleHandleW(target);if(!retained)return 35;
+        LPCSTR symbol=reject?(ordinal?"PendingRejectOrdinal":"PendingRejectName"):(ordinal?"PendingOrdinal":"PendingName");
+        SetLastError(0);
+        auto pointer=GetProcAddress(forward,symbol);
+        if(reject) {
+            if(pointer||GetLastError()!=ERROR_PROC_NOT_FOUND)return 36;
+            SetLastError(0);
+            if(GetProcAddress(retained,ordinal?MAKEINTRESOURCEA(1):"dependency_check")||GetLastError()!=ERROR_PROC_NOT_FOUND)return 37;
+            SetLastError(0);
+            if(LoadLibraryW(target)||GetLastError()!=ERROR_DLL_INIT_FAILED)return 38;
+        } else if(!pointer)return 39;
+        // Never invoke the pending/rejected pointer: the host checks actual
+        // TLS/DllMain lifecycle state even for accepted targets. A retained
+        // failure must not poison lookups into an already initialized sibling.
+        auto healthy=(int(*)())GetProcAddress(forward,"ForwardName");
+        return healthy&&healthy()?42:40;
+    }
+    if(contains(GetCommandLineW(),L"reject-export-")) {
+        auto forward=GetModuleHandleW(L"play-forward.dll");
+        bool lazy=contains(GetCommandLineW(),L"reject-export-lazy");
+        if(lazy) {
+            // The forwarder maps its target now; failed attach must discard the
+            // pointer computed before initializePending, without invoking it.
+            if(GetModuleHandleW(L"play-reject.dll"))return 22;
+        } else {
+            SetLastError(0);
+            if(LoadLibraryW(L"play-reject.dll")||GetLastError()!=ERROR_DLL_INIT_FAILED)return 23;
+        }
+        HMODULE owner=lazy?forward:GetModuleHandleW(L"play-reject.dll");
+        if(!owner)return 24;
+        LPCSTR symbol="dependency_check";
+        if(contains(GetCommandLineW(),L"reject-export-ordinal"))symbol=MAKEINTRESOURCEA(1);
+        if(contains(GetCommandLineW(),L"reject-export-source-forward"))symbol="RejectedForward";
+        if(lazy||contains(GetCommandLineW(),L"reject-export-target-name")) {owner=forward;symbol="ForwardRejected";}
+        if(contains(GetCommandLineW(),L"reject-export-target-ordinal")) {owner=forward;symbol="ForwardRejectedOrdinal";}
+        SetLastError(0);
+        if(GetProcAddress(owner,symbol)||GetLastError()!=ERROR_PROC_NOT_FOUND)return 25;
+        // Failure retention is intentional diagnostic state, not an unload or
+        // retry implementation. No rejected export is ever called by this test.
+        if(!GetModuleHandleW(L"play-reject.dll"))return 26;
+        SetLastError(0);
+        if(LoadLibraryW(L"play-reject.dll")||GetLastError()!=ERROR_DLL_INIT_FAILED)return 27;
+        return 42;
+    }
     if(contains(GetCommandLineW(),L"reject-mapping")) {
         for(int i=0;i<2;++i) {
             SetLastError(0);
@@ -82,13 +134,21 @@ DWORD guest_exe_entry(){
 #ifdef PLAY_STATIC_STEAM
     ForwardSteam(); // Static forwarded Steam imports must block before TLS.
 #endif
-    if(contains(GetCommandLineW(),L"steam-forward")) {
-        auto call=(void(*)())GetProcAddress(GetModuleHandleW(L"play-forward.dll"),"ForwardSteam");
-        if(!call)return 19;
-        call();
+    // No genuine Steam client exists: Steam calls fail as on Windows without
+    // the files, and the guest carries on. Nothing answers in Steam's place.
+    if(contains(GetCommandLineW(),L"steam-forward") &&
+        GetProcAddress(GetModuleHandleW(L"play-forward.dll"),"ForwardSteam"))return 19;
+    if(contains(GetCommandLineW(),L"steam-api") &&
+        (LoadLibraryW(L"StEaM_ApI64") || GetLastError()!=ERROR_MOD_NOT_FOUND))return 40;
+    // A steamclient64.dll in the game root is refused, never mapped.
+    if(contains(GetCommandLineW(),L"steam-client") &&
+        (LoadLibraryW(L"STEAMCLIENT64.DLL") || GetLastError()!=ERROR_MOD_NOT_FOUND))return 41;
+    // A root steam_api64.dll is an ordinary game DLL (owned stand-in here).
+    if(contains(GetCommandLineW(),L"root-steam")) {
+        auto api=LoadLibraryW(L"steam_api64");
+        auto check=api?(int(*)())GetProcAddress(api,"dependency_check"):nullptr;
+        if(!check || !check())return 43;
     }
-    if(contains(GetCommandLineW(),L"steam-api"))LoadLibraryW(L"StEaM_ApI64");
-    if(contains(GetCommandLineW(),L"steam-client"))LoadLibraryW(L"STEAMCLIENT64.DLL");
     if(contains(GetCommandLineW(),L"wide-long")) {
         static wchar_t text[2050];for(int i=0;i<2047;++i)text[i]=L'\u00e7';
         text[2047]=0xd83d;text[2048]=0xde00;text[2049]=0;

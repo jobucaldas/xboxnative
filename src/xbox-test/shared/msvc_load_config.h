@@ -89,6 +89,8 @@ struct Plan {
     std::vector<Relocation> relocations;
     std::vector<Import> imports;
     Tls tls;
+    // Play profile only (validate(...,true)); both stay zero otherwise.
+    uint32_t guardFlags=0; size_t volatileMetadata=0;
     // All loader-owned locations, including read-only inactive guard slots.
     bool protectedWrite(size_t rva,size_t n) const {
         Span s{rva,n};
@@ -97,7 +99,15 @@ struct Plan {
         return false;
     }
 };
-inline bool validate(const File& f,Plan& result) {
+// play=false is the original owned cookie-only fixture contract. play=true is
+// LoadConfig::msvc_x64 for real game images: it also accepts GuardFlags exactly
+// IMAGE_GUARD_CF_INSTRUMENTED (0x100, what LINK emits for /guard:cf objects
+// linked without /GUARD:CF; GUARD_CF stays clear) and a VolatileMetadataPointer.
+// Neither is acted on: like Wine 10 on x86_64 the loader only initializes the
+// cookie. Volatile metadata describes x64 code for ARM64 emulation and is never
+// read; only its outer VA is bounds-checked. Relocation limits scale to game
+// images instead of the owned fixture's small caps.
+inline bool validate(const File& f,Plan& result,bool play=false) {
     Plan p;
     if(!f.bytes || (f.dllCharacteristics&0x4000) || f.config.size!=0x140 || f.config.rva%8 ||
         !f.preferred || f.preferred>UINT64_MAX-f.imageSize ||
@@ -123,7 +133,12 @@ inline bool validate(const File& f,Plan& result) {
     for(size_t i=4;i<0x140;++i) {
         bool pointer=false;
         for(auto off:offsets) if(i>=off && i-off<8) pointer=true;
+        if(play && ((i>=0x90 && i<0x94) || (i>=0x100 && i<0x108))) pointer=true;
         if(!pointer && record[i]) return false;
+    }
+    if(play) {
+        memcpy(&p.guardFlags,record+0x90,4);
+        if(p.guardFlags!=0 && p.guardFlags!=0x100) return false;
     }
     p.record={f.config.rva,0x140};
     std::vector<size_t> expected;
@@ -153,6 +168,18 @@ inline bool validate(const File& f,Plan& result) {
         }
         p.pointers.push_back({p.record.rva+off,target,false});
         expected.push_back(p.record.rva+off);
+    }
+    uint64_t volatileVa=0;
+    if(play) memcpy(&volatileVa,record+0x100,8);
+    if(volatileVa) {
+        // Bounds of the outer pointer only: read-only, non-executable, backed
+        // in-image bytes that the loader must never write. Never dereferenced.
+        size_t target;
+        if(!f.va(volatileVa,8,target,read,write|execute) ||
+            p.protectedWrite(target,8)) return false;
+        p.volatileMetadata=target;
+        p.pointers.push_back({p.record.rva+0x100,target,false});
+        expected.push_back(p.record.rva+0x100);
     }
     // File TLS metadata is checked before any write, RNG call or import resolver.
     // Its expected relocated directory is retained for the separate prepare API.
@@ -235,7 +262,9 @@ inline bool validate(const File& f,Plan& result) {
     for(size_t i=1;i<iatRanges.size();++i) if(overlaps(iatRanges[i-1],iatRanges[i])) return false;
     // Prevalidate the ENTIRE relocation program, including non-load-config
     // destinations. Snapshot values so even self-modifying reloc data is inert.
-    if(!f.reloc.size || f.reloc.size>1024*1024 || !f.at(f.reloc.rva,f.reloc.size)) return false;
+    const size_t relocBytes=play?size_t(64)*1024*1024:size_t(1024)*1024;
+    const size_t relocCount=play?size_t(16)*1024*1024:size_t(65536);
+    if(!f.reloc.size || f.reloc.size>relocBytes || !f.at(f.reloc.rva,f.reloc.size)) return false;
     for(size_t pos=0;pos<f.reloc.size;) {
         uint32_t page,length;
         if(!bounds(pos,8,f.reloc.size) || !f.get(f.reloc.rva+pos,page) ||
@@ -246,15 +275,20 @@ inline bool validate(const File& f,Plan& result) {
             unsigned type=word>>12; if(!type) continue;
             size_t target=size_t(page)+(word&4095);
             uint64_t value;
-            if(type!=10 || (target&4095)>4088 || !f.get(target,value) || overlaps({target,8},p.cookie)) return false;
+            // Windows and Wine apply page-straddling DIR64 entries; game images
+            // may contain them. The owned fixture contract stays page-local.
+            if(type!=10 || (!play && (target&4095)>4088) || !f.get(target,value) || overlaps({target,8},p.cookie)) return false;
             bool known=std::find(expected.begin(),expected.end(),target)!=expected.end();
             if(p.protectedWrite(target,8) && !known) return false;
-            // TLS index/template and import writes cannot be relocation targets.
+            // TLS index and import writes cannot be relocation targets. Game
+            // images legitimately relocate pointers inside the TLS template
+            // (thread_local initializers); the template is copied only after
+            // relocation, as on Windows. The owned fixture keeps it immutable.
             if(p.tls.present && (overlaps({target,8},{p.tls.index,4}) ||
-                                overlaps({target,8},{p.tls.start,std::max<size_t>(1,p.tls.raw)}))) return false;
+                                (!play && overlaps({target,8},{p.tls.start,std::max<size_t>(1,p.tls.raw)})))) return false;
             for(auto s:iatRanges) if(overlaps({target,8},s)) return false;
             p.relocations.push_back({target,value});
-            if(p.relocations.size()>65536) return false;
+            if(p.relocations.size()>relocCount) return false;
         }
         pos+=length;
     }

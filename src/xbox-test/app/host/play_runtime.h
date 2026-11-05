@@ -52,6 +52,11 @@ static State* state=nullptr; // One guest process per launcher lifetime.
 static std::atomic<State*> observed{nullptr};
 static thread_local bool guestThread=false;
 static thread_local unsigned mappingImports=0;
+// Only the current dynamic lookup's export chain contributes pending work.
+// Historic dependencies (including retained failures) must not poison lookups
+// that reach only already initialized images. Nested callback lookups restore
+// their caller's collection scope.
+static thread_local bool* pendingExportLookup=nullptr;
 static std::string lower(std::string s) { for(auto& c:s) if(c>='A'&&c<='Z') c+=32; return s; }
 static std::string narrow(const std::wstring& s) {
     if(s.empty()) return {}; int n=WideCharToMultiByte(CP_UTF8,0,s.data(),int(s.size()),nullptr,0,nullptr,nullptr);
@@ -87,6 +92,18 @@ static uintptr_t missing(const char* dll,const char* name,WORD ordinal) {
     // Optional detection is diagnostic, not a new execution milestone/result.
     if(state->log) state->log(("PRUN OPTIONAL unresolved dynamic export: "+full).c_str());
     SetLastError(ERROR_PROC_NOT_FOUND);return 0;
+}
+// No supported guest child-process provider is installed here. These names
+// must not acquire native implementations or callable failure placeholders.
+// This is a feature boundary, not a sandbox: other launch APIs/ordinals and
+// arbitrary native export aliases are not proven blocked by this policy.
+static bool processCreation(const char* name) {
+    return name && (!strcmp(name,"CreateProcessA") || !strcmp(name,"CreateProcessW"));
+}
+static uintptr_t unavailableProcess(const char* dll,const char* name) {
+    // Optional dynamic detection must not replace real execution progress.
+    if(mappingImports)state->event("guest child-process creation unavailable (no supported provider): "+lower(dll)+"!"+name);
+    return missing(dll,name,0);
 }
 static void WINAPI exitProcess(UINT code) {
     state->code=code; state->event("ExitProcess code="+std::to_string(code));
@@ -143,17 +160,21 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     std::wstring requested=name;
     auto leaf=requested.substr(requested.find_last_of(L"\\/")+1);
     if(leaf.find(L'.')==std::wstring::npos) requested+=L".dll";
-    // Apply the real-client prerequisite after Windows name normalization,
-    // including extensionless requests and the client DLL itself.
+    // There is no genuine Steam client (item 36). Refuse the client DLL after
+    // Windows name normalization, even when a copy ships in the game root, so
+    // nothing but a real client could ever answer the game's Steam API. The
+    // game's original steam_api64.dll maps unmodified like any other game DLL
+    // and its SteamAPI_Init fails naturally without a client.
     auto key=basename(requested);
-    if(key=="steam_api64.dll" || key=="steamclient64.dll") {
-        stopMissing(key+"!LoadLibrary (real client prerequisite item 36)",(uintptr_t)_ReturnAddress());return nullptr;
+    if(key=="steamclient64.dll") {
+        state->event("LoadLibrary refused name="+narrow(requested)+": no genuine Steam client (item 36)");
+        SetLastError(ERROR_MOD_NOT_FOUND);return nullptr;
     }
     Module* m=nullptr;
     {std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
      m=named(requested);if(!m){std::wstring p=requested;if(p.find(L':')==std::wstring::npos && (p.empty()||p[0]!=L'\\'))p=state->root+L"\\"+p;if(exists(p)) {m=map(p);if(!m){SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}}}
+     if(m) { if(m->mappingFailed || !m->mapped || !initializePending() || !m->initialized) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;} return (HMODULE)m->image.base; }
     }
-    if(m) { if(m->mappingFailed || !m->mapped || !initializePending() || !m->initialized) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;} return (HMODULE)m->image.base; }
     if(auto input=xinput_core::find_module(key.c_str(),true))return input;
     // Restrict fallback to documented system DLL search, never desktop paths.
     auto result=LoadLibraryExW(requested.c_str(),nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -168,7 +189,18 @@ static BOOL WINAPI freeLibrary(HMODULE h) { if(auto input=xinput_core::module(h)
 // DLL/symbol separator, supports #ordinals and records a module dependency.
 // Keep this execution behavior separate from the non-executing import probe.
 static uintptr_t exported(Module& module,const char* name,WORD ordinal) {
-    if(module.mappingFailed || !module.image.base) return 0;
+    // Retained failed images are diagnostic only, including forwarder sources
+    // and targets. Do not require initialized: circular imports/TLS setup may
+    // legitimately resolve exports before initialization has finished.
+    if(module.mappingFailed || module.initializationFailed || !module.image.base) return 0;
+    if(pendingExportLookup && !mappingImports && !module.initialized) {
+        // The recursive lock permits the initializing thread to resolve its
+        // prepared siblings (all TLS/unwind setup precedes callbacks). A new,
+        // unprepared dynamic target still needs initialization before return.
+        bool recursive=false;
+        if(module.prepared)for(auto m:state->order)if(m->initializing){recursive=true;break;}
+        if(!recursive)*pendingExportLookup=true;
+    }
     auto& image=module.image;
     if(auto p=mlp::asset_export(image,name,ordinal)) return p;
     auto nt=(IMAGE_NT_HEADERS64*)(image.base+((IMAGE_DOS_HEADER*)image.base)->e_lfanew);
@@ -215,17 +247,39 @@ static uintptr_t exported(Module& module,const char* name,WORD ordinal) {
     }
     return result;
 }
+struct ExportLookup {
+    bool pending=false;
+    bool* previous=pendingExportLookup;
+    ExportLookup() {pendingExportLookup=&pending;}
+    ~ExportLookup() {pendingExportLookup=previous;}
+    FARPROC finish(uintptr_t p) {
+        // Decide from every image reached by this export chain, even if an
+        // earlier failed lookup mapped its target. Resolve the complete chain
+        // (and record dependencies) before running any new guest callbacks.
+        if(p && pending && !mappingImports && !initializePending())p=0;
+        if(!p)SetLastError(ERROR_PROC_NOT_FOUND);return (FARPROC)p;
+    }
+};
 static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
     if(auto input=xinput_core::module(h))return xinput_core::module_proc(input,name);
+    // find() iterates vector storage that map() may reallocate. Native-handle
+    // resolution below can also inspect/map guest modules, so retain the lock
+    // for the entire lookup, not just the mapped-export branch.
+    std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
+    ExportLookup lookup;
     if(auto m=find(h)) {
         WORD ordinal=IS_INTRESOURCE(name)?WORD((uintptr_t)name):0;
-        std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
-        size_t previousCount=state->modules.size();
-        auto p=exported(*m,IS_INTRESOURCE(name)?nullptr:name,ordinal);
-        // A dynamically resolved forwarder may have mapped a new target DLL.
-        // Initialize its TLS and DllMain before returning callable guest code.
-        if(p&&state->modules.size()!=previousCount&&!initializePending())p=0;
-        if(!p) SetLastError(ERROR_PROC_NOT_FOUND);return (FARPROC)p;
+        return lookup.finish(exported(*m,IS_INTRESOURCE(name)?nullptr:name,ordinal));
+    }
+    // Native handles (including OS-resolved API sets/forwarders) must not
+    // expose these names even when GetModuleFileNameW cannot identify them.
+    // Keep owned mapped exports above separate from native fallback below.
+    if(!IS_INTRESOURCE(name)) {
+        if(processCreation(name)) return (FARPROC)unavailableProcess("native module",name);
+        // Do not hand out raw GetProcAddress on the metadata-failure path:
+        // a second lookup through it would bypass the unavailable-name gate.
+        if(!strcmp(name,"GetProcAddress"))
+            return GetProcAddress(h,name)?(FARPROC)&proc:nullptr;
     }
     // Route dynamic lookups back through the same process wrappers and router.
     wchar_t p[32768]{};using Fn=DWORD(WINAPI*)(HMODULE,LPWSTR,DWORD);auto fn=(Fn)kernel_tail::native("GetModuleFileNameW");
@@ -233,7 +287,7 @@ static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
         auto result=resolve(basename(p).c_str(),IS_INTRESOURCE(name)?nullptr:name,IS_INTRESOURCE(name)?WORD((uintptr_t)name):0);
         // Static imports are rejected while mapping; dynamic feature detection
         // observes NULL rather than a callable failure placeholder.
-        return (FARPROC)result;
+        return lookup.finish(result);
     }
     return GetProcAddress(h,name);
 }
@@ -335,8 +389,9 @@ static Module* map(const std::wstring& path) {
     // table, but no initialization runs until the complete graph is mapped.
     mlp::assets[m->key]=&m->image;
     state->event("mapping "+m->key);
+    if(m->key=="steam_api64.dll") state->event("steam_api64.dll is the game's original file, mapped unmodified; no Steam client, so SteamAPI_Init is expected to fail (item 36)");
     struct ImportScope {ImportScope(){++mappingImports;} ~ImportScope(){--mappingImports;}} imports;
-    if(!wxl::run(path.c_str(),state->log,&m->image,resolve)) {m->mappingFailed=true;state->event("mapping failed: "+m->key+"; guest initialization blocked; "+state->snapshot());return nullptr;}
+    if(!wxl::run(path.c_str(),state->log,&m->image,resolve,wxl::LoadConfig::msvc_x64)) {m->mappingFailed=true;state->event("mapping failed: "+m->key+"; guest initialization blocked; "+state->snapshot());return nullptr;}
     m->mapped=true;++state->mappedCount;state->order.push_back(m);return m;
 }
 static bool prepare(Module& m) {
@@ -380,6 +435,10 @@ static bool initialize(Module& m) {
     m.initialized=true;m.initializing=false;return true;
 }
 static bool initializePending() {
+    // All entry paths, including initial runImpl(), publish initialization and
+    // failure while owning proc/loadExW's recursive loader lock. Other threads
+    // cannot observe initializing=true as permission to use pending exports.
+    std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
     // Register every unwind table and TLS index before any guest callback.
     for(auto m:state->order) if(!prepare(*m)) return false;
     // Every template must exist before the first callback can call a sibling.
@@ -497,18 +556,19 @@ static int WINAPI messageBoxW(HWND,LPCWSTR text,LPCWSTR caption,UINT type) {
 static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     std::string key=lower(dll);
     if(key=="kernelbase.dll") key="kernel32.dll";
+    // Reject static imports before map() can create a worker or initialize any
+    // guest TLS/DllMain/entry. Mapped forwarders recurse through this same gate.
+    if(processCreation(name) && (key=="kernel32.dll" || key.find("api-ms-win-core-")==0)) return unavailableProcess(dll,name);
     if(auto graphics=play_graphics::resolve(dll,name,ordinal))return graphics;
     if(name && (key=="kernel32.dll"||key=="kernelbase.dll"||key=="ntdll.dll"||key.find("api-ms-win-core-")==0)) if(auto p=processApi(name)) return p;
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxA")) return (uintptr_t)&messageBoxA;
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxW")) return (uintptr_t)&messageBoxW;
     if(key=="user32.dll" && name && !strcmp(name,"CreateWindowExW")) return (uintptr_t)&createWindow;
     if(key=="d3d11.dll" && name && !strcmp(name,"D3D11CreateDevice")) return (uintptr_t)&createDevice;
-    if(key=="steam_api64.dll" || key=="steamclient64.dll") {
-        // Forwarded dynamic exports must obey the same real-client gate as
-        // LoadLibrary; never return a callable Steam placeholder.
-        if(!mappingImports) stopMissing(key+"!"+(name?name:"#"+std::to_string(ordinal))+" (real client prerequisite item 36)",(uintptr_t)_ReturnAddress());
-        return missing(dll,name,ordinal);
-    }
+    // Same client gate as LoadLibrary, for static and forwarded imports. Never
+    // a callable Steam placeholder: the import stays unresolved, as on Windows
+    // without the DLL. steam_api64.dll resolves from the game's own file below.
+    if(key=="steamclient64.dll") return missing(dll,name,ordinal);
     Module* owner=nullptr;
     // Current mapper is the last incomplete module; capture it before recursion.
     for(auto& m:state->modules) if(!m->mapped) owner=m.get();

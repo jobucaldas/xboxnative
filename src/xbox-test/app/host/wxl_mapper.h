@@ -312,14 +312,32 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
     for (unsigned d : {IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR})
         if (!mapped && h.DataDirectory[d].Size) return fail("WXL FAIL unsupported runtime directory");
     auto configDir=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG];
-    const bool explicitMsvc=config==LoadConfig::msvc_x64_cookie;
-    if ((configDir.VirtualAddress || configDir.Size) && config!=LoadConfig::inert_wine && !explicitMsvc)
+    auto sections=(const IMAGE_SECTION_HEADER*)(file.data()+secOff);
+    const bool hasConfig=configDir.VirtualAddress || configDir.Size;
+    auto inertConfig=[&]() {
+        bool inert=false;
+        for (unsigned i=0;i<nt->FileHeader.NumberOfSections;i++) {
+            auto s=sections[i];
+            if (configDir.VirtualAddress<s.VirtualAddress) continue;
+            size_t offset=size_t(configDir.VirtualAddress)-s.VirtualAddress;
+            if (!range(offset,configDir.Size,s.SizeOfRawData) ||
+                (s.Characteristics&(IMAGE_SCN_MEM_WRITE|IMAGE_SCN_MEM_EXECUTE))) continue;
+            inert=inert_wine_load_config(file.data()+s.PointerToRawData+offset,
+                                        configDir.Size,h.DllCharacteristics);
+        }
+        return inert;
+    };
+    // Play (msvc_x64) takes source-built Wine donors through the unchanged
+    // inert path and every other present record through the MSVC preflight.
+    const bool playMsvc=config==LoadConfig::msvc_x64;
+    const bool playInert=playMsvc && hasConfig && inertConfig();
+    const bool explicitMsvc=config==LoadConfig::msvc_x64_cookie || (playMsvc && hasConfig && !playInert);
+    if (hasConfig && config!=LoadConfig::inert_wine && !playInert && !explicitMsvc)
         return fail("WXL FAIL unsupported runtime directory");
     if (explicitMsvc && (image.base || !configDir.VirtualAddress || !configDir.Size ||
         h.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].VirtualAddress ||
         h.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].Size))
         return fail("WXL FAIL explicit MSVC runtime directory/state");
-    auto sections=(const IMAGE_SECTION_HEADER*)(file.data()+secOff);
     // Preflight belongs to this attempt, not to Image until allocation succeeds.
     // A failed explicit allocation may be retried with a different policy.
     msvc_config::Plan msvcPlan;
@@ -348,20 +366,16 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
             view.sections.push_back({s.VirtualAddress,s.Misc.VirtualSize,s.PointerToRawData,s.SizeOfRawData,s.Characteristics});
         }
         if((h.AddressOfEntryPoint && !view.at(h.AddressOfEntryPoint,1,msvc_config::read|msvc_config::execute,msvc_config::write)) ||
-            !msvc_config::validate(view,msvcPlan)) return fail("WXL FAIL explicit MSVC file preflight");
+            !msvc_config::validate(view,msvcPlan,playMsvc)) return fail("WXL FAIL explicit MSVC file preflight");
         log("WXL explicit MSVC file/write plan validated");
-    } else if ((configDir.VirtualAddress || configDir.Size)) {
-        bool inert=false;
-        for (unsigned i=0;i<nt->FileHeader.NumberOfSections;i++) {
-            auto s=sections[i];
-            if (configDir.VirtualAddress<s.VirtualAddress) continue;
-            size_t offset=size_t(configDir.VirtualAddress)-s.VirtualAddress;
-            if (!range(offset,configDir.Size,s.SizeOfRawData) ||
-                (s.Characteristics&(IMAGE_SCN_MEM_WRITE|IMAGE_SCN_MEM_EXECUTE))) continue;
-            inert=inert_wine_load_config(file.data()+s.PointerToRawData+offset,
-                                        configDir.Size,h.DllCharacteristics);
+        if (playMsvc) {
+            char msg[160];
+            snprintf(msg,sizeof msg,"WXL Play MSVC load config GuardFlags=0x%x volatileMetadata=%s (cookie only; guard slots and metadata untouched, as Wine)",
+                     msvcPlan.guardFlags,msvcPlan.volatileMetadata?"present":"absent");
+            log(msg);
         }
-        if (!inert) return fail("WXL FAIL non-inert Wine load configuration");
+    } else if (hasConfig) {
+        if (!inertConfig()) return fail("WXL FAIL non-inert Wine load configuration");
         configStart=configDir.VirtualAddress; configEnd=configStart+configDir.Size;
         log("WXL inert Wine load configuration validated; no loader work requested");
     }
@@ -524,8 +538,8 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
     }
     return true;
 }
-inline bool run(const wchar_t* path, Log log, Image* mapped=nullptr, Resolver resolve=nullptr) {
-    if (mapped) return load(*mapped,path,log,{},resolve,true);
+inline bool run(const wchar_t* path, Log log, Image* mapped=nullptr, Resolver resolve=nullptr, LoadConfig config=LoadConfig::reject) {
+    if (mapped) return load(*mapped,path,log,{},resolve,true,config);
     Image image;
     if (!load(image,path,log,{},resolve)) return false;
     if (image.dll) return true;
