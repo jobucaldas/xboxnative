@@ -245,6 +245,24 @@ static void cloud_uploader(uint32_t appid,std::wstring gameRoot) {
 // enough to copy its registers; the stack is walked after it resumes (a hung
 // thread's stack is unchanged), so nothing allocates while another thread is
 // stopped.
+// The thread runs again while its copied registers are unwound (suspending
+// it across RtlLookupFunctionEntry could deadlock on a lock it holds), so its
+// stack may change underneath: an unreadable address raises inside this SEH
+// frame and a torn walk just ends early. No C++ objects here (SEH frame).
+static int unwind_frames(CONTEXT ctx,DWORD64* rips,int max) {
+    int n=0;
+    __try {
+        while(n<max&&ctx.Rip) {
+            rips[n++]=ctx.Rip;
+            DWORD64 base=0;auto fn=RtlLookupFunctionEntry(ctx.Rip,&base,nullptr);
+            if(fn){void* handler=nullptr;DWORD64 frameBase=0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER,base,ctx.Rip,fn,&ctx,&handler,&frameBase,nullptr);continue;}
+            if(!ctx.Rsp)break;   // leaf frame: return address at [rsp]
+            ctx.Rip=*(volatile DWORD64*)ctx.Rsp;ctx.Rsp+=8;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return n;
+}
 static std::string stack_frame(uintptr_t address) {
     char b[300];
     if(auto st=play_runtime::state) for(auto& m:st->modules)
@@ -286,13 +304,8 @@ static void dump_thread_stacks() {
         CloseHandle(thread);
         if(!got)continue;
         snprintf(line,sizeof line,"STACK tid=%lu",(unsigned long)id);lp_sink(line);
-        for(int frame=0;frame<24&&ctx.Rip;++frame) {
-            snprintf(line,sizeof line,"  #%02d %s",frame,stack_frame(ctx.Rip).c_str());lp_sink(line);
-            DWORD64 base=0;auto fn=RtlLookupFunctionEntry(ctx.Rip,&base,nullptr);
-            if(fn){void* handler=nullptr;DWORD64 frameBase=0;
-                RtlVirtualUnwind(UNW_FLAG_NHANDLER,base,ctx.Rip,fn,&ctx,&handler,&frameBase,nullptr);}
-            else{if(!ctx.Rsp)break;ctx.Rip=*(DWORD64*)ctx.Rsp;ctx.Rsp+=8;}
-        }
+        DWORD64 rips[24];int frames=unwind_frames(ctx,rips,24);
+        for(int frame=0;frame<frames;++frame){snprintf(line,sizeof line,"  #%02d %s",frame,stack_frame(rips[frame]).c_str());lp_sink(line);}
     }
     lp_sink("STACKS end");
 }
