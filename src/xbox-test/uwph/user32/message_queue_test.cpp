@@ -121,6 +121,26 @@ static void pumpChecks(HMODULE dll){
  n=2;CHECK(fGetRegisteredRawInputDevices(out,&n,sizeof(RAWINPUTDEVICE))==2&&out[0].usUsage==6&&out[1].usUsage==5);
  n=0;SetLastError(0);CHECK(fGetRegisteredRawInputDevices(out,&n,sizeof(RAWINPUTDEVICE))==~0u&&GetLastError()==ERROR_INVALID_PARAMETER);
  SetLastError(0);CHECK(fGetRegisteredRawInputDevices(nullptr,&n,1)==~0u&&GetLastError()==ERROR_INVALID_PARAMETER);
+ // One record display, described consistently by CCD and GetMonitorInfo.
+ LOADP(GetDisplayConfigBufferSizes);LOADP(QueryDisplayConfig);LOADP(DisplayConfigGetDeviceInfo);LOADP(GetMonitorInfoW);LOADP(MonitorFromWindow);
+ UINT32 np=0,nm=0;CHECK(fGetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS,&np,&nm)==ERROR_SUCCESS&&np==1&&nm==2);
+ CHECK(fGetDisplayConfigBufferSizes(0,&np,&nm)==ERROR_INVALID_PARAMETER);
+ DISPLAYCONFIG_PATH_INFO paths[2]{};DISPLAYCONFIG_MODE_INFO modes[2]{};
+ UINT32 small=1,smallModes=1;CHECK(fQueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS,&small,paths,&smallModes,modes,nullptr)==ERROR_INSUFFICIENT_BUFFER);
+ np=2;nm=2;CHECK(fQueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS,&np,paths,&nm,modes,nullptr)==ERROR_SUCCESS&&np==1&&nm==2);
+ CHECK((paths[0].flags&DISPLAYCONFIG_PATH_ACTIVE)&&paths[0].sourceInfo.modeInfoIdx==0&&paths[0].targetInfo.modeInfoIdx==1);
+ CHECK(modes[0].infoType==DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE&&modes[0].sourceMode.width>0&&modes[1].infoType==DISPLAYCONFIG_MODE_INFO_TYPE_TARGET);
+ CHECK(modes[1].targetMode.targetVideoSignalInfo.vSyncFreq.Numerator==60);
+ np=nm=2;CHECK(fQueryDisplayConfig(QDC_DATABASE_CURRENT,&np,paths,&nm,modes,nullptr)==ERROR_INVALID_PARAMETER);
+ DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};source.header.type=DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;source.header.size=sizeof source;
+ source.header.adapterId=paths[0].sourceInfo.adapterId;source.header.id=paths[0].sourceInfo.id;
+ CHECK(fDisplayConfigGetDeviceInfo(&source.header)==ERROR_SUCCESS&&!wcscmp(source.viewGdiDeviceName,L"\\\\.\\DISPLAY1"));
+ DISPLAYCONFIG_TARGET_DEVICE_NAME target{};target.header.type=DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;target.header.size=sizeof target;
+ target.header.adapterId=paths[0].targetInfo.adapterId;
+ CHECK(fDisplayConfigGetDeviceInfo(&target.header)==ERROR_SUCCESS&&target.monitorFriendlyDeviceName[0]);
+ source.header.id=5;CHECK(fDisplayConfigGetDeviceInfo(&source.header)==ERROR_INVALID_PARAMETER);
+ struct {DWORD size;RECT monitor,work;DWORD flags;WCHAR device[32];} info{};info.size=sizeof info;
+ CHECK(fGetMonitorInfoW(fMonitorFromWindow(nullptr,MONITOR_DEFAULTTOPRIMARY),(LPMONITORINFO)&info)&&!wcscmp(info.device,L"\\\\.\\DISPLAY1"));
  reg[0].dwFlags=reg[1].dwFlags=RIDEV_REMOVE;CHECK(fRegisterRawInputDevices(reg,2,sizeof(RAWINPUTDEVICE)));
  n=0;CHECK(fGetRegisteredRawInputDevices(nullptr,&n,sizeof(RAWINPUTDEVICE))==0&&n==0);
 }

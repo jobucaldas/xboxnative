@@ -144,6 +144,8 @@ static steam_cloud::Roots cloud_roots(const std::wstring& gameRoot) {
     roots["GameInstall"]=gameRoot;
     return roots;
 }
+static std::mutex g_cloudRulesM;
+static std::vector<steam_cloud::Rule> g_cloudRules;   // from the pre-launch download pass
 static bool cloud_sync(uint32_t appid,const std::wstring& gameRoot,bool upload,uint64_t quiet) {
     auto session=user_session();
     if(!session||session->anon)return false;
@@ -153,6 +155,7 @@ static bool cloud_sync(uint32_t appid,const std::wstring& gameRoot,bool upload,u
     const Vdf* app=root.get("appinfo");if(!app)app=&root;
     auto rules=steam_cloud::rules(*app);
     if(rules.empty()){lp_sink("STEAM cloud: app has no Auto-Cloud save rules");return false;}
+    {std::lock_guard<std::mutex> lock(g_cloudRulesM);g_cloudRules=rules;}
     steam_cloud::Io io;
     io.service=[session](const std::string& method,const std::string& request,int& eresult,std::string& response){
         JobMsg m;if(!session->service(method,request,30000,m))return false;
@@ -204,18 +207,107 @@ static void achievements_sync(uint32_t appid,bool store) {
     char line[160];snprintf(line,sizeof line,"STEAM achievements: %s achievements=%zu stats=%zu unlocked=%u",
         ok?"prepared":"prepare failed",schema->achievements.size(),schema->stats.size(),unlocked);lp_sink(line);
 }
+// Uploads must not depend on a clean exit (the console may end the app, or the
+// game may crash while quitting): watch the save files and the provider's
+// achievement state, and sync once a change has settled for 15 s, with a
+// 5-minute backstop and a final pass when the guest finishes.
 static void cloud_uploader(uint32_t appid,std::wstring gameRoot) {
     std::thread([appid,gameRoot]{
         init_apartment(apartment_type::multi_threaded);
-        for(;;) {
+        namespace fs=std::filesystem;
+        auto roots=cloud_roots(gameRoot);
+        std::vector<fs::path> extra{fs::path(provider_dir(appid))/"saves"/std::to_string(appid)};
+        std::vector<steam_cloud::Rule> rules;{std::lock_guard<std::mutex> lock(g_cloudRulesM);rules=g_cloudRules;}
+        std::string synced,seen;
+        try{synced=seen=steam_cloud::signature(roots,rules,extra);}catch(...){}
+        ULONGLONG changedAt=GetTickCount64(),lastPass=GetTickCount64();
+        for(;;) try {
             auto r=play_runtime::observed.load(std::memory_order_acquire);
             bool finished=!r||r->finished.load(std::memory_order_acquire);
-            for(int i=0;i<300&&!finished;++i){Sleep(1000);finished=!r||r->finished.load(std::memory_order_acquire);}
-            try{cloud_sync(appid,gameRoot,true,finished?0:30);}catch(...){lp_sink("STEAM cloud upload: exception");}
-            try{achievements_sync(appid,true);}catch(...){lp_sink("STEAM achievements store: exception");}
+            if(!finished)Sleep(5000);
+            ULONGLONG now=GetTickCount64();
+            std::string current=steam_cloud::signature(roots,rules,extra);
+            if(current!=seen){seen=current;changedAt=now;}
+            bool settled=current!=synced&&now-changedAt>=15000;
+            if(finished||settled||now-lastPass>=300000) {
+                if(settled)lp_sink("STEAM sync: saves changed; syncing");
+                try{cloud_sync(appid,gameRoot,true,finished?0:10);}catch(...){lp_sink("STEAM cloud upload: exception");}
+                try{achievements_sync(appid,true);}catch(...){lp_sink("STEAM achievements store: exception");}
+                synced=current;lastPass=now;
+            }
             if(finished){games_played(0);return;}
-        }
+        } catch(...) {lp_sink("STEAM sync watcher: exception; retrying");Sleep(5000);}
     }).detach();
+}
+// ---- Diagnostic: cmd.txt "stacks" logs every other thread's call stack to
+// launch_probe.log (module+offset via Play's guest module map). Live process
+// dumps are unavailable on the console. Each thread is suspended only long
+// enough to copy its registers; the stack is walked after it resumes (a hung
+// thread's stack is unchanged), so nothing allocates while another thread is
+// stopped.
+// The thread runs again while its copied registers are unwound (suspending
+// it across RtlLookupFunctionEntry could deadlock on a lock it holds), so its
+// stack may change underneath: an unreadable address raises inside this SEH
+// frame and a torn walk just ends early. No C++ objects here (SEH frame).
+static int unwind_frames(CONTEXT ctx,DWORD64* rips,int max) {
+    int n=0;
+    __try {
+        while(n<max&&ctx.Rip) {
+            rips[n++]=ctx.Rip;
+            DWORD64 base=0;auto fn=RtlLookupFunctionEntry(ctx.Rip,&base,nullptr);
+            if(fn){void* handler=nullptr;DWORD64 frameBase=0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER,base,ctx.Rip,fn,&ctx,&handler,&frameBase,nullptr);continue;}
+            if(!ctx.Rsp)break;   // leaf frame: return address at [rsp]
+            ctx.Rip=*(volatile DWORD64*)ctx.Rsp;ctx.Rsp+=8;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return n;
+}
+static std::string stack_frame(uintptr_t address) {
+    char b[300];
+    if(auto st=play_runtime::state) for(auto& m:st->modules)
+        if(address>=(uintptr_t)m->image.base&&address-(uintptr_t)m->image.base<m->image.size){
+            snprintf(b,sizeof b,"%s+0x%llx",m->key.c_str(),(unsigned long long)(address-(uintptr_t)m->image.base));return b;}
+    MEMORY_BASIC_INFORMATION mbi{};
+    using File=DWORD(WINAPI*)(HMODULE,LPWSTR,DWORD);static auto file=(File)kernel_tail::native("GetModuleFileNameW");
+    wchar_t path[512]{};
+    if(VirtualQuery((void*)address,&mbi,sizeof mbi)&&file&&file((HMODULE)mbi.AllocationBase,path,512)){
+        const wchar_t* name=wcsrchr(path,L'\\');name=name?name+1:path;
+        snprintf(b,sizeof b,"%ls+0x%llx",name,(unsigned long long)(address-(uintptr_t)mbi.AllocationBase));return b;}
+    snprintf(b,sizeof b,"0x%llx",(unsigned long long)address);return b;
+}
+static void dump_thread_stacks() {
+    using Snapshot=HANDLE(WINAPI*)(DWORD,DWORD);
+    using Open=HANDLE(WINAPI*)(DWORD,BOOL,DWORD);
+    using Suspend=DWORD(WINAPI*)(HANDLE);
+    using Context=BOOL(WINAPI*)(HANDLE,CONTEXT*);
+    auto snapshot=(Snapshot)kernel_tail::native("CreateToolhelp32Snapshot");
+    auto open=(Open)kernel_tail::native("OpenThread");
+    auto suspend=(Suspend)kernel_tail::native("SuspendThread");
+    auto resume=(Suspend)kernel_tail::native("ResumeThread");
+    auto context=(Context)kernel_tail::native("GetThreadContext");
+    if(!snapshot||!open||!suspend||!resume||!context){lp_sink("STACKS unavailable: thread APIs missing");return;}
+    HANDLE snap=snapshot(4/*TH32CS_SNAPTHREAD*/,0);
+    if(snap==INVALID_HANDLE_VALUE){lp_sink("STACKS unavailable: snapshot failed");return;}
+    std::vector<DWORD> ids;
+    kernel_tail::ThreadEntry entry{};entry.size=sizeof entry;
+    for(BOOL ok=kernel_tail::first(snap,&entry);ok;ok=kernel_tail::next(snap,&entry))
+        if(entry.process==GetCurrentProcessId()&&entry.id!=GetCurrentThreadId())ids.push_back(entry.id);
+    CloseHandle(snap);
+    char line[512];snprintf(line,sizeof line,"STACKS begin threads=%zu",ids.size());lp_sink(line);
+    for(DWORD id:ids) {
+        HANDLE thread=open(0x0002|0x0008|0x0040,FALSE,id); // SUSPEND_RESUME|GET_CONTEXT|QUERY_INFORMATION
+        if(!thread)continue;
+        CONTEXT ctx{};ctx.ContextFlags=CONTEXT_FULL;
+        bool got=false;
+        if(suspend(thread)!=DWORD(-1)){got=context(thread,&ctx)!=FALSE;resume(thread);}
+        CloseHandle(thread);
+        if(!got)continue;
+        snprintf(line,sizeof line,"STACK tid=%lu",(unsigned long)id);lp_sink(line);
+        DWORD64 rips[24];int frames=unwind_frames(ctx,rips,24);
+        for(int frame=0;frame<frames;++frame){snprintf(line,sizeof line,"  #%02d %s",frame,stack_frame(rips[frame]).c_str());lp_sink(line);}
+    }
+    lp_sink("STACKS end");
 }
 static void lp_run_impl(LpCtx& c) {
     wine_gap::report(c.root);
@@ -239,6 +331,7 @@ static void lp_run_impl(LpCtx& c) {
         try{achievements_sync(c.appid,false);}catch(...){lp_sink("STEAM achievements: exception");}
         games_played(c.appid);
     }
+    regb::init(g_dir,lp_sink); // guest registry (PlayerPrefs): LocalState\registry.sqlite
     if(!play_runtime::start(c.root,exe,c.args,lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
     if(steamProvider)cloud_uploader(c.appid,c.root);
     auto r=play_runtime::state;

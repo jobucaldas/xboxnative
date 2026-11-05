@@ -577,7 +577,11 @@ static HRESULT WINAPI createDevice(IDXGIAdapter* adapter,D3D_DRIVER_TYPE type,HM
     auto fn=(Fn)mlp::resolve("d3d11.dll","D3D11CreateDevice",0);
     state->event("guest D3D11CreateDevice caller="+describe((uintptr_t)_ReturnAddress()));
     if(!fn) {stopMissing("d3d11.dll!D3D11CreateDevice");return E_NOINTERFACE;}
-    HRESULT hr=fn(adapter,type,software,flags,levels,count,version,device,level,context);
+    // Adapters from the guest factory are wrappers (virtual console output);
+    // the native device needs the real adapter.
+    IDXGIAdapter* real=corewindow_dxgi::real_adapter(adapter);
+    HRESULT hr=fn(real?real:adapter,type,software,flags,levels,count,version,device,level,context);
+    if(real)real->Release();
     char b[160];snprintf(b,sizeof b,"guest D3D11CreateDevice returned hr=0x%08lx device=%p",(unsigned long)hr,device?*device:nullptr);state->event(b);
     if(SUCCEEDED(hr)&&device&&*device)state->milestone=2;return hr;
 }

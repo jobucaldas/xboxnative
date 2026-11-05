@@ -207,6 +207,21 @@ DWORD guest_exe_entry(){
     if(contains(GetCommandLineW(),L"steam-api") &&
         (LoadLibraryW(L"StEaM_ApI64") || GetLastError()!=ERROR_MOD_NOT_FOUND))return 40;
     // A steamclient64.dll in the game root is refused, never mapped.
+    // PlayerPrefs-style registry use: the value written by "registry-write"
+    // must be read back by a later, separate "registry-read" run.
+    if(contains(GetCommandLineW(),L"registry-")) {
+        HKEY key=nullptr;DWORD disposition=0;
+        if(RegCreateKeyExW(HKEY_CURRENT_USER,L"Software\\Ved\\PlayTest",0,nullptr,0,KEY_ALL_ACCESS,nullptr,&key,&disposition))return 50;
+        DWORD value=0,size=sizeof value,type=0;
+        if(contains(GetCommandLineW(),L"registry-write")) {
+            value=0x5eed;
+            if(RegSetValueExW(key,L"last_steam_id_h1",0,REG_DWORD,(const BYTE*)&value,sizeof value))return 51;
+            value=0;
+        } else if(disposition!=REG_OPENED_EXISTING_KEY)return 52;
+        if(RegQueryValueExW(key,L"last_steam_id_h1",nullptr,&type,(BYTE*)&value,&size)||type!=REG_DWORD||value!=0x5eed)return 53;
+        if(RegCloseKey(key))return 54;
+        return 42;
+    }
     if(contains(GetCommandLineW(),L"steam-client") &&
         (LoadLibraryW(L"STEAMCLIENT64.DLL") || GetLastError()!=ERROR_MOD_NOT_FOUND))return 41;
     // A root steam_api64.dll is an ordinary game DLL (owned stand-in here).

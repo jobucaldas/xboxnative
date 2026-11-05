@@ -59,8 +59,9 @@ for alias in Kernel32 Kernelbase Core Core2;do
 done
 for adapter in native sentinel;do
     flags=();[[ $adapter == sentinel ]] && flags=(/DPROCESS_TEST_SENTINEL)
-    UWP_OBJ_DIR="$out/obj/$adapter" "$cb/scripts/build.sh" --uwp \
-        --out "$out/process-$adapter.exe" tests/process-boundary.cpp -- /MT /O2 "${flags[@]}"
+    bash ../uwph/host/build-sqlite-lib.sh "$out/obj/sqlite3.lib"
+    UWP_OBJ_DIR="$out/obj/$adapter" "$cb/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" \
+        --out "$out/process-$adapter.exe" tests/process-boundary.cpp -- /MT /O2 /I../uwph/host/third_party/sqlite "${flags[@]}"
     for mode in "${modes[@]}";do
         # Do not pass unrelated service credentials to owned guest execution.
         env -u DP_PASS -u TS_AUTHKEY timeout -k 2 30 wine "$out/process-$adapter.exe" "$mode" > "$logs/$adapter-$mode.log" 2>&1
