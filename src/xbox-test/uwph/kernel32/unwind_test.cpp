@@ -34,6 +34,8 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR,int) {
     }
     for(const char* name : {"RtlVirtualUnwind","RtlCaptureContext","RtlLookupFunctionEntry"})
         CHECK(kernel32_core::resolve_exception("api-ms-win-core-rtlsupport-l1-1-0.dll",name));
+    CHECK(kernel32_core::resolve_exception("ntdll.dll","RtlLookupFunctionEntry")==
+          kernel32_core::resolve_exception("api-ms-win-core-rtlsupport-l1-1-0.dll","RtlLookupFunctionEntry"));
     CHECK(!kernel32_core::resolve_exception("api-ms-win-core-rtlsupport-l1-1-0.dll","RaiseException"));
     CHECK(!kernel32_core::resolve_exception("api-ms-win-core-rtlsupport-l1-3-0.dll","RtlUnwindEx"));
     for(ULONG_PTR useEx : {ULONG_PTR(0),ULONG_PTR(1),ULONG_PTR(2),ULONG_PTR(3)}) {

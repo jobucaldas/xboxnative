@@ -52,6 +52,7 @@ static const Symbol symbols[]={
     {"shell32.dll","CommandLineToArgvW"},
     // Unity imports it; the console shell32 serves its siblings above.
     {"shell32.dll","SHFileOperationW"},
+    {"shell32.dll","ShellExecuteExW"},
     {"opengl32.dll","wglGetProcAddress"},
     {"opengl32.dll","wglDeleteContext"},
     {"opengl32.dll","wglMakeCurrent"},

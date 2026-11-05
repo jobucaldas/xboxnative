@@ -53,3 +53,12 @@ extern "C" BOOL WINAPI c_EndDialog(HWND,INT_PTR) {
 }
 // No pointer input or capture exists, so a drag can never start.
 extern "C" BOOL WINAPI c_DragDetect(HWND,POINT) { return FALSE; }
+// Records belong to the creating thread of this process (Wine/Windows: 0 and
+// ERROR_INVALID_WINDOW_HANDLE for an unknown window, output left untouched).
+extern "C" DWORD WINAPI c_GetWindowThreadProcessId(HWND hwnd,DWORD* process) {
+ std::lock_guard<std::recursive_mutex> lock(mutex);
+ auto record=window(hwnd);
+ if(!record){SetLastError(ERROR_INVALID_WINDOW_HANDLE);return 0;}
+ if(process)*process=GetCurrentProcessId();
+ return record->thread;
+}

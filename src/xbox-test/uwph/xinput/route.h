@@ -104,7 +104,21 @@ inline DWORD WINAPI battery(DWORD index,BYTE,XINPUT_BATTERY_INFORMATION*) {
     // No battery-report backend yet. Match Wine's honest unsupported path.
     return slots[index].connected?ERROR_NOT_SUPPORTED:ERROR_DEVICE_NOT_CONNECTED;
 }
-inline uintptr_t resolve(const char* dll,const char* name) {
+// xinput1_3/1_4 publish fixed ordinals (Wine's spec files match Windows);
+// xinput9_1_0 exports by name only. Ordinal imports map to the same entries.
+inline const char* ordinal_name(const char* dll,WORD ordinal) {
+    if(!dll || (_stricmp(dll,"xinput1_4.dll") && _stricmp(dll,"xinput1_3.dll")))return nullptr;
+    switch(ordinal) {
+    case 2: return "XInputGetState";
+    case 3: return "XInputSetState";
+    case 4: return "XInputGetCapabilities";
+    case 5: return "XInputEnable";
+    case 7: return "XInputGetBatteryInformation";
+    default: return nullptr;
+    }
+}
+inline uintptr_t resolve(const char* dll,const char* name,WORD ordinal=0) {
+    if(!name)name=ordinal_name(dll,ordinal);
     if(!dll || !name || (_stricmp(dll,"xinput1_4.dll") && _stricmp(dll,"xinput1_3.dll") &&
         _stricmp(dll,"xinput9_1_0.dll")))return 0;
     if(!strcmp(name,"XInputGetState"))return reinterpret_cast<uintptr_t>(&get_state);

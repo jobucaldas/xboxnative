@@ -92,7 +92,7 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
         else if(name) for(auto& b:wxl::builtins) if(!_stricmp(dll,b.dll)&&!strcmp(name,b.name)) address=b.address;
     }
     if(auto audio=audio_routes::resolve(dll,name)) address=audio;
-    if(auto input=xinput_core::resolve(dll,name)) address=input;
+    if(auto input=xinput_core::resolve(dll,name,ordinal)) address=input;
     if(auto core=user32_core::resolve(dll,name)) address=core;
     if(!address) address=imm32_core::resolve(dll,name, reinterpret_cast<imm32_core::IsWindow>(
         user32_core::resolve("user32.dll","IsWindow")));

@@ -18,6 +18,13 @@ inline constexpr struct { const char* dll; const char* symbol; } allowed[] = {
         {"dbghelp.dll", "SymFromAddr"},
         {"dbghelp.dll", "SymLoadModuleEx"},
         {"dbghelp.dll", "SymRegisterFunctionEntryCallback64"},
+        // gbe_fork's crash printer (Steam API provider for owned games).
+        {"dbghelp.dll", "SymSetOptions"},
+        {"dbghelp.dll", "SymCleanup"},
+        {"dbghelp.dll", "SymGetSymFromAddr64"},
+        {"dbghelp.dll", "SymGetModuleBase64"},
+        {"dbghelp.dll", "SymFunctionTableAccess64"},
+        {"dbghelp.dll", "StackWalk64"},
         {"wininet.dll", "InternetOpenA"},
         {"wininet.dll", "InternetConnectA"},
         {"wininet.dll", "InternetCrackUrlA"},

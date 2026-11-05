@@ -7,8 +7,12 @@ static const char* const wave_symbols[]={
     "waveInGetNumDevs","waveInOpen","waveInPrepareHeader","waveInReset",
     "waveInStart","waveInUnprepareHeader","waveOutClose","waveOutGetDevCapsA",
     "waveOutGetDevCapsW","waveOutGetNumDevs","waveOutGetPosition","waveOutOpen",
-    "waveOutPrepareHeader","waveOutReset","waveOutUnprepareHeader","waveOutWrite"
+    "waveOutPrepareHeader","waveOutReset","waveOutUnprepareHeader","waveOutWrite",
+    // gbe_fork (Steam API provider for owned games) imports these as well.
+    "timeGetDevCaps","waveInGetErrorTextW","waveInMessage","waveOutGetErrorTextW",
+    "waveOutMessage","waveOutPause","waveOutRestart"
 };
+constexpr unsigned wave_count=sizeof(wave_symbols)/sizeof(wave_symbols[0]);
 static const char* const com_symbols[]={
     "CoCreateFreeThreadedMarshaler","CoGetApartmentType","CoInitializeEx",
     "CoTaskMemAlloc","CoTaskMemFree","CoUninitialize","CoCreateGuid",
@@ -30,7 +34,7 @@ inline void discover(void (*log)(const char*)) {
         bool found=!!resolve("winmm.dll",name);missing+=!found;
         char line[160];snprintf(line,sizeof line,"AUD ROUTE winmm.dll!%s native=%u",name,unsigned(found));log(line);
     }
-    char line[160];snprintf(line,sizeof line,"AUD ROUTES winmm total=23 resolved=%u missing=%u",23-missing,missing);log(line);
+    char line[160];snprintf(line,sizeof line,"AUD ROUTES winmm total=%u resolved=%u missing=%u",wave_count,wave_count-missing,missing);log(line);
     unsigned com_missing=0;
     static HMODULE ole=LoadLibraryExW(L"ole32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
     for(auto name:com_symbols) {

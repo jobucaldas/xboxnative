@@ -93,6 +93,10 @@ static void pumpChecks(HMODULE dll){
  CHECK(fEnumWindows(enumerate,(LPARAM)&seen)&&!seen.found);CHECK(fEnumWindows(enumerate,(LPARAM)&top)&&top.found);
  CHECK(fPostMessageW(messageOnly,WM_APP+1,4,0));before=calls;
  CHECK(fGetMessageW(&m,nullptr,0,0)>0&&m.hwnd==messageOnly&&fDispatchMessageA(&m)==104&&calls==before+1);
+ LOADP(GetWindowThreadProcessId);DWORD pid=0;
+ CHECK(fGetWindowThreadProcessId(h,&pid)==GetCurrentThreadId()&&pid==GetCurrentProcessId());
+ CHECK(fGetWindowThreadProcessId(messageOnly,nullptr)==GetCurrentThreadId());
+ pid=7;SetLastError(0);CHECK(fGetWindowThreadProcessId((HWND)123,&pid)==0&&pid==7&&GetLastError()==ERROR_INVALID_WINDOW_HANDLE);
  CHECK(fDestroyWindow(messageOnly));
  CHECK(fDestroyWindow(h));CHECK(fUnregisterClassW(cls.lpszClassName,cls.hInstance));
  // Wine user32 DPI internals (shcore donor delay imports): one 96-DPI display.
