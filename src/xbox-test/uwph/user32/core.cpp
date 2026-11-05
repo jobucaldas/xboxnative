@@ -209,6 +209,18 @@ extern "C" BOOL WINAPI c_RegisterRawInputDevices(const RawInputDevice2* devices,
  }
  return TRUE;
 }
+// Wine 10 NtUserGetRegisteredRawInputDevices: sizes, NULL-buffer count query,
+// ERROR_INSUFFICIENT_BUFFER with the required count, else a copy of the table.
+extern "C" UINT WINAPI c_GetRegisteredRawInputDevices(RawInputDevice2* devices,UINT* count,UINT size){
+ if(size!=sizeof(RawInputDevice2)||!count||(devices&&!*count)){SetLastError(ERROR_INVALID_PARAMETER);return ~0u;}
+ std::lock_guard<std::recursive_mutex> l(mutex);
+ size_t capacity=size_t(*count)*size;*count=UINT(rawDevices.size());
+ size_t needed=size_t(size)*rawDevices.size();
+ if(!devices)return 0;
+ if(capacity<needed){SetLastError(ERROR_INSUFFICIENT_BUFFER);return ~0u;}
+ if(needed)memcpy(devices,rawDevices.data(),needed);
+ return *count;
+}
 // No HID backend feeds this record module, so the honest device list is empty
 // and any raw-input handle is unknown; both match real Windows error paths.
 extern "C" UINT WINAPI c_GetRawInputDeviceList(RawInputDeviceList2* list,UINT* count,UINT size){

@@ -107,6 +107,18 @@ static void pumpChecks(HMODULE dll){
  CHECK(setAware(2));CHECK(getAware(GetCurrentProcess(),&aware)&&aware==2);
  SetLastError(0);CHECK(!setAware(1)&&GetLastError()==ERROR_ACCESS_DENIED);
  CHECK(getAware((HANDLE)(LONG_PTR)1234,&aware)&&aware==0); // other process: unaware
+ // Raw input registrations read back as Wine's NtUserGetRegisteredRawInputDevices.
+ LOADP(RegisterRawInputDevices);LOADP(GetRegisteredRawInputDevices);
+ RAWINPUTDEVICE reg[2]={{1,6,0,nullptr},{1,5,0,nullptr}},out[2]{};UINT n=0;
+ CHECK(fGetRegisteredRawInputDevices(nullptr,&n,sizeof(RAWINPUTDEVICE))==0&&n==0);
+ CHECK(fRegisterRawInputDevices(reg,2,sizeof(RAWINPUTDEVICE)));
+ n=0;CHECK(fGetRegisteredRawInputDevices(nullptr,&n,sizeof(RAWINPUTDEVICE))==0&&n==2);
+ n=1;SetLastError(0);CHECK(fGetRegisteredRawInputDevices(out,&n,sizeof(RAWINPUTDEVICE))==~0u&&GetLastError()==ERROR_INSUFFICIENT_BUFFER&&n==2);
+ n=2;CHECK(fGetRegisteredRawInputDevices(out,&n,sizeof(RAWINPUTDEVICE))==2&&out[0].usUsage==6&&out[1].usUsage==5);
+ n=0;SetLastError(0);CHECK(fGetRegisteredRawInputDevices(out,&n,sizeof(RAWINPUTDEVICE))==~0u&&GetLastError()==ERROR_INVALID_PARAMETER);
+ SetLastError(0);CHECK(fGetRegisteredRawInputDevices(nullptr,&n,1)==~0u&&GetLastError()==ERROR_INVALID_PARAMETER);
+ reg[0].dwFlags=reg[1].dwFlags=RIDEV_REMOVE;CHECK(fRegisterRawInputDevices(reg,2,sizeof(RAWINPUTDEVICE)));
+ n=0;CHECK(fGetRegisteredRawInputDevices(nullptr,&n,sizeof(RAWINPUTDEVICE))==0&&n==0);
 }
 int main(int argc,char** argv){
  HMODULE dll=LoadLibraryA(argc>1?argv[1]:"uwph-u32c.dll");CHECK(dll!=nullptr);if(!dll)return 2;

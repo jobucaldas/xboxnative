@@ -84,6 +84,7 @@ EXPORTS
  EnumDisplayDevicesA=c_EnumDisplayDevicesA
  GetWindowPlacement=c_GetWindowPlacement
  RegisterRawInputDevices=c_RegisterRawInputDevices
+ GetRegisteredRawInputDevices=c_GetRegisteredRawInputDevices
  GetRawInputDeviceList=c_GetRawInputDeviceList
  GetRawInputDeviceInfoW=c_GetRawInputDeviceInfoW
  GetRawInputData=c_GetRawInputData
