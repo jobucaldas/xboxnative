@@ -1,4 +1,4 @@
-# xboxnative
+# Xbox Native (xboxnative)
 
 Run Windows x64 Steam games on an **Xbox Series S** (Dev Mode) inside a UWP "Game" app, using a Wine-style
 loader plus our own POSIX/syscall host layer (`uwph`). Status: **early, experimental**.

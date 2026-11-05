@@ -149,7 +149,7 @@ static Resp steam_call(const char* iface, const char* method, const std::string&
 }
 struct QrSession { uint64_t clientId = 0; std::string requestId, url; float interval = 5; };
 static bool begin_qr(QrSession& q) {
-    std::string dd; pb_s(dd, 1, "Xbox Steam Launcher"); pb_u(dd, 2, 1 /*EAuthTokenPlatformType.SteamClient*/); pb_u(dd, 3, 20 /*EOSType.Win11*/); pb_u(dd, 4, 1 /*gaming_device_type*/);
+    std::string dd; pb_s(dd, 1, "Xbox Native"); pb_u(dd, 2, 1 /*EAuthTokenPlatformType.SteamClient*/); pb_u(dd, 3, 20 /*EOSType.Win11*/); pb_u(dd, 4, 1 /*gaming_device_type*/);
     std::string req; pb_s(req, 3, dd);
     Resp r = steam_call("IAuthenticationService", "BeginAuthSessionViaQR", req);
     if (r.status != 200 || r.eresult != 1) return false;
