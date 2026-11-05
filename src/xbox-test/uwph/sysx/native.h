@@ -28,6 +28,12 @@ inline constexpr struct { const char* dll; const char* symbol; } allowed[] = {
         // Version queries (Unity, Rewired): the real OS version.
         {"ntdll.dll", "RtlGetVersion"},
         {"ntdll.dll", "RtlVerifyVersionInfo"},
+        // Rust std (Fields of Mistria): file/pipe I/O through the native layer.
+        {"ntdll.dll", "NtCreateNamedPipeFile"},
+        {"ntdll.dll", "NtOpenFile"},
+        {"ntdll.dll", "NtReadFile"},
+        {"ntdll.dll", "NtWriteFile"},
+        {"ntdll.dll", "RtlNtStatusToDosError"},
         {"wininet.dll", "InternetOpenA"},
         {"wininet.dll", "InternetConnectA"},
         {"wininet.dll", "InternetCrackUrlA"},

@@ -84,6 +84,9 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     std::string symbol=name ? name : "#"+std::to_string(ordinal);
     const char* kind="unclassified";
     for(auto& route:routes) if(key==route.dll) kind=route.kind;
+    // The Universal CRT API sets (api-ms-win-crt-*) are system contracts
+    // served by the console's ucrtbase through the OS API-set schema.
+    if(key.rfind("api-ms-win-crt-",0)==0) kind="system";
     uintptr_t address=kernel32_core::resolve(dll,name);
     // The console refuses HKCU writes (ERROR_ACCESS_DENIED): Unity PlayerPrefs and
     // other guests use the uwph registry (LocalState\registry.sqlite) instead.

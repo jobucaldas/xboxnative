@@ -260,6 +260,17 @@ int main() {
         auto bound=lazy; bound.put<uint32_t>(0x2614,0x2a00); assert(bound.valid(true));
         bound.put<uint32_t>(0x2614,0x1a00); assert(!bound.valid(true)); // executable bytes
     }
+    // CastGuardOsDeterminedFailureMode as a writable variable (FMOD: .data,
+    // often zero-fill). Play accepts it only while zero and never executable.
+    {
+        auto data=base; data.put<uint64_t>(0x2100+0x130,data.file.preferred+0x3500);
+        assert(!data.valid()); assert(data.valid(true));
+        auto tail=data; tail.file.sections[2].rawSize=0x800; tail.put<uint64_t>(0x2100+0x130,tail.file.preferred+0x3a00);
+        assert(tail.valid(true));
+        auto active=data; active.put<uint64_t>(0x3500,1); assert(!active.valid(true));
+        auto code=base; code.put<uint64_t>(0x2100+0x130,code.file.preferred+0x1500); assert(!code.valid(true));
+        auto beyond=base; beyond.put<uint64_t>(0x2100+0x130,beyond.file.preferred+0x5008); assert(!beyond.valid(true));
+    }
     uint64_t value=17;
     assert(!cookie(nullptr,value) && value==17);
     assert(!cookie(+[](uint64_t&){return false;},value) && value==17);
@@ -269,4 +280,5 @@ int main() {
     puts("MSVC-CONFIG pure PASS: immutable byte validation, bounds, writes, relocations, TLS and bounded entropy");
     puts("MSVC-CONFIG play PASS: CF_INSTRUMENTED + relocated read-only volatile pointer accepted only by msvc_x64; other flags/fields/targets reject");
     puts("MSVC-CONFIG play PASS: zero-fill TLS index, 0x100 records, TLS alignment and helper-owned delay imports accepted only by msvc_x64");
+    puts("MSVC-CONFIG play PASS: writable or zero-fill inactive CastGuard variable accepted only by msvc_x64");
 }

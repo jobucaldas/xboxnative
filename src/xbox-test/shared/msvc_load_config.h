@@ -163,7 +163,14 @@ inline bool validate(const File& f,Plan& result,bool play=false) {
     for(auto off:offsets) {
         uint64_t value; memcpy(&value,record+off,8);
         size_t target;
-        if(!f.va(value,8,target,read,off==0x58?execute:write|execute) || target%8)
+        // Play: CastGuardOsDeterminedFailureMode names a variable the OS loader
+        // may write. FMOD keeps it in writable .data, often in the zero-filled
+        // tail; accept that (never executable) as long as it holds zero.
+        const bool castGuardVariable=play && off==0x130 && value>=f.preferred &&
+            value-f.preferred<=f.imageSize && (value-f.preferred)%8==0 &&
+            f.mapped(size_t(value-f.preferred),8,read|write,execute);
+        if(castGuardVariable) target=size_t(value-f.preferred);
+        else if(!f.va(value,8,target,read,off==0x58?execute:write|execute) || target%8)
             return false;
         if(off==0x58) {
             if(!f.at(target,8,read|write,execute)) return false;
@@ -175,7 +182,8 @@ inline bool validate(const File& f,Plan& result,bool play=false) {
             if(overlaps(slot,p.record)||overlaps(slot,p.cookie)) return false;
             for(auto other:p.slots) if(overlaps(slot,other)) return false;
             p.slots.push_back(slot);
-            uint64_t function; if(!f.get(target,function)) return false;
+            uint64_t function=0;   // a zero-filled variable reads as zero
+            if(!f.get(target,function) && !castGuardVariable) return false;
             size_t code=0;
             if(off==0x130) { if(function) return false; } // inactive CastGuard
             else {
