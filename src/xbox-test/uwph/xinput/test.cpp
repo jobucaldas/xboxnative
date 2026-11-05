@@ -64,6 +64,13 @@ int main() {
     CHECK(resolve("xinput9_1_0.dll","XInputGetCapabilities"));
     CHECK(!resolve("xinput9_1_0.dll","XInputEnable"));
     CHECK(!resolve("xinput1_4.dll","XInputGetKeystroke"));
+    // Ordinal imports (gbe_fork imports xinput1_4 #2/#3) map to the named entries.
+    CHECK(resolve("xinput1_4.dll",nullptr,2)==resolve("xinput1_4.dll","XInputGetState"));
+    CHECK(resolve("XINPUT1_3.DLL",nullptr,3)==resolve("xinput1_3.dll","XInputSetState"));
+    CHECK(resolve("xinput1_4.dll",nullptr,4)==resolve("xinput1_4.dll","XInputGetCapabilities"));
+    CHECK(resolve("xinput1_4.dll",nullptr,5)&&resolve("xinput1_4.dll",nullptr,7));
+    CHECK(!resolve("xinput1_4.dll",nullptr,8)&&!resolve("xinput1_4.dll",nullptr,100)&&!resolve("xinput1_4.dll",nullptr,1));
+    CHECK(!resolve("xinput9_1_0.dll",nullptr,2)&&!resolve("other.dll",nullptr,2));
     CHECK(!resolve(nullptr,"XInputGetState"));
     CHECK(!resolve("xinput1_4.dll",nullptr));
     CHECK(!find_module("xinput1_4.dll",false));

@@ -430,15 +430,24 @@ static wxl::Carrier carrier() {
     }
     return {};
 }
-static Module* map(const std::wstring& path) {
-    if(auto m=named(path)) return m->mappingFailed?nullptr:m;
+// Optional Steam API provider for an owned game (AGENTS rule 3), e.g. a pinned
+// gbe_fork steam_api64.dll staged with its steam_settings in a writable folder.
+// When set, any steam_api64.dll the game loads is mapped from this file instead;
+// the game's own file on disk is never modified. Set before start().
+static std::wstring steamProvider;
+static void set_steam_provider(const std::wstring& path) { steamProvider=path; }
+static Module* map(const std::wstring& requested) {
+    if(auto m=named(requested)) return m->mappingFailed?nullptr:m;
+    const bool provided=basename(requested)=="steam_api64.dll" && !steamProvider.empty();
+    const std::wstring& path=provided?steamProvider:requested;
     if(state->modules.size()>=128) {state->event("loader module capacity exceeded");return nullptr;}
     auto own=std::make_unique<Module>();auto m=own.get();m->path=path;m->key=basename(path);state->modules.push_back(std::move(own));state->moduleCount=int(state->modules.size());
     // Publish before fixing imports; circular imports can use the copied export
     // table, but no initialization runs until the complete graph is mapped.
     mlp::assets[m->key]=&m->image;
     state->event("mapping "+m->key);
-    if(m->key=="steam_api64.dll") state->event("steam_api64.dll is the game's original file, mapped unmodified; no Steam client, so SteamAPI_Init is expected to fail (item 36)");
+    if(provided) state->event("steam_api64.dll served by the configured Steam API provider; the game's file is unchanged");
+    else if(m->key=="steam_api64.dll") state->event("steam_api64.dll is the game's original file, mapped unmodified; no Steam client, so SteamAPI_Init is expected to fail (item 36)");
     struct ImportScope {ImportScope(){++mappingImports;} ~ImportScope(){--mappingImports;}} imports;
     if(!wxl::run(path.c_str(),state->log,&m->image,resolve,wxl::LoadConfig::msvc_x64)) {
         // Withdraw the early publication: a failed image's export table must

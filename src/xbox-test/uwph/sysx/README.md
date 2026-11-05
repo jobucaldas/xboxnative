@@ -1,6 +1,6 @@
 # sysx native routes
 
-`native.h` permits only eleven named dbghelp/WinINet exports. It loads the real
+`native.h` permits only seventeen named dbghelp/WinINet exports (six dbghelp ones serve gbe_fork, the Steam API provider for owned games). It loads the real
 System32 DLL and returns its exact export. Missing libraries or exports remain
 unresolved, so Play's existing missing-import trap reports them. There is no
 manufactured success, broad DLL forwarding, relaxed TLS validation, guest DLL

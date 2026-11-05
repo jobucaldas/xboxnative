@@ -275,6 +275,9 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         host_surface::schedulePad(logline);
         logline("HOST SURFACE native Wine window stands in for the CoreWindow (off-device only)");
     }
+    // Optional Steam API provider (owned game): mapped in place of steam_api64.dll.
+    {wchar_t provider[1024];DWORD n=GetEnvironmentVariableW(L"PRUN_STEAM_PROVIDER",provider,1024);
+     if(n&&n<1024)play_runtime::set_steam_provider(std::wstring(provider,n));}
     if(!play_runtime::start(root,game?L"Megabonk.exe":std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":L"play-guest.exe",game?play_runtime::wide(launch_arguments::for_app(3405340)):play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
@@ -296,6 +299,13 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     else if(mode=="root-steam") {
         auto api=play_runtime::named(L"steam_api64.dll");
         ok=ok&&r->finished&&r->success&&r->code==42&&api&&api->mapped&&api->initialized&&!play_runtime::named(L"steamclient64.dll");
+    }
+    else if(mode=="root-steam-provider") {
+        // The root stand-in rejects attach; only the provider's file succeeds.
+        auto api=play_runtime::named(L"steam_api64.dll");
+        wchar_t provider[1024];DWORD n=GetEnvironmentVariableW(L"PRUN_STEAM_PROVIDER",provider,1024);
+        ok=ok&&r->finished&&r->success&&r->code==42&&api&&api->mapped&&api->initialized&&
+            n&&n<1024&&api->path==std::wstring(provider,n)&&!play_runtime::named(L"steamclient64.dll");
     }
     else if(mode=="dialog-milestone")ok=ok&&r->finished&&!r->success&&last.find("user32.dll!MessageBoxA caption=\"Fatal error\"")!=std::string::npos&&
         r->milestone==1&&launch_status::observe(r->finished,r->success,r->milestone,true)==launch_status::Outcome::failed;

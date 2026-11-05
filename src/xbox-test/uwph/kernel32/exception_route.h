@@ -17,7 +17,7 @@ inline uintptr_t resolve_exception(const char* dll,const char* name) {
                  !_stricmp(dll,"api-ms-win-core-rtlsupport-l1-2-0.dll");
     if (!kernel && !rtl && !error && !debug && !support) return 0;
 #define K32_EXCEPTION(symbol) if (!strcmp(name,#symbol)) return reinterpret_cast<uintptr_t>(&::symbol)
-    if (support) K32_EXCEPTION(RtlLookupFunctionEntry);
+    if (support || rtl) K32_EXCEPTION(RtlLookupFunctionEntry); // kernel32: mapper builtin
     if (kernel || rtl || support) {
         K32_EXCEPTION(RtlCaptureContext);
         K32_EXCEPTION(RtlCaptureStackBackTrace);

@@ -17,12 +17,12 @@ static void discovery_log(const char* message) {
 PVOID CALLBACK no_function_entry(HANDLE, DWORD64, ULONG64) { return nullptr; }
 int main(int argc, char** argv) {
     sysx_native::discover(discovery_log);
-    CHECK(discovered == 11 && unavailable == 0);
+    CHECK(discovered == 17 && unavailable == 0);
     CHECK(!sysx_native::resolve(nullptr, "SymInitialize"));
     CHECK(!sysx_native::resolve("dbghelp.dll", nullptr));
     CHECK(!sysx_native::resolve("untrusted.dll", "SymInitialize"));
     CHECK(!sysx_native::resolve("dbghelp.dll", "syminitialize"));
-    CHECK(!sysx_native::resolve("dbghelp.dll", "SymCleanup"));
+    CHECK(!sysx_native::resolve("dbghelp.dll", "SymEnumSymbols"));
     auto init = api<decltype(&SymInitialize)>("DBGHELP.DLL", "SymInitialize");
     auto load = api<decltype(&SymLoadModuleEx)>("dbghelp.dll", "SymLoadModuleEx");
     auto from = api<decltype(&SymFromAddr)>("dbghelp.dll", "SymFromAddr");
@@ -56,7 +56,17 @@ int main(int argc, char** argv) {
     CHECK(strstr(symbol->Name, "sysx_exported_symbol"));
     CHECK(displacement == 0);
     CHECK(!from(process, 1, &displacement, symbol));
-    auto cleanup = reinterpret_cast<decltype(&SymCleanup)>(GetProcAddress(dbg, "SymCleanup"));
+    // gbe_fork's exports are the exact OS functions and behave on a live session.
+    for (const char* name : {"SymSetOptions", "SymCleanup", "SymGetSymFromAddr64", "SymGetModuleBase64",
+                             "SymFunctionTableAccess64", "StackWalk64"})
+        CHECK(reinterpret_cast<FARPROC>(sysx_native::resolve("dbghelp.dll", name)) == GetProcAddress(dbg, name));
+    auto options = api<decltype(&SymSetOptions)>("dbghelp.dll", "SymSetOptions");
+    auto module_base = api<decltype(&SymGetModuleBase64)>("dbghelp.dll", "SymGetModuleBase64");
+    CHECK(options && module_base);
+    DWORD previous = options(SYMOPT_UNDNAME);
+    CHECK(options(previous) == SYMOPT_UNDNAME);
+    CHECK(module_base(process, reinterpret_cast<DWORD64>(&sysx_exported_symbol)) == base);
+    auto cleanup = api<decltype(&SymCleanup)>("dbghelp.dll", "SymCleanup");
     CHECK(cleanup && cleanup(process));
 
     auto crack = api<decltype(&InternetCrackUrlA)>("wininet.dll", "InternetCrackUrlA");

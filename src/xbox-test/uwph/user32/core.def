@@ -151,6 +151,7 @@ EXPORTS
  DialogBoxParamW=c_DialogBoxParamW
  EndDialog=c_EndDialog
  DragDetect=c_DragDetect
+ GetWindowThreadProcessId=c_GetWindowThreadProcessId
  GetDpiForMonitorInternal=c_GetDpiForMonitorInternal
  SetProcessDpiAwarenessInternal=c_SetProcessDpiAwarenessInternal
  GetProcessDpiAwarenessInternal=c_GetProcessDpiAwarenessInternal
