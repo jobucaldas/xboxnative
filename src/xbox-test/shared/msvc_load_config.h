@@ -38,6 +38,13 @@ struct File {
             bounds(s.raw+(rva-s.rva),n,size)) return bytes+s.raw+(rva-s.rva);
         return nullptr;
     }
+    // Loader-written locations need only mapped (virtual) extent: a section's
+    // zero-filled tail is image memory even though no file byte backs it.
+    bool mapped(size_t rva, size_t n, uint32_t required, uint32_t forbidden) const {
+        for (auto s:sections) if (rva>=s.rva && bounds(rva-s.rva,n,s.virtualSize) &&
+            bounds(rva,n,imageSize) && (s.flags&required)==required && !(s.flags&forbidden)) return true;
+        return false;
+    }
     template<class T> bool get(size_t rva,T& value) const {
         auto p=at(rva,sizeof value); if(!p) return false;
         memcpy(&value,p,sizeof value); return true;
@@ -107,9 +114,17 @@ struct Plan {
 // cookie. Volatile metadata describes x64 code for ARM64 emulation and is never
 // read; only its outer VA is bounds-checked. Relocation limits scale to game
 // images instead of the owned fixture's small caps.
+// Play also accepts the shorter records older MSVC linkers emit (GuardFlags
+// present, i.e. 0x94..0x140 bytes); fields past the record's end are absent, as
+// on Windows. The TLS index slot is written by the loader and may sit in a
+// section's zero-filled tail (common in MSVC DLLs); it needs mapped, writable,
+// non-executable extent, not file bytes. The fixture contract stays 0x140 and
+// file-backed.
 inline bool validate(const File& f,Plan& result,bool play=false) {
     Plan p;
-    if(!f.bytes || (f.dllCharacteristics&0x4000) || f.config.size!=0x140 || f.config.rva%8 ||
+    const size_t recordSize=f.config.size;
+    if(!f.bytes || (f.dllCharacteristics&0x4000) || f.config.rva%8 ||
+        (play ? recordSize<0x94 || recordSize>0x140 : recordSize!=0x140) ||
         !f.preferred || f.preferred>UINT64_MAX-f.imageSize ||
         f.sections.empty() || f.sections.size()>96) return false;
     // The caller validates PE headers/alignment/W^X; also reject raw aliases,
@@ -125,12 +140,15 @@ inline bool validate(const File& f,Plan& result,bool play=false) {
                          {b.rva,std::max(b.rawSize,b.virtualSize)})) return false;
         }
     }
-    auto record=f.at(f.config.rva,0x140,read,write|execute);
+    auto record=f.at(f.config.rva,recordSize,read,write|execute);
     if(!record) return false;
-    constexpr size_t offsets[]={0x58,0x70,0x78,0x118,0x120,0x128,0x130,0x138};
+    constexpr size_t allOffsets[]={0x58,0x70,0x78,0x118,0x120,0x128,0x130,0x138};
+    std::vector<size_t> offsets;
+    for(auto off:allOffsets) if(off+8<=recordSize) offsets.push_back(off);
+    if(offsets.empty() || offsets[0]!=0x58) return false; // the cookie is required
     uint32_t declared; memcpy(&declared,record,4);
-    if(declared!=0x140) return false;
-    for(size_t i=4;i<0x140;++i) {
+    if(declared!=recordSize) return false;
+    for(size_t i=4;i<recordSize;++i) {
         bool pointer=false;
         for(auto off:offsets) if(i>=off && i-off<8) pointer=true;
         if(play && ((i>=0x90 && i<0x94) || (i>=0x100 && i<0x108))) pointer=true;
@@ -140,7 +158,7 @@ inline bool validate(const File& f,Plan& result,bool play=false) {
         memcpy(&p.guardFlags,record+0x90,4);
         if(p.guardFlags!=0 && p.guardFlags!=0x100) return false;
     }
-    p.record={f.config.rva,0x140};
+    p.record={f.config.rva,recordSize};
     std::vector<size_t> expected;
     for(auto off:offsets) {
         uint64_t value; memcpy(&value,record+off,8);
@@ -170,7 +188,7 @@ inline bool validate(const File& f,Plan& result,bool play=false) {
         expected.push_back(p.record.rva+off);
     }
     uint64_t volatileVa=0;
-    if(play) memcpy(&volatileVa,record+0x100,8);
+    if(play && recordSize>=0x108) memcpy(&volatileVa,record+0x100,8);
     if(volatileVa) {
         // Bounds of the outer pointer only: read-only, non-executable, backed
         // in-image bytes that the loader must never write. Never dereferenced.
@@ -190,12 +208,18 @@ inline bool validate(const File& f,Plan& result,bool play=false) {
         uint64_t start,end,index,callbacks; uint32_t zero,characteristics;
         memcpy(&start,t,8); memcpy(&end,t+8,8); memcpy(&index,t+16,8);
         memcpy(&callbacks,t+24,8); memcpy(&zero,t+32,4); memcpy(&characteristics,t+36,4);
+        // Neither Windows nor Wine honours a TLS alignment above the heap's
+        // 16 bytes (blocks are heap-allocated); real images may still declare
+        // one (e.g. 32). Play accepts any IMAGE_SCN_ALIGN_* code, like them.
         if(end<start || end-start>65536 || zero>65536-(end-start) ||
-            ((characteristics>>20)&15)>5) return false;
+            ((characteristics>>20)&15)>(play?14u:5u)) return false;
         auto& tls=p.tls; tls.present=true; tls.directory=f.tls.rva;
         tls.raw=size_t(end-start); tls.zero=zero;
         if(!f.va(start,std::max<size_t>(1,tls.raw),tls.start,read,execute) ||
-            !f.va(index,4,tls.index,read|write,execute) || tls.index%4) return false;
+            index<f.preferred || index-f.preferred>f.imageSize) return false;
+        tls.index=size_t(index-f.preferred);
+        if(tls.index%4 || !(play ? f.mapped(tls.index,4,read|write,execute)
+                                 : f.at(tls.index,4,read|write,execute)!=nullptr)) return false;
         memcpy(tls.expected.data(),t,40);
         tlsRanges={{f.tls.rva,40},{tls.start,std::max<size_t>(1,tls.raw)},{tls.index,4}};
         if(callbacks) {
@@ -217,7 +241,7 @@ inline bool validate(const File& f,Plan& result,bool play=false) {
     }
     // Build imports from FILE bytes, not relocation-mutated descriptors/thunks.
     // Later binding uses these copied names and destinations exclusively.
-    std::vector<Span> iatRanges;
+    std::vector<Span> iatRanges, lazyRanges;
     auto imports=[&](Directory dir,bool delay)->bool {
         if(!dir.rva && !dir.size) return true;
         size_t stride=delay?32:20;
@@ -231,17 +255,34 @@ inline bool validate(const File& f,Plan& result,bool play=false) {
                 for(size_t i=0;i<stride/4;++i) if(d[i]) return false;
                 ended=true; break;
             }
-            if(!name || !src || !dst || (delay && (d[0]!=1 || d[2] || d[5] || d[6] || d[7]))) return false;
+            // Play leaves delay imports to the image's own delay-load helper, as
+            // Windows and Wine do: it resolves on first call through the routed
+            // LoadLibraryExA/GetProcAddress, so an optional DLL (UnityPlayer's
+            // d3d12.dll) is needed only if actually used. The loader never
+            // writes the delay IAT, whose initial in-image thunk VAs are DIR64
+            // relocation targets, so it is not an eager-binding range.
+            const bool lazy=delay && play;
+            if(!name || !src || !dst || (delay && d[0]!=1) ||
+                (delay && !lazy && (d[2] || d[5] || d[6] || d[7]))) return false;
+            if(lazy) {
+                // The helper (not the loader) writes the module handle slot;
+                // bound/unload tables are optional read-only copies it may read.
+                if(d[2] && (d[2]%8 || !f.mapped(d[2],8,read|write,execute) ||
+                    p.protectedWrite(d[2],8))) return false;
+                if(d[2]) for(auto s:tlsRanges) if(overlaps({d[2],8},s)) return false;
+                for(uint32_t table:{d[5],d[6]}) if(table && !f.at(table,8,read,execute)) return false;
+            }
             std::string dll; if(!f.string(name,dll)) return false;
             bool terminated=false;
             for(size_t i=0;i<4096;++i) {
                 size_t target=size_t(dst)+i*8;
                 uint64_t thunk;
-                if(!f.get(size_t(src)+i*8,thunk) || !f.at(target,8,read,execute) ||
+                if(!f.get(size_t(src)+i*8,thunk) ||
+                    !f.at(target,8,lazy?read|write:read,execute) ||
                     p.protectedWrite(target,8)) return false;
                 for(auto s:tlsRanges) if(overlaps({target,8},s)) return false;
                 // Include even the zero terminator in alias validation.
-                if(!thunk) { iatRanges.push_back({dst,(i+1)*8}); terminated=true; break; }
+                if(!thunk) { (lazy?lazyRanges:iatRanges).push_back({dst,(i+1)*8}); terminated=true; break; }
                 Import imp; imp.destination=target; imp.dll=dll;
                 if(thunk>>63) {
                     if(thunk&~(uint64_t(1)<<63|0xffff)) return false;
@@ -250,6 +291,7 @@ inline bool validate(const File& f,Plan& result,bool play=false) {
                     uint16_t hint;
                     if(thunk>UINT32_MAX || !f.get(size_t(thunk),hint) || !f.string(size_t(thunk)+2,imp.name)) return false;
                 }
+                if(lazy) continue;
                 p.imports.push_back(std::move(imp));
                 if(p.imports.size()>4096) return false;
             }
@@ -260,6 +302,11 @@ inline bool validate(const File& f,Plan& result,bool play=false) {
     if(!imports(f.imports,false) || !imports(f.delay,true)) return false;
     std::sort(iatRanges.begin(),iatRanges.end(),[](Span a,Span b){return a.rva<b.rva;});
     for(size_t i=1;i<iatRanges.size();++i) if(overlaps(iatRanges[i-1],iatRanges[i])) return false;
+    // Lazy delay IATs may be relocated, but never alias each other or a bound IAT.
+    for(size_t i=0;i<lazyRanges.size();++i) {
+        for(size_t j=0;j<i;++j) if(overlaps(lazyRanges[i],lazyRanges[j])) return false;
+        for(auto s:iatRanges) if(overlaps(lazyRanges[i],s)) return false;
+    }
     // Prevalidate the ENTIRE relocation program, including non-load-config
     // destinations. Snapshot values so even self-modifying reloc data is inert.
     const size_t relocBytes=play?size_t(64)*1024*1024:size_t(1024)*1024;
