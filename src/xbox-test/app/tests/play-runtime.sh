@@ -131,5 +131,13 @@ cp "$out/play-dependency.dll" "$out/steam_api64.dll"
 WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" root-steam > "$out/root-steam.log" 2>&1
 tail -1 "$out/root-steam.log"
 grep -q "steam_api64.dll is the game's original file, mapped unmodified" "$out/root-steam.log"
-rm -f "$out/steam_api64.dll"
+# A configured Steam API provider serves steam_api64.dll for the owned game. The
+# root stand-in rejects attach, so only a real substitution reaches exit 42.
+cp "$out/play-reject.dll" "$out/steam_api64.dll"
+mkdir -p "$out/provider"; cp "$out/play-dependency.dll" "$out/provider/steam_api64.dll"
+PRUN_STEAM_PROVIDER=$(winepath -w "$out/provider/steam_api64.dll") WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d \
+ timeout -k 2 20 wine "$out/play-runner.exe" root-steam-provider > "$out/root-steam-provider.log" 2>&1
+tail -1 "$out/root-steam-provider.log"
+grep -q "steam_api64.dll served by the configured Steam API provider" "$out/root-steam-provider.log"
+rm -rf "$out/steam_api64.dll" "$out/provider"
 
