@@ -24,6 +24,7 @@ jobs:
         run: |
           set -e
           bash xbox-test/app/tests/session-restore.sh
+          bash xbox-test/app/tests/launch-status.sh
           python3 -m unittest xbox-test/app/tests/test_store_badge.py
           python3 -m unittest xbox-test/dp/test-verify-depot.py
           python3 -m unittest discover -s xbox-test/app/donors -p 'test_*.py'

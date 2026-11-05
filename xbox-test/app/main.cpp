@@ -26,6 +26,7 @@
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.ApplicationModel.Activation.h>
 #include <winrt/Windows.UI.Core.h>
+#include <winrt/Windows.UI.Popups.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Gaming.Input.h>
@@ -43,6 +44,7 @@ extern "C" {
 extern "C" size_t ZSTD_decompress(void* dst, size_t dstCapacity, const void* src, size_t compressedSize);
 extern "C" unsigned ZSTD_isError(size_t code);
 #include "font8x8_basic.h"
+#include "launch_button.h"
 #include <xinput.h>
 #include "../uwph/display/gamepad.h"
 
@@ -656,6 +658,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     CoreWindow m_window{nullptr};
     CoreDispatcher m_graphicsDispatcher{nullptr};
     bool m_guestSurface=false;
+    int m_guestFailureGen=0;
+    Windows::Foundation::IAsyncOperation<Windows::UI::Popups::IUICommand> m_guestDialog{nullptr};
     inline static App* graphicsApp=nullptr;
     bool m_closed = false;
     com_ptr<ID3D11Device> m_dev; com_ptr<ID3D11DeviceContext> m_ctx; com_ptr<IDXGISwapChain1> m_sc; com_ptr<ID3D11Texture2D> m_bb;
@@ -709,7 +713,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void refresh_install(double t) { if (t - m_dInstT > 0.5) { m_dInst = read_install(m_dApp); m_dInstT = t; } }
     bool dl_is_mine() { return g_dl.appid == m_dApp && g_dl.state == 1; }
     void detail_action(const char* via) {   // A: Install or Play
-        if (g_launch.phase == 1) { logf("detail: A ignored, launch attempt running"); return; }
+        if (g_launch.phase == 1 || g_launch.phase == 3) { logf("detail: A ignored, launch attempt running"); return; }
         m_dInst = read_install(m_dApp);
         if (m_dInst.installed) { m_dNote.clear(); logf("detail: Play pressed appid=%u (%s)", m_dApp, via); start_launch(m_dApp, m_dName, m_dInst.dir, via); return; }
         if (dl_is_mine() || is_queued(m_dApp)) { logf("detail: A ignored, download already queued/running"); return; }
@@ -732,6 +736,33 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
         }
         lp_watchdog();
+        guest_failure();
+    }
+    void guest_failure() {
+        if(!m_guestSurface || g_launch.phase!=2 || m_guestFailureGen==g_launch.gen)return;
+        std::string result;
+        {std::lock_guard<std::mutex> lock(g_launch.m);if(g_launch.ok)return;result=g_launch.result;}
+        m_guestFailureGen=g_launch.gen;
+        // Guest resources and other guest threads may still be live. Do not
+        // destroy their swapchain or attempt an in-process restart. Native UI
+        // can explain the failure above the retained guest surface safely.
+        std::string message=result.find("real client prerequisite item 36")!=std::string::npos?
+            "This game needs the genuine Steam client. This runtime cannot start that client yet. No playable game was reached.":
+            "The game launch failed or timed out. No playable game was confirmed.";
+        message+="\n\nClose and reopen the launcher before trying again.\n\n"+clip(result,500);
+        try {
+            Windows::UI::Popups::MessageDialog dialog(to_hstring(message),L"Game could not start");
+            dialog.Commands().Append(Windows::UI::Popups::UICommand(L"Close launcher",[](auto&&) {
+                logf("launch: failure dialog close launcher selected");CoreApplication::Exit();
+            }));
+            dialog.DefaultCommandIndex(0);dialog.CancelCommandIndex(0);
+            m_guestDialog=dialog.ShowAsync();
+            m_guestDialog.Completed([](auto const& operation,Windows::Foundation::AsyncStatus status) {
+                if(status==Windows::Foundation::AsyncStatus::Error)
+                    logf("launch: failure dialog async error hr=0x%08x",(unsigned)operation.ErrorCode().value);
+            });
+            logf("launch: failure dialog requested; guest resources retained");
+        } catch(hresult_error const& error) {logf("launch: failure dialog failed hr=0x%08x",(unsigned)error.code().value);}
     }
     static void blit(const std::vector<uint32_t>& pix, int iw, int ih, int x, int y) {
         for (int j = 0; j < ih; j++) { int yy = y + j; if (yy < 0 || yy >= H) continue; for (int i = 0; i < iw; i++) { int xx = x + i; if (xx < 0 || xx >= W) continue; g_fb[yy * W + xx] = pix[(size_t)j * iw + i] | 0xFF000000u; } }
@@ -751,7 +782,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         frame(60, 130, 616, 353, 3, C3(60, 70, 88));
         apib::Result gfx = apib::combine(apib::lookup(m_dApp), si && st == 1 ? si->dxKind : 0, si && st == 1 ? si->dxNote : std::string()); apib::draw(70, 140, 3, gfx);
         // install state
-        int dl = g_dl.state; bool mine = g_dl.appid == m_dApp, down = mine && dl == 1, queued = !down && is_queued(m_dApp), launching = g_launch.phase == 1 && g_launch.appid == m_dApp;
+        int dl = g_dl.state; bool mine = g_dl.appid == m_dApp, down = mine && dl == 1, queued = !down && is_queued(m_dApp), launching = (g_launch.phase == 1 || g_launch.phase == 3) && g_launch.appid == m_dApp;
         std::string status; uint32_t sc = TXT;
         if (down) { double p = g_dl.total ? 100.0 * g_dl.done / g_dl.total : 0; char b[64]; snprintf(b, sizeof b, "Downloading %.0f%%", p); status = b; sc = YEL; }
         else if (queued) { status = "Queued..."; sc = YEL; }
@@ -767,10 +798,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             text(60, 548, l1, 2, RED); text(60, 572, l2, 2, RED);
         } else if (!m_dNote.empty()) text(60, 548, clip(m_dNote, 38), 2, RED);
         // main button
-        const char* label = launching ? "LAUNCHING..." : (down || queued) ? "INSTALLING..." : m_dInst.installed ? "PLAY" : "INSTALL";
-        bool busy = launching || down || queued;
-        fill(60, 650, 616, 120, busy ? C3(60, 66, 78) : m_dInst.installed ? C3(40, 150, 80) : C3(45, 90, 200)); frame(60, 650, 616, 120, 8, YEL);
-        text(60 + 308 - twidth(label, 5) / 2, 678, label, 5, TXT);
+        bool retained=play_runtime::observed.load(std::memory_order_acquire)!=nullptr;
+        const char* label = launching ? (g_launch.phase==3?"GUEST RUNNING":"LAUNCHING...") : retained ? "RESTART REQUIRED" : (down || queued) ? "INSTALLING..." : m_dInst.installed ? "PLAY" : "INSTALL";
+        bool busy = launching || retained || down || queued;
+        fill(60, 650, launch_button::width, 120, busy ? C3(60, 66, 78) : m_dInst.installed ? C3(40, 150, 80) : C3(45, 90, 200)); frame(60, 650, launch_button::width, 120, 8, YEL);
+        auto labelLayout=launch_button::label_layout(std::char_traits<char>::length(label));
+        text(60 + labelLayout.x, 650 + labelLayout.y, label, labelLayout.scale, TXT);
         text(60 + 308 - twidth(down ? "B: cancel download" : "press A", 2) / 2, 734, down ? "B: cancel download" : "press A", 2, C3(210, 220, 240));
         // right column: meta + description
         std::vector<std::string> meta;
@@ -795,7 +828,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             fill(60, 810, 1800, 180, C3(10, 12, 16)); frame(60, 810, 1800, 180, 3, g_launch.phase == 1 ? YEL : C3(60, 70, 88));
             if (g_launch.phase == 1) { char b[100]; snprintf(b, sizeof b, "Launching... (%.0f s) running guest loader", now_s() - g_launch.started); text(80, 826, b, 3, YEL); }
             else { std::string r; { std::lock_guard<std::mutex> l(g_launch.m); r = g_launch.result; }
-                text(80, 822, "Launch attempted:", 3, YEL); auto ls = wrap_lines(r, 73); for (size_t i = 0; i < ls.size() && i < 4; i++) text(80, 858 + (int)i * 34, ls[i], 3, TXT); }
+                bool ok;{std::lock_guard<std::mutex> l(g_launch.m);ok=g_launch.ok;}
+                text(80, 822, g_launch.phase==3?"Guest running (playability unverified)":ok?"Guest completed (playability unverified)":"Launch failed - restart launcher", 3, g_launch.phase==3?YEL:ok?GRN:RED); auto ls = wrap_lines(r, 73); for (size_t i = 0; i < ls.size() && i < 4; i++) text(80, 858 + (int)i * 34, ls[i], 3, TXT); }
         }
         text(60, 1050, st == 0 || st == 2 ? "A: Install / Play   B: back (cancels a running download)   Menu: back   D-pad up/down: scroll" : "A: Install / Play   B: back (cancels a running download)   Menu: back   D-pad up/down: scroll text", 2, C3(120, 130, 145));
     }

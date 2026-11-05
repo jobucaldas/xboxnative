@@ -6,7 +6,8 @@
 # Input is SYNTHETIC: one-shot LocalState\cmd.txt lines (consumed by the app, logged as "cmd.txt SYNTHETIC command").
 # Env: PKG=<PackageFullName> (default: auto-detect Grok.XboxTest), PT_MAXMB=<n> (size guard via dlmax.txt: refuse download if
 #      bigger than n MB; 0 = dry run that only prints the manifest size), PT_NOKILL=1 (don't restart the app first).
-# Exit: 0 = a launch attempt and GAP summary were reported; 1 = install failed/timeout/missing GAP; 2 = usage/setup.
+# Exit: 0 = fresh, clean guest completion plus GAP summary (visual/playable sign-off still required);
+#       1 = runtime/install failure, nonterminal progress, stale evidence, timeout or missing GAP; 2 = usage/setup.
 # Never touches steam_session.bin. DP_PASS comes from the env and is never printed. Needs PATH with $HOME/.local/bin.
 HERE="$(cd "$(dirname "$0")" && pwd)"; DP="$HERE/../dp"; . "$DP/dp-lib.sh"
 app="$1"; to="${2:-600}"; out="${3:-/workspace/x64-run/runs/play-$1-$(date +%Y%m%d-%H%M%S)}"
@@ -60,5 +61,5 @@ if [[ "$app" == 480 || "$app" == 48000 ]]; then
   grep -q '^i386,' "$out/pe32-imports-$app.csv" || { echo "NO I386 IMPORT LIST"; exit 1; }
 fi
 echo "---- fps ----"; grep -E 'fps~' "$out/boot.session.log" | tail -2
-[ $res -eq 0 ] && { [ "$gap_ok" -eq 1 ] || { echo "NO GAP SUMMARY (see $out/launch_probe.log)"; exit 1; }; echo "LAUNCH ATTEMPTED: $(grep 'launch: RESULT' "$out/boot.session.log" | tail -1)"; echo "evidence: $out"; exit 0; }
+[ $res -eq 0 ] && { [ "$gap_ok" -eq 1 ] || { echo "NO GAP SUMMARY (see $out/launch_probe.log)"; exit 1; }; python3 -I "$HERE/check-play-result.py" "$app" "$out" || exit 1; echo "GUEST COMPLETED: $(grep 'launch: RESULT' "$out/boot.session.log" | tail -1)"; echo "evidence: $out (visual/playable sign-off still required)"; exit 0; }
 echo "NO LAUNCH RESULT (see $out)"; exit 1
