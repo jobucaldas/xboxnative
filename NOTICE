@@ -29,6 +29,10 @@ External dependencies fetched at build time (never copied here; pinned in deps.p
                                                its minimal Wine context is LGPL-2.1-or-later (Copyright 2000 Alexandre Julliard).
                                                Retain that patch with the corresponding source. LGPL-2.1-or-later is generally read as combinable with GPLv3 code (LGPLv2.1 s.3 lets a
                                                recipient apply the GPL instead).
+  gbe_fork release (gbe-fork-win)              LGPL-3.0 (Detanup01/gbe_fork). Pinned prebuilt release fetched and SHA-256 verified by
+                                               src/tools/fetch-gbe-fork.sh into git-ignored out/gbe-fork/; only the regular x64
+                                               steam_api64.dll is packaged (steam-provider/gbe/, with LICENSE and SOURCE.txt naming the
+                                               tagged source). Never committed; mapped unmodified as a separate library.
   uwp-crossbuild (gianlucamazza/uwp-crossbuild)  MIT. Build wrapper used by the build scripts (clang-cl/lld-link + xwin).
   SQLite amalgamation (sqlite-src)             Public domain (https://sqlite.org/copyright.html). Source archive pinned in deps.pin,
                                                verified and fetched by src/xbox-test/uwph/host/fetch-sqlite.sh into git-ignored

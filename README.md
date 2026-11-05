@@ -110,6 +110,9 @@ such as NixOS, expose ICU's development `.pc` files through `PKG_CONFIG_PATH`, a
 The current builds do **not** need Boxedwine sources. `src/tools/fetch-boxedwine.sh` fetches the pinned upstream
 (`deps.pin`) for future work (x86 engine); see [patches/README.md](patches/README.md).
 
+The launcher packages a Steam API provider for owned games: the pinned gbe_fork release (`gbe-fork-win` in deps.pin,
+LGPL-3.0), fetched and verified by `src/tools/fetch-gbe-fork.sh` during `build.sh` (needs `7z`); it is never committed.
+
 Wine-built donor DLLs (avrt, hid, setupapi, shcore, version) are never committed. Build them from the pinned Wine 10.0 source
 (needs mingw-w64, flex, bison; about a minute):
 ```sh

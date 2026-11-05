@@ -25,6 +25,11 @@ lld-link-19 /dll /noentry /subsystem:windows,6.02 /appcontainer /dynamicbase /nx
 mkdir -p "$out/layout/donors"
 cp "$donors"/{avrt,hid,setupapi,shcore,version}.dll "$out/layout/donors/"
 cp "$donors"/{SHA256SUMS,SOURCE.txt,0001-pe-rodata.patch} "$here/donors/COPYING.LIB" "$here/donors/LICENSE" "$out/layout/donors/"
+# Steam API provider for owned games (gbe_fork, pinned release; never committed).
+gbe="$here/../../../out/gbe-fork"
+bash "$here/../../tools/fetch-gbe-fork.sh" "$gbe"
+mkdir -p "$out/layout/steam-provider/gbe"
+cp "$gbe"/{steam_api64.dll,LICENSE,SOURCE.txt} "$out/layout/steam-provider/gbe/"
 cp -r "$here/Assets" "$here/AppxManifest.xml" "$out/layout/"
 # test certificate (subject must equal manifest Publisher); created once, never committed
 if [ ! -f "$out/test.pfx" ]; then
