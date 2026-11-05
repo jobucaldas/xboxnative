@@ -218,9 +218,10 @@ static void cloud_uploader(uint32_t appid,std::wstring gameRoot) {
         auto roots=cloud_roots(gameRoot);
         std::vector<fs::path> extra{fs::path(provider_dir(appid))/"saves"/std::to_string(appid)};
         std::vector<steam_cloud::Rule> rules;{std::lock_guard<std::mutex> lock(g_cloudRulesM);rules=g_cloudRules;}
-        std::string synced=steam_cloud::signature(roots,rules,extra),seen=synced;
+        std::string synced,seen;
+        try{synced=seen=steam_cloud::signature(roots,rules,extra);}catch(...){}
         ULONGLONG changedAt=GetTickCount64(),lastPass=GetTickCount64();
-        for(;;) {
+        for(;;) try {
             auto r=play_runtime::observed.load(std::memory_order_acquire);
             bool finished=!r||r->finished.load(std::memory_order_acquire);
             if(!finished)Sleep(5000);
@@ -235,7 +236,7 @@ static void cloud_uploader(uint32_t appid,std::wstring gameRoot) {
                 synced=current;lastPass=now;
             }
             if(finished){games_played(0);return;}
-        }
+        } catch(...) {lp_sink("STEAM sync watcher: exception; retrying");Sleep(5000);}
     }).detach();
 }
 static void lp_run_impl(LpCtx& c) {

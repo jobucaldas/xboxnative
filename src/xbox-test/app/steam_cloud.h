@@ -122,6 +122,18 @@ inline void set_unix_time(const fs::path& p,uint64_t seconds) {
     auto system=std::chrono::system_clock::time_point(std::chrono::seconds(seconds));
     fs::last_write_time(p,system-std::chrono::system_clock::now()+fs::file_time_type::clock::now(),ec);
 }
+// Non-throwing directory walk: the game may create or delete save files while
+// we look, and a range-for over a directory iterator throws on such errors.
+template<class F> inline void walk(const fs::path& dir,bool recursive,F&& visit) {
+    std::error_code ec;
+    if(recursive) {
+        fs::recursive_directory_iterator it(dir,fs::directory_options::skip_permission_denied,ec),end;
+        for(;!ec&&it!=end;it.increment(ec)) visit(*it);
+    } else {
+        fs::directory_iterator it(dir,fs::directory_options::skip_permission_denied,ec),end;
+        for(;!ec&&it!=end;it.increment(ec)) visit(*it);
+    }
+}
 struct Result { unsigned downloaded=0, uploaded=0, unchanged=0, kept=0, busy=0, failed=0; };
 // Cheap change detector for save-triggered uploads: names, sizes and times of
 // the files the save rules match, plus any extra directories (e.g. the
@@ -140,9 +152,9 @@ inline std::string signature(const Roots& roots,const std::vector<Rule>& saveRul
         fs::path base=it->second;std::string rel=rule.path;
         for(size_t s=0;s<rel.size();){size_t e=rel.find('/',s);if(e==std::string::npos)e=rel.size();base/=rel.substr(s,e-s);s=e+1;}
         std::error_code ec;if(!fs::is_directory(base,ec)) continue;
-        for(auto& e:fs::recursive_directory_iterator(base,ec)) if(glob(rule.pattern,e.path().filename().string())) add(e);
+        walk(base,true,[&](const fs::directory_entry& e){if(glob(rule.pattern,e.path().filename().string()))add(e);});
     }
-    for(auto& dir:extra){std::error_code ec;for(auto& e:fs::recursive_directory_iterator(dir,ec))add(e);}
+    for(auto& dir:extra) walk(dir,true,add);
     return sig;
 }
 inline Headers headers(const std::string& message,int field) {
@@ -200,11 +212,14 @@ inline Result upload(Io& io,uint32_t appid,const Roots& roots,const std::vector<
         for(size_t s=0;s<rel.size();){size_t e=rel.find('/',s);if(e==std::string::npos)e=rel.size();base/=rel.substr(s,e-s);s=e+1;}
         std::error_code ec;if(!fs::is_directory(base,ec)) continue;
         auto visit=[&](const fs::directory_entry& entry) {
-            if(!entry.is_regular_file()) return;
+            std::error_code fileError;
+            if(!entry.is_regular_file(fileError)) return;
             auto name=entry.path().filename().string();
             if(!glob(rule.pattern,name)||name.find(".xboxnative-")!=std::string::npos) return;
-            auto sub=fs::relative(entry.path(),base,ec).generic_string();
-            if(ec||!safe_relative(sub)) return;
+            // Lexical: fs::relative canonicalizes through the filesystem, which the
+            // console app container can refuse (every file was skipped).
+            auto sub=entry.path().lexically_relative(base).generic_string();
+            if(!safe_relative(sub)) return;
             std::string cloudName="%"+rule.root+"%"+(rule.path.empty()?"":rule.path+"/")+sub;
             auto data=read_file(entry.path());if(!data) return;
             uint64_t time=unix_time(entry.path());
@@ -216,8 +231,7 @@ inline Result upload(Io& io,uint32_t appid,const Roots& roots,const std::vector<
             }
             pending.push_back({cloudName,entry.path(),*data,time});
         };
-        if(rule.recursive){for(auto& e:fs::recursive_directory_iterator(base,ec))visit(e);}
-        else for(auto& e:fs::directory_iterator(base,ec))visit(e);
+        walk(base,rule.recursive,visit);
     }
     if(pending.empty()) return r;
     std::string begin;pb_u(begin,1,appid);pb_s(begin,2,machine);
