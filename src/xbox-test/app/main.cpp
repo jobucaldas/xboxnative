@@ -853,7 +853,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         text(60, 1050, "A: Install / Play   X: Delete   B: back / cancel download   Menu: back   D-pad up/down: scroll", 2, C3(120, 130, 145));
         if (m_confirmDelete) {
             std::string q = "Delete " + clip(m_dName, 30) + "?"; char sz[96];
-            if (m_dInst.bytes) snprintf(sz, sizeof sz, "Frees %.2f GB on this console. Saves are kept.", m_dInst.bytes / 1073741824.0); else snprintf(sz, sizeof sz, "Removes the game files from this console. Saves are kept.");
+            if (m_dInst.bytes >= 107374182) snprintf(sz, sizeof sz, "Frees %.2f GB on this console. Saves are kept.", m_dInst.bytes / 1073741824.0);
+            else if (m_dInst.bytes) snprintf(sz, sizeof sz, "Frees %.1f MB on this console. Saves are kept.", m_dInst.bytes / 1048576.0); else snprintf(sz, sizeof sz, "Removes the game files from this console. Saves are kept.");
             fill(360, 380, 1200, 300, C3(10, 12, 16)); frame(360, 380, 1200, 300, 6, YEL);
             int qs = twidth(q, 5) <= 1120 ? 5 : 3; text(960 - twidth(q, qs) / 2, 420, q, qs, TXT);
             text(960 - twidth(sz, 2) / 2, 500, sz, 2, DIM);
