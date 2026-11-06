@@ -11,6 +11,7 @@
 #include <d3d11.h>
 #include <intrin.h>
 #include "play_graphics.h"
+#include "../../uwph/vcruntime/route.h"
 namespace play_runtime {
 constexpr DWORD missingException=0xe0520001, exitException=0xe0520002;
 struct Module {
@@ -646,6 +647,7 @@ static int WINAPI messageBoxW(HWND,LPCWSTR text,LPCWSTR caption,UINT type) {
     stopMissing("user32.dll!MessageBoxW caption=\""+title+"\" text=\""+message+"\" type="+std::to_string(type),(uintptr_t)_ReturnAddress());
     return 0;
 }
+static uintptr_t vcruntimeLookup(const char* dll,const char* name) {return resolve(dll,name,0);}
 static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     std::string key=lower(dll);
     if(key=="kernelbase.dll") key="kernel32.dll";
@@ -676,6 +678,14 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     if(dependency) {
         if(owner && owner!=dependency) owner->dependencies.push_back(dependency);
         auto p=exported(*dependency,name,ordinal);return p?p:missing(dll,name,ordinal);
+    }
+    // VC++ runtime DLLs the console lacks (no game copy was found above):
+    // forwarded to the console's ucrtbase, as Wine's vcruntime140 does.
+    if(vcruntime_core::handles(key.c_str())) {
+        auto p=name?vcruntime_core::resolve(key.c_str(),name,&vcruntimeLookup):0;
+        std::string full=key+"!"+(name?name:"#"+std::to_string(ordinal));
+        if(state->log && mlp::first_report("vcrt "+full)) state->log(("VCRT ROUTE "+full+" found="+std::to_string(!!p)).c_str());
+        return p?p:missing(dll,name,ordinal);
     }
     return mlp::resolve(key.c_str(),name,ordinal);
 }
