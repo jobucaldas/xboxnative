@@ -283,7 +283,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // Engine options come from the game's files, as in the launcher.
     std::wstring gameExe=L"Megabonk.exe";
     {wchar_t value[260];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_EXE",value,260);if(n&&n<260)gameExe.assign(value,n);}
-    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES)):play_runtime::wide(args),logline))return 1;
+    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
     // guest stop (fatal dialog). Progress must never mask that failure.
