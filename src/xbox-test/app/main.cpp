@@ -151,7 +151,7 @@ static Resp steam_call(const char* iface, const char* method, const std::string&
 }
 struct QrSession { uint64_t clientId = 0; std::string requestId, url; float interval = 5; };
 static bool begin_qr(QrSession& q) {
-    std::string dd; pb_s(dd, 1, "Xbox Steam Launcher"); pb_u(dd, 2, 1 /*EAuthTokenPlatformType.SteamClient*/); pb_u(dd, 3, 20 /*EOSType.Win11*/); pb_u(dd, 4, 1 /*gaming_device_type*/);
+    std::string dd; pb_s(dd, 1, "Xbox Native"); pb_u(dd, 2, 1 /*EAuthTokenPlatformType.SteamClient*/); pb_u(dd, 3, 20 /*EOSType.Win11*/); pb_u(dd, 4, 1 /*gaming_device_type*/);
     std::string req; pb_s(req, 3, dd);
     Resp r = steam_call("IAuthenticationService", "BeginAuthSessionViaQR", req);
     if (r.status != 200 || r.eresult != 1) return false;
@@ -493,6 +493,20 @@ static void enter_library_cm(CmSession& cm) {
 static std::mutex g_dqm; static std::condition_variable g_dqcv; static std::deque<uint32_t> g_dq;
 static void enqueue_download(uint32_t appid) { { std::lock_guard<std::mutex> l(g_dqm); if (std::find(g_dq.begin(), g_dq.end(), appid) != g_dq.end()) return; g_dq.push_back(appid); } g_dqcv.notify_all(); logf("download queued: appid %u", appid); }
 static bool is_queued(uint32_t appid) { std::lock_guard<std::mutex> l(g_dqm); return std::find(g_dq.begin(), g_dq.end(), appid) != g_dq.end(); }
+// Install folders: one download or one delete (game_delete.h) at a time, never both,
+// because another app may share the folder and its marker must not appear while the
+// folder is removed. Both flags live under g_dqm, so popping a queued job and claiming
+// the folders is one step, and a delete only starts with nothing running or queued.
+static bool g_fsDownloading = false, g_fsDeleting = false;   // guarded by g_dqm
+static bool begin_download() {   // autodownload.txt path: wait out a running delete
+    std::unique_lock<std::mutex> l(g_dqm);
+    while (g_fsDeleting && !g_quit) g_dqcv.wait_for(l, std::chrono::milliseconds(200));
+    if (g_quit) return false; g_fsDownloading = true; return true;
+}
+static void end_download() { { std::lock_guard<std::mutex> l(g_dqm); g_fsDownloading = false; } g_dqcv.notify_all(); }
+static bool try_begin_delete() { std::lock_guard<std::mutex> l(g_dqm); if (g_fsDownloading || g_fsDeleting || !g_dq.empty()) return false; g_fsDeleting = true; return true; }
+static void end_delete() { { std::lock_guard<std::mutex> l(g_dqm); g_fsDeleting = false; } g_dqcv.notify_all(); }
+static bool deleting_now() { std::lock_guard<std::mutex> l(g_dqm); return g_fsDeleting; }
 static std::atomic<int> g_dlSeq{0}; static std::atomic<uint32_t> g_dlLastApp{0}; static std::atomic<bool> g_dlLastOk{false};   // bumped when a queued download finishes (detail screen auto-launch)
 static std::shared_ptr<CmSession> g_cmAnon;
 static std::shared_ptr<CmSession> session_for_download() {
@@ -511,20 +525,28 @@ static void dl_thread() {
         logf("autodownload.txt: %zu appids", ids.size());
         for (int k = 0; k < 600 && !g_authResolved && !g_quit; k++) Sleep(100);
         bool allOk = true;
-        for (uint32_t id : ids) { if (g_quit) break; auto s = session_for_download(); if (!s) { allOk = false; logf("autodownload: no CM session for appid %u", id); continue; } if (!download_app(*s, id)) allOk = false; }
+        for (uint32_t id : ids) {
+            if (g_quit || !begin_download()) break;
+            auto s = session_for_download();
+            if (!s) { allOk = false; logf("autodownload: no CM session for appid %u", id); }
+            else if (!download_app(*s, id)) allOk = false;
+            end_download();
+        }
         logf("autodownload: finished (%s)", allOk ? "all ok" : "with failures");
         if (allOk) MoveFileExW(ap.c_str(), (g_dir + L"\\autodownload.done.txt").c_str(), MOVEFILE_REPLACE_EXISTING);
     }
     while (!g_quit) {
         uint32_t id = 0;
-        { std::unique_lock<std::mutex> l(g_dqm); g_dqcv.wait_for(l, std::chrono::milliseconds(500), [] { return !g_dq.empty() || g_quit; }); if (g_dq.empty()) continue; id = g_dq.front(); g_dq.pop_front(); }
-        auto s = session_for_download(); if (!s) { g_dl.appid = id; g_dl.state = 3; dl_msg("Cannot reach Steam"); g_dlLastApp = id; g_dlLastOk = false; g_dlSeq++; continue; }
-        bool dok = download_app(*s, id); g_dlLastApp = id; g_dlLastOk = dok; g_dlSeq++;
+        { std::unique_lock<std::mutex> l(g_dqm); g_dqcv.wait_for(l, std::chrono::milliseconds(500), [] { return (!g_dq.empty() && !g_fsDeleting) || g_quit; });
+          if (g_quit || g_dq.empty() || g_fsDeleting) continue; id = g_dq.front(); g_dq.pop_front(); g_fsDownloading = true; }
+        auto s = session_for_download(); if (!s) { g_dl.appid = id; g_dl.state = 3; dl_msg("Cannot reach Steam"); g_dlLastApp = id; g_dlLastOk = false; end_download(); g_dlSeq++; continue; }
+        bool dok = download_app(*s, id); end_download(); g_dlLastApp = id; g_dlLastOk = dok; g_dlSeq++;
     }
 }
 
 #include "launch.h"
 #include "guest_overlay.h"
+#include "game_delete.h"
 #include "apibadge.h"
 
 // definitive refusals mean the saved token is bad; anything else (network, CM busy) keeps the token and retries
@@ -648,6 +670,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     com_ptr<ID3D11Device> m_dev; com_ptr<ID3D11DeviceContext> m_ctx; com_ptr<IDXGISwapChain1> m_sc; com_ptr<ID3D11Texture2D> m_bb;
     Pad m_pad; int m_prevPads = -1; uint64_t m_frame = 0;
     int m_sel = 0, m_top = 0; double m_scroll = 0, m_scrollT = 0; bool m_btnFocus = true, m_confirmLogout = false;
+    bool m_onlyInstalled = false;                            // View: library shows installed games only
+    std::set<uint32_t> m_installed; double m_installedT = -10; int m_installedDel = -1, m_installedDl = -1;
+    void refresh_installed(double t) {                       // dl_<appid>.done markers; rescanned every 2 s and after a download/delete
+        if (t - m_installedT < 2 && m_installedDel == g_del.gen && m_installedDl == g_dlSeq) return;
+        m_installed = installed_appids(); m_installedT = t; m_installedDel = g_del.gen; m_installedDl = g_dlSeq;
+    }
+    std::vector<std::shared_ptr<Game>> shown_games() { return game_library::shown(g_games, m_onlyInstalled, m_installed); }   // caller holds g_gm
     static constexpr int COLS = 6;
 
     void grid_position(int sel, int top, const char* cause) {
@@ -682,25 +711,41 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     }
 
     // ---------------------------------------------------------------- detail screen (store info + Install/Play)
-    uint32_t m_dApp = 0; std::string m_dName, m_dNote; int m_dScroll = 0; std::shared_ptr<StoreInfo> m_dSi;
+    uint32_t m_dApp = 0; std::string m_dName, m_dNote; int m_dScroll = 0; std::shared_ptr<StoreInfo> m_dSi; bool m_confirmDelete = false;
+    game_library::DeleteKind m_delKind = game_library::DeleteKind::folder;   // decided when the confirm dialog opens
     InstallInfo m_dInst; double m_dInstT = -10;
     struct AutoLaunch { uint32_t app = 0; int seq = 0; } m_auto;
     std::string game_name(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return g->name; return id == 480 ? "Spacewar" : id == 3405340 ? "Megabonk" : id == 1007 ? "Steamworks SDK Redist" : ""; }
     bool owned(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return true; return false; }
     void open_detail(uint32_t id, const std::string& nm, const char* via) {
-        m_dApp = id; m_dName = nm.empty() ? "App " + std::to_string(id) : nm; m_dNote.clear(); m_dScroll = 0; m_dInstT = -10;
+        m_dApp = id; m_dName = nm.empty() ? "App " + std::to_string(id) : nm; m_dNote.clear(); m_dScroll = 0; m_dInstT = -10; m_confirmDelete = false;
         auto si = std::make_shared<StoreInfo>(); si->appid = id; m_dSi = si; std::thread(store_worker, si).detach();
         m_confirmLogout = false; g_screen = S_DETAIL; logf("detail: open appid=%u name='%s' via=%s", id, m_dName.c_str(), via);
     }
     void close_detail(const char* why) { logf("detail: back to library (%s)", why); m_dSi.reset(); g_screen = S_LIBRARY; }
-    void refresh_install(double t) { if (t - m_dInstT > 0.5) { m_dInst = read_install(m_dApp); m_dInstT = t; } }
+    int m_dInstDel = -1;   // g_del.gen seen by m_dInst: a finished delete refreshes it at once
+    void refresh_install(double t) { if (t - m_dInstT > 0.5 || m_dInstDel != g_del.gen) { m_dInstDel = g_del.gen; m_dInst = read_install(m_dApp); m_dInstT = t; } }
     bool dl_is_mine() { return g_dl.appid == m_dApp && g_dl.state == 1; }
+    bool deleting_mine() { return g_del.appid == m_dApp && g_del.state == 1; }
+    void detail_delete(const char* via) {     // X: ask to delete an installed game
+        m_dInst = read_install(m_dApp); m_dInstT = now_s();
+        if (!m_dInst.installed || deleting_mine()) return;
+        if (g_launch.phase == 1 || g_launch.phase == 3 || play_runtime::observed.load(std::memory_order_acquire) != nullptr) { m_dNote = "A game was started: reopen the app to delete."; return; }
+        m_delKind = delete_kind_for(m_dApp, m_dInst.dir); m_dNote.clear(); m_confirmDelete = true; logf("detail: delete asked appid=%u (%s)", m_dApp, via);
+    }
+    void detail_delete_confirm(const char* via) {
+        m_confirmDelete = false; std::string why = start_delete(m_dApp);
+        if (!why.empty()) { m_dNote = why; logf("detail: delete not started appid=%u (%s): %s", m_dApp, via, why.c_str()); }
+        else { m_dNote.clear(); m_dInstT = -10; }
+    }
     void detail_action(const char* via) {   // A: Install or Play
         if (g_launch.phase == 1 || g_launch.phase == 3) { logf("detail: A ignored, launch attempt running"); return; }
         m_dInst = read_install(m_dApp);
+        if (deleting_mine()) { logf("detail: A ignored, delete running"); return; }
         if (m_dInst.installed) { m_dNote.clear(); logf("detail: Play pressed appid=%u (%s)", m_dApp, via); start_launch(m_dApp, m_dName, m_dInst.dir, via); return; }
         if (dl_is_mine() || is_queued(m_dApp)) { logf("detail: A ignored, download already queued/running"); return; }
         if (g_demo) { m_dNote = "Demo list: installing is disabled."; return; }
+        if (deleting_now()) { m_dNote = "Wait for the delete to finish."; return; }
         m_auto.app = m_dApp; m_auto.seq = g_dlSeq; m_dNote.clear();
         logf("detail: Install pressed appid=%u (%s) - will auto-launch when finished", m_dApp, via); enqueue_download(m_dApp);
     }
@@ -877,8 +922,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         apib::Result gfx = apib::combine(apib::lookup(m_dApp), si && st == 1 ? si->dxKind : 0, si && st == 1 ? si->dxNote : std::string()); apib::draw(70, 140, 3, gfx);
         // install state
         int dl = g_dl.state; bool mine = g_dl.appid == m_dApp, down = mine && dl == 1, queued = !down && is_queued(m_dApp), launching = (g_launch.phase == 1 || g_launch.phase == 3) && g_launch.appid == m_dApp;
+        bool deleting = deleting_mine(), delDone = g_del.appid == m_dApp && (g_del.state == 2 || g_del.state == 3);
         std::string status; uint32_t sc = TXT;
-        if (down) { double p = g_dl.total ? 100.0 * g_dl.done / g_dl.total : 0; char b[64]; snprintf(b, sizeof b, "Downloading %.0f%%", p); status = b; sc = YEL; }
+        if (deleting) { status = "Deleting..."; sc = YEL; }
+        else if (down) { double p = g_dl.total ? 100.0 * g_dl.done / g_dl.total : 0; char b[64]; snprintf(b, sizeof b, "Downloading %.0f%%", p); status = b; sc = YEL; }
         else if (queued) { status = "Queued..."; sc = YEL; }
         else if (m_dInst.installed) { double gb = m_dInst.bytes / 1073741824.0; char b[64]; if (m_dInst.bytes == 0) snprintf(b, sizeof b, "Installed"); else if (gb < 0.1) snprintf(b, sizeof b, "Installed - %.1f MB", m_dInst.bytes / 1048576.0); else snprintf(b, sizeof b, "Installed - %.2f GB", gb); status = b; sc = GRN; }
         else { status = "Not installed"; sc = TXT; }
@@ -891,10 +938,18 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             std::string ms; { std::lock_guard<std::mutex> l(g_dl.m); ms = g_dl.msg; } std::string l1, l2; wrap2((dl == 4 ? "Cancelled: " : "Failed: ") + ms, 38, l1, l2);
             text(60, 548, l1, 2, RED); text(60, 572, l2, 2, RED);
         } else if (!m_dNote.empty()) text(60, 548, clip(m_dNote, 38), 2, RED);
+        else if (deleting) { char b[80]; snprintf(b, sizeof b, "%llu files removed", (unsigned long long)g_del.progress.removed.load()); text(60, 548, b, 2, DIM); }
+        else if (delDone && !m_dInst.installed) {
+            if (g_del.state == 2) { auto k = g_del.kind.load(); text(60, 548, k == game_library::DeleteKind::folder ? "Deleted. Saves were kept." : k == game_library::DeleteKind::shared ? "Removed. Shared files kept." : "Removed; folder unknown, files kept.", 2, GRN); }
+            else { char b[80]; snprintf(b, sizeof b, "Deleted; %u items left behind.", g_del.progress.failed.load()); text(60, 548, b, 2, RED); }
+        } else if (delDone && g_del.untouched) text(60, 548, "Delete failed. Nothing was removed.", 2, RED);
         // main button
         bool retained=play_runtime::observed.load(std::memory_order_acquire)!=nullptr;
-        const char* label = launching ? (g_launch.phase==3?"GUEST RUNNING":"LAUNCHING...") : retained ? "RESTART REQUIRED" : (down || queued) ? "INSTALLING..." : m_dInst.installed ? "PLAY" : "INSTALL";
-        bool busy = launching || retained || down || queued;
+        const char* label = launching ? (g_launch.phase==3?"GUEST RUNNING":"LAUNCHING...") : retained ? "RESTART REQUIRED" : deleting ? "DELETING..." : (down || queued) ? "INSTALLING..." : m_dInst.installed ? "PLAY" : "INSTALL";
+        bool busy = launching || retained || deleting || down || queued;
+        if (m_dInst.installed && !busy) {   // secondary action: delete (X)
+            const char* dl2 = "X: Delete game"; int w = twidth(dl2, 3) + 30; fill(60, 590, w, 46, C3(120, 40, 40)); text(75, 601, dl2, 3, TXT);
+        }
         fill(60, 650, launch_button::width, 120, busy ? C3(60, 66, 78) : m_dInst.installed ? C3(40, 150, 80) : C3(45, 90, 200)); frame(60, 650, launch_button::width, 120, 8, YEL);
         auto labelLayout=launch_button::label_layout(std::char_traits<char>::length(label));
         text(60 + labelLayout.x, 650 + labelLayout.y, label, labelLayout.scale, TXT);
@@ -925,7 +980,18 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 bool ok;{std::lock_guard<std::mutex> l(g_launch.m);ok=g_launch.ok;}
                 text(80, 822, g_launch.phase==3?"Guest running (playability unverified)":ok?"Guest completed (playability unverified)":"Launch failed - restart launcher", 3, g_launch.phase==3?YEL:ok?GRN:RED); auto ls = wrap_lines(r, 73); for (size_t i = 0; i < ls.size() && i < 4; i++) text(80, 858 + (int)i * 34, ls[i], 3, TXT); }
         }
-        text(60, 1050, st == 0 || st == 2 ? "A: Install / Play   B: back (cancels a running download)   Menu: back   D-pad up/down: scroll" : "A: Install / Play   B: back (cancels a running download)   Menu: back   D-pad up/down: scroll text", 2, C3(120, 130, 145));
+        text(60, 1050, "A: Install / Play   X: Delete   B: back / cancel download   Menu: back   D-pad up/down: scroll", 2, C3(120, 130, 145));
+        if (m_confirmDelete) {
+            std::string q = "Delete " + clip(m_dName, 30) + "?"; char sz[96];
+            if (m_delKind == game_library::DeleteKind::shared) snprintf(sz, sizeof sz, "Its files are shared with another installed game and stay.");
+            else if (m_delKind == game_library::DeleteKind::unknown_folder) snprintf(sz, sizeof sz, "Leaves the installed list. Its folder is unknown, so files stay.");
+            else if (m_dInst.bytes >= 107374182) snprintf(sz, sizeof sz, "Frees %.2f GB on this console. Saves are kept.", m_dInst.bytes / 1073741824.0);
+            else if (m_dInst.bytes) snprintf(sz, sizeof sz, "Frees %.1f MB on this console. Saves are kept.", m_dInst.bytes / 1048576.0); else snprintf(sz, sizeof sz, "Removes the game files from this console. Saves are kept.");
+            fill(360, 380, 1200, 300, C3(10, 12, 16)); frame(360, 380, 1200, 300, 6, YEL);
+            int qs = twidth(q, 5) <= 1120 ? 5 : 3; text(960 - twidth(q, qs) / 2, 420, q, qs, TXT);
+            text(960 - twidth(sz, 2) / 2, 500, sz, 2, DIM);
+            text(960 - twidth("A: Yes, delete        B: Cancel", 3) / 2, 600, "A: Yes, delete        B: Cancel", 3, TXT);
+        }
     }
     // One-shot synthetic command file LocalState\cmd.txt (consumed on read). Lines: open <appid> | press (=A) | back (=B) | view | up | down | left | right | lb | rb | x | y | sleep <s>.
     // Never periodic, never present unless a tester/script writes it; every executed line is logged as SYNTHETIC.
@@ -1103,7 +1169,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     }
     void draw_library(double t) {
         fill(0, 0, W, H, C3(14, 17, 22));
-        int owned = g_ownedCount; size_t listed; { std::lock_guard<std::mutex> l(g_gm); listed = g_games.size(); }
+        refresh_installed(t);
+        int owned = g_ownedCount; size_t listed, total; { std::lock_guard<std::mutex> l(g_gm); total = g_games.size(); listed = m_onlyInstalled ? shown_games().size() : total; }
         const int CW = 280, CH = 452, GX = 20, X0 = 60, Y0 = 120, PITCH = CH + 16;
         { // smooth row scroll: m_scroll (in rows) eases toward m_top; position changes still only come via grid_position()
           double dt = m_scrollT > 0 ? std::min(0.1, t - m_scrollT) : 0.0; m_scrollT = t;
@@ -1111,15 +1178,19 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
           if (std::fabs(d) < 0.004) m_scroll = m_top; else m_scroll += d * std::min(1.0, dt * 14.0);
         }
         { std::lock_guard<std::mutex> l(g_gm);
-          int lo = std::max(0, (m_top - 1) * COLS), hi = (int)std::min<size_t>(g_games.size(), (size_t)(m_top + 3) * COLS);   // visible rows + 1 row margin each side
-          for (int i = 0; i < (int)g_games.size(); i++) {
-              Game& g = *g_games[i];
-              if (i >= lo && i < hi) { int z = 0; if (g.cover.compare_exchange_strong(z, 3)) { std::lock_guard<std::mutex> ql(g_qm); g_q.push_back(g_games[i]); g_qcv.notify_one(); } }
-              else { int c = g.cover; if (c == 1 || c == 2) { g.cover = 0; std::vector<uint32_t>().swap(g.pix); } }
+          auto list = shown_games();
+          if (!list.empty() && m_sel >= (int)list.size()) { int ns = game_library::clamp_selection(m_sel, list.size()); grid_position(ns, std::min(m_top, ns / COLS), "shown list shrank"); }
+          int lo = std::max(0, (m_top - 1) * COLS), hi = (int)std::min<size_t>(list.size(), (size_t)(m_top + 3) * COLS);   // visible rows + 1 row margin each side
+          auto evict = [](Game& g) { int c = g.cover; if (c == 1 || c == 2) { g.cover = 0; std::vector<uint32_t>().swap(g.pix); } };
+          for (int i = 0; i < (int)list.size(); i++) {
+              Game& g = *list[i];
+              if (i >= lo && i < hi) { int z = 0; if (g.cover.compare_exchange_strong(z, 3)) { std::lock_guard<std::mutex> ql(g_qm); g_q.push_back(list[i]); g_qcv.notify_one(); } }
+              else evict(g);
           }
-          for (size_t i = 0; i < g_games.size(); i++) {
+          if (m_onlyInstalled) for (auto& g : g_games) if (!m_installed.count(g->appid)) evict(*g);   // hidden by the filter
+          for (size_t i = 0; i < list.size(); i++) {
             int row = (int)i / COLS, col = (int)i % COLS;
-            int x = X0 + col * (CW + GX), y = Y0 + (int)std::lround((row - m_scroll) * PITCH); Game& g = *g_games[i];
+            int x = X0 + col * (CW + GX), y = Y0 + (int)std::lround((row - m_scroll) * PITCH); Game& g = *list[i];
             if (y >= 1040 || y + CH <= 0) continue;
             bool sel = (int)i == m_sel;
             fill(x, y, CW, CH, C3(27, 35, 48));
@@ -1128,7 +1199,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             if (c == 1) { int ox = cx + (COVER_W - g.iw) / 2, oy = cy + (COVER_H - g.ih) / 2;
                 for (int j = 0; j < g.ih; j++) { int py = oy + j; if (py < 0 || py >= H) continue; memcpy(&g_fb[py * W + ox], &g.pix[j * g.iw], g.iw * 4); } }
             else text(cx + 20, cy + 180, c == 2 ? "no cover" : "loading...", 2, C3(120, 130, 145));
-            if (g_dl.appid == g.appid && g_dl.state != 0) {
+            bool dlOverlay = g_dl.appid == g.appid && g_dl.state != 0;
+            if (!dlOverlay && m_installed.count(g.appid)) { const char* it = "INSTALLED"; fill(cx, cy + COVER_H - 30, twidth(it, 2) + 16, 30, C3(30, 120, 60)); text(cx + 8, cy + COVER_H - 23, it, 2, C3(255, 255, 255)); }
+            if (dlOverlay) {
                 int stt = g_dl.state; uint64_t tot = g_dl.total, dn = g_dl.done; double p = tot ? std::min(1.0, (double)dn / (double)tot) : 0;
                 fill(cx, cy + COVER_H - 62, COVER_W, 62, C3(0, 0, 0));
                 fill(cx + 8, cy + COVER_H - 18, (int)((COVER_W - 16) * (stt == 2 ? 1.0 : p)), 10, stt == 3 || stt == 4 ? C3(220, 70, 70) : C3(60, 200, 90)); frame(cx + 8, cy + COVER_H - 18, COVER_W - 16, 10, 1, C3(200, 200, 200));
@@ -1143,15 +1216,19 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             if (sel) frame(x - 4, y - 4, CW + 8, CH + 8, 6, C3(255, 210, 63));
           }
           if (g_games.empty()) text(60, 300, g_screen == S_LOADING ? "Loading your games..." : "No games to show.", 4, C3(170, 180, 195));
+          else if (list.empty()) { text(60, 300, "No installed games.", 4, C3(170, 180, 195)); text(60, 360, "Press View to show all games.", 3, C3(120, 130, 145)); }
         }
         fill(0, 0, W, Y0 - 8, C3(14, 17, 22)); fill(0, 1040, W, H - 1040, C3(14, 17, 22));   // mask partially scrolled rows
         text(60, 24, "LIBRARY", 5, C3(255, 255, 255));
         char b[200]; int first = (int)std::min<size_t>(listed, (size_t)m_top * COLS + 1), last = (int)std::min<size_t>(listed, (size_t)(m_top + 2) * COLS);
-        snprintf(b, sizeof b, "%d games owned - %zu listed - showing %d-%d  (row %d of %d)", (int)owned, listed, first, last, m_sel / COLS + 1, (int)((listed + COLS - 1) / COLS));
+        if (m_onlyInstalled) snprintf(b, sizeof b, "%zu installed of %zu listed - showing %d-%d  (row %d of %d)", listed, total, first, last, m_sel / COLS + 1, (int)std::max<size_t>(1, (listed + COLS - 1) / COLS));
+        else snprintf(b, sizeof b, "%d games owned - %zu listed - showing %d-%d  (row %d of %d)", (int)owned, listed, first, last, m_sel / COLS + 1, (int)((listed + COLS - 1) / COLS));
         text(60, 74, b, 3, C3(170, 180, 195));
-        // sort chip (Y) and logout chip (B)
-        { char c[64]; snprintf(c, sizeof c, "Sort: %s  (Y)", SORT_NAMES[g_sortMode]); int w = twidth(c, 3) + 30; fill(1000, 24, w, 50, C3(45, 90, 200)); frame(1000, 24, w, 50, 3, C3(255, 210, 63)); text(1015, 38, c, 3, C3(255, 255, 255));
-          const char* lo = "Logout (B)"; int w2 = twidth(lo, 3) + 30; fill(W - w2 - 60, 24, w2, 50, C3(120, 40, 40)); text(W - w2 - 45, 38, lo, 3, C3(255, 255, 255)); }
+        // chips, laid out right to left: logout (B), sort (Y), filter (View)
+        { const char* lo = "Logout (B)"; int w2 = twidth(lo, 3) + 30, x = W - w2 - 60; fill(x, 24, w2, 50, C3(120, 40, 40)); text(x + 15, 38, lo, 3, C3(255, 255, 255));
+          char c[64]; snprintf(c, sizeof c, "Sort: %s (Y)", SORT_NAMES[g_sortMode]); int w = twidth(c, 3) + 30; x -= w + 20; fill(x, 24, w, 50, C3(45, 90, 200)); frame(x, 24, w, 50, 3, C3(255, 210, 63)); text(x + 15, 38, c, 3, C3(255, 255, 255));
+          const char* fl = m_onlyInstalled ? "Installed only (View)" : "All games (View)"; int w3 = twidth(fl, 3) + 30; x -= w3 + 20;
+          fill(x, 24, w3, 50, m_onlyInstalled ? C3(30, 120, 60) : C3(45, 90, 200)); frame(x, 24, w3, 50, 3, C3(255, 210, 63)); text(x + 15, 38, fl, 3, C3(255, 255, 255)); }
         if (g_demo) text(900, 84, "DEMO LIST - not your account", 3, C3(255, 210, 63));
         std::string err; { std::lock_guard<std::mutex> l(g_sm); err = g_err; }
         if (!err.empty()) text(60, 104, err, 3, C3(255, 100, 100));
@@ -1161,7 +1238,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
           if (rows > 0) { int vis = std::min(rows, 2); int thumb = std::max(40, th * vis / rows); double span = std::max(1, rows - 2);
             int py = ty + (int)((th - thumb) * std::min(1.0, std::max(0.0, m_scroll / span))); fill(tx, py, 12, thumb, C3(255, 210, 63)); }
         }
-        text(60, 1050, "D-pad: move   LB/RB: page   A: Open game page   Y: sort   X: reload   B: cancel download / logout", 2, C3(120, 130, 145));
+        text(60, 1050, "D-pad: move   LB/RB: page   A: Open   View: installed / all   Y: sort   X: reload   B: cancel download / logout", 2, C3(120, 130, 145));
         if (m_confirmLogout) {
             fill(460, 380, 1000, 300, C3(10, 12, 16)); frame(460, 380, 1000, 300, 6, C3(255, 210, 63));
             text(960 - twidth("Log out of Steam?", 5) / 2, 420, "Log out of Steam?", 5, C3(255, 255, 255));
@@ -1205,6 +1282,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         int s = g_screen;
         if (s == S_LOGIN) { if (has(edge, GamepadButtons::A) || has(edge, GamepadButtons::X)) { g_refreshReq = true; set_status("Refreshing QR..."); logf("Refresh button pressed"); } }
         else if (s == S_DETAIL) {
+            if (m_confirmDelete) {
+                if (has(edge, GamepadButtons::A)) detail_delete_confirm(source);
+                else if (has(edge, GamepadButtons::B)) { m_confirmDelete = false; logf("detail: delete cancelled (%s)", source); }
+                return;
+            }
+            if (has(edge, GamepadButtons::X)) { detail_delete(source); return; }
             if (has(edge, GamepadButtons::A)) detail_action(source);
             if (has(edge, GamepadButtons::B)) detail_back(source);
             if (has(edge, GamepadButtons::View) || has(edge, GamepadButtons::Menu)) close_detail("Menu/View");
@@ -1212,7 +1295,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             if (has(edge, GamepadButtons::DPadUp)) m_dScroll = std::max(0, m_dScroll - 3);
         }
         else if (s == S_LIBRARY) {
-            size_t n; { std::lock_guard<std::mutex> l(g_gm); n = g_games.size(); }
+            if (!m_confirmLogout && has(edge, GamepadButtons::View)) {
+                m_onlyInstalled = !m_onlyInstalled; m_installedT = -10; refresh_installed(t); grid_position(0, 0, "View filter");
+                logf("library filter -> %s (%zu installed)", m_onlyInstalled ? "installed only" : "all games", m_installed.size()); return;
+            }
+            std::vector<std::shared_ptr<Game>> list; { std::lock_guard<std::mutex> l(g_gm); list = shown_games(); } size_t n = list.size();
             if (m_confirmLogout) {
                 if (has(edge, GamepadButtons::A)) { m_confirmLogout = false; g_logoutReq = true; grid_position(0, 0, "logout confirmed"); logf("logout confirmed: deleting local session file only (no revoke call)"); }
                 else if (has(edge, GamepadButtons::B)) { m_confirmLogout = false; logf("logout cancelled"); }
@@ -1229,7 +1316,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             sel = std::max(0, std::min(sel, (int)n - 1));
             int top = m_top, r = sel / COLS; if (r < top) top = r; if (r > top + 1) top = r - 1;
             grid_position(sel, top, source);
-            if (has(edge, GamepadButtons::A) && n) { uint32_t aid; std::string nm; { std::lock_guard<std::mutex> l(g_gm); aid = g_games[m_sel]->appid; nm = g_games[m_sel]->name; } open_detail(aid, nm, source); return; }
+            if (has(edge, GamepadButtons::A) && n) { uint32_t aid; std::string nm; { std::lock_guard<std::mutex> l(g_gm); aid = list[m_sel]->appid; nm = list[m_sel]->name; } open_detail(aid, nm, source); return; }
             if (has(edge, GamepadButtons::Y)) { int m = (g_sortMode + 1) % 3; g_sortMode = m; { std::lock_guard<std::mutex> l(g_gm); sort_games(m); } grid_position(0, 0, "Y resort"); logf("sort mode -> %s", SORT_NAMES[m]); }
             if (has(edge, GamepadButtons::X) && !g_demo) { g_reloadReq = true; grid_position(0, 0, "X library reload"); }
             if (has(edge, GamepadButtons::B) && !g_demo) { if (g_dl.state == 1) { g_dl.cancel = true; logf("download cancel requested (B)"); } else m_confirmLogout = true; }
