@@ -781,6 +781,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     }
     void menu_command(const std::string& c,const char* via) {
         using namespace guest_overlay;
+        // The menu only opens where it can be drawn: blocking the pad behind an
+        // invisible menu would leave the game with a dead controller.
+        if(c=="toggle"&&!menuOpen&&!guest_overlay::drawable){logf("overlay: menu unavailable (present hooks or back-buffer format unsupported) (%s)",via);return;}
         if(c=="toggle"){if(busy)return;menuOpen=!menuOpen;selection=Resume;if(menuOpen)block_input(true);logf("overlay: menu %s (%s)",menuOpen?"opened":"closed",via);return;}
         int item=c=="select"?selection.load():c=="quit"?Quit:c=="force"?ForceQuit:c=="fps"?Fps:-1;
         if(item<0||busy)return;
@@ -801,10 +804,16 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if(m_leaving)return;
         m_leaving=true;guest_overlay::set_status("Uploading saves...");
         auto sync=g_finalSync;
-        std::thread([this,sync]{
-            init_apartment(apartment_type::multi_threaded);
-            if(sync)sync();
-            m_window.Dispatcher().RunAsync(CoreDispatcherPriority::Normal,[this]{back_to_games("force quit");});
+        // CoreWindow is thread-affine; its CoreDispatcher is agile. Take the
+        // dispatcher here, on the UI thread, for the worker to post back with.
+        auto dispatcher=m_window.Dispatcher();
+        std::thread([this,sync,dispatcher]{
+            try {
+                init_apartment(apartment_type::multi_threaded);
+                if(sync)sync();
+            } catch(...) {logf("overlay: force quit upload failed");}
+            try {dispatcher.RunAsync(CoreDispatcherPriority::Normal,[this]{back_to_games("force quit");});}
+            catch(hresult_error const& e) {logf("overlay: force quit dispatch failed hr=0x%08x",(unsigned)e.code().value);}
         }).detach();
     }
     // Play does not restart a guest in-process: its modules, threads and
