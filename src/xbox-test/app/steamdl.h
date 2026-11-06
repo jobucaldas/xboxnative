@@ -3,6 +3,8 @@
 // Tokens are never logged.
 #pragma once
 #include <bcrypt.h>
+#include "depot_select.h"
+#include "installs.h"
 
 // ---------------------------------------------------------------- crypto (CNG)
 struct Sha1 {
@@ -317,7 +319,18 @@ static std::string pics_appinfo(CmSession& cm, uint32_t appid) {
 static bool download_app(CmSession& cm, uint32_t appid) {
     g_dl.cancel = false; g_dl.appid = appid; g_dl.done = 0; g_dl.total = 0; g_dl.files = 0; g_dl.filesDone = 0; g_dl.speed = 0; g_dl.state = 1; { std::lock_guard<std::mutex> l(g_dl.m); g_dl.name.clear(); g_dl.msg = "Contacting Steam..."; }
     double t0 = now_s();
-    auto fail = [&](const std::string& m) { logf("dl: FAILED appid %u: %s", appid, m.c_str()); dl_msg(m); g_dl.state = g_dl.cancel ? 4 : 3; return false; };
+    std::string partialDir; bool partial = false;   // set once a fresh install's files may exist on disk
+    auto fail = [&](const std::string& m) {
+        logf("dl: FAILED appid %u: %s", appid, m.c_str());
+        std::string shown = m;
+        if (partial) {   // do not leave preallocated files filling the disk (installs.h, unfinished downloads)
+            partial = false; dl_msg("Removing the unfinished download..."); installs::Progress p;
+            auto r = installs::discard_partial(g_dir, appid, partialDir, p);
+            logf("dl: unfinished download LocalState\\%s: %s, %llu files removed, %u left", partialDir.c_str(), installs::discard_name(r), (unsigned long long)p.removed.load(), p.failed.load());
+            if (r == installs::Discard::removed) shown += " (partial files removed)";
+        }
+        dl_msg(shown); g_dl.state = g_dl.cancel ? 4 : 3; return false;
+    };
     logf("dl: ===== start appid %u (session: %s) =====", appid, cm.anon ? "anonymous" : "user");
     // 1. PICS access token + product info
     std::string appBuf = pics_appinfo(cm, appid);
@@ -331,17 +344,18 @@ static bool download_app(CmSession& cm, uint32_t appid) {
     installdir = tolower_s(installdir);
     { std::lock_guard<std::mutex> l(g_dl.m); g_dl.name = name; }
     logf("dl: app '%s' installdir=%s buildid=%s", name.c_str(), installdir.c_str(), build.c_str());
-    struct Dep { uint32_t id; std::string gid; };
-    std::vector<Dep> deps; const Vdf* dv = ai->get("depots");
+    std::vector<depot_select::Depot> listed; const Vdf* dv = ai->get("depots");
     if (dv) for (size_t i = 0; i < dv->keys.size(); i++) {
         if (!all_digits(dv->keys[i])) continue; const Vdf& d = dv->kids[i]; if (!d.obj) continue;
-        uint32_t id = (uint32_t)strtoul(dv->keys[i].c_str(), nullptr, 10);
-        std::string os = d.str({"config", "oslist"}); if (!os.empty() && os.find("windows") == std::string::npos) { logf("dl: depot %u skipped (os=%s)", id, os.c_str()); continue; }
-        if (d.get("dlcappid")) { logf("dl: depot %u skipped (DLC depot)", id); continue; }
-        std::string gid; const Vdf* pm = d.at({"manifests", "public"}); if (pm) gid = pm->obj ? pm->str({"gid"}) : pm->val;
-        if (gid.empty()) { logf("dl: depot %u skipped (no public manifest)", id); continue; }
-        deps.push_back({id, gid});
+        depot_select::Depot x; x.id = (uint32_t)strtoul(dv->keys[i].c_str(), nullptr, 10);
+        x.oslist = d.str({"config", "oslist"}); x.osarch = d.str({"config", "osarch"}); x.language = tolower_s(d.str({"config", "language"}));
+        x.lowviolence = d.str({"config", "lowviolence"}) == "1"; x.dlc = d.get("dlcappid") != nullptr;
+        const Vdf* pm = d.at({"manifests", "public"}); if (pm) x.gid = pm->obj ? pm->str({"gid"}) : pm->val;
+        listed.push_back(x);
     }
+    std::vector<depot_select::Skip> skipped; auto deps = depot_select::choose(listed, &skipped);
+    for (auto& k : skipped) logf("dl: depot %u skipped (%s)", k.id, k.why.c_str());
+    for (auto& d : deps) logf("dl: depot %u selected (os=%s arch=%s)", d.id, d.oslist.empty() ? "any" : d.oslist.c_str(), d.osarch.empty() ? "any" : d.osarch.c_str());
     if (deps.empty()) return fail("no downloadable Windows depot found");
     auto servers = fetch_cdn_servers(); if (servers.empty()) return fail("no Steam content servers available");
     // 2. per depot: key, manifest
@@ -372,16 +386,34 @@ static bool download_app(CmSession& cm, uint32_t appid) {
     }
     uint64_t total = 0; int nfiles = 0; for (auto& p : preps) { total += p.bytes; for (auto& f : p.files) if (!(f->flags & 64) && f->link.empty()) nfiles++; }
     g_dl.total = total; g_dl.files = nfiles;
-    // 3. free space
+    // 3. install paths, and free space for what is not already on disk (a resumed download reuses its files)
     std::wstring destRoot = g_dir + L"\\" + widen(installdir);
+    uint64_t onDisk = 0;
+    for (auto& p : preps) for (auto& fp : p.files) {
+        DlFile& f = *fp;
+        std::string rel = f.path; for (auto& c : rel) if (c == '\\') c = '/';
+        while (!rel.empty() && rel[0] == '/') rel.erase(0, 1);
+        if (rel.find("..") != std::string::npos) { logf("dl: skipping suspicious path"); f.size = 0; f.flags |= 64; f.path.clear(); continue; }
+        std::wstring w = widen(rel); for (auto& c : w) if (c == L'/') c = L'\\';
+        f.wpath = destRoot + L"\\" + w;
+        WIN32_FILE_ATTRIBUTE_DATA fa{};
+        if (!(f.flags & 64) && f.link.empty() && GetFileAttributesExW(f.wpath.c_str(), GetFileExInfoStandard, &fa) && !(fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+            onDisk += std::min<uint64_t>(f.size, ((uint64_t)fa.nFileSizeHigh << 32) | fa.nFileSizeLow);
+    }
+    uint64_t need = total - std::min(total, onDisk);
     { ULARGE_INTEGER fb{}, tb{}, tf{}; if (GetDiskFreeSpaceExW(g_dir.c_str(), &fb, &tb, &tf)) {
-        logf("dl: need %.1f MB, free space %.1f MB", total / 1048576.0, fb.QuadPart / 1048576.0);
+        logf("dl: need %.1f MB (%.1f MB already on disk), free space %.1f MB", need / 1048576.0, onDisk / 1048576.0, fb.QuadPart / 1048576.0);
         { // test guard: LocalState\dlmax.txt = size cap in MB (0 = dry run: report size only); one-shot, consumed when read
           std::wstring gp = g_dir + L"\\dlmax.txt"; FILE* gf = _wfopen(gp.c_str(), L"rb");
           if (gf) { char gb[32] = {}; fread(gb, 1, sizeof gb - 1, gf); fclose(gf); DeleteFileW(gp.c_str()); double cap = atof(gb);
             logf("dl: dlmax.txt (test guard, consumed) cap=%.0f MB need=%.1f MB", cap, total / 1048576.0);
             if (total / 1048576.0 > cap || cap <= 0) { char b[160]; snprintf(b, sizeof b, "Test guard: %.1f MB exceeds cap %.0f MB (dlmax.txt) - nothing downloaded", total / 1048576.0, cap); return fail(b); } } }
-        if (fb.QuadPart < total + (total / 20) + (64ull << 20)) { char b[160]; snprintf(b, sizeof b, "Not enough free space: need %.0f MB, have %.0f MB", total / 1048576.0, fb.QuadPart / 1048576.0); return fail(b); } } }
+        if (fb.QuadPart < need + (need / 20) + (64ull << 20)) { char b[160]; snprintf(b, sizeof b, "Not enough free space: need %.0f MB, have %.0f MB", need / 1048576.0, fb.QuadPart / 1048576.0); return fail(b); } } }
+    // a fresh install records itself before creating files, so a failure (or a crash, swept at start) removes them
+    if (!file_exists(installs::marker_path(g_dir, appid))) {
+        if (!installs::begin_partial(g_dir, appid, installdir)) return fail("cannot write install state (disk full?)");
+        partialDir = installdir; partial = true;
+    }
     if (!mkdirs(destRoot)) return fail("cannot create install folder");
     // 4. per depot: lay out files, resume-check, download
     for (auto& p : preps) {
@@ -389,11 +421,8 @@ static bool download_app(CmSession& cm, uint32_t appid) {
         uint64_t alreadyOk = 0; size_t nresumed = 0;
         for (size_t fi = 0; fi < p.files.size(); fi++) {
             DlFile& f = *p.files[fi];
-            std::string rel = f.path; for (auto& c : rel) if (c == '\\') c = '/';
-            while (!rel.empty() && rel[0] == '/') rel.erase(0, 1);
-            if (rel.find("..") != std::string::npos) { logf("dl: skipping suspicious path"); f.size = 0; f.flags |= 64; f.path.clear(); cx.doneChunk.emplace_back(); continue; }
-            std::wstring w = widen(rel); for (auto& c : w) if (c == L'/') c = L'\\';
-            f.wpath = destRoot + L"\\" + w; cx.doneChunk.emplace_back(f.chunks.size(), 0);
+            if (f.path.empty()) { cx.doneChunk.emplace_back(); continue; }   // suspicious path, dropped in step 3
+            cx.doneChunk.emplace_back(f.chunks.size(), 0);
             if (f.flags & 64) { mkdirs(f.wpath); continue; }
             if (!f.link.empty()) { logf("dl: symlink entry skipped: %s", f.path.c_str()); continue; }
             size_t sl = f.wpath.find_last_of(L'\\'); if (sl != std::wstring::npos) mkdirs(f.wpath.substr(0, sl));
@@ -445,7 +474,16 @@ static bool download_app(CmSession& cm, uint32_t appid) {
     }
     logf("dl: VERIFY files_ok=%d files_bad=%d bytes_ok=%llu", verified, bad, (unsigned long long)vbytes);
     if (bad) return fail(std::to_string(bad) + " files failed verification");
-    { std::wstring mk = g_dir + L"\\dl_" + widen(std::to_string(appid)) + L".done"; FILE* mf = _wfopen(mk.c_str(), L"wb"); if (mf) { fprintf(mf, "app %u build %s files %d bytes %llu installdir %s\n", appid, build.c_str(), verified, (unsigned long long)vbytes, installdir.c_str()); fclose(mf); } }
+    // write dl_<appid>.done through a temporary file: an existing marker is only ever replaced by a complete one
+    { std::wstring mk = installs::marker_path(g_dir, appid), tmp = mk + L".tmp"; FILE* mf = _wfopen(tmp.c_str(), L"wb");
+      bool marked = mf && fprintf(mf, "app %u build %s files %d bytes %llu installdir %s\n", appid, build.c_str(), verified, (unsigned long long)vbytes, installdir.c_str()) > 0;
+      if (mf && fclose(mf) != 0) marked = false;
+      if (marked) marked = MoveFileExW(tmp.c_str(), mk.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+      if (!marked) {   // verified files stay for a retry to resume; a fresh install keeps its .partial, so the next start's sweep frees the space if no retry finishes it
+          DeleteFileW(tmp.c_str()); partial = false;
+          return fail("cannot write the install marker (disk full?)");
+      } }
+    if (partial) { installs::end_partial(g_dir, appid); partial = false; }
     char sm[200]; snprintf(sm, sizeof sm, "Done: %d files, %.1f MB verified", verified, vbytes / 1048576.0); dl_msg(sm);
     logf("dl: ===== DONE appid %u '%s' -> LocalState\\%s : %d files, %llu bytes, SHA1-verified, %.0f s =====", appid, name.c_str(), installdir.c_str(), verified, (unsigned long long)vbytes, now_s() - t0);
     g_dl.state = 2; return true;

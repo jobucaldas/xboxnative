@@ -18,6 +18,8 @@ int main() {
     uint32_t id = 0;
     assert(marker_appid("dl_3405340.done", id) && id == 3405340);
     assert(!marker_appid("dl_.done", id) && !marker_appid("dl_12a.done", id) && !marker_appid("dl_1.done.bak", id));
+    assert(marker_appid("dl_433340.partial", id, ".partial") && id == 433340);
+    assert(!marker_appid("dl_433340.partial", id) && !marker_appid("dl_1.partial.bak", id, ".partial"));
     assert(!marker_appid("dl_0.done", id) && !marker_appid("dl_99999999999.done", id) && !marker_appid("x_1.done", id));
 
     // only a single downloader-shaped folder under LocalState may be removed
