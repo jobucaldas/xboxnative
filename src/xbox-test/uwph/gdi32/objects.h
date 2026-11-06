@@ -19,6 +19,7 @@ namespace gdi32_core {
 enum class Kind { Bitmap, Brush, Font, Region, MemoryDc, DisplayDc };
 struct Object {
     Kind kind;
+    bool stock=false;                 // default DC objects: shared, never freed
     // Bitmap: width/height/bpp, top-down rows of `stride` bytes at `bits`.
     int width=0,height=0,bpp=0,stride=0;bool topDown=false;BYTE* bits=nullptr;std::vector<BYTE> storage;bool section=false;
     COLORREF color=0;                 // brush
@@ -35,6 +36,19 @@ inline Object* find(HGDIOBJ h,Kind kind) {
 }
 inline Object* any(HGDIOBJ h){auto it=objects.find(h);return it==objects.end()?nullptr:it->second.get();}
 inline HGDIOBJ add(std::unique_ptr<Object> o){void* h=o.get();objects.emplace(h,std::move(o));return (HGDIOBJ)h;}
+// A new memory DC holds the stock 1x1 bitmap, white brush and system font, so
+// the first SelectObject of each kind returns a real (stock) handle, as on Windows.
+inline Object* stock(Kind kind) {
+    static Object* objectsByKind[3]{};int i=kind==Kind::Bitmap?0:kind==Kind::Brush?1:2;
+    if(!objectsByKind[i]) {
+        auto o=std::make_unique<Object>();o->kind=kind;o->stock=true;
+        if(kind==Kind::Bitmap){o->width=o->height=1;o->bpp=32;o->stride=4;o->topDown=true;o->storage.assign(4,0);o->bits=o->storage.data();}
+        if(kind==Kind::Brush)o->color=RGB(255,255,255);
+        if(kind==Kind::Font){wcscpy_s(o->font.lfFaceName,L"System");o->font.lfHeight=16;o->font.lfWeight=FW_BOLD;}
+        objectsByKind[i]=o.get();add(std::move(o));
+    }
+    return objectsByKind[i];
+}
 
 // ---- Bitmaps. Only 32-bpp pixels are stored (what DIB sections and
 // compatible bitmaps of this 32-bpp display use); other depths are refused.
@@ -72,8 +86,9 @@ inline int WINAPI get_dibits(HDC,HBITMAP h,UINT start,UINT lines,void* out,BITMA
     auto& hd=info->bmiHeader;if(hd.biSize<sizeof(BITMAPINFOHEADER)){SetLastError(ERROR_INVALID_PARAMETER);return 0;}
     if(!out||!hd.biBitCount) {
         hd.biWidth=b->width;hd.biHeight=b->topDown?-b->height:b->height;hd.biPlanes=1;hd.biBitCount=32;
-        hd.biCompression=BI_BITFIELDS;hd.biSizeImage=DWORD(b->stride*b->height);hd.biClrUsed=0;hd.biClrImportant=0;
-        auto masks=(DWORD*)info->bmiColors;masks[0]=0xFF0000;masks[1]=0x00FF00;masks[2]=0x0000FF;   // BGRA
+        // 32-bpp BI_RGB is exactly this BGRX layout, and needs no colour masks
+        // (callers often pass only a BITMAPINFOHEADER).
+        hd.biCompression=BI_RGB;hd.biSizeImage=DWORD(b->stride*b->height);hd.biClrUsed=0;hd.biClrImportant=0;
         return 1;
     }
     if(hd.biBitCount!=32||hd.biWidth!=b->width){SetLastError(ERROR_NOT_SUPPORTED);return 0;}
@@ -89,19 +104,23 @@ inline int WINAPI get_dibits(HDC,HBITMAP h,UINT start,UINT lines,void* out,BITMA
 // ---- DCs
 inline HDC WINAPI create_compatible_dc(HDC) {
     std::lock_guard<std::recursive_mutex> l(objectsM);
-    auto o=std::make_unique<Object>();o->kind=Kind::MemoryDc;return (HDC)add(std::move(o));
+    auto o=std::make_unique<Object>();o->kind=Kind::MemoryDc;
+    o->selectedBitmap=stock(Kind::Bitmap);o->selectedBrush=stock(Kind::Brush);o->selectedFont=stock(Kind::Font);
+    return (HDC)add(std::move(o));
 }
 // Only the display driver exists ("DISPLAY" or \\.\DISPLAY1).
 inline HDC WINAPI create_dc_w(LPCWSTR driver,LPCWSTR device,LPCWSTR,const void*) {
     auto display=[](LPCWSTR s){return s&&(!_wcsicmp(s,L"DISPLAY")||!_wcsicmp(s,L"\\\\.\\DISPLAY1"));};
     if(!display(driver)&&!display(device)){SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}
     std::lock_guard<std::recursive_mutex> l(objectsM);
-    auto o=std::make_unique<Object>();o->kind=Kind::DisplayDc;return (HDC)add(std::move(o));
+    auto o=std::make_unique<Object>();o->kind=Kind::DisplayDc;
+    o->selectedBrush=stock(Kind::Brush);o->selectedFont=stock(Kind::Font);
+    return (HDC)add(std::move(o));
 }
 inline BOOL WINAPI delete_dc(HDC h) {
     std::lock_guard<std::recursive_mutex> l(objectsM);
     auto d=any(h);if(!d||(d->kind!=Kind::MemoryDc&&d->kind!=Kind::DisplayDc)){SetLastError(ERROR_INVALID_HANDLE);return FALSE;}
-    if(d->selectedBitmap)--d->selectedBitmap->selections;
+    if(d->selectedBitmap&&!d->selectedBitmap->stock)--d->selectedBitmap->selections;
     objects.erase(h);return TRUE;
 }
 inline HGDIOBJ WINAPI select_object(HDC dc,HGDIOBJ h) {
@@ -110,9 +129,9 @@ inline HGDIOBJ WINAPI select_object(HDC dc,HGDIOBJ h) {
     if(!d||(d->kind!=Kind::MemoryDc&&d->kind!=Kind::DisplayDc)||!o){SetLastError(ERROR_INVALID_HANDLE);return nullptr;}
     switch(o->kind) {
     case Kind::Bitmap: {
-        if(d->kind!=Kind::MemoryDc||(o->selections&&d->selectedBitmap!=o))return nullptr;   // one DC at a time
-        auto old=d->selectedBitmap;if(old)--old->selections;d->selectedBitmap=o;++o->selections;
-        return old?(HGDIOBJ)old:nullptr;
+        if(d->kind!=Kind::MemoryDc||(!o->stock&&o->selections&&d->selectedBitmap!=o))return nullptr;   // one DC at a time
+        auto old=d->selectedBitmap;if(old&&!old->stock)--old->selections;d->selectedBitmap=o;if(!o->stock)++o->selections;
+        return (HGDIOBJ)old;
     }
     case Kind::Brush:{auto old=d->selectedBrush;d->selectedBrush=h;return old;}
     case Kind::Font:{auto old=d->selectedFont;d->selectedFont=h;return old;}
@@ -123,6 +142,7 @@ inline HGDIOBJ WINAPI select_object(HDC dc,HGDIOBJ h) {
 inline BOOL WINAPI delete_object(HGDIOBJ h) {
     std::lock_guard<std::recursive_mutex> l(objectsM);
     auto o=any(h);if(!o||o->kind==Kind::MemoryDc||o->kind==Kind::DisplayDc){SetLastError(ERROR_INVALID_HANDLE);return FALSE;}
+    if(o->stock)return TRUE;          // stock objects: deleting them is a successful no-op
     if(o->selections)return FALSE;   // still selected into a DC (Windows refuses as well)
     objects.erase(h);return TRUE;
 }
@@ -147,6 +167,43 @@ inline BOOL WINAPI bit_blt(HDC dst,int x,int y,int w,int h,HDC src,int sx,int sy
     }
     return TRUE;
 }
+
+// The UWP SDK hides DIBSECTION: its documented Win64 layout.
+struct DibSection { BITMAP dsBm; BITMAPINFOHEADER dsBmih; DWORD dsBitfields[3]; HANDLE dshSection; DWORD dsOffset; };
+static_assert(sizeof(DibSection)==104,"DIBSECTION layout");
+// ---- GetObject: BITMAP (or DIBSECTION for sections), LOGBRUSH, LOGFONT.
+// Unknown handles return 0 without touching the output (Wine win32u).
+inline int get_object(HGDIOBJ h,int size,void* out,bool wide) {
+    std::lock_guard<std::recursive_mutex> l(objectsM);
+    auto o=any(h);if(!o)return 0;
+    switch(o->kind) {
+    case Kind::Bitmap: {
+        BITMAP bm{0,o->width,o->height,o->stride,1,WORD(o->bpp),o->section?o->bits:nullptr};
+        if(o->section&&size>=int(sizeof(DibSection))) {
+            if(!out)return sizeof(DibSection);
+            DibSection ds{};ds.dsBm=bm;auto& hd=ds.dsBmih;hd.biSize=sizeof hd;hd.biWidth=o->width;
+            hd.biHeight=o->topDown?-o->height:o->height;hd.biPlanes=1;hd.biBitCount=32;hd.biCompression=BI_RGB;
+            hd.biSizeImage=DWORD(o->stride*o->height);memcpy(out,&ds,sizeof ds);return sizeof ds;
+        }
+        if(!out)return sizeof bm;if(size<int(sizeof bm))return 0;
+        memcpy(out,&bm,sizeof bm);return sizeof bm;
+    }
+    case Kind::Brush: {
+        LOGBRUSH lb{BS_SOLID,o->color,0};
+        if(!out)return sizeof lb;if(size<int(sizeof lb))return 0;
+        memcpy(out,&lb,sizeof lb);return sizeof lb;
+    }
+    case Kind::Font: {
+        if(wide){int n=std::min(size,int(sizeof(LOGFONTW)));if(!out)return sizeof(LOGFONTW);memcpy(out,&o->font,size_t(n));return n;}
+        LOGFONTA a{};memcpy(&a,&o->font,offsetof(LOGFONTA,lfFaceName));
+        WideCharToMultiByte(CP_ACP,0,o->font.lfFaceName,-1,a.lfFaceName,LF_FACESIZE,nullptr,nullptr);
+        int n=std::min(size,int(sizeof a));if(!out)return sizeof a;memcpy(out,&a,size_t(n));return n;
+    }
+    default: return 0;
+    }
+}
+inline int WINAPI get_object_a(HGDIOBJ h,int size,void* out){return get_object(h,size,out,false);}
+inline int WINAPI get_object_w(HGDIOBJ h,int size,void* out){return get_object(h,size,out,true);}
 
 // ---- Brushes, fonts (no rasterizer: text measurement is refused)
 inline HBRUSH WINAPI create_solid_brush(COLORREF c) {
