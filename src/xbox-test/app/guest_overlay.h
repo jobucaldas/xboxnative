@@ -84,7 +84,22 @@ inline const char* label(int item) {
     switch(item){case Resume:return "Resume";case Quit:return "Quit game";case ForceQuit:return "Force quit";
     default:return fpsOn?"FPS counter: On":"FPS counter: Off";}
 }
+// Whether the overlay can be drawn into this game's chain: D3D11 device and
+// an 8-bit RGBA/BGRA back buffer. Probed at the first hooked Present.
+inline std::atomic<bool> drawable{false};
+inline std::atomic<bool> probed{false};
+inline bool supported_format(DXGI_FORMAT f) {
+    return f==DXGI_FORMAT_R8G8B8A8_UNORM||f==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB||f==DXGI_FORMAT_B8G8R8A8_UNORM||
+           f==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB||f==DXGI_FORMAT_B8G8R8X8_UNORM;
+}
+inline void probe(IDXGISwapChain* chain) {
+    if(probed.exchange(true))return;
+    winrt::com_ptr<ID3D11Device> dev;winrt::com_ptr<ID3D11Texture2D> bb;
+    if(FAILED(chain->GetDevice(__uuidof(ID3D11Device),dev.put_void()))||FAILED(chain->GetBuffer(0,__uuidof(ID3D11Texture2D),bb.put_void())))return;
+    D3D11_TEXTURE2D_DESC d{};bb->GetDesc(&d);drawable=supported_format(d.Format);
+}
 inline void draw(IDXGISwapChain* chain) {
+    probe(chain);
     LARGE_INTEGER now;QueryPerformanceCounter(&now);
     if(!freq.QuadPart){QueryPerformanceFrequency(&freq);lastSample=now;}
     ++framesSince;double dt=double(now.QuadPart-lastSample.QuadPart)/double(freq.QuadPart);
