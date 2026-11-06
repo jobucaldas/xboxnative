@@ -29,8 +29,8 @@ it does not prove that a package works on the console.
    to Game when required for the larger memory limit; the UI sequence varies
    with console software. Do not use `src/xbox-test/dp/uninstall.sh` for this guide.
 5. Read the package's identity/version from `manifest.json`. For the default
-   manifests, full name is `<Identity>_<Version>_x64__dk715arakrne0` and launch ID
-   is `<Identity>_dk715arakrne0!App`. With alternate manifests, use the actual
+   manifests, full name is `<Identity>_<Version>_x64__0bdeywx3x8szp` and launch ID
+   is `<Identity>_0bdeywx3x8szp!App`. With alternate manifests, use the actual
    architecture, publisher-family suffix and application ID.
 
 Browser installation is an alternative, but menu names and certificate upload
@@ -57,7 +57,7 @@ script route, which uploads the matching public certificate with the package.
 5. If running, stop the app with `bash src/xbox-test/dp/kill.sh '<full name>'` and
    confirm with `bash src/xbox-test/dp/ps.sh`. Kill's HTTP status alone is unreliable.
    Launch using
-   `bash src/xbox-test/dp/launch.sh '<Identity>_dk715arakrne0!App' '<full name>'`.
+   `bash src/xbox-test/dp/launch.sh '<Identity>_0bdeywx3x8szp!App' '<full name>'`.
    Optional `bash src/xbox-test/dp/user-signin.sh` can report HTTP 400 when already
    signed in; check the actual launch result rather than treating that as proof.
 6. Wait for the required log lines with

@@ -17,7 +17,7 @@ Env overrides: `DP_HOST` (default `192.168.15.96`, LAN IP can change), `DP_SOCKS
 
 | Script | Verified | Notes |
 |---|---|---|
-| `install.sh PKG.msix [CERT.cer]` | yes | Upload via `POST /api/app/packagemanager/package`, then polls `GET /api/app/packagemanager/state` for `Code: 0`. Used successfully to install `Xboxnative.Launcher_0.2.0.0_x64__dk715arakrne0` (HTTP 202 -> state Success). |
+| `install.sh PKG.msix [CERT.cer]` | yes | Upload via `POST /api/app/packagemanager/package`, then polls `GET /api/app/packagemanager/state` for `Code: 0`. Used successfully to install `Xboxnative.Launcher_0.2.0.0_x64__0bdeywx3x8szp` (HTTP 202 -> state Success). |
 | `launch.sh RID FULL` | yes | `POST /api/taskmanager/app?appid=<b64 PackageRelativeId>&package=<b64 PackageFullName>` with `Content-Length: 0` (omitting it gets HTTP 411). `RID` is `Family!App` (PackageRelativeId), `FULL` is the full package name. Returns HTTP 200 and the process appears in `ps.sh` within ~1-2s. |
 | `kill.sh FULL` | yes (with caveat) | `DELETE /api/taskmanager/app?package=<b64 full>&forcestop=yes`. **Quirk**: can return HTTP 400 `{"ErrorMessage":"Failed to terminate the application.","ErrorCode":-2147483635}` even though the process is actually gone afterward — always confirm with `ps.sh`, don't trust the HTTP status alone. |
 | `ps.sh [grep-pattern]` | yes | `GET /api/resourcemanager/processes`; prints `name pid=.. cpu=..% ws=..MB pkg=..`, optional case-insensitive regex filter on the formatted line. Memory field in the console's JSON is `WorkingSetSize` (bytes) — not `WorkingSet`, which doesn't exist and silently printed empty; fixed and verified live (e.g. `xbtest.exe ws=298.8MB`). |

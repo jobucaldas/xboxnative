@@ -84,9 +84,9 @@ bash src/xbox-test/kit/sync-readme-versions.sh --check /path/to/kit/manifest.jso
 | `launcher` | `Xboxnative.Launcher` | `boot.log` | QR/library screen; this alone is not evidence of playable games |
 
 For the default manifests, publisher is `CN=xboxnative-dev`, package-family
-suffix is `dk715arakrne0`, application ID is `App`, and architecture is `x64`.
-Full package name is `<Identity>_<Version>_x64__dk715arakrne0`; launch ID is
-`<Identity>_dk715arakrne0!App`. Read versions from the kit, not this document.
+suffix is `0bdeywx3x8szp`, application ID is `App`, and architecture is `x64`.
+Full package name is `<Identity>_<Version>_x64__0bdeywx3x8szp`; launch ID is
+`<Identity>_0bdeywx3x8szp!App`. Read versions from the kit, not this document.
 Alternate manifests/publishers require their actual package identifiers.
 
 ## Install and collect evidence
