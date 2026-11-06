@@ -770,7 +770,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     GamepadButtons m_menuPrev=GamepadButtons::None; double m_quitDeadline=0; bool m_leaving=false;
     static bool held(GamepadButtons b,GamepadButtons m){return (b&m)==m;}
     bool m_inputHooks=false;
-    void guest_menu(double t,GamepadButtons b) {
+    void guest_menu(double t,GamepadButtons b,const GamepadReading& r) {
+        guest_overlay::padAtRest=b==GamepadButtons::None&&std::abs(r.LeftThumbstickX)<0.1&&std::abs(r.LeftThumbstickY)<0.1&&
+            std::abs(r.RightThumbstickX)<0.1&&std::abs(r.RightThumbstickY)<0.1&&r.LeftTrigger<0.05&&r.RightTrigger<0.05;
         if(!m_inputHooks) {
             auto pads=Gamepad::Gamepads();
             if(pads.Size()){m_inputHooks=true;logf("overlay: input capture hooks %s",guest_overlay::install_input_block(pads.GetAt(0))?"installed":"unavailable");}
@@ -1274,10 +1276,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         for (auto m : {GamepadButtons::A, GamepadButtons::B, GamepadButtons::X, GamepadButtons::Y, GamepadButtons::DPadUp, GamepadButtons::DPadDown, GamepadButtons::DPadLeft, GamepadButtons::DPadRight})
             if (has(edge, m)) logf("button event mask=0x%x screen=%d", (unsigned)m, (int)g_screen);
         logf("input source=%s edge=0x%x buttons=0x%x stick=(%.3f,%.3f) held=%.3f", source, (unsigned)edge, (unsigned)rd.Buttons, rd.LeftThumbstickX, rd.LeftThumbstickY, t - m_pad.heldSince);
-        // A running guest owns the controller (it reads the same pad through XInput/WGI):
-        // the launcher screen behind it must not act on those presses.
-        if (auto guest = play_runtime::observed.load(std::memory_order_acquire); guest && !guest->finished.load(std::memory_order_acquire)) {
-            logf("input: guest running; launcher UI ignores controller"); return;
+        // A running guest owns the controller (it reads the same pad through XInput/WGI).
+        // While its surface is up the launcher UI is not visible either (also during the
+        // final save upload before the restart), so it must not act on those presses.
+        if (auto guest = play_runtime::observed.load(std::memory_order_acquire); m_guestSurface || (guest && !guest->finished.load(std::memory_order_acquire))) {
+            logf("input: game surface up; launcher UI ignores controller"); return;
         }
         int s = g_screen;
         if (s == S_LOGIN) { if (has(edge, GamepadButtons::A) || has(edge, GamepadButtons::X)) { g_refreshReq = true; set_status("Refreshing QR..."); logf("Refresh button pressed"); } }
@@ -1340,7 +1343,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             if (n) rd = pads.GetAt(0).GetCurrentReading();
             input(t, rd, n > 0);
             autotest(t); cmdhook(t); detail_tick(t);
-            if(m_guestSurface){guest_menu(t,n?rd.Buttons:GamepadButtons::None);Sleep(1);continue;}
+            if(m_guestSurface){guest_menu(t,n?rd.Buttons:GamepadButtons::None,rd);Sleep(1);continue;}
             draw(t);
             m_ctx->UpdateSubresource(m_bb.get(), 0, nullptr, g_fb.data(), W * 4, 0);
             HRESULT hr = m_sc->Present(1, 0);
