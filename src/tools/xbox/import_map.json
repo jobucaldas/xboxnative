@@ -155,6 +155,10 @@
       "class": "stub",
       "reason": "Named x64 ABI failure/empty adapters in entry-stubs.dll for the three-image probe; runtime tolerance remains unverified."
     },
+    "ucrtbase.dll": {
+      "class": "system",
+      "reason": "Native Universal CRT (OS component on the console): api-ms-win-crt-* contracts resolve to it, and the vcruntime140 route forwards to its exception-handling, RTTI and string exports."
+    },
     "unityplayer.dll": {
       "class": "uwph",
       "reason": "Unmodified game-supplied x64 PE loaded through the uwph/Wine loader; this is a game asset, not a replacement host DLL."
@@ -166,6 +170,14 @@
     "userenv.dll": {
       "class": "system",
       "reason": "Native user profile API (GetUserProfileDirectoryW) for home-directory lookups."
+    },
+    "vcruntime140.dll": {
+      "class": "uwph",
+      "reason": "VC++ redistributable absent on the console (LoadLibrary 126). Unless the game ships its own copy, uwph/vcruntime forwards the names to ucrtbase.dll (as Wine 10 does) and implements the few vcruntime-only helpers."
+    },
+    "vcruntime140_1.dll": {
+      "class": "uwph",
+      "reason": "x64 FH4 handler (__CxxFrameHandler4), absent on the console; uwph/vcruntime forwards it to ucrtbase.dll as Wine 10 does."
     },
     "version.dll": {
       "class": "wine-pe",

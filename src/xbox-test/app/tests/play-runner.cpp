@@ -279,7 +279,11 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // Optional Steam API provider (owned game): mapped in place of steam_api64.dll.
     {wchar_t provider[1024];DWORD n=GetEnvironmentVariableW(L"PRUN_STEAM_PROVIDER",provider,1024);
      if(n&&n<1024)play_runtime::set_steam_provider(std::wstring(provider,n));}
-    if(!play_runtime::start(root,game?L"Megabonk.exe":std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":L"play-guest.exe",game?play_runtime::wide(launch_arguments::for_app(3405340)):play_runtime::wide(args),logline))return 1;
+    // Game mode runs Megabonk unless PRUN_GAME_EXE/PRUN_GAME_APPID name another owned game.
+    std::wstring gameExe=L"Megabonk.exe";std::uint32_t gameApp=3405340;
+    {wchar_t value[260];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_EXE",value,260);if(n&&n<260)gameExe.assign(value,n);
+     n=GetEnvironmentVariableW(L"PRUN_GAME_APPID",value,260);if(n&&n<260)gameApp=std::uint32_t(_wtoi(value));}
+    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":L"play-guest.exe",game?play_runtime::wide(launch_arguments::for_app(gameApp)):play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
     // guest stop (fatal dialog). Progress must never mask that failure.

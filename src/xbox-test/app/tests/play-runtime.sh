@@ -84,16 +84,31 @@ crt=${XWIN_ROOT:-$HOME/.cache/uwp-crossbuild/xwin}
 lld-link-19 "$out"/obj/cxx/tests_play-cxx.*.obj /dll /out:"$out/play-cxx.dll" \
  /libpath:"$crt/crt/lib/x86_64" /libpath:"$crt/sdk/lib/um/x86_64" \
  /libpath:"$crt/sdk/lib/ucrt/x86_64" kernel32.lib
+# A /MD C++ DLL importing vcruntime140.dll and vcruntime140_1.dll, as games
+# built for the VC++ redistributable do. No redistributable copy is present.
+printf 'LIBRARY vcruntime140_1.dll\nEXPORTS\n __CxxFrameHandler4\n' > "$out/obj/vcrt1.def"
+llvm-dlltool-19 -m i386:x86-64 -d "$out/obj/vcrt1.def" -l "$out/obj/play-vcrt1.lib"
+UWP_OBJ_DIR="$out/obj/vcrt" "$CB/scripts/build.sh" --out "$out/play-vcrt.dll" --link-arg /dll tests/play-vcrt.cpp -- /MD /O2 /EHsc /GR
+lld-link-19 "$out"/obj/vcrt/tests_play-vcrt.*.obj /dll /nodefaultlib /out:"$out/play-vcrt.dll" \
+ /libpath:"$crt/crt/lib/x86_64" /libpath:"$crt/sdk/lib/um/x86_64" \
+ /libpath:"$crt/sdk/lib/ucrt/x86_64" msvcrt.lib vcruntime.lib ucrt.lib kernel32.lib "$out/obj/play-vcrt1.lib"
+llvm-readobj --coff-imports "$out/play-vcrt.dll" | grep -q 'Name: VCRUNTIME140.dll'
+llvm-readobj --coff-imports "$out/play-vcrt.dll" | grep -q 'Name: VCRUNTIME140_1.dll'
+rm -f "$out/vcruntime140.dll" "$out/vcruntime140_1.dll"
 bash ../uwph/host/build-sqlite-lib.sh "$out/obj/sqlite3.lib"
 UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/play-runner.exe" tests/play-runner.cpp -- /MT /O2 /Iout/obj /I../uwph/host/third_party/sqlite
 # Use the exact packaged carriers from the launcher build.
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
 # Owned stand-in so steam-client proves refusal of a present root client DLL.
 cp "$out/play-dependency.dll" "$out/steamclient64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
+# Every vcruntime import took the ucrtbase route; none was left unresolved.
+grep -q 'VCRT ROUTE vcruntime140.dll!__CxxFrameHandler3 found=1' "$out/native-vcrt.log"
+grep -q 'VCRT ROUTE vcruntime140_1.dll!__CxxFrameHandler4 found=1' "$out/native-vcrt.log"
+if grep -q 'VCRT ROUTE .* found=0' "$out/native-vcrt.log";then exit 1;fi
 # Guest registry (PlayerPrefs) persists in the uwph SQLite registry across runs.
 rm -f "$out"/registry.sqlite*
 for mode in registry-write registry-read;do
