@@ -61,6 +61,15 @@ Lock keys latch their toggle bit in GetKeyState. Dead keys and other layouts are
 not claimed. Run `wine-parity-test.sh` after `build.sh` for the off-device
 geometry, object-query, SystemParametersInfo and keyboard checks.
 
+`corewindow_feed.h` is the launcher's keyboard/mouse source. While a game's swap
+chain is on screen and the launcher menu is closed, CoreWindow key and mouse
+events update the key/cursor state and post WM_KEY*/WM_SYSKEY*, button, move and
+wheel messages to the focused, foreground or presenting guest window. WM_CHAR
+comes from the guest's TranslateMessage. Controller and navigation keys are
+ignored (the pad reaches games through XInput/Windows.Gaming.Input). Raw input,
+relative mouse, touch and pen are not fed. Run `corewindow-feed-test.sh` after
+`build.sh`; physical input needs the console.
+
 GetDC/ReleaseDC hand out opaque per-call handles with no real GDI surface: no
 rendering exists in this module. LoadCursorA/LoadIconA/W/LoadImageA/W resolve
 only standard shared system cursor/icon IDs (hInstance==NULL, integer
