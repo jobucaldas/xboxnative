@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <dxgi1_4.h>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -54,8 +55,43 @@ struct Token final : IUnknown {
     ULONG STDMETHODCALLTYPE Release() override {return InterlockedDecrement(&refs);}
 };
 static Token token;
+// Wine's D3D11 swap chain returns E_NOTIMPL from CheckColorSpaceSupport,
+// SetColorSpace1 and SetRotation. The console's DXGI implements them, and
+// SDL3's D3D11 renderer refuses a chain that does not report sRGB as
+// presentable or reject identity rotation. As part of this stand-in, answer as
+// DXGI does for the default sRGB (G22/P709) colour space and identity rotation
+// only; everything else keeps Wine's answer.
+static HRESULT (STDMETHODCALLTYPE* wineCheck)(IDXGISwapChain3*,DXGI_COLOR_SPACE_TYPE,UINT*)=nullptr;
+static HRESULT (STDMETHODCALLTYPE* wineSet)(IDXGISwapChain3*,DXGI_COLOR_SPACE_TYPE)=nullptr;
+static HRESULT STDMETHODCALLTYPE checkColorSpace(IDXGISwapChain3* c,DXGI_COLOR_SPACE_TYPE space,UINT* support) {
+    if(space!=DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709)return wineCheck(c,space,support);
+    if(!support)return E_INVALIDARG;
+    *support=DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT;return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE setColorSpace(IDXGISwapChain3* c,DXGI_COLOR_SPACE_TYPE space) {
+    return space==DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709?S_OK:wineSet(c,space);
+}
+static HRESULT (STDMETHODCALLTYPE* wineRotation)(IDXGISwapChain1*,DXGI_MODE_ROTATION)=nullptr;
+static HRESULT STDMETHODCALLTYPE setRotation(IDXGISwapChain1* c,DXGI_MODE_ROTATION rotation) {
+    return rotation==DXGI_MODE_ROTATION_IDENTITY?S_OK:wineRotation(c,rotation);
+}
 static HRESULT present(IDXGIFactory2* factory,IUnknown* device,IUnknown*,const DXGI_SWAP_CHAIN_DESC1* desc,IDXGIOutput* output,IDXGISwapChain1** chain) {
-    return factory->CreateSwapChainForHwnd(device,window,desc,nullptr,output,chain);
+    HRESULT hr=factory->CreateSwapChainForHwnd(device,window,desc,nullptr,output,chain);
+    IDXGISwapChain3* three=nullptr;
+    if(SUCCEEDED(hr)&&SUCCEEDED((*chain)->QueryInterface(__uuidof(IDXGISwapChain3),(void**)&three))) {
+        // vtable: IDXGISwapChain1::SetRotation 27; IDXGISwapChain3::
+        // CheckColorSpaceSupport 37, SetColorSpace1 38 (one vtable, shared by
+        // every chain Wine creates, so patch it once).
+        void** slots=*(void***)three;DWORD old=0;
+        if(slots[37]!=(void*)&checkColorSpace&&VirtualProtect(&slots[27],12*sizeof(void*),PAGE_READWRITE,&old)) {
+            wineRotation=(decltype(wineRotation))slots[27];
+            wineCheck=(decltype(wineCheck))slots[37];wineSet=(decltype(wineSet))slots[38];
+            slots[27]=(void*)&setRotation;slots[37]=(void*)&checkColorSpace;slots[38]=(void*)&setColorSpace;
+            VirtualProtect(&slots[27],12*sizeof(void*),old,&old);
+        }
+        three->Release();
+    }
+    return hr;
 }
 // The runner is a UWP build: desktop user32 is reached by name, with its
 // Win64 types declared here (WNDCLASSW, MSG and the constants used).

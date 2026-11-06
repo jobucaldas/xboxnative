@@ -143,12 +143,12 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     // No guest OpenGL driver: Wine-equivalent no-context wgl answers.
     if(!address) address=opengl32_core::resolve(dll,name);
     if(!address && name && key=="gdi32.dll") {
-        static const auto caps=[]() -> gdi32_core::DeviceCaps {
-            HMODULE records=LoadPackagedLibrary(L"uwph-u32c.dll",0);
-            return records?reinterpret_cast<gdi32_core::DeviceCaps>(
-                GetProcAddress(records,"uwph_u32c_device_caps")):nullptr;
-        }();
-        address=gdi32_core::resolve(dll,name,caps);
+        static HMODULE records=LoadPackagedLibrary(L"uwph-u32c.dll",0);
+        static const auto caps=records?reinterpret_cast<gdi32_core::DeviceCaps>(
+            GetProcAddress(records,"uwph_u32c_device_caps")):nullptr;
+        static const auto metrics=records?reinterpret_cast<gdi32_core::Metrics>(
+            GetProcAddress(records,"GetSystemMetrics")):nullptr;
+        address=gdi32_core::resolve(dll,name,caps,metrics);
     }
     if(key=="kernel32.dll" && name && !address) {
         address=kernel_tail::resolve(name);

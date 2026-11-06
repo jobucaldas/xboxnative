@@ -8,11 +8,11 @@ int main() {
     CHECK(module);
     auto device_caps = reinterpret_cast<gdi32_core::DeviceCaps>(
         GetProcAddress(module, "uwph_u32c_device_caps"));
-    auto caps = reinterpret_cast<gdi32_core::DeviceCaps>(gdi32_core::resolve("GDI32.DLL", "GetDeviceCaps",device_caps));
+    auto metrics = reinterpret_cast<decltype(&GetSystemMetrics)>(GetProcAddress(module, "GetSystemMetrics"));
+    auto caps = reinterpret_cast<gdi32_core::DeviceCaps>(gdi32_core::resolve("GDI32.DLL", "GetDeviceCaps",device_caps,metrics));
     auto get_dc = reinterpret_cast<decltype(&GetDC)>(GetProcAddress(module, "GetDC"));
     auto release_dc = reinterpret_cast<decltype(&ReleaseDC)>(GetProcAddress(module, "ReleaseDC"));
     auto desktop = reinterpret_cast<decltype(&GetDesktopWindow)>(GetProcAddress(module, "GetDesktopWindow"));
-    auto metrics = reinterpret_cast<decltype(&GetSystemMetrics)>(GetProcAddress(module, "GetSystemMetrics"));
     using Configure = void (WINAPI*)(LONG,LONG);
     auto configure = reinterpret_cast<Configure>(GetProcAddress(module, "uwph_u32c_configure"));
     CHECK(caps && get_dc && release_dc && desktop && metrics && configure);
@@ -72,5 +72,17 @@ int main() {
     CHECK(!gdi32_core::resolve("user32.dll","GetDeviceCaps"));
     CHECK(!gdi32_core::resolve("gdi32.dll","getdevicecaps"));
     CHECK(!gdi32_core::resolve("gdi32.dll","#1"));
+    {   // Registry display/memory DCs report the same virtual display (SDL2's desktop mode).
+        auto display = gdi32_core::create_dc_w(L"DISPLAY", nullptr, nullptr, nullptr);
+        auto memory = gdi32_core::create_compatible_dc(display);
+        CHECK(display && memory);
+        CHECK(caps(display, 8) == metrics(SM_CXSCREEN) && caps(display, 10) == metrics(SM_CYSCREEN));
+        CHECK(caps(memory, 8) == metrics(SM_CXSCREEN) && caps(memory, 116) == 60);
+        auto brush = gdi32_core::create_solid_brush(RGB(1, 2, 3));
+        SetLastError(0); CHECK(!caps((HDC)brush, 8) && GetLastError() == ERROR_INVALID_HANDLE);
+        gdi32_core::delete_object(brush);
+        CHECK(gdi32_core::delete_dc(memory) && gdi32_core::delete_dc(display));
+        SetLastError(0); CHECK(!caps(display, 8) && GetLastError() == ERROR_INVALID_HANDLE);  // deleted
+    }
     std::printf("GDI32 CAPS OFFDEVICE PASS %u Wine invalid-DC cases, guest DC lifetime, configured metrics, conservative capabilities, typed resolver\n",invalid);
 }
