@@ -42,6 +42,8 @@ jobs:
           /tmp/steam-cloud-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_achievements_test.cpp -o /tmp/steam-achievements-test
           /tmp/steam-achievements-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/game_library_test.cpp -o /tmp/game-library-test
+          /tmp/game-library-test
           python3 src/xbox-test/app/depot-fixtures/validate-vectors.py
       - name: strict resolver policy unit test
         run: bash src/xbox-test/uwph/strict-policy/tests/run-policy-test.sh
@@ -78,6 +80,8 @@ jobs:
         run: bash src/xbox-test/uwph/host/tests/run-load-config.sh
       - name: Launcher mapped-image load-config rejection
         run: bash src/xbox-test/app/tests/load-config.sh
+      - name: Delete game removes only its install folder
+        run: bash src/xbox-test/app/tests/game-delete.sh
   strict-imports:
     runs-on: ubuntu-latest
     steps:
