@@ -437,7 +437,7 @@ regression; unchanged offline smoke passes 2/2. Evidence under
 reject-attach-before.log, runtime-reject-after.log and offline-reject.log.
 Signed updated build and unchanged full console smoke are pending.
 
-A locked transaction installed and verified Grok.XboxTest_0.5.157.1 using the
+A locked transaction installed and verified Xboxnative.Launcher_0.5.157.1 using the
 pre-fix current launcher build, then invoked unchanged play-test.sh 3405340.
 Upload HTTP 202, command uploads HTTP 200 and app launch HTTP 200 are transport
 and installation evidence only. Result collection is pending. No Unity or
@@ -537,7 +537,7 @@ Installed 0.5.157.4 is running unchanged console Play; full smoke rerun follows.
 
 Reached the requested Unity window-creation stopping point ON Xbox Series S
 through the unchanged real launcher Play path, with verified installed package
-Grok.XboxTest_0.5.157.4_x64__dk715arakrne0. play-test.sh 3405340 exits 0 and
+Xboxnative.Launcher_0.5.157.4_x64__dk715arakrne0. play-test.sh 3405340 exits 0 and
 collects the required launch: RESULT, GAP summary, screenshots and JSON.
 Console launch_probe.log records UnityPlayer TLS PROCESS_ATTACH and DllMain,
 Megabonk EXE entry +0x1264, then baselib and GameAssembly DllMain. Unity calls

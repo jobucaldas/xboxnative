@@ -28,9 +28,11 @@ extern "C" int WINAPI c_GetClipboardFormatNameA(UINT format,LPSTR out,int size){
  std::lock_guard<std::recursive_mutex> l(mutex);
  if(!out||size<=0){SetLastError(ERROR_INVALID_PARAMETER);return 0;}
  auto a=atoms.find(ATOM(format));if(format<0xc000||a==atoms.end()){SetLastError(ERROR_INVALID_PARAMETER);out[0]=0;return 0;}
- int n=WideCharToMultiByte(CP_ACP,0,a->second.name.c_str(),-1,out,size,nullptr,nullptr);
- if(!n){out[size-1]=0;return size-1;}
- return n-1;
+ // Convert in full, then copy what fits (truncated, always terminated).
+ int need=WideCharToMultiByte(CP_ACP,0,a->second.name.c_str(),-1,nullptr,0,nullptr,nullptr);
+ std::string name(need>0?size_t(need):1,'\0');
+ if(need>0)WideCharToMultiByte(CP_ACP,0,a->second.name.c_str(),-1,&name[0],need,nullptr,nullptr);
+ int n=std::min(size-1,int(strlen(name.c_str())));memcpy(out,name.data(),size_t(n));out[n]=0;return n;
 }
 
 // ---- Window state on the records
