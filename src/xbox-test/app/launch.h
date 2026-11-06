@@ -10,7 +10,7 @@
 #include "host/mlp_probe.h"
 #include "../uwph/user32/probe.h"
 #include "launch_status.h"
-#include "launch_arguments.h"
+#include "launch_target.h"
 
 struct LaunchState {
     std::atomic<int> phase{0};          // 0 never, 1 starting, 2 finished, 3 guest running
@@ -291,10 +291,15 @@ static void dump_thread_stacks() {
 static void lp_run_impl(LpCtx& c) {
     wine_gap::report(c.root);
     if(c.names.empty()) {c.failName="no executable";return;}
-    auto exe=c.names.back();
-    if(pe_machine(c.root+L"\\"+exe)==IMAGE_FILE_MACHINE_I386) {
+    // A Steam launch option may name an executable in a subdirectory: the guest
+    // runs from that directory (DLL search and current directory), as on
+    // Windows; Steam Cloud keeps the install root.
+    auto rel=c.names.back();auto slash=rel.find_last_of(L'\\');
+    std::wstring exe=slash==std::wstring::npos?rel:rel.substr(slash+1);
+    std::wstring exeDir=slash==std::wstring::npos?c.root:c.root+L"\\"+rel.substr(0,slash);
+    if(pe_machine(exeDir+L"\\"+exe)==IMAGE_FILE_MACHINE_I386) {
         std::string summary;
-        bool inspected=pe32_probe::map(c.root+L"\\"+exe,c.root,summary);
+        bool inspected=pe32_probe::map(exeDir+L"\\"+exe,exeDir,summary);
         c.mapped=inspected?1:0;
         c.failName=inspected?summary+"; 32-bit execution unsupported":"PE32 data-only inspection failed; execution unsupported";
         lp_sink("PRUN FAIL 32-bit execution unsupported; PE32 inspection is data-only");return;
@@ -312,7 +317,7 @@ static void lp_run_impl(LpCtx& c) {
     }
     if(steamProvider){uint32_t appid=c.appid;std::wstring root=c.root;g_finalSync=[appid,root]{final_sync(appid,root);};}
     regb::init(g_dir,lp_sink); // guest registry (PlayerPrefs): LocalState\registry.sqlite
-    if(!play_runtime::start(c.root,exe,c.args,lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
+    if(!play_runtime::start(exeDir,exe,c.args,lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
     auto r=play_runtime::state;
     ULONGLONG end=GetTickCount64()+110000; bool reportedRunning=false;
     for(;;) {
@@ -343,14 +348,48 @@ static bool lp_run_seh(LpCtx* c) {     // no C++ objects with destructors in thi
     __try { lp_run_impl(*c); return true; }
     __except (play_runtime::state?play_runtime::filter(GetExceptionInformation()):EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
-static std::vector<std::wstring> pick_targets(uint32_t appid, const std::wstring& root, std::string& why) {
-    if (appid == 3405340) { why = "Megabonk.exe with recursive dependency loading"; return {L"Megabonk.exe"}; }
-    WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW((root + L"\\*.exe").c_str(), &fd); std::wstring best; uint64_t bs = 0;
-    if (h != INVALID_HANDLE_VALUE) { do { std::wstring n = fd.cFileName; std::wstring l = n; for (auto& ch : l) ch = (wchar_t)towlower(ch);
-            if (l.find(L"unins") != std::wstring::npos || l.find(L"crash") != std::wstring::npos || l.find(L"redist") != std::wstring::npos || l.find(L"setup") != std::wstring::npos) continue;
-            uint64_t sz = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow; if (sz > bs) { bs = sz; best = n; } } while (FindNextFileW(h, &fd)); FindClose(h); }
-    if (best.empty()) { why = "no launchable .exe in install dir"; return {}; }
-    why = "largest top-level .exe"; return {best};
+// Cached appinfo (the downloader writes it); read only, no network on this path.
+static bool load_appinfo(uint32_t appid,Vdf& root,const Vdf*& app) {
+    FILE* f=_wfopen((g_dir+L"\\appinfo_"+widen(std::to_string(appid))+L".vdf").c_str(),L"rb");
+    if(!f)return false;
+    std::string text;char b[65536];size_t n;
+    while((n=fread(b,1,sizeof b,f))>0&&text.size()<(16u<<20))text.append(b,n);
+    fclose(f);
+    while(!text.empty()&&text.back()==0)text.pop_back();
+    if(text.empty()||!vdf_parse(text,root))return false;
+    app=root.get("appinfo");if(!app)app=&root;
+    return true;
+}
+struct LaunchTarget { std::wstring exe; std::string args, why; };   // exe is install-relative
+// The game's own Steam launch option when known, as the Steam client picks it;
+// otherwise the largest top-level .exe. Engine options come from the game's
+// files (Unity: UnityPlayer.dll beside the executable), never from its app ID.
+static LaunchTarget pick_target(uint32_t appid, const std::wstring& root) {
+    LaunchTarget t; Vdf info; const Vdf* app=nullptr; const launch_target::Entry* chosen=nullptr;
+    std::vector<launch_target::Entry> options;
+    if(load_appinfo(appid,info,app)) {
+        options=launch_target::entries(*app);
+        std::string rel;
+        if(auto e=launch_target::choose(options)) {
+            if(!launch_target::relative_path(e->executable,rel)) t.why="Steam launch option \""+e->executable+"\" is not an install-relative path; ";
+            else if(GetFileAttributesW((root+L"\\"+widen(rel)).c_str())==INVALID_FILE_ATTRIBUTES) t.why="Steam launch option \""+rel+"\" is not installed; ";
+            else {t.exe=widen(rel);chosen=e;t.why="Steam launch option \""+rel+"\"";}
+        } else t.why="no Windows Steam launch option; ";
+    } else t.why="no cached app info; ";
+    if(t.exe.empty()) {
+        WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW((root + L"\\*.exe").c_str(), &fd); std::wstring best; uint64_t bs = 0;
+        if (h != INVALID_HANDLE_VALUE) { do { std::wstring n = fd.cFileName; std::wstring l = n; for (auto& ch : l) ch = (wchar_t)towlower(ch);
+                if (l.find(L"unins") != std::wstring::npos || l.find(L"crash") != std::wstring::npos || l.find(L"redist") != std::wstring::npos || l.find(L"setup") != std::wstring::npos) continue;
+                uint64_t sz = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow; if (sz > bs) { bs = sz; best = n; } } while (FindNextFileW(h, &fd)); FindClose(h); }
+        if (best.empty()) { t.why += "no launchable .exe in install dir"; return t; }
+        t.exe=best;t.why+="largest top-level .exe";
+    }
+    auto slash=t.exe.find_last_of(L'\\');
+    std::wstring dir=slash==std::wstring::npos?root:root+L"\\"+t.exe.substr(0,slash);
+    bool unity=GetFileAttributesW((dir+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES;
+    t.args=launch_target::arguments(chosen,unity);
+    if(unity)t.why+="; Unity player";
+    return t;
 }
 
 // Serialize progress, completion and watchdog publication. A terminal result
@@ -387,7 +426,8 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
     }
     int gen = ++g_launch.gen; g_launch.appid = appid; g_launch.started = now_s();
     { std::lock_guard<std::mutex> l(g_launch.m); g_launch.result.clear();g_launch.ok=false;g_launch.attempt=std::to_string(GetCurrentProcessId())+":"+std::to_string(gen); } g_launch.phase = 1;
-    const std::string args = launch_arguments::for_app(appid);
+    const LaunchTarget target = dir.empty() ? LaunchTarget{} : pick_target(appid, g_dir + L"\\" + widen(dir));
+    const std::string args = target.args;
     char b[1500]; snprintf(b, sizeof b, "{\"appid\":%u,\"attemptId\":\"%s\",\"name\":\"%s\",\"installDir\":\"%s\",\"time\":\"%s\",\"args\":\"%s\",\"via\":\"%s\"}\n", appid, g_launch.attempt.c_str(), json_esc(name).c_str(), json_esc(dir).c_str(), utc_iso().c_str(), args.c_str(), via);
     write_text(g_dir + L"\\launch_request.json", b);
     logf("launch: request written LocalState\\launch_request.json appid=%u attempt=%s dir=%s via=%s", appid, g_launch.attempt.c_str(), dir.c_str(), via);
@@ -402,7 +442,7 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
                   if ((int)q == 0) { std::wstring u = L"xboxsteam-host://launch?appid=" + widen(std::to_string(appid)) + L"&dir=" + widen(dir); bool ok = winrt::Windows::System::Launcher::LaunchUriAsync(winrt::Windows::Foundation::Uri(u)).get(); logf("launch: host activation LaunchUriAsync ok=%d", ok ? 1 : 0); if (ok) { lp_finish(gen,appid,"handed over to host package via xboxsteam-host://; guest execution unverified",false,0,0,"handed-off"); return; } }
             } catch (winrt::hresult_error const& e) { logf("launch: activation query failed hr=0x%08x", (unsigned)e.code().value); } catch (...) { logf("launch: activation query failed"); }
             // 2. in-process guest runtime
-            std::wstring root = g_dir + L"\\" + widen(dir); std::string why; auto names = pick_targets(appid, root, why);
+            std::wstring root = g_dir + L"\\" + widen(dir); std::string why = target.why; std::vector<std::wstring> names; if (!target.exe.empty()) names.push_back(target.exe);
             logf("launch: runtime root=LocalState\\%s targets=%zu (%s)", dir.c_str(), names.size(), why.c_str());
             if (dir.empty() || names.empty()) { finish("cannot start: " + (dir.empty() ? std::string("install directory unknown") : why), false, 0, 0); return; }
             { std::lock_guard<std::mutex> l(g_lpm); if (g_lpf) fclose(g_lpf); g_lpf = _wfopen((g_dir + L"\\launch_probe.log").c_str(), L"wb"); g_lpMissing = g_lpStubbed = g_lpStubCalls = g_lpLines = 0; g_lpLastFail.clear(); }

@@ -7,7 +7,7 @@ game_root=$(realpath "$1")
 alternate=
 if [[ $# == 2 ]];then alternate=$(realpath "$2");fi
 cd "$(dirname "$0")/.."
-# PRUN_GAME_EXE (and PRUN_GAME_APPID) select another owned game; default Megabonk.
+# PRUN_GAME_EXE selects another owned game; default Megabonk.
 exe=${PRUN_GAME_EXE:-Megabonk.exe}
 if [[ $exe == Megabonk.exe ]];then
  [[ -f "$game_root/Megabonk.exe" && -f "$game_root/Megabonk_Data/il2cpp_data/Metadata/global-metadata.dat" ]] || { echo 'complete owned Megabonk installation required'; exit 2; }

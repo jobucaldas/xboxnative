@@ -325,6 +325,8 @@ static bool download_app(CmSession& cm, uint32_t appid) {
     Vdf root; while (!appBuf.empty() && appBuf.back() == 0) appBuf.pop_back();
     if (!vdf_parse(appBuf, root)) return fail("could not parse product info");
     const Vdf* ai = root.get("appinfo"); if (!ai) ai = &root;
+    // Kept for launch: the game's own Steam launch options (launch_target.h).
+    if (FILE* cache = _wfopen((g_dir + L"\\appinfo_" + widen(std::to_string(appid)) + L".vdf").c_str(), L"wb")) { fwrite(appBuf.data(), 1, appBuf.size(), cache); fclose(cache); }
     std::string name = ai->str({"common", "name"}, "App " + std::to_string(appid)), installdir = ai->str({"config", "installdir"}, "app" + std::to_string(appid)), build = ai->str({"depots", "branches", "public", "buildid"}, "?");
     if (appid == 3405340) installdir = "megabonk";
     for (auto& c : installdir) if (!(isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.')) c = '_';
