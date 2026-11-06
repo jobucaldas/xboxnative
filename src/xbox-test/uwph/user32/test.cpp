@@ -5,6 +5,9 @@ extern "C" __declspec(dllimport) ATOM WINAPI uwph_atom_add(LPCWSTR);
 extern "C" __declspec(dllimport) ATOM WINAPI uwph_atom_find(LPCWSTR);
 extern "C" __declspec(dllimport) ATOM WINAPI uwph_atom_delete(ATOM);
 extern "C" __declspec(dllimport) void WINAPI uwph_u32c_key_event(int,BOOL);
+extern "C" __declspec(dllimport) void WINAPI uwph_u32c_input_set_fallback(HWND);
+extern "C" __declspec(dllimport) void WINAPI uwph_u32c_input_release_all();
+extern "C" __declspec(dllimport) BOOL WINAPI uwph_u32c_input_key(UINT,UINT,BOOL,BOOL,UINT);
 static bool streq(const char* a,const char* b){while(*a&&*b){if(*a++!=*b++)return false;}return *a==*b;}
 static bool wstreq(const wchar_t* a,const wchar_t* b){while(*a&&*b){if(*a++!=*b++)return false;}return *a==*b;}
 static int checks,failures,created,destroyed;
@@ -70,6 +73,26 @@ extern "C" DWORD WINAPI u32c_entry(){
   in[0].ki.dwFlags=KEYEVENTF_UNICODE;in[0].ki.wVk=0;in[0].ki.wScan='x';SetLastError(0);check(SendInput(1,in,sizeof(INPUT))==0&&GetLastError()==ERROR_NOT_SUPPORTED);
   SetLastError(0);check(SendInput(1,in,sizeof(INPUT)-1)==0&&GetLastError()==ERROR_INVALID_PARAMETER);}
  {char layout[KL_NAMELENGTH]={};check(GetKeyboardLayoutNameA(layout)&&!lstrcmpA(layout,"00000409"));}
+ // SendInput and the launcher feed are one path: same target (focus, then
+ // foreground, then the presenting window), lParams, system keys, sides, mirror.
+ {WNDCLASSW fc={};fc.lpfnWndProc=DefWindowProcW;fc.lpszClassName=L"u32cfeed";check(RegisterClassW(&fc));
+  HWND fw=CreateWindowExW(0,L"u32cfeed",L"",0,0,0,640,360,0,0,0,0);check(fw);SetFocus(0);check(SetForegroundWindow(fw));
+  uwph_u32c_input_set_fallback(fw);MSG fm;while(PeekMessageW(&fm,fw,0,0,PM_REMOVE)){}
+  INPUT k={};k.type=INPUT_KEYBOARD;k.ki.wVk='B';check(SendInput(1,&k,sizeof k)==1);
+  check(PeekMessageW(&fm,fw,0,0,PM_REMOVE)&&fm.message==WM_KEYDOWN&&fm.wParam=='B'&&fm.lParam==LPARAM(1|(0x30<<16)));
+  k.ki.dwFlags=KEYEVENTF_KEYUP;check(SendInput(1,&k,sizeof k)==1&&PeekMessageW(&fm,fw,0,0,PM_REMOVE)&&fm.message==WM_KEYUP&&(fm.lParam&0xC0000000)==0xC0000000);
+  INPUT alt[2]={};alt[0].type=alt[1].type=INPUT_KEYBOARD;alt[0].ki.wVk=VK_MENU;alt[1].ki.wVk='F';check(SendInput(2,alt,sizeof(INPUT))==2);
+  check((GetKeyState(VK_LMENU)&0x8000)&&(GetKeyState(VK_MENU)&0x8000));
+  check(PeekMessageW(&fm,fw,0,0,PM_REMOVE)&&fm.message==WM_SYSKEYDOWN&&fm.wParam==VK_MENU);
+  check(PeekMessageW(&fm,fw,0,0,PM_REMOVE)&&fm.message==WM_SYSKEYDOWN&&fm.wParam=='F'&&(fm.lParam&(1<<29)));
+  uwph_u32c_input_release_all();check(!(GetAsyncKeyState('F')&0x8000)&&!(GetKeyState(VK_LMENU)&0x8000)); // one mirror
+  while(PeekMessageW(&fm,fw,0,0,PM_REMOVE)){}
+  INPUT m={};m.type=INPUT_MOUSE;m.mi.dx=m.mi.dy=32768;m.mi.dwFlags=MOUSEEVENTF_MOVE|MOUSEEVENTF_ABSOLUTE|MOUSEEVENTF_LEFTDOWN;check(SendInput(1,&m,sizeof m)==1);
+  check(PeekMessageW(&fm,fw,0,0,PM_REMOVE)&&fm.message==WM_LBUTTONDOWN&&(fm.wParam&MK_LBUTTON));
+  check(PeekMessageW(&fm,fw,0,0,PM_REMOVE)&&fm.message==WM_MOUSEMOVE&&(fm.wParam&MK_LBUTTON));
+  m.mi.dwFlags=MOUSEEVENTF_LEFTUP;check(SendInput(1,&m,sizeof m)==1&&PeekMessageW(&fm,fw,0,0,PM_REMOVE)&&fm.message==WM_LBUTTONUP);
+  check(uwph_u32c_input_key('Q',0x10,FALSE,TRUE,1)&&(GetAsyncKeyState('Q')&0x8000));uwph_u32c_input_release_all();check(!(GetAsyncKeyState('Q')&0x8000));
+  uwph_u32c_input_set_fallback(0);while(PeekMessageW(&fm,fw,0,0,PM_REMOVE)){}check(DestroyWindow(fw));}
  // ANSI class and messages over the W records: window text converts, posted messages pass through.
  {WNDCLASSA ac={};ac.lpfnWndProc=ansiProc;ac.lpszClassName="u32cansi";check(RegisterClassA(&ac));
   HWND ah=CreateWindowExA(0,"u32cansi","",0,0,0,10,10,0,0,0,0);check(ah);

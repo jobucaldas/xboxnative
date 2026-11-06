@@ -70,6 +70,15 @@ ignored (the pad reaches games through XInput/Windows.Gaming.Input). Raw input,
 relative mouse, touch and pen are not fed. Run `corewindow-feed-test.sh` after
 `build.sh`; physical input needs the console.
 
+There is one feed per process, owned by this record DLL (`input_feed.h`): the
+launcher drives it through the `uwph_u32c_input_*` exports, and the guest's own
+`SendInput` goes through the same instance. Synthesized and physical input
+therefore share the held-key mirror, sided modifiers, lParams (scan code,
+extended, context, previous-state and transition bits), system-key rules, target
+window and `release_all`. `SendInput` derives a missing scan code from the
+virtual key (or the virtual key from `KEYEVENTF_SCANCODE`), and refuses Unicode
+keystrokes and hardware input.
+
 GetDC/ReleaseDC hand out opaque per-call handles with no real GDI surface: no
 rendering exists in this module. LoadCursorA/LoadIconA/W/LoadImageA/W resolve
 only standard shared system cursor/icon IDs (hInstance==NULL, integer

@@ -53,33 +53,51 @@ extern "C" LRESULT WINAPI c_SendMessageA(HWND h,UINT m,WPARAM w,LPARAM p){
 extern "C" BOOL WINAPI c_PostMessageA(HWND h,UINT m,WPARAM w,LPARAM p){return c_PostMessageW(h,m,w,p);} // posted payloads are scalar; WM_CHAR > 127 is refused by the W path
 extern "C" BOOL WINAPI c_GetKeyboardLayoutNameA(LPSTR name){if(!name)return FALSE;strcpy(name,"00000409");return TRUE;} // fixed en-US layout, as the W form
 extern "C" HANDLE WINAPI c_RegisterDeviceNotificationA(HANDLE recipient,void* filter,DWORD flags){return c_RegisterDeviceNotificationW(recipient,filter,flags);} // same validation; the A filter types differ only in name fields
-// SendInput: synthesized keyboard input updates the key state table and is
-// posted to the focus window as WM_KEYDOWN/WM_KEYUP; mouse moves set the
-// cursor (absolute coordinates are 0..65535 over the virtual desktop). Unicode
-// keystrokes (no virtual key) and mouse buttons/wheel are not injected, and the
-// call stops at the first such entry, returning how many were inserted.
+// SendInput through the shared feed (input_feed.h): exactly the messages,
+// lParams, side/system-key handling and target the physical keyboard and
+// mouse produce. A missing scan code is derived from the virtual key (and the
+// virtual key from KEYEVENTF_SCANCODE). Unicode keystrokes and hardware input
+// are refused (ERROR_NOT_SUPPORTED); the call stops at the first entry it
+// cannot insert and returns how many were inserted.
 struct KeyInput {WORD vk,scan;DWORD flags,time;ULONG_PTR extra;};
 struct MouseInput {LONG dx,dy;DWORD data,flags,time;ULONG_PTR extra;};
 struct Input {DWORD type;union {MouseInput mouse;KeyInput key;BYTE raw[32];};};
 static_assert(sizeof(Input)==40,"INPUT layout");
 extern "C" UINT WINAPI c_SendInput(UINT count,Input* inputs,int size){
  if(size!=int(sizeof(Input))||(count&&!inputs)){SetLastError(ERROR_INVALID_PARAMETER);return 0;}
+ std::lock_guard<std::recursive_mutex> l(mutex);
+ auto& feed=sharedFeed();
  UINT done=0;
  for(;done<count;++done){
   auto& in=inputs[done];
   if(in.type==1){ // INPUT_KEYBOARD
-   if((in.key.flags&4)||!in.key.vk||in.key.vk>255){SetLastError(ERROR_NOT_SUPPORTED);break;} // KEYEVENTF_UNICODE
-   bool up=(in.key.flags&2)!=0;uwph_u32c_key_event(in.key.vk,!up);
-   HWND target=c_GetFocus();
-   if(target)c_PostMessageW(target,up?WM_KEYUP:WM_KEYDOWN,in.key.vk,up?LPARAM(0xC0000001):1);
+   const DWORD flags=in.key.flags;
+   if(flags&KEYEVENTF_UNICODE){SetLastError(ERROR_NOT_SUPPORTED);break;}
+   const bool extended=(flags&KEYEVENTF_EXTENDEDKEY)!=0,up=(flags&KEYEVENTF_KEYUP)!=0;
+   UINT vk=in.key.vk,scan=in.key.scan&0xff;
+   if(flags&KEYEVENTF_SCANCODE)vk=c_MapVirtualKeyW(scan|(extended?0xE000:0),MAPVK_VSC_TO_VK_EX);
+   else if(!scan)scan=c_MapVirtualKeyW(vk,MAPVK_VK_TO_VSC);
+   if(!vk||vk>255||!feed.key(vk,scan,extended,!up)){SetLastError(ERROR_NOT_SUPPORTED);break;}
   } else if(in.type==0){ // INPUT_MOUSE
-   if(in.mouse.flags&~DWORD(0x8001)){SetLastError(ERROR_NOT_SUPPORTED);break;} // only MOVE | ABSOLUTE
-   std::lock_guard<std::recursive_mutex> l(mutex);
-   POINT& pos=cursorPosRef();
-   if(in.mouse.flags&0x8000)pos={LONG((LONGLONG(in.mouse.dx)*desktopWidth)>>16),LONG((LONGLONG(in.mouse.dy)*desktopHeight)>>16)};
-   else{pos.x+=in.mouse.dx;pos.y+=in.mouse.dy;}
-   clampToClip(pos);haveCursorPos=true;
-  } else {SetLastError(ERROR_INVALID_PARAMETER);break;}
+   const DWORD flags=in.mouse.flags;
+   POINT pos{};c_GetCursorPos(&pos);
+   if(flags&MOUSEEVENTF_MOVE){
+    if(flags&MOUSEEVENTF_ABSOLUTE)pos={LONG((LONGLONG(in.mouse.dx)*desktopWidth)>>16),LONG((LONGLONG(in.mouse.dy)*desktopHeight)>>16)};
+    else{pos.x+=in.mouse.dx;pos.y+=in.mouse.dy;}
+   }
+   unsigned buttons=feed.buttons;
+   auto apply=[&](DWORD downFlag,DWORD upFlag,unsigned bit){if(flags&downFlag)buttons|=bit;if(flags&upFlag)buttons&=~bit;};
+   apply(MOUSEEVENTF_LEFTDOWN,MOUSEEVENTF_LEFTUP,corewindow_input::Left);
+   apply(MOUSEEVENTF_RIGHTDOWN,MOUSEEVENTF_RIGHTUP,corewindow_input::Right);
+   apply(MOUSEEVENTF_MIDDLEDOWN,MOUSEEVENTF_MIDDLEUP,corewindow_input::Middle);
+   if(flags&(MOUSEEVENTF_XDOWN|MOUSEEVENTF_XUP)){
+    unsigned bit=(in.mouse.data&XBUTTON1)?corewindow_input::X1:(in.mouse.data&XBUTTON2)?corewindow_input::X2:0;
+    if(flags&MOUSEEVENTF_XDOWN)buttons|=bit;if(flags&MOUSEEVENTF_XUP)buttons&=~bit;
+   }
+   // No guest window yet: the cursor still moves, as on Windows.
+   if(!feed.pointer_screen(pos,buttons))c_SetCursorPos(pos.x,pos.y);
+   if(flags&(MOUSEEVENTF_WHEEL|MOUSEEVENTF_HWHEEL))feed.wheel_here(SHORT(WORD(in.mouse.data)),(flags&MOUSEEVENTF_HWHEEL)!=0);
+  } else {SetLastError(ERROR_NOT_SUPPORTED);break;} // INPUT_HARDWARE
  }
  return done;
 }

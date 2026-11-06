@@ -671,7 +671,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     CoreDispatcher m_graphicsDispatcher{nullptr};
     bool m_guestSurface=false;
     int m_guestEndGen=0;
-    corewindow_input::Feed m_input;   // keyboard/mouse to the guest; UI thread only
+    corewindow_input::Shared m_input; // keyboard/mouse to the guest: the record DLL's one feed, shared with guest SendInput
     bool m_inputLogged=false;
     winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::UI::Popups::IUICommand> m_guestDialog{nullptr};
     inline static App* graphicsApp=nullptr;
@@ -1046,23 +1046,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // the window is active and the launcher menu is closed.
     bool guest_input() {
         if(!m_guestSurface||guest_overlay::inputBlocked.load(std::memory_order_relaxed)){m_input.release_all();return false;}
-        if(!m_input.api.complete()) {
-            auto r=[](const char* name){return user32_core::resolve("user32.dll",name);};
-            auto& a=m_input.api;
-            a.key=reinterpret_cast<decltype(a.key)>(r("uwph_u32c_key_event"));
-            a.post=reinterpret_cast<decltype(a.post)>(r("PostMessageW"));
-            a.focus=reinterpret_cast<decltype(a.focus)>(r("GetFocus"));
-            a.foreground=reinterpret_cast<decltype(a.foreground)>(r("GetForegroundWindow"));
-            a.is_window=reinterpret_cast<decltype(a.is_window)>(r("IsWindow"));
-            a.client_rect=reinterpret_cast<decltype(a.client_rect)>(r("GetClientRect"));
-            a.to_screen=reinterpret_cast<decltype(a.to_screen)>(r("ClientToScreen"));
-            a.to_client=reinterpret_cast<decltype(a.to_client)>(r("ScreenToClient"));
-            a.set_cursor=reinterpret_cast<decltype(a.set_cursor)>(r("SetCursorPos"));
-            a.get_cursor=reinterpret_cast<decltype(a.get_cursor)>(r("GetCursorPos"));
-            if(!m_inputLogged){m_inputLogged=true;logf("keyboard/mouse feed %s",a.complete()?"ready":"unavailable (user32 records missing)");}
-            if(!a.complete())return false;
+        if(!m_input.complete()) {
+            bool ready=m_input.bind([](const char* name){return user32_core::resolve("user32.dll",name);});
+            if(!m_inputLogged){m_inputLogged=true;logf("keyboard/mouse feed %s",ready?"ready":"unavailable (user32 records missing)");}
+            if(!ready)return false;
         }
-        m_input.fallback=play_graphics::presented.load(std::memory_order_acquire);
+        m_input.set_fallback(play_graphics::presented.load(std::memory_order_acquire));
         return true;
     }
     void pointer_event(PointerEventArgs const& e,bool wheel) {

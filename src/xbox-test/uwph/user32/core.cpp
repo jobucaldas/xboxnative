@@ -10,6 +10,7 @@
 #include <mutex>
 #include <algorithm>
 #include "keymap.h"
+#include "corewindow_feed.h"
 // The APP family this DLL compiles under (build.sh --uwp) hides several
 // desktop-only SDK declarations this record module still needs to export
 // (they are plain data layouts/constants, not calls to restricted entry
@@ -21,6 +22,12 @@
 #define MAPVK_VK_TO_CHAR 2
 #define MAPVK_VSC_TO_VK_EX 3
 #define MAPVK_VK_TO_VSC_EX 4
+#endif
+#ifndef KEYEVENTF_EXTENDEDKEY
+#define KEYEVENTF_EXTENDEDKEY 0x0001
+#define KEYEVENTF_KEYUP 0x0002
+#define KEYEVENTF_UNICODE 0x0004
+#define KEYEVENTF_SCANCODE 0x0008
 #endif
 #ifndef ENUM_CURRENT_SETTINGS
 #define ENUM_CURRENT_SETTINGS ((DWORD)-1)
@@ -547,5 +554,6 @@ extern "C" int WINAPI c_LookupIconIdFromDirectoryEx(BYTE* xdir,BOOL isIcon,int w
 #include "dialog_keys.h"
 #include "dpi.h"
 #include "device_notifications.h"
+#include "input_feed.h"
 #include "window_extras.h"
 } // namespace u32c
