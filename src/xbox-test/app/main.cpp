@@ -916,7 +916,15 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                         app->m_guestSurface=true;
                         app->m_ctx->ClearState();app->m_ctx->Flush();
                         app->m_bb=nullptr;app->m_sc=nullptr;
-                        result=factory->CreateSwapChainForCoreWindow(device,window,description,output,chain);
+                        // The frame-latency waitable object is optional for the game
+                        // (Unity falls back to Present pacing without it); on the console
+                        // the game's main thread hung forever waiting on it.
+                        DXGI_SWAP_CHAIN_DESC1 desc=*description;
+                        desc.Flags&=~UINT(DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
+                        logf("guest swapchain %ux%u format=%u buffers=%u effect=%u scaling=%u alpha=%u flags=0x%x (requested 0x%x)",
+                             desc.Width,desc.Height,(unsigned)desc.Format,desc.BufferCount,(unsigned)desc.SwapEffect,
+                             (unsigned)desc.Scaling,(unsigned)desc.AlphaMode,desc.Flags,description->Flags);
+                        result=factory->CreateSwapChainForCoreWindow(device,window,&desc,output,chain);
                         logf("guest surface handoff native hr=0x%08lx",(unsigned long)result);
                     } catch(hresult_error const& e) {result=e.code();}
                     SetEvent(done);
