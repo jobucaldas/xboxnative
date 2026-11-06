@@ -17,7 +17,7 @@ static void discovery_log(const char* message) {
 PVOID CALLBACK no_function_entry(HANDLE, DWORD64, ULONG64) { return nullptr; }
 int main(int argc, char** argv) {
     sysx_native::discover(discovery_log);
-    CHECK(discovered == 17 && unavailable == 0);
+    CHECK(discovered == std::size(sysx_native::allowed) && unavailable == 0);
     CHECK(!sysx_native::resolve(nullptr, "SymInitialize"));
     CHECK(!sysx_native::resolve("dbghelp.dll", nullptr));
     CHECK(!sysx_native::resolve("untrusted.dll", "SymInitialize"));
