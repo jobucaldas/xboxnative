@@ -63,6 +63,7 @@ EXPORTS
  uwph_u32c_key_event
  GetAsyncKeyState=c_GetAsyncKeyState
  GetKeyState=c_GetKeyState
+ GetKeyboardState=c_GetKeyboardState
  GetFocus=c_GetFocus
  SetFocus=c_SetFocus
  GetActiveWindow=c_GetActiveWindow

@@ -136,6 +136,7 @@ static std::vector<RawInputDevice2> rawDevices;
 static POINT& cursorPosRef(){if(!haveCursorPos){cursorPos2={desktopWidth/2,desktopHeight/2};haveCursorPos=true;}return cursorPos2;}
 extern "C" void WINAPI uwph_u32c_key_event(int vk,BOOL down){std::lock_guard<std::recursive_mutex> l(mutex);if(vk<0||vk>255)return;if(down){keyDown[vk]|=0x80;keyPressedSince[vk]|=0x01;}else keyDown[vk]&=~0x80;}
 extern "C" SHORT WINAPI c_GetAsyncKeyState(int vk){std::lock_guard<std::recursive_mutex> l(mutex);if(vk<0||vk>255)return 0;SHORT r=(keyDown[vk]&0x80)?(SHORT)0x8000:0;if(keyPressedSince[vk]&0x01){r|=1;keyPressedSince[vk]&=~0x01;}return r;}
+extern "C" BOOL WINAPI c_GetKeyboardState(PBYTE state){if(!state){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}std::lock_guard<std::recursive_mutex> l(mutex);memcpy(state,keyDown,256);return TRUE;}
 extern "C" SHORT WINAPI c_GetKeyState(int vk){std::lock_guard<std::recursive_mutex> l(mutex);if(vk<0||vk>255)return 0;return (keyDown[vk]&0x80)?(SHORT)0x8000:0;}
 extern "C" HWND WINAPI c_GetFocus(){std::lock_guard<std::recursive_mutex> l(mutex);return focusWindow&&window(focusWindow)?focusWindow:nullptr;}
 extern "C" HWND WINAPI c_SetFocus(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);HWND old=c_GetFocus();if(!h){focusWindow=nullptr;return old;}auto w=window(h);if(!w)return nullptr;if(w->thread!=GetCurrentThreadId()){SetLastError(ERROR_ACCESS_DENIED);return nullptr;}focusWindow=h;return old;}
