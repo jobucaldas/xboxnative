@@ -517,6 +517,10 @@ static std::shared_ptr<CmSession> session_for_download() {
 }
 static void dl_thread() {
     init_apartment(apartment_type::multi_threaded);
+    if (begin_download()) {   // downloads cut off by a crash or power loss: remove their files (installs.h)
+        for (auto& w : installs::sweep_partials(g_dir, &g_quit)) logf("dl: unfinished download of appid %u (LocalState\\%s) from an earlier run: %s", w.appid, w.dir.c_str(), installs::discard_name(w.result));
+        end_download();
+    }
     // LocalState\autodownload.txt: one appid per line; processed once the account state is known (user session, else anonymous)
     std::wstring ap = g_dir + L"\\autodownload.txt";
     if (file_exists(ap)) {
