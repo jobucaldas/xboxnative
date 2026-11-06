@@ -118,6 +118,8 @@ EXPORTS
  AdjustWindowRectEx=c_AdjustWindowRectEx
  SetWindowPos=c_SetWindowPos
  ValidateRect=c_ValidateRect
+ InvalidateRect=c_InvalidateRect
+ CopyImage=c_CopyImage
  GetDC=c_GetDC
  ReleaseDC=c_ReleaseDC
  LoadCursorA=c_LoadCursorA

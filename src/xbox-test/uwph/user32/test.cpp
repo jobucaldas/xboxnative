@@ -101,6 +101,7 @@ extern "C" DWORD WINAPI u32c_entry(){
  check(SetWindowPos(h2,0,5,6,20,30,0));RECT wr{};check(GetWindowRect(h2,&wr)&&wr.left==5&&wr.top==6&&wr.right==25);
  check(SetWindowPos(h2,0,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_HIDEWINDOW));check(!IsWindowVisible(h2));
  check(ValidateRect(h2,0));check(UpdateWindow(h2));check(!ValidateRect((HWND)0x99999,0));
+ check(InvalidateRect(h2,0,TRUE));check(InvalidateRect(0,0,FALSE));SetLastError(0);check(!InvalidateRect((HWND)0x99999,0,TRUE)&&GetLastError()==ERROR_INVALID_WINDOW_HANDLE);
  BYTE keyState[256]={};keyState[VK_SHIFT]=0x80;WCHAR tu[4]={};check(ToUnicode('A',0,keyState,tu,4,0)==1&&tu[0]==L'A');
  keyState[VK_SHIFT]=0;check(ToUnicode('A',0,keyState,tu,4,0)==1&&tu[0]==L'a');check(ToUnicode(VK_F1,0,keyState,tu,4,0)==0);
  // batch 3: GetDC/ReleaseDC, standard cursor/icon loading, CreateIconFromResourceEx+LookupIconIdFromDirectoryEx
@@ -110,6 +111,14 @@ extern "C" DWORD WINAPI u32c_entry(){
  HICON appIcon=LoadIconA(0,MAKEINTRESOURCEA(32512));check(appIcon!=0);check(LoadIconW(0,MAKEINTRESOURCEW(32512))==appIcon);check(appIcon!=(HICON)arrow);
  HANDLE img=LoadImageW(0,MAKEINTRESOURCEW(32513),IMAGE_CURSOR,0,0,LR_DEFAULTSIZE);check(img&&img!=arrow);
  check(!LoadImageW(0,MAKEINTRESOURCEW(1),IMAGE_BITMAP,0,0,0)&&GetLastError()==ERROR_NOT_SUPPORTED);
+ {HANDLE icon=LoadImageW(0,MAKEINTRESOURCEW(32512),IMAGE_ICON,0,0,LR_DEFAULTSIZE);check(icon);
+  HANDLE copy=CopyImage(icon,IMAGE_ICON,48,48,0);check(copy&&copy!=icon);
+  ICONINFO ci{};check(GetIconInfo((HICON)copy,&ci)&&ci.fIcon&&ci.xHotspot==24&&ci.yHotspot==24);
+  HANDLE moved=CopyImage(copy,IMAGE_CURSOR,0,0,LR_COPYDELETEORG);check(moved&&moved!=copy);
+  SetLastError(0);check(!DestroyIcon((HICON)copy)&&GetLastError()==ERROR_INVALID_CURSOR_HANDLE); // original deleted
+  check(DestroyIcon((HICON)moved));check(DestroyIcon((HICON)icon)); // shared system icon survives LR_COPYDELETEORG
+  SetLastError(0);check(!CopyImage(icon,IMAGE_BITMAP,0,0,0)&&GetLastError()==ERROR_NOT_SUPPORTED);
+  SetLastError(0);check(!CopyImage((HANDLE)0x4242,IMAGE_ICON,0,0,0)&&GetLastError()==ERROR_INVALID_CURSOR_HANDLE);}
  check(!LoadImageW(0,L"file.cur",IMAGE_CURSOR,0,0,LR_LOADFROMFILE)&&GetLastError()==ERROR_FILE_NOT_FOUND);
  check(DestroyIcon(appIcon));check(DestroyIcon(appIcon)); // shared/system icon destroy is always a TRUE no-op.
  check(!DestroyIcon((HICON)0x7777)&&GetLastError()==ERROR_INVALID_CURSOR_HANDLE);

@@ -31,7 +31,7 @@ int main() {
     CHECK(!gdi32_core::resolve("user32.dll", "GetObjectA"));
     CHECK(!gdi32_core::resolve("gdi32.dll", "getobjecta"));
     CHECK(!gdi32_core::resolve("gdi32.dll", "#1"));
-    CHECK(!gdi32_core::resolve("gdi32.dll", "CreateBitmap"));
+    CHECK(!gdi32_core::resolve("gdi32.dll", "CreatePen"));  // unimplemented names stay unresolved
     auto set_format = reinterpret_cast<BOOL (WINAPI*)(HDC, int, const PIXELFORMATDESCRIPTOR*)>(
         gdi32_core::resolve("GDI32.DLL", "SetPixelFormat"));
     auto swap = reinterpret_cast<BOOL (WINAPI*)(HDC)>(
@@ -87,6 +87,18 @@ int main() {
     CHECK(descriptor.nSize == sizeof(descriptor) && descriptor.nVersion == 1);
     CHECK(!gdi32_core::resolve("user32.dll", "SetPixelFormat"));
     CHECK(!gdi32_core::resolve("gdi32.dll", "swapbuffers"));
+    {
+        using Gamma = BOOL (WINAPI*)(HDC, void*);
+        auto get = reinterpret_cast<Gamma>(gdi32_core::resolve("gdi32.dll", "GetDeviceGammaRamp"));
+        auto set = reinterpret_cast<Gamma>(gdi32_core::resolve("gdi32.dll", "SetDeviceGammaRamp"));
+        CHECK(get && set);
+        static WORD ramp[3][256];
+        HDC record = reinterpret_cast<HDC>(UINT_PTR(0x1234));
+        CHECK(get(record, ramp) && ramp[0][0] == 0 && ramp[1][128] == 128 * 257 && ramp[2][255] == 0xffff);
+        SetLastError(0); CHECK(!get(nullptr, ramp) && GetLastError() == ERROR_INVALID_PARAMETER);
+        SetLastError(0); CHECK(!set(record, ramp) && GetLastError() == ERROR_NOT_SUPPORTED);
+        SetLastError(0); CHECK(!set(record, nullptr) && GetLastError() == ERROR_INVALID_PARAMETER);
+    }
     FreeLibrary(oracle);
     std::puts("GDI32 OFFDEVICE PASS null-driver pixel format/presentation failures, descriptor guards, last error");
     std::printf("GDI32 OFFDEVICE PASS %u invalid-object cases, Wine differential, output guards, last error, resolver isolation\n", cases);

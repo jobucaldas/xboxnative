@@ -51,7 +51,11 @@ static unsigned nextAtom=0xc000;
 static bool integer(const void* p){return ULONG_PTR(p)<=0xffff;}
 static std::wstring fold(std::wstring s){for(auto& c:s)if(c>=L'A'&&c<=L'Z')c+=32;return s;}
 static Window* window(HWND h){for(auto& w:windows)if((HWND)w.get()==h&&w->alive)return w.get();SetLastError(ERROR_INVALID_WINDOW_HANDLE);return nullptr;}
-static Class* klass(LPCWSTR name,HINSTANCE instance){for(auto& c:classes)if((integer(name)?c->atom==LOWORD(ULONG_PTR(name)):fold(c->name)==fold(name))&&(c->info.instance==instance||(c->info.style&0x4000)))return c.get();return nullptr;}
+// Wine win32u find_class: a NULL instance matches any class (SDL2 registers
+// with GetModuleHandle(NULL) and creates with NULL), a global class (CS_GLOBALCLASS)
+// matches every instance, and other instances compare at 64 KiB granularity.
+static bool sameInstance(HINSTANCE registered,HINSTANCE requested){auto a=ULONG_PTR(registered),b=ULONG_PTR(requested);return a==b||((a>>16)&&(a&~ULONG_PTR(0xffff))==(b&~ULONG_PTR(0xffff)));}
+static Class* klass(LPCWSTR name,HINSTANCE instance){for(auto& c:classes)if((integer(name)?c->atom==LOWORD(ULONG_PTR(name)):fold(c->name)==fold(name))&&(!instance||(c->info.style&0x4000)||sameInstance(c->info.instance,instance)))return c.get();return nullptr;}
 static std::wstring key(LPCWSTR p){if(!integer(p))return L"s:"+fold(p);auto a=atoms.find(LOWORD(ULONG_PTR(p)));if(a!=atoms.end())return L"s:"+fold(a->second.name);return L"a:"+std::to_wstring(ULONG_PTR(p));}
 static std::wstring wide(LPCSTR p){if(integer(p))return {};int n=MultiByteToWideChar(CP_ACP,0,p,-1,nullptr,0);std::wstring s(n? n:1,0);if(n)MultiByteToWideChar(CP_ACP,0,p,-1,&s[0],n);s.resize(n?n-1:0);return s;}
 extern "C" ATOM WINAPI c_GlobalAddAtomW(LPCWSTR);
@@ -388,6 +392,9 @@ extern "C" BOOL WINAPI c_SetWindowPos(HWND h,HWND,int x,int y,int cx,int cy,UINT
 }
 extern "C" BOOL WINAPI c_ValidateRect(HWND h,const RECT*){std::lock_guard<std::recursive_mutex> l(mutex);return window(h)!=nullptr;} // no invalid-region tracking: nothing to validate, trivially honest.
 extern "C" BOOL WINAPI c_UpdateWindow(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);return window(h)!=nullptr;} // no pending update region ever exists here, so nothing to flush.
+// InvalidateRect: no invalid region is tracked (see ValidateRect), so there is
+// nothing to add and no WM_PAINT to schedule. NULL means every window (TRUE).
+extern "C" BOOL WINAPI c_InvalidateRect(HWND h,const RECT*,BOOL){std::lock_guard<std::recursive_mutex> l(mutex);if(h&&!window(h)){SetLastError(ERROR_INVALID_WINDOW_HANDLE);return FALSE;}return TRUE;}
 
 // Icon/cursor handles and device contexts. Wine/Windows route HICON and
 // HCURSOR through the same shared handle table (user32/cursoricon.c); this
@@ -444,6 +451,24 @@ extern "C" BOOL WINAPI c_DestroyIcon(HICON h){
  icons.erase(it);return TRUE;
 }
 extern "C" BOOL WINAPI c_DestroyCursor(HCURSOR h){return c_DestroyIcon((HICON)h);} // same shared icon/cursor handle table.
+// CopyImage for icon/cursor records: a new, caller-owned record of the requested
+// size (0 keeps the original), as Windows returns a distinct handle even for an
+// unchanged copy. LR_COPYDELETEORG destroys a non-shared original. Bitmaps have
+// no backend in this module (as LoadImage IMAGE_BITMAP).
+extern "C" HANDLE WINAPI c_CopyImage(HANDLE h,UINT type,int cx,int cy,UINT flags){
+ std::lock_guard<std::recursive_mutex> l(mutex);
+ if(type==IMAGE_BITMAP){SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
+ if(type!=IMAGE_ICON&&type!=IMAGE_CURSOR){SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}
+ auto r=iconRec(h);
+ if(!r){SetLastError(ERROR_INVALID_CURSOR_HANDLE);return nullptr;}
+ IconRec source=*r;
+ int w=cx?cx:source.cx,hh=cy?cy:source.cy;
+ POINT hotspot=source.hotspot;
+ if(source.cx&&source.cy){hotspot.x=hotspot.x*w/source.cx;hotspot.y=hotspot.y*hh/source.cy;}
+ HICON copy=allocIcon(type==IMAGE_ICON,w,hh,hotspot,false);
+ if((flags&LR_COPYDELETEORG)&&!source.shared)c_DestroyIcon((HICON)h);
+ return copy;
+}
 extern "C" BOOL WINAPI c_GetIconInfo(HICON h,IconInfo2* info){
  std::lock_guard<std::recursive_mutex> l(mutex);
  auto r=iconRec((HANDLE)h);
