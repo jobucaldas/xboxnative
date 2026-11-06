@@ -34,6 +34,11 @@ inline constexpr struct { const char* dll; const char* symbol; } allowed[] = {
         {"ntdll.dll", "NtReadFile"},
         {"ntdll.dll", "NtWriteFile"},
         {"ntdll.dll", "RtlNtStatusToDosError"},
+        // Wine's concrt140 (C++ runtime for games without their own copy):
+        // the wait-on-address primitives under kernelbase WaitOnAddress.
+        {"ntdll.dll", "RtlWaitOnAddress"},
+        {"ntdll.dll", "RtlWakeAddressSingle"},
+        {"ntdll.dll", "RtlWakeAddressAll"},
         {"wininet.dll", "InternetOpenA"},
         {"wininet.dll", "InternetConnectA"},
         {"wininet.dll", "InternetCrackUrlA"},
@@ -42,11 +47,20 @@ inline constexpr struct { const char* dll; const char* symbol; } allowed[] = {
         {"wininet.dll", "HttpSendRequestA"},
         {"wininet.dll", "HttpQueryInfoA"},
     };
+// ntdll's C runtime subset (string, memory, number formatting and sorting:
+// _vsnprintf, strlen, _ui64toa, qsort, ...). These names are lowercase, or one
+// underscore and a lowercase letter or digit. They take no handles or guest
+// state, so any of them is served natively. System calls and loader/runtime
+// functions (Nt*, Zw*, Rtl*, Ldr*, __*) stay on the explicit list above.
+inline bool ntdll_crt(const char* name) {
+    if (name[0] >= 'a' && name[0] <= 'z') return true;
+    return name[0] == '_' && ((name[1] >= 'a' && name[1] <= 'z') || (name[1] >= '0' && name[1] <= '9'));
+}
 inline uintptr_t resolve(const char* dll, const char* name) {
     if (!dll || !name) return 0;
-    bool matched = false;
+    bool matched = !_stricmp(dll, "ntdll.dll") && ntdll_crt(name);
     for (const auto& entry : allowed)
-        if (!_stricmp(dll, entry.dll) && !strcmp(name, entry.symbol)) {
+        if (!matched && !_stricmp(dll, entry.dll) && !strcmp(name, entry.symbol)) {
             matched = true;
             break;
         }

@@ -95,13 +95,22 @@ lld-link-19 "$out"/obj/vcrt/tests_play-vcrt.*.obj /dll /nodefaultlib /out:"$out/
 llvm-readobj --coff-imports "$out/play-vcrt.dll" | grep -q 'Name: VCRUNTIME140.dll'
 llvm-readobj --coff-imports "$out/play-vcrt.dll" | grep -q 'Name: VCRUNTIME140_1.dll'
 rm -f "$out/vcruntime140.dll" "$out/vcruntime140_1.dll"
+# A /MD C++ DLL using msvcp140.dll, served from Play's runtime directory
+# (Wine's build from the launcher layout); no copy beside the game.
+UWP_OBJ_DIR="$out/obj/msvcp" "$CB/scripts/build.sh" --out "$out/play-msvcp.dll" --link-arg /dll tests/play-msvcp.cpp -- /MD /O2 /EHsc /GR
+lld-link-19 "$out"/obj/msvcp/tests_play-msvcp.*.obj /dll /nodefaultlib /out:"$out/play-msvcp.dll" \
+ /libpath:"$crt/crt/lib/x86_64" /libpath:"$crt/sdk/lib/um/x86_64" \
+ /libpath:"$crt/sdk/lib/ucrt/x86_64" msvcrt.lib msvcprt.lib vcruntime.lib ucrt.lib kernel32.lib
+llvm-readobj --coff-imports "$out/play-msvcp.dll" | grep -q 'Name: MSVCP140.dll'
+rm -f "$out/msvcp140.dll"
+rm -rf "$out/runtime";mkdir -p "$out/runtime";cp out/layout/runtime/*.dll "$out/runtime/"
 bash ../uwph/host/build-sqlite-lib.sh "$out/obj/sqlite3.lib"
 UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/play-runner.exe" tests/play-runner.cpp -- /MT /O2 /Iout/obj /I../uwph/host/third_party/sqlite
 # Use the exact packaged carriers from the launcher build.
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
 # Owned stand-in so steam-client proves refusal of a present root client DLL.
 cp "$out/play-dependency.dll" "$out/steamclient64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -109,6 +118,7 @@ done
 grep -q 'VCRT ROUTE vcruntime140.dll!__CxxFrameHandler3 found=1' "$out/native-vcrt.log"
 grep -q 'VCRT ROUTE vcruntime140_1.dll!__CxxFrameHandler4 found=1' "$out/native-vcrt.log"
 if grep -q 'VCRT ROUTE .* found=0' "$out/native-vcrt.log";then exit 1;fi
+grep -q 'PRUN EVENT mapping msvcp140.dll' "$out/native-msvcp.log"
 # Guest registry (PlayerPrefs) persists in the uwph SQLite registry across runs.
 rm -f "$out"/registry.sqlite*
 for mode in registry-write registry-read;do

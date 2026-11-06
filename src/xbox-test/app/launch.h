@@ -317,6 +317,10 @@ static void lp_run_impl(LpCtx& c) {
     }
     if(steamProvider){uint32_t appid=c.appid;std::wstring root=c.root;g_finalSync=[appid,root]{final_sync(appid,root);};}
     regb::init(g_dir,lp_sink); // guest registry (PlayerPrefs): LocalState\registry.sqlite
+    {   // Wine's C++ runtime packaged beside the launcher (build.sh: layout\runtime).
+        wchar_t self[2048];DWORD n=GetModuleFileNameW(nullptr,self,2048);
+        if(n&&n<2048){std::wstring package(self,n);package.resize(package.find_last_of(L"\\/")+1);play_runtime::set_runtime_directory(package+L"runtime");}
+    }
     if(!play_runtime::start(exeDir,exe,c.args,lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
     auto r=play_runtime::state;
     ULONGLONG end=GetTickCount64()+110000; bool reportedRunning=false;

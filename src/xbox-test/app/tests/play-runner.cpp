@@ -276,6 +276,9 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         host_surface::schedulePad(logline);
         logline("HOST SURFACE native Wine window stands in for the CoreWindow (off-device only)");
     }
+    // Wine's C++ runtime beside the runner, as layout\runtime beside the launcher.
+    {wchar_t self[32768];DWORD n=GetModuleFileNameW(nullptr,self,32768);std::wstring dir(self,n);
+     play_runtime::set_runtime_directory(dir.substr(0,dir.find_last_of(L"\\/"))+L"\\runtime");}
     // Optional Steam API provider (owned game): mapped in place of steam_api64.dll.
     {wchar_t provider[1024];DWORD n=GetEnvironmentVariableW(L"PRUN_STEAM_PROVIDER",provider,1024);
      if(n&&n<1024)play_runtime::set_steam_provider(std::wstring(provider,n));}

@@ -203,7 +203,11 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
         if(flags) {SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
         if(m->mappingFailed || !m->mapped) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
         ++m->references;
-        if(!initializePending() || !m->initialized) {--m->references;SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
+        // A DllMain may load a module whose own DllMain is still running on
+        // this thread (Wine's concrt140 loads msvcp140 while msvcp140 attaches
+        // it). Windows and Wine return that handle; the recursive loader lock
+        // means no other thread can be inside this branch meanwhile.
+        if(!initializePending() || !(m->initialized || m->initializing)) {--m->references;SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
         return (HMODULE)m->image.base;
     }
     if(auto input=xinput_core::find_module(key.c_str(),true))return input;

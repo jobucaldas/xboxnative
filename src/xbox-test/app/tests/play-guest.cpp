@@ -127,6 +127,11 @@ DWORD guest_exe_entry(){
         auto test=(int(*)())GetProcAddress(library,"native_cxx_test");
         return test?test():32;
     }
+    if(contains(GetCommandLineW(),L"native-msvcp")) {
+        auto library=LoadLibraryW(L"play-msvcp.dll");if(!library)return 31;
+        auto test=(int(*)())GetProcAddress(library,"native_msvcp_test");
+        return test?test():32;
+    }
     if(contains(GetCommandLineW(),L"native-vcrt")) {
         auto library=LoadLibraryW(L"play-vcrt.dll");if(!library)return 31;
         auto test=(int(*)())GetProcAddress(library,"native_vcrt_test");
