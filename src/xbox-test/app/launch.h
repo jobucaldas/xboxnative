@@ -11,6 +11,7 @@
 #include "../uwph/user32/probe.h"
 #include "launch_status.h"
 #include "launch_arguments.h"
+#include "installs.h"
 
 struct LaunchState {
     std::atomic<int> phase{0};          // 0 never, 1 starting, 2 finished, 3 guest running
@@ -21,18 +22,9 @@ struct LaunchState {
 };
 static LaunchState g_launch;
 
-// ---- install state helpers (marker dl_<appid>.done written by the downloader)
-struct InstallInfo { bool installed = false; uint64_t bytes = 0; std::string dir; };
-static InstallInfo read_install(uint32_t appid) {
-    InstallInfo r; std::wstring mk = g_dir + L"\\dl_" + widen(std::to_string(appid)) + L".done";
-    FILE* f = _wfopen(mk.c_str(), L"rb"); if (!f) return r;
-    char b[512] = {}; size_t n = fread(b, 1, sizeof b - 1, f); fclose(f); std::string s(b, n);
-    r.installed = true;
-    size_t p = s.find(" bytes "); if (p != std::string::npos) r.bytes = strtoull(s.c_str() + p + 7, nullptr, 10);
-    p = s.find(" installdir "); if (p != std::string::npos) { r.dir = s.substr(p + 12); while (!r.dir.empty() && (r.dir.back() == '\n' || r.dir.back() == '\r' || r.dir.back() == ' ')) r.dir.pop_back(); }
-    if (r.dir.empty()) r.dir = appid == 480 ? "spacewar" : appid == 3405340 ? "megabonk" : appid == 1007 ? "steamworks_sdk_redist" : "";   // markers written before 0.5.0.0 carry no installdir
-    return r;
-}
+// ---- install state (marker dl_<appid>.done written by the downloader; see installs.h)
+using InstallInfo = installs::Info;
+static InstallInfo read_install(uint32_t appid) { return installs::read(g_dir, appid); }
 static std::string json_esc(const std::string& s) {
     std::string o; for (unsigned char c : s) { if (c == '"' || c == '\\') { o += '\\'; o += (char)c; } else if (c < 32) o += ' '; else o += (char)c; } return o;
 }
