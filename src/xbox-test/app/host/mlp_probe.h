@@ -79,6 +79,20 @@ inline bool first_report(const std::string& line) {
     std::lock_guard<std::mutex> lock(mutex);
     return seen.size()<4096&&seen.insert(line).second;
 }
+// Unlisted DLLs default to the system loader (System32 and API sets only; a
+// game's own DLLs are mapped before this resolver). Excluded: core API sets,
+// which take the guarded kernel32 route below; and native UI libraries whose
+// APIs take window or device-context handles, because guest HWNDs are user32
+// records that native code must never receive. A DLL the console lacks still
+// fails to load, exactly as before.
+inline bool default_system_dll(const std::string& key) {
+    static const char* const ui[] = {"uxtheme.dll","comctl32.dll","comdlg32.dll","msimg32.dll","glu32.dll",
+        "ddraw.dll","oleacc.dll","dwrite.dll","d2d1.dll","gdiplus.dll","usp10.dll"};
+    if(key.size()<5 || key.compare(key.size()-4,4,".dll")) return false;
+    if(key.rfind("api-ms-win-core-",0)==0 || key.rfind("ext-ms-",0)==0) return false;
+    for(auto name:ui) if(key==name) return false;
+    return true;
+}
 static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     std::string key=dll; for(auto& c:key) if(c>='A' && c<='Z') c+=32;
     std::string symbol=name ? name : "#"+std::to_string(ordinal);
@@ -87,6 +101,9 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     // The Universal CRT API sets (api-ms-win-crt-*) are system contracts
     // served by the console's ucrtbase through the OS API-set schema.
     if(key.rfind("api-ms-win-crt-",0)==0) kind="system";
+    // Any other DLL resolves from System32, as the Windows loader does, so a
+    // new game needs no per-title table (default_system_dll).
+    if(!strcmp(kind,"unclassified") && default_system_dll(key)) kind="system";
     uintptr_t address=kernel32_core::resolve(dll,name);
     // The console refuses HKCU writes (ERROR_ACCESS_DENIED): Unity PlayerPrefs and
     // other guests use the uwph registry (LocalState\registry.sqlite) instead.
