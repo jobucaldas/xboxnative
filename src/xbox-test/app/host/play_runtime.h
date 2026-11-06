@@ -96,7 +96,7 @@ static uintptr_t missing(const char* dll,const char* name,WORD ordinal) {
     // Optional dynamic feature detection observes NULL. No unresolved import
     // receives executable code, including the probe-only failure stubs.
     // Optional detection is diagnostic, not a new execution milestone/result.
-    if(state->log) state->log(("PRUN OPTIONAL unresolved dynamic export: "+full).c_str());
+    if(state->log && mlp::first_report("optional "+full)) state->log(("PRUN OPTIONAL unresolved dynamic export: "+full).c_str());
     SetLastError(ERROR_PROC_NOT_FOUND);return 0;
 }
 // No guest child-process provider exists: the console's UWP container cannot

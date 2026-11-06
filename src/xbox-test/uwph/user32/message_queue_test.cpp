@@ -64,6 +64,9 @@ static void pumpChecks(HMODULE dll){
  MSG down{h,WM_KEYDOWN,'A',0x001E0001,0,{0,0}};
  CHECK(fTranslateMessage(&down)&&peek(&m,nullptr,0,0,PM_REMOVE)&&m.hwnd==h&&m.message==WM_CHAR&&m.wParam=='a'&&m.lParam==0x001E0001);
  key(VK_SHIFT,TRUE);CHECK(fTranslateMessage(&down)&&peek(&m,nullptr,0,0,PM_REMOVE)&&m.wParam=='A');key(VK_SHIFT,FALSE);
+ LOADP(GetKeyboardState);BYTE keys[256];memset(keys,0x55,sizeof keys);
+ key('Q',TRUE);CHECK(fGetKeyboardState(keys)&&(keys['Q']&0x80)&&!(keys['W']&0x80));key('Q',FALSE);
+ CHECK(fGetKeyboardState(keys)&&!(keys['Q']&0x80));SetLastError(0);CHECK(!fGetKeyboardState(nullptr)&&GetLastError()==ERROR_INVALID_PARAMETER);
  MSG sys=down;sys.message=WM_SYSKEYDOWN;
  CHECK(fTranslateMessage(&sys)&&peek(&m,nullptr,0,0,PM_REMOVE)&&m.message==WM_SYSCHAR&&m.wParam=='a');
  MSG up=down;up.message=WM_KEYUP;CHECK(fTranslateMessage(&up)&&!peek(&m,nullptr,0,0,PM_REMOVE));

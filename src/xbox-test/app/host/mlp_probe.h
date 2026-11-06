@@ -9,6 +9,8 @@
 #include "../../uwph/sysx/native.h"
 #include "../../uwph/dwmapi/route.h"
 #include <map>
+#include <set>
+#include <mutex>
 #include <array>
 #include <utility>
 #include "../../shared/kernel_tail.h"
@@ -67,6 +69,14 @@ static uintptr_t asset_export(wxl::Image& image, const char* name, WORD ordinal)
     // Forwarders need loader recursion; explicitly missing in this probe.
     if(!rva || !image.valid(rva,1) || (rva>=dir.VirtualAddress && rva-dir.VirtualAddress<dir.Size)) return 0;
     return (uintptr_t)image.base+rva;
+}
+// Games retry failed lookups every frame (IL2CPP P/Invoke, Unity plugin
+// probing): on the console a flushed log line per attempt grew the probe log by
+// megabytes a minute and stuttered play. Report each missing name once.
+inline bool first_report(const std::string& line) {
+    static std::mutex mutex;static std::set<std::string> seen;
+    std::lock_guard<std::mutex> lock(mutex);
+    return seen.size()<4096&&seen.insert(line).second;
 }
 static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     std::string key=dll; for(auto& c:key) if(c>='A' && c<='Z') c+=32;
@@ -151,7 +161,7 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     bool planned=!strcmp(kind,"stub");
     if(!planned && sum.first=="none") sum.first=symbol;
     std::string msg=std::string(planned?"MLP STUB ":"MLP MISSING ")+key+"!"+symbol+" route="+kind+(missingResolver?" execution=reject":" return=0 error=120 probe-only");
-    log(msg.c_str());
+    if(first_report(msg)) log(msg.c_str());
     if(missingResolver) return missingResolver(dll,name,ordinal);
     if(stub_names.size()>=stub_functions.size()) { log("MLP FAIL stub capacity"); return 0; }
     stub_names.push_back(key+"!"+symbol);
