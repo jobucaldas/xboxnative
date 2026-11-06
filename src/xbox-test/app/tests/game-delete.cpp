@@ -69,8 +69,35 @@ int main(int argc, char** argv) {
     put(L"dl_400.done", "app 400 build 1 files 1 bytes 1 installdir gone\n");
     CHECK(installs::remove_install(root, 400, "gone", false, pm) && !exists(L"dl_400.done") && pm.failed == 0);
 
+    // unfinished downloads (dl_<appid>.partial): a fresh install's folder goes, everything else stays
+    installs::Progress pp;
+    CHECK(installs::begin_partial(root, 600, "fresh") && installs::read_partial_dir(root, 600) == "fresh");
+    mkdir(L"fresh"); mkdir(L"fresh\\sub"); put(L"fresh\\big.bin", "x"); put(L"fresh\\sub\\c.bin", "x");
+    CHECK(installs::discard_partial(root, 600, "fresh", pp) == installs::Discard::removed);
+    CHECK(!exists(L"fresh") && !exists(L"dl_600.partial") && pp.removed == 2 && pp.failed == 0);
+
+    installs::Progress pk;   // failed update of a finished install: files and .done kept
+    put(L"dl_700.done", "app 700 build 1 files 1 bytes 1 installdir upd\n"); mkdir(L"upd"); put(L"upd\\g.exe", "x");
+    CHECK(installs::begin_partial(root, 700, "upd"));
+    CHECK(installs::discard_partial(root, 700, "upd", pk) == installs::Discard::kept_installed);
+    CHECK(exists(L"upd\\g.exe") && exists(L"dl_700.done") && !exists(L"dl_700.partial"));
+
+    installs::Progress pq;   // folder shared with an installed app, or launcher-owned: kept
+    CHECK(installs::begin_partial(root, 202, "shared") && installs::discard_partial(root, 202, "shared", pq) == installs::Discard::kept_shared);
+    CHECK(exists(L"shared\\s.bin"));
+    CHECK(installs::begin_partial(root, 302, "steam") && installs::discard_partial(root, 302, "steam", pq) == installs::Discard::kept_unsafe);
+    CHECK(exists(L"steam\\300\\save.dat"));
+
+    // start-up sweep of runs cut off mid-download; a dl_<appid>.partial.bak is not a marker
+    installs::begin_partial(root, 800, "crashed"); mkdir(L"crashed"); put(L"crashed\\a.bin", "x");
+    put(L"dl_800.partial.bak", "app 800 installdir alphabet\n");
+    auto swept = installs::sweep_partials(root);
+    CHECK(swept.size() == 1 && swept[0].appid == 800 && swept[0].dir == "crashed" && swept[0].result == installs::Discard::removed);
+    CHECK(!exists(L"crashed") && !exists(L"dl_800.partial") && exists(L"alphabet\\keep.txt") && exists(L"dl_800.partial.bak"));
+    CHECK(installs::sweep_partials(root).empty());
+
     if (failures) { std::printf("GAME-DELETE FAIL: %d check(s)\n", failures); return 1; }
-    std::printf("GAME-DELETE PASS: folder+marker removed, neighbours/shared/launcher folders kept%s\n",
+    std::printf("GAME-DELETE PASS: folder+marker removed, neighbours/shared/launcher folders kept, unfinished downloads removed%s\n",
                 linked ? ", directory link removed without following it" : " (directory link not creatable here: link case not exercised)");
     return 0;
 }
