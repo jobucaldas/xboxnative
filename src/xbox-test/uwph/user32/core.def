@@ -152,6 +152,7 @@ EXPORTS
  GetMessageExtraInfo=c_GetMessageExtraInfo
  GetKeyNameTextW=c_GetKeyNameTextW
  DialogBoxParamW=c_DialogBoxParamW
+ DialogBoxParamA=c_DialogBoxParamA
  EndDialog=c_EndDialog
  DragDetect=c_DragDetect
  GetWindowThreadProcessId=c_GetWindowThreadProcessId

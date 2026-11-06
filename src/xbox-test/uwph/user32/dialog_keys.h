@@ -47,6 +47,10 @@ extern "C" INT_PTR WINAPI c_DialogBoxParamW(HINSTANCE,LPCWSTR,HWND owner,DLGPROC
  if(owner&&!window(owner)){SetLastError(ERROR_INVALID_WINDOW_HANDLE);return 0;}
  SetLastError(ERROR_NOT_SUPPORTED);return -1;
 }
+// The template is never loaded, so the ANSI entry has nothing to convert.
+extern "C" INT_PTR WINAPI c_DialogBoxParamA(HINSTANCE i,LPCSTR,HWND owner,DLGPROC proc,LPARAM p) {
+ return c_DialogBoxParamW(i,nullptr,owner,proc,p);
+}
 // No window here is a dialog, so none can be ended (Wine: no dialog info).
 extern "C" BOOL WINAPI c_EndDialog(HWND,INT_PTR) {
  SetLastError(ERROR_INVALID_WINDOW_HANDLE);return FALSE;

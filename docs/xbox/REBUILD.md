@@ -4,7 +4,7 @@ The box was reset: /workspace/Boxedwine-xbox-64 (with its local-only `x64-spike`
 x64-run, Megabonk files, tailscale, Claude/Codex logins, DP_PASS and TS_AUTHKEY were lost.
 GitHub (jobucaldas/Boxedwine-xbox-64) only has `master`. Nothing is recoverable. This file is the
 memory of what was learned. Surviving on the console: the installed Boxedwine dev app + its results.
-Surviving in the agent store: earlier screenshots/proof videos (grok-bot/agents/*/attachments).
+Surviving in the agent store: earlier screenshots/proof videos (agent store attachments).
 
 RULES: no pushes anywhere, no posts to other people's repos, no secrets in logs/files.
 Back up work with `x64-run/backup.sh` (git bundles into the persistent agent store) after each milestone.

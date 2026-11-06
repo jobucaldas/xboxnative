@@ -7,8 +7,8 @@ cd "$root"
 dp="$root/src/xbox-test/dp"
 runs=${REG_RUNS:-/workspace/x64-run/runs/reg}
 ver=$(sed -n 's/.*Name="Joao.XboxSteam.Reg".*Version="\([0-9.]*\)".*/\1/p' src/xbox-test/uwph/host/AppxManifest.Reg.xml)
-full=Joao.XboxSteam.Reg_${ver}_x64__dk715arakrne0
-rid='Joao.XboxSteam.Reg_dk715arakrne0!App'
+full=Joao.XboxSteam.Reg_${ver}_x64__0bdeywx3x8szp
+rid='Joao.XboxSteam.Reg_0bdeywx3x8szp!App'
 mkdir -p "$runs"
 exec 9>/workspace/x64-run/CONSOLE.lock
 flock -w 600 9
