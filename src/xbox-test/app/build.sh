@@ -9,7 +9,8 @@ donors="$here/../../../out/wine-donors"
 bash "$here/../../tools/build-wine-donors.sh" "$donors"
 python3 -I "$here/donors/inspect.py" --donor-dir "$donors" --output "$out/obj/donor_imports.generated.h"
 CB="${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}"
-UWP_OBJ_DIR="$out/obj" "$CB/scripts/build.sh" --uwp --out "$out/layout/xbtest.exe" --jobs 4 main.cpp qrcodegen.cpp vendor/zlib/inflate.c vendor/zlib/inftrees.c vendor/zlib/inffast.c vendor/zlib/adler32.c vendor/zlib/crc32.c vendor/zlib/zutil.c vendor/lzma/LzmaDec.c vendor/zstd/zstddeclib.c --link-arg bcrypt.lib -- /MT /O2 /DNDEBUG "/I$out/obj"
+bash ../uwph/host/build-sqlite-lib.sh "$out/obj/sqlite3.lib"
+UWP_OBJ_DIR="$out/obj" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/layout/xbtest.exe" --jobs 4 main.cpp qrcodegen.cpp vendor/zlib/inflate.c vendor/zlib/inftrees.c vendor/zlib/inffast.c vendor/zlib/adler32.c vendor/zlib/crc32.c vendor/zlib/zutil.c vendor/lzma/LzmaDec.c vendor/zstd/zstddeclib.c --link-arg bcrypt.lib -- /MT /O2 /DNDEBUG "/I$out/obj" /I../uwph/host/third_party/sqlite
 bash ../audio/build.sh "$out/layout"
 # Separate native TLS slots for mapped guest modules. Windows initializes each
 # carrier's static storage on every native guest thread; never replace GS/TEB.

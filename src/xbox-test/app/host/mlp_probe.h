@@ -1,5 +1,6 @@
 #include "../../uwph/gdi32/route.h"
 #include "../../uwph/opengl32/route.h"
+#include "../../uwph/host/reg_builtin.h"
 #pragma once
 #include "../../uwph/xinput/route.h"
 #include "../../uwph/user32/route.h"
@@ -8,6 +9,8 @@
 #include "../../uwph/sysx/native.h"
 #include "../../uwph/dwmapi/route.h"
 #include <map>
+#include <set>
+#include <mutex>
 #include <array>
 #include <utility>
 #include "../../shared/kernel_tail.h"
@@ -17,6 +20,7 @@
 #include "../../shared/pe_tail_test.h"
 #include "../../audio/probe.h"
 #include "../../audio/routes.h"
+#include "../../uwph/kernel32/desktop_policy.h"
 namespace mlp {
 struct Route { const char* dll; const char* kind; };
 static const Route routes[] = {
@@ -67,12 +71,26 @@ static uintptr_t asset_export(wxl::Image& image, const char* name, WORD ordinal)
     if(!rva || !image.valid(rva,1) || (rva>=dir.VirtualAddress && rva-dir.VirtualAddress<dir.Size)) return 0;
     return (uintptr_t)image.base+rva;
 }
+// Games retry failed lookups every frame (IL2CPP P/Invoke, Unity plugin
+// probing): on the console a flushed log line per attempt grew the probe log by
+// megabytes a minute and stuttered play. Report each missing name once.
+inline bool first_report(const std::string& line) {
+    static std::mutex mutex;static std::set<std::string> seen;
+    std::lock_guard<std::mutex> lock(mutex);
+    return seen.size()<4096&&seen.insert(line).second;
+}
 static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     std::string key=dll; for(auto& c:key) if(c>='A' && c<='Z') c+=32;
     std::string symbol=name ? name : "#"+std::to_string(ordinal);
     const char* kind="unclassified";
     for(auto& route:routes) if(key==route.dll) kind=route.kind;
+    // The Universal CRT API sets (api-ms-win-crt-*) are system contracts
+    // served by the console's ucrtbase through the OS API-set schema.
+    if(key.rfind("api-ms-win-crt-",0)==0) kind="system";
     uintptr_t address=kernel32_core::resolve(dll,name);
+    // The console refuses HKCU writes (ERROR_ACCESS_DENIED): Unity PlayerPrefs and
+    // other guests use the uwph registry (LocalState\registry.sqlite) instead.
+    if(!address && name && key=="advapi32.dll") address=regb::lookup(name);
     if(!address && !strcmp(kind,"wine-pe")) {
         if(donor_resolve)address=donor_resolve(key.c_str(),name,ordinal);
         if(address)log(("DWPE ROUTE "+key+"!"+symbol).c_str());
@@ -101,6 +119,9 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
         reinterpret_cast<dwmapi_core::IsWindow>(user32_core::resolve("user32.dll","IsWindow")),
         reinterpret_cast<dwmapi_core::WindowRect>(user32_core::resolve("user32.dll","GetWindowRect")),
         reinterpret_cast<dwmapi_core::WindowLong>(user32_core::resolve("user32.dll","GetWindowLongPtrW")));
+    // Desktop process policies and services (AppPolicy*, ktmw32): before the
+    // system loader, whose answers describe the UWP host package.
+    if(auto policy=desktop_policy::resolve(key.c_str(),name)) address=policy;
     if(!address) address=sysx_native::resolve(dll,name);
     // No guest OpenGL driver: Wine-equivalent no-context wgl answers.
     if(!address) address=opengl32_core::resolve(dll,name);
@@ -147,7 +168,7 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     bool planned=!strcmp(kind,"stub");
     if(!planned && sum.first=="none") sum.first=symbol;
     std::string msg=std::string(planned?"MLP STUB ":"MLP MISSING ")+key+"!"+symbol+" route="+kind+(missingResolver?" execution=reject":" return=0 error=120 probe-only");
-    log(msg.c_str());
+    if(first_report(msg)) log(msg.c_str());
     if(missingResolver) return missingResolver(dll,name,ordinal);
     if(stub_names.size()>=stub_functions.size()) { log("MLP FAIL stub capacity"); return 0; }
     stub_names.push_back(key+"!"+symbol);

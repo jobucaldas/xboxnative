@@ -38,7 +38,8 @@ for kind in guest missing;do
   "$out/obj/"{hid,setupapi,version,shcore,avrt}.lib \
   /libpath:"$sdk/sdk/lib/um/x86_64" kernel32.lib
  done
-UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --out "$out/runner.exe" tests/donor-runtime.cpp -- /MT /O2 /Iout/obj
+bash ../uwph/host/build-sqlite-lib.sh "$out/obj/sqlite3.lib"
+UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/runner.exe" tests/donor-runtime.cpp -- /MT /O2 /Iout/obj /I../uwph/host/third_party/sqlite
 cp out/layout/donors/*.dll "$out/donors/"
 cp out/layout/uwph-u32c.dll "$out/"
 # Probe and guest each have a 30-second wait. Keep both gates intact and

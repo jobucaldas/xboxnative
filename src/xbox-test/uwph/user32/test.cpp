@@ -72,7 +72,12 @@ extern "C" DWORD WINAPI u32c_entry(){
  DISPLAY_DEVICEA dd={};dd.cb=sizeof(dd);check(EnumDisplayDevicesA(0,0,&dd,0)&&streq(dd.DeviceName,"\\\\.\\DISPLAY1"));check(!EnumDisplayDevicesA(0,1,&dd,0));
  WINDOWPLACEMENT wp={sizeof(wp)};check(GetWindowPlacement(h2,&wp)&&wp.showCmd==SW_SHOWNORMAL&&wp.rcNormalPosition.right==10);
  RAWINPUTDEVICE rid={1,6,0,h2};check(RegisterRawInputDevices(&rid,1,sizeof(rid)));UINT rc=0;check(GetRawInputDeviceList(0,&rc,sizeof(RAWINPUTDEVICELIST))==0&&rc==0);
- UINT32 npath=0,nmode=0;check(GetDisplayConfigBufferSizes(0,&npath,&nmode)==ERROR_NOT_SUPPORTED);check(QueryDisplayConfig(0,0,0,0,0,0)==ERROR_NOT_SUPPORTED);check(DisplayConfigGetDeviceInfo(0)==ERROR_NOT_SUPPORTED);
+ // CCD describes the one record display (Unity's display layout needs it).
+ UINT32 npath=0,nmode=0;check(GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS,&npath,&nmode)==ERROR_SUCCESS&&npath==1&&nmode==2);
+ check(GetDisplayConfigBufferSizes(0,&npath,&nmode)==ERROR_INVALID_PARAMETER);
+ DISPLAYCONFIG_PATH_INFO paths[1]={};DISPLAYCONFIG_MODE_INFO modes[2]={};npath=1;nmode=2;
+ check(QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS,&npath,paths,&nmode,modes,0)==ERROR_SUCCESS&&npath==1&&modes[0].sourceMode.width==1920);
+ check(QueryDisplayConfig(0,0,0,0,0,0)==ERROR_INVALID_PARAMETER);check(DisplayConfigGetDeviceInfo(0)==ERROR_INVALID_PARAMETER);
  // batch 2: clipboard, timers/tracking, dialog/message helpers, metrics, geometry
  check(!CloseClipboard());check(OpenClipboard(h2));check(!OpenClipboard(0)&&GetLastError()==ERROR_ACCESS_DENIED);
  check(!IsClipboardFormatAvailable(CF_TEXT));check(SetClipboardData(CF_TEXT,(HANDLE)0xABCD)==(HANDLE)0xABCD);

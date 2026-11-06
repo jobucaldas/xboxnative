@@ -25,6 +25,15 @@ inline constexpr struct { const char* dll; const char* symbol; } allowed[] = {
         {"dbghelp.dll", "SymGetModuleBase64"},
         {"dbghelp.dll", "SymFunctionTableAccess64"},
         {"dbghelp.dll", "StackWalk64"},
+        // Version queries (Unity, Rewired): the real OS version.
+        {"ntdll.dll", "RtlGetVersion"},
+        {"ntdll.dll", "RtlVerifyVersionInfo"},
+        // Rust std (Fields of Mistria): file/pipe I/O through the native layer.
+        {"ntdll.dll", "NtCreateNamedPipeFile"},
+        {"ntdll.dll", "NtOpenFile"},
+        {"ntdll.dll", "NtReadFile"},
+        {"ntdll.dll", "NtWriteFile"},
+        {"ntdll.dll", "RtlNtStatusToDosError"},
         {"wininet.dll", "InternetOpenA"},
         {"wininet.dll", "InternetConnectA"},
         {"wininet.dll", "InternetCrackUrlA"},
@@ -47,6 +56,7 @@ inline uintptr_t resolve(const char* dll, const char* name) {
     static Library libraries[] = {
         {"dbghelp.dll", L"dbghelp.dll", nullptr},
         {"wininet.dll", L"wininet.dll", nullptr},
+        {"ntdll.dll", L"ntdll.dll", nullptr},
     };
     static std::mutex mutex;
     std::lock_guard<std::mutex> lock(mutex);

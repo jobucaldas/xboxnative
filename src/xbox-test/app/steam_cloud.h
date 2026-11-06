@@ -70,6 +70,9 @@ inline bool safe_relative(const std::string& path) {
     return true;
 }
 // "%WinAppDataLocalLow%Ved/Megabonk/Saves/CloudDir/<id>/" + "progression.json"
+// A link inside a save root may point anywhere: never read, write or descend
+// through one (the lexical checks above cannot see where it leads).
+inline bool linked(const fs::path& p) { std::error_code ec; return fs::is_symlink(fs::symlink_status(p,ec)); }
 inline std::optional<fs::path> local_path(const Roots& roots,const std::string& prefix,const std::string& name) {
     if(prefix.size()<2||prefix[0]!='%') return std::nullopt;
     size_t close=prefix.find('%',1);if(close==std::string::npos) return std::nullopt;
@@ -78,7 +81,8 @@ inline std::optional<fs::path> local_path(const Roots& roots,const std::string& 
     if(!safe_relative(relative)) return std::nullopt;
     fs::path out=it->second;
     size_t start=0;
-    while(start<relative.size()){size_t end=relative.find('/',start);if(end==std::string::npos)end=relative.size();out/=relative.substr(start,end-start);start=end+1;}
+    while(start<relative.size()){size_t end=relative.find('/',start);if(end==std::string::npos)end=relative.size();out/=relative.substr(start,end-start);start=end+1;
+        if(linked(out)) return std::nullopt;}
     return out;
 }
 struct Remote { std::string name, sha; uint32_t prefix=0, raw=0; uint64_t time=0; int persist=0; };
@@ -121,6 +125,18 @@ inline void set_unix_time(const fs::path& p,uint64_t seconds) {
     std::error_code ec;
     auto system=std::chrono::system_clock::time_point(std::chrono::seconds(seconds));
     fs::last_write_time(p,system-std::chrono::system_clock::now()+fs::file_time_type::clock::now(),ec);
+}
+// Non-throwing directory walk: the game may create or delete save files while
+// we look, and a range-for over a directory iterator throws on such errors.
+template<class F> inline void walk(const fs::path& dir,bool recursive,F&& visit) {
+    std::error_code ec;
+    if(recursive) {
+        fs::recursive_directory_iterator it(dir,fs::directory_options::skip_permission_denied,ec),end;
+        for(;!ec&&it!=end;it.increment(ec)) if(!linked(it->path())) visit(*it);
+    } else {
+        fs::directory_iterator it(dir,fs::directory_options::skip_permission_denied,ec),end;
+        for(;!ec&&it!=end;it.increment(ec)) if(!linked(it->path())) visit(*it);
+    }
 }
 struct Result { unsigned downloaded=0, uploaded=0, unchanged=0, kept=0, busy=0, failed=0; };
 inline Headers headers(const std::string& message,int field) {
@@ -175,14 +191,18 @@ inline Result upload(Io& io,uint32_t appid,const Roots& roots,const std::vector<
         auto it=roots.find(rule.root);if(it==roots.end()) continue;
         if(!rule.path.empty()&&!safe_relative(rule.path)) continue;
         fs::path base=it->second;std::string rel=rule.path;
-        for(size_t s=0;s<rel.size();){size_t e=rel.find('/',s);if(e==std::string::npos)e=rel.size();base/=rel.substr(s,e-s);s=e+1;}
-        std::error_code ec;if(!fs::is_directory(base,ec)) continue;
+        bool through=false;
+        for(size_t s=0;s<rel.size();){size_t e=rel.find('/',s);if(e==std::string::npos)e=rel.size();base/=rel.substr(s,e-s);s=e+1;through|=linked(base);}
+        std::error_code ec;if(through||!fs::is_directory(base,ec)) continue;
         auto visit=[&](const fs::directory_entry& entry) {
-            if(!entry.is_regular_file()) return;
+            std::error_code fileError;
+            if(!entry.is_regular_file(fileError)) return;
             auto name=entry.path().filename().string();
             if(!glob(rule.pattern,name)||name.find(".xboxnative-")!=std::string::npos) return;
-            auto sub=fs::relative(entry.path(),base,ec).generic_string();
-            if(ec||!safe_relative(sub)) return;
+            // Lexical: fs::relative canonicalizes through the filesystem, which the
+            // console app container can refuse (every file was skipped).
+            auto sub=entry.path().lexically_relative(base).generic_string();
+            if(!safe_relative(sub)) return;
             std::string cloudName="%"+rule.root+"%"+(rule.path.empty()?"":rule.path+"/")+sub;
             auto data=read_file(entry.path());if(!data) return;
             uint64_t time=unix_time(entry.path());
@@ -194,8 +214,7 @@ inline Result upload(Io& io,uint32_t appid,const Roots& roots,const std::vector<
             }
             pending.push_back({cloudName,entry.path(),*data,time});
         };
-        if(rule.recursive){for(auto& e:fs::recursive_directory_iterator(base,ec))visit(e);}
-        else for(auto& e:fs::directory_iterator(base,ec))visit(e);
+        walk(base,rule.recursive,visit);
     }
     if(pending.empty()) return r;
     std::string begin;pb_u(begin,1,appid);pb_s(begin,2,machine);

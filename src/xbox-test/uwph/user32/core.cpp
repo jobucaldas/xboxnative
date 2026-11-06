@@ -118,8 +118,8 @@ extern "C" void WINAPI uwph_u32c_configure(LONG x,LONG y){std::lock_guard<std::r
 extern "C" HWND WINAPI c_GetDesktopWindow(){std::lock_guard<std::recursive_mutex> l(mutex);if(!desktop){auto w=std::make_unique<Window>();w->cls=nullptr;w->proc=c_DefWindowProcW;w->thread=GetCurrentThreadId();w->parent=nullptr;w->instance=nullptr;w->style=WS_VISIBLE;w->ex=0;w->x=w->y=0;w->cx=desktopWidth;w->cy=desktopHeight;desktop=w.get();windows.push_back(std::move(w));}return (HWND)desktop;}
 extern "C" HMONITOR WINAPI c_MonitorFromRect(const RECT* r,DWORD flags){std::lock_guard<std::recursive_mutex> l(mutex);if(!r)return nullptr;bool hit=r->left<desktopWidth&&r->right>0&&r->top<desktopHeight&&r->bottom>0;return hit||(flags&3)?(HMONITOR)&monitorToken:nullptr;}
 extern "C" HMONITOR WINAPI c_MonitorFromWindow(HWND h,DWORD flags){RECT r;if(c_GetWindowRect(h,&r))return c_MonitorFromRect(&r,flags);return flags&3?(HMONITOR)&monitorToken:nullptr;}
-extern "C" BOOL WINAPI c_GetMonitorInfoW(HMONITOR h,MonitorInfo* p){std::lock_guard<std::recursive_mutex> l(mutex);if(h!=(HMONITOR)&monitorToken||!p||(p->size!=sizeof(MonitorInfo)&&p->size!=sizeof(MonitorInfoW))){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}p->monitor=p->work=RECT{0,0,desktopWidth,desktopHeight};p->flags=1;if(p->size==sizeof(MonitorInfoW))wcscpy(((MonitorInfoW*)p)->device,L"U32C-Record-Display");return TRUE;}
-extern "C" BOOL WINAPI c_GetMonitorInfoA(HMONITOR h,MonitorInfo* p){if(!p||(p->size!=sizeof(MonitorInfo)&&p->size!=sizeof(MonitorInfoA))){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}MonitorInfo w{sizeof(w)};if(!c_GetMonitorInfoW(h,&w))return FALSE;p->monitor=w.monitor;p->work=w.work;p->flags=w.flags;if(p->size==sizeof(MonitorInfoA))strcpy(((MonitorInfoA*)p)->device,"U32C-Record-Display");return TRUE;}
+extern "C" BOOL WINAPI c_GetMonitorInfoW(HMONITOR h,MonitorInfo* p){std::lock_guard<std::recursive_mutex> l(mutex);if(h!=(HMONITOR)&monitorToken||!p||(p->size!=sizeof(MonitorInfo)&&p->size!=sizeof(MonitorInfoW))){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}p->monitor=p->work=RECT{0,0,desktopWidth,desktopHeight};p->flags=1;if(p->size==sizeof(MonitorInfoW))wcscpy(((MonitorInfoW*)p)->device,L"\\\\.\\DISPLAY1");return TRUE;}
+extern "C" BOOL WINAPI c_GetMonitorInfoA(HMONITOR h,MonitorInfo* p){if(!p||(p->size!=sizeof(MonitorInfo)&&p->size!=sizeof(MonitorInfoA))){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}MonitorInfo w{sizeof(w)};if(!c_GetMonitorInfoW(h,&w))return FALSE;p->monitor=w.monitor;p->work=w.work;p->flags=w.flags;if(p->size==sizeof(MonitorInfoA))strcpy(((MonitorInfoA*)p)->device,"\\\\.\\DISPLAY1");return TRUE;}
 extern "C" int WINAPI c_GetSystemMetrics(int n){std::lock_guard<std::recursive_mutex> l(mutex);switch(n){case SM_CXSCREEN:case SM_CXVIRTUALSCREEN:return desktopWidth;case SM_CYSCREEN:case SM_CYVIRTUALSCREEN:return desktopHeight;case SM_CMONITORS:case SM_SAMEDISPLAYFORMAT:return 1;case SM_XVIRTUALSCREEN:case SM_YVIRTUALSCREEN:return 0;default:SetLastError(ERROR_NOT_SUPPORTED);return 0;}}
 
 // ---- item 44: input/cursor/focus. No CoreWindow/HID backend is wired from this
@@ -136,6 +136,7 @@ static std::vector<RawInputDevice2> rawDevices;
 static POINT& cursorPosRef(){if(!haveCursorPos){cursorPos2={desktopWidth/2,desktopHeight/2};haveCursorPos=true;}return cursorPos2;}
 extern "C" void WINAPI uwph_u32c_key_event(int vk,BOOL down){std::lock_guard<std::recursive_mutex> l(mutex);if(vk<0||vk>255)return;if(down){keyDown[vk]|=0x80;keyPressedSince[vk]|=0x01;}else keyDown[vk]&=~0x80;}
 extern "C" SHORT WINAPI c_GetAsyncKeyState(int vk){std::lock_guard<std::recursive_mutex> l(mutex);if(vk<0||vk>255)return 0;SHORT r=(keyDown[vk]&0x80)?(SHORT)0x8000:0;if(keyPressedSince[vk]&0x01){r|=1;keyPressedSince[vk]&=~0x01;}return r;}
+extern "C" BOOL WINAPI c_GetKeyboardState(PBYTE state){if(!state){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}std::lock_guard<std::recursive_mutex> l(mutex);memcpy(state,keyDown,256);return TRUE;}
 extern "C" SHORT WINAPI c_GetKeyState(int vk){std::lock_guard<std::recursive_mutex> l(mutex);if(vk<0||vk>255)return 0;return (keyDown[vk]&0x80)?(SHORT)0x8000:0;}
 extern "C" HWND WINAPI c_GetFocus(){std::lock_guard<std::recursive_mutex> l(mutex);return focusWindow&&window(focusWindow)?focusWindow:nullptr;}
 extern "C" HWND WINAPI c_SetFocus(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);HWND old=c_GetFocus();if(!h){focusWindow=nullptr;return old;}auto w=window(h);if(!w)return nullptr;if(w->thread!=GetCurrentThreadId()){SetLastError(ERROR_ACCESS_DENIED);return nullptr;}focusWindow=h;return old;}
@@ -150,12 +151,7 @@ extern "C" BOOL WINAPI c_SetCursorPos(int x,int y){std::lock_guard<std::recursiv
 extern "C" BOOL WINAPI c_GetCursorPos(POINT* p){std::lock_guard<std::recursive_mutex> l(mutex);if(!p)return FALSE;*p=cursorPosRef();return TRUE;}
 extern "C" HCURSOR WINAPI c_SetCursor(HCURSOR c){std::lock_guard<std::recursive_mutex> l(mutex);HCURSOR old=currentCursor;currentCursor=c;return old;}
 extern "C" int WINAPI c_ShowCursor(BOOL show){std::lock_guard<std::recursive_mutex> l(mutex);cursorShowCount+=show?1:-1;return cursorShowCount;}
-// Display config (CCD) APIs: no backend beyond the one record monitor. Real
-// Windows returns ERROR_NOT_SUPPORTED on systems without a CCD-capable driver;
-// that is the honest answer here too, not a fabricated topology.
-extern "C" LONG WINAPI c_GetDisplayConfigBufferSizes(UINT32,UINT32*,UINT32*){return ERROR_NOT_SUPPORTED;}
-extern "C" LONG WINAPI c_QueryDisplayConfig(UINT32,UINT32*,void*,UINT32*,void*,void*){return ERROR_NOT_SUPPORTED;}
-extern "C" LONG WINAPI c_DisplayConfigGetDeviceInfo(void*){return ERROR_NOT_SUPPORTED;}
+#include "display_config.h"
 using MonitorEnumProc=BOOL(CALLBACK*)(HMONITOR,HDC,RECT*,LPARAM);
 extern "C" BOOL WINAPI c_EnumDisplayMonitors(HDC hdc,const RECT* clip,MonitorEnumProc proc,LPARAM p){
  if(!proc){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
@@ -273,13 +269,13 @@ extern "C" int WINAPI c_ToUnicode(UINT vk,UINT,const BYTE* state,LPWSTR buf,int 
 // EnumWindows, documented in README.md). Timer/TrackMouseEvent entries are
 // record-only: actual WM_TIMER/WM_MOUSELEAVE delivery needs the message pump
 // (item 43/upmp), left to that lane on purpose.
-static bool clipboardOpen=false; static HWND clipboardOwner;
+static bool clipboardOpen=false; static HWND clipboardOwner; static DWORD clipboardSequence=0;
 static std::map<UINT,HANDLE> clipboardData;
 extern "C" BOOL WINAPI c_OpenClipboard(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);if(h&&!window(h))return FALSE;if(clipboardOpen){SetLastError(ERROR_ACCESS_DENIED);return FALSE;}clipboardOpen=true;clipboardOwner=h;return TRUE;}
 extern "C" BOOL WINAPI c_CloseClipboard(){std::lock_guard<std::recursive_mutex> l(mutex);if(!clipboardOpen)return FALSE;clipboardOpen=false;return TRUE;}
-extern "C" BOOL WINAPI c_EmptyClipboard(){std::lock_guard<std::recursive_mutex> l(mutex);if(!clipboardOpen)return FALSE;clipboardData.clear();return TRUE;}
+extern "C" BOOL WINAPI c_EmptyClipboard(){std::lock_guard<std::recursive_mutex> l(mutex);if(!clipboardOpen)return FALSE;clipboardData.clear();++clipboardSequence;return TRUE;}
 extern "C" HANDLE WINAPI c_GetClipboardData(UINT fmt){std::lock_guard<std::recursive_mutex> l(mutex);if(!clipboardOpen)return nullptr;auto p=clipboardData.find(fmt);SetLastError(0);return p==clipboardData.end()?nullptr:p->second;}
-extern "C" HANDLE WINAPI c_SetClipboardData(UINT fmt,HANDLE data){std::lock_guard<std::recursive_mutex> l(mutex);if(!clipboardOpen){SetLastError(ERROR_ACCESS_DENIED);return nullptr;}clipboardData[fmt]=data;return data;}
+extern "C" HANDLE WINAPI c_SetClipboardData(UINT fmt,HANDLE data){std::lock_guard<std::recursive_mutex> l(mutex);if(!clipboardOpen){SetLastError(ERROR_ACCESS_DENIED);return nullptr;}clipboardData[fmt]=data;++clipboardSequence;return data;}
 extern "C" BOOL WINAPI c_IsClipboardFormatAvailable(UINT fmt){std::lock_guard<std::recursive_mutex> l(mutex);return clipboardData.count(fmt)!=0;}
 
 struct TimerEntry{HWND hwnd;UINT_PTR id;};
@@ -500,4 +496,5 @@ extern "C" int WINAPI c_LookupIconIdFromDirectoryEx(BYTE* xdir,BOOL isIcon,int w
 #include "dialog_keys.h"
 #include "dpi.h"
 #include "device_notifications.h"
+#include "window_extras.h"
 } // namespace u32c
