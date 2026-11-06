@@ -22,13 +22,13 @@ loader plus our own POSIX/syscall host layer (`uwph`). Status: **early, experime
 
 ## Game milestones
 
-**Confirmed working: 0.** Last evidence update: **2026-11-03**. Megabonk is the first target;
+**Confirmed working: 0.** Last evidence update: **2026-11-06**. Megabonk is the first target;
 any independently verified playable game is a milestone. These are the requested test targets,
 not a compatibility claim. A series is not marked working because one entry works.
 
 | Game | Steam app ID | Status | Latest evidence / next gate |
 |---|---:|---|---|
-| Megabonk | 3405340 | **Blocked before game execution** | Launcher 0.5.169.0, source `95cb0c7`, attempt `6924:1`: terminal loader failure, `gameCodeExecuted=false`. Active load configuration unsupported. Donor-route acceptance fails because required game IAT routes were not reached; this is not yet a separate routing diagnosis. Evidence: [#25](https://github.com/jobucaldas/xboxnative/pull/25). |
+| Megabonk | 3405340 | **Launch progress** | Console, launcher 0.5.178.0 to 0.5.198.0: reaches the main menu on the Xbox Series S. The owner confirmed audio and controller. Steam goes through the staged gbe_fork provider: real cloud saves download, and achievements are prepared. Fixes along the way: the greyed-menu hang (frame-latency waitable, [#50](https://github.com/jobucaldas/xboxnative/pull/50)), log-driven stutter ([#48](https://github.com/jobucaldas/xboxnative/pull/48)), and Present stalls (3 buffers, measured `avg=16.7ms p99=17.2 max=17.4` over 600 frames, [#53](https://github.com/jobucaldas/xboxnative/pull/53), not yet merged). Next gate: a recorded run of at least five minutes from the menu into gameplay, with a real pad, per [PLAYABLE](docs/PLAYABLE.md). Evidence: [#46](https://github.com/jobucaldas/xboxnative/pull/46), [#50](https://github.com/jobucaldas/xboxnative/pull/50), [#53](https://github.com/jobucaldas/xboxnative/pull/53). |
 | Danganronpa: Trigger Happy Havoc | 413410 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
 | Danganronpa 2: Goodbye Despair | 413420 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
 | Danganronpa Another Episode: Ultra Despair Girls | 555950 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
@@ -45,6 +45,10 @@ not a compatibility claim. A series is not marked working because one entry work
 | Haven | 983970 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
 | Hades | 1145360 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
 | Going Under | 1154810 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Fields of Mistria | 2142790 | **Blocked after game execution (off-device)** | Wine, Play: maps with the vcruntime140 route ([#61](https://github.com/jobucaldas/xboxnative/pull/61)), runs its own code, Steam fails naturally, SDL3 creates its windows; stops at `No matching GL pixel format available`. The game renders with OpenGL (Rust `glow` via SDL3 WGL), so it needs a guest OpenGL driver. No console run of this build. |
+| Puyo Puyo Tetris 2 | 1259790 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Mega Man Legacy Collection | 363440 | Queued — not tested | 32-bit (PE32) D3D11 game importing msvcp140/concrt140: needs 32-bit execution, which is unsupported. |
+| Mega Man Legacy Collection 2 | 495050 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
 
 ### What counts
 
