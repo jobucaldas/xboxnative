@@ -30,6 +30,8 @@
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Gaming.Input.h>
+#include <winrt/Windows.UI.Input.h>
+#include <winrt/Windows.Devices.Input.h>
 #include <winrt/Windows.Web.Http.h>
 #include <winrt/Windows.Web.Http.Headers.h>
 #include <winrt/Windows.Data.Json.h>
@@ -550,6 +552,7 @@ static void dl_thread() {
 
 #include "launch.h"
 #include "guest_overlay.h"
+#include "../uwph/user32/corewindow_feed.h"
 #include "game_delete.h"
 #include "apibadge.h"
 
@@ -668,6 +671,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     CoreDispatcher m_graphicsDispatcher{nullptr};
     bool m_guestSurface=false;
     int m_guestEndGen=0;
+    corewindow_input::Feed m_input;   // keyboard/mouse to the guest; UI thread only
+    bool m_inputLogged=false;
     winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::UI::Popups::IUICommand> m_guestDialog{nullptr};
     inline static App* graphicsApp=nullptr;
     bool m_closed = false;
@@ -775,6 +780,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     static bool held(GamepadButtons b,GamepadButtons m){return (b&m)==m;}
     bool m_inputHooks=false;
     void guest_menu(double t,GamepadButtons b) {
+        if(guest_overlay::inputBlocked.load(std::memory_order_relaxed))m_input.release_all(); // nothing stays held behind the menu
         if(!m_inputHooks) {
             auto pads=Gamepad::Gamepads();
             if(pads.Size()){m_inputHooks=true;logf("overlay: input capture hooks %s",guest_overlay::install_input_block(pads.GetAt(0))?"installed":"unavailable");}
@@ -1036,7 +1042,55 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             CoreWindow::GetForCurrentThread().Activate();
         });
     }
-    void SetWindow(CoreWindow const& w) { m_window = w; w.Activated([](auto&&, WindowActivatedEventArgs const& e) { xinput_core::set_active(e.WindowActivationState()!=CoreWindowActivationState::Deactivated); }); w.Closed([this](auto&&, auto&&) { m_closed = true; g_quit = true; logf("window closed"); });
+    // Keyboard and mouse reach the guest only while its swap chain is on screen,
+    // the window is active and the launcher menu is closed.
+    bool guest_input() {
+        if(!m_guestSurface||guest_overlay::inputBlocked.load(std::memory_order_relaxed)){m_input.release_all();return false;}
+        if(!m_input.api.complete()) {
+            auto r=[](const char* name){return user32_core::resolve("user32.dll",name);};
+            auto& a=m_input.api;
+            a.key=reinterpret_cast<decltype(a.key)>(r("uwph_u32c_key_event"));
+            a.post=reinterpret_cast<decltype(a.post)>(r("PostMessageW"));
+            a.focus=reinterpret_cast<decltype(a.focus)>(r("GetFocus"));
+            a.foreground=reinterpret_cast<decltype(a.foreground)>(r("GetForegroundWindow"));
+            a.is_window=reinterpret_cast<decltype(a.is_window)>(r("IsWindow"));
+            a.client_rect=reinterpret_cast<decltype(a.client_rect)>(r("GetClientRect"));
+            a.to_screen=reinterpret_cast<decltype(a.to_screen)>(r("ClientToScreen"));
+            a.to_client=reinterpret_cast<decltype(a.to_client)>(r("ScreenToClient"));
+            a.set_cursor=reinterpret_cast<decltype(a.set_cursor)>(r("SetCursorPos"));
+            a.get_cursor=reinterpret_cast<decltype(a.get_cursor)>(r("GetCursorPos"));
+            if(!m_inputLogged){m_inputLogged=true;logf("keyboard/mouse feed %s",a.complete()?"ready":"unavailable (user32 records missing)");}
+            if(!a.complete())return false;
+        }
+        m_input.fallback=play_graphics::presented.load(std::memory_order_acquire);
+        return true;
+    }
+    void pointer_event(PointerEventArgs const& e,bool wheel) {
+        auto point=e.CurrentPoint();
+        if(point.PointerDevice().PointerDeviceType()!=winrt::Windows::Devices::Input::PointerDeviceType::Mouse||!guest_input())return;
+        auto p=point.Properties();auto bounds=m_window.Bounds();auto at=point.Position();
+        bool fed;
+        if(wheel)fed=m_input.wheel(at.X,at.Y,bounds.Width,bounds.Height,p.MouseWheelDelta(),p.IsHorizontalMouseWheel());
+        else fed=m_input.pointer(at.X,at.Y,bounds.Width,bounds.Height,
+            (p.IsLeftButtonPressed()?corewindow_input::Left:0)|(p.IsRightButtonPressed()?corewindow_input::Right:0)|
+            (p.IsMiddleButtonPressed()?corewindow_input::Middle:0)|(p.IsXButton1Pressed()?corewindow_input::X1:0)|
+            (p.IsXButton2Pressed()?corewindow_input::X2:0));
+        if(fed)e.Handled(true);
+    }
+    void SetWindow(CoreWindow const& w) { m_window = w; w.Activated([this](auto&&, WindowActivatedEventArgs const& e) { bool active=e.WindowActivationState()!=CoreWindowActivationState::Deactivated; xinput_core::set_active(active); if(!active)m_input.release_all(); }); w.Closed([this](auto&&, auto&&) { m_closed = true; g_quit = true; logf("window closed"); });
+        // Every key, including Alt and F10 (which never raise KeyDown), arrives here.
+        w.Dispatcher().AcceleratorKeyActivated([this](auto&&, AcceleratorKeyEventArgs const& e) {
+            auto type=e.EventType();
+            bool down=type==CoreAcceleratorKeyEventType::KeyDown||type==CoreAcceleratorKeyEventType::SystemKeyDown;
+            bool up=type==CoreAcceleratorKeyEventType::KeyUp||type==CoreAcceleratorKeyEventType::SystemKeyUp;
+            if((!down&&!up)||!guest_input())return;
+            auto k=e.KeyStatus();
+            if(m_input.key(unsigned(e.VirtualKey()),k.ScanCode,k.IsExtendedKey,down,k.RepeatCount))e.Handled(true);
+        });
+        w.PointerMoved([this](auto&&, PointerEventArgs const& e){pointer_event(e,false);});
+        w.PointerPressed([this](auto&&, PointerEventArgs const& e){pointer_event(e,false);});
+        w.PointerReleased([this](auto&&, PointerEventArgs const& e){pointer_event(e,false);});
+        w.PointerWheelChanged([this](auto&&, PointerEventArgs const& e){pointer_event(e,true);});
         // B on Xbox raises a system back request; unhandled, the shell sends the
         // app to Home. B belongs to the launcher UI and the running game.
         SystemNavigationManager::GetForCurrentView().BackRequested([](auto&&, BackRequestedEventArgs const& e) { e.Handled(true); }); logf("SetWindow bounds=%.0fx%.0f", w.Bounds().Width, w.Bounds().Height); }
