@@ -39,7 +39,7 @@ struct ClassEx {UINT size,style;Proc proc;int clsExtra,wndExtra;HINSTANCE instan
 struct ClassW {UINT style;Proc proc;int clsExtra,wndExtra;HINSTANCE instance;HICON icon;HCURSOR cursor;HBRUSH brush;LPCWSTR menu,name;};
 struct Create {void* param;HINSTANCE instance;HMENU menu;HWND parent;int cy,cx,y,x;LONG style;LPCWSTR title,name;DWORD ex;};
 static_assert(sizeof(ClassEx)==80 && sizeof(Create)==80,"Win64 ABI");
-struct Class {ClassEx info;std::wstring name,menu;ATOM atom;std::vector<BYTE> extra;};
+struct Class {ClassEx info;std::wstring name,menu;ATOM atom;std::vector<BYTE> extra;bool ansi=false;}; // ansi: registered through RegisterClass(Ex)A
 struct Window {Class* cls;Proc proc;DWORD thread;bool alive=true,destroying=false,messageOnly=false;LONG_PTR user=0,id=0;HINSTANCE instance;HWND parent;LONG style,ex;int x,y,cx,cy;std::wstring title;std::vector<BYTE> extra;std::map<std::wstring,HANDLE> props;};
 static Window* desktop;
 static std::recursive_mutex mutex;

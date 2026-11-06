@@ -175,6 +175,13 @@ EXPORTS
  RegisterTouchWindow=c_RegisterTouchWindow
  UnregisterTouchWindow=c_UnregisterTouchWindow
  RegisterClassExA=c_RegisterClassExA
+ RegisterClassA=c_RegisterClassA
+ DefWindowProcA=c_DefWindowProcA
+ SendMessageA=c_SendMessageA
+ PostMessageA=c_PostMessageA
+ GetKeyboardLayoutNameA=c_GetKeyboardLayoutNameA
+ RegisterDeviceNotificationA=c_RegisterDeviceNotificationA
+ SendInput=c_SendInput
  UnregisterClassA=c_UnregisterClassA
  CreateWindowExA=c_CreateWindowExA
  RegisterWindowMessageW=c_RegisterWindowMessageW

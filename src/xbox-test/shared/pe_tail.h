@@ -53,6 +53,11 @@ static const Symbol symbols[]={
     // Unity imports it; the console shell32 serves its siblings above.
     {"shell32.dll","SHFileOperationW"},
     {"shell32.dll","ShellExecuteExW"},
+    // ANSI siblings of the entries above (Puyo Puyo Tetris 2 imports SHFileOperationA).
+    {"shell32.dll","SHFileOperationA"},
+    {"shell32.dll","SHGetFolderPathA"},
+    {"shell32.dll","ShellExecuteA"},
+    {"shell32.dll","ShellExecuteExA"},
     {"opengl32.dll","wglGetProcAddress"},
     {"opengl32.dll","wglDeleteContext"},
     {"opengl32.dll","wglMakeCurrent"},

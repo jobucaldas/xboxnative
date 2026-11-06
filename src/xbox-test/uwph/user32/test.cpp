@@ -14,7 +14,8 @@ static LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM p){
  if(m==WM_NCCREATE){auto c=(CREATESTRUCTW*)p;check(c->lpCreateParams==(void*)0x12345678);SetWindowLongPtrW(h,GWLP_USERDATA,(LONG_PTR)0x1234567887654321ULL);++created;}
  if(m==WM_NCDESTROY)++destroyed;
  return DefWindowProcW(h,m,w,p);
-}
+}static LRESULT CALLBACK ansiProc(HWND h,UINT m,WPARAM w,LPARAM p){return DefWindowProcA(h,m,w,p);}
+
 static LRESULT CALLBACK subclass(HWND h,UINT m,WPARAM w,LPARAM p){if(m==WM_APP)return 42;return CallWindowProcW(proc,h,m,w,p);}
 static int rejectedDestroyed,rejectedCreated;
 static LRESULT CALLBACK reject(HWND,UINT m,WPARAM,LPARAM){if(m==WM_NCDESTROY)++rejectedDestroyed;if(m==WM_CREATE)++rejectedCreated;return 0;}
@@ -61,6 +62,22 @@ extern "C" DWORD WINAPI u32c_entry(){
  check(!(GetAsyncKeyState('A')&0x8000));uwph_u32c_key_event('A',TRUE);
  {SHORT s=GetAsyncKeyState('A');check((s&0x8000)&&(s&1));}check(!(GetAsyncKeyState('A')&1));check(GetKeyState('A')&0x8000);
  uwph_u32c_key_event('A',FALSE);check(!(GetAsyncKeyState('A')&0x8000));check(!(GetKeyState('A')&0x8000));
+ // SendInput: keys reach the key table; absolute mouse moves map 0..65535 to the desktop; Unicode keystrokes are refused.
+ {INPUT in[2]={};in[0].type=INPUT_KEYBOARD;in[0].ki.wVk='B';in[1].type=INPUT_MOUSE;in[1].mi.dx=32768;in[1].mi.dy=32768;in[1].mi.dwFlags=MOUSEEVENTF_MOVE|MOUSEEVENTF_ABSOLUTE;
+  check(SendInput(2,in,sizeof(INPUT))==2&&(GetAsyncKeyState('B')&0x8000));
+  POINT pt;check(GetCursorPos(&pt)&&pt.x==GetSystemMetrics(SM_CXSCREEN)/2&&pt.y==GetSystemMetrics(SM_CYSCREEN)/2);
+  in[0].ki.dwFlags=KEYEVENTF_KEYUP;check(SendInput(1,in,sizeof(INPUT))==1&&!(GetAsyncKeyState('B')&0x8000));
+  in[0].ki.dwFlags=KEYEVENTF_UNICODE;in[0].ki.wVk=0;in[0].ki.wScan='x';SetLastError(0);check(SendInput(1,in,sizeof(INPUT))==0&&GetLastError()==ERROR_NOT_SUPPORTED);
+  SetLastError(0);check(SendInput(1,in,sizeof(INPUT)-1)==0&&GetLastError()==ERROR_INVALID_PARAMETER);}
+ {char layout[KL_NAMELENGTH]={};check(GetKeyboardLayoutNameA(layout)&&!lstrcmpA(layout,"00000409"));}
+ // ANSI class and messages over the W records: window text converts, posted messages pass through.
+ {WNDCLASSA ac={};ac.lpfnWndProc=ansiProc;ac.lpszClassName="u32cansi";check(RegisterClassA(&ac));
+  HWND ah=CreateWindowExA(0,"u32cansi","",0,0,0,10,10,0,0,0,0);check(ah);
+  check(SendMessageA(ah,WM_SETTEXT,0,(LPARAM)"ansi text"));char text[32]={};
+  check(SendMessageA(ah,WM_GETTEXT,sizeof text,(LPARAM)text)==9&&!lstrcmpA(text,"ansi text"));
+  char small[5]={};check(SendMessageA(ah,WM_GETTEXT,sizeof small,(LPARAM)small)==4&&!lstrcmpA(small,"ansi"));
+  check(PostMessageA(ah,WM_USER+5,7,9));MSG am;check(PeekMessageA(&am,ah,WM_USER+5,WM_USER+5,PM_REMOVE)&&am.wParam==7&&am.lParam==9);
+  check(DestroyWindow(ah));check(UnregisterClassA("u32cansi",0));}
  POINT cp2; check(GetCursorPos(&cp2)&&cp2.x==960&&cp2.y==540);check(SetCursorPos(10,10)&&GetCursorPos(&cp2)&&cp2.x==10&&cp2.y==10);
  RECT clip{0,0,5,5};check(ClipCursor(&clip));check(GetCursorPos(&cp2)&&cp2.x==4&&cp2.y==4);check(ClipCursor(0));
  int shown=ShowCursor(TRUE);check(ShowCursor(FALSE)==shown-1);
