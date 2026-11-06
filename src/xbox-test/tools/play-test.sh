@@ -4,7 +4,7 @@
 # open detail -> press main button (Install if needed, then auto-launch / Play) -> wait for 'launch: RESULT'
 # -> collect screenshots + boot.log + launch_probe.log + launch_request/result.json into OUTDIR.
 # Input is SYNTHETIC: one-shot LocalState\cmd.txt lines (consumed by the app, logged as "cmd.txt SYNTHETIC command").
-# Env: PKG=<PackageFullName> (default: auto-detect Grok.XboxTest), PT_MAXMB=<n> (size guard via dlmax.txt: refuse download if
+# Env: PKG=<PackageFullName> (default: auto-detect Xboxnative.Launcher), PT_MAXMB=<n> (size guard via dlmax.txt: refuse download if
 #      bigger than n MB; 0 = dry run that only prints the manifest size), PT_NOKILL=1 (don't restart the app first).
 # Exit: 0 = fresh, clean guest completion plus GAP summary (visual/playable sign-off still required);
 #       1 = runtime/install failure, nonterminal progress, stale evidence, timeout, missing GAP or a Device Portal
@@ -16,9 +16,9 @@ app="$1"; to="${2:-600}"; out="${3:-/workspace/x64-run/runs/play-$1-$(date +%Y%m
 mkdir -p "$out"; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 full="${PKG:-}"
 if [ -z "$full" ]; then
-  full=$(dp_lock curl_dp /api/app/packagemanager/packages | grep -o 'Grok\.XboxTest_[0-9.]*_x64__[a-z0-9]*' | sort -u | tail -1)
+  full=$(dp_lock curl_dp /api/app/packagemanager/packages | grep -o 'Xboxnative\.Launcher_[0-9.]*_x64__[a-z0-9]*' | sort -u | tail -1)
 fi
-[ -n "$full" ] || { echo "no Grok.XboxTest package found"; exit 2; }
+[ -n "$full" ] || { echo "no Xboxnative.Launcher package found"; exit 2; }
 echo "package: $full  app: $app  out: $out"
 tfail() { echo "TRANSPORT FAIL: $1 (no acceptance claimed; see $out)"; exit 1; }
 # dp_step LABEL HELPER ARGS...: helper must exit 0 with a 2xx "<op> HTTP nnn" status line.
@@ -59,7 +59,8 @@ fi
 n0=0   # boot.log is truncated on every app start; with PT_NOKILL we count from the current length
 if [ -n "$PT_NOKILL" ]; then evidence boot.log "$tmp/before.log"; n0=$(wc -l < "$tmp/before.log" 2>/dev/null || echo 0); fi
 if [ -n "$PT_MAXMB" ]; then printf '%s\n' "$PT_MAXMB" > "$tmp/dlmax.txt"; dp_step "upload dlmax.txt" "$DP/put-file.sh" "$full" '\LocalState' "$tmp/dlmax.txt"; fi
-dp_step "launch app" "$DP/launch.sh" 'Grok.XboxTest_dk715arakrne0!App' "$full"
+# Family name = <Name>_<publisher hash>, from the detected full name.
+dp_step "launch app" "$DP/launch.sh" "${full%%_*}_${full##*__}!App" "$full"
 ok=1; for k in $(seq 1 40); do evidence boot.log "$tmp/b.log"; tail -n +$((n0+1)) "$tmp/b.log" | grep -Eq 'library(\(cm\))?: owned=' && { ok=0; break; }; sleep 4; done
 [ $ok -eq 0 ] || { echo "library never loaded"; cp "$tmp/b.log" "$out/boot.log" 2>/dev/null; exit 1; }
 sleep 5

@@ -17,7 +17,9 @@ routed as kernel32 exports. No kernel32 implementation is changed by this lane.
 
 One desktop/monitor record defaults to the launcher's 1920x1080 viewport;
 `uwph_u32c_configure` can update its dimensions. GetSystemMetrics supports screen,
-virtual-screen and monitor-count indices; others fail with ERROR_NOT_SUPPORTED.
+virtual-screen and monitor-count indices plus the classic 96 DPI border, frame,
+edge, caption and menu sizes that AdjustWindowRect(Ex) uses; other indices return
+0 without changing the last error, as Wine does.
 This is a virtual record description, not a physical display enumeration.
 
 RegisterDeviceNotificationW/UnregisterDeviceNotification remain unresolved: Wine
@@ -53,6 +55,11 @@ report the single 96-DPI virtual display and a first-choice-wins process awarene
 AdjustWindowRect(Ex) and SetWindowPos use fixed classic (96 DPI, unthemed)
 metrics; SetWindowPos tracks no z-order, same limitation as EnumWindows.
 A/W long aliases apply to these Unicode records.
+ToUnicode and MapVirtualKey(VK_TO_CHAR) follow the fixed US layout: Shift and
+Caps Lock columns, Ctrl letters, keypad operators and Backspace/Tab/Enter/Esc.
+Lock keys latch their toggle bit in GetKeyState. Dead keys and other layouts are
+not claimed. Run `wine-parity-test.sh` after `build.sh` for the off-device
+geometry, object-query, SystemParametersInfo and keyboard checks.
 
 GetDC/ReleaseDC hand out opaque per-call handles with no real GDI surface: no
 rendering exists in this module. LoadCursorA/LoadIconA/W/LoadImageA/W resolve

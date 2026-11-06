@@ -1,6 +1,6 @@
 # X86-32BIT-PLAN: running 32-bit (PE32) Windows Steam games on the Xbox Series S stack
 
-Author: Grok Bot executor (research only; no console use, nothing pushed or posted). Date: 2026-10-26 (America/Sao_Paulo).
+Author: agent executor (research only; no console use, nothing pushed or posted). Date: 2026-10-26 (America/Sao_Paulo).
 Scope: BACKLOG item 49 (x86-engine, option b) and everything it drags in. Targets: Spacewar 480, LIMBO 48000, Undertale 391540.
 Marking: **[V]** verified in a file or page this session (path/URL given). **[G]** guess/estimate, not measured. Effort = weeks for ONE coding agent (Codex or Claude) working offline plus console sessions.
 
@@ -144,7 +144,7 @@ First deliverables, concretely: (1) `x32cpu` builds as a static library for the 
 ## 7. Recommendation, scope, and beta cuts
 
 - **Verdict:** feasible without writing a CPU from scratch; moderate (not huge) engineering, but Spacewar is ~11 weeks of one-agent work end-to-end and it is blocked on the D3D9 layer regardless of the CPU engine.
-- **Order:** finish Megabonk (52 → rendering → beta). While Codex lanes hold the console, run **M0 as a Claude/Grok offline side lane** (engine extraction + hello32). That buys the answer to the only unknowns that matter (does the extracted core build and run in UWP with no RWX; guest MIPS on the console) for ~2-3 weeks of one agent.
+- **Order:** finish Megabonk (52 → rendering → beta). While Codex lanes hold the console, run **M0 as a Claude/agent offline side lane** (engine extraction + hello32). That buys the answer to the only unknowns that matter (does the extracted core build and run in UWP with no RWX; guest MIPS on the console) for ~2-3 weeks of one agent.
 - **Then** M1-M3 only if João still wants 32-bit after the beta; M4/M5 are separate decisions per game.
 - **Cut for beta:** all 32-bit execution except (optionally) the M0 hello-world proof; LIMBO; Undertale; the JIT (M6); 32-bit D3DX9 beyond ID3DXFont; dinput8/xinput1_3 32-bit shims; dbghelp.
 - **What 32-bit must NOT block:** Megabonk (64-bit), d3d11, sqlite registry (item 50).

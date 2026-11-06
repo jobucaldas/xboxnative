@@ -1,6 +1,6 @@
 # Wine as a base for "any Windows game boots" on Xbox (uwph) — research report
 
-Date: 2026-10-26 (America/Sao_Paulo). Author: Grok executor (research only; no product code changed, no console used).
+Date: 2026-10-26 (America/Sao_Paulo). Author: agent executor (research only; no product code changed, no console used).
 Requested by João in pt132u: "32 bit should work too though / … can't we use [wine] as a base? Or at least to know what might be missing because any windows game should boot".
 
 All coverage numbers come from `src/research/wine-coverage/analyze.py` + `dll-table.py` run on **Wine 11.0 source** (`/workspace/research/wine`) and the Debian **Wine 10** PE builtins on the box. They are produced by a regex/call-graph walk of the C sources, **not a compiler**: treat percentages as ±5 points and the win32u syscall count as an upper bound. Everything marked (UNVERIFIED) is reasoning, not measurement.
@@ -172,7 +172,7 @@ Xbox UWP offers **D3D11/D3D12 only** (Microsoft Learn "Map DirectX 9 features to
 
 ---
 
-## D. Next 10 backlog items (ranked; each fits one Codex/Grok lane)
+## D. Next 10 backlog items (ranked; each fits one Codex/agent lane)
 
 Conventions: appids Megabonk 3405340, Spacewar 480 (free, any account), LIMBO 48000, Undertale 391540 (the last two only if João owns/can install them). `play-test.sh` = `src/xbox-test/tools/play-test.sh <appid>` (lives in wt/gdet at the moment). Numbers continue after BACKLOG item 39.
 

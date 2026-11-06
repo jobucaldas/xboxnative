@@ -1,7 +1,7 @@
 # UWPH kernel host foundation
 
 `./build.sh` produces a signed `out/k32.msix` with identity
-`Joao.XboxSteam.Uwph` version `0.1.23.0` (publisher `CN=grok-xbox-dev`). Requires the local
+`Joao.XboxSteam.Uwph` version `0.1.23.0` (publisher `CN=xboxnative-dev`). Requires the local
 uwp-crossbuild toolchain, makemsix, openssl and osslsigncode. Outputs and test
 certificates are ignored. No external runtime dependency is required.
 
@@ -31,7 +31,7 @@ The UWP executable loads five packaged x64 PE DLLs:
 A complete run logs `K32 RESULT failures=0` and
 `D3DT RESULT presented=300 hr=0x00000000`. Use `src/xbox-test/dp/install.sh`, `launch.sh`,
 then `wait-log.sh` to collect results. Those scripts take CONSOLE.lock themselves.
-Do not wrap them in another flock. Do not install over Grok.XboxTest.
+Do not wrap them in another flock. Do not install over Xboxnative.Launcher.
 
 ## ABI and limits
 
@@ -75,8 +75,8 @@ Example deployment for the current HID manifest version 0.1.0.0, from the reposi
 ```sh
 src/xbox-test/uwph/host/build.sh
 src/xbox-test/dp/install.sh src/xbox-test/uwph/host/out/k32.msix src/xbox-test/uwph/host/out/test.cer
-src/xbox-test/dp/launch.sh 'Joao.XboxSteam.Hid_dk715arakrne0!App' 'Joao.XboxSteam.Hid_0.1.0.0_x64__dk715arakrne0'
-src/xbox-test/dp/wait-log.sh 'Joao.XboxSteam.Hid_0.1.0.0_x64__dk715arakrne0' k32.log 'K32 RESULT failures=0' 60 /workspace/x64-run/runs/k32/k32-final.log
+src/xbox-test/dp/launch.sh 'Joao.XboxSteam.Hid_0bdeywx3x8szp!App' 'Joao.XboxSteam.Hid_0.1.0.0_x64__0bdeywx3x8szp'
+src/xbox-test/dp/wait-log.sh 'Joao.XboxSteam.Hid_0.1.0.0_x64__0bdeywx3x8szp' k32.log 'K32 RESULT failures=0' 60 /workspace/x64-run/runs/k32/k32-final.log
 ```
 
 The publisher determines the family suffix; query Device Portal's
@@ -116,7 +116,7 @@ must never be passed directly to a native Windows API. This private ABI accepts
 trusted in-process pointers; it is not a memory isolation boundary.
 
 **Actual Xbox Series S evidence:** `ws-console-evidence.log`, package
-`Joao.XboxSteam.Uwph_0.1.4.0_x64__dk715arakrne0`, PID 6776, 71 checks,
+`Joao.XboxSteam.Uwph_0.1.4.0_x64__0bdeywx3x8szp`, PID 6776, 71 checks,
 zero failures. Separate test PE's main thread and native worker synchronize via
 an event duplicate whose original has been closed, then wait for completion
 and thread termination together. It also checks stale/double-close rejection,
@@ -142,7 +142,7 @@ in the separate PE, and its device/swapchain remain alive until app closure.
 ## Minimal PE mapper (lane/wxl)
 
 This lane uses isolated identity `Joao.XboxSteam.Wxl`, version `0.1.0.0`, with
-family `Joao.XboxSteam.Wxl_dk715arakrne0`. The publisher is unchanged. Earlier
+family `Joao.XboxSteam.Wxl_0bdeywx3x8szp`. The publisher is unchanged. Earlier
 Uwph package examples above refer to the inherited kernel/server foundation.
 
 `wxl_mapper.h` implements a deliberately small loader, following Wine 10's
@@ -172,8 +172,8 @@ Reproduce from the repository root (each DP helper takes CONSOLE.lock itself):
 ```sh
 src/xbox-test/uwph/host/build.sh
 src/xbox-test/dp/install.sh src/xbox-test/uwph/host/out/k32.msix src/xbox-test/uwph/host/out/test.cer
-pkg=Joao.XboxSteam.Wxl_0.1.0.0_x64__dk715arakrne0
-app='Joao.XboxSteam.Wxl_dk715arakrne0!App'
+pkg=Joao.XboxSteam.Wxl_0.1.0.0_x64__0bdeywx3x8szp
+app='Joao.XboxSteam.Wxl_0bdeywx3x8szp!App'
 src/xbox-test/dp/launch.sh "$app" "$pkg"
 # First launch creates LocalState; without the file it logs WXL FAIL open.
 src/xbox-test/dp/put-file.sh "$pkg" '\LocalState' src/xbox-test/uwph/host/out/layout/wxl-test.exe
@@ -203,7 +203,7 @@ kernel/ws checks, the LocalState mapper, then the separate D3DT PE for 300
 frames. Run `build.sh out/wxl-variant wxl` to build the same host under the preserved
 Joao.XboxSteam.Wxl identity (0.1.1.0); its manifest is AppxManifest.Wxl.xml.
 The Wxl 0.1.0.0 reproduction/evidence above is historical. Neither identity is
-Grok.XboxTest. Upload wxl-test.exe to the selected package's LocalState before
+Xboxnative.Launcher. Upload wxl-test.exe to the selected package's LocalState before
 acceptance. The repository smoke-all.sh uploads and verifies this guest, clears
 stale logs, and checks WXL, k32/ws and D3DT under a single console lock.
 

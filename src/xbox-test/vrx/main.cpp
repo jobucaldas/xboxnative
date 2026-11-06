@@ -2,7 +2,7 @@
 // execution, and does the documented VirtualAllocFromApp/VirtualProtectFromApp path work instead?
 // Minimal CoreWindow+D3D11 UWP app (no XAML), runs the 3 test cases once at boot, logs results to
 // LocalState\vrx.log, then idles rendering a heartbeat frame. Own package identity (Joao.XboxSteam.Vrx)
-// so it never touches the Grok.XboxTest launcher package other lanes are using on the same console.
+// so it never touches the Xboxnative.Launcher launcher package other lanes are using on the same console.
 #define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
 #include <d3d11_1.h>

@@ -136,7 +136,8 @@ extern "C" HMONITOR WINAPI c_MonitorFromRect(const RECT* r,DWORD flags){std::loc
 extern "C" HMONITOR WINAPI c_MonitorFromWindow(HWND h,DWORD flags){RECT r;if(c_GetWindowRect(h,&r))return c_MonitorFromRect(&r,flags);return flags&3?(HMONITOR)&monitorToken:nullptr;}
 extern "C" BOOL WINAPI c_GetMonitorInfoW(HMONITOR h,MonitorInfo* p){std::lock_guard<std::recursive_mutex> l(mutex);if(h!=(HMONITOR)&monitorToken||!p||(p->size!=sizeof(MonitorInfo)&&p->size!=sizeof(MonitorInfoW))){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}p->monitor=p->work=RECT{0,0,desktopWidth,desktopHeight};p->flags=1;if(p->size==sizeof(MonitorInfoW))wcscpy(((MonitorInfoW*)p)->device,L"\\\\.\\DISPLAY1");return TRUE;}
 extern "C" BOOL WINAPI c_GetMonitorInfoA(HMONITOR h,MonitorInfo* p){if(!p||(p->size!=sizeof(MonitorInfo)&&p->size!=sizeof(MonitorInfoA))){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}MonitorInfo w{sizeof(w)};if(!c_GetMonitorInfoW(h,&w))return FALSE;p->monitor=w.monitor;p->work=w.work;p->flags=w.flags;if(p->size==sizeof(MonitorInfoA))strcpy(((MonitorInfoA*)p)->device,"\\\\.\\DISPLAY1");return TRUE;}
-extern "C" int WINAPI c_GetSystemMetrics(int n){std::lock_guard<std::recursive_mutex> l(mutex);switch(n){case SM_CXSCREEN:case SM_CXVIRTUALSCREEN:return desktopWidth;case SM_CYSCREEN:case SM_CYVIRTUALSCREEN:return desktopHeight;case SM_CMONITORS:case SM_SAMEDISPLAYFORMAT:return 1;case SM_XVIRTUALSCREEN:case SM_YVIRTUALSCREEN:return 0;default:SetLastError(ERROR_NOT_SUPPORTED);return 0;}}
+#include "system_metrics.h"
+extern "C" int WINAPI c_GetSystemMetrics(int n){std::lock_guard<std::recursive_mutex> l(mutex);return classic_system_metric(n,desktopWidth,desktopHeight);}
 
 // ---- item 44: input/cursor/focus. No CoreWindow/HID backend is wired from this
 // record-only DLL; state defaults to "nothing pressed/no capture/no focus",
@@ -150,10 +151,11 @@ static bool haveCursorPos=false; static POINT cursorPos2; static bool hasClip=fa
 static int cursorShowCount=0; static HCURSOR currentCursor;
 static std::vector<RawInputDevice2> rawDevices;
 static POINT& cursorPosRef(){if(!haveCursorPos){cursorPos2={desktopWidth/2,desktopHeight/2};haveCursorPos=true;}return cursorPos2;}
-extern "C" void WINAPI uwph_u32c_key_event(int vk,BOOL down){std::lock_guard<std::recursive_mutex> l(mutex);if(vk<0||vk>255)return;if(down){keyDown[vk]|=0x80;keyPressedSince[vk]|=0x01;}else keyDown[vk]&=~0x80;}
+#include "lock_keys.h"
+extern "C" void WINAPI uwph_u32c_key_event(int vk,BOOL down){std::lock_guard<std::recursive_mutex> l(mutex);if(vk<0||vk>255)return;if(down){u32c_input::toggle_lock(keyDown[vk],vk);keyDown[vk]|=0x80;keyPressedSince[vk]|=0x01;}else keyDown[vk]&=~0x80;}
 extern "C" SHORT WINAPI c_GetAsyncKeyState(int vk){std::lock_guard<std::recursive_mutex> l(mutex);if(vk<0||vk>255)return 0;SHORT r=(keyDown[vk]&0x80)?(SHORT)0x8000:0;if(keyPressedSince[vk]&0x01){r|=1;keyPressedSince[vk]&=~0x01;}return r;}
 extern "C" BOOL WINAPI c_GetKeyboardState(PBYTE state){if(!state){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}std::lock_guard<std::recursive_mutex> l(mutex);memcpy(state,keyDown,256);return TRUE;}
-extern "C" SHORT WINAPI c_GetKeyState(int vk){std::lock_guard<std::recursive_mutex> l(mutex);if(vk<0||vk>255)return 0;return (keyDown[vk]&0x80)?(SHORT)0x8000:0;}
+extern "C" SHORT WINAPI c_GetKeyState(int vk){std::lock_guard<std::recursive_mutex> l(mutex);if(vk<0||vk>255)return 0;return SHORT(((keyDown[vk]&0x80)?0x8000:0)|(keyDown[vk]&1));}
 extern "C" HWND WINAPI c_GetFocus(){std::lock_guard<std::recursive_mutex> l(mutex);return focusWindow&&window(focusWindow)?focusWindow:nullptr;}
 extern "C" HWND WINAPI c_SetFocus(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);HWND old=c_GetFocus();if(!h){focusWindow=nullptr;return old;}auto w=window(h);if(!w)return nullptr;if(w->thread!=GetCurrentThreadId()){SetLastError(ERROR_ACCESS_DENIED);return nullptr;}focusWindow=h;return old;}
 extern "C" HWND WINAPI c_GetActiveWindow(){std::lock_guard<std::recursive_mutex> l(mutex);return activeWindow&&window(activeWindow)?activeWindow:nullptr;}
@@ -253,6 +255,7 @@ extern "C" INT WINAPI c_GetRawInputBuffer(LPVOID data,PUINT size,UINT headerSize
 }
 extern "C" HKL WINAPI c_GetKeyboardLayout(DWORD){return (HKL)(ULONG_PTR)0x04090409;} // fixed en-US layout
 extern "C" BOOL WINAPI c_GetKeyboardLayoutNameW(LPWSTR name){if(!name)return FALSE;wcscpy(name,L"00000409");return TRUE;}
+#include "map_char.h"
 static unsigned mapVk(UINT code,UINT type){
  switch(type){
  case MAPVK_VK_TO_VSC: case MAPVK_VK_TO_VSC_EX:
@@ -263,6 +266,7 @@ static unsigned mapVk(UINT code,UINT type){
   for(auto& r:u32c_keymap::rows) if(r.scan==scan&&r.ext==ext) return type==MAPVK_VSC_TO_VK_EX?r.vk:u32c_keymap::generic(r.vk);
   return 0; }
  case MAPVK_VK_TO_CHAR:
+  if(UINT ch=u32c_map_char::extra_character(code))return ch;
   for(auto& r:u32c_keymap::rows) if(r.vk==code&&r.ch) return r.ch;
   return 0;
  default: return 0;
@@ -270,11 +274,19 @@ static unsigned mapVk(UINT code,UINT type){
 }
 extern "C" UINT WINAPI c_MapVirtualKeyW(UINT code,UINT type){std::lock_guard<std::recursive_mutex> l(mutex);return mapVk(code,type);}
 extern "C" UINT WINAPI c_MapVirtualKeyExA(UINT code,UINT type,HKL){return c_MapVirtualKeyW(code,type);}
+#include "unicode_letters.h"
+#include "unicode_punctuation.h"
+#include "unicode_control.h"
+#include "unicode_special.h"
+#include "unicode_keypad.h"
 extern "C" int WINAPI c_ToUnicode(UINT vk,UINT,const BYTE* state,LPWSTR buf,int bufSize,UINT){
  if(!buf||bufSize<1)return 0;
+ int keypad=u32c_unicode::keypad_operator(vk,state,buf,bufSize);if(keypad>=0)return keypad;
+ int special=u32c_unicode::special_key(vk,state,buf,bufSize);if(special>=0)return special;
+ int control=u32c_unicode::control_letter(vk,state,buf,bufSize);if(control>=0)return control;
  char ch=0;for(auto& r:u32c_keymap::rows)if(u32c_keymap::generic(r.vk)==vk&&r.ch){ch=r.ch;break;}
  if(!ch)return 0; // dead/non-printable key: no composition table, honest "no translation"
- if(state&&(state[VK_SHIFT]&0x80)&&ch>='a'&&ch<='z')ch-=32;else if(state&&!(state[VK_SHIFT]&0x80)&&ch>='A'&&ch<='Z')ch+=32;
+ ch=u32c_unicode::punctuation_case(u32c_unicode::letter_case(ch,state),state);
  buf[0]=(WCHAR)(unsigned char)ch;if(bufSize>1)buf[1]=0;return 1;
 }
 
@@ -338,41 +350,40 @@ extern "C" HANDLE WINAPI c_GetThreadDesktop(DWORD){return (HANDLE)&threadDesktop
 #define UOI_NAME 2
 #define UOI_TYPE 3
 #endif
+#include "object_flags.h"
+#include "object_strings.h"
 extern "C" BOOL WINAPI c_GetUserObjectInformationA(HANDLE h,int index,void* info,DWORD len,DWORD* needed){
  if(h!=(HANDLE)&threadDesktopToken){SetLastError(ERROR_INVALID_HANDLE);return FALSE;}
- if(index==UOI_FLAGS){if(needed)*needed=sizeof(DWORD);if(len<sizeof(DWORD)||!info){SetLastError(ERROR_INSUFFICIENT_BUFFER);return FALSE;}*(DWORD*)info=1/*WSF_VISIBLE*/;return TRUE;}
+ if(index==UOI_FLAGS)return object_flags(info,len,needed);
  const char* s=index==UOI_NAME?"Default":index==UOI_TYPE?"Desktop":nullptr;
  if(!s){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
- DWORD need=(DWORD)strlen(s)+1;if(needed)*needed=need;
- if(len<need||!info){SetLastError(ERROR_INSUFFICIENT_BUFFER);return FALSE;}
- memcpy(info,s,need);return TRUE;
+ return object_string(s,info,len,needed);
 }
 #ifndef SPI_GETWORKAREA
 #define SPI_GETWORKAREA 0x0030
 #endif
+#include "input_parameters.h"
 extern "C" BOOL WINAPI c_SystemParametersInfoW(UINT action,UINT,void* pv,UINT){
  std::lock_guard<std::recursive_mutex> l(mutex);
  if(action==SPI_GETWORKAREA){if(!pv)return FALSE;*(RECT*)pv={0,0,desktopWidth,desktopHeight};return TRUE;} // no taskbar: work area equals the full desktop.
+ UINT value;
+ if(input_parameter_default(action,value)){if(!pv)return FALSE;*(UINT*)pv=value;return TRUE;}
  SetLastError(ERROR_NOT_SUPPORTED);return FALSE; // honest: no other SPI_* backend exists.
 }
 
 // Fixed classic (96 DPI, unthemed) window-geometry metrics (Wine/Windows
 // border/caption/menu defaults); this record module has no real display
 // driver to report DPI/theme-scaled values from.
-static bool hasDlgFrame(DWORD s,DWORD ex){return (ex&WS_EX_DLGMODALFRAME)||((s&WS_DLGFRAME)==WS_DLGFRAME&&!(s&WS_THICKFRAME));}
-static bool hasThickFrame(DWORD s){return (s&WS_THICKFRAME)!=0;}
+#include "window_caption.h"
+#include "window_border.h"
 extern "C" BOOL WINAPI c_AdjustWindowRectEx(RECT* r,DWORD style,BOOL menu,DWORD ex){
  if(!r)return FALSE;
- if(style&WS_MINIMIZE)return TRUE; // no nonclient adjustment while iconic
- LONG cx=0,cy=0;
- if(hasThickFrame(style)){cx=4;cy=4;}
- else if(hasDlgFrame(style,ex)){cx=3;cy=3;}
- else if(style&WS_BORDER){cx=cy=1;}
+ // Wine adjusts requested nonclient geometry even when WS_MINIMIZE is set.
+ LONG cx=classic_window_border(style,ex),cy=cx;
  r->left-=cx;r->top-=cy;r->right+=cx;r->bottom+=cy;
- if(style&WS_CAPTION)r->top-=19;
+ r->top-=classic_caption_height(style,ex);
  if(menu)r->top-=20;
  if(ex&WS_EX_CLIENTEDGE){r->left-=2;r->top-=2;r->right+=2;r->bottom+=2;}
- if(ex&WS_EX_STATICEDGE){r->left-=1;r->top-=1;r->right+=1;r->bottom+=1;}
  return TRUE;
 }
 extern "C" BOOL WINAPI c_AdjustWindowRect(RECT* r,DWORD style,BOOL menu){return c_AdjustWindowRectEx(r,style,menu,0);}
@@ -482,9 +493,12 @@ extern "C" HICON WINAPI c_CreateIconFromResourceEx(BYTE* bits,DWORD cbSize,BOOL 
  std::lock_guard<std::recursive_mutex> l(mutex);
  if(!bits||version==0x00020000){SetLastError(ERROR_INVALID_PARAMETER);return nullptr;} // 2.xx resources: unsupported in Wine too.
  if(cbSize>=4&&!memcmp(bits,"RIFF",4)){SetLastError(ERROR_NOT_SUPPORTED);return nullptr;} // animated .ani resources: no decoder here.
+ // Validate the declared resource length before reading either the bitmap
+ // dimensions or the cursor hotspot prefix.
+ if(cbSize<sizeof(BITMAPINFOHEADER)+(isIcon?0:4)){SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}
  POINT hotspot{0,0};const BITMAPINFOHEADER* bmi;
  if(isIcon)bmi=(const BITMAPINFOHEADER*)bits;
- else{if(cbSize<4){SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}auto pt=(const SHORT*)bits;hotspot={pt[0],pt[1]};bmi=(const BITMAPINFOHEADER*)(pt+2);}
+ else{auto pt=(const SHORT*)bits;hotspot={pt[0],pt[1]};bmi=(const BITMAPINFOHEADER*)(pt+2);}
  int cx=width,cy=height;
  if(!cx)cx=bmi->biWidth;
  if(!cy)cy=std::abs((long)bmi->biHeight)/(isIcon?2:1); // icon DIBs stack XOR+AND masks, doubling biHeight; matches Wine's create_icon_from_bmi halving.
