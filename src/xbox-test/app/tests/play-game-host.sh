@@ -7,7 +7,13 @@ game_root=$(realpath "$1")
 alternate=
 if [[ $# == 2 ]];then alternate=$(realpath "$2");fi
 cd "$(dirname "$0")/.."
-[[ -f "$game_root/Megabonk.exe" && -f "$game_root/Megabonk_Data/il2cpp_data/Metadata/global-metadata.dat" ]] || { echo 'complete owned Megabonk installation required'; exit 2; }
+# PRUN_GAME_EXE (and PRUN_GAME_APPID) select another owned game; default Megabonk.
+exe=${PRUN_GAME_EXE:-Megabonk.exe}
+if [[ $exe == Megabonk.exe ]];then
+ [[ -f "$game_root/Megabonk.exe" && -f "$game_root/Megabonk_Data/il2cpp_data/Metadata/global-metadata.dat" ]] || { echo 'complete owned Megabonk installation required'; exit 2; }
+else
+ [[ -f "$game_root/$exe" ]] || { echo "owned game executable $exe not found"; exit 2; }
+fi
 export WINEPREFIX=${PRUN_WINEPREFIX:-/tmp/prun-wine}
 export WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d
 bash tests/play-runtime.sh
@@ -18,7 +24,7 @@ mkdir -p "$out/donors"; cp out/layout/donors/*.dll "$out/donors/"
 # afterward; this never changes the packaged launcher or its source files.
 trap 'cp out/layout/uwph-u32c.dll "$out/"' EXIT
 if [[ -n "$alternate" ]];then cp "$alternate" "$out/uwph-u32c.dll";fi
-sha256sum "$out/uwph-u32c.dll" "$game_root/Megabonk.exe" "$game_root/UnityPlayer.dll" "$game_root/GameAssembly.dll" "$game_root/baselib.dll"
+sha256sum "$out/uwph-u32c.dll" "$game_root/$exe"
 export PRUN_GAME_ROOT
 PRUN_GAME_ROOT=$(winepath -w "$game_root")
 rm -f "$out/host-game-events.log"
