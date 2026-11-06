@@ -27,9 +27,9 @@ inline Marker parse_marker(const std::string& s) {
     return m;
 }
 
-// "dl_<digits>.done" -> appid; anything else (dl_x.done, dl_1.done.bak, ...) is not a marker.
-inline bool marker_appid(const std::string& name, uint32_t& appid) {
-    const std::string pre = "dl_", suf = ".done";
+// "dl_<digits><suffix>" -> appid; anything else (dl_x.done, dl_1.done.bak, ...) is not a marker.
+inline bool marker_appid(const std::string& name, uint32_t& appid, const std::string& suf = ".done") {
+    const std::string pre = "dl_";
     if (name.size() <= pre.size() + suf.size() || name.compare(0, pre.size(), pre) || name.compare(name.size() - suf.size(), suf.size(), suf)) return false;
     std::string digits = name.substr(pre.size(), name.size() - pre.size() - suf.size());
     if (digits.size() > 10) return false;
