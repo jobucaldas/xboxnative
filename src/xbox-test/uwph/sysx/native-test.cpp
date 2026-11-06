@@ -21,6 +21,12 @@ int main(int argc, char** argv) {
     CHECK(!sysx_native::resolve(nullptr, "SymInitialize"));
     CHECK(!sysx_native::resolve("dbghelp.dll", nullptr));
     CHECK(!sysx_native::resolve("untrusted.dll", "SymInitialize"));
+    // ntdll's C runtime subset is native; its system calls stay listed.
+    CHECK(sysx_native::resolve("ntdll.dll", "_vsnprintf") == reinterpret_cast<uintptr_t>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "_vsnprintf")));
+    CHECK(sysx_native::resolve("NTDLL.DLL", "strlen") && sysx_native::resolve("ntdll.dll", "_ui64toa"));
+    CHECK(!sysx_native::resolve("ntdll.dll", "NtClose") && !sysx_native::resolve("ntdll.dll", "RtlAllocateHeap"));
+    CHECK(!sysx_native::resolve("ntdll.dll", "__C_specific_handler") && !sysx_native::resolve("ntdll.dll", "LdrLoadDll"));
+    CHECK(!sysx_native::resolve("kernel32.dll", "_vsnprintf"));
     CHECK(!sysx_native::resolve("dbghelp.dll", "syminitialize"));
     CHECK(!sysx_native::resolve("dbghelp.dll", "SymEnumSymbols"));
     auto init = api<decltype(&SymInitialize)>("DBGHELP.DLL", "SymInitialize");
