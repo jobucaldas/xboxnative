@@ -33,8 +33,9 @@ mkdir -p "$out/layout/steam-provider/gbe"
 cp "$gbe"/{steam_api64.dll,LICENSE,SOURCE.txt} "$out/layout/steam-provider/gbe/"
 cp -r "$here/Assets" "$here/AppxManifest.xml" "$out/layout/"
 # test certificate (subject must equal manifest Publisher); created once, never committed
-if [ ! -f "$out/test.pfx" ]; then
-  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$out/test.key" -out "$out/test.pem" -days 825 -subj "/CN=grok-xbox-dev" \
+# A cert from before the publisher rename (or any other subject) is replaced.
+if [ ! -f "$out/test.pfx" ] || ! openssl x509 -in "$out/test.pem" -noout -subject 2>/dev/null | grep -q "CN *= *xboxnative-dev"; then
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$out/test.key" -out "$out/test.pem" -days 825 -subj "/CN=xboxnative-dev" \
     -addext "basicConstraints=critical,CA:FALSE" -addext "keyUsage=critical,digitalSignature" -addext "extendedKeyUsage=codeSigning,1.3.6.1.5.5.7.3.3" 2>/dev/null
   openssl pkcs12 -export -out "$out/test.pfx" -inkey "$out/test.key" -in "$out/test.pem" -passout pass:test
   openssl x509 -in "$out/test.pem" -outform DER -out "$out/test.cer"

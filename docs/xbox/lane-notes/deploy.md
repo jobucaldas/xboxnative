@@ -11,13 +11,13 @@ the console, document findings in `src/xbox-test/dp/README.md`, save evidence un
   — all scripts existed and were committed, but `README.md` and `runs/deploy/` evidence were
   missing, and most scripts hadn't been exercised live from *this* worktree/session.
 - Note: this commit hash is identical to a parallel branch `g/dp` (a different agent track,
-  "Grok", working the same objective in `/workspace/wt/g-dp`) — the two converged on the same
+  another agent, working the same objective in `/workspace/wt/g-dp`) — the two converged on the same
   content already, see `/workspace/x64-run/runs/g-status.md` for their verification notes (they'd
   already confirmed launch/kill/ps/screenshot/ls/get working, and pulled 24 files of Megabonk).
 - Multiple other lanes (`app`, `plan`, `dl`) are running concurrently against the same console;
   console access is already serialized via `flock /workspace/x64-run/CONSOLE.lock` inside every
   script, so this is safe. Checked `ps.sh` before touching anything: the `launcher` app
-  (`Grok.XboxTest_0.3.2.0`) was live (another lane's QR-login test) — left it alone.
+  (`Xboxnative.Launcher_0.3.2.0`) was live (another lane's QR-login test) — left it alone.
 
 ## What I did this session
 - Live-verified every non-destructive script against the console using the pre-existing
@@ -28,7 +28,7 @@ the console, document findings in `src/xbox-test/dp/README.md`, save evidence un
   "Failed to terminate the application" but the process *was* actually gone after — documented as
   a quirk, trust `ps.sh` not the HTTP status).
 - `install.sh` and `pull-megabonk.sh` were not re-run live (already proven working: `install.sh`
-  by the `g/dp`/`g/app` work installing `Grok.XboxTest`, `pull-megabonk.sh` already produced
+  by the `g/dp`/`g/app` work installing `Xboxnative.Launcher`, `pull-megabonk.sh` already produced
   `/workspace/megabonk-from-console`, 24 files / ~237 MB, sha256 manifest present).
 - `uninstall.sh` deliberately NOT tested — no disposable package was safe to remove without
   risking console state other lanes depend on (per explicit instruction not to uninstall the
@@ -76,14 +76,14 @@ covered verification + README, not these). Did them this session, each tested li
   `kill`, PASS/FAIL per step (kill confirmed via `ps.sh` with a short retry loop, not the HTTP
   status, per the documented kill quirk), exit code = failure count. Ran live end-to-end,
   4/4 pass, against the Boxedwine DevMode probe app (safe, disposable-ish, already proven).
-  **Deliberately did not** run it against `Grok.XboxTest` — that package is the live shared
+  **Deliberately did not** run it against `Xboxnative.Launcher` — that package is the live shared
   launcher another lane (`app`/`launcher`) owns and was actively running on the console this
   session (`xbtest.exe`, 298 MB working set); `install` would've upgraded/downgraded it in place
   and `kill` would've killed another lane's live session (QR login state, `steam_session.bin`)
   for no verification benefit, since the pipeline was already proven against a real app.
 - Updated `src/xbox-test/dp/README.md` with all of the above (new rows + an ETW/crash-dump section).
 - Confirmed via `ps -ef`/`flock -n` during testing that the `CONSOLE.lock` contention I hit was
-  real concurrent use by lane `app` (`install.sh` running against `Grok.XboxTest`), not a stuck
+  real concurrent use by lane `app` (`install.sh` running against `Xboxnative.Launcher`), not a stuck
   process — the locking design works as intended across lanes, just budget for wait time.
 
 Objective is now fully done: every script in the lane prompt's list exists, is verified live

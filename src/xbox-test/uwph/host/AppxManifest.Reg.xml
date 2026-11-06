@@ -3,10 +3,10 @@
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   IgnorableNamespaces="uap">
-  <Identity Name="Joao.XboxSteam.Reg" Publisher="CN=grok-xbox-dev" Version="0.5.80.0" ProcessorArchitecture="x64" />
+  <Identity Name="Joao.XboxSteam.Reg" Publisher="CN=xboxnative-dev" Version="0.5.80.0" ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>UWPH Registry Probe</DisplayName>
-    <PublisherDisplayName>grok-xbox-dev</PublisherDisplayName>
+    <PublisherDisplayName>xboxnative-dev</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
   <Dependencies>
