@@ -143,17 +143,6 @@ int main() {
     set_unix_time(dir/"fresh.json",nowSeconds-60);
     auto later=upload(io,3405340,roots,saveRules,"Xbox",30);
     assert(later.uploaded==1&&later.busy==0&&server.batches==2);
-    // Save-triggered sync: the signature changes when a matching save changes,
-    // not for files outside the rules.
-    auto before=signature(roots,saveRules);
-    write("notes.txt","changed",nowSeconds+5);
-    assert(signature(roots,saveRules)==before);
-    write("slot/run.json","run2",nowSeconds+5);
-    assert(signature(roots,saveRules)!=before);
-    auto extraDir=root/"extra";write_file(extraDir/"achievements.json","{}");
-    auto withExtra=signature(roots,saveRules,{extraDir});
-    write_file(extraDir/"achievements.json","{\"A\":{}}");
-    assert(signature(roots,saveRules,{extraDir})!=withExtra);
     fs::remove_all(root);fs::remove_all(outside);
     puts("STEAM-CLOUD PASS: rules, paths, download policy/backup/traversal, upload batch/blocks/commit");
 }

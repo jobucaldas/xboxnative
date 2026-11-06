@@ -36,6 +36,7 @@ struct State {
     std::atomic<DWORD> firstChanceCode{0};
     std::atomic<uintptr_t> firstChanceAddress{0};
     std::atomic<unsigned> firstChanceCount{0};
+    std::atomic<unsigned> invalidHandles{0};   // strict-handle-check raises continued (see vectored)
     std::mutex eventMutex;
     std::recursive_mutex loaderMutex;
     std::string last="loader not entered", result;
@@ -398,7 +399,26 @@ static LONG filter(EXCEPTION_POINTERS* ep) {
     if(e->ExceptionCode==EXCEPTION_ACCESS_VIOLATION && e->NumberParameters>=2) {snprintf(b,sizeof b," access=%llu target=0x%llx",(unsigned long long)e->ExceptionInformation[0],(unsigned long long)e->ExceptionInformation[1]);text+=b;}
     state->event(text);return EXCEPTION_EXECUTE_HANDLER;
 }
+// The packaged process runs with strict handle checking: closing an invalid
+// handle raises STATUS_INVALID_HANDLE from ntdll instead of returning it (as
+// on a desktop process without that policy). gbe_fork's socket teardown hits
+// this on quit. Continue such raises so the call returns the error status.
+static uintptr_t ntdllBase=0,ntdllEnd=0;
+static void find_ntdll() {
+    using Handle=HMODULE(WINAPI*)(LPCWSTR);
+    auto handle=(Handle)kernel_tail::native("GetModuleHandleW");
+    auto base=handle?(uintptr_t)handle(L"ntdll.dll"):0;
+    if(!base)return;
+    auto dos=(IMAGE_DOS_HEADER*)base;auto nt=(IMAGE_NT_HEADERS64*)(base+dos->e_lfanew);
+    ntdllBase=base;ntdllEnd=base+nt->OptionalHeader.SizeOfImage;
+}
 static LONG CALLBACK vectored(EXCEPTION_POINTERS* ep) {
+    auto e=ep->ExceptionRecord;auto at=(uintptr_t)e->ExceptionAddress;
+    if(e->ExceptionCode==STATUS_INVALID_HANDLE && !(e->ExceptionFlags&EXCEPTION_NONCONTINUABLE) &&
+       at>=ntdllBase && at<ntdllEnd) {
+        state->invalidHandles.fetch_add(1,std::memory_order_relaxed);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     if(guestThread && ep->ExceptionRecord->ExceptionCode!=missingException && ep->ExceptionRecord->ExceptionCode!=exitException) {
         // No logger, CRT formatting, allocation or mutex here: OutputDebugString
         // and file writes can themselves raise exceptions while a log lock is
@@ -679,6 +699,7 @@ static bool start(const std::wstring& root,const std::wstring& exe,const std::ws
     state=new State();state->root=root;state->log=log;observed.store(state,std::memory_order_release);state->command=L"\""+root+L"\\"+exe+L"\" "+args;state->commandA=narrow(state->command);
     mlp::log=log;wxl::logger=log;mlp::missingResolver=missing;mlp::assets.clear();mlp::summaries.clear();
     state->exe=map(root+L"\\"+exe);if(!state->exe) {state->result=state->snapshot();state->finished=true;return true;}
+    find_ntdll();
     state->event("registering guest exception observer");
     using AddVeh=PVOID(WINAPI*)(ULONG,LONG(CALLBACK*)(EXCEPTION_POINTERS*));
     auto addVeh=(AddVeh)kernel_tail::native("AddVectoredExceptionHandler");

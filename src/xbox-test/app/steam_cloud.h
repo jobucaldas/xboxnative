@@ -139,28 +139,6 @@ template<class F> inline void walk(const fs::path& dir,bool recursive,F&& visit)
     }
 }
 struct Result { unsigned downloaded=0, uploaded=0, unchanged=0, kept=0, busy=0, failed=0; };
-// Cheap change detector for save-triggered uploads: names, sizes and times of
-// the files the save rules match, plus any extra directories (e.g. the
-// provider's achievement state). No hashing and no network.
-inline std::string signature(const Roots& roots,const std::vector<Rule>& saveRules,
-                             const std::vector<fs::path>& extra={}) {
-    std::string sig;
-    auto add=[&](const fs::directory_entry& e){
-        std::error_code ec;
-        if(!e.is_regular_file(ec)) return;
-        sig+=e.path().generic_string()+'|'+std::to_string(e.file_size(ec))+'|'+std::to_string(unix_time(e.path()))+'\n';
-    };
-    for(auto& rule:saveRules) {
-        auto it=roots.find(rule.root);if(it==roots.end()) continue;
-        if(!rule.path.empty()&&!safe_relative(rule.path)) continue;
-        fs::path base=it->second;std::string rel=rule.path;
-        for(size_t s=0;s<rel.size();){size_t e=rel.find('/',s);if(e==std::string::npos)e=rel.size();base/=rel.substr(s,e-s);s=e+1;}
-        std::error_code ec;if(!fs::is_directory(base,ec)) continue;
-        walk(base,true,[&](const fs::directory_entry& e){if(glob(rule.pattern,e.path().filename().string()))add(e);});
-    }
-    for(auto& dir:extra) walk(dir,true,add);
-    return sig;
-}
 inline Headers headers(const std::string& message,int field) {
     Headers h;
     for(auto& f:pb_parse(message)) if(f.f==field) {

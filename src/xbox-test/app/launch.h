@@ -199,37 +199,16 @@ static void achievements_sync(uint32_t appid,bool store) {
     char line[160];snprintf(line,sizeof line,"STEAM achievements: %s achievements=%zu stats=%zu unlocked=%u",
         ok?"prepared":"prepare failed",schema->achievements.size(),schema->stats.size(),unlocked);lp_sink(line);
 }
-// Uploads must not depend on a clean exit (the console may end the app, or the
-// game may crash while quitting): watch the save files and the provider's
-// achievement state, and sync once a change has settled for 15 s, with a
-// 5-minute backstop and a final pass when the guest finishes.
-static void cloud_uploader(uint32_t appid,std::wstring gameRoot) {
-    std::thread([appid,gameRoot]{
-        init_apartment(apartment_type::multi_threaded);
-        namespace fs=std::filesystem;
-        auto roots=cloud_roots(gameRoot);
-        std::vector<fs::path> extra{fs::path(provider_dir(appid))/"saves"/std::to_string(appid)};
-        std::vector<steam_cloud::Rule> rules;{std::lock_guard<std::mutex> lock(g_cloudRulesM);rules=g_cloudRules;}
-        std::string synced,seen;
-        try{synced=seen=steam_cloud::signature(roots,rules,extra);}catch(...){}
-        ULONGLONG changedAt=GetTickCount64(),lastPass=GetTickCount64();
-        for(;;) try {
-            auto r=play_runtime::observed.load(std::memory_order_acquire);
-            bool finished=!r||r->finished.load(std::memory_order_acquire);
-            if(!finished)Sleep(5000);
-            ULONGLONG now=GetTickCount64();
-            std::string current=steam_cloud::signature(roots,rules,extra);
-            if(current!=seen){seen=current;changedAt=now;}
-            bool settled=current!=synced&&now-changedAt>=15000;
-            if(finished||settled||now-lastPass>=300000) {
-                if(settled)lp_sink("STEAM sync: saves changed; syncing");
-                try{cloud_sync(appid,gameRoot,true,finished?0:10);}catch(...){lp_sink("STEAM cloud upload: exception");}
-                try{achievements_sync(appid,true);}catch(...){lp_sink("STEAM achievements store: exception");}
-                synced=current;lastPass=now;
-            }
-            if(finished){games_played(0);return;}
-        } catch(...) {lp_sink("STEAM sync watcher: exception; retrying");Sleep(5000);}
-    }).detach();
+// Saves and achievements go up once, when the game ends (it quits, closes by
+// itself or is quit from the launcher menu), never while it is playing.
+static std::atomic<bool> g_finalSyncDone{false};
+static std::function<void()> g_finalSync;   // set before the guest starts; used by the overlay's Force quit
+static void final_sync(uint32_t appid,const std::wstring& gameRoot) {
+    if(g_finalSyncDone.exchange(true))return;
+    lp_sink("STEAM sync: game ended; uploading saves and achievements");
+    try{cloud_sync(appid,gameRoot,true,0);}catch(...){lp_sink("STEAM cloud upload: exception");}
+    try{achievements_sync(appid,true);}catch(...){lp_sink("STEAM achievements store: exception");}
+    try{games_played(0);}catch(...){}
 }
 // ---- Diagnostic: cmd.txt "stacks" logs every other thread's call stack to
 // launch_probe.log (module+offset via Play's guest module map). Live process
@@ -323,9 +302,9 @@ static void lp_run_impl(LpCtx& c) {
         try{achievements_sync(c.appid,false);}catch(...){lp_sink("STEAM achievements: exception");}
         games_played(c.appid);
     }
+    if(steamProvider){uint32_t appid=c.appid;std::wstring root=c.root;g_finalSync=[appid,root]{final_sync(appid,root);};}
     regb::init(g_dir,lp_sink); // guest registry (PlayerPrefs): LocalState\registry.sqlite
     if(!play_runtime::start(c.root,exe,c.args,lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
-    if(steamProvider)cloud_uploader(c.appid,c.root);
     auto r=play_runtime::state;
     ULONGLONG end=GetTickCount64()+110000; bool reportedRunning=false;
     for(;;) {
@@ -343,6 +322,8 @@ static void lp_run_impl(LpCtx& c) {
         }
         if(r->worker)WaitForSingleObject(r->worker,50);else Sleep(50);
     }
+    if(unsigned n=r->invalidHandles.load()){char line[96];snprintf(line,sizeof line,"PRUN invalid-handle raises continued=%u",n);lp_sink(line);}
+    if(steamProvider)final_sync(c.appid,c.root);
     c.mapped=r->mappedCount;
     for(auto& row:mlp::summaries) {
         c.resolved+=row.second.resolved;c.stubbed+=row.second.stubbed;
