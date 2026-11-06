@@ -474,10 +474,15 @@ static bool download_app(CmSession& cm, uint32_t appid) {
     }
     logf("dl: VERIFY files_ok=%d files_bad=%d bytes_ok=%llu", verified, bad, (unsigned long long)vbytes);
     if (bad) return fail(std::to_string(bad) + " files failed verification");
-    { std::wstring mk = g_dir + L"\\dl_" + widen(std::to_string(appid)) + L".done"; FILE* mf = _wfopen(mk.c_str(), L"wb");
+    // write dl_<appid>.done through a temporary file: an existing marker is only ever replaced by a complete one
+    { std::wstring mk = installs::marker_path(g_dir, appid), tmp = mk + L".tmp"; FILE* mf = _wfopen(tmp.c_str(), L"wb");
       bool marked = mf && fprintf(mf, "app %u build %s files %d bytes %llu installdir %s\n", appid, build.c_str(), verified, (unsigned long long)vbytes, installdir.c_str()) > 0;
       if (mf && fclose(mf) != 0) marked = false;
-      if (!marked) { DeleteFileW(mk.c_str()); return fail("cannot write the install marker (disk full?)"); } }
+      if (marked) marked = MoveFileExW(tmp.c_str(), mk.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+      if (!marked) {   // verified files stay for a retry to resume; a fresh install keeps its .partial, so the next start's sweep frees the space if no retry finishes it
+          DeleteFileW(tmp.c_str()); partial = false;
+          return fail("cannot write the install marker (disk full?)");
+      } }
     if (partial) { installs::end_partial(g_dir, appid); partial = false; }
     char sm[200]; snprintf(sm, sizeof sm, "Done: %d files, %.1f MB verified", verified, vbytes / 1048576.0); dl_msg(sm);
     logf("dl: ===== DONE appid %u '%s' -> LocalState\\%s : %d files, %llu bytes, SHA1-verified, %.0f s =====", appid, name.c_str(), installdir.c_str(), verified, (unsigned long long)vbytes, now_s() - t0);
