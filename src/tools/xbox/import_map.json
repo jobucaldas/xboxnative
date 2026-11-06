@@ -55,6 +55,10 @@
       "class": "system",
       "reason": "Resolve the native WinRT API-set contract for UWP runtime services; console export compatibility remains to be checked."
     },
+    "avrt.dll": {
+      "class": "wine-pe",
+      "reason": "Built from pinned Wine 10 source with the tracked read-only PE section patch; strict mapper initialization and focused behavior gate; full runtime export coverage remains unverified."
+    },
     "baselib.dll": {
       "class": "uwph",
       "reason": "Unmodified game-supplied x64 PE loaded through the uwph/Wine loader; this is a game asset, not a replacement host DLL."
@@ -62,6 +66,14 @@
     "bcrypt.dll": {
       "class": "system",
       "reason": "Native crypto/COM/version passthrough planned by LANES \u00a71; imported export behavior still needs game-level validation."
+    },
+    "bcryptprimitives.dll": {
+      "class": "system",
+      "reason": "Native CSPRNG (ProcessPrng), used by the Rust standard library on Windows 10+."
+    },
+    "combase.dll": {
+      "class": "system",
+      "reason": "Native COM base (CoTaskMemFree, CoCreateGuid, ...): the same system COM runtime ole32 forwards to; GameMaker imports it directly."
     },
     "crypt32.dll": {
       "class": "system",
@@ -123,7 +135,15 @@
       "class": "stub",
       "reason": "Named x64 ABI failure/empty adapters in entry-stubs.dll for the three-image probe; runtime tolerance remains unverified."
     },
+    "psapi.dll": {
+      "class": "system",
+      "reason": "Native process-status API (forwards to kernelbase K32*); Rust backtraces and module queries."
+    },
     "setupapi.dll": {
+      "class": "wine-pe",
+      "reason": "Built from pinned Wine 10 source with the tracked read-only PE section patch; strict mapper initialization and focused behavior gate; full runtime export coverage remains unverified."
+    },
+    "shcore.dll": {
       "class": "wine-pe",
       "reason": "Built from pinned Wine 10 source with the tracked read-only PE section patch; strict mapper initialization and focused behavior gate; full runtime export coverage remains unverified."
     },
@@ -142,6 +162,10 @@
     "user32.dll": {
       "class": "uwph",
       "reason": "uwph single-CoreWindow driver for supported window/message imports; remaining imports use named x64 ABI failure/empty adapters, never desktop user32."
+    },
+    "userenv.dll": {
+      "class": "system",
+      "reason": "Native user profile API (GetUserProfileDirectoryW) for home-directory lookups."
     },
     "version.dll": {
       "class": "wine-pe",
@@ -163,14 +187,6 @@
     "ws2_32.dll": {
       "class": "system",
       "reason": "Native Winsock passthrough per LANES \u00a71; console TCP works, while AF_UNIX remains unavailable."
-    },
-    "shcore.dll": {
-      "class": "wine-pe",
-      "reason": "Built from pinned Wine 10 source with the tracked read-only PE section patch; strict mapper initialization and focused behavior gate; full runtime export coverage remains unverified."
-    },
-    "avrt.dll": {
-      "class": "wine-pe",
-      "reason": "Built from pinned Wine 10 source with the tracked read-only PE section patch; strict mapper initialization and focused behavior gate; full runtime export coverage remains unverified."
     }
   }
 }

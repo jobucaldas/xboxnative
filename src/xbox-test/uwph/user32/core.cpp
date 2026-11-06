@@ -269,13 +269,13 @@ extern "C" int WINAPI c_ToUnicode(UINT vk,UINT,const BYTE* state,LPWSTR buf,int 
 // EnumWindows, documented in README.md). Timer/TrackMouseEvent entries are
 // record-only: actual WM_TIMER/WM_MOUSELEAVE delivery needs the message pump
 // (item 43/upmp), left to that lane on purpose.
-static bool clipboardOpen=false; static HWND clipboardOwner;
+static bool clipboardOpen=false; static HWND clipboardOwner; static DWORD clipboardSequence=0;
 static std::map<UINT,HANDLE> clipboardData;
 extern "C" BOOL WINAPI c_OpenClipboard(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);if(h&&!window(h))return FALSE;if(clipboardOpen){SetLastError(ERROR_ACCESS_DENIED);return FALSE;}clipboardOpen=true;clipboardOwner=h;return TRUE;}
 extern "C" BOOL WINAPI c_CloseClipboard(){std::lock_guard<std::recursive_mutex> l(mutex);if(!clipboardOpen)return FALSE;clipboardOpen=false;return TRUE;}
-extern "C" BOOL WINAPI c_EmptyClipboard(){std::lock_guard<std::recursive_mutex> l(mutex);if(!clipboardOpen)return FALSE;clipboardData.clear();return TRUE;}
+extern "C" BOOL WINAPI c_EmptyClipboard(){std::lock_guard<std::recursive_mutex> l(mutex);if(!clipboardOpen)return FALSE;clipboardData.clear();++clipboardSequence;return TRUE;}
 extern "C" HANDLE WINAPI c_GetClipboardData(UINT fmt){std::lock_guard<std::recursive_mutex> l(mutex);if(!clipboardOpen)return nullptr;auto p=clipboardData.find(fmt);SetLastError(0);return p==clipboardData.end()?nullptr:p->second;}
-extern "C" HANDLE WINAPI c_SetClipboardData(UINT fmt,HANDLE data){std::lock_guard<std::recursive_mutex> l(mutex);if(!clipboardOpen){SetLastError(ERROR_ACCESS_DENIED);return nullptr;}clipboardData[fmt]=data;return data;}
+extern "C" HANDLE WINAPI c_SetClipboardData(UINT fmt,HANDLE data){std::lock_guard<std::recursive_mutex> l(mutex);if(!clipboardOpen){SetLastError(ERROR_ACCESS_DENIED);return nullptr;}clipboardData[fmt]=data;++clipboardSequence;return data;}
 extern "C" BOOL WINAPI c_IsClipboardFormatAvailable(UINT fmt){std::lock_guard<std::recursive_mutex> l(mutex);return clipboardData.count(fmt)!=0;}
 
 struct TimerEntry{HWND hwnd;UINT_PTR id;};
@@ -496,4 +496,5 @@ extern "C" int WINAPI c_LookupIconIdFromDirectoryEx(BYTE* xdir,BOOL isIcon,int w
 #include "dialog_keys.h"
 #include "dpi.h"
 #include "device_notifications.h"
+#include "window_extras.h"
 } // namespace u32c

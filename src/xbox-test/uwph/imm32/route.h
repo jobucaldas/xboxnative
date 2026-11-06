@@ -71,6 +71,25 @@ inline BOOL WINAPI notify(HIMC context, DWORD, DWORD, DWORD) {
     SetLastError(context ? ERROR_INVALID_HANDLE : ERROR_SUCCESS);
     return FALSE;
 }
+// Candidate/composition window state belongs to a context; none exists.
+inline DWORD WINAPI get_candidate_list(HIMC context, DWORD, void*, DWORD) {
+    reject_foreign_context(context);
+    return 0;
+}
+inline BOOL WINAPI get_composition_font(HIMC context, void*) {
+    reject_foreign_context(context);
+    return FALSE;
+}
+inline BOOL WINAPI set_composition_window(HIMC context, const void*) {
+    reject_foreign_context(context);
+    return FALSE;
+}
+inline BOOL WINAPI set_candidate_window(HIMC context, const void*) {
+    reject_foreign_context(context);
+    return FALSE;
+}
+// No keyboard layout here is an IME (Wine: zero for a non-IME HKL).
+inline UINT WINAPI get_ime_file_name_a(HKL, LPSTR, UINT) { return 0; }
 // Wine releases no resource here, even for a null context or window.
 inline BOOL WINAPI release_context(HWND, HIMC) { return TRUE; }
 inline uintptr_t resolve(const char* dll, const char* name, IsWindow validator = nullptr) {
@@ -84,6 +103,11 @@ inline uintptr_t resolve(const char* dll, const char* name, IsWindow validator =
     if (!strcmp(name, "ImmSetCompositionStringW")) return reinterpret_cast<uintptr_t>(&set_composition);
     if (!strcmp(name, "ImmNotifyIME")) return reinterpret_cast<uintptr_t>(&notify);
     if (!strcmp(name, "ImmReleaseContext")) return reinterpret_cast<uintptr_t>(&release_context);
+    if (!strcmp(name, "ImmGetCandidateListW")) return reinterpret_cast<uintptr_t>(&get_candidate_list);
+    if (!strcmp(name, "ImmGetCompositionFontW")) return reinterpret_cast<uintptr_t>(&get_composition_font);
+    if (!strcmp(name, "ImmSetCompositionWindow")) return reinterpret_cast<uintptr_t>(&set_composition_window);
+    if (!strcmp(name, "ImmSetCandidateWindow")) return reinterpret_cast<uintptr_t>(&set_candidate_window);
+    if (!strcmp(name, "ImmGetIMEFileNameA")) return reinterpret_cast<uintptr_t>(&get_ime_file_name_a);
     return 0;
 }
 }

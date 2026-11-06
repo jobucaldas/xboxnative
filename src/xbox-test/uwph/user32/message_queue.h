@@ -4,6 +4,8 @@
 struct GuestMessage { HWND hwnd; UINT message; WPARAM wParam; LPARAM lParam; DWORD time; POINT pt; };
 static_assert(sizeof(GuestMessage)==48,"Win64 MSG layout");
 static std::map<DWORD,std::deque<GuestMessage>> messageQueues;
+// GetMessageTime/GetMessagePos: the last message this thread retrieved.
+static thread_local DWORD lastMessageTime=0,lastMessagePos=0;
 // Per-thread "new posted message" wake bit (manual-reset event): set by every
 // post, cleared whenever that thread checks its queue, as Windows' QS bits.
 // Events live for the process, like the queues. Callers hold the mutex.
@@ -61,7 +63,8 @@ extern "C" BOOL WINAPI c_PeekMessageW(GuestMessage* out,HWND hwnd,UINT first,UIN
  for(auto it=queue.begin();it!=queue.end();){
   if(it->hwnd&&!window(it->hwnd)){it=queue.erase(it);continue;}
   if((it->message==WM_QUIT||((!first&&!last)||(it->message>=first&&it->message<=last)))&&messageWindow(it->hwnd,hwnd)){
-   *out=*it;if(flags&PM_REMOVE)queue.erase(it);return TRUE;
+   *out=*it;lastMessageTime=it->time;lastMessagePos=MAKELONG(SHORT(it->pt.x),SHORT(it->pt.y));
+   if(flags&PM_REMOVE)queue.erase(it);return TRUE;
   }
   ++it;
  }
