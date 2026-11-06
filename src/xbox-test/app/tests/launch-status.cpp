@@ -62,6 +62,11 @@ int main() {
     auto any=launch_target::entries(plain);
     assert(launch_target::choose(any)==&any[1]);
     assert(launch_target::relative_path(any[1].executable,rel) && rel=="Run.exe");
+    // A "none"-typed Play entry beats an option1 alternative (safe mode etc.).
+    Vdf typed;
+    assert(vdf_parse(R"("config" { "launch" { "0" { "executable" "Safe.exe" "type" "option1" } "1" { "executable" "Game.exe" "type" "none" } } })",typed));
+    auto typedOptions=launch_target::entries(typed);
+    assert(launch_target::choose(typedOptions)==&typedOptions[1]);
     Vdf none;
     assert(vdf_parse(R"("config" { "launch" { "0" { "executable" "Tool.exe" "type" "server" } } })",none));
     auto tools=launch_target::entries(none);
