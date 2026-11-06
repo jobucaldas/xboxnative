@@ -21,6 +21,7 @@ int main(int argc, char** argv) {
     if (!ids || displays < 1) return fail(11, "SDL_GetDisplays");
     const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(ids[0]);
     if (!mode || mode->w <= 0 || mode->h <= 0) return fail(12, "SDL_GetDesktopDisplayMode");
+    const int desktopW = mode->w, desktopH = mode->h;  // SDL owns *mode until SDL_Quit
     SDL_free(ids);
     SDL_Window* window = SDL_CreateWindow("play-sdl3", 640, 360, 0);
     if (!window) return fail(20, "SDL_CreateWindow");
@@ -44,7 +45,7 @@ int main(int argc, char** argv) {
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
-    printf("PLAY-SDL3 PASS displays=%d desktop=%dx%d pads=%d\n", displays, mode ? mode->w : 0, mode ? mode->h : 0, pads);
+    printf("PLAY-SDL3 PASS displays=%d desktop=%dx%d pads=%d\n", displays, desktopW, desktopH, pads);
     fflush(stdout);
     return 42;
 }

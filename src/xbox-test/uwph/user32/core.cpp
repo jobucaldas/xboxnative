@@ -83,7 +83,19 @@ static bool origin(HWND h,LONG& x,LONG& y){for(unsigned depth=0;h&&depth<4096;++
 extern "C" BOOL WINAPI c_ClientToScreen(HWND h,POINT* p){std::lock_guard<std::recursive_mutex> l(mutex);if(!p)return FALSE;LONG x=0,y=0;if(!origin(h,x,y))return FALSE;p->x+=x;p->y+=y;return TRUE;}
 extern "C" BOOL WINAPI c_ScreenToClient(HWND h,POINT* p){std::lock_guard<std::recursive_mutex> l(mutex);if(!p)return FALSE;LONG x=0,y=0;if(!origin(h,x,y))return FALSE;p->x-=x;p->y-=y;return TRUE;}
 extern "C" BOOL WINAPI c_GetWindowRect(HWND h,RECT* r){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!r)return FALSE;LONG x=0,y=0;if(!origin(h,x,y))return FALSE;*r={x,y,x+w->cx,y+w->cy};return TRUE;}
-extern "C" LRESULT WINAPI c_SendMessageW(HWND h,UINT m,WPARAM w,LPARAM p){std::lock_guard<std::recursive_mutex> l(mutex);auto v=window(h);if(!v)return 0;if(v->thread!=GetCurrentThreadId()){SetLastError(ERROR_NOT_SUPPORTED);return 0;}return v->proc(h,m,w,p);}
+static LRESULT sendRaw(HWND h,UINT m,WPARAM w,LPARAM p){std::lock_guard<std::recursive_mutex> l(mutex);auto v=window(h);if(!v)return 0;if(v->thread!=GetCurrentThreadId()){SetLastError(ERROR_NOT_SUPPORTED);return 0;}return v->proc(h,m,w,p);}
+static bool ansiWindow(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);auto v=window(h);return v&&v->cls&&v->cls->ansi;}
+// An ANSI window procedure (RegisterClass(Ex)A) receives window text as ANSI:
+// Unicode WM_SETTEXT/WM_GETTEXT payloads are converted for it, as Windows does.
+extern "C" LRESULT WINAPI c_SendMessageW(HWND h,UINT m,WPARAM w,LPARAM p){
+ if(!p||(m!=WM_SETTEXT&&m!=WM_GETTEXT)||!ansiWindow(h))return sendRaw(h,m,w,p);
+ if(m==WM_SETTEXT){int n=WideCharToMultiByte(CP_ACP,0,(LPCWSTR)p,-1,nullptr,0,nullptr,nullptr);std::string text(n>0?size_t(n):1,'\0');if(n>0)WideCharToMultiByte(CP_ACP,0,(LPCWSTR)p,-1,&text[0],n,nullptr,nullptr);return sendRaw(h,m,w,(LPARAM)text.c_str());}
+ if(!w)return 0;
+ std::string buffer(size_t(w)*2,'\0');LRESULT bytes=sendRaw(h,m,WPARAM(buffer.size()),(LPARAM)&buffer[0]);
+ int n=bytes>0?MultiByteToWideChar(CP_ACP,0,buffer.c_str(),int(bytes),nullptr,0):0;
+ std::wstring text(size_t(n>0?n:0),L'\0');if(n>0)MultiByteToWideChar(CP_ACP,0,buffer.c_str(),int(bytes),&text[0],n);
+ size_t chars=std::min(text.size(),size_t(w)-1);memcpy((void*)p,text.data(),chars*sizeof(WCHAR));((LPWSTR)p)[chars]=0;return LRESULT(chars);
+}
 extern "C" LRESULT WINAPI c_CallWindowProcW(Proc proc,HWND h,UINT m,WPARAM w,LPARAM p){return proc?proc(h,m,w,p):0;}
 extern "C" BOOL WINAPI c_SetPropW(HWND h,LPCWSTR n,HANDLE v){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!n)return FALSE;w->props[key(n)]=v;return TRUE;}
 extern "C" HANDLE WINAPI c_GetPropW(HWND h,LPCWSTR n){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!n)return nullptr;auto p=w->props.find(key(n));return p==w->props.end()?nullptr:p->second;}
