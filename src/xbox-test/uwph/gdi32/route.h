@@ -38,13 +38,17 @@ using Metrics = int (WINAPI*)(int);
 inline std::atomic<DeviceCaps> window_device_caps{nullptr};
 inline std::atomic<Metrics> screen_metrics{nullptr};
 inline int WINAPI get_device_caps(HDC dc, int cap) {
+    // Classify under the GDI lock, but call user32 only after releasing it:
+    // user32 runs window procedures under its own lock, which may call GDI.
+    enum { None, Ours, Other } owner = None;
     {
         std::lock_guard<std::recursive_mutex> l(objectsM);
-        if (auto o = any(dc)) {
-            auto metrics = screen_metrics.load();
-            if ((o->kind != Kind::DisplayDc && o->kind != Kind::MemoryDc) || !metrics) { SetLastError(ERROR_INVALID_HANDLE); return 0; }
-            return display_cap(cap, metrics(0), metrics(1));  // SM_CXSCREEN, SM_CYSCREEN
-        }
+        if (auto o = any(dc)) owner = (o->kind == Kind::DisplayDc || o->kind == Kind::MemoryDc) ? Ours : Other;
+    }
+    if (owner != None) {
+        auto metrics = screen_metrics.load();
+        if (owner == Other || !metrics) { SetLastError(ERROR_INVALID_HANDLE); return 0; }
+        return display_cap(cap, metrics(0), metrics(1));  // SM_CXSCREEN, SM_CYSCREEN
     }
     auto window = window_device_caps.load();
     return window ? window(dc, cap) : 0;
