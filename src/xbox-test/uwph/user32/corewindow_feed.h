@@ -101,6 +101,33 @@ struct Feed {
     bool pointer(double x,double y,double width,double height,unsigned pressed) {
         POINT client;HWND window;
         if(!place(x,y,width,height,client,window))return false;
+        emit(window,client,pressed);
+        return true;
+    }
+
+    // The same, from a screen position (SendInput): the record cursor moves
+    // (ClipCursor applies) and the guest window gets the same messages.
+    bool pointer_screen(POINT screen,unsigned pressed) {
+        if(!api.complete()||!api.set_cursor(screen.x,screen.y))return false;
+        HWND window=target();
+        POINT client{};
+        if(!window||!api.get_cursor(&client)||!api.to_client(window,&client))return false;
+        emit(window,client,pressed);
+        return true;
+    }
+
+    // Wheel at the current cursor (SendInput), as wheel() does.
+    bool wheel_here(int delta,bool horizontal) {
+        HWND window=target();
+        POINT screen{};
+        if(!window||!api.get_cursor(&screen))return false;
+        WPARAM state=MAKEWPARAM(WORD(modifiers()|buttons),WORD(SHORT(std::clamp(delta,-32768,32767))));
+        api.post(window,horizontal?WM_MOUSEHWHEEL:WM_MOUSEWHEEL,state,MAKELPARAM(screen.x,screen.y));
+        return true;
+    }
+
+    // Button transitions and the move, at a client position.
+    void emit(HWND window,POINT client,unsigned pressed) {
         const unsigned flags[]={Left,Right,Middle,X1,X2};
         const int keys[]={VK_LBUTTON,VK_RBUTTON,VK_MBUTTON,VK_XBUTTON1,VK_XBUTTON2};
         const UINT downs[]={WM_LBUTTONDOWN,WM_RBUTTONDOWN,WM_MBUTTONDOWN,WM_XBUTTONDOWN,WM_XBUTTONDOWN};
@@ -117,7 +144,6 @@ struct Feed {
             api.post(window,held?downs[i]:ups[i],state,at);
         }
         api.post(window,WM_MOUSEMOVE,modifiers()|buttons,at);
-        return true;
     }
 
     // Wheel delta in WHEEL_DELTA units; lParam is the cursor in screen coordinates.
@@ -159,6 +185,31 @@ private:
         client=screen;
         return api.to_client(window,&client)!=FALSE;
     }
+};
+
+// One feed per process: the record DLL owns it (uwph_u32c_input_* exports), so
+// the launcher's CoreWindow input and the guest's own SendInput share key
+// state, targeting, lParams and release_all. The launcher binds these.
+struct Shared {
+    BOOL (WINAPI* key_)(UINT,UINT,BOOL,BOOL,UINT)=nullptr;
+    BOOL (WINAPI* pointer_)(double,double,double,double,UINT)=nullptr;
+    BOOL (WINAPI* wheel_)(double,double,double,double,int,BOOL)=nullptr;
+    void (WINAPI* release_)()=nullptr;
+    void (WINAPI* fallback_)(HWND)=nullptr;
+    bool complete() const {return key_&&pointer_&&wheel_&&release_&&fallback_;}
+    template<class Resolve> bool bind(Resolve resolve) {
+        key_=reinterpret_cast<decltype(key_)>(resolve("uwph_u32c_input_key"));
+        pointer_=reinterpret_cast<decltype(pointer_)>(resolve("uwph_u32c_input_pointer"));
+        wheel_=reinterpret_cast<decltype(wheel_)>(resolve("uwph_u32c_input_wheel"));
+        release_=reinterpret_cast<decltype(release_)>(resolve("uwph_u32c_input_release_all"));
+        fallback_=reinterpret_cast<decltype(fallback_)>(resolve("uwph_u32c_input_set_fallback"));
+        return complete();
+    }
+    void set_fallback(HWND h) {if(fallback_)fallback_(h);}
+    bool key(unsigned vk,unsigned scan,bool extended,bool pressed,unsigned repeats=1) {return key_&&key_(vk,scan,extended,pressed,repeats);}
+    bool pointer(double x,double y,double w,double h,unsigned pressed) {return pointer_&&pointer_(x,y,w,h,pressed);}
+    bool wheel(double x,double y,double w,double h,int delta,bool horizontal) {return wheel_&&wheel_(x,y,w,h,delta,horizontal);}
+    void release_all() {if(release_)release_();}
 };
 
 }

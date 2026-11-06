@@ -8,6 +8,7 @@
 // rasterization and colour profiles are not provided.
 #include <windows.h>
 #include <cstring>
+#include <cwchar>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -217,6 +218,28 @@ inline HFONT WINAPI create_font_indirect_w(const LOGFONTW* f) {
     if(!f){SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}
     std::lock_guard<std::recursive_mutex> l(objectsM);
     auto o=std::make_unique<Object>();o->kind=Kind::Font;o->font=*f;return (HFONT)add(std::move(o));
+}
+// Stock objects (Wine win32u/gdiobj.c stock table): the six brushes and the
+// fonts, as registry objects created once and never deleted. Stock pens and
+// the default palette have no object kind here and return NULL.
+inline HGDIOBJ WINAPI get_stock_object(int index) {
+    static const COLORREF brushes[]={RGB(255,255,255),RGB(192,192,192),RGB(128,128,128),RGB(64,64,64),RGB(0,0,0)};
+    static HGDIOBJ table[20]={};
+    std::lock_guard<std::recursive_mutex> l(objectsM);
+    if(index<0||index>=20)return nullptr;
+    if(table[index])return table[index];
+    // A DC's default brush and font are these stock objects (WHITE_BRUSH, SYSTEM_FONT).
+    if(index==0)return table[index]=(HGDIOBJ)stock(Kind::Brush);
+    if(index==13)return table[index]=(HGDIOBJ)stock(Kind::Font);
+    auto o=std::make_unique<Object>();o->stock=true;
+    if(index<=4){o->kind=Kind::Brush;o->color=brushes[index];}
+    else if(index==5||index==18){o->kind=Kind::Brush;o->color=index==18?RGB(255,255,255):0;} // NULL_BRUSH, DC_BRUSH
+    else if((index>=10&&index<=14)||index==16||index==17){ // OEM/ANSI fixed/var, system, device default, system fixed, default GUI
+        o->kind=Kind::Font;o->font.lfHeight=index==17?-11:16;o->font.lfWeight=index==12||index==16?700:400;
+        o->font.lfCharSet=index==10?255:0;o->font.lfPitchAndFamily=(index==10||index==11||index==16)?1:2;
+        wcscpy_s(o->font.lfFaceName,index==17?L"MS Shell Dlg":index==12||index==13?L"System":L"");
+    } else return nullptr;
+    return table[index]=add(std::move(o));
 }
 inline BOOL WINAPI get_text_metrics_w(HDC,void*){SetLastError(ERROR_NOT_SUPPORTED);return FALSE;}
 inline BOOL WINAPI get_text_extent_point_32a(HDC,LPCSTR,int,SIZE*){SetLastError(ERROR_NOT_SUPPORTED);return FALSE;}

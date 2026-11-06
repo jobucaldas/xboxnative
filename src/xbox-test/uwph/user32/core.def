@@ -176,6 +176,18 @@ EXPORTS
  RegisterTouchWindow=c_RegisterTouchWindow
  UnregisterTouchWindow=c_UnregisterTouchWindow
  RegisterClassExA=c_RegisterClassExA
+ RegisterClassA=c_RegisterClassA
+ DefWindowProcA=c_DefWindowProcA
+ SendMessageA=c_SendMessageA
+ PostMessageA=c_PostMessageA
+ GetKeyboardLayoutNameA=c_GetKeyboardLayoutNameA
+ RegisterDeviceNotificationA=c_RegisterDeviceNotificationA
+ SendInput=c_SendInput
+ uwph_u32c_input_key
+ uwph_u32c_input_pointer
+ uwph_u32c_input_wheel
+ uwph_u32c_input_release_all
+ uwph_u32c_input_set_fallback
  UnregisterClassA=c_UnregisterClassA
  CreateWindowExA=c_CreateWindowExA
  RegisterWindowMessageW=c_RegisterWindowMessageW

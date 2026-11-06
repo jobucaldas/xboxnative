@@ -10,6 +10,7 @@
 #include <mutex>
 #include <algorithm>
 #include "keymap.h"
+#include "corewindow_feed.h"
 // The APP family this DLL compiles under (build.sh --uwp) hides several
 // desktop-only SDK declarations this record module still needs to export
 // (they are plain data layouts/constants, not calls to restricted entry
@@ -21,6 +22,12 @@
 #define MAPVK_VK_TO_CHAR 2
 #define MAPVK_VSC_TO_VK_EX 3
 #define MAPVK_VK_TO_VSC_EX 4
+#endif
+#ifndef KEYEVENTF_EXTENDEDKEY
+#define KEYEVENTF_EXTENDEDKEY 0x0001
+#define KEYEVENTF_KEYUP 0x0002
+#define KEYEVENTF_UNICODE 0x0004
+#define KEYEVENTF_SCANCODE 0x0008
 #endif
 #ifndef ENUM_CURRENT_SETTINGS
 #define ENUM_CURRENT_SETTINGS ((DWORD)-1)
@@ -39,7 +46,7 @@ struct ClassEx {UINT size,style;Proc proc;int clsExtra,wndExtra;HINSTANCE instan
 struct ClassW {UINT style;Proc proc;int clsExtra,wndExtra;HINSTANCE instance;HICON icon;HCURSOR cursor;HBRUSH brush;LPCWSTR menu,name;};
 struct Create {void* param;HINSTANCE instance;HMENU menu;HWND parent;int cy,cx,y,x;LONG style;LPCWSTR title,name;DWORD ex;};
 static_assert(sizeof(ClassEx)==80 && sizeof(Create)==80,"Win64 ABI");
-struct Class {ClassEx info;std::wstring name,menu;ATOM atom;std::vector<BYTE> extra;};
+struct Class {ClassEx info;std::wstring name,menu;ATOM atom;std::vector<BYTE> extra;bool ansi=false;}; // ansi: registered through RegisterClass(Ex)A
 struct Window {Class* cls;Proc proc;DWORD thread;bool alive=true,destroying=false,messageOnly=false;LONG_PTR user=0,id=0;HINSTANCE instance;HWND parent;LONG style,ex;int x,y,cx,cy;std::wstring title;std::vector<BYTE> extra;std::map<std::wstring,HANDLE> props;};
 static Window* desktop;
 static std::recursive_mutex mutex;
@@ -83,7 +90,19 @@ static bool origin(HWND h,LONG& x,LONG& y){for(unsigned depth=0;h&&depth<4096;++
 extern "C" BOOL WINAPI c_ClientToScreen(HWND h,POINT* p){std::lock_guard<std::recursive_mutex> l(mutex);if(!p)return FALSE;LONG x=0,y=0;if(!origin(h,x,y))return FALSE;p->x+=x;p->y+=y;return TRUE;}
 extern "C" BOOL WINAPI c_ScreenToClient(HWND h,POINT* p){std::lock_guard<std::recursive_mutex> l(mutex);if(!p)return FALSE;LONG x=0,y=0;if(!origin(h,x,y))return FALSE;p->x-=x;p->y-=y;return TRUE;}
 extern "C" BOOL WINAPI c_GetWindowRect(HWND h,RECT* r){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!r)return FALSE;LONG x=0,y=0;if(!origin(h,x,y))return FALSE;*r={x,y,x+w->cx,y+w->cy};return TRUE;}
-extern "C" LRESULT WINAPI c_SendMessageW(HWND h,UINT m,WPARAM w,LPARAM p){std::lock_guard<std::recursive_mutex> l(mutex);auto v=window(h);if(!v)return 0;if(v->thread!=GetCurrentThreadId()){SetLastError(ERROR_NOT_SUPPORTED);return 0;}return v->proc(h,m,w,p);}
+static LRESULT sendRaw(HWND h,UINT m,WPARAM w,LPARAM p){std::lock_guard<std::recursive_mutex> l(mutex);auto v=window(h);if(!v)return 0;if(v->thread!=GetCurrentThreadId()){SetLastError(ERROR_NOT_SUPPORTED);return 0;}return v->proc(h,m,w,p);}
+static bool ansiWindow(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);auto v=window(h);return v&&v->cls&&v->cls->ansi;}
+// An ANSI window procedure (RegisterClass(Ex)A) receives window text as ANSI:
+// Unicode WM_SETTEXT/WM_GETTEXT payloads are converted for it, as Windows does.
+extern "C" LRESULT WINAPI c_SendMessageW(HWND h,UINT m,WPARAM w,LPARAM p){
+ if(!p||(m!=WM_SETTEXT&&m!=WM_GETTEXT)||!ansiWindow(h))return sendRaw(h,m,w,p);
+ if(m==WM_SETTEXT){int n=WideCharToMultiByte(CP_ACP,0,(LPCWSTR)p,-1,nullptr,0,nullptr,nullptr);std::string text(n>0?size_t(n):1,'\0');if(n>0)WideCharToMultiByte(CP_ACP,0,(LPCWSTR)p,-1,&text[0],n,nullptr,nullptr);return sendRaw(h,m,w,(LPARAM)text.c_str());}
+ if(!w)return 0;
+ std::string buffer(size_t(w)*2,'\0');LRESULT bytes=sendRaw(h,m,WPARAM(buffer.size()),(LPARAM)&buffer[0]);
+ int n=bytes>0?MultiByteToWideChar(CP_ACP,0,buffer.c_str(),int(bytes),nullptr,0):0;
+ std::wstring text(size_t(n>0?n:0),L'\0');if(n>0)MultiByteToWideChar(CP_ACP,0,buffer.c_str(),int(bytes),&text[0],n);
+ size_t chars=std::min(text.size(),size_t(w)-1);memcpy((void*)p,text.data(),chars*sizeof(WCHAR));((LPWSTR)p)[chars]=0;return LRESULT(chars);
+}
 extern "C" LRESULT WINAPI c_CallWindowProcW(Proc proc,HWND h,UINT m,WPARAM w,LPARAM p){return proc?proc(h,m,w,p):0;}
 extern "C" BOOL WINAPI c_SetPropW(HWND h,LPCWSTR n,HANDLE v){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!n)return FALSE;w->props[key(n)]=v;return TRUE;}
 extern "C" HANDLE WINAPI c_GetPropW(HWND h,LPCWSTR n){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!n)return nullptr;auto p=w->props.find(key(n));return p==w->props.end()?nullptr:p->second;}
@@ -535,5 +554,6 @@ extern "C" int WINAPI c_LookupIconIdFromDirectoryEx(BYTE* xdir,BOOL isIcon,int w
 #include "dialog_keys.h"
 #include "dpi.h"
 #include "device_notifications.h"
+#include "input_feed.h"
 #include "window_extras.h"
 } // namespace u32c

@@ -15,12 +15,91 @@ extern "C" ATOM WINAPI c_RegisterClassExA(const ClassExA* p){
  auto name=wide(p->name),menu=wide(p->menu);
  ClassEx x{sizeof(x),p->style,p->proc,p->clsExtra,p->wndExtra,p->instance,p->icon,p->cursor,p->brush,
   integer(p->menu)?(LPCWSTR)p->menu:menu.c_str(),integer(p->name)?(LPCWSTR)p->name:name.c_str(),p->smallIcon};
- return c_RegisterClassExW(&x);
+ std::lock_guard<std::recursive_mutex> l(mutex);
+ ATOM atom=c_RegisterClassExW(&x);
+ if(atom)for(auto& c:classes)if(c->atom==atom&&c->info.instance==p->instance)c->ansi=true;
+ return atom;
 }
 extern "C" BOOL WINAPI c_UnregisterClassA(LPCSTR n,HINSTANCE i){auto w=wide(n);return c_UnregisterClassW(integer(n)?(LPCWSTR)n:w.c_str(),i);}
 extern "C" HWND WINAPI c_CreateWindowExA(DWORD ex,LPCSTR n,LPCSTR title,DWORD style,int x,int y,int cx,int cy,HWND parent,HMENU menu,HINSTANCE i,void* param){
  auto cls=wide(n),text=wide(title);
  return c_CreateWindowExW(ex,integer(n)?(LPCWSTR)n:cls.c_str(),title?text.c_str():nullptr,style,x,y,cx,cy,parent,menu,i,param);
+}
+struct ClassA {UINT style;Proc proc;int clsExtra,wndExtra;HINSTANCE instance;HICON icon;HCURSOR cursor;HBRUSH brush;LPCSTR menu,name;};
+static_assert(sizeof(ClassA)==72,"WNDCLASSA layout");
+extern "C" ATOM WINAPI c_RegisterClassA(const ClassA* p){
+ if(!p){SetLastError(ERROR_INVALID_PARAMETER);return 0;}
+ ClassExA x{sizeof(x),p->style,p->proc,p->clsExtra,p->wndExtra,p->instance,p->icon,p->cursor,p->brush,p->menu,p->name,nullptr};
+ return c_RegisterClassExA(&x);
+}
+// ANSI messages over the W records. Window text is the one payload converted
+// (WM_SETTEXT, WM_GETTEXT); other messages are scalar or carry the same
+// structures, as for SendDlgItemMessageA.
+static LRESULT ansiText(LRESULT (WINAPI* call)(HWND,UINT,WPARAM,LPARAM),HWND h,UINT m,WPARAM w,LPARAM p){
+ if(m==WM_SETTEXT&&p){auto text=wide((LPCSTR)p);return call(h,m,w,(LPARAM)text.c_str());}
+ if(m==WM_GETTEXT&&p&&w){
+  std::wstring buffer(size_t(w),L'\0');LRESULT n=call(h,m,w,(LPARAM)buffer.data());
+  int bytes=WideCharToMultiByte(CP_ACP,0,buffer.c_str(),int(n),(LPSTR)p,int(w)-1,nullptr,nullptr);
+  ((LPSTR)p)[bytes]=0;return bytes;
+ }
+ return call(h,m,w,p);
+}
+extern "C" LRESULT WINAPI c_DefWindowProcA(HWND h,UINT m,WPARAM w,LPARAM p){return ansiText(c_DefWindowProcW,h,m,w,p);}
+// An ANSI window's procedure receives ANSI text unchanged; a Unicode window's
+// receives it converted (Windows decides by the window procedure's class).
+extern "C" LRESULT WINAPI c_SendMessageA(HWND h,UINT m,WPARAM w,LPARAM p){
+ return ansiWindow(h)?sendRaw(h,m,w,p):ansiText(c_SendMessageW,h,m,w,p);
+}
+extern "C" BOOL WINAPI c_PostMessageA(HWND h,UINT m,WPARAM w,LPARAM p){return c_PostMessageW(h,m,w,p);} // posted payloads are scalar; WM_CHAR > 127 is refused by the W path
+extern "C" BOOL WINAPI c_GetKeyboardLayoutNameA(LPSTR name){if(!name)return FALSE;strcpy(name,"00000409");return TRUE;} // fixed en-US layout, as the W form
+extern "C" HANDLE WINAPI c_RegisterDeviceNotificationA(HANDLE recipient,void* filter,DWORD flags){return c_RegisterDeviceNotificationW(recipient,filter,flags);} // same validation; the A filter types differ only in name fields
+// SendInput through the shared feed (input_feed.h): exactly the messages,
+// lParams, side/system-key handling and target the physical keyboard and
+// mouse produce. A missing scan code is derived from the virtual key (and the
+// virtual key from KEYEVENTF_SCANCODE). Unicode keystrokes and hardware input
+// are refused (ERROR_NOT_SUPPORTED); the call stops at the first entry it
+// cannot insert and returns how many were inserted.
+struct KeyInput {WORD vk,scan;DWORD flags,time;ULONG_PTR extra;};
+struct MouseInput {LONG dx,dy;DWORD data,flags,time;ULONG_PTR extra;};
+struct Input {DWORD type;union {MouseInput mouse;KeyInput key;BYTE raw[32];};};
+static_assert(sizeof(Input)==40,"INPUT layout");
+extern "C" UINT WINAPI c_SendInput(UINT count,Input* inputs,int size){
+ if(size!=int(sizeof(Input))||(count&&!inputs)){SetLastError(ERROR_INVALID_PARAMETER);return 0;}
+ std::lock_guard<std::recursive_mutex> l(mutex);
+ auto& feed=sharedFeed();
+ UINT done=0;
+ for(;done<count;++done){
+  auto& in=inputs[done];
+  if(in.type==1){ // INPUT_KEYBOARD
+   const DWORD flags=in.key.flags;
+   if(flags&KEYEVENTF_UNICODE){SetLastError(ERROR_NOT_SUPPORTED);break;}
+   const bool extended=(flags&KEYEVENTF_EXTENDEDKEY)!=0,up=(flags&KEYEVENTF_KEYUP)!=0;
+   UINT vk=in.key.vk,scan=in.key.scan&0xff;
+   if(flags&KEYEVENTF_SCANCODE)vk=c_MapVirtualKeyW(scan|(extended?0xE000:0),MAPVK_VSC_TO_VK_EX);
+   else if(!scan)scan=c_MapVirtualKeyW(vk,MAPVK_VK_TO_VSC);
+   if(!vk||vk>255||!feed.key(vk,scan,extended,!up)){SetLastError(ERROR_NOT_SUPPORTED);break;}
+  } else if(in.type==0){ // INPUT_MOUSE
+   const DWORD flags=in.mouse.flags;
+   POINT pos{};c_GetCursorPos(&pos);
+   if(flags&MOUSEEVENTF_MOVE){
+    if(flags&MOUSEEVENTF_ABSOLUTE)pos={LONG((LONGLONG(in.mouse.dx)*desktopWidth)>>16),LONG((LONGLONG(in.mouse.dy)*desktopHeight)>>16)};
+    else{pos.x+=in.mouse.dx;pos.y+=in.mouse.dy;}
+   }
+   unsigned buttons=feed.buttons;
+   auto apply=[&](DWORD downFlag,DWORD upFlag,unsigned bit){if(flags&downFlag)buttons|=bit;if(flags&upFlag)buttons&=~bit;};
+   apply(MOUSEEVENTF_LEFTDOWN,MOUSEEVENTF_LEFTUP,corewindow_input::Left);
+   apply(MOUSEEVENTF_RIGHTDOWN,MOUSEEVENTF_RIGHTUP,corewindow_input::Right);
+   apply(MOUSEEVENTF_MIDDLEDOWN,MOUSEEVENTF_MIDDLEUP,corewindow_input::Middle);
+   if(flags&(MOUSEEVENTF_XDOWN|MOUSEEVENTF_XUP)){
+    unsigned bit=(in.mouse.data&XBUTTON1)?corewindow_input::X1:(in.mouse.data&XBUTTON2)?corewindow_input::X2:0;
+    if(flags&MOUSEEVENTF_XDOWN)buttons|=bit;if(flags&MOUSEEVENTF_XUP)buttons&=~bit;
+   }
+   // No guest window yet: the cursor still moves, as on Windows.
+   if(!feed.pointer_screen(pos,buttons))c_SetCursorPos(pos.x,pos.y);
+   if(flags&(MOUSEEVENTF_WHEEL|MOUSEEVENTF_HWHEEL))feed.wheel_here(SHORT(WORD(in.mouse.data)),(flags&MOUSEEVENTF_HWHEEL)!=0);
+  } else {SetLastError(ERROR_NOT_SUPPORTED);break;} // INPUT_HARDWARE
+ }
+ return done;
 }
 extern "C" UINT WINAPI c_RegisterWindowMessageW(LPCWSTR s){return c_GlobalAddAtomW(s);}   // same atom table (Wine)
 extern "C" UINT WINAPI c_RegisterClipboardFormatW(LPCWSTR s){return c_GlobalAddAtomW(s);}

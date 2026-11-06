@@ -87,6 +87,18 @@ int main() {
     CHECK(descriptor.nSize == sizeof(descriptor) && descriptor.nVersion == 1);
     CHECK(!gdi32_core::resolve("user32.dll", "SetPixelFormat"));
     CHECK(!gdi32_core::resolve("gdi32.dll", "swapbuffers"));
+    {   // Stock objects are stable, survive DeleteObject, and pens/palettes are not provided.
+        auto stock = reinterpret_cast<HGDIOBJ (WINAPI*)(int)>(gdi32_core::resolve("gdi32.dll", "GetStockObject"));
+        CHECK(stock);
+        HGDIOBJ white = stock(WHITE_BRUSH);
+        CHECK(white && stock(WHITE_BRUSH) == white && stock(BLACK_BRUSH) && stock(BLACK_BRUSH) != white);
+        CHECK(stock(SYSTEM_FONT) && stock(DEFAULT_GUI_FONT) && stock(NULL_BRUSH));
+        CHECK(gdi32_core::delete_object(white) && stock(WHITE_BRUSH) == white);
+        CHECK(!stock(BLACK_PEN) && !stock(DEFAULT_PALETTE) && !stock(-1) && !stock(20));
+        auto dc = gdi32_core::create_compatible_dc(nullptr);   // a new DC holds WHITE_BRUSH and SYSTEM_FONT
+        CHECK(dc && gdi32_core::select_object(dc, stock(BLACK_BRUSH)) == white);
+        CHECK(gdi32_core::select_object(dc, stock(DEFAULT_GUI_FONT)) == stock(SYSTEM_FONT) && gdi32_core::delete_dc(dc));
+    }
     {
         using Gamma = BOOL (WINAPI*)(HDC, void*);
         auto get = reinterpret_cast<Gamma>(gdi32_core::resolve("gdi32.dll", "GetDeviceGammaRamp"));

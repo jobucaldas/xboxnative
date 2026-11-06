@@ -123,6 +123,32 @@ static BOOL WINAPI createProcessA(LPCSTR,LPSTR,LPSECURITY_ATTRIBUTES,LPSECURITY_
 static BOOL WINAPI createProcessW(LPCWSTR,LPWSTR,LPSECURITY_ATTRIBUTES,LPSECURITY_ATTRIBUTES,BOOL,DWORD,LPVOID,LPCWSTR,LPSTARTUPINFOW,LPPROCESS_INFORMATION info) {
     return unsupportedProcess("CreateProcessW",info);
 }
+// ShellExecute(Ex) starts programs and URL handlers, the same boundary as
+// CreateProcess: every form resolves to a refusal (SE_ERR_ACCESSDENIED /
+// FALSE with ERROR_NOT_SUPPORTED), never to native shell32. The guest decides
+// how to carry on (SteamStub asks Steam to relaunch the game this way).
+static bool shellLaunch(const char* name) {
+    return name && (!strcmp(name,"ShellExecuteA") || !strcmp(name,"ShellExecuteW") ||
+                    !strcmp(name,"ShellExecuteExA") || !strcmp(name,"ShellExecuteExW"));
+}
+struct ShellExecuteInfo { DWORD size,mask; HWND window; const void* verb,*file,*parameters,*directory; int show; HINSTANCE instance; void* idList; const void* className; HKEY classKey; DWORD hotKey; HANDLE icon,process; };
+static_assert(sizeof(ShellExecuteInfo)==112,"SHELLEXECUTEINFO x64 layout");
+static void refusedShell(const char* name) {
+    if(state->log) state->log((std::string("PRUN OPTIONAL ")+name+" refused: no guest program launcher (ERROR_NOT_SUPPORTED)").c_str());
+    SetLastError(ERROR_NOT_SUPPORTED);
+}
+static HINSTANCE WINAPI shellExecuteA(HWND,LPCSTR,LPCSTR,LPCSTR,LPCSTR,INT) {refusedShell("ShellExecuteA");return (HINSTANCE)5;}  // SE_ERR_ACCESSDENIED
+static HINSTANCE WINAPI shellExecuteW(HWND,LPCWSTR,LPCWSTR,LPCWSTR,LPCWSTR,INT) {refusedShell("ShellExecuteW");return (HINSTANCE)5;}
+static BOOL shellExecuteEx(ShellExecuteInfo* info,const char* name) {
+    if(info && info->size==sizeof *info) {info->instance=(HINSTANCE)5;info->process=nullptr;}
+    refusedShell(name);return FALSE;
+}
+static BOOL WINAPI shellExecuteExA(ShellExecuteInfo* info) {return shellExecuteEx(info,"ShellExecuteExA");}
+static BOOL WINAPI shellExecuteExW(ShellExecuteInfo* info) {return shellExecuteEx(info,"ShellExecuteExW");}
+static uintptr_t shellExport(const char* name) {
+    return !strcmp(name,"ShellExecuteA")?uintptr_t(&shellExecuteA):!strcmp(name,"ShellExecuteW")?uintptr_t(&shellExecuteW):
+           !strcmp(name,"ShellExecuteExA")?uintptr_t(&shellExecuteExA):uintptr_t(&shellExecuteExW);
+}
 static uintptr_t processExport(const char* name) {
     return !strcmp(name,"CreateProcessA")?uintptr_t(&createProcessA):uintptr_t(&createProcessW);
 }
@@ -315,6 +341,12 @@ static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
     if(!IS_INTRESOURCE(name)) {
         if(processCreation(name)) {
             if(processModule(h)) return (FARPROC)processExport(name);
+            SetLastError(ERROR_PROC_NOT_FOUND);return nullptr;
+        }
+        if(shellLaunch(name)) {
+            wchar_t path[1024]{};using File=DWORD(WINAPI*)(HMODULE,LPWSTR,DWORD);
+            auto file=(File)kernel_tail::native("GetModuleFileNameW");
+            if(file&&file(h,path,1024)&&basename(path)=="shell32.dll") return (FARPROC)shellExport(name);
             SetLastError(ERROR_PROC_NOT_FOUND);return nullptr;
         }
         // Do not hand out raw GetProcAddress on the metadata-failure path:
@@ -658,6 +690,7 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // Process creation binds Play's refusal before any native lookup, for static,
     // dynamic and mapped-forwarder imports alike (see processCreation).
     if(processCreation(name) && (key=="kernel32.dll" || key.find("api-ms-win-core-")==0)) return processExport(name);
+    if(shellLaunch(name) && key=="shell32.dll") return shellExport(name);
     if(auto graphics=play_graphics::resolve(dll,name,ordinal))return graphics;
     if(name && (key=="kernel32.dll"||key=="kernelbase.dll"||key=="ntdll.dll"||key.find("api-ms-win-core-")==0)) if(auto p=processApi(name)) return p;
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxA")) return (uintptr_t)&messageBoxA;
