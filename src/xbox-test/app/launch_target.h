@@ -44,15 +44,17 @@ inline bool windows(const Entry& e) {
     }
 }
 // Same preference as the client on 64-bit Windows: a public (no beta key)
-// Windows option of the default type, 64-bit before unspecified before 32-bit,
-// keeping appinfo order among equals. Tools, servers, editors and VR options
-// are never the game's main launch.
+// Windows option, explicit "default" type first, then untyped or "none" (many
+// apps store their Play entry that way), then "option1"; 64-bit before
+// unspecified before 32-bit; appinfo order among equals. Tools, servers,
+// editors and VR options are never the game's main launch.
 inline const Entry* choose(const std::vector<Entry>& all) {
     const Entry* best = nullptr; int bestScore = -1;
     for (auto& e : all) {
         if (!windows(e) || !e.betakey.empty()) continue;
-        if (!e.type.empty() && e.type != "default" && e.type != "option1") continue;
-        int score = (e.type == "default" || e.type.empty() ? 4 : 0) + (e.osarch == "64" ? 2 : e.osarch.empty() ? 1 : 0);
+        int kind = e.type == "default" ? 8 : e.type.empty() || e.type == "none" ? 4 : e.type == "option1" ? 0 : -1;
+        if (kind < 0) continue;
+        int score = kind + (e.osarch == "64" ? 2 : e.osarch.empty() ? 1 : 0);
         if (score > bestScore) { best = &e; bestScore = score; }
     }
     return best;
