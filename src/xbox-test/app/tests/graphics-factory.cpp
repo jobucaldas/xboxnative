@@ -65,11 +65,18 @@ int main(){
     CHECK(calls==2&&reports==2&&window.refs==1);
     CHECK(observed.BufferCount==2&&observed.SwapEffect==DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL);
     CHECK(observed.Width==640&&observed.Height==480&&legacy.BufferCount==1);
+    // Desktop games commonly ask for display-mode switching; it is dropped.
+    legacy.Flags=DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+    CHECK(proxy->CreateSwapChain(expectedDevice,&legacy,&oldChain)==E_ABORT&&!oldChain);
+    CHECK(calls==3&&reports==3&&observed.Flags==0);
+    legacy.Flags=DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
+    CHECK(proxy->CreateSwapChain(expectedDevice,&legacy,&oldChain)==DXGI_ERROR_INVALID_CALL&&!oldChain);
+    legacy.Flags=0;
     legacy.SampleDesc.Count=4;
     CHECK(proxy->CreateSwapChain(expectedDevice,&legacy,&oldChain)==DXGI_ERROR_INVALID_CALL&&!oldChain);
     legacy.SampleDesc.Count=1;legacy.Windowed=FALSE;
     CHECK(proxy->CreateSwapChain(expectedDevice,&legacy,&oldChain)==DXGI_ERROR_INVALID_CALL&&!oldChain);
-    CHECK(calls==2&&reports==2&&window.refs==1);
+    CHECK(calls==3&&reports==3&&window.refs==1);
     CHECK(proxy->Release()==0);
     printf("OFF-DEVICE CoreWindow factory contracts checks=%u failures=%u; no rendering claim\n",checks,failures);
     return failures?1:0;

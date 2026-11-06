@@ -318,8 +318,15 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // Optional emulated Steam client (owned game): served for steamclient64.dll,
     // with the ActiveProcess registry environment in the guest registry.
     {wchar_t client[1024];DWORD n=GetEnvironmentVariableW(L"PRUN_STEAM_CLIENT",client,1024);
-     if(n&&n<1024){std::wstring path(client,n);play_runtime::set_steam_client(path);
-      if(!play_runtime::seed_steam_client_registry(path,1)){logline("PRUN FAIL steam client registry");return 4;}
+     if(n&&n<1024){std::wstring path(client,n),signedPath;
+      wchar_t valve[1024];DWORD v=GetEnvironmentVariableW(L"PRUN_STEAM_CLIENT_SIGNED",valve,1024);
+      if(v&&v<1024)signedPath.assign(valve,v);
+      play_runtime::set_steam_client(path,signedPath);
+      if(!play_runtime::seed_steam_client_registry(signedPath.empty()?path:signedPath,1)){logline("PRUN FAIL steam client registry");return 4;}
+      // The owner's genuine app ownership ticket, as the launcher obtains it.
+      wchar_t ticket[1024];DWORD t=GetEnvironmentVariableW(L"PRUN_STEAM_APP_TICKET",ticket,1024);
+      if(t&&t<1024){std::string bytes;if(FILE* f=_wfopen(std::wstring(ticket,t).c_str(),L"rb")){char b[4096];size_t k=fread(b,1,sizeof b,f);bytes.assign(b,k);fclose(f);}
+       play_runtime::set_app_ticket(bytes);}
       logline("PRUN steam client staged (off-device fixture account)");}}
     // Optional Steam API provider (owned game): mapped in place of steam_api64.dll.
     {wchar_t provider[1024];DWORD n=GetEnvironmentVariableW(L"PRUN_STEAM_PROVIDER",provider,1024);
@@ -343,18 +350,37 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
             DWORD alive=r->worker?WaitForSingleObject(r->worker,0):WAIT_FAILED;
             logline(("STACK worker state wait="+std::to_string(alive)+" finished="+std::to_string(int(r->finished.load()))).c_str());
         }
-        if(GetEnvironmentVariableW(L"PRUN_STACKS",nullptr,0)&&r->worker&&!r->finished.load()&&SuspendThread(r->worker)!=DWORD(-1)) {
+        // PRUN_STACKS=all: every other thread in the process too (lock waits).
+        auto dump=[](HANDLE thread,const std::string& title,int frames) {
+            if(SuspendThread(thread)==DWORD(-1))return;
             CONTEXT ctx{};ctx.ContextFlags=CONTEXT_FULL;
-            if(GetThreadContext(r->worker,&ctx)) {
-                logline("STACK guest main thread");
-                for(int frame=0;frame<24&&ctx.Rip;++frame) {
+            if(GetThreadContext(thread,&ctx)) {
+                logline(("STACK "+title).c_str());
+                for(int frame=0;frame<frames&&ctx.Rip;++frame) {
                     logline(("  #"+std::to_string(frame)+" "+play_runtime::describe(ctx.Rip)).c_str());
                     DWORD64 base=0;auto fn=RtlLookupFunctionEntry(ctx.Rip,&base,nullptr);
                     if(fn){void* handler=nullptr;DWORD64 establisher=0;RtlVirtualUnwind(UNW_FLAG_NHANDLER,base,ctx.Rip,fn,&ctx,&handler,&establisher,nullptr);}
                     else{if(!ctx.Rsp)break;ctx.Rip=*(DWORD64*)ctx.Rsp;ctx.Rsp+=8;}
                 }
             }
-            ResumeThread(r->worker);
+            ResumeThread(thread);
+        };
+        if(GetEnvironmentVariableW(L"PRUN_STACKS",nullptr,0)&&r->worker&&!r->finished.load()) dump(r->worker,"guest main thread",24);
+        wchar_t stacks[8]{};
+        if(GetEnvironmentVariableW(L"PRUN_STACKS",stacks,8)&&!wcscmp(stacks,L"all")) {
+            // Toolhelp is outside the UWP SDK partition; resolve it from kernel32.
+            struct ThreadEntry {DWORD dwSize,cntUsage,th32ThreadID,th32OwnerProcessID;LONG tpBasePri,tpDeltaPri;DWORD dwFlags;};
+            using Snapshot=HANDLE(WINAPI*)(DWORD,DWORD);using Walk=BOOL(WINAPI*)(HANDLE,ThreadEntry*);
+            HMODULE k32=GetModuleHandleW(L"kernel32.dll");
+            auto snapshot=(Snapshot)GetProcAddress(k32,"CreateToolhelp32Snapshot");
+            auto first=(Walk)GetProcAddress(k32,"Thread32First"),next=(Walk)GetProcAddress(k32,"Thread32Next");
+            HANDLE snap=snapshot?snapshot(0x4/*TH32CS_SNAPTHREAD*/,0):INVALID_HANDLE_VALUE;ThreadEntry te{sizeof te};
+            DWORD self=GetCurrentThreadId(),worker=r->worker?GetThreadId(r->worker):0;
+            for(BOOL ok=snap!=INVALID_HANDLE_VALUE&&first&&next&&first(snap,&te);ok;ok=next(snap,&te)) {
+                if(te.th32OwnerProcessID!=GetCurrentProcessId()||te.th32ThreadID==self||te.th32ThreadID==worker)continue;
+                if(HANDLE t=OpenThread(THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_QUERY_INFORMATION,FALSE,te.th32ThreadID)){dump(t,"thread "+std::to_string(te.th32ThreadID),12);CloseHandle(t);}
+            }
+            if(snap!=INVALID_HANDLE_VALUE)CloseHandle(snap);
         }
     } else if(r->worker)WaitForSingleObject(r->worker,2000);
     auto last=r->snapshot();char summary[8192];snprintf(summary,sizeof summary,"PLAY-TEST executed=%d finished=%d success=%d code=%lu last=%s",int(r->executed),int(r->finished),r->success,r->code,last.c_str());

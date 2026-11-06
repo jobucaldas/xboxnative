@@ -85,10 +85,26 @@ extern "C" HWND WINAPI c_GetParent(HWND h){return (HWND)c_GetWindowLongPtrW(h,GW
 extern "C" BOOL WINAPI c_IsIconic(HWND h){return (c_GetWindowLongW(h,GWL_STYLE)&WS_MINIMIZE)!=0;}
 extern "C" BOOL WINAPI c_IsWindowVisible(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);for(unsigned depth=0;h&&depth<4096;++depth){auto w=window(h);if(!w||!(w->style&WS_VISIBLE))return FALSE;if(!(w->style&WS_CHILD))return TRUE;h=w->parent;}return FALSE;}
 extern "C" BOOL WINAPI c_ShowWindow(HWND h,int cmd){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w)return FALSE;BOOL old=(w->style&WS_VISIBLE)!=0;if(cmd==SW_HIDE)w->style&=~WS_VISIBLE;else w->style|=WS_VISIBLE;if(cmd==SW_MINIMIZE||cmd==SW_SHOWMINIMIZED)w->style|=WS_MINIMIZE;if(cmd==SW_RESTORE)w->style&=~(WS_MINIMIZE|WS_MAXIMIZE);return old;}
-extern "C" BOOL WINAPI c_GetClientRect(HWND h,RECT* r){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!r)return FALSE;*r={0,0,w->cx,w->cy};return TRUE;}
-static bool origin(HWND h,LONG& x,LONG& y){for(unsigned depth=0;h&&depth<4096;++depth){auto w=window(h);if(!w)return false;x+=w->x;y+=w->y;if(!(w->style&WS_CHILD))return true;h=w->parent;}return !h;}
-extern "C" BOOL WINAPI c_ClientToScreen(HWND h,POINT* p){std::lock_guard<std::recursive_mutex> l(mutex);if(!p)return FALSE;LONG x=0,y=0;if(!origin(h,x,y))return FALSE;p->x+=x;p->y+=y;return TRUE;}
-extern "C" BOOL WINAPI c_ScreenToClient(HWND h,POINT* p){std::lock_guard<std::recursive_mutex> l(mutex);if(!p)return FALSE;LONG x=0,y=0;if(!origin(h,x,y))return FALSE;p->x-=x;p->y-=y;return TRUE;}
+// The nonclient frame a window's style implies, exactly what AdjustWindowRectEx
+// adds (a top-level window with an HMENU id has a menu bar): the client area is
+// the window rect minus it, as on Windows. Games size their window as
+// "client + frame" and expect GetClientRect/WM_SIZE to give the client back.
+extern "C" BOOL WINAPI c_AdjustWindowRectEx(RECT* r,DWORD style,BOOL menu,DWORD ex);
+static RECT frame(const Window* w){RECT r{};c_AdjustWindowRectEx(&r,w->style,!(w->style&WS_CHILD)&&w->id,w->ex);return {-r.left,-r.top,r.right,r.bottom};}
+static LONG clientWidth(const Window* w){RECT f=frame(w);return std::max<LONG>(0,w->cx-f.left-f.right);}
+static LONG clientHeight(const Window* w){RECT f=frame(w);return std::max<LONG>(0,w->cy-f.top-f.bottom);}
+extern "C" BOOL WINAPI c_GetClientRect(HWND h,RECT* r){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!r)return FALSE;*r={0,0,clientWidth(w),clientHeight(w)};return TRUE;}
+// Window origin in screen coordinates: a child's position is relative to its
+// parent's client area. `client` adds this window's own frame.
+static bool origin(HWND h,LONG& x,LONG& y,bool client=false,unsigned depth=0){
+ auto w=window(h);if(!w||depth>=4096)return false;
+ if((w->style&WS_CHILD)&&w->parent&&!origin(w->parent,x,y,true,depth+1))return false;
+ x+=w->x;y+=w->y;
+ if(client){RECT f=frame(w);x+=f.left;y+=f.top;}
+ return true;
+}
+extern "C" BOOL WINAPI c_ClientToScreen(HWND h,POINT* p){std::lock_guard<std::recursive_mutex> l(mutex);if(!p)return FALSE;LONG x=0,y=0;if(!origin(h,x,y,true))return FALSE;p->x+=x;p->y+=y;return TRUE;}
+extern "C" BOOL WINAPI c_ScreenToClient(HWND h,POINT* p){std::lock_guard<std::recursive_mutex> l(mutex);if(!p)return FALSE;LONG x=0,y=0;if(!origin(h,x,y,true))return FALSE;p->x-=x;p->y-=y;return TRUE;}
 extern "C" BOOL WINAPI c_GetWindowRect(HWND h,RECT* r){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!r)return FALSE;LONG x=0,y=0;if(!origin(h,x,y))return FALSE;*r={x,y,x+w->cx,y+w->cy};return TRUE;}
 static LRESULT sendRaw(HWND h,UINT m,WPARAM w,LPARAM p){std::lock_guard<std::recursive_mutex> l(mutex);auto v=window(h);if(!v)return 0;if(v->thread!=GetCurrentThreadId()){SetLastError(ERROR_NOT_SUPPORTED);return 0;}return v->proc(h,m,w,p);}
 static bool ansiWindow(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);auto v=window(h);return v&&v->cls&&v->cls->ansi;}
@@ -126,7 +142,7 @@ extern "C" HWND WINAPI c_GetDlgItem(HWND h,int id){std::lock_guard<std::recursiv
 extern "C" LRESULT WINAPI c_SendDlgItemMessageW(HWND h,int id,UINT m,WPARAM w,LPARAM p){return c_SendMessageW(c_GetDlgItem(h,id),m,w,p);}
 extern "C" BOOL WINAPI c_SetWindowTextW(HWND h,LPCWSTR s){return (BOOL)c_SendMessageW(h,WM_SETTEXT,0,(LPARAM)s);}
 extern "C" BOOL WINAPI c_SetDlgItemTextW(HWND h,int id,LPCWSTR s){return c_SetWindowTextW(c_GetDlgItem(h,id),s);}
-extern "C" BOOL WINAPI c_MoveWindow(HWND h,int x,int y,int cx,int cy,BOOL){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w)return FALSE;w->x=x;w->y=y;w->cx=std::max(0,cx);w->cy=std::max(0,cy);w->proc(h,WM_MOVE,0,MAKELPARAM(x,y));if(w->alive)w->proc(h,WM_SIZE,SIZE_RESTORED,MAKELPARAM(w->cx,w->cy));return TRUE;}
+extern "C" BOOL WINAPI c_MoveWindow(HWND h,int x,int y,int cx,int cy,BOOL){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w)return FALSE;w->x=x;w->y=y;w->cx=std::max(0,cx);w->cy=std::max(0,cy);w->proc(h,WM_MOVE,0,MAKELPARAM(x,y));if(w->alive)w->proc(h,WM_SIZE,SIZE_RESTORED,MAKELPARAM(clientWidth(w),clientHeight(w)));return TRUE;}
 extern "C" BOOL WINAPI c_InflateRect(RECT* r,int x,int y){if(!r)return FALSE;r->left-=x;r->top-=y;r->right+=x;r->bottom+=y;return TRUE;}
 extern "C" BOOL WINAPI c_UnionRect(RECT* d,const RECT* a,const RECT* b){if(!d||!a||!b)return FALSE;RECT x=*a,y=*b;if(c_IsRectEmpty(&x)){*d=c_IsRectEmpty(&y)?RECT{}:y;}else if(c_IsRectEmpty(&y))*d=x;else *d={std::min(x.left,y.left),std::min(x.top,y.top),std::max(x.right,y.right),std::max(x.bottom,y.bottom)};return !c_IsRectEmpty(d);}
 // One virtual desktop/monitor record. Dimensions are supplied by the launcher;
@@ -406,7 +422,7 @@ extern "C" BOOL WINAPI c_SetWindowPos(HWND h,HWND,int x,int y,int cx,int cy,UINT
  if(flags&SWP_HIDEWINDOW)w->style&=~WS_VISIBLE;
  // No z-order tracking (insertAfter ignored), same limitation as EnumWindows.
  if(moved&&w->alive)w->proc(h,WM_MOVE,0,MAKELPARAM(nx,ny));
- if(sized&&w->alive)w->proc(h,WM_SIZE,SIZE_RESTORED,MAKELPARAM(ncx,ncy));
+ if(sized&&w->alive)w->proc(h,WM_SIZE,SIZE_RESTORED,MAKELPARAM(clientWidth(w),clientHeight(w)));
  return TRUE;
 }
 extern "C" BOOL WINAPI c_ValidateRect(HWND h,const RECT*){std::lock_guard<std::recursive_mutex> l(mutex);return window(h)!=nullptr;} // no invalid-region tracking: nothing to validate, trivially honest.

@@ -12,6 +12,7 @@
 #include <intrin.h>
 #include "play_graphics.h"
 #include "../../uwph/vcruntime/route.h"
+#include "steam_app_ticket.h"
 namespace play_runtime {
 constexpr DWORD missingException=0xe0520001, exitException=0xe0520002;
 struct Module {
@@ -82,7 +83,7 @@ static Module* named(const std::wstring& name) {
 static bool exists(const std::wstring& path) { DWORD a=GetFileAttributesW(path.c_str()); return a!=INVALID_FILE_ATTRIBUTES && !(a&FILE_ATTRIBUTE_DIRECTORY); }
 #include "../../uwph/kernel32/guest_loader_search.h"
 static uintptr_t resolve(const char*,const char*,WORD);
-static Module* map(const std::wstring& path);
+static Module* map(const std::wstring& path,const std::string& asKey={},wxl::Resolver resolver=nullptr);
 static bool initialize(Module&);
 static bool initializePending();
 static std::string describe(uintptr_t);
@@ -188,8 +189,12 @@ static HMODULE WINAPI moduleW(LPCWSTR name) {
 // launcher has staged one after its ownership check, a guest load of
 // steamclient64.dll (SteamStub's locator, the game's own steam_api64) maps
 // that file. Without one, steamclient64.dll stays refused (item 36).
-static std::wstring steamClient;
-static void set_steam_client(const std::wstring& path) { steamClient=path; }
+static std::wstring steamClient, steamClientSigned;
+// `signedClient` is Valve's own signed steamclient64.dll, fetched from Valve
+// (never shipped), for games whose Steam DRM wrapper checks the client's
+// signature; see signedClientModule().
+static void set_steam_client(const std::wstring& path,const std::wstring& signedClient={}) { steamClient=path; steamClientSigned=signedClient; }
+static Module* signedClientModule();
 // The environment Steam's client locator reads, as Steam itself (and gbe_fork's
 // loader) publishes it: HKCU\Software\Valve\Steam\ActiveProcess with this
 // process as the client (pid), the client DLL path, the universe and the
@@ -236,6 +241,12 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
             SetLastError(ERROR_MOD_NOT_FOUND);return nullptr;
         }
         if(flags&~(LOAD_WITH_ALTERED_SEARCH_PATH|LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)) {SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
+        if(!steamClientSigned.empty()) {
+            auto client=signedClientModule();
+            if(!client) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
+            if(!initializePending()) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
+            ++client->references;return (HMODULE)client->image.base;
+        }
         requested=steamClient;flags=0;
         state->event("steamclient64.dll served by the staged emulated Steam client (owned game)");
     }
@@ -519,12 +530,12 @@ static wxl::Carrier carrier() {
 // the game's own file on disk is never modified. Set before start().
 static std::wstring steamProvider;
 static void set_steam_provider(const std::wstring& path) { steamProvider=path; }
-static Module* map(const std::wstring& requested) {
-    if(auto m=named(requested)) return m->mappingFailed?nullptr:m;
+static Module* map(const std::wstring& requested,const std::string& asKey,wxl::Resolver resolver) {
+    if(auto m=named(asKey.empty()?requested:wide(asKey.c_str()))) return m->mappingFailed?nullptr:m;
     const bool provided=basename(requested)=="steam_api64.dll" && !steamProvider.empty();
     const std::wstring& path=provided?steamProvider:requested;
     if(state->modules.size()>=128) {state->event("loader module capacity exceeded");return nullptr;}
-    auto own=std::make_unique<Module>();auto m=own.get();m->path=path;m->key=basename(path);state->modules.push_back(std::move(own));state->moduleCount=int(state->modules.size());
+    auto own=std::make_unique<Module>();auto m=own.get();m->path=path;m->key=asKey.empty()?basename(path):asKey;state->modules.push_back(std::move(own));state->moduleCount=int(state->modules.size());
     // Publish before fixing imports; circular imports can use the copied export
     // table, but no initialization runs until the complete graph is mapped.
     mlp::assets[m->key]=&m->image;
@@ -532,13 +543,121 @@ static Module* map(const std::wstring& requested) {
     if(provided) state->event("steam_api64.dll served by the configured Steam API provider; the game's file is unchanged");
     else if(m->key=="steam_api64.dll") state->event("steam_api64.dll is the game's original file, mapped unmodified; no Steam client, so SteamAPI_Init is expected to fail (item 36)");
     struct ImportScope {ImportScope(){++mappingImports;} ~ImportScope(){--mappingImports;}} imports;
-    if(!wxl::run(path.c_str(),state->log,&m->image,resolve,wxl::LoadConfig::msvc_x64)) {
+    if(!wxl::run(path.c_str(),state->log,&m->image,resolver?resolver:resolve,wxl::LoadConfig::msvc_x64)) {
         // Withdraw the early publication: a failed image's export table must
         // never satisfy another import (it is never protected or initialized).
         mlp::assets.erase(m->key);
         m->mappingFailed=true;state->event("mapping failed: "+m->key+"; guest initialization blocked; "+state->snapshot());return nullptr;
     }
     m->mapped=true;++state->mappedCount;state->order.push_back(m);return m;
+}
+// Steam's DRM wrapper (SteamStub) finds the module that provides
+// steamclient64.dll!CreateInterface, reads that module's file and verifies
+// Valve's signature over it. As Proton does, the module the guest sees is then
+// Valve's genuine signed steamclient64.dll, mapped from its own unmodified
+// file. None of its code runs: its imports bind to a refusal, it gets no TLS
+// or DllMain, and each export entry is overwritten in memory with a jump to
+// the emulated client's export of the same name. Every Steam call is answered
+// by the emulated client, as without the wrapper. Nothing is patched on disk,
+// and the game's own wrapper code is untouched.
+// The Steam DRM wrapper then asks the client for the account's app ownership
+// ticket and verifies Valve's signature over it. The emulated client cannot
+// sign one, so ISteamClient (versions 012-021, where slot 12 is
+// GetISteamGenericInterface) is handed out through a forwarding wrapper whose
+// STEAMAPPTICKET_INTERFACE_VERSION001 serves the genuine ticket the launcher
+// obtained from Steam for the signed-in owner. Without one it answers no
+// ticket, and the wrapper fails as on Windows without ownership.
+static std::string appTicket;
+static void set_app_ticket(const std::string& ticket) { appTicket=ticket; }
+static uint32_t ticketData(void*,uint32_t appid,void* buffer,uint32_t capacity,uint32_t* appidOffset,uint32_t* steamidOffset,uint32_t* signatureOffset,uint32_t* signatureSize) {
+    uint32_t size=steam_app_ticket::copy(appTicket,appid,buffer,capacity,appidOffset,steamidOffset,signatureOffset,signatureSize);
+    state->event(size?"app ownership ticket for app "+std::to_string(appid)+" served: the genuine one Steam issued to the signed-in owner"
+                     :"no app ownership ticket for app "+std::to_string(appid)+" (not owned, offline, or not requested)");
+    return size;
+}
+static void* ticketVtable[]={(void*)&ticketData};
+static struct {void** vtable;} ticketInterface{ticketVtable};
+struct ClientWrapper {void** vtable;void* inner;};
+using ClientMethod=uintptr_t(*)(void*,uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t);
+// Integer/pointer arguments pass through unchanged (no ISteamClient method
+// takes floating-point arguments); extra slots read the caller's own frame.
+template<size_t I> static uintptr_t clientForward(ClientWrapper* w,uintptr_t a,uintptr_t b,uintptr_t c,uintptr_t d,uintptr_t e,uintptr_t f,uintptr_t g) {
+    return ((ClientMethod)(*(void***)w->inner)[I])(w->inner,a,b,c,d,e,f,g);
+}
+static void* clientGenericInterface(ClientWrapper* w,uintptr_t user,uintptr_t pipe,const char* version) {
+    if(version&&!strcmp(version,"STEAMAPPTICKET_INTERFACE_VERSION001")) return &ticketInterface;
+    return (void*)clientForward<12>(w,user,pipe,(uintptr_t)version,0,0,0,0);
+}
+template<size_t... I> static std::array<void*,sizeof...(I)> clientTable(std::index_sequence<I...>) {
+    return {{(I==12?(void*)&clientGenericInterface:(void*)&clientForward<I>)...}};
+}
+static auto clientVtable=clientTable(std::make_index_sequence<40>());
+using ClientCreate=void*(*)(const char*,int*);
+static ClientCreate emulatedCreate;
+static void* clientCreateInterface(const char* version,int* result) {
+    void* inner=emulatedCreate(version,result);
+    if(!inner||!version||strncmp(version,"SteamClient",11)) return inner;
+    int n=atoi(version+11);
+    if(n<12||n>21) return inner;
+    std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
+    static std::vector<std::unique_ptr<ClientWrapper>> wrappers;
+    for(auto& w:wrappers) if(w->inner==inner) return w.get();
+    wrappers.push_back(std::make_unique<ClientWrapper>(ClientWrapper{clientVtable.data(),inner}));
+    return wrappers.back().get();
+}
+static void signedClientCode() {
+    state->event("Valve steamclient64.dll code reached outside its redirected exports; refused");
+    RaiseException(missingException,EXCEPTION_NONCONTINUABLE,0,nullptr);
+}
+static uintptr_t signedClientImport(const char*,const char*,WORD) { return (uintptr_t)&signedClientCode; }
+static bool redirectExports(Module& client,Module& emulated) {
+    auto& image=client.image;
+    auto nt=(IMAGE_NT_HEADERS64*)(image.base+((IMAGE_DOS_HEADER*)image.base)->e_lfanew);
+    auto dir=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if(!image.valid(dir.VirtualAddress,dir.Size)||dir.Size<sizeof(IMAGE_EXPORT_DIRECTORY))return false;
+    auto e=(IMAGE_EXPORT_DIRECTORY*)(image.base+dir.VirtualAddress);
+    if(!image.valid(e->AddressOfNames,size_t(e->NumberOfNames)*4)||!image.valid(e->AddressOfNameOrdinals,size_t(e->NumberOfNames)*2)||
+       !image.valid(e->AddressOfFunctions,size_t(e->NumberOfFunctions)*4))return false;
+    auto functions=(DWORD*)(image.base+e->AddressOfFunctions);
+    // Every entry must be code with room for the 14-byte jump before the next
+    // entry; otherwise this client build is refused rather than half-redirected.
+    std::vector<DWORD> starts(functions,functions+e->NumberOfFunctions);std::sort(starts.begin(),starts.end());
+    auto section=IMAGE_FIRST_SECTION(nt);
+    auto code=[&](DWORD rva){for(WORD i=0;i<nt->FileHeader.NumberOfSections;++i){auto& sh=section[i];
+        if(rva>=sh.VirtualAddress&&rva-sh.VirtualAddress<sh.Misc.VirtualSize)return (sh.Characteristics&IMAGE_SCN_MEM_EXECUTE)!=0;}return false;};
+    unsigned redirected=0,missing=0;
+    for(DWORD i=0;i<e->NumberOfNames;++i) {
+        auto name=image.str(((DWORD*)(image.base+e->AddressOfNames))[i]);
+        WORD index=((WORD*)(image.base+e->AddressOfNameOrdinals))[i];
+        if(!name||index>=e->NumberOfFunctions)return false;
+        DWORD rva=functions[index];
+        auto next=std::upper_bound(starts.begin(),starts.end(),rva);
+        if(!code(rva)||(next!=starts.end()&&*next-rva<14)||!image.valid(rva,14)) {state->event(std::string("Valve client export not redirectable: ")+name);return false;}
+        uintptr_t target=exported(emulated,name,0);
+        if(target&&!strcmp(name,"CreateInterface")) {emulatedCreate=(ClientCreate)target;target=(uintptr_t)&clientCreateInterface;}
+        if(!target) {target=(uintptr_t)&signedClientCode;++missing;state->event(std::string("emulated client lacks ")+name+"; Valve's entry refuses");}
+        BYTE jump[14]={0xff,0x25,0,0,0,0};memcpy(jump+6,&target,8);   // jmp [rip+0]; dq target
+        DWORD old=0;auto at=image.base+rva;
+        if(!VirtualProtect(at,sizeof jump,PAGE_EXECUTE_READWRITE,&old))return false;
+        memcpy(at,jump,sizeof jump);VirtualProtect(at,sizeof jump,old,&old);++redirected;
+    }
+    FlushInstructionCache(GetCurrentProcess(),image.base,image.size);
+    state->event("Valve's signed steamclient64.dll mapped unmodified from its file; "+std::to_string(redirected)+
+                 " exports answered by the emulated client ("+std::to_string(missing)+" refused)");
+    return true;
+}
+static Module* signedClientModule() {
+    if(auto m=named(L"steamclient64.dll")) return m->mappingFailed?nullptr:m;
+    auto emulated=map(steamClient,"steamclient64-emulated.dll");
+    if(!emulated) return nullptr;
+    state->event("steamclient64.dll: emulated Steam client for an owned game, behind Valve's signed client");
+    auto client=map(steamClientSigned,"steamclient64.dll",signedClientImport);
+    if(!client) return nullptr;
+    if(!redirectExports(*client,*emulated)) {client->mappingFailed=true;mlp::assets.erase(client->key);state->event("Valve client redirection failed");return nullptr;}
+    // Valve's code never runs: no TLS index, unwind data or DllMain.
+    client->prepared=true;client->initialized=true;client->pinned=true;
+    client->dependencies.push_back(emulated);emulated->pinned=true;
+    return client;
 }
 static bool prepare(Module& m) {
     if(m.prepared) return true;
@@ -666,7 +785,7 @@ static HRESULT WINAPI createDevice(IDXGIAdapter* adapter,D3D_DRIVER_TYPE type,HM
     HRESULT hr=fn(real?real:adapter,type,software,flags,levels,count,version,device,level,context);
     if(real)real->Release();
     char b[160];snprintf(b,sizeof b,"guest D3D11CreateDevice returned hr=0x%08lx device=%p",(unsigned long)hr,device?*device:nullptr);state->event(b);
-    if(SUCCEEDED(hr)&&device&&*device)state->milestone=2;return hr;
+    if(SUCCEEDED(hr)&&device&&*device){play_graphics::adopt_device(*device);state->milestone=2;}return hr;
 }
 // Until a real modal UI bridge exists, retain fatal game diagnostics and stop.
 // Never return a fabricated button selection that would advance startup.
@@ -728,7 +847,7 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // without the DLL. steam_api64.dll resolves from the game's own file below.
     if(key=="steamclient64.dll") {
         if(steamClient.empty()) return missing(dll,name,ordinal);
-        auto client=named(steamClient);
+        auto client=steamClientSigned.empty()?named(steamClient):signedClientModule();
         if(!client) client=map(steamClient);
         if(!client||client->mappingFailed) return missing(dll,name,ordinal);
         auto p=exported(*client,name,ordinal);return p?p:missing(dll,name,ordinal);

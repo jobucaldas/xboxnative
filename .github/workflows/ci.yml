@@ -26,6 +26,7 @@ jobs:
           python3 -I src/tools/tests/test_source_layout.py
           bash src/xbox-test/app/tests/session-restore.sh
           bash src/xbox-test/app/tests/launch-status.sh
+          bash src/xbox-test/app/tests/steam-app-ticket.sh
           python3 -I src/xbox-test/app/tests/launch-result-test.py
           python3 -I src/xbox-test/tools/tests/test_play_test_transport.py
           python3 -m unittest src/xbox-test/app/tests/test_store_badge.py
