@@ -42,7 +42,7 @@ this lane does not implement that loader integration or claim Unity tolerance.
 Xbox controller support continues to belong to the existing gamepad path.
 
 Actual Xbox Series S verification: [LocalState evidence](console-evidence.log),
-`Joao.XboxSteam.Hid_0.1.0.0_x64__dk715arakrne0`, PID 6096. All 20 symbols
+`Joao.XboxSteam.Hid_0.1.0.0_x64__0bdeywx3x8szp`, PID 6096. All 20 symbols
 logged and 23 checks passed, ending `HID-STUB-OK symbols=20 checks=23` and
 `HID RESULT failures=0`. A prelaunch process list had no HID process; the
 postlaunch list matched PID 6096. Inherited kernel checks and 300 native D3D11

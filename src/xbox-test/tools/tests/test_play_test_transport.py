@@ -121,7 +121,7 @@ class PlayRunnerTransportTest(unittest.TestCase):
         cfg.setdefault('app', 'ok'); cfg['appid'] = APP
         (self.root / 'fake.json').write_text(json.dumps(cfg))
         env = {k: v for k, v in os.environ.items() if not k.startswith(('DP_', 'PT_'))}
-        env.update(FAKE_ROOT=str(self.root), PKG='Grok.XboxTest_0.0.0.0_x64__fake',
+        env.update(FAKE_ROOT=str(self.root), PKG='Xboxnative.Launcher_0.0.0.0_x64__fake',
                    DP_HOST='invalid.invalid', DP_LOCK=str(self.root / 'lock'),
                    PATH=str(self.root / 'bin') + os.pathsep + env.get('PATH', ''))
         p = subprocess.run(['bash', str(self.root / 'tools/play-test.sh'), str(APP), str(timeout_s),

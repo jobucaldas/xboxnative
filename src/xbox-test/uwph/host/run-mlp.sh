@@ -5,8 +5,8 @@ root=$(cd "$(dirname "$0")/../../../.." && pwd)
 cd "$root"
 dp="$root/src/xbox-test/dp"
 runs=${MLP_RUNS:-/workspace/x64-run/runs/mlp}
-full=Joao.XboxSteam.Mlp_0.1.32.0_x64__dk715arakrne0
-rid='Joao.XboxSteam.Mlp_dk715arakrne0!App'
+full=Joao.XboxSteam.Mlp_0.1.32.0_x64__0bdeywx3x8szp
+rid='Joao.XboxSteam.Mlp_0bdeywx3x8szp!App'
 mkdir -p "$runs"
 exec 9>/workspace/x64-run/CONSOLE.lock
 flock -w "${MLP_LOCK_WAIT:-600}" 9
