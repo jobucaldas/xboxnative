@@ -1,5 +1,6 @@
 #pragma once
 #include <dxgi1_2.h>
+#include <atomic>
 #include "../../shared/corewindow_factory.h"
 
 // Play's guest HWNDs belong to the user32 record registry. Only this checked
@@ -14,10 +15,14 @@ static void configure(IUnknown* window,corewindow_dxgi::PresentSurface create,
     if(hostWindow)hostWindow->Release();
     hostWindow=window;createSurface=create;event=logger;
 }
+// The guest window most recently bound to the CoreWindow; keyboard and mouse
+// fall back to it when the game never sets focus or foreground itself.
+static std::atomic<HWND> presented{nullptr};
 static IUnknown* lookup(HWND window) {
     using Valid=BOOL(WINAPI*)(HWND);
     auto valid=(Valid)user32_core::resolve("user32.dll","IsWindow");
     if(!hostWindow || !valid || !valid(window))return nullptr;
+    presented.store(window,std::memory_order_release);
     hostWindow->AddRef();return hostWindow;
 }
 static void result(HRESULT hr) {
