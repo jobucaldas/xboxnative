@@ -36,8 +36,10 @@ struct Exports {
 
 // Xbox delivers controller and navigation input as virtual keys as well; the
 // controller already reaches the guest through XInput/Windows.Gaming.Input.
-inline bool controller_key(unsigned vk) {
-    return (vk>=0x88&&vk<=0x8F) || (vk>=0xC3&&vk<=0xDA);
+// Keys synthesized by the shell carry no scan code; a physical keyboard
+// always reports one.
+inline bool controller_key(unsigned vk,unsigned scan) {
+    return scan==0 || (vk>=0x88&&vk<=0x8F) || (vk>=0xC3&&vk<=0xDA);
 }
 
 enum : unsigned { Left=MK_LBUTTON, Right=MK_RBUTTON, Middle=MK_MBUTTON, X1=MK_XBUTTON1, X2=MK_XBUTTON2 };
@@ -64,7 +66,7 @@ struct Feed {
 
     // One key transition. Returns false when the key is not for the guest.
     bool key(unsigned vk,unsigned scan,bool extended,bool pressed,unsigned repeats=1) {
-        if(!api.complete()||vk==0||vk>=down.size()||controller_key(vk))return false;
+        if(!api.complete()||vk==0||vk>=down.size()||controller_key(vk,scan))return false;
         // CoreWindow reports generic modifiers; keep both sides as Windows does.
         unsigned side=vk;
         if(vk==VK_SHIFT)side=scan==0x36?VK_RSHIFT:VK_LSHIFT;

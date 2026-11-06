@@ -32,7 +32,9 @@ int main(int argc,char** argv) {
  CHECK(feed.key('Q',0x10,false,true));CHECK(async('Q')&0x8000);CHECK(empty());
  CHECK(feed.key('Q',0x10,false,false));CHECK(!(state('Q')&0x8000));
  // Controller keys from the Xbox shell never reach the guest.
- CHECK(!feed.key(0xC3,0,false,true));CHECK(!feed.key(0x8A,0,false,true));CHECK(!(state(0xC3)&0x8000));
+ CHECK(!feed.key(0xC3,0x01,false,true));CHECK(!feed.key(0x8A,0x01,false,true));CHECK(!(state(0xC3)&0x8000));
+ // Shell-synthesized keys (no scan code), e.g. Escape from a controller button, are not keyboard input.
+ CHECK(!feed.key(VK_ESCAPE,0,false,true));CHECK(!(state(VK_ESCAPE)&0x8000));
 
  WNDCLASSW cls{};cls.lpfnWndProc=proc;cls.lpszClassName=L"feed-test";cls.hInstance=GetModuleHandleW(nullptr);
  CHECK(api<decltype(&RegisterClassW)>("RegisterClassW")(&cls));
