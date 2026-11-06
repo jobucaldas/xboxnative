@@ -182,6 +182,9 @@ EXPORTS
  GetKeyboardLayoutNameA=c_GetKeyboardLayoutNameA
  RegisterDeviceNotificationA=c_RegisterDeviceNotificationA
  SendInput=c_SendInput
+ IsWindowUnicode=c_IsWindowUnicode
+ SetProcessDPIAware=c_SetProcessDPIAware
+ WindowFromDC=c_WindowFromDC
  UnregisterClassA=c_UnregisterClassA
  CreateWindowExA=c_CreateWindowExA
  RegisterWindowMessageW=c_RegisterWindowMessageW

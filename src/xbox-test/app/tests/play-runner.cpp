@@ -315,6 +315,12 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // Wine's C++ runtime beside the runner, as layout\runtime beside the launcher.
     {wchar_t self[32768];DWORD n=GetModuleFileNameW(nullptr,self,32768);std::wstring dir(self,n);
      play_runtime::set_runtime_directory(dir.substr(0,dir.find_last_of(L"\\/"))+L"\\runtime");}
+    // Optional emulated Steam client (owned game): served for steamclient64.dll,
+    // with the ActiveProcess registry environment in the guest registry.
+    {wchar_t client[1024];DWORD n=GetEnvironmentVariableW(L"PRUN_STEAM_CLIENT",client,1024);
+     if(n&&n<1024){std::wstring path(client,n);play_runtime::set_steam_client(path);
+      if(!play_runtime::seed_steam_client_registry(path,1)){logline("PRUN FAIL steam client registry");return 4;}
+      logline("PRUN steam client staged (off-device fixture account)");}}
     // Optional Steam API provider (owned game): mapped in place of steam_api64.dll.
     {wchar_t provider[1024];DWORD n=GetEnvironmentVariableW(L"PRUN_STEAM_PROVIDER",provider,1024);
      if(n&&n<1024)play_runtime::set_steam_provider(std::wstring(provider,n));}
@@ -331,6 +337,25 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         wchar_t seconds[16];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_SECONDS",seconds,16);
         DWORD limit=n&&n<16?DWORD(_wtoi(seconds)):10;
         host_surface::wait(r->worker,limit*1000);
+        // PRUN_STACKS=1: the guest main thread's stack at the time limit, as the
+        // launcher's cmd.txt "stacks" reports it (off-device diagnosis).
+        if(GetEnvironmentVariableW(L"PRUN_STACKS",nullptr,0)) {
+            DWORD alive=r->worker?WaitForSingleObject(r->worker,0):WAIT_FAILED;
+            logline(("STACK worker state wait="+std::to_string(alive)+" finished="+std::to_string(int(r->finished.load()))).c_str());
+        }
+        if(GetEnvironmentVariableW(L"PRUN_STACKS",nullptr,0)&&r->worker&&!r->finished.load()&&SuspendThread(r->worker)!=DWORD(-1)) {
+            CONTEXT ctx{};ctx.ContextFlags=CONTEXT_FULL;
+            if(GetThreadContext(r->worker,&ctx)) {
+                logline("STACK guest main thread");
+                for(int frame=0;frame<24&&ctx.Rip;++frame) {
+                    logline(("  #"+std::to_string(frame)+" "+play_runtime::describe(ctx.Rip)).c_str());
+                    DWORD64 base=0;auto fn=RtlLookupFunctionEntry(ctx.Rip,&base,nullptr);
+                    if(fn){void* handler=nullptr;DWORD64 establisher=0;RtlVirtualUnwind(UNW_FLAG_NHANDLER,base,ctx.Rip,fn,&ctx,&handler,&establisher,nullptr);}
+                    else{if(!ctx.Rsp)break;ctx.Rip=*(DWORD64*)ctx.Rsp;ctx.Rsp+=8;}
+                }
+            }
+            ResumeThread(r->worker);
+        }
     } else if(r->worker)WaitForSingleObject(r->worker,2000);
     auto last=r->snapshot();char summary[8192];snprintf(summary,sizeof summary,"PLAY-TEST executed=%d finished=%d success=%d code=%lu last=%s",int(r->executed),int(r->finished),r->success,r->code,last.c_str());
     logline(summary);

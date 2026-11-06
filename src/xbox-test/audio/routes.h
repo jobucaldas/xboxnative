@@ -10,7 +10,9 @@ static const char* const wave_symbols[]={
     "waveOutPrepareHeader","waveOutReset","waveOutUnprepareHeader","waveOutWrite",
     // gbe_fork (Steam API provider for owned games) imports these as well.
     "timeGetDevCaps","waveInGetErrorTextW","waveInMessage","waveOutGetErrorTextW",
-    "waveOutMessage","waveOutPause","waveOutRestart"
+    "waveOutMessage","waveOutPause","waveOutRestart",
+    // gbe_fork's emulated Steam client (SteamStub games) plays notification sounds.
+    "PlaySoundA","PlaySoundW"
 };
 constexpr unsigned wave_count=sizeof(wave_symbols)/sizeof(wave_symbols[0]);
 static const char* const com_symbols[]={

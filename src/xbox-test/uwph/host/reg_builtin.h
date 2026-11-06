@@ -382,6 +382,22 @@ static LONG WINAPI RegDeleteValueA(HKEY h,LPCSTR name) {
 static LONG WINAPI RegCreateKeyTransactedW(HKEY,LPCWSTR,DWORD,LPWSTR,DWORD,REGSAM,const SECURITY_ATTRIBUTES*,PHKEY,LPDWORD,HANDLE,PVOID) {
     return ERROR_INVALID_HANDLE;
 }
+// ANSI and legacy opens over the same keys (Steam's client locator reads
+// HKCU\Software\Valve\Steam\ActiveProcess through the ANSI API).
+static std::wstring wide_key(LPCSTR s) {
+    std::wstring w; if(!s) return w;
+    int c=MultiByteToWideChar(CP_ACP,0,s,-1,nullptr,0); if(c>0) { w.resize(c); MultiByteToWideChar(CP_ACP,0,s,-1,&w[0],c); w.resize(c-1); }
+    return w;
+}
+static LONG WINAPI RegOpenKeyExA(HKEY h,LPCSTR sub,DWORD options,REGSAM sam,PHKEY out) {
+    auto w=wide_key(sub); return regb::RegOpenKeyExW(h,sub?w.c_str():nullptr,options,sam,out);
+}
+static LONG WINAPI RegCreateKeyExA(HKEY h,LPCSTR sub,DWORD reserved,LPSTR,DWORD options,REGSAM sam,const SECURITY_ATTRIBUTES* sa,PHKEY out,LPDWORD disp) {
+    auto w=wide_key(sub); return regb::RegCreateKeyExW(h,sub?w.c_str():nullptr,reserved,nullptr,options,sam,sa,out,disp);
+}
+static LONG WINAPI RegOpenKeyW(HKEY h,LPCWSTR sub,PHKEY out) { return regb::RegOpenKeyExW(h,sub,0,KEY_ALL_ACCESS,out); }
+static LONG WINAPI RegOpenKeyA(HKEY h,LPCSTR sub,PHKEY out) { return regb::RegOpenKeyExA(h,sub,0,KEY_ALL_ACCESS,out); }
+static LONG WINAPI RegCreateKeyA(HKEY h,LPCSTR sub,PHKEY out) { auto w=wide_key(sub); return regb::RegCreateKeyW(h,sub?w.c_str():nullptr,out); }
 struct Export { const char* name; uintptr_t address; };
 static const Export exports[]={
     {"RegCreateKeyW",(uintptr_t)&RegCreateKeyW},{"RegCreateKeyExW",(uintptr_t)&RegCreateKeyExW},
@@ -389,6 +405,8 @@ static const Export exports[]={
     {"RegQueryValueExA",(uintptr_t)&RegQueryValueExA},{"RegQueryValueExW",(uintptr_t)&RegQueryValueExW},
     {"RegDeleteValueA",(uintptr_t)&RegDeleteValueA},{"RegOpenKeyExW",(uintptr_t)&RegOpenKeyExW},{"RegCloseKey",(uintptr_t)&RegCloseKey},
     {"RegCreateKeyTransactedW",(uintptr_t)&RegCreateKeyTransactedW},
+    {"RegOpenKeyExA",(uintptr_t)&RegOpenKeyExA},{"RegCreateKeyExA",(uintptr_t)&RegCreateKeyExA},
+    {"RegOpenKeyW",(uintptr_t)&RegOpenKeyW},{"RegOpenKeyA",(uintptr_t)&RegOpenKeyA},{"RegCreateKeyA",(uintptr_t)&RegCreateKeyA},
 };
 static uintptr_t lookup(const char* name) { for(auto& e:exports) if(!strcmp(e.name,name)) return e.address; return 0; }
 }

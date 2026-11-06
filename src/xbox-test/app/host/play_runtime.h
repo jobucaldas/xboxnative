@@ -158,6 +158,27 @@ static HMODULE WINAPI moduleW(LPCWSTR name) {
 }
 #include "../../uwph/kernel32/guest_module_filename.h"
 #include "../../uwph/kernel32/guest_loader_lifetime.h"
+// Emulated Steam client for an owned game (AGENTS.md rule 3): when the
+// launcher has staged one after its ownership check, a guest load of
+// steamclient64.dll (SteamStub's locator, the game's own steam_api64) maps
+// that file. Without one, steamclient64.dll stays refused (item 36).
+static std::wstring steamClient;
+static void set_steam_client(const std::wstring& path) { steamClient=path; }
+// The environment Steam's client locator reads, as Steam itself (and gbe_fork's
+// loader) publishes it: HKCU\Software\Valve\Steam\ActiveProcess with this
+// process as the client (pid), the client DLL path, the universe and the
+// signed-in account ID. It lives in the guest registry only.
+static bool seed_steam_client_registry(const std::wstring& client,DWORD accountId) {
+    HKEY key=nullptr;
+    if(regb::RegCreateKeyExW(HKEY_CURRENT_USER,L"Software\\Valve\\Steam\\ActiveProcess",0,nullptr,0,0,nullptr,&key,nullptr)!=ERROR_SUCCESS)return false;
+    DWORD pid=GetCurrentProcessId();
+    auto text=[&](LPCWSTR name,const std::wstring& value){return regb::RegSetValueExW(key,name,0,REG_SZ,(const BYTE*)value.c_str(),DWORD((value.size()+1)*sizeof(wchar_t)))==ERROR_SUCCESS;};
+    bool ok=regb::RegSetValueExW(key,L"pid",0,REG_DWORD,(const BYTE*)&pid,sizeof pid)==ERROR_SUCCESS&&
+        regb::RegSetValueExW(key,L"ActiveUser",0,REG_DWORD,(const BYTE*)&accountId,sizeof accountId)==ERROR_SUCCESS&&
+        text(L"SteamClientDll64",client)&&text(L"Universe",L"Public");
+    regb::RegCloseKey(key);
+    return ok;
+}
 static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     if(!name || file) {SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}
     constexpr DWORD knownFlags= DONT_RESOLVE_DLL_REFERENCES|LOAD_LIBRARY_AS_DATAFILE|
@@ -184,8 +205,13 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     // and its SteamAPI_Init fails naturally without a client.
     auto key=basename(requested);
     if(key=="steamclient64.dll") {
-        state->event("LoadLibrary refused name="+narrow(requested)+": no genuine Steam client (item 36)");
-        SetLastError(ERROR_MOD_NOT_FOUND);return nullptr;
+        if(steamClient.empty()) {
+            state->event("LoadLibrary refused name="+narrow(requested)+": no genuine Steam client (item 36)");
+            SetLastError(ERROR_MOD_NOT_FOUND);return nullptr;
+        }
+        if(flags&~(LOAD_WITH_ALTERED_SEARCH_PATH|LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)) {SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
+        requested=steamClient;flags=0;
+        state->event("steamclient64.dll served by the staged emulated Steam client (owned game)");
     }
     Module* m=nullptr;
     {std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
@@ -667,7 +693,13 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // Same client gate as LoadLibrary, for static and forwarded imports. Never
     // a callable Steam placeholder: the import stays unresolved, as on Windows
     // without the DLL. steam_api64.dll resolves from the game's own file below.
-    if(key=="steamclient64.dll") return missing(dll,name,ordinal);
+    if(key=="steamclient64.dll") {
+        if(steamClient.empty()) return missing(dll,name,ordinal);
+        auto client=named(steamClient);
+        if(!client) client=map(steamClient);
+        if(!client||client->mappingFailed) return missing(dll,name,ordinal);
+        auto p=exported(*client,name,ordinal);return p?p:missing(dll,name,ordinal);
+    }
     Module* owner=nullptr;
     // Current mapper is the last incomplete module; capture it before recursion.
     for(auto& m:state->modules) if(!m->mapped) owner=m.get();

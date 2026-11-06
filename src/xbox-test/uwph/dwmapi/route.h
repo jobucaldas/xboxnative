@@ -47,6 +47,23 @@ inline HRESULT WINAPI set_attribute(HWND window, DWORD, const void*, DWORD) {
     // Wine 10's unconditional S_OK is a stub, not a supported behavior to copy.
     return FAILED(result) ? result : E_NOTIMPL;
 }
+// Composition is always on since Windows 8 (DwmIsCompositionEnabled cannot be
+// FALSE there); answered without native DWM.
+inline HRESULT WINAPI is_composition_enabled(BOOL* enabled) {
+    if (!enabled) return E_INVALIDARG;
+    *enabled = TRUE;
+    return S_OK;
+}
+// No blur or frame effect exists for record windows.
+inline HRESULT WINAPI enable_blur_behind(HWND window, const void* blur) {
+    HRESULT result = validate(window);
+    if (FAILED(result)) return result;
+    return blur ? E_NOTIMPL : E_INVALIDARG;
+}
+// Window-free DWM queries that keep the real system export (no HWND reaches it).
+inline bool native_safe(const char* name) {
+    return name && (!strcmp(name, "DwmGetColorizationColor") || !strcmp(name, "DwmFlush"));
+}
 inline uintptr_t resolve(const char* dll, const char* name, IsWindow valid = nullptr,
                          WindowRect rect = nullptr, WindowLong style = nullptr) {
     if (!dll || !name || _stricmp(dll, "dwmapi.dll")) return 0;
@@ -55,6 +72,8 @@ inline uintptr_t resolve(const char* dll, const char* name, IsWindow valid = nul
     if (style) window_long = style;
     if (!strcmp(name, "DwmGetWindowAttribute")) return reinterpret_cast<uintptr_t>(&get_attribute);
     if (!strcmp(name, "DwmSetWindowAttribute")) return reinterpret_cast<uintptr_t>(&set_attribute);
+    if (!strcmp(name, "DwmIsCompositionEnabled")) return reinterpret_cast<uintptr_t>(&is_composition_enabled);
+    if (!strcmp(name, "DwmEnableBlurBehindWindow")) return reinterpret_cast<uintptr_t>(&enable_blur_behind);
     return 0;
 }
 }

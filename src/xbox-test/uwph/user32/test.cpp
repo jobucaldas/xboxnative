@@ -77,7 +77,9 @@ extern "C" DWORD WINAPI u32c_entry(){
   check(SendMessageA(ah,WM_GETTEXT,sizeof text,(LPARAM)text)==9&&!lstrcmpA(text,"ansi text"));
   char small[5]={};check(SendMessageA(ah,WM_GETTEXT,sizeof small,(LPARAM)small)==4&&!lstrcmpA(small,"ansi"));
   check(PostMessageA(ah,WM_USER+5,7,9));MSG am;check(PeekMessageA(&am,ah,WM_USER+5,WM_USER+5,PM_REMOVE)&&am.wParam==7&&am.lParam==9);
+  check(!IsWindowUnicode(ah));HDC adc=GetDC(ah);check(adc&&WindowFromDC(adc)==ah);ReleaseDC(ah,adc);check(!WindowFromDC(adc));
   check(DestroyWindow(ah));check(UnregisterClassA("u32cansi",0));}
+ check(SetProcessDPIAware()&&SetProcessDPIAware());
  POINT cp2; check(GetCursorPos(&cp2)&&cp2.x==960&&cp2.y==540);check(SetCursorPos(10,10)&&GetCursorPos(&cp2)&&cp2.x==10&&cp2.y==10);
  RECT clip{0,0,5,5};check(ClipCursor(&clip));check(GetCursorPos(&cp2)&&cp2.x==4&&cp2.y==4);check(ClipCursor(0));
  int shown=ShowCursor(TRUE);check(ShowCursor(FALSE)==shown-1);
