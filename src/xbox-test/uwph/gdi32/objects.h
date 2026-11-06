@@ -194,6 +194,9 @@ inline int get_object(HGDIOBJ h,int size,void* out,bool wide) {
         memcpy(out,&lb,sizeof lb);return sizeof lb;
     }
     case Kind::Font: {
+        // A font may be read partially (a prefix of LOGFONT), but never with a
+        // non-positive size.
+        if(out&&size<=0)return 0;
         if(wide){int n=std::min(size,int(sizeof(LOGFONTW)));if(!out)return sizeof(LOGFONTW);memcpy(out,&o->font,size_t(n));return n;}
         LOGFONTA a{};memcpy(&a,&o->font,offsetof(LOGFONTA,lfFaceName));
         WideCharToMultiByte(CP_ACP,0,o->font.lfFaceName,-1,a.lfFaceName,LF_FACESIZE,nullptr,nullptr);
