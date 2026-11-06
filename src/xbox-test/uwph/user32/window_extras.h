@@ -48,9 +48,7 @@ extern "C" LRESULT WINAPI c_DefWindowProcA(HWND h,UINT m,WPARAM w,LPARAM p){retu
 // An ANSI window's procedure receives ANSI text unchanged; a Unicode window's
 // receives it converted (Windows decides by the window procedure's class).
 extern "C" LRESULT WINAPI c_SendMessageA(HWND h,UINT m,WPARAM w,LPARAM p){
- bool ansiWindow=false;
- {std::lock_guard<std::recursive_mutex> l(mutex);if(auto v=window(h))ansiWindow=v->cls&&v->cls->ansi;}
- return ansiWindow?c_SendMessageW(h,m,w,p):ansiText(c_SendMessageW,h,m,w,p);
+ return ansiWindow(h)?sendRaw(h,m,w,p):ansiText(c_SendMessageW,h,m,w,p);
 }
 extern "C" BOOL WINAPI c_PostMessageA(HWND h,UINT m,WPARAM w,LPARAM p){return c_PostMessageW(h,m,w,p);} // posted payloads are scalar; WM_CHAR > 127 is refused by the W path
 extern "C" BOOL WINAPI c_GetKeyboardLayoutNameA(LPSTR name){if(!name)return FALSE;strcpy(name,"00000409");return TRUE;} // fixed en-US layout, as the W form

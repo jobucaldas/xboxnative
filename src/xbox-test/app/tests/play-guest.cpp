@@ -127,6 +127,22 @@ DWORD guest_exe_entry(){
         auto test=(int(*)())GetProcAddress(library,"native_cxx_test");
         return test?test():32;
     }
+    if(contains(GetCommandLineW(),L"shell-execute")) {
+        // Every ShellExecute form, statically linked or looked up on the
+        // native shell32 handle, is Play's refusal; nothing is launched.
+        auto shell=LoadLibraryW(L"shell32.dll");if(!shell)return 60;
+        using Execute=HINSTANCE(WINAPI*)(HWND,LPCWSTR,LPCWSTR,LPCWSTR,LPCWSTR,INT);
+        using ExecuteA=HINSTANCE(WINAPI*)(HWND,LPCSTR,LPCSTR,LPCSTR,LPCSTR,INT);
+        auto w=(Execute)GetProcAddress(shell,"ShellExecuteW");auto a=(ExecuteA)GetProcAddress(shell,"ShellExecuteA");
+        auto ex=(BOOL(WINAPI*)(void*))GetProcAddress(shell,"ShellExecuteExW");
+        if(!w||!a||!ex)return 61;
+        SetLastError(0);if((ULONG_PTR)w(nullptr,L"open",L"steam://run/1",nullptr,nullptr,1)>32||GetLastError()!=ERROR_NOT_SUPPORTED)return 62;
+        SetLastError(0);if((ULONG_PTR)a(nullptr,"open","play-guest.exe",nullptr,nullptr,1)>32||GetLastError()!=ERROR_NOT_SUPPORTED)return 63;
+        struct {DWORD size,mask;HWND window;const void* verb,*file,*parameters,*directory;int show;HINSTANCE instance;void* idList;const void* className;HKEY classKey;DWORD hotKey;HANDLE icon,process;} info{};
+        info.size=sizeof info;info.file=L"steam://run/1";info.process=(HANDLE)1;
+        SetLastError(0);if(ex(&info)||GetLastError()!=ERROR_NOT_SUPPORTED||info.process||(ULONG_PTR)info.instance>32)return 64;
+        return 42;
+    }
     if(contains(GetCommandLineW(),L"native-msvcp")) {
         auto library=LoadLibraryW(L"play-msvcp.dll");if(!library)return 31;
         auto test=(int(*)())GetProcAddress(library,"native_msvcp_test");

@@ -54,10 +54,9 @@ static const Symbol symbols[]={
     {"shell32.dll","SHFileOperationW"},
     {"shell32.dll","ShellExecuteExW"},
     // ANSI siblings of the entries above (Puyo Puyo Tetris 2 imports SHFileOperationA).
+    // ShellExecute* never reaches native shell32 in Play (play_runtime shellLaunch).
     {"shell32.dll","SHFileOperationA"},
     {"shell32.dll","SHGetFolderPathA"},
-    {"shell32.dll","ShellExecuteA"},
-    {"shell32.dll","ShellExecuteExA"},
     {"opengl32.dll","wglGetProcAddress"},
     {"opengl32.dll","wglDeleteContext"},
     {"opengl32.dll","wglMakeCurrent"},

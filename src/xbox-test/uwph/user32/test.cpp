@@ -76,6 +76,9 @@ extern "C" DWORD WINAPI u32c_entry(){
   check(SendMessageA(ah,WM_SETTEXT,0,(LPARAM)"ansi text"));char text[32]={};
   check(SendMessageA(ah,WM_GETTEXT,sizeof text,(LPARAM)text)==9&&!lstrcmpA(text,"ansi text"));
   char small[5]={};check(SendMessageA(ah,WM_GETTEXT,sizeof small,(LPARAM)small)==4&&!lstrcmpA(small,"ansi"));
+  check(SetWindowTextW(ah,L"wide text"));WCHAR wtext[32]={};check(SendMessageW(ah,WM_GETTEXT,32,(LPARAM)wtext)==9&&!lstrcmpW(wtext,L"wide text"));
+  check(SendMessageA(ah,WM_GETTEXT,sizeof text,(LPARAM)text)==9&&!lstrcmpA(text,"wide text"));
+  WCHAR wsmall[5]={};check(SendMessageW(ah,WM_GETTEXT,5,(LPARAM)wsmall)==4&&!lstrcmpW(wsmall,L"wide"));
   check(PostMessageA(ah,WM_USER+5,7,9));MSG am;check(PeekMessageA(&am,ah,WM_USER+5,WM_USER+5,PM_REMOVE)&&am.wParam==7&&am.lParam==9);
   check(DestroyWindow(ah));check(UnregisterClassA("u32cansi",0));}
  POINT cp2; check(GetCursorPos(&cp2)&&cp2.x==960&&cp2.y==540);check(SetCursorPos(10,10)&&GetCursorPos(&cp2)&&cp2.x==10&&cp2.y==10);
