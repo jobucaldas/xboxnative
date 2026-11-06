@@ -198,7 +198,11 @@ inline unsigned long long blockedReads=0;
 using GamepadRead=int32_t(__stdcall*)(void*,winrt::Windows::Gaming::Input::GamepadReading*);
 using RawRead=int32_t(__stdcall*)(void*,uint32_t,bool*,uint32_t,int32_t*,uint32_t,double*,uint64_t*);
 inline GamepadRead realGamepadRead=nullptr;inline RawRead realRawRead=nullptr;
-inline std::mutex rawM;inline std::vector<double> rawAxes;   // axes when the block began (stick rest differs per axis)
+// Raw axes have per-axis rest values (sticks 0.5, triggers 0): the last
+// reading taken while the pad was at rest (sticks centred, triggers up, no
+// buttons; reported by the launcher UI thread) is replayed while blocked.
+inline std::atomic<bool> padAtRest{false};
+inline std::mutex rawM;inline std::vector<double> rawAxes;
 inline bool blocking(){return inputBlocked.load(std::memory_order_relaxed)&&GetCurrentThreadId()!=uiThread;}
 inline int32_t __stdcall gamepad_read(void* self,winrt::Windows::Gaming::Input::GamepadReading* out) {
     int32_t hr=realGamepadRead(self,out);
@@ -207,19 +211,18 @@ inline int32_t __stdcall gamepad_read(void* self,winrt::Windows::Gaming::Input::
 }
 inline int32_t __stdcall raw_read(void* self,uint32_t nb,bool* b,uint32_t ns,int32_t* sw,uint32_t na,double* ax,uint64_t* ts) {
     int32_t hr=realRawRead(self,nb,b,ns,sw,na,ax,ts);
+    if(hr>=0&&ax&&!blocking()&&padAtRest.load(std::memory_order_relaxed)){std::lock_guard<std::mutex> l(rawM);rawAxes.assign(ax,ax+na);}
     if(hr>=0&&blocking()) {
         for(uint32_t i=0;b&&i<nb;++i)b[i]=false;
         for(uint32_t i=0;sw&&i<ns;++i)sw[i]=0;   // GameControllerSwitchPosition::Center
         std::lock_guard<std::mutex> l(rawM);
-        if(ax){if(rawAxes.size()!=na)rawAxes.assign(ax,ax+na);else for(uint32_t i=0;i<na;++i)ax[i]=rawAxes[i];}
+        // No rest reading yet: centred sticks (0.5) are the best neutral guess.
+        if(ax)for(uint32_t i=0;i<na;++i)ax[i]=rawAxes.size()==na?rawAxes[i]:0.5;
         ++blockedReads;
     }
     return hr;
 }
-inline void block_input(bool on){
-    if(!on){std::lock_guard<std::mutex> l(rawM);rawAxes.clear();}
-    inputBlocked=on;
-}
+inline void block_input(bool on){inputBlocked=on;}
 // IGamepad::GetCurrentReading is slot 8, IRawGameController::GetCurrentReading slot 13.
 inline bool install_input_block(const winrt::Windows::Gaming::Input::Gamepad& pad) {
     uiThread=GetCurrentThreadId();
