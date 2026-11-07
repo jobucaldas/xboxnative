@@ -46,6 +46,9 @@ lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-guest.exe" "$o
 lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-missing.exe" "$out/obj/missing.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$out/obj/missing.lib" /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libadvapi32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-steam.exe" "$out/obj/steam.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libadvapi32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-unresolved.dll" "$out/obj/unresolved.obj" "$out/obj/missing.lib" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+# EXE that reads its TLS through TEB slot 0, as MSVC /GA code does (no _tls_index).
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-slot0.cpp -o "$out/obj/slot0.obj"
+lld-link-19 /nodefaultlib /include:_tls_used /entry:slot0_exe_entry /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-slot0.exe" "$out/obj/slot0.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
 # A static import from a DLL whose own mapping fails must stay unresolved: the
 # failed image is never published to resolve the importer (never executed).
 # baselib.dll is a game-DLL (uwph-routed) name, the route Megabonk exercised.
@@ -113,12 +116,12 @@ llvm-readobj --coff-imports "$out/play-msvcp.dll" | grep -q 'Name: MSVCP140.dll'
 rm -f "$out/msvcp140.dll"
 rm -rf "$out/runtime";mkdir -p "$out/runtime";cp out/layout/runtime/*.dll "$out/runtime/"
 bash ../uwph/host/build-sqlite-lib.sh "$out/obj/sqlite3.lib"
-UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/play-runner.exe" tests/play-runner.cpp -- /MT /O2 /Iout/obj /I../uwph/host/third_party/sqlite
+UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/play-runner.exe" host/tls_slot0.cpp tests/play-runner.cpp -- /MT /O2 /Iout/obj /I../uwph/host/third_party/sqlite
 # Use the exact packaged carriers from the launcher build.
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
 # Owned stand-in so steam-client proves refusal of a present root client DLL.
 cp "$out/play-dependency.dll" "$out/steamclient64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -127,6 +130,9 @@ grep -q 'VCRT ROUTE vcruntime140.dll!__CxxFrameHandler3 found=1' "$out/native-vc
 grep -q 'VCRT ROUTE vcruntime140_1.dll!__CxxFrameHandler4 found=1' "$out/native-vcrt.log"
 if grep -q 'VCRT ROUTE .* found=0' "$out/native-vcrt.log";then exit 1;fi
 grep -q 'PRUN EVENT mapping msvcp140.dll' "$out/native-msvcp.log"
+# The /GA-style fixture got the launcher's slot 0, not a packaged carrier.
+grep -q 'PRUN EVENT TLS slot 0 for play-slot0.exe' "$out/slot0.log"
+if grep -q 'TLS slot 0 unavailable' "$out/slot0.log";then exit 1;fi
 grep -q 'PRUN OPTIONAL ShellExecuteExW refused' "$out/shell-execute.log"
 # Guest RWX (JIT) memory is emulated over W^X: pages flip RW<->RX on fault.
 grep -q 'RWX emulation: guest requested RWX' "$out/rwx-jit.log"
