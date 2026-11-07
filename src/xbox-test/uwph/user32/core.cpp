@@ -47,7 +47,7 @@ struct ClassW {UINT style;Proc proc;int clsExtra,wndExtra;HINSTANCE instance;HIC
 struct Create {void* param;HINSTANCE instance;HMENU menu;HWND parent;int cy,cx,y,x;LONG style;LPCWSTR title,name;DWORD ex;};
 static_assert(sizeof(ClassEx)==80 && sizeof(Create)==80,"Win64 ABI");
 struct Class {ClassEx info;std::wstring name,menu;ATOM atom;std::vector<BYTE> extra;bool ansi=false;}; // ansi: registered through RegisterClass(Ex)A
-struct Window {Class* cls;Proc proc;DWORD thread;bool alive=true,destroying=false,messageOnly=false;LONG_PTR user=0,id=0;HINSTANCE instance;HWND parent;LONG style,ex;int x,y,cx,cy;std::wstring title;std::vector<BYTE> extra;std::map<std::wstring,HANDLE> props;};
+struct Window {Class* cls;Proc proc;DWORD thread;bool alive=true,destroying=false,messageOnly=false;LONG_PTR user=0,id=0;HINSTANCE instance;HWND parent;LONG style,ex;int x,y,cx,cy;bool needSize=false;std::wstring title;std::vector<BYTE> extra;std::map<std::wstring,HANDLE> props;};
 static Window* desktop;
 static std::recursive_mutex mutex;
 static std::vector<std::unique_ptr<Class>> classes;
@@ -73,7 +73,8 @@ extern "C" BOOL WINAPI c_UnregisterClassW(LPCWSTR n,HINSTANCE i){std::lock_guard
 extern "C" BOOL WINAPI c_GetClassInfoExW(HINSTANCE i,LPCWSTR n,ClassEx* p){std::lock_guard<std::recursive_mutex> l(mutex);auto c=klass(n,i);if(!c||!p){SetLastError(ERROR_CLASS_DOES_NOT_EXIST);return FALSE;}*p=c->info;p->name=c->name.c_str();return TRUE;}
 extern "C" BOOL WINAPI c_DestroyWindow(HWND);
 extern "C" LRESULT WINAPI c_DefWindowProcW(HWND h,UINT m,WPARAM w,LPARAM p){std::lock_guard<std::recursive_mutex> l(mutex);auto v=window(h);if(!v)return 0;switch(m){case WM_NCCREATE:return TRUE;case WM_CLOSE:c_DestroyWindow(h);return 0;case WM_SETTEXT:v->title=p?(LPCWSTR)p:L"";return TRUE;case WM_GETTEXTLENGTH:return v->title.size();case WM_GETTEXT:if(!p||!w)return 0;{size_t n=std::min(size_t(w-1),v->title.size());memcpy((void*)p,v->title.data(),n*2);((WCHAR*)p)[n]=0;return n;}default:return 0;}}
-extern "C" HWND WINAPI c_CreateWindowExW(DWORD ex,LPCWSTR n,LPCWSTR title,DWORD style,int x,int y,int cx,int cy,HWND parent,HMENU menu,HINSTANCE i,void* param){std::lock_guard<std::recursive_mutex> l(mutex);auto c=klass(n,i);if(!c){SetLastError(ERROR_CANNOT_FIND_WND_CLASS);return nullptr;}bool messageOnly=parent==HWND_MESSAGE;if(messageOnly)parent=nullptr;if(parent&&!window(parent))return nullptr;if(windows.size()>=4096){SetLastError(ERROR_NOT_ENOUGH_MEMORY);return nullptr;}auto v=std::make_unique<Window>();v->cls=c;v->proc=c->info.proc;v->thread=GetCurrentThreadId();v->instance=i;v->parent=parent;v->messageOnly=messageOnly;v->id=(LONG_PTR)menu;v->style=style;v->ex=ex;v->x=x==CW_USEDEFAULT?0:x;v->y=y==CW_USEDEFAULT?0:y;v->cx=cx==CW_USEDEFAULT?640:std::max(0,cx);v->cy=cy==CW_USEDEFAULT?480:std::max(0,cy);v->title=title?title:L"";v->extra.resize(c->info.wndExtra);auto p=v.get();HWND h=(HWND)p;windows.push_back(std::move(v));Create cs{param,i,menu,parent,cy,cx,y,x,(LONG)style,title,n,ex};if(!p->proc(h,WM_NCCREATE,0,(LPARAM)&cs)){if(p->alive)p->proc(h,WM_NCDESTROY,0,0);p->alive=false;p->props.clear();return nullptr;}if(!p->alive)return nullptr;if(p->proc(h,WM_CREATE,0,(LPARAM)&cs)==-1){c_DestroyWindow(h);return nullptr;}return p->alive?h:nullptr;}
+static void sendInitialSizeMove(HWND h,Window* w);static bool isFrameless(const Window* w);
+extern "C" HWND WINAPI c_CreateWindowExW(DWORD ex,LPCWSTR n,LPCWSTR title,DWORD style,int x,int y,int cx,int cy,HWND parent,HMENU menu,HINSTANCE i,void* param){std::lock_guard<std::recursive_mutex> l(mutex);auto c=klass(n,i);if(!c){SetLastError(ERROR_CANNOT_FIND_WND_CLASS);return nullptr;}bool messageOnly=parent==HWND_MESSAGE;if(messageOnly)parent=nullptr;if(parent&&!window(parent))return nullptr;if(windows.size()>=4096){SetLastError(ERROR_NOT_ENOUGH_MEMORY);return nullptr;}auto v=std::make_unique<Window>();v->cls=c;v->proc=c->info.proc;v->thread=GetCurrentThreadId();v->instance=i;v->parent=parent;v->messageOnly=messageOnly;v->id=(LONG_PTR)menu;v->style=style;v->ex=ex;v->x=x==CW_USEDEFAULT?0:x;v->y=y==CW_USEDEFAULT?0:y;v->cx=cx==CW_USEDEFAULT?640:std::max(0,cx);v->cy=cy==CW_USEDEFAULT?480:std::max(0,cy);v->title=title?title:L"";v->extra.resize(c->info.wndExtra);auto p=v.get();HWND h=(HWND)p;windows.push_back(std::move(v));Create cs{param,i,menu,parent,cy,cx,y,x,(LONG)style,title,n,ex};if(!p->proc(h,WM_NCCREATE,0,(LPARAM)&cs)){if(p->alive)p->proc(h,WM_NCDESTROY,0,0);p->alive=false;p->props.clear();return nullptr;}if(!p->alive)return nullptr;if(p->proc(h,WM_CREATE,0,(LPARAM)&cs)==-1){c_DestroyWindow(h);return nullptr;}if(p->alive){p->needSize=true;if((p->style&WS_VISIBLE)||isFrameless(p))sendInitialSizeMove(h,p);}return p->alive?h:nullptr;}
 extern "C" BOOL WINAPI c_DestroyWindow(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||w->destroying||w==desktop)return FALSE;if(w->thread!=GetCurrentThreadId()){SetLastError(ERROR_ACCESS_DENIED);return FALSE;}w->destroying=true;w->proc(h,WM_DESTROY,0,0);std::vector<HWND> children;for(auto& child:windows)if(child->alive&&child->parent==h&&(child->style&WS_CHILD))children.push_back((HWND)child.get());for(auto child:children)c_DestroyWindow(child);w->proc(h,WM_NCDESTROY,0,0);w->alive=false;w->props.clear();return TRUE;}
 static LONG_PTR value(Window* w,int index,size_t size,bool set,LONG_PTR v){LONG_PTR old=0;if(size==sizeof(LONG)&&(index==GWLP_WNDPROC||index==GWLP_HINSTANCE||index==GWLP_HWNDPARENT)){SetLastError(ERROR_INVALID_INDEX);return 0;}if(index>=0){if(size_t(index)>w->extra.size()||size>w->extra.size()-index){SetLastError(ERROR_INVALID_INDEX);return 0;}memcpy(&old,w->extra.data()+index,size);if(set)memcpy(w->extra.data()+index,&v,size);return old;}switch(index){case GWLP_USERDATA:old=w->user;if(set)w->user=v;break;case GWLP_WNDPROC:old=(LONG_PTR)w->proc;if(set)w->proc=(Proc)v;break;case GWLP_HINSTANCE:old=(LONG_PTR)w->instance;if(set)w->instance=(HINSTANCE)v;break;case GWLP_ID:old=w->id;if(set)w->id=v;break;case GWLP_HWNDPARENT:old=(LONG_PTR)w->parent;if(set){if(v&&!window((HWND)v))return 0;w->parent=(HWND)v;}break;case GWL_STYLE:old=w->style;if(set)w->style=(LONG)v;break;case GWL_EXSTYLE:old=w->ex;if(set)w->ex=(LONG)v;break;default:SetLastError(ERROR_INVALID_INDEX);}return old;}
 extern "C" LONG_PTR WINAPI c_GetWindowLongPtrW(HWND h,int n){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);return w?value(w,n,sizeof(LONG_PTR),false,0):0;}
@@ -84,7 +85,7 @@ extern "C" BOOL WINAPI c_IsWindow(HWND h){std::lock_guard<std::recursive_mutex> 
 extern "C" HWND WINAPI c_GetParent(HWND h){return (HWND)c_GetWindowLongPtrW(h,GWLP_HWNDPARENT);}
 extern "C" BOOL WINAPI c_IsIconic(HWND h){return (c_GetWindowLongW(h,GWL_STYLE)&WS_MINIMIZE)!=0;}
 extern "C" BOOL WINAPI c_IsWindowVisible(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);for(unsigned depth=0;h&&depth<4096;++depth){auto w=window(h);if(!w||!(w->style&WS_VISIBLE))return FALSE;if(!(w->style&WS_CHILD))return TRUE;h=w->parent;}return FALSE;}
-extern "C" BOOL WINAPI c_ShowWindow(HWND h,int cmd){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w)return FALSE;BOOL old=(w->style&WS_VISIBLE)!=0;if(cmd==SW_HIDE)w->style&=~WS_VISIBLE;else w->style|=WS_VISIBLE;if(cmd==SW_MINIMIZE||cmd==SW_SHOWMINIMIZED)w->style|=WS_MINIMIZE;if(cmd==SW_RESTORE)w->style&=~(WS_MINIMIZE|WS_MAXIMIZE);return old;}
+extern "C" BOOL WINAPI c_ShowWindow(HWND h,int cmd){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w)return FALSE;BOOL old=(w->style&WS_VISIBLE)!=0;if(cmd==SW_HIDE)w->style&=~WS_VISIBLE;else w->style|=WS_VISIBLE;if(cmd==SW_MINIMIZE||cmd==SW_SHOWMINIMIZED)w->style|=WS_MINIMIZE;if(cmd==SW_RESTORE)w->style&=~(WS_MINIMIZE|WS_MAXIMIZE);if(cmd!=SW_HIDE&&w->needSize&&w->alive)sendInitialSizeMove(h,w);return old;}
 // The nonclient frame a window's style implies, exactly what AdjustWindowRectEx
 // adds (a top-level window with an HMENU id has a menu bar): the client area is
 // the window rect minus it, as on Windows. Games size their window as
@@ -93,6 +94,20 @@ extern "C" BOOL WINAPI c_AdjustWindowRectEx(RECT* r,DWORD style,BOOL menu,DWORD 
 static RECT frame(const Window* w){RECT r{};c_AdjustWindowRectEx(&r,w->style,!(w->style&WS_CHILD)&&w->id,w->ex);return {-r.left,-r.top,r.right,r.bottom};}
 static LONG clientWidth(const Window* w){RECT f=frame(w);return std::max<LONG>(0,w->cx-f.left-f.right);}
 static LONG clientHeight(const Window* w){RECT f=frame(w);return std::max<LONG>(0,w->cy-f.top-f.bottom);}
+// Wine's model of the first size messages (what Windows games are tested
+// against): a visible window, or one with no frame, gets WM_SIZE then WM_MOVE
+// (client size, client origin) before CreateWindowEx returns; any other window
+// gets them on its first show. Engines such as Halo Wars: DE learn their window
+// size only from that first WM_SIZE and later divide by it.
+static bool isFrameless(const Window* w){RECT f=frame(w);return !f.left&&!f.top&&!f.right&&!f.bottom;}
+static void sendInitialSizeMove(HWND h,Window* w){
+ if(!w->needSize)return;
+ w->needSize=false;
+ RECT f=frame(w);
+ WPARAM kind=(w->style&WS_MINIMIZE)?SIZE_MINIMIZED:(w->style&WS_MAXIMIZE)?SIZE_MAXIMIZED:SIZE_RESTORED;
+ w->proc(h,WM_SIZE,kind,MAKELPARAM(clientWidth(w),clientHeight(w)));
+ if(w->alive)w->proc(h,WM_MOVE,0,MAKELPARAM((short)(w->x+f.left),(short)(w->y+f.top)));
+}
 extern "C" BOOL WINAPI c_GetClientRect(HWND h,RECT* r){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!r)return FALSE;*r={0,0,clientWidth(w),clientHeight(w)};return TRUE;}
 // Window origin in screen coordinates: a child's position is relative to its
 // parent's client area. `client` adds this window's own frame.
@@ -496,6 +511,8 @@ extern "C" BOOL WINAPI c_SetWindowPos(HWND h,HWND,int x,int y,int cx,int cy,UINT
  // No z-order tracking (insertAfter ignored), same limitation as EnumWindows.
  if(moved&&w->alive)w->proc(h,WM_MOVE,0,MAKELPARAM(nx,ny));
  if(sized&&w->alive)w->proc(h,WM_SIZE,SIZE_RESTORED,MAKELPARAM(clientWidth(w),clientHeight(w)));
+ if(moved||sized)w->needSize=false;
+ else if((flags&SWP_SHOWWINDOW)&&w->alive)sendInitialSizeMove(h,w);
  return TRUE;
 }
 extern "C" BOOL WINAPI c_ValidateRect(HWND h,const RECT*){std::lock_guard<std::recursive_mutex> l(mutex);return window(h)!=nullptr;} // no invalid-region tracking: nothing to validate, trivially honest.
