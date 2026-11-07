@@ -1,5 +1,6 @@
 #pragma once
 #include "../../uwph/xinput/modules.h"
+#include "../../uwph/opengl32/modules.h"
 // Play tracks mapped image ownership and dependencies. Windows owns the
 // actual AppContainer PEB/TEB, native threads and static TLS carrier slots.
 // Guest process APIs below expose the guest identity without rewriting the
@@ -213,6 +214,7 @@ static LPWSTR WINAPI commandW() { return state->command.data(); }
 static LPSTR WINAPI commandA() { return state->commandA.data(); }
 static HMODULE WINAPI moduleW(LPCWSTR name) {
     if(name)if(auto input=xinput_core::find_module(basename(name).c_str(),false))return input;
+    if(name)if(auto gl=opengl32_core::find_module(basename(name).c_str(),false))return gl;
     if(!name) return (HMODULE)state->exe->image.base;
     if(auto m=named(name)) return (HMODULE)m->image.base;
     using Fn=HMODULE(WINAPI*)(LPCWSTR); auto fn=(Fn)kernel_tail::native("GetModuleHandleW");
@@ -309,6 +311,8 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
         return (HMODULE)m->image.base;
     }
     if(auto input=xinput_core::find_module(key.c_str(),true))return input;
+    // No console opengl32.dll: serve Play's WGL state surface, not a host DLL.
+    if(auto gl=opengl32_core::find_module(key.c_str(),true))return gl;
     // Restrict fallback to documented system DLL search, never desktop paths.
     if(flags&~(LOAD_LIBRARY_SEARCH_SYSTEM32|LOAD_LIBRARY_REQUIRE_SIGNED_TARGET)) {
         SetLastError(ERROR_NOT_SUPPORTED);return nullptr;
@@ -396,6 +400,7 @@ struct ExportLookup {
 };
 static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
     if(auto input=xinput_core::module(h))return xinput_core::module_proc(input,name);
+    if(auto gl=opengl32_core::module(h))return opengl32_core::module_proc(gl,name);
     // find() iterates vector storage that map() may reallocate. Native-handle
     // resolution below can also inspect/map guest modules, so retain the lock
     // for the entire lookup, not just the mapped-export branch.

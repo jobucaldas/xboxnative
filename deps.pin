@@ -12,3 +12,8 @@ gbe-fork-license  https://raw.githubusercontent.com/Detanup01/gbe_fork/release-2
 # Test-only fixtures (official SDL release builds, zlib; fetched by src/tools/fetch-sdl.sh, never packaged or committed).
 sdl3-devel-vc  https://github.com/libsdl-org/SDL/releases/download/release-3.4.20/SDL3-devel-3.4.20-VC.zip  1ec3009655ee37b1f73e52b3b120acc5afd8abaf9532f3303b1bf1dfe91b5969
 sdl2-devel-vc  https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-VC.zip  af347939395a58b365846aaea27391e69f9ec9d4dd650d6ac40802159b418a6e
+# OpenGL-on-D3D12 (research/OPENGL-PLAN.md): Mesa 25.3.6 source tarball (SHA-256 verified; MIT) built by src/tools/build-mesa-d3d12.sh.
+mesa-src  https://archive.mesa3d.org/mesa-25.3.6.tar.xz  59217efeac3b64e7ced958324b9db7494f1e0741aeb22d780276514cc1b8f206
+# Mesa's own wrap (subprojects/DirectX-Headers.wrap in 25.3.6) uses this tag. FIXME(pin): record the 40-hex commit it resolves to
+# (github.com was unreachable when this was written); once a hash is here the script verifies the checkout against it.
+directx-headers  https://github.com/microsoft/DirectX-Headers.git  v1.618.1

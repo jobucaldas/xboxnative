@@ -18,6 +18,12 @@ static BOOL WINAPI moduleExW(DWORD flags,LPCWSTR name,HMODULE* out) {
             if(!(flags&GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT))xinput_core::find_module(basename(name).c_str(),true);
             *out=input;return TRUE;
         }
+    if(!(flags&GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS) && name)
+        if(auto gl=opengl32_core::find_module(basename(name).c_str(),false)) {
+            if(flags&~GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT) {SetLastError(ERROR_NOT_SUPPORTED);return FALSE;}
+            if(!(flags&GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT))opengl32_core::find_module(basename(name).c_str(),true);
+            *out=gl;return TRUE;
+        }
     std::lock_guard<LoaderMutex> lock(state->loaderMutex);
     Module* module=nullptr;
     if((flags&GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS)&&name) {
@@ -95,6 +101,7 @@ static void collectGuestModules() {
 }
 static BOOL WINAPI freeLibrary(HMODULE handle) {
     if(auto input=xinput_core::module(handle))return xinput_core::release_module(input);
+    if(auto gl=opengl32_core::module(handle))return opengl32_core::release_module(gl);
     std::lock_guard<LoaderMutex> lock(state->loaderMutex);
     if(auto module=find(handle)) {
         if(module->references)--module->references;
