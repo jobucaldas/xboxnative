@@ -42,6 +42,8 @@ jobs:
           /tmp/apibadge-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/shared/tests/wine_load_config_test.cpp -o /tmp/wine-config-test
           /tmp/wine-config-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/shared/tests/msvc_load_config_test.cpp -o /tmp/msvc-config-test
+          /tmp/msvc-config-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_cloud_test.cpp -o /tmp/steam-cloud-test
           /tmp/steam-cloud-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_achievements_test.cpp -o /tmp/steam-achievements-test

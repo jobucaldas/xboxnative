@@ -59,6 +59,13 @@ struct Fixture {
         file.bytes=bytes.data(); Plan plan; auto before=bytes;
         bool accepted=validate(file,plan,play); assert(bytes==before); return accepted;
     }
+    // Control Flow Guard as a Microsoft-built DLL carries it (concrt140,
+    // d3dcompiler_47, ucrtbase): GUARD_CF, a relocated table VA, count, flags.
+    void cfg(uint64_t count=4,uint32_t flags=0x500,size_t table=0x2b00) {
+        put<uint64_t>(0x2180,file.preferred+table); reloc(0x2180);
+        put<uint64_t>(0x2188,count); put<uint32_t>(0x2190,flags);
+        file.dllCharacteristics|=0x4000;
+    }
     // Megabonk/Unity shape: GuardFlags CF_INSTRUMENTED plus a relocated
     // VolatileMetadataPointer into read-only data (structural, owned bytes).
     void instrumented(size_t metadata=0x2400,bool relocate=true) {
@@ -205,6 +212,68 @@ int main() {
     for(size_t field:{0x2180,0x2188,0x2198,0x21a0,0x2208}) { // GuardCF table/count, after flags, after metadata
         auto f=base; f.instrumented(); f.put<uint8_t>(field,1); assert(!f.valid(true));
     }
+    // CFG present, never enforced (Wine 10 x86_64): MSVC DLLs such as concrt140.dll
+    // and d3dcompiler_47.dll pass ONLY in Play; the table is bounds-checked, never used.
+    {
+        auto f=base; f.cfg(); assert(!f.valid()); assert(f.valid(true));
+        Plan plan; f.file.bytes=f.bytes.data();
+        assert(validate(f.file,plan,true) && plan.guardFlags==0x500 && plan.cfgEntries==4 &&
+               plan.cfgTable.rva==0x2b00 && plan.cfgTable.size==16 && plan.protectedWrite(0x2b00,4));
+        Plan strict; assert(!validate(f.file,strict));
+        for(uint32_t flags:{0x500u,0x3500u,0x13500u,0x10013500u,0xf0000500u,0x1500u}) {
+            auto g=base; g.cfg(4,flags); assert(g.valid(true));
+        }
+        { auto g=base; g.cfg(5,0x10000500u); g.file.bytes=g.bytes.data(); Plan q;
+          assert(validate(g.file,q,true) && q.cfgTable.size==25); } // stride nibble 1: 5 bytes each
+        { auto g=base; g.cfg(0x100,0x500,0x2b00); assert(g.valid(true)); } // 1 KiB table
+        { auto g=base; g.instrumented(); g.cfg(); g.imports(false,0x3400); g.imports(true,0x3500); g.tls(); assert(g.valid(true)); }
+        { auto g=base; g.cfg(); g.put<uint32_t>(0x2190,0x100|0x400); assert(g.valid(true)); }
+    }
+    // Still rejected: every part of the CFG story that is not exactly the above.
+    for(uint32_t flags:{0x700u,0x4500u,0x8500u,0x20500u,0x100500u,0x400500u,0x800500u,0x1000500u,0x2000500u,
+                        0x900u,0x100u,0x0u,0x10100u,0x10000000u,0x500u|0x800u,0x500u|0x40000u}) {
+        auto f=base; f.cfg(4,flags); assert(!f.valid(true)); // unknown bit, or flag/table mismatch
+    }
+    { auto f=base; f.cfg(); f.file.dllCharacteristics=0; assert(!f.valid(true)); } // table without GUARD_CF
+    { auto f=base; f.cfg(); f.put<uint64_t>(0x2188,0); assert(!f.valid(true)); } // VA without count
+    { auto f=base; f.put<uint64_t>(0x2188,4); f.put<uint32_t>(0x2190,0x500); f.file.dllCharacteristics|=0x4000; assert(!f.valid(true)); } // count without VA
+    { auto f=base; f.cfg(); f.put<uint16_t>(0x4000+f.file.reloc.size-4,0); assert(!f.valid(true)); } // table VA not relocated
+    { auto f=base; f.cfg(); f.reloc(0x2188); assert(!f.valid(true)); } // count is not a pointer
+    { auto f=base; f.cfg(); f.reloc(0x2b04); assert(!f.valid(true)); } // table is never relocated
+    { auto f=base; f.cfg(); f.reloc(0x2afc); assert(!f.valid(true)); } // straddles the table start
+    { auto f=base; f.cfg(); f.reloc(0x2b0c); assert(!f.valid(true)); } // straddles the table end
+    for(size_t table:{0x3200,0x1200,0x2120,0x2300,0x2308,0x2ff8,0x5000,0x4ffc,0x2000-0x10,0x3100}) {
+        // RW, code, record, guard slots, past section end, beyond image, section gap, cookie
+        auto f=base; f.cfg(4,0x500,table); assert(!f.valid(true));
+    }
+    { auto f=base; f.cfg(0x200,0x500,0x2ff0); assert(!f.valid(true)); } // too long for its section
+    { auto f=base; f.cfg((uint64_t(1)<<22)+1); assert(!f.valid(true)); }
+    { auto f=base; f.cfg(~uint64_t(0)); assert(!f.valid(true)); } // size overflow
+    { auto f=base; f.cfg(); f.file.sections[1].flags=read|execute; assert(!f.valid(true)); }
+    { auto f=base; f.cfg(); f.file.sections[1].rawSize=0x300; assert(!f.valid(true)); } // table not file-backed
+    { auto f=base; f.cfg(); f.file.dllCharacteristics|=0x4000; f.put<uint8_t>(0x21a0,1); assert(!f.valid(true)); } // address-taken IAT table
+    for(size_t field:{0x2194,0x21a8,0x21b0,0x21b8,0x21c0,0x21e8,0x21f0,0x21f8,0x2210,0x2220}) {
+        auto f=base; f.cfg(); f.put<uint8_t>(field,1); assert(!f.valid(true)); // long-jump, EH, dynamic reloc, XFG, ... fields
+    }
+    { // check/dispatch pointers keep their in-image defaults: executable code, read-only slot
+        auto f=base; f.cfg(); f.put<uint64_t>(0x2300,f.file.preferred+0x2000); assert(!f.valid(true)); // check ptr -> data
+        auto g=base; g.cfg(); g.put<uint64_t>(0x2308,g.file.preferred+0x3000); assert(!g.valid(true)); // dispatch ptr -> RW data
+        auto h=base; h.cfg(); h.put<uint64_t>(0x2300,0); assert(!h.valid(true)); // null check ptr
+        auto j=base; j.cfg(); j.file.sections[1].flags=read|write; assert(!j.valid(true));
+    }
+    // The shorter 0x70-byte pre-CFG record (D3DCompiler_46, steam_api64): cookie and
+    // SEH fields only. 0x90 and other sizes stay rejected; GUARD_CF has no table to describe.
+    {
+        auto f=base; f.put<uint32_t>(0x2100,0x70); f.file.config.size=0x70;
+        assert(!f.valid()); assert(f.valid(true));
+        Plan plan; f.file.bytes=f.bytes.data();
+        assert(validate(f.file,plan,true) && plan.record.size==0x70 && plan.guardFlags==0 && plan.slots.empty());
+        auto stray=f; stray.put<uint8_t>(0x2160,1); assert(!stray.valid(true));
+        auto cf=f; cf.file.dllCharacteristics=0x4000; assert(!cf.valid(true));
+        for(uint32_t size:{0x60u,0x6fu,0x71u,0x78u,0x90u,0x93u}) {
+            auto g=base; g.put<uint32_t>(0x2100,size); g.file.config.size=size; assert(!g.valid(true));
+        }
+    }
     // Relocated thread_local initializers inside the TLS template are applied
     // before the template copy in Play; the TLS index never is.
     { auto f=base; f.tls(); f.reloc(0x3300); assert(!f.valid()); assert(f.valid(true)); }
@@ -281,4 +350,5 @@ int main() {
     puts("MSVC-CONFIG play PASS: CF_INSTRUMENTED + relocated read-only volatile pointer accepted only by msvc_x64; other flags/fields/targets reject");
     puts("MSVC-CONFIG play PASS: zero-fill TLS index, 0x100 records, TLS alignment and helper-owned delay imports accepted only by msvc_x64");
     puts("MSVC-CONFIG play PASS: writable or zero-fill inactive CastGuard variable accepted only by msvc_x64");
+    puts("MSVC-CONFIG play PASS: CFG function table present but unused (Wine 10 x86_64) and 0x70 records accepted only by msvc_x64; malformed tables/flags/pointers reject");
 }
