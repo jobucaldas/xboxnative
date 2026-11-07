@@ -13,7 +13,7 @@ loader plus our own POSIX/syscall host layer (`uwph`). Status: **early, experime
   login and its own downloader; the uwph host (threads, TLS, exceptions, files, loopback TCP, W^X via
   `VirtualProtectFromApp`); a PE mapper (64-bit and, as data only, 32-bit); CoreWindow D3D11 swap chain; gamepad; real
   system `d3d11`/`dxgi`/`ws2_32`/`bcrypt`. Known gaps: input delivery to the guest, audio (zero samples), Steam API path,
-  32-bit execution (needs an x86 engine), Direct3D 9.
+  32-bit execution (an x86 core exists off-device but is not wired in), Direct3D 9.
 - Steam: no Steam API provider runs on the console yet. Play loads a game's original `steam_api64.dll` unmodified
   and its `SteamAPI_Init` fails naturally; `steamclient64.dll` is always refused. Games that tolerate a missing client
   can proceed. Next: an emulated API (gbe_fork) for owned games with achievements and cloud saves synced to the real
@@ -74,7 +74,7 @@ not game milestones. Record failures honestly; never weaken a gate to increase t
 launcher → Wine-style loader → ELF/PE shim → `uwph` (POSIX/syscall host in UWP, in-process wineserver, no AF_UNIX).
 Rationale and checklists: [research/WINE-BASE-REPORT.md](research/WINE-BASE-REPORT.md) (use Wine's `*.spec` files as the
 checklist; donor PE-only DLLs), [research/D3D-LAYERS-REPORT.md](research/D3D-LAYERS-REPORT.md) (D3D9/D3D11 options),
-[research/X86-32BIT-PLAN.md](research/X86-32BIT-PLAN.md) (32-bit plan, held until Megabonk is playable).
+[research/X86-32BIT-PLAN.md](research/X86-32BIT-PLAN.md) (staged 32-bit plan; stage 1, an off-device x86 interpreter core with PE32 loader and import thunks, is in `src/xbox-test/app/host/x86/` and tested by `src/xbox-test/app/tests/x86-core.sh`; it is not yet wired into the launcher, so 32-bit games still only map for inspection).
 Backlog: [docs/BACKLOG.md](docs/BACKLOG.md). Rebuild notes and lessons: [docs/xbox/REBUILD.md](docs/xbox/REBUILD.md).
 
 ## Layout
