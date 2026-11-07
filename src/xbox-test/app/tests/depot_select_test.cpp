@@ -21,6 +21,11 @@ int main() {
     assert((ids(choose({dep(10, "windows", "32"), dep(11, "", "")})) == std::vector<uint32_t>{10, 11}));
     assert((ids(choose({dep(20, "windows", "64"), dep(21, "", ""), dep(22, "windows", "32")})) == std::vector<uint32_t>{20, 21}));
 
+    // depots shared from another app (redistributable installers) are not fetched
+    { std::vector<Skip> sh; Depot r = dep(228986, "windows", ""); r.sharedFrom = "228980";
+      assert((ids(choose({dep(40, "windows", "64"), r}, &sh)) == std::vector<uint32_t>{40}));
+      assert(sh.size() == 1 && sh[0].id == 228986 && sh[0].why.find("228980") != std::string::npos); }
+
     // language and low-violence depots, missing manifests
     assert((ids(choose({dep(30, "windows", ""), dep(31, "windows", "", "1", "german"), dep(32, "windows", "", "1", "english"), dep(33, "windows", "", "1", "", true), dep(34, "windows", "", "")})) == std::vector<uint32_t>{30, 32}));
 
