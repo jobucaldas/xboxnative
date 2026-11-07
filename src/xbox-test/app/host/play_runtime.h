@@ -16,6 +16,7 @@
 #include "steam_app_ticket.h"
 #include "redact.h"
 #include "../../shared/rwx_emulation.h"
+#include "tls_slot0.h"
 namespace play_runtime {
 constexpr DWORD missingException=0xe0520001, exitException=0xe0520002;
 struct Module {
@@ -568,6 +569,36 @@ static wxl::Carrier carrier() {
     }
     return {};
 }
+// Slot 0: the launcher EXE's own static TLS block, whose first bytes
+// tls_slot0.cpp reserves. Only the guest EXE may use it, because MSVC /GA code
+// reads its TLS through TEB slot 0 rather than _tls_index. Guest DLLs keep
+// carriers. Windows gives each thread its own copy of the block and
+// Image::initThreadStorage fills it from the guest template, as for carriers.
+static BYTE* slot0Block() {
+    PlaySlot0 info{};
+    return play_slot0_info(&info)?info.block:nullptr;
+}
+static DWORD slot0Index() {
+    PlaySlot0 info{};
+    return play_slot0_info(&info)?DWORD(info.index):TLS_OUT_OF_INDEXES;
+}
+// Whether the guest EXE can take slot 0; otherwise says why not (empty = yes).
+static std::string slot0Refusal(Module& m,const IMAGE_NT_HEADERS64* nt) {
+    if(&m!=state->exe || m.image.dll) return "not the guest EXE";
+    PlaySlot0 info{};
+    if(!play_slot0_info(&info)) return "launcher has no usable reserve at the start of its TLS block";
+    if(info.index!=0) return "launcher TLS index is "+std::to_string(info.index)+", not 0";
+    for(auto& other:state->modules)
+        if(other.get()!=&m && other->image.carrier.block==&slot0Block) return "slot 0 already owned";
+    auto td=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
+    if(td.Size<sizeof(IMAGE_TLS_DIRECTORY64) || !m.image.valid(td.VirtualAddress,td.Size)) return "bad TLS directory";
+    auto t=(const IMAGE_TLS_DIRECTORY64*)(m.image.base+td.VirtualAddress);
+    if(t->EndAddressOfRawData<t->StartAddressOfRawData) return "bad TLS template";
+    ULONGLONG size=t->EndAddressOfRawData-t->StartAddressOfRawData;
+    if(size>info.capacity || t->SizeOfZeroFill>info.capacity-size)
+        return "TLS template ("+std::to_string(size)+"+"+std::to_string(t->SizeOfZeroFill)+" bytes) exceeds the "+std::to_string(info.capacity)+"-byte reserve";
+    return {};
+}
 // Optional Steam API provider for an owned game (AGENTS rule 3), e.g. a pinned
 // gbe_fork steam_api64.dll staged with its steam_settings in a writable folder.
 // When set, any steam_api64.dll the game loads is mapped from this file instead;
@@ -714,9 +745,18 @@ static bool prepare(Module& m) {
     auto nt=(IMAGE_NT_HEADERS64*)(image.base+((IMAGE_DOS_HEADER*)image.base)->e_lfanew);
     auto td=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
     if(td.Size) {
-        state->event("loading TLS carrier for "+m.key);
-        auto c=carrier();
-        if(!c.index || !c.block) {state->event("TLS carrier unavailable: "+m.key);return false;}
+        wxl::Carrier c;
+        std::string refusal=slot0Refusal(m,nt);
+        if(refusal.empty()) {
+            // The guest EXE's code may assume it owns TLS slot 0 (MSVC /GA).
+            c.index=&slot0Index;c.block=&slot0Block;c.capacity=65536;
+            state->event("TLS slot 0 for "+m.key);
+        } else {
+            if(&m==state->exe) state->event("TLS slot 0 unavailable for "+m.key+": "+refusal+"; using a carrier");
+            state->event("loading TLS carrier for "+m.key);
+            c=carrier();
+            if(!c.index || !c.block) {state->event("TLS carrier unavailable: "+m.key);return false;}
+        }
         auto tls=(IMAGE_TLS_DIRECTORY64*)(image.base+td.VirtualAddress);
         // TLS index lives in writable data in supported images. prepareTls
         // validates section ownership before writing it.
