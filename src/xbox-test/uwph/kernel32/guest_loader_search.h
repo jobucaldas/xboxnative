@@ -12,6 +12,15 @@ static bool redistributable(const std::wstring& name) {
                   L"msvcp140_codecvt_ids.dll",L"concrt140.dll"}) if(key==dll) return true;
     return false;
 }
+// API-set names (api-ms-win-*, ext-ms-win-*) always resolve through the OS
+// schema on Windows 10; app-local copies (old VC++ app-local UCRT deployments
+// ship api-ms-win-crt-*.dll beside the game) are never loaded. Play does the
+// same: such a name is never mapped from the game's folder.
+static bool apiSetName(const std::wstring& name) {
+    std::wstring key=name;for(auto& c:key)c=towlower(c);
+    auto slash=key.find_last_of(L"\\/");if(slash!=std::wstring::npos)key=key.substr(slash+1);
+    return key.rfind(L"api-ms-win-",0)==0||key.rfind(L"ext-ms-win-",0)==0;
+}
 static std::wstring guestLibraryPath(const std::wstring& requested,bool useDirectory=true) {
     std::wstring path=requested;
     if(path.find(L':')==std::wstring::npos && (path.empty()||path[0]!=L'\\'))

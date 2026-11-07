@@ -95,6 +95,10 @@ static void stopMissing(const std::string& name,uintptr_t caller=0) {
 }
 static uintptr_t missing(const char* dll,const char* name,WORD ordinal) {
     std::string full=lower(dll)+"!"+(name?name:"#"+std::to_string(ordinal));
+    if(mappingImports && wxl::resolvingDelay) {
+        if(state->log && mlp::first_report("delay "+full)) state->log(("PRUN delay import not found yet, bound on first call: "+full).c_str());
+        return 0;
+    }
     if(mappingImports) {state->event("unresolved static import: "+full+"; guest initialization blocked; "+state->snapshot());return 0;}
     // Optional dynamic feature detection observes NULL. No unresolved import
     // receives executable code, including the probe-only failure stubs.
@@ -262,7 +266,7 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     Module* m=nullptr;
     {std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
      m=named(requested);
-     if(!m) {
+     if(!m && !apiSetName(requested)) {
          auto p=guestLibraryPath(requested,!flags);
          if(exists(p)) {
              if(flags) {SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
@@ -995,7 +999,7 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // A dependency whose mapping failed leaves its imports unresolved, as on
     // Windows; neither it nor the probe registry may supply an address.
     if(dependency && dependency->mappingFailed) return missing(dll,name,ordinal);
-    if(!dependency) {
+    if(!dependency && !apiSetName(wide(dll))) {
         auto path=guestLibraryPath(wide(dll));
         if(exists(path)) {dependency=map(path);if(!dependency)return missing(dll,name,ordinal);}
     }
