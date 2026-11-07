@@ -428,14 +428,32 @@ extern "C" HANDLE WINAPI c_GetThreadDesktop(DWORD){return (HANDLE)&threadDesktop
 #define UOI_NAME 2
 #define UOI_TYPE 3
 #endif
+#ifndef WSF_VISIBLE
+#define WSF_VISIBLE 1
+#endif
 #include "object_flags.h"
 #include "object_strings.h"
+// One interactive window station, WinSta0, holding the one desktop.
+static int stationToken;
+extern "C" HWINSTA WINAPI c_GetProcessWindowStation(){return (HWINSTA)&stationToken;}
+static bool userObject(HANDLE h,bool& station){station=h==(HANDLE)&stationToken;return station||h==(HANDLE)&threadDesktopToken;}
 extern "C" BOOL WINAPI c_GetUserObjectInformationA(HANDLE h,int index,void* info,DWORD len,DWORD* needed){
- if(h!=(HANDLE)&threadDesktopToken){SetLastError(ERROR_INVALID_HANDLE);return FALSE;}
- if(index==UOI_FLAGS)return object_flags(info,len,needed);
- const char* s=index==UOI_NAME?"Default":index==UOI_TYPE?"Desktop":nullptr;
+ bool station;if(!userObject(h,station)){SetLastError(ERROR_INVALID_HANDLE);return FALSE;}
+ if(index==UOI_FLAGS)return object_flags(info,len,needed,station?WSF_VISIBLE:0);
+ const char* s=index==UOI_NAME?(station?"WinSta0":"Default"):index==UOI_TYPE?(station?"WindowStation":"Desktop"):nullptr;
  if(!s){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
  return object_string(s,info,len,needed);
+}
+extern "C" BOOL WINAPI c_GetUserObjectInformationW(HANDLE h,int index,void* info,DWORD len,DWORD* needed){
+ bool station;if(!userObject(h,station)){SetLastError(ERROR_INVALID_HANDLE);return FALSE;}
+ if(index==UOI_FLAGS)return object_flags(info,len,needed,station?WSF_VISIBLE:0);
+ const wchar_t* s=index==UOI_NAME?(station?L"WinSta0":L"Default"):index==UOI_TYPE?(station?L"WindowStation":L"Desktop"):nullptr;
+ if(!s){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
+ const DWORD bytes=DWORD((wcslen(s)+1)*sizeof(WCHAR));
+ if(needed)*needed=bytes;
+ if(len<bytes){SetLastError(ERROR_INSUFFICIENT_BUFFER);return FALSE;}
+ if(!info){SetLastError(ERROR_NOACCESS);return FALSE;}
+ memcpy(info,s,bytes);return TRUE;
 }
 #ifndef SPI_GETWORKAREA
 #define SPI_GETWORKAREA 0x0030

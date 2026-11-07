@@ -110,6 +110,16 @@ int main() {
     SetLastError(0xdead);
     CHECK(!associate_ex(record, nullptr, IACE_CHILDREN | IACE_DEFAULT));
     CHECK(GetLastError() == 0xdead);
+    // ANSI composition string: the same no-context result as Wine, buffer untouched.
+    {
+        auto ansi = reinterpret_cast<decltype(&ImmGetCompositionStringA)>(imm32_core::resolve("imm32.dll", "ImmGetCompositionStringA"));
+        auto oracle = reinterpret_cast<decltype(&ImmGetCompositionStringA)>(GetProcAddress(reference, "ImmGetCompositionStringA"));
+        CHECK(ansi && oracle);
+        char mine[16], wine[16]; std::memset(mine, 0xa5, sizeof mine); std::memset(wine, 0xa5, sizeof wine);
+        SetLastError(0xdead); LONG r1 = ansi(nullptr, GCS_COMPSTR, mine, sizeof mine); DWORD e1 = GetLastError();
+        SetLastError(0xdead); LONG r2 = oracle(nullptr, GCS_COMPSTR, wine, sizeof wine); DWORD e2 = GetLastError();
+        CHECK(r1 == r2 && e1 == e2 && !std::memcmp(mine, wine, sizeof mine));
+    }
     FreeLibrary(reference);
     std::puts("IMM32 OFFDEVICE PASS eight exports, association regression, typed ABI, Wine null/foreign-context differential, errors, untouched outputs, resolver");
 }

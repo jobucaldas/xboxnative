@@ -98,7 +98,12 @@ inline uintptr_t resolve(const char* dll, const char* name, IsWindow validator =
     if (!strcmp(name, "ImmAssociateContext")) return reinterpret_cast<uintptr_t>(&associate_context);
     if (!strcmp(name, "ImmAssociateContextEx")) return reinterpret_cast<uintptr_t>(&associate_context_ex);
     if (!strcmp(name, "ImmGetContext")) return reinterpret_cast<uintptr_t>(&get_context);
-    if (!strcmp(name, "ImmGetCompositionStringW")) return reinterpret_cast<uintptr_t>(&get_composition);
+    // ANSI variants take the same no-context path (Wine imm.c checks the
+    // context before any string conversion).
+    if (!strcmp(name, "ImmGetCompositionStringW") || !strcmp(name, "ImmGetCompositionStringA")) return reinterpret_cast<uintptr_t>(&get_composition);
+    if (!strcmp(name, "ImmSetCompositionStringA")) return reinterpret_cast<uintptr_t>(&set_composition);
+    if (!strcmp(name, "ImmGetCandidateListA")) return reinterpret_cast<uintptr_t>(&get_candidate_list);
+    if (!strcmp(name, "ImmGetCompositionFontA")) return reinterpret_cast<uintptr_t>(&get_composition_font);
     if (!strcmp(name, "ImmGetConversionStatus")) return reinterpret_cast<uintptr_t>(&get_conversion);
     if (!strcmp(name, "ImmSetCompositionStringW")) return reinterpret_cast<uintptr_t>(&set_composition);
     if (!strcmp(name, "ImmNotifyIME")) return reinterpret_cast<uintptr_t>(&notify);

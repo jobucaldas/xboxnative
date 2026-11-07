@@ -67,6 +67,12 @@ extern "C" DWORD WINAPI u32c_entry(){
   check(DestroyWindow(framed));}
  check(UnregisterClassW(wc.lpszClassName,0));check(!CreateWindowExW(0,MAKEINTATOM(a),0,0,0,0,1,1,0,0,0,0));
  wc.lpszClassName=L"U32cReject";wc.lpfnWndProc=reject;check(RegisterClassExW(&wc)!=0);check(!CreateWindowExW(0,wc.lpszClassName,0,0,0,0,1,1,0,0,0,0));check(rejectedDestroyed==1&&rejectedCreated==0);check(UnregisterClassW(wc.lpszClassName,0));
+ {USEROBJECTFLAGS flags{};DWORD n=0;WCHAR station[16]{};HWINSTA ws=GetProcessWindowStation();
+  check(ws&&GetUserObjectInformationW(ws,UOI_FLAGS,&flags,sizeof flags,&n)&&n==sizeof flags&&(flags.dwFlags&WSF_VISIBLE));
+  check(GetUserObjectInformationW(ws,UOI_NAME,station,sizeof station,&n)&&n==16&&!lstrcmpW(station,L"WinSta0"));
+  check(!GetUserObjectInformationW(ws,UOI_NAME,station,4,&n)&&GetLastError()==ERROR_INSUFFICIENT_BUFFER&&n==16);
+  check(GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()),UOI_FLAGS,&flags,sizeof flags,&n)&&!(flags.dwFlags&WSF_VISIBLE));
+  check(!GetUserObjectInformationW((HANDLE)h,UOI_FLAGS,&flags,sizeof flags,&n)&&GetLastError()==ERROR_INVALID_HANDLE);}
  HMONITOR monitor=MonitorFromWindow(h,MONITOR_DEFAULTTOPRIMARY);MONITORINFO mi={sizeof(mi)};check(GetMonitorInfoW(monitor,&mi)&&mi.rcMonitor.right==1920);check(GetSystemMetrics(SM_CMONITORS)==1);check(IsWindow(GetDesktopWindow()));
  // item 44: input/cursor/focus
  WNDCLASSEXW wc2={};wc2.cbSize=sizeof(wc2);wc2.lpfnWndProc=proc;wc2.lpszClassName=L"U32cItem44";
