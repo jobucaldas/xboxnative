@@ -335,7 +335,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // Engine options come from the game's files, as in the launcher.
     std::wstring gameExe=L"Megabonk.exe";
     {wchar_t value[260];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_EXE",value,260);if(n&&n<260)gameExe.assign(value,n);}
-    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
+    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
     // guest stop (fatal dialog). Progress must never mask that failure.
@@ -448,6 +448,8 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         ok=ok&&r->finished&&r->success&&r->code==42&&st.regions.load()>=4&&!st.live.load()&&st.executeFlips.load()>=50&&st.writeFlips.load()>=50&&!st.failures.load()&&!st.exhausted.load();
         printf("PLAY-RWX regions=%u live=%u executeFlips=%u writeFlips=%u retries=%u failures=%u\n",st.regions.load(),st.live.load(),st.executeFlips.load(),st.writeFlips.load(),st.retries.load(),st.failures.load());fflush(stdout);
     }
+    else if(mode=="crt-exit")ok=ok&&r->finished&&r->success&&r->code==37&&last.find("ExitProcess code=37")!=std::string::npos;
+    else if(mode=="crt-abort")ok=ok&&r->finished&&r->success&&r->code==3&&last.find("ExitProcess code=3")!=std::string::npos;
     else if(mode=="hang")ok=ok&&!r->finished&&last.find("EXE entry play-guest.exe")!=std::string::npos;
     else ok=ok&&r->finished&&r->success&&r->code==42;
     if(mode=="failed-dependency"&&ok) {
