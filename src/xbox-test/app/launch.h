@@ -51,42 +51,13 @@ static void lp_sink(const char* s) {
 #include "donors/probe.h"
 
 #include "host/play_runtime.h"
+#include "steam_client_package.h"
 
 static void lp_publish(int gen,uint32_t appid,const std::string& result,bool ok,int mapped,int total,const char* status,bool terminal);
 struct LpCtx { std::wstring root, args; std::vector<std::wstring> names; int gen = 0; uint32_t appid = 0; int mapped = 0; unsigned resolved = 0, stubbed = 0; std::string firstMissing, failName, fault; bool ok = false, timedOut = false; };
 static int pe_machine(const std::wstring& p) {   // 0 = unreadable/not PE, else IMAGE_FILE_MACHINE_*
     FILE* f = _wfopen(p.c_str(), L"rb"); if (!f) return 0; unsigned char h[1024]; size_t n = fread(h, 1, sizeof h, f); fclose(f);
     if (n < 0x40 || h[0] != 'M' || h[1] != 'Z') return 0; uint32_t o = *(uint32_t*)(h + 0x3c); if (o + 6 > n || memcmp(h + o, "PE\0\0", 4)) return 0; return *(uint16_t*)(h + o + 4);
-}
-// Steam API provider for the signed-in account's game (AGENTS.md rule 3): the
-// packaged, pinned gbe_fork steam_api64.dll is copied to LocalState\steam\<appid>
-// with steam_settings for this account, and Play maps it in place of the game's
-// steam_api64.dll (the game's own file is untouched). The SteamID is written only
-// to that on-device settings file, never to a log. Without a packaged provider or
-// a signed-in account nothing is staged and Steam calls fail naturally.
-// TODO(ownership gate): verify the account owns appid before staging (parked).
-static bool stage_steam_provider(uint32_t appid) {
-    wchar_t exe[2048];DWORD n=GetModuleFileNameW(nullptr,exe,2048);
-    if(!n||n>=2048)return false;
-    std::wstring package(exe,n);package.resize(package.find_last_of(L"\\/")+1);
-    const std::wstring source=package+L"steam-provider\\gbe\\steam_api64.dll";
-    if(GetFileAttributesW(source.c_str())==INVALID_FILE_ATTRIBUTES){lp_sink("STEAM provider: none packaged; game Steam calls fail naturally");return false;}
-    auto session=user_session();
-    if(!session||session->anon||!session->steamid){lp_sink("STEAM provider: no signed-in account; not staged");return false;}
-    const std::wstring dir=g_dir+L"\\steam\\"+widen(std::to_string(appid));
-    for(auto d:{g_dir+L"\\steam",dir,dir+L"\\steam_settings",dir+L"\\saves"})CreateDirectoryW(d.c_str(),nullptr);
-    const std::wstring target=dir+L"\\steam_api64.dll";
-    COPYFILE2_EXTENDED_PARAMETERS copy{};copy.dwSize=sizeof copy;
-    HRESULT hr=CopyFile2(source.c_str(),target.c_str(),&copy);
-    if(FAILED(hr)){char line[96];snprintf(line,sizeof line,"STEAM provider: copy failed hr=0x%08lx; not staged",(unsigned long)hr);lp_sink(line);return false;}
-    write_text(dir+L"\\steam_settings\\steam_appid.txt",std::to_string(appid)+"\n");
-    write_text(dir+L"\\steam_settings\\configs.user.ini","[user::general]\naccount_name=Player\naccount_steamid="+
-        std::to_string(session->steamid)+"\nlanguage=english\n[user::saves]\nlocal_save_path=./saves\n");
-    // No LAN/peer networking yet: achievements and cloud saves sync through the launcher.
-    write_text(dir+L"\\steam_settings\\configs.main.ini","[main::connectivity]\ndisable_networking=1\n");
-    play_runtime::set_steam_provider(target);
-    char line[160];snprintf(line,sizeof line,"STEAM provider: gbe_fork staged in LocalState\\steam\\%u for the signed-in account",appid);lp_sink(line);
-    return true;
 }
 // ---- Steam Auto-Cloud for the provider-served game (steam_cloud.h): download
 // the player's newer cloud saves before launch, then upload changed saves every
@@ -118,6 +89,130 @@ static int cloud_http(bool put,bool https,const std::string& host,const std::str
             array_view<uint8_t>((uint8_t*)&body[0],(uint8_t*)&body[0]+body.size()));
         return (int)resp.StatusCode();
     } catch(...) {return 0;}
+}
+static std::string read_bytes(const std::wstring& p) {
+    std::string out; FILE* f=_wfopen(p.c_str(),L"rb"); if(!f) return out;
+    char b[65536]; size_t n; while((n=fread(b,1,sizeof b,f))>0) out.append(b,n); fclose(f); return out;
+}
+// Ownership gate (AGENTS.md rule 3): before any emulated Steam component is
+// staged, Steam itself must issue the signed-in account an app ownership
+// ticket for this app (CM ClientGetAppOwnershipTicket). Steam refuses it for an
+// app the account does not own. The genuine ticket is also what Steam's DRM
+// wrapper checks (play_runtime set_app_ticket); it is kept in memory only.
+static bool owner_ticket(uint32_t appid,std::string& ticket) {
+    ticket.clear();
+    auto session=user_session();
+    if(!session||session->anon||!session->steamid) return false;
+    std::string body; pb_u(body,1,appid);
+    JobMsg m; if(!session->call(857,body,"",15000,m)||m.emsg!=858) return false;   // ClientGetAppOwnershipTicket(Response)
+    uint64_t eresult=2,app=0; std::string bytes;
+    for(auto& f:pb_parse(m.body)) { if(f.f==1)eresult=f.u; else if(f.f==2)app=f.u; else if(f.f==3)bytes=f.s; }
+    steam_app_ticket::Layout t;
+    if(eresult!=1||app!=appid||!steam_app_ticket::parse(bytes,t)||t.appid!=appid||t.steamid!=session->steamid) return false;
+    ticket=bytes; return true;
+}
+// Steam's DRM wrapper (SteamStub) lives in a ".bind" section of the game's
+// executable on disk: the section table answers "is this game wrapped"
+// without running anything.
+static bool steamstub_wrapped(const std::wstring& exe) {
+    FILE* f=_wfopen(exe.c_str(),L"rb"); if(!f) return false;
+    unsigned char h[4096]; size_t n=fread(h,1,sizeof h,f); fclose(f);
+    if(n<0x40||h[0]!='M'||h[1]!='Z') return false;
+    uint32_t o=*(uint32_t*)(h+0x3c); if(o+24>n||memcmp(h+o,"PE\0\0",4)) return false;
+    uint16_t sections=*(uint16_t*)(h+o+6), optional=*(uint16_t*)(h+o+20);
+    size_t table=o+24+optional;
+    for(uint16_t i=0;i<sections&&table+40*(i+1)<=n;++i) if(!memcmp(h+table+40*i,".bind\0",6)) return true;
+    return false;
+}
+static std::string sha256_hex(const std::string& data) {
+    BCRYPT_HASH_HANDLE h=nullptr; UCHAR d[32]={};
+    if(BCryptCreateHash(BCRYPT_SHA256_ALG_HANDLE,&h,nullptr,0,nullptr,0,0)<0) return {};
+    for(size_t at=0;at<data.size();) { ULONG c=(ULONG)std::min<size_t>(data.size()-at,1u<<30); BCryptHashData(h,(PUCHAR)data.data()+at,c,0); at+=c; }
+    BCryptFinishHash(h,d,32,0); BCryptDestroyHash(h);
+    static const char* x="0123456789abcdef"; std::string out;
+    for(UCHAR b:d){out+=x[b>>4];out+=x[b&15];}
+    return out;
+}
+// Valve's signed steamclient64.dll in LocalState\steam\client, fetched from
+// Valve (steam_client_package.h) once per Steam client update. With Valve's
+// manifest unreachable, a cached copy that still carries Valve's signature
+// block is used.
+static std::wstring valve_client() {
+    namespace pkg=steam_client_package;
+    const std::wstring dir=g_dir+L"\\steam\\client", dll=dir+L"\\steamclient64.dll", stamp=dir+L"\\package.sha256";
+    for(auto d:{g_dir+L"\\steam",dir})CreateDirectoryW(d.c_str(),nullptr);
+    auto cached=[&]{return pkg::valve_signature_block(read_bytes(dll));};
+    std::string text; pkg::Entry e;
+    if(cloud_http(false,true,pkg::host,pkg::manifest_path,{},{},text)!=200||!pkg::manifest_entry(text,e)) {
+        if(cached()){lp_sink("STEAM client: Valve's client manifest unreachable; using the cached signed client");return dll;}
+        lp_sink("STEAM client: Valve's client manifest unreachable and nothing cached");return {};
+    }
+    if(read_bytes(stamp)==e.sha256&&cached()) return dll;
+    lp_sink("STEAM client: fetching Valve's signed client from Valve (once per Steam client update)");
+    std::string zip;
+    if(cloud_http(false,true,pkg::host,std::string("/client/")+e.file,{},{},zip)!=200){lp_sink("STEAM client: package download failed");return {};}
+    if(sha256_hex(zip)!=e.sha256){lp_sink("STEAM client: package SHA-256 differs from Valve's manifest; discarded");return {};}
+    auto inflater=[](const char* data,size_t size,size_t expected,std::string& out){
+        out.resize(expected); z_stream z{}; if(inflateInit2(&z,-15)!=Z_OK) return false;
+        z.next_in=(Bytef*)data; z.avail_in=(uInt)size; z.next_out=(Bytef*)&out[0]; z.avail_out=(uInt)expected;
+        int rc=inflate(&z,Z_FINISH); bool ok=rc==Z_STREAM_END&&z.total_out==expected; inflateEnd(&z); return ok;};
+    std::string client;
+    if(!pkg::zip_member(zip,pkg::member,inflater,client)||!pkg::valve_signature_block(client)){lp_sink("STEAM client: package has no signed steamclient64.dll; discarded");return {};}
+    const std::wstring part=dll+L".part";
+    write_text(part,client);
+    if(read_bytes(part)!=client||!MoveFileExW(part.c_str(),dll.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)){DeleteFileW(part.c_str());lp_sink("STEAM client: could not store the signed client");return {};}
+    write_text(stamp,e.sha256);
+    lp_sink("STEAM client: Valve's signed client stored (SHA-256 matched Valve's manifest)");
+    return dll;
+}
+// Emulated Steam for the signed-in account's game (AGENTS.md rule 3), only
+// after Steam issued this account an ownership ticket for the app (above). The
+// packaged, pinned gbe_fork files are copied to LocalState\steam\<appid> with
+// steam_settings for this account; the game's own files are untouched. The
+// SteamID is written only to that on-device settings file, never to a log.
+//  - Most games: gbe's steam_api64.dll is mapped in place of the game's.
+//  - SteamStub-wrapped games: the game keeps its own steam_api64.dll, and the
+//    client it loads is Valve's signed steamclient64.dll answered by gbe's
+//    emulated client; the DRM gets the genuine ownership ticket.
+// Without a packaged emulator, a signed-in account or Steam's ticket nothing
+// is staged and the game's Steam calls fail naturally.
+static std::wstring g_signedClient;   // set when the client route is staged; registry seeded after regb::init
+static uint32_t g_clientAccount=0;
+static bool stage_steam_provider(uint32_t appid,const std::wstring& exePath) {
+    wchar_t exe[2048];DWORD n=GetModuleFileNameW(nullptr,exe,2048);
+    if(!n||n>=2048)return false;
+    std::wstring package(exe,n);package.resize(package.find_last_of(L"\\/")+1);
+    const bool wrapped=steamstub_wrapped(exePath);
+    const std::wstring source=package+(wrapped?L"steam-provider\\gbe\\steamclient64.dll":L"steam-provider\\gbe\\steam_api64.dll");
+    if(GetFileAttributesW(source.c_str())==INVALID_FILE_ATTRIBUTES){lp_sink("STEAM provider: none packaged; game Steam calls fail naturally");return false;}
+    auto session=user_session();
+    if(!session||session->anon||!session->steamid){lp_sink("STEAM provider: no signed-in account; not staged");return false;}
+    std::string ticket;
+    if(!owner_ticket(appid,ticket)){char line[160];snprintf(line,sizeof line,"STEAM provider: Steam issued no ownership ticket for app %u to this account (not owned or offline); nothing staged",appid);lp_sink(line);return false;}
+    const std::wstring dir=g_dir+L"\\steam\\"+widen(std::to_string(appid));
+    for(auto d:{g_dir+L"\\steam",dir,dir+L"\\steam_settings",dir+L"\\saves"})CreateDirectoryW(d.c_str(),nullptr);
+    std::wstring valve;
+    if(wrapped&&(valve=valve_client()).empty()){lp_sink("STEAM provider: SteamStub game, but Valve's signed client is unavailable; nothing staged");return false;}
+    const std::wstring target=dir+(wrapped?L"\\steamclient64.dll":L"\\steam_api64.dll");
+    COPYFILE2_EXTENDED_PARAMETERS copy{};copy.dwSize=sizeof copy;
+    HRESULT hr=CopyFile2(source.c_str(),target.c_str(),&copy);
+    if(FAILED(hr)){char line[96];snprintf(line,sizeof line,"STEAM provider: copy failed hr=0x%08lx; not staged",(unsigned long)hr);lp_sink(line);return false;}
+    write_text(dir+L"\\steam_settings\\steam_appid.txt",std::to_string(appid)+"\n");
+    write_text(dir+L"\\steam_settings\\configs.user.ini","[user::general]\naccount_name=Player\naccount_steamid="+
+        std::to_string(session->steamid)+"\nlanguage=english\n[user::saves]\nlocal_save_path=./saves\n");
+    // No LAN/peer networking yet: achievements and cloud saves sync through the launcher.
+    write_text(dir+L"\\steam_settings\\configs.main.ini","[main::connectivity]\ndisable_networking=1\n");
+    char line[200];
+    if(wrapped) {
+        play_runtime::set_steam_client(target,valve);play_runtime::set_app_ticket(ticket);
+        g_signedClient=valve;g_clientAccount=uint32_t(session->steamid);
+        snprintf(line,sizeof line,"STEAM provider: SteamStub game; gbe_fork client behind Valve's signed client staged in LocalState\\steam\\%u for the owner",appid);
+    } else {
+        play_runtime::set_steam_provider(target);
+        snprintf(line,sizeof line,"STEAM provider: gbe_fork staged in LocalState\\steam\\%u for the owner",appid);
+    }
+    lp_sink(line);
+    return true;
 }
 // The same known folders the game resolves in this process and container.
 static steam_cloud::Roots cloud_roots(const std::wstring& gameRoot) {
@@ -301,7 +396,7 @@ static void lp_run_impl(LpCtx& c) {
     if(!donor_pe::probe(lp_sink)) {c.failName="Wine donor initialization/behavior";lp_sink("DWPE FAIL donor behavior gate; no game code executed");return;}
     mlp::donor_resolve=donor_pe::exported;
     if(!user32_core::test(lp_sink)) {c.failName="u32c-test.exe";lp_sink("U32C FAIL regression PE; no game code executed");return;}
-    const bool steamProvider=stage_steam_provider(c.appid);
+    const bool steamProvider=stage_steam_provider(c.appid,exeDir+L"\\"+exe);
     if(steamProvider) {
         try{cloud_sync(c.appid,c.root,false,0);}catch(...){lp_sink("STEAM cloud download: exception");}
         try{achievements_sync(c.appid,false);}catch(...){lp_sink("STEAM achievements: exception");}
@@ -309,6 +404,8 @@ static void lp_run_impl(LpCtx& c) {
     }
     if(steamProvider){uint32_t appid=c.appid;std::wstring root=c.root;g_finalSync=[appid,root]{final_sync(appid,root);};}
     regb::init(g_dir,lp_sink); // guest registry (PlayerPrefs): LocalState\registry.sqlite
+    if(!g_signedClient.empty()&&!play_runtime::seed_steam_client_registry(g_signedClient,g_clientAccount))
+        lp_sink("STEAM client: guest registry not seeded; the game's Steam client lookup will fail");
     {   // Wine's C++ runtime packaged beside the launcher (build.sh: layout\runtime).
         wchar_t self[2048];DWORD n=GetModuleFileNameW(nullptr,self,2048);
         if(n&&n<2048){std::wstring package(self,n);package.resize(package.find_last_of(L"\\/")+1);play_runtime::set_runtime_directory(package+L"runtime");}

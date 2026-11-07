@@ -34,7 +34,7 @@ cp "$donors"/SOURCE.txt "$here/donors/COPYING.LIB" "$here/donors/LICENSE" "$out/
 gbe="$here/../../../out/gbe-fork"
 bash "$here/../../tools/fetch-gbe-fork.sh" "$gbe"
 mkdir -p "$out/layout/steam-provider/gbe"
-cp "$gbe"/{steam_api64.dll,LICENSE,SOURCE.txt} "$out/layout/steam-provider/gbe/"
+cp "$gbe"/{steam_api64.dll,steamclient64.dll,LICENSE,SOURCE.txt} "$out/layout/steam-provider/gbe/"
 cp -r "$here/Assets" "$here/AppxManifest.xml" "$out/layout/"
 # test certificate (subject must equal manifest Publisher); created once, never committed
 # A cert from before the publisher rename (or any other subject) is replaced.
