@@ -10,7 +10,7 @@ CSRF token read back from the `CSRF-Token` cookie set by an initial `GET /api/os
 subsequent request sends `X-CSRF-Token: <cookie value>`. `dp-lib.sh` handles this automatically
 via a per-process cookie jar.
 
-Env overrides: `DP_HOST` (default `192.168.15.96`, LAN IP can change), `DP_SOCKS` (default
+Env overrides: `DP_HOST` (default `192.168.15.96`, LAN IP can change; a bare host or a URL like `https://host[:port]`), `DP_PORT` (default `11443`; wins over a port in `DP_HOST`), `DP_SOCKS` (default
 `localhost:1055`), `DP_LOCK`, `DP_TIMEOUT` (default 120s per request).
 
 ## Scripts (all verified live against the console 2026-10-25, except where noted)

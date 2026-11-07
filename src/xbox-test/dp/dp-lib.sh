@@ -1,5 +1,8 @@
-# shared helpers; DP_PASS from env, never printed. Override: DP_HOST, DP_SOCKS (default tailscale socks5 localhost:1055)
-DP_HOST="${DP_HOST:-192.168.15.96}"; DP_SOCKS="${DP_SOCKS-localhost:1055}"   # DP_SOCKS= (empty) connects directly
+# shared helpers; DP_PASS from env, never printed. Override: DP_HOST, DP_PORT, DP_SOCKS (default tailscale socks5 localhost:1055)
+# DP_HOST may be a bare host or a URL ("https://host[:port][/]"); DP_PORT wins over a port in the URL (default 11443).
+DP_HOST="${DP_HOST:-192.168.15.96}"; DP_HOST="${DP_HOST#*://}"; DP_HOST="${DP_HOST%%/*}"
+[[ $DP_HOST == *:* ]] && { DP_PORT="${DP_PORT:-${DP_HOST##*:}}"; DP_HOST="${DP_HOST%:*}"; }
+DP_PORT="${DP_PORT:-11443}"; DP_SOCKS="${DP_SOCKS-localhost:1055}"   # DP_SOCKS= (empty) connects directly
 DP_LOCK="${DP_LOCK:-/workspace/x64-run/CONSOLE.lock}"
 DP_JAR="${DP_JAR:-/tmp/dp-cookies.$$}"
 urlenc() { python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' "$1"; }
@@ -7,9 +10,9 @@ b64() { printf %s "$1" | base64 -w0; }
 # curl_dp PATH [curl args]: authenticated, CSRF header from cookie jar
 curl_dp() {
   local p="$1"; shift
-  [ -s "$DP_JAR" ] || printf 'user = "%s:%s"\n' "${DP_USER:-jobucaldas}" "$DP_PASS" | curl -sk -m 30 ${DP_SOCKS:+--socks5-hostname $DP_SOCKS} -K - -c "$DP_JAR" -o /dev/null "https://$DP_HOST:11443/api/os/info"
+  [ -s "$DP_JAR" ] || printf 'user = "%s:%s"\n' "${DP_USER:-jobucaldas}" "$DP_PASS" | curl -sk -m 30 ${DP_SOCKS:+--socks5-hostname $DP_SOCKS} -K - -c "$DP_JAR" -o /dev/null "https://$DP_HOST:$DP_PORT/api/os/info"
   local csrf; csrf=$(awk '$6=="CSRF-Token"{print $7}' "$DP_JAR" | tail -1)
-  printf 'user = "%s:%s"\n' "${DP_USER:-jobucaldas}" "$DP_PASS" | curl -sk -m "${DP_TIMEOUT:-120}" ${DP_SOCKS:+--socks5-hostname $DP_SOCKS} -K - -b "$DP_JAR" -H "X-CSRF-Token: $csrf" "$@" "https://$DP_HOST:11443$p"
+  printf 'user = "%s:%s"\n' "${DP_USER:-jobucaldas}" "$DP_PASS" | curl -sk -m "${DP_TIMEOUT:-120}" ${DP_SOCKS:+--socks5-hostname $DP_SOCKS} -K - -b "$DP_JAR" -H "X-CSRF-Token: $csrf" "$@" "https://$DP_HOST:$DP_PORT$p"
 }
 dp_lock() {
   # A caller may hold the console lock for a whole multi-helper transaction.

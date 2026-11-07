@@ -103,10 +103,17 @@ echo "smoke build commit: $(build_commit)"
 
 # Probe Device Portal through the tailnet SOCKS proxy (no credentials needed:
 # any HTTP status, even 401, means the console answered).
+# host:port for the Device Portal, from DP_HOST (bare host or URL) and DP_PORT (default 11443).
+dp_host() {
+    local h="${DP_HOST:-192.168.15.96}" p="${DP_PORT:-}"
+    h="${h#*://}"; h="${h%%/*}"
+    if [[ $h == *:* ]]; then p="${p:-${h##*:}}"; h="${h%:*}"; fi
+    printf '%s:%s' "$h" "${p:-11443}"
+}
 console_probe() {
     local code
     code=$(flock /workspace/x64-run/CONSOLE.lock curl -sk -m 20 --socks5-hostname "${DP_SOCKS:-localhost:1055}" -o /dev/null -w '%{http_code}' \
-        "https://${DP_HOST:-192.168.15.96}:11443/" 2>/dev/null) || true
+        "https://$(dp_host)/" 2>/dev/null) || true
     [[ $code =~ ^[1-5][0-9][0-9]$ ]]
 }
 build_rc=0
