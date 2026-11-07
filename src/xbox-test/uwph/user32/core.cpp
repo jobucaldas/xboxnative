@@ -645,4 +645,5 @@ extern "C" int WINAPI c_LookupIconIdFromDirectoryEx(BYTE* xdir,BOOL isIcon,int w
 #include "device_notifications.h"
 #include "input_feed.h"
 #include "window_extras.h"
+#include "window_tree.h"
 } // namespace u32c

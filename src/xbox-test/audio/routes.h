@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include "mm_timer.h"
 // Native x64 audio exports, plus PlaySoundA as the ANSI conversion to a native
 // PlaySoundW. No success stubs or fabricated device counters.
 namespace audio_routes {
@@ -14,7 +15,11 @@ static const char* const wave_symbols[]={
     "timeGetDevCaps","waveInGetErrorTextW","waveInMessage","waveOutGetErrorTextW",
     "waveOutMessage","waveOutPause","waveOutRestart",
     // gbe_fork's emulated Steam client (SteamStub games) plays notification sounds.
-    "PlaySoundA","PlaySoundW"
+    "PlaySoundA","PlaySoundW",
+    // Halo Wars: Definitive Edition sets its wave output volume.
+    "waveOutSetVolume",
+    // Mono (Unity) uses multimedia timers.
+    "timeSetEvent","timeKillEvent"
 };
 constexpr unsigned wave_count=sizeof(wave_symbols)/sizeof(wave_symbols[0]);
 static const char* const com_symbols[]={
@@ -46,6 +51,9 @@ inline uintptr_t resolve(const char* dll,const char* name) {
     for(auto symbol:wave_symbols)if(!strcmp(symbol,name)) {
         uintptr_t p=native(name);
         if(!p&&!strcmp(name,"PlaySoundA")&&native("PlaySoundW"))p=reinterpret_cast<uintptr_t>(&play_sound_a);
+        // Multimedia timers the console's winmm lacks (mm_timer.h).
+        if(!p&&!strcmp(name,"timeSetEvent"))p=reinterpret_cast<uintptr_t>(&mm_timer::set_event);
+        if(!p&&!strcmp(name,"timeKillEvent"))p=reinterpret_cast<uintptr_t>(&mm_timer::kill_event);
         return p;
     }
     return 0;
@@ -55,7 +63,7 @@ inline void discover(void (*log)(const char*)) {
     for(auto name:wave_symbols) {
         bool found=!!resolve("winmm.dll",name);missing+=!found;
         bool adapted=found&&!native(name);
-        char line[160];snprintf(line,sizeof line,"AUD ROUTE winmm.dll!%s native=%u%s",name,unsigned(found&&!adapted),adapted?" adapter=PlaySoundW":"");log(line);
+        char line[160];snprintf(line,sizeof line,"AUD ROUTE winmm.dll!%s native=%u%s",name,unsigned(found&&!adapted),adapted?(strcmp(name,"PlaySoundA")?" adapter=thread-pool timer":" adapter=PlaySoundW"):"");log(line);
     }
     char line[160];snprintf(line,sizeof line,"AUD ROUTES winmm total=%u resolved=%u missing=%u",wave_count,wave_count-missing,missing);log(line);
     unsigned com_missing=0;

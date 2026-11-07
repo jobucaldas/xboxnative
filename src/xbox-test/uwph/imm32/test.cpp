@@ -120,6 +120,37 @@ int main() {
         SetLastError(0xdead); LONG r2 = oracle(nullptr, GCS_COMPSTR, wine, sizeof wine); DWORD e2 = GetLastError();
         CHECK(r1 == r2 && e1 == e2 && !std::memcmp(mine, wine, sizeof mine));
     }
+    {
+        auto mine = reinterpret_cast<decltype(&ImmSimulateHotKey)>(imm32_core::resolve("imm32.dll", "ImmSimulateHotKey"));
+        auto wine = reinterpret_cast<decltype(&ImmSimulateHotKey)>(GetProcAddress(reference, "ImmSimulateHotKey"));
+        CHECK(mine && wine);
+        SetLastError(0xdead); BOOL r1 = mine(nullptr, IME_CHOTKEY_IME_NONIME_TOGGLE); DWORD e1 = GetLastError();
+        SetLastError(0xdead); BOOL r2 = wine(nullptr, IME_CHOTKEY_IME_NONIME_TOGGLE); DWORD e2 = GetLastError();
+        if (r1 != r2 || e1 != e2) std::printf("ImmSimulateHotKey mine=%d/%lu Wine=%d/%lu\n", r1, e1, r2, e2);
+        CHECK(r1 == r2 && e1 == e2);
+    }
+    // The no-context/no-IME calls against Wine: same result and last error.
+    {
+        HKL english = reinterpret_cast<HKL>(static_cast<uintptr_t>(0x04090409));
+        using Call = long long (*)(uintptr_t, HKL);
+        auto compare = [&](const char* name, Call call) -> bool {
+            SetLastError(0xdead); const long long mine = call(imm32_core::resolve("imm32.dll", name), english); const DWORD e1 = GetLastError();
+            SetLastError(0xdead); const long long wine = call(reinterpret_cast<uintptr_t>(GetProcAddress(reference, name)), english); const DWORD e2 = GetLastError();
+            const bool same = mine == wine && e1 == e2;
+            if (!same) std::printf("%s mine=%llx/%lx Wine=%llx/%lx\n", name, (unsigned long long)mine, (unsigned long)e1, (unsigned long long)wine, (unsigned long)e2);
+            return same;
+        };
+        CHECK(compare("ImmGetDefaultIMEWnd", [](uintptr_t f, HKL) { return (long long)(intptr_t)reinterpret_cast<decltype(&ImmGetDefaultIMEWnd)>(f)(nullptr); }));
+        CHECK(compare("ImmGetIMEFileNameW", [](uintptr_t f, HKL l) { return (long long)reinterpret_cast<decltype(&ImmGetIMEFileNameW)>(f)(l, nullptr, 0); }));
+        CHECK(compare("ImmGetOpenStatus", [](uintptr_t f, HKL) { return (long long)reinterpret_cast<decltype(&ImmGetOpenStatus)>(f)(nullptr); }));
+        CHECK(compare("ImmSetOpenStatus", [](uintptr_t f, HKL) { return (long long)reinterpret_cast<decltype(&ImmSetOpenStatus)>(f)(nullptr, TRUE); }));
+        CHECK(compare("ImmSetConversionStatus", [](uintptr_t f, HKL) { return (long long)reinterpret_cast<decltype(&ImmSetConversionStatus)>(f)(nullptr, 0, 0); }));
+        CHECK(compare("ImmGetVirtualKey", [](uintptr_t f, HKL) { return (long long)reinterpret_cast<decltype(&ImmGetVirtualKey)>(f)(nullptr); }));
+        // Wine gives every layout its built-in IME; this backend has none, so
+        // ImmIsIME is FALSE here (the no-IME result), deliberately unlike Wine.
+        SetLastError(0xdead);
+        CHECK(!reinterpret_cast<decltype(&ImmIsIME)>(imm32_core::resolve("imm32.dll", "ImmIsIME"))(english) && GetLastError() == 0xdead);
+    }
     FreeLibrary(reference);
     std::puts("IMM32 OFFDEVICE PASS eight exports, association regression, typed ABI, Wine null/foreign-context differential, errors, untouched outputs, resolver");
 }

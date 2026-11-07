@@ -47,6 +47,14 @@ extern "C" DWORD WINAPI u32c_entry(){
  POINT cp={0,0};check(ClientToScreen(child,&cp)&&cp.x==25&&cp.y==50);
  POINT mp[2]={{0,0},{1,1}};check(MapWindowPoints(child,0,mp,2)==MAKELONG(25,50)&&mp[0].x==25&&mp[0].y==50&&mp[1].x==26&&mp[1].y==51);
  check(MapWindowPoints(0,h,mp,1)==MAKELONG(-23,-47)&&mp[0].x==2&&mp[0].y==3);
+ check(GetWindow(h,GW_CHILD)==child&&GetTopWindow(h)==child&&!GetWindow(child,GW_HWNDNEXT)&&!GetWindow(child,GW_HWNDPREV));
+ check(GetWindow(child,GW_HWNDFIRST)==child&&!GetWindow(child,GW_OWNER)&&GetTopWindow(0)==h&&GetWindow(h,GW_HWNDFIRST)==h);
+ {RECT a={1,2,3,4},b={1,2,3,4},c={1,2,3,5};check(EqualRect(&a,&b)&&!EqualRect(&a,&c));}
+ {WCHAR text[32];check(wsprintfW(text,L"%d-%s",7,L"x")==3&&!lstrcmpW(text,L"7-x"));check(*CharNextW(L"ab")==L'b');}
+ check(GetClassLongPtrW(h,GCLP_WNDPROC)==(ULONG_PTR)proc&&GetClassLongPtrW(h,GCL_CBCLSEXTRA)==8);
+ check(SetClassLongPtrW(h,0,0x55)==0&&GetClassLongPtrW(h,0)==0x55);
+ {DWORD_PTR result=7;check(SendMessageTimeoutW(h,WM_APP,0,0,SMTO_NORMAL,100,&result)&&result==42);}
+ SetLastError(0);check(!GetClassLongPtrW(h,4)&&GetLastError()==ERROR_INVALID_INDEX);
  check(IsWindow(h)&&IsWindowVisible(h)&&!IsIconic(h));check(ShowWindow(h,SW_HIDE));check(!IsWindowVisible(h)&&!IsWindowVisible(child));check(!ShowWindow(h,SW_SHOW));
  POINT p={1,2};check(ClientToScreen(h,&p)&&p.x==24&&p.y==49);check(ScreenToClient(h,&p)&&p.x==1&&p.y==2);
  RECT r={};check(GetClientRect(h,&r)&&r.right==320&&r.bottom==240);check(GetWindowRect(h,&r)&&r.left==23&&r.top==47&&r.right==343);

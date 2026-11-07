@@ -88,6 +88,20 @@ inline BOOL WINAPI set_candidate_window(HIMC context, const void*) {
     reject_foreign_context(context);
     return FALSE;
 }
+// Without contexts or IME keyboard layouts (Wine's results for a null HIMC
+// and a non-IME HKL): no default IME window, no open/conversion state to
+// read or set, and no IME file. Keys are never converted (VK_PROCESSKEY
+// marks "nothing pending", as Wine returns without IME data).
+inline HWND WINAPI get_default_ime_window(HWND) { return nullptr; }
+inline UINT WINAPI get_ime_file_name_w(HKL, LPWSTR, UINT) { return 0; }
+inline BOOL WINAPI get_open_status(HIMC context) { reject_foreign_context(context); return FALSE; }
+// Setting state on a context reports an invalid handle, null or foreign (Wine).
+inline BOOL WINAPI set_open_status(HIMC, BOOL) { SetLastError(ERROR_INVALID_HANDLE); return FALSE; }
+inline BOOL WINAPI set_conversion(HIMC, DWORD, DWORD) { SetLastError(ERROR_INVALID_HANDLE); return FALSE; }
+inline UINT WINAPI get_virtual_key(HWND window) { valid_window(window); return VK_PROCESSKEY; }
+inline BOOL WINAPI is_ime(HKL) { return FALSE; }
+// No IME hotkeys exist without an IME (Wine: not implemented, FALSE).
+inline BOOL WINAPI simulate_hot_key(HWND, DWORD) { SetLastError(ERROR_CALL_NOT_IMPLEMENTED); return FALSE; }
 // No keyboard layout here is an IME (Wine: zero for a non-IME HKL).
 inline UINT WINAPI get_ime_file_name_a(HKL, LPSTR, UINT) { return 0; }
 // Wine releases no resource here, even for a null context or window.
@@ -112,6 +126,14 @@ inline uintptr_t resolve(const char* dll, const char* name, IsWindow validator =
     if (!strcmp(name, "ImmGetCompositionFontW")) return reinterpret_cast<uintptr_t>(&get_composition_font);
     if (!strcmp(name, "ImmSetCompositionWindow")) return reinterpret_cast<uintptr_t>(&set_composition_window);
     if (!strcmp(name, "ImmSetCandidateWindow")) return reinterpret_cast<uintptr_t>(&set_candidate_window);
+    if (!strcmp(name, "ImmGetDefaultIMEWnd")) return reinterpret_cast<uintptr_t>(&get_default_ime_window);
+    if (!strcmp(name, "ImmGetIMEFileNameW")) return reinterpret_cast<uintptr_t>(&get_ime_file_name_w);
+    if (!strcmp(name, "ImmGetOpenStatus")) return reinterpret_cast<uintptr_t>(&get_open_status);
+    if (!strcmp(name, "ImmSetOpenStatus")) return reinterpret_cast<uintptr_t>(&set_open_status);
+    if (!strcmp(name, "ImmSetConversionStatus")) return reinterpret_cast<uintptr_t>(&set_conversion);
+    if (!strcmp(name, "ImmGetVirtualKey")) return reinterpret_cast<uintptr_t>(&get_virtual_key);
+    if (!strcmp(name, "ImmIsIME")) return reinterpret_cast<uintptr_t>(&is_ime);
+    if (!strcmp(name, "ImmSimulateHotKey")) return reinterpret_cast<uintptr_t>(&simulate_hot_key);
     if (!strcmp(name, "ImmGetIMEFileNameA")) return reinterpret_cast<uintptr_t>(&get_ime_file_name_a);
     return 0;
 }

@@ -243,6 +243,7 @@ inline HGDIOBJ WINAPI get_stock_object(int index) {
 }
 inline BOOL WINAPI get_text_metrics_w(HDC,void*){SetLastError(ERROR_NOT_SUPPORTED);return FALSE;}
 inline BOOL WINAPI get_text_extent_point_32a(HDC,LPCSTR,int,SIZE*){SetLastError(ERROR_NOT_SUPPORTED);return FALSE;}
+inline BOOL WINAPI get_text_extent_point_32w(HDC,LPCWSTR,int,SIZE*){SetLastError(ERROR_NOT_SUPPORTED);return FALSE;}   // no font rasterizer, as the A call
 
 // ---- Regions as lists of disjoint rectangles: COPY, AND, OR and DIFF are
 // exact on rectangle sets (as SetWindowRgn callers build them); XOR is refused.

@@ -77,6 +77,7 @@ inline uintptr_t resolve(const char* dll, const char* name, DeviceCaps device_ca
         {"CreateFontIndirectW", reinterpret_cast<uintptr_t>(&create_font_indirect_w)},
         {"GetTextMetricsW", reinterpret_cast<uintptr_t>(&get_text_metrics_w)},
         {"GetTextExtentPoint32A", reinterpret_cast<uintptr_t>(&get_text_extent_point_32a)},
+        {"GetTextExtentPoint32W", reinterpret_cast<uintptr_t>(&get_text_extent_point_32w)},
         {"CreateRectRgn", reinterpret_cast<uintptr_t>(&create_rect_rgn)},
         {"CombineRgn", reinterpret_cast<uintptr_t>(&combine_rgn)},
         {"GetPixelFormat", reinterpret_cast<uintptr_t>(&get_pixel_format)},

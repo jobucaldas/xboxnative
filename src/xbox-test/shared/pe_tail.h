@@ -38,6 +38,9 @@ static const Symbol symbols[]={
     {"user32.dll","GetMonitorInfoW"},
     {"shlwapi.dll","SHDeleteKeyW"},
     {"shlwapi.dll","PathCanonicalizeW"},
+    // Path queries take no window handles (Unity's UnityPlayer imports PathFileExistsW).
+    {"shlwapi.dll","PathFileExistsW"},
+    {"shlwapi.dll","PathFileExistsA"},
     {"setupapi.dll","SetupDiEnumDeviceInterfaces"},
     {"setupapi.dll","SetupDiGetClassDevsA"},
     {"setupapi.dll","SetupDiGetDeviceInterfaceDetailW"},
