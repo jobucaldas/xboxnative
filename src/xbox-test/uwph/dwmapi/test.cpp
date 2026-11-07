@@ -30,6 +30,18 @@ int main(int argc, char** argv) {
     CHECK(get && set);
     CHECK(get(record, DWMWA_EXTENDED_FRAME_BOUNDS, nullptr, 0) == E_NOTIMPL);
     dwmapi_core::resolve("dwmapi.dll", "DwmGetWindowAttribute", valid, rect, style);
+    {
+        auto composition = reinterpret_cast<HRESULT (WINAPI*)(BOOL*)>(dwmapi_core::resolve("dwmapi.dll", "DwmIsCompositionEnabled"));
+        auto blur = reinterpret_cast<HRESULT (WINAPI*)(HWND, const void*)>(dwmapi_core::resolve("dwmapi.dll", "DwmEnableBlurBehindWindow"));
+        CHECK(composition && blur);
+        BOOL enabled = FALSE;
+        CHECK(composition(&enabled) == S_OK && enabled && composition(nullptr) == E_INVALIDARG);
+        DWM_BLURBEHIND blurBehind{};
+        CHECK(blur(record, &blurBehind) == E_NOTIMPL && blur(record, nullptr) == E_INVALIDARG);
+        CHECK(blur(reinterpret_cast<HWND>(0x9999), &blurBehind) == E_HANDLE);
+        CHECK(dwmapi_core::native_safe("DwmGetColorizationColor") && dwmapi_core::native_safe("DwmFlush"));
+        CHECK(!dwmapi_core::native_safe("DwmExtendFrameIntoClientArea") && !dwmapi_core::resolve("dwmapi.dll", "DwmExtendFrameIntoClientArea"));
+    }
     HMODULE library = LoadLibraryW(L"dwmapi.dll"); CHECK(library);
     auto oracle = reinterpret_cast<decltype(&DwmGetWindowAttribute)>(GetProcAddress(library, "DwmGetWindowAttribute"));
     CHECK(oracle);

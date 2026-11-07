@@ -14,6 +14,7 @@
 namespace wxl {
 using Log = void (*)(const char*);
 static Log logger;
+static thread_local bool resolvingDelay=false;   // the resolver is binding a delay import
 static void WINAPI debug_string(LPCSTR s) { logger(s); }
 struct Builtin { const char* dll; const char* name; uintptr_t address; };
 static const Builtin builtins[] = {
@@ -397,7 +398,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
     log("WXL VirtualAllocFromApp initial=0x4 (RW)");
     memcpy(image.base,file.data(),h.SizeOfHeaders);
     for (unsigned i=0;i<nt->FileHeader.NumberOfSections;i++) { auto s=sections[i]; if(s.SizeOfRawData) memcpy(image.base+s.VirtualAddress,file.data()+s.PointerToRawData,s.SizeOfRawData); }
-    uintptr_t delta=(uintptr_t)image.base-h.ImageBase; unsigned relocations=0, imports=0;
+    uintptr_t delta=(uintptr_t)image.base-h.ImageBase; unsigned relocations=0, imports=0, unresolved=0, deferred=0;
     bool terminated=false;
     if(explicitMsvc) {
         for(auto r:relocationPlan) {
@@ -431,9 +432,12 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
                     if(!_stricmp(imp.dll.c_str(),b.dll) && !strcmp(name,b.name)) address=b.address;
                 if(!address && resolve) address=resolve(imp.dll.c_str(),name,imp.ordinal);
             }
-            if(!address) return fail("WXL FAIL explicit MSVC unresolved import");
+            // Keep binding after a miss so one run reports every import the
+            // console lacks; the image still fails before anything runs.
+            if(!address) {++unresolved;continue;}
             memcpy(image.base+imp.destination,&address,8); ++imports;
         }
+        if(unresolved) return fail("WXL FAIL explicit MSVC unresolved import");
         terminated=true;
         log("WXL explicit MSVC cookie initialized; inactive guard slots unchanged");
     } else {
@@ -477,10 +481,11 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
                 if (!ordinal) for(auto& b:builtins) if(!_stricmp(dll,b.dll)&&!strcmp(name,b.name)) address=b.address;
                 if (!address && resolve) address=resolve(dll,name,ordinal ? WORD(thunk) : 0);
             }
-            if(!address) return fail("WXL FAIL unresolved builtin");
+            if(!address) {++unresolved;continue;}   // reported by the resolver; fail after the rest
             memcpy(image.base+dst,&address,8); imports++;
         }
     }
+    if(unresolved) return fail("WXL FAIL unresolved builtin");
     // Probe eagerly fixes RVA-based delay imports too; no delay helper executes.
     auto delay=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
     if(mapped && delay.Size) {
@@ -502,12 +507,19 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
                     if(thunk>image.size || !image.valid(size_t(thunk),3)) return fail("WXL FAIL delay name bounds");
                     name=image.str(size_t(thunk)+2); if(!name) return fail("WXL FAIL delay name");
                 }
+                resolvingDelay=true;
                 uintptr_t address=resolve(dll,name,ordinal?WORD(thunk):0);
-                if(!address) return fail("WXL FAIL unresolved delay import");
+                resolvingDelay=false;
+                // As on Windows, a delay import binds on first call: one not
+                // found now (its DLL in a folder the game adds with
+                // SetDllDirectory before calling it) keeps its stub, which runs
+                // the game's own delay-load helper through Play's loader.
+                if(!address) {++deferred;continue;}
                 memcpy(image.base+dst,&address,8); ++imports;
             }
         }
         if(!ended) return fail("WXL FAIL delay terminator");
+        if(deferred){char b[96];snprintf(b,sizeof b,"WXL delay imports left for first call: %u",deferred);log(b);}
     }
     } // Legacy/default/inert import and relocation path.
     if(!terminated || (!mapped && (!relocations || !delta))) return fail("WXL FAIL missing terminator/relocation exercise");

@@ -551,6 +551,7 @@ static void dl_thread() {
 }
 
 #include "launch.h"
+#include "launch_report.h"
 #include "guest_overlay.h"
 #include "../uwph/user32/corewindow_feed.h"
 #include "game_delete.h"
@@ -728,6 +729,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     bool owned(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return true; return false; }
     void open_detail(uint32_t id, const std::string& nm, const char* via) {
         m_dApp = id; m_dName = nm.empty() ? "App " + std::to_string(id) : nm; m_dNote.clear(); m_dScroll = 0; m_dInstT = -10; m_confirmDelete = false;
+        // After a restart that unloaded a failed game, its page says why (this session's launches show in the launch panel).
+        if (g_launch.phase == 0) { std::string why = launch_report::failure(read_bytes(g_dir + L"\\launch_result.json"), id); if (!why.empty()) m_dNote = "Last launch failed: " + why; }
         auto si = std::make_shared<StoreInfo>(); si->appid = id; m_dSi = si; std::thread(store_worker, si).detach();
         m_confirmLogout = false; g_screen = S_DETAIL; logf("detail: open appid=%u name='%s' via=%s", id, m_dName.c_str(), via);
     }
@@ -888,8 +891,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             });
         } catch(hresult_error const& error) {logf("launch: restart unavailable hr=0x%08x",(unsigned)error.code().value);exitOnUi();}
     }
+    // A launch that ran no game code was already released (launch.h): its
+    // page shows why and Play works again. Once game code ran, the launcher
+    // restarts to unload it, with or without a game window.
     void guest_ended() {
-        if(!m_guestSurface || g_launch.phase!=2 || m_guestEndGen==g_launch.gen)return;
+        if(g_launch.phase!=2 || m_guestEndGen==g_launch.gen)return;
+        if(!m_guestSurface && !play_runtime::observed.load(std::memory_order_acquire))return;
         std::string result;bool ok;
         {std::lock_guard<std::mutex> lock(g_launch.m);ok=g_launch.ok;result=g_launch.result;}
         m_guestEndGen=g_launch.gen;
@@ -899,6 +906,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // A crash: explain it above the retained guest frame, then go back.
         std::string message=result.find("real client prerequisite item 36")!=std::string::npos?
             "This game needs the genuine Steam client. This runtime cannot start that client yet.":
+            !m_guestSurface?"The game failed while starting. The launcher restarts to unload it; then you can play another game.":
             "The game stopped unexpectedly. Saves and achievements were uploaded if Steam was reachable.";
         message+="\n\n"+clip(result,500);
         try {
@@ -947,7 +955,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         } else if (mine && (dl == 3 || dl == 4) && !m_dInst.installed) {
             std::string ms; { std::lock_guard<std::mutex> l(g_dl.m); ms = g_dl.msg; } std::string l1, l2; wrap2((dl == 4 ? "Cancelled: " : "Failed: ") + ms, 38, l1, l2);
             text(60, 548, l1, 2, RED); text(60, 572, l2, 2, RED);
-        } else if (!m_dNote.empty()) text(60, 548, clip(m_dNote, 38), 2, RED);
+        } else if (!m_dNote.empty()) { std::string l1, l2; wrap2(m_dNote, 38, l1, l2); text(60, 548, l1, 2, RED); text(60, 572, l2, 2, RED); }
         else if (deleting) { char b[80]; snprintf(b, sizeof b, "%llu files removed", (unsigned long long)g_del.progress.removed.load()); text(60, 548, b, 2, DIM); }
         else if (delDone && !m_dInst.installed) {
             if (g_del.state == 2) { auto k = g_del.kind.load(); text(60, 548, k == game_library::DeleteKind::folder ? "Deleted. Saves were kept." : k == game_library::DeleteKind::shared ? "Removed. Shared files kept." : "Removed; folder unknown, files kept.", 2, GRN); }
@@ -988,7 +996,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             if (g_launch.phase == 1) { char b[100]; snprintf(b, sizeof b, "Launching... (%.0f s) running guest loader", now_s() - g_launch.started); text(80, 826, b, 3, YEL); }
             else { std::string r; { std::lock_guard<std::mutex> l(g_launch.m); r = g_launch.result; }
                 bool ok;{std::lock_guard<std::mutex> l(g_launch.m);ok=g_launch.ok;}
-                text(80, 822, g_launch.phase==3?"Guest running (playability unverified)":ok?"Guest completed (playability unverified)":"Launch failed - restart launcher", 3, g_launch.phase==3?YEL:ok?GRN:RED); auto ls = wrap_lines(r, 73); for (size_t i = 0; i < ls.size() && i < 4; i++) text(80, 858 + (int)i * 34, ls[i], 3, TXT); }
+                text(80, 822, g_launch.phase==3?"Guest running (playability unverified)":ok?"Guest completed (playability unverified)":retained?"Launch failed - restarting launcher to unload it":"Launch failed - nothing was left running; press A or pick another game", 3, g_launch.phase==3?YEL:ok?GRN:RED); auto ls = wrap_lines(r, 73); for (size_t i = 0; i < ls.size() && i < 4; i++) text(80, 858 + (int)i * 34, ls[i], 3, TXT); }
         }
         text(60, 1050, "A: Install / Play   X: Delete   B: back / cancel download   Menu: back   D-pad up/down: scroll", 2, C3(120, 130, 145));
         if (m_confirmDelete) {

@@ -18,6 +18,7 @@ struct LaunchState {
     std::atomic<uint32_t> appid{0};
     std::atomic<int> gen{0};
     double started = 0;                 // render-thread read only (set before phase=1)
+    std::atomic<double> loaderStarted{0}; // when the guest loader began (0: still preparing Steam/client)
     std::mutex m; std::string result, attempt; bool ok=false;
 };
 static LaunchState g_launch;
@@ -51,42 +52,13 @@ static void lp_sink(const char* s) {
 #include "donors/probe.h"
 
 #include "host/play_runtime.h"
+#include "steam_client_package.h"
 
 static void lp_publish(int gen,uint32_t appid,const std::string& result,bool ok,int mapped,int total,const char* status,bool terminal);
 struct LpCtx { std::wstring root, args; std::vector<std::wstring> names; int gen = 0; uint32_t appid = 0; int mapped = 0; unsigned resolved = 0, stubbed = 0; std::string firstMissing, failName, fault; bool ok = false, timedOut = false; };
 static int pe_machine(const std::wstring& p) {   // 0 = unreadable/not PE, else IMAGE_FILE_MACHINE_*
     FILE* f = _wfopen(p.c_str(), L"rb"); if (!f) return 0; unsigned char h[1024]; size_t n = fread(h, 1, sizeof h, f); fclose(f);
     if (n < 0x40 || h[0] != 'M' || h[1] != 'Z') return 0; uint32_t o = *(uint32_t*)(h + 0x3c); if (o + 6 > n || memcmp(h + o, "PE\0\0", 4)) return 0; return *(uint16_t*)(h + o + 4);
-}
-// Steam API provider for the signed-in account's game (AGENTS.md rule 3): the
-// packaged, pinned gbe_fork steam_api64.dll is copied to LocalState\steam\<appid>
-// with steam_settings for this account, and Play maps it in place of the game's
-// steam_api64.dll (the game's own file is untouched). The SteamID is written only
-// to that on-device settings file, never to a log. Without a packaged provider or
-// a signed-in account nothing is staged and Steam calls fail naturally.
-// TODO(ownership gate): verify the account owns appid before staging (parked).
-static bool stage_steam_provider(uint32_t appid) {
-    wchar_t exe[2048];DWORD n=GetModuleFileNameW(nullptr,exe,2048);
-    if(!n||n>=2048)return false;
-    std::wstring package(exe,n);package.resize(package.find_last_of(L"\\/")+1);
-    const std::wstring source=package+L"steam-provider\\gbe\\steam_api64.dll";
-    if(GetFileAttributesW(source.c_str())==INVALID_FILE_ATTRIBUTES){lp_sink("STEAM provider: none packaged; game Steam calls fail naturally");return false;}
-    auto session=user_session();
-    if(!session||session->anon||!session->steamid){lp_sink("STEAM provider: no signed-in account; not staged");return false;}
-    const std::wstring dir=g_dir+L"\\steam\\"+widen(std::to_string(appid));
-    for(auto d:{g_dir+L"\\steam",dir,dir+L"\\steam_settings",dir+L"\\saves"})CreateDirectoryW(d.c_str(),nullptr);
-    const std::wstring target=dir+L"\\steam_api64.dll";
-    COPYFILE2_EXTENDED_PARAMETERS copy{};copy.dwSize=sizeof copy;
-    HRESULT hr=CopyFile2(source.c_str(),target.c_str(),&copy);
-    if(FAILED(hr)){char line[96];snprintf(line,sizeof line,"STEAM provider: copy failed hr=0x%08lx; not staged",(unsigned long)hr);lp_sink(line);return false;}
-    write_text(dir+L"\\steam_settings\\steam_appid.txt",std::to_string(appid)+"\n");
-    write_text(dir+L"\\steam_settings\\configs.user.ini","[user::general]\naccount_name=Player\naccount_steamid="+
-        std::to_string(session->steamid)+"\nlanguage=english\n[user::saves]\nlocal_save_path=./saves\n");
-    // No LAN/peer networking yet: achievements and cloud saves sync through the launcher.
-    write_text(dir+L"\\steam_settings\\configs.main.ini","[main::connectivity]\ndisable_networking=1\n");
-    play_runtime::set_steam_provider(target);
-    char line[160];snprintf(line,sizeof line,"STEAM provider: gbe_fork staged in LocalState\\steam\\%u for the signed-in account",appid);lp_sink(line);
-    return true;
 }
 // ---- Steam Auto-Cloud for the provider-served game (steam_cloud.h): download
 // the player's newer cloud saves before launch, then upload changed saves every
@@ -118,6 +90,130 @@ static int cloud_http(bool put,bool https,const std::string& host,const std::str
             array_view<uint8_t>((uint8_t*)&body[0],(uint8_t*)&body[0]+body.size()));
         return (int)resp.StatusCode();
     } catch(...) {return 0;}
+}
+static std::string read_bytes(const std::wstring& p) {
+    std::string out; FILE* f=_wfopen(p.c_str(),L"rb"); if(!f) return out;
+    char b[65536]; size_t n; while((n=fread(b,1,sizeof b,f))>0) out.append(b,n); fclose(f); return out;
+}
+// Ownership gate (AGENTS.md rule 3): before any emulated Steam component is
+// staged, Steam itself must issue the signed-in account an app ownership
+// ticket for this app (CM ClientGetAppOwnershipTicket). Steam refuses it for an
+// app the account does not own. The genuine ticket is also what Steam's DRM
+// wrapper checks (play_runtime set_app_ticket); it is kept in memory only.
+static bool owner_ticket(uint32_t appid,std::string& ticket) {
+    ticket.clear();
+    auto session=user_session();
+    if(!session||session->anon||!session->steamid) return false;
+    std::string body; pb_u(body,1,appid);
+    JobMsg m; if(!session->call(857,body,"",15000,m)||m.emsg!=858) return false;   // ClientGetAppOwnershipTicket(Response)
+    uint64_t eresult=2,app=0; std::string bytes;
+    for(auto& f:pb_parse(m.body)) { if(f.f==1)eresult=f.u; else if(f.f==2)app=f.u; else if(f.f==3)bytes=f.s; }
+    steam_app_ticket::Layout t;
+    if(eresult!=1||app!=appid||!steam_app_ticket::parse(bytes,t)||t.appid!=appid||t.steamid!=session->steamid) return false;
+    ticket=bytes; return true;
+}
+// Steam's DRM wrapper (SteamStub) lives in a ".bind" section of the game's
+// executable on disk: the section table answers "is this game wrapped"
+// without running anything.
+static bool steamstub_wrapped(const std::wstring& exe) {
+    FILE* f=_wfopen(exe.c_str(),L"rb"); if(!f) return false;
+    unsigned char h[4096]; size_t n=fread(h,1,sizeof h,f); fclose(f);
+    if(n<0x40||h[0]!='M'||h[1]!='Z') return false;
+    uint32_t o=*(uint32_t*)(h+0x3c); if(o+24>n||memcmp(h+o,"PE\0\0",4)) return false;
+    uint16_t sections=*(uint16_t*)(h+o+6), optional=*(uint16_t*)(h+o+20);
+    size_t table=o+24+optional;
+    for(uint16_t i=0;i<sections&&table+40*(i+1)<=n;++i) if(!memcmp(h+table+40*i,".bind\0",6)) return true;
+    return false;
+}
+static std::string sha256_hex(const std::string& data) {
+    BCRYPT_HASH_HANDLE h=nullptr; UCHAR d[32]={};
+    if(BCryptCreateHash(BCRYPT_SHA256_ALG_HANDLE,&h,nullptr,0,nullptr,0,0)<0) return {};
+    for(size_t at=0;at<data.size();) { ULONG c=(ULONG)std::min<size_t>(data.size()-at,1u<<30); BCryptHashData(h,(PUCHAR)data.data()+at,c,0); at+=c; }
+    BCryptFinishHash(h,d,32,0); BCryptDestroyHash(h);
+    static const char* x="0123456789abcdef"; std::string out;
+    for(UCHAR b:d){out+=x[b>>4];out+=x[b&15];}
+    return out;
+}
+// Valve's signed steamclient64.dll in LocalState\steam\client, fetched from
+// Valve (steam_client_package.h) once per Steam client update. With Valve's
+// manifest unreachable, a cached copy that still carries Valve's signature
+// block is used.
+static std::wstring valve_client() {
+    namespace pkg=steam_client_package;
+    const std::wstring dir=g_dir+L"\\steam\\client", dll=dir+L"\\steamclient64.dll", stamp=dir+L"\\package.sha256";
+    for(auto d:{g_dir+L"\\steam",dir})CreateDirectoryW(d.c_str(),nullptr);
+    auto cached=[&]{return pkg::valve_signature_block(read_bytes(dll));};
+    std::string text; pkg::Entry e;
+    if(cloud_http(false,true,pkg::host,pkg::manifest_path,{},{},text)!=200||!pkg::manifest_entry(text,e)) {
+        if(cached()){lp_sink("STEAM client: Valve's client manifest unreachable; using the cached signed client");return dll;}
+        lp_sink("STEAM client: Valve's client manifest unreachable and nothing cached");return {};
+    }
+    if(read_bytes(stamp)==e.sha256&&cached()) return dll;
+    lp_sink("STEAM client: fetching Valve's signed client from Valve (once per Steam client update)");
+    std::string zip;
+    if(cloud_http(false,true,pkg::host,std::string("/client/")+e.file,{},{},zip)!=200){lp_sink("STEAM client: package download failed");return {};}
+    if(sha256_hex(zip)!=e.sha256){lp_sink("STEAM client: package SHA-256 differs from Valve's manifest; discarded");return {};}
+    auto inflater=[](const char* data,size_t size,size_t expected,std::string& out){
+        out.resize(expected); z_stream z{}; if(inflateInit2(&z,-15)!=Z_OK) return false;
+        z.next_in=(Bytef*)data; z.avail_in=(uInt)size; z.next_out=(Bytef*)&out[0]; z.avail_out=(uInt)expected;
+        int rc=inflate(&z,Z_FINISH); bool ok=rc==Z_STREAM_END&&z.total_out==expected; inflateEnd(&z); return ok;};
+    std::string client;
+    if(!pkg::zip_member(zip,pkg::member,inflater,client)||!pkg::valve_signature_block(client)){lp_sink("STEAM client: package has no signed steamclient64.dll; discarded");return {};}
+    const std::wstring part=dll+L".part";
+    write_text(part,client);
+    if(read_bytes(part)!=client||!MoveFileExW(part.c_str(),dll.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)){DeleteFileW(part.c_str());lp_sink("STEAM client: could not store the signed client");return {};}
+    write_text(stamp,e.sha256);
+    lp_sink("STEAM client: Valve's signed client stored (SHA-256 matched Valve's manifest)");
+    return dll;
+}
+// Emulated Steam for the signed-in account's game (AGENTS.md rule 3), only
+// after Steam issued this account an ownership ticket for the app (above). The
+// packaged, pinned gbe_fork files are copied to LocalState\steam\<appid> with
+// steam_settings for this account; the game's own files are untouched. The
+// SteamID is written only to that on-device settings file, never to a log.
+//  - Most games: gbe's steam_api64.dll is mapped in place of the game's.
+//  - SteamStub-wrapped games: the game keeps its own steam_api64.dll, and the
+//    client it loads is Valve's signed steamclient64.dll answered by gbe's
+//    emulated client; the DRM gets the genuine ownership ticket.
+// Without a packaged emulator, a signed-in account or Steam's ticket nothing
+// is staged and the game's Steam calls fail naturally.
+static std::wstring g_signedClient;   // set when the client route is staged; registry seeded after regb::init
+static uint32_t g_clientAccount=0;
+static bool stage_steam_provider(uint32_t appid,const std::wstring& exePath) {
+    wchar_t exe[2048];DWORD n=GetModuleFileNameW(nullptr,exe,2048);
+    if(!n||n>=2048)return false;
+    std::wstring package(exe,n);package.resize(package.find_last_of(L"\\/")+1);
+    const bool wrapped=steamstub_wrapped(exePath);
+    const std::wstring source=package+(wrapped?L"steam-provider\\gbe\\steamclient64.dll":L"steam-provider\\gbe\\steam_api64.dll");
+    if(GetFileAttributesW(source.c_str())==INVALID_FILE_ATTRIBUTES){lp_sink("STEAM provider: none packaged; game Steam calls fail naturally");return false;}
+    auto session=user_session();
+    if(!session||session->anon||!session->steamid){lp_sink("STEAM provider: no signed-in account; not staged");return false;}
+    std::string ticket;
+    if(!owner_ticket(appid,ticket)){char line[160];snprintf(line,sizeof line,"STEAM provider: Steam issued no ownership ticket for app %u to this account (not owned or offline); nothing staged",appid);lp_sink(line);return false;}
+    const std::wstring dir=g_dir+L"\\steam\\"+widen(std::to_string(appid));
+    for(auto d:{g_dir+L"\\steam",dir,dir+L"\\steam_settings",dir+L"\\saves"})CreateDirectoryW(d.c_str(),nullptr);
+    std::wstring valve;
+    if(wrapped&&(valve=valve_client()).empty()){lp_sink("STEAM provider: SteamStub game, but Valve's signed client is unavailable; nothing staged");return false;}
+    const std::wstring target=dir+(wrapped?L"\\steamclient64.dll":L"\\steam_api64.dll");
+    COPYFILE2_EXTENDED_PARAMETERS copy{};copy.dwSize=sizeof copy;
+    HRESULT hr=CopyFile2(source.c_str(),target.c_str(),&copy);
+    if(FAILED(hr)){char line[96];snprintf(line,sizeof line,"STEAM provider: copy failed hr=0x%08lx; not staged",(unsigned long)hr);lp_sink(line);return false;}
+    write_text(dir+L"\\steam_settings\\steam_appid.txt",std::to_string(appid)+"\n");
+    write_text(dir+L"\\steam_settings\\configs.user.ini","[user::general]\naccount_name=Player\naccount_steamid="+
+        std::to_string(session->steamid)+"\nlanguage=english\n[user::saves]\nlocal_save_path=./saves\n");
+    // No LAN/peer networking yet: achievements and cloud saves sync through the launcher.
+    write_text(dir+L"\\steam_settings\\configs.main.ini","[main::connectivity]\ndisable_networking=1\n");
+    char line[200];
+    if(wrapped) {
+        play_runtime::set_steam_client(target,valve);play_runtime::set_app_ticket(ticket);
+        g_signedClient=valve;g_clientAccount=uint32_t(session->steamid);
+        snprintf(line,sizeof line,"STEAM provider: SteamStub game; gbe_fork client behind Valve's signed client staged in LocalState\\steam\\%u for the owner",appid);
+    } else {
+        play_runtime::set_steam_provider(target);
+        snprintf(line,sizeof line,"STEAM provider: gbe_fork staged in LocalState\\steam\\%u for the owner",appid);
+    }
+    lp_sink(line);
+    return true;
 }
 // The same known folders the game resolves in this process and container.
 static steam_cloud::Roots cloud_roots(const std::wstring& gameRoot) {
@@ -174,12 +270,15 @@ static steam_achievements::Io achievement_io(std::shared_ptr<CmSession> session)
     return io;
 }
 // The account is "in game" while the guest runs (status, playtime), as with the
-// real client; an empty list ends it.
+// real client; an empty list ends it. Friends only see a game on an online
+// persona, so the account goes Online first, as the real client does on start.
 static void games_played(uint32_t appid) {
     auto session=user_session();
     if(!session||session->anon)return;
+    if(appid){std::string status;pb_u(status,1,1);session->send_raw(716,status,0,"");}   // ClientChangeStatus: k_EPersonaStateOnline
     std::string body;
     if(appid){std::string game;pb_fixed64(game,2,appid);pb_s(body,1,game);}
+    pb_u(body,2,20);   // client_os_type, as in ClientLogon (Windows 11)
     session->send_raw(5410,body,0,""); // ClientGamesPlayedWithDataBlob
 }
 static void achievements_sync(uint32_t appid,bool store) {
@@ -281,6 +380,10 @@ static void dump_thread_stacks() {
     lp_sink("STACKS end");
 }
 static void lp_run_impl(LpCtx& c) {
+    // A previous launch that never ran game code was released; nothing of its
+    // Steam routing or final upload carries over to this one.
+    play_runtime::reset_launch_config();g_signedClient.clear();g_clientAccount=0;
+    g_finalSync=nullptr;g_finalSyncDone=false;
     wine_gap::report(c.root);
     if(c.names.empty()) {c.failName="no executable";return;}
     // A Steam launch option may name an executable in a subdirectory: the guest
@@ -301,7 +404,7 @@ static void lp_run_impl(LpCtx& c) {
     if(!donor_pe::probe(lp_sink)) {c.failName="Wine donor initialization/behavior";lp_sink("DWPE FAIL donor behavior gate; no game code executed");return;}
     mlp::donor_resolve=donor_pe::exported;
     if(!user32_core::test(lp_sink)) {c.failName="u32c-test.exe";lp_sink("U32C FAIL regression PE; no game code executed");return;}
-    const bool steamProvider=stage_steam_provider(c.appid);
+    const bool steamProvider=stage_steam_provider(c.appid,exeDir+L"\\"+exe);
     if(steamProvider) {
         try{cloud_sync(c.appid,c.root,false,0);}catch(...){lp_sink("STEAM cloud download: exception");}
         try{achievements_sync(c.appid,false);}catch(...){lp_sink("STEAM achievements: exception");}
@@ -309,10 +412,17 @@ static void lp_run_impl(LpCtx& c) {
     }
     if(steamProvider){uint32_t appid=c.appid;std::wstring root=c.root;g_finalSync=[appid,root]{final_sync(appid,root);};}
     regb::init(g_dir,lp_sink); // guest registry (PlayerPrefs): LocalState\registry.sqlite
+    if(!g_signedClient.empty()&&!play_runtime::seed_steam_client_registry(g_signedClient,g_clientAccount))
+        lp_sink("STEAM client: guest registry not seeded; the game's Steam client lookup will fail");
     {   // Wine's C++ runtime packaged beside the launcher (build.sh: layout\runtime).
         wchar_t self[2048];DWORD n=GetModuleFileNameW(nullptr,self,2048);
         if(n&&n<2048){std::wstring package(self,n);package.resize(package.find_last_of(L"\\/")+1);play_runtime::set_runtime_directory(package+L"runtime");}
     }
+    // The watchdog may already have reported this launch as failed while Steam
+    // was being prepared; then the game must not start behind that result.
+    {std::lock_guard<std::mutex> lock(g_launch.m);
+     if(g_launch.gen!=c.gen||g_launch.phase!=1){c.failName="launch abandoned by the watchdog before the game started";return;}
+     g_launch.loaderStarted=now_s();}
     if(!play_runtime::start(exeDir,exe,c.args,lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
     auto r=play_runtime::state;
     ULONGLONG end=GetTickCount64()+110000; bool reportedRunning=false;
@@ -401,26 +511,45 @@ static void lp_publish(int gen,uint32_t appid,const std::string& result,bool ok,
     write_text(g_dir+L"\\launch_result.json",json);
     g_launch.result=result;g_launch.ok=ok;
     logf("launch: %s attempt=%s ok=%d mapped=%d/%d gameCodeExecuted=%s: %s",terminal?"RESULT":"RUNNING",g_launch.attempt.c_str(),ok?1:0,mapped,total,executed?"true":"false",result.c_str());
+    if(terminal) {   // LocalState\launch_history.log: one line per finished launch, newest last
+        const std::wstring history=g_dir+L"\\launch_history.log";
+        WIN32_FILE_ATTRIBUTE_DATA a{};
+        if(GetFileAttributesExW(history.c_str(),GetFileExInfoStandard,&a)&&(a.nFileSizeHigh||a.nFileSizeLow>(512u<<10)))
+            MoveFileExW(history.c_str(),(history+L".old").c_str(),MOVEFILE_REPLACE_EXISTING);
+        if(FILE* f=_wfopen(history.c_str(),L"ab")) {
+            std::string line=utc_iso()+" appid="+std::to_string(appid)+" attempt="+g_launch.attempt+" state="+status+" ok="+(ok?"1":"0")+
+                " gameCodeExecuted="+(executed?"1":"0")+" mapped="+std::to_string(mapped)+"/"+std::to_string(total)+" result="+result;
+            for(auto& ch:line) if(ch=='\r'||ch=='\n') ch=' ';
+            line+="\n";fwrite(line.data(),1,line.size(),f);fclose(f);
+        }
+    }
     g_launch.phase=terminal?2:3;
 }
 static void lp_finish(int gen,uint32_t appid,const std::string& result,bool ok,int mapped,int total,const char* status=nullptr) {
     lp_publish(gen,appid,result,ok,mapped,total,status?status:ok?"completed":"failed",true);
 }
+// 120 s from the guest loader's start to a first frame or result. Preparing
+// Steam before that (ownership ticket, a first download of Valve's client,
+// cloud saves) may take longer, so it gets 600 s; past that the launch is
+// abandoned and the launch thread never starts the guest (lp_run_impl).
 static void lp_watchdog() {
-    if(g_launch.phase!=1 || now_s()-g_launch.started<=120)return;
+    if(g_launch.phase!=1)return;
+    const double loader=g_launch.loaderStarted.load();
+    if(loader ? now_s()-loader<=120 : now_s()-g_launch.started<=600)return;
     auto r=play_runtime::observed.load(std::memory_order_acquire);
     if(r && (r->finished.load(std::memory_order_acquire) || r->milestone.load()))return;
-    lp_finish(g_launch.gen,g_launch.appid,"watchdog timeout 120 s; last event: "+(r?r->snapshot():std::string("preparing guest loader")),false,0,0,"timeout");
+    lp_finish(g_launch.gen,g_launch.appid,loader?"watchdog timeout 120 s; last event: "+(r?r->snapshot():std::string("preparing guest loader")):
+        std::string("watchdog timeout 600 s preparing Steam before the game started; the game was not started"),false,0,0,"timeout");
 }
 
 // Entry: called on the render thread; returns immediately (work happens on a worker thread).
 static void start_launch(uint32_t appid, const std::string& name, const std::string& dir, const char* via) {
-    if(play_runtime::observed.load(std::memory_order_acquire)) {
+    if(auto guest=play_runtime::observed.load(std::memory_order_acquire)) {
         std::lock_guard<std::mutex> lock(g_launch.m);
-        g_launch.result="Guest retained. Restart launcher before another Play. Last event: "+play_runtime::state->snapshot();
-        logf("launch: Play rejected: guest retained; restart launcher before another Play");return;
+        g_launch.result="Game code from the last launch is still loaded; the launcher restarts to end it. Last event: "+guest->snapshot();
+        logf("launch: Play rejected: game code from the last launch is still loaded");return;
     }
-    int gen = ++g_launch.gen; g_launch.appid = appid; g_launch.started = now_s();
+    int gen = ++g_launch.gen; g_launch.appid = appid; g_launch.started = now_s(); g_launch.loaderStarted = 0;
     { std::lock_guard<std::mutex> l(g_launch.m); g_launch.result.clear();g_launch.ok=false;g_launch.attempt=std::to_string(GetCurrentProcessId())+":"+std::to_string(gen); } g_launch.phase = 1;
     const LaunchTarget target = dir.empty() ? LaunchTarget{} : pick_target(appid, g_dir + L"\\" + widen(dir));
     const std::string args = target.args;
@@ -441,12 +570,17 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
             std::wstring root = g_dir + L"\\" + widen(dir); std::string why = target.why; std::vector<std::wstring> names; if (!target.exe.empty()) names.push_back(target.exe);
             logf("launch: runtime root=LocalState\\%s targets=%zu (%s)", dir.c_str(), names.size(), why.c_str());
             if (dir.empty() || names.empty()) { finish("cannot start: " + (dir.empty() ? std::string("install directory unknown") : why), false, 0, 0); return; }
+            // Keep the previous attempt's log beside this one (launch_probe.previous.log).
+            MoveFileExW((g_dir + L"\\launch_probe.log").c_str(), (g_dir + L"\\launch_probe.previous.log").c_str(), MOVEFILE_REPLACE_EXISTING);
             { std::lock_guard<std::mutex> l(g_lpm); if (g_lpf) fclose(g_lpf); g_lpf = _wfopen((g_dir + L"\\launch_probe.log").c_str(), L"wb"); g_lpMissing = g_lpStubbed = g_lpStubCalls = g_lpLines = 0; g_lpLastFail.clear(); }
             LpCtx c; c.root = root; c.args = widen(args); c.names = names;c.gen=gen;c.appid=appid; bool noFault = lp_run_seh(&c);
             { std::lock_guard<std::mutex> l(g_lpm); if (g_lpf) { fclose(g_lpf); g_lpf = nullptr; } }
             int total=play_runtime::state?int(play_runtime::state->moduleCount):int(names.size());
-            if(!noFault) {finish("loader SEH exception; last event: "+(play_runtime::state?play_runtime::state->snapshot():std::string("loader not entered")),false,c.mapped,total);return;}
-            lp_finish(gen,appid,c.fault.empty()?c.failName:c.fault,c.ok,c.mapped,total,c.timedOut?"timeout":nullptr);
+            const std::string fault=noFault?(c.fault.empty()?c.failName:c.fault):
+                "loader SEH exception; last event: "+(play_runtime::state?play_runtime::state->snapshot():std::string("loader not entered"));
+            // Before publishing: the UI offers Play again only once nothing is retained.
+            if(play_runtime::discard_unstarted()) logf("launch: no game code ran; loader released, another game can be played");
+            lp_finish(gen,appid,fault,noFault&&c.ok,c.mapped,total,noFault&&c.timedOut?"timeout":nullptr);
         } catch (std::exception const& e) { finish(std::string("loader threw: ") + e.what(), false, 0, 0); }
         catch (...) { finish("loader threw an unknown exception.", false, 0, 0); }
     }).detach();

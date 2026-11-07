@@ -208,7 +208,7 @@ static bool loaderLockTest() {
     auto module=new(guardedModule) play_runtime::Module();
     auto observer=add(1,registryRead);
     if(!observer){module->~Module();VirtualFree(guardedModule,0,MEM_RELEASE);return false;}
-    {std::lock_guard<std::recursive_mutex> lock(play_runtime::state->loaderMutex);
+    {std::lock_guard<play_runtime::LoaderMutex> lock(play_runtime::state->loaderMutex);
      play_runtime::state->modules.emplace_back(module);}
     DWORD old=0;
     bool guarded=VirtualProtect(guardedModule,sizeof(*module),PAGE_READWRITE|PAGE_GUARD,&old)!=FALSE;
@@ -221,7 +221,7 @@ static bool loaderLockTest() {
     remove(observer);
     // Clear any unconsumed guard before destroying test-only metadata.
     VirtualProtect(guardedModule,sizeof(*module),PAGE_READWRITE,&old);
-    {std::lock_guard<std::recursive_mutex> lock(play_runtime::state->loaderMutex);
+    {std::lock_guard<play_runtime::LoaderMutex> lock(play_runtime::state->loaderMutex);
      play_runtime::state->modules.back().release();play_runtime::state->modules.pop_back();}
     module->~Module();VirtualFree(guardedModule,0,MEM_RELEASE);guardedModule=nullptr;
     printf("PLAY-LOADER-LOCK registry-reads=%u checks=%u unlocked=%u\n",registryReads,loaderLockChecks,loaderLockFailures);fflush(stdout);
@@ -315,6 +315,19 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // Wine's C++ runtime beside the runner, as layout\runtime beside the launcher.
     {wchar_t self[32768];DWORD n=GetModuleFileNameW(nullptr,self,32768);std::wstring dir(self,n);
      play_runtime::set_runtime_directory(dir.substr(0,dir.find_last_of(L"\\/"))+L"\\runtime");}
+    // Optional emulated Steam client (owned game): served for steamclient64.dll,
+    // with the ActiveProcess registry environment in the guest registry.
+    {wchar_t client[1024];DWORD n=GetEnvironmentVariableW(L"PRUN_STEAM_CLIENT",client,1024);
+     if(n&&n<1024){std::wstring path(client,n),signedPath;
+      wchar_t valve[1024];DWORD v=GetEnvironmentVariableW(L"PRUN_STEAM_CLIENT_SIGNED",valve,1024);
+      if(v&&v<1024)signedPath.assign(valve,v);
+      play_runtime::set_steam_client(path,signedPath);
+      if(!play_runtime::seed_steam_client_registry(signedPath.empty()?path:signedPath,1)){logline("PRUN FAIL steam client registry");return 4;}
+      // The owner's genuine app ownership ticket, as the launcher obtains it.
+      wchar_t ticket[1024];DWORD t=GetEnvironmentVariableW(L"PRUN_STEAM_APP_TICKET",ticket,1024);
+      if(t&&t<1024){std::string bytes;if(FILE* f=_wfopen(std::wstring(ticket,t).c_str(),L"rb")){char b[4096];size_t k=fread(b,1,sizeof b,f);bytes.assign(b,k);fclose(f);}
+       play_runtime::set_app_ticket(bytes);}
+      logline("PRUN steam client staged (off-device fixture account)");}}
     // Optional Steam API provider (owned game): mapped in place of steam_api64.dll.
     {wchar_t provider[1024];DWORD n=GetEnvironmentVariableW(L"PRUN_STEAM_PROVIDER",provider,1024);
      if(n&&n<1024)play_runtime::set_steam_provider(std::wstring(provider,n));}
@@ -331,6 +344,44 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         wchar_t seconds[16];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_SECONDS",seconds,16);
         DWORD limit=n&&n<16?DWORD(_wtoi(seconds)):10;
         host_surface::wait(r->worker,limit*1000);
+        // PRUN_STACKS=1: the guest main thread's stack at the time limit, as the
+        // launcher's cmd.txt "stacks" reports it (off-device diagnosis).
+        if(GetEnvironmentVariableW(L"PRUN_STACKS",nullptr,0)) {
+            DWORD alive=r->worker?WaitForSingleObject(r->worker,0):WAIT_FAILED;
+            logline(("STACK worker state wait="+std::to_string(alive)+" finished="+std::to_string(int(r->finished.load()))).c_str());
+        }
+        // PRUN_STACKS=all: every other thread in the process too (lock waits).
+        auto dump=[](HANDLE thread,const std::string& title,int frames) {
+            if(SuspendThread(thread)==DWORD(-1))return;
+            CONTEXT ctx{};ctx.ContextFlags=CONTEXT_FULL;
+            if(GetThreadContext(thread,&ctx)) {
+                logline(("STACK "+title).c_str());
+                for(int frame=0;frame<frames&&ctx.Rip;++frame) {
+                    logline(("  #"+std::to_string(frame)+" "+play_runtime::describe(ctx.Rip)).c_str());
+                    DWORD64 base=0;auto fn=RtlLookupFunctionEntry(ctx.Rip,&base,nullptr);
+                    if(fn){void* handler=nullptr;DWORD64 establisher=0;RtlVirtualUnwind(UNW_FLAG_NHANDLER,base,ctx.Rip,fn,&ctx,&handler,&establisher,nullptr);}
+                    else{if(!ctx.Rsp)break;ctx.Rip=*(DWORD64*)ctx.Rsp;ctx.Rsp+=8;}
+                }
+            }
+            ResumeThread(thread);
+        };
+        if(GetEnvironmentVariableW(L"PRUN_STACKS",nullptr,0)&&r->worker&&!r->finished.load()) dump(r->worker,"guest main thread",24);
+        wchar_t stacks[8]{};
+        if(GetEnvironmentVariableW(L"PRUN_STACKS",stacks,8)&&!wcscmp(stacks,L"all")) {
+            // Toolhelp is outside the UWP SDK partition; resolve it from kernel32.
+            struct ThreadEntry {DWORD dwSize,cntUsage,th32ThreadID,th32OwnerProcessID;LONG tpBasePri,tpDeltaPri;DWORD dwFlags;};
+            using Snapshot=HANDLE(WINAPI*)(DWORD,DWORD);using Walk=BOOL(WINAPI*)(HANDLE,ThreadEntry*);
+            HMODULE k32=GetModuleHandleW(L"kernel32.dll");
+            auto snapshot=(Snapshot)GetProcAddress(k32,"CreateToolhelp32Snapshot");
+            auto first=(Walk)GetProcAddress(k32,"Thread32First"),next=(Walk)GetProcAddress(k32,"Thread32Next");
+            HANDLE snap=snapshot?snapshot(0x4/*TH32CS_SNAPTHREAD*/,0):INVALID_HANDLE_VALUE;ThreadEntry te{sizeof te};
+            DWORD self=GetCurrentThreadId(),worker=r->worker?GetThreadId(r->worker):0;
+            for(BOOL ok=snap!=INVALID_HANDLE_VALUE&&first&&next&&first(snap,&te);ok;ok=next(snap,&te)) {
+                if(te.th32OwnerProcessID!=GetCurrentProcessId()||te.th32ThreadID==self||te.th32ThreadID==worker)continue;
+                if(HANDLE t=OpenThread(THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_QUERY_INFORMATION,FALSE,te.th32ThreadID)){dump(t,"thread "+std::to_string(te.th32ThreadID),12);CloseHandle(t);}
+            }
+            if(snap!=INVALID_HANDLE_VALUE)CloseHandle(snap);
+        }
     } else if(r->worker)WaitForSingleObject(r->worker,2000);
     auto last=r->snapshot();char summary[8192];snprintf(summary,sizeof summary,"PLAY-TEST executed=%d finished=%d success=%d code=%lu last=%s",int(r->executed),int(r->finished),r->success,r->code,last.c_str());
     logline(summary);
@@ -393,6 +444,44 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     else if(mode=="exit")ok=ok&&r->finished&&r->success&&r->code==37;
     else if(mode=="hang")ok=ok&&!r->finished&&last.find("EXE entry play-guest.exe")!=std::string::npos;
     else ok=ok&&r->finished&&r->success&&r->code==42;
+    if(mode=="failed-dependency"&&ok) {
+        // No game code ran, so the launcher releases this loader and the next
+        // Play starts fresh in the same process; a guest that ran stays retained.
+        bool released=play_runtime::discard_unstarted()&&!play_runtime::observed.load()&&!play_runtime::state&&mlp::assets.empty();
+        bool again=released&&play_runtime::start(root,L"play-guest.exe",L"",logline);
+        auto next=play_runtime::state;
+        if(again&&next->worker)WaitForSingleObject(next->worker,5000);
+        bool ran=again&&next!=r&&next->executed&&next->finished&&next->success&&next->code==42;
+        bool retained=ran&&!play_runtime::discard_unstarted()&&play_runtime::observed.load()==next;
+        printf("PLAY-RELEASE released=%d restarted=%d ran=%d retained=%d\n",released,again,ran,retained);fflush(stdout);
+        ok=retained;
+    }
+    if(mode=="top-level"&&ok) {
+        // A guest thread Play did not create (CRT/SDL threads start natively)
+        // faults: the process filter records it and ends only that thread.
+        r->finished=false;
+        // It faults while holding Play's loader lock (twice, recursively): the
+        // lock must be released, or every later lookup would wait forever.
+        HANDLE native=CreateThread(nullptr,0,[](void*)->DWORD{play_runtime::guestThread=true;
+            play_runtime::state->loaderMutex.lock();play_runtime::state->loaderMutex.lock();
+            RaiseException(0xe0424243,0,0,nullptr);return 7;},nullptr,0,nullptr);
+        DWORD wait=native?WaitForSingleObject(native,5000):WAIT_FAILED,code=0;
+        if(native){GetExitCodeThread(native,&code);CloseHandle(native);}
+        auto last=r->snapshot();
+        auto lockFree=[&]{HANDLE t=CreateThread(nullptr,0,[](void*)->DWORD{auto& m=play_runtime::state->loaderMutex;if(!m.try_lock())return 1;m.unlock();return 0;},nullptr,0,nullptr);
+            DWORD c=1;if(t){WaitForSingleObject(t,5000);GetExitCodeThread(t,&c);CloseHandle(t);}return c==0;};
+        bool survived=wait==WAIT_OBJECT_0&&code==0xe0424243&&r->finished.load()&&last.find("unhandled exception code=0xe0424243")!=std::string::npos&&lockFree();
+        // ExitProcess while holding the loader lock (e.g. from a DllMain): same.
+        r->finished=false;
+        native=CreateThread(nullptr,0,[](void*)->DWORD{play_runtime::guestThread=true;
+            play_runtime::state->loaderMutex.lock();play_runtime::exitProcess(9);return 7;},nullptr,0,nullptr);
+        wait=native?WaitForSingleObject(native,5000):WAIT_FAILED;code=0;
+        if(native){GetExitCodeThread(native,&code);CloseHandle(native);}
+        bool exited=wait==WAIT_OBJECT_0&&code==9&&r->finished.load()&&r->code==9&&lockFree();
+        survived=survived&&exited;
+        printf("PLAY-TOP-LEVEL survived=%d exit=%d\n",survived,exited);fflush(stdout);
+        ok=survived;
+    }
     // The runner is a disposable off-device process, like launcher restart.
     ExitProcess(ok?0:1);
 }

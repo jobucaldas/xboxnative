@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-x86_64-w64-mingw32-g++ -O2 -static wine_parity_test.cpp -o "$work/wine-parity-test.exe"
+x86_64-w64-mingw32-windres parity_strings.rc -O coff -o "$work/strings.o"
+x86_64-w64-mingw32-g++ -O2 -static wine_parity_test.cpp "$work/strings.o" -o "$work/wine-parity-test.exe"
 cp out/layout/uwph-u32c.dll "$work/"
 WINEDEBUG=-all wine "$work/wine-parity-test.exe"

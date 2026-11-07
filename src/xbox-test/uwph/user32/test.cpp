@@ -10,12 +10,13 @@ extern "C" __declspec(dllimport) void WINAPI uwph_u32c_input_release_all();
 extern "C" __declspec(dllimport) BOOL WINAPI uwph_u32c_input_key(UINT,UINT,BOOL,BOOL,UINT);
 static bool streq(const char* a,const char* b){while(*a&&*b){if(*a++!=*b++)return false;}return *a==*b;}
 static bool wstreq(const wchar_t* a,const wchar_t* b){while(*a&&*b){if(*a++!=*b++)return false;}return *a==*b;}
-static int checks,failures,created,destroyed;
+static int checks,failures,created,destroyed;static LPARAM sizedParam;
 static void check_result(bool ok,const char* expression){++checks;if(!ok){++failures;OutputDebugStringA(expression);}}
 #define check(...) check_result((__VA_ARGS__),"U32C CHECK FAIL " #__VA_ARGS__)
 static LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM p){
  if(m==WM_NCCREATE){auto c=(CREATESTRUCTW*)p;check(c->lpCreateParams==(void*)0x12345678);SetWindowLongPtrW(h,GWLP_USERDATA,(LONG_PTR)0x1234567887654321ULL);++created;}
  if(m==WM_NCDESTROY)++destroyed;
+ if(m==WM_SIZE)sizedParam=p;
  return DefWindowProcW(h,m,w,p);
 }static LRESULT CALLBACK ansiProc(HWND h,UINT m,WPARAM w,LPARAM p){return DefWindowProcA(h,m,w,p);}
 
@@ -44,6 +45,16 @@ extern "C" DWORD WINAPI u32c_entry(){
  SetLastError(0);check(!GetWindowLongA(h,GWLP_WNDPROC)&&GetLastError()==ERROR_INVALID_INDEX);
  HWND child=CreateWindowExW(0,wc.lpszClassName,L"child",WS_CHILD|WS_VISIBLE,2,3,10,20,h,(HMENU)77,0,(void*)0x12345678);check(child&&GetParent(child)==h&&GetDlgItem(h,77)==child);check(SetDlgItemTextW(h,77,L"child text"));
  POINT cp={0,0};check(ClientToScreen(child,&cp)&&cp.x==25&&cp.y==50);
+ POINT mp[2]={{0,0},{1,1}};check(MapWindowPoints(child,0,mp,2)==MAKELONG(25,50)&&mp[0].x==25&&mp[0].y==50&&mp[1].x==26&&mp[1].y==51);
+ check(MapWindowPoints(0,h,mp,1)==MAKELONG(-23,-47)&&mp[0].x==2&&mp[0].y==3);
+ check(GetWindow(h,GW_CHILD)==child&&GetTopWindow(h)==child&&!GetWindow(child,GW_HWNDNEXT)&&!GetWindow(child,GW_HWNDPREV));
+ check(GetWindow(child,GW_HWNDFIRST)==child&&!GetWindow(child,GW_OWNER)&&GetTopWindow(0)==h&&GetWindow(h,GW_HWNDFIRST)==h);
+ {RECT a={1,2,3,4},b={1,2,3,4},c={1,2,3,5};check(EqualRect(&a,&b)&&!EqualRect(&a,&c));}
+ {WCHAR text[32];check(wsprintfW(text,L"%d-%s",7,L"x")==3&&!lstrcmpW(text,L"7-x"));check(*CharNextW(L"ab")==L'b');}
+ check(GetClassLongPtrW(h,GCLP_WNDPROC)==(ULONG_PTR)proc&&GetClassLongPtrW(h,GCL_CBCLSEXTRA)==8);
+ check(SetClassLongPtrW(h,0,0x55)==0&&GetClassLongPtrW(h,0)==0x55);
+ {DWORD_PTR result=7;check(SendMessageTimeoutW(h,WM_APP,0,0,SMTO_NORMAL,100,&result)&&result==42);}
+ SetLastError(0);check(!GetClassLongPtrW(h,4)&&GetLastError()==ERROR_INVALID_INDEX);
  check(IsWindow(h)&&IsWindowVisible(h)&&!IsIconic(h));check(ShowWindow(h,SW_HIDE));check(!IsWindowVisible(h)&&!IsWindowVisible(child));check(!ShowWindow(h,SW_SHOW));
  POINT p={1,2};check(ClientToScreen(h,&p)&&p.x==24&&p.y==49);check(ScreenToClient(h,&p)&&p.x==1&&p.y==2);
  RECT r={};check(GetClientRect(h,&r)&&r.right==320&&r.bottom==240);check(GetWindowRect(h,&r)&&r.left==23&&r.top==47&&r.right==343);
@@ -53,8 +64,23 @@ extern "C" DWORD WINAPI u32c_entry(){
  RECT x={1,2,5,6},y={};check(CopyRect(&y,&x)&&y.left==1);check(PtInRect(&x,POINT{1,2})&&!PtInRect(&x,POINT{5,6}));check(OffsetRect(&y,2,3)&&y.left==3&&y.top==5);
  check(InflateRect(&y,1,1)&&y.left==2);check(UnionRect(&r,&x,&y)&&r.left==1&&r.bottom==10);
  check(DestroyWindow(h)&&destroyed==2&&!IsWindow(child));check(!IsWindow(h));SetLastError(0);check(!GetWindowLongPtrW(h,GWLP_USERDATA)&&GetLastError()==ERROR_INVALID_WINDOW_HANDLE);
+ // A framed window: its client area is the window minus the frame that
+ // AdjustWindowRectEx adds, so "client + frame" sizing round-trips.
+ {RECT want={0,0,1280,720};check(AdjustWindowRectEx(&want,WS_OVERLAPPEDWINDOW,FALSE,0)&&want.left<0&&want.top<want.left);
+  HWND framed=CreateWindowExW(0,MAKEINTATOM(a),L"framed",WS_OVERLAPPEDWINDOW,10,20,want.right-want.left,want.bottom-want.top,0,0,0,(void*)0x12345678);
+  RECT fr={};check(framed&&GetClientRect(framed,&fr)&&fr.right==1280&&fr.bottom==720);
+  POINT fp={0,0};check(ClientToScreen(framed,&fp)&&fp.x==10-want.left&&fp.y==20-want.top);check(ScreenToClient(framed,&fp)&&!fp.x&&!fp.y);
+  check(GetWindowRect(framed,&fr)&&fr.left==10&&fr.top==20&&fr.right-fr.left==want.right-want.left);
+  sizedParam=0;check(SetWindowPos(framed,0,0,0,want.right-want.left+100,want.bottom-want.top,SWP_NOMOVE|SWP_NOZORDER)&&sizedParam==MAKELPARAM(1380,720));
+  check(DestroyWindow(framed));}
  check(UnregisterClassW(wc.lpszClassName,0));check(!CreateWindowExW(0,MAKEINTATOM(a),0,0,0,0,1,1,0,0,0,0));
  wc.lpszClassName=L"U32cReject";wc.lpfnWndProc=reject;check(RegisterClassExW(&wc)!=0);check(!CreateWindowExW(0,wc.lpszClassName,0,0,0,0,1,1,0,0,0,0));check(rejectedDestroyed==1&&rejectedCreated==0);check(UnregisterClassW(wc.lpszClassName,0));
+ {USEROBJECTFLAGS flags{};DWORD n=0;WCHAR station[16]{};HWINSTA ws=GetProcessWindowStation();
+  check(ws&&GetUserObjectInformationW(ws,UOI_FLAGS,&flags,sizeof flags,&n)&&n==sizeof flags&&(flags.dwFlags&WSF_VISIBLE));
+  check(GetUserObjectInformationW(ws,UOI_NAME,station,sizeof station,&n)&&n==16&&!lstrcmpW(station,L"WinSta0"));
+  check(!GetUserObjectInformationW(ws,UOI_NAME,station,4,&n)&&GetLastError()==ERROR_INSUFFICIENT_BUFFER&&n==16);
+  check(GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()),UOI_FLAGS,&flags,sizeof flags,&n)&&!(flags.dwFlags&WSF_VISIBLE));
+  check(!GetUserObjectInformationW((HANDLE)h,UOI_FLAGS,&flags,sizeof flags,&n)&&GetLastError()==ERROR_INVALID_HANDLE);}
  HMONITOR monitor=MonitorFromWindow(h,MONITOR_DEFAULTTOPRIMARY);MONITORINFO mi={sizeof(mi)};check(GetMonitorInfoW(monitor,&mi)&&mi.rcMonitor.right==1920);check(GetSystemMetrics(SM_CMONITORS)==1);check(IsWindow(GetDesktopWindow()));
  // item 44: input/cursor/focus
  WNDCLASSEXW wc2={};wc2.cbSize=sizeof(wc2);wc2.lpfnWndProc=proc;wc2.lpszClassName=L"U32cItem44";
@@ -103,7 +129,9 @@ extern "C" DWORD WINAPI u32c_entry(){
   check(SendMessageA(ah,WM_GETTEXT,sizeof text,(LPARAM)text)==9&&!lstrcmpA(text,"wide text"));
   WCHAR wsmall[5]={};check(SendMessageW(ah,WM_GETTEXT,5,(LPARAM)wsmall)==4&&!lstrcmpW(wsmall,L"wide"));
   check(PostMessageA(ah,WM_USER+5,7,9));MSG am;check(PeekMessageA(&am,ah,WM_USER+5,WM_USER+5,PM_REMOVE)&&am.wParam==7&&am.lParam==9);
+  check(!IsWindowUnicode(ah));HDC adc=GetDC(ah);check(adc&&WindowFromDC(adc)==ah);ReleaseDC(ah,adc);check(!WindowFromDC(adc));
   check(DestroyWindow(ah));check(UnregisterClassA("u32cansi",0));}
+ check(SetProcessDPIAware()&&SetProcessDPIAware());
  POINT cp2; check(GetCursorPos(&cp2)&&cp2.x==960&&cp2.y==540);check(SetCursorPos(10,10)&&GetCursorPos(&cp2)&&cp2.x==10&&cp2.y==10);
  RECT clip{0,0,5,5};check(ClipCursor(&clip));check(GetCursorPos(&cp2)&&cp2.x==4&&cp2.y==4);check(ClipCursor(0));
  int shown=ShowCursor(TRUE);check(ShowCursor(FALSE)==shown-1);

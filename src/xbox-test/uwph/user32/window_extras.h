@@ -101,6 +101,13 @@ extern "C" UINT WINAPI c_SendInput(UINT count,Input* inputs,int size){
  }
  return done;
 }
+// IsWindowUnicode: whether the window procedure's class was registered through
+// the W API (RegisterClass(Ex)A marks it ANSI).
+extern "C" BOOL WINAPI c_IsWindowUnicode(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);return w&&!(w->cls&&w->cls->ansi);}
+// Wine: system DPI awareness, and TRUE even when the awareness was already set.
+extern "C" BOOL WINAPI c_SetProcessDPIAware(){c_SetProcessDpiAwarenessInternal(1);return TRUE;}
+// The window a GetDC/BeginPaint DC belongs to (NULL for others and the screen DC).
+extern "C" HWND WINAPI c_WindowFromDC(HDC dc){std::lock_guard<std::recursive_mutex> l(mutex);for(auto& d:dcs)if((HDC)d.get()==dc)return d->hwnd;return nullptr;}
 extern "C" UINT WINAPI c_RegisterWindowMessageW(LPCWSTR s){return c_GlobalAddAtomW(s);}   // same atom table (Wine)
 extern "C" UINT WINAPI c_RegisterClipboardFormatW(LPCWSTR s){return c_GlobalAddAtomW(s);}
 extern "C" int WINAPI c_GetClipboardFormatNameA(UINT format,LPSTR out,int size){
@@ -229,7 +236,7 @@ static_assert(sizeof(PaintStruct)==72,"PAINTSTRUCT layout");
 extern "C" HDC WINAPI c_BeginPaint(HWND h,PaintStruct* ps){
  if(!ps){SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}
  std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w)return nullptr;
- *ps={};ps->hdc=c_GetDC(h);ps->paint={0,0,w->cx,w->cy};return ps->hdc;
+ *ps={};ps->hdc=c_GetDC(h);ps->paint={0,0,clientWidth(w),clientHeight(w)};return ps->hdc;   // client coordinates, as GetClientRect
 }
 extern "C" BOOL WINAPI c_EndPaint(HWND h,const PaintStruct* ps){if(ps&&ps->hdc)c_ReleaseDC(h,ps->hdc);return TRUE;}
 extern "C" BOOL WINAPI c_GetUpdateRect(HWND h,RECT* r,BOOL){std::lock_guard<std::recursive_mutex> l(mutex);if(!window(h))return FALSE;if(r)*r={};return FALSE;}

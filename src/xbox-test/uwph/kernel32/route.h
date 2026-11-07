@@ -5,6 +5,7 @@
 #include "handles_route.h"
 #include "memory_route.h"
 #include "file_route.h"
+#include "pipe_route.h"
 #include "nls_time_route.h"
 #include "process_route.h"
 #include "slist_route.h"
@@ -27,6 +28,7 @@ inline uintptr_t resolve(const char* dll, const char* name) {
     if (auto p = resolve_handles(dll, name)) return p;
     if (auto p = resolve_memory(dll, name)) return p;
     if (auto p = resolve_file(dll, name)) return p;
+    if (auto p = resolve_pipe(dll, name)) return p;
     if (auto p = resolve_nls_time(dll, name)) return p;
     if (auto p = resolve_process(dll, name)) return p;
     if (auto p = resolve_slist(dll, name)) return p;

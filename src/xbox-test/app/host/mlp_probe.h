@@ -132,7 +132,7 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     if(!address) address=imm32_core::resolve(dll,name, reinterpret_cast<imm32_core::IsWindow>(
         user32_core::resolve("user32.dll","IsWindow")));
     // Override system DWM before a guest record HWND can reach desktop DWM.
-    if(key=="dwmapi.dll" && name) address=dwmapi_core::resolve(dll,name,
+    if(key=="dwmapi.dll" && name && !dwmapi_core::native_safe(name)) address=dwmapi_core::resolve(dll,name,
         reinterpret_cast<dwmapi_core::IsWindow>(user32_core::resolve("user32.dll","IsWindow")),
         reinterpret_cast<dwmapi_core::WindowRect>(user32_core::resolve("user32.dll","GetWindowRect")),
         reinterpret_cast<dwmapi_core::WindowLong>(user32_core::resolve("user32.dll","GetWindowLongPtrW")));

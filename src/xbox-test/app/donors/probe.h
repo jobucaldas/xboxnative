@@ -42,6 +42,9 @@ static BOOL WINAPI disable_thread_calls(HMODULE) {
     return TRUE;
 }
 static std::map<std::string, HMODULE> modules;
+// comctl32 v6's InitCommonControls registers nothing (its classes register
+// when comctl32 loads); dinput8 calls it only before its configuration dialog.
+static void WINAPI init_common_controls() {}
 // Wine donors delay-load user32/ole32/... through winecrt0's __delayLoadHelper2,
 // which calls kernel32!ResolveDelayLoadedAPI. The native API would load host
 // DLLs and pass guest record handles (HMONITOR, HWND) to host user32, so donors
@@ -82,6 +85,8 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     else if(key=="kernel32.dll"&&name&&!strcmp(name,"ResolveDelayLoadedAPI")) p=(uintptr_t)&resolve_delay_loaded;
     else if(key=="user32.dll") p=user32_core::resolve(dll,name);
     else if(key=="kernel32.dll"&&name) p=kernel_tail::resolve(name);
+    else if(key=="comctl32.dll"&&name&&!strcmp(name,"InitCommonControls")) p=(uintptr_t)&init_common_controls;
+    else if(images.count(key)) p=exported(key.c_str(),name,ordinal);   // an earlier donor (dinput8 -> hid, setupapi)
     else {
         auto it=modules.find(key);
         if(it==modules.end()) {
@@ -94,6 +99,7 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     if(!p) ++missing;
     return p;
 }
+static BOOL WINAPI count_device(const void*,void* count) {++*(unsigned*)count;return TRUE;}
 static bool behavior(const std::string& label,wxl::Image& image,const std::wstring& path) {
     if(label=="hid.dll") {
         GUID guid{};auto call=(void(WINAPI*)(GUID*))image.symbol("HidD_GetHidGuid");
@@ -123,6 +129,23 @@ static bool behavior(const std::string& label,wxl::Image& image,const std::wstri
         bool ok=args&&count==2&&!wcscmp(args[0],L"alpha beta")&&!wcscmp(args[1],L"tail");
         if(args)LocalFree(args);return ok;
     }
+    if(label=="dinput8.dll") {
+        // Create DirectInput 8 and enumerate attached devices, as games do
+        // first. Keyboard and mouse come from the record core; joysticks from
+        // the hid/setupapi donors (none on a console: pads use XInput).
+        using Create=HRESULT(WINAPI*)(HINSTANCE,DWORD,const GUID&,void**,IUnknown*);
+        auto create=(Create)image.symbol("DirectInput8Create");if(!create)return false;
+        static const GUID input8W={0xbf798031,0x483a,0x4da2,{0xaa,0x99,0x5d,0x64,0xed,0x36,0x97,0x00}};   // IID_IDirectInput8W
+        void* input=nullptr;
+        if(FAILED(create(GetModuleHandleW(nullptr),0x0800,input8W,&input,nullptr))||!input)return false;
+        struct Table {void* query;void* addRef;ULONG(WINAPI*release)(void*);void* createDevice;
+                      HRESULT(WINAPI*enumDevices)(void*,DWORD,BOOL(WINAPI*)(const void*,void*),void*,DWORD);};
+        auto table=*(Table**)input;unsigned devices=0;
+        HRESULT hr=table->enumDevices(input,0/*DI8DEVCLASS_ALL*/,count_device,&devices,1/*DIEDFL_ATTACHEDONLY*/);
+        table->release(input);
+        char text[96];snprintf(text,sizeof text,"DWPE dinput8 EnumDevices hr=0x%08lx attached=%u",(unsigned long)hr,devices);sink(text);
+        return hr==S_OK;
+    }
     if(label=="avrt.dll") {
         auto call=(HANDLE(WINAPI*)(LPCWSTR,LPDWORD))image.symbol("AvSetMmThreadCharacteristicsW");
         if(!call)return false;DWORD index=0;SetLastError(0);
@@ -143,7 +166,8 @@ inline bool probe(wxl::Log log) {
 #include "donor_imports.generated.h"
     };
     unsigned failures=0;
-    for(auto name:{L"hid.dll",L"setupapi.dll",L"version.dll",L"shcore.dll",L"avrt.dll"}) {
+    // dinput8 is last: its hid/setupapi imports resolve to those donors.
+    for(auto name:{L"hid.dll",L"setupapi.dll",L"version.dll",L"shcore.dll",L"avrt.dll",L"dinput8.dll"}) {
         std::wstring path=root+name; std::string label(name,name+wcslen(name));
         missing=0;log(("DWPE BEGIN "+label+" strict imports before initialization").c_str());
         for(auto& i:imports) if(label==i.donor) resolve(i.dll,i.name,i.ordinal);
@@ -160,6 +184,10 @@ inline bool probe(wxl::Log log) {
             }
         }
         char text[256];snprintf(text,sizeof text,"DWPE RUN %s initialized=%u missing=%u behavior=%u",label.c_str(),ok,preflightMissing,tested);log(text);
+        // dinput8 serves only games that import it: when its gate fails it is
+        // withheld (those games fail on the unresolved import, as before);
+        // the other donors stay a gate for every launch.
+        if(label=="dinput8.dll"&&!tested) {log("DWPE dinput8 withheld; games importing it stop at that import");continue;}
         failures+=!tested;
     }
     ready=failures==0;

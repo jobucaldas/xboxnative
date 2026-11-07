@@ -11,7 +11,12 @@ static uintptr_t test_resolve(const char* dll,const char* name,WORD ordinal) {
  }
  return 0;
 }
+// Gates the backend once per launcher process, like the donor probe: the test
+// PE registers classes and windows in the same record core the games use, so a
+// second run (the next Play after a failed launch) would see its own leftovers.
 inline bool test(wxl::Log log) {
+ static bool passed=false;
+ if(passed){log("U32C own mapped test passed earlier in this launcher process");return true;}
  static const char* imports[]={
 #include "megabonk-user32.h"
  };
@@ -30,6 +35,7 @@ inline bool test(wxl::Log log) {
  auto entry=(DWORD(WINAPI*)())(image.base+image.entry);
  DWORD result=entry();
  char text[120];snprintf(text,sizeof(text),"U32C own mapped test entry=%lu; game entries remain uncalled",result);log(text);
- return result==42;
+ passed=result==42;
+ return passed;
 }
 }

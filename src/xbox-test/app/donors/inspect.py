@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import re
 
-DONORS = ("hid.dll", "setupapi.dll", "version.dll", "shcore.dll", "avrt.dll")
+DONORS = ("hid.dll", "setupapi.dll", "version.dll", "shcore.dll", "avrt.dll", "dinput8.dll")
 
 
 def checksums(directory: Path, source_url: str, source_sha256: str, patch_sha256=None) -> dict:
@@ -27,7 +27,7 @@ def checksums(directory: Path, source_url: str, source_sha256: str, patch_sha256
             raise ValueError("invalid or duplicate donor checksum")
         expected[match[2]] = match[1]
     if set(expected) != set(DONORS):
-        raise ValueError("checksum manifest must contain exactly the five Wine donors")
+        raise ValueError(f"checksum manifest must contain exactly the {len(DONORS)} Wine donors")
     for name, digest in expected.items():
         if hashlib.sha256((directory / name).read_bytes()).hexdigest() != digest:
             raise ValueError(f"{name}: SHA256 mismatch")

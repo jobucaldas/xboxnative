@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <initializer_list>
 #define CHECK(x) do { if (!(x)) { printf("FAIL line %d: %s\n", __LINE__, #x); exit(1); } } while (0)
 
@@ -177,9 +178,28 @@ static unsigned keyboard() {
  return n;
 }
 
+// LoadStringW reads string tables (parity_strings.rc, linked into this test)
+// from a module's resource directory; GetKeyboardType reports one keyboard.
+static unsigned resources() {
+ auto load = api<decltype(&LoadStringW)>("LoadStringW");
+ auto type = api<decltype(&GetKeyboardType)>("GetKeyboardType");
+ HINSTANCE self = GetModuleHandleW(nullptr); unsigned n = 0;
+ for (UINT id : {1u, 2u, 3u, 16u, 17u, 31u, 4000u}) for (int max : {64, 4}) {   // (max 1: Wine leaves the buffer as is, Windows writes "")
+  WCHAR a[64], b[64]; wmemset(a, L'x', 64); wmemset(b, L'x', 64);
+  int ra = load(self, id, a, max), rb = LoadStringW(self, id, b, max);
+  CHECK(ra == rb); CHECK(!memcmp(a, b, sizeof a)); ++n;
+ }
+ for (UINT id : {1u, 3u, 31u}) {   // max 0: a read-only pointer into the table
+  const WCHAR *a = nullptr, *b = nullptr;
+  int ra = load(self, id, (LPWSTR)&a, 0), rb = LoadStringW(self, id, (LPWSTR)&b, 0);
+  CHECK(ra == rb && a == b && (id == 3 ? !ra : ra > 0)); ++n;
+ }
+ for (int t : {0, 1, 2}) { CHECK(type(t) == GetKeyboardType(t)); ++n; }
+ return n;
+}
 int main() {
  module = LoadLibraryW(L"uwph-u32c.dll"); CHECK(module);
- unsigned geometry = metrics(), object = objects(), parameter = parameters(), keys = keyboard();
- printf("PASS: Wine parity: %u metrics/geometry, %u object queries, %u parameters, %u keyboard checks (off-device)\n",
-        geometry, object, parameter, keys);
+ unsigned geometry = metrics(), object = objects(), parameter = parameters(), keys = keyboard(), strings = resources();
+ printf("PASS: Wine parity: %u metrics/geometry, %u object queries, %u parameters, %u keyboard checks, %u string/keyboard-type checks (off-device)\n",
+        geometry, object, parameter, keys, strings);
 }

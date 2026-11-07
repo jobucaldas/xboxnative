@@ -12,6 +12,8 @@
 #include <intrin.h>
 #include "play_graphics.h"
 #include "../../uwph/vcruntime/route.h"
+#include "steam_app_ticket.h"
+#include "redact.h"
 namespace play_runtime {
 constexpr DWORD missingException=0xe0520001, exitException=0xe0520002;
 struct Module {
@@ -23,6 +25,25 @@ struct Module {
     size_t notifications=0;
     bool pinned=false;
     std::vector<Module*> dependencies;
+};
+// Play's loader lock (recursive, like the OS loader lock). It records its
+// owner so a guest thread that ends without unwinding (ExitProcess or a crash
+// contained by Play, both ExitThread) releases what it held; otherwise every
+// later GetProcAddress/LoadLibrary would wait forever on a dead owner.
+class LoaderMutex {
+    std::recursive_mutex mutex;
+    std::atomic<DWORD> owner{0};
+    unsigned depth=0;
+public:
+    void lock(){mutex.lock();owner.store(GetCurrentThreadId());++depth;}
+    bool try_lock(){if(!mutex.try_lock())return false;owner.store(GetCurrentThreadId());++depth;return true;}
+    void unlock(){if(--depth==0)owner.store(0);mutex.unlock();}
+    // Called on a thread about to end without unwinding.
+    void abandon(){
+        if(owner.load()!=GetCurrentThreadId())return;
+        unsigned held=depth;depth=0;owner.store(0);
+        while(held--)mutex.unlock();
+    }
 };
 struct State {
     std::wstring root, command;
@@ -39,7 +60,7 @@ struct State {
     std::atomic<unsigned> firstChanceCount{0};
     std::atomic<unsigned> invalidHandles{0};   // strict-handle-check raises continued (see vectored)
     std::mutex eventMutex;
-    std::recursive_mutex loaderMutex;
+    LoaderMutex loaderMutex;
     std::string last="loader not entered", result;
     DWORD code=0;
     std::array<wxl::Carrier,16> carriers;
@@ -82,7 +103,7 @@ static Module* named(const std::wstring& name) {
 static bool exists(const std::wstring& path) { DWORD a=GetFileAttributesW(path.c_str()); return a!=INVALID_FILE_ATTRIBUTES && !(a&FILE_ATTRIBUTE_DIRECTORY); }
 #include "../../uwph/kernel32/guest_loader_search.h"
 static uintptr_t resolve(const char*,const char*,WORD);
-static Module* map(const std::wstring& path);
+static Module* map(const std::wstring& path,const std::string& asKey={},wxl::Resolver resolver=nullptr);
 static bool initialize(Module&);
 static bool initializePending();
 static std::string describe(uintptr_t);
@@ -94,6 +115,10 @@ static void stopMissing(const std::string& name,uintptr_t caller=0) {
 }
 static uintptr_t missing(const char* dll,const char* name,WORD ordinal) {
     std::string full=lower(dll)+"!"+(name?name:"#"+std::to_string(ordinal));
+    if(mappingImports && wxl::resolvingDelay) {
+        if(state->log && mlp::first_report("delay "+full)) state->log(("PRUN delay import not found yet, bound on first call: "+full).c_str());
+        return 0;
+    }
     if(mappingImports) {state->event("unresolved static import: "+full+"; guest initialization blocked; "+state->snapshot());return 0;}
     // Optional dynamic feature detection observes NULL. No unresolved import
     // receives executable code, including the probe-only failure stubs.
@@ -164,9 +189,19 @@ static bool processModule(HMODULE h) {
     auto key=basename(p);
     return key=="kernel32.dll" || key=="kernelbase.dll" || key.find("api-ms-win-core-")==0;
 }
+// The guest ends where it calls ExitProcess, without unwinding, as on Windows.
+// Raising an exception to unwind back to the worker took the whole launcher
+// down when a frame had no unwind data (SteamStub's DRM runs from memory it
+// maps itself) and could be swallowed by a guest catch(...). The calling
+// thread exits; game code has run, so the launcher reports the end and
+// restarts to unload the rest of the guest.
 static void WINAPI exitProcess(UINT code) {
     state->code=code; state->event("ExitProcess code="+std::to_string(code));
-    ULONG_PTR arg=code; RaiseException(exitException,EXCEPTION_NONCONTINUABLE,1,&arg);
+    state->success=true; state->result=state->snapshot();
+    if(GetCurrentThreadId()==state->thread) guestThread=false;
+    state->finished.store(true,std::memory_order_release);
+    state->loaderMutex.abandon();
+    ExitThread(code);
 }
 static BOOL WINAPI terminateProcess(HANDLE process,UINT code) {
     if(process==GetCurrentProcess()) { exitProcess(code); return TRUE; }
@@ -184,6 +219,31 @@ static HMODULE WINAPI moduleW(LPCWSTR name) {
 }
 #include "../../uwph/kernel32/guest_module_filename.h"
 #include "../../uwph/kernel32/guest_loader_lifetime.h"
+// Emulated Steam client for an owned game (AGENTS.md rule 3): when the
+// launcher has staged one after its ownership check, a guest load of
+// steamclient64.dll (SteamStub's locator, the game's own steam_api64) maps
+// that file. Without one, steamclient64.dll stays refused (item 36).
+static std::wstring steamClient, steamClientSigned;
+// `signedClient` is Valve's own signed steamclient64.dll, fetched from Valve
+// (never shipped), for games whose Steam DRM wrapper checks the client's
+// signature; see signedClientModule().
+static void set_steam_client(const std::wstring& path,const std::wstring& signedClient={}) { steamClient=path; steamClientSigned=signedClient; }
+static Module* signedClientModule();
+// The environment Steam's client locator reads, as Steam itself (and gbe_fork's
+// loader) publishes it: HKCU\Software\Valve\Steam\ActiveProcess with this
+// process as the client (pid), the client DLL path, the universe and the
+// signed-in account ID. It lives in the guest registry only.
+static bool seed_steam_client_registry(const std::wstring& client,DWORD accountId) {
+    HKEY key=nullptr;
+    if(regb::RegCreateKeyExW(HKEY_CURRENT_USER,L"Software\\Valve\\Steam\\ActiveProcess",0,nullptr,0,0,nullptr,&key,nullptr)!=ERROR_SUCCESS)return false;
+    DWORD pid=GetCurrentProcessId();
+    auto text=[&](LPCWSTR name,const std::wstring& value){return regb::RegSetValueExW(key,name,0,REG_SZ,(const BYTE*)value.c_str(),DWORD((value.size()+1)*sizeof(wchar_t)))==ERROR_SUCCESS;};
+    bool ok=regb::RegSetValueExW(key,L"pid",0,REG_DWORD,(const BYTE*)&pid,sizeof pid)==ERROR_SUCCESS&&
+        regb::RegSetValueExW(key,L"ActiveUser",0,REG_DWORD,(const BYTE*)&accountId,sizeof accountId)==ERROR_SUCCESS&&
+        text(L"SteamClientDll64",client)&&text(L"Universe",L"Public");
+    regb::RegCloseKey(key);
+    return ok;
+}
 static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     if(!name || file) {SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}
     constexpr DWORD knownFlags= DONT_RESOLVE_DLL_REFERENCES|LOAD_LIBRARY_AS_DATAFILE|
@@ -199,7 +259,7 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
               LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE|LOAD_IGNORE_CODE_AUTHZ_LEVEL)) {
         SetLastError(ERROR_NOT_SUPPORTED);return nullptr;
     }
-    std::lock_guard<std::recursive_mutex> loaderLock(state->loaderMutex);
+    std::lock_guard<LoaderMutex> loaderLock(state->loaderMutex);
     std::wstring requested=name;
     auto leaf=requested.substr(requested.find_last_of(L"\\/")+1);
     if(leaf.find(L'.')==std::wstring::npos) requested+=L".dll";
@@ -210,13 +270,24 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     // and its SteamAPI_Init fails naturally without a client.
     auto key=basename(requested);
     if(key=="steamclient64.dll") {
-        state->event("LoadLibrary refused name="+narrow(requested)+": no genuine Steam client (item 36)");
-        SetLastError(ERROR_MOD_NOT_FOUND);return nullptr;
+        if(steamClient.empty()) {
+            state->event("LoadLibrary refused name="+narrow(requested)+": no genuine Steam client (item 36)");
+            SetLastError(ERROR_MOD_NOT_FOUND);return nullptr;
+        }
+        if(flags&~(LOAD_WITH_ALTERED_SEARCH_PATH|LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)) {SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
+        if(!steamClientSigned.empty()) {
+            auto client=signedClientModule();
+            if(!client) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
+            if(!initializePending()) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
+            ++client->references;return (HMODULE)client->image.base;
+        }
+        requested=steamClient;flags=0;
+        state->event("steamclient64.dll served by the staged emulated Steam client (owned game)");
     }
     Module* m=nullptr;
-    {std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
+    {std::lock_guard<LoaderMutex> lock(state->loaderMutex);
      m=named(requested);
-     if(!m) {
+     if(!m && !apiSetName(requested)) {
          auto p=guestLibraryPath(requested,!flags);
          if(exists(p)) {
              if(flags) {SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
@@ -327,7 +398,7 @@ static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
     // find() iterates vector storage that map() may reallocate. Native-handle
     // resolution below can also inspect/map guest modules, so retain the lock
     // for the entire lookup, not just the mapped-export branch.
-    std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
+    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
     ExportLookup lookup;
     if(auto m=find(h)) {
         WORD ordinal=IS_INTRESOURCE(name)?WORD((uintptr_t)name):0;
@@ -493,26 +564,139 @@ static wxl::Carrier carrier() {
 // the game's own file on disk is never modified. Set before start().
 static std::wstring steamProvider;
 static void set_steam_provider(const std::wstring& path) { steamProvider=path; }
-static Module* map(const std::wstring& requested) {
-    if(auto m=named(requested)) return m->mappingFailed?nullptr:m;
+static Module* map(const std::wstring& requested,const std::string& asKey,wxl::Resolver resolver) {
+    if(auto m=named(asKey.empty()?requested:wide(asKey.c_str()))) return m->mappingFailed?nullptr:m;
+    // A delay import may map its DLL here; that DLL's own static imports are
+    // not delay imports, so their misses must fail and be reported as such.
+    struct DelayScope {bool outer=wxl::resolvingDelay;DelayScope(){wxl::resolvingDelay=false;}~DelayScope(){wxl::resolvingDelay=outer;}} delayScope;
     const bool provided=basename(requested)=="steam_api64.dll" && !steamProvider.empty();
     const std::wstring& path=provided?steamProvider:requested;
     if(state->modules.size()>=128) {state->event("loader module capacity exceeded");return nullptr;}
-    auto own=std::make_unique<Module>();auto m=own.get();m->path=path;m->key=basename(path);state->modules.push_back(std::move(own));state->moduleCount=int(state->modules.size());
+    auto own=std::make_unique<Module>();auto m=own.get();m->path=path;m->key=asKey.empty()?basename(path):asKey;state->modules.push_back(std::move(own));state->moduleCount=int(state->modules.size());
     // Publish before fixing imports; circular imports can use the copied export
     // table, but no initialization runs until the complete graph is mapped.
     mlp::assets[m->key]=&m->image;
     state->event("mapping "+m->key);
     if(provided) state->event("steam_api64.dll served by the configured Steam API provider; the game's file is unchanged");
-    else if(m->key=="steam_api64.dll") state->event("steam_api64.dll is the game's original file, mapped unmodified; no Steam client, so SteamAPI_Init is expected to fail (item 36)");
+    else if(m->key=="steam_api64.dll") state->event(steamClient.empty()?
+        "steam_api64.dll is the game's original file, mapped unmodified; no Steam client, so SteamAPI_Init is expected to fail (item 36)":
+        "steam_api64.dll is the game's original file, mapped unmodified; it reaches the staged Steam client");
     struct ImportScope {ImportScope(){++mappingImports;} ~ImportScope(){--mappingImports;}} imports;
-    if(!wxl::run(path.c_str(),state->log,&m->image,resolve,wxl::LoadConfig::msvc_x64)) {
+    if(!wxl::run(path.c_str(),state->log,&m->image,resolver?resolver:resolve,wxl::LoadConfig::msvc_x64)) {
         // Withdraw the early publication: a failed image's export table must
         // never satisfy another import (it is never protected or initialized).
         mlp::assets.erase(m->key);
         m->mappingFailed=true;state->event("mapping failed: "+m->key+"; guest initialization blocked; "+state->snapshot());return nullptr;
     }
     m->mapped=true;++state->mappedCount;state->order.push_back(m);return m;
+}
+// Steam's DRM wrapper (SteamStub) finds the module that provides
+// steamclient64.dll!CreateInterface, reads that module's file and verifies
+// Valve's signature over it. As Proton does, the module the guest sees is then
+// Valve's genuine signed steamclient64.dll, mapped from its own unmodified
+// file. None of its code runs: its imports bind to a refusal, it gets no TLS
+// or DllMain, and each export entry is overwritten in memory with a jump to
+// the emulated client's export of the same name. Every Steam call is answered
+// by the emulated client, as without the wrapper. Nothing is patched on disk,
+// and the game's own wrapper code is untouched.
+// The Steam DRM wrapper then asks the client for the account's app ownership
+// ticket and verifies Valve's signature over it. The emulated client cannot
+// sign one, so ISteamClient (versions 012-021, where slot 12 is
+// GetISteamGenericInterface) is handed out through a forwarding wrapper whose
+// STEAMAPPTICKET_INTERFACE_VERSION001 serves the genuine ticket the launcher
+// obtained from Steam for the signed-in owner. Without one it answers no
+// ticket, and the wrapper fails as on Windows without ownership.
+static std::string appTicket;
+static void set_app_ticket(const std::string& ticket) { appTicket=ticket; }
+static uint32_t ticketData(void*,uint32_t appid,void* buffer,uint32_t capacity,uint32_t* appidOffset,uint32_t* steamidOffset,uint32_t* signatureOffset,uint32_t* signatureSize) {
+    uint32_t size=steam_app_ticket::copy(appTicket,appid,buffer,capacity,appidOffset,steamidOffset,signatureOffset,signatureSize);
+    state->event(size?"app ownership ticket for app "+std::to_string(appid)+" served: the genuine one Steam issued to the signed-in owner"
+                     :"no app ownership ticket for app "+std::to_string(appid)+" (not owned, offline, or not requested)");
+    return size;
+}
+static void* ticketVtable[]={(void*)&ticketData};
+static struct {void** vtable;} ticketInterface{ticketVtable};
+struct ClientWrapper {void** vtable;void* inner;};
+using ClientMethod=uintptr_t(*)(void*,uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t);
+// Integer/pointer arguments pass through unchanged (no ISteamClient method
+// takes floating-point arguments); extra slots read the caller's own frame.
+template<size_t I> static uintptr_t clientForward(ClientWrapper* w,uintptr_t a,uintptr_t b,uintptr_t c,uintptr_t d,uintptr_t e,uintptr_t f,uintptr_t g) {
+    return ((ClientMethod)(*(void***)w->inner)[I])(w->inner,a,b,c,d,e,f,g);
+}
+static void* clientGenericInterface(ClientWrapper* w,uintptr_t user,uintptr_t pipe,const char* version) {
+    if(version&&!strcmp(version,"STEAMAPPTICKET_INTERFACE_VERSION001")) return &ticketInterface;
+    return (void*)clientForward<12>(w,user,pipe,(uintptr_t)version,0,0,0,0);
+}
+template<size_t... I> static std::array<void*,sizeof...(I)> clientTable(std::index_sequence<I...>) {
+    return {{(I==12?(void*)&clientGenericInterface:(void*)&clientForward<I>)...}};
+}
+static auto clientVtable=clientTable(std::make_index_sequence<40>());
+using ClientCreate=void*(*)(const char*,int*);
+static ClientCreate emulatedCreate;
+static void* clientCreateInterface(const char* version,int* result) {
+    void* inner=emulatedCreate(version,result);
+    if(!inner||!version||strncmp(version,"SteamClient",11)) return inner;
+    int n=atoi(version+11);
+    if(n<12||n>21) return inner;
+    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
+    static std::vector<std::unique_ptr<ClientWrapper>> wrappers;
+    for(auto& w:wrappers) if(w->inner==inner) return w.get();
+    wrappers.push_back(std::make_unique<ClientWrapper>(ClientWrapper{clientVtable.data(),inner}));
+    return wrappers.back().get();
+}
+static void signedClientCode() {
+    state->event("Valve steamclient64.dll code reached outside its redirected exports; refused");
+    RaiseException(missingException,EXCEPTION_NONCONTINUABLE,0,nullptr);
+}
+static uintptr_t signedClientImport(const char*,const char*,WORD) { return (uintptr_t)&signedClientCode; }
+static bool redirectExports(Module& client,Module& emulated) {
+    auto& image=client.image;
+    auto nt=(IMAGE_NT_HEADERS64*)(image.base+((IMAGE_DOS_HEADER*)image.base)->e_lfanew);
+    auto dir=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if(!image.valid(dir.VirtualAddress,dir.Size)||dir.Size<sizeof(IMAGE_EXPORT_DIRECTORY))return false;
+    auto e=(IMAGE_EXPORT_DIRECTORY*)(image.base+dir.VirtualAddress);
+    if(!image.valid(e->AddressOfNames,size_t(e->NumberOfNames)*4)||!image.valid(e->AddressOfNameOrdinals,size_t(e->NumberOfNames)*2)||
+       !image.valid(e->AddressOfFunctions,size_t(e->NumberOfFunctions)*4))return false;
+    auto functions=(DWORD*)(image.base+e->AddressOfFunctions);
+    // Every entry must be code with room for the 14-byte jump before the next
+    // entry; otherwise this client build is refused rather than half-redirected.
+    std::vector<DWORD> starts(functions,functions+e->NumberOfFunctions);std::sort(starts.begin(),starts.end());
+    auto section=IMAGE_FIRST_SECTION(nt);
+    auto code=[&](DWORD rva){for(WORD i=0;i<nt->FileHeader.NumberOfSections;++i){auto& sh=section[i];
+        if(rva>=sh.VirtualAddress&&rva-sh.VirtualAddress<sh.Misc.VirtualSize)return (sh.Characteristics&IMAGE_SCN_MEM_EXECUTE)!=0;}return false;};
+    unsigned redirected=0,missing=0;
+    for(DWORD i=0;i<e->NumberOfNames;++i) {
+        auto name=image.str(((DWORD*)(image.base+e->AddressOfNames))[i]);
+        WORD index=((WORD*)(image.base+e->AddressOfNameOrdinals))[i];
+        if(!name||index>=e->NumberOfFunctions)return false;
+        DWORD rva=functions[index];
+        auto next=std::upper_bound(starts.begin(),starts.end(),rva);
+        if(!code(rva)||(next!=starts.end()&&*next-rva<14)||!image.valid(rva,14)) {state->event(std::string("Valve client export not redirectable: ")+name);return false;}
+        uintptr_t target=exported(emulated,name,0);
+        if(target&&!strcmp(name,"CreateInterface")) {emulatedCreate=(ClientCreate)target;target=(uintptr_t)&clientCreateInterface;}
+        if(!target) {target=(uintptr_t)&signedClientCode;++missing;state->event(std::string("emulated client lacks ")+name+"; Valve's entry refuses");}
+        BYTE jump[14]={0xff,0x25,0,0,0,0};memcpy(jump+6,&target,8);   // jmp [rip+0]; dq target
+        DWORD old=0;auto at=image.base+rva;
+        if(!VirtualProtect(at,sizeof jump,PAGE_EXECUTE_READWRITE,&old))return false;
+        memcpy(at,jump,sizeof jump);VirtualProtect(at,sizeof jump,old,&old);++redirected;
+    }
+    FlushInstructionCache(GetCurrentProcess(),image.base,image.size);
+    state->event("Valve's signed steamclient64.dll mapped unmodified from its file; "+std::to_string(redirected)+
+                 " exports answered by the emulated client ("+std::to_string(missing)+" refused)");
+    return true;
+}
+static Module* signedClientModule() {
+    if(auto m=named(L"steamclient64.dll")) return m->mappingFailed?nullptr:m;
+    auto emulated=map(steamClient,"steamclient64-emulated.dll");
+    if(!emulated) return nullptr;
+    state->event("steamclient64.dll: emulated Steam client for an owned game, behind Valve's signed client");
+    auto client=map(steamClientSigned,"steamclient64.dll",signedClientImport);
+    if(!client) return nullptr;
+    if(!redirectExports(*client,*emulated)) {client->mappingFailed=true;mlp::assets.erase(client->key);state->event("Valve client redirection failed");return nullptr;}
+    // Valve's code never runs: no TLS index, unwind data or DllMain.
+    client->prepared=true;client->initialized=true;client->pinned=true;
+    client->dependencies.push_back(emulated);emulated->pinned=true;
+    return client;
 }
 static bool prepare(Module& m) {
     if(m.prepared) return true;
@@ -558,7 +742,7 @@ static bool initializePending() {
     // All entry paths, including initial runImpl(), publish initialization and
     // failure while owning proc/loadExW's recursive loader lock. Other threads
     // cannot observe initializing=true as permission to use pending exports.
-    std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
+    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
     // Register every unwind table and TLS index before any guest callback.
     for(auto m:state->order) if(!prepare(*m)) return false;
     // Every template must exist before the first callback can call a sibling.
@@ -586,7 +770,7 @@ static PVOID WINAPI pcToFileHeader(PVOID pc,PVOID* base) {
     // its loader lock. RtlAddFunctionTable alone does not register an image
     // with the OS loader; the static Microsoft CRT needs this base for EH RVAs.
     {
-        std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
+        std::lock_guard<LoaderMutex> lock(state->loaderMutex);
         auto address=(uintptr_t)pc;
         for(auto& module:state->modules) {
             auto start=(uintptr_t)module->image.base;
@@ -600,8 +784,130 @@ static PVOID WINAPI pcToFileHeader(PVOID pc,PVOID* base) {
     if(native)return native(pc,base);
     *base=nullptr;return nullptr;
 }
+// The game's wide debug output goes to launch_probe.log, like
+// OutputDebugStringA (wxl builtin). Nothing else captures it on the console,
+// and engines report fatal errors this way just before they trap.
+static void WINAPI debugStringW(LPCWSTR text) {
+    if(!text||!state||!state->log)return;
+    const size_t n=wcsnlen(text,4096);
+    const int bytes=n?WideCharToMultiByte(CP_UTF8,0,text,int(n),nullptr,0,nullptr,nullptr):0;
+    std::string line(size_t(bytes>0?bytes:0),'\0');
+    if(bytes>0)WideCharToMultiByte(CP_UTF8,0,text,int(n),&line[0],bytes,nullptr,nullptr);
+    state->log(redact::steam_ids(line).c_str());
+}
+static void WINAPI debugStringA(LPCSTR text) {
+    if(!text||!state||!state->log)return;
+    state->log(redact::steam_ids(std::string(text,strnlen(text,4096))).c_str());
+}
+// In-process COM servers Play supplies as gated Wine donors. Windows finds
+// them through their registry entries; the console has none, so a guest's
+// CoCreateInstance/CoGetClassObject for these CLSIDs reaches the donor's
+// DllGetClassObject (only once the donor passed its gate). Every other CLSID
+// goes to the console's COM unchanged.
+struct DonorServer {const char* dll;GUID clsid;const char* label;};
+static const DonorServer donorServers[]={
+    {"dinput8.dll",{0x25e609e4,0xb259,0x11cf,{0xbf,0xc7,0x44,0x45,0x53,0x54,0,0}},"CLSID_DirectInput8"},
+    {"dinput8.dll",{0x25e609e5,0xb259,0x11cf,{0xbf,0xc7,0x44,0x45,0x53,0x54,0,0}},"CLSID_DirectInputDevice8"},
+};
+static const DonorServer* donorServer(REFCLSID clsid,DWORD context) {
+    if(!(context&CLSCTX_INPROC_SERVER)) return nullptr;
+    for(auto& server:donorServers) if(IsEqualGUID(clsid,server.clsid)) return &server;
+    return nullptr;
+}
+static HRESULT donorClassObject(const DonorServer& server,REFIID iid,void** out) {
+    using Get=HRESULT(WINAPI*)(REFCLSID,REFIID,void**);
+    auto get=mlp::donor_resolve?(Get)mlp::donor_resolve(server.dll,"DllGetClassObject",0):nullptr;
+    return get?get(server.clsid,iid,out):REGDB_E_CLASSNOTREG;
+}
+template<class F> static F nativeCom(const char* name) {
+    static HMODULE ole=LoadLibraryExW(L"ole32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    return ole?(F)GetProcAddress(ole,name):nullptr;
+}
+static HRESULT WINAPI coGetClassObject(REFCLSID clsid,DWORD context,COSERVERINFO* info,REFIID iid,void** out) {
+    if(auto server=donorServer(clsid,context)) {
+        if(!out) return E_POINTER;
+        *out=nullptr;HRESULT hr=donorClassObject(*server,iid,out);
+        if(state) state->event(std::string("guest CoGetClassObject ")+server->label+" served by the "+server->dll+" donor hr="+std::to_string(hr));
+        return hr;
+    }
+    using Fn=HRESULT(WINAPI*)(REFCLSID,DWORD,COSERVERINFO*,REFIID,void**);
+    auto fn=nativeCom<Fn>("CoGetClassObject");return fn?fn(clsid,context,info,iid,out):E_NOTIMPL;
+}
+static HRESULT WINAPI coCreateInstance(REFCLSID clsid,IUnknown* outer,DWORD context,REFIID iid,void** out) {
+    if(auto server=donorServer(clsid,context)) {
+        if(!out) return E_POINTER;
+        *out=nullptr;IClassFactory* factory=nullptr;
+        HRESULT hr=donorClassObject(*server,IID_IClassFactory,(void**)&factory);
+        if(SUCCEEDED(hr)) {hr=factory->CreateInstance(outer,iid,out);factory->Release();}
+        char line[160];snprintf(line,sizeof line,"guest CoCreateInstance %s served by the %s donor hr=0x%08lx",server->label,server->dll,(unsigned long)hr);
+        if(state) state->event(line);
+        return hr;
+    }
+    using Fn=HRESULT(WINAPI*)(REFCLSID,IUnknown*,DWORD,REFIID,void**);
+    auto fn=nativeCom<Fn>("CoCreateInstance");return fn?fn(clsid,outer,context,iid,out):E_NOTIMPL;
+}
+// Unhandled exceptions on threads Play did not create (CRT _beginthreadex,
+// SDL threads) reach the process-wide filter, not Play's per-thread guard,
+// and used to end the whole launcher with no trace. Play keeps the process
+// filter. A guest's own handler (SetUnhandledExceptionFilter, e.g. Crashpad)
+// still runs first. Then, for an exception in guest code, the crash is
+// recorded and only that thread ends; the launcher reports it and restarts to
+// unload the game. Exceptions in launcher code keep their previous handling.
+static LPTOP_LEVEL_EXCEPTION_FILTER guestTopLevel=nullptr,hostTopLevel=nullptr;
+static LONG WINAPI topLevelFilter(EXCEPTION_POINTERS* ep) {
+    State* s=state;
+    bool guest=s&&guestThread;
+    if(s&&!guest) {
+        std::unique_lock<LoaderMutex> lock(s->loaderMutex,std::try_to_lock);
+        const auto address=(uintptr_t)ep->ExceptionRecord->ExceptionAddress;
+        if(lock.owns_lock()) for(auto& m:s->modules) {
+            const auto base=(uintptr_t)m->image.base;
+            if(base&&address>=base&&address-base<m->image.size){guest=true;break;}
+        }
+    }
+    if(!guest) return hostTopLevel?hostTopLevel(ep):EXCEPTION_CONTINUE_SEARCH;
+    if(auto handler=guestTopLevel) {LONG r=handler(ep);if(r==EXCEPTION_CONTINUE_EXECUTION)return r;}
+    filter(ep);   // records the exception and its stack, as for Play's threads
+    s->result=s->snapshot();
+    if(GetCurrentThreadId()==s->thread) guestThread=false;
+    s->finished.store(true,std::memory_order_release);
+    s->loaderMutex.abandon();
+    ExitThread(ep->ExceptionRecord->ExceptionCode);
+}
+static LPTOP_LEVEL_EXCEPTION_FILTER WINAPI setGuestTopLevel(LPTOP_LEVEL_EXCEPTION_FILTER handler) {
+    auto previous=guestTopLevel;guestTopLevel=handler;return previous;
+}
+// Files a guest opens for writing are logged (path, result, handle type), so
+// a save that stalls shows where it writes. SteamIDs in paths are redacted:
+// the log may be shared.
+static std::string redactedPath(const std::string& text) { return redact::steam_ids(text); }
+static void logWriteOpen(const std::wstring& path,DWORD access,DWORD disposition,HANDLE h) {
+    if(!state||!(access&(GENERIC_WRITE|FILE_WRITE_DATA|FILE_APPEND_DATA|GENERIC_ALL)))return;
+    static std::atomic<unsigned> logged{0};
+    if(logged.fetch_add(1)>=256)return;
+    // The guest reads the open's last error next (ERROR_ALREADY_EXISTS after a
+    // successful CREATE_ALWAYS/OPEN_ALWAYS): logging must not change it.
+    const DWORD error=GetLastError();
+    struct Keep {DWORD e;~Keep(){SetLastError(e);}} keep{error};
+    char tail[96];snprintf(tail,sizeof tail," disposition=%lu -> %s type=%lu error=%lu",(unsigned long)disposition,
+        h==INVALID_HANDLE_VALUE?"failed":"open",h==INVALID_HANDLE_VALUE?0ul:(unsigned long)GetFileType(h),(unsigned long)error);
+    state->event("guest file write-open "+redactedPath(narrow(path))+tail);
+}
+static HANDLE WINAPI guestCreateFileW(LPCWSTR path,DWORD access,DWORD share,LPSECURITY_ATTRIBUTES security,DWORD disposition,DWORD flags,HANDLE templateFile) {
+    HANDLE h=kernel32_core::create_file_w(path,access,share,security,disposition,flags,templateFile);
+    if(path)logWriteOpen(path,access,disposition,h);
+    return h;
+}
+static HANDLE WINAPI guestCreateFileA(LPCSTR path,DWORD access,DWORD share,LPSECURITY_ATTRIBUTES security,DWORD disposition,DWORD flags,HANDLE templateFile) {
+    HANDLE h=kernel32_core::create_file_a(path,access,share,security,disposition,flags,templateFile);
+    if(path){DWORD error=GetLastError();std::wstring wide;for(const char* c=path;*c;++c)wide+=wchar_t((unsigned char)*c);SetLastError(error);logWriteOpen(wide,access,disposition,h);}   // logWriteOpen keeps the last error
+    return h;
+}
 static uintptr_t processApi(const char* name) {
 #define PLAY_API(n,f) if(!strcmp(name,n)) return (uintptr_t)&f
+    PLAY_API("OutputDebugStringW",debugStringW);PLAY_API("OutputDebugStringA",debugStringA);
+    PLAY_API("SetUnhandledExceptionFilter",setGuestTopLevel);
+    PLAY_API("CreateFileW",guestCreateFileW);PLAY_API("CreateFileA",guestCreateFileA);
     PLAY_API("K32GetModuleBaseNameW",kernelModuleBaseName);
     PLAY_API("FindResourceA",kernelFindResourceA);PLAY_API("FindResourceW",kernelFindResourceW);
     PLAY_API("EnumResourceNamesA",kernelEnumResourceNamesA);PLAY_API("LoadResource",kernelLoadResource);
@@ -640,7 +946,7 @@ static HRESULT WINAPI createDevice(IDXGIAdapter* adapter,D3D_DRIVER_TYPE type,HM
     HRESULT hr=fn(real?real:adapter,type,software,flags,levels,count,version,device,level,context);
     if(real)real->Release();
     char b[160];snprintf(b,sizeof b,"guest D3D11CreateDevice returned hr=0x%08lx device=%p",(unsigned long)hr,device?*device:nullptr);state->event(b);
-    if(SUCCEEDED(hr)&&device&&*device)state->milestone=2;return hr;
+    if(SUCCEEDED(hr)&&device&&*device){play_graphics::adopt_device(*device);state->milestone=2;}return hr;
 }
 // Until a real modal UI bridge exists, retain fatal game diagnostics and stop.
 // Never return a fabricated button selection that would advance startup.
@@ -693,6 +999,10 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     if(shellLaunch(name) && key=="shell32.dll") return shellExport(name);
     if(auto graphics=play_graphics::resolve(dll,name,ordinal))return graphics;
     if(name && (key=="kernel32.dll"||key=="kernelbase.dll"||key=="ntdll.dll"||key.find("api-ms-win-core-")==0)) if(auto p=processApi(name)) return p;
+    if(name && (key=="ole32.dll"||key=="combase.dll"||key.find("api-ms-win-core-com-l1-")==0)) {
+        if(!strcmp(name,"CoCreateInstance")) return (uintptr_t)&coCreateInstance;
+        if(!strcmp(name,"CoGetClassObject")) return (uintptr_t)&coGetClassObject;
+    }
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxA")) return (uintptr_t)&messageBoxA;
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxW")) return (uintptr_t)&messageBoxW;
     if(key=="user32.dll" && name && !strcmp(name,"CreateWindowExW")) return (uintptr_t)&createWindow;
@@ -700,7 +1010,13 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // Same client gate as LoadLibrary, for static and forwarded imports. Never
     // a callable Steam placeholder: the import stays unresolved, as on Windows
     // without the DLL. steam_api64.dll resolves from the game's own file below.
-    if(key=="steamclient64.dll") return missing(dll,name,ordinal);
+    if(key=="steamclient64.dll") {
+        if(steamClient.empty()) return missing(dll,name,ordinal);
+        auto client=steamClientSigned.empty()?named(steamClient):signedClientModule();
+        if(!client) client=map(steamClient);
+        if(!client||client->mappingFailed) return missing(dll,name,ordinal);
+        auto p=exported(*client,name,ordinal);return p?p:missing(dll,name,ordinal);
+    }
     Module* owner=nullptr;
     // Current mapper is the last incomplete module; capture it before recursion.
     for(auto& m:state->modules) if(!m->mapped) owner=m.get();
@@ -708,7 +1024,7 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // A dependency whose mapping failed leaves its imports unresolved, as on
     // Windows; neither it nor the probe registry may supply an address.
     if(dependency && dependency->mappingFailed) return missing(dll,name,ordinal);
-    if(!dependency) {
+    if(!dependency && !apiSetName(wide(dll))) {
         auto path=guestLibraryPath(wide(dll));
         if(exists(path)) {dependency=map(path);if(!dependency)return missing(dll,name,ordinal);}
     }
@@ -747,6 +1063,7 @@ static bool start(const std::wstring& root,const std::wstring& exe,const std::ws
     mlp::log=log;wxl::logger=log;mlp::missingResolver=missing;mlp::assets.clear();mlp::summaries.clear();
     state->exe=map(root+L"\\"+exe);if(!state->exe) {state->result=state->snapshot();state->finished=true;return true;}
     find_ntdll();
+    {static bool installed=false;if(!installed){installed=true;hostTopLevel=SetUnhandledExceptionFilter(topLevelFilter);}}
     state->event("registering guest exception observer");
     using AddVeh=PVOID(WINAPI*)(ULONG,LONG(CALLBACK*)(EXCEPTION_POINTERS*));
     auto addVeh=(AddVeh)kernel_tail::native("AddVectoredExceptionHandler");
@@ -754,6 +1071,41 @@ static bool start(const std::wstring& root,const std::wstring& exe,const std::ws
     state->event("creating guest worker stackReserve=16777216");
     state->worker=CreateThread(nullptr,16*1024*1024,worker,nullptr,STACK_SIZE_PARAM_IS_A_RESERVATION,nullptr);
     if(!state->worker){state->event("CreateThread failed error="+std::to_string(GetLastError()));state->result=state->snapshot();state->finished=true;}
+    return true;
+}
+// Per-launch Steam routing, cleared before each Play so one game's provider,
+// client or ownership ticket can never reach the next game.
+static void reset_launch_config() {
+    steamProvider.clear();steamClient.clear();steamClientSigned.clear();appTicket.clear();emulatedCreate=nullptr;
+}
+// A launch that ended before any game code ran (no TLS callback, DllMain or
+// entry point: `executed` is set before each) left nothing executing: the
+// worker has returned and only this loader refers to the images. Free them so
+// the next Play starts a fresh loader without restarting the launcher. Once
+// game code ran, its threads, hooks and addresses may live on, so the guest
+// stays retained and only a launcher restart ends it. The State object itself
+// is kept (it is small): launcher threads may still read its last event.
+static bool discard_unstarted() {
+    State* s=observed.load(std::memory_order_acquire);
+    if(!s || !s->finished.load(std::memory_order_acquire) || s->executed.load()) return false;
+    if(s->worker) {
+        if(WaitForSingleObject(s->worker,10000)!=WAIT_OBJECT_0) return false;
+        if(s->executed.load()) return false;
+        CloseHandle(s->worker);s->worker=nullptr;
+    }
+    if(s->veh) {
+        auto remove=(ULONG(WINAPI*)(PVOID))kernel_tail::native("RemoveVectoredExceptionHandler");
+        if(!remove || !remove(s->veh)) return false;
+        s->veh=nullptr;
+    }
+    {
+        std::lock_guard<LoaderMutex> lock(s->loaderMutex);
+        mlp::assets.clear();
+        s->order.clear();s->exe=nullptr;
+        s->modules.clear();   // ~Image: no entry ran, so this only unmaps and frees TLS indices
+    }
+    reset_launch_config();
+    state=nullptr;observed.store(nullptr,std::memory_order_release);
     return true;
 }
 }

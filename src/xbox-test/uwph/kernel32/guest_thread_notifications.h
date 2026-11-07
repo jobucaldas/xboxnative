@@ -3,7 +3,7 @@
 // its loader lock. Mapped images need the same serialization and must remain
 // rooted while a callback recursively calls LoadLibrary or FreeLibrary.
 struct GuestThreadNotifications {
-    std::lock_guard<std::recursive_mutex> lock;
+    std::lock_guard<LoaderMutex> lock;
     std::vector<Module*> modules;
     GuestThreadNotifications():lock(state->loaderMutex) {
         for(auto module:state->order)if(module->initialized)modules.push_back(module);

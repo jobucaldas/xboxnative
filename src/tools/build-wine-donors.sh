@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # build-wine-donors.sh [outdir] [--dry-run]
-# Builds the Wine "donor" PE DLLs (avrt, hid, setupapi, shcore, version) from the pinned Wine source tarball
+# Builds the Wine "donor" PE DLLs (avrt, dinput8, hid, setupapi, shcore, version) from the pinned Wine source tarball
 # (`wine-src` in deps.pin, SHA-256 verified) with mingw-w64. Only those DLLs and the import libraries they need are built.
 # Also builds Wine's C++ runtime DLLs (msvcp140 family, concrt140) into <outdir>/runtime/: launcher Play maps them for
 # games that do not ship their own copy, as an installed VC++ redistributable serves them on Windows.
@@ -14,7 +14,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 out=; dry=0
 for a in "$@"; do case "$a" in --dry-run) dry=1 ;; *) out=$a ;; esac; done
 out=${out:-$root/out/wine-donors}
-DLLS=(avrt hid setupapi shcore version)
+DLLS=(avrt dinput8 hid setupapi shcore version)
 RUNTIME=(msvcp140 msvcp140_1 msvcp140_2 msvcp140_atomic_wait msvcp140_codecvt_ids concrt140)
 read -r _ url sha < <(grep -E '^wine-src[[:space:]]' "$root/deps.pin") || { echo "wine-src missing from deps.pin" >&2; exit 2; }
 patchfile=$root/patches/wine-src/0001-pe-rodata.patch

@@ -85,10 +85,34 @@ extern "C" HWND WINAPI c_GetParent(HWND h){return (HWND)c_GetWindowLongPtrW(h,GW
 extern "C" BOOL WINAPI c_IsIconic(HWND h){return (c_GetWindowLongW(h,GWL_STYLE)&WS_MINIMIZE)!=0;}
 extern "C" BOOL WINAPI c_IsWindowVisible(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);for(unsigned depth=0;h&&depth<4096;++depth){auto w=window(h);if(!w||!(w->style&WS_VISIBLE))return FALSE;if(!(w->style&WS_CHILD))return TRUE;h=w->parent;}return FALSE;}
 extern "C" BOOL WINAPI c_ShowWindow(HWND h,int cmd){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w)return FALSE;BOOL old=(w->style&WS_VISIBLE)!=0;if(cmd==SW_HIDE)w->style&=~WS_VISIBLE;else w->style|=WS_VISIBLE;if(cmd==SW_MINIMIZE||cmd==SW_SHOWMINIMIZED)w->style|=WS_MINIMIZE;if(cmd==SW_RESTORE)w->style&=~(WS_MINIMIZE|WS_MAXIMIZE);return old;}
-extern "C" BOOL WINAPI c_GetClientRect(HWND h,RECT* r){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!r)return FALSE;*r={0,0,w->cx,w->cy};return TRUE;}
-static bool origin(HWND h,LONG& x,LONG& y){for(unsigned depth=0;h&&depth<4096;++depth){auto w=window(h);if(!w)return false;x+=w->x;y+=w->y;if(!(w->style&WS_CHILD))return true;h=w->parent;}return !h;}
-extern "C" BOOL WINAPI c_ClientToScreen(HWND h,POINT* p){std::lock_guard<std::recursive_mutex> l(mutex);if(!p)return FALSE;LONG x=0,y=0;if(!origin(h,x,y))return FALSE;p->x+=x;p->y+=y;return TRUE;}
-extern "C" BOOL WINAPI c_ScreenToClient(HWND h,POINT* p){std::lock_guard<std::recursive_mutex> l(mutex);if(!p)return FALSE;LONG x=0,y=0;if(!origin(h,x,y))return FALSE;p->x-=x;p->y-=y;return TRUE;}
+// The nonclient frame a window's style implies, exactly what AdjustWindowRectEx
+// adds (a top-level window with an HMENU id has a menu bar): the client area is
+// the window rect minus it, as on Windows. Games size their window as
+// "client + frame" and expect GetClientRect/WM_SIZE to give the client back.
+extern "C" BOOL WINAPI c_AdjustWindowRectEx(RECT* r,DWORD style,BOOL menu,DWORD ex);
+static RECT frame(const Window* w){RECT r{};c_AdjustWindowRectEx(&r,w->style,!(w->style&WS_CHILD)&&w->id,w->ex);return {-r.left,-r.top,r.right,r.bottom};}
+static LONG clientWidth(const Window* w){RECT f=frame(w);return std::max<LONG>(0,w->cx-f.left-f.right);}
+static LONG clientHeight(const Window* w){RECT f=frame(w);return std::max<LONG>(0,w->cy-f.top-f.bottom);}
+extern "C" BOOL WINAPI c_GetClientRect(HWND h,RECT* r){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!r)return FALSE;*r={0,0,clientWidth(w),clientHeight(w)};return TRUE;}
+// Window origin in screen coordinates: a child's position is relative to its
+// parent's client area. `client` adds this window's own frame.
+static bool origin(HWND h,LONG& x,LONG& y,bool client=false,unsigned depth=0){
+ auto w=window(h);if(!w||depth>=4096)return false;
+ if((w->style&WS_CHILD)&&w->parent&&!origin(w->parent,x,y,true,depth+1))return false;
+ x+=w->x;y+=w->y;
+ if(client){RECT f=frame(w);x+=f.left;y+=f.top;}
+ return true;
+}
+extern "C" BOOL WINAPI c_ClientToScreen(HWND h,POINT* p){std::lock_guard<std::recursive_mutex> l(mutex);if(!p)return FALSE;LONG x=0,y=0;if(!origin(h,x,y,true))return FALSE;p->x+=x;p->y+=y;return TRUE;}
+extern "C" BOOL WINAPI c_ScreenToClient(HWND h,POINT* p){std::lock_guard<std::recursive_mutex> l(mutex);if(!p)return FALSE;LONG x=0,y=0;if(!origin(h,x,y,true))return FALSE;p->x-=x;p->y-=y;return TRUE;}
+// Points from one window's client area to another's (NULL: the screen). The
+// return value packs the x and y offsets added, as on Windows.
+extern "C" int WINAPI c_MapWindowPoints(HWND from,HWND to,POINT* p,UINT n){
+ std::lock_guard<std::recursive_mutex> l(mutex);LONG fx=0,fy=0,tx=0,ty=0;
+ if((from&&!origin(from,fx,fy,true))||(to&&!origin(to,tx,ty,true))){SetLastError(ERROR_INVALID_WINDOW_HANDLE);return 0;}
+ const LONG dx=fx-tx,dy=fy-ty;if(p)for(UINT i=0;i<n;++i){p[i].x+=dx;p[i].y+=dy;}
+ SetLastError(ERROR_SUCCESS);return MAKELONG(LOWORD(dx),LOWORD(dy));
+}
 extern "C" BOOL WINAPI c_GetWindowRect(HWND h,RECT* r){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!r)return FALSE;LONG x=0,y=0;if(!origin(h,x,y))return FALSE;*r={x,y,x+w->cx,y+w->cy};return TRUE;}
 static LRESULT sendRaw(HWND h,UINT m,WPARAM w,LPARAM p){std::lock_guard<std::recursive_mutex> l(mutex);auto v=window(h);if(!v)return 0;if(v->thread!=GetCurrentThreadId()){SetLastError(ERROR_NOT_SUPPORTED);return 0;}return v->proc(h,m,w,p);}
 static bool ansiWindow(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);auto v=window(h);return v&&v->cls&&v->cls->ansi;}
@@ -126,7 +150,7 @@ extern "C" HWND WINAPI c_GetDlgItem(HWND h,int id){std::lock_guard<std::recursiv
 extern "C" LRESULT WINAPI c_SendDlgItemMessageW(HWND h,int id,UINT m,WPARAM w,LPARAM p){return c_SendMessageW(c_GetDlgItem(h,id),m,w,p);}
 extern "C" BOOL WINAPI c_SetWindowTextW(HWND h,LPCWSTR s){return (BOOL)c_SendMessageW(h,WM_SETTEXT,0,(LPARAM)s);}
 extern "C" BOOL WINAPI c_SetDlgItemTextW(HWND h,int id,LPCWSTR s){return c_SetWindowTextW(c_GetDlgItem(h,id),s);}
-extern "C" BOOL WINAPI c_MoveWindow(HWND h,int x,int y,int cx,int cy,BOOL){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w)return FALSE;w->x=x;w->y=y;w->cx=std::max(0,cx);w->cy=std::max(0,cy);w->proc(h,WM_MOVE,0,MAKELPARAM(x,y));if(w->alive)w->proc(h,WM_SIZE,SIZE_RESTORED,MAKELPARAM(w->cx,w->cy));return TRUE;}
+extern "C" BOOL WINAPI c_MoveWindow(HWND h,int x,int y,int cx,int cy,BOOL){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w)return FALSE;w->x=x;w->y=y;w->cx=std::max(0,cx);w->cy=std::max(0,cy);w->proc(h,WM_MOVE,0,MAKELPARAM(x,y));if(w->alive)w->proc(h,WM_SIZE,SIZE_RESTORED,MAKELPARAM(clientWidth(w),clientHeight(w)));return TRUE;}
 extern "C" BOOL WINAPI c_InflateRect(RECT* r,int x,int y){if(!r)return FALSE;r->left-=x;r->top-=y;r->right+=x;r->bottom+=y;return TRUE;}
 extern "C" BOOL WINAPI c_UnionRect(RECT* d,const RECT* a,const RECT* b){if(!d||!a||!b)return FALSE;RECT x=*a,y=*b;if(c_IsRectEmpty(&x)){*d=c_IsRectEmpty(&y)?RECT{}:y;}else if(c_IsRectEmpty(&y))*d=x;else *d={std::min(x.left,y.left),std::min(x.top,y.top),std::max(x.right,y.right),std::max(x.bottom,y.bottom)};return !c_IsRectEmpty(d);}
 // One virtual desktop/monitor record. Dimensions are supplied by the launcher;
@@ -261,6 +285,53 @@ extern "C" INT WINAPI c_GetRawInputBuffer(LPVOID data,PUINT size,UINT headerSize
  return 0; // no buffered raw input: nothing was ever produced
 }
 extern "C" HKL WINAPI c_GetKeyboardLayout(DWORD){return (HKL)(ULONG_PTR)0x04090409;} // fixed en-US layout
+// A standard enhanced 101/102-key keyboard with 12 function keys (as Wine reports).
+extern "C" int WINAPI c_GetKeyboardType(int type){return type==0?4:type==2?12:0;}
+// String tables come straight from the module's resource directory, so this
+// serves images Play mapped itself as well as system modules.
+static const IMAGE_RESOURCE_DIRECTORY_ENTRY* resourceEntry(const BYTE* base,size_t size,DWORD rva,WORD id,bool any){
+ if(rva>size||size-rva<sizeof(IMAGE_RESOURCE_DIRECTORY))return nullptr;
+ auto dir=(const IMAGE_RESOURCE_DIRECTORY*)(base+rva);
+ size_t n=size_t(dir->NumberOfNamedEntries)+dir->NumberOfIdEntries;
+ if((size-rva-sizeof *dir)/sizeof(IMAGE_RESOURCE_DIRECTORY_ENTRY)<n)return nullptr;
+ auto e=(const IMAGE_RESOURCE_DIRECTORY_ENTRY*)(dir+1);
+ for(size_t i=0;i<n;++i)if(!e[i].NameIsString&&(any||e[i].Id==id))return &e[i];
+ return nullptr;
+}
+static bool stringResource(HINSTANCE h,UINT id,const WCHAR*& text,size_t& length){
+ auto base=(const BYTE*)(h?h:GetModuleHandleW(nullptr));if(!base)return false;
+ auto dos=(const IMAGE_DOS_HEADER*)base;if(dos->e_magic!=IMAGE_DOS_SIGNATURE||dos->e_lfanew<=0||dos->e_lfanew>0x10000)return false;
+ auto nt=(const IMAGE_NT_HEADERS64*)(base+dos->e_lfanew);
+ if(nt->Signature!=IMAGE_NT_SIGNATURE||nt->OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR64_MAGIC)return false;
+ const size_t size=nt->OptionalHeader.SizeOfImage;
+ auto d=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_RESOURCE];
+ if(!d.VirtualAddress||d.VirtualAddress>=size)return false;
+ const DWORD root=d.VirtualAddress;
+ auto type=resourceEntry(base,size,root,6/*RT_STRING*/,false);if(!type||!type->DataIsDirectory)return false;
+ auto block=resourceEntry(base,size,root+type->OffsetToDirectory,WORD((id>>4)+1),false);if(!block||!block->DataIsDirectory)return false;
+ const DWORD languages=root+block->OffsetToDirectory;
+ auto language=resourceEntry(base,size,languages,0,false);              // neutral
+ if(!language)language=resourceEntry(base,size,languages,0x409,false);  // en-US
+ if(!language)language=resourceEntry(base,size,languages,0,true);
+ if(!language||language->DataIsDirectory)return false;
+ const size_t at=size_t(root)+language->OffsetToData;
+ if(at>size||size-at<sizeof(IMAGE_RESOURCE_DATA_ENTRY))return false;
+ auto data=(const IMAGE_RESOURCE_DATA_ENTRY*)(base+at);
+ if(data->OffsetToData>size||size-data->OffsetToData<data->Size)return false;
+ auto p=(const WCHAR*)(base+data->OffsetToData),end=p+data->Size/sizeof(WCHAR);
+ for(UINT i=0;i<(id&15);++i){if(p>=end||size_t(end-p-1)<*p)return false;p+=1+*p;}
+ if(p>=end||size_t(end-p-1)<*p)return false;
+ text=p+1;length=*p;return true;
+}
+// As Wine: a missing or empty string yields "" (and 0).
+extern "C" int WINAPI c_LoadStringW(HINSTANCE h,UINT id,LPWSTR buffer,int max){
+ if(!buffer||max<0){SetLastError(ERROR_INVALID_PARAMETER);return 0;}
+ const WCHAR* text=nullptr;size_t length=0;
+ if(!stringResource(h,LOWORD(id),text,length)){if(max>0)buffer[0]=0;SetLastError(ERROR_RESOURCE_NAME_NOT_FOUND);return 0;}
+ if(!max){*(const WCHAR**)buffer=text;return int(length);}   // read-only pointer into the string table
+ if(!length){buffer[0]=0;return 0;}
+ const size_t n=std::min(length,size_t(max-1));memcpy(buffer,text,n*sizeof(WCHAR));buffer[n]=0;return int(n);
+}
 extern "C" BOOL WINAPI c_GetKeyboardLayoutNameW(LPWSTR name){if(!name)return FALSE;wcscpy(name,L"00000409");return TRUE;}
 #include "map_char.h"
 static unsigned mapVk(UINT code,UINT type){
@@ -357,14 +428,32 @@ extern "C" HANDLE WINAPI c_GetThreadDesktop(DWORD){return (HANDLE)&threadDesktop
 #define UOI_NAME 2
 #define UOI_TYPE 3
 #endif
+#ifndef WSF_VISIBLE
+#define WSF_VISIBLE 1
+#endif
 #include "object_flags.h"
 #include "object_strings.h"
+// One interactive window station, WinSta0, holding the one desktop.
+static int stationToken;
+extern "C" HWINSTA WINAPI c_GetProcessWindowStation(){return (HWINSTA)&stationToken;}
+static bool userObject(HANDLE h,bool& station){station=h==(HANDLE)&stationToken;return station||h==(HANDLE)&threadDesktopToken;}
 extern "C" BOOL WINAPI c_GetUserObjectInformationA(HANDLE h,int index,void* info,DWORD len,DWORD* needed){
- if(h!=(HANDLE)&threadDesktopToken){SetLastError(ERROR_INVALID_HANDLE);return FALSE;}
- if(index==UOI_FLAGS)return object_flags(info,len,needed);
- const char* s=index==UOI_NAME?"Default":index==UOI_TYPE?"Desktop":nullptr;
+ bool station;if(!userObject(h,station)){SetLastError(ERROR_INVALID_HANDLE);return FALSE;}
+ if(index==UOI_FLAGS)return object_flags(info,len,needed,station?WSF_VISIBLE:0);
+ const char* s=index==UOI_NAME?(station?"WinSta0":"Default"):index==UOI_TYPE?(station?"WindowStation":"Desktop"):nullptr;
  if(!s){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
  return object_string(s,info,len,needed);
+}
+extern "C" BOOL WINAPI c_GetUserObjectInformationW(HANDLE h,int index,void* info,DWORD len,DWORD* needed){
+ bool station;if(!userObject(h,station)){SetLastError(ERROR_INVALID_HANDLE);return FALSE;}
+ if(index==UOI_FLAGS)return object_flags(info,len,needed,station?WSF_VISIBLE:0);
+ const wchar_t* s=index==UOI_NAME?(station?L"WinSta0":L"Default"):index==UOI_TYPE?(station?L"WindowStation":L"Desktop"):nullptr;
+ if(!s){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
+ const DWORD bytes=DWORD((wcslen(s)+1)*sizeof(WCHAR));
+ if(needed)*needed=bytes;
+ if(len<bytes){SetLastError(ERROR_INSUFFICIENT_BUFFER);return FALSE;}
+ if(!info){SetLastError(ERROR_NOACCESS);return FALSE;}
+ memcpy(info,s,bytes);return TRUE;
 }
 #ifndef SPI_GETWORKAREA
 #define SPI_GETWORKAREA 0x0030
@@ -406,7 +495,7 @@ extern "C" BOOL WINAPI c_SetWindowPos(HWND h,HWND,int x,int y,int cx,int cy,UINT
  if(flags&SWP_HIDEWINDOW)w->style&=~WS_VISIBLE;
  // No z-order tracking (insertAfter ignored), same limitation as EnumWindows.
  if(moved&&w->alive)w->proc(h,WM_MOVE,0,MAKELPARAM(nx,ny));
- if(sized&&w->alive)w->proc(h,WM_SIZE,SIZE_RESTORED,MAKELPARAM(ncx,ncy));
+ if(sized&&w->alive)w->proc(h,WM_SIZE,SIZE_RESTORED,MAKELPARAM(clientWidth(w),clientHeight(w)));
  return TRUE;
 }
 extern "C" BOOL WINAPI c_ValidateRect(HWND h,const RECT*){std::lock_guard<std::recursive_mutex> l(mutex);return window(h)!=nullptr;} // no invalid-region tracking: nothing to validate, trivially honest.
@@ -556,4 +645,5 @@ extern "C" int WINAPI c_LookupIconIdFromDirectoryEx(BYTE* xdir,BOOL isIcon,int w
 #include "device_notifications.h"
 #include "input_feed.h"
 #include "window_extras.h"
+#include "window_tree.h"
 } // namespace u32c

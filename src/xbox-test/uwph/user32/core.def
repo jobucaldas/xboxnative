@@ -92,6 +92,9 @@ EXPORTS
  GetRawInputBuffer=c_GetRawInputBuffer
  GetKeyboardLayout=c_GetKeyboardLayout
  GetKeyboardLayoutNameW=c_GetKeyboardLayoutNameW
+ GetKeyboardType=c_GetKeyboardType
+ LoadStringW=c_LoadStringW
+ MapWindowPoints=c_MapWindowPoints
  MapVirtualKeyW=c_MapVirtualKeyW
  MapVirtualKeyA=c_MapVirtualKeyW
  MapVirtualKeyExA=c_MapVirtualKeyExA
@@ -113,6 +116,8 @@ EXPORTS
  GetDoubleClickTime=c_GetDoubleClickTime
  GetThreadDesktop=c_GetThreadDesktop
  GetUserObjectInformationA=c_GetUserObjectInformationA
+ GetUserObjectInformationW=c_GetUserObjectInformationW
+ GetProcessWindowStation=c_GetProcessWindowStation
  SystemParametersInfoW=c_SystemParametersInfoW
  AdjustWindowRect=c_AdjustWindowRect
  AdjustWindowRectEx=c_AdjustWindowRectEx
@@ -183,6 +188,9 @@ EXPORTS
  GetKeyboardLayoutNameA=c_GetKeyboardLayoutNameA
  RegisterDeviceNotificationA=c_RegisterDeviceNotificationA
  SendInput=c_SendInput
+ IsWindowUnicode=c_IsWindowUnicode
+ SetProcessDPIAware=c_SetProcessDPIAware
+ WindowFromDC=c_WindowFromDC
  uwph_u32c_input_key
  uwph_u32c_input_pointer
  uwph_u32c_input_wheel
@@ -241,3 +249,18 @@ EXPORTS
  MessageBoxW=c_MessageBoxW
  MessageBoxA=c_MessageBoxA
  uwph_u32c_set_message_box=uwph_u32c_set_message_box
+ GetWindow=c_GetWindow
+ GetTopWindow=c_GetTopWindow
+ CloseWindow=c_CloseWindow
+ EqualRect=c_EqualRect
+ MessageBeep=c_MessageBeep
+ CharNextW=c_CharNextW
+ CharNextA=c_CharNextA
+ wvsprintfW=c_wvsprintfW
+ wsprintfW=c_wsprintfW
+ DialogBoxIndirectParamA=c_DialogBoxIndirectParamA
+ GetClassLongPtrW=c_GetClassLongPtrW
+ SetClassLongPtrW=c_SetClassLongPtrW
+ SetClassLongPtrA=c_SetClassLongPtrA
+ SendMessageTimeoutW=c_SendMessageTimeoutW
+ WaitForInputIdle=c_WaitForInputIdle

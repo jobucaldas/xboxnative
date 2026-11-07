@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// String table for wine_parity_test.cpp: LoadStringW against host Wine.
+#include <winresrc.h>
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+STRINGTABLE
+BEGIN
+  1 "first"
+  2 "second string"
+  17 "next block"
+  31 "gap before me"
+END

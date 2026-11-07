@@ -151,7 +151,9 @@ struct Factory final : IDXGIFactory2 {
     HRESULT STDMETHODCALLTYPE GetWindowAssociation(HWND* h) override { if(!h)return E_POINTER; *h=nullptr; return S_OK; }
     HRESULT STDMETHODCALLTYPE CreateSwapChain(IUnknown* d,DXGI_SWAP_CHAIN_DESC* s,IDXGISwapChain** out) override {
         if(!out)return E_POINTER; *out=nullptr;
-        if(!s || !s->Windowed || s->Flags)return DXGI_ERROR_INVALID_CALL;
+        // Mode switching only concerns desktop fullscreen display modes, which a
+        // CoreWindow swapchain never has; any other legacy flag is refused.
+        if(!s || !s->Windowed || (s->Flags&~UINT(DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH)))return DXGI_ERROR_INVALID_CALL;
         DXGI_SWAP_CHAIN_DESC1 v{}; v.Width=s->BufferDesc.Width; v.Height=s->BufferDesc.Height;
         v.Format=s->BufferDesc.Format; v.SampleDesc=s->SampleDesc; v.BufferUsage=s->BufferUsage;
         // CoreWindow needs flip presentation; desktop legacy discard is common.

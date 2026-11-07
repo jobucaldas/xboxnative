@@ -28,6 +28,7 @@ inline constexpr struct { const char* dll; const char* symbol; } allowed[] = {
         // Version queries (Unity, Rewired): the real OS version.
         {"ntdll.dll", "RtlGetVersion"},
         {"ntdll.dll", "RtlVerifyVersionInfo"},
+        {"ntdll.dll", "VerSetConditionMask"},   // pure: builds RtlVerifyVersionInfo's mask
         // Rust std (Fields of Mistria): file/pipe I/O through the native layer.
         {"ntdll.dll", "NtCreateNamedPipeFile"},
         {"ntdll.dll", "NtOpenFile"},
@@ -39,6 +40,11 @@ inline constexpr struct { const char* dll; const char* symbol; } allowed[] = {
         {"ntdll.dll", "RtlWaitOnAddress"},
         {"ntdll.dll", "RtlWakeAddressSingle"},
         {"ntdll.dll", "RtlWakeAddressAll"},
+        // Thread information on the guest's own (native) threads: SteamStub and
+        // game anti-debug code hide their threads from debuggers this way.
+        {"ntdll.dll", "NtSetInformationThread"},
+        {"ntdll.dll", "NtQueryInformationThread"},
+        {"ntdll.dll", "NtQueryInformationProcess"},
         {"wininet.dll", "InternetOpenA"},
         {"wininet.dll", "InternetConnectA"},
         {"wininet.dll", "InternetCrackUrlA"},
