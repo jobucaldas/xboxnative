@@ -92,6 +92,9 @@ EXPORTS
  GetRawInputBuffer=c_GetRawInputBuffer
  GetKeyboardLayout=c_GetKeyboardLayout
  GetKeyboardLayoutNameW=c_GetKeyboardLayoutNameW
+ GetKeyboardType=c_GetKeyboardType
+ LoadStringW=c_LoadStringW
+ MapWindowPoints=c_MapWindowPoints
  MapVirtualKeyW=c_MapVirtualKeyW
  MapVirtualKeyA=c_MapVirtualKeyW
  MapVirtualKeyExA=c_MapVirtualKeyExA

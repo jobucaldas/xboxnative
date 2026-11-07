@@ -45,6 +45,8 @@ extern "C" DWORD WINAPI u32c_entry(){
  SetLastError(0);check(!GetWindowLongA(h,GWLP_WNDPROC)&&GetLastError()==ERROR_INVALID_INDEX);
  HWND child=CreateWindowExW(0,wc.lpszClassName,L"child",WS_CHILD|WS_VISIBLE,2,3,10,20,h,(HMENU)77,0,(void*)0x12345678);check(child&&GetParent(child)==h&&GetDlgItem(h,77)==child);check(SetDlgItemTextW(h,77,L"child text"));
  POINT cp={0,0};check(ClientToScreen(child,&cp)&&cp.x==25&&cp.y==50);
+ POINT mp[2]={{0,0},{1,1}};check(MapWindowPoints(child,0,mp,2)==MAKELONG(25,50)&&mp[0].x==25&&mp[0].y==50&&mp[1].x==26&&mp[1].y==51);
+ check(MapWindowPoints(0,h,mp,1)==MAKELONG(-23,-47)&&mp[0].x==2&&mp[0].y==3);
  check(IsWindow(h)&&IsWindowVisible(h)&&!IsIconic(h));check(ShowWindow(h,SW_HIDE));check(!IsWindowVisible(h)&&!IsWindowVisible(child));check(!ShowWindow(h,SW_SHOW));
  POINT p={1,2};check(ClientToScreen(h,&p)&&p.x==24&&p.y==49);check(ScreenToClient(h,&p)&&p.x==1&&p.y==2);
  RECT r={};check(GetClientRect(h,&r)&&r.right==320&&r.bottom==240);check(GetWindowRect(h,&r)&&r.left==23&&r.top==47&&r.right==343);

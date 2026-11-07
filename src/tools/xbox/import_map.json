@@ -91,6 +91,10 @@
       "class": "stub",
       "reason": "GameAssembly directly imports SymInitialize/SymFromAddr despite LANES \u00a71 crash-handler-only claim; planned clean-failure symbolization stubs need validation."
     },
+    "dinput8.dll": {
+      "class": "wine-pe",
+      "reason": "Built from pinned Wine 10 source like the other donors. DirectInput 8 for games that import it statically: keyboard and mouse through the u32c record core, joysticks through the hid/setupapi donors (controllers reach games through XInput). Mapped only after its focused behavior gate (create + enumerate); a failure withholds dinput8 alone."
+    },
     "dwmapi.dll": {
       "class": "system",
       "reason": "Provisional native WinHTTP/compositor-query route from the LANES \u00a71 table; validate exact exports on console."

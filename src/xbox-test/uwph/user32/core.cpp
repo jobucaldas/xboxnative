@@ -105,6 +105,14 @@ static bool origin(HWND h,LONG& x,LONG& y,bool client=false,unsigned depth=0){
 }
 extern "C" BOOL WINAPI c_ClientToScreen(HWND h,POINT* p){std::lock_guard<std::recursive_mutex> l(mutex);if(!p)return FALSE;LONG x=0,y=0;if(!origin(h,x,y,true))return FALSE;p->x+=x;p->y+=y;return TRUE;}
 extern "C" BOOL WINAPI c_ScreenToClient(HWND h,POINT* p){std::lock_guard<std::recursive_mutex> l(mutex);if(!p)return FALSE;LONG x=0,y=0;if(!origin(h,x,y,true))return FALSE;p->x-=x;p->y-=y;return TRUE;}
+// Points from one window's client area to another's (NULL: the screen). The
+// return value packs the x and y offsets added, as on Windows.
+extern "C" int WINAPI c_MapWindowPoints(HWND from,HWND to,POINT* p,UINT n){
+ std::lock_guard<std::recursive_mutex> l(mutex);LONG fx=0,fy=0,tx=0,ty=0;
+ if((from&&!origin(from,fx,fy,true))||(to&&!origin(to,tx,ty,true))){SetLastError(ERROR_INVALID_WINDOW_HANDLE);return 0;}
+ const LONG dx=fx-tx,dy=fy-ty;if(p)for(UINT i=0;i<n;++i){p[i].x+=dx;p[i].y+=dy;}
+ SetLastError(ERROR_SUCCESS);return MAKELONG(LOWORD(dx),LOWORD(dy));
+}
 extern "C" BOOL WINAPI c_GetWindowRect(HWND h,RECT* r){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!r)return FALSE;LONG x=0,y=0;if(!origin(h,x,y))return FALSE;*r={x,y,x+w->cx,y+w->cy};return TRUE;}
 static LRESULT sendRaw(HWND h,UINT m,WPARAM w,LPARAM p){std::lock_guard<std::recursive_mutex> l(mutex);auto v=window(h);if(!v)return 0;if(v->thread!=GetCurrentThreadId()){SetLastError(ERROR_NOT_SUPPORTED);return 0;}return v->proc(h,m,w,p);}
 static bool ansiWindow(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);auto v=window(h);return v&&v->cls&&v->cls->ansi;}
@@ -277,6 +285,53 @@ extern "C" INT WINAPI c_GetRawInputBuffer(LPVOID data,PUINT size,UINT headerSize
  return 0; // no buffered raw input: nothing was ever produced
 }
 extern "C" HKL WINAPI c_GetKeyboardLayout(DWORD){return (HKL)(ULONG_PTR)0x04090409;} // fixed en-US layout
+// A standard enhanced 101/102-key keyboard with 12 function keys (as Wine reports).
+extern "C" int WINAPI c_GetKeyboardType(int type){return type==0?4:type==2?12:0;}
+// String tables come straight from the module's resource directory, so this
+// serves images Play mapped itself as well as system modules.
+static const IMAGE_RESOURCE_DIRECTORY_ENTRY* resourceEntry(const BYTE* base,size_t size,DWORD rva,WORD id,bool any){
+ if(rva>size||size-rva<sizeof(IMAGE_RESOURCE_DIRECTORY))return nullptr;
+ auto dir=(const IMAGE_RESOURCE_DIRECTORY*)(base+rva);
+ size_t n=size_t(dir->NumberOfNamedEntries)+dir->NumberOfIdEntries;
+ if((size-rva-sizeof *dir)/sizeof(IMAGE_RESOURCE_DIRECTORY_ENTRY)<n)return nullptr;
+ auto e=(const IMAGE_RESOURCE_DIRECTORY_ENTRY*)(dir+1);
+ for(size_t i=0;i<n;++i)if(!e[i].NameIsString&&(any||e[i].Id==id))return &e[i];
+ return nullptr;
+}
+static bool stringResource(HINSTANCE h,UINT id,const WCHAR*& text,size_t& length){
+ auto base=(const BYTE*)(h?h:GetModuleHandleW(nullptr));if(!base)return false;
+ auto dos=(const IMAGE_DOS_HEADER*)base;if(dos->e_magic!=IMAGE_DOS_SIGNATURE||dos->e_lfanew<=0||dos->e_lfanew>0x10000)return false;
+ auto nt=(const IMAGE_NT_HEADERS64*)(base+dos->e_lfanew);
+ if(nt->Signature!=IMAGE_NT_SIGNATURE||nt->OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR64_MAGIC)return false;
+ const size_t size=nt->OptionalHeader.SizeOfImage;
+ auto d=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_RESOURCE];
+ if(!d.VirtualAddress||d.VirtualAddress>=size)return false;
+ const DWORD root=d.VirtualAddress;
+ auto type=resourceEntry(base,size,root,6/*RT_STRING*/,false);if(!type||!type->DataIsDirectory)return false;
+ auto block=resourceEntry(base,size,root+type->OffsetToDirectory,WORD((id>>4)+1),false);if(!block||!block->DataIsDirectory)return false;
+ const DWORD languages=root+block->OffsetToDirectory;
+ auto language=resourceEntry(base,size,languages,0,false);              // neutral
+ if(!language)language=resourceEntry(base,size,languages,0x409,false);  // en-US
+ if(!language)language=resourceEntry(base,size,languages,0,true);
+ if(!language||language->DataIsDirectory)return false;
+ const size_t at=size_t(root)+language->OffsetToData;
+ if(at>size||size-at<sizeof(IMAGE_RESOURCE_DATA_ENTRY))return false;
+ auto data=(const IMAGE_RESOURCE_DATA_ENTRY*)(base+at);
+ if(data->OffsetToData>size||size-data->OffsetToData<data->Size)return false;
+ auto p=(const WCHAR*)(base+data->OffsetToData),end=p+data->Size/sizeof(WCHAR);
+ for(UINT i=0;i<(id&15);++i){if(p>=end||size_t(end-p-1)<*p)return false;p+=1+*p;}
+ if(p>=end||size_t(end-p-1)<*p)return false;
+ text=p+1;length=*p;return true;
+}
+// As Wine: a missing or empty string yields "" (and 0).
+extern "C" int WINAPI c_LoadStringW(HINSTANCE h,UINT id,LPWSTR buffer,int max){
+ if(!buffer||max<0){SetLastError(ERROR_INVALID_PARAMETER);return 0;}
+ const WCHAR* text=nullptr;size_t length=0;
+ if(!stringResource(h,LOWORD(id),text,length)){if(max>0)buffer[0]=0;SetLastError(ERROR_RESOURCE_NAME_NOT_FOUND);return 0;}
+ if(!max){*(const WCHAR**)buffer=text;return int(length);}   // read-only pointer into the string table
+ if(!length){buffer[0]=0;return 0;}
+ const size_t n=std::min(length,size_t(max-1));memcpy(buffer,text,n*sizeof(WCHAR));buffer[n]=0;return int(n);
+}
 extern "C" BOOL WINAPI c_GetKeyboardLayoutNameW(LPWSTR name){if(!name)return FALSE;wcscpy(name,L"00000409");return TRUE;}
 #include "map_char.h"
 static unsigned mapVk(UINT code,UINT type){

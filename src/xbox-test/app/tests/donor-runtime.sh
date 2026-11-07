@@ -48,6 +48,7 @@ for mode in normal missing disabled;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 90 wine "$out/runner.exe" "$mode" | tr -d '\r' | tee "$out/$mode.log"
  grep -Fx 'DONOR-RUNTIME PASS: behavior gate, cross-thread publication, retained addresses; no game code' "$out/$mode.log"
  grep -Fx 'DONOR-DELAY PASS: shcore delay-loaded user32 DPI internals resolve to the record core' "$out/$mode.log"
+ grep -Fx 'DWPE RUN dinput8.dll initialized=1 missing=0 behavior=1' "$out/$mode.log"
  if [[ $mode == normal ]];then
   grep -Fx 'DONOR-GUEST PASS: actual Play runtime; 8 verified donor IAT slots; behavior exit=42; owned fixture only' "$out/$mode.log"
  else

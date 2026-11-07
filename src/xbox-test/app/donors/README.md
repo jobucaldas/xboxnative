@@ -1,6 +1,6 @@
 # Wine PE donor experiment
 
-The launcher builds five diagnostic donor DLLs (`avrt`, `hid`, `setupapi`,
+The launcher builds six donor DLLs (`avrt`, `dinput8`, `hid`, `setupapi`,
 `shcore`, `version`) from the `wine-src` source archive in `deps.pin`, using
 `src/tools/build-wine-donors.sh`. The tracked `patches/wine-src/0001-pe-rodata.patch`
 corrects PE constant-data section flags for GNU MinGW builds; it does not alter

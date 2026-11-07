@@ -24,7 +24,7 @@ mkdir -p "$out/layout/k32t"
 x86_64-w64-mingw32-gcc -c -Os -fno-stack-protector ../shared/tests/search-dll.c -o "$out/obj/search-dll.obj"
 lld-link-19 /dll /noentry /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/layout/k32t/directory-test.dll" "$out/obj/search-dll.obj"
 mkdir -p "$out/layout/donors"
-cp "$donors"/{avrt,hid,setupapi,shcore,version}.dll "$out/layout/donors/"
+cp "$donors"/{avrt,dinput8,hid,setupapi,shcore,version}.dll "$out/layout/donors/"
 cp "$donors"/{SHA256SUMS,SOURCE.txt,0001-pe-rodata.patch} "$here/donors/COPYING.LIB" "$here/donors/LICENSE" "$out/layout/donors/"
 # Wine's C++ runtime (msvcp140 family, concrt140) for games without their own copy.
 mkdir -p "$out/layout/runtime"

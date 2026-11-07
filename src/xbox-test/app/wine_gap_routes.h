@@ -14,6 +14,7 @@
 {"d3d11.dll", "system"},
 {"d3d12.dll", "system"},
 {"dbghelp.dll", "stub"},
+{"dinput8.dll", "wine-pe"},
 {"dwmapi.dll", "system"},
 {"dxgi.dll", "system"},
 {"gdi32.dll", "stub"},
