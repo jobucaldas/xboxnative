@@ -756,8 +756,67 @@ static PVOID WINAPI pcToFileHeader(PVOID pc,PVOID* base) {
     if(native)return native(pc,base);
     *base=nullptr;return nullptr;
 }
+// The game's wide debug output goes to launch_probe.log, like
+// OutputDebugStringA (wxl builtin). Nothing else captures it on the console,
+// and engines report fatal errors this way just before they trap.
+static void WINAPI debugStringW(LPCWSTR text) {
+    if(!text||!state||!state->log)return;
+    const size_t n=wcsnlen(text,4096);
+    const int bytes=n?WideCharToMultiByte(CP_UTF8,0,text,int(n),nullptr,0,nullptr,nullptr):0;
+    std::string line(size_t(bytes>0?bytes:0),'\0');
+    if(bytes>0)WideCharToMultiByte(CP_UTF8,0,text,int(n),&line[0],bytes,nullptr,nullptr);
+    state->log(line.c_str());
+}
+// In-process COM servers Play supplies as gated Wine donors. Windows finds
+// them through their registry entries; the console has none, so a guest's
+// CoCreateInstance/CoGetClassObject for these CLSIDs reaches the donor's
+// DllGetClassObject (only once the donor passed its gate). Every other CLSID
+// goes to the console's COM unchanged.
+struct DonorServer {const char* dll;GUID clsid;const char* label;};
+static const DonorServer donorServers[]={
+    {"dinput8.dll",{0x25e609e4,0xb259,0x11cf,{0xbf,0xc7,0x44,0x45,0x53,0x54,0,0}},"CLSID_DirectInput8"},
+    {"dinput8.dll",{0x25e609e5,0xb259,0x11cf,{0xbf,0xc7,0x44,0x45,0x53,0x54,0,0}},"CLSID_DirectInputDevice8"},
+};
+static const DonorServer* donorServer(REFCLSID clsid,DWORD context) {
+    if(!(context&CLSCTX_INPROC_SERVER)) return nullptr;
+    for(auto& server:donorServers) if(IsEqualGUID(clsid,server.clsid)) return &server;
+    return nullptr;
+}
+static HRESULT donorClassObject(const DonorServer& server,REFIID iid,void** out) {
+    using Get=HRESULT(WINAPI*)(REFCLSID,REFIID,void**);
+    auto get=mlp::donor_resolve?(Get)mlp::donor_resolve(server.dll,"DllGetClassObject",0):nullptr;
+    return get?get(server.clsid,iid,out):REGDB_E_CLASSNOTREG;
+}
+template<class F> static F nativeCom(const char* name) {
+    static HMODULE ole=LoadLibraryExW(L"ole32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    return ole?(F)GetProcAddress(ole,name):nullptr;
+}
+static HRESULT WINAPI coGetClassObject(REFCLSID clsid,DWORD context,COSERVERINFO* info,REFIID iid,void** out) {
+    if(auto server=donorServer(clsid,context)) {
+        if(!out) return E_POINTER;
+        *out=nullptr;HRESULT hr=donorClassObject(*server,iid,out);
+        if(state) state->event(std::string("guest CoGetClassObject ")+server->label+" served by the "+server->dll+" donor hr="+std::to_string(hr));
+        return hr;
+    }
+    using Fn=HRESULT(WINAPI*)(REFCLSID,DWORD,COSERVERINFO*,REFIID,void**);
+    auto fn=nativeCom<Fn>("CoGetClassObject");return fn?fn(clsid,context,info,iid,out):E_NOTIMPL;
+}
+static HRESULT WINAPI coCreateInstance(REFCLSID clsid,IUnknown* outer,DWORD context,REFIID iid,void** out) {
+    if(auto server=donorServer(clsid,context)) {
+        if(!out) return E_POINTER;
+        *out=nullptr;IClassFactory* factory=nullptr;
+        HRESULT hr=donorClassObject(*server,IID_IClassFactory,(void**)&factory);
+        if(SUCCEEDED(hr)) {hr=factory->CreateInstance(outer,iid,out);factory->Release();}
+        char line[160];snprintf(line,sizeof line,"guest CoCreateInstance %s served by the %s donor hr=0x%08lx",server->label,server->dll,(unsigned long)hr);
+        if(state) state->event(line);
+        return hr;
+    }
+    using Fn=HRESULT(WINAPI*)(REFCLSID,IUnknown*,DWORD,REFIID,void**);
+    auto fn=nativeCom<Fn>("CoCreateInstance");return fn?fn(clsid,outer,context,iid,out):E_NOTIMPL;
+}
 static uintptr_t processApi(const char* name) {
 #define PLAY_API(n,f) if(!strcmp(name,n)) return (uintptr_t)&f
+    PLAY_API("OutputDebugStringW",debugStringW);
     PLAY_API("K32GetModuleBaseNameW",kernelModuleBaseName);
     PLAY_API("FindResourceA",kernelFindResourceA);PLAY_API("FindResourceW",kernelFindResourceW);
     PLAY_API("EnumResourceNamesA",kernelEnumResourceNamesA);PLAY_API("LoadResource",kernelLoadResource);
@@ -849,6 +908,10 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     if(shellLaunch(name) && key=="shell32.dll") return shellExport(name);
     if(auto graphics=play_graphics::resolve(dll,name,ordinal))return graphics;
     if(name && (key=="kernel32.dll"||key=="kernelbase.dll"||key=="ntdll.dll"||key.find("api-ms-win-core-")==0)) if(auto p=processApi(name)) return p;
+    if(name && (key=="ole32.dll"||key=="combase.dll"||key.find("api-ms-win-core-com-l1-")==0)) {
+        if(!strcmp(name,"CoCreateInstance")) return (uintptr_t)&coCreateInstance;
+        if(!strcmp(name,"CoGetClassObject")) return (uintptr_t)&coGetClassObject;
+    }
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxA")) return (uintptr_t)&messageBoxA;
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxW")) return (uintptr_t)&messageBoxW;
     if(key=="user32.dll" && name && !strcmp(name,"CreateWindowExW")) return (uintptr_t)&createWindow;

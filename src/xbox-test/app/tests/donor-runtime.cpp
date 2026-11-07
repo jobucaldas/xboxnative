@@ -76,6 +76,28 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int) {
     if(dpi(nullptr,3,&dx,&dy)!=HRESULT_FROM_WIN32(ERROR_BAD_ARGUMENTS))ExitProcess(14);
     if(setAware(2)!=S_OK||!coreAware(nullptr,&aware)||aware!=2)ExitProcess(15);
     puts("DONOR-DELAY PASS: shcore delay-loaded user32 DPI internals resolve to the record core");
+    // A guest's COM creation of DirectInput (CLSID_DirectInput8, as Puyo Puyo
+    // Tetris 2 does) reaches the gated dinput8 donor: create, Initialize, then
+    // the system keyboard device. Unrelated CLSIDs never reach a donor.
+    {
+        mlp::donor_resolve=donor_pe::exported;
+        const GUID input8={0x25e609e4,0xb259,0x11cf,{0xbf,0xc7,0x44,0x45,0x53,0x54,0,0}};
+        const GUID input8W={0xbf798031,0x483a,0x4da2,{0xaa,0x99,0x5d,0x64,0xed,0x36,0x97,0x00}};
+        const GUID keyboard={0x6f1d2b61,0xd5a0,0x11cf,{0xbf,0xc7,0x44,0x45,0x53,0x54,0,0}};
+        struct Table {void* query;void* addRef;ULONG(WINAPI*release)(void*);
+                      HRESULT(WINAPI*createDevice)(void*,const GUID&,void**,IUnknown*);
+                      void* enumDevices;void* status;void* panel;HRESULT(WINAPI*initialize)(void*,HINSTANCE,DWORD);};
+        void* input=nullptr;
+        if(play_runtime::coCreateInstance(input8,nullptr,CLSCTX_INPROC_SERVER,input8W,&input)!=S_OK||!input)ExitProcess(16);
+        auto table=*(Table**)input;void* device=nullptr;
+        if(table->initialize(input,GetModuleHandleW(nullptr),0x0800)!=S_OK)ExitProcess(17);
+        if(table->createDevice(input,keyboard,&device,nullptr)!=S_OK||!device)ExitProcess(18);
+        ((IUnknown*)device)->Release();table->release(input);
+        const GUID other={0x12345678,0x1234,0x1234,{1,2,3,4,5,6,7,8}};void* none=(void*)1;
+        if(SUCCEEDED(play_runtime::coCreateInstance(other,nullptr,CLSCTX_INPROC_SERVER,input8W,&none)))ExitProcess(19);
+        mlp::donor_resolve=nullptr;
+        puts("DONOR-COM PASS: CoCreateInstance(CLSID_DirectInput8) served by the dinput8 donor; keyboard device created");
+    }
     puts("DONOR-RUNTIME PASS: behavior gate, cross-thread publication, retained addresses; no game code");
     std::string mode=args;
     if(mode!="normal"&&mode!="missing"&&mode!="disabled")ExitProcess(6);
