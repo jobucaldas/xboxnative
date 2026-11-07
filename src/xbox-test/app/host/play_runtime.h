@@ -931,7 +931,7 @@ static uintptr_t processApi(const char* name) {
 #define PLAY_API(n,f) if(!strcmp(name,n)) return (uintptr_t)&f
     PLAY_API("OutputDebugStringW",debugStringW);PLAY_API("OutputDebugStringA",debugStringA);
     PLAY_API("SetUnhandledExceptionFilter",setGuestTopLevel);
-    PLAY_API("VirtualAlloc",rwx_emulation::alloc);PLAY_API("VirtualProtect",rwx_emulation::protect);PLAY_API("VirtualFree",rwx_emulation::release);
+    PLAY_API("VirtualAlloc",rwx_emulation::alloc);PLAY_API("VirtualProtect",rwx_emulation::protect);PLAY_API("VirtualFree",rwx_emulation::release);PLAY_API("VirtualQuery",rwx_emulation::query);
     PLAY_API("AddVectoredExceptionHandler",guestAddVeh);
     PLAY_API("CreateFileW",guestCreateFileW);PLAY_API("CreateFileA",guestCreateFileA);
     PLAY_API("K32GetModuleBaseNameW",kernelModuleBaseName);

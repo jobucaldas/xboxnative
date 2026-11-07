@@ -445,8 +445,8 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     else if(mode=="rwx-jit") {
         // The guest saw no access violation, yet pages really flipped both ways.
         auto& st=rwx_emulation::state().stats;
-        ok=ok&&r->finished&&r->success&&r->code==42&&st.regions.load()==1&&st.executeFlips.load()>=4&&st.writeFlips.load()>=1&&!st.failures.load();
-        printf("PLAY-RWX regions=%u executeFlips=%u writeFlips=%u retries=%u failures=%u\n",st.regions.load(),st.executeFlips.load(),st.writeFlips.load(),st.retries.load(),st.failures.load());fflush(stdout);
+        ok=ok&&r->finished&&r->success&&r->code==42&&st.regions.load()>=4&&!st.live.load()&&st.executeFlips.load()>=50&&st.writeFlips.load()>=50&&!st.failures.load()&&!st.exhausted.load();
+        printf("PLAY-RWX regions=%u live=%u executeFlips=%u writeFlips=%u retries=%u failures=%u\n",st.regions.load(),st.live.load(),st.executeFlips.load(),st.writeFlips.load(),st.retries.load(),st.failures.load());fflush(stdout);
     }
     else if(mode=="hang")ok=ok&&!r->finished&&last.find("EXE entry play-guest.exe")!=std::string::npos;
     else ok=ok&&r->finished&&r->success&&r->code==42;
