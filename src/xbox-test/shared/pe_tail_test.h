@@ -9,6 +9,7 @@ inline unsigned test(void (*log)(const char*)) {
     check(pt&&copy&&offset,"rectangle-exports");
     if(pt&&copy&&offset){RECT r{10,20,30,40},out{};check(pt(&r,POINT{10,20})&&!pt(&r,POINT{30,40}),"rectangle-half-open-bounds");check(copy(&out,&r)&&!memcmp(&r,&out,sizeof(r)),"rectangle-copy");check(offset(&out,-10,5)&&out.left==0&&out.top==25&&out.right==20&&out.bottom==45,"rectangle-offset");}
     auto path=(BOOL(WINAPI*)(LPWSTR,LPCWSTR))resolve("shlwapi.dll","PathCanonicalizeW");check(!!path,"path-export");
+    auto strcmpw=(int(WINAPI*)(LPCWSTR,LPCWSTR))resolve("shlwapi.dll","StrCmpW");check(strcmpw&&strcmpw(L"a",L"b")<0&&strcmpw(L"x",L"x")==0,"strcmp-export");
     if(path){wchar_t out[MAX_PATH]{};check(path(out,L"C:\\one\\..\\two")&&!wcscmp(out,L"C:\\two"),"path-canonicalize");}
     auto argv=(LPWSTR*(WINAPI*)(LPCWSTR,int*))resolve("shell32.dll","CommandLineToArgvW");check(!!argv,"command-line-export");
     if(argv){int count=0;auto args=argv(L"game.exe \"two words\" end",&count);check(args&&count==3&&!wcscmp(args[0],L"game.exe")&&!wcscmp(args[1],L"two words")&&!wcscmp(args[2],L"end"),"command-line-quoted-arguments");if(args)check(!LocalFree(args),"command-line-free");}
