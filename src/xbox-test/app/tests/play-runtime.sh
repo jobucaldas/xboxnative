@@ -53,6 +53,14 @@ printf 'LIBRARY baselib.dll\nEXPORTS\n dependency_check\n' > "$out/obj/unresolve
 llvm-dlltool-19 -m i386:x86-64 -d "$out/obj/unresolved-import.def" -l "$out/obj/unresolved-import.lib"
 printf '__declspec(dllimport) int dependency_check(void);\nint failed_anchor; void *failed_relocation = &failed_anchor;\nint failed_dependency_entry(void) { return dependency_check() ? 42 : 43; }\n' | clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -x c -c - -o "$out/obj/failed-dependency.obj"
 lld-link-19 /nodefaultlib /entry:failed_dependency_entry /include:failed_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-failed-dependency.exe" "$out/obj/failed-dependency.obj" "$out/obj/unresolved-import.lib"
+# CRT exit family imported from the API set (as MSVC /MD binaries do): Play
+# contains them, so the guest ends and the runner process survives.
+printf 'LIBRARY api-ms-win-crt-runtime-l1-1-0.dll\nEXPORTS\n exit\n abort\n' > "$out/obj/crt-runtime.def"
+llvm-dlltool-19 -m i386:x86-64 -d "$out/obj/crt-runtime.def" -l "$out/obj/crt-runtime.lib"
+for kind in exit abort;do
+ printf '__declspec(dllimport) void exit(int);\n__declspec(dllimport) void abort(void);\nint crt_anchor; void *crt_relocation = &crt_anchor;\nint crt_entry(void) { %s; return 41; }\n' "$([[ $kind == exit ]] && echo 'exit(37)' || echo 'abort()')" | clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -x c -c - -o "$out/obj/crt-$kind.obj"
+ lld-link-19 /nodefaultlib /entry:crt_entry /include:crt_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-crt-$kind.exe" "$out/obj/crt-$kind.obj" "$out/obj/crt-runtime.lib"
+done
 cat > "$out/obj/reject.def" <<'DEF'
 LIBRARY play-reject.dll
 EXPORTS
@@ -159,6 +167,10 @@ cp "$out/play-unresolved.dll" "$out/baselib.dll"
 WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" failed-dependency > "$out/failed-dependency.log" 2>&1
 tail -1 "$out/failed-dependency.log"
 grep -q "PLAY-RELEASE released=1 restarted=1 ran=1 retained=1" "$out/failed-dependency.log"
+for mode in crt-exit crt-abort;do
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
+ tail -1 "$out/$mode.log"
+done
 WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" top-level > "$out/top-level.log" 2>&1
 grep -q "PLAY-TOP-LEVEL survived=1 exit=1" "$out/top-level.log"
 rm -f "$out/baselib.dll"

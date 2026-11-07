@@ -927,6 +927,47 @@ static PVOID WINAPI guestAddVeh(ULONG first,LONG(CALLBACK* handler)(EXCEPTION_PO
     }
     return guest;
 }
+// The C runtime's exit family (exit, _exit, quick_exit, _Exit, abort) runs in
+// the console's native ucrtbase/msvcrt, which ends the process through its
+// own ExitProcess import and would take the launcher down with the game.
+// For a guest, exit() still does the CRT's exit-time work through _cexit
+// (atexit handlers, static destructors, stream flush) in that same CRT, then
+// ends like Play's ExitProcess: the guest thread ends and the launcher reports
+// the result and restarts to unload the game. The quick/underscore forms skip
+// that work, as on Windows; abort() reports code 3 like the CRT does.
+static HMODULE crtModule(bool msvcrt) {
+    static HMODULE ucrt=LoadLibraryExW(L"ucrtbase.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    static HMODULE legacy=LoadLibraryExW(L"msvcrt.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    return msvcrt?legacy:ucrt;
+}
+template<bool Msvcrt> static void __cdecl crtExit(int code) {
+    using Cleanup=void(__cdecl*)();
+    HMODULE crt=crtModule(Msvcrt);
+    auto cleanup=crt?(Cleanup)GetProcAddress(crt,"_cexit"):nullptr;
+    if(state) state->event("guest CRT exit("+std::to_string(code)+")");
+    if(cleanup) cleanup();
+    exitProcess(UINT(code));
+}
+static void __cdecl crtQuickExit(int code) {
+    if(state) state->event("guest CRT quick exit("+std::to_string(code)+")");
+    exitProcess(UINT(code));
+}
+static void __cdecl crtAbort() {
+    if(state) state->event("guest CRT abort()");
+    exitProcess(3);
+}
+static uintptr_t crtExitApi(const std::string& key,const char* name) {
+    if(!name) return 0;
+    const bool msvcrt=key=="msvcrt.dll";
+    if(!msvcrt && key!="ucrtbase.dll" && key.rfind("api-ms-win-crt-runtime-",0)!=0) return 0;
+    // A CRT the game ships is mapped by Play; its own ExitProcess import
+    // already reaches Play, and its exit-time work belongs to that copy.
+    if(key=="ucrtbase.dll"||msvcrt) {const auto own=wide(key.c_str());if(named(own)||exists(guestLibraryPath(own)))return 0;}
+    if(!strcmp(name,"exit")) return msvcrt?(uintptr_t)&crtExit<true>:(uintptr_t)&crtExit<false>;
+    if(!strcmp(name,"_exit")||!strcmp(name,"_Exit")||!strcmp(name,"quick_exit")) return (uintptr_t)&crtQuickExit;
+    if(!strcmp(name,"abort")) return (uintptr_t)&crtAbort;
+    return 0;
+}
 static uintptr_t processApi(const char* name) {
 #define PLAY_API(n,f) if(!strcmp(name,n)) return (uintptr_t)&f
     PLAY_API("OutputDebugStringW",debugStringW);PLAY_API("OutputDebugStringA",debugStringA);
@@ -1036,6 +1077,7 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // Same client gate as LoadLibrary, for static and forwarded imports. Never
     // a callable Steam placeholder: the import stays unresolved, as on Windows
     // without the DLL. steam_api64.dll resolves from the game's own file below.
+    if(auto p=crtExitApi(key,name)) return p;
     if(key=="steamclient64.dll") {
         if(steamClient.empty()) return missing(dll,name,ordinal);
         auto client=steamClientSigned.empty()?named(steamClient):signedClientModule();
