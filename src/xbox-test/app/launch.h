@@ -379,6 +379,10 @@ static void dump_thread_stacks() {
     lp_sink("STACKS end");
 }
 static void lp_run_impl(LpCtx& c) {
+    // A previous launch that never ran game code was released; nothing of its
+    // Steam routing or final upload carries over to this one.
+    play_runtime::reset_launch_config();g_signedClient.clear();g_clientAccount=0;
+    g_finalSync=nullptr;g_finalSyncDone=false;
     wine_gap::report(c.root);
     if(c.names.empty()) {c.failName="no executable";return;}
     // A Steam launch option may name an executable in a subdirectory: the guest
@@ -501,6 +505,18 @@ static void lp_publish(int gen,uint32_t appid,const std::string& result,bool ok,
     write_text(g_dir+L"\\launch_result.json",json);
     g_launch.result=result;g_launch.ok=ok;
     logf("launch: %s attempt=%s ok=%d mapped=%d/%d gameCodeExecuted=%s: %s",terminal?"RESULT":"RUNNING",g_launch.attempt.c_str(),ok?1:0,mapped,total,executed?"true":"false",result.c_str());
+    if(terminal) {   // LocalState\launch_history.log: one line per finished launch, newest last
+        const std::wstring history=g_dir+L"\\launch_history.log";
+        WIN32_FILE_ATTRIBUTE_DATA a{};
+        if(GetFileAttributesExW(history.c_str(),GetFileExInfoStandard,&a)&&(a.nFileSizeHigh||a.nFileSizeLow>(512u<<10)))
+            MoveFileExW(history.c_str(),(history+L".old").c_str(),MOVEFILE_REPLACE_EXISTING);
+        if(FILE* f=_wfopen(history.c_str(),L"ab")) {
+            std::string line=utc_iso()+" appid="+std::to_string(appid)+" attempt="+g_launch.attempt+" state="+status+" ok="+(ok?"1":"0")+
+                " gameCodeExecuted="+(executed?"1":"0")+" mapped="+std::to_string(mapped)+"/"+std::to_string(total)+" result="+result;
+            for(auto& ch:line) if(ch=='\r'||ch=='\n') ch=' ';
+            line+="\n";fwrite(line.data(),1,line.size(),f);fclose(f);
+        }
+    }
     g_launch.phase=terminal?2:3;
 }
 static void lp_finish(int gen,uint32_t appid,const std::string& result,bool ok,int mapped,int total,const char* status=nullptr) {
@@ -515,10 +531,10 @@ static void lp_watchdog() {
 
 // Entry: called on the render thread; returns immediately (work happens on a worker thread).
 static void start_launch(uint32_t appid, const std::string& name, const std::string& dir, const char* via) {
-    if(play_runtime::observed.load(std::memory_order_acquire)) {
+    if(auto guest=play_runtime::observed.load(std::memory_order_acquire)) {
         std::lock_guard<std::mutex> lock(g_launch.m);
-        g_launch.result="Guest retained. Restart launcher before another Play. Last event: "+play_runtime::state->snapshot();
-        logf("launch: Play rejected: guest retained; restart launcher before another Play");return;
+        g_launch.result="Game code from the last launch is still loaded; the launcher restarts to end it. Last event: "+guest->snapshot();
+        logf("launch: Play rejected: game code from the last launch is still loaded");return;
     }
     int gen = ++g_launch.gen; g_launch.appid = appid; g_launch.started = now_s();
     { std::lock_guard<std::mutex> l(g_launch.m); g_launch.result.clear();g_launch.ok=false;g_launch.attempt=std::to_string(GetCurrentProcessId())+":"+std::to_string(gen); } g_launch.phase = 1;
@@ -541,12 +557,17 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
             std::wstring root = g_dir + L"\\" + widen(dir); std::string why = target.why; std::vector<std::wstring> names; if (!target.exe.empty()) names.push_back(target.exe);
             logf("launch: runtime root=LocalState\\%s targets=%zu (%s)", dir.c_str(), names.size(), why.c_str());
             if (dir.empty() || names.empty()) { finish("cannot start: " + (dir.empty() ? std::string("install directory unknown") : why), false, 0, 0); return; }
+            // Keep the previous attempt's log beside this one (launch_probe.previous.log).
+            MoveFileExW((g_dir + L"\\launch_probe.log").c_str(), (g_dir + L"\\launch_probe.previous.log").c_str(), MOVEFILE_REPLACE_EXISTING);
             { std::lock_guard<std::mutex> l(g_lpm); if (g_lpf) fclose(g_lpf); g_lpf = _wfopen((g_dir + L"\\launch_probe.log").c_str(), L"wb"); g_lpMissing = g_lpStubbed = g_lpStubCalls = g_lpLines = 0; g_lpLastFail.clear(); }
             LpCtx c; c.root = root; c.args = widen(args); c.names = names;c.gen=gen;c.appid=appid; bool noFault = lp_run_seh(&c);
             { std::lock_guard<std::mutex> l(g_lpm); if (g_lpf) { fclose(g_lpf); g_lpf = nullptr; } }
             int total=play_runtime::state?int(play_runtime::state->moduleCount):int(names.size());
-            if(!noFault) {finish("loader SEH exception; last event: "+(play_runtime::state?play_runtime::state->snapshot():std::string("loader not entered")),false,c.mapped,total);return;}
-            lp_finish(gen,appid,c.fault.empty()?c.failName:c.fault,c.ok,c.mapped,total,c.timedOut?"timeout":nullptr);
+            const std::string fault=noFault?(c.fault.empty()?c.failName:c.fault):
+                "loader SEH exception; last event: "+(play_runtime::state?play_runtime::state->snapshot():std::string("loader not entered"));
+            // Before publishing: the UI offers Play again only once nothing is retained.
+            if(play_runtime::discard_unstarted()) logf("launch: no game code ran; loader released, another game can be played");
+            lp_finish(gen,appid,fault,noFault&&c.ok,c.mapped,total,noFault&&c.timedOut?"timeout":nullptr);
         } catch (std::exception const& e) { finish(std::string("loader threw: ") + e.what(), false, 0, 0); }
         catch (...) { finish("loader threw an unknown exception.", false, 0, 0); }
     }).detach();

@@ -156,6 +156,7 @@ cp "$out/obj/play-cxx-cookie.dll" "$cxx"
 cp "$out/play-unresolved.dll" "$out/baselib.dll"
 WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" failed-dependency > "$out/failed-dependency.log" 2>&1
 tail -1 "$out/failed-dependency.log"
+grep -q "PLAY-RELEASE released=1 restarted=1 ran=1 retained=1" "$out/failed-dependency.log"
 rm -f "$out/baselib.dll"
 # Steam without a genuine client. A steamclient64.dll in the game root must be
 # refused (steam-client runs above with it present); a root steam_api64.dll is

@@ -444,6 +444,18 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     else if(mode=="exit")ok=ok&&r->finished&&r->success&&r->code==37;
     else if(mode=="hang")ok=ok&&!r->finished&&last.find("EXE entry play-guest.exe")!=std::string::npos;
     else ok=ok&&r->finished&&r->success&&r->code==42;
+    if(mode=="failed-dependency"&&ok) {
+        // No game code ran, so the launcher releases this loader and the next
+        // Play starts fresh in the same process; a guest that ran stays retained.
+        bool released=play_runtime::discard_unstarted()&&!play_runtime::observed.load()&&!play_runtime::state&&mlp::assets.empty();
+        bool again=released&&play_runtime::start(root,L"play-guest.exe",L"",logline);
+        auto next=play_runtime::state;
+        if(again&&next->worker)WaitForSingleObject(next->worker,5000);
+        bool ran=again&&next!=r&&next->executed&&next->finished&&next->success&&next->code==42;
+        bool retained=ran&&!play_runtime::discard_unstarted()&&play_runtime::observed.load()==next;
+        printf("PLAY-RELEASE released=%d restarted=%d ran=%d retained=%d\n",released,again,ran,retained);fflush(stdout);
+        ok=retained;
+    }
     // The runner is a disposable off-device process, like launcher restart.
     ExitProcess(ok?0:1);
 }

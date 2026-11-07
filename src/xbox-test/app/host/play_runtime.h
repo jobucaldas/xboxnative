@@ -165,9 +165,18 @@ static bool processModule(HMODULE h) {
     auto key=basename(p);
     return key=="kernel32.dll" || key=="kernelbase.dll" || key.find("api-ms-win-core-")==0;
 }
+// The guest ends where it calls ExitProcess, without unwinding, as on Windows.
+// Raising an exception to unwind back to the worker took the whole launcher
+// down when a frame had no unwind data (SteamStub's DRM runs from memory it
+// maps itself) and could be swallowed by a guest catch(...). The calling
+// thread exits; game code has run, so the launcher reports the end and
+// restarts to unload the rest of the guest.
 static void WINAPI exitProcess(UINT code) {
     state->code=code; state->event("ExitProcess code="+std::to_string(code));
-    ULONG_PTR arg=code; RaiseException(exitException,EXCEPTION_NONCONTINUABLE,1,&arg);
+    state->success=true; state->result=state->snapshot();
+    if(GetCurrentThreadId()==state->thread) guestThread=false;
+    state->finished.store(true,std::memory_order_release);
+    ExitThread(code);
 }
 static BOOL WINAPI terminateProcess(HANDLE process,UINT code) {
     if(process==GetCurrentProcess()) { exitProcess(code); return TRUE; }
@@ -541,7 +550,9 @@ static Module* map(const std::wstring& requested,const std::string& asKey,wxl::R
     mlp::assets[m->key]=&m->image;
     state->event("mapping "+m->key);
     if(provided) state->event("steam_api64.dll served by the configured Steam API provider; the game's file is unchanged");
-    else if(m->key=="steam_api64.dll") state->event("steam_api64.dll is the game's original file, mapped unmodified; no Steam client, so SteamAPI_Init is expected to fail (item 36)");
+    else if(m->key=="steam_api64.dll") state->event(steamClient.empty()?
+        "steam_api64.dll is the game's original file, mapped unmodified; no Steam client, so SteamAPI_Init is expected to fail (item 36)":
+        "steam_api64.dll is the game's original file, mapped unmodified; it reaches the staged Steam client");
     struct ImportScope {ImportScope(){++mappingImports;} ~ImportScope(){--mappingImports;}} imports;
     if(!wxl::run(path.c_str(),state->log,&m->image,resolver?resolver:resolve,wxl::LoadConfig::msvc_x64)) {
         // Withdraw the early publication: a failed image's export table must
@@ -905,6 +916,41 @@ static bool start(const std::wstring& root,const std::wstring& exe,const std::ws
     state->event("creating guest worker stackReserve=16777216");
     state->worker=CreateThread(nullptr,16*1024*1024,worker,nullptr,STACK_SIZE_PARAM_IS_A_RESERVATION,nullptr);
     if(!state->worker){state->event("CreateThread failed error="+std::to_string(GetLastError()));state->result=state->snapshot();state->finished=true;}
+    return true;
+}
+// Per-launch Steam routing, cleared before each Play so one game's provider,
+// client or ownership ticket can never reach the next game.
+static void reset_launch_config() {
+    steamProvider.clear();steamClient.clear();steamClientSigned.clear();appTicket.clear();emulatedCreate=nullptr;
+}
+// A launch that ended before any game code ran (no TLS callback, DllMain or
+// entry point: `executed` is set before each) left nothing executing: the
+// worker has returned and only this loader refers to the images. Free them so
+// the next Play starts a fresh loader without restarting the launcher. Once
+// game code ran, its threads, hooks and addresses may live on, so the guest
+// stays retained and only a launcher restart ends it. The State object itself
+// is kept (it is small): launcher threads may still read its last event.
+static bool discard_unstarted() {
+    State* s=observed.load(std::memory_order_acquire);
+    if(!s || !s->finished.load(std::memory_order_acquire) || s->executed.load()) return false;
+    if(s->worker) {
+        if(WaitForSingleObject(s->worker,10000)!=WAIT_OBJECT_0) return false;
+        if(s->executed.load()) return false;
+        CloseHandle(s->worker);s->worker=nullptr;
+    }
+    if(s->veh) {
+        auto remove=(ULONG(WINAPI*)(PVOID))kernel_tail::native("RemoveVectoredExceptionHandler");
+        if(!remove || !remove(s->veh)) return false;
+        s->veh=nullptr;
+    }
+    {
+        std::lock_guard<std::recursive_mutex> lock(s->loaderMutex);
+        mlp::assets.clear();
+        s->order.clear();s->exe=nullptr;
+        s->modules.clear();   // ~Image: no entry ran, so this only unmaps and frees TLS indices
+    }
+    reset_launch_config();
+    state=nullptr;observed.store(nullptr,std::memory_order_release);
     return true;
 }
 }
