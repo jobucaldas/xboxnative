@@ -64,6 +64,104 @@ static BOOL CALLBACK resourceName(HMODULE module,LPCSTR type,LPSTR name,LONG_PTR
     if(module!=GetModuleHandleW(nullptr)||type!=MAKEINTRESOURCEA(10)||name!=MAKEINTRESOURCEA(101))return FALSE;
     ++*count;return TRUE;
 }
+// Guest JIT memory: RWX request, emit, run, patch, run again (see
+// shared/rwx_emulation.h). Hand-assembled `mov eax,imm32 ; ret`.
+static volatile LONG guestSawAccessViolation=0;
+static LONG CALLBACK countAccessViolation(EXCEPTION_POINTERS* ep){
+    if(ep->ExceptionRecord->ExceptionCode==EXCEPTION_ACCESS_VIOLATION)InterlockedIncrement(&guestSawAccessViolation);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static void emitReturn(BYTE* at,DWORD value){
+    volatile BYTE* w=at;w[0]=0xb8;w[1]=BYTE(value);w[2]=BYTE(value>>8);w[3]=BYTE(value>>16);w[4]=BYTE(value>>24);w[5]=0xc3;
+}
+static DWORD WINAPI jitThread(void* page){emitReturn((BYTE*)page,44);return ((DWORD(*)())page)();}
+// Several threads run a stub in the same page a writer keeps patching: the
+// page flips RX<->RW under them. Every call must return one of the values the
+// writer stored (the 4-byte immediate is aligned, so a store is atomic).
+struct Race{BYTE* stub;volatile LONG stop;volatile LONG bad;volatile LONG calls;};
+static DWORD WINAPI raceWriter(void* arg){
+    auto* r=(Race*)arg;
+    // Each store waits for a runner to execute the page again, so the page
+    // really flips RX->RW->RX under the runners 300 times.
+    for(DWORD v=1;v<=300;++v){
+        LONG seen=r->calls;
+        *(volatile DWORD*)(r->stub+1)=v;
+        for(DWORD spin=0;r->calls==seen&&spin<50000000;++spin)YieldProcessor();
+    }
+    InterlockedExchange(&r->stop,1);return 0;
+}
+static DWORD WINAPI raceRunner(void* arg){
+    auto* r=(Race*)arg;
+    while(!r->stop){DWORD v=((DWORD(*)())r->stub)();if(v>300)InterlockedIncrement(&r->bad);InterlockedIncrement(&r->calls);}
+    return 0;
+}
+static int testRwxJit(){
+    // A first-in-chain guest handler (as Unity's Mono installs) must never see
+    // the page-flip faults: Play's handler stays ahead of it, also when the
+    // guest registers a second first-in-chain handler later.
+    if(!AddVectoredExceptionHandler(1,countAccessViolation))return 70;
+    BYTE* p=(BYTE*)VirtualAlloc(nullptr,4*4096,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);
+    if(!p)return 71;
+    emitReturn(p,42);if(((DWORD(*)())p)()!=42)return 72;          // execute fault on an RW page
+    emitReturn(p,43);if(((DWORD(*)())p)()!=43)return 73;          // write fault on an RX page
+    emitReturn(p+4096,45);if(((DWORD(*)())(p+4096))()!=45)return 74; // independent page
+    if(((DWORD(*)())p)()!=43)return 75;                           // page 0 stayed executable
+    // VirtualQuery reports what the guest asked for, over the whole region,
+    // whichever way each page is currently flipped (page 0/1 are RX, 2/3 RW).
+    MEMORY_BASIC_INFORMATION mbi{};
+    if(!VirtualQuery(p+4096,&mbi,sizeof mbi)||mbi.Protect!=PAGE_EXECUTE_READWRITE||mbi.BaseAddress!=p||mbi.RegionSize!=4*4096)return 83;
+    DWORD old=0;
+    if(!VirtualProtect(p+2*4096,4096,PAGE_EXECUTE_READWRITE,&old)||old!=PAGE_EXECUTE_READWRITE)return 76;
+    HANDLE t=CreateThread(nullptr,0,jitThread,p+2*4096,0,nullptr);
+    if(!t||WaitForSingleObject(t,10000)!=WAIT_OBJECT_0)return 77;
+    DWORD code=0;GetExitCodeThread(t,&code);CloseHandle(t);if(code!=44)return 78;
+    // An explicit non-RWX protection ends emulation: plain read/write.
+    if(!VirtualProtect(p+3*4096,4096,PAGE_READWRITE,&old)||old!=PAGE_EXECUTE_READWRITE)return 79;
+    *(volatile BYTE*)(p+3*4096)=1;
+    if(!VirtualQuery(p+3*4096,&mbi,sizeof mbi)||mbi.Protect!=PAGE_READWRITE)return 84;
+    if(!VirtualQuery(p,&mbi,sizeof mbi)||mbi.Protect!=PAGE_EXECUTE_READWRITE||mbi.RegionSize!=3*4096)return 85;
+    // A stub and a write that both straddle a page boundary: each page flips
+    // on its own fault, in both directions, twice.
+    BYTE* q=(BYTE*)VirtualAlloc(nullptr,2*4096,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);
+    if(!q)return 86;
+    BYTE* span=q+4096-3;
+    for(DWORD v=50;v<52;++v){emitReturn(span,v);if(((DWORD(*)())span)()!=v)return 87;}
+    if(!AddVectoredExceptionHandler(1,countAccessViolation))return 88;
+    // Decommit the middle page of a region and recommit it as RWX: still tracked.
+    BYTE* r=(BYTE*)VirtualAlloc(nullptr,3*4096,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);
+    if(!r)return 89;
+    emitReturn(r+4096,60);if(((DWORD(*)())(r+4096))()!=60)return 90;
+    if(!VirtualFree(r+4096,4096,MEM_DECOMMIT))return 91;
+    if(!VirtualAlloc(r+4096,4096,MEM_COMMIT,PAGE_EXECUTE_READWRITE))return 92;
+    emitReturn(r+4096,61);if(((DWORD(*)())(r+4096))()!=61)return 93;
+    emitReturn(r+2*4096,62);if(((DWORD(*)())(r+2*4096))()!=62)return 94;   // neighbours still work
+    // Overlapping RWX protections on plain RW memory merge into one region.
+    BYTE* m=(BYTE*)VirtualAlloc(nullptr,4*4096,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+    if(!m||!VirtualProtect(m,2*4096,PAGE_EXECUTE_READWRITE,&old)||old!=PAGE_READWRITE)return 95;
+    if(!VirtualProtect(m+4096,2*4096,PAGE_EXECUTE_READWRITE,&old)||old!=PAGE_EXECUTE_READWRITE)return 96;
+    emitReturn(m,70);emitReturn(m+4096,71);emitReturn(m+2*4096,72);
+    if(((DWORD(*)())m)()!=70||((DWORD(*)())(m+4096))()!=71||((DWORD(*)())(m+2*4096))()!=72)return 97;
+    emitReturn(m+4096,73);if(((DWORD(*)())(m+4096))()!=73)return 98;       // flipped back after running
+    // Threads executing a page while another patches it.
+    BYTE* race=(BYTE*)VirtualAlloc(nullptr,4096,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);
+    if(!race)return 99;
+    BYTE* stub=race+3;                              // imm32 at offset 4: aligned
+    emitReturn(stub,1);
+    Race shared{stub,0,0,0};
+    HANDLE threads[4];
+    for(int i=0;i<3;++i)threads[i]=CreateThread(nullptr,0,raceRunner,&shared,0,nullptr);
+    threads[3]=CreateThread(nullptr,0,raceWriter,&shared,0,nullptr);
+    for(auto h:threads)if(!h)return 100;
+    DWORD waited=WaitForMultipleObjects(4,threads,TRUE,60000);
+    for(auto h:threads)CloseHandle(h);
+    if(waited!=WAIT_OBJECT_0)return 101;
+    if(shared.bad||!shared.calls)return 102;
+    if(guestSawAccessViolation)return 80;
+    // The documented executable-copy-on-write combination stays refused.
+    SetLastError(0);if(VirtualAlloc(nullptr,4096,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_WRITECOPY)||GetLastError()!=ERROR_ACCESS_DENIED)return 81;
+    if(!VirtualFree(race,0,MEM_RELEASE)||!VirtualFree(m,0,MEM_RELEASE)||!VirtualFree(r,0,MEM_RELEASE)||!VirtualFree(q,0,MEM_RELEASE))return 103;
+    return VirtualFree(p,0,MEM_RELEASE)?42:82;
+}
 DWORD guest_exe_entry(){
     if(tls_value!=74||tls_count!=1||!dependency_check())return 1;
     HMODULE main=GetModuleHandleW(nullptr);wchar_t path[512];
@@ -74,6 +172,7 @@ DWORD guest_exe_entry(){
     auto init=(Init)GetProcAddress(kernel,"InitializeCriticalSectionEx");
     if(!init||GetProcAddress(kernel,"DeliberatelyAbsentOptionalExport"))return 6;
     CRITICAL_SECTION section;if(!init(&section,0,0))return 7;DeleteCriticalSection(&section);
+    if(contains(GetCommandLineW(),L"rwx-jit"))return testRwxJit();
     if(contains(GetCommandLineW(),L"loader-lifetime"))return testLoaderLifetime();
     if(contains(GetCommandLineW(),L"loader-search"))return testLoaderSearch();
     if(contains(GetCommandLineW(),L"loader-thread"))return testLoaderThreadNotifications();
