@@ -442,6 +442,8 @@ static void lp_run_impl(LpCtx& c) {
         if(r->worker)WaitForSingleObject(r->worker,50);else Sleep(50);
     }
     if(unsigned n=r->invalidHandles.load()){char line[96];snprintf(line,sizeof line,"PRUN invalid-handle raises continued=%u",n);lp_sink(line);}
+    {auto& st=rwx_emulation::state().stats;
+     if(unsigned n=st.regions.load()){char line[160];snprintf(line,sizeof line,"PRUN rwx-emulation regions=%u executeFlips=%u writeFlips=%u retries=%u failures=%u",n,st.executeFlips.load(),st.writeFlips.load(),st.retries.load(),st.failures.load());lp_sink(line);}}
     if(steamProvider)final_sync(c.appid,c.root);
     c.mapped=r->mappedCount;
     for(auto& row:mlp::summaries) {

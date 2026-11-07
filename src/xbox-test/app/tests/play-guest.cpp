@@ -64,6 +64,40 @@ static BOOL CALLBACK resourceName(HMODULE module,LPCSTR type,LPSTR name,LONG_PTR
     if(module!=GetModuleHandleW(nullptr)||type!=MAKEINTRESOURCEA(10)||name!=MAKEINTRESOURCEA(101))return FALSE;
     ++*count;return TRUE;
 }
+// Guest JIT memory: RWX request, emit, run, patch, run again (see
+// shared/rwx_emulation.h). Hand-assembled `mov eax,imm32 ; ret`.
+static volatile LONG guestSawAccessViolation=0;
+static LONG CALLBACK countAccessViolation(EXCEPTION_POINTERS* ep){
+    if(ep->ExceptionRecord->ExceptionCode==EXCEPTION_ACCESS_VIOLATION)InterlockedIncrement(&guestSawAccessViolation);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static void emitReturn(BYTE* at,DWORD value){
+    volatile BYTE* w=at;w[0]=0xb8;w[1]=BYTE(value);w[2]=BYTE(value>>8);w[3]=BYTE(value>>16);w[4]=BYTE(value>>24);w[5]=0xc3;
+}
+static DWORD WINAPI jitThread(void* page){emitReturn((BYTE*)page,44);return ((DWORD(*)())page)();}
+static int testRwxJit(){
+    // A first-in-chain guest handler (as Unity's Mono installs) must never see
+    // the page-flip faults: Play's handler stays ahead of it.
+    if(!AddVectoredExceptionHandler(1,countAccessViolation))return 70;
+    BYTE* p=(BYTE*)VirtualAlloc(nullptr,4*4096,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);
+    if(!p)return 71;
+    emitReturn(p,42);if(((DWORD(*)())p)()!=42)return 72;          // execute fault on an RW page
+    emitReturn(p,43);if(((DWORD(*)())p)()!=43)return 73;          // write fault on an RX page
+    emitReturn(p+4096,45);if(((DWORD(*)())(p+4096))()!=45)return 74; // independent page
+    if(((DWORD(*)())p)()!=43)return 75;                           // page 0 stayed executable
+    DWORD old=0;
+    if(!VirtualProtect(p+2*4096,4096,PAGE_EXECUTE_READWRITE,&old)||old!=PAGE_EXECUTE_READWRITE)return 76;
+    HANDLE t=CreateThread(nullptr,0,jitThread,p+2*4096,0,nullptr);
+    if(!t||WaitForSingleObject(t,10000)!=WAIT_OBJECT_0)return 77;
+    DWORD code=0;GetExitCodeThread(t,&code);CloseHandle(t);if(code!=44)return 78;
+    // An explicit non-RWX protection ends emulation: plain read/write.
+    if(!VirtualProtect(p+3*4096,4096,PAGE_READWRITE,&old)||old!=PAGE_EXECUTE_READWRITE)return 79;
+    *(volatile BYTE*)(p+3*4096)=1;
+    if(guestSawAccessViolation)return 80;
+    // The documented executable-copy-on-write combination stays refused.
+    SetLastError(0);if(VirtualAlloc(nullptr,4096,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_WRITECOPY)||GetLastError()!=ERROR_ACCESS_DENIED)return 81;
+    return VirtualFree(p,0,MEM_RELEASE)?42:82;
+}
 DWORD guest_exe_entry(){
     if(tls_value!=74||tls_count!=1||!dependency_check())return 1;
     HMODULE main=GetModuleHandleW(nullptr);wchar_t path[512];
@@ -74,6 +108,7 @@ DWORD guest_exe_entry(){
     auto init=(Init)GetProcAddress(kernel,"InitializeCriticalSectionEx");
     if(!init||GetProcAddress(kernel,"DeliberatelyAbsentOptionalExport"))return 6;
     CRITICAL_SECTION section;if(!init(&section,0,0))return 7;DeleteCriticalSection(&section);
+    if(contains(GetCommandLineW(),L"rwx-jit"))return testRwxJit();
     if(contains(GetCommandLineW(),L"loader-lifetime"))return testLoaderLifetime();
     if(contains(GetCommandLineW(),L"loader-search"))return testLoaderSearch();
     if(contains(GetCommandLineW(),L"loader-thread"))return testLoaderThreadNotifications();
