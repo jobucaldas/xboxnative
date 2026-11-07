@@ -49,13 +49,47 @@ directories outside SizeOfImage, outside a single section, not fully raw-backed,
 or too short for Size, and declared Size values below four or beyond the
 directory. With multiple files, the highest status wins.
 
+## What Play accepts
+
+The report above is a diagnosis; it never certifies a record. Play's own preflight
+(`msvc_config::validate(..., play=true)` in `src/xbox-test/shared/msvc_load_config.h`)
+maps Microsoft-built and other MSVC images the way Wine 10 does on x86_64: the
+loader initializes the security cookie only, and Control Flow Guard metadata is
+present but not enforced (Wine's `update_load_config` reads nothing else).
+`GuardCFCheckFunctionPointer` and `GuardCFDispatchFunctionPointer` are never
+written, so they keep their in-image defaults: a relocated pointer, in read-only
+data, to executable code, which the mapper re-verifies as unmodified.
+
+Beyond the cookie-only record, Play accepts:
+
+- the `GUARD_CF` DLL characteristic (`0x4000`), only together with a function table
+- `GuardCFFunctionTable`/`GuardCFFunctionCount`: both nonzero, the table VA
+  relocated by a DIR64 entry, `count * (4 + stride nibble)` bytes (stride nibble =
+  `GuardFlags` bits 28-31) wholly inside one read-only, non-executable,
+  file-backed section, disjoint from the record, cookie and guard slots, never
+  relocated, read for decisions or written
+- `GuardFlags` made only of `CF_INSTRUMENTED` (`0x100`), `CF_FUNCTION_TABLE_PRESENT`
+  (`0x400`, required exactly when a table exists), `PROTECT_DELAYLOAD_IAT`
+  (`0x1000`), `DELAYLOAD_IAT_IN_ITS_OWN_SECTION` (`0x2000`),
+  `CF_LONGJUMP_TABLE_PRESENT` (`0x10000`, only with a table) and the stride nibble
+  (only with a table); the last three are descriptive flags, nothing acts on them
+- a relocated, read-only `VolatileMetadataPointer` (outer VA only, never read)
+- the 0x70-byte pre-CFG record (cookie and SEH fields, as in `steam_api64.dll`)
+  and the 0x94..0x140-byte records of older MSVC linkers
+
+Everything else stays rejected: other `GuardFlags` bits (CFW, export suppression,
+retpoline, return-flow, EH continuation, XFG, CastGuard, memcpy), non-zero
+address-taken IAT, long-jump, EH-continuation, dynamic-relocation, return-flow and
+XFG fields, tables outside a read-only file-backed section, and unknown non-zero
+bytes. `src/xbox-test/shared/tests/msvc_load_config_test.cpp` covers both sides.
+
 `inert Wine file-byte candidate: yes` describes only the record's file-byte shape,
 DLL characteristics and section permissions, not donor mapper acceptance. The
 tool does not validate loader writes: both mappers reject overlapping DIR64
 writes (including boundary straddles), and imports, delay imports and TLS may
 also write into an otherwise inert-looking record. Other mapper checks still
-apply. Play still uses `LoadConfig::reject`; every well-formed present record is
-BLOCKED. The report does not certify a record, and it does not claim that an
+apply. This tool does not model Play's profile (see above): it reports every
+well-formed present record as BLOCKED. The report does not certify a record, and it does not claim that an
 image can run. Supporting a real MSVC record means
 implementing what the record asks for (cookie initialization, CFG/XFG, volatile
 metadata), not ignoring or stripping it. The report prints only file base names.

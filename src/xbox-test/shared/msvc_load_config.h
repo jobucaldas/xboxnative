@@ -98,12 +98,15 @@ struct Plan {
     Tls tls;
     // Play profile only (validate(...,true)); both stay zero otherwise.
     uint32_t guardFlags=0; size_t volatileMetadata=0;
+    // Control Flow Guard function table (Play only): read-only image bytes the
+    // loader never reads or writes, like Wine. Span is zero when absent.
+    Span cfgTable; uint64_t cfgEntries=0;
     // All loader-owned locations, including read-only inactive guard slots.
     bool protectedWrite(size_t rva,size_t n) const {
         Span s{rva,n};
         if(overlaps(s,record)||overlaps(s,cookie)) return true;
         for(auto g:slots) if(overlaps(s,g)) return true;
-        return false;
+        return overlaps(s,cfgTable);
     }
 };
 // play=false is the original owned cookie-only fixture contract. play=true is
@@ -114,17 +117,35 @@ struct Plan {
 // cookie. Volatile metadata describes x64 code for ARM64 emulation and is never
 // read; only its outer VA is bounds-checked. Relocation limits scale to game
 // images instead of the owned fixture's small caps.
+// Play also accepts Control Flow Guard metadata as Wine 10 maps it on x86_64:
+// present, never enforced. Wine's loader reads only SecurityCookie (ntdll
+// update_load_config); it never writes GuardCFCheck/DispatchFunctionPointer, so
+// they keep their in-image defaults (a pointer slot in read-only data whose
+// value is a relocated pointer into executable code, checked above and verified
+// unmodified by the mapper). Accepted, additionally to the cookie-only record:
+//  - the GUARD_CF DLL characteristic (0x4000), only together with a function table;
+//  - GuardCFFunctionTable/Count (0x80/0x88): both nonzero, the table VA relocated
+//    (DIR64), the table (count x (4 + stride nibble) bytes) wholly inside one
+//    read-only, non-executable, file-backed section and clear of every loader-
+//    owned location; the table is never read for decisions or written;
+//  - GuardFlags = CF_INSTRUMENTED(0x100) | CF_FUNCTION_TABLE_PRESENT(0x400, iff a
+//    table exists) | PROTECT_DELAYLOAD_IAT(0x1000) | DELAYLOAD_IAT_IN_ITS_OWN_SECTION
+//    (0x2000) | CF_LONGJUMP_TABLE_PRESENT(0x10000, only with a table; the long-jump
+//    table pointer itself stays required zero) | the stride nibble (bits 28-31,
+//    only with a table). Everything else (CFW, export suppression, retpoline, RF,
+//    EH-continuation, XFG, CastGuard/memcpy flags; address-taken IAT, long-jump,
+//    EH-continuation, dynamic-relocation, XFG/RF pointers) stays rejected.
 // Play also accepts the shorter records older MSVC linkers emit (GuardFlags
-// present, i.e. 0x94..0x140 bytes); fields past the record's end are absent, as
-// on Windows. The TLS index slot is written by the loader and may sit in a
+// present, i.e. 0x94..0x140 bytes, or the 0x70-byte pre-CFG record with only the
+// cookie and SEH fields); fields past the record's end are absent, as on Windows. The TLS index slot is written by the loader and may sit in a
 // section's zero-filled tail (common in MSVC DLLs); it needs mapped, writable,
 // non-executable extent, not file bytes. The fixture contract stays 0x140 and
 // file-backed.
 inline bool validate(const File& f,Plan& result,bool play=false) {
     Plan p;
     const size_t recordSize=f.config.size;
-    if(!f.bytes || (f.dllCharacteristics&0x4000) || f.config.rva%8 ||
-        (play ? recordSize<0x94 || recordSize>0x140 : recordSize!=0x140) ||
+    if(!f.bytes || (!play && (f.dllCharacteristics&0x4000)) || f.config.rva%8 ||
+        (play ? !(recordSize==0x70 || (recordSize>=0x94 && recordSize<=0x140)) : recordSize!=0x140) ||
         !f.preferred || f.preferred>UINT64_MAX-f.imageSize ||
         f.sections.empty() || f.sections.size()>96) return false;
     // The caller validates PE headers/alignment/W^X; also reject raw aliases,
@@ -151,13 +172,22 @@ inline bool validate(const File& f,Plan& result,bool play=false) {
     for(size_t i=4;i<recordSize;++i) {
         bool pointer=false;
         for(auto off:offsets) if(i>=off && i-off<8) pointer=true;
-        if(play && ((i>=0x90 && i<0x94) || (i>=0x100 && i<0x108))) pointer=true;
+        // GuardCFFunctionTable/Count and GuardFlags exist in every Play record >= 0x94.
+        if(play && recordSize>=0x94 && ((i>=0x80 && i<0x94) || (i>=0x100 && i<0x108))) pointer=true;
         if(!pointer && record[i]) return false;
     }
-    if(play) {
+    uint64_t cfgVa=0, cfgCount=0;
+    if(play && recordSize>=0x94) {
         memcpy(&p.guardFlags,record+0x90,4);
-        if(p.guardFlags!=0 && p.guardFlags!=0x100) return false;
-    }
+        memcpy(&cfgVa,record+0x80,8); memcpy(&cfgCount,record+0x88,8);
+        constexpr uint32_t allowed=0x100|0x400|0x1000|0x2000|0x10000|0xf0000000u;
+        const bool table=cfgVa||cfgCount;
+        // The flag, the table, and the DLL characteristic must tell one story.
+        if((p.guardFlags&~allowed) || table!=!!(p.guardFlags&0x400) ||
+            table!=!!(f.dllCharacteristics&0x4000) ||
+            (!table && (p.guardFlags&(0x10000|0xf0000000u))) ||
+            (table && (!cfgVa || !cfgCount))) return false;
+    } else if(play && (f.dllCharacteristics&0x4000)) return false;
     p.record={f.config.rva,recordSize};
     std::vector<size_t> expected;
     for(auto off:offsets) {
@@ -194,6 +224,21 @@ inline bool validate(const File& f,Plan& result,bool play=false) {
         }
         p.pointers.push_back({p.record.rva+off,target,false});
         expected.push_back(p.record.rva+off);
+    }
+    if(cfgVa) {
+        // Never read or written by the loader, like Wine. Bounds only: wholly in
+        // one read-only, non-executable, file-backed section, disjoint from the
+        // record, cookie and guard slots; the VA field itself must be relocated.
+        const size_t stride=4+(p.guardFlags>>28);
+        size_t target;
+        if(cfgCount>(uint64_t(1)<<22) ||
+            !f.va(cfgVa,size_t(cfgCount)*stride,target,read,write|execute)) return false;
+        Span table{target,size_t(cfgCount)*stride};
+        if(overlaps(table,p.record)||overlaps(table,p.cookie)) return false;
+        for(auto slot:p.slots) if(overlaps(table,slot)) return false;
+        p.cfgTable=table; p.cfgEntries=cfgCount;
+        p.pointers.push_back({p.record.rva+0x80,target,false});
+        expected.push_back(p.record.rva+0x80);
     }
     uint64_t volatileVa=0;
     if(play && recordSize>=0x108) memcpy(&volatileVa,record+0x100,8);

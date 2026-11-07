@@ -371,8 +371,8 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
         log("WXL explicit MSVC file/write plan validated");
         if (playMsvc) {
             char msg[160];
-            snprintf(msg,sizeof msg,"WXL Play MSVC load config GuardFlags=0x%x volatileMetadata=%s (cookie only; guard slots and metadata untouched, as Wine)",
-                     msvcPlan.guardFlags,msvcPlan.volatileMetadata?"present":"absent");
+            snprintf(msg,sizeof msg,"WXL Play MSVC load config GuardFlags=0x%x volatileMetadata=%s cfgTable=%s (cookie only; guard slots, CFG table and metadata untouched, as Wine)",
+                     msvcPlan.guardFlags,msvcPlan.volatileMetadata?"present":"absent",msvcPlan.cfgEntries?"present":"absent");
             log(msg);
         }
     } else if (hasConfig) {
