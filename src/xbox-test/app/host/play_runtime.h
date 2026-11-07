@@ -13,6 +13,7 @@
 #include "play_graphics.h"
 #include "../../uwph/vcruntime/route.h"
 #include "steam_app_ticket.h"
+#include "redact.h"
 namespace play_runtime {
 constexpr DWORD missingException=0xe0520001, exitException=0xe0520002;
 struct Module {
@@ -24,6 +25,25 @@ struct Module {
     size_t notifications=0;
     bool pinned=false;
     std::vector<Module*> dependencies;
+};
+// Play's loader lock (recursive, like the OS loader lock). It records its
+// owner so a guest thread that ends without unwinding (ExitProcess or a crash
+// contained by Play, both ExitThread) releases what it held; otherwise every
+// later GetProcAddress/LoadLibrary would wait forever on a dead owner.
+class LoaderMutex {
+    std::recursive_mutex mutex;
+    std::atomic<DWORD> owner{0};
+    unsigned depth=0;
+public:
+    void lock(){mutex.lock();owner.store(GetCurrentThreadId());++depth;}
+    bool try_lock(){if(!mutex.try_lock())return false;owner.store(GetCurrentThreadId());++depth;return true;}
+    void unlock(){if(--depth==0)owner.store(0);mutex.unlock();}
+    // Called on a thread about to end without unwinding.
+    void abandon(){
+        if(owner.load()!=GetCurrentThreadId())return;
+        unsigned held=depth;depth=0;owner.store(0);
+        while(held--)mutex.unlock();
+    }
 };
 struct State {
     std::wstring root, command;
@@ -40,7 +60,7 @@ struct State {
     std::atomic<unsigned> firstChanceCount{0};
     std::atomic<unsigned> invalidHandles{0};   // strict-handle-check raises continued (see vectored)
     std::mutex eventMutex;
-    std::recursive_mutex loaderMutex;
+    LoaderMutex loaderMutex;
     std::string last="loader not entered", result;
     DWORD code=0;
     std::array<wxl::Carrier,16> carriers;
@@ -180,6 +200,7 @@ static void WINAPI exitProcess(UINT code) {
     state->success=true; state->result=state->snapshot();
     if(GetCurrentThreadId()==state->thread) guestThread=false;
     state->finished.store(true,std::memory_order_release);
+    state->loaderMutex.abandon();
     ExitThread(code);
 }
 static BOOL WINAPI terminateProcess(HANDLE process,UINT code) {
@@ -238,7 +259,7 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
               LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE|LOAD_IGNORE_CODE_AUTHZ_LEVEL)) {
         SetLastError(ERROR_NOT_SUPPORTED);return nullptr;
     }
-    std::lock_guard<std::recursive_mutex> loaderLock(state->loaderMutex);
+    std::lock_guard<LoaderMutex> loaderLock(state->loaderMutex);
     std::wstring requested=name;
     auto leaf=requested.substr(requested.find_last_of(L"\\/")+1);
     if(leaf.find(L'.')==std::wstring::npos) requested+=L".dll";
@@ -264,7 +285,7 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
         state->event("steamclient64.dll served by the staged emulated Steam client (owned game)");
     }
     Module* m=nullptr;
-    {std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
+    {std::lock_guard<LoaderMutex> lock(state->loaderMutex);
      m=named(requested);
      if(!m && !apiSetName(requested)) {
          auto p=guestLibraryPath(requested,!flags);
@@ -377,7 +398,7 @@ static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
     // find() iterates vector storage that map() may reallocate. Native-handle
     // resolution below can also inspect/map guest modules, so retain the lock
     // for the entire lookup, not just the mapped-export branch.
-    std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
+    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
     ExportLookup lookup;
     if(auto m=find(h)) {
         WORD ordinal=IS_INTRESOURCE(name)?WORD((uintptr_t)name):0;
@@ -545,6 +566,9 @@ static std::wstring steamProvider;
 static void set_steam_provider(const std::wstring& path) { steamProvider=path; }
 static Module* map(const std::wstring& requested,const std::string& asKey,wxl::Resolver resolver) {
     if(auto m=named(asKey.empty()?requested:wide(asKey.c_str()))) return m->mappingFailed?nullptr:m;
+    // A delay import may map its DLL here; that DLL's own static imports are
+    // not delay imports, so their misses must fail and be reported as such.
+    struct DelayScope {bool outer=wxl::resolvingDelay;DelayScope(){wxl::resolvingDelay=false;}~DelayScope(){wxl::resolvingDelay=outer;}} delayScope;
     const bool provided=basename(requested)=="steam_api64.dll" && !steamProvider.empty();
     const std::wstring& path=provided?steamProvider:requested;
     if(state->modules.size()>=128) {state->event("loader module capacity exceeded");return nullptr;}
@@ -614,7 +638,7 @@ static void* clientCreateInterface(const char* version,int* result) {
     if(!inner||!version||strncmp(version,"SteamClient",11)) return inner;
     int n=atoi(version+11);
     if(n<12||n>21) return inner;
-    std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
+    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
     static std::vector<std::unique_ptr<ClientWrapper>> wrappers;
     for(auto& w:wrappers) if(w->inner==inner) return w.get();
     wrappers.push_back(std::make_unique<ClientWrapper>(ClientWrapper{clientVtable.data(),inner}));
@@ -718,7 +742,7 @@ static bool initializePending() {
     // All entry paths, including initial runImpl(), publish initialization and
     // failure while owning proc/loadExW's recursive loader lock. Other threads
     // cannot observe initializing=true as permission to use pending exports.
-    std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
+    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
     // Register every unwind table and TLS index before any guest callback.
     for(auto m:state->order) if(!prepare(*m)) return false;
     // Every template must exist before the first callback can call a sibling.
@@ -746,7 +770,7 @@ static PVOID WINAPI pcToFileHeader(PVOID pc,PVOID* base) {
     // its loader lock. RtlAddFunctionTable alone does not register an image
     // with the OS loader; the static Microsoft CRT needs this base for EH RVAs.
     {
-        std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
+        std::lock_guard<LoaderMutex> lock(state->loaderMutex);
         auto address=(uintptr_t)pc;
         for(auto& module:state->modules) {
             auto start=(uintptr_t)module->image.base;
@@ -769,7 +793,11 @@ static void WINAPI debugStringW(LPCWSTR text) {
     const int bytes=n?WideCharToMultiByte(CP_UTF8,0,text,int(n),nullptr,0,nullptr,nullptr):0;
     std::string line(size_t(bytes>0?bytes:0),'\0');
     if(bytes>0)WideCharToMultiByte(CP_UTF8,0,text,int(n),&line[0],bytes,nullptr,nullptr);
-    state->log(line.c_str());
+    state->log(redact::steam_ids(line).c_str());
+}
+static void WINAPI debugStringA(LPCSTR text) {
+    if(!text||!state||!state->log)return;
+    state->log(redact::steam_ids(std::string(text,strnlen(text,4096))).c_str());
 }
 // In-process COM servers Play supplies as gated Wine donors. Windows finds
 // them through their registry entries; the console has none, so a guest's
@@ -830,7 +858,7 @@ static LONG WINAPI topLevelFilter(EXCEPTION_POINTERS* ep) {
     State* s=state;
     bool guest=s&&guestThread;
     if(s&&!guest) {
-        std::unique_lock<std::recursive_mutex> lock(s->loaderMutex,std::try_to_lock);
+        std::unique_lock<LoaderMutex> lock(s->loaderMutex,std::try_to_lock);
         const auto address=(uintptr_t)ep->ExceptionRecord->ExceptionAddress;
         if(lock.owns_lock()) for(auto& m:s->modules) {
             const auto base=(uintptr_t)m->image.base;
@@ -843,6 +871,7 @@ static LONG WINAPI topLevelFilter(EXCEPTION_POINTERS* ep) {
     s->result=s->snapshot();
     if(GetCurrentThreadId()==s->thread) guestThread=false;
     s->finished.store(true,std::memory_order_release);
+    s->loaderMutex.abandon();
     ExitThread(ep->ExceptionRecord->ExceptionCode);
 }
 static LPTOP_LEVEL_EXCEPTION_FILTER WINAPI setGuestTopLevel(LPTOP_LEVEL_EXCEPTION_FILTER handler) {
@@ -851,22 +880,18 @@ static LPTOP_LEVEL_EXCEPTION_FILTER WINAPI setGuestTopLevel(LPTOP_LEVEL_EXCEPTIO
 // Files a guest opens for writing are logged (path, result, handle type), so
 // a save that stalls shows where it writes. SteamIDs in paths are redacted:
 // the log may be shared.
-static std::string redactedPath(std::string text) {
-    for(size_t at=text.find("7656119");at!=std::string::npos;at=text.find("7656119",at)) {
-        size_t end=at;while(end<text.size()&&text[end]>='0'&&text[end]<='9')++end;
-        if(end-at==17){text.replace(at,17,"<steamid>");at+=9;} else at=end;
-    }
-    return text;
-}
+static std::string redactedPath(const std::string& text) { return redact::steam_ids(text); }
 static void logWriteOpen(const std::wstring& path,DWORD access,DWORD disposition,HANDLE h) {
     if(!state||!(access&(GENERIC_WRITE|FILE_WRITE_DATA|FILE_APPEND_DATA|GENERIC_ALL)))return;
     static std::atomic<unsigned> logged{0};
     if(logged.fetch_add(1)>=256)return;
-    DWORD error=h==INVALID_HANDLE_VALUE?GetLastError():0;
+    // The guest reads the open's last error next (ERROR_ALREADY_EXISTS after a
+    // successful CREATE_ALWAYS/OPEN_ALWAYS): logging must not change it.
+    const DWORD error=GetLastError();
+    struct Keep {DWORD e;~Keep(){SetLastError(e);}} keep{error};
     char tail[96];snprintf(tail,sizeof tail," disposition=%lu -> %s type=%lu error=%lu",(unsigned long)disposition,
         h==INVALID_HANDLE_VALUE?"failed":"open",h==INVALID_HANDLE_VALUE?0ul:(unsigned long)GetFileType(h),(unsigned long)error);
     state->event("guest file write-open "+redactedPath(narrow(path))+tail);
-    if(error)SetLastError(error);
 }
 static HANDLE WINAPI guestCreateFileW(LPCWSTR path,DWORD access,DWORD share,LPSECURITY_ATTRIBUTES security,DWORD disposition,DWORD flags,HANDLE templateFile) {
     HANDLE h=kernel32_core::create_file_w(path,access,share,security,disposition,flags,templateFile);
@@ -875,12 +900,12 @@ static HANDLE WINAPI guestCreateFileW(LPCWSTR path,DWORD access,DWORD share,LPSE
 }
 static HANDLE WINAPI guestCreateFileA(LPCSTR path,DWORD access,DWORD share,LPSECURITY_ATTRIBUTES security,DWORD disposition,DWORD flags,HANDLE templateFile) {
     HANDLE h=kernel32_core::create_file_a(path,access,share,security,disposition,flags,templateFile);
-    if(path){DWORD error=GetLastError();std::wstring wide;for(const char* c=path;*c;++c)wide+=wchar_t((unsigned char)*c);SetLastError(error);logWriteOpen(wide,access,disposition,h);}
+    if(path){DWORD error=GetLastError();std::wstring wide;for(const char* c=path;*c;++c)wide+=wchar_t((unsigned char)*c);SetLastError(error);logWriteOpen(wide,access,disposition,h);}   // logWriteOpen keeps the last error
     return h;
 }
 static uintptr_t processApi(const char* name) {
 #define PLAY_API(n,f) if(!strcmp(name,n)) return (uintptr_t)&f
-    PLAY_API("OutputDebugStringW",debugStringW);
+    PLAY_API("OutputDebugStringW",debugStringW);PLAY_API("OutputDebugStringA",debugStringA);
     PLAY_API("SetUnhandledExceptionFilter",setGuestTopLevel);
     PLAY_API("CreateFileW",guestCreateFileW);PLAY_API("CreateFileA",guestCreateFileA);
     PLAY_API("K32GetModuleBaseNameW",kernelModuleBaseName);
@@ -1074,7 +1099,7 @@ static bool discard_unstarted() {
         s->veh=nullptr;
     }
     {
-        std::lock_guard<std::recursive_mutex> lock(s->loaderMutex);
+        std::lock_guard<LoaderMutex> lock(s->loaderMutex);
         mlp::assets.clear();
         s->order.clear();s->exe=nullptr;
         s->modules.clear();   // ~Image: no entry ran, so this only unmaps and frees TLS indices

@@ -12,7 +12,10 @@ namespace mm_timer {
 using Callback = void (CALLBACK*)(UINT id, UINT msg, DWORD_PTR user, DWORD_PTR, DWORD_PTR);
 constexpr UINT periodic = 0x0001, eventSet = 0x0010, eventPulse = 0x0020;
 constexpr UINT noError = 0, invalidParameter = 11 /*MMSYSERR_INVALPARAM*/;
-struct Timer { UINT id; Callback callback; DWORD_PTR user; UINT flags; PTP_TIMER pool; };
+struct Timer { UINT id; Callback callback; DWORD_PTR user; UINT flags; PTP_TIMER pool; bool killedInCallback = false; };
+// The timer whose callback is running on this thread: Windows allows
+// timeKillEvent from inside that callback, where waiting for it would deadlock.
+inline thread_local Timer* running = nullptr;
 inline std::mutex mutex;
 inline std::map<UINT, Timer*> timers;
 inline UINT nextId = 1;
@@ -30,7 +33,10 @@ inline void signal(Timer* t) {
 }
 inline VOID CALLBACK fire(PTP_CALLBACK_INSTANCE, PVOID context, PTP_TIMER) {
     auto t = static_cast<Timer*>(context);
+    running = t;
     signal(t);
+    running = nullptr;
+    if (t->killedInCallback) { delete t; return; }   // killed from its own callback: the pool timer is closed
     if (!(t->flags & periodic)) {   // a one-shot id is spent once it fires
         std::lock_guard<std::mutex> lock(mutex);
         timers.erase(t->id);   // the Timer stays allocated: its pool timer may still be referenced
@@ -60,7 +66,13 @@ inline UINT WINAPI kill_event(UINT id) {
         t = it->second; timers.erase(it);
     }
     SetThreadpoolTimer(t->pool, nullptr, 0, 0);
-    // Not from inside the timer's own callback: waiting there would deadlock.
+    if (t == running) {
+        // Inside its own callback: no wait (it would wait on itself). Closing
+        // from the callback is allowed; fire() frees the Timer on return.
+        CloseThreadpoolTimer(t->pool);
+        t->killedInCallback = true;
+        return noError;
+    }
     WaitForThreadpoolTimerCallbacks(t->pool, TRUE);
     CloseThreadpoolTimer(t->pool);
     delete t;

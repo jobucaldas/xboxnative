@@ -208,7 +208,7 @@ static bool loaderLockTest() {
     auto module=new(guardedModule) play_runtime::Module();
     auto observer=add(1,registryRead);
     if(!observer){module->~Module();VirtualFree(guardedModule,0,MEM_RELEASE);return false;}
-    {std::lock_guard<std::recursive_mutex> lock(play_runtime::state->loaderMutex);
+    {std::lock_guard<play_runtime::LoaderMutex> lock(play_runtime::state->loaderMutex);
      play_runtime::state->modules.emplace_back(module);}
     DWORD old=0;
     bool guarded=VirtualProtect(guardedModule,sizeof(*module),PAGE_READWRITE|PAGE_GUARD,&old)!=FALSE;
@@ -221,7 +221,7 @@ static bool loaderLockTest() {
     remove(observer);
     // Clear any unconsumed guard before destroying test-only metadata.
     VirtualProtect(guardedModule,sizeof(*module),PAGE_READWRITE,&old);
-    {std::lock_guard<std::recursive_mutex> lock(play_runtime::state->loaderMutex);
+    {std::lock_guard<play_runtime::LoaderMutex> lock(play_runtime::state->loaderMutex);
      play_runtime::state->modules.back().release();play_runtime::state->modules.pop_back();}
     module->~Module();VirtualFree(guardedModule,0,MEM_RELEASE);guardedModule=nullptr;
     printf("PLAY-LOADER-LOCK registry-reads=%u checks=%u unlocked=%u\n",registryReads,loaderLockChecks,loaderLockFailures);fflush(stdout);
@@ -460,12 +460,26 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         // A guest thread Play did not create (CRT/SDL threads start natively)
         // faults: the process filter records it and ends only that thread.
         r->finished=false;
-        HANDLE native=CreateThread(nullptr,0,[](void*)->DWORD{play_runtime::guestThread=true;RaiseException(0xe0424243,0,0,nullptr);return 7;},nullptr,0,nullptr);
+        // It faults while holding Play's loader lock (twice, recursively): the
+        // lock must be released, or every later lookup would wait forever.
+        HANDLE native=CreateThread(nullptr,0,[](void*)->DWORD{play_runtime::guestThread=true;
+            play_runtime::state->loaderMutex.lock();play_runtime::state->loaderMutex.lock();
+            RaiseException(0xe0424243,0,0,nullptr);return 7;},nullptr,0,nullptr);
         DWORD wait=native?WaitForSingleObject(native,5000):WAIT_FAILED,code=0;
         if(native){GetExitCodeThread(native,&code);CloseHandle(native);}
         auto last=r->snapshot();
-        bool survived=wait==WAIT_OBJECT_0&&code==0xe0424243&&r->finished.load()&&last.find("unhandled exception code=0xe0424243")!=std::string::npos;
-        printf("PLAY-TOP-LEVEL survived=%d\n",survived);fflush(stdout);
+        auto lockFree=[&]{HANDLE t=CreateThread(nullptr,0,[](void*)->DWORD{auto& m=play_runtime::state->loaderMutex;if(!m.try_lock())return 1;m.unlock();return 0;},nullptr,0,nullptr);
+            DWORD c=1;if(t){WaitForSingleObject(t,5000);GetExitCodeThread(t,&c);CloseHandle(t);}return c==0;};
+        bool survived=wait==WAIT_OBJECT_0&&code==0xe0424243&&r->finished.load()&&last.find("unhandled exception code=0xe0424243")!=std::string::npos&&lockFree();
+        // ExitProcess while holding the loader lock (e.g. from a DllMain): same.
+        r->finished=false;
+        native=CreateThread(nullptr,0,[](void*)->DWORD{play_runtime::guestThread=true;
+            play_runtime::state->loaderMutex.lock();play_runtime::exitProcess(9);return 7;},nullptr,0,nullptr);
+        wait=native?WaitForSingleObject(native,5000):WAIT_FAILED;code=0;
+        if(native){GetExitCodeThread(native,&code);CloseHandle(native);}
+        bool exited=wait==WAIT_OBJECT_0&&code==9&&r->finished.load()&&r->code==9&&lockFree();
+        survived=survived&&exited;
+        printf("PLAY-TOP-LEVEL survived=%d exit=%d\n",survived,exited);fflush(stdout);
         ok=survived;
     }
     // The runner is a disposable off-device process, like launcher restart.

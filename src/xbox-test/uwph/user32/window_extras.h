@@ -236,7 +236,7 @@ static_assert(sizeof(PaintStruct)==72,"PAINTSTRUCT layout");
 extern "C" HDC WINAPI c_BeginPaint(HWND h,PaintStruct* ps){
  if(!ps){SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}
  std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w)return nullptr;
- *ps={};ps->hdc=c_GetDC(h);ps->paint={0,0,w->cx,w->cy};return ps->hdc;
+ *ps={};ps->hdc=c_GetDC(h);ps->paint={0,0,clientWidth(w),clientHeight(w)};return ps->hdc;   // client coordinates, as GetClientRect
 }
 extern "C" BOOL WINAPI c_EndPaint(HWND h,const PaintStruct* ps){if(ps&&ps->hdc)c_ReleaseDC(h,ps->hdc);return TRUE;}
 extern "C" BOOL WINAPI c_GetUpdateRect(HWND h,RECT* r,BOOL){std::lock_guard<std::recursive_mutex> l(mutex);if(!window(h))return FALSE;if(r)*r={};return FALSE;}

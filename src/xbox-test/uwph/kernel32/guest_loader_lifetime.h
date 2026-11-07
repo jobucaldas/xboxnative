@@ -18,7 +18,7 @@ static BOOL WINAPI moduleExW(DWORD flags,LPCWSTR name,HMODULE* out) {
             if(!(flags&GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT))xinput_core::find_module(basename(name).c_str(),true);
             *out=input;return TRUE;
         }
-    std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
+    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
     Module* module=nullptr;
     if((flags&GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS)&&name) {
         for(auto& candidate:state->modules) {
@@ -95,7 +95,7 @@ static void collectGuestModules() {
 }
 static BOOL WINAPI freeLibrary(HMODULE handle) {
     if(auto input=xinput_core::module(handle))return xinput_core::release_module(input);
-    std::lock_guard<std::recursive_mutex> lock(state->loaderMutex);
+    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
     if(auto module=find(handle)) {
         if(module->references)--module->references;
         collectGuestModules();return TRUE;

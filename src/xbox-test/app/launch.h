@@ -18,6 +18,7 @@ struct LaunchState {
     std::atomic<uint32_t> appid{0};
     std::atomic<int> gen{0};
     double started = 0;                 // render-thread read only (set before phase=1)
+    std::atomic<double> loaderStarted{0}; // when the guest loader began (0: still preparing Steam/client)
     std::mutex m; std::string result, attempt; bool ok=false;
 };
 static LaunchState g_launch;
@@ -417,6 +418,11 @@ static void lp_run_impl(LpCtx& c) {
         wchar_t self[2048];DWORD n=GetModuleFileNameW(nullptr,self,2048);
         if(n&&n<2048){std::wstring package(self,n);package.resize(package.find_last_of(L"\\/")+1);play_runtime::set_runtime_directory(package+L"runtime");}
     }
+    // The watchdog may already have reported this launch as failed while Steam
+    // was being prepared; then the game must not start behind that result.
+    {std::lock_guard<std::mutex> lock(g_launch.m);
+     if(g_launch.gen!=c.gen||g_launch.phase!=1){c.failName="launch abandoned by the watchdog before the game started";return;}
+     g_launch.loaderStarted=now_s();}
     if(!play_runtime::start(exeDir,exe,c.args,lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
     auto r=play_runtime::state;
     ULONGLONG end=GetTickCount64()+110000; bool reportedRunning=false;
@@ -522,11 +528,18 @@ static void lp_publish(int gen,uint32_t appid,const std::string& result,bool ok,
 static void lp_finish(int gen,uint32_t appid,const std::string& result,bool ok,int mapped,int total,const char* status=nullptr) {
     lp_publish(gen,appid,result,ok,mapped,total,status?status:ok?"completed":"failed",true);
 }
+// 120 s from the guest loader's start to a first frame or result. Preparing
+// Steam before that (ownership ticket, a first download of Valve's client,
+// cloud saves) may take longer, so it gets 600 s; past that the launch is
+// abandoned and the launch thread never starts the guest (lp_run_impl).
 static void lp_watchdog() {
-    if(g_launch.phase!=1 || now_s()-g_launch.started<=120)return;
+    if(g_launch.phase!=1)return;
+    const double loader=g_launch.loaderStarted.load();
+    if(loader ? now_s()-loader<=120 : now_s()-g_launch.started<=600)return;
     auto r=play_runtime::observed.load(std::memory_order_acquire);
     if(r && (r->finished.load(std::memory_order_acquire) || r->milestone.load()))return;
-    lp_finish(g_launch.gen,g_launch.appid,"watchdog timeout 120 s; last event: "+(r?r->snapshot():std::string("preparing guest loader")),false,0,0,"timeout");
+    lp_finish(g_launch.gen,g_launch.appid,loader?"watchdog timeout 120 s; last event: "+(r?r->snapshot():std::string("preparing guest loader")):
+        std::string("watchdog timeout 600 s preparing Steam before the game started; the game was not started"),false,0,0,"timeout");
 }
 
 // Entry: called on the render thread; returns immediately (work happens on a worker thread).
@@ -536,7 +549,7 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
         g_launch.result="Game code from the last launch is still loaded; the launcher restarts to end it. Last event: "+guest->snapshot();
         logf("launch: Play rejected: game code from the last launch is still loaded");return;
     }
-    int gen = ++g_launch.gen; g_launch.appid = appid; g_launch.started = now_s();
+    int gen = ++g_launch.gen; g_launch.appid = appid; g_launch.started = now_s(); g_launch.loaderStarted = 0;
     { std::lock_guard<std::mutex> l(g_launch.m); g_launch.result.clear();g_launch.ok=false;g_launch.attempt=std::to_string(GetCurrentProcessId())+":"+std::to_string(gen); } g_launch.phase = 1;
     const LaunchTarget target = dir.empty() ? LaunchTarget{} : pick_target(appid, g_dir + L"\\" + widen(dir));
     const std::string args = target.args;
