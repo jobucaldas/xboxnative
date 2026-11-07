@@ -41,3 +41,7 @@ mapped guest module lists remain unverified. The mapped-runtime regressions
 cover module references/pins, dependency lifetime, callback reentrancy and
 thread notification lifetime. Shared kernel_tail routes must also be included
 when auditing the CSV; owner-header searches alone omit existing behavior.
+The write guard suite (`write_guard_test.cpp`) covers the guest `WriteFile` route:
+bounded chunks for disk files, stall reporting, and `CancelSynchronousIo` of a
+stalled write (opt-in for non-disk handles in the test), plus the synchronous or
+overlapped mode of handles from the `CreateFile2` conversion.

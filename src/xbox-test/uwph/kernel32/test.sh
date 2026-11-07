@@ -8,7 +8,7 @@ trap 'rm -rf "$work"' EXIT
 # Wine exports it from kernelbase; test the production FromApp adapter itself.
 printf 'LIBRARY kernelbase.dll\nEXPORTS\nOpenFileMappingFromApp\n' > "$work/kernelbase.def"
 x86_64-w64-mingw32-dlltool -d "$work/kernelbase.def" -l "$work/kernelbase.lib"
-suites=(sync handles memory file pipe nls_time process slist file_ops exception system thread_query console process_attributes winrt process_creation snapshot module_filename loader_ansi)
+suites=(sync handles memory file write_guard pipe nls_time process slist file_ops exception system thread_query console process_attributes winrt process_creation snapshot module_filename loader_ansi)
 if (( $# )); then suites=("$@"); fi
 for suite in "${suites[@]}"; do
     x86_64-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Werror -static "${suite}_test.cpp" "$work/kernelbase.lib" -lsynchronization -lruntimeobject -o "$work/$suite-test.exe"
