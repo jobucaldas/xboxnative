@@ -6,14 +6,14 @@ static DWORD copyPath(const std::wstring& path,LPWSTR out,DWORD capacity) {
     if(path.size()>=capacity) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return capacity; } SetLastError(ERROR_SUCCESS); return DWORD(n);
 }
 static DWORD WINAPI filenameW(HMODULE handle,LPWSTR out,DWORD size) {
-    if(xinput_core::module(handle)) {SetLastError(ERROR_NOT_SUPPORTED);return 0;}
+    if(xinput_core::module(handle) || opengl32_core::module(handle)) {SetLastError(ERROR_NOT_SUPPORTED);return 0;}
     auto m=handle?find(handle):state->exe;
     if(m) return copyPath(m->path,out,size);
     using Fn=DWORD(WINAPI*)(HMODULE,LPWSTR,DWORD); auto fn=(Fn)kernel_tail::native("GetModuleFileNameW"); if(!fn) {SetLastError(ERROR_CALL_NOT_IMPLEMENTED);return 0;}
     return fn(handle,out,size);
 }
 static DWORD WINAPI filenameA(HMODULE handle,LPSTR out,DWORD size) {
-    if(xinput_core::module(handle)) {SetLastError(ERROR_NOT_SUPPORTED);return 0;}
+    if(xinput_core::module(handle) || opengl32_core::module(handle)) {SetLastError(ERROR_NOT_SUPPORTED);return 0;}
     auto m=handle?find(handle):state->exe;
     if(!m) {
         using Fn=DWORD(WINAPI*)(HMODULE,LPSTR,DWORD);

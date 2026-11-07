@@ -15,10 +15,16 @@ static uintptr_t native(const char* name) { return reinterpret_cast<uintptr_t>(G
 namespace xinput_core {
 static void* module(HMODULE) { return nullptr; }
 }
+#include "../opengl32/modules.h"
 #include "guest_module_filename.h"
 static unsigned checks;
 #define CHECK(x) do { ++checks; if(!(x)) { std::fprintf(stderr,"FAIL %d: %s error=%lu\n",__LINE__,#x,GetLastError());std::exit(1); } } while(0)
 int main() {
+    {   // Play-owned opengl32.dll has no file: both name APIs refuse it, like the XInput modules.
+        auto gl=reinterpret_cast<HMODULE>(&opengl32_core::module_entry);wchar_t w[8];char a[8];
+        SetLastError(0);CHECK(filenameW(gl,w,8)==0 && GetLastError()==ERROR_NOT_SUPPORTED);
+        SetLastError(0);CHECK(filenameA(gl,a,8)==0 && GetLastError()==ERROR_NOT_SUPPORTED);
+    }
     wchar_t path[32768];CHECK(GetModuleFileNameW(nullptr,path,32768));
     Module module{path};state->exe=&module;
     for(DWORD size : {0ul,1ul,2ul,8ul,static_cast<DWORD>(module.path.size()),static_cast<DWORD>(module.path.size()+1),32768ul}) {

@@ -66,6 +66,8 @@ jobs:
           set -e
           bash src/tools/build-wine-donors.sh --dry-run
           bash src/tools/fetch-boxedwine.sh --dry-run
+          bash src/tools/build-mesa-d3d12.sh --dry-run
+          bash src/tools/tests/test_build_mesa_d3d12.sh
       - name: no secrets / binaries committed
         run: |
           if git ls-files | grep -E '\.(pfx|key|pem|exe|dll|so|msix|appx|zip|7z|tar|gz|xz)$'; then

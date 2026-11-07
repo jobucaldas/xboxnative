@@ -23,3 +23,13 @@ a non-null context fail with `ERROR_INVALID_HANDLE`. With no previous context,
 case does not validate the DC, create a context, or change either current query.
 Tests compare all these cases through resolved pointers with host Wine on two
 threads, using null and arbitrary handle values. Host handles never reach GDI.
+
+## Loading `OPENGL32.DLL`
+
+`modules.h` makes `opengl32.dll` a Play-owned module (like the XInput modules): `LoadLibrary`, `GetModuleHandle(Ex)`,
+`GetProcAddress` (only the names `resolve()` serves), `FreeLibrary` and `GetModuleFileName` work the same on the
+console, which has no `opengl32.dll`, and under Wine. A guest- or runtime-shipped `opengl32.dll` is mapped first and
+takes precedence, which is how a real driver (research/OPENGL-PLAN.md) replaces these stubs.
+`bash src/xbox-test/uwph/opengl32/runtime-test.sh` (after `app/tests/play-runtime.sh`) runs a guest through Play's
+production loader; `app/tests/play-sdl3-gl.sh` runs an SDL3 GL program that loads the library and then reports the
+missing pixel formats as BLOCKED.
