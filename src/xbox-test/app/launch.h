@@ -269,12 +269,15 @@ static steam_achievements::Io achievement_io(std::shared_ptr<CmSession> session)
     return io;
 }
 // The account is "in game" while the guest runs (status, playtime), as with the
-// real client; an empty list ends it.
+// real client; an empty list ends it. Friends only see a game on an online
+// persona, so the account goes Online first, as the real client does on start.
 static void games_played(uint32_t appid) {
     auto session=user_session();
     if(!session||session->anon)return;
+    if(appid){std::string status;pb_u(status,1,1);session->send_raw(716,status,0,"");}   // ClientChangeStatus: k_EPersonaStateOnline
     std::string body;
     if(appid){std::string game;pb_fixed64(game,2,appid);pb_s(body,1,game);}
+    pb_u(body,2,20);   // client_os_type, as in ClientLogon (Windows 11)
     session->send_raw(5410,body,0,""); // ClientGamesPlayedWithDataBlob
 }
 static void achievements_sync(uint32_t appid,bool store) {
