@@ -14,6 +14,7 @@
 #include "../../uwph/vcruntime/route.h"
 #include "steam_app_ticket.h"
 #include "redact.h"
+#include "../../shared/rwx_emulation.h"
 namespace play_runtime {
 constexpr DWORD missingException=0xe0520001, exitException=0xe0520002;
 struct Module {
@@ -522,6 +523,10 @@ static void find_ntdll() {
 }
 static LONG CALLBACK vectored(EXCEPTION_POINTERS* ep) {
     auto e=ep->ExceptionRecord;auto at=(uintptr_t)e->ExceptionAddress;
+    // Guest RWX memory (JIT code) is RW or RX per page; flip on the faulting
+    // access and resume. Must run before any guest handler sees the fault.
+    if(e->ExceptionCode==EXCEPTION_ACCESS_VIOLATION && rwx_emulation::fault(ep)==EXCEPTION_CONTINUE_EXECUTION)
+        return EXCEPTION_CONTINUE_EXECUTION;
     if(e->ExceptionCode==STATUS_INVALID_HANDLE && !(e->ExceptionFlags&EXCEPTION_NONCONTINUABLE) &&
        at>=ntdllBase && at<ntdllEnd) {
         state->invalidHandles.fetch_add(1,std::memory_order_relaxed);
@@ -903,10 +908,31 @@ static HANDLE WINAPI guestCreateFileA(LPCSTR path,DWORD access,DWORD share,LPSEC
     if(path){DWORD error=GetLastError();std::wstring wide;for(const char* c=path;*c;++c)wide+=wchar_t((unsigned char)*c);SetLastError(error);logWriteOpen(wide,access,disposition,h);}   // logWriteOpen keeps the last error
     return h;
 }
+// A guest's first-in-chain vectored handler (Unity's Mono installs one) would
+// otherwise run before Play's and mistake the page-flip faults of emulated RWX
+// memory for managed exceptions. After a guest registers a first handler, Play
+// adds a fresh first handler and only then retires the old one: Play stays
+// ahead and the chain is never empty.
+static PVOID WINAPI guestAddVeh(ULONG first,LONG(CALLBACK* handler)(EXCEPTION_POINTERS*)) {
+    using AddVeh=PVOID(WINAPI*)(ULONG,LONG(CALLBACK*)(EXCEPTION_POINTERS*));
+    using RemoveVeh=ULONG(WINAPI*)(PVOID);
+    static std::mutex order;
+    std::lock_guard<std::mutex> lock(order);
+    auto add=(AddVeh)kernel_tail::native("AddVectoredExceptionHandler");
+    auto remove=(RemoveVeh)kernel_tail::native("RemoveVectoredExceptionHandler");
+    if(!add){SetLastError(ERROR_PROC_NOT_FOUND);return nullptr;}
+    PVOID guest=add(first,handler);
+    if(guest&&first&&state&&state->veh&&remove) {
+        if(PVOID fresh=add(1,vectored)){PVOID old=state->veh;state->veh=fresh;remove(old);}
+    }
+    return guest;
+}
 static uintptr_t processApi(const char* name) {
 #define PLAY_API(n,f) if(!strcmp(name,n)) return (uintptr_t)&f
     PLAY_API("OutputDebugStringW",debugStringW);PLAY_API("OutputDebugStringA",debugStringA);
     PLAY_API("SetUnhandledExceptionFilter",setGuestTopLevel);
+    PLAY_API("VirtualAlloc",rwx_emulation::alloc);PLAY_API("VirtualProtect",rwx_emulation::protect);PLAY_API("VirtualFree",rwx_emulation::release);PLAY_API("VirtualQuery",rwx_emulation::query);
+    PLAY_API("AddVectoredExceptionHandler",guestAddVeh);
     PLAY_API("CreateFileW",guestCreateFileW);PLAY_API("CreateFileA",guestCreateFileA);
     PLAY_API("K32GetModuleBaseNameW",kernelModuleBaseName);
     PLAY_API("FindResourceA",kernelFindResourceA);PLAY_API("FindResourceW",kernelFindResourceW);
@@ -1064,6 +1090,7 @@ static bool start(const std::wstring& root,const std::wstring& exe,const std::ws
     state->exe=map(root+L"\\"+exe);if(!state->exe) {state->result=state->snapshot();state->finished=true;return true;}
     find_ntdll();
     {static bool installed=false;if(!installed){installed=true;hostTopLevel=SetUnhandledExceptionFilter(topLevelFilter);}}
+    rwx_emulation::state().notify=[](const char* text){if(state)state->event(text);};
     state->event("registering guest exception observer");
     using AddVeh=PVOID(WINAPI*)(ULONG,LONG(CALLBACK*)(EXCEPTION_POINTERS*));
     auto addVeh=(AddVeh)kernel_tail::native("AddVectoredExceptionHandler");
