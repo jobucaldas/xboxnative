@@ -456,6 +456,18 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         printf("PLAY-RELEASE released=%d restarted=%d ran=%d retained=%d\n",released,again,ran,retained);fflush(stdout);
         ok=retained;
     }
+    if(mode=="top-level"&&ok) {
+        // A guest thread Play did not create (CRT/SDL threads start natively)
+        // faults: the process filter records it and ends only that thread.
+        r->finished=false;
+        HANDLE native=CreateThread(nullptr,0,[](void*)->DWORD{play_runtime::guestThread=true;RaiseException(0xe0424243,0,0,nullptr);return 7;},nullptr,0,nullptr);
+        DWORD wait=native?WaitForSingleObject(native,5000):WAIT_FAILED,code=0;
+        if(native){GetExitCodeThread(native,&code);CloseHandle(native);}
+        auto last=r->snapshot();
+        bool survived=wait==WAIT_OBJECT_0&&code==0xe0424243&&r->finished.load()&&last.find("unhandled exception code=0xe0424243")!=std::string::npos;
+        printf("PLAY-TOP-LEVEL survived=%d\n",survived);fflush(stdout);
+        ok=survived;
+    }
     // The runner is a disposable off-device process, like launcher restart.
     ExitProcess(ok?0:1);
 }

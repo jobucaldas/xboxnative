@@ -814,9 +814,71 @@ static HRESULT WINAPI coCreateInstance(REFCLSID clsid,IUnknown* outer,DWORD cont
     using Fn=HRESULT(WINAPI*)(REFCLSID,IUnknown*,DWORD,REFIID,void**);
     auto fn=nativeCom<Fn>("CoCreateInstance");return fn?fn(clsid,outer,context,iid,out):E_NOTIMPL;
 }
+// Unhandled exceptions on threads Play did not create (CRT _beginthreadex,
+// SDL threads) reach the process-wide filter, not Play's per-thread guard,
+// and used to end the whole launcher with no trace. Play keeps the process
+// filter. A guest's own handler (SetUnhandledExceptionFilter, e.g. Crashpad)
+// still runs first. Then, for an exception in guest code, the crash is
+// recorded and only that thread ends; the launcher reports it and restarts to
+// unload the game. Exceptions in launcher code keep their previous handling.
+static LPTOP_LEVEL_EXCEPTION_FILTER guestTopLevel=nullptr,hostTopLevel=nullptr;
+static LONG WINAPI topLevelFilter(EXCEPTION_POINTERS* ep) {
+    State* s=state;
+    bool guest=s&&guestThread;
+    if(s&&!guest) {
+        std::unique_lock<std::recursive_mutex> lock(s->loaderMutex,std::try_to_lock);
+        const auto address=(uintptr_t)ep->ExceptionRecord->ExceptionAddress;
+        if(lock.owns_lock()) for(auto& m:s->modules) {
+            const auto base=(uintptr_t)m->image.base;
+            if(base&&address>=base&&address-base<m->image.size){guest=true;break;}
+        }
+    }
+    if(!guest) return hostTopLevel?hostTopLevel(ep):EXCEPTION_CONTINUE_SEARCH;
+    if(auto handler=guestTopLevel) {LONG r=handler(ep);if(r==EXCEPTION_CONTINUE_EXECUTION)return r;}
+    filter(ep);   // records the exception and its stack, as for Play's threads
+    s->result=s->snapshot();
+    if(GetCurrentThreadId()==s->thread) guestThread=false;
+    s->finished.store(true,std::memory_order_release);
+    ExitThread(ep->ExceptionRecord->ExceptionCode);
+}
+static LPTOP_LEVEL_EXCEPTION_FILTER WINAPI setGuestTopLevel(LPTOP_LEVEL_EXCEPTION_FILTER handler) {
+    auto previous=guestTopLevel;guestTopLevel=handler;return previous;
+}
+// Files a guest opens for writing are logged (path, result, handle type), so
+// a save that stalls shows where it writes. SteamIDs in paths are redacted:
+// the log may be shared.
+static std::string redactedPath(std::string text) {
+    for(size_t at=text.find("7656119");at!=std::string::npos;at=text.find("7656119",at)) {
+        size_t end=at;while(end<text.size()&&text[end]>='0'&&text[end]<='9')++end;
+        if(end-at==17){text.replace(at,17,"<steamid>");at+=9;} else at=end;
+    }
+    return text;
+}
+static void logWriteOpen(const std::wstring& path,DWORD access,DWORD disposition,HANDLE h) {
+    if(!state||!(access&(GENERIC_WRITE|FILE_WRITE_DATA|FILE_APPEND_DATA|GENERIC_ALL)))return;
+    static std::atomic<unsigned> logged{0};
+    if(logged.fetch_add(1)>=256)return;
+    DWORD error=h==INVALID_HANDLE_VALUE?GetLastError():0;
+    char tail[96];snprintf(tail,sizeof tail," disposition=%lu -> %s type=%lu error=%lu",(unsigned long)disposition,
+        h==INVALID_HANDLE_VALUE?"failed":"open",h==INVALID_HANDLE_VALUE?0ul:(unsigned long)GetFileType(h),(unsigned long)error);
+    state->event("guest file write-open "+redactedPath(narrow(path))+tail);
+    if(error)SetLastError(error);
+}
+static HANDLE WINAPI guestCreateFileW(LPCWSTR path,DWORD access,DWORD share,LPSECURITY_ATTRIBUTES security,DWORD disposition,DWORD flags,HANDLE templateFile) {
+    HANDLE h=kernel32_core::create_file_w(path,access,share,security,disposition,flags,templateFile);
+    if(path)logWriteOpen(path,access,disposition,h);
+    return h;
+}
+static HANDLE WINAPI guestCreateFileA(LPCSTR path,DWORD access,DWORD share,LPSECURITY_ATTRIBUTES security,DWORD disposition,DWORD flags,HANDLE templateFile) {
+    HANDLE h=kernel32_core::create_file_a(path,access,share,security,disposition,flags,templateFile);
+    if(path){DWORD error=GetLastError();std::wstring wide;for(const char* c=path;*c;++c)wide+=wchar_t((unsigned char)*c);SetLastError(error);logWriteOpen(wide,access,disposition,h);}
+    return h;
+}
 static uintptr_t processApi(const char* name) {
 #define PLAY_API(n,f) if(!strcmp(name,n)) return (uintptr_t)&f
     PLAY_API("OutputDebugStringW",debugStringW);
+    PLAY_API("SetUnhandledExceptionFilter",setGuestTopLevel);
+    PLAY_API("CreateFileW",guestCreateFileW);PLAY_API("CreateFileA",guestCreateFileA);
     PLAY_API("K32GetModuleBaseNameW",kernelModuleBaseName);
     PLAY_API("FindResourceA",kernelFindResourceA);PLAY_API("FindResourceW",kernelFindResourceW);
     PLAY_API("EnumResourceNamesA",kernelEnumResourceNamesA);PLAY_API("LoadResource",kernelLoadResource);
@@ -972,6 +1034,7 @@ static bool start(const std::wstring& root,const std::wstring& exe,const std::ws
     mlp::log=log;wxl::logger=log;mlp::missingResolver=missing;mlp::assets.clear();mlp::summaries.clear();
     state->exe=map(root+L"\\"+exe);if(!state->exe) {state->result=state->snapshot();state->finished=true;return true;}
     find_ntdll();
+    {static bool installed=false;if(!installed){installed=true;hostTopLevel=SetUnhandledExceptionFilter(topLevelFilter);}}
     state->event("registering guest exception observer");
     using AddVeh=PVOID(WINAPI*)(ULONG,LONG(CALLBACK*)(EXCEPTION_POINTERS*));
     auto addVeh=(AddVeh)kernel_tail::native("AddVectoredExceptionHandler");
