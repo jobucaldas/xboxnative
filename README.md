@@ -46,7 +46,7 @@ not a compatibility claim. A series is not marked working because one entry work
 | Hades | 1145360 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
 | Going Under | 1154810 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
 | Fields of Mistria | 2142790 | **Blocked after game execution (off-device)** | Wine, Play: maps with the vcruntime140 route ([#61](https://github.com/jobucaldas/xboxnative/pull/61)), runs its own code, Steam fails naturally, SDL3 creates its windows; stops at `No matching GL pixel format available`. The game renders with OpenGL (Rust `glow` via SDL3 WGL), so it needs a guest OpenGL driver. No console run of this build. |
-| Puyo Puyo Tetris 2 | 1259790 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
+| Puyo Puyo Tetris 2 | 1259790 | **Launch progress** | Console, launcher 0.5.230.0: installs through the launcher. The Steam DRM passes with Valve's signed client and the owner's ownership ticket. The game renders and reaches its animated main menu. On the way it needed: DirectInput from the pinned Wine source (static import and COM creation), Crashpad's named pipe in the AppContainer namespace, and gbe's `PlaySoundA`. In that run the game later exited cleanly (`ExitProcess 0`, cause not yet known), and the launcher returned to the game list. Next gate: menu navigation and a match with a real pad, recorded per [PLAYABLE](docs/PLAYABLE.md). |
 | Mega Man Legacy Collection | 363440 | Queued — not tested | 32-bit (PE32) D3D11 game importing msvcp140/concrt140: needs 32-bit execution, which is unsupported. |
 | Mega Man Legacy Collection 2 | 495050 | Queued — not tested | No launcher Play or gameplay evidence recorded. |
 
