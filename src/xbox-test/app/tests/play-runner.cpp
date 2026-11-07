@@ -442,6 +442,12 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     else if(mode=="dialog")ok=ok&&r->finished&&!r->success&&last.find("user32.dll!MessageBoxA caption=\"Fatal error\"")!=std::string::npos&&last.find("Failed to initialize IL2CPP\\nprobe \\\"quoted\\\"")!=std::string::npos&&last.find("caller=0x")!=std::string::npos;
     else if(mode=="crash")ok=ok&&r->finished&&!r->success&&last.find("unhandled exception code=0xe0424242")!=std::string::npos;
     else if(mode=="exit")ok=ok&&r->finished&&r->success&&r->code==37;
+    else if(mode=="rwx-jit") {
+        // The guest saw no access violation, yet pages really flipped both ways.
+        auto& st=rwx_emulation::state().stats;
+        ok=ok&&r->finished&&r->success&&r->code==42&&st.regions.load()==1&&st.executeFlips.load()>=4&&st.writeFlips.load()>=1&&!st.failures.load();
+        printf("PLAY-RWX regions=%u executeFlips=%u writeFlips=%u retries=%u failures=%u\n",st.regions.load(),st.executeFlips.load(),st.writeFlips.load(),st.retries.load(),st.failures.load());fflush(stdout);
+    }
     else if(mode=="hang")ok=ok&&!r->finished&&last.find("EXE entry play-guest.exe")!=std::string::npos;
     else ok=ok&&r->finished&&r->success&&r->code==42;
     if(mode=="failed-dependency"&&ok) {
