@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include "pipe_route.h"
 namespace kernel32_core {
 inline HANDLE WINAPI create_file_w(LPCWSTR path, DWORD access, DWORD share,
         LPSECURITY_ATTRIBUTES security, DWORD disposition, DWORD flags, HANDLE template_file) {
@@ -13,7 +14,8 @@ inline HANDLE WINAPI create_file_w(LPCWSTR path, DWORD access, DWORD share,
     parameters.dwSecurityQosFlags = flags & SECURITY_VALID_SQOS_FLAGS;
     parameters.lpSecurityAttributes = security;
     parameters.hTemplateFile = template_file;
-    return CreateFile2(path, access, share, disposition, &parameters);
+    std::wstring local = local_pipe(path);   // a pipe client finds a guest pipe where its creator put it
+    return CreateFile2(local.empty() ? path : local.c_str(), access, share, disposition, &parameters);
 }
 inline HANDLE WINAPI create_file_a(LPCSTR path, DWORD access, DWORD share,
         LPSECURITY_ATTRIBUTES security, DWORD disposition, DWORD flags, HANDLE template_file) {
