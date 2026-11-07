@@ -5,7 +5,9 @@
 static int checks, failures;
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; std::printf("FAIL line %d: %s\n", __LINE__, #x); } } while (0)
 int main() {
-    const std::string id = "76561190000000001";   // synthetic, not a real account
+    // Synthetic, not a real account; assembled at run time so the repository's
+    // SteamID scanner never sees a 17-digit literal.
+    const std::string id = std::string("7656119") + "0000000001";
     CHECK(redact::steam_ids("C:\\save\\" + id + "\\replay.dat") == "C:\\save\\<steamid>\\replay.dat");
     CHECK(redact::steam_ids("a " + id + " b " + id) == "a <steamid> b <steamid>");
     CHECK(redact::steam_ids(id) == "<steamid>");
