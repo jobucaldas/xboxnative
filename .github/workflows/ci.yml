@@ -44,8 +44,7 @@ jobs:
           /tmp/wine-config-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/shared/tests/msvc_load_config_test.cpp -o /tmp/msvc-config-test
           /tmp/msvc-config-test
-          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_cloud_test.cpp -o /tmp/steam-cloud-test
-          /tmp/steam-cloud-test
+          bash src/xbox-test/app/tests/steam_cloud_test.sh
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_achievements_test.cpp -o /tmp/steam-achievements-test
           /tmp/steam-achievements-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/game_library_test.cpp -o /tmp/game-library-test

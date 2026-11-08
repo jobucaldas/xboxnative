@@ -120,6 +120,12 @@ The current builds do **not** need Boxedwine sources. `src/tools/fetch-boxedwine
 The launcher packages a Steam API provider for owned games: the pinned gbe_fork release (`gbe-fork-win` in deps.pin,
 LGPL-3.0), fetched and verified by `src/tools/fetch-gbe-fork.sh` during `build.sh` (needs `7z`); it is never committed.
 
+Steam Cloud saves of a provider-served game download before launch and upload after exit (`steam_cloud.h`): Auto-Cloud
+files go to the game's known folders, files saved through the Steam API go to gbe_fork's remote-storage folder, and
+compressed copies are inflated and SHA-1 checked. The game's page shows the cloud status and a "Y: Sync cloud" button
+(not available while a game is running). Each file decision is logged in `launch_probe.log` with its cloud name and
+local path.
+
 Wine-built donor DLLs (avrt, hid, setupapi, shcore, version) are never committed. Build them from the pinned Wine 10.0 source
 (needs mingw-w64, flex, bison; about a minute):
 ```sh

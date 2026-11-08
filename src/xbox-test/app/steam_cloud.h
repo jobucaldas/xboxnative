@@ -13,6 +13,14 @@
 // being replaced is kept as <name>.xboxnative-backup); a local file is uploaded
 // only if absent remotely or changed and not older than the remote copy.
 // Deletions are never propagated. Paths never leave the configured roots.
+//
+// Two kinds of cloud file: Auto-Cloud files carry a "%Root%path/" prefix and
+// live under the matching known folder; files saved through the
+// ISteamRemoteStorage API (served in-process by gbe_fork) have no prefix and
+// live in gbe's remote-storage folder, passed as the roots entry kRemoteRoot.
+// Compressed cloud copies (a PKZip archive with one entry) are inflated and
+// checked against the changelist SHA-1; client-side-encrypted ones are skipped.
+#include "steam_client_package.h"
 #include "steam_wire.h"
 #include <chrono>
 #include <filesystem>
@@ -30,6 +38,7 @@ struct Io {
     std::function<int(bool https,const std::string& host,const std::string& path,const Headers&,std::string& body)> get;
     std::function<int(bool https,const std::string& host,const std::string& path,const Headers&,const std::string& body)> put;
     std::function<std::string(const std::string& data)> sha1;   // 20 raw bytes
+    steam_client_package::Inflate inflate;   // raw deflate: (data,size,expected size,out) -> ok
     std::function<void(const std::string&)> log;
 };
 struct Rule { std::string root, path, pattern; bool recursive=false; };
@@ -40,12 +49,19 @@ inline std::vector<Rule> rules(const Vdf& appinfo) {
     if(!files||!files->obj) return out;
     for(auto& rule:files->kids) {
         Rule r{rule.str({"root"}),rule.str({"path"}),rule.str({"pattern"},"*"),rule.str({"recursive"})=="1"};
+        // appinfo writes Windows separators ("TheGameBakers\\Haven"); cloud names use '/'.
+        for(auto& c:r.path) if(c=='\\') c='/';
+        while(!r.path.empty()&&r.path.back()=='/') r.path.pop_back();
+        while(!r.path.empty()&&r.path.front()=='/') r.path.erase(0,1);
         if(r.root.rfind("Win",0)==0||r.root=="GameInstall") out.push_back(r);
     }
     return out;
 }
 // Local directories for UFS root names (e.g. "WinAppDataLocalLow").
 using Roots = std::map<std::string,fs::path>;
+// Roots key for the folder of un-prefixed (ISteamRemoteStorage API) cloud files.
+inline const std::string kRemoteRoot="@remote";
+inline std::string path_text(const fs::path& p) { auto u=p.u8string(); return std::string(u.begin(),u.end()); }
 inline bool glob(const std::string& pattern,const std::string& name) {
     size_t p=0,n=0,star=std::string::npos,mark=0;
     while(n<name.size()) {
@@ -74,19 +90,41 @@ inline bool safe_relative(const std::string& path) {
 // through one (the lexical checks above cannot see where it leads).
 inline bool linked(const fs::path& p) { std::error_code ec; return fs::is_symlink(fs::symlink_status(p,ec)); }
 inline std::optional<fs::path> local_path(const Roots& roots,const std::string& prefix,const std::string& name) {
-    if(prefix.size()<2||prefix[0]!='%') return std::nullopt;
-    size_t close=prefix.find('%',1);if(close==std::string::npos) return std::nullopt;
-    auto it=roots.find(prefix.substr(1,close-1));if(it==roots.end()) return std::nullopt;
-    std::string relative=prefix.substr(close+1)+name;
+    const fs::path* base=nullptr;std::string relative;
+    if(prefix.empty()) {   // API file: the remote-storage folder, by name alone
+        auto it=roots.find(kRemoteRoot);if(it==roots.end()) return std::nullopt;
+        base=&it->second;relative=name;
+    } else {
+        if(prefix.size()<2||prefix[0]!='%') return std::nullopt;
+        size_t close=prefix.find('%',1);if(close==std::string::npos) return std::nullopt;
+        auto it=roots.find(prefix.substr(1,close-1));if(it==roots.end()) return std::nullopt;
+        base=&it->second;relative=prefix.substr(close+1)+name;
+    }
     if(!safe_relative(relative)) return std::nullopt;
-    fs::path out=it->second;
+    fs::path out=*base;
     size_t start=0;
     while(start<relative.size()){size_t end=relative.find('/',start);if(end==std::string::npos)end=relative.size();out/=relative.substr(start,end-start);start=end+1;
         if(linked(out)) return std::nullopt;}
     return out;
 }
+// Where a replaced local copy is kept. Never inside the remote-storage folder:
+// the game would list the backup as one of its own cloud files.
+inline fs::path backup_path(const Roots& roots,const fs::path& path) {
+    auto it=roots.find(kRemoteRoot);
+    if(it!=roots.end()) {
+        auto rel=path.lexically_relative(it->second);
+        if(!rel.empty()&&*rel.begin()!="..") return it->second.parent_path()/"remote.xboxnative-backup"/rel;
+    }
+    auto backup=path;backup+=".xboxnative-backup";return backup;
+}
 struct Remote { std::string name, sha; uint32_t prefix=0, raw=0; uint64_t time=0; int persist=0; };
-struct Listing { bool ok=false; uint64_t change=0; std::vector<std::string> prefixes; std::vector<Remote> files; };
+struct Listing { bool ok=false; uint64_t change=0; std::vector<std::string> prefixes; std::vector<Remote> files;
+    // The cloud prefix of a file: "" for API files (no prefix list at all, or the empty entry).
+    std::optional<std::string> prefix_of(const Remote& f) const {
+        if(f.prefix<prefixes.size()) return prefixes[f.prefix];
+        if(prefixes.empty()&&f.prefix==0) return std::string();
+        return std::nullopt;
+    } };
 inline Listing list(Io& io,uint32_t appid) {
     Listing l; std::string req; pb_u(req,1,appid); pb_u(req,2,0);
     int er=0; std::string resp;
@@ -138,7 +176,7 @@ template<class F> inline void walk(const fs::path& dir,bool recursive,F&& visit)
         for(;!ec&&it!=end;it.increment(ec)) if(!linked(it->path())) visit(*it);
     }
 }
-struct Result { unsigned downloaded=0, uploaded=0, unchanged=0, kept=0, busy=0, failed=0; };
+struct Result { unsigned downloaded=0, uploaded=0, unchanged=0, kept=0, busy=0, failed=0, newer=0; };
 inline Headers headers(const std::string& message,int field) {
     Headers h;
     for(auto& f:pb_parse(message)) if(f.f==field) {
@@ -147,32 +185,48 @@ inline Headers headers(const std::string& message,int field) {
     }
     return h;
 }
-// Before launch: bring the player's newer cloud files down.
-inline Result download(Io& io,uint32_t appid,const Roots& roots) {
+// One line per cloud file decision: what Steam calls it and where it maps.
+inline void decided(Io& io,const char* action,const std::string& cloud,const fs::path& local) {
+    io.log(std::string("cloud: ")+action+" "+cloud+" -> "+path_text(local));
+}
+// Before launch: bring the player's newer cloud files down. dry: only count
+// them (Result::newer), change nothing.
+inline Result download(Io& io,uint32_t appid,const Roots& roots,bool dry=false) {
     Result r;auto l=list(io,appid);if(!l.ok){++r.failed;return r;}
     for(auto& file:l.files) {
-        if(file.persist!=0) continue; // deleted or forgotten on the server
-        if(file.prefix>=l.prefixes.size()){++r.failed;continue;}
-        auto path=local_path(roots,l.prefixes[file.prefix],file.name);
-        if(!path){io.log("cloud: skipped a file outside the configured roots");++r.failed;continue;}
+        auto prefix=l.prefix_of(file);
+        if(!prefix){io.log("cloud: skipped "+file.name+" (prefix index "+std::to_string(file.prefix)+" is not in the changelist)");++r.failed;continue;}
+        const std::string cloud=*prefix+file.name;
+        if(file.persist!=0){io.log("cloud: skipped "+cloud+" (deleted or forgotten on the server)");continue;}
+        auto path=local_path(roots,*prefix,file.name);
+        if(!path){io.log("cloud: skipped "+cloud+" (not under a configured root)");++r.failed;continue;}
         auto local=read_file(*path);
-        if(local&&io.sha1(*local)==file.sha){++r.unchanged;continue;}
-        if(local&&unix_time(*path)>=file.time){++r.kept;continue;} // local is newer: upload after play
-        std::string req;pb_u(req,1,appid);pb_s(req,2,l.prefixes[file.prefix]+file.name);pb_u(req,3,1);
+        if(local&&io.sha1(*local)==file.sha){decided(io,"unchanged",cloud,*path);++r.unchanged;continue;}
+        if(local&&unix_time(*path)>=file.time){decided(io,"keep-local (newer here; uploads after play)",cloud,*path);++r.kept;continue;}
+        if(dry){decided(io,"newer-in-cloud",cloud,*path);++r.newer;continue;}
+        std::string req;pb_u(req,1,appid);pb_s(req,2,cloud);pb_u(req,3,1);
         int er=0;std::string resp;
-        if(!io.service("Cloud.ClientFileDownload#1",req,er,resp)||er!=1){++r.failed;continue;}
+        if(!io.service("Cloud.ClientFileDownload#1",req,er,resp)||er!=1){decided(io,"fail (download request refused)",cloud,*path);++r.failed;continue;}
         std::string host,url;bool https=true,encrypted=false;uint32_t size=0,raw=0;
         for(auto& f:pb_parse(resp)) {
             if(f.f==2)size=uint32_t(f.u);else if(f.f==3)raw=uint32_t(f.u);else if(f.f==7)host=f.s;
             else if(f.f==8)url=f.s;else if(f.f==9)https=f.u!=0;else if(f.f==11)encrypted=f.u!=0;
         }
-        // Compressed or encrypted cloud copies are not handled yet: keep local.
-        if(encrypted||size!=raw||host.empty()){io.log("cloud: "+file.name+" stored compressed/encrypted; not downloaded");++r.failed;continue;}
+        // Client-side encryption is not supported: keep the local copy.
+        if(encrypted){decided(io,"skip (stored encrypted; client-side encryption unsupported)",cloud,*path);++r.failed;continue;}
+        if(host.empty()){decided(io,"fail (no download host)",cloud,*path);++r.failed;continue;}
         std::string body;int status=io.get(https,host,url,headers(resp,10),body);
-        if(status!=200||body.size()!=raw||io.sha1(body)!=file.sha){io.log("cloud: download of "+file.name+" failed status="+std::to_string(status));++r.failed;continue;}
-        if(local){auto backup=*path;backup+=".xboxnative-backup";write_file(backup,*local);}
-        if(!write_file(*path,body)){++r.failed;continue;}
+        if(status!=200||body.size()!=size){decided(io,("fail (download status="+std::to_string(status)+" bytes="+std::to_string(body.size())+"/"+std::to_string(size)+")").c_str(),cloud,*path);++r.failed;continue;}
+        // Stored size != raw size: a PKZip archive with the one file in it.
+        std::string data;
+        if(size!=raw) {
+            if(!io.inflate||!steam_client_package::zip_member(body,nullptr,io.inflate,data)||data.size()!=raw){decided(io,"fail (compressed copy did not inflate)",cloud,*path);++r.failed;continue;}
+        } else data=std::move(body);
+        if(io.sha1(data)!=file.sha){decided(io,"fail (SHA-1 differs from the changelist)",cloud,*path);++r.failed;continue;}
+        if(local){write_file(backup_path(roots,*path),*local);}
+        if(!write_file(*path,data)){decided(io,"fail (could not write)",cloud,*path);++r.failed;continue;}
         set_unix_time(*path,file.time);++r.downloaded;
+        decided(io,size!=raw?"downloaded (inflated)":"downloaded",cloud,*path);
     }
     return r;
 }
@@ -184,10 +238,12 @@ inline Result upload(Io& io,uint32_t appid,const Roots& roots,const std::vector<
     Result r;
     const uint64_t now=uint64_t(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());auto l=list(io,appid);if(!l.ok){++r.failed;return r;}
     std::map<std::string,const Remote*> remote;
-    for(auto& f:l.files) if(f.prefix<l.prefixes.size()) remote[l.prefixes[f.prefix]+f.name]=&f;
+    for(auto& f:l.files) if(auto prefix=l.prefix_of(f)) remote[*prefix+f.name]=&f;
     struct Pending { std::string cloudName; fs::path path; std::string data; uint64_t time; };
     std::vector<Pending> pending;
-    for(auto& rule:saveRules) {
+    std::vector<Rule> scan=saveRules;
+    if(roots.count(kRemoteRoot)) scan.push_back({kRemoteRoot,"","*",true});   // API files: whole folder, un-prefixed names
+    for(auto& rule:scan) {
         auto it=roots.find(rule.root);if(it==roots.end()) continue;
         if(!rule.path.empty()&&!safe_relative(rule.path)) continue;
         fs::path base=it->second;std::string rel=rule.path;
@@ -203,16 +259,17 @@ inline Result upload(Io& io,uint32_t appid,const Roots& roots,const std::vector<
             // console app container can refuse (every file was skipped).
             auto sub=entry.path().lexically_relative(base).generic_string();
             if(!safe_relative(sub)) return;
-            std::string cloudName="%"+rule.root+"%"+(rule.path.empty()?"":rule.path+"/")+sub;
+            std::string cloudName=rule.root==kRemoteRoot?sub:"%"+rule.root+"%"+(rule.path.empty()?"":rule.path+"/")+sub;
             auto data=read_file(entry.path());if(!data) return;
             uint64_t time=unix_time(entry.path());
             if(quietSeconds&&time+quietSeconds>now){++r.busy;return;}
             auto found=remote.find(cloudName);
             if(found!=remote.end()&&found->second->persist==0) {
                 if(io.sha1(*data)==found->second->sha){++r.unchanged;return;}
-                if(time<found->second->time){++r.kept;return;} // remote is newer: keep it
+                if(time<found->second->time){decided(io,"keep-cloud (newer there)",cloudName,entry.path());++r.kept;return;} // remote is newer: keep it
             }
             pending.push_back({cloudName,entry.path(),*data,time});
+            decided(io,"upload",cloudName,entry.path());
         };
         walk(base,rule.recursive,visit);
     }
@@ -245,7 +302,7 @@ inline Result upload(Io& io,uint32_t appid,const Roots& roots,const std::vector<
         std::string commit;pb_u(commit,1,ok?1:0);pb_u(commit,2,appid);pb_s(commit,3,sha);pb_s(commit,4,p.cloudName);
         int ce=0;std::string cr;bool committed=false;
         if(io.service("Cloud.ClientCommitFileUpload#1",commit,ce,cr)&&ce==1)for(auto& f:pb_parse(cr))if(f.f==1)committed=f.u!=0;
-        if(ok&&committed)++r.uploaded;else{++r.failed;all=false;io.log("cloud: upload of a save file failed");}
+        if(ok&&committed)++r.uploaded;else{++r.failed;all=false;decided(io,"upload failed",p.cloudName,p.path);}
     }
     std::string done;pb_u(done,1,appid);pb_u(done,2,batch);pb_u(done,3,all?1:2);
     int de=0;std::string dr;io.service("Cloud.CompleteAppUploadBatchBlocking#1",done,de,dr);
