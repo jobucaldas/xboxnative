@@ -1,8 +1,66 @@
 # X86-32BIT-PLAN: running 32-bit (PE32) Windows Steam games on the Xbox Series S stack
 
-Author: agent executor (research only; no console use, nothing pushed or posted). Date: 2026-10-26 (America/Sao_Paulo).
-Scope: BACKLOG item 49 (x86-engine, option b) and everything it drags in. Targets: Spacewar 480, LIMBO 48000, Undertale 391540.
-Marking: **[V]** verified in a file or page this session (path/URL given). **[G]** guess/estimate, not measured. Effort = weeks for ONE coding agent (Codex or Claude) working offline plus console sessions.
+Updated 2026-11-07 (stage 1 implemented off-device; stages 2+ planned). The 2026-10-26 research that this builds on is kept below as **Background**; where it disagrees with this section (engine choice, targets, effort), this section wins.
+Marking: **[V]** verified (file, test, or command named); **[G]** guess/estimate, not measured. Effort = weeks for one coding agent plus console sessions.
+
+## Staged plan
+
+**Target:** Mega Man Legacy Collection (Steam 363440, owned), `Proteus.exe`. **Other owned PE32 titles to unblock afterwards:** Mega Man Legacy Collection 2 (same engine), the Danganronpa titles. **Constraint that shapes everything:** the console is an x64 UWP container, so 32-bit code can only run by *interpreting or translating it inside the Play process*, thunking Win32/COM calls to Play's 64-bit providers. No RWX, no security-restriction bypasses (AGENTS.md).
+
+### What Proteus.exe actually needs [V: pefile on the owned local copy, never committed]
+
+PE32, ImageBase `0x400000`, SizeOfImage `0x649000`, **has a `.reloc`** (25 336 B), a **`.tls`** directory (implicit TLS + possibly callbacks), and a **`.bind`** section (a Steam DRM wrapper; it must be unwrapped by the legitimate Steam client path, never stripped or patched, AGENTS rule 3). 173 imports:
+
+| DLL | imports | how it is served (plan) |
+|---|---|---|
+| KERNEL32 | 31 | host thunks (stage 3), 5 already thunked in stage 1 |
+| api-ms-win-crt-* (runtime 23, stdio 17, string 7, heap 7, math 5, utility 1, time 1, locale 1) | 62 | **x86 UCRT run emulated** (built from pinned Wine source as i686 PE, rule 9) over the kernel32 thunks, *or* thunked CRT-level to Play's 64-bit UCRT; decide at stage 3 with a measurement |
+| MSVCP140 | 17 | emulated i686 build (C++ stdlib objects have 32-bit layouts the guest owns; thunking would need a layout mirror) |
+| VCRUNTIME140 | 14 | emulated i686 build (EH/`_CxxThrowException`, memcpy family) |
+| CONCRT140 | 4 | emulated i686 build |
+| USER32 | 23 | thunks onto Play's user32 "u32c" records (struct translators for WNDCLASS/MSG/...) |
+| steam_api.dll | 12 | the owned 32-bit `steam_api.dll` is itself PE32: run it emulated over a 32-bit Steam bridge shim, or replace with a thunk shim to the 64-bit client path |
+| VERSION 3, XINPUT1_3 2, SHELL32 1, ole32 3 | 9 | thunks (donor DLLs where the 64-bit side already has them) |
+| d3d11 | 1 | `D3D11CreateDevice*` then **COM thunking** of ID3D11*/IDXGI* to the 64-bit D3D11 (stage 5) |
+
+The game folder ships `Proteus.exe`, `steam_api.dll`, `steam_appid.txt` and data only: **the VC++ 2015-2022 x86 runtime (MSVCP140/VCRUNTIME140/CONCRT140/UCRT) is not in it** [V: directory listing], so those DLLs must come from a pinned from-source build (Wine) or a user-supplied redistributable; Microsoft binaries are never committed. This is the largest open dependency.
+
+### Stage 0: is there WoW64 for a UWP app? (1-2 days, console, tiny)
+
+Prior evidence (BACKLOG item 46, cited by the Background section, not re-run now): a far jump to the 32-bit code selector faults before any x86 instruction, and `wow64*.dll` fail `LoadPackagedLibrary` with error 126. Cheap re-confirmation to add to the launcher's diagnostics, logging one line each: (1) `GetFileAttributesFromApp` on `%SystemRoot%\SysWOW64\wow64.dll`/`wow64cpu.dll`/`wow64win.dll`; (2) `IsWow64Process2` on self (expect native=x64, no emulation); (3) `NtQueryInformationProcess(ProcessWow64Information)` on self (expect 0); (4) a hello-world UWP packaged with `ProcessorArchitecture="x86"` deployed through the Device Portal: record the exact install rejection or, if it installs and runs, its `IsWow64Process2` result. **Decision rule:** only if (4) runs does a native-x86 route become worth pursuing (as a separate process, which cannot share Play's in-process graphics/windows, so it would still need an IPC design); otherwise stages 1-6 stand unchanged. Acceptance: the four lines in the console log and a one-line verdict in this file.
+
+### Stage 1 (DONE here, off-device): x86 execution core + loader + thunks [V]
+
+`src/xbox-test/app/host/x86/`: guest memory with per-page R/W/X (`x86_mem.h`), a purpose-built 32-bit integer interpreter (`x86_cpu.h`), a PE32 loader that reuses the bounds-checked `wxl::Pe32` mapper, maps at the true ImageBase, applies section protections, binds the IAT to thunk stubs from an explicit allowlist and builds TEB32/PEB32/stack (`x86_pe.h`), and the thunk allowlist (`x86_win32.h`: GetStdHandle, WriteFile, Set/GetLastError, ExitProcess, msvcrt `strlen`, `qsort` with a cdecl guest callback). Test: `src/xbox-test/app/tests/x86-core.sh [--wine]`.
+
+Design decisions and why:
+- **Engine: purpose-built, not Boxedwine.** The earlier plan chose Boxedwine's normal core; the pin remains in `deps.pin` as a donor/fallback, but the 2026-10-26 source audit (see "M0 implementation constraints") found the trap hook and process/thread/MMU coupling were not a drop-in, and the pinned source cannot be fetched on every machine. A ~600-line core covering what freestanding i686 code needs is reviewable, GPL-3.0-or-later clean, and each instruction class is **verified differentially against this machine's real CPU** (inline-asm native execution compared result-and-flags, 59 400 cases) rather than trusted. Revisit at the stage-2 gate (below).
+- **Soft MMU, no flat 4 GiB reservation.** Guest addresses index a 1M-entry page table of host pages, so the guest arena is ordinary `VirtualAllocFromApp` RW pages: **the interpreter never executes guest bytes natively, so no RWX or execute-flip is needed at all.** Guest pointers are never host pointers; thunks marshal through checked `Memory` helpers, so a bad guest pointer is a `Fault`, not a host access. (A flat low-4 GiB alias is only a later JIT/perf optimization.)
+- **Thunk = host call at a stub address**, not an instruction: stubs live in a read+execute page filled with `int3`; the interpreter recognises EIP in the stub range before fetching, runs the host handler against the guest stack, and performs the stdcall/cdecl return. No reserved opcode, no exception path. Callbacks use `Cpu::call` (pushes args and a return sentinel, re-entrant, callee-saved registers preserved) [V: nested test and `qsort` comparator].
+- **Everything outside the subset fails loudly**: unsupported opcode -> `Fault` with the instruction bytes; unresolved import -> bound stub that faults naming `dll!symbol` on first call; unaligned/mid-stub jumps, W^X violations, divide error, instruction limit are all distinct fault kinds [V: tests].
+- **Fixture:** `tests/x86-fixture/fixture.c`, built in-test with the i686 mingw gcc, freestanding (no CRT). It reads TEB32/PEB32 via FS, uses relocated absolute pointers, a cdecl `qsort` guest callback, last-error in TEB32, and exits 42. It runs unchanged under Wine (cross-check, `--wine`) with identical stdout and exit code, and in the emulator at its ImageBase and at a different base (relocations applied).
+- **Measured speed [V]:** ~91 MIPS on an i5-1135G7 for a tight ALU loop with every fetch permission-checked and no decode cache. That is a floor for an unoptimized core on a faster-IPC host than Series S's Zen 2 at 3.4 GHz [G: similar order]; a decode cache and page-fetch fast path are the first planned optimizations. The earlier "push 32-bit behind the JIT if < 50 MIPS" rule is not triggered yet; real numbers need the console.
+
+Out of scope for stage 1 and **not** claimed: x87/MMX/SSE, TLS, SEH, threads, DLL loading, any real game, any console run, launcher integration (`launch.h` still only inspects PE32).
+
+### Stage 2: instruction coverage for MSVC-built games (2-3 wk [G]) 
+MSVC's default 32-bit codegen uses **SSE/SSE2** scalar and packed float/int, x87 in older paths, and the runtime uses `cpuid`, `rdtsc`, `lock cmpxchg/xadd`, `bsf/bsr`, `bt*`, `shld/shrd`, `rcl/rcr`, `cmps/scas`, `pushfd/popfd`, `cmovcc` (done), `xchg`/`lock` for atomics. Work: add each class with a **native differential test** like stage 1 (inline asm on the x86 test host, flags/MXCSR/x87 status compared), plus a decode cache and a threaded-code fast path. **Acceptance:** differential suites for SSE/SSE2/x87/atomics pass; a larger MSVC-style fixture (float math, `std::sort`, `printf`) matches Wine output; MIPS re-measured on the console. **Decision gate:** if SSE2+x87 cost exceeds ~3 weeks, evaluate adopting Boxedwine's FPU/SSE op handlers (pinned, GPL-2.0-or-later, compatible via "or later").
+
+### Stage 3: guest OS surface (3-4 wk [G])
+Full TEB32/PEB32 and `Ldr` lists, static TLS + TLS callbacks, **frame-based x86 SEH** (fault -> EXCEPTION_RECORD32/CONTEXT32 on the guest stack -> a small guest-resident dispatcher walking `fs:[0]`, plus `RtlUnwind`/`RaiseException`; MSVC C++ `0xE06D7363`), threads (one host thread per guest CPU over the shared memory; blocking APIs run on the host with the CPU parked in the thunk), a DLL loader (DllMain via `Cpu::call`), and a **thunk generator**: stack-argument metadata from Wine `.spec` files for an explicit allowlist, with hand-checked marshallers for pointer-bearing and size-dependent structs (generation alone does not give return types, pointer lengths, ownership or handle policy). Load the emulated i686 UCRT/VCRUNTIME/MSVCP/CONCRT builds. **Acceptance:** a fixture linked against the dynamic MSVC runtime (built i686, `__try/__except`, `__declspec(thread)`, C++ throw/catch, `CreateThread`, a WndProc round-trip) runs to `6/6` under the emulator and Wine; Proteus.exe resolves all 173 imports with the missing set reported by name.
+
+### Stage 4: Proteus.exe to its first window, with legitimate Steam (3-4 wk [G])
+User32 thunks to u32c, the 32-bit Steam path (emulated owned `steam_api.dll` or shim) feeding the real signed-in client, and the `.bind` wrapper handled only via the legitimate client (**no unwrap-by-patching**; if that path cannot be made legitimate, MMLC is out). **Acceptance (console):** `play-test.sh 363440` reaches `CreateWindowExW` and `D3D11CreateDevice` from the emulated entry point, with the log stating which PE ran.
+
+### Stage 5: D3D11/DXGI COM thunking (3-5 wk [G])
+Guest COM proxies whose vtable slots are thunk stubs marshalled onto the 64-bit D3D11 objects (~400 methods across Device/Context/Texture/Buffer/Views/shaders/states/DXGI [G count]; only the methods Proteus calls need to exist first, others fault by name). HLSL bytecode is architecture-neutral and passes through. `Map`/`Unmap` use guest-memory bounce buffers with copy-back; descriptor structs with pointers/HWNDs get translators. **Acceptance:** MMLC title screen presents 300 frames; screenshot evidence in the PR with no account data.
+
+### Stage 6: speed (open-ended)
+Block cache and, only if measured necessary, a W^X JIT using `VirtualAllocFromApp`/`VirtualProtectFromApp` (write RW, flip to RX, never RWX). Gate: console MIPS and MMLC frame time.
+
+**Total to MMLC on screen: roughly 12-17 weeks of one agent [G], dominated by stages 3-5; stage 1 evidence: the core is small and exactly testable, so the CPU is not the long pole, the OS/COM surface and the runtime-DLL provenance are.**
+
+## Background (2026-10-26 research; targets and engine choice superseded above)
 
 ## 0. TL;DR
 
@@ -167,10 +225,7 @@ First deliverables, concretely: (1) `x32cpu` builds as a static library for the 
 
 ## M0 implementation constraints
 
-**Execution work is deferred until genuine Megabonk playability through the
-launcher is demonstrated.** The earlier parallel-M0 scheduling suggestions above
-are not authorization to start extraction or execution. Mapping-only results,
-a standalone fixture, or a launcher screenshot do not satisfy that prerequisite.
+**Gate status (2026-11-07):** off-device, console-free x86 work is allowed (stage 1 above). It is not wired into the launcher and makes no game claim; launcher/console integration (stage 4 onward) still needs its own evidence. A mapping-only result, a standalone fixture, or a launcher screenshot is not proof that a real game's entry point executes.
 
 The source audit at fork 75b719bc found that FE /7 imm8 is not a callback registry: DecodeGrp4_8 accepts
 only index 1, hardwired to onExitSignal. KMemoryData::addCallback also rejects
