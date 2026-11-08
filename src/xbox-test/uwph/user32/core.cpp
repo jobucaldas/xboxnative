@@ -164,6 +164,25 @@ extern "C" BOOL WINAPI c_EnumWindows(EnumProc proc,LPARAM p){if(!proc){SetLastEr
 extern "C" HWND WINAPI c_GetDlgItem(HWND h,int id){std::lock_guard<std::recursive_mutex> l(mutex);if(!window(h))return nullptr;for(auto& w:windows)if(w->alive&&w->parent==h&&w->id==id)return (HWND)w.get();return nullptr;}
 extern "C" LRESULT WINAPI c_SendDlgItemMessageW(HWND h,int id,UINT m,WPARAM w,LPARAM p){return c_SendMessageW(c_GetDlgItem(h,id),m,w,p);}
 extern "C" BOOL WINAPI c_SetWindowTextW(HWND h,LPCWSTR s){return (BOOL)c_SendMessageW(h,WM_SETTEXT,0,(LPARAM)s);}
+extern "C" HWND WINAPI c_GetDesktopWindow();
+// GetAncestor: GA_PARENT is the parent of a child window, the desktop for a
+// top-level one; GA_ROOT climbs child links; GA_ROOTOWNER also follows owners.
+extern "C" HWND WINAPI c_GetAncestor(HWND h,UINT flags){std::lock_guard<std::recursive_mutex> l(mutex);Window* w=window(h);if(!w)return nullptr;if(w==desktop)return nullptr;
+ auto up=[&](Window* x)->Window*{if(!(x->style&WS_CHILD)||!x->parent)return nullptr;Window* p=window(x->parent);return p==desktop?nullptr:p;};
+ auto root=[&](Window* x){while(Window* p=up(x))x=p;return x;};
+ if(flags==GA_PARENT){Window* p=up(w);return p?(HWND)p:c_GetDesktopWindow();}
+ Window* r=root(w);if(flags==GA_ROOT)return (HWND)r;
+ if(flags==GA_ROOTOWNER){for(int guard=0;guard<64&&r->parent;++guard){Window* o=window(r->parent);if(!o||o==desktop)break;r=root(o);}return (HWND)r;}
+ SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}
+// No dialog manager: dialog templates are not instantiated. Games import these
+// for optional setup/crash dialogs; creating one fails cleanly, and with no
+// dialogs alive no message is a dialog message.
+extern "C" HWND WINAPI c_CreateDialogParamW(HINSTANCE,LPCWSTR,HWND,DLGPROC,LPARAM){SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
+extern "C" HWND WINAPI c_CreateDialogParamA(HINSTANCE,LPCSTR,HWND,DLGPROC,LPARAM){SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
+extern "C" BOOL WINAPI c_IsDialogMessageW(HWND,LPMSG){return FALSE;}
+extern "C" BOOL WINAPI c_IsDialogMessageA(HWND,LPMSG){return FALSE;}
+extern "C" BOOL WINAPI c_CheckDlgButton(HWND h,int id,UINT check){HWND item=c_GetDlgItem(h,id);if(!item)return FALSE;c_SendMessageW(item,BM_SETCHECK,check,0);return TRUE;}
+extern "C" UINT WINAPI c_IsDlgButtonChecked(HWND h,int id){HWND item=c_GetDlgItem(h,id);return item?(UINT)c_SendMessageW(item,BM_GETCHECK,0,0):0;}
 extern "C" BOOL WINAPI c_SetDlgItemTextW(HWND h,int id,LPCWSTR s){return c_SetWindowTextW(c_GetDlgItem(h,id),s);}
 extern "C" BOOL WINAPI c_MoveWindow(HWND h,int x,int y,int cx,int cy,BOOL){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w)return FALSE;w->x=x;w->y=y;w->cx=std::max(0,cx);w->cy=std::max(0,cy);w->proc(h,WM_MOVE,0,MAKELPARAM(x,y));if(w->alive)w->proc(h,WM_SIZE,SIZE_RESTORED,MAKELPARAM(clientWidth(w),clientHeight(w)));return TRUE;}
 extern "C" BOOL WINAPI c_InflateRect(RECT* r,int x,int y){if(!r)return FALSE;r->left-=x;r->top-=y;r->right+=x;r->bottom+=y;return TRUE;}

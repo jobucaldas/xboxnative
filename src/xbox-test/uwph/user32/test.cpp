@@ -44,6 +44,8 @@ extern "C" DWORD WINAPI u32c_entry(){
  check(SetWindowLongPtrW(h,GWLP_WNDPROC,(LONG_PTR)subclass)==(LONG_PTR)proc);check(SendMessageW(h,WM_APP,0,0)==42);check(GetWindowLongPtrW(h,GWLP_WNDPROC)==(LONG_PTR)subclass);
  SetLastError(0);check(!GetWindowLongA(h,GWLP_WNDPROC)&&GetLastError()==ERROR_INVALID_INDEX);
  HWND child=CreateWindowExW(0,wc.lpszClassName,L"child",WS_CHILD|WS_VISIBLE,2,3,10,20,h,(HMENU)77,0,(void*)0x12345678);check(child&&GetParent(child)==h&&GetDlgItem(h,77)==child);check(SetDlgItemTextW(h,77,L"child text"));
+ check(GetAncestor(child,GA_PARENT)==h&&GetAncestor(child,GA_ROOT)==h&&GetAncestor(child,GA_ROOTOWNER)==h&&GetAncestor(h,GA_PARENT)==GetDesktopWindow()&&GetAncestor(h,GA_ROOT)==h);
+ {MSG dm={};dm.hwnd=child;check(!IsDialogMessageW(h,&dm));SetLastError(0);check(!CreateDialogParamW(0,MAKEINTRESOURCEW(1),h,nullptr,0)&&GetLastError()==ERROR_NOT_SUPPORTED);check(!CheckDlgButton(h,9999,BST_CHECKED)&&IsDlgButtonChecked(h,9999)==0);}
  POINT cp={0,0};check(ClientToScreen(child,&cp)&&cp.x==25&&cp.y==50);
  POINT mp[2]={{0,0},{1,1}};check(MapWindowPoints(child,0,mp,2)==MAKELONG(25,50)&&mp[0].x==25&&mp[0].y==50&&mp[1].x==26&&mp[1].y==51);
  check(MapWindowPoints(0,h,mp,1)==MAKELONG(-23,-47)&&mp[0].x==2&&mp[0].y==3);

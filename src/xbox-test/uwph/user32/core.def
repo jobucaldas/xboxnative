@@ -264,3 +264,10 @@ EXPORTS
  SetClassLongPtrA=c_SetClassLongPtrA
  SendMessageTimeoutW=c_SendMessageTimeoutW
  WaitForInputIdle=c_WaitForInputIdle
+ GetAncestor=c_GetAncestor
+ CreateDialogParamW=c_CreateDialogParamW
+ CreateDialogParamA=c_CreateDialogParamA
+ IsDialogMessageW=c_IsDialogMessageW
+ IsDialogMessageA=c_IsDialogMessageA
+ CheckDlgButton=c_CheckDlgButton
+ IsDlgButtonChecked=c_IsDlgButtonChecked
