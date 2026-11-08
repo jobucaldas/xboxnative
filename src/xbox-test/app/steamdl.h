@@ -351,7 +351,7 @@ static bool download_app(CmSession& cm, uint32_t appid) {
         if (!all_digits(dv->keys[i])) continue; const Vdf& d = dv->kids[i]; if (!d.obj) continue;
         depot_select::Depot x; x.id = (uint32_t)strtoul(dv->keys[i].c_str(), nullptr, 10);
         x.oslist = d.str({"config", "oslist"}); x.osarch = d.str({"config", "osarch"}); x.language = tolower_s(d.str({"config", "language"}));
-        x.lowviolence = d.str({"config", "lowviolence"}) == "1"; x.dlc = d.get("dlcappid") != nullptr;
+        x.lowviolence = d.str({"config", "lowviolence"}) == "1"; x.dlc = d.get("dlcappid") != nullptr; x.sharedFrom = d.str({"depotfromapp"});
         const Vdf* pm = d.at({"manifests", "public"}); if (pm) x.gid = pm->obj ? pm->str({"gid"}) : pm->val;
         listed.push_back(x);
     }
@@ -362,17 +362,28 @@ static bool download_app(CmSession& cm, uint32_t appid) {
     auto servers = fetch_cdn_servers(); if (servers.empty()) return fail("no Steam content servers available");
     // 2. per depot: key, manifest
     struct Prep { uint32_t depot; std::string key; std::vector<std::unique_ptr<DlFile>> files; uint64_t bytes = 0; };
-    std::vector<Prep> preps;
+    std::vector<Prep> preps; std::vector<uint32_t> refused;
     for (auto& d : deps) {
         if (g_dl.cancel) return fail("cancelled");
         dl_msg("Getting depot " + std::to_string(d.id) + " key...");
         std::string b; pb_u(b, 1, d.id); pb_u(b, 2, appid); JobMsg km;
         if (!cm.call(EMSG_GetDepotKey, b, "", 15000, km)) return fail("depot key request timed out");
         auto kf = pb_parse(km.body); int ker = pb_get(kf, 1) ? (int)pb_get(kf, 1)->u : 2; auto kk = pb_get(kf, 3);
-        if (ker != 1 || !kk || kk->s.size() != 32) return fail(std::string(cm.anon ? "not available without signing in" : "Steam refused the depot key") + " (eresult " + std::to_string(ker) + ")");
+        if (ker != 1 || !kk || kk->s.size() != 32) {
+            if (cm.anon) return fail("not available without signing in (eresult " + std::to_string(ker) + ")");
+            // As the Steam client: only depots this account's licenses grant are
+            // installed. A refused one (e.g. a depot of an edition, bundle or
+            // region the account doesn't own) is skipped, not fatal.
+            logf("dl: depot %u skipped (Steam refused its key, eresult %d: not in this account's licenses)", d.id, ker);
+            refused.push_back(d.id); continue;
+        }
         logf("dl: depot %u key OK (32 bytes, not shown)", d.id);
         std::string rb; pb_u(rb, 1, appid); pb_u(rb, 2, d.id); pb_u(rb, 3, strtoull(d.gid.c_str(), nullptr, 10)); pb_s(rb, 4, "public"); JobMsg rm;
-        if (!cm.service("ContentServerDirectory.GetManifestRequestCode#1", rb, 15000, rm) || rm.eresult != 1) return fail("manifest request code refused (eresult " + std::to_string(rm.eresult) + ")");
+        if (!cm.service("ContentServerDirectory.GetManifestRequestCode#1", rb, 15000, rm) || rm.eresult != 1) {
+            if (!rm.eresult) return fail("manifest request code timed out");
+            logf("dl: depot %u skipped (manifest request code refused, eresult %d)", d.id, rm.eresult);
+            refused.push_back(d.id); continue;
+        }
         uint64_t code = 0; for (auto& f : pb_parse(rm.body)) if (f.f == 1) code = f.u;
         std::string zip, e; int st = 0; bool got = false;
         for (size_t si = 0; si < servers.size() && si < 4 && !got; si++) {
@@ -386,6 +397,8 @@ static bool download_app(CmSession& cm, uint32_t appid) {
         logf("dl: depot %u manifest %s: %zu entries, %llu bytes%s", d.id, d.gid.c_str(), p.files.size(), (unsigned long long)p.bytes, enc ? " (names were encrypted)" : "");
         preps.push_back(std::move(p));
     }
+    if (preps.empty()) return fail("Steam granted none of this app's Windows depots to this account (" + std::to_string(refused.size()) + " refused)");
+    if (!refused.empty()) logf("dl: %zu depot(s) skipped as not licensed; installing the %zu this account owns", refused.size(), preps.size());
     uint64_t total = 0; int nfiles = 0; for (auto& p : preps) { total += p.bytes; for (auto& f : p.files) if (!(f->flags & 64) && f->link.empty()) nfiles++; }
     g_dl.total = total; g_dl.files = nfiles;
     // 3. install paths, and free space for what is not already on disk (a resumed download reuses its files)
