@@ -292,16 +292,25 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     {std::lock_guard<LoaderMutex> lock(state->loaderMutex);
      m=named(requested);
      if(!m && !apiSetName(requested)) {
-         auto p=guestLibraryPath(requested,!flags);
+         // Flags that only steer where the file is searched (Mono/Unity pass
+         // LOAD_WITH_ALTERED_SEARCH_PATH or the SEARCH_* set for plugins) do not
+         // change what is loaded; anything else is refused below, as before.
+         constexpr DWORD searchOnly=LOAD_WITH_ALTERED_SEARCH_PATH|LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|
+             LOAD_LIBRARY_SEARCH_APPLICATION_DIR|LOAD_LIBRARY_SEARCH_USER_DIRS|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
+         auto p=guestLibraryPath(requested,!(flags&~searchOnly));
          if(exists(p)) {
-             if(flags) {SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
+             if(flags&~searchOnly) {
+                 state->event("LoadLibrary refused name="+narrow(requested)+" flags="+std::to_string(flags)+": unsupported load flags");
+                 SetLastError(ERROR_NOT_SUPPORTED);return nullptr;
+             }
              m=map(p);
              if(!m) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
          }
      }
     }
     if(m) {
-        if(flags) {SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
+        if(flags&~(LOAD_WITH_ALTERED_SEARCH_PATH|LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_APPLICATION_DIR|
+                   LOAD_LIBRARY_SEARCH_USER_DIRS|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)) {SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
         if(m->mappingFailed || !m->mapped) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
         ++m->references;
         // A DllMain may load a module whose own DllMain is still running on

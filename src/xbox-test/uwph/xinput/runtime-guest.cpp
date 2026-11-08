@@ -40,6 +40,9 @@ extern "C" DWORD WINAPI input_entry() {
     if(!pluginState || pluginState(0,&value)!=0 || value.Gamepad.wButtons!=XINPUT_GAMEPAD_A)return 20;
     if(pluginState(1,&value)!=ERROR_DEVICE_NOT_CONNECTED)return 21;
     if(!FreeLibrary(plugin))return 22;
+    // Mono/Unity may pass search-path flags with the full path; they only steer lookup.
+    plugin=LoadLibraryExW(path,nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);if(!plugin)return 23;
+    if(!FreeLibrary(plugin))return 24;
     return 42;
 }
 // Mapper requires relocatable images; retain one actual base relocation.
