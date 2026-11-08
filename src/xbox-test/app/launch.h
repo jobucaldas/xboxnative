@@ -257,6 +257,25 @@ static void cloud_note_synced(uint32_t appid) {
     for(auto d:{g_dir+L"\\steam",provider_dir(appid)})CreateDirectoryW(d.c_str(),nullptr);
     write_text(cloud_stamp_path(appid),std::to_string((unsigned long long)time(nullptr))+"\n");
 }
+// Per cloud file, the SHA-1 both sides agreed on at the last sync (hex, one
+// "<sha>\t<name>" line each): what tells "changed here" from "changed there".
+static std::wstring cloud_state_path(uint32_t appid) { return provider_dir(appid)+L"\\cloud_state.txt"; }
+static steam_cloud::Known cloud_known_load(uint32_t appid) {
+    steam_cloud::Known k;auto text=read_bytes(cloud_state_path(appid));size_t at=0;
+    while(at<text.size()){size_t end=text.find('\n',at);if(end==std::string::npos)end=text.size();
+        auto line=text.substr(at,end-at);at=end+1;size_t tab=line.find('\t');
+        if(tab!=40)continue;std::string sha;
+        for(size_t i=0;i<40;i+=2)sha+=char(strtoul(line.substr(i,2).c_str(),nullptr,16));
+        k[line.substr(41)]=sha;}
+    return k;
+}
+static void cloud_known_save(uint32_t appid,const steam_cloud::Known& k) {
+    for(auto d:{g_dir+L"\\steam",provider_dir(appid)})CreateDirectoryW(d.c_str(),nullptr);
+    std::string text;static const char* hex="0123456789abcdef";
+    for(auto& [name,sha]:k){if(sha.size()!=20||name.find('\n')!=std::string::npos)continue;
+        for(unsigned char c:sha){text+=hex[c>>4];text+=hex[c&15];}text+='\t';text+=name;text+='\n';}
+    write_text(cloud_state_path(appid),text);
+}
 static uint64_t cloud_last_synced(uint32_t appid) {
     auto text=read_bytes(cloud_stamp_path(appid));
     return text.empty()?0:strtoull(text.c_str(),nullptr,10);
@@ -265,7 +284,7 @@ static uint64_t cloud_last_synced(uint32_t appid) {
 // A game that is starting or running owns its save files: the detail page's
 // passes (fromUi) refuse then, the launch's own passes do not.
 static bool cloud_blocked() { return g_launch.phase==1||g_launch.phase==3||play_runtime::observed.load(std::memory_order_acquire)!=nullptr; }
-static bool cloud_sync(uint32_t appid,const std::wstring& gameRoot,bool upload,uint64_t quiet,CloudOutcome* out=nullptr,bool dry=false,bool fromUi=false) {
+static bool cloud_sync(uint32_t appid,const std::wstring& gameRoot,bool upload,uint64_t quiet,CloudOutcome* out=nullptr,bool dry=false,bool fromUi=false,steam_cloud::Prefer prefer=steam_cloud::Prefer::Auto) {
     CloudOutcome local;CloudOutcome& o=out?*out:local;o=CloudOutcome{};
     auto session=user_session();
     if(!session||session->anon){o.why="not signed in";return false;}
@@ -297,12 +316,13 @@ static bool cloud_sync(uint32_t appid,const std::wstring& gameRoot,bool upload,u
     io.log=[](const std::string& line){lp_sink(redact::steam_ids("STEAM "+line).c_str());};
     auto roots=cloud_roots(appid,gameRoot);
     for(auto& [name,path]:roots)lp_sink(redact::steam_ids("STEAM cloud: root "+name+" = "+steam_cloud::path_text(path)).c_str());
-    auto r=upload?steam_cloud::upload(io,appid,roots,rules,"Xbox",quiet):steam_cloud::download(io,appid,roots,dry);
-    char line[220];snprintf(line,sizeof line,"STEAM cloud %s: downloaded=%u uploaded=%u unchanged=%u kept=%u busy=%u newer=%u failed=%u",
-        upload?"upload":dry?"check":"download",r.downloaded,r.uploaded,r.unchanged,r.kept,r.busy,r.newer,r.failed);lp_sink(line);
+    auto known=cloud_known_load(appid);
+    auto r=upload?steam_cloud::upload(io,appid,roots,rules,"Xbox",quiet,&known,prefer):steam_cloud::download(io,appid,roots,dry,&known,prefer);
+    if(!dry)cloud_known_save(appid,known);
+    char line[220];snprintf(line,sizeof line,"STEAM cloud %s: downloaded=%u uploaded=%u unchanged=%u kept=%u busy=%u newer=%u conflict=%u failed=%u",
+        upload?"upload":dry?"check":"download",r.downloaded,r.uploaded,r.unchanged,r.kept,r.busy,r.newer,r.conflict,r.failed);lp_sink(line);
     o.ran=true;o.r=r;
-    if(!upload&&!dry&&r.failed==0)cloud_note_synced(appid);
-    if(upload&&r.failed==0)cloud_note_synced(appid);
+    if(!dry&&r.failed==0&&r.conflict==0)cloud_note_synced(appid);
     return r.failed==0;
 }
 // ---- Cloud status on the game's detail page, and its "Sync cloud saves" button.
@@ -321,6 +341,8 @@ static std::string cloud_plural(unsigned n,const char* one,const char* many) { r
 static void cloud_describe(uint32_t appid,bool sync,const CloudOutcome& down,const CloudOutcome& up) {
     if(!down.ran){cloud_set(appid,2,"Cloud: not synced ("+down.why+")",2);return;}
     unsigned failed=down.r.failed+(up.ran?up.r.failed:0);
+    unsigned conflict=std::max(down.r.conflict,up.ran?up.r.conflict:0u);
+    if(conflict){cloud_set(appid,2,"Cloud: "+cloud_plural(conflict,"save differs","saves differ")+" here and in the cloud. LB: use cloud, RB: keep Xbox",2);return;}
     if(sync) {
         if(!up.ran){cloud_set(appid,2,"Cloud: not synced ("+(up.why.empty()?std::string("upload skipped"):up.why)+")",2);return;}
         if(failed){cloud_set(appid,2,"Cloud: not synced ("+cloud_plural(failed,"file","files")+" failed; see the launch log)",2);return;}
@@ -334,7 +356,7 @@ static void cloud_describe(uint32_t appid,bool sync,const CloudOutcome& down,con
 }
 // Off the UI thread. sync=false only checks (counts the files newer in the
 // cloud); sync=true downloads those and uploads newer local files.
-static void cloud_async(uint32_t appid,const std::wstring& gameRoot,bool sync) {
+static void cloud_async(uint32_t appid,const std::wstring& gameRoot,bool sync,steam_cloud::Prefer prefer=steam_cloud::Prefer::Auto) {
     if(cloud_blocked()){if(sync)cloud_set(appid,2,"Cloud: not synced (a game is running)",2);return;}
     if(g_cloudBusy.exchange(true))return;
     cloud_set(appid,1,sync?"Cloud: syncing...":"Cloud: checking...",0);
@@ -342,8 +364,8 @@ static void cloud_async(uint32_t appid,const std::wstring& gameRoot,bool sync) {
         init_apartment(apartment_type::multi_threaded);
         try {
             CloudOutcome down,up;
-            cloud_sync(appid,gameRoot,false,0,&down,!sync,true);
-            if(sync&&down.ran)cloud_sync(appid,gameRoot,true,0,&up,false,true);
+            cloud_sync(appid,gameRoot,false,0,&down,!sync,true,prefer);
+            if(sync&&down.ran)cloud_sync(appid,gameRoot,true,0,&up,false,true,prefer);
             cloud_describe(appid,sync,down,up);
         } catch(...) {lp_sink("STEAM cloud: exception");cloud_set(appid,2,"Cloud: not synced (unexpected error)",2);}
         g_cloudBusy=false;

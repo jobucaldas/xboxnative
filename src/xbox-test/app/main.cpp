@@ -751,13 +751,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (!why.empty()) { m_dNote = why; logf("detail: delete not started appid=%u (%s): %s", m_dApp, via, why.c_str()); }
         else { m_dNote.clear(); m_dInstT = -10; }
     }
-    void detail_cloud(const char* via) {      // Y: download newer cloud saves, upload newer local ones
+    void detail_cloud(const char* via, steam_cloud::Prefer prefer = steam_cloud::Prefer::Auto) {      // Y: sync; LB/RB after a conflict: use the cloud / this console's copy
         m_dInst = read_install(m_dApp); m_dInstT = now_s();
         if (!m_dInst.installed || g_demo) return;
         if (cloud_blocked()) { m_dNote = "A game was started: reopen the app to sync cloud saves."; return; }
         if (g_cloudBusy) { logf("detail: Y ignored, cloud pass already running"); return; }
         m_dNote.clear(); logf("detail: cloud sync asked appid=%u (%s)", m_dApp, via);
-        cloud_async(m_dApp, g_dir + L"\\" + widen(m_dInst.dir), true);
+        cloud_async(m_dApp, g_dir + L"\\" + widen(m_dInst.dir), true, prefer);
     }
     void detail_action(const char* via) {   // A: Install or Play
         if (g_launch.phase == 1 || g_launch.phase == 3) { logf("detail: A ignored, launch attempt running"); return; }
@@ -1362,6 +1362,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
             if (has(edge, GamepadButtons::X)) { detail_delete(source); return; }
             if (has(edge, GamepadButtons::Y)) { detail_cloud(source); return; }
+            if (cloud_status(m_dApp).text.find("LB: use cloud") != std::string::npos) {
+                if (has(edge, GamepadButtons::LeftShoulder)) { detail_cloud("LB use cloud", steam_cloud::Prefer::Cloud); return; }
+                if (has(edge, GamepadButtons::RightShoulder)) { detail_cloud("RB keep Xbox", steam_cloud::Prefer::Local); return; }
+            }
             if (has(edge, GamepadButtons::A)) detail_action(source);
             if (has(edge, GamepadButtons::B)) detail_back(source);
             if (has(edge, GamepadButtons::View) || has(edge, GamepadButtons::Menu)) close_detail("Menu/View");

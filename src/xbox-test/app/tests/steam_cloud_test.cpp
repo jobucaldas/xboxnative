@@ -274,5 +274,45 @@ int main() {
         fs::remove_all(api);
     }
     fs::remove_all(root);fs::remove_all(outside);
-    puts("STEAM-CLOUD PASS: rules, paths, download policy/backup/traversal, per-file log, zip inflate+SHA-1, encrypted skip, API remote folder, upload batch/blocks/commit");
+    // ---- last-sync baseline (Known): a console that never synced a file takes
+    // the cloud copy; afterwards only the side that changed wins, and a file
+    // changed on both sides moves only when the player picks a side.
+    {   auto kroot=fs::temp_directory_path()/"steam-cloud-known";fs::remove_all(kroot);
+        Roots kroots{{"WinAppDataLocalLow",kroot}};
+        auto kdir=kroot/"Ved"/"Megabonk"/"Saves"/"CloudDir"/"1";fs::create_directories(kdir);
+        Server ks;Io kio=io;
+        kio.service=[&](auto& m,auto& r,int& e,std::string& o){return ks.service(m,r,e,o);};
+        kio.get=[&](bool,auto&,auto& path,auto&,std::string& body){body=ks.body(ks.files.at(path.substr(5)));return 200;};
+        kio.put=[&](bool,auto&,auto& path,auto&,auto& body){ks.uploads[path]=body;return 200;};
+        auto put=[&](const char* name,const std::string& data,uint64_t time){write_file(kdir/name,data);set_unix_time(kdir/name,time);};
+        Known known;
+        // Fresh local file written by the game, newer than the player's cloud save: cloud wins, local backed up.
+        ks.add("save.json","pc progress",1700000000);put("save.json","new profile",1800000000);
+        auto first=download(kio,1,kroots,false,&known);
+        assert(first.downloaded==1&&*read_file(kdir/"save.json")=="pc progress"&&*read_file(kdir/"save.json.xboxnative-backup")=="new profile");
+        assert(known.at(ks.prefix+"save.json")==sha1("pc progress"));
+        // Only the local copy changed: kept, then uploaded.
+        put("save.json","played on xbox",1800000100);
+        auto keep=download(kio,1,kroots,false,&known);assert(keep.kept==1&&keep.downloaded==0);
+        auto push=upload(kio,1,kroots,saveRules,"Xbox",0,&known);
+        assert(push.uploaded==1&&known.at(ks.prefix+"save.json")==sha1("played on xbox"));
+        // Only the cloud changed: downloaded even though the local file looks newer.
+        ks.add("save.json","played on pc",1700000000);set_unix_time(kdir/"save.json",1900000000);
+        auto pull=download(kio,1,kroots,false,&known);assert(pull.downloaded==1&&*read_file(kdir/"save.json")=="played on pc");
+        // Both changed: conflict, nothing moves either way.
+        ks.add("save.json","pc again",1700000000);put("save.json","xbox again",1900000000);
+        auto c1=download(kio,1,kroots,false,&known);auto c2=upload(kio,1,kroots,saveRules,"Xbox",0,&known);
+        assert(c1.conflict==1&&c2.conflict==1&&c2.uploaded==0&&*read_file(kdir/"save.json")=="xbox again"&&ks.files.at(ks.prefix+"save.json").data=="pc again");
+        // The player picks: the cloud copy, or this console's.
+        auto useCloud=download(kio,1,kroots,false,&known,Prefer::Cloud);
+        assert(useCloud.downloaded==1&&*read_file(kdir/"save.json")=="pc again");
+        put("save.json","xbox wins",1900000000);ks.add("save.json","pc later",1700000000);
+        auto keepXbox=upload(kio,1,kroots,saveRules,"Xbox",0,&known,Prefer::Local);
+        assert(keepXbox.uploaded==1&&ks.files.at(ks.prefix+"save.json").data=="xbox wins");
+        // Upload never replaces a cloud file this console never synced.
+        put("save.json","another console run",1900000500);
+        Known empty;auto hold=upload(kio,1,kroots,saveRules,"Xbox",0,&empty);
+        assert(hold.conflict==1&&hold.uploaded==0);
+        fs::remove_all(kroot);}
+    puts("STEAM-CLOUD PASS: rules, last-sync baseline/conflicts, paths, download policy/backup/traversal, per-file log, zip inflate+SHA-1, encrypted skip, API remote folder, upload batch/blocks/commit");
 }

@@ -8,10 +8,14 @@
 // steammessages_cloud.steamclient.proto; the flow mirrors the Steam client's
 // Auto-Cloud (and GameNative's SteamAutoCloud.kt, GPL-3.0).
 //
-// Conservative policy, never losing either side: a remote file is downloaded
-// only if missing locally or strictly newer than the local copy (a local copy
-// being replaced is kept as <name>.xboxnative-backup); a local file is uploaded
-// only if absent remotely or changed and not older than the remote copy.
+// Policy, never losing either side. Known holds, per cloud file, the SHA-1
+// both sides agreed on at the last sync on this console. A file is downloaded
+// when only the cloud changed since then, or when this console never synced it
+// (the player's existing cloud save beats a fresh local file the game wrote);
+// it is uploaded when only the local copy changed. Changed on both sides is a
+// conflict: nothing moves until the player picks a side (Prefer). A replaced
+// local copy is kept as <name>.xboxnative-backup. Without Known (tests of the
+// old rule), modification times decide as before.
 // Deletions are never propagated. Paths never leave the configured roots.
 //
 // Two kinds of cloud file: Auto-Cloud files carry a "%Root%path/" prefix and
@@ -176,7 +180,9 @@ template<class F> inline void walk(const fs::path& dir,bool recursive,F&& visit)
         for(;!ec&&it!=end;it.increment(ec)) if(!linked(it->path())) visit(*it);
     }
 }
-struct Result { unsigned downloaded=0, uploaded=0, unchanged=0, kept=0, busy=0, failed=0, newer=0; };
+struct Result { unsigned downloaded=0, uploaded=0, unchanged=0, kept=0, busy=0, failed=0, newer=0, conflict=0; };
+using Known=std::map<std::string,std::string>;   // cloud name -> SHA-1 agreed at the last sync
+enum class Prefer { Auto, Cloud, Local };          // Cloud/Local: the player's pick for conflicts
 inline Headers headers(const std::string& message,int field) {
     Headers h;
     for(auto& f:pb_parse(message)) if(f.f==field) {
@@ -191,7 +197,7 @@ inline void decided(Io& io,const char* action,const std::string& cloud,const fs:
 }
 // Before launch: bring the player's newer cloud files down. dry: only count
 // them (Result::newer), change nothing.
-inline Result download(Io& io,uint32_t appid,const Roots& roots,bool dry=false) {
+inline Result download(Io& io,uint32_t appid,const Roots& roots,bool dry=false,Known* known=nullptr,Prefer prefer=Prefer::Auto) {
     Result r;auto l=list(io,appid);if(!l.ok){++r.failed;return r;}
     for(auto& file:l.files) {
         auto prefix=l.prefix_of(file);
@@ -201,8 +207,15 @@ inline Result download(Io& io,uint32_t appid,const Roots& roots,bool dry=false) 
         auto path=local_path(roots,*prefix,file.name);
         if(!path){io.log("cloud: skipped "+cloud+" (not under a configured root)");++r.failed;continue;}
         auto local=read_file(*path);
-        if(local&&io.sha1(*local)==file.sha){decided(io,"unchanged",cloud,*path);++r.unchanged;continue;}
-        if(local&&unix_time(*path)>=file.time){decided(io,"keep-local (newer here; uploads after play)",cloud,*path);++r.kept;continue;}
+        if(local&&io.sha1(*local)==file.sha){decided(io,"unchanged",cloud,*path);if(known&&!dry)(*known)[cloud]=file.sha;++r.unchanged;continue;}
+        if(local&&!known&&unix_time(*path)>=file.time){decided(io,"keep-local (newer here; uploads after play)",cloud,*path);++r.kept;continue;}
+        if(local&&known) {
+            auto base=known->find(cloud);const bool synced=base!=known->end();
+            if(prefer==Prefer::Local){decided(io,"keep-local (the player chose this console's copy)",cloud,*path);++r.kept;continue;}
+            if(prefer==Prefer::Auto&&synced&&base->second==file.sha){decided(io,"keep-local (changed here since the last sync; uploads after play)",cloud,*path);++r.kept;continue;}
+            if(prefer==Prefer::Auto&&synced&&base->second!=io.sha1(*local)){decided(io,"conflict (changed here and in the cloud since the last sync)",cloud,*path);++r.conflict;continue;}
+            // Only the cloud changed, or this console never synced the file: the cloud copy wins.
+        }
         if(dry){decided(io,"newer-in-cloud",cloud,*path);++r.newer;continue;}
         std::string req;pb_u(req,1,appid);pb_s(req,2,cloud);pb_u(req,3,1);
         int er=0;std::string resp;
@@ -225,7 +238,7 @@ inline Result download(Io& io,uint32_t appid,const Roots& roots,bool dry=false) 
         if(io.sha1(data)!=file.sha){decided(io,"fail (SHA-1 differs from the changelist)",cloud,*path);++r.failed;continue;}
         if(local){write_file(backup_path(roots,*path),*local);}
         if(!write_file(*path,data)){decided(io,"fail (could not write)",cloud,*path);++r.failed;continue;}
-        set_unix_time(*path,file.time);++r.downloaded;
+        set_unix_time(*path,file.time);++r.downloaded;if(known)(*known)[cloud]=file.sha;
         decided(io,size!=raw?"downloaded (inflated)":"downloaded",cloud,*path);
     }
     return r;
@@ -234,7 +247,7 @@ inline Result download(Io& io,uint32_t appid,const Roots& roots,bool dry=false) 
 // quietSeconds: files modified more recently are left for a later pass, so a
 // periodic sync never uploads a save the game is still writing.
 inline Result upload(Io& io,uint32_t appid,const Roots& roots,const std::vector<Rule>& saveRules,
-                     const std::string& machine,uint64_t quietSeconds=0) {
+                     const std::string& machine,uint64_t quietSeconds=0,Known* known=nullptr,Prefer prefer=Prefer::Auto) {
     Result r;
     const uint64_t now=uint64_t(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());auto l=list(io,appid);if(!l.ok){++r.failed;return r;}
     std::map<std::string,const Remote*> remote;
@@ -265,8 +278,13 @@ inline Result upload(Io& io,uint32_t appid,const Roots& roots,const std::vector<
             if(quietSeconds&&time+quietSeconds>now){++r.busy;return;}
             auto found=remote.find(cloudName);
             if(found!=remote.end()&&found->second->persist==0) {
-                if(io.sha1(*data)==found->second->sha){++r.unchanged;return;}
-                if(time<found->second->time){decided(io,"keep-cloud (newer there)",cloudName,entry.path());++r.kept;return;} // remote is newer: keep it
+                if(io.sha1(*data)==found->second->sha){if(known)(*known)[cloudName]=found->second->sha;++r.unchanged;return;}
+                if(!known&&time<found->second->time){decided(io,"keep-cloud (newer there)",cloudName,entry.path());++r.kept;return;} // remote is newer: keep it
+                if(known&&prefer!=Prefer::Local) {
+                    auto base=known->find(cloudName);
+                    if(base==known->end()){decided(io,"hold (never synced on this console; the cloud copy is not replaced)",cloudName,entry.path());++r.conflict;return;}
+                    if(base->second!=found->second->sha){decided(io,"conflict (the cloud copy changed since the last sync)",cloudName,entry.path());++r.conflict;return;}
+                }
             }
             pending.push_back({cloudName,entry.path(),*data,time});
             decided(io,"upload",cloudName,entry.path());
@@ -302,7 +320,7 @@ inline Result upload(Io& io,uint32_t appid,const Roots& roots,const std::vector<
         std::string commit;pb_u(commit,1,ok?1:0);pb_u(commit,2,appid);pb_s(commit,3,sha);pb_s(commit,4,p.cloudName);
         int ce=0;std::string cr;bool committed=false;
         if(io.service("Cloud.ClientCommitFileUpload#1",commit,ce,cr)&&ce==1)for(auto& f:pb_parse(cr))if(f.f==1)committed=f.u!=0;
-        if(ok&&committed)++r.uploaded;else{++r.failed;all=false;decided(io,"upload failed",p.cloudName,p.path);}
+        if(ok&&committed){++r.uploaded;if(known)(*known)[p.cloudName]=sha;}else{++r.failed;all=false;decided(io,"upload failed",p.cloudName,p.path);}
     }
     std::string done;pb_u(done,1,appid);pb_u(done,2,batch);pb_u(done,3,all?1:2);
     int de=0;std::string dr;io.service("Cloud.CompleteAppUploadBatchBlocking#1",done,de,dr);
