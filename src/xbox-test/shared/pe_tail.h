@@ -41,6 +41,15 @@ static const Symbol symbols[]={
     // Path queries take no window handles (Unity's UnityPlayer imports PathFileExistsW).
     {"shlwapi.dll","PathFileExistsW"},
     {"shlwapi.dll","PathFileExistsA"},
+    // String comparisons/searches (no window handles). Haven's InControl native
+    // input plugin imports StrCmpW; without it the plugin and pad input fail.
+    {"shlwapi.dll","StrCmpW"},
+    {"shlwapi.dll","StrCmpIW"},
+    {"shlwapi.dll","StrCmpNW"},
+    {"shlwapi.dll","StrCmpNIW"},
+    {"shlwapi.dll","StrStrW"},
+    {"shlwapi.dll","StrStrIW"},
+    {"shlwapi.dll","StrChrW"},
     {"setupapi.dll","SetupDiEnumDeviceInterfaces"},
     {"setupapi.dll","SetupDiGetClassDevsA"},
     {"setupapi.dll","SetupDiGetDeviceInterfaceDetailW"},
