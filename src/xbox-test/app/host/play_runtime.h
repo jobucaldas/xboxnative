@@ -931,18 +931,70 @@ static LPTOP_LEVEL_EXCEPTION_FILTER WINAPI setGuestTopLevel(LPTOP_LEVEL_EXCEPTIO
 // a save that stalls shows where it writes. SteamIDs in paths are redacted:
 // the log may be shared.
 static std::string redactedPath(const std::string& text) { return redact::steam_ids(text); }
+// Handle -> redacted path for the most recent write-opens, so a stalled write
+// (which can only name its handle) shows which file it is on.
+struct WriteOpen {HANDLE handle;std::string path;};
+static std::mutex writeOpensM;
+static std::array<WriteOpen,64> writeOpens;
+static size_t writeOpenNext=0;
+static void rememberWriteOpen(HANDLE h,const std::string& path) {
+    std::lock_guard<std::mutex> lock(writeOpensM);
+    for(auto& open:writeOpens) if(open.handle==h){open.path=path;return;}
+    writeOpens[writeOpenNext]={h,path};writeOpenNext=(writeOpenNext+1)%writeOpens.size();
+}
+static std::string writeOpenPath(HANDLE h) {
+    std::lock_guard<std::mutex> lock(writeOpensM);
+    for(auto& open:writeOpens) if(open.handle==h)return open.path;
+    return "?";
+}
+// What the file system sees for a disk file the guest just opened for writing:
+// the resolved path, size and free space of its volume. Runs on the opening
+// thread right after the open, so no other thread is using the handle.
+static std::string diskDetail(HANDLE h,const std::wstring& requested) {
+    std::string out;
+    wchar_t final_path[1024];
+    DWORD n=GetFinalPathNameByHandleW(h,final_path,1024,VOLUME_NAME_DOS);
+    if(n&&n<1024)out+=" final="+redactedPath(narrow(final_path));
+    LARGE_INTEGER size{};
+    if(GetFileSizeEx(h,&size)){char t[48];snprintf(t,sizeof t," size=%lld",(long long)size.QuadPart);out+=t;}
+    std::wstring dir=requested;
+    size_t slash=dir.find_last_of(L"\\/");
+    if(slash!=std::wstring::npos)dir.resize(slash+1);
+    ULARGE_INTEGER avail{},total{},freeBytes{};
+    if(GetDiskFreeSpaceExW(dir.empty()?nullptr:dir.c_str(),&avail,&total,&freeBytes)){
+        char t[64];snprintf(t,sizeof t," free-mb=%llu",(unsigned long long)(avail.QuadPart>>20));out+=t;
+    }
+    return out;
+}
 static void logWriteOpen(const std::wstring& path,DWORD access,DWORD disposition,HANDLE h) {
     if(!state||!(access&(GENERIC_WRITE|FILE_WRITE_DATA|FILE_APPEND_DATA|GENERIC_ALL)))return;
-    static std::atomic<unsigned> logged{0};
-    if(logged.fetch_add(1)>=256)return;
     // The guest reads the open's last error next (ERROR_ALREADY_EXISTS after a
     // successful CREATE_ALWAYS/OPEN_ALWAYS): logging must not change it.
     const DWORD error=GetLastError();
     struct Keep {DWORD e;~Keep(){SetLastError(e);}} keep{error};
+    std::string shown=redactedPath(narrow(path));
+    if(h!=INVALID_HANDLE_VALUE)rememberWriteOpen(h,shown);
+    static std::atomic<unsigned> logged{0};
+    if(logged.fetch_add(1)>=256)return;
+    DWORD type=h==INVALID_HANDLE_VALUE?0:GetFileType(h);
     char tail[96];snprintf(tail,sizeof tail," disposition=%lu -> %s type=%lu error=%lu",(unsigned long)disposition,
-        h==INVALID_HANDLE_VALUE?"failed":"open",h==INVALID_HANDLE_VALUE?0ul:(unsigned long)GetFileType(h),(unsigned long)error);
-    state->event("guest file write-open "+redactedPath(narrow(path))+tail);
+        h==INVALID_HANDLE_VALUE?"failed":"open",(unsigned long)type,(unsigned long)error);
+    state->event("guest file write-open "+shown+tail+(type==FILE_TYPE_DISK?diskDetail(h,path):std::string()));
 }
+// A guest WriteFile that stalls (see kernel32_core::write_guard) is logged
+// with its file; a cancelled one is reported so the failed save is explained.
+static void guestWriteStall(const kernel32_core::WriteStall& e) {
+    if(!state)return;
+    static std::atomic<unsigned> logged{0};
+    if(logged.fetch_add(1)>=32)return;
+    char tail[160];
+    snprintf(tail,sizeof tail," %lums size=%lu done=%lu type=%s%s",(unsigned long)e.elapsed_ms,(unsigned long)e.size,(unsigned long)e.done,
+        e.disk?"disk":"other",e.cancelled?(e.cancel_error?" cancel failed":" cancelled (ERROR_OPERATION_ABORTED to the game)"):"");
+    std::string line="guest WriteFile stalled on "+writeOpenPath(e.file)+tail;
+    if(e.cancelled&&e.cancel_error){char t[32];snprintf(t,sizeof t," error=%lu",(unsigned long)e.cancel_error);line+=t;}
+    state->event(line);
+}
+[[maybe_unused]] static const bool writeGuardHooked=(kernel32_core::write_guard().hook=guestWriteStall,true);
 static HANDLE WINAPI guestCreateFileW(LPCWSTR path,DWORD access,DWORD share,LPSECURITY_ATTRIBUTES security,DWORD disposition,DWORD flags,HANDLE templateFile) {
     HANDLE h=kernel32_core::create_file_w(path,access,share,security,disposition,flags,templateFile);
     if(path)logWriteOpen(path,access,disposition,h);
