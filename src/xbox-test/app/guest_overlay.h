@@ -168,16 +168,21 @@ inline bool patch(void** slot,void* hook,void** original) {
     DWORD old;if(!VirtualProtect(slot,sizeof(void*),PAGE_READWRITE,&old))return false;
     *original=*slot;*slot=hook;VirtualProtect(slot,sizeof(void*),old,&old);return true;
 }
-// ResizeBuffers is observed only, for the frame log. Unity's resize asks for the
-// frame-latency waitable flag the chain was created without and fails with
-// E_INVALIDARG, leaving the 3-buffer chain as created; the game runs on. A
-// successful resize (flag stripped) crashed in d3d11 on the console: follow-up.
+// ResizeBuffers keeps the chain as the launcher created it: the guest chain has
+// no frame-latency waitable object (main.cpp strips it), and DXGI fails a resize
+// whose flags add it (E_INVALIDARG). Unity asks for it on every resize; left
+// failing, the chain kept its first size (Slime Rancher: an 800x600 chain under
+// a 1920x1080 game, the menu drawn zoomed). Same rule for the buffer count:
+// at least the three the chain was created with (0 keeps the current count).
 using ResizeFn=HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*,UINT,UINT,UINT,DXGI_FORMAT,UINT);
 inline ResizeFn realResize=nullptr;
 inline std::atomic<unsigned> resizes{0};inline std::atomic<unsigned> lastResizeCount{0};inline std::atomic<long> lastResizeHr{0};
+inline std::atomic<unsigned> lastResizeW{0},lastResizeH{0};
+inline UINT resize_flags(UINT flags){return flags&~UINT(DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);}
+inline UINT resize_count(UINT count){return count==0?0:std::max<UINT>(count,3);}
 inline HRESULT STDMETHODCALLTYPE resize(IDXGISwapChain* c,UINT count,UINT w,UINT h,DXGI_FORMAT f,UINT flags) {
-    HRESULT hr=realResize(c,count,w,h,f,flags);
-    ++resizes;lastResizeCount=count;lastResizeHr=hr;return hr;
+    HRESULT hr=realResize(c,resize_count(count),w,h,f,resize_flags(flags));
+    ++resizes;lastResizeCount=count;lastResizeW=w;lastResizeH=h;lastResizeHr=hr;return hr;
 }
 // IDXGISwapChain::Present is slot 8, ResizeBuffers 13; IDXGISwapChain1::Present1 22.
 inline bool install(IDXGISwapChain1* chain) {

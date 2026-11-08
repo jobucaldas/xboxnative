@@ -832,9 +832,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         std::vector<double> v;double sum=0,present=0;unsigned over25=0,over50=0;
         for(auto& x:m_frameWindow){v.push_back(x.frameMs);sum+=x.frameMs;present+=x.presentMs;over25+=x.frameMs>25;over50+=x.frameMs>50;}
         std::sort(v.begin(),v.end());
-        logf("frames: n=%zu avg=%.1fms p50=%.1f p99=%.1f max=%.1f >25ms=%u >50ms=%u present_avg=%.1fms resizes=%u (last count=%u hr=0x%08lx)",v.size(),sum/v.size(),
+        logf("frames: n=%zu avg=%.1fms p50=%.1f p99=%.1f max=%.1f >25ms=%u >50ms=%u present_avg=%.1fms resizes=%u (last %ux%u count=%u hr=0x%08lx)",v.size(),sum/v.size(),
              v[v.size()/2],v[std::min(v.size()-1,v.size()*99/100)],v.back(),over25,over50,present/v.size(),
-             guest_overlay::resizes.load(),guest_overlay::lastResizeCount.load(),(unsigned long)guest_overlay::lastResizeHr.load());
+             guest_overlay::resizes.load(),guest_overlay::lastResizeW.load(),guest_overlay::lastResizeH.load(),guest_overlay::lastResizeCount.load(),(unsigned long)guest_overlay::lastResizeHr.load());
         m_frameWindow.clear();
     }
     void menu_command(const std::string& c,const char* via) {
