@@ -2,6 +2,8 @@
 #include <windows.h>
 #include <xinput.h>
 #include <array>
+#include <atomic>
+#include <cstdio>
 #include <mutex>
 #include <functional>
 #include <cstring>
@@ -25,6 +27,17 @@ struct Slot {
     Rumble rumble;
 };
 inline std::array<Slot,4> slots;
+// Optional diagnostics sink (the launcher's guest log). Each distinct (call,
+// slot, result) is reported once, so a console log shows whether the guest ever
+// polls the emulated XInput and what it was told, without a line per frame.
+inline void (*note)(const char*)=nullptr;
+inline void trace(bool set,DWORD index,DWORD result) {
+    if(!note || index>=slots.size())return;
+    static std::atomic<unsigned> seen[2]{};
+    const unsigned bit=1u<<(index*3+(result==ERROR_SUCCESS?0:result==ERROR_DEVICE_NOT_CONNECTED?1:2));
+    if(seen[set].fetch_or(bit)&bit)return;
+    char line[96];snprintf(line,sizeof line,"XINPUT XInput%sState slot=%lu result=%lu (first)",set?"Set":"Get",static_cast<unsigned long>(index),static_cast<unsigned long>(result));note(line);
+}
 inline std::mutex mutex;
 inline bool enabled=true;
 inline bool active=true;
@@ -46,7 +59,7 @@ inline void publish(unsigned index,const XINPUT_GAMEPAD* pad,Rumble rumble={}) {
     else if(!equal(slot.state.Gamepad,visible))++slot.state.dwPacketNumber;
     slot.state.Gamepad=visible;slot.rumble=std::move(rumble);
 }
-inline DWORD WINAPI get_state(DWORD index,XINPUT_STATE* state) {
+inline DWORD get_state_locked(DWORD index,XINPUT_STATE* state) {
     if(index>=slots.size() || !state)return ERROR_BAD_ARGUMENTS;
     std::lock_guard<std::mutex> lock(mutex);
     if(!slots[index].connected)return ERROR_DEVICE_NOT_CONNECTED;
@@ -54,7 +67,12 @@ inline DWORD WINAPI get_state(DWORD index,XINPUT_STATE* state) {
     state->Gamepad.wButtons&=~WORD(0x0400); // Guide is not exposed by GetState.
     return ERROR_SUCCESS;
 }
-inline DWORD WINAPI set_state(DWORD index,XINPUT_VIBRATION* vibration) {
+inline DWORD WINAPI get_state(DWORD index,XINPUT_STATE* state) {
+    DWORD result=get_state_locked(index,state);
+    trace(false,index,result); // after the slot lock: note() may log
+    return result;
+}
+inline DWORD set_state_locked(DWORD index,XINPUT_VIBRATION* vibration) {
     if(index>=slots.size() || !vibration)return ERROR_BAD_ARGUMENTS;
     std::lock_guard<std::mutex> lock(mutex);
     auto& slot=slots[index];
@@ -63,6 +81,11 @@ inline DWORD WINAPI set_state(DWORD index,XINPUT_VIBRATION* vibration) {
     if(!enabled || !active){slot.vibration=*vibration;return ERROR_SUCCESS;}
     DWORD result=slot.rumble(vibration->wLeftMotorSpeed,vibration->wRightMotorSpeed);
     if(!result)slot.vibration=*vibration;
+    return result;
+}
+inline DWORD WINAPI set_state(DWORD index,XINPUT_VIBRATION* vibration) {
+    DWORD result=set_state_locked(index,vibration);
+    trace(true,index,result);
     return result;
 }
 // Called under mutex when either guest feedback policy or CoreWindow focus
@@ -117,10 +140,15 @@ inline const char* ordinal_name(const char* dll,WORD ordinal) {
     default: return nullptr;
     }
 }
+// Every name under which a guest can reach the XInput API. Play serves all of
+// them from the emulation: the console's own XInput never sees the pads.
+inline bool handles(const char* dll) {
+    return dll && (!_stricmp(dll,"xinput1_4.dll") || !_stricmp(dll,"xinput1_3.dll") ||
+        !_stricmp(dll,"xinput9_1_0.dll"));
+}
 inline uintptr_t resolve(const char* dll,const char* name,WORD ordinal=0) {
     if(!name)name=ordinal_name(dll,ordinal);
-    if(!dll || !name || (_stricmp(dll,"xinput1_4.dll") && _stricmp(dll,"xinput1_3.dll") &&
-        _stricmp(dll,"xinput9_1_0.dll")))return 0;
+    if(!handles(dll) || !name)return 0;
     if(!strcmp(name,"XInputGetState"))return reinterpret_cast<uintptr_t>(&get_state);
     if(!strcmp(name,"XInputSetState"))return reinterpret_cast<uintptr_t>(&set_state);
     if(!strcmp(name,"XInputGetCapabilities"))return reinterpret_cast<uintptr_t>(&capabilities);

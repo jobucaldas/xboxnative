@@ -105,6 +105,10 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     // new game needs no per-title table (default_system_dll).
     if(!strcmp(kind,"unclassified") && default_system_dll(key)) kind="system";
     uintptr_t address=kernel32_core::resolve(dll,name);
+    // XInput is Play's WGI emulation. Take it before the system route below, which
+    // would otherwise load the console's own xinput1_4 (blind to pads on UWP) as a
+    // side effect of any static import, e.g. the Steam API provider's.
+    if(!address) address=xinput_core::resolve(dll,name,ordinal);
     // The console refuses HKCU writes (ERROR_ACCESS_DENIED): Unity PlayerPrefs and
     // other guests use the uwph registry (LocalState\registry.sqlite) instead.
     if(!address && name && key=="advapi32.dll") address=regb::lookup(name);
@@ -127,7 +131,6 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
         else if(name) for(auto& b:wxl::builtins) if(!_stricmp(dll,b.dll)&&!strcmp(name,b.name)) address=b.address;
     }
     if(auto audio=audio_routes::resolve(dll,name)) address=audio;
-    if(auto input=xinput_core::resolve(dll,name,ordinal)) address=input;
     if(auto core=user32_core::resolve(dll,name)) address=core;
     if(!address) address=imm32_core::resolve(dll,name, reinterpret_cast<imm32_core::IsWindow>(
         user32_core::resolve("user32.dll","IsWindow")));
