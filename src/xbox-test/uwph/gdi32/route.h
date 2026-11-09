@@ -72,6 +72,7 @@ inline uintptr_t resolve(const char* dll, const char* name, DeviceCaps device_ca
         {"DeleteObject", reinterpret_cast<uintptr_t>(&delete_object)},
         {"SetPixel", reinterpret_cast<uintptr_t>(&set_pixel)},
         {"BitBlt", reinterpret_cast<uintptr_t>(&bit_blt)},
+        {"StretchBlt", reinterpret_cast<uintptr_t>(&stretch_blt)},
         {"CreateSolidBrush", reinterpret_cast<uintptr_t>(&create_solid_brush)},
         {"GetStockObject", reinterpret_cast<uintptr_t>(&get_stock_object)},
         {"CreateFontIndirectW", reinterpret_cast<uintptr_t>(&create_font_indirect_w)},

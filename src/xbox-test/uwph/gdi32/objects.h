@@ -168,6 +168,21 @@ inline BOOL WINAPI bit_blt(HDC dst,int x,int y,int w,int h,HDC src,int sx,int sy
     }
     return TRUE;
 }
+// SRCCOPY between memory DCs, scaled by nearest neighbour (what a 1:1 blit
+// between equal sizes degenerates to). Mesa's dzn WSI imports it for its
+// software swap-chain path; a window DC has no surface here, as with BitBlt.
+inline BOOL WINAPI stretch_blt(HDC dst,int x,int y,int w,int h,HDC src,int sx,int sy,int sw,int sh,DWORD rop) {
+    std::lock_guard<std::recursive_mutex> l(objectsM);
+    auto d=dc_bitmap(dst),s=dc_bitmap(src);
+    if(!d||!s||rop!=SRCCOPY||w<=0||h<=0||sw<=0||sh<=0){SetLastError(ERROR_NOT_SUPPORTED);return FALSE;}
+    for(int j=0;j<h;++j)for(int i=0;i<w;++i) {
+        int dx=x+i,dy=y+j,px=sx+i*sw/w,py=sy+j*sh/h;
+        if(dx<0||dy<0||dx>=d->width||dy>=d->height||px<0||py<0||px>=s->width||py>=s->height)continue;
+        int dr=d->topDown?dy:d->height-1-dy,sr=s->topDown?py:s->height-1-py;
+        ((DWORD*)(d->bits+size_t(dr)*d->stride))[dx]=((const DWORD*)(s->bits+size_t(sr)*s->stride))[px];
+    }
+    return TRUE;
+}
 
 // The UWP SDK hides DIBSECTION: its documented Win64 layout.
 struct DibSection { BITMAP dsBm; BITMAPINFOHEADER dsBmih; DWORD dsBitfields[3]; HANDLE dshSection; DWORD dsOffset; };
