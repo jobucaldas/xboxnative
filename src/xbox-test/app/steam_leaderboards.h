@@ -200,29 +200,38 @@ inline bool write_cache(const fs::path& path, const std::vector<Entry>& entries)
 // file so the game reads real players on its next (or current) Find. `create`
 // mirrors the API call the game made: only FindOrCreateLeaderboard may create.
 struct Fetch { bool ok = false; Board board; std::vector<Entry> entries; };
-inline Fetch fetch(Io& io, uint32_t appid, const std::string& name, int sort, int display, bool create) {
-    Fetch out;
+// One FindOrCreateLB request. `board.found` is the only verdict: a board Steam
+// has is addressable from here on, even if its rows do not arrive.
+inline Board find_board(Io& io, uint32_t appid, const std::string& name, int sort, int display, bool create) {
     std::string resp;
     if (!io.call(ClientLBSFindOrCreateLB, appid, find_body(appid, name, sort, display, create), resp)) {
         io.log("leaderboards: '" + name + "' request failed (transport)");
-        return out;
+        return Board{};
     }
-    out.board = parse_find(resp, 2);
-    if (!out.board.found) {
-        io.log("leaderboards: '" + name + "' unavailable (eresult " + std::to_string(out.board.eresult) + ")");
-        return out;
-    }
-    resp.clear();
-    if (!io.call(ClientLBSGetLBEntries, appid, entries_body(appid, out.board.id, DataGlobal, 1, SeedEntries), resp)) {
+    auto board = parse_find(resp, 2);
+    if (!board.found) io.log("leaderboards: '" + name + "' unavailable (eresult " + std::to_string(board.eresult) + ")");
+    return board;
+}
+// One GetLBEntries request for a board whose id is already known.
+inline bool fetch_rows(Io& io, uint32_t appid, const std::string& name, int32_t id,
+                       std::vector<Entry>& entries, int32_t& count) {
+    std::string resp;
+    if (!io.call(ClientLBSGetLBEntries, appid, entries_body(appid, id, DataGlobal, 1, SeedEntries), resp)) {
         io.log("leaderboards: '" + name + "' rows request failed (transport)");
-        return out;
+        return false;
     }
-    int32_t count = 0;
-    if (!parse_entries(resp, 2, out.entries, count)) {
+    if (!parse_entries(resp, 2, entries, count)) {
         io.log("leaderboards: '" + name + "' rows unavailable");
-        return out;
+        return false;
     }
-    out.ok = true;
+    return true;
+}
+inline Fetch fetch(Io& io, uint32_t appid, const std::string& name, int sort, int display, bool create) {
+    Fetch out;
+    out.board = find_board(io, appid, name, sort, display, create);
+    if (!out.board.found) return out;
+    int32_t count = 0;
+    out.ok = fetch_rows(io, appid, name, out.board.id, out.entries, count);
     return out;
 }
 inline Score upload(Io& io, uint32_t appid, int32_t id, int32_t score, const int32_t* details, int count, int method) {
@@ -244,6 +253,9 @@ struct Bridge {
     // name -> Steam leaderboard id. -1: asked, and Steam had nothing (or the
     // request failed), so do not ask again this launch.
     std::map<std::string, int32_t> ids;
+    // Names whose rows are in the provider's cache file. Kept apart from `ids`
+    // because a board can be known while its rows never arrived.
+    std::map<std::string, bool> seeded;
     // Serialises seeds: the check and the round trip must not interleave, and
     // the caller's own lock must not be held across the network wait.
     std::mutex m;
@@ -254,20 +266,28 @@ struct Bridge {
         if (name.empty()) return false;
         std::lock_guard<std::mutex> lock(m);
         auto known = ids.find(name);
-        if (known != ids.end()) return known->second > 0;
-        auto got = fetch(io, appid, name, sort, display, create);
-        if (!got.ok) { ids[name] = -1; return false; }
+        if (known != ids.end()) {
+            auto rows = seeded.find(name);
+            return rows != seeded.end() && rows->second;
+        }
+        auto board = find_board(io, appid, name, sort, display, create);
+        if (!board.found) { ids[name] = -1; return false; }
+        // The board exists on Steam, so its id is kept even when the rows do
+        // not arrive: a score for it can still be uploaded this launch.
+        ids[name] = board.id;
+        std::vector<Entry> entries; int32_t count = 0;
+        bool rows = fetch_rows(io, appid, name, board.id, entries, count);
         bool stored = false;
-        if (!got.entries.empty()) {
+        if (rows && !entries.empty()) {
             auto path = cache_path(savesRoot, appid, name);
-            stored = path && write_cache(*path, got.entries);
+            stored = path && write_cache(*path, entries);
             if (!stored) io.log("leaderboards: '" + name + "' rows could not be stored");
         }
-        ids[name] = got.board.id;
+        seeded[name] = stored;
         char line[240];
         snprintf(line, sizeof line, "leaderboards: '%s' seeded %zu rows (id %d, %d on Steam, file %s)",
-                 name.c_str(), got.entries.size(), got.board.id, got.board.count,
-                 stored ? "written" : (got.entries.empty() ? "empty" : "failed"));
+                 name.c_str(), entries.size(), board.id, board.count,
+                 stored ? "written" : (rows ? "empty" : "unavailable"));
         io.log(line);
         return stored;
     }
@@ -286,6 +306,6 @@ struct Bridge {
         io.log(line);
         return true;
     }
-    void reset() { std::lock_guard<std::mutex> lock(m); ids.clear(); }
+    void reset() { std::lock_guard<std::mutex> lock(m); ids.clear(); seeded.clear(); }
 };
 } // namespace steam_leaderboards

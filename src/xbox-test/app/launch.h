@@ -423,7 +423,10 @@ static void leaderboard_tap_upload(const std::string& name,int32_t score,const i
     { std::lock_guard<std::mutex> l(g_leaderboards.m);
       if(!g_leaderboards.appid) return;
       session = g_leaderboards.session; appid = g_leaderboards.appid; }
-    if(!session || !session->up) return;
+    // As with the seed, the keeper may have replaced the connection since the
+    // launch began; the score belongs to the account, not to one socket.
+    if(!session || !session->up || session->anon) session = user_session();
+    if(!session || !session->up || session->anon) return;
     auto io = leaderboard_io(session);
     g_leaderboards.bridge.upload(io,appid,name,score,details,count,method);
 }

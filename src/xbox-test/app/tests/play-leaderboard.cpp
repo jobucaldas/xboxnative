@@ -18,6 +18,7 @@ STEAM_API uint64_t __cdecl SteamAPI_ISteamUserStats_DownloadLeaderboardEntries(v
 STEAM_API int __cdecl SteamAPI_ISteamUserStats_GetDownloadedLeaderboardEntry(void*, uint64_t, int, void*, int32_t*, int);
 STEAM_API uint64_t __cdecl SteamAPI_ISteamUserStats_UploadLeaderboardScore(void*, uint64_t, int, int32_t, const int32_t*, int);
 STEAM_API const char* __cdecl PlayLeaderboardTrace(void);
+STEAM_API uint64_t __cdecl PlayLeaderboardCallBoard(uint64_t call);
 
 namespace {
 struct Entry { uint64_t user; int32_t rank, score, details; uint64_t ugc; };
@@ -40,8 +41,13 @@ void* lb_relocation = &lb_anchor;
 
 DWORD lb_entry() {
     // The board the game asks for by FindLeaderboard: the launcher seeds it.
-    uint64_t kills = SteamAPI_ISteamUserStats_FindLeaderboard(nullptr, "v2_kills");
-    if (!kills) return 12;
+    // Find answers a SteamAPICall_t; the board handle arrives in
+    // LeaderboardFindResult_t, and that is what Download/Upload take.
+    uint64_t call = SteamAPI_ISteamUserStats_FindLeaderboard(nullptr, "v2_kills");
+    if (!call) return 12;
+    uint64_t kills = PlayLeaderboardCallBoard(call);
+    if (!kills) return 21;
+    if (kills == call) return 22;   // the fixture must keep the two distinct
     // The first Find read the file the launcher wrote before answering.
     if (!contains(PlayLeaderboardTrace(), "v2_kills=3;")) return 13;
     int rows = int(SteamAPI_ISteamUserStats_DownloadLeaderboardEntries(nullptr, kills, 0 /*Global*/, 1, 100));
@@ -53,12 +59,15 @@ DWORD lb_entry() {
 
     // A board this launch never seeded: the provider reads nothing, so the game
     // sees the empty board it saw before the bridge existed.
-    uint64_t empty = SteamAPI_ISteamUserStats_FindOrCreateLeaderboard(nullptr, "v2_unseeded", 2, 1);
-    if (!empty) return 17;
+    uint64_t emptyCall = SteamAPI_ISteamUserStats_FindOrCreateLeaderboard(nullptr, "v2_unseeded", 2, 1);
+    if (!emptyCall) return 17;
+    uint64_t empty = PlayLeaderboardCallBoard(emptyCall);
+    if (!empty) return 23;
     if (contains(PlayLeaderboardTrace(), "v2_unseeded=3;")) return 18;
     if (SteamAPI_ISteamUserStats_DownloadLeaderboardEntries(nullptr, empty, 0, 1, 100) != 0) return 19;
 
-    // A score goes to the board the game found; the launcher forwards it to
+    // A score goes to the board the game found; the launcher resolves that
+    // board handle back to its name through the provider and forwards it to
     // Steam after the provider answered.
     int32_t details[] = {4, 2};
     SteamAPI_ISteamUserStats_UploadLeaderboardScore(nullptr, kills, 1 /*KeepBest*/, 2000, details, 2);

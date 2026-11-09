@@ -37,6 +37,7 @@ extern "C" void* memcpy(void* d, const void* s, size_t n) {
 #define MAX_ENTRIES 64
 #define MAX_DETAILS 8
 #define MAX_WORDS 1024
+#define MAX_CALLS 16
 
 typedef struct { uint64_t steamid; int32_t score; int32_t details[MAX_DETAILS]; int32_t count; } Entry;
 typedef struct { char name[128]; int entries; Entry rows[MAX_ENTRIES]; } Board;
@@ -126,16 +127,30 @@ static Board* find(const char* name) {
 extern "C" {
 __declspec(dllexport) int __cdecl SteamAPI_Init(void) { return 1; }
 
+// Like gbe_fork: Find answers with a SteamAPICall_t, and the board handle is
+// delivered separately in LeaderboardFindResult_t. The two are different
+// values on purpose, so a launcher that keys uploads off the call id fails.
+static uint64_t nextCall = 100;
+static uint64_t callBoard[MAX_CALLS];
+
 // SteamLeaderboard_t is an index into the provider's own cache, 1-based.
 __declspec(dllexport) uint64_t __cdecl SteamAPI_ISteamUserStats_FindLeaderboard(void* self, const char* name) {
     (void)self;
     if (!name || !*name) return 0;
     if (!find(name)) return 0;
-    return (uint64_t)boardCount;
+    if (nextCall >= 100 + MAX_CALLS) return 0;
+    callBoard[nextCall - 100] = (uint64_t)boardCount;
+    return nextCall++;
 }
 __declspec(dllexport) uint64_t __cdecl SteamAPI_ISteamUserStats_FindOrCreateLeaderboard(void* self, const char* name, int sort, int display) {
     (void)sort; (void)display;
     return SteamAPI_ISteamUserStats_FindLeaderboard(self, name);
+}
+// The handle the game passes back to Download/Upload, as the CallResult gave it.
+__declspec(dllexport) const char* __cdecl SteamAPI_ISteamUserStats_GetLeaderboardName(void* self, uint64_t board) {
+    (void)self;
+    if (board == 0 || board > (uint64_t)boardCount) return "";
+    return boards[board - 1].name;
 }
 __declspec(dllexport) uint64_t __cdecl SteamAPI_ISteamUserStats_DownloadLeaderboardEntries(void* self, uint64_t board, int request, int start, int end) {
     (void)self; (void)request;
@@ -167,6 +182,13 @@ __declspec(dllexport) uint64_t __cdecl SteamAPI_ISteamUserStats_UploadLeaderboar
     (void)self; (void)method; (void)score; (void)details; (void)count;
     append("upload="); appendInt((int)board); append(";");
     return 1;
+}
+// Test-only: what LeaderboardFindResult_t.m_hSteamLeaderboard carries for the
+// call Find returned. The fixture guest has no CallResult plumbing, so it reads
+// the handle here; a real game gets it from the callback.
+__declspec(dllexport) uint64_t __cdecl PlayLeaderboardCallBoard(uint64_t call) {
+    if (call < 100 || call >= 100 + MAX_CALLS) return 0;
+    return callBoard[call - 100];
 }
 // Test-only: what the provider read, so the guest can assert the seed landed
 // before the first Find and that the rows are the ones Steam sent.

@@ -223,6 +223,38 @@ int main() {
         fs::remove_all(root2);
     }
 
+    // ---- a board Steam has, whose rows do not arrive
+    // The board is still addressable: the id from FindOrCreateLB is kept, so a
+    // score for it is uploaded rather than silently dropped for the launch.
+    {
+        Server s3;
+        s3.ensure(3405340, "v2_rows_lost", SortDescending, true);
+        int32_t id3 = s3.ids["3405340/v2_rows_lost"];
+        Io io3;
+        io3.call = [&](uint32_t emsg, uint32_t routing, const std::string& body, std::string& resp) {
+            // The rows request times out; the find answers normally.
+            if (emsg == ClientLBSGetLBEntries) return false;
+            return s3.call(emsg, routing, body, resp);
+        };
+        std::vector<std::string> lines;
+        io3.log = [&](const std::string& line) { lines.push_back(line); };
+        fs::path root3 = fs::temp_directory_path() / "xbn-leaderboards-rows-lost";
+        fs::remove_all(root3);
+        Bridge bridge;
+        assert(!bridge.seed(io3, 3405340, root3, "v2_rows_lost", SortDescending, DisplayNumeric, false));
+        assert(!cache_path(root3, 3405340, "v2_rows_lost") || !fs::exists(*cache_path(root3, 3405340, "v2_rows_lost")));
+        bool told = false;
+        for (auto& l : lines) if (l.find("'v2_rows_lost' seeded 0 rows (id " + std::to_string(id3)) != std::string::npos) told = true;
+        assert(told);
+        int32_t mine3[] = {3};
+        assert(bridge.upload(io3, 3405340, "v2_rows_lost", 2500, mine3, 1, UploadKeepBest));
+        assert(s3.sets == 1);
+        // The second seed does not ask again: the board is already known.
+        assert(!bridge.seed(io3, 3405340, root3, "v2_rows_lost", SortDescending, DisplayNumeric, false));
+        assert(s3.finds == 1);
+        fs::remove_all(root3);
+    }
+
     // ---- transport failure is reported, never thrown
     Io dead;
     dead.call = [](uint32_t, uint32_t, const std::string&, std::string&) { return false; };

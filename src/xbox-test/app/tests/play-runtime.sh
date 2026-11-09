@@ -97,7 +97,9 @@ EXPORTS
  SteamAPI_ISteamUserStats_DownloadLeaderboardEntries
  SteamAPI_ISteamUserStats_GetDownloadedLeaderboardEntry
  SteamAPI_ISteamUserStats_UploadLeaderboardScore
+ SteamAPI_ISteamUserStats_GetLeaderboardName
  PlayLeaderboardTrace
+ PlayLeaderboardCallBoard
 DEF
 llvm-dlltool-19 -m i386:x86-64 -d "$out/obj/steam-api.def" -l "$out/obj/steam-api.lib"
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -c tests/play-leaderboard-provider.cpp -o "$out/obj/leaderboard-provider.obj"

@@ -143,9 +143,9 @@ cache file as the delivery surface:
    already uses (`play_runtime::steamApiExport`).
 2. On the game's `Find`, **before** the provider is called, the launcher asks
    Steam for the board and its top rows over its own `CmSession`:
-   `CMsgClientLBSFindOrCreateLB` (5414) → `CMsgClientLBSFindOrCreateLBResponse`
-   (5415), then `CMsgClientLBSGetLBEntries` (5416) →
-   `...GetLBEntriesResponse` (5417), with the header's `routing_appid` set to the
+   `CMsgClientLBSFindOrCreateLB` (5416) → `CMsgClientLBSFindOrCreateLBResponse`
+   (5417), then `CMsgClientLBSGetLBEntries` (5418) →
+   `...GetLBEntriesResponse` (5419), with the header's `routing_appid` set to the
    game's app id.
 3. It writes the rows into the provider's own leaderboard file in the provider's
    own format — flat little-endian `uint32`: steam id low, steam id high, score,
@@ -155,21 +155,26 @@ cache file as the delivery surface:
    runs, still receives the provider's handle, and no game or Valve file is
    touched.
 5. On `UploadLeaderboardScore`, after the provider answers, the launcher sends
-   `CMsgClientLBSSetScore` (5418) with the board id the seed learned and the
+   `CMsgClientLBSSetScore` (5414) with the board id the seed learned and the
    game's own upload method (keep-best / force-update), so the player's score
-   reaches their real account.
+   reaches their real account. The board is identified by asking the provider
+   itself (`GetLeaderboardName`) what the handle the game passed names: `Find`
+   returns a `SteamAPICall_t`, while the game uploads with the `SteamLeaderboard_t`
+   from `LeaderboardFindResult_t`, and the two are different values.
 
 The ordering is the whole design: a background fetch after the Find can never be
 seen, because the provider never re-reads the file. The seed therefore runs on
 the game's thread, bounded by a 3 s CM timeout per request, and only once per
 board per launch (a board Steam does not have is remembered as such and not
-asked again).
+asked again). A board Steam *does* have keeps its id even when the rows request
+fails, so a score for it is still uploaded that launch; only the rank list is
+missing.
 
 | EMsg | Message | Fields used |
 |---:|---|---|
-| 5414 / 5415 | `CMsgClientLBSFindOrCreateLB` / `...Response` | request `app_id[1]`, `leaderboard_sort_method[2]`, `leaderboard_display_type[3]`, `create_if_not_found[4]`, `leaderboard_name[5]`; response `eresult[1]`, `leaderboard_id[2]`, `leaderboard_entry_count[3]`, `leaderboard_sort_method[4]`, `leaderboard_display_type[5]`, `leaderboard_name[6]` |
-| 5416 / 5417 | `CMsgClientLBSGetLBEntries` / `...Response` | request `app_id[1]`, `leaderboard_id[2]`, `range_start[3]`, `range_end[4]`, `leaderboard_data_request[5]`; response `eresult[1]`, `leaderboard_entry_count[2]`, `entries[3]` (`steam_id[1]`, `global_rank[2]`, `score[3]`, `score_details[4]`) |
-| 5418 / 5419 | `CMsgClientLBSSetScore` / `...Response` | request `app_id[1]`, `leaderboard_id[2]`, `score[3]`, `score_details[4]`, `upload_score_method[5]`; response `eresult[1]`, `leaderboard_entry_count[2]`, `score_changed[3]`, `global_rank_previous[4]`, `global_rank_new[5]` |
+| 5416 / 5417 | `CMsgClientLBSFindOrCreateLB` / `...Response` | request `app_id[1]`, `leaderboard_sort_method[2]`, `leaderboard_display_type[3]`, `create_if_not_found[4]`, `leaderboard_name[5]`; response `eresult[1]`, `leaderboard_id[2]`, `leaderboard_entry_count[3]`, `leaderboard_sort_method[4]`, `leaderboard_display_type[5]`, `leaderboard_name[6]` |
+| 5418 / 5419 | `CMsgClientLBSGetLBEntries` / `...Response` | request `app_id[1]`, `leaderboard_id[2]`, `range_start[3]`, `range_end[4]`, `leaderboard_data_request[5]`; response `eresult[1]`, `leaderboard_entry_count[2]`, `entries[3]` (`steam_id[1]`, `global_rank[2]`, `score[3]`, `score_details[4]`) |
+| 5414 / 5415 | `CMsgClientLBSSetScore` / `...Response` | request `app_id[1]`, `leaderboard_id[2]`, `score[3]`, `score_details[4]`, `upload_score_method[5]`; response `eresult[1]`, `leaderboard_entry_count[2]`, `score_changed[3]`, `global_rank_previous[4]`, `global_rank_new[5]` |
 
 **What this does not do.** The board names are a hypothesis until a console run
 shows them. `FindOrCreateLeaderboard` with `create=false` (which is what
