@@ -371,6 +371,8 @@ static void cloud_async(uint32_t appid,const std::wstring& gameRoot,bool sync,st
         g_cloudBusy=false;
     }).detach();
 }
+// ---- Steam presence (steam_presence.h): the account shows the game to friends.
+#include "steam_presence.h"
 // ---- Steam achievements/stats for the provider-served game (steam_achievements.h)
 #include "steam_achievements.h"
 static steam_achievements::Io achievement_io(std::shared_ptr<CmSession> session) {
@@ -387,11 +389,8 @@ static steam_achievements::Io achievement_io(std::shared_ptr<CmSession> session)
 static void games_played(uint32_t appid) {
     auto session=user_session();
     if(!session||session->anon)return;
-    if(appid){std::string status;pb_u(status,1,1);session->send_raw(716,status,0,"");}   // ClientChangeStatus: k_EPersonaStateOnline
-    std::string body;
-    if(appid){std::string game;pb_fixed64(game,2,appid);pb_s(body,1,game);}
-    pb_u(body,2,20);   // client_os_type, as in ClientLogon (Windows 11)
-    session->send_raw(5410,body,0,""); // ClientGamesPlayedWithDataBlob
+    if(appid){session->send_raw(steam_presence::ClientChangeStatus,steam_presence::change_status_body(),0,"");}
+    session->send_raw(steam_presence::ClientGamesPlayedWithDataBlob,steam_presence::games_played_body(appid),0,"");
 }
 static void achievements_sync(uint32_t appid,bool store) {
     auto session=user_session();
@@ -410,6 +409,155 @@ static void achievements_sync(uint32_t appid,bool store) {
     char line[160];snprintf(line,sizeof line,"STEAM achievements: %s achievements=%zu stats=%zu unlocked=%u",
         ok?"prepared":"prepare failed",schema->achievements.size(),schema->stats.size(),unlocked);lp_sink(line);
 }
+// ---- Presence while the guest runs (steam_presence.h).
+// Steam drops "in game" and rich presence when the CM session that sent them
+// ends, and the launcher reconnects by itself after a network drop. The keeper
+// re-sends the game state on every new session, uploads the game's rich
+// presence once a burst of SetRichPresence calls settles, and answers Steam's
+// playing-session notice (another of the account's clients starting a game
+// blocks this one; saying nothing would leave friends seeing a stale game).
+// It never sends a games-played while blocked: Steam logs such a session off.
+struct PresenceKeeper {
+    std::mutex m;
+    uint32_t appid = 0;
+    steam_presence::RichPresence rp;
+    std::shared_ptr<CmSession> session;   // the session the state was last sent on
+    bool blocked = false, ended = false, warned = false;
+    std::atomic<unsigned> gen{0};         // a new launch retires the previous keeper
+};
+static PresenceKeeper g_presence;
+// `full` carries the game state (a new session: Steam forgot it); a coalesced
+// rich-presence change only uploads the key set.
+static void presence_send(std::shared_ptr<CmSession> s,uint32_t appid,const std::map<std::string,std::string>& kv,bool full) {
+    if(!s||!s->up||!appid) return;
+    if(full) {
+        s->send_raw(steam_presence::ClientChangeStatus,steam_presence::change_status_body(),0,"");
+        s->send_raw(steam_presence::ClientGamesPlayedWithDataBlob,steam_presence::games_played_body(appid),0,"");
+    }
+    if(!kv.empty()) s->send_raw(steam_presence::ClientRichPresenceUpload,
+        steam_presence::rich_presence_upload_body(kv),0,"",appid);
+}
+// The game's SetRichPresence/ClearRichPresence, observed from the game's thread
+// (play_runtime::set_rich_presence_tap). Only the key/value set is kept here.
+static void presence_tap_set(const std::string& key,const char* value) {
+    std::lock_guard<std::mutex> l(g_presence.m);
+    if(!g_presence.appid) return;
+    g_presence.rp.set(key,value,now_s());
+}
+static void presence_tap_clear() {
+    std::lock_guard<std::mutex> l(g_presence.m);
+    if(!g_presence.appid) return;
+    g_presence.rp.clear(now_s());
+}
+// What Steam says about this session's game state: a persona-state reply to the
+// self-check below, or another client starting a game. Runs on the CM reader
+// thread, so it never blocks: the tap's lock is only taken to read state.
+static void presence_push(const JobMsg& m) {
+    if(m.emsg==steam_presence::ClientPlayingSessionState) {
+        auto ps = steam_presence::parse_playing_state(m.body);
+        bool started = false, stopped = false;
+        {
+            std::lock_guard<std::mutex> l(g_presence.m);
+            if(!g_presence.appid) return;
+            started = ps.blocked && !g_presence.blocked;
+            stopped = !ps.blocked && g_presence.blocked;
+            if(stopped) g_presence.session.reset();   // the keeper re-sends on its next pass
+            g_presence.blocked = ps.blocked;
+        }
+        if(started) {
+            char line[160];snprintf(line,sizeof line,
+                "STEAM presence: another of this account's clients started app %u; this session stops reporting the game",ps.app);
+            lp_sink(line);
+        } else if(stopped) {
+            lp_sink("STEAM presence: the other client stopped; reporting the game again");
+        }
+        return;
+    }
+    if(m.emsg!=steam_presence::ClientPersonaState) return;
+    uint64_t self = 0; { auto s = user_session(); if(s) self = s->steamid; }
+    if(!self) return;
+    auto p = steam_presence::parse_persona(m.body,self);
+    if(!p.found) return;
+    uint32_t appid = 0; { std::lock_guard<std::mutex> l(g_presence.m); appid = g_presence.appid; }
+    if(!appid) return;
+    // Steam's own view, as friends see it: online persona, this app, our keys.
+    char line[220];snprintf(line,sizeof line,"STEAM presence: Steam reports persona_state=%u game=%u name='%s' rich_presence_keys=%zu",
+        p.state,p.game_played_app_id,p.game_name.c_str(),p.rich_presence.size());
+    lp_sink(redact::steam_ids(line).c_str());
+    bool ok = p.state == steam_presence::PersonaOnline && p.game_played_app_id == appid;
+    { std::lock_guard<std::mutex> l(g_presence.m); if(ok) g_presence.warned = false; else if(g_presence.warned) return; else g_presence.warned = true; }
+    if(!ok) lp_sink("STEAM presence: Steam does not show this session as in-game (see the logon and games-played lines above)");
+}
+static void presence_start(uint32_t appid) {
+    unsigned gen;
+    {
+        std::lock_guard<std::mutex> l(g_presence.m);
+        gen = ++g_presence.gen;
+        g_presence.appid = appid; g_presence.rp.reset(appid);
+        g_presence.session.reset(); g_presence.blocked = false; g_presence.ended = false; g_presence.warned = false;
+    }
+    play_runtime::set_rich_presence_tap({[](const std::string& key,const char* value){presence_tap_set(key,value);},
+                                         []{presence_tap_clear();}});
+    // A dropped session is re-established by the main loop; the keeper sends
+    // the game state again as soon as a new one is up, and takes the Steam
+    // notifications on that new session too.
+    std::thread([gen]{
+        init_apartment(apartment_type::multi_threaded);
+        unsigned uploads = 0;
+        while(g_presence.gen.load() == gen) {
+            Sleep(500);
+            std::shared_ptr<CmSession> session; std::map<std::string,std::string> kv; uint32_t appid = 0; bool send = false, full = false;
+            {   std::lock_guard<std::mutex> l(g_presence.m);
+                if(g_presence.gen.load() != gen || !g_presence.appid || g_presence.ended) break;
+                auto now = user_session();
+                if(!now || !now->up) continue;              // reconnecting
+                if(g_presence.blocked) continue;
+                appid = g_presence.appid;
+                if(now != g_presence.session) {             // a new session: Steam forgot the game
+                    g_presence.session = now; send = full = true;
+                    now->set_push(presence_push);
+                    if(g_presence.rp.coalescer.dirty) g_presence.rp.coalescer.sent();
+                    kv = g_presence.rp.kv;
+                } else if(g_presence.rp.coalescer.ready(now_s())) {
+                    g_presence.rp.coalescer.sent(); send = true; kv = g_presence.rp.kv;
+                }
+                session = now;
+            }
+            if(!send) continue;
+            try { presence_send(session,appid,kv,full); } catch(...) { continue; }
+            if(kv.empty()) continue;
+            char line[120];snprintf(line,sizeof line,"STEAM presence: rich presence uploaded (%zu keys, #%u)",kv.size(),++uploads);lp_sink(line);
+        }
+    }).detach();
+    // Ask Steam for this account's own persona state: the only way to see from
+    // the console what friends see. Sent once the keeper has carried the game
+    // state, so the answer reflects it.
+    std::thread([gen]{
+        init_apartment(apartment_type::multi_threaded);
+        for(int i=0;i<120&&g_presence.gen.load()==gen;++i) {
+            Sleep(500);
+            auto s = user_session();
+            if(!s || s->anon || !s->steamid || !s->up) continue;
+            if(i < 20) continue;   // let the keeper carry the game state first
+            s->send_raw(steam_presence::ClientRequestFriendData,steam_presence::persona_request_body(s->steamid),0,"");
+            return;
+        }
+    }).detach();
+}
+static void presence_end() {
+    bool blocked;
+    {
+        std::lock_guard<std::mutex> l(g_presence.m);
+        ++g_presence.gen;   // retires the keeper and the self-check
+        g_presence.ended = true; g_presence.appid = 0; g_presence.session.reset();
+        blocked = g_presence.blocked;
+    }
+    play_runtime::set_rich_presence_tap({});
+    // While another of the account's clients is playing, even the empty list is
+    // a games-played message this session must not send: that other client owns
+    // the state, and Steam logs a blocked session off for sending one.
+    if(!blocked) games_played(0);
+}
 // Saves and achievements go up once, when the game ends (it quits, closes by
 // itself or is quit from the launcher menu), never while it is playing.
 static std::atomic<bool> g_finalSyncDone{false};
@@ -419,7 +567,7 @@ static void final_sync(uint32_t appid,const std::wstring& gameRoot) {
     lp_sink("STEAM sync: game ended; uploading saves and achievements");
     try{cloud_sync(appid,gameRoot,true,0);}catch(...){lp_sink("STEAM cloud upload: exception");}
     try{achievements_sync(appid,true);}catch(...){lp_sink("STEAM achievements store: exception");}
-    try{games_played(0);}catch(...){}
+    try{presence_end();}catch(...){}
 }
 // ---- Diagnostic: cmd.txt "stacks" logs every other thread's call stack to
 // launch_probe.log (module+offset via Play's guest module map). Live process
@@ -520,7 +668,7 @@ static void lp_run_impl(LpCtx& c) {
     if(steamProvider) {
         try{cloud_sync(c.appid,c.root,false,0);}catch(...){lp_sink("STEAM cloud download: exception");}
         try{achievements_sync(c.appid,false);}catch(...){lp_sink("STEAM achievements: exception");}
-        games_played(c.appid);
+        try{presence_start(c.appid);}catch(...){lp_sink("STEAM presence: keeper did not start");}
     }
     if(steamProvider){uint32_t appid=c.appid;std::wstring root=c.root;g_finalSync=[appid,root]{final_sync(appid,root);};}
     regb::init(g_dir,lp_sink); // guest registry (PlayerPrefs): LocalState\registry.sqlite

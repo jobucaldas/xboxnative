@@ -21,6 +21,7 @@
 #include <set>
 #include <memory>
 #include <condition_variable>
+#include <functional>
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
