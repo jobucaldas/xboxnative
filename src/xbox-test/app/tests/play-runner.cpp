@@ -312,9 +312,9 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         host_surface::schedulePad(logline);
         logline("HOST SURFACE native Wine window stands in for the CoreWindow (off-device only)");
     }
-    // The D3D12 fixture creates a swap chain on a guest HWND, which the launcher
-    // always maps to its CoreWindow. Give it the same stand-in.
-    if(std::string(args)=="d3d12-diag") {
+    // The D3D10 and D3D12 fixtures create a swap chain on a guest HWND, which
+    // the launcher always maps to its CoreWindow. Give them the same stand-in.
+    if(std::string(args)=="d3d10-diag"||std::string(args)=="d3d12-diag") {
         if(!host_surface::create()) {logline("HOST SURFACE FAIL native Wine window unavailable");return 3;}
         play_graphics::configure(&host_surface::token,host_surface::present,logline);
         logline("HOST SURFACE native Wine window stands in for the CoreWindow (off-device only)");
@@ -351,7 +351,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // Engine options come from the game's files, as in the launcher.
     std::wstring gameExe=L"Megabonk.exe";
     {wchar_t value[260];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_EXE",value,260);if(n&&n<260)gameExe.assign(value,n);}
-    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
+    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
     // guest stop (fatal dialog). Progress must never mask that failure.
@@ -434,6 +434,10 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     }
     else if(mode=="d3d11-diag")ok=ok&&r->finished&&r->success&&r->code==42;
     else if(mode=="d3d12-diag")ok=ok&&r->finished&&r->success&&r->code==42;
+    // The D3D10 fixture exits 42 only when the shim's device, swap chain and
+    // three presents all succeeded through Play's routes. play-runtime.sh also
+    // checks that the shim came from the runtime directory.
+    else if(mode=="d3d10-diag")ok=ok&&r->finished&&r->success&&r->code==42;
     else if(mode=="vulkan") {
         // The Khronos loader was mapped from the runtime directory, the guest
         // created an instance and got no devices (the fixture exits 42 only

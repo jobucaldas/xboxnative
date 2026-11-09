@@ -99,10 +99,6 @@
       "class": "system",
       "reason": "Native Xbox graphics passthrough per LANES \u00a71; basic devices/swap chain have console evidence, full game use remains unverified."
     },
-    "d3d9.dll": {
-      "class": "uwph",
-      "reason": "The console has d3d11.dll and dxgi.dll but no d3d9.dll, d3d10.dll, d3d10_1.dll or d3d10core.dll, so a guest importing one of them fails to load. Play ships its own shim (src/xbox-test/uwph/d3d10, built by mingw and mapped by Play's loader) in the runtime directory; its d3d11.dll!D3D11CreateDevice import reaches Play's device hook and its swapchains go through the validated CoreWindow adapter. A guest copy in the game folder is mapped first and wins."
-    },
     "dbghelp.dll": {
       "class": "stub",
       "reason": "GameAssembly directly imports SymInitialize/SymFromAddr despite LANES \u00a71 crash-handler-only claim; planned clean-failure symbolization stubs need validation."
