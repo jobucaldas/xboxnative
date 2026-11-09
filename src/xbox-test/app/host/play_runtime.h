@@ -6,6 +6,7 @@
 // Guest process APIs below expose the guest identity without rewriting the
 // launcher's PEB or installing a private segment/exception mechanism.
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <memory>
 #include <array>
@@ -399,6 +400,61 @@ static uintptr_t exported(Module& module,const char* name,WORD ordinal) {
     }
     return result;
 }
+// ---- Rich presence the game sets through the Steam API provider
+// (steam_presence.h). gbe_fork keeps the key/value set in memory and sends it
+// only to its own LAN peers, so the launcher's Steam session never sees it and
+// friends cannot read it. The provider's own SetRichPresence/ClearRichPresence
+// still run (the game reads back what it set); the launcher observes the same
+// calls here, from the game's own thread, and uploads the set to Steam.
+// This is observation, not replacement: nothing on disk changes, and the
+// provider answers the game exactly as before.
+struct RichPresenceTap {
+    std::function<void(const std::string& key,const char* value)> set;   // value NULL: the key is deleted
+    std::function<void()> clear;
+};
+static std::mutex richPresenceMutex;
+static RichPresenceTap richPresence;
+static void set_rich_presence_tap(RichPresenceTap tap) {
+    std::lock_guard<std::mutex> lock(richPresenceMutex);
+    richPresence=std::move(tap);
+}
+// The tap is copied out before it runs: it belongs to the launcher and takes
+// its own lock, which must not be held here.
+static void richPresenceSet(const std::string& key,const char* value) {
+    RichPresenceTap tap; {std::lock_guard<std::mutex> lock(richPresenceMutex);tap=richPresence;}
+    if(tap.set)tap.set(key,value);
+}
+static void richPresenceClear() {
+    RichPresenceTap tap; {std::lock_guard<std::mutex> lock(richPresenceMutex);tap=richPresence;}
+    if(tap.clear)tap.clear();
+}
+static uintptr_t richPresenceHook(const char* name,uintptr_t real) {
+    if(!real) return 0;
+    if(!strcmp(name,"SteamAPI_ISteamFriends_SetRichPresence")) {
+        using Fn=uint32_t(*)(void*,const char*,const char*);
+        static Fn inner=(Fn)real;
+        static Fn hook=[](void* self,const char* key,const char* value){uint32_t ok=inner(self,key,value);if(key)richPresenceSet(key,value);return ok;};
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamFriends_ClearRichPresence")) {
+        using Fn=void(*)(void*);
+        static Fn inner=(Fn)real;
+        static Fn hook=[](void* self){inner(self);richPresenceClear();};
+        return (uintptr_t)hook;
+    }
+    return 0;
+}
+// Every Steam API export the game binds (static imports and GetProcAddress)
+// passes here first; only the two rich-presence calls are wrapped.
+static uintptr_t steamApiExport(Module& module,const char* name,uintptr_t address) {
+    if(!address||!name||strcmp(module.key.c_str(),"steam_api64.dll")) return address;
+    if(auto hook=richPresenceHook(name,address)) {
+        if(state->log&&mlp::first_report(std::string("steam rich presence ")+name))
+            state->log((std::string("STEAM rich presence: ")+name+" observed; the set is uploaded to Steam by the launcher").c_str());
+        return hook;
+    }
+    return address;
+}
 struct ExportLookup {
     bool pending=false;
     bool* previous=pendingExportLookup;
@@ -422,7 +478,7 @@ static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
     ExportLookup lookup;
     if(auto m=find(h)) {
         WORD ordinal=IS_INTRESOURCE(name)?WORD((uintptr_t)name):0;
-        return lookup.finish(exported(*m,IS_INTRESOURCE(name)?nullptr:name,ordinal));
+        return lookup.finish(steamApiExport(*m,IS_INTRESOURCE(name)?nullptr:name,exported(*m,IS_INTRESOURCE(name)?nullptr:name,ordinal)));
     }
     // Native handles (including OS-resolved API sets/forwarders) never expose
     // the native process exports, even when GetModuleFileNameW cannot identify
@@ -1219,7 +1275,7 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     }
     if(dependency) {
         if(owner && owner!=dependency) owner->dependencies.push_back(dependency);
-        auto p=exported(*dependency,name,ordinal);return p?p:missing(dll,name,ordinal);
+        auto p=exported(*dependency,name,ordinal);return p?steamApiExport(*dependency,name,p):missing(dll,name,ordinal);
     }
     // VC++ runtime DLLs the console lacks (no game copy was found above):
     // forwarded to the console's ucrtbase, as Wine's vcruntime140 does.
@@ -1268,6 +1324,7 @@ static bool start(const std::wstring& root,const std::wstring& exe,const std::ws
 // client or ownership ticket can never reach the next game.
 static void reset_launch_config() {
     steamProvider.clear();steamClient.clear();steamClientSigned.clear();appTicket.clear();emulatedCreate=nullptr;
+    set_rich_presence_tap({});
 }
 // A launch that ended before any game code ran (no TLS callback, DllMain or
 // entry point: `executed` is set before each) left nothing executing: the

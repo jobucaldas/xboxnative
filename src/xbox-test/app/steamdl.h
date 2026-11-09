@@ -89,6 +89,11 @@ struct CmSession : std::enable_shared_from_this<CmSession> {
     CmConn conn; std::atomic<bool> up{false}, stop{false}; bool anon = false;
     uint64_t steamid = 0; int32_t sessionId = 0; int hbSec = 30; std::string host;
     std::mutex jm; std::condition_variable jcv; std::map<uint64_t, std::deque<JobMsg>> jobs; std::mutex sendm; std::atomic<uint64_t> nextJob{1};
+    // Messages Steam sends on its own (no job target): persona state, playing
+    // session state, logged off. Set before the first reply is expected.
+    std::mutex pushm; std::function<void(const JobMsg&)> push;
+    void set_push(std::function<void(const JobMsg&)> fn) { std::lock_guard<std::mutex> l(pushm); push = std::move(fn); }
+    void deliver_push(const JobMsg& m) { std::function<void(const JobMsg&)> fn; { std::lock_guard<std::mutex> l(pushm); fn = push; } if (fn) fn(m); }
 
     void reader() {
         for (;;) {
@@ -106,7 +111,7 @@ struct CmSession : std::enable_shared_from_this<CmSession> {
                     if (auto s = pb_get(hf, 1)) steamid = s->u; if (auto s = pb_get(hf, 2)) sessionId = (int32_t)s->u;
                     { std::lock_guard<std::mutex> l(jm); jobs[0].push_back(std::move(m)); } jcv.notify_all(); continue;
                 }
-                if (tgt == UINT64_MAX) continue;
+                if (tgt == UINT64_MAX) { deliver_push(m); continue; }
                 { std::lock_guard<std::mutex> l(jm); auto it = jobs.find(tgt); if (it != jobs.end()) it->second.push_back(std::move(m)); }
                 jcv.notify_all();
             }
@@ -120,8 +125,9 @@ struct CmSession : std::enable_shared_from_this<CmSession> {
             if (now_s() - last >= hbSec) { last = now_s(); send_raw(EMSG_ClientHeartBeat, "", 0, ""); }
         }
     }
-    void send_raw(uint32_t emsg, const std::string& body, uint64_t job, const std::string& jobname) {
+    void send_raw(uint32_t emsg, const std::string& body, uint64_t job, const std::string& jobname, uint32_t routingAppid = 0) {
         std::string h; pb_fixed64(h, 1, steamid); pb_u(h, 2, (uint64_t)(uint32_t)sessionId);
+        if (routingAppid) pb_u(h, 3, routingAppid);   // routing_appid: rich presence is per app
         pb_fixed64(h, 10, job ? job : UINT64_MAX); pb_fixed64(h, 11, UINT64_MAX); if (!jobname.empty()) pb_s(h, 12, jobname);
         std::string f = cm_build_frame(emsg, h, body);
         std::lock_guard<std::mutex> l(sendm); try { conn.send(f); } catch (...) { up = false; }
