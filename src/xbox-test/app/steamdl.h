@@ -427,14 +427,19 @@ static bool download_app(CmSession& cm, uint32_t appid, bool startCancelled = fa
             onDisk += std::min<uint64_t>(f.size, ((uint64_t)fa.nFileSizeHigh << 32) | fa.nFileSizeLow);
     }
     uint64_t need = total - std::min(total, onDisk);
-    { ULARGE_INTEGER fb{}, tb{}, tf{}; if (GetDiskFreeSpaceExW(spaceRoot.c_str(), &fb, &tb, &tf)) {
-        logf("dl: install root %s; need %.1f MB (%.1f MB already on disk), free space %.1f MB", (gameRoot.empty() ? std::string("LocalState") : gameRoot).c_str(), need / 1048576.0, onDisk / 1048576.0, fb.QuadPart / 1048576.0);
+    { storage_roots::Space sp = installs::space_of(spaceRoot);
+      if (sp.ok) {
+        logf("dl: %s", storage_roots::space_line("install root", gameRoot.empty() ? std::string("LocalState") : gameRoot, sp).c_str());
         { // test guard: LocalState\dlmax.txt = size cap in MB (0 = dry run: report size only); one-shot, consumed when read
           std::wstring gp = g_dir + L"\\dlmax.txt"; FILE* gf = _wfopen(gp.c_str(), L"rb");
           if (gf) { char gb[32] = {}; fread(gb, 1, sizeof gb - 1, gf); fclose(gf); DeleteFileW(gp.c_str()); double cap = atof(gb);
             logf("dl: dlmax.txt (test guard, consumed) cap=%.0f MB need=%.1f MB", cap, total / 1048576.0);
             if (total / 1048576.0 > cap || cap <= 0) { char b[160]; snprintf(b, sizeof b, "Test guard: %.1f MB exceeds cap %.0f MB (dlmax.txt) - nothing downloaded", total / 1048576.0, cap); return fail(b); } } }
-        if (!storage_roots::has_room(fb.QuadPart, need)) { char b[160]; snprintf(b, sizeof b, "Not enough free space on %s: need %.0f MB, have %.0f MB", gameRoot.empty() ? "the internal drive" : gameRoot.substr(0, 2).c_str(), need / 1048576.0, fb.QuadPart / 1048576.0); return fail(b); } } }
+        if (!storage_roots::has_room(sp.available, need)) {
+          char b[200]; snprintf(b, sizeof b, "Not enough free space on %s: need %.0f MB, %s", gameRoot.empty() ? "the internal drive" : gameRoot.substr(0, 2).c_str(), need / 1048576.0, storage_roots::space_text(sp).c_str());
+          return fail(b);
+        }
+      } else logf("dl: install root %s GetDiskFreeSpaceEx FAILED (%s); downloading without a space check", gameRoot.empty() ? "LocalState" : gameRoot.c_str(), installs::error_text(GetLastError()).c_str()); }
     // a fresh install records itself before creating files, so a failure (or a crash, swept at start) removes them
     if (!file_exists(installs::marker_path(g_dir, appid))) {
         if (!installs::begin_partial(g_dir, appid, installdir, gameRoot)) return fail("cannot write install state (disk full?)");

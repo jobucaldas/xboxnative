@@ -66,11 +66,72 @@ int main() {
 
     // install location choices
     using namespace storage_roots;
-    std::vector<Choice> ch = {{"", "Internal", 5ull << 30}, {"E:\\XboxNativeGames", drive_name("E:\\XboxNativeGames"), 120ull << 30}};
+    std::vector<Choice> ch(2); ch[0].name = "Internal"; ch[0].freeBytes = 5ull << 30;
+    ch[1].root = "E:\\XboxNativeGames"; ch[1].name = drive_name(ch[1].root, kRemovable); ch[1].freeBytes = 120ull << 30;
     assert(label(ch[0]) == "Internal (5.0 GB free)" && label(ch[1]) == "USB E: (120.0 GB free)" && size_text(300ull << 20) == "300 MB");
     assert(index_of(ch, "") == 0 && index_of(ch, "E:\\XboxNativeGames") == 1 && index_of(ch, "e:\\xboxnativegames") == 1 && index_of(ch, "F:\\Gone") == 0);   // missing drive: back to internal
     assert(cycle(0, 2, 1) == 1 && cycle(1, 2, 1) == 0 && cycle(0, 1, 1) == 0 && cycle(0, 0, 1) == 0 && cycle(0, 3, -1) == 2);
     assert(!has_room(100ull << 20, 100ull << 20) && has_room(22000ull << 20, 20000ull << 20) && !has_room(4920ull << 20, 20461ull << 20));
+
+    // drive names: only a removable drive is "USB"; a fixed D: on a Dev Mode console is the
+    // developer scratch partition, so calling it USB would point at a drive that is not there
+    assert(drive_name("E:\\XboxNativeGames", kRemovable) == "USB E:" && drive_name("D:\\XboxNativeGames", kFixed) == "Drive D:");
+    assert(drive_name("", kRemovable) == "Drive" && drive_name("e:\\x", kRemovable) == "USB E:");
+
+    // the storage line: the app's own figure, the pool it writes into, and the volume when
+    // the volume has more (a quota or a separate partition), which is the console's report
+    Space internal; internal.ok = true; internal.available = 4421ull << 20; internal.total = 5120ull << 20; internal.freeTotal = 4421ull << 20;
+    assert(space_text(internal) == "4.3 GB for this app of 5.0 GB");
+    Space quota = internal; quota.freeTotal = 200ull << 30;
+    assert(space_text(quota) == "4.3 GB for this app of 5.0 GB, 200.0 GB volume free");
+    Space none; assert(space_text(none) == "free space could not be read");
+    Space zero = internal; zero.available = 0;
+    assert(space_text(zero) == "0 MB for this app of 5.0 GB, 4.3 GB volume free");   // exhausted pool, volume still has room
+    assert(space_line("Internal", "Q:\\Local", internal) == "Internal path=Q:\\Local GetDiskFreeSpaceEx available=4.3 GB total=5.0 GB free_total=4.3 GB");
+    assert(space_line("Internal", "Q:\\Local", none) == "Internal path=Q:\\Local GetDiskFreeSpaceEx FAILED");
+    Space wr = internal; wr.winrt = true; wr.winrtFree = 1ull << 30; wr.winrtCapacity = 5ull << 30;
+    assert(space_line("Internal", "Q:\\Local", wr).find("WinRT System.FreeSpace=1.0 GB System.Capacity=5.0 GB") != std::string::npos);
+    assert(space_line("USB E:", "E:\\XboxNativeGames", internal, "type=removable").find("type=removable") != std::string::npos);
+
+    // the size of the pool beside the free figure, so 5 GB of dev storage is not read as 5 GB of disk
+    Choice cap; cap.name = "Internal"; cap.freeBytes = 4421ull << 20; cap.space = internal;
+    assert(label_capacity(cap) == "Internal (4.3 GB free of 5.0 GB)");
+    Choice capped = cap; capped.space = quota;
+    assert(label_capacity(capped) == "Internal (4.3 GB free of 5.0 GB)");   // the volume figure is for the refusal line and the log
+    Choice nospace; nospace.name = "Internal"; nospace.freeBytes = 1ull << 30;
+    assert(label_capacity(nospace) == "Internal (1.0 GB free)");   // no total read: plain label
+
+    // refusal: the figure with the pool it is a share of, then the way out (another drive, else delete a game)
+    std::vector<Choice> both = {cap, ch[1]};
+    std::string r = refusal_text(cap, both, 0);
+    assert(r.find("1.0 GB free") == std::string::npos && r.find("No space on Internal: 4.3 GB of 5.0 GB.") == 0);
+    assert(r.find("\nX: install to USB E: (120.0 GB free).") != std::string::npos);
+    std::vector<Choice> one = {cap};
+    assert(refusal_text(cap, one, 0).find("\nDelete an installed game to free space.") != std::string::npos);
+    assert(refusal_text(nospace, one, 0).find("Could not read free space on Internal") == 0);
+    Choice usbfull; usbfull.name = "USB E:"; usbfull.freeBytes = 0; usbfull.space = internal; usbfull.space.available = 0;
+    assert(refusal_text(usbfull, {cap, usbfull}, 1) == "No space on USB E: 0 MB of 5.0 GB.\nX: install to Internal (4.3 GB free).");
+    assert(best_other(both, 0) == 1 && best_other(both, 1) == 0 && best_other(one, 0) == one.size());
+    Choice big = ch[1]; big.freeBytes = 300ull << 30;
+    std::vector<Choice> pair2 = {cap, big};
+    assert(best_other(pair2, 1) == 0);   // internal is the only other one, whatever its size
+
+    // the two lines the detail page draws a note on: an explicit break, else a word wrap
+    std::string n1, n2;
+    note_lines("No space on Internal: 0 MB of 5.0 GB.\nX: install to USB E: (15.2 GB free).", 42, n1, n2);
+    assert(n1 == "No space on Internal: 0 MB of 5.0 GB." && n2 == "X: install to USB E: (15.2 GB free).");
+    note_lines("Delete an installed game to free space.", 42, n1, n2);
+    assert(n1 == "Delete an installed game to free space." && n2.empty());
+    note_lines("A game was started: reopen the app to delete.", 42, n1, n2);
+    assert(n1 == "A game was started: reopen the app to" && n2 == "delete.");
+    note_lines("Wait for the delete to finish.", 42, n1, n2);
+    assert(n1 == "Wait for the delete to finish." && n2.empty());
+    note_lines(std::string(60, 'x'), 42, n1, n2);   // one long word: cut at the column, the tail starts line two
+    assert(n1.size() == 42 && n2 == std::string(18, 'x'));
+    note_lines(std::string(100, 'x'), 42, n1, n2);   // more than two lines: the second is ellipsized
+    assert(n1.size() == 42 && n2.size() == 42 && n2.substr(40) == "..");
+    note_lines("", 42, n1, n2);
+    assert(n1.empty() && n2.empty());
 
     assert(clamp_selection(5, 0) == 0 && clamp_selection(5, 3) == 2 && clamp_selection(-1, 3) == 0 && clamp_selection(1, 3) == 1);
     std::puts("game_library: all checks passed");

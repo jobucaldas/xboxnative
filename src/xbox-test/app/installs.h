@@ -6,6 +6,8 @@
 #include <windows.h>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -161,22 +163,117 @@ inline std::vector<Swept> sweep_partials(const std::wstring& root, const std::at
 // letters, the same way the downloader and the Play loader open files. note (optional)
 // receives one line per skipped drive for the log.
 inline const char* kExtraFolder = "XboxNativeGames";
-inline uint64_t free_bytes(const std::wstring& path) { ULARGE_INTEGER fb{}, tb{}, tf{}; return GetDiskFreeSpaceExW(path.c_str(), &fb, &tb, &tf) ? fb.QuadPart : 0; }
+// Every figure GetDiskFreeSpaceExW returns. lpFreeBytesAvailableToCaller is the one an
+// install must be checked against: with a per-user quota or a separate pool it is below
+// the volume's own free space, and a write past it fails even when the volume has room.
+inline storage_roots::Space space_of(const std::wstring& path) {
+    storage_roots::Space s; ULARGE_INTEGER a{}, t{}, f{};
+    if (GetDiskFreeSpaceExW(path.c_str(), &a, &t, &f)) { s.ok = true; s.available = a.QuadPart; s.total = t.QuadPart; s.freeTotal = f.QuadPart; }
+    return s;
+}
+inline uint64_t free_bytes(const std::wstring& path) { return space_of(path).available; }
+// "label='X' fs=NTFS": the drive's own name, so a log line says which volume a letter is.
+inline std::string volume_text(const std::wstring& path) {
+    wchar_t label[64] = {}, fs[32] = {};
+    std::string out;
+    if (GetVolumeInformationW(path.c_str(), label, 64, nullptr, nullptr, nullptr, fs, 32)) {
+        out = "label='"; for (const wchar_t* c = label; *c; ++c) out += *c < 128 ? (char)*c : '?'; out += "' fs=";
+        for (const wchar_t* c = fs; *c; ++c) out += *c < 128 ? (char)*c : '?';
+    } else out = "volume info error " + std::to_string(GetLastError());
+    return out;
+}
+// "error 5 (Access is denied.)": the Win32 text, so the log explains a skipped drive.
+inline std::string error_text(DWORD e) {
+    wchar_t* buf = nullptr;
+    DWORD n = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, e, 0, (LPWSTR)&buf, 0, nullptr);
+    std::string t = "error " + std::to_string(e);
+    if (n && buf) { t += " ("; for (DWORD i = 0; i < n; ++i) { if (buf[i] == L'\r' || buf[i] == L'\n') break; t += buf[i] < 128 ? (char)buf[i] : '?'; } t += ")"; }
+    if (buf) LocalFree(buf);
+    return t;
+}
 inline std::vector<storage_roots::Choice> list_roots(const std::wstring& stateRoot, std::vector<std::string>* note = nullptr) {
-    std::vector<storage_roots::Choice> out; out.push_back({"", "Internal", free_bytes(stateRoot)});
+    std::vector<storage_roots::Choice> out;
+    { storage_roots::Choice c; c.name = "Internal"; c.type = DRIVE_FIXED; c.space = space_of(stateRoot); c.freeBytes = c.space.available; out.push_back(c); }
     const wchar_t home = stateRoot.empty() ? L'\0' : (wchar_t)towupper(stateRoot[0]);
     DWORD mask = GetLogicalDrives();
     for (int i = 0; i < 26; i++) {
         if (!(mask & (1u << i))) continue;
         wchar_t letter = (wchar_t)(L'A' + i); if (letter == home) continue;
         std::wstring drive = std::wstring(1, letter) + L":\\"; UINT t = GetDriveTypeW(drive.c_str());
-        if (t != DRIVE_REMOVABLE && t != DRIVE_FIXED) { if (note) note->push_back(std::string(1, (char)letter) + ": skipped, drive type " + std::to_string(t)); continue; }
-        std::string root = std::string(1, (char)letter) + ":\\" + kExtraFolder;
+        const std::string name(1, (char)letter);
+        if (t != DRIVE_REMOVABLE && t != DRIVE_FIXED) { if (note) note->push_back(name + ": skipped, drive type " + std::to_string(t) + " (" + storage_roots::drive_type_name(t) + ")"); continue; }
+        std::string root = name + ":\\" + kExtraFolder;
         std::wstring w = ascii(root);
-        if (!CreateDirectoryW(w.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) { if (note) note->push_back(std::string(1, (char)letter) + ": not usable, create folder error " + std::to_string(GetLastError())); continue; }
-        out.push_back({root, storage_roots::drive_name(root), free_bytes(w)});
+        if (!CreateDirectoryW(w.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+            DWORD e = GetLastError();
+            if (note) note->push_back(name + ": not usable, create folder " + error_text(e) + ", drive type " + storage_roots::drive_type_name(t) + ", " + volume_text(drive));
+            continue;
+        }
+        storage_roots::Choice c; c.root = root; c.type = t; c.name = storage_roots::drive_name(root, t);
+        c.space = space_of(w); c.freeBytes = c.space.available;
+        out.push_back(c);
     }
     return out;
+}
+
+// ---- launcher-owned leftovers
+// Files the launcher itself writes into LocalState that no game or save needs. These are
+// KB-to-MB, not the GB an install needs, so they are cleaned quietly at start and reported
+// rather than offered as a button: the space an install lacks is the pool's, not theirs.
+struct Leftover { std::string name; uint64_t bytes = 0; };
+// A file whose last write is more than `days` ago (FILETIME is 100 ns since 1601).
+inline bool older_than_days(const FILETIME& ft, double days) {
+    ULARGE_INTEGER t; t.LowPart = ft.dwLowDateTime; t.HighPart = ft.dwHighDateTime;
+    FILETIME nowft; GetSystemTimeAsFileTime(&nowft);
+    ULARGE_INTEGER n; n.LowPart = nowft.dwLowDateTime; n.HighPart = nowft.dwHighDateTime;
+    return n.QuadPart > t.QuadPart && (double)(n.QuadPart - t.QuadPart) / 1e7 / 86400.0 > days;
+}
+// name is relative to the state root ("storecache\123.json" for the cache). An appinfo
+// cache is kept for an installed game: Play reads it to pick the game's launch option.
+inline bool leftover_kind(const std::string& name, const std::set<uint32_t>& installed) {
+    if (name == "boot.prev.log" || name == "launch_probe.previous.log" || name == "frametimes.csv") return true;
+    if (name.compare(0, 7, "appinfo") != 0) return false;
+    std::string d = name.substr(8); if (d.size() <= 4 || d.compare(d.size() - 4, 4, ".vdf") != 0) return false;
+    d.resize(d.size() - 4);
+    for (char c : d) if (c < '0' || c > '9') return false;
+    return !installed.count((uint32_t)strtoul(d.c_str(), nullptr, 10));
+}
+inline std::vector<Leftover> launcher_leftovers(const std::wstring& root, const std::set<uint32_t>& installed) {
+    std::vector<Leftover> out;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileExW((root + L"\\*").c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            std::string name; for (const wchar_t* c = fd.cFileName; *c; ++c) name += *c < 128 ? (char)*c : '?';
+            if (leftover_kind(name, installed)) out.push_back({name, ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow});
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    // Store info is cached per appid for 24 h (store.h) and the detail page reads it back
+    // offline, so only an entry no page has touched for a week is stale: deleting a fresh
+    // one would only make the next detail page wait on the network.
+    HANDLE c = FindFirstFileExW((root + L"\\storecache\\*.json").c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr, 0);
+    if (c != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (!older_than_days(fd.ftLastWriteTime, 7)) continue;
+            std::string name; for (const wchar_t* p = fd.cFileName; *p; ++p) name += *p < 128 ? (char)*p : '?';
+            out.push_back({"storecache\\" + name, ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow});
+        } while (FindNextFileW(c, &fd));
+        FindClose(c);
+    }
+    return out;
+}
+// Delete the leftovers and return the bytes freed. Only files launcher_leftovers names,
+// and only under root or root\storecache, are ever touched.
+inline uint64_t clean_leftovers(const std::wstring& root, const std::set<uint32_t>& installed) {
+    uint64_t freed = 0;
+    for (auto& l : launcher_leftovers(root, installed)) {
+        std::wstring w(l.name.begin(), l.name.end());
+        if (DeleteFileW((root + L"\\" + w).c_str())) freed += l.bytes;
+    }
+    return freed;
 }
 
 }  // namespace installs
