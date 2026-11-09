@@ -50,7 +50,7 @@ public:
     }
 };
 struct State {
-    std::wstring root, command;
+    std::wstring root, cwd, command;
     std::string commandA;
     wxl::Log log=nullptr;
     std::vector<std::unique_ptr<Module>> modules;
@@ -1232,10 +1232,10 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     return mlp::resolve(key.c_str(),name,ordinal);
 }
 static void runImpl() {
-    state->event("guest environment: native AppContainer PEB/TEB; guest module/command APIs; current directory="+narrow(state->root));
+    state->event("guest environment: native AppContainer PEB/TEB; guest module/command APIs; current directory="+narrow(state->cwd));
     using SetDir=BOOL(WINAPI*)(LPCWSTR);auto setDir=(SetDir)kernel_tail::native("SetCurrentDirectoryW");
     state->event("SetCurrentDirectoryW guest root");
-    if(!setDir || !setDir(state->root.c_str())) {state->event("SetCurrentDirectoryW failed error="+std::to_string(GetLastError()));return;}
+    if(!setDir || !setDir(state->cwd.c_str())) {state->event("SetCurrentDirectoryW failed error="+std::to_string(GetLastError()));return;}
     if(!initializePending()) return;
     char entry[128];snprintf(entry,sizeof entry,"EXE entry %s+0x%lx",state->exe->key.c_str(),state->exe->image.entry);state->event(entry);state->executed=true;
     state->code=((DWORD(WINAPI*)())(state->exe->image.base+state->exe->image.entry))();
@@ -1246,9 +1246,11 @@ static DWORD WINAPI worker(void*) {
     __try {runImpl();} __except(filter(GetExceptionInformation())) {}
     state->result=state->snapshot();state->finished=true;guestThread=false;return state->code;
 }
-static bool start(const std::wstring& root,const std::wstring& exe,const std::wstring& args,wxl::Log log) {
+// cwd (optional) is the guest's working directory, as a Steam launch option's
+// workingdir names it; empty means the executable's own directory.
+static bool start(const std::wstring& root,const std::wstring& exe,const std::wstring& args,wxl::Log log,const std::wstring& cwd=std::wstring()) {
     if(state) return false;
-    state=new State();state->root=root;state->log=log;observed.store(state,std::memory_order_release);state->command=L"\""+root+L"\\"+exe+L"\" "+args;state->commandA=narrow(state->command);
+    state=new State();state->root=root;state->cwd=cwd.empty()?root:cwd;state->log=log;observed.store(state,std::memory_order_release);state->command=L"\""+root+L"\\"+exe+L"\" "+args;state->commandA=narrow(state->command);
     mlp::log=log;wxl::logger=log;
     xinput_core::note=[](const char* text){if(mlp::log)mlp::log(text);};mlp::missingResolver=missing;mlp::assets.clear();mlp::summaries.clear();
     state->exe=map(root+L"\\"+exe);if(!state->exe) {state->result=state->snapshot();state->finished=true;return true;}
