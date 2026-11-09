@@ -65,6 +65,16 @@ struct Memory {
     }
     uint32_t r32(uint32_t a) const { return r(a, 4); }
     void w32(uint32_t a, uint32_t v) { w(a, v, 4); }
+    uint64_t r64(uint32_t a) const { uint64_t v = 0; for (unsigned i = 0; i < 8; ++i) v |= uint64_t(r8(a + i)) << (8 * i); return v; }
+    void w64(uint32_t a, uint64_t v) {
+        for (unsigned i = 0; i < 8; ++i) at(a + i, PROT_W, FaultKind::AccessViolation);
+        for (unsigned i = 0; i < 8; ++i) w8(a + i, uint8_t(v >> (8 * i)));
+    }
+    void r128(uint32_t a, uint32_t out[4]) const { for (unsigned i = 0; i < 4; ++i) out[i] = r32(a + 4 * i); }
+    void w128(uint32_t a, const uint32_t in[4]) {
+        for (unsigned i = 0; i < 16; ++i) at(a + i, PROT_W, FaultKind::AccessViolation);
+        for (unsigned i = 0; i < 4; ++i) w32(a + 4 * i, in[i]);
+    }
     // Host-side marshalling helpers used by thunks: bounds and permission checked.
     std::vector<uint8_t> read_bytes(uint32_t a, uint32_t n) const {
         std::vector<uint8_t> v(n); for (uint32_t i = 0; i < n; ++i) v[i] = r8(a + i); return v;

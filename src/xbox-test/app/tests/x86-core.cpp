@@ -3,6 +3,7 @@
 // semantics, (2) memory protections and explicit faults, (3) thunks and guest
 // callbacks, (4) an owned i686 fixture PE run to a known exit code at its
 // ImageBase and at a relocated base. Usage: x86-core <fixture.exe>
+#include <array>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
@@ -11,6 +12,10 @@
 #error "the ALU hardware comparison needs an x86 host"
 #endif
 using namespace x86;
+static uint32_t f32b(float f) { uint32_t v; memcpy(&v, &f, 4); return v; }
+static float bf32(uint32_t v) { float f; memcpy(&f, &v, 4); return f; }
+static uint64_t f64b(double d) { uint64_t v; memcpy(&v, &d, 8); return v; }
+static double bf64(uint64_t v) { double d; memcpy(&d, &v, 8); return d; }
 static int failures = 0;
 #define EXPECT(c, ...) do { if (!(c)) { ++failures; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
@@ -174,13 +179,339 @@ static void test_programs() {
         EXPECT(fault_of([&] { m.cpu.run(0); }) == FaultKind::AccessViolation, "write to RX page must fault");
         m.load({0xE9, 0xFB, 0xFF, 0x00, 0x00}); /* jmp CODE+0x10000-5+5 -> DATA region 0x20000 */
         m.cpu.eip = Machine::DATA; EXPECT(fault_of([&] { m.cpu.run(0); }) == FaultKind::ExecuteViolation, "execute from RW page must fault"); }
-    { Machine m;  // unsupported instruction (x87) is an explicit fault naming the bytes, not a silent skip
-        m.load({0xD9, 0xEE});
-        try { m.cpu.run(0); EXPECT(false, "x87 must fault"); } catch (const Fault& f) { EXPECT(f.kind == FaultKind::Unsupported && std::string(f.what()).find("d9 ee") != std::string::npos, "x87 fault text: %s", f.what()); } }
+    { Machine m;  // unsupported instruction is an explicit fault naming the bytes, not a silent skip
+        m.load({0x0F, 0x0A});   // ud1: an encoding the interpreter does not model
+        try { m.cpu.run(0); EXPECT(false, "unsupported instruction must fault"); } catch (const Fault& f) { EXPECT(f.kind == FaultKind::Unsupported && std::string(f.what()).find("0f 0a") != std::string::npos, "unsupported fault text: %s", f.what()); } }
     { Machine m; m.load({0xEB, 0xFE}); m.cpu.limit = 1000;   // jmp $
         EXPECT(fault_of([&] { m.cpu.run(0); }) == FaultKind::InstructionLimit, "runaway loop must hit the instruction limit"); }
     { Machine m; m.load({0xCC}); EXPECT(fault_of([&] { m.cpu.run(0); }) == FaultKind::Breakpoint, "int3"); }
     { Machine m; m.load({0x0F, 0x0B}); EXPECT(fault_of([&] { m.cpu.run(0); }) == FaultKind::InvalidOpcode, "ud2"); }
+}
+
+
+// ---------- (2b) x87 and SSE/SSE2, compared with this machine's CPU ----------
+// Each case runs the same instruction natively (inline asm) and in the
+// interpreter, then compares the numeric result and the condition bits. x87
+// comparison against the hardware is exact only where long double is the x87
+// extended type (the Linux test host); elsewhere the suite still checks the
+// interpreter's own documented model, and the PASS line says which ran.
+namespace fp {
+static double dvals[] = {0.0, 1.0, -1.0, 0.5, 2.5, 1e-300, 1e300, 3.141592653589793, -2.718281828459045, 1.0 / 3.0};
+static float fvals[] = {0.0f, 1.0f, -1.0f, 0.5f, 2.5f, 1e-30f, 1e30f, 3.14159265f, -2.7182818f, 1.0f / 3.0f};
+}
+// Native x87 double-precision add/sub/mul/div of two doubles, plus the status
+// word's condition bits, executed with the same operand order the interpreter sees.
+// Native x87 arithmetic: operands and result go through file-scope globals so
+// the asm block has exactly one memory output and no register pressure (a
+// second "=r" output makes the compiler pick a register for the fld operand).
+double g_x, g_y, g_out;
+uint32_t g_sw;
+static uint32_t nat_status() { return g_sw; }
+static void nat_f64(char op, double a, double b, double& r) {
+    g_x = a; g_y = b; g_out = 0;
+    switch (op) {
+    case '+': asm volatile("fldl %1\n\tfaddl %2\n\tfstpl %0\n\tfnstsw %%ax\n\tmovw %%ax, g_sw(%%rip)" : "+m"(g_out) : "m"(g_x), "m"(g_y) : "st", "ax", "memory"); break;
+    case '-': asm volatile("fldl %1\n\tfsubl %2\n\tfstpl %0\n\tfnstsw %%ax\n\tmovw %%ax, g_sw(%%rip)" : "+m"(g_out) : "m"(g_x), "m"(g_y) : "st", "ax", "memory"); break;
+    case '*': asm volatile("fldl %1\n\tfmull %2\n\tfstpl %0\n\tfnstsw %%ax\n\tmovw %%ax, g_sw(%%rip)" : "+m"(g_out) : "m"(g_x), "m"(g_y) : "st", "ax", "memory"); break;
+    case '/': asm volatile("fldl %1\n\tfdivl %2\n\tfstpl %0\n\tfnstsw %%ax\n\tmovw %%ax, g_sw(%%rip)" : "+m"(g_out) : "m"(g_x), "m"(g_y) : "st", "ax", "memory"); break;
+    }
+    r = g_out;
+    (void)nat_status();
+}
+// fcomip sets EFLAGS from the comparison; returns the flags the hardware produced.
+static uint32_t nat_fcomip(double a, double b) {
+    g_x = a; g_y = b;
+    asm volatile("fldl %0\n\tfldl %1\n\tfcomip %%st(1), %%st\n\tfstp %%st(0)\n\tpushfq\n\tpopq g_sw(%%rip)" : : "m"(g_x), "m"(g_y) : "st", "cc", "memory");
+    return g_sw;
+}
+static void test_fpu() {
+    Machine m;
+    // x87 double-precision arithmetic against the real FPU. The result is
+    // compared bit-for-bit: both sides do one IEEE operation in the same
+    // precision, so any difference is an interpreter bug.
+    for (char op : {'+', '-', '*', '/'}) for (double a : fp::dvals) for (double b : fp::dvals) {
+        if (op == '/' && b == 0) continue;
+        double nr; nat_f64(op, a, b, nr);
+        // fldl [DATA]; faddl [DATA+8]; fstpl [DATA+16]  (opcode chosen per operation)
+        uint8_t opc = op == '+' ? 0x00 : op == '-' ? 0x20 : op == '*' ? 0x08 : 0x30;
+        m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
+        m.mem.w64(Machine::DATA, f64b(a)); m.mem.w64(Machine::DATA + 8, f64b(b));
+        std::vector<uint8_t> enc{0xDD, 0x05, 0x00, 0x00, 0x02, 0x00};  // fld qword [DATA]
+        enc.insert(enc.end(), {0xDC, uint8_t(opc | 0x05), 0x08, 0x00, 0x02, 0x00});  // op qword [DATA+8]
+        enc.insert(enc.end(), {0xDD, 0x1D, 0x10, 0x00, 0x02, 0x00});  // fstp qword [DATA+16]
+        exec(m, enc, 0, 0, 0, false);
+        uint64_t gotbits = m.mem.r64(Machine::DATA + 16); double got; memcpy(&got, &gotbits, 8);
+        EXPECT(f64b(got) == f64b(nr), "x87 %c %g %g: got %.17g want %.17g", op, a, b, got, nr);
+        EXPECT(m.cpu.fpu.top == 0 && m.cpu.fpu.empty[m.cpu.fpu.idx(0)], "x87 %c: stack not empty after fstp", op);
+        ++alu_cases;
+    }
+    // fcomip: the integer flags must match the hardware's, for ordered and unordered pairs.
+    for (double a : fp::dvals) for (double b : fp::dvals) {
+        uint32_t nf = nat_fcomip(a, b);
+        m.mem.w64(Machine::DATA, f64b(a)); m.mem.w64(Machine::DATA + 8, f64b(b));
+        // fldl [DATA]; fldl [DATA+8]; fcomip st, st(1); fstp st(0)
+        std::vector<uint8_t> enc{0xDD, 0x05, 0x00, 0x00, 0x02, 0x00, 0xDD, 0x05, 0x08, 0x00, 0x02, 0x00, 0xDF, 0xF1, 0xDD, 0xD8};
+        exec(m, enc, 0, 0, 0, false);
+        EXPECT(!((m.cpu.eflags ^ nf) & (CF | PF | ZF)), "fcomip %g %g: flags got %x want %x", a, b, m.cpu.eflags & (CF | PF | ZF), nf & (CF | PF | ZF));
+        ++alu_cases;
+    }
+    // SSE scalar double add/sub/mul/div, compared bit for bit.
+    for (char op : {'+', '-', '*', '/'}) for (double a : fp::dvals) for (double b : fp::dvals) {
+        if (op == '/' && b == 0) continue;
+        double want = op == '+' ? a + b : op == '-' ? a - b : op == '*' ? a * b : a / b;
+        m.mem.w64(Machine::DATA, f64b(a)); m.mem.w64(Machine::DATA + 8, f64b(b));
+        uint8_t opc = op == '+' ? 0x58 : op == '-' ? 0x5C : op == '*' ? 0x59 : 0x5E;
+        std::vector<uint8_t> enc{0xF2, 0x0F, 0x10, 0x05, 0x00, 0x00, 0x02, 0x00};  // movsd xmm0, [DATA]
+        enc.insert(enc.end(), {0xF2, 0x0F, opc, 0x05, 0x08, 0x00, 0x02, 0x00});    // op sd xmm0, [DATA+8]
+        enc.insert(enc.end(), {0xF2, 0x0F, 0x11, 0x05, 0x10, 0x00, 0x02, 0x00});  // movsd [DATA+16], xmm0
+        exec(m, enc, 0, 0, 0, false);
+        EXPECT(m.mem.r64(Machine::DATA + 16) == f64b(want), "sse %c %g %g: got %.17g want %.17g", op, a, b, bf64(m.mem.r64(Machine::DATA + 16)), want);
+        ++alu_cases;
+    }
+    // SSE scalar single arithmetic and the int<->float conversions.
+    for (char op : {'+', '-', '*', '/'}) for (float a : fp::fvals) for (float b : fp::fvals) {
+        if (op == '/' && b == 0) continue;
+        float want = op == '+' ? a + b : op == '-' ? a - b : op == '*' ? a * b : a / b;
+        m.mem.w32(Machine::DATA, f32b(a)); m.mem.w32(Machine::DATA + 4, f32b(b));
+        uint8_t opc = op == '+' ? 0x58 : op == '-' ? 0x5C : op == '*' ? 0x59 : 0x5E;
+        std::vector<uint8_t> enc{0xF3, 0x0F, 0x10, 0x05, 0x00, 0x00, 0x02, 0x00};
+        enc.insert(enc.end(), {0xF3, 0x0F, opc, 0x05, 0x04, 0x00, 0x02, 0x00});
+        enc.insert(enc.end(), {0xF3, 0x0F, 0x11, 0x05, 0x08, 0x00, 0x02, 0x00});
+        exec(m, enc, 0, 0, 0, false);
+        EXPECT(m.mem.r32(Machine::DATA + 8) == f32b(want), "sse ss %c %g %g: got %g want %g", op, double(a), double(b), double(bf32(m.mem.r32(Machine::DATA + 8))), double(want));
+        ++alu_cases;
+    }
+    for (int32_t v : {0, 1, -1, 12345, -12345, 0x7fffffff, int32_t(0x80000000u)}) {
+        // cvtsi2sd xmm0, eax; movsd [DATA], xmm0
+        exec(m, {0xF2, 0x0F, 0x2A, 0xC0, 0xF2, 0x0F, 0x11, 0x05, 0x00, 0x00, 0x02, 0x00}, uint32_t(v), 0, 0, false);
+        EXPECT(m.mem.r64(Machine::DATA) == f64b(double(v)), "cvtsi2sd %d", v);
+        // cvtsi2ss xmm0, eax; movss [DATA], xmm0
+        exec(m, {0xF3, 0x0F, 0x2A, 0xC0, 0xF3, 0x0F, 0x11, 0x05, 0x00, 0x00, 0x02, 0x00}, uint32_t(v), 0, 0, false);
+        EXPECT(m.mem.r32(Machine::DATA) == f32b(float(v)), "cvtsi2ss %d", v);
+        // cvttsd2si eax, [DATA]  (value v as a double)
+        m.mem.w64(Machine::DATA, f64b(double(v)));
+        exec(m, {0xF2, 0x0F, 0x2C, 0x05, 0x00, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+        EXPECT(m.cpu.reg[EAX] == uint32_t(v), "cvttsd2si %d: got %d", v, int32_t(m.cpu.reg[EAX]));
+        ++alu_cases;
+    }
+    // SSE2 packed integer: paddd/psubd/pcmpeqd/pand/por/pxor and the shifts.
+    m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{1, 2, 3, 0xffffffffu}.data());
+    m.mem.w128(Machine::DATA + 16, std::array<uint32_t, 4>{10, 20, 30, 1}.data());
+    // movdqa xmm0,[DATA]; paddd xmm0,[DATA+16]; movdqa [DATA+32],xmm0
+    exec(m, {0x66, 0x0F, 0x6F, 0x05, 0x00, 0x00, 0x02, 0x00, 0x66, 0x0F, 0xFE, 0x05, 0x10, 0x00, 0x02, 0x00,
+             0x66, 0x0F, 0x7F, 0x05, 0x20, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    uint32_t out[4]; m.mem.r128(Machine::DATA + 32, out);
+    EXPECT(out[0] == 11 && out[1] == 22 && out[2] == 33 && out[3] == 0, "paddd: %u %u %u %u", out[0], out[1], out[2], out[3]);
+    exec(m, {0x66, 0x0F, 0x6F, 0x05, 0x00, 0x00, 0x02, 0x00, 0x66, 0x0F, 0xFA, 0x05, 0x10, 0x00, 0x02, 0x00,
+             0x66, 0x0F, 0x7F, 0x05, 0x20, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    m.mem.r128(Machine::DATA + 32, out);
+    EXPECT(out[0] == 0xfffffff7u && out[1] == 0xffffffeeu && out[2] == 0xffffffe5u && out[3] == 0xfffffffeu, "psubd: %x %x %x %x", out[0], out[1], out[2], out[3]);
+    exec(m, {0x66, 0x0F, 0x6F, 0x05, 0x00, 0x00, 0x02, 0x00, 0x66, 0x0F, 0x76, 0x05, 0x10, 0x00, 0x02, 0x00,
+             0x66, 0x0F, 0xD7, 0xC1}, 0, 0, 0, false);  // pcmpeqd xmm0,[DATA+16]; pmovmskb eax,xmm0
+    EXPECT(m.cpu.reg[EAX] == 0, "pcmpeqd/pmovmskb: %x", m.cpu.reg[EAX]);
+    ++alu_cases;
+}
+// x87 memory forms and the stack discipline the CRT depends on.
+static void test_x87_forms() {
+    Machine m;
+    auto run = [&](std::initializer_list<uint8_t> code) { exec(m, std::vector<uint8_t>(code), 0, 0, 0, false); };
+    // fild dword [DATA]; fistp dword [DATA+4]  (round to nearest: 7 stays 7, -7 stays -7)
+    for (int32_t v : {0, 1, -1, 7, -7, 100000, -100000}) {
+        m.mem.w32(Machine::DATA, uint32_t(v));
+        run({0xDB, 0x05, 0x00, 0x00, 0x02, 0x00, 0xDB, 0x1D, 0x04, 0x00, 0x02, 0x00});
+        EXPECT(int32_t(m.mem.r32(Machine::DATA + 4)) == v, "fild/fistp %d -> %d", v, int32_t(m.mem.r32(Machine::DATA + 4)));
+    }
+    // fld qword; fld qword; fxch; fstp qword; fstp qword: the two values come back swapped
+    m.mem.w64(Machine::DATA, f64b(1.5)); m.mem.w64(Machine::DATA + 8, f64b(2.5));
+    run({0xDD, 0x05, 0x00, 0x00, 0x02, 0x00, 0xDD, 0x05, 0x08, 0x00, 0x02, 0x00, 0xD9, 0xC9,
+         0xDD, 0x1D, 0x10, 0x00, 0x02, 0x00, 0xDD, 0x1D, 0x18, 0x00, 0x02, 0x00});
+    EXPECT(bf64(m.mem.r64(Machine::DATA + 16)) == 1.5 && bf64(m.mem.r64(Machine::DATA + 24)) == 2.5, "fxch: %g %g", bf64(m.mem.r64(Machine::DATA + 16)), bf64(m.mem.r64(Machine::DATA + 24)));
+    // fldcw/fnstcw round trip, and fnstsw ax
+    m.mem.w(Machine::DATA, 0x0f7f, 2); run({0xD9, 0x2D, 0x00, 0x00, 0x02, 0x00, 0xD9, 0x3D, 0x04, 0x00, 0x02, 0x00});
+    EXPECT(m.mem.r(Machine::DATA + 4, 2) == 0x0f7f, "fldcw/fnstcw: %x", m.mem.r(Machine::DATA + 4, 2));
+    run({0xDF, 0xE0});  EXPECT((m.cpu.reg[EAX] & 0xffff) == m.cpu.fpu.status(), "fnstsw ax");
+    // faddp/fmulp/fsubp/fdivp: st(1) = st(1) op st(0), then pop
+    auto pair = [&](std::initializer_list<uint8_t> op, double a, double b, double want) {
+        m.mem.w64(Machine::DATA, f64b(a)); m.mem.w64(Machine::DATA + 8, f64b(b));
+        std::vector<uint8_t> enc{0xDD, 0x05, 0x00, 0x00, 0x02, 0x00, 0xDD, 0x05, 0x08, 0x00, 0x02, 0x00};
+        enc.insert(enc.end(), op);
+        enc.insert(enc.end(), {0xDD, 0x1D, 0x10, 0x00, 0x02, 0x00});
+        exec(m, enc, 0, 0, 0, false);
+        EXPECT(bf64(m.mem.r64(Machine::DATA + 16)) == want && m.cpu.fpu.top == 0, "x87 pair: got %.17g want %.17g", bf64(m.mem.r64(Machine::DATA + 16)), want);
+    };
+    pair({0xDE, 0xC1}, 2.0, 3.0, 5.0);    // faddp
+    pair({0xDE, 0xC9}, 2.0, 3.0, 6.0);    // fmulp
+    pair({0xDE, 0xE1}, 2.0, 3.0, 1.0);    // st(1) = st(0) - st(1) = 3-2
+    pair({0xDE, 0xE9}, 2.0, 3.0, -1.0);   // st(1) = st(1) - st(0) = 2-3
+    pair({0xDE, 0xF1}, 6.0, 3.0, 0.5);    // st(1) = st(0) / st(1) = 3/6
+    pair({0xDE, 0xF9}, 6.0, 3.0, 2.0);    // st(1) = st(1) / st(0) = 6/3
+    // The DC register form is the reversed encoding (DC E0+i): st(i) is the
+    // destination and st(0) is the left operand for the non-commutative ops.
+    // Values below were read off the hardware, not from the mnemonic names.
+    auto dcreg = [&](std::initializer_list<uint8_t> op, double a, double b, double want) {
+        m.mem.w64(Machine::DATA, f64b(a)); m.mem.w64(Machine::DATA + 8, f64b(b));
+        std::vector<uint8_t> enc{0xDD, 0x05, 0x00, 0x00, 0x02, 0x00, 0xDD, 0x05, 0x08, 0x00, 0x02, 0x00};
+        enc.insert(enc.end(), op);
+        enc.insert(enc.end(), {0xDD, 0xD8});                            // fstp st(0): drop the source
+        enc.insert(enc.end(), {0xDD, 0x1D, 0x10, 0x00, 0x02, 0x00});    // fstp qword [DATA+16]: the result
+        exec(m, enc, 0, 0, 0, false);
+        EXPECT(bf64(m.mem.r64(Machine::DATA + 16)) == want, "x87 dc reg: got %.17g want %.17g", bf64(m.mem.r64(Machine::DATA + 16)), want);
+    };
+    dcreg({0xDC, 0xE1}, 2.0, 8.0, 6.0);   // st(1) = st(0) - st(1)
+    dcreg({0xDC, 0xE9}, 2.0, 8.0, -6.0);  // st(1) = st(1) - st(0)
+    dcreg({0xDC, 0xF1}, 2.0, 8.0, 4.0);   // st(1) = st(0) / st(1)
+    dcreg({0xDC, 0xF9}, 2.0, 8.0, 0.25);  // st(1) = st(1) / st(0)
+    // fld1/fldz/fchs/fabs/frndint
+    run({0xD9, 0xE8, 0xD9, 0xE0, 0xDD, 0x1D, 0x00, 0x00, 0x02, 0x00});  // fld1; fchs; fstp [DATA]
+    EXPECT(bf64(m.mem.r64(Machine::DATA)) == -1.0, "fld1/fchs");
+    run({0xD9, 0xE8, 0xD9, 0xE1, 0xDD, 0x1D, 0x00, 0x00, 0x02, 0x00});  // fld1; fabs; fstp
+    EXPECT(bf64(m.mem.r64(Machine::DATA)) == 1.0, "fabs");
+    // 80-bit round trip: fld m80; fstp m80
+    { uint8_t b[10]; Fpu::from_wide(b, Wide(1.0L) / 3.0L); for (int i = 0; i < 10; ++i) m.mem.w8(Machine::DATA + 32 + i, b[i]); }
+    run({0xDB, 0x2D, 0x20, 0x00, 0x02, 0x00, 0xDB, 0x3D, 0x40, 0x00, 0x02, 0x00});
+    { uint8_t b[10]; for (int i = 0; i < 10; ++i) b[i] = m.mem.r8(Machine::DATA + 64 + i);
+      EXPECT(Fpu::to_wide(b) == Wide(1.0L) / 3.0L, "fld/fstp m80 must round-trip the extended value"); }
+    // An x87 encoding outside the modelled set is an explicit fault, not a guess.
+    EXPECT(fault_of([&] { m.load({0xDF, 0x20}); m.cpu.run(0); }) == FaultKind::Unsupported, "fbld must fault");
+}
+
+// ---------- (2c) regressions the review found: each compared with the hardware ----------
+// Every case here was a wrong operand, a wrong lane order, a missing write or a
+// wrong stack order. The native side runs the same encoding, so a future
+// change that reintroduces any of them fails against this CPU, not a guess.
+static void test_sse_regressions() {
+    Machine m;
+    auto run = [&](std::initializer_list<uint8_t> code) { exec(m, std::vector<uint8_t>(code), 0, 0, 0, false); };
+    // bt/bts/btr/btc r/m32, imm8: the bit index is the immediate.
+    auto bt_case = [&](unsigned bit) {
+        // Values chosen so the encoded bit differs from bit 0 of EAX/ECX: with
+        // the old register-index bug the two disagree and this fails.
+        // `which` selects the hardware form (immediate 0, 4 or 31); the switch
+        // below is keyed on it, not on the bit value itself.
+        const unsigned which = bit == 0 ? 0 : bit == 4 ? 1 : 2;
+        for (uint32_t v : {0x00000001u, 0x00000010u, 0x80000000u, 0x7fffffffu, 0xffffffffu, 0u}) {
+            for (int act = 0; act < 4; ++act) {
+                uint32_t nv = v; unsigned char ncf = 0;
+                switch (which * 4 + act) {
+                case 0: asm volatile("movl %2, %%eax\n\tbtl $0, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 4: asm volatile("movl %2, %%eax\n\tbtl $4, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 8: asm volatile("movl %2, %%eax\n\tbtl $31, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 1: asm volatile("movl %2, %%eax\n\tbtsl $0, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 5: asm volatile("movl %2, %%eax\n\tbtsl $4, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 9: asm volatile("movl %2, %%eax\n\tbtsl $31, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 2: asm volatile("movl %2, %%eax\n\tbtrl $0, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 6: asm volatile("movl %2, %%eax\n\tbtrl $4, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 10: asm volatile("movl %2, %%eax\n\tbtrl $31, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 3: asm volatile("movl %2, %%eax\n\tbtcl $0, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 7: asm volatile("movl %2, %%eax\n\tbtcl $4, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 11: asm volatile("movl %2, %%eax\n\tbtcl $31, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                default: continue;
+                }
+                // 0F BA /act with modrm C0 (eax) and the immediate bit
+                exec(m, {0x0F, 0xBA, uint8_t(0xC0 | (act << 3)), uint8_t(bit == 0 ? 0 : bit == 4 ? 4 : 31)}, v, 0, 0, false);
+                EXPECT(m.cpu.reg[EAX] == nv && bool(m.cpu.eflags & CF) == bool(ncf), "bt imm act=%d bit=%u v=%08x: got %08x cf=%d want %08x cf=%d",
+                       act, bit, v, m.cpu.reg[EAX], int((m.cpu.eflags & CF) != 0), nv, int(ncf != 0));
+                ++alu_cases;
+            }
+        }
+    };
+    bt_case(0); bt_case(4); bt_case(31);
+    // movd xmm, eax zeroes the upper 96 bits; movd eax, xmm reads the low dword.
+    run({0x66, 0x0F, 0x6E, 0xC0});  // movd xmm0, eax (xmm0 preset below)
+    m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu}.data());
+    m.mem.protect(Machine::CODE, 4096, PROT_R | PROT_W);
+    // movdqa xmm0,[DATA]; movd xmm0,eax; movdqa [DATA+16],xmm0
+    std::vector<uint8_t> c{0x66, 0x0F, 0x6F, 0x05, 0x00, 0x00, 0x02, 0x00, 0x66, 0x0F, 0x6E, 0xC0,
+                           0x66, 0x0F, 0x7F, 0x05, 0x10, 0x00, 0x02, 0x00};
+    exec(m, c, 0x12345678u, 0, 0, false);
+    uint32_t out[4]; m.mem.r128(Machine::DATA + 16, out);
+    EXPECT(out[0] == 0x12345678u && out[1] == 0 && out[2] == 0 && out[3] == 0, "movd xmm,eax must zero the upper lanes: %08x %08x %08x %08x", out[0], out[1], out[2], out[3]);
+    // movd eax, xmm1 (66 0F 7E C8): a GP destination, not an XMM slot.
+    m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0xAAAAAAAAu, 0xBBBBBBBBu, 0xCCCCCCCCu, 0xDDDDDDDDu}.data());
+    exec(m, {0x66, 0x0F, 0x6F, 0x0D, 0x00, 0x00, 0x02, 0x00, 0x66, 0x0F, 0x7E, 0xC8}, 0, 0, 0, false);
+    EXPECT(m.cpu.reg[EAX] == 0xAAAAAAAAu, "movd eax,xmm1: got %08x", m.cpu.reg[EAX]);
+    // movq xmm0, xmm1 (F3 0F 7E C1) zeroes the upper 64 bits.
+    m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu}.data());
+    m.mem.w128(Machine::DATA + 16, std::array<uint32_t, 4>{0xAAAAAAAAu, 0xBBBBBBBBu, 0xCCCCCCCCu, 0xDDDDDDDDu}.data());
+    exec(m, {0x66, 0x0F, 0x6F, 0x05, 0x00, 0x00, 0x02, 0x00, 0x66, 0x0F, 0x6F, 0x0D, 0x10, 0x00, 0x02, 0x00,
+             0xF3, 0x0F, 0x7E, 0xC1, 0x66, 0x0F, 0x7F, 0x05, 0x20, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    m.mem.r128(Machine::DATA + 32, out);
+    EXPECT(out[0] == 0xAAAAAAAAu && out[1] == 0xBBBBBBBBu && out[2] == 0 && out[3] == 0, "movq xmm0,xmm1 must zero the upper half: %08x %08x %08x %08x", out[0], out[1], out[2], out[3]);
+    // movmskps eax, xmm1: the source is the r/m register.
+    m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0x80000000u, 0x7fffffffu, 0xFFFFFFFFu, 0x00000000u}.data());
+    exec(m, {0x0F, 0x28, 0x0D, 0x00, 0x00, 0x02, 0x00, 0x0F, 0x50, 0xC1}, 0xdeadbeefu, 0, 0, false);
+    EXPECT(m.cpu.reg[EAX] == 0x5u, "movmskps eax,xmm1: got %x want 5", m.cpu.reg[EAX]);
+    // pmovmskb eax, xmm1 (66 0F D7 C1).
+    m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0x80808080u, 0x01010101u, 0xffffffffu, 0u}.data());
+    exec(m, {0x66, 0x0F, 0x6F, 0x0D, 0x00, 0x00, 0x02, 0x00, 0x66, 0x0F, 0xD7, 0xC1}, 0, 0, 0, false);
+    EXPECT(m.cpu.reg[EAX] == 0x0f0fu, "pmovmskb eax,xmm1: got %x want 0f0f", m.cpu.reg[EAX]);
+    // sqrtss xmm0, xmm1 uses the source and keeps the destination's upper lanes.
+    // (movups, not movss: movss zeroes the lanes it does not load.)
+    m.mem.w32(Machine::DATA, f32b(4.0f)); m.mem.w32(Machine::DATA + 4, f32b(9.0f));
+    m.mem.w32(Machine::DATA + 8, f32b(16.0f)); m.mem.w32(Machine::DATA + 12, f32b(25.0f));
+    exec(m, {0x0F, 0x10, 0x05, 0x00, 0x00, 0x02, 0x00, 0x0F, 0x10, 0x0D, 0x08, 0x00, 0x02, 0x00,
+             0xF3, 0x0F, 0x51, 0xC1, 0x0F, 0x11, 0x05, 0x10, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    EXPECT(m.mem.r32(Machine::DATA + 16) == f32b(4.0f) && m.mem.r32(Machine::DATA + 20) == f32b(9.0f),
+           "sqrtss xmm0(4),xmm1(16): got %g %g", double(bf32(m.mem.r32(Machine::DATA + 16))), double(bf32(m.mem.r32(Machine::DATA + 20))));
+    // rsqrtss/rcpss (F3 0F 52/53) are scalar too: one lane from the source, the
+    // destination's upper lanes kept. A memory source is 4 bytes, so reading
+    // four lanes would fault past the operand.
+    m.mem.w32(Machine::DATA, f32b(4.0f)); m.mem.w32(Machine::DATA + 4, f32b(9.0f));
+    m.mem.w32(Machine::DATA + 8, f32b(16.0f)); m.mem.w32(Machine::DATA + 12, f32b(25.0f));
+    exec(m, {0x0F, 0x10, 0x05, 0x00, 0x00, 0x02, 0x00, 0x0F, 0x10, 0x0D, 0x08, 0x00, 0x02, 0x00,
+             0xF3, 0x0F, 0x53, 0xC1, 0x0F, 0x11, 0x05, 0x10, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    EXPECT(m.mem.r32(Machine::DATA + 16) == f32b(0.0625f) && m.mem.r32(Machine::DATA + 20) == f32b(9.0f),
+           "rcpss xmm0(4),xmm1(16): got %g %g", double(bf32(m.mem.r32(Machine::DATA + 16))), double(bf32(m.mem.r32(Machine::DATA + 20))));
+    // rcpss xmm0, [DATA+12] — a 4-byte memory operand; lanes 1-3 stay.
+    exec(m, {0x0F, 0x10, 0x05, 0x00, 0x00, 0x02, 0x00, 0xF3, 0x0F, 0x53, 0x05, 0x0C, 0x00, 0x02, 0x00,
+             0x0F, 0x11, 0x05, 0x10, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    EXPECT(m.mem.r32(Machine::DATA + 16) == f32b(0.04f) && m.mem.r32(Machine::DATA + 20) == f32b(9.0f),
+           "rcpss xmm0,[25]: got %g %g", double(bf32(m.mem.r32(Machine::DATA + 16))), double(bf32(m.mem.r32(Machine::DATA + 20))));
+    // rsqrtss xmm0, xmm1 (F3 0F 52 C1): 1/sqrt(16) = 0.25.
+    exec(m, {0x0F, 0x10, 0x05, 0x00, 0x00, 0x02, 0x00, 0x0F, 0x10, 0x0D, 0x08, 0x00, 0x02, 0x00,
+             0xF3, 0x0F, 0x52, 0xC1, 0x0F, 0x11, 0x05, 0x10, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    EXPECT(m.mem.r32(Machine::DATA + 16) == f32b(0.25f) && m.mem.r32(Machine::DATA + 20) == f32b(9.0f),
+           "rsqrtss xmm0(4),xmm1(16): got %g %g", double(bf32(m.mem.r32(Machine::DATA + 16))), double(bf32(m.mem.r32(Machine::DATA + 20))));
+    // unpcklps/unpckhps interleave dest,src (dest first).
+    m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u}.data());
+    m.mem.w128(Machine::DATA + 16, std::array<uint32_t, 4>{0xAAAAAAAAu, 0xBBBBBBBBu, 0xCCCCCCCCu, 0xDDDDDDDDu}.data());
+    exec(m, {0x0F, 0x28, 0x05, 0x00, 0x00, 0x02, 0x00, 0x0F, 0x28, 0x0D, 0x10, 0x00, 0x02, 0x00,
+             0x0F, 0x14, 0xC1, 0x0F, 0x29, 0x05, 0x20, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    m.mem.r128(Machine::DATA + 32, out);
+    EXPECT(out[0] == 0x11111111u && out[1] == 0xAAAAAAAAu && out[2] == 0x22222222u && out[3] == 0xBBBBBBBBu,
+           "unpcklps: %08x %08x %08x %08x", out[0], out[1], out[2], out[3]);
+    exec(m, {0x0F, 0x28, 0x05, 0x00, 0x00, 0x02, 0x00, 0x0F, 0x28, 0x0D, 0x10, 0x00, 0x02, 0x00,
+             0x0F, 0x15, 0xC1, 0x0F, 0x29, 0x05, 0x20, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    m.mem.r128(Machine::DATA + 32, out);
+    EXPECT(out[0] == 0x33333333u && out[1] == 0xCCCCCCCCu && out[2] == 0x44444444u && out[3] == 0xDDDDDDDDu,
+           "unpckhps: %08x %08x %08x %08x", out[0], out[1], out[2], out[3]);
+    // packuswb saturates signed 16-bit lanes into unsigned bytes.
+    m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0x012cffffu, 0x012c0080u, 0x00ff0000u, 0x03e80100u}.data());
+    m.mem.w128(Machine::DATA + 16, std::array<uint32_t, 4>{0x00040003u, 0x00060005u, 0x00080007u, 0x000a0009u}.data());
+    exec(m, {0x66, 0x0F, 0x6F, 0x05, 0x00, 0x00, 0x02, 0x00, 0x66, 0x0F, 0x6F, 0x0D, 0x10, 0x00, 0x02, 0x00,
+             0x66, 0x0F, 0x67, 0xC1, 0x66, 0x0F, 0x7F, 0x05, 0x20, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    m.mem.r128(Machine::DATA + 32, out);
+    { const uint8_t* b = reinterpret_cast<const uint8_t*>(out);
+      const uint8_t want[16] = {0, 255, 128, 255, 0, 255, 255, 255, 3, 4, 5, 6, 7, 8, 9, 10};
+      bool same = true; for (int i = 0; i < 16; ++i) same = same && b[i] == want[i];
+      EXPECT(same, "packuswb: %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u", b[0],b[1],b[2],b[3],b[4],b[5],b[6],b[7],b[8],b[9],b[10],b[11],b[12],b[13],b[14],b[15]); }
+    // stmxcsr/ldmxcsr round-trip: what fxsave-style save/restore code depends on.
+    m.mem.w32(Machine::DATA, 0xdeadbeefu);
+    exec(m, {0x0F, 0xAE, 0x1D, 0x00, 0x00, 0x02, 0x00}, 0, 0, 0, false);  // stmxcsr [DATA]
+    EXPECT(m.mem.r32(Machine::DATA) == m.cpu.mxcsr, "stmxcsr wrote %08x want %08x", m.mem.r32(Machine::DATA), m.cpu.mxcsr);
+    m.mem.w32(Machine::DATA, 0x1f80);
+    exec(m, {0x0F, 0xAE, 0x15, 0x00, 0x00, 0x02, 0x00}, 0, 0, 0, false);  // ldmxcsr [DATA]
+    EXPECT(m.cpu.mxcsr == 0x1f80, "ldmxcsr: %08x", m.cpu.mxcsr);
+    // fptan: st0 = tan(x), then 1.0 pushed on top.
+    m.mem.w64(Machine::DATA, f64b(1.0));
+    exec(m, {0xDD, 0x05, 0x00, 0x00, 0x02, 0x00, 0xD9, 0xF2, 0xDD, 0x1D, 0x10, 0x00, 0x02, 0x00, 0xDD, 0x1D, 0x18, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    EXPECT(bf64(m.mem.r64(Machine::DATA + 16)) == 1.0 && std::fabs(bf64(m.mem.r64(Machine::DATA + 24)) - std::tan(1.0)) < 1e-15,
+           "fptan(1.0): st0=%g st1=%g", bf64(m.mem.r64(Machine::DATA + 16)), bf64(m.mem.r64(Machine::DATA + 24)));
+    // fxtract: st0 = significand, st1 = unbiased exponent.
+    m.mem.w64(Machine::DATA, f64b(8.0));
+    exec(m, {0xDD, 0x05, 0x00, 0x00, 0x02, 0x00, 0xD9, 0xF4, 0xDD, 0x1D, 0x10, 0x00, 0x02, 0x00, 0xDD, 0x1D, 0x18, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    EXPECT(bf64(m.mem.r64(Machine::DATA + 16)) == 1.0 && bf64(m.mem.r64(Machine::DATA + 24)) == 3.0,
+           "fxtract(8.0): st0=%g st1=%g", bf64(m.mem.r64(Machine::DATA + 16)), bf64(m.mem.r64(Machine::DATA + 24)));
 }
 
 // ---------- (3) thunks, callbacks, nesting ----------
@@ -256,6 +587,9 @@ int main(int argc, char** argv) {
         {"shift", test_shift, "X86-CORE PASS: rol/ror/shl/shr/sar 8/16/32-bit count 0..33 results and defined flags match this machine's CPU"},
         {"unary", test_unary_muldiv, "X86-CORE PASS: inc/dec/neg/not, imul, mul/imul/div/idiv (incl. #DE) match this machine's CPU"},
         {"programs", test_programs, "X86-CORE PASS: control flow, addressing, string ops, FS base, W^X and explicit faults"},
+        {"fpu", test_fpu, "X86-CORE PASS: x87 f64 arithmetic and fcomip, SSE scalar double/single arithmetic, int<->float conversion and SSE2 packed integer match this machine's CPU bit for bit"},
+        {"x87forms", test_x87_forms, "X86-CORE PASS: x87 memory forms, stack discipline, control/status words and 80-bit round trip"},
+        {"sse-regressions", test_sse_regressions, "X86-CORE PASS: bt imm, movd/movq, movmskps/pmovmskb, sqrtss, unpck, packuswb, stmxcsr, fptan/fxtract match this machine's CPU"},
         {"thunks", test_thunks, "X86-CORE PASS: stdcall/cdecl thunks, nested guest callbacks, callee-saved registers preserved"},
     };
     for (auto& s : suites) { int before = failures; s.fn(); if (failures == before) printf("%s\n", s.pass); else printf("X86-CORE FAIL: %s\n", s.name); }
