@@ -1,0 +1,171 @@
+diff -ruN a/src/microsoft/vulkan/dzn_device.c b/src/microsoft/vulkan/dzn_device.c
+--- a/src/microsoft/vulkan/dzn_device.c	2026-11-09 08:54:54.364075767 -0300
++++ b/src/microsoft/vulkan/dzn_device.c	2026-11-09 08:54:54.365075777 -0300
+@@ -1820,19 +1820,18 @@
+    }
+ #endif
+ 
+-   bool missing_validator = false;
+ #ifdef _WIN32
+-   if ((instance->debug_flags & DZN_DEBUG_EXPERIMENTAL) == 0) {
++   /* Play: the DXIL signer (dxil.dll) is an optional redistributable, as it is
++    * for the d3d12 GL driver. Without it shaders are emitted unvalidated at the
++    * newest validator version we understand (NO_DXIL_VALIDATION) instead of
++    * refusing to create an instance; DZN_DEBUG=experimental still asks the
++    * device for experimental shader models and skips the signer entirely. */
++   if ((instance->debug_flags & DZN_DEBUG_EXPERIMENTAL) == 0)
+       instance->dxil_validator = dxil_create_validator(NULL);
+-      missing_validator = !instance->dxil_validator;
+-   }
++   if (!instance->dxil_validator && (instance->debug_flags & DZN_DEBUG_EXPERIMENTAL) == 0)
++      mesa_logw("DXIL.dll not found; shaders are emitted without validation\n");
+ #endif
+ 
+-   if (missing_validator) {
+-      dzn_instance_destroy(instance, pAllocator);
+-      return vk_error(NULL, VK_ERROR_INITIALIZATION_FAILED);
+-   }
+-
+    instance->d3d12_mod = util_dl_open(UTIL_DL_PREFIX "d3d12" UTIL_DL_EXT);
+    if (!instance->d3d12_mod) {
+       dzn_instance_destroy(instance, pAllocator);
+diff -ruN a/src/microsoft/vulkan/dzn_meta.c b/src/microsoft/vulkan/dzn_meta.c
+--- a/src/microsoft/vulkan/dzn_meta.c	2026-11-09 08:54:54.367075795 -0300
++++ b/src/microsoft/vulkan/dzn_meta.c	2026-11-09 08:54:54.368075804 -0300
+@@ -57,37 +57,40 @@
+    assert(ret);
+ 
+ #ifdef _WIN32
+-   char *err = NULL;
+-   bool res = dxil_validate_module(instance->dxil_validator,
+-                                   dxil_blob.data,
+-                                   dxil_blob.size, &err);
++   /* Play: no DXIL signer means nothing to validate against (see dzn_pipeline.c). */
++   if (instance->dxil_validator) {
++      char *err = NULL;
++      bool res = dxil_validate_module(instance->dxil_validator,
++                                      dxil_blob.data,
++                                      dxil_blob.size, &err);
+ 
+-   if ((instance->debug_flags & DZN_DEBUG_DXIL) &&
+-       (instance->debug_flags & DZN_DEBUG_INTERNAL)) {
+-      char *disasm = dxil_disasm_module(instance->dxil_validator,
+-                                        dxil_blob.data,
+-                                        dxil_blob.size);
+-      if (disasm) {
+-         fprintf(stderr,
+-                 "== BEGIN SHADER ============================================\n"
+-                 "%s\n"
+-                 "== END SHADER ==============================================\n",
+-                  disasm);
+-         ralloc_free(disasm);
++      if ((instance->debug_flags & DZN_DEBUG_DXIL) &&
++          (instance->debug_flags & DZN_DEBUG_INTERNAL)) {
++         char *disasm = dxil_disasm_module(instance->dxil_validator,
++                                           dxil_blob.data,
++                                           dxil_blob.size);
++         if (disasm) {
++            fprintf(stderr,
++                    "== BEGIN SHADER ============================================\n"
++                    "%s\n"
++                    "== END SHADER ==============================================\n",
++                     disasm);
++            ralloc_free(disasm);
++         }
+       }
+-   }
+ 
+-   if ((instance->debug_flags & DZN_DEBUG_DXIL) &&
+-       (instance->debug_flags & DZN_DEBUG_INTERNAL) &&
+-       !res && !(instance->debug_flags & DZN_DEBUG_EXPERIMENTAL)) {
+-      fprintf(stderr,
+-            "== VALIDATION ERROR =============================================\n"
+-            "%s\n"
+-            "== END ==========================================================\n",
+-            err ? err : "unknown");
+-      ralloc_free(err);
++      if ((instance->debug_flags & DZN_DEBUG_DXIL) &&
++          (instance->debug_flags & DZN_DEBUG_INTERNAL) &&
++          !res && !(instance->debug_flags & DZN_DEBUG_EXPERIMENTAL)) {
++         fprintf(stderr,
++               "== VALIDATION ERROR =============================================\n"
++               "%s\n"
++               "== END ==========================================================\n",
++               err ? err : "unknown");
++         ralloc_free(err);
++      }
++      assert(res || (instance->debug_flags & DZN_DEBUG_EXPERIMENTAL));
+    }
+-   assert(res || (instance->debug_flags & DZN_DEBUG_EXPERIMENTAL));
+ #endif
+ 
+    void *data;
+diff -ruN a/src/microsoft/vulkan/dzn_pipeline.c b/src/microsoft/vulkan/dzn_pipeline.c
+--- a/src/microsoft/vulkan/dzn_pipeline.c	2026-11-09 08:54:54.369075814 -0300
++++ b/src/microsoft/vulkan/dzn_pipeline.c	2026-11-09 08:54:54.371075832 -0300
+@@ -453,35 +453,40 @@
+       return result;
+ 
+ #ifdef _WIN32
+-   char *err;
+-   bool res = dxil_validate_module(instance->dxil_validator,
+-                                   (void *)slot->pShaderBytecode,
+-                                   slot->BytecodeLength, &err);
++   /* Play: with no DXIL signer (dxil.dll) there is nothing to validate against;
++    * the module was emitted at the newest validator version we understand and
++    * is submitted as-is, as the d3d12 GL driver does. */
++   if (instance->dxil_validator) {
++      char *err = NULL;
++      bool res = dxil_validate_module(instance->dxil_validator,
++                                      (void *)slot->pShaderBytecode,
++                                      slot->BytecodeLength, &err);
+ 
+-   if (instance->debug_flags & DZN_DEBUG_DXIL) {
+-      char *disasm = dxil_disasm_module(instance->dxil_validator,
+-                                        (void *)slot->pShaderBytecode,
+-                                        slot->BytecodeLength);
+-      if (disasm) {
+-         fprintf(stderr,
+-                 "== BEGIN SHADER ============================================\n"
+-                 "%s\n"
+-                 "== END SHADER ==============================================\n",
+-                  disasm);
+-         ralloc_free(disasm);
++      if (instance->debug_flags & DZN_DEBUG_DXIL) {
++         char *disasm = dxil_disasm_module(instance->dxil_validator,
++                                           (void *)slot->pShaderBytecode,
++                                           slot->BytecodeLength);
++         if (disasm) {
++            fprintf(stderr,
++                    "== BEGIN SHADER ============================================\n"
++                    "%s\n"
++                    "== END SHADER ==============================================\n",
++                     disasm);
++            ralloc_free(disasm);
++         }
+       }
+-   }
+ 
+-   if (!res && !(instance->debug_flags & DZN_DEBUG_EXPERIMENTAL)) {
+-      if (err) {
+-         mesa_loge(
+-               "== VALIDATION ERROR =============================================\n"
+-               "%s\n"
+-               "== END ==========================================================\n",
+-               err);
+-         ralloc_free(err);
++      if (!res && !(instance->debug_flags & DZN_DEBUG_EXPERIMENTAL)) {
++         if (err) {
++            mesa_loge(
++                  "== VALIDATION ERROR =============================================\n"
++                  "%s\n"
++                  "== END ==========================================================\n",
++                  err);
++            ralloc_free(err);
++         }
++         return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+       }
+-      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+    }
+ #endif
+ 

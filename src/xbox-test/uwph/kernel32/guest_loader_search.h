@@ -10,12 +10,13 @@ static void set_runtime_directory(const std::wstring& path) { runtimeDirectory=p
 // and its driver library libgallium_wgl.dll, as the OS opengl32.dll serves a game on Windows. The console has none,
 // so a game that ships no GL DLL of its own gets these (when the package carries them; otherwise Play's WGL stubs
 // answer). dxil.dll is the optional DXIL signer Mesa loads by name (DXIL.dll) for shader validation.
-// Vulkan (research/VULKAN-PLAN.md) is the same contract: vulkan-1.dll is the Khronos loader built from pinned source
-// and vulkan-null-icd.dll is the driver its manifest names, so a Vulkan-optional engine's LoadLibrary succeeds and
-// then sees zero physical devices, exactly as on a Windows machine with no Vulkan driver.
+// Vulkan (research/VULKAN-PLAN.md) is the same contract: vulkan-1.dll is the Khronos loader built from pinned source,
+// vulkan_dzn.dll is Mesa's dzn driver (Vulkan on D3D12) and vulkan-null-icd.dll is the fallback driver that reports
+// zero physical devices. Both manifests name a bare DLL, so a Vulkan-optional engine's LoadLibrary succeeds and the
+// loader's own LoadLibraryW of the ICD resolves here.
 static bool redistributable(const std::wstring& name) {
     std::wstring key=name;for(auto& c:key)c=towlower(c);
-    for(auto dll:{L"opengl32.dll",L"libgallium_wgl.dll",L"dxil.dll",L"vulkan-1.dll",L"vulkan-null-icd.dll",L"msvcp140.dll",L"msvcp140_1.dll",L"msvcp140_2.dll",L"msvcp140_atomic_wait.dll",
+    for(auto dll:{L"opengl32.dll",L"libgallium_wgl.dll",L"dxil.dll",L"vulkan-1.dll",L"vulkan_dzn.dll",L"vulkan-null-icd.dll",L"msvcp140.dll",L"msvcp140_1.dll",L"msvcp140_2.dll",L"msvcp140_atomic_wait.dll",
                   L"msvcp140_codecvt_ids.dll",L"concrt140.dll"}) if(key==dll) return true;
     return false;
 }
