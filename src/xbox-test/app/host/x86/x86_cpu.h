@@ -385,7 +385,9 @@ struct Cpu {
         case 0xAC: case 0xAD: {  // shrd r/m, r, imm8/cl
             Rm r = modrm(); unsigned cnt = op == 0xAC ? fetch() : (reg[ECX] & 31); shld(r, modrm_reg, n, cnt, true); return; }
         case 0xBA: {  // bt/bts/btr/btc r/m, imm8
-            Rm r = modrm(); uint32_t bit = fetch(); bt(r, bit, n, (modrm_reg & 3) + 0); return; }
+            // The bit index is the encoded immediate, not a register: bt() reads
+            // a register for the other form, so the immediate gets its own path.
+            Rm r = modrm(); uint32_t bit = fetch(); bt_imm(r, bit, n, modrm_reg & 3); return; }
         case 0xB0: case 0xB1: {  // cmpxchg r/m, r
             unsigned sz = (op & 1) ? n : 1; Rm r = modrm();
             uint32_t dst = rd(r, sz), src = getreg(modrm_reg, sz);
@@ -409,18 +411,19 @@ struct Cpu {
         case 0xAE: {  // group 15: fences, fxrstor/xsave, ldmxcsr/stmxcsr
             Rm r = modrm();
             switch (modrm_reg) {
-            case 0: case 3: case 5: case 6: return;  // fxsave/fxrstor/xsave/xrstor: state is host-side only
+            case 0: case 1: case 5: case 6: return;  // fxsave/fxrstor/xsave/xrstor: state is host-side only
             case 2: mxcsr = rd(r, 4); return;        // ldmxcsr
+            case 3: wr(r, 4, mxcsr); return;         // stmxcsr: a save/restore pair must round-trip
             case 7: return;                          // clflush
             default: unsupported("0f ae /n"); }
         }
         case 0x10: case 0x11: sse_move(op); return;
         case 0x28: case 0x29: sse_move(op); return;
         case 0x12: case 0x13: case 0x16: case 0x17: sse_move(op); return;
-        case 0x14: case 0x15: {  // unpcklps/unpckhps
+        case 0x14: case 0x15: {  // unpcklps/unpckhps: dest and src interleaved (dest first)
             Rm r = modrm(); uint32_t a[4], b[4]; sse_read(r, a); sse_reg(modrm_reg, b);
             bool hi = op == 0x15; uint32_t out[4];
-            for (int i = 0; i < 2; ++i) { out[i] = hi ? b[i + 2] : a[i]; out[i + 2] = hi ? a[i + 2] : b[i]; }
+            for (int i = 0; i < 2; ++i) { out[i * 2] = b[i + (hi ? 2 : 0)]; out[i * 2 + 1] = a[i + (hi ? 2 : 0)]; }
             sse_write_reg(modrm_reg, out); return; }
         case 0x2B: { Rm r = modrm(); if (r.isreg) unsupported("movntps reg"); uint32_t v[4]; sse_reg(modrm_reg, v); mem.w128(r.ea + seg, v); return; }
         case 0x2E: case 0x2F: {  // ucomiss/comiss
@@ -446,18 +449,23 @@ struct Cpu {
             return; }
         case 0x6E: {  // movd/movq xmm, r/m (66 prefix; F3 0F 7E is the movq load)
             if (!p66) unsupported("movd (MMX)");
+            // A load into an XMM register zeroes the rest of it (Intel: the
+            // destination is the full 128 bits, not a partial write).
             Rm r = modrm();
-            xmm.setu32(modrm_reg, rd(r, 4)); return; }
+            uint32_t v[4] = {rd(r, 4), 0, 0, 0};
+            sse_write_reg(modrm_reg, v); return; }
         case 0x7E: {  // movd/movq r/m, xmm (66) or movq xmm, xmm/m64 (F3)
             Rm r = modrm();
-            if (rep == 0xF3) { xmm.setu64(modrm_reg, sse_rd64(r)); return; }
-            if (r.isreg) { xmm.setu64(r.regno, xmm.u64(modrm_reg)); return; }
+            if (rep == 0xF3) { uint32_t v[4] = {0, 0, 0, 0}; uint64_t q = sse_rd64(r); v[0] = uint32_t(q); v[1] = uint32_t(q >> 32); sse_write_reg(modrm_reg, v); return; }
+            // 66 0F 7E with a register operand is a GP destination (movd r32, xmm).
+            if (r.isreg) { setreg(r.regno, 4, xmm.u32(modrm_reg)); return; }
             mem.w32(r.ea + seg, xmm.u32(modrm_reg)); return; }
         case 0xD6: { Rm r = modrm(); if (r.isreg) unsupported("movq2dq reg"); mem.w64(r.ea + seg, xmm.u64(modrm_reg)); return; }
-        case 0x50: {  // movmskps/movmskpd
-            Rm r = modrm(); (void)r;
-            uint32_t m = 0; if (p66) for (int i = 0; i < 2; ++i) m |= (xmm.r[modrm_reg][i * 2 + 1] >> 31) << i;
-            else for (int i = 0; i < 4; ++i) m |= (xmm.r[modrm_reg][i] >> 31) << i;
+        case 0x50: {  // movmskps/movmskpd: the source is the r/m XMM, the destination a GPR
+            Rm r = modrm();
+            if (!r.isreg) unsupported("movmskps memory operand");
+            uint32_t m = 0; if (p66) for (int i = 0; i < 2; ++i) m |= (xmm.r[r.regno][i * 2 + 1] >> 31) << i;
+            else for (int i = 0; i < 4; ++i) m |= (xmm.r[r.regno][i] >> 31) << i;
             setreg(modrm_reg, 4, m); return; }
         case 0x5A: case 0x5B: case 0x5C: case 0x5D: case 0x5E: case 0x5F: sse_arith(op); return;
         case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57: sse_arith(op); return;
@@ -473,6 +481,13 @@ struct Cpu {
     // bt/bts/btr/btc r/m, r|imm. `action`: 0 test, 1 set, 2 reset, 3 complement.
     void bt(const Rm& r, unsigned regno, unsigned n, unsigned action) {
         uint32_t bit = getreg(regno, n) & (8 * n - 1);
+        bt_bit(r, bit, n, action);
+    }
+    // bt/bts/btr/btc r/m, imm8: the bit index is the immediate itself.
+    void bt_imm(const Rm& r, uint32_t bit, unsigned n, unsigned action) {
+        bt_bit(r, bit & (8 * n - 1), n, action);
+    }
+    void bt_bit(const Rm& r, uint32_t bit, unsigned n, unsigned action) {
         uint32_t v = rd(r, n);
         setf(CF, (v >> bit) & 1);
         if (!action) return;
@@ -563,16 +578,16 @@ struct Cpu {
         bool ss = rep == 0xF3, sd = rep == 0xF2, pd = p66;
         uint32_t a[4], b[4];
         switch (op) {
-        case 0x51: {  // sqrt
+        case 0x51: {  // sqrt: the r/m operand is the source; the destination keeps its upper lanes
             sse_reg(modrm_reg, a);
-            if (ss) a[0] = f32b(std::sqrt(bf32(a[0])));
-            else if (sd) { double x = std::sqrt(bf64(uint64_t(a[1]) << 32 | a[0])); a[0] = uint32_t(f64b(x)); a[1] = uint32_t(f64b(x) >> 32); }
-            else if (pd) { for (int i = 0; i < 2; ++i) { double x = std::sqrt(bf64(uint64_t(a[i * 2 + 1]) << 32 | a[i * 2])); uint64_t q = f64b(x); a[i * 2] = uint32_t(q); a[i * 2 + 1] = uint32_t(q >> 32); } }
-            else { for (int i = 0; i < 4; ++i) a[i] = f32b(std::sqrt(bf32(a[i]))); }
+            if (ss) a[0] = f32b(std::sqrt(sse_f32(r)));
+            else if (sd) { double x = std::sqrt(sse_f64(r)); uint64_t q = f64b(x); a[0] = uint32_t(q); a[1] = uint32_t(q >> 32); }
+            else if (pd) { for (int i = 0; i < 2; ++i) { double x = std::sqrt(sse_f64(r, i * 8)); uint64_t q = f64b(x); a[i * 2] = uint32_t(q); a[i * 2 + 1] = uint32_t(q >> 32); } }
+            else { for (int i = 0; i < 4; ++i) a[i] = f32b(std::sqrt(sse_f32(r, i * 4))); }
             sse_write_reg(modrm_reg, a); return; }
         case 0x52: case 0x53: {  // rsqrtps / rcpps (approximations: the exact reciprocal is closer than the hardware estimate)
             sse_reg(modrm_reg, a);
-            for (int i = 0; i < 4; ++i) { float x = bf32(a[i]); a[i] = f32b(op == 0x52 ? 1.0f / std::sqrt(x) : 1.0f / x); }
+            for (int i = 0; i < 4; ++i) { float x = sse_f32(r, i * 4); a[i] = f32b(op == 0x52 ? 1.0f / std::sqrt(x) : 1.0f / x); }
             sse_write_reg(modrm_reg, a); return; }
         case 0x54: case 0x55: case 0x56: case 0x57: {  // and/andn/or/xor
             sse_reg(modrm_reg, a); sse_read(r, b);
@@ -631,19 +646,22 @@ struct Cpu {
             const uint8_t* ab = reinterpret_cast<const uint8_t*>(a) + 8; const uint8_t* bb = reinterpret_cast<const uint8_t*>(b) + 8;
             for (unsigned i = 0; i < 8 / gran; ++i) { memcpy(o + i * 2 * gran, ab + i * gran, gran); memcpy(o + i * 2 * gran + gran, bb + i * gran, gran); }
             sse_write_reg(modrm_reg, out); return; }
-        case 0x63: case 0x6B: {  // packsswb / packssdw
+        case 0x63: case 0x67: case 0x6B: {  // packsswb / packuswb / packssdw
             sse_reg(modrm_reg, a); sse_read(r, b);
             uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
             if (op == 0x63) {
                 for (int i = 0; i < 8; ++i) { int v = int16_t(uint16_t(a[i / 2] >> (16 * (i % 2)))); o[i] = uint8_t(v < -128 ? -128 : v > 127 ? 127 : v); }
                 for (int i = 0; i < 8; ++i) { int v = int16_t(uint16_t(b[i / 2] >> (16 * (i % 2)))); o[8 + i] = uint8_t(v < -128 ? -128 : v > 127 ? 127 : v); }
+            } else if (op == 0x67) {  // packuswb: signed 16-bit in, unsigned 8-bit saturate
+                for (int i = 0; i < 8; ++i) { int v = int16_t(uint16_t(a[i / 2] >> (16 * (i % 2)))); o[i] = uint8_t(v < 0 ? 0 : v > 255 ? 255 : v); }
+                for (int i = 0; i < 8; ++i) { int v = int16_t(uint16_t(b[i / 2] >> (16 * (i % 2)))); o[8 + i] = uint8_t(v < 0 ? 0 : v > 255 ? 255 : v); }
             } else {
                 for (int i = 0; i < 4; ++i) { int v = int32_t(a[i]); int16_t s = int16_t(v < -32768 ? -32768 : v > 32767 ? 32767 : v); memcpy(o + 2 * i, &s, 2); }
                 for (int i = 0; i < 4; ++i) { int v = int32_t(b[i]); int16_t s = int16_t(v < -32768 ? -32768 : v > 32767 ? 32767 : v); memcpy(o + 8 + 2 * i, &s, 2); }
             }
             sse_write_reg(modrm_reg, out); return; }
-        case 0x64: case 0x65: case 0x66: case 0x67: {  // pcmpgtb/w/d/q
-            unsigned gran = op == 0x64 ? 1 : op == 0x65 ? 2 : op == 0x66 ? 4 : 8;
+        case 0x64: case 0x65: case 0x66: {  // pcmpgtb/w/d
+            unsigned gran = op == 0x64 ? 1 : op == 0x65 ? 2 : 4;
             sse_reg(modrm_reg, a); sse_read(r, b);
             uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
             const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
@@ -651,8 +669,7 @@ struct Cpu {
                 bool gt;
                 if (gran == 1) gt = int8_t(ab[i]) > int8_t(bb[i]);
                 else if (gran == 2) { int16_t x, y; memcpy(&x, ab + 2 * i, 2); memcpy(&y, bb + 2 * i, 2); gt = x > y; }
-                else if (gran == 4) { int32_t x, y; memcpy(&x, ab + 4 * i, 4); memcpy(&y, bb + 4 * i, 4); gt = x > y; }
-                else { int64_t x, y; memcpy(&x, ab + 8 * i, 8); memcpy(&y, bb + 8 * i, 8); gt = x > y; }
+                else { int32_t x, y; memcpy(&x, ab + 4 * i, 4); memcpy(&y, bb + 4 * i, 4); gt = x > y; }
                 memset(o + i * gran, gt ? 0xff : 0, gran);
             }
             sse_write_reg(modrm_reg, out); return; }
@@ -667,8 +684,9 @@ struct Cpu {
             const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
             for (unsigned i = 0; i < 16 / gran; ++i) memset(o + i * gran, memcmp(ab + i * gran, bb + i * gran, gran) == 0 ? 0xff : 0, gran);
             sse_write_reg(modrm_reg, out); return; }
-        case 0xD7: {  // pmovmskb
-            sse_reg(modrm_reg, a);
+        case 0xD7: {  // pmovmskb: the source is the r/m XMM, the destination a GPR
+            if (!r.isreg) unsupported("pmovmskb memory operand");
+            sse_reg(r.regno, a);
             uint32_t m = 0; const uint8_t* ab = reinterpret_cast<const uint8_t*>(a);
             for (int i = 0; i < 16; ++i) m |= ((ab[i] >> 7) & 1) << i;
             setreg(modrm_reg, 4, m); return; }
@@ -835,9 +853,10 @@ struct Cpu {
             case 0x2e: fpu.push(0.0L); return;               // fldz
             case 0x30: setst(0, std::exp2(st(0)) - 1.0L); return;  // f2xm1
             case 0x31: setst(1, st(1) * std::log2(st(0))); fpu.pop(); return;  // fyl2x
-            case 0x32: fpu.push(std::tan(st(0))); return;    // fptan (the 1.0 push is implicit in the model)
+            case 0x32: setst(0, std::tan(st(0))); fpu.push(1.0L); return;  // fptan: st0 = tan(x), push 1.0
             case 0x33: setst(1, std::atan2(st(1), st(0))); fpu.pop(); return;  // fpatan
-            case 0x34: { Wide v = st(0); int e; Wide m = std::frexp(v, &e); fpu.push(Wide(e)); setst(1, m * 2); return; }  // fxtract
+            case 0x34: {  // fxtract: st0 = significand in [1,2), st1 = unbiased exponent
+                Wide v = st(0); int e; Wide m = std::frexp(v, &e); fpu.push(Wide(m * 2)); setst(1, Wide(e - 1)); return; }
             case 0x35: setst(0, std::fmod(st(0), st(1))); return;  // fprem1 (approximation: one iteration)
             case 0x36: fpu.top = (fpu.top + 1) & 7; return;  // fdecstp
             case 0x37: fpu.top = (fpu.top + 7) & 7; return;  // fincstp
