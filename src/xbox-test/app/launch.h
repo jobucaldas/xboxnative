@@ -426,10 +426,14 @@ struct PresenceKeeper {
     std::atomic<unsigned> gen{0};         // a new launch retires the previous keeper
 };
 static PresenceKeeper g_presence;
-static void presence_send(std::shared_ptr<CmSession> s,uint32_t appid,const std::map<std::string,std::string>& kv) {
+// `full` carries the game state (a new session: Steam forgot it); a coalesced
+// rich-presence change only uploads the key set.
+static void presence_send(std::shared_ptr<CmSession> s,uint32_t appid,const std::map<std::string,std::string>& kv,bool full) {
     if(!s||!s->up||!appid) return;
-    s->send_raw(steam_presence::ClientChangeStatus,steam_presence::change_status_body(),0,"");
-    s->send_raw(steam_presence::ClientGamesPlayedWithDataBlob,steam_presence::games_played_body(appid),0,"");
+    if(full) {
+        s->send_raw(steam_presence::ClientChangeStatus,steam_presence::change_status_body(),0,"");
+        s->send_raw(steam_presence::ClientGamesPlayedWithDataBlob,steam_presence::games_played_body(appid),0,"");
+    }
     if(!kv.empty()) s->send_raw(steam_presence::ClientRichPresenceUpload,
         steam_presence::rich_presence_upload_body(kv),0,"",appid);
 }
@@ -502,7 +506,7 @@ static void presence_start(uint32_t appid) {
         unsigned uploads = 0;
         while(g_presence.gen.load() == gen) {
             Sleep(500);
-            std::shared_ptr<CmSession> session; std::map<std::string,std::string> kv; uint32_t appid = 0; bool send = false;
+            std::shared_ptr<CmSession> session; std::map<std::string,std::string> kv; uint32_t appid = 0; bool send = false, full = false;
             {   std::lock_guard<std::mutex> l(g_presence.m);
                 if(g_presence.gen.load() != gen || !g_presence.appid || g_presence.ended) break;
                 auto now = user_session();
@@ -510,7 +514,7 @@ static void presence_start(uint32_t appid) {
                 if(g_presence.blocked) continue;
                 appid = g_presence.appid;
                 if(now != g_presence.session) {             // a new session: Steam forgot the game
-                    g_presence.session = now; send = true;
+                    g_presence.session = now; send = full = true;
                     now->set_push(presence_push);
                     if(g_presence.rp.coalescer.dirty) g_presence.rp.coalescer.sent();
                     kv = g_presence.rp.kv;
@@ -520,7 +524,7 @@ static void presence_start(uint32_t appid) {
                 session = now;
             }
             if(!send) continue;
-            try { presence_send(session,appid,kv); } catch(...) { continue; }
+            try { presence_send(session,appid,kv,full); } catch(...) { continue; }
             if(kv.empty()) continue;
             char line[120];snprintf(line,sizeof line,"STEAM presence: rich presence uploaded (%zu keys, #%u)",kv.size(),++uploads);lp_sink(line);
         }
