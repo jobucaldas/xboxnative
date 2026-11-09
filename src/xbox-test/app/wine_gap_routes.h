@@ -11,6 +11,7 @@
 {"bcryptprimitives.dll", "system"},
 {"combase.dll", "system"},
 {"crypt32.dll", "system"},
+{"d3d9.dll", "uwph"},
 {"d3d10.dll", "uwph"},
 {"d3d10_1.dll", "uwph"},
 {"d3d10core.dll", "uwph"},
