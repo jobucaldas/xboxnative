@@ -13,10 +13,14 @@
 
 namespace game_library {
 
-// "app <id> build <b> files <n> bytes <n> installdir <dir>\n" (installdir absent before 0.5.0.0)
-struct Marker { uint64_t bytes = 0; std::string installdir; };
+// "app <id> build <b> files <n> bytes <n> [root <path>] installdir <dir>\n"
+// installdir absent before 0.5.0.0; root absent for an install under LocalState (see valid_root).
+struct Marker { uint64_t bytes = 0; std::string installdir, root; };
 inline Marker parse_marker(const std::string& s) {
     Marker m;
+    size_t r = s.find(" root "), e = s.find(" installdir ");
+    if (r != std::string::npos && (e == std::string::npos || r < e)) m.root = s.substr(r + 6, (e == std::string::npos ? s.size() : e) - (r + 6));
+    while (!m.root.empty() && (m.root.back() == '\n' || m.root.back() == '\r' || m.root.back() == ' ')) m.root.pop_back();
     size_t p = s.find(" bytes ");
     if (p != std::string::npos) m.bytes = std::strtoull(s.c_str() + p + 7, nullptr, 10);
     p = s.find(" installdir ");
@@ -38,6 +42,27 @@ inline bool marker_appid(const std::string& name, uint32_t& appid, const std::st
     if (v == 0 || v > 0xFFFFFFFFull) return false;
     appid = (uint32_t)v; return true;
 }
+
+// Extra install roots (USB drives) are "<drive>:\\<folder>[\\<folder>...]": ASCII, no spaces, no
+// dot-leading/trailing or empty components, no trailing backslash, so the marker line stays
+// parseable and the path means one thing to Win32. "" is the default root (LocalState).
+inline bool valid_root(const std::string& r) {
+    if (r.size() < 4 || r.size() > 120 || !((r[0] >= 'A' && r[0] <= 'Z') || (r[0] >= 'a' && r[0] <= 'z')) || r[1] != ':' || r[2] != '\\') return false;
+    size_t start = 3;
+    for (size_t i = 3; i <= r.size(); i++) {
+        if (i < r.size() && r[i] != '\\') { char c = r[i]; if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')) return false; continue; }
+        if (i == start || r[start] == '.' || r[i - 1] == '.') return false;
+        start = i + 1;
+    }
+    return true;
+}
+// Folder holding the game: root (or the default root when empty) + one installdir component.
+inline std::string join_root(const std::string& defaultRoot, const std::string& root, const std::string& dir) {
+    return (root.empty() ? defaultRoot : root) + "\\" + dir;
+}
+// Identity used to decide whether two installs share a folder: the installdir alone under the
+// default root, "<root>\\<installdir>" elsewhere (same name on two drives is not shared).
+inline std::string share_key(const std::string& root, const std::string& dir) { return dir.empty() || root.empty() ? dir : root + "\\" + dir; }
 
 // Win32 path normalization drops trailing dots and spaces from a component, so
 // "steam." names the same folder as "steam". Compare and protect folders in this form.

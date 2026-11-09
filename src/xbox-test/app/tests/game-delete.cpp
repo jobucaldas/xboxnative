@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
 
     // unfinished downloads (dl_<appid>.partial): a fresh install's folder goes, everything else stays
     installs::Progress pp;
-    CHECK(installs::begin_partial(root, 600, "fresh") && installs::read_partial_dir(root, 600) == "fresh");
+    CHECK(installs::begin_partial(root, 600, "fresh") && installs::read_partial(root, 600).installdir == "fresh");
     mkdir(L"fresh"); mkdir(L"fresh\\sub"); put(L"fresh\\big.bin", "x"); put(L"fresh\\sub\\c.bin", "x");
     CHECK(installs::discard_partial(root, 600, "fresh", pp) == installs::Discard::removed);
     CHECK(!exists(L"fresh") && !exists(L"dl_600.partial") && pp.removed == 2 && pp.failed == 0);
@@ -95,6 +95,36 @@ int main(int argc, char** argv) {
     CHECK(swept.size() == 1 && swept[0].appid == 800 && swept[0].dir == "crashed" && swept[0].result == installs::Discard::removed);
     CHECK(!exists(L"crashed") && !exists(L"dl_800.partial") && exists(L"alphabet\\keep.txt") && exists(L"dl_800.partial.bak"));
     CHECK(installs::sweep_partials(root).empty());
+
+    // install on another drive: the marker stays in root and names the game's root
+    {
+        const std::wstring ext = L"C:\\xbn-usb-test"; const std::string extn = "C:\\xbn-usb-test";
+        installs::Progress rm; installs::remove_tree(ext, rm);
+        CreateDirectoryW(ext.c_str(), nullptr); CreateDirectoryW((ext + L"\\usbgame").c_str(), nullptr); CreateDirectoryW((ext + L"\\alpha").c_str(), nullptr);
+        { FILE* f = _wfopen((ext + L"\\usbgame\\g.bin").c_str(), L"wb"); if (f) { std::fputs("x", f); std::fclose(f); } }
+        { FILE* f = _wfopen((ext + L"\\alpha\\keep.bin").c_str(), L"wb"); if (f) { std::fputs("x", f); std::fclose(f); } }
+        put(L"dl_900.done", "app 900 build 1 files 1 bytes 1 root C:\\xbn-usb-test installdir usbgame\n");
+        put(L"dl_901.done", "app 901 build 1 files 1 bytes 1 root C:\\xbn-usb-test installdir alpha\n");   // same name as an internal folder, other drive
+        mkdir(L"alpha"); put(L"alpha\\own.bin", "x"); put(L"dl_902.done", "app 902 build 1 files 1 bytes 1 installdir alpha\n");
+        auto i = installs::read(root, 900);
+        CHECK(i.installed && i.root == extn && i.folder == ext + L"\\usbgame");
+        CHECK(installs::read(root, 902).folder == root + L"\\alpha" && installs::read(root, 902).root.empty());
+        CHECK(!game_library::valid_root("..\\x") && installs::read(root, 100).root.empty());
+        bool sawExt = false; for (auto& e : installs::scan(root, true)) if (e.first == 900 && e.second == "C:\\xbn-usb-test\\usbgame") sawExt = true;
+        CHECK(sawExt);
+        installs::Progress pu; CHECK(installs::remove_install(root, 900, "usbgame", false, pu, nullptr, extn));
+        CHECK(!exists(L"dl_900.done") && GetFileAttributesW((ext + L"\\usbgame").c_str()) == INVALID_FILE_ATTRIBUTES);
+        CHECK(exists(L"alpha\\own.bin") && GetFileAttributesW((ext + L"\\alpha\\keep.bin").c_str()) != INVALID_FILE_ATTRIBUTES);   // same-named folders on the other root untouched
+        // unfinished download on the extra root: removed there, record names the root
+        CHECK(installs::begin_partial(root, 910, "half", extn)); CreateDirectoryW((ext + L"\\half").c_str(), nullptr);
+        { FILE* f = _wfopen((ext + L"\\half\\p.bin").c_str(), L"wb"); if (f) { std::fputs("x", f); std::fclose(f); } }
+        auto m = installs::read_partial(root, 910); CHECK(m.installdir == "half" && m.root == extn);
+        auto sw = installs::sweep_partials(root);
+        CHECK(sw.size() == 1 && sw[0].root == extn && sw[0].result == installs::Discard::removed && GetFileAttributesW((ext + L"\\half").c_str()) == INVALID_FILE_ATTRIBUTES);
+        // choices: internal first, then the extra drive folders the sandbox allows
+        auto roots = installs::list_roots(root); CHECK(!roots.empty() && roots[0].root.empty());
+        installs::Progress pc; installs::remove_tree(ext, pc); DeleteFileW(at(L"dl_901.done").c_str()); DeleteFileW(at(L"dl_902.done").c_str());
+    }
 
     if (failures) { std::printf("GAME-DELETE FAIL: %d check(s)\n", failures); return 1; }
     std::printf("GAME-DELETE PASS: folder+marker removed, neighbours/shared/launcher folders kept, unfinished downloads removed%s\n",

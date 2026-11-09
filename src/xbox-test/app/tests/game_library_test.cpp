@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Native regression for the Delete-game and Installed-filter rules.
 #include "../game_library.h"
+#include "../storage_roots.h"
 #include <cassert>
 #include <cstdio>
 #include <memory>
@@ -47,6 +48,29 @@ int main() {
     auto only = shown(all, true, installed);
     assert(only.size() == 2 && only[0]->appid == 10 && only[1]->appid == 30);
     assert(shown(all, true, {}).empty());
+
+    // install records with a root: parse, validity, path joining, shared-folder identity
+    Marker usb = parse_marker("app 5 build 1 files 2 bytes 77 root E:\\XboxNativeGames installdir hades\n");
+    assert(usb.root == "E:\\XboxNativeGames" && usb.installdir == "hades" && usb.bytes == 77);
+    assert(parse_marker("app 5 build 1 files 2 bytes 77 installdir hades\n").root.empty());   // existing installs: LocalState
+    assert(parse_marker("app 5 root E:\\G\n").installdir.empty() && parse_marker("app 5 root E:\\G\n").root == "E:\\G");
+    assert(parse_marker("app 5 installdir a root b\n").root.empty());                         // root only counts before installdir
+    for (const char* ok : {"E:\\XboxNativeGames", "d:\\Games\\Steam-1.x", "F:\\a_b"}) assert(valid_root(ok));
+    for (const char* bad : {"", "E:", "E:\\", "E:\\x\\", "E:\\x\\\\y", "E:\\..\\x", "E:\\.x", "E:\\x.", "E:\\a b", "1:\\x", "\\\\srv\\share", "E:/x", "E:\\a\nb", "E:\\a:b"}) assert(!valid_root(bad));
+    assert(join_root("L:\\Local", "", "hades") == "L:\\Local\\hades" && join_root("L:\\Local", "E:\\G", "hades") == "E:\\G\\hades");
+    assert(share_key("", "x") == "x" && share_key("E:\\G", "x") == "E:\\G\\x" && share_key("E:\\G", "").empty());
+    std::vector<std::pair<uint32_t, std::string>> two = {{1, "x"}, {2, share_key("E:\\G", "x")}, {3, share_key("e:\\g", "x")}};
+    assert(!installdir_shared(1, "x", {two[1]}) && !installdir_shared(2, share_key("E:\\G", "x"), {two[0]}));   // same name, different drive: not shared
+    assert(installdir_shared(2, share_key("E:\\G", "x"), two) && delete_kind(2, share_key("E:\\G", "x"), {two[0], two[1]}) == DeleteKind::folder);
+    assert(delete_kind(3, share_key("e:\\g", "x"), two) == DeleteKind::shared);                               // drive letter case is the same folder
+
+    // install location choices
+    using namespace storage_roots;
+    std::vector<Choice> ch = {{"", "Internal", 5ull << 30}, {"E:\\XboxNativeGames", drive_name("E:\\XboxNativeGames"), 120ull << 30}};
+    assert(label(ch[0]) == "Internal (5.0 GB free)" && label(ch[1]) == "USB E: (120.0 GB free)" && size_text(300ull << 20) == "300 MB");
+    assert(index_of(ch, "") == 0 && index_of(ch, "E:\\XboxNativeGames") == 1 && index_of(ch, "e:\\xboxnativegames") == 1 && index_of(ch, "F:\\Gone") == 0);   // missing drive: back to internal
+    assert(cycle(0, 2, 1) == 1 && cycle(1, 2, 1) == 0 && cycle(0, 1, 1) == 0 && cycle(0, 0, 1) == 0 && cycle(0, 3, -1) == 2);
+    assert(!has_room(100ull << 20, 100ull << 20) && has_room(22000ull << 20, 20000ull << 20) && !has_room(4920ull << 20, 20461ull << 20));
 
     assert(clamp_selection(5, 0) == 0 && clamp_selection(5, 3) == 2 && clamp_selection(-1, 3) == 0 && clamp_selection(1, 3) == 1);
     std::puts("game_library: all checks passed");

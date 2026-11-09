@@ -18,7 +18,7 @@ struct DelState {
 static DelState g_del;
 
 static std::set<uint32_t> installed_appids() { std::set<uint32_t> s; for (auto& i : installs::scan(g_dir, false)) s.insert(i.first); return s; }
-static game_library::DeleteKind delete_kind_for(uint32_t appid, const std::string& dir) { return game_library::delete_kind(appid, dir, installs::scan(g_dir, true)); }
+static game_library::DeleteKind delete_kind_for(uint32_t appid, const std::string& dir, const std::string& root = std::string()) { return game_library::delete_kind(appid, game_library::share_key(root, dir), installs::scan(g_dir, true)); }
 
 // UI thread. Returns "" when the delete started, else the reason it cannot.
 // try_begin_delete() (main.cpp) only succeeds with no download running or queued and
@@ -31,17 +31,17 @@ static std::string start_delete(uint32_t appid) {
     InstallInfo ii = read_install(appid);
     if (!ii.installed) return "This game is not installed.";
     if (!try_begin_delete()) return "Wait for downloads to finish first.";
-    DeleteKind kind = delete_kind_for(appid, ii.dir);
+    DeleteKind kind = delete_kind_for(appid, ii.dir, ii.root);
     if (kind == DeleteKind::folder && !game_library::deletable_installdir(ii.dir)) {
         end_delete(); logf("delete: appid %u refused, install folder not deletable", appid); return "This install folder cannot be deleted here.";
     }
     if (g_dl.appid == appid) g_dl.state = 0;   // drop the finished/failed download overlay for this game
     g_del.appid = appid; g_del.progress.removed = 0; g_del.progress.failed = 0; g_del.kind = kind; g_del.untouched = false; g_del.state = 1;
-    logf("delete: start appid %u folder LocalState\\%s (%s)", appid, ii.dir.c_str(),
+    logf("delete: start appid %u folder %s (%s)", appid, game_library::join_root("LocalState", ii.root, ii.dir).c_str(),
          kind == DeleteKind::folder ? "marker + folder" : kind == DeleteKind::shared ? "shared with another install: marker only" : "folder unknown: marker only");
-    std::thread([appid, dir = ii.dir, keep = kind != DeleteKind::folder] {
+    std::thread([appid, dir = ii.dir, gameRoot = ii.root, keep = kind != DeleteKind::folder] {
         double t0 = now_s();
-        bool ok = installs::remove_install(g_dir, appid, dir, keep, g_del.progress, &g_quit);
+        bool ok = installs::remove_install(g_dir, appid, dir, keep, g_del.progress, &g_quit, gameRoot);
         unsigned failed = g_del.progress.failed;
         g_del.untouched = !ok;
         if (!ok) logf("delete: appid %u marker could not be removed; nothing deleted", appid);

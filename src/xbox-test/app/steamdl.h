@@ -255,10 +255,15 @@ static bool parse_manifest(const std::string& raw, AesKey& key, std::vector<std:
 }
 
 static std::wstring g_dlRoot() { return g_dir + L"\\"; }
+// Where a fresh install of appid goes (game_library::valid_root path, "" = LocalState); set when
+// Install is pressed. An existing install keeps the root its marker names.
+static std::mutex g_rootM; static std::map<uint32_t, std::string> g_chosenRoot;
+static void set_install_root(uint32_t appid, const std::string& root) { std::lock_guard<std::mutex> l(g_rootM); g_chosenRoot[appid] = root; }
+static std::string chosen_install_root(uint32_t appid) { std::lock_guard<std::mutex> l(g_rootM); auto it = g_chosenRoot.find(appid); return it == g_chosenRoot.end() ? std::string() : it->second; }
 static bool mkdirs(const std::wstring& dir) {
-    if (dir.size() <= g_dir.size()) return true;
+    if (dir.size() <= 3) return true;   // "X:\"
     if (GetFileAttributesW(dir.c_str()) != INVALID_FILE_ATTRIBUTES) return true;
-    size_t p = dir.find_last_of(L'\\'); if (p != std::wstring::npos && p > g_dir.size()) mkdirs(dir.substr(0, p));
+    size_t p = dir.find_last_of(L'\\'); if (p != std::wstring::npos && p > 2) mkdirs(dir.substr(0, p));
     return CreateDirectoryW(dir.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS;
 }
 static bool read_at(HANDLE h, uint64_t off, void* buf, DWORD n) { LARGE_INTEGER li; li.QuadPart = (LONGLONG)off; if (!SetFilePointerEx(h, li, nullptr, FILE_BEGIN)) return false; DWORD got = 0; return ReadFile(h, buf, n, &got, nullptr) && got == n; }
@@ -320,13 +325,16 @@ static bool download_app(CmSession& cm, uint32_t appid) {
     g_dl.cancel = false; g_dl.appid = appid; g_dl.done = 0; g_dl.total = 0; g_dl.files = 0; g_dl.filesDone = 0; g_dl.speed = 0; g_dl.state = 1; { std::lock_guard<std::mutex> l(g_dl.m); g_dl.name.clear(); g_dl.msg = "Contacting Steam..."; }
     double t0 = now_s();
     std::string partialDir; bool partial = false;   // set once a fresh install's files may exist on disk
+    // install root: an existing install keeps its own; a fresh one uses the choice made on the detail page (default LocalState)
+    std::string gameRoot; { installs::Info cur = installs::read(g_dir, appid); gameRoot = cur.installed ? cur.root : chosen_install_root(appid); }
+    if (!gameRoot.empty() && !game_library::valid_root(gameRoot)) gameRoot.clear();
     auto fail = [&](const std::string& m) {
         logf("dl: FAILED appid %u: %s", appid, m.c_str());
         std::string shown = m;
         if (partial) {   // do not leave preallocated files filling the disk (installs.h, unfinished downloads)
             partial = false; dl_msg("Removing the unfinished download..."); installs::Progress p;
-            auto r = installs::discard_partial(g_dir, appid, partialDir, p);
-            logf("dl: unfinished download LocalState\\%s: %s, %llu files removed, %u left", partialDir.c_str(), installs::discard_name(r), (unsigned long long)p.removed.load(), p.failed.load());
+            auto r = installs::discard_partial(g_dir, appid, partialDir, p, nullptr, gameRoot);
+            logf("dl: unfinished download %s: %s, %llu files removed, %u left", game_library::join_root("LocalState", gameRoot, partialDir).c_str(), installs::discard_name(r), (unsigned long long)p.removed.load(), p.failed.load());
             if (r == installs::Discard::removed) shown += " (partial files removed)";
         }
         dl_msg(shown); g_dl.state = g_dl.cancel ? 4 : 3; return false;
@@ -402,7 +410,9 @@ static bool download_app(CmSession& cm, uint32_t appid) {
     uint64_t total = 0; int nfiles = 0; for (auto& p : preps) { total += p.bytes; for (auto& f : p.files) if (!(f->flags & 64) && f->link.empty()) nfiles++; }
     g_dl.total = total; g_dl.files = nfiles;
     // 3. install paths, and free space for what is not already on disk (a resumed download reuses its files)
-    std::wstring destRoot = g_dir + L"\\" + widen(installdir);
+    std::wstring destRoot = installs::folder_of(g_dir, gameRoot, installdir);
+    const std::wstring spaceRoot = gameRoot.empty() ? g_dir : installs::ascii(gameRoot);   // free space is checked where the files go
+    if (!gameRoot.empty() && !mkdirs(spaceRoot)) return fail("The chosen drive is not available (" + gameRoot + ")");
     uint64_t onDisk = 0;
     for (auto& p : preps) for (auto& fp : p.files) {
         DlFile& f = *fp;
@@ -416,17 +426,17 @@ static bool download_app(CmSession& cm, uint32_t appid) {
             onDisk += std::min<uint64_t>(f.size, ((uint64_t)fa.nFileSizeHigh << 32) | fa.nFileSizeLow);
     }
     uint64_t need = total - std::min(total, onDisk);
-    { ULARGE_INTEGER fb{}, tb{}, tf{}; if (GetDiskFreeSpaceExW(g_dir.c_str(), &fb, &tb, &tf)) {
-        logf("dl: need %.1f MB (%.1f MB already on disk), free space %.1f MB", need / 1048576.0, onDisk / 1048576.0, fb.QuadPart / 1048576.0);
+    { ULARGE_INTEGER fb{}, tb{}, tf{}; if (GetDiskFreeSpaceExW(spaceRoot.c_str(), &fb, &tb, &tf)) {
+        logf("dl: install root %s; need %.1f MB (%.1f MB already on disk), free space %.1f MB", (gameRoot.empty() ? std::string("LocalState") : gameRoot).c_str(), need / 1048576.0, onDisk / 1048576.0, fb.QuadPart / 1048576.0);
         { // test guard: LocalState\dlmax.txt = size cap in MB (0 = dry run: report size only); one-shot, consumed when read
           std::wstring gp = g_dir + L"\\dlmax.txt"; FILE* gf = _wfopen(gp.c_str(), L"rb");
           if (gf) { char gb[32] = {}; fread(gb, 1, sizeof gb - 1, gf); fclose(gf); DeleteFileW(gp.c_str()); double cap = atof(gb);
             logf("dl: dlmax.txt (test guard, consumed) cap=%.0f MB need=%.1f MB", cap, total / 1048576.0);
             if (total / 1048576.0 > cap || cap <= 0) { char b[160]; snprintf(b, sizeof b, "Test guard: %.1f MB exceeds cap %.0f MB (dlmax.txt) - nothing downloaded", total / 1048576.0, cap); return fail(b); } } }
-        if (fb.QuadPart < need + (need / 20) + (64ull << 20)) { char b[160]; snprintf(b, sizeof b, "Not enough free space: need %.0f MB, have %.0f MB", need / 1048576.0, fb.QuadPart / 1048576.0); return fail(b); } } }
+        if (!storage_roots::has_room(fb.QuadPart, need)) { char b[160]; snprintf(b, sizeof b, "Not enough free space on %s: need %.0f MB, have %.0f MB", gameRoot.empty() ? "the internal drive" : gameRoot.substr(0, 2).c_str(), need / 1048576.0, fb.QuadPart / 1048576.0); return fail(b); } } }
     // a fresh install records itself before creating files, so a failure (or a crash, swept at start) removes them
     if (!file_exists(installs::marker_path(g_dir, appid))) {
-        if (!installs::begin_partial(g_dir, appid, installdir)) return fail("cannot write install state (disk full?)");
+        if (!installs::begin_partial(g_dir, appid, installdir, gameRoot)) return fail("cannot write install state (disk full?)");
         partialDir = installdir; partial = true;
     }
     if (!mkdirs(destRoot)) return fail("cannot create install folder");
@@ -491,7 +501,7 @@ static bool download_app(CmSession& cm, uint32_t appid) {
     if (bad) return fail(std::to_string(bad) + " files failed verification");
     // write dl_<appid>.done through a temporary file: an existing marker is only ever replaced by a complete one
     { std::wstring mk = installs::marker_path(g_dir, appid), tmp = mk + L".tmp"; FILE* mf = _wfopen(tmp.c_str(), L"wb");
-      bool marked = mf && fprintf(mf, "app %u build %s files %d bytes %llu installdir %s\n", appid, build.c_str(), verified, (unsigned long long)vbytes, installdir.c_str()) > 0;
+      bool marked = mf && fprintf(mf, "app %u build %s files %d bytes %llu%s%s installdir %s\n", appid, build.c_str(), verified, (unsigned long long)vbytes, gameRoot.empty() ? "" : " root ", gameRoot.c_str(), installdir.c_str()) > 0;
       if (mf && fclose(mf) != 0) marked = false;
       if (marked) marked = MoveFileExW(tmp.c_str(), mk.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
       if (!marked) {   // verified files stay for a retry to resume; a fresh install keeps its .partial, so the next start's sweep frees the space if no retry finishes it
@@ -500,6 +510,6 @@ static bool download_app(CmSession& cm, uint32_t appid) {
       } }
     if (partial) { installs::end_partial(g_dir, appid); partial = false; }
     char sm[200]; snprintf(sm, sizeof sm, "Done: %d files, %.1f MB verified", verified, vbytes / 1048576.0); dl_msg(sm);
-    logf("dl: ===== DONE appid %u '%s' -> LocalState\\%s : %d files, %llu bytes, SHA1-verified, %.0f s =====", appid, name.c_str(), installdir.c_str(), verified, (unsigned long long)vbytes, now_s() - t0);
+    logf("dl: ===== DONE appid %u '%s' -> %s : %d files, %llu bytes, SHA1-verified, %.0f s =====", appid, name.c_str(), game_library::join_root("LocalState", gameRoot, installdir).c_str(), verified, (unsigned long long)vbytes, now_s() - t0);
     g_dl.state = 2; return true;
 }
