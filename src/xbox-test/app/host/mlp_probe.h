@@ -7,6 +7,7 @@
 #include "../../uwph/imm32/route.h"
 #include "../../uwph/kernel32/route.h"
 #include "../../uwph/sysx/native.h"
+#include "../../uwph/sysx/mcf_ntdll.h"
 #include "../../uwph/dwmapi/route.h"
 #include <map>
 #include <set>
@@ -143,6 +144,8 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     // system loader, whose answers describe the UWP host package.
     if(auto policy=desktop_policy::resolve(key.c_str(),name)) address=policy;
     if(!address) address=sysx_native::resolve(dll,name);
+    // Closed list: the ntdll natives mingw-w64 GCC's threading runtime (Mesa's d3d12 driver) imports; see mcf_ntdll.h.
+    if(!address) address=mcf_ntdll::resolve(dll,name);
     // No guest OpenGL driver: Wine-equivalent no-context wgl answers.
     if(!address) address=opengl32_core::resolve(dll,name);
     if(!address && name && key=="gdi32.dll") {

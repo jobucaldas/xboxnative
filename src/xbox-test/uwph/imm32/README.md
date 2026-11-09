@@ -32,6 +32,17 @@ Context creation remains unresolved. A future input-context
 backend must replace these routes together; it cannot keep these functions
 while enabling context creation elsewhere.
 
+The lock family follows the same split. `ImmLockIMC` has no context to return
+(NULL) and `ImmUnlockIMC` has nothing to unlock (FALSE), which is Wine's
+`get_imc_data(NULL)` path; a foreign HIMC is rejected with
+`ERROR_INVALID_HANDLE` like every other context call here. `ImmLockIMCC` and
+`ImmUnlockIMCC` are the real implementation: Wine's imm.c forwards them
+straight to `GlobalLock`/`GlobalUnlock` with no context lookup, so an IMCC block
+this process allocated locks and unlocks exactly as it does under Wine,
+including the `ERROR_NOT_LOCKED` on a second unlock. `ImmDisableTextFrameService`
+returns FALSE without touching the last error, matching Wine's unimplemented
+stub.
+
 Run `bash src/xbox-test/uwph/imm32/test.sh` for off-device tests. The test compares
 return values, last error, and output preservation with Wine's IMM32 exports
 for null and foreign contexts through typed WINAPI function pointers. This is Wine
@@ -40,3 +51,5 @@ The routing-plan CSV count is unchanged by adding individual resolver routes.
 
 Association tests add null-HWND Wine differentials and a guest-record validator
 regression for detach, children, unsupported defaults, invalid handles and flags.
+Lock tests add the null/foreign context differentials plus a real movable global
+block (each side gets its own, since the lock count is per block).

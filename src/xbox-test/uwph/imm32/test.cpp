@@ -1,6 +1,13 @@
 #include "route.h"
 #include <cstdio>
 #include <array>
+// mingw's imm.h omits the lock family; the ABI is imm32.spec's.
+extern "C" {
+LPVOID WINAPI ImmLockIMC(HIMC);
+BOOL WINAPI ImmUnlockIMC(HIMC);
+LPVOID WINAPI ImmLockIMCC(HIMCC);
+BOOL WINAPI ImmUnlockIMCC(HIMCC);
+}
 #define CHECK(x) do { if (!(x)) { std::printf("FAIL line %d: %s\n", __LINE__, #x); return 1; } } while (0)
 int main() {
     HMODULE reference = LoadLibraryW(L"imm32.dll");
@@ -129,6 +136,67 @@ int main() {
         if (r1 != r2 || e1 != e2) std::printf("ImmSimulateHotKey mine=%d/%lu Wine=%d/%lu\n", r1, e1, r2, e2);
         CHECK(r1 == r2 && e1 == e2);
     }
+    // Context and component locks. No context exists here, so ImmLockIMC has
+    // nothing to return; an IMCC block is plain global memory in Wine, so the
+    // lock pair must agree with Wine on a real movable block as well as on
+    // null and foreign handles.
+    {
+        auto mine_lock = reinterpret_cast<decltype(&ImmLockIMC)>(imm32_core::resolve("imm32.dll", "ImmLockIMC"));
+        auto mine_unlock = reinterpret_cast<decltype(&ImmUnlockIMC)>(imm32_core::resolve("imm32.dll", "ImmUnlockIMC"));
+        auto mine_lockcc = reinterpret_cast<decltype(&ImmLockIMCC)>(imm32_core::resolve("imm32.dll", "ImmLockIMCC"));
+        auto mine_unlockcc = reinterpret_cast<decltype(&ImmUnlockIMCC)>(imm32_core::resolve("imm32.dll", "ImmUnlockIMCC"));
+        auto mine_disable = reinterpret_cast<decltype(&ImmDisableTextFrameService)>(imm32_core::resolve("imm32.dll", "ImmDisableTextFrameService"));
+        auto wine_lock = reinterpret_cast<decltype(&ImmLockIMC)>(GetProcAddress(reference, "ImmLockIMC"));
+        auto wine_unlock = reinterpret_cast<decltype(&ImmUnlockIMC)>(GetProcAddress(reference, "ImmUnlockIMC"));
+        auto wine_lockcc = reinterpret_cast<decltype(&ImmLockIMCC)>(GetProcAddress(reference, "ImmLockIMCC"));
+        auto wine_unlockcc = reinterpret_cast<decltype(&ImmUnlockIMCC)>(GetProcAddress(reference, "ImmUnlockIMCC"));
+        auto wine_disable = reinterpret_cast<decltype(&ImmDisableTextFrameService)>(GetProcAddress(reference, "ImmDisableTextFrameService"));
+        CHECK(mine_lock && mine_unlock && mine_lockcc && mine_unlockcc && mine_disable);
+        CHECK(wine_lock && wine_unlock && wine_lockcc && wine_unlockcc && wine_disable);
+        // Null and foreign contexts: no backend context is ever manufactured.
+        for (HIMC context : {HIMC(nullptr), reinterpret_cast<HIMC>(0x5678)}) {
+            SetLastError(0xdead); void* mine = mine_lock(context); DWORD e1 = GetLastError();
+            SetLastError(0xdead); void* wine = wine_lock(context); DWORD e2 = GetLastError();
+            if (mine != wine || e1 != e2) std::printf("ImmLockIMC mine=%p/%lu Wine=%p/%lu\n", mine, e1, wine, e2);
+            CHECK(mine == wine && e1 == e2);
+            SetLastError(0xdead); BOOL ur = mine_unlock(context); e1 = GetLastError();
+            SetLastError(0xdead); BOOL wr = wine_unlock(context); e2 = GetLastError();
+            if (ur != wr || e1 != e2) std::printf("ImmUnlockIMC mine=%d/%lu Wine=%d/%lu\n", ur, e1, wr, e2);
+            CHECK(ur == wr && e1 == e2);
+        }
+        // The same for component blocks, plus a real movable global block.
+        // Each side gets its own block: the lock count is per block, so sharing
+        // one would make the second unlock observe the first side's lock.
+        HGLOBAL mine_block = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, 64);
+        HGLOBAL wine_block = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, 64);
+        CHECK(mine_block && wine_block);
+        HIMCC handles[] = {HIMCC(nullptr), reinterpret_cast<HIMCC>(0x5678)};
+        for (HIMCC handle : handles) {
+            SetLastError(0xdead); void* mine = mine_lockcc(handle); DWORD e1 = GetLastError();
+            SetLastError(0xdead); void* wine = wine_lockcc(handle); DWORD e2 = GetLastError();
+            CHECK(mine == nullptr && wine == nullptr && e1 == e2);
+            SetLastError(0xdead); BOOL ur = mine_unlockcc(handle); e1 = GetLastError();
+            SetLastError(0xdead); BOOL wr = wine_unlockcc(handle); e2 = GetLastError();
+            if (ur != wr || e1 != e2) std::printf("ImmUnlockIMCC mine=%d/%lu Wine=%d/%lu\n", ur, e1, wr, e2);
+            CHECK(ur == wr && e1 == e2);
+        }
+        // A real block locks to a data pointer and unlocks TRUE, then FALSE.
+        SetLastError(0xdead); void* mine = mine_lockcc(reinterpret_cast<HIMCC>(mine_block)); DWORD e1 = GetLastError();
+        SetLastError(0xdead); void* wine = wine_lockcc(reinterpret_cast<HIMCC>(wine_block)); DWORD e2 = GetLastError();
+        CHECK(mine && wine && e1 == e2);
+        SetLastError(0xdead); BOOL ur = mine_unlockcc(reinterpret_cast<HIMCC>(mine_block)); e1 = GetLastError();
+        SetLastError(0xdead); BOOL wr = wine_unlockcc(reinterpret_cast<HIMCC>(wine_block)); e2 = GetLastError();
+        CHECK(ur == wr && e1 == e2);
+        // Unlocking an unlocked block fails the same way on both sides.
+        SetLastError(0xdead); ur = mine_unlockcc(reinterpret_cast<HIMCC>(mine_block)); e1 = GetLastError();
+        SetLastError(0xdead); wr = wine_unlockcc(reinterpret_cast<HIMCC>(wine_block)); e2 = GetLastError();
+        CHECK(ur == wr && e1 == e2);
+        GlobalFree(mine_block); GlobalFree(wine_block);
+        // Wine's stub returns FALSE and leaves the last error alone.
+        SetLastError(0xdead); BOOL mine_disabled = mine_disable(0); e1 = GetLastError();
+        SetLastError(0xdead); BOOL wine_disabled = wine_disable(0); e2 = GetLastError();
+        CHECK(mine_disabled == wine_disabled && e1 == e2);
+    }
     // The no-context/no-IME calls against Wine: same result and last error.
     {
         HKL english = reinterpret_cast<HKL>(static_cast<uintptr_t>(0x04090409));
@@ -152,5 +220,5 @@ int main() {
         CHECK(!reinterpret_cast<decltype(&ImmIsIME)>(imm32_core::resolve("imm32.dll", "ImmIsIME"))(english) && GetLastError() == 0xdead);
     }
     FreeLibrary(reference);
-    std::puts("IMM32 OFFDEVICE PASS eight exports, association regression, typed ABI, Wine null/foreign-context differential, errors, untouched outputs, resolver");
+    std::puts("IMM32 OFFDEVICE PASS eight exports, association regression, typed ABI, Wine null/foreign-context differential, context/component locks, errors, untouched outputs, resolver");
 }

@@ -8,13 +8,20 @@ namespace kernel32_core {
 // An AppContainer process may name pipes only under \\.\pipe\LOCAL\ (its own
 // namespace); a bare \\.\pipe\<name> is refused on the console. A guest's
 // \\.\pipe\<name> is mapped to \\.\pipe\LOCAL\<name> for the pipe's creator and
-// its clients alike, so the pipe still connects inside the game. Other paths
-// and names already under LOCAL\ are unchanged (empty result).
+// its clients alike, so the pipe still connects inside the game. The extended
+// \\?\pipe\<name> form names the same object and is mapped the same way: both
+// Discord SDKs (discord-rpc's BaseConnection::Open and the Game SDK) build
+// exactly that form for discord-ipc-N. Other paths and names already under
+// LOCAL\ are unchanged (empty result).
 inline std::wstring local_pipe(LPCWSTR path) {
     static const wchar_t prefix[] = L"\\\\.\\pipe\\";
-    const size_t n = wcslen(prefix);
-    if (!path || _wcsnicmp(path, prefix, n) || !path[n] || !_wcsnicmp(path + n, L"LOCAL\\", 6)) return {};
-    return std::wstring(prefix) + L"LOCAL\\" + (path + n);
+    static const wchar_t extended[] = L"\\\\?\\pipe\\";
+    const size_t n = wcslen(prefix), m = wcslen(extended);
+    if (!path) return {};
+    const wchar_t* rest = !_wcsnicmp(path, prefix, n) ? path + n
+                        : !_wcsnicmp(path, extended, m) ? path + m : nullptr;
+    if (!rest || !*rest || !_wcsnicmp(rest, L"LOCAL\\", 6)) return {};
+    return std::wstring(prefix) + L"LOCAL\\" + rest;
 }
 inline std::wstring ansi_path(LPCSTR path) {
     int size = path ? MultiByteToWideChar(CP_ACP, 0, path, -1, nullptr, 0) : 0;

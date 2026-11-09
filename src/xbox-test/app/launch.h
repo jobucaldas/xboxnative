@@ -55,7 +55,7 @@ static void lp_sink(const char* s) {
 #include "steam_client_package.h"
 
 static void lp_publish(int gen,uint32_t appid,const std::string& result,bool ok,int mapped,int total,const char* status,bool terminal);
-struct LpCtx { std::wstring root, args; std::vector<std::wstring> names; int gen = 0; uint32_t appid = 0; int mapped = 0; unsigned resolved = 0, stubbed = 0; std::string firstMissing, failName, fault; bool ok = false, timedOut = false; };
+struct LpCtx { std::wstring root, args, cwd; std::vector<std::wstring> names; int gen = 0; uint32_t appid = 0; int mapped = 0; unsigned resolved = 0, stubbed = 0; std::string firstMissing, failName, fault; bool ok = false, timedOut = false; };
 static int pe_machine(const std::wstring& p) {   // 0 = unreadable/not PE, else IMAGE_FILE_MACHINE_*
     FILE* f = _wfopen(p.c_str(), L"rb"); if (!f) return 0; unsigned char h[1024]; size_t n = fread(h, 1, sizeof h, f); fclose(f);
     if (n < 0x40 || h[0] != 'M' || h[1] != 'Z') return 0; uint32_t o = *(uint32_t*)(h + 0x3c); if (o + 6 > n || memcmp(h + o, "PE\0\0", 4)) return 0; return *(uint16_t*)(h + o + 4);
@@ -371,6 +371,8 @@ static void cloud_async(uint32_t appid,const std::wstring& gameRoot,bool sync,st
         g_cloudBusy=false;
     }).detach();
 }
+// ---- Steam presence (steam_presence.h): the account shows the game to friends.
+#include "steam_presence.h"
 // ---- Steam achievements/stats for the provider-served game (steam_achievements.h)
 #include "steam_achievements.h"
 static steam_achievements::Io achievement_io(std::shared_ptr<CmSession> session) {
@@ -387,11 +389,8 @@ static steam_achievements::Io achievement_io(std::shared_ptr<CmSession> session)
 static void games_played(uint32_t appid) {
     auto session=user_session();
     if(!session||session->anon)return;
-    if(appid){std::string status;pb_u(status,1,1);session->send_raw(716,status,0,"");}   // ClientChangeStatus: k_EPersonaStateOnline
-    std::string body;
-    if(appid){std::string game;pb_fixed64(game,2,appid);pb_s(body,1,game);}
-    pb_u(body,2,20);   // client_os_type, as in ClientLogon (Windows 11)
-    session->send_raw(5410,body,0,""); // ClientGamesPlayedWithDataBlob
+    if(appid){session->send_raw(steam_presence::ClientChangeStatus,steam_presence::change_status_body(),0,"");}
+    session->send_raw(steam_presence::ClientGamesPlayedWithDataBlob,steam_presence::games_played_body(appid),0,"");
 }
 static void achievements_sync(uint32_t appid,bool store) {
     auto session=user_session();
@@ -410,6 +409,155 @@ static void achievements_sync(uint32_t appid,bool store) {
     char line[160];snprintf(line,sizeof line,"STEAM achievements: %s achievements=%zu stats=%zu unlocked=%u",
         ok?"prepared":"prepare failed",schema->achievements.size(),schema->stats.size(),unlocked);lp_sink(line);
 }
+// ---- Presence while the guest runs (steam_presence.h).
+// Steam drops "in game" and rich presence when the CM session that sent them
+// ends, and the launcher reconnects by itself after a network drop. The keeper
+// re-sends the game state on every new session, uploads the game's rich
+// presence once a burst of SetRichPresence calls settles, and answers Steam's
+// playing-session notice (another of the account's clients starting a game
+// blocks this one; saying nothing would leave friends seeing a stale game).
+// It never sends a games-played while blocked: Steam logs such a session off.
+struct PresenceKeeper {
+    std::mutex m;
+    uint32_t appid = 0;
+    steam_presence::RichPresence rp;
+    std::shared_ptr<CmSession> session;   // the session the state was last sent on
+    bool blocked = false, ended = false, warned = false;
+    std::atomic<unsigned> gen{0};         // a new launch retires the previous keeper
+};
+static PresenceKeeper g_presence;
+// `full` carries the game state (a new session: Steam forgot it); a coalesced
+// rich-presence change only uploads the key set.
+static void presence_send(std::shared_ptr<CmSession> s,uint32_t appid,const std::map<std::string,std::string>& kv,bool full) {
+    if(!s||!s->up||!appid) return;
+    if(full) {
+        s->send_raw(steam_presence::ClientChangeStatus,steam_presence::change_status_body(),0,"");
+        s->send_raw(steam_presence::ClientGamesPlayedWithDataBlob,steam_presence::games_played_body(appid),0,"");
+    }
+    if(!kv.empty()) s->send_raw(steam_presence::ClientRichPresenceUpload,
+        steam_presence::rich_presence_upload_body(kv),0,"",appid);
+}
+// The game's SetRichPresence/ClearRichPresence, observed from the game's thread
+// (play_runtime::set_rich_presence_tap). Only the key/value set is kept here.
+static void presence_tap_set(const std::string& key,const char* value) {
+    std::lock_guard<std::mutex> l(g_presence.m);
+    if(!g_presence.appid) return;
+    g_presence.rp.set(key,value,now_s());
+}
+static void presence_tap_clear() {
+    std::lock_guard<std::mutex> l(g_presence.m);
+    if(!g_presence.appid) return;
+    g_presence.rp.clear(now_s());
+}
+// What Steam says about this session's game state: a persona-state reply to the
+// self-check below, or another client starting a game. Runs on the CM reader
+// thread, so it never blocks: the tap's lock is only taken to read state.
+static void presence_push(const JobMsg& m) {
+    if(m.emsg==steam_presence::ClientPlayingSessionState) {
+        auto ps = steam_presence::parse_playing_state(m.body);
+        bool started = false, stopped = false;
+        {
+            std::lock_guard<std::mutex> l(g_presence.m);
+            if(!g_presence.appid) return;
+            started = ps.blocked && !g_presence.blocked;
+            stopped = !ps.blocked && g_presence.blocked;
+            if(stopped) g_presence.session.reset();   // the keeper re-sends on its next pass
+            g_presence.blocked = ps.blocked;
+        }
+        if(started) {
+            char line[160];snprintf(line,sizeof line,
+                "STEAM presence: another of this account's clients started app %u; this session stops reporting the game",ps.app);
+            lp_sink(line);
+        } else if(stopped) {
+            lp_sink("STEAM presence: the other client stopped; reporting the game again");
+        }
+        return;
+    }
+    if(m.emsg!=steam_presence::ClientPersonaState) return;
+    uint64_t self = 0; { auto s = user_session(); if(s) self = s->steamid; }
+    if(!self) return;
+    auto p = steam_presence::parse_persona(m.body,self);
+    if(!p.found) return;
+    uint32_t appid = 0; { std::lock_guard<std::mutex> l(g_presence.m); appid = g_presence.appid; }
+    if(!appid) return;
+    // Steam's own view, as friends see it: online persona, this app, our keys.
+    char line[220];snprintf(line,sizeof line,"STEAM presence: Steam reports persona_state=%u game=%u name='%s' rich_presence_keys=%zu",
+        p.state,p.game_played_app_id,p.game_name.c_str(),p.rich_presence.size());
+    lp_sink(redact::steam_ids(line).c_str());
+    bool ok = p.state == steam_presence::PersonaOnline && p.game_played_app_id == appid;
+    { std::lock_guard<std::mutex> l(g_presence.m); if(ok) g_presence.warned = false; else if(g_presence.warned) return; else g_presence.warned = true; }
+    if(!ok) lp_sink("STEAM presence: Steam does not show this session as in-game (see the logon and games-played lines above)");
+}
+static void presence_start(uint32_t appid) {
+    unsigned gen;
+    {
+        std::lock_guard<std::mutex> l(g_presence.m);
+        gen = ++g_presence.gen;
+        g_presence.appid = appid; g_presence.rp.reset(appid);
+        g_presence.session.reset(); g_presence.blocked = false; g_presence.ended = false; g_presence.warned = false;
+    }
+    play_runtime::set_rich_presence_tap({[](const std::string& key,const char* value){presence_tap_set(key,value);},
+                                         []{presence_tap_clear();}});
+    // A dropped session is re-established by the main loop; the keeper sends
+    // the game state again as soon as a new one is up, and takes the Steam
+    // notifications on that new session too.
+    std::thread([gen]{
+        init_apartment(apartment_type::multi_threaded);
+        unsigned uploads = 0;
+        while(g_presence.gen.load() == gen) {
+            Sleep(500);
+            std::shared_ptr<CmSession> session; std::map<std::string,std::string> kv; uint32_t appid = 0; bool send = false, full = false;
+            {   std::lock_guard<std::mutex> l(g_presence.m);
+                if(g_presence.gen.load() != gen || !g_presence.appid || g_presence.ended) break;
+                auto now = user_session();
+                if(!now || !now->up) continue;              // reconnecting
+                if(g_presence.blocked) continue;
+                appid = g_presence.appid;
+                if(now != g_presence.session) {             // a new session: Steam forgot the game
+                    g_presence.session = now; send = full = true;
+                    now->set_push(presence_push);
+                    if(g_presence.rp.coalescer.dirty) g_presence.rp.coalescer.sent();
+                    kv = g_presence.rp.kv;
+                } else if(g_presence.rp.coalescer.ready(now_s())) {
+                    g_presence.rp.coalescer.sent(); send = true; kv = g_presence.rp.kv;
+                }
+                session = now;
+            }
+            if(!send) continue;
+            try { presence_send(session,appid,kv,full); } catch(...) { continue; }
+            if(kv.empty()) continue;
+            char line[120];snprintf(line,sizeof line,"STEAM presence: rich presence uploaded (%zu keys, #%u)",kv.size(),++uploads);lp_sink(line);
+        }
+    }).detach();
+    // Ask Steam for this account's own persona state: the only way to see from
+    // the console what friends see. Sent once the keeper has carried the game
+    // state, so the answer reflects it.
+    std::thread([gen]{
+        init_apartment(apartment_type::multi_threaded);
+        for(int i=0;i<120&&g_presence.gen.load()==gen;++i) {
+            Sleep(500);
+            auto s = user_session();
+            if(!s || s->anon || !s->steamid || !s->up) continue;
+            if(i < 20) continue;   // let the keeper carry the game state first
+            s->send_raw(steam_presence::ClientRequestFriendData,steam_presence::persona_request_body(s->steamid),0,"");
+            return;
+        }
+    }).detach();
+}
+static void presence_end() {
+    bool blocked;
+    {
+        std::lock_guard<std::mutex> l(g_presence.m);
+        ++g_presence.gen;   // retires the keeper and the self-check
+        g_presence.ended = true; g_presence.appid = 0; g_presence.session.reset();
+        blocked = g_presence.blocked;
+    }
+    play_runtime::set_rich_presence_tap({});
+    // While another of the account's clients is playing, even the empty list is
+    // a games-played message this session must not send: that other client owns
+    // the state, and Steam logs a blocked session off for sending one.
+    if(!blocked) games_played(0);
+}
 // Saves and achievements go up once, when the game ends (it quits, closes by
 // itself or is quit from the launcher menu), never while it is playing.
 static std::atomic<bool> g_finalSyncDone{false};
@@ -419,7 +567,7 @@ static void final_sync(uint32_t appid,const std::wstring& gameRoot) {
     lp_sink("STEAM sync: game ended; uploading saves and achievements");
     try{cloud_sync(appid,gameRoot,true,0);}catch(...){lp_sink("STEAM cloud upload: exception");}
     try{achievements_sync(appid,true);}catch(...){lp_sink("STEAM achievements store: exception");}
-    try{games_played(0);}catch(...){}
+    try{presence_end();}catch(...){}
 }
 // ---- Diagnostic: cmd.txt "stacks" logs every other thread's call stack to
 // launch_probe.log (module+offset via Play's guest module map). Live process
@@ -520,7 +668,7 @@ static void lp_run_impl(LpCtx& c) {
     if(steamProvider) {
         try{cloud_sync(c.appid,c.root,false,0);}catch(...){lp_sink("STEAM cloud download: exception");}
         try{achievements_sync(c.appid,false);}catch(...){lp_sink("STEAM achievements: exception");}
-        games_played(c.appid);
+        try{presence_start(c.appid);}catch(...){lp_sink("STEAM presence: keeper did not start");}
     }
     if(steamProvider){uint32_t appid=c.appid;std::wstring root=c.root;g_finalSync=[appid,root]{final_sync(appid,root);};}
     regb::init(g_dir,lp_sink); // guest registry (PlayerPrefs): LocalState\registry.sqlite
@@ -535,7 +683,7 @@ static void lp_run_impl(LpCtx& c) {
     {std::lock_guard<std::mutex> lock(g_launch.m);
      if(g_launch.gen!=c.gen||g_launch.phase!=1){c.failName="launch abandoned by the watchdog before the game started";return;}
      g_launch.loaderStarted=now_s();}
-    if(!play_runtime::start(exeDir,exe,c.args,lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
+    if(!play_runtime::start(exeDir,exe,c.args,lp_sink,c.cwd)) {c.failName="guest already started; restart launcher before next Play";return;}
     auto r=play_runtime::state;
     ULONGLONG end=GetTickCount64()+110000; bool reportedRunning=false;
     for(;;) {
@@ -580,34 +728,65 @@ static bool load_appinfo(uint32_t appid,Vdf& root,const Vdf*& app) {
     app=root.get("appinfo");if(!app)app=&root;
     return true;
 }
-struct LaunchTarget { std::wstring exe; std::string args, why; };   // exe is install-relative
+struct LaunchTarget { std::wstring exe; std::string args, why, workdir; };   // exe is install-relative
 // The game's own Steam launch option when known, as the Steam client picks it;
-// otherwise the largest top-level .exe. Engine options come from the game's
-// files (Unity: UnityPlayer.dll beside the executable), never from its app ID.
-static LaunchTarget pick_target(uint32_t appid, const std::wstring& root) {
+// otherwise the largest 64-bit top-level .exe. Engine options come from the
+// game's files (Unity: UnityPlayer.dll beside the executable), never from its
+// app ID. Play executes 64-bit guests only, so a 64-bit option wins even over
+// a 32-bit one typed "default" (Hades ships x64 and x86 entries). wanted (the
+// picker's choice) starts that option instead of the preferred one.
+static LaunchTarget pick_target(uint32_t appid, const std::wstring& root, const std::string* wanted=nullptr) {
     LaunchTarget t; Vdf info; const Vdf* app=nullptr; const launch_target::Entry* chosen=nullptr;
     std::vector<launch_target::Entry> options;
+    auto pe_arch=[&](const std::string& executable) {
+        std::string rel; if(!launch_target::relative_path(executable,rel)) return int(launch_target::archUnknown);
+        switch(pe_machine(root+L"\\"+widen(rel))) {
+            case IMAGE_FILE_MACHINE_AMD64: return int(launch_target::arch64);
+            case IMAGE_FILE_MACHINE_I386: return int(launch_target::arch32);
+            default: return int(launch_target::archUnknown);
+        }
+    };
     if(load_appinfo(appid,info,app)) {
         options=launch_target::entries(*app);
         std::string rel;
-        if(auto e=launch_target::choose(options)) {
-            if(!launch_target::relative_path(e->executable,rel)) t.why="Steam launch option \""+e->executable+"\" is not an install-relative path; ";
-            else if(GetFileAttributesW((root+L"\\"+widen(rel)).c_str())==INVALID_FILE_ATTRIBUTES) t.why="Steam launch option \""+rel+"\" is not installed; ";
-            else {t.exe=widen(rel);chosen=e;t.why="Steam launch option \""+rel+"\"";}
-        } else t.why="no Windows Steam launch option; ";
+        auto order=launch_target::ranked(options,pe_arch);
+        if(wanted) {   // the picker's row: only that option, never a silent fallback to another
+            const launch_target::Entry* only=nullptr;
+            for(auto e:order) if(e->executable==*wanted) { only=e; break; }
+            order.clear();
+            if(only) order.push_back(only);
+            else t.why="the chosen Steam launch option is no longer in the app's appinfo; ";
+        }
+        if(order.empty()&&t.why.empty()) t.why="no Windows Steam launch option; ";
+        for(auto e:order) {
+            if(!launch_target::relative_path(e->executable,rel)) {t.why="Steam launch option \""+e->executable+"\" is not an install-relative path; ";continue;}
+            if(GetFileAttributesW((root+L"\\"+widen(rel)).c_str())==INVALID_FILE_ATTRIBUTES) {t.why="Steam launch option \""+rel+"\" is not installed; ";continue;}
+            t.exe=widen(rel);chosen=e;
+            t.why="Steam launch option \""+rel+"\""+(launch_target::arch_of(*e,pe_arch)==launch_target::arch64?" (64-bit)":"");
+            break;
+        }
     } else t.why="no cached app info; ";
+    if(t.exe.empty()&&wanted) return t;   // a picked option that cannot start must not become another .exe
     if(t.exe.empty()) {
-        WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW((root + L"\\*.exe").c_str(), &fd); std::wstring best; uint64_t bs = 0;
+        WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW((root + L"\\*.exe").c_str(), &fd); std::vector<launch_target::Candidate> exes;
         if (h != INVALID_HANDLE_VALUE) { do { std::wstring n = fd.cFileName; std::wstring l = n; for (auto& ch : l) ch = (wchar_t)towlower(ch);
                 if (l.find(L"unins") != std::wstring::npos || l.find(L"crash") != std::wstring::npos || l.find(L"redist") != std::wstring::npos || l.find(L"setup") != std::wstring::npos) continue;
-                uint64_t sz = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow; if (sz > bs) { bs = sz; best = n; } } while (FindNextFileW(h, &fd)); FindClose(h); }
-        if (best.empty()) { t.why += "no launchable .exe in install dir"; return t; }
-        t.exe=best;t.why+="largest top-level .exe";
+                uint64_t sz = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+                int machine=pe_machine(root+L"\\"+n);
+                int arch=machine==IMAGE_FILE_MACHINE_AMD64?launch_target::arch64:
+                         machine==IMAGE_FILE_MACHINE_I386?launch_target::arch32:launch_target::archUnknown;
+                exes.push_back({play_runtime::narrow(n),sz,arch}); } while (FindNextFileW(h, &fd)); FindClose(h); }
+        auto best=launch_target::largest(exes);
+        if (!best) { t.why += "no launchable .exe in install dir"; return t; }
+        t.exe=widen(best->name);t.why+=best->arch==launch_target::arch64?"largest 64-bit top-level .exe":"largest top-level .exe";
     }
     auto slash=t.exe.find_last_of(L'\\');
     std::wstring dir=slash==std::wstring::npos?root:root+L"\\"+t.exe.substr(0,slash);
     bool unity=GetFileAttributesW((dir+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES;
     t.args=launch_target::arguments(chosen,unity);
+    // The option's own working directory (install-relative), as Steam honours it;
+    // the executable's directory when the option names none.
+    if(chosen&&!chosen->workingdir.empty()) { std::string wd; if(launch_target::relative_path(chosen->workingdir,wd)) t.workdir=wd; }
     if(unity)t.why+="; Unity player";
     return t;
 }
@@ -657,7 +836,9 @@ static void lp_watchdog() {
 }
 
 // Entry: called on the render thread; returns immediately (work happens on a worker thread).
-static void start_launch(uint32_t appid, const std::string& name, const std::string& dir, const char* via) {
+// option (the picker's choice, an appinfo executable) starts that launch option
+// instead of the preferred one; nullptr picks the preferred option as before.
+static void start_launch(uint32_t appid, const std::string& name, const std::string& dir, const char* via, const std::string* option=nullptr) {
     if(auto guest=play_runtime::observed.load(std::memory_order_acquire)) {
         std::lock_guard<std::mutex> lock(g_launch.m);
         g_launch.result="Game code from the last launch is still loaded; the launcher restarts to end it. Last event: "+guest->snapshot();
@@ -667,11 +848,14 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
     { std::lock_guard<std::mutex> l(g_launch.m); g_launch.result.clear();g_launch.ok=false;g_launch.attempt=std::to_string(GetCurrentProcessId())+":"+std::to_string(gen); } g_launch.phase = 1;
     const InstallInfo inst = read_install(appid);   // the game folder may be on another drive (marker root)
     const std::wstring folder = !dir.empty() && inst.installed && inst.dir == dir ? inst.folder : g_dir + L"\\" + widen(dir);
-    const LaunchTarget target = dir.empty() ? LaunchTarget{} : pick_target(appid, folder);
+    const LaunchTarget target = dir.empty() ? LaunchTarget{} : pick_target(appid, folder, option);
     const std::string args = target.args;
-    char b[1500]; snprintf(b, sizeof b, "{\"appid\":%u,\"attemptId\":\"%s\",\"name\":\"%s\",\"installDir\":\"%s\",\"time\":\"%s\",\"args\":\"%s\",\"via\":\"%s\"}\n", appid, g_launch.attempt.c_str(), json_esc(name).c_str(), json_esc(dir).c_str(), utc_iso().c_str(), args.c_str(), via);
+    // The chosen option's executable, arguments and working directory, so the
+    // request says exactly what Play starts (a picker choice included).
+    char b[2048]; snprintf(b, sizeof b, "{\"appid\":%u,\"attemptId\":\"%s\",\"name\":\"%s\",\"installDir\":\"%s\",\"time\":\"%s\",\"exe\":\"%s\",\"args\":\"%s\",\"workingDir\":\"%s\",\"via\":\"%s\"}\n", appid, g_launch.attempt.c_str(), json_esc(name).c_str(), json_esc(dir).c_str(), utc_iso().c_str(), json_esc(play_runtime::narrow(target.exe)).c_str(), args.c_str(), json_esc(target.workdir).c_str(), via);
     write_text(g_dir + L"\\launch_request.json", b);
     logf("launch: request written LocalState\\launch_request.json appid=%u attempt=%s dir=%s via=%s", appid, g_launch.attempt.c_str(), dir.c_str(), via);
+    logf("launch: target exe=\"%s\" args=\"%s\" workingDir=\"%s\" (%s)", play_runtime::narrow(target.exe).c_str(), target.args.c_str(), target.workdir.c_str(), target.why.c_str());
     std::thread([=] {
         init_apartment(apartment_type::multi_threaded);
         auto finish = [&](const std::string& r,bool ok,int mapped,int total) {lp_finish(gen,appid,r,ok,mapped,total);};
@@ -689,7 +873,7 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
             // Keep the previous attempt's log beside this one (launch_probe.previous.log).
             MoveFileExW((g_dir + L"\\launch_probe.log").c_str(), (g_dir + L"\\launch_probe.previous.log").c_str(), MOVEFILE_REPLACE_EXISTING);
             { std::lock_guard<std::mutex> l(g_lpm); if (g_lpf) fclose(g_lpf); g_lpf = _wfopen((g_dir + L"\\launch_probe.log").c_str(), L"wb"); g_lpMissing = g_lpStubbed = g_lpStubCalls = g_lpLines = 0; g_lpLastFail.clear(); }
-            LpCtx c; c.root = root; c.args = widen(args); c.names = names;c.gen=gen;c.appid=appid; bool noFault = lp_run_seh(&c);
+            LpCtx c; c.root = root; c.args = widen(args); c.cwd = target.workdir.empty() ? std::wstring() : root + L"\\" + widen(target.workdir); c.names = names;c.gen=gen;c.appid=appid; bool noFault = lp_run_seh(&c);
             { std::lock_guard<std::mutex> l(g_lpm); if (g_lpf) { fclose(g_lpf); g_lpf = nullptr; } }
             int total=play_runtime::state?int(play_runtime::state->moduleCount):int(names.size());
             const std::string fault=noFault?(c.fault.empty()?c.failName:c.fault):

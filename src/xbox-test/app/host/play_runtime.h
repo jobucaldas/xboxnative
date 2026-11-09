@@ -6,13 +6,16 @@
 // Guest process APIs below expose the guest identity without rewriting the
 // launcher's PEB or installing a private segment/exception mechanism.
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <memory>
 #include <array>
 #include <d3d11.h>
+#include <d3d12.h>
 #include <intrin.h>
 #include "play_graphics.h"
 #include "d3d11_diag.h"
+#include "d3d12_diag.h"
 #include "../../uwph/vcruntime/route.h"
 #include "steam_app_ticket.h"
 #include "redact.h"
@@ -50,7 +53,7 @@ public:
     }
 };
 struct State {
-    std::wstring root, command;
+    std::wstring root, cwd, command;
     std::string commandA;
     wxl::Log log=nullptr;
     std::vector<std::unique_ptr<Module>> modules;
@@ -399,6 +402,73 @@ static uintptr_t exported(Module& module,const char* name,WORD ordinal) {
     }
     return result;
 }
+// ---- Rich presence the game sets through the Steam API provider
+// (steam_presence.h). gbe_fork keeps the key/value set in memory and sends it
+// only to its own LAN peers, so the launcher's Steam session never sees it and
+// friends cannot read it. The provider's own SetRichPresence/ClearRichPresence
+// still run (the game reads back what it set); the launcher observes the same
+// calls here, from the game's own thread, and uploads the set to Steam.
+// This is observation, not replacement: nothing on disk changes, and the
+// provider answers the game exactly as before.
+struct RichPresenceTap {
+    std::function<void(const std::string& key,const char* value)> set;   // value NULL: the key is deleted
+    std::function<void()> clear;
+};
+static std::mutex richPresenceMutex;
+static RichPresenceTap richPresence;
+static void set_rich_presence_tap(RichPresenceTap tap) {
+    std::lock_guard<std::mutex> lock(richPresenceMutex);
+    richPresence=std::move(tap);
+}
+// The tap is copied out before it runs: it belongs to the launcher and takes
+// its own lock, which must not be held here.
+static void richPresenceSet(const std::string& key,const char* value) {
+    RichPresenceTap tap; {std::lock_guard<std::mutex> lock(richPresenceMutex);tap=richPresence;}
+    if(tap.set)tap.set(key,value);
+}
+static void richPresenceClear() {
+    RichPresenceTap tap; {std::lock_guard<std::mutex> lock(richPresenceMutex);tap=richPresence;}
+    if(tap.clear)tap.clear();
+}
+// The real provider addresses are re-read on every resolution: a released
+// launch unmaps the provider, so the next one may map it at a different base.
+static std::atomic<uintptr_t> richPresenceRealSet{0}, richPresenceRealClear{0};
+static uintptr_t richPresenceHook(const char* name,uintptr_t real) {
+    if(!real) return 0;
+    if(!strcmp(name,"SteamAPI_ISteamFriends_SetRichPresence")) {
+        using Fn=uint32_t(*)(void*,const char*,const char*);
+        richPresenceRealSet.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,const char* key,const char* value){
+            auto inner=(Fn)richPresenceRealSet.load(std::memory_order_acquire);
+            uint32_t ok=inner?inner(self,key,value):0;
+            if(key)richPresenceSet(key,value);
+            return ok;
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamFriends_ClearRichPresence")) {
+        using Fn=void(*)(void*);
+        richPresenceRealClear.store(real,std::memory_order_release);
+        static Fn hook=[](void* self){
+            auto inner=(Fn)richPresenceRealClear.load(std::memory_order_acquire);
+            if(inner)inner(self);
+            richPresenceClear();
+        };
+        return (uintptr_t)hook;
+    }
+    return 0;
+}
+// Every Steam API export the game binds (static imports and GetProcAddress)
+// passes here first; only the two rich-presence calls are wrapped.
+static uintptr_t steamApiExport(Module& module,const char* name,uintptr_t address) {
+    if(!address||!name||strcmp(module.key.c_str(),"steam_api64.dll")) return address;
+    if(auto hook=richPresenceHook(name,address)) {
+        if(state->log&&mlp::first_report(std::string("steam rich presence ")+name))
+            state->log((std::string("STEAM rich presence: ")+name+" observed; the set is uploaded to Steam by the launcher").c_str());
+        return hook;
+    }
+    return address;
+}
 struct ExportLookup {
     bool pending=false;
     bool* previous=pendingExportLookup;
@@ -422,7 +492,7 @@ static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
     ExportLookup lookup;
     if(auto m=find(h)) {
         WORD ordinal=IS_INTRESOURCE(name)?WORD((uintptr_t)name):0;
-        return lookup.finish(exported(*m,IS_INTRESOURCE(name)?nullptr:name,ordinal));
+        return lookup.finish(steamApiExport(*m,IS_INTRESOURCE(name)?nullptr:name,exported(*m,IS_INTRESOURCE(name)?nullptr:name,ordinal)));
     }
     // Native handles (including OS-resolved API sets/forwarders) never expose
     // the native process exports, even when GetModuleFileNameW cannot identify
@@ -618,6 +688,41 @@ static std::string slot0Refusal(Module& m,const IMAGE_NT_HEADERS64* nt) {
 // the game's own file on disk is never modified. Set before start().
 static std::wstring steamProvider;
 static void set_steam_provider(const std::wstring& path) { steamProvider=path; }
+// Discord's SDKs reach a Discord client over the local IPC pipe
+// \?\pipe\discord-ipc-N, which only a running desktop client serves. A console
+// has no such client, so the SDK's connect fails with ERROR_FILE_NOT_FOUND and
+// the SDK carries on without presence, exactly as on a desktop where Discord is
+// not running (discord-rpc's BaseConnection::Open walks discord-ipc-0..9 and
+// returns false; the Game SDK's DiscordCreate returns DiscordResult_InternalError
+// with no device). Play needs no substitute: the pipe route answers in the
+// AppContainer namespace and the shell route refuses the discord:// launch the
+// Game SDK would otherwise attempt, so nothing blocks. Report it once per game
+// so a missing presence is explained rather than mysterious.
+// Whether a mapped image exports this name. Reads the export table only; it
+// never binds or executes anything, so it is safe before initialization.
+static bool exported_any(const wxl::Image& image,const char* name) {
+    if(!image.base || !name) return false;
+    auto nt=(IMAGE_NT_HEADERS64*)(image.base+((IMAGE_DOS_HEADER*)image.base)->e_lfanew);
+    auto dir=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if(!dir.Size || !image.valid(dir.VirtualAddress,dir.Size) || dir.Size<sizeof(IMAGE_EXPORT_DIRECTORY)) return false;
+    auto e=(IMAGE_EXPORT_DIRECTORY*)(image.base+dir.VirtualAddress);
+    if(!image.valid(e->AddressOfNames,size_t(e->NumberOfNames)*4)) return false;
+    auto names=(DWORD*)(image.base+e->AddressOfNames);
+    for(DWORD i=0;i<e->NumberOfNames;++i) { auto n=image.str(names[i]); if(n && !strcmp(n,name)) return true; }
+    return false;
+}
+static bool discordSdk(const Module& m) {
+    static const char* const names[]={"discord_game_sdk.dll","discord-rpc.dll","discord_rpc.dll","discordrpc.dll","discord_game_sdk_x64.dll"};
+    for(auto name:names) if(m.key==name) return true;
+    // A Unity plugin or a renamed copy: identify it by the API it exports.
+    return m.image.base && (exported_any(m.image,"DiscordCreate") || exported_any(m.image,"Discord_Initialize"));
+}
+static void note_discord(const Module& m) {
+    if(!state || !discordSdk(m)) return;
+    static std::atomic<bool> reported{false};
+    if(reported.exchange(true)) return;
+    state->event("Discord SDK present ("+m.key+"); no Discord client on this console, so the game runs without Rich Presence");
+}
 static Module* map(const std::wstring& requested,const std::string& asKey,wxl::Resolver resolver) {
     if(auto m=named(asKey.empty()?requested:wide(asKey.c_str()))) return m->mappingFailed?nullptr:m;
     // A delay import may map its DLL here; that DLL's own static imports are
@@ -642,7 +747,7 @@ static Module* map(const std::wstring& requested,const std::string& asKey,wxl::R
         mlp::assets.erase(m->key);
         m->mappingFailed=true;state->event("mapping failed: "+m->key+"; guest initialization blocked; "+state->snapshot());return nullptr;
     }
-    m->mapped=true;++state->mappedCount;state->order.push_back(m);return m;
+    m->mapped=true;++state->mappedCount;state->order.push_back(m);note_discord(*m);return m;
 }
 // Steam's DRM wrapper (SteamStub) finds the module that provides
 // steamclient64.dll!CreateInterface, reads that module's file and verifies
@@ -1136,6 +1241,90 @@ static HRESULT WINAPI createDevice(IDXGIAdapter* adapter,D3D_DRIVER_TYPE type,HM
         d3d11_diag::adopt(*device);
         play_graphics::adopt_device(*device);state->milestone=2;}return hr;
 }
+// A D3D12 guest reaches the device through d3d12.dll's D3D12CreateDevice, not
+// through a d3d11 device, so the D3D11 hook above never sees it. The route
+// logs the request and result the same way and gives the returned device the
+// D3D12 diagnostics; the swap chain still goes through the same CoreWindow
+// adapter, which takes the command queue as its device argument.
+static HRESULT WINAPI createD3D12Device(IUnknown* adapter,D3D_FEATURE_LEVEL minimum,REFIID id,void** device) {
+    using Fn=HRESULT(WINAPI*)(IUnknown*,D3D_FEATURE_LEVEL,REFIID,void**);
+    auto fn=(Fn)mlp::resolve("d3d12.dll","D3D12CreateDevice",0);
+    state->event("guest D3D12CreateDevice caller="+describe((uintptr_t)_ReturnAddress()));
+    if(!fn) {stopMissing("d3d12.dll!D3D12CreateDevice");return E_NOINTERFACE;}
+    // Adapters from the guest factory are wrappers (virtual console output);
+    // the native device needs the real adapter. D3D12CreateDevice takes an
+    // IUnknown* adapter, so the wrapper is unwrapped through its adapter
+    // interface first.
+    IDXGIAdapter* real=nullptr;
+    if(adapter) {
+        IDXGIAdapter* asAdapter=nullptr;
+        if(SUCCEEDED(adapter->QueryInterface(__uuidof(IDXGIAdapter),(void**)&asAdapter))&&asAdapter) {
+            real=corewindow_dxgi::real_adapter(asAdapter);
+            asAdapter->Release();
+        }
+    }
+    {char b[200];snprintf(b,sizeof b,"guest D3D12CreateDevice request adapter=%s minimum=0x%x iid=%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+        adapter?"given":"default",unsigned(minimum),unsigned(id.Data1),unsigned(id.Data2),unsigned(id.Data3),
+        id.Data4[0],id.Data4[1],id.Data4[2],id.Data4[3],id.Data4[4],id.Data4[5],id.Data4[6],id.Data4[7]);state->event(b);}
+    HRESULT hr=fn(real?static_cast<IUnknown*>(real):adapter,minimum,id,device);
+    if(real)real->Release();
+    {char b[160];snprintf(b,sizeof b,"guest D3D12CreateDevice returned hr=0x%08lx device=%p",(unsigned long)hr,device?*device:nullptr);state->event(b);}
+    if(SUCCEEDED(hr)&&device&&*device) {
+        // Failed D3D12 calls are logged through the probe sink (not as the
+        // run's "last event"), once per distinct call.
+        d3d12_diag::configure([](const char* text){if(state&&state->log)state->log((std::string("PRUN D3D12 ")+text).c_str());});
+        ID3D12Device* d3d=nullptr;
+        if(SUCCEEDED(static_cast<IUnknown*>(*device)->QueryInterface(__uuidof(ID3D12Device),(void**)&d3d))&&d3d) {
+            d3d12_diag::adopt(d3d);
+            // The factory the guest reaches through the device must route guest
+            // windows to the CoreWindow, exactly as it does for D3D11.
+            play_graphics::adopt_factory_of(d3d);
+            d3d->Release();
+        }
+        state->milestone=2;
+    }
+    return hr;
+}
+// D3D12GetDebugInterface and the root-signature helpers are the other d3d12.dll
+// exports a guest imports. The debug layer's absence is reported by the
+// console/Wine as DXGI_ERROR_SDK_COMPONENT_MISSING; a guest that treats that as
+// fatal would otherwise fail with no trace, so the answer is logged once.
+static HRESULT WINAPI d3d12GetDebugInterface(REFIID id,void** debug) {
+    using Fn=HRESULT(WINAPI*)(REFIID,void**);
+    auto fn=(Fn)mlp::resolve("d3d12.dll","D3D12GetDebugInterface",0);
+    if(!fn)return E_NOINTERFACE;
+    HRESULT hr=fn(id,debug);
+    if(state->log&&mlp::first_report("d3d12 debug interface"))
+        state->log(("PRUN EVENT guest D3D12GetDebugInterface hr=0x"+hex32(hr)+" (debug layer absent when DXGI_ERROR_SDK_COMPONENT_MISSING)").c_str());
+    return hr;
+}
+static HRESULT WINAPI d3d12SerializeRootSignature(const D3D12_ROOT_SIGNATURE_DESC* desc,D3D_ROOT_SIGNATURE_VERSION version,ID3DBlob** blob,ID3DBlob** error) {
+    using Fn=HRESULT(WINAPI*)(const D3D12_ROOT_SIGNATURE_DESC*,D3D_ROOT_SIGNATURE_VERSION,ID3DBlob**,ID3DBlob**);
+    auto fn=(Fn)mlp::resolve("d3d12.dll","D3D12SerializeRootSignature",0);
+    if(!fn)return E_NOINTERFACE;
+    HRESULT hr=fn(desc,version,blob,error);
+    if(FAILED(hr)&&state->log&&mlp::first_report("d3d12 serialize root signature"))
+        state->log(("PRUN D3D12 D3D12SerializeRootSignature hr=0x"+hex32(hr)+" version="+std::to_string(int(version))+" params="+std::to_string(desc?desc->NumParameters:0)).c_str());
+    return hr;
+}
+static HRESULT WINAPI d3d12CreateRootSignatureDeserializer(const void* data,SIZE_T length,REFIID id,void** deserializer) {
+    using Fn=HRESULT(WINAPI*)(const void*,SIZE_T,REFIID,void**);
+    auto fn=(Fn)mlp::resolve("d3d12.dll","D3D12CreateRootSignatureDeserializer",0);
+    if(!fn)return E_NOINTERFACE;
+    HRESULT hr=fn(data,length,id,deserializer);
+    if(FAILED(hr)&&state->log&&mlp::first_report("d3d12 deserialize root signature"))
+        state->log(("PRUN D3D12 D3D12CreateRootSignatureDeserializer hr=0x"+hex32(hr)+" bytes="+std::to_string(length)).c_str());
+    return hr;
+}
+static HRESULT WINAPI d3d12EnableExperimentalFeatures(UINT count,const IID* features,void* configurations,UINT* sizes) {
+    using Fn=HRESULT(WINAPI*)(UINT,const IID*,void*,UINT*);
+    auto fn=(Fn)mlp::resolve("d3d12.dll","D3D12EnableExperimentalFeatures",0);
+    if(!fn)return E_NOINTERFACE;
+    HRESULT hr=fn(count,features,configurations,sizes);
+    if(state->log&&mlp::first_report("d3d12 experimental features"))
+        state->log(("PRUN EVENT guest D3D12EnableExperimentalFeatures count="+std::to_string(count)+" hr=0x"+hex32(hr)).c_str());
+    return hr;
+}
 // Until a real modal UI bridge exists, retain fatal game diagnostics and stop.
 // Never return a fabricated button selection that would advance startup.
 static std::string dialogText(LPCSTR text,size_t limit=2048) {
@@ -1195,6 +1384,16 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxW")) return (uintptr_t)&messageBoxW;
     if(key=="user32.dll" && name && !strcmp(name,"CreateWindowExW")) return (uintptr_t)&createWindow;
     if(key=="d3d11.dll" && name && !strcmp(name,"D3D11CreateDevice")) return (uintptr_t)&createDevice;
+    // D3D12: the device entry point and the helpers a D3D12 guest imports. Every
+    // other d3d12.dll export (layered device, GetBehaviorValue) falls through to
+    // the system route in mlp, which loads the console's own d3d12.dll.
+    if(key=="d3d12.dll" && name) {
+        if(!strcmp(name,"D3D12CreateDevice")) return (uintptr_t)&createD3D12Device;
+        if(!strcmp(name,"D3D12GetDebugInterface")) return (uintptr_t)&d3d12GetDebugInterface;
+        if(!strcmp(name,"D3D12SerializeRootSignature")) return (uintptr_t)&d3d12SerializeRootSignature;
+        if(!strcmp(name,"D3D12CreateRootSignatureDeserializer")) return (uintptr_t)&d3d12CreateRootSignatureDeserializer;
+        if(!strcmp(name,"D3D12EnableExperimentalFeatures")) return (uintptr_t)&d3d12EnableExperimentalFeatures;
+    }
     // Same client gate as LoadLibrary, for static and forwarded imports. Never
     // a callable Steam placeholder: the import stays unresolved, as on Windows
     // without the DLL. steam_api64.dll resolves from the game's own file below.
@@ -1219,7 +1418,7 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     }
     if(dependency) {
         if(owner && owner!=dependency) owner->dependencies.push_back(dependency);
-        auto p=exported(*dependency,name,ordinal);return p?p:missing(dll,name,ordinal);
+        auto p=exported(*dependency,name,ordinal);return p?steamApiExport(*dependency,name,p):missing(dll,name,ordinal);
     }
     // VC++ runtime DLLs the console lacks (no game copy was found above):
     // forwarded to the console's ucrtbase, as Wine's vcruntime140 does.
@@ -1232,10 +1431,10 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     return mlp::resolve(key.c_str(),name,ordinal);
 }
 static void runImpl() {
-    state->event("guest environment: native AppContainer PEB/TEB; guest module/command APIs; current directory="+narrow(state->root));
+    state->event("guest environment: native AppContainer PEB/TEB; guest module/command APIs; current directory="+narrow(state->cwd));
     using SetDir=BOOL(WINAPI*)(LPCWSTR);auto setDir=(SetDir)kernel_tail::native("SetCurrentDirectoryW");
     state->event("SetCurrentDirectoryW guest root");
-    if(!setDir || !setDir(state->root.c_str())) {state->event("SetCurrentDirectoryW failed error="+std::to_string(GetLastError()));return;}
+    if(!setDir || !setDir(state->cwd.c_str())) {state->event("SetCurrentDirectoryW failed error="+std::to_string(GetLastError()));return;}
     if(!initializePending()) return;
     char entry[128];snprintf(entry,sizeof entry,"EXE entry %s+0x%lx",state->exe->key.c_str(),state->exe->image.entry);state->event(entry);state->executed=true;
     state->code=((DWORD(WINAPI*)())(state->exe->image.base+state->exe->image.entry))();
@@ -1246,11 +1445,24 @@ static DWORD WINAPI worker(void*) {
     __try {runImpl();} __except(filter(GetExceptionInformation())) {}
     state->result=state->snapshot();state->finished=true;guestThread=false;return state->code;
 }
-static bool start(const std::wstring& root,const std::wstring& exe,const std::wstring& args,wxl::Log log) {
+// gdi32's pixel-format and SwapBuffers entry points forward to the wgl* exports of whichever opengl32.dll the guest
+// has mapped (Mesa from the runtime directory, or one the game ships). None mapped: Play's failing stubs answer.
+static uintptr_t openglExport(const char* name) {
+    if(!state||!name)return 0;
+    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
+    auto m=named(L"opengl32.dll");
+    if(!m||m->mappingFailed||!m->mapped)return 0;
+    ExportLookup lookup;
+    return (uintptr_t)lookup.finish(exported(*m,name,0));
+}
+// cwd (optional) is the guest's working directory, as a Steam launch option's
+// workingdir names it; empty means the executable's own directory.
+static bool start(const std::wstring& root,const std::wstring& exe,const std::wstring& args,wxl::Log log,const std::wstring& cwd=std::wstring()) {
     if(state) return false;
-    state=new State();state->root=root;state->log=log;observed.store(state,std::memory_order_release);state->command=L"\""+root+L"\\"+exe+L"\" "+args;state->commandA=narrow(state->command);
+    state=new State();state->root=root;state->cwd=cwd.empty()?root:cwd;state->log=log;observed.store(state,std::memory_order_release);state->command=L"\""+root+L"\\"+exe+L"\" "+args;state->commandA=narrow(state->command);
     mlp::log=log;wxl::logger=log;
     xinput_core::note=[](const char* text){if(mlp::log)mlp::log(text);};mlp::missingResolver=missing;mlp::assets.clear();mlp::summaries.clear();
+    gdi32_core::gl_lookup.store(&openglExport);
     state->exe=map(root+L"\\"+exe);if(!state->exe) {state->result=state->snapshot();state->finished=true;return true;}
     find_ntdll();
     {static bool installed=false;if(!installed){installed=true;hostTopLevel=SetUnhandledExceptionFilter(topLevelFilter);}}
@@ -1268,6 +1480,7 @@ static bool start(const std::wstring& root,const std::wstring& exe,const std::ws
 // client or ownership ticket can never reach the next game.
 static void reset_launch_config() {
     steamProvider.clear();steamClient.clear();steamClientSigned.clear();appTicket.clear();emulatedCreate=nullptr;
+    set_rich_presence_tap({});
 }
 // A launch that ended before any game code ran (no TLS callback, DllMain or
 // entry point: `executed` is set before each) left nothing executing: the

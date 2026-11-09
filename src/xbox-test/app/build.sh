@@ -32,6 +32,16 @@ cp "$donors"/{SHA256SUMS,SOURCE.txt,0001-pe-rodata.patch} "$here/donors/COPYING.
 mkdir -p "$out/layout/runtime"
 cp "$donors"/runtime/*.dll "$donors"/runtime/SHA256SUMS "$out/layout/runtime/"
 cp "$donors"/SOURCE.txt "$here/donors/COPYING.LIB" "$here/donors/LICENSE" "$out/layout/runtime/"
+# OpenGL for games that load OPENGL32.DLL (research/OPENGL-PLAN.md): Mesa's d3d12 driver, built from the pinned source.
+# Play maps these from runtime/ after any copy the game ships. PLAY_MESA=0 builds a launcher without them (Play's
+# failing WGL stubs then answer, as before); the Mesa build needs meson, ninja, python mako and pyyaml.
+if [ "${PLAY_MESA:-1}" != 0 ]; then
+  mesa="$here/../../../out/mesa-d3d12"
+  bash "$here/../../tools/build-mesa-d3d12.sh" "$mesa" --build
+  cp "$mesa"/{opengl32.dll,libgallium_wgl.dll,LICENSE-Mesa.rst,LICENSE-DirectX-Headers} "$out/layout/runtime/"
+  mkdir -p "$out/layout/runtime/mesa-patches"; cp "$mesa"/patches/*.patch "$out/layout/runtime/mesa-patches/"
+  cp "$mesa/SHA256SUMS" "$out/layout/runtime/SHA256SUMS-mesa"; cp "$mesa/SOURCE.txt" "$out/layout/runtime/SOURCE-mesa.txt"
+fi
 # Steam API provider for owned games (gbe_fork, pinned release; never committed).
 gbe="$here/../../../out/gbe-fork"
 bash "$here/../../tools/fetch-gbe-fork.sh" "$gbe"

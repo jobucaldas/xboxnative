@@ -69,6 +69,82 @@ int main() {
     CHECK(establisher==reinterpret_cast<DWORD64>(stack));
     CHECK(kernel32_core::resolve("ntdll.dll","RtlVirtualUnwind")==kernel32_core::resolve("kernel32.dll","RtlVirtualUnwind"));
     CHECK(!kernel32_core::resolve("ntdll.dll","DebugBreak"));
+    // Growable function tables (Mono's JIT registers generated code this way).
+    // The route must hand out the OS export: the native unwinder consults only
+    // its own registry, so a private list would accept every table and then
+    // never be read by RtlLookupFunctionEntry or RtlVirtualUnwind.
+    {
+        HMODULE ntdll=GetModuleHandleW(L"ntdll.dll"); CHECK(ntdll);
+        auto raw_add=reinterpret_cast<decltype(&::RtlAddGrowableFunctionTable)>(
+            reinterpret_cast<uintptr_t>(GetProcAddress(ntdll,"RtlAddGrowableFunctionTable")));
+        auto raw_grow=reinterpret_cast<decltype(&::RtlGrowFunctionTable)>(
+            reinterpret_cast<uintptr_t>(GetProcAddress(ntdll,"RtlGrowFunctionTable")));
+        auto raw_drop=reinterpret_cast<decltype(&::RtlDeleteGrowableFunctionTable)>(
+            reinterpret_cast<uintptr_t>(GetProcAddress(ntdll,"RtlDeleteGrowableFunctionTable")));
+        auto lookup=reinterpret_cast<decltype(&::RtlLookupFunctionEntry)>(
+            kernel32_core::resolve("ntdll.dll","RtlLookupFunctionEntry"));
+        CHECK(lookup);
+        auto add=reinterpret_cast<decltype(&::RtlAddGrowableFunctionTable)>(
+            kernel32_core::resolve("ntdll.dll","RtlAddGrowableFunctionTable"));
+        auto grow=reinterpret_cast<decltype(&::RtlGrowFunctionTable)>(
+            kernel32_core::resolve("ntdll.dll","RtlGrowFunctionTable"));
+        auto drop=reinterpret_cast<decltype(&::RtlDeleteGrowableFunctionTable)>(
+            kernel32_core::resolve("ntdll.dll","RtlDeleteGrowableFunctionTable"));
+        CHECK(add&&grow&&drop);
+        // The refusal path is what a console without the export gets. It is
+        // always exercised here: a table it never issued must not be reported
+        // as registered, and the grow/delete handles stay inert.
+        {
+            void* refused=reinterpret_cast<void*>(0x1);
+            CHECK(kernel32_core::add_growable_unsupported(&refused,nullptr,0,0,0,0)==kernel32_core::status_not_supported);
+            CHECK(refused==reinterpret_cast<void*>(0x1));
+            kernel32_core::grow_unsupported(nullptr,1);
+            kernel32_core::delete_growable_unsupported(nullptr);
+            CHECK(kernel32_core::status_not_supported==DWORD(0xC00000BB));
+        }
+        // Wine 10 exports all three from ntdll only; when the OS has them the
+        // route is that exact function, never a local reimplementation.
+        if(raw_add) {
+            CHECK(add==raw_add); CHECK(grow==raw_grow); CHECK(drop==raw_drop);
+            // The rtlsupport API set names the same ntdll runtime.
+            CHECK(kernel32_core::resolve("api-ms-win-core-rtlsupport-l1-1-0.dll","RtlAddGrowableFunctionTable")==
+                  reinterpret_cast<uintptr_t>(raw_add));
+            // kernel32/kernelbase do not export the growable family.
+            CHECK(!kernel32_core::resolve("kernel32.dll","RtlAddGrowableFunctionTable"));
+            alignas(16) BYTE code[64]{};
+            RUNTIME_FUNCTION functions[2]{};
+            functions[0].BeginAddress=0; functions[0].EndAddress=16; functions[0].UnwindData=0;
+            functions[1].BeginAddress=16; functions[1].EndAddress=32; functions[1].UnwindData=0;
+            ULONG_PTR start=reinterpret_cast<ULONG_PTR>(code);
+            void* table=nullptr;
+            CHECK(add(&table,functions,1,2,start,start+64)==0); CHECK(table);
+            // The registered entry resolves through the same unwinder, at the
+            // registered range base.
+            ULONG_PTR base=0;
+            CHECK(lookup(start+8,&base,nullptr)==&functions[0]); CHECK(base==start);
+            // Beyond the current count the second entry stays invisible.
+            base=0xdead;
+            CHECK(!lookup(start+24,&base,nullptr));
+            grow(table,2);
+            base=0;
+            CHECK(lookup(start+24,&base,nullptr)==&functions[1]); CHECK(base==start);
+            drop(table);
+            // Deleted: the same query now matches the export's own answer.
+            auto raw_lookup=reinterpret_cast<decltype(&::RtlLookupFunctionEntry)>(
+                reinterpret_cast<uintptr_t>(GetProcAddress(ntdll,"RtlLookupFunctionEntry")));
+            CHECK(raw_lookup);
+            ULONG_PTR mine_base=0xdead,wine_base=0xdead;
+            auto mine=lookup(start+8,&mine_base,nullptr);
+            auto wine=raw_lookup(start+8,&wine_base,nullptr);
+            CHECK(!mine&&!wine); CHECK(mine_base==wine_base);
+        } else {
+            // No OS export: the route is the documented refusal, never a local
+            // table the unwinder would ignore.
+            CHECK(add==reinterpret_cast<decltype(&::RtlAddGrowableFunctionTable)>(&kernel32_core::add_growable_unsupported));
+            CHECK(grow==reinterpret_cast<decltype(&::RtlGrowFunctionTable)>(&kernel32_core::grow_unsupported));
+            CHECK(drop==reinterpret_cast<decltype(&::RtlDeleteGrowableFunctionTable)>(&kernel32_core::delete_growable_unsupported));
+        }
+    }
     // Formatting compares native results, last errors and complete output
     // buffers. Insertion arguments use the documented argument-array form.
     ULONG_PTR inserts[]={reinterpret_cast<ULONG_PTR>(L"item"),42};

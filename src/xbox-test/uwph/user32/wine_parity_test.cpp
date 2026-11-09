@@ -197,9 +197,68 @@ static unsigned resources() {
  for (int t : {0, 1, 2}) { CHECK(type(t) == GetKeyboardType(t)); ++n; }
  return n;
 }
+// DPI_AWARENESS_CONTEXT family: the stateless conversions and predicates are
+// compared against host Wine user32 over the public constants and a set of
+// encoded NTUSER_DPI_CONTEXT values (valid, invalid version, GDISCALED and
+// PROCESS flags, and the "no context" 0). The process/thread state machine is
+// first-choice-wins and irreversible, so it is covered by dpi-context-test.sh
+// in a fresh process instead.
+static unsigned dpi() {
+ auto equal = api<decltype(&AreDpiAwarenessContextsEqual)>("AreDpiAwarenessContextsEqual");
+ auto aware = api<decltype(&GetAwarenessFromDpiAwarenessContext)>("GetAwarenessFromDpiAwarenessContext");
+ auto from = api<decltype(&GetDpiFromDpiAwarenessContext)>("GetDpiFromDpiAwarenessContext");
+ auto valid = api<decltype(&IsValidDpiAwarenessContext)>("IsValidDpiAwarenessContext");
+ auto thread = api<decltype(&GetThreadDpiAwarenessContext)>("GetThreadDpiAwarenessContext");
+ auto process = api<decltype(&IsProcessDPIAware)>("IsProcessDPIAware");
+ const DPI_AWARENESS_CONTEXT contexts[] = {
+  DPI_AWARENESS_CONTEXT_UNAWARE, DPI_AWARENESS_CONTEXT_SYSTEM_AWARE,
+  DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+  DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED,
+  (DPI_AWARENESS_CONTEXT)(UINT_PTR)0, (DPI_AWARENESS_CONTEXT)(UINT_PTR)0x6010,
+  (DPI_AWARENESS_CONTEXT)(UINT_PTR)0x6110, (DPI_AWARENESS_CONTEXT)(UINT_PTR)0x20,
+  (DPI_AWARENESS_CONTEXT)(UINT_PTR)0x10, (DPI_AWARENESS_CONTEXT)(UINT_PTR)0x6011,
+  (DPI_AWARENESS_CONTEXT)(UINT_PTR)0x40006010, (DPI_AWARENESS_CONTEXT)(UINT_PTR)0x80006010,
+  (DPI_AWARENESS_CONTEXT)(UINT_PTR)0x1234, (DPI_AWARENESS_CONTEXT)(UINT_PTR)0xffffffffffffffff,
+ };
+ unsigned n = 0;
+ for (DPI_AWARENESS_CONTEXT c : contexts) {
+  SetLastError(0xdead);
+  CHECK(valid(c) == IsValidDpiAwarenessContext(c)); CHECK(GetLastError() == 0xdead);
+  CHECK(aware(c) == GetAwarenessFromDpiAwarenessContext(c));
+  CHECK(from(c) == GetDpiFromDpiAwarenessContext(c)); ++n;
+ }
+ for (DPI_AWARENESS_CONTEXT a : contexts) for (DPI_AWARENESS_CONTEXT b : contexts) {
+  SetLastError(0xdead);
+  CHECK(equal(a, b) == AreDpiAwarenessContextsEqual(a, b)); CHECK(GetLastError() == 0xdead); ++n;
+ }
+ // Neither side has chosen a process context in this test process.
+ CHECK(thread() == GetThreadDpiAwarenessContext()); CHECK(process() == IsProcessDPIAware()); n += 2;
+ return n;
+}
+// Touch input: no pointer device exists, so no touch handle is ever issued and
+// Wine answers ERROR_CALL_NOT_IMPLEMENTED from its unimplemented stubs.
+static unsigned touch() {
+ auto get = api<decltype(&GetTouchInputInfo)>("GetTouchInputInfo");
+ auto close = api<decltype(&CloseTouchInputHandle)>("CloseTouchInputHandle");
+ auto devices = api<decltype(&GetPointerDevices)>("GetPointerDevices");
+ unsigned n = 0;
+ for (HTOUCHINPUT handle : {HTOUCHINPUT(nullptr), HTOUCHINPUT(1), HTOUCHINPUT(0x1234)}) {
+  SetLastError(0xdead);
+  CHECK(get(handle, 0, nullptr, sizeof(TOUCHINPUT)) == GetTouchInputInfo(handle, 0, nullptr, sizeof(TOUCHINPUT)));
+  CHECK(GetLastError() == ERROR_CALL_NOT_IMPLEMENTED);
+  SetLastError(0xdead);
+  CHECK(close(handle) == CloseTouchInputHandle(handle)); CHECK(GetLastError() == ERROR_CALL_NOT_IMPLEMENTED); ++n;
+ }
+ // The console exposes no pointer devices at all.
+ UINT32 count = 0xffffffff; SetLastError(0xdead);
+ CHECK(devices(&count, nullptr)); CHECK(count == 0 && GetLastError() == 0xdead);
+ SetLastError(0xdead); CHECK(!devices(nullptr, nullptr)); CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+ return n + 2;
+}
 int main() {
  module = LoadLibraryW(L"uwph-u32c.dll"); CHECK(module);
  unsigned geometry = metrics(), object = objects(), parameter = parameters(), keys = keyboard(), strings = resources();
- printf("PASS: Wine parity: %u metrics/geometry, %u object queries, %u parameters, %u keyboard checks, %u string/keyboard-type checks (off-device)\n",
-        geometry, object, parameter, keys, strings);
+ unsigned awareness = dpi(), touches = touch();
+ printf("PASS: Wine parity: %u metrics/geometry, %u object queries, %u parameters, %u keyboard checks, %u string/keyboard-type checks, %u DPI awareness checks, %u touch checks (off-device)\n",
+        geometry, object, parameter, keys, strings, awareness, touches);
 }

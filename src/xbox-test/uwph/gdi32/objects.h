@@ -279,8 +279,8 @@ inline int WINAPI combine_rgn(HRGN dst,HRGN a,HRGN b,int mode) {
     return out.empty()?NULLREGION:out.size()==1?SIMPLEREGION:COMPLEXREGION;
 }
 
-// ---- No OpenGL driver formats and no colour-management profile here.
-inline int WINAPI get_pixel_format(HDC){SetLastError(ERROR_INVALID_PIXEL_FORMAT);return 0;}
-inline int WINAPI describe_pixel_format(HDC,int,UINT,void*){return 0;}
+// ---- No colour-management profile here (pixel formats live in pixel_format.h).
+// Mesa's software (GDI) winsys links StretchDIBits; the d3d12 path never calls it. There is no GDI surface to blit to.
+inline int WINAPI stretch_dibits(HDC,int,int,int,int,int,int,int,int,const void*,const void*,UINT,DWORD){SetLastError(ERROR_NOT_SUPPORTED);return 0;}
 inline BOOL WINAPI get_icm_profile_w(HDC,DWORD*,LPWSTR){SetLastError(ERROR_NOT_SUPPORTED);return FALSE;}
 }

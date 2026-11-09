@@ -14,9 +14,9 @@ sdl3-devel-vc  https://github.com/libsdl-org/SDL/releases/download/release-3.4.2
 sdl2-devel-vc  https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-VC.zip  af347939395a58b365846aaea27391e69f9ec9d4dd650d6ac40802159b418a6e
 # OpenGL-on-D3D12 (research/OPENGL-PLAN.md): Mesa 25.3.6 source tarball (SHA-256 verified; MIT) built by src/tools/build-mesa-d3d12.sh.
 mesa-src  https://archive.mesa3d.org/mesa-25.3.6.tar.xz  59217efeac3b64e7ced958324b9db7494f1e0741aeb22d780276514cc1b8f206
-# Mesa's own wrap (subprojects/DirectX-Headers.wrap in 25.3.6) uses this tag. FIXME(pin): record the 40-hex commit it resolves to
-# (github.com was unreachable when this was written); once a hash is here the script verifies the checkout against it.
-directx-headers  https://github.com/microsoft/DirectX-Headers.git  v1.618.1
+# Mesa's own wrap (subprojects/DirectX-Headers.wrap in 25.3.6) uses tag v1.618.1; this is the commit that tag resolves to.
+# Columns: NAME URL COMMIT TAG. The build script checks the wrap still names the tag and the checkout is exactly COMMIT.
+directx-headers  https://github.com/microsoft/DirectX-Headers.git  64c650b0c6642ab0f3cdf674e38401e02ccd2460  v1.618.1
 # Vulkan (research/VULKAN-PLAN.md): Khronos Vulkan-Loader and Vulkan-Headers 1.4.313 (Apache-2.0), built by
 # src/tools/build-vulkan-loader.sh into vulkan-1.dll plus a null ICD that reports zero physical devices.
 vulkan-loader-src  https://codeload.github.com/KhronosGroup/Vulkan-Loader/tar.gz/refs/tags/vulkan-sdk-1.4.313.0  c736fa79d974c3513f5573b74249ed002aab59f1d15d1c13fc1d00644830869a

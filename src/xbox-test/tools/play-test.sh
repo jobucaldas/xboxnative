@@ -1,8 +1,10 @@
 #!/bin/bash
 # play-test.sh <appid> [TIMEOUT_S=600] [OUTDIR]
 # THE ACCEPTANCE TEST: "Play <game> via the launcher". Runs the real launcher path on the console:
-# open detail -> press main button (Install if needed, then auto-launch / Play) -> wait for 'launch: RESULT'
+# open detail -> press main button (Install when needed, then Play after the install finishes) -> wait for 'launch: RESULT'
 # -> collect screenshots + boot.log + launch_probe.log + launch_request/result.json into OUTDIR.
+# The launcher never launches by itself after an install: when that first press starts a download this
+# script waits for it to finish and presses the button again, exactly as the player does.
 # Input is SYNTHETIC: one-shot LocalState\cmd.txt lines (consumed by the app, logged as "cmd.txt SYNTHETIC command").
 # Env: PKG=<PackageFullName> (default: auto-detect Xboxnative.Launcher), PT_MAXMB=<n> (size guard via dlmax.txt: refuse download if
 #      bigger than n MB; 0 = dry run that only prints the manifest size), PT_NOKILL=1 (don't restart the app first).
@@ -65,15 +67,34 @@ ok=1; for k in $(seq 1 40); do evidence boot.log "$tmp/b.log"; tail -n +$((n0+1)
 [ $ok -eq 0 ] || { echo "library never loaded"; cp "$tmp/b.log" "$out/boot.log" 2>/dev/null; exit 1; }
 sleep 5
 cmd "open $app"; sleep 8; shot 1-detail
-cmd "press"; sleep 1; shot 2-after-press
-end=$((SECONDS+to)); i=0; res=1; attempt=""
+end=$((SECONDS+to)); i=0; res=1; attempt=""; pressed=0; press_mark=0
 while [ $SECONDS -lt $end ]; do
   need boot.log "$tmp/b.log"
+  session=$(tail -n +$((n0+1)) "$tmp/b.log")
+  after=$(printf '%s\n' "$session" | tail -n +$((press_mark + 1)))
+  # The launcher must never launch by itself: a launch request that follows a
+  # finished download with no press in between is exactly that, so fail the run.
+  if [ "$pressed" -eq 1 ] && printf '%s\n' "$after" | grep -q "dl: ===== DONE appid $app " && printf '%s\n' "$after" | grep -q 'launch: request written'; then
+    echo "AUTO-LAUNCHED after install: the launcher must not launch by itself"; break
+  fi
   # Only the newest request written in this session, and never the previous run's, is ours.
-  a=$(tail -n +$((n0+1)) "$tmp/b.log" | sed -nE 's/.*launch: request written .* attempt=([0-9]+:[0-9]+)([[:space:]].*)?$/\1/p' | tail -1)
+  a=$(printf '%s\n' "$session" | sed -nE 's/.*launch: request written .* attempt=([0-9]+:[0-9]+)([[:space:]].*)?$/\1/p' | tail -1)
   [ -n "$a" ] && [ "$a" != "$stale" ] && attempt=$a
-  if [ -n "$attempt" ] && tail -n +$((n0+1)) "$tmp/b.log" | grep -Eq "launch: RESULT attempt=$attempt( |\$)"; then res=0; break; fi
-  if tail -n +$((n0+1)) "$tmp/b.log" | grep -Eq 'dl: (FAILED|failed)|Test guard|Cannot reach Steam'; then echo "install did not complete"; break; fi
+  if [ -n "$attempt" ] && printf '%s\n' "$session" | grep -Eq "launch: RESULT attempt=$attempt( |\$)"; then res=0; break; fi
+  if printf '%s\n' "$session" | grep -Eq 'dl: (FAILED|failed)|Test guard|Cannot reach Steam'; then echo "install did not complete"; break; fi
+  # The launcher never launches after an install. Press the main button once (Install,
+  # or Play when it is already installed), then again once the download this press
+  # started is done. A download already running (PT_NOKILL kept the session) is
+  # waited for, never cancelled by a stray press.
+  dl_last=$(printf '%s\n' "$session" | grep -E "dl: ===== start appid $app |dl: ===== DONE appid $app " | tail -1)
+  if [ "$pressed" -eq 0 ]; then
+    case "$dl_last" in
+      *"start appid $app "*) : ;;   # pressing A now would cancel that download
+      *) press_mark=$(printf '%s\n' "$session" | wc -l); cmd "press"; pressed=1; sleep 1; shot 2-after-press ;;
+    esac
+  elif [ "$pressed" -eq 1 ] && printf '%s\n' "$after" | grep -q "dl: ===== DONE appid $app "; then
+    press_mark=$(printf '%s\n' "$session" | wc -l); sleep 2; cmd "press"; pressed=2; sleep 1; shot 3-installed-press
+  fi
   i=$((i+1)); { [ $((i%6)) -eq 0 ] || [ $i -le 12 ]; } && shot "3-wait-$(printf %03d $i)"; sleep 1
 done
 sleep 4; shot 4-final

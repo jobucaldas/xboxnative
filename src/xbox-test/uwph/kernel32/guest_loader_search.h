@@ -6,9 +6,13 @@
 // installed redistributable serves them from System32 on Windows.
 static std::wstring runtimeDirectory;
 static void set_runtime_directory(const std::wstring& path) { runtimeDirectory=path; }
+// The OpenGL stack (Mesa's d3d12 driver, research/OPENGL-PLAN.md) is served from the same directory: opengl32.dll
+// and its driver library libgallium_wgl.dll, as the OS opengl32.dll serves a game on Windows. The console has none,
+// so a game that ships no GL DLL of its own gets these (when the package carries them; otherwise Play's WGL stubs
+// answer). dxil.dll is the optional DXIL signer Mesa loads by name (DXIL.dll) for shader validation.
 static bool redistributable(const std::wstring& name) {
     std::wstring key=name;for(auto& c:key)c=towlower(c);
-    for(auto dll:{L"msvcp140.dll",L"msvcp140_1.dll",L"msvcp140_2.dll",L"msvcp140_atomic_wait.dll",
+    for(auto dll:{L"opengl32.dll",L"libgallium_wgl.dll",L"dxil.dll",L"msvcp140.dll",L"msvcp140_1.dll",L"msvcp140_2.dll",L"msvcp140_atomic_wait.dll",
                   L"msvcp140_codecvt_ids.dll",L"concrt140.dll"}) if(key==dll) return true;
     return false;
 }
