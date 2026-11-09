@@ -308,11 +308,12 @@ inline std::string Guest::format(FmtArgs a, const std::string& fmt) {
 inline int Guest::store(const std::string& s, uint32_t out_ptr, int cap, bool append_nul) {
     int n = int(s.size());
     if (cap != 0) {
+        // cap < 0 is an unbounded buffer: every byte fits, plus the terminator.
         int room = cap < 0 ? n : (append_nul ? cap - 1 : cap);
         if (room < 0) room = 0;
         int put = n < room ? n : room;
         if (put > 0) mem.write_bytes(out_ptr, s.data(), uint32_t(put));
-        if (append_nul && cap > 0) mem.w8(out_ptr + uint32_t(put), 0);
+        if (append_nul) mem.w8(out_ptr + uint32_t(put), 0);
     }
     return n;
 }
@@ -395,12 +396,19 @@ inline void Guest::register_all() {
         uint32_t p = c.arg(0); if (!p) return 0;
         uint32_t cb = mem.r32(p); if (cb < 148) { set_last_error(122); return 0; }
         mem.w32(p + 4, 10); mem.w32(p + 8, 0); mem.w32(p + 12, 19045); mem.w32(p + 16, 2);
-        mem.w32(p + 20, 0); std::string cs = "Service Pack 0";
-        mem.write_bytes(p + 24, cs.c_str(), uint32_t(cs.size() + 1));
-        // OSVERSIONINFOA is 148 bytes (szCSDVersion is 128); OSVERSIONINFOEXA adds
-        // two words and a byte (dwPlatformId is followed by wSuiteMask, wProductType
-        // and wReserved). Nothing is written past the size the caller declared.
-        if (cb >= 156) { mem.w(p + 148, 0, 2); mem.w(p + 150, 1, 2); mem.w8(p + 152, 0); }
+        // OSVERSIONINFOA: the five dwords, then szCSDVersion[128] at offset 20,
+        // so the struct is 148 bytes. OSVERSIONINFOEXA appends wServicePackMajor,
+        // wServicePackMinor, wSuiteMask, wProductType and wReserved (156 bytes).
+        // Nothing is written past the size the caller declared.
+        std::string cs = "Service Pack 0";
+        mem.write_bytes(p + 20, cs.c_str(), uint32_t(cs.size() + 1));
+        if (cb >= 156) {
+            mem.w(p + 148, 0, 2);  // wServicePackMajor
+            mem.w(p + 150, 0, 2);  // wServicePackMinor
+            mem.w(p + 152, 0, 2);  // wSuiteMask
+            mem.w(p + 154, 1, 2);  // wProductType: VER_NT_WORKSTATION
+            mem.w8(p + 155, 0);    // wReserved
+        }
         return 1; });
     reg.add("kernel32.dll", "IsProcessorFeaturePresent", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
         return c.arg(0) == 10 ? 1u : 0u; });  // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)

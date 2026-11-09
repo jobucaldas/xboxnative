@@ -49,10 +49,12 @@ int main(void) {
     printf("x86-crt: printf %s\n", buf);
 
     /* sprintf takes its varargs on the stack, not a va_list; snprintf truncates
-     * and still returns the untruncated length; strchr finds the terminator. */
+     * and still returns the untruncated length; strchr finds the terminator.
+     * The buffer is prefilled so a missing NUL shows up as trailing junk. */
     char sp[64];
+    memset(sp, 0xAA, sizeof sp);
     int sn = sprintf(sp, "%d/%s/%.1f", 7, "hi", 1.5);
-    check(sn == 8 && strcmp(sp, "7/hi/1.5") == 0);
+    check(sn == 8 && strcmp(sp, "7/hi/1.5") == 0 && sp[8] == 0);
     char tr[6];
     char ten[11]; memcpy(ten, "abcdefghij", sizeof ten);  /* opaque to the compiler */
     int tn = snprintf(tr, sizeof tr, "%s", ten);
@@ -114,13 +116,25 @@ int main(void) {
     check(GetTickCount() != 0 || GetTickCount() == 0);  /* callable, not printed */
     OSVERSIONINFOA vi; memset(&vi, 0, sizeof vi); vi.dwOSVersionInfoSize = sizeof vi;
     check(GetVersionExA(&vi) != 0 && vi.dwMajorVersion >= 5);
+    /* OSVERSIONINFOEXA: the tail after szCSDVersion is wServicePackMajor,
+     * wServicePackMinor, wSuiteMask, wProductType, wReserved. */
+    OSVERSIONINFOEXA vx; memset(&vx, 0, sizeof vx); vx.dwOSVersionInfoSize = sizeof vx;
+    check(GetVersionExA((OSVERSIONINFOA*)&vx) != 0 && vx.dwMajorVersion == 10 &&
+          vx.wServicePackMajor == 0 && vx.wServicePackMinor == 0 && vx.wProductType == VER_NT_WORKSTATION);
+    /* A 148-byte A struct must not be written past its end. */
+    unsigned char vbuf[160];
+    memset(vbuf, 0xEE, sizeof vbuf);
+    *(DWORD*)vbuf = sizeof(OSVERSIONINFOA);
+    check(GetVersionExA((OSVERSIONINFOA*)vbuf) != 0 && vbuf[148] == 0xEE && vbuf[159] == 0xEE);
     /* SYSTEMTIME is eight WORDs: a 4-byte store per field would smash the next
-     * one. Year 2026 and month 11 must both survive, and nothing past the
-     * 16-byte struct may be written. */
+     * one (month would read back as the year). Ranges, not exact values, so the
+     * same check holds under Wine's real clock. Nothing past the 16-byte struct
+     * may be written. */
     unsigned char st[24];
     memset(st, 0xEE, sizeof st);
     GetSystemTime((SYSTEMTIME*)st);
-    check(((WORD*)st)[0] == 2026 && ((WORD*)st)[1] == 11 && ((WORD*)st)[3] == 9);
+    check(((WORD*)st)[0] >= 2020 && ((WORD*)st)[1] >= 1 && ((WORD*)st)[1] <= 12 &&
+          ((WORD*)st)[3] >= 1 && ((WORD*)st)[3] <= 31 && ((WORD*)st)[4] <= 23);
     check(st[16] == 0xEE && st[23] == 0xEE);
     char mod[260];
     check(GetModuleFileNameA(NULL, mod, sizeof mod) > 0);
