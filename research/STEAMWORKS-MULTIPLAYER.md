@@ -194,20 +194,22 @@ has never seen, in which case the game sees the empty board it saw before.
 Only the first Find of a board in a process benefits. And the seed blocks the
 game's thread for one CM round trip per board it asks for.
 
-Two gaps are known and are *not* fixed by the cache-file route. Both are visible
-on the Rank screen, so a console run should be read with them in mind rather
-than as "the bridge did nothing":
+Three gaps are known and are *not* fixed by the cache-file route. All are
+visible on the Rank screen, so a console run should be read with them in mind
+rather than as "the bridge did nothing":
 
-1. **The AMIGOS tab will stay empty.** gbe's `DownloadLeaderboardEntries` treats
-   `k_ELeaderboardDataRequestFriends` as "all rows in the cache"
-   (`dll/steam_user_stats_leaderboard.cpp`: the range clamp is skipped for the
-   friends request, then `m_cEntryCount = entries.size()`), and
-   `DownloadLeaderboardEntriesForUsers` only counts users it already has in that
-   same vector. The cache file carries no friend flag, so the bridge cannot make
-   the friends request narrower than the global one. Serving it properly means
-   asking CM for `DataFriends` rows per request — i.e. the request has to be
-   observed at `DownloadLeaderboardEntries`, not only at Find, which is the
-   shim route below.
+1. **The AMIGOS tab will show global players, not friends.** gbe's
+   `DownloadLeaderboardEntries` treats `k_ELeaderboardDataRequestFriends` as
+   "all rows in the cache" (`dll/steam_user_stats_leaderboard.cpp`: the range
+   clamp is skipped for the friends request, then
+   `m_cEntryCount = entries.size()`), so the tab is not empty — it lists
+   everyone the seed wrote. `DownloadLeaderboardEntriesForUsers` does filter:
+   it counts only users already in that same vector. The cache file carries no
+   friend flag, so the bridge cannot make the friends request narrower than the
+   global one. Serving it properly means asking CM for `DataFriends` rows per
+   request — i.e. the request has to be observed at
+   `DownloadLeaderboardEntries`, not only at Find, which is the shim route
+   below.
 2. **Other players' names will read "Unknown User".** gbe's
    `GetFriendPersonaName` answers the local name for the account and otherwise
    only a `Friend` record from its own LAN peer network
@@ -216,8 +218,15 @@ than as "the bridge did nothing":
    column will show the placeholder unless the launcher also serves persona
    names (CM `CMsgClientPersonaState` for the row ids, or a small name cache
    written where the provider looks — none exists today).
+3. **Ranks are 1..N, not Steam's ranks.** gbe derives `m_nGlobalRank` from the
+   entry's index in its sorted array (`1 + (&entry - &entries[0])`), not from
+   Steam's `global_rank`, and the cache file has no field for it. That is right
+   for the top of the board and wrong for the user's own row whenever they are
+   not inside the seeded slice.
 
-The GLOBAL tab, which is the owner's stated check, is unaffected by both.
+The GLOBAL tab — the owner's stated check — is unaffected by the first gap: it
+will list real players' scores and ranks. The second gap applies to it too, so
+expect rows with placeholder names rather than an empty panel.
 
 ## The three serving options
 
