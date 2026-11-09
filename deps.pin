@@ -17,3 +17,7 @@ mesa-src  https://archive.mesa3d.org/mesa-25.3.6.tar.xz  59217efeac3b64e7ced9583
 # Mesa's own wrap (subprojects/DirectX-Headers.wrap in 25.3.6) uses this tag. FIXME(pin): record the 40-hex commit it resolves to
 # (github.com was unreachable when this was written); once a hash is here the script verifies the checkout against it.
 directx-headers  https://github.com/microsoft/DirectX-Headers.git  v1.618.1
+# Vulkan (research/VULKAN-PLAN.md): Khronos Vulkan-Loader and Vulkan-Headers 1.4.313 (Apache-2.0), built by
+# src/tools/build-vulkan-loader.sh into vulkan-1.dll plus a null ICD that reports zero physical devices.
+vulkan-loader-src  https://codeload.github.com/KhronosGroup/Vulkan-Loader/tar.gz/refs/tags/vulkan-sdk-1.4.313.0  c736fa79d974c3513f5573b74249ed002aab59f1d15d1c13fc1d00644830869a
+vulkan-headers-src  https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/refs/tags/vulkan-sdk-1.4.313.0  20743c99a96c07290f24377360e7a12bdd2c465ba202e0c7ef2ec25d446cf61d

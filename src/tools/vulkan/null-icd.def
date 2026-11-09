@@ -1,0 +1,10 @@
+; SPDX-License-Identifier: GPL-3.0-or-later
+; Exported entry points of the null Vulkan ICD (src/tools/vulkan/null-icd.c).
+; The Vulkan loader finds a driver by GetProcAddress on the first two names and
+; reaches everything else through vk_icdGetInstanceProcAddr.
+LIBRARY vulkan-null-icd.dll
+EXPORTS
+    vk_icdNegotiateLoaderICDInterfaceVersion
+    vk_icdGetInstanceProcAddr
+    vk_icdGetPhysicalDeviceProcAddr
+    vk_icdEnumerateAdapterPhysicalDevices

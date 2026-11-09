@@ -69,6 +69,8 @@ jobs:
           bash src/tools/fetch-boxedwine.sh --dry-run
           bash src/tools/build-mesa-d3d12.sh --dry-run
           bash src/tools/tests/test_build_mesa_d3d12.sh
+          bash src/tools/build-vulkan-loader.sh --dry-run
+          bash src/tools/tests/test_build_vulkan_loader.sh
       - name: no secrets / binaries committed
         run: |
           if git ls-files | grep -E '\.(pfx|key|pem|exe|dll|so|msix|appx|zip|7z|tar|gz|xz)$'; then
