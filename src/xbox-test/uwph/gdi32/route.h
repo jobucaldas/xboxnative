@@ -5,6 +5,7 @@
 #include <atomic>
 #include "pixel_format.h"
 #include "objects.h"
+#include "d3dkmt.h"
 #include "device_caps.h"
 
 namespace gdi32_core {
@@ -86,6 +87,18 @@ inline uintptr_t resolve(const char* dll, const char* name, DeviceCaps device_ca
         {"GetICMProfileW", reinterpret_cast<uintptr_t>(&get_icm_profile_w)},
         {"GetDeviceGammaRamp", reinterpret_cast<uintptr_t>(&get_device_gamma_ramp)},
         {"SetDeviceGammaRamp", reinterpret_cast<uintptr_t>(&set_device_gamma_ramp)},
+        {"SetDIBColorTable", reinterpret_cast<uintptr_t>(&set_dib_color_table)},
+        {"StretchBlt", reinterpret_cast<uintptr_t>(&stretch_blt)},
+        // wined3d's adapter and output setup (research/D3D9-PLAN.md, milestone 2).
+        {"D3DKMTOpenAdapterFromLuid", reinterpret_cast<uintptr_t>(&d3dkmt_open_adapter_from_luid)},
+        {"D3DKMTOpenAdapterFromGdiDisplayName", reinterpret_cast<uintptr_t>(&d3dkmt_open_adapter_from_gdi_display_name)},
+        {"D3DKMTCreateDevice", reinterpret_cast<uintptr_t>(&d3dkmt_create_device)},
+        {"D3DKMTDestroyDevice", reinterpret_cast<uintptr_t>(&d3dkmt_destroy_device)},
+        {"D3DKMTCloseAdapter", reinterpret_cast<uintptr_t>(&d3dkmt_close_adapter)},
+        {"D3DKMTSetVidPnSourceOwner", reinterpret_cast<uintptr_t>(&d3dkmt_set_vidpn_source_owner)},
+        {"D3DKMTQueryVideoMemoryInfo", reinterpret_cast<uintptr_t>(&d3dkmt_query_video_memory_info)},
+        {"D3DKMTCreateDCFromMemory", reinterpret_cast<uintptr_t>(&d3dkmt_create_dc_from_memory)},
+        {"D3DKMTDestroyDCFromMemory", reinterpret_cast<uintptr_t>(&d3dkmt_destroy_dc_from_memory)},
     };
     for (auto& api : objectApis) if (!strcmp(name, api.name)) return api.address;
     return 0;
