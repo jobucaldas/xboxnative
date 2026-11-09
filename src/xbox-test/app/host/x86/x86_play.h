@@ -35,9 +35,18 @@ struct PlayResult {
 // `on_loaded` runs once the image is mapped and its imports bound, before the
 // entry point: the launcher reports progress from there, so a guest that runs
 // for a long time is not mistaken for one that never started.
+// `instruction_limit` is the interpreter's runaway-loop guard. Its default (the
+// Cpu's 500 million) is a few seconds of interpreted work, which is right for a
+// fixture and wrong for a game; the launcher passes kGuestRunCap instead.
+// The cap stays finite on purpose: a guest that never returns still ends in an
+// InstructionLimit fault the launcher can report, rather than spinning on the
+// launch thread with no way out. A trillion instructions is hours of
+// interpreted work, so no real session reaches it.
+inline constexpr uint64_t kGuestRunCap = 1000ull * 1000 * 1000 * 1000;
 inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string& name, const std::string& cmdline,
                             const std::function<void(const std::string&)>& tee = nullptr,
-                            const std::function<void(const PlayResult&)>& on_loaded = nullptr) {
+                            const std::function<void(const PlayResult&)>& on_loaded = nullptr,
+                            uint64_t instruction_limit = 500ull * 1000 * 1000) {
     PlayResult r;
     try {
         Memory mem; ThunkTable table; Host host; Registry reg;
@@ -50,9 +59,10 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         r.loaded = true; r.base = img.base; r.entry = img.entry;
         r.imports = img.imports; r.bound = img.bound; r.relocations = img.relocations; r.unresolved = img.unresolved;
         guest.image_base = img.base;
-        guest.modules[name] = img.base;
+        guest.add_module(name, img.base);
         map_thunk_page(mem, table);
         Cpu cpu(mem, table);
+        cpu.limit = instruction_limit;
         init_process(mem, cpu, img);
         if (on_loaded) on_loaded(r);
         try {
@@ -83,9 +93,12 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
 #if defined(_WIN32)
 // Reads the executable and runs it. `exe` is the full path, `dir` the guest's
 // working directory (the launch option's, else the executable's own).
+// `instruction_limit` is forwarded to run_image: a game run passes
+// kGuestRunCap, a bounded one keeps the interpreter's default.
 inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const std::string& cmdline,
                       const std::function<void(const std::string&)>& tee = nullptr,
-                      const std::function<void(const PlayResult&)>& on_loaded = nullptr) {
+                      const std::function<void(const PlayResult&)>& on_loaded = nullptr,
+                      uint64_t instruction_limit = 500ull * 1000 * 1000) {
     PlayResult r;
     FILE* f = _wfopen(exe.c_str(), L"rb");
     if (!f) { r.fault = "cannot open the executable"; r.fault_kind = "Loader"; return r; }
@@ -100,7 +113,7 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
     std::string name;
     for (size_t i = exe.find_last_of(L"\\/") + 1; i < exe.size(); ++i) name += char(exe[i]);
     (void)dir;
-    return run_image(file, name, cmdline, tee, on_loaded);
+    return run_image(file, name, cmdline, tee, on_loaded, instruction_limit);
 }
 #endif
 }

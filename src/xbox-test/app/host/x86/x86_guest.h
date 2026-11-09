@@ -99,6 +99,13 @@ struct Guest {
     unsigned next_tls = 0;
     Guest(Memory& m, Host& h, Registry& r) : mem(m), host(h), reg(r), heap(m, 0x10000000) {}
     void register_all();
+    // Module names are case-insensitive on Windows, and GetModuleHandleA
+    // lowercases its lookup, so every insert goes through here: a mixed-case
+    // executable name ("Proteus.exe") must still be found by the guest.
+    void add_module(std::string name, uint32_t base) {
+        for (auto& ch : name) ch = char(std::tolower((unsigned char)ch));
+        modules[name] = base;
+    }
     // --- guest-memory helpers ---
     std::string str(uint32_t p) const { return p ? mem.read_cstr(p) : std::string(); }
     uint32_t put_str(const std::string& s) {
