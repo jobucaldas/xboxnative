@@ -5,6 +5,7 @@
 #include <mutex>
 #include <vector>
 #include "../../shared/corewindow_factory.h"
+#include "d3d11_diag.h"
 
 // Play's guest HWNDs belong to the user32 record registry. Only this checked
 // binding exposes the application's real CoreWindow to the native factory.
@@ -91,14 +92,17 @@ static HRESULT STDMETHODCALLTYPE classCreateSwapChain(IDXGIFactory* self,IUnknow
     if(desc&&guestWindow(desc->OutputWindow)) {
         if(event){char line[200];snprintf(line,sizeof line,"guest legacy swapchain %ux%u format=%d buffers=%u effect=%d windowed=%d flags=0x%x samples=%u/%u",
             desc->BufferDesc.Width,desc->BufferDesc.Height,int(desc->BufferDesc.Format),desc->BufferCount,int(desc->SwapEffect),int(desc->Windowed),desc->Flags,desc->SampleDesc.Count,desc->SampleDesc.Quality);event(line);}
+        d3d11_diag::noteSwapChain(desc->BufferDesc.Width,desc->BufferDesc.Height,desc->BufferDesc.Format,desc->BufferCount);
         return throughAdapter(self,[&](corewindow_dxgi::Factory* proxy){return proxy->CreateSwapChain(device,desc,out);});
     }
     auto c=classOf(self);return c.create?((CreateSwapChainFn)c.create)(self,device,desc,out):E_FAIL;
 }
 static HRESULT STDMETHODCALLTYPE classCreateForHwnd(IDXGIFactory2* self,IUnknown* device,HWND window,const DXGI_SWAP_CHAIN_DESC1* desc,
         const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen,IDXGIOutput* output,IDXGISwapChain1** out) {
-    if(guestWindow(window))
+    if(guestWindow(window)) {
+        if(desc)d3d11_diag::noteSwapChain(desc->Width,desc->Height,desc->Format,desc->BufferCount);
         return throughAdapter(self,[&](corewindow_dxgi::Factory* proxy){return proxy->CreateSwapChainForHwnd(device,window,desc,fullscreen,output,out);});
+    }
     auto c=classOf(self);return c.createForHwnd?((CreateForHwndFn)c.createForHwnd)(self,device,window,desc,fullscreen,output,out):E_FAIL;
 }
 static void adopt_device(IUnknown* device) {

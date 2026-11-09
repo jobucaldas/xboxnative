@@ -11,6 +11,12 @@
 // interfaces, whose vtables extend ID3D11Device's: slots beyond ID3D11Device
 // are only written to vtables reached through a successful QueryInterface for
 // that interface.
+// The same classes are patched for the context slots that say what the guest
+// actually draws: draws and dispatches bucketed by primitive topology and by
+// whether hull/domain shaders are bound, successful shader creations, render
+// target sets by format and size, clears, and deferred-context command lists.
+// Those are counted with relaxed atomics (no per-call logging) and summarised
+// through the sink every ~10 s for the first minutes.
 #pragma once
 #include <d3d11.h>
 #include <d3d11_1.h>
@@ -24,13 +30,14 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace d3d11_diag {
 using Sink=void(*)(const char*);
 inline Sink sink=nullptr;
 constexpr size_t kMaxFailures=200;   // distinct failed calls logged
 constexpr size_t kMaxProbes=160;     // distinct capability answers logged
-constexpr int kSlots=50;
+constexpr int kSlots=128;            // ID3D11DeviceContext reaches slot 114
 constexpr size_t kMaxClasses=16;
 
 // ---- vtable slots (ID3D11Device, ID3D11Device1, ID3D11DeviceContext)
@@ -45,6 +52,16 @@ enum DeviceSlot {
     ContextMap=14
 };
 static_assert(CheckFeatureSupport==33&&CreateDeferredContext==27&&CreateSamplerState==23,"ID3D11Device slot layout");
+
+// ID3D11DeviceContext slots (ID3D11DeviceChild's 3 come first). Only the ones
+// the draw summary reads are named.
+enum ContextSlot {
+    DrawIndexed=12,Draw=13,DrawIndexedInstanced=20,DrawInstanced=21,IASetPrimitiveTopology=24,OMSetRenderTargets=33,
+    Dispatch=41,ClearRenderTargetView=50,ClearDepthStencilView=53,ExecuteCommandList=58,HSSetShader=60,DSSetShader=64,
+    FinishCommandList=114
+};
+static_assert(ContextMap==14&&DrawIndexed==12&&DrawIndexedInstanced==20&&OMSetRenderTargets==33&&
+    ExecuteCommandList==58&&HSSetShader==60&&DSSetShader==64&&FinishCommandList==114,"ID3D11DeviceContext slot layout");
 
 // ---- reporting: once per key, bounded
 inline std::mutex reportM;
@@ -116,6 +133,173 @@ inline uint64_t fnv(const void* data,size_t n,uint64_t h=1469598103934665603ull)
     auto p=static_cast<const unsigned char*>(data);for(size_t i=0;i<n;++i){h^=p[i];h*=1099511628211ull;}return h;
 }
 
+// ---- draw summary
+// What the guest actually submits, counted with relaxed atomics on the hot
+// path and printed as one line per bucket every kSummaryMs for the first
+// kSummaryWindows windows. Nothing here changes a call's result.
+constexpr ULONGLONG kSummaryMs=10000;
+constexpr unsigned kSummaryWindows=7;   // ~70 s, then one line saying so
+// Upper bound on the lines the summary can print: 11 fixed lines and up to
+// kMaxRtvKinds render-target lines per window, one line per draw bucket
+// (4 kinds x patchlist x hull/domain), one per described render target view,
+// and the closing line.
+constexpr size_t kMaxDrawBuckets=16;
+constexpr size_t kMaxRtvKinds=24;
+constexpr size_t kMaxRtvViews=32;
+constexpr size_t kMaxSummaryLines=kSummaryWindows*(11+kMaxRtvKinds)+kMaxDrawBuckets+kMaxRtvViews+2;
+inline std::atomic<bool> summaryStarted{false};
+inline std::atomic<unsigned> summaryWindows{0};
+inline std::atomic<ULONGLONG> summaryNext{0};
+inline std::atomic<bool> summaryStopped{false};
+// Per-context state: a deferred context records with its own topology and its
+// own bound shaders, so the draw bucket must read the state of the context
+// that made the call. Fixed table, lock-free, first match or first free slot.
+struct ContextState {
+    std::atomic<void*> context{nullptr};
+    std::atomic<unsigned> topology{0};
+    std::atomic<unsigned> shaders{0};
+};
+constexpr size_t kMaxContexts=32;
+inline ContextState contextStates[kMaxContexts];
+inline ContextState orphanState;                 // past kMaxContexts: counted, not bucketed by context
+inline std::atomic<unsigned> lastTopology{0};    // last topology any context set, for the summary line
+inline ContextState& stateOf(void* self) {
+    static thread_local ContextState* last=nullptr;
+    if(last&&last->context.load(std::memory_order_relaxed)==self)return *last;
+    for(auto& s:contextStates) if(s.context.load(std::memory_order_acquire)==self){last=&s;return s;}
+    for(auto& s:contextStates) {
+        void* expected=nullptr;
+        if(s.context.compare_exchange_strong(expected,self,std::memory_order_acq_rel)){last=&s;return s;}
+    }
+    return orphanState;
+}
+// A context created at an address an earlier one used must not inherit its
+// state: patchContext resets the entry (a new context has no topology and no
+// shaders bound).
+inline void resetContext(void* self) {
+    ContextState& s=stateOf(self);
+    s.topology.store(0,std::memory_order_relaxed);s.shaders.store(0,std::memory_order_relaxed);
+}
+inline std::atomic<uint64_t> draws[4][2][2];     // [kind][patchlist][hull+domain]
+inline std::atomic<uint64_t> zeroCounts[4];      // draws with 0 index/vertex/instance count
+inline std::atomic<uint64_t> dispatches,dispatchZero,commandLists,executedLists;
+inline std::atomic<uint64_t> shaderCreates[6];   // vs gs ps hs ds cs, successful
+inline std::atomic<uint64_t> clears[2];          // render target, depth stencil
+inline std::atomic<uint64_t> rtvSets;            // OMSetRenderTargets with a render target
+inline std::atomic<uint64_t> rtvUnknown;         // ... whose view or resource could not be read
+inline std::mutex rtvM;
+inline std::vector<std::string> rtvKinds;        // distinct "fmt WxH" bound as render target
+inline std::atomic<void*> rtvViews[kMaxRtvViews];   // views already described: no GetDesc per frame
+inline std::atomic<unsigned> mainWidth{0},mainHeight{0};   // largest render target bound
+inline std::atomic<unsigned> chainWidth{0},chainHeight{0}; // guest swapchain buffers
+inline std::atomic<unsigned> chainFormat{0},chainBuffers{0};
+inline std::atomic<unsigned> contextsPatched{0};
+inline std::atomic<unsigned> deferredContexts{0};
+inline std::vector<void**> contextVtables;   // guarded by patchM
+inline std::atomic<bool> contextSeen{false}; // no patch attempt while nothing is adopted
+
+inline std::string topologyName(unsigned t) {
+    switch(t) {
+    case 0:return "undefined";
+    case 1:return "pointlist";
+    case 2:return "linelist";case 3:return "linestrip";case 4:return "trianglelist";case 5:return "trianglestrip";
+    case 10:return "linelist-adj";case 11:return "linestrip-adj";case 12:return "trianglelist-adj";case 13:return "trianglestrip-adj";
+    default:break;
+    }
+    if(t>=33&&t<=64)return fmt("patchlist-%u",t-32);   // 1..32 control points
+    return "?";
+}
+// Patch lists are 1..32 control points (33..64 in D3D11): the game's terrain
+// effect tessellates, so this is the bucket that says whether it ran.
+inline bool patchList(unsigned t){return t>=33&&t<=64;}
+inline const char* drawKindName(int k){
+    static const char* names[]={"DrawIndexed","Draw","DrawIndexedInstanced","DrawInstanced"};return names[k];
+}
+inline std::string rtvText(ID3D11RenderTargetView* view) {
+    if(!view)return "null";
+    D3D11_RENDER_TARGET_VIEW_DESC v{};
+    view->GetDesc(&v);   // void: a view always has a description
+    ID3D11Resource* resource=nullptr;view->GetResource(&resource);
+    if(!resource)return "no-resource";
+    D3D11_RESOURCE_DIMENSION dim=D3D11_RESOURCE_DIMENSION_UNKNOWN;resource->GetType(&dim);
+    std::string text="unknown";
+    if(dim==D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        D3D11_TEXTURE2D_DESC t{};static_cast<ID3D11Texture2D*>(resource)->GetDesc(&t);
+        text=fmt("fmt=%s %ux%u bind=0x%x ms=%u",formatText(t.Format).c_str(),t.Width,t.Height,t.BindFlags,t.SampleDesc.Count);
+        if(t.BindFlags&D3D11_BIND_RENDER_TARGET) {
+            unsigned w=mainWidth.load(std::memory_order_relaxed),h=mainHeight.load(std::memory_order_relaxed);
+            if(size_t(t.Width)*t.Height>size_t(w)*h){mainWidth.store(t.Width,std::memory_order_relaxed);mainHeight.store(t.Height,std::memory_order_relaxed);}
+        }
+    }
+    resource->Release();
+    return text;
+}
+// Adds a distinct key to a capped list; returns whether it was new.
+inline bool noteKind(std::vector<std::string>& list,const std::string& key,size_t cap) {
+    for(auto& k:list) if(k==key)return false;
+    if(list.size()>=cap)return false;
+    list.push_back(key);return true;
+}
+inline void summary() {
+    if(summaryStarted.exchange(true,std::memory_order_acq_rel))return;
+    summaryNext.store(GetTickCount64()+kSummaryMs,std::memory_order_relaxed);
+}
+inline void printSummary(unsigned window);
+// Called from the hooks after they counted; cheap until the next window.
+inline void tick() {
+    if(!summaryStarted.load(std::memory_order_acquire))return;
+    ULONGLONG now=GetTickCount64(),next=summaryNext.load(std::memory_order_relaxed);
+    if(now<next)return;
+    if(!summaryNext.compare_exchange_strong(next,now+kSummaryMs))return;
+    unsigned window=summaryWindows.load(std::memory_order_relaxed);
+    if(window>=kSummaryWindows) {
+        if(!summaryStopped.exchange(true))emit(fmt("draw summary: %u windows done, counters stay live but are no longer printed",kSummaryWindows));
+        return;
+    }
+    summaryWindows.store(window+1,std::memory_order_relaxed);
+    printSummary(window+1);
+}
+// One window's lines. Called from tick() under the window's CAS, so two
+// threads never print the same window.
+inline void printSummary(unsigned window) {
+    unsigned t=lastTopology.load(std::memory_order_relaxed);
+    emit(fmt("draw summary %u/%u: last topology=%u(%s) contexts=%u deferred=%u",window,kSummaryWindows,t,topologyName(t).c_str(),
+        contextsPatched.load(),deferredContexts.load()));
+    for(int k=0;k<4;++k) {
+        uint64_t total=0,patched=0,withHull=0,zero=zeroCounts[k].load(std::memory_order_relaxed);
+        for(int p=0;p<2;++p)for(int h=0;h<2;++h) {
+            uint64_t n=draws[k][p][h].load(std::memory_order_relaxed);
+            total+=n;if(p)patched+=n;if(h)withHull+=n;
+        }
+        if(!total)continue;
+        emit(fmt("draw summary %u/%u: %s calls=%llu patchlist=%llu hull-domain=%llu zero-count=%llu",window,kSummaryWindows,drawKindName(k),
+            (unsigned long long)total,(unsigned long long)patched,(unsigned long long)withHull,(unsigned long long)zero));
+    }
+    uint64_t d=dispatches.load(std::memory_order_relaxed);
+    if(d||dispatchZero.load(std::memory_order_relaxed))
+        emit(fmt("draw summary %u/%u: Dispatch calls=%llu zero-groups=%llu",window,kSummaryWindows,(unsigned long long)d,(unsigned long long)dispatchZero.load()));
+    emit(fmt("draw summary %u/%u: command lists finish=%llu execute=%llu",window,kSummaryWindows,
+        (unsigned long long)commandLists.load(),(unsigned long long)executedLists.load()));
+    emit(fmt("draw summary %u/%u: shader creates vs=%llu gs=%llu ps=%llu hs=%llu ds=%llu cs=%llu",window,kSummaryWindows,
+        (unsigned long long)shaderCreates[0].load(),(unsigned long long)shaderCreates[1].load(),(unsigned long long)shaderCreates[2].load(),
+        (unsigned long long)shaderCreates[3].load(),(unsigned long long)shaderCreates[4].load(),(unsigned long long)shaderCreates[5].load()));
+    emit(fmt("draw summary %u/%u: render targets sets=%llu unreadable=%llu clears=rt %llu/ds %llu",window,kSummaryWindows,
+        (unsigned long long)rtvSets.load(),(unsigned long long)rtvUnknown.load(),(unsigned long long)clears[0].load(),(unsigned long long)clears[1].load()));
+    std::vector<std::string> kinds;
+    {std::lock_guard<std::mutex> lock(rtvM);kinds=rtvKinds;}
+    for(auto& k:kinds)emit(fmt("draw summary %u/%u: render target %s",window,kSummaryWindows,k.c_str()));
+    unsigned w=mainWidth.load(std::memory_order_relaxed),h=mainHeight.load(std::memory_order_relaxed);
+    unsigned cw=chainWidth.load(std::memory_order_relaxed),ch=chainHeight.load(std::memory_order_relaxed);
+    if(w||cw)emit(fmt("draw summary %u/%u: main render target %ux%u swapchain %ux%u fmt=%s buffers=%u",window,kSummaryWindows,w,h,cw,ch,
+        formatText(DXGI_FORMAT(chainFormat.load())).c_str(),chainBuffers.load()));
+}
+// The guest's own swapchain creation (play_graphics.h) says the size the
+// guest asked for; the CoreWindow route may substitute its own.
+inline void noteSwapChain(UINT width,UINT height,DXGI_FORMAT format,UINT buffers) {
+    chainWidth.store(width,std::memory_order_relaxed);chainHeight.store(height,std::memory_order_relaxed);
+    chainFormat.store(unsigned(format),std::memory_order_relaxed);chainBuffers.store(buffers,std::memory_order_relaxed);
+}
+
 // ---- vtable patching
 struct Patch {int slot;void* hook;};
 struct Class {void** vtable=nullptr;bool patched[kSlots]={};void* original[kSlots]={};};
@@ -141,9 +325,10 @@ inline bool patchClass(void** vtable,const Patch* patches,size_t count) {
     int low=kSlots,high=-1;
     for(size_t i=0;i<count;++i) if(!c->patched[patches[i].slot]) {low=std::min(low,patches[i].slot);high=std::max(high,patches[i].slot);}
     if(high<0)return true;
+    if(high>=kSlots){emit(fmt("diagnostics cannot patch vtable slot %d (beyond %d)",high,kSlots));return false;}
     DWORD old=0;
     if(!VirtualProtect(vtable+low,sizeof(void*)*size_t(high-low+1),PAGE_READWRITE,&old)) {
-        emit(fmt("diagnostics cannot patch a device vtable (error %lu)",GetLastError()));return false;
+        emit(fmt("diagnostics cannot patch a vtable (error %lu)",GetLastError()));return false;
     }
     for(size_t i=0;i<count;++i) {
         int s=patches[i].slot;if(c->patched[s])continue;
@@ -301,6 +486,13 @@ static HRESULT STDMETHODCALLTYPE createShader(DevicePtr self,const void* code,SI
         const char* name="CreateShader";for(auto& n:names) if(n.slot==Slot)name=n.name;
         std::string key,text=shaderText(code,length,&key);
         D3D11_DIAG_FAILED(name,key,text+fmt(" linkage=%d",linkage!=nullptr));
+    } else {
+        // 0 vs 1 gs 2 ps 3 hs 4 ds 5 cs: what the guest can actually create
+        // says whether a missing terrain layer never had its shaders.
+        static const struct {int slot;int index;} created[]={{CreateVertexShader,0},{CreateGeometryShader,1},{CreatePixelShader,2},
+            {CreateHullShader,3},{CreateDomainShader,4},{CreateComputeShader,5}};
+        for(auto& c:created) if(c.slot==Slot){shaderCreates[c.index].fetch_add(1,std::memory_order_relaxed);break;}
+        tick();
     }
     return hr;
 }
@@ -383,8 +575,10 @@ static HRESULT STDMETHODCALLTYPE createPredicate(DevicePtr self,const D3D11_QUER
     return hr;
 }
 
-// ---- immediate/deferred context: only Map, the call with the most
-// undocumented driver restrictions (NO_OVERWRITE on non-buffers, staging use).
+// ---- immediate/deferred context: Map, the call with the most undocumented
+// driver restrictions (NO_OVERWRITE on non-buffers, staging use), plus the
+// calls that say what the guest draws. The draw hooks only count: they call
+// the original entry with the arguments they were given and return its result.
 inline bool patchContext(ID3D11DeviceContext* context);
 static HRESULT STDMETHODCALLTYPE contextMap(DevicePtr self,ID3D11Resource* r,UINT subresource,D3D11_MAP type,UINT flags,D3D11_MAPPED_SUBRESOURCE* mapped) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT,D3D11_MAP,UINT,D3D11_MAPPED_SUBRESOURCE*);
@@ -394,23 +588,160 @@ static HRESULT STDMETHODCALLTYPE contextMap(DevicePtr self,ID3D11Resource* r,UIN
         D3D11_DIAG_FAILED("Map",fmt("%d/%x/%s",int(type),flags,resourceKey(r).c_str()),fmt("type=%d flags=0x%x subresource=%u %s",int(type),flags,subresource,resourceText(r).c_str()));
     return hr;
 }
+// One counter per draw, bucketed by the topology last set on this context and
+// by whether a hull and a domain shader are bound there. A bucket seen for the
+// first time is named once, so a summary that shows a kind the game never
+// reaches is not silently missing. No allocation and no lock on the hot path.
+inline void countDraw(void* self,int kind,unsigned count,unsigned instances) {
+    ContextState& state=stateOf(self);
+    unsigned t=state.topology.load(std::memory_order_relaxed);
+    unsigned s=state.shaders.load(std::memory_order_relaxed);
+    bool patch=patchList(t),hull=(s&3)==3;
+    draws[kind][patch?1:0][hull?1:0].fetch_add(1,std::memory_order_relaxed);
+    if(!count||(kind>=2&&!instances))zeroCounts[kind].fetch_add(1,std::memory_order_relaxed);
+    static std::atomic<bool> named[4][2][2];
+    if(!named[kind][patch?1:0][hull?1:0].exchange(true,std::memory_order_relaxed))
+        emit(fmt("draw summary: first %s topology=%u(%s) hs/ds=%s",drawKindName(kind),t,topologyName(t).c_str(),
+            hull?"both":((s&1)?"hs":((s&2)?"ds":"none"))));
+    tick();
+}
+static void STDMETHODCALLTYPE contextDrawIndexed(DevicePtr self,UINT indexCount,UINT startIndex,INT baseVertex) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,INT);
+    auto call=reinterpret_cast<Fn>(original(self,DrawIndexed));if(!call)return;
+    countDraw(self,0,indexCount,1);call(self,indexCount,startIndex,baseVertex);
+}
+static void STDMETHODCALLTYPE contextDraw(DevicePtr self,UINT vertexCount,UINT startVertex) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT);
+    auto call=reinterpret_cast<Fn>(original(self,Draw));if(!call)return;
+    countDraw(self,1,vertexCount,1);call(self,vertexCount,startVertex);
+}
+static void STDMETHODCALLTYPE contextDrawIndexedInstanced(DevicePtr self,UINT indexCount,UINT instances,UINT startIndex,INT baseVertex,UINT startInstance) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,UINT,INT,UINT);
+    auto call=reinterpret_cast<Fn>(original(self,DrawIndexedInstanced));if(!call)return;
+    countDraw(self,2,indexCount,instances);call(self,indexCount,instances,startIndex,baseVertex,startInstance);
+}
+static void STDMETHODCALLTYPE contextDrawInstanced(DevicePtr self,UINT vertexCount,UINT instances,UINT startVertex,UINT startInstance) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,UINT,UINT);
+    auto call=reinterpret_cast<Fn>(original(self,DrawInstanced));if(!call)return;
+    countDraw(self,3,vertexCount,instances);call(self,vertexCount,instances,startVertex,startInstance);
+}
+static void STDMETHODCALLTYPE contextIASetPrimitiveTopology(DevicePtr self,D3D11_PRIMITIVE_TOPOLOGY t) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,D3D11_PRIMITIVE_TOPOLOGY);
+    auto call=reinterpret_cast<Fn>(original(self,IASetPrimitiveTopology));if(!call)return;
+    stateOf(self).topology.store(unsigned(t),std::memory_order_relaxed);
+    lastTopology.store(unsigned(t),std::memory_order_relaxed);
+    call(self,t);
+}
+static void STDMETHODCALLTYPE contextHSSetShader(DevicePtr self,ID3D11HullShader* shader,ID3D11ClassInstance* const* instances,UINT count) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11HullShader*,ID3D11ClassInstance* const*,UINT);
+    auto call=reinterpret_cast<Fn>(original(self,HSSetShader));if(!call)return;
+    auto& s=stateOf(self).shaders;
+    if(shader)s.fetch_or(1,std::memory_order_relaxed);else s.fetch_and(~1u,std::memory_order_relaxed);
+    call(self,shader,instances,count);
+}
+static void STDMETHODCALLTYPE contextDSSetShader(DevicePtr self,ID3D11DomainShader* shader,ID3D11ClassInstance* const* instances,UINT count) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11DomainShader*,ID3D11ClassInstance* const*,UINT);
+    auto call=reinterpret_cast<Fn>(original(self,DSSetShader));if(!call)return;
+    auto& s=stateOf(self).shaders;
+    if(shader)s.fetch_or(2,std::memory_order_relaxed);else s.fetch_and(~2u,std::memory_order_relaxed);
+    call(self,shader,instances,count);
+}
+static void STDMETHODCALLTYPE contextOMSetRenderTargets(DevicePtr self,UINT count,ID3D11RenderTargetView* const* views,ID3D11DepthStencilView* depth) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*);
+    auto call=reinterpret_cast<Fn>(original(self,OMSetRenderTargets));if(!call)return;
+    if(count&&views) {
+        rtvSets.fetch_add(1,std::memory_order_relaxed);
+        for(UINT i=0;i<count;++i) {
+            ID3D11RenderTargetView* view=views[i];if(!view)continue;
+            bool known=false;
+            for(auto& seen:rtvViews) if(seen.load(std::memory_order_relaxed)==view){known=true;break;}
+            if(known)continue;
+            std::string text=rtvText(view);
+            if(text=="unknown"||text=="no-resource"){rtvUnknown.fetch_add(1,std::memory_order_relaxed);continue;}
+            for(auto& seen:rtvViews) {
+                void* expected=nullptr;
+                if(seen.compare_exchange_strong(expected,view,std::memory_order_acq_rel))break;
+            }
+            {
+                std::lock_guard<std::mutex> lock(rtvM);
+                noteKind(rtvKinds,text,kMaxRtvKinds);
+            }
+            emit(fmt("draw summary: first render target %s",text.c_str()));
+        }
+    }
+    call(self,count,views,depth);
+}
+static void STDMETHODCALLTYPE contextDispatch(DevicePtr self,UINT x,UINT y,UINT z) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,UINT);
+    auto call=reinterpret_cast<Fn>(original(self,Dispatch));if(!call)return;
+    dispatches.fetch_add(1,std::memory_order_relaxed);
+    if(!x||!y||!z)dispatchZero.fetch_add(1,std::memory_order_relaxed);
+    call(self,x,y,z);tick();
+}
+static void STDMETHODCALLTYPE contextClearRenderTargetView(DevicePtr self,ID3D11RenderTargetView* view,const FLOAT color[4]) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11RenderTargetView*,const FLOAT*);
+    auto call=reinterpret_cast<Fn>(original(self,ClearRenderTargetView));if(!call)return;
+    clears[0].fetch_add(1,std::memory_order_relaxed);call(self,view,color);
+}
+static void STDMETHODCALLTYPE contextClearDepthStencilView(DevicePtr self,ID3D11DepthStencilView* view,UINT flags,FLOAT depth,UINT8 stencil) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11DepthStencilView*,UINT,FLOAT,UINT8);
+    auto call=reinterpret_cast<Fn>(original(self,ClearDepthStencilView));if(!call)return;
+    clears[1].fetch_add(1,std::memory_order_relaxed);call(self,view,flags,depth,stencil);
+}
+static HRESULT STDMETHODCALLTYPE contextFinishCommandList(DevicePtr self,BOOL restore,ID3D11CommandList** list) {
+    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,BOOL,ID3D11CommandList**);
+    auto call=reinterpret_cast<Fn>(original(self,FinishCommandList));if(!call)return E_FAIL;
+    HRESULT hr=call(self,restore,list);
+    if(SUCCEEDED(hr))commandLists.fetch_add(1,std::memory_order_relaxed);
+    D3D11_DIAG_FAILED("FinishCommandList",fmt("%d",restore!=0),fmt("restore=%d",restore!=0));
+    return hr;
+}
+// Executed lists carry draws recorded on a deferred context: the draw hooks
+// already counted them at recording time, so this only reports the plumbing.
+static void STDMETHODCALLTYPE contextExecuteCommandList(DevicePtr self,ID3D11CommandList* list,BOOL restore) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11CommandList*,BOOL);
+    auto call=reinterpret_cast<Fn>(original(self,ExecuteCommandList));if(!call)return;
+    executedLists.fetch_add(1,std::memory_order_relaxed);call(self,list,restore);tick();
+}
 static HRESULT STDMETHODCALLTYPE createDeferredContext(DevicePtr self,UINT flags,ID3D11DeviceContext** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11DeviceContext**);
     D3D11_DIAG_HOOK(Fn,CreateDeferredContext)HRESULT hr=call(self,flags,out);
-    if(SUCCEEDED(hr)&&out&&*out)patchContext(*out);
+    if(SUCCEEDED(hr)&&out&&*out){deferredContexts.fetch_add(1,std::memory_order_relaxed);patchContext(*out);}
     D3D11_DIAG_FAILED("CreateDeferredContext",fmt("%x",flags),fmt("flags=0x%x",flags));
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createDeferredContext1(DevicePtr self,UINT flags,ID3D11DeviceContext1** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11DeviceContext1**);
     D3D11_DIAG_HOOK(Fn,CreateDeferredContext1)HRESULT hr=call(self,flags,out);
-    if(SUCCEEDED(hr)&&out&&*out)patchContext(*out);
+    if(SUCCEEDED(hr)&&out&&*out){deferredContexts.fetch_add(1,std::memory_order_relaxed);patchContext(*out);}
     D3D11_DIAG_FAILED("CreateDeferredContext1",fmt("%x",flags),fmt("flags=0x%x",flags));
     return hr;
 }
+inline const Patch* contextPatches(size_t& count){
+    static const Patch table[]={
+        {ContextMap,(void*)&contextMap},{DrawIndexed,(void*)&contextDrawIndexed},{Draw,(void*)&contextDraw},
+        {DrawIndexedInstanced,(void*)&contextDrawIndexedInstanced},{DrawInstanced,(void*)&contextDrawInstanced},
+        {IASetPrimitiveTopology,(void*)&contextIASetPrimitiveTopology},{HSSetShader,(void*)&contextHSSetShader},
+        {DSSetShader,(void*)&contextDSSetShader},{OMSetRenderTargets,(void*)&contextOMSetRenderTargets},
+        {Dispatch,(void*)&contextDispatch},{ClearRenderTargetView,(void*)&contextClearRenderTargetView},
+        {ClearDepthStencilView,(void*)&contextClearDepthStencilView},{FinishCommandList,(void*)&contextFinishCommandList},
+        {ExecuteCommandList,(void*)&contextExecuteCommandList}};
+    count=sizeof table/sizeof *table;return table;
+}
 inline bool patchContext(ID3D11DeviceContext* context) {
-    static const Patch patches[]={{ContextMap,(void*)&contextMap}};
-    return context&&patchClass(*reinterpret_cast<void***>(context),patches,1);
+    if(!context||!contextSeen.load(std::memory_order_acquire))return false;
+    void** vtable=*reinterpret_cast<void***>(context);
+    {
+        std::lock_guard<std::mutex> lock(patchM);
+        bool known=false;
+        for(auto* v:contextVtables) known|=v==vtable;
+        if(!known&&contextVtables.size()<kMaxClasses){contextVtables.push_back(vtable);contextsPatched.fetch_add(1,std::memory_order_relaxed);}
+    }
+    resetContext(context);
+    size_t count=0;const Patch* patches=contextPatches(count);
+    if(!patchClass(vtable,patches,count))return false;
+    summary();
+    return true;
 }
 
 // ---- capability queries
@@ -484,9 +815,10 @@ inline void adopt(ID3D11Device* device) {
         device1->Release();
     }
     ID3D11DeviceContext* context=nullptr;device->GetImmediateContext(&context);
-    if(context){patchContext(context);context->Release();}
+    if(context){contextSeen.store(true,std::memory_order_release);patchContext(context);context->Release();}
     if(!ok)return;
-    emit(fmt("diagnostics on: failed Create*/Check*/Map calls are logged once per distinct call (caps %zu/%zu)",kMaxFailures,kMaxProbes));
+    emit(fmt("diagnostics on: failed Create*/Check*/Map calls are logged once per distinct call (caps %zu/%zu); draws are summarised every %llu s",
+        kMaxFailures,kMaxProbes,(unsigned long long)(kSummaryMs/1000)));
     IDXGIDevice* dxgi=nullptr;IDXGIAdapter* adapter=nullptr;
     if(SUCCEEDED(device->QueryInterface(__uuidof(IDXGIDevice),reinterpret_cast<void**>(&dxgi)))&&dxgi&&SUCCEEDED(dxgi->GetAdapter(&adapter))&&adapter) {
         DXGI_ADAPTER_DESC d{};
