@@ -520,7 +520,7 @@ static std::shared_ptr<CmSession> session_for_download() {
 static void dl_thread() {
     init_apartment(apartment_type::multi_threaded);
     if (begin_download()) {   // downloads cut off by a crash or power loss: remove their files (installs.h)
-        for (auto& w : installs::sweep_partials(g_dir, &g_quit)) logf("dl: unfinished download of appid %u (LocalState\\%s) from an earlier run: %s", w.appid, w.dir.c_str(), installs::discard_name(w.result));
+        for (auto& w : installs::sweep_partials(g_dir, &g_quit)) logf("dl: unfinished download of appid %u (%s) from an earlier run: %s", w.appid, game_library::join_root("LocalState", w.root, w.dir).c_str(), installs::discard_name(w.result));
         end_download();
     }
     // LocalState\autodownload.txt: one appid per line; processed once the account state is known (user session, else anonymous)
@@ -724,6 +724,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     uint32_t m_dApp = 0; std::string m_dName, m_dNote; int m_dScroll = 0; std::shared_ptr<StoreInfo> m_dSi; bool m_confirmDelete = false;
     game_library::DeleteKind m_delKind = game_library::DeleteKind::folder;   // decided when the confirm dialog opens
     InstallInfo m_dInst; double m_dInstT = -10;
+    std::vector<storage_roots::Choice> m_roots; size_t m_rootSel = 0;   // install locations of the detail page (X cycles them before Install)
     struct AutoLaunch { uint32_t app = 0; int seq = 0; } m_auto;
     std::string game_name(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return g->name; return id == 480 ? "Spacewar" : id == 3405340 ? "Megabonk" : id == 1007 ? "Steamworks SDK Redist" : ""; }
     bool owned(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return true; return false; }
@@ -731,8 +732,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         m_dApp = id; m_dName = nm.empty() ? "App " + std::to_string(id) : nm; m_dNote.clear(); m_dScroll = 0; m_dInstT = -10; m_confirmDelete = false;
         // After a restart that unloaded a failed game, its page says why (this session's launches show in the launch panel).
         if (g_launch.phase == 0) { std::string why = launch_report::failure(read_bytes(g_dir + L"\\launch_result.json"), id); if (!why.empty()) m_dNote = "Last launch failed: " + why; }
+        m_roots.clear(); m_rootSel = 0; refresh_roots("detail open");
         auto si = std::make_shared<StoreInfo>(); si->appid = id; m_dSi = si; std::thread(store_worker, si).detach();
-        { InstallInfo ii = read_install(id); if (ii.installed && !g_demo) cloud_async(id, g_dir + L"\\" + widen(ii.dir), false); }   // status line: what the cloud holds
+        { InstallInfo ii = read_install(id); if (ii.installed && !g_demo) cloud_async(id, ii.folder, false); }   // status line: what the cloud holds
         m_confirmLogout = false; g_screen = S_DETAIL; logf("detail: open appid=%u name='%s' via=%s", id, m_dName.c_str(), via);
     }
     void close_detail(const char* why) { logf("detail: back to library (%s)", why); m_dSi.reset(); g_screen = S_LIBRARY; }
@@ -740,11 +742,22 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void refresh_install(double t) { if (t - m_dInstT > 0.5 || m_dInstDel != g_del.gen) { m_dInstDel = g_del.gen; m_dInst = read_install(m_dApp); m_dInstT = t; } }
     bool dl_is_mine() { return g_dl.appid == m_dApp && g_dl.state == 1; }
     bool deleting_mine() { return g_del.appid == m_dApp && g_del.state == 1; }
+    void refresh_roots(const char* via) {   // internal + every usable extra drive; keeps the pick when its drive is still there
+        std::string keep = m_rootSel < m_roots.size() ? m_roots[m_rootSel].root : chosen_install_root(m_dApp);
+        std::vector<std::string> note; m_roots = installs::list_roots(g_dir, &note); m_rootSel = storage_roots::index_of(m_roots, keep);
+        std::string l; for (auto& c : m_roots) l += (l.empty() ? "" : "; ") + storage_roots::label(c);
+        logf("storage: %s: %s", via, l.c_str()); for (auto& n : note) logf("storage: %s", n.c_str());
+    }
+    void detail_storage(const char* via) {      // X (not installed): next install location
+        if (m_dInst.installed || g_demo || dl_is_mine() || is_queued(m_dApp)) return;
+        refresh_roots("refresh"); m_rootSel = storage_roots::cycle(m_rootSel, m_roots.size(), 1); m_dNote.clear();
+        logf("detail: install location appid=%u -> %s (%s)", m_dApp, storage_roots::label(m_roots[m_rootSel]).c_str(), via);
+    }
     void detail_delete(const char* via) {     // X: ask to delete an installed game
         m_dInst = read_install(m_dApp); m_dInstT = now_s();
         if (!m_dInst.installed || deleting_mine()) return;
         if (g_launch.phase == 1 || g_launch.phase == 3 || play_runtime::observed.load(std::memory_order_acquire) != nullptr) { m_dNote = "A game was started: reopen the app to delete."; return; }
-        m_delKind = delete_kind_for(m_dApp, m_dInst.dir); m_dNote.clear(); m_confirmDelete = true; logf("detail: delete asked appid=%u (%s)", m_dApp, via);
+        m_delKind = delete_kind_for(m_dApp, m_dInst.dir, m_dInst.root); m_dNote.clear(); m_confirmDelete = true; logf("detail: delete asked appid=%u (%s)", m_dApp, via);
     }
     void detail_delete_confirm(const char* via) {
         m_confirmDelete = false; std::string why = start_delete(m_dApp);
@@ -757,7 +770,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (cloud_blocked()) { m_dNote = "A game was started: reopen the app to sync cloud saves."; return; }
         if (g_cloudBusy) { logf("detail: Y ignored, cloud pass already running"); return; }
         m_dNote.clear(); logf("detail: cloud sync asked appid=%u (%s)", m_dApp, via);
-        cloud_async(m_dApp, g_dir + L"\\" + widen(m_dInst.dir), true, prefer);
+        cloud_async(m_dApp, m_dInst.folder, true, prefer);
     }
     void detail_action(const char* via) {   // A: Install or Play
         if (g_launch.phase == 1 || g_launch.phase == 3) { logf("detail: A ignored, launch attempt running"); return; }
@@ -767,8 +780,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (dl_is_mine() || is_queued(m_dApp)) { logf("detail: A ignored, download already queued/running"); return; }
         if (g_demo) { m_dNote = "Demo list: installing is disabled."; return; }
         if (deleting_now()) { m_dNote = "Wait for the delete to finish."; return; }
+        refresh_roots("install");
+        const storage_roots::Choice& where = m_roots[m_rootSel];
+        if (where.freeBytes < (64ull << 20)) { m_dNote = "Not enough free space on " + where.name + ": " + storage_roots::size_text(where.freeBytes) + " free."; logf("detail: Install refused appid=%u, %s", m_dApp, m_dNote.c_str()); return; }
+        set_install_root(m_dApp, where.root);
         m_auto.app = m_dApp; m_auto.seq = g_dlSeq; m_dNote.clear();
-        logf("detail: Install pressed appid=%u (%s) - will auto-launch when finished", m_dApp, via); enqueue_download(m_dApp);
+        logf("detail: Install pressed appid=%u (%s) to %s - will auto-launch when finished", m_dApp, via, storage_roots::label(where).c_str()); enqueue_download(m_dApp);
     }
     void detail_back(const char* via) {         // B: cancel a running download of this app first, else back to the library
         if (dl_is_mine()) { g_dl.cancel = true; m_auto.app = 0; logf("detail: download cancel requested (B, %s)", via); return; }
@@ -976,6 +993,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         bool busy = launching || retained || deleting || down || queued;
         if (m_dInst.installed && !busy) {   // secondary action: delete (X)
             const char* dl2 = "X: Delete game"; int w = twidth(dl2, 3) + 30; fill(60, 590, w, 46, C3(120, 40, 40)); text(75, 601, dl2, 3, TXT);
+        }
+        if (!m_dInst.installed && !busy && !g_demo && m_rootSel < m_roots.size()) {   // where a fresh install goes (X cycles)
+            std::string sl = m_roots.size() > 1 ? "X: Install to " + storage_roots::label(m_roots[m_rootSel]) : storage_roots::label(m_roots[m_rootSel]) + ", no USB found";
+            int w = twidth(sl, 2) + 28; fill(60, 590, w, 46, C3(40, 90, 150)); text(74, 604, sl, 2, TXT);
         }
         if (m_dInst.installed && !busy && !g_demo) {   // secondary action: sync cloud saves (Y)
             bool working = cloud_status(m_dApp).phase == 1; const char* cl = working ? "Syncing cloud..." : "Y: Sync cloud"; int w = twidth(cl, 2) + 28;
@@ -1360,7 +1381,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 else if (has(edge, GamepadButtons::B)) { m_confirmDelete = false; logf("detail: delete cancelled (%s)", source); }
                 return;
             }
-            if (has(edge, GamepadButtons::X)) { detail_delete(source); return; }
+            if (has(edge, GamepadButtons::X)) { if (m_dInst.installed) detail_delete(source); else detail_storage(source); return; }
             if (has(edge, GamepadButtons::Y)) { detail_cloud(source); return; }
             if (cloud_status(m_dApp).text.find("LB: use cloud") != std::string::npos) {
                 if (has(edge, GamepadButtons::LeftShoulder)) { detail_cloud("LB use cloud", steam_cloud::Prefer::Cloud); return; }

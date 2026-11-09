@@ -665,7 +665,9 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
     }
     int gen = ++g_launch.gen; g_launch.appid = appid; g_launch.started = now_s(); g_launch.loaderStarted = 0;
     { std::lock_guard<std::mutex> l(g_launch.m); g_launch.result.clear();g_launch.ok=false;g_launch.attempt=std::to_string(GetCurrentProcessId())+":"+std::to_string(gen); } g_launch.phase = 1;
-    const LaunchTarget target = dir.empty() ? LaunchTarget{} : pick_target(appid, g_dir + L"\\" + widen(dir));
+    const InstallInfo inst = read_install(appid);   // the game folder may be on another drive (marker root)
+    const std::wstring folder = !dir.empty() && inst.installed && inst.dir == dir ? inst.folder : g_dir + L"\\" + widen(dir);
+    const LaunchTarget target = dir.empty() ? LaunchTarget{} : pick_target(appid, folder);
     const std::string args = target.args;
     char b[1500]; snprintf(b, sizeof b, "{\"appid\":%u,\"attemptId\":\"%s\",\"name\":\"%s\",\"installDir\":\"%s\",\"time\":\"%s\",\"args\":\"%s\",\"via\":\"%s\"}\n", appid, g_launch.attempt.c_str(), json_esc(name).c_str(), json_esc(dir).c_str(), utc_iso().c_str(), args.c_str(), via);
     write_text(g_dir + L"\\launch_request.json", b);
@@ -681,9 +683,9 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
                   if ((int)q == 0) { std::wstring u = L"xboxsteam-host://launch?appid=" + widen(std::to_string(appid)) + L"&dir=" + widen(dir); bool ok = winrt::Windows::System::Launcher::LaunchUriAsync(winrt::Windows::Foundation::Uri(u)).get(); logf("launch: host activation LaunchUriAsync ok=%d", ok ? 1 : 0); if (ok) { lp_finish(gen,appid,"handed over to host package via xboxsteam-host://; guest execution unverified",false,0,0,"handed-off"); return; } }
             } catch (winrt::hresult_error const& e) { logf("launch: activation query failed hr=0x%08x", (unsigned)e.code().value); } catch (...) { logf("launch: activation query failed"); }
             // 2. in-process guest runtime
-            std::wstring root = g_dir + L"\\" + widen(dir); std::string why = target.why; std::vector<std::wstring> names; if (!target.exe.empty()) names.push_back(target.exe);
-            logf("launch: runtime root=LocalState\\%s targets=%zu (%s)", dir.c_str(), names.size(), why.c_str());
-            if (dir.empty() || names.empty()) { finish("cannot start: " + (dir.empty() ? std::string("install directory unknown") : why), false, 0, 0); return; }
+            std::wstring root = folder; std::string why = target.why; std::vector<std::wstring> names; if (!target.exe.empty()) names.push_back(target.exe);
+            logf("launch: runtime root=%s targets=%zu (%s)", game_library::join_root("LocalState", inst.root, dir).c_str(), names.size(), why.c_str());
+            if (dir.empty() || names.empty()) { finish("cannot start: " + (dir.empty() ? std::string("install directory unknown") : !inst.root.empty() && GetFileAttributesW(folder.c_str()) == INVALID_FILE_ATTRIBUTES ? "the drive holding this game (" + inst.root.substr(0, 2) + ") is not connected" : why), false, 0, 0); return; }
             // Keep the previous attempt's log beside this one (launch_probe.previous.log).
             MoveFileExW((g_dir + L"\\launch_probe.log").c_str(), (g_dir + L"\\launch_probe.previous.log").c_str(), MOVEFILE_REPLACE_EXISTING);
             { std::lock_guard<std::mutex> l(g_lpm); if (g_lpf) fclose(g_lpf); g_lpf = _wfopen((g_dir + L"\\launch_probe.log").c_str(), L"wb"); g_lpMissing = g_lpStubbed = g_lpStubCalls = g_lpLines = 0; g_lpLastFail.clear(); }
