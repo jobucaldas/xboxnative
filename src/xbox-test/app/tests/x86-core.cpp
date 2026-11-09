@@ -224,6 +224,43 @@ static uint32_t nat_fcomip(double a, double b) {
     asm volatile("fldl %0\n\tfldl %1\n\tfcomip %%st(1), %%st\n\tfstp %%st(0)\n\tpushfq\n\tpopq g_sw(%%rip)" : : "m"(g_x), "m"(g_y) : "st", "cc", "memory");
     return g_sw;
 }
+// The four integer-flag compares (fcomi/fucomi keep the stack, fcomip/fucomip
+// pop st(0)): which = 0 fcomi, 1 fucomi, 2 fcomip, 3 fucomip.
+static uint32_t nat_x87_cmp(int which, double a, double b) {
+    g_x = a; g_y = b;
+    switch (which) {
+    case 0: asm volatile("fldl %0\n\tfldl %1\n\tfcomi %%st(1), %%st\n\tfstp %%st(0)\n\tfstp %%st(0)\n\tpushfq\n\tpopq g_sw(%%rip)" : : "m"(g_x), "m"(g_y) : "st", "cc", "memory"); break;
+    case 1: asm volatile("fldl %0\n\tfldl %1\n\tfucomi %%st(1), %%st\n\tfstp %%st(0)\n\tfstp %%st(0)\n\tpushfq\n\tpopq g_sw(%%rip)" : : "m"(g_x), "m"(g_y) : "st", "cc", "memory"); break;
+    case 2: asm volatile("fldl %0\n\tfldl %1\n\tfcomip %%st(1), %%st\n\tfstp %%st(0)\n\tpushfq\n\tpopq g_sw(%%rip)" : : "m"(g_x), "m"(g_y) : "st", "cc", "memory"); break;
+    default: asm volatile("fldl %0\n\tfldl %1\n\tfucomip %%st(1), %%st\n\tfstp %%st(0)\n\tpushfq\n\tpopq g_sw(%%rip)" : : "m"(g_x), "m"(g_y) : "st", "cc", "memory"); break;
+    }
+    return g_sw;
+}
+// fxam's class and sign bits. `empty` inspects the empty st(0) after fninit.
+static uint32_t nat_fxam(double v, bool empty) {
+    g_x = v;
+    if (empty) asm volatile("fninit\n\tfxam\n\tfnstsw %%ax\n\tmovw %%ax, g_sw(%%rip)" : : : "st", "ax", "memory");
+    else asm volatile("fninit\n\tfldl %0\n\tfxam\n\tfnstsw %%ax\n\tmovw %%ax, g_sw(%%rip)" : : "m"(g_x) : "st", "ax", "memory");
+    return g_sw;
+}
+// fcmovCC st(0), st(1) on the hardware: returns the 8 bytes of the result
+// (st(0) after the move, 1.0 when the condition did not hold). The integer
+// flags are set from cf/pf/zf through pushf/popf.
+static uint32_t nat_flags(bool cf, bool pf, bool zf) {
+    uint32_t f; const uint32_t want = (cf ? uint32_t(CF) : 0u) | (pf ? uint32_t(PF) : 0u) | (zf ? uint32_t(ZF) : 0u);
+    asm volatile("pushfq\n\tpopq %%rax\n\tandl $~0x45, %%eax\n\torl %1, %%eax\n\tpushq %%rax\n\tpopfq\n\tpushfq\n\tpopq %%rax\n\tmovl %%eax, %0" : "=r"(f) : "r"(want) : "ax", "cc", "memory");
+    return f;
+}
+#define NAT_FCMOV(NAME, MN) \
+    static uint64_t NAME() { asm volatile("fldl g_y(%%rip)\n\tfldl g_x(%%rip)\n\t" MN " %%st(1), %%st\n\tfstpl g_out(%%rip)\n\tfstp %%st(0)" : : : "st", "memory"); \
+        uint64_t b; std::memcpy(&b, &g_out, 8); return b; }
+NAT_FCMOV(nat_fcmovb, "fcmovb") NAT_FCMOV(nat_fcmove, "fcmove") NAT_FCMOV(nat_fcmovbe, "fcmovbe") NAT_FCMOV(nat_fcmovu, "fcmovu")
+NAT_FCMOV(nat_fcmovnb, "fcmovnb") NAT_FCMOV(nat_fcmovne, "fcmovne") NAT_FCMOV(nat_fcmovnbe, "fcmovnbe") NAT_FCMOV(nat_fcmovnu, "fcmovnu")
+static uint64_t nat_fcmov(int which, bool cf, bool pf, bool zf) {
+    g_x = 1.0; g_y = 2.0; nat_flags(cf, pf, zf);
+    static uint64_t (*const fns[8])() = {nat_fcmovb, nat_fcmove, nat_fcmovbe, nat_fcmovu, nat_fcmovnb, nat_fcmovne, nat_fcmovnbe, nat_fcmovnu};
+    return fns[which]();
+}
 static void test_fpu() {
     Machine m;
     // x87 double-precision arithmetic against the real FPU. The result is
@@ -373,6 +410,66 @@ static void test_x87_forms() {
       EXPECT(Fpu::to_wide(b) == Wide(1.0L) / 3.0L, "fld/fstp m80 must round-trip the extended value"); }
     // An x87 encoding outside the modelled set is an explicit fault, not a guess.
     EXPECT(fault_of([&] { m.load({0xDF, 0x20}); m.cpu.run(0); }) == FaultKind::Unsupported, "fbld must fault");
+    // fxam: the class bits (C0/C2/C3) and the sign bit (C1) the mingw FP formatter
+    // branches on, for every class of value, against the hardware.
+    {
+        double nan = std::numeric_limits<double>::quiet_NaN();
+        double inf = std::numeric_limits<double>::infinity();
+        double denorm = std::numeric_limits<double>::denorm_min();
+        for (double v : {3.14159, -3.14159, 0.0, -0.0, inf, -inf, nan, denorm, -denorm, 1e300, -1e-300}) {
+            uint32_t want = nat_fxam(v, false);
+            m.mem.w64(Machine::DATA, f64b(v));
+            run({0xDD, 0x05, 0x00, 0x00, 0x02, 0x00, 0xD9, 0xE5, 0xDF, 0xE0, 0xDD, 0xD8});  // fldl; fxam; fnstsw ax; fstp st(0)
+            EXPECT((m.cpu.reg[EAX] & 0x4700) == (want & 0x4700) && (m.cpu.reg[EAX] & 0x0200) == (want & 0x0200),
+                   "fxam %g: class %x sign %x, want %x/%x", v, m.cpu.reg[EAX] & 0x4700, m.cpu.reg[EAX] & 0x0200, want & 0x4700, want & 0x0200);
+            ++alu_cases;
+        }
+        uint32_t want = nat_fxam(0, true);
+        run({0xD9, 0xE5, 0xDF, 0xE0});  // fxam on the empty stack; fnstsw ax
+        EXPECT((m.cpu.reg[EAX] & 0x4700) == (want & 0x4700), "fxam empty: %x want %x", m.cpu.reg[EAX] & 0x4700, want & 0x4700);
+        ++alu_cases;
+    }
+    // fcomi/fucomi/fcomip/fucomip: the integer flags and the stack discipline.
+    // (DB F0+i / DB E8+i keep st(0); DF F0+i / DF E8+i pop it.)
+    {
+        double nan = std::numeric_limits<double>::quiet_NaN();
+        const uint8_t enc[4] = {0xDB, 0xF1, 0xDB, 0xE9};  // fcomi/fucomi st, st(1)
+        const uint8_t pop[4] = {0xDF, 0xF1, 0xDF, 0xE9};  // fcomip/fucomip st, st(1)
+        for (int which = 0; which < 4; ++which) for (double a : {1.0, -1.0, 0.0}) for (double b : {1.0, -1.0, 0.0, nan}) {
+            uint32_t nf = nat_x87_cmp(which, a, b);
+            m.mem.w64(Machine::DATA, f64b(a)); m.mem.w64(Machine::DATA + 8, f64b(b));
+            std::vector<uint8_t> code{0xDD, 0x05, 0x00, 0x00, 0x02, 0x00, 0xDD, 0x05, 0x08, 0x00, 0x02, 0x00};
+            code.push_back(which < 2 ? enc[which * 2] : pop[(which - 2) * 2]); code.push_back(which < 2 ? enc[which * 2 + 1] : pop[(which - 2) * 2 + 1]);
+            if (which < 2) code.insert(code.end(), {0xDD, 0xD8, 0xDD, 0xD8});  // keep: drop both explicitly
+            else code.push_back(0xDD), code.push_back(0xD8);                    // pop: drop the remaining one
+            exec(m, code, 0, 0, 0, false);
+            EXPECT(!((m.cpu.eflags ^ nf) & (CF | PF | ZF)), "x87 cmp %d %g %g: flags got %x want %x", which, a, b, m.cpu.eflags & (CF | PF | ZF), nf & (CF | PF | ZF));
+            EXPECT(m.cpu.fpu.top == 0 && m.cpu.fpu.empty[m.cpu.fpu.idx(0)], "x87 cmp %d: stack not empty", which);
+            ++alu_cases;
+        }
+    }
+    // fcmov: the condition comes from the integer flags, and st(0) takes st(1)'s
+    // value only when it holds. DA C0+i b/e/be/u, DB C0+i nb/ne/nbe/nu.
+    {
+        const char* mn[8] = {"fcmovb", "fcmove", "fcmovbe", "fcmovu", "fcmovnb", "fcmovne", "fcmovnbe", "fcmovnu"};
+        for (int which = 0; which < 8; ++which) for (int fl = 0; fl < 8; ++fl) {
+            bool cf = fl & 1, pf = fl & 2, zf = fl & 4;
+            uint64_t nf = nat_fcmov(which, cf, pf, zf);
+            m.mem.w64(Machine::DATA, f64b(1.0)); m.mem.w64(Machine::DATA + 8, f64b(2.0));
+            // fldl [DATA+8] (st1 = 2.0); fldl [DATA] (st0 = 1.0); fcmovCC st(1); fstpl [DATA+16]; fstp st(0)
+            std::vector<uint8_t> code{0xDD, 0x05, 0x08, 0x00, 0x02, 0x00, 0xDD, 0x05, 0x00, 0x00, 0x02, 0x00,
+                                      uint8_t(which < 4 ? 0xDA : 0xDB), uint8_t(0xC1 | ((which & 3) << 3)),
+                                      0xDD, 0x1D, 0x10, 0x00, 0x02, 0x00, 0xDD, 0xD8};
+            m.mem.protect(Machine::CODE, 4096, PROT_R | PROT_W);
+            code.push_back(0xF4);
+            m.mem.write_bytes(Machine::CODE, code.data(), uint32_t(code.size())); m.mem.protect(Machine::CODE, 4096, PROT_R | PROT_X);
+            m.cpu.eip = Machine::CODE; m.cpu.reg[ESP] = Machine::STACK + 4096 - 16; m.cpu.exited = false; m.cpu.depth = 0;
+            m.cpu.eflags = 2u | (cf ? uint32_t(CF) : 0u) | (pf ? uint32_t(PF) : 0u) | (zf ? uint32_t(ZF) : 0u);
+            EXPECT(m.run_to_end(code.size() - 1), "fcmov program did not reach end");
+            EXPECT(m.mem.r64(Machine::DATA + 16) == nf, "%s cf=%d pf=%d zf=%d: got %.17g want %.17g", mn[which], cf, pf, zf, bf64(m.mem.r64(Machine::DATA + 16)), bf64(nf));
+            ++alu_cases;
+        }
+    }
 }
 
 // ---------- (3) thunks, callbacks, nesting ----------
