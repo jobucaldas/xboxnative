@@ -103,6 +103,97 @@ true)` — gbe's own UDP peer network, nothing to do with Steam's CM. The
 `PRINT_DEBUG` that would have exposed the values is compiled out of the release
 build. Nothing is persisted, so there is no file for the launcher to watch.
 
+## Leaderboards (part 2 of #55)
+
+The owner's check: launch Megabonk, open the Rank screen in the main menu, and
+other players' entries should be listed. They are not.
+
+**What the game asks for.** Megabonk's IL2CPP metadata carries the flat export
+names `SteamAPI_ISteamUserStats_FindLeaderboard`,
+`..._FindOrCreateLeaderboard`, `..._DownloadLeaderboardEntries`,
+`..._GetDownloadedLeaderboardEntry` and `..._UploadLeaderboardScore`, plus the
+board-name literals `kills`, `kills_weekly`, `friends` and a `v2_` prefix, and a
+serialized default blob `\x04 v2 | \x0a kills | \x18 kills_weekly | \x0e friends`.
+The names it passes to Steam are therefore most likely `v2_kills`,
+`v2_kills_weekly` and `v2_friends` — a hypothesis until the console log shows the
+seed line for each.
+
+**Why the board is empty today.** gbe_fork answers `FindLeaderboard` from its own
+cache (`dll/steam_user_stats_leaderboard.cpp`, tag `release-2026_09_27`):
+
+1. `find_leaderboard` looks the name up in `cached_leaderboards`; a miss calls
+   `cache_leaderboard_ifneeded`, which builds the board and calls
+   `load_leaderboard_entries(name)` **once**, on that first Find in the process.
+2. `load_leaderboard_entries` reads
+   `<local_save_path>\<appid>\leaderboard\<lowercased name>` and nothing else.
+3. `DownloadLeaderboardEntries` answers from that in-memory vector.
+
+With `disable_networking=1` (which the launcher sets) and no LAN peers, no file
+is ever written, so the board is empty. The console evidence matches: the
+leaderboard folder does not exist under
+`LocalState\steam\3405340\saves\3405340\`, and `launch_probe.log` has zero
+`FindLeaderboard`/`ISteamUserStats` hits. The game's own "Error when finding
+leaderboard" string is the path it takes.
+
+**The route.** Option (b), the launcher's CM bridge, with the provider's own
+cache file as the delivery surface. Three ways to get the CM answer into the
+provider were considered:
+
+| Delivery surface | How it would work | Why not (or why) |
+|---|---|---|
+| `steam_settings` | a file the provider reads at init | gbe_fork has no setting for leaderboard rows. `leaderboards.txt` names a board and its sort/display method only (`parse_leaderboards`, `dll/settings_parser.cpp`), and `disable_leaderboards_create_unknown` only changes whether an unknown board is created. No key supplies entries. Not a channel. |
+| CallResult injection in Play | synthesise `LeaderboardFindResult_t` / `LeaderboardScoresDownloaded_t` into the provider's callback queue | the queue is the provider's private state; reaching it means knowing its internal layout, and the game's own `DownloadLeaderboardEntries` would still be answered from the provider's empty vector. It replaces the provider rather than feeding it. |
+| **the provider's cache file** (chosen) | write the rows where the provider already looks, before its first Find | it is the provider's documented input (`load_leaderboard_entries`), it needs no internal knowledge, the provider's own callbacks still run unchanged, and a wrong guess fails safe: the game sees exactly what it sees today. |
+| a thin `ISteamUserStats` shim in `stage_steam_provider` | answer the leaderboard exports ourselves instead of forwarding | it would own the whole interface (handles, callbacks, every other `ISteamUserStats` call the game makes) for one family, and would diverge from the provider on stats/achievements that already work. Kept as the fallback if the cache file proves insufficient. |
+
+The cache file is the smallest surface that is still the provider's own code
+path:
+
+1. Play observes the provider's `FindLeaderboard`, `FindOrCreateLeaderboard` and
+   `UploadLeaderboardScore` exports, the same export-tap mechanism rich presence
+   already uses (`play_runtime::steamApiExport`).
+2. On the game's `Find`, **before** the provider is called, the launcher asks
+   Steam for the board and its top rows over its own `CmSession`:
+   `CMsgClientLBSFindOrCreateLB` (5416) → `CMsgClientLBSFindOrCreateLBResponse`
+   (5417), then `CMsgClientLBSGetLBEntries` (5418) →
+   `...GetLBEntriesResponse` (5419), with the header's `routing_appid` set to the
+   game's app id.
+3. It writes the rows into the provider's own leaderboard file in the provider's
+   own format — flat little-endian `uint32`: steam id low, steam id high, score,
+   details count, details… — then lets the provider's `Find` run.
+4. The provider reads that file on its first Find, sorts it, and answers the
+   game's `DownloadLeaderboardEntries` with real players. The game's call still
+   runs, still receives the provider's handle, and no game or Valve file is
+   touched.
+5. On `UploadLeaderboardScore`, after the provider answers, the launcher sends
+   `CMsgClientLBSSetScore` (5414) with the board id the seed learned and the
+   game's own upload method (keep-best / force-update), so the player's score
+   reaches their real account. The board is identified by asking the provider
+   itself (`GetLeaderboardName`) what the handle the game passed names: `Find`
+   returns a `SteamAPICall_t`, while the game uploads with the `SteamLeaderboard_t`
+   from `LeaderboardFindResult_t`, and the two are different values.
+
+The ordering is the whole design: a background fetch after the Find can never be
+seen, because the provider never re-reads the file. The seed therefore runs on
+the game's thread, bounded by a 3 s CM timeout per request, and only once per
+board per launch (a board Steam does not have is remembered as such and not
+asked again). A board Steam *does* have keeps its id even when the rows request
+fails, so a score for it is still uploaded that launch; only the rank list is
+missing.
+
+| EMsg | Message | Fields used |
+|---:|---|---|
+| 5416 / 5417 | `CMsgClientLBSFindOrCreateLB` / `...Response` | request `app_id[1]`, `leaderboard_sort_method[2]`, `leaderboard_display_type[3]`, `create_if_not_found[4]`, `leaderboard_name[5]`; response `eresult[1]`, `leaderboard_id[2]`, `leaderboard_entry_count[3]`, `leaderboard_sort_method[4]`, `leaderboard_display_type[5]`, `leaderboard_name[6]` |
+| 5418 / 5419 | `CMsgClientLBSGetLBEntries` / `...Response` | request `app_id[1]`, `leaderboard_id[2]`, `range_start[3]`, `range_end[4]`, `leaderboard_data_request[5]`; response `eresult[1]`, `leaderboard_entry_count[2]`, `entries[3]` (`steam_id[1]`, `global_rank[2]`, `score[3]`, `score_details[4]`) |
+| 5414 / 5415 | `CMsgClientLBSSetScore` / `...Response` | request `app_id[1]`, `leaderboard_id[2]`, `score[3]`, `score_details[4]`, `upload_score_method[5]`; response `eresult[1]`, `leaderboard_entry_count[2]`, `score_changed[3]`, `global_rank_previous[4]`, `global_rank_new[5]` |
+
+**What this does not do.** The board names are a hypothesis until a console run
+shows them. `FindOrCreateLeaderboard` with `create=false` (which is what
+`FindLeaderboard` becomes) may answer `k_EResultNoMatch` for a board the account
+has never seen, in which case the game sees the empty board it saw before.
+Only the first Find of a board in a process benefits. And the seed blocks the
+game's thread for one CM round trip per board it asks for.
+
 ## The three serving options
 
 For each interface family:
@@ -121,6 +212,7 @@ For each interface family:
 | Interface | Games | (a) gbe_fork today | (b) CM bridge | (c) Valve client |
 |---|---|---|---|---|
 | `ISteamFriends` rich presence | Megabonk, Slime Rancher, PPT2 | in-memory + LAN only | **done in this branch**: observed at the export, uploaded on the launcher session | — |
+| `ISteamUserStats` leaderboards | Megabonk | reads `<appid>\leaderboard\<name>` on a board's first Find and answers downloads from it; never writes it with `disable_networking=1`, so boards are empty | **done in this branch**: observed at the export, board + top rows fetched on the launcher session and written into the provider's own file before its first Find; scores uploaded as `CMsgClientLBSSetScore` | — |
 | `ISteamFriends` invites / `GameLobbyJoinRequested` | Megabonk | overlay/invite handling is experimental-build only; `auto_accept_invite.txt` exists | needs `CMsgClientMMSInviteToLobby` (6621) and the `ClientMMSLobbyChatMsg` (6614) path to raise callbacks | — |
 | `ISteamMatchmaking` lobbies | Megabonk | LAN-only lobbies over its own UDP port (`listen_port`, default 47584): `CreateLobby` queues a pending create and `create_pending_lobbies()` mints a local lobby id, answers `LobbyCreated_t`/`LobbyEnter_t` itself and broadcasts the lobby over gbe's network (`dll/steam_matchmaking.cpp`); `disable_lobby_creation` makes it fail instead | **feasible**: the 14 messages below map almost 1:1 to the API | — |
 | `ISteamMatchmakingServers` | Megabonk | returns LAN server list; `matchmaking_server_list_actual_type` and `..._via_source_query` change the list type | not a CM thing: it is a UDP server query (`A2S`), which the console can do over its own sockets if the AppContainer allows outbound UDP | — |
@@ -177,6 +269,7 @@ SDR (for `ISteamNetworkingSockets`) additionally needs
 | Slice | Effort | Main risk |
 |---|---|---|
 | Rich presence (this branch) | done | Steam may ignore `routing_appid` for an app the session did not launch through the client; the console log says whether it did |
+| Leaderboards (this branch) | done for the read path and score upload | the board names are a hypothesis until the console log shows them; `FindLeaderboard` becomes `FindOrCreateLeaderboard(create=false)`, which may answer `k_EResultNoMatch` for a board the account has never seen; the seed blocks the game's thread for one CM round trip per board |
 | Lobby list / create / join | medium: 14 messages, each a request/response plus a pushed form that must become the right `_t` callback; the game also needs `LobbyEnter_t`, `LobbyDataUpdate_t`, `LobbyChatUpdate_t`, `LobbyKicked_t` | the provider owns the callback queue. Either the launcher feeds gbe's queue (needs a hook gbe does not document) or the launcher answers the interface itself, which means replacing `ISteamMatchmaking` wholesale — a much bigger change than observing one export |
 | Auth tickets | medium | gbe's ticket is signed by the emulator; CM will not accept it as a client ticket, so only the "register what gbe gave the game" direction is realistic. Validating other players is server-side |
 | `ISteamNetworkingSockets` over SDR | large | a full transport implementation: certificates, relay tickets, POP selection, encryption, and the console's AppContainer UDP rules. Not a launcher-session feature |
@@ -197,7 +290,7 @@ Two structural risks apply to everything in option (b):
 
 | Source | What it provided | Licence |
 |---|---|---|
-| SteamDatabase/Protobufs (as vendored in steam-user 5.3.0 `protobufs/*.proto`) | `CMsgClientMMS*`, `CMsgClientPersonaState`, `CMsgClientRichPresence*`, `CMsgClientPlayingSessionState`, `CMsgClientGamesPlayed`, `CMsgProtoBufHeader`, `CMsgSteamDatagram*` field numbers | The `.proto` files are Valve's published protocol definitions, distributed by SteamDatabase as public domain (Unlicense). steam-user is MIT (Copyright (c) 2015 Alex Corn); its own code was not copied |
+| SteamDatabase/Protobufs (as vendored in steam-user 5.3.0 `protobufs/*.proto`) | `CMsgClientMMS*`, `CMsgClientLBS*`, `CMsgClientPersonaState`, `CMsgClientRichPresence*`, `CMsgClientPlayingSessionState`, `CMsgClientGamesPlayed`, `CMsgProtoBufHeader`, `CMsgSteamDatagram*` field numbers | The `.proto` files are Valve's published protocol definitions, distributed by SteamDatabase as public domain (Unlicense). steam-user is MIT (Copyright (c) 2015 Alex Corn); its own code was not copied |
 | SteamKit2 | cross-check of message names and `EMsg` values | LGPL-2.1 — no source copied; names and numbers are facts, not expression |
 
 Nothing from either project is vendored into this repository. The message
@@ -214,6 +307,18 @@ Verified off-device:
 - The presence wire shapes round-trip against hand-built CM bodies, and the
   coalescing policy behaves as described
   (`app/tests/steam_presence_test.cpp`, run by CI).
+- The leaderboard wire shapes round-trip against a fake CM service that answers
+  in the real `CMsgClientLBS*` shapes, the provider's cache file is byte-exact
+  against gbe_fork's reader, the seed policy asks Steam once per board and never
+  for a board it already knows, and a score is only sent for a seeded board
+  (`app/tests/steam_leaderboards_test.cpp`, run by CI).
+- Off-device under Wine, a guest that statically imports `steam_api64.dll` as a
+  Steamworks game does finds a board, and Play's seed runs before the provider's
+  Find: the provider reads three players out of the file Play wrote, the guest
+  downloads them in rank order and uploads a score that Play forwards. A board
+  the seed did not cover stays empty, which is the pre-bridge behaviour
+  (`app/tests/play-runtime.sh leaderboards`, fixtures
+  `app/tests/play-leaderboard.cpp` and `play-leaderboard-provider.cpp`).
 - The launcher sources compile with the UWP toolchain.
 - gbe_fork exports 1,032 `SteamAPI_ISteam*` names. Of the 894 Megabonk
   references, 890 are exported; the 4 that are not are the
@@ -234,3 +339,9 @@ Not verified:
   the check.
 - Anything about lobbies, P2P or auth tickets end to end. No CM lobby message
   has been sent from this codebase.
+- That Steam answers `CMsgClientLBSFindOrCreateLB` for these boards on the
+  launcher's session, that the board names are `v2_kills` / `v2_kills_weekly` /
+  `v2_friends`, and that the game's Rank screen then lists the rows. That needs a
+  console run; the checks are the lines
+  `STEAM leaderboards: 'v2_kills' seeded N rows (id …, N on Steam, file written)`
+  and, on the screen, other players' entries.
