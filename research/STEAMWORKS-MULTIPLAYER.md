@@ -116,7 +116,9 @@ board-name literals `kills`, `kills_weekly`, `friends` and a `v2_` prefix, and a
 serialized default blob `\x04 v2 | \x0a kills | \x18 kills_weekly | \x0e friends`.
 The names it passes to Steam are therefore most likely `v2_kills`,
 `v2_kills_weekly` and `v2_friends` — a hypothesis until the console log shows the
-seed line for each.
+seed line for each. (The 2026-11-09 console run settled it: the real names are
+`v2_kills`, `v2_kills_friends`, `v2_kills_weekly`, `v2_kills_weekly_friends` and
+`banned_players`; see the console section at the end.)
 
 **Why the board is empty today.** gbe_fork answers `FindLeaderboard` from its own
 cache (`dll/steam_user_stats_leaderboard.cpp`, tag `release-2026_09_27`):
@@ -353,6 +355,13 @@ Verified off-device:
   the seed did not cover stays empty, which is the pre-bridge behaviour
   (`app/tests/play-runtime.sh leaderboards`, fixtures
   `app/tests/play-leaderboard.cpp` and `play-leaderboard-provider.cpp`).
+- The **pinned gbe_fork binary itself** reads the file the launcher writes. The
+  test above uses a stand-in provider written here, so it proves the bridge and
+  the file format but not the real reader; `app/tests/steam-leaderboard-gbe.sh`
+  runs the fetched, hash-checked `steam_api64.dll` as a game would, seeds with
+  the launcher's own encoder, and gets 3 rows back at ranks 1-3 with the seeded
+  scores. With the file removed the same guest gets an empty board. That is the
+  link a new pin or a changed path would break silently.
 - The launcher sources compile with the UWP toolchain.
 - gbe_fork exports 1,032 `SteamAPI_ISteam*` names. Of the 894 Megabonk
   references, 890 are exported; the 4 that are not are the
@@ -373,9 +382,30 @@ Not verified:
   the check.
 - Anything about lobbies, P2P or auth tickets end to end. No CM lobby message
   has been sent from this codebase.
-- That Steam answers `CMsgClientLBSFindOrCreateLB` for these boards on the
-  launcher's session, that the board names are `v2_kills` / `v2_kills_weekly` /
-  `v2_friends`, and that the game's Rank screen then lists the rows. That needs a
-  console run; the checks are the lines
-  `STEAM leaderboards: 'v2_kills' seeded N rows (id …, N on Steam, file written)`
-  and, on the screen, other players' entries.
+- That the game's Rank screen lists the rows. Steam answering for the boards is
+  settled by the console run below; what the panel does with them is not.
+
+**Console run, 2026-11-09 (0.5.255.0, `feat/steam-leaderboards` @ 7dd2f0f).**
+The first half is answered. The tap fired, and Steam answered every board the
+game asked for, in one launch:
+
+```
+STEAM leaderboards: SteamAPI_ISteamUserStats_FindLeaderboard observed; rows come from the launcher's Steam session
+STEAM leaderboards: 'banned_players' seeded 72 rows (id 17849113, 72 on Steam, file written)
+STEAM leaderboards: 'v2_kills' seeded 0 rows (id 17843353, 0 on Steam, file empty)
+STEAM leaderboards: 'v2_kills_friends' seeded 100 rows (id 17772166, 3735220 on Steam, file written)
+STEAM leaderboards: 'v2_kills_weekly' seeded 100 rows (id 17850492, 29116 on Steam, file written)
+STEAM leaderboards: 'v2_kills_weekly_friends' seeded 100 rows (id 17850493, 29171 on Steam, file written)
+```
+
+So the board names are not a hypothesis any more, `CMsgClientLBSFindOrCreateLB`
+answers on the launcher's session, and the cache files on the console decode to
+the row counts in the log. `v2_kills` is genuinely empty on Steam — that is
+Steam's answer, not a bridge failure — and the game's real boards are the
+`_friends` / `_weekly` names plus `banned_players`. Note that `_friends` is a
+board *name*, not the friends data request: it is a separate global board.
+
+Still not verified: that the Rank screen lists the rows. Megabonk stops at its
+photosensitivity warning and no gamepad was connected, so nothing could press
+CONFIRM and the panel was never reached. The seeding happens at startup, before
+that screen, so the Steam question is answered without it.
