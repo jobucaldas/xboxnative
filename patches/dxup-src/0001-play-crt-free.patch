@@ -1,0 +1,227 @@
+diff -ruN a/src/d3d9/d3d9_includes.h b/src/d3d9/d3d9_includes.h
+--- a/src/d3d9/d3d9_includes.h
++++ b/src/d3d9/d3d9_includes.h
+@@ -45,7 +45,10 @@
+ 
+ // d3d11
+ 
+-#ifndef _MSC_VER
++// Play's build: mingw-w64's d3d11_1.h already declares this enum, so the
++// donor's own copy (written for MSVC, where the SDK header was older) is only
++// needed there.
++#if !defined(_MSC_VER) && !defined(__MINGW32__)
+ enum D3D11_FILTER_REDUCTION_TYPE {
+   D3D11_FILTER_REDUCTION_TYPE_STANDARD,
+   D3D11_FILTER_REDUCTION_TYPE_COMPARISON,
+diff -ruN a/src/dx9asm/dx9asm_operand.cpp b/src/dx9asm/dx9asm_operand.cpp
+--- a/src/dx9asm/dx9asm_operand.cpp
++++ b/src/dx9asm/dx9asm_operand.cpp
+@@ -23,23 +23,30 @@
+     }
+ 
+     using namespace optype;
+-    std::vector<OperandInfo> operandInfos = {
+-      {Dst, 1},
+-      {Src0, 1},
+-      {Src1, 1},
+-      {Src2, 1},
+-      {Src3, 1},
+-      {Vec4, 4},
+-      {Label, 1},
+-      {Bool, 1},
+-      {Integer, 1},
+-      {UsageToken, 1},
+-      {LoopCounter, 1},
+-      {VaradicOperandCount, 0}
+-    };
++    // Play's build: function-local rather than namespace-scope. The shim is a
++    // /noentry DLL with no CRT, so nothing would run a global constructor; a
++    // first-use initialisation (this build has -fno-threadsafe-statics) does
++    // not need one. The table itself is unchanged.
++    static std::vector<OperandInfo>& operandInfos() {
++      static std::vector<OperandInfo> table = {
++        {Dst, 1},
++        {Src0, 1},
++        {Src1, 1},
++        {Src2, 1},
++        {Src3, 1},
++        {Vec4, 4},
++        {Label, 1},
++        {Bool, 1},
++        {Integer, 1},
++        {UsageToken, 1},
++        {LoopCounter, 1},
++        {VaradicOperandCount, 0}
++      };
++      return table;
++    }
+ 
+     const OperandInfo* lookupOperandInfo(OperandType type) {
+-      for (OperandInfo& info : operandInfos) {
++      for (OperandInfo& info : operandInfos()) {
+         if (info.type == type)
+           return &info;
+       }
+diff -ruN a/src/dx9asm/dx9asm_operations.cpp b/src/dx9asm/dx9asm_operations.cpp
+--- a/src/dx9asm/dx9asm_operations.cpp
++++ b/src/dx9asm/dx9asm_operations.cpp
+@@ -10,7 +10,10 @@
+       using namespace optype;
+       using namespace implicitflag;
+ 
+-      std::vector<DX9OperationInfo> operationInfos = {
++      // Play's build: function-local (see dx9asm_operand.cpp); the shim is a
++      // /noentry DLL with no CRT and would never run a global constructor.
++      std::vector<DX9OperationInfo>& operationInfos() {
++      static std::vector<DX9OperationInfo> table = {
+         {"abs",     D3DSIO_ABS, 1, { Dst, Src0 }, { D3D10_SB_OPCODE_MOV, abs} },
+         {"add",     D3DSIO_ADD, 1, {Dst, Src0, Src1}, { D3D10_SB_OPCODE_ADD, 0} },
+         {"bem",     D3DSIO_BEM, 1, {Dst, Src0, Src1}, {} },
+@@ -99,11 +102,14 @@
+         {"texreg2gb",  D3DSIO_TEXREG2GB, 1, { Dst, Src0 }, {}, &ShaderCodeTranslator::handleTexReg2Gb},
+         {"texreg2rgb",  D3DSIO_TEXREG2RGB, 1, { Dst, Src0 }, {}},
+       };
++      return table;
++      }
+     }
+ 
+     const DX9OperationInfo* lookupOperationInfo(uint32_t token) {
+-      for (size_t i = 0; i < operationInfos.size(); i++) {
+-        DX9OperationInfo* info = &operationInfos[i];
++      std::vector<DX9OperationInfo>& table = operationInfos();
++      for (size_t i = 0; i < table.size(); i++) {
++        DX9OperationInfo* info = &table[i];
+         if (info->dx9opcode == opcode(token))
+           return info;
+       }
+diff -ruN a/src/dx9asm/dx9asm_register_map.cpp b/src/dx9asm/dx9asm_register_map.cpp
+--- a/src/dx9asm/dx9asm_register_map.cpp
++++ b/src/dx9asm/dx9asm_register_map.cpp
+@@ -21,7 +21,10 @@
+       return lookupOrCreateRegisterMapping(translator, operand.getRegType(), operand.getRegNumber() + regOffset, readMask, writeMask);
+     }
+ 
+-    std::vector<TransientRegisterMapping> transientMappings = {
++    // Play's build: function-local (see dx9asm_operand.cpp); the shim is a
++    // /noentry DLL with no CRT and would never run a global constructor.
++    static std::vector<TransientRegisterMapping>& transientMappings() {
++      static std::vector<TransientRegisterMapping> table = {
+       {0, 0, D3DDECLUSAGE_POSITION, "SV_Position", 0},
+ 
+       // SM1 Up me later!
+@@ -39,14 +42,16 @@
+ 
+       {11, 0, D3DDECLUSAGE_FOG, "TEXCOORD", 10},
+       {12, 0, D3DDECLUSAGE_PSIZE, "TEXCOORD", 11},
+-    };
++      };
++      return table;
++    }
+ 
+     std::vector<TransientRegisterMapping>& RegisterMap::getTransientMappings() {
+-      return transientMappings;
++      return transientMappings();
+     }
+ 
+     uint32_t RegisterMap::getTransientId(DclInfo& info) {
+-      for (const TransientRegisterMapping& mapping : transientMappings) {
++      for (const TransientRegisterMapping& mapping : transientMappings()) {
+         if (mapping.d3d9Usage == info.usage) {
+           if (mapping.d3d9UsageIndex == info.usageIndex)
+             return mapping.dxbcRegNum;
+@@ -58,9 +63,9 @@
+       TransientRegisterMapping mapping;
+       mapping.d3d9Usage = info.usage;
+       mapping.d3d9UsageIndex = info.usageIndex;
+-      mapping.dxbcRegNum = transientMappings.size();
++      mapping.dxbcRegNum = transientMappings().size();
+ 
+-      transientMappings.push_back(mapping);
++      transientMappings().push_back(mapping);
+ 
+       return mapping.dxbcRegNum;
+     }
+diff -ruN a/src/util/config.h b/src/util/config.h
+--- a/src/util/config.h
++++ b/src/util/config.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ #include <string>
++#include <cstdint>
+ 
+ namespace dxup {
+ 
+diff -ruN a/src/util/misc_helpers.h b/src/util/misc_helpers.h
+--- a/src/util/misc_helpers.h
++++ b/src/util/misc_helpers.h
+@@ -56,6 +56,14 @@
+     pushAlignedString(vec, str.c_str(), str.length());
+   }
+ 
++  // Play's build: convert::declUsage returns a const char* table entry, and
++  // without this overload it would be converted to a temporary std::string,
++  // pulling libstdc++'s exception machinery into a shim that links no CRT.
++  template <typename T>
++  void pushAlignedString(std::vector<T>& vec, const char* str) {
++    pushAlignedString(vec, str, std::strlen(str));
++  }
++
+   template <typename T, typename J>
+   void arrayCopyT(T* dst, const J* src, size_t tCount) {
+     std::memcpy((void*)dst, (const void*)src, sizeof(T) * tCount);
+diff -ruN a/src/util/shared_conversions.cpp b/src/util/shared_conversions.cpp
+--- a/src/util/shared_conversions.cpp
++++ b/src/util/shared_conversions.cpp
+@@ -1,12 +1,12 @@
+ #include "shared_conversions.h"
+-#include <array>
+ #include <d3dcommon.h>
+ 
+ namespace dxup {
+ 
+   namespace convert {
+ 
+-    std::array<std::string, 16> dclUsageMapSemantic = {
++    // Play's build: the tables are const char* (see shared_conversions.h).
++    static const char* const dclUsageMapSemantic[16] = {
+       "SV_Position",
+       "BLENDWEIGHT",
+       "BLENDINDICES",
+@@ -26,7 +26,7 @@
+       "SV_Target"
+     };
+ 
+-    std::array<std::string, 15> dclUsageMap = {
++    static const char* const dclUsageMap[15] = {
+       "POSITION",
+       "BLENDWEIGHT",
+       "BLENDINDICES",
+@@ -45,7 +45,7 @@
+     };
+ 
+ 
+-    const std::string& declUsage(bool vsInput, bool target, D3DDECLUSAGE usage) {
++    const char* declUsage(bool vsInput, bool target, D3DDECLUSAGE usage) {
+       if (target)
+         return dclUsageMapSemantic[15];
+ 
+diff -ruN a/src/util/shared_conversions.h b/src/util/shared_conversions.h
+--- a/src/util/shared_conversions.h
++++ b/src/util/shared_conversions.h
+@@ -1,11 +1,14 @@
+ #include <d3d9.h>
+-#include <string>
++#include <cstdint>
+ 
+ namespace dxup {
+ 
+     namespace convert {
+ 
+-        const std::string& declUsage(bool vsInput, bool target, D3DDECLUSAGE usage);
++        // Play's build returns the table entry directly. The only caller hands
++        // it to pushAlignedString, so a std::string here only pulled
++        // libstdc++'s exception machinery into a shim that links no CRT.
++        const char* declUsage(bool vsInput, bool target, D3DDECLUSAGE usage);
+         uint32_t sysValue(bool vsInput, bool target, D3DDECLUSAGE usage);
+ 
+     }

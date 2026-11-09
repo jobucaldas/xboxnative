@@ -17,6 +17,11 @@ mesa-src  https://archive.mesa3d.org/mesa-25.3.6.tar.xz  59217efeac3b64e7ced9583
 # Mesa's own wrap (subprojects/DirectX-Headers.wrap in 25.3.6) uses tag v1.618.1; this is the commit that tag resolves to.
 # Columns: NAME URL COMMIT TAG. The build script checks the wrap still names the tag and the checkout is exactly COMMIT.
 directx-headers  https://github.com/microsoft/DirectX-Headers.git  64c650b0c6642ab0f3cdf674e38401e02ccd2460  v1.618.1
+# D3D9 shader translation (research/D3D9-PLAN.md): DXUP's dx9asm, which turns D3D9 SM1-3
+# bytecode into SM5 DXBC for the own D3D9->D3D11 shim. zlib licence, Copyright (c) 2018
+# Joshua Ashton. Fetched, SHA-256 verified and built by src/tools/build-d3d9-translator.sh;
+# patches/dxup-src/0001-play-crt-free.patch makes it build CRT-free with mingw-w64.
+dxup-src  https://codeload.github.com/Joshua-Ashton/dxup/tar.gz/7cce9ee7ddecadbf58f12f74547dc1bf1e09c5f7  15aa110ec50b719ddd2d22b563ede3c769724060bd4f857ab79238b9343ab6e2
 # Vulkan (research/VULKAN-PLAN.md): Khronos Vulkan-Loader and Vulkan-Headers 1.4.313 (Apache-2.0), built by
 # src/tools/build-vulkan-loader.sh into vulkan-1.dll plus a null ICD that reports zero physical devices.
 vulkan-loader-src  https://codeload.github.com/KhronosGroup/Vulkan-Loader/tar.gz/refs/tags/vulkan-sdk-1.4.313.0  c736fa79d974c3513f5573b74249ed002aab59f1d15d1c13fc1d00644830869a
