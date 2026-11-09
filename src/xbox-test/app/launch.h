@@ -541,13 +541,18 @@ static void presence_start(uint32_t appid) {
     }).detach();
 }
 static void presence_end() {
+    bool blocked;
     {
         std::lock_guard<std::mutex> l(g_presence.m);
         ++g_presence.gen;   // retires the keeper and the self-check
         g_presence.ended = true; g_presence.appid = 0; g_presence.session.reset();
+        blocked = g_presence.blocked;
     }
     play_runtime::set_rich_presence_tap({});
-    games_played(0);
+    // While another of the account's clients is playing, even the empty list is
+    // a games-played message this session must not send: that other client owns
+    // the state, and Steam logs a blocked session off for sending one.
+    if(!blocked) games_played(0);
 }
 // Saves and achievements go up once, when the game ends (it quits, closes by
 // itself or is quit from the launcher menu), never while it is playing.
