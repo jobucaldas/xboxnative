@@ -136,7 +136,18 @@ leaderboard folder does not exist under
 leaderboard" string is the path it takes.
 
 **The route.** Option (b), the launcher's CM bridge, with the provider's own
-cache file as the delivery surface:
+cache file as the delivery surface. Three ways to get the CM answer into the
+provider were considered:
+
+| Delivery surface | How it would work | Why not (or why) |
+|---|---|---|
+| `steam_settings` | a file the provider reads at init | gbe_fork has no setting for leaderboard rows. `leaderboards.txt` names a board and its sort/display method only (`parse_leaderboards`, `dll/settings_parser.cpp`), and `disable_leaderboards_create_unknown` only changes whether an unknown board is created. No key supplies entries. Not a channel. |
+| CallResult injection in Play | synthesise `LeaderboardFindResult_t` / `LeaderboardScoresDownloaded_t` into the provider's callback queue | the queue is the provider's private state; reaching it means knowing its internal layout, and the game's own `DownloadLeaderboardEntries` would still be answered from the provider's empty vector. It replaces the provider rather than feeding it. |
+| **the provider's cache file** (chosen) | write the rows where the provider already looks, before its first Find | it is the provider's documented input (`load_leaderboard_entries`), it needs no internal knowledge, the provider's own callbacks still run unchanged, and a wrong guess fails safe: the game sees exactly what it sees today. |
+| a thin `ISteamUserStats` shim in `stage_steam_provider` | answer the leaderboard exports ourselves instead of forwarding | it would own the whole interface (handles, callbacks, every other `ISteamUserStats` call the game makes) for one family, and would diverge from the provider on stats/achievements that already work. Kept as the fallback if the cache file proves insufficient. |
+
+The cache file is the smallest surface that is still the provider's own code
+path:
 
 1. Play observes the provider's `FindLeaderboard`, `FindOrCreateLeaderboard` and
    `UploadLeaderboardScore` exports, the same export-tap mechanism rich presence
