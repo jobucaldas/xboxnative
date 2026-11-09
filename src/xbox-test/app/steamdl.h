@@ -321,8 +321,8 @@ static std::string pics_appinfo(CmSession& cm, uint32_t appid) {
       cm.end_job(id); }
     return appBuf;
 }
-static bool download_app(CmSession& cm, uint32_t appid) {
-    g_dl.cancel = false; g_dl.appid = appid; g_dl.done = 0; g_dl.total = 0; g_dl.files = 0; g_dl.filesDone = 0; g_dl.speed = 0; g_dl.state = 1; { std::lock_guard<std::mutex> l(g_dl.m); g_dl.name.clear(); g_dl.msg = "Contacting Steam..."; }
+static bool download_app(CmSession& cm, uint32_t appid, bool startCancelled = false) {
+    g_dl.cancel = startCancelled; g_dl.appid = appid; g_dl.done = 0; g_dl.total = 0; g_dl.files = 0; g_dl.filesDone = 0; g_dl.speed = 0; g_dl.state = 1; { std::lock_guard<std::mutex> l(g_dl.m); g_dl.name.clear(); g_dl.msg = "Contacting Steam..."; }
     double t0 = now_s();
     std::string partialDir; bool partial = false;   // set once a fresh install's files may exist on disk
     // install root: an existing install keeps its own; a fresh one uses the choice made on the detail page (default LocalState)
@@ -340,6 +340,7 @@ static bool download_app(CmSession& cm, uint32_t appid) {
         dl_msg(shown); g_dl.state = g_dl.cancel ? 4 : 3; return false;
     };
     logf("dl: ===== start appid %u (session: %s) =====", appid, cm.anon ? "anonymous" : "user");
+    if (g_dl.cancel) return fail("cancelled");   // a second A press landed between the queue pop and this call
     // 1. PICS access token + product info
     std::string appBuf = pics_appinfo(cm, appid);
     if (appBuf.empty()) return fail("Steam has no product info for this app (not owned?)");

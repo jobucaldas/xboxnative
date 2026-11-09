@@ -18,6 +18,7 @@
 #include <thread>
 #include <algorithm>
 #include <deque>
+#include <set>
 #include <memory>
 #include <condition_variable>
 #include <winrt/base.h>
@@ -47,6 +48,7 @@ extern "C" size_t ZSTD_decompress(void* dst, size_t dstCapacity, const void* src
 extern "C" unsigned ZSTD_isError(size_t code);
 #include "font8x8_basic.h"
 #include "launch_button.h"
+#include "detail_input.h"
 #include <xinput.h>
 #include "../uwph/display/gamepad.h"
 
@@ -509,6 +511,15 @@ static void end_download() { { std::lock_guard<std::mutex> l(g_dqm); g_fsDownloa
 static bool try_begin_delete() { std::lock_guard<std::mutex> l(g_dqm); if (g_fsDownloading || g_fsDeleting || !g_dq.empty()) return false; g_fsDeleting = true; return true; }
 static void end_delete() { { std::lock_guard<std::mutex> l(g_dqm); g_fsDeleting = false; } g_dqcv.notify_all(); }
 static bool deleting_now() { std::lock_guard<std::mutex> l(g_dqm); return g_fsDeleting; }
+static std::set<uint32_t> g_dqCancel;   // guarded by g_dqm: popped by the queue thread, cancelled before it started
+static bool cancel_queued(uint32_t appid) {   // A twice on the detail page: drop a job that has not started
+    std::lock_guard<std::mutex> l(g_dqm);
+    auto it = std::find(g_dq.begin(), g_dq.end(), appid);
+    if (it != g_dq.end()) { g_dq.erase(it); return true; }
+    if (g_fsDownloading) g_dqCancel.insert(appid);   // popped, but download_app has not reset g_dl.cancel yet
+    return false;
+}
+static bool take_queued_cancel(uint32_t appid) { std::lock_guard<std::mutex> l(g_dqm); return g_dqCancel.erase(appid) != 0; }
 static std::atomic<int> g_dlSeq{0}; static std::atomic<uint32_t> g_dlLastApp{0}; static std::atomic<bool> g_dlLastOk{false};   // bumped when a queued download finishes (detail screen auto-launch)
 static std::shared_ptr<CmSession> g_cmAnon;
 static std::shared_ptr<CmSession> session_for_download() {
@@ -545,8 +556,8 @@ static void dl_thread() {
         uint32_t id = 0;
         { std::unique_lock<std::mutex> l(g_dqm); g_dqcv.wait_for(l, std::chrono::milliseconds(500), [] { return (!g_dq.empty() && !g_fsDeleting) || g_quit; });
           if (g_quit || g_dq.empty() || g_fsDeleting) continue; id = g_dq.front(); g_dq.pop_front(); g_fsDownloading = true; }
-        auto s = session_for_download(); if (!s) { g_dl.appid = id; g_dl.state = 3; dl_msg("Cannot reach Steam"); g_dlLastApp = id; g_dlLastOk = false; end_download(); g_dlSeq++; continue; }
-        bool dok = download_app(*s, id); end_download(); g_dlLastApp = id; g_dlLastOk = dok; g_dlSeq++;
+        auto s = session_for_download(); if (!s) { g_dl.appid = id; g_dl.state = 3; dl_msg("Cannot reach Steam"); g_dlLastApp = id; g_dlLastOk = false; take_queued_cancel(id); end_download(); g_dlSeq++; continue; }
+        bool dok = download_app(*s, id, take_queued_cancel(id)); end_download(); g_dlLastApp = id; g_dlLastOk = dok; g_dlSeq++;
     }
 }
 
@@ -722,6 +733,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
 
     // ---------------------------------------------------------------- detail screen (store info + Install/Play)
     uint32_t m_dApp = 0; std::string m_dName, m_dNote; int m_dScroll = 0; std::shared_ptr<StoreInfo> m_dSi; bool m_confirmDelete = false;
+    bool m_cancelArmed = false; double m_cancelArmedT = 0;   // first A press on a downloading game (detail_input.h)
     game_library::DeleteKind m_delKind = game_library::DeleteKind::folder;   // decided when the confirm dialog opens
     InstallInfo m_dInst; double m_dInstT = -10;
     std::vector<storage_roots::Choice> m_roots; size_t m_rootSel = 0;   // install locations of the detail page (X cycles them before Install)
@@ -729,7 +741,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     std::string game_name(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return g->name; return id == 480 ? "Spacewar" : id == 3405340 ? "Megabonk" : id == 1007 ? "Steamworks SDK Redist" : ""; }
     bool owned(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return true; return false; }
     void open_detail(uint32_t id, const std::string& nm, const char* via) {
-        m_dApp = id; m_dName = nm.empty() ? "App " + std::to_string(id) : nm; m_dNote.clear(); m_dScroll = 0; m_dInstT = -10; m_confirmDelete = false;
+        m_dApp = id; m_dName = nm.empty() ? "App " + std::to_string(id) : nm; m_dNote.clear(); m_dScroll = 0; m_dInstT = -10; m_confirmDelete = false; m_cancelArmed = false;
         // After a restart that unloaded a failed game, its page says why (this session's launches show in the launch panel).
         if (g_launch.phase == 0) { std::string why = launch_report::failure(read_bytes(g_dir + L"\\launch_result.json"), id); if (!why.empty()) m_dNote = "Last launch failed: " + why; }
         m_roots.clear(); m_rootSel = 0; refresh_roots("detail open");
@@ -772,12 +784,34 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         m_dNote.clear(); logf("detail: cloud sync asked appid=%u (%s)", m_dApp, via);
         cloud_async(m_dApp, m_dInst.folder, true, prefer);
     }
-    void detail_action(const char* via) {   // A: Install or Play
+    void detail_action(const char* via) {   // A: Install, Play, or cancel a download (a second press)
         if (g_launch.phase == 1 || g_launch.phase == 3) { logf("detail: A ignored, launch attempt running"); return; }
         m_dInst = read_install(m_dApp);
         if (deleting_mine()) { logf("detail: A ignored, delete running"); return; }
-        if (m_dInst.installed) { m_dNote.clear(); logf("detail: Play pressed appid=%u (%s)", m_dApp, via); start_launch(m_dApp, m_dName, m_dInst.dir, via); return; }
-        if (dl_is_mine() || is_queued(m_dApp)) { logf("detail: A ignored, download already queued/running"); return; }
+        detail_input::State st;
+        st.installed = m_dInst.installed;
+        st.download = dl_is_mine() ? detail_input::Download::running : is_queued(m_dApp) ? detail_input::Download::queued : detail_input::Download::none;
+        st.cancelArmed = m_cancelArmed && now_s() - m_cancelArmedT <= detail_input::cancel_window;
+        switch (detail_input::press_a(st)) {
+        case detail_input::Action::cancel:   // second A: the same cleanup as any other cancelled download (steamdl.h fail())
+            m_cancelArmed = false; m_auto.app = 0;
+            if (st.download == detail_input::Download::running) { g_dl.cancel = true; logf("detail: download cancel requested (A twice, %s)", via); }
+            else {
+                bool dropped = cancel_queued(m_dApp);
+                if (!dropped && g_dl.appid == m_dApp && g_dl.state == 1) g_dl.cancel = true;   // the queue started it meanwhile
+                logf("detail: queued download cancel (A twice, %s): %s", via, dropped ? "dropped from the queue" : "already started, cancel requested");
+            }
+            return;
+        case detail_input::Action::ask_cancel:
+            m_cancelArmed = true; m_cancelArmedT = now_s(); m_dNote.clear();
+            logf("detail: A asks to cancel the download of appid=%u (press A again, %s)", m_dApp, via); return;
+        case detail_input::Action::play:
+            m_cancelArmed = false; m_dNote.clear(); logf("detail: Play pressed appid=%u (%s)", m_dApp, via); start_launch(m_dApp, m_dName, m_dInst.dir, via); return;
+        case detail_input::Action::install:
+        case detail_input::Action::back:
+            break;
+        }
+        m_cancelArmed = false;
         if (g_demo) { m_dNote = "Demo list: installing is disabled."; return; }
         if (deleting_now()) { m_dNote = "Wait for the delete to finish."; return; }
         refresh_roots("install");
@@ -787,12 +821,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         m_auto.app = m_dApp; m_auto.seq = g_dlSeq; m_dNote.clear();
         logf("detail: Install pressed appid=%u (%s) to %s - will auto-launch when finished", m_dApp, via, storage_roots::label(where).c_str()); enqueue_download(m_dApp);
     }
-    void detail_back(const char* via) {         // B: cancel a running download of this app first, else back to the library
-        if (dl_is_mine()) { g_dl.cancel = true; m_auto.app = 0; logf("detail: download cancel requested (B, %s)", via); return; }
-        if (is_queued(m_dApp)) { m_auto.app = 0; }
+    void detail_back(const char* via) {         // B: back to the library; a download keeps running in the background
+        m_cancelArmed = false;
+        m_auto.app = 0;   // the auto-launch after install belongs to the detail page
         close_detail(via);
     }
     void detail_tick(double t) {   // runs every frame on every screen: auto-launch after install, launch watchdog
+        if (m_cancelArmed && g_screen == S_DETAIL && !dl_is_mine() && !is_queued(m_dApp)) m_cancelArmed = false;   // the download ended first
         if (m_auto.app && g_dlSeq != m_auto.seq) {
             m_auto.seq = g_dlSeq;
             if (g_dlLastApp == m_auto.app) {
@@ -987,9 +1022,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             if (g_del.state == 2) { auto k = g_del.kind.load(); text(60, 548, k == game_library::DeleteKind::folder ? "Deleted. Saves were kept." : k == game_library::DeleteKind::shared ? "Removed. Shared files kept." : "Removed; folder unknown, files kept.", 2, GRN); }
             else { char b[80]; snprintf(b, sizeof b, "Deleted; %u items left behind.", g_del.progress.failed.load()); text(60, 548, b, 2, RED); }
         } else if (delDone && g_del.untouched) text(60, 548, "Delete failed. Nothing was removed.", 2, RED);
-        // main button
+        // main button: a download is cancelled by pressing A twice (detail_input.h), never by B
+        detail_input::State di; di.installed = m_dInst.installed;
+        di.download = down ? detail_input::Download::running : queued ? detail_input::Download::queued : detail_input::Download::none;
+        di.cancelArmed = m_cancelArmed && now_s() - m_cancelArmedT <= detail_input::cancel_window;
         bool retained=play_runtime::observed.load(std::memory_order_acquire)!=nullptr;
-        const char* label = launching ? (g_launch.phase==3?"GUEST RUNNING":"LAUNCHING...") : retained ? "RESTART REQUIRED" : deleting ? "DELETING..." : (down || queued) ? "INSTALLING..." : m_dInst.installed ? "PLAY" : "INSTALL";
+        const char* label = launching ? (g_launch.phase==3?"GUEST RUNNING":"LAUNCHING...") : retained ? "RESTART REQUIRED" : deleting ? "DELETING..." : detail_input::label(di);
         bool busy = launching || retained || deleting || down || queued;
         if (m_dInst.installed && !busy) {   // secondary action: delete (X)
             const char* dl2 = "X: Delete game"; int w = twidth(dl2, 3) + 30; fill(60, 590, w, 46, C3(120, 40, 40)); text(75, 601, dl2, 3, TXT);
@@ -1006,10 +1044,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             CloudStatus cs = cloud_status(m_dApp);
             if (cs.phase != 0) { std::string l1, l2; wrap2(cs.text, 38, l1, l2); uint32_t cc = cs.tone == 1 ? GRN : cs.tone == 2 ? YEL : DIM; text(60, 776, l1, 2, cc); text(60, 794, l2, 2, cc); }
         }
-        fill(60, 650, launch_button::width, 120, busy ? C3(60, 66, 78) : m_dInst.installed ? C3(40, 150, 80) : C3(45, 90, 200)); frame(60, 650, launch_button::width, 120, 8, YEL);
+        fill(60, 650, launch_button::width, 120, (down || queued) ? C3(45, 90, 200) : busy ? C3(60, 66, 78) : m_dInst.installed ? C3(40, 150, 80) : C3(45, 90, 200)); frame(60, 650, launch_button::width, 120, 8, YEL);
         auto labelLayout=launch_button::label_layout(std::char_traits<char>::length(label));
         text(60 + labelLayout.x, 650 + labelLayout.y, label, labelLayout.scale, TXT);
-        text(60 + 308 - twidth(down ? "B: cancel download" : "press A", 2) / 2, 734, down ? "B: cancel download" : "press A", 2, C3(210, 220, 240));
+        text(60 + 308 - twidth(detail_input::hint(di), 2) / 2, 734, detail_input::hint(di), 2, C3(210, 220, 240));
         // right column: meta + description
         std::vector<std::string> meta;
         auto addm = [&](const std::string& k, const std::string& v) { if (v.empty()) return; for (auto& l : wrap_lines(k + v, 46)) meta.push_back(l); };
@@ -1036,7 +1074,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 bool ok;{std::lock_guard<std::mutex> l(g_launch.m);ok=g_launch.ok;}
                 text(80, 822, g_launch.phase==3?"Guest running (playability unverified)":ok?"Guest completed (playability unverified)":retained?"Launch failed - restarting launcher to unload it":"Launch failed - nothing was left running; press A or pick another game", 3, g_launch.phase==3?YEL:ok?GRN:RED); auto ls = wrap_lines(r, 73); for (size_t i = 0; i < ls.size() && i < 4; i++) text(80, 858 + (int)i * 34, ls[i], 3, TXT); }
         }
-        text(60, 1050, "A: Install / Play   X: Delete   Y: Cloud sync   B: back   Menu: back   D-pad up/down: scroll", 2, C3(120, 130, 145));
+        text(60, 1050, "A: Install / Play / cancel download (twice)   X: Delete   Y: Cloud sync   B: back   Menu: back   D-pad up/down: scroll", 2, C3(120, 130, 145));
         if (m_confirmDelete) {
             std::string q = "Delete " + clip(m_dName, 30) + "?"; char sz[96];
             if (m_delKind == game_library::DeleteKind::shared) snprintf(sz, sizeof sz, "Its files are shared with another installed game and stay.");
@@ -1331,7 +1369,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
           if (rows > 0) { int vis = std::min(rows, 2); int thumb = std::max(40, th * vis / rows); double span = std::max(1, rows - 2);
             int py = ty + (int)((th - thumb) * std::min(1.0, std::max(0.0, m_scroll / span))); fill(tx, py, 12, thumb, C3(255, 210, 63)); }
         }
-        text(60, 1050, "D-pad: move   LB/RB: page   A: Open   View: installed / all   Y: sort   X: reload   B: cancel download / logout", 2, C3(120, 130, 145));
+        text(60, 1050, "D-pad: move   LB/RB: page   A: Open   View: installed / all   Y: sort   X: reload   B: logout", 2, C3(120, 130, 145));
         if (m_confirmLogout) {
             fill(460, 380, 1000, 300, C3(10, 12, 16)); frame(460, 380, 1000, 300, 6, C3(255, 210, 63));
             text(960 - twidth("Log out of Steam?", 5) / 2, 420, "Log out of Steam?", 5, C3(255, 255, 255));
@@ -1418,7 +1456,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             if (has(edge, GamepadButtons::A) && n) { uint32_t aid; std::string nm; { std::lock_guard<std::mutex> l(g_gm); aid = list[m_sel]->appid; nm = list[m_sel]->name; } open_detail(aid, nm, source); return; }
             if (has(edge, GamepadButtons::Y)) { int m = (g_sortMode + 1) % 3; g_sortMode = m; { std::lock_guard<std::mutex> l(g_gm); sort_games(m); } grid_position(0, 0, "Y resort"); logf("sort mode -> %s", SORT_NAMES[m]); }
             if (has(edge, GamepadButtons::X) && !g_demo) { g_reloadReq = true; grid_position(0, 0, "X library reload"); }
-            if (has(edge, GamepadButtons::B) && !g_demo) { if (g_dl.state == 1) { g_dl.cancel = true; logf("download cancel requested (B)"); } else m_confirmLogout = true; }
+            if (has(edge, GamepadButtons::B) && !g_demo) m_confirmLogout = true;   // B never stops a download
         }
     }
 

@@ -49,6 +49,8 @@ jobs:
           /tmp/steam-achievements-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/game_library_test.cpp -o /tmp/game-library-test
           /tmp/game-library-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/detail-input.cpp -o /tmp/detail-input-test
+          /tmp/detail-input-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/depot_select_test.cpp -o /tmp/depot-select-test
           /tmp/depot-select-test
           python3 src/xbox-test/app/depot-fixtures/validate-vectors.py
