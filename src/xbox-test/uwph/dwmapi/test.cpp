@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
     CHECK(!dwmapi_core::resolve("dwmapi.dll", nullptr));
     CHECK(!dwmapi_core::resolve("user32.dll", "DwmGetWindowAttribute"));
     CHECK(!dwmapi_core::resolve("dwmapi.dll", "dwmgetwindowattribute"));
-    CHECK(!dwmapi_core::resolve("dwmapi.dll", "DwmFlush"));
+    CHECK(!dwmapi_core::resolve("dwmapi.dll", "dwmflush"));
     auto get = reinterpret_cast<decltype(&DwmGetWindowAttribute)>(
         dwmapi_core::resolve("DWMAPI.DLL", "DwmGetWindowAttribute"));
     auto set = reinterpret_cast<decltype(&DwmSetWindowAttribute)>(
@@ -39,10 +39,19 @@ int main(int argc, char** argv) {
         DWM_BLURBEHIND blurBehind{};
         CHECK(blur(record, &blurBehind) == E_NOTIMPL && blur(record, nullptr) == E_INVALIDARG);
         CHECK(blur(reinterpret_cast<HWND>(0x9999), &blurBehind) == E_HANDLE);
-        CHECK(dwmapi_core::native_safe("DwmGetColorizationColor") && dwmapi_core::native_safe("DwmFlush"));
+        CHECK(dwmapi_core::native_safe("DwmGetColorizationColor") && !dwmapi_core::native_safe("DwmFlush"));
+        // DwmFlush: no DWM compositor exists here, so the call refuses instead
+        // of claiming a frame was composited. Wine 10 returns S_OK (a stub);
+        // the console's dwmapi.dll does not export the name at all.
+        auto flush = reinterpret_cast<HRESULT (WINAPI*)(void)>(dwmapi_core::resolve("dwmapi.dll", "DwmFlush"));
+        CHECK(flush && flush() == E_NOTIMPL);
         CHECK(!dwmapi_core::native_safe("DwmExtendFrameIntoClientArea") && !dwmapi_core::resolve("dwmapi.dll", "DwmExtendFrameIntoClientArea"));
     }
     HMODULE library = LoadLibraryW(L"dwmapi.dll"); CHECK(library);
+    // Wine's DwmFlush is an unconditional S_OK stub; this route deliberately
+    // does not copy it, so the two answers differ on a host that has the export.
+    if (auto wine_flush = reinterpret_cast<HRESULT (WINAPI*)(void)>(GetProcAddress(library, "DwmFlush")))
+        CHECK(wine_flush() == S_OK && reinterpret_cast<HRESULT (WINAPI*)(void)>(dwmapi_core::resolve("dwmapi.dll", "DwmFlush"))() == E_NOTIMPL);
     auto oracle = reinterpret_cast<decltype(&DwmGetWindowAttribute)>(GetProcAddress(library, "DwmGetWindowAttribute"));
     CHECK(oracle);
     for (HWND bad : {HWND(nullptr), reinterpret_cast<HWND>(0x9999)}) {

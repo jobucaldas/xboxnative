@@ -60,9 +60,16 @@ inline HRESULT WINAPI enable_blur_behind(HWND window, const void* blur) {
     if (FAILED(result)) return result;
     return blur ? E_NOTIMPL : E_INVALIDARG;
 }
+// DwmFlush waits until the DWM composition queue has consumed the pending
+// updates. This backend has no DWM compositor: guest presents go straight to
+// the CoreWindow swapchain, which paces itself. There is nothing to flush, so
+// reporting S_OK would tell the caller its frame reached a compositor that does
+// not exist. Wine 10's unconditional S_OK is the same stub as its setter, not a
+// behavior to copy; the console's dwmapi.dll does not export the name at all.
+inline HRESULT WINAPI flush() { return E_NOTIMPL; }
 // Window-free DWM queries that keep the real system export (no HWND reaches it).
 inline bool native_safe(const char* name) {
-    return name && (!strcmp(name, "DwmGetColorizationColor") || !strcmp(name, "DwmFlush"));
+    return name && !strcmp(name, "DwmGetColorizationColor");
 }
 inline uintptr_t resolve(const char* dll, const char* name, IsWindow valid = nullptr,
                          WindowRect rect = nullptr, WindowLong style = nullptr) {
@@ -74,6 +81,7 @@ inline uintptr_t resolve(const char* dll, const char* name, IsWindow valid = nul
     if (!strcmp(name, "DwmSetWindowAttribute")) return reinterpret_cast<uintptr_t>(&set_attribute);
     if (!strcmp(name, "DwmIsCompositionEnabled")) return reinterpret_cast<uintptr_t>(&is_composition_enabled);
     if (!strcmp(name, "DwmEnableBlurBehindWindow")) return reinterpret_cast<uintptr_t>(&enable_blur_behind);
+    if (!strcmp(name, "DwmFlush")) return reinterpret_cast<uintptr_t>(&flush);
     return 0;
 }
 }

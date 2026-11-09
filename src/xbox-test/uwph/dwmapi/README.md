@@ -15,6 +15,13 @@ unsupported DWM policies. There is no DWM renderer or policy storage for guest
 records. Wine 10's setter is explicitly an unconditional-success stub; copying
 it would falsely advertise implemented behavior.
 
+`DwmFlush` has no composition queue to wait on: guest presents go to the
+CoreWindow swapchain, which paces itself, and this backend has no DWM
+compositor. It returns `E_NOTIMPL` for the same reason the setter does — Wine
+10's `S_OK` is the same unconditional stub, and the console's `dwmapi.dll` does
+not export the name at all (Fields of Mistria calls it). `DwmGetColorizationColor`
+stays on the native route since no HWND reaches it.
+
 Run `WINEPREFIX=<prefix> bash xbox-test/uwph/dwmapi/test.sh`. Invalid HWND get
 calls compare typed ABI/results/untouched output against Wine 10. Remaining
 checks use host callbacks representing guest records: negative screen origins,
