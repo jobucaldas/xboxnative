@@ -41,6 +41,47 @@ int main(){
     CHECK(proxy->QueryInterface(__uuidof(IUnknown),nullptr)==E_POINTER);
     CHECK(proxy->QueryInterface(__uuidof(IDXGIFactory),&queried)==S_OK&&queried==proxy);
     static_cast<IDXGIFactory*>(queried)->Release();
+    // A D3D12 guest asks for a factory at IDXGIFactory4 and QIs higher levels
+    // for GPU preference and feature answers. Each level is answered only when
+    // the real factory has it, and the adapter-returning entries hand back the
+    // wrapping adapter (virtual output), never the real one.
+    for(REFIID id:{__uuidof(IDXGIFactory3),__uuidof(IDXGIFactory4),__uuidof(IDXGIFactory5),
+                   __uuidof(IDXGIFactory6),__uuidof(IDXGIFactory7)}){
+        void* real=nullptr;bool realHas=SUCCEEDED(native->QueryInterface(id,&real))&&real;
+        if(real)static_cast<IUnknown*>(real)->Release();
+        queried=nullptr;
+        HRESULT level=proxy->QueryInterface(id,&queried);
+        CHECK(realHas?SUCCEEDED(level)&&queried:level==E_NOINTERFACE&&!queried);
+        if(queried)static_cast<IUnknown*>(queried)->Release();
+    }
+    {
+        IDXGIFactory4* four=nullptr;
+        if(SUCCEEDED(proxy->QueryInterface(__uuidof(IDXGIFactory4),(void**)&four))) {
+            LUID luid{};IDXGIAdapter1* realAdapter=nullptr;
+            IDXGIFactory4* realFour=nullptr;
+            native->QueryInterface(__uuidof(IDXGIFactory4),(void**)&realFour);
+            if(realFour) {
+                if(SUCCEEDED(realFour->EnumAdapters1(0,(IDXGIAdapter1**)&realAdapter))&&realAdapter) {
+                    DXGI_ADAPTER_DESC desc{};realAdapter->GetDesc(&desc);luid=desc.AdapterLuid;realAdapter->Release();
+                    IDXGIAdapter* wrapped=nullptr;IDXGIAdapter* realOne=nullptr;
+                    HRESULT hr=four->EnumAdapterByLuid(luid,__uuidof(IDXGIAdapter),(void**)&wrapped);
+                    CHECK(SUCCEEDED(hr)&&wrapped);
+                    if(SUCCEEDED(hr)&&wrapped) {
+                        // The wrapper answers the private real-adapter query and
+                        // reports the virtual output; the real one does neither.
+                        CHECK(SUCCEEDED(wrapped->QueryInterface(corewindow_dxgi::realAdapterId,(void**)&realOne))&&realOne);
+                        if(realOne)realOne->Release();
+                        IDXGIOutput* output=nullptr;
+                        CHECK(SUCCEEDED(wrapped->EnumOutputs(0,&output))&&output);
+                        if(output)output->Release();
+                        wrapped->Release();
+                    }
+                }
+                realFour->Release();
+            }
+            four->Release();
+        }
+    }
     DXGI_SWAP_CHAIN_DESC1 desc{};desc.Width=1920;desc.Height=1080;
     desc.Format=DXGI_FORMAT_B8G8R8A8_UNORM;desc.SampleDesc.Count=1;
     desc.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;desc.BufferCount=2;

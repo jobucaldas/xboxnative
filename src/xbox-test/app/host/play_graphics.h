@@ -1,5 +1,6 @@
 #pragma once
 #include <dxgi1_2.h>
+#include <d3d12.h>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -101,21 +102,50 @@ static HRESULT STDMETHODCALLTYPE classCreateForHwnd(IDXGIFactory2* self,IUnknown
         return throughAdapter(self,[&](corewindow_dxgi::Factory* proxy){return proxy->CreateSwapChainForHwnd(device,window,desc,fullscreen,output,out);});
     auto c=classOf(self);return c.createForHwnd?((CreateForHwndFn)c.createForHwnd)(self,device,window,desc,fullscreen,output,out):E_FAIL;
 }
+// A D3D12 device is not an IDXGIDevice, so its factory is reached differently:
+// the guest creates it with CreateDXGIFactory2 (already routed) or asks the
+// device's adapter LUID for it. Either way the factory class is the one the
+// native dxgi created, and its three entries are redirected here.
+static void adopt_factory(IDXGIFactory2* factory) {
+    if(!factory||!hostWindow)return;
+    std::lock_guard<std::mutex> lock(classesM);
+    void** vtable=*(void***)factory;bool known=false;
+    for(auto& c:classes) known|=c.vtable==vtable;
+    DWORD old=0;
+    if(!known&&VirtualProtect(vtable+8,8*8,PAGE_READWRITE,&old)) {
+        classes.push_back({vtable,vtable[8],vtable[10],vtable[15]});
+        vtable[8]=(void*)&classAssociate;vtable[10]=(void*)&classCreateSwapChain;vtable[15]=(void*)&classCreateForHwnd;
+        VirtualProtect(vtable+8,8*8,old,&old);
+        if(event)event("guest device's DXGI factory: guest-window swapchains go through the CoreWindow adapter");
+    }
+}
+// The factory a D3D12 device's adapter belongs to, adopted for guest windows.
+static void adopt_factory_of(IUnknown* device) {
+    if(!device||!hostWindow)return;
+    ID3D12Device* d3d=nullptr;IDXGIFactory2* factory=nullptr;
+    if(SUCCEEDED(device->QueryInterface(__uuidof(ID3D12Device),(void**)&d3d))&&d3d) {
+        LUID luid=d3d->GetAdapterLuid();
+        IDXGIFactory4* four=nullptr;
+        using Create=HRESULT(WINAPI*)(UINT,REFIID,void**);
+        auto create=(Create)mlp::resolve("dxgi.dll","CreateDXGIFactory2",0);
+        if(create&&SUCCEEDED(create(0,__uuidof(IDXGIFactory4),(void**)&four))&&four) {
+            IDXGIAdapter1* adapter=nullptr;
+            if(SUCCEEDED(four->EnumAdapterByLuid(luid,__uuidof(IDXGIAdapter1),(void**)&adapter))&&adapter) {
+                adapter->GetParent(__uuidof(IDXGIFactory2),(void**)&factory);
+                adapter->Release();
+            }
+            four->Release();
+        }
+        d3d->Release();
+    }
+    if(factory){adopt_factory(factory);factory->Release();}
+}
 static void adopt_device(IUnknown* device) {
     if(!device||!hostWindow)return;
     IDXGIDevice* dxgi=nullptr;IDXGIAdapter* adapter=nullptr;IDXGIFactory2* factory=nullptr;
     if(SUCCEEDED(device->QueryInterface(__uuidof(IDXGIDevice),(void**)&dxgi))&&SUCCEEDED(dxgi->GetAdapter(&adapter))&&
        SUCCEEDED(adapter->GetParent(__uuidof(IDXGIFactory2),(void**)&factory))) {
-        std::lock_guard<std::mutex> lock(classesM);
-        void** vtable=*(void***)factory;bool known=false;
-        for(auto& c:classes) known|=c.vtable==vtable;
-        DWORD old=0;
-        if(!known&&VirtualProtect(vtable+8,8*8,PAGE_READWRITE,&old)) {
-            classes.push_back({vtable,vtable[8],vtable[10],vtable[15]});
-            vtable[8]=(void*)&classAssociate;vtable[10]=(void*)&classCreateSwapChain;vtable[15]=(void*)&classCreateForHwnd;
-            VirtualProtect(vtable+8,8*8,old,&old);
-            if(event)event("guest device's DXGI factory: guest-window swapchains go through the CoreWindow adapter");
-        }
+        adopt_factory(factory);
     }
     if(factory)factory->Release();if(adapter)adapter->Release();if(dxgi)dxgi->Release();
 }
