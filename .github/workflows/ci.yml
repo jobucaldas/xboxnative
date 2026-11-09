@@ -155,4 +155,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-i686
       - name: x86 execution core (hardware-compared ALU, faults, thunks, owned i686 fixture)
         run: bash src/xbox-test/app/tests/x86-core.sh
+      - name: "x86 guest surface (mingw CRT program through the interpreter: printf, heap, TLS, VirtualAlloc)"
+        run: bash src/xbox-test/app/tests/x86-guest.sh
   # TODO: on-device sections of src/xbox-test/smoke-all.sh need a console and cannot run in GitHub Actions.

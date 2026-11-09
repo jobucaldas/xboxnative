@@ -1,0 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Embeds fixture-crt.manifest as the fixture's application manifest. The
+// supportedOS entry makes GetVersionEx report 10.0 under real Windows (and
+// Wine), matching what the console reports and what the interpreter answers.
+1 24 "fixture-crt.manifest"
