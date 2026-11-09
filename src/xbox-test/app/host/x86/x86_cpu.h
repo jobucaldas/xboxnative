@@ -804,26 +804,30 @@ struct Cpu {
             case 6: setst(rm, st(0) / st(rm)); fpu.pop(); return;  // fdivrp
             case 7: setst(rm, st(rm) / st(0)); fpu.pop(); return;  // fdivp
             default: unsupported("de /n"); }
-        case 0xDA: switch (m & 0x38) {
-            case 0x00: if (f(CF)) setst(0, st(rm)); return;  // fcmovb
-            case 0x08: if (f(ZF)) setst(0, st(rm)); return;  // fcmove
-            case 0x10: if (f(CF) || f(ZF)) setst(0, st(rm)); return;  // fcmovbe
-            case 0x18: if (f(PF)) setst(0, st(rm)); return;  // fcmovu
+        case 0xDA: switch (rno) {
+            case 0: if (f(CF)) setst(0, st(rm)); return;  // fcmovb
+            case 1: if (f(ZF)) setst(0, st(rm)); return;  // fcmove
+            case 2: if (f(CF) || f(ZF)) setst(0, st(rm)); return;  // fcmovbe
+            case 3: if (f(PF)) setst(0, st(rm)); return;  // fcmovu
+            case 5: if (rm == 1) { fpu.compare(st(0), st(1)); fpu.pop(); fpu.pop(); return; }  // fucompp
+                unsupported("da /5");
             default: unsupported("da /n"); }
-        case 0xDB: switch (m & 0x38) {
-            case 0x00: if (!f(CF)) setst(0, st(rm)); return;  // fcmovnb
-            case 0x08: if (!f(ZF)) setst(0, st(rm)); return;  // fcmovne
-            case 0x10: if (!f(CF) && !f(ZF)) setst(0, st(rm)); return;  // fcmovnbe
-            case 0x18: if (!f(PF)) setst(0, st(rm)); return;  // fcmovnu
-            case 0x20: fpu.sw &= ~uint16_t(0x7f); return;  // fnclex
-            case 0x28: if (rm == 3) { fpu.init(); return; } unsupported("db /5");  // fninit
-            case 0x30: fpu.compare(st(0), st(rm)); x87_flags(); return;  // fucomi
-            case 0x38: fpu.compare(st(0), st(rm)); x87_flags(); return;  // fcomi
+        case 0xDB: switch (rno) {
+            case 0: if (!f(CF)) setst(0, st(rm)); return;  // fcmovnb
+            case 1: if (!f(ZF)) setst(0, st(rm)); return;  // fcmovne
+            case 2: if (!f(CF) && !f(ZF)) setst(0, st(rm)); return;  // fcmovnbe
+            case 3: if (!f(PF)) setst(0, st(rm)); return;  // fcmovnu
+            // DB E2 fnclex, DB E3 fninit; DB E0/E1/E4-E7 are the obsolete
+            // FENI/FDISI/FSETPM, which do nothing on anything since a 387.
+            case 4: if (rm == 2) fpu.sw &= ~uint16_t(0x7f); else if (rm == 3) fpu.init(); return;
+            case 5: fpu.compare(st(0), st(rm)); x87_flags(); return;  // fucomi st, st(i)
+            case 6: fpu.compare(st(0), st(rm)); x87_flags(); return;  // fcomi st, st(i)
             default: unsupported("db /n"); }
-        case 0xDF: switch (m & 0x38) {
-            case 0x20: reg[EAX] = (reg[EAX] & 0xffff0000u) | (fpu.status() & 0xffff); return;  // fnstsw ax
-            case 0x30: fpu.compare(st(0), st(rm)); x87_flags(); fpu.pop(); return;  // fucomip
-            case 0x38: fpu.compare(st(0), st(rm)); x87_flags(); fpu.pop(); return;  // fcomip
+        case 0xDF: switch (rno) {
+            case 4: if (rm == 0) { reg[EAX] = (reg[EAX] & 0xffff0000u) | (fpu.status() & 0xffff); return; }  // fnstsw ax
+                unsupported("df /4");
+            case 5: fpu.compare(st(0), st(rm)); x87_flags(); fpu.pop(); return;  // fucomip st, st(i)
+            case 6: fpu.compare(st(0), st(rm)); x87_flags(); fpu.pop(); return;  // fcomip st, st(i)
             default: unsupported("df /n"); }
         case 0xDD: switch (rno) {
             case 0: fpu.empty[fpu.idx(rm)] = true; return;  // ffree
@@ -842,10 +846,16 @@ struct Cpu {
             case 0x20: setst(0, -st(0)); return;             // fchs
             case 0x21: setst(0, std::fabs(st(0))); return;   // fabs
             case 0x24: fpu.compare(st(0), 0.0L); return;     // ftst
-            case 0x25: {  // fxam: C3=C2=C1=0, C0=1 for NaN/unsupported; a value of 0 sets C3
-                Wide v = st(0); fpu.sw &= ~uint16_t(0x4700);
-                if (std::isnan(v)) fpu.sw |= 0x0100;
-                else if (v == 0) fpu.sw |= 0x4000;
+            case 0x25: {  // fxam: C1 = sign, C0/C2/C3 = class (Intel's table)
+                Wide v = st(0);
+                fpu.sw &= ~uint16_t(0x4700);
+                if (std::signbit(v)) fpu.sw |= 0x0200;          // C1
+                if (fpu.is_empty(0)) fpu.sw |= 0x4100;          // empty:    C3 C0
+                else if (std::isnan(v)) fpu.sw |= 0x0100;       // NaN:      C0
+                else if (std::isinf(v)) fpu.sw |= 0x0500;       // infinity: C2 C0
+                else if (v == 0) fpu.sw |= 0x4000;              // zero:     C3
+                else if (std::fpclassify(v) == FP_SUBNORMAL) fpu.sw |= 0x4400;  // denormal: C3 C2
+                else fpu.sw |= 0x0400;                          // normal:   C2
                 return; }
             case 0x28: fpu.push(1.0L); return;               // fld1
             case 0x29: fpu.push(3.32192809488736234787L); return;  // fldl2t
