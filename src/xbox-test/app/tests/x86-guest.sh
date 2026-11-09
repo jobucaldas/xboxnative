@@ -29,12 +29,13 @@ body=$(sed '/^guest: /d' <<<"$out")
 want='x86-crt: start
 x86-crt: stdio ok
 x86-crt: printf -42|42|beef|BEEF|10|Z|str| 3.14|-1234567|78187493530
+x86-crt: sprintf 7/hi/1.5 abcde
 x86-crt: heap ok
 x86-crt: strings ok
 x86-crt: varargs 60 4.00
 x86-crt: kernel32 ok
 x86-crt: sync ok
-x86-crt: checks 26 failed 0'
+x86-crt: checks 34 failed 0'
 [[ $body == "$want" ]] || { echo "X86-GUEST FAIL: stdout differs"; diff <(echo "$want") <(echo "$body") || true; exit 1; }
 echo "X86-GUEST PASS: mingw CRT program (printf with doubles, heap, qsort, TLS, VirtualAlloc) ran in the interpreter to exit 42"
 if [[ ${1:-} == --wine ]]; then

@@ -117,34 +117,54 @@ struct Guest {
     uint32_t last_error() const { return mem.r32(TEB_ADDR + 0x34); }
     void set_last_error(uint32_t v) { mem.w32(TEB_ADDR + 0x34, v); }
     // A FILE* is one of our three iob entries; anything else is a bad handle.
+    // The index is the C stream number: 0 stdin, 1 stdout, 2 stderr.
     int file_index(uint32_t f) const {
         if (f >= iob_addr && f < iob_addr + 3 * 32 && (f - iob_addr) % 32 == 0) return int((f - iob_addr) / 32);
         return -1;
     }
     uint32_t file_ptr(int i) const { return iob_addr + uint32_t(i) * 32; }
+    // `which` is a C stream number (0/1/2), the same one file_index returns, so
+    // stderr reaches host.err on both the FILE* and the WriteFile path.
     void emit(int which, const std::string& s) {
-        (which == 0 ? host.err : host.out) += s;
+        (which == 2 ? host.err : host.out) += s;
         if (host.tee) host.tee(s);
     }
     void write_file(int which, const std::string& s) { emit(which, s); }
     // printf-family core. `next` yields the next 32-bit argument slot: the guest
     // stack for printf/fprintf/sprintf, or a walk over the guest va_list for the
-    // v* forms (on i386 a va_list is a char* to the first vararg). A double
-    // occupies two consecutive 4-byte slots and, per the i386 ABI, starts at an
-    // 8-byte aligned address, so `align8` moves the reader to the next aligned
-    // slot before a double is fetched (gcc pushes varargs at absolute
-    // 8-byte alignment; reading them unaligned yields a wrong value, not a fault).
-    struct FmtArgs { std::function<uint32_t()> next; std::function<void()> align8; };
+    // v* forms (on i386 a va_list is a char* to the first vararg). The i386
+    // calling convention aligns every argument to 4 bytes only: a double is two
+    // consecutive slots wherever they fall, with no padding before it (mingw's
+    // va_arg and msvcrt's own printf both read it that way; measured, not
+    // assumed). A `long long`/`__int64` is likewise two slots, low dword first.
+    struct FmtArgs { std::function<uint32_t()> next; };
     std::string format(FmtArgs a, const std::string& fmt);
-    int vformat(uint32_t fmt_ptr, uint32_t argp, uint32_t out_ptr, int cap, bool append_nul);
+    // Copy a formatted result into guest memory. A negative `cap` means
+    // unbounded (sprintf); 0 writes nothing (snprintf with a zero size). With
+    // append_nul the result is NUL-terminated inside cap. Returns the full
+    // length the format would have produced, as C99 snprintf does.
+    int store(const std::string& s, uint32_t out_ptr, int cap, bool append_nul);
     std::string format_stack(Cpu& c, const std::string& fmt, unsigned first_arg) {
         unsigned ai = first_arg;
-        return format({[&c, &ai]() { return c.arg(ai++); },
-                       [&c, &ai]() { if ((c.reg[ESP] + 4 + 4 * ai) & 7) ++ai; }}, fmt);
+        return format({[&c, &ai]() { return c.arg(ai++); }}, fmt);
     }
     std::string format_va(const std::string& fmt, uint32_t& ap) {
-        return format({[this, &ap]() { uint32_t v = mem.r32(ap); ap += 4; return v; },
-                       [&ap]() { ap = (ap + 7u) & ~7u; }}, fmt);
+        return format({[this, &ap]() { uint32_t v = mem.r32(ap); ap += 4; return v; }}, fmt);
+    }
+    // sprintf/_snprintf/snprintf take their varargs on the stack, not a va_list:
+    // only the v* forms walk a pointer.
+    int format_stack_to(Cpu& c, uint32_t fmt_ptr, unsigned first_arg, uint32_t out_ptr, int cap, bool append_nul) {
+        return store(format_stack(c, str(fmt_ptr), first_arg), out_ptr, cap, append_nul);
+    }
+    int format_va_to(uint32_t fmt_ptr, uint32_t argp, uint32_t out_ptr, int cap, bool append_nul) {
+        return store(format_va(str(fmt_ptr), argp), out_ptr, cap, append_nul);
+    }
+    // SYSTEMTIME is eight WORDs (year, month, dayOfWeek, day, hour, minute,
+    // second, milliseconds), 16 bytes total, so every field is a 2-byte store.
+    void fill_system_time(uint32_t p) {
+        if (!p) return;
+        static const uint16_t f[8] = {2026, 11, 0, 9, 12, 0, 0, 0};
+        for (unsigned i = 0; i < 8; ++i) mem.w(p + i * 2, f[i], 2);
     }
     void run_atexit(Cpu& c);
     void do_exit(Cpu& c, uint32_t code);
@@ -215,9 +235,12 @@ inline std::string Guest::format(FmtArgs a, const std::string& fmt) {
         char conv = fmt[i++];
         switch (conv) {
         case 'd': case 'i': case 'u': case 'o': case 'x': case 'X': {
+            // On Win32 `long` is 32 bits, so %l is one slot; %ll and %I64 are
+            // two (low dword first). %z is size_t, 32 bits on i386.
             uint64_t v = next();
-            bool wide = len == LEN_LL || len == LEN_I64 || len == LEN_L || len == LEN_Z;
-            if (!wide) v &= 0xffffffffu;
+            bool wide = len == LEN_LL || len == LEN_I64;
+            if (wide) v |= uint64_t(next()) << 32;
+            else v &= 0xffffffffu;
             if (len == LEN_H) v &= 0xffffu;
             if (len == LEN_HH) v &= 0xffu;
             bool neg = false; std::string body;
@@ -252,11 +275,11 @@ inline std::string Guest::format(FmtArgs a, const std::string& fmt) {
             break; }
         case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': {
             // A double vararg occupies two 32-bit stack slots (little-endian: low
-            // dword first). long double is 12 bytes on i386, but no CRT printf
-            // path in a game passes one without an explicit cast, and MSVC's
-            // %Lf is not used by the fixtures; treat it as double and say so.
+            // dword first) with no alignment padding on i386. long double is 12
+            // bytes on i386, but no CRT printf path in a game passes one without
+            // an explicit cast, and MSVC's %Lf is not used by the fixtures; treat
+            // it as double and say so.
             double v;
-            a.align8();
             uint32_t lo = next(), hi = next(); uint64_t bits = uint64_t(hi) << 32 | lo; std::memcpy(&v, &bits, 8);
             char spec[32]; int k = 0;
             spec[k++] = '%';
@@ -282,15 +305,15 @@ inline std::string Guest::format(FmtArgs a, const std::string& fmt) {
     return out;
 }
 
-inline int Guest::vformat(uint32_t fmt_ptr, uint32_t argp, uint32_t out_ptr, int cap, bool append_nul) {
-    std::string s = format_va(str(fmt_ptr), argp);
+inline int Guest::store(const std::string& s, uint32_t out_ptr, int cap, bool append_nul) {
     int n = int(s.size());
-    if (cap > 0) {
-        int room = append_nul ? cap - 1 : cap;
+    if (cap != 0) {
+        // cap < 0 is an unbounded buffer: every byte fits, plus the terminator.
+        int room = cap < 0 ? n : (append_nul ? cap - 1 : cap);
         if (room < 0) room = 0;
         int put = n < room ? n : room;
         if (put > 0) mem.write_bytes(out_ptr, s.data(), uint32_t(put));
-        if (append_nul && cap > 0) mem.w8(out_ptr + uint32_t(put), 0);
+        if (append_nul) mem.w8(out_ptr + uint32_t(put), 0);
     }
     return n;
 }
@@ -348,12 +371,13 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetModuleHandleW", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         if (!c.arg(0)) return image_base;
         return 0; });
+    // (hModule, lpFilename, nSize): arg(0) is the module handle, not the buffer.
     reg.add("kernel32.dll", "GetModuleFileNameA", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
-        uint32_t buf = c.arg(0), n = c.arg(1); if (!buf || !n) return 0;
+        uint32_t buf = c.arg(1), n = c.arg(2); if (!buf || !n) return 0;
         uint32_t put = uint32_t(exe_path.size()) < n ? uint32_t(exe_path.size()) : n - 1;
         mem.write_bytes(buf, exe_path.data(), put); mem.w8(buf + put, 0); return put; });
     reg.add("kernel32.dll", "GetModuleFileNameW", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
-        uint32_t buf = c.arg(0), n = c.arg(1); if (!buf || !n) return 0;
+        uint32_t buf = c.arg(1), n = c.arg(2); if (!buf || !n) return 0;
         std::u16string w(exe_path.begin(), exe_path.end());
         uint32_t put = uint32_t(w.size()) < n ? uint32_t(w.size()) : n - 1;
         for (uint32_t i = 0; i < put; ++i) { mem.w8(buf + i * 2, uint8_t(w[i])); mem.w8(buf + i * 2 + 1, uint8_t(w[i] >> 8)); }
@@ -366,14 +390,26 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "UnhandledExceptionFilter", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "RaiseException", Conv::Stdcall, 4, [](Cpu& c) -> uint32_t {
         throw Fault(FaultKind::Unsupported, c.eip, c.arg(0), "RaiseException (guest SEH not implemented)"); });
-    reg.add("kernel32.dll", "GetVersion", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0x4A650A00u; });
+    // GetVersion packs major in the low byte and minor in the next: 10.0.19045.
+    reg.add("kernel32.dll", "GetVersion", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0x4A65000Au; });
     reg.add("kernel32.dll", "GetVersionExA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t p = c.arg(0); if (!p) return 0;
         uint32_t cb = mem.r32(p); if (cb < 148) { set_last_error(122); return 0; }
         mem.w32(p + 4, 10); mem.w32(p + 8, 0); mem.w32(p + 12, 19045); mem.w32(p + 16, 2);
-        mem.w32(p + 20, 0); std::string cs = "Service Pack 0";
-        mem.write_bytes(p + 24, cs.c_str(), uint32_t(cs.size() + 1));
-        mem.w32(p + 276 - 4, 0); return 1; });
+        // OSVERSIONINFOA: the five dwords, then szCSDVersion[128] at offset 20,
+        // so the struct is 148 bytes. OSVERSIONINFOEXA appends wServicePackMajor,
+        // wServicePackMinor, wSuiteMask, wProductType and wReserved (156 bytes).
+        // Nothing is written past the size the caller declared.
+        std::string cs = "Service Pack 0";
+        mem.write_bytes(p + 20, cs.c_str(), uint32_t(cs.size() + 1));
+        if (cb >= 156) {
+            mem.w(p + 148, 0, 2);  // wServicePackMajor
+            mem.w(p + 150, 0, 2);  // wServicePackMinor
+            mem.w(p + 152, 0, 2);  // wSuiteMask
+            mem.w(p + 154, 1, 2);  // wProductType: VER_NT_WORKSTATION
+            mem.w8(p + 155, 0);    // wReserved
+        }
+        return 1; });
     reg.add("kernel32.dll", "IsProcessorFeaturePresent", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
         return c.arg(0) == 10 ? 1u : 0u; });  // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
     reg.add("kernel32.dll", "GetACP", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 1252; });
@@ -479,13 +515,9 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetSystemTimeAsFileTime", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t p = c.arg(0); if (p) { mem.w32(p, 0x80000000u); mem.w32(p + 4, 0x01D00000u); } return 0; });
     reg.add("kernel32.dll", "GetSystemTime", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
-        uint32_t p = c.arg(0); if (!p) return 0;
-        mem.w32(p + 0, 2026); mem.w32(p + 2, 11); mem.w32(p + 4, 0); mem.w32(p + 6, 9);
-        mem.w32(p + 8, 12); mem.w32(p + 10, 0); mem.w32(p + 12, 0); mem.w32(p + 14, 0); return 0; });
+        fill_system_time(c.arg(0)); return 0; });
     reg.add("kernel32.dll", "GetLocalTime", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
-        uint32_t p = c.arg(0); if (!p) return 0;
-        mem.w32(p + 0, 2026); mem.w32(p + 2, 11); mem.w32(p + 4, 0); mem.w32(p + 6, 9);
-        mem.w32(p + 8, 12); mem.w32(p + 10, 0); mem.w32(p + 12, 0); mem.w32(p + 14, 0); return 0; });
+        fill_system_time(c.arg(0)); return 0; });
     reg.add("kernel32.dll", "GetSystemInfo", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t p = c.arg(0); if (!p) return 0;
         mem.w32(p + 0, 0); mem.w32(p + 4, 4096); mem.w32(p + 8, 0x10000); mem.w32(p + 12, 0x7FFE0000u);
@@ -500,7 +532,7 @@ inline void Guest::register_all() {
         if (handle != Host::H_STDOUT && handle != Host::H_STDERR) { set_last_error(6); return 0; }  // ERROR_INVALID_HANDLE
         if (n > (1u << 24)) { set_last_error(87); return 0; }
         auto bytes = mem.read_bytes(buf, n);
-        emit(handle == Host::H_STDOUT ? 1 : 0, std::string(bytes.begin(), bytes.end()));
+        emit(handle == Host::H_STDOUT ? 1 : 2, std::string(bytes.begin(), bytes.end()));
         if (written) mem.w32(written, n);
         return 1; });
     reg.add("kernel32.dll", "GetFileType", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
@@ -609,12 +641,16 @@ inline void Guest::register_all() {
     reg.add("msvcrt.dll", "strcat", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
         std::string a = str(c.arg(0)), b = str(c.arg(1)); a += b;
         mem.write_bytes(c.arg(0), a.c_str(), uint32_t(a.size() + 1)); return c.arg(0); });
+    // strchr(s, 0) returns the terminator, so the search covers the NUL that
+    // read_cstr drops.
     reg.add("msvcrt.dll", "strchr", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
         std::string s = str(c.arg(0)); char ch = char(c.arg(1));
-        size_t p = s.find(ch); return p == std::string::npos ? 0u : c.arg(0) + uint32_t(p); });
+        size_t p = ch ? s.find(ch) : s.size();
+        return p == std::string::npos ? 0u : c.arg(0) + uint32_t(p); });
     reg.add("msvcrt.dll", "strrchr", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
         std::string s = str(c.arg(0)); char ch = char(c.arg(1));
-        size_t p = s.rfind(ch); return p == std::string::npos ? 0u : c.arg(0) + uint32_t(p); });
+        size_t p = ch ? s.rfind(ch) : s.size();
+        return p == std::string::npos ? 0u : c.arg(0) + uint32_t(p); });
     reg.add("msvcrt.dll", "strstr", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
         std::string s = str(c.arg(0)), n = str(c.arg(1));
         size_t p = s.find(n); return p == std::string::npos ? 0u : c.arg(0) + uint32_t(p); });
@@ -657,16 +693,18 @@ inline void Guest::register_all() {
         int fi = file_index(c.arg(0)); if (fi < 0) return 0xFFFFFFFFu;
         uint32_t ap = c.arg(2);  // an i386 va_list is a pointer to the first vararg
         std::string s = format_va(str(c.arg(1)), ap); emit(fi, s); return uint32_t(s.size()); });
+    // The non-v forms take their varargs on the stack (first one at arg 2 or 3);
+    // only the v* forms receive a va_list pointer.
     reg.add("msvcrt.dll", "sprintf", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
-        return uint32_t(vformat(c.arg(1), c.arg(2), c.arg(0), 0x7fffffff, true)); });
+        return uint32_t(format_stack_to(c, c.arg(1), 2, c.arg(0), -1, true)); });
     reg.add("msvcrt.dll", "_snprintf", Conv::Cdecl, 4, [this](Cpu& c) -> uint32_t {
-        return uint32_t(vformat(c.arg(2), c.arg(3), c.arg(0), int(c.arg(1)), true)); });
+        return uint32_t(format_stack_to(c, c.arg(2), 3, c.arg(0), int(c.arg(1)), true)); });
     reg.add("msvcrt.dll", "snprintf", Conv::Cdecl, 4, [this](Cpu& c) -> uint32_t {
-        return uint32_t(vformat(c.arg(2), c.arg(3), c.arg(0), int(c.arg(1)), true)); });
+        return uint32_t(format_stack_to(c, c.arg(2), 3, c.arg(0), int(c.arg(1)), true)); });
     reg.add("msvcrt.dll", "vsprintf", Conv::Cdecl, 3, [this](Cpu& c) -> uint32_t {
-        return uint32_t(vformat(c.arg(1), c.arg(2), c.arg(0), 0x7fffffff, true)); });
+        return uint32_t(format_va_to(c.arg(1), c.arg(2), c.arg(0), -1, true)); });
     reg.add("msvcrt.dll", "_vsnprintf", Conv::Cdecl, 4, [this](Cpu& c) -> uint32_t {
-        return uint32_t(vformat(c.arg(2), c.arg(3), c.arg(0), int(c.arg(1)), true)); });
+        return uint32_t(format_va_to(c.arg(2), c.arg(3), c.arg(0), int(c.arg(1)), true)); });
     reg.add("msvcrt.dll", "puts", Conv::Cdecl, 1, [this](Cpu& c) -> uint32_t {
         std::string s = str(c.arg(0)); emit(1, s + "\n"); return uint32_t(s.size() + 1); });
     reg.add("msvcrt.dll", "fputs", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
