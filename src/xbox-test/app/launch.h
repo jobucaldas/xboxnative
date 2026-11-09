@@ -989,6 +989,10 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
         logf("launch: Play rejected: game code from the last launch is still loaded");return;
     }
     int gen = ++g_launch.gen; g_launch.appid = appid; g_launch.started = now_s(); g_launch.loaderStarted = 0;
+    // The 32-bit interpreter's report belongs to the launch that produced it:
+    // clear it here, not only in lp_run_pe32, or a later 64-bit launch would
+    // publish a previous PE32 run as this one's progress.
+    g_launch.pe32Executed = false; g_launch.pe32Finished = false; g_launch.pe32ExitCode = 0;
     { std::lock_guard<std::mutex> l(g_launch.m); g_launch.result.clear();g_launch.ok=false;g_launch.attempt=std::to_string(GetCurrentProcessId())+":"+std::to_string(gen); } g_launch.phase = 1;
     const InstallInfo inst = read_install(appid);   // the game folder may be on another drive (marker root)
     const std::wstring folder = !dir.empty() && inst.installed && inst.dir == dir ? inst.folder : g_dir + L"\\" + widen(dir);
