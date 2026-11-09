@@ -19,6 +19,16 @@ static bool redistributable(const std::wstring& name) {
                   L"msvcp140_codecvt_ids.dll",L"concrt140.dll"}) if(key==dll) return true;
     return false;
 }
+// The console ships d3d11.dll and dxgi.dll but no d3d9.dll, d3d10.dll,
+// d3d10_1.dll or d3d10core.dll, so a guest importing one of those fails to
+// load. Play ships its own shims beside the launcher and maps them like the
+// Wine donors: a guest copy in the game folder still wins, and nothing is
+// loaded from the host's System32.
+static bool graphics_shim(const std::wstring& name) {
+    std::wstring key=name;for(auto& c:key)c=towlower(c);
+    for(auto dll:{L"d3d9.dll",L"d3d10.dll",L"d3d10_1.dll",L"d3d10core.dll"}) if(key==dll) return true;
+    return false;
+}
 // API-set names (api-ms-win-*, ext-ms-win-*) always resolve through the OS
 // schema on Windows 10; app-local copies (old VC++ app-local UCRT deployments
 // ship api-ms-win-crt-*.dll beside the game) are never loaded. Play does the
@@ -55,7 +65,7 @@ static std::wstring guestLibraryPath(const std::wstring& requested,bool useDirec
         auto candidate=search.directory+L"\\"+requested;
         if(exists(candidate))return candidate;
     }
-    if(!runtimeDirectory.empty() && redistributable(requested)) {
+    if(!runtimeDirectory.empty() && (redistributable(requested) || graphics_shim(requested))) {
         auto candidate=runtimeDirectory+L"\\"+requested;
         if(exists(candidate))return candidate;
     }

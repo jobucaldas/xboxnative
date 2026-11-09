@@ -111,6 +111,24 @@ struct Host {
         if(device){device->Release();device=nullptr;}
     }
 };
+// D3D11's immediate context keeps a reference on every object bound to it, so
+// a guest may release what it bound and the context still draws with it. Wine's
+// d3d11 does not take that reference, so a guest following the documented
+// pattern would leave the context pointing at freed memory. The shims hold the
+// reference themselves, per binding site, and drop it when the slot is rebound.
+template<unsigned N> struct Held {
+    IUnknown* objects[N]{};
+    void set(unsigned index,IUnknown* object) {
+        if(index>=N||objects[index]==object)return;
+        if(objects[index])objects[index]->Release();
+        objects[index]=object;
+        if(object)object->AddRef();
+    }
+    void setRange(unsigned start,unsigned count,IUnknown* const* list) {
+        for(unsigned i=0;i<count;++i)set(start+i,list?list[i]:nullptr);
+    }
+    void clear() { for(unsigned i=0;i<N;++i)set(i,nullptr); }
+};
 // Play's DXGI factory proxy: guest HWND -> CoreWindow, virtual console output.
 inline HRESULT factory(IDXGIFactory** out) {
     if(!out)return E_POINTER;
@@ -158,6 +176,12 @@ struct Base {
     const IID* const* interfaceIds=nullptr;
     unsigned interfaceCount=0;
     IUnknown* forward=nullptr;
+    // Destroys the complete wrapper. Release cannot name the concrete type: the
+    // shared bases (Child, Resource, ...) are templates over the interface, so
+    // `this->~I()` there is the interface's trivial destructor and would skip
+    // ~Base, leaking the reference and leaving a dangling private-data pointer
+    // on the D3D11 object. create<T> stores the right one.
+    void (*dispose)(Base*)=nullptr;
     // A wrapper owns one reference on the object it proxies, and leaves no
     // pointer to itself behind on that object.
     ~Base() {
@@ -176,7 +200,14 @@ template<class T> inline void destroy(T* object) {
 // starts at its zero value and the constructor only sets what it means to.
 template<class T> inline T* create() {
     void* memory=allocate(sizeof(T));
-    return memory?new(memory) T():nullptr;
+    if(!memory)return nullptr;
+    T* object=new(memory) T();
+    // Objects that are not wrappers (the reflection helpers) have no Base and
+    // are destroyed by name by their owner.
+    if constexpr(__is_base_of(Base,T)) {
+        object->dispose=[](Base* base){ destroy(static_cast<T*>(base)); };
+    }
+    return object;
 }
 inline Base* baseOf(IUnknown* object) {
     if(!object)return nullptr;
@@ -206,13 +237,13 @@ template<class T> inline T* wrap(ID3D11DeviceChild* object) {
 }
 }
 // The two IUnknown entries every shim wrapper shares. `refs`, `self` and the
-// interface list come from d3dshim::Base. TYPE is the concrete wrapper class,
-// so Release destroys the complete object and frees its Play-heap storage.
-#define D3DSHIM_REF(TYPE) \
+// interface list come from d3dshim::Base. Release destroys through `dispose`,
+// which create<T> set to the complete type's destructor.
+#define D3DSHIM_REF \
     ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&refs); } \
     ULONG STDMETHODCALLTYPE Release() override { \
         ULONG left=InterlockedDecrement(&refs); \
-        if(!left) { d3dshim::destroy(static_cast<TYPE*>(this)); } \
+        if(!left) { if(dispose)dispose(this); } \
         return left; }
 #define D3DSHIM_QI \
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void** out) override { \
