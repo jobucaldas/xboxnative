@@ -1,0 +1,136 @@
+Play: fill in the DXBC container checksum so an unsigned dzn shader is well-formed (research/VULKAN-PLAN.md).
+SPDX-License-Identifier: MIT (same licence as the file patched; Mesa is MIT)
+
+dxil_container_write() writes a zero checksum into the DXBC header and relies on the DXIL signer (dxil.dll) to
+replace it. With no signer on the console (patch 0003 makes it optional) the container keeps the zero checksum, and
+any consumer that validates it rejects the shader: vkd3d's D3D12 reports "Invalid DXBC checksum" and
+CreateComputePipelineState fails with E_INVALIDARG, so dzn's device creation dies in dzn_meta_init() and
+vkCreateDevice returns VK_ERROR_INITIALIZATION_FAILED.
+
+Compute the checksum in dxil_container_write() once the container is complete. It is MD5 with DXBC's variant
+padding: the bit count goes at the start of the final block, the data is shifted one word in, and the block ends
+with (bit_count >> 2) | 1. Verified against the value vkd3d computes for the same container.
+
+--- a/src/microsoft/compiler/dxil_container.c
++++ b/src/microsoft/compiler/dxil_container.c
+@@ -355,6 +355,109 @@
+           blob_write_bytes(&c->parts, m->buf.blob.data, m->buf.blob.size);
+ }
+ 
++/* The DXBC container's first 20 bytes are the magic and a 16-byte checksum over
++ * everything that follows. Mesa writes a zero checksum and leaves it to the
++ * DXIL signer (dxil.dll) to fill in; with no signer available the container is
++ * rejected by consumers that validate it (vkd3d's D3D12 reports "Invalid DXBC
++ * checksum"). Compute it here so an unsigned container is still well-formed.
++ *
++ * The checksum is MD5 with DXBC's variant padding: the bit count goes at the
++ * start of the final block, the data is shifted one word in, and the block ends
++ * with (bit_count >> 2) | 1. */
++static void
++dxbc_md5_block(uint32_t state[4], const uint8_t *p)
++{
++   static const uint32_t k[64] = {
++      0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
++      0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
++      0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
++      0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
++      0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
++      0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
++      0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
++      0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
++   };
++   static const uint8_t r[64] = {
++      7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
++      5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
++      4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
++      6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
++   };
++   uint32_t w[16], a = state[0], b = state[1], c = state[2], d = state[3];
++
++   for (unsigned i = 0; i < 16; i++)
++      w[i] = (uint32_t)p[i * 4] | (uint32_t)p[i * 4 + 1] << 8 |
++             (uint32_t)p[i * 4 + 2] << 16 | (uint32_t)p[i * 4 + 3] << 24;
++
++   for (unsigned i = 0; i < 64; i++) {
++      uint32_t f, g;
++      if (i < 16) {
++         f = (b & c) | (~b & d);
++         g = i;
++      } else if (i < 32) {
++         f = (d & b) | (~d & c);
++         g = (5 * i + 1) % 16;
++      } else if (i < 48) {
++         f = b ^ c ^ d;
++         g = (3 * i + 5) % 16;
++      } else {
++         f = c ^ (b | ~d);
++         g = (7 * i) % 16;
++      }
++      uint32_t sum = a + f + k[i] + w[g];
++      uint32_t tmp = d;
++      d = c;
++      c = b;
++      b = b + (sum << r[i] | sum >> (32 - r[i]));
++      a = tmp;
++   }
++   state[0] += a;
++   state[1] += b;
++   state[2] += c;
++   state[3] += d;
++}
++
++static void
++dxbc_put_u32(uint8_t *p, uint32_t v)
++{
++   p[0] = v;
++   p[1] = v >> 8;
++   p[2] = v >> 16;
++   p[3] = v >> 24;
++}
++
++static void
++dxbc_checksum(const uint8_t *data, size_t size, uint8_t out[16])
++{
++   uint32_t state[4] = { 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476 };
++   uint8_t last[64] = { 0 };
++   size_t i = 0, rem;
++   uint32_t bits = (uint32_t)(size * 8);
++   uint32_t tail = (bits >> 2) | 1;
++
++   for (; i + 64 <= size; i += 64)
++      dxbc_md5_block(state, data + i);
++
++   rem = size - i;
++   if (rem < 56) {
++      memcpy(last + 4, data + i, rem);
++      last[4 + rem] = 0x80;
++      dxbc_put_u32(last, bits);
++      dxbc_put_u32(last + 60, tail);
++      dxbc_md5_block(state, last);
++   } else {
++      memcpy(last + 4, data + i, 56);
++      last[60] = 0x80;
++      dxbc_md5_block(state, last);
++      memset(last, 0, sizeof(last));
++      dxbc_put_u32(last, bits);
++      dxbc_put_u32(last + 60, tail);
++      dxbc_md5_block(state, last);
++   }
++   for (unsigned j = 0; j < 4; j++)
++      dxbc_put_u32(out + j * 4, state[j]);
++}
++
+ bool
+ dxil_container_write(struct dxil_container *c, struct blob *blob)
+ {
+@@ -391,5 +494,10 @@
+        !blob_write_bytes(blob, c->parts.data, c->parts.size))
+       return false;
+ 
++   /* Fill in the checksum now that the container is complete. The header is
++    * magic (4 bytes) + checksum (16 bytes), so the digest covers blob->data + 20. */
++   assert(blob->size > 20);
++   dxbc_checksum(blob->data + 20, blob->size - 20, blob->data + 4);
++
+    return true;
+ }
