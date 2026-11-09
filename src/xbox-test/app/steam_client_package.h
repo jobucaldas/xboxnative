@@ -44,6 +44,8 @@ inline uint16_t le16(const std::string& z, size_t at) { uint16_t v; memcpy(&v, z
 // Raw-deflate inflater: (compressed, expected size, out) -> ok.
 using Inflate = std::function<bool(const char*, size_t, size_t, std::string&)>;
 // One member of a (non-zip64) archive, by exact name in the central directory.
+// A null name takes the archive's only entry (Steam Cloud stores a compressed
+// file as a PKZip archive with exactly one), whatever it is called.
 inline bool zip_member(const std::string& z, const char* name, const Inflate& inflate, std::string& out) {
     out.clear();
     if (z.size() < 22) return false;
@@ -54,13 +56,14 @@ inline bool zip_member(const std::string& z, const char* name, const Inflate& in
     }
     if (end == std::string::npos) return false;
     size_t count = le16(z, end + 10), at = le32(z, end + 16);
-    const size_t nameLength = strlen(name);
+    if (!name && count != 1) return false;
+    const size_t nameLength = name ? strlen(name) : 0;
     for (size_t n = 0; n < count; ++n) {
         if (at + 46 > z.size() || le32(z, at) != 0x02014b50) return false;
         uint16_t method = le16(z, at + 10), nl = le16(z, at + 28), xl = le16(z, at + 30), cl = le16(z, at + 32);
         uint32_t csize = le32(z, at + 20), usize = le32(z, at + 24), local = le32(z, at + 42);
         if (at + 46 + nl > z.size()) return false;
-        if (nl == nameLength && !memcmp(z.data() + at + 46, name, nl)) {
+        if (!name || (nl == nameLength && !memcmp(z.data() + at + 46, name, nl))) {
             if (csize == 0xffffffffu || usize == 0xffffffffu || local == 0xffffffffu) return false;   // zip64: not expected
             if (size_t(local) + 30 > z.size() || le32(z, local) != 0x04034b50) return false;
             size_t data = size_t(local) + 30 + le16(z, local + 26) + le16(z, local + 28);

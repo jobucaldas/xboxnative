@@ -215,8 +215,19 @@ static bool stage_steam_provider(uint32_t appid,const std::wstring& exePath) {
     lp_sink(line);
     return true;
 }
-// The same known folders the game resolves in this process and container.
-static steam_cloud::Roots cloud_roots(const std::wstring& gameRoot) {
+static std::wstring provider_dir(uint32_t appid) { return g_dir+L"\\steam\\"+widen(std::to_string(appid)); }
+// Where gbe_fork keeps the files a game saves through ISteamRemoteStorage:
+// <local_save_path>\<appid>\remote, with local_save_path=./saves staged in
+// stage_steam_provider (achievements use the same <saves>\<appid> folder).
+static std::filesystem::path provider_remote_dir(uint32_t appid) {
+    return std::filesystem::path(provider_dir(appid))/"saves"/std::to_string(appid)/"remote";
+}
+// The known folders the game resolves. There is no separate guest mapping to
+// follow: the guest's SHGetKnownFolderPath / SHGetFolderPathW are routed to the
+// system shell32 in this very process and package container (K32T "system-route=1"
+// in research/k32t-console-evidence.log), so asking that function here yields the
+// guest's LocalLow/Local/Roaming/Documents/Saved Games by construction.
+static steam_cloud::Roots cloud_roots(uint32_t appid,const std::wstring& gameRoot) {
     static const GUID localLow={0xA520A1A4,0x1780,0x4FF6,{0xBD,0x18,0x16,0x73,0x43,0xC5,0xAF,0x16}};
     static const GUID local={0xF1B32785,0x6FBA,0x4FCF,{0x9D,0x55,0x7B,0x8E,0x7F,0x15,0x70,0x91}};
     static const GUID roaming={0x3EB685DB,0x65F9,0x4CF6,{0xA0,0x3A,0xE3,0xEF,0x65,0x72,0x9F,0x3D}};
@@ -230,19 +241,65 @@ static steam_cloud::Roots cloud_roots(const std::wstring& gameRoot) {
     add("WinAppDataLocalLow",localLow);add("WinAppDataLocal",local);add("WinAppDataRoaming",roaming);
     add("WinMyDocuments",documents);add("WinSavedGames",savedGames);
     roots["GameInstall"]=gameRoot;
+    roots[steam_cloud::kRemoteRoot]=provider_remote_dir(appid);
     return roots;
 }
 static std::mutex g_cloudRulesM;
 static std::vector<steam_cloud::Rule> g_cloudRules;   // from the pre-launch download pass
-static bool cloud_sync(uint32_t appid,const std::wstring& gameRoot,bool upload,uint64_t quiet) {
+// One Steam Cloud pass at a time (launch download, final upload, the detail
+// page's button), so two never write the same save file.
+static std::mutex g_cloudRunM;
+struct CloudOutcome { bool ran=false; steam_cloud::Result r; std::string why; };
+// When a pass last completed with no failures, kept in the app's provider folder
+// so the detail page can say "synced <time>" across restarts.
+static std::wstring cloud_stamp_path(uint32_t appid) { return provider_dir(appid)+L"\\cloud_synced.txt"; }
+static void cloud_note_synced(uint32_t appid) {
+    for(auto d:{g_dir+L"\\steam",provider_dir(appid)})CreateDirectoryW(d.c_str(),nullptr);
+    write_text(cloud_stamp_path(appid),std::to_string((unsigned long long)time(nullptr))+"\n");
+}
+// Per cloud file, the SHA-1 both sides agreed on at the last sync (hex, one
+// "<sha>\t<name>" line each): what tells "changed here" from "changed there".
+static std::wstring cloud_state_path(uint32_t appid) { return provider_dir(appid)+L"\\cloud_state.txt"; }
+static steam_cloud::Known cloud_known_load(uint32_t appid) {
+    steam_cloud::Known k;auto text=read_bytes(cloud_state_path(appid));size_t at=0;
+    while(at<text.size()){size_t end=text.find('\n',at);if(end==std::string::npos)end=text.size();
+        auto line=text.substr(at,end-at);at=end+1;size_t tab=line.find('\t');
+        if(tab!=40)continue;std::string sha;
+        for(size_t i=0;i<40;i+=2)sha+=char(strtoul(line.substr(i,2).c_str(),nullptr,16));
+        k[line.substr(41)]=sha;}
+    return k;
+}
+static void cloud_known_save(uint32_t appid,const steam_cloud::Known& k) {
+    for(auto d:{g_dir+L"\\steam",provider_dir(appid)})CreateDirectoryW(d.c_str(),nullptr);
+    std::string text;static const char* hex="0123456789abcdef";
+    for(auto& [name,sha]:k){if(sha.size()!=20||name.find('\n')!=std::string::npos)continue;
+        for(unsigned char c:sha){text+=hex[c>>4];text+=hex[c&15];}text+='\t';text+=name;text+='\n';}
+    write_text(cloud_state_path(appid),text);
+}
+static uint64_t cloud_last_synced(uint32_t appid) {
+    auto text=read_bytes(cloud_stamp_path(appid));
+    return text.empty()?0:strtoull(text.c_str(),nullptr,10);
+}
+// dry: list the cloud and count the files that are newer there, changing nothing.
+// A game that is starting or running owns its save files: the detail page's
+// passes (fromUi) refuse then, the launch's own passes do not.
+static bool cloud_blocked() { return g_launch.phase==1||g_launch.phase==3||play_runtime::observed.load(std::memory_order_acquire)!=nullptr; }
+static bool cloud_sync(uint32_t appid,const std::wstring& gameRoot,bool upload,uint64_t quiet,CloudOutcome* out=nullptr,bool dry=false,bool fromUi=false,steam_cloud::Prefer prefer=steam_cloud::Prefer::Auto) {
+    CloudOutcome local;CloudOutcome& o=out?*out:local;o=CloudOutcome{};
     auto session=user_session();
-    if(!session||session->anon)return false;
+    if(!session||session->anon){o.why="not signed in";return false;}
+    std::lock_guard<std::mutex> pass(g_cloudRunM);
+    if(fromUi&&cloud_blocked()){o.why="a game is running";return false;}
     std::string text=pics_appinfo(*session,appid);
     while(!text.empty()&&text.back()==0)text.pop_back();
-    Vdf root;if(text.empty()||!vdf_parse(text,root)){lp_sink("STEAM cloud: no app info; not synced");return false;}
-    const Vdf* app=root.get("appinfo");if(!app)app=&root;
-    auto rules=steam_cloud::rules(*app);
-    if(rules.empty()){lp_sink("STEAM cloud: app has no Auto-Cloud save rules");return false;}
+    std::vector<steam_cloud::Rule> rules;
+    Vdf root;
+    if(text.empty()||!vdf_parse(text,root))lp_sink("STEAM cloud: no app info; Auto-Cloud rules unknown (API files still sync)");
+    else {
+        const Vdf* app=root.get("appinfo");if(!app)app=&root;
+        rules=steam_cloud::rules(*app);
+        if(rules.empty())lp_sink("STEAM cloud: app has no Auto-Cloud save rules (files saved through the Steam API still sync)");
+    }
     {std::lock_guard<std::mutex> lock(g_cloudRulesM);g_cloudRules=rules;}
     steam_cloud::Io io;
     io.service=[session](const std::string& method,const std::string& request,int& eresult,std::string& response){
@@ -251,16 +308,71 @@ static bool cloud_sync(uint32_t appid,const std::wstring& gameRoot,bool upload,u
     io.get=[](bool https,const std::string& host,const std::string& path,const steam_cloud::Headers& h,std::string& body){return cloud_http(false,https,host,path,h,{},body);};
     io.put=[](bool https,const std::string& host,const std::string& path,const steam_cloud::Headers& h,const std::string& body){std::string ignored;return cloud_http(true,https,host,path,h,body,ignored);};
     io.sha1=[](const std::string& data){return sha1_of(data.data(),data.size());};
-    io.log=[](const std::string& line){lp_sink(("STEAM "+line).c_str());};
-    auto roots=cloud_roots(gameRoot);
-    auto r=upload?steam_cloud::upload(io,appid,roots,rules,"Xbox",quiet):steam_cloud::download(io,appid,roots);
-    char line[200];snprintf(line,sizeof line,"STEAM cloud %s: downloaded=%u uploaded=%u unchanged=%u kept=%u busy=%u failed=%u",
-        upload?"upload":"download",r.downloaded,r.uploaded,r.unchanged,r.kept,r.busy,r.failed);lp_sink(line);
+    io.inflate=[](const char* data,size_t size,size_t expected,std::string& out){
+        out.resize(expected); z_stream z{}; if(inflateInit2(&z,-15)!=Z_OK) return false;
+        z.next_in=(Bytef*)data; z.avail_in=(uInt)size; z.next_out=(Bytef*)&out[0]; z.avail_out=(uInt)expected;
+        int rc=inflate(&z,Z_FINISH); bool ok=rc==Z_STREAM_END&&z.total_out==expected; inflateEnd(&z); return ok;};
+    // Cloud names and paths can carry the account's SteamID (e.g. a per-user save folder).
+    io.log=[](const std::string& line){lp_sink(redact::steam_ids("STEAM "+line).c_str());};
+    auto roots=cloud_roots(appid,gameRoot);
+    for(auto& [name,path]:roots)lp_sink(redact::steam_ids("STEAM cloud: root "+name+" = "+steam_cloud::path_text(path)).c_str());
+    auto known=cloud_known_load(appid);
+    auto r=upload?steam_cloud::upload(io,appid,roots,rules,"Xbox",quiet,&known,prefer):steam_cloud::download(io,appid,roots,dry,&known,prefer);
+    if(!dry)cloud_known_save(appid,known);
+    char line[220];snprintf(line,sizeof line,"STEAM cloud %s: downloaded=%u uploaded=%u unchanged=%u kept=%u busy=%u newer=%u conflict=%u failed=%u",
+        upload?"upload":dry?"check":"download",r.downloaded,r.uploaded,r.unchanged,r.kept,r.busy,r.newer,r.conflict,r.failed);lp_sink(line);
+    o.ran=true;o.r=r;
+    if(!dry&&r.failed==0&&r.conflict==0)cloud_note_synced(appid);
     return r.failed==0;
+}
+// ---- Cloud status on the game's detail page, and its "Sync cloud saves" button.
+struct CloudStatus { int phase=0; std::string text; int tone=0; };   // phase: 0 unchecked, 1 working, 2 done; tone: 0 dim, 1 ok, 2 attention
+static std::mutex g_cloudStatusM;
+static std::map<uint32_t,CloudStatus> g_cloudStatus;
+static std::atomic<bool> g_cloudBusy{false};
+static CloudStatus cloud_status(uint32_t appid) { std::lock_guard<std::mutex> l(g_cloudStatusM); auto it=g_cloudStatus.find(appid); return it==g_cloudStatus.end()?CloudStatus{}:it->second; }
+static void cloud_set(uint32_t appid,int phase,const std::string& text,int tone) { std::lock_guard<std::mutex> l(g_cloudStatusM); g_cloudStatus[appid]={phase,text,tone}; }
+static std::string cloud_time(uint64_t t) {
+    time_t tt=(time_t)t;tm local{};char b[48];
+    if(localtime_s(&local,&tt)!=0||!strftime(b,sizeof b,"%Y-%m-%d %H:%M",&local))return "at an unknown time";
+    return b;
+}
+static std::string cloud_plural(unsigned n,const char* one,const char* many) { return std::to_string(n)+" "+(n==1?one:many); }
+static void cloud_describe(uint32_t appid,bool sync,const CloudOutcome& down,const CloudOutcome& up) {
+    if(!down.ran){cloud_set(appid,2,"Cloud: not synced ("+down.why+")",2);return;}
+    unsigned failed=down.r.failed+(up.ran?up.r.failed:0);
+    unsigned conflict=std::max(down.r.conflict,up.ran?up.r.conflict:0u);
+    if(conflict){cloud_set(appid,2,"Cloud: "+cloud_plural(conflict,"save differs","saves differ")+" here and in the cloud. LB: use cloud, RB: keep Xbox",2);return;}
+    if(sync) {
+        if(!up.ran){cloud_set(appid,2,"Cloud: not synced ("+(up.why.empty()?std::string("upload skipped"):up.why)+")",2);return;}
+        if(failed){cloud_set(appid,2,"Cloud: not synced ("+cloud_plural(failed,"file","files")+" failed; see the launch log)",2);return;}
+        cloud_set(appid,2,"Cloud: synced "+cloud_time((uint64_t)time(nullptr))+" ("+std::to_string(down.r.downloaded)+" down, "+std::to_string(up.r.uploaded)+" up)",1);
+        return;
+    }
+    if(down.r.newer){cloud_set(appid,2,"Cloud: "+cloud_plural(down.r.newer,"file is","files are")+" newer in the cloud",2);return;}
+    if(down.r.failed){cloud_set(appid,2,"Cloud: not synced ("+cloud_plural(down.r.failed,"file","files")+" could not be checked; see the launch log)",2);return;}
+    if(auto last=cloud_last_synced(appid)){cloud_set(appid,2,"Cloud: synced "+cloud_time(last),1);return;}
+    cloud_set(appid,2,"Cloud: up to date",1);
+}
+// Off the UI thread. sync=false only checks (counts the files newer in the
+// cloud); sync=true downloads those and uploads newer local files.
+static void cloud_async(uint32_t appid,const std::wstring& gameRoot,bool sync,steam_cloud::Prefer prefer=steam_cloud::Prefer::Auto) {
+    if(cloud_blocked()){if(sync)cloud_set(appid,2,"Cloud: not synced (a game is running)",2);return;}
+    if(g_cloudBusy.exchange(true))return;
+    cloud_set(appid,1,sync?"Cloud: syncing...":"Cloud: checking...",0);
+    std::thread([=]{
+        init_apartment(apartment_type::multi_threaded);
+        try {
+            CloudOutcome down,up;
+            cloud_sync(appid,gameRoot,false,0,&down,!sync,true,prefer);
+            if(sync&&down.ran)cloud_sync(appid,gameRoot,true,0,&up,false,true,prefer);
+            cloud_describe(appid,sync,down,up);
+        } catch(...) {lp_sink("STEAM cloud: exception");cloud_set(appid,2,"Cloud: not synced (unexpected error)",2);}
+        g_cloudBusy=false;
+    }).detach();
 }
 // ---- Steam achievements/stats for the provider-served game (steam_achievements.h)
 #include "steam_achievements.h"
-static std::wstring provider_dir(uint32_t appid) { return g_dir+L"\\steam\\"+widen(std::to_string(appid)); }
 static steam_achievements::Io achievement_io(std::shared_ptr<CmSession> session) {
     steam_achievements::Io io;
     io.call=[session](uint32_t emsg,const std::string& body,std::string& out){

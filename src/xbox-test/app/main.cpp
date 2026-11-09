@@ -732,6 +732,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // After a restart that unloaded a failed game, its page says why (this session's launches show in the launch panel).
         if (g_launch.phase == 0) { std::string why = launch_report::failure(read_bytes(g_dir + L"\\launch_result.json"), id); if (!why.empty()) m_dNote = "Last launch failed: " + why; }
         auto si = std::make_shared<StoreInfo>(); si->appid = id; m_dSi = si; std::thread(store_worker, si).detach();
+        { InstallInfo ii = read_install(id); if (ii.installed && !g_demo) cloud_async(id, g_dir + L"\\" + widen(ii.dir), false); }   // status line: what the cloud holds
         m_confirmLogout = false; g_screen = S_DETAIL; logf("detail: open appid=%u name='%s' via=%s", id, m_dName.c_str(), via);
     }
     void close_detail(const char* why) { logf("detail: back to library (%s)", why); m_dSi.reset(); g_screen = S_LIBRARY; }
@@ -749,6 +750,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         m_confirmDelete = false; std::string why = start_delete(m_dApp);
         if (!why.empty()) { m_dNote = why; logf("detail: delete not started appid=%u (%s): %s", m_dApp, via, why.c_str()); }
         else { m_dNote.clear(); m_dInstT = -10; }
+    }
+    void detail_cloud(const char* via, steam_cloud::Prefer prefer = steam_cloud::Prefer::Auto) {      // Y: sync; LB/RB after a conflict: use the cloud / this console's copy
+        m_dInst = read_install(m_dApp); m_dInstT = now_s();
+        if (!m_dInst.installed || g_demo) return;
+        if (cloud_blocked()) { m_dNote = "A game was started: reopen the app to sync cloud saves."; return; }
+        if (g_cloudBusy) { logf("detail: Y ignored, cloud pass already running"); return; }
+        m_dNote.clear(); logf("detail: cloud sync asked appid=%u (%s)", m_dApp, via);
+        cloud_async(m_dApp, g_dir + L"\\" + widen(m_dInst.dir), true, prefer);
     }
     void detail_action(const char* via) {   // A: Install or Play
         if (g_launch.phase == 1 || g_launch.phase == 3) { logf("detail: A ignored, launch attempt running"); return; }
@@ -968,6 +977,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (m_dInst.installed && !busy) {   // secondary action: delete (X)
             const char* dl2 = "X: Delete game"; int w = twidth(dl2, 3) + 30; fill(60, 590, w, 46, C3(120, 40, 40)); text(75, 601, dl2, 3, TXT);
         }
+        if (m_dInst.installed && !busy && !g_demo) {   // secondary action: sync cloud saves (Y)
+            bool working = cloud_status(m_dApp).phase == 1; const char* cl = working ? "Syncing cloud..." : "Y: Sync cloud"; int w = twidth(cl, 2) + 28;
+            fill(440, 590, w, 46, working ? C3(60, 66, 78) : C3(40, 90, 150)); text(454, 604, cl, 2, TXT);
+        }
+        if (m_dInst.installed && !g_demo) {   // cloud status line
+            CloudStatus cs = cloud_status(m_dApp);
+            if (cs.phase != 0) { std::string l1, l2; wrap2(cs.text, 38, l1, l2); uint32_t cc = cs.tone == 1 ? GRN : cs.tone == 2 ? YEL : DIM; text(60, 776, l1, 2, cc); text(60, 794, l2, 2, cc); }
+        }
         fill(60, 650, launch_button::width, 120, busy ? C3(60, 66, 78) : m_dInst.installed ? C3(40, 150, 80) : C3(45, 90, 200)); frame(60, 650, launch_button::width, 120, 8, YEL);
         auto labelLayout=launch_button::label_layout(std::char_traits<char>::length(label));
         text(60 + labelLayout.x, 650 + labelLayout.y, label, labelLayout.scale, TXT);
@@ -998,7 +1015,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 bool ok;{std::lock_guard<std::mutex> l(g_launch.m);ok=g_launch.ok;}
                 text(80, 822, g_launch.phase==3?"Guest running (playability unverified)":ok?"Guest completed (playability unverified)":retained?"Launch failed - restarting launcher to unload it":"Launch failed - nothing was left running; press A or pick another game", 3, g_launch.phase==3?YEL:ok?GRN:RED); auto ls = wrap_lines(r, 73); for (size_t i = 0; i < ls.size() && i < 4; i++) text(80, 858 + (int)i * 34, ls[i], 3, TXT); }
         }
-        text(60, 1050, "A: Install / Play   X: Delete   B: back / cancel download   Menu: back   D-pad up/down: scroll", 2, C3(120, 130, 145));
+        text(60, 1050, "A: Install / Play   X: Delete   Y: Cloud sync   B: back   Menu: back   D-pad up/down: scroll", 2, C3(120, 130, 145));
         if (m_confirmDelete) {
             std::string q = "Delete " + clip(m_dName, 30) + "?"; char sz[96];
             if (m_delKind == game_library::DeleteKind::shared) snprintf(sz, sizeof sz, "Its files are shared with another installed game and stay.");
@@ -1344,6 +1361,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 return;
             }
             if (has(edge, GamepadButtons::X)) { detail_delete(source); return; }
+            if (has(edge, GamepadButtons::Y)) { detail_cloud(source); return; }
+            if (cloud_status(m_dApp).text.find("LB: use cloud") != std::string::npos) {
+                if (has(edge, GamepadButtons::LeftShoulder)) { detail_cloud("LB use cloud", steam_cloud::Prefer::Cloud); return; }
+                if (has(edge, GamepadButtons::RightShoulder)) { detail_cloud("RB keep Xbox", steam_cloud::Prefer::Local); return; }
+            }
             if (has(edge, GamepadButtons::A)) detail_action(source);
             if (has(edge, GamepadButtons::B)) detail_back(source);
             if (has(edge, GamepadButtons::View) || has(edge, GamepadButtons::Menu)) close_detail("Menu/View");
