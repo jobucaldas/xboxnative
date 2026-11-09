@@ -48,6 +48,18 @@ int main(void) {
     check(n > 0 && strcmp(buf, "-42|42|beef|BEEF|10|Z|str| 3.14|-1234567|78187493530") == 0);
     printf("x86-crt: printf %s\n", buf);
 
+    /* sprintf takes its varargs on the stack, not a va_list; snprintf truncates
+     * and still returns the untruncated length; strchr finds the terminator. */
+    char sp[64];
+    int sn = sprintf(sp, "%d/%s/%.1f", 7, "hi", 1.5);
+    check(sn == 8 && strcmp(sp, "7/hi/1.5") == 0);
+    char tr[6];
+    char ten[11]; memcpy(ten, "abcdefghij", sizeof ten);  /* opaque to the compiler */
+    int tn = snprintf(tr, sizeof tr, "%s", ten);
+    check(tn == 10 && strcmp(tr, "abcde") == 0);
+    check(strchr("abc", 0) == "abc" + 3 && strrchr("a/b/c", '/') == "a/b/c" + 3);
+    printf("x86-crt: sprintf %s %s\n", sp, tr);
+
     /* Heap: malloc/calloc/realloc/free with a real free list. */
     int* v = (int*)malloc(64 * sizeof(int));
     check(v != NULL);
@@ -102,6 +114,16 @@ int main(void) {
     check(GetTickCount() != 0 || GetTickCount() == 0);  /* callable, not printed */
     OSVERSIONINFOA vi; memset(&vi, 0, sizeof vi); vi.dwOSVersionInfoSize = sizeof vi;
     check(GetVersionExA(&vi) != 0 && vi.dwMajorVersion >= 5);
+    /* SYSTEMTIME is eight WORDs: a 4-byte store per field would smash the next
+     * one. Year 2026 and month 11 must both survive, and nothing past the
+     * 16-byte struct may be written. */
+    unsigned char st[24];
+    memset(st, 0xEE, sizeof st);
+    GetSystemTime((SYSTEMTIME*)st);
+    check(((WORD*)st)[0] == 2026 && ((WORD*)st)[1] == 11 && ((WORD*)st)[3] == 9);
+    check(st[16] == 0xEE && st[23] == 0xEE);
+    char mod[260];
+    check(GetModuleFileNameA(NULL, mod, sizeof mod) > 0);
     puts("x86-crt: kernel32 ok");
 
     /* Interlocked and critical sections on the single guest thread. */
