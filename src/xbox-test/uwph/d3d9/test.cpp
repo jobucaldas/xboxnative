@@ -1,0 +1,348 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Off-device contract test for Play's D3D9 shim. It loads the shim the way
+// Play's loader does (by name, from its own directory) and drives the entry
+// points a game uses first. Wine's d3d11.dll stands in for the console's
+// device, so this proves the shim's own conversions and object model, not Xbox
+// execution. No console is contacted and nothing here is a game.
+#include <windows.h>
+#include <d3d9.h>
+#include <d3d11.h>
+// The shim's own file-scope definitions, for the same reason: no CRT here.
+extern "C" void* memset(void* d,int c,size_t n) {
+    auto p=(unsigned char*)d;while(n--)*p++=(unsigned char)c;return d;
+}
+extern "C" int strcmp(const char* a,const char* b) {
+    while(*a&&*a==*b){++a;++b;}return (unsigned char)*a-(unsigned char)*b;
+}
+// mingw emits this stack-probe helper for large frames; the CRT supplies it.
+extern "C" void ___chkstk_ms(void) {}
+// No C runtime: the test is linked /nodefaultlib like the shim, so output goes
+// to stderr through WriteFile and the entry point is named explicitly.
+static void out(const char* text) {
+    DWORD written=0;DWORD length=0;while(text[length])++length;
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE),text,length,&written,nullptr);
+}
+static void outNum(const char* prefix,unsigned long long value) {
+    char digits[24];unsigned n=0;
+    do{digits[n++]=char('0'+value%10);value/=10;}while(value);
+    char line[64];unsigned used=0;
+    while(*prefix&&used<sizeof line-2)line[used++]=*prefix++;
+    while(n)line[used++]=digits[--n];
+    line[used++]='\n';
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE),line,used,nullptr,nullptr);
+}
+static void outHex(const char* prefix,unsigned long long value) {
+    char digits[16];unsigned n=0;
+    do{digits[n++]="0123456789abcdef"[value&15];value>>=4;}while(value);
+    char line[96];unsigned used=0;
+    while(*prefix&&used<sizeof line-8)line[used++]=*prefix++;
+    line[used++]='0';line[used++]='x';
+    while(n)line[used++]=digits[--n];
+    line[used++]='\n';
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE),line,used,nullptr,nullptr);
+}
+static unsigned checks=0,failures=0;
+#define CHECK(x) do { ++checks; if(!(x)){++failures;out("FAIL line " #x);outNum("  at line ",__LINE__);} } while(0)
+#define CHECK_HR(call) do { HRESULT hr_=(call); ++checks; if(FAILED(hr_)){++failures; \
+    out("FAIL " #call);outHex("  hr=",(unsigned long)hr_);} } while(0)
+#define CHECK_HR_IS(call,expected) do { HRESULT hr_=(call); ++checks; if(hr_!=(expected)){++failures; \
+    out("FAIL " #call);outHex("  hr=",(unsigned long)hr_);outHex("  expected=",(unsigned long)(expected));} } while(0)
+
+using Create9=IDirect3D9*(WINAPI*)(UINT);
+using Create9Ex=HRESULT(WINAPI*)(UINT,IDirect3D9Ex**);
+
+static LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM l) { return DefWindowProcW(h,m,w,l); }
+
+// The shim is loaded by full path from this executable's own directory, so the
+// test never picks up a host d3d9.dll.
+static HMODULE loadShim() {
+    wchar_t path[1024];DWORD n=GetModuleFileNameW(nullptr,path,1024);
+    if(!n||n>=1024)return nullptr;
+    while(n&&path[n-1]!=L'\\'&&path[n-1]!=L'/')--n;
+    const wchar_t name[]=L"d3d9.dll";
+    if(n+sizeof name/sizeof name[0]>=1024)return nullptr;
+    for(unsigned i=0;i<sizeof name/sizeof name[0];++i)path[n+i]=name[i];
+    return LoadLibraryExW(path,nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);
+}
+extern "C" DWORD WINAPI d3d9_test_entry() {
+    HMODULE module=loadShim();
+    if(!module) {
+        outHex("SKIP-DLL d3d9.dll not loadable error=",GetLastError());
+        return 2;
+    }
+    {wchar_t loaded[1024];DWORD m=GetModuleFileNameW(module,loaded,1024);
+     out("INFO loaded ");if(m&&m<1024){char narrow[1024];unsigned k=0;
+        for(DWORD i=0;i<m&&k+1<sizeof narrow;++i)narrow[k++]=char(loaded[i]);narrow[k]=0;out(narrow);}
+     out("\n");}
+    auto create9=(Create9)GetProcAddress(module,"Direct3DCreate9");
+    auto create9Ex=(Create9Ex)GetProcAddress(module,"Direct3DCreate9Ex");
+    CHECK(create9!=nullptr);
+    CHECK(create9Ex!=nullptr);
+    if(!create9||!create9Ex){outNum("RESULT checks=",checks);outNum("RESULT failures=",failures);return 1;}
+
+    // The entry points report the SDK version they were built for.
+    CHECK(create9(D3D_SDK_VERSION+1)==nullptr);
+    IDirect3D9Ex* wrong=nullptr;
+    CHECK_HR_IS(create9Ex(D3D_SDK_VERSION+1,&wrong),D3DERR_INVALIDCALL);
+    CHECK(wrong==nullptr);
+
+    IDirect3D9Ex* ex=nullptr;
+    CHECK_HR(create9Ex(D3D_SDK_VERSION,&ex));
+    CHECK(ex!=nullptr);
+    if(!ex){outNum("RESULT checks=",checks);outNum("RESULT failures=",failures);return 1;}
+
+    // IDirect3D9 and IDirect3D9Ex are the same object, as on Windows.
+    IDirect3D9* plain=nullptr;
+    CHECK_HR(ex->QueryInterface(__uuidof(IDirect3D9),(void**)&plain));
+    CHECK(plain==static_cast<IDirect3D9*>(ex));
+    if(plain)plain->Release();
+    IDirect3D9* fromCreate9=create9(D3D_SDK_VERSION);
+    CHECK(fromCreate9!=nullptr);
+    if(fromCreate9) {
+        CHECK(fromCreate9->GetAdapterCount()==1);
+        fromCreate9->Release();
+    }
+
+    // Adapter enumeration: one adapter, the CoreWindow's output.
+    CHECK(ex->GetAdapterCount()==1);
+    D3DADAPTER_IDENTIFIER9 identifier{};
+    CHECK_HR(ex->GetAdapterIdentifier(0,0,&identifier));
+    CHECK(identifier.VendorId==0x1414);
+    CHECK(!strcmp(identifier.DeviceName,"Console CoreWindow adapter"));
+    CHECK_HR_IS(ex->GetAdapterIdentifier(1,0,&identifier),D3DERR_INVALIDCALL);
+    D3DDISPLAYMODE mode{};
+    CHECK_HR(ex->GetAdapterDisplayMode(0,&mode));
+    CHECK(mode.Width==1920&&mode.Height==1080&&mode.Format==D3DFMT_X8R8G8B8);
+    CHECK(ex->GetAdapterModeCount(0,D3DFMT_X8R8G8B8)==1);
+    CHECK(ex->GetAdapterModeCount(0,D3DFMT_UNKNOWN)==0);
+    CHECK_HR(ex->EnumAdapterModes(0,D3DFMT_X8R8G8B8,0,&mode));
+    CHECK_HR_IS(ex->EnumAdapterModes(0,D3DFMT_X8R8G8B8,1,&mode),D3DERR_INVALIDCALL);
+    LUID luid{};
+    CHECK_HR(ex->GetAdapterLUID(0,&luid));
+
+    // The capability and format queries a game runs before creating a device.
+    D3DCAPS9 caps{};
+    CHECK_HR(ex->GetDeviceCaps(0,D3DDEVTYPE_HAL,&caps));
+    CHECK(caps.VertexShaderVersion==D3DVS_VERSION(3,0));
+    CHECK(caps.PixelShaderVersion==D3DPS_VERSION(3,0));
+    CHECK_HR_IS(ex->GetDeviceCaps(0,D3DDEVTYPE_REF,&caps),D3DERR_INVALIDCALL);
+    CHECK_HR(ex->CheckDeviceType(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DFMT_X8R8G8B8,TRUE));
+    CHECK_HR_IS(ex->CheckDeviceType(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DFMT_UNKNOWN,TRUE),D3DERR_NOTAVAILABLE);
+    CHECK_HR(ex->CheckDeviceFormat(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,0,D3DRTYPE_TEXTURE,D3DFMT_A8R8G8B8));
+    CHECK_HR_IS(ex->CheckDeviceFormat(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DUSAGE_RENDERTARGET,
+        D3DRTYPE_TEXTURE,D3DFMT_A8R8G8B8),D3DERR_NOTAVAILABLE);
+    DWORD quality=0;
+    CHECK_HR(ex->CheckDeviceMultiSampleType(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,TRUE,D3DMULTISAMPLE_NONE,&quality));
+    CHECK(quality==1);
+    CHECK_HR_IS(ex->CheckDeviceMultiSampleType(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,TRUE,
+        D3DMULTISAMPLE_4_SAMPLES,&quality),D3DERR_NOTAVAILABLE);
+    CHECK_HR(ex->CheckDepthStencilMatch(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DFMT_X8R8G8B8,D3DFMT_D24S8));
+    CHECK_HR_IS(ex->CheckDepthStencilMatch(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DFMT_X8R8G8B8,
+        D3DFMT_A8R8G8B8),D3DERR_NOTAVAILABLE);
+    CHECK_HR(ex->CheckDeviceFormatConversion(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DFMT_A8R8G8B8));
+
+    // A device on a real window: this is the path a game takes first.
+    WNDCLASSW cls{};cls.lpfnWndProc=proc;cls.hInstance=GetModuleHandleW(nullptr);cls.lpszClassName=L"d3d9-shim-test";
+    HWND window=nullptr;
+    if(RegisterClassW(&cls))
+        window=CreateWindowExW(0,cls.lpszClassName,L"d3d9 shim",WS_OVERLAPPEDWINDOW,
+            0,0,320,240,nullptr,nullptr,cls.hInstance,nullptr);
+    CHECK(window!=nullptr);
+
+    D3DPRESENT_PARAMETERS present{};
+    present.BackBufferWidth=320;present.BackBufferHeight=240;
+    present.BackBufferFormat=D3DFMT_X8R8G8B8;present.BackBufferCount=1;
+    present.MultiSampleType=D3DMULTISAMPLE_NONE;
+    present.SwapEffect=D3DSWAPEFFECT_DISCARD;present.hDeviceWindow=window;present.Windowed=TRUE;
+    present.EnableAutoDepthStencil=TRUE;present.AutoDepthStencilFormat=D3DFMT_D24S8;
+    present.PresentationInterval=D3DPRESENT_INTERVAL_IMMEDIATE;
+
+    IDirect3DDevice9Ex* device=nullptr;
+    if(window) {
+        CHECK_HR_IS(ex->CreateDevice(0,D3DDEVTYPE_REF,window,D3DCREATE_HARDWARE_VERTEXPROCESSING,
+            &present,nullptr),D3DERR_INVALIDCALL);
+        CHECK_HR(ex->CreateDeviceEx(0,D3DDEVTYPE_HAL,window,D3DCREATE_HARDWARE_VERTEXPROCESSING,
+            &present,nullptr,&device));
+    }
+    CHECK(device!=nullptr);
+    if(!device){outNum("RESULT checks=",checks);outNum("RESULT failures=",failures);return 1;}
+
+    // Device identity and caps.
+    D3DDEVICE_CREATION_PARAMETERS creation{};
+    CHECK_HR(device->GetCreationParameters(&creation));
+    CHECK(creation.hFocusWindow==window&&creation.DeviceType==D3DDEVTYPE_HAL);
+    CHECK_HR(device->GetDeviceCaps(&caps));
+    CHECK(caps.VertexShaderVersion==D3DVS_VERSION(3,0));
+    IDirect3D9* owner=nullptr;
+    CHECK_HR(device->GetDirect3D(&owner));
+    CHECK(owner==static_cast<IDirect3D9*>(ex));
+    if(owner)owner->Release();
+    CHECK_HR(device->TestCooperativeLevel());
+    CHECK(device->GetNumberOfSwapChains()==1);
+
+    // The swap chain and its back buffer, which is the device's first render
+    // target exactly as on Windows.
+    IDirect3DSwapChain9* chain=nullptr;
+    CHECK_HR(device->GetSwapChain(0,&chain));
+    CHECK(chain!=nullptr);
+    if(chain) {
+        D3DPRESENT_PARAMETERS got{};
+        CHECK_HR(chain->GetPresentParameters(&got));
+        CHECK(got.BackBufferWidth==320&&got.BackBufferFormat==D3DFMT_X8R8G8B8);
+        IDirect3DDevice9* chainDevice=nullptr;
+        CHECK_HR(chain->GetDevice(&chainDevice));
+        CHECK(chainDevice==static_cast<IDirect3DDevice9*>(device));
+        if(chainDevice)chainDevice->Release();
+    }
+    IDirect3DSurface9* backBuffer=nullptr;
+    CHECK_HR(device->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,&backBuffer));
+    CHECK(backBuffer!=nullptr);
+    if(backBuffer) {
+        D3DSURFACE_DESC desc{};
+        CHECK_HR(backBuffer->GetDesc(&desc));
+        CHECK(desc.Width==320&&desc.Height==240&&desc.Format==D3DFMT_X8R8G8B8);
+        CHECK(desc.Usage&D3DUSAGE_RENDERTARGET);
+        CHECK(backBuffer->GetType()==D3DRTYPE_SURFACE);
+        IDirect3DDevice9* surfaceDevice=nullptr;
+        CHECK_HR(backBuffer->GetDevice(&surfaceDevice));
+        CHECK(surfaceDevice==static_cast<IDirect3DDevice9*>(device));
+        if(surfaceDevice)surfaceDevice->Release();
+        // A default-pool surface is not lockable, as on Windows.
+        D3DLOCKED_RECT locked{};
+        CHECK_HR_IS(backBuffer->LockRect(&locked,nullptr,0),D3DERR_INVALIDCALL);
+        // The swap chain's back buffer is the device's render target 0.
+        IDirect3DSurface9* current=nullptr;
+        CHECK_HR(device->GetRenderTarget(0,&current));
+        CHECK(current==backBuffer);
+        if(current)current->Release();
+    }
+
+    // A depth-stencil surface, which the auto depth-stencil parameter created.
+    IDirect3DSurface9* depth=nullptr;
+    CHECK_HR(device->GetDepthStencilSurface(&depth));
+    CHECK(depth!=nullptr);
+    if(depth) {
+        D3DSURFACE_DESC desc{};
+        CHECK_HR(depth->GetDesc(&desc));
+        CHECK(desc.Format==D3DFMT_D24S8);
+        depth->Release();
+    }
+
+    // The frame path: BeginScene, clear, EndScene, Present.
+    CHECK_HR(device->BeginScene());
+    CHECK_HR(device->Clear(0,nullptr,D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER|D3DCLEAR_STENCIL,
+        0xff204060,1.0f,0));
+    CHECK_HR(device->EndScene());
+    HRESULT presented=device->Present(nullptr,nullptr,nullptr,nullptr);
+    // Wine's windowed path presents; a lost or occluded device is still an
+    // answer, a crash is not.
+    outHex("INFO Present hr=",(unsigned long)presented);
+    CHECK(presented==D3D_OK||presented==D3DERR_DEVICELOST);
+    CHECK_HR(device->PresentEx(nullptr,nullptr,nullptr,nullptr,0));
+
+    // Viewport and scissor rect reach the D3D11 context and read back.
+    D3DVIEWPORT9 viewport{0,0,320,240,0.0f,1.0f};
+    CHECK_HR(device->SetViewport(&viewport));
+    D3DVIEWPORT9 readback{};
+    CHECK_HR(device->GetViewport(&readback));
+    CHECK(readback.Width==320&&readback.MaxZ==1.0f);
+    RECT scissor{0,0,160,120};
+    CHECK_HR(device->SetScissorRect(&scissor));
+    RECT scissorBack{};
+    CHECK_HR(device->GetScissorRect(&scissorBack));
+    CHECK(scissorBack.right==160&&scissorBack.bottom==120);
+
+    // Render states and sampler states are stored and read back; the
+    // translation that consumes them is the unfinished half.
+    CHECK_HR(device->SetRenderState(D3DRS_ZENABLE,D3DZB_TRUE));
+    DWORD value=0;
+    CHECK_HR(device->GetRenderState(D3DRS_ZENABLE,&value));
+    CHECK(value==D3DZB_TRUE);
+    CHECK_HR(device->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_LINEAR));
+    CHECK_HR(device->GetSamplerState(0,D3DSAMP_MINFILTER,&value));
+    CHECK(value==D3DTEXF_LINEAR);
+    CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_MODULATE));
+    CHECK_HR(device->GetTextureStageState(0,D3DTSS_COLOROP,&value));
+    CHECK(value==D3DTOP_MODULATE);
+
+    // Shader constants are stored and read back.
+    const float constants[2][4]={{1,2,3,4},{5,6,7,8}};
+    CHECK_HR(device->SetVertexShaderConstantF(0,&constants[0][0],2));
+    float returned[2][4]{};
+    CHECK_HR(device->GetVertexShaderConstantF(0,&returned[0][0],2));
+    CHECK(returned[1][3]==8.0f);
+    CHECK_HR(device->SetPixelShaderConstantF(4,&constants[0][0],1));
+    float pixel[4]{};
+    CHECK_HR(device->GetPixelShaderConstantF(4,pixel,1));
+    CHECK(pixel[0]==1.0f&&pixel[3]==4.0f);
+
+    // A render target the guest creates, set, cleared and unset.
+    IDirect3DSurface9* target=nullptr;
+    CHECK_HR(device->CreateRenderTarget(64,64,D3DFMT_A8R8G8B8,D3DMULTISAMPLE_NONE,0,FALSE,&target,nullptr));
+    CHECK(target!=nullptr);
+    if(target) {
+        CHECK_HR(device->SetRenderTarget(0,target));
+        IDirect3DSurface9* current=nullptr;
+        CHECK_HR(device->GetRenderTarget(0,&current));
+        CHECK(current==target);
+        if(current)current->Release();
+        CHECK_HR(device->Clear(0,nullptr,D3DCLEAR_TARGET,0xff00ff00,1.0f,0));
+        // Back to the swap chain's back buffer.
+        CHECK_HR(device->SetRenderTarget(0,backBuffer));
+        target->Release();
+    }
+
+    // A depth-stencil surface the guest creates and binds.
+    IDirect3DSurface9* ownDepth=nullptr;
+    CHECK_HR(device->CreateDepthStencilSurface(64,64,D3DFMT_D16,D3DMULTISAMPLE_NONE,0,FALSE,&ownDepth,nullptr));
+    CHECK(ownDepth!=nullptr);
+    if(ownDepth) {
+        CHECK_HR(device->SetDepthStencilSurface(ownDepth));
+        CHECK_HR(device->Clear(0,nullptr,D3DCLEAR_ZBUFFER,0,0.5f,0));
+        ownDepth->Release();
+    }
+
+    // A SYSTEMMEM surface is CPU-visible and locks, unlike the back buffer.
+    IDirect3DSurface9* staging=nullptr;
+    CHECK_HR(device->CreateOffscreenPlainSurface(16,16,D3DFMT_A8R8G8B8,D3DPOOL_SYSTEMMEM,
+        &staging,nullptr));
+    if(staging) {
+        D3DLOCKED_RECT locked{};
+        CHECK_HR(staging->LockRect(&locked,nullptr,0));
+        CHECK(locked.pBits!=nullptr&&locked.Pitch>=64);
+        CHECK_HR(staging->UnlockRect());
+        CHECK_HR_IS(staging->UnlockRect(),D3DERR_INVALIDCALL);   // not locked twice
+        staging->Release();
+    }
+
+    // The unimplemented half answers with the API's own failure code and says
+    // so in the log, rather than pretending to work.
+    IDirect3DVertexBuffer9* vertexBuffer=nullptr;
+    CHECK_HR_IS(device->CreateVertexBuffer(64,D3DUSAGE_WRITEONLY,0,D3DPOOL_DEFAULT,&vertexBuffer,nullptr),
+        D3DERR_INVALIDCALL);
+    CHECK(vertexBuffer==nullptr);
+    IDirect3DVertexShader9* vertexShader=nullptr;
+    CHECK_HR_IS(device->CreateVertexShader(nullptr,&vertexShader),D3DERR_INVALIDCALL);
+    CHECK_HR_IS(device->DrawPrimitive(D3DPT_TRIANGLELIST,0,1),D3DERR_INVALIDCALL);
+    IDirect3DTexture9* texture=nullptr;
+    CHECK_HR_IS(device->CreateTexture(16,16,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&texture,nullptr),
+        D3DERR_INVALIDCALL);
+
+    // Reset rebuilds the swap chain, as D3D9 documents.
+    CHECK_HR(device->Reset(&present));
+    IDirect3DSurface9* afterReset=nullptr;
+    CHECK_HR(device->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,&afterReset));
+    CHECK(afterReset!=nullptr);
+    if(afterReset)afterReset->Release();
+
+    // Release everything the guest holds before the device: Wine never finishes
+    // process exit while a D3D object outlives its device.
+    if(backBuffer)backBuffer->Release();
+    if(chain)chain->Release();
+    device->Release();
+    ex->Release();
+    if(window)DestroyWindow(window);
+    FreeLibrary(module);
+    outNum("RESULT checks=",checks);outNum("RESULT failures=",failures);
+    return failures?1:0;
+}
