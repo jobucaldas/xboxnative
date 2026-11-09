@@ -14,7 +14,9 @@ mingw_lib=$(dirname "$(x86_64-w64-mingw32-g++ -print-file-name=libkernel32.a)")
 x86_64-w64-mingw32-g++ -c -O2 -std=c++17 -fno-builtin -fno-tree-loop-distribute-patterns \
     -fno-exceptions -fno-rtti -fno-stack-protector -fno-asynchronous-unwind-tables \
     test.cpp -o "$out/test.obj"
-lld-link-19 /nodefaultlib /entry:d3d10_test_entry /subsystem:console,6.02 /dynamicbase /nxcompat \
+# CI installs plain lld; development hosts here carry the versioned name.
+link() { lld-link-19 "$@" 2>/dev/null || lld-link "$@"; }
+link /nodefaultlib /entry:d3d10_test_entry /subsystem:console,6.02 /dynamicbase /nxcompat \
     /out:"$out/d3d10-test.exe" "$out/test.obj" /libpath:"$mingw_lib" \
     libkernel32.a libuser32.a libuuid.a libd3d11.a libdxgi.a
 # Wine recognises a DLL by name and serves Wine's own builtin export table for

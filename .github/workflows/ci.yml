@@ -123,6 +123,17 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 llvm lld
       - name: inspect synthetic no-CRT guest
         run: bash src/xbox-test/uwph/guest-fixture/check-pe.sh
+  d3d10-shim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install cross compiler and PE tools
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64 llvm lld
+      # Build and inspect only: the shim must import nothing but what Play routes,
+      # have no writable code section, and export the entry points. Driving it
+      # against Wine's d3d11 is src/xbox-test/uwph/d3d10/test.sh, run locally.
+      - name: build the D3D10 shim and inspect its PE
+        run: bash src/xbox-test/uwph/d3d10/build.sh "$RUNNER_TEMP/d3d10-shim"
   x86-core:
     runs-on: ubuntu-latest
     steps:
