@@ -53,6 +53,8 @@ jobs:
           /tmp/steam-achievements-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_presence_test.cpp -o /tmp/steam-presence-test
           /tmp/steam-presence-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_leaderboards_test.cpp -o /tmp/steam-leaderboards-test
+          /tmp/steam-leaderboards-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/game_library_test.cpp -o /tmp/game-library-test
           /tmp/game-library-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/detail-input.cpp -o /tmp/detail-input-test
