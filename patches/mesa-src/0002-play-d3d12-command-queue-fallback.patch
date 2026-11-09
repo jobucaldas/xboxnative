@@ -1,0 +1,42 @@
+Play: create the d3d12 command queue when CreateCommandQueue1 is not implemented (research/OPENGL-PLAN.md).
+SPDX-License-Identifier: MIT (same licence as the file patched; Mesa is MIT)
+
+Mesa's d3d12 screen asks ID3D12Device9::CreateCommandQueue1 (with the OpenGLOn12 creator ID) whenever the device
+exposes that interface and treats any failure as fatal. Wine's d3d12 exposes ID3D12Device9 but answers E_NOTIMPL,
+so the screen never initialised: no adapter formats, "No matching GL pixel format available" in the guest. A
+creator ID only tags the queue for tooling; the queue is what the driver needs, so fall back to
+ID3D12Device::CreateCommandQueue. On a D3D12 implementation that does honour creator IDs nothing changes.
+
+--- a/src/gallium/drivers/d3d12/d3d12_screen.cpp	2026-11-08 23:15:30.063781974 -0300
++++ b/src/gallium/drivers/d3d12/d3d12_screen.cpp	2026-11-08 23:15:29.616777877 -0300
+@@ -1441,20 +1441,21 @@
+    queue_desc.Type = screen->queue_type;
+    queue_desc.Flags = queue_flags;
+ 
++   HRESULT hr = E_FAIL;
+ #ifndef _GAMING_XBOX
+    ID3D12Device9 *device9 = NULL;
+    if (SUCCEEDED(screen->dev->QueryInterface(&device9))) {
+-      if (FAILED(device9->CreateCommandQueue1(&queue_desc, OpenGLOn12CreatorID,
+-                                              IID_PPV_ARGS(&screen->cmdqueue)))) {
+-         device9->Release();
+-         return false;
+-      }
++      hr = device9->CreateCommandQueue1(&queue_desc, OpenGLOn12CreatorID,
++                                        IID_PPV_ARGS(&screen->cmdqueue));
+       device9->Release();
+-   } else
++   }
+ #endif
+-   {
+-      if (FAILED(screen->dev->CreateCommandQueue(&queue_desc,
+-                                                 IID_PPV_ARGS(&screen->cmdqueue))))
++   /* CreateCommandQueue1 is optional: a device may expose ID3D12Device9 and still
++    * answer E_NOTIMPL (a D3D12 implementation without creator IDs, e.g. Wine's).
++    * The queue itself is not optional, so fall back to the plain call. */
++   if (FAILED(hr)) {
++      hr = screen->dev->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&screen->cmdqueue));
++      if (FAILED(hr))
+          return false;
+    }
+    return true;

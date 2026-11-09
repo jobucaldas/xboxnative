@@ -6,6 +6,8 @@
 # d3d12 driver (research/OPENGL-PLAN.md). The program then creates a window and context,
 # clears and presents frames. A stage the host cannot run (Wine without a working d3d12 backend)
 # prints BLOCKED with the reason, never PASS; any other failure fails the script. No console or game claim.
+# Wine 11's d3d12 does run the driver (it answers ID3D12Device9 but not CreateCommandQueue1, which
+# patches/mesa-src/0002 covers), so the d3d12 pass is expected to present a frame here too.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export WINEPREFIX=${PRUN_WINEPREFIX:-/tmp/prun-wine}
@@ -39,8 +41,8 @@ run_pass() {
 }
 mesa=0; [ -f out/play-tests/runtime/opengl32.dll ] && mesa=1
 # Pass 1, Mesa's default: the d3d12 driver. It needs a D3D12 backend that reports DISPLAY-capable formats (the
-# console's; Wine's vkd3d does not, so no GL pixel format exists there: BLOCKED, not a pass). PRUN_REQUIRE_D3D12=1
-# turns BLOCKED into a failure for hosts that should run it.
+# console's; Wine's vkd3d does too since patch 0002). PRUN_REQUIRE_D3D12=1 turns BLOCKED into a failure for hosts
+# that should run it.
 run_pass d3d12 ""
 if [ "$result" = PASS ] && grep -q 'renderer=".*D3D12' "$log"; then echo "PLAY-SDL3-GL d3d12 context+frame PASS"
 elif [ "$result" = PASS ]; then echo "PLAY-SDL3-GL FAIL: frame presented but the renderer is not d3d12"; exit 1

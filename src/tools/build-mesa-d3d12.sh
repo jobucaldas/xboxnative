@@ -7,7 +7,8 @@
 # imports). Mesa is MIT-licensed; the DLLs are build outputs, git-ignored (out/ and *.dll) and never committed.
 # Default: fetch, verify, extract and run `meson setup` (milestone 1: the configuration is reproducible and accepted by Mesa).
 # --build also compiles and copies the DLLs to <outdir>. --dry-run only prints the recipe (offline; what CI runs).
-# Patches: patches/mesa-src/*.patch (window handling and CoreWindow presentation for a launcher guest), applied with
+# Patches: patches/mesa-src/*.patch (window handling and CoreWindow presentation for a launcher guest; a command-queue
+# fallback for D3D12 implementations without CreateCommandQueue1), applied with
 # `patch --fuzz=0` after the SHA-256 check. Needs: a UCRT-flavoured x86_64-w64-mingw32-gcc/g++ (the console has no msvcrt.dll; on NixOS pkgsCross.ucrt64), meson, ninja, python3 with mako and pyyaml, bison, flex, curl, xz, sha256sum, git.
 # Env: MCFGTHREAD_LIBDIR = directory holding libmcfgthread.a when the toolchain's threading runtime is mcfgthread
 # (linked statically: there is no libmcfgthread-2.dll to map); MCFGTHREAD_INCDIR = its headers (mcfgthread/gthr.h,

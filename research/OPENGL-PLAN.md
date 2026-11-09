@@ -1,8 +1,8 @@
 # OpenGL for Play on the console: plan
 
-Status: plan plus milestone 1 (loader route and recipe) and milestone 2 (the d3d12 driver builds, is packaged and is
-mapped; a GL context is created off-device through the software rasterizer, and the d3d12 path is blocked only by the
-off-device host having no D3D12 device). Nothing here claims a game renders on the console. Evidence labels:
+Status: plan plus milestone 1 (loader route and recipe) and milestone 2 (the d3d12 driver builds, is packaged, is
+mapped, and creates a GL context and presents frames off-device through both the d3d12 driver and the software
+rasterizer). Nothing here claims a game renders on the console. Evidence labels:
 **[verified]** read in the pinned source or run off-device, **[unverified]** needs the console.
 
 ## Problem
@@ -87,6 +87,16 @@ Play: maps both from the runtime layout like Wine's msvcp140 ──> console d3d
      drops exactly those from our own output (`opengl32.dll`: 0, `libgallium_wgl.dll`: 23 in this build).
 3. **Done: DirectX-Headers pin.** `deps.pin` records the 40-hex commit `64c650b0…` (v1.618.1); the script checks the
    tag in Mesa's wrap, clones that tag and verifies the commit. **[verified]**
+3b. **Done: command-queue fallback** (`patches/mesa-src/0002-play-d3d12-command-queue-fallback.patch`). This was the
+   blocker between "device created" and "zero pixel formats": `d3d12_init_screen_command_queue` calls
+   `ID3D12Device9::CreateCommandQueue1(OpenGLOn12CreatorID)` whenever the device exposes that interface and treats
+   any failure as fatal, with no fallback. Wine's d3d12 exposes `ID3D12Device9` and answers `E_NOTIMPL`, so the screen
+   never initialised, `stw` had no adapter formats, and the guest saw `No matching GL pixel format available`. The
+   patch falls back to `ID3D12Device::CreateCommandQueue`; a creator ID only tags the queue for tooling. On a D3D12
+   implementation that honours creator IDs nothing changes. **[verified off-device: Wine 11]**
+   The diagnostic path, if this ever regresses: `MESA_DEBUG`/`debug_printf` is compiled out of release builds, so the
+   trace comes from `OutputDebugStringA` (Play logs it) — the screen init chain is `d3d12_wgl_create_screen` →
+   `d3d12_create_dxgi_screen` → `d3d12_init_screen`, and a NULL there leaves `stw` with zero formats.
 4. **Done: package + map.** `app/build.sh` copies both DLLs, the licences, the patches and `SOURCE.txt` into
    `layout/runtime/`; `loadExW` finds them there (after any copy the game ships) through `redistributable()`.
    Mesa's imports resolve through the existing routes; `d3d12.dll!D3D12CreateDevice` is routed with the real
@@ -100,6 +110,10 @@ Play: maps both from the runtime layout like Wine's msvcp140 ──> console d3d
    adapter reaches Mesa. **[verified off-device]**
 7. **D3D12 on the console from Play**: Mesa calls `D3D12CreateDevice` itself; Play routes it with the real adapter.
    Whether the console's D3D12 accepts Mesa's device creation has to be tested on the device. **[unverified]**
+   What the driver needs from the backend at runtime, read in the pinned source and confirmed off-device: a D3D12
+   device at feature level ≥ 11.0 (else the queue is a compute queue), `CheckFeatureSupport` for options/architecture/
+   feature levels/shader model and per-format support, a command queue, a shared fence, and DXGI adapters by LUID.
+   `CreateCommandQueue1` is optional (see 3b). DXIL validation is optional (see 8).
 8. **DXIL validation.** Read in the pinned source: `d3d12_context_common.cpp` only creates the validator when
    `D3D12_DEBUG` does *not* include `experimental`; without `dxil.dll` on the search path `dxil_create_validator`
    fails and Mesa proceeds with `NO_DXIL_VALIDATION`. With `D3D12_DEBUG=experimental` Mesa instead asks the device
@@ -107,15 +121,19 @@ Play: maps both from the runtime layout like Wine's msvcp140 ──> console d3d
    experimental models outright. `dxil.dll` is now mappable from `runtime/` (optional signer, game copies first).
    Which of these the console accepts is **[unverified]**.
 9. **Acceptance**: `app/tests/play-sdl3-gl.sh` runs the SDL3 GL path twice off-device: the default (d3d12) pass and a
-   `GALLIUM_DRIVER=softpipe` pass that must present a frame. On the console, via the launcher with Fields of Mistria
-   (`play-test.sh 2142790`), with evidence in the PR. **[off-device: see the test section below]**
+   `GALLIUM_DRIVER=softpipe` pass that must present a frame. Both passes present a frame here (Wine 11.0 with its
+   built-in vkd3d, Intel HD 4000 through vkd3d): d3d12 reports `renderer="D3D12 (Intel(R) HD Graphics 4000)"`,
+   `version="2.1 Mesa 25.3.6"`; softpipe reports `renderer="softpipe"`, `version="3.3 (Compatibility Profile)"`.
+   The d3d12 swapchain is created through Play's CoreWindow adapter (`guest DXGI CoreWindow swapchain returned
+   hr=0x00000000`). On the console, via the launcher with Fields of Mistria (`play-test.sh 2142790`), with evidence
+   in the PR. **[verified off-device; console unverified]**
 
 ## Licensing and policy
 
 Mesa and DirectX-Headers are MIT; listed in `NOTICE`; built from pinned sources, outputs git-ignored, never
 committed (AGENTS.md rules 5 and 9). No game or Valve files are touched; the GL stack is substituted in memory like
-the other Play modules. Nothing here weakens a gate: the new SDL fixture prints `BLOCKED` for window/context creation
-rather than counting it as a pass.
+the other Play modules. Nothing here weakens a gate: the SDL fixture still prints `BLOCKED` (never PASS) for a stage
+the host cannot run rather than counting it as a pass.
 
 ## Not covered
 
