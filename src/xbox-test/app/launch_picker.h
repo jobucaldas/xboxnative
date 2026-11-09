@@ -18,7 +18,7 @@ struct State {
     bool open = false;
     std::vector<launch_target::Choice> rows;
     int sel = 0;
-    std::string note;   // why the last A press did not start (a 32-bit row)
+    std::string note;   // why the last A press did not start (a row that cannot run)
 };
 
 // Open on the remembered option when it is still offered and runnable, else
@@ -44,7 +44,7 @@ inline const launch_target::Choice* current(const State& s) {
 }
 
 enum class Press { none, start, refused };
-// A: start the highlighted option, or explain why it cannot run yet.
+// A: start the highlighted option, or explain why it cannot run.
 inline Press press_a(State& s) {
     if (!s.open) return Press::none;
     const launch_target::Choice* c = current(s);

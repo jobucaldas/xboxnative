@@ -371,6 +371,20 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetModuleHandleW", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         if (!c.arg(0)) return image_base;
         return 0; });
+    // FreeLibrary: the guest cannot unload a module it did not load through a
+    // path this surface tracks, so a handle for the image or a known module is
+    // accepted and nothing is unmapped. Anything else fails with
+    // ERROR_MOD_NOT_FOUND, which is what Windows' LdrUnloadDll and Wine answer.
+    reg.add("kernel32.dll", "FreeLibrary", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        uint32_t h = c.arg(0);
+        if (h == image_base) return 1;
+        for (const auto& m : modules) if (m.second == h) return 1;
+        set_last_error(126);  // ERROR_MOD_NOT_FOUND
+        return 0; });
+    // IsDBCSLeadByteEx: the code pages this surface answers (1252, 437, 65001)
+    // are all single-byte or UTF-8, so no byte is a lead byte.
+    reg.add("kernel32.dll", "IsDBCSLeadByteEx", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("kernel32.dll", "IsDBCSLeadByte", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
     // (hModule, lpFilename, nSize): arg(0) is the module handle, not the buffer.
     reg.add("kernel32.dll", "GetModuleFileNameA", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
         uint32_t buf = c.arg(1), n = c.arg(2); if (!buf || !n) return 0;

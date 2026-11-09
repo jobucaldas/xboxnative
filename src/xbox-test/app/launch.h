@@ -19,6 +19,11 @@ struct LaunchState {
     std::atomic<int> gen{0};
     double started = 0;                 // render-thread read only (set before phase=1)
     std::atomic<double> loaderStarted{0}; // when the guest loader began (0: still preparing Steam/client)
+    // The 32-bit path (host/x86) has no play_runtime::State: the interpreter runs
+    // the guest synchronously and reports these itself, so launch_result.json
+    // says whether game code ran and how it ended for both engines.
+    std::atomic<bool> pe32Executed{false}, pe32Finished{false};
+    std::atomic<uint32_t> pe32ExitCode{0};
     std::mutex m; std::string result, attempt; bool ok=false;
 };
 static LaunchState g_launch;
@@ -48,6 +53,7 @@ static void lp_sink(const char* s) {
 }
 #include "wine_gap.h"
 #include "host/wxl_pe32.h"
+#include "host/x86/x86_play.h"
 #include "pe32_probe.h"
 #include "donors/probe.h"
 
@@ -714,6 +720,64 @@ static void dump_thread_stacks() {
     }
     lp_sink("STACKS end");
 }
+// A 32-bit (PE32) guest: the in-process x86 interpreter (host/x86) runs the
+// executable with the guest OS surface serving its imports. This is a separate
+// path from the 64-bit loader on purpose: the guest never shares the launcher's
+// address space (guest addresses are indices into the interpreter's own page
+// table), so nothing here can be mistaken for the native route, and the log
+// says which engine ran which PE. Steam, cloud and presence staging are not
+// part of this path yet, so a game that needs them reports exactly that.
+static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& exe) {
+    char line[512];
+    std::string name=play_runtime::narrow(exe);
+    g_launch.pe32Executed=false;g_launch.pe32Finished=false;g_launch.pe32ExitCode=0;
+    {   // The import classification beside the interpreter's own unresolved list.
+        std::string summary;
+        if(pe32_probe::map(path,c.root,summary)){snprintf(line,sizeof line,"PE32 %s",summary.c_str());lp_sink(line);}
+    }
+    snprintf(line,sizeof line,"PRUN PE32 engine=x86-interpreter exe=%s",name.c_str());lp_sink(line);
+    auto tee=[&name](const std::string& s) {
+        // Guest output goes to the probe log line by line, bounded per line.
+        size_t start=0;
+        while(start<s.size()) {
+            size_t nl=s.find('\n',start);if(nl==std::string::npos)nl=s.size();
+            std::string row=s.substr(start,nl-start);
+            if(row.size()>400)row.resize(400);
+            char b[512];snprintf(b,sizeof b,"PE32 OUT %s: %s",name.c_str(),row.c_str());lp_sink(b);
+            start=nl+1;
+        }
+    };
+    std::string cmdline="\""+name+"\"";
+    if(!c.args.empty())cmdline+=" "+play_runtime::narrow(c.args);
+    // The guest runs on this thread (the interpreter is synchronous), so the
+    // progress report happens once the image is mapped and before the entry
+    // point: from here on the launch is "running", not "preparing".
+    auto loaded=[&](const x86::PlayResult& r) {
+        g_launch.loaderStarted=now_s();
+        g_launch.pe32Executed=true;
+        char b[96];snprintf(b,sizeof b,"PE32 guest entry 0x%08x",r.entry);
+        lp_publish(c.gen,c.appid,b,false,1,1,"running",false);
+    };
+    auto r=x86::run(path,c.cwd,cmdline,tee,loaded);
+    c.mapped=r.loaded?1:0;
+    g_launch.pe32Finished=r.finished;
+    g_launch.pe32ExitCode=r.exit_code;
+    snprintf(line,sizeof line,"PRUN PE32 %s base=0x%08x entry=0x%08x imports=%u bound=%u relocs=%u instructions=%llu",
+             r.loaded?"loaded":"NOT-LOADED",r.base,r.entry,r.imports,r.bound,r.relocations,(unsigned long long)r.instructions);lp_sink(line);
+    for(auto& u:r.unresolved){snprintf(line,sizeof line,"PE32 UNRESOLVED %s",u.c_str());lp_sink(line);}
+    if(r.finished) {
+        // Same rule as the native loader: only a clean exit is success, and a
+        // nonzero code is reported as the failure it is.
+        c.ok=r.exit_code==0;
+        snprintf(line,sizeof line,"PRUN PE32 exited code=%u",r.exit_code);lp_sink(line);
+        if(!c.ok)c.failName="32-bit guest exited with code "+std::to_string(r.exit_code);
+        return;
+    }
+    c.ok=false;
+    std::string why=r.fault.empty()?"the 32-bit guest did not exit":r.fault;
+    if(!r.fault_kind.empty()) {snprintf(line,sizeof line,"PRUN PE32 fault kind=%s eip=0x%08x",r.fault_kind.c_str(),r.fault_eip);lp_sink(line);}
+    c.failName="32-bit guest: "+why;
+}
 static void lp_run_impl(LpCtx& c) {
     // A previous launch that never ran game code was released; nothing of its
     // Steam routing or final upload carries over to this one.
@@ -728,11 +792,7 @@ static void lp_run_impl(LpCtx& c) {
     std::wstring exe=slash==std::wstring::npos?rel:rel.substr(slash+1);
     std::wstring exeDir=slash==std::wstring::npos?c.root:c.root+L"\\"+rel.substr(0,slash);
     if(pe_machine(exeDir+L"\\"+exe)==IMAGE_FILE_MACHINE_I386) {
-        std::string summary;
-        bool inspected=pe32_probe::map(exeDir+L"\\"+exe,exeDir,summary);
-        c.mapped=inspected?1:0;
-        c.failName=inspected?summary+"; 32-bit execution unsupported":"PE32 data-only inspection failed; execution unsupported";
-        lp_sink("PRUN FAIL 32-bit execution unsupported; PE32 inspection is data-only");return;
+        lp_run_pe32(c,exeDir+L"\\"+exe,exe);return;
     }
     // These are behavior/ABI prerequisites, not optional progress diagnostics.
     // Never expose donor exports to executable guests after a failed probe.
@@ -806,11 +866,12 @@ static bool load_appinfo(uint32_t appid,Vdf& root,const Vdf*& app) {
 }
 struct LaunchTarget { std::wstring exe; std::string args, why, workdir; };   // exe is install-relative
 // The game's own Steam launch option when known, as the Steam client picks it;
-// otherwise the largest 64-bit top-level .exe. Engine options come from the
-// game's files (Unity: UnityPlayer.dll beside the executable), never from its
-// app ID. Play executes 64-bit guests only, so a 64-bit option wins even over
-// a 32-bit one typed "default" (Hades ships x64 and x86 entries). wanted (the
-// picker's choice) starts that option instead of the preferred one.
+// otherwise the largest top-level .exe (a 64-bit one first). Engine options come
+// from the game's files (Unity: UnityPlayer.dll beside the executable), never
+// from its app ID. A 64-bit option still wins over a 32-bit one typed "default"
+// (Hades ships x64 and x86 entries), because the 64-bit guest runs natively
+// while a 32-bit one runs in the x86 interpreter. wanted (the picker's choice)
+// starts that option instead of the preferred one.
 static LaunchTarget pick_target(uint32_t appid, const std::wstring& root, const std::string* wanted=nullptr) {
     LaunchTarget t; Vdf info; const Vdf* app=nullptr; const launch_target::Entry* chosen=nullptr;
     std::vector<launch_target::Entry> options;
@@ -873,10 +934,14 @@ static void lp_publish(int gen,uint32_t appid,const std::string& result,bool ok,
     std::lock_guard<std::mutex> lock(g_launch.m);
     if(g_launch.gen!=gen || (g_launch.phase!=1 && g_launch.phase!=3))return;
     auto runtime=play_runtime::observed.load(std::memory_order_acquire);
-    bool executed=runtime && runtime->executed;
-    bool finished=runtime && runtime->finished.load(std::memory_order_acquire);
+    // Either engine: the native loader's state, or the 32-bit interpreter's own
+    // report (it has no play_runtime::State; see LaunchState::pe32*).
+    bool executed=(runtime && runtime->executed) || g_launch.pe32Executed.load();
+    bool finished=runtime ? runtime->finished.load(std::memory_order_acquire) : g_launch.pe32Finished.load();
+    bool success=runtime ? runtime->success : g_launch.pe32Finished.load();
+    uint32_t code=runtime ? runtime->code : g_launch.pe32ExitCode.load();
     std::string last=runtime?runtime->snapshot():result;
-    std::string json="{\"appid\":"+std::to_string(appid)+",\"attemptId\":\""+g_launch.attempt+"\",\"time\":\""+utc_iso()+"\",\"stage\":\""+(executed?"guest-execution":"loader")+"\",\"state\":\""+status+"\",\"terminal\":"+(terminal?"true":"false")+",\"ok\":"+(ok?"true":"false")+",\"mapped\":"+std::to_string(mapped)+",\"total\":"+std::to_string(total)+",\"gameCodeExecuted\":"+(executed?"true":"false")+",\"exitCode\":"+(finished&&runtime->success?std::to_string(runtime->code):"null")+",\"lastEvent\":\""+json_esc(last)+"\",\"result\":\""+json_esc(result)+"\"}\n";
+    std::string json="{\"appid\":"+std::to_string(appid)+",\"attemptId\":\""+g_launch.attempt+"\",\"time\":\""+utc_iso()+"\",\"stage\":\""+(executed?"guest-execution":"loader")+"\",\"state\":\""+status+"\",\"terminal\":"+(terminal?"true":"false")+",\"ok\":"+(ok?"true":"false")+",\"mapped\":"+std::to_string(mapped)+",\"total\":"+std::to_string(total)+",\"gameCodeExecuted\":"+(executed?"true":"false")+",\"exitCode\":"+(finished&&success?std::to_string(code):"null")+",\"lastEvent\":\""+json_esc(last)+"\",\"result\":\""+json_esc(result)+"\"}\n";
     write_text(g_dir+L"\\launch_result.json",json);
     g_launch.result=result;g_launch.ok=ok;
     logf("launch: %s attempt=%s ok=%d mapped=%d/%d gameCodeExecuted=%s: %s",terminal?"RESULT":"RUNNING",g_launch.attempt.c_str(),ok?1:0,mapped,total,executed?"true":"false",result.c_str());
@@ -907,6 +972,9 @@ static void lp_watchdog() {
     if(loader ? now_s()-loader<=120 : now_s()-g_launch.started<=600)return;
     auto r=play_runtime::observed.load(std::memory_order_acquire);
     if(r && (r->finished.load(std::memory_order_acquire) || r->milestone.load()))return;
+    // The 32-bit interpreter's milestone is its own: the guest is running, and
+    // a game that runs for minutes must not be reported as a timeout.
+    if(!r && g_launch.pe32Executed.load())return;
     lp_finish(g_launch.gen,g_launch.appid,loader?"watchdog timeout 120 s; last event: "+(r?r->snapshot():std::string("preparing guest loader")):
         std::string("watchdog timeout 600 s preparing Steam before the game started; the game was not started"),false,0,0,"timeout");
 }
@@ -921,6 +989,10 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
         logf("launch: Play rejected: game code from the last launch is still loaded");return;
     }
     int gen = ++g_launch.gen; g_launch.appid = appid; g_launch.started = now_s(); g_launch.loaderStarted = 0;
+    // The 32-bit interpreter's report belongs to the launch that produced it:
+    // clear it here, not only in lp_run_pe32, or a later 64-bit launch would
+    // publish a previous PE32 run as this one's progress.
+    g_launch.pe32Executed = false; g_launch.pe32Finished = false; g_launch.pe32ExitCode = 0;
     { std::lock_guard<std::mutex> l(g_launch.m); g_launch.result.clear();g_launch.ok=false;g_launch.attempt=std::to_string(GetCurrentProcessId())+":"+std::to_string(gen); } g_launch.phase = 1;
     const InstallInfo inst = read_install(appid);   // the game folder may be on another drive (marker root)
     const std::wstring folder = !dir.empty() && inst.installed && inst.dir == dir ? inst.folder : g_dir + L"\\" + widen(dir);
