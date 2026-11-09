@@ -295,7 +295,7 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     Module* m=nullptr;
     {std::lock_guard<LoaderMutex> lock(state->loaderMutex);
      m=named(requested);
-     if(!m && !apiSetName(requested)) {
+     if(!m && !apiSetName(requested) && !systemDirectoryPath(requested)) {
          // Flags that only steer where the file is searched (Mono/Unity pass
          // LOAD_WITH_ALTERED_SEARCH_PATH or the SEARCH_* set for plugins) do not
          // change what is loaded; anything else is refused below, as before.
@@ -723,6 +723,43 @@ static void note_discord(const Module& m) {
     if(reported.exchange(true)) return;
     state->event("Discord SDK present ("+m.key+"); no Discord client on this console, so the game runs without Rich Presence");
 }
+// Vulkan (research/VULKAN-PLAN.md): the Khronos loader finds drivers through a JSON manifest. On Windows its search
+// order is VK_DRIVER_FILES (an environment override), the Microsoft.D3DMappingLayers app package, then
+// HKLM\SOFTWARE\Khronos\Vulkan\Drivers (RegEnumValueA). The console has no mapping-layers package, and the loader only
+// honours the environment override when the process is not elevated: loader_secure_getenv() calls is_high_integrity()
+// (OpenProcessToken/GetTokenInformation TokenIntegrityLevel) and ignores the variable at SECURITY_MANDATORY_HIGH_RID or
+// above. Play's process is at high integrity, so VK_DRIVER_FILES is silently dropped and the registry is the only route
+// that works (verified off-device: the loader logs "Loader is running with elevated permissions. Environment variable
+// VK_DRIVER_FILES will be ignored" and then "Found no registry files in HKEY_LOCAL_MACHINE\SOFTWARE\Khronos\Vulkan\Drivers").
+// Play therefore seeds that key in the guest registry (regb, LocalState\registry.sqlite), the same registry the loader's
+// RegOpenKeyExA/RegEnumValueA imports already reach. The value name is the manifest path and the data is 0, the layout
+// the loader requires; the manifest's library_path is a bare name, so the loader's own LoadLibraryW reaches Play's guest
+// search and finds vulkan-null-icd.dll in the runtime directory (redistributable()). Seeded before the loader maps, so
+// its first vkCreateInstance sees it; removed when the launch ends (reset_launch_config) so the next game starts clean.
+static const wchar_t* vulkanDriversKey=L"SOFTWARE\\Khronos\\Vulkan\\Drivers";
+static void publishVulkanDriverFiles(const std::wstring& path) {
+    if(basename(path)!="vulkan-1.dll") return;
+    // A game that ships its own loader keeps its own driver discovery: only the
+    // packaged runtime copy is ours to configure.
+    if(runtimeDirectory.empty() || _wcsicmp(path.c_str(),(runtimeDirectory+L"\\vulkan-1.dll").c_str())) return;
+    auto manifest=runtimeDirectory+L"\\vulkan-null-icd.json";
+    if(!exists(manifest)) return;
+    HKEY key=nullptr;
+    if(regb::RegCreateKeyExW(HKEY_LOCAL_MACHINE,vulkanDriversKey,0,nullptr,0,KEY_ALL_ACCESS,nullptr,&key,nullptr)!=ERROR_SUCCESS) return;
+    DWORD zero=0;
+    LONG set=regb::RegSetValueExW(key,manifest.c_str(),0,REG_DWORD,(const BYTE*)&zero,sizeof zero);
+    regb::RegCloseKey(key);
+    if(set!=ERROR_SUCCESS) return;
+    state->event("Vulkan loader mapped from the runtime directory; the guest registry lists the packaged null ICD (zero physical devices)");
+}
+// The loader caches driver discovery per process, so the key only has to be right before the first vkCreateInstance.
+// It must not outlive the launch: the next game would inherit a driver entry it never asked for.
+static void clearVulkanDriverFiles() {
+    HKEY key=nullptr;
+    if(regb::RegOpenKeyExW(HKEY_LOCAL_MACHINE,vulkanDriversKey,0,KEY_ALL_ACCESS,&key)!=ERROR_SUCCESS) return;
+    if(!runtimeDirectory.empty()) regb::RegDeleteValueW(key,(runtimeDirectory+L"\\vulkan-null-icd.json").c_str());
+    regb::RegCloseKey(key);
+}
 static Module* map(const std::wstring& requested,const std::string& asKey,wxl::Resolver resolver) {
     if(auto m=named(asKey.empty()?requested:wide(asKey.c_str()))) return m->mappingFailed?nullptr:m;
     // A delay import may map its DLL here; that DLL's own static imports are
@@ -730,6 +767,7 @@ static Module* map(const std::wstring& requested,const std::string& asKey,wxl::R
     struct DelayScope {bool outer=wxl::resolvingDelay;DelayScope(){wxl::resolvingDelay=false;}~DelayScope(){wxl::resolvingDelay=outer;}} delayScope;
     const bool provided=basename(requested)=="steam_api64.dll" && !steamProvider.empty();
     const std::wstring& path=provided?steamProvider:requested;
+    publishVulkanDriverFiles(path);
     if(state->modules.size()>=128) {state->event("loader module capacity exceeded");return nullptr;}
     auto own=std::make_unique<Module>();auto m=own.get();m->path=path;m->key=asKey.empty()?basename(path):asKey;state->modules.push_back(std::move(own));state->moduleCount=int(state->modules.size());
     // Publish before fixing imports; circular imports can use the copied export
@@ -1459,6 +1497,10 @@ static uintptr_t openglExport(const char* name) {
 // workingdir names it; empty means the executable's own directory.
 static bool start(const std::wstring& root,const std::wstring& exe,const std::wstring& args,wxl::Log log,const std::wstring& cwd=std::wstring()) {
     if(state) return false;
+    // A previous launch may have left its packaged ICD listed (a game that ran
+    // game code keeps its process state); this launch publishes its own only if
+    // it maps the runtime loader, so start from a clean registry.
+    clearVulkanDriverFiles();
     state=new State();state->root=root;state->cwd=cwd.empty()?root:cwd;state->log=log;observed.store(state,std::memory_order_release);state->command=L"\""+root+L"\\"+exe+L"\" "+args;state->commandA=narrow(state->command);
     mlp::log=log;wxl::logger=log;
     xinput_core::note=[](const char* text){if(mlp::log)mlp::log(text);};mlp::missingResolver=missing;mlp::assets.clear();mlp::summaries.clear();
@@ -1481,6 +1523,7 @@ static bool start(const std::wstring& root,const std::wstring& exe,const std::ws
 static void reset_launch_config() {
     steamProvider.clear();steamClient.clear();steamClientSigned.clear();appTicket.clear();emulatedCreate=nullptr;
     set_rich_presence_tap({});
+    clearVulkanDriverFiles();
 }
 // A launch that ended before any game code ran (no TLS callback, DllMain or
 // entry point: `executed` is set before each) left nothing executing: the

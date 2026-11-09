@@ -75,6 +75,32 @@ int main(int argc,char** argv) {
     regb::init(dir+L"\\missing-parent\\registry",say);
     EXPECT(regb::RegCreateKeyW(HKEY_CURRENT_USER,L"MustPersist",&rejected)==ERROR_WRITE_FAULT);
     EXPECT(regb::RegOpenKeyExW(HKEY_CURRENT_USER,L"MustPersist",0,KEY_READ,&rejected)==ERROR_FILE_NOT_FOUND);
+    // Enumeration: the Khronos Vulkan loader reads HKLM\SOFTWARE\Khronos\Vulkan\Drivers with RegEnumValueA and stops at
+    // ERROR_NO_MORE_ITEMS. Cover the ANSI name, the UTF-16 value behind it, the short-buffer answers and the end.
+    regb::init(dir,say);
+    { HKEY vk=0; DWORD driverValue=99;
+      EXPECT(regb::RegCreateKeyW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Khronos\\Vulkan\\Drivers",&vk)==0);
+      const wchar_t* manifest=L"C:\\runtime\\vulkan-null-icd.json";
+      EXPECT(regb::RegSetValueExW(vk,manifest,0,REG_DWORD,(const BYTE*)&driverValue,sizeof driverValue)==0);
+      char name[256]; DWORD nameLen=sizeof name, type=0, data=0, dataLen=sizeof data;
+      EXPECT(regb::RegEnumValueA(vk,0,name,&nameLen,nullptr,&type,(LPBYTE)&data,&dataLen)==0);
+      EXPECT(!strcmp(name,"C:\\runtime\\vulkan-null-icd.json") && type==REG_DWORD && dataLen==4 && data==99);
+      // A name buffer that is too small fails the call and reports the size it needs (including the terminator).
+      nameLen=4; dataLen=sizeof data;
+      EXPECT(regb::RegEnumValueA(vk,0,name,&nameLen,nullptr,&type,(LPBYTE)&data,&dataLen)==ERROR_MORE_DATA && nameLen==32);
+      nameLen=sizeof name; dataLen=0;   // count-only data query
+      EXPECT(regb::RegEnumValueA(vk,0,name,&nameLen,nullptr,&type,nullptr,&dataLen)==0 && dataLen==4);
+      nameLen=sizeof name; dataLen=sizeof data;
+      EXPECT(regb::RegEnumValueA(vk,1,name,&nameLen,nullptr,&type,(LPBYTE)&data,&dataLen)==ERROR_NO_MORE_ITEMS);
+      wchar_t wname[256]; DWORD wlen=256; dataLen=sizeof data;
+      EXPECT(regb::RegEnumValueW(vk,0,wname,&wlen,nullptr,&type,(LPBYTE)&data,&dataLen)==0 && !wcscmp(wname,manifest) && wlen==31);
+      EXPECT(regb::RegCloseKey(vk)==0); }
+    // The value survives a reload, so the next launch's enumeration sees the same driver entry.
+    regb::init(dir,say);
+    { HKEY vk=0; char name[256]; DWORD nameLen=sizeof name, type=0, data=0, dataLen=sizeof data;
+      EXPECT(regb::RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Khronos\\Vulkan\\Drivers",0,KEY_READ,&vk)==0);
+      EXPECT(regb::RegEnumValueA(vk,0,name,&nameLen,nullptr,&type,(LPBYTE)&data,&dataLen)==0 && data==99);
+      EXPECT(regb::RegCloseKey(vk)==0); }
     printf(bad?"SELFTEST FAILED %d\n":"SELFTEST OK\n",bad);
     return bad!=0;
 }

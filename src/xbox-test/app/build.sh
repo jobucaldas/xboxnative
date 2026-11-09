@@ -42,6 +42,16 @@ if [ "${PLAY_MESA:-1}" != 0 ]; then
   mkdir -p "$out/layout/runtime/mesa-patches"; cp "$mesa"/patches/*.patch "$out/layout/runtime/mesa-patches/"
   cp "$mesa/SHA256SUMS" "$out/layout/runtime/SHA256SUMS-mesa"; cp "$mesa/SOURCE.txt" "$out/layout/runtime/SOURCE-mesa.txt"
 fi
+# Vulkan for games that load vulkan-1.dll (research/VULKAN-PLAN.md): the Khronos loader built from the pinned source,
+# plus a null ICD that reports zero physical devices so a Vulkan-optional engine takes its normal fallback path.
+# PLAY_VULKAN=0 builds a launcher without them (LoadLibrary("vulkan-1.dll") then fails as it did before).
+if [ "${PLAY_VULKAN:-1}" != 0 ]; then
+  vk="$here/../../../out/vulkan-loader"
+  bash "$here/../../tools/build-vulkan-loader.sh" "$vk" --build
+  cp "$vk"/{vulkan-1.dll,vulkan-null-icd.dll,vulkan-null-icd.json} "$out/layout/runtime/"
+  cp "$vk"/{LICENSE-Vulkan-Loader.txt,LICENSE-Vulkan-Headers.md} "$out/layout/runtime/"
+  cp "$vk/SHA256SUMS" "$out/layout/runtime/SHA256SUMS-vulkan"; cp "$vk/SOURCE.txt" "$out/layout/runtime/SOURCE-vulkan.txt"
+fi
 # Steam API provider for owned games (gbe_fork, pinned release; never committed).
 gbe="$here/../../../out/gbe-fork"
 bash "$here/../../tools/fetch-gbe-fork.sh" "$gbe"

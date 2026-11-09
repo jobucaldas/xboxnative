@@ -319,6 +319,15 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         play_graphics::configure(&host_surface::token,host_surface::present,logline);
         logline("HOST SURFACE native Wine window stands in for the CoreWindow (off-device only)");
     }
+    // The Khronos loader statically imports setupapi.dll's cfgmgr32 family, which
+    // Play serves from the Wine setupapi donor (wine-pe). A launch probes the
+    // donors before it maps anything, so this fixture must too; without the gate
+    // the loader's imports are unresolved and the load fails for a reason a real
+    // launch never hits.
+    if(std::string(args)=="vulkan") {
+        if(!donor_pe::probe(logline)) {logline("DWPE FAIL donor behavior gate; no game code executed");return 3;}
+        mlp::donor_resolve=donor_pe::exported;
+    }
     // Wine's C++ runtime beside the runner, as layout\runtime beside the launcher.
     {wchar_t self[32768];DWORD n=GetModuleFileNameW(nullptr,self,32768);std::wstring dir(self,n);
      play_runtime::set_runtime_directory(dir.substr(0,dir.find_last_of(L"\\/"))+L"\\runtime");}
@@ -342,7 +351,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // Engine options come from the game's files, as in the launcher.
     std::wstring gameExe=L"Megabonk.exe";
     {wchar_t value[260];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_EXE",value,260);if(n&&n<260)gameExe.assign(value,n);}
-    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
+    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
     // guest stop (fatal dialog). Progress must never mask that failure.
@@ -425,6 +434,13 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     }
     else if(mode=="d3d11-diag")ok=ok&&r->finished&&r->success&&r->code==42;
     else if(mode=="d3d12-diag")ok=ok&&r->finished&&r->success&&r->code==42;
+    else if(mode=="vulkan") {
+        // The Khronos loader was mapped from the runtime directory, the guest
+        // created an instance and got no devices (the fixture exits 42 only
+        // then). play-runtime.sh greps the log for the ICD registry publication.
+        auto loader=play_runtime::named(L"vulkan-1.dll");
+        ok=ok&&r->finished&&r->success&&r->code==42&&loader&&loader->mapped&&loader->initialized;
+    }
     else if(mode=="discord-sdk") {
         // Both Discord SDK flavours returned the answer they return with no
         // Discord client running (the fixture exits 42 only then), and the SDK

@@ -10,9 +10,12 @@ static void set_runtime_directory(const std::wstring& path) { runtimeDirectory=p
 // and its driver library libgallium_wgl.dll, as the OS opengl32.dll serves a game on Windows. The console has none,
 // so a game that ships no GL DLL of its own gets these (when the package carries them; otherwise Play's WGL stubs
 // answer). dxil.dll is the optional DXIL signer Mesa loads by name (DXIL.dll) for shader validation.
+// Vulkan (research/VULKAN-PLAN.md) is the same contract: vulkan-1.dll is the Khronos loader built from pinned source
+// and vulkan-null-icd.dll is the driver its manifest names, so a Vulkan-optional engine's LoadLibrary succeeds and
+// then sees zero physical devices, exactly as on a Windows machine with no Vulkan driver.
 static bool redistributable(const std::wstring& name) {
     std::wstring key=name;for(auto& c:key)c=towlower(c);
-    for(auto dll:{L"opengl32.dll",L"libgallium_wgl.dll",L"dxil.dll",L"msvcp140.dll",L"msvcp140_1.dll",L"msvcp140_2.dll",L"msvcp140_atomic_wait.dll",
+    for(auto dll:{L"opengl32.dll",L"libgallium_wgl.dll",L"dxil.dll",L"vulkan-1.dll",L"vulkan-null-icd.dll",L"msvcp140.dll",L"msvcp140_1.dll",L"msvcp140_2.dll",L"msvcp140_atomic_wait.dll",
                   L"msvcp140_codecvt_ids.dll",L"concrt140.dll"}) if(key==dll) return true;
     return false;
 }
@@ -24,6 +27,21 @@ static bool apiSetName(const std::wstring& name) {
     std::wstring key=name;for(auto& c:key)c=towlower(c);
     auto slash=key.find_last_of(L"\\/");if(slash!=std::wstring::npos)key=key.substr(slash+1);
     return key.rfind(L"api-ms-win-",0)==0||key.rfind(L"ext-ms-win-",0)==0;
+}
+// An absolute path into the OS directory names the OS module, never a guest
+// image: Windows resolves LoadLibraryW("C:\Windows\System32\dxgi.dll") to the
+// system loader's own dxgi. The Vulkan loader does exactly that in
+// windows_initialization (its ICD discovery calls CreateDXGIFactory1 through
+// it), so mapping the file as a guest image would hand it a module whose
+// user32 imports Play refuses and leave its factory pointer NULL.
+static bool systemDirectoryPath(const std::wstring& path) {
+    using GetDir=DWORD(WINAPI*)(LPWSTR,DWORD);
+    auto get=(GetDir)kernel_tail::native("GetSystemDirectoryW");
+    wchar_t directory[MAX_PATH]{};DWORD n=get?get(directory,MAX_PATH):0;
+    if(!get||!n||n>=MAX_PATH)return false;
+    std::wstring prefix(directory,n);
+    if(path.size()<=prefix.size()||_wcsnicmp(path.c_str(),prefix.c_str(),prefix.size()))return false;
+    return path[prefix.size()]==L'\\' && path.find(L'\\',prefix.size()+1)==std::wstring::npos;
 }
 static std::wstring guestLibraryPath(const std::wstring& requested,bool useDirectory=true) {
     std::wstring path=requested;

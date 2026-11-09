@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cwctype>
 #include <cstdarg>
+#include <iterator>
 #include "sqlite3.h"
 namespace regb {
 struct Value { std::wstring name; DWORD type=REG_NONE; std::vector<BYTE> data; };
@@ -369,13 +370,82 @@ static LONG WINAPI RegQueryValueExA(HKEY h,LPCSTR name,LPDWORD,LPDWORD type,LPBY
     std::wstring n; if(name&&*name) { int c=MultiByteToWideChar(CP_ACP,0,name,-1,nullptr,0); if(c>0) { n.resize(c); MultiByteToWideChar(CP_ACP,0,name,-1,&n[0],c); n.resize(c-1); } }
     return query(h,n,type,data,cb,true);
 }
-static LONG WINAPI RegDeleteValueA(HKEY h,LPCSTR name) {
-    std::lock_guard<std::mutex> g(lock); ensure();
+// Enumeration: the Khronos Vulkan loader reads HKLM\SOFTWARE\Khronos\Vulkan\Drivers with RegEnumValueA and stops at
+// ERROR_NO_MORE_ITEMS. Values are ordered by lowercase name (std::map), which is a valid order: Windows promises none.
+// A buffer that is too small reports the required size and ERROR_MORE_DATA, as advapi32 does.
+static LONG enumerate(HKEY h,DWORD index,std::wstring& name,DWORD* type,BYTE* data,LPDWORD cb,bool ansi) {
     Key* k=open_key(h); if(!k) return ERROR_INVALID_HANDLE;
-    std::wstring n; if(name&&*name) { int c=MultiByteToWideChar(CP_ACP,0,name,-1,nullptr,0); if(c>0) { n.resize(c); MultiByteToWideChar(CP_ACP,0,name,-1,&n[0],c); n.resize(c-1); } }
+    if(index>=k->values.size()) return ERROR_NO_MORE_ITEMS;
+    auto it=k->values.begin(); std::advance(it,(ptrdiff_t)index);
+    const Value& v=it->second;
+    name=v.name;
+    std::vector<BYTE> out=v.data;
+    if(ansi && is_string(v.type) && !v.data.empty()) {
+        int c=WideCharToMultiByte(CP_ACP,0,(LPCWSTR)v.data.data(),(int)(v.data.size()/2),nullptr,0,nullptr,nullptr);
+        out.assign(c>0?c:0,0); if(c>0) WideCharToMultiByte(CP_ACP,0,(LPCWSTR)v.data.data(),(int)(v.data.size()/2),(LPSTR)out.data(),c,nullptr,nullptr);
+    }
+    if(type) *type=v.type;
+    if(!cb) return ERROR_INVALID_PARAMETER;
+    if(!data) { *cb=(DWORD)out.size(); return ERROR_SUCCESS; }
+    if(*cb<out.size()) { *cb=(DWORD)out.size(); return ERROR_MORE_DATA; }
+    if(!out.empty()) memcpy(data,out.data(),out.size());
+    *cb=(DWORD)out.size(); return ERROR_SUCCESS;
+}
+// Both forms report the value name before the data: a short name buffer fails the call even when the data fits.
+static LONG enumerate_named(HKEY h,DWORD index,LPWSTR name,LPDWORD nameLen,DWORD* type,BYTE* data,LPDWORD cb,bool ansi) {
+    std::lock_guard<std::mutex> g(lock); ensure();
+    if(!nameLen) return ERROR_INVALID_PARAMETER;
+    Key* k=open_key(h); if(!k) return ERROR_INVALID_HANDLE;
+    if(index>=k->values.size()) return ERROR_NO_MORE_ITEMS;
+    std::wstring found; DWORD valueType=REG_NONE, valueSize=0;
+    if(LONG e=enumerate(h,index,found,&valueType,nullptr,&valueSize,ansi)) return e;
+    size_t need=found.size()+1;
+    if(!name||*nameLen<need) { *nameLen=(DWORD)need; return ERROR_MORE_DATA; }
+    memcpy(name,found.c_str(),need*sizeof(wchar_t));
+    *nameLen=(DWORD)found.size();
+    if(type) *type=valueType;
+    if(!cb) return ERROR_SUCCESS;
+    if(!data) { *cb=valueSize; return ERROR_SUCCESS; }
+    if(*cb<valueSize) { *cb=valueSize; return ERROR_MORE_DATA; }
+    if(!valueSize) { *cb=0; return ERROR_SUCCESS; }
+    return enumerate(h,index,found,type,data,cb,ansi);
+}
+static LONG WINAPI RegEnumValueW(HKEY h,DWORD index,LPWSTR name,LPDWORD nameLen,LPDWORD,DWORD* type,LPBYTE data,LPDWORD cb) {
+    return enumerate_named(h,index,name,nameLen,type,data,cb,false);
+}
+static LONG WINAPI RegEnumValueA(HKEY h,DWORD index,LPSTR name,LPDWORD nameLen,LPDWORD,DWORD* type,LPBYTE data,LPDWORD cb) {
+    std::lock_guard<std::mutex> g(lock); ensure();
+    if(!nameLen) return ERROR_INVALID_PARAMETER;
+    Key* k=open_key(h); if(!k) return ERROR_INVALID_HANDLE;
+    if(index>=k->values.size()) return ERROR_NO_MORE_ITEMS;
+    std::wstring found; DWORD valueType=REG_NONE, valueSize=0;
+    if(LONG e=enumerate(h,index,found,&valueType,nullptr,&valueSize,true)) return e;
+    int chars=WideCharToMultiByte(CP_ACP,0,found.c_str(),(int)found.size()+1,nullptr,0,nullptr,nullptr);
+    size_t need=chars>0?(size_t)chars:0;
+    if(!name||*nameLen<need) { *nameLen=(DWORD)need; return ERROR_MORE_DATA; }
+    WideCharToMultiByte(CP_ACP,0,found.c_str(),(int)found.size()+1,name,(int)need,nullptr,nullptr);
+    *nameLen=(DWORD)(need?need-1:0);
+    if(type) *type=valueType;
+    if(!cb) return ERROR_SUCCESS;
+    if(!data) { *cb=valueSize; return ERROR_SUCCESS; }
+    if(*cb<valueSize) { *cb=valueSize; return ERROR_MORE_DATA; }
+    if(!valueSize) { *cb=0; return ERROR_SUCCESS; }
+    return enumerate(h,index,found,type,data,cb,true);
+}
+static LONG delete_value(HKEY h,const std::wstring& n) {
+    Key* k=open_key(h); if(!k) return ERROR_INVALID_HANDLE;
     auto it=k->values.find(lower(n)); if(it==k->values.end()) return ERROR_FILE_NOT_FOUND;
     if(!db_del_value(lower(k->path),lower(n))) return ERROR_WRITE_FAULT;
     k->values.erase(it); return ERROR_SUCCESS;
+}
+static LONG WINAPI RegDeleteValueA(HKEY h,LPCSTR name) {
+    std::lock_guard<std::mutex> g(lock); ensure();
+    std::wstring n; if(name&&*name) { int c=MultiByteToWideChar(CP_ACP,0,name,-1,nullptr,0); if(c>0) { n.resize(c); MultiByteToWideChar(CP_ACP,0,name,-1,&n[0],c); n.resize(c-1); } }
+    return delete_value(h,n);
+}
+static LONG WINAPI RegDeleteValueW(HKEY h,LPCWSTR name) {
+    std::lock_guard<std::mutex> g(lock); ensure();
+    return delete_value(h,name?name:L"");
 }
 // No transaction can be created here (ktmw32: desktop_policy.h), so any
 // transaction handle a caller passes is not one this process issued.
@@ -403,10 +473,11 @@ static const Export exports[]={
     {"RegCreateKeyW",(uintptr_t)&RegCreateKeyW},{"RegCreateKeyExW",(uintptr_t)&RegCreateKeyExW},
     {"RegSetValueExA",(uintptr_t)&RegSetValueExA},{"RegSetValueExW",(uintptr_t)&RegSetValueExW},
     {"RegQueryValueExA",(uintptr_t)&RegQueryValueExA},{"RegQueryValueExW",(uintptr_t)&RegQueryValueExW},
-    {"RegDeleteValueA",(uintptr_t)&RegDeleteValueA},{"RegOpenKeyExW",(uintptr_t)&RegOpenKeyExW},{"RegCloseKey",(uintptr_t)&RegCloseKey},
+    {"RegDeleteValueA",(uintptr_t)&RegDeleteValueA},{"RegDeleteValueW",(uintptr_t)&RegDeleteValueW},{"RegOpenKeyExW",(uintptr_t)&RegOpenKeyExW},{"RegCloseKey",(uintptr_t)&RegCloseKey},
     {"RegCreateKeyTransactedW",(uintptr_t)&RegCreateKeyTransactedW},
     {"RegOpenKeyExA",(uintptr_t)&RegOpenKeyExA},{"RegCreateKeyExA",(uintptr_t)&RegCreateKeyExA},
     {"RegOpenKeyW",(uintptr_t)&RegOpenKeyW},{"RegOpenKeyA",(uintptr_t)&RegOpenKeyA},{"RegCreateKeyA",(uintptr_t)&RegCreateKeyA},
+    {"RegEnumValueA",(uintptr_t)&RegEnumValueA},{"RegEnumValueW",(uintptr_t)&RegEnumValueW},
 };
 static uintptr_t lookup(const char* name) { for(auto& e:exports) if(!strcmp(e.name,name)) return e.address; return 0; }
 }
