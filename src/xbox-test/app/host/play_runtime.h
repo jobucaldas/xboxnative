@@ -11,9 +11,11 @@
 #include <memory>
 #include <array>
 #include <d3d11.h>
+#include <d3d12.h>
 #include <intrin.h>
 #include "play_graphics.h"
 #include "d3d11_diag.h"
+#include "d3d12_diag.h"
 #include "../../uwph/vcruntime/route.h"
 #include "steam_app_ticket.h"
 #include "redact.h"
@@ -1204,6 +1206,90 @@ static HRESULT WINAPI createDevice(IDXGIAdapter* adapter,D3D_DRIVER_TYPE type,HM
         d3d11_diag::adopt(*device);
         play_graphics::adopt_device(*device);state->milestone=2;}return hr;
 }
+// A D3D12 guest reaches the device through d3d12.dll's D3D12CreateDevice, not
+// through a d3d11 device, so the D3D11 hook above never sees it. The route
+// logs the request and result the same way and gives the returned device the
+// D3D12 diagnostics; the swap chain still goes through the same CoreWindow
+// adapter, which takes the command queue as its device argument.
+static HRESULT WINAPI createD3D12Device(IUnknown* adapter,D3D_FEATURE_LEVEL minimum,REFIID id,void** device) {
+    using Fn=HRESULT(WINAPI*)(IUnknown*,D3D_FEATURE_LEVEL,REFIID,void**);
+    auto fn=(Fn)mlp::resolve("d3d12.dll","D3D12CreateDevice",0);
+    state->event("guest D3D12CreateDevice caller="+describe((uintptr_t)_ReturnAddress()));
+    if(!fn) {stopMissing("d3d12.dll!D3D12CreateDevice");return E_NOINTERFACE;}
+    // Adapters from the guest factory are wrappers (virtual console output);
+    // the native device needs the real adapter. D3D12CreateDevice takes an
+    // IUnknown* adapter, so the wrapper is unwrapped through its adapter
+    // interface first.
+    IDXGIAdapter* real=nullptr;
+    if(adapter) {
+        IDXGIAdapter* asAdapter=nullptr;
+        if(SUCCEEDED(adapter->QueryInterface(__uuidof(IDXGIAdapter),(void**)&asAdapter))&&asAdapter) {
+            real=corewindow_dxgi::real_adapter(asAdapter);
+            asAdapter->Release();
+        }
+    }
+    {char b[200];snprintf(b,sizeof b,"guest D3D12CreateDevice request adapter=%s minimum=0x%x iid=%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+        adapter?"given":"default",unsigned(minimum),unsigned(id.Data1),unsigned(id.Data2),unsigned(id.Data3),
+        id.Data4[0],id.Data4[1],id.Data4[2],id.Data4[3],id.Data4[4],id.Data4[5],id.Data4[6],id.Data4[7]);state->event(b);}
+    HRESULT hr=fn(real?static_cast<IUnknown*>(real):adapter,minimum,id,device);
+    if(real)real->Release();
+    {char b[160];snprintf(b,sizeof b,"guest D3D12CreateDevice returned hr=0x%08lx device=%p",(unsigned long)hr,device?*device:nullptr);state->event(b);}
+    if(SUCCEEDED(hr)&&device&&*device) {
+        // Failed D3D12 calls are logged through the probe sink (not as the
+        // run's "last event"), once per distinct call.
+        d3d12_diag::configure([](const char* text){if(state&&state->log)state->log((std::string("PRUN D3D12 ")+text).c_str());});
+        ID3D12Device* d3d=nullptr;
+        if(SUCCEEDED(static_cast<IUnknown*>(*device)->QueryInterface(__uuidof(ID3D12Device),(void**)&d3d))&&d3d) {
+            d3d12_diag::adopt(d3d);
+            // The factory the guest reaches through the device must route guest
+            // windows to the CoreWindow, exactly as it does for D3D11.
+            play_graphics::adopt_factory_of(d3d);
+            d3d->Release();
+        }
+        state->milestone=2;
+    }
+    return hr;
+}
+// D3D12GetDebugInterface and the root-signature helpers are the other d3d12.dll
+// exports a guest imports. The debug layer's absence is reported by the
+// console/Wine as DXGI_ERROR_SDK_COMPONENT_MISSING; a guest that treats that as
+// fatal would otherwise fail with no trace, so the answer is logged once.
+static HRESULT WINAPI d3d12GetDebugInterface(REFIID id,void** debug) {
+    using Fn=HRESULT(WINAPI*)(REFIID,void**);
+    auto fn=(Fn)mlp::resolve("d3d12.dll","D3D12GetDebugInterface",0);
+    if(!fn)return E_NOINTERFACE;
+    HRESULT hr=fn(id,debug);
+    if(state->log&&mlp::first_report("d3d12 debug interface"))
+        state->log(("PRUN EVENT guest D3D12GetDebugInterface hr=0x"+hex32(hr)+" (debug layer absent when DXGI_ERROR_SDK_COMPONENT_MISSING)").c_str());
+    return hr;
+}
+static HRESULT WINAPI d3d12SerializeRootSignature(const D3D12_ROOT_SIGNATURE_DESC* desc,D3D_ROOT_SIGNATURE_VERSION version,ID3DBlob** blob,ID3DBlob** error) {
+    using Fn=HRESULT(WINAPI*)(const D3D12_ROOT_SIGNATURE_DESC*,D3D_ROOT_SIGNATURE_VERSION,ID3DBlob**,ID3DBlob**);
+    auto fn=(Fn)mlp::resolve("d3d12.dll","D3D12SerializeRootSignature",0);
+    if(!fn)return E_NOINTERFACE;
+    HRESULT hr=fn(desc,version,blob,error);
+    if(FAILED(hr)&&state->log&&mlp::first_report("d3d12 serialize root signature"))
+        state->log(("PRUN D3D12 D3D12SerializeRootSignature hr=0x"+hex32(hr)+" version="+std::to_string(int(version))+" params="+std::to_string(desc?desc->NumParameters:0)).c_str());
+    return hr;
+}
+static HRESULT WINAPI d3d12CreateRootSignatureDeserializer(const void* data,SIZE_T length,REFIID id,void** deserializer) {
+    using Fn=HRESULT(WINAPI*)(const void*,SIZE_T,REFIID,void**);
+    auto fn=(Fn)mlp::resolve("d3d12.dll","D3D12CreateRootSignatureDeserializer",0);
+    if(!fn)return E_NOINTERFACE;
+    HRESULT hr=fn(data,length,id,deserializer);
+    if(FAILED(hr)&&state->log&&mlp::first_report("d3d12 deserialize root signature"))
+        state->log(("PRUN D3D12 D3D12CreateRootSignatureDeserializer hr=0x"+hex32(hr)+" bytes="+std::to_string(length)).c_str());
+    return hr;
+}
+static HRESULT WINAPI d3d12EnableExperimentalFeatures(UINT count,const IID* features,void* configurations,UINT* sizes) {
+    using Fn=HRESULT(WINAPI*)(UINT,const IID*,void*,UINT*);
+    auto fn=(Fn)mlp::resolve("d3d12.dll","D3D12EnableExperimentalFeatures",0);
+    if(!fn)return E_NOINTERFACE;
+    HRESULT hr=fn(count,features,configurations,sizes);
+    if(state->log&&mlp::first_report("d3d12 experimental features"))
+        state->log(("PRUN EVENT guest D3D12EnableExperimentalFeatures count="+std::to_string(count)+" hr=0x"+hex32(hr)).c_str());
+    return hr;
+}
 // Until a real modal UI bridge exists, retain fatal game diagnostics and stop.
 // Never return a fabricated button selection that would advance startup.
 static std::string dialogText(LPCSTR text,size_t limit=2048) {
@@ -1263,6 +1349,16 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxW")) return (uintptr_t)&messageBoxW;
     if(key=="user32.dll" && name && !strcmp(name,"CreateWindowExW")) return (uintptr_t)&createWindow;
     if(key=="d3d11.dll" && name && !strcmp(name,"D3D11CreateDevice")) return (uintptr_t)&createDevice;
+    // D3D12: the device entry point and the helpers a D3D12 guest imports. Every
+    // other d3d12.dll export (layered device, GetBehaviorValue) falls through to
+    // the system route in mlp, which loads the console's own d3d12.dll.
+    if(key=="d3d12.dll" && name) {
+        if(!strcmp(name,"D3D12CreateDevice")) return (uintptr_t)&createD3D12Device;
+        if(!strcmp(name,"D3D12GetDebugInterface")) return (uintptr_t)&d3d12GetDebugInterface;
+        if(!strcmp(name,"D3D12SerializeRootSignature")) return (uintptr_t)&d3d12SerializeRootSignature;
+        if(!strcmp(name,"D3D12CreateRootSignatureDeserializer")) return (uintptr_t)&d3d12CreateRootSignatureDeserializer;
+        if(!strcmp(name,"D3D12EnableExperimentalFeatures")) return (uintptr_t)&d3d12EnableExperimentalFeatures;
+    }
     // Same client gate as LoadLibrary, for static and forwarded imports. Never
     // a callable Steam placeholder: the import stays unresolved, as on Windows
     // without the DLL. steam_api64.dll resolves from the game's own file below.
