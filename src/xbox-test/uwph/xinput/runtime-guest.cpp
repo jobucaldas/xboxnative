@@ -21,6 +21,28 @@ extern "C" DWORD WINAPI input_entry() {
     state=reinterpret_cast<DWORD(WINAPI*)(DWORD,XINPUT_STATE*)>(GetProcAddress(module,"XInputGetState"));
     if(!state || state(0,&value)!=0 || value.Gamepad.wButtons!=XINPUT_GAMEPAD_A)return 13;
     if(!FreeLibrary(module))return 14;
+    // Name without extension, as InControl/Unity spell it.
+    module=LoadLibraryA("xinput1_4");if(!module || GetModuleHandleA("xinput1_4")!=module || GetModuleHandleA("XINPUT1_4.DLL")!=module)return 15;
+    if(!FreeLibrary(module))return 16;
+    // Static import: resolved by the loader to Play's module, never the console's.
+    value={};
+    if(XInputGetState(0,&value)!=0 || value.Gamepad.wButtons!=XINPUT_GAMEPAD_A)return 17;
+    // A Unity plugin, loaded the way Mono does (full path, mixed slashes), reaches
+    // XInput through its own LoadLibrary and must get the same emulated pad.
+    WCHAR directory[MAX_PATH];DWORD length=GetModuleFileNameW(nullptr,directory,MAX_PATH);
+    if(!length || length>=MAX_PATH)return 18;
+    while(length && directory[length-1]!=L'\\' && directory[length-1]!=L'/')--length;
+    directory[length]=0;
+    WCHAR path[MAX_PATH*2];lstrcpyW(path,directory);lstrcatW(path,L"Plugins/x86_64\\play-xinput-plugin.dll");
+    HMODULE plugin=LoadLibraryW(path);if(!plugin)return 19;
+    auto pluginState=reinterpret_cast<DWORD(WINAPI*)(DWORD,XINPUT_STATE*)>(GetProcAddress(plugin,"plugin_get_state"));
+    value={};
+    if(!pluginState || pluginState(0,&value)!=0 || value.Gamepad.wButtons!=XINPUT_GAMEPAD_A)return 20;
+    if(pluginState(1,&value)!=ERROR_DEVICE_NOT_CONNECTED)return 21;
+    if(!FreeLibrary(plugin))return 22;
+    // Mono/Unity may pass search-path flags with the full path; they only steer lookup.
+    plugin=LoadLibraryExW(path,nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);if(!plugin)return 23;
+    if(!FreeLibrary(plugin))return 24;
     return 42;
 }
 // Mapper requires relocatable images; retain one actual base relocation.

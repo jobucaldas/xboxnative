@@ -292,16 +292,25 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     {std::lock_guard<LoaderMutex> lock(state->loaderMutex);
      m=named(requested);
      if(!m && !apiSetName(requested)) {
-         auto p=guestLibraryPath(requested,!flags);
+         // Flags that only steer where the file is searched (Mono/Unity pass
+         // LOAD_WITH_ALTERED_SEARCH_PATH or the SEARCH_* set for plugins) do not
+         // change what is loaded; anything else is refused below, as before.
+         constexpr DWORD searchOnly=LOAD_WITH_ALTERED_SEARCH_PATH|LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|
+             LOAD_LIBRARY_SEARCH_APPLICATION_DIR|LOAD_LIBRARY_SEARCH_USER_DIRS|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
+         auto p=guestLibraryPath(requested,!(flags&~searchOnly));
          if(exists(p)) {
-             if(flags) {SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
+             if(flags&~searchOnly) {
+                 state->event("LoadLibrary refused name="+narrow(requested)+" flags="+std::to_string(flags)+": unsupported load flags");
+                 SetLastError(ERROR_NOT_SUPPORTED);return nullptr;
+             }
              m=map(p);
              if(!m) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
          }
      }
     }
     if(m) {
-        if(flags) {SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
+        if(flags&~(LOAD_WITH_ALTERED_SEARCH_PATH|LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_APPLICATION_DIR|
+                   LOAD_LIBRARY_SEARCH_USER_DIRS|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)) {SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
         if(m->mappingFailed || !m->mapped) {SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
         ++m->references;
         // A DllMain may load a module whose own DllMain is still running on
@@ -311,7 +320,10 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
         if(!initializePending() || !(m->initialized || m->initializing)) {--m->references;SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
         return (HMODULE)m->image.base;
     }
-    if(auto input=xinput_core::find_module(key.c_str(),true))return input;
+    if(auto input=xinput_core::find_module(key.c_str(),true)) {
+        if(state->log)state->log(("XINPUT LoadLibrary "+narrow(requested)+" -> Play's emulated module").c_str());
+        return input;
+    }
     // No console opengl32.dll: serve Play's WGL state surface, not a host DLL.
     if(auto gl=opengl32_core::find_module(key.c_str(),true))return gl;
     // Restrict fallback to documented system DLL search, never desktop paths.
@@ -1225,7 +1237,8 @@ static DWORD WINAPI worker(void*) {
 static bool start(const std::wstring& root,const std::wstring& exe,const std::wstring& args,wxl::Log log) {
     if(state) return false;
     state=new State();state->root=root;state->log=log;observed.store(state,std::memory_order_release);state->command=L"\""+root+L"\\"+exe+L"\" "+args;state->commandA=narrow(state->command);
-    mlp::log=log;wxl::logger=log;mlp::missingResolver=missing;mlp::assets.clear();mlp::summaries.clear();
+    mlp::log=log;wxl::logger=log;
+    xinput_core::note=[](const char* text){if(mlp::log)mlp::log(text);};mlp::missingResolver=missing;mlp::assets.clear();mlp::summaries.clear();
     state->exe=map(root+L"\\"+exe);if(!state->exe) {state->result=state->snapshot();state->finished=true;return true;}
     find_ntdll();
     {static bool installed=false;if(!installed){installed=true;hostTopLevel=SetUnhandledExceptionFilter(topLevelFilter);}}
