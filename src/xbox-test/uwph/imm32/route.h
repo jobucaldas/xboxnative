@@ -106,6 +106,20 @@ inline BOOL WINAPI simulate_hot_key(HWND, DWORD) { SetLastError(ERROR_CALL_NOT_I
 inline UINT WINAPI get_ime_file_name_a(HKL, LPSTR, UINT) { return 0; }
 // Wine releases no resource here, even for a null context or window.
 inline BOOL WINAPI release_context(HWND, HIMC) { return TRUE; }
+// Locking an input context: this backend issues none, so ImmLockIMC has nothing
+// to return and ImmUnlockIMC has nothing to unlock (Wine's get_imc_data(NULL)
+// path). A foreign handle is rejected like every other context call here.
+inline void* WINAPI lock_context(HIMC context) { reject_foreign_context(context); return nullptr; }
+inline BOOL WINAPI unlock_context(HIMC context) { reject_foreign_context(context); return FALSE; }
+// IMCC blocks are plain movable global memory in Wine (imm.c: GlobalLock and
+// GlobalUnlock with no context lookup), so these are the real implementation.
+// A handle this process never issued fails in GlobalLock/GlobalUnlock exactly
+// as it does under Wine.
+inline void* WINAPI lock_component(HIMCC block) { return GlobalLock(block); }
+inline BOOL WINAPI unlock_component(HIMCC block) { return GlobalUnlock(block); }
+// Wine's ImmDisableTextFrameService is an unimplemented stub returning FALSE
+// without touching the last error; there is no text frame service here either.
+inline BOOL WINAPI disable_text_frame_service(DWORD) { return FALSE; }
 inline uintptr_t resolve(const char* dll, const char* name, IsWindow validator = nullptr) {
     if (!dll || !name || _stricmp(dll, "imm32.dll")) return 0;
     if (validator) window_validator = validator;
@@ -135,6 +149,11 @@ inline uintptr_t resolve(const char* dll, const char* name, IsWindow validator =
     if (!strcmp(name, "ImmIsIME")) return reinterpret_cast<uintptr_t>(&is_ime);
     if (!strcmp(name, "ImmSimulateHotKey")) return reinterpret_cast<uintptr_t>(&simulate_hot_key);
     if (!strcmp(name, "ImmGetIMEFileNameA")) return reinterpret_cast<uintptr_t>(&get_ime_file_name_a);
+    if (!strcmp(name, "ImmLockIMC")) return reinterpret_cast<uintptr_t>(&lock_context);
+    if (!strcmp(name, "ImmUnlockIMC")) return reinterpret_cast<uintptr_t>(&unlock_context);
+    if (!strcmp(name, "ImmLockIMCC")) return reinterpret_cast<uintptr_t>(&lock_component);
+    if (!strcmp(name, "ImmUnlockIMCC")) return reinterpret_cast<uintptr_t>(&unlock_component);
+    if (!strcmp(name, "ImmDisableTextFrameService")) return reinterpret_cast<uintptr_t>(&disable_text_frame_service);
     return 0;
 }
 }
