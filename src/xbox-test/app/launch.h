@@ -373,6 +373,77 @@ static void cloud_async(uint32_t appid,const std::wstring& gameRoot,bool sync,st
 }
 // ---- Steam presence (steam_presence.h): the account shows the game to friends.
 #include "steam_presence.h"
+// ---- Steam leaderboards for the provider-served game (steam_leaderboards.h):
+// the game's Find call is observed at the provider's export boundary, and the
+// board's real rows are written into the provider's leaderboard cache file
+// BEFORE the provider answers. The provider reads that file once, the first
+// time a board is found in the process, so the game's own rank screen lists
+// real players. Its own Find still runs and still hands the game its handle.
+#include "steam_leaderboards.h"
+struct LeaderboardBridge {
+    std::mutex m;
+    steam_leaderboards::Bridge bridge;   // seed policy and board ids, per launch
+    std::shared_ptr<CmSession> session;
+    uint32_t appid = 0;
+};
+static LeaderboardBridge g_leaderboards;
+static steam_leaderboards::Io leaderboard_io(std::shared_ptr<CmSession> session) {
+    steam_leaderboards::Io io;
+    // The seed runs on the game's thread, which is blocked inside its own Find
+    // call, so a request that does not answer quickly is abandoned rather than
+    // stalling the game.
+    io.call=[session](uint32_t emsg,uint32_t routing,const std::string& body,std::string& out){
+        JobMsg m;if(!session->call(emsg,body,"",3000,m,routing))return false;
+        out=m.body;return true;};
+    io.log=[](const std::string& line){lp_sink(redact::steam_ids("STEAM "+line).c_str());};
+    return io;
+}
+// The game's Find, observed from the game's thread before the provider answers.
+// The provider reads a board's cache file only on its first Find in the
+// process, so this is the one moment the rows can be put in place.
+static bool leaderboard_tap_seed(const std::string& name,int sort,int display,bool create) {
+    if(name.empty()) return false;
+    std::shared_ptr<CmSession> session; uint32_t appid = 0;
+    { std::lock_guard<std::mutex> l(g_leaderboards.m);
+      if(!g_leaderboards.appid) return false;
+      appid = g_leaderboards.appid; session = g_leaderboards.session; }
+    if(!session || !session->up) session = user_session();   // the keeper may have re-established it
+    // No session yet is not a verdict on the board: the keeper can reconnect,
+    // and the next Find should try again.
+    if(!session || !session->up || session->anon) return false;
+    auto io = leaderboard_io(session);
+    namespace fs = std::filesystem;
+    fs::path saves = fs::path(provider_dir(appid))/"saves";
+    return g_leaderboards.bridge.seed(io,appid,saves,name,sort,display,create);
+}
+// A score the game uploaded, observed after the provider answered. The board
+// name is the one this thread last found, which is the handle the game passed.
+static void leaderboard_tap_upload(const std::string& name,int32_t score,const int32_t* details,int count,int method) {
+    std::shared_ptr<CmSession> session; uint32_t appid = 0;
+    { std::lock_guard<std::mutex> l(g_leaderboards.m);
+      if(!g_leaderboards.appid) return;
+      session = g_leaderboards.session; appid = g_leaderboards.appid; }
+    if(!session || !session->up) return;
+    auto io = leaderboard_io(session);
+    g_leaderboards.bridge.upload(io,appid,name,score,details,count,method);
+}
+static void leaderboard_start(uint32_t appid) {
+    {
+        std::lock_guard<std::mutex> l(g_leaderboards.m);
+        g_leaderboards.appid = appid; g_leaderboards.bridge.reset();
+        g_leaderboards.session.reset();
+        auto now = user_session();
+        if(now && now->up && !now->anon) g_leaderboards.session = now;
+    }
+    play_runtime::set_leaderboard_tap({[](const std::string& name,int sort,int display,bool create){return leaderboard_tap_seed(name,sort,display,create);},
+                                       [](const std::string& name,int32_t score,const int32_t* details,int count,int method){leaderboard_tap_upload(name,score,details,count,method);}});
+}
+static void leaderboard_end() {
+    { std::lock_guard<std::mutex> l(g_leaderboards.m);
+      g_leaderboards.appid = 0;
+      g_leaderboards.bridge.reset(); g_leaderboards.session.reset(); }
+    play_runtime::set_leaderboard_tap({});
+}
 // ---- Steam achievements/stats for the provider-served game (steam_achievements.h)
 #include "steam_achievements.h"
 static steam_achievements::Io achievement_io(std::shared_ptr<CmSession> session) {
@@ -568,6 +639,7 @@ static void final_sync(uint32_t appid,const std::wstring& gameRoot) {
     try{cloud_sync(appid,gameRoot,true,0);}catch(...){lp_sink("STEAM cloud upload: exception");}
     try{achievements_sync(appid,true);}catch(...){lp_sink("STEAM achievements store: exception");}
     try{presence_end();}catch(...){}
+    try{leaderboard_end();}catch(...){}
 }
 // ---- Diagnostic: cmd.txt "stacks" logs every other thread's call stack to
 // launch_probe.log (module+offset via Play's guest module map). Live process
@@ -669,6 +741,7 @@ static void lp_run_impl(LpCtx& c) {
         try{cloud_sync(c.appid,c.root,false,0);}catch(...){lp_sink("STEAM cloud download: exception");}
         try{achievements_sync(c.appid,false);}catch(...){lp_sink("STEAM achievements: exception");}
         try{presence_start(c.appid);}catch(...){lp_sink("STEAM presence: keeper did not start");}
+        try{leaderboard_start(c.appid);}catch(...){lp_sink("STEAM leaderboards: bridge did not start");}
     }
     if(steamProvider){uint32_t appid=c.appid;std::wstring root=c.root;g_finalSync=[appid,root]{final_sync(appid,root);};}
     regb::init(g_dir,lp_sink); // guest registry (PlayerPrefs): LocalState\registry.sqlite

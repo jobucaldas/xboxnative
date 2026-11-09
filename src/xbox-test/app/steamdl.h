@@ -140,9 +140,9 @@ struct CmSession : std::enable_shared_from_this<CmSession> {
         auto& q = jobs[id]; if (!ok || q.empty()) return false; out = std::move(q.front()); q.pop_front(); return true;
     }
     // one request -> one response
-    bool call(uint32_t emsg, const std::string& body, const std::string& jobname, int timeoutMs, JobMsg& out) {
+    bool call(uint32_t emsg, const std::string& body, const std::string& jobname, int timeoutMs, JobMsg& out, uint32_t routingAppid = 0) {
         if (!up) return false;
-        uint64_t id = begin_job(); send_raw(emsg, body, id, jobname); bool ok = wait_job(id, timeoutMs, out); end_job(id); return ok;
+        uint64_t id = begin_job(); send_raw(emsg, body, id, jobname, routingAppid); bool ok = wait_job(id, timeoutMs, out); end_job(id); return ok;
     }
     bool service(const std::string& method, const std::string& body, int timeoutMs, JobMsg& out) { return call(EMSG_ServiceMethodCall, body, method, timeoutMs, out); }
     void close() { stop = true; up = false; conn.close(); jcv.notify_all(); }
