@@ -473,11 +473,13 @@ static void leaderboard_start(uint32_t appid) {
     play_runtime::set_leaderboard_tap({[](const std::string& name,int sort,int display,bool create){return leaderboard_tap_seed(name,sort,display,create);},
                                        [](const std::string& name,int32_t score,const int32_t* details,int count,int method){leaderboard_tap_upload(name,score,details,count,method);}});
     // The provider's own GetFriendPersonaName still runs; this only replaces
-    // its answer for accounts Steam has told us a name for.
-    play_runtime::set_persona_name_tap({[](uint64_t steamid){
+    // its answer for accounts Steam has told us a name for. std::map nodes are
+    // stable, so the pointer stays valid until leaderboard_end clears the map,
+    // which is when the launch is over and no guest can call again.
+    play_runtime::set_persona_name_tap({[](uint64_t steamid)->const char*{
         std::lock_guard<std::mutex> l(g_leaderboards.m);
         auto it = g_leaderboards.names.find(steamid);
-        return it == g_leaderboards.names.end() ? std::string() : it->second;}});
+        return it == g_leaderboards.names.end() ? nullptr : it->second.c_str();}});
 }
 static void leaderboard_end() {
     { std::lock_guard<std::mutex> l(g_leaderboards.m);

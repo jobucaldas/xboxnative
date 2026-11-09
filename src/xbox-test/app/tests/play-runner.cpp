@@ -409,9 +409,9 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
             std::string body; pb_s(body,2,a); pb_s(body,2,b); pb_s(body,2,c);
             names=steam_presence::parse_persona_names(body);
         }
-        play_runtime::set_persona_name_tap({[](uint64_t steamid){
+        play_runtime::set_persona_name_tap({[](uint64_t steamid)->const char*{
             auto it=names.find(steamid);
-            return it==names.end()?std::string():it->second;}});
+            return it==names.end()?nullptr:it->second.c_str();}});
         logline("PRUN leaderboard bridge staged (off-device fixture backend)");
     }
     // Game mode runs Megabonk unless PRUN_GAME_EXE names another owned game.

@@ -468,9 +468,11 @@ static uintptr_t richPresenceHook(const char* name,uintptr_t real) {
 // provider's own call still runs and its answer is only replaced when the
 // launcher actually has a name.
 struct PersonaNameTap {
-    // Empty when the launcher has no name for this account; the provider's own
-    // answer is then returned untouched.
-    std::function<std::string(uint64_t steamid)> name;
+    // NULL when the launcher has no name for this account; the provider's own
+    // answer is then returned untouched. A returned pointer must stay valid
+    // until the launch ends: the provider returns pointers into its own
+    // storage, and a game may hold several rows' names at once.
+    std::function<const char*(uint64_t steamid)> name;
 };
 static std::mutex personaNameMutex;
 static PersonaNameTap personaName;
@@ -478,9 +480,9 @@ static void set_persona_name_tap(PersonaNameTap tap) {
     std::lock_guard<std::mutex> lock(personaNameMutex);
     personaName=std::move(tap);
 }
-static std::string personaNameLookup(uint64_t steamid) {
+static const char* personaNameLookup(uint64_t steamid) {
     PersonaNameTap tap; {std::lock_guard<std::mutex> lock(personaNameMutex);tap=personaName;}
-    return tap.name?tap.name(steamid):std::string();
+    return tap.name?tap.name(steamid):nullptr;
 }
 static std::atomic<uintptr_t> personaNameReal{0};
 static uintptr_t personaNameHook(const char* name,uintptr_t real) {
@@ -491,15 +493,10 @@ static uintptr_t personaNameHook(const char* name,uintptr_t real) {
     static Fn hook=[](void* self,uint64_t steamid)->const char*{
         auto inner=(Fn)personaNameReal.load(std::memory_order_acquire);
         // The provider's answer is a pointer it owns (into its friends vector),
-        // so it is returned as-is whenever the launcher has nothing better. The
-        // launcher's string is copied into a thread-local buffer that lives as
-        // long as the caller can hold the pointer before its next call.
+        // so it is returned as-is whenever the launcher has nothing better.
         const char* own=inner?inner(self,steamid):nullptr;
-        auto found=personaNameLookup(steamid);
-        if(found.empty())return own;
-        static thread_local std::string held;
-        held=std::move(found);
-        return held.c_str();
+        const char* found=personaNameLookup(steamid);
+        return found?found:own;
     };
     return (uintptr_t)hook;
 }
