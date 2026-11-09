@@ -96,6 +96,8 @@ jobs:
         run: bash src/xbox-test/app/tests/load-config.sh
       - name: Delete game removes only its install folder
         run: bash src/xbox-test/app/tests/game-delete.sh
+      - name: Free space figures and launcher leftovers
+        run: bash src/xbox-test/app/tests/storage-report.sh
   strict-imports:
     runs-on: ubuntu-latest
     steps:

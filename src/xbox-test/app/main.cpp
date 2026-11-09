@@ -358,6 +358,7 @@ static void save_token2(const std::string& refresh, const std::string& access) {
 static void delete_token() { DeleteFileW(token_path().c_str()); logf("session token deleted"); }
 static bool file_exists(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
 #include "steamdl.h"
+#include "storage_report.h"
 
 // ---------------------------------------------------------------- library model + covers
 struct Game { uint32_t appid = 0; std::string name; uint32_t playtime = 0; uint64_t lastPlayed = 0; std::atomic<int> cover{0}; int iw = 0, ih = 0; std::vector<uint32_t> pix; };
@@ -533,6 +534,17 @@ static void dl_thread() {
     init_apartment(apartment_type::multi_threaded);
     if (begin_download()) {   // downloads cut off by a crash or power loss: remove their files (installs.h)
         for (auto& w : installs::sweep_partials(g_dir, &g_quit)) logf("dl: unfinished download of appid %u (%s) from an earlier run: %s", w.appid, game_library::join_root("LocalState", w.root, w.dir).c_str(), installs::discard_name(w.result));
+        // launcher-owned leftovers (old logs, caches): small, but they are ours to remove
+        std::set<uint32_t> inst; for (auto& i : installs::scan(g_dir, false)) inst.insert(i.first);
+        auto left = installs::launcher_leftovers(g_dir, inst);
+        uint64_t before = 0; for (auto& l : left) before += l.bytes;
+        uint64_t freed = installs::clean_leftovers(g_dir, inst);
+        logf("storage: launcher leftovers: %zu files, %s; removed %s", left.size(), storage_roots::size_text(before).c_str(), storage_roots::size_text(freed).c_str());
+        // every free-space figure for LocalState, once per start, for the console log and LocalState\storage_report.txt
+        // (the other drives are probed, and reported, when the detail page opens)
+        std::vector<storage_roots::Choice> roots = {storage_report::internal_root(g_dir)};
+        std::string report = storage_report::write(g_dir, roots, inst);
+        for (auto& line : storage_report::log_lines(report)) logf("storage: %s", line.c_str());
         end_download();
     }
     // LocalState\autodownload.txt: one appid per line; processed once the account state is known (user session, else anonymous)
@@ -799,14 +811,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     bool deleting_mine() { return g_del.appid == m_dApp && g_del.state == 1; }
     void refresh_roots(const char* via) {   // internal + every usable extra drive; keeps the pick when its drive is still there
         std::string keep = m_rootSel < m_roots.size() ? m_roots[m_rootSel].root : chosen_install_root(m_dApp);
-        std::vector<std::string> note; m_roots = installs::list_roots(g_dir, &note); m_rootSel = storage_roots::index_of(m_roots, keep);
-        std::string l; for (auto& c : m_roots) l += (l.empty() ? "" : "; ") + storage_roots::label(c);
+        std::vector<std::string> note; m_roots = installs::list_roots(g_dir, &note);
+        std::string report = storage_report::write(g_dir, m_roots, installed_appids());   // WinRT figures + LocalState\storage_report.txt
+        m_rootSel = storage_roots::index_of(m_roots, keep);
+        std::string l; for (auto& c : m_roots) l += (l.empty() ? "" : "; ") + storage_roots::label_capacity(c);
         logf("storage: %s: %s", via, l.c_str()); for (auto& n : note) logf("storage: %s", n.c_str());
+        for (auto& line : storage_report::log_lines(report)) logf("storage: %s", line.c_str());
     }
     void detail_storage(const char* via) {      // X (not installed): next install location
         if (m_dInst.installed || g_demo || dl_is_mine() || is_queued(m_dApp)) return;
         refresh_roots("refresh"); m_rootSel = storage_roots::cycle(m_rootSel, m_roots.size(), 1); m_dNote.clear();
-        logf("detail: install location appid=%u -> %s (%s)", m_dApp, storage_roots::label(m_roots[m_rootSel]).c_str(), via);
+        logf("detail: install location appid=%u -> %s (%s)", m_dApp, storage_roots::label_capacity(m_roots[m_rootSel]).c_str(), via);
     }
     void detail_delete(const char* via) {     // X: ask to delete an installed game
         m_dInst = read_install(m_dApp); m_dInstT = now_s();
@@ -859,10 +874,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (deleting_now()) { m_dNote = "Wait for the delete to finish."; return; }
         refresh_roots("install");
         const storage_roots::Choice& where = m_roots[m_rootSel];
-        if (where.freeBytes < (64ull << 20)) { m_dNote = "Not enough free space on " + where.name + ": " + storage_roots::size_text(where.freeBytes) + " free."; logf("detail: Install refused appid=%u, %s", m_dApp, m_dNote.c_str()); return; }
+        if (where.freeBytes < (64ull << 20)) {
+            m_dNote = storage_roots::refusal_text(where, m_roots, m_rootSel);
+            std::string one = m_dNote; for (auto& ch : one) if (ch == '\n') ch = ' ';
+            logf("detail: Install refused appid=%u, %s", m_dApp, one.c_str()); return;
+        }
         set_install_root(m_dApp, where.root);
         m_auto.app = m_dApp; m_auto.seq = g_dlSeq; m_dNote.clear();
-        logf("detail: Install pressed appid=%u (%s) to %s - will auto-launch when finished", m_dApp, via, storage_roots::label(where).c_str()); enqueue_download(m_dApp);
+        logf("detail: Install pressed appid=%u (%s) to %s - will auto-launch when finished", m_dApp, via, storage_roots::label_capacity(where).c_str()); enqueue_download(m_dApp);
     }
     void detail_back(const char* via) {         // B: back to the library; a download keeps running in the background
         m_cancelArmed = false;
@@ -1060,7 +1079,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         } else if (mine && (dl == 3 || dl == 4) && !m_dInst.installed) {
             std::string ms; { std::lock_guard<std::mutex> l(g_dl.m); ms = g_dl.msg; } std::string l1, l2; wrap2((dl == 4 ? "Cancelled: " : "Failed: ") + ms, 38, l1, l2);
             text(60, 548, l1, 2, RED); text(60, 572, l2, 2, RED);
-        } else if (!m_dNote.empty()) { std::string l1, l2; wrap2(m_dNote, 38, l1, l2); text(60, 548, l1, 2, RED); text(60, 572, l2, 2, RED); }
+        } else if (!m_dNote.empty()) { std::string l1, l2; storage_roots::note_lines(m_dNote, 42, l1, l2); text(60, 548, l1, 2, RED); text(60, 572, l2, 2, RED); }
         else if (deleting) { char b[80]; snprintf(b, sizeof b, "%llu files removed", (unsigned long long)g_del.progress.removed.load()); text(60, 548, b, 2, DIM); }
         else if (delDone && !m_dInst.installed) {
             if (g_del.state == 2) { auto k = g_del.kind.load(); text(60, 548, k == game_library::DeleteKind::folder ? "Deleted. Saves were kept." : k == game_library::DeleteKind::shared ? "Removed. Shared files kept." : "Removed; folder unknown, files kept.", 2, GRN); }
@@ -1077,7 +1096,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             const char* dl2 = "X: Delete game"; int w = twidth(dl2, 3) + 30; fill(60, 590, w, 46, C3(120, 40, 40)); text(75, 601, dl2, 3, TXT);
         }
         if (!m_dInst.installed && !busy && !g_demo && m_rootSel < m_roots.size()) {   // where a fresh install goes (X cycles)
-            std::string sl = m_roots.size() > 1 ? "X: Install to " + storage_roots::label(m_roots[m_rootSel]) : storage_roots::label(m_roots[m_rootSel]) + ", no USB found";
+            std::string sl = m_roots.size() > 1 ? "X: Install to " + storage_roots::label_capacity(m_roots[m_rootSel]) : storage_roots::label_capacity(m_roots[m_rootSel]) + ", no USB found";
             int w = twidth(sl, 2) + 28; fill(60, 590, w, 46, C3(40, 90, 150)); text(74, 604, sl, 2, TXT);
         }
         if (m_dInst.installed && !busy && !g_demo) {   // secondary action: sync cloud saves (Y)

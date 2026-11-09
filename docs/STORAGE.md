@@ -36,6 +36,53 @@ treats as *media* storage (format it on a PC or choose the media option when the
 
 The package path (`Q:\`-style package roots) is the app's own install and does not change: only game folders move.
 
+## Why the free space the launcher sees is small
+
+`GetDiskFreeSpaceExW` returns three figures, and the launcher now logs all three for every path it checks
+(`storage:` lines in `boot.log`, and `LocalState\storage_report.txt`):
+
+| Figure | Argument | What it is |
+|---|---|---|
+| available to this app | `lpFreeBytesAvailableToCaller` | What the app may still write. Under a per-user quota the docs say it "may be less than the total number of free bytes on a disk" ([GetDiskFreeSpaceExW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getdiskfreespaceexw)). This is the figure an install is checked against. |
+| total | `lpTotalNumberOfBytes` | The size of the space the app is writing into: the volume, or the quota/pool when one applies. |
+| total free | `lpTotalNumberOfFreeBytes` | The whole volume's free space, quota or not. |
+
+A Dev Mode console keeps app data in a developer partition of its own, 5 GB by default and resized in
+Dev Home → *Manage dev storage* (community reports: [yosonia](https://yosonia.com/en/510),
+[freedom251](https://freedom251.com/xbox-developer-mode-storage-limits-and-how-to-manage-them/),
+[reddit](https://www.reddit.com/r/XboxRetailHomebrew/comments/1466sr6/help_development_files_storage_capped_at_5_gigs/);
+resizing wipes the dev storage). That is the pool
+`LocalState` lives in, so the console's own storage settings show far more free space than an install through
+`LocalState` can use. The console logs agree: the same install root read 4421 MB, 2789 MB, 4919 MB and 6078 MB at
+different times, and 0–1 MB once the pool was full — a few-GB pool being filled and cleaned, not a full disk.
+Installed games, unfinished downloads and the launcher's own caches all come out of that same pool.
+
+The report says which case it is: `internal space: 4.3 GB for this app of 5.0 GB, 200.0 GB volume free` means a pool
+smaller than the volume; `... of 5.0 GB` with no volume figure means the volume itself is the pool and is nearly full.
+
+## What the launcher does about it
+
+- **Every free-space query logs all three figures** with the path and the API, plus what WinRT reports
+  (`System.FreeSpace` / `System.Capacity` for `LocalFolder`) as a cross-check: `storage: Internal path=... GetDiskFreeSpaceEx available=... total=... free_total=... WinRT System.FreeSpace=... System.Capacity=...`.
+- **`LocalState\storage_report.txt`** holds the same, one line per install location plus the launcher's leftovers,
+  written at start and whenever the detail page probes the drives.
+- **The detail page shows the pool, not a bare figure**: *Internal (4.3 GB free of 5.0 GB)*, and on a refusal
+  *No space on Internal: 0 MB of 5.0 GB.* with the way out on the next line (*X: install to USB E: ...* or
+  *Delete an installed game to free space.*); the volume's own figure is in the log line and the report.
+- **Launcher leftovers are removed at start**: `boot.prev.log`, `launch_probe.previous.log`, `frametimes.csv`,
+  appinfo caches of games that are no longer installed, and store caches no page has touched for a week. They are
+  KB-to-MB, not the GB an install needs, so they are cleaned quietly and reported
+  (`storage: launcher leftovers: N files, X; removed Y`) rather than offered as a button. A game's own folder is
+  never touched by this.
+- **Unfinished downloads are already removed** at start (`installs::sweep_partials`), from the drive they were on.
+- **The USB option is named in the refusal** when another location has more room, and every drive that is not
+  listed says why in the log: `X: not usable, create folder error 19 (The media is write protected.), drive type fixed, label='...' fs=NTFS`
+  or `X: skipped, drive type 1 (unknown)`. The drive type is logged because a fixed `D:` on a Dev Mode console is the
+  developer scratch partition, not the USB stick; only a removable drive is named *USB X:*.
+
+If the pool is the developer partition, no launcher change can grow it: the owner resizes it in Dev Home
+(*Manage dev storage*) or installs to the USB drive. That is an Xbox setting, not something an app may change.
+
 ## Open questions for the console
 
 1. Is the USB drive visible to the app as a drive letter, and can `CreateDirectory` on it succeed (look for
