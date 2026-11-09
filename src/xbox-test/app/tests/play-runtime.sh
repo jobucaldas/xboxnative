@@ -49,6 +49,9 @@ lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-unresolve
 # EXE that reads its TLS through TEB slot 0, as MSVC /GA code does (no _tls_index).
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-slot0.cpp -o "$out/obj/slot0.obj"
 lld-link-19 /nodefaultlib /include:_tls_used /entry:slot0_exe_entry /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-slot0.exe" "$out/obj/slot0.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+# EXE whose D3D11 device (through Play's D3D11CreateDevice) rejects calls; Play must log them.
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d11.cpp -o "$out/obj/d3d11.obj"
+lld-link-19 /nodefaultlib /entry:d3d_entry /include:d3d_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d11.exe" "$out/obj/d3d11.obj" /usr/x86_64-w64-mingw32/lib/libd3d11.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 # A static import from a DLL whose own mapping fails must stay unresolved: the
 # failed image is never published to resolve the importer (never executed).
 # baselib.dll is a game-DLL (uwph-routed) name, the route Megabonk exercised.
@@ -121,7 +124,7 @@ UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
 # Owned stand-in so steam-client proves refusal of a present root client DLL.
 cp "$out/play-dependency.dll" "$out/steamclient64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -134,6 +137,15 @@ grep -q 'PRUN EVENT mapping msvcp140.dll' "$out/native-msvcp.log"
 grep -q 'PRUN EVENT TLS slot 0 for play-slot0.exe' "$out/slot0.log"
 if grep -q 'TLS slot 0 unavailable' "$out/slot0.log";then exit 1;fi
 grep -q 'PRUN OPTIONAL ShellExecuteExW refused' "$out/shell-execute.log"
+# A guest's rejected D3D11 calls are logged by Play, once per distinct call, with
+# the feature levels it asked for and got. (Results pass through: exit code 42.)
+grep -q 'PRUN EVENT guest D3D11CreateDevice request type=1 flags=0x0 adapter=default levels=\[0xb100,0xb000\]' "$out/d3d11-diag.log"
+grep -q 'PRUN EVENT guest D3D11CreateDevice feature level got=0x' "$out/d3d11-diag.log"
+grep -q 'PRUN D3D11 CreateTexture2D hr=0x[0-9a-f]* fmt=0(UNKNOWN) 256x256 .*bind=0x8 ' "$out/d3d11-diag.log"
+grep -q 'PRUN D3D11 CreateBuffer hr=0x[0-9a-f]* bytes=0 bind=0x1 ' "$out/d3d11-diag.log"
+grep -q 'PRUN D3D11 CheckFormatSupport hr=0x[0-9a-f]* fmt=32767 support=0x0 UNSUPPORTED' "$out/d3d11-diag.log"
+grep -q 'PRUN D3D11 adapter vendor=0x' "$out/d3d11-diag.log"
+[[ $(grep -c 'PRUN D3D11 CreateTexture2D hr=' "$out/d3d11-diag.log") == 1 ]]
 # Guest RWX (JIT) memory is emulated over W^X: pages flip RW<->RX on fault.
 grep -q 'RWX emulation: guest requested RWX' "$out/rwx-jit.log"
 # Guest registry (PlayerPrefs) persists in the uwph SQLite registry across runs.

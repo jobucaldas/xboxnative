@@ -12,6 +12,7 @@
 #include <d3d11.h>
 #include <intrin.h>
 #include "play_graphics.h"
+#include "d3d11_diag.h"
 #include "../../uwph/vcruntime/route.h"
 #include "steam_app_ticket.h"
 #include "redact.h"
@@ -1111,6 +1112,7 @@ static HWND WINAPI createWindow(DWORD ex,LPCWSTR cls,LPCWSTR title,DWORD style,i
     char b[160];snprintf(b,sizeof b,"guest CreateWindowExW returned hwnd=%p error=%lu (guest window record; native window bridge pending)",window,window?0:GetLastError());state->event(b);
     if(window)state->milestone=1;return window;
 }
+static std::string hex32(unsigned long long v){char b[20];snprintf(b,sizeof b,"%x",unsigned(v));return b;}
 static HRESULT WINAPI createDevice(IDXGIAdapter* adapter,D3D_DRIVER_TYPE type,HMODULE software,UINT flags,const D3D_FEATURE_LEVEL* levels,UINT count,UINT version,ID3D11Device** device,D3D_FEATURE_LEVEL* level,ID3D11DeviceContext** context) {
     using Fn=decltype(&createDevice);
     auto fn=(Fn)mlp::resolve("d3d11.dll","D3D11CreateDevice",0);
@@ -1119,10 +1121,20 @@ static HRESULT WINAPI createDevice(IDXGIAdapter* adapter,D3D_DRIVER_TYPE type,HM
     // Adapters from the guest factory are wrappers (virtual console output);
     // the native device needs the real adapter.
     IDXGIAdapter* real=corewindow_dxgi::real_adapter(adapter);
+    // What the guest asked for (feature levels in its order) and what it got.
+    {std::string asked="guest D3D11CreateDevice request type="+std::to_string(int(type))+" flags=0x"+hex32(flags)+" adapter="+(adapter?"given":"default")+" levels=[";
+     for(UINT i=0;levels&&i<count&&i<8;++i)asked+=(i?",0x":"0x")+hex32(levels[i]);
+     state->event(asked+(levels?"]":"default]"));}
     HRESULT hr=fn(real?real:adapter,type,software,flags,levels,count,version,device,level,context);
     if(real)real->Release();
     char b[160];snprintf(b,sizeof b,"guest D3D11CreateDevice returned hr=0x%08lx device=%p",(unsigned long)hr,device?*device:nullptr);state->event(b);
-    if(SUCCEEDED(hr)&&device&&*device){play_graphics::adopt_device(*device);state->milestone=2;}return hr;
+    if(level){snprintf(b,sizeof b,"guest D3D11CreateDevice feature level got=0x%x",unsigned(*level));state->event(b);}
+    if(SUCCEEDED(hr)&&device&&*device){
+        // Failed D3D11 calls are logged through the probe sink (not as the
+        // run's "last event"), once per distinct call.
+        d3d11_diag::configure([](const char* text){if(state&&state->log)state->log((std::string("PRUN D3D11 ")+text).c_str());});
+        d3d11_diag::adopt(*device);
+        play_graphics::adopt_device(*device);state->milestone=2;}return hr;
 }
 // Until a real modal UI bridge exists, retain fatal game diagnostics and stop.
 // Never return a fabricated button selection that would advance startup.
