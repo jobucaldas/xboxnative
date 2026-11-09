@@ -6,6 +6,7 @@
  * value printed is deterministic; time and counters are only tested for
  * plausibility, never printed. */
 #include <stdarg.h>
+#include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,6 +85,13 @@ int main(void) {
     check(strlen("hello") == 5 && strncmp("abcdef", "abcxyz", 3) == 0);
     char cat[32]; strcpy(cat, "ab"); strcat(cat, "cd");
     check(strcmp(cat, "abcd") == 0 && memcmp(cat, "abcz", 3) == 0);
+    /* setlocale: the query and a request for "C" answer "C"; an unavailable
+     * locale answers NULL. mingw's CRT calls this from its startup path on
+     * some builds, so an unbound stub stops a program before main. */
+    const char* loc_q = setlocale(LC_ALL, NULL);
+    const char* loc_c = setlocale(LC_ALL, "C");
+    const char* loc_bad = setlocale(LC_ALL, "xx_YY.UTF-8");
+    check(loc_q && strcmp(loc_q, "C") == 0 && loc_c && strcmp(loc_c, "C") == 0 && loc_bad == NULL);
     puts("x86-crt: strings ok");
 
     /* Variadic guest code calling variadic host code. */

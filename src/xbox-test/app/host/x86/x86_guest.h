@@ -557,6 +557,17 @@ inline void Guest::register_all() {
         uint32_t empty = put_str(""), dot = put_str(".");
         for (int i = 0; i < 10; ++i) mem.w32(p + uint32_t(i * 4), i == 0 ? dot : empty);
         return p; });
+    // setlocale(category, locale): the only locale this surface implements is
+    // "C"/"" (the process default), so a query or a request for it answers
+    // "C" and anything else answers NULL, as msvcrt does for an unavailable
+    // locale. mingw's CRT calls it from its startup path.
+    reg.add("msvcrt.dll", "setlocale", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
+        uint32_t name = c.arg(1);
+        if (name) {
+            std::string want = str(name);
+            if (!want.empty() && want != "C" && want != "POSIX") return 0;
+        }
+        return put_str("C"); });
     reg.add("kernel32.dll", "GetProcAddress", Conv::Stdcall, 2, [](Cpu& c) -> uint32_t {
         throw Fault(FaultKind::UnresolvedImport, c.eip, 0, "GetProcAddress: no export table for guest modules"); });
     reg.add("kernel32.dll", "LoadLibraryA", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
