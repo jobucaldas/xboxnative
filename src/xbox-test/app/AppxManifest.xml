@@ -24,6 +24,6 @@
   <Capabilities>
     <Capability Name="internetClient" />
     <Capability Name="codeGeneration" />
-    <Capability Name="removableStorage" />
+    <uap:Capability Name="removableStorage" />
   </Capabilities>
 </Package>
