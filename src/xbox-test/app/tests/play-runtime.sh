@@ -77,6 +77,13 @@ lld-link-19 /nodefaultlib /entry:d3d9_entry /include:d3d9_relocation /subsystem:
 # VK_ERROR_INITIALIZATION_FAILED, as on a desktop with no GPU.
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-vulkan.cpp -o "$out/obj/vulkan.obj"
 lld-link-19 /nodefaultlib /entry:vk_entry /include:vk_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-vulkan.exe" "$out/obj/vulkan.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+# EXE that runs the Vulkan startup path a game takes against the packaged dzn
+# ICD (Vulkan on D3D12): instance with VK_KHR_surface/VK_KHR_win32_surface, a
+# real physical device, a win32 surface on a guest HWND, device, swap chain,
+# render pass, framebuffers, clear and present. Exits 42 when a frame is
+# presented, 43 when the host's D3D12 refuses dzn's device (BLOCKED, not a pass).
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -fno-builtin -c tests/play-vulkan-dzn.cpp -o "$out/obj/vulkan-dzn.obj"
+lld-link-19 /nodefaultlib /entry:vk_dzn_entry /include:vk_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-vulkan-dzn.exe" "$out/obj/vulkan-dzn.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a /usr/x86_64-w64-mingw32/lib/libuser32.a
 # A guest that uses a Discord SDK as a game does. The SDK is our own stand-in
 # (never Discord's binary): it connects to \?\pipe\discord-ipc-N exactly as
 # discord-rpc and the Game SDK do, so Play's answer is what a real game sees.
@@ -159,7 +166,7 @@ UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
 # Owned stand-in so steam-client proves refusal of a present root client DLL.
 cp "$out/play-dependency.dll" "$out/steamclient64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d9-diag discord-sdk vulkan;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d9-diag discord-sdk vulkan-dzn;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -177,14 +184,54 @@ grep -q 'PRUN OPTIONAL ShellExecuteExW refused' "$out/shell-execute.log"
 # desktop where Discord is not running (the fixture exits 42 only then).
 grep -q 'PRUN EVENT Discord SDK present (play-discord-sdk.dll); no Discord client on this console' "$out/discord-sdk.log"
 [[ $(grep -c 'Discord SDK present' "$out/discord-sdk.log") == 1 ]]
-# Vulkan (research/VULKAN-PLAN.md, milestone 1): a guest's LoadLibrary("vulkan-1.dll") is served by the Khronos loader
-# from the runtime directory, its instance is created, and it reports no physical devices. The fixture exits 42 only
-# then; Play must also have listed the packaged ICD manifest in the guest registry, which is the route the loader reads
-# (VK_DRIVER_FILES is ignored at the process's integrity level).
-grep -q 'PRUN EVENT mapping vulkan-1.dll' "$out/vulkan.log"
-grep -q 'PRUN EVENT Vulkan loader mapped from the runtime directory; the guest registry lists the packaged null ICD' "$out/vulkan.log"
-grep -q 'PRUN EVENT mapping vulkan-null-icd.dll' "$out/vulkan.log"
-[[ $(grep -c 'the guest registry lists the packaged null ICD' "$out/vulkan.log") == 1 ]]
+# Vulkan (research/VULKAN-PLAN.md): a guest's LoadLibrary("vulkan-1.dll") is served by the Khronos loader from the
+# runtime directory, and Play must have listed the packaged ICD manifests in the guest registry, which is the route
+# the loader reads (VK_DRIVER_FILES is ignored at the process's integrity level).
+# The launcher build packages dzn and the null ICD, so the milestone-1 fixture's "no devices" answer no longer holds
+# against that runtime directory: the loader now finds a real physical device. The milestone-1 answer is asserted
+# against a runtime directory without dzn instead (below), which is exactly what a PLAY_DZN=0 launcher ships.
+if [ -f out/layout/runtime/vulkan-dzn.json ]; then
+  grep -q 'PRUN EVENT mapping vulkan-1.dll' "$out/vulkan-dzn.log"
+  grep -q 'PRUN EVENT Vulkan loader mapped from the runtime directory; the guest registry lists the packaged dzn driver (Vulkan on D3D12) with the null ICD as fallback' "$out/vulkan-dzn.log"
+  grep -q 'PRUN EVENT mapping vulkan_dzn.dll' "$out/vulkan-dzn.log"
+  [[ $(grep -c 'lists the packaged dzn driver' "$out/vulkan-dzn.log") == 1 ]]
+else
+  grep -q 'PRUN EVENT Vulkan loader mapped from the runtime directory; the guest registry lists the packaged null ICD' "$out/vulkan-dzn.log"
+  grep -q 'PRUN EVENT mapping vulkan-null-icd.dll' "$out/vulkan-dzn.log"
+  [[ $(grep -c 'the guest registry lists the packaged null ICD' "$out/vulkan-dzn.log") == 1 ]]
+fi
+# The milestone-1 answer, against a runtime directory that has no dzn manifest: the instance is created and the
+# enumeration reports no devices (the fixture exits 42 only then, so the runner exits 0). This is the PLAY_DZN=0
+# launcher's behaviour.
+rm -rf "$out/runtime-null";mkdir -p "$out/runtime-null"
+cp out/layout/runtime/*.dll out/layout/runtime/*.json "$out/runtime-null/"
+rm -f "$out/runtime-null/vulkan_dzn.dll" "$out/runtime-null/vulkan-dzn.json"
+# A fresh guest registry: the previous run's entries name the other runtime directory, and
+# clearVulkanDriverFiles() only removes the manifests of the directory it is given.
+rm -f "$out"/registry.sqlite*
+PRUN_RUNTIME_DIR=$(winepath -w "$out/runtime-null") WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d \
+ timeout -k 2 20 wine "$out/play-runner.exe" vulkan > "$out/vulkan-null-runtime.log" 2>&1
+tail -1 "$out/vulkan-null-runtime.log"
+grep -q 'PRUN EVENT Vulkan loader mapped from the runtime directory; the guest registry lists the packaged null ICD' "$out/vulkan-null-runtime.log"
+grep -q 'PRUN EVENT mapping vulkan-null-icd.dll' "$out/vulkan-null-runtime.log"
+# dzn (research/VULKAN-PLAN.md, milestone 2): the guest gets a real physical device and a win32 surface from the
+# packaged ICD, and either presents a frame (PASS) or stops at device creation on a host whose D3D12 refuses dzn's
+# device (BLOCKED, never a pass). The launcher build always packages dzn, so a missing manifest is a failure.
+if [ -f out/layout/runtime/vulkan-dzn.json ]; then
+  grep -q 'PLAY-VULKAN-DZN STAGE instance-created' "$out/vulkan-dzn.log"
+  grep -q 'PLAY-VULKAN-DZN STAGE physical-device count=[1-9]' "$out/vulkan-dzn.log"
+  grep -q 'PLAY-VULKAN-DZN STAGE win32-surface-created' "$out/vulkan-dzn.log"
+  if grep -q 'PLAY-VULKAN-DZN PASS frame-presented' "$out/vulkan-dzn.log"; then
+    echo "PLAY-VULKAN-DZN PASS frame-presented"
+  elif grep -q 'PLAY-VULKAN-DZN BLOCKED device-creation' "$out/vulkan-dzn.log"; then
+    echo "PLAY-VULKAN-DZN BLOCKED device-creation on this host; not a pass"
+    [ "${PRUN_REQUIRE_DZN:-0}" = 1 ] && { echo "PLAY-VULKAN-DZN FAIL: PRUN_REQUIRE_DZN=1"; exit 1; }
+  else
+    echo "PLAY-VULKAN-DZN FAIL (see $out/vulkan-dzn.log)"; exit 1
+  fi
+else
+  echo "PLAY-VULKAN-DZN FAIL: the launcher build did not package dzn"; exit 1
+fi
 # A guest's rejected D3D11 calls are logged by Play, once per distinct call, with
 # the feature levels it asked for and got. (Results pass through: exit code 42.)
 grep -q 'PRUN EVENT guest D3D11CreateDevice request type=1 flags=0x0 adapter=default levels=\[0xb100,0xb000\]' "$out/d3d11-diag.log"

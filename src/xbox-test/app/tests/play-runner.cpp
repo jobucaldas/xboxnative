@@ -315,7 +315,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // The D3D10, D3D12 and D3D9 fixtures create a swap chain on a guest HWND,
     // which the launcher always maps to its CoreWindow. Give them the same
     // stand-in.
-    if(std::string(args)=="d3d10-diag"||std::string(args)=="d3d12-diag"||std::string(args)=="d3d9-diag") {
+    if(std::string(args)=="d3d10-diag"||std::string(args)=="d3d12-diag"||std::string(args)=="d3d9-diag"||std::string(args)=="vulkan-dzn") {
         if(!host_surface::create()) {logline("HOST SURFACE FAIL native Wine window unavailable");return 3;}
         play_graphics::configure(&host_surface::token,host_surface::present,logline);
         logline("HOST SURFACE native Wine window stands in for the CoreWindow (off-device only)");
@@ -325,13 +325,18 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // donors before it maps anything, so this fixture must too; without the gate
     // the loader's imports are unresolved and the load fails for a reason a real
     // launch never hits.
-    if(std::string(args)=="vulkan") {
+    if(std::string(args)=="vulkan"||std::string(args)=="vulkan-dzn") {
         if(!donor_pe::probe(logline)) {logline("DWPE FAIL donor behavior gate; no game code executed");return 3;}
         mlp::donor_resolve=donor_pe::exported;
     }
     // Wine's C++ runtime beside the runner, as layout\runtime beside the launcher.
+    // PRUN_RUNTIME_DIR names another runtime directory (play-runtime.sh uses it
+    // to run the same runner against a launcher built without dzn, where the
+    // loader must list only the null ICD).
     {wchar_t self[32768];DWORD n=GetModuleFileNameW(nullptr,self,32768);std::wstring dir(self,n);
-     play_runtime::set_runtime_directory(dir.substr(0,dir.find_last_of(L"\\/"))+L"\\runtime");}
+     dir.resize(dir.find_last_of(L"\\/"));
+     wchar_t override_[32768];DWORD o=GetEnvironmentVariableW(L"PRUN_RUNTIME_DIR",override_,32768);
+     play_runtime::set_runtime_directory(o&&o<32768?std::wstring(override_,o):dir+L"\\runtime");}
     // Optional emulated Steam client (owned game): served for steamclient64.dll,
     // with the ActiveProcess registry environment in the guest registry.
     {wchar_t client[1024];DWORD n=GetEnvironmentVariableW(L"PRUN_STEAM_CLIENT",client,1024);
@@ -352,7 +357,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // Engine options come from the game's files, as in the launcher.
     std::wstring gameExe=L"Megabonk.exe";
     {wchar_t value[260];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_EXE",value,260);if(n&&n<260)gameExe.assign(value,n);}
-    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
+    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":std::string(args)=="vulkan-dzn"?L"play-vulkan-dzn.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
     // guest stop (fatal dialog). Progress must never mask that failure.
@@ -450,6 +455,19 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         // then). play-runtime.sh greps the log for the ICD registry publication.
         auto loader=play_runtime::named(L"vulkan-1.dll");
         ok=ok&&r->finished&&r->success&&r->code==42&&loader&&loader->mapped&&loader->initialized;
+    }
+    else if(mode=="vulkan-dzn") {
+        // dzn is the packaged ICD: the loader and dzn were mapped from the
+        // runtime directory, and the guest got a real physical device and a
+        // win32 surface. The fixture exits 42 when it also presented frames;
+        // 43 means the host's D3D12 refused dzn's device after every earlier
+        // stage worked (off-device: Wine's vkd3d DXIL parser), which is a
+        // BLOCKED result, never a pass. play-runtime.sh picks PASS or BLOCKED
+        // from the fixture's own lines.
+        auto loader=play_runtime::named(L"vulkan-1.dll");
+        auto dzn=play_runtime::named(L"vulkan_dzn.dll");
+        ok=ok&&r->finished&&r->success&&(r->code==42||r->code==43)&&loader&&loader->mapped&&loader->initialized&&
+            dzn&&dzn->mapped&&dzn->initialized;
     }
     else if(mode=="discord-sdk") {
         // Both Discord SDK flavours returned the answer they return with no
