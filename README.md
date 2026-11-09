@@ -23,7 +23,8 @@ loader plus our own POSIX/syscall host layer (`uwph`). Status: **early, experime
 
 Which games run on the console, and the evidence for each, is tracked in [docs/GAMES.md](docs/GAMES.md)
 (per-title status, last evidence date, what counts as working). Nothing is marked working until it meets
-[docs/PLAYABLE.md](docs/PLAYABLE.md).
+[docs/PLAYABLE.md](docs/PLAYABLE.md). Missing Win32 functions, ranked by whether a real run reached them,
+are in [docs/GAPS.md](docs/GAPS.md).
 
 ## Design
 launcher → Wine-style loader → ELF/PE shim → `uwph` (POSIX/syscall host in UWP, in-process wineserver, no AF_UNIX).
