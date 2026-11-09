@@ -31,7 +31,10 @@ namespace {
 struct FindResult { uint64_t handle; uint8_t found; };
 struct DownloadResult { uint64_t board; uint64_t entries; int count; };
 struct Entry { uint64_t user; int32_t rank; int32_t score; int32_t details; uint64_t ugc; };
-struct CallbackMsg { int pipe; int callback; void* param; };
+// Steam's CallbackMsg_t, in full: m_hSteamUser, m_iCallback, m_pubParam,
+// m_cubParam. GetNextCallback writes the whole object, so every field must be
+// here; a short struct would be overrun on each poll (24 bytes on Win64).
+struct CallbackMsg { int32_t user; int32_t callback; uint8_t* param; int32_t size; };
 enum : int { CallbackLeaderboardFindResult = 1104, CallbackLeaderboardScoresDownloaded = 1105,
              CallbackSteamAPICallCompleted = 703 };
 
