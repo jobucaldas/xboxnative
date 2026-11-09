@@ -472,6 +472,145 @@ static void test_x87_forms() {
     }
 }
 
+// ---------- (2c) regressions the review found: each compared with the hardware ----------
+// Every case here was a wrong operand, a wrong lane order, a missing write or a
+// wrong stack order. The native side runs the same encoding, so a future
+// change that reintroduces any of them fails against this CPU, not a guess.
+static void test_sse_regressions() {
+    Machine m;
+    auto run = [&](std::initializer_list<uint8_t> code) { exec(m, std::vector<uint8_t>(code), 0, 0, 0, false); };
+    // bt/bts/btr/btc r/m32, imm8: the bit index is the immediate.
+    auto bt_case = [&](unsigned bit) {
+        // Values chosen so the encoded bit differs from bit 0 of EAX/ECX: with
+        // the old register-index bug the two disagree and this fails.
+        // `which` selects the hardware form (immediate 0, 4 or 31); the switch
+        // below is keyed on it, not on the bit value itself.
+        const unsigned which = bit == 0 ? 0 : bit == 4 ? 1 : 2;
+        for (uint32_t v : {0x00000001u, 0x00000010u, 0x80000000u, 0x7fffffffu, 0xffffffffu, 0u}) {
+            for (int act = 0; act < 4; ++act) {
+                uint32_t nv = v; unsigned char ncf = 0;
+                switch (which * 4 + act) {
+                case 0: asm volatile("movl %2, %%eax\n\tbtl $0, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 4: asm volatile("movl %2, %%eax\n\tbtl $4, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 8: asm volatile("movl %2, %%eax\n\tbtl $31, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 1: asm volatile("movl %2, %%eax\n\tbtsl $0, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 5: asm volatile("movl %2, %%eax\n\tbtsl $4, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 9: asm volatile("movl %2, %%eax\n\tbtsl $31, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 2: asm volatile("movl %2, %%eax\n\tbtrl $0, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 6: asm volatile("movl %2, %%eax\n\tbtrl $4, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 10: asm volatile("movl %2, %%eax\n\tbtrl $31, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 3: asm volatile("movl %2, %%eax\n\tbtcl $0, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 7: asm volatile("movl %2, %%eax\n\tbtcl $4, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                case 11: asm volatile("movl %2, %%eax\n\tbtcl $31, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
+                default: continue;
+                }
+                // 0F BA /act with modrm C0 (eax) and the immediate bit
+                exec(m, {0x0F, 0xBA, uint8_t(0xC0 | (act << 3)), uint8_t(bit == 0 ? 0 : bit == 4 ? 4 : 31)}, v, 0, 0, false);
+                EXPECT(m.cpu.reg[EAX] == nv && bool(m.cpu.eflags & CF) == bool(ncf), "bt imm act=%d bit=%u v=%08x: got %08x cf=%d want %08x cf=%d",
+                       act, bit, v, m.cpu.reg[EAX], int((m.cpu.eflags & CF) != 0), nv, int(ncf != 0));
+                ++alu_cases;
+            }
+        }
+    };
+    bt_case(0); bt_case(4); bt_case(31);
+    // movd xmm, eax zeroes the upper 96 bits; movd eax, xmm reads the low dword.
+    run({0x66, 0x0F, 0x6E, 0xC0});  // movd xmm0, eax (xmm0 preset below)
+    m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu}.data());
+    m.mem.protect(Machine::CODE, 4096, PROT_R | PROT_W);
+    // movdqa xmm0,[DATA]; movd xmm0,eax; movdqa [DATA+16],xmm0
+    std::vector<uint8_t> c{0x66, 0x0F, 0x6F, 0x05, 0x00, 0x00, 0x02, 0x00, 0x66, 0x0F, 0x6E, 0xC0,
+                           0x66, 0x0F, 0x7F, 0x05, 0x10, 0x00, 0x02, 0x00};
+    exec(m, c, 0x12345678u, 0, 0, false);
+    uint32_t out[4]; m.mem.r128(Machine::DATA + 16, out);
+    EXPECT(out[0] == 0x12345678u && out[1] == 0 && out[2] == 0 && out[3] == 0, "movd xmm,eax must zero the upper lanes: %08x %08x %08x %08x", out[0], out[1], out[2], out[3]);
+    // movd eax, xmm1 (66 0F 7E C8): a GP destination, not an XMM slot.
+    m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0xAAAAAAAAu, 0xBBBBBBBBu, 0xCCCCCCCCu, 0xDDDDDDDDu}.data());
+    exec(m, {0x66, 0x0F, 0x6F, 0x0D, 0x00, 0x00, 0x02, 0x00, 0x66, 0x0F, 0x7E, 0xC8}, 0, 0, 0, false);
+    EXPECT(m.cpu.reg[EAX] == 0xAAAAAAAAu, "movd eax,xmm1: got %08x", m.cpu.reg[EAX]);
+    // movq xmm0, xmm1 (F3 0F 7E C1) zeroes the upper 64 bits.
+    m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu}.data());
+    m.mem.w128(Machine::DATA + 16, std::array<uint32_t, 4>{0xAAAAAAAAu, 0xBBBBBBBBu, 0xCCCCCCCCu, 0xDDDDDDDDu}.data());
+    exec(m, {0x66, 0x0F, 0x6F, 0x05, 0x00, 0x00, 0x02, 0x00, 0x66, 0x0F, 0x6F, 0x0D, 0x10, 0x00, 0x02, 0x00,
+             0xF3, 0x0F, 0x7E, 0xC1, 0x66, 0x0F, 0x7F, 0x05, 0x20, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    m.mem.r128(Machine::DATA + 32, out);
+    EXPECT(out[0] == 0xAAAAAAAAu && out[1] == 0xBBBBBBBBu && out[2] == 0 && out[3] == 0, "movq xmm0,xmm1 must zero the upper half: %08x %08x %08x %08x", out[0], out[1], out[2], out[3]);
+    // movmskps eax, xmm1: the source is the r/m register.
+    m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0x80000000u, 0x7fffffffu, 0xFFFFFFFFu, 0x00000000u}.data());
+    exec(m, {0x0F, 0x28, 0x0D, 0x00, 0x00, 0x02, 0x00, 0x0F, 0x50, 0xC1}, 0xdeadbeefu, 0, 0, false);
+    EXPECT(m.cpu.reg[EAX] == 0x5u, "movmskps eax,xmm1: got %x want 5", m.cpu.reg[EAX]);
+    // pmovmskb eax, xmm1 (66 0F D7 C1).
+    m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0x80808080u, 0x01010101u, 0xffffffffu, 0u}.data());
+    exec(m, {0x66, 0x0F, 0x6F, 0x0D, 0x00, 0x00, 0x02, 0x00, 0x66, 0x0F, 0xD7, 0xC1}, 0, 0, 0, false);
+    EXPECT(m.cpu.reg[EAX] == 0x0f0fu, "pmovmskb eax,xmm1: got %x want 0f0f", m.cpu.reg[EAX]);
+    // sqrtss xmm0, xmm1 uses the source and keeps the destination's upper lanes.
+    // (movups, not movss: movss zeroes the lanes it does not load.)
+    m.mem.w32(Machine::DATA, f32b(4.0f)); m.mem.w32(Machine::DATA + 4, f32b(9.0f));
+    m.mem.w32(Machine::DATA + 8, f32b(16.0f)); m.mem.w32(Machine::DATA + 12, f32b(25.0f));
+    exec(m, {0x0F, 0x10, 0x05, 0x00, 0x00, 0x02, 0x00, 0x0F, 0x10, 0x0D, 0x08, 0x00, 0x02, 0x00,
+             0xF3, 0x0F, 0x51, 0xC1, 0x0F, 0x11, 0x05, 0x10, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    EXPECT(m.mem.r32(Machine::DATA + 16) == f32b(4.0f) && m.mem.r32(Machine::DATA + 20) == f32b(9.0f),
+           "sqrtss xmm0(4),xmm1(16): got %g %g", double(bf32(m.mem.r32(Machine::DATA + 16))), double(bf32(m.mem.r32(Machine::DATA + 20))));
+    // rsqrtss/rcpss (F3 0F 52/53) are scalar too: one lane from the source, the
+    // destination's upper lanes kept. A memory source is 4 bytes, so reading
+    // four lanes would fault past the operand.
+    m.mem.w32(Machine::DATA, f32b(4.0f)); m.mem.w32(Machine::DATA + 4, f32b(9.0f));
+    m.mem.w32(Machine::DATA + 8, f32b(16.0f)); m.mem.w32(Machine::DATA + 12, f32b(25.0f));
+    exec(m, {0x0F, 0x10, 0x05, 0x00, 0x00, 0x02, 0x00, 0x0F, 0x10, 0x0D, 0x08, 0x00, 0x02, 0x00,
+             0xF3, 0x0F, 0x53, 0xC1, 0x0F, 0x11, 0x05, 0x10, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    EXPECT(m.mem.r32(Machine::DATA + 16) == f32b(0.0625f) && m.mem.r32(Machine::DATA + 20) == f32b(9.0f),
+           "rcpss xmm0(4),xmm1(16): got %g %g", double(bf32(m.mem.r32(Machine::DATA + 16))), double(bf32(m.mem.r32(Machine::DATA + 20))));
+    // rcpss xmm0, [DATA+12] — a 4-byte memory operand; lanes 1-3 stay.
+    exec(m, {0x0F, 0x10, 0x05, 0x00, 0x00, 0x02, 0x00, 0xF3, 0x0F, 0x53, 0x05, 0x0C, 0x00, 0x02, 0x00,
+             0x0F, 0x11, 0x05, 0x10, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    EXPECT(m.mem.r32(Machine::DATA + 16) == f32b(0.04f) && m.mem.r32(Machine::DATA + 20) == f32b(9.0f),
+           "rcpss xmm0,[25]: got %g %g", double(bf32(m.mem.r32(Machine::DATA + 16))), double(bf32(m.mem.r32(Machine::DATA + 20))));
+    // rsqrtss xmm0, xmm1 (F3 0F 52 C1): 1/sqrt(16) = 0.25.
+    exec(m, {0x0F, 0x10, 0x05, 0x00, 0x00, 0x02, 0x00, 0x0F, 0x10, 0x0D, 0x08, 0x00, 0x02, 0x00,
+             0xF3, 0x0F, 0x52, 0xC1, 0x0F, 0x11, 0x05, 0x10, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    EXPECT(m.mem.r32(Machine::DATA + 16) == f32b(0.25f) && m.mem.r32(Machine::DATA + 20) == f32b(9.0f),
+           "rsqrtss xmm0(4),xmm1(16): got %g %g", double(bf32(m.mem.r32(Machine::DATA + 16))), double(bf32(m.mem.r32(Machine::DATA + 20))));
+    // unpcklps/unpckhps interleave dest,src (dest first).
+    m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u}.data());
+    m.mem.w128(Machine::DATA + 16, std::array<uint32_t, 4>{0xAAAAAAAAu, 0xBBBBBBBBu, 0xCCCCCCCCu, 0xDDDDDDDDu}.data());
+    exec(m, {0x0F, 0x28, 0x05, 0x00, 0x00, 0x02, 0x00, 0x0F, 0x28, 0x0D, 0x10, 0x00, 0x02, 0x00,
+             0x0F, 0x14, 0xC1, 0x0F, 0x29, 0x05, 0x20, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    m.mem.r128(Machine::DATA + 32, out);
+    EXPECT(out[0] == 0x11111111u && out[1] == 0xAAAAAAAAu && out[2] == 0x22222222u && out[3] == 0xBBBBBBBBu,
+           "unpcklps: %08x %08x %08x %08x", out[0], out[1], out[2], out[3]);
+    exec(m, {0x0F, 0x28, 0x05, 0x00, 0x00, 0x02, 0x00, 0x0F, 0x28, 0x0D, 0x10, 0x00, 0x02, 0x00,
+             0x0F, 0x15, 0xC1, 0x0F, 0x29, 0x05, 0x20, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    m.mem.r128(Machine::DATA + 32, out);
+    EXPECT(out[0] == 0x33333333u && out[1] == 0xCCCCCCCCu && out[2] == 0x44444444u && out[3] == 0xDDDDDDDDu,
+           "unpckhps: %08x %08x %08x %08x", out[0], out[1], out[2], out[3]);
+    // packuswb saturates signed 16-bit lanes into unsigned bytes.
+    m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0x012cffffu, 0x012c0080u, 0x00ff0000u, 0x03e80100u}.data());
+    m.mem.w128(Machine::DATA + 16, std::array<uint32_t, 4>{0x00040003u, 0x00060005u, 0x00080007u, 0x000a0009u}.data());
+    exec(m, {0x66, 0x0F, 0x6F, 0x05, 0x00, 0x00, 0x02, 0x00, 0x66, 0x0F, 0x6F, 0x0D, 0x10, 0x00, 0x02, 0x00,
+             0x66, 0x0F, 0x67, 0xC1, 0x66, 0x0F, 0x7F, 0x05, 0x20, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    m.mem.r128(Machine::DATA + 32, out);
+    { const uint8_t* b = reinterpret_cast<const uint8_t*>(out);
+      const uint8_t want[16] = {0, 255, 128, 255, 0, 255, 255, 255, 3, 4, 5, 6, 7, 8, 9, 10};
+      bool same = true; for (int i = 0; i < 16; ++i) same = same && b[i] == want[i];
+      EXPECT(same, "packuswb: %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u", b[0],b[1],b[2],b[3],b[4],b[5],b[6],b[7],b[8],b[9],b[10],b[11],b[12],b[13],b[14],b[15]); }
+    // stmxcsr/ldmxcsr round-trip: what fxsave-style save/restore code depends on.
+    m.mem.w32(Machine::DATA, 0xdeadbeefu);
+    exec(m, {0x0F, 0xAE, 0x1D, 0x00, 0x00, 0x02, 0x00}, 0, 0, 0, false);  // stmxcsr [DATA]
+    EXPECT(m.mem.r32(Machine::DATA) == m.cpu.mxcsr, "stmxcsr wrote %08x want %08x", m.mem.r32(Machine::DATA), m.cpu.mxcsr);
+    m.mem.w32(Machine::DATA, 0x1f80);
+    exec(m, {0x0F, 0xAE, 0x15, 0x00, 0x00, 0x02, 0x00}, 0, 0, 0, false);  // ldmxcsr [DATA]
+    EXPECT(m.cpu.mxcsr == 0x1f80, "ldmxcsr: %08x", m.cpu.mxcsr);
+    // fptan: st0 = tan(x), then 1.0 pushed on top.
+    m.mem.w64(Machine::DATA, f64b(1.0));
+    exec(m, {0xDD, 0x05, 0x00, 0x00, 0x02, 0x00, 0xD9, 0xF2, 0xDD, 0x1D, 0x10, 0x00, 0x02, 0x00, 0xDD, 0x1D, 0x18, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    EXPECT(bf64(m.mem.r64(Machine::DATA + 16)) == 1.0 && std::fabs(bf64(m.mem.r64(Machine::DATA + 24)) - std::tan(1.0)) < 1e-15,
+           "fptan(1.0): st0=%g st1=%g", bf64(m.mem.r64(Machine::DATA + 16)), bf64(m.mem.r64(Machine::DATA + 24)));
+    // fxtract: st0 = significand, st1 = unbiased exponent.
+    m.mem.w64(Machine::DATA, f64b(8.0));
+    exec(m, {0xDD, 0x05, 0x00, 0x00, 0x02, 0x00, 0xD9, 0xF4, 0xDD, 0x1D, 0x10, 0x00, 0x02, 0x00, 0xDD, 0x1D, 0x18, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    EXPECT(bf64(m.mem.r64(Machine::DATA + 16)) == 1.0 && bf64(m.mem.r64(Machine::DATA + 24)) == 3.0,
+           "fxtract(8.0): st0=%g st1=%g", bf64(m.mem.r64(Machine::DATA + 16)), bf64(m.mem.r64(Machine::DATA + 24)));
+}
+
 // ---------- (3) thunks, callbacks, nesting ----------
 static void test_thunks() {
     Machine m; Host host; Registry reg; register_win32(reg, host);
@@ -547,6 +686,7 @@ int main(int argc, char** argv) {
         {"programs", test_programs, "X86-CORE PASS: control flow, addressing, string ops, FS base, W^X and explicit faults"},
         {"fpu", test_fpu, "X86-CORE PASS: x87 f64 arithmetic and fcomip, SSE scalar double/single arithmetic, int<->float conversion and SSE2 packed integer match this machine's CPU bit for bit"},
         {"x87forms", test_x87_forms, "X86-CORE PASS: x87 memory forms, stack discipline, control/status words and 80-bit round trip"},
+        {"sse-regressions", test_sse_regressions, "X86-CORE PASS: bt imm, movd/movq, movmskps/pmovmskb, sqrtss, unpck, packuswb, stmxcsr, fptan/fxtract match this machine's CPU"},
         {"thunks", test_thunks, "X86-CORE PASS: stdcall/cdecl thunks, nested guest callbacks, callee-saved registers preserved"},
     };
     for (auto& s : suites) { int before = failures; s.fn(); if (failures == before) printf("%s\n", s.pass); else printf("X86-CORE FAIL: %s\n", s.name); }

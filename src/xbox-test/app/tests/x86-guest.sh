@@ -18,7 +18,13 @@ fi
 extra=()
 for d in /nix/store/*-mcfgthread-i686-w64-mingw32-*/lib; do [[ -d $d ]] && extra+=("-L$d"); done
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/x86-guest.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
-"$cc32" -O1 -Wall -Wextra -Werror "${extra[@]}" -o "$tmp/fixture-crt.exe" "$here/x86-guest/fixture-crt.c"
+# The fixture carries an application manifest declaring Windows 10 support, so
+# GetVersionEx reports 10.0 under real Windows/Wine as it does on the console.
+rc32="$(dirname "$cc32")/i686-w64-mingw32-windres"
+[[ -x $rc32 ]] || { echo "x86-guest: no i686-w64-mingw32-windres" >&2; exit 1; }
+# The .rc is preprocessed, and the wrapper's preprocessor is the cross gcc.
+PATH="$(dirname "$cc32"):$PATH" "$rc32" -O coff -I "$here/x86-guest" -i "$here/x86-guest/fixture-crt.rc" -o "$tmp/fixture-crt.res"
+"$cc32" -O1 -Wall -Wextra -Werror "${extra[@]}" -o "$tmp/fixture-crt.exe" "$here/x86-guest/fixture-crt.c" "$tmp/fixture-crt.res"
 "${CXX:-c++}" -std=c++17 -O2 -mno-red-zone -Wall -Wextra -Werror "$here/x86-guest.cpp" -o "$tmp/x86-guest"
 set +e
 out=$("$tmp/x86-guest" "$tmp/fixture-crt.exe"); rc=$?
