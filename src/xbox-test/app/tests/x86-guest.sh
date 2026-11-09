@@ -52,7 +52,13 @@ set +e
 pout=$("$tmp/x86-play" "$tmp/fixture-crt.exe"); prc=$?
 set -e
 [[ $prc -eq 0 ]] || { echo "X86-GUEST FAIL: x86_play exit $prc"; echo "$pout"; exit 1; }
-grep -q '^play: loaded=1 finished=1 exit=42 .* imports=65 bound=65 ' <<<"$pout" || { echo "X86-GUEST FAIL: x86_play result"; echo "$pout"; exit 1; }
+grep -q '^play: loaded=1 finished=1 exit=42 ' <<<"$pout" || { echo "X86-GUEST FAIL: x86_play result"; echo "$pout"; exit 1; }
+# Every import the fixture declares must be bound. The exact count follows the
+# fixture and the mingw CRT (it grew from 65 to 67 with #114's sprintf/strchr
+# checks), so require all of them bound and no fewer than the original 65.
+read -r pimports pbound < <(sed -n 's/^play: .* imports=\([0-9]\+\) bound=\([0-9]\+\).*/\1 \2/p' <<<"$pout")
+[[ -n ${pimports:-} && $pimports -ge 65 && $pimports -eq $pbound ]] || {
+  echo "X86-GUEST FAIL: x86_play imports=$pimports bound=$pbound (want all bound, at least 65)"; echo "$pout"; exit 1; }
 grep -q '^play: on_loaded calls=1 before-entry=1 ' <<<"$pout" || { echo "X86-GUEST FAIL: x86_play progress callback"; echo "$pout"; exit 1; }
 ! grep -q '^play: unresolved\|^play: fault' <<<"$pout" || { echo "X86-GUEST FAIL: x86_play reported a fault or unresolved import"; echo "$pout"; exit 1; }
 pbody=$(sed '/^play: /d' <<<"$pout")
