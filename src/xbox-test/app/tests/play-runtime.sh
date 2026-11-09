@@ -57,6 +57,13 @@ lld-link-19 /nodefaultlib /entry:d3d_entry /include:d3d_relocation /subsystem:wi
 # device it got and the calls the device rejects, once each.
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d12.cpp -o "$out/obj/d3d12.obj"
 lld-link-19 /nodefaultlib /entry:d3d12_entry /include:d3d12_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d12.exe" "$out/obj/d3d12.obj" /usr/x86_64-w64-mingw32/lib/libd3d12.a /usr/x86_64-w64-mingw32/lib/libdxgi.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libdxguid.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+# A guest that uses a Discord SDK as a game does. The SDK is our own stand-in
+# (never Discord's binary): it connects to \?\pipe\discord-ipc-N exactly as
+# discord-rpc and the Game SDK do, so Play's answer is what a real game sees.
+clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -c tests/play-discord-sdk.cpp -o "$out/obj/discord-sdk.obj"
+lld-link-19 /nodefaultlib /dll /entry:DllMain /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-discord-sdk.dll" "$out/obj/discord-sdk.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -c tests/play-discord.cpp -o "$out/obj/discord.obj"
+lld-link-19 /nodefaultlib /entry:discord_entry /include:discord_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-discord.exe" "$out/obj/discord.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
 # A static import from a DLL whose own mapping fails must stay unresolved: the
 # failed image is never published to resolve the importer (never executed).
 # baselib.dll is a game-DLL (uwph-routed) name, the route Megabonk exercised.
@@ -129,7 +136,7 @@ UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
 # Owned stand-in so steam-client proves refusal of a present root client DLL.
 cp "$out/play-dependency.dll" "$out/steamclient64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag discord-sdk;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -142,6 +149,11 @@ grep -q 'PRUN EVENT mapping msvcp140.dll' "$out/native-msvcp.log"
 grep -q 'PRUN EVENT TLS slot 0 for play-slot0.exe' "$out/slot0.log"
 if grep -q 'TLS slot 0 unavailable' "$out/slot0.log";then exit 1;fi
 grep -q 'PRUN OPTIONAL ShellExecuteExW refused' "$out/shell-execute.log"
+# A Discord SDK is present and there is no Discord client to reach: Play says so
+# once, and both SDK flavours return at once with the answer they return on a
+# desktop where Discord is not running (the fixture exits 42 only then).
+grep -q 'PRUN EVENT Discord SDK present (play-discord-sdk.dll); no Discord client on this console' "$out/discord-sdk.log"
+[[ $(grep -c 'Discord SDK present' "$out/discord-sdk.log") == 1 ]]
 # A guest's rejected D3D11 calls are logged by Play, once per distinct call, with
 # the feature levels it asked for and got. (Results pass through: exit code 42.)
 grep -q 'PRUN EVENT guest D3D11CreateDevice request type=1 flags=0x0 adapter=default levels=\[0xb100,0xb000\]' "$out/d3d11-diag.log"

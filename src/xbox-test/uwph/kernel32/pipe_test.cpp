@@ -18,6 +18,11 @@ int main() {
     CHECK(local_pipe(L"\\\\.\\PIPE\\x")==L"\\\\.\\pipe\\LOCAL\\x");
     CHECK(local_pipe(L"\\\\.\\pipe\\LOCAL\\x").empty()&&local_pipe(L"\\\\.\\pipe\\local\\x").empty());
     CHECK(local_pipe(L"\\\\.\\pipe\\").empty()&&local_pipe(L"C:\\pipe\\x").empty()&&local_pipe(nullptr).empty());
+    // The extended form names the same object; both Discord SDKs build it for
+    // discord-ipc-N, so a guest's connect lands on the LOCAL\ namespace too.
+    CHECK(local_pipe(L"\\\\?\\pipe\\discord-ipc-0")==L"\\\\.\\pipe\\LOCAL\\discord-ipc-0");
+    CHECK(local_pipe(L"\\\\?\\PIPE\\discord-ipc-9")==L"\\\\.\\pipe\\LOCAL\\discord-ipc-9");
+    CHECK(local_pipe(L"\\\\?\\pipe\\LOCAL\\x").empty()&&local_pipe(L"\\\\?\\pipe\\").empty());
     CHECK(kernel32_core::resolve("api-ms-win-core-namedpipe-l1-2-2.dll","CreateNamedPipeW")==kernel32_core::resolve("kernel32.dll","CreateNamedPipeW"));
     wchar_t unique[64];std::swprintf(unique,64,L"\\\\.\\pipe\\xbn-pipe-test-%lu",GetCurrentProcessId());
     // Created and opened under the bare name; both land on the LOCAL\ pipe.
