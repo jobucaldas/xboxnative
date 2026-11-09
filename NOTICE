@@ -43,6 +43,14 @@ External dependencies fetched at build time (never copied here; pinned in deps.p
                                                steam_api64.dll and the x64 emulated steamclient64.dll are packaged (steam-provider/gbe/,
                                                with LICENSE and SOURCE.txt naming the tagged source). Never committed; mapped unmodified
                                                as separate libraries.
+  Vulkan-Loader (vulkan-loader-src)            Apache-2.0 (Khronos Group). Fetched, SHA-256 verified and cross-built by
+                                               src/tools/build-vulkan-loader.sh (research/VULKAN-PLAN.md) into the git-ignored
+                                               out/vulkan-loader/vulkan-1.dll; the built DLL is never committed. The null ICD beside it
+                                               (src/tools/vulkan/null-icd.c) is original work of this repository, GPL-3.0-or-later.
+                                               Shipping the loader requires its LICENSE.txt alongside.
+  Vulkan-Headers (vulkan-headers-src)          Apache-2.0 (Khronos Group), with MIT-licensed helper headers (LICENSES/MIT.txt).
+                                               Headers only, fetched and SHA-256 verified by src/tools/build-vulkan-loader.sh for the
+                                               build above; nothing from it is committed. Apache-2.0 is GPLv3-compatible.
   uwp-crossbuild (gianlucamazza/uwp-crossbuild)  MIT. Build wrapper used by the build scripts (clang-cl/lld-link + xwin).
   SQLite amalgamation (sqlite-src)             Public domain (https://sqlite.org/copyright.html). Source archive pinned in deps.pin,
                                                verified and fetched by src/xbox-test/uwph/host/fetch-sqlite.sh into git-ignored

@@ -57,6 +57,13 @@ lld-link-19 /nodefaultlib /entry:d3d_entry /include:d3d_relocation /subsystem:wi
 # device it got and the calls the device rejects, once each.
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d12.cpp -o "$out/obj/d3d12.obj"
 lld-link-19 /nodefaultlib /entry:d3d12_entry /include:d3d12_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d12.exe" "$out/obj/d3d12.obj" /usr/x86_64-w64-mingw32/lib/libd3d12.a /usr/x86_64-w64-mingw32/lib/libdxgi.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libdxguid.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+# EXE that probes Vulkan the way a Vulkan-optional engine does: it loads
+# vulkan-1.dll by name (Play serves the Khronos loader from the runtime
+# directory), creates an instance and enumerates physical devices. The console
+# has no driver, so the answer must be zero devices with
+# VK_ERROR_INITIALIZATION_FAILED, as on a desktop with no GPU.
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-vulkan.cpp -o "$out/obj/vulkan.obj"
+lld-link-19 /nodefaultlib /entry:vk_entry /include:vk_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-vulkan.exe" "$out/obj/vulkan.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
 # A guest that uses a Discord SDK as a game does. The SDK is our own stand-in
 # (never Discord's binary): it connects to \?\pipe\discord-ipc-N exactly as
 # discord-rpc and the Game SDK do, so Play's answer is what a real game sees.
@@ -129,14 +136,17 @@ lld-link-19 "$out"/obj/msvcp/tests_play-msvcp.*.obj /dll /nodefaultlib /out:"$ou
  /libpath:"$crt/sdk/lib/ucrt/x86_64" msvcrt.lib msvcprt.lib vcruntime.lib ucrt.lib kernel32.lib
 llvm-readobj --coff-imports "$out/play-msvcp.dll" | grep -q 'Name: MSVCP140.dll'
 rm -f "$out/msvcp140.dll"
-rm -rf "$out/runtime";mkdir -p "$out/runtime";cp out/layout/runtime/*.dll "$out/runtime/"
+rm -rf "$out/runtime";mkdir -p "$out/runtime";cp out/layout/runtime/*.dll out/layout/runtime/*.json "$out/runtime/"
+# Source-built donors from the launcher layout, as packaged: the Vulkan loader
+# imports setupapi's cfgmgr32 family, which Play serves from the setupapi donor.
+mkdir -p "$out/donors";cp out/layout/donors/*.dll "$out/donors/"
 bash ../uwph/host/build-sqlite-lib.sh "$out/obj/sqlite3.lib"
 UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/play-runner.exe" host/tls_slot0.cpp tests/play-runner.cpp -- /MT /O2 /Iout/obj /I../uwph/host/third_party/sqlite
 # Use the exact packaged carriers from the launcher build.
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
 # Owned stand-in so steam-client proves refusal of a present root client DLL.
 cp "$out/play-dependency.dll" "$out/steamclient64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag discord-sdk;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag discord-sdk vulkan;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -154,6 +164,14 @@ grep -q 'PRUN OPTIONAL ShellExecuteExW refused' "$out/shell-execute.log"
 # desktop where Discord is not running (the fixture exits 42 only then).
 grep -q 'PRUN EVENT Discord SDK present (play-discord-sdk.dll); no Discord client on this console' "$out/discord-sdk.log"
 [[ $(grep -c 'Discord SDK present' "$out/discord-sdk.log") == 1 ]]
+# Vulkan (research/VULKAN-PLAN.md, milestone 1): a guest's LoadLibrary("vulkan-1.dll") is served by the Khronos loader
+# from the runtime directory, its instance is created, and it reports no physical devices. The fixture exits 42 only
+# then; Play must also have listed the packaged ICD manifest in the guest registry, which is the route the loader reads
+# (VK_DRIVER_FILES is ignored at the process's integrity level).
+grep -q 'PRUN EVENT mapping vulkan-1.dll' "$out/vulkan.log"
+grep -q 'PRUN EVENT Vulkan loader mapped from the runtime directory; the guest registry lists the packaged null ICD' "$out/vulkan.log"
+grep -q 'PRUN EVENT mapping vulkan-null-icd.dll' "$out/vulkan.log"
+[[ $(grep -c 'the guest registry lists the packaged null ICD' "$out/vulkan.log") == 1 ]]
 # A guest's rejected D3D11 calls are logged by Play, once per distinct call, with
 # the feature levels it asked for and got. (Results pass through: exit code 42.)
 grep -q 'PRUN EVENT guest D3D11CreateDevice request type=1 flags=0x0 adapter=default levels=\[0xb100,0xb000\]' "$out/d3d11-diag.log"

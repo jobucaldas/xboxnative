@@ -52,3 +52,18 @@ For every promotion, record the exact build/source, date, input method (real pad
 observed duration, frame rate, audio/Steam checks, limitations and evidence PR. Raw account-bearing
 captures and game files stay private. Host smoke, Wine fixtures and CI are separate regression gates,
 not game milestones. Record failures honestly; never weaken a gate to increase the count.
+
+## Graphics API survey
+
+Static evidence only — imports (`llvm-readobj --coff-imports`) and strings in the installed files.
+A survey result is not a compatibility claim and does not move a title's status above.
+
+| Game | Vulkan badge | Evidence |
+|---|---|---|
+| Megabonk, Slime Rancher, Say No! More | `Vulkan-optional` | `UnityPlayer.dll` carries `vulkan-1.dll` and `force-vulkan`; no static import. Unity's Windows default is D3D11, which they use. |
+| Fields of Mistria | `Vulkan-optional` | `SDL3.dll` carries `vulkan-1.dll` and the `VK_*` error names; the game renders through OpenGL (SDL3 WGL), no static import. |
+| Halo Wars: Definitive Edition, Puyo Puyo Tetris 2, Mega Man Legacy Collection | `none` | No Vulkan strings and no import. |
+
+No installed title statically imports `vulkan-1.dll`. Play ships a Vulkan loader that answers "no GPU" the
+way Windows does, so a Vulkan-optional engine falls back instead of failing; a real Vulkan driver is not
+needed by any title today. Details: [research/VULKAN-PLAN.md](../research/VULKAN-PLAN.md).
