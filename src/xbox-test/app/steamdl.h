@@ -346,7 +346,7 @@ static bool download_app(CmSession& cm, uint32_t appid, bool startCancelled = fa
         dl_msg(shown); g_dl.state = g_dl.cancel ? 4 : 3; return false;
     };
     logf("dl: ===== start appid %u (session: %s) =====", appid, cm.anon ? "anonymous" : "user");
-    if (g_dl.cancel) return fail("cancelled");   // a second A press landed between the queue pop and this call
+    if (g_dl.cancel) return fail("cancelled");   // an A press cancelled it between the queue pop and this call
     // 1. PICS access token + product info
     std::string appBuf = pics_appinfo(cm, appid);
     if (appBuf.empty()) return fail("Steam has no product info for this app (not owned?)");

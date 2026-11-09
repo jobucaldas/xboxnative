@@ -5,6 +5,11 @@ of a game that is not installed also offers other drives: **X** cycles *Internal
 *USB E: (N GB free)*; **A** installs there. The choice is stored in the game's install record, so download,
 launch, delete and Steam Cloud (`GameInstall`) all use that game's own folder. Existing installs are unchanged.
 
+While a download runs or is queued the button reads *INSTALLING... A: cancel*: one **A** press cancels it (the
+partial files and the queue entry are removed). **B** only goes back to the library and the download keeps running.
+A finished install does not start the game: the page and the library show *Installed. Press A to play*, and **A**
+launches it.
+
 ## How it works
 
 - `LocalState\dl_<appid>.done` (and `dl_<appid>.partial` while downloading) always stays in `LocalState`.

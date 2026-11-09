@@ -55,6 +55,17 @@ if op == 'put':
         print('put HTTP 000'); save(); sys.exit(7)
     shutil.copy(a[2], st / Path(a[2]).name); print('put HTTP 200')
     if cfg.get('running') and 'press' in data:
+        if cfg.get('install') and not cfg.get('installed'):
+            # The first press installs; the launcher never launches by itself, so
+            # no launch request appears until the script presses again.
+            cfg['installed'] = True
+            boot_append('dl: ===== start appid %d (session: user) =====' % cfg['appid'])
+            boot_append("dl: ===== DONE appid %d 'game' -> game : 4 files, 1024 bytes, SHA1-verified, 1 s =====" % cfg['appid'])
+            if cfg.get('auto_launch'):
+                att = '%d:auto' % cfg['pid']
+                boot_append('launch: request written LocalState\\launch_request.json appid=%d attempt=%s dir=game via=auto after install' % (cfg['appid'], att))
+                (st / 'launch_request.json').write_text(json.dumps({'appid': cfg['appid'], 'attemptId': att}))
+            save(); sys.exit(0)
         cfg['gen'] += 1; att = '%d:%d' % (cfg['pid'], cfg['gen'])
         (st / 'launch_request.json').write_text(json.dumps({'appid': cfg['appid'], 'attemptId': att}))
         boot_append('launch: request written LocalState\\launch_request.json appid=%d attempt=%s dir=game via=test' % (cfg['appid'], att))
@@ -187,6 +198,23 @@ class PlayRunnerTransportTest(unittest.TestCase):
         rc, log = self.run_play(timeout_s=600, app='fail')
         self.assert_not_accepted(rc, log)
         self.assertIn('LAUNCH RESULT FAIL: no successful terminal result', log)
+
+    def test_install_then_second_press_launches(self):
+        # An install no longer auto-launches: the script must press again once
+        # the download is done, and only that press may produce the attempt.
+        self.seed_stale_success()
+        rc, log = self.run_play(timeout_s=600, install=True)
+        self.assertEqual(rc, 0, log)
+        self.assertIn('GUEST COMPLETED: launch: RESULT attempt=2000:1 ok=1', log)
+        self.assertIn('dl: ===== DONE appid %d ' % APP, log)
+
+    def test_auto_launch_after_install_is_rejected(self):
+        # A launch request that follows the install without a second press is the
+        # behaviour this flow forbids; the run must fail, never pass on it.
+        self.seed_stale_success()
+        rc, log = self.run_play(timeout_s=600, install=True, auto_launch=True)
+        self.assert_not_accepted(rc, log)
+        self.assertIn('AUTO-LAUNCHED after install', log)
 
 
 if __name__ == '__main__':
