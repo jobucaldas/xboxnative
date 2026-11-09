@@ -688,6 +688,41 @@ static std::string slot0Refusal(Module& m,const IMAGE_NT_HEADERS64* nt) {
 // the game's own file on disk is never modified. Set before start().
 static std::wstring steamProvider;
 static void set_steam_provider(const std::wstring& path) { steamProvider=path; }
+// Discord's SDKs reach a Discord client over the local IPC pipe
+// \?\pipe\discord-ipc-N, which only a running desktop client serves. A console
+// has no such client, so the SDK's connect fails with ERROR_FILE_NOT_FOUND and
+// the SDK carries on without presence, exactly as on a desktop where Discord is
+// not running (discord-rpc's BaseConnection::Open walks discord-ipc-0..9 and
+// returns false; the Game SDK's DiscordCreate returns DiscordResult_InternalError
+// with no device). Play needs no substitute: the pipe route answers in the
+// AppContainer namespace and the shell route refuses the discord:// launch the
+// Game SDK would otherwise attempt, so nothing blocks. Report it once per game
+// so a missing presence is explained rather than mysterious.
+// Whether a mapped image exports this name. Reads the export table only; it
+// never binds or executes anything, so it is safe before initialization.
+static bool exported_any(const wxl::Image& image,const char* name) {
+    if(!image.base || !name) return false;
+    auto nt=(IMAGE_NT_HEADERS64*)(image.base+((IMAGE_DOS_HEADER*)image.base)->e_lfanew);
+    auto dir=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if(!dir.Size || !image.valid(dir.VirtualAddress,dir.Size) || dir.Size<sizeof(IMAGE_EXPORT_DIRECTORY)) return false;
+    auto e=(IMAGE_EXPORT_DIRECTORY*)(image.base+dir.VirtualAddress);
+    if(!image.valid(e->AddressOfNames,size_t(e->NumberOfNames)*4)) return false;
+    auto names=(DWORD*)(image.base+e->AddressOfNames);
+    for(DWORD i=0;i<e->NumberOfNames;++i) { auto n=image.str(names[i]); if(n && !strcmp(n,name)) return true; }
+    return false;
+}
+static bool discordSdk(const Module& m) {
+    static const char* const names[]={"discord_game_sdk.dll","discord-rpc.dll","discord_rpc.dll","discordrpc.dll","discord_game_sdk_x64.dll"};
+    for(auto name:names) if(m.key==name) return true;
+    // A Unity plugin or a renamed copy: identify it by the API it exports.
+    return m.image.base && (exported_any(m.image,"DiscordCreate") || exported_any(m.image,"Discord_Initialize"));
+}
+static void note_discord(const Module& m) {
+    if(!state || !discordSdk(m)) return;
+    static std::atomic<bool> reported{false};
+    if(reported.exchange(true)) return;
+    state->event("Discord SDK present ("+m.key+"); no Discord client on this console, so the game runs without Rich Presence");
+}
 static Module* map(const std::wstring& requested,const std::string& asKey,wxl::Resolver resolver) {
     if(auto m=named(asKey.empty()?requested:wide(asKey.c_str()))) return m->mappingFailed?nullptr:m;
     // A delay import may map its DLL here; that DLL's own static imports are
@@ -712,7 +747,7 @@ static Module* map(const std::wstring& requested,const std::string& asKey,wxl::R
         mlp::assets.erase(m->key);
         m->mappingFailed=true;state->event("mapping failed: "+m->key+"; guest initialization blocked; "+state->snapshot());return nullptr;
     }
-    m->mapped=true;++state->mappedCount;state->order.push_back(m);return m;
+    m->mapped=true;++state->mappedCount;state->order.push_back(m);note_discord(*m);return m;
 }
 // Steam's DRM wrapper (SteamStub) finds the module that provides
 // steamclient64.dll!CreateInterface, reads that module's file and verifies
