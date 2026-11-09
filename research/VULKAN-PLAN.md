@@ -1,9 +1,11 @@
 # Vulkan for Play on the console: plan
 
 Status: milestone 1 (a guest's `LoadLibrary("vulkan-1.dll")` succeeds and reports zero physical devices) is built,
-packaged and verified off-device. Milestone 2 (a real Vulkan driver) is a plan only. Nothing here claims a game
-renders through Vulkan on the console. Evidence labels: **[verified]** read in the pinned source or run off-device,
-**[unverified]** needs the console.
+packaged and verified off-device. Milestone 2 (Mesa's `dzn`, Vulkan on D3D12, as the real ICD) is built and packaged
+and verified off-device as far as the host allows: the loader finds a real physical device and creates a
+`VK_KHR_win32_surface`, but `vkCreateDevice` stops under Wine because Wine's vkd3d DXIL parser rejects the shader
+model `dzn` emits. Nothing here claims a game renders through Vulkan on the console. Evidence labels: **[verified]**
+read in the pinned source or run off-device, **[unverified]** needs the console.
 
 ## Problem
 
@@ -34,8 +36,8 @@ Surveyed 2026-11-09 over `/home/jobu/steam-owned/games/*` (7 installed titles), 
 
 **No owned game statically imports `vulkan-1.dll`.** The four hits are engines that *can* use Vulkan when asked
 (Unity's `-force-vulkan`, SDL3's `SDL_Vulkan_LoadLibrary`), all of which fall back to D3D11/OpenGL by default. So
-milestone 1 is a robustness fix (a probe now answers like Windows), not a path to a currently blocked game. That is
-why milestone 2 is a plan and not started: nothing owned is waiting on it.
+milestone 1 is a robustness fix (a probe now answers like Windows), not a path to a currently blocked game, and
+milestone 2's acceptance is a synthetic fixture rather than a title (see its last section).
 
 ## Milestone 1: a loader that answers "no GPU" cleanly
 
@@ -121,74 +123,143 @@ real behaviour: `terminator_EnumeratePhysicalDevices` returns before it writes `
 fiction. The runner additionally asserts the loader module is mapped and initialized, and the script greps Play's log
 for the registry publication and the ICD mapping. This runs under Wine off-device; the console check is in the PR.
 
-## Milestone 2: a real driver (plan)
+Milestone 2 changes what the packaged runtime directory answers: once `dzn` ships, the same fixture finds a real
+physical device, so its zero-device assertion only holds against a runtime directory without `dzn`. `play-runtime.sh`
+therefore runs it twice: against the packaged directory (asserting the dzn-first publication) and against a copy with
+the dzn files removed (`PRUN_RUNTIME_DIR`, the `PLAY_DZN=0` shape), where the milestone-1 answer is asserted exactly
+as before. The fixture itself is unchanged, so the zero-device contract is still tested, not weakened.
 
-### The candidate: Mesa `dzn` (Vulkan on D3D12)
+## Milestone 2: Mesa `dzn` (Vulkan on D3D12) as the real ICD
 
 `dzn` is Mesa's Vulkan driver over D3D12 — the same backend the OpenGL stack already uses
 ([OPENGL-PLAN.md](OPENGL-PLAN.md)), so the device, queue and swap-chain work Play routes for Mesa's GL driver is
 already done and exercised. It is MIT, in the pinned `mesa-src` tarball, and builds from the same meson tree.
 
-**What it needs that the console may not give it** (read in the 25.3.6 source; **[unverified]** on device):
+### What is built
 
-* **DXIL.** `dzn` compiles NIR to DXIL and signs it through `dxil.dll`, exactly as Mesa's d3d12 GL driver does. The
-  GL driver already tolerates a missing signer (`NO_DXIL_VALIDATION`); whether `dzn` does the same, and whether the
-  console's D3D12 accepts unsigned DXIL, has to be tested. This is the single largest risk and the same one
-  OPENGL-PLAN.md records for GLon12.
-* **Vulkan features DXVK requires.** `dzn`'s device table lacks `robustness2`, `transform_feedback`,
-  `depth_clip_enable`, `maintenance5/6` and `extended_dynamic_state`, and reports `dualSrcBlend=false`,
-  `logicOp=false`, `fullDrawIndexUint32=false` ([D3D-LAYERS-REPORT.md](D3D-LAYERS-REPORT.md) §2 #4, read in
-  `dzn_device.c`). That makes `dzn` **not** a DXVK host: it cannot be the path to D3D9 games. It can still be a
-  Vulkan driver for engines that ask for Vulkan directly.
-* **W^X.** `dzn` is plain C compiled to a PE; it has no runtime codegen. The loader and ICD already pass the
-  no-RWX-section gate; `dzn` has to be checked the same way.
-* **ICD interface.** `dzn` must be built as an ICD (it is, in Mesa's `vulkan/dzn` target) and packaged with a
-  manifest whose `library_path` is its bare name, so Play's guest search resolves it from `runtime/`. No loader
-  change is needed: `publishVulkanDriverFiles` already seeds the registry key, and a second manifest is a second value
-  in the same key. The null ICD should stay listed beside it, so a `dzn` that fails to load still leaves the guest
-  with a clean "no devices" answer instead of `VK_ERROR_INCOMPATIBLE_DRIVER`.
+* **`src/tools/build-mesa-dzn.sh`** cross-builds `vulkan_dzn.dll` from the pinned `mesa-src` (SHA-256 verified) with
+  the UCRT-flavoured mingw-w64 toolchain, `meson setup` with only the Vulkan driver (`microsoft-experimental`),
+  `spirv-to-dxil`, no Gallium/LLVM/GLES/EGL/GLX/video/CL/tests. It writes the ICD manifest, licences, `SHA256SUMS`
+  and `SOURCE.txt`; `--dry-run` prints the recipe (what CI runs) and `--build` compiles and gates the result.
+  **[verified: the DLL builds]**
+  * Gates, all passing: only DLLs the console supplies are imported (`kernel32`, `ntdll`, `user32`, `gdi32`,
+    `shell32`, `version`, `advapi32`, `ws2_32`, `ole32`, `api-ms-win-*`); no writable+executable section; the three
+    ICD entry points the loader looks up by name are exported. **[verified off-device]**
+  * `pe-drop-empty-pdata.py` drops the zero-length x64 unwind entries GNU ld emits (19 in this build), which Play's
+    loader refuses.
+  * The DirectX-Headers subproject is pinned by commit in `deps.pin` (`64c650b0…`, v1.618.1) and fetched at setup
+    time; `--wrap-mode=nodownload` means meson downloads nothing else.
+* **Patches** (`patches/mesa-src/`, applied with `patch --fuzz=0`): 0003 makes the DXIL signer optional (the console
+  has no `dxil.dll`; `dzn` then emits unsigned DXIL instead of failing), 0004 makes DirectComposition optional and
+  creates the swap chain for the surface's HWND (the console has no DirectComposition; Play maps a guest HWND to its
+  CoreWindow), 0005 turns a failed `EnableExperimentalFeatures` into a warning, 0006 makes the meta cleanup idempotent
+  on a failed device creation, and 0007 fills in the DXBC container checksum (MD5 with DXBC's variant padding) so an
+  unsigned container is well-formed. 0001 and 0002 are the shared d3d12-backend patches the GL driver needs.
+* **Packaging**: `app/build.sh` copies `vulkan_dzn.dll`, `vulkan-dzn.json`, the licences, the patches, `SHA256SUMS`
+  and `SOURCE.txt` into `layout/runtime/` behind `PLAY_DZN` (default on; a dzn build failure fails the launcher build;
+  `PLAY_DZN=0` is the explicit way to package without it). `redistributable()` in
+  `uwph/kernel32/guest_loader_search.h` lists `vulkan_dzn.dll`, so a guest's or the loader's `LoadLibraryW` of the bare
+  manifest name resolves from the runtime directory.
+* **Driver discovery**: `publishVulkanDriverFiles` (`host/play_runtime.h`) seeds `HKLM\SOFTWARE\Khronos\Vulkan\Drivers`
+  with every packaged manifest that exists, in order `vulkan-dzn.json` then `vulkan-null-icd.json`. The loader's
+  `terminator_CreateInstance` skips an ICD whose `CreateInstance` fails and only returns
+  `VK_ERROR_INCOMPATIBLE_DRIVER` when none succeed, so a `dzn` that cannot initialise leaves the guest with milestone
+  1's clean "no devices" answer rather than a hard failure. A manifest that is not packaged is skipped, so a
+  `PLAY_DZN=0` launcher behaves exactly as before. **[verified off-device]**
 
-### Which Vulkan extensions owned games would ask for
+### What `dzn` does off-device, and where it stops
 
-From the strings the engines carry (not a claim that they run Vulkan today):
+`app/tests/play-vulkan-dzn.cpp` runs the startup path a Vulkan game takes: instance with `VK_KHR_surface` and
+`VK_KHR_win32_surface`, physical-device enumeration, a win32 surface on a guest HWND, queue-family selection, surface
+capabilities and formats, device, swap chain, render pass, framebuffers, a cleared frame and two presents. Under Wine
+11.0 with its built-in vkd3d (Intel HD 4000) it gets this far: **[verified off-device]**
 
-* **Unity** (`UnityPlayer.dll`, Megabonk/Slime Rancher/Say No! More): `VK_KHR_swapchain`, `VK_KHR_surface`,
-  `VK_KHR_win32_surface`, `VK_EXT_debug_utils`, `VK_EXT_memory_budget`, `VK_EXT_memory_priority`,
-  `VK_EXT_conservative_rasterization`, `VK_EXT_scalar_block_layout`, `VK_EXT_hdr_metadata`,
-  `VK_EXT_fragment_density_map`, `VK_EXT_load_store_op_none`. Most are optional feature probes; the swap-chain family
-  is required.
+```
+PLAY-VULKAN-DZN STAGE instance-created
+PLAY-VULKAN-DZN STAGE physical-device count=1 api=0x402148 driver=0x… name="Microsoft Direct3D12 (Intel(R) HD Graphics 4000)"
+PLAY-VULKAN-DZN STAGE win32-surface-created hwnd=…
+PLAY-VULKAN-DZN STAGE queue-family index=0 count=4
+PLAY-VULKAN-DZN STAGE surface formats=2 chosen=44 minImages=3 maxImages=3 extent=632x453
+PLAY-VULKAN-DZN BLOCKED device-creation result=-3 (…)
+```
+
+So the loader, the registry publication, the ICD mapping, instance creation, a real physical device, a win32 surface
+and the surface queries all work. `vkCreateDevice` returns `VK_ERROR_INITIALIZATION_FAILED` because Wine's vkd3d
+cannot parse the DXIL `dzn` emits for its meta shaders:
+
+* `dzn` probes `D3D12_FEATURE_SHADER_MODEL` for 6.8 down to **6.1** (`dzn_device.c`), and Wine's vkd3d answers
+  `E_INVALIDARG` for all of them, reporting `HighestShaderModel = 0x60` (SM 6.0) instead. SM 6.0 is the D3D12
+  baseline, so `pdev->shader_model` stays 0 and `dzn_get_shader_model()` returns 0.
+* Independently of that, vkd3d's DXIL parser fails on the meta shader regardless: `sm6_parser_read_bits Failed
+  assertion: length < 32` (61×), `E8009: A DXIL function declaration is invalid`, and `create_shader_stage Failed to
+  compile shader, vkd3d result -4`. vkd3d's SM 6.0 support is not what `dzn` writes against (it emits validator
+  version 1.8 metadata).
+
+Getting this far needed one Play fix: `dzn` statically imports `gdi32!StretchBlt` (its WSI software path, used when
+there is no DXGI swap chain), which the gdi32 route did not resolve, so the image was refused before `DllMain`. The
+route now implements `StretchBlt` as a nearest-neighbour `SRCCOPY` between guest memory DCs, the same contract as its
+`BitBlt`; a window DC still has no surface and the call fails with `ERROR_NOT_SUPPORTED`. `uwph/gdi32/test.cpp` covers
+it (copy, scaling, non-`SRCCOPY`, unknown DC). **[verified off-device]**
+
+This is a **Wine-host limitation, not a proven console limitation**: the console's D3D12 is Microsoft's, not vkd3d.
+Whether it accepts unsigned DXIL from `dzn` is **[unverified]** and is the console check in the PR. If it refuses, the
+failure is graceful: the loader falls through to the null ICD and the guest sees milestone 1's answer.
+
+### Needed extensions and `dzn` gaps
+
+The extensions the fixture needs, and the ones owned engines would ask for (from the strings the engines carry, not a
+claim that they run Vulkan today):
+
+* **Required for a frame**: `VK_KHR_surface`, `VK_KHR_win32_surface`, `VK_KHR_swapchain`. `dzn` advertises all three;
+  the surface is created on a guest HWND that Play's DXGI CoreWindow adapter serves for D3D12 and Mesa's GL driver.
+  **[verified off-device: surface created]**
+* **Unity** (`UnityPlayer.dll`, Megabonk/Slime Rancher/Say No! More): `VK_EXT_debug_utils`, `VK_EXT_memory_budget`,
+  `VK_EXT_memory_priority`, `VK_EXT_conservative_rasterization`, `VK_EXT_scalar_block_layout`, `VK_EXT_hdr_metadata`,
+  `VK_EXT_fragment_density_map`, `VK_EXT_load_store_op_none`. Most are optional feature probes.
 * **SDL3** (Fields of Mistria): `VK_KHR_surface`/`VK_KHR_win32_surface` and the `VK_*_EXT_*` names it string-matches
   for error reporting; SDL only loads Vulkan when the game asks for it, and this game asks for OpenGL.
+* **`dzn` gaps, read in `dzn_device.c`**: no `robustness2`, `transform_feedback`, `depth_clip_enable`,
+  `maintenance5/6` or `extended_dynamic_state`; `dualSrcBlend=false`, `logicOp=false`, `fullDrawIndexUint32=false`
+  ([D3D-LAYERS-REPORT.md](D3D-LAYERS-REPORT.md) §2 #4). That makes `dzn` **not** a DXVK host: it cannot be the path to
+  D3D9 games. It can still be a Vulkan driver for engines that ask for Vulkan directly. `dzn` is also upstream
+  `microsoft-experimental` (non-conformant), which it announces at instance creation.
 
-`dzn` advertises most of these; the two that matter for a first run are `VK_KHR_win32_surface` and
-`VK_KHR_swapchain` on a guest HWND, which Play's DXGI CoreWindow adapter already serves for D3D12 and Mesa's GL
-driver. **[unverified for `dzn`]**
+### Acceptance
 
-### Effort and risks
+`app/tests/play-runtime.sh` runs three Vulkan modes:
 
-| Step | Effort | Risk |
-|---|---|---|
-| Build `dzn` from the pinned Mesa source as a second ICD (reuse `build-mesa-d3d12.sh`'s meson setup and the UCRT mingw toolchain) | ~1 week | Medium: `dzn` may need Vulkan-Headers/loader versions newer than the pinned 1.4.313 |
-| Package `dzn` + manifest beside the loader; list both manifests in the guest registry key | 1–2 days | Low: the plumbing exists |
-| DXIL signing on the console | unknown | **High**: if the console's D3D12 refuses unsigned DXIL, `dzn` is dead and the OpenGL path (which has the same risk) is the fallback |
-| Swap chain on a guest HWND | unknown | Medium: `dzn`'s WSI is Mesa's `wsi_common_win32.cpp`; Play's factory already serves the CoreWindow adapter for GL |
-| A Vulkan game to test with | none owned | **Blocker for a milestone-2 acceptance**: no owned title runs Vulkan today, so acceptance would be a synthetic fixture, not a game |
+* `vulkan` against the packaged runtime directory: the loader is mapped and the guest registry lists both manifests
+  (dzn first, null ICD as fallback).
+* `vulkan` against a runtime directory with the dzn files removed (`PRUN_RUNTIME_DIR` points the runner at it, which
+  is what a `PLAY_DZN=0` launcher ships): the milestone-1 zero-device answer, unchanged.
+* `vulkan-dzn`: the fixture above. It prints `PLAY-VULKAN-DZN PASS frame-presented` when a frame is presented, or
+  `PLAY-VULKAN-DZN BLOCKED device-creation` with the reason when the host's D3D12 refuses the device. The script
+  prints PASS or BLOCKED from those lines and never counts BLOCKED as a pass; `PRUN_REQUIRE_DZN=1` turns BLOCKED into
+  a failure for a host that should run it.
 
-**Recommendation: do not start milestone 2 until an owned game needs Vulkan.** Milestone 1 already gives every
-Vulkan-optional engine the answer Windows gives it, and no owned title is blocked on a real driver. If one appears,
-start with the DXIL question on the console (a probe that signs and submits a trivial DXIL shader through D3D12) before
-building anything: it is the gate both `dzn` and Mesa's GL driver depend on, and it is cheap to test.
+Off-device the result is BLOCKED at device creation (Wine's vkd3d). On the console, via the launcher, the same runner
+mode with dzn packaged is the check: PASS means `dzn` presented frames through the CoreWindow adapter, BLOCKED means
+the console's D3D12 refused `dzn`'s device or shaders and the guest still gets milestone 1's answer. **[unverified]**
+
+### A Vulkan game to test with
+
+No owned title runs Vulkan today (see the survey above), so milestone 2's acceptance is a synthetic fixture, not a
+game. The first owned title that asks for Vulkan (Unity's `-force-vulkan`, an SDL3 Vulkan renderer) is the real
+acceptance; until then nothing here claims a game renders through Vulkan.
 
 ## Licensing and policy
 
-Vulkan-Loader and Vulkan-Headers are Apache-2.0; the null ICD is this repository's own code (GPL-3.0-or-later); both
-are listed in `NOTICE`, built from pinned sources, and their outputs are git-ignored and never committed (AGENTS.md
-rules 5 and 9). No game or Valve files are touched: the loader is substituted in memory like the other Play modules,
-and a game that ships its own `vulkan-1.dll` keeps it. Nothing here weakens a gate: the fixture fails (never passes)
-when the loader, the instance or the zero-device answer is not exactly what Windows without a driver returns.
+Vulkan-Loader and Vulkan-Headers are Apache-2.0; Mesa and DirectX-Headers are MIT; the null ICD is this repository's
+own code (GPL-3.0-or-later). All are listed in `NOTICE`, built from pinned sources, and their outputs are git-ignored
+and never committed (AGENTS.md rules 5 and 9). No game or Valve files are touched: the loader and the ICD are
+substituted in memory like the other Play modules, and a game that ships its own `vulkan-1.dll` keeps it. Nothing here
+weakens a gate: the fixture fails (never passes) when the loader, the instance or the zero-device answer is not
+exactly what Windows without a driver returns, and the dzn fixture prints BLOCKED (never PASS) when the host's D3D12
+refuses the device.
 
 ## Not covered
 
-Real Vulkan rendering (milestone 2), DXVK/D3D9 over Vulkan (`dzn` cannot host it, per the layers report), 32-bit
-Vulkan (the x86 plan in `X86-32BIT-PLAN.md` would need a 32-bit loader and ICD), Vulkan layers (validation, GPU
-assist) beyond the loader's default discovery.
+DXVK/D3D9 over Vulkan (`dzn` cannot host it, per the layers report), 32-bit Vulkan (the x86 plan in
+`X86-32BIT-PLAN.md` would need a 32-bit loader and ICD), Vulkan layers (validation, GPU assist) beyond the loader's
+default discovery, and `dxil.dll` signing (the console has no signer; patch 0003 makes it optional and patch 0007
+makes the unsigned container well-formed).
