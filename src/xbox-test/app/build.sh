@@ -31,6 +31,9 @@ cp "$donors"/{SHA256SUMS,SOURCE.txt,0001-pe-rodata.patch} "$here/donors/COPYING.
 # Wine's C++ runtime (msvcp140 family, concrt140) for games without their own copy.
 mkdir -p "$out/layout/runtime"
 cp "$donors"/runtime/*.dll "$donors"/runtime/SHA256SUMS "$out/layout/runtime/"
+# Play's D3D10 shim (source in uwph/d3d10): the console has no d3d10.dll or
+# d3d10_1.dll, and one PE answers both names plus d3d10core.dll.
+bash ../uwph/d3d10/build.sh "$out/layout/runtime"
 cp "$donors"/SOURCE.txt "$here/donors/COPYING.LIB" "$here/donors/LICENSE" "$out/layout/runtime/"
 # Steam API provider for owned games (gbe_fork, pinned release; never committed).
 gbe="$here/../../../out/gbe-fork"

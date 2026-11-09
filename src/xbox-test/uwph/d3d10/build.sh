@@ -14,9 +14,19 @@ trap 'rm -rf "$work"' EXIT
 # The mingw import libraries live beside the compiler's own libkernel32.a; ask
 # it rather than hardcoding a prefix.
 mingw_lib=$(dirname "$(x86_64-w64-mingw32-g++ -print-file-name=libkernel32.a)")
-x86_64-w64-mingw32-g++ -c -O2 -std=c++17 -fno-exceptions -fno-rtti -fno-stack-protector \
-    -fno-asynchronous-unwind-tables -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type \
+# Keep the compiler from recognising this file's own memset and memcpy loops as
+# the libc calls they implement: its loop-distribution pass rewrote the byte
+# loop in memset() into a call to memset(), which then jumped to itself forever.
+# -ffreestanding is deliberately not used: it hides malloc from the headers.
+x86_64-w64-mingw32-g++ -c -O2 -std=c++17 -fno-builtin -fno-tree-loop-distribute-patterns \
+    -fno-exceptions -fno-rtti -fno-stack-protector -fno-asynchronous-unwind-tables \
+    -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type \
     "$here/d3d10.cpp" -o "$work/d3d10.obj"
 lld-link-19 /dll /noentry /nodefaultlib /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat \
     /def:"$here/d3d10.def" /implib:"$work/d3d10.lib" /out:"$out/d3d10.dll" \
     "$work/d3d10.obj" /libpath:"$mingw_lib" libkernel32.a libuuid.a libd3d11.a libdxgi.a
+# d3d10_1.dll forwards to d3d10.dll and d3d10core.dll is the layer below it, so
+# the same image answers all three names; Play maps it under whichever the guest
+# asked for.
+cp "$out/d3d10.dll" "$out/d3d10_1.dll"
+cp "$out/d3d10.dll" "$out/d3d10core.dll"

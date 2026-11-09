@@ -211,7 +211,7 @@ template<class D,class S> inline D prefix(const S& in) {
 // GetMultithreadProtected is whether that protection is in force.
 struct Multithread : d3dshim::Base, ID3D10Multithread {
     Multithread() { self=static_cast<ID3D10Multithread*>(this); }
-    D3DSHIM_REF(Multithread)
+    D3DSHIM_REF
     D3DSHIM_QI
     void STDMETHODCALLTYPE Enter() override {}
     void STDMETHODCALLTYPE Leave() override {}
@@ -227,7 +227,7 @@ struct Multithread : d3dshim::Base, ID3D10Multithread {
 // Every child answers GetDevice with the shim device the guest created it from
 // and forwards private data to the D3D11 object behind it.
 template<class I> struct Child : d3dshim::Base, I {
-    D3DSHIM_REF(I)
+    D3DSHIM_REF
     D3DSHIM_QI
     void STDMETHODCALLTYPE GetDevice(ID3D10Device** out) override {
         if(!out)return;
@@ -512,6 +512,23 @@ namespace {
 struct Device : d3dshim::Base, ID3D10Device1 {
     d3dshim::Host host;
     UINT creationFlags=0;
+    // Wine's d3d11 context does not reference what is bound to it (real D3D11
+    // does), so the shim holds those references for as long as the slot is
+    // bound. See d3dshim::Held.
+    d3dshim::Held<D3D10_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT> vsConstantBuffers;
+    d3dshim::Held<D3D10_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT> psConstantBuffers;
+    d3dshim::Held<D3D10_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT> gsConstantBuffers;
+    d3dshim::Held<D3D10_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> vsShaderResources;
+    d3dshim::Held<D3D10_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> psShaderResources;
+    d3dshim::Held<D3D10_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> gsShaderResources;
+    d3dshim::Held<D3D10_COMMONSHADER_SAMPLER_SLOT_COUNT> vsSamplers;
+    d3dshim::Held<D3D10_COMMONSHADER_SAMPLER_SLOT_COUNT> psSamplers;
+    d3dshim::Held<D3D10_COMMONSHADER_SAMPLER_SLOT_COUNT> gsSamplers;
+    d3dshim::Held<1> vsShader, psShader, gsShader, inputLayout, indexBuffer, depthStencilState, blendState,
+        rasterizerState, depthStencilView, predicate;
+    d3dshim::Held<D3D10_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> vertexBuffers;
+    d3dshim::Held<D3D10_SIMULTANEOUS_RENDER_TARGET_COUNT> renderTargets;
+    d3dshim::Held<D3D10_SO_BUFFER_SLOT_COUNT> streamOutput;
     Multithread* multithreadObject=nullptr;
     Device() { self=static_cast<ID3D10Device1*>(this); }
     ~Device() {
@@ -541,45 +558,78 @@ struct Device : d3dshim::Base, ID3D10Device1 {
         // ID3D11Device/IDXGIDevice and its private interfaces stay reachable.
         return device()?device()->QueryInterface(id,out):E_NOINTERFACE;
     }
-    D3DSHIM_REF(Device)
+    D3DSHIM_REF
 
     // ---- pipeline state: unwrap the guest's objects, forward everything else
     void STDMETHODCALLTYPE VSSetConstantBuffers(UINT start,UINT count,ID3D10Buffer* const* values) override {
-        ID3D11Buffer* list[16]{};UINT n=unwrap(values,count,list);context()->VSSetConstantBuffers(start,n,list);
+        ID3D11Buffer* list[16]{};UINT n=unwrap(values,count,list);
+        vsConstantBuffers.setRange(start,n,reinterpret_cast<IUnknown* const*>(list));
+        context()->VSSetConstantBuffers(start,n,list);
     }
     void STDMETHODCALLTYPE PSSetConstantBuffers(UINT start,UINT count,ID3D10Buffer* const* values) override {
-        ID3D11Buffer* list[16]{};UINT n=unwrap(values,count,list);context()->PSSetConstantBuffers(start,n,list);
+        ID3D11Buffer* list[16]{};UINT n=unwrap(values,count,list);
+        psConstantBuffers.setRange(start,n,reinterpret_cast<IUnknown* const*>(list));
+        context()->PSSetConstantBuffers(start,n,list);
     }
     void STDMETHODCALLTYPE GSSetConstantBuffers(UINT start,UINT count,ID3D10Buffer* const* values) override {
-        ID3D11Buffer* list[16]{};UINT n=unwrap(values,count,list);context()->GSSetConstantBuffers(start,n,list);
+        ID3D11Buffer* list[16]{};UINT n=unwrap(values,count,list);
+        gsConstantBuffers.setRange(start,n,reinterpret_cast<IUnknown* const*>(list));
+        context()->GSSetConstantBuffers(start,n,list);
     }
     void STDMETHODCALLTYPE VSSetShaderResources(UINT start,UINT count,ID3D10ShaderResourceView* const* values) override {
-        ID3D11ShaderResourceView* list[128]{};UINT n=unwrap(values,count,list);context()->VSSetShaderResources(start,n,list);
+        ID3D11ShaderResourceView* list[128]{};UINT n=unwrap(values,count,list);
+        vsShaderResources.setRange(start,n,reinterpret_cast<IUnknown* const*>(list));
+        context()->VSSetShaderResources(start,n,list);
     }
     void STDMETHODCALLTYPE PSSetShaderResources(UINT start,UINT count,ID3D10ShaderResourceView* const* values) override {
-        ID3D11ShaderResourceView* list[128]{};UINT n=unwrap(values,count,list);context()->PSSetShaderResources(start,n,list);
+        ID3D11ShaderResourceView* list[128]{};UINT n=unwrap(values,count,list);
+        psShaderResources.setRange(start,n,reinterpret_cast<IUnknown* const*>(list));
+        context()->PSSetShaderResources(start,n,list);
     }
     void STDMETHODCALLTYPE GSSetShaderResources(UINT start,UINT count,ID3D10ShaderResourceView* const* values) override {
-        ID3D11ShaderResourceView* list[128]{};UINT n=unwrap(values,count,list);context()->GSSetShaderResources(start,n,list);
+        ID3D11ShaderResourceView* list[128]{};UINT n=unwrap(values,count,list);
+        gsShaderResources.setRange(start,n,reinterpret_cast<IUnknown* const*>(list));
+        context()->GSSetShaderResources(start,n,list);
     }
     void STDMETHODCALLTYPE VSSetSamplers(UINT start,UINT count,ID3D10SamplerState* const* values) override {
-        ID3D11SamplerState* list[16]{};UINT n=unwrap(values,count,list);context()->VSSetSamplers(start,n,list);
+        ID3D11SamplerState* list[16]{};UINT n=unwrap(values,count,list);
+        vsSamplers.setRange(start,n,reinterpret_cast<IUnknown* const*>(list));
+        context()->VSSetSamplers(start,n,list);
     }
     void STDMETHODCALLTYPE PSSetSamplers(UINT start,UINT count,ID3D10SamplerState* const* values) override {
-        ID3D11SamplerState* list[16]{};UINT n=unwrap(values,count,list);context()->PSSetSamplers(start,n,list);
+        ID3D11SamplerState* list[16]{};UINT n=unwrap(values,count,list);
+        psSamplers.setRange(start,n,reinterpret_cast<IUnknown* const*>(list));
+        context()->PSSetSamplers(start,n,list);
     }
     void STDMETHODCALLTYPE GSSetSamplers(UINT start,UINT count,ID3D10SamplerState* const* values) override {
-        ID3D11SamplerState* list[16]{};UINT n=unwrap(values,count,list);context()->GSSetSamplers(start,n,list);
+        ID3D11SamplerState* list[16]{};UINT n=unwrap(values,count,list);
+        gsSamplers.setRange(start,n,reinterpret_cast<IUnknown* const*>(list));
+        context()->GSSetSamplers(start,n,list);
     }
-    void STDMETHODCALLTYPE VSSetShader(ID3D10VertexShader* value) override { context()->VSSetShader(behind<ID3D11VertexShader>(value),nullptr,0); }
-    void STDMETHODCALLTYPE PSSetShader(ID3D10PixelShader* value) override { context()->PSSetShader(behind<ID3D11PixelShader>(value),nullptr,0); }
-    void STDMETHODCALLTYPE GSSetShader(ID3D10GeometryShader* value) override { context()->GSSetShader(behind<ID3D11GeometryShader>(value),nullptr,0); }
-    void STDMETHODCALLTYPE IASetInputLayout(ID3D10InputLayout* value) override { context()->IASetInputLayout(behind<ID3D11InputLayout>(value)); }
+    void STDMETHODCALLTYPE VSSetShader(ID3D10VertexShader* value) override {
+        auto object=behind<ID3D11VertexShader>(value);
+        vsShader.set(0,object);context()->VSSetShader(object,nullptr,0);
+    }
+    void STDMETHODCALLTYPE PSSetShader(ID3D10PixelShader* value) override {
+        auto object=behind<ID3D11PixelShader>(value);
+        psShader.set(0,object);context()->PSSetShader(object,nullptr,0);
+    }
+    void STDMETHODCALLTYPE GSSetShader(ID3D10GeometryShader* value) override {
+        auto object=behind<ID3D11GeometryShader>(value);
+        gsShader.set(0,object);context()->GSSetShader(object,nullptr,0);
+    }
+    void STDMETHODCALLTYPE IASetInputLayout(ID3D10InputLayout* value) override {
+        auto object=behind<ID3D11InputLayout>(value);
+        inputLayout.set(0,object);context()->IASetInputLayout(object);
+    }
     void STDMETHODCALLTYPE IASetVertexBuffers(UINT start,UINT count,ID3D10Buffer* const* values,const UINT* strides,const UINT* offsets) override {
-        ID3D11Buffer* list[16]{};UINT n=unwrap(values,count,list);context()->IASetVertexBuffers(start,n,list,strides,offsets);
+        ID3D11Buffer* list[16]{};UINT n=unwrap(values,count,list);
+        vertexBuffers.setRange(start,n,reinterpret_cast<IUnknown* const*>(list));
+        context()->IASetVertexBuffers(start,n,list,strides,offsets);
     }
     void STDMETHODCALLTYPE IASetIndexBuffer(ID3D10Buffer* value,DXGI_FORMAT format,UINT offset) override {
-        context()->IASetIndexBuffer(behind<ID3D11Buffer>(value),format,offset);
+        auto object=behind<ID3D11Buffer>(value);
+        indexBuffer.set(0,object);context()->IASetIndexBuffer(object,format,offset);
     }
     void STDMETHODCALLTYPE IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY topology) override {
         context()->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY(topology));
@@ -587,20 +637,29 @@ struct Device : d3dshim::Base, ID3D10Device1 {
     void STDMETHODCALLTYPE OMSetRenderTargets(UINT count,ID3D10RenderTargetView* const* values,ID3D10DepthStencilView* depth) override {
         ID3D11RenderTargetView* list[D3D10_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
         UINT n=unwrap(values,count,list);
-        context()->OMSetRenderTargets(n,list,behind<ID3D11DepthStencilView>(depth));
+        auto depthView=behind<ID3D11DepthStencilView>(depth);
+        renderTargets.setRange(0,n,reinterpret_cast<IUnknown* const*>(list));
+        depthStencilView.set(0,depthView);
+        context()->OMSetRenderTargets(n,list,depthView);
     }
     void STDMETHODCALLTYPE OMSetBlendState(ID3D10BlendState* state,const FLOAT factor[4],UINT mask) override {
-        context()->OMSetBlendState(behind<ID3D11BlendState>(state),factor,mask);
+        auto object=behind<ID3D11BlendState>(state);
+        blendState.set(0,object);context()->OMSetBlendState(object,factor,mask);
     }
     void STDMETHODCALLTYPE OMSetDepthStencilState(ID3D10DepthStencilState* state,UINT reference) override {
-        context()->OMSetDepthStencilState(behind<ID3D11DepthStencilState>(state),reference);
+        auto object=behind<ID3D11DepthStencilState>(state);
+        depthStencilState.set(0,object);context()->OMSetDepthStencilState(object,reference);
     }
     void STDMETHODCALLTYPE SOSetTargets(UINT count,ID3D10Buffer* const* values,const UINT* offsets) override {
         ID3D11Buffer* list[D3D10_SO_BUFFER_SLOT_COUNT]{};
         UINT n=unwrap(values,count,list);
+        streamOutput.setRange(0,n,reinterpret_cast<IUnknown* const*>(list));
         context()->SOSetTargets(n,list,offsets);
     }
-    void STDMETHODCALLTYPE RSSetState(ID3D10RasterizerState* state) override { context()->RSSetState(behind<ID3D11RasterizerState>(state)); }
+    void STDMETHODCALLTYPE RSSetState(ID3D10RasterizerState* state) override {
+        auto object=behind<ID3D11RasterizerState>(state);
+        rasterizerState.set(0,object);context()->RSSetState(object);
+    }
     void STDMETHODCALLTYPE RSSetViewports(UINT count,const D3D10_VIEWPORT* values) override {
         D3D11_VIEWPORT list[D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
         UINT n=count>D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE?D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE:count;
@@ -609,7 +668,8 @@ struct Device : d3dshim::Base, ID3D10Device1 {
     }
     void STDMETHODCALLTYPE RSSetScissorRects(UINT count,const D3D10_RECT* values) override { context()->RSSetScissorRects(count,values); }
     void STDMETHODCALLTYPE SetPredication(ID3D10Predicate* value,WINBOOL keep) override {
-        context()->SetPredication(behind<ID3D11Predicate>(value),keep);
+        auto object=behind<ID3D11Predicate>(value);
+        predicate.set(0,object);context()->SetPredication(object,keep);
     }
 
     // ---- draws and copies
@@ -792,7 +852,17 @@ struct Device : d3dshim::Base, ID3D10Device1 {
     HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID id,UINT* size,void* data) override { return device()->GetPrivateData(id,size,data); }
     HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID id,UINT size,const void* data) override { return device()->SetPrivateData(id,size,data); }
     HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID id,const IUnknown* data) override { return device()->SetPrivateDataInterface(id,data); }
-    void STDMETHODCALLTYPE ClearState() override { context()->ClearState(); }
+    void STDMETHODCALLTYPE ClearState() override {
+        context()->ClearState();
+        // The context dropped everything, so the shim's references go too.
+        vsConstantBuffers.clear();psConstantBuffers.clear();gsConstantBuffers.clear();
+        vsShaderResources.clear();psShaderResources.clear();gsShaderResources.clear();
+        vsSamplers.clear();psSamplers.clear();gsSamplers.clear();
+        vsShader.clear();psShader.clear();gsShader.clear();
+        inputLayout.clear();indexBuffer.clear();depthStencilState.clear();blendState.clear();
+        rasterizerState.clear();depthStencilView.clear();predicate.clear();
+        vertexBuffers.clear();renderTargets.clear();streamOutput.clear();
+    }
     void STDMETHODCALLTYPE Flush() override { context()->Flush(); }
 
     // ---- creation
@@ -1251,7 +1321,7 @@ struct Reflection : d3dshim::Base, ID3D10ShaderReflection {
         for(unsigned i=0;i<variableCount;++i)if(variables[i])d3dshim::destroy(variables[i]);
         for(unsigned i=0;i<constantBufferCount;++i)if(constantBuffers[i])d3dshim::destroy(constantBuffers[i]);
     }
-    D3DSHIM_REF(Reflection)
+    D3DSHIM_REF
     D3DSHIM_QI
     // The reflection objects are owned by this reflector and live as long as it
     // does, so the same wrapper answers every lookup (as the D3D11 objects do).
@@ -1347,7 +1417,7 @@ namespace {
 struct StateBlock : d3dshim::Base, ID3D10StateBlock {
     StateBlock() { self=static_cast<ID3D10StateBlock*>(this);D3DSHIM_IDS(&__uuidof(ID3D10StateBlock)); }
     ~StateBlock() { cleanup(); }
-    D3DSHIM_REF(StateBlock)
+    D3DSHIM_REF
     D3DSHIM_QI
     ID3D10Device* device=nullptr;
     D3D10_STATE_BLOCK_MASK mask{};
