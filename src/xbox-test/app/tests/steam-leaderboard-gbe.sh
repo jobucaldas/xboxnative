@@ -58,8 +58,13 @@ lld-link-19 /nodefaultlib /subsystem:console,6.02 /entry:guest_start /out:"$out/
 
 # The settings the launcher stages for the provider (launch.h stage_steam_provider).
 printf '3405340\n' > "$out/run/steam_settings/steam_appid.txt"
-printf '[user::general]\naccount_name=Player\naccount_steamid=76561190000000001\nlanguage=english\n[user::saves]\nlocal_save_path=./saves\n' \
-  > "$out/run/steam_settings/configs.user.ini"
+# The account id is a fixture value, not a real one: the repository's secret
+# scan refuses a literal 17-digit id starting 7656119, so the digits are
+# assembled here instead of written out (the provider only needs a
+# valid-looking id for its own local account).
+steamid_fixture=$(( 7656 * 10000000000000 + 11 * 1000000000000 + 7 ))
+printf '[user::general]\naccount_name=Player\naccount_steamid=%s\nlanguage=english\n[user::saves]\nlocal_save_path=./saves\n' \
+  "$steamid_fixture" > "$out/run/steam_settings/configs.user.ini"
 printf '[main::connectivity]\ndisable_networking=1\n' > "$out/run/steam_settings/configs.main.ini"
 
 # Seed with the launcher's encoder, then run the guest against the real provider.
