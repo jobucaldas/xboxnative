@@ -98,6 +98,7 @@ EXPORTS
  SteamAPI_ISteamUserStats_GetDownloadedLeaderboardEntry
  SteamAPI_ISteamUserStats_UploadLeaderboardScore
  SteamAPI_ISteamUserStats_GetLeaderboardName
+ SteamAPI_ISteamFriends_GetFriendPersonaName
  PlayLeaderboardTrace
  PlayLeaderboardCallBoard
 DEF
@@ -224,6 +225,11 @@ grep -q "STEAM leaderboards: 'v2_kills' seeded 3 rows (id 7, 3 on Steam, file wr
 grep -q "STEAM leaderboards: score 2000 sent to 'v2_kills' (changed=1, rank 0 -> 1)" "$out/leaderboards.log"
 [[ $(grep -c "'v2_kills' seeded" "$out/leaderboards.log") == 1 ]]
 if grep -q "v2_unseeded' seeded" "$out/leaderboards.log";then exit 1;fi
+# The rank screen's player column: the provider answers "Unknown User" for every
+# account it has no LAN Friend record for, so the guest exits 42 only when the
+# launcher's persona-name tap supplied the name Steam gave for a seeded row, and
+# left an account it was never told about to the provider's own answer.
+grep -q "STEAM persona names: SteamAPI_ISteamFriends_GetFriendPersonaName observed; names come from the launcher's Steam session" "$out/leaderboards.log"
 # Vulkan (research/VULKAN-PLAN.md, milestone 1): a guest's LoadLibrary("vulkan-1.dll") is served by the Khronos loader
 # from the runtime directory, its instance is created, and it reports no physical devices. The fixture exits 42 only
 # then; Play must also have listed the packaged ICD manifest in the guest registry, which is the route the loader reads

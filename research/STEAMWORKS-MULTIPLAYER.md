@@ -212,14 +212,23 @@ rather than as "the bridge did nothing":
    request — i.e. the request has to be observed at
    `DownloadLeaderboardEntries`, not only at Find, which is the shim route
    below.
-2. **Other players' names will read "Unknown User".** gbe's
+2. **Other players' names read "Unknown User" — fixed in this branch.** gbe's
    `GetFriendPersonaName` answers the local name for the account and otherwise
    only a `Friend` record from its own LAN peer network
-   (`dll/steam_friends.cpp`); it has no settings file for a friend list, so a
-   real Steam row's steam id has no name behind it. The Rank screen's JOGADOR
-   column will show the placeholder unless the launcher also serves persona
-   names (CM `CMsgClientPersonaState` for the row ids, or a small name cache
-   written where the provider looks — none exists today).
+   (`dll/steam_friends.cpp`: `friends` is pushed only by network peers, and
+   `Settings` has no friend-list file), so a real Steam row's steam id has no
+   name behind it. The launcher now asks Steam for the seeded rows' names on the
+   same CM session (`CMsgClientRequestFriendData`, EMsg 815, with repeated
+   `friends` and only `Status|PlayerName`), collects the reply — an unsolicited
+   `CMsgClientPersonaState` push (EMsg 766), field `friends[2].player_name[15]`,
+   which `presence_push` already receives — and serves it in memory through an
+   export tap on `SteamAPI_ISteamFriends_GetFriendPersonaName`. The provider's
+   own call still runs; its answer is replaced only for an account Steam named.
+   Megabonk references that export (`GameAssembly.dll`, 894 Steam API symbols),
+   so the tap is on a call the game makes. Off-device proof:
+   `app/tests/play-runtime.sh leaderboards` — the stand-in provider answers
+   "Unknown User" for every account, and the guest exits 42 only when the tap
+   supplied "Ana" for a seeded row and left an unknown id to the provider.
 3. **Ranks are 1..N, not Steam's ranks.** gbe derives `m_nGlobalRank` from the
    entry's index in its sorted array (`1 + (&entry - &entries[0])`), not from
    Steam's `global_rank`, and the cache file has no field for it. That is right
@@ -227,8 +236,8 @@ rather than as "the bridge did nothing":
    not inside the seeded slice.
 
 The GLOBAL tab — the owner's stated check — is unaffected by the first gap: it
-will list real players' scores and ranks. The second gap applies to it too, so
-expect rows with placeholder names rather than an empty panel.
+will list real players' scores and ranks. Names on it now come from Steam; the
+one remaining visible defect there is the AMIGOS tab listing global players.
 
 ## The three serving options
 
@@ -248,6 +257,7 @@ For each interface family:
 | Interface | Games | (a) gbe_fork today | (b) CM bridge | (c) Valve client |
 |---|---|---|---|---|
 | `ISteamFriends` rich presence | Megabonk, Slime Rancher, PPT2 | in-memory + LAN only | **done in this branch**: observed at the export, uploaded on the launcher session | — |
+| `ISteamFriends` persona names | Megabonk | local account only; every other id is "Unknown User" unless a LAN peer pushed a `Friend` record | **done in this branch**: `CMsgClientRequestFriendData` for the seeded rows' ids, names collected from the `CMsgClientPersonaState` push and served through an export tap on `GetFriendPersonaName` | — |
 | `ISteamUserStats` leaderboards | Megabonk | reads `<appid>\leaderboard\<name>` on a board's first Find and answers downloads from it; never writes it with `disable_networking=1`, so boards are empty | **done in this branch**: observed at the export, board + top rows fetched on the launcher session and written into the provider's own file before its first Find; scores uploaded as `CMsgClientLBSSetScore` | — |
 | `ISteamFriends` invites / `GameLobbyJoinRequested` | Megabonk | overlay/invite handling is experimental-build only; `auto_accept_invite.txt` exists | needs `CMsgClientMMSInviteToLobby` (6621) and the `ClientMMSLobbyChatMsg` (6614) path to raise callbacks | — |
 | `ISteamMatchmaking` lobbies | Megabonk | LAN-only lobbies over its own UDP port (`listen_port`, default 47584): `CreateLobby` queues a pending create and `create_pending_lobbies()` mints a local lobby id, answers `LobbyCreated_t`/`LobbyEnter_t` itself and broadcasts the lobby over gbe's network (`dll/steam_matchmaking.cpp`); `disable_lobby_creation` makes it fail instead | **feasible**: the 14 messages below map almost 1:1 to the API | — |
