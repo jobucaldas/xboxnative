@@ -27,4 +27,7 @@ provider is installed yet for the game; Play never patches game files to avoid i
 fresh observed guest completion with exit code zero plus the existing GAP check;
 it still does **not** establish the visual, controller, audio, real-Steam or
 five-minute gameplay requirements above. A still-running guest at the timeout is
-not converted into acceptance success.
+not converted into acceptance success. When the first press starts an install,
+the script waits for the download and presses the main button again, as a player
+does: the launcher never launches a game by itself, and a launch request that
+follows a finished download without that second press fails the run.
