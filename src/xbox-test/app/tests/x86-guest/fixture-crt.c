@@ -121,6 +121,15 @@ int main(void) {
     check(VirtualQuery(va, &mbi, sizeof mbi) == sizeof mbi);
     VirtualFree(va, 0, MEM_RELEASE);
     check(GetModuleHandleA(NULL) != NULL);
+    /* FreeLibrary of the image handle succeeds; an unknown handle fails with
+     * ERROR_MOD_NOT_FOUND, as Windows and Wine answer. IsDBCSLeadByteEx is
+     * false on the single-byte and UTF-8 code pages this surface answers. Some
+     * mingw builds import both from the CRT startup path, so an unbound stub
+     * stops a program before main. */
+    check(FreeLibrary(GetModuleHandleA(NULL)) != 0);
+    SetLastError(0);
+    check(FreeLibrary((HMODULE)(ULONG_PTR)0xDEAD0000) == 0 && GetLastError() == ERROR_MOD_NOT_FOUND);
+    check(IsDBCSLeadByteEx(CP_ACP, 0x81) == 0 && IsDBCSLeadByteEx(CP_UTF8, 0xE3) == 0);
     check(GetTickCount() != 0 || GetTickCount() == 0);  /* callable, not printed */
     OSVERSIONINFOA vi; memset(&vi, 0, sizeof vi); vi.dwOSVersionInfoSize = sizeof vi;
     check(GetVersionExA(&vi) != 0 && vi.dwMajorVersion >= 5);

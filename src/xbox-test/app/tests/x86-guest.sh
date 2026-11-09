@@ -41,7 +41,7 @@ x86-crt: strings ok
 x86-crt: varargs 60 4.00
 x86-crt: kernel32 ok
 x86-crt: sync ok
-x86-crt: checks 35 failed 0'
+x86-crt: checks 38 failed 0'
 [[ $body == "$want" ]] || { echo "X86-GUEST FAIL: stdout differs"; diff <(echo "$want") <(echo "$body") || true; exit 1; }
 echo "X86-GUEST PASS: mingw CRT program (printf with doubles, heap, qsort, TLS, VirtualAlloc) ran in the interpreter to exit 42"
 # The launcher's own PE32 entry point (host/x86/x86_play.h): the structured
