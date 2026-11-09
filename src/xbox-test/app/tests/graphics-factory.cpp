@@ -76,6 +76,20 @@ int main(){
                         if(output)output->Release();
                         wrapped->Release();
                     }
+                    // Mesa asks for IDXGIAdapter1 and keeps using the result, so
+                    // the wrapper must survive the call that returned it.
+                    IDXGIAdapter1* wrapped1=nullptr;
+                    hr=four->EnumAdapterByLuid(luid,__uuidof(IDXGIAdapter1),(void**)&wrapped1);
+                    CHECK(SUCCEEDED(hr)&&wrapped1);
+                    if(SUCCEEDED(hr)&&wrapped1) {
+                        DXGI_ADAPTER_DESC1 again{};CHECK(SUCCEEDED(wrapped1->GetDesc1(&again))&&again.AdapterLuid.LowPart==luid.LowPart);
+                        realOne=corewindow_dxgi::real_adapter(wrapped1);
+                        CHECK(realOne&&realOne!=wrapped1);   // a wrapper, from which the real adapter is recoverable
+                        if(realOne)realOne->Release();
+                        wrapped1->Release();
+                    }
+                    IDXGIAdapter* none=reinterpret_cast<IDXGIAdapter*>(UINT_PTR(1));
+                    CHECK(four->EnumAdapterByLuid(LUID{0x7fffffff,0x7fffffff},__uuidof(IDXGIAdapter1),(void**)&none)==DXGI_ERROR_NOT_FOUND&&!none);
                 }
                 realFour->Release();
             }

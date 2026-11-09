@@ -1,0 +1,239 @@
+Play: make Mesa's WGL frontend and d3d12 winsys usable inside a launcher guest (research/OPENGL-PLAN.md).
+SPDX-License-Identifier: MIT (same licence as the files patched; Mesa is MIT)
+
+1. -DSTW_NO_DESKTOP_HOOKS (set by src/tools/build-mesa-d3d12.sh) selects Mesa's existing GDK-style code paths in the
+   WGL frontend: no per-thread WH_CALLWNDPROC hook and thread snapshot, no EnumDisplaySettings/ClientToScreen, no
+   wglUseFontOutlines GDI calls; window teardown is observed by subclassing the window procedure, resizes are
+   polled at make-current/swap. A thread with no hook still gets its TLS record (upstream's GDK path would fail).
+2. WGL target: without GALLIUM_DRIVER only the d3d12 driver is tried (no silent fall back to the CPU rasterizer,
+   whose GDI blit has no surface under Play); GALLIUM_DRIVER=softpipe still selects it.
+3. d3d12 WGL framebuffer: presents into a CoreWindow swapchain (Play's DXGI adapter maps the guest HWND to the app's
+   CoreWindow): no ALLOW_TEARING or frame-latency-waitable flag, alpha ignored (no DirectComposition path), three
+   flip buffers (Play creates at least three), Present never waits on a missing waitable object.
+
+diff -ruN a/src/gallium/frontends/wgl/stw_device.c b/src/gallium/frontends/wgl/stw_device.c
+--- a/src/gallium/frontends/wgl/stw_device.c	2026-11-08 16:24:36.764193571 -0300
++++ b/src/gallium/frontends/wgl/stw_device.c	2026-11-08 16:24:49.989054663 -0300
+@@ -73,7 +73,7 @@
+ static int
+ get_refresh_rate(void)
+ {
+-#ifndef _GAMING_XBOX
++#if !defined(_GAMING_XBOX) && !defined(STW_NO_DESKTOP_HOOKS)
+    DEVMODE devModes = { .dmSize = sizeof(DEVMODE) };
+ 
+    if (EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &devModes)) {
+diff -ruN a/src/gallium/frontends/wgl/stw_framebuffer.c b/src/gallium/frontends/wgl/stw_framebuffer.c
+--- a/src/gallium/frontends/wgl/stw_framebuffer.c	2026-11-08 16:24:36.748193421 -0300
++++ b/src/gallium/frontends/wgl/stw_framebuffer.c	2026-11-08 16:31:15.029717446 -0300
+@@ -179,7 +179,7 @@
+ 
+    client_pos.x = 0;
+    client_pos.y = 0;
+-#ifndef _GAMING_XBOX
++#if !defined(_GAMING_XBOX) && !defined(STW_NO_DESKTOP_HOOKS)
+    if (ClientToScreen(fb->hWnd, &client_pos) &&
+        GetWindowRect(fb->hWnd, &window_rect)) {
+       fb->client_rect.left = client_pos.x - window_rect.left;
+@@ -207,7 +207,7 @@
+ }
+ 
+ 
+-#ifndef _GAMING_XBOX
++#if !defined(_GAMING_XBOX) && !defined(STW_NO_DESKTOP_HOOKS)
+ /**
+  * @sa http://msdn.microsoft.com/en-us/library/ms644975(VS.85).aspx
+  * @sa http://msdn.microsoft.com/en-us/library/ms644960(VS.85).aspx
+@@ -268,7 +268,7 @@
+    return CallNextHookEx(tls_data->hCallWndProcHook, nCode, wParam, lParam);
+ }
+ #else
+-LRESULT CALLBACK
++static LRESULT CALLBACK
+ stw_call_window_proc_xbox(HWND hWnd, UINT message,
+                           WPARAM wParam, LPARAM lParam)
+ {
+@@ -329,7 +329,7 @@
+       fb->winsys_framebuffer->set_latency(fb->winsys_framebuffer, latency);
+    }
+ 
+-#ifdef _GAMING_XBOX
++#if defined(_GAMING_XBOX) || defined(STW_NO_DESKTOP_HOOKS)
+    fb->prev_wndproc = (WNDPROC)SetWindowLongPtr(hWnd, GWLP_WNDPROC, (LONG_PTR)&stw_call_window_proc_xbox);
+ #endif
+ 
+diff -ruN a/src/gallium/frontends/wgl/stw_framebuffer.h b/src/gallium/frontends/wgl/stw_framebuffer.h
+--- a/src/gallium/frontends/wgl/stw_framebuffer.h	2026-11-08 16:24:36.756193496 -0300
++++ b/src/gallium/frontends/wgl/stw_framebuffer.h	2026-11-08 16:24:49.988684275 -0300
+@@ -132,7 +132,7 @@
+    int swap_interval;
+    int64_t prev_swap_time;
+ 
+-#ifdef _GAMING_XBOX
++#if defined(_GAMING_XBOX) || defined(STW_NO_DESKTOP_HOOKS)
+    /* For the WndProc hook chain */
+    WNDPROC prev_wndproc;
+ #endif
+diff -ruN a/src/gallium/frontends/wgl/stw_tls.c b/src/gallium/frontends/wgl/stw_tls.c
+--- a/src/gallium/frontends/wgl/stw_tls.c	2026-11-08 16:24:36.741193355 -0300
++++ b/src/gallium/frontends/wgl/stw_tls.c	2026-11-08 16:24:49.989854618 -0300
+@@ -73,7 +73,7 @@
+     * XXX: Except for the current thread since it there is an explicit
+     * stw_tls_init_thread() call for it later on.
+     */
+-#ifndef _GAMING_XBOX
++#if !defined(_GAMING_XBOX) && !defined(STW_NO_DESKTOP_HOOKS)
+    DWORD dwCurrentProcessId = GetCurrentProcessId();
+    DWORD dwCurrentThreadId = GetCurrentThreadId();
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, dwCurrentProcessId);
+@@ -127,7 +127,7 @@
+ 
+    data->dwThreadId = dwThreadId;
+ 
+-#ifndef _GAMING_XBOX
++#if !defined(_GAMING_XBOX) && !defined(STW_NO_DESKTOP_HOOKS)
+    data->hCallWndProcHook = SetWindowsHookEx(WH_CALLWNDPROC,
+                                              stw_call_window_proc,
+                                              NULL,
+@@ -135,14 +135,18 @@
+ #else
+    data->hCallWndProcHook = NULL;
+ #endif
++#if !defined(_GAMING_XBOX) && !defined(STW_NO_DESKTOP_HOOKS)
+    if (data->hCallWndProcHook == NULL) {
+       goto no_hook;
+    }
++#endif
+ 
+    return data;
+ 
++#if !defined(_GAMING_XBOX) && !defined(STW_NO_DESKTOP_HOOKS)
+ no_hook:
+    free(data);
++#endif
+ no_data:
+    return NULL;
+ }
+@@ -165,7 +169,7 @@
+       debug_printf("%s(0x%04lx)\n", __func__, data->dwThreadId);
+    }
+ 
+-#ifndef _GAMING_XBOX
++#if !defined(_GAMING_XBOX) && !defined(STW_NO_DESKTOP_HOOKS)
+    if (data->hCallWndProcHook) {
+       UnhookWindowsHookEx(data->hCallWndProcHook);
+       data->hCallWndProcHook = NULL;
+diff -ruN a/src/gallium/targets/libgl-gdi/stw_wgl.c b/src/gallium/targets/libgl-gdi/stw_wgl.c
+--- a/src/gallium/targets/libgl-gdi/stw_wgl.c	2026-11-08 16:24:36.774193665 -0300
++++ b/src/gallium/targets/libgl-gdi/stw_wgl.c	2026-11-08 16:24:49.989743422 -0300
+@@ -224,7 +224,7 @@
+    DWORD count,
+    DWORD listBase )
+ {
+-#ifndef _GAMING_XBOX
++#if !defined(_GAMING_XBOX) && !defined(STW_NO_DESKTOP_HOOKS)
+    GLYPHMETRICS gm;
+    MAT2 tra;
+    FIXED one, minus_one, zero;
+diff -ruN a/src/gallium/targets/wgl/wgl.c b/src/gallium/targets/wgl/wgl.c
+--- a/src/gallium/targets/wgl/wgl.c	2026-11-08 16:43:05.172809101 -0300
++++ b/src/gallium/targets/wgl/wgl.c	2026-11-08 16:43:05.186745644 -0300
+@@ -120,8 +120,15 @@
+    if (!winsys)
+       return NULL;
+ 
++   /* Play: without GALLIUM_DRIVER the d3d12 driver is the only one tried, so a console where it cannot start fails
++    * visibly instead of drawing nothing through the CPU rasterizer (the GDI blit it presents with has no surface
++    * under Play). GALLIUM_DRIVER=softpipe selects the software rasterizer, which the off-device test uses. */
+    const char *const drivers[] = {
++#ifdef GALLIUM_D3D12
++      debug_get_option("GALLIUM_DRIVER", "d3d12"),
++#else
+       debug_get_option("GALLIUM_DRIVER", ""),
++#endif
+ #ifdef GALLIUM_D3D12
+       sw_only ? "" : "d3d12",
+ #endif
+diff -ruN a/src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer.cpp b/src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer.cpp
+--- a/src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer.cpp	2026-11-08 16:24:36.782193740 -0300
++++ b/src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer.cpp	2026-11-08 16:24:49.990499706 -0300
+@@ -47,7 +47,9 @@
+ #include <dcomp.h>
+ 
+ using Microsoft::WRL::ComPtr;
+-constexpr uint32_t num_buffers = 2;
++/* Play's CoreWindow adapter presents with at least three flip buffers, so use three: the swapchain it hands back
++ * may report a current back buffer index of 2. */
++constexpr uint32_t num_buffers = 3;
+ 
+ struct d3d12_wgl_framebuffer {
+    struct stw_winsys_framebuffer base;
+@@ -155,15 +157,16 @@
+    DXGI_SWAP_CHAIN_DESC1 desc = {};
+    desc.BufferCount = num_buffers;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT | DXGI_USAGE_SHADER_INPUT;
+-   desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING | DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
++   /* CoreWindow swapchains (Play) take neither the tearing nor the frame-latency-waitable flag. */
++   desc.Flags = 0;
+    desc.Format = d3d12_get_format(templ->format);
+    if (desc.Format == DXGI_FORMAT_B8G8R8X8_UNORM)
+       desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.Width = templ->width0;
+    desc.Height = templ->height0;
+    desc.SampleDesc.Count = 1;
+-   desc.AlphaMode = util_format_has_alpha(templ->format) ?
+-      DXGI_ALPHA_MODE_PREMULTIPLIED : DXGI_ALPHA_MODE_IGNORE;
++   /* A CoreWindow has no per-pixel window transparency: always ignore alpha (no DirectComposition path). */
++   desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    desc.Scaling = DXGI_SCALING_STRETCH;
+ 
+@@ -223,9 +226,10 @@
+       swapchain1.As(&framebuffer->swapchain);
+ 
+       framebuffer->waitable_object = framebuffer->swapchain->GetFrameLatencyWaitableObject();
+-      WaitForSingleObject(framebuffer->waitable_object, INFINITE);
+-
+-      framebuffer->swapchain->SetMaximumFrameLatency(framebuffer->latency);
++      if (framebuffer->waitable_object) {
++         WaitForSingleObject(framebuffer->waitable_object, INFINITE);
++         framebuffer->swapchain->SetMaximumFrameLatency(framebuffer->latency);
++      }
+    }
+    else {
+       struct pipe_fence_handle *fence = NULL;
+@@ -302,7 +306,7 @@
+       framebuffer->offscreen_buffer = screen->base.base.resource_create(&screen->base.base, &local_templ);
+    }
+ 
+-   framebuffer->need_fillrect = util_format_has_alpha(templ->format);
++   framebuffer->need_fillrect = false;
+ }
+ 
+ static bool
+@@ -328,13 +332,11 @@
+    }
+ 
+    HRESULT hr;
+-   if (interval < 1)
+-      hr = framebuffer->swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
+-   else
+-      hr = framebuffer->swapchain->Present(interval, 0);
++   hr = framebuffer->swapchain->Present(interval < 1 ? 0 : interval, 0);
+ 
+    if (hr == S_OK)
+-      return WaitForSingleObject(framebuffer->waitable_object, 2000) == WAIT_OBJECT_0;
++      return !framebuffer->waitable_object ||
++             WaitForSingleObject(framebuffer->waitable_object, 2000) == WAIT_OBJECT_0;
+    return false;
+ }
+ 
+@@ -404,7 +406,7 @@
+       ++delta;
+    }
+    framebuffer->latency = latency;
+-   if (framebuffer->swapchain)
++   if (framebuffer->swapchain && framebuffer->waitable_object)
+       framebuffer->swapchain->SetMaximumFrameLatency(latency);
+ }
+ 

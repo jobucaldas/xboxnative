@@ -10,5 +10,9 @@ for opt in -Dplatforms=windows -Dgallium-drivers=d3d12,softpipe -Dgallium-d3d12-
   echo "$txt" | grep -qF -- "$opt" || { echo "FAIL missing $opt"; exit 1; }
 done
 echo "$txt" | grep -qF 'outputs: opengl32.dll libgallium_wgl.dll'
+# The pinned DirectX-Headers commit is a full 40-hex hash and both Play patches are applied.
+echo "$txt" | grep -Eq 'directx-headers=[^ ]+@[0-9a-f]{40} '
+echo "$txt" | grep -qF 'patches: 0001-play-corewindow-wgl.patch 0002-play-d3d12-command-queue-fallback.patch'
+for opt in -Dzlib=disabled; do echo "$txt" | grep -qF -- "$opt" || { echo "FAIL missing $opt"; exit 1; }; done
 grep -q 'Mesa' NOTICE || { echo "FAIL Mesa is not listed in NOTICE"; exit 1; }
 echo "MESA-D3D12 RECIPE PASS"

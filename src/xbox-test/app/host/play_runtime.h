@@ -1445,6 +1445,16 @@ static DWORD WINAPI worker(void*) {
     __try {runImpl();} __except(filter(GetExceptionInformation())) {}
     state->result=state->snapshot();state->finished=true;guestThread=false;return state->code;
 }
+// gdi32's pixel-format and SwapBuffers entry points forward to the wgl* exports of whichever opengl32.dll the guest
+// has mapped (Mesa from the runtime directory, or one the game ships). None mapped: Play's failing stubs answer.
+static uintptr_t openglExport(const char* name) {
+    if(!state||!name)return 0;
+    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
+    auto m=named(L"opengl32.dll");
+    if(!m||m->mappingFailed||!m->mapped)return 0;
+    ExportLookup lookup;
+    return (uintptr_t)lookup.finish(exported(*m,name,0));
+}
 // cwd (optional) is the guest's working directory, as a Steam launch option's
 // workingdir names it; empty means the executable's own directory.
 static bool start(const std::wstring& root,const std::wstring& exe,const std::wstring& args,wxl::Log log,const std::wstring& cwd=std::wstring()) {
@@ -1452,6 +1462,7 @@ static bool start(const std::wstring& root,const std::wstring& exe,const std::ws
     state=new State();state->root=root;state->cwd=cwd.empty()?root:cwd;state->log=log;observed.store(state,std::memory_order_release);state->command=L"\""+root+L"\\"+exe+L"\" "+args;state->commandA=narrow(state->command);
     mlp::log=log;wxl::logger=log;
     xinput_core::note=[](const char* text){if(mlp::log)mlp::log(text);};mlp::missingResolver=missing;mlp::assets.clear();mlp::summaries.clear();
+    gdi32_core::gl_lookup.store(&openglExport);
     state->exe=map(root+L"\\"+exe);if(!state->exe) {state->result=state->snapshot();state->finished=true;return true;}
     find_ntdll();
     {static bool installed=false;if(!installed){installed=true;hostTopLevel=SetUnhandledExceptionFilter(topLevelFilter);}}
