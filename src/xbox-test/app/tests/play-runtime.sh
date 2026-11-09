@@ -63,6 +63,13 @@ lld-link-19 /nodefaultlib /entry:d3d12_entry /include:d3d12_relocation /subsyste
 # with a swap chain on a guest HWND, clears and presents three frames.
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d10.cpp -o "$out/obj/d3d10.obj"
 lld-link-19 /nodefaultlib /entry:d3d10_entry /include:d3d10_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d10.exe" "$out/obj/d3d10.obj" /usr/x86_64-w64-mingw32/lib/libd3d10.a /usr/x86_64-w64-mingw32/lib/libdxgi.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libuuid.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+# EXE that starts a D3D9 game: it statically imports d3d9.dll, which the console
+# lacks, so Play must serve the shim from the runtime directory and the shim's
+# own d3d11/dxgi imports must reach Play's routes. It creates a device with a
+# swap chain and an auto depth-stencil surface on a guest HWND, clears and
+# presents three frames.
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d9.cpp -o "$out/obj/d3d9.obj"
+lld-link-19 /nodefaultlib /entry:d3d9_entry /include:d3d9_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d9.exe" "$out/obj/d3d9.obj" /usr/x86_64-w64-mingw32/lib/libd3d9.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 # EXE that probes Vulkan the way a Vulkan-optional engine does: it loads
 # vulkan-1.dll by name (Play serves the Khronos loader from the runtime
 # directory), creates an instance and enumerates physical devices. The console
@@ -152,7 +159,7 @@ UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
 # Owned stand-in so steam-client proves refusal of a present root client DLL.
 cp "$out/play-dependency.dll" "$out/steamclient64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag discord-sdk vulkan;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d9-diag discord-sdk vulkan;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -206,6 +213,17 @@ grep -q 'PRUN EVENT guest D3D11CreateDevice caller=' "$out/d3d10-diag.log"
 grep -q "guest device's DXGI factory: guest-window swapchains go through the CoreWindow adapter" "$out/d3d10-diag.log"
 grep -q 'guest DXGI CoreWindow swapchain returned hr=0x00000000' "$out/d3d10-diag.log"
 [[ $(grep -c 'guest D3D11CreateDevice returned hr=0x00000000' "$out/d3d10-diag.log") == 1 ]]
+# A guest's static d3d9.dll import is served by Play's own D3D9 shim from the
+# runtime directory (the console has no d3d9.dll), and the shim's own
+# d3d11.dll!D3D11CreateDevice import reaches Play's device hook. The fixture
+# exits 42 only when the factory, the device, a swap chain on a guest HWND, the
+# auto depth-stencil surface, the clear and three presents all succeeded; the
+# CoreWindow adapter answered the chain.
+grep -q 'PRUN EVENT mapping d3d9.dll' "$out/d3d9-diag.log"
+grep -q 'PRUN EVENT guest D3D11CreateDevice caller=.*d3d9.dll' "$out/d3d9-diag.log"
+grep -q "guest device's DXGI factory: guest-window swapchains go through the CoreWindow adapter" "$out/d3d9-diag.log"
+grep -q 'guest DXGI CoreWindow swapchain returned hr=0x00000000' "$out/d3d9-diag.log"
+[[ $(grep -c 'guest D3D11CreateDevice returned hr=0x00000000' "$out/d3d9-diag.log") == 1 ]]
 # Guest RWX (JIT) memory is emulated over W^X: pages flip RW<->RX on fault.
 grep -q 'RWX emulation: guest requested RWX' "$out/rwx-jit.log"
 # Guest registry (PlayerPrefs) persists in the uwph SQLite registry across runs.

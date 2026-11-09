@@ -89,7 +89,7 @@ class SourceLayoutTest(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
         self.assertEqual(set(re.findall(r'^  ([\w-]+):$', workflow.split('\njobs:\n', 1)[1], re.M)),
                          {'offline-checks', 'registry-persistence', 'strict-imports', 'guest-pe-inspection',
-                          'd3d10-shim', 'x86-core'})
+                          'd3d10-shim', 'd3d9-shim', 'x86-core'})
         paths = re.findall(r'\bsrc/(?:xbox-test|tools)/[\w./*-]+', workflow)
         self.assertTrue(paths)
         for name in paths:
