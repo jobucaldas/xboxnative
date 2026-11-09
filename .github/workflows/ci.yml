@@ -20,6 +20,8 @@ jobs:
           find . -name '*.py' -not -path './.git/*' -print0 | xargs -0 -n1 python3 -m py_compile
       - name: synthetic input routing fixture
         run: bash src/xbox-test/uwph/input/tests/run-route-test.sh
+      - name: DPI awareness context encoding
+        run: bash src/xbox-test/uwph/user32/tests/run-dpi-context-test.sh
       - name: offline unit tests
         run: |
           set -e
