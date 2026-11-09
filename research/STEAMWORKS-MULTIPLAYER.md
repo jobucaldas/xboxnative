@@ -1,0 +1,225 @@
+# Steamworks multiplayer: what the owned games use, and what can serve it
+
+This is the map for issue #55 part 2: which Steamworks interfaces the owned
+games actually reference, what the pinned Steam API provider (gbe_fork) already
+serves, what a launcher-side CM bridge could serve against the real Steam
+network, and what would need Valve's own client. It is a plan, not a
+compatibility claim: nothing here has been run on the console, and a static
+string in a binary is a lower bound on what the game calls, never proof that a
+call executes.
+
+Scope rule (AGENTS.md rule 3): every path below runs a game the signed-in
+account owns, installed from official depots. No path patches a game or Valve
+file on disk, and every path keeps the ownership gate
+(`owner_ticket()` → `ClientGetAppOwnershipTicket`, EMsg 857/858) in front of
+anything that is staged.
+
+## Method and limits
+
+- Inventory: `strings`/byte scan of the game's own binaries under
+  `/home/jobu/steam-owned/games/*`, excluding `steam_api*.dll`,
+  `steamclient*.dll`, `steamclient_loader*` and `GameOverlayRenderer*` — those
+  contain every symbol by construction and would only report the SDK's surface.
+  Matched `SteamAPI_ISteam<Interface>_<Function>` and `Steam<Interface>_vNNN`
+  version strings.
+- Provider coverage: the pinned gbe_fork release from `deps.pin`
+  (`gbe-fork-win`, `release-2026_09_27`), inspected as a PE export table, its
+  shipped `steam_settings.EXAMPLE` and `README.release.md`, and a read-only
+  checkout of the same tag's source (`git describe` = `release-2026_09_27`,
+  commit `7103add7`). Statements about gbe's internals below cite the file they
+  come from; no gbe code is copied into this repository.
+- CM message names and field numbers: SteamDatabase/Protobufs as vendored in
+  `node_modules/steam-user/protobufs/*.proto` (steam-user 5.3.0, MIT). The
+  `.proto` files themselves are Valve's published protocol definitions
+  (SteamDatabase/Protobufs is public domain / Unlicense); steam-user only
+  repackages them. See [Proto sources and licences](#proto-sources-and-licences).
+
+## What each owned game references
+
+| Game | App | Steam binaries | Multiplayer-relevant surface |
+|---|---:|---|---|
+| Megabonk | 3405340 | `GameAssembly.dll` (IL2CPP, 894 Steam API symbols) | Everything: `ISteamMatchmaking` (38), `ISteamMatchmakingServers` (17), `ISteamNetworking` (22), `ISteamNetworkingSockets` (47), `ISteamNetworkingMessages` (6), `ISteamNetworkingUtils` (27), `ISteamFriends` (80, incl. rich presence and invites), `ISteamUser` (35, incl. `GetAuthSessionTicket`, `BeginAuthSession`, `AdvertiseGame`), `ISteamParties` (12), `ISteamGameSearch` (14), `ISteamRemotePlay` (8), `ISteamGameServer` (41), `ISteamUserStats` (45), `ISteamUGC` (94), `ISteamInventory` (38), `ISteamRemoteStorage` (59) |
+| Fields of Mistria | 2142790 | `FieldsOfMistria.exe`, `SDL3.dll` | `ISteamNetworkingSockets::CloseConnection`/`CloseListenSocket` only (teardown), `ISteamUserStats` (4), `ISteamApps`, `ISteamUtils`, `ISteamScreenshots`; SDL3 uses `ISteamRemoteStorage` for cloud |
+| Mega Man Legacy Collection | 363440 | `Proteus.exe` (PE32), `steam_api.dll` | 32-bit: maps for inspection only, no execution yet, so no runtime surface |
+| Puyo Puyo Tetris 2 | 1259790 | `PuyoPuyoTetris2.exe` | Imports only the flat C API (`SteamAPI_Init`, `SteamAPI_RunCallbacks`, `SteamInternal_*`), no `SteamAPI_ISteam*` names; carries the `steam_display` rich-presence key. Interfaces are reached through `SteamInternal_FindOrCreateUserInterface` at runtime, so the static surface under-reports |
+| Hyperdimension Neptunia Re;Birth1 | 282900 | `xgameFinal.exe` | Same flat C API shape as PPT2; no `SteamAPI_ISteam*` names |
+| Slime Rancher | 433340 | `Managed/Assembly-CSharp.dll` | Managed `Steamworks` bindings, `SetRichPresence` + a `RichPresenceDirector`; no Steam DLL ships in the install (Unity loads it from the client) |
+| Say No! More | 1191900 | — | No Steam API references in its own binaries |
+
+Two consequences worth stating plainly:
+
+1. **Only Megabonk exercises the multiplayer surface broadly.** Mistria's
+   networking calls are teardown-only, and the rest either reach Steam through
+   the flat C API (so the interface set is decided at runtime) or do not
+   reference Steam at all. A CM bridge built for lobbies is a Megabonk-shaped
+   investment first.
+2. **IL2CPP strings over-report.** `GameAssembly.dll` contains the generated
+   bindings for the full Steamworks surface the game's C# assembly references,
+   including wrappers the game may never call. The list above is "compiled in",
+   not "called".
+
+## Presence (part 1 of #55)
+
+Presence is the one integration that needs no game cooperation beyond
+`ISteamFriends::SetRichPresence`, and it is implemented in this branch
+(`app/steam_presence.h`, `app/launch.h`, `app/host/play_runtime.h`). The model:
+
+| What friends see | Where it comes from | Message |
+|---|---|---|
+| "In-Game: <game>" | the launcher's own CM session | `CMsgClientGamesPlayed` (EMsg 5410), `games_played[1].game_id[2]`, `client_os_type[2]` |
+| The online dot | persona state | `CMsgClientChangeStatus` (EMsg 716), `persona_state[1] = 1` |
+| Rich-presence line | per-app key/value set | `CMsgClientRichPresenceUpload` (EMsg 7501), `rich_presence_kv[1]`, header `routing_appid[3]` |
+
+The blob is Steam's binary KeyValues: `\0` + `"RP"` + `\0`, then per key
+`\1` + key + `\0` + value + `\0`, then `\x08\x08`. Steam drops both the game
+state and the key set when the session that sent them ends, so the keeper
+re-sends on every new session; `CMsgClientPlayingSessionState` (EMsg 9600,
+`playing_blocked[2]`, `playing_app[3]`) says when another of the account's
+clients is playing and this session must stay quiet (sending games-played while
+blocked logs the session off).
+
+gbe_fork does not help here: its `SetRichPresence` keeps the set in memory and
+broadcasts it only to its own LAN peers, and its release build compiles the
+debug print out. There is no settings file or saved blob to read. That is why
+the launcher observes the call at the export boundary instead of reading
+provider state.
+
+The source confirms it (`dll/steam_friends.cpp`, tag `release-2026_09_27`):
+`SetRichPresence` writes `us.mutable_rich_presence()` and calls
+`resend_friend_data()`, which only sets `modified = true`; `RunCallbacks()`
+then builds a `Friend` protobuf and calls `network->sendToAllIndividuals(&msg,
+true)` — gbe's own UDP peer network, nothing to do with Steam's CM. The
+`PRINT_DEBUG` that would have exposed the values is compiled out of the release
+build. Nothing is persisted, so there is no file for the launcher to watch.
+
+## The three serving options
+
+For each interface family:
+
+- **(a) gbe_fork offline** — the provider answers from local state. Works with
+  no network and no Valve client; peers are only the ones on the same LAN.
+- **(b) launcher CM bridge** — the launcher translates the game's Steamworks
+  call into a CM message on its own signed-in session, and feeds the reply back
+  through the provider's callback queue. Real Steam lobbies, real friends, real
+  auth tickets; needs the launcher to own the interface object the game talks
+  to, or to fill in what the provider leaves empty.
+- **(c) Valve's client** — the real Steam client owns the interface. Not
+  available on the console (no supported guest process model; see
+  [STEAM-API-PATH.md](STEAM-API-PATH.md)).
+
+| Interface | Games | (a) gbe_fork today | (b) CM bridge | (c) Valve client |
+|---|---|---|---|---|
+| `ISteamFriends` rich presence | Megabonk, Slime Rancher, PPT2 | in-memory + LAN only | **done in this branch**: observed at the export, uploaded on the launcher session | — |
+| `ISteamFriends` invites / `GameLobbyJoinRequested` | Megabonk | overlay/invite handling is experimental-build only; `auto_accept_invite.txt` exists | needs `CMsgClientMMSInviteToLobby` (6621) and the `ClientMMSLobbyChatMsg` (6614) path to raise callbacks | — |
+| `ISteamMatchmaking` lobbies | Megabonk | LAN-only lobbies over its own UDP port (`listen_port`, default 47584): `CreateLobby` queues a pending create and `create_pending_lobbies()` mints a local lobby id, answers `LobbyCreated_t`/`LobbyEnter_t` itself and broadcasts the lobby over gbe's network (`dll/steam_matchmaking.cpp`); `disable_lobby_creation` makes it fail instead | **feasible**: the 14 messages below map almost 1:1 to the API | — |
+| `ISteamMatchmakingServers` | Megabonk | returns LAN server list; `matchmaking_server_list_actual_type` and `..._via_source_query` change the list type | not a CM thing: it is a UDP server query (`A2S`), which the console can do over its own sockets if the AppContainer allows outbound UDP | — |
+| `ISteamNetworking` (old P2P) | Megabonk | LAN P2P over its own sockets | needs `CMsgClientP2PConnectionInfo` (5434) rendezvous and a relay; old API is deprecated by Valve | — |
+| `ISteamNetworkingSockets` | Megabonk, Mistria | exports exist (`ConnectP2P`, `InitAuthentication`, `GetCertificateRequest`, `ReceivedRelayAuthTicket`, `FindRelayAuthTicketForServer`) but they are stubs: `GetCertificateRequest`/`SetCertificate` return `false` with `PRINT_DEBUG_TODO`, `ReceivedRelayAuthTicket` returns `false`, `FindRelayAuthTicketForServer` returns `0`, and `ConnectP2P` only opens gbe's own UDP path (`dll/steam_networking_sockets.cpp`). No SDR datagram protos are compiled in either (`CMsgSteamDatagramConnectRequest`, `CMsgSteamDatagramP2PSessionRequest`, `CMsgSteamDatagramRelayAuthTicket` are all absent from the DLL), so it cannot speak SDR | **large**: SDR is a whole transport (certificates, relay tickets, ping/pop selection, encryption). `CMsgClientNetworkingCertRequest` (5621/5622) is only the first step | — |
+| `ISteamNetworkingMessages` | Megabonk | sits on NetworkingSockets, so same answer | same as SDR | — |
+| `ISteamUser` auth tickets | Megabonk | gbe generates and signs its own ticket with a fake key (`dll/auth.cpp`, `app_ticket_key`, `sign_auth_data`), and `BeginAuthSession` validates only tickets that same key signed — so it works between emulated peers and nowhere else | **client side only, and not by reuse**: gbe's ticket is not a Valve ticket, so it cannot be registered with CM as one. A real ticket would have to come from CM for the app, which means the launcher owns `GetAuthSessionTicket` too. Validating *other* players' tickets is the game-server side | — |
+| `ISteamParties` / `ISteamGameSearch` | Megabonk | exports present, LAN-scoped | parties ride lobbies (`CMsgClientMMS*`); GameSearch is a Valve-hosted matchmaking service the launcher would have to call as the client | — |
+| `ISteamRemotePlay` | Megabonk | exports present, no-op | needs the Steam client's streaming stack | required |
+| `ISteamUGC` / `ISteamInventory` | Megabonk | file-backed workshop/inventory from `steam_settings` | UGC can use the published Web API (`ISteamRemoteStorage/GetPublishedFileDetails`); inventory is a GC service | — |
+| `ISteamGameServer` | Megabonk, Mistria | local emulation | a real game server needs a server login (`CMsgClientLogon` with a server account) — out of scope for a player launcher | required |
+
+## CM messages a lobby bridge would use
+
+All names and numbers from `enums_clientserver.proto` and
+`steammessages_clientserver_mms.proto`:
+
+| EMsg | Message | Fields that matter |
+|---:|---|---|
+| 6601 / 6602 | `CMsgClientMMSCreateLobby` / `...Response` | `app_id[1]`, `max_members[2]`, `lobby_type[3]`, `lobby_flags[4]`, `cell_id[5]`, `metadata[7]`; response `steam_id_lobby[2]`, `eresult[3]` |
+| 6603 / 6604 | `CMsgClientMMSJoinLobby` / `...Response` | `steam_id_lobby[2]`; response carries `members[9]` (`steam_id[1]`, `persona_name[2]`, `metadata[3]`), `steam_id_owner[7]`, `metadata[8]` |
+| 6605 / 6606 | `CMsgClientMMSLeaveLobby` / `...Response` | `steam_id_lobby[2]` |
+| 6607 / 6608 | `CMsgClientMMSGetLobbyList` / `...Response` | `num_lobbies_requested[3]`, `filters[6]` (`key[1]`, `value[2]`, `comparision[3]`, `filter_type[4]`); response `lobbies[4]` (`steam_id[1]`, `max_members[2]`, `lobby_type[3]`, `lobby_flags[4]`, `metadata[5]`, `num_members[6]`) |
+| 6609 / 6610 | `CMsgClientMMSSetLobbyData` / `...Response` | `steam_id_member[3]` for member data, `metadata[7]` |
+| 6611 / 6612 | `CMsgClientMMSGetLobbyData` / `CMsgClientMMSLobbyData` | the pushed form (`6612`) is unsolicited: it must reach the game as a `LobbyDataUpdate_t` |
+| 6613 / 6614 | `CMsgClientMMSSendLobbyChatMsg` / `CMsgClientMMSLobbyChatMsg` | `lobby_message[4]`; the pushed form carries `steam_id_sender[3]` |
+| 6615 / 6616 | `CMsgClientMMSSetLobbyOwner` / `...Response` | `steam_id_new_owner[3]` |
+| 6617 / 6618 | `CMsgClientMMSSetLobbyGameServer` / `...LobbyGameServerSet` | `game_server_ip[6]` (`CMsgIPAddress`), `game_server_port[4]`, `game_server_steam_id[5]` |
+| 6619 / 6620 | `CMsgClientMMSUserJoinedLobby` / `...UserLeftLobby` | pushed; raise `LobbyChatUpdate_t` |
+| 6621 | `CMsgClientMMSInviteToLobby` | `steam_id_user_invited[3]` |
+| 6624 | `CMsgClientMMSSetLobbyLinked` | `steam_id_lobby2[3]` |
+| 6626 / 6627 | `CMsgClientMMSGetLobbyStatus` / `...Response` | `claim_membership[3]`, `claim_ownership[4]`, `lobby_status[3]` (`EMMSLobbyStatus`) |
+
+Auth and networking neighbours:
+
+| EMsg | Message | Use |
+|---:|---|---|
+| 857 / 858 | `CMsgClientGetAppOwnershipTicket` / response | the existing ownership gate; unchanged |
+| 5502 | `CMsgClientRegisterAuthTicketWithCM` | register the ticket gbe handed the game so a real server can validate it |
+| 5431 / 5432 / 5575 | `CMsgClientRequestAuthList` / `CMsgClientAuthList` / `...Ack` | the client's ticket list to CM |
+| 5429 | `CMsgClientTicketAuthComplete` | result of a ticket CM validated |
+| 5526 / 5527 | `CMsgClientRequestEncryptedAppTicket` / response | `GetEncryptedAppTicket` |
+| 5621 / 5622 | `CMsgClientNetworkingCertRequest` / response | first step of SDR: `key_data[2]`, `app_id[3]` → `CMsgSteamDatagramCertificateSigned` |
+| 5434 / 5435 | `CMsgClientP2PConnectionInfo` / `...FailInfo` | old P2P rendezvous (`candidate[4]`, `rendezvous[6]`) |
+
+SDR (for `ISteamNetworkingSockets`) additionally needs
+`CMsgSteamDatagramRelayAuthTicket`, `CMsgSteamDatagramConnectRequest`,
+`CMsgSteamDatagramConnectOK`, `CMsgSteamDatagramP2PSessionRequest`,
+`CMsgSteamDatagramP2PRoutingSummary` and the ping/pop messages in
+`steamdatagram_messages_auth.proto` / `steamdatagram_messages_sdr.proto`.
+
+## Effort and risks
+
+| Slice | Effort | Main risk |
+|---|---|---|
+| Rich presence (this branch) | done | Steam may ignore `routing_appid` for an app the session did not launch through the client; the console log says whether it did |
+| Lobby list / create / join | medium: 14 messages, each a request/response plus a pushed form that must become the right `_t` callback; the game also needs `LobbyEnter_t`, `LobbyDataUpdate_t`, `LobbyChatUpdate_t`, `LobbyKicked_t` | the provider owns the callback queue. Either the launcher feeds gbe's queue (needs a hook gbe does not document) or the launcher answers the interface itself, which means replacing `ISteamMatchmaking` wholesale — a much bigger change than observing one export |
+| Auth tickets | medium | gbe's ticket is signed by the emulator; CM will not accept it as a client ticket, so only the "register what gbe gave the game" direction is realistic. Validating other players is server-side |
+| `ISteamNetworkingSockets` over SDR | large | a full transport implementation: certificates, relay tickets, POP selection, encryption, and the console's AppContainer UDP rules. Not a launcher-session feature |
+| `ISteamMatchmakingServers` | small | independent of Steam: it is UDP `A2S` queries. Worth checking whether the AppContainer lets the launcher open outbound UDP at all before designing anything |
+
+Two structural risks apply to everything in option (b):
+
+- **The callback queue.** Steamworks delivers asynchronous results as
+  `*_t` structs through `SteamAPI_RunCallbacks`. gbe owns that queue. A bridge
+  that only talks CM cannot deliver a callback unless it either goes through
+  gbe's queue or replaces the interface object. The rich-presence slice avoids
+  this because `SetRichPresence` is fire-and-forget; lobbies are not.
+- **Two sessions, one account.** The launcher already holds the account's CM
+  session. Lobby messages must go on that session, with `routing_appid` set,
+  or Steam treats them as belonging to no app.
+
+## Proto sources and licences
+
+| Source | What it provided | Licence |
+|---|---|---|
+| SteamDatabase/Protobufs (as vendored in steam-user 5.3.0 `protobufs/*.proto`) | `CMsgClientMMS*`, `CMsgClientPersonaState`, `CMsgClientRichPresence*`, `CMsgClientPlayingSessionState`, `CMsgClientGamesPlayed`, `CMsgProtoBufHeader`, `CMsgSteamDatagram*` field numbers | The `.proto` files are Valve's published protocol definitions, distributed by SteamDatabase as public domain (Unlicense). steam-user is MIT (Copyright (c) 2015 Alex Corn); its own code was not copied |
+| SteamKit2 | cross-check of message names and `EMsg` values | LGPL-2.1 — no source copied; names and numbers are facts, not expression |
+
+Nothing from either project is vendored into this repository. The message
+numbers and field tags used by `app/steam_presence.h` are protocol facts; the
+encoding helpers (`pb_varint`, `pb_u`, `pb_s`, `pb_fixed64`) are this project's
+own (`app/steam_wire.h`). If a future slice copies actual proto text or
+generated code, it must be pinned in `deps.pin`, fetched by a `src/tools`
+script, and listed in `NOTICE`.
+
+## What is verified, and what is not
+
+Verified off-device:
+
+- The presence wire shapes round-trip against hand-built CM bodies, and the
+  coalescing policy behaves as described
+  (`app/tests/steam_presence_test.cpp`, run by CI).
+- The launcher sources compile with the UWP toolchain.
+- gbe_fork exports 1,032 `SteamAPI_ISteam*` names. Of the 894 Megabonk
+  references, 890 are exported; the 4 that are not are the
+  `ISteamNetworkingConnectionSignaling` and `ISteamNetworkingSignalingRecvContext`
+  callbacks (`Release`, `SendSignal`, `OnConnectRequest`,
+  `SendRejectionSignal`), which only matter to a game that supplies its own
+  custom signaling — Megabonk also references `ConnectP2PCustomSignaling`, so
+  this is a real gap if that path is ever taken. Mistria's 25 references are
+  all exported.
+- gbe_fork has no SDR datagram protos compiled in, so its
+  `ISteamNetworkingSockets` cannot reach Steam's relay network.
+
+Not verified:
+
+- That Steam accepts the rich-presence upload with `routing_appid`, or shows
+  the game to friends. That needs a console run and a friend's client; the
+  console log line `STEAM presence: Steam reports persona_state=… game=…` is
+  the check.
+- Anything about lobbies, P2P or auth tickets end to end. No CM lobby message
+  has been sent from this codebase.
