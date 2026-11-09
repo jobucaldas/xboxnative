@@ -173,5 +173,21 @@ int main() {
     assert(parse_remember("x64\\Hades.exe\nsecond") == "x64\\Hades.exe");
     assert(parse_remember(std::string("a\tb")).empty() && parse_remember(std::string("a\0b", 3)).empty());
 
+    // The rows own their entries: they stay valid after the appinfo buffer
+    // (and the vector `entries()` parsed it into) is gone, as on the console
+    // where the picker outlives the parse.
+    std::vector<Choice> detached;
+    {
+        Vdf live;
+        assert(vdf_parse(R"("config" { "launch" {
+            "0" { "executable" "x64\\Hades.exe" "arguments" "-dx11" "workingdir" "x64" "type" "default" "description" "DirectX" "config" { "osarch" "64" } }
+            "1" { "executable" "x86\\Hades.exe" "type" "option1" "config" { "osarch" "32" } }
+        } })",live));
+        detached=choices(entries(live));
+    }
+    assert(detached.size()==2);
+    assert(detached[0].entry.executable=="x64\\Hades.exe" && detached[0].entry.arguments=="-dx11" && detached[0].entry.workingdir=="x64");
+    assert(preselect(detached,"x64\\Hades.exe")==0 && detached[1].entry.executable=="x86\\Hades.exe");
+
     std::puts("LAUNCH-PICKER-OK: several options ask; 32-bit rows explain instead of starting; last choice remembered");
 }

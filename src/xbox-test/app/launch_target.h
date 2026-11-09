@@ -96,9 +96,10 @@ inline const Entry* choose(const std::vector<Entry>& all, const PeArch& pe = PeA
 // ---- launch-option picker (a game with several run options must not pick silently)
 // One row of the selection screen. Play executes 64-bit guests only, so a
 // 32-bit row is listed (the player should see the game's own options) but
-// cannot be started until 32-bit support lands.
+// cannot be started until 32-bit support lands. The entry is owned: the
+// picker outlives the appinfo buffer the options were parsed from.
 struct Choice {
-    const Entry* entry = nullptr;
+    Entry entry;
     int arch = archUnknown;
     std::string label;        // the option's description, else its executable
     bool selectable = false;
@@ -107,7 +108,7 @@ inline std::vector<Choice> choices(const std::vector<Entry>& all, const PeArch& 
     std::vector<Choice> out;
     for (const Entry* e : ranked(all, pe)) {
         int arch = arch_of(*e, pe);
-        out.push_back({e, arch, e->description.empty() ? e->executable : e->description, arch != arch32});
+        out.push_back({*e, arch, e->description.empty() ? e->executable : e->description, arch != arch32});
     }
     return out;
 }
@@ -118,7 +119,7 @@ inline int preselect(const std::vector<Choice>& list, const std::string& remembe
     for (size_t i = 0; i < list.size(); i++) {
         if (!list[i].selectable) continue;
         if (firstSelectable < 0) firstSelectable = (int)i;
-        if (!remembered.empty() && list[i].entry && list[i].entry->executable == remembered) return (int)i;
+        if (!remembered.empty() && list[i].entry.executable == remembered) return (int)i;
     }
     return firstSelectable >= 0 ? firstSelectable : 0;
 }

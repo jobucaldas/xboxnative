@@ -59,7 +59,7 @@ inline Press press_a(State& s) {
 // The executable to remember once a row starts ("" when nothing is open).
 inline std::string started(const State& s) {
     const launch_target::Choice* c = current(s);
-    return c && c->entry ? c->entry->executable : std::string();
+    return c ? c->entry.executable : std::string();
 }
 
 // ---- remembered choice: LocalState\launch_choice_<appid>.txt next to the
