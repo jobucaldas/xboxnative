@@ -100,14 +100,14 @@ Play: maps both from the runtime layout like Wine's msvcp140 ──> console d3d
 4. **Done: package + map.** `app/build.sh` copies both DLLs, the licences, the patches and `SOURCE.txt` into
    `layout/runtime/`; `loadExW` finds them there (after any copy the game ships) through `redistributable()`.
    Mesa's imports resolve through the existing routes; `d3d12.dll!D3D12CreateDevice` is routed with the real
-   adapter (as `D3D11CreateDevice` is) and logged as `guest D3D12CreateDevice level=… returned hr=…`.
-   **[verified off-device]**
+   adapter (as `D3D11CreateDevice` is) and logged as `guest D3D12CreateDevice request adapter=… minimum=… iid=…`
+   then `… returned hr=… device=…`. **[verified off-device]**
 5. **Done: gdi32 forwarders.** `ChoosePixelFormat`, `SetPixelFormat`, `GetPixelFormat`, `DescribePixelFormat` and
    `SwapBuffers` forward to the mapped `opengl32.dll`'s `wgl*` when it is mapped, and fail cleanly otherwise
    (`GetPixelFormat` sets `ERROR_INVALID_PIXEL_FORMAT`). **[verified off-device]**
 6. **DXGI factory level 4.** Mesa asks `CreateDXGIFactory2` for `IDXGIFactory4` and calls `EnumAdapterByLuid`;
-   Play's wrapper now answers `IDXGIFactory3`/`IDXGIFactory4` when the real factory has them, so the CoreWindow
-   adapter reaches Mesa. **[verified off-device]**
+   Play's wrapper answers `IDXGIFactory3`..`IDXGIFactory7` when the real factory has the level (the D3D12 routes),
+   so the CoreWindow adapter reaches Mesa. **[verified off-device]**
 7. **D3D12 on the console from Play**: Mesa calls `D3D12CreateDevice` itself; Play routes it with the real adapter.
    Whether the console's D3D12 accepts Mesa's device creation has to be tested on the device. **[unverified]**
    What the driver needs from the backend at runtime, read in the pinned source and confirmed off-device: a D3D12

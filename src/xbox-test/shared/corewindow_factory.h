@@ -120,9 +120,14 @@ inline IDXGIAdapter* real_adapter(IDXGIAdapter* a) {
 inline UINT outputWidth=1920, outputHeight=1080;
 using PresentSurface = HRESULT (*)(IDXGIFactory2*, IUnknown*, IUnknown*,
     const DXGI_SWAP_CHAIN_DESC1*, IDXGIOutput*, IDXGISwapChain1**);
-// IDXGIFactory3/4 are answered when the real factory supports them (Mesa's d3d12 driver asks CreateDXGIFactory2 for
-// an IDXGIFactory4 and enumerates adapters by LUID); every adapter still comes back wrapped like EnumAdapters1's.
-struct Factory final : IDXGIFactory4 {
+// IDXGIFactory2..7. A D3D12 guest asks CreateDXGIFactory2 for IDXGIFactory4
+// (EnumAdapterByLuid, EnumWarpAdapter) and QIs 5/6 for GPU-preference and
+// feature answers; answering only up to IDXGIFactory2 made the factory call
+// itself fail. Each higher level is answered only when the real factory has it,
+// and the adapters it returns are wrapped like EnumAdapters1's, so no path
+// leads back to an adapter without the virtual output or to a factory that
+// does not know guest windows.
+struct Factory final : IDXGIFactory7 {
     IDXGIFactory2* real;
     ULONG refs = 1;
     IUnknown* (*corewindow)(HWND);
@@ -135,20 +140,24 @@ struct Factory final : IDXGIFactory4 {
     template<class T> T* level() const {   // the real factory at a higher interface level, or null
         T* p=nullptr;if(FAILED(real->QueryInterface(__uuidof(T),(void**)&p)))return nullptr;p->Release();return p;
     }
-    HRESULT wrapped(IDXGIAdapter1* adapter,REFIID id,void** out) {
-        // Adapter takes ownership of the reference (its destructor releases it), as in EnumAdapters1.
-        auto wrapper=new Adapter(adapter,static_cast<IDXGIFactory2*>(this),outputWidth,outputHeight);
-        HRESULT hr=wrapper->QueryInterface(id,out);wrapper->Release();return hr;
+    // The same, with the reference kept: for the entries that call through it.
+    template<class T> T* hold() const {
+        T* p=nullptr;if(FAILED(real->QueryInterface(__uuidof(T),(void**)&p)))return nullptr;return p;
+    }
+    IUnknown* wrap(IDXGIAdapter1* adapter) const {
+        return new Adapter(adapter, const_cast<Factory*>(this), outputWidth, outputHeight);
     }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** out) override {
         if (!out) return E_POINTER;
         *out = nullptr;
         if (id == __uuidof(IUnknown) || id == __uuidof(IDXGIObject) || id == __uuidof(IDXGIFactory) ||
-            id == __uuidof(IDXGIFactory1) || id == __uuidof(IDXGIFactory2)) {
-            *out = static_cast<IDXGIFactory2*>(this); AddRef(); return S_OK;
-        }
-        if ((id == __uuidof(IDXGIFactory3) && level<IDXGIFactory3>()) || (id == __uuidof(IDXGIFactory4) && level<IDXGIFactory4>())) {
-            *out = static_cast<IDXGIFactory4*>(this); AddRef(); return S_OK;
+            id == __uuidof(IDXGIFactory1) || id == __uuidof(IDXGIFactory2) ||
+            (id == __uuidof(IDXGIFactory3) && level<IDXGIFactory3>()) ||
+            (id == __uuidof(IDXGIFactory4) && level<IDXGIFactory4>()) ||
+            (id == __uuidof(IDXGIFactory5) && level<IDXGIFactory5>()) ||
+            (id == __uuidof(IDXGIFactory6) && level<IDXGIFactory6>()) ||
+            (id == __uuidof(IDXGIFactory7) && level<IDXGIFactory7>())) {
+            *out = static_cast<IDXGIFactory7*>(this); AddRef(); return S_OK;
         }
         return E_NOINTERFACE;
     }
@@ -205,18 +214,48 @@ struct Factory final : IDXGIFactory4 {
     HRESULT STDMETHODCALLTYPE RegisterOcclusionStatusEvent(HANDLE a,DWORD* b) override { return real->RegisterOcclusionStatusEvent(a,b); }
     void STDMETHODCALLTYPE UnregisterOcclusionStatus(DWORD a) override { real->UnregisterOcclusionStatus(a); }
     HRESULT STDMETHODCALLTYPE CreateSwapChainForComposition(IUnknown* a,const DXGI_SWAP_CHAIN_DESC1* b,IDXGIOutput* c,IDXGISwapChain1** d) override { return real->CreateSwapChainForComposition(a,b,c,d); }
-    // Only reachable when QueryInterface found the real factory at that level.
-    UINT STDMETHODCALLTYPE GetCreationFlags() override { auto r=level<IDXGIFactory3>();return r?r->GetCreationFlags():0; }
+    // IDXGIFactory3..7: only reachable when level<T>() succeeded in
+    // QueryInterface. Adapter-returning entries wrap what the real factory
+    // returns, so the virtual output and guest-window routing still apply.
+    UINT STDMETHODCALLTYPE GetCreationFlags() override { auto r=hold<IDXGIFactory3>();if(!r)return 0;UINT f=r->GetCreationFlags();r->Release();return f; }
     HRESULT STDMETHODCALLTYPE EnumAdapterByLuid(LUID luid,REFIID id,void** out) override {
-        if(!out)return E_POINTER;*out=nullptr;auto r=level<IDXGIFactory4>();if(!r)return E_NOTIMPL;
+        auto r=hold<IDXGIFactory4>();if(!r)return E_NOINTERFACE;
+        if(!out){r->Release();return E_POINTER;}*out=nullptr;
         IDXGIAdapter1* adapter=nullptr;HRESULT hr=r->EnumAdapterByLuid(luid,__uuidof(IDXGIAdapter1),(void**)&adapter);
-        // wrapped() takes the adapter's reference (Adapter releases it when it dies): do not release it here too.
-        return FAILED(hr)?hr:wrapped(adapter,id,out);
+        r->Release();
+        if(FAILED(hr))return hr;
+        IUnknown* wrapper=wrap(adapter);   // takes the adapter reference
+        hr=wrapper->QueryInterface(id,out);wrapper->Release();return hr;
     }
     HRESULT STDMETHODCALLTYPE EnumWarpAdapter(REFIID id,void** out) override {
-        if(!out)return E_POINTER;*out=nullptr;auto r=level<IDXGIFactory4>();if(!r)return E_NOTIMPL;
+        auto r=hold<IDXGIFactory4>();if(!r)return E_NOINTERFACE;
+        if(!out){r->Release();return E_POINTER;}*out=nullptr;
         IDXGIAdapter1* adapter=nullptr;HRESULT hr=r->EnumWarpAdapter(__uuidof(IDXGIAdapter1),(void**)&adapter);
-        return FAILED(hr)?hr:wrapped(adapter,id,out);
+        r->Release();
+        if(FAILED(hr))return hr;
+        IUnknown* wrapper=wrap(adapter);   // takes the adapter reference
+        hr=wrapper->QueryInterface(id,out);wrapper->Release();return hr;
+    }
+    HRESULT STDMETHODCALLTYPE CheckFeatureSupport(DXGI_FEATURE feature,void* data,UINT size) override {
+        auto r=hold<IDXGIFactory5>();if(!r)return E_NOINTERFACE;
+        HRESULT hr=r->CheckFeatureSupport(feature,data,size);r->Release();return hr;
+    }
+    HRESULT STDMETHODCALLTYPE EnumAdapterByGpuPreference(UINT index,DXGI_GPU_PREFERENCE preference,REFIID id,void** out) override {
+        auto r=hold<IDXGIFactory6>();if(!r)return E_NOINTERFACE;
+        if(!out){r->Release();return E_POINTER;}*out=nullptr;
+        IDXGIAdapter1* adapter=nullptr;HRESULT hr=r->EnumAdapterByGpuPreference(index,preference,__uuidof(IDXGIAdapter1),(void**)&adapter);
+        r->Release();
+        if(FAILED(hr))return hr;
+        IUnknown* wrapper=wrap(adapter);   // takes the adapter reference
+        hr=wrapper->QueryInterface(id,out);wrapper->Release();return hr;
+    }
+    HRESULT STDMETHODCALLTYPE RegisterAdaptersChangedEvent(HANDLE event,DWORD* cookie) override {
+        auto r=hold<IDXGIFactory7>();if(!r)return E_NOINTERFACE;
+        HRESULT hr=r->RegisterAdaptersChangedEvent(event,cookie);r->Release();return hr;
+    }
+    HRESULT STDMETHODCALLTYPE UnregisterAdaptersChangedEvent(DWORD cookie) override {
+        auto r=hold<IDXGIFactory7>();if(!r)return E_NOINTERFACE;
+        HRESULT hr=r->UnregisterAdaptersChangedEvent(cookie);r->Release();return hr;
     }
 };
 }

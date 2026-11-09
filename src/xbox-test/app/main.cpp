@@ -21,6 +21,7 @@
 #include <set>
 #include <memory>
 #include <condition_variable>
+#include <functional>
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -357,6 +358,7 @@ static void save_token2(const std::string& refresh, const std::string& access) {
 static void delete_token() { DeleteFileW(token_path().c_str()); logf("session token deleted"); }
 static bool file_exists(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
 #include "steamdl.h"
+#include "storage_report.h"
 
 // ---------------------------------------------------------------- library model + covers
 struct Game { uint32_t appid = 0; std::string name; uint32_t playtime = 0; uint64_t lastPlayed = 0; std::atomic<int> cover{0}; int iw = 0, ih = 0; std::vector<uint32_t> pix; };
@@ -532,6 +534,17 @@ static void dl_thread() {
     init_apartment(apartment_type::multi_threaded);
     if (begin_download()) {   // downloads cut off by a crash or power loss: remove their files (installs.h)
         for (auto& w : installs::sweep_partials(g_dir, &g_quit)) logf("dl: unfinished download of appid %u (%s) from an earlier run: %s", w.appid, game_library::join_root("LocalState", w.root, w.dir).c_str(), installs::discard_name(w.result));
+        // launcher-owned leftovers (old logs, caches): small, but they are ours to remove
+        std::set<uint32_t> inst; for (auto& i : installs::scan(g_dir, false)) inst.insert(i.first);
+        auto left = installs::launcher_leftovers(g_dir, inst);
+        uint64_t before = 0; for (auto& l : left) before += l.bytes;
+        uint64_t freed = installs::clean_leftovers(g_dir, inst);
+        logf("storage: launcher leftovers: %zu files, %s; removed %s", left.size(), storage_roots::size_text(before).c_str(), storage_roots::size_text(freed).c_str());
+        // every free-space figure for LocalState, once per start, for the console log and LocalState\storage_report.txt
+        // (the other drives are probed, and reported, when the detail page opens)
+        std::vector<storage_roots::Choice> roots = {storage_report::internal_root(g_dir)};
+        std::string report = storage_report::write(g_dir, roots, inst);
+        for (auto& line : storage_report::log_lines(report)) logf("storage: %s", line.c_str());
         end_download();
     }
     // LocalState\autodownload.txt: one appid per line; processed once the account state is known (user session, else anonymous)
@@ -562,6 +575,7 @@ static void dl_thread() {
 }
 
 #include "launch.h"
+#include "launch_picker.h"
 #include "launch_report.h"
 #include "guest_overlay.h"
 #include "../uwph/user32/corewindow_feed.h"
@@ -738,13 +752,54 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     InstallInfo m_dInst; double m_dInstT = -10;
     std::vector<storage_roots::Choice> m_roots; size_t m_rootSel = 0;   // install locations of the detail page (X cycles them before Install)
     struct AutoLaunch { uint32_t app = 0; int seq = 0; } m_auto;
+    // Launch-option picker (launch_picker.h): a game with several run options
+    // asks before Play instead of picking one silently.
+    launch_picker::State m_pick;
+    std::string remembered_option(uint32_t id) {   // LocalState\launch_choice_<appid>.txt beside the install marker
+        std::string text; return read_file_s(g_dir + L"\\" + widen(launch_picker::remember_name(id)), text) ? launch_picker::parse_remember(text) : std::string();
+    }
+    void remember_option(uint32_t id, const std::string& executable) {
+        if (executable.empty()) return;
+        write_text(g_dir + L"\\" + widen(launch_picker::remember_name(id)), launch_picker::format_remember(executable));
+    }
+    // The options Play may offer for a game, in preference order. appinfo is
+    // the downloader's cache; without it there is nothing to ask.
+    std::vector<launch_target::Choice> launch_options(uint32_t id) {
+        Vdf info; const Vdf* app = nullptr;
+        if (!load_appinfo(id, info, app)) return {};
+        return launch_target::choices(launch_target::entries(*app));
+    }
+    // A: Play. One runnable option (or none: the largest .exe fallback) starts
+    // directly; several open the picker.
+    size_t m_optApp = 0, m_optCount = 0;   // cached: how many run options Play offers (draw_detail hint)
+    size_t option_count() {
+        if (m_optApp != m_dApp) { m_optApp = m_dApp; m_optCount = launch_options(m_dApp).size(); }
+        return m_optCount;
+    }
+    void detail_play(const char* via) {
+        m_dInst = read_install(m_dApp);
+        std::vector<launch_target::Choice> rows = launch_options(m_dApp);
+        if (!launch_picker::needed(rows)) { logf("detail: Play pressed appid=%u (%s)", m_dApp, via); start_launch(m_dApp, m_dName, m_dInst.dir, via); return; }
+        launch_picker::open(m_pick, std::move(rows), remembered_option(m_dApp));
+        logf("detail: Play opens the launch-option picker appid=%u options=%zu selected=%d (%s)", m_dApp, m_pick.rows.size(), m_pick.sel, via);
+    }
+    void detail_picker_a(const char* via) {   // A: start the highlighted option
+        if (launch_picker::press_a(m_pick) != launch_picker::Press::start) { logf("detail: launch option refused appid=%u: %s (%s)", m_dApp, m_pick.note.c_str(), via); return; }
+        std::string exe = launch_picker::started(m_pick);
+        launch_picker::close(m_pick);
+        remember_option(m_dApp, exe);
+        logf("detail: Play pressed appid=%u option=\"%s\" (%s)", m_dApp, exe.c_str(), via);
+        start_launch(m_dApp, m_dName, m_dInst.dir, via, &exe);
+    }
     std::string game_name(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return g->name; return id == 480 ? "Spacewar" : id == 3405340 ? "Megabonk" : id == 1007 ? "Steamworks SDK Redist" : ""; }
     bool owned(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return true; return false; }
     void open_detail(uint32_t id, const std::string& nm, const char* via) {
         m_dApp = id; m_dName = nm.empty() ? "App " + std::to_string(id) : nm; m_dNote.clear(); m_dScroll = 0; m_dInstT = -10; m_confirmDelete = false; m_cancelArmed = false;
+        launch_picker::close(m_pick);   // a picker left open belongs to the previous game
         // After a restart that unloaded a failed game, its page says why (this session's launches show in the launch panel).
         if (g_launch.phase == 0) { std::string why = launch_report::failure(read_bytes(g_dir + L"\\launch_result.json"), id); if (!why.empty()) m_dNote = "Last launch failed: " + why; }
         m_roots.clear(); m_rootSel = 0; refresh_roots("detail open");
+        m_optApp = 0;   // a fresh page: the run-option count is read again (a download may have cached appinfo)
         auto si = std::make_shared<StoreInfo>(); si->appid = id; m_dSi = si; std::thread(store_worker, si).detach();
         { InstallInfo ii = read_install(id); if (ii.installed && !g_demo) cloud_async(id, ii.folder, false); }   // status line: what the cloud holds
         m_confirmLogout = false; g_screen = S_DETAIL; logf("detail: open appid=%u name='%s' via=%s", id, m_dName.c_str(), via);
@@ -756,14 +811,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     bool deleting_mine() { return g_del.appid == m_dApp && g_del.state == 1; }
     void refresh_roots(const char* via) {   // internal + every usable extra drive; keeps the pick when its drive is still there
         std::string keep = m_rootSel < m_roots.size() ? m_roots[m_rootSel].root : chosen_install_root(m_dApp);
-        std::vector<std::string> note; m_roots = installs::list_roots(g_dir, &note); m_rootSel = storage_roots::index_of(m_roots, keep);
-        std::string l; for (auto& c : m_roots) l += (l.empty() ? "" : "; ") + storage_roots::label(c);
+        std::vector<std::string> note; m_roots = installs::list_roots(g_dir, &note);
+        std::string report = storage_report::write(g_dir, m_roots, installed_appids());   // WinRT figures + LocalState\storage_report.txt
+        m_rootSel = storage_roots::index_of(m_roots, keep);
+        std::string l; for (auto& c : m_roots) l += (l.empty() ? "" : "; ") + storage_roots::label_capacity(c);
         logf("storage: %s: %s", via, l.c_str()); for (auto& n : note) logf("storage: %s", n.c_str());
+        for (auto& line : storage_report::log_lines(report)) logf("storage: %s", line.c_str());
     }
     void detail_storage(const char* via) {      // X (not installed): next install location
         if (m_dInst.installed || g_demo || dl_is_mine() || is_queued(m_dApp)) return;
         refresh_roots("refresh"); m_rootSel = storage_roots::cycle(m_rootSel, m_roots.size(), 1); m_dNote.clear();
-        logf("detail: install location appid=%u -> %s (%s)", m_dApp, storage_roots::label(m_roots[m_rootSel]).c_str(), via);
+        logf("detail: install location appid=%u -> %s (%s)", m_dApp, storage_roots::label_capacity(m_roots[m_rootSel]).c_str(), via);
     }
     void detail_delete(const char* via) {     // X: ask to delete an installed game
         m_dInst = read_install(m_dApp); m_dInstT = now_s();
@@ -806,7 +864,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             m_cancelArmed = true; m_cancelArmedT = now_s(); m_dNote.clear();
             logf("detail: A asks to cancel the download of appid=%u (press A again, %s)", m_dApp, via); return;
         case detail_input::Action::play:
-            m_cancelArmed = false; m_dNote.clear(); logf("detail: Play pressed appid=%u (%s)", m_dApp, via); start_launch(m_dApp, m_dName, m_dInst.dir, via); return;
+            m_cancelArmed = false; m_dNote.clear(); detail_play(via); return;
         case detail_input::Action::install:
         case detail_input::Action::back:
             break;
@@ -816,14 +874,19 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (deleting_now()) { m_dNote = "Wait for the delete to finish."; return; }
         refresh_roots("install");
         const storage_roots::Choice& where = m_roots[m_rootSel];
-        if (where.freeBytes < (64ull << 20)) { m_dNote = "Not enough free space on " + where.name + ": " + storage_roots::size_text(where.freeBytes) + " free."; logf("detail: Install refused appid=%u, %s", m_dApp, m_dNote.c_str()); return; }
+        if (where.freeBytes < (64ull << 20)) {
+            m_dNote = storage_roots::refusal_text(where, m_roots, m_rootSel);
+            std::string one = m_dNote; for (auto& ch : one) if (ch == '\n') ch = ' ';
+            logf("detail: Install refused appid=%u, %s", m_dApp, one.c_str()); return;
+        }
         set_install_root(m_dApp, where.root);
         m_auto.app = m_dApp; m_auto.seq = g_dlSeq; m_dNote.clear();
-        logf("detail: Install pressed appid=%u (%s) to %s - will auto-launch when finished", m_dApp, via, storage_roots::label(where).c_str()); enqueue_download(m_dApp);
+        logf("detail: Install pressed appid=%u (%s) to %s - will auto-launch when finished", m_dApp, via, storage_roots::label_capacity(where).c_str()); enqueue_download(m_dApp);
     }
     void detail_back(const char* via) {         // B: back to the library; a download keeps running in the background
         m_cancelArmed = false;
         m_auto.app = 0;   // the auto-launch after install belongs to the detail page
+        launch_picker::close(m_pick);
         close_detail(via);
     }
     void detail_tick(double t) {   // runs every frame on every screen: auto-launch after install, launch watchdog
@@ -832,7 +895,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             m_auto.seq = g_dlSeq;
             if (g_dlLastApp == m_auto.app) {
                 uint32_t app = m_auto.app; m_auto.app = 0; InstallInfo ii = read_install(app);
-                if (g_dlLastOk && ii.installed && g_screen == S_DETAIL && m_dApp == app) { logf("detail: download finished -> auto-launch appid=%u", app); m_dInst = ii; m_dInstT = t; start_launch(app, m_dName, ii.dir, "auto after install"); }
+                if (g_dlLastOk && ii.installed && g_screen == S_DETAIL && m_dApp == app) { logf("detail: download finished -> auto-launch appid=%u", app); m_dInst = ii; m_dInstT = t; detail_play("auto after install"); }
                 else logf("detail: auto-launch not started (ok=%d installed=%d onDetail=%d)", g_dlLastOk ? 1 : 0, ii.installed ? 1 : 0, (g_screen == S_DETAIL && m_dApp == app) ? 1 : 0);
             }
         }
@@ -1016,7 +1079,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         } else if (mine && (dl == 3 || dl == 4) && !m_dInst.installed) {
             std::string ms; { std::lock_guard<std::mutex> l(g_dl.m); ms = g_dl.msg; } std::string l1, l2; wrap2((dl == 4 ? "Cancelled: " : "Failed: ") + ms, 38, l1, l2);
             text(60, 548, l1, 2, RED); text(60, 572, l2, 2, RED);
-        } else if (!m_dNote.empty()) { std::string l1, l2; wrap2(m_dNote, 38, l1, l2); text(60, 548, l1, 2, RED); text(60, 572, l2, 2, RED); }
+        } else if (!m_dNote.empty()) { std::string l1, l2; storage_roots::note_lines(m_dNote, 42, l1, l2); text(60, 548, l1, 2, RED); text(60, 572, l2, 2, RED); }
         else if (deleting) { char b[80]; snprintf(b, sizeof b, "%llu files removed", (unsigned long long)g_del.progress.removed.load()); text(60, 548, b, 2, DIM); }
         else if (delDone && !m_dInst.installed) {
             if (g_del.state == 2) { auto k = g_del.kind.load(); text(60, 548, k == game_library::DeleteKind::folder ? "Deleted. Saves were kept." : k == game_library::DeleteKind::shared ? "Removed. Shared files kept." : "Removed; folder unknown, files kept.", 2, GRN); }
@@ -1033,7 +1096,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             const char* dl2 = "X: Delete game"; int w = twidth(dl2, 3) + 30; fill(60, 590, w, 46, C3(120, 40, 40)); text(75, 601, dl2, 3, TXT);
         }
         if (!m_dInst.installed && !busy && !g_demo && m_rootSel < m_roots.size()) {   // where a fresh install goes (X cycles)
-            std::string sl = m_roots.size() > 1 ? "X: Install to " + storage_roots::label(m_roots[m_rootSel]) : storage_roots::label(m_roots[m_rootSel]) + ", no USB found";
+            std::string sl = m_roots.size() > 1 ? "X: Install to " + storage_roots::label_capacity(m_roots[m_rootSel]) : storage_roots::label_capacity(m_roots[m_rootSel]) + ", no USB found";
             int w = twidth(sl, 2) + 28; fill(60, 590, w, 46, C3(40, 90, 150)); text(74, 604, sl, 2, TXT);
         }
         if (m_dInst.installed && !busy && !g_demo) {   // secondary action: sync cloud saves (Y)
@@ -1048,6 +1111,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         auto labelLayout=launch_button::label_layout(std::char_traits<char>::length(label));
         text(60 + labelLayout.x, 650 + labelLayout.y, label, labelLayout.scale, TXT);
         text(60 + 308 - twidth(detail_input::hint(di), 2) / 2, 734, detail_input::hint(di), 2, C3(210, 220, 240));
+        // Play offers a choice: say so before it is pressed (screenshot-able).
+        if (m_dInst.installed && !busy && !g_demo && option_count() > 1) {
+            char b[96]; snprintf(b, sizeof b, "Play asks which of %zu run options to start", option_count());
+            text(60, 786, b, 2, C3(210, 220, 240));
+        }
         // right column: meta + description
         std::vector<std::string> meta;
         auto addm = [&](const std::string& k, const std::string& v) { if (v.empty()) return; for (auto& l : wrap_lines(k + v, 46)) meta.push_back(l); };
@@ -1075,6 +1143,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 text(80, 822, g_launch.phase==3?"Guest running (playability unverified)":ok?"Guest completed (playability unverified)":retained?"Launch failed - restarting launcher to unload it":"Launch failed - nothing was left running; press A or pick another game", 3, g_launch.phase==3?YEL:ok?GRN:RED); auto ls = wrap_lines(r, 73); for (size_t i = 0; i < ls.size() && i < 4; i++) text(80, 858 + (int)i * 34, ls[i], 3, TXT); }
         }
         text(60, 1050, "A: Install / Play / cancel download (twice)   X: Delete   Y: Cloud sync   B: back   Menu: back   D-pad up/down: scroll", 2, C3(120, 130, 145));
+        if (m_pick.open) draw_picker();
         if (m_confirmDelete) {
             std::string q = "Delete " + clip(m_dName, 30) + "?"; char sz[96];
             if (m_delKind == game_library::DeleteKind::shared) snprintf(sz, sizeof sz, "Its files are shared with another installed game and stay.");
@@ -1086,6 +1155,32 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             text(960 - twidth(sz, 2) / 2, 500, sz, 2, DIM);
             text(960 - twidth("A: Yes, delete        B: Cancel", 3) / 2, 600, "A: Yes, delete        B: Cancel", 3, TXT);
         }
+    }
+    // The launch-option picker (launch_picker.h): the game's own run options,
+    // 64-bit first, with the 32-bit ones marked and refused until 32-bit lands.
+    void draw_picker() {
+        const uint32_t TXT = C3(255, 255, 255), DIM = C3(170, 180, 195), YEL = C3(255, 210, 63), GRN = C3(120, 255, 140), RED = C3(255, 110, 110);
+        const int x = 360, w = 1200, rowH = 74;
+        int rows = (int)m_pick.rows.size();
+        int h = 172 + rows * rowH + (m_pick.note.empty() ? 0 : 44);
+        int y = std::max(40, (1080 - h) / 2);
+        fill(x, y, w, h, C3(10, 12, 16)); frame(x, y, w, h, 6, YEL);
+        text(x + 40, y + 30, "How should this game start?", 4, TXT);
+        text(x + 40, y + 84, clip(m_dName, 44) + " offers more than one run option. D-pad up/down to choose, A to run, B to cancel.", 2, DIM);
+        int ry = y + 132;
+        for (int i = 0; i < rows; i++) {
+            const launch_target::Choice& c = m_pick.rows[i];
+            bool sel = i == m_pick.sel;
+            fill(x + 30, ry, w - 60, rowH - 10, sel ? C3(45, 90, 200) : C3(27, 35, 48));
+            if (sel) frame(x + 30, ry, w - 60, rowH - 10, 3, YEL);
+            text(x + 50, ry + 14, clip(c.label, 60), 3, c.selectable ? TXT : DIM);
+            const char* note = launch_target::arch_note(c.arch);
+            if (note) text(x + 50, ry + 42, note, 2, RED);
+            else if (c.arch == launch_target::arch64) text(x + 50, ry + 42, "64-bit", 2, GRN);
+            ry += rowH;
+        }
+        if (!m_pick.note.empty()) text(x + 40, ry + 8, clip(m_pick.note, 90), 2, RED);
+        text(x + 40, y + h - 40, "A: run this option        B: cancel", 3, TXT);
     }
     // One-shot synthetic command file LocalState\cmd.txt (consumed on read). Lines: open <appid> | press (=A) | back (=B) | view | up | down | left | right | lb | rb | x | y | sleep <s>.
     // Never periodic, never present unless a tester/script writes it; every executed line is logged as SYNTHETIC.
@@ -1414,6 +1509,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         int s = g_screen;
         if (s == S_LOGIN) { if (has(edge, GamepadButtons::A) || has(edge, GamepadButtons::X)) { g_refreshReq = true; set_status("Refreshing QR..."); logf("Refresh button pressed"); } }
         else if (s == S_DETAIL) {
+            if (m_pick.open) {   // the launch-option picker owns the pad while it is up
+                if (has(edge, GamepadButtons::DPadUp)) { launch_picker::move(m_pick, -1); logf("detail: launch option %d/%zu (%s)", m_pick.sel + 1, m_pick.rows.size(), source); }
+                else if (has(edge, GamepadButtons::DPadDown)) { launch_picker::move(m_pick, 1); logf("detail: launch option %d/%zu (%s)", m_pick.sel + 1, m_pick.rows.size(), source); }
+                else if (has(edge, GamepadButtons::A)) detail_picker_a(source);
+                else if (has(edge, GamepadButtons::B)) { launch_picker::close(m_pick); logf("detail: launch-option picker cancelled (%s)", source); }
+                return;
+            }
             if (m_confirmDelete) {
                 if (has(edge, GamepadButtons::A)) detail_delete_confirm(source);
                 else if (has(edge, GamepadButtons::B)) { m_confirmDelete = false; logf("detail: delete cancelled (%s)", source); }

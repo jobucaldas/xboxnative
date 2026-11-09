@@ -2,7 +2,12 @@
 // Off-device contracts of the D3D11 failure diagnostics (host/d3d11_diag.h) on a
 // native Wine d3d11 device: failed calls log once per distinct call, results
 // pass through unchanged, several devices and d3d11.1 interfaces are safe, the
-// log is bounded. No rendering claim.
+// log is bounded, and the draw summary counts what a context submits. No
+// rendering claim.
+// Two processes: `d3d11-diag.exe` covers the failed-call log, `d3d11-diag.exe
+// draw` the draw summary. Wine 11.0 faults at process teardown when one process
+// both exercises the failure hooks and draws on a real device (the unpatched
+// header does the same); each half alone exits cleanly.
 #include <d3d11_1.h>
 #include <cstdio>
 #include <string>
@@ -22,10 +27,95 @@ static ID3D11Device* make(ID3D11DeviceContext** context=nullptr) {
     }
     return nullptr;
 }
-int main() {
+// The draw summary on the real immediate context: the counters follow the
+// topology and shaders set on that context, and a render target set is
+// described once by format and size. Results are untouched (draws with no
+// shaders bound are legal; they just produce nothing).
+static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
+    d3d11_diag::configure(sinkLine);
+    d3d11_diag::adopt(device);
+    CHECK(count("diagnostics on")==1);
+    D3D11_TEXTURE2D_DESC target{};target.Width=64;target.Height=64;target.MipLevels=1;target.ArraySize=1;
+    target.Format=DXGI_FORMAT_R8G8B8A8_UNORM;target.SampleDesc.Count=1;target.Usage=D3D11_USAGE_DEFAULT;target.BindFlags=D3D11_BIND_RENDER_TARGET;
+    ID3D11Texture2D* targetTexture=nullptr;ID3D11RenderTargetView* rtv=nullptr;
+    CHECK(SUCCEEDED(device->CreateTexture2D(&target,nullptr,&targetTexture)));
+    CHECK(SUCCEEDED(device->CreateRenderTargetView(targetTexture,nullptr,&rtv)));
+    context->OMSetRenderTargets(1,&rtv,nullptr);
+    context->OMSetRenderTargets(1,&rtv,nullptr);   // same view: described once
+    CHECK(count("draw summary: first render target fmt=28(R8G8B8A8_UNORM) 64x64")==1);
+    CHECK(d3d11_diag::mainWidth.load()==64&&d3d11_diag::mainHeight.load()==64);
+    const FLOAT black[4]={0,0,0,1};
+    context->ClearRenderTargetView(rtv,black);
+    CHECK(d3d11_diag::clears[0].load()>=1);
+    uint64_t beforeIndexed=d3d11_diag::draws[0][0][0].load(),beforeTriangle=d3d11_diag::draws[1][0][0].load();
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->Draw(3,0);
+    CHECK(d3d11_diag::draws[1][0][0].load()==beforeTriangle+1);
+    CHECK(count("draw summary: first Draw topology=4(trianglelist) hs/ds=none")==1);
+    context->DrawIndexed(3,0,0);
+    CHECK(d3d11_diag::draws[0][0][0].load()==beforeIndexed+1);
+    // A patch list with no hull shader bound is still a patch-list draw.
+    uint64_t beforePatch=d3d11_diag::draws[0][1][0].load();
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+    context->DrawIndexed(3,0,0);
+    CHECK(d3d11_diag::draws[0][1][0].load()==beforePatch+1);
+    CHECK(count("draw summary: first DrawIndexed topology=35(patchlist-3) hs/ds=none")==1);
+    // Zero counts are counted separately.
+    uint64_t beforeZero=d3d11_diag::zeroCounts[2].load();
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->DrawIndexedInstanced(0,1,0,0,0);
+    CHECK(d3d11_diag::zeroCounts[2].load()==beforeZero+1);
+    context->DrawInstanced(3,0,0,0);   // zero instances
+    CHECK(d3d11_diag::zeroCounts[3].load()>=1);
+    // A deferred context records with its own topology, and its command list is
+    // counted when finished and when executed.
+    ID3D11DeviceContext* deferred=nullptr;
+    if(SUCCEEDED(device->CreateDeferredContext(0,&deferred))&&deferred) {
+        uint64_t beforeDeferred=d3d11_diag::draws[1][0][0].load();
+        deferred->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        deferred->Draw(3,0);
+        CHECK(d3d11_diag::draws[1][0][0].load()==beforeDeferred+1);
+        CHECK(d3d11_diag::deferredContexts.load()>=1);
+        ID3D11CommandList* list=nullptr;
+        if(SUCCEEDED(deferred->FinishCommandList(FALSE,&list))&&list) {
+            CHECK(d3d11_diag::commandLists.load()>=1);
+            context->ExecuteCommandList(list,FALSE);
+            CHECK(d3d11_diag::executedLists.load()>=1);
+            list->Release();
+        }
+        deferred->Release();
+    }
+    // The swapchain size the guest asked for is what a summary compares to.
+    d3d11_diag::noteSwapChain(1920,1080,DXGI_FORMAT_R8G8B8A8_UNORM,2);
+    // Force the next window: the print path is the one the timer uses.
+    d3d11_diag::summaryNext.store(0);
+    context->Draw(3,0);
+    CHECK(count("draw summary 1/7: last topology=4(trianglelist)")==1);
+    CHECK(count("draw summary 1/7: Draw calls=")==1);
+    CHECK(count("draw summary 1/7: DrawIndexed calls=")==1);
+    CHECK(count("draw summary 1/7: DrawIndexedInstanced calls=")==1);
+    CHECK(count("draw summary 1/7: DrawInstanced calls=")==1);
+    CHECK(count("draw summary 1/7: command lists finish=")==1);
+    CHECK(count("draw summary 1/7: shader creates vs=")==1);
+    CHECK(count("draw summary 1/7: render targets sets=")==1);
+    CHECK(count("draw summary 1/7: render target fmt=28(R8G8B8A8_UNORM) 64x64")==1);
+    CHECK(count("draw summary 1/7: main render target 64x64 swapchain 1920x1080 fmt=28(R8G8B8A8_UNORM) buffers=2")==1);
+    // The summary is bounded like the rest of the log.
+    size_t summaryLines=0;
+    for(auto& l:lines)if(l.find("draw summary")!=std::string::npos)++summaryLines;
+    CHECK(summaryLines<=d3d11_diag::kMaxSummaryLines);
+    if(rtv)rtv->Release();
+    if(targetTexture)targetTexture->Release();
+    if(failures)for(auto& l:lines)printf("  %s\n",l.c_str());
+    printf("OFF-DEVICE D3D11 draw summary checks=%u failures=%u lines=%zu; no rendering claim\n",checks,failures,lines.size());
+    return failures?1:0;
+}
+int main(int argc,char** argv) {
+    bool drawMode=argc>1&&std::string(argv[1])=="draw";
     ID3D11DeviceContext* context=nullptr;
     ID3D11Device* device=make(&context);
     if(!device){printf("OFF-DEVICE no d3d11 device available\n");return 2;}
+    if(drawMode)return drawSummary(device,context);
     // A bare DXBC container with a pixel shader chunk (ps_5_0): enough for the
     // model/hash parser; the device rejects it as a shader.
     unsigned char dxbc[64]{};memcpy(dxbc,"DXBC",4);
@@ -105,6 +195,17 @@ int main() {
     CHECK(FAILED(context->Map(buffer,0,D3D11_MAP_WRITE_DISCARD,0,&mapped))&&count("Map hr=")==1&&count("res=buffer bytes=64")==1);
     CHECK(FAILED(context->Map(buffer,0,D3D11_MAP_WRITE_DISCARD,0,&mapped))&&count("Map hr=")==1);
 
+    // A second device and the d3d11.1 interface share the class: no new patch, same dedupe.
+    ID3D11Device* second=make();
+    CHECK(second!=nullptr);
+    if(second) {
+        d3d11_diag::adopt(second);
+        CHECK(d3d11_diag::classCount.load()<=classesAfterFirst+2);
+        ID3D11Texture2D* again=nullptr;bad.BindFlags=D3D11_BIND_RENDER_TARGET;
+        CHECK(FAILED(second->CreateTexture2D(&bad,nullptr,&again)));
+        CHECK(count("CreateTexture2D hr=")==2);   // already logged through the first device
+        second->Release();
+    }
 
     // Every other hook, against a stand-in whose entries all fail (Wine accepts
     // many invalid state descriptions): installed through the same patch tables.
@@ -147,21 +248,9 @@ int main() {
         CHECK(count("rt0:enable=1")==1&&count("query=")>=2);
     }
 
-    // A second device and the d3d11.1 interface share the class: no new patch, same dedupe.
-    ID3D11Device* second=make();
-    CHECK(second!=nullptr);
-    if(second) {
-        d3d11_diag::adopt(second);
-        CHECK(d3d11_diag::classCount.load()<=classesAfterFirst+2);
-        ID3D11Texture2D* again=nullptr;bad.BindFlags=D3D11_BIND_RENDER_TARGET;
-        CHECK(FAILED(second->CreateTexture2D(&bad,nullptr,&again)));
-        CHECK(count("CreateTexture2D hr=")==2);   // already logged through the first device
-        second->Release();
-    }
-
     // The log is bounded; one line says so.
     for(UINT i=0;i<400;++i){D3D11_TEXTURE2D_DESC d=bad;d.MiscFlags=0x100000u+i;ID3D11Texture2D* t=nullptr;device->CreateTexture2D(&d,nullptr,&t);}
-    CHECK(lines.size()<=d3d11_diag::kMaxFailures+d3d11_diag::kMaxProbes+4);
+    CHECK(lines.size()<=d3d11_diag::kMaxFailures+d3d11_diag::kMaxProbes+d3d11_diag::kMaxSummaryLines+4);
     CHECK(count("further failed calls suppressed")==1);
     if(failures)for(auto& l:lines)printf("  %s\n",l.c_str());
     if(texture)texture->Release();

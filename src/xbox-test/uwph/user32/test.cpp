@@ -136,6 +136,33 @@ extern "C" DWORD WINAPI u32c_entry(){
   check(!IsWindowUnicode(ah));HDC adc=GetDC(ah);check(adc&&WindowFromDC(adc)==ah);ReleaseDC(ah,adc);check(!WindowFromDC(adc));
   check(DestroyWindow(ah));check(UnregisterClassA("u32cansi",0));}
  check(SetProcessDPIAware()&&SetProcessDPIAware());
+ // DPI awareness contexts (SDL3/Unity probe these at runtime). The process has
+ // already chosen SYSTEM_AWARE above, so the thread reports it, flagged.
+ check(IsProcessDPIAware());
+ DPI_AWARENESS_CONTEXT processContext=GetThreadDpiAwarenessContext();
+ check(processContext==(DPI_AWARENESS_CONTEXT)(UINT_PTR)0x6011);
+ check(GetAwarenessFromDpiAwarenessContext(processContext)==DPI_AWARENESS_SYSTEM_AWARE);
+ check(GetDpiFromDpiAwarenessContext(processContext)==96);
+ check(IsValidDpiAwarenessContext(processContext));
+ check(AreDpiAwarenessContextsEqual(processContext,DPI_AWARENESS_CONTEXT_SYSTEM_AWARE));
+ check(!AreDpiAwarenessContextsEqual(processContext,DPI_AWARENESS_CONTEXT_UNAWARE));
+ check(GetAwarenessFromDpiAwarenessContext((DPI_AWARENESS_CONTEXT)(UINT_PTR)0x1234)==DPI_AWARENESS_INVALID);
+ check(!IsValidDpiAwarenessContext((DPI_AWARENESS_CONTEXT)(UINT_PTR)0x1234));
+ SetLastError(0);check(!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE)&&GetLastError()==ERROR_ACCESS_DENIED);
+ // A thread override wins; the previous value carries the PROCESS flag because
+ // the thread was following the process context. Passing a flagged context
+ // back clears the override, as win32u's set_thread_dpi_awareness_context does.
+ check(SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)==(DPI_AWARENESS_CONTEXT)(UINT_PTR)0x80006011);
+ check(GetThreadDpiAwarenessContext()==(DPI_AWARENESS_CONTEXT)(UINT_PTR)0x22);
+ check(GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext())==DPI_AWARENESS_PER_MONITOR_AWARE);
+ check(SetThreadDpiAwarenessContext((DPI_AWARENESS_CONTEXT)(UINT_PTR)0x80006011)==(DPI_AWARENESS_CONTEXT)(UINT_PTR)0x22);
+ check(GetThreadDpiAwarenessContext()==processContext);
+ SetLastError(0);check(!SetThreadDpiAwarenessContext((DPI_AWARENESS_CONTEXT)(UINT_PTR)0x1234)&&GetLastError()==ERROR_INVALID_PARAMETER);
+ check(GetThreadDpiAwarenessContext()==processContext);
+ // No pointer device exists, so no touch handle is ever issued.
+ SetLastError(0);check(!GetTouchInputInfo((HTOUCHINPUT)1,0,0,sizeof(TOUCHINPUT))&&GetLastError()==ERROR_CALL_NOT_IMPLEMENTED);
+ SetLastError(0);check(!CloseTouchInputHandle((HTOUCHINPUT)1)&&GetLastError()==ERROR_CALL_NOT_IMPLEMENTED);
+ UINT32 pointerCount=0xffffffff;check(GetPointerDevices(&pointerCount,0)&&pointerCount==0);
  POINT cp2; check(GetCursorPos(&cp2)&&cp2.x==960&&cp2.y==540);check(SetCursorPos(10,10)&&GetCursorPos(&cp2)&&cp2.x==10&&cp2.y==10);
  RECT clip{0,0,5,5};check(ClipCursor(&clip));check(GetCursorPos(&cp2)&&cp2.x==4&&cp2.y==4);check(ClipCursor(0));
  int shown=ShowCursor(TRUE);check(ShowCursor(FALSE)==shown-1);

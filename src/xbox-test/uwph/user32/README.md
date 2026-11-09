@@ -52,6 +52,19 @@ buffer). DialogBoxParamW returns -1 with ERROR_NOT_SUPPORTED (no dialog manager 
 template loader); EndDialog fails, as no record is a dialog; DragDetect is FALSE
 (no pointer capture). `dpi.h`: the Wine-internal DPI exports shcore delay-imports
 report the single 96-DPI virtual display and a first-choice-wins process awareness.
+The DPI_AWARENESS_CONTEXT family (Set/GetProcessDpiAwarenessContext,
+Set/GetThreadDpiAwarenessContext, AreDpiAwarenessContextsEqual,
+GetAwarenessFromDpiAwarenessContext, GetDpiFromDpiAwarenessContext,
+IsValidDpiAwarenessContext, IsProcessDPIAware) ports Wine's NTUSER_DPI_CONTEXT
+encoding: the public constants map to versioned/DPI/flag bits, contexts are
+validated as Wine does, a thread override wins over the process context and is
+dropped by a context carrying the PROCESS flag, and the process choice is
+irreversible (ERROR_ACCESS_DENIED on a second, different choice). Touch and pen
+input are refused honestly: no pointer device exists, so GetPointerDevices
+reports zero, GetPointerType/GetPointerInfo* reject every pointer id, and
+GetTouchInputInfo/CloseTouchInputHandle return ERROR_CALL_NOT_IMPLEMENTED as
+Wine's unimplemented stubs do. RegisterTouchWindow succeeds for a record window
+but no WM_TOUCH can arrive.
 AdjustWindowRect(Ex) and SetWindowPos use fixed classic (96 DPI, unthemed)
 metrics; SetWindowPos tracks no z-order, same limitation as EnumWindows.
 A/W long aliases apply to these Unicode records.
@@ -59,7 +72,10 @@ ToUnicode and MapVirtualKey(VK_TO_CHAR) follow the fixed US layout: Shift and
 Caps Lock columns, Ctrl letters, keypad operators and Backspace/Tab/Enter/Esc.
 Lock keys latch their toggle bit in GetKeyState. Dead keys and other layouts are
 not claimed. Run `wine-parity-test.sh` after `build.sh` for the off-device
-geometry, object-query, SystemParametersInfo and keyboard checks.
+geometry, object-query, SystemParametersInfo, keyboard, DPI-awareness and touch
+checks, and `dpi-context-test.sh` for the process/thread awareness state machine
+(a fixed sequence run in two fresh processes, one against host Wine user32 and
+one against this DLL; the transcripts must match).
 
 `corewindow_feed.h` is the launcher's keyboard/mouse source. While a game's swap
 chain is on screen and the launcher menu is closed, CoreWindow key and mouse

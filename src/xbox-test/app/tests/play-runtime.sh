@@ -52,6 +52,11 @@ lld-link-19 /nodefaultlib /include:_tls_used /entry:slot0_exe_entry /subsystem:w
 # EXE whose D3D11 device (through Play's D3D11CreateDevice) rejects calls; Play must log them.
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d11.cpp -o "$out/obj/d3d11.obj"
 lld-link-19 /nodefaultlib /entry:d3d_entry /include:d3d_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d11.exe" "$out/obj/d3d11.obj" /usr/x86_64-w64-mingw32/lib/libd3d11.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+# EXE that renders D3D12 frames through Play's routes: device, queue, flip-model
+# swap chain on a guest HWND, RTVs, clear, present, fence wait. Play must log the
+# device it got and the calls the device rejects, once each.
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d12.cpp -o "$out/obj/d3d12.obj"
+lld-link-19 /nodefaultlib /entry:d3d12_entry /include:d3d12_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d12.exe" "$out/obj/d3d12.obj" /usr/x86_64-w64-mingw32/lib/libd3d12.a /usr/x86_64-w64-mingw32/lib/libdxgi.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libdxguid.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 # A static import from a DLL whose own mapping fails must stay unresolved: the
 # failed image is never published to resolve the importer (never executed).
 # baselib.dll is a game-DLL (uwph-routed) name, the route Megabonk exercised.
@@ -124,7 +129,7 @@ UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
 # Owned stand-in so steam-client proves refusal of a present root client DLL.
 cp "$out/play-dependency.dll" "$out/steamclient64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -146,6 +151,15 @@ grep -q 'PRUN D3D11 CreateBuffer hr=0x[0-9a-f]* bytes=0 bind=0x1 ' "$out/d3d11-d
 grep -q 'PRUN D3D11 CheckFormatSupport hr=0x[0-9a-f]* fmt=32767 support=0x0 UNSUPPORTED' "$out/d3d11-diag.log"
 grep -q 'PRUN D3D11 adapter vendor=0x' "$out/d3d11-diag.log"
 [[ $(grep -c 'PRUN D3D11 CreateTexture2D hr=' "$out/d3d11-diag.log") == 1 ]]
+# A guest's D3D12 device, queue, flip-model swap chain on a guest HWND and its
+# frames go through Play; the device answers shader model, and the calls it
+# rejects are logged once per distinct call. (Exit code 42 = every step passed.)
+grep -q 'PRUN EVENT guest D3D12CreateDevice request adapter=default minimum=0xb000 iid=189819f1-1db6-4b57-be54-1821339b85f7' "$out/d3d12-diag.log"
+grep -q 'PRUN EVENT guest D3D12CreateDevice returned hr=0x00000000 device=' "$out/d3d12-diag.log"
+grep -q 'PRUN D3D12 diagnostics on: failed D3D12 create/query/submit calls are logged once' "$out/d3d12-diag.log"
+grep -q 'PRUN D3D12 CheckFeatureSupport feature=7(SHADER_MODEL) size=4 highest=0x' "$out/d3d12-diag.log"
+grep -q 'PRUN D3D12 CreateCommittedResource hr=0x[0-9a-f]* heap=default .*fmt=0(UNKNOWN) 64x64 ' "$out/d3d12-diag.log"
+[[ $(grep -c 'PRUN D3D12 CreateCommittedResource hr=' "$out/d3d12-diag.log") == 1 ]]
 # Guest RWX (JIT) memory is emulated over W^X: pages flip RW<->RX on fault.
 grep -q 'RWX emulation: guest requested RWX' "$out/rwx-jit.log"
 # Guest registry (PlayerPrefs) persists in the uwph SQLite registry across runs.

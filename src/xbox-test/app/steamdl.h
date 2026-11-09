@@ -89,6 +89,11 @@ struct CmSession : std::enable_shared_from_this<CmSession> {
     CmConn conn; std::atomic<bool> up{false}, stop{false}; bool anon = false;
     uint64_t steamid = 0; int32_t sessionId = 0; int hbSec = 30; std::string host;
     std::mutex jm; std::condition_variable jcv; std::map<uint64_t, std::deque<JobMsg>> jobs; std::mutex sendm; std::atomic<uint64_t> nextJob{1};
+    // Messages Steam sends on its own (no job target): persona state, playing
+    // session state, logged off. Set before the first reply is expected.
+    std::mutex pushm; std::function<void(const JobMsg&)> push;
+    void set_push(std::function<void(const JobMsg&)> fn) { std::lock_guard<std::mutex> l(pushm); push = std::move(fn); }
+    void deliver_push(const JobMsg& m) { std::function<void(const JobMsg&)> fn; { std::lock_guard<std::mutex> l(pushm); fn = push; } if (fn) fn(m); }
 
     void reader() {
         for (;;) {
@@ -106,7 +111,7 @@ struct CmSession : std::enable_shared_from_this<CmSession> {
                     if (auto s = pb_get(hf, 1)) steamid = s->u; if (auto s = pb_get(hf, 2)) sessionId = (int32_t)s->u;
                     { std::lock_guard<std::mutex> l(jm); jobs[0].push_back(std::move(m)); } jcv.notify_all(); continue;
                 }
-                if (tgt == UINT64_MAX) continue;
+                if (tgt == UINT64_MAX) { deliver_push(m); continue; }
                 { std::lock_guard<std::mutex> l(jm); auto it = jobs.find(tgt); if (it != jobs.end()) it->second.push_back(std::move(m)); }
                 jcv.notify_all();
             }
@@ -120,8 +125,9 @@ struct CmSession : std::enable_shared_from_this<CmSession> {
             if (now_s() - last >= hbSec) { last = now_s(); send_raw(EMSG_ClientHeartBeat, "", 0, ""); }
         }
     }
-    void send_raw(uint32_t emsg, const std::string& body, uint64_t job, const std::string& jobname) {
+    void send_raw(uint32_t emsg, const std::string& body, uint64_t job, const std::string& jobname, uint32_t routingAppid = 0) {
         std::string h; pb_fixed64(h, 1, steamid); pb_u(h, 2, (uint64_t)(uint32_t)sessionId);
+        if (routingAppid) pb_u(h, 3, routingAppid);   // routing_appid: rich presence is per app
         pb_fixed64(h, 10, job ? job : UINT64_MAX); pb_fixed64(h, 11, UINT64_MAX); if (!jobname.empty()) pb_s(h, 12, jobname);
         std::string f = cm_build_frame(emsg, h, body);
         std::lock_guard<std::mutex> l(sendm); try { conn.send(f); } catch (...) { up = false; }
@@ -427,14 +433,19 @@ static bool download_app(CmSession& cm, uint32_t appid, bool startCancelled = fa
             onDisk += std::min<uint64_t>(f.size, ((uint64_t)fa.nFileSizeHigh << 32) | fa.nFileSizeLow);
     }
     uint64_t need = total - std::min(total, onDisk);
-    { ULARGE_INTEGER fb{}, tb{}, tf{}; if (GetDiskFreeSpaceExW(spaceRoot.c_str(), &fb, &tb, &tf)) {
-        logf("dl: install root %s; need %.1f MB (%.1f MB already on disk), free space %.1f MB", (gameRoot.empty() ? std::string("LocalState") : gameRoot).c_str(), need / 1048576.0, onDisk / 1048576.0, fb.QuadPart / 1048576.0);
+    { storage_roots::Space sp = installs::space_of(spaceRoot);
+      if (sp.ok) {
+        logf("dl: %s", storage_roots::space_line("install root", gameRoot.empty() ? std::string("LocalState") : gameRoot, sp).c_str());
         { // test guard: LocalState\dlmax.txt = size cap in MB (0 = dry run: report size only); one-shot, consumed when read
           std::wstring gp = g_dir + L"\\dlmax.txt"; FILE* gf = _wfopen(gp.c_str(), L"rb");
           if (gf) { char gb[32] = {}; fread(gb, 1, sizeof gb - 1, gf); fclose(gf); DeleteFileW(gp.c_str()); double cap = atof(gb);
             logf("dl: dlmax.txt (test guard, consumed) cap=%.0f MB need=%.1f MB", cap, total / 1048576.0);
             if (total / 1048576.0 > cap || cap <= 0) { char b[160]; snprintf(b, sizeof b, "Test guard: %.1f MB exceeds cap %.0f MB (dlmax.txt) - nothing downloaded", total / 1048576.0, cap); return fail(b); } } }
-        if (!storage_roots::has_room(fb.QuadPart, need)) { char b[160]; snprintf(b, sizeof b, "Not enough free space on %s: need %.0f MB, have %.0f MB", gameRoot.empty() ? "the internal drive" : gameRoot.substr(0, 2).c_str(), need / 1048576.0, fb.QuadPart / 1048576.0); return fail(b); } } }
+        if (!storage_roots::has_room(sp.available, need)) {
+          char b[200]; snprintf(b, sizeof b, "Not enough free space on %s: need %.0f MB, %s", gameRoot.empty() ? "the internal drive" : gameRoot.substr(0, 2).c_str(), need / 1048576.0, storage_roots::space_text(sp).c_str());
+          return fail(b);
+        }
+      } else logf("dl: install root %s GetDiskFreeSpaceEx FAILED (%s); downloading without a space check", gameRoot.empty() ? "LocalState" : gameRoot.c_str(), installs::error_text(GetLastError()).c_str()); }
     // a fresh install records itself before creating files, so a failure (or a crash, swept at start) removes them
     if (!file_exists(installs::marker_path(g_dir, appid))) {
         if (!installs::begin_partial(g_dir, appid, installdir, gameRoot)) return fail("cannot write install state (disk full?)");

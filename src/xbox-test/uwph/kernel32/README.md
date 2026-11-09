@@ -45,3 +45,30 @@ The write guard suite (`write_guard_test.cpp`) covers the guest `WriteFile` rout
 bounded chunks for disk files, stall reporting, and `CancelSynchronousIo` of a
 stalled write (opt-in for non-disk handles in the test), plus the synchronous or
 overlapped mode of handles from the `CreateFile2` conversion.
+
+## Growable function tables
+
+Mono's JIT (`mono-2.0-bdwgc.dll`, which Haven, Slime Rancher and Say No! More
+load) registers its generated code with `RtlAddGrowableFunctionTable` and drops
+it with `RtlDeleteGrowableFunctionTable`, both looked up dynamically from
+`ntdll.dll`. The desktop SDK declares the family only for the desktop/system
+API family, so the UWP build cannot import it statically; Play routes the names
+through `exception_route.h` instead.
+
+These three are forwarded to the OS `ntdll.dll` exports, never reimplemented
+locally. The unwinder is the OS's: `RtlLookupFunctionEntry` and
+`RtlVirtualUnwind` read only the dynamic table list inside the ntdll that owns
+them, so a private registry here would accept every registration and then never
+be consulted — the guest would believe its JIT frames are unwindable while any
+exception through them failed. When the OS export is absent, `RtlAddGrowableFunctionTable`
+returns `STATUS_NOT_SUPPORTED` and leaves the caller's table handle untouched,
+and grow/delete are inert (they return void and no handle was ever issued),
+matching Wine's handling of a handle it does not own. `kernel32.dll` and
+`kernelbase.dll` do not export the family in Wine 10; only `ntdll.dll` and the
+`api-ms-win-core-rtlsupport-l1-*` sets do.
+
+`exception_test.cpp` asserts the route is the exact OS export, registers a
+two-entry table over a code buffer, checks lookup before and after
+`RtlGrowFunctionTable`, checks the entry disappears after delete, and compares
+the post-delete lookup with a direct call to the export. The refusal path is
+always exercised, so a console without the export is covered by the same run.
