@@ -585,6 +585,7 @@ extern "C" int WINAPI uwph_u32c_device_caps(HDC hdc,int cap){
   return gdi32_core::display_cap(cap,desktopWidth,desktopHeight);
  SetLastError(ERROR_INVALID_HANDLE);return 0;
 }
+extern "C" HDC WINAPI c_GetWindowDC(HWND h){return c_GetDC(h);} // same opaque record DC as GetDC; Mesa's WGL presenter imports it (never drawn on: no GDI surface)
 extern "C" int WINAPI c_ReleaseDC(HWND h,HDC hdc){std::lock_guard<std::recursive_mutex> l(mutex);for(size_t i=0;i<dcs.size();i++)if((HDC)dcs[i].get()==hdc&&dcs[i]->hwnd==h){dcs.erase(dcs.begin()+i);return 1;}return 0;}
 extern "C" HANDLE WINAPI c_LoadImageW(HINSTANCE inst,LPCWSTR name,UINT type,int cx,int cy,UINT flags){
  std::lock_guard<std::recursive_mutex> l(mutex);

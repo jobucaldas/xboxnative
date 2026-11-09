@@ -82,6 +82,7 @@ inline uintptr_t resolve(const char* dll, const char* name, DeviceCaps device_ca
         {"CombineRgn", reinterpret_cast<uintptr_t>(&combine_rgn)},
         {"GetPixelFormat", reinterpret_cast<uintptr_t>(&get_pixel_format)},
         {"DescribePixelFormat", reinterpret_cast<uintptr_t>(&describe_pixel_format)},
+        {"StretchDIBits", reinterpret_cast<uintptr_t>(&stretch_dibits)},
         {"GetICMProfileW", reinterpret_cast<uintptr_t>(&get_icm_profile_w)},
         {"GetDeviceGammaRamp", reinterpret_cast<uintptr_t>(&get_device_gamma_ramp)},
         {"SetDeviceGammaRamp", reinterpret_cast<uintptr_t>(&set_device_gamma_ramp)},

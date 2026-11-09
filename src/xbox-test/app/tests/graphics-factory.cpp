@@ -77,6 +77,24 @@ int main(){
     legacy.SampleDesc.Count=1;legacy.Windowed=FALSE;
     CHECK(proxy->CreateSwapChain(expectedDevice,&legacy,&oldChain)==DXGI_ERROR_INVALID_CALL&&!oldChain);
     CHECK(calls==3&&reports==3&&window.refs==1);
+    {   // Mesa's d3d12 driver asks for an IDXGIFactory4 and enumerates adapters by LUID; adapters stay wrapped.
+        IDXGIFactory4* factory4=nullptr;
+        CHECK(proxy->QueryInterface(__uuidof(IDXGIFactory4),(void**)&factory4)==S_OK&&factory4==static_cast<IDXGIFactory4*>(proxy));
+        IDXGIAdapter1* first=nullptr;IDXGIAdapter* wrapped=nullptr;DXGI_ADAPTER_DESC1 info{};
+        if(factory4&&SUCCEEDED(proxy->EnumAdapters1(0,&first))&&SUCCEEDED(first->GetDesc1(&info))) {
+            CHECK(SUCCEEDED(factory4->EnumAdapterByLuid(info.AdapterLuid,__uuidof(IDXGIAdapter1),(void**)&wrapped)));
+            // The wrapper must still be alive and usable after the call: the factory hands its reference to it.
+            DXGI_ADAPTER_DESC again{};CHECK(wrapped&&SUCCEEDED(wrapped->GetDesc(&again))&&again.AdapterLuid.LowPart==info.AdapterLuid.LowPart);
+            IDXGIAdapter* real=corewindow_dxgi::real_adapter(wrapped);
+            CHECK(real&&real!=wrapped);   // a wrapper, from which the real adapter is recoverable
+            if(real)real->Release();
+            if(wrapped)wrapped->Release();
+            IDXGIAdapter* none=reinterpret_cast<IDXGIAdapter*>(UINT_PTR(1));
+            CHECK(factory4->EnumAdapterByLuid(LUID{0x7fffffff,0x7fffffff},__uuidof(IDXGIAdapter1),(void**)&none)==DXGI_ERROR_NOT_FOUND&&!none);
+        } else CHECK(!"first adapter");
+        if(first)first->Release();
+        if(factory4)factory4->Release();
+    }
     CHECK(proxy->Release()==0);
     printf("OFF-DEVICE CoreWindow factory contracts checks=%u failures=%u; no rendering claim\n",checks,failures);
     return failures?1:0;

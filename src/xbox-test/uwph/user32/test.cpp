@@ -180,6 +180,7 @@ extern "C" DWORD WINAPI u32c_entry(){
  BYTE keyState[256]={};keyState[VK_SHIFT]=0x80;WCHAR tu[4]={};check(ToUnicode('A',0,keyState,tu,4,0)==1&&tu[0]==L'A');
  keyState[VK_SHIFT]=0;check(ToUnicode('A',0,keyState,tu,4,0)==1&&tu[0]==L'a');check(ToUnicode(VK_F1,0,keyState,tu,4,0)==0);
  // batch 3: GetDC/ReleaseDC, standard cursor/icon loading, CreateIconFromResourceEx+LookupIconIdFromDirectoryEx
+ {HDC wdc=GetWindowDC(h2);check(wdc&&WindowFromDC(wdc)==h2&&ReleaseDC(h2,wdc)==1);check(GetWindowDC((HWND)0x99999)==0);}
  HDC dc=GetDC(h2);check(dc!=0);check(ReleaseDC(h2,dc)==1);check(ReleaseDC(h2,dc)==0);check(GetDC((HWND)0x99999)==0);
  HCURSOR arrow=LoadCursorA(0,MAKEINTRESOURCEA(32512));check(arrow!=0);check(LoadCursorA(0,MAKEINTRESOURCEA(32512))==arrow);
  check(!LoadCursorA((HINSTANCE)0x1234,MAKEINTRESOURCEA(32512))&&GetLastError()==ERROR_RESOURCE_DATA_NOT_FOUND);

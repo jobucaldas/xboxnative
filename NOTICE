@@ -31,10 +31,13 @@ External dependencies fetched at build time (never copied here; pinned in deps.p
                                                its minimal Wine context is LGPL-2.1-or-later (Copyright 2000 Alexandre Julliard).
                                                Retain that patch with the corresponding source. LGPL-2.1-or-later is generally read as combinable with GPLv3 code (LGPLv2.1 s.3 lets a
                                                recipient apply the GPL instead).
-  Mesa 25.3.6 source tarball (mesa-src)        MIT (Mesa 3D Graphics Library; DirectX-Headers, also MIT). Not yet packaged. Fetched, SHA-256
-                                               verified and cross-built by src/tools/build-mesa-d3d12.sh (OpenGL on the Direct3D 12
-                                               Gallium driver, research/OPENGL-PLAN.md) into the git-ignored out/mesa-d3d12/; the built
-                                               DLLs are never committed. Shipping them requires Mesa's licence texts alongside.
+  Mesa 25.3.6 source tarball (mesa-src)        MIT (Mesa 3D Graphics Library; DirectX-Headers, also MIT). Fetched, SHA-256
+                                               verified, patched (patches/mesa-src/0001-play-corewindow-wgl.patch, MIT) and cross-built by
+                                               src/tools/build-mesa-d3d12.sh (OpenGL on the Direct3D 12 Gallium driver,
+                                               research/OPENGL-PLAN.md) into the git-ignored out/mesa-d3d12/. opengl32.dll and
+                                               libgallium_wgl.dll are packaged in the launcher's runtime/ directory with Mesa's and
+                                               DirectX-Headers' licence texts, the patch and SOURCE-mesa.txt; the built DLLs are never
+                                               committed. DirectX-Headers is pinned to commit 64c650b0c6642ab0f3cdf674e38401e02ccd2460 (tag v1.618.1).
   gbe_fork release (gbe-fork-win)              LGPL-3.0 (Detanup01/gbe_fork). Pinned prebuilt release fetched and SHA-256 verified by
                                                src/tools/fetch-gbe-fork.sh into git-ignored out/gbe-fork/; only the regular x64
                                                steam_api64.dll and the x64 emulated steamclient64.dll are packaged (steam-provider/gbe/,

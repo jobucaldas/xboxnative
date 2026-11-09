@@ -2,6 +2,22 @@
 #include <cstdio>
 #include <initializer_list>
 #define CHECK(x) do { if (!(x)) { std::printf("FAIL line %d: %s\n", __LINE__, #x); return 1; } } while (0)
+namespace {
+// Stands in for a mapped OpenGL implementation's exports (Mesa's opengl32.dll under Play).
+int WINAPI fake_choose(HDC, const PIXELFORMATDESCRIPTOR*) { return 7; }
+BOOL WINAPI fake_set(HDC, int format, const PIXELFORMATDESCRIPTOR*) { return format == 7; }
+int WINAPI fake_get(HDC) { return 7; }
+int WINAPI fake_describe(HDC, int format, UINT, void*) { return format == 1 ? 3 : 0; }
+BOOL WINAPI fake_swap(HDC) { return TRUE; }
+uintptr_t fake_lookup(const char* name) {
+    if (!strcmp(name, "wglChoosePixelFormat")) return reinterpret_cast<uintptr_t>(&fake_choose);
+    if (!strcmp(name, "wglSetPixelFormat")) return reinterpret_cast<uintptr_t>(&fake_set);
+    if (!strcmp(name, "wglGetPixelFormat")) return reinterpret_cast<uintptr_t>(&fake_get);
+    if (!strcmp(name, "wglDescribePixelFormat")) return reinterpret_cast<uintptr_t>(&fake_describe);
+    if (!strcmp(name, "wglSwapBuffers")) return reinterpret_cast<uintptr_t>(&fake_swap);
+    return 0;
+}
+}
 int main() {
     using Function = int (WINAPI*)(HGDIOBJ, int, void*);
     auto call = reinterpret_cast<Function>(gdi32_core::resolve("GDI32.DLL", "GetObjectA"));
@@ -31,7 +47,14 @@ int main() {
     CHECK(!gdi32_core::resolve("user32.dll", "GetObjectA"));
     CHECK(!gdi32_core::resolve("gdi32.dll", "getobjecta"));
     CHECK(!gdi32_core::resolve("gdi32.dll", "#1"));
-    CHECK(!gdi32_core::resolve("gdi32.dll", "CreatePen"));  // unimplemented names stay unresolved
+    CHECK(!gdi32_core::resolve("gdi32.dll", "CreatePen"));
+    {   // Mesa's software winsys imports StretchDIBits: it resolves and fails cleanly (no GDI surface).
+        auto stretch = reinterpret_cast<int (WINAPI*)(HDC,int,int,int,int,int,int,int,int,const void*,const void*,UINT,DWORD)>(
+            gdi32_core::resolve("gdi32.dll", "StretchDIBits"));
+        CHECK(stretch);
+        SetLastError(0);
+        CHECK(stretch(nullptr,0,0,1,1,0,0,1,1,nullptr,nullptr,0,SRCCOPY) == 0 && GetLastError() == ERROR_NOT_SUPPORTED);
+    }  // unimplemented names stay unresolved
     auto set_format = reinterpret_cast<BOOL (WINAPI*)(HDC, int, const PIXELFORMATDESCRIPTOR*)>(
         gdi32_core::resolve("GDI32.DLL", "SetPixelFormat"));
     auto swap = reinterpret_cast<BOOL (WINAPI*)(HDC)>(
@@ -110,6 +133,22 @@ int main() {
         SetLastError(0); CHECK(!get(nullptr, ramp) && GetLastError() == ERROR_INVALID_PARAMETER);
         SetLastError(0); CHECK(!set(record, ramp) && GetLastError() == ERROR_NOT_SUPPORTED);
         SetLastError(0); CHECK(!set(record, nullptr) && GetLastError() == ERROR_INVALID_PARAMETER);
+    }
+    {   // With a mapped OpenGL implementation, gdi32 forwards to its wgl* entry points.
+        auto describe = reinterpret_cast<int (WINAPI*)(HDC, int, UINT, void*)>(gdi32_core::resolve("gdi32.dll", "DescribePixelFormat"));
+        auto get_format = reinterpret_cast<int (WINAPI*)(HDC)>(gdi32_core::resolve("gdi32.dll", "GetPixelFormat"));
+        CHECK(describe && get_format);
+        gdi32_core::gl_lookup.store(&fake_lookup);
+        PIXELFORMATDESCRIPTOR request{};
+        HDC dc = reinterpret_cast<HDC>(UINT_PTR(0x1234));
+        CHECK(choose(dc, &request) == 7 && set_format(dc, 7, nullptr) && !set_format(dc, 6, nullptr));
+        CHECK(swap(dc) && get_format(dc) == 7 && describe(dc, 1, sizeof request, &request) == 3);
+        gdi32_core::gl_lookup.store([](const char*) -> uintptr_t { return 0; });   // a module without these exports
+        CHECK(choose(dc, &request) == 0 && !set_format(dc, 7, nullptr) && !swap(dc) && describe(dc, 1, sizeof request, &request) == 0);
+        SetLastError(0); CHECK(get_format(dc) == 0 && GetLastError() == ERROR_INVALID_PIXEL_FORMAT);
+        gdi32_core::gl_lookup.store(nullptr);
+        CHECK(choose(dc, &request) == 0 && !swap(dc));
+        std::puts("GDI32 OFFDEVICE PASS pixel format/SwapBuffers forward to a mapped OpenGL module and fail cleanly without one");
     }
     FreeLibrary(oracle);
     std::puts("GDI32 OFFDEVICE PASS null-driver pixel format/presentation failures, descriptor guards, last error");

@@ -126,6 +126,7 @@ EXPORTS
  InvalidateRect=c_InvalidateRect
  CopyImage=c_CopyImage
  GetDC=c_GetDC
+ GetWindowDC=c_GetWindowDC
  ReleaseDC=c_ReleaseDC
  LoadCursorA=c_LoadCursorA
  LoadIconA=c_LoadIconA

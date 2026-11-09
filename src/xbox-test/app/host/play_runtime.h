@@ -1136,6 +1136,19 @@ static HRESULT WINAPI createDevice(IDXGIAdapter* adapter,D3D_DRIVER_TYPE type,HM
         d3d11_diag::adopt(*device);
         play_graphics::adopt_device(*device);state->milestone=2;}return hr;
 }
+// Mesa's d3d12 driver (OpenGL on D3D12) takes its adapter from the guest DXGI factory and creates the device
+// itself. As for D3D11CreateDevice, the native device needs the real adapter, not the factory's wrapper.
+static HRESULT WINAPI createDevice12(IUnknown* adapter,D3D_FEATURE_LEVEL level,REFIID iid,void** device) {
+    using Fn=decltype(&createDevice12);
+    auto fn=(Fn)mlp::resolve("d3d12.dll","D3D12CreateDevice",0);
+    if(!fn) {stopMissing("d3d12.dll!D3D12CreateDevice");return E_NOINTERFACE;}
+    IDXGIAdapter* real=nullptr;
+    if(adapter) real=corewindow_dxgi::real_adapter(static_cast<IDXGIAdapter*>(adapter));
+    HRESULT hr=fn(real?static_cast<IUnknown*>(real):adapter,level,iid,device);
+    if(real) real->Release();
+    char b[160];snprintf(b,sizeof b,"guest D3D12CreateDevice level=0x%x returned hr=0x%08lx",unsigned(level),(unsigned long)hr);state->event(b);
+    return hr;
+}
 // Until a real modal UI bridge exists, retain fatal game diagnostics and stop.
 // Never return a fabricated button selection that would advance startup.
 static std::string dialogText(LPCSTR text,size_t limit=2048) {
@@ -1195,6 +1208,7 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxW")) return (uintptr_t)&messageBoxW;
     if(key=="user32.dll" && name && !strcmp(name,"CreateWindowExW")) return (uintptr_t)&createWindow;
     if(key=="d3d11.dll" && name && !strcmp(name,"D3D11CreateDevice")) return (uintptr_t)&createDevice;
+    if(key=="d3d12.dll" && name && !strcmp(name,"D3D12CreateDevice")) return (uintptr_t)&createDevice12;
     // Same client gate as LoadLibrary, for static and forwarded imports. Never
     // a callable Steam placeholder: the import stays unresolved, as on Windows
     // without the DLL. steam_api64.dll resolves from the game's own file below.
@@ -1246,11 +1260,22 @@ static DWORD WINAPI worker(void*) {
     __try {runImpl();} __except(filter(GetExceptionInformation())) {}
     state->result=state->snapshot();state->finished=true;guestThread=false;return state->code;
 }
+// gdi32's pixel-format and SwapBuffers entry points forward to the wgl* exports of whichever opengl32.dll the guest
+// has mapped (Mesa from the runtime directory, or one the game ships). None mapped: Play's failing stubs answer.
+static uintptr_t openglExport(const char* name) {
+    if(!state||!name)return 0;
+    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
+    auto m=named(L"opengl32.dll");
+    if(!m||m->mappingFailed||!m->mapped)return 0;
+    ExportLookup lookup;
+    return (uintptr_t)lookup.finish(exported(*m,name,0));
+}
 static bool start(const std::wstring& root,const std::wstring& exe,const std::wstring& args,wxl::Log log) {
     if(state) return false;
     state=new State();state->root=root;state->log=log;observed.store(state,std::memory_order_release);state->command=L"\""+root+L"\\"+exe+L"\" "+args;state->commandA=narrow(state->command);
     mlp::log=log;wxl::logger=log;
     xinput_core::note=[](const char* text){if(mlp::log)mlp::log(text);};mlp::missingResolver=missing;mlp::assets.clear();mlp::summaries.clear();
+    gdi32_core::gl_lookup.store(&openglExport);
     state->exe=map(root+L"\\"+exe);if(!state->exe) {state->result=state->snapshot();state->finished=true;return true;}
     find_ntdll();
     {static bool installed=false;if(!installed){installed=true;hostTopLevel=SetUnhandledExceptionFilter(topLevelFilter);}}

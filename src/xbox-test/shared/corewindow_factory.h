@@ -120,7 +120,9 @@ inline IDXGIAdapter* real_adapter(IDXGIAdapter* a) {
 inline UINT outputWidth=1920, outputHeight=1080;
 using PresentSurface = HRESULT (*)(IDXGIFactory2*, IUnknown*, IUnknown*,
     const DXGI_SWAP_CHAIN_DESC1*, IDXGIOutput*, IDXGISwapChain1**);
-struct Factory final : IDXGIFactory2 {
+// IDXGIFactory3/4 are answered when the real factory supports them (Mesa's d3d12 driver asks CreateDXGIFactory2 for
+// an IDXGIFactory4 and enumerates adapters by LUID); every adapter still comes back wrapped like EnumAdapters1's.
+struct Factory final : IDXGIFactory4 {
     IDXGIFactory2* real;
     ULONG refs = 1;
     IUnknown* (*corewindow)(HWND);
@@ -130,12 +132,23 @@ struct Factory final : IDXGIFactory2 {
             PresentSurface create = nullptr)
         : real(f), corewindow(window), report(logger), createSurface(create) {}
     ~Factory() { real->Release(); }
+    template<class T> T* level() const {   // the real factory at a higher interface level, or null
+        T* p=nullptr;if(FAILED(real->QueryInterface(__uuidof(T),(void**)&p)))return nullptr;p->Release();return p;
+    }
+    HRESULT wrapped(IDXGIAdapter1* adapter,REFIID id,void** out) {
+        // Adapter takes ownership of the reference (its destructor releases it), as in EnumAdapters1.
+        auto wrapper=new Adapter(adapter,static_cast<IDXGIFactory2*>(this),outputWidth,outputHeight);
+        HRESULT hr=wrapper->QueryInterface(id,out);wrapper->Release();return hr;
+    }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** out) override {
         if (!out) return E_POINTER;
         *out = nullptr;
         if (id == __uuidof(IUnknown) || id == __uuidof(IDXGIObject) || id == __uuidof(IDXGIFactory) ||
             id == __uuidof(IDXGIFactory1) || id == __uuidof(IDXGIFactory2)) {
             *out = static_cast<IDXGIFactory2*>(this); AddRef(); return S_OK;
+        }
+        if ((id == __uuidof(IDXGIFactory3) && level<IDXGIFactory3>()) || (id == __uuidof(IDXGIFactory4) && level<IDXGIFactory4>())) {
+            *out = static_cast<IDXGIFactory4*>(this); AddRef(); return S_OK;
         }
         return E_NOINTERFACE;
     }
@@ -192,5 +205,18 @@ struct Factory final : IDXGIFactory2 {
     HRESULT STDMETHODCALLTYPE RegisterOcclusionStatusEvent(HANDLE a,DWORD* b) override { return real->RegisterOcclusionStatusEvent(a,b); }
     void STDMETHODCALLTYPE UnregisterOcclusionStatus(DWORD a) override { real->UnregisterOcclusionStatus(a); }
     HRESULT STDMETHODCALLTYPE CreateSwapChainForComposition(IUnknown* a,const DXGI_SWAP_CHAIN_DESC1* b,IDXGIOutput* c,IDXGISwapChain1** d) override { return real->CreateSwapChainForComposition(a,b,c,d); }
+    // Only reachable when QueryInterface found the real factory at that level.
+    UINT STDMETHODCALLTYPE GetCreationFlags() override { auto r=level<IDXGIFactory3>();return r?r->GetCreationFlags():0; }
+    HRESULT STDMETHODCALLTYPE EnumAdapterByLuid(LUID luid,REFIID id,void** out) override {
+        if(!out)return E_POINTER;*out=nullptr;auto r=level<IDXGIFactory4>();if(!r)return E_NOTIMPL;
+        IDXGIAdapter1* adapter=nullptr;HRESULT hr=r->EnumAdapterByLuid(luid,__uuidof(IDXGIAdapter1),(void**)&adapter);
+        // wrapped() takes the adapter's reference (Adapter releases it when it dies): do not release it here too.
+        return FAILED(hr)?hr:wrapped(adapter,id,out);
+    }
+    HRESULT STDMETHODCALLTYPE EnumWarpAdapter(REFIID id,void** out) override {
+        if(!out)return E_POINTER;*out=nullptr;auto r=level<IDXGIFactory4>();if(!r)return E_NOTIMPL;
+        IDXGIAdapter1* adapter=nullptr;HRESULT hr=r->EnumWarpAdapter(__uuidof(IDXGIAdapter1),(void**)&adapter);
+        return FAILED(hr)?hr:wrapped(adapter,id,out);
+    }
 };
 }
