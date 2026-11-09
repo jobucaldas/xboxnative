@@ -562,6 +562,7 @@ static void dl_thread() {
 }
 
 #include "launch.h"
+#include "launch_picker.h"
 #include "launch_report.h"
 #include "guest_overlay.h"
 #include "../uwph/user32/corewindow_feed.h"
@@ -738,13 +739,54 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     InstallInfo m_dInst; double m_dInstT = -10;
     std::vector<storage_roots::Choice> m_roots; size_t m_rootSel = 0;   // install locations of the detail page (X cycles them before Install)
     struct AutoLaunch { uint32_t app = 0; int seq = 0; } m_auto;
+    // Launch-option picker (launch_picker.h): a game with several run options
+    // asks before Play instead of picking one silently.
+    launch_picker::State m_pick;
+    std::string remembered_option(uint32_t id) {   // LocalState\launch_choice_<appid>.txt beside the install marker
+        std::string text; return read_file_s(g_dir + L"\\" + widen(launch_picker::remember_name(id)), text) ? launch_picker::parse_remember(text) : std::string();
+    }
+    void remember_option(uint32_t id, const std::string& executable) {
+        if (executable.empty()) return;
+        write_text(g_dir + L"\\" + widen(launch_picker::remember_name(id)), launch_picker::format_remember(executable));
+    }
+    // The options Play may offer for a game, in preference order. appinfo is
+    // the downloader's cache; without it there is nothing to ask.
+    std::vector<launch_target::Choice> launch_options(uint32_t id) {
+        Vdf info; const Vdf* app = nullptr;
+        if (!load_appinfo(id, info, app)) return {};
+        return launch_target::choices(launch_target::entries(*app));
+    }
+    // A: Play. One runnable option (or none: the largest .exe fallback) starts
+    // directly; several open the picker.
+    size_t m_optApp = 0, m_optCount = 0;   // cached: how many run options Play offers (draw_detail hint)
+    size_t option_count() {
+        if (m_optApp != m_dApp) { m_optApp = m_dApp; m_optCount = launch_options(m_dApp).size(); }
+        return m_optCount;
+    }
+    void detail_play(const char* via) {
+        m_dInst = read_install(m_dApp);
+        std::vector<launch_target::Choice> rows = launch_options(m_dApp);
+        if (!launch_picker::needed(rows)) { logf("detail: Play pressed appid=%u (%s)", m_dApp, via); start_launch(m_dApp, m_dName, m_dInst.dir, via); return; }
+        launch_picker::open(m_pick, std::move(rows), remembered_option(m_dApp));
+        logf("detail: Play opens the launch-option picker appid=%u options=%zu selected=%d (%s)", m_dApp, m_pick.rows.size(), m_pick.sel, via);
+    }
+    void detail_picker_a(const char* via) {   // A: start the highlighted option
+        if (launch_picker::press_a(m_pick) != launch_picker::Press::start) { logf("detail: launch option refused appid=%u: %s (%s)", m_dApp, m_pick.note.c_str(), via); return; }
+        std::string exe = launch_picker::started(m_pick);
+        launch_picker::close(m_pick);
+        remember_option(m_dApp, exe);
+        logf("detail: Play pressed appid=%u option=\"%s\" (%s)", m_dApp, exe.c_str(), via);
+        start_launch(m_dApp, m_dName, m_dInst.dir, via, &exe);
+    }
     std::string game_name(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return g->name; return id == 480 ? "Spacewar" : id == 3405340 ? "Megabonk" : id == 1007 ? "Steamworks SDK Redist" : ""; }
     bool owned(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return true; return false; }
     void open_detail(uint32_t id, const std::string& nm, const char* via) {
         m_dApp = id; m_dName = nm.empty() ? "App " + std::to_string(id) : nm; m_dNote.clear(); m_dScroll = 0; m_dInstT = -10; m_confirmDelete = false; m_cancelArmed = false;
+        launch_picker::close(m_pick);   // a picker left open belongs to the previous game
         // After a restart that unloaded a failed game, its page says why (this session's launches show in the launch panel).
         if (g_launch.phase == 0) { std::string why = launch_report::failure(read_bytes(g_dir + L"\\launch_result.json"), id); if (!why.empty()) m_dNote = "Last launch failed: " + why; }
         m_roots.clear(); m_rootSel = 0; refresh_roots("detail open");
+        m_optApp = 0;   // a fresh page: the run-option count is read again (a download may have cached appinfo)
         auto si = std::make_shared<StoreInfo>(); si->appid = id; m_dSi = si; std::thread(store_worker, si).detach();
         { InstallInfo ii = read_install(id); if (ii.installed && !g_demo) cloud_async(id, ii.folder, false); }   // status line: what the cloud holds
         m_confirmLogout = false; g_screen = S_DETAIL; logf("detail: open appid=%u name='%s' via=%s", id, m_dName.c_str(), via);
@@ -806,7 +848,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             m_cancelArmed = true; m_cancelArmedT = now_s(); m_dNote.clear();
             logf("detail: A asks to cancel the download of appid=%u (press A again, %s)", m_dApp, via); return;
         case detail_input::Action::play:
-            m_cancelArmed = false; m_dNote.clear(); logf("detail: Play pressed appid=%u (%s)", m_dApp, via); start_launch(m_dApp, m_dName, m_dInst.dir, via); return;
+            m_cancelArmed = false; m_dNote.clear(); detail_play(via); return;
         case detail_input::Action::install:
         case detail_input::Action::back:
             break;
@@ -824,6 +866,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void detail_back(const char* via) {         // B: back to the library; a download keeps running in the background
         m_cancelArmed = false;
         m_auto.app = 0;   // the auto-launch after install belongs to the detail page
+        launch_picker::close(m_pick);
         close_detail(via);
     }
     void detail_tick(double t) {   // runs every frame on every screen: auto-launch after install, launch watchdog
@@ -832,7 +875,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             m_auto.seq = g_dlSeq;
             if (g_dlLastApp == m_auto.app) {
                 uint32_t app = m_auto.app; m_auto.app = 0; InstallInfo ii = read_install(app);
-                if (g_dlLastOk && ii.installed && g_screen == S_DETAIL && m_dApp == app) { logf("detail: download finished -> auto-launch appid=%u", app); m_dInst = ii; m_dInstT = t; start_launch(app, m_dName, ii.dir, "auto after install"); }
+                if (g_dlLastOk && ii.installed && g_screen == S_DETAIL && m_dApp == app) { logf("detail: download finished -> auto-launch appid=%u", app); m_dInst = ii; m_dInstT = t; detail_play("auto after install"); }
                 else logf("detail: auto-launch not started (ok=%d installed=%d onDetail=%d)", g_dlLastOk ? 1 : 0, ii.installed ? 1 : 0, (g_screen == S_DETAIL && m_dApp == app) ? 1 : 0);
             }
         }
@@ -1048,6 +1091,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         auto labelLayout=launch_button::label_layout(std::char_traits<char>::length(label));
         text(60 + labelLayout.x, 650 + labelLayout.y, label, labelLayout.scale, TXT);
         text(60 + 308 - twidth(detail_input::hint(di), 2) / 2, 734, detail_input::hint(di), 2, C3(210, 220, 240));
+        // Play offers a choice: say so before it is pressed (screenshot-able).
+        if (m_dInst.installed && !busy && !g_demo && option_count() > 1) {
+            char b[96]; snprintf(b, sizeof b, "Play asks which of %zu run options to start", option_count());
+            text(60, 786, b, 2, C3(210, 220, 240));
+        }
         // right column: meta + description
         std::vector<std::string> meta;
         auto addm = [&](const std::string& k, const std::string& v) { if (v.empty()) return; for (auto& l : wrap_lines(k + v, 46)) meta.push_back(l); };
@@ -1075,6 +1123,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 text(80, 822, g_launch.phase==3?"Guest running (playability unverified)":ok?"Guest completed (playability unverified)":retained?"Launch failed - restarting launcher to unload it":"Launch failed - nothing was left running; press A or pick another game", 3, g_launch.phase==3?YEL:ok?GRN:RED); auto ls = wrap_lines(r, 73); for (size_t i = 0; i < ls.size() && i < 4; i++) text(80, 858 + (int)i * 34, ls[i], 3, TXT); }
         }
         text(60, 1050, "A: Install / Play / cancel download (twice)   X: Delete   Y: Cloud sync   B: back   Menu: back   D-pad up/down: scroll", 2, C3(120, 130, 145));
+        if (m_pick.open) draw_picker();
         if (m_confirmDelete) {
             std::string q = "Delete " + clip(m_dName, 30) + "?"; char sz[96];
             if (m_delKind == game_library::DeleteKind::shared) snprintf(sz, sizeof sz, "Its files are shared with another installed game and stay.");
@@ -1086,6 +1135,32 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             text(960 - twidth(sz, 2) / 2, 500, sz, 2, DIM);
             text(960 - twidth("A: Yes, delete        B: Cancel", 3) / 2, 600, "A: Yes, delete        B: Cancel", 3, TXT);
         }
+    }
+    // The launch-option picker (launch_picker.h): the game's own run options,
+    // 64-bit first, with the 32-bit ones marked and refused until 32-bit lands.
+    void draw_picker() {
+        const uint32_t TXT = C3(255, 255, 255), DIM = C3(170, 180, 195), YEL = C3(255, 210, 63), GRN = C3(120, 255, 140), RED = C3(255, 110, 110);
+        const int x = 360, w = 1200, rowH = 74;
+        int rows = (int)m_pick.rows.size();
+        int h = 172 + rows * rowH + (m_pick.note.empty() ? 0 : 44);
+        int y = std::max(40, (1080 - h) / 2);
+        fill(x, y, w, h, C3(10, 12, 16)); frame(x, y, w, h, 6, YEL);
+        text(x + 40, y + 30, "How should this game start?", 4, TXT);
+        text(x + 40, y + 84, clip(m_dName, 44) + " offers more than one run option. D-pad up/down to choose, A to run, B to cancel.", 2, DIM);
+        int ry = y + 132;
+        for (int i = 0; i < rows; i++) {
+            const launch_target::Choice& c = m_pick.rows[i];
+            bool sel = i == m_pick.sel;
+            fill(x + 30, ry, w - 60, rowH - 10, sel ? C3(45, 90, 200) : C3(27, 35, 48));
+            if (sel) frame(x + 30, ry, w - 60, rowH - 10, 3, YEL);
+            text(x + 50, ry + 14, clip(c.label, 60), 3, c.selectable ? TXT : DIM);
+            const char* note = launch_target::arch_note(c.arch);
+            if (note) text(x + 50, ry + 42, note, 2, RED);
+            else if (c.arch == launch_target::arch64) text(x + 50, ry + 42, "64-bit", 2, GRN);
+            ry += rowH;
+        }
+        if (!m_pick.note.empty()) text(x + 40, ry + 8, clip(m_pick.note, 90), 2, RED);
+        text(x + 40, y + h - 40, "A: run this option        B: cancel", 3, TXT);
     }
     // One-shot synthetic command file LocalState\cmd.txt (consumed on read). Lines: open <appid> | press (=A) | back (=B) | view | up | down | left | right | lb | rb | x | y | sleep <s>.
     // Never periodic, never present unless a tester/script writes it; every executed line is logged as SYNTHETIC.
@@ -1414,6 +1489,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         int s = g_screen;
         if (s == S_LOGIN) { if (has(edge, GamepadButtons::A) || has(edge, GamepadButtons::X)) { g_refreshReq = true; set_status("Refreshing QR..."); logf("Refresh button pressed"); } }
         else if (s == S_DETAIL) {
+            if (m_pick.open) {   // the launch-option picker owns the pad while it is up
+                if (has(edge, GamepadButtons::DPadUp)) { launch_picker::move(m_pick, -1); logf("detail: launch option %d/%zu (%s)", m_pick.sel + 1, m_pick.rows.size(), source); }
+                else if (has(edge, GamepadButtons::DPadDown)) { launch_picker::move(m_pick, 1); logf("detail: launch option %d/%zu (%s)", m_pick.sel + 1, m_pick.rows.size(), source); }
+                else if (has(edge, GamepadButtons::A)) detail_picker_a(source);
+                else if (has(edge, GamepadButtons::B)) { launch_picker::close(m_pick); logf("detail: launch-option picker cancelled (%s)", source); }
+                return;
+            }
             if (m_confirmDelete) {
                 if (has(edge, GamepadButtons::A)) detail_delete_confirm(source);
                 else if (has(edge, GamepadButtons::B)) { m_confirmDelete = false; logf("detail: delete cancelled (%s)", source); }

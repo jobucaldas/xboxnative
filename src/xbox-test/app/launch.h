@@ -55,7 +55,7 @@ static void lp_sink(const char* s) {
 #include "steam_client_package.h"
 
 static void lp_publish(int gen,uint32_t appid,const std::string& result,bool ok,int mapped,int total,const char* status,bool terminal);
-struct LpCtx { std::wstring root, args; std::vector<std::wstring> names; int gen = 0; uint32_t appid = 0; int mapped = 0; unsigned resolved = 0, stubbed = 0; std::string firstMissing, failName, fault; bool ok = false, timedOut = false; };
+struct LpCtx { std::wstring root, args, cwd; std::vector<std::wstring> names; int gen = 0; uint32_t appid = 0; int mapped = 0; unsigned resolved = 0, stubbed = 0; std::string firstMissing, failName, fault; bool ok = false, timedOut = false; };
 static int pe_machine(const std::wstring& p) {   // 0 = unreadable/not PE, else IMAGE_FILE_MACHINE_*
     FILE* f = _wfopen(p.c_str(), L"rb"); if (!f) return 0; unsigned char h[1024]; size_t n = fread(h, 1, sizeof h, f); fclose(f);
     if (n < 0x40 || h[0] != 'M' || h[1] != 'Z') return 0; uint32_t o = *(uint32_t*)(h + 0x3c); if (o + 6 > n || memcmp(h + o, "PE\0\0", 4)) return 0; return *(uint16_t*)(h + o + 4);
@@ -535,7 +535,7 @@ static void lp_run_impl(LpCtx& c) {
     {std::lock_guard<std::mutex> lock(g_launch.m);
      if(g_launch.gen!=c.gen||g_launch.phase!=1){c.failName="launch abandoned by the watchdog before the game started";return;}
      g_launch.loaderStarted=now_s();}
-    if(!play_runtime::start(exeDir,exe,c.args,lp_sink)) {c.failName="guest already started; restart launcher before next Play";return;}
+    if(!play_runtime::start(exeDir,exe,c.args,lp_sink,c.cwd)) {c.failName="guest already started; restart launcher before next Play";return;}
     auto r=play_runtime::state;
     ULONGLONG end=GetTickCount64()+110000; bool reportedRunning=false;
     for(;;) {
@@ -580,34 +580,65 @@ static bool load_appinfo(uint32_t appid,Vdf& root,const Vdf*& app) {
     app=root.get("appinfo");if(!app)app=&root;
     return true;
 }
-struct LaunchTarget { std::wstring exe; std::string args, why; };   // exe is install-relative
+struct LaunchTarget { std::wstring exe; std::string args, why, workdir; };   // exe is install-relative
 // The game's own Steam launch option when known, as the Steam client picks it;
-// otherwise the largest top-level .exe. Engine options come from the game's
-// files (Unity: UnityPlayer.dll beside the executable), never from its app ID.
-static LaunchTarget pick_target(uint32_t appid, const std::wstring& root) {
+// otherwise the largest 64-bit top-level .exe. Engine options come from the
+// game's files (Unity: UnityPlayer.dll beside the executable), never from its
+// app ID. Play executes 64-bit guests only, so a 64-bit option wins even over
+// a 32-bit one typed "default" (Hades ships x64 and x86 entries). wanted (the
+// picker's choice) starts that option instead of the preferred one.
+static LaunchTarget pick_target(uint32_t appid, const std::wstring& root, const std::string* wanted=nullptr) {
     LaunchTarget t; Vdf info; const Vdf* app=nullptr; const launch_target::Entry* chosen=nullptr;
     std::vector<launch_target::Entry> options;
+    auto pe_arch=[&](const std::string& executable) {
+        std::string rel; if(!launch_target::relative_path(executable,rel)) return int(launch_target::archUnknown);
+        switch(pe_machine(root+L"\\"+widen(rel))) {
+            case IMAGE_FILE_MACHINE_AMD64: return int(launch_target::arch64);
+            case IMAGE_FILE_MACHINE_I386: return int(launch_target::arch32);
+            default: return int(launch_target::archUnknown);
+        }
+    };
     if(load_appinfo(appid,info,app)) {
         options=launch_target::entries(*app);
         std::string rel;
-        if(auto e=launch_target::choose(options)) {
-            if(!launch_target::relative_path(e->executable,rel)) t.why="Steam launch option \""+e->executable+"\" is not an install-relative path; ";
-            else if(GetFileAttributesW((root+L"\\"+widen(rel)).c_str())==INVALID_FILE_ATTRIBUTES) t.why="Steam launch option \""+rel+"\" is not installed; ";
-            else {t.exe=widen(rel);chosen=e;t.why="Steam launch option \""+rel+"\"";}
-        } else t.why="no Windows Steam launch option; ";
+        auto order=launch_target::ranked(options,pe_arch);
+        if(wanted) {   // the picker's row: only that option, never a silent fallback to another
+            const launch_target::Entry* only=nullptr;
+            for(auto e:order) if(e->executable==*wanted) { only=e; break; }
+            order.clear();
+            if(only) order.push_back(only);
+            else t.why="the chosen Steam launch option is no longer in the app's appinfo; ";
+        }
+        if(order.empty()&&t.why.empty()) t.why="no Windows Steam launch option; ";
+        for(auto e:order) {
+            if(!launch_target::relative_path(e->executable,rel)) {t.why="Steam launch option \""+e->executable+"\" is not an install-relative path; ";continue;}
+            if(GetFileAttributesW((root+L"\\"+widen(rel)).c_str())==INVALID_FILE_ATTRIBUTES) {t.why="Steam launch option \""+rel+"\" is not installed; ";continue;}
+            t.exe=widen(rel);chosen=e;
+            t.why="Steam launch option \""+rel+"\""+(launch_target::arch_of(*e,pe_arch)==launch_target::arch64?" (64-bit)":"");
+            break;
+        }
     } else t.why="no cached app info; ";
+    if(t.exe.empty()&&wanted) return t;   // a picked option that cannot start must not become another .exe
     if(t.exe.empty()) {
-        WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW((root + L"\\*.exe").c_str(), &fd); std::wstring best; uint64_t bs = 0;
+        WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW((root + L"\\*.exe").c_str(), &fd); std::vector<launch_target::Candidate> exes;
         if (h != INVALID_HANDLE_VALUE) { do { std::wstring n = fd.cFileName; std::wstring l = n; for (auto& ch : l) ch = (wchar_t)towlower(ch);
                 if (l.find(L"unins") != std::wstring::npos || l.find(L"crash") != std::wstring::npos || l.find(L"redist") != std::wstring::npos || l.find(L"setup") != std::wstring::npos) continue;
-                uint64_t sz = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow; if (sz > bs) { bs = sz; best = n; } } while (FindNextFileW(h, &fd)); FindClose(h); }
-        if (best.empty()) { t.why += "no launchable .exe in install dir"; return t; }
-        t.exe=best;t.why+="largest top-level .exe";
+                uint64_t sz = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+                int machine=pe_machine(root+L"\\"+n);
+                int arch=machine==IMAGE_FILE_MACHINE_AMD64?launch_target::arch64:
+                         machine==IMAGE_FILE_MACHINE_I386?launch_target::arch32:launch_target::archUnknown;
+                exes.push_back({play_runtime::narrow(n),sz,arch}); } while (FindNextFileW(h, &fd)); FindClose(h); }
+        auto best=launch_target::largest(exes);
+        if (!best) { t.why += "no launchable .exe in install dir"; return t; }
+        t.exe=widen(best->name);t.why+=best->arch==launch_target::arch64?"largest 64-bit top-level .exe":"largest top-level .exe";
     }
     auto slash=t.exe.find_last_of(L'\\');
     std::wstring dir=slash==std::wstring::npos?root:root+L"\\"+t.exe.substr(0,slash);
     bool unity=GetFileAttributesW((dir+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES;
     t.args=launch_target::arguments(chosen,unity);
+    // The option's own working directory (install-relative), as Steam honours it;
+    // the executable's directory when the option names none.
+    if(chosen&&!chosen->workingdir.empty()) { std::string wd; if(launch_target::relative_path(chosen->workingdir,wd)) t.workdir=wd; }
     if(unity)t.why+="; Unity player";
     return t;
 }
@@ -657,7 +688,9 @@ static void lp_watchdog() {
 }
 
 // Entry: called on the render thread; returns immediately (work happens on a worker thread).
-static void start_launch(uint32_t appid, const std::string& name, const std::string& dir, const char* via) {
+// option (the picker's choice, an appinfo executable) starts that launch option
+// instead of the preferred one; nullptr picks the preferred option as before.
+static void start_launch(uint32_t appid, const std::string& name, const std::string& dir, const char* via, const std::string* option=nullptr) {
     if(auto guest=play_runtime::observed.load(std::memory_order_acquire)) {
         std::lock_guard<std::mutex> lock(g_launch.m);
         g_launch.result="Game code from the last launch is still loaded; the launcher restarts to end it. Last event: "+guest->snapshot();
@@ -667,11 +700,14 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
     { std::lock_guard<std::mutex> l(g_launch.m); g_launch.result.clear();g_launch.ok=false;g_launch.attempt=std::to_string(GetCurrentProcessId())+":"+std::to_string(gen); } g_launch.phase = 1;
     const InstallInfo inst = read_install(appid);   // the game folder may be on another drive (marker root)
     const std::wstring folder = !dir.empty() && inst.installed && inst.dir == dir ? inst.folder : g_dir + L"\\" + widen(dir);
-    const LaunchTarget target = dir.empty() ? LaunchTarget{} : pick_target(appid, folder);
+    const LaunchTarget target = dir.empty() ? LaunchTarget{} : pick_target(appid, folder, option);
     const std::string args = target.args;
-    char b[1500]; snprintf(b, sizeof b, "{\"appid\":%u,\"attemptId\":\"%s\",\"name\":\"%s\",\"installDir\":\"%s\",\"time\":\"%s\",\"args\":\"%s\",\"via\":\"%s\"}\n", appid, g_launch.attempt.c_str(), json_esc(name).c_str(), json_esc(dir).c_str(), utc_iso().c_str(), args.c_str(), via);
+    // The chosen option's executable, arguments and working directory, so the
+    // request says exactly what Play starts (a picker choice included).
+    char b[2048]; snprintf(b, sizeof b, "{\"appid\":%u,\"attemptId\":\"%s\",\"name\":\"%s\",\"installDir\":\"%s\",\"time\":\"%s\",\"exe\":\"%s\",\"args\":\"%s\",\"workingDir\":\"%s\",\"via\":\"%s\"}\n", appid, g_launch.attempt.c_str(), json_esc(name).c_str(), json_esc(dir).c_str(), utc_iso().c_str(), json_esc(play_runtime::narrow(target.exe)).c_str(), args.c_str(), json_esc(target.workdir).c_str(), via);
     write_text(g_dir + L"\\launch_request.json", b);
     logf("launch: request written LocalState\\launch_request.json appid=%u attempt=%s dir=%s via=%s", appid, g_launch.attempt.c_str(), dir.c_str(), via);
+    logf("launch: target exe=\"%s\" args=\"%s\" workingDir=\"%s\" (%s)", play_runtime::narrow(target.exe).c_str(), target.args.c_str(), target.workdir.c_str(), target.why.c_str());
     std::thread([=] {
         init_apartment(apartment_type::multi_threaded);
         auto finish = [&](const std::string& r,bool ok,int mapped,int total) {lp_finish(gen,appid,r,ok,mapped,total);};
@@ -689,7 +725,7 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
             // Keep the previous attempt's log beside this one (launch_probe.previous.log).
             MoveFileExW((g_dir + L"\\launch_probe.log").c_str(), (g_dir + L"\\launch_probe.previous.log").c_str(), MOVEFILE_REPLACE_EXISTING);
             { std::lock_guard<std::mutex> l(g_lpm); if (g_lpf) fclose(g_lpf); g_lpf = _wfopen((g_dir + L"\\launch_probe.log").c_str(), L"wb"); g_lpMissing = g_lpStubbed = g_lpStubCalls = g_lpLines = 0; g_lpLastFail.clear(); }
-            LpCtx c; c.root = root; c.args = widen(args); c.names = names;c.gen=gen;c.appid=appid; bool noFault = lp_run_seh(&c);
+            LpCtx c; c.root = root; c.args = widen(args); c.cwd = target.workdir.empty() ? std::wstring() : root + L"\\" + widen(target.workdir); c.names = names;c.gen=gen;c.appid=appid; bool noFault = lp_run_seh(&c);
             { std::lock_guard<std::mutex> l(g_lpm); if (g_lpf) { fclose(g_lpf); g_lpf = nullptr; } }
             int total=play_runtime::state?int(play_runtime::state->moduleCount):int(names.size());
             const std::string fault=noFault?(c.fault.empty()?c.failName:c.fault):
