@@ -585,9 +585,12 @@ struct Cpu {
             else if (pd) { for (int i = 0; i < 2; ++i) { double x = std::sqrt(sse_f64(r, i * 8)); uint64_t q = f64b(x); a[i * 2] = uint32_t(q); a[i * 2 + 1] = uint32_t(q >> 32); } }
             else { for (int i = 0; i < 4; ++i) a[i] = f32b(std::sqrt(sse_f32(r, i * 4))); }
             sse_write_reg(modrm_reg, a); return; }
-        case 0x52: case 0x53: {  // rsqrtps / rcpps (approximations: the exact reciprocal is closer than the hardware estimate)
+        case 0x52: case 0x53: {  // rsqrtps/rcpps, and the F3 scalar rsqrtss/rcpss
             sse_reg(modrm_reg, a);
-            for (int i = 0; i < 4; ++i) { float x = sse_f32(r, i * 4); a[i] = f32b(op == 0x52 ? 1.0f / std::sqrt(x) : 1.0f / x); }
+            // The scalar forms read one float and leave lanes 1-3 alone; a
+            // memory source is only 4 bytes, so reading four would fault.
+            int lanes = ss ? 1 : 4;
+            for (int i = 0; i < lanes; ++i) { float x = sse_f32(r, i * 4); a[i] = f32b(op == 0x52 ? 1.0f / std::sqrt(x) : 1.0f / x); }
             sse_write_reg(modrm_reg, a); return; }
         case 0x54: case 0x55: case 0x56: case 0x57: {  // and/andn/or/xor
             sse_reg(modrm_reg, a); sse_read(r, b);

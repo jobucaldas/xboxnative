@@ -386,10 +386,13 @@ static void test_sse_regressions() {
     auto bt_case = [&](unsigned bit) {
         // Values chosen so the encoded bit differs from bit 0 of EAX/ECX: with
         // the old register-index bug the two disagree and this fails.
+        // `which` selects the hardware form (immediate 0, 4 or 31); the switch
+        // below is keyed on it, not on the bit value itself.
+        const unsigned which = bit == 0 ? 0 : bit == 4 ? 1 : 2;
         for (uint32_t v : {0x00000001u, 0x00000010u, 0x80000000u, 0x7fffffffu, 0xffffffffu, 0u}) {
             for (int act = 0; act < 4; ++act) {
                 uint32_t nv = v; unsigned char ncf = 0;
-                switch (bit * 4 + act) {
+                switch (which * 4 + act) {
                 case 0: asm volatile("movl %2, %%eax\n\tbtl $0, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
                 case 4: asm volatile("movl %2, %%eax\n\tbtl $4, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
                 case 8: asm volatile("movl %2, %%eax\n\tbtl $31, %%eax\n\tsetc %1\n\tmovl %%eax, %0" : "=r"(nv), "=r"(ncf) : "r"(v) : "eax", "cc"); break;
@@ -450,6 +453,25 @@ static void test_sse_regressions() {
              0xF3, 0x0F, 0x51, 0xC1, 0x0F, 0x11, 0x05, 0x10, 0x00, 0x02, 0x00}, 0, 0, 0, false);
     EXPECT(m.mem.r32(Machine::DATA + 16) == f32b(4.0f) && m.mem.r32(Machine::DATA + 20) == f32b(9.0f),
            "sqrtss xmm0(4),xmm1(16): got %g %g", double(bf32(m.mem.r32(Machine::DATA + 16))), double(bf32(m.mem.r32(Machine::DATA + 20))));
+    // rsqrtss/rcpss (F3 0F 52/53) are scalar too: one lane from the source, the
+    // destination's upper lanes kept. A memory source is 4 bytes, so reading
+    // four lanes would fault past the operand.
+    m.mem.w32(Machine::DATA, f32b(4.0f)); m.mem.w32(Machine::DATA + 4, f32b(9.0f));
+    m.mem.w32(Machine::DATA + 8, f32b(16.0f)); m.mem.w32(Machine::DATA + 12, f32b(25.0f));
+    exec(m, {0x0F, 0x10, 0x05, 0x00, 0x00, 0x02, 0x00, 0x0F, 0x10, 0x0D, 0x08, 0x00, 0x02, 0x00,
+             0xF3, 0x0F, 0x53, 0xC1, 0x0F, 0x11, 0x05, 0x10, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    EXPECT(m.mem.r32(Machine::DATA + 16) == f32b(0.0625f) && m.mem.r32(Machine::DATA + 20) == f32b(9.0f),
+           "rcpss xmm0(4),xmm1(16): got %g %g", double(bf32(m.mem.r32(Machine::DATA + 16))), double(bf32(m.mem.r32(Machine::DATA + 20))));
+    // rcpss xmm0, [DATA+12] — a 4-byte memory operand; lanes 1-3 stay.
+    exec(m, {0x0F, 0x10, 0x05, 0x00, 0x00, 0x02, 0x00, 0xF3, 0x0F, 0x53, 0x05, 0x0C, 0x00, 0x02, 0x00,
+             0x0F, 0x11, 0x05, 0x10, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    EXPECT(m.mem.r32(Machine::DATA + 16) == f32b(0.04f) && m.mem.r32(Machine::DATA + 20) == f32b(9.0f),
+           "rcpss xmm0,[25]: got %g %g", double(bf32(m.mem.r32(Machine::DATA + 16))), double(bf32(m.mem.r32(Machine::DATA + 20))));
+    // rsqrtss xmm0, xmm1 (F3 0F 52 C1): 1/sqrt(16) = 0.25.
+    exec(m, {0x0F, 0x10, 0x05, 0x00, 0x00, 0x02, 0x00, 0x0F, 0x10, 0x0D, 0x08, 0x00, 0x02, 0x00,
+             0xF3, 0x0F, 0x52, 0xC1, 0x0F, 0x11, 0x05, 0x10, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+    EXPECT(m.mem.r32(Machine::DATA + 16) == f32b(0.25f) && m.mem.r32(Machine::DATA + 20) == f32b(9.0f),
+           "rsqrtss xmm0(4),xmm1(16): got %g %g", double(bf32(m.mem.r32(Machine::DATA + 16))), double(bf32(m.mem.r32(Machine::DATA + 20))));
     // unpcklps/unpckhps interleave dest,src (dest first).
     m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u}.data());
     m.mem.w128(Machine::DATA + 16, std::array<uint32_t, 4>{0xAAAAAAAAu, 0xBBBBBBBBu, 0xCCCCCCCCu, 0xDDDDDDDDu}.data());
