@@ -19,6 +19,7 @@ static LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM p){
  if(m==WM_SIZE)sizedParam=p;
  return DefWindowProcW(h,m,w,p);
 }static LRESULT CALLBACK ansiProc(HWND h,UINT m,WPARAM w,LPARAM p){return DefWindowProcA(h,m,w,p);}
+static LRESULT CALLBACK valueProc(HWND,UINT m,WPARAM,LPARAM){return m==WM_APP?7:0;}
 
 static LRESULT CALLBACK subclass(HWND h,UINT m,WPARAM w,LPARAM p){if(m==WM_APP)return 42;return CallWindowProcW(proc,h,m,w,p);}
 static int rejectedDestroyed,rejectedCreated;
@@ -134,6 +135,8 @@ extern "C" DWORD WINAPI u32c_entry(){
   WCHAR wsmall[5]={};check(SendMessageW(ah,WM_GETTEXT,5,(LPARAM)wsmall)==4&&!lstrcmpW(wsmall,L"wide"));
   check(PostMessageA(ah,WM_USER+5,7,9));MSG am;check(PeekMessageA(&am,ah,WM_USER+5,WM_USER+5,PM_REMOVE)&&am.wParam==7&&am.lParam==9);
   check(!IsWindowUnicode(ah));HDC adc=GetDC(ah);check(adc&&WindowFromDC(adc)==ah);ReleaseDC(ah,adc);check(!WindowFromDC(adc));
+  // CallWindowProcA forwards to the same record proc; a null proc is a no-op, as Windows'.
+  check(CallWindowProcA(valueProc,ah,WM_APP,0,0)==7);check(CallWindowProcA(0,ah,WM_APP,0,0)==0);
   check(DestroyWindow(ah));check(UnregisterClassA("u32cansi",0));}
  check(SetProcessDPIAware()&&SetProcessDPIAware());
  // DPI awareness contexts (SDL3/Unity probe these at runtime). The process has
@@ -171,6 +174,11 @@ extern "C" DWORD WINAPI u32c_entry(){
  WCHAR layoutName[KL_NAMELENGTH];check(GetKeyboardLayout(0)==(HKL)(ULONG_PTR)0x04090409);check(GetKeyboardLayoutNameW(layoutName)&&wstreq(layoutName,L"00000409"));
  int monitors=0;check(EnumDisplayMonitors(0,0,[](HMONITOR,HDC,RECT* r,LPARAM p)->BOOL{++*(int*)p;return r->right==1920;},(LPARAM)&monitors)&&monitors==1);
  DEVMODEW dm={};check(EnumDisplaySettingsW(0,0,&dm)&&dm.dmPelsWidth==1920&&dm.dmPelsHeight==1080);
+ // EnumDisplaySettingsExW: the record display is the only device; wined3d walks it per output.
+ {DEVMODEW ex={};check(EnumDisplaySettingsExW(0,0,&ex,0)&&ex.dmPelsWidth==1920&&ex.dmPelsHeight==1080);
+  check(EnumDisplaySettingsExW(L"\\\\.\\DISPLAY1",0,&ex,0)&&ex.dmPelsWidth==1920);
+  check(!EnumDisplaySettingsExW(L"\\\\.\\DISPLAY2",0,&ex,0));
+  SetLastError(0);check(!EnumDisplaySettingsExW(0,0,0,0)&&GetLastError()==ERROR_INVALID_PARAMETER);}
  DISPLAY_DEVICEA dd={};dd.cb=sizeof(dd);check(EnumDisplayDevicesA(0,0,&dd,0)&&streq(dd.DeviceName,"\\\\.\\DISPLAY1"));check(!EnumDisplayDevicesA(0,1,&dd,0));
  WINDOWPLACEMENT wp={sizeof(wp)};check(GetWindowPlacement(h2,&wp)&&wp.showCmd==SW_SHOWNORMAL&&wp.rcNormalPosition.right==10);
  RAWINPUTDEVICE rid={1,6,0,h2};check(RegisterRawInputDevices(&rid,1,sizeof(rid)));UINT rc=0;check(GetRawInputDeviceList(0,&rc,sizeof(RAWINPUTDEVICELIST))==0&&rc==0);
@@ -209,6 +217,8 @@ extern "C" DWORD WINAPI u32c_entry(){
  // batch 3: GetDC/ReleaseDC, standard cursor/icon loading, CreateIconFromResourceEx+LookupIconIdFromDirectoryEx
  {HDC wdc=GetWindowDC(h2);check(wdc&&WindowFromDC(wdc)==h2&&ReleaseDC(h2,wdc)==1);check(GetWindowDC((HWND)0x99999)==0);}
  HDC dc=GetDC(h2);check(dc!=0);check(ReleaseDC(h2,dc)==1);check(ReleaseDC(h2,dc)==0);check(GetDC((HWND)0x99999)==0);
+ // GetDCEx without a clip region is GetDC (wined3d's caps context asks this way).
+ {HDC ex=GetDCEx(h2,0,0);check(ex&&WindowFromDC(ex)==h2&&ReleaseDC(h2,ex)==1);check(GetDCEx((HWND)0x99999,0,0)==0);}
  HCURSOR arrow=LoadCursorA(0,MAKEINTRESOURCEA(32512));check(arrow!=0);check(LoadCursorA(0,MAKEINTRESOURCEA(32512))==arrow);
  check(!LoadCursorA((HINSTANCE)0x1234,MAKEINTRESOURCEA(32512))&&GetLastError()==ERROR_RESOURCE_DATA_NOT_FOUND);
  HICON appIcon=LoadIconA(0,MAKEINTRESOURCEA(32512));check(appIcon!=0);check(LoadIconW(0,MAKEINTRESOURCEW(32512))==appIcon);check(appIcon!=(HICON)arrow);

@@ -24,6 +24,7 @@ EXPORTS
  GetWindowRect=c_GetWindowRect
  SendMessageW=c_SendMessageW
  CallWindowProcW=c_CallWindowProcW
+ CallWindowProcA=c_CallWindowProcA
  SetPropW=c_SetPropW
  GetPropW=c_GetPropW
  RemovePropW=c_RemovePropW
@@ -82,6 +83,7 @@ EXPORTS
  EnumDisplayMonitors=c_EnumDisplayMonitors
  EnumDisplaySettingsW=c_EnumDisplaySettingsW
  EnumDisplaySettingsA=c_EnumDisplaySettingsA
+ EnumDisplaySettingsExW=c_EnumDisplaySettingsExW
  EnumDisplayDevicesA=c_EnumDisplayDevicesA
  GetWindowPlacement=c_GetWindowPlacement
  RegisterRawInputDevices=c_RegisterRawInputDevices
@@ -127,6 +129,7 @@ EXPORTS
  CopyImage=c_CopyImage
  GetDC=c_GetDC
  GetWindowDC=c_GetWindowDC
+ GetDCEx=c_GetDCEx
  ReleaseDC=c_ReleaseDC
  LoadCursorA=c_LoadCursorA
  LoadIconA=c_LoadIconA

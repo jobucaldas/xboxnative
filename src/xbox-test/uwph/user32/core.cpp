@@ -157,6 +157,9 @@ extern "C" LRESULT WINAPI c_SendMessageW(HWND h,UINT m,WPARAM w,LPARAM p){
  size_t chars=std::min(text.size(),size_t(w)-1);memcpy((void*)p,text.data(),chars*sizeof(WCHAR));((LPWSTR)p)[chars]=0;return LRESULT(chars);
 }
 extern "C" LRESULT WINAPI c_CallWindowProcW(Proc proc,HWND h,UINT m,WPARAM w,LPARAM p){return proc?proc(h,m,w,p):0;}
+// Wine's CallWindowProcA dispatches the same call to the ANSI procedure, which
+// receives message strings unconverted (winproc.c dispatch_win_proc_params).
+extern "C" LRESULT WINAPI c_CallWindowProcA(Proc proc,HWND h,UINT m,WPARAM w,LPARAM p){return proc?proc(h,m,w,p):0;}
 extern "C" BOOL WINAPI c_SetPropW(HWND h,LPCWSTR n,HANDLE v){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!n)return FALSE;w->props[key(n)]=v;return TRUE;}
 extern "C" HANDLE WINAPI c_GetPropW(HWND h,LPCWSTR n){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!n)return nullptr;auto p=w->props.find(key(n));return p==w->props.end()?nullptr:p->second;}
 extern "C" HANDLE WINAPI c_RemovePropW(HWND h,LPCWSTR n){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);if(!w||!n)return nullptr;auto p=w->props.find(key(n));if(p==w->props.end())return nullptr;HANDLE v=p->second;w->props.erase(p);return v;}
@@ -270,6 +273,13 @@ extern "C" BOOL WINAPI c_EnumDisplaySettingsA(LPCSTR,DWORD mode,DEVMODEA* dm){
  std::lock_guard<std::recursive_mutex> l(mutex);
  fillMode(dm->dmFields,dm->dmPelsWidth,dm->dmPelsHeight,dm->dmBitsPerPel,dm->dmDisplayFrequency,dm->dmPosition);
  return TRUE;
+}
+// EnumDisplaySettingsExW names an output and takes flags; this display has one
+// output and no flags change its answer (Wine win32u NtUserEnumDisplaySettings).
+extern "C" BOOL WINAPI c_EnumDisplaySettingsExW(LPCWSTR device,DWORD mode,DEVMODEW* dm,DWORD){
+ if(!dm){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
+ if(device&&*device&&wcscmp(device,L"\\\\.\\DISPLAY1"))return FALSE;
+ return c_EnumDisplaySettingsW(device,mode,dm);
 }
 extern "C" BOOL WINAPI c_EnumDisplayDevicesA(LPCSTR device,DWORD num,DISPLAY_DEVICEA* dd,DWORD){
  if(!dd)return FALSE;
@@ -586,6 +596,10 @@ extern "C" int WINAPI uwph_u32c_device_caps(HDC hdc,int cap){
  SetLastError(ERROR_INVALID_HANDLE);return 0;
 }
 extern "C" HDC WINAPI c_GetWindowDC(HWND h){return c_GetDC(h);} // same opaque record DC as GetDC; Mesa's WGL presenter imports it (never drawn on: no GDI surface)
+// GetDCEx returns the same per-call record DC as GetDC: there is no DCE cache or
+// clipping region to honour, and no surface to draw on. A NULL window is the
+// desktop, as GetDC(NULL) is; an unknown window fails as Wine's does.
+extern "C" HDC WINAPI c_GetDCEx(HWND h,HRGN,DWORD){return c_GetDC(h);}
 extern "C" int WINAPI c_ReleaseDC(HWND h,HDC hdc){std::lock_guard<std::recursive_mutex> l(mutex);for(size_t i=0;i<dcs.size();i++)if((HDC)dcs[i].get()==hdc&&dcs[i]->hwnd==h){dcs.erase(dcs.begin()+i);return 1;}return 0;}
 extern "C" HANDLE WINAPI c_LoadImageW(HINSTANCE inst,LPCWSTR name,UINT type,int cx,int cy,UINT flags){
  std::lock_guard<std::recursive_mutex> l(mutex);
