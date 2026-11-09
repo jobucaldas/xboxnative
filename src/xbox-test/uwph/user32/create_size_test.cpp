@@ -8,9 +8,12 @@
 #include <cstdlib>
 static unsigned checks=0;
 #define CHECK(x) do{++checks;if(!(x)){printf("FAIL line %d: %s\n",__LINE__,#x);exit(1);}}while(0)
-static int order[8],n;static WPARAM sizeKind;static LPARAM sizeParam,moveParam;
+static int order[8],n;static int activateApp,activate,setFocus;static WPARAM sizeKind;static LPARAM sizeParam,moveParam;
 static LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM p){
  if(m==WM_NCCREATE)return TRUE;
+ if(m==WM_ACTIVATEAPP&&w)++activateApp;
+ if(m==WM_ACTIVATE&&LOWORD(w)==WA_ACTIVE)++activate;
+ if(m==WM_SETFOCUS)++setFocus;
  if(m==WM_CREATE&&n<8)order[n++]=WM_CREATE;
  if(m==WM_SIZE&&n<8){order[n++]=WM_SIZE;sizeKind=w;sizeParam=p;}
  if(m==WM_MOVE&&n<8){order[n++]=WM_MOVE;moveParam=p;}
@@ -41,6 +44,18 @@ int main(int argc,char** argv){
  win=fCreateWindowExW(0,cls.lpszClassName,L"",WS_OVERLAPPEDWINDOW|WS_VISIBLE,10,20,800,600,nullptr,nullptr,cls.hInstance,nullptr);CHECK(win);
  CHECK(fGetClientRect(win,&c));CHECK(sizeParam==MAKELPARAM(c.right,c.bottom)&&c.right>0);
  CHECK(fDestroyWindow(win));
+ // The record user32 activates the first shown top-level window (Windows does;
+ // a Wine session without a window manager may not, so only the record DLL is checked).
+ if(argc>1){
+  API(GetForegroundWindow);API(GetActiveWindow);API(GetFocus);
+  activateApp=activate=setFocus=0;
+  win=fCreateWindowExW(0,cls.lpszClassName,L"",WS_OVERLAPPEDWINDOW|WS_VISIBLE,10,20,800,600,nullptr,nullptr,cls.hInstance,nullptr);CHECK(win);
+  CHECK(fGetForegroundWindow()==win&&fGetActiveWindow()==win&&fGetFocus()==win);
+  CHECK(activateApp==1&&activate==1&&setFocus==1);
+  HWND second=fCreateWindowExW(0,cls.lpszClassName,L"",WS_OVERLAPPEDWINDOW|WS_VISIBLE,0,0,100,100,nullptr,nullptr,cls.hInstance,nullptr);CHECK(second);
+  CHECK(fGetForegroundWindow()==win&&activate==1);   // the first stays foreground
+  CHECK(fDestroyWindow(second));CHECK(fDestroyWindow(win));
+ }
  printf("create-size checks=%u failures=0\n",checks);
  return 0;
 }

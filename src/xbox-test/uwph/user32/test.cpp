@@ -87,8 +87,10 @@ extern "C" DWORD WINAPI u32c_entry(){
  // item 44: input/cursor/focus
  WNDCLASSEXW wc2={};wc2.cbSize=sizeof(wc2);wc2.lpfnWndProc=proc;wc2.lpszClassName=L"U32cItem44";
  check(RegisterClassExW(&wc2)!=0);HWND h2=CreateWindowExW(0,wc2.lpszClassName,L"focus",WS_VISIBLE,0,0,10,10,0,0,0,(void*)0x12345678);check(h2!=0);
- check(!GetFocus());check(SetFocus(h2)==0&&GetFocus()==h2);check(SetFocus(0)==h2&&!GetFocus());
- check(!GetForegroundWindow()&&!GetActiveWindow());check(SetForegroundWindow(h2)&&GetForegroundWindow()==h2&&GetActiveWindow()==h2);
+ // The first visible top-level window is activated, as Windows does (Unity ignores pads otherwise).
+ check(GetForegroundWindow()==h2&&GetActiveWindow()==h2&&GetFocus()==h2);
+ check(SetFocus(0)==h2&&!GetFocus());check(SetFocus(h2)==0&&GetFocus()==h2);
+ check(SetForegroundWindow(h2)&&GetForegroundWindow()==h2&&GetActiveWindow()==h2);
  check(!SetCapture(0));check(SetCapture(h2)==0);check(ReleaseCapture());
  check(!(GetAsyncKeyState('A')&0x8000));uwph_u32c_key_event('A',TRUE);
  {SHORT s=GetAsyncKeyState('A');check((s&0x8000)&&(s&1));}check(!(GetAsyncKeyState('A')&1));check(GetKeyState('A')&0x8000);
