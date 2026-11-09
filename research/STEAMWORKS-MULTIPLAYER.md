@@ -84,6 +84,17 @@ debug print out. There is no settings file or saved blob to read. That is why
 the launcher observes the call at the export boundary instead of reading
 provider state.
 
+The observation covers the **flat export** `SteamAPI_ISteamFriends_SetRichPresence`
+(static import or `GetProcAddress`) and its `ClearRichPresence` sibling. That is
+the path the games that set rich presence take: Megabonk's IL2CPP
+`GameAssembly.dll` carries the export name and binds it at runtime, and Slime
+Rancher's Steamworks.NET assembly P/Invokes the same flat export. A game built
+against the C++ SDK calls `SteamFriends()->SetRichPresence(...)`, which is an
+inline vtable call on the object `SteamInternal_FindOrCreateUserInterface`
+returned — that never passes an export, so it would not be observed. Covering it
+would mean rewriting a slot in the provider's own vtable at runtime; not done
+here, and no owned game needs it today.
+
 The source confirms it (`dll/steam_friends.cpp`, tag `release-2026_09_27`):
 `SetRichPresence` writes `us.mutable_rich_presence()` and calls
 `resend_friend_data()`, which only sets `modified = true`; `RunCallbacks()`

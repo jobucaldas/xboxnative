@@ -428,18 +428,30 @@ static void richPresenceClear() {
     RichPresenceTap tap; {std::lock_guard<std::mutex> lock(richPresenceMutex);tap=richPresence;}
     if(tap.clear)tap.clear();
 }
+// The real provider addresses are re-read on every resolution: a released
+// launch unmaps the provider, so the next one may map it at a different base.
+static std::atomic<uintptr_t> richPresenceRealSet{0}, richPresenceRealClear{0};
 static uintptr_t richPresenceHook(const char* name,uintptr_t real) {
     if(!real) return 0;
     if(!strcmp(name,"SteamAPI_ISteamFriends_SetRichPresence")) {
         using Fn=uint32_t(*)(void*,const char*,const char*);
-        static Fn inner=(Fn)real;
-        static Fn hook=[](void* self,const char* key,const char* value){uint32_t ok=inner(self,key,value);if(key)richPresenceSet(key,value);return ok;};
+        richPresenceRealSet.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,const char* key,const char* value){
+            auto inner=(Fn)richPresenceRealSet.load(std::memory_order_acquire);
+            uint32_t ok=inner?inner(self,key,value):0;
+            if(key)richPresenceSet(key,value);
+            return ok;
+        };
         return (uintptr_t)hook;
     }
     if(!strcmp(name,"SteamAPI_ISteamFriends_ClearRichPresence")) {
         using Fn=void(*)(void*);
-        static Fn inner=(Fn)real;
-        static Fn hook=[](void* self){inner(self);richPresenceClear();};
+        richPresenceRealClear.store(real,std::memory_order_release);
+        static Fn hook=[](void* self){
+            auto inner=(Fn)richPresenceRealClear.load(std::memory_order_acquire);
+            if(inner)inner(self);
+            richPresenceClear();
+        };
         return (uintptr_t)hook;
     }
     return 0;
