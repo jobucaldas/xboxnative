@@ -44,6 +44,20 @@ x86-crt: sync ok
 x86-crt: checks 35 failed 0'
 [[ $body == "$want" ]] || { echo "X86-GUEST FAIL: stdout differs"; diff <(echo "$want") <(echo "$body") || true; exit 1; }
 echo "X86-GUEST PASS: mingw CRT program (printf with doubles, heap, qsort, TLS, VirtualAlloc) ran in the interpreter to exit 42"
+# The launcher's own PE32 entry point (host/x86/x86_play.h): the structured
+# result launch.h logs and launch_result.json is built from, plus the live
+# output tee and the pre-entry progress callback.
+"${CXX:-c++}" -std=c++17 -O2 -mno-red-zone -Wall -Wextra -Werror "$here/x86-play.cpp" -o "$tmp/x86-play"
+set +e
+pout=$("$tmp/x86-play" "$tmp/fixture-crt.exe"); prc=$?
+set -e
+[[ $prc -eq 0 ]] || { echo "X86-GUEST FAIL: x86_play exit $prc"; echo "$pout"; exit 1; }
+grep -q '^play: loaded=1 finished=1 exit=42 .* imports=65 bound=65 ' <<<"$pout" || { echo "X86-GUEST FAIL: x86_play result"; echo "$pout"; exit 1; }
+grep -q '^play: on_loaded calls=1 before-entry=1 ' <<<"$pout" || { echo "X86-GUEST FAIL: x86_play progress callback"; echo "$pout"; exit 1; }
+! grep -q '^play: unresolved\|^play: fault' <<<"$pout" || { echo "X86-GUEST FAIL: x86_play reported a fault or unresolved import"; echo "$pout"; exit 1; }
+pbody=$(sed '/^play: /d' <<<"$pout")
+[[ $pbody == "$want" ]] || { echo "X86-GUEST FAIL: x86_play tee differs"; diff <(echo "$want") <(echo "$pbody") || true; exit 1; }
+echo "X86-GUEST PASS: the launcher's PE32 entry point reports the same run (loaded, imports bound, exit 42) and streams its output"
 if [[ ${1:-} == --wine ]]; then
   set +e; wout=$(WINEDEBUG=-all wine "$tmp/fixture-crt.exe" | tr -d '\r'); wrc=$?; set -e
   [[ $wrc -eq 42 ]] || { echo "X86-GUEST FAIL: wine exit $wrc (want 42)"; exit 1; }
