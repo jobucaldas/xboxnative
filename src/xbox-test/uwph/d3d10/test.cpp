@@ -182,6 +182,14 @@ extern "C" DWORD WINAPI d3d10_test_entry() {
         CHECK(readback==buffer);
         CHECK(stride==16&&offset==0);
         if(readback)readback->Release();
+        // The buffer holds the device alive; Wine never finishes process exit
+        // while a D3D object outlives the test, so unbind and release it. D3D11
+        // dereferences the stride array for every slot, so unbinding passes a
+        // NULL buffer entry rather than a NULL list.
+        ID3D10Buffer* none[1]={nullptr};
+        const UINT zero=0;
+        device->IASetVertexBuffers(0,1,none,&zero,&zero);
+        buffer->Release();
     }
 
     // A render target: the clear path a game's first frame takes.

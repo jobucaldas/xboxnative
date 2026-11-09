@@ -533,6 +533,19 @@ struct Device : d3dshim::Base, ID3D10Device1 {
     Device() { self=static_cast<ID3D10Device1*>(this); }
     ~Device() {
         if(multithreadObject)multithreadObject->Release();
+        // Every Held slot owns a reference on what the guest bound. Releasing
+        // the context first would leave those D3D11 objects alive with the
+        // context's own references, and Wine's present path never finishes
+        // process exit while any D3D object outlives its device. A failed
+        // D3D11CreateDevice leaves no context, and then nothing was bound.
+        if(ID3D11DeviceContext* immediate=context())immediate->ClearState();
+        vsConstantBuffers.clear();psConstantBuffers.clear();gsConstantBuffers.clear();
+        vsShaderResources.clear();psShaderResources.clear();gsShaderResources.clear();
+        vsSamplers.clear();psSamplers.clear();gsSamplers.clear();
+        vsShader.clear();psShader.clear();gsShader.clear();
+        inputLayout.clear();indexBuffer.clear();depthStencilState.clear();blendState.clear();
+        rasterizerState.clear();depthStencilView.clear();predicate.clear();
+        vertexBuffers.clear();renderTargets.clear();streamOutput.clear();
         host.destroy();
     }
     ID3D11Device* device() const { return host.device; }
@@ -1416,7 +1429,10 @@ namespace {
 // applied or released.
 struct StateBlock : d3dshim::Base, ID3D10StateBlock {
     StateBlock() { self=static_cast<ID3D10StateBlock*>(this);D3DSHIM_IDS(&__uuidof(ID3D10StateBlock)); }
-    ~StateBlock() { cleanup(); }
+    // The block holds the device it was created from (D3D10CreateStateBlock
+    // AddRefs it), so releasing it must drop that reference too; cleanup() only
+    // runs between Capture() calls and deliberately keeps the device.
+    ~StateBlock() { cleanup();if(device){device->Release();device=nullptr;} }
     D3DSHIM_REF
     D3DSHIM_QI
     ID3D10Device* device=nullptr;
