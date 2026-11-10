@@ -230,6 +230,10 @@ static bool g_requested = false;   // this process has consumed a request
 static bool tick() {
     static double next = 0;
     if (g_requested || g_running.load(std::memory_order_acquire)) return false;
+    // A launch owns the probe sink and the one 64-bit guest slot: leave the
+    // request in place until the launcher is idle rather than failing it (or
+    // redirecting a running launch's evidence into selftest_probe.log).
+    if (g_launch.phase == 1 || g_launch.phase == 3 || play_runtime::observed.load(std::memory_order_acquire)) return false;
     double t = now_s();
     if (t < next) return false;
     next = t + 1.0;
