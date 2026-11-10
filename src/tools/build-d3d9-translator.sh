@@ -51,9 +51,16 @@ obj=$work/obj; mkdir -p "$obj"
 # -fno-builtin and -fno-tree-loop-distribute-patterns for the same reason as the
 # shim's build.sh: this DLL supplies its own memset/memcpy, and without them the
 # compiler turns those loops back into calls to themselves.
+#
+# Unwind tables are ON, deliberately. Play maps this DLL into the launcher and
+# calls it on the guest's thread; when the donor faults, the OS has to unwind to
+# that thread's __try/__except to reach Play's crash record, and it can only do
+# that through this image's .pdata. With -fno-asynchronous-unwind-tables the
+# exception directory is empty, the mapper accepts that silently, and a fault
+# here is never dispatched: the launcher dies with no record at all.
 flags=(-c -O2 -std=c++17 -fno-builtin -fno-tree-loop-distribute-patterns
        -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-stack-protector
-       -fno-asynchronous-unwind-tables -Wall -Wextra -Wno-unused-parameter
+       -Wall -Wextra -Wno-unused-parameter
        -Wno-sign-compare -Wno-missing-field-initializers)
 # The donor's headers include <memory> for std::shared_ptr. On the mcf thread
 # model (NixOS's mingw) libstdc++ pulls that in through mcfgthread, whose
@@ -94,6 +101,10 @@ rwx=$(llvm-readobj --sections "$out/d3d9translator.dll" \
 [[ -z $rwx ]] || { echo "d3d9translator.dll has writable code section(s): $rwx" >&2; exit 1; }
 llvm-readobj --coff-exports "$out/d3d9translator.dll" | grep -q 'Name: d3d9Translate$' \
     || { echo "d3d9translator.dll does not export d3d9Translate" >&2; exit 1; }
+# A fault inside the donor must reach the guest thread's handler, which needs the
+# image's unwind data: an empty exception directory means the OS cannot unwind
+# out of it, so the fault is never dispatched and the launcher dies silently.
+python3 -I "$root/src/xbox-test/uwph/d3d9/check-unwind-data.py" "$out/d3d9translator.dll"
 ( cd "$out" && sha256sum -- d3d9translator.dll >SHA256SUMS )
 cat >"$out/SOURCE.txt" <<S
 Built from DXUP $(basename "$url") (sha256 $sha), zlib licence, Copyright (c) 2018 Joshua Ashton,
