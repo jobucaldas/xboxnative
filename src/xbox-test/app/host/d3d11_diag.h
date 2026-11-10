@@ -27,14 +27,22 @@
 // target and is then resolved/copied into the frame is invisible in a
 // direct-draw-only summary. Draws are also bucketed by the format of the
 // target they were submitted to. Null shader-resource entries are counted per
-// stage, because a layer that samples a texture the guest never bound renders
-// black with no failed call anywhere. The arguments of an indirect draw are
-// read where the guest writes them (CreateBuffer's initial data,
-// UpdateSubresource, and the Unmap of a write-only Map), so a zero-count
-// submission is visible. Only the bytes the buffer holds are read: the
-// argument layouts differ in size (20 for the indexed draws, 16 for
-// DrawInstancedIndirect, 12 for DispatchIndirect), and a short upload is
-// reported as raw words rather than named fields.
+// stage — now including the geometry stage, whose set is not hooked anywhere
+// else — because a layer that samples a texture the guest never bound renders
+// black with no failed call anywhere. The geometry shader's presence on a
+// draw is tracked alongside hull/domain: Halo Wars: DE creates a thousand of
+// them and draws tens of thousands of point-list instances, a shape that only
+// makes sense with a GS bound, and a summary that cannot say whether the GS
+// was bound cannot tell a working expansion layer from a silently skipped
+// one. Zero-area viewports and scissor rects, GenerateMips on a chain that
+// cannot generate, and stream-output targets are counted because each one
+// silently draws nothing or leaves a texture empty with no failed call
+// anywhere. The arguments of an indirect draw are read where the guest writes
+// them (CreateBuffer's initial data, UpdateSubresource, and the Unmap of a
+// write-only Map), so a zero-count submission is visible. Only the bytes the
+// buffer holds are read: the argument layouts differ in size (20 for the
+// indexed draws, 16 for DrawInstancedIndirect, 12 for DispatchIndirect), and
+// a short upload is reported as raw words rather than named fields.
 #pragma once
 #include <d3d11.h>
 #include <d3d11_1.h>
@@ -74,12 +82,13 @@ static_assert(CheckFeatureSupport==33&&CreateDeferredContext==27&&CreateSamplerS
 // ID3D11DeviceContext slots (ID3D11DeviceChild's 3 come first). Only the ones
 // the draw summary reads are named.
 enum ContextSlot {
-    PSSetShaderResources=8,DrawIndexed=12,Draw=13,Map=14,Unmap=15,DrawIndexedInstanced=20,DrawInstanced=21,IASetPrimitiveTopology=24,
-    VSSetShaderResources=25,SetPredication=30,OMSetRenderTargets=33,
-    OMSetRenderTargetsAndUnorderedAccessViews=34,DrawAuto=38,DrawIndexedInstancedIndirect=39,DrawInstancedIndirect=40,
-    Dispatch=41,DispatchIndirect=42,CopySubresourceRegion=46,CopyResource=47,UpdateSubresource=48,
-    ClearRenderTargetView=50,ClearDepthStencilView=53,ResolveSubresource=57,ExecuteCommandList=58,HSSetShaderResources=59,HSSetShader=60,
-    DSSetShaderResources=63,DSSetShader=64,FinishCommandList=114,
+    PSSetShaderResources=8,DrawIndexed=12,Draw=13,Map=14,Unmap=15,DrawIndexedInstanced=20,DrawInstanced=21,
+    GSSetShader=23,IASetPrimitiveTopology=24,VSSetShaderResources=25,SetPredication=30,GSSetShaderResources=31,
+    OMSetRenderTargets=33,OMSetRenderTargetsAndUnorderedAccessViews=34,SOSetTargets=37,DrawAuto=38,
+    DrawIndexedInstancedIndirect=39,DrawInstancedIndirect=40,Dispatch=41,DispatchIndirect=42,
+    RSSetViewports=44,RSSetScissorRects=45,CopySubresourceRegion=46,CopyResource=47,UpdateSubresource=48,
+    ClearRenderTargetView=50,ClearDepthStencilView=53,GenerateMips=54,ResolveSubresource=57,ExecuteCommandList=58,
+    HSSetShaderResources=59,HSSetShader=60,DSSetShaderResources=63,DSSetShader=64,FinishCommandList=114,
     // ID3D11DeviceContext1 continues the same vtable: ClearView is the 11.1
     // way to clear a render target or depth view, and a game that clears only
     // through it shows clears=0 in the summary. It is the 18th Context1
@@ -91,10 +100,13 @@ enum ContextSlot {
 // ClearView moves with it and kSlots must grow to cover it.
 static_assert(Context1ClearView==FinishCommandList+18&&Context1ClearView+1<kSlots,
     "ID3D11DeviceContext1::ClearView must fit inside kSlots");
-static_assert(ContextMap==14&&Unmap==15&&DrawIndexed==12&&DrawIndexedInstanced==20&&OMSetRenderTargets==33&&
-    OMSetRenderTargetsAndUnorderedAccessViews==34&&DrawAuto==38&&DrawIndexedInstancedIndirect==39&&
-    DrawInstancedIndirect==40&&DispatchIndirect==42&&UpdateSubresource==48&&
-    ResolveSubresource==57&&ExecuteCommandList==58&&HSSetShader==60&&DSSetShader==64&&FinishCommandList==114&&
+static_assert(ContextMap==14&&Unmap==15&&DrawIndexed==12&&DrawIndexedInstanced==20&&DrawInstanced==21&&
+    GSSetShader==23&&IASetPrimitiveTopology==24&&VSSetShaderResources==25&&SetPredication==30&&GSSetShaderResources==31&&
+    OMSetRenderTargets==33&&OMSetRenderTargetsAndUnorderedAccessViews==34&&SOSetTargets==37&&DrawAuto==38&&
+    DrawIndexedInstancedIndirect==39&&DrawInstancedIndirect==40&&Dispatch==41&&DispatchIndirect==42&&
+    RSSetViewports==44&&RSSetScissorRects==45&&CopySubresourceRegion==46&&CopyResource==47&&UpdateSubresource==48&&
+    ClearRenderTargetView==50&&ClearDepthStencilView==53&&GenerateMips==54&&ResolveSubresource==57&&
+    ExecuteCommandList==58&&HSSetShader==60&&DSSetShader==64&&FinishCommandList==114&&
     Context1ClearView==132,"ID3D11DeviceContext slot layout");
 
 // ---- reporting: once per key, bounded
@@ -200,7 +212,7 @@ constexpr size_t kFormatCache=8;   // power of two
 struct ContextState {
     std::atomic<void*> context{nullptr};
     std::atomic<unsigned> topology{0};
-    std::atomic<unsigned> shaders{0};
+    std::atomic<unsigned> shaders{0};    // bit0=HS bit1=DS bit2=GS bound
     std::atomic<unsigned> rtFormat{0};   // format of the first render target bound
     std::atomic<void*> formatView[kFormatCache];   // view the cached format is for
     std::atomic<unsigned> formatValue[kFormatCache];
@@ -229,6 +241,9 @@ inline void resetContext(void* self) {
     for(size_t i=0;i<kFormatCache;++i)s.formatView[i].store(nullptr,std::memory_order_relaxed);
 }
 inline std::atomic<uint64_t> draws[kDrawKinds][2][2];   // [kind][patchlist][hull+domain]
+// The geometry shader's presence on a draw, tracked like hull/domain but for
+// the stage Halo Wars' point-sprite terrain actually uses.
+inline std::atomic<uint64_t> drawsWithGs[kDrawKinds];
 // Draws per render-target format. A layer that renders into an off-screen
 // target (deferred/HDR) and is then tonemapped into the backbuffer shows up
 // here as draws into that format and none into the swapchain's; a layer that
@@ -267,9 +282,21 @@ inline std::atomic<uint64_t> rtvUavSets;         // OMSetRenderTargetsAndUnorder
 inline std::atomic<uint64_t> uavSets;            // ... and with at least one UAV
 inline std::atomic<uint64_t> resolves;           // ResolveSubresource (MSAA -> single sample)
 inline std::atomic<uint64_t> copies;             // CopyResource + CopySubresourceRegion
-inline std::atomic<uint64_t> srvSets[4];         // SetShaderResources calls, vs ps hs ds
-inline std::atomic<uint64_t> srvNulls[4];        // ... with at least one null entry (an unbound texture)
+inline std::atomic<uint64_t> srvSets[5];         // SetShaderResources calls, vs gs ps hs ds
+inline std::atomic<uint64_t> srvNulls[5];        // ... with at least one null entry (an unbound texture)
 inline std::atomic<uint64_t> predicated;         // SetPredication with a predicate object
+// Silent no-op paths a black layer hides behind: a zero-area viewport or
+// scissor rect clips every draw to nothing, GenerateMips on a non-mip or
+// non-shader-resource texture leaves the mip chain empty, and a stream-output
+// target set while the draw reads it is a feedback loop the summary cannot see.
+inline std::atomic<uint64_t> viewportSets;       // RSSetViewports calls
+inline std::atomic<unsigned> viewportZero;       // ... that set a 0-width or 0-height viewport
+inline std::atomic<unsigned> viewportMaxWidth{0},viewportMaxHeight{0};
+inline std::atomic<uint64_t> scissorSets;        // RSSetScissorRects calls
+inline std::atomic<unsigned> scissorZero;        // ... that set an empty rect
+inline std::atomic<uint64_t> generateMips;       // GenerateMips calls
+inline std::atomic<uint64_t> generateMipsNoMips; // ... on a texture without MIP bind or with 1 mip
+inline std::atomic<uint64_t> soTargets;          // SOSetTargets with at least one buffer
 // Buffers the guest created for indirect draw arguments, so a later
 // UpdateSubresource/Map of one can be read without a GetDesc per call. The
 // mapped pointer is kept per buffer because a write-only Map is read back
@@ -403,15 +430,25 @@ inline void printSummary(unsigned window) {
     emit(fmt("draw summary %u/%u: last topology=%u(%s) contexts=%u deferred=%u",window,kSummaryWindows,t,topologyName(t).c_str(),
         contextsPatched.load(),deferredContexts.load()));
     for(int k=0;k<kDrawKinds;++k) {
-        uint64_t total=0,patched=0,withHull=0,zero=zeroCounts[k].load(std::memory_order_relaxed);
+        uint64_t total=0,patched=0,withHull=0,withGs=drawsWithGs[k].load(std::memory_order_relaxed),
+                 zero=zeroCounts[k].load(std::memory_order_relaxed);
         for(int p=0;p<2;++p)for(int h=0;h<2;++h) {
             uint64_t n=draws[k][p][h].load(std::memory_order_relaxed);
             total+=n;if(p)patched+=n;if(h)withHull+=n;
         }
         if(!total)continue;
-        emit(fmt("draw summary %u/%u: %s calls=%llu patchlist=%llu hull-domain=%llu zero-count=%llu",window,kSummaryWindows,drawKindName(k),
-            (unsigned long long)total,(unsigned long long)patched,(unsigned long long)withHull,(unsigned long long)zero));
+        emit(fmt("draw summary %u/%u: %s calls=%llu patchlist=%llu hull-domain=%llu gs=%llu zero-count=%llu",window,kSummaryWindows,drawKindName(k),
+            (unsigned long long)total,(unsigned long long)patched,(unsigned long long)withHull,(unsigned long long)withGs,(unsigned long long)zero));
     }
+    // A zero-area viewport or scissor clips every draw to nothing: the silent
+    // shape of a layer that renders black with no failed call anywhere.
+    emit(fmt("draw summary %u/%u: viewports sets=%llu zero-area=%u largest=%ux%u scissors=%llu empty=%u",window,kSummaryWindows,
+        (unsigned long long)viewportSets.load(),viewportZero.load(),viewportMaxWidth.load(),viewportMaxHeight.load(),
+        (unsigned long long)scissorSets.load(),scissorZero.load()));
+    // GenerateMips on a chain that cannot generate leaves the mips empty; a
+    // stream-output target set while drawing is a feedback loop.
+    emit(fmt("draw summary %u/%u: GenerateMips calls=%llu no-mips=%llu SO targets=%llu",window,kSummaryWindows,
+        (unsigned long long)generateMips.load(),(unsigned long long)generateMipsNoMips.load(),(unsigned long long)soTargets.load()));
     uint64_t d=dispatches.load(std::memory_order_relaxed),di=dispatchIndirects.load(std::memory_order_relaxed);
     if(d||di||dispatchZero.load(std::memory_order_relaxed))
         emit(fmt("draw summary %u/%u: Dispatch calls=%llu indirect=%llu zero-groups=%llu",window,kSummaryWindows,
@@ -430,11 +467,15 @@ inline void printSummary(unsigned window) {
         (unsigned long long)rtvUavSets.load(),(unsigned long long)uavSets.load(),
         (unsigned long long)resolves.load(),(unsigned long long)copies.load()));
     // Null entries are the textures the guest never bound: a black layer with
-    // no failed call is what that looks like.
-    emit(fmt("draw summary %u/%u: shader resources vs=%llu/%llu ps=%llu/%llu hs=%llu/%llu ds=%llu/%llu (null sets)",
+    // no failed call is what that looks like. The geometry stage is in the
+    // same table now; a GS that samples an unbound terrain texture is one of
+    // the shapes of the black-terrain bug.
+    emit(fmt("draw summary %u/%u: shader resources vs=%llu/%llu gs=%llu/%llu ps=%llu/%llu hs=%llu/%llu ds=%llu/%llu (null sets)",
         window,kSummaryWindows,(unsigned long long)srvSets[0].load(),(unsigned long long)srvNulls[0].load(),
-        (unsigned long long)srvSets[1].load(),(unsigned long long)srvNulls[1].load(),(unsigned long long)srvSets[2].load(),
-        (unsigned long long)srvNulls[2].load(),(unsigned long long)srvSets[3].load(),(unsigned long long)srvNulls[3].load()));
+        (unsigned long long)srvSets[1].load(),(unsigned long long)srvNulls[1].load(),
+        (unsigned long long)srvSets[2].load(),(unsigned long long)srvNulls[2].load(),
+        (unsigned long long)srvSets[3].load(),(unsigned long long)srvNulls[3].load(),
+        (unsigned long long)srvSets[4].load(),(unsigned long long)srvNulls[4].load()));
     // Draws per target format: the format the swapchain presents vs the ones
     // the guest renders into and may or may not composite. Draws with no
     // render target bound are counted separately: they write nothing visible.
@@ -784,21 +825,23 @@ static void STDMETHODCALLTYPE contextUnmap(DevicePtr self,ID3D11Resource* r,UINT
     call(self,r,subresource);
 }
 // One counter per draw, bucketed by the topology last set on this context and
-// by whether a hull and a domain shader are bound there. A bucket seen for the
-// first time is named once, so a summary that shows a kind the game never
-// reaches is not silently missing. No allocation and no lock on the hot path.
+// by whether a hull, a domain and a geometry shader are bound there. A bucket
+// seen for the first time is named once, so a summary that shows a kind the
+// game never reaches is not silently missing. No allocation and no lock on the
+// hot path.
 inline void countDraw(void* self,int kind,unsigned count,unsigned instances) {
     ContextState& state=stateOf(self);
     unsigned t=state.topology.load(std::memory_order_relaxed);
     unsigned s=state.shaders.load(std::memory_order_relaxed);
-    bool patch=patchList(t),hull=(s&3)==3;
+    bool patch=patchList(t),hull=(s&3)==3,gs=(s&4)!=0;
     draws[kind][patch?1:0][hull?1:0].fetch_add(1,std::memory_order_relaxed);
+    if(gs)drawsWithGs[kind].fetch_add(1,std::memory_order_relaxed);
     countDrawFormat(state.rtFormat.load(std::memory_order_relaxed));
     if(!count||(kind>=2&&kind<4&&!instances))zeroCounts[kind].fetch_add(1,std::memory_order_relaxed);
-    static std::atomic<bool> named[kDrawKinds][2][2];
-    if(!named[kind][patch?1:0][hull?1:0].exchange(true,std::memory_order_relaxed))
-        emit(fmt("draw summary: first %s topology=%u(%s) hs/ds=%s",drawKindName(kind),t,topologyName(t).c_str(),
-            hull?"both":((s&1)?"hs":((s&2)?"ds":"none"))));
+    static std::atomic<bool> named[kDrawKinds];
+    if(!named[kind].exchange(true,std::memory_order_relaxed))
+        emit(fmt("draw summary: first %s topology=%u(%s) hs/ds/gs=%s/%s/%s",drawKindName(kind),t,topologyName(t).c_str(),
+            (s&1)?"hs":"-",((s&2)?"ds":"-"),gs?"gs":"-"));
     tick();
 }
 // The indirect kinds and DrawAuto carry no counts on the CPU side: the
@@ -808,13 +851,14 @@ inline void countDrawUnknown(void* self,int kind) {
     ContextState& state=stateOf(self);
     unsigned t=state.topology.load(std::memory_order_relaxed);
     unsigned s=state.shaders.load(std::memory_order_relaxed);
-    bool patch=patchList(t),hull=(s&3)==3;
+    bool patch=patchList(t),hull=(s&3)==3,gs=(s&4)!=0;
     draws[kind][patch?1:0][hull?1:0].fetch_add(1,std::memory_order_relaxed);
+    if(gs)drawsWithGs[kind].fetch_add(1,std::memory_order_relaxed);
     countDrawFormat(state.rtFormat.load(std::memory_order_relaxed));
-    static std::atomic<bool> named[kDrawKinds][2][2];
-    if(!named[kind][patch?1:0][hull?1:0].exchange(true,std::memory_order_relaxed))
-        emit(fmt("draw summary: first %s topology=%u(%s) hs/ds=%s",drawKindName(kind),t,topologyName(t).c_str(),
-            hull?"both":((s&1)?"hs":((s&2)?"ds":"none"))));
+    static std::atomic<bool> named[kDrawKinds];
+    if(!named[kind].exchange(true,std::memory_order_relaxed))
+        emit(fmt("draw summary: first %s topology=%u(%s) hs/ds/gs=%s/%s/%s",drawKindName(kind),t,topologyName(t).c_str(),
+            (s&1)?"hs":"-",((s&2)?"ds":"-"),gs?"gs":"-"));
     tick();
 }
 static void STDMETHODCALLTYPE contextDrawIndexed(DevicePtr self,UINT indexCount,UINT startIndex,INT baseVertex) {
@@ -881,6 +925,89 @@ static void STDMETHODCALLTYPE contextDSSetShader(DevicePtr self,ID3D11DomainShad
     auto& s=stateOf(self).shaders;
     if(shader)s.fetch_or(2,std::memory_order_relaxed);else s.fetch_and(~2u,std::memory_order_relaxed);
     call(self,shader,instances,count);
+}
+static void STDMETHODCALLTYPE contextGSSetShader(DevicePtr self,ID3D11GeometryShader* shader,ID3D11ClassInstance* const* instances,UINT count) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11GeometryShader*,ID3D11ClassInstance* const*,UINT);
+    auto call=reinterpret_cast<Fn>(original(self,GSSetShader));if(!call)return;
+    auto& s=stateOf(self).shaders;
+    if(shader)s.fetch_or(4,std::memory_order_relaxed);else s.fetch_and(~4u,std::memory_order_relaxed);
+    call(self,shader,instances,count);
+}
+// The geometry stage's resource binds land in the same table as the other
+// stages': a GS that samples a texture the guest never bound is one of the
+// shapes of the black-terrain bug.
+template<int Slot,int Stage>
+static void STDMETHODCALLTYPE contextSetShaderResources(DevicePtr self,UINT start,UINT count,ID3D11ShaderResourceView* const* views) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,ID3D11ShaderResourceView* const*);
+    auto call=reinterpret_cast<Fn>(original(self,Slot));if(!call)return;
+    srvSets[Stage].fetch_add(1,std::memory_order_relaxed);
+    if(!views||!count)srvNulls[Stage].fetch_add(1,std::memory_order_relaxed);
+    else for(UINT i=0;i<count;++i) if(!views[i]){srvNulls[Stage].fetch_add(1,std::memory_order_relaxed);break;}
+    call(self,start,count,views);
+}
+// A zero-area viewport or an empty scissor rect clips every draw to nothing:
+// the silent shape of a black layer with no failed call anywhere. The largest
+// viewport is remembered so a summary can compare it to the swapchain.
+static void STDMETHODCALLTYPE contextRSSetViewports(DevicePtr self,UINT count,const D3D11_VIEWPORT* viewports) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,const D3D11_VIEWPORT*);
+    auto call=reinterpret_cast<Fn>(original(self,RSSetViewports));if(!call)return;
+    viewportSets.fetch_add(1,std::memory_order_relaxed);
+    if(viewports&&count)for(UINT i=0;i<count;++i) {
+        const auto& v=viewports[i];
+        if(!v.Width||!v.Height)viewportZero.fetch_add(1,std::memory_order_relaxed);
+        unsigned w=viewportMaxWidth.load(std::memory_order_relaxed),h=viewportMaxHeight.load(std::memory_order_relaxed);
+        while(size_t(v.Width)>w||size_t(v.Height)>h) {
+            viewportMaxWidth.store(std::max(w,UINT(v.Width)),std::memory_order_relaxed);
+            viewportMaxHeight.store(std::max(h,UINT(v.Height)),std::memory_order_relaxed);
+            w=viewportMaxWidth.load(std::memory_order_relaxed);h=viewportMaxHeight.load(std::memory_order_relaxed);
+        }
+    }
+    call(self,count,viewports);
+}
+static void STDMETHODCALLTYPE contextRSSetScissorRects(DevicePtr self,UINT count,const D3D11_RECT* rects) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,const D3D11_RECT*);
+    auto call=reinterpret_cast<Fn>(original(self,RSSetScissorRects));if(!call)return;
+    scissorSets.fetch_add(1,std::memory_order_relaxed);
+    if(rects&&count)for(UINT i=0;i<count;++i)
+        if(rects[i].left>=rects[i].right||rects[i].top>=rects[i].bottom)scissorZero.fetch_add(1,std::memory_order_relaxed);
+    call(self,count,rects);
+}
+// GenerateMips on a texture without the MIP bind (or with a single mip)
+// succeeds and leaves the chain empty: the silent shape of a blank minimap.
+// MipLevels -1 means "all remaining mips": whether that is a no-op depends on
+// the resource, so read the resource's own mip count when the view says -1.
+static void STDMETHODCALLTYPE contextGenerateMips(DevicePtr self,ID3D11ShaderResourceView* view) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11ShaderResourceView*);
+    auto call=reinterpret_cast<Fn>(original(self,GenerateMips));if(!call)return;
+    generateMips.fetch_add(1,std::memory_order_relaxed);
+    if(view) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC v{};view->GetDesc(&v);
+        unsigned mips=v.Texture2D.MipLevels;
+        if(v.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D&&mips==0xffffffffu) {
+            ID3D11Resource* resource=nullptr;view->GetResource(&resource);
+            if(resource) {
+                D3D11_RESOURCE_DIMENSION dim=D3D11_RESOURCE_DIMENSION_UNKNOWN;resource->GetType(&dim);
+                if(dim==D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+                    ID3D11Texture2D* t=nullptr;
+                    if(SUCCEEDED(resource->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&t)))&&t) {
+                        D3D11_TEXTURE2D_DESC d{};t->GetDesc(&d);mips=d.MipLevels;t->Release();
+                    }
+                }
+                resource->Release();
+            }
+        }
+        bool samplable=v.ViewDimension!=D3D11_SRV_DIMENSION_BUFFER;
+        if(!samplable||mips<=1)generateMipsNoMips.fetch_add(1,std::memory_order_relaxed);
+    }
+    call(self,view);
+}
+// A stream-output target set while draws read it is a feedback loop the
+// summary cannot see; the game's terrain splatting may go through it.
+static void STDMETHODCALLTYPE contextSOSetTargets(DevicePtr self,UINT count,ID3D11Buffer* const* targets,const UINT* offsets) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11Buffer* const*,const UINT*);
+    auto call=reinterpret_cast<Fn>(original(self,SOSetTargets));if(!call)return;
+    if(count&&targets)soTargets.fetch_add(1,std::memory_order_relaxed);
+    call(self,count,targets,offsets);
 }
 // Describes the render target views of an OM set once per distinct view. The
 // table is direct-mapped (pointer hash) so the check is O(1) on a path the
@@ -953,16 +1080,9 @@ static void STDMETHODCALLTYPE contextOMSetRenderTargetsAndUnorderedAccessViews(D
     call(self,count,views,depth,uavStart,uavCount,uavs,initialCounts);tick();
 }
 // Null entries in a shader-resource bind are textures the guest never set: a
-// layer that samples one renders black without any call failing.
-template<int Slot,int Stage>
-static void STDMETHODCALLTYPE contextSetShaderResources(DevicePtr self,UINT start,UINT count,ID3D11ShaderResourceView* const* views) {
-    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,ID3D11ShaderResourceView* const*);
-    auto call=reinterpret_cast<Fn>(original(self,Slot));if(!call)return;
-    srvSets[Stage].fetch_add(1,std::memory_order_relaxed);
-    if(!views||!count)srvNulls[Stage].fetch_add(1,std::memory_order_relaxed);
-    else for(UINT i=0;i<count;++i) if(!views[i]){srvNulls[Stage].fetch_add(1,std::memory_order_relaxed);break;}
-    call(self,start,count,views);
-}
+// layer that samples one renders black without any call failing. The template
+// lives above, next to the GS hook that shares its table.
+
 static void STDMETHODCALLTYPE contextDispatch(DevicePtr self,UINT x,UINT y,UINT z) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,UINT);
     auto call=reinterpret_cast<Fn>(original(self,Dispatch));if(!call)return;
@@ -1073,10 +1193,13 @@ inline const Patch* contextPatches(size_t& count){
         {IASetPrimitiveTopology,(void*)&contextIASetPrimitiveTopology},{HSSetShader,(void*)&contextHSSetShader},
         {DSSetShader,(void*)&contextDSSetShader},{OMSetRenderTargets,(void*)&contextOMSetRenderTargets},
         {OMSetRenderTargetsAndUnorderedAccessViews,(void*)&contextOMSetRenderTargetsAndUnorderedAccessViews},
-        {PSSetShaderResources,(void*)&contextSetShaderResources<PSSetShaderResources,1>},
+        {PSSetShaderResources,(void*)&contextSetShaderResources<PSSetShaderResources,2>},
         {VSSetShaderResources,(void*)&contextSetShaderResources<VSSetShaderResources,0>},
-        {HSSetShaderResources,(void*)&contextSetShaderResources<HSSetShaderResources,2>},
-        {DSSetShaderResources,(void*)&contextSetShaderResources<DSSetShaderResources,3>},
+        {HSSetShaderResources,(void*)&contextSetShaderResources<HSSetShaderResources,3>},
+        {DSSetShaderResources,(void*)&contextSetShaderResources<DSSetShaderResources,4>},
+        {GSSetShader,(void*)&contextGSSetShader},{GSSetShaderResources,(void*)&contextSetShaderResources<GSSetShaderResources,1>},
+        {RSSetViewports,(void*)&contextRSSetViewports},{RSSetScissorRects,(void*)&contextRSSetScissorRects},
+        {GenerateMips,(void*)&contextGenerateMips},{SOSetTargets,(void*)&contextSOSetTargets},
         {SetPredication,(void*)&contextSetPredication},{UpdateSubresource,(void*)&contextUpdateSubresource},
         {CopyResource,(void*)&contextCopyResource},{CopySubresourceRegion,(void*)&contextCopySubresourceRegion},
         {ResolveSubresource,(void*)&contextResolveSubresource},
