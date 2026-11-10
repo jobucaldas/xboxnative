@@ -82,9 +82,15 @@ enum ContextSlot {
     DSSetShaderResources=63,DSSetShader=64,FinishCommandList=114,
     // ID3D11DeviceContext1 continues the same vtable: ClearView is the 11.1
     // way to clear a render target or depth view, and a game that clears only
-    // through it shows clears=0 in the summary.
+    // through it shows clears=0 in the summary. It is the 18th Context1
+    // method, so it sits 18 slots past FinishCommandList (the last base one):
+    // 114 + 18 = 132.
     Context1ClearView=132
 };
+// The Context1 slot is derived, not restated: if FinishCommandList ever moves,
+// ClearView moves with it and kSlots must grow to cover it.
+static_assert(Context1ClearView==FinishCommandList+18&&Context1ClearView+1<kSlots,
+    "ID3D11DeviceContext1::ClearView must fit inside kSlots");
 static_assert(ContextMap==14&&Unmap==15&&DrawIndexed==12&&DrawIndexedInstanced==20&&OMSetRenderTargets==33&&
     OMSetRenderTargetsAndUnorderedAccessViews==34&&DrawAuto==38&&DrawIndexedInstancedIndirect==39&&
     DrawInstancedIndirect==40&&DispatchIndirect==42&&UpdateSubresource==48&&
@@ -178,9 +184,9 @@ constexpr int kDrawAuto=4,kDrawIndexedIndirect=5,kDrawInstancedIndirect=6;
 // and the closing line.
 constexpr size_t kMaxDrawBuckets=size_t(kDrawKinds)*4;
 constexpr size_t kMaxRtvKinds=24;
-constexpr size_t kMaxRtvViews=32;
+constexpr size_t kRtvSeenSlots=256;   // power of two
 constexpr size_t kFixedSummaryLines=16;   // topology, kDrawKinds, dispatch, lists, shaders, targets, UAVs, resources, formats, main target
-constexpr size_t kMaxSummaryLines=kSummaryWindows*(kFixedSummaryLines+kMaxRtvKinds+kMaxDrawBuckets)+kMaxDrawBuckets+kMaxRtvViews+2;
+constexpr size_t kMaxSummaryLines=kSummaryWindows*(kFixedSummaryLines+kMaxRtvKinds+kMaxDrawBuckets)+kMaxDrawBuckets+2;
 inline std::atomic<bool> summaryStarted{false};
 inline std::atomic<unsigned> summaryWindows{0};
 inline std::atomic<ULONGLONG> summaryNext{0};
@@ -257,7 +263,6 @@ inline std::atomic<uint64_t> clears[2];          // render target, depth stencil
 inline std::atomic<uint64_t> clearViews[2];      // ... through ID3D11DeviceContext1::ClearView
 inline std::atomic<uint64_t> rtvSets;            // OMSetRenderTargets with a render target
 inline std::atomic<uint64_t> rtvUnknown;         // ... whose view or resource could not be read
-inline std::atomic<uint64_t> rtvUncached;        // ... beyond the kMaxRtvViews table (counted, not described)
 inline std::atomic<uint64_t> rtvUavSets;         // OMSetRenderTargetsAndUnorderedAccessViews with a view
 inline std::atomic<uint64_t> uavSets;            // ... and with at least one UAV
 inline std::atomic<uint64_t> resolves;           // ResolveSubresource (MSAA -> single sample)
@@ -279,7 +284,11 @@ inline void noteIndirectBuffer(void* buffer,unsigned bytes) {
         if(indirectBuffers[i].compare_exchange_strong(expected,buffer,std::memory_order_acq_rel)) {
             indirectBytes[i].store(bytes,std::memory_order_relaxed);return;
         }
-        if(expected==buffer)return;
+        // The slot already holds this address: COM recycles buffer addresses,
+        // so the size must be refreshed, not kept from the earlier buffer.
+        if(expected==buffer) {
+            indirectBytes[i].store(bytes,std::memory_order_relaxed);return;
+        }
     }
 }
 inline int indirectIndex(void* buffer) {
@@ -316,7 +325,7 @@ inline std::string indirectArgsText(const void* data,size_t bytes,const char* fi
 }
 inline std::mutex rtvM;
 inline std::vector<std::string> rtvKinds;        // distinct "fmt WxH" bound as render target
-inline std::atomic<void*> rtvViews[kMaxRtvViews];   // views already described: no GetDesc per frame
+inline std::atomic<void*> rtvSeen[kRtvSeenSlots];   // views already described: no GetDesc per frame
 inline std::atomic<unsigned> mainWidth{0},mainHeight{0};   // largest render target bound
 inline std::atomic<unsigned> chainWidth{0},chainHeight{0}; // guest swapchain buffers
 inline std::atomic<unsigned> chainFormat{0},chainBuffers{0};
@@ -412,8 +421,8 @@ inline void printSummary(unsigned window) {
     emit(fmt("draw summary %u/%u: shader creates vs=%llu gs=%llu ps=%llu hs=%llu ds=%llu cs=%llu",window,kSummaryWindows,
         (unsigned long long)shaderCreates[0].load(),(unsigned long long)shaderCreates[1].load(),(unsigned long long)shaderCreates[2].load(),
         (unsigned long long)shaderCreates[3].load(),(unsigned long long)shaderCreates[4].load(),(unsigned long long)shaderCreates[5].load()));
-    emit(fmt("draw summary %u/%u: render targets sets=%llu unreadable=%llu uncached=%llu clears=rt %llu/ds %llu clearview=%llu",window,kSummaryWindows,
-        (unsigned long long)rtvSets.load(),(unsigned long long)rtvUnknown.load(),(unsigned long long)rtvUncached.load(),
+    emit(fmt("draw summary %u/%u: render targets sets=%llu unreadable=%llu clears=rt %llu/ds %llu clearview=%llu",window,kSummaryWindows,
+        (unsigned long long)rtvSets.load(),(unsigned long long)rtvUnknown.load(),
         (unsigned long long)clears[0].load(),(unsigned long long)clears[1].load(),(unsigned long long)clearViews[0].load()));
     // A layer that renders into its own target and is then resolved or copied
     // into the frame never appears as a draw into the swapchain.
@@ -874,26 +883,20 @@ static void STDMETHODCALLTYPE contextDSSetShader(DevicePtr self,ID3D11DomainShad
     call(self,shader,instances,count);
 }
 // Describes the render target views of an OM set once per distinct view. The
-// view table is fixed: once it is full, later views are counted but not
-// described, and nothing is emitted for them. (Emitting on every unseen view
-// instead flooded a real run with 35k lines once the table filled.)
+// table is direct-mapped (pointer hash) so the check is O(1) on a path the
+// guest hits 200k+ times a window; a hash collision only costs one GetDesc for
+// that set, never a re-scan, and the kind list dedups the line. A line is
+// emitted only for a kind not seen before, so the log cannot flood.
 inline void noteRenderTargets(UINT count,ID3D11RenderTargetView* const* views) {
     if(!count||!views)return;
     rtvSets.fetch_add(1,std::memory_order_relaxed);
     for(UINT i=0;i<count;++i) {
         ID3D11RenderTargetView* view=views[i];if(!view)continue;
-        bool known=false;
-        for(auto& seen:rtvViews) if(seen.load(std::memory_order_relaxed)==view){known=true;break;}
-        if(known)continue;
+        size_t slot=(reinterpret_cast<uintptr_t>(view)>>4)&(kRtvSeenSlots-1);
+        if(rtvSeen[slot].load(std::memory_order_relaxed)==view)continue;
         std::string text=rtvText(view);
         if(text=="unknown"||text=="no-resource"){rtvUnknown.fetch_add(1,std::memory_order_relaxed);continue;}
-        bool registered=false;
-        for(auto& seen:rtvViews) {
-            void* expected=nullptr;
-            if(seen.compare_exchange_strong(expected,view,std::memory_order_acq_rel)){registered=true;break;}
-            if(expected==view){registered=true;break;}   // another thread stored it first
-        }
-        if(!registered){rtvUncached.fetch_add(1,std::memory_order_relaxed);continue;}
+        rtvSeen[slot].store(view,std::memory_order_relaxed);
         bool fresh=false;
         {
             std::lock_guard<std::mutex> lock(rtvM);
