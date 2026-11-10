@@ -6,6 +6,9 @@ cd "$(dirname "$0")"
 out=${1:-/tmp/xbn-d3d9-test}
 rm -rf "$out";mkdir -p "$out"
 bash build.sh "$out"
+# The shim loads its shader translator by name from its own directory, so the
+# test needs the real DLL beside it: the draw path is only proven with it.
+bash "$(cd ../../../.. && pwd)/src/tools/build-d3d9-translator.sh" "$out"
 # The test links no CRT either: mingw's g++ cannot link on this machine, and a
 # shim test should not depend on a C runtime the console's guests do not have.
 # -fno-builtin -fno-tree-loop-distribute-patterns for the same reason as the

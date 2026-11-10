@@ -1,0 +1,311 @@
+diff -ruN a/src/d3d9/d3d9_includes.h b/src/d3d9/d3d9_includes.h
+--- a/src/d3d9/d3d9_includes.h
++++ b/src/d3d9/d3d9_includes.h
+@@ -45,7 +45,10 @@
+ 
+ // d3d11
+ 
+-#ifndef _MSC_VER
++// Play's build: mingw-w64's d3d11_1.h already declares this enum, so the
++// donor's own copy (written for MSVC, where the SDK header was older) is only
++// needed there.
++#if !defined(_MSC_VER) && !defined(__MINGW32__)
+ enum D3D11_FILTER_REDUCTION_TYPE {
+   D3D11_FILTER_REDUCTION_TYPE_STANDARD,
+   D3D11_FILTER_REDUCTION_TYPE_COMPARISON,
+diff -ruN a/src/dx9asm/dx9asm_operand.cpp b/src/dx9asm/dx9asm_operand.cpp
+--- a/src/dx9asm/dx9asm_operand.cpp
++++ b/src/dx9asm/dx9asm_operand.cpp
+@@ -23,23 +23,30 @@
+     }
+ 
+     using namespace optype;
+-    std::vector<OperandInfo> operandInfos = {
+-      {Dst, 1},
+-      {Src0, 1},
+-      {Src1, 1},
+-      {Src2, 1},
+-      {Src3, 1},
+-      {Vec4, 4},
+-      {Label, 1},
+-      {Bool, 1},
+-      {Integer, 1},
+-      {UsageToken, 1},
+-      {LoopCounter, 1},
+-      {VaradicOperandCount, 0}
+-    };
++    // Play's build: function-local rather than namespace-scope. The shim is a
++    // /noentry DLL with no CRT, so nothing would run a global constructor; a
++    // first-use initialisation (this build has -fno-threadsafe-statics) does
++    // not need one. The table itself is unchanged.
++    static std::vector<OperandInfo>& operandInfos() {
++      static std::vector<OperandInfo> table = {
++        {Dst, 1},
++        {Src0, 1},
++        {Src1, 1},
++        {Src2, 1},
++        {Src3, 1},
++        {Vec4, 4},
++        {Label, 1},
++        {Bool, 1},
++        {Integer, 1},
++        {UsageToken, 1},
++        {LoopCounter, 1},
++        {VaradicOperandCount, 0}
++      };
++      return table;
++    }
+ 
+     const OperandInfo* lookupOperandInfo(OperandType type) {
+-      for (OperandInfo& info : operandInfos) {
++      for (OperandInfo& info : operandInfos()) {
+         if (info.type == type)
+           return &info;
+       }
+diff -ruN a/src/dx9asm/dx9asm_operations.cpp b/src/dx9asm/dx9asm_operations.cpp
+--- a/src/dx9asm/dx9asm_operations.cpp
++++ b/src/dx9asm/dx9asm_operations.cpp
+@@ -10,7 +10,10 @@
+       using namespace optype;
+       using namespace implicitflag;
+ 
+-      std::vector<DX9OperationInfo> operationInfos = {
++      // Play's build: function-local (see dx9asm_operand.cpp); the shim is a
++      // /noentry DLL with no CRT and would never run a global constructor.
++      std::vector<DX9OperationInfo>& operationInfos() {
++      static std::vector<DX9OperationInfo> table = {
+         {"abs",     D3DSIO_ABS, 1, { Dst, Src0 }, { D3D10_SB_OPCODE_MOV, abs} },
+         {"add",     D3DSIO_ADD, 1, {Dst, Src0, Src1}, { D3D10_SB_OPCODE_ADD, 0} },
+         {"bem",     D3DSIO_BEM, 1, {Dst, Src0, Src1}, {} },
+@@ -99,11 +102,14 @@
+         {"texreg2gb",  D3DSIO_TEXREG2GB, 1, { Dst, Src0 }, {}, &ShaderCodeTranslator::handleTexReg2Gb},
+         {"texreg2rgb",  D3DSIO_TEXREG2RGB, 1, { Dst, Src0 }, {}},
+       };
++      return table;
++      }
+     }
+ 
+     const DX9OperationInfo* lookupOperationInfo(uint32_t token) {
+-      for (size_t i = 0; i < operationInfos.size(); i++) {
+-        DX9OperationInfo* info = &operationInfos[i];
++      std::vector<DX9OperationInfo>& table = operationInfos();
++      for (size_t i = 0; i < table.size(); i++) {
++        DX9OperationInfo* info = &table[i];
+         if (info->dx9opcode == opcode(token))
+           return info;
+       }
+diff -ruN a/src/dx9asm/dx9asm_register_map.cpp b/src/dx9asm/dx9asm_register_map.cpp
+--- a/src/dx9asm/dx9asm_register_map.cpp
++++ b/src/dx9asm/dx9asm_register_map.cpp
+@@ -21,7 +21,10 @@
+       return lookupOrCreateRegisterMapping(translator, operand.getRegType(), operand.getRegNumber() + regOffset, readMask, writeMask);
+     }
+ 
+-    std::vector<TransientRegisterMapping> transientMappings = {
++    // Play's build: function-local (see dx9asm_operand.cpp); the shim is a
++    // /noentry DLL with no CRT and would never run a global constructor.
++    static std::vector<TransientRegisterMapping>& transientMappings() {
++      static std::vector<TransientRegisterMapping> table = {
+       {0, 0, D3DDECLUSAGE_POSITION, "SV_Position", 0},
+ 
+       // SM1 Up me later!
+@@ -39,14 +42,16 @@
+ 
+       {11, 0, D3DDECLUSAGE_FOG, "TEXCOORD", 10},
+       {12, 0, D3DDECLUSAGE_PSIZE, "TEXCOORD", 11},
+-    };
++      };
++      return table;
++    }
+ 
+     std::vector<TransientRegisterMapping>& RegisterMap::getTransientMappings() {
+-      return transientMappings;
++      return transientMappings();
+     }
+ 
+     uint32_t RegisterMap::getTransientId(DclInfo& info) {
+-      for (const TransientRegisterMapping& mapping : transientMappings) {
++      for (const TransientRegisterMapping& mapping : transientMappings()) {
+         if (mapping.d3d9Usage == info.usage) {
+           if (mapping.d3d9UsageIndex == info.usageIndex)
+             return mapping.dxbcRegNum;
+@@ -58,9 +63,9 @@
+       TransientRegisterMapping mapping;
+       mapping.d3d9Usage = info.usage;
+       mapping.d3d9UsageIndex = info.usageIndex;
+-      mapping.dxbcRegNum = transientMappings.size();
++      mapping.dxbcRegNum = transientMappings().size();
+ 
+-      transientMappings.push_back(mapping);
++      transientMappings().push_back(mapping);
+ 
+       return mapping.dxbcRegNum;
+     }
+diff -ruN a/src/util/config.h b/src/util/config.h
+--- a/src/util/config.h
++++ b/src/util/config.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ #include <string>
++#include <cstdint>
+ 
+ namespace dxup {
+ 
+diff -ruN a/src/util/misc_helpers.h b/src/util/misc_helpers.h
+--- a/src/util/misc_helpers.h
++++ b/src/util/misc_helpers.h
+@@ -56,6 +56,14 @@
+     pushAlignedString(vec, str.c_str(), str.length());
+   }
+ 
++  // Play's build: convert::declUsage returns a const char* table entry, and
++  // without this overload it would be converted to a temporary std::string,
++  // pulling libstdc++'s exception machinery into a shim that links no CRT.
++  template <typename T>
++  void pushAlignedString(std::vector<T>& vec, const char* str) {
++    pushAlignedString(vec, str, std::strlen(str));
++  }
++
+   template <typename T, typename J>
+   void arrayCopyT(T* dst, const J* src, size_t tCount) {
+     std::memcpy((void*)dst, (const void*)src, sizeof(T) * tCount);
+diff -ruN a/src/util/shared_conversions.cpp b/src/util/shared_conversions.cpp
+--- a/src/util/shared_conversions.cpp
++++ b/src/util/shared_conversions.cpp
+@@ -1,12 +1,12 @@
+ #include "shared_conversions.h"
+-#include <array>
+ #include <d3dcommon.h>
+ 
+ namespace dxup {
+ 
+   namespace convert {
+ 
+-    std::array<std::string, 16> dclUsageMapSemantic = {
++    // Play's build: the tables are const char* (see shared_conversions.h).
++    static const char* const dclUsageMapSemantic[16] = {
+       "SV_Position",
+       "BLENDWEIGHT",
+       "BLENDINDICES",
+@@ -26,7 +26,7 @@
+       "SV_Target"
+     };
+ 
+-    std::array<std::string, 15> dclUsageMap = {
++    static const char* const dclUsageMap[15] = {
+       "POSITION",
+       "BLENDWEIGHT",
+       "BLENDINDICES",
+@@ -45,7 +45,7 @@
+     };
+ 
+ 
+-    const std::string& declUsage(bool vsInput, bool target, D3DDECLUSAGE usage) {
++    const char* declUsage(bool vsInput, bool target, D3DDECLUSAGE usage) {
+       if (target)
+         return dclUsageMapSemantic[15];
+ 
+diff -ruN a/src/util/shared_conversions.h b/src/util/shared_conversions.h
+--- a/src/util/shared_conversions.h
++++ b/src/util/shared_conversions.h
+@@ -1,11 +1,14 @@
+ #include <d3d9.h>
+-#include <string>
++#include <cstdint>
+ 
+ namespace dxup {
+ 
+     namespace convert {
+ 
+-        const std::string& declUsage(bool vsInput, bool target, D3DDECLUSAGE usage);
++        // Play's build returns the table entry directly. The only caller hands
++        // it to pushAlignedString, so a std::string here only pulled
++        // libstdc++'s exception machinery into a shim that links no CRT.
++        const char* declUsage(bool vsInput, bool target, D3DDECLUSAGE usage);
+         uint32_t sysValue(bool vsInput, bool target, D3DDECLUSAGE usage);
+ 
+     }
+diff -ruN a/src/dx9asm/dxbc_chunks.cpp b/src/dx9asm/dxbc_chunks.cpp
+--- a/src/dx9asm/dxbc_chunks.cpp
++++ b/src/dx9asm/dxbc_chunks.cpp
+@@ -520,6 +520,12 @@
+             element.nameOffset = 0; // <-- Must be set later!
+             element.registerIndex = transMapping.dxbcRegNum;
+             element.semanticIndex = transMapping.dxbcSemanticIndex;
++            // Play's fix: SHEX already emits dcl_output_siv/dcl_input_ps_siv
++            // for the position entry, so the signature must carry the matching
++            // system-value name. Leaving it UNDEFINED makes D3D11 reject the
++            // shader with E_INVALIDARG and nothing rasterises.
++            if (transMapping.d3d9Usage == D3DDECLUSAGE_POSITION && transMapping.d3d9UsageIndex == 0)
++              element.systemValueType = D3D_NAME_POSITION;
+ 
+             uint32_t baseMask = 0;
+             forEachValidElement<isInput(ChunkType)>(bytecode, shdrCode, [&](const RegisterMapping& mapping, uint32_t i) {
+diff -ruN a/src/dx9asm/dxbc_chunks.cpp b/src/dx9asm/dxbc_chunks.cpp
+--- a/src/dx9asm/dxbc_chunks.cpp
++++ b/src/dx9asm/dxbc_chunks.cpp
+@@ -213,7 +213,11 @@
+           PlaceholderPtr<uint32_t> cbufVariableOffset{ "[RDEF] Constant Buffer Variable Offset", nextPtr(obj) };
+           obj.push_back(0); // [PUSH] Constant Buffer Variable Offset
+ 
+-          obj.push_back(cbufferVariableCount * sizeof(float)); // [PUSH] Constant Buffer Size (bytes)
++          // Play's fix: every D3D9 constant register is a float4, so the buffer
++          // is 16 bytes per variable. The donor wrote sizeof(float), declaring a
++          // 16-byte buffer whose variables sit at 0, 16, 32, 48 - D3D11 then
++          // binds a buffer too small for the reads and the draw produces nothing.
++          obj.push_back(cbufferVariableCount * 4 * sizeof(float)); // [PUSH] Constant Buffer Size (bytes)
+           obj.push_back(0); // [PUSH] Constant Buffer Flags (None)
+           obj.push_back(0); // [PUSH] Constant Buffer Type (CBuffer)
+ 
+diff -ruN a/src/dx9asm/dx9asm_standard_operations.cpp b/src/dx9asm/dx9asm_standard_operations.cpp
+--- a/src/dx9asm/dx9asm_standard_operations.cpp
++++ b/src/dx9asm/dx9asm_standard_operations.cpp
+@@ -9,7 +9,20 @@
+       if (!config::getBool(config::EmitNop) && operation.getImplicitInfo().dxbcOpcode == D3D10_SB_OPCODE_NOP)
+         return true;
+ 
+-      for (uint32_t col = 0; col < operation.getMatrixColumns(); col++) {
++      // Play's fix: a matrix operation writes one component per column, but the
++      // donor copied the destination's whole write mask onto every column, so
++      // each column overwrote the previous one and only the last row survived
++      // (m4x4 oPos, v0, c0 left oPos holding the fourth row alone). Each column
++      // now writes only its own component, and a column the destination masks
++      // off is skipped entirely.
++      const DX9Operand* dstOperand = operation.getOperandByType(optype::Dst);
++      const uint32_t dstMask = dstOperand != nullptr ? dstOperand->getWriteMaskData() : 0;
++      const uint32_t columns = operation.getMatrixColumns();
++
++      for (uint32_t col = 0; col < columns; col++) {
++        if (columns > 1 && dstMask != 0 && (dstMask & (D3DSP_WRITEMASK_0 << col)) == 0)
++          continue;
++
+         DXBCOperation dxbcOperation{ operation };
+ 
+         for (uint32_t i = 0; i < operation.operandCount(); i++) {
+@@ -26,6 +39,8 @@
+ 
+           uint32_t regOffset = operand->getType() == optype::Src1 ? col : 0;
+           DXBCOperand dbxcOperand{ *this, operation, *operand, regOffset };
++          if (operand->getType() == optype::Dst && columns > 1)
++            dbxcOperand.setSwizzleOrWritemask(D3D10_SB_OPERAND_4_COMPONENT_MASK_X << col);
+           dxbcOperation.appendOperand(dbxcOperand);
+         }
+ 
+diff -ruN a/src/dx9asm/dx9asm_operand.h b/src/dx9asm/dx9asm_operand.h
+--- a/src/dx9asm/dx9asm_operand.h
++++ b/src/dx9asm/dx9asm_operand.h
+@@ -198,7 +198,13 @@
+       }
+ 
+       uint32_t m_usedComponents = 4;
+-      uint32_t m_dx9tokens[4];
++      // Play's fix: zero-initialised. An operand whose OperandInfo has
++      // sizeInTokens 0 (the SM1 `tex` destination) never has this written, and
++      // isIndirect() reads it - so a stale word from the previous shader could
++      // put the translator into indirect-constant mode, which changes the
++      // constant buffer the shader declares. The same shader then translated to
++      // different DXBC on the first and later calls in a process.
++      uint32_t m_dx9tokens[4] = { 0, 0, 0, 0 };
+       const OperandInfo* m_info;
+     };
+ 

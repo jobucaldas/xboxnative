@@ -14,10 +14,12 @@ static void set_runtime_directory(const std::wstring& path) { runtimeDirectory=p
 // vulkan_dzn.dll is Mesa's dzn driver (Vulkan on D3D12) and vulkan-null-icd.dll is the fallback driver that reports
 // zero physical devices. Both manifests name a bare DLL, so a Vulkan-optional engine's LoadLibrary succeeds and the
 // loader's own LoadLibraryW of the ICD resolves here.
+// d3d9translator.dll is Play's own D3D9 shader translator (src/tools/build-d3d9-translator.sh):
+// the D3D9 shim loads it by name, so it is served from the runtime directory like the donors.
 static bool redistributable(const std::wstring& name) {
     std::wstring key=name;for(auto& c:key)c=towlower(c);
     for(auto dll:{L"opengl32.dll",L"libgallium_wgl.dll",L"dxil.dll",L"vulkan-1.dll",L"vulkan_dzn.dll",L"vulkan-null-icd.dll",L"msvcp140.dll",L"msvcp140_1.dll",L"msvcp140_2.dll",L"msvcp140_atomic_wait.dll",
-                  L"msvcp140_codecvt_ids.dll",L"concrt140.dll"}) if(key==dll) return true;
+                  L"msvcp140_codecvt_ids.dll",L"concrt140.dll",L"d3d9translator.dll"}) if(key==dll) return true;
     return false;
 }
 // The console ships d3d11.dll and dxgi.dll but no d3d9.dll, d3d10.dll,

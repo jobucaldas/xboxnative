@@ -47,6 +47,15 @@ External dependencies fetched at build time (never copied here; pinned in deps.p
                                                steam_api64.dll and the x64 emulated steamclient64.dll are packaged (steam-provider/gbe/,
                                                with LICENSE and SOURCE.txt naming the tagged source). Never committed; mapped unmodified
                                                as separate libraries.
+  DXUP (dxup-src)                              zlib licence, Copyright (c) 2018 Joshua Ashton. Only its dx9asm shader
+                                               translator (D3D9 shader model 1-3 bytecode -> SM5 DXBC) is built, by
+                                               src/tools/build-d3d9-translator.sh into the git-ignored
+                                               out/d3d9-translator/d3d9translator.dll; the built DLL is never committed.
+                                               patches/dxup-src/0001-play-crt-free.patch adapts it to build CRT-free with
+                                               mingw-w64 (function-local tables instead of global constructors, a const char*
+                                               semantic table, no std::string round trip); retain that patch with the
+                                               corresponding source. Packaged in the launcher's runtime/ directory with the
+                                               licence text and SOURCE.txt. zlib is GPLv3-compatible.
   Vulkan-Loader (vulkan-loader-src)            Apache-2.0 (Khronos Group). Fetched, SHA-256 verified and cross-built by
                                                src/tools/build-vulkan-loader.sh (research/VULKAN-PLAN.md) into the git-ignored
                                                out/vulkan-loader/vulkan-1.dll; the built DLL is never committed. The null ICD beside it

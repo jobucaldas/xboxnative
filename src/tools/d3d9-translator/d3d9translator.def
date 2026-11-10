@@ -1,0 +1,3 @@
+LIBRARY d3d9translator.dll
+EXPORTS
+    d3d9Translate

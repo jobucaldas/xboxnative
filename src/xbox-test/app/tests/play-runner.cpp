@@ -319,7 +319,8 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // The D3D10, D3D12 and D3D9 fixtures create a swap chain on a guest HWND,
     // which the launcher always maps to its CoreWindow. Give them the same
     // stand-in.
-    if(std::string(args)=="d3d10-diag"||std::string(args)=="d3d12-diag"||std::string(args)=="d3d9-diag"||std::string(args)=="vulkan-dzn") {
+    if(std::string(args)=="d3d10-diag"||std::string(args)=="d3d12-diag"||
+       std::string(args).rfind("d3d9-",0)==0||std::string(args)=="vulkan-dzn") {
         if(!host_surface::create()) {logline("HOST SURFACE FAIL native Wine window unavailable");return 3;}
         play_graphics::configure(&host_surface::token,host_surface::present,logline);
         logline("HOST SURFACE native Wine window stands in for the CoreWindow (off-device only)");
@@ -472,7 +473,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // Engine options come from the game's files, as in the launcher.
     std::wstring gameExe=L"Megabonk.exe";
     {wchar_t value[260];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_EXE",value,260);if(n&&n<260)gameExe.assign(value,n);}
-    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="leaderboards"?L"play-leaderboard.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":std::string(args)=="vulkan-dzn"?L"play-vulkan-dzn.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
+    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="d3d9-triangle"?L"play-d3d9-triangle.exe":std::string(args)=="d3d9-textured"?L"play-d3d9-textured.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="leaderboards"?L"play-leaderboard.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":std::string(args)=="vulkan-dzn"?L"play-vulkan-dzn.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
     // guest stop (fatal dialog). Progress must never mask that failure.
@@ -564,6 +565,10 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // Play's routes. play-runtime.sh also checks that the shim came from the
     // runtime directory.
     else if(mode=="d3d9-diag")ok=ok&&r->finished&&r->success&&r->code==42;
+    // The D3D9 drawing fixtures exit 42 only when the shim's draw landed where
+    // it should in a readback of the render target; play-runtime.sh also checks
+    // that the shim and its translator came from the runtime directory.
+    else if(mode=="d3d9-triangle"||mode=="d3d9-textured")ok=ok&&r->finished&&r->success&&r->code==42;
     else if(mode=="vulkan") {
         // The Khronos loader was mapped from the runtime directory, the guest
         // created an instance and got no devices (the fixture exits 42 only

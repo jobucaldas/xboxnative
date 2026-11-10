@@ -129,8 +129,8 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
     CHECK_HR(ex->CheckDeviceType(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DFMT_X8R8G8B8,TRUE));
     CHECK_HR_IS(ex->CheckDeviceType(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DFMT_UNKNOWN,TRUE),D3DERR_NOTAVAILABLE);
     CHECK_HR(ex->CheckDeviceFormat(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,0,D3DRTYPE_TEXTURE,D3DFMT_A8R8G8B8));
-    CHECK_HR_IS(ex->CheckDeviceFormat(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DUSAGE_RENDERTARGET,
-        D3DRTYPE_TEXTURE,D3DFMT_A8R8G8B8),D3DERR_NOTAVAILABLE);
+    CHECK_HR(ex->CheckDeviceFormat(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DUSAGE_RENDERTARGET,
+        D3DRTYPE_TEXTURE,D3DFMT_A8R8G8B8));
     DWORD quality=0;
     CHECK_HR(ex->CheckDeviceMultiSampleType(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,TRUE,D3DMULTISAMPLE_NONE,&quality));
     CHECK(quality==1);
@@ -310,23 +310,313 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
         D3DLOCKED_RECT locked{};
         CHECK_HR(staging->LockRect(&locked,nullptr,0));
         CHECK(locked.pBits!=nullptr&&locked.Pitch>=64);
+        // A plain lock on a SYSTEMMEM surface is writable, which is how a game
+        // fills an offscreen surface; the write must land in the texture.
+        if(locked.pBits)*static_cast<unsigned*>(locked.pBits)=0xff00ff00u;
+        CHECK_HR(staging->UnlockRect());
+        CHECK_HR(staging->LockRect(&locked,nullptr,D3DLOCK_READONLY));
+        if(locked.pBits)CHECK((*static_cast<const unsigned*>(locked.pBits)&0x00ffffffu)==0x0000ff00u);
         CHECK_HR(staging->UnlockRect());
         CHECK_HR_IS(staging->UnlockRect(),D3DERR_INVALIDCALL);   // not locked twice
         staging->Release();
     }
 
-    // The unimplemented half answers with the API's own failure code and says
-    // so in the log, rather than pretending to work.
-    IDirect3DVertexBuffer9* vertexBuffer=nullptr;
-    CHECK_HR_IS(device->CreateVertexBuffer(64,D3DUSAGE_WRITEONLY,0,D3DPOOL_DEFAULT,&vertexBuffer,nullptr),
-        D3DERR_INVALIDCALL);
-    CHECK(vertexBuffer==nullptr);
-    IDirect3DVertexShader9* vertexShader=nullptr;
-    CHECK_HR_IS(device->CreateVertexShader(nullptr,&vertexShader),D3DERR_INVALIDCALL);
-    CHECK_HR_IS(device->DrawPrimitive(D3DPT_TRIANGLELIST,0,1),D3DERR_INVALIDCALL);
-    IDirect3DTexture9* texture=nullptr;
-    CHECK_HR_IS(device->CreateTexture(16,16,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&texture,nullptr),
-        D3DERR_INVALIDCALL);
+    // Drawing. The shim renders a triangle into an offscreen render target,
+    // reads the pixels back through a SYSTEMMEM surface, and checks the colour
+    // the fixed-function pipeline was asked for is where the triangle is and
+    // nowhere else. This is the whole draw path: buffers, a vertex declaration,
+    // the generated fixed-function shaders, the translator, the states.
+    {
+        IDirect3DSurface9* target=nullptr;
+        CHECK_HR(device->CreateRenderTarget(64,64,D3DFMT_X8R8G8B8,D3DMULTISAMPLE_NONE,0,FALSE,
+            &target,nullptr));
+        IDirect3DSurface9* staging=nullptr;
+        CHECK_HR(device->CreateOffscreenPlainSurface(64,64,D3DFMT_X8R8G8B8,D3DPOOL_SYSTEMMEM,
+            &staging,nullptr));
+        IDirect3DVertexBuffer9* buffer=nullptr;
+        CHECK_HR(device->CreateVertexBuffer(3*sizeof(float)*5,D3DUSAGE_WRITEONLY,0,D3DPOOL_MANAGED,
+            &buffer,nullptr));
+        if(target&&staging&&buffer) {
+            // Three vertices in clip space: a triangle over the left half of the
+            // target. D3D9's XYZRHW vertices are already in screen space, so
+            // the generated shader passes them through untransformed.
+            // D3DFVF_XYZRHW|D3DFVF_DIFFUSE: four floats then a D3DCOLOR, so the
+            // vertex is a struct rather than an array of floats (a D3DCOLOR
+            // written as a float literal is a different bit pattern).
+            struct Vertex { float x,y,z,w; DWORD colour; };
+            Vertex* vertices=nullptr;
+            CHECK_HR(buffer->Lock(0,0,reinterpret_cast<void**>(&vertices),0));
+            if(vertices) {
+                const Vertex data[3]={
+                    { 8.0f, 8.0f,0.0f,1.0f,0xffff0000},   // red, top left
+                    {56.0f, 8.0f,0.0f,1.0f,0xffff0000},   // red, top right
+                    {32.0f,56.0f,0.0f,1.0f,0xffff0000},   // red, bottom middle
+                };
+                for(unsigned i=0;i<3;++i)vertices[i]=data[i];
+            }
+            CHECK_HR(buffer->Unlock());
+            CHECK_HR(device->SetStreamSource(0,buffer,0,sizeof(Vertex)));
+            CHECK_HR(device->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE));
+            CHECK_HR(device->SetRenderState(D3DRS_LIGHTING,FALSE));
+            CHECK_HR(device->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE));
+            CHECK_HR(device->SetRenderState(D3DRS_ZENABLE,FALSE));
+            CHECK_HR(device->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE));
+            // Stage 0 selects the vertex colour: no texture in this draw.
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_SELECTARG1));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_DIFFUSE));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG1));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_ALPHAARG1,D3DTA_DIFFUSE));
+            CHECK_HR(device->SetRenderTarget(0,target));
+            CHECK_HR(device->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1.0f,0));
+            D3DVIEWPORT9 full{0,0,64,64,0.0f,1.0f};
+            CHECK_HR(device->SetViewport(&full));
+            CHECK_HR(device->BeginScene());
+            CHECK_HR(device->DrawPrimitive(D3DPT_TRIANGLELIST,0,1));
+            CHECK_HR(device->EndScene());
+            CHECK_HR(device->GetRenderTargetData(target,staging));
+            D3DLOCKED_RECT locked{};
+            CHECK_HR(staging->LockRect(&locked,nullptr,D3DLOCK_READONLY));
+            if(locked.pBits) {
+                // Inside the triangle: the vertex colour. Outside: the clear
+                // colour. A draw that silently did nothing fails both.
+                const unsigned char* inside=static_cast<const unsigned char*>(locked.pBits)
+                    +32*locked.Pitch+32*4;
+                const unsigned char* outside=static_cast<const unsigned char*>(locked.pBits)
+                    +4*locked.Pitch+4*4;
+                outHex("INFO inside bgra=",unsigned(inside[0])|unsigned(inside[1])<<8
+                    |unsigned(inside[2])<<16|unsigned(inside[3])<<24);
+                for(unsigned y=0;y<64;y+=8) {
+                    char row[80];unsigned used=0;
+                    for(unsigned x=0;x<64;x+=8) {
+                        const unsigned char* p=static_cast<const unsigned char*>(locked.pBits)
+                            +y*locked.Pitch+x*4;
+                        row[used++]=p[2]>0x80?'R':p[1]>0x80?'G':p[0]>0x80?'B':'.';
+                    }
+                    row[used++]='\n';row[used]=0;out(row);
+                }
+                CHECK(inside[2]>0x80&&inside[0]<0x40&&inside[1]<0x40);   // red
+                CHECK(outside[0]<0x20&&outside[1]<0x20&&outside[2]<0x20); // black
+            }
+            CHECK_HR(staging->UnlockRect());
+            CHECK_HR(device->SetRenderTarget(0,backBuffer));
+        }
+        if(buffer)buffer->Release();
+        if(staging)staging->Release();
+        if(target)target->Release();
+    }
+
+    // A texture, a sampler and a texture-stage operation: the shim uploads the
+    // pixels, binds the view and the sampler, and the generated pixel shader
+    // samples them.
+    {
+        IDirect3DTexture9* texture=nullptr;
+        CHECK_HR(device->CreateTexture(2,2,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&texture,nullptr));
+        if(texture) {
+            D3DLOCKED_RECT locked{};
+            CHECK_HR(texture->LockRect(0,&locked,nullptr,0));
+            if(locked.pBits) {
+                for(unsigned y=0;y<2;++y) {
+                    unsigned* row=reinterpret_cast<unsigned*>(
+                        static_cast<unsigned char*>(locked.pBits)+y*locked.Pitch);
+                    row[0]=0xff00ff00u;row[1]=0xff00ff00u;   // green
+                }
+            }
+            CHECK_HR(texture->UnlockRect(0));
+            CHECK_HR(device->SetTexture(0,texture));
+            IDirect3DBaseTexture9* bound=nullptr;
+            CHECK_HR(device->GetTexture(0,&bound));
+            CHECK(bound==static_cast<IDirect3DBaseTexture9*>(texture));
+            if(bound)bound->Release();
+            CHECK_HR(device->SetTexture(0,nullptr));
+            CHECK_HR(device->GetTexture(0,&bound));
+            CHECK(bound==nullptr);
+            texture->Release();
+        }
+        // A MANAGED texture with a mip chain is still lockable at every level,
+        // as in D3D9: D3D11 cannot make it dynamic, so the shim locks through a
+        // staging copy and copies the level back on unlock.
+        IDirect3DTexture9* mipmapped=nullptr;
+        CHECK_HR(device->CreateTexture(8,8,0,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&mipmapped,nullptr));
+        if(mipmapped) {
+            CHECK(mipmapped->GetLevelCount()==4);
+            D3DLOCKED_RECT locked{};
+            CHECK_HR(mipmapped->LockRect(0,&locked,nullptr,0));
+            if(locked.pBits) {
+                for(unsigned y=0;y<8;++y) {
+                    unsigned* row=reinterpret_cast<unsigned*>(
+                        static_cast<unsigned char*>(locked.pBits)+y*locked.Pitch);
+                    for(unsigned x=0;x<8;++x)row[x]=0xff0000ffu;   // blue
+                }
+            }
+            CHECK_HR(mipmapped->UnlockRect(0));
+            // The write reached the texture, not just the staging copy: read the
+            // level back through a SYSTEMMEM surface.
+            IDirect3DSurface9* staging=nullptr;
+            CHECK_HR(device->CreateOffscreenPlainSurface(8,8,D3DFMT_A8R8G8B8,D3DPOOL_SYSTEMMEM,
+                &staging,nullptr));
+            if(staging) {
+                IDirect3DSurface9* level0=nullptr;
+                CHECK_HR(mipmapped->GetSurfaceLevel(0,&level0));
+                if(level0) {
+                    CHECK_HR(device->GetRenderTargetData(level0,staging));
+                    CHECK_HR(staging->LockRect(&locked,nullptr,D3DLOCK_READONLY));
+                    if(locked.pBits) {
+                        const unsigned char* p=static_cast<const unsigned char*>(locked.pBits);
+                        CHECK(p[0]>0x80&&p[1]<0x40&&p[2]<0x40);   // blue in BGRA
+                    }
+                    CHECK_HR(staging->UnlockRect());
+                    level0->Release();
+                }
+                staging->Release();
+            }
+            mipmapped->Release();
+        }
+    }
+
+    // A shader the guest compiles itself goes through the translator: this is
+    // the same vs_1_1 the translator's own regression uses.
+    {
+        const DWORD tokens[]={
+            0xFFFE0101,                                     // vs_1_1
+            (0x1F)|(2<<24),0x00000000,0xE4000000,           // dcl_position v0
+            (20)|(3<<24),0xC0000000,0xE4000000,0xA0000000,  // m4x4 oPos, v0, c0
+            0x0000FFFF,                                     // end
+        };
+        IDirect3DVertexShader9* shader=nullptr;
+        CHECK_HR(device->CreateVertexShader(tokens,&shader));
+        CHECK(shader!=nullptr);
+        if(shader) {
+            UINT size=0;
+            CHECK_HR(shader->GetFunction(nullptr,&size));
+            CHECK(size==sizeof tokens);
+            // A buffer too small for the bytecode is refused without a write:
+            // the caller's own capacity is still what it passed in.
+            DWORD shortBuffer[2]{};
+            UINT shortSize=2;
+            CHECK_HR_IS(shader->GetFunction(shortBuffer,&shortSize),D3DERR_INVALIDCALL);
+            CHECK(shortSize==2);
+            CHECK(shortBuffer[0]==0&&shortBuffer[1]==0);
+            shader->Release();
+        }
+        // A blob with no END token is not a shader, and the shim says so.
+        const DWORD truncated[]={0xFFFE0101,0x0000FFFF|(1<<24)};
+        IDirect3DVertexShader9* bad=nullptr;
+        CHECK_HR_IS(device->CreateVertexShader(truncated,&bad),D3DERR_INVALIDCALL);
+        CHECK(bad==nullptr);
+    }
+
+    // Vertex declarations report their element count, terminator included, and
+    // refuse a buffer that cannot hold them instead of overrunning it.
+    {
+        const D3DVERTEXELEMENT9 elements[]={
+            {0,0,D3DDECLTYPE_FLOAT3,D3DDECLMETHOD_DEFAULT,D3DDECLUSAGE_POSITION,0},
+            {0,12,D3DDECLTYPE_FLOAT2,D3DDECLMETHOD_DEFAULT,D3DDECLUSAGE_TEXCOORD,0},
+            D3DDECL_END(),
+        };
+        IDirect3DVertexDeclaration9* declaration=nullptr;
+        CHECK_HR(device->CreateVertexDeclaration(elements,&declaration));
+        if(declaration) {
+            UINT count=0;
+            CHECK_HR(declaration->GetDeclaration(nullptr,&count));
+            CHECK(count==3);   // two elements and the terminator, not bytes
+            D3DVERTEXELEMENT9 readBack[3]{};
+            count=3;
+            CHECK_HR(declaration->GetDeclaration(readBack,&count));
+            CHECK(count==3);
+            CHECK(readBack[1].Usage==D3DDECLUSAGE_TEXCOORD);
+            // A capacity of two cannot hold three elements.
+            D3DVERTEXELEMENT9 small[2]{};
+            count=2;
+            CHECK_HR_IS(declaration->GetDeclaration(small,&count),D3DERR_INVALIDCALL);
+            declaration->Release();
+        }
+    }
+
+    // An FVF with one-float texcoords decodes them as one float, not two: the
+    // size field is a two-bit mask at bit 16, not a shift count.
+    {
+        CHECK_HR(device->SetFVF(D3DFVF_XYZ|D3DFVF_TEX1|D3DFVF_TEXCOORDSIZE1(0)));
+        CHECK_HR(device->SetFVF(D3DFVF_XYZ|D3DFVF_TEX1|D3DFVF_TEXCOORDSIZE4(0)));
+    }
+
+    // A texture with Levels=0 asks for the full chain down to 1x1.
+    {
+        IDirect3DTexture9* chainTexture=nullptr;
+        CHECK_HR(device->CreateTexture(8,8,0,0,D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,
+            &chainTexture,nullptr));
+        if(chainTexture) {
+            CHECK(chainTexture->GetLevelCount()==4);   // 8, 4, 2, 1
+            chainTexture->Release();
+        }
+    }
+
+    // The UP draw path: the primitive count is converted to vertices, and the
+    // data is copied from guest memory into a dynamic buffer.
+    {
+        struct Vertex { float x,y,z,w; DWORD colour; };
+        const Vertex vertices[3]={
+            { 8.0f, 8.0f,0.0f,1.0f,0xffff0000},
+            {56.0f, 8.0f,0.0f,1.0f,0xffff0000},
+            {32.0f,56.0f,0.0f,1.0f,0xffff0000},
+        };
+        CHECK_HR(device->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE));
+        CHECK_HR(device->BeginScene());
+        CHECK_HR(device->DrawPrimitiveUP(D3DPT_TRIANGLELIST,1,vertices,sizeof(Vertex)));
+        CHECK_HR(device->EndScene());
+    }
+
+    // An indexed UP draw whose indices start at a non-zero MinVertexIndex: the
+    // array holds MinVertexIndex+NumVertices vertices, and the indices address
+    // it from vertex 0. A shim that copies only NumVertices from the start, or
+    // that adds MinVertexIndex again, reads the wrong vertices and draws the
+    // wrong colour.
+    {
+        struct Vertex { float x,y,z,w; DWORD colour; };
+        const Vertex vertices[5]={
+            { 0.0f, 0.0f,0.0f,1.0f,0xff000000},   // black, unused
+            { 0.0f, 0.0f,0.0f,1.0f,0xff000000},   // black, unused
+            { 8.0f, 8.0f,0.0f,1.0f,0xff00ff00},   // green, top left
+            {56.0f, 8.0f,0.0f,1.0f,0xff00ff00},   // green, top right
+            {32.0f,56.0f,0.0f,1.0f,0xff00ff00},   // green, bottom middle
+        };
+        const unsigned short indices[3]={2,3,4};
+        IDirect3DSurface9* target=nullptr;
+        CHECK_HR(device->CreateRenderTarget(64,64,D3DFMT_X8R8G8B8,D3DMULTISAMPLE_NONE,0,FALSE,
+            &target,nullptr));
+        IDirect3DSurface9* staging=nullptr;
+        CHECK_HR(device->CreateOffscreenPlainSurface(64,64,D3DFMT_X8R8G8B8,D3DPOOL_SYSTEMMEM,
+            &staging,nullptr));
+        if(target&&staging) {
+            CHECK_HR(device->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE));
+            CHECK_HR(device->SetRenderState(D3DRS_LIGHTING,FALSE));
+            CHECK_HR(device->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE));
+            CHECK_HR(device->SetRenderState(D3DRS_ZENABLE,FALSE));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_SELECTARG1));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_DIFFUSE));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG1));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_ALPHAARG1,D3DTA_DIFFUSE));
+            CHECK_HR(device->SetRenderTarget(0,target));
+            CHECK_HR(device->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1.0f,0));
+            D3DVIEWPORT9 full{0,0,64,64,0.0f,1.0f};
+            CHECK_HR(device->SetViewport(&full));
+            CHECK_HR(device->BeginScene());
+            CHECK_HR(device->DrawIndexedPrimitiveUP(D3DPT_TRIANGLELIST,2,3,1,indices,
+                D3DFMT_INDEX16,vertices,sizeof(Vertex)));
+            CHECK_HR(device->EndScene());
+            CHECK_HR(device->GetRenderTargetData(target,staging));
+            D3DLOCKED_RECT locked{};
+            CHECK_HR(staging->LockRect(&locked,nullptr,D3DLOCK_READONLY));
+            if(locked.pBits) {
+                const unsigned char* inside=static_cast<const unsigned char*>(locked.pBits)
+                    +32*locked.Pitch+32*4;
+                CHECK(inside[1]>0x80&&inside[0]<0x40&&inside[2]<0x40);   // green
+            }
+            CHECK_HR(staging->UnlockRect());
+            CHECK_HR(device->SetRenderTarget(0,backBuffer));
+        }
+        if(staging)staging->Release();
+        if(target)target->Release();
+    }
 
     // Reset rebuilds the swap chain, as D3D9 documents.
     CHECK_HR(device->Reset(&present));
