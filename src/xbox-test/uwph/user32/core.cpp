@@ -8,6 +8,7 @@
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <atomic>
 #include <algorithm>
 #include "keymap.h"
 #include "corewindow_feed.h"
@@ -321,29 +322,34 @@ extern "C" UINT WINAPI c_GetRegisteredRawInputDevices(RawInputDevice2* devices,U
 // RIM_TYPEHID device (hid/pad_device.h), which is what a guest's legacy
 // joystick enumeration looks for. The launcher reports the connected slots
 // through uwph_u32c_pads; with no pad the list stays empty.
-static unsigned padSlots;   // bit i: XInput slot i holds a published pad
+// The publisher runs on the launcher's UI thread every frame, so this mask is
+// the one piece of state here that is not guarded by `mutex`: that mutex is held
+// across guest window procedures (sendRaw, CreateWindowExW, DispatchMessageW),
+// and a guest proc that waits on the launcher's dispatcher while the UI thread
+// waits for the mutex would deadlock both. An atomic store keeps the publisher
+// lock-free; the readers below take a single snapshot of it.
+static std::atomic<unsigned> padSlots{0};   // bit i: XInput slot i holds a published pad
 static int padToken[pad_device::slot_count];   // stable per-slot device handles
 extern "C" void WINAPI uwph_u32c_pads(unsigned mask){
  if(mask&~((1u<<pad_device::slot_count)-1))return;
- std::lock_guard<std::recursive_mutex> l(mutex);
- padSlots=mask;
+ padSlots.store(mask,std::memory_order_relaxed);
 }
-static int padSlotOf(HANDLE device){
+static int padSlotOf(HANDLE device,unsigned slots){
  if(!device)return -1;
- for(unsigned i=0;i<pad_device::slot_count;++i)if(device==(HANDLE)&padToken[i])return (padSlots>>i&1)?int(i):-1;
+ for(unsigned i=0;i<pad_device::slot_count;++i)if(device==(HANDLE)&padToken[i])return (slots>>i&1)?int(i):-1;
  return -1;
 }
-static UINT padCount(){unsigned n=0;for(unsigned i=0;i<pad_device::slot_count;++i)if(padSlots>>i&1)++n;return n;}
+static UINT padCount(unsigned slots){unsigned n=0;for(unsigned i=0;i<pad_device::slot_count;++i)if(slots>>i&1)++n;return n;}
 // GetRawInputDeviceList: the two-call pattern (NULL list, then the sized list)
 // with ERROR_INSUFFICIENT_BUFFER when the caller's list is too small.
 extern "C" UINT WINAPI c_GetRawInputDeviceList(RawInputDeviceList2* list,UINT* count,UINT size){
  if(!count||size!=sizeof(RawInputDeviceList2)){SetLastError(ERROR_INVALID_PARAMETER);return (UINT)-1;}
- std::lock_guard<std::recursive_mutex> l(mutex);
- UINT n=padCount();
+ const unsigned slots=padSlots.load(std::memory_order_relaxed);
+ const UINT n=padCount(slots);
  if(!list){*count=n;return 0;}
  if(*count<n){*count=n;SetLastError(ERROR_INSUFFICIENT_BUFFER);return (UINT)-1;}
  UINT at=0;
- for(unsigned i=0;i<pad_device::slot_count&&at<n;++i)if(padSlots>>i&1){
+ for(unsigned i=0;i<pad_device::slot_count&&at<n;++i)if(slots>>i&1){
   list[at].hDevice=(HANDLE)&padToken[i];
   list[at].dwType=pad_device::rid_type_hid;
   ++at;
@@ -358,8 +364,9 @@ extern "C" UINT WINAPI c_GetRawInputDeviceList(RawInputDeviceList2* list,UINT* c
 // interface.
 extern "C" UINT WINAPI c_GetRawInputDeviceInfoW(HANDLE device,UINT command,LPVOID data,PUINT size){
  if(!size){SetLastError(ERROR_INVALID_PARAMETER);return (UINT)-1;}
- std::lock_guard<std::recursive_mutex> l(mutex);
- int slot=padSlotOf(device);
+ // The slot is resolved from one snapshot, so a pad that disconnects mid-answer
+ // cannot be reported as connected for one command and gone for the next.
+ int slot=padSlotOf(device,padSlots.load(std::memory_order_relaxed));
  if(slot<0){SetLastError(ERROR_INVALID_HANDLE);return (UINT)-1;}
  if(command==pad_device::ridi_device_info){
   const UINT needed=sizeof(pad_device::RidDeviceInfo);
