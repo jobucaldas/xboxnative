@@ -1,0 +1,123 @@
+Play: make dzn's meta cleanup idempotent so a failed device creation does not crash (research/VULKAN-PLAN.md).
+SPDX-License-Identifier: MIT (same licence as the file patched; Mesa is MIT)
+
+dzn_device_create() calls dzn_meta_init(); when that fails, dzn_meta_init()'s error path calls dzn_meta_finish()
+itself, and dzn_device_create() then calls dzn_device_destroy(), which calls dzn_meta_finish() a second time.
+Every release in dzn_meta_finish() therefore has to be idempotent:
+
+1. dzn_meta_indirect_draw_finish() released root_sig and pipeline_state without clearing them, so the second pass
+   called Release() through a freed vtable (access violation at a NULL function pointer).
+2. dzn_meta_triangle_fan_rewrite_index_finish() had the same problem for root_sig, pipeline_state and cmd_sig.
+3. dzn_meta_blits_finish() iterated meta->fs and meta->contexts after destroying them (access violation inside
+   _mesa_hash_table_next_entry) and freed the blit vertex shader twice.
+4. dzn_meta_blits_finish() destroyed shaders_lock and contexts_lock unconditionally, so the second call destroyed
+   both mutexes again (undefined behaviour). A locks_initialized flag, set after mtx_init() and cleared after
+   mtx_destroy(), makes the destroy run once.
+
+Each pointer/table is cleared or detached as it is released. Nothing changes on the success path.
+
+--- a/src/microsoft/vulkan/dzn_meta.c	2026-11-09 20:58:16.693872839 -0300
++++ b/src/microsoft/vulkan/dzn_meta.c	2026-11-09 20:58:52.341196299 -0300
+@@ -107,11 +107,19 @@
+ {
+    struct dzn_meta_indirect_draw *meta = &device->indirect_draws[type.value];
+ 
+-   if (meta->root_sig)
++   /* Play: the init path calls this when it fails, and dzn_meta_init() then
++    * calls dzn_meta_finish(), which calls it again for every type. Clear each
++    * pointer as it is released so the second call is a no-op; releasing twice
++    * dereferences a freed object's vtable. */
++   if (meta->root_sig) {
+       ID3D12RootSignature_Release(meta->root_sig);
++      meta->root_sig = NULL;
++   }
+ 
+-   if (meta->pipeline_state)
++   if (meta->pipeline_state) {
+       ID3D12PipelineState_Release(meta->pipeline_state);
++      meta->pipeline_state = NULL;
++   }
+ }
+ 
+ static VkResult
+@@ -242,12 +250,21 @@
+    struct dzn_meta_triangle_fan_rewrite_index *meta =
+       &device->triangle_fan[old_index_type];
+ 
+-   if (meta->root_sig)
++   /* Play: dzn_meta_finish() runs twice when device creation fails (once from
++    * dzn_meta_init()'s error path, once from dzn_device_destroy()), so every
++    * release here must be idempotent. */
++   if (meta->root_sig) {
+       ID3D12RootSignature_Release(meta->root_sig);
+-   if (meta->pipeline_state)
++      meta->root_sig = NULL;
++   }
++   if (meta->pipeline_state) {
+       ID3D12PipelineState_Release(meta->pipeline_state);
+-   if (meta->cmd_sig)
++      meta->pipeline_state = NULL;
++   }
++   if (meta->cmd_sig) {
+       ID3D12CommandSignature_Release(meta->cmd_sig);
++      meta->cmd_sig = NULL;
++   }
+ }
+ 
+ static VkResult
+@@ -757,22 +774,32 @@
+ {
+    struct dzn_meta_blits *meta = &device->blits;
+ 
++   /* Play: dzn_meta_finish() runs twice when device creation fails (once from
++    * dzn_meta_init()'s error path, once from dzn_device_destroy()), so the
++    * tables are detached as they are destroyed. */
+    vk_free(&device->vk.alloc, (void *)meta->vs.pShaderBytecode);
++   meta->vs.pShaderBytecode = NULL;
++   meta->vs.BytecodeLength = 0;
+ 
+    if (meta->fs) {
+       hash_table_foreach(meta->fs, he)
+          vk_free(&device->vk.alloc, he->data);
+       _mesa_hash_table_destroy(meta->fs, NULL);
++      meta->fs = NULL;
+    }
+ 
+    if (meta->contexts) {
+       hash_table_foreach(&meta->contexts->table, he)
+          dzn_meta_blit_destroy(device, he->data);
+       _mesa_hash_table_u64_destroy(meta->contexts);
++      meta->contexts = NULL;
+    }
+ 
+-   mtx_destroy(&meta->shaders_lock);
+-   mtx_destroy(&meta->contexts_lock);
++   if (meta->locks_initialized) {
++      mtx_destroy(&meta->shaders_lock);
++      mtx_destroy(&meta->contexts_lock);
++      meta->locks_initialized = false;
++   }
+ }
+ 
+ static VkResult
+@@ -784,6 +811,7 @@
+ 
+    mtx_init(&meta->shaders_lock, mtx_plain);
+    mtx_init(&meta->contexts_lock, mtx_plain);
++   meta->locks_initialized = true;
+ 
+    meta->fs = _mesa_hash_table_create_u32_keys(NULL);
+    if (!meta->fs) {
+--- a/src/microsoft/vulkan/dzn_private.h	2026-11-09 20:58:16.694872848 -0300
++++ b/src/microsoft/vulkan/dzn_private.h	2026-11-09 20:58:41.668099451 -0300
+@@ -170,6 +170,10 @@
+    struct hash_table *fs;
+    mtx_t contexts_lock;
+    struct hash_table_u64 *contexts;
++   /* Play: set once the locks above are initialised and cleared when they are
++    * destroyed, so dzn_meta_blits_finish() can run more than once (it does when
++    * device creation fails) without destroying a lock twice. */
++   bool locks_initialized;
+ };
+ 
+ const struct dzn_meta_blit *

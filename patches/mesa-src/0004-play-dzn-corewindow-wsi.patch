@@ -1,0 +1,102 @@
+diff -ruN a/src/vulkan/wsi/wsi_common_win32.cpp b/src/vulkan/wsi/wsi_common_win32.cpp
+--- a/src/vulkan/wsi/wsi_common_win32.cpp	2026-11-09 08:54:54.372075842 -0300
++++ b/src/vulkan/wsi/wsi_common_win32.cpp	2026-11-09 08:54:54.373075851 -0300
+@@ -185,8 +185,16 @@
+       /* DXGI doesn't support random presenting order (images need to
+        * be presented in the order they were acquired), so we can't
+        * expose more than two image per swapchain.
++       *
++       * Play: without a DirectComposition device (the console has none) the
++       * swapchain is created for the guest HWND, which the launcher maps to
++       * its CoreWindow. A CoreWindow swapchain needs at least three flip
++       * buffers, and the image count must match the buffer count because
++       * acquire indexes the images by the swapchain's back buffer index.
+        */
+-      caps->minImageCount = caps->maxImageCount = 2;
++      struct wsi_win32 *wsi =
++         (struct wsi_win32 *)wsi_device->wsi[VK_ICD_WSI_PLATFORM_WIN32];
++      caps->minImageCount = caps->maxImageCount = wsi && !wsi->dxgi.dcomp ? 3 : 2;
+    } else {
+       caps->minImageCount = 1;
+       /* Software callbacke, there is no real maximum */
+@@ -698,12 +706,13 @@
+       break;
+    }
+ 
+-   if (chain->surface->current_swapchain != chain) {
++   /* Play: with no DirectComposition device the swapchain is bound to the
++    * window directly, so Present above is the whole of presentation. */
++   if (chain->wsi->dxgi.dcomp && chain->surface->current_swapchain != chain) {
+       chain->surface->visual->SetContent(chain->dxgi);
+       chain->wsi->dxgi.dcomp->Commit();
+       chain->surface->current_swapchain = chain;
+    }
+-
+    /* Mark the other image idle */
+    chain->status = VK_SUCCESS;
+    return VK_SUCCESS;
+@@ -792,12 +801,26 @@
+       desc.BufferUsage |= DXGI_USAGE_RENDER_TARGET_OUTPUT;
+ 
+    IDXGISwapChain1 *swapchain1;
+-   if (FAILED(factory->CreateSwapChainForComposition(queue, &desc, NULL, &swapchain1)) ||
++   /* Play: DirectComposition is absent on the console, so the swapchain is
++    * created for the surface's HWND. Under Play that HWND is a guest window
++    * the launcher's DXGI adapter maps to its CoreWindow; on a desktop it is
++    * the window itself. A CoreWindow swapchain takes neither the tearing nor
++    * the frame-latency-waitable flag, so neither is requested here. */
++   HRESULT hr = wsi->dxgi.dcomp ?
++      factory->CreateSwapChainForComposition(queue, &desc, NULL, &swapchain1) :
++      factory->CreateSwapChainForHwnd(queue, surface->base.hwnd, &desc, NULL, NULL, &swapchain1);
++   if (FAILED(hr) ||
+        FAILED(swapchain1->QueryInterface(&chain->dxgi)))
+       return VK_ERROR_INITIALIZATION_FAILED;
+ 
+    swapchain1->Release();
+ 
++   /* Presentation through DirectComposition only exists when there is a
++    * composition device; without one the swapchain is already bound to the
++    * window. */
++   if (!wsi->dxgi.dcomp)
++      return VK_SUCCESS;
++
+    if (!surface->target &&
+        FAILED(wsi->dxgi.dcomp->CreateTargetForHwnd(surface->base.hwnd, false, &surface->target)))
+       return VK_ERROR_INITIALIZATION_FAILED;
+@@ -848,8 +871,9 @@
+       { WSI_IMAGE_TYPE_CPU },
+    };
+ 
++   /* Play: the DXGI image path needs the factory and the command queue; the
++    * composition device is only needed to bind the swapchain to a visual. */
+    bool supports_dxgi = wsi->dxgi.factory &&
+-                        wsi->dxgi.dcomp &&
+                         wsi->wsi->win32.get_d3d12_command_queue;
+    struct wsi_base_image_params *image_params = supports_dxgi ?
+       &dxgi_image_params.base : &cpu_image_params.base;
+@@ -896,7 +920,7 @@
+    return VK_SUCCESS;
+ 
+ fail:
+-   if (surface->visual) {
++   if (surface->visual && wsi->dxgi.dcomp) {
+       surface->visual->SetContent(NULL);
+       surface->current_swapchain = NULL;
+       wsi->dxgi.dcomp->Commit();
+@@ -986,12 +1010,10 @@
+          goto fail;
+       }
+       wsi->dxgi.dcomp = dcomp_get_device();
+-      if (!wsi->dxgi.dcomp) {
+-         wsi->dxgi.factory->Release();
+-         vk_free(alloc, wsi);
+-         result = VK_ERROR_INITIALIZATION_FAILED;
+-         goto fail;
+-      }
++      /* Play: DirectComposition is optional. Without it the swapchain is
++       * created for the surface's HWND instead of for composition (see
++       * wsi_win32_surface_create_swapchain_dxgi); only the composition path
++       * needs it. */
+    }
+ 
+    wsi->base.get_support = wsi_win32_surface_get_support;

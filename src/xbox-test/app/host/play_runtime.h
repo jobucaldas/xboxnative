@@ -883,27 +883,44 @@ static void note_discord(const Module& m) {
 // search and finds vulkan-null-icd.dll in the runtime directory (redistributable()). Seeded before the loader maps, so
 // its first vkCreateInstance sees it; removed when the launch ends (reset_launch_config) so the next game starts clean.
 static const wchar_t* vulkanDriversKey=L"SOFTWARE\\Khronos\\Vulkan\\Drivers";
+// Drivers listed in the guest registry, in the order the loader should try them. dzn first (a real physical device over
+// D3D12), the null ICD second: the loader's terminator_CreateInstance skips an ICD whose CreateInstance fails and only
+// returns VK_ERROR_INCOMPATIBLE_DRIVER when none succeed, so a dzn that cannot initialise (no D3D12 device, no DXIL
+// acceptance) leaves the guest with the same clean "no devices" answer milestone 1 gives, never a hard failure.
+// A manifest that is not packaged is skipped, so a launcher built without dzn behaves exactly as before.
+static const wchar_t* const vulkanDriverManifests[]={L"vulkan-dzn.json",L"vulkan-null-icd.json"};
 static void publishVulkanDriverFiles(const std::wstring& path) {
     if(basename(path)!="vulkan-1.dll") return;
     // A game that ships its own loader keeps its own driver discovery: only the
     // packaged runtime copy is ours to configure.
     if(runtimeDirectory.empty() || _wcsicmp(path.c_str(),(runtimeDirectory+L"\\vulkan-1.dll").c_str())) return;
-    auto manifest=runtimeDirectory+L"\\vulkan-null-icd.json";
-    if(!exists(manifest)) return;
+    std::vector<std::wstring> listed;
+    for(auto name:vulkanDriverManifests) {
+        auto manifest=runtimeDirectory+L"\\"+name;
+        if(exists(manifest)) listed.push_back(manifest);
+    }
+    if(listed.empty()) return;
     HKEY key=nullptr;
     if(regb::RegCreateKeyExW(HKEY_LOCAL_MACHINE,vulkanDriversKey,0,nullptr,0,KEY_ALL_ACCESS,nullptr,&key,nullptr)!=ERROR_SUCCESS) return;
     DWORD zero=0;
-    LONG set=regb::RegSetValueExW(key,manifest.c_str(),0,REG_DWORD,(const BYTE*)&zero,sizeof zero);
+    LONG set=ERROR_SUCCESS;
+    for(auto& manifest:listed) {
+        set=regb::RegSetValueExW(key,manifest.c_str(),0,REG_DWORD,(const BYTE*)&zero,sizeof zero);
+        if(set!=ERROR_SUCCESS) break;
+    }
     regb::RegCloseKey(key);
     if(set!=ERROR_SUCCESS) return;
-    state->event("Vulkan loader mapped from the runtime directory; the guest registry lists the packaged null ICD (zero physical devices)");
+    const bool dzn=listed.size()>1;
+    state->event(dzn?
+        "Vulkan loader mapped from the runtime directory; the guest registry lists the packaged dzn driver (Vulkan on D3D12) with the null ICD as fallback":
+        "Vulkan loader mapped from the runtime directory; the guest registry lists the packaged null ICD (zero physical devices)");
 }
 // The loader caches driver discovery per process, so the key only has to be right before the first vkCreateInstance.
 // It must not outlive the launch: the next game would inherit a driver entry it never asked for.
 static void clearVulkanDriverFiles() {
     HKEY key=nullptr;
     if(regb::RegOpenKeyExW(HKEY_LOCAL_MACHINE,vulkanDriversKey,0,KEY_ALL_ACCESS,&key)!=ERROR_SUCCESS) return;
-    if(!runtimeDirectory.empty()) regb::RegDeleteValueW(key,(runtimeDirectory+L"\\vulkan-null-icd.json").c_str());
+    if(!runtimeDirectory.empty()) for(auto name:vulkanDriverManifests) regb::RegDeleteValueW(key,(runtimeDirectory+L"\\"+name).c_str());
     regb::RegCloseKey(key);
 }
 static Module* map(const std::wstring& requested,const std::string& asKey,wxl::Resolver resolver) {

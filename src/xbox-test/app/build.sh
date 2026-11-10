@@ -50,14 +50,24 @@ if [ "${PLAY_MESA:-1}" != 0 ]; then
   cp "$mesa/SHA256SUMS" "$out/layout/runtime/SHA256SUMS-mesa"; cp "$mesa/SOURCE.txt" "$out/layout/runtime/SOURCE-mesa.txt"
 fi
 # Vulkan for games that load vulkan-1.dll (research/VULKAN-PLAN.md): the Khronos loader built from the pinned source,
-# plus a null ICD that reports zero physical devices so a Vulkan-optional engine takes its normal fallback path.
-# PLAY_VULKAN=0 builds a launcher without them (LoadLibrary("vulkan-1.dll") then fails as it did before).
+# Mesa's dzn driver (Vulkan on D3D12) as the real ICD, and a null ICD that reports zero physical devices as the
+# fallback when dzn cannot initialise. PLAY_VULKAN=0 builds a launcher without them (LoadLibrary("vulkan-1.dll") then
+# fails as it did before). The dzn build needs the same UCRT mingw/meson toolchain as the Mesa OpenGL block.
 if [ "${PLAY_VULKAN:-1}" != 0 ]; then
   vk="$here/../../../out/vulkan-loader"
   bash "$here/../../tools/build-vulkan-loader.sh" "$vk" --build
   cp "$vk"/{vulkan-1.dll,vulkan-null-icd.dll,vulkan-null-icd.json} "$out/layout/runtime/"
   cp "$vk"/{LICENSE-Vulkan-Loader.txt,LICENSE-Vulkan-Headers.md} "$out/layout/runtime/"
   cp "$vk/SHA256SUMS" "$out/layout/runtime/SHA256SUMS-vulkan"; cp "$vk/SOURCE.txt" "$out/layout/runtime/SOURCE-vulkan.txt"
+  # dzn is part of the Vulkan stack: a build failure fails the launcher build rather than silently shipping the null
+  # ICD alone. PLAY_DZN=0 is the explicit way to package without it (the loader then lists only the null ICD).
+  if [ "${PLAY_DZN:-1}" != 0 ]; then
+    dzn="$here/../../../out/mesa-dzn"
+    bash "$here/../../tools/build-mesa-dzn.sh" "$dzn" --build
+    cp "$dzn"/{vulkan_dzn.dll,vulkan-dzn.json,LICENSE-Mesa.rst,LICENSE-DirectX-Headers} "$out/layout/runtime/"
+    mkdir -p "$out/layout/runtime/dzn-patches"; cp "$dzn"/patches/*.patch "$out/layout/runtime/dzn-patches/"
+    cp "$dzn/SHA256SUMS" "$out/layout/runtime/SHA256SUMS-dzn"; cp "$dzn/SOURCE.txt" "$out/layout/runtime/SOURCE-dzn.txt"
+  fi
 fi
 # Steam API provider for owned games (gbe_fork, pinned release; never committed).
 gbe="$here/../../../out/gbe-fork"
