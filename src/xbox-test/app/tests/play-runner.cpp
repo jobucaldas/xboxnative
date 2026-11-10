@@ -39,6 +39,7 @@ static FARPROC WINAPI hostProc(HMODULE h,LPCSTR name) {
 #include "../donors/probe.h"
 #include "../host/play_runtime.h"
 #include "../steam_leaderboards.h"
+#include "../steam_presence.h"
 #include "../launch_target.h"
 // OFF-DEVICE stand-in for the application's CoreWindow (game mode only). Play's
 // unchanged factory adapter still validates every guest HWND; only its final
@@ -395,6 +396,22 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
                 return bridge.seed(io,appid,std::filesystem::path(savesRoot),name,sort,display,create);},
             [appid](const std::string& name,int32_t score,const int32_t* details,int count,int method){
                 bridge.upload(io,appid,name,score,details,count,method);}});
+        // The persona-name tap, driven by a fake CMsgClientPersonaState reply.
+        // The launcher gets this as an unsolicited push on its CM session and
+        // collects it with parse_persona_names; here the same parser reads the
+        // same shape, so the tap and the guest's call are what is under test.
+        static std::map<uint64_t,std::string> names;
+        {
+            std::string a,b,c;
+            pb_fixed64(a,1,0x110000100000003ull); pb_u(a,2,1); pb_s(a,15,"Ana");
+            pb_fixed64(b,1,0x110000100000002ull); pb_u(b,2,1); pb_s(b,15,"Beto");
+            pb_fixed64(c,1,0x110000100000004ull); pb_u(c,2,1); pb_s(c,15,"Caio");
+            std::string body; pb_s(body,2,a); pb_s(body,2,b); pb_s(body,2,c);
+            names=steam_presence::parse_persona_names(body);
+        }
+        play_runtime::set_persona_name_tap({[](uint64_t steamid)->const char*{
+            auto it=names.find(steamid);
+            return it==names.end()?nullptr:it->second.c_str();}});
         logline("PRUN leaderboard bridge staged (off-device fixture backend)");
     }
     // Game mode runs Megabonk unless PRUN_GAME_EXE names another owned game.
