@@ -448,11 +448,13 @@ static bool leaderboard_tap_seed(const std::string& name,int sort,int display,bo
     bool ok = g_leaderboards.bridge.seed(io,appid,saves,name,sort,display,create,leaderboard_now());
     // The rows name players; ask Steam for their persona names now, so the rank
     // screen the game is about to draw can read them instead of "Unknown User".
+    // This runs inside the game's Find, so the wait is one frame's worth, not
+    // Steam's round trip: names that land later are handed out by the tap.
     if(auto rows = g_leaderboards.bridge.entries(name)) {
         std::vector<uint64_t> ids;
         for(auto& e : *rows) ids.push_back(e.steamid);
         auto pio = persona_io(session);
-        g_leaderboards.persona.ensure(pio,ids,2000);
+        g_leaderboards.persona.ensure(pio,ids,int(steam_persona::Bridge::SeedWaitMs));
     }
     return ok;
 }
