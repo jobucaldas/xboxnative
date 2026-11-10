@@ -3,6 +3,11 @@
 #include <cstdio>
 #include "reg_builtin.h"
 #include "reg_stress.h"
+#include "../../shared/vulkan_driver_registry.h"
+static std::string utf8_of(const std::wstring& w) {
+    int n=WideCharToMultiByte(CP_UTF8,0,w.data(),(int)w.size(),nullptr,0,nullptr,nullptr);
+    std::string s(n,'\0'); WideCharToMultiByte(CP_UTF8,0,w.data(),(int)w.size(),&s[0],n,nullptr,nullptr); return s;
+}
 extern "C" {
 LONG WINAPI regb_RegCreateKeyW(HKEY a, LPCWSTR b, PHKEY c) { return regb::RegCreateKeyW(a,b,c); }
 LONG WINAPI regb_RegCreateKeyExW(HKEY a, LPCWSTR b, DWORD c, LPWSTR d, DWORD e, REGSAM f, const SECURITY_ATTRIBUTES* g, PHKEY h, LPDWORD i) { return regb::RegCreateKeyExW(a,b,c,d,e,f,g,h,i); }
@@ -100,6 +105,45 @@ int main(int argc,char** argv) {
     { HKEY vk=0; char name[256]; DWORD nameLen=sizeof name, type=0, data=0, dataLen=sizeof data;
       EXPECT(regb::RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Khronos\\Vulkan\\Drivers",0,KEY_READ,&vk)==0);
       EXPECT(regb::RegEnumValueA(vk,0,name,&nameLen,nullptr,&type,(LPBYTE)&data,&dataLen)==0 && data==99);
+      EXPECT(regb::RegCloseKey(vk)==0); }
+    // Registration replaces, it does not append. The key survives an upgrade and the loader de-duplicates it by
+    // manifest basename keeping the first entry it enumerates, so an entry left by an earlier install would shadow the
+    // live manifest. Seed that history — two installs' worth of our own manifests, a third-party driver and a manifest
+    // that no longer exists — and check the prune leaves exactly the live pair plus the third-party driver.
+    regb::init(dir,say);
+    { HKEY vk=0; DWORD zero=0;
+      const std::wstring live=dir+L"\\runtime", old=dir+L"\\old-install", older=dir+L"\\older-install";
+      EXPECT(regb::RegCreateKeyW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Khronos\\Vulkan\\Drivers",&vk)==0);
+      for(auto& manifest:{live+L"\\vulkan-dzn.json",live+L"\\vulkan-null-icd.json",
+                          old+L"\\vulkan-dzn.json",old+L"\\vulkan-null-icd.json",
+                          older+L"\\vulkan-dzn.json"})
+          EXPECT(regb::RegSetValueExW(vk,manifest.c_str(),0,REG_DWORD,(const BYTE*)&zero,sizeof zero)==0);
+      // A third-party driver whose manifest is still on disk must survive; one whose file is gone must not.
+      std::wstring thirdParty=dir+L"\\third-party\\vulkan-icd.json", gone=dir+L"\\gone\\vulkan-icd.json";
+      CreateDirectoryW((dir+L"\\third-party").c_str(),nullptr);
+      { FILE* f=_wfopen(thirdParty.c_str(),L"wb"); if(f) fclose(f); }
+      EXPECT(regb::RegSetValueExW(vk,thirdParty.c_str(),0,REG_DWORD,(const BYTE*)&zero,sizeof zero)==0);
+      EXPECT(regb::RegSetValueExW(vk,gone.c_str(),0,REG_DWORD,(const BYTE*)&zero,sizeof zero)==0);
+      const unsigned removed=vulkan_driver_registry::prune_stale(vk,live,{L"vulkan-dzn.json",L"vulkan-null-icd.json"});
+      // Five: two stale dzn, one stale null ICD, the C:\runtime\vulkan-null-icd.json left by the block above
+      // (an install on another drive), and the manifest whose file is gone.
+      EXPECT(removed==5);
+      EXPECT(regb::RegCloseKey(vk)==0); }
+    // Reload from disk: the prune is a persistent change, and the loader's own enumeration (ANSI, ordered by name)
+    // must now see the live dzn ICD first with the null ICD as the fallback.
+    regb::init(dir,say);
+    { HKEY vk=0; char name[1024]; DWORD nameLen=sizeof name, type=0, data=0, dataLen=sizeof data;
+      EXPECT(regb::RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\Khronos\\Vulkan\\Drivers",0,KEY_READ,&vk)==0);
+      std::vector<std::string> seen;
+      for(DWORD i=0;;++i) {
+          nameLen=sizeof name; dataLen=sizeof data;
+          if(regb::RegEnumValueA(vk,i,name,&nameLen,nullptr,&type,(LPBYTE)&data,&dataLen)!=0) break;
+          seen.push_back(name);
+      }
+      EXPECT(seen.size()==3);
+      EXPECT(seen.size()==3 && seen[0]==utf8_of(dir)+"\\runtime\\vulkan-dzn.json");
+      EXPECT(seen.size()==3 && seen[1]==utf8_of(dir)+"\\runtime\\vulkan-null-icd.json");
+      EXPECT(seen.size()==3 && seen[2]==utf8_of(dir)+"\\third-party\\vulkan-icd.json");
       EXPECT(regb::RegCloseKey(vk)==0); }
     printf(bad?"SELFTEST FAILED %d\n":"SELFTEST OK\n",bad);
     return bad!=0;
