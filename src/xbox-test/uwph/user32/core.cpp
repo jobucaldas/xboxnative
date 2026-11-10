@@ -329,10 +329,34 @@ extern "C" UINT WINAPI c_GetRegisteredRawInputDevices(RawInputDevice2* devices,U
 // waits for the mutex would deadlock both. An atomic store keeps the publisher
 // lock-free; the readers below take a single snapshot of it.
 static std::atomic<unsigned> padSlots{0};   // bit i: XInput slot i holds a published pad
+static std::atomic<bool> padTestOwned{false};   // the mapped regression PE holds the mask
 static int padToken[pad_device::slot_count];   // stable per-slot device handles
 extern "C" void WINAPI uwph_u32c_pads(unsigned mask){
  if(mask&~((1u<<pad_device::slot_count)-1))return;
+ if(padTestOwned.load(std::memory_order_relaxed))return;   // the mapped test owns the mask
  padSlots.store(mask,std::memory_order_relaxed);
+}
+// The mapped regression PE (test.cpp) runs inside the launcher's own process,
+// where the publisher above rewrites the mask every frame from the UI thread. A
+// test that asserted exact counts against that value would race the publisher,
+// so the test takes the mask over for the length of its pad checks: while it
+// owns the mask the launcher's publishes are dropped and the readers below see
+// only what the test published. uwph_u32c_pads_test_end releases it, and the
+// launcher's next frame publish (it publishes every frame) restores the live
+// state. Both are plain atomic stores: the publisher staying lock-free is what
+// #132 fixed, and taking the mask must not reintroduce a wait.
+extern "C" void WINAPI uwph_u32c_pads_test(unsigned mask){
+ if(mask&~((1u<<pad_device::slot_count)-1))return;
+ padTestOwned.store(true,std::memory_order_relaxed);
+ padSlots.store(mask,std::memory_order_relaxed);
+}
+extern "C" void WINAPI uwph_u32c_pads_test_end(void){
+ padTestOwned.store(false,std::memory_order_relaxed);
+}
+// The mask the readers are acting on, so a caller can check that what it
+// published is what the device list is built from.
+extern "C" unsigned WINAPI uwph_u32c_pads_current(void){
+ return padSlots.load(std::memory_order_relaxed);
 }
 static int padSlotOf(HANDLE device,unsigned slots){
  if(!device)return -1;
