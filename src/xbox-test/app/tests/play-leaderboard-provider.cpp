@@ -152,6 +152,14 @@ __declspec(dllexport) const char* __cdecl SteamAPI_ISteamUserStats_GetLeaderboar
     if (board == 0 || board > (uint64_t)boardCount) return "";
     return boards[board - 1].name;
 }
+// Like gbe_fork: the local account's name is known, and every other account is
+// "Unknown User" unless a LAN peer pushed a Friend record. The leaderboard
+// bridge's name tap is what replaces that answer for real Steam rows, so this
+// fixture must return the placeholder for the seeded ids on its own.
+__declspec(dllexport) const char* __cdecl SteamAPI_ISteamFriends_GetFriendPersonaName(void* self, uint64_t steamid) {
+    (void)self; (void)steamid;
+    return "Unknown User";
+}
 __declspec(dllexport) uint64_t __cdecl SteamAPI_ISteamUserStats_DownloadLeaderboardEntries(void* self, uint64_t board, int request, int start, int end) {
     (void)self; (void)request;
     int n;

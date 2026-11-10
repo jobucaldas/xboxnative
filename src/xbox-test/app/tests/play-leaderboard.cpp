@@ -17,6 +17,7 @@ STEAM_API uint64_t __cdecl SteamAPI_ISteamUserStats_FindOrCreateLeaderboard(void
 STEAM_API uint64_t __cdecl SteamAPI_ISteamUserStats_DownloadLeaderboardEntries(void*, uint64_t, int, int, int);
 STEAM_API int __cdecl SteamAPI_ISteamUserStats_GetDownloadedLeaderboardEntry(void*, uint64_t, int, void*, int32_t*, int);
 STEAM_API uint64_t __cdecl SteamAPI_ISteamUserStats_UploadLeaderboardScore(void*, uint64_t, int, int32_t, const int32_t*, int);
+STEAM_API const char* __cdecl SteamAPI_ISteamFriends_GetFriendPersonaName(void*, uint64_t);
 STEAM_API const char* __cdecl PlayLeaderboardTrace(void);
 STEAM_API uint64_t __cdecl PlayLeaderboardCallBoard(uint64_t call);
 
@@ -56,6 +57,15 @@ DWORD lb_entry() {
     if (!SteamAPI_ISteamUserStats_GetDownloadedLeaderboardEntry(nullptr, kills, 0, &top, nullptr, 0)) return 15;
     // Descending: the highest score is rank 1, and it is another player's.
     if (top.rank != 1 || top.score != 1500 || top.user == 0) return 16;
+
+    // The row's player has a name. The provider answers "Unknown User" for any
+    // account it has no LAN Friend record for, so this only passes when the
+    // launcher's persona-name tap supplied the name Steam gave it.
+    const char* name = SteamAPI_ISteamFriends_GetFriendPersonaName(nullptr, top.user);
+    if (!name || !contains(name, "Ana")) return 24;
+    // An account the launcher was never told about keeps the provider's own
+    // answer: the tap must not invent names.
+    if (!contains(SteamAPI_ISteamFriends_GetFriendPersonaName(nullptr, 0x1100000000000099ull), "Unknown User")) return 25;
 
     // A board this launch never seeded: the provider reads nothing, so the game
     // sees the empty board it saw before the bridge existed.

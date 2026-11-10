@@ -105,6 +105,7 @@ EXPORTS
  SteamAPI_ISteamUserStats_GetDownloadedLeaderboardEntry
  SteamAPI_ISteamUserStats_UploadLeaderboardScore
  SteamAPI_ISteamUserStats_GetLeaderboardName
+ SteamAPI_ISteamFriends_GetFriendPersonaName
  PlayLeaderboardTrace
  PlayLeaderboardCallBoard
 DEF
@@ -231,6 +232,7 @@ grep -q "STEAM leaderboards: 'v2_kills' seeded 3 rows (id 7, 3 on Steam, file wr
 grep -q "STEAM leaderboards: score 2000 sent to 'v2_kills' (changed=1, rank 0 -> 1)" "$out/leaderboards.log"
 [[ $(grep -c "'v2_kills' seeded" "$out/leaderboards.log") == 1 ]]
 if grep -q "v2_unseeded' seeded" "$out/leaderboards.log";then exit 1;fi
+grep -q "STEAM persona names: SteamAPI_ISteamFriends_GetFriendPersonaName observed; names come from the launcher's Steam session" "$out/leaderboards.log"
 # Vulkan (research/VULKAN-PLAN.md): a guest's LoadLibrary("vulkan-1.dll") is served by the Khronos loader from the
 # runtime directory, and Play must have listed the packaged ICD manifests in the guest registry, which is the route
 # the loader reads (VK_DRIVER_FILES is ignored at the process's integrity level).

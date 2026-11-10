@@ -1,5 +1,10 @@
 # Steamworks multiplayer: what the owned games use, and what can serve it
 
+The lobby wire layer this map describes is implemented in
+`app/steam_lobbies.h`; the route decision and the off-device evidence for
+hosting Valve's client in-process are in
+[STEAM-REAL-ONLINE.md](STEAM-REAL-ONLINE.md).
+
 This is the map for issue #55 part 2: which Steamworks interfaces the owned
 games actually reference, what the pinned Steam API provider (gbe_fork) already
 serves, what a launcher-side CM bridge could serve against the real Steam
@@ -116,7 +121,9 @@ board-name literals `kills`, `kills_weekly`, `friends` and a `v2_` prefix, and a
 serialized default blob `\x04 v2 | \x0a kills | \x18 kills_weekly | \x0e friends`.
 The names it passes to Steam are therefore most likely `v2_kills`,
 `v2_kills_weekly` and `v2_friends` — a hypothesis until the console log shows the
-seed line for each.
+seed line for each. (The 2026-11-09 console run settled it: the real names are
+`v2_kills`, `v2_kills_friends`, `v2_kills_weekly`, `v2_kills_weekly_friends` and
+`banned_players`; see the console section at the end.)
 
 **Why the board is empty today.** gbe_fork answers `FindLeaderboard` from its own
 cache (`dll/steam_user_stats_leaderboard.cpp`, tag `release-2026_09_27`):
@@ -194,6 +201,54 @@ has never seen, in which case the game sees the empty board it saw before.
 Only the first Find of a board in a process benefits. And the seed blocks the
 game's thread for one CM round trip per board it asks for.
 
+Three gaps are known and are *not* fixed by the cache-file route. All are
+visible on the Rank screen, so a console run should be read with them in mind
+rather than as "the bridge did nothing":
+
+1. **The AMIGOS tab will show global players, not friends** (read from the
+   provider's source, not yet seen on console: reaching it needs a right-press
+   inside the guest and no pad was connected in the runs so far). gbe's
+   `DownloadLeaderboardEntries` treats `k_ELeaderboardDataRequestFriends` as
+   "all rows in the cache" (`dll/steam_user_stats_leaderboard.cpp`: the range
+   clamp is skipped for the friends request, then
+   `m_cEntryCount = entries.size()`), so the tab is not empty — it lists
+   everyone the seed wrote. `DownloadLeaderboardEntriesForUsers` does filter:
+   it counts only users already in that same vector. The cache file carries no
+   friend flag, so the bridge cannot make the friends request narrower than the
+   global one. Serving it properly means asking CM for `DataFriends` rows per
+   request — i.e. the request has to be observed at
+   `DownloadLeaderboardEntries`, not only at Find, which is the shim route
+   below.
+2. **Other players' names read "Unknown User" — fixed, and verified on the
+   console.** gbe's
+   `GetFriendPersonaName` answers the local name for the account and otherwise
+   only a `Friend` record from its own LAN peer network
+   (`dll/steam_friends.cpp`: `friends` is pushed only by network peers, and
+   `Settings` has no friend-list file), so a real Steam row's steam id has no
+   name behind it. The launcher now asks Steam for the seeded rows' names on the
+   same CM session (`CMsgClientRequestFriendData`, EMsg 815, with repeated
+   `friends` and only `Status|PlayerName`), collects the reply — an unsolicited
+   `CMsgClientPersonaState` push (EMsg 766), field `friends[2].player_name[15]`,
+   which `presence_push` already receives — and serves it in memory through an
+   export tap on `SteamAPI_ISteamFriends_GetFriendPersonaName`. The provider's
+   own call still runs; its answer is replaced only for an account Steam named.
+   Megabonk references that export (`GameAssembly.dll`, 894 Steam API symbols),
+   so the tap is on a call the game makes. Off-device proof:
+   `app/tests/play-runtime.sh leaderboards` — the stand-in provider answers
+   "Unknown User" for every account, and the guest exits 42 only when the tap
+   supplied "Ana" for a seeded row and left an unknown id to the provider.
+   Console proof: 0.5.256.0 showed real names on all ten Rank rows (below).
+3. **Ranks are 1..N, not Steam's ranks.** gbe derives `m_nGlobalRank` from the
+   entry's index in its sorted array (`1 + (&entry - &entries[0])`), not from
+   Steam's `global_rank`, and the cache file has no field for it. That is right
+   for the top of the board and wrong for the user's own row whenever they are
+   not inside the seeded slice.
+
+The GLOBAL tab — the owner's stated check — is unaffected by the first gap: it
+lists real players' scores and ranks, and it is the tab the console runs above
+captured. The AMIGOS tab shares the same seeded rows, so it is expected to list
+them too; that is read from the provider's source, not yet photographed.
+
 ## The three serving options
 
 For each interface family:
@@ -212,6 +267,7 @@ For each interface family:
 | Interface | Games | (a) gbe_fork today | (b) CM bridge | (c) Valve client |
 |---|---|---|---|---|
 | `ISteamFriends` rich presence | Megabonk, Slime Rancher, PPT2 | in-memory + LAN only | **done in this branch**: observed at the export, uploaded on the launcher session | — |
+| `ISteamFriends` persona names | Megabonk | local account only; every other id is "Unknown User" unless a LAN peer pushed a `Friend` record | **done and console-verified**: `CMsgClientRequestFriendData` for the seeded rows' ids, names collected from the `CMsgClientPersonaState` push and served through an export tap on `GetFriendPersonaName` | — |
 | `ISteamUserStats` leaderboards | Megabonk | reads `<appid>\leaderboard\<name>` on a board's first Find and answers downloads from it; never writes it with `disable_networking=1`, so boards are empty | **done in this branch**: observed at the export, board + top rows fetched on the launcher session and written into the provider's own file before its first Find; scores uploaded as `CMsgClientLBSSetScore` | — |
 | `ISteamFriends` invites / `GameLobbyJoinRequested` | Megabonk | overlay/invite handling is experimental-build only; `auto_accept_invite.txt` exists | needs `CMsgClientMMSInviteToLobby` (6621) and the `ClientMMSLobbyChatMsg` (6614) path to raise callbacks | — |
 | `ISteamMatchmaking` lobbies | Megabonk | LAN-only lobbies over its own UDP port (`listen_port`, default 47584): `CreateLobby` queues a pending create and `create_pending_lobbies()` mints a local lobby id, answers `LobbyCreated_t`/`LobbyEnter_t` itself and broadcasts the lobby over gbe's network (`dll/steam_matchmaking.cpp`); `disable_lobby_creation` makes it fail instead | **feasible**: the 14 messages below map almost 1:1 to the API | — |
@@ -319,6 +375,13 @@ Verified off-device:
   the seed did not cover stays empty, which is the pre-bridge behaviour
   (`app/tests/play-runtime.sh leaderboards`, fixtures
   `app/tests/play-leaderboard.cpp` and `play-leaderboard-provider.cpp`).
+- The **pinned gbe_fork binary itself** reads the file the launcher writes. The
+  test above uses a stand-in provider written here, so it proves the bridge and
+  the file format but not the real reader; `app/tests/steam-leaderboard-gbe.sh`
+  runs the fetched, hash-checked `steam_api64.dll` as a game would, seeds with
+  the launcher's own encoder, and gets 3 rows back at ranks 1-3 with the seeded
+  scores. With the file removed the same guest gets an empty board. That is the
+  link a new pin or a changed path would break silently.
 - The launcher sources compile with the UWP toolchain.
 - gbe_fork exports 1,032 `SteamAPI_ISteam*` names. Of the 894 Megabonk
   references, 890 are exported; the 4 that are not are the
@@ -339,9 +402,72 @@ Not verified:
   the check.
 - Anything about lobbies, P2P or auth tickets end to end. No CM lobby message
   has been sent from this codebase.
-- That Steam answers `CMsgClientLBSFindOrCreateLB` for these boards on the
-  launcher's session, that the board names are `v2_kills` / `v2_kills_weekly` /
-  `v2_friends`, and that the game's Rank screen then lists the rows. That needs a
-  console run; the checks are the lines
-  `STEAM leaderboards: 'v2_kills' seeded N rows (id …, N on Steam, file written)`
-  and, on the screen, other players' entries.
+- That the AMIGOS tab lists only the account's real friends, or that ranks match
+  Steam's `global_rank` for a row outside the seeded slice (gaps 1 and 3 above).
+
+**Console run, 2026-11-09 (0.5.255.0, `feat/steam-leaderboards` @ 7dd2f0f).**
+The tap fired, and Steam answered every board the game asked for, in one launch:
+
+```
+STEAM leaderboards: SteamAPI_ISteamUserStats_FindLeaderboard observed; rows come from the launcher's Steam session
+STEAM leaderboards: 'banned_players' seeded 72 rows (id 17849113, 72 on Steam, file written)
+STEAM leaderboards: 'v2_kills' seeded 0 rows (id 17843353, 0 on Steam, file empty)
+STEAM leaderboards: 'v2_kills_friends' seeded 100 rows (id 17772166, 3735220 on Steam, file written)
+STEAM leaderboards: 'v2_kills_weekly' seeded 100 rows (id 17850492, 29116 on Steam, file written)
+STEAM leaderboards: 'v2_kills_weekly_friends' seeded 100 rows (id 17850493, 29171 on Steam, file written)
+```
+
+So the board names are not a hypothesis any more, `CMsgClientLBSFindOrCreateLB`
+answers on the launcher's session, and the cache files on the console decode to
+the row counts in the log. `v2_kills` is genuinely empty on Steam — that is
+Steam's answer, not a bridge failure — and the game's real boards are the
+`_friends` / `_weekly` names plus `banned_players`. Note that `_friends` is a
+board *name*, not the friends data request: it is a separate global board.
+
+**The Rank screen lists the rows.** A later run on the same build captured the
+LEADERBOARDS panel with GLOBAL selected, on Megabonk's main menu:
+
+```
+LEADERBOARDS                    Reset 140:12:26
+GLOBAL | FRIENDS
+RANK  PLAYER          KILLS
+#1    Unknown User    3.01M
+#2    Unknown User    2.94M
+#3    Unknown User    1.41M
+...
+#10   Unknown User    934.01K
+```
+
+Real other players, real scores, ranked 1..10 — the owner's acceptance check on
+this build. The JOGADOR column read "Unknown User" on every row, which is gap 2
+above; the name fix was verified on the next package (below).
+
+**The Rank screen shows real names (0.5.256.0, `feat/steam-leaderboards` @
+`a552964`).** Same panel, same framing, one build later — only the PLAYER column
+changed:
+
+```
+LEADERBOARDS                    Reset 139:43:06
+GLOBAL | FRIENDS
+RANK  PLAYER            KILLS
+#1    Банановый сок    3.01M
+#2    Gaskarth         2.94M
+#3    Time             1.41M
+#4    Ryan Gosling     1.36M
+#5    Iar              1.20M
+#6    MrWifiss         1.08M
+#7    casual gamer     1.08M
+#8    Rollngar         1.03M
+#9    blaizerd         993.27K
+#10   pepequentin      934.01K
+```
+
+Scores and ranks are identical to the run above, so the name path is isolated:
+the tap fired once
+(`STEAM persona names: SteamAPI_ISteamFriends_GetFriendPersonaName observed;
+names come from the launcher's Steam session`) and the persona push named 294 of
+the seeded accounts, one per `CMsgClientPersonaState` entry, interleaved with
+the seeding (`STEAM leaderboards: 1 player names received from Steam (N known)`,
+N reaching 294). No input was needed: the photosensitivity warning had already
+been accepted in two earlier runs with a pad connected, and the game persists
+that.

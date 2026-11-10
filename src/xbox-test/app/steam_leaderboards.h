@@ -256,6 +256,10 @@ struct Bridge {
     // Names whose rows are in the provider's cache file. Kept apart from `ids`
     // because a board can be known while its rows never arrived.
     std::map<std::string, bool> seeded;
+    // The rows written for each board, so the launcher can ask Steam for the
+    // names its rank screen will show. The provider's file has no name field;
+    // the ids are the only thing that can be looked up.
+    std::map<std::string, std::vector<Entry>> rows;
     // Serialises seeds: the check and the round trip must not interleave, and
     // the caller's own lock must not be held across the network wait.
     std::mutex m;
@@ -284,6 +288,7 @@ struct Bridge {
             if (!stored) io.log("leaderboards: '" + name + "' rows could not be stored");
         }
         seeded[name] = stored;
+        if (stored) this->rows[name] = entries;
         char line[240];
         snprintf(line, sizeof line, "leaderboards: '%s' seeded %zu rows (id %d, %d on Steam, file %s)",
                  name.c_str(), entries.size(), board.id, board.count,
@@ -306,6 +311,16 @@ struct Bridge {
         io.log(line);
         return true;
     }
-    void reset() { std::lock_guard<std::mutex> lock(m); ids.clear(); seeded.clear(); }
+    void reset() { std::lock_guard<std::mutex> lock(m); ids.clear(); seeded.clear(); rows.clear(); }
+    // Every player id the seeded boards hold, so the launcher can ask Steam for
+    // their names. Called after a seed; the provider's file carries no names.
+    std::vector<uint64_t> player_ids() {
+        std::lock_guard<std::mutex> lock(m);
+        std::vector<uint64_t> out;
+        for (auto& [name, entries] : rows)
+            for (auto& e : entries)
+                if (e.steamid) out.push_back(e.steamid);
+        return out;
+    }
 };
 } // namespace steam_leaderboards
