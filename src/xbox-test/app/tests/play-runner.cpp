@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstring>
 #include <new>
+#include <optional>
+#include <thread>
 // Wine 10 lacks VirtualProtectFromApp; this host-only alias preserves W^X.
 static BOOL WINAPI hostProtect(void* p,SIZE_T n,DWORD flags,DWORD* old) {
     using Fn=BOOL(WINAPI*)(void*,SIZE_T,DWORD,DWORD*);
@@ -39,7 +41,7 @@ static FARPROC WINAPI hostProc(HMODULE h,LPCSTR name) {
 #include "../donors/probe.h"
 #include "../host/play_runtime.h"
 #include "../steam_leaderboards.h"
-#include "../steam_presence.h"
+#include "../steam_persona.h"
 #include "../launch_target.h"
 // OFF-DEVICE stand-in for the application's CoreWindow (game mode only). Play's
 // unchanged factory adapter still validates every guest HWND; only its final
@@ -362,6 +364,11 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         if(!n||n>=1024){logline("PRUN FAIL PRUN_LB_SAVES");return 4;}
         static steam_leaderboards::Bridge bridge;
         static steam_leaderboards::Io io;
+        // The board Steam holds, so a SetScore changes what the next GetLBEntries
+        // returns: that is what makes the refresh observable.
+        static std::mutex rowsMutex;
+        static std::vector<steam_leaderboards::Entry> boardRows={
+            {0x110000100000003ull,1,1500,{}},{0x110000100000002ull,2,900,{}},{0x110000100000004ull,3,400,{}}};
         io.call=[](uint32_t emsg,uint32_t routing,const std::string& body,std::string& out){
             // The fake backend: the two boards Steam has, three players each,
             // answering the CMsgClientLBS* shapes.
@@ -373,18 +380,30 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
                 return true;
             }
             if(emsg==steam_leaderboards::ClientLBSGetLBEntries) {
-                pb_u(out,1,1);pb_u(out,2,3);
+                std::lock_guard<std::mutex> lock(rowsMutex);
+                pb_u(out,1,1);pb_u(out,2,uint64_t(boardRows.size()));
                 // Descending board: Steam returns rows in rank order, and the
                 // provider's cache file keeps that order.
-                const uint64_t users[3]={0x110000100000003ull,0x110000100000002ull,0x110000100000004ull};
-                const int32_t scores[3]={1500,900,400};
-                for(int i=0;i<3;++i) {
-                    std::string e;pb_fixed64(e,1,users[i]);pb_u(e,2,uint64_t(i+1));pb_u(e,3,uint64_t(int64_t(scores[i])));
-                    pb_s(out,3,e);
+                int32_t rank=0;
+                for(auto& r:boardRows) {
+                    std::string e;pb_fixed64(e,1,r.steamid);pb_u(e,2,uint64_t(++rank));
+                    pb_u(e,3,uint64_t(int64_t(r.score)));pb_s(out,3,e);
                 }
                 return true;
             }
-            if(emsg==steam_leaderboards::ClientLBSSetScore) { pb_u(out,1,1);pb_u(out,2,3);pb_u(out,3,1);pb_u(out,4,0);pb_u(out,5,1);return true; }
+            if(emsg==steam_leaderboards::ClientLBSSetScore) {
+                int32_t score=int32_t(pb_get(f,3)->u);
+                {
+                    std::lock_guard<std::mutex> lock(rowsMutex);
+                    bool found=false;
+                    for(auto& r:boardRows)if(r.steamid==0x110000100000001ull){r.score=score;found=true;}
+                    if(!found)boardRows.push_back({0x110000100000001ull,0,score,{}});
+                    std::sort(boardRows.begin(),boardRows.end(),
+                              [](const steam_leaderboards::Entry& a,const steam_leaderboards::Entry& b){return a.score>b.score;});
+                }
+                pb_u(out,1,1);pb_u(out,2,uint64_t(boardRows.size()));pb_u(out,3,1);pb_u(out,4,0);pb_u(out,5,1);
+                return true;
+            }
             (void)routing;return false;
         };
         // Same prefix the launcher puts on these lines (launch.h), so the greps
@@ -393,27 +412,60 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         uint32_t appid=3405340;
         {wchar_t a[32];DWORD n=GetEnvironmentVariableW(L"PRUN_LB_APPID",a,32);if(n&&n<32)appid=uint32_t(_wtoi(a));}
         std::wstring savesRoot(saves,n);
+        // Persona names (steam_persona.h): the same policy the launcher runs.
+        // The fake backend answers CMsgClientRequestFriendData with the
+        // CMsgClientPersonaState push Steam sends, on a reader thread, so the
+        // game's thread waits for the names exactly as it does on the console.
+        // Names are synthetic; no real account appears in this fixture.
+        static steam_persona::Bridge persona;
+        static steam_persona::Io personaIo;
+        personaIo.send=[&](uint32_t emsg,const std::string& body){
+            if(emsg!=steam_persona::ClientRequestFriendData)return false;
+            std::vector<uint64_t> ids;
+            for(auto& f:pb_parse(body))if(f.f==2)ids.push_back(f.u);
+            std::thread([ids]{
+                std::string push;
+                for(auto id:ids) {
+                    const char* name=id==0x110000100000003ull?"Player Three":
+                                     id==0x110000100000002ull?"Player Two":
+                                     id==0x110000100000004ull?"Player Four":
+                                     id==0x110000100000001ull?"Fixture Owner":nullptr;
+                    if(!name)continue;
+                    std::string f;pb_fixed64(f,1,id);pb_u(f,2,1);pb_s(f,15,name);pb_s(push,2,f);
+                }
+                if(!push.empty())persona.on_state(push);
+            }).detach();
+            return true;
+        };
+        personaIo.log=[](const std::string& line){logline(("STEAM "+line).c_str());};
+        persona.self=0x110000100000001ull;
+        // The account's own name, as the launcher's presence self-check asks for
+        // it, so GetPersonaName is not the provider's staged placeholder.
+        persona.ensure(personaIo,{0x110000100000001ull},2000);
+        play_runtime::set_persona_tap({
+            [](uint64_t id){return persona.name(id);},
+            []{return persona.self_name();},
+            [](uint64_t id){persona.want({id});}});
+        logline("PRUN persona bridge staged (off-device fixture backend)");
         play_runtime::set_leaderboard_tap({
             [savesRoot,appid](const std::string& name,int sort,int display,bool create){
-                return bridge.seed(io,appid,std::filesystem::path(savesRoot),name,sort,display,create);},
+                bool ok=bridge.seed(io,appid,std::filesystem::path(savesRoot),name,sort,display,create);
+                // The rows name players; ask for their names before the game
+                // draws them, as the launcher's seed does.
+                if(auto rows=bridge.entries(name)) {
+                    std::vector<uint64_t> ids;
+                    for(auto& e:*rows)ids.push_back(e.steamid);
+                    persona.ensure(personaIo,ids,2000);
+                }
+                return ok;},
             [appid](const std::string& name,int32_t score,const int32_t* details,int count,int method){
-                bridge.upload(io,appid,name,score,details,count,method);}});
-        // The persona-name tap, driven by a fake CMsgClientPersonaState reply.
-        // The launcher gets this as an unsolicited push on its CM session and
-        // collects it with parse_persona_names; here the same parser reads the
-        // same shape, so the tap and the guest's call are what is under test.
-        static std::map<uint64_t,std::string> names;
-        {
-            std::string a,b,c;
-            pb_fixed64(a,1,0x110000100000003ull); pb_u(a,2,1); pb_s(a,15,"Ana");
-            pb_fixed64(b,1,0x110000100000002ull); pb_u(b,2,1); pb_s(b,15,"Beto");
-            pb_fixed64(c,1,0x110000100000004ull); pb_u(c,2,1); pb_s(c,15,"Caio");
-            std::string body; pb_s(body,2,a); pb_s(body,2,b); pb_s(body,2,c);
-            names=steam_presence::parse_persona_names(body);
-        }
-        play_runtime::set_persona_name_tap({[](uint64_t steamid)->const char*{
-            auto it=names.find(steamid);
-            return it==names.end()?nullptr:it->second.c_str();}});
+                bridge.upload(io,appid,name,score,details,count,method);},
+            [](const std::string& name){
+                auto rows=bridge.entries(name);
+                if(!rows)return std::optional<std::vector<play_runtime::LeaderboardTap::Row>>{};
+                std::vector<play_runtime::LeaderboardTap::Row> out;
+                for(auto& e:*rows)out.push_back({e.steamid,e.rank,e.score,e.details});
+                return std::optional<std::vector<play_runtime::LeaderboardTap::Row>>(std::move(out));}});
         logline("PRUN leaderboard bridge staged (off-device fixture backend)");
     }
     // Game mode runs Megabonk unless PRUN_GAME_EXE names another owned game.

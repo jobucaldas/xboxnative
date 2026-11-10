@@ -59,6 +59,8 @@ jobs:
           /tmp/steam-lobbies-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_host_test.cpp -o /tmp/steam-host-test
           /tmp/steam-host-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_persona_test.cpp -o /tmp/steam-persona-test
+          /tmp/steam-persona-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/game_library_test.cpp -o /tmp/game-library-test
           /tmp/game-library-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/detail-input.cpp -o /tmp/detail-input-test

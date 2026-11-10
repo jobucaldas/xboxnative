@@ -23,6 +23,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -256,45 +257,85 @@ struct Bridge {
     // Names whose rows are in the provider's cache file. Kept apart from `ids`
     // because a board can be known while its rows never arrived.
     std::map<std::string, bool> seeded;
-    // The rows written for each board, so the launcher can ask Steam for the
-    // names its rank screen will show. The provider's file has no name field;
-    // the ids are the only thing that can be looked up.
+    // The freshest rows Steam sent for a board, and when. The provider caches a
+    // board in memory on its first Find and never re-reads the file, so a later
+    // Find cannot refresh it; these rows are what the launcher hands the game
+    // instead (play_runtime's GetDownloadedLeaderboardEntry tap), and the ids
+    // the launcher asks Steam for persona names.
     std::map<std::string, std::vector<Entry>> rows;
+    std::map<std::string, double> rowsAt;
+    // A score this account uploaded changed the board; the next Find refetches
+    // even inside the TTL.
+    std::set<std::string> dirty;
+    // How long a row set is trusted before a Find refetches it. Short on
+    // purpose: the owner asked to see other players' scores move.
+    double ttl = 30.0;
     // Serialises seeds: the check and the round trip must not interleave, and
     // the caller's own lock must not be held across the network wait.
-    std::mutex m;
+    mutable std::mutex m;
 
-    // Returns true when the provider's cache file now holds rows for `name`.
+    // Returns true when the provider's cache file (or the launcher's own rows)
+    // holds rows for `name`. `now` is seconds on any monotonic clock.
     bool seed(Io& io, uint32_t appid, const fs::path& savesRoot, const std::string& name,
-              int sort, int display, bool create) {
+              int sort, int display, bool create, double now = 0) {
         if (name.empty()) return false;
         std::lock_guard<std::mutex> lock(m);
+        int32_t id = 0;
+        bool refresh = false;
         auto known = ids.find(name);
-        if (known != ids.end()) {
-            auto rows = seeded.find(name);
-            return rows != seeded.end() && rows->second;
+        if (known == ids.end()) {
+            auto board = find_board(io, appid, name, sort, display, create);
+            if (!board.found) { ids[name] = -1; return false; }
+            // The board exists on Steam, so its id is kept even when the rows do
+            // not arrive: a score for it can still be uploaded this launch.
+            ids[name] = board.id;
+            id = board.id;
+            refresh = true;
+        } else if (known->second <= 0) {
+            return false;   // asked, Steam had nothing: the provider's answer stands
+        } else {
+            id = known->second;
+            auto at = rowsAt.find(name);
+            refresh = dirty.count(name) != 0 || at == rowsAt.end() || now - at->second >= ttl;
         }
-        auto board = find_board(io, appid, name, sort, display, create);
-        if (!board.found) { ids[name] = -1; return false; }
-        // The board exists on Steam, so its id is kept even when the rows do
-        // not arrive: a score for it can still be uploaded this launch.
-        ids[name] = board.id;
+        bool had = seeded.find(name) != seeded.end() && seeded[name];
+        if (!refresh) return had;
         std::vector<Entry> entries; int32_t count = 0;
-        bool rows = fetch_rows(io, appid, name, board.id, entries, count);
-        bool stored = false;
-        if (rows && !entries.empty()) {
-            auto path = cache_path(savesRoot, appid, name);
-            stored = path && write_cache(*path, entries);
-            if (!stored) io.log("leaderboards: '" + name + "' rows could not be stored");
+        bool got = fetch_rows(io, appid, name, id, entries, count);
+        if (!got) {
+            // Keep whatever the last successful fetch left: a failed refresh is
+            // not a reason to show the game less than it already had.
+            char line[240];
+            if (had)
+                snprintf(line, sizeof line, "leaderboards: '%s' refresh unavailable (id %d); keeping %zu rows",
+                         name.c_str(), id, rows.count(name) ? rows[name].size() : size_t(0));
+            else
+                snprintf(line, sizeof line, "leaderboards: '%s' seeded 0 rows (id %d, %d on Steam, file %s)",
+                         name.c_str(), id, count, "unavailable");
+            io.log(line);
+            return had;
         }
-        seeded[name] = stored;
-        if (stored) this->rows[name] = entries;
+        // A successful fetch with no rows is Steam's answer, not a failure: a
+        // weekly board that reset really is empty, so last week's players must
+        // go. The empty set is stored and the provider's file is emptied too.
+        rows[name] = entries;
+        rowsAt[name] = now;
+        dirty.erase(name);
+        bool stored = false;
+        auto path = cache_path(savesRoot, appid, name);
+        stored = path && write_cache(*path, entries);
+        if (!stored) io.log("leaderboards: '" + name + "' rows could not be stored");
+        seeded[name] = true;
         char line[240];
-        snprintf(line, sizeof line, "leaderboards: '%s' seeded %zu rows (id %d, %d on Steam, file %s)",
-                 name.c_str(), entries.size(), board.id, board.count,
-                 stored ? "written" : (rows ? "empty" : "unavailable"));
+        if (had) {
+            snprintf(line, sizeof line, "leaderboards: '%s' refreshed %zu rows (id %d, %d on Steam)",
+                     name.c_str(), entries.size(), id, count);
+        } else {
+            snprintf(line, sizeof line, "leaderboards: '%s' seeded %zu rows (id %d, %d on Steam, file %s)",
+                     name.c_str(), entries.size(), id, count, stored ? "written" : "empty");
+        }
         io.log(line);
-        return stored;
+        return true;
     }
     // A score the game uploaded. The id is the one the seed learned for this
     // board; without it there is nothing to address, so nothing is sent.
@@ -305,22 +346,30 @@ struct Bridge {
         if (known == ids.end() || known->second <= 0) return false;
         auto up = steam_leaderboards::upload(io, appid, known->second, score, details, count, method);
         if (!up.ok) return false;
+        // The board changed on Steam's side; the next Find must not answer from
+        // the rows fetched before the upload.
+        dirty.insert(name);
         char line[240];
         snprintf(line, sizeof line, "leaderboards: score %d sent to '%s' (changed=%d, rank %d -> %d)",
                  score, name.c_str(), int(up.changed), up.rankPrevious, up.rankNew);
         io.log(line);
         return true;
     }
-    void reset() { std::lock_guard<std::mutex> lock(m); ids.clear(); seeded.clear(); rows.clear(); }
-    // Every player id the seeded boards hold, so the launcher can ask Steam for
-    // their names. Called after a seed; the provider's file carries no names.
-    std::vector<uint64_t> player_ids() {
+    // The rows the launcher holds for a board, or nothing. Used by the
+    // GetDownloadedLeaderboardEntry tap to hand the game fresher rows than the
+    // provider cached at its first Find, and by the seed to ask Steam for the
+    // persona names of the players on it. Returned by value: the caller reads
+    // them on the game's thread, and a reset on another thread must not pull
+    // the rows out from under it.
+    std::optional<std::vector<Entry>> entries(const std::string& name) const {
         std::lock_guard<std::mutex> lock(m);
-        std::vector<uint64_t> out;
-        for (auto& [name, entries] : rows)
-            for (auto& e : entries)
-                if (e.steamid) out.push_back(e.steamid);
-        return out;
+        auto it = rows.find(name);
+        if (it == rows.end()) return std::nullopt;
+        return it->second;
+    }
+    void reset() {
+        std::lock_guard<std::mutex> lock(m);
+        ids.clear(); seeded.clear(); rows.clear(); rowsAt.clear(); dirty.clear();
     }
 };
 } // namespace steam_leaderboards

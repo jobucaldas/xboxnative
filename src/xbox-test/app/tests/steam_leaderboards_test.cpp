@@ -255,6 +255,85 @@ int main() {
         fs::remove_all(root3);
     }
 
+    // ---- refresh: a later Find picks up other players' new scores
+    // The provider caches a board in memory at its first Find and never re-reads
+    // the file, so the launcher keeps its own rows and hands them to the game
+    // from GetDownloadedLeaderboardEntry. Those rows must follow Steam.
+    {
+        Server s4;
+        s4.ensure(3405340, "v2_kills_weekly", SortDescending, true);
+        int32_t id4 = s4.ids["3405340/v2_kills_weekly"];
+        s4.rows[id4] = {{0x110000100000002ull, 900, {}}, {0x110000100000003ull, 1500, {}}};
+        Io io4;
+        io4.call = [&](uint32_t emsg, uint32_t routing, const std::string& body, std::string& resp) {
+            return s4.call(emsg, routing, body, resp);
+        };
+        std::vector<std::string> lines;
+        io4.log = [&](const std::string& line) { lines.push_back(line); };
+        fs::path root4 = fs::temp_directory_path() / "xbn-leaderboards-refresh";
+        fs::remove_all(root4);
+        Bridge bridge;
+        // First Find: seeded, and the rows are the ones Steam sent.
+        assert(bridge.seed(io4, 3405340, root4, "v2_kills_weekly", SortDescending, DisplayNumeric, false, 100));
+        assert(s4.finds == 1 && s4.gets == 1);
+        auto rows = bridge.entries("v2_kills_weekly");
+        assert(rows && rows->size() == 2 && (*rows)[0].score == 1500);
+        // Inside the TTL, a Find answers from the rows already held.
+        assert(bridge.seed(io4, 3405340, root4, "v2_kills_weekly", SortDescending, DisplayNumeric, false, 110));
+        assert(s4.gets == 1);
+        // Another player's score moved. Past the TTL the Find refetches, and the
+        // rows the game will read are the new ones.
+        s4.rows[id4][0].score = 2100;
+        assert(bridge.seed(io4, 3405340, root4, "v2_kills_weekly", SortDescending, DisplayNumeric, false, 100 + 31));
+        assert(s4.gets == 2);
+        rows = bridge.entries("v2_kills_weekly");
+        assert(rows && rows->size() == 2 && (*rows)[0].score == 2100);
+        // This account's own upload dirties the board: the next Find refetches
+        // at once, inside the TTL, so the owner sees their new rank.
+        int32_t mine4[] = {1};
+        assert(bridge.upload(io4, 3405340, "v2_kills_weekly", 3000, mine4, 1, UploadKeepBest));
+        assert(bridge.seed(io4, 3405340, root4, "v2_kills_weekly", SortDescending, DisplayNumeric, false, 100 + 32));
+        assert(s4.gets == 3);
+        rows = bridge.entries("v2_kills_weekly");
+        assert(rows && rows->size() == 3);
+        bool mineFirst = false;
+        for (auto& e : *rows) if (e.steamid == 0x110000100000001ull && e.score == 3000) mineFirst = true;
+        assert(mineFirst);
+        bool refreshed = false;
+        for (auto& l : lines) if (l.find("'v2_kills_weekly' refreshed 3 rows") != std::string::npos) refreshed = true;
+        assert(refreshed);
+        // A failed refresh keeps what the last successful one left: the game is
+        // never shown less than it already had.
+        Io broken;
+        broken.call = [&](uint32_t emsg, uint32_t routing, const std::string& body, std::string& resp) {
+            if (emsg == ClientLBSGetLBEntries) return false;
+            return s4.call(emsg, routing, body, resp);
+        };
+        broken.log = [&](const std::string& line) { lines.push_back(line); };
+        assert(bridge.seed(broken, 3405340, root4, "v2_kills_weekly", SortDescending, DisplayNumeric, false, 100 + 200));
+        rows = bridge.entries("v2_kills_weekly");
+        assert(rows && rows->size() == 3);
+        bool kept = false;
+        for (auto& l : lines) if (l.find("refresh unavailable") != std::string::npos && l.find("keeping 3 rows") != std::string::npos) kept = true;
+        assert(kept);
+        // A successful fetch that returns no rows is Steam's answer, not a
+        // failure: a weekly board that reset is empty, so last week's players go.
+        s4.rows[id4].clear();
+        assert(bridge.seed(io4, 3405340, root4, "v2_kills_weekly", SortDescending, DisplayNumeric, false, 100 + 300));
+        rows = bridge.entries("v2_kills_weekly");
+        assert(rows && rows->empty());
+        bool emptied = false;
+        for (auto& l : lines) if (l.find("'v2_kills_weekly' refreshed 0 rows") != std::string::npos) emptied = true;
+        assert(emptied);
+        // The provider's cache file is emptied too, so a board found for the
+        // first time after the reset reads no players either.
+        auto file4 = cache_path(root4, 3405340, "v2_kills_weekly");
+        assert(file4 && fs::exists(*file4) && fs::file_size(*file4) == 0);
+        // No SteamID or name reaches the log.
+        for (auto& l : lines) assert(l.find("7656119") == std::string::npos);
+        fs::remove_all(root4);
+    }
+
     // ---- transport failure is reported, never thrown
     Io dead;
     dead.call = [](uint32_t, uint32_t, const std::string&, std::string&) { return false; };

@@ -5,7 +5,10 @@
 // serves from the configured provider (play-leaderboard-provider.dll, never
 // gbe_fork's binary). It finds two boards, downloads the rows and uploads a
 // score, and fails unless the provider read real players out of its cache file
-// on the first Find.
+// on the first Find. It also asks ISteamFriends for the persona names of those
+// rows, as a rank screen does: the provider answers "Unknown User" for every
+// user it does not know, and the launcher's persona tap must replace that with
+// the name Steam gave, in memory.
 // Exit code 42 = every check passed; play-runtime.sh also checks the log lines
 // Play must emit.
 #include <windows.h>
@@ -18,8 +21,11 @@ STEAM_API uint64_t __cdecl SteamAPI_ISteamUserStats_DownloadLeaderboardEntries(v
 STEAM_API int __cdecl SteamAPI_ISteamUserStats_GetDownloadedLeaderboardEntry(void*, uint64_t, int, void*, int32_t*, int);
 STEAM_API uint64_t __cdecl SteamAPI_ISteamUserStats_UploadLeaderboardScore(void*, uint64_t, int, int32_t, const int32_t*, int);
 STEAM_API const char* __cdecl SteamAPI_ISteamFriends_GetFriendPersonaName(void*, uint64_t);
+STEAM_API const char* __cdecl SteamAPI_ISteamFriends_GetPersonaName(void*);
+STEAM_API int __cdecl SteamAPI_ISteamFriends_RequestUserInformation(void*, uint64_t, int);
 STEAM_API const char* __cdecl PlayLeaderboardTrace(void);
 STEAM_API uint64_t __cdecl PlayLeaderboardCallBoard(uint64_t call);
+STEAM_API int __cdecl PlayLeaderboardPersonaCalls(int which);
 
 namespace {
 struct Entry { uint64_t user; int32_t rank, score, details; uint64_t ugc; };
@@ -33,6 +39,10 @@ bool contains(const char* haystack, const char* needle) {
         if (!*b) return true;
     }
     return false;
+}
+bool same(const char* a, const char* b) {
+    while (*a && *a == *b) { ++a; ++b; }
+    return *a == *b;
 }
 }
 
@@ -58,11 +68,6 @@ DWORD lb_entry() {
     // Descending: the highest score is rank 1, and it is another player's.
     if (top.rank != 1 || top.score != 1500 || top.user == 0) return 16;
 
-    // The row's player has a name. The provider answers "Unknown User" for any
-    // account it has no LAN Friend record for, so this only passes when the
-    // launcher's persona-name tap supplied the name Steam gave it.
-    const char* name = SteamAPI_ISteamFriends_GetFriendPersonaName(nullptr, top.user);
-    if (!name || !contains(name, "Ana")) return 24;
     // An account the launcher was never told about keeps the provider's own
     // answer: the tap must not invent names.
     if (!contains(SteamAPI_ISteamFriends_GetFriendPersonaName(nullptr, 0x1100000000000099ull), "Unknown User")) return 25;
@@ -82,6 +87,37 @@ DWORD lb_entry() {
     int32_t details[] = {4, 2};
     SteamAPI_ISteamUserStats_UploadLeaderboardScore(nullptr, kills, 1 /*KeepBest*/, 2000, details, 2);
     if (!contains(PlayLeaderboardTrace(), "upload=1;")) return 20;
+
+    // The rank screen reads the players' names. The provider answers "Unknown
+    // User" for every SteamID it does not know (gbe_fork's LAN-only friend
+    // list), so these must come from the launcher's Steam session instead.
+    // Synthetic names: this fixture never carries a real account's persona.
+    if (!same(SteamAPI_ISteamFriends_GetFriendPersonaName(nullptr, top.user), "Player Three")) return 24;
+    if (!same(SteamAPI_ISteamFriends_GetPersonaName(nullptr), "Fixture Owner")) return 25;
+    // The provider's own call still ran: the launcher replaced its answer, it
+    // did not skip it.
+    if (PlayLeaderboardPersonaCalls(0) < 1) return 26;
+    // The API contract: false means "known, call the getters now"; true means
+    // "in flight, wait for PersonaStateChange_t". Nothing in Play posts that
+    // callback (the provider owns the callback plumbing), so the tap must never
+    // answer true: a game that waited would never be woken. Both a name the
+    // launcher holds and one it does not answer false; the getters are then
+    // called, and the queued name arrives for the next frame.
+    if (SteamAPI_ISteamFriends_RequestUserInformation(nullptr, top.user, 1) != 0) return 27;
+    if (SteamAPI_ISteamFriends_RequestUserInformation(nullptr, 0x110000100000009ull, 1) != 0) return 28;
+    if (PlayLeaderboardPersonaCalls(1) < 1) return 29;
+
+    // This account's own score changed the board. The provider still answers
+    // from the copy it read at the first Find, so the launcher's refreshed rows
+    // are what the game must read on the next download.
+    uint64_t againCall = SteamAPI_ISteamUserStats_FindLeaderboard(nullptr, "v2_kills");
+    if (!againCall) return 30;
+    uint64_t again = PlayLeaderboardCallBoard(againCall);
+    if (again != kills) return 31;
+    if (SteamAPI_ISteamUserStats_DownloadLeaderboardEntries(nullptr, again, 0, 1, 100) != 3) return 32;
+    Entry top2{};
+    if (!SteamAPI_ISteamUserStats_GetDownloadedLeaderboardEntry(nullptr, again, 0, &top2, nullptr, 0)) return 33;
+    if (top2.user != 0x110000100000001ull || top2.score != 2000 || top2.rank != 1) return 34;
 
     return 42;
 }

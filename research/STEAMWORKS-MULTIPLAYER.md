@@ -201,7 +201,7 @@ has never seen, in which case the game sees the empty board it saw before.
 Only the first Find of a board in a process benefits. And the seed blocks the
 game's thread for one CM round trip per board it asks for.
 
-Three gaps are known and are *not* fixed by the cache-file route. All are
+Two gaps are known and are *not* fixed by the cache-file route. Both are
 visible on the Rank screen, so a console run should be read with them in mind
 rather than as "the bridge did nothing":
 
@@ -219,26 +219,7 @@ rather than as "the bridge did nothing":
    request — i.e. the request has to be observed at
    `DownloadLeaderboardEntries`, not only at Find, which is the shim route
    below.
-2. **Other players' names read "Unknown User" — fixed, and verified on the
-   console.** gbe's
-   `GetFriendPersonaName` answers the local name for the account and otherwise
-   only a `Friend` record from its own LAN peer network
-   (`dll/steam_friends.cpp`: `friends` is pushed only by network peers, and
-   `Settings` has no friend-list file), so a real Steam row's steam id has no
-   name behind it. The launcher now asks Steam for the seeded rows' names on the
-   same CM session (`CMsgClientRequestFriendData`, EMsg 815, with repeated
-   `friends` and only `Status|PlayerName`), collects the reply — an unsolicited
-   `CMsgClientPersonaState` push (EMsg 766), field `friends[2].player_name[15]`,
-   which `presence_push` already receives — and serves it in memory through an
-   export tap on `SteamAPI_ISteamFriends_GetFriendPersonaName`. The provider's
-   own call still runs; its answer is replaced only for an account Steam named.
-   Megabonk references that export (`GameAssembly.dll`, 894 Steam API symbols),
-   so the tap is on a call the game makes. Off-device proof:
-   `app/tests/play-runtime.sh leaderboards` — the stand-in provider answers
-   "Unknown User" for every account, and the guest exits 42 only when the tap
-   supplied "Ana" for a seeded row and left an unknown id to the provider.
-   Console proof: 0.5.256.0 showed real names on all ten Rank rows (below).
-3. **Ranks are 1..N, not Steam's ranks.** gbe derives `m_nGlobalRank` from the
+2. **Ranks are 1..N, not Steam's ranks.** gbe derives `m_nGlobalRank` from the
    entry's index in its sorted array (`1 + (&entry - &entries[0])`), not from
    Steam's `global_rank`, and the cache file has no field for it. That is right
    for the top of the board and wrong for the user's own row whenever they are
@@ -248,6 +229,128 @@ The GLOBAL tab — the owner's stated check — is unaffected by the first gap: 
 lists real players' scores and ranks, and it is the tab the console runs above
 captured. The AMIGOS tab shares the same seeded rows, so it is expected to list
 them too; that is read from the provider's source, not yet photographed.
+
+A third gap, the "Unknown User" player column, is fixed: gbe's
+`GetFriendPersonaName` answers only a `Friend` record from its own LAN peer
+network (`dll/steam_friends.cpp`), so a real Steam row's steam id had no name
+behind it. The launcher now asks Steam for those names on its own CM session and
+answers the friends exports in memory — see
+[Persona names on those rows](#persona-names-on-those-rows). Console proof:
+0.5.256.0 showed real names on all ten Rank rows (below).
+
+### Refreshing rows after the first Find
+
+The provider never re-reads a board's file, so a later Find cannot refresh it.
+The launcher therefore keeps the freshest rows itself and hands them to the game
+through a second export tap, `GetDownloadedLeaderboardEntry`:
+
+- A Find inside the bridge's TTL (30 s) answers from the rows already held and
+  asks Steam nothing.
+- A Find past the TTL refetches `CMsgClientLBSGetLBEntries` and replaces the
+  held rows.
+- A successful `UploadLeaderboardScore` marks the board dirty, so the next Find
+  refetches at once, inside the TTL: the owner sees their own new score and rank
+  without waiting.
+- A failed refresh keeps the previous rows and logs
+  `refresh unavailable … keeping N rows`; the game is never shown less than it
+  already had.
+- A successful fetch that returns no rows is Steam's answer, not a failure: a
+  weekly board that reset really is empty, so the held rows are replaced with
+  the empty set, the provider's cache file is emptied, and a download of that
+  board returns no entries.
+
+The tap calls the provider's own `GetDownloadedLeaderboardEntry` first and then
+overwrites `user`, `rank`, `score` and `details` in the entry struct the game
+passed, only when the launcher holds rows for the board the provider's handle
+names. It patches only when the launcher's row carries the same global rank as
+the index the game asked for, so a shorter refresh or a ranged download cannot
+mix rows from different positions; an index past the launcher's rows reports no
+entry, because that player is no longer on the board. The provider's call, its
+handle and its callbacks are unchanged.
+
+One limit is the provider's, not the tap's: the game loops
+`index < m_cEntryCount`, and that count is fixed by the provider's own
+`DownloadLeaderboardEntries` from its in-memory copy
+(`cached_leaderboards[handle - 1].entries.size()`) and delivered in its
+CallResult. The tap can replace rows the provider reports; it cannot report
+more. A board that **grew** since its first Find therefore shows only the rows
+the provider knew at that Find. A board that was **empty** at its first Find
+stays empty for the launch, with one exception: this account's own upload,
+which the provider appends to its copy itself
+(`UploadLeaderboardScore` → `update_leaderboard_entry`), so the owner's row
+appears. Growing the count for other players would mean writing into the
+provider's board, which only its own score-upload path may do.
+
+### Persona names on those rows
+
+With the rows in place, every row still drew "Unknown user". The game resolves a
+row's name through `ISteamFriends`, and gbe_fork answers from a friend list that
+only ever holds peers on its own LAN network
+(`dll/steam_friends.cpp`, tag `release-2026_09_27`):
+
+- `GetFriendPersonaName` returns the literal `"Unknown User"` unless the SteamID
+  is the local user or is in `friends` (`find_friend`), and `friends` is filled
+  only from gbe's own UDP peer callbacks — empty under `disable_networking=1`.
+- `RequestUserInformation` is `PRINT_DEBUG_TODO()` and returns `false`.
+- `GetPersonaName` returns the staged `account_name` (`Player` by default).
+
+The launcher answers the same three exports from its own signed-in session:
+
+1. After a seed, it sends `CMsgClientRequestFriendData` (EMsg 815) with
+   `persona_state_requested` = `Status | PlayerName` and the SteamIDs of the rows
+   just fetched, in batches of 100. The message has no job id: the answer is an
+   unsolicited `CMsgClientPersonaState` (EMsg 766) push, which the launcher's
+   existing presence push handler already receives on that session.
+2. `CMsgClientPersonaState.friends[]` carries `friendid[1]`, `persona_state[2]`
+   and `player_name[15]`; each name is stored against its SteamID. Only a push
+   that mentions one of the SteamIDs this request asked for counts as its
+   answer: the same session also carries persona state for the account itself,
+   for friends and for other lookups, and one of those arriving first must not
+   end the wait before the names do.
+3. `GetFriendPersonaName` returns the launcher's name when it has one and the
+   provider's own answer otherwise; `GetPersonaName` returns the account's own
+   name once Steam answered for it. `RequestUserInformation` answers `false`
+   ("known, call the getters now") in every case: a name the launcher holds is
+   known, and one it does not is queued for the keeper and reported as known
+   too. Answering `true` ("in flight, wait for `PersonaStateChange_t`") would
+   strand a game that waits on that callback, because Play does not post it —
+   the provider owns the callback plumbing. The getters are called instead and
+   return the provider's answer until Steam's name lands, at which point the tap
+   hands out the real one.
+4. The seed waits on the game's thread only for a bounded time: at most
+   `SeedWaitMs` (250 ms) for Steam's first push that mentions a requested
+   SteamID, then a 500 ms quiet window after each such push, and never past the
+   caller's own timeout. The game is drawing behind this call, so a Find that
+   has to wait for Steam costs a fraction of a second rather than the two
+   seconds the caller asks for; a name that lands after the seed returned is
+   still handed out by the tap on the game's next draw and still cached for the
+   next launch. A push that mentions a requested SteamID but carries no name
+   (private profiles) still ends the wait, so a rank screen is not stalled for
+   accounts Steam will not name, and a reply slower than the quiet window is
+   still waited for.
+5. Names are kept in the app's own `LocalState` (`persona_names.txt`, hex-encoded
+   so a name with a space or newline cannot corrupt the record, 7-day TTL) and
+   adopted at launch, so a row drawn before Steam answers still reads correctly.
+   The file is private on-device state: never logged, never committed.
+6. The request set is bounded by distinct SteamIDs (2000 per launch): a rank
+   screen polling the same unresolved rows adds nothing.
+7. Log lines carry counts only (`persona: N of M leaderboard names resolved`);
+   no SteamID and no persona name is ever written to a log.
+
+The provider's own call always runs and its answer is replaced only when the
+launcher has one. Nothing on disk changes.
+
+| EMsg | Message | Fields used |
+|---:|---|---|
+| 815 | `CMsgClientRequestFriendData` | `persona_state_requested[1]`, `friends[2]` (repeated `fixed64`) |
+| 766 | `CMsgClientPersonaState` (unsolicited push) | `status_flags[1]`, `friends[2]` → `friendid[1]`, `persona_state[2]`, `player_name[15]` |
+
+**What this does not do.** Avatars (`GetMediumFriendAvatar`,
+`AvatarImageLoaded_t`) are not served yet; a game that draws one gets the
+provider's answer. A name Steam does not return stays the provider's "Unknown
+User". And Steam answers a persona request for any SteamID the account can see,
+so the launcher only ever asks for SteamIDs that came from a board the game
+itself requested.
 
 ## The three serving options
 
@@ -267,7 +370,7 @@ For each interface family:
 | Interface | Games | (a) gbe_fork today | (b) CM bridge | (c) Valve client |
 |---|---|---|---|---|
 | `ISteamFriends` rich presence | Megabonk, Slime Rancher, PPT2 | in-memory + LAN only | **done in this branch**: observed at the export, uploaded on the launcher session | — |
-| `ISteamFriends` persona names | Megabonk | local account only; every other id is "Unknown User" unless a LAN peer pushed a `Friend` record | **done and console-verified**: `CMsgClientRequestFriendData` for the seeded rows' ids, names collected from the `CMsgClientPersonaState` push and served through an export tap on `GetFriendPersonaName` | — |
+| `ISteamFriends` persona names | Megabonk | local account only; every other id is "Unknown User" unless a LAN peer pushed a `Friend` record | **done**: `CMsgClientRequestFriendData` for the seeded rows' ids, names collected from the `CMsgClientPersonaState` push and served through an export tap on `GetFriendPersonaName` / `GetPersonaName` / `RequestUserInformation`; a simple version of the tap was console-verified in 0.5.256.0, the wait-and-cache version here is off-device only so far | — |
 | `ISteamUserStats` leaderboards | Megabonk | reads `<appid>\leaderboard\<name>` on a board's first Find and answers downloads from it; never writes it with `disable_networking=1`, so boards are empty | **done in this branch**: observed at the export, board + top rows fetched on the launcher session and written into the provider's own file before its first Find; scores uploaded as `CMsgClientLBSSetScore` | — |
 | `ISteamFriends` invites / `GameLobbyJoinRequested` | Megabonk | overlay/invite handling is experimental-build only; `auto_accept_invite.txt` exists | needs `CMsgClientMMSInviteToLobby` (6621) and the `ClientMMSLobbyChatMsg` (6614) path to raise callbacks | — |
 | `ISteamMatchmaking` lobbies | Megabonk | LAN-only lobbies over its own UDP port (`listen_port`, default 47584): `CreateLobby` queues a pending create and `create_pending_lobbies()` mints a local lobby id, answers `LobbyCreated_t`/`LobbyEnter_t` itself and broadcasts the lobby over gbe's network (`dll/steam_matchmaking.cpp`); `disable_lobby_creation` makes it fail instead | **feasible**: the 14 messages below map almost 1:1 to the API | — |
@@ -382,6 +485,23 @@ Verified off-device:
   the launcher's own encoder, and gets 3 rows back at ranks 1-3 with the seeded
   scores. With the file removed the same guest gets an empty board. That is the
   link a new pin or a changed path would break silently.
+- The refresh policy: a Find inside the TTL asks Steam nothing, a Find past it
+  refetches, an upload dirties the board so the next Find refetches at once, a
+  failed refresh keeps the previous rows, and a successful empty fetch replaces
+  them (a reset weekly board really is empty)
+  (`app/tests/steam_leaderboards_test.cpp`).
+- Persona names: the request and push wire shapes round-trip, a name is only
+  handed out once Steam answered, a rename replaces the name in place, a push
+  about somebody else (the account, a friend, another board) neither ends the
+  wait nor is counted as its answer, a push that mentions a requested id without
+  naming it does end it, the seed never holds the game's thread past
+  `SeedWaitMs`, the private cache round-trips and expires, and no SteamID or
+  name reaches the log (`app/tests/steam_persona_test.cpp`, run by CI).
+  Off-device under Wine, the provider stand-in answers "Unknown User" and the
+  launcher's tap replaces it with the name the fixture backend sent,
+  `RequestUserInformation` never reports a name as in flight (Play posts no
+  `PersonaStateChange_t`), and the rows after the guest's own upload are the
+  refreshed ones (`app/tests/play-runtime.sh leaderboards`).
 - The launcher sources compile with the UWP toolchain.
 - gbe_fork exports 1,032 `SteamAPI_ISteam*` names. Of the 894 Megabonk
   references, 890 are exported; the 4 that are not are the
@@ -403,7 +523,20 @@ Not verified:
 - Anything about lobbies, P2P or auth tickets end to end. No CM lobby message
   has been sent from this codebase.
 - That the AMIGOS tab lists only the account's real friends, or that ranks match
-  Steam's `global_rank` for a row outside the seeded slice (gaps 1 and 3 above).
+  Steam's `global_rank` for a row outside the seeded slice (gaps 1 and 2 above).
+- That the refresh policy is what the console shows: a Find past the 30 s TTL,
+  or one after this account's own upload, giving the owner their new score and
+  rank without a relaunch. The checks are
+  `STEAM leaderboards: '…' refreshed N rows (id …, N on Steam)` and, on the
+  screen, the owner's row moved. Off-device the policy is proven
+  (`app/tests/steam_leaderboards_test.cpp`, `app/tests/play-runtime.sh
+  leaderboards`); on the console it has not been observed yet.
+- That the persona route in `steam_persona.h` — the request batch, the wait for
+  the push, the private cache and the `RequestUserInformation` contract — draws
+  names on the console. The checks are `STEAM persona: N of M leaderboard names
+  resolved` and, on the screen, the Rank screen naming players. The run below
+  proved the simpler tap this branch replaces; this one is off-device only so
+  far.
 
 **Console run, 2026-11-09 (0.5.255.0, `feat/steam-leaderboards` @ 7dd2f0f).**
 The tap fired, and Steam answered every board the game asked for, in one launch:
@@ -471,3 +604,4 @@ the seeding (`STEAM leaderboards: 1 player names received from Steam (N known)`,
 N reaching 294). No input was needed: the photosensitivity warning had already
 been accepted in two earlier runs with a pad connected, and the game persists
 that.
+

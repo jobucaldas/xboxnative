@@ -99,14 +99,6 @@ inline std::string rich_presence_request_body(uint64_t steamid) {
 inline std::string persona_request_body(uint64_t steamid, uint32_t flags = PersonaFlagsWanted) {
     std::string body; pb_u(body, 1, flags); pb_fixed64(body, 2, steamid); return body;
 }
-// The same request for several accounts at once: `friends` is repeated. Only
-// the name and status are asked for, which is all a leaderboard row shows.
-inline std::string persona_names_request_body(const std::vector<uint64_t>& steamids,
-                                              uint32_t flags = 1u /*Status*/ | 2u /*PlayerName*/) {
-    std::string body; pb_u(body, 1, flags);
-    for (auto id : steamids) pb_fixed64(body, 2, id);
-    return body;
-}
 
 // ---- replies
 struct Persona {
@@ -137,26 +129,6 @@ inline Persona parse_persona(const std::string& body, uint64_t steamid) {
             }
         }
         if (id == steamid) { p.found = true; return p; }
-    }
-    return out;
-}
-// CMsgClientPersonaState carries one entry per account in the same `friends`
-// field, and a reply to a multi-id request is a single push holding all of
-// them. This collects every entry's name, which is what a leaderboard row
-// needs; `parse_persona` above answers the narrower "what does Steam say about
-// this one account" question.
-inline std::map<uint64_t, std::string> parse_persona_names(const std::string& body) {
-    std::map<uint64_t, std::string> out;
-    for (auto& friendField : pb_parse(body)) {
-        if (friendField.f != 2) continue;
-        uint64_t id = 0; std::string name;
-        for (auto& f : pb_parse(friendField.s)) {
-            if (f.f == 1) id = f.u;
-            else if (f.f == 15) name = f.s;
-        }
-        // Steam omits player_name when the account asked for no names, or when
-        // the name is hidden; an empty one must not overwrite a good one.
-        if (id && !name.empty()) out[id] = std::move(name);
     }
     return out;
 }

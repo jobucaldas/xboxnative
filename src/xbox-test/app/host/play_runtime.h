@@ -9,6 +9,7 @@
 #include <functional>
 #include <mutex>
 #include <memory>
+#include <optional>
 #include <array>
 #include <d3d11.h>
 #include <d3d12.h>
@@ -458,48 +459,6 @@ static uintptr_t richPresenceHook(const char* name,uintptr_t real) {
     }
     return 0;
 }
-// ---- Names for the players a leaderboard row shows (steam_presence.h)
-// gbe_fork's GetFriendPersonaName answers the local account's name and, for
-// everyone else, a Friend record from its own LAN peer network
-// (dll/steam_friends.cpp: friends are only pushed by network peers). A real
-// Steam row's id therefore has no name behind it and the Rank screen's player
-// column reads "Unknown User". The launcher knows the names: it asked Steam for
-// them over its own CM session. This tap serves them in memory, so the
-// provider's own call still runs and its answer is only replaced when the
-// launcher actually has a name.
-struct PersonaNameTap {
-    // NULL when the launcher has no name for this account; the provider's own
-    // answer is then returned untouched. A returned pointer must stay valid
-    // until the launch ends: the provider returns pointers into its own
-    // storage, and a game may hold several rows' names at once.
-    std::function<const char*(uint64_t steamid)> name;
-};
-static std::mutex personaNameMutex;
-static PersonaNameTap personaName;
-static void set_persona_name_tap(PersonaNameTap tap) {
-    std::lock_guard<std::mutex> lock(personaNameMutex);
-    personaName=std::move(tap);
-}
-static const char* personaNameLookup(uint64_t steamid) {
-    PersonaNameTap tap; {std::lock_guard<std::mutex> lock(personaNameMutex);tap=personaName;}
-    return tap.name?tap.name(steamid):nullptr;
-}
-static std::atomic<uintptr_t> personaNameReal{0};
-static uintptr_t personaNameHook(const char* name,uintptr_t real) {
-    if(!real||!name)return 0;
-    if(strcmp(name,"SteamAPI_ISteamFriends_GetFriendPersonaName"))return 0;
-    using Fn=const char*(*)(void*,uint64_t);
-    personaNameReal.store(real,std::memory_order_release);
-    static Fn hook=[](void* self,uint64_t steamid)->const char*{
-        auto inner=(Fn)personaNameReal.load(std::memory_order_acquire);
-        // The provider's answer is a pointer it owns (into its friends vector),
-        // so it is returned as-is whenever the launcher has nothing better.
-        const char* own=inner?inner(self,steamid):nullptr;
-        const char* found=personaNameLookup(steamid);
-        return found?found:own;
-    };
-    return (uintptr_t)hook;
-}
 // ---- Leaderboards the game asks for through the Steam API provider
 // (steam_leaderboards.h). gbe_fork answers Find/Download from its own disk
 // cache and its LAN peer network, so with no peers a rank screen shows no
@@ -514,6 +473,15 @@ struct LeaderboardTap {
     // exactly as it was.
     std::function<bool(const std::string& name,int sort,int display,bool create)> seed;
     std::function<void(const std::string& name,int32_t score,const int32_t* details,int count,int method)> upload;
+    // The rows the launcher holds for a board, fresher than the provider's
+    // in-memory copy (which it read once, at the board's first Find). Called on
+    // the game's thread from GetDownloadedLeaderboardEntry. `nullopt` means the
+    // launcher holds nothing for that board, so the provider's own entry stands;
+    // an empty vector means Steam answered that the board is empty. `details`
+    // is the raw int32 array Steam sent for that row, so the entry the game
+    // reads is whole.
+    struct Row { uint64_t steamid; int32_t rank,score; std::string details; };
+    std::function<std::optional<std::vector<Row>>(const std::string& name)> rows;
 };
 static std::mutex leaderboardMutex;
 static LeaderboardTap leaderboard;
@@ -528,6 +496,10 @@ static bool leaderboardSeed(const std::string& name,int sort,int display,bool cr
 static void leaderboardUpload(const std::string& name,int32_t score,const int32_t* details,int count,int method) {
     LeaderboardTap tap; {std::lock_guard<std::mutex> lock(leaderboardMutex);tap=leaderboard;}
     if(tap.upload)tap.upload(name,score,details,count,method);
+}
+static std::optional<std::vector<LeaderboardTap::Row>> leaderboardRows(const std::string& name) {
+    LeaderboardTap tap; {std::lock_guard<std::mutex> lock(leaderboardMutex);tap=leaderboard;}
+    return tap.rows?tap.rows(name):std::nullopt;
 }
 // A score is addressed by the SteamLeaderboard_t the game passes back, which is
 // the handle from LeaderboardFindResult_t, NOT the SteamAPICall_t that Find
@@ -550,7 +522,7 @@ static std::string leaderboardHandleName(void* self,uint64_t handle) {
     const char* name=((Fn)p)(self,handle);
     return name?std::string(name):std::string();
 }
-static std::atomic<uintptr_t> leaderboardRealFind{0}, leaderboardRealCreate{0}, leaderboardRealUpload{0};
+static std::atomic<uintptr_t> leaderboardRealFind{0}, leaderboardRealCreate{0}, leaderboardRealUpload{0}, leaderboardRealEntry{0};
 static uintptr_t leaderboardHook(const char* name,uintptr_t real) {
     if(!real) return 0;
     if(!strcmp(name,"SteamAPI_ISteamUserStats_FindLeaderboard")) {
@@ -589,10 +561,160 @@ static uintptr_t leaderboardHook(const char* name,uintptr_t real) {
         };
         return (uintptr_t)hook;
     }
+    if(!strcmp(name,"SteamAPI_ISteamUserStats_GetDownloadedLeaderboardEntry")) {
+        using Fn=uint32_t(*)(void*,uint64_t,int,void*,int32_t*,int);
+        leaderboardRealEntry.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t entries,int index,void* entry,int32_t* details,int maxDetails)->uint32_t{
+            auto inner=(Fn)leaderboardRealEntry.load(std::memory_order_acquire);
+            uint32_t ok=inner?inner(self,entries,index,entry,details,maxDetails):0;
+            // The provider answered from the rows it cached at the board's first
+            // Find. When the launcher holds fresher rows for that board (a
+            // refresh, or a score this account just uploaded), the entry the game
+            // reads is replaced in place: same struct, same layout, the game's
+            // own call still ran.
+            //
+            // The row COUNT is not ours to change: the game loops
+            // `index < m_cEntryCount`, and that number is fixed by the
+            // provider's own DownloadLeaderboardEntries from its in-memory copy
+            // (gbe_fork: cached_leaderboards[handle-1].entries.size()) and
+            // delivered in its CallResult. So a board that GREW since its first
+            // Find shows only the rows the provider reports; the tap replaces
+            // those, it cannot add more. A board that was empty at its first
+            // Find therefore stays empty for the launch — except for this
+            // account's own upload, which the provider appends to its copy
+            // itself (gbe_fork's UploadLeaderboardScore -> update_leaderboard_entry).
+            // Growing that count would mean writing into the provider's board,
+            // which only its own score-upload path may do.
+            if(!ok||!entry)return ok;
+            auto found=leaderboardHandleName(self,entries);
+            if(found.empty())return ok;
+            auto rows=leaderboardRows(found);
+            if(!rows)return ok;   // nothing held for this board: the provider's entry stands
+            // Steam answered that the board is empty: the provider's first-Find
+            // copy is stale, so the game reads an empty entry rather than a
+            // player who is no longer on the board.
+            if(rows->empty())return 0;
+            // Past the launcher's rows the player is no longer on the board,
+            // even though the provider's first-Find copy still has them.
+            if(index<0||size_t(index)>=rows->size())return 0;
+            struct LeaderboardEntry_t { uint64_t user; int32_t rank,score,details; uint64_t ugc; };
+            auto* e=(LeaderboardEntry_t*)entry;
+            // The provider's cached list and the launcher's rows are both in
+            // global rank order, so index i is global rank i+1 in each. Patch
+            // only when the launcher's row agrees on that rank: a shorter
+            // refresh or a provider that honours the download range would
+            // otherwise mix rows from different positions.
+            if((*rows)[size_t(index)].rank!=index+1)return ok;
+            e->user=(*rows)[size_t(index)].steamid;
+            e->rank=(*rows)[size_t(index)].rank;
+            e->score=(*rows)[size_t(index)].score;
+            // The row's details are part of what the game reads; a refresh that
+            // changed the score but left the provider's first-Find details in
+            // place would hand the game a mismatched entry.
+            const auto& raw=(*rows)[size_t(index)].details;
+            int32_t have=int32_t(raw.size()/sizeof(int32_t));
+            e->details=have;
+            for(int32_t i=0;details&&i<have&&i<maxDetails;++i)memcpy(&details[i],raw.data()+size_t(i)*sizeof(int32_t),sizeof(int32_t));
+            return ok;
+        };
+        return (uintptr_t)hook;
+    }
     return 0;
 }
-// Every Steam API export the game binds (static imports and GetProcAddress)
-// passes here first; only the rich-presence and leaderboard calls are wrapped.
+// ---- Persona names the game asks for through the Steam API provider
+// (steam_persona.h). gbe_fork answers GetFriendPersonaName from its own friend
+// list, which only holds peers on its LAN network; with disable_networking=1
+// that list is empty, so every leaderboard row reads "Unknown User". The
+// launcher asks the real Steam backend for the names and answers here, in
+// memory. The provider's own call still runs; its answer is replaced only when
+// the launcher has a name for that SteamID.
+struct PersonaTap {
+    // A name for this SteamID, or nullptr when Steam has not answered for it.
+    // The pointer must stay valid for the launch (it is handed to the game).
+    std::function<const char*(uint64_t steamid)> name;
+    // The account's own persona name, or nullptr.
+    std::function<const char*()> self;
+    // The game asked about a SteamID outside the seeded leaderboard rows; queue
+    // it for the keeper (never blocks the game's thread).
+    std::function<void(uint64_t steamid)> want;
+};
+static std::mutex personaMutex;
+static PersonaTap personaTap;
+static void set_persona_tap(PersonaTap tap) {
+    std::lock_guard<std::mutex> lock(personaMutex);
+    personaTap=std::move(tap);
+}
+static const char* personaName(uint64_t steamid) {
+    PersonaTap tap; {std::lock_guard<std::mutex> lock(personaMutex);tap=personaTap;}
+    return tap.name?tap.name(steamid):nullptr;
+}
+static const char* personaSelf() {
+    PersonaTap tap; {std::lock_guard<std::mutex> lock(personaMutex);tap=personaTap;}
+    return tap.self?tap.self():nullptr;
+}
+static void personaWant(uint64_t steamid) {
+    PersonaTap tap; {std::lock_guard<std::mutex> lock(personaMutex);tap=personaTap;}
+    if(tap.want)tap.want(steamid);
+}
+// A SteamID the game asked about is queued for the keeper, which requests it
+// once. The queue is bounded by distinct ids in the bridge (steam_persona.h),
+// so a rank screen polling the same unresolved rows costs nothing.
+static std::atomic<uintptr_t> personaRealName{0}, personaRealSelf{0}, personaRealRequest{0};
+static uintptr_t personaHook(const char* name,uintptr_t real) {
+    if(!real) return 0;
+    if(!strcmp(name,"SteamAPI_ISteamFriends_GetFriendPersonaName")) {
+        using Fn=const char*(*)(void*,uint64_t);
+        personaRealName.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t steamid)->const char*{
+            auto inner=(Fn)personaRealName.load(std::memory_order_acquire);
+            // The provider's own call still runs; its answer ("Unknown User" for
+            // a SteamID that is not on its LAN friend list) stands unless the
+            // launcher has the name Steam gave.
+            const char* theirs=inner?inner(self,steamid):nullptr;
+            if(const char* ours=personaName(steamid))return ours;
+            // Not answered yet: the game asked, so the keeper should request it.
+            personaWant(steamid);
+            return theirs?theirs:"Unknown User";
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamFriends_GetPersonaName")) {
+        using Fn=const char*(*)(void*);
+        personaRealSelf.store(real,std::memory_order_release);
+        static Fn hook=[](void* self)->const char*{
+            auto inner=(Fn)personaRealSelf.load(std::memory_order_acquire);
+            const char* theirs=inner?inner(self):nullptr;
+            if(const char* ours=personaSelf())return ours;
+            return theirs?theirs:"Player";
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamFriends_RequestUserInformation")) {
+        using Fn=uint32_t(*)(void*,uint64_t,uint32_t);
+        personaRealRequest.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t steamid,uint32_t nameOnly)->uint32_t{
+            auto inner=(Fn)personaRealRequest.load(std::memory_order_acquire);
+            // The provider's own call still runs (gbe_fork's is a TODO that
+            // answers "already known"); its answer is not what the game acts on.
+            if(inner)inner(self,steamid,nameOnly);
+            // The API's contract: true means "being fetched, you will get a
+            // PersonaStateChange_t"; false means "already known, call the
+            // getters now". A name the launcher already holds is known. One it
+            // does not is queued and reported as in flight — but nothing here
+            // posts PersonaStateChange_t (the provider owns that callback
+            // plumbing), so a game that waits on it would wait forever. Answer
+            // false instead: the getters are then called, and they return the
+            // provider's answer until Steam's name lands, at which point the
+            // tap hands out the real one. That is the same answer gbe_fork's
+            // TODO gives, and it never strands a row.
+            if(personaName(steamid))return 0;
+            personaWant(steamid);
+            return 0;
+        };
+        return (uintptr_t)hook;
+    }
+    return 0;
+}
 static uintptr_t steamApiExport(Module& module,const char* name,uintptr_t address) {
     if(!address||!name||strcmp(module.key.c_str(),"steam_api64.dll")) return address;
     // The provider image is the only image whose exports reach here, so it is
@@ -608,9 +730,9 @@ static uintptr_t steamApiExport(Module& module,const char* name,uintptr_t addres
             state->log((std::string("STEAM leaderboards: ")+name+" observed; rows come from the launcher's Steam session").c_str());
         return hook;
     }
-    if(auto hook=personaNameHook(name,address)) {
-        if(state->log&&mlp::first_report(std::string("steam persona names ")+name))
-            state->log((std::string("STEAM persona names: ")+name+" observed; names come from the launcher's Steam session").c_str());
+    if(auto hook=personaHook(name,address)) {
+        if(state->log&&mlp::first_report(std::string("steam persona ")+name))
+            state->log((std::string("STEAM persona: ")+name+" observed; names come from the launcher's Steam session").c_str());
         return hook;
     }
     return address;
