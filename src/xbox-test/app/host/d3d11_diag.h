@@ -184,11 +184,16 @@ inline std::atomic<bool> summaryStopped{false};
 // Per-context state: a deferred context records with its own topology and its
 // own bound shaders, so the draw bucket must read the state of the context
 // that made the call. Fixed table, lock-free, first match or first free slot.
+// The format cache is direct-mapped: the guest rebinds the same few targets
+// most of the time, and a collision costs one GetDesc, never a re-scan.
+constexpr size_t kFormatCache=8;   // power of two
 struct ContextState {
     std::atomic<void*> context{nullptr};
     std::atomic<unsigned> topology{0};
     std::atomic<unsigned> shaders{0};
     std::atomic<unsigned> rtFormat{0};   // format of the first render target bound
+    std::atomic<void*> formatView[kFormatCache];   // view the cached format is for
+    std::atomic<unsigned> formatValue[kFormatCache];
 };
 constexpr size_t kMaxContexts=32;
 inline ContextState contextStates[kMaxContexts];
@@ -211,6 +216,7 @@ inline void resetContext(void* self) {
     ContextState& s=stateOf(self);
     s.topology.store(0,std::memory_order_relaxed);s.shaders.store(0,std::memory_order_relaxed);
     s.rtFormat.store(0,std::memory_order_relaxed);
+    for(size_t i=0;i<kFormatCache;++i)s.formatView[i].store(nullptr,std::memory_order_relaxed);
 }
 inline std::atomic<uint64_t> draws[kDrawKinds][2][2];   // [kind][patchlist][hull+domain]
 // Draws per render-target format. A layer that renders into an off-screen
@@ -246,6 +252,7 @@ inline std::atomic<uint64_t> shaderCreates[6];   // vs gs ps hs ds cs, successfu
 inline std::atomic<uint64_t> clears[2];          // render target, depth stencil
 inline std::atomic<uint64_t> rtvSets;            // OMSetRenderTargets with a render target
 inline std::atomic<uint64_t> rtvUnknown;         // ... whose view or resource could not be read
+inline std::atomic<uint64_t> rtvUncached;        // ... beyond the kMaxRtvViews table (counted, not described)
 inline std::atomic<uint64_t> rtvUavSets;         // OMSetRenderTargetsAndUnorderedAccessViews with a view
 inline std::atomic<uint64_t> uavSets;            // ... and with at least one UAV
 inline std::atomic<uint64_t> resolves;           // ResolveSubresource (MSAA -> single sample)
@@ -305,11 +312,6 @@ inline std::string indirectArgsText(const void* data,size_t bytes,const char* fi
 inline std::mutex rtvM;
 inline std::vector<std::string> rtvKinds;        // distinct "fmt WxH" bound as render target
 inline std::atomic<void*> rtvViews[kMaxRtvViews];   // views already described: no GetDesc per frame
-// Format of the first view of an OM set, cached per view: Halo Wars sets render
-// targets 200k+ times a minute, and a GetDesc on each would be a per-call cost
-// the diagnostics must not add.
-inline std::atomic<void*> rtvFormatViews[kMaxRtvViews];
-inline std::atomic<unsigned> rtvFormatValues[kMaxRtvViews];
 inline std::atomic<unsigned> mainWidth{0},mainHeight{0};   // largest render target bound
 inline std::atomic<unsigned> chainWidth{0},chainHeight{0}; // guest swapchain buffers
 inline std::atomic<unsigned> chainFormat{0},chainBuffers{0};
@@ -405,8 +407,9 @@ inline void printSummary(unsigned window) {
     emit(fmt("draw summary %u/%u: shader creates vs=%llu gs=%llu ps=%llu hs=%llu ds=%llu cs=%llu",window,kSummaryWindows,
         (unsigned long long)shaderCreates[0].load(),(unsigned long long)shaderCreates[1].load(),(unsigned long long)shaderCreates[2].load(),
         (unsigned long long)shaderCreates[3].load(),(unsigned long long)shaderCreates[4].load(),(unsigned long long)shaderCreates[5].load()));
-    emit(fmt("draw summary %u/%u: render targets sets=%llu unreadable=%llu clears=rt %llu/ds %llu",window,kSummaryWindows,
-        (unsigned long long)rtvSets.load(),(unsigned long long)rtvUnknown.load(),(unsigned long long)clears[0].load(),(unsigned long long)clears[1].load()));
+    emit(fmt("draw summary %u/%u: render targets sets=%llu unreadable=%llu uncached=%llu clears=rt %llu/ds %llu",window,kSummaryWindows,
+        (unsigned long long)rtvSets.load(),(unsigned long long)rtvUnknown.load(),(unsigned long long)rtvUncached.load(),
+        (unsigned long long)clears[0].load(),(unsigned long long)clears[1].load()));
     // A layer that renders into its own target and is then resolved or copied
     // into the frame never appears as a draw into the swapchain.
     emit(fmt("draw summary %u/%u: targets with UAVs sets=%llu uav=%llu resolves=%llu copies=%llu",window,kSummaryWindows,
@@ -865,7 +868,10 @@ static void STDMETHODCALLTYPE contextDSSetShader(DevicePtr self,ID3D11DomainShad
     if(shader)s.fetch_or(2,std::memory_order_relaxed);else s.fetch_and(~2u,std::memory_order_relaxed);
     call(self,shader,instances,count);
 }
-// Describes the render target views of an OM set once per distinct view.
+// Describes the render target views of an OM set once per distinct view. The
+// view table is fixed: once it is full, later views are counted but not
+// described, and nothing is emitted for them. (Emitting on every unseen view
+// instead flooded a real run with 35k lines once the table filled.)
 inline void noteRenderTargets(UINT count,ID3D11RenderTargetView* const* views) {
     if(!count||!views)return;
     rtvSets.fetch_add(1,std::memory_order_relaxed);
@@ -876,43 +882,41 @@ inline void noteRenderTargets(UINT count,ID3D11RenderTargetView* const* views) {
         if(known)continue;
         std::string text=rtvText(view);
         if(text=="unknown"||text=="no-resource"){rtvUnknown.fetch_add(1,std::memory_order_relaxed);continue;}
+        bool registered=false;
         for(auto& seen:rtvViews) {
             void* expected=nullptr;
-            if(seen.compare_exchange_strong(expected,view,std::memory_order_acq_rel))break;
+            if(seen.compare_exchange_strong(expected,view,std::memory_order_acq_rel)){registered=true;break;}
+            if(expected==view){registered=true;break;}   // another thread stored it first
         }
+        if(!registered){rtvUncached.fetch_add(1,std::memory_order_relaxed);continue;}
+        bool fresh=false;
         {
             std::lock_guard<std::mutex> lock(rtvM);
-            noteKind(rtvKinds,text,kMaxRtvKinds);
+            fresh=noteKind(rtvKinds,text,kMaxRtvKinds);
         }
-        emit(fmt("draw summary: first render target %s",text.c_str()));
+        if(fresh)emit(fmt("draw summary: first render target %s",text.c_str()));
     }
 }
 // The first view's format is what the draw-format counter buckets by: it is
 // the target the layer writes, and a summary that shows no draws into the
 // swapchain's format says the layer never reaches the frame.
 inline void noteRenderTargetFormat(void* self,UINT count,ID3D11RenderTargetView* const* views) {
+    ContextState& state=stateOf(self);
     // An unbind (no view, or a null first slot) leaves no target: the next
     // draws must not be bucketed as the format that was bound before, or the
     // summary would report swapchain-format work that never reached it.
-    if(!count||!views||!views[0]){stateOf(self).rtFormat.store(0,std::memory_order_relaxed);return;}
+    if(!count||!views||!views[0]){state.rtFormat.store(0,std::memory_order_relaxed);return;}
     ID3D11RenderTargetView* view=views[0];
+    size_t slot=(reinterpret_cast<uintptr_t>(view)>>4)&(kFormatCache-1);
     unsigned format=0;
-    bool known=false;
-    for(size_t i=0;i<kMaxRtvViews;++i)
-        if(rtvFormatViews[i].load(std::memory_order_relaxed)==view){format=rtvFormatValues[i].load(std::memory_order_relaxed);known=true;break;}
-    if(!known) {
+    if(state.formatView[slot].load(std::memory_order_relaxed)!=view) {
         D3D11_RENDER_TARGET_VIEW_DESC v{};
         view->GetDesc(&v);
         format=unsigned(v.Format);
-        for(size_t i=0;i<kMaxRtvViews;++i) {
-            void* expected=nullptr;
-            if(rtvFormatViews[i].compare_exchange_strong(expected,view,std::memory_order_acq_rel)) {
-                rtvFormatValues[i].store(format,std::memory_order_relaxed);break;
-            }
-            if(expected==view)break;
-        }
-    }
-    stateOf(self).rtFormat.store(format,std::memory_order_relaxed);
+        state.formatValue[slot].store(format,std::memory_order_relaxed);
+        state.formatView[slot].store(view,std::memory_order_release);
+    } else format=state.formatValue[slot].load(std::memory_order_relaxed);
+    state.rtFormat.store(format,std::memory_order_relaxed);
 }
 static void STDMETHODCALLTYPE contextOMSetRenderTargets(DevicePtr self,UINT count,ID3D11RenderTargetView* const* views,ID3D11DepthStencilView* depth) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*);
