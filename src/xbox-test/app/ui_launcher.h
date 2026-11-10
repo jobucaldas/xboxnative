@@ -229,9 +229,9 @@ struct SignVM {
 // The bottom hint bar: A/B/X/Y/Menu prompts on the page background.
 // pairs = {"A","Select", "B","Back", "X","Sort", "Y","Filter", "M","Menu"}; n = number of pairs.
 // A is a filled disc; B/X/Y are outlined; M is the hamburger.
-inline float draw_hint_bar(ui::Canvas& c, const Font& f, const char* const* pairs, int n) {
+inline float draw_hint_bar(ui::Canvas& c, const Font& f, const char* const* pairs, int n, float x0 = ui::theme::margin) {
     const float px = ui::theme::hintText.px;
-    float x = ui::theme::margin;
+    float x = x0;
     for (int i = 0; i + 1 < n * 2; i += 2) {
         const char key = pairs[i][0];
         const char* label = pairs[i + 1];
@@ -355,12 +355,14 @@ inline void draw_library(ui::Canvas& c, const Font& f, const SidebarVM& sb, cons
     // grid
     int lo, hi;
     grid_visible(lib.tile_count, lib.top_row, lo, hi);
+    c.set_clip(rect(0, 0, 1920, 988));   // rows scroll out above the hint bar, as in the mockup
     for (int i = lo; i < hi; ++i) {
         const Rect g = grid_tile(i, lib.top_row);
         if (g.y > 1040 || g.y + g.h < 0) continue;
         draw_tile(c, f, lib.tiles[i], g, lib.focus_tile && i == lib.sel);
     }
-    draw_hint_bar(c, f, kLibraryHints, 5);
+    c.reset_clip();
+    draw_hint_bar(c, f, kLibraryHints, 5, 524.0f);
 }
 
 // ---- download queue screen (mockup 06) ----
