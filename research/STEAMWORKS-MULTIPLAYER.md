@@ -212,7 +212,8 @@ rather than as "the bridge did nothing":
    request — i.e. the request has to be observed at
    `DownloadLeaderboardEntries`, not only at Find, which is the shim route
    below.
-2. **Other players' names read "Unknown User" — fixed in this branch.** gbe's
+2. **Other players' names read "Unknown User" — fixed, and verified on the
+   console.** gbe's
    `GetFriendPersonaName` answers the local name for the account and otherwise
    only a `Friend` record from its own LAN peer network
    (`dll/steam_friends.cpp`: `friends` is pushed only by network peers, and
@@ -229,6 +230,7 @@ rather than as "the bridge did nothing":
    `app/tests/play-runtime.sh leaderboards` — the stand-in provider answers
    "Unknown User" for every account, and the guest exits 42 only when the tap
    supplied "Ana" for a seeded row and left an unknown id to the provider.
+   Console proof: 0.5.256.0 showed real names on all ten Rank rows (below).
 3. **Ranks are 1..N, not Steam's ranks.** gbe derives `m_nGlobalRank` from the
    entry's index in its sorted array (`1 + (&entry - &entries[0])`), not from
    Steam's `global_rank`, and the cache file has no field for it. That is right
@@ -257,7 +259,7 @@ For each interface family:
 | Interface | Games | (a) gbe_fork today | (b) CM bridge | (c) Valve client |
 |---|---|---|---|---|
 | `ISteamFriends` rich presence | Megabonk, Slime Rancher, PPT2 | in-memory + LAN only | **done in this branch**: observed at the export, uploaded on the launcher session | — |
-| `ISteamFriends` persona names | Megabonk | local account only; every other id is "Unknown User" unless a LAN peer pushed a `Friend` record | **done in this branch**: `CMsgClientRequestFriendData` for the seeded rows' ids, names collected from the `CMsgClientPersonaState` push and served through an export tap on `GetFriendPersonaName` | — |
+| `ISteamFriends` persona names | Megabonk | local account only; every other id is "Unknown User" unless a LAN peer pushed a `Friend` record | **done and console-verified**: `CMsgClientRequestFriendData` for the seeded rows' ids, names collected from the `CMsgClientPersonaState` push and served through an export tap on `GetFriendPersonaName` | — |
 | `ISteamUserStats` leaderboards | Megabonk | reads `<appid>\leaderboard\<name>` on a board's first Find and answers downloads from it; never writes it with `disable_networking=1`, so boards are empty | **done in this branch**: observed at the export, board + top rows fetched on the launcher session and written into the provider's own file before its first Find; scores uploaded as `CMsgClientLBSSetScore` | — |
 | `ISteamFriends` invites / `GameLobbyJoinRequested` | Megabonk | overlay/invite handling is experimental-build only; `auto_accept_invite.txt` exists | needs `CMsgClientMMSInviteToLobby` (6621) and the `ClientMMSLobbyChatMsg` (6614) path to raise callbacks | — |
 | `ISteamMatchmaking` lobbies | Megabonk | LAN-only lobbies over its own UDP port (`listen_port`, default 47584): `CreateLobby` queues a pending create and `create_pending_lobbies()` mints a local lobby id, answers `LobbyCreated_t`/`LobbyEnter_t` itself and broadcasts the lobby over gbe's network (`dll/steam_matchmaking.cpp`); `disable_lobby_creation` makes it fail instead | **feasible**: the 14 messages below map almost 1:1 to the API | — |
@@ -392,9 +394,8 @@ Not verified:
   the check.
 - Anything about lobbies, P2P or auth tickets end to end. No CM lobby message
   has been sent from this codebase.
-- That the persona-name fix shows real names on the Rank screen. The panel is
-  captured below with "Unknown User" on every row, but that build predates the
-  fix; the next package is the check.
+- That the AMIGOS tab lists only the account's real friends, or that ranks match
+  Steam's `global_rank` for a row outside the seeded slice (gaps 1 and 3 below).
 
 **Console run, 2026-11-09 (0.5.255.0, `feat/steam-leaderboards` @ 7dd2f0f).**
 The tap fired, and Steam answered every board the game asked for, in one launch:
@@ -430,10 +431,35 @@ RANK  PLAYER          KILLS
 ```
 
 Real other players, real scores, ranked 1..10 — the owner's acceptance check on
-this build. The JOGADOR column reads "Unknown User" on every row, which is gap 2
-above; the name fix in this branch targets exactly that call
-(`GetFriendPersonaName`) but had not been built into a console package when this
-screenshot was taken, so it is not evidence either way for the fix. The
-photosensitivity warning did not appear in this run: it had already been
-accepted in two earlier runs with a pad connected, and the game persists that,
-so no input was needed to reach the menu.
+this build. The JOGADOR column read "Unknown User" on every row, which is gap 2
+above; the name fix was verified on the next package (below).
+
+**The Rank screen shows real names (0.5.256.0, `feat/steam-leaderboards` @
+`a552964`).** Same panel, same framing, one build later — only the PLAYER column
+changed:
+
+```
+LEADERBOARDS                    Reset 139:43:06
+GLOBAL | FRIENDS
+RANK  PLAYER            KILLS
+#1    Банановый сок    3.01M
+#2    Gaskarth         2.94M
+#3    Time             1.41M
+#4    Ryan Gosling     1.36M
+#5    Iar              1.20M
+#6    MrWifiss         1.08M
+#7    casual gamer     1.08M
+#8    Rollngar         1.03M
+#9    blaizerd         993.27K
+#10   pepequentin      934.01K
+```
+
+Scores and ranks are identical to the run above, so the name path is isolated:
+the tap fired once
+(`STEAM persona names: SteamAPI_ISteamFriends_GetFriendPersonaName observed;
+names come from the launcher's Steam session`) and the persona push named 294 of
+the seeded accounts, one per `CMsgClientPersonaState` entry, interleaved with
+the seeding (`STEAM leaderboards: 1 player names received from Steam (N known)`,
+N reaching 294). No input was needed: the photosensitivity warning had already
+been accepted in two earlier runs with a pad connected, and the game persists
+that.
