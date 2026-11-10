@@ -47,9 +47,13 @@ for name in D3D10CreateDevice D3D10CreateDeviceAndSwapChain D3D10CreateDevice1 D
 done
 # A fault inside this DLL must reach the guest thread's handler, which needs the
 # image's unwind data (see src/xbox-test/uwph/d3d9/build.sh).
-python3 -I "$here/../d3d9/check-unwind-data.py" "$out/d3d10.dll"
 # d3d10_1.dll forwards to d3d10.dll and d3d10core.dll is the layer below it, so
 # the same image answers all three names; Play maps it under whichever the guest
 # asked for.
 cp "$out/d3d10.dll" "$out/d3d10_1.dll"
 cp "$out/d3d10.dll" "$out/d3d10core.dll"
+# All three names ship and all three are mapped, so all three are gated: an
+# empty exception directory in any of them is a silent death waiting to happen.
+for name in d3d10.dll d3d10_1.dll d3d10core.dll; do
+  python3 -I "$here/../d3d9/check-unwind-data.py" "$out/$name"
+done
