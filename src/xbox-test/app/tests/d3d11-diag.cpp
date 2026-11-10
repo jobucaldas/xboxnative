@@ -315,6 +315,10 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         deferred->Draw(3,0);
         CHECK(d3d11_diag::draws[1][0][0].load()==beforeDeferred+1);
         CHECK(d3d11_diag::deferredContexts.load()>=1);
+        // The draw happened on a deferred context: the by-context split must
+        // say so, or a replayed terrain pass is indistinguishable from an
+        // immediate one.
+        CHECK(d3d11_diag::drawsDeferred.load()>=1);
         ID3D11CommandList* list=nullptr;
         if(SUCCEEDED(deferred->FinishCommandList(FALSE,&list))&&list) {
             CHECK(d3d11_diag::commandLists.load()>=1);
@@ -323,6 +327,18 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
             list->Release();
         }
         deferred->Release();
+    }
+    // A resource bound as a target and then sampled: the read-while-bound
+    // hazard the runtime fixes by silently unbinding the SRV. The bind must be
+    // counted, or a black layer that samples its own target has no trace.
+    {
+        uint64_t beforeFeedback=d3d11_diag::srvFeedbackSets.load();
+        ID3D11ShaderResourceView* targetSrv=nullptr;
+        if(targetTexture&&SUCCEEDED(device->CreateShaderResourceView(targetTexture,nullptr,&targetSrv))&&targetSrv) {
+            context->PSSetShaderResources(0,1,&targetSrv);
+            CHECK(d3d11_diag::srvFeedbackSets.load()==beforeFeedback+1);
+            targetSrv->Release();
+        }
     }
     // The swapchain size the guest asked for is what a summary compares to.
     d3d11_diag::noteSwapChain(1920,1080,DXGI_FORMAT_R8G8B8A8_UNORM,2);
@@ -341,7 +357,15 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     CHECK(count("draw summary 1/7: DrawInstancedIndirect calls=1 patchlist=1")==1);
     CHECK(count("draw summary 1/7: Dispatch calls=0 indirect=1")==1);
     CHECK(count("draw summary 1/7: targets with UAVs sets=2 uav=2")==1);
-    CHECK(count("draw summary 1/7: shader resources vs=0/0 gs=0/0 ps=1/1")==1);
+    CHECK(count("draw summary 1/7: shader resources vs=0/0 gs=0/0 ps=2/1 hs=0/0 ds=0/0 (null sets)")==1);
+    // The read-while-bound hazard: the target texture sampled as an SRV is
+    // counted once, on the bind the test made above.
+    CHECK(d3d11_diag::srvFeedbackSets.load()>=1);
+    // Draws are split by the context that made them: everything so far ran on
+    // the immediate context except the deferred one's own Draw. The line is
+    // printed once per summary window and two windows fired in this test.
+    CHECK(count("draw summary 1/7: draws by context immediate=")>=1);
+    CHECK(count("draws by context immediate=11 deferred=1")>=1);
     // Draws are bucketed by the format of the target they were submitted to,
     // so a layer that never reaches the swapchain's format is visible.
     CHECK(count("draw summary 1/7: draws by target format 28(R8G8B8A8_UNORM)=")==1);

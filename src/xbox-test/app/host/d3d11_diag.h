@@ -197,7 +197,7 @@ constexpr int kDrawAuto=4,kDrawIndexedIndirect=5,kDrawInstancedIndirect=6;
 constexpr size_t kMaxDrawBuckets=size_t(kDrawKinds)*4;
 constexpr size_t kMaxRtvKinds=24;
 constexpr size_t kRtvSeenSlots=256;   // power of two
-constexpr size_t kFixedSummaryLines=16;   // topology, kDrawKinds, dispatch, lists, shaders, targets, UAVs, resources, formats, main target
+constexpr size_t kFixedSummaryLines=18;   // topology, kDrawKinds, context split, SRV feedback, dispatch, lists, shaders, targets, UAVs, resources, formats, main target
 constexpr size_t kMaxSummaryLines=kSummaryWindows*(kFixedSummaryLines+kMaxRtvKinds+kMaxDrawBuckets)+kMaxDrawBuckets+2;
 inline std::atomic<bool> summaryStarted{false};
 inline std::atomic<unsigned> summaryWindows{0};
@@ -214,6 +214,7 @@ struct ContextState {
     std::atomic<unsigned> topology{0};
     std::atomic<unsigned> shaders{0};    // bit0=HS bit1=DS bit2=GS bound
     std::atomic<unsigned> rtFormat{0};   // format of the first render target bound
+    std::atomic<unsigned> deferred{0};   // 1 for a context CreateDeferredContext returned
     std::atomic<void*> formatView[kFormatCache];   // view the cached format is for
     std::atomic<unsigned> formatValue[kFormatCache];
 };
@@ -244,6 +245,12 @@ inline std::atomic<uint64_t> draws[kDrawKinds][2][2];   // [kind][patchlist][hul
 // The geometry shader's presence on a draw, tracked like hull/domain but for
 // the stage Halo Wars' point-sprite terrain actually uses.
 inline std::atomic<uint64_t> drawsWithGs[kDrawKinds];
+// Draws split by the context that made the call. A deferred context records
+// with its own state, so a layer recorded there and replayed through
+// ExecuteCommandList is invisible to a summary that only knows one context
+// kind; Halo Wars runs 10 deferred contexts, and the terrain pass may be
+// recorded on one of them.
+inline std::atomic<uint64_t> drawsImmediate{0},drawsDeferred{0};
 // Draws per render-target format. A layer that renders into an off-screen
 // target (deferred/HDR) and is then tonemapped into the backbuffer shows up
 // here as draws into that format and none into the swapchain's; a layer that
@@ -274,6 +281,8 @@ inline void countDrawFormat(unsigned format) {
 inline std::atomic<uint64_t> zeroCounts[kDrawKinds];    // draws with 0 index/vertex/instance count
 inline std::atomic<uint64_t> dispatches,dispatchZero,dispatchIndirects,commandLists,executedLists;
 inline std::atomic<uint64_t> shaderCreates[6];   // vs gs ps hs ds cs, successful
+inline std::atomic<uint64_t> shaderCreateFails[6];   // ... failed, per kind
+inline std::atomic<uint64_t> shaderCreateAttempts[6];   // ... attempted, per kind
 inline std::atomic<uint64_t> clears[2];          // render target, depth stencil
 inline std::atomic<uint64_t> clearViews[2];      // ... through ID3D11DeviceContext1::ClearView
 inline std::atomic<uint64_t> rtvSets;            // OMSetRenderTargets with a render target
@@ -353,6 +362,29 @@ inline std::string indirectArgsText(const void* data,size_t bytes,const char* fi
 inline std::mutex rtvM;
 inline std::vector<std::string> rtvKinds;        // distinct "fmt WxH" bound as render target
 inline std::atomic<void*> rtvSeen[kRtvSeenSlots];   // views already described: no GetDesc per frame
+// Resources (not views) seen as a render target, direct-mapped by pointer: a
+// texture the guest binds as a target and then samples as a shader resource on
+// the same context is a read-while-bound feedback hazard. The runtime resolves
+// it in the guest's favour only by unbinding the SRV silently — the draw then
+// samples null and the layer renders black with no failed call anywhere.
+constexpr size_t kRtResourceSlots=512;   // power of two
+inline std::atomic<void*> rtResources[kRtResourceSlots];
+inline std::atomic<uint64_t> srvFeedbackSets{0};   // SRV binds that hit a bound-or-was-target resource
+inline void noteRenderTargetResource(ID3D11RenderTargetView* view) {
+    if(!view)return;
+    ID3D11Resource* resource=nullptr;view->GetResource(&resource);
+    if(!resource)return;
+    rtResources[(reinterpret_cast<uintptr_t>(resource)>>4)&(kRtResourceSlots-1)].store(resource,std::memory_order_relaxed);
+    resource->Release();
+}
+inline bool wasRenderTarget(ID3D11ShaderResourceView* view) {
+    if(!view)return false;
+    ID3D11Resource* resource=nullptr;view->GetResource(&resource);
+    if(!resource)return false;
+    bool hit=rtResources[(reinterpret_cast<uintptr_t>(resource)>>4)&(kRtResourceSlots-1)].load(std::memory_order_relaxed)==resource;
+    resource->Release();
+    return hit;
+}
 inline std::atomic<unsigned> mainWidth{0},mainHeight{0};   // largest render target bound
 inline std::atomic<unsigned> chainWidth{0},chainHeight{0}; // guest swapchain buffers
 inline std::atomic<unsigned> chainFormat{0},chainBuffers{0};
@@ -440,6 +472,11 @@ inline void printSummary(unsigned window) {
         emit(fmt("draw summary %u/%u: %s calls=%llu patchlist=%llu hull-domain=%llu gs=%llu zero-count=%llu",window,kSummaryWindows,drawKindName(k),
             (unsigned long long)total,(unsigned long long)patched,(unsigned long long)withHull,(unsigned long long)withGs,(unsigned long long)zero));
     }
+    // Which context kind drew: a deferred-context replay that carries the
+    // terrain pass shows up here as a deferred count, not in a hook the
+    // immediate context owns.
+    emit(fmt("draw summary %u/%u: draws by context immediate=%llu deferred=%llu",window,kSummaryWindows,
+        (unsigned long long)drawsImmediate.load(),(unsigned long long)drawsDeferred.load()));
     // A zero-area viewport or scissor clips every draw to nothing: the silent
     // shape of a layer that renders black with no failed call anywhere.
     emit(fmt("draw summary %u/%u: viewports sets=%llu zero-area=%u largest=%ux%u scissors=%llu empty=%u",window,kSummaryWindows,
@@ -455,9 +492,13 @@ inline void printSummary(unsigned window) {
             (unsigned long long)d,(unsigned long long)di,(unsigned long long)dispatchZero.load()));
     emit(fmt("draw summary %u/%u: command lists finish=%llu execute=%llu predicated=%llu",window,kSummaryWindows,
         (unsigned long long)commandLists.load(),(unsigned long long)executedLists.load(),(unsigned long long)predicated.load()));
-    emit(fmt("draw summary %u/%u: shader creates vs=%llu gs=%llu ps=%llu hs=%llu ds=%llu cs=%llu",window,kSummaryWindows,
-        (unsigned long long)shaderCreates[0].load(),(unsigned long long)shaderCreates[1].load(),(unsigned long long)shaderCreates[2].load(),
-        (unsigned long long)shaderCreates[3].load(),(unsigned long long)shaderCreates[4].load(),(unsigned long long)shaderCreates[5].load()));
+    emit(fmt("draw summary %u/%u: shader creates vs=%llu/%llu gs=%llu/%llu ps=%llu/%llu hs=%llu/%llu ds=%llu/%llu cs=%llu/%llu (ok/attempts)",
+        window,kSummaryWindows,(unsigned long long)shaderCreates[0].load(),(unsigned long long)shaderCreateAttempts[0].load(),
+        (unsigned long long)shaderCreates[1].load(),(unsigned long long)shaderCreateAttempts[1].load(),
+        (unsigned long long)shaderCreates[2].load(),(unsigned long long)shaderCreateAttempts[2].load(),
+        (unsigned long long)shaderCreates[3].load(),(unsigned long long)shaderCreateAttempts[3].load(),
+        (unsigned long long)shaderCreates[4].load(),(unsigned long long)shaderCreateAttempts[4].load(),
+        (unsigned long long)shaderCreates[5].load(),(unsigned long long)shaderCreateAttempts[5].load()));
     emit(fmt("draw summary %u/%u: render targets sets=%llu unreadable=%llu clears=rt %llu/ds %llu clearview=%llu",window,kSummaryWindows,
         (unsigned long long)rtvSets.load(),(unsigned long long)rtvUnknown.load(),
         (unsigned long long)clears[0].load(),(unsigned long long)clears[1].load(),(unsigned long long)clearViews[0].load()));
@@ -476,6 +517,15 @@ inline void printSummary(unsigned window) {
         (unsigned long long)srvSets[2].load(),(unsigned long long)srvNulls[2].load(),
         (unsigned long long)srvSets[3].load(),(unsigned long long)srvNulls[3].load(),
         (unsigned long long)srvSets[4].load(),(unsigned long long)srvNulls[4].load()));
+    // Which context kind drew: a deferred-context replay that carries the
+    // terrain pass shows up here as a deferred count, not in a hook the
+    // immediate context owns.
+    emit(fmt("draw summary %u/%u: draws by context immediate=%llu deferred=%llu",window,kSummaryWindows,
+        (unsigned long long)drawsImmediate.load(),(unsigned long long)drawsDeferred.load()));
+    // A resource bound as a target and then sampled: the runtime's silent fix
+    // is unbinding the SRV, so the draw samples null and the layer is black.
+    emit(fmt("draw summary %u/%u: SRV binds over a render-target resource sets=%llu",window,kSummaryWindows,
+        (unsigned long long)srvFeedbackSets.load()));
     // Draws per target format: the format the swapchain presents vs the ones
     // the guest renders into and may or may not composite. Draws with no
     // render target bound are counted separately: they write nothing visible.
@@ -701,13 +751,19 @@ static HRESULT STDMETHODCALLTYPE createShader(DevicePtr self,const void* code,SI
         const char* name="CreateShader";for(auto& n:names) if(n.slot==Slot)name=n.name;
         std::string key,text=shaderText(code,length,&key);
         D3D11_DIAG_FAILED(name,key,text+fmt(" linkage=%d",linkage!=nullptr));
-    } else {
-        // 0 vs 1 gs 2 ps 3 hs 4 ds 5 cs: what the guest can actually create
-        // says whether a missing terrain layer never had its shaders.
+    }
+    // A failed creation is as interesting as a success: a tessellation stage
+    // whose bytecode the runtime rejected renders nothing and the summary
+    // would only see the absence. Attempted/succeeded/succeeded-ratio per
+    // shader kind is the shape to read.
+    {
         static const struct {int slot;int index;} created[]={{CreateVertexShader,0},{CreateGeometryShader,1},{CreatePixelShader,2},
             {CreateHullShader,3},{CreateDomainShader,4},{CreateComputeShader,5}};
-        for(auto& c:created) if(c.slot==Slot){shaderCreates[c.index].fetch_add(1,std::memory_order_relaxed);break;}
-        tick();
+        int index=-1;for(auto& c:created) if(c.slot==Slot){index=c.index;break;}
+        if(index>=0) {
+            shaderCreateAttempts[index].fetch_add(1,std::memory_order_relaxed);
+            if(SUCCEEDED(hr))shaderCreates[index].fetch_add(1,std::memory_order_relaxed);
+        }
     }
     return hr;
 }
@@ -835,6 +891,8 @@ inline void countDraw(void* self,int kind,unsigned count,unsigned instances) {
     unsigned s=state.shaders.load(std::memory_order_relaxed);
     bool patch=patchList(t),hull=(s&3)==3,gs=(s&4)!=0;
     draws[kind][patch?1:0][hull?1:0].fetch_add(1,std::memory_order_relaxed);
+    if(state.deferred.load(std::memory_order_relaxed))drawsDeferred.fetch_add(1,std::memory_order_relaxed);
+    else drawsImmediate.fetch_add(1,std::memory_order_relaxed);
     if(gs)drawsWithGs[kind].fetch_add(1,std::memory_order_relaxed);
     countDrawFormat(state.rtFormat.load(std::memory_order_relaxed));
     if(!count||(kind>=2&&kind<4&&!instances))zeroCounts[kind].fetch_add(1,std::memory_order_relaxed);
@@ -853,6 +911,8 @@ inline void countDrawUnknown(void* self,int kind) {
     unsigned s=state.shaders.load(std::memory_order_relaxed);
     bool patch=patchList(t),hull=(s&3)==3,gs=(s&4)!=0;
     draws[kind][patch?1:0][hull?1:0].fetch_add(1,std::memory_order_relaxed);
+    if(state.deferred.load(std::memory_order_relaxed))drawsDeferred.fetch_add(1,std::memory_order_relaxed);
+    else drawsImmediate.fetch_add(1,std::memory_order_relaxed);
     if(gs)drawsWithGs[kind].fetch_add(1,std::memory_order_relaxed);
     countDrawFormat(state.rtFormat.load(std::memory_order_relaxed));
     static std::atomic<bool> named[kDrawKinds];
@@ -935,7 +995,10 @@ static void STDMETHODCALLTYPE contextGSSetShader(DevicePtr self,ID3D11GeometrySh
 }
 // The geometry stage's resource binds land in the same table as the other
 // stages': a GS that samples a texture the guest never bound is one of the
-// shapes of the black-terrain bug.
+// shapes of the black-terrain bug. A bind whose view's resource was bound as a
+// render target earlier is the read-while-bound hazard: D3D11 resolves it by
+// unbinding the SRV silently, the draw samples null, and the layer renders
+// black with no failed call anywhere.
 template<int Slot,int Stage>
 static void STDMETHODCALLTYPE contextSetShaderResources(DevicePtr self,UINT start,UINT count,ID3D11ShaderResourceView* const* views) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,ID3D11ShaderResourceView* const*);
@@ -943,6 +1006,8 @@ static void STDMETHODCALLTYPE contextSetShaderResources(DevicePtr self,UINT star
     srvSets[Stage].fetch_add(1,std::memory_order_relaxed);
     if(!views||!count)srvNulls[Stage].fetch_add(1,std::memory_order_relaxed);
     else for(UINT i=0;i<count;++i) if(!views[i]){srvNulls[Stage].fetch_add(1,std::memory_order_relaxed);break;}
+    if(views&&count)for(UINT i=0;i<count;++i)
+        if(views[i]&&wasRenderTarget(views[i])){srvFeedbackSets.fetch_add(1,std::memory_order_relaxed);break;}
     call(self,start,count,views);
 }
 // A zero-area viewport or an empty scissor rect clips every draw to nothing:
@@ -1019,6 +1084,7 @@ inline void noteRenderTargets(UINT count,ID3D11RenderTargetView* const* views) {
     rtvSets.fetch_add(1,std::memory_order_relaxed);
     for(UINT i=0;i<count;++i) {
         ID3D11RenderTargetView* view=views[i];if(!view)continue;
+        noteRenderTargetResource(view);
         size_t slot=(reinterpret_cast<uintptr_t>(view)>>4)&(kRtvSeenSlots-1);
         if(rtvSeen[slot].load(std::memory_order_relaxed)==view)continue;
         std::string text=rtvText(view);
@@ -1173,14 +1239,14 @@ static void STDMETHODCALLTYPE contextExecuteCommandList(DevicePtr self,ID3D11Com
 static HRESULT STDMETHODCALLTYPE createDeferredContext(DevicePtr self,UINT flags,ID3D11DeviceContext** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11DeviceContext**);
     D3D11_DIAG_HOOK(Fn,CreateDeferredContext)HRESULT hr=call(self,flags,out);
-    if(SUCCEEDED(hr)&&out&&*out){deferredContexts.fetch_add(1,std::memory_order_relaxed);patchContext(*out);}
+    if(SUCCEEDED(hr)&&out&&*out){deferredContexts.fetch_add(1,std::memory_order_relaxed);stateOf(*out).deferred.store(1,std::memory_order_relaxed);patchContext(*out);}
     D3D11_DIAG_FAILED("CreateDeferredContext",fmt("%x",flags),fmt("flags=0x%x",flags));
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createDeferredContext1(DevicePtr self,UINT flags,ID3D11DeviceContext1** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11DeviceContext1**);
     D3D11_DIAG_HOOK(Fn,CreateDeferredContext1)HRESULT hr=call(self,flags,out);
-    if(SUCCEEDED(hr)&&out&&*out){deferredContexts.fetch_add(1,std::memory_order_relaxed);patchContext(*out);}
+    if(SUCCEEDED(hr)&&out&&*out){deferredContexts.fetch_add(1,std::memory_order_relaxed);stateOf(*out).deferred.store(1,std::memory_order_relaxed);patchContext(*out);}
     D3D11_DIAG_FAILED("CreateDeferredContext1",fmt("%x",flags),fmt("flags=0x%x",flags));
     return hr;
 }
