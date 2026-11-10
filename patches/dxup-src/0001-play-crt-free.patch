@@ -257,3 +257,55 @@ diff -ruN a/src/dx9asm/dxbc_chunks.cpp b/src/dx9asm/dxbc_chunks.cpp
            obj.push_back(0); // [PUSH] Constant Buffer Flags (None)
            obj.push_back(0); // [PUSH] Constant Buffer Type (CBuffer)
  
+diff -ruN a/src/dx9asm/dx9asm_standard_operations.cpp b/src/dx9asm/dx9asm_standard_operations.cpp
+--- a/src/dx9asm/dx9asm_standard_operations.cpp
++++ b/src/dx9asm/dx9asm_standard_operations.cpp
+@@ -9,7 +9,20 @@
+       if (!config::getBool(config::EmitNop) && operation.getImplicitInfo().dxbcOpcode == D3D10_SB_OPCODE_NOP)
+         return true;
+ 
+-      for (uint32_t col = 0; col < operation.getMatrixColumns(); col++) {
++      // Play's fix: a matrix operation writes one component per column, but the
++      // donor copied the destination's whole write mask onto every column, so
++      // each column overwrote the previous one and only the last row survived
++      // (m4x4 oPos, v0, c0 left oPos holding the fourth row alone). Each column
++      // now writes only its own component, and a column the destination masks
++      // off is skipped entirely.
++      const DX9Operand* dstOperand = operation.getOperandByType(optype::Dst);
++      const uint32_t dstMask = dstOperand != nullptr ? dstOperand->getWriteMaskData() : 0;
++      const uint32_t columns = operation.getMatrixColumns();
++
++      for (uint32_t col = 0; col < columns; col++) {
++        if (columns > 1 && dstMask != 0 && (dstMask & (D3DSP_WRITEMASK_0 << col)) == 0)
++          continue;
++
+         DXBCOperation dxbcOperation{ operation };
+ 
+         for (uint32_t i = 0; i < operation.operandCount(); i++) {
+@@ -26,6 +39,8 @@
+ 
+           uint32_t regOffset = operand->getType() == optype::Src1 ? col : 0;
+           DXBCOperand dbxcOperand{ *this, operation, *operand, regOffset };
++          if (operand->getType() == optype::Dst && columns > 1)
++            dbxcOperand.setSwizzleOrWritemask(D3D10_SB_OPERAND_4_COMPONENT_MASK_X << col);
+           dxbcOperation.appendOperand(dbxcOperand);
+         }
+ 
+diff -ruN a/src/dx9asm/dx9asm_operand.h b/src/dx9asm/dx9asm_operand.h
+--- a/src/dx9asm/dx9asm_operand.h
++++ b/src/dx9asm/dx9asm_operand.h
+@@ -198,7 +198,13 @@
+       }
+ 
+       uint32_t m_usedComponents = 4;
+-      uint32_t m_dx9tokens[4];
++      // Play's fix: zero-initialised. An operand whose OperandInfo has
++      // sizeInTokens 0 (the SM1 `tex` destination) never has this written, and
++      // isIndirect() reads it - so a stale word from the previous shader could
++      // put the translator into indirect-constant mode, which changes the
++      // constant buffer the shader declares. The same shader then translated to
++      // different DXBC on the first and later calls in a process.
++      uint32_t m_dx9tokens[4] = { 0, 0, 0, 0 };
+       const OperandInfo* m_info;
+     };
+ 
