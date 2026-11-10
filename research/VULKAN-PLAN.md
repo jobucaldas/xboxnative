@@ -253,11 +253,12 @@ claim that they run Vulkan today):
   prints PASS or BLOCKED from those lines and never counts BLOCKED as a pass; `PRUN_REQUIRE_DZN=1` turns BLOCKED into
   a failure for a host that should run it.
 
-Off-device the result is BLOCKED at device creation (Wine's vkd3d). The console answer is still open, and the
-launcher package cannot produce it today: `app/build.sh` ships `layout/xbtest.exe` and the Play runtime, not
-`play-runner.exe` or the fixtures, which `play-runtime.sh` builds off-device only. So `vulkan-dzn` is an off-device
-proof, and a console verdict needs either the runner packaged (a deliberate change, not made here) or a title that
-actually asks for Vulkan. **[unverified on console]**
+Off-device the result is BLOCKED at device creation (Wine's vkd3d). On the console the fixture is packaged: the
+launcher's build packs the self-test fixtures into `layout\diag`, and a `selftest.txt` request naming `vulkan-dzn`
+runs it under Play with the verdict taken from the exit code (42 PASS, 43 BLOCKED) and the fixture's own
+`PLAY-VULKAN-DZN` lines — which reach `LocalState\selftest_probe.log` through `OutputDebugStringA`, since a packaged
+process has no stdout handle. **[console: exit 12 until the registry replace fix; the swapchain stage is still
+unverified]**
 
 ### A Vulkan game to test with
 
