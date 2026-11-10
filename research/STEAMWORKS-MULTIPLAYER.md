@@ -1,5 +1,10 @@
 # Steamworks multiplayer: what the owned games use, and what can serve it
 
+The lobby wire layer this map describes is implemented in
+`app/steam_lobbies.h`; the route decision and the off-device evidence for
+hosting Valve's client in-process are in
+[STEAM-REAL-ONLINE.md](STEAM-REAL-ONLINE.md).
+
 This is the map for issue #55 part 2: which Steamworks interfaces the owned
 games actually reference, what the pinned Steam API provider (gbe_fork) already
 serves, what a launcher-side CM bridge could serve against the real Steam
