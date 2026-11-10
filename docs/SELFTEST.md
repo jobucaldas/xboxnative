@@ -75,6 +75,10 @@ runs in the interpreter and needs no restart, so it comes first. A queue left be
 previous process resumes on the next start while it is fresh (30 minutes); after four
 restarts without progress the remaining modes are reported `FAIL restart-limit`.
 
+While a fixture runs, Play belongs to the self-test: starting a game from the grid is
+refused with a message pointing at `selftest.log`. Once the run ends (or the launcher
+restarts for the next fixture) Play is free again.
+
 The self-test never touches Steam, cloud saves or presence: a fixture is not a game and
 must not reach the player's account.
 
