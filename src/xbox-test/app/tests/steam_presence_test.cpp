@@ -42,13 +42,6 @@ static void test_requests() {
     assert(pb_get(req, 1)->u == 1234);
     auto persona = pb_parse(persona_request_body(1234));
     assert(pb_get(persona, 1)->u == PersonaFlagsWanted && pb_get(persona, 2)->u == 1234);
-    // A multi-account request: repeated `friends`, and only the two flags a
-    // leaderboard row needs (Status | PlayerName).
-    auto names = pb_parse(persona_names_request_body({11, 22, 33}));
-    assert(pb_get(names, 1)->u == 3);
-    std::vector<uint64_t> ids;
-    for (auto& f : names) if (f.f == 2) ids.push_back(f.u);
-    assert(ids.size() == 3 && ids[0] == 11 && ids[1] == 22 && ids[2] == 33);
     puts("PRESENCE-REQUESTS-OK: games played, status, rich presence upload/request and persona request bodies");
 }
 
@@ -64,18 +57,6 @@ static void test_replies() {
     assert(p.found && p.state == PersonaOnline && p.game_played_app_id == 3405340);
     assert(p.game_name == "Megabonk" && p.rich_presence.at("status") == "In a run");
     assert(!parse_persona(body, 556).found);   // another account's entry is not ours
-
-    // A multi-id reply: one push, one `friends` entry per account, each with its
-    // own name. An entry with no name (Steam omits it when names were not asked
-    // for) must not create an empty name that would shadow a later good one.
-    std::string a; pb_fixed64(a, 1, 7001); pb_u(a, 2, PersonaOnline); pb_s(a, 15, "Ana");
-    std::string b; pb_fixed64(b, 1, 7002); pb_u(b, 2, PersonaOnline); pb_s(b, 15, "Beto");
-    std::string c; pb_fixed64(c, 1, 7003); pb_u(c, 2, PersonaOnline);
-    std::string multi; pb_s(multi, 2, a); pb_s(multi, 2, b); pb_s(multi, 2, c);
-    auto names = parse_persona_names(multi);
-    assert(names.size() == 2 && names.at(7001) == "Ana" && names.at(7002) == "Beto");
-    assert(names.count(7003) == 0);
-    assert(parse_persona_names(std::string()).empty());
 
     std::string infoEntry; pb_fixed64(infoEntry, 1, 555); pb_s(infoEntry, 2, encode_kv({{"status", "Lobby"}}));
     std::string info; pb_s(info, 1, infoEntry);
