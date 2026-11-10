@@ -411,11 +411,14 @@ static steam_leaderboards::Io leaderboard_io(std::shared_ptr<CmSession> session)
 // Requests are batched and each id is asked for once per launch.
 static void leaderboard_ask_names(std::shared_ptr<CmSession> session) {
     if(!session || !session->up || session->anon) return;
+    // The bridge's ids are copied before the launcher's own lock is taken: the
+    // two mutexes are never held together, so no ordering has to be maintained.
+    auto ids = g_leaderboards.bridge.player_ids();
     std::vector<uint64_t> ask;
     {
         std::lock_guard<std::mutex> l(g_leaderboards.m);
         if(!g_leaderboards.appid) return;
-        for(auto id : g_leaderboards.bridge.player_ids()) {
+        for(auto id : ids) {
             if(!id) continue;
             if(g_leaderboards.names.count(id)) continue;
             if(!g_leaderboards.namesAsked.insert(id).second) continue;
