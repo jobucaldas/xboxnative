@@ -1586,6 +1586,40 @@ static HRESULT WINAPI createDevice(IDXGIAdapter* adapter,D3D_DRIVER_TYPE type,HM
         d3d11_diag::adopt(*device);
         play_graphics::adopt_device(*device);state->milestone=2;}return hr;
 }
+// The other D3D11 device entry a guest imports: the same device route as
+// createDevice above (a device made by this call must get the adoption,
+// diagnostics and CoreWindow factory too, or a guest using it renders with a
+// factory that never routes its windows), with the swap chain the guest asked
+// for built through that adopted device's factory afterwards.
+static HRESULT WINAPI createDeviceAndSwapChain(IDXGIAdapter* adapter,D3D_DRIVER_TYPE type,HMODULE software,UINT flags,
+        const D3D_FEATURE_LEVEL* levels,UINT count,UINT version,const DXGI_SWAP_CHAIN_DESC* swapDesc,
+        IDXGISwapChain** swapchain,ID3D11Device** device,D3D_FEATURE_LEVEL* level,ID3D11DeviceContext** context) {
+    HRESULT hr=createDevice(adapter,type,software,flags,levels,count,version,device,level,context);
+    if(FAILED(hr)||!swapDesc||!swapchain)return hr;
+    // The chain comes from the adopted device's factory, whose HWND entries
+    // Play has redirected.
+    IDXGIDevice* dxgi=nullptr;
+    IDXGIFactory2* factory=nullptr;
+    if(SUCCEEDED((*device)->QueryInterface(__uuidof(IDXGIDevice),(void**)&dxgi))&&dxgi) {
+        IDXGIAdapter* deviceAdapter=nullptr;
+        if(SUCCEEDED(dxgi->GetAdapter(&deviceAdapter))&&deviceAdapter) {
+            deviceAdapter->GetParent(__uuidof(IDXGIFactory2),(void**)&factory);
+            deviceAdapter->Release();
+        }
+        dxgi->Release();
+    }
+    if(!factory)return DXGI_ERROR_INVALID_CALL;
+    DXGI_SWAP_CHAIN_DESC1 flip{};
+    flip.Width=swapDesc->BufferDesc.Width;flip.Height=swapDesc->BufferDesc.Height;
+    flip.Format=swapDesc->BufferDesc.Format;flip.SampleDesc=swapDesc->SampleDesc;
+    flip.BufferUsage=swapDesc->BufferUsage;flip.BufferCount=swapDesc->BufferCount;
+    flip.SwapEffect=swapDesc->SwapEffect;flip.Flags=swapDesc->Flags;
+    IDXGISwapChain1* made=nullptr;
+    hr=factory->CreateSwapChainForHwnd(*device,swapDesc->OutputWindow,&flip,nullptr,nullptr,&made);
+    factory->Release();
+    if(SUCCEEDED(hr))*swapchain=made;
+    return hr;
+}
 // A D3D12 guest reaches the device through d3d12.dll's D3D12CreateDevice, not
 // through a d3d11 device, so the D3D11 hook above never sees it. The route
 // logs the request and result the same way and gives the returned device the
@@ -1729,6 +1763,7 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     if(key=="user32.dll" && name && !strcmp(name,"MessageBoxW")) return (uintptr_t)&messageBoxW;
     if(key=="user32.dll" && name && !strcmp(name,"CreateWindowExW")) return (uintptr_t)&createWindow;
     if(key=="d3d11.dll" && name && !strcmp(name,"D3D11CreateDevice")) return (uintptr_t)&createDevice;
+    if(key=="d3d11.dll" && name && !strcmp(name,"D3D11CreateDeviceAndSwapChain")) return (uintptr_t)&createDeviceAndSwapChain;
     // D3D12: the device entry point and the helpers a D3D12 guest imports. Every
     // other d3d12.dll export (layered device, GetBehaviorValue) falls through to
     // the system route in mlp, which loads the console's own d3d12.dll.
