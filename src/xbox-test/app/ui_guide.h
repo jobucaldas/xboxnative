@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -42,7 +43,7 @@ constexpr float kHomeY = 120.0f, kHomeRowH = 64.0f, kHomePitch = 72.0f;
 constexpr float kSetRowH = 88.0f;
 constexpr float kAchY = 216.0f, kAchPitch = 88.0f, kAchRowH = 80.0f;
 constexpr int   kAchVisible = 8;                               // rows between y=216 and the footer
-constexpr float kAchRight = 532.0f;                            // meta right edge
+constexpr float kAchRight = 531.0f;                            // meta right edge
 constexpr float kToastW = 352.0f, kToastH = 88.0f;
 constexpr float kToastX = 784.0f, kToastY = 912.0f;            // centred pill, 68 px off the bottom
 
@@ -67,12 +68,20 @@ inline Action press(Button b, bool rowUsesLeftRight) {
 }
 
 // ---- view models ----
+// Fallback mark drawn inside an icon tile when no Steam image is set (the
+// mockups' placeholder marks: ring, squares, triangle, bar chart).
+enum class Mark { Ring, Square, Badge, Triangle, Bars };
+
 struct AchievementView {
     std::string name, description;
     bool unlocked = false, hidden = false;
     std::string earned;                       // "Nov 9, 2026"; empty while locked
     const uint32_t* icon = nullptr;           // Steam icon, 0xAARRGGBB
     int iconW = 0, iconH = 0;
+    // Fallback art (icon == nullptr): tile fill and mark colour, 0 = default
+    // (coloured tile when unlocked, #383838 when locked).
+    uint32_t tileColor = 0, markColor = 0;
+    Mark mark = Mark::Ring;
 };
 
 struct Toast {
@@ -86,9 +95,26 @@ struct Toast {
 struct AchievementStore {
     mutable std::mutex m;
     std::vector<AchievementView> all;
+    // Icon pixel buffers the views point into (set_icon swaps the view's
+    // pointer; the buffer must outlive every view that points into it).
+    std::vector<std::shared_ptr<std::vector<uint32_t>>> iconPix;
     void set_achievements(std::vector<AchievementView> v) {
         std::lock_guard<std::mutex> l(m);
         all = std::move(v);
+        iconPix.clear();
+    }
+    // Installs one decoded icon (by index) into the view: unlocked pixels on
+    // an unlocked entry, grey pixels on a locked one. `pix` must stay alive;
+    // the store keeps a reference to it. Returns false on a bad index.
+    bool set_icon(size_t index, const std::shared_ptr<std::vector<uint32_t>>& pix, int w, int h, bool unlockedIcon) {
+        if (!pix || w <= 0 || h <= 0) return false;
+        std::lock_guard<std::mutex> l(m);
+        if (index >= all.size()) return false;
+        iconPix.push_back(pix);
+        AchievementView& a = all[index];
+        if (unlockedIcon) { a.icon = pix->data(); a.iconW = w; a.iconH = h; }
+        else if (!a.unlocked) { a.icon = pix->data(); a.iconW = w; a.iconH = h; }
+        return true;
     }
     // Marks one achievement unlocked (by index), stamps the date and returns
     // the toast to show, or nullopt-ish (empty title) if the index is bad.
@@ -98,6 +124,18 @@ struct AchievementStore {
         all[index].unlocked = true;
         all[index].earned = earnedDate;
         return {all[index].name, all[index].icon, all[index].iconW, all[index].iconH, nowSeconds};
+    }
+    // Same, plus the real name/description for a hidden achievement (its view
+    // was built masked while locked). Empty names keep the view's text.
+    Toast unlock(size_t index, const std::string& name, const std::string& description,
+                 const std::string& earnedDate, double nowSeconds) {
+        std::lock_guard<std::mutex> l(m);
+        if (index >= all.size()) return {};
+        AchievementView& a = all[index];
+        a.unlocked = true;
+        a.earned = earnedDate;
+        if (!name.empty()) { a.name = name; a.description = description; }
+        return {a.name, a.icon, a.iconW, a.iconH, nowSeconds};
     }
     std::vector<AchievementView> snapshot() const {
         std::lock_guard<std::mutex> l(m);
@@ -128,7 +166,7 @@ struct Model {
 inline int row_count(const Model& m) {
     if (m.tab == 0) return 3;                                     // Resume, Quit game, Force quit
     if (m.tab == 1) return m.achievements ? int(m.achievements->size()) : 0;
-    return 2;                                                     // FPS counter, Frame-time graph
+    return m.fpsOn ? 2 : 1;                                       // FPS counter; frame-time graph only while it is on
 }
 
 inline void sync_scroll(Model& m) {
@@ -149,6 +187,9 @@ inline void move(Model& m, Action a) {
         case Action::TabNext: m.tab = (m.tab + 1) % 3; m.sel = 0; break;
         default: break;
     }
+    // The achievements list consumes achSel (draw_achievements focuses on it);
+    // keep it equal to sel so the tab's selection state lives in one place.
+    if (m.tab == 1) { m.achSel = m.sel; sync_scroll(m); }
 }
 
 // ---- date formatting (portable, UTC; Howard Hinnant's civil-from-days) ----
@@ -173,73 +214,112 @@ inline std::string format_date(long long unixSecs) {
 // ---- drawing ----------------------------------------------------------------
 
 // Row glyphs (home rows and tab icons), drawn from primitives; the mockups'
-// vectors normalised to a box, 2.5px stroke.
+// vectors traced vertex-for-vertex (2.5px centred round-cap stroke).
 namespace icons {
 
-inline void play(Canvas& c, const Rect& r, uint32_t color) {           // Resume
-    const float p[6] = {r.x, r.y, r.x, r.y + r.h, r.x + r.w, r.y + r.h * 0.5f};
+// Resume: filled triangle. Design box 14 x 18.667.
+inline void play(Canvas& c, const Rect& r, uint32_t color) {
+    const float p[6] = {r.x, r.y, r.x + r.w, r.y + r.h * 0.5f, r.x, r.y + r.h};
     c.fill_polygon(p, 3, color);
 }
-inline void quit(Canvas& c, const Rect& r, uint32_t color, float strokePx) {   // Quit game: door + arrow out
-    const float dw = 20, dh = 20, s = std::min(r.w / dw, r.h / dh);
-    const float cx = r.x + r.w * 0.5f, cy = r.y + r.h * 0.5f;
-    auto X = [&](float x) { return cx + (x - dw * 0.5f) * s; };
-    auto Y = [&](float y) { return cy + (y - dh * 0.5f) * s; };
+// Quit game: door with an arrow out. Design box 15.167 x 18.667.
+inline void quit(Canvas& c, const Rect& r, uint32_t color, float strokePx) {
+    const float dw = 15.16667f, dh = 18.66663f;
+    const float s = std::min(r.w / dw, r.h / dh);
+    auto X = [&](float x) { return r.x + x * s; };
+    auto Y = [&](float y) { return r.y + y * s; };
     float p[8];
-    p[0] = X(3); p[1] = Y(2); p[2] = X(9); p[3] = Y(2); p[4] = X(9); p[5] = Y(18); p[6] = X(3); p[7] = Y(18);
-    c.stroke_polyline(p, 4, true, strokePx, color);
-    p[0] = X(12); p[1] = Y(10); p[2] = X(18); p[3] = Y(10);
-    c.stroke_polyline(p, 2, false, strokePx, color);
-    p[0] = X(15.5f); p[1] = Y(7); p[2] = X(18); p[3] = Y(10); p[4] = X(15.5f); p[5] = Y(13);
+    p[0] = X(5.83337f); p[1] = Y(0); p[2] = X(0); p[3] = Y(0);
+    p[4] = X(0); p[5] = Y(18.66663f); p[6] = X(5.83337f); p[7] = Y(18.66663f);
+    c.stroke_polyline(p, 4, false, strokePx, color);
+    p[0] = X(10.49997f); p[1] = Y(4.66666f); p[2] = X(15.16667f); p[3] = Y(9.33333f);
+    p[4] = X(10.49997f); p[5] = Y(14.00003f);
     c.stroke_polyline(p, 3, false, strokePx, color);
+    p[0] = X(15.16667f); p[1] = Y(9.33333f); p[2] = X(4.66667f); p[3] = Y(9.33333f);
+    c.stroke_polyline(p, 2, false, strokePx, color);
 }
-inline void power(Canvas& c, const Rect& r, uint32_t color, float strokePx) {  // Force quit
-    const float cx = r.x + r.w * 0.5f, cy = r.y + r.h * 0.5f + r.h * 0.08f;
-    const float rad = std::min(r.w, r.h) * 0.42f;
-    c.stroke_circle(cx, cy, rad, strokePx, color, ui::Align::Inside);
-    c.fill_rect(cx - strokePx * 0.5f, r.y, strokePx, r.h * 0.5f, color);
+// Force quit: X cross. Design box 14 x 14.
+inline void power(Canvas& c, const Rect& r, uint32_t color, float strokePx) {
+    const float p[8] = {r.x, r.y, r.x + r.w, r.y + r.h, r.x + r.w, r.y, r.x, r.y + r.h};
+    c.stroke_polyline(p, 2, false, strokePx, color);
+    c.stroke_polyline(p + 4, 2, false, strokePx, color);
 }
+// Home tab: roof plus walls with a door gap. Design box 30 x 26.667.
 inline void home(Canvas& c, const Rect& r, uint32_t color, float strokePx) {
-    const float p[10] = {r.x, r.y + r.h * 0.45f, r.x + r.w * 0.5f, r.y,
-                         r.x + r.w, r.y + r.h * 0.45f,
-                         r.x + r.w * 0.85f, r.y + r.h * 0.45f,
-                         r.x + r.w * 0.85f, r.y + r.h};
-    c.stroke_polyline(p, 5, false, strokePx, color);
-    const float q[6] = {r.x + r.w * 0.15f, r.y + r.h * 0.45f, r.x + r.w * 0.15f, r.y + r.h,
-                        r.x + r.w * 0.85f, r.y + r.h};
-    c.stroke_polyline(q, 3, false, strokePx, color);
+    const float p[6] = {r.x, r.y + r.h * 0.5f,
+                        r.x + r.w * 0.5f, r.y,
+                        r.x + r.w, r.y + r.h * 0.5f};
+    c.stroke_polyline(p, 3, false, strokePx, color);
+    const float q[10] = {r.x + r.w / 6.0f, r.y + r.h * 0.375f,
+                         r.x + r.w / 6.0f, r.y + r.h,
+                         r.x + r.w * 5.0f / 6.0f, r.y + r.h,
+                         r.x + r.w * 5.0f / 6.0f, r.y + r.h * 0.375f};
+    c.stroke_polyline(q, 4, false, strokePx, color);
 }
+// Achievements tab: the mockup's cup-with-side-handles vector (design 26.667 x 26.667).
 inline void trophy(Canvas& c, const Rect& r, uint32_t color, float strokePx) {
-    // cup: two sides, stem, base and handles
-    float q[8];
-    q[0] = r.x + r.w * 0.25f; q[1] = r.y;
-    q[2] = r.x + r.w * 0.75f; q[3] = r.y;
-    q[4] = r.x + r.w * 0.72f; q[5] = r.y + r.h * 0.5f;
-    q[6] = r.x + r.w * 0.5f;  q[7] = r.y + r.h * 0.58f;
-    c.stroke_polyline(q, 4, false, strokePx, color);
-    q[0] = r.x + r.w * 0.25f; q[1] = r.y;
-    q[2] = r.x + r.w * 0.28f; q[3] = r.y + r.h * 0.5f;
-    q[4] = r.x + r.w * 0.5f;  q[5] = r.y + r.h * 0.58f;
-    c.stroke_polyline(q, 3, false, strokePx, color);
-    q[0] = r.x + r.w * 0.5f;  q[1] = r.y + r.h * 0.58f;
-    q[2] = r.x + r.w * 0.5f;  q[3] = r.y + r.h * 0.8f;
-    c.stroke_polyline(q, 2, false, strokePx, color);
-    q[0] = r.x + r.w * 0.32f; q[1] = r.y + r.h * 0.95f;
-    q[2] = r.x + r.w * 0.68f; q[3] = r.y + r.h * 0.95f;
-    c.stroke_polyline(q, 2, false, strokePx, color);
-    q[0] = r.x + r.w * 0.25f; q[1] = r.y + r.h * 0.12f;
-    q[2] = r.x + r.w * 0.1f;  q[3] = r.y + r.h * 0.12f;
-    q[4] = r.x + r.w * 0.1f;  q[5] = r.y + r.h * 0.4f;
-    q[6] = r.x + r.w * 0.3f;  q[7] = r.y + r.h * 0.45f;
-    c.stroke_polyline(q, 4, false, strokePx, color);
-    q[0] = r.x + r.w * 0.75f; q[1] = r.y + r.h * 0.12f;
-    q[2] = r.x + r.w * 0.9f;  q[3] = r.y + r.h * 0.12f;
-    q[4] = r.x + r.w * 0.9f;  q[5] = r.y + r.h * 0.4f;
-    q[6] = r.x + r.w * 0.7f;  q[7] = r.y + r.h * 0.45f;
-    c.stroke_polyline(q, 4, false, strokePx, color);
+    const float dw = 26.66663f, dh = 26.66663f;
+    const float s = std::min(r.w / dw, r.h / dh);
+    auto X = [&](float x) { return r.x + x * s; };
+    auto Y = [&](float y) { return r.y + y * s; };
+    float p[10];
+    // cup body: left side, bottom curve, right side, top
+    p[0] = X(5.00003f); p[1] = Y(0);
+    p[2] = X(5.00003f); p[3] = Y(10.00003f);
+    p[4] = X(13.33333f); p[5] = Y(18.33333f);
+    p[6] = X(21.66663f); p[7] = Y(10.00003f);
+    p[8] = X(21.66663f); p[9] = Y(0);
+    c.stroke_polyline(p, 5, false, strokePx, color);
+    p[0] = X(5.00003f); p[1] = Y(0); p[2] = X(21.66663f); p[3] = Y(0);
+    c.stroke_polyline(p, 2, false, strokePx, color);
+    // left handle: out, down, back in
+    p[0] = X(5.00003f); p[1] = Y(3.33333f); p[2] = X(0); p[3] = Y(3.33333f);
+    p[4] = X(0); p[5] = Y(6.66663f); p[6] = X(5.00003f); p[7] = Y(11.66663f);
+    c.stroke_polyline(p, 4, false, strokePx, color);
+    // right handle
+    p[0] = X(21.66663f); p[1] = Y(3.33333f); p[2] = X(26.66663f); p[3] = Y(3.33333f);
+    p[4] = X(26.66663f); p[5] = Y(6.66663f); p[6] = X(21.66663f); p[7] = Y(11.66663f);
+    c.stroke_polyline(p, 4, false, strokePx, color);
+    // stem and base
+    p[0] = X(13.33333f); p[1] = Y(18.33333f); p[2] = X(13.33333f); p[3] = Y(23.33333f);
+    c.stroke_polyline(p, 2, false, strokePx, color);
+    p[0] = X(6.66663f); p[1] = Y(26.66663f); p[2] = X(20.00003f); p[3] = Y(26.66663f);
+    c.stroke_polyline(p, 2, false, strokePx, color);
 }
-inline void cog(Canvas& c, const Rect& r, uint32_t color, float strokePx) {
-    ui::glyphs::cog(c, r, color, strokePx);
+// Settings tab: three slider lines with knobs (the mockup's vector, design
+// 26.667 x 16.667; knob centres on the lines at x 8.3 / 18.3 / 6.6).
+inline void sliders(Canvas& c, const Rect& r, uint32_t color, float strokePx) {
+    const float dw = 26.66663f, dh = 16.6666f;
+    const float s = std::min(r.w / dw, r.h / dh);
+    auto X = [&](float x) { return r.x + x * s; };
+    auto Y = [&](float y) { return r.y + y * s; };
+    float p[4];
+    for (int i = 0; i < 3; ++i) {
+        const float y = Y(float(i) * 8.3333f);
+        p[0] = X(0); p[1] = y; p[2] = X(26.66663f); p[3] = y;
+        c.stroke_polyline(p, 2, false, strokePx, color);
+    }
+    // knobs: 10px discs filled with the card colour so the line breaks
+    const float kx[3] = {8.3f, 18.3f, 6.3f};
+    const float ky[3] = {1.3f, 8.3f, 14.8f};
+    for (int i = 0; i < 3; ++i) {
+        c.fill_circle(X(kx[i]), Y(ky[i]), 5.0f * s, 0xFF1F1F1F);
+        c.stroke_circle(X(kx[i]), Y(ky[i]), 5.0f * s, strokePx, color, ui::Align::Inside);
+    }
+}
+// FPS row icon: three bottom-aligned vertical ticks (the mockup's gauge vector).
+inline void gauge(Canvas& c, const Rect& r, uint32_t color, float strokePx) {
+    const float dw = 16.33337f, dh = 16.33337f;
+    const float s = std::min(r.w / dw, r.h / dh);
+    auto X = [&](float x) { return r.x + x * s; };
+    auto Y = [&](float y) { return r.y + y * s; };
+    const float tops[3] = {8.16667f, 0.0f, 4.66667f};
+    float p[4];
+    for (int i = 0; i < 3; ++i) {
+        p[0] = X(float(i) * 8.16667f); p[1] = Y(16.33337f);
+        p[2] = X(float(i) * 8.16667f); p[3] = Y(tops[i]);
+        c.stroke_polyline(p, 2, false, strokePx, color);
+    }
 }
 
 }  // namespace icons
@@ -262,14 +342,14 @@ inline float draw_right(Canvas& c, const Font& f, Face face, float px, float rig
 inline void draw_toggle(Canvas& c, float x, float y, bool on) {
     using namespace ui::theme;
     c.fill_round_rect(rect(x, y, 56, 32), 16, on ? accent : track);
-    c.fill_circle(on ? x + 40 : x + 16, y + 16, 12, glyphBright);
+    c.fill_circle(on ? x + 40 : x + 16, y + 16, 12, glyphBright);  // mock knob x+40 (24px knob, 4px inset)
 }
 
-// One focused/home row highlight: #303030 fill with the mockup's 3px white ring.
+// One focused/home row highlight: #303030 fill with the mockup's 3px green ring.
 inline void draw_focus_row(Canvas& c, const Rect& r, float radius) {
     using namespace ui::theme;
     c.fill_round_rect(r, radius, control);
-    c.stroke_round_rect(r, radius, ui::theme::ringWidth, focus, ui::Align::Inside);
+    c.stroke_round_rect(r, radius, ui::theme::ringWidth, accent, ui::Align::Inside);
 }
 
 // Achievement icon: the Steam image when present, else the mockup's fallbacks
@@ -286,21 +366,47 @@ inline void draw_ach_icon(Canvas& c, const Font& f, const Rect& r, const Achieve
         }
         return;
     }
-    if (a.unlocked) {
-        c.fill_round_rect(r, ui::theme::radiusTile, rgb(63, 91, 115));   // mockup #3F5B73
-        const float p[6] = {r.x + r.w * 0.28f, r.y + r.h * 0.52f, r.x + r.w * 0.44f, r.y + r.h * 0.68f,
-                            r.x + r.w * 0.74f, r.y + r.h * 0.32f};
-        c.stroke_polyline(p, 3, false, 4, rgb(234, 223, 196));           // mockup mark #EADFC4
-        return;
-    }
-    c.fill_round_rect(r, ui::theme::radiusTile, rgb(56, 56, 56));        // mockup #383838
+    const uint32_t tile = a.tileColor ? a.tileColor
+                                      : a.unlocked ? rgb(63, 91, 115) : rgb(56, 56, 56);
+    c.fill_round_rect(r, ui::theme::radiusTile, tile);
     if (a.hidden) {
         const float px = 30.0f;
         const float w = f.measure(Face::Regular, px, "?");
         f.draw(c, Face::Regular, px, r.x + r.w * 0.5f - w * 0.5f,
-               r.y + r.h * 0.5f + f.ascent(Face::Regular, px) * 0.5f, "?", rgb(106, 106, 106));
-    } else {
-        c.stroke_circle(r.x + r.w * 0.5f, r.y + r.h * 0.5f, 12, 4, rgb(110, 110, 110), ui::Align::Inside);
+               r.y + r.h * 0.5f + f.ascent(Face::Regular, px) * 0.5f, "?",
+               a.markColor ? a.markColor : rgb(106, 106, 106));
+        return;
+    }
+    const uint32_t mark = a.markColor ? a.markColor : rgb(234, 223, 196);
+    switch (a.mark) {
+        case Mark::Ring:     // 24px ring, 4px stroke (mockup mark nodes)
+            c.stroke_circle(r.x + r.w * 0.5f, r.y + r.h * 0.5f, 12, 4, mark, ui::Align::Center);
+            break;
+        case Mark::Square:   // 20x20 filled square, 2px corner radius
+            c.fill_round_rect(rect(r.x + r.w * 0.5f - 10, r.y + r.h * 0.5f - 10, 20, 20), 2, mark);
+            break;
+        case Mark::Badge: {  // filled circle with a tile-coloured dot
+            c.fill_circle(r.x + r.w * 0.5f, r.y + r.h * 0.5f, 12, mark);
+            c.fill_circle(r.x + r.w * 0.5f, r.y + r.h * 0.5f, 5, tile);
+            break;
+        }
+        case Mark::Triangle: {   // outlined triangle, 4px stroke (mockup vector mark)
+            const float p[6] = {r.x + r.w * 0.5f, r.y + r.h * 0.28f,
+                                r.x + r.w * 0.75f, r.y + r.h * 0.72f,
+                                r.x + r.w * 0.25f, r.y + r.h * 0.72f};
+            c.stroke_polyline(p, 3, true, 4, mark);
+            break;
+        }
+        case Mark::Bars: {   // three-bar chart, bottom aligned (mockup 4/16/20px bars)
+            const float bw = 4.0f, gap = 6.0f;
+            const float hs[3] = {12.0f, 16.0f, 20.0f};
+            const float x0 = r.x + r.w * 0.5f - (bw * 3 + gap * 2) * 0.5f;
+            for (int i = 0; i < 3; ++i) {
+                const float bh = hs[i];
+                c.fill_round_rect(rect(x0 + float(i) * (bw + gap), r.y + r.h * 0.5f + 10.0f - bh, bw, bh), 1, mark);
+            }
+            break;
+        }
     }
 }
 
@@ -314,7 +420,7 @@ inline void draw_tabs(Canvas& c, const Font& f, const Model& m) {
         const Rect box = rect(kTabCx[i] - 14, kTabCy - 14, 28, 28);
         if (i == 0) icons::home(c, box, color, stroke);
         else if (i == 1) icons::trophy(c, box, color, stroke);
-        else icons::cog(c, box, color, stroke);
+        else icons::sliders(c, box, color, stroke);
         if (i == m.tab) c.fill_round_rect(rect(kTabCx[i] - kUnderW * 0.5f, kUnderY, kUnderW, kUnderH), 2, accent);
     }
     c.fill_rect(0, kDividerY, kCardW, 1, control);
@@ -340,19 +446,20 @@ inline void draw_home(Canvas& c, const Font& f, const Model& m) {
         icons::play(c, rect(33, y + 23, 14, 18), color);
         if (i == 1) icons::quit(c, rect(30, y + 22, 20, 20), color, 2.0f);
         if (i == 2) icons::power(c, rect(31, y + 25, 16, 16), color, 2.5f);
-        f.draw(c, Face::Regular, 28, 68, detail::baseline(f, Face::Regular, 28, y, kHomeRowH), labels[i], color);
+        f.draw(c, i == 0 ? Face::Semibold : Face::Regular, 24, 68,
+               detail::baseline(f, i == 0 ? Face::Semibold : Face::Regular, 24, y, kHomeRowH), labels[i], color);
     }
 }
 
 inline void draw_achievements(Canvas& c, const Font& f, const Model& m) {
     using namespace ui::theme;
-    f.draw(c, Face::Semibold, 34, 28, 112 + f.ascent(Face::Semibold, 34), "Achievements", text);
+    f.draw(c, Face::Semibold, 28, 28, detail::baseline(f, Face::Semibold, 28, 112, 34), "Achievements", text);
     const int total = m.achievements ? int(m.achievements->size()) : 0;
     int unlocked = 0;
     for (int i = 0; i < total; ++i) unlocked += (*m.achievements)[size_t(i)].unlocked;
     char sub[96];
     std::snprintf(sub, sizeof sub, "Steam \xC2\xB7 %d of %d unlocked", unlocked, total);
-    f.draw(c, Face::Regular, 24, 28, 150 + f.ascent(Face::Regular, 24), sub, textDim);
+    f.draw(c, Face::Regular, 20, 28, detail::baseline(f, Face::Regular, 20, 150, 24), sub, textDim);
     c.fill_round_rect(rect(28, 186, 504, 4), 2, rgb(58, 58, 58));
     if (total > 0) c.fill_round_rect(rect(28, 186, 504.0f * unlocked / float(total), 4), 2, accent);
 
@@ -366,11 +473,11 @@ inline void draw_achievements(Canvas& c, const Font& f, const Model& m) {
         draw_ach_icon(c, f, rect(28, y + 12, 56, 56), a);
         const std::string title = a.hidden && !a.unlocked ? "Hidden achievement" : a.name;
         const std::string desc = a.hidden && !a.unlocked ? "Details are hidden until unlocked" : a.description;
-        f.draw(c, Face::Regular, 26, 100, y + 14 + f.ascent(Face::Regular, 26), title, text);
-        f.draw(c, Face::Regular, 22, 100, y + 44 + f.ascent(Face::Regular, 22), desc, textDim);
+        f.draw(c, Face::Semibold, 22, 100, detail::baseline(f, Face::Semibold, 22, y + 14, 26), title, text);
+        f.draw(c, Face::Regular, 18, 100, detail::baseline(f, Face::Regular, 18, y + 44, 22), desc, textDim);
         const std::string meta = a.unlocked && !a.earned.empty() ? a.earned : "Locked";
-        detail::draw_right(c, f, Face::Regular, 22, kAchRight, y + 16 + f.ascent(Face::Regular, 22), meta,
-                           rgb(143, 143, 143));
+        detail::draw_right(c, f, Face::Regular, 18, kAchRight, detail::baseline(f, Face::Regular, 18, y + 16, 22),
+                           meta, rgb(143, 143, 143));
     }
 }
 
@@ -380,17 +487,18 @@ inline void draw_settings(Canvas& c, const Font& f, const Model& m) {
     const Rect row = rect(16, 120, 528, kSetRowH);
     if (m.sel == 0 && !m.busy) draw_focus_row(c, row, ui::theme::radiusCard);
     const uint32_t color = m.busy ? textMuted : text;
-    icons::cog(c, rect(32, 156, 16, 16), color, 2.0f);
-    f.draw(c, Face::Regular, 28, 68, 136 + f.ascent(Face::Regular, 28), "FPS counter", color);
-    f.draw(c, Face::Regular, 22, 68, 170 + f.ascent(Face::Regular, 22), "Show FPS in the top-left corner", textDim);
+    icons::gauge(c, rect(32, 156, 16, 16), color, 2.0f);
+    f.draw(c, Face::Semibold, 24, 68, detail::baseline(f, Face::Semibold, 24, 136, 29), "FPS counter", color);
+    f.draw(c, Face::Regular, 18, 68, detail::baseline(f, Face::Regular, 18, 170, 22),
+           "Show FPS in the top-left corner", textDim);
     draw_toggle(c, 476, 148, m.fpsOn);
     // Sub-row: frame-time graph, shown and reachable only while the counter is on.
     if (m.fpsOn) {
         const Rect sub = rect(48, 216, 496, 64);
-        c.fill_round_rect(sub, ui::theme::radiusControl, controlDark);
+        // the mockup draws no sub-row fill; only the toggle shows
         if (m.sel == 1 && !m.busy) c.stroke_round_rect(sub, ui::theme::radiusControl, ui::theme::ringWidth, focus,
                                                        ui::Align::Inside);
-        f.draw(c, Face::Regular, 28, 100, 233.5f + f.ascent(Face::Regular, 28), "Frame-time graph",
+        f.draw(c, Face::Regular, 24, 100, detail::baseline(f, Face::Regular, 24, 233.5f, 29), "Frame-time graph",
                m.busy ? textMuted : text);
         draw_toggle(c, 476, 232, m.graphOn);
     }
@@ -426,15 +534,17 @@ inline void draw_guide(Canvas& c, const Font& f, const Model& m, const uint32_t*
 inline void draw_toast(Canvas& c, const Font& f, const Toast& t, float x = kToastX, float y = kToastY) {
     using namespace ui::theme;
     c.fill_round_rect(rect(x, y, kToastW, kToastH), kToastH * 0.5f, panel);
+    c.stroke_round_rect(rect(x, y, kToastW, kToastH), kToastH * 0.5f, 1, control, ui::Align::Inside);
     const Rect icon = rect(x + 16, y + 16, 56, 56);
     if (t.icon && t.iconW > 0 && t.iconH > 0) {
         c.draw_image(Image{t.icon, t.iconW, t.iconH, t.iconW}, icon, ui::Fit::Cover, ui::theme::radiusTile);
     } else {
         c.fill_round_rect(icon, ui::theme::radiusTile, rgb(63, 91, 115));
-        c.stroke_circle(x + 44, y + 44, 12, 4, rgb(234, 223, 196), ui::Align::Inside);
+        c.stroke_circle(x + 44, y + 44, 12, 4, rgb(214, 226, 234), ui::Align::Center);
     }
-    f.draw(c, Face::Semibold, 26, x + 88, y + 18 + f.ascent(Face::Semibold, 26), "Achievement unlocked", text);
-    f.draw(c, Face::Regular, 22, x + 88, y + 48 + f.ascent(Face::Regular, 22), t.title, textDim);
+    f.draw(c, Face::Semibold, 22, x + 88, detail::baseline(f, Face::Semibold, 22, y + 18, 26),
+           "Achievement unlocked", text);
+    f.draw(c, Face::Regular, 18, x + 88, detail::baseline(f, Face::Regular, 18, y + 48, 22), t.title, textDim);
 }
 
 // Dims one row of back-buffer pixels in place: scales the three colour bytes

@@ -544,6 +544,9 @@ static void leaderboard_end() {
 }
 // ---- Steam achievements/stats for the provider-served game (steam_achievements.h)
 #include "steam_achievements.h"
+// The guide's achievements tab (main.cpp): filled once gbe's files are prepared.
+void guide_achievements_prepared(uint32_t appid,const steam_achievements::Schema& schema,
+                                 const std::map<std::string,steam_achievements::Earned>& earned);
 static steam_achievements::Io achievement_io(std::shared_ptr<CmSession> session) {
     steam_achievements::Io io;
     io.call=[session](uint32_t emsg,const std::string& body,std::string& out){
@@ -577,6 +580,9 @@ static void achievements_sync(uint32_t appid,bool store) {
     bool ok=steam_achievements::prepare(*schema,user,dir/"steam_settings",saves);
     char line[160];snprintf(line,sizeof line,"STEAM achievements: %s achievements=%zu stats=%zu unlocked=%u",
         ok?"prepared":"prepare failed",schema->achievements.size(),schema->stats.size(),unlocked);lp_sink(line);
+    // The guide's achievements tab and unlock poller read gbe's saves file
+    // (ui_unlocks.h); the hook receives the schema and the merged earned set.
+    if(ok)guide_achievements_prepared(appid,*schema,steam_achievements::parse_earned(steam_achievements::read(saves/"achievements.json").value_or("{}")));
 }
 // ---- Presence while the guest runs (steam_presence.h).
 // Steam drops "in game" and rich presence when the CM session that sent them

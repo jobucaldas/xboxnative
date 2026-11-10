@@ -118,14 +118,22 @@ std::vector<ui_guide::AchievementView> make_achievements() {
     static std::vector<uint32_t> icon0 = make_icon(0xFF3F5B73);   // First Steps (mockup colour)
     static std::vector<uint32_t> icon1 = make_icon(0xFF6B5A3A);   // Treasure Hunter
     std::vector<ui_guide::AchievementView> v(8);
-    v[0] = {"First Steps", "Finish the tutorial level", true, false, "Nov 9, 2026", icon0.data(), 64, 64};
-    v[1] = {"Treasure Hunter", "Open 10 hidden chests", true, false, "Nov 2, 2026", icon1.data(), 64, 64};
-    v[2] = {"Quick Learner", "Win your first match", true, false, "Oct 28, 2026", nullptr, 0, 0};
-    v[3] = {"Untouchable", "Beat a boss without taking damage", false, false, "", nullptr, 0, 0};
-    v[4] = {"Hidden achievement", "Details are hidden until unlocked", false, true, "", nullptr, 0, 0};
-    v[5] = {"Marathon", "Play for ten hours in total", false, false, "", nullptr, 0, 0};
-    v[6] = {"Perfect Round", "Clear a round with no misses", false, false, "", nullptr, 0, 0};
-    v[7] = {"Collector", "Find every collectible", false, false, "", nullptr, 0, 0};
+    v[0] = {"First Steps", "Finish the tutorial level", true, false, "Nov 9, 2026", icon0.data(), 64, 64,
+            0, 0, ui_guide::Mark::Ring};
+    v[1] = {"Treasure Hunter", "Open 10 hidden chests", true, false, "Nov 2, 2026", icon1.data(), 64, 64,
+            0, 0, ui_guide::Mark::Square};
+    v[2] = {"Quick Learner", "Win your first match", true, false, "Oct 28, 2026", nullptr, 0, 0,
+            0xFF5A4A6B, 0xFFE3D9EC, ui_guide::Mark::Badge};
+    v[3] = {"Untouchable", "Beat a boss without taking damage", false, false, "", nullptr, 0, 0,
+            0xFF383838, 0xFF6E6E6E, ui_guide::Mark::Triangle};
+    v[4] = {"Hidden achievement", "Details are hidden until unlocked", false, true, "", nullptr, 0, 0,
+            0xFF383838, 0xFF6A6A6A, ui_guide::Mark::Ring};
+    v[5] = {"Marathon", "Play for ten hours in total", false, false, "", nullptr, 0, 0,
+            0xFF383838, 0xFF6E6E6E, ui_guide::Mark::Bars};
+    v[6] = {"Perfect Round", "Clear a round with no misses", false, false, "", nullptr, 0, 0,
+            0xFF383838, 0xFF6E6E6E, ui_guide::Mark::Ring};
+    v[7] = {"Collector", "Find every collectible", false, false, "", nullptr, 0, 0,
+            0xFF383838, 0xFF6E6E6E, ui_guide::Mark::Square};
     return v;
 }
 
@@ -261,21 +269,16 @@ int main(int argc, char** argv) {
     using ui_guide::draw_guide;
     using ui_guide::draw_toast;
 
-    // synthetic game frame behind the card: flat dark blue-grey, like a paused scene
-    auto fill_game = [&]() { px.assign(size_t(W) * H, 0xFF16222E); };
+    // comparison mode: plain #101010 page, no game frame, no dim (matches the
+    // approved mockups, which show the card over the flat page)
+    auto fill_game = [&]() { px.assign(size_t(W) * H, ui::theme::page); };
 
     // 01 home tab: Resume focused
     {
         fill_game();
-        std::vector<uint32_t> dimmed(size_t(ui_guide::kCardW) * size_t(ui_guide::kCardH));
-        for (size_t i = 0; i < dimmed.size(); ++i) {
-            const uint32_t p = 0xFF16222E;
-            dimmed[i] = ui::theme::argb(255, ((p >> 16) & 0xFF) * 45 / 100, ((p >> 8) & 0xFF) * 45 / 100,
-                                        (p & 0xFF) * 45 / 100);
-        }
         ui_guide::Model m;
         m.tab = 0; m.sel = 0;
-        draw_guide(c, font, m, dimmed.data());
+        draw_guide(c, font, m);
         // focus row fill is #303030 (checks before snap(), which wipes the buffer)
         check(px[size_t(ui_guide::kCardY + 120 + 32) * W + (ui_guide::kCardX + 16 + 40)] == ui::theme::control,
               "home focus row is the control colour");
@@ -294,14 +297,14 @@ int main(int argc, char** argv) {
         m.tab = 1; m.achSel = 0; m.achTop = 0;
         m.achievements = &achs;
         draw_guide(c, font, m);
-        // progress fill is accent green at the track's left (screen y = kCardY + 186 + 2)
+        // progress fill is accent green at the track's left (screen y = kCardY + 154 + 2)
         check(px[size_t(int(ui_guide::kCardY + 186) + 2) * W + int(ui_guide::kCardX + 30)] == ui::theme::accent,
               "achievement progress fill is accent green");
-        // the focused row's ring: a 3px Inside stroke renders full white over the
-        // row's #303030 fill (screen y = kCardY + 216 + 1, x = kCardX + 16 + 20)
+        // the focused row's ring is the 3px Inside accent stroke (screen
+        // y = kCardY + 216 + 1, x = kCardX + 16 + 20)
         check(px[size_t(int(ui_guide::kCardY + 216) + 1) * W + int(ui_guide::kCardX + 16 + 20)] ==
-                  ui::theme::argb(255, 255, 255, 255),
-              "achievement focus ring is white");
+                  ui::theme::accent,
+              "achievement focus ring is accent");
         snap("guide-02-achievements");
     }
 
@@ -309,7 +312,7 @@ int main(int argc, char** argv) {
     {
         fill_game();
         ui_guide::Model m;
-        m.tab = 2; m.sel = 0; m.fpsOn = true;
+        m.tab = 2; m.sel = 0; m.fpsOn = true; m.graphOn = true;
         draw_guide(c, font, m);
         // toggle track is accent green when on (screen y = kCardY + 148 + 8,
         // x = kCardX + 476 + 8, inside the track's left edge)
@@ -318,15 +321,11 @@ int main(int argc, char** argv) {
         snap("guide-03-settings");
     }
 
-    // 04 achievement toast over the home tab
+    // 04 achievement toast alone on the page (the mockup shows no card)
     {
         fill_game();
         auto achs = make_achievements();
-        ui_guide::Model m;
-        m.tab = 0; m.sel = 0;
-        m.achievements = &achs;
-        draw_guide(c, font, m);
-        ui_guide::Toast t = achs[0].name.empty() ? ui_guide::Toast{} : ui_guide::Toast{achs[0].name, achs[0].icon, 64, 64, 0};
+        ui_guide::Toast t{achs[0].name, achs[0].icon, 64, 64, 0};
         draw_toast(c, font, t);
         // the toast pill is panel grey right of the icon tile (screen x = kToastX + 300)
         check(px[size_t(ui_guide::kToastY + 10) * W + int(ui_guide::kToastX + 300)] == ui::theme::panel,

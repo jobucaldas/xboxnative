@@ -356,7 +356,7 @@ static std::vector<std::shared_ptr<Game>> g_games;
 static std::atomic<int> g_ownedCount{0};
 static std::atomic<bool> g_demo{false};
 
-static bool wic_decode(const std::string& jpg, Game& g, int& hrOut, int maxW = COVER_W, int maxH = COVER_H) {
+static bool wic_decode_buf(const std::string& jpg, std::vector<uint32_t>& pix, int& w, int& h, int maxW, int maxH, int& hrOut) {
     static thread_local com_ptr<IWICImagingFactory> fac;
     if (!fac) {
         HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, __uuidof(IWICImagingFactory), fac.put_void());
@@ -371,9 +371,12 @@ static bool wic_decode(const std::string& jpg, Game& g, int& hrOut, int maxW = C
     double s = std::min((double)maxW / sw, (double)maxH / sh); UINT tw = std::max(1, (int)(sw * s)), th = std::max(1, (int)(sh * s));
     if (FAILED(hr = fac->CreateFormatConverter(cv.put())) || FAILED(hr = cv->Initialize(fr.get(), GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom)) ||
         FAILED(hr = fac->CreateBitmapScaler(sc.put())) || FAILED(hr = sc->Initialize(cv.get(), tw, th, WICBitmapInterpolationModeFant))) { hrOut = hr; return false; }
-    g.pix.assign((size_t)tw * th, 0);
-    if (FAILED(hr = sc->CopyPixels(nullptr, tw * 4, (UINT)g.pix.size() * 4, (BYTE*)g.pix.data()))) { hrOut = hr; return false; }
-    g.iw = tw; g.ih = th; hrOut = 0; return true;
+    pix.assign((size_t)tw * th, 0);
+    if (FAILED(hr = sc->CopyPixels(nullptr, tw * 4, (UINT)pix.size() * 4, (BYTE*)pix.data()))) { hrOut = hr; return false; }
+    w = tw; h = th; hrOut = 0; return true;
+}
+static bool wic_decode(const std::string& jpg, Game& g, int& hrOut, int maxW = COVER_W, int maxH = COVER_H) {
+    return wic_decode_buf(jpg, g.pix, g.iw, g.ih, maxW, maxH, hrOut);
 }
 // Lazy covers: the render thread asks for covers of visible rows (+1 row margin) and evicts the rest.
 // cover: 0 = not loaded, 3 = queued/loading, 1 = ready, 2 = failed
@@ -599,8 +602,112 @@ static void dl_thread() {
 #include "launch_report.h"
 #include "selftest.h"
 #include "guest_overlay.h"
+#include "ui_unlocks.h"
 #include "../uwph/user32/corewindow_feed.h"
 #include "game_delete.h"
+
+// The in-game guide (guest_overlay.h) loads the same three Selawik TTFs from
+// their package paths; without them it falls back to its 8x8 bitmap text.
+static void load_guide_fonts() {
+    const std::wstring dir = exe_dir() + L"\\fonts\\";
+    const std::wstring paths[3] = {dir + L"selawk.ttf", dir + L"selawksb.ttf", dir + L"selawkb.ttf"};
+    const wchar_t* files[3] = {paths[0].c_str(), paths[1].c_str(), paths[2].c_str()};
+    logf("fonts: guide Selawik %s", guest_overlay::load_fonts(files, 3) ? "loaded" : "unavailable; 8x8 text stays");
+}
+
+// ---- Guide achievements (ui_unlocks.h + guest_overlay.h) --------------------
+// launch.h's achievements_sync calls guide_achievements_prepared() after it
+// prepared gbe's files (schema + the player's merged earned set); the hook
+// fills the guide's list and starts the CDN icon fetches. While the guest
+// runs, a 2 s poller diffs <saves>/<appid>/achievements.json and pushes a
+// toast per newly earned achievement. The store() upload to the player's
+// real Steam account (launch.h's final_sync) is untouched by all of this.
+static std::mutex g_guideAchM;
+static steam_achievements::Schema g_guideSchema;                     // guarded by g_guideAchM
+static std::vector<ui_guide::AchievementView> g_guideViews;          // guarded by g_guideAchM
+static std::atomic<unsigned> g_achPollGen{0};                        // retires the poller
+static std::atomic<bool> g_achPollRunning{false};
+
+static void guide_icon_fetch(uint32_t appid, size_t index, const std::string& url, bool unlockedIcon) {
+    // Plain public CDN image, decoded with WIC like the cover fetch; never
+    // blocks the launch and never fails it (one short line on an error).
+    Resp r = http(false, url, "", "achicon");
+    if (r.status != 200 || r.body.size() < 100) { logf("achicon: appid=%u HTTP %d", appid, r.status); return; }
+    int hr = 0;
+    std::vector<uint32_t> pix;
+    int w = 0, h = 0;
+    if (!wic_decode_buf(r.body, pix, w, h, 64, 64, hr)) { logf("achicon: appid=%u WIC decode failed hr=0x%08x", appid, (unsigned)hr); return; }
+    auto held = std::make_shared<std::vector<uint32_t>>(std::move(pix));
+    guest_overlay::achievements.set_icon(index, held, w, h, unlockedIcon);
+}
+
+// launch.h hook (achievements_sync, before the game starts): build the guide's
+// achievement views for the launched game. Icons arrive later, off-thread.
+static void guide_achievements_prepared(uint32_t appid, const steam_achievements::Schema& schema,
+                                        const std::map<std::string, steam_achievements::Earned>& earned) {
+    std::vector<ui_guide::AchievementView> views = ui_unlocks::build_views(schema, earned);
+    {   std::lock_guard<std::mutex> l(g_guideAchM);
+        g_guideSchema = schema;
+        g_guideViews = views;
+    }
+    guest_overlay::achievements.set_achievements(views);
+    // Icon pixels: unlocked icon on unlocked rows, grey icon on locked ones.
+    for (size_t idx = 0; idx < schema.achievements.size() && idx < views.size(); ++idx) {
+        const auto& a = schema.achievements[idx];
+        const bool unlockedIcon = views[idx].unlocked;
+        const std::string hash = unlockedIcon && !a.icon.empty() ? a.icon : a.iconGray;
+        std::string url = ui_unlocks::icon_url(appid, hash);
+        if (url.empty()) continue;
+        std::thread([appid, idx, url, unlockedIcon] { guide_icon_fetch(appid, idx, url, unlockedIcon); }).detach();
+    }
+}
+
+// Polls gbe's saves file while the guest runs (gbe writes earned:true +
+// earned_time there on every unlock); one detached thread per launch, 2 s.
+static void achievement_poller(uint32_t appid) {
+    namespace fs = std::filesystem;
+    const fs::path saves = fs::path(provider_dir(appid)) / "saves" / std::to_string(appid) / "achievements.json";
+    const unsigned gen = ++g_achPollGen;
+    g_achPollRunning = true;
+    std::map<std::string, steam_achievements::Earned> seen;
+    {   std::lock_guard<std::mutex> l(g_guideAchM);
+        for (const auto& v : g_guideViews) if (v.unlocked) seen[v.name] = {true, 1};   // time unknown here; only the earned bit is compared
+    }
+    long long mtime = -1;
+    while (!g_quit && g_achPollGen.load() == gen) {
+        Sleep(2000);
+        WIN32_FILE_ATTRIBUTE_DATA fa{};
+        if (!GetFileAttributesExW(saves.c_str(), GetFileExInfoStandard, &fa)) continue;
+        const long long ft = (static_cast<long long>(fa.ftLastWriteTime.dwHighDateTime) << 32) | fa.ftLastWriteTime.dwLowDateTime;
+        if (ft == mtime) continue;                     // unchanged: no re-parse
+        mtime = ft;
+        auto text = steam_achievements::read(saves);
+        if (!text) continue;
+        auto now = steam_achievements::parse_earned(*text);
+        for (const auto& name : ui_unlocks::newly_earned(seen, now)) {
+            steam_achievements::Schema schema; std::vector<ui_guide::AchievementView> views;
+            {   std::lock_guard<std::mutex> l(g_guideAchM);
+                schema = g_guideSchema; views = g_guideViews;
+            }
+            const int idx = ui_unlocks::index_of(schema, views, name);
+            if (idx < 0) continue;
+            const auto& e = now[name];
+            const std::string date = e.time ? ui_guide::format_date(static_cast<long long>(e.time)) : std::string();
+            const auto& sa = schema.achievements[size_t(idx)];
+            const std::string realName = sa.display.empty() ? sa.name : sa.display;
+            ui_guide::Toast t = guest_overlay::achievements.unlock(size_t(idx), realName, sa.description, date, now_s());
+            guest_overlay::push_toast(t);
+            // The toast's icon: the unlocked CDN image, fetched off-thread.
+            const std::string url = ui_unlocks::icon_url(appid, sa.icon);
+            if (!url.empty()) std::thread([appid, idx, url] { guide_icon_fetch(appid, size_t(idx), url, true); }).detach();
+            logf("achievements: unlocked \"%s\"", realName.c_str());
+        }
+        seen = std::move(now);
+    }
+    g_achPollRunning = false;
+}
+// Stops the poller (the guest is exiting); the thread notices on its next tick.
+static void achievement_poller_stop() { ++g_achPollGen; }
 
 // definitive refusals mean the saved token is bad; anything else (network, CM busy) keeps the token and retries
 #include "session_restore.h"
@@ -934,8 +1041,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     GamepadButtons m_menuPrev=GamepadButtons::None; double m_quitDeadline=0; bool m_leaving=false;
     static bool held(GamepadButtons b,GamepadButtons m){return (b&m)==m;}
     bool m_inputHooks=false;
+    bool m_achPollStarted=false;   // the unlock poller runs while the guest does
     void guest_menu(double t,GamepadButtons b) {
         if(guest_overlay::inputBlocked.load(std::memory_order_relaxed))m_input.release_all(); // nothing stays held behind the menu
+        if(!m_achPollStarted) {   // gbe writes achievements.json while the game runs; watch it from a background thread
+            m_achPollStarted=true;
+            std::thread(achievement_poller,m_dApp).detach();
+        }
         if(!m_inputHooks) {
             auto pads=Gamepad::Gamepads();
             if(pads.Size()){m_inputHooks=true;logf("overlay: input capture hooks %s",guest_overlay::install_input_block(pads.GetAt(0))?"installed":"unavailable");}
@@ -946,8 +1058,18 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         auto pressed=[&](GamepadButtons m){return held(b,m)&&!held(m_menuPrev,m);};
         if(held(b,combo)&&!held(m_menuPrev,combo))menu_command("toggle","controller");
         else if(guest_overlay::menuOpen&&!guest_overlay::busy) {
-            if(pressed(GamepadButtons::DPadUp))guest_overlay::selection=(guest_overlay::selection+guest_overlay::ItemCount-1)%guest_overlay::ItemCount;
-            else if(pressed(GamepadButtons::DPadDown))guest_overlay::selection=(guest_overlay::selection+1)%guest_overlay::ItemCount;
+            // Guide navigation (ui_guide.h's state machine, guest_overlay.h's
+            // atomics): D-pad moves the selection, LB/RB switch tabs, A
+            // activates, B closes. D-pad left/right also switch tabs unless
+            // the focused row uses them (the Settings toggles flip in place).
+            using ui_guide::Button;
+            const bool rowUsesLeftRight=guest_overlay::ui_guideTab.load()==2;
+            if(pressed(GamepadButtons::DPadUp))guest_overlay::guide_press(Button::Up,rowUsesLeftRight);
+            else if(pressed(GamepadButtons::DPadDown))guest_overlay::guide_press(Button::Down,rowUsesLeftRight);
+            else if(pressed(GamepadButtons::LeftShoulder))guest_overlay::guide_press(Button::LB,rowUsesLeftRight);
+            else if(pressed(GamepadButtons::RightShoulder))guest_overlay::guide_press(Button::RB,rowUsesLeftRight);
+            else if(pressed(GamepadButtons::DPadLeft))guest_overlay::guide_press(Button::Left,rowUsesLeftRight);
+            else if(pressed(GamepadButtons::DPadRight))guest_overlay::guide_press(Button::Right,rowUsesLeftRight);
             else if(pressed(GamepadButtons::A))menu_command("select","controller");
             else if(pressed(GamepadButtons::B))menu_command("toggle","controller");
         }
@@ -994,21 +1116,41 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // The menu only opens where it can be drawn: blocking the pad behind an
         // invisible menu would leave the game with a dead controller.
         if(c=="toggle"&&!menuOpen&&!guest_overlay::drawable){logf("overlay: menu unavailable (present hooks or back-buffer format unsupported) (%s)",via);return;}
-        if(c=="toggle"){if(busy)return;menuOpen=!menuOpen;selection=Resume;if(menuOpen)block_input(true);logf("overlay: menu %s (%s)",menuOpen?"opened":"closed",via);return;}
-        int item=c=="select"?selection.load():c=="quit"?Quit:c=="force"?ForceQuit:c=="fps"?Fps:-1;
-        if(item<0||busy)return;
-        if(item!=Fps)logf("overlay: %s (%s)",label(item),via);
-        if(item==Resume){menuOpen=false;return;}   // input returns once buttons are released
-        if(item==Fps){fpsOn=!fpsOn;write_text(g_dir+L"\\overlay.txt",fpsOn?"fps=1\n":"fps=0\n");logf("overlay: FPS counter now %s",fpsOn?"on":"off");return;}
-        menuOpen=true;busy=true;
-        if(item==Quit) {
-            unsigned n=close_guest_windows();
-            logf("overlay: WM_CLOSE posted to %u guest window(s)",n);
-            guest_overlay::set_status(n?"Closing the game...":"No game window; force quitting");
-            if(!n){force_quit();return;}
-            m_quitDeadline=now_s()+15;return;
+        if(c=="toggle"){if(busy)return;menuOpen=!menuOpen;guest_overlay::ui_guideTab=0;selection=0;guest_overlay::achTop=0;
+                        if(menuOpen)block_input(true);logf("overlay: menu %s (Home) (%s)",menuOpen?"opened":"closed",via);return;}
+        // `selection` is the active tab's focused row (guide_press keeps the
+        // atomics in sync); map it to the tab's commands.
+        const int tab=ui_guideTab.load(),row=selection.load();
+        const char* names[3][2]={{"Resume","Quit game"},{"",""},{"FPS counter","Frame-time graph"}};
+        const char* name=tab<3&&row<2?names[tab][row]:"";
+        if(busy)return;
+        // cmd.txt synthetic commands (gquit/gforce/gfps) act without selection.
+        if(c=="quit"||c=="force"){menuOpen=true;}
+        if(c=="quit"){busy=true;unsigned n=close_guest_windows();logf("overlay: WM_CLOSE posted to %u guest window(s)",n);
+                      guest_overlay::set_status(n?"Closing the game...":"No game window; force quitting");
+                      if(!n){force_quit();return;}m_quitDeadline=now_s()+15;return;}
+        if(c=="force"){busy=true;force_quit();return;}
+        if(c=="fps"){fpsOn=!fpsOn;write_text(g_dir+L"\\overlay.txt",fpsOn?"fps=1\n":"fps=0\n");logf("overlay: FPS counter now %s",fpsOn?"on":"off");return;}
+        if(c=="select"&&*name)logf("overlay: %s (tab %d row %d) (%s)",name,tab,row,via);
+        if(c=="select"&&tab==0) {
+            if(row==0){menuOpen=false;return;}   // Resume: input returns once buttons are released
+            menuOpen=true;busy=true;
+            if(row==1) {   // Quit game
+                unsigned n=close_guest_windows();
+                logf("overlay: WM_CLOSE posted to %u guest window(s)",n);
+                guest_overlay::set_status(n?"Closing the game...":"No game window; force quitting");
+                if(!n){force_quit();return;}
+                m_quitDeadline=now_s()+15;return;
+            }
+            force_quit();   // row 2: Force quit
+            return;
         }
-        force_quit();
+        if(c=="select"&&tab==2) {
+            if(row==0){fpsOn=!fpsOn;write_text(g_dir+L"\\overlay.txt",fpsOn?"fps=1\n":"fps=0\n");logf("overlay: FPS counter now %s",fpsOn?"on":"off");return;}
+            if(row==1&&fpsOn){graphOn=!graphOn;logf("overlay: frame-time graph now %s",graphOn?"on":"off");return;}   // reachable only while the counter is on
+            return;
+        }
+        // tab 1 (Achievements): the rows are not commands.
     }
     void force_quit() {
         if(m_leaving)return;
@@ -1052,6 +1194,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         std::string result;bool ok;
         {std::lock_guard<std::mutex> lock(g_launch.m);ok=g_launch.ok;result=g_launch.result;}
         m_guestEndGen=g_launch.gen;
+        achievement_poller_stop();   // the guest is exiting; stop watching its achievements.json
+        m_achPollStarted=false;      // the next launch starts its own poller
         if(m_leaving)return;   // Force quit is already syncing and restarting
         m_leaving=true;m_quitDeadline=0;
         if(ok){back_to_games("game quit");return;}
@@ -1756,6 +1900,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void Run() {
         logf("Run: entering"); m_window.Activate();
         load_fonts();   // Selawik faces from the package's fonts/ folder; on failure the bitmap fallback stays
+        load_guide_fonts();   // the same faces for the in-game guide (guest_overlay.h)
         if (!InitD3D()) { logf("D3D init FAILED; idling"); while (!m_closed) { m_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessOneAndAllPending); Sleep(50); } return; }
         graphicsApp=this;m_graphicsDispatcher=m_window.Dispatcher();
         play_graphics::configure((::IUnknown*)winrt::get_abi(m_window),GuestSurface,

@@ -63,13 +63,13 @@ inline std::mutex fontM;
 inline ui::Font guideFont;
 inline std::vector<uint8_t> fontData[3];       // keeps the TTF bytes alive for stb_truetype
 inline bool fontTried = false;
-inline bool load_fonts(const char* const* files, size_t n) {   // [regular, semibold, bold] TTF paths
+inline bool load_fonts(const wchar_t* const* files, size_t n) {   // [regular, semibold, bold] TTF paths
     std::lock_guard<std::mutex> l(fontM);
     if (fontTried) return guideFont.ready();
     fontTried = true;
     bool ok = n >= 3;
     for (size_t i = 0; ok && i < 3; ++i) {
-        FILE* f = std::fopen(files[i], "rb");
+        FILE* f = _wfopen(files[i], L"rb");
         if (!f) { ok = false; break; }
         std::fseek(f, 0, SEEK_END);
         long sz = std::ftell(f);
@@ -342,6 +342,37 @@ inline bool install(IDXGISwapChain1* chain) {
     return patch(&vtable[8],(void*)&present,(void**)&realPresent)&&
            patch(&vtable[13],(void*)&resize,(void**)&realResize)&&
            patch(&vtable[22],(void*)&present1,(void**)&realPresent1);
+}
+
+// ---- Guide navigation: applies ui_guide's state machine to these atomics.
+// One button press in; the atomics (tab, selection, achTop) updated. The
+// caller handles Select/Close/Left/Right itself (they map to commands, not
+// selection moves). `rowUsesLeftRight` says the focused row consumes the
+// stick/D-pad left-right (a toggle would rather flip than leave the tab).
+inline ui_guide::Action guide_press(ui_guide::Button b,bool rowUsesLeftRight) {
+    const ui_guide::Action a=ui_guide::press(b,rowUsesLeftRight);
+    int tab=ui_guideTab.load(),sel=selection.load();
+    switch(a) {
+        case ui_guide::Action::TabPrev: tab=(tab+2)%3;sel=0;achTop=0;ui_guideTab=tab;selection=0;break;
+        case ui_guide::Action::TabNext: tab=(tab+1)%3;sel=0;achTop=0;ui_guideTab=tab;selection=0;break;
+        case ui_guide::Action::Up: case ui_guide::Action::Down: {
+            int n=tab==0?3:tab==1?int(achievements.snapshot().size()):2;
+            if(n>0) {
+                sel=(sel+(a==ui_guide::Action::Down?1:n-1))%n;
+                selection=sel;
+                if(tab==1) {
+                    int top=achTop.load();
+                    if(sel<top)top=sel;
+                    if(sel>=top+ui_guide::kAchVisible)top=sel-ui_guide::kAchVisible+1;
+                    if(top>n-ui_guide::kAchVisible)top=std::max(0,n-ui_guide::kAchVisible);
+                    achTop=top;
+                }
+            }
+            break;
+        }
+        default:break;
+    }
+    return a;
 }
 
 // ---- Input capture while the menu is open. The game reads its pads through
