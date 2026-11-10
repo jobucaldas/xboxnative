@@ -31,7 +31,10 @@
 // black with no failed call anywhere. The arguments of an indirect draw are
 // read where the guest writes them (CreateBuffer's initial data,
 // UpdateSubresource, and the Unmap of a write-only Map), so a zero-count
-// submission is visible.
+// submission is visible. Only the bytes the buffer holds are read: the
+// argument layouts differ in size (20 for the indexed draws, 16 for
+// DrawInstancedIndirect, 12 for DispatchIndirect), and a short upload is
+// reported as raw words rather than named fields.
 #pragma once
 #include <d3d11.h>
 #include <d3d11_1.h>
@@ -219,8 +222,9 @@ constexpr size_t kMaxDrawFormats=16;
 inline std::atomic<unsigned> drawFormatValue[kMaxDrawFormats];
 inline std::atomic<uint64_t> drawFormatCount[kMaxDrawFormats];
 inline std::atomic<unsigned> drawFormatUsed{0};
+inline std::atomic<uint64_t> drawsNoTarget;   // draws with no render target bound
 inline void countDrawFormat(unsigned format) {
-    if(!format)return;
+    if(!format){drawsNoTarget.fetch_add(1,std::memory_order_relaxed);return;}
     unsigned used=drawFormatUsed.load(std::memory_order_relaxed);
     for(unsigned i=0;i<used&&i<kMaxDrawFormats;++i)
         if(drawFormatValue[i].load(std::memory_order_relaxed)==format) {
@@ -256,10 +260,13 @@ inline std::atomic<uint64_t> predicated;         // SetPredication with a predic
 constexpr size_t kMaxIndirectBuffers=64;
 inline std::atomic<void*> indirectBuffers[kMaxIndirectBuffers];
 inline std::atomic<void*> indirectMapped[kMaxIndirectBuffers];
-inline void noteIndirectBuffer(void* buffer) {
+inline std::atomic<unsigned> indirectBytes[kMaxIndirectBuffers];   // ByteWidth: the read at Unmap must not pass it
+inline void noteIndirectBuffer(void* buffer,unsigned bytes) {
     for(size_t i=0;i<kMaxIndirectBuffers;++i) {
         void* expected=nullptr;
-        if(indirectBuffers[i].compare_exchange_strong(expected,buffer,std::memory_order_acq_rel))return;
+        if(indirectBuffers[i].compare_exchange_strong(expected,buffer,std::memory_order_acq_rel)) {
+            indirectBytes[i].store(bytes,std::memory_order_relaxed);return;
+        }
         if(expected==buffer)return;
     }
 }
@@ -268,14 +275,32 @@ inline int indirectIndex(void* buffer) {
     return -1;
 }
 inline bool isIndirectBuffer(void* buffer) {return indirectIndex(buffer)>=0;}
-// The five words of an indirect draw's arguments (index/vertex count,
-// instances, start index, base vertex, start instance). A zero count submits
-// no work: that is what a silently missing layer looks like when the
-// submission is indirect.
-inline std::string indirectArgsText(const void* data,size_t bytes) {
-    if(!data||bytes<20)return "args=short";
+inline unsigned indirectBufferBytes(void* buffer) {
+    int i=indirectIndex(buffer);
+    return i<0?0:indirectBytes[i].load(std::memory_order_relaxed);
+}
+// The words of an indirect draw's arguments (index/vertex count, instances,
+// start index, base vertex, start instance). A zero count submits no work:
+// that is what a silently missing layer looks like when the submission is
+// indirect. Only the bytes the guest actually supplied are read: a
+// DrawInstancedIndirect's arguments are 16 bytes and a DispatchIndirect's 12,
+// and a tightly sized buffer must not be read past its end. A short upload is
+// reported as raw words rather than named fields, because the field layout
+// depends on which call consumes it.
+inline std::string indirectArgsText(const void* data,size_t bytes,const char* first="count") {
+    if(!data)return "args=null";
+    if(bytes<4)return fmt("args=%zuB",bytes);
     const UINT* a=static_cast<const UINT*>(data);
-    return fmt("count=%u instances=%u startIndex=%u baseVertex=%u startInstance=%u",a[0],a[1],a[2],a[3],a[4]);
+    size_t words=std::min<size_t>(bytes/4,5);
+    if(words<5) {
+        std::string text="words=";
+        for(size_t i=0;i<words;++i)text+=fmt(i?",%u":"%u",a[i]);
+        return text+fmt(" (%zu bytes)",bytes);
+    }
+    static const char* rest[4]={"instances","startIndex","baseVertex","startInstance"};
+    std::string text=fmt("%s=%u",first,a[0]);
+    for(size_t i=1;i<5;++i)text+=fmt(" %s=%u",rest[i-1],a[i]);
+    return text;
 }
 inline std::mutex rtvM;
 inline std::vector<std::string> rtvKinds;        // distinct "fmt WxH" bound as render target
@@ -394,7 +419,8 @@ inline void printSummary(unsigned window) {
         (unsigned long long)srvSets[1].load(),(unsigned long long)srvNulls[1].load(),(unsigned long long)srvSets[2].load(),
         (unsigned long long)srvNulls[2].load(),(unsigned long long)srvSets[3].load(),(unsigned long long)srvNulls[3].load()));
     // Draws per target format: the format the swapchain presents vs the ones
-    // the guest renders into and may or may not composite.
+    // the guest renders into and may or may not composite. Draws with no
+    // render target bound are counted separately: they write nothing visible.
     unsigned formatUsed=drawFormatUsed.load(std::memory_order_relaxed);
     std::string formats;
     for(unsigned i=0;i<formatUsed&&i<kMaxDrawFormats;++i) {
@@ -402,6 +428,8 @@ inline void printSummary(unsigned window) {
         if(!formats.empty())formats+=" ";
         formats+=fmt("%s=%llu",formatText(DXGI_FORMAT(f)).c_str(),(unsigned long long)drawFormatCount[i].load(std::memory_order_relaxed));
     }
+    uint64_t noTarget=drawsNoTarget.load(std::memory_order_relaxed);
+    if(noTarget)formats+=fmt("%sno-target=%llu",formats.empty()?"":" ",(unsigned long long)noTarget);
     if(!formats.empty())emit(fmt("draw summary %u/%u: draws by target format %s",window,kSummaryWindows,formats.c_str()));
     std::vector<std::string> kinds;
     {std::lock_guard<std::mutex> lock(rtvM);kinds=rtvKinds;}
@@ -527,12 +555,9 @@ static HRESULT STDMETHODCALLTYPE createBuffer(DevicePtr self,const D3D11_BUFFER_
     // is a draw that submits no work, which is what a silently missing layer
     // looks like when the submission is indirect.
     if(SUCCEEDED(hr)&&d&&(d->MiscFlags&D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS)) {
-        if(out&&*out)noteIndirectBuffer(*out);
+        if(out&&*out)noteIndirectBuffer(*out,d->ByteWidth);
         std::string words="no-initial-data (written by the GPU or later)";
-        if(init&&init->pSysMem&&d->ByteWidth>=20) {
-            const UINT* a=static_cast<const UINT*>(init->pSysMem);
-            words=fmt("index=%u instances=%u startIndex=%u baseVertex=%u startInstance=%u",a[0],a[1],a[2],a[3],a[4]);
-        }
+        if(init&&init->pSysMem) words=indirectArgsText(init->pSysMem,d->ByteWidth,"index");
         report(true,fmt("indirect args buffer %u/%x/%d/%s",d->ByteWidth,d->BindFlags,int(d->Usage),words.c_str()),
             fmt("indirect args buffer bytes=%u bind=0x%x usage=%d %s",d->ByteWidth,d->BindFlags,int(d->Usage),words.c_str()));
     }
@@ -733,7 +758,9 @@ static void STDMETHODCALLTYPE contextUnmap(DevicePtr self,ID3D11Resource* r,UINT
     if(indirect>=0) {
         void* data=indirectMapped[indirect].exchange(nullptr,std::memory_order_relaxed);
         if(data) {
-            std::string text=indirectArgsText(data,20);
+            // Read only what the buffer holds: a 16-byte DrawInstancedIndirect
+            // or 12-byte DispatchIndirect upload must not be read as 20.
+            std::string text=indirectArgsText(data,indirectBytes[indirect].load(std::memory_order_relaxed));
             report(true,fmt("indirect args upload %s",text.c_str()),fmt("indirect args upload %s",text.c_str()));
         }
     }
@@ -864,7 +891,10 @@ inline void noteRenderTargets(UINT count,ID3D11RenderTargetView* const* views) {
 // the target the layer writes, and a summary that shows no draws into the
 // swapchain's format says the layer never reaches the frame.
 inline void noteRenderTargetFormat(void* self,UINT count,ID3D11RenderTargetView* const* views) {
-    if(!count||!views||!views[0])return;
+    // An unbind (no view, or a null first slot) leaves no target: the next
+    // draws must not be bucketed as the format that was bound before, or the
+    // summary would report swapchain-format work that never reached it.
+    if(!count||!views||!views[0]){stateOf(self).rtFormat.store(0,std::memory_order_relaxed);return;}
     ID3D11RenderTargetView* view=views[0];
     unsigned format=0;
     bool known=false;
@@ -899,9 +929,15 @@ static void STDMETHODCALLTYPE contextOMSetRenderTargetsAndUnorderedAccessViews(D
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*,UINT,UINT,ID3D11UnorderedAccessView* const*,const UINT*);
     auto call=reinterpret_cast<Fn>(original(self,OMSetRenderTargetsAndUnorderedAccessViews));if(!call)return;
     rtvUavSets.fetch_add(1,std::memory_order_relaxed);
-    if(uavCount&&uavs)uavSets.fetch_add(1,std::memory_order_relaxed);
-    noteRenderTargets(count,views);
-    noteRenderTargetFormat(self,count,views);
+    if(uavCount&&uavs&&uavCount!=D3D11_KEEP_UNORDERED_ACCESS_VIEWS)uavSets.fetch_add(1,std::memory_order_relaxed);
+    // D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL (0xffffffff) means "leave the
+    // bound targets alone": it is not a view count, and walking the array that
+    // many times would read far past it. Binding UAVs while keeping the
+    // targets is exactly the path a UAV-writing layer takes.
+    if(count!=D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL) {
+        noteRenderTargets(count,views);
+        noteRenderTargetFormat(self,count,views);
+    }
     call(self,count,views,depth,uavStart,uavCount,uavs,initialCounts);tick();
 }
 // Null entries in a shader-resource bind are textures the guest never set: a
@@ -964,7 +1000,11 @@ static void STDMETHODCALLTYPE contextUpdateSubresource(DevicePtr self,ID3D11Reso
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT,const D3D11_BOX*,const void*,UINT,UINT);
     auto call=reinterpret_cast<Fn>(original(self,UpdateSubresource));if(!call)return;
     if(data&&isIndirectBuffer(resource)) {
-        std::string text=indirectArgsText(data,20);
+        // The source is only as large as the buffer it fills (or the box it
+        // fills), so read no more than that.
+        size_t bytes=indirectBufferBytes(resource);
+        if(box&&box->right>box->left) bytes=std::min<size_t>(bytes,size_t(box->right-box->left));
+        std::string text=indirectArgsText(data,bytes);
         report(true,fmt("indirect args upload %s",text.c_str()),fmt("indirect args upload %s",text.c_str()));
     }
     call(self,resource,subresource,box,data,rowPitch,depthPitch);

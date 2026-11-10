@@ -81,6 +81,14 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     // the guest supplied are logged so a zero-count submission is visible.
     CHECK(count("indirect args buffer bytes=64")==1);
     CHECK(count("index=0 instances=0 startIndex=0 baseVertex=0 startInstance=0")==1);
+    // A tightly sized argument buffer is read only as far as it goes: a
+    // 16-byte DrawInstancedIndirect upload must not be read as 20 bytes.
+    D3D11_BUFFER_DESC shortDesc=argsDesc;shortDesc.ByteWidth=16;
+    UINT shortArgs[4]={5,1,0,0};D3D11_SUBRESOURCE_DATA shortInit{};shortInit.pSysMem=shortArgs;
+    ID3D11Buffer* shortBuffer=nullptr;
+    CHECK(SUCCEEDED(device->CreateBuffer(&shortDesc,&shortInit,&shortBuffer)));
+    CHECK(count("indirect args buffer bytes=16")==1);
+    CHECK(count("words=5,1,0,0 (16 bytes)")==1);
     if(argsBuffer) {
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
         uint64_t beforeAuto=d3d11_diag::draws[d3d11_diag::kDrawAuto][1][0].load();
@@ -102,6 +110,17 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         UINT newArgs[5]={36,1,0,0,0};
         context->UpdateSubresource(argsBuffer,0,nullptr,newArgs,0,0);
         CHECK(count("indirect args upload count=36 instances=1 startIndex=0 baseVertex=0 startInstance=0")==1);
+        // A 12-byte DispatchIndirect upload is read as three words, not five.
+        D3D11_BUFFER_DESC dispatchDesc=argsDesc;dispatchDesc.ByteWidth=12;
+        UINT groups[3]={8,4,1};D3D11_SUBRESOURCE_DATA dispatchInit{};dispatchInit.pSysMem=groups;
+        ID3D11Buffer* dispatchBuffer=nullptr;
+        if(SUCCEEDED(device->CreateBuffer(&dispatchDesc,&dispatchInit,&dispatchBuffer))&&dispatchBuffer) {
+            UINT newGroups[3]={16,8,1};
+            context->UpdateSubresource(dispatchBuffer,0,nullptr,newGroups,0,0);
+            CHECK(count("indirect args upload words=16,8,1 (12 bytes)")==1);
+            dispatchBuffer->Release();
+        }
+        if(shortBuffer)shortBuffer->Release();
         // Bound together with UAVs, and sampled with a null entry: the two
         // shapes a layer that renders off-screen and samples what it wrote has.
         D3D11_TEXTURE2D_DESC uavTextureDesc=target;uavTextureDesc.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
@@ -115,9 +134,24 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
             context->OMSetRenderTargetsAndUnorderedAccessViews(1,&rtv,nullptr,1,1,&uav,nullptr);
             CHECK(d3d11_diag::rtvUavSets.load()>=1);
             CHECK(d3d11_diag::uavSets.load()==beforeUavSets+1);
+            // D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL is a sentinel, not a
+            // view count: binding a UAV while keeping the targets must not walk
+            // the view array 0xffffffff times, and must leave the format alone.
+            unsigned beforeKeep=d3d11_diag::stateOf(context).rtFormat.load();
+            context->OMSetRenderTargetsAndUnorderedAccessViews(D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL,nullptr,nullptr,1,1,&uav,nullptr);
+            CHECK(d3d11_diag::stateOf(context).rtFormat.load()==beforeKeep);
+            CHECK(d3d11_diag::uavSets.load()==beforeUavSets+2);
             uav->Release();
         }
         if(uavTexture)uavTexture->Release();
+        // Unbinding the targets leaves no format: a later draw must not be
+        // bucketed as the target that was bound before.
+        context->OMSetRenderTargets(0,nullptr,nullptr);
+        CHECK(d3d11_diag::stateOf(context).rtFormat.load()==0);
+        uint64_t beforeNoTarget=d3d11_diag::drawsNoTarget.load();
+        context->Draw(3,0);
+        CHECK(d3d11_diag::drawsNoTarget.load()==beforeNoTarget+1);
+        context->OMSetRenderTargets(1,&rtv,nullptr);
         ID3D11ShaderResourceView* nullView=nullptr;
         uint64_t beforeSrvSets=d3d11_diag::srvSets[1].load(),beforeSrvNulls=d3d11_diag::srvNulls[1].load();
         context->PSSetShaderResources(0,1,&nullView);
@@ -188,11 +222,14 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     CHECK(count("draw summary 1/7: DrawIndexedInstancedIndirect calls=1 patchlist=1")==1);
     CHECK(count("draw summary 1/7: DrawInstancedIndirect calls=1 patchlist=1")==1);
     CHECK(count("draw summary 1/7: Dispatch calls=0 indirect=1")==1);
-    CHECK(count("draw summary 1/7: targets with UAVs sets=1 uav=1")==1);
+    CHECK(count("draw summary 1/7: targets with UAVs sets=2 uav=2")==1);
     CHECK(count("draw summary 1/7: shader resources vs=0/0 ps=1/1")==1);
     // Draws are bucketed by the format of the target they were submitted to,
     // so a layer that never reaches the swapchain's format is visible.
     CHECK(count("draw summary 1/7: draws by target format 28(R8G8B8A8_UNORM)=")==1);
+    // Draws with nothing bound are reported apart from the format buckets: the
+    // one here and the deferred context's, which never had a target bound.
+    CHECK(count("no-target=2")==1);
     CHECK(count("draw summary 1/7: command lists finish=")==1);
     CHECK(count("draw summary 1/7: shader creates vs=")==1);
     CHECK(count("draw summary 1/7: render targets sets=")==1);
