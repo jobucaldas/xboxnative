@@ -51,9 +51,31 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     // a game that only clears through it must not show clears=0.
     ID3D11DeviceContext1* context1=nullptr;
     if(SUCCEEDED(context->QueryInterface(__uuidof(ID3D11DeviceContext1),reinterpret_cast<void**>(&context1)))&&context1) {
+        // The hook must occupy the ClearView slot itself. The counter alone
+        // cannot prove that: Wine's ClearView may reach ClearRenderTargetView
+        // internally, which would move clears[0] even with no hook installed.
+        void* saved=d3d11_diag::original(context1,d3d11_diag::Context1ClearView);
+        void** vtable=*reinterpret_cast<void***>(context1);
+        size_t patchCount=0;const d3d11_diag::Patch* patches=d3d11_diag::context1Patches(patchCount);
+        CHECK(saved!=nullptr);
+        CHECK(patchCount==1&&patches[0].slot==d3d11_diag::Context1ClearView);
+        CHECK(vtable[d3d11_diag::Context1ClearView]==patches[0].hook);
+        CHECK(saved!=patches[0].hook);
         uint64_t beforeView=d3d11_diag::clears[0].load();
         context1->ClearView(rtv,black,nullptr,0);
         CHECK(d3d11_diag::clears[0].load()==beforeView+1);
+        // A depth view cannot be reached through ClearRenderTargetView, so
+        // this counts only if the hook body itself ran and classified it.
+        D3D11_TEXTURE2D_DESC depth{};depth.Width=64;depth.Height=64;depth.MipLevels=1;depth.ArraySize=1;
+        depth.Format=DXGI_FORMAT_D32_FLOAT;depth.SampleDesc.Count=1;depth.Usage=D3D11_USAGE_DEFAULT;depth.BindFlags=D3D11_BIND_DEPTH_STENCIL;
+        ID3D11Texture2D* depthTexture=nullptr;ID3D11DepthStencilView* dsv=nullptr;
+        if(SUCCEEDED(device->CreateTexture2D(&depth,nullptr,&depthTexture))&&SUCCEEDED(device->CreateDepthStencilView(depthTexture,nullptr,&dsv))) {
+            uint64_t beforeDepth=d3d11_diag::clears[1].load();
+            context1->ClearView(dsv,black,nullptr,0);
+            CHECK(d3d11_diag::clears[1].load()==beforeDepth+1);
+        }
+        if(dsv)dsv->Release();
+        if(depthTexture)depthTexture->Release();
         context1->Release();
     }
     uint64_t beforeIndexed=d3d11_diag::draws[0][0][0].load(),beforeTriangle=d3d11_diag::draws[1][0][0].load();
