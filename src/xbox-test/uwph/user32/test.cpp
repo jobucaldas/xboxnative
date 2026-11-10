@@ -9,6 +9,12 @@ extern "C" __declspec(dllimport) void WINAPI uwph_u32c_input_set_fallback(HWND);
 extern "C" __declspec(dllimport) void WINAPI uwph_u32c_input_release_all();
 extern "C" __declspec(dllimport) BOOL WINAPI uwph_u32c_input_key(UINT,UINT,BOOL,BOOL,UINT);
 extern "C" __declspec(dllimport) void WINAPI uwph_u32c_pads(unsigned);
+extern "C" __declspec(dllimport) void WINAPI uwph_u32c_pads_test(unsigned);
+extern "C" __declspec(dllimport) void WINAPI uwph_u32c_pads_test_end(void);
+extern "C" __declspec(dllimport) unsigned WINAPI uwph_u32c_pads_current(void);
+// Popcount of the pad slot mask: the device list must hold exactly one
+// RIM_TYPEHID device per published slot.
+static unsigned padbits(unsigned mask){unsigned n=0;for(unsigned i=0;i<4;++i)if(mask>>i&1)++n;return n;}
 static bool streq(const char* a,const char* b){while(*a&&*b){if(*a++!=*b++)return false;}return *a==*b;}
 static bool wstreq(const wchar_t* a,const wchar_t* b){while(*a&&*b){if(*a++!=*b++)return false;}return *a==*b;}
 // The test links without a CRT, so it carries its own substring search.
@@ -45,6 +51,15 @@ static DWORD WINAPI holdMutex(void*){
  return 0;
 }
 static DWORD WINAPI publishWhileHeld(void*){uwph_u32c_pads(1);SetEvent(published);return 0;}
+// The launcher's UI thread publishes every frame while the test owns the mask.
+// Ownership and the mask are one atomic word, so a publish racing the takeover
+// must never land: the publisher spins here until the test is done. It counts
+// its iterations so the race check below cannot pass by never running.
+static volatile LONG hammerStop,hammerRuns;
+static DWORD WINAPI hammerPublisher(void*){
+ while(!hammerStop){uwph_u32c_pads(1);InterlockedIncrement(&hammerRuns);}
+ return 0;
+}
 static int rejectedDestroyed,rejectedCreated;
 static LRESULT CALLBACK reject(HWND,UINT m,WPARAM,LPARAM){if(m==WM_NCDESTROY)++rejectedDestroyed;if(m==WM_CREATE)++rejectedCreated;return 0;}
 static BOOL CALLBACK count(HWND,LPARAM p){++*(int*)p;return TRUE;}
@@ -197,11 +212,55 @@ extern "C" DWORD WINAPI u32c_entry(){
  DEVMODEW dm={};check(EnumDisplaySettingsW(0,0,&dm)&&dm.dmPelsWidth==1920&&dm.dmPelsHeight==1080);
  DISPLAY_DEVICEA dd={};dd.cb=sizeof(dd);check(EnumDisplayDevicesA(0,0,&dd,0)&&streq(dd.DeviceName,"\\\\.\\DISPLAY1"));check(!EnumDisplayDevicesA(0,1,&dd,0));
  WINDOWPLACEMENT wp={sizeof(wp)};check(GetWindowPlacement(h2,&wp)&&wp.showCmd==SW_SHOWNORMAL&&wp.rcNormalPosition.right==10);
- RAWINPUTDEVICE rid={1,6,0,h2};check(RegisterRawInputDevices(&rid,1,sizeof(rid)));UINT rc=0;check(GetRawInputDeviceList(0,&rc,sizeof(RAWINPUTDEVICELIST))==0&&rc==0);
+ RAWINPUTDEVICE rid={1,6,0,h2};check(RegisterRawInputDevices(&rid,1,sizeof(rid)));UINT rc=0;
+ // The launcher's UI thread publishes the connected pad slots every frame in
+ // this same process, so the device list is NOT empty when a pad is connected.
+ // These checks take the mask over (uwph_u32c_pads_test makes the launcher's
+ // publishes no-ops until uwph_u32c_pads_test_end), which makes the counts below
+ // deterministic both on a console with a pad and in CI without one, and keeps
+ // them strict: the list must hold exactly one device per set bit of the mask
+ // the readers are acting on.
+ uwph_u32c_pads_test(0);
+ check(uwph_u32c_pads_current()==0);
+ check(GetRawInputDeviceList(0,&rc,sizeof(RAWINPUTDEVICELIST))==0&&rc==padbits(0));
+ // The launcher publishes every frame in this process. Take the mask over while
+ // other threads publish continuously: no publish may land, so the counts below
+ // cannot be changed under the test. The publishers store a mask (1) that differs
+ // from each take-over below, unpaced, and every take-over is released first:
+ // the race is a publisher that already passed the ownership check and stores
+ // after the test's snapshot, so holding the mask would close that window after
+ // the first iteration and the check would never exercise it.
+ hammerStop=0;hammerRuns=0;HANDLE hammers[2];
+ for(int i=0;i<2;++i)hammers[i]=CreateThread(0,0,hammerPublisher,0,0,0);
+ // Wait until both publishers are scheduled and storing before racing them: the
+ // take-over loop is short enough to finish before a new thread ever runs, and a
+ // check that never raced the publisher would prove nothing.
+ for(int i=0;i<500&&hammerRuns<1000;++i)Sleep(1);
+ check(hammerRuns>=1000);
+ int races=0;
+ for(int i=0;i<200000;++i){
+  uwph_u32c_pads_test_end();
+  uwph_u32c_pads_test(0);
+  if(uwph_u32c_pads_current()!=0)++races;
+  uwph_u32c_pads_test_end();
+  uwph_u32c_pads_test(0x5);
+  if(uwph_u32c_pads_current()!=0x5)++races;
+ }
+ InterlockedExchange(&hammerStop,1);
+ for(int i=0;i<2;++i)if(hammers[i]){WaitForSingleObject(hammers[i],5000);CloseHandle(hammers[i]);}
+ check(races==0);
+ check(uwph_u32c_pads_current()==0x5);
+ // A mask naming a slot that does not exist is refused, not stored. Checked on
+ // the test entry, which carries the same range guard as the launcher's; the
+ // launcher's own call is dropped here by the ownership above.
+ uwph_u32c_pads_test(0);
+ uwph_u32c_pads_test(0x10);check(uwph_u32c_pads_current()==0);
+ uwph_u32c_pads_test(0xffffffff);check(uwph_u32c_pads_current()==0);
  // A pad the launcher publishes in an XInput slot is one RIM_TYPEHID device
  // (hid/pad_device.h); Unity's legacy joystick enumeration needs exactly this.
- uwph_u32c_pads(1);
- check(GetRawInputDeviceList(0,&rc,sizeof(RAWINPUTDEVICELIST))==0&&rc==1);
+ uwph_u32c_pads_test(1);
+ check(uwph_u32c_pads_current()==1);
+ check(GetRawInputDeviceList(0,&rc,sizeof(RAWINPUTDEVICELIST))==0&&rc==padbits(1));
  RAWINPUTDEVICELIST devs[2]={};rc=2;check(GetRawInputDeviceList(devs,&rc,sizeof(RAWINPUTDEVICELIST))==1&&rc==1&&devs[0].dwType==RIM_TYPEHID);
  rc=0;check(GetRawInputDeviceList(devs,&rc,sizeof(RAWINPUTDEVICELIST))==(UINT)-1&&GetLastError()==ERROR_INSUFFICIENT_BUFFER&&rc==1);
  UINT infoSize=0;check(GetRawInputDeviceInfoW(devs[0].hDevice,RIDI_DEVICEINFO,0,&infoSize)==0&&infoSize==sizeof(RID_DEVICE_INFO));
@@ -211,6 +270,24 @@ extern "C" DWORD WINAPI u32c_entry(){
  WCHAR name[128]={};UINT nameSize=sizeof(name);
  check(GetRawInputDeviceInfoW(devs[0].hDevice,RIDI_DEVICENAME,name,&nameSize)>0&&wscontains(name,L"IG_")&&name[0]=='\\');
  check(GetRawInputDeviceInfoW((HANDLE)0x1234,RIDI_DEVICEINFO,&deviceInfo,&infoSize)==(UINT)-1&&GetLastError()==ERROR_INVALID_HANDLE);
+ // Two pads in non-adjacent slots: one device per set bit, in slot order, each
+ // answering for its own slot's path, and the count query agreeing with the
+ // snapshot. A device whose slot is not published is not a device.
+ uwph_u32c_pads_test(0x5);
+ check(uwph_u32c_pads_current()==0x5);
+ check(GetRawInputDeviceList(0,&rc,sizeof(RAWINPUTDEVICELIST))==0&&rc==padbits(0x5));
+ RAWINPUTDEVICELIST two[2]={};rc=2;
+ check(GetRawInputDeviceList(two,&rc,sizeof(RAWINPUTDEVICELIST))==2&&rc==2&&two[0].dwType==RIM_TYPEHID&&two[1].dwType==RIM_TYPEHID&&two[0].hDevice!=two[1].hDevice);
+ rc=1;check(GetRawInputDeviceList(two,&rc,sizeof(RAWINPUTDEVICELIST))==(UINT)-1&&GetLastError()==ERROR_INSUFFICIENT_BUFFER&&rc==2);
+ WCHAR name2[128]={};UINT name2Size=sizeof(name2);
+ check(GetRawInputDeviceInfoW(two[1].hDevice,RIDI_DEVICENAME,name2,&name2Size)>0&&wscontains(name2,L"IG_")&&!wstreq(name,name2));
+ uwph_u32c_pads_test(0x1);
+ check(GetRawInputDeviceList(0,&rc,sizeof(RAWINPUTDEVICELIST))==0&&rc==padbits(0x1));
+ check(GetRawInputDeviceInfoW(two[1].hDevice,RIDI_DEVICEINFO,&deviceInfo,&infoSize)==(UINT)-1&&GetLastError()==ERROR_INVALID_HANDLE);
+ uwph_u32c_pads_test(0);
+ // Hand the mask back before the lock-free check below: that one has to drive
+ // the launcher's real publisher, which is a no-op while the test owns the mask.
+ uwph_u32c_pads_test_end();
  // The launcher publishes the slot mask every frame from its UI thread, and the
  // record DLL holds its mutex across guest window procedures. Publishing must
  // therefore never wait for that mutex: a guest proc that blocks (on the
@@ -230,8 +307,12 @@ extern "C" DWORD WINAPI u32c_entry(){
    check(answered);
   }
   CloseHandle(inProc);CloseHandle(releaseProc);CloseHandle(published);}
- uwph_u32c_pads(0);
- check(GetRawInputDeviceList(0,&rc,sizeof(RAWINPUTDEVICELIST))==0&&rc==0);
+ // With every slot clear the list is empty again, and the mask is handed back so
+ // the launcher's next frame publish restores whatever is really connected.
+ uwph_u32c_pads_test(0);
+ check(uwph_u32c_pads_current()==0);
+ check(GetRawInputDeviceList(0,&rc,sizeof(RAWINPUTDEVICELIST))==0&&rc==padbits(0));
+ uwph_u32c_pads_test_end();
  // CCD describes the one record display (Unity's display layout needs it).
  UINT32 npath=0,nmode=0;check(GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS,&npath,&nmode)==ERROR_SUCCESS&&npath==1&&nmode==2);
  check(GetDisplayConfigBufferSizes(0,&npath,&nmode)==ERROR_INVALID_PARAMETER);

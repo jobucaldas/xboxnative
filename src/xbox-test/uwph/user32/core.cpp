@@ -328,11 +328,42 @@ extern "C" UINT WINAPI c_GetRegisteredRawInputDevices(RawInputDevice2* devices,U
 // and a guest proc that waits on the launcher's dispatcher while the UI thread
 // waits for the mutex would deadlock both. An atomic store keeps the publisher
 // lock-free; the readers below take a single snapshot of it.
-static std::atomic<unsigned> padSlots{0};   // bit i: XInput slot i holds a published pad
+// The mask and the test's ownership of it live in ONE atomic word: ownership
+// has to be decided by the same compare-exchange that stores the mask, or a
+// publisher that already passed an ownership check could overwrite the test's
+// snapshot afterwards.
+static const unsigned padMaskBits=(1u<<pad_device::slot_count)-1;
+static const unsigned padTestOwned=1u<<31;   // the mapped regression PE holds the mask
+static std::atomic<unsigned> padState{0};    // padTestOwned | mask
 static int padToken[pad_device::slot_count];   // stable per-slot device handles
 extern "C" void WINAPI uwph_u32c_pads(unsigned mask){
- if(mask&~((1u<<pad_device::slot_count)-1))return;
- padSlots.store(mask,std::memory_order_relaxed);
+ if(mask&~padMaskBits)return;
+ // Lock-free: a failed exchange only means the state moved under us, and the
+ // reloaded value then carries the ownership bit if the test took the mask.
+ unsigned state=padState.load(std::memory_order_relaxed);
+ while(!(state&padTestOwned))
+  if(padState.compare_exchange_weak(state,mask,std::memory_order_relaxed))return;
+}
+// The mapped regression PE (test.cpp) runs inside the launcher's own process,
+// where the publisher above rewrites the mask every frame from the UI thread. A
+// test that asserted exact counts against that value would race the publisher,
+// so the test takes the mask over for the length of its pad checks: while it
+// owns the mask the launcher's publishes are dropped and the readers below see
+// only what the test published. uwph_u32c_pads_test_end releases it, and the
+// launcher's next frame publish (it publishes every frame) restores the live
+// state. Every operation here is a single atomic: the publisher staying
+// lock-free is what #132 fixed, and taking the mask must not reintroduce a wait.
+extern "C" void WINAPI uwph_u32c_pads_test(unsigned mask){
+ if(mask&~padMaskBits)return;
+ padState.store(padTestOwned|mask,std::memory_order_relaxed);
+}
+extern "C" void WINAPI uwph_u32c_pads_test_end(void){
+ padState.fetch_and(~padTestOwned,std::memory_order_relaxed);
+}
+// The mask the readers are acting on, so a caller can check that what it
+// published is what the device list is built from.
+extern "C" unsigned WINAPI uwph_u32c_pads_current(void){
+ return padState.load(std::memory_order_relaxed)&padMaskBits;
 }
 static int padSlotOf(HANDLE device,unsigned slots){
  if(!device)return -1;
@@ -344,7 +375,7 @@ static UINT padCount(unsigned slots){unsigned n=0;for(unsigned i=0;i<pad_device:
 // with ERROR_INSUFFICIENT_BUFFER when the caller's list is too small.
 extern "C" UINT WINAPI c_GetRawInputDeviceList(RawInputDeviceList2* list,UINT* count,UINT size){
  if(!count||size!=sizeof(RawInputDeviceList2)){SetLastError(ERROR_INVALID_PARAMETER);return (UINT)-1;}
- const unsigned slots=padSlots.load(std::memory_order_relaxed);
+ const unsigned slots=padState.load(std::memory_order_relaxed)&padMaskBits;
  const UINT n=padCount(slots);
  if(!list){*count=n;return 0;}
  if(*count<n){*count=n;SetLastError(ERROR_INSUFFICIENT_BUFFER);return (UINT)-1;}
@@ -366,7 +397,7 @@ extern "C" UINT WINAPI c_GetRawInputDeviceInfoW(HANDLE device,UINT command,LPVOI
  if(!size){SetLastError(ERROR_INVALID_PARAMETER);return (UINT)-1;}
  // The slot is resolved from one snapshot, so a pad that disconnects mid-answer
  // cannot be reported as connected for one command and gone for the next.
- int slot=padSlotOf(device,padSlots.load(std::memory_order_relaxed));
+ int slot=padSlotOf(device,padState.load(std::memory_order_relaxed)&padMaskBits);
  if(slot<0){SetLastError(ERROR_INVALID_HANDLE);return (UINT)-1;}
  if(command==pad_device::ridi_device_info){
   const UINT needed=sizeof(pad_device::RidDeviceInfo);

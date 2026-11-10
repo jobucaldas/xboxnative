@@ -3,6 +3,9 @@ EXPORTS
  uwph_u32c_device_caps
  uwph_u32c_configure
  uwph_u32c_pads
+ uwph_u32c_pads_test
+ uwph_u32c_pads_test_end
+ uwph_u32c_pads_current
  RegisterClassExW=c_RegisterClassExW
  RegisterClassW=c_RegisterClassW
  UnregisterClassW=c_UnregisterClassW
