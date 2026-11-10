@@ -107,11 +107,17 @@ inline constexpr char16_t serial_string[] = u"";
 
 // ---- hidpi.h layouts ------------------------------------------------------
 // HIDP_BUTTON_CAPS and HIDP_VALUE_CAPS are both 72 bytes; HIDP_CAPS is 64.
+// The status codes are HIDP_ERROR_CODES(severity, code) with facility 0x11:
+// (severity << 28) | 0x11 << 16 | code. Values below are the documented ones
+// from hidpi.h, in table order.
 constexpr std::uint32_t hidp_status_success = 0x00110000;
 constexpr std::uint32_t hidp_status_invalid_preparsed_data = 0xc0110001;
 constexpr std::uint32_t hidp_status_invalid_report_type = 0xc0110002;
+constexpr std::uint32_t hidp_status_invalid_report_length = 0xc0110003;
 constexpr std::uint32_t hidp_status_usage_not_found = 0xc0110004;
-constexpr std::uint32_t hidp_status_buffer_too_small = 0xc0110005;
+constexpr std::uint32_t hidp_status_value_out_of_range = 0xc0110005;
+constexpr std::uint32_t hidp_status_bad_log_phy_values = 0xc0110006;
+constexpr std::uint32_t hidp_status_buffer_too_small = 0xc0110007;
 
 struct ButtonCaps {
     std::uint16_t usage_page;

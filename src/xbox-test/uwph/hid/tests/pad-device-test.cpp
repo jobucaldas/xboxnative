@@ -28,6 +28,19 @@ int main() {
     check(offsetof(ValueCaps, usage_min) == 0x38 && offsetof(ValueCaps, data_index_min) == 0x44, "value usage range");
     check(offsetof(Caps, input_button_caps) == 0x2e && offsetof(Caps, input_value_caps) == 0x30, "caps counts");
 
+    // HIDP status codes: HIDP_ERROR_CODES(severity, code) with facility 0x11.
+    // The guest compares these against the documented values, so each one is
+    // pinned here rather than only named.
+    check(hidp_status_success == 0x00110000, "HIDP_STATUS_SUCCESS");
+    check(hidp_status_invalid_preparsed_data == 0xc0110001, "HIDP_STATUS_INVALID_PREPARSED_DATA");
+    check(hidp_status_invalid_report_type == 0xc0110002, "HIDP_STATUS_INVALID_REPORT_TYPE");
+    check(hidp_status_invalid_report_length == 0xc0110003, "HIDP_STATUS_INVALID_REPORT_LENGTH");
+    check(hidp_status_usage_not_found == 0xc0110004, "HIDP_STATUS_USAGE_NOT_FOUND");
+    check(hidp_status_value_out_of_range == 0xc0110005, "HIDP_STATUS_VALUE_OUT_OF_RANGE");
+    check(hidp_status_bad_log_phy_values == 0xc0110006, "HIDP_STATUS_BAD_LOG_PHY_VALUES");
+    check(hidp_status_buffer_too_small == 0xc0110007, "HIDP_STATUS_BUFFER_TOO_SMALL");
+    check(hidp_status_buffer_too_small != hidp_status_value_out_of_range, "buffer-too-small is not value-out-of-range");
+
     // RID_DEVICE_INFO: a HID game pad on page 1 usage 5, which Unity accepts.
     RidDeviceInfo info = device_info();
     check(info.size == 0x20 && info.type == 2, "device info type");
