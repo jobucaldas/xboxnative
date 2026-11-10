@@ -200,7 +200,9 @@ Three gaps are known and are *not* fixed by the cache-file route. All are
 visible on the Rank screen, so a console run should be read with them in mind
 rather than as "the bridge did nothing":
 
-1. **The AMIGOS tab will show global players, not friends.** gbe's
+1. **The AMIGOS tab will show global players, not friends** (read from the
+   provider's source, not yet seen on console: reaching it needs a right-press
+   inside the guest and no pad was connected in the runs so far). gbe's
    `DownloadLeaderboardEntries` treats `k_ELeaderboardDataRequestFriends` as
    "all rows in the cache" (`dll/steam_user_stats_leaderboard.cpp`: the range
    clamp is skipped for the friends request, then
@@ -238,8 +240,9 @@ rather than as "the bridge did nothing":
    not inside the seeded slice.
 
 The GLOBAL tab — the owner's stated check — is unaffected by the first gap: it
-will list real players' scores and ranks. Names on it now come from Steam; the
-one remaining visible defect there is the AMIGOS tab listing global players.
+lists real players' scores and ranks, and it is the tab the console runs above
+captured. The AMIGOS tab shares the same seeded rows, so it is expected to list
+them too; that is read from the provider's source, not yet photographed.
 
 ## The three serving options
 
