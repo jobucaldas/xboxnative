@@ -51,6 +51,15 @@ static DWORD WINAPI holdMutex(void*){
  return 0;
 }
 static DWORD WINAPI publishWhileHeld(void*){uwph_u32c_pads(1);SetEvent(published);return 0;}
+// The launcher's UI thread publishes every frame while the test owns the mask.
+// Ownership and the mask are one atomic word, so a publish racing the takeover
+// must never land: the publisher spins here until the test is done. It counts
+// its iterations so the race check below cannot pass by never running.
+static volatile LONG hammerStop,hammerRuns;
+static DWORD WINAPI hammerPublisher(void*){
+ while(!hammerStop){uwph_u32c_pads(1);InterlockedIncrement(&hammerRuns);}
+ return 0;
+}
 static int rejectedDestroyed,rejectedCreated;
 static LRESULT CALLBACK reject(HWND,UINT m,WPARAM,LPARAM){if(m==WM_NCDESTROY)++rejectedDestroyed;if(m==WM_CREATE)++rejectedCreated;return 0;}
 static BOOL CALLBACK count(HWND,LPARAM p){++*(int*)p;return TRUE;}
@@ -214,9 +223,37 @@ extern "C" DWORD WINAPI u32c_entry(){
  uwph_u32c_pads_test(0);
  check(uwph_u32c_pads_current()==0);
  check(GetRawInputDeviceList(0,&rc,sizeof(RAWINPUTDEVICELIST))==0&&rc==padbits(0));
+ // The launcher publishes every frame in this process. Take the mask over while
+ // other threads publish continuously: no publish may land, so the counts below
+ // cannot be changed under the test. The publishers store a mask (1) that differs
+ // from each take-over below, unpaced, and every take-over is released first:
+ // the race is a publisher that already passed the ownership check and stores
+ // after the test's snapshot, so holding the mask would close that window after
+ // the first iteration and the check would never exercise it.
+ hammerStop=0;hammerRuns=0;HANDLE hammers[2];
+ for(int i=0;i<2;++i)hammers[i]=CreateThread(0,0,hammerPublisher,0,0,0);
+ // Wait until both publishers are scheduled and storing before racing them: the
+ // take-over loop is short enough to finish before a new thread ever runs, and a
+ // check that never raced the publisher would prove nothing.
+ for(int i=0;i<500&&hammerRuns<1000;++i)Sleep(1);
+ check(hammerRuns>=1000);
+ int races=0;
+ for(int i=0;i<200000;++i){
+  uwph_u32c_pads_test_end();
+  uwph_u32c_pads_test(0);
+  if(uwph_u32c_pads_current()!=0)++races;
+  uwph_u32c_pads_test_end();
+  uwph_u32c_pads_test(0x5);
+  if(uwph_u32c_pads_current()!=0x5)++races;
+ }
+ InterlockedExchange(&hammerStop,1);
+ for(int i=0;i<2;++i)if(hammers[i]){WaitForSingleObject(hammers[i],5000);CloseHandle(hammers[i]);}
+ check(races==0);
+ check(uwph_u32c_pads_current()==0x5);
  // A mask naming a slot that does not exist is refused, not stored. Checked on
  // the test entry, which carries the same range guard as the launcher's; the
  // launcher's own call is dropped here by the ownership above.
+ uwph_u32c_pads_test(0);
  uwph_u32c_pads_test(0x10);check(uwph_u32c_pads_current()==0);
  uwph_u32c_pads_test(0xffffffff);check(uwph_u32c_pads_current()==0);
  // A pad the launcher publishes in an XInput slot is one RIM_TYPEHID device
