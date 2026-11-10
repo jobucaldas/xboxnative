@@ -572,6 +572,19 @@ static uintptr_t leaderboardHook(const char* name,uintptr_t real) {
             // refresh, or a score this account just uploaded), the entry the game
             // reads is replaced in place: same struct, same layout, the game's
             // own call still ran.
+            //
+            // The row COUNT is not ours to change: the game loops
+            // `index < m_cEntryCount`, and that number is fixed by the
+            // provider's own DownloadLeaderboardEntries from its in-memory copy
+            // (gbe_fork: cached_leaderboards[handle-1].entries.size()) and
+            // delivered in its CallResult. So a board that GREW since its first
+            // Find shows only the rows the provider reports; the tap replaces
+            // those, it cannot add more. A board that was empty at its first
+            // Find therefore stays empty for the launch — except for this
+            // account's own upload, which the provider appends to its copy
+            // itself (gbe_fork's UploadLeaderboardScore -> update_leaderboard_entry).
+            // Growing that count would mean writing into the provider's board,
+            // which only its own score-upload path may do.
             if(!ok||!entry)return ok;
             auto found=leaderboardHandleName(self,entries);
             if(found.empty())return ok;

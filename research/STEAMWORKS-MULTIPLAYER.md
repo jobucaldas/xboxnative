@@ -268,6 +268,19 @@ mix rows from different positions; an index past the launcher's rows reports no
 entry, because that player is no longer on the board. The provider's call, its
 handle and its callbacks are unchanged.
 
+One limit is the provider's, not the tap's: the game loops
+`index < m_cEntryCount`, and that count is fixed by the provider's own
+`DownloadLeaderboardEntries` from its in-memory copy
+(`cached_leaderboards[handle - 1].entries.size()`) and delivered in its
+CallResult. The tap can replace rows the provider reports; it cannot report
+more. A board that **grew** since its first Find therefore shows only the rows
+the provider knew at that Find. A board that was **empty** at its first Find
+stays empty for the launch, with one exception: this account's own upload,
+which the provider appends to its copy itself
+(`UploadLeaderboardScore` → `update_leaderboard_entry`), so the owner's row
+appears. Growing the count for other players would mean writing into the
+provider's board, which only its own score-upload path may do.
+
 ### Persona names on those rows
 
 With the rows in place, every row still drew "Unknown user". The game resolves a
