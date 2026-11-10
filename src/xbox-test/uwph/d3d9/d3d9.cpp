@@ -1936,8 +1936,12 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
             const unsigned signature=layoutSignatureOf(descs,used);
             if(signature!=shaderLayoutSignature||!inputLayout) {
                 ID3D11InputLayout* made=nullptr;
-                if(FAILED(device()->CreateInputLayout(descs,used,vs->blob,vs->blobBytes,&made)))
+                const HRESULT hr=device()->CreateInputLayout(descs,used,vs->blob,vs->blobBytes,&made);
+                if(FAILED(hr)) {
+                    d3dshim::Line line("D3D9 shim: D3D11 refused the input layout for the draw hr=");
+                    line.hex((unsigned long)hr);line.emit();
                     return D3DERR_INVALIDCALL;
+                }
                 if(inputLayout)inputLayout->Release();
                 inputLayout=made;
                 shaderLayoutSignature=signature;
@@ -2086,7 +2090,11 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
             const HRESULT hr=device()->CreateInputLayout(descs,used,dxbc,bytes,&made);
             shader->Release();
             d3dshim::release(dxbc);
-            if(FAILED(hr))return D3DERR_INVALIDCALL;
+            if(FAILED(hr)) {
+                d3dshim::Line line("D3D9 shim: D3D11 refused the fixed-function input layout hr=");
+                line.hex((unsigned long)hr);line.emit();
+                return D3DERR_INVALIDCALL;
+            }
             if(ffpLayout)ffpLayout->Release();
             ffpLayout=made;
             ffpLayoutSignature=signature;

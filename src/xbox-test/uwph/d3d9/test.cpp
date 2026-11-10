@@ -434,7 +434,7 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
         const DWORD tokens[]={
             0xFFFE0101,                                     // vs_1_1
             (0x1F)|(2<<24),0x00000000,0xE4000000,           // dcl_position v0
-            (0x18)|(3<<24),0xC0000000,0xE4000000,0xA0000000,// m4x4 oPos, v0, c0
+            (20)|(3<<24),0xC0000000,0xE4000000,0xA0000000,  // m4x4 oPos, v0, c0
             0x0000FFFF,                                     // end
         };
         IDirect3DVertexShader9* shader=nullptr;
