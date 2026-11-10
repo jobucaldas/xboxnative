@@ -13,15 +13,20 @@ done
 echo "$txt" | grep -qF 'outputs: vulkan_dzn.dll vulkan-dzn.json'
 # The pinned DirectX-Headers commit is a full 40-hex hash and every Play dzn patch is applied.
 echo "$txt" | grep -Eq 'directx-headers=[^ ]+@[0-9a-f]{40} '
-for p in 0003-play-dzn-dxil-optional.patch 0004-play-dzn-corewindow-wsi.patch 0005-play-dzn-experimental-optional.patch 0006-play-dzn-meta-finish-idempotent.patch 0007-play-dzn-dxbc-checksum.patch 0008-play-dzn-wsi-logging.patch; do
+for p in 0003-play-dzn-dxil-optional.patch 0004-play-dzn-corewindow-wsi.patch 0005-play-dzn-experimental-optional.patch 0006-play-dzn-meta-finish-idempotent.patch 0007-play-dzn-dxbc-checksum.patch 0008-play-dzn-wsi-logging.patch 0009-play-dzn-wsi-hwnd-only.patch; do
   echo "$txt" | grep -qF "$p" || { echo "FAIL missing patch $p"; exit 1; }
 done
 # The swapchain path is decided by whether a DirectComposition device is kept, and that decision was invisible from the
-# guest. 0008 logs every step of it.
+# guest. 0008 logs every step of it; 0009 makes the HWND path the only one, so dzn's swapchain always reaches Play's
+# CoreWindow adapter (a composition swapchain is bound to a visual, not to a window).
 grep -q 'Play WSI: CreateSwapChainForHwnd' patches/mesa-src/0008-play-dzn-wsi-logging.patch \
   || { echo "FAIL 0008 does not log the HWND swapchain branch"; exit 1; }
 grep -q 'DCompositionCreateDevice failed hr=' patches/mesa-src/0008-play-dzn-wsi-logging.patch \
   || { echo "FAIL 0008 does not log the composition device outcome"; exit 1; }
+grep -q 'wsi->dxgi.dcomp = NULL;' patches/mesa-src/0009-play-dzn-wsi-hwnd-only.patch \
+  || { echo "FAIL 0009 keeps the composition device"; exit 1; }
+! grep -q '^+ *wsi->dxgi.dcomp = dcomp_get_device();' patches/mesa-src/0009-play-dzn-wsi-hwnd-only.patch \
+  || { echo "FAIL 0009 still stores the composition device"; exit 1; }
 # The checksum patch is the one that makes an unsigned container acceptable to a validator; it must still be a patch
 # against Mesa's own file, not a rewritten copy.
 grep -q 'dxil_container_write' patches/mesa-src/0007-play-dzn-dxbc-checksum.patch

@@ -452,8 +452,15 @@ int vk_dzn_entry() {
     uint32_t imagesRead = imageCount < 8 ? imageCount : 8;
     result = getImages(device, swapchain, &imagesRead, images);
     if (result != VK_SUCCESS || !imagesRead) return fail(19, "vkGetSwapchainImagesKHR(array)", result);
-    {char line[160]; char* p = append(line, "PLAY-VULKAN-DZN STAGE swapchain images=");
-     p = appendUInt(p, imagesRead); p = append(p, "\n"); *p = 0; emit(line);}
+    // The driver indexes its images by the DXGI back buffer index, so a
+    // swapchain that reports fewer images than were asked for is presenting
+    // through a buffer it does not track. Report both counts and refuse the
+    // shortfall here rather than at the first acquire.
+    if (imagesRead < swapchainInfo.minImageCount)
+        return fail(19, "vkGetSwapchainImagesKHR(fewer than requested)", (VkResult)imagesRead);
+    {char line[192]; char* p = append(line, "PLAY-VULKAN-DZN STAGE swapchain images=");
+     p = appendUInt(p, imagesRead); p = append(p, " requested="); p = appendUInt(p, swapchainInfo.minImageCount);
+     p = append(p, "\n"); *p = 0; emit(line);}
 
     VkAttachmentDescription attachment{0, chosen.format, VK_SAMPLE_COUNT_1_BIT,
         VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, 0, 0,

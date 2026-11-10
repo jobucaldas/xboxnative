@@ -1,0 +1,46 @@
+diff -ruN a/src/vulkan/wsi/wsi_common_win32.cpp b/src/vulkan/wsi/wsi_common_win32.cpp
+--- a/src/vulkan/wsi/wsi_common_win32.cpp	2026-11-10 04:10:30.104263146 -0300
++++ b/src/vulkan/wsi/wsi_common_win32.cpp	2026-11-10 04:17:48.150991115 -0300
+@@ -186,11 +186,12 @@
+        * be presented in the order they were acquired), so we can't
+        * expose more than two image per swapchain.
+        *
+-       * Play: without a DirectComposition device (the console has none) the
+-       * swapchain is created for the guest HWND, which the launcher maps to
+-       * its CoreWindow. A CoreWindow swapchain needs at least three flip
+-       * buffers, and the image count must match the buffer count because
+-       * acquire indexes the images by the swapchain's back buffer index.
++       * Play: the swapchain is always created for the guest HWND (see
++       * wsi_win32_init_wsi, which never keeps a DirectComposition device),
++       * and the launcher maps that HWND to its CoreWindow. A CoreWindow
++       * swapchain needs at least three flip buffers, and the image count must
++       * match the buffer count because acquire indexes the images by the
++       * swapchain's back buffer index.
+        */
+       struct wsi_win32 *wsi =
+          (struct wsi_win32 *)wsi_device->wsi[VK_ICD_WSI_PLATFORM_WIN32];
+@@ -1034,11 +1035,19 @@
+          result = VK_ERROR_INITIALIZATION_FAILED;
+          goto fail;
+       }
+-      wsi->dxgi.dcomp = dcomp_get_device();
+-      /* Play: DirectComposition is optional. Without it the swapchain is
+-       * created for the surface's HWND instead of for composition (see
+-       * wsi_win32_surface_create_swapchain_dxgi); only the composition path
+-       * needs it. */
++      /* Play: a composition swapchain is presented through an
++       * IDCompositionVisual rooted at an HWND, and the only window Play can
++       * present into is the launcher's CoreWindow, which no visual can root.
++       * Only the HWND path reaches Play's CoreWindow adapter (its DXGI factory
++       * maps a guest HWND to that CoreWindow), so the composition device is
++       * probed for the log and never kept; the image count then stays at the
++       * three buffers a CoreWindow swapchain needs. */
++      IDCompositionDevice *dcomp = dcomp_get_device();
++      if (dcomp)
++         dcomp->Release();
++      wsi->dxgi.dcomp = NULL;
++      mesa_logi("Play WSI: composition device discarded; swapchains are created "
++                "for the guest HWND\n");
+    }
+ 
+    wsi->base.get_support = wsi_win32_surface_get_support;

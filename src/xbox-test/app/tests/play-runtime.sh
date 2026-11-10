@@ -284,7 +284,14 @@ if [ -f out/layout/runtime/vulkan-dzn.json ]; then
   grep -q 'PLAY-VULKAN-DZN STAGE instance-created' "$out/vulkan-dzn.log"
   grep -q 'PLAY-VULKAN-DZN STAGE physical-device count=[1-9]' "$out/vulkan-dzn.log"
   grep -q 'PLAY-VULKAN-DZN STAGE win32-surface-created' "$out/vulkan-dzn.log"
+  # The swapchain path is chosen inside the WSI and used to be invisible from
+  # the guest. The driver now logs the DirectComposition probe and the branch
+  # it took; the HWND branch is the only one that reaches Play's CoreWindow.
+  grep -q 'Play WSI: DirectComposition device created\|Play WSI: DCompositionCreateDevice failed\|Play WSI: no DComp.DLL' "$out/vulkan-dzn.log"
+  grep -q 'Play WSI: composition device discarded; swapchains are created for the guest HWND' "$out/vulkan-dzn.log"
   if grep -q 'PLAY-VULKAN-DZN PASS frame-presented' "$out/vulkan-dzn.log"; then
+    grep -q 'Play WSI: CreateSwapChainForHwnd [0-9]*x[0-9]* buffers=[0-9]* hr=0x00000000' "$out/vulkan-dzn.log"
+    grep -q 'guest DXGI CoreWindow swapchain returned hr=0x00000000' "$out/vulkan-dzn.log"
     echo "PLAY-VULKAN-DZN PASS frame-presented"
   elif grep -q 'PLAY-VULKAN-DZN BLOCKED device-creation' "$out/vulkan-dzn.log"; then
     echo "PLAY-VULKAN-DZN BLOCKED device-creation on this host; not a pass"
