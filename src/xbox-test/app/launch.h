@@ -1087,17 +1087,18 @@ static void lp_watchdog() {
 // Entry: called on the render thread; returns immediately (work happens on a worker thread).
 // option (the picker's choice, an appinfo executable) starts that launch option
 // instead of the preferred one; nullptr picks the preferred option as before.
-static void start_launch(uint32_t appid, const std::string& name, const std::string& dir, const char* via, const std::string* option=nullptr) {
+// Returns why Play was refused, or empty when the launch started: the detail
+// page shows that reason, since a refusal leaves no launch panel to show it.
+static std::string start_launch(uint32_t appid, const std::string& name, const std::string& dir, const char* via, const std::string* option=nullptr) {
     if(g_selftest_busy.load(std::memory_order_acquire)) {
-        std::lock_guard<std::mutex> lock(g_launch.m);
-        g_launch.result="The launcher self-test is running; restart the launcher to play a game. See LocalState\\selftest.log.";
         logf("launch: Play rejected: the console self-test is running");
-        return;
+        return "The launcher self-test is running. Wait for it to finish, or restart the launcher.";
     }
     if(auto guest=play_runtime::observed.load(std::memory_order_acquire)) {
-        std::lock_guard<std::mutex> lock(g_launch.m);
-        g_launch.result="Game code from the last launch is still loaded; the launcher restarts to end it. Last event: "+guest->snapshot();
-        logf("launch: Play rejected: game code from the last launch is still loaded");return;
+        std::string why="Game code from the last launch is still loaded; the launcher restarts to end it. Last event: "+guest->snapshot();
+        { std::lock_guard<std::mutex> lock(g_launch.m); g_launch.result=why; }
+        logf("launch: Play rejected: game code from the last launch is still loaded");
+        return why;
     }
     int gen = ++g_launch.gen; g_launch.appid = appid; g_launch.started = now_s(); g_launch.loaderStarted = 0;
     // The 32-bit interpreter's report belongs to the launch that produced it:
@@ -1143,4 +1144,5 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
         } catch (std::exception const& e) { finish(std::string("loader threw: ") + e.what(), false, 0, 0); }
         catch (...) { finish("loader threw an unknown exception.", false, 0, 0); }
     }).detach();
+    return std::string();
 }

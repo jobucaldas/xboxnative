@@ -780,7 +780,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void detail_play(const char* via) {
         m_dInst = read_install(m_dApp);
         std::vector<launch_target::Choice> rows = launch_options(m_dApp);
-        if (!launch_picker::needed(rows)) { logf("detail: Play pressed appid=%u (%s)", m_dApp, via); start_launch(m_dApp, m_dName, m_dInst.dir, via); return; }
+        if (!launch_picker::needed(rows)) { logf("detail: Play pressed appid=%u (%s)", m_dApp, via); if (std::string why = start_launch(m_dApp, m_dName, m_dInst.dir, via); !why.empty()) m_dNote = why; return; }
         launch_picker::open(m_pick, std::move(rows), remembered_option(m_dApp));
         logf("detail: Play opens the launch-option picker appid=%u options=%zu selected=%d (%s)", m_dApp, m_pick.rows.size(), m_pick.sel, via);
     }
@@ -790,7 +790,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         launch_picker::close(m_pick);
         remember_option(m_dApp, exe);
         logf("detail: Play pressed appid=%u option=\"%s\" (%s)", m_dApp, exe.c_str(), via);
-        start_launch(m_dApp, m_dName, m_dInst.dir, via, &exe);
+        if (std::string why = start_launch(m_dApp, m_dName, m_dInst.dir, via, &exe); !why.empty()) m_dNote = why;
     }
     std::string game_name(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return g->name; return id == 480 ? "Spacewar" : id == 3405340 ? "Megabonk" : id == 1007 ? "Steamworks SDK Redist" : ""; }
     bool owned(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return true; return false; }
