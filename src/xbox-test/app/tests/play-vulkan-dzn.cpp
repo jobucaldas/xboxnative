@@ -35,6 +35,10 @@ static void emit(const char* text) {
     DWORD written = 0;
     HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
     if (out && out != INVALID_HANDLE_VALUE) WriteFile(out, text, (DWORD)lstrlenA(text), &written, nullptr);
+    // The console has no stdout handle, so a stage line written only there is
+    // lost and a failed run names no stage. Play routes this to the launch
+    // probe log, which is the same record the verifier reads.
+    OutputDebugStringA(text);
 }
 static char* append(char* p, const char* text) {
     while (*text) *p++ = *text++;
