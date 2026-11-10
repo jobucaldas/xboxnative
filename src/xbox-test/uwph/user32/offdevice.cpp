@@ -30,4 +30,22 @@ int main(int argc,char**argv){
   publish((unsigned)strtoul(argv[2],nullptr,0));
   printf("U32C OFFDEVICE published pads=%s\n",argv[2]);
  }
+ // The gate is re-entrant: the launcher calls it again in the same process when
+ // the first run failed (probe.h only caches a PASS) or when a self-test step
+ // follows a PE32 fixture, and the UI thread keeps publishing pads throughout.
+ // `--twice` maps the PE once, publishes a pad, calls the entry twice with a
+ // different pad mask published in between, and requires both to return 42.
+ if(argc==2&&!strcmp(argv[1],"--twice")){
+  auto publish=(void(WINAPI*)(unsigned))GetProcAddress(core,"uwph_u32c_pads");
+  if(!publish){puts("no uwph_u32c_pads export");return 1;}
+  wxl::Image image;if(!wxl::run(L"u32c-test.exe",sink,&image,resolve))return 1;
+  auto entry=(DWORD(WINAPI*)())(image.base+image.entry);
+  publish(1);
+  DWORD first=entry();
+  printf("U32C OFFDEVICE entry1=%lu\n",first);
+  publish(5);
+  DWORD second=entry();
+  printf("U32C OFFDEVICE entry2=%lu\n",second);
+  return first==42&&second==42?0:1;
+ }
  wxl::Image image;if(!wxl::run(L"u32c-test.exe",sink,&image,resolve))return 1;DWORD r=((DWORD(WINAPI*)())(image.base+image.entry))();printf("U32C OFFDEVICE entry=%lu\n",r);return r==42?0:1;}
