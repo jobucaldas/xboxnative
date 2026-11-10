@@ -398,7 +398,7 @@ Not verified:
 - Anything about lobbies, P2P or auth tickets end to end. No CM lobby message
   has been sent from this codebase.
 - That the AMIGOS tab lists only the account's real friends, or that ranks match
-  Steam's `global_rank` for a row outside the seeded slice (gaps 1 and 3 below).
+  Steam's `global_rank` for a row outside the seeded slice (gaps 1 and 3 above).
 
 **Console run, 2026-11-09 (0.5.255.0, `feat/steam-leaderboards` @ 7dd2f0f).**
 The tap fired, and Steam answered every board the game asked for, in one launch:
