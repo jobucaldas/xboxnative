@@ -78,6 +78,17 @@ emulator serves the game and online play works.
   `MSG_RUN_CALLBACKS`. `SteamClientComponent` that would host it has its request
   handling commented out. It is not the real path and this project must not copy
   it (GAMENATIVE-STEAM.md already excludes Pluvia's version of the same idea).
+- **Its fallback mode strips SteamStub from the game on disk.** When neither
+  `isLaunchRealSteam` nor `isLaunchBionicSteam` is set,
+  `XServerScreen.kt` writes `z:\Steamless\Steamless.CLI.exe "<game>.exe"` into a
+  batch file and runs it under Wine before launching
+  (`Skipping Steamless (launchRealSteam=…, launchBionicSteam=…)` is the line
+  that says it did not). That is a DRM-stripping tool writing a modified game
+  executable. AGENTS.md rule 3 forbids exactly this ("no Steamless or cracks"),
+  so this is the one GameNative technique this project must not adopt even as a
+  fallback — which is why the SteamStub path here serves an emulated
+  `steamclient64.dll` in memory instead (`steam_client_package.h`,
+  `play_runtime.h` `redirectExports`).
 
 ### The withheld half
 
