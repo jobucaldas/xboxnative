@@ -472,11 +472,6 @@ inline void printSummary(unsigned window) {
         emit(fmt("draw summary %u/%u: %s calls=%llu patchlist=%llu hull-domain=%llu gs=%llu zero-count=%llu",window,kSummaryWindows,drawKindName(k),
             (unsigned long long)total,(unsigned long long)patched,(unsigned long long)withHull,(unsigned long long)withGs,(unsigned long long)zero));
     }
-    // Which context kind drew: a deferred-context replay that carries the
-    // terrain pass shows up here as a deferred count, not in a hook the
-    // immediate context owns.
-    emit(fmt("draw summary %u/%u: draws by context immediate=%llu deferred=%llu",window,kSummaryWindows,
-        (unsigned long long)drawsImmediate.load(),(unsigned long long)drawsDeferred.load()));
     // A zero-area viewport or scissor clips every draw to nothing: the silent
     // shape of a layer that renders black with no failed call anywhere.
     emit(fmt("draw summary %u/%u: viewports sets=%llu zero-area=%u largest=%ux%u scissors=%llu empty=%u",window,kSummaryWindows,
