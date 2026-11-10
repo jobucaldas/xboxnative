@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstring>
 #include <new>
+#include <optional>
+#include <thread>
 // Wine 10 lacks VirtualProtectFromApp; this host-only alias preserves W^X.
 static BOOL WINAPI hostProtect(void* p,SIZE_T n,DWORD flags,DWORD* old) {
     using Fn=BOOL(WINAPI*)(void*,SIZE_T,DWORD,DWORD*);
@@ -38,6 +40,8 @@ static FARPROC WINAPI hostProc(HMODULE h,LPCSTR name) {
 #include "../host/mlp_probe.h"
 #include "../donors/probe.h"
 #include "../host/play_runtime.h"
+#include "../steam_leaderboards.h"
+#include "../steam_persona.h"
 #include "../launch_target.h"
 // OFF-DEVICE stand-in for the application's CoreWindow (game mode only). Play's
 // unchanged factory adapter still validates every guest HWND; only its final
@@ -316,7 +320,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // which the launcher always maps to its CoreWindow. Give them the same
     // stand-in.
     if(std::string(args)=="d3d10-diag"||std::string(args)=="d3d12-diag"||
-       std::string(args).rfind("d3d9-",0)==0) {
+       std::string(args).rfind("d3d9-",0)==0||std::string(args)=="vulkan-dzn") {
         if(!host_surface::create()) {logline("HOST SURFACE FAIL native Wine window unavailable");return 3;}
         play_graphics::configure(&host_surface::token,host_surface::present,logline);
         logline("HOST SURFACE native Wine window stands in for the CoreWindow (off-device only)");
@@ -326,13 +330,15 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // donors before it maps anything, so this fixture must too; without the gate
     // the loader's imports are unresolved and the load fails for a reason a real
     // launch never hits.
-    if(std::string(args)=="vulkan") {
+    if(std::string(args)=="vulkan"||std::string(args)=="vulkan-dzn") {
         if(!donor_pe::probe(logline)) {logline("DWPE FAIL donor behavior gate; no game code executed");return 3;}
         mlp::donor_resolve=donor_pe::exported;
     }
     // Wine's C++ runtime beside the runner, as layout\runtime beside the launcher.
     {wchar_t self[32768];DWORD n=GetModuleFileNameW(nullptr,self,32768);std::wstring dir(self,n);
-     play_runtime::set_runtime_directory(dir.substr(0,dir.find_last_of(L"\\/"))+L"\\runtime");}
+     dir.resize(dir.find_last_of(L"\\/"));
+     wchar_t override_[32768];DWORD o=GetEnvironmentVariableW(L"PRUN_RUNTIME_DIR",override_,32768);
+     play_runtime::set_runtime_directory(o&&o<32768?std::wstring(override_,o):dir+L"\\runtime");}
     // Optional emulated Steam client (owned game): served for steamclient64.dll,
     // with the ActiveProcess registry environment in the guest registry.
     {wchar_t client[1024];DWORD n=GetEnvironmentVariableW(L"PRUN_STEAM_CLIENT",client,1024);
@@ -349,11 +355,125 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // Optional Steam API provider (owned game): mapped in place of steam_api64.dll.
     {wchar_t provider[1024];DWORD n=GetEnvironmentVariableW(L"PRUN_STEAM_PROVIDER",provider,1024);
      if(n&&n<1024)play_runtime::set_steam_provider(std::wstring(provider,n));}
+    // Leaderboard bridge (steam_leaderboards.h): the same seed policy the
+    // launcher runs, driven by a fake Steam backend instead of the CM session.
+    // The guest's Find is observed at the provider's export, the rows are
+    // written into the provider's leaderboard file, and the provider's own Find
+    // still answers the guest.
+    if(std::string(args)=="leaderboards") {
+        wchar_t saves[1024];DWORD n=GetEnvironmentVariableW(L"PRUN_LB_SAVES",saves,1024);
+        if(!n||n>=1024){logline("PRUN FAIL PRUN_LB_SAVES");return 4;}
+        static steam_leaderboards::Bridge bridge;
+        static steam_leaderboards::Io io;
+        // The board Steam holds, so a SetScore changes what the next GetLBEntries
+        // returns: that is what makes the refresh observable.
+        static std::mutex rowsMutex;
+        static std::vector<steam_leaderboards::Entry> boardRows={
+            {0x110000100000003ull,1,1500,{}},{0x110000100000002ull,2,900,{}},{0x110000100000004ull,3,400,{}}};
+        io.call=[](uint32_t emsg,uint32_t routing,const std::string& body,std::string& out){
+            // The fake backend: the two boards Steam has, three players each,
+            // answering the CMsgClientLBS* shapes.
+            auto f=pb_parse(body);
+            auto name=pb_get(f,5)?pb_get(f,5)->s:std::string();
+            if(emsg==steam_leaderboards::ClientLBSFindOrCreateLB) {
+                if(name!="v2_kills")return false;
+                pb_u(out,1,1);pb_u(out,2,7);pb_u(out,3,3);pb_u(out,4,2);pb_u(out,5,1);pb_s(out,6,name);
+                return true;
+            }
+            if(emsg==steam_leaderboards::ClientLBSGetLBEntries) {
+                std::lock_guard<std::mutex> lock(rowsMutex);
+                pb_u(out,1,1);pb_u(out,2,uint64_t(boardRows.size()));
+                // Descending board: Steam returns rows in rank order, and the
+                // provider's cache file keeps that order.
+                int32_t rank=0;
+                for(auto& r:boardRows) {
+                    std::string e;pb_fixed64(e,1,r.steamid);pb_u(e,2,uint64_t(++rank));
+                    pb_u(e,3,uint64_t(int64_t(r.score)));pb_s(out,3,e);
+                }
+                return true;
+            }
+            if(emsg==steam_leaderboards::ClientLBSSetScore) {
+                int32_t score=int32_t(pb_get(f,3)->u);
+                {
+                    std::lock_guard<std::mutex> lock(rowsMutex);
+                    bool found=false;
+                    for(auto& r:boardRows)if(r.steamid==0x110000100000001ull){r.score=score;found=true;}
+                    if(!found)boardRows.push_back({0x110000100000001ull,0,score,{}});
+                    std::sort(boardRows.begin(),boardRows.end(),
+                              [](const steam_leaderboards::Entry& a,const steam_leaderboards::Entry& b){return a.score>b.score;});
+                }
+                pb_u(out,1,1);pb_u(out,2,uint64_t(boardRows.size()));pb_u(out,3,1);pb_u(out,4,0);pb_u(out,5,1);
+                return true;
+            }
+            (void)routing;return false;
+        };
+        // Same prefix the launcher puts on these lines (launch.h), so the greps
+        // in play-runtime.sh assert the text a console log will carry.
+        io.log=[](const std::string& line){logline(("STEAM "+line).c_str());};
+        uint32_t appid=3405340;
+        {wchar_t a[32];DWORD n=GetEnvironmentVariableW(L"PRUN_LB_APPID",a,32);if(n&&n<32)appid=uint32_t(_wtoi(a));}
+        std::wstring savesRoot(saves,n);
+        // Persona names (steam_persona.h): the same policy the launcher runs.
+        // The fake backend answers CMsgClientRequestFriendData with the
+        // CMsgClientPersonaState push Steam sends, on a reader thread, so the
+        // game's thread waits for the names exactly as it does on the console.
+        // Names are synthetic; no real account appears in this fixture.
+        static steam_persona::Bridge persona;
+        static steam_persona::Io personaIo;
+        personaIo.send=[&](uint32_t emsg,const std::string& body){
+            if(emsg!=steam_persona::ClientRequestFriendData)return false;
+            std::vector<uint64_t> ids;
+            for(auto& f:pb_parse(body))if(f.f==2)ids.push_back(f.u);
+            std::thread([ids]{
+                std::string push;
+                for(auto id:ids) {
+                    const char* name=id==0x110000100000003ull?"Player Three":
+                                     id==0x110000100000002ull?"Player Two":
+                                     id==0x110000100000004ull?"Player Four":
+                                     id==0x110000100000001ull?"Fixture Owner":nullptr;
+                    if(!name)continue;
+                    std::string f;pb_fixed64(f,1,id);pb_u(f,2,1);pb_s(f,15,name);pb_s(push,2,f);
+                }
+                if(!push.empty())persona.on_state(push);
+            }).detach();
+            return true;
+        };
+        personaIo.log=[](const std::string& line){logline(("STEAM "+line).c_str());};
+        persona.self=0x110000100000001ull;
+        // The account's own name, as the launcher's presence self-check asks for
+        // it, so GetPersonaName is not the provider's staged placeholder.
+        persona.ensure(personaIo,{0x110000100000001ull},2000);
+        play_runtime::set_persona_tap({
+            [](uint64_t id){return persona.name(id);},
+            []{return persona.self_name();},
+            [](uint64_t id){persona.want({id});}});
+        logline("PRUN persona bridge staged (off-device fixture backend)");
+        play_runtime::set_leaderboard_tap({
+            [savesRoot,appid](const std::string& name,int sort,int display,bool create){
+                bool ok=bridge.seed(io,appid,std::filesystem::path(savesRoot),name,sort,display,create);
+                // The rows name players; ask for their names before the game
+                // draws them, as the launcher's seed does.
+                if(auto rows=bridge.entries(name)) {
+                    std::vector<uint64_t> ids;
+                    for(auto& e:*rows)ids.push_back(e.steamid);
+                    persona.ensure(personaIo,ids,2000);
+                }
+                return ok;},
+            [appid](const std::string& name,int32_t score,const int32_t* details,int count,int method){
+                bridge.upload(io,appid,name,score,details,count,method);},
+            [](const std::string& name){
+                auto rows=bridge.entries(name);
+                if(!rows)return std::optional<std::vector<play_runtime::LeaderboardTap::Row>>{};
+                std::vector<play_runtime::LeaderboardTap::Row> out;
+                for(auto& e:*rows)out.push_back({e.steamid,e.rank,e.score,e.details});
+                return std::optional<std::vector<play_runtime::LeaderboardTap::Row>>(std::move(out));}});
+        logline("PRUN leaderboard bridge staged (off-device fixture backend)");
+    }
     // Game mode runs Megabonk unless PRUN_GAME_EXE names another owned game.
     // Engine options come from the game's files, as in the launcher.
     std::wstring gameExe=L"Megabonk.exe";
     {wchar_t value[260];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_EXE",value,260);if(n&&n<260)gameExe.assign(value,n);}
-    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="d3d9-triangle"?L"play-d3d9-triangle.exe":std::string(args)=="d3d9-textured"?L"play-d3d9-textured.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
+    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="d3d9-triangle"?L"play-d3d9-triangle.exe":std::string(args)=="d3d9-textured"?L"play-d3d9-textured.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="leaderboards"?L"play-leaderboard.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":std::string(args)=="vulkan-dzn"?L"play-vulkan-dzn.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
     // guest stop (fatal dialog). Progress must never mask that failure.
@@ -455,6 +575,27 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         // then). play-runtime.sh greps the log for the ICD registry publication.
         auto loader=play_runtime::named(L"vulkan-1.dll");
         ok=ok&&r->finished&&r->success&&r->code==42&&loader&&loader->mapped&&loader->initialized;
+    }
+    else if(mode=="vulkan-dzn") {
+        // dzn is the packaged ICD: the loader and dzn were mapped from the
+        // runtime directory, and the guest got a real physical device and a
+        // win32 surface. The fixture exits 42 when it also presented frames;
+        // 43 means the host's D3D12 refused dzn's device after every earlier
+        // stage worked (off-device: Wine's vkd3d DXIL parser), which is a
+        // BLOCKED result, never a pass. play-runtime.sh picks PASS or BLOCKED
+        // from the fixture's own lines.
+        auto loader=play_runtime::named(L"vulkan-1.dll");
+        auto dzn=play_runtime::named(L"vulkan_dzn.dll");
+        ok=ok&&r->finished&&r->success&&(r->code==42||r->code==43)&&loader&&loader->mapped&&loader->initialized&&
+            dzn&&dzn->mapped&&dzn->initialized;
+    }
+    else if(mode=="leaderboards") {
+        // The fixture exits 42 only when the provider read real players out of
+        // its cache file on the first Find, the unseeded board stayed empty,
+        // and the upload reached the board the game found. play-runtime.sh
+        // greps the log for the seed line Play must emit.
+        auto api=play_runtime::named(L"steam_api64.dll");
+        ok=ok&&r->finished&&r->success&&r->code==42&&api&&api->mapped&&api->initialized;
     }
     else if(mode=="discord-sdk") {
         // Both Discord SDK flavours returned the answer they return with no

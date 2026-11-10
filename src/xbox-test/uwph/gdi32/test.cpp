@@ -134,6 +134,35 @@ int main() {
         SetLastError(0); CHECK(!set(record, ramp) && GetLastError() == ERROR_NOT_SUPPORTED);
         SetLastError(0); CHECK(!set(record, nullptr) && GetLastError() == ERROR_INVALID_PARAMETER);
     }
+    {   // StretchBlt (Mesa's dzn WSI imports it): SRCCOPY between memory DCs,
+        // nearest neighbour, and a window DC still has no surface.
+        auto stretch = reinterpret_cast<BOOL (WINAPI*)(HDC,int,int,int,int,HDC,int,int,int,int,DWORD)>(
+            gdi32_core::resolve("gdi32.dll", "StretchBlt"));
+        CHECK(stretch);
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = 2; info.bmiHeader.biHeight = -2;
+        info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32; info.bmiHeader.biCompression = BI_RGB;
+        void* source_bits = nullptr; void* target_bits = nullptr;
+        HBITMAP source = gdi32_core::create_dib_section(nullptr, &info, 0, &source_bits, nullptr, 0);
+        HBITMAP target = gdi32_core::create_dib_section(nullptr, &info, 0, &target_bits, nullptr, 0);
+        CHECK(source && target && source_bits && target_bits);
+        HDC source_dc = gdi32_core::create_compatible_dc(nullptr);
+        HDC target_dc = gdi32_core::create_compatible_dc(nullptr);
+        CHECK(source_dc && target_dc);
+        CHECK(gdi32_core::select_object(source_dc, source) && gdi32_core::select_object(target_dc, target));
+        gdi32_core::set_pixel(source_dc, 1, 0, RGB(0x11, 0x22, 0x33));
+        CHECK(stretch(target_dc, 0, 0, 2, 2, source_dc, 0, 0, 2, 2, SRCCOPY));
+        CHECK(((DWORD*)target_bits)[1] == 0x00112233);   // top-down rows: (1,0) is index 1
+        CHECK(((DWORD*)target_bits)[0] == 0);
+        SetLastError(0);
+        CHECK(!stretch(target_dc, 0, 0, 2, 2, source_dc, 0, 0, 2, 2, NOTSRCCOPY) && GetLastError() == ERROR_NOT_SUPPORTED);
+        SetLastError(0);
+        CHECK(!stretch(reinterpret_cast<HDC>(UINT_PTR(0x1234)), 0, 0, 2, 2, source_dc, 0, 0, 2, 2, SRCCOPY) &&
+              GetLastError() == ERROR_NOT_SUPPORTED);
+        CHECK(gdi32_core::delete_dc(source_dc) && gdi32_core::delete_dc(target_dc));
+        CHECK(gdi32_core::delete_object(source) && gdi32_core::delete_object(target));
+    }
     {   // With a mapped OpenGL implementation, gdi32 forwards to its wgl* entry points.
         auto describe = reinterpret_cast<int (WINAPI*)(HDC, int, UINT, void*)>(gdi32_core::resolve("gdi32.dll", "DescribePixelFormat"));
         auto get_format = reinterpret_cast<int (WINAPI*)(HDC)>(gdi32_core::resolve("gdi32.dll", "GetPixelFormat"));

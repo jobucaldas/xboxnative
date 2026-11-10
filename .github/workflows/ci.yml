@@ -53,6 +53,14 @@ jobs:
           /tmp/steam-achievements-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_presence_test.cpp -o /tmp/steam-presence-test
           /tmp/steam-presence-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_leaderboards_test.cpp -o /tmp/steam-leaderboards-test
+          /tmp/steam-leaderboards-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_lobbies_test.cpp -o /tmp/steam-lobbies-test
+          /tmp/steam-lobbies-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_host_test.cpp -o /tmp/steam-host-test
+          /tmp/steam-host-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_persona_test.cpp -o /tmp/steam-persona-test
+          /tmp/steam-persona-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/game_library_test.cpp -o /tmp/game-library-test
           /tmp/game-library-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/detail-input.cpp -o /tmp/detail-input-test
@@ -79,6 +87,8 @@ jobs:
           bash src/tools/tests/test_build_mesa_d3d12.sh
           bash src/tools/build-vulkan-loader.sh --dry-run
           bash src/tools/tests/test_build_vulkan_loader.sh
+          bash src/tools/build-mesa-dzn.sh --dry-run
+          bash src/tools/tests/test_build_mesa_dzn.sh
       - name: no secrets / binaries committed
         run: |
           if git ls-files | grep -E '\.(pfx|key|pem|exe|dll|so|msix|appx|zip|7z|tar|gz|xz)$'; then
@@ -158,4 +168,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-i686
       - name: x86 execution core (hardware-compared ALU, faults, thunks, owned i686 fixture)
         run: bash src/xbox-test/app/tests/x86-core.sh
+      - name: "x86 guest surface (mingw CRT program through the interpreter: printf, heap, TLS, VirtualAlloc)"
+        run: bash src/xbox-test/app/tests/x86-guest.sh
   # TODO: on-device sections of src/xbox-test/smoke-all.sh need a console and cannot run in GitHub Actions.

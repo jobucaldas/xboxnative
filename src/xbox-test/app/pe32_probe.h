@@ -1,5 +1,8 @@
-// Read-only PE32 inspection on the real Play path. No native import addresses
-// are truncated into an i386 IAT. The relocated image remains data, never RX.
+// Read-only PE32 inspection on the real Play path, beside the x86 interpreter:
+// it writes the per-game import classification (which DLLs are system routes a
+// 64-bit provider answers, which the game ships itself) that the interpreter's
+// own unresolved-import list is read against. No native import addresses are
+// truncated into an i386 IAT; the relocated image here remains data.
 #pragma once
 namespace pe32_probe {
 static bool map(const std::wstring& path, const std::wstring& root, std::string& summary) {

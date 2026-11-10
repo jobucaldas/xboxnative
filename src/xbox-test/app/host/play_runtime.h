@@ -9,6 +9,7 @@
 #include <functional>
 #include <mutex>
 #include <memory>
+#include <optional>
 #include <array>
 #include <d3d11.h>
 #include <d3d12.h>
@@ -458,13 +459,280 @@ static uintptr_t richPresenceHook(const char* name,uintptr_t real) {
     }
     return 0;
 }
-// Every Steam API export the game binds (static imports and GetProcAddress)
-// passes here first; only the two rich-presence calls are wrapped.
+// ---- Leaderboards the game asks for through the Steam API provider
+// (steam_leaderboards.h). gbe_fork answers Find/Download from its own disk
+// cache and its LAN peer network, so with no peers a rank screen shows no
+// players. The launcher asks the real Steam backend over its own CM session and
+// writes the provider's cache file. The provider reads that file once, the
+// first time a board is found in the process, so the seed runs BEFORE the
+// provider's own Find; the game's call then still runs and still receives the
+// provider's handle, and the rows it downloads are the real ones.
+struct LeaderboardTap {
+    // Runs on the game's thread before the provider's Find. Must be bounded:
+    // the game is blocked in it. Returning false leaves the provider's answer
+    // exactly as it was.
+    std::function<bool(const std::string& name,int sort,int display,bool create)> seed;
+    std::function<void(const std::string& name,int32_t score,const int32_t* details,int count,int method)> upload;
+    // The rows the launcher holds for a board, fresher than the provider's
+    // in-memory copy (which it read once, at the board's first Find). Called on
+    // the game's thread from GetDownloadedLeaderboardEntry. `nullopt` means the
+    // launcher holds nothing for that board, so the provider's own entry stands;
+    // an empty vector means Steam answered that the board is empty. `details`
+    // is the raw int32 array Steam sent for that row, so the entry the game
+    // reads is whole.
+    struct Row { uint64_t steamid; int32_t rank,score; std::string details; };
+    std::function<std::optional<std::vector<Row>>(const std::string& name)> rows;
+};
+static std::mutex leaderboardMutex;
+static LeaderboardTap leaderboard;
+static void set_leaderboard_tap(LeaderboardTap tap) {
+    std::lock_guard<std::mutex> lock(leaderboardMutex);
+    leaderboard=std::move(tap);
+}
+static bool leaderboardSeed(const std::string& name,int sort,int display,bool create) {
+    LeaderboardTap tap; {std::lock_guard<std::mutex> lock(leaderboardMutex);tap=leaderboard;}
+    return tap.seed?tap.seed(name,sort,display,create):false;
+}
+static void leaderboardUpload(const std::string& name,int32_t score,const int32_t* details,int count,int method) {
+    LeaderboardTap tap; {std::lock_guard<std::mutex> lock(leaderboardMutex);tap=leaderboard;}
+    if(tap.upload)tap.upload(name,score,details,count,method);
+}
+static std::optional<std::vector<LeaderboardTap::Row>> leaderboardRows(const std::string& name) {
+    LeaderboardTap tap; {std::lock_guard<std::mutex> lock(leaderboardMutex);tap=leaderboard;}
+    return tap.rows?tap.rows(name):std::nullopt;
+}
+// A score is addressed by the SteamLeaderboard_t the game passes back, which is
+// the handle from LeaderboardFindResult_t, NOT the SteamAPICall_t that Find
+// returns. That handle is the provider's own (gbe_fork: an index into its
+// cached_leaderboards), so the provider is asked which board it names rather
+// than the launcher guessing from Find order.
+static std::atomic<Module*> leaderboardModule{nullptr};   // the provider image, while a launch runs
+static void set_leaderboard_provider(Module* module) { leaderboardModule.store(module,std::memory_order_release); }
+static std::string leaderboardHandleName(void* self,uint64_t handle) {
+    Module* module=leaderboardModule.load(std::memory_order_acquire);
+    if(!module||!state) return std::string();
+    // exported() reads the image's export table, so this is the provider's real
+    // GetLeaderboardName even when the game also bound a hook of ours. Resolve
+    // under the loader lock, call outside it: the provider is guest code.
+    uintptr_t p=0;
+    {std::lock_guard<LoaderMutex> lock(state->loaderMutex);
+     p=exported(*module,"SteamAPI_ISteamUserStats_GetLeaderboardName",0);}
+    if(!p) return std::string();
+    using Fn=const char*(*)(void*,uint64_t);
+    const char* name=((Fn)p)(self,handle);
+    return name?std::string(name):std::string();
+}
+static std::atomic<uintptr_t> leaderboardRealFind{0}, leaderboardRealCreate{0}, leaderboardRealUpload{0}, leaderboardRealEntry{0};
+static uintptr_t leaderboardHook(const char* name,uintptr_t real) {
+    if(!real) return 0;
+    if(!strcmp(name,"SteamAPI_ISteamUserStats_FindLeaderboard")) {
+        using Fn=uint64_t(*)(void*,const char*);
+        leaderboardRealFind.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,const char* board)->uint64_t{
+            auto inner=(Fn)leaderboardRealFind.load(std::memory_order_acquire);
+            // Seed first: the provider reads the cache file only on the first
+            // Find of a board in this process.
+            if(board&&*board)leaderboardSeed(board,2/*Descending*/,1/*Numeric*/,false);
+            return inner?inner(self,board):0;
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamUserStats_FindOrCreateLeaderboard")) {
+        using Fn=uint64_t(*)(void*,const char*,int,int);
+        leaderboardRealCreate.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,const char* board,int sort,int display)->uint64_t{
+            auto inner=(Fn)leaderboardRealCreate.load(std::memory_order_acquire);
+            if(board&&*board)leaderboardSeed(board,sort,display,true);
+            return inner?inner(self,board,sort,display):0;
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamUserStats_UploadLeaderboardScore")) {
+        using Fn=uint64_t(*)(void*,uint64_t,int,int32_t,const int32_t*,int);
+        leaderboardRealUpload.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t board,int method,int32_t score,const int32_t* details,int count)->uint64_t{
+            auto inner=(Fn)leaderboardRealUpload.load(std::memory_order_acquire);
+            uint64_t call=inner?inner(self,board,method,score,details,count):0;
+            // The provider's own handle -> name, so the score reaches the board
+            // the game actually uploaded to.
+            auto found=leaderboardHandleName(self,board);
+            if(!found.empty())leaderboardUpload(found,score,details,count,method);
+            return call;
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamUserStats_GetDownloadedLeaderboardEntry")) {
+        using Fn=uint32_t(*)(void*,uint64_t,int,void*,int32_t*,int);
+        leaderboardRealEntry.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t entries,int index,void* entry,int32_t* details,int maxDetails)->uint32_t{
+            auto inner=(Fn)leaderboardRealEntry.load(std::memory_order_acquire);
+            uint32_t ok=inner?inner(self,entries,index,entry,details,maxDetails):0;
+            // The provider answered from the rows it cached at the board's first
+            // Find. When the launcher holds fresher rows for that board (a
+            // refresh, or a score this account just uploaded), the entry the game
+            // reads is replaced in place: same struct, same layout, the game's
+            // own call still ran.
+            //
+            // The row COUNT is not ours to change: the game loops
+            // `index < m_cEntryCount`, and that number is fixed by the
+            // provider's own DownloadLeaderboardEntries from its in-memory copy
+            // (gbe_fork: cached_leaderboards[handle-1].entries.size()) and
+            // delivered in its CallResult. So a board that GREW since its first
+            // Find shows only the rows the provider reports; the tap replaces
+            // those, it cannot add more. A board that was empty at its first
+            // Find therefore stays empty for the launch — except for this
+            // account's own upload, which the provider appends to its copy
+            // itself (gbe_fork's UploadLeaderboardScore -> update_leaderboard_entry).
+            // Growing that count would mean writing into the provider's board,
+            // which only its own score-upload path may do.
+            if(!ok||!entry)return ok;
+            auto found=leaderboardHandleName(self,entries);
+            if(found.empty())return ok;
+            auto rows=leaderboardRows(found);
+            if(!rows)return ok;   // nothing held for this board: the provider's entry stands
+            // Steam answered that the board is empty: the provider's first-Find
+            // copy is stale, so the game reads an empty entry rather than a
+            // player who is no longer on the board.
+            if(rows->empty())return 0;
+            // Past the launcher's rows the player is no longer on the board,
+            // even though the provider's first-Find copy still has them.
+            if(index<0||size_t(index)>=rows->size())return 0;
+            struct LeaderboardEntry_t { uint64_t user; int32_t rank,score,details; uint64_t ugc; };
+            auto* e=(LeaderboardEntry_t*)entry;
+            // The provider's cached list and the launcher's rows are both in
+            // global rank order, so index i is global rank i+1 in each. Patch
+            // only when the launcher's row agrees on that rank: a shorter
+            // refresh or a provider that honours the download range would
+            // otherwise mix rows from different positions.
+            if((*rows)[size_t(index)].rank!=index+1)return ok;
+            e->user=(*rows)[size_t(index)].steamid;
+            e->rank=(*rows)[size_t(index)].rank;
+            e->score=(*rows)[size_t(index)].score;
+            // The row's details are part of what the game reads; a refresh that
+            // changed the score but left the provider's first-Find details in
+            // place would hand the game a mismatched entry.
+            const auto& raw=(*rows)[size_t(index)].details;
+            int32_t have=int32_t(raw.size()/sizeof(int32_t));
+            e->details=have;
+            for(int32_t i=0;details&&i<have&&i<maxDetails;++i)memcpy(&details[i],raw.data()+size_t(i)*sizeof(int32_t),sizeof(int32_t));
+            return ok;
+        };
+        return (uintptr_t)hook;
+    }
+    return 0;
+}
+// ---- Persona names the game asks for through the Steam API provider
+// (steam_persona.h). gbe_fork answers GetFriendPersonaName from its own friend
+// list, which only holds peers on its LAN network; with disable_networking=1
+// that list is empty, so every leaderboard row reads "Unknown User". The
+// launcher asks the real Steam backend for the names and answers here, in
+// memory. The provider's own call still runs; its answer is replaced only when
+// the launcher has a name for that SteamID.
+struct PersonaTap {
+    // A name for this SteamID, or nullptr when Steam has not answered for it.
+    // The pointer must stay valid for the launch (it is handed to the game).
+    std::function<const char*(uint64_t steamid)> name;
+    // The account's own persona name, or nullptr.
+    std::function<const char*()> self;
+    // The game asked about a SteamID outside the seeded leaderboard rows; queue
+    // it for the keeper (never blocks the game's thread).
+    std::function<void(uint64_t steamid)> want;
+};
+static std::mutex personaMutex;
+static PersonaTap personaTap;
+static void set_persona_tap(PersonaTap tap) {
+    std::lock_guard<std::mutex> lock(personaMutex);
+    personaTap=std::move(tap);
+}
+static const char* personaName(uint64_t steamid) {
+    PersonaTap tap; {std::lock_guard<std::mutex> lock(personaMutex);tap=personaTap;}
+    return tap.name?tap.name(steamid):nullptr;
+}
+static const char* personaSelf() {
+    PersonaTap tap; {std::lock_guard<std::mutex> lock(personaMutex);tap=personaTap;}
+    return tap.self?tap.self():nullptr;
+}
+static void personaWant(uint64_t steamid) {
+    PersonaTap tap; {std::lock_guard<std::mutex> lock(personaMutex);tap=personaTap;}
+    if(tap.want)tap.want(steamid);
+}
+// A SteamID the game asked about is queued for the keeper, which requests it
+// once. The queue is bounded by distinct ids in the bridge (steam_persona.h),
+// so a rank screen polling the same unresolved rows costs nothing.
+static std::atomic<uintptr_t> personaRealName{0}, personaRealSelf{0}, personaRealRequest{0};
+static uintptr_t personaHook(const char* name,uintptr_t real) {
+    if(!real) return 0;
+    if(!strcmp(name,"SteamAPI_ISteamFriends_GetFriendPersonaName")) {
+        using Fn=const char*(*)(void*,uint64_t);
+        personaRealName.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t steamid)->const char*{
+            auto inner=(Fn)personaRealName.load(std::memory_order_acquire);
+            // The provider's own call still runs; its answer ("Unknown User" for
+            // a SteamID that is not on its LAN friend list) stands unless the
+            // launcher has the name Steam gave.
+            const char* theirs=inner?inner(self,steamid):nullptr;
+            if(const char* ours=personaName(steamid))return ours;
+            // Not answered yet: the game asked, so the keeper should request it.
+            personaWant(steamid);
+            return theirs?theirs:"Unknown User";
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamFriends_GetPersonaName")) {
+        using Fn=const char*(*)(void*);
+        personaRealSelf.store(real,std::memory_order_release);
+        static Fn hook=[](void* self)->const char*{
+            auto inner=(Fn)personaRealSelf.load(std::memory_order_acquire);
+            const char* theirs=inner?inner(self):nullptr;
+            if(const char* ours=personaSelf())return ours;
+            return theirs?theirs:"Player";
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamFriends_RequestUserInformation")) {
+        using Fn=uint32_t(*)(void*,uint64_t,uint32_t);
+        personaRealRequest.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t steamid,uint32_t nameOnly)->uint32_t{
+            auto inner=(Fn)personaRealRequest.load(std::memory_order_acquire);
+            // The provider's own call still runs (gbe_fork's is a TODO that
+            // answers "already known"); its answer is not what the game acts on.
+            if(inner)inner(self,steamid,nameOnly);
+            // The API's contract: true means "being fetched, you will get a
+            // PersonaStateChange_t"; false means "already known, call the
+            // getters now". A name the launcher already holds is known. One it
+            // does not is queued and reported as in flight — but nothing here
+            // posts PersonaStateChange_t (the provider owns that callback
+            // plumbing), so a game that waits on it would wait forever. Answer
+            // false instead: the getters are then called, and they return the
+            // provider's answer until Steam's name lands, at which point the
+            // tap hands out the real one. That is the same answer gbe_fork's
+            // TODO gives, and it never strands a row.
+            if(personaName(steamid))return 0;
+            personaWant(steamid);
+            return 0;
+        };
+        return (uintptr_t)hook;
+    }
+    return 0;
+}
 static uintptr_t steamApiExport(Module& module,const char* name,uintptr_t address) {
     if(!address||!name||strcmp(module.key.c_str(),"steam_api64.dll")) return address;
+    // The provider image is the only image whose exports reach here, so it is
+    // the one to ask for a leaderboard handle's name later.
+    if(&module!=leaderboardModule.load(std::memory_order_acquire))set_leaderboard_provider(&module);
     if(auto hook=richPresenceHook(name,address)) {
         if(state->log&&mlp::first_report(std::string("steam rich presence ")+name))
             state->log((std::string("STEAM rich presence: ")+name+" observed; the set is uploaded to Steam by the launcher").c_str());
+        return hook;
+    }
+    if(auto hook=leaderboardHook(name,address)) {
+        if(state->log&&mlp::first_report(std::string("steam leaderboards ")+name))
+            state->log((std::string("STEAM leaderboards: ")+name+" observed; rows come from the launcher's Steam session").c_str());
+        return hook;
+    }
+    if(auto hook=personaHook(name,address)) {
+        if(state->log&&mlp::first_report(std::string("steam persona ")+name))
+            state->log((std::string("STEAM persona: ")+name+" observed; names come from the launcher's Steam session").c_str());
         return hook;
     }
     return address;
@@ -737,27 +1005,44 @@ static void note_discord(const Module& m) {
 // search and finds vulkan-null-icd.dll in the runtime directory (redistributable()). Seeded before the loader maps, so
 // its first vkCreateInstance sees it; removed when the launch ends (reset_launch_config) so the next game starts clean.
 static const wchar_t* vulkanDriversKey=L"SOFTWARE\\Khronos\\Vulkan\\Drivers";
+// Drivers listed in the guest registry, in the order the loader should try them. dzn first (a real physical device over
+// D3D12), the null ICD second: the loader's terminator_CreateInstance skips an ICD whose CreateInstance fails and only
+// returns VK_ERROR_INCOMPATIBLE_DRIVER when none succeed, so a dzn that cannot initialise (no D3D12 device, no DXIL
+// acceptance) leaves the guest with the same clean "no devices" answer milestone 1 gives, never a hard failure.
+// A manifest that is not packaged is skipped, so a launcher built without dzn behaves exactly as before.
+static const wchar_t* const vulkanDriverManifests[]={L"vulkan-dzn.json",L"vulkan-null-icd.json"};
 static void publishVulkanDriverFiles(const std::wstring& path) {
     if(basename(path)!="vulkan-1.dll") return;
     // A game that ships its own loader keeps its own driver discovery: only the
     // packaged runtime copy is ours to configure.
     if(runtimeDirectory.empty() || _wcsicmp(path.c_str(),(runtimeDirectory+L"\\vulkan-1.dll").c_str())) return;
-    auto manifest=runtimeDirectory+L"\\vulkan-null-icd.json";
-    if(!exists(manifest)) return;
+    std::vector<std::wstring> listed;
+    for(auto name:vulkanDriverManifests) {
+        auto manifest=runtimeDirectory+L"\\"+name;
+        if(exists(manifest)) listed.push_back(manifest);
+    }
+    if(listed.empty()) return;
     HKEY key=nullptr;
     if(regb::RegCreateKeyExW(HKEY_LOCAL_MACHINE,vulkanDriversKey,0,nullptr,0,KEY_ALL_ACCESS,nullptr,&key,nullptr)!=ERROR_SUCCESS) return;
     DWORD zero=0;
-    LONG set=regb::RegSetValueExW(key,manifest.c_str(),0,REG_DWORD,(const BYTE*)&zero,sizeof zero);
+    LONG set=ERROR_SUCCESS;
+    for(auto& manifest:listed) {
+        set=regb::RegSetValueExW(key,manifest.c_str(),0,REG_DWORD,(const BYTE*)&zero,sizeof zero);
+        if(set!=ERROR_SUCCESS) break;
+    }
     regb::RegCloseKey(key);
     if(set!=ERROR_SUCCESS) return;
-    state->event("Vulkan loader mapped from the runtime directory; the guest registry lists the packaged null ICD (zero physical devices)");
+    const bool dzn=listed.size()>1;
+    state->event(dzn?
+        "Vulkan loader mapped from the runtime directory; the guest registry lists the packaged dzn driver (Vulkan on D3D12) with the null ICD as fallback":
+        "Vulkan loader mapped from the runtime directory; the guest registry lists the packaged null ICD (zero physical devices)");
 }
 // The loader caches driver discovery per process, so the key only has to be right before the first vkCreateInstance.
 // It must not outlive the launch: the next game would inherit a driver entry it never asked for.
 static void clearVulkanDriverFiles() {
     HKEY key=nullptr;
     if(regb::RegOpenKeyExW(HKEY_LOCAL_MACHINE,vulkanDriversKey,0,KEY_ALL_ACCESS,&key)!=ERROR_SUCCESS) return;
-    if(!runtimeDirectory.empty()) regb::RegDeleteValueW(key,(runtimeDirectory+L"\\vulkan-null-icd.json").c_str());
+    if(!runtimeDirectory.empty()) for(auto name:vulkanDriverManifests) regb::RegDeleteValueW(key,(runtimeDirectory+L"\\"+name).c_str());
     regb::RegCloseKey(key);
 }
 static Module* map(const std::wstring& requested,const std::string& asKey,wxl::Resolver resolver) {
@@ -1523,6 +1808,8 @@ static bool start(const std::wstring& root,const std::wstring& exe,const std::ws
 static void reset_launch_config() {
     steamProvider.clear();steamClient.clear();steamClientSigned.clear();appTicket.clear();emulatedCreate=nullptr;
     set_rich_presence_tap({});
+    set_leaderboard_tap({});
+    set_leaderboard_provider(nullptr);   // the image may be unloaded with the launch
     clearVulkanDriverFiles();
 }
 // A launch that ended before any game code ran (no TLS callback, DllMain or

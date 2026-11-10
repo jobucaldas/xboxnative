@@ -1,0 +1,34 @@
+diff -ruN a/src/microsoft/vulkan/dzn_util.c b/src/microsoft/vulkan/dzn_util.c
+--- a/src/microsoft/vulkan/dzn_util.c	2026-11-09 09:23:53.818911552 -0300
++++ b/src/microsoft/vulkan/dzn_util.c	2026-11-09 09:23:53.819911561 -0300
+@@ -353,19 +353,22 @@
+    if (experimental_features)
+ #endif
+    {
++      /* Play: experimental shader models are what lets a runtime accept the
++       * unvalidated DXIL emitted when dxil.dll is absent, but a runtime that
++       * refuses the request (Wine answers E_NOINTERFACE) is not a reason to
++       * report no GPU at all: the device is still created and the shader
++       * failure, if any, surfaces at pipeline creation where the caller can
++       * see it. */
+       if (factory) {
+-         if (FAILED(ID3D12DeviceFactory_EnableExperimentalFeatures(factory, 1, &D3D12ExperimentalShaderModels, NULL, NULL))) {
+-            mesa_loge("failed to enable experimental shader models\n");
+-            return NULL;
+-         }
++         if (FAILED(ID3D12DeviceFactory_EnableExperimentalFeatures(factory, 1, &D3D12ExperimentalShaderModels, NULL, NULL)))
++            mesa_logw("failed to enable experimental shader models; unsigned DXIL may be refused\n");
+       } else {
+          typedef HRESULT(WINAPI *PFN_D3D12ENABLEEXPERIMENTALFEATURES)(UINT, const IID *, void *, UINT *);
+          PFN_D3D12ENABLEEXPERIMENTALFEATURES D3D12EnableExperimentalFeatures =
+             (PFN_D3D12ENABLEEXPERIMENTALFEATURES)util_dl_get_proc_address(d3d12_mod, "D3D12EnableExperimentalFeatures");
+-         if (FAILED(D3D12EnableExperimentalFeatures(1, &D3D12ExperimentalShaderModels, NULL, NULL))) {
+-            mesa_loge("failed to enable experimental shader models\n");
+-            return NULL;
+-         }
++         if (!D3D12EnableExperimentalFeatures ||
++             FAILED(D3D12EnableExperimentalFeatures(1, &D3D12ExperimentalShaderModels, NULL, NULL)))
++            mesa_logw("failed to enable experimental shader models; unsigned DXIL may be refused\n");
+       }
+    }
+ 
