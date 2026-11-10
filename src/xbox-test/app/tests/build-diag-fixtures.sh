@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # build-diag-fixtures.sh OUTDIR -> OUTDIR/{fixture-crt.exe,play-vulkan-dzn.exe,
-# play-d3d9.exe,play-d3d10.exe}, the console self-test's fixtures (selftest.h).
+# play-d3d9.exe,play-d3d9-triangle.exe,play-d3d9-textured.exe,play-d3d10.exe},
+# the console self-test's fixtures (selftest.h).
 #
 # These are the same guest programs tests/play-runtime.sh builds for the
 # off-device runner, compiled from this repository's sources so the package
@@ -37,6 +38,14 @@ lld "${common[@]}" /entry:vk_dzn_entry /include:vk_relocation /out:"$out/play-vu
 clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d9.cpp" -o "$work/d3d9.obj"
 lld "${common[@]}" /entry:d3d9_entry /include:d3d9_relocation /out:"$out/play-d3d9.exe" \
   "$work/d3d9.obj" "$mingw_lib/libd3d9.a" "${libs[@]}"
+
+clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d9-triangle.cpp" -o "$work/d3d9-triangle.obj"
+lld "${common[@]}" /entry:d3d9_triangle_entry /include:d3d9_triangle_relocation /out:"$out/play-d3d9-triangle.exe" \
+  "$work/d3d9-triangle.obj" "$mingw_lib/libd3d9.a" "${libs[@]}"
+
+clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d9-textured.cpp" -o "$work/d3d9-textured.obj"
+lld "${common[@]}" /entry:d3d9_textured_entry /include:d3d9_textured_relocation /out:"$out/play-d3d9-textured.exe" \
+  "$work/d3d9-textured.obj" "$mingw_lib/libd3d9.a" "${libs[@]}"
 
 clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d10.cpp" -o "$work/d3d10.obj"
 lld "${common[@]}" /entry:d3d10_entry /include:d3d10_relocation /out:"$out/play-d3d10.exe" \

@@ -28,8 +28,10 @@
 namespace selftest {
 // A launcher restart that makes no progress must not loop: each fixture gets a
 // few attempts (a fixture that faults before game code is released and retried
-// once), and a queue older than this is abandoned with a FAIL line.
-static const int kMaxRestarts = 4;
+// once), and a queue older than this is abandoned with a FAIL line. The cap
+// comes from the fixture table (selftest_plan::max_restarts), so adding a mode
+// cannot silently starve the ones after it.
+static const int kMaxRestarts = selftest_plan::max_restarts();
 static const double kRequestMaxAge = 1800.0;
 
 static std::wstring log_path() { return g_dir + L"\\selftest.log"; }

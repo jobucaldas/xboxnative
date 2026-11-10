@@ -23,10 +23,24 @@ inline const Mode* modes(size_t& count) {
         {"x86", "fixture-crt.exe", true},
         {"vulkan-dzn", "play-vulkan-dzn.exe", false},
         {"d3d9", "play-d3d9.exe", false},
+        {"d3d9-triangle", "play-d3d9-triangle.exe", false},
+        {"d3d9-textured", "play-d3d9-textured.exe", false},
         {"d3d10", "play-d3d10.exe", false},
     };
     count = sizeof(table) / sizeof(*table);
     return table;
+}
+// How many launcher restarts a run may take. Play keeps one 64-bit guest per
+// process, so every non-pe32 fixture costs a restart; the extra one lets a
+// fixture that faults before game code be retried. Derived from the table so
+// "all" can never outgrow a fixed cap: a limit below the guest count marks the
+// last fixtures FAIL restart-limit without ever running them.
+inline int max_restarts() {
+    size_t count = 0;
+    const Mode* table = modes(count);
+    int guests = 0;
+    for (size_t i = 0; i < count; ++i) if (!table[i].pe32) ++guests;
+    return guests + 1;
 }
 inline const Mode* find(const std::string& name) {
     size_t count = 0;
