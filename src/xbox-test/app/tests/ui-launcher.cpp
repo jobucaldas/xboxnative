@@ -265,7 +265,17 @@ int main(int argc, char** argv) {
               "installed: PLAY");
         vm.download = detail_input::Download::running;
         check(primary_state(vm) == Primary::installing, "download running: installing");
-        check(!std::strcmp(primary_label(vm, false), "INSTALLING 62%"), "installing label without focus");
+        check(!std::strcmp(primary_label(vm, false), "INSTALLING 0%"), "installing label at 0%");
+        vm.install_pct = 0.62f;
+        check(!std::strcmp(primary_label(vm, false), "INSTALLING 62%"), "installing label reads the real percentage");
+        vm.install_pct = 1.0f;
+        check(!std::strcmp(primary_label(vm, false), "INSTALLING 100%"), "installing label at 100%");
+        vm.install_pct = 1.5f;
+        check(!std::strcmp(primary_label(vm, false), "INSTALLING 100%"), "installing label clamps above 100%");
+        vm.install_pct = -0.25f;
+        check(!std::strcmp(primary_label(vm, false), "INSTALLING 0%"), "installing label clamps below 0");
+        vm.install_pct = 0.0f;
+        check(!std::strcmp(primary_label(vm, false), "INSTALLING 0%"), "installing label back at 0%");
         check(!std::strcmp(primary_label(vm, true), "CANCEL"), "focused installing button reads CANCEL");
         check(!std::strcmp(primary_hint(vm, true), "Cancel install"), "hint says cancel when focused");
         check(!std::strcmp(primary_hint(vm, false), "Cancel install"), "hint says cancel install in both states");
@@ -407,6 +417,7 @@ int main(int argc, char** argv) {
         g.has_art = true;
         g.primary.download = detail_input::Download::running;
         g.install_pct = 0.62f;
+        g.primary.install_pct = 0.62f;         // the label reads the same progress
         g.install_status = "Downloading";
         g.size_on_disk = "1.8 GB of 48.2 GB";
         g.last_updated = "Not installed";
@@ -423,6 +434,7 @@ int main(int argc, char** argv) {
         g.has_art = true;
         g.primary.download = detail_input::Download::running;
         g.install_pct = 0.62f;
+        g.primary.install_pct = 0.62f;         // the label reads the same progress
         g.primary_focus = true;
         g.install_status = "Downloading";
         g.size_on_disk = "1.8 GB of 48.2 GB";

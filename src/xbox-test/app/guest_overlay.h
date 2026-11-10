@@ -13,6 +13,8 @@
 #include <winrt/Windows.Gaming.Input.h>
 #include <array>
 #include <atomic>
+#include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -27,7 +29,6 @@ inline std::atomic<bool> menuOpen{false};
 inline std::atomic<int> selection{Resume};
 inline std::atomic<int> ui_guideTab{0};        // guide tab: 0 Home, 1 Achievements, 2 Settings
 inline std::atomic<int> achTop{0};             // first visible achievement row
-inline std::atomic<bool> achDirty{true};       // achievements snapshot needs a refresh
 inline std::atomic<bool> fpsOn{false};
 inline std::atomic<bool> graphOn{false};       // frame-time graph, drawn only when fpsOn too
 inline std::atomic<bool> busy{false};          // quitting: the menu shows a status line
@@ -36,22 +37,30 @@ inline std::string status;
 inline void set_status(const std::string& s){std::lock_guard<std::mutex> l(statusM);status=s;}
 
 // ---- guide state: achievements snapshot + toasts, filled by the Steam thread
+// The overlay's one clock: raw QPC seconds (NOT main.cpp's now_s(), which is
+// QPC minus process start). Everything that stamps or expires a toast uses
+// this, so a caller's Toast::born is always ignored and re-stamped here.
+inline double overlay_now_seconds() {
+    LARGE_INTEGER t;QueryPerformanceCounter(&t);
+    LARGE_INTEGER f;QueryPerformanceFrequency(&f);
+    return f.QuadPart ? double(t.QuadPart) / double(f.QuadPart) : 0.0;
+}
 inline ui_guide::AchievementStore achievements;
 inline std::mutex toastsM;
 inline std::vector<ui_guide::Toast> toasts;   // queued; the oldest shows for kToastLifeSec
 inline void push_toast(ui_guide::Toast t) {
     if (t.title.empty()) return;
+    t.born = overlay_now_seconds();   // callers' born is ignored (their clocks differ)
     std::lock_guard<std::mutex> l(toastsM);
     if (toasts.size() < 4) toasts.push_back(std::move(t));
 }
 // The toast to draw right now: the oldest queued one, with entries past their
-// 5 s lifetime dropped. `born` is seconds on the same clock the caller used
-// when it filled Toast::born (the overlay's QPC seconds work for both).
+// 5 s lifetime dropped. Expiry runs on this header's own clock
+// (overlay_now_seconds), never the caller's.
 inline constexpr double kToastLifeSec = 5.0;
 inline ui_guide::Toast active_toast(double nowSeconds) {
     std::lock_guard<std::mutex> l(toastsM);
-    while (!toasts.empty() && toasts.front().born > 0 &&
-           nowSeconds - toasts.front().born > kToastLifeSec)
+    while (!toasts.empty() && ui_guide::toast_expired(toasts.front(), nowSeconds, kToastLifeSec))
         toasts.erase(toasts.begin());
     return toasts.empty() ? ui_guide::Toast{} : toasts.front();
 }
@@ -163,11 +172,23 @@ inline void probe(IDXGISwapChain* chain) {
 }
 // Dims the WHOLE game frame behind the guide card by 55% black, CPU-side:
 // CopySubresourceRegion the full back buffer into a staging texture, Map(READ),
-// blend (ui_guide::dim_row), UpdateSubresource back through a GPU texture in
-// the back buffer's own format, then CopySubresourceRegion into the back
-// buffer. The card then draws over the dimmed frame. Reuses the staging pair
-// across frames; on any failure returns false and the caller draws the card
-// over the undimmed frame (the old behaviour).
+// copy the rows out (Unmap on every path), blend (ui_guide::dim_row) in the
+// CPU buffer, UpdateSubresource through a copy-only DEFAULT texture in the
+// back buffer's own format, then CopySubresourceRegion into the back buffer.
+// The card then draws over the dimmed frame. Reuses the staging pair across
+// frames; on any failure returns false and the caller draws the card over the
+// undimmed frame (the old behaviour).
+struct MappedGuard {   // Unmaps on scope exit, so no early return leaks a Map
+    ID3D11DeviceContext* ctx=nullptr;ID3D11Texture2D* tex=nullptr;bool mapped=false;
+    const void* data=nullptr;UINT pitch=0;
+    bool enter(ID3D11DeviceContext* c,ID3D11Texture2D* t) {
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if(FAILED(c->Map(t,0,D3D11_MAP_READ,0,&m)))return false;
+        ctx=c;tex=t;mapped=true;data=m.pData;pitch=m.RowPitch;return true;
+    }
+    void release(){if(mapped){ctx->Unmap(tex,0);mapped=false;}}
+    ~MappedGuard(){release();}
+};
 inline bool dim_frame(ID3D11Device* dev,ID3D11DeviceContext* ctx,ID3D11Texture2D* bb,
                       const D3D11_TEXTURE2D_DESC& d) {
     const int w=int(d.Width),h=int(d.Height);
@@ -181,39 +202,54 @@ inline bool dim_frame(ID3D11Device* dev,ID3D11DeviceContext* ctx,ID3D11Texture2D
         dimW=w;dimH=h;dimFmt=d.Format;
     }
     ctx->CopySubresourceRegion(dimStaging.get(),0,0,0,0,bb,0,nullptr);   // whole buffer
-    D3D11_MAPPED_SUBRESOURCE m{};
-    if(FAILED(ctx->Map(dimStaging.get(),0,D3D11_MAP_READ,0,&m)))return false;
-    // Scale the three colour bytes in place (RGBA and BGRA both: uniform scale),
-    // then upload the same buffer through a GPU texture in the back buffer's format.
+    MappedGuard g;
+    if(!g.enter(ctx,dimStaging.get()))return false;
+    // Read the rows into CPU memory (the Map is READ-only: never write through
+    // it), then dim there; the staging texture is unmapped right away.
+    std::vector<uint8_t> frame(size_t(w)*4*size_t(h));
+    const uint8_t* src=static_cast<const uint8_t*>(g.data);
+    const UINT pitch=g.pitch?g.pitch:UINT(w)*4;
     for(int row=0;row<h;++row)
-        ui_guide::dim_row(static_cast<uint8_t*>(m.pData)+size_t(row)*m.RowPitch,w,45);   // ~55% black scrim
-    D3D11_TEXTURE2D_DESC up{};up=d;up.Usage=D3D11_USAGE_DEFAULT;up.CPUAccessFlags=0;up.BindFlags=0;
+        std::memcpy(frame.data()+size_t(row)*size_t(w)*4,src+size_t(row)*pitch,size_t(w)*4);
+    g.release();
+    for(int row=0;row<h;++row)
+        ui_guide::dim_row(frame.data()+size_t(row)*size_t(w)*4,w,45);   // ~55% black scrim
+    // Upload through a copy-only DEFAULT texture (BindFlags=0 is valid for a
+    // texture only CopySubresourceRegion reads; UpdateSubresource fills it).
+    D3D11_TEXTURE2D_DESC up{};up.Width=d.Width;up.Height=d.Height;up.MipLevels=1;up.ArraySize=1;
+    up.Format=d.Format;up.SampleDesc.Count=1;up.Usage=D3D11_USAGE_DEFAULT;
+    up.BindFlags=0;up.CPUAccessFlags=0;up.MiscFlags=0;
     winrt::com_ptr<ID3D11Texture2D> tex;
     if(FAILED(dev->CreateTexture2D(&up,nullptr,tex.put())))return false;
-    ctx->UpdateSubresource(tex.get(),0,nullptr,m.pData,UINT(m.RowPitch),0);
-    ctx->Unmap(dimStaging.get(),0);
+    ctx->UpdateSubresource(tex.get(),0,nullptr,frame.data(),UINT(w)*4,0);
     ctx->CopySubresourceRegion(bb,0,0,0,0,tex.get(),0,nullptr);   // whole frame back
     return true;
 }
 
 // Builds the guide view-model from the overlay's atomics and draws the card
-// into a CPU canvas sized to the card, ready for menuPanel.blit at (80,32).
-// The Canvas is a non-owning view over pxScratch, which the caller must keep
-// alive until the blit has copied from it.
-inline std::vector<uint32_t>& draw_guide_canvas(int sc,ui::Canvas& c) {
+// at 1:1 into a canvas of exactly kCardW x kCardH, in card-local coordinates
+// (the same render the native tests composite over a full frame). The caller
+// positions it on the frame with ui_guide::card_rect(backW, backH). The
+// achievements snapshot refreshes whenever the store's generation moved
+// (set_achievements / unlock / set_icon all bump it). The Canvas is a
+// non-owning view over pxScratch, which the caller must keep alive until the
+// blit has copied from it.
+inline std::vector<uint32_t>& draw_guide_canvas(ui::Canvas& c) {
     std::string line;{std::lock_guard<std::mutex> l(statusM);line=status;}
     ui_guide::Model m;
     m.tab=ui_guideTab.load();m.sel=selection.load();
     m.fpsOn=fpsOn.load();m.graphOn=graphOn.load();m.busy=busy.load();m.status=line;
     static std::vector<ui_guide::AchievementView> snap;   // refreshed while open; stable pointer for draw
-    if(achDirty.exchange(false)) snap=achievements.snapshot();
+    static unsigned snapGen=0;
+    const unsigned gen=achievements.generation();
+    if(gen!=snapGen){snapGen=gen;snap=achievements.snapshot();}
     m.achievements=&snap;
     m.achSel=selection.load();
     m.achTop=achTop.load();
-    const int w=int(ui_guide::kCardW)*sc,h=int(ui_guide::kCardH)*sc;
+    const int w=int(ui_guide::kCardW),h=int(ui_guide::kCardH);
     pxScratch.assign(size_t(w)*h,ui::theme::page);
     c=ui::Canvas(pxScratch.data(),w,h,w);
-    if(guideFont.ready())ui_guide::draw_guide(c,guideFont,m);
+    if(guideFont.ready())ui_guide::draw_guide_at(c,guideFont,m,0,0);
     return pxScratch;
 }
 
@@ -263,21 +299,38 @@ inline void draw(IDXGISwapChain* chain) {
         // 55% dim of the whole game frame behind the card, CPU-side; on any
         // failure the card draws over the undimmed frame (the old behaviour).
         dim_frame(dev.get(),ctx.get(),bb.get(),d);
-        const int cardX=int(ui_guide::kCardX)*sc,cardY=int(ui_guide::kCardY)*sc;
-        std::vector<uint32_t> cardBuf;
+        // The card renders 1:1 in design space (1920x1080); position it with
+        // card_rect and nearest-scale only when the frame is not 1080p.
+        const ui::Rect cardR=ui_guide::card_rect(int(d.Width),int(d.Height));
         ui::Canvas cardC(nullptr,0,0,0);
-        draw_guide_canvas(sc,cardC);   // fills cardBuf; cardC views it
-        menuPanel.blit(dev.get(),ctx.get(),bb.get(),d.Format,rgba,cardC,cardX,cardY,int(d.Width),int(d.Height));
+        draw_guide_canvas(cardC);   // fills pxScratch; cardC views it
+        ui::Canvas cardView=cardC;
+        std::vector<uint32_t> scaled;
+        if(int(cardR.w)!=cardC.width()||int(cardR.h)!=cardC.height()) {
+            scaled=ui_guide::scale_nearest(cardC.data(),cardC.width(),cardC.height(),
+                                           int(cardR.w),int(cardR.h));
+            cardView=ui::Canvas(scaled.data(),int(cardR.w),int(cardR.h),int(cardR.w));
+        }
+        menuPanel.blit(dev.get(),ctx.get(),bb.get(),d.Format,rgba,cardView,
+                       int(cardR.x),int(cardR.y),int(d.Width),int(d.Height));
     }
     if(!toast.title.empty()) {
         // Achievement toast: centred bottom pill, alive ~5 s regardless of the
-        // menu (drawn whenever active_toast returns one).
-        const int tw=int(ui_guide::kToastW)*sc,th=int(ui_guide::kToastH)*sc;
-        const int tx=int(ui_guide::kToastX)*sc,ty=int(ui_guide::kToastY)*sc;
-        std::vector<uint32_t> tbuf(size_t(tw)*size_t(th),0);
-        ui::Canvas t(tbuf.data(),tw,th,tw);
+        // menu (drawn whenever active_toast returns one). Same design-space
+        // contract as the card: 1:1 render, nearest-scaled to toast_rect.
+        const ui::Rect toastR=ui_guide::toast_rect(int(d.Width),int(d.Height));
+        std::vector<uint32_t> tbuf(size_t(ui_guide::kToastW)*size_t(ui_guide::kToastH),0);
+        ui::Canvas t(tbuf.data(),int(ui_guide::kToastW),int(ui_guide::kToastH),int(ui_guide::kToastW));
         ui_guide::draw_toast(t,guideFont,toast,0,0);
-        menuPanel.blit(dev.get(),ctx.get(),bb.get(),d.Format,rgba,t,tx,ty,int(d.Width),int(d.Height));
+        ui::Canvas tView=t;
+        std::vector<uint32_t> scaled;
+        if(int(toastR.w)!=t.width()||int(toastR.h)!=t.height()) {
+            scaled=ui_guide::scale_nearest(t.data(),t.width(),t.height(),
+                                           int(toastR.w),int(toastR.h));
+            tView=ui::Canvas(scaled.data(),int(toastR.w),int(toastR.h),int(toastR.w));
+        }
+        menuPanel.blit(dev.get(),ctx.get(),bb.get(),d.Format,rgba,tView,
+                       int(toastR.x),int(toastR.y),int(d.Width),int(d.Height));
     }
 }
 

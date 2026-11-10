@@ -148,6 +148,14 @@ int main() {
         ui_guide::Toast t = store.push_unlock(1, "Nov 10, 2026", 99.0);
         check(t.title == "Hidden achievement" && t.born == 99.0, "push_unlock: toast carries the visible name");
         check(store.unlocked() == 1, "push_unlock: the row counts as unlocked");
+        // expiry on an injected clock: a toast stamped at 99.0 dies at 104+ on
+        // the same clock (guest_overlay stamps born with its own QPC seconds
+        // and drops with the same ui_guide::toast_expired helper)
+        check(!ui_guide::toast_expired(t, 103.9, 5.0), "toast alive 4.9 s after its stamp");
+        check(ui_guide::toast_expired(t, 104.1, 5.0), "toast expired 5.1 s after its stamp");
+        const unsigned gBefore = store.generation();
+        store.push_unlock(0, "Nov 10, 2026", 100.0);
+        check(store.generation() != gBefore, "push_unlock bumps the store generation");
     }
 
     std::printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "OK", g_failures, g_failures == 1 ? "" : "s");

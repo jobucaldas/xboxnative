@@ -10,6 +10,7 @@
 // dimmed behind the card (the dim itself is guest_overlay's GPU-side job).
 #pragma once
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -46,6 +47,43 @@ constexpr int   kAchVisible = 8;                               // rows between y
 constexpr float kAchRight = 531.0f;                            // meta right edge
 constexpr float kToastW = 352.0f, kToastH = 88.0f;
 constexpr float kToastX = 784.0f, kToastY = 912.0f;            // centred pill, 68 px off the bottom
+
+// ---- destination rects on the game frame ------------------------------------
+// All guide geometry is defined in the 1920x1080 design space (the figcraft).
+// The card/toast render 1:1 into their design-size canvases; on a frame of
+// another size the canvas is nearest-scaled by a uniform s (the tighter axis
+// wins, so the whole design always fits) and blitted at the scaled design
+// position -- exact at 1920x1080, in-bounds everywhere. Pure helpers so the
+// native tests can assert the 1080p contract and the in-bounds invariant.
+inline float guide_scale(int backW, int backH) {
+    if (backW <= 0 || backH <= 0) return 1.0f;
+    return std::min(float(backW) / float(ui::theme::width),
+                    float(backH) / float(ui::theme::height));
+}
+inline Rect card_rect(int backW, int backH) {
+    const float s = guide_scale(backW, backH);
+    return rect(std::lround(kCardX * s), std::lround(kCardY * s),
+                std::lround(kCardW * s), std::lround(kCardH * s));
+}
+inline Rect toast_rect(int backW, int backH) {
+    const float s = guide_scale(backW, backH);
+    return rect(std::lround(kToastX * s), std::lround(kToastY * s),
+                std::lround(kToastW * s), std::lround(kToastH * s));
+}
+// Nearest-neighbour scale of an ARGB canvas (the 1:1 guide render onto a
+// frame whose scale is not 1). Pure; tested.
+inline std::vector<uint32_t> scale_nearest(const uint32_t* src, int sw, int sh, int dw, int dh) {
+    std::vector<uint32_t> out(size_t(dw > 0 ? dw : 1) * size_t(dh > 0 ? dh : 1), 0);
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return out;
+    for (int y = 0; y < dh; ++y) {
+        const int sy = std::min(sh - 1, int(int64_t(y) * sh / dh));
+        const uint32_t* srow = src + size_t(sy) * sw;
+        uint32_t* drow = out.data() + size_t(y) * dw;
+        for (int x = 0; x < dw; ++x)
+            drow[x] = srow[std::min(sw - 1, int(int64_t(x) * sw / dw))];
+    }
+    return out;
+}
 
 // ---- navigation state machine (pure; unit-tested with assert) ----
 enum class Button { Up, Down, Left, Right, A, B, LB, RB };
@@ -88,13 +126,26 @@ struct Toast {
     std::string title;                        // achievement display name under the fixed label
     const uint32_t* icon = nullptr;
     int iconW = 0, iconH = 0;
-    double born = 0;                          // seconds; the owner decides expiry
+    double born = 0;                          // seconds on the owner's clock; the queue owner stamps it
 };
 
+// A queued toast is expired once `life` seconds have passed since its stamp
+// (born <= 0 means "never stamped": it never expires). Pure so the native
+// tests can drive it with an injected clock.
+inline bool toast_expired(const Toast& t, double nowSeconds, double life) {
+    return t.born > 0 && nowSeconds - t.born > life;
+}
+
 // Thread-safe snapshot the Steam thread fills and the UI thread reads.
+// A generation counter bumps on every mutation so a renderer holding a
+// snapshot pointer can cheaply notice "something changed" without a dirty
+// flag the callers would have to remember to set.
 struct AchievementStore {
     mutable std::mutex m;
     std::vector<AchievementView> all;
+    unsigned gen = 0;                         // bumped by every mutation
+    unsigned generation() const { std::lock_guard<std::mutex> l(m); return gen; }
+    void touch() { ++gen; }
     // Icon pixel buffers the views point into (set_icon swaps the view's
     // pointer; the buffer must outlive every view that points into it).
     std::vector<std::shared_ptr<std::vector<uint32_t>>> iconPix;
@@ -102,6 +153,7 @@ struct AchievementStore {
         std::lock_guard<std::mutex> l(m);
         all = std::move(v);
         iconPix.clear();
+        touch();
     }
     // Installs one decoded icon (by index) into the view: unlocked pixels on
     // an unlocked entry, grey pixels on a locked one. `pix` must stay alive;
@@ -114,6 +166,7 @@ struct AchievementStore {
         AchievementView& a = all[index];
         if (unlockedIcon) { a.icon = pix->data(); a.iconW = w; a.iconH = h; }
         else if (!a.unlocked) { a.icon = pix->data(); a.iconW = w; a.iconH = h; }
+        touch();
         return true;
     }
     // Marks one achievement unlocked (by index), stamps the date and returns
@@ -123,6 +176,7 @@ struct AchievementStore {
         if (index >= all.size()) return {};
         all[index].unlocked = true;
         all[index].earned = earnedDate;
+        touch();
         return {all[index].name, all[index].icon, all[index].iconW, all[index].iconH, nowSeconds};
     }
     // Same, plus the real name/description for a hidden achievement (its view
@@ -135,6 +189,7 @@ struct AchievementStore {
         a.unlocked = true;
         a.earned = earnedDate;
         if (!name.empty()) { a.name = name; a.description = description; }
+        touch();
         return {a.name, a.icon, a.iconW, a.iconH, nowSeconds};
     }
     std::vector<AchievementView> snapshot() const {
@@ -506,28 +561,36 @@ inline void draw_settings(Canvas& c, const Font& f, const Model& m) {
 
 // The whole guide card at its fixed position; `dimmed` pixels (the game frame
 // under the 55% scrim) show through the rounded corners when provided.
-inline void draw_guide(Canvas& c, const Font& f, const Model& m, const uint32_t* dimmed = nullptr) {
+// draw_guide_at draws at an arbitrary origin (the overlay renders the card
+// into a card-sized canvas at (0,0); the tests draw at the mockup's screen
+// position); draw_guide is the mockup-position form.
+inline void draw_guide_at(Canvas& c, const Font& f, const Model& m, float ox, float oy,
+                          const uint32_t* dimmed = nullptr) {
     using namespace ui::theme;
+    const Rect card = rect(ox, oy, kCardW, kCardH);
     if (dimmed) {   // backdrop: the already-dimmed game frame, card-relative
         for (int y = 0; y < int(kCardH); ++y)
             std::copy_n(dimmed + size_t(y) * int(kCardW), int(kCardW),
-                        c.data() + size_t(int(kCardY) + y) * c.width() + int(kCardX));
+                        c.data() + size_t(int(oy) + y) * c.width() + int(ox));
     } else {
-        c.fill_rect(kCardX, kCardY, kCardW, kCardH, page);
+        c.fill_rect(card.x, card.y, card.w, card.h, page);
     }
-    c.fill_round_rect(rect(kCardX, kCardY, kCardW, kCardH), kCardR, panel);
+    c.fill_round_rect(card, kCardR, panel);
     // clip everything below to the card
     ui::Canvas::Clip saved = c.clip();
-    c.set_clip(rect(kCardX, kCardY, kCardW, kCardH));
-    Canvas card(c.data() + size_t(int(kCardY)) * c.width() + int(kCardX), int(kCardW), int(kCardH), c.width());
-    draw_tabs(card, f, m);
-    if (m.tab == 0) draw_home(card, f, m);
-    else if (m.tab == 1) draw_achievements(card, f, m);
-    else draw_settings(card, f, m);
+    c.set_clip(card);
+    Canvas cardC(c.data() + size_t(int(oy)) * c.width() + int(ox), int(kCardW), int(kCardH), c.width());
+    draw_tabs(cardC, f, m);
+    if (m.tab == 0) draw_home(cardC, f, m);
+    else if (m.tab == 1) draw_achievements(cardC, f, m);
+    else draw_settings(cardC, f, m);
     if (!m.status.empty())
-        f.draw(card, Face::Regular, 24, 28, 900 + f.ascent(Face::Regular, 24), m.status, textDim);
-    draw_footer(card, f);
+        f.draw(cardC, Face::Regular, 24, 28, 900 + f.ascent(Face::Regular, 24), m.status, textDim);
+    draw_footer(cardC, f);
     c.set_clip(saved);
+}
+inline void draw_guide(Canvas& c, const Font& f, const Model& m, const uint32_t* dimmed = nullptr) {
+    draw_guide_at(c, f, m, kCardX, kCardY, dimmed);
 }
 
 // Achievement toast: centred bottom pill, icon left, fixed label + name.

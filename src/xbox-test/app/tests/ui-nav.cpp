@@ -71,18 +71,36 @@ int main() {
     // ---- game screen focus: slots and icon buttons ----
     {
         check(focus_count(true) == 4 && focus_count(false) == 3, "installed has 4 slots, otherwise 3");
-        // installed: trash/cloud/cog at slots 1/2/3
+        // installed: trash/cloud/cog are the buttons after the primary, so the
+        // slots carry the same numbers as the icon ids (1/2/3)
         check(icon_focus_slot(true, 0) == 1 && icon_focus_slot(true, 1) == 2 && icon_focus_slot(true, 2) == 3,
               "installed icon buttons sit at slots 1..3");
-        check(icon_for_slot(true, 0) == -1, "slot 0 is the primary button");
-        check(icon_for_slot(true, 1) == 0 && icon_for_slot(true, 2) == 1 && icon_for_slot(true, 3) == 2,
+        check(icon_for_slot(true, 0) == 0, "slot 0 is the primary button");
+        check(icon_for_slot(true, 1) == 1 && icon_for_slot(true, 2) == 2 && icon_for_slot(true, 3) == 3,
               "installed slots map to trash/cloud/cog");
-        // not installed: cloud/cog at slots 2/3, no trash
-        check(icon_focus_slot(false, 0) == 2 && icon_focus_slot(false, 1) == 3,
-              "not-installed icon buttons sit at slots 2/3");
-        check(icon_for_slot(false, 1) == -1, "slot 1 does not exist when not installed");
-        check(icon_for_slot(false, 2) == 0 && icon_for_slot(false, 3) == 1,
+        // not installed: no trash, so cloud/cog sit at slots 1/2 and carry ids 2/3
+        check(icon_focus_slot(false, 0) == 1 && icon_focus_slot(false, 1) == 2,
+              "not-installed icon buttons sit at slots 1/2");
+        check(icon_for_slot(false, 0) == 0, "slot 0 is the primary button when not installed");
+        check(icon_for_slot(false, 1) == 2 && icon_for_slot(false, 2) == 3,
               "not-installed slots map to cloud/cog");
+        // The A handler only ever sees slots 0..count-1; out-of-range slots
+        // fall back to the primary button rather than a wrong icon.
+        check(icon_for_slot(true, 7) == 0 && icon_for_slot(false, 7) == 0, "out-of-range slots fall back to the primary");
+        // Walking right across the slots covers exactly the buttons present:
+        // every slot maps to a distinct icon id, and the icon set matches the
+        // layout (installed: primary+trash+cloud+cog; else primary+cloud+cog).
+        for (bool installed : {true, false}) {
+            const int count = focus_count(installed);
+            int seen[4] = {-1, -1, -1, -1};
+            for (int s = 0; s < count; ++s) seen[s] = icon_for_slot(installed, s);
+            for (int s = 0; s < count; ++s)
+                for (int t = s + 1; t < count; ++t)
+                    check(seen[s] != seen[t], "each slot activates a different button");
+            check(seen[0] == 0, "slot 0 is always the primary button");
+            if (installed) check(seen[1] == 1 && seen[2] == 2 && seen[3] == 3, "installed walk: trash, cloud, cog");
+            else check(seen[1] == 2 && seen[2] == 3, "not-installed walk: cloud, cog, no gap");
+        }
     }
 
     // ---- logout reachability ----

@@ -843,7 +843,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         m_installed = installed_appids(); m_installedT = t; m_installedDel = g_del.gen; m_installedDl = g_dlSeq;
     }
     std::vector<std::shared_ptr<Game>> shown_games() { return game_library::shown(g_games, m_onlyInstalled, m_installed); }   // caller holds g_gm
-    static constexpr int COLS = 6;
+    static constexpr int COLS = ui_launcher::kGridCols;   // same 7 columns the grid draws
 
     void grid_position(int sel, int top, const char* cause) {
         if (sel != m_sel || top != m_top)
@@ -1595,6 +1595,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // Sidebar view-model, shared by the library and queue screens. Storage
     // figures come from the last storage report's internal root (the queue
     // screen does not probe drives); until one exists the defaults hold.
+    // m_sidebarFocus: the sidebar row the D-pad sits on while the sidebar has
+    // focus (draw_sidebar's pill); -1 = no row is focused. The library input
+    // path keeps it in sync with m_sidebar on every edge event.
+    int m_sidebarFocus = -1;
     ui_launcher::SidebarVM sidebar_vm() {
         ui_launcher::SidebarVM sb;
         static std::string persona; persona = persona_name();
@@ -1605,6 +1609,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
           size_t q; { std::lock_guard<std::mutex> ql(g_dqm); q = g_dq.size(); }
           sb.queue_count = (int)q + (g_dl.state == 1 ? 1 : 0); }
         sb.active = m_onlyInstalled ? 1 : 0;
+        sb.focus = m_sidebarFocus;
         return sb;
     }
 
@@ -1829,9 +1834,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
             if (has(edge, GamepadButtons::A)) {
                 int icon = ui_nav::icon_for_slot(installed, m_dFocus);
-                if (icon < 0) detail_action(source);
-                else if (icon == 0) detail_delete(source);        // trash
-                else if (icon == 1) { m_cloudOpen = true; m_cloudFocus = 0; logf("detail: cloud sheet open (%s)", source); }   // cloud
+                if (icon == 0) detail_action(source);             // the primary button (or its id)
+                else if (icon == 1) detail_delete(source);        // trash
+                else if (icon == 2) { m_cloudOpen = true; m_cloudFocus = 0; logf("detail: cloud sheet open (%s)", source); }   // cloud
                 else detail_storage(source);                      // cog: cycle the install location
             }
             if (has(edge, GamepadButtons::B)) detail_back(source);
@@ -1846,7 +1851,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
             // Sidebar focus: up/down moves the entry, A switches the view, right
             // returns to the grid. The View filter chip is gone; Installed is a
-            // sidebar entry now.
+            // sidebar entry now. m_sidebarFocus mirrors (focus, m_sidebar) for
+            // the drawer; on the queue/storage screens it equals the entry that
+            // was pressed, which is those screens' active row, so the sidebar
+            // reads as the mockup's single highlighted row there too.
+            m_sidebarFocus = m_focus == ui_nav::Focus::sidebar ? m_sidebar : -1;
             if (m_focus == ui_nav::Focus::sidebar) {
                 if (has(edge, GamepadButtons::DPadUp)) { ui_nav::sidebar_move(m_sidebar, false); logf("sidebar: entry %d (%s)", m_sidebar, source); }
                 else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::sidebar_move(m_sidebar, true); logf("sidebar: entry %d (%s)", m_sidebar, source); }

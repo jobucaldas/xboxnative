@@ -67,23 +67,26 @@ inline const char* dl_status_text(int state, int pct, const char* msg) {
 }
 
 // ---- game screen focus (icon buttons replace the old X/Y shortcuts) ----
-// 0 primary button, 1 trash (installed only), 2 cloud, 3 cog. Right moves
-// through them in that order; left moves back; the primary button is the
-// only one on a not-installed page (no trash there), so the ring wraps over
-// two slots instead of three.
+// Icon ids: 0 primary button, 1 trash, 2 cloud, 3 cog. A focus slot numbers
+// the buttons actually present on the row, left to right with no gaps: an
+// installed page has four slots (0 primary, 1 trash, 2 cloud, 3 cog), a
+// not-installed page three (0 primary, 1 cloud, 2 cog — no trash). Right
+// walks the slots in that order, left walks back; main.cpp clamps at both
+// ends. The ring drawing (ui_launcher.h) and main.cpp's A handler both go
+// through these maps, so a ring can never sit on a button A does not
+// activate.
 inline int focus_count(bool installed) { return installed ? 4 : 3; }
-// The ui_launcher::GameVM focus slot for icon button i (0-based, left to
-// right): installed pages show trash/cloud/cog at slots 1/2/3; a
-// not-installed page has no trash, so cloud/cog sit at slots 2/3 and slot 1
-// is skipped.
+// The focus slot of the i-th icon button present (i 0-based among the icons
+// drawn left to right; the icons always start right of the primary button).
 inline int icon_focus_slot(bool installed, int i) {
-    if (!installed) return i == 0 ? 2 : 3;   // cloud, cog
-    return i + 1;                            // trash, cloud, cog
+    (void)installed;
+    return i + 1;
 }
-// The icon button a GameVM focus slot lands on, or -1 (the primary button).
+// The icon id (0 primary, 1 trash, 2 cloud, 3 cog) a focus slot lands on.
 inline int icon_for_slot(bool installed, int slot) {
-    if (!installed) return slot == 2 ? 0 : slot == 3 ? 1 : -1;
-    return slot >= 1 && slot <= 3 ? slot - 1 : -1;
+    if (slot <= 0) return 0;                 // the primary button
+    if (installed) return slot < 4 ? slot : 0;
+    return slot < 3 ? slot + 1 : 0;          // no trash: cloud/cog carry ids 2/3
 }
 
 // ---- logout reachability ----

@@ -101,12 +101,18 @@ inline Primary primary_state(const PrimaryVM& vm) {
 }
 
 // The label the single button shows. The installing button reads INSTALLING n%
-// and turns into CANCEL when it has focus (A then cancels; never a second button).
+// (the real percentage: vm.install_pct 0..1, clamped, rounded down) and turns
+// into CANCEL when it has focus (A then cancels; never a second button).
 inline const char* primary_label(const PrimaryVM& vm, bool focus) {
+    static char pct[32];
     switch (primary_state(vm)) {
         case Primary::play:             return "PLAY";
         case Primary::install:          return "INSTALL";
-        case Primary::installing:       return focus ? "CANCEL" : "INSTALLING 62%";
+        case Primary::installing:
+            if (focus) return "CANCEL";
+            { float p = vm.install_pct; p = p < 0.0f ? 0.0f : p > 1.0f ? 1.0f : p;
+              std::snprintf(pct, sizeof pct, "INSTALLING %d%%", int(p * 100.0f)); }
+            return pct;
         case Primary::cancelling:       return "CANCEL";
         case Primary::launching:        return "LAUNCHING...";
         case Primary::restart_required: return "RESTART REQUIRED";
@@ -132,6 +138,8 @@ struct SidebarVM {
     int all_count = 0, installed_count = 0, queue_count = 0;
     int free_gb_x10 = 4126, used_pct = 34;
     int active = 0;   // 0 All games, 1 Installed, 2 Download queue, 3 Storage management
+    int focus = -1;   // row with the pad focus (pill fill); -1 = the sidebar is
+                      // not focused (mockups: only the active row is highlighted)
 };
 
 struct TileVM {
@@ -190,7 +198,9 @@ struct GameVM {
     const char* achievement_sub = "";
     float progress_pct = 0.0f;           // 0..1 achievement progress bar
     PrimaryVM primary;
-    int focus = -1;          // 0 primary button, 1 trash, 2 cloud, 3 cog (ring drawn)
+    int focus = -1;          // icon id the ring draws: -1 none, 0 primary button,
+                             // 1 trash, 2 cloud, 3 cog (ui_nav::icon_for_slot maps
+                             // the focus slot to it; main.cpp owns the slot walk)
     bool primary_focus = false;
     float install_pct = 0.0f;   // 0..1 while installing
     bool has_art = false;
@@ -294,11 +304,16 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
     float y = 264.0f;
     for (int i = 0; i < 4; ++i) {
         const bool on = i == sb.active;
-        if (on) {
+        const bool focused = i == sb.focus;
+        // mockup 01: the ACTIVE row wears the control pill + green bar; the
+        // row with the pad FOCUS wears the same pill (focus == active reads
+        // as the mockup's single highlighted row). No ring on sidebar rows.
+        if (on || focused) {
             c.fill_round_rect(rect(40, y, 395, 64), radiusControl, ui::theme::control);
-            c.fill_rect(429, y, 6, 64, ui::theme::accent);
+            if (on) c.fill_rect(429, y, 6, 64, ui::theme::accent);
         }
-        text(c, f, Face::Regular, 24, 64, y + 17.5f, rows[i].label, on ? ui::theme::text : ui::theme::text2);
+        text(c, f, Face::Regular, 24, 64, y + 17.5f, rows[i].label,
+             on || focused ? ui::theme::text : ui::theme::text2);
         if (rows[i].count >= 0) {
             char n[16];
             std::snprintf(n, sizeof n, "%d", rows[i].count);
@@ -478,6 +493,10 @@ inline void draw_primary_button(ui::Canvas& c, const Font& f, const GameVM& g) {
         focus_ring(c, rect(58, y - 6, 268, 92), radiusControl + ringRadiusDelta, ringWidth);
 }
 
+// The focus ring highlights the button the same icon id main.cpp's A handler
+// activates: draw order left to right, i == 0 is the primary button (this
+// file's own comments carry the mockup's slot numbers; the ring lives on the
+// button, not the slot).
 inline void draw_icon_buttons(ui::Canvas& c, const GameVM& g, bool installed) {
     using namespace ui::theme;
     const float y = 384.0f;
@@ -489,8 +508,7 @@ inline void draw_icon_buttons(ui::Canvas& c, const GameVM& g, bool installed) {
         if (installed ? i == 0 : false) ui::glyphs::trash(c, rect(bx[i] + 28, y + 28, 24, 24), kIconLight);
         else if (installed ? i == 1 : i == 0) ui::glyphs::cloud(c, rect(bx[i] + 26, y + 30, 28, 20), kIconLight);
         else ui::glyphs::cog(c, rect(bx[i] + 23, y + 23, 34, 34), kIconLight);
-        const int slot = installed ? i : i + 1;   // ui::theme::focus slots: 1 trash, 2 cloud, 3 cog
-        if (g.focus == slot)
+        if (g.focus == 1 + i)                     // ring: icon id 1..3 = the i-th button
             focus_ring(c, rect(bx[i] - 6, y - 6, 92, 92), radiusControl + ringRadiusDelta, ringWidth);
     }
 }

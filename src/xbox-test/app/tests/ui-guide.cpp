@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -249,6 +250,117 @@ int main(int argc, char** argv) {
         uint8_t ten[4] = {200, 200, 200, 255};
         ui_guide::dim_row(ten, 1, 100);
         check(ten[0] == 200 && ten[3] == 255, "dim_row at 100% keep is a no-op");
+    }
+
+    // ---- pure logic: toast expiry on an injected clock ----
+    {
+        ui_guide::Toast t{"Marathon", nullptr, 0, 0, 100.0};
+        check(!ui_guide::toast_expired(t, 100.0, 5.0), "toast born now is alive");
+        check(!ui_guide::toast_expired(t, 104.999, 5.0), "toast just under its lifetime is alive");
+        check(ui_guide::toast_expired(t, 105.001, 5.0), "toast past its lifetime is expired");
+        check(ui_guide::toast_expired(t, 1000.0, 5.0), "toast far past its lifetime is expired");
+        ui_guide::Toast never{"", nullptr, 0, 0, 0.0};
+        check(!ui_guide::toast_expired(never, 1000.0, 5.0), "unstamped toast (born 0) never expires");
+    }
+
+    // ---- pure logic: AchievementStore generation bumps on every mutation ----
+    {
+        ui_guide::AchievementStore store;
+        const unsigned g0 = store.generation();
+        auto achs = make_achievements();
+        store.set_achievements(achs);
+        const unsigned g1 = store.generation();
+        check(g1 != g0, "generation bumps on set_achievements");
+        store.push_unlock(0, "Nov 10, 2026", 1.0);
+        check(store.generation() != g1, "generation bumps on push_unlock");
+        const unsigned g3 = store.generation();
+        auto icon = std::make_shared<std::vector<uint32_t>>(64 * 64, 0xFF3F5B73);
+        check(store.set_icon(0, icon, 64, 64, true), "set_icon on a valid index succeeds");
+        check(store.generation() != g3, "generation bumps on set_icon");
+        const unsigned g4 = store.generation();
+        store.unlock(1, "Treasure Hunter", "Open 10 hidden chests", "Nov 10, 2026", 2.0);
+        check(store.generation() != g4, "generation bumps on unlock");
+        check(!store.set_icon(99, icon, 64, 64, true), "set_icon of a bad index fails");
+        check(store.generation() == store.generation(), "generation is stable without mutations");
+    }
+
+    // ---- pure logic: guide geometry (design space 1920x1080) ----
+    {
+        const ui::Rect card = ui_guide::card_rect(1920, 1080);
+        check(int(card.x) == 80 && int(card.y) == 32 && int(card.w) == 560 && int(card.h) == 1016,
+              "card_rect at 1080p is exactly (80,32,560,1016)");
+        const ui::Rect toast = ui_guide::toast_rect(1920, 1080);
+        check(int(toast.x) == 784 && int(toast.y) == 912 && int(toast.w) == 352 && int(toast.h) == 88,
+              "toast_rect at 1080p is exactly (784,912,352,88)");
+        // everything inside the frame at 1080p
+        check(card.x >= 0 && card.y >= 0 && card.x + card.w <= 1920 && card.y + card.h <= 1080,
+              "card fits the 1080p frame");
+        check(toast.x >= 0 && toast.y >= 0 && toast.x + toast.w <= 1920 && toast.y + toast.h <= 1080,
+              "toast fits the 1080p frame");
+        // 720p: scaled by 2/3, still inside
+        const ui::Rect card720 = ui_guide::card_rect(1280, 720);
+        check(card720.x >= 0 && card720.y >= 0 &&
+                  card720.x + card720.w <= 1280 && card720.y + card720.h <= 720,
+              "card fits a 720p frame");
+        const ui::Rect toast720 = ui_guide::toast_rect(1280, 720);
+        check(toast720.x >= 0 && toast720.y >= 0 &&
+                  toast720.x + toast720.w <= 1280 && toast720.y + toast720.h <= 720,
+              "toast fits a 720p frame");
+        check(ui_guide::card_rect(1920, 1080).w == card.w, "card_rect is deterministic");
+        // degenerate sizes stay in bounds
+        const ui::Rect cardTiny = ui_guide::card_rect(100, 60);
+        check(cardTiny.x >= 0 && cardTiny.y >= 0 && cardTiny.x + cardTiny.w <= 100 && cardTiny.y + cardTiny.h <= 60,
+              "card fits a tiny frame");
+    }
+
+    // ---- pure logic: scale_nearest ----
+    {
+        // 2x2 -> 4x4 doubles every pixel
+        const uint32_t src[4] = {0xFF000000u, 0xFF111111u, 0xFF222222u, 0xFF333333u};
+        auto out = ui_guide::scale_nearest(src, 2, 2, 4, 4);
+        check(out.size() == 16, "scale_nearest: output size is dw*dh");
+        // 2x upscale: output rows 0,1 <- source row 0; rows 2,3 <- row 1;
+        // columns likewise (out[8] is row 2, col 0 -> src[2]; out[15] row 3
+        // col 3 -> src[3])
+        check(out[0] == src[0] && out[1] == src[0] && out[2] == src[1] && out[3] == src[1] &&
+                  out[8] == src[2] && out[9] == src[2] && out[10] == src[3] && out[11] == src[3] &&
+                  out[14] == src[3] && out[15] == src[3],
+              "scale_nearest: 2x upscale reproduces the source pixels");
+        // 1:1 is an identity copy
+        auto same = ui_guide::scale_nearest(src, 2, 2, 2, 2);
+        check(same[0] == src[0] && same[1] == src[1] && same[2] == src[2] && same[3] == src[3],
+              "scale_nearest: 1:1 is identity");
+        // downscale never reads out of bounds (samples stay in range)
+        auto small = ui_guide::scale_nearest(src, 2, 2, 1, 1);
+        check(small.size() == 1 && (small[0] == src[0] || small[0] == src[3]),
+              "scale_nearest: downscale samples a source pixel");
+    }
+
+    // ---- card-local render: draw_guide_at at (0,0) into a card-sized canvas ----
+    {
+        std::vector<uint32_t> cardPx(size_t(ui_guide::kCardW) * size_t(ui_guide::kCardH),
+                                     ui::theme::page);
+        ui::Canvas cardC(cardPx.data(), int(ui_guide::kCardW), int(ui_guide::kCardH), int(ui_guide::kCardW));
+        ui_guide::Model m;
+        m.tab = 0; m.sel = 0;
+        ui_guide::draw_guide_at(cardC, font, m, 0, 0);
+        // the card's tab underline lands at card-local (kTabCx[0]-30, kUnderY+2),
+        // i.e. where it would on the full frame minus the (80,32) origin
+        check(cardPx[size_t(ui_guide::kUnderY + 2) * int(ui_guide::kCardW) +
+                     int(ui_guide::kTabCx[0] - 30)] == ui::theme::accent,
+              "card-local render puts the tab underline at the design offsets");
+        // compositing the card canvas over a full frame at card_rect reproduces
+        // the screen-space draw_guide result (same pixel, same colour)
+        const int W = ui::theme::width, H = ui::theme::height;
+        std::vector<uint32_t> frame(size_t(W) * H, ui::theme::page);
+        ui::Canvas fc(frame.data(), W, H, W);
+        const ui::Rect r = ui_guide::card_rect(W, H);
+        for (int y = 0; y < int(r.h); ++y)
+            std::copy_n(cardPx.data() + size_t(y) * int(ui_guide::kCardW), int(ui_guide::kCardW),
+                        frame.data() + size_t(int(r.y) + y) * W + int(r.x));
+        check(frame[size_t(ui_guide::kCardY + ui_guide::kUnderY + 2) * W +
+                    int(ui_guide::kCardX + ui_guide::kTabCx[0] - 30)] == ui::theme::accent,
+              "composited card-local render matches the screen-space coordinates");
     }
 
     // ---- rendering ----
