@@ -38,9 +38,9 @@ inline void face_button(Canvas& c, float cx, float cy, float diameter, char lett
     c.fill_circle(cx, cy, r, disc);
     std::string s(1, letter);
     float px = diameter * 0.62f;
-    float w = font.measure(Face::Bold, px, s);
-    font.draw(c, Face::Bold, px, cx - w * 0.5f, cy + font.ascent(Face::Bold, px) * 0.5f - font.descent(Face::Bold, px) * 0.12f,
-              s, letterColor);
+    float ix0, iy0, ix1, iy1;   // centre the visible letter (its ink box) on the disc, not the line box
+    if (font.ink_box(Face::Bold, px, s, ix0, iy0, ix1, iy1))
+        font.draw(c, Face::Bold, px, cx - (ix0 + ix1) * 0.5f, cy - (iy0 + iy1) * 0.5f, s, letterColor);
 }
 
 // Menu (hamburger): ring with three short lines.

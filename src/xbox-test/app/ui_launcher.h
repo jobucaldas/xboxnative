@@ -245,11 +245,12 @@ inline float draw_hint_bar(ui::Canvas& c, const Font& f, const char* const* pair
             if (filled) {
                 ui::glyphs::face_button(c, x + kHintDiscPx * 0.5f, cy, kHintDiscPx, key, f, disc, letter);
             } else {
-                c.fill_circle(x + kHintDiscPx * 0.5f, cy, kHintDiscPx * 0.5f - 1.0f, 0);
                 c.stroke_circle(x + kHintDiscPx * 0.5f, cy, kHintDiscPx * 0.5f - 1.0f, 2.0f,
                                 ui::theme::glyph, Align::Center);
-                text_c(c, f, Face::Bold, 15.0f, x + kHintDiscPx * 0.5f, kHintY + 4.0f,
-                       std::string(1, key).c_str(), letter);
+                float ix0, iy0, ix1, iy1;   // centre the visible letter on the ring
+                if (f.ink_box(Face::Bold, 15.0f, std::string(1, key), ix0, iy0, ix1, iy1))
+                    f.draw(c, Face::Bold, 15.0f, x + kHintDiscPx * 0.5f - (ix0 + ix1) * 0.5f, cy - (iy0 + iy1) * 0.5f,
+                           std::string(1, key), letter);
             }
         }
         text(c, f, Face::Regular, px, x + kHintDiscPx + 12.0f, kHintY + 1.0f, label, ui::theme::hint);

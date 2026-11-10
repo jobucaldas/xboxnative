@@ -124,6 +124,19 @@ public:
         return float(-d) * scale_of(f, px);
     }
 
+    // Ink box of the first codepoint of `s` relative to its pen origin and baseline (x right, y down,
+    // so a cap letter has y0 < 0): lets glyph prompts centre the visible letter, not its line box.
+    bool ink_box(Face face, float px, const std::string& s, float& x0, float& y0, float& x1, float& y1) const {
+        const FaceData& f = faces_[static_cast<int>(face)];
+        if (!f.ok || s.empty()) return false;
+        const char* p = s.data(); uint32_t cp; utf8_next(p, s.data() + s.size(), cp);
+        int bx0, by0, bx1, by1;
+        if (!stbtt_GetGlyphBox(&f.info, glyph_index(f, cp), &bx0, &by0, &bx1, &by1)) return false;
+        float sc = scale_of(f, px);
+        x0 = float(bx0) * sc; x1 = float(bx1) * sc; y0 = -float(by1) * sc; y1 = -float(by0) * sc;
+        return true;
+    }
+
     // Advance width of `s`, including pair kerning.
     float measure(Face face, float px, const std::string& s) const {
         return measure(face, px, s.data(), s.size());

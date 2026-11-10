@@ -272,6 +272,21 @@ int main(int argc, char** argv) {
         }
     check(grey > 100, "text is anti-aliased (intermediate greys present)");
 
+    // glyph letters sit in the middle of their disc: ink bbox centre within 0.75px, both axes
+    for (char letter : {'A', 'B', 'X', 'Y'}) {
+        const int D = 26; std::vector<uint32_t> buf(D * D, 0xFF000000u);
+        ui::Canvas gc(buf.data(), D, D, D);
+        ui::glyphs::face_button(gc, D * 0.5f, D * 0.5f, float(D), letter, font, 0xFFFFFFFFu, 0xFF000000u);
+        int x0 = D, y0 = D, x1 = -1, y1 = -1;
+        for (int y = 0; y < D; ++y) for (int x = 0; x < D; ++x) {
+            const float dx = x + 0.5f - D * 0.5f, dy = y + 0.5f - D * 0.5f;
+            if (dx * dx + dy * dy > 9.0f * 9.0f) continue;   // inside the disc, away from its edge
+            if ((buf[y * D + x] & 0xFF) < 128) { x0 = std::min(x0, x); x1 = std::max(x1, x); y0 = std::min(y0, y); y1 = std::max(y1, y); }
+        }
+        const float cx = (x0 + x1 + 1) * 0.5f, cy = (y0 + y1 + 1) * 0.5f;
+        char msg[64]; std::snprintf(msg, sizeof msg, "glyph %c letter is centred in its disc", letter);
+        check(x1 >= 0 && std::fabs(cx - D * 0.5f) <= 0.75f && std::fabs(cy - D * 0.5f) <= 0.75f, msg);
+    }
     bool wrote = write_png(png.c_str(), px.data(), W, H);
     check(wrote, "PNG written");
     if (wrote) std::printf("render: %s\n", png.c_str());
