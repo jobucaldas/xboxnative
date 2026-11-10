@@ -1270,8 +1270,8 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     // A render target's pixels copied into a SYSTEMMEM surface, which is how a
     // game takes a screenshot and how the off-device fixtures read back what
     // they drew. D3D9 requires the same size and format on both surfaces, and
-    // D3D11's CopyResource needs the same texture description, so this is the
-    // copy D3D9 documents.
+    // the copy is per subresource: a level surface of a mipmapped texture is
+    // smaller than the texture it came from.
     HRESULT STDMETHODCALLTYPE GetRenderTargetData(IDirect3DSurface9* source,
                                                   IDirect3DSurface9* destination) override {
         if(!source||!destination)return D3DERR_INVALIDCALL;
@@ -1282,11 +1282,12 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
             d3dshim::noteOnce("D3D9 shim: GetRenderTargetData needs a SYSTEMMEM destination surface");
             return D3DERR_INVALIDCALL;
         }
-        D3D11_TEXTURE2D_DESC from{},to{};
-        src->texture->GetDesc(&from);
-        dst->texture->GetDesc(&to);
-        if(from.Width!=to.Width||from.Height!=to.Height||from.Format!=to.Format)return D3DERR_INVALIDCALL;
-        context()->CopyResource(dst->texture,src->texture);
+        // The surfaces' own descriptions, not their textures': a level surface
+        // of a mipmapped texture is smaller than the texture it came from.
+        if(src->desc.Width!=dst->desc.Width||src->desc.Height!=dst->desc.Height
+                ||src->desc.Format!=dst->desc.Format)return D3DERR_INVALIDCALL;
+        // CopyResource would copy the whole texture; these are subresources.
+        context()->CopySubresourceRegion(dst->texture,dst->level,0,0,0,src->texture,src->level,nullptr);
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE GetFrontBufferData(UINT,IDirect3DSurface9*) override { return D3DERR_INVALIDCALL; }
