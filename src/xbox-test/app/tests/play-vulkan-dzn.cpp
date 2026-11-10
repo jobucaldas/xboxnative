@@ -260,6 +260,7 @@ typedef void (__stdcall *PFN_vkCmdPipelineBarrier)(VkCommandBuffer,VkFlags,VkFla
 typedef void (__stdcall *PFN_vkCmdBeginRenderPass)(VkCommandBuffer,const VkRenderPassBeginInfo*,int32_t);
 typedef void (__stdcall *PFN_vkCmdEndRenderPass)(VkCommandBuffer);
 typedef VkResult (__stdcall *PFN_vkEndCommandBuffer)(VkCommandBuffer);
+typedef VkResult (__stdcall *PFN_vkResetCommandPool)(VkDevice,VkCommandPool,VkFlags);
 typedef VkResult (__stdcall *PFN_vkQueueSubmit)(VkQueue,uint32_t,const VkSubmitInfo*,VkFence);
 typedef VkResult (__stdcall *PFN_vkQueueWaitIdle)(VkQueue);
 typedef VkResult (__stdcall *PFN_vkAcquireNextImageKHR)(VkDevice,VkSwapchainKHR,uint64_t,VkSemaphore,VkFence,uint32_t*);
@@ -417,6 +418,7 @@ int vk_dzn_entry() {
     auto cmdBeginRenderPass = (PFN_vkCmdBeginRenderPass)gipa(instance, "vkCmdBeginRenderPass");
     auto cmdEndRenderPass = (PFN_vkCmdEndRenderPass)gipa(instance, "vkCmdEndRenderPass");
     auto endCommandBuffer = (PFN_vkEndCommandBuffer)gipa(instance, "vkEndCommandBuffer");
+    auto resetCommandPool = (PFN_vkResetCommandPool)gipa(instance, "vkResetCommandPool");
     auto queueSubmit = (PFN_vkQueueSubmit)gipa(instance, "vkQueueSubmit");
     auto queueWaitIdle = (PFN_vkQueueWaitIdle)gipa(instance, "vkQueueWaitIdle");
     auto acquireNextImage = (PFN_vkAcquireNextImageKHR)gipa(instance, "vkAcquireNextImageKHR");
@@ -427,7 +429,8 @@ int vk_dzn_entry() {
     auto resetFences = (PFN_vkResetFences)gipa(instance, "vkResetFences");
     if (!createSwapchain || !getImages || !createImageView || !createRenderPass || !createFramebuffer ||
         !createCommandPool || !allocateCommandBuffers || !beginCommandBuffer || !cmdPipelineBarrier ||
-        !cmdBeginRenderPass || !cmdEndRenderPass || !endCommandBuffer || !queueSubmit || !queueWaitIdle ||
+        !cmdBeginRenderPass || !cmdEndRenderPass || !endCommandBuffer || !resetCommandPool ||
+        !queueSubmit || !queueWaitIdle ||
         !acquireNextImage || !queuePresent || !createSemaphore || !createFence || !waitForFences || !resetFences)
         return 18;
 
@@ -501,6 +504,13 @@ int vk_dzn_entry() {
         uint32_t index = 0;
         result = acquireNextImage(device, swapchain, 1000000000ull, acquired, nullptr, &index);
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) return fail(23, "vkAcquireNextImageKHR", result);
+        // The pool has no VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, so the command buffer cannot be
+        // reset individually; resetting the pool is what returns it to the initial state. Without this the
+        // second vkBeginCommandBuffer is called on an executable buffer, which the runtime refuses.
+        if (frame) {
+            result = resetCommandPool(device, pool, 0);
+            if (result != VK_SUCCESS) return fail(23, "vkResetCommandPool", result);
+        }
         VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr, 0, nullptr};
         result = beginCommandBuffer(commandBuffer, &beginInfo);
         if (result != VK_SUCCESS) return fail(23, "vkBeginCommandBuffer", result);
