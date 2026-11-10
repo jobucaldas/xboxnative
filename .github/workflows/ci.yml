@@ -167,7 +167,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install cross compiler and PE tools
-        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64 llvm lld
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64 llvm lld wine64
       # Build and inspect only: the shim must import nothing but what Play routes,
       # have no writable code section, and export the entry points. Driving it
       # against Wine's d3d11 is src/xbox-test/uwph/d3d9/test.sh, run locally.
@@ -178,6 +178,12 @@ jobs:
       # pinned donor still compiles CRT-free and keeps its single export.
       - name: build the D3D9 shader translator and inspect its PE
         run: bash src/tools/build-d3d9-translator.sh "$RUNNER_TEMP/d3d9-translator"
+      # The console's d3d9-triangle selftest faults on the fixed-function
+      # POSITIONT path this regression pins: the translator must emit the
+      # POSITIONT input with the SV_Position system value in both signatures.
+      # The driver never opens a d3d11 device, so headless CI can run it.
+      - name: D3D9 translator POSITIONT signature regression
+        run: bash src/tools/d3d9-translator/test-positiont.sh "$RUNNER_TEMP/d3d9-translator"
   diag-fixtures:
     runs-on: ubuntu-latest
     steps:

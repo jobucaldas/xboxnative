@@ -22,8 +22,9 @@ for a in "$@"; do case "$a" in --dry-run) dry=1 ;; *) out=$a ;; esac; done
 out=${out:-$root/out/d3d9-translator}
 read -r _ url sha < <(grep -E '^dxup-src[[:space:]]' "$root/deps.pin") || { echo "dxup-src missing from deps.pin" >&2; exit 2; }
 patchfile=$root/patches/dxup-src/0001-play-crt-free.patch
+patchfile2=$root/patches/dxup-src/0002-play-positiont-siv.patch
 read -r patchsha _ < <(sha256sum "$patchfile")
-read -r recipe _ < <(sha256sum "$patchfile" "${BASH_SOURCE[0]}" \
+read -r recipe _ < <(sha256sum "$patchfile" "$patchfile2" "${BASH_SOURCE[0]}" \
     "$root/src/tools/d3d9-translator/entry.cpp" \
     "$root/src/tools/d3d9-translator/support.cpp" \
     "$root/src/tools/d3d9-translator/libc.cpp" | sha256sum)
@@ -45,6 +46,7 @@ src=$work/dxup-7cce9ee7ddecadbf58f12f74547dc1bf1e09c5f7   # the tarball's own to
 if [[ ! -f $work/.extracted ]]; then   # marker written only after a complete extract; an interrupted one is redone
   rm -rf "$src" "$work/obj"; tar -C "$work" -xf "$tar"
   patch --batch --fuzz=0 -d "$src" -p1 < "$patchfile"
+  patch --batch --fuzz=0 -d "$src" -p1 < "$patchfile2"
   touch "$work/.extracted"
 fi
 obj=$work/obj; mkdir -p "$obj"
@@ -111,8 +113,10 @@ Built from DXUP $(basename "$url") (sha256 $sha), zlib licence, Copyright (c) 20
 source: https://github.com/Joshua-Ashton/dxup at 7cce9ee7ddecadbf58f12f74547dc1bf1e09c5f7
 Build: $(x86_64-w64-mingw32-g++ --version | head -1); mingw-w64, CRT-free, kernel32 only.
 Patch: 0001-play-crt-free.patch sha256 $patchsha
+Patch: 0002-play-positiont-siv.patch sha256 $(sha256sum "$patchfile2" | cut -d' ' -f1)
 Recipe sha256 $recipe
 This DLL is not part of the xboxnative repository; rebuild it with src/tools/build-d3d9-translator.sh.
 S
 cp "$patchfile" "$out/0001-play-crt-free.patch"
+cp "$patchfile2" "$out/0002-play-positiont-siv.patch"
 echo "ok: $out"; cat "$out/SHA256SUMS"

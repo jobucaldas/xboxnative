@@ -1,0 +1,35 @@
+diff -ruN a/src/util/shared_conversions.cpp b/src/util/shared_conversions.cpp
+--- a/src/util/shared_conversions.cpp	2026-11-10 16:19:00.263398628 -0300
++++ b/src/util/shared_conversions.cpp	2026-11-10 16:18:51.113567100 -0300
+@@ -52,6 +52,14 @@
+       if (usage > 14 || usage < 0)
+         return dclUsageMap[14];
+ 
++      // Play's fix: keep the name in step with sysValue. A vertex shader's
++      // POSITIONT input is emitted as the SV_Position system value, so the
++      // signature element must be named "SV_Position"; a plain "POSITIONT"
++      // has no system-value entry and the D3D11 layer's converter dies
++      // resolving it at shader creation.
++      if (vsInput && usage == D3DDECLUSAGE_POSITIONT)
++        return dclUsageMapSemantic[usage];
++
+       return vsInput ? dclUsageMap[usage] : dclUsageMapSemantic[usage];
+     }
+ 
+@@ -59,6 +67,16 @@
+       if (target)
+         return D3D_NAME_UNDEFINED;
+ 
++      // Play's fix: a vertex shader's POSITIONT input is the rasterizer
++      // position already transformed to screen space, so it is a system value
++      // (D3D_NAME_POSITION), not a plain semantic. Emitting the literal
++      // "POSITIONT" with an undefined system value makes the D3D11 layer's
++      // DXBC->DXIL converter dereference a null semantic entry at shader
++      // creation; the SHEX dcl and the ISGN element must both carry the
++      // system value, which this single conversion drives.
++      if (vsInput && usage == D3DDECLUSAGE_POSITIONT)
++        return D3D_NAME_POSITION;
++
+       if (vsInput)
+         return D3D_NAME_UNDEFINED;
+ 
