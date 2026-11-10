@@ -1011,6 +1011,28 @@ static const wchar_t* vulkanDriversKey=L"SOFTWARE\\Khronos\\Vulkan\\Drivers";
 // acceptance) leaves the guest with the same clean "no devices" answer milestone 1 gives, never a hard failure.
 // A manifest that is not packaged is skipped, so a launcher built without dzn behaves exactly as before.
 static const wchar_t* const vulkanDriverManifests[]={L"vulkan-dzn.json",L"vulkan-null-icd.json"};
+// The key is machine-wide and survives an upgrade, so every install used to leave its own two entries behind. The loader
+// de-duplicates registry entries by manifest basename and keeps the first it enumerates (loader_windows.c: a later
+// "vulkan-dzn.json" is skipped as a duplicate), so one stale entry from an earlier package shadows the live one and the
+// loader reports no driver at all. Remove our own manifests that point anywhere but the current runtime directory; a
+// third-party driver's entry is left alone.
+static void pruneStaleVulkanDriverFiles(HKEY key) {
+    std::vector<std::wstring> stale;
+    for(DWORD index=0;;++index) {
+        wchar_t name[1024]; DWORD chars=DWORD(sizeof name/sizeof name[0]);
+        LONG e=regb::RegEnumValueW(key,index,name,&chars,nullptr,nullptr,nullptr,nullptr);
+        if(e==ERROR_NO_MORE_ITEMS) break;
+        if(e==ERROR_MORE_DATA) continue;   // a name longer than any of ours; not one this function owns
+        if(e!=ERROR_SUCCESS) return;       // an unreadable value means the key is not ours to prune
+        std::wstring value(name,chars);
+        auto slash=value.find_last_of(L"\\/");
+        std::wstring leaf=slash==std::wstring::npos?value:value.substr(slash+1);
+        for(auto manifest:vulkanDriverManifests)
+            if(!_wcsicmp(leaf.c_str(),manifest) && _wcsicmp(value.c_str(),(runtimeDirectory+L"\\"+manifest).c_str()))
+                stale.push_back(value);
+    }
+    for(auto& value:stale) regb::RegDeleteValueW(key,value.c_str());
+}
 static void publishVulkanDriverFiles(const std::wstring& path) {
     if(basename(path)!="vulkan-1.dll") return;
     // A game that ships its own loader keeps its own driver discovery: only the
@@ -1024,6 +1046,7 @@ static void publishVulkanDriverFiles(const std::wstring& path) {
     if(listed.empty()) return;
     HKEY key=nullptr;
     if(regb::RegCreateKeyExW(HKEY_LOCAL_MACHINE,vulkanDriversKey,0,nullptr,0,KEY_ALL_ACCESS,nullptr,&key,nullptr)!=ERROR_SUCCESS) return;
+    pruneStaleVulkanDriverFiles(key);
     DWORD zero=0;
     LONG set=ERROR_SUCCESS;
     for(auto& manifest:listed) {
