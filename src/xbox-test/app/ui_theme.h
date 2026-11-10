@@ -91,7 +91,7 @@ constexpr Type tile         {22, 400};
 constexpr Type count        {22, 400};
 constexpr Type toastTitle   {22, 600};
 constexpr Type hintText     {20, 400};
-constexpr Type small        {19, 400};
+constexpr Type smallText   {19, 400};
 constexpr Type caption      {18, 400};
 constexpr Type toastSub     {18, 400};
 constexpr Type micro        {16, 400};

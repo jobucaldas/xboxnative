@@ -154,7 +154,7 @@ int main(int argc, char** argv) {
     using namespace ui::theme;
     float y = 96;
     const ui::theme::Type scale[] = {title, screenTitle, section, tab, cardLabel, button, panelHeading, sidebar, body, tile,
-                              toastTitle, hintText, small, caption, micro, badge};
+                              toastTitle, hintText, smallText, caption, micro, badge};
     const char* names[] = {"title 44/600", "screenTitle 56/600", "section 32/600", "tab 32/400", "cardLabel 32/400",
                            "button 30/600", "panelHeading 26/600", "sidebar 24/400", "body 24/400", "tile 22/400",
                            "toastTitle 22/600", "hintText 20/400", "small 19/400", "caption 18/400", "micro 16/400",

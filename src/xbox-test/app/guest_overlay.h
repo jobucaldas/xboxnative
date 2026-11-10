@@ -1,66 +1,128 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// In-game launcher overlay: View+Menu (Select+Start) opens a menu with Resume,
-// Quit game, Force quit and an FPS counter toggle; the counter sits top-left.
-// The game owns the CoreWindow swapchain, so the overlay is copied into the
-// game's current back buffer just before its own Present (D3D11 games; other
-// back-buffer kinds are left alone). Copies only: no pipeline state changes.
+// In-game launcher overlay: View+Menu (Select+Start) opens the Xbox guide
+// (ui_guide.h): Resume, Quit game, Force quit, achievements, and an FPS
+// counter with an optional frame-time graph, top-left. The game owns the
+// CoreWindow swapchain, so the overlay is copied into the game's current back
+// buffer just before its own Present (D3D11 games; other back-buffer kinds
+// are left alone). Copies only: no pipeline state changes.
 #pragma once
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include "host/d3d11_diag.h"   // the Present-failure path reports through its sink
+#include <winrt/base.h>
+#include <winrt/Windows.Gaming.Input.h>
 #include <array>
 #include <atomic>
 #include <mutex>
 #include <string>
 #include <vector>
 
+#include "ui_canvas.h"
+#include "ui_font.h"
+#include "ui_guide.h"
+
 namespace guest_overlay {
 enum Item { Resume, Quit, ForceQuit, Fps, ItemCount };
 inline std::atomic<bool> menuOpen{false};
 inline std::atomic<int> selection{Resume};
+inline std::atomic<int> ui_guideTab{0};        // guide tab: 0 Home, 1 Achievements, 2 Settings
+inline std::atomic<int> achTop{0};             // first visible achievement row
+inline std::atomic<bool> achDirty{true};       // achievements snapshot needs a refresh
 inline std::atomic<bool> fpsOn{false};
+inline std::atomic<bool> graphOn{false};       // frame-time graph, drawn only when fpsOn too
 inline std::atomic<bool> busy{false};          // quitting: the menu shows a status line
 inline std::mutex statusM;
 inline std::string status;
 inline void set_status(const std::string& s){std::lock_guard<std::mutex> l(statusM);status=s;}
 
-// ---- CPU canvas (0xAARRGGBB), the launcher's 8x8 bitmap font
-struct Canvas {
-    int w=0,h=0;std::vector<uint32_t> px;
-    void reset(int width,int height,uint32_t c){w=width;h=height;px.assign(size_t(w)*h,c);}
-    void fill(int x,int y,int fw,int fh,uint32_t c) {
-        for(int j=std::max(0,y);j<std::min(h,y+fh);++j)for(int i=std::max(0,x);i<std::min(w,x+fw);++i)px[size_t(j)*w+i]=c;
+// ---- guide state: achievements snapshot + toasts, filled by the Steam thread
+inline ui_guide::AchievementStore achievements;
+inline std::mutex toastsM;
+inline std::vector<ui_guide::Toast> toasts;   // queued; the oldest shows for kToastLifeSec
+inline void push_toast(ui_guide::Toast t) {
+    if (t.title.empty()) return;
+    std::lock_guard<std::mutex> l(toastsM);
+    if (toasts.size() < 4) toasts.push_back(std::move(t));
+}
+// The toast to draw right now: the oldest queued one, with entries past their
+// 5 s lifetime dropped. `born` is seconds on the same clock the caller used
+// when it filled Toast::born (the overlay's QPC seconds work for both).
+inline constexpr double kToastLifeSec = 5.0;
+inline ui_guide::Toast active_toast(double nowSeconds) {
+    std::lock_guard<std::mutex> l(toastsM);
+    while (!toasts.empty() && toasts.front().born > 0 &&
+           nowSeconds - toasts.front().born > kToastLifeSec)
+        toasts.erase(toasts.begin());
+    return toasts.empty() ? ui_guide::Toast{} : toasts.front();
+}
+
+// ---- Selawik fonts for the guide, loaded once (caller passes the three TTF
+// paths: regular, semibold, bold); without them the guide falls back to the
+// 8x8 bitmap font.
+inline std::mutex fontM;
+inline ui::Font guideFont;
+inline std::vector<uint8_t> fontData[3];       // keeps the TTF bytes alive for stb_truetype
+inline bool fontTried = false;
+inline bool load_fonts(const char* const* files, size_t n) {   // [regular, semibold, bold] TTF paths
+    std::lock_guard<std::mutex> l(fontM);
+    if (fontTried) return guideFont.ready();
+    fontTried = true;
+    bool ok = n >= 3;
+    for (size_t i = 0; ok && i < 3; ++i) {
+        FILE* f = std::fopen(files[i], "rb");
+        if (!f) { ok = false; break; }
+        std::fseek(f, 0, SEEK_END);
+        long sz = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        fontData[i].resize(size_t(sz > 0 ? sz : 0));
+        ok = sz > 0 && std::fread(fontData[i].data(), 1, fontData[i].size(), f) == fontData[i].size();
+        std::fclose(f);
+        if (ok) ok = guideFont.load(ui::Face(i), fontData[i].data(), fontData[i].size());
     }
-    void text(int x,int y,const std::string& s,int sc,uint32_t c) {
-        for(size_t k=0;k<s.size();++k){unsigned char ch=(unsigned char)s[k];if(ch>=128)ch='?';
-            for(int r=0;r<8;++r){unsigned char row=(unsigned char)font8x8_basic[ch][r];
-                for(int b=0;b<8;++b)if(row&(1<<b))fill(x+int(k)*8*sc+b*sc,y+r*sc,sc,sc,c);}}
-    }
-};
-inline uint32_t rgb(int r,int g,int b){return 0xFF000000u|(r<<16)|(g<<8)|b;}
+    return ok;
+}
+
+// ---- legacy 8x8 fallback text (used only when the Selawik fonts are absent)
+inline uint32_t rgb(int r,int g,int b){return ui::theme::argb(255,unsigned(r),unsigned(g),unsigned(b));}
+// Draws `s` with the 8x8 bitmap font at `sc` pixels per cell. main.cpp includes
+// font8x8_basic.h before this header, so the table is in scope.
+inline void text8(ui::Canvas& c,int x,int y,const std::string& s,int sc,uint32_t col) {
+    for(size_t k=0;k<s.size();++k){unsigned char ch=(unsigned char)s[k];if(ch>=128)ch='?';
+        for(int r=0;r<8;++r){unsigned char row=(unsigned char)font8x8_basic[ch][r];
+            for(int b=0;b<8;++b)if(row&(1<<b))c.fill_rect(float(x+int(k)*8*sc+b*sc),float(y+r*sc),float(sc),float(sc),col);}}
+}
+// A 8x8-only fallback "font" is not a ui::Font; without Selawik the guide
+// simply draws its card flat (the caller's fallback), and the FPS counter
+// falls back to the legacy 8x8 text path.
+inline bool fonts_ready(){return guideFont.ready();}
+inline std::vector<uint32_t> pxScratch;   // guide-card pixel buffer, reused per frame
 
 // ---- GPU side: one cached texture per panel, in the back buffer's format
 struct Panel {
     winrt::com_ptr<ID3D11Texture2D> tex;ID3D11Device* device=nullptr;int w=0,h=0;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
     std::vector<uint32_t> staging;
     void blit(ID3D11Device* dev,ID3D11DeviceContext* ctx,ID3D11Texture2D* target,DXGI_FORMAT fmt,bool rgba,
-              const Canvas& c,int x,int y,int tw,int th) {
-        if(x<0||y<0||x+c.w>tw||y+c.h>th)return;
-        if(!tex||device!=dev||w!=c.w||h!=c.h||format!=fmt) {
-            tex=nullptr;D3D11_TEXTURE2D_DESC d{};d.Width=c.w;d.Height=c.h;d.MipLevels=1;d.ArraySize=1;d.Format=fmt;
+              const ui::Canvas& c,int x,int y,int tw,int th) {
+        if(x<0||y<0||x+c.width()>tw||y+c.height()>th)return;
+        if(!tex||device!=dev||w!=c.width()||h!=c.height()||format!=fmt) {
+            tex=nullptr;D3D11_TEXTURE2D_DESC d{};d.Width=c.width();d.Height=c.height();d.MipLevels=1;d.ArraySize=1;d.Format=fmt;
             d.SampleDesc.Count=1;d.Usage=D3D11_USAGE_DEFAULT;
             if(FAILED(dev->CreateTexture2D(&d,nullptr,tex.put())))return;
-            device=dev;w=c.w;h=c.h;format=fmt;
+            device=dev;w=c.width();h=c.height();format=fmt;
         }
-        staging.resize(c.px.size());
-        for(size_t i=0;i<c.px.size();++i){uint32_t p=c.px[i];   // memory order: BGRA for 0xAARRGGBB, swap for RGBA
+        const uint32_t* px=c.data();
+        staging.resize(c.width()*c.height());
+        for(size_t i=0;i<staging.size();++i){uint32_t p=px[i];   // memory order: BGRA for 0xAARRGGBB, swap for RGBA
             staging[i]=rgba?((p&0xFF00FF00u)|((p>>16)&0xFF)|((p&0xFF)<<16)):p;}
-        ctx->UpdateSubresource(tex.get(),0,nullptr,staging.data(),UINT(c.w*4),0);
+        ctx->UpdateSubresource(tex.get(),0,nullptr,staging.data(),UINT(c.width()*4),0);
         ctx->CopySubresourceRegion(target,0,UINT(x),UINT(y),0,tex.get(),0,nullptr);
     }
 };
 inline LARGE_INTEGER lastSample{},freq{};
 inline Panel fpsPanel,menuPanel,graphPanel;
+// Staging pair for the 55% dim behind the guide card: a copy of the card's
+// back-buffer region read back to the CPU, blended there, uploaded back.
+inline winrt::com_ptr<ID3D11Texture2D> dimStaging;inline int dimW=0,dimH=0;inline DXGI_FORMAT dimFmt=DXGI_FORMAT_UNKNOWN;
 // ---- Frame timing: interval between the game's Presents and the time spent
 // inside Present itself (blocking on the display/GPU queue). Kept for the
 // on-screen graph and appended to LocalState\frametimes.csv by the launcher.
@@ -99,14 +161,73 @@ inline void probe(IDXGISwapChain* chain) {
     if(FAILED(chain->GetDevice(__uuidof(ID3D11Device),dev.put_void()))||FAILED(chain->GetBuffer(0,__uuidof(ID3D11Texture2D),bb.put_void())))return;
     D3D11_TEXTURE2D_DESC d{};bb->GetDesc(&d);drawable=supported_format(d.Format);
 }
+// Dims the WHOLE game frame behind the guide card by 55% black, CPU-side:
+// CopySubresourceRegion the full back buffer into a staging texture, Map(READ),
+// blend (ui_guide::dim_row), UpdateSubresource back through a GPU texture in
+// the back buffer's own format, then CopySubresourceRegion into the back
+// buffer. The card then draws over the dimmed frame. Reuses the staging pair
+// across frames; on any failure returns false and the caller draws the card
+// over the undimmed frame (the old behaviour).
+inline bool dim_frame(ID3D11Device* dev,ID3D11DeviceContext* ctx,ID3D11Texture2D* bb,
+                      const D3D11_TEXTURE2D_DESC& d) {
+    const int w=int(d.Width),h=int(d.Height);
+    if(w<=0||h<=0)return false;
+    if(!dimStaging||dimW!=w||dimH!=h||dimFmt!=d.Format) {
+        D3D11_TEXTURE2D_DESC s{};s.Width=d.Width;s.Height=d.Height;s.MipLevels=1;s.ArraySize=1;
+        s.Format=d.Format;                       // same format: CopySubresourceRegion is defined
+        s.SampleDesc=d.SampleDesc;s.Usage=D3D11_USAGE_STAGING;s.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        dimStaging=nullptr;
+        if(FAILED(dev->CreateTexture2D(&s,nullptr,dimStaging.put())))return false;
+        dimW=w;dimH=h;dimFmt=d.Format;
+    }
+    ctx->CopySubresourceRegion(dimStaging.get(),0,0,0,0,bb,0,nullptr);   // whole buffer
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if(FAILED(ctx->Map(dimStaging.get(),0,D3D11_MAP_READ,0,&m)))return false;
+    // Scale the three colour bytes in place (RGBA and BGRA both: uniform scale),
+    // then upload the same buffer through a GPU texture in the back buffer's format.
+    for(int row=0;row<h;++row)
+        ui_guide::dim_row(static_cast<uint8_t*>(m.pData)+size_t(row)*m.RowPitch,w,45);   // ~55% black scrim
+    D3D11_TEXTURE2D_DESC up{};up=d;up.Usage=D3D11_USAGE_DEFAULT;up.CPUAccessFlags=0;up.BindFlags=0;
+    winrt::com_ptr<ID3D11Texture2D> tex;
+    if(FAILED(dev->CreateTexture2D(&up,nullptr,tex.put())))return false;
+    ctx->UpdateSubresource(tex.get(),0,nullptr,m.pData,UINT(m.RowPitch),0);
+    ctx->Unmap(dimStaging.get(),0);
+    ctx->CopySubresourceRegion(bb,0,0,0,0,tex.get(),0,nullptr);   // whole frame back
+    return true;
+}
+
+// Builds the guide view-model from the overlay's atomics and draws the card
+// into a CPU canvas sized to the card, ready for menuPanel.blit at (80,32).
+// The Canvas is a non-owning view over pxScratch, which the caller must keep
+// alive until the blit has copied from it.
+inline std::vector<uint32_t>& draw_guide_canvas(int sc,ui::Canvas& c) {
+    std::string line;{std::lock_guard<std::mutex> l(statusM);line=status;}
+    ui_guide::Model m;
+    m.tab=ui_guideTab.load();m.sel=selection.load();
+    m.fpsOn=fpsOn.load();m.graphOn=graphOn.load();m.busy=busy.load();m.status=line;
+    static std::vector<ui_guide::AchievementView> snap;   // refreshed while open; stable pointer for draw
+    if(achDirty.exchange(false)) snap=achievements.snapshot();
+    m.achievements=&snap;
+    m.achSel=selection.load();
+    m.achTop=achTop.load();
+    const int w=int(ui_guide::kCardW)*sc,h=int(ui_guide::kCardH)*sc;
+    pxScratch.assign(size_t(w)*h,ui::theme::page);
+    c=ui::Canvas(pxScratch.data(),w,h,w);
+    if(guideFont.ready())ui_guide::draw_guide(c,guideFont,m);
+    return pxScratch;
+}
+
 inline void draw(IDXGISwapChain* chain) {
     probe(chain);
     LARGE_INTEGER now;QueryPerformanceCounter(&now);
     if(!freq.QuadPart){QueryPerformanceFrequency(&freq);lastSample=now;}
     ++framesSince;double dt=double(now.QuadPart-lastSample.QuadPart)/double(freq.QuadPart);
     if(dt>=0.5){fps=framesSince/dt;framesSince=0;lastSample=now;}
+    const double nowSec=double(now.QuadPart)/double(freq.QuadPart);   // QPC seconds, shared clock for toasts
     const bool menu=menuOpen.load(),counter=fpsOn.load();
-    if(!menu&&!counter)return;
+    ui_guide::Toast toast;   // drawn with or without the menu open
+    toast=active_toast(nowSec);   // locks toastsM itself
+    if(!menu&&!counter&&toast.title.empty())return;
     winrt::com_ptr<ID3D11Device> dev;if(FAILED(chain->GetDevice(__uuidof(ID3D11Device),dev.put_void())))return;
     winrt::com_ptr<ID3D11Texture2D> bb;if(FAILED(chain->GetBuffer(0,__uuidof(ID3D11Texture2D),bb.put_void())))return;
     D3D11_TEXTURE2D_DESC d{};bb->GetDesc(&d);
@@ -119,34 +240,44 @@ inline void draw(IDXGISwapChain* chain) {
     winrt::com_ptr<ID3D11DeviceContext> ctx;dev->GetImmediateContext(ctx.put());
     const int sc=std::max(1,int(d.Height)/540);   // 2 at 1080p
     if(counter) {
-        char b[32];snprintf(b,sizeof b,"FPS %.0f",fps);
-        Canvas c;c.reset((8*8+8)*sc,12*sc,rgb(0,0,0));c.text(4*sc,2*sc,b,sc,rgb(120,255,140));
-        fpsPanel.blit(dev.get(),ctx.get(),bb.get(),d.Format,rgba,c,8*sc,8*sc,int(d.Width),int(d.Height));
-        // Frame-time graph: one column per frame (newest right), 0-50 ms tall;
-        // guides at 16.7 ms (60 fps) and 33.3 ms (30 fps). Red: over 33 ms.
-        const int gh=50,gw=int(history.size());
-        Canvas g;g.reset(gw,gh,rgb(0,0,0));
-        g.fill(0,gh-17,gw,1,rgb(60,90,60));g.fill(0,gh-34,gw,1,rgb(90,60,60));
+        // FPS counter + optional frame-time graph, one CPU canvas, top-left.
+        const int gw=int(history.size());
+        std::vector<float> hist(gw);
+        unsigned head;
         {std::lock_guard<std::mutex> l(framesM);
-         for(int i=0;i<gw;++i){float v=history[(historyPos+i)%history.size()];int bar=std::min(gh,int(v+0.5f));
-             g.fill(i,gh-bar,1,bar,v>33.4f?rgb(255,90,90):v>17.5f?rgb(255,210,63):rgb(120,255,140));}}
-        Canvas big;big.reset(gw*sc,gh*sc,0);
-        for(int y=0;y<big.h;++y)for(int x=0;x<big.w;++x)big.px[size_t(y)*big.w+x]=g.px[size_t(y/sc)*gw+x/sc];
-        graphPanel.blit(dev.get(),ctx.get(),bb.get(),d.Format,rgba,big,8*sc,(8+14)*sc,int(d.Width),int(d.Height));
+         head=historyPos;
+         for(int i=0;i<gw;++i)hist[size_t(i)]=history[(historyPos+unsigned(i))%history.size()];}
+        const bool fonts=guideFont.ready();
+        const int cw=240,ch=graphOn.load()?44+64:44;   // px at scale 1
+        std::vector<uint32_t> buf(size_t(cw*sc)*size_t(ch*sc),0);
+        ui::Canvas c(buf.data(),cw*sc,ch*sc,cw*sc);
+        if(fonts) {
+            ui_guide::draw_fps_counter(c,guideFont,fps,graphOn.load(),float(sc),hist.data(),unsigned(hist.size()),head);
+        } else {   // no Selawik: legacy 8x8 text, no graph
+            char b[32];std::snprintf(b,sizeof b,"FPS %.0f",fps);
+            text8(c,4*sc,2*sc,b,sc,rgb(120,255,140));
+        }
+        fpsPanel.blit(dev.get(),ctx.get(),bb.get(),d.Format,rgba,c,8*sc,8*sc,int(d.Width),int(d.Height));
     }
     if(menu) {
-        const int s=sc*2,rowH=14*s,pw=26*8*s,ph=rowH*(ItemCount+2)+8*s;
-        Canvas c;c.reset(pw,ph,rgb(14,17,22));
-        c.fill(0,0,pw,s,rgb(255,210,63));c.fill(0,ph-s,pw,s,rgb(255,210,63));c.fill(0,0,s,ph,rgb(255,210,63));c.fill(pw-s,0,s,ph,rgb(255,210,63));
-        c.text(8*s,6*s,"Xboxnative",s,rgb(255,210,63));
-        std::string line;{std::lock_guard<std::mutex> l(statusM);line=status;}
-        for(int i=0;i<ItemCount;++i) {
-            int y=6*s+rowH*(i+1);bool sel=i==selection.load();
-            if(sel)c.fill(4*s,y-3*s,pw-8*s,rowH-2*s,rgb(60,70,90));
-            c.text(8*s,y,label(i),s,busy?rgb(110,115,125):sel?rgb(255,255,255):rgb(170,180,195));
-        }
-        c.text(8*s,6*s+rowH*(ItemCount+1),line.empty()?"A select  B close":line,s/2>0?s/2:1,rgb(170,180,195));
-        menuPanel.blit(dev.get(),ctx.get(),bb.get(),d.Format,rgba,c,(int(d.Width)-pw)/2,(int(d.Height)-ph)/2,int(d.Width),int(d.Height));
+        // 55% dim of the whole game frame behind the card, CPU-side; on any
+        // failure the card draws over the undimmed frame (the old behaviour).
+        dim_frame(dev.get(),ctx.get(),bb.get(),d);
+        const int cardX=int(ui_guide::kCardX)*sc,cardY=int(ui_guide::kCardY)*sc;
+        std::vector<uint32_t> cardBuf;
+        ui::Canvas cardC(nullptr,0,0,0);
+        draw_guide_canvas(sc,cardC);   // fills cardBuf; cardC views it
+        menuPanel.blit(dev.get(),ctx.get(),bb.get(),d.Format,rgba,cardC,cardX,cardY,int(d.Width),int(d.Height));
+    }
+    if(!toast.title.empty()) {
+        // Achievement toast: centred bottom pill, alive ~5 s regardless of the
+        // menu (drawn whenever active_toast returns one).
+        const int tw=int(ui_guide::kToastW)*sc,th=int(ui_guide::kToastH)*sc;
+        const int tx=int(ui_guide::kToastX)*sc,ty=int(ui_guide::kToastY)*sc;
+        std::vector<uint32_t> tbuf(size_t(tw)*size_t(th),0);
+        ui::Canvas t(tbuf.data(),tw,th,tw);
+        ui_guide::draw_toast(t,guideFont,toast,0,0);
+        menuPanel.blit(dev.get(),ctx.get(),bb.get(),d.Format,rgba,t,tx,ty,int(d.Width),int(d.Height));
     }
 }
 
