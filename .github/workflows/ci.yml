@@ -120,6 +120,13 @@ jobs:
         run: bash src/xbox-test/app/tests/game-delete.sh
       - name: Free space figures and launcher leftovers
         run: bash src/xbox-test/app/tests/storage-report.sh
+      - name: UI toolkit, launcher screens, guide overlay and unlock logic (native renders and asserts)
+        run: |
+          bash src/xbox-test/app/tests/ui-render.sh
+          bash src/xbox-test/app/tests/ui-launcher.sh
+          bash src/xbox-test/app/tests/ui-guide.sh
+          bash src/xbox-test/app/tests/ui-nav.sh
+          bash src/xbox-test/app/tests/ui-unlocks.sh
   strict-imports:
     runs-on: ubuntu-latest
     steps:
