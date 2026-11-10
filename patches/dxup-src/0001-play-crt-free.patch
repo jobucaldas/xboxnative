@@ -225,3 +225,19 @@ diff -ruN a/src/util/shared_conversions.h b/src/util/shared_conversions.h
          uint32_t sysValue(bool vsInput, bool target, D3DDECLUSAGE usage);
  
      }
+diff -ruN a/src/dx9asm/dxbc_chunks.cpp b/src/dx9asm/dxbc_chunks.cpp
+--- a/src/dx9asm/dxbc_chunks.cpp
++++ b/src/dx9asm/dxbc_chunks.cpp
+@@ -520,6 +520,12 @@
+             element.nameOffset = 0; // <-- Must be set later!
+             element.registerIndex = transMapping.dxbcRegNum;
+             element.semanticIndex = transMapping.dxbcSemanticIndex;
++            // Play's fix: SHEX already emits dcl_output_siv/dcl_input_ps_siv
++            // for the position entry, so the signature must carry the matching
++            // system-value name. Leaving it UNDEFINED makes D3D11 reject the
++            // shader with E_INVALIDARG and nothing rasterises.
++            if (transMapping.d3d9Usage == D3DDECLUSAGE_POSITION && transMapping.d3d9UsageIndex == 0)
++              element.systemValueType = D3D_NAME_POSITION;
+ 
+             uint32_t baseMask = 0;
+             forEachValidElement<isInput(ChunkType)>(bytecode, shdrCode, [&](const RegisterMapping& mapping, uint32_t i) {
