@@ -29,6 +29,7 @@ jobs:
           bash src/xbox-test/app/tests/session-restore.sh
           bash src/xbox-test/app/tests/launch-status.sh
           bash src/xbox-test/app/tests/launch-target.sh
+          bash src/xbox-test/app/tests/selftest-plan.sh
           bash src/xbox-test/app/tests/steam-app-ticket.sh
           bash src/xbox-test/app/tests/steam-client-package.sh
           bash src/xbox-test/app/tests/launch-report.sh
@@ -155,6 +156,17 @@ jobs:
       # against Wine's d3d11 is src/xbox-test/uwph/d3d9/test.sh, run locally.
       - name: build the D3D9 shim and inspect its PE
         run: bash src/xbox-test/uwph/d3d9/build.sh "$RUNNER_TEMP/d3d9-shim"
+  diag-fixtures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install cross compilers and PE tools
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64 gcc-mingw-w64-i686 llvm lld
+      # The console self-test's fixtures must build from source at package time
+      # and stay small; the script fails on either. Running them is the console's
+      # job (LocalState\selftest.txt).
+      - name: build the console self-test fixtures
+        run: bash src/xbox-test/app/tests/build-diag-fixtures.sh "$RUNNER_TEMP/diag"
   x86-core:
     runs-on: ubuntu-latest
     steps:

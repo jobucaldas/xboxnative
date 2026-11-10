@@ -28,6 +28,10 @@ struct LaunchState {
     std::mutex m; std::string result, attempt; bool ok=false;
 };
 static LaunchState g_launch;
+// Set while the console self-test (selftest.h) owns Play: it starts a guest
+// without a launch, so a Play from the UI must not start a second one or take
+// the probe sink away from the run.
+static std::atomic<bool> g_selftest_busy{false};
 
 // ---- install state (marker dl_<appid>.done written by the downloader; see installs.h)
 using InstallInfo = installs::Info;
@@ -979,6 +983,20 @@ static bool load_appinfo(uint32_t appid,Vdf& root,const Vdf*& app) {
     return true;
 }
 struct LaunchTarget { std::wstring exe; std::string args, why, workdir; };   // exe is install-relative
+// PLAY_FORCE_VULKAN: start a Unity title on the Vulkan renderer instead of the
+// default D3D11 (launch_target.h), so the packaged Vulkan stack is exercised by
+// a real game. Per game: LocalState\vulkan_<appid>.txt; launcher-wide:
+// LocalState\vulkan.txt; otherwise the PLAY_FORCE_VULKAN environment variable.
+// A file that exists decides for its scope, so a per-game "0" keeps D3D11 even
+// when the global setting asks for Vulkan. The default is D3D11.
+static bool force_vulkan(uint32_t appid) {
+    std::string text;
+    if(read_file_s(g_dir+L"\\vulkan_"+widen(std::to_string(appid))+L".txt",text)) return launch_target::vulkan_setting(text);
+    if(read_file_s(g_dir+L"\\vulkan.txt",text)) return launch_target::vulkan_setting(text);
+    wchar_t value[8]{};
+    DWORD n=GetEnvironmentVariableW(L"PLAY_FORCE_VULKAN",value,8);
+    return n && n < 8 && launch_target::vulkan_flag(play_runtime::narrow(value));
+}
 // The game's own Steam launch option when known, as the Steam client picks it;
 // otherwise the largest top-level .exe (a 64-bit one first). Engine options come
 // from the game's files (Unity: UnityPlayer.dll beside the executable), never
@@ -1034,11 +1052,12 @@ static LaunchTarget pick_target(uint32_t appid, const std::wstring& root, const 
     auto slash=t.exe.find_last_of(L'\\');
     std::wstring dir=slash==std::wstring::npos?root:root+L"\\"+t.exe.substr(0,slash);
     bool unity=GetFileAttributesW((dir+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES;
-    t.args=launch_target::arguments(chosen,unity);
+    const bool vulkan=unity&&force_vulkan(appid);
+    t.args=launch_target::arguments(chosen,unity,vulkan);
     // The option's own working directory (install-relative), as Steam honours it;
     // the executable's directory when the option names none.
     if(chosen&&!chosen->workingdir.empty()) { std::string wd; if(launch_target::relative_path(chosen->workingdir,wd)) t.workdir=wd; }
-    if(unity)t.why+="; Unity player";
+    if(unity)t.why+=vulkan?"; Unity player, PLAY_FORCE_VULKAN":"; Unity player";
     return t;
 }
 
@@ -1096,11 +1115,18 @@ static void lp_watchdog() {
 // Entry: called on the render thread; returns immediately (work happens on a worker thread).
 // option (the picker's choice, an appinfo executable) starts that launch option
 // instead of the preferred one; nullptr picks the preferred option as before.
-static void start_launch(uint32_t appid, const std::string& name, const std::string& dir, const char* via, const std::string* option=nullptr) {
+// Returns why Play was refused, or empty when the launch started: the detail
+// page shows that reason, since a refusal leaves no launch panel to show it.
+static std::string start_launch(uint32_t appid, const std::string& name, const std::string& dir, const char* via, const std::string* option=nullptr) {
+    if(g_selftest_busy.load(std::memory_order_acquire)) {
+        logf("launch: Play rejected: the console self-test is running");
+        return "The launcher self-test is running. Wait for it to finish, or restart the launcher.";
+    }
     if(auto guest=play_runtime::observed.load(std::memory_order_acquire)) {
-        std::lock_guard<std::mutex> lock(g_launch.m);
-        g_launch.result="Game code from the last launch is still loaded; the launcher restarts to end it. Last event: "+guest->snapshot();
-        logf("launch: Play rejected: game code from the last launch is still loaded");return;
+        std::string why="Game code from the last launch is still loaded; the launcher restarts to end it. Last event: "+guest->snapshot();
+        { std::lock_guard<std::mutex> lock(g_launch.m); g_launch.result=why; }
+        logf("launch: Play rejected: game code from the last launch is still loaded");
+        return why;
     }
     int gen = ++g_launch.gen; g_launch.appid = appid; g_launch.started = now_s(); g_launch.loaderStarted = 0;
     // The 32-bit interpreter's report belongs to the launch that produced it:
@@ -1146,4 +1172,5 @@ static void start_launch(uint32_t appid, const std::string& name, const std::str
         } catch (std::exception const& e) { finish(std::string("loader threw: ") + e.what(), false, 0, 0); }
         catch (...) { finish("loader threw an unknown exception.", false, 0, 0); }
     }).detach();
+    return std::string();
 }

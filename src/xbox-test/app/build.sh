@@ -74,6 +74,13 @@ gbe="$here/../../../out/gbe-fork"
 bash "$here/../../tools/fetch-gbe-fork.sh" "$gbe"
 mkdir -p "$out/layout/steam-provider/gbe"
 cp "$gbe"/{steam_api64.dll,steamclient64.dll,LICENSE,SOURCE.txt} "$out/layout/steam-provider/gbe/"
+# Console self-test fixtures (selftest.h): the same guest programs the off-device
+# runner builds (tests/play-runtime.sh), packed into layout\diag so the installed
+# package can exercise the Vulkan, D3D9, D3D10 and 32-bit paths on the console.
+# Built from this repository's sources at package time; PLAY_SELFTEST=0 omits them.
+if [ "${PLAY_SELFTEST:-1}" != 0 ]; then
+  bash "$here/tests/build-diag-fixtures.sh" "$out/layout/diag"
+fi
 cp -r "$here/Assets" "$here/AppxManifest.xml" "$out/layout/"
 # test certificate (subject must equal manifest Publisher); created once, never committed
 # A cert from before the publisher rename (or any other subject) is replaced.
