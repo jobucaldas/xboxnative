@@ -27,6 +27,24 @@ static LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM p){
 }static LRESULT CALLBACK ansiProc(HWND h,UINT m,WPARAM w,LPARAM p){return DefWindowProcA(h,m,w,p);}
 
 static LRESULT CALLBACK subclass(HWND h,UINT m,WPARAM w,LPARAM p){if(m==WM_APP)return 42;return CallWindowProcW(proc,h,m,w,p);}
+// Publishing while another thread holds the record mutex inside a window proc.
+// The proc signals `inProc`, waits for `releaseProc`, and the publisher has to
+// answer (signal `published`) without that mutex ever being released.
+static HANDLE inProc,releaseProc,published;
+static LRESULT CALLBACK holdProc(HWND h,UINT m,WPARAM w,LPARAM p){
+ if(m==WM_USER){SetEvent(inProc);WaitForSingleObject(releaseProc,10000);return 0;}
+ return DefWindowProcW(h,m,w,p);
+}
+static DWORD WINAPI holdMutex(void*){
+ WNDCLASSW c={};c.lpfnWndProc=holdProc;c.hInstance=GetModuleHandleW(0);c.lpszClassName=L"U32cHold";
+ if(!RegisterClassW(&c))return 1;
+ HWND h=CreateWindowExW(0,c.lpszClassName,L"hold",0,0,0,10,10,0,0,c.hInstance,0);
+ if(!h)return 2;
+ SendMessageW(h,WM_USER,0,0);   // enters holdProc, which takes the record mutex
+ DestroyWindow(h);UnregisterClassW(c.lpszClassName,c.hInstance);
+ return 0;
+}
+static DWORD WINAPI publishWhileHeld(void*){uwph_u32c_pads(1);SetEvent(published);return 0;}
 static int rejectedDestroyed,rejectedCreated;
 static LRESULT CALLBACK reject(HWND,UINT m,WPARAM,LPARAM){if(m==WM_NCDESTROY)++rejectedDestroyed;if(m==WM_CREATE)++rejectedCreated;return 0;}
 static BOOL CALLBACK count(HWND,LPARAM p){++*(int*)p;return TRUE;}
@@ -193,6 +211,25 @@ extern "C" DWORD WINAPI u32c_entry(){
  WCHAR name[128]={};UINT nameSize=sizeof(name);
  check(GetRawInputDeviceInfoW(devs[0].hDevice,RIDI_DEVICENAME,name,&nameSize)>0&&wscontains(name,L"IG_")&&name[0]=='\\');
  check(GetRawInputDeviceInfoW((HANDLE)0x1234,RIDI_DEVICEINFO,&deviceInfo,&infoSize)==(UINT)-1&&GetLastError()==ERROR_INVALID_HANDLE);
+ // The launcher publishes the slot mask every frame from its UI thread, and the
+ // record DLL holds its mutex across guest window procedures. Publishing must
+ // therefore never wait for that mutex: a guest proc that blocks (on the
+ // launcher's dispatcher, say) while the UI thread waits for the mutex would
+ // deadlock both. A second thread holds the mutex inside its window proc; the
+ // publisher has to answer while it is held.
+ {inProc=CreateEventW(0,TRUE,FALSE,0);releaseProc=CreateEventW(0,TRUE,FALSE,0);published=CreateEventW(0,TRUE,FALSE,0);
+  check(inProc&&releaseProc&&published);
+  HANDLE holder=CreateThread(0,0,holdMutex,0,0,0);check(holder!=0);
+  if(holder){
+   check(WaitForSingleObject(inProc,5000)==WAIT_OBJECT_0);   // the proc now holds the mutex
+   HANDLE publisher=CreateThread(0,0,publishWhileHeld,0,0,0);check(publisher!=0);
+   bool answered=publisher&&WaitForSingleObject(published,2000)==WAIT_OBJECT_0;
+   SetEvent(releaseProc);                                   // unblock the proc either way
+   if(publisher){WaitForSingleObject(publisher,5000);CloseHandle(publisher);}
+   WaitForSingleObject(holder,5000);CloseHandle(holder);
+   check(answered);
+  }
+  CloseHandle(inProc);CloseHandle(releaseProc);CloseHandle(published);}
  uwph_u32c_pads(0);
  check(GetRawInputDeviceList(0,&rc,sizeof(RAWINPUTDEVICELIST))==0&&rc==0);
  // CCD describes the one record display (Unity's display layout needs it).
