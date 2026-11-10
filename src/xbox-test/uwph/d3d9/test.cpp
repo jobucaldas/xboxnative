@@ -453,6 +453,66 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
         CHECK(bad==nullptr);
     }
 
+    // Vertex declarations report their element count, terminator included, and
+    // refuse a buffer that cannot hold them instead of overrunning it.
+    {
+        const D3DVERTEXELEMENT9 elements[]={
+            {0,0,D3DDECLTYPE_FLOAT3,D3DDECLMETHOD_DEFAULT,D3DDECLUSAGE_POSITION,0},
+            {0,12,D3DDECLTYPE_FLOAT2,D3DDECLMETHOD_DEFAULT,D3DDECLUSAGE_TEXCOORD,0},
+            D3DDECL_END(),
+        };
+        IDirect3DVertexDeclaration9* declaration=nullptr;
+        CHECK_HR(device->CreateVertexDeclaration(elements,&declaration));
+        if(declaration) {
+            UINT count=0;
+            CHECK_HR(declaration->GetDeclaration(nullptr,&count));
+            CHECK(count==3);   // two elements and the terminator, not bytes
+            D3DVERTEXELEMENT9 readBack[3]{};
+            count=3;
+            CHECK_HR(declaration->GetDeclaration(readBack,&count));
+            CHECK(count==3);
+            CHECK(readBack[1].Usage==D3DDECLUSAGE_TEXCOORD);
+            // A capacity of two cannot hold three elements.
+            D3DVERTEXELEMENT9 small[2]{};
+            count=2;
+            CHECK_HR_IS(declaration->GetDeclaration(small,&count),D3DERR_INVALIDCALL);
+            declaration->Release();
+        }
+    }
+
+    // An FVF with one-float texcoords decodes them as one float, not two: the
+    // size field is a two-bit mask at bit 16, not a shift count.
+    {
+        CHECK_HR(device->SetFVF(D3DFVF_XYZ|D3DFVF_TEX1|D3DFVF_TEXCOORDSIZE1(0)));
+        CHECK_HR(device->SetFVF(D3DFVF_XYZ|D3DFVF_TEX1|D3DFVF_TEXCOORDSIZE4(0)));
+    }
+
+    // A texture with Levels=0 asks for the full chain down to 1x1.
+    {
+        IDirect3DTexture9* chainTexture=nullptr;
+        CHECK_HR(device->CreateTexture(8,8,0,0,D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,
+            &chainTexture,nullptr));
+        if(chainTexture) {
+            CHECK(chainTexture->GetLevelCount()==4);   // 8, 4, 2, 1
+            chainTexture->Release();
+        }
+    }
+
+    // The UP draw path: the primitive count is converted to vertices, and the
+    // data is copied from guest memory into a dynamic buffer.
+    {
+        struct Vertex { float x,y,z,w; DWORD colour; };
+        const Vertex vertices[3]={
+            { 8.0f, 8.0f,0.0f,1.0f,0xffff0000},
+            {56.0f, 8.0f,0.0f,1.0f,0xffff0000},
+            {32.0f,56.0f,0.0f,1.0f,0xffff0000},
+        };
+        CHECK_HR(device->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE));
+        CHECK_HR(device->BeginScene());
+        CHECK_HR(device->DrawPrimitiveUP(D3DPT_TRIANGLELIST,1,vertices,sizeof(Vertex)));
+        CHECK_HR(device->EndScene());
+    }
+
     // Reset rebuilds the swap chain, as D3D9 documents.
     CHECK_HR(device->Reset(&present));
     IDirect3DSurface9* afterReset=nullptr;

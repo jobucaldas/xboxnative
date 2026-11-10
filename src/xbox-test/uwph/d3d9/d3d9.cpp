@@ -97,6 +97,13 @@ UINT cpuAccessFor(D3DPOOL pool,DWORD d3d9Usage) {
     default:return 0;
     }
 }
+// D3D9's Levels=0 means the full chain: as many levels as halving both sides
+// reaches 1x1 in.
+UINT mipChain(UINT width,UINT height) {
+    UINT levels=1;
+    while(width>1||height>1){width=width>1?width>>1:1;height=height>1?height>>1:1;++levels;}
+    return levels;
+}
 // D3D9 render states and sampler states are not D3D11 pipeline state, so they
 // are stored and read back; the translation that would consume them is the
 // unfinished half of the shim.
@@ -297,8 +304,10 @@ unsigned decodeFVF(DWORD fvf,Element* out,unsigned capacity) {
     if(fvf&D3DFVF_SPECULAR)add(D3DDECLTYPE_D3DCOLOR,D3DDECLUSAGE_COLOR,1);
     const unsigned texcoords=(fvf&D3DFVF_TEXCOUNT_MASK)>>D3DFVF_TEXCOUNT_SHIFT;
     for(unsigned i=0;i<texcoords&&i<8;++i) {
-        // D3DFVF_TEXTUREFORMAT1 is 3 and means one float; 0..2 mean two to four.
-        const unsigned format=(fvf>>(D3DFVF_TEXCOORDSIZE1(i)))&3;
+        // D3DFVF_TEXCOORDSIZE1(i) is a mask, not a shift count: the two-bit
+        // field for texcoord i sits at bit 16+2i. Masking the shifted value
+        // gives 0..3, where 3 means one float and 0..2 mean two to four.
+        const unsigned format=(fvf>>(16+2*i))&3;
         const D3DDECLTYPE type=format==D3DFVF_TEXTUREFORMAT1?D3DDECLTYPE_FLOAT1
             :format==D3DFVF_TEXTUREFORMAT2?D3DDECLTYPE_FLOAT2
             :format==D3DFVF_TEXTUREFORMAT3?D3DDECLTYPE_FLOAT3:D3DDECLTYPE_FLOAT4;
@@ -369,6 +378,9 @@ struct Surface : d3dshim::Base, IDirect3DSurface9 {
     ID3D11RenderTargetView* rtv=nullptr;     // when the surface is a render target
     ID3D11DepthStencilView* dsv=nullptr;     // when the surface is depth-stencil
     D3DSURFACE_DESC desc{};
+    // The mip level this surface is, for the texture's own levels; the back
+    // buffer and standalone surfaces are level 0.
+    UINT level=0;
     bool cpuVisible=false;                   // SYSTEMMEM, SCRATCH or DYNAMIC
     bool locked=false;
     // D3D9's surfaces and swap chains hold their device weakly: the device owns
@@ -378,7 +390,7 @@ struct Surface : d3dshim::Base, IDirect3DSurface9 {
     // defined below this wrapper.
     IDirect3DDevice9* device=nullptr;
     ~Surface() {
-        if(locked&&context)context->Unmap(texture,0);
+        if(locked&&context)context->Unmap(texture,level);
         if(rtv)rtv->Release();
         if(dsv)dsv->Release();
     }
@@ -425,9 +437,10 @@ struct Surface : d3dshim::Base, IDirect3DSurface9 {
         }
         if(locked)return D3DERR_INVALIDCALL;   // D3D9 allows one lock at a time
         D3D11_MAPPED_SUBRESOURCE mapped{};
-        // A staging texture can only be read, a dynamic one only written.
-        D3D11_MAP mode=desc.Usage&D3DUSAGE_DYNAMIC?D3D11_MAP_WRITE_DISCARD:D3D11_MAP_READ_WRITE;
-        HRESULT hr=context->Map(texture,0,mode,0,&mapped);
+        // A staging texture can only be read, a dynamic one only written - and
+        // D3D11 accepts WRITE_DISCARD on it, never plain WRITE.
+        D3D11_MAP mode=desc.Usage&D3DUSAGE_DYNAMIC?D3D11_MAP_WRITE_DISCARD:D3D11_MAP_READ;
+        HRESULT hr=context->Map(texture,level,mode,0,&mapped);
         if(FAILED(hr))return D3DERR_INVALIDCALL;
         locked=true;
         out->pBits=mapped.pData;
@@ -436,7 +449,7 @@ struct Surface : d3dshim::Base, IDirect3DSurface9 {
     }
     HRESULT STDMETHODCALLTYPE UnlockRect() override {
         if(!locked)return D3DERR_INVALIDCALL;
-        context->Unmap(texture,0);
+        context->Unmap(texture,level);
         locked=false;
         return D3D_OK;
     }
@@ -500,8 +513,12 @@ struct VertexBuffer : Resource<IDirect3DVertexBuffer9> {
             return D3DERR_INVALIDCALL;
         }
         D3D11_MAPPED_SUBRESOURCE mapped{};
-        const bool discard=flags&D3DLOCK_DISCARD;
-        HRESULT hr=context->Map(buffer,0,discard?D3D11_MAP_WRITE_DISCARD:D3D11_MAP_WRITE,0,&mapped);
+        // A dynamic D3D11 buffer only accepts WRITE_DISCARD or
+        // WRITE_NO_OVERWRITE, never plain WRITE, so a D3D9 lock that does not
+        // ask to discard still discards: the buffer is refilled from the start,
+        // which is what the guest's offset-based write expects.
+        (void)flags;
+        HRESULT hr=context->Map(buffer,0,D3D11_MAP_WRITE_DISCARD,0,&mapped);
         if(FAILED(hr))return D3DERR_INVALIDCALL;
         locked=true;
         // D3D9's offset is in bytes from the start of the buffer; D3D11's Map
@@ -542,8 +559,10 @@ struct IndexBuffer : Resource<IDirect3DIndexBuffer9> {
             return D3DERR_INVALIDCALL;
         }
         D3D11_MAPPED_SUBRESOURCE mapped{};
-        const bool discard=flags&D3DLOCK_DISCARD;
-        HRESULT hr=context->Map(buffer,0,discard?D3D11_MAP_WRITE_DISCARD:D3D11_MAP_WRITE,0,&mapped);
+        // A dynamic D3D11 buffer only accepts WRITE_DISCARD or
+        // WRITE_NO_OVERWRITE, never plain WRITE (see VertexBuffer::Lock).
+        (void)flags;
+        HRESULT hr=context->Map(buffer,0,D3D11_MAP_WRITE_DISCARD,0,&mapped);
         if(FAILED(hr))return D3DERR_INVALIDCALL;
         locked=true;
         *data=static_cast<unsigned char*>(mapped.pData)+offset;
@@ -623,6 +642,7 @@ struct Texture : Resource<IDirect3DTexture9> {
         surface->device=device;
         surface->context=context;
         surface->cpuVisible=cpuVisible;
+        surface->level=level;
         GetLevelDesc(level,&surface->desc);
         // A level of a texture that can be rendered to answers a render target
         // view, which is what SetRenderTarget needs from it.
@@ -650,10 +670,10 @@ struct Texture : Resource<IDirect3DTexture9> {
         if(locked)return D3DERR_INVALIDCALL;
         D3D11_MAPPED_SUBRESOURCE mapped{};
         // A staging texture (SYSTEMMEM, SCRATCH) only reads; a dynamic one
-        // (DYNAMIC, MANAGED) only writes, and discards what was there.
+        // (DYNAMIC, MANAGED) only writes, and D3D11 only accepts WRITE_DISCARD
+        // or WRITE_NO_OVERWRITE on it, never plain WRITE.
         const bool staging=pool==D3DPOOL_SYSTEMMEM||pool==D3DPOOL_SCRATCH;
-        D3D11_MAP mode=staging?D3D11_MAP_READ:(usage&D3DUSAGE_DYNAMIC?D3D11_MAP_WRITE_DISCARD
-                                                                  :D3D11_MAP_WRITE);
+        D3D11_MAP mode=staging?D3D11_MAP_READ:D3D11_MAP_WRITE_DISCARD;
         HRESULT hr=context->Map(texture,level,mode,0,&mapped);
         if(FAILED(hr))return D3DERR_INVALIDCALL;
         locked=true;
@@ -695,11 +715,17 @@ struct VertexDeclaration : d3dshim::Base, IDirect3DVertexDeclaration9 {
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE GetDeclaration(D3DVERTEXELEMENT9* out,UINT* countOut) override {
-        const UINT words=(count+1)*sizeof(D3DVERTEXELEMENT9);
-        if(countOut)*countOut=words;
-        if(!out)return D3D_OK;   // D3D9 lets a caller ask for the size only
-        if(countOut&&*countOut<words)return D3DERR_INVALIDCALL;
-        memcpy(out,original,(count+1)*sizeof(D3DVERTEXELEMENT9));
+        // D3D9 counts elements, terminator included, not bytes.
+        const UINT elements=count+1;
+        if(!out) {   // D3D9 lets a caller ask for the size only
+            if(countOut)*countOut=elements;
+            return D3D_OK;
+        }
+        // The caller's capacity is read before it is overwritten, so a buffer
+        // that is too small is refused instead of overrun.
+        if(!countOut||*countOut<elements)return D3DERR_INVALIDCALL;
+        memcpy(out,original,elements*sizeof(D3DVERTEXELEMENT9));
+        *countOut=elements;
         return D3D_OK;
     }
 };
@@ -721,8 +747,9 @@ struct VertexShader : d3dshim::Base, IDirect3DVertexShader9 {
     unsigned blobBytes=0;
     SignatureElement signature[16]{};
     unsigned signatureCount=0;
+    // `shader` is `inner`, so ~Base releases the D3D11 object's one reference;
+    // releasing it here too would free it twice.
     ~VertexShader() {
-        if(shader)shader->Release();
         d3dshim::release(bytecode);
         d3dshim::release(blob);
     }
@@ -750,8 +777,8 @@ struct PixelShader : d3dshim::Base, IDirect3DPixelShader9 {
     ID3D11PixelShader* shader=nullptr;  // also `inner`
     DWORD* bytecode=nullptr;
     unsigned bytecodeBytes=0;
+    // `shader` is `inner`, so ~Base releases it.
     ~PixelShader() {
-        if(shader)shader->Release();
         d3dshim::release(bytecode);
     }
     HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice9** out) override {
@@ -1049,7 +1076,10 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
             return D3DERR_INVALIDCALL;
         }
         D3D11_TEXTURE2D_DESC desc{};
-        desc.Width=width;desc.Height=height;desc.MipLevels=levels?levels:1;desc.ArraySize=1;
+        desc.Width=width;desc.Height=height;
+        // D3D9's Levels=0 asks for the full chain down to 1x1.
+        desc.MipLevels=levels?levels:mipChain(width,height);
+        desc.ArraySize=1;
         desc.Format=dxgi;desc.SampleDesc.Count=1;
         desc.Usage=usageFor(pool,usage);
         desc.BindFlags=0;
@@ -1088,13 +1118,17 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         wrapper->device=static_cast<IDirect3DDevice9*>(self);
         wrapper->device11=device();
         wrapper->context=context();
+        const UINT mips=levels?levels:mipChain(width,height);
         wrapper->cpuVisible=usageFor(pool,usage)!=D3D11_USAGE_DEFAULT;
+        // A mipmapped MANAGED texture fell back to default above, so it is not
+        // CPU-visible however the pool names it.
+        if(pool==D3DPOOL_MANAGED&&mips>1)wrapper->cpuVisible=false;
         wrapper->format=format;
         wrapper->usage=usage;
         wrapper->pool=pool;
         wrapper->width=width;
         wrapper->height=height;
-        wrapper->levels=levels?levels:1;
+        wrapper->levels=mips;
         // A texture the guest binds to a sampler needs a view; a render target
         // or depth surface does not, and D3D11 refuses the combination on some
         // formats, so the view is only made when the texture is sampled.
@@ -1787,10 +1821,10 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
                 }
             }
             samplers[i]=samplerState[i];
-            if(textures[i]) {
-                auto texture=static_cast<Texture*>(textures[i]);
-                views[i]=texture->view;
-            }
+            // D3D9 samples a stage with no texture as white, so an untextured
+            // draw keeps its diffuse colour under the default modulate op;
+            // D3D11 would sample a null view as black.
+            views[i]=textures[i]?static_cast<Texture*>(textures[i])->view:defaultView;
         }
         // D3D9 binds textures per stage and the translator emits one sampler and
         // one texture binding per stage in the same order, so the D3D11 slots
@@ -1845,7 +1879,10 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         // The guest's constants are copied on every draw: it may have changed
         // any register since the last one, and D3D11's dynamic buffer makes that
         // a single write rather than a tracking problem.
-        colorF(pixelConstF[ffp::PcTFactor],renderStates[D3DRS_TEXTUREFACTOR]);
+        // c1 is the generated pixel shader's texture factor, so only that
+        // shader may have it written; a game's own pixel shader owns c1 and
+        // reads the constant it set there.
+        if(!pixelShader)colorF(pixelConstF[ffp::PcTFactor],renderStates[D3DRS_TEXTUREFACTOR]);
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if(FAILED(ctx->Map(vertexConstants,0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return false;
         memcpy(mapped.pData,vertexConstF,maxVertexConst*16);
@@ -2214,7 +2251,8 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         if(FAILED(hr))return hr;
         hr=bindShaders();
         if(FAILED(hr))return hr;
-        return uploadAndDraw(type,false,count,0,0,data,stride,nullptr,D3DFMT_UNKNOWN);
+        // D3D9's count is primitives; the array holds the vertices they name.
+        return uploadAndDraw(type,false,verticesFor(type,count),0,0,data,stride,nullptr,D3DFMT_UNKNOWN);
     }
     HRESULT STDMETHODCALLTYPE DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE type,UINT minIndex,UINT count,
                                                      UINT indexCount,const void* indexData,
@@ -2224,12 +2262,16 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         if(FAILED(hr))return hr;
         hr=bindShaders();
         if(FAILED(hr))return hr;
+        // D3D9's minIndex is the lowest vertex the indices name, not an offset
+        // into the array: the whole array is copied and the indices index it as
+        // the guest wrote them.
         return uploadAndDraw(type,true,count,minIndex,verticesFor(type,indexCount),vertexData,stride,
                              indexData,indexFormat);
     }
     // The UP variants keep their data in guest memory. D3D11 has no equivalent,
     // so the data is copied into a dynamic buffer for the draw, which is what
-    // Wine's d3d9 does too.
+    // Wine's d3d9 does too. `vertexCount` is the number of vertices the array
+    // holds; `minIndex` is the vertex the guest's index values count from.
     HRESULT uploadAndDraw(D3DPRIMITIVETYPE type,bool indexed,UINT vertexCount,UINT minIndex,
                           UINT indexCount,const void* vertexData,UINT stride,
                           const void* indexData,D3DFORMAT indexFormat) {
@@ -2248,7 +2290,10 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         if(FAILED(ctx->Map(buffer,0,D3D11_MAP_WRITE_DISCARD,0,&mapped))){buffer->Release();return D3DERR_INVALIDCALL;}
         memcpy(mapped.pData,vertexData,vertexBytes);
         ctx->Unmap(buffer,0);
-        ctx->IASetVertexBuffers(0,1,&buffer,&stride,nullptr);
+        // D3D11 requires the offset array to be non-null; the UP data starts at
+        // vertex 0 of the buffer just filled.
+        const UINT offset=0;
+        ctx->IASetVertexBuffers(0,1,&buffer,&stride,&offset);
         ID3D11Buffer* indexBuffer=nullptr;
         if(indexed) {
             if(!indexData) {
@@ -2276,7 +2321,10 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
                 indexFormat==D3DFMT_INDEX32?DXGI_FORMAT_R32_UINT:DXGI_FORMAT_R16_UINT,0);
         }
         ctx->IASetPrimitiveTopology(topologyOf(type,indexed));
-        if(indexed)ctx->DrawIndexed(indexCount,0,0);
+        // D3D9's index values count from MinVertexIndex, which D3D11 spells
+        // BaseVertexLocation - the same fold the non-UP path makes for
+        // BaseVertexIndex.
+        if(indexed)ctx->DrawIndexed(indexCount,0,minIndex);
         else ctx->Draw(vertexCount,0);
         if(indexBuffer)indexBuffer->Release();
         buffer->Release();
@@ -2830,6 +2878,24 @@ struct Factory : d3dshim::Base, IDirect3D9Ex {
             D3D_FEATURE_LEVEL_10_0,D3D_FEATURE_LEVEL_9_3};
         HRESULT hr=device->host.create(nullptr,D3D_DRIVER_TYPE_HARDWARE,levels,4,0);
         if(FAILED(hr)){d3dshim::destroy(device);return D3DERR_NOTAVAILABLE;}
+        // The 1x1 white view an unbound texture stage samples (syncTextures).
+        D3D11_TEXTURE2D_DESC white{};
+        white.Width=white.Height=1;white.MipLevels=white.ArraySize=1;
+        white.Format=DXGI_FORMAT_B8G8R8A8_UNORM;white.SampleDesc.Count=1;
+        white.Usage=D3D11_USAGE_DEFAULT;white.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        const UINT32 opaque=0xFFFFFFFF;
+        D3D11_SUBRESOURCE_DATA pixel{};
+        pixel.pSysMem=&opaque;pixel.SysMemPitch=sizeof opaque;
+        ID3D11Texture2D* whiteTexture=nullptr;
+        if(SUCCEEDED(device->host.device->CreateTexture2D(&white,&pixel,&whiteTexture))) {
+            device->host.device->CreateShaderResourceView(whiteTexture,nullptr,&device->defaultView);
+            whiteTexture->Release();
+        }
+        if(!device->defaultView) {
+            d3dshim::noteOnce("D3D9 shim: could not create the white texture an unbound stage samples");
+            d3dshim::destroy(device);
+            return D3DERR_NOTAVAILABLE;
+        }
         device->creation.AdapterOrdinal=adapter;
         device->creation.DeviceType=type;
         device->creation.hFocusWindow=focus;

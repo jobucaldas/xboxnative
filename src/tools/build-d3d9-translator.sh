@@ -55,25 +55,27 @@ flags=(-c -O2 -std=c++17 -fno-builtin -fno-tree-loop-distribute-patterns
        -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-stack-protector
        -fno-asynchronous-unwind-tables -Wall -Wextra -Wno-unused-parameter
        -Wno-sign-compare -Wno-missing-field-initializers)
-# The donor's headers include <memory> for std::shared_ptr, which mingw's
-# libstdc++ pulls in through mcfgthread; only the headers are needed.
-mcfg_inc=; mcfg=$(x86_64-w64-mingw32-g++ -print-file-name=include 2>/dev/null || true)
-for d in /usr/x86_64-w64-mingw32/include /usr/share/mingw-w64/include "$(dirname "$mcfg")"; do
-  [[ -f $d/mcfgthread/gthr.h ]] && mcfg_inc=$d && break
-done
-if [[ -z $mcfg_inc ]]; then
-  # NixOS keeps it in a separate output of the mcfgthread package.
-  for d in /nix/store/*mcfgthread*x86_64-w64-mingw32*/include; do
+# The donor's headers include <memory> for std::shared_ptr. On the mcf thread
+# model (NixOS's mingw) libstdc++ pulls that in through mcfgthread, whose
+# headers sit outside the compiler's search path; on Ubuntu's win32 model
+# nothing extra is needed. Probe rather than assume, so the same script builds
+# on both.
+mcfg_flags=()
+if ! echo '#include <memory>' | x86_64-w64-mingw32-g++ -x c++ -fsyntax-only - >/dev/null 2>&1; then
+  mcfg_inc=
+  for d in /usr/x86_64-w64-mingw32/include /usr/share/mingw-w64/include \
+           /nix/store/*mcfgthread*x86_64-w64-mingw32*/include; do
     [[ -f $d/mcfgthread/gthr.h ]] && mcfg_inc=$d && break
   done
+  [[ -n $mcfg_inc ]] || { echo "mcfgthread headers not found (needed by <memory> in the donor's headers)" >&2; exit 2; }
+  mcfg_flags=(-I"$mcfg_inc")
 fi
-[[ -n $mcfg_inc ]] || { echo "mcfgthread headers not found (needed by <memory> in the donor's headers)" >&2; exit 2; }
 for f in "$src"/src/dx9asm/dx9asm_*.cpp "$src"/src/dx9asm/dxbc_*.cpp \
          "$src"/src/util/shared_conversions.cpp "$src"/src/extern/gpuopen/DXBCChecksum.cpp; do
-  x86_64-w64-mingw32-g++ "${flags[@]}" -I"$src/src" -I"$mcfg_inc" -o "$obj/$(basename "${f%.cpp}").o" "$f"
+  x86_64-w64-mingw32-g++ "${flags[@]}" -I"$src/src" "${mcfg_flags[@]}" -o "$obj/$(basename "${f%.cpp}").o" "$f"
 done
 for f in entry support libc; do
-  x86_64-w64-mingw32-g++ "${flags[@]}" -I"$src/src" -I"$mcfg_inc" \
+  x86_64-w64-mingw32-g++ "${flags[@]}" -I"$src/src" "${mcfg_flags[@]}" \
       -o "$obj/$f.o" "$root/src/tools/d3d9-translator/$f.cpp"
 done
 mingw_lib=$(dirname "$(x86_64-w64-mingw32-g++ -print-file-name=libkernel32.a)")
