@@ -951,6 +951,20 @@ static bool load_appinfo(uint32_t appid,Vdf& root,const Vdf*& app) {
     return true;
 }
 struct LaunchTarget { std::wstring exe; std::string args, why, workdir; };   // exe is install-relative
+// PLAY_FORCE_VULKAN: start a Unity title on the Vulkan renderer instead of the
+// default D3D11 (launch_target.h), so the packaged Vulkan stack is exercised by
+// a real game. Per game: LocalState\vulkan_<appid>.txt; launcher-wide:
+// LocalState\vulkan.txt; otherwise the PLAY_FORCE_VULKAN environment variable.
+// A file that exists decides for its scope, so a per-game "0" keeps D3D11 even
+// when the global setting asks for Vulkan. The default is D3D11.
+static bool force_vulkan(uint32_t appid) {
+    std::string text;
+    if(read_file_s(g_dir+L"\\vulkan_"+widen(std::to_string(appid))+L".txt",text)) return launch_target::vulkan_setting(text);
+    if(read_file_s(g_dir+L"\\vulkan.txt",text)) return launch_target::vulkan_setting(text);
+    wchar_t value[8]{};
+    DWORD n=GetEnvironmentVariableW(L"PLAY_FORCE_VULKAN",value,8);
+    return n && n < 8 && launch_target::vulkan_flag(play_runtime::narrow(value));
+}
 // The game's own Steam launch option when known, as the Steam client picks it;
 // otherwise the largest top-level .exe (a 64-bit one first). Engine options come
 // from the game's files (Unity: UnityPlayer.dll beside the executable), never
@@ -1006,11 +1020,12 @@ static LaunchTarget pick_target(uint32_t appid, const std::wstring& root, const 
     auto slash=t.exe.find_last_of(L'\\');
     std::wstring dir=slash==std::wstring::npos?root:root+L"\\"+t.exe.substr(0,slash);
     bool unity=GetFileAttributesW((dir+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES;
-    t.args=launch_target::arguments(chosen,unity);
+    const bool vulkan=unity&&force_vulkan(appid);
+    t.args=launch_target::arguments(chosen,unity,vulkan);
     // The option's own working directory (install-relative), as Steam honours it;
     // the executable's directory when the option names none.
     if(chosen&&!chosen->workingdir.empty()) { std::string wd; if(launch_target::relative_path(chosen->workingdir,wd)) t.workdir=wd; }
-    if(unity)t.why+="; Unity player";
+    if(unity)t.why+=vulkan?"; Unity player, PLAY_FORCE_VULKAN":"; Unity player";
     return t;
 }
 

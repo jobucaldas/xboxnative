@@ -164,10 +164,50 @@ inline const Candidate* largest(const std::vector<Candidate>& all) {
 // Engine options chosen from the game's own files, for any title.
 // Unity: windowed (the swap chain covers the CoreWindow), D3D11 (the guest
 // graphics route), and the player log beside the game for diagnosis.
-inline const char* unity_arguments() { return "-screen-fullscreen 0 -force-d3d11 -logFile vis-player.log"; }
-inline std::string arguments(const Entry* chosen, bool unity) {
+// forceVulkan asks for the Vulkan renderer instead of D3D11, so a Unity title
+// can exercise the packaged Vulkan stack (PLAY_FORCE_VULKAN=1, see
+// launch.h force_vulkan); the default stays D3D11.
+inline const char* unity_arguments(bool forceVulkan = false) {
+    return forceVulkan ? "-screen-fullscreen 0 -force-vulkan -logFile vis-player.log"
+                       : "-screen-fullscreen 0 -force-d3d11 -logFile vis-player.log";
+}
+inline std::string arguments(const Entry* chosen, bool unity, bool forceVulkan = false) {
     std::string args = chosen ? chosen->arguments : std::string();
-    if (unity) args += std::string(args.empty() ? "" : " ") + unity_arguments();
+    if (unity) args += std::string(args.empty() ? "" : " ") + unity_arguments(forceVulkan);
     return args;
+}
+// The PLAY_FORCE_VULKAN opt-in, as a value read from the environment or from a
+// Launcher setting file: "1", "on", "true" or "yes" asks for Vulkan. Anything
+// else (empty, "0", "off", "false", "no", a typo) keeps D3D11, so the default
+// never changes by accident.
+inline bool vulkan_flag(const std::string& value) {
+    std::string v = lower(value);
+    while (!v.empty() && (v.back() == '\n' || v.back() == '\r' || v.back() == ' ' || v.back() == '\t')) v.pop_back();
+    size_t start = 0;
+    while (start < v.size() && (v[start] == ' ' || v[start] == '\t')) ++start;
+    v = v.substr(start);
+    return v == "1" || v == "on" || v == "true" || v == "yes";
+}
+// A setting file may also name the key it sets ("vulkan=1", "force-vulkan=1"),
+// so a shared settings file can hold more than this one line.
+inline bool vulkan_setting(const std::string& text) {
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(pos, end - pos);
+        pos = end + 1;
+        for (auto& c : line) if (c == '\r') c = ' ';
+        size_t eq = line.find('=');
+        if (eq != std::string::npos) {
+            std::string key = lower(line.substr(0, eq));
+            while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+            if (key != "vulkan" && key != "force-vulkan" && key != "force_vulkan" && key != "play_force_vulkan") continue;
+            if (vulkan_flag(line.substr(eq + 1))) return true;
+            continue;
+        }
+        if (vulkan_flag(line)) return true;
+    }
+    return false;
 }
 }
