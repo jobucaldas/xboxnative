@@ -7,6 +7,7 @@
 #pragma once
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include "host/d3d11_diag.h"   // the Present-failure path reports through its sink
 #include <array>
 #include <atomic>
 #include <mutex>
@@ -153,15 +154,35 @@ inline void draw(IDXGISwapChain* chain) {
 using PresentFn=HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*,UINT,UINT);
 using Present1Fn=HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain1*,UINT,UINT,const DXGI_PRESENT_PARAMETERS*);
 inline PresentFn realPresent=nullptr;inline Present1Fn realPresent1=nullptr;
+// A failed Present is the one call the guest still makes after a device
+// removal — everything else fails too, but Present keeps returning while the
+// screen is frozen. The first failure asks the device why, once: without it
+// the only trace is the caller's error hiding the removal.
+inline std::atomic<bool> presentFailureLogged{false};
+inline void presentFailure(IDXGISwapChain* c,HRESULT hr) {
+    if(!presentFailureLogged.exchange(true)) {
+        winrt::com_ptr<ID3D11Device> dev;
+        if(SUCCEEDED(c->GetDevice(__uuidof(ID3D11Device),dev.put_void()))&&dev) {
+            HRESULT reason=dev->GetDeviceRemovedReason();
+            char b[128];snprintf(b,sizeof b,"guest Present failed hr=0x%08lx; device removed reason hr=0x%08lx",
+                (unsigned long)hr,(unsigned long)reason);
+            if(auto s=d3d11_diag::sink)s(b);
+        }
+    }
+}
 inline HRESULT STDMETHODCALLTYPE present(IDXGISwapChain* c,UINT sync,UINT flags) {
     if(flags&DXGI_PRESENT_TEST)return realPresent(c,sync,flags);
     draw(c);LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
-    HRESULT hr=realPresent(c,sync,flags);QueryPerformanceCounter(&b);record(a,b);return hr;
+    HRESULT hr=realPresent(c,sync,flags);QueryPerformanceCounter(&b);record(a,b);
+    if(FAILED(hr))presentFailure(c,hr);
+    return hr;
 }
 inline HRESULT STDMETHODCALLTYPE present1(IDXGISwapChain1* c,UINT sync,UINT flags,const DXGI_PRESENT_PARAMETERS* p) {
     if(flags&DXGI_PRESENT_TEST)return realPresent1(c,sync,flags,p);
     draw(c);LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
-    HRESULT hr=realPresent1(c,sync,flags,p);QueryPerformanceCounter(&b);record(a,b);return hr;
+    HRESULT hr=realPresent1(c,sync,flags,p);QueryPerformanceCounter(&b);record(a,b);
+    if(FAILED(hr))presentFailure(c,hr);
+    return hr;
 }
 inline bool patch(void** slot,void* hook,void** original) {
     if(*slot==hook)return true;

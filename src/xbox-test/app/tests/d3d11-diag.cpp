@@ -477,6 +477,27 @@ int main(int argc,char** argv) {
     CHECK(FAILED(context->Map(buffer,0,D3D11_MAP_WRITE_DISCARD,0,&mapped))&&count("Map hr=")==1&&count("res=buffer bytes=64")==1);
     CHECK(FAILED(context->Map(buffer,0,D3D11_MAP_WRITE_DISCARD,0,&mapped))&&count("Map hr=")==1);
 
+    // Device-lost tracking: an ordinary failure does not mark the device lost;
+    // a removed-code failure does, once, and the summary carries the state.
+    {
+        size_t before=lines.size();
+        d3d11_diag::noteFailure(E_FAIL);   // an ordinary failure: no transition
+        CHECK(!d3d11_diag::deviceRemoved.load()&&d3d11_diag::deviceLostReports.load()==0);
+        d3d11_diag::noteFailure(DXGI_ERROR_DEVICE_REMOVED);
+        CHECK(d3d11_diag::deviceRemoved.load()&&d3d11_diag::deviceLostReports.load()==1);
+        bool marked=false;for(size_t i=before;i<lines.size();++i)if(lines[i].find("device removed: reason")!=std::string::npos)marked=true;
+        CHECK(marked);   // the transition is logged with the removal reason
+        d3d11_diag::noteFailure(DXGI_ERROR_DEVICE_REMOVED);   // sticky: no second transition
+        CHECK(d3d11_diag::deviceLostReports.load()==1);
+        // The summary line carries the state: force a window by rewinding the
+        // schedule so the next tick fires immediately.
+        d3d11_diag::summaryNext.store(GetTickCount64()-1);
+        d3d11_diag::tick();
+        bool inSummary=false;
+        for(auto& l:lines)if(l.find("device lost=1 transitions=1")!=std::string::npos)inSummary=true;
+        CHECK(inSummary);
+    }
+
     // A second device and the d3d11.1 interface share the class: no new patch, same dedupe.
     ID3D11Device* second=make();
     CHECK(second!=nullptr);
