@@ -14,14 +14,23 @@ extern "C" __declspec(dllexport) int d3d9Translate(const unsigned* code, unsigne
                                                    unsigned words, unsigned* size) {
     if (size) *size = 0;
     if (!code || !out || !size) return 2;
+    // Play maps this DLL and calls it from the guest's draw; a fault inside the
+    // donor leaves the launcher log with nothing from here, so each call marks
+    // its own progress. Two lines per call, not per frame: the shim caches the
+    // shaders it builds.
+    OutputDebugStringA("D3D9 translator: enter\n");
     dxup::dx9asm::ShaderBytecode* bytecode = nullptr;
     dxup::dx9asm::toDXBC(code, &bytecode);
-    if (!bytecode) return 1;
+    if (!bytecode) {
+        OutputDebugStringA("D3D9 translator: the donor refused the shader\n");
+        return 1;
+    }
     const unsigned bytes = bytecode->getByteSize();
     if (bytes > words * 4u) { delete bytecode; return 3; }
     const unsigned* source = reinterpret_cast<const unsigned*>(bytecode->getBytecode());
     for (unsigned i = 0; i < bytes / 4; ++i) out[i] = source[i];
     *size = bytes;
     delete bytecode;
+    OutputDebugStringA("D3D9 translator: leave\n");
     return 0;
 }

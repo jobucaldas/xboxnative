@@ -2088,6 +2088,11 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         }
         const unsigned vertexSignature=vertexShaderSignature(vertex);
         if(vertexSignature!=ffpVertexSignature||!ffpVertex) {
+            // The fixed-function path is the only one that runs the translator
+            // three times for one draw (vertex, pixel, then the vertex shader
+            // again for the input layout), so a fault here has no obvious
+            // single owner. These notes name the step that was running.
+            d3dshim::note("D3D9 shim: fixed-function vertex shader: translating");
             // On the heap, not the stack: a 5 KB frame is more than the
             // compiler's stack-probe threshold, and the probe (___chkstk_ms)
             // lives in mingw's CRT, which this DLL deliberately does not link.
@@ -2099,6 +2104,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
                                   :D3DERR_INVALIDCALL;
             d3dshim::release(tokens);
             if(FAILED(hr))return hr;
+            d3dshim::note("D3D9 shim: fixed-function vertex shader: created");
             if(ffpVertex)ffpVertex->Release();
             ffpVertex=made;
             ffpVertexSignature=vertexSignature;
@@ -2122,6 +2128,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         }
         const unsigned pixelSignature=pixelShaderSignature(pixel);
         if(pixelSignature!=ffpPixelSignature||!ffpPixel) {
+            d3dshim::note("D3D9 shim: fixed-function pixel shader: translating");
             DWORD* tokens=static_cast<DWORD*>(d3dshim::allocate(1024*sizeof(DWORD)));
             if(!tokens)return E_OUTOFMEMORY;
             const unsigned words=ffp::writePixelShader(pixel,tokens,1024);
@@ -2130,6 +2137,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
                                   :D3DERR_INVALIDCALL;
             d3dshim::release(tokens);
             if(FAILED(hr))return hr;
+            d3dshim::note("D3D9 shim: fixed-function pixel shader: created");
             if(ffpPixel)ffpPixel->Release();
             ffpPixel=made;
             ffpPixelSignature=pixelSignature;
@@ -2163,6 +2171,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         if(signature!=ffpLayoutSignature||!ffpLayout) {
             // The layout is built against the same DXBC the vertex shader was
             // made from, so the two always agree.
+            d3dshim::note("D3D9 shim: fixed-function input layout: translating");
             DWORD tokens[512];
             const unsigned words=ffp::writeVertexShader(vertex,tokens,512);
             void* dxbc=nullptr;unsigned bytes=0;
@@ -2181,6 +2190,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
             if(ffpLayout)ffpLayout->Release();
             ffpLayout=made;
             ffpLayoutSignature=signature;
+            d3dshim::note("D3D9 shim: fixed-function input layout: created");
         }
         ctx->IASetInputLayout(ffpLayout);
         return D3D_OK;
