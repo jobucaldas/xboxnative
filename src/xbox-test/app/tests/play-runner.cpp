@@ -325,12 +325,13 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         play_graphics::configure(&host_surface::token,host_surface::present,logline);
         logline("HOST SURFACE native Wine window stands in for the CoreWindow (off-device only)");
     }
-    // The Khronos loader statically imports setupapi.dll's cfgmgr32 family, which
-    // Play serves from the Wine setupapi donor (wine-pe). A launch probes the
-    // donors before it maps anything, so this fixture must too; without the gate
-    // the loader's imports are unresolved and the load fails for a reason a real
+    // The Khronos loader statically imports setupapi.dll's cfgmgr32 family, and
+    // Mesa's opengl32.dll/libgallium_wgl.dll statically import version.dll,
+    // which Play serves from the Wine donors (wine-pe). A launch probes the
+    // donors before it maps anything, so these fixtures must too; without the
+    // gate the imports are unresolved and the load fails for a reason a real
     // launch never hits.
-    if(std::string(args)=="vulkan"||std::string(args)=="vulkan-dzn") {
+    if(std::string(args)=="vulkan"||std::string(args)=="vulkan-dzn"||std::string(args)=="opengl") {
         if(!donor_pe::probe(logline)) {logline("DWPE FAIL donor behavior gate; no game code executed");return 3;}
         mlp::donor_resolve=donor_pe::exported;
     }
