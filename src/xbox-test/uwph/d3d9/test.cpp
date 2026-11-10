@@ -310,6 +310,12 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
         D3DLOCKED_RECT locked{};
         CHECK_HR(staging->LockRect(&locked,nullptr,0));
         CHECK(locked.pBits!=nullptr&&locked.Pitch>=64);
+        // A plain lock on a SYSTEMMEM surface is writable, which is how a game
+        // fills an offscreen surface; the write must land in the texture.
+        if(locked.pBits)*static_cast<unsigned*>(locked.pBits)=0xff00ff00u;
+        CHECK_HR(staging->UnlockRect());
+        CHECK_HR(staging->LockRect(&locked,nullptr,D3DLOCK_READONLY));
+        if(locked.pBits)CHECK((*static_cast<const unsigned*>(locked.pBits)&0x00ffffffu)==0x0000ff00u);
         CHECK_HR(staging->UnlockRect());
         CHECK_HR_IS(staging->UnlockRect(),D3DERR_INVALIDCALL);   // not locked twice
         staging->Release();
