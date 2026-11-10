@@ -808,8 +808,13 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
     std::string name=play_runtime::narrow(exe);
     g_launch.pe32Executed=false;g_launch.pe32Finished=false;g_launch.pe32ExitCode=0;
     {   // The import classification beside the interpreter's own unresolved list.
+        // The DLLs a game ships beside its executable are what Windows' search
+        // finds first, so the probe looks in the executable's own directory (a
+        // launch option's exe may sit in a subdirectory of the install root).
         std::string summary;
-        if(pe32_probe::map(path,c.root,summary)){snprintf(line,sizeof line,"PE32 %s",summary.c_str());lp_sink(line);}
+        auto slash=path.find_last_of(L"\\/");
+        std::wstring exeDir=slash==std::wstring::npos?std::wstring():path.substr(0,slash);
+        if(pe32_probe::map(path,exeDir,summary)){snprintf(line,sizeof line,"PE32 %s",summary.c_str());lp_sink(line);}
     }
     snprintf(line,sizeof line,"PRUN PE32 engine=x86-interpreter exe=%s",name.c_str());lp_sink(line);
     auto tee=[&name](const std::string& s) {
@@ -834,7 +839,12 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         char b[96];snprintf(b,sizeof b,"PE32 guest entry 0x%08x",r.entry);
         lp_publish(c.gen,c.appid,b,false,1,1,"running",false);
     };
-    auto r=x86::run(path,c.cwd,cmdline,tee,loaded);
+    // A game is not a fixture: the interpreter's default 500 million instruction
+    // cap is a few seconds of work, so a guest that really runs would be stopped
+    // with InstructionLimit. The cap is raised to a value no real session
+    // reaches, and stays finite so a runaway guest still ends in a reported
+    // fault instead of spinning on the launch thread forever.
+    auto r=x86::run(path,c.cwd,cmdline,tee,loaded,x86::kGuestRunCap);
     c.mapped=r.loaded?1:0;
     g_launch.pe32Finished=r.finished;
     g_launch.pe32ExitCode=r.exit_code;
