@@ -46,6 +46,10 @@ enum : uint32_t {
 enum : uint32_t { FlagStatus = 1, FlagPlayerName = 2 };
 // Steam answers a batch; keep one request well inside a single CM frame.
 enum : unsigned { RequestBatch = 100 };
+// How long the seed waits after the names stop arriving before it lets the
+// game draw: Steam sends one push per reply, and an account it will not name
+// never arrives, so waiting for "all" would always burn the full timeout.
+enum : int { QuietMs = 500 };
 
 struct Io {
     // Fire and forget: CMsgClientRequestFriendData has no job id, and the answer
@@ -202,10 +206,14 @@ struct Bridge {
         if (added) cv.notify_all();
         return added;
     }
-    // Ask Steam for the names of `ids` that are not known yet, and wait up to
-    // `timeoutMs` for the reply. Called on the game's thread from the seed, so
-    // the wait is bounded and a missing reply leaves the provider's own answer
-    // exactly as it was.
+    // Ask Steam for the names of `ids` that are not known yet, and wait a
+    // bounded time for the reply. Called on the game's thread from the seed, so
+    // the wait must end as soon as Steam has said what it is going to say: the
+    // push arrives as one entry per account, and accounts Steam will not name
+    // (private profiles) never arrive at all. So it returns once every id is
+    // known, or once the names have stopped arriving for `QuietMs`, or at
+    // `timeoutMs` — whichever comes first. A missing reply leaves the
+    // provider's own answer exactly as it was.
     void ensure(Io& io, const std::vector<uint64_t>& ids, int timeoutMs) {
         std::vector<uint64_t> missing;
         {
@@ -225,15 +233,27 @@ struct Bridge {
             std::lock_guard<std::mutex> lock(m);
             for (auto id : missing) asked.insert(id);
         }
-        std::unique_lock<std::mutex> lock(m);
-        cv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] {
+        auto known_count = [&] {
+            size_t got = 0;
             for (auto id : ids)
-                if (id && !known(id)) return false;
-            return true;
-        });
-        size_t got = 0;
-        for (auto id : ids)
-            if (id && known(id)) ++got;
+                if (id && known(id)) ++got;
+            return got;
+        };
+        std::unique_lock<std::mutex> lock(m);
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+        size_t got = known_count(), last = got;
+        while (got < ids.size()) {
+            auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (left <= 0) break;
+            auto slice = std::chrono::milliseconds(std::min<long long>(QuietMs, left));
+            cv.wait_for(lock, slice, [&] { return known_count() != got; });
+            got = known_count();
+            // Steam sends the reply as one push; if nothing new arrived for a
+            // slice, the rest are accounts it will not name. Draw what it named.
+            if (got == last) break;
+            last = got;
+        }
         lock.unlock();
         // Counts only: a SteamID or a persona name must never reach the log.
         io.log("persona: " + std::to_string(got) + " of " + std::to_string(ids.size()) + " leaderboard names resolved");

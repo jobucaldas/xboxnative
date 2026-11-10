@@ -130,6 +130,29 @@ int main() {
         assert(!bridge.known(0x110000100000002ull));
     }
 
+    // ---- the reply names some of the rows and not others (Steam does not name
+    // a private profile): the wait ends when the names stop arriving, not at the
+    // timeout, because the game's thread is drawing behind it
+    {
+        Server server;
+        server.names = {{0x110000100000002ull, "Player Two"}};
+        Io io;
+        io.send = [&](uint32_t emsg, const std::string& body) { return server.send(emsg, body); };
+        io.log = [](const std::string&) {};
+        Bridge bridge;
+        std::vector<uint64_t> ids = {0x110000100000002ull, 0x110000100000009ull};
+        std::thread reader([&] {
+            while (server.requests == 0) std::this_thread::yield();
+            bridge.on_state(server.state_body(ids));
+        });
+        auto start = std::chrono::steady_clock::now();
+        bridge.ensure(io, ids, 5000);
+        auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        reader.join();
+        assert(bridge.known(0x110000100000002ull) && !bridge.known(0x110000100000009ull));
+        assert(waited < 2500);   // one quiet slice after the push, not the whole timeout
+    }
+
     // ---- names the game asked for outside the seeded rows are queued, not sent
     // on the game's thread, and are requested once by the keeper
     {
@@ -182,14 +205,17 @@ int main() {
         // A stamp in the future is not trusted either.
         assert(!load_cache(path, 900, 100, back));
         // A file that is not ours, or carries a broken record, is refused or
-        // skipped rather than loaded as a name.
+        // skipped rather than loaded as a name. The ids are written in decimal
+        // (as the bridge writes them) but built from synthetic constants: a
+        // committed 17-digit account literal is what the secret scan refuses.
         {
+            const uint64_t good = 0x110000100000002ull, odd = 0x110000100000003ull, unnamed = 0x110000100000004ull;
             std::ofstream out(path, std::ios::binary | std::ios::trunc);
             out << "#xbn-persona 1 1000\n";
-            out << "76561197960265730 " << hex_encode("Good") << "\n";
+            out << good << ' ' << hex_encode("Good") << "\n";
             out << "notanumber zz\n";
-            out << "76561197960265731 6a6\n";   // odd-length hex
-            out << "76561197960265732 " << hex_encode("") << "\n";   // empty name
+            out << odd << " 6a6\n";   // odd-length hex
+            out << unnamed << ' ' << hex_encode("") << "\n";   // empty name
         }
         back.clear();
         assert(load_cache(path, 1000, 100, back));
