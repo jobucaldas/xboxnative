@@ -22,6 +22,7 @@
 #include <memory>
 #include <condition_variable>
 #include <functional>
+#include <ctime>
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -89,20 +90,17 @@ static void fill(int x, int y, int w, int h, uint32_t c) {
     for (int j = y0; j < y1; j++) { uint32_t* p = &g_fb[j * W]; for (int i = x0; i < x1; i++) p[i] = c; }
 }
 static void frame(int x, int y, int w, int h, int t, uint32_t c) { fill(x, y, w, t, c); fill(x, y + h - t, w, t, c); fill(x, y, t, h, c); fill(x + w - t, y, t, h, c); }
-static void text(int x, int y, const std::string& s, int sc, uint32_t c) {
+// Bitmap-font text, named text8 so the name `text` stays free for ui::theme's
+// color constants (ui_guide.h draws with `using namespace ui::theme` and must
+// not see an ambiguous global). Used by the font-failure fallback and the
+// launch-option picker.
+static void text8(int x, int y, const std::string& s, int sc, uint32_t c) {
     for (size_t k = 0; k < s.size(); k++) {
         unsigned char ch = (unsigned char)s[k]; if (ch >= 128) ch = '?';
         for (int r = 0; r < 8; r++) { unsigned char row = (unsigned char)font8x8_basic[ch][r];
             for (int b = 0; b < 8; b++) if (row & (1 << b)) fill(x + (int)k * 8 * sc + b * sc, y + r * sc, sc, sc, c); }
     }
 }
-static void wrap2(const std::string& s, size_t n, std::string& l1, std::string& l2) {   // two lines max, word wrap, ellipsis on overflow
-    l1.clear(); l2.clear(); if (s.size() <= n) { l1 = s; return; }
-    size_t cut = s.rfind(' ', n); if (cut == std::string::npos || cut < n / 2) cut = n;
-    l1 = s.substr(0, cut); size_t st = cut; while (st < s.size() && s[st] == ' ') st++; l2 = s.substr(st);
-    if (l2.size() > n) l2 = l2.substr(0, n - 2) + "..";
-}
-static int twidth(const std::string& s, int sc) { return (int)s.size() * 8 * sc; }
 static std::string clip(const std::string& s, size_t n) { return s.size() <= n ? s : s.substr(0, n - 2) + ".."; }
 
 // ---------------------------------------------------------------- HTTP (Windows.Web.Http, default TLS validation)
@@ -147,6 +145,7 @@ static std::string unb64url(const std::string& s) {
 }
 
 #include "steam_wire.h"
+#include "steam_presence.h"   // ClientPersonaState / persona_request_body for the sidebar's profile row
 
 // ---------------------------------------------------------------- Steam auth (matches steam-session AuthenticationClient, platform SteamClient)
 static const std::string API = "https://api.steampowered.com/";
@@ -183,11 +182,6 @@ static std::string jwt_sub(const std::string& jwt) {
     std::string p = unb64url(jwt.substr(a + 1, b - a - 1)); size_t k = p.find("\"sub\""); if (k == std::string::npos) return {};
     size_t q1 = p.find('"', k + 5), q2 = q1 == std::string::npos ? q1 : p.find('"', q1 + 1); if (q2 == std::string::npos) return {};
     return p.substr(q1 + 1, q2 - q1 - 1);
-}
-static long long jwt_exp(const std::string& jwt) {
-    size_t a = jwt.find('.'); if (a == std::string::npos) return 0; size_t b = jwt.find('.', a + 1); if (b == std::string::npos) return 0;
-    std::string p = unb64url(jwt.substr(a + 1, b - a - 1)); size_t k = p.find("\"exp\""); if (k == std::string::npos) return 0;
-    size_t c = p.find(':', k); return c == std::string::npos ? 0 : strtoll(p.c_str() + c + 1, nullptr, 10);
 }
 static bool g_genTransient = false;   // last gen_access failure was network/server (not an invalid token)
 static bool gen_access(const std::string& refresh, std::string& access) {
@@ -230,22 +224,9 @@ static bool fetch_cm_list(std::vector<CmServer>& out) {
     return !out.empty();
 }
 
-static std::string cm_build_header(uint64_t steamid64, int32_t sessionId) {
-    std::string h; pb_fixed64(h, 1, steamid64); pb_u(h, 2, (uint64_t)(uint32_t)sessionId);
-    pb_fixed64(h, 10, UINT64_MAX); pb_fixed64(h, 11, UINT64_MAX); return h;
-}
-static std::string cm_build_client_logon(const std::string& refreshToken) {
-    std::string b;
-    pb_u(b, 1, 65580);          // protocol_version
-    pb_u(b, 3, 0);              // cell_id
-    pb_s(b, 6, "english");      // client_language
-    pb_u(b, 7, 20);             // client_os_type (Win11)
-    pb_u(b, 8, 1);              // should_remember_password
-    pb_u(b, 33, 2);             // chat_mode
-    pb_u(b, 102, 1);            // supports_rate_limit_response
-    pb_s(b, 108, refreshToken); // access_token (CM login takes the refresh token here)
-    return b;
-}
+// cm_build_header/cm_build_client_logon were removed: steamdl.h's CmSession
+// builds its own logon/header frames now (send_raw / cm_logon).
+
 static std::string cm_build_frame(uint32_t emsg, const std::string& header, const std::string& body) {
     std::string f; put_u32le(f, emsg | PB_PROTOMASK); put_u32le(f, (uint32_t)header.size()); f += header; f += body; return f;
 }
@@ -308,55 +289,62 @@ struct CmConn {
 };
 
 struct CmResult { bool connected = false, gotResponse = false; int32_t eresult = 0, heartbeatSec = 0; std::string err, cm; };
-static CmResult cm_login_test(const std::string& refreshToken) {   // connect to a CM, send ClientLogon, log the eresult, disconnect. Never logs the token.
-    CmResult res; std::vector<CmServer> servers;
-    if (!fetch_cm_list(servers)) { res.err = "GetCMListForConnect failed"; return res; }
-    logf("cm: %zu websocket CM candidates", servers.size());
-    std::string sid = jwt_sub(refreshToken); if (sid.empty()) { res.err = "bad refresh token (no sub)"; return res; }
-    uint64_t steamid64 = strtoull(sid.c_str(), nullptr, 10);
-    for (size_t i = 0; i < servers.size() && i < 5 && !res.gotResponse; i++) {
-        CmConn conn;
-        try { conn.start(servers[i].host); }
-        catch (hresult_error const& e) { logf("cm: connect to %s failed 0x%08x %s", servers[i].host.c_str(), (unsigned)e.code().value, to_string(e.message()).c_str()); continue; }
-        catch (...) { logf("cm: connect to %s failed (exception)", servers[i].host.c_str()); continue; }
-        res.connected = true; res.cm = servers[i].host;
-        conn.send(cm_build_frame(EMSG_ClientLogon, cm_build_header(steamid64, 0), cm_build_client_logon(refreshToken)));
-        logf("cm: ClientLogon sent to %s", servers[i].host.c_str());
-        auto t0 = std::chrono::steady_clock::now();
-        for (;;) {
-            int remain = 10000 - (int)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
-            std::string frame;
-            if (remain <= 0 || !conn.recv(frame, remain)) { logf("cm: timed out waiting for a response from %s", servers[i].host.c_str()); break; }
-            std::vector<std::string> subs; cm_flatten(frame, subs);
-            for (auto& sf : subs) {
-            CmHeader h; if (!cm_parse_frame(sf, h)) continue;
-            if (h.emsg == EMSG_ClientLogOnResponse) {
-                auto f = pb_parse(h.bodyBytes);
-                if (auto e = pb_get(f, 1)) res.eresult = (int32_t)e->u;
-                if (auto hb = pb_get(f, 3)) res.heartbeatSec = (int32_t)hb->u;
-                res.gotResponse = true; logf("cm: ClientLogOnResponse eresult=%d heartbeat=%ds (from %s)", res.eresult, res.heartbeatSec, servers[i].host.c_str());
-                break;
-            } else logf("cm: got EMsg %u (%zu bytes), ignoring (phase 1)", h.emsg, h.bodyBytes.size());
-            }
-            if (res.gotResponse) break;
-        }
-        conn.close();
-    }
-    if (!res.gotResponse && res.err.empty()) res.err = "no response from any CM";
-    return res;
-}
-
 // ---------------------------------------------------------------- token store (LocalState is private to the AppContainer; content never logged)
 static std::wstring token_path() { return g_dir + L"\\steam_session.bin"; }
 static bool load_token2(std::string& refresh, std::string& access) {   // file = refresh [\n access]
     std::string t; FILE* f = _wfopen((g_dir + L"\\steam_session.bin").c_str(), L"rb"); if (!f) return false; char b[8192]; size_t n = fread(b, 1, sizeof b, f); fclose(f); t.assign(b, n);
     size_t nl = t.find('\n'); refresh = t.substr(0, nl); access = nl == std::string::npos ? "" : t.substr(nl + 1); while (!access.empty() && (access.back() == '\n' || access.back() == '\r')) access.pop_back(); return refresh.size() > 20;
 }
-static bool load_token(std::string& t) { FILE* f = _wfopen(token_path().c_str(), L"rb"); if (!f) return false; char b[4096]; size_t n = fread(b, 1, sizeof b, f); fclose(f); t.assign(b, n); return n > 20; }
 static void save_token(const std::string& t) { FILE* f = _wfopen(token_path().c_str(), L"wb"); if (f) { fwrite(t.data(), 1, t.size(), f); fclose(f); } logf("session token saved (%zu bytes, not shown)", t.size()); }
 static void save_token2(const std::string& refresh, const std::string& access) { std::string t = refresh; if (!access.empty()) t += "\n" + access; save_token(t); }
 static void delete_token() { DeleteFileW(token_path().c_str()); logf("session token deleted"); }
 static bool file_exists(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
+
+// ---------------------------------------------------------------- Xbox-style screens (ui_launcher.h) + navigation (ui_nav.h)
+#include "ui_nav.h"
+#include "ui_launcher.h"
+
+// The account's persona name for the sidebar profile row, parsed from
+// ClientPersonaState field 4 (player_name) here, because steam_presence.h's
+// Persona has no name field. Empty until Steam answers: the sidebar then
+// shows the honest default, never an invented name.
+static std::mutex g_personaM; static std::string g_personaName;
+static std::string persona_name() { std::lock_guard<std::mutex> l(g_personaM); return g_personaName; }
+
+// Selawik fonts for the ui:: toolkit, loaded once from the package's fonts/
+// folder (build.sh copies out/ui-assets into layout/fonts/). The bytes must
+// outlive the ui::Font, so they live in static storage next to it. Loading
+// failure is logged once; the old bitmap screens stay drawable (font8x8
+// text8() above) and the draw dispatcher falls back to them.
+static std::vector<uint8_t> g_fontReg, g_fontSemi, g_fontBold;
+static ui::Font g_font;
+static bool g_fontOk = false;
+static std::wstring exe_dir() {
+    wchar_t self[2048]; DWORD n = GetModuleFileNameW(nullptr, self, 2048);
+    if (!n || n >= 2048) return L".";
+    std::wstring p(self, n); return p.substr(0, p.find_last_of(L"\\/"));
+}
+static bool load_font_file(const wchar_t* name, std::vector<uint8_t>& buf) {
+    FILE* f = _wfopen((exe_dir() + L"\\fonts\\" + name).c_str(), L"rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    if (n <= 12) { fclose(f); return false; }
+    buf.resize(size_t(n));
+    bool ok = fread(buf.data(), 1, buf.size(), f) == buf.size();
+    fclose(f); return ok;
+}
+static void load_fonts() {
+    if (!load_font_file(L"selawk.ttf", g_fontReg) || !load_font_file(L"selawksb.ttf", g_fontSemi) ||
+        !load_font_file(L"selawkb.ttf", g_fontBold)) {
+        logf("fonts: selawk.ttf/selawksb.ttf/selawkb.ttf not found beside the launcher; bitmap text stays");
+        return;
+    }
+    g_fontOk = g_font.load(ui::Face::Regular, g_fontReg.data(), g_fontReg.size()) &&
+               g_font.load(ui::Face::Semibold, g_fontSemi.data(), g_fontSemi.size()) &&
+               g_font.load(ui::Face::Bold, g_fontBold.data(), g_fontBold.size());
+    logf("fonts: ui::Font %s (three Selawik faces)", g_fontOk ? "loaded" : "load FAILED; bitmap text stays");
+}
+
 #include "steamdl.h"
 #include "storage_report.h"
 
@@ -422,7 +410,7 @@ static void sort_games(int mode) {   // caller holds g_gm
 }
 
 // ---------------------------------------------------------------- app state + network thread
-enum Screen { S_BOOT, S_LOGIN, S_LOADING, S_LIBRARY, S_DETAIL };
+enum Screen { S_BOOT, S_LOGIN, S_LOADING, S_LIBRARY, S_DETAIL, S_QUEUE, S_STORAGE };
 static std::atomic<int> g_screen{S_BOOT};
 static std::mutex g_sm;                       // guards the strings below
 static std::string g_status = "Starting...", g_qrUrl, g_err;
@@ -493,6 +481,38 @@ static void enter_library_cm(CmSession& cm) {
     if (!fetch_library_cm(cm)) { { std::lock_guard<std::mutex> l(g_sm); g_err = "Could not load your games (see boot.log)"; } g_screen = S_LIBRARY; return; }
     { std::lock_guard<std::mutex> l(g_sm); g_err.clear(); }
     start_covers(); g_screen = S_LIBRARY;
+}
+
+// Persona name for the sidebar profile row (field 4 of ClientPersonaState's
+// friends[] entry; steam_presence.h's Persona has no name field). Runs on the
+// CM reader thread. The keeper in launch.h replaces the push handler when a
+// game launches; the launcher restarts when the game ends, so the name keeps
+// working for every library screen.
+static void persona_push(const JobMsg& m) {
+    if (m.emsg != steam_presence::ClientPersonaState) return;
+    uint64_t self = 0; { auto s = user_session(); if (s) self = s->steamid; }
+    if (!self) return;
+    for (auto& friendField : pb_parse(m.body)) {
+        if (friendField.f != 2) continue;
+        uint64_t id = 0; std::string name;
+        for (auto& f : pb_parse(friendField.s)) {
+            if (f.f == 1) id = f.u;
+            else if (f.f == 4) name = f.s;
+        }
+        if (id == self && !name.empty()) {
+            std::lock_guard<std::mutex> l(g_personaM);
+            if (g_personaName != name) { g_personaName = name; logf("persona: name updated (%zu chars, not logged)", name.size()); }
+            return;
+        }
+    }
+}
+// Installs the persona push handler on a freshly (re-)established user
+// session, then asks Steam for this account's own persona state.
+static void adopt_user_session(std::shared_ptr<CmSession> s) {
+    set_user_session(s);
+    if (!s || !s->up) return;
+    s->set_push(persona_push);
+    try { s->send_raw(steam_presence::ClientRequestFriendData, steam_presence::persona_request_body(s->steamid), 0, ""); } catch (...) {}
 }
 
 // ---- download queue (A on a game, or LocalState\autodownload.txt)
@@ -581,7 +601,6 @@ static void dl_thread() {
 #include "guest_overlay.h"
 #include "../uwph/user32/corewindow_feed.h"
 #include "game_delete.h"
-#include "apibadge.h"
 
 // definitive refusals mean the saved token is bad; anything else (network, CM busy) keeps the token and retries
 #include "session_restore.h"
@@ -641,7 +660,7 @@ static void net_thread() {
         for (int attempt = 0; !g_quit; attempt++) {
             int er = 0; std::string err; auto s = cm_logon(refresh, er, err);
             auto result = restore_result(bool(s), er, refresh);
-            if (result == session_restore::Result::restored) { logf("session restored via CM logon (refresh token)"); set_user_session(s); enter_library_cm(*s); break; }
+            if (result == session_restore::Result::restored) { logf("session restored via CM logon (refresh token)"); adopt_user_session(s); enter_library_cm(*s); break; }
             if (result == session_restore::Result::qr) break;
             set_status(er == 84 ? "Steam asks to wait - retrying (saved login kept)..." : "Cannot reach Steam - retrying (saved login kept)...");
             logf("session restore: transient failure (eresult %d %s), retry %d", er, err.c_str(), attempt + 1);
@@ -650,14 +669,14 @@ static void net_thread() {
     }
     g_authResolved = true;
     while (!g_quit) {
-        if (g_screen == S_LIBRARY || g_screen == S_LOADING || g_screen == S_DETAIL) {
+        if (g_screen == S_LIBRARY || g_screen == S_LOADING || g_screen == S_DETAIL || g_screen == S_QUEUE || g_screen == S_STORAGE) {
             if (g_logoutReq.exchange(false)) { delete_token(); if (auto u = user_session()) { u->close(); set_user_session(nullptr); } g_screen = S_LOGIN; refresh.clear(); access.clear(); { std::lock_guard<std::mutex> l(g_gm); g_games.clear(); } continue; }
             if (!refresh.empty() && !g_demo) {
                 auto u = user_session();
                 bool want = g_reloadReq.exchange(false);
                 if ((!u || !u->up) && now_s() - lastRelog > 20) {   // session dropped: log on again with the same refresh token
                     lastRelog = now_s(); int er = 0; std::string err; auto s = cm_logon(refresh, er, err);
-                    if (s) { logf("session re-established via CM logon"); set_user_session(s); u = s; want = true; }
+                    if (s) { logf("session re-established via CM logon"); adopt_user_session(s); u = s; want = true; }
                     else if (restore_result(false, er, refresh) == session_restore::Result::qr) continue;
                 }
                 if (want && u && u->up) { { std::lock_guard<std::mutex> l(g_gm); g_games.clear(); } enter_library_cm(*u); }
@@ -681,7 +700,7 @@ static void net_thread() {
                 if (access.empty()) gen_access(refresh, access);
                 save_token2(refresh, access); logf("login approved");
                 int er = 0; std::string err; auto s = cm_logon(refresh, er, err);
-                if (s) { set_user_session(s); enter_library_cm(*s); }
+                if (s) { adopt_user_session(s); enter_library_cm(*s); }
                 else { logf("post-QR CM logon failed (eresult %d %s); trying HTTPS library", er, err.c_str()); enter_library(access, jwt_sub(refresh)); }
                 g_authResolved = true; break;
             }
@@ -707,6 +726,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     Pad m_pad; int m_prevPads = -1; uint64_t m_frame = 0;
     int m_sel = 0, m_top = 0; double m_scroll = 0, m_scrollT = 0; bool m_btnFocus = true, m_confirmLogout = false;
     bool m_onlyInstalled = false;                            // View: library shows installed games only
+    ui_nav::Focus m_focus = ui_nav::Focus::grid;             // library: grid tiles or the sidebar
+    int m_sidebar = 0;                                       // sidebar row the focus sits on
+    bool m_autoUpdate = true;                                // queue screen pill (no update backend yet; memory only)
     std::set<uint32_t> m_installed; double m_installedT = -10; int m_installedDel = -1, m_installedDl = -1;
     void refresh_installed(double t) {                       // dl_<appid>.done markers; rescanned every 2 s and after a download/delete
         if (t - m_installedT < 2 && m_installedDel == g_del.gen && m_installedDl == g_dlSeq) return;
@@ -756,6 +778,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // Launch-option picker (launch_picker.h): a game with several run options
     // asks before Play instead of picking one silently.
     launch_picker::State m_pick;
+    // New-style detail focus (ui_nav icon slots): 0 primary, 1 trash, 2 cloud,
+    // 3 cog; the cog opens the install-location cycle, the cloud opens the
+    // cloud sheet (m_cloudOpen / m_cloudFocus).
+    int m_dFocus = 0;
+    bool m_cloudOpen = false; int m_cloudFocus = 0;
+    std::string m_achName, m_achSub; float m_achPct = 0; bool m_focusAch = false;   // latest achievement (no live schema feed yet; stays off)
     std::string remembered_option(uint32_t id) {   // LocalState\launch_choice_<appid>.txt beside the install marker
         std::string text; return read_file_s(g_dir + L"\\" + widen(launch_picker::remember_name(id)), text) ? launch_picker::parse_remember(text) : std::string();
     }
@@ -1050,110 +1078,98 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     }
     void draw_detail(double t) {
         refresh_install(t);
-        const uint32_t BG = C3(14, 17, 22), TXT = C3(255, 255, 255), DIM = C3(170, 180, 195), YEL = C3(255, 210, 63), GRN = C3(120, 255, 140), RED = C3(255, 110, 110);
-        fill(0, 0, W, H, BG);
         auto si = m_dSi; int st = si ? (int)si->state : 2;
-        std::string title = (si && st == 1 && !si->name.empty()) ? si->name : m_dName;
-        int tsc = title.size() <= 44 ? 5 : 3; text(60, 40, clip(title, (size_t)(1800 / (8 * tsc))), tsc, TXT);
-        { char b[80]; snprintf(b, sizeof b, "App %u", m_dApp); text(60, 92, b, 2, DIM); }
-        // header image
-        fill(60, 130, 616, 353, C3(30, 36, 46));
-        if (si && si->img == 1) blit(si->hdr.pix, si->hdr.iw, si->hdr.ih, 60 + (616 - si->hdr.iw) / 2, 130 + (353 - si->hdr.ih) / 2);
-        else text(60 + 308 - twidth(si && si->img == 2 ? "no image" : "loading image...", 3) / 2, 290, si && si->img == 2 ? "no image" : "loading image...", 3, DIM);
-        frame(60, 130, 616, 353, 3, C3(60, 70, 88));
-        apib::Result gfx = apib::combine(apib::lookup(m_dApp), si && st == 1 ? si->dxKind : 0, si && st == 1 ? si->dxNote : std::string()); apib::draw(70, 140, 3, gfx);
-        // install state
-        int dl = g_dl.state; bool mine = g_dl.appid == m_dApp, down = mine && dl == 1, queued = !down && is_queued(m_dApp), launching = (g_launch.phase == 1 || g_launch.phase == 3) && g_launch.appid == m_dApp;
+        bool installing = si && st == 1;
+        std::string title = (installing && !si->name.empty()) ? si->name : m_dName;
+        int dl = g_dl.state; bool mine = g_dl.appid == m_dApp, down = mine && dl == 1, queued = !down && is_queued(m_dApp);
+        bool launching = (g_launch.phase == 1 || g_launch.phase == 3) && g_launch.appid == m_dApp;
+        bool retained = play_runtime::observed.load(std::memory_order_acquire) != nullptr;
         bool deleting = deleting_mine(), delDone = g_del.appid == m_dApp && (g_del.state == 2 || g_del.state == 3);
-        std::string status; uint32_t sc = TXT;
-        if (deleting) { status = "Deleting..."; sc = YEL; }
-        else if (down) { double p = g_dl.total ? 100.0 * g_dl.done / g_dl.total : 0; char b[64]; snprintf(b, sizeof b, "Downloading %.0f%%", p); status = b; sc = YEL; }
-        else if (queued) { status = "Queued..."; sc = YEL; }
-        else if (m_dInst.installed) { double gb = m_dInst.bytes / 1073741824.0; char b[64]; if (m_dInst.bytes == 0) snprintf(b, sizeof b, "Installed"); else if (gb < 0.1) snprintf(b, sizeof b, "Installed - %.1f MB", m_dInst.bytes / 1048576.0); else snprintf(b, sizeof b, "Installed - %.2f GB", gb); status = b; sc = GRN; }
-        else { status = "Not installed"; sc = TXT; }
-        text(60, 505, status, 4, sc);
-        if (down) {
-            double p = g_dl.total ? (double)g_dl.done / g_dl.total : 0; fill(60, 548, 616, 26, C3(35, 43, 58)); fill(60, 548, (int)(616 * std::min(1.0, p)), 26, C3(45, 160, 90)); frame(60, 548, 616, 26, 2, C3(60, 70, 88));
-            char b[120]; snprintf(b, sizeof b, "%.1f / %.1f MB  %.1f MB/s", g_dl.done / 1048576.0, g_dl.total / 1048576.0, g_dl.speed / 1048576.0); text(60, 582, b, 2, DIM);
-            std::string ms; { std::lock_guard<std::mutex> l(g_dl.m); ms = g_dl.msg; } text(60, 606, clip(ms, 38), 2, DIM);
-        } else if (mine && (dl == 3 || dl == 4) && !m_dInst.installed) {
-            std::string ms; { std::lock_guard<std::mutex> l(g_dl.m); ms = g_dl.msg; } std::string l1, l2; wrap2((dl == 4 ? "Cancelled: " : "Failed: ") + ms, 38, l1, l2);
-            text(60, 548, l1, 2, RED); text(60, 572, l2, 2, RED);
-        } else if (!m_dNote.empty()) { std::string l1, l2; storage_roots::note_lines(m_dNote, 42, l1, l2); text(60, 548, l1, 2, RED); text(60, 572, l2, 2, RED); }
-        else if (deleting) { char b[80]; snprintf(b, sizeof b, "%llu files removed", (unsigned long long)g_del.progress.removed.load()); text(60, 548, b, 2, DIM); }
-        else if (delDone && !m_dInst.installed) {
-            if (g_del.state == 2) { auto k = g_del.kind.load(); text(60, 548, k == game_library::DeleteKind::folder ? "Deleted. Saves were kept." : k == game_library::DeleteKind::shared ? "Removed. Shared files kept." : "Removed; folder unknown, files kept.", 2, GRN); }
-            else { char b[80]; snprintf(b, sizeof b, "Deleted; %u items left behind.", g_del.progress.failed.load()); text(60, 548, b, 2, RED); }
-        } else if (delDone && g_del.untouched) text(60, 548, "Delete failed. Nothing was removed.", 2, RED);
-        // main button: one A press cancels a download (detail_input.h), never B or the d-pad
-        detail_input::State di; di.installed = m_dInst.installed;
-        di.download = down ? detail_input::Download::running : queued ? detail_input::Download::queued : detail_input::Download::none;
-        di.sinceStart = now_s() - m_dlStartT;
-        bool retained=play_runtime::observed.load(std::memory_order_acquire)!=nullptr;
-        const char* label = launching ? (g_launch.phase==3?"GUEST RUNNING":"LAUNCHING...") : retained ? "RESTART REQUIRED" : deleting ? "DELETING..." : detail_input::label(di);
-        bool busy = launching || retained || deleting || down || queued;
-        if (m_dInst.installed && !busy) {   // secondary action: delete (X)
-            const char* dl2 = "X: Delete game"; int w = twidth(dl2, 3) + 30; fill(60, 590, w, 46, C3(120, 40, 40)); text(75, 601, dl2, 3, TXT);
+        double pct = down && g_dl.total ? std::min(1.0, (double)g_dl.done / (double)g_dl.total) : 0.0;
+
+        // ---- view model (statics keep the c_str()s alive while drawing) ----
+        static std::string vTitle, vSub, vTime, vAch, vLast, vStatus, vSize, vLoc, vUpdated, vCloud, vAbout, vPlayers, vLang, vNote;
+        vTitle = title;
+        if (installing) vSub = si->dev.empty() ? si->genres : si->dev + "  \xC2\xB7  " + si->genres;
+        else vSub = "App " + std::to_string(m_dApp);
+        Game* gm = nullptr; { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == m_dApp) { gm = g.get(); break; } }
+        if (gm && gm->playtime > 0) { char b[48]; snprintf(b, sizeof b, "%u min", gm->playtime); vTime = b; } else vTime = "Not played yet";
+        vAch = "Not tracked yet";   // achievements sync after play (steam_achievements.h); no schema on this page yet
+        if (gm && gm->lastPlayed > 0) { time_t lt = (time_t)gm->lastPlayed; char b[32]; struct tm tmv{}; localtime_s(&tmv, &lt); strftime(b, sizeof b, "%d %b %Y", &tmv); vLast = b; } else vLast = "Never";
+        if (deleting) vStatus = "Deleting...";
+        else if (down) { char b[48]; snprintf(b, sizeof b, "Downloading %.0f%%", pct * 100); vStatus = b; }
+        else if (queued) vStatus = "Queued...";
+        else if (m_dInst.installed) vStatus = m_dInst.bytes ? storage_roots::size_text(m_dInst.bytes) : "Installed";
+        else vStatus = "Not installed";
+        vSize = m_dInst.installed ? (m_dInst.bytes ? storage_roots::size_text(m_dInst.bytes) : "Unknown") : "Not installed";
+        vLoc = "Internal storage";
+        if (m_dInst.installed && !m_dInst.root.empty()) {
+            vLoc = m_dInst.root; for (auto& rc : m_roots) if (rc.root == m_dInst.root) { vLoc = rc.name; break; }
         }
-        if (!m_dInst.installed && !busy && !g_demo && m_rootSel < m_roots.size()) {   // where a fresh install goes (X cycles)
-            std::string sl = m_roots.size() > 1 ? "X: Install to " + storage_roots::label_capacity(m_roots[m_rootSel]) : storage_roots::label_capacity(m_roots[m_rootSel]) + ", no USB found";
-            int w = twidth(sl, 2) + 28; fill(60, 590, w, 46, C3(40, 90, 150)); text(74, 604, sl, 2, TXT);
+        vUpdated = "Not tracked";   // no install-timestamp marker exists yet
+        CloudStatus cs = cloud_status(m_dApp);
+        if (m_dInst.installed) { std::string ct = cs.text; vCloud = (cs.phase != 0 && !ct.empty()) ? ct : "Checking..."; }
+        else vCloud = "Not installed";
+        vAbout = (installing && !si->desc.empty()) ? si->desc : "No store description for this game yet.";
+        vPlayers = "1"; vLang = "English";   // the store schema carries no players/language rows
+
+        ui_launcher::PrimaryVM pv;
+        pv.installed = m_dInst.installed;
+        pv.download = down ? detail_input::Download::running : queued ? detail_input::Download::queued : detail_input::Download::none;
+        pv.launching = launching; pv.deleting = deleting; pv.restart_required = retained;
+        pv.install_pct = float(pct);
+
+        ui_launcher::GameVM g;
+        g.title = vTitle.c_str(); g.subtitle = vSub.c_str();
+        g.time_played = vTime.c_str(); g.achievements = vAch.c_str(); g.last_played = vLast.c_str();
+        g.install_status = vStatus.c_str(); g.size_on_disk = vSize.c_str(); g.location = vLoc.c_str();
+        g.last_updated = vUpdated.c_str(); g.cloud_saves = vCloud.c_str();
+        g.about = vAbout.c_str(); g.players = vPlayers.c_str(); g.language = vLang.c_str();
+        g.primary = pv; g.primary_focus = m_dFocus == 0; g.install_pct = float(pct);
+        if (si && si->img == 1 && !si->hdr.pix.empty()) { g.has_art = true; g.art = ui::Image{si->hdr.pix.data(), si->hdr.iw, si->hdr.ih, si->hdr.iw}; }
+        if (m_focusAch) {   // latest achievement row when the schema is around (steam_achievements.h cache)
+            g.achievement = m_achName.c_str(); g.achievement_sub = m_achSub.c_str();
+            g.progress_pct = m_achPct;
         }
-        if (m_dInst.installed && !busy && !g_demo) {   // secondary action: sync cloud saves (Y)
-            bool working = cloud_status(m_dApp).phase == 1; const char* cl = working ? "Syncing cloud..." : "Y: Sync cloud"; int w = twidth(cl, 2) + 28;
-            fill(440, 590, w, 46, working ? C3(60, 66, 78) : C3(40, 90, 150)); text(454, 604, cl, 2, TXT);
-        }
-        if (m_dInst.installed && !g_demo) {   // cloud status line
-            CloudStatus cs = cloud_status(m_dApp);
-            if (cs.phase != 0) { std::string l1, l2; wrap2(cs.text, 38, l1, l2); uint32_t cc = cs.tone == 1 ? GRN : cs.tone == 2 ? YEL : DIM; text(60, 776, l1, 2, cc); text(60, 794, l2, 2, cc); }
-        }
-        fill(60, 650, launch_button::width, 120, (down || queued) ? C3(45, 90, 200) : busy ? C3(60, 66, 78) : m_dInst.installed ? C3(40, 150, 80) : C3(45, 90, 200)); frame(60, 650, launch_button::width, 120, 8, YEL);
-        auto labelLayout=launch_button::label_layout(std::char_traits<char>::length(label));
-        text(60 + labelLayout.x, 650 + labelLayout.y, label, labelLayout.scale, TXT);
-        text(60 + 308 - twidth(detail_input::hint(di), 2) / 2, 734, detail_input::hint(di), 2, C3(210, 220, 240));
-        // Play offers a choice: say so before it is pressed (screenshot-able).
-        if (m_dInst.installed && !busy && !g_demo && option_count() > 1) {
-            char b[96]; snprintf(b, sizeof b, "Play asks which of %zu run options to start", option_count());
-            text(60, 786, b, 2, C3(210, 220, 240));
-        }
-        // right column: meta + description
-        std::vector<std::string> meta;
-        auto addm = [&](const std::string& k, const std::string& v) { if (v.empty()) return; for (auto& l : wrap_lines(k + v, 46)) meta.push_back(l); };
-        if (st == 1) { addm("Released: ", si->release); addm("Developer: ", si->dev); addm("Genres: ", si->genres); }
-        std::string lib = owned(m_dApp) ? "Owned (in your library)" : g_demo ? "" : "Not in your library list";
-        if (!lib.empty()) meta.insert(meta.begin(), "Library: " + lib);   // first row: the yellow accent marks ownership
-        { std::string gl = "Graphics: " + apib::describe(gfx); if (!gfx.note.empty() && gfx.src == 1 && gfx.kind != apib::K_D3D11) gl += " [" + gfx.note + "]"; for (auto& l : wrap_lines(gl, 46)) meta.push_back(l); }
-        int y = 130; for (size_t i = 0; i < meta.size() && i < 8; i++, y += 36) text(740, y, meta[i], 3, i == 0 && st == 1 ? YEL : meta[i].rfind("Graphics: ", 0) == 0 ? (gfx.kind == apib::K_D3D11 ? GRN : gfx.kind == apib::K_LEGACY || gfx.kind == apib::K_D3D12 ? DIM : TXT) : TXT);
-        y += 14; int dy0 = y, dy1 = 790;
-        if (st == 0) text(740, dy0, "Loading store info...", 3, DIM);
-        else if (st == 2) { text(740, dy0, "Store info unavailable", 3, RED); text(740, dy0 + 40, "You can still install and play.", 3, DIM); if (si && !si->why.empty()) text(740, dy0 + 80, clip(si->why, 70), 2, DIM); }
-        else if (!si->desc.empty()) {
-            auto lines = wrap_lines(si->desc, 46); int vis = (dy1 - dy0) / 34, maxScroll = std::max(0, (int)lines.size() - vis);
-            m_dScroll = std::max(0, std::min(m_dScroll, maxScroll));
-            for (int i = 0; i < vis && m_dScroll + i < (int)lines.size(); i++) text(740, dy0 + i * 34, lines[m_dScroll + i], 3, C3(210, 218, 230));
-            if (maxScroll > 0) { int th = dy1 - dy0, thumb = std::max(30, th * vis / (int)lines.size()); fill(1880, dy0, 8, th, C3(35, 43, 58)); fill(1880, dy0 + (th - thumb) * m_dScroll / maxScroll, 8, thumb, YEL);
-                if (m_dScroll < maxScroll) text(1700, dy1 + 2, "more (D-pad down)", 2, DIM); }
-        }
-        // launch panel
-        if (g_launch.phase != 0 && g_launch.appid == m_dApp) {
-            fill(60, 810, 1800, 180, C3(10, 12, 16)); frame(60, 810, 1800, 180, 3, g_launch.phase == 1 ? YEL : C3(60, 70, 88));
-            if (g_launch.phase == 1) { char b[100]; snprintf(b, sizeof b, "Launching... (%.0f s) running guest loader", now_s() - g_launch.started); text(80, 826, b, 3, YEL); }
-            else { std::string r; { std::lock_guard<std::mutex> l(g_launch.m); r = g_launch.result; }
-                bool ok;{std::lock_guard<std::mutex> l(g_launch.m);ok=g_launch.ok;}
-                text(80, 822, g_launch.phase==3?"Guest running (playability unverified)":ok?"Guest completed (playability unverified)":retained?"Launch failed - restarting launcher to unload it":"Launch failed - nothing was left running; press A or pick another game", 3, g_launch.phase==3?YEL:ok?GRN:RED); auto ls = wrap_lines(r, 73); for (size_t i = 0; i < ls.size() && i < 4; i++) text(80, 858 + (int)i * 34, ls[i], 3, TXT); }
-        }
-        text(60, 1050, "A: Install / Play / cancel download   X: Delete   Y: Cloud sync   B: back   Menu: back   D-pad up/down: scroll", 2, C3(120, 130, 145));
+
+        // transient note: refusals, cloud warnings, launch panel (one line, newlines flattened)
+        vNote.clear();
+        if (!m_dNote.empty()) { vNote = m_dNote; for (auto& ch : vNote) if (ch == '\n') ch = ' '; }
+        else if (launching) { if (g_launch.phase == 3) vNote = "Guest running (playability unverified)"; else { char b[64]; snprintf(b, sizeof b, "Launching... (%.0f s)", now_s() - g_launch.started); vNote = b; } }
+        else if (retained) vNote = "Launch failed - restarting the launcher to unload it";
+        else if (delDone && !m_dInst.installed) vNote = g_del.state == 2 ? "Deleted. Saves were kept." : "Deleted with items left behind; see boot.log";
+        else if (deleting) { char b[64]; snprintf(b, sizeof b, "%llu files removed", (unsigned long long)g_del.progress.removed.load()); vNote = b; }
+        else if (mine && (dl == 3 || dl == 4) && !m_dInst.installed) { std::string ms; { std::lock_guard<std::mutex> l(g_dl.m); ms = g_dl.msg; } vNote = (dl == 4 ? "Cancelled: " : "Failed: ") + ms; }
+        g.focus = m_dFocus;
+
+        ui::Canvas c(g_fb.data(), W, H, W);
+        ui_launcher::draw_game(c, g_font, g);
+        ui_launcher::draw_game_note(c, g_font, g, vNote.c_str());
         if (m_pick.open) draw_picker();
         if (m_confirmDelete) {
-            std::string q = "Delete " + clip(m_dName, 30) + "?"; char sz[96];
-            if (m_delKind == game_library::DeleteKind::shared) snprintf(sz, sizeof sz, "Its files are shared with another installed game and stay.");
-            else if (m_delKind == game_library::DeleteKind::unknown_folder) snprintf(sz, sizeof sz, "Leaves the installed list. Its folder is unknown, so files stay.");
-            else if (m_dInst.bytes >= 107374182) snprintf(sz, sizeof sz, "Frees %.2f GB on this console. Saves are kept.", m_dInst.bytes / 1073741824.0);
-            else if (m_dInst.bytes) snprintf(sz, sizeof sz, "Frees %.1f MB on this console. Saves are kept.", m_dInst.bytes / 1048576.0); else snprintf(sz, sizeof sz, "Removes the game files from this console. Saves are kept.");
-            fill(360, 380, 1200, 300, C3(10, 12, 16)); frame(360, 380, 1200, 300, 6, YEL);
-            int qs = twidth(q, 5) <= 1120 ? 5 : 3; text(960 - twidth(q, qs) / 2, 420, q, qs, TXT);
-            text(960 - twidth(sz, 2) / 2, 500, sz, 2, DIM);
-            text(960 - twidth("A: Yes, delete        B: Cancel", 3) / 2, 600, "A: Yes, delete        B: Cancel", 3, TXT);
+            ui_launcher::DeleteVM d;
+            static std::string dTitle, dBody;
+            dTitle = "Delete " + clip(m_dName, 30) + "?";
+            if (m_delKind == game_library::DeleteKind::shared) dBody = "Its files are shared with another installed game and stay.";
+            else if (m_delKind == game_library::DeleteKind::unknown_folder) dBody = "Leaves the installed list. Its folder is unknown, so files stay.";
+            else if (m_dInst.bytes >= 107374182) dBody = "Frees " + storage_roots::size_text(m_dInst.bytes) + " on this console. Saves are kept.";
+            else if (m_dInst.bytes) dBody = "Frees " + storage_roots::size_text(m_dInst.bytes) + " on this console. Saves are kept.";
+            else dBody = "Removes the game files from this console. Saves are kept.";
+            d.title = dTitle.c_str(); d.body = dBody.c_str(); d.focus_delete = true;
+            ui_launcher::draw_delete_sheet(c, g_font, d);
+        }
+        if (m_cloudOpen) {
+            ui_launcher::CloudVM v;
+            static std::string synced; synced = cs.phase != 0 && !cs.text.empty() ? cs.text : std::string("Never synced");
+            static ui_launcher::CloudSlotVM slot; slot.name = "Status"; slot.detail = synced.c_str();
+            static ui_launcher::CloudOptVM opts[3];
+            bool conflict = cs.text.find("LB: use cloud") != std::string::npos;
+            opts[0] = {"Sync now", "", true};
+            opts[1] = {"Use the cloud copy", "", conflict};
+            opts[2] = {"Keep this console's copy", "", conflict};
+            v.synced = synced.c_str(); v.slots = &slot; v.slot_count = 1;
+            v.opts = opts; v.opt_count = 3; v.focus_opt = m_cloudFocus;
+            ui_launcher::draw_cloud_sheet(c, g_font, v);
         }
     }
     // The launch-option picker (launch_picker.h): the game's own run options,
@@ -1166,29 +1182,33 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         int h = 172 + rows * rowH + (m_pick.note.empty() ? 0 : 44);
         int y = std::max(40, (1080 - h) / 2);
         fill(x, y, w, h, C3(10, 12, 16)); frame(x, y, w, h, 6, YEL);
-        text(x + 40, y + 30, "How should this game start?", 4, TXT);
-        text(x + 40, y + 84, clip(m_dName, 44) + " offers more than one run option. D-pad up/down to choose, A to run, B to cancel.", 2, DIM);
+        text8(x + 40, y + 30, "How should this game start?", 4, TXT);
+        text8(x + 40, y + 84, clip(m_dName, 44) + " offers more than one run option. D-pad up/down to choose, A to run, B to cancel.", 2, DIM);
         int ry = y + 132;
         for (int i = 0; i < rows; i++) {
             const launch_target::Choice& c = m_pick.rows[i];
             bool sel = i == m_pick.sel;
             fill(x + 30, ry, w - 60, rowH - 10, sel ? C3(45, 90, 200) : C3(27, 35, 48));
             if (sel) frame(x + 30, ry, w - 60, rowH - 10, 3, YEL);
-            text(x + 50, ry + 14, clip(c.label, 60), 3, c.selectable ? TXT : DIM);
+            text8(x + 50, ry + 14, clip(c.label, 60), 3, c.selectable ? TXT : DIM);
             const char* note = launch_target::arch_note(c.arch);
-            if (note) text(x + 50, ry + 42, note, 2, DIM);
-            else if (c.arch == launch_target::arch64) text(x + 50, ry + 42, "64-bit", 2, GRN);
+            if (note) text8(x + 50, ry + 42, note, 2, DIM);
+            else if (c.arch == launch_target::arch64) text8(x + 50, ry + 42, "64-bit", 2, GRN);
             ry += rowH;
         }
-        if (!m_pick.note.empty()) text(x + 40, ry + 8, clip(m_pick.note, 90), 2, RED);
-        text(x + 40, y + h - 40, "A: run this option        B: cancel", 3, TXT);
+        if (!m_pick.note.empty()) text8(x + 40, ry + 8, clip(m_pick.note, 90), 2, RED);
+        text8(x + 40, y + h - 40, "A: run this option        B: cancel", 3, TXT);
     }
     // One-shot synthetic command file LocalState\cmd.txt (consumed on read). Lines: open <appid> | press (=A) | back (=B) | view | up | down | left | right | lb | rb | x | y | sleep <s>.
+    // Semantics follow the new screens: on the library X cycles the sort and Y reloads,
+    // the View filter is gone (the sidebar's Installed entry switches the view); on the
+    // detail page X/Y are no longer shortcuts (focus the trash/cloud/cog buttons with
+    // left/right, then A). lb/rb keep their conflict-pick role.
     // Never periodic, never present unless a tester/script writes it; every executed line is logged as SYNTHETIC.
     void cmdhook(double t) {
         static double next = 0, holdUntil = 0; static std::deque<std::string> q;
         if (t < next) return; next = t + 0.25;
-        if (g_screen != S_LIBRARY && g_screen != S_DETAIL) return;
+        if (g_screen != S_LIBRARY && g_screen != S_DETAIL && g_screen != S_QUEUE) return;
         std::wstring path = g_dir + L"\\cmd.txt"; std::string all;
         if (read_file_s(path, all)) {
             if (!DeleteFileW(path.c_str())) { logf("cmd.txt: consume failed; no input"); }
@@ -1378,122 +1398,225 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         CloseHandle(done);return result;
     }
 
-    // ---- drawing
-    void draw_login() {
-        m_btnFocus = true; m_confirmLogout = false; // Refresh is the sole login action.
-        fill(0, 0, W, H, C3(14, 17, 22));
-        text(80, 50, "STEAM LOGIN", 6, C3(255, 255, 255));
-        text(80, 130, "Scan the QR code with the Steam mobile app and approve the sign-in", 3, C3(170, 180, 195));
-        std::string url, st; { std::lock_guard<std::mutex> l(g_sm); url = g_qrUrl; st = g_status; }
-        int qx = 120, qy = 240, size = 0;
-        if (!url.empty()) {
-            auto qr = qrcodegen::QrCode::encodeText(url.c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
-            int sc = 12, n = qr.getSize(), q = 4; size = (n + 2 * q) * sc;
-            fill(qx, qy, size, size, C3(255, 255, 255));
-            for (int y = 0; y < n; y++) for (int x = 0; x < n; x++) if (qr.getModule(x, y)) fill(qx + (x + q) * sc, qy + (y + q) * sc, sc, sc, C3(0, 0, 0));
-        } else { size = 600; fill(qx, qy, size, size, C3(30, 36, 46)); text(qx + 40, qy + 280, "waiting for QR...", 3, C3(170, 180, 195)); }
-        int bx = qx + size + 80, by = qy + 40;
-        fill(bx, by, 560, 130, m_btnFocus ? C3(45, 90, 200) : C3(40, 46, 58));
-        frame(bx, by, 560, 130, 8, C3(255, 210, 63));
-        text(bx + 280 - twidth("REFRESH QR", 4) / 2, by + 24, "REFRESH QR", 4, C3(255, 255, 255));
-        text(bx + 280 - twidth("press A or X", 3) / 2, by + 78, "press A or X", 3, C3(210, 220, 240));
-        text(bx, by + 190, st, 3, g_scanned ? C3(120, 255, 140) : C3(255, 255, 255));
-        double left = 270 - (now_s() - g_qrStart); if (url.empty() || left < 0) left = 0;
-        char b[64]; snprintf(b, sizeof b, "QR refreshes automatically in %d:%02d", (int)left / 60, (int)left % 60);
-        text(bx, by + 250, b, 3, C3(170, 180, 195));
-        text(bx, by + 320, "Your login token is stored only on this console.", 2, C3(120, 130, 145));
-        text(bx, by + 350, "It is never shown or written to logs.", 2, C3(120, 130, 145));
-    }
-    void draw_library(double t) {
-        fill(0, 0, W, H, C3(14, 17, 22));
-        refresh_installed(t);
-        int owned = g_ownedCount; size_t listed, total; { std::lock_guard<std::mutex> l(g_gm); total = g_games.size(); listed = m_onlyInstalled ? shown_games().size() : total; }
-        const int CW = 280, CH = 452, GX = 20, X0 = 60, Y0 = 120, PITCH = CH + 16;
-        { // smooth row scroll: m_scroll (in rows) eases toward m_top; position changes still only come via grid_position()
-          double dt = m_scrollT > 0 ? std::min(0.1, t - m_scrollT) : 0.0; m_scrollT = t;
-          double d = (double)m_top - m_scroll;
-          if (std::fabs(d) < 0.004) m_scroll = m_top; else m_scroll += d * std::min(1.0, dt * 14.0);
+    // ---- drawing (Xbox-style screens; ui_launcher.h over ui::Canvas on g_fb) ----
+
+    // QR code as horizontal runs of dark modules (ui_launcher::QrRun, 10px modules).
+    inline static ui_launcher::QrRun g_qrRuns[1024];
+    int g_qrRunCount = 0;
+    inline static uint64_t g_qrRunGen = 0;   // g_qrGen value the runs were built for
+    void build_qr_runs() {
+        uint64_t gen = (uint64_t)g_qrGen.load();
+        if (g_qrRunGen == gen) return;
+        g_qrRunGen = gen;
+        std::string url; { std::lock_guard<std::mutex> l(g_sm); url = g_qrUrl; }
+        g_qrRunCount = 0;
+        if (url.empty()) return;
+        qrcodegen::QrCode qr = qrcodegen::QrCode::encodeText(url.c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
+        int n = qr.getSize();
+        for (int y = 0; y < n && g_qrRunCount < (int)(sizeof(g_qrRuns) / sizeof(g_qrRuns[0])); y++) {
+            for (int x = 0; x < n;) {
+                if (!qr.getModule(x, y)) { x++; continue; }
+                int w = 0;
+                while (x + w < n && qr.getModule(x + w, y)) w++;
+                g_qrRuns[g_qrRunCount++] = {uint8_t(y), uint8_t(x), uint8_t(w > 255 ? 255 : w)};
+                x += w;
+            }
         }
+    }
+
+    void draw_login() {
+        m_btnFocus = true; m_confirmLogout = false; // Refresh is the sole action
+        build_qr_runs();
+        static std::string status_buf; static char timer[64];
+        {   // fill the view-model from the shared login state
+            std::lock_guard<std::mutex> l(g_sm);
+            status_buf = g_scanned ? "Scanned - approve the sign-in on your phone" : g_status;
+        }
+        double left = 270 - (now_s() - g_qrStart.load(std::memory_order_relaxed));
+        if (left < 0) left = 0;
+        snprintf(timer, sizeof timer, "The code refreshes in %d:%02d", (int)left / 60, (int)left % 60);
+        ui::Canvas c(g_fb.data(), W, H, W);
+        ui_launcher::SignVM s;
+        s.status = status_buf.c_str();
+        s.timer = timer;
+        s.persona = "Not signed in";
+        s.qr = g_qrRuns;
+        s.qr_count = g_qrRunCount;
+        s.refresh_focused = true;
+        ui_launcher::draw_signin(c, g_font, s);
+    }
+    // Sidebar view-model, shared by the library and queue screens. Storage
+    // figures come from the last storage report's internal root (the queue
+    // screen does not probe drives); until one exists the defaults hold.
+    ui_launcher::SidebarVM sidebar_vm() {
+        ui_launcher::SidebarVM sb;
+        static std::string persona; persona = persona_name();
+        sb.persona = persona.c_str();
+        { std::lock_guard<std::mutex> l(g_gm);
+          sb.all_count = (int)g_games.size();
+          sb.installed_count = (int)m_installed.size();
+          size_t q; { std::lock_guard<std::mutex> ql(g_dqm); q = g_dq.size(); }
+          sb.queue_count = (int)q + (g_dl.state == 1 ? 1 : 0); }
+        sb.active = m_onlyInstalled ? 1 : 0;
+        return sb;
+    }
+
+    void draw_library(double t) {
+        refresh_installed(t);
+        ui::Canvas c(g_fb.data(), W, H, W);
+        // smooth row scroll: m_scroll (in rows) eases toward m_top; position changes still only come via grid_position()
+        { double dt = m_scrollT > 0 ? std::min(0.1, t - m_scrollT) : 0.0; m_scrollT = t;
+          double d = (double)m_top - m_scroll;
+          if (std::fabs(d) < 0.004) m_scroll = m_top; else m_scroll += d * std::min(1.0, dt * 14.0); }
+        // tile view-models + cover management under g_gm (same lazy load/evict as before)
+        static std::vector<ui_launcher::TileVM> tiles;
+        static std::vector<ui::Image> arts;   // pixel memory the TileVMs point into
+        size_t listed = 0; bool loading = false;
         { std::lock_guard<std::mutex> l(g_gm);
           auto list = shown_games();
+          listed = list.size();
+          loading = g_screen == S_LOADING || (g_games.empty() && !g_authResolved);
           if (!list.empty() && m_sel >= (int)list.size()) { int ns = game_library::clamp_selection(m_sel, list.size()); grid_position(ns, std::min(m_top, ns / COLS), "shown list shrank"); }
-          int lo = std::max(0, (m_top - 1) * COLS), hi = (int)std::min<size_t>(list.size(), (size_t)(m_top + 3) * COLS);   // visible rows + 1 row margin each side
-          auto evict = [](Game& g) { int c = g.cover; if (c == 1 || c == 2) { g.cover = 0; std::vector<uint32_t>().swap(g.pix); } };
+          int lo = std::max(0, (m_top - 1) * COLS), hi = (int)std::min<size_t>(list.size(), (size_t)(m_top + 3) * COLS);
+          auto evict = [](Game& g) { int cc = g.cover; if (cc == 1 || cc == 2) { g.cover = 0; std::vector<uint32_t>().swap(g.pix); } };
           for (int i = 0; i < (int)list.size(); i++) {
               Game& g = *list[i];
               if (i >= lo && i < hi) { int z = 0; if (g.cover.compare_exchange_strong(z, 3)) { std::lock_guard<std::mutex> ql(g_qm); g_q.push_back(list[i]); g_qcv.notify_one(); } }
               else evict(g);
           }
-          if (m_onlyInstalled) for (auto& g : g_games) if (!m_installed.count(g->appid)) evict(*g);   // hidden by the filter
+          if (m_onlyInstalled) for (auto& g : g_games) if (!m_installed.count(g->appid)) evict(*g);
+          tiles.clear(); arts.clear(); tiles.reserve(list.size()); arts.reserve(list.size());
           for (size_t i = 0; i < list.size(); i++) {
-            int row = (int)i / COLS, col = (int)i % COLS;
-            int x = X0 + col * (CW + GX), y = Y0 + (int)std::lround((row - m_scroll) * PITCH); Game& g = *list[i];
-            if (y >= 1040 || y + CH <= 0) continue;
-            bool sel = (int)i == m_sel;
-            fill(x, y, CW, CH, C3(27, 35, 48));
-            int cx = x + 10, cy = y + 8; fill(cx, cy, COVER_W, COVER_H, C3(20, 24, 32));
-            int c = g.cover;
-            if (c == 1) { int ox = cx + (COVER_W - g.iw) / 2, oy = cy + (COVER_H - g.ih) / 2;
-                for (int j = 0; j < g.ih; j++) { int py = oy + j; if (py < 0 || py >= H) continue; memcpy(&g_fb[py * W + ox], &g.pix[j * g.iw], g.iw * 4); } }
-            else text(cx + 20, cy + 180, c == 2 ? "no cover" : "loading...", 2, C3(120, 130, 145));
-            bool dlOverlay = g_dl.appid == g.appid && g_dl.state != 0;
-            if (!dlOverlay && m_installed.count(g.appid)) { const char* it = "INSTALLED"; fill(cx, cy + COVER_H - 30, twidth(it, 2) + 16, 30, C3(30, 120, 60)); text(cx + 8, cy + COVER_H - 23, it, 2, C3(255, 255, 255)); }
-            if (dlOverlay) {
-                int stt = g_dl.state; uint64_t tot = g_dl.total, dn = g_dl.done; double p = tot ? std::min(1.0, (double)dn / (double)tot) : 0;
-                fill(cx, cy + COVER_H - 62, COVER_W, 62, C3(0, 0, 0));
-                fill(cx + 8, cy + COVER_H - 18, (int)((COVER_W - 16) * (stt == 2 ? 1.0 : p)), 10, stt == 3 || stt == 4 ? C3(220, 70, 70) : C3(60, 200, 90)); frame(cx + 8, cy + COVER_H - 18, COVER_W - 16, 10, 1, C3(200, 200, 200));
-                char sb[80]; if (stt == 1) snprintf(sb, sizeof sb, "%.0f%% %.1f/%.1f MB %.1f MB/s", p * 100, dn / 1048576.0, tot / 1048576.0, g_dl.speed / 1048576.0); else snprintf(sb, sizeof sb, "%s", stt == 2 ? detail_input::finished_text() : stt == 3 ? "Failed" : "Cancelled");
-                text(cx + 8, cy + COVER_H - 56, sb, 1, C3(255, 255, 255));
-                std::string dm; { std::lock_guard<std::mutex> ml(g_dl.m); dm = g_dl.msg; } text(cx + 8, cy + COVER_H - 40, clip(dm, 32), 1, C3(190, 200, 215));
-            }
-            { auto br = apib::lookup(g.appid); apib::draw(cx + 6, cy + 6, 2, br); }
-            std::string l1, l2; wrap2(g.name, 16, l1, l2);
-            text(x + 10, y + COVER_H + 16, l1, 2, C3(255, 255, 255));
-            if (!l2.empty()) text(x + 10, y + COVER_H + 16 + 20, l2, 2, C3(190, 200, 215));
-            if (sel) frame(x - 4, y - 4, CW + 8, CH + 8, 6, C3(255, 210, 63));
+              Game& g = *list[i];
+              ui_launcher::TileVM tv;
+              tv.name = g.name.c_str();
+              tv.installed = m_installed.count(g.appid) != 0;
+              if (g.cover == 1 && !g.pix.empty()) { arts.push_back(ui::Image{g.pix.data(), g.iw, g.ih, g.iw}); tv.art = arts.back(); }
+              tiles.push_back(tv);
           }
-          if (g_games.empty()) text(60, 300, g_screen == S_LOADING ? "Loading your games..." : "No games to show.", 4, C3(170, 180, 195));
-          else if (list.empty()) { text(60, 300, "No installed games.", 4, C3(170, 180, 195)); text(60, 360, "Press View to show all games.", 3, C3(120, 130, 145)); }
         }
-        fill(0, 0, W, Y0 - 8, C3(14, 17, 22)); fill(0, 1040, W, H - 1040, C3(14, 17, 22));   // mask partially scrolled rows
-        text(60, 24, "LIBRARY", 5, C3(255, 255, 255));
-        char b[200]; int first = (int)std::min<size_t>(listed, (size_t)m_top * COLS + 1), last = (int)std::min<size_t>(listed, (size_t)(m_top + 2) * COLS);
-        if (m_onlyInstalled) snprintf(b, sizeof b, "%zu installed of %zu listed - showing %d-%d  (row %d of %d)", listed, total, first, last, m_sel / COLS + 1, (int)std::max<size_t>(1, (listed + COLS - 1) / COLS));
-        else snprintf(b, sizeof b, "%d games owned - %zu listed - showing %d-%d  (row %d of %d)", (int)owned, listed, first, last, m_sel / COLS + 1, (int)((listed + COLS - 1) / COLS));
-        text(60, 74, b, 3, C3(170, 180, 195));
-        // chips, laid out right to left: logout (B), sort (Y), filter (View)
-        { const char* lo = "Logout (B)"; int w2 = twidth(lo, 3) + 30, x = W - w2 - 60; fill(x, 24, w2, 50, C3(120, 40, 40)); text(x + 15, 38, lo, 3, C3(255, 255, 255));
-          char c[64]; snprintf(c, sizeof c, "Sort: %s (Y)", SORT_NAMES[g_sortMode]); int w = twidth(c, 3) + 30; x -= w + 20; fill(x, 24, w, 50, C3(45, 90, 200)); frame(x, 24, w, 50, 3, C3(255, 210, 63)); text(x + 15, 38, c, 3, C3(255, 255, 255));
-          const char* fl = m_onlyInstalled ? "Installed only (View)" : "All games (View)"; int w3 = twidth(fl, 3) + 30; x -= w3 + 20;
-          fill(x, 24, w3, 50, m_onlyInstalled ? C3(30, 120, 60) : C3(45, 90, 200)); frame(x, 24, w3, 50, 3, C3(255, 210, 63)); text(x + 15, 38, fl, 3, C3(255, 255, 255)); }
-        if (g_demo) text(900, 84, "DEMO LIST - not your account", 3, C3(255, 210, 63));
+        ui_launcher::SidebarVM sb = sidebar_vm();
+        ui_launcher::LibraryVM lib;
+        lib.tiles = tiles.data(); lib.tile_count = (int)tiles.size();
+        lib.sel = m_sel; lib.top_row = m_top; lib.focus_tile = m_focus == ui_nav::Focus::grid;
+        static std::string sort_label; sort_label = std::string("Sort by ") + SORT_NAMES[g_sortMode.load(std::memory_order_relaxed)];
+        lib.sort_label = sort_label.c_str();
+        static char count[128];
+        if (loading) lib.loading = true;
+        else if (m_onlyInstalled) snprintf(count, sizeof count, "%zu installed of %d games", listed, (int)g_ownedCount.load()), lib.count_label = count;
+        else { snprintf(count, sizeof count, "%d games", (int)listed); lib.count_label = count; }
+        ui_launcher::draw_library(c, g_font, sb, lib);
+        if (g_demo) {   // demo marker replaces the count line (honest: not your account)
+            c.fill_rect_alpha(524, 168, 430, 60, ui::theme::page, 255);
+            c.fill_round_rect(ui::rect(524, 168, 430, 60), ui::theme::radiusControl, ui::theme::control);
+            ui_launcher::text(c, g_font, ui::Face::Regular, 24, 548, 183.5f, "DEMO LIST - not your account", ui::theme::text);
+        }
         std::string err; { std::lock_guard<std::mutex> l(g_sm); err = g_err; }
-        if (!err.empty()) text(60, 104, err, 3, C3(255, 100, 100));
-        { // scrollbar / position indicator
-          int rows = (int)((listed + COLS - 1) / COLS); int tx = 1872, ty = Y0, th = 1040 - Y0;
-          fill(tx, ty, 12, th, C3(35, 43, 58));
-          if (rows > 0) { int vis = std::min(rows, 2); int thumb = std::max(40, th * vis / rows); double span = std::max(1, rows - 2);
-            int py = ty + (int)((th - thumb) * std::min(1.0, std::max(0.0, m_scroll / span))); fill(tx, py, 12, thumb, C3(255, 210, 63)); }
+        if (!err.empty()) {   // load failure line above the grid
+            ui_launcher::text(c, g_font, ui::Face::Regular, 24, 524, 216, err.c_str(), ui::theme::danger);
         }
-        text(60, 1050, "D-pad: move   LB/RB: page   A: Open   View: installed / all   Y: sort   X: reload   B: logout", 2, C3(120, 130, 145));
         if (m_confirmLogout) {
-            fill(460, 380, 1000, 300, C3(10, 12, 16)); frame(460, 380, 1000, 300, 6, C3(255, 210, 63));
-            text(960 - twidth("Log out of Steam?", 5) / 2, 420, "Log out of Steam?", 5, C3(255, 255, 255));
-            text(960 - twidth("This deletes the saved login on this console only.", 2) / 2, 500, "This deletes the saved login on this console only.", 2, C3(170, 180, 195));
-            text(960 - twidth("A: Yes, log out        B: Cancel", 3) / 2, 600, "A: Yes, log out        B: Cancel", 3, C3(255, 255, 255));
+            // restyled logout confirm over the dimmed library (delete-sheet layout)
+            ui_launcher::draw_scrim(c);
+            c.fill_round_rect(ui::rect(560, 368, 800, 344), ui::theme::radiusCard, ui::theme::panel);
+            ui_launcher::text(c, g_font, ui::Face::Semibold, 36, 608, 416, "Log out of Steam?", ui::theme::text);
+            ui_launcher::text(c, g_font, ui::Face::Regular, 24, 608, 475, "This deletes the saved login on this console only.", ui::theme::textDim);
+            ui_launcher::text(c, g_font, ui::Face::Regular, 22, 608, 516, "You can sign in again with the QR code.", ui::theme::textMuted);
+            const char* pairs[4] = {"A", "Yes, log out", "B", "Cancel"};
+            ui_launcher::draw_hint_bar(c, g_font, pairs, 2);
         }
     }
+
+    // Download queue screen (mockup 06): rows from g_dq + the active download;
+    // pause has no backend (disabled stub is not drawn: rows show CANCEL only
+    // via A), auto-update pill is a memory-only setting, Updates is always
+    // empty (the launcher has no update backend).
+    void draw_queue() {
+        ui::Canvas c(g_fb.data(), W, H, W);
+        refresh_installed(now_s());
+        ui_launcher::SidebarVM sb = sidebar_vm(); sb.active = 2;
+        // row model under the same locks the queue state uses
+        static std::vector<ui_launcher::QueueRowVM> rows;
+        static std::vector<std::string> rowNames, rowStatus;
+        rows.clear(); rowNames.clear(); rowStatus.clear();
+        std::deque<uint32_t> dq; uint32_t dlApp = 0; int dlState = 0; double dlPct = 0; std::string dlName, dlMsg;
+        { std::lock_guard<std::mutex> l(g_dqm); dq = g_dq; }
+        dlApp = g_dl.appid.load(); dlState = g_dl.state.load();
+        dlPct = g_dl.total ? (double)g_dl.done / (double)g_dl.total : 0;
+        { std::lock_guard<std::mutex> l(g_dl.m); dlName = g_dl.name; dlMsg = g_dl.msg; }
+        if (dlState == 1 || (dlState != 0 && dlApp)) {
+            rowNames.push_back(dlName.empty() ? "App " + std::to_string(dlApp) : dlName);
+            char b[96];
+            if (dlState == 1) snprintf(b, sizeof b, "Downloading  \xC2\xB7  %.0f%%  \xC2\xB7  %.1f MB/s", dlPct * 100, g_dl.speed / 1048576.0);
+            else snprintf(b, sizeof b, "%s", ui_nav::dl_status_text(dlState, 0, dlMsg.c_str()));
+            rowStatus.push_back(b);
+            ui_launcher::QueueRowVM r;
+            r.name = rowNames.back().c_str();
+            r.status = rowStatus.back().c_str();
+            r.pct = dlState == 1 ? float(dlPct) : 0.0f;
+            r.busy = dlState == 1;
+            rows.push_back(r);
+        }
+        for (uint32_t id : dq) {
+            rowNames.push_back(game_name(id).empty() ? "App " + std::to_string(id) : game_name(id));
+            rowStatus.push_back("Queued");
+            ui_launcher::QueueRowVM r;
+            r.name = rowNames.back().c_str();
+            r.status = "Queued";
+            rows.push_back(r);
+        }
+        ui_launcher::QueueVM q;
+        q.auto_update = m_autoUpdate;
+        q.rows = rows.data(); q.row_count = (int)rows.size();
+        q.updates = nullptr; q.update_count = 0;
+        q.focus = -1;
+        ui_launcher::draw_download_queue(c, g_font, sb, q);
+        if (rows.empty()) {   // honest empty state over the (empty) section
+            ui_launcher::text(c, g_font, ui::Face::Regular, 24, 524, 340, "No downloads.", ui::theme::textDim);
+            ui_launcher::text(c, g_font, ui::Face::Regular, 22, 524, 748, "No updates available.", ui::theme::textDim);
+        }
+        const char* pairs[4] = {"A", "Cancel", "B", "Back"};
+        ui_launcher::draw_hint_bar(c, g_font, pairs, 2);
+    }
+
+    // Storage management: the sidebar entry opens the same figures the detail
+    // page's storage report already collects (no new probing here).
+    void draw_storage() {
+        ui::Canvas c(g_fb.data(), W, H, W);
+        ui_launcher::SidebarVM sb = sidebar_vm(); sb.active = 3;
+        ui_launcher::draw_sidebar(c, g_font, sb);
+        ui_launcher::text(c, g_font, ui::Face::Semibold, 44, 524, 73.5f, "Storage", ui::theme::text);
+        std::vector<storage_roots::Choice> roots = m_roots.empty() ? std::vector<storage_roots::Choice>{storage_report::internal_root(g_dir)} : m_roots;
+        float y = 200;
+        for (auto& r : roots) {
+            std::string line = storage_roots::label_capacity(r);
+            ui_launcher::text(c, g_font, ui::Face::Regular, 24, 524, y, line.c_str(), ui::theme::text2);
+            if (r.space.ok && r.space.total) {
+                int pct = (int)(100 - 100.0 * r.space.freeTotal / (double)r.space.total);
+                std::string used = std::to_string(pct) + "% used of " + storage_roots::size_text(r.space.total);
+                ui_launcher::text(c, g_font, ui::Face::Regular, 20, 524, y + 34, used.c_str(), ui::theme::textDim);
+            }
+            y += 96;
+        }
+        ui_launcher::text(c, g_font, ui::Face::Regular, 20, 524, y + 16,
+                          "The full report is in LocalState\\storage_report.txt", ui::theme::textMuted);
+        const char* pairs[4] = {"A", "Select", "B", "Back"};
+        ui_launcher::draw_hint_bar(c, g_font, pairs, 2);
+    }
+
     void draw(double t) {
         int s = g_screen;
+        if (!g_fontOk) {   // graceful fallback: the old bitmap screens stay drawable
+            if (s == S_LOGIN) { fill(0, 0, W, H, C3(14, 17, 22)); std::string st; { std::lock_guard<std::mutex> l(g_sm); st = g_status; } text8(80, 480, st.c_str(), 4, C3(255, 255, 255)); }
+            else { fill(0, 0, W, H, C3(14, 17, 22)); text8(80, 480, "Fonts failed to load - see boot.log", 4, C3(255, 120, 120)); }
+            return;
+        }
         if (s == S_LOGIN) draw_login();
         else if (s == S_LIBRARY || s == S_LOADING) draw_library(t);
+        else if (s == S_QUEUE) draw_queue();
+        else if (s == S_STORAGE) draw_storage();
         else if (s == S_DETAIL) draw_detail(t);
-        else { fill(0, 0, W, H, C3(14, 17, 22)); std::string st; { std::lock_guard<std::mutex> l(g_sm); st = g_status; } text(80, 480, st, 4, C3(255, 255, 255)); }
-        if (g_dl.state != 0 && s != S_BOOT && s != S_DETAIL) { char b[200]; std::string nm, ms; { std::lock_guard<std::mutex> l(g_dl.m); nm = g_dl.name; ms = g_dl.msg; }
-            int stt = g_dl.state; double p = g_dl.total ? 100.0 * g_dl.done / g_dl.total : 0; snprintf(b, sizeof b, "DOWNLOAD %s: %s %.0f%% (%d/%d files, %.1f MB/s) %s", nm.c_str(), stt == 1 ? "running" : stt == 2 ? "DONE" : stt == 3 ? "FAILED" : "cancelled", p, (int)g_dl.filesDone, (int)g_dl.files, g_dl.speed / 1048576.0, clip(ms, 60).c_str());
-            fill(0, 1000, W, 36, C3(0, 0, 0)); text(20, 1008, b, 2, stt == 3 ? C3(255, 120, 120) : C3(120, 255, 140)); }
-        // heartbeat so frames visibly update
-        fill((int)((m_frame * 4) % 1800), 4, 100, 6, C3(60, 200, 90));
+        else { fill(0, 0, W, H, C3(14, 17, 22)); std::string st; { std::lock_guard<std::mutex> l(g_sm); st = g_status; } text8(80, 480, st.c_str(), 4, C3(255, 255, 255)); }
     }
 
     // ---- input
@@ -1532,32 +1655,72 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 else if (has(edge, GamepadButtons::B)) { m_confirmDelete = false; logf("detail: delete cancelled (%s)", source); }
                 return;
             }
-            if (has(edge, GamepadButtons::X)) { if (m_dInst.installed) detail_delete(source); else detail_storage(source); return; }
-            if (has(edge, GamepadButtons::Y)) { detail_cloud(source); return; }
+            if (m_cloudOpen) {   // cloud sheet over the dimmed page: A activates, B closes
+                CloudStatus cs = cloud_status(m_dApp);
+                bool conflict = cs.text.find("LB: use cloud") != std::string::npos;
+                if (has(edge, GamepadButtons::DPadUp)) { if (m_cloudFocus > 0) m_cloudFocus--; }
+                else if (has(edge, GamepadButtons::DPadDown)) { if (m_cloudFocus < 2) m_cloudFocus++; }
+                else if (has(edge, GamepadButtons::A)) {
+                    if (m_cloudFocus == 0) detail_cloud("cloud sheet sync");
+                    else if (m_cloudFocus == 1 && conflict) detail_cloud("cloud sheet use cloud", steam_cloud::Prefer::Cloud);
+                    else if (m_cloudFocus == 2 && conflict) detail_cloud("cloud sheet keep local", steam_cloud::Prefer::Local);
+                    m_cloudOpen = false;
+                }
+                else if (has(edge, GamepadButtons::B)) { m_cloudOpen = false; logf("detail: cloud sheet closed (%s)", source); }
+                return;
+            }
+            // focus ring: 0 primary, 1 trash, 2 cloud, 3 cog (ui_nav slots)
+            bool installed = m_dInst.installed;
+            int slots = ui_nav::focus_count(installed);
+            if (has(edge, GamepadButtons::DPadRight)) { m_dFocus = std::min(slots - 1, m_dFocus + 1); logf("detail: focus slot %d (%s)", m_dFocus, source); }
+            if (has(edge, GamepadButtons::DPadLeft)) { m_dFocus = std::max(0, m_dFocus - 1); logf("detail: focus slot %d (%s)", m_dFocus, source); }
+            if (has(edge, GamepadButtons::DPadDown)) m_dScroll += 3;   // d-pad never cancels: it scrolls the description
+            if (has(edge, GamepadButtons::DPadUp)) m_dScroll = std::max(0, m_dScroll - 3);
             if (cloud_status(m_dApp).text.find("LB: use cloud") != std::string::npos) {
                 if (has(edge, GamepadButtons::LeftShoulder)) { detail_cloud("LB use cloud", steam_cloud::Prefer::Cloud); return; }
                 if (has(edge, GamepadButtons::RightShoulder)) { detail_cloud("RB keep Xbox", steam_cloud::Prefer::Local); return; }
             }
-            if (has(edge, GamepadButtons::A)) detail_action(source);
+            if (has(edge, GamepadButtons::A)) {
+                int icon = ui_nav::icon_for_slot(installed, m_dFocus);
+                if (icon < 0) detail_action(source);
+                else if (icon == 0) detail_delete(source);        // trash
+                else if (icon == 1) { m_cloudOpen = true; m_cloudFocus = 0; logf("detail: cloud sheet open (%s)", source); }   // cloud
+                else detail_storage(source);                      // cog: cycle the install location
+            }
             if (has(edge, GamepadButtons::B)) detail_back(source);
             if (has(edge, GamepadButtons::View) || has(edge, GamepadButtons::Menu)) close_detail("Menu/View");
-            if (has(edge, GamepadButtons::DPadDown)) m_dScroll += 3;
-            if (has(edge, GamepadButtons::DPadUp)) m_dScroll = std::max(0, m_dScroll - 3);
         }
         else if (s == S_LIBRARY) {
-            if (!m_confirmLogout && has(edge, GamepadButtons::View)) {
-                m_onlyInstalled = !m_onlyInstalled; m_installedT = -10; refresh_installed(t); grid_position(0, 0, "View filter");
-                logf("library filter -> %s (%zu installed)", m_onlyInstalled ? "installed only" : "all games", m_installed.size()); return;
-            }
             std::vector<std::shared_ptr<Game>> list; { std::lock_guard<std::mutex> l(g_gm); list = shown_games(); } size_t n = list.size();
             if (m_confirmLogout) {
                 if (has(edge, GamepadButtons::A)) { m_confirmLogout = false; g_logoutReq = true; grid_position(0, 0, "logout confirmed"); logf("logout confirmed: deleting local session file only (no revoke call)"); }
                 else if (has(edge, GamepadButtons::B)) { m_confirmLogout = false; logf("logout cancelled"); }
                 return;
             }
+            // Sidebar focus: up/down moves the entry, A switches the view, right
+            // returns to the grid. The View filter chip is gone; Installed is a
+            // sidebar entry now.
+            if (m_focus == ui_nav::Focus::sidebar) {
+                if (has(edge, GamepadButtons::DPadUp)) { ui_nav::sidebar_move(m_sidebar, false); logf("sidebar: entry %d (%s)", m_sidebar, source); }
+                else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::sidebar_move(m_sidebar, true); logf("sidebar: entry %d (%s)", m_sidebar, source); }
+                else if (has(edge, GamepadButtons::DPadRight)) { ui_nav::lateral(m_focus, 0, false); logf("sidebar: back to the grid (%s)", source); }
+                else if (has(edge, GamepadButtons::A)) {
+                    int target = ui_nav::sidebar_target(m_sidebar);
+                    if (target == 0 || target == 1) {
+                        bool want = target == 1;
+                        if (m_onlyInstalled != want) { m_onlyInstalled = want; m_installedT = -10; refresh_installed(t); grid_position(0, 0, "sidebar view"); }
+                        logf("sidebar: %s view (%zu installed)", m_onlyInstalled ? "installed" : "all games", m_installed.size());
+                    } else if (target == 2) { g_screen = S_QUEUE; logf("sidebar: download queue (%s)", source); }
+                    else if (target == 3) { refresh_roots("storage screen"); g_screen = S_STORAGE; logf("sidebar: storage management (%s)", source); }
+                }
+                return;
+            }
+            // Grid focus. The grid draws kGridCols columns (ui_launcher.h geometry);
+            // movement uses the same constant so the ring never lies.
+            const int COLS = ui_launcher::kGridCols;
             int sel = m_sel;
             if (has(edge, GamepadButtons::DPadRight) && sel + 1 < (int)n) sel++;
-            if (has(edge, GamepadButtons::DPadLeft) && sel > 0) sel--;
+            if (has(edge, GamepadButtons::DPadLeft)) { if (!ui_nav::lateral(m_focus, sel % COLS, true)) { if (sel > 0) sel--; } else { logf("grid: focus -> sidebar (%s)", source); } }
             if (has(edge, GamepadButtons::DPadDown) && (sel / COLS + 1) * COLS < (int)n) sel = std::min((int)n - 1, sel + COLS);
             if (has(edge, GamepadButtons::DPadUp) && sel - COLS >= 0) sel -= COLS;
             if (has(edge, GamepadButtons::RightShoulder)) sel = std::min((int)n - 1, sel + 2 * COLS);
@@ -1567,14 +1730,32 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             int top = m_top, r = sel / COLS; if (r < top) top = r; if (r > top + 1) top = r - 1;
             grid_position(sel, top, source);
             if (has(edge, GamepadButtons::A) && n) { uint32_t aid; std::string nm; { std::lock_guard<std::mutex> l(g_gm); aid = list[m_sel]->appid; nm = list[m_sel]->name; } open_detail(aid, nm, source); return; }
-            if (has(edge, GamepadButtons::Y)) { int m = (g_sortMode + 1) % 3; g_sortMode = m; { std::lock_guard<std::mutex> l(g_gm); sort_games(m); } grid_position(0, 0, "Y resort"); logf("sort mode -> %s", SORT_NAMES[m]); }
-            if (has(edge, GamepadButtons::X) && !g_demo) { g_reloadReq = true; grid_position(0, 0, "X library reload"); }
-            if (has(edge, GamepadButtons::B) && !g_demo) m_confirmLogout = true;   // B never stops a download
+            if (has(edge, GamepadButtons::X)) {   // sort cycles the existing modes (kLibraryHints "X Sort")
+                int m = ui_nav::cycle_sort(g_sortMode.load(), 3); g_sortMode = m; { std::lock_guard<std::mutex> l(g_gm); sort_games(m); } grid_position(0, 0, "sort cycle"); logf("sort mode -> %s", SORT_NAMES[m]);
+            }
+            if (has(edge, GamepadButtons::Y) && !g_demo) { g_reloadReq = true; grid_position(0, 0, "Y library reload"); }   // the old X reload moved to Y
+            if (has(edge, GamepadButtons::B) && !g_demo && ui_nav::logout_request(m_confirmLogout, m_focus, m_sel, m_sidebar, true)) m_confirmLogout = true;   // B never stops a download
+        }
+        else if (s == S_QUEUE) {
+            // A on a busy row cancels it (running download or queued job); B back to the library.
+            std::deque<uint32_t> dq; { std::lock_guard<std::mutex> l(g_dqm); dq = g_dq; }
+            uint32_t dlApp = g_dl.appid.load(); int dlState = g_dl.state.load();
+            bool hasRows = (dlState == 1 || (dlState != 0 && dlApp)) || !dq.empty();
+            if (has(edge, GamepadButtons::B)) { g_screen = S_LIBRARY; logf("queue: back to the library (%s)", source); return; }
+            if (has(edge, GamepadButtons::A) && hasRows) {
+                if (dlState == 1 || (dlState != 0 && dlApp)) { g_dl.cancel = true; logf("queue: download cancel requested appid=%u (%s)", dlApp, source); }
+                else if (!dq.empty()) { uint32_t id = dq.front(); cancel_queued(id); logf("queue: cancel asked appid=%u (%s)", id, source); }
+            }
+            if (has(edge, GamepadButtons::Y)) { m_autoUpdate = !m_autoUpdate; logf("queue: auto-update -> %s (memory only, %s)", m_autoUpdate ? "on" : "off", source); }
+        }
+        else if (s == S_STORAGE) {
+            if (has(edge, GamepadButtons::B)) { g_screen = S_LIBRARY; logf("storage: back to the library (%s)", source); }
         }
     }
 
     void Run() {
         logf("Run: entering"); m_window.Activate();
+        load_fonts();   // Selawik faces from the package's fonts/ folder; on failure the bitmap fallback stays
         if (!InitD3D()) { logf("D3D init FAILED; idling"); while (!m_closed) { m_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessOneAndAllPending); Sleep(50); } return; }
         graphicsApp=this;m_graphicsDispatcher=m_window.Dispatcher();
         play_graphics::configure((::IUnknown*)winrt::get_abi(m_window),GuestSurface,

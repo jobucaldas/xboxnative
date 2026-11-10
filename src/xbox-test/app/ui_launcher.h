@@ -136,6 +136,7 @@ struct TileVM {
     const char* name = "";
     uint32_t art_top = 0xFF1B2A4A, art_mid = 0xFF3E6FA8, art_bot = 0xFF0B1220;
     bool installed = false;
+    ui::Image art{};   // real cover art (main.cpp); empty falls back to the gradient wash
 };
 
 struct LibraryVM {
@@ -190,6 +191,7 @@ struct GameVM {
     bool primary_focus = false;
     float install_pct = 0.0f;   // 0..1 while installing
     bool has_art = false;
+    ui::Image art{};   // header image (main.cpp); empty falls back to the gradient wash
     uint32_t art_top = 0xFF1A3F6B, art_mid = 0xFF14304F, art_bottom = 0xFF0A0E14;
 };
 
@@ -321,16 +323,20 @@ inline uint32_t grad3(uint32_t top, uint32_t mid, uint32_t bot, float k) {
 
 inline void draw_tile(ui::Canvas& c, const Font& f, const TileVM& t, const ui::Rect& g, bool focus) {
     using namespace ui::theme;
-    for (int yy = 0; yy < int(g.h); ++yy)
-        c.fill_rect(g.x, g.y + yy, g.w, 1, grad3(t.art_top, t.art_mid, t.art_bot, yy / (g.h - 1)));
+    if (t.art.px && t.art.w > 0 && t.art.h > 0) {
+        c.draw_image(t.art, g, ui::Fit::Cover, radiusTile);
+    } else {
+        for (int yy = 0; yy < int(g.h); ++yy)
+            c.fill_rect(g.x, g.y + yy, g.w, 1, grad3(t.art_top, t.art_mid, t.art_bot, yy / (g.h - 1)));
+        // art motif: dark ring + corner block in the tile's own dark color
+        c.stroke_circle(g.x + g.w * 0.5f, g.y + 159, 48, 8, t.art_bot, Align::Center);
+        c.fill_round_rect(rect(g.x + 112, g.y + 12, 44, 44), 3, t.art_bot);
+    }
     // label scrim band: transparent until mid, 0.78 black at the bottom (mockup band)
     for (int yy = int(g.h) / 2; yy < int(g.h); ++yy) {
         const float k = (yy - g.h * 0.5f) / (g.h * 0.5f);
         c.fill_rect_alpha(g.x, g.y + yy, g.w, 1, scrim, uint8_t(0.78f * 255.0f * k));
     }
-    // art motif: dark ring + corner block in the tile's own dark color
-    c.stroke_circle(g.x + g.w * 0.5f, g.y + 159, 48, 8, t.art_bot, Align::Center);
-    c.fill_round_rect(rect(g.x + 112, g.y + 12, 44, 44), 3, t.art_bot);
     text(c, f, Face::Regular, 22, g.x + 12, g.y + 225, t.name, ui::theme::text);
     if (t.installed) {
         c.fill_round_rect(rect(g.x + 12, g.y + 21, 94, 26), radiusBadge, ui::theme::accent);
@@ -523,16 +529,30 @@ inline void draw_game(ui::Canvas& c, const Font& f, const GameVM& g) {
     c.fill_rect(1368, 892, 456, 1, ui::theme::controlDark);
     draw_kv(c, f, 1368, 1568, 908, "Language", g.language);
 
-    // capsule art right
-    for (int yy = 0; yy < 336; ++yy)
-        c.fill_rect(1632, 72.0f + yy, 224, 1, grad3(g.art_top, g.art_mid, g.art_bottom, yy / 335.0f));
-    c.fill_round_rect(rect(1632, 72, 224, 336), radiusTile, 0);  // no-op; corners come from the row fills
-    c.stroke_circle(1744, 222, 72, 10, kRingDark, Align::Center);
-    c.fill_round_rect(rect(1800, 84, 44, 44), 3, kRingDark);
+    // capsule art right: the store header image when it is in, else the wash
+    if (g.has_art && g.art.px && g.art.w > 0 && g.art.h > 0) {
+        c.draw_image(g.art, rect(1632, 72, 224, 336), ui::Fit::Cover, radiusTile);
+    } else {
+        for (int yy = 0; yy < 336; ++yy)
+            c.fill_rect(1632, 72.0f + yy, 224, 1, grad3(g.art_top, g.art_mid, g.art_bottom, yy / 335.0f));
+        c.stroke_circle(1744, 222, 72, 10, kRingDark, Align::Center);
+        c.fill_round_rect(rect(1800, 84, 44, 44), 3, kRingDark);
+    }
 
     // ui::theme::hint bar: the A ui::theme::hint follows the primary state
     const char* pairs[6] = {"A", primary_hint(g.primary, g.primary_focus), "M", "Manage", "B", "Back"};
     draw_hint_bar(c, f, pairs, 3);
+}
+
+// One transient note line over the dimmed game page (refusals, cloud warnings,
+// launch failures): mockup 03 has no dedicated slot, so it takes the Status row
+// of the Install card while it is up. main.cpp passes "" when there is none.
+inline void draw_game_note(ui::Canvas& c, const Font& f, const GameVM& /*g*/, const char* note) {
+    if (!note || !*note) return;
+    using namespace ui::theme;
+    c.fill_round_rect(rect(700, 560, 520, 56), radiusControl, ui::theme::controlDark);
+    const float w = f.measure(Face::Regular, 22, note, std::strlen(note));
+    text(c, f, Face::Regular, 22, 960 - w * 0.5f, 575.5f, note, ui::theme::text2);
 }
 
 // ---- sign-in screen (mockup 04) ----
