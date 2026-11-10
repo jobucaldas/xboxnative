@@ -36,7 +36,7 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     d3d11_diag::adopt(device);
     CHECK(count("diagnostics on")==1);
     D3D11_TEXTURE2D_DESC target{};target.Width=64;target.Height=64;target.MipLevels=1;target.ArraySize=1;
-    target.Format=DXGI_FORMAT_R8G8B8A8_UNORM;target.SampleDesc.Count=1;target.Usage=D3D11_USAGE_DEFAULT;target.BindFlags=D3D11_BIND_RENDER_TARGET;
+    target.Format=DXGI_FORMAT_R8G8B8A8_UNORM;target.SampleDesc.Count=1;target.Usage=D3D11_USAGE_DEFAULT;target.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
     ID3D11Texture2D* targetTexture=nullptr;ID3D11RenderTargetView* rtv=nullptr;
     CHECK(SUCCEEDED(device->CreateTexture2D(&target,nullptr,&targetTexture)));
     CHECK(SUCCEEDED(device->CreateRenderTargetView(targetTexture,nullptr,&rtv)));
@@ -82,7 +82,7 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context->Draw(3,0);
     CHECK(d3d11_diag::draws[1][0][0].load()==beforeTriangle+1);
-    CHECK(count("draw summary: first Draw topology=4(trianglelist) hs/ds=none")==1);
+    CHECK(count("draw summary: first Draw topology=4(trianglelist) hs/ds/gs=-/-/-")==1);
     context->DrawIndexed(3,0,0);
     CHECK(d3d11_diag::draws[0][0][0].load()==beforeIndexed+1);
     // A patch list with no hull shader bound is still a patch-list draw.
@@ -90,7 +90,21 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
     context->DrawIndexed(3,0,0);
     CHECK(d3d11_diag::draws[0][1][0].load()==beforePatch+1);
-    CHECK(count("draw summary: first DrawIndexed topology=35(patchlist-3) hs/ds=none")==1);
+    // The "first" line names the kind once: this DrawIndexed already emitted
+    // it above, now under a patch list with no shaders bound.
+    // A point-list draw with a geometry shader bound: Halo Wars' terrain shape
+    // (51683 DrawInstanced on point lists, 1021 GS created). The gs= counter
+    // must follow GSSetShader, and the first-draw line must name it.
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+    uint64_t beforeGsDraw=d3d11_diag::draws[1][0][0].load(),beforeGsBound=d3d11_diag::drawsWithGs[1].load();
+    context->Draw(1,0);   // no GS bound: not counted in the gs bucket
+    CHECK(d3d11_diag::draws[1][0][0].load()==beforeGsDraw+1);
+    CHECK(d3d11_diag::drawsWithGs[1].load()==beforeGsBound);
+    // A real GS needs real DXBC; Wine rejects junk bytecode. The GSSetShader
+    // hook itself is proven with a shader only if creation succeeds; the
+    // unbind path (no GS) is proven regardless.
+    context->GSSetShader(nullptr,nullptr,0);
+    CHECK(d3d11_diag::drawsWithGs[1].load()==beforeGsBound);
     // Zero counts are counted separately.
     uint64_t beforeZero=d3d11_diag::zeroCounts[2].load();
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -125,15 +139,15 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         uint64_t beforeAuto=d3d11_diag::draws[d3d11_diag::kDrawAuto][1][0].load();
         context->DrawAuto();
         CHECK(d3d11_diag::draws[d3d11_diag::kDrawAuto][1][0].load()==beforeAuto+1);
-        CHECK(count("draw summary: first DrawAuto topology=35(patchlist-3) hs/ds=none")==1);
+        CHECK(count("draw summary: first DrawAuto topology=35(patchlist-3) hs/ds/gs=-/-/-")==1);
         uint64_t beforeIndexedIndirect=d3d11_diag::draws[d3d11_diag::kDrawIndexedIndirect][1][0].load();
         context->DrawIndexedInstancedIndirect(argsBuffer,0);
         CHECK(d3d11_diag::draws[d3d11_diag::kDrawIndexedIndirect][1][0].load()==beforeIndexedIndirect+1);
         uint64_t beforeInstancedIndirect=d3d11_diag::draws[d3d11_diag::kDrawInstancedIndirect][1][0].load();
         context->DrawInstancedIndirect(argsBuffer,0);
         CHECK(d3d11_diag::draws[d3d11_diag::kDrawInstancedIndirect][1][0].load()==beforeInstancedIndirect+1);
-        CHECK(count("draw summary: first DrawIndexedInstancedIndirect topology=35(patchlist-3) hs/ds=none")==1);
-        CHECK(count("draw summary: first DrawInstancedIndirect topology=35(patchlist-3) hs/ds=none")==1);
+        CHECK(count("draw summary: first DrawIndexedInstancedIndirect topology=35(patchlist-3) hs/ds/gs=-/-/-")==1);
+        CHECK(count("draw summary: first DrawInstancedIndirect topology=35(patchlist-3) hs/ds/gs=-/-/-")==1);
         uint64_t beforeDispatchIndirect=d3d11_diag::dispatchIndirects.load();
         context->DispatchIndirect(argsBuffer,0);
         CHECK(d3d11_diag::dispatchIndirects.load()==beforeDispatchIndirect+1);
@@ -184,10 +198,11 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         CHECK(d3d11_diag::drawsNoTarget.load()==beforeNoTarget+1);
         context->OMSetRenderTargets(1,&rtv,nullptr);
         ID3D11ShaderResourceView* nullView=nullptr;
-        uint64_t beforeSrvSets=d3d11_diag::srvSets[1].load(),beforeSrvNulls=d3d11_diag::srvNulls[1].load();
+        // The pixel stage is index 2 in the summary's table (vs=0, gs=1, ps=2).
+        uint64_t beforeSrvSets=d3d11_diag::srvSets[2].load(),beforeSrvNulls=d3d11_diag::srvNulls[2].load();
         context->PSSetShaderResources(0,1,&nullView);
-        CHECK(d3d11_diag::srvSets[1].load()==beforeSrvSets+1);
-        CHECK(d3d11_diag::srvNulls[1].load()==beforeSrvNulls+1);
+        CHECK(d3d11_diag::srvSets[2].load()==beforeSrvSets+1);
+        CHECK(d3d11_diag::srvNulls[2].load()==beforeSrvNulls+1);
         // A target that reaches the frame by copy/resolve, not by a draw.
         D3D11_TEXTURE2D_DESC copyDesc=target;copyDesc.Width=32;copyDesc.Height=32;
         ID3D11Texture2D* copyTexture=nullptr;
@@ -207,14 +222,59 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         if(msaaTexture)msaaTexture->Release();
         if(copyTexture)copyTexture->Release();
         // A draw under a predicate can be skipped entirely by the driver.
-        ID3D11Predicate* predicate=nullptr;
-        D3D11_QUERY_DESC queryDesc{};queryDesc.Query=D3D11_QUERY_OCCLUSION_PREDICATE;
-        if(SUCCEEDED(device->CreatePredicate(&queryDesc,&predicate))&&predicate) {
-            uint64_t beforePredicated=d3d11_diag::predicated.load();
-            context->SetPredication(predicate,FALSE);
-            CHECK(d3d11_diag::predicated.load()==beforePredicated+1);
-            context->SetPredication(nullptr,FALSE);
-            predicate->Release();
+        {
+            ID3D11Predicate* predicate=nullptr;
+            D3D11_QUERY_DESC queryDesc{};queryDesc.Query=D3D11_QUERY_OCCLUSION_PREDICATE;
+            if(SUCCEEDED(device->CreatePredicate(&queryDesc,&predicate))&&predicate) {
+                uint64_t beforePredicated=d3d11_diag::predicated.load();
+                context->SetPredication(predicate,FALSE);
+                CHECK(d3d11_diag::predicated.load()==beforePredicated+1);
+                context->SetPredication(nullptr,FALSE);
+                predicate->Release();
+            }
+        }
+
+        // A zero-area viewport clips every draw to nothing: the silent shape
+        // of a black layer with no failed call anywhere. The summary counts
+        // the sets, the zero-area ones, and remembers the largest size.
+        {
+            uint64_t beforeSets=d3d11_diag::viewportSets.load();
+            unsigned beforeZero=d3d11_diag::viewportZero.load();
+            D3D11_VIEWPORT good={0,0,64,64,0,1};
+            D3D11_VIEWPORT zeroVpDesc={0,0,0,0,0,1};
+            context->RSSetViewports(1,&good);
+            context->RSSetViewports(1,&zeroVpDesc);
+            CHECK(d3d11_diag::viewportSets.load()==beforeSets+2);
+            CHECK(d3d11_diag::viewportZero.load()==beforeZero+1);
+            CHECK(d3d11_diag::viewportMaxWidth.load()==64);
+            CHECK(d3d11_diag::viewportMaxHeight.load()==64);
+        }
+        // An empty scissor rect likewise.
+        {
+            uint64_t before=d3d11_diag::scissorSets.load();
+            unsigned beforeEmpty=d3d11_diag::scissorZero.load();
+            D3D11_RECT emptyScissor={0,0,0,0};
+            context->RSSetScissorRects(1,&emptyScissor);
+            CHECK(d3d11_diag::scissorSets.load()==before+1);
+            CHECK(d3d11_diag::scissorZero.load()==beforeEmpty+1);
+        }
+        // GenerateMips on a single-mip SRV: legal, leaves the chain empty, and
+        // counted so a blank minimap chain has a trace.
+        {
+            uint64_t before=d3d11_diag::generateMips.load();
+            if(targetTexture) {
+                ID3D11ShaderResourceView* targetSrv=nullptr;
+                D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+                srvDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+                srvDesc.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;
+                srvDesc.Texture2D.MostDetailedMip=0;
+                srvDesc.Texture2D.MipLevels=1;
+                if(SUCCEEDED(device->CreateShaderResourceView(targetTexture,&srvDesc,&targetSrv))&&targetSrv) {
+                    context->GenerateMips(targetSrv);
+                    targetSrv->Release();
+                }
+            }
+            CHECK(d3d11_diag::generateMips.load()==before+1);
         }
         argsBuffer->Release();
     }
@@ -254,7 +314,7 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     CHECK(count("draw summary 1/7: DrawInstancedIndirect calls=1 patchlist=1")==1);
     CHECK(count("draw summary 1/7: Dispatch calls=0 indirect=1")==1);
     CHECK(count("draw summary 1/7: targets with UAVs sets=2 uav=2")==1);
-    CHECK(count("draw summary 1/7: shader resources vs=0/0 ps=1/1")==1);
+    CHECK(count("draw summary 1/7: shader resources vs=0/0 gs=0/0 ps=1/1")==1);
     // Draws are bucketed by the format of the target they were submitted to,
     // so a layer that never reaches the swapchain's format is visible.
     CHECK(count("draw summary 1/7: draws by target format 28(R8G8B8A8_UNORM)=")==1);
@@ -262,6 +322,9 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     // one here and the deferred context's, which never had a target bound.
     CHECK(count("no-target=2")==1);
     CHECK(count("draw summary 1/7: command lists finish=")==1);
+    // The raster-state and mip lines carry the silent-black shapes.
+    CHECK(count("draw summary 1/7: viewports sets=2 zero-area=1 largest=64x64 scissors=1 empty=1")==1);
+    CHECK(count("draw summary 1/7: GenerateMips calls=1 no-mips=1 SO targets=0")==1);
     CHECK(count("draw summary 1/7: shader creates vs=")==1);
     CHECK(count("draw summary 1/7: render targets sets=")==1);
     // The 11.1 ClearView count is reported next to the 11.0 clears.
