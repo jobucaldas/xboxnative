@@ -432,6 +432,45 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
             CHECK(bound==nullptr);
             texture->Release();
         }
+        // A MANAGED texture with a mip chain is still lockable at every level,
+        // as in D3D9: D3D11 cannot make it dynamic, so the shim locks through a
+        // staging copy and copies the level back on unlock.
+        IDirect3DTexture9* mipmapped=nullptr;
+        CHECK_HR(device->CreateTexture(8,8,0,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&mipmapped,nullptr));
+        if(mipmapped) {
+            CHECK(mipmapped->GetLevelCount()==4);
+            D3DLOCKED_RECT locked{};
+            CHECK_HR(mipmapped->LockRect(0,&locked,nullptr,0));
+            if(locked.pBits) {
+                for(unsigned y=0;y<8;++y) {
+                    unsigned* row=reinterpret_cast<unsigned*>(
+                        static_cast<unsigned char*>(locked.pBits)+y*locked.Pitch);
+                    for(unsigned x=0;x<8;++x)row[x]=0xff0000ffu;   // blue
+                }
+            }
+            CHECK_HR(mipmapped->UnlockRect(0));
+            // The write reached the texture, not just the staging copy: read the
+            // level back through a SYSTEMMEM surface.
+            IDirect3DSurface9* staging=nullptr;
+            CHECK_HR(device->CreateOffscreenPlainSurface(8,8,D3DFMT_A8R8G8B8,D3DPOOL_SYSTEMMEM,
+                &staging,nullptr));
+            if(staging) {
+                IDirect3DSurface9* level0=nullptr;
+                CHECK_HR(mipmapped->GetSurfaceLevel(0,&level0));
+                if(level0) {
+                    CHECK_HR(device->GetRenderTargetData(level0,staging));
+                    CHECK_HR(staging->LockRect(&locked,nullptr,D3DLOCK_READONLY));
+                    if(locked.pBits) {
+                        const unsigned char* p=static_cast<const unsigned char*>(locked.pBits);
+                        CHECK(p[0]>0x80&&p[1]<0x40&&p[2]<0x40);   // blue in BGRA
+                    }
+                    CHECK_HR(staging->UnlockRect());
+                    level0->Release();
+                }
+                staging->Release();
+            }
+            mipmapped->Release();
+        }
     }
 
     // A shader the guest compiles itself goes through the translator: this is
@@ -450,6 +489,13 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
             UINT size=0;
             CHECK_HR(shader->GetFunction(nullptr,&size));
             CHECK(size==sizeof tokens);
+            // A buffer too small for the bytecode is refused without a write:
+            // the caller's own capacity is still what it passed in.
+            DWORD shortBuffer[2]{};
+            UINT shortSize=2;
+            CHECK_HR_IS(shader->GetFunction(shortBuffer,&shortSize),D3DERR_INVALIDCALL);
+            CHECK(shortSize==2);
+            CHECK(shortBuffer[0]==0&&shortBuffer[1]==0);
             shader->Release();
         }
         // A blob with no END token is not a shader, and the shim says so.
@@ -517,6 +563,59 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
         CHECK_HR(device->BeginScene());
         CHECK_HR(device->DrawPrimitiveUP(D3DPT_TRIANGLELIST,1,vertices,sizeof(Vertex)));
         CHECK_HR(device->EndScene());
+    }
+
+    // An indexed UP draw whose indices start at a non-zero MinVertexIndex: the
+    // array holds MinVertexIndex+NumVertices vertices, and the indices address
+    // it from vertex 0. A shim that copies only NumVertices from the start, or
+    // that adds MinVertexIndex again, reads the wrong vertices and draws the
+    // wrong colour.
+    {
+        struct Vertex { float x,y,z,w; DWORD colour; };
+        const Vertex vertices[5]={
+            { 0.0f, 0.0f,0.0f,1.0f,0xff000000},   // black, unused
+            { 0.0f, 0.0f,0.0f,1.0f,0xff000000},   // black, unused
+            { 8.0f, 8.0f,0.0f,1.0f,0xff00ff00},   // green, top left
+            {56.0f, 8.0f,0.0f,1.0f,0xff00ff00},   // green, top right
+            {32.0f,56.0f,0.0f,1.0f,0xff00ff00},   // green, bottom middle
+        };
+        const unsigned short indices[3]={2,3,4};
+        IDirect3DSurface9* target=nullptr;
+        CHECK_HR(device->CreateRenderTarget(64,64,D3DFMT_X8R8G8B8,D3DMULTISAMPLE_NONE,0,FALSE,
+            &target,nullptr));
+        IDirect3DSurface9* staging=nullptr;
+        CHECK_HR(device->CreateOffscreenPlainSurface(64,64,D3DFMT_X8R8G8B8,D3DPOOL_SYSTEMMEM,
+            &staging,nullptr));
+        if(target&&staging) {
+            CHECK_HR(device->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE));
+            CHECK_HR(device->SetRenderState(D3DRS_LIGHTING,FALSE));
+            CHECK_HR(device->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE));
+            CHECK_HR(device->SetRenderState(D3DRS_ZENABLE,FALSE));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_SELECTARG1));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_DIFFUSE));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG1));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_ALPHAARG1,D3DTA_DIFFUSE));
+            CHECK_HR(device->SetRenderTarget(0,target));
+            CHECK_HR(device->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1.0f,0));
+            D3DVIEWPORT9 full{0,0,64,64,0.0f,1.0f};
+            CHECK_HR(device->SetViewport(&full));
+            CHECK_HR(device->BeginScene());
+            CHECK_HR(device->DrawIndexedPrimitiveUP(D3DPT_TRIANGLELIST,2,3,1,indices,
+                D3DFMT_INDEX16,vertices,sizeof(Vertex)));
+            CHECK_HR(device->EndScene());
+            CHECK_HR(device->GetRenderTargetData(target,staging));
+            D3DLOCKED_RECT locked{};
+            CHECK_HR(staging->LockRect(&locked,nullptr,D3DLOCK_READONLY));
+            if(locked.pBits) {
+                const unsigned char* inside=static_cast<const unsigned char*>(locked.pBits)
+                    +32*locked.Pitch+32*4;
+                CHECK(inside[1]>0x80&&inside[0]<0x40&&inside[2]<0x40);   // green
+            }
+            CHECK_HR(staging->UnlockRect());
+            CHECK_HR(device->SetRenderTarget(0,backBuffer));
+        }
+        if(staging)staging->Release();
+        if(target)target->Release();
     }
 
     // Reset rebuilds the swap chain, as D3D9 documents.

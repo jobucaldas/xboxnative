@@ -614,6 +614,10 @@ struct Texture : Resource<IDirect3DTexture9> {
     D3DSHIM_REF
     D3DSHIM_QI
     ID3D11Texture2D* texture=nullptr;   // also `inner`
+    // A mipmapped MANAGED texture cannot be dynamic in D3D11, so it is default
+    // and this staging copy is what LockRect maps; UnlockRect copies the level
+    // back. The D3D9 managed model: the guest's writes reach the texture.
+    ID3D11Texture2D* shadow=nullptr;
     ID3D11ShaderResourceView* view=nullptr;
     UINT levels=1;
     D3DFORMAT format=D3DFMT_UNKNOWN;
@@ -624,6 +628,7 @@ struct Texture : Resource<IDirect3DTexture9> {
     D3DTEXTUREFILTERTYPE autoGen=D3DTEXF_LINEAR;
     ~Texture() {
         if(view)view->Release();
+        if(shadow)shadow->Release();
     }
     D3DRESOURCETYPE STDMETHODCALLTYPE GetType() override { return D3DRTYPE_TEXTURE; }
     DWORD STDMETHODCALLTYPE SetLOD(DWORD value) override { DWORD old=lod;lod=value;return old; }
@@ -686,23 +691,34 @@ struct Texture : Resource<IDirect3DTexture9> {
             return D3DERR_INVALIDCALL;
         }
         if(locked)return D3DERR_INVALIDCALL;
+        // The shadow is staging, so a plain lock is read-write and only
+        // D3DLOCK_READONLY takes the write away, as for a SYSTEMMEM texture.
+        ID3D11Texture2D* target=shadow?shadow:texture;
         D3D11_MAPPED_SUBRESOURCE mapped{};
-        HRESULT hr=context->Map(texture,level,textureMapMode(stagingPool(pool),flags),0,&mapped);
+        HRESULT hr=context->Map(target,level,
+            shadow?textureMapMode(true,flags):textureMapMode(stagingPool(pool),flags),0,&mapped);
         if(FAILED(hr))return D3DERR_INVALIDCALL;
         locked=true;
         lockedLevel=level;
+        lockedReadOnly=(flags&D3DLOCK_READONLY)!=0;
         out->pBits=mapped.pData;
         out->Pitch=INT(mapped.RowPitch);
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE UnlockRect(UINT level) override {
         if(!locked||level!=lockedLevel)return D3DERR_INVALIDCALL;
-        context->Unmap(texture,level);
+        ID3D11Texture2D* target=shadow?shadow:texture;
+        context->Unmap(target,level);
+        // A write through the shadow has to reach the texture the sampler
+        // reads; a read-only lock changed nothing.
+        if(shadow&&!lockedReadOnly)
+            context->CopySubresourceRegion(texture,level,0,0,0,shadow,level,nullptr);
         locked=false;
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE AddDirtyRect(const RECT*) override { return D3D_OK; }
     UINT lockedLevel=0;
+    bool lockedReadOnly=false;
 };
 }
 
@@ -772,10 +788,13 @@ struct VertexShader : d3dshim::Base, IDirect3DVertexShader9 {
         if(*out)(*out)->AddRef();
         return D3D_OK;
     }
+    // The size is reported only when the caller asks for it; a buffer too small
+    // for the bytecode is refused without writing, so *size stays the caller's
+    // own value (what Wine's wined3d_shader_get_byte_code does).
     HRESULT STDMETHODCALLTYPE GetFunction(void* data,UINT* size) override {
-        if(size)*size=bytecodeBytes;
-        if(!data)return D3D_OK;
-        if(!size||*size<bytecodeBytes)return D3DERR_INVALIDCALL;
+        if(!size)return D3DERR_INVALIDCALL;
+        if(!data){*size=bytecodeBytes;return D3D_OK;}
+        if(*size<bytecodeBytes)return D3DERR_INVALIDCALL;
         memcpy(data,bytecode,bytecodeBytes);
         return D3D_OK;
     }
@@ -801,9 +820,9 @@ struct PixelShader : d3dshim::Base, IDirect3DPixelShader9 {
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE GetFunction(void* data,UINT* size) override {
-        if(size)*size=bytecodeBytes;
-        if(!data)return D3D_OK;
-        if(!size||*size<bytecodeBytes)return D3DERR_INVALIDCALL;
+        if(!size)return D3DERR_INVALIDCALL;
+        if(!data){*size=bytecodeBytes;return D3D_OK;}
+        if(*size<bytecodeBytes)return D3DERR_INVALIDCALL;
         memcpy(data,bytecode,bytecodeBytes);
         return D3D_OK;
     }
@@ -1105,9 +1124,10 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         if(desc.Usage==D3D11_USAGE_DYNAMIC&&!desc.BindFlags)desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
         if(desc.Usage==D3D11_USAGE_STAGING)desc.BindFlags=0;
         // A MANAGED texture is CPU-writable and sampled, which D3D11 spells
-        // dynamic + shader resource; a mipmapped one cannot be dynamic, so it
-        // falls back to default and refuses Lock, as the D3D9 runtime does for
-        // a managed texture it cannot keep in system memory.
+        // dynamic + shader resource; a mipmapped one cannot be dynamic, so the
+        // texture itself is default and the wrapper keeps a staging copy that
+        // LockRect maps (see Texture::LockRect), which is how D3D11 spells a
+        // managed resource that is lockable at every level.
         if(pool==D3DPOOL_MANAGED&&desc.MipLevels>1&&desc.Usage==D3D11_USAGE_DYNAMIC) {
             desc.Usage=D3D11_USAGE_DEFAULT;
             desc.CPUAccessFlags=0;
@@ -1133,9 +1153,21 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         wrapper->context=context();
         const UINT mips=levels?levels:mipChain(width,height);
         wrapper->cpuVisible=usageFor(pool,usage)!=D3D11_USAGE_DEFAULT;
-        // A mipmapped MANAGED texture fell back to default above, so it is not
-        // CPU-visible however the pool names it.
-        if(pool==D3DPOOL_MANAGED&&mips>1)wrapper->cpuVisible=false;
+        // A mipmapped MANAGED texture is default (D3D11 has no dynamic mip
+        // chain), but D3D9 lets a managed resource be locked at every level, so
+        // it gets a staging copy to lock through.
+        if(pool==D3DPOOL_MANAGED&&mips>1) {
+            D3D11_TEXTURE2D_DESC shadowDesc{};
+            texture->GetDesc(&shadowDesc);
+            shadowDesc.Usage=D3D11_USAGE_STAGING;
+            shadowDesc.BindFlags=0;
+            shadowDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ|D3D11_CPU_ACCESS_WRITE;
+            if(FAILED(device()->CreateTexture2D(&shadowDesc,nullptr,&wrapper->shadow))) {
+                d3dshim::destroy(wrapper);
+                return D3DERR_INVALIDCALL;
+            }
+            wrapper->cpuVisible=true;
+        }
         wrapper->format=format;
         wrapper->usage=usage;
         wrapper->pool=pool;
@@ -2266,7 +2298,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         hr=bindShaders();
         if(FAILED(hr))return hr;
         // D3D9's count is primitives; the array holds the vertices they name.
-        return uploadAndDraw(type,false,verticesFor(type,count),0,0,data,stride,nullptr,D3DFMT_UNKNOWN);
+        return uploadAndDraw(type,false,verticesFor(type,count),0,data,stride,nullptr,D3DFMT_UNKNOWN);
     }
     HRESULT STDMETHODCALLTYPE DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE type,UINT minIndex,UINT count,
                                                      UINT indexCount,const void* indexData,
@@ -2276,17 +2308,19 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         if(FAILED(hr))return hr;
         hr=bindShaders();
         if(FAILED(hr))return hr;
-        // D3D9's minIndex is the lowest vertex the indices name, not an offset
-        // into the array: the whole array is copied and the indices index it as
-        // the guest wrote them.
-        return uploadAndDraw(type,true,count,minIndex,verticesFor(type,indexCount),vertexData,stride,
+        // D3D9's minIndex is the lowest vertex the indices name, so the array
+        // holds minIndex+count vertices and the guest's index values address
+        // the array from vertex 0. The whole extent is copied and the indices
+        // are used as written; Wine's d3d9 copies from minIndex instead and
+        // draws with a negative base, which is the same thing for less copy.
+        return uploadAndDraw(type,true,minIndex+count,verticesFor(type,indexCount),vertexData,stride,
                              indexData,indexFormat);
     }
     // The UP variants keep their data in guest memory. D3D11 has no equivalent,
     // so the data is copied into a dynamic buffer for the draw, which is what
     // Wine's d3d9 does too. `vertexCount` is the number of vertices the array
-    // holds; `minIndex` is the vertex the guest's index values count from.
-    HRESULT uploadAndDraw(D3DPRIMITIVETYPE type,bool indexed,UINT vertexCount,UINT minIndex,
+    // holds, from vertex 0.
+    HRESULT uploadAndDraw(D3DPRIMITIVETYPE type,bool indexed,UINT vertexCount,
                           UINT indexCount,const void* vertexData,UINT stride,
                           const void* indexData,D3DFORMAT indexFormat) {
         if(!vertexData||!stride)return D3DERR_INVALIDCALL;
@@ -2335,10 +2369,8 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
                 indexFormat==D3DFMT_INDEX32?DXGI_FORMAT_R32_UINT:DXGI_FORMAT_R16_UINT,0);
         }
         ctx->IASetPrimitiveTopology(topologyOf(type,indexed));
-        // D3D9's index values count from MinVertexIndex, which D3D11 spells
-        // BaseVertexLocation - the same fold the non-UP path makes for
-        // BaseVertexIndex.
-        if(indexed)ctx->DrawIndexed(indexCount,0,minIndex);
+        // The copy starts at vertex 0, so the indices index it as written.
+        if(indexed)ctx->DrawIndexed(indexCount,0,0);
         else ctx->Draw(vertexCount,0);
         if(indexBuffer)indexBuffer->Release();
         buffer->Release();
