@@ -171,7 +171,17 @@ already done and exercised. It is MIT, in the pinned `mesa-src` tarball, and bui
   `terminator_CreateInstance` skips an ICD whose `CreateInstance` fails and only returns
   `VK_ERROR_INCOMPATIBLE_DRIVER` when none succeed, so a `dzn` that cannot initialise leaves the guest with milestone
   1's clean "no devices" answer rather than a hard failure. A manifest that is not packaged is skipped, so a
-  `PLAY_DZN=0` launcher behaves exactly as before. **[verified off-device]**
+  `PLAY_DZN=0` launcher behaves exactly as before. Registration **replaces** rather than appends
+  (`shared/vulkan_driver_registry.h`): the key is machine-wide and survives an upgrade, and the loader de-duplicates
+  it by manifest basename keeping the first entry it enumerates, so an entry left by an earlier install would shadow
+  the live manifest and the loader would report no driver at all. Every Play manifest pointing anywhere but the
+  runtime directory being registered is deleted first, as is any entry whose manifest file no longer exists; a
+  third-party driver whose manifest is on disk is left alone. **[verified off-device]**
+  * Console evidence for why this matters: 0.5.264.0 onwards failed the `vulkan-dzn` self-test with exit 12 (no
+    driver found) rather than 0.5.263.0's exit 19, because four stale entries from two earlier installs shadowed the
+    live `vulkan-dzn.json`, with a byte-identical driver DLL.
+  * The fixture's own stage lines reach the console only through `OutputDebugStringA` (Play routes it into the probe
+    log): a packaged process has no stdout handle, so `WriteFile` to `STD_OUTPUT_HANDLE` writes nowhere.
 
 ### What `dzn` does off-device, and where it stops
 
