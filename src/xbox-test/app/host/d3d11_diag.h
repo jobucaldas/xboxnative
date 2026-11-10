@@ -55,7 +55,7 @@ using Sink=void(*)(const char*);
 inline Sink sink=nullptr;
 constexpr size_t kMaxFailures=200;   // distinct failed calls logged
 constexpr size_t kMaxProbes=160;     // distinct capability answers logged
-constexpr int kSlots=128;            // ID3D11DeviceContext reaches slot 114
+constexpr int kSlots=136;            // ID3D11DeviceContext reaches slot 114; Context1's ClearView is 132
 constexpr size_t kMaxClasses=16;
 
 // ---- vtable slots (ID3D11Device, ID3D11Device1, ID3D11DeviceContext)
@@ -79,13 +79,17 @@ enum ContextSlot {
     OMSetRenderTargetsAndUnorderedAccessViews=34,DrawAuto=38,DrawIndexedInstancedIndirect=39,DrawInstancedIndirect=40,
     Dispatch=41,DispatchIndirect=42,CopySubresourceRegion=46,CopyResource=47,UpdateSubresource=48,
     ClearRenderTargetView=50,ClearDepthStencilView=53,ResolveSubresource=57,ExecuteCommandList=58,HSSetShaderResources=59,HSSetShader=60,
-    DSSetShaderResources=63,DSSetShader=64,FinishCommandList=114
+    DSSetShaderResources=63,DSSetShader=64,FinishCommandList=114,
+    // ID3D11DeviceContext1 continues the same vtable: ClearView is the 11.1
+    // way to clear a render target or depth view, and a game that clears only
+    // through it shows clears=0 in the summary.
+    Context1ClearView=132
 };
 static_assert(ContextMap==14&&Unmap==15&&DrawIndexed==12&&DrawIndexedInstanced==20&&OMSetRenderTargets==33&&
     OMSetRenderTargetsAndUnorderedAccessViews==34&&DrawAuto==38&&DrawIndexedInstancedIndirect==39&&
     DrawInstancedIndirect==40&&DispatchIndirect==42&&UpdateSubresource==48&&
-    ResolveSubresource==57&&ExecuteCommandList==58&&HSSetShader==60&&DSSetShader==64&&FinishCommandList==114,
-    "ID3D11DeviceContext slot layout");
+    ResolveSubresource==57&&ExecuteCommandList==58&&HSSetShader==60&&DSSetShader==64&&FinishCommandList==114&&
+    Context1ClearView==132,"ID3D11DeviceContext slot layout");
 
 // ---- reporting: once per key, bounded
 inline std::mutex reportM;
@@ -250,6 +254,7 @@ inline std::atomic<uint64_t> zeroCounts[kDrawKinds];    // draws with 0 index/ve
 inline std::atomic<uint64_t> dispatches,dispatchZero,dispatchIndirects,commandLists,executedLists;
 inline std::atomic<uint64_t> shaderCreates[6];   // vs gs ps hs ds cs, successful
 inline std::atomic<uint64_t> clears[2];          // render target, depth stencil
+inline std::atomic<uint64_t> clearViews[2];      // ... through ID3D11DeviceContext1::ClearView
 inline std::atomic<uint64_t> rtvSets;            // OMSetRenderTargets with a render target
 inline std::atomic<uint64_t> rtvUnknown;         // ... whose view or resource could not be read
 inline std::atomic<uint64_t> rtvUncached;        // ... beyond the kMaxRtvViews table (counted, not described)
@@ -407,9 +412,9 @@ inline void printSummary(unsigned window) {
     emit(fmt("draw summary %u/%u: shader creates vs=%llu gs=%llu ps=%llu hs=%llu ds=%llu cs=%llu",window,kSummaryWindows,
         (unsigned long long)shaderCreates[0].load(),(unsigned long long)shaderCreates[1].load(),(unsigned long long)shaderCreates[2].load(),
         (unsigned long long)shaderCreates[3].load(),(unsigned long long)shaderCreates[4].load(),(unsigned long long)shaderCreates[5].load()));
-    emit(fmt("draw summary %u/%u: render targets sets=%llu unreadable=%llu uncached=%llu clears=rt %llu/ds %llu",window,kSummaryWindows,
+    emit(fmt("draw summary %u/%u: render targets sets=%llu unreadable=%llu uncached=%llu clears=rt %llu/ds %llu clearview=%llu",window,kSummaryWindows,
         (unsigned long long)rtvSets.load(),(unsigned long long)rtvUnknown.load(),(unsigned long long)rtvUncached.load(),
-        (unsigned long long)clears[0].load(),(unsigned long long)clears[1].load()));
+        (unsigned long long)clears[0].load(),(unsigned long long)clears[1].load(),(unsigned long long)clearViews[0].load()));
     // A layer that renders into its own target and is then resolved or copied
     // into the frame never appears as a draw into the swapchain.
     emit(fmt("draw summary %u/%u: targets with UAVs sets=%llu uav=%llu resolves=%llu copies=%llu",window,kSummaryWindows,
@@ -1013,8 +1018,22 @@ static void STDMETHODCALLTYPE contextUpdateSubresource(DevicePtr self,ID3D11Reso
     }
     call(self,resource,subresource,box,data,rowPitch,depthPitch);
 }
-static HRESULT STDMETHODCALLTYPE contextFinishCommandList(DevicePtr self,BOOL restore,ID3D11CommandList** list) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,BOOL,ID3D11CommandList**);
+// ID3D11DeviceContext1's clear: the game clears its targets through this, not
+// through ID3D11DeviceContext::Clear*, so a summary that only counted the
+// latter reported clears=0 for a game that clears every frame.
+static void STDMETHODCALLTYPE context1ClearView(DevicePtr self,ID3D11View* view,const FLOAT color[4],const D3D11_RECT* rects,UINT count) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11View*,const FLOAT*,const D3D11_RECT*,UINT);
+    auto call=reinterpret_cast<Fn>(original(self,Context1ClearView));if(!call)return;
+    // Which kind of view it is decides the bucket; a failed QI is not counted.
+    ID3D11RenderTargetView* rtv=nullptr;ID3D11DepthStencilView* dsv=nullptr;
+    if(view&&SUCCEEDED(view->QueryInterface(__uuidof(ID3D11RenderTargetView),reinterpret_cast<void**>(&rtv)))&&rtv) {
+        clears[0].fetch_add(1,std::memory_order_relaxed);rtv->Release();
+    } else if(view&&SUCCEEDED(view->QueryInterface(__uuidof(ID3D11DepthStencilView),reinterpret_cast<void**>(&dsv)))&&dsv) {
+        clears[1].fetch_add(1,std::memory_order_relaxed);dsv->Release();
+    } else clearViews[0].fetch_add(1,std::memory_order_relaxed);
+    call(self,view,color,rects,count);
+}
+static HRESULT STDMETHODCALLTYPE contextFinishCommandList(DevicePtr self,BOOL restore,ID3D11CommandList** list) {    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,BOOL,ID3D11CommandList**);
     auto call=reinterpret_cast<Fn>(original(self,FinishCommandList));if(!call)return E_FAIL;
     HRESULT hr=call(self,restore,list);
     if(SUCCEEDED(hr))commandLists.fetch_add(1,std::memory_order_relaxed);
@@ -1063,6 +1082,12 @@ inline const Patch* contextPatches(size_t& count){
         {ExecuteCommandList,(void*)&contextExecuteCommandList}};
     count=sizeof table/sizeof *table;return table;
 }
+// The 11.1 context's own entries. Only applied to a vtable reached through a
+// successful ID3D11DeviceContext1 QI: a plain context's vtable ends at 114.
+inline const Patch* context1Patches(size_t& count){
+    static const Patch table[]={{Context1ClearView,(void*)&context1ClearView}};
+    count=sizeof table/sizeof *table;return table;
+}
 inline bool patchContext(ID3D11DeviceContext* context) {
     if(!context||!contextSeen.load(std::memory_order_acquire))return false;
     void** vtable=*reinterpret_cast<void***>(context);
@@ -1075,6 +1100,14 @@ inline bool patchContext(ID3D11DeviceContext* context) {
     resetContext(context);
     size_t count=0;const Patch* patches=contextPatches(count);
     if(!patchClass(vtable,patches,count))return false;
+    // ID3D11DeviceContext1's vtable continues ID3D11DeviceContext's, so the
+    // ClearView slot exists only on a context that answers the 11.1 QI.
+    ID3D11DeviceContext1* context1=nullptr;
+    if(SUCCEEDED(context->QueryInterface(__uuidof(ID3D11DeviceContext1),reinterpret_cast<void**>(&context1)))&&context1) {
+        size_t count1=0;const Patch* patches1=context1Patches(count1);   // set before use: argument order is unspecified
+        patchClass(*reinterpret_cast<void***>(context1),patches1,count1);
+        context1->Release();
+    }
     summary();
     return true;
 }

@@ -47,6 +47,15 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     const FLOAT black[4]={0,0,0,1};
     context->ClearRenderTargetView(rtv,black);
     CHECK(d3d11_diag::clears[0].load()>=1);
+    // ID3D11DeviceContext1::ClearView is the 11.1 way to clear the same view:
+    // a game that only clears through it must not show clears=0.
+    ID3D11DeviceContext1* context1=nullptr;
+    if(SUCCEEDED(context->QueryInterface(__uuidof(ID3D11DeviceContext1),reinterpret_cast<void**>(&context1)))&&context1) {
+        uint64_t beforeView=d3d11_diag::clears[0].load();
+        context1->ClearView(rtv,black,nullptr,0);
+        CHECK(d3d11_diag::clears[0].load()==beforeView+1);
+        context1->Release();
+    }
     uint64_t beforeIndexed=d3d11_diag::draws[0][0][0].load(),beforeTriangle=d3d11_diag::draws[1][0][0].load();
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context->Draw(3,0);
@@ -233,6 +242,8 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     CHECK(count("draw summary 1/7: command lists finish=")==1);
     CHECK(count("draw summary 1/7: shader creates vs=")==1);
     CHECK(count("draw summary 1/7: render targets sets=")==1);
+    // The 11.1 ClearView count is reported next to the 11.0 clears.
+    CHECK(count("clearview=0")==1);
     CHECK(count("draw summary 1/7: render target fmt=28(R8G8B8A8_UNORM) 64x64")==1);
     CHECK(count("draw summary 1/7: main render target 64x64 swapchain 1920x1080 fmt=28(R8G8B8A8_UNORM) buffers=2")==1);
     // The summary is bounded like the rest of the log.
