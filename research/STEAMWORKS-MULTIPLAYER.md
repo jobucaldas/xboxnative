@@ -392,12 +392,12 @@ Not verified:
   the check.
 - Anything about lobbies, P2P or auth tickets end to end. No CM lobby message
   has been sent from this codebase.
-- That the game's Rank screen lists the rows. Steam answering for the boards is
-  settled by the console run below; what the panel does with them is not.
+- That the persona-name fix shows real names on the Rank screen. The panel is
+  captured below with "Unknown User" on every row, but that build predates the
+  fix; the next package is the check.
 
 **Console run, 2026-11-09 (0.5.255.0, `feat/steam-leaderboards` @ 7dd2f0f).**
-The first half is answered. The tap fired, and Steam answered every board the
-game asked for, in one launch:
+The tap fired, and Steam answered every board the game asked for, in one launch:
 
 ```
 STEAM leaderboards: SteamAPI_ISteamUserStats_FindLeaderboard observed; rows come from the launcher's Steam session
@@ -415,7 +415,25 @@ Steam's answer, not a bridge failure — and the game's real boards are the
 `_friends` / `_weekly` names plus `banned_players`. Note that `_friends` is a
 board *name*, not the friends data request: it is a separate global board.
 
-Still not verified: that the Rank screen lists the rows. Megabonk stops at its
-photosensitivity warning and no gamepad was connected, so nothing could press
-CONFIRM and the panel was never reached. The seeding happens at startup, before
-that screen, so the Steam question is answered without it.
+**The Rank screen lists the rows.** A later run on the same build captured the
+LEADERBOARDS panel with GLOBAL selected, on Megabonk's main menu:
+
+```
+LEADERBOARDS                    Reset 140:12:26
+GLOBAL | FRIENDS
+RANK  PLAYER          KILLS
+#1    Unknown User    3.01M
+#2    Unknown User    2.94M
+#3    Unknown User    1.41M
+...
+#10   Unknown User    934.01K
+```
+
+Real other players, real scores, ranked 1..10 — the owner's acceptance check on
+this build. The JOGADOR column reads "Unknown User" on every row, which is gap 2
+above; the name fix in this branch targets exactly that call
+(`GetFriendPersonaName`) but had not been built into a console package when this
+screenshot was taken, so it is not evidence either way for the fix. The
+photosensitivity warning did not appear in this run: it had already been
+accepted in two earlier runs with a pad connected, and the game persists that,
+so no input was needed to reach the menu.
