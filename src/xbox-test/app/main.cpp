@@ -1595,10 +1595,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // Sidebar view-model, shared by the library and queue screens. Storage
     // figures come from the last storage report's internal root (the queue
     // screen does not probe drives); until one exists the defaults hold.
-    // m_sidebarFocus: the sidebar row the D-pad sits on while the sidebar has
-    // focus (draw_sidebar's pill); -1 = no row is focused. The library input
-    // path keeps it in sync with m_sidebar on every edge event.
-    int m_sidebarFocus = -1;
+    // The sidebar row the D-pad sits on while the sidebar has focus (draw_sidebar's
+    // pill); -1 = no row is focused. Derived at draw time from (m_focus, m_sidebar),
+    // so it never lags the input handling.
+    int sidebar_focus_row() const { return m_focus == ui_nav::Focus::sidebar ? m_sidebar : -1; }
     ui_launcher::SidebarVM sidebar_vm() {
         ui_launcher::SidebarVM sb;
         static std::string persona; persona = persona_name();
@@ -1609,7 +1609,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
           size_t q; { std::lock_guard<std::mutex> ql(g_dqm); q = g_dq.size(); }
           sb.queue_count = (int)q + (g_dl.state == 1 ? 1 : 0); }
         sb.active = m_onlyInstalled ? 1 : 0;
-        sb.focus = m_sidebarFocus;
+        sb.focus = sidebar_focus_row();
         return sb;
     }
 
@@ -1851,11 +1851,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
             // Sidebar focus: up/down moves the entry, A switches the view, right
             // returns to the grid. The View filter chip is gone; Installed is a
-            // sidebar entry now. m_sidebarFocus mirrors (focus, m_sidebar) for
-            // the drawer; on the queue/storage screens it equals the entry that
-            // was pressed, which is those screens' active row, so the sidebar
-            // reads as the mockup's single highlighted row there too.
-            m_sidebarFocus = m_focus == ui_nav::Focus::sidebar ? m_sidebar : -1;
+            // sidebar entry now. The drawer derives its focused row from
+            // (m_focus, m_sidebar) (sidebar_focus_row), on the queue/storage
+            // screens that is the entry that was pressed, i.e. their active row.
             if (m_focus == ui_nav::Focus::sidebar) {
                 if (has(edge, GamepadButtons::DPadUp)) { ui_nav::sidebar_move(m_sidebar, false); logf("sidebar: entry %d (%s)", m_sidebar, source); }
                 else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::sidebar_move(m_sidebar, true); logf("sidebar: entry %d (%s)", m_sidebar, source); }
