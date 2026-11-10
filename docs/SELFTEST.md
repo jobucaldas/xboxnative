@@ -17,8 +17,9 @@ selftest.txt
 
 One mode per line; blank lines and `#` comments are ignored, names are case-insensitive,
 duplicates collapse, and `all` expands to every mode. The file is consumed (deleted) when
-the launcher reads it. A mode the build does not carry is reported as `SKIP`, never
-silently dropped.
+the launcher reads it, which it only does while no game is launching or running; a request
+that arrives during a launch waits on disk until the launcher is idle. A mode the build
+does not carry is reported as `SKIP`, never silently dropped.
 
 | Mode | Fixture | What it exercises |
 |---|---|---|
@@ -61,6 +62,7 @@ actually ran guest code and the guest exited. It is not a visual or playability 
 | `FAIL did-not-exit` | Guest code ran and the fixture never exited |
 | `FAIL donor-gate` / `FAIL u32c-test` | A runtime prerequisite a launch also needs is missing |
 | `FAIL restart-limit` / `FAIL stale-request` | The run could not continue across launcher restarts |
+| `FAIL empty-request` | `selftest.txt` named no mode |
 | `SKIP unknown-mode` / `SKIP not-packaged` | The request named a mode this build cannot run |
 
 ## How a run proceeds
