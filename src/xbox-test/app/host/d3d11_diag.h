@@ -283,11 +283,11 @@ inline void noteFailure(HRESULT hr) {
             if(SUCCEEDED(raw->QueryInterface(__uuidof(IDXGIAdapter3),reinterpret_cast<void**>(&adapter)))&&adapter) {
                 DXGI_QUERY_VIDEO_MEMORY_INFO local{},nonlocal{};
                 if(SUCCEEDED(adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&local)))
-                    emit(fmt("device removed: memory local budget=%llu used=%llu reserved=%llu",
-                        (unsigned long long)local.Budget,(unsigned long long)local.CurrentUsage,(unsigned long long)local.AvailableForReservation));
+                    emit(fmt("device removed: memory local budget=%llu used=%llu reserved=%llu avail_reserve=%llu",
+                        (unsigned long long)local.Budget,(unsigned long long)local.CurrentUsage,(unsigned long long)local.CurrentReservation,(unsigned long long)local.AvailableForReservation));
                 if(SUCCEEDED(adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,&nonlocal)))
-                    emit(fmt("device removed: memory nonlocal budget=%llu used=%llu reserved=%llu",
-                        (unsigned long long)nonlocal.Budget,(unsigned long long)nonlocal.CurrentUsage,(unsigned long long)nonlocal.AvailableForReservation));
+                    emit(fmt("device removed: memory nonlocal budget=%llu used=%llu reserved=%llu avail_reserve=%llu",
+                        (unsigned long long)nonlocal.Budget,(unsigned long long)nonlocal.CurrentUsage,(unsigned long long)nonlocal.CurrentReservation,(unsigned long long)nonlocal.AvailableForReservation));
                 adapter->Release();
             }
             raw->Release();
@@ -511,9 +511,9 @@ inline void logMemory() {
             DXGI_QUERY_VIDEO_MEMORY_INFO local{},nonlocal{};
             adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&local);
             adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,&nonlocal);
-            emit(fmt("video memory local budget=%llu used=%llu reserved=%llu nonlocal used=%llu",
-                (unsigned long long)local.Budget,(unsigned long long)local.CurrentUsage,(unsigned long long)local.AvailableForReservation,
-                (unsigned long long)nonlocal.CurrentUsage));
+            emit(fmt("video memory local budget=%llu used=%llu reserved=%llu avail_reserve=%llu nonlocal used=%llu",
+                (unsigned long long)local.Budget,(unsigned long long)local.CurrentUsage,(unsigned long long)local.CurrentReservation,
+                (unsigned long long)local.AvailableForReservation,(unsigned long long)nonlocal.CurrentUsage));
             adapter->Release();
         }
         raw->Release();
