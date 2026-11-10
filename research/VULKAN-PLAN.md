@@ -155,6 +155,12 @@ already done and exercised. It is MIT, in the pinned `mesa-src` tarball, and bui
   CoreWindow), 0005 turns a failed `EnableExperimentalFeatures` into a warning, 0006 makes the meta cleanup idempotent
   on a failed device creation, and 0007 fills in the DXBC container checksum (MD5 with DXBC's variant padding) so an
   unsigned container is well-formed. 0001 and 0002 are the shared d3d12-backend patches the GL driver needs.
+  0006 and 0007 were corrected after review: 0007's two-block tail is 56 or 60 bytes (the payload after the 20-byte
+  header is 4-byte aligned) and now pads the first block as a plain block with the whole remainder, which matches
+  vkd3d's `md5_final(VKD3D_MD5_DXBC)`; 0006 now destroys `shaders_lock`/`contexts_lock` once, guarded by a flag, so
+  the second `dzn_meta_finish()` on the failure path does not destroy a mutex twice. The checksum is checked by
+  compiling the patched function against a port of vkd3d's implementation over container sizes whose tail is 56 and
+  60 bytes. **[verified off-device]**
 * **Packaging**: `app/build.sh` copies `vulkan_dzn.dll`, `vulkan-dzn.json`, the licences, the patches, `SHA256SUMS`
   and `SOURCE.txt` into `layout/runtime/` behind `PLAY_DZN` (default on; a dzn build failure fails the launcher build;
   `PLAY_DZN=0` is the explicit way to package without it). `redistributable()` in
