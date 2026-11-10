@@ -226,10 +226,10 @@ static bool step() {
 // A step already in flight owns the queue: a request that arrives meanwhile
 // must not start a second one (resume() and tick() both reach run_async).
 static std::atomic<bool> g_running{false};
-static bool g_requested = false;   // this process has consumed a request
+static std::atomic<bool> g_requested{false};   // this process has consumed a request
 static bool tick() {
     static double next = 0;
-    if (g_requested || g_running.load(std::memory_order_acquire)) return false;
+    if (g_requested.load(std::memory_order_acquire) || g_running.load(std::memory_order_acquire)) return false;
     // A launch owns the probe sink and the one 64-bit guest slot: leave the
     // request in place until the launcher is idle rather than failing it (or
     // redirecting a running launch's evidence into selftest_probe.log).
@@ -239,12 +239,12 @@ static bool tick() {
     next = t + 1.0;
     std::string text;
     if (!read_file_s(request_path(), text)) return false;
-    g_requested = true;
-    if (!DeleteFileW(request_path().c_str())) { g_requested = false; logf("selftest: request file could not be consumed; no run"); return false; }
+    g_requested.store(true, std::memory_order_release);
+    if (!DeleteFileW(request_path().c_str())) { g_requested.store(false, std::memory_order_release); logf("selftest: request file could not be consumed; no run"); return false; }
     selftest_plan::Queue q;
     q.pending = selftest_plan::parse_request(text);
     // An empty request is a FAIL line the summary counts, not a silent no-op.
-    if (q.pending.empty()) { append_log("SELFTEST RESULT request FAIL empty-request"); summary(); g_requested = false; return false; }
+    if (q.pending.empty()) { append_log("SELFTEST RESULT request FAIL empty-request"); summary(); g_requested.store(false, std::memory_order_release); return false; }
     // A new request starts a new record: the log is per request, not per app.
     DeleteFileW(log_path().c_str());
     append_log("SELFTEST BEGIN request=" + std::to_string(q.pending.size()) + " modes");
@@ -279,7 +279,7 @@ static void run_async(const winrt::Windows::UI::Core::CoreDispatcher& dispatcher
         g_running.store(false, std::memory_order_release);
         // No guest is in this process (only 32-bit modes ran, or nothing was
         // packaged), so another request may be taken without a restart.
-        if (!more) { g_requested = false; logf("selftest: run finished"); return; }
+        if (!more) { g_requested.store(false, std::memory_order_release); logf("selftest: run finished"); return; }
         // Same rule as back_to_games: a pending restart replaces the app, so
         // Exit() only when the shell did not take it (the queue then resumes
         // on the next start). RestartPending means the restart is coming.
