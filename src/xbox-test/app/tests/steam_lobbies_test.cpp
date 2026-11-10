@@ -22,6 +22,7 @@ struct Server {
     };
     std::map<uint64_t, Row> lobbies;
     std::vector<std::pair<uint32_t, uint32_t>> routed;   // (emsg, routing_appid)
+    std::string last_set_body, last_server_body, last_list_body;
     unsigned creates = 0, joins = 0, leaves = 0, lists = 0, sets = 0, chats = 0, invites = 0, statuses = 0, servers = 0;
     int32_t create_eresult = ResultOK;
     int32_t join_eresult = ResultOK;
@@ -104,6 +105,7 @@ struct Server {
         }
         case GetLobbyList: {
             ++lists;
+            last_list_body = body;
             pb_u(resp, 1, routing);
             pb_u(resp, 3, uint64_t(int64_t(list_eresult)));
             if (list_eresult != ResultOK) return true;
@@ -121,6 +123,7 @@ struct Server {
         }
         case SetLobbyData: {
             ++sets;
+            last_set_body = body;
             uint64_t id = pb_get(f, 2)->u;
             pb_u(resp, 1, routing); pb_fixed64(resp, 2, id);
             pb_u(resp, 3, uint64_t(int64_t(set_eresult)));
@@ -129,6 +132,7 @@ struct Server {
                 if (it != lobbies.end()) {
                     if (auto m = pb_get(f, 7)) it->second.metadata = m->s;
                     if (auto m = pb_get(f, 4)) it->second.max_members = int32_t(m->u);
+                    if (auto m = pb_get(f, 5)) it->second.lobby_type = int32_t(m->u);
                 }
             }
             return true;
@@ -148,6 +152,7 @@ struct Server {
         }
         case SetLobbyGameServer: {
             ++servers;
+            last_server_body = body;
             return true;   // the effect arrives as the pushed LobbyGameServerSet
         }
         case GetLobbyStatus: {
@@ -177,6 +182,11 @@ int main() {
         return server.call(emsg, routing, body, resp);
     };
     io.log = [&](const std::string& line) { log.push_back(line); };
+
+    // ---- the Steamworks enum values, which the CM compares against
+    assert(CompareEqualOrLess == -2 && CompareLess == -1 && CompareEqual == 0);
+    assert(CompareGreater == 1 && CompareEqualOrGreater == 2 && CompareNotEqual == 3);
+    assert(LobbyTypePrivate == 0 && LobbyTypeFriendsOnly == 1 && LobbyTypePublic == 2 && LobbyTypeInvisible == 3);
 
     // ---- create
     auto made = create(io, 3405340, 8, LobbyTypePublic, 0, "mode=coop", "host");
@@ -211,6 +221,14 @@ int main() {
     assert(found[0].num_members == 1);
     assert(found[0].metadata == "mode=coop");
     assert(server.routed.back().second == 3405340);
+    {
+        auto f = pb_parse(server.last_list_body);
+        auto filt = pb_get(f, 6);   // repeated Filter; 5 is the deprecated public ip
+        assert(filt && !filt->s.empty());
+        auto inner = pb_parse(filt->s);
+        auto cmp = pb_get(inner, 3);
+        assert(cmp && int32_t(cmp->u) == CompareEqual);
+    }
 
     // ---- join: the member list and owner come from the CM
     auto joined = join(io, 3405340, lobby_id, "friend");
@@ -238,12 +256,42 @@ int main() {
     assert(set_data(io, 3405340, lobby_id, 0, "mode=coop;map=1"));
     assert(server.sets == 1);
     assert(server.lobbies[lobby_id].metadata == "mode=coop;map=1");
+    {
+        // Metadata only: the int fields are absent, so the CM keeps them.
+        auto f = pb_parse(server.last_set_body);
+        assert(pb_get(f, 7) && pb_get(f, 7)->s == "mode=coop;map=1");
+        assert(!pb_get(f, 4) && !pb_get(f, 5) && !pb_get(f, 6));
+    }
+    // A change to private is 0 on the wire, not a dropped field.
+    assert(set_data(io, 3405340, lobby_id, 0, "mode=coop;map=1", std::nullopt, LobbyTypePrivate));
+    {
+        auto f = pb_parse(server.last_set_body);
+        auto type = pb_get(f, 5);
+        assert(type && type->u == 0);
+        assert(server.lobbies[lobby_id].lobby_type == LobbyTypePrivate);
+    }
     assert(send_chat(io, 3405340, lobby_id, 0, "hello"));
     assert(server.chats == 1);
     assert(invite(io, 3405340, lobby_id, 0x11000010000000aull));
     assert(server.invites == 1);
     assert(set_server(io, 3405340, lobby_id, 0x0a000001u, 27015, 0));
     assert(server.servers == 1);
+    {
+        auto f = pb_parse(server.last_server_body);
+        auto addr = pb_get(f, 6);
+        assert(addr && addr->wt == 2);
+        auto a = pb_parse(addr->s);
+        assert(a.size() == 1 && a[0].f == 1 && a[0].wt == 5 && uint32_t(a[0].u) == 0x0a000001u);
+        assert(pb_get(f, 4) && pb_get(f, 4)->u == 27015);
+    }
+    // A Steam-ID-only server has no address, but its port still goes out.
+    assert(set_server(io, 3405340, lobby_id, 0, 27016, 0x11000010000000bull));
+    {
+        auto f = pb_parse(server.last_server_body);
+        assert(!pb_get(f, 6));
+        assert(pb_get(f, 4) && pb_get(f, 4)->u == 27016);
+        assert(pb_get(f, 5) && pb_get(f, 5)->u == 0x11000010000000bull);
+    }
     assert(status(io, 3405340, lobby_id, true, true) == LobbyStatusOwner);
     assert(status(io, 3405340, 0x11000010000ffffull, true, false) == LobbyStatusNotMember);
     // A chat message over the API's limit is refused before the wire.
@@ -275,6 +323,13 @@ int main() {
         pb_u(server_body, 3, 0x0a000001u); pb_u(server_body, 4, 27015);
         auto server_set = parse_server_set(server_body);
         assert(server_set.lobby == lobby_id && server_set.ipv4 == 0x0a000001u && server_set.port == 27015);
+
+        // The modern field, which is what a current CM sends, is read too.
+        std::string modern_body;
+        pb_u(modern_body, 1, 3405340); pb_fixed64(modern_body, 2, lobby_id);
+        pb_s(modern_body, 6, ip_address(0x0a000002u)); pb_u(modern_body, 4, 27016);
+        auto modern = parse_server_set(modern_body);
+        assert(modern.lobby == lobby_id && modern.ipv4 == 0x0a000002u && modern.port == 27016);
     }
 
     // ---- the bridge policy

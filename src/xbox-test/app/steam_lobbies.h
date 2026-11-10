@@ -49,9 +49,10 @@ enum : uint32_t {
 };
 
 // ELobbyType / ELobbyFilterType / ELobbyComparison, as the game passes them.
+// ELobbyComparison is signed and centred on Equal: -2..3, not 0..5.
 enum : int { LobbyTypePrivate = 0, LobbyTypeFriendsOnly = 1, LobbyTypePublic = 2, LobbyTypeInvisible = 3 };
 enum : int { FilterString = 0, FilterNumerical = 1, FilterSlotsAvailable = 2, FilterNearValue = 3 };
-enum : int { CompareEqualOrLess = 0, CompareLess = 1, CompareEqual = 2, CompareGreater = 3, CompareEqualOrGreater = 4, CompareNotEqual = 5 };
+enum : int { CompareEqualOrLess = -2, CompareLess = -1, CompareEqual = 0, CompareGreater = 1, CompareEqualOrGreater = 2, CompareNotEqual = 3 };
 // EMMSLobbyStatus.
 enum : int { LobbyStatusInvalid = 0, LobbyStatusNotMember = 1, LobbyStatusMember = 2, LobbyStatusOwner = 3 };
 
@@ -196,14 +197,18 @@ inline bool parse_list(const std::string& body, int32_t headerEresult, std::vect
 // CMsgClientMMSSetLobbyData: app_id (1), steam_id_lobby (2), steam_id_member
 // (3, non-zero for member data), max_members (4), lobby_type (5), lobby_flags
 // (6), metadata (7).
+// A field is sent only when the caller means to change it: LobbyTypePrivate is
+// 0, so "non-zero means present" would make a change to private unsendable and
+// would let a metadata-only update reset the other fields to their defaults.
 inline std::string set_data_body(uint32_t appid, uint64_t lobby, uint64_t member,
-                                 const std::string& metadata, int max_members, int lobby_type, int lobby_flags) {
+                                 const std::string& metadata, std::optional<int> max_members,
+                                 std::optional<int> lobby_type, std::optional<int> lobby_flags) {
     std::string b;
     pb_u(b, 1, appid); pb_fixed64(b, 2, lobby);
     if (member) pb_fixed64(b, 3, member);
-    if (max_members) pb_u(b, 4, uint64_t(int64_t(max_members)));
-    if (lobby_type) pb_u(b, 5, uint64_t(int64_t(lobby_type)));
-    if (lobby_flags) pb_u(b, 6, uint64_t(int64_t(lobby_flags)));
+    if (max_members) pb_u(b, 4, uint64_t(int64_t(*max_members)));
+    if (lobby_type) pb_u(b, 5, uint64_t(int64_t(*lobby_type)));
+    if (lobby_flags) pb_u(b, 6, uint64_t(int64_t(*lobby_flags)));
     pb_s(b, 7, metadata);
     return b;
 }
@@ -275,26 +280,44 @@ inline int32_t parse_set_owner(const std::string& body, int32_t headerEresult) {
     for (auto& f : pb_parse(body)) if (f.f == 3) eresult = int32_t(f.u);
     return eresult;
 }
+// CMsgIPAddress: v4 (1, fixed32), v6 (2, bytes). The CM reads the modern field;
+// the deprecated one stays for clients that still do.
+inline std::string ip_address(uint32_t ipv4) {
+    std::string addr;
+    pb_varint(addr, (1u << 3) | 5);
+    for (int i = 0; i < 4; ++i) addr += char(ipv4 >> (8 * i));
+    return addr;
+}
 // CMsgClientMMSSetLobbyGameServer: app_id (1), steam_id_lobby (2),
 // deprecated_game_server_ip (3), game_server_port (4), game_server_steam_id
-// (5), game_server_ip (6). `ipv4` is host order; 0 means "no server".
+// (5), game_server_ip (6). `ipv4` is host order; 0 means "address unknown",
+// which is how a Steam-ID-only server is advertised — its port still goes out.
 inline std::string set_server_body(uint32_t appid, uint64_t lobby, uint32_t ipv4, uint32_t port, uint64_t server_steamid) {
     std::string b;
     pb_u(b, 1, appid); pb_fixed64(b, 2, lobby);
-    if (ipv4) { pb_u(b, 3, ipv4); pb_u(b, 4, port); }
+    if (ipv4) {
+        pb_u(b, 3, ipv4);
+        pb_s(b, 6, ip_address(ipv4));
+    }
+    if (ipv4 || server_steamid) pb_u(b, 4, port);
     if (server_steamid) pb_fixed64(b, 5, server_steamid);
     return b;
 }
 // CMsgClientMMSLobbyGameServerSet (pushed): same fields as the request.
 struct GameServer { uint64_t lobby = 0; uint32_t ipv4 = 0, port = 0; uint64_t steamid = 0; };
 inline GameServer parse_server_set(const std::string& body) {
-    GameServer out;
+    GameServer out; uint32_t modern = 0;
     for (auto& f : pb_parse(body)) {
         if (f.f == 2) out.lobby = f.u;
         else if (f.f == 3) out.ipv4 = uint32_t(f.u);
         else if (f.f == 4) out.port = uint32_t(f.u);
         else if (f.f == 5) out.steamid = f.u;
+        else if (f.f == 6) {   // CMsgIPAddress
+            for (auto& a : pb_parse(f.s)) if (a.f == 1 && a.wt == 5) modern = uint32_t(a.u);
+        }
     }
+    // The modern field wins: the deprecated one is what old clients sent.
+    if (modern) out.ipv4 = modern;
     return out;
 }
 // CMsgClientMMSUserJoinedLobby / ...UserLeftLobby (pushed): app_id (1),
@@ -400,7 +423,9 @@ inline Lobby data(Io& io, uint32_t appid, uint64_t lobby) {
     return parse_lobby_data(resp, ResultOK);
 }
 inline bool set_data(Io& io, uint32_t appid, uint64_t lobby, uint64_t member, const std::string& metadata,
-                     int max_members = 0, int lobby_type = 0, int lobby_flags = 0) {
+                     std::optional<int> max_members = std::nullopt,
+                     std::optional<int> lobby_type = std::nullopt,
+                     std::optional<int> lobby_flags = std::nullopt) {
     std::string resp;
     if (!io.call(SetLobbyData, appid, set_data_body(appid, lobby, member, metadata, max_members, lobby_type, lobby_flags), resp)) {
         io.log("lobbies: set-data request failed (transport)");
