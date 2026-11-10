@@ -974,26 +974,40 @@ static void STDMETHODCALLTYPE contextRSSetScissorRects(DevicePtr self,UINT count
 }
 // GenerateMips on a texture without the MIP bind (or with a single mip)
 // succeeds and leaves the chain empty: the silent shape of a blank minimap.
+// MipLevels -1 means "all remaining mips": whether that is a no-op depends on
+// the resource, so read the resource's own mip count when the view says -1.
 static void STDMETHODCALLTYPE contextGenerateMips(DevicePtr self,ID3D11ShaderResourceView* view) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11ShaderResourceView*);
     auto call=reinterpret_cast<Fn>(original(self,GenerateMips));if(!call)return;
     generateMips.fetch_add(1,std::memory_order_relaxed);
     if(view) {
-        ID3D11Resource* resource=nullptr;view->GetResource(&resource);
-        D3D11_RESOURCE_DIMENSION dim=D3D11_RESOURCE_DIMENSION_UNKNOWN;resource->GetType(&dim);resource->Release();
         D3D11_SHADER_RESOURCE_VIEW_DESC v{};view->GetDesc(&v);
+        unsigned mips=v.Texture2D.MipLevels;
+        if(v.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D&&mips==0xffffffffu) {
+            ID3D11Resource* resource=nullptr;view->GetResource(&resource);
+            if(resource) {
+                D3D11_RESOURCE_DIMENSION dim=D3D11_RESOURCE_DIMENSION_UNKNOWN;resource->GetType(&dim);
+                if(dim==D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+                    ID3D11Texture2D* t=nullptr;
+                    if(SUCCEEDED(resource->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&t)))&&t) {
+                        D3D11_TEXTURE2D_DESC d{};t->GetDesc(&d);mips=d.MipLevels;t->Release();
+                    }
+                }
+                resource->Release();
+            }
+        }
         bool samplable=v.ViewDimension!=D3D11_SRV_DIMENSION_BUFFER;
-        if(!samplable||v.Texture2D.MipLevels<=1)generateMipsNoMips.fetch_add(1,std::memory_order_relaxed);
+        if(!samplable||mips<=1)generateMipsNoMips.fetch_add(1,std::memory_order_relaxed);
     }
     call(self,view);
 }
 // A stream-output target set while draws read it is a feedback loop the
 // summary cannot see; the game's terrain splatting may go through it.
-static void STDMETHODCALLTYPE contextSOSetTargets(DevicePtr self,UINT start,UINT count,ID3D11Buffer* const* targets) {
-    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,ID3D11Buffer* const*);
+static void STDMETHODCALLTYPE contextSOSetTargets(DevicePtr self,UINT count,ID3D11Buffer* const* targets,const UINT* offsets) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11Buffer* const*,const UINT*);
     auto call=reinterpret_cast<Fn>(original(self,SOSetTargets));if(!call)return;
     if(count&&targets)soTargets.fetch_add(1,std::memory_order_relaxed);
-    call(self,start,count,targets);
+    call(self,count,targets,offsets);
 }
 // Describes the render target views of an OM set once per distinct view. The
 // table is direct-mapped (pointer hash) so the check is O(1) on a path the

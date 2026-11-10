@@ -259,9 +259,12 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
             CHECK(d3d11_diag::scissorZero.load()==beforeEmpty+1);
         }
         // GenerateMips on a single-mip SRV: legal, leaves the chain empty, and
-        // counted so a blank minimap chain has a trace.
+        // counted so a blank minimap chain has a trace. MipLevels -1 (all
+        // remaining) on the same 1-mip texture is the same no-op and must be
+        // counted too.
         {
             uint64_t before=d3d11_diag::generateMips.load();
+            uint64_t beforeNoMips=d3d11_diag::generateMipsNoMips.load();
             if(targetTexture) {
                 ID3D11ShaderResourceView* targetSrv=nullptr;
                 D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
@@ -273,8 +276,32 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
                     context->GenerateMips(targetSrv);
                     targetSrv->Release();
                 }
+                srvDesc.Texture2D.MipLevels=0xffffffffu;   // "all remaining mips"
+                ID3D11ShaderResourceView* remainingSrv=nullptr;
+                if(SUCCEEDED(device->CreateShaderResourceView(targetTexture,&srvDesc,&remainingSrv))&&remainingSrv) {
+                    context->GenerateMips(remainingSrv);
+                    remainingSrv->Release();
+                }
             }
-            CHECK(d3d11_diag::generateMips.load()==before+1);
+            CHECK(d3d11_diag::generateMips.load()==before+2);
+            CHECK(d3d11_diag::generateMipsNoMips.load()==beforeNoMips+2);
+        }
+        // A stream-output target set with real buffers: the hook must forward
+        // the arguments untouched (a swapped or truncated forward corrupts the
+        // call) and count the set.
+        {
+            D3D11_BUFFER_DESC soDesc{};soDesc.ByteWidth=64;soDesc.Usage=D3D11_USAGE_DEFAULT;
+            soDesc.BindFlags=D3D11_BIND_STREAM_OUTPUT;soDesc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+            soDesc.StructureByteStride=16;
+            ID3D11Buffer* soBuffer=nullptr;
+            if(SUCCEEDED(device->CreateBuffer(&soDesc,nullptr,&soBuffer))&&soBuffer) {
+                uint64_t beforeSo=d3d11_diag::soTargets.load();
+                UINT offset=0;
+                context->SOSetTargets(1,&soBuffer,&offset);
+                context->SOSetTargets(0,nullptr,nullptr);
+                CHECK(d3d11_diag::soTargets.load()==beforeSo+1);
+                soBuffer->Release();
+            }
         }
         argsBuffer->Release();
     }
@@ -324,7 +351,7 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     CHECK(count("draw summary 1/7: command lists finish=")==1);
     // The raster-state and mip lines carry the silent-black shapes.
     CHECK(count("draw summary 1/7: viewports sets=2 zero-area=1 largest=64x64 scissors=1 empty=1")==1);
-    CHECK(count("draw summary 1/7: GenerateMips calls=1 no-mips=1 SO targets=0")==1);
+    CHECK(count("draw summary 1/7: GenerateMips calls=2 no-mips=2 SO targets=1")==1);
     CHECK(count("draw summary 1/7: shader creates vs=")==1);
     CHECK(count("draw summary 1/7: render targets sets=")==1);
     // The 11.1 ClearView count is reported next to the 11.0 clears.
