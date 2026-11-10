@@ -105,23 +105,49 @@ std::string out_dir() {
 
 std::vector<ui_launcher::TileVM> make_tiles(int n) {
     std::vector<ui_launcher::TileVM> t{size_t(n)};
-    // a rotation of the mockup's 21 tile gradients (first three from fixtures.txt)
-    const uint32_t tops[7] = {0xFF1B2A4A, 0xFF4A1B2A, 0xFF2A4A1B, 0xFF3A2A4A, 0xFF2A4A4A, 0xFF4A3A1B, 0xFF1B4A3A};
-    const uint32_t mids[7] = {0xFF3E6FA8, 0xFFA86F3E, 0xFF6FA83E, 0xFF6F3EA8, 0xFF3E8AA8, 0xFFA88A3E, 0xFF3EA88A};
-    const uint32_t bots[7] = {0xFF0B1220, 0xFF200B12, 0xFF12200B, 0xFF170B20, 0xFF0B2020, 0xFF201708, 0xFF0B2015};
+    // the mockup's 21 tiles: measured stops of each art gradient along its diagonal
+    struct Art { uint32_t top, mid, bot; };
+    const Art arts[21] = {
+        {0xFF1D2E50, 0xFF3E6FA7, 0xFF0E1929},  // Megabonk
+        {0xFF421334, 0xFFAF3A6E, 0xFF200A18},  // Hades
+        {0xFF152D24, 0xFF3E8B69, 0xFF132E24},  // Celeste
+        {0xFF32271A, 0xFFA77A3E, 0xFF1A150C},  // Hollow Knight
+        {0xFF2A1E3B, 0xFF795AA7, 0xFF160E1E},  // Stardew Valley
+        {0xFF361524, 0xFFA73E5A, 0xFF1C0910},  // Terraria
+        {0xFF102837, 0xFF2E7999, 0xFF08181F},  // Dead Cells
+        {0xFF331912, 0xFFAF5A2E, 0xFF1E0C08},  // Cuphead
+        {0xFF172630, 0xFF4A798B, 0xFF0D161C},  // Subnautica
+        {0xFF1E1738, 0xFF5A4AAF, 0xFF0E0D20},  // Portal 2
+        {0xFF143122, 0xFF4A995A, 0xFF0B1B10},  // Slay the Spire
+        {0xFF362111, 0xFFBF893A, 0xFF1F1308},  // Balatro
+        {0xFF232328, 0xFF6D6D79, 0xFF111114},  // Inscryption
+        {0xFF232328, 0xFF6D6D79, 0xFF111114},  // Factorio
+        {0xFF271730, 0xFF894AA7, 0xFF150D1A},  // Risk of Rain 2
+        {0xFF271730, 0xFF894AA7, 0xFF150D1A},  // Undertale
+        {0xFF2C261E, 0xFF89795A, 0xFF1A140C},  // Katana ZERO
+        {0xFF2C261E, 0xFF89795A, 0xFF1A140C},  // Outer Wilds
+        {0xFF112330, 0xFF3A6989, 0xFF0A131A},  // Valheim
+        {0xFF1E2A37, 0xFF5A7999, 0xFF0E161D},  // Spelunky 2
+        {0xFF281F36, 0xFF7969A7, 0xFF0B060E},  // Tunic
+    };
+    const char* names[21] = {
+        "Megabonk", "Hades", "Celeste", "Hollow Knight", "Stardew Valley", "Terraria", "Dead Cells",
+        "Cuphead", "Subnautica", "Portal 2", "Slay the Spire", "Balatro", "Inscryption", "Factorio",
+        "Risk of Rain 2", "Undertale", "Katana ZERO", "Outer Wilds", "Valheim", "Spelunky 2", "Tunic",
+    };
     for (int i = 0; i < n; ++i) {
-        t[i].name = "Game";
-        t[i].art_top = tops[i % 7];
-        t[i].art_mid = mids[i % 7];
-        t[i].art_bot = bots[i % 7];
-        t[i].installed = i % 3 == 0;
+        t[i].name = names[i % 21];
+        t[i].art_top = arts[i % 21].top;
+        t[i].art_mid = arts[i % 21].mid;
+        t[i].art_bot = arts[i % 21].bot;
+        t[i].installed = i == 0 || i == 7;   // the mockup badges Megabonk and Cuphead only
     }
     return t;  // implicit move
 }
 
 std::vector<ui_launcher::QueueRowVM> make_rows(int n, bool updates) {
     std::vector<ui_launcher::QueueRowVM> r{size_t(n)};
-    const uint32_t arts[5] = {0xFF1A3F6B, 0xFF2A6B4A, 0xFF6B2A55, 0xFF4A3A6B, 0xFF6B4A2A};
+    const uint32_t arts[5] = {0xFF1A3F6B, 0xFF6B2A55, 0xFF2A6B4A, 0xFF6B4A1B, 0xFF4A2A6B};
     const char* names[5] = {"Megabonk", "Hades", "Celeste", "Hollow Knight", "Terraria"};
     const char* sts[5] = {
         "Downloading  \xC2\xB7  62%  \xC2\xB7  12.4 MB/s  \xC2\xB7  about 1 hour left",
@@ -130,29 +156,64 @@ std::vector<ui_launcher::QueueRowVM> make_rows(int n, bool updates) {
         "Update available  \xC2\xB7  1.2 GB",
         "Update available  \xC2\xB7  312 MB",
     };
+    // the mockup's updates section lists Hollow Knight and Terraria (rows 3 and 4)
+    const int first = updates ? 3 : 0;
     for (int i = 0; i < n; ++i) {
-        r[i].name = names[i % 5];
-        r[i].status = sts[i % 5];
-        r[i].pct = updates || i != 0 ? 0.0f : 0.62f;
-        r[i].art = arts[i % 5];
+        r[i].name = names[(first + i) % 5];
+        r[i].status = sts[(first + i) % 5];
+        r[i].pct = !updates && i == 0 ? 0.62f : 0.0f;
+        r[i].art = arts[(first + i) % 5];
         r[i].busy = !updates && i == 0;
     }
     return r;
 }
 
-// QR module runs for mockup 04 (29x29 finder-pattern-ish fixture at 10px)
-ui_launcher::QrRun make_qr(int& count) {
-    // three finder patterns + timing rows, enough to look like the mockup at RMSE level
-    static ui_launcher::QrRun runs[64];
+// QR module runs for mockup 04: the mockup's exact 29x29 code, merged into 230 runs at 10px
+ui_launcher::QrRun* make_qr(int& count) {
+    static ui_launcher::QrRun runs[256];
     int n = 0;
     auto run = [&](uint8_t row, uint8_t col, uint8_t w) { runs[n++] = {row, col, w}; };
-    for (int k = 0; k < 7; ++k) { run(uint8_t(k), 0, 7); run(uint8_t(k), 22, 7); run(uint8_t(k + 22), 0, 7); }
-    run(7, 0, 8); run(7, 21, 2); run(21, 0, 8);
-    for (int k = 0; k < 7; ++k) { run(0, uint8_t(k), 1); run(0, uint8_t(22 + k), 1); run(28, uint8_t(k), 1); }
-    for (int k = 8; k < 21; ++k) if (k % 2 == 0) run(14, uint8_t(k), 1);
-    for (int k = 0; k < 5; ++k) { run(uint8_t(2 + k), 2, 3); run(uint8_t(24 + k), 24, 2); }
+    run(0, 0, 7), run(0, 10, 3), run(0, 14, 1), run(0, 19, 1), run(0, 22, 7), run(1, 0, 1),
+    run(1, 6, 1), run(1, 8, 1), run(1, 13, 1), run(1, 18, 1), run(1, 20, 1), run(1, 22, 1),
+    run(1, 28, 1), run(2, 0, 1), run(2, 2, 3), run(2, 6, 1), run(2, 9, 2), run(2, 12, 1),
+    run(2, 15, 1), run(2, 18, 3), run(2, 22, 1), run(2, 24, 3), run(2, 28, 1), run(3, 0, 1),
+    run(3, 2, 3), run(3, 6, 1), run(3, 9, 1), run(3, 12, 2), run(3, 16, 1), run(3, 18, 1),
+    run(3, 20, 1), run(3, 22, 1), run(3, 24, 3), run(3, 28, 1), run(4, 0, 1), run(4, 2, 3),
+    run(4, 6, 1), run(4, 8, 2), run(4, 11, 3), run(4, 16, 1), run(4, 18, 1), run(4, 20, 1),
+    run(4, 22, 1), run(4, 24, 3), run(4, 28, 1), run(5, 0, 1), run(5, 6, 1), run(5, 9, 1),
+    run(5, 11, 1), run(5, 14, 3), run(5, 19, 2), run(5, 22, 1), run(5, 28, 1), run(6, 0, 7),
+    run(6, 8, 1), run(6, 10, 1), run(6, 12, 1), run(6, 14, 1), run(6, 16, 1), run(6, 18, 1),
+    run(6, 20, 1), run(6, 22, 7), run(7, 9, 4), run(7, 15, 1), run(7, 18, 2), run(8, 0, 1),
+    run(8, 2, 1), run(8, 4, 1), run(8, 6, 1), run(8, 9, 2), run(8, 16, 2), run(8, 20, 1),
+    run(8, 24, 1), run(8, 27, 1), run(9, 10, 1), run(9, 13, 1), run(9, 15, 8), run(9, 25, 1),
+    run(9, 28, 1), run(10, 0, 3), run(10, 4, 1), run(10, 6, 1), run(10, 8, 1), run(10, 10, 2),
+    run(10, 14, 3), run(10, 20, 1), run(10, 22, 3), run(10, 26, 3), run(11, 0, 1), run(11, 2, 1),
+    run(11, 4, 1), run(11, 7, 2), run(11, 10, 2), run(11, 13, 2), run(11, 16, 5), run(11, 27, 1),
+    run(12, 1, 1), run(12, 4, 4), run(12, 11, 2), run(12, 14, 2), run(12, 18, 5), run(12, 25, 1),
+    run(12, 27, 2), run(13, 0, 2), run(13, 3, 3), run(13, 8, 1), run(13, 11, 2), run(13, 14, 2),
+    run(13, 17, 1), run(13, 21, 2), run(13, 25, 1), run(13, 28, 1), run(14, 0, 3), run(14, 6, 8),
+    run(14, 18, 4), run(14, 24, 2), run(14, 27, 2), run(15, 1, 5), run(15, 7, 3), run(15, 12, 1),
+    run(15, 15, 1), run(15, 17, 1), run(15, 19, 1), run(15, 25, 1), run(15, 27, 1), run(16, 2, 1),
+    run(16, 4, 3), run(16, 8, 3), run(16, 16, 1), run(16, 18, 1), run(16, 22, 2), run(16, 25, 1),
+    run(16, 27, 2), run(17, 1, 1), run(17, 3, 3), run(17, 7, 3), run(17, 11, 3), run(17, 15, 3),
+    run(17, 19, 1), run(17, 21, 2), run(17, 25, 2), run(17, 28, 1), run(18, 0, 1), run(18, 3, 4),
+    run(18, 9, 3), run(18, 14, 3), run(18, 18, 2), run(18, 21, 1), run(18, 27, 2), run(19, 1, 1),
+    run(19, 7, 2), run(19, 11, 1), run(19, 13, 2), run(19, 16, 2), run(19, 20, 1), run(19, 22, 1),
+    run(19, 24, 2), run(19, 27, 1), run(20, 0, 1), run(20, 4, 1), run(20, 6, 2), run(20, 10, 3),
+    run(20, 14, 2), run(20, 18, 7), run(21, 8, 1), run(21, 10, 1), run(21, 12, 1), run(21, 14, 2),
+    run(21, 17, 1), run(21, 20, 1), run(21, 24, 1), run(21, 26, 3), run(22, 0, 7), run(22, 13, 1),
+    run(22, 18, 1), run(22, 20, 1), run(22, 22, 1), run(22, 24, 2), run(22, 27, 2), run(23, 0, 1),
+    run(23, 6, 1), run(23, 11, 1), run(23, 15, 1), run(23, 17, 1), run(23, 19, 2), run(23, 24, 2),
+    run(23, 27, 1), run(24, 0, 1), run(24, 2, 3), run(24, 6, 1), run(24, 8, 2), run(24, 11, 2),
+    run(24, 16, 1), run(24, 18, 1), run(24, 20, 5), run(24, 28, 1), run(25, 0, 1), run(25, 2, 3),
+    run(25, 6, 1), run(25, 9, 3), run(25, 13, 1), run(25, 15, 3), run(25, 19, 1), run(25, 23, 2),
+    run(25, 26, 1), run(26, 0, 1), run(26, 2, 3), run(26, 6, 1), run(26, 8, 1), run(26, 14, 3),
+    run(26, 18, 1), run(26, 20, 2), run(26, 24, 2), run(26, 28, 1), run(27, 0, 1), run(27, 6, 1),
+    run(27, 9, 1), run(27, 12, 3), run(27, 16, 2), run(27, 19, 3), run(27, 24, 1), run(27, 27, 1),
+    run(28, 0, 7), run(28, 8, 1), run(28, 10, 1), run(28, 15, 2), run(28, 18, 1), run(28, 20, 3),
+    run(28, 24, 2), run(28, 27, 2),
     count = n;
-    return runs[0];
+    return runs;
 }
 
 }  // namespace
@@ -293,20 +354,22 @@ int main(int argc, char** argv) {
     // 01 library: 21 tiles, first selected
     {
         const std::vector<TileVM> tiles = make_tiles(21);
-        SidebarVM sb; sb.all_count = 21; sb.installed_count = 7; sb.queue_count = 3;
+        SidebarVM sb; sb.all_count = 128; sb.installed_count = 9; sb.queue_count = 1;
         LibraryVM lib; lib.tiles = tiles.data(); lib.tile_count = 21; lib.sel = 0;
-        lib.count_label = "21 games";
+        lib.count_label = "128 games";
         c.fill(ui::theme::page);
         draw_library(c, font, sb, lib);
         snap("launcher-01-library");
         check(px[size_t(300) * W + 300] == px[size_t(300) * W + 300], "library rendered");  // placeholder read
     }
 
-    // 02 game detail (not installed)
+    // 02 game detail (installed)
     {
         GameVM g;
         g.has_art = true;
         g.primary.installed = true;
+        g.install_ok = true;
+        g.primary_focus = true;                // mockup 02: the PLAY button carries the ring
         g.time_played = "26h 14m";
         g.achievements = "18 / 42";
         g.last_played = "2 days ago";
@@ -325,12 +388,14 @@ int main(int argc, char** argv) {
         snap("launcher-02-game");
     }
 
-    // 02b game detail with install progress
+    // 02b game install prompt: INSTALL, not installed, button focused
     {
         GameVM g;
         g.has_art = true;
-        g.primary.download = detail_input::Download::running;
-        g.install_pct = 0.43f;
+        g.primary_focus = true;
+        g.location = "Not installed";          // mockup 02b: never installed
+        g.achievement = "First Light";
+        g.achievement_sub = "Locked";
         c.fill(ui::theme::page);
         draw_game(c, font, g);
         snap("launcher-02b-game-install");
@@ -342,8 +407,11 @@ int main(int argc, char** argv) {
         g.has_art = true;
         g.primary.download = detail_input::Download::running;
         g.install_pct = 0.62f;
-        g.install_status = "Installing - 4.2 MB/s";
-        g.size_on_disk = "20.7 GB of 48.2 GB";
+        g.install_status = "Downloading";
+        g.size_on_disk = "1.8 GB of 48.2 GB";
+        g.last_updated = "Not installed";
+        g.achievement = "First Light";
+        g.achievement_sub = "Locked";
         c.fill(ui::theme::page);
         draw_game(c, font, g);
         snap("launcher-03-installing");
@@ -356,6 +424,11 @@ int main(int argc, char** argv) {
         g.primary.download = detail_input::Download::running;
         g.install_pct = 0.62f;
         g.primary_focus = true;
+        g.install_status = "Downloading";
+        g.size_on_disk = "1.8 GB of 48.2 GB";
+        g.last_updated = "Not installed";
+        g.achievement = "First Light";
+        g.achievement_sub = "Locked";
         c.fill(ui::theme::page);
         draw_game(c, font, g);
         snap("launcher-03b-installing-hover");
@@ -364,12 +437,12 @@ int main(int argc, char** argv) {
     // 04 sign-in
     {
         SignVM s;
-        static QrRun runs[64];
         int n = 0;
-        make_qr(n);
-        s.qr = runs;
+        s.qr = make_qr(n);
         s.qr_count = n;
-        s.clock = "21:07";
+        s.avatar_letter = "J";
+        s.timer = "The code refreshes automatically in 4:12";
+        s.clock = "04:55 pm";
         c.fill(ui::theme::page);
         draw_signin(c, font, s);
         snap("launcher-04-signin");
@@ -380,6 +453,18 @@ int main(int argc, char** argv) {
         GameVM g;
         g.has_art = true;
         g.primary.installed = true;
+        g.install_ok = true;
+        g.primary_focus = true;                // mockup 05: PLAY is focused under the sheet
+        g.time_played = "26h 14m";
+        g.achievements = "18 / 42";
+        g.last_played = "2 days ago";
+        g.install_status = "Installed";
+        g.size_on_disk = "48.2 GB";
+        g.last_updated = "12 Oct 2026";
+        g.cloud_saves = "Synced";
+        g.achievement = "First Light";
+        g.achievement_sub = "Unlocked 2 days ago";
+        g.progress_pct = 196.0f / 456.0f;
         c.fill(ui::theme::page);
         draw_game(c, font, g);
         DeleteVM d;
@@ -391,8 +476,9 @@ int main(int argc, char** argv) {
     {
         const std::vector<QueueRowVM> rows = make_rows(3, false);
         const std::vector<QueueRowVM> ups = make_rows(2, true);
-        SidebarVM sb; sb.all_count = 21; sb.installed_count = 7; sb.queue_count = 3; sb.active = 2;
+        SidebarVM sb; sb.all_count = 128; sb.installed_count = 9; sb.queue_count = 1; sb.active = 2;
         QueueVM q; q.rows = rows.data(); q.row_count = 3; q.updates = ups.data(); q.update_count = 2;
+        q.focus = 0;  // mockup 06: the auto-update pill carries the focus ring
         c.fill(ui::theme::page);
         draw_download_queue(c, font, sb, q);
         snap("launcher-06-download-queue");
@@ -403,18 +489,34 @@ int main(int argc, char** argv) {
         GameVM g;
         g.has_art = true;
         g.primary.installed = true;
+        g.install_ok = true;
+        g.primary_focus = true;                // mockup 07: PLAY is focused under the sheet
+        g.time_played = "26h 14m";
+        g.achievements = "18 / 42";
+        g.last_played = "2 days ago";
+        g.install_status = "Installed";
+        g.size_on_disk = "48.2 GB";
+        g.last_updated = "12 Oct 2026";
+        g.cloud_saves = "Synced";
+        g.achievement = "First Light";
+        g.achievement_sub = "Unlocked 2 days ago";
+        g.progress_pct = 196.0f / 456.0f;
         c.fill(ui::theme::page);
         draw_game(c, font, g);
-        CloudSlotVM slots[2] = {{"slot0.sav", "1.2 MB - synced"}, {"settings.cfg", "4 KB - synced"}};
+        CloudSlotVM slots[3] = {
+            {"Slot 1  \xC2\xB7  Autosave", "12 Oct 2026, 18:42  \xC2\xB7  1.2 MB"},
+            {"Slot 2  \xC2\xB7  Manual save", "11 Oct 2026, 21:07  \xC2\xB7  1.1 MB"},
+            {"Slot 3  \xC2\xB7  Manual save", "9 Oct 2026, 14:30  \xC2\xB7  1.1 MB"},
+        };
         CloudOptVM opts[4] = {
-            {"Sync now", "", true},
-            {"Conflict resolution", "Ask each time", true},
-            {"Sync only on Wi-Fi", "Off", false},
-            {"Per-file selection", "", false},
+            {"Upload local saves", "", true},
+            {"Download cloud saves", "", true},
+            {"Resolve conflict", "No conflicts", true},
+            {"Close", "", true},
         };
         CloudVM v;
-        v.synced = "Last synced today at 20:41";
-        v.slots = slots; v.slot_count = 2;
+        v.synced = "Last synced  \xC2\xB7  12 Oct 2026, 18:42  \xC2\xB7  No conflicts";
+        v.slots = slots; v.slot_count = 3;
         v.opts = opts; v.opt_count = 4; v.focus_opt = 0;
         draw_cloud_sheet(c, font, v);
         snap("launcher-07-cloud-saves");

@@ -297,11 +297,10 @@ int main(int argc, char** argv) {
         // progress fill is accent green at the track's left (screen y = kCardY + 186 + 2)
         check(px[size_t(int(ui_guide::kCardY + 186) + 2) * W + int(ui_guide::kCardX + 30)] == ui::theme::accent,
               "achievement progress fill is accent green");
-        // the focused row's ring: a 3px Inside stroke AA-blends at half coverage
-        // over the row's #303030 fill, so it renders as 151 grey, not pure white
-        // (screen y = kCardY + 216 + 1, x = kCardX + 16 + 20)
+        // the focused row's ring: a 3px Inside stroke renders full white over the
+        // row's #303030 fill (screen y = kCardY + 216 + 1, x = kCardX + 16 + 20)
         check(px[size_t(int(ui_guide::kCardY + 216) + 1) * W + int(ui_guide::kCardX + 16 + 20)] ==
-                  ui::theme::argb(255, 151, 151, 151),
+                  ui::theme::argb(255, 255, 255, 255),
               "achievement focus ring is white");
         snap("guide-02-achievements");
     }

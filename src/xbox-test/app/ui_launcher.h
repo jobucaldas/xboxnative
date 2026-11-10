@@ -46,23 +46,25 @@ constexpr uint32_t kRingDark  = 0xFF0B1A2E;
 constexpr uint32_t kIconLight = 0xFFE4E4E4;
 
 // ---- text helpers: mockup text nodes are top-anchored (y = top of line box) ----
+// Figma's line box is centred on the em: first baseline = y_top + (lineHeightPx + ascentPx
+// - descentPx) / 2, where the metrics come from the face at the node's font size.
 inline float baseline_of(const Font& f, ui::Face face, float px, float y_top) {
     const float lh = f.line_height(face, px);
     return y_top + (lh + f.ascent(face, px) - f.descent(face, px)) * 0.5f;
 }
 inline void text(ui::Canvas& c, const Font& f, ui::Face face, float px, float x, float y_top,
-                 const char* s, uint32_t color) {
-    f.draw(c, face, px, x, baseline_of(f, face, px, y_top), s, std::strlen(s), color);
+                 const char* s, uint32_t color, float ls = 0.0f) {
+    f.draw(c, face, px, x, baseline_of(f, face, px, y_top), s, std::strlen(s), color, 255, ls);
 }
 inline void text_c(ui::Canvas& c, const Font& f, ui::Face face, float px, float cx, float y_top,
-                   const char* s, uint32_t color) {
-    const float w = f.measure(face, px, s, std::strlen(s));
-    text(c, f, face, px, cx - w * 0.5f, y_top, s, color);
+                   const char* s, uint32_t color, float ls = 0.0f) {
+    const float w = f.measure(face, px, s, std::strlen(s), ls);
+    text(c, f, face, px, cx - w * 0.5f, y_top, s, color, ls);
 }
 inline void text_r(ui::Canvas& c, const Font& f, ui::Face face, float px, float right, float y_top,
-                   const char* s, uint32_t color) {
-    const float w = f.measure(face, px, s, std::strlen(s));
-    text(c, f, face, px, right - w, y_top, s, color);
+                   const char* s, uint32_t color, float ls = 0.0f) {
+    const float w = f.measure(face, px, s, std::strlen(s), ls);
+    text(c, f, face, px, right - w, y_top, s, color, ls);
 }
 
 // ---- pure grid geometry (unit-tested with assert) ----
@@ -175,6 +177,7 @@ struct GameVM {
     const char* achievements = "0 / 42";
     const char* last_played = "Never";
     const char* install_status = "Not installed";
+    bool install_ok = false;             // status value draws in accentSoft when the game is in
     const char* size_on_disk = "Not installed";
     const char* location = "Internal storage";
     const char* last_updated = "Never";
@@ -228,6 +231,14 @@ struct SignVM {
 
 // ---- drawing ----------------------------------------------------------------
 
+// The mockup's focus ring is a 3px white band just inside the focus rect (measured:
+// rect edge 138 → band 138..141). Stroke centred on the rect inset by half the width.
+inline void focus_ring(ui::Canvas& c, const ui::Rect& r, float radius, float width) {
+    const float h = width * 0.5f;
+    c.stroke_round_rect(rect(r.x + h, r.y + h, r.w - width, r.h - width), radius - h, width,
+                        ui::theme::focus, Align::Center);
+}
+
 // The bottom hint bar: A/B/X/Y/Menu prompts on the page background.
 // pairs = {"A","Select", "B","Back", "X","Sort", "Y","Filter", "M","Menu"}; n = number of pairs.
 // A is a filled disc; B/X/Y are outlined; M is the hamburger.
@@ -239,7 +250,8 @@ inline float draw_hint_bar(ui::Canvas& c, const Font& f, const char* const* pair
         const char* label = pairs[i + 1];
         const float cy = kHintY + kHintDiscPx * 0.5f;
         if (key == 'M') {
-            ui::glyphs::menu(c, x + kHintDiscPx * 0.5f, cy, kHintDiscPx, ui::theme::glyph, 0xFFC8C8C8);
+            // mockup: the hamburger sits in the same 28px disc as the outlined prompts
+            ui::glyphs::menu(c, x + kHintDiscPx * 0.5f, cy, kHintDiscPx + 2.0f, ui::theme::glyph, 0xFFC8C8C8);
         } else {
             const bool filled = key == 'A';
             const uint32_t disc = filled ? ui::theme::glyph : 0;
@@ -247,7 +259,8 @@ inline float draw_hint_bar(ui::Canvas& c, const Font& f, const char* const* pair
             if (filled) {
                 ui::glyphs::face_button(c, x + kHintDiscPx * 0.5f, cy, kHintDiscPx, key, f, disc, letter);
             } else {
-                c.stroke_circle(x + kHintDiscPx * 0.5f, cy, kHintDiscPx * 0.5f - 1.0f, 2.0f,
+                // mockup: 2px stroke centred on r=13 → 28px outer ring
+                c.stroke_circle(x + kHintDiscPx * 0.5f, cy, kHintDiscPx * 0.5f, 2.0f,
                                 ui::theme::glyph, Align::Center);
                 float ix0, iy0, ix1, iy1;   // centre the visible letter on the ring
                 if (f.ink_box(Face::Bold, 15.0f, std::string(1, key), ix0, iy0, ix1, iy1))
@@ -256,7 +269,7 @@ inline float draw_hint_bar(ui::Canvas& c, const Font& f, const char* const* pair
             }
         }
         text(c, f, Face::Regular, px, x + kHintDiscPx + 12.0f, kHintY + 1.0f, label, ui::theme::hint);
-        x += kHintDiscPx + 12.0f + f.measure(Face::Regular, px, label) + 32.0f;
+        x += kHintDiscPx + 12.0f + f.measure(Face::Regular, px, label) + 40.0f;
     }
     return x;
 }
@@ -300,9 +313,12 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
     text(c, f, Face::Regular, 22, 64, 952.0f, b, ui::theme::text2);
     std::snprintf(b, sizeof b, "%d%% used", sb.used_pct);
     text(c, f, Face::Regular, 20, 64, 984.0f, b, ui::theme::textDim);
-    c.fill_donut(383, 980, 28, 5, -ui::kPi * 0.5f, ui::kTau, ui::theme::track);
-    if (sb.used_pct > 0)
-        c.fill_donut(383, 980, 28, 5, -ui::kPi * 0.5f, ui::kTau * sb.used_pct / 100.0f, ui::theme::accent);
+    // donut: track ring r=26 stroke 5; the used arc is centred on 6 o'clock (mockup 01/06)
+    c.fill_donut(383, 981, 26, 5, -ui::kPi * 0.5f, ui::kTau, ui::theme::track);
+    if (sb.used_pct > 0) {
+        const float sweep = ui::kTau * sb.used_pct / 100.0f;
+        c.fill_donut(383, 981, 26, 5, ui::kPi * 0.5f - sweep * 0.5f, sweep, ui::theme::accent);
+    }
     std::snprintf(b, sizeof b, "%d%%", sb.used_pct);
     text_c(c, f, Face::Regular, 16, 383, 970.5f, b, ui::theme::textDim);
 }
@@ -310,7 +326,8 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
 // ---- library screen (mockup 01) ----
 constexpr const char* kLibraryHints[10] = {"A", "Select", "B", "Back", "X", "Sort", "Y", "Filter", "M", "Menu"};
 
-// vertical 3-stop gradient into `dst` (one row per call site loop); used for tile and hero art.
+// 3-stop gradient into `dst` (one pixel per call site loop); used for tile and hero art.
+// k is the position along the gradient axis: 0 → top, 0.5 → mid, 1 → bottom stop.
 inline uint32_t grad3(uint32_t top, uint32_t mid, uint32_t bot, float k) {
     const uint32_t a = k < 0.5f ? top : mid;
     const uint32_t b = k < 0.5f ? mid : bot;
@@ -326,25 +343,32 @@ inline void draw_tile(ui::Canvas& c, const Font& f, const TileVM& t, const ui::R
     if (t.art.px && t.art.w > 0 && t.art.h > 0) {
         c.draw_image(t.art, g, ui::Fit::Cover, radiusTile);
     } else {
-        for (int yy = 0; yy < int(g.h); ++yy)
-            c.fill_rect(g.x, g.y + yy, g.w, 1, grad3(t.art_top, t.art_mid, t.art_bot, yy / (g.h - 1)));
+        // mockup art is a 3-stop diagonal from the tile's top-left to bottom-right
+        for (int yy = 0; yy < int(g.h); ++yy) {
+            const float v = float(yy) / (g.h - 1);
+            for (int xx = 0; xx < int(g.w); ++xx) {
+                const float u = float(xx) / (g.w - 1);
+                c.fill_rect(g.x + xx, g.y + yy, 1, 1, grad3(t.art_top, t.art_mid, t.art_bot, (u + v) * 0.5f));
+            }
+        }
         // art motif: dark ring + corner block in the tile's own dark color
-        c.stroke_circle(g.x + g.w * 0.5f, g.y + 159, 48, 8, t.art_bot, Align::Center);
-        c.fill_round_rect(rect(g.x + 112, g.y + 12, 44, 44), 3, t.art_bot);
+        // (mockup: ring centre sits 150px below the tile top, block at 0.22 alpha)
+        c.stroke_circle(g.x + g.w * 0.5f, g.y + 150, 48, 8, t.art_bot, Align::Center, 77);
+        c.fill_rect_alpha(float(g.x + 112), float(g.y + 12), 44.0f, 44.0f, t.art_bot, 56);
     }
     // label scrim band: transparent until mid, 0.78 black at the bottom (mockup band)
     for (int yy = int(g.h) / 2; yy < int(g.h); ++yy) {
         const float k = (yy - g.h * 0.5f) / (g.h * 0.5f);
         c.fill_rect_alpha(g.x, g.y + yy, g.w, 1, scrim, uint8_t(0.78f * 255.0f * k));
     }
-    text(c, f, Face::Regular, 22, g.x + 12, g.y + 225, t.name, ui::theme::text);
+    text(c, f, Face::Regular, 20, g.x + 12, g.y + 216, t.name, ui::theme::text);
     if (t.installed) {
-        c.fill_round_rect(rect(g.x + 12, g.y + 21, 94, 26), radiusBadge, ui::theme::accent);
-        text(c, f, Face::Bold, 15, g.x + 29.5f, g.y + 25, "INSTALLED", ui::theme::onAccent);
+        c.fill_round_rect(rect(g.x + 12, g.y + 12, 94, 26), radiusBadge, ui::theme::accent);
+        text_c(c, f, Face::Bold, 15, g.x + 59, g.y + 16, "INSTALLED", ui::theme::onAccent);
     }
     if (focus)
-        c.stroke_round_rect(rect(g.x - ringOffset, g.y - ringOffset, g.w + ringOffset * 2, g.h + ringOffset * 2),
-                            radiusTile + ringRadiusDelta, ringWidth, ui::theme::focus);
+        focus_ring(c, rect(g.x - ringOffset, g.y - ringOffset, g.w + ringOffset * 2, g.h + ringOffset * 2),
+                   radiusTile + ringRadiusDelta, ringWidth);
 }
 
 inline void draw_library(ui::Canvas& c, const Font& f, const SidebarVM& sb, const LibraryVM& lib) {
@@ -352,13 +376,13 @@ inline void draw_library(ui::Canvas& c, const Font& f, const SidebarVM& sb, cons
     c.fill(ui::theme::page);
     draw_sidebar(c, f, sb);
     // title + sort bar
-    text(c, f, Face::Semibold, 44, kTitleX, kTitleY, "Library", ui::theme::text);
+    text(c, f, Face::Semibold, 44, kTitleX, kTitleY, "Library", ui::theme::text, -0.2f);
     c.fill_round_rect(rect(524, 168, 430, 60), radiusControl, ui::theme::control);
     text(c, f, Face::Regular, 24, 548, 183.5f, lib.sort_label, ui::theme::text2);
     const char* count = lib.loading ? "Loading..." : lib.count_label;
     if (count && *count) text(c, f, Face::Regular, 22, 1556, 184.5f, count, ui::theme::textDim);
     c.fill_round_rect(rect(1692, 168, 152, 60), radiusControl, ui::theme::control);
-    text_c(c, f, Face::Regular, 24, 1768, 183.5f, "Filters", ui::theme::text2);
+    text_c(c, f, Face::Regular, 24, 1765, 183.5f, "Filters", ui::theme::text2);
     // grid
     int lo, hi;
     grid_visible(lib.tile_count, lib.top_row, lo, hi);
@@ -379,21 +403,26 @@ inline void draw_queue_card(ui::Canvas& c, const Font& f, const QueueRowVM& r, f
     using namespace ui::theme;
     c.fill_round_rect(rect(524, y, 1320, 104), radiusCard, ui::theme::panel);
     c.fill_round_rect(rect(540, y + 16, 48, 72), radiusControl, r.art);
-    if (r.busy) c.stroke_circle(564, y + 34, 14, 2, 0xFF0B1220, Align::Center);
-    text(c, f, Face::Regular, 22, 604, y + 16, r.name, ui::theme::text);
-    text(c, f, Face::Regular, 20, 604, y + 47, r.status, ui::theme::textDim);
+    // mockup: every row carries the dark status ring (26px, stroke 4) at its thumb
+    c.stroke_circle(564, y + 52, 14, 4, kRingDark, Align::Center);
+    // the busy row stacks name/status/progress from the top; a 2-row card centres them
+    const float top = r.busy ? 16.0f : 24.0f;
+    text(c, f, Face::Regular, 22, 604, y + top, r.name, ui::theme::text);
+    text(c, f, Face::Regular, 20, 604, y + top + 31.0f, r.status, ui::theme::textDim);
     if (r.busy) {
         c.fill_round_rect(rect(604, y + 80, 920, 8), 4, ui::theme::track);
         if (r.pct > 0) c.fill_round_rect(rect(604, y + 80, 920 * r.pct, 8), 4, ui::theme::accent);
     }
     if (update) {
         c.fill_round_rect(rect(1668, y + 28, 160, 48), radiusControl, ui::theme::controlDark);
-        text_c(c, f, Face::Regular, 20, 1748, y + 40, "UPDATE NOW", ui::theme::text2);
+        text_c(c, f, Face::Semibold, 20, 1748, y + 40, "UPDATE NOW", ui::theme::text2);
     } else {
-        c.fill_round_rect(rect(1556, y + 28, 128, 48), radiusControl, ui::theme::controlDark);
-        text_c(c, f, Face::Regular, 20, 1620, y + 40, r.paused ? "RESUME" : "PAUSE", ui::theme::text2);
         c.fill_round_rect(rect(1700, y + 28, 128, 48), radiusControl, ui::theme::controlDark);
-        text_c(c, f, Face::Regular, 20, 1764, y + 40, "CANCEL", ui::theme::text2);
+        text_c(c, f, Face::Semibold, 20, 1764, y + 40, r.paused ? "RESUME" : "CANCEL", ui::theme::text2);
+        if (r.busy) {   // the downloading row also shows PAUSE (mockup q0)
+            c.fill_round_rect(rect(1556, y + 28, 128, 48), radiusControl, ui::theme::controlDark);
+            text_c(c, f, Face::Semibold, 20, 1620, y + 40, "PAUSE", ui::theme::text2);
+        }
     }
 }
 
@@ -401,15 +430,16 @@ inline void draw_download_queue(ui::Canvas& c, const Font& f, const SidebarVM& s
     using namespace ui::theme;
     c.fill(ui::theme::page);
     draw_sidebar(c, f, sb);
+    text(c, f, Face::Semibold, 44, kTitleX, kTitleY, "Download queue", ui::theme::text, -0.2f);
     // auto-update pill (ui::theme::focus ring when q.focus == 0)
     c.fill_round_rect(rect(524, 144, 1320, 96), radiusCard, ui::theme::panel);
     text(c, f, Face::Semibold, 26, 556, 162, "Auto-update games", ui::theme::text);
     text(c, f, Face::Regular, 20, 556, 197, q.update_note, ui::theme::textDim);
     text_r(c, f, Face::Regular, 22, 1744, 178.5f, q.auto_update ? "On" : "Off", ui::theme::textDim);
     c.fill_round_rect(rect(1756, 176, 56, 32), 16, q.auto_update ? ui::theme::accent : ui::theme::controlDark);
-    c.fill_circle(q.auto_update ? 1792 : 1768, 192, 12, ui::theme::onAccent);
+    c.fill_circle(q.auto_update ? 1796 : 1768, 192, 12, ui::theme::onAccent);
     if (q.focus == 0)
-        c.stroke_round_rect(rect(518, 138, 1332, 108), radiusCard + ringRadiusDelta, ringWidth, ui::theme::focus);
+        focus_ring(c, rect(518, 138, 1332, 108), radiusCard + ringRadiusDelta, ringWidth);
     // queue section
     text(c, f, Face::Semibold, 26, 524, 272, "Queue", ui::theme::text);
     char b[32];
@@ -421,7 +451,7 @@ inline void draw_download_queue(ui::Canvas& c, const Font& f, const SidebarVM& s
     std::snprintf(b, sizeof b, "%d pending", q.update_count);
     text_r(c, f, Face::Regular, 22, 1844, 682, b, ui::theme::textDim);
     for (int i = 0; i < q.update_count; ++i) draw_queue_card(c, f, q.updates[i], 728 + 112.0f * i, true);
-    draw_hint_bar(c, f, kQueueHints, 3);
+    draw_hint_bar(c, f, kQueueHints, 3, 524.0f);
 }
 
 // ---- game screen (mockups 02 / 02b / 03 / 03b: one layout, state-driven) ----
@@ -437,14 +467,15 @@ inline void draw_primary_button(ui::Canvas& c, const Font& f, const GameVM& g) {
         c.fill_round_rect(rect(64, y, 256, 80), radiusControl, ui::theme::controlDark);
         if (g.install_pct > 0)
             c.fill_round_rect(rect(64, y, 256 * g.install_pct, 80), radiusControl, ui::theme::accent);
-        text_c(c, f, Face::Regular, 26, 192, y + 24.5f, label, ui::theme::text2);
+        // mockup 03: the progress label is centred in the button, like the other states
+        text_c(c, f, Face::Semibold, 26, 192, y + 24.5f, label, ui::theme::text2);
     } else {
         const bool green = st == Primary::play || st == Primary::install;
         c.fill_round_rect(rect(64, y, 256, 80), radiusControl, green ? ui::theme::accent : ui::theme::controlDark);
         text_c(c, f, Face::Semibold, 30, 192, y + 22, label, green ? ui::theme::onAccent : ui::theme::text2);
     }
     if (focus || st == Primary::deleting)
-        c.stroke_round_rect(rect(58, y - 6, 268, 92), radiusCard + ringRadiusDelta, ringWidth, ui::theme::focus);
+        focus_ring(c, rect(58, y - 6, 268, 92), radiusControl + ringRadiusDelta, ringWidth);
 }
 
 inline void draw_icon_buttons(ui::Canvas& c, const GameVM& g, bool installed) {
@@ -460,7 +491,7 @@ inline void draw_icon_buttons(ui::Canvas& c, const GameVM& g, bool installed) {
         else ui::glyphs::cog(c, rect(bx[i] + 23, y + 23, 34, 34), kIconLight);
         const int slot = installed ? i : i + 1;   // ui::theme::focus slots: 1 trash, 2 cloud, 3 cog
         if (g.focus == slot)
-            c.stroke_round_rect(rect(bx[i] - 6, y - 6, 92, 92), radiusCard + ringRadiusDelta, ringWidth, ui::theme::focus);
+            focus_ring(c, rect(bx[i] - 6, y - 6, 92, 92), radiusControl + ringRadiusDelta, ringWidth);
     }
 }
 
@@ -473,18 +504,26 @@ inline void draw_kv(ui::Canvas& c, const Font& f, float kx, float vx, float y, c
 
 inline void draw_game(ui::Canvas& c, const Font& f, const GameVM& g) {
     using namespace ui::theme;
-    // hero: art gradient, ring+disc+block motif, dim veil, fade into the ui::theme::page
-    for (int y = 0; y < 520; ++y)
-        c.fill_rect(0, float(y), 1920, 1, grad3(kHeroTop, kHeroMid, kHeroBot, y / 519.0f));
-    c.stroke_circle(1180, 250, 210, 26, kHeroBot, Align::Center);
-    c.fill_circle(1180, 250, 120, kHeroBot);
-    c.fill_round_rect(rect(240, 40, 520, 440), radiusCard, kHeroBot);
+    // hero: art gradient, ring+disc+block motif, dim veil, fade into the ui::theme::page.
+    // Mockup layer model (measured): the 3-stop gradient maps over the whole 1920x520
+    // hero (k = (x/1920 + y/520) / 2); the motif shapes sit on the art at partial
+    // opacity (ring 0.35, disc 0.22, block 0.10); the veil and fade come last.
+    for (int y = 0; y < 520; ++y) {
+        const float v = float(y) / 520.0f;
+        for (int x = 0; x < 1920; ++x) {
+            const float u = float(x) / 1920.0f;
+            c.fill_rect(float(x), float(y), 1, 1, grad3(kHeroTop, kHeroMid, kHeroBot, (u + v) * 0.5f));
+        }
+    }
+    c.stroke_circle(1180, 250, 210, 26, kHeroBot, Align::Center, 89);
+    c.fill_circle(1180, 250, 120, kHeroBot, 56);  // mockup hero-disc: #0A1018 at 0.22
+    c.fill_rect_alpha(240.0f, 40.0f, 520.0f, 440.0f, kHeroBot, 26);    // block at 0.10
     c.fill_rect_alpha(0, 0, 1920, 520, ui::theme::page, 158);
     for (int y = 370; y < 520; ++y)
         c.fill_rect_alpha(0, float(y), 1920, 1, ui::theme::page, uint8_t(255.0f * (y - 370) / 150.0f));
 
     text(c, f, Face::Regular, 22, 64, 50.5f, "Library", ui::theme::textDim);
-    text(c, f, Face::Semibold, 56, 64, 230, g.title, ui::theme::text);
+    text(c, f, Face::Semibold, 56, 64, 230, g.title, ui::theme::text, -0.4f);
     text(c, f, Face::Regular, 24, 64, 306, g.subtitle, ui::theme::textDim);
 
     draw_primary_button(c, f, g);
@@ -511,7 +550,9 @@ inline void draw_game(ui::Canvas& c, const Font& f, const GameVM& g) {
 
     // card 2: install
     text(c, f, Face::Semibold, 26, 732, 592, "Install", ui::theme::text);
-    draw_kv(c, f, 732, 932, 664, "Status", g.install_status);
+    text(c, f, Face::Regular, 24, 732, 664, "Status", ui::theme::text2);
+    text(c, f, Face::Regular, 24, 932 + 256.0f - f.measure(Face::Regular, 24, g.install_status, std::strlen(g.install_status)),
+         664, g.install_status, g.install_ok ? ui::theme::accentSoft : ui::theme::textDim);
     c.fill_rect(732, 708, 456, 1, ui::theme::controlDark);
     draw_kv(c, f, 732, 932, 724, "Size on disk", g.size_on_disk);
     c.fill_rect(732, 768, 456, 1, ui::theme::controlDark);
@@ -523,8 +564,10 @@ inline void draw_game(ui::Canvas& c, const Font& f, const GameVM& g) {
 
     // card 3: about this game
     text(c, f, Face::Semibold, 26, 1368, 592, "About this game", ui::theme::text);
-    f.draw_wrapped(c, Face::Regular, 22, 1368, baseline_of(f, Face::Regular, 22, 664), 456,
-                   g.about, 0xFFC8C8C8, 3);
+    // mockup 02 sets lineHeight 36 on this node; its first cap top lands 3px below the
+    // natural-line-height conversion, so use the measured offset.
+    f.draw_wrapped_lh(c, Face::Regular, 22, 1368, baseline_of(f, Face::Regular, 22, 664) + 3.0f, 456,
+                      g.about, 0xFFC8C8C8, 36.0f, 3);
     draw_kv(c, f, 1368, 1568, 848, "Players", g.players);
     c.fill_rect(1368, 892, 456, 1, ui::theme::controlDark);
     draw_kv(c, f, 1368, 1568, 908, "Language", g.language);
@@ -561,7 +604,7 @@ constexpr const char* kSignHints[4] = {"A", "Refresh code", "B", "Quit"};
 inline void draw_signin(ui::Canvas& c, const Font& f, const SignVM& s) {
     using namespace ui::theme;
     c.fill(ui::theme::page);
-    text_c(c, f, Face::Semibold, 56, 960, 264, s.title, ui::theme::text);
+    text_c(c, f, Face::Semibold, 56, 956.5f, 264, s.title, ui::theme::text, -0.4f);
     // QR card: white, 29x29 modules at 10px, origin (467,415)
     c.fill_round_rect(rect(432, 380, 360, 360), radiusCard, 0xFFFFFFFF);
     for (int i = 0; i < s.qr_count; ++i)
@@ -570,17 +613,18 @@ inline void draw_signin(ui::Canvas& c, const Font& f, const SignVM& s) {
     // status card
     c.fill_round_rect(rect(840, 380, 648, 360), radiusCard, ui::theme::panel);
     text_c(c, f, Face::Semibold, 32, 1164, 464, s.status, ui::theme::text);
-    text_c(c, f, Face::Regular, 22, 1164, 510, s.timer, ui::theme::textDim);
+    text(c, f, Face::Regular, 22, 953, 510, s.timer, ui::theme::textDim);
     c.fill_round_rect(rect(981, 576, 366, 80), radiusControl, ui::theme::accent);
-    text_c(c, f, Face::Semibold, 26, 1164, 600.5f, "REFRESH QR", ui::theme::onAccent);
+    text_c(c, f, Face::Semibold, 26, 1158, 600.5f, "REFRESH QR", ui::theme::onAccent);
     if (s.refresh_focused)
-        c.stroke_round_rect(rect(975, 570, 378, 92), radiusCard + ringRadiusDelta, ringWidth, ui::theme::focus);
+        focus_ring(c, rect(975, 570, 378, 92), radiusControl + ringRadiusDelta, ringWidth);
     // user pill top-left, clock top-right
-    c.fill_circle(92, 100, 28, ui::theme::controlDark);
-    if (s.avatar_letter && *s.avatar_letter) text_c(c, f, Face::Regular, 22, 92, 86.5f, s.avatar_letter, ui::theme::textDim);
+    c.fill_circle(92, 100, 28, 0xFF2E2E2E);
+    if (s.avatar_letter && *s.avatar_letter) text_c(c, f, Face::Semibold, 22, 92, 86.5f, s.avatar_letter, ui::theme::textDim);
     text(c, f, Face::Regular, 24, 136, 85.5f, s.persona, ui::theme::textDim);
-    if (s.clock && *s.clock) text_r(c, f, Face::Semibold, 36, 1812, 78, s.clock, ui::theme::text);
-    draw_hint_bar(c, f, kSignHints, 2);
+    if (s.clock && *s.clock) text_r(c, f, Face::Semibold, 36, 1848, 78, s.clock, ui::theme::text);
+    // mockup 04: the prompt pair sits left of centre (A disc at 823.5)
+    draw_hint_bar(c, f, kSignHints, 2, 823.5f);
 }
 
 // ---- sheets over the dimmed game page (mockups 05 / 07) ----
@@ -594,11 +638,11 @@ inline void draw_delete_sheet(ui::Canvas& c, const Font& f, const DeleteVM& d) {
     text(c, f, Face::Regular, 24, 608, 475, d.body, ui::theme::textDim);
     text(c, f, Face::Regular, 22, 608, 516, d.note, ui::theme::textMuted);
     c.fill_round_rect(rect(1018, 600, 170, 64), radiusControl, ui::theme::controlDark);
-    text_c(c, f, Face::Regular, 26, 1103, 616.5f, "Cancel", ui::theme::text2);
+    text_c(c, f, Face::Semibold, 26, 1103, 616.5f, "Cancel", ui::theme::text2);
     c.fill_round_rect(rect(1204, 600, 108, 64), radiusControl, ui::theme::accent);
-    text_c(c, f, Face::Regular, 26, 1258, 616.5f, "Delete", ui::theme::onAccent);
+    text_c(c, f, Face::Semibold, 26, 1258, 616.5f, "Delete", ui::theme::onAccent);
     if (d.focus_delete)
-        c.stroke_round_rect(rect(1198, 594, 120, 76), radiusCard + ringRadiusDelta, ringWidth, ui::theme::focus);
+        focus_ring(c, rect(1198, 594, 120, 76), radiusControl + ringRadiusDelta, ringWidth);
     const char* pairs[4] = {"A", "Yes, delete", "B", "Cancel"};
     draw_hint_bar(c, f, pairs, 2);
 }
@@ -612,16 +656,17 @@ inline void draw_cloud_sheet(ui::Canvas& c, const Font& f, const CloudVM& v) {
     for (int i = 0; i < v.slot_count && i < 3; ++i) {
         const float y = 412 + 32.0f * i;
         text(c, f, Face::Regular, 22, 608, y, v.slots[i].name, ui::theme::text2);
-        text(c, f, Face::Regular, 22, 912, y, v.slots[i].detail, ui::theme::textDim);
+        // mockup 07: slot details are right-aligned to the detail column's right edge
+        text_r(c, f, Face::Regular, 22, 1312, y, v.slots[i].detail, ui::theme::textDim);
     }
     for (int i = 0; i < v.opt_count && i < 4; ++i) {
         const float y = 532 + 64.0f * i;
         c.fill_round_rect(rect(608, y, 704, 56), radiusControl, v.opts[i].enabled ? ui::theme::controlDark : chip);
         text(c, f, Face::Regular, 24, 632, y + 13.5f, v.opts[i].label, v.opts[i].enabled ? ui::theme::text2 : ui::theme::textMuted);
         if (v.opts[i].value && *v.opts[i].value)
-            text(c, f, Face::Regular, 22, 988, y + 14.5f, v.opts[i].value, ui::theme::textDim);
+            text_r(c, f, Face::Regular, 22, 1288, y + 14.5f, v.opts[i].value, ui::theme::textDim);
         if (i == v.focus_opt)
-            c.stroke_round_rect(rect(602, y - 6, 716, 68), radiusCard + ringRadiusDelta, ringWidth, ui::theme::focus);
+            focus_ring(c, rect(602, y - 6, 716, 68), radiusControl + ringRadiusDelta, ringWidth);
     }
     const char* pairs[4] = {"A", "Select", "B", "Close"};
     draw_hint_bar(c, f, pairs, 2);

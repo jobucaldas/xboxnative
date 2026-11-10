@@ -138,10 +138,12 @@ public:
     }
 
     // Advance width of `s`, including pair kerning.
-    float measure(Face face, float px, const std::string& s) const {
-        return measure(face, px, s.data(), s.size());
+    float measure(Face face, float px, const std::string& s, float ls = 0.0f) const {
+        return measure(face, px, s.data(), s.size(), ls);
     }
-    float measure(Face face, float px, const char* s, std::size_t len) const {
+    // ls: extra advance between characters (Figma letter spacing, pixels). The mockup
+    // applies it between glyphs only — n characters get n-1 gaps — so centers match.
+    float measure(Face face, float px, const char* s, std::size_t len, float ls = 0.0f) const {
         const FaceData& f = faces_[static_cast<int>(face)];
         if (!f.ok) return float(len) * px * 0.5f;
         float scale = scale_of(f, px), x = 0;
@@ -155,6 +157,7 @@ public:
             stbtt_GetGlyphHMetrics(&f.info, gi, &adv, &lsb);
             (void)lsb;
             x += float(adv) * scale;
+            if (p < end) x += ls;
             if (prev) x += float(stbtt_GetGlyphKernAdvance(&f.info, int(prev), gi)) * scale;
             prev = cp;
         }
@@ -163,11 +166,11 @@ public:
 
     // Draws `s` with its baseline at (x, y). Returns the advance width.
     float draw(Canvas& c, Face face, float px, float x, float y, const std::string& s, uint32_t color,
-               uint8_t opacity = 255) const {
-        return draw(c, face, px, x, y, s.data(), s.size(), color, opacity);
+               uint8_t opacity = 255, float ls = 0.0f) const {
+        return draw(c, face, px, x, y, s.data(), s.size(), color, opacity, ls);
     }
     float draw(Canvas& c, Face face, float px, float x, float y, const char* s, std::size_t len, uint32_t color,
-               uint8_t opacity = 255) const {
+               uint8_t opacity = 255, float ls = 0.0f) const {
         const FaceData& f = faces_[static_cast<int>(face)];
         if (!f.ok) return 0;
         float scale = scale_of(f, px), pen = x;
@@ -181,6 +184,7 @@ public:
                 c.blend_mask(int(std::floor(pen + 0.5f)) + g.xoff, int(std::floor(y + 0.5f)) + g.yoff, g.w, g.h,
                              g.bmp.data(), g.w, color, opacity);
             pen += g.adv;
+            if (p < end) pen += ls;   // Figma letter spacing: between glyphs only
             prev = cp;
         }
         return pen - x;
@@ -260,8 +264,12 @@ public:
     // Draws wrapped text, first baseline at (x, y); returns the height consumed.
     float draw_wrapped(Canvas& c, Face face, float px, float x, float y, float maxw, const std::string& s,
                        uint32_t color, int max_lines = 0, uint8_t opacity = 255) const {
+        return draw_wrapped_lh(c, face, px, x, y, maxw, s, color, line_height(face, px), max_lines, opacity);
+    }
+    // Same, with the mockup's explicit line height (the .figcraft text styles set one per node).
+    float draw_wrapped_lh(Canvas& c, Face face, float px, float x, float y, float maxw, const std::string& s,
+                          uint32_t color, float lh, int max_lines = 0, uint8_t opacity = 255) const {
         std::vector<std::string> lines = wrap(face, px, s, maxw, max_lines);
-        float lh = line_height(face, px);
         for (std::size_t i = 0; i < lines.size(); ++i) draw(c, face, px, x, y + float(i) * lh, lines[i], color, opacity);
         return float(lines.size()) * lh;
     }

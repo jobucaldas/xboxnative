@@ -130,37 +130,45 @@ public:
         if (r.w <= 0 || r.h <= 0 || width <= 0) return;
         radius = detail::clampf(radius, 0, std::min(r.w, r.h) * 0.5f);
         float half = width * 0.5f;
-        aa_rect(r, [&](float px, float py) {
+        // the stroke can reach one width past the shape's bounds (Center/Outside align),
+        // so cull against the padded box, not the shape itself
+        const Rect pad{r.x - width, r.y - width, r.w + width * 2, r.h + width * 2};
+        aa_rect(pad, [&](float px, float py) {
             float sd = detail::sd_round_rect(px, py, r, radius), d;
             switch (align) {
-                case Align::Inside:  d = sd > 0 ? sd : (sd < -width ? -width - sd : 0); break;
-                case Align::Outside: d = sd < 0 ? -sd : (sd > width ? sd - width : 0); break;
+                // Inside/Outside: signed distance to the band's far edge — negative
+                // inside the band (full coverage), positive past it
+                case Align::Inside:  d = std::max(sd, -width - sd); break;
+                case Align::Outside: d = std::max(-sd, sd - width); break;
                 default:             d = std::fabs(sd) - half; break;
             }
             return detail::clampf(0.5f - d, 0, 1);
         }, c);
     }
 
-    void fill_circle(float cx, float cy, float radius, uint32_t c) {
-        if (radius <= 0) return;
+    void fill_circle(float cx, float cy, float radius, uint32_t c, uint8_t alpha = 255) {
+        if (radius <= 0 || !alpha) return;
         aa_rect(Rect{cx - radius, cy - radius, radius * 2, radius * 2}, [&](float px, float py) {
             float d = std::sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy)) - radius;
-            return detail::clampf(0.5f - d, 0, 1);
+            return detail::clampf(0.5f - d, 0, 1) * (alpha / 255.0f);
         }, c);
     }
 
-    void stroke_circle(float cx, float cy, float radius, float width, uint32_t c, Align align = Align::Center) {
+    void stroke_circle(float cx, float cy, float radius, float width, uint32_t c, Align align = Align::Center,
+                       uint8_t alpha = 255) {
         if (radius <= 0 || width <= 0) return;
         float half = width * 0.5f, inner = radius - width, outer = radius;
         aa_rect(Rect{cx - radius, cy - radius, radius * 2, radius * 2}, [&](float px, float py) {
             float d = std::sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy));
             float e;
             switch (align) {
-                case Align::Inside:  e = d < inner ? inner - d : (d > outer ? d - outer : 0); break;
-                case Align::Outside: e = d < outer ? outer - d : (d > outer + width ? d - outer - width : 0); break;
+                // Inside/Outside: signed distance to the band's far edge — negative
+                // inside the band (full coverage), positive past it
+                case Align::Inside:  e = std::max(d - outer, inner - d); break;
+                case Align::Outside: e = std::max(d - outer - width, outer - d); break;
                 default:             e = std::fabs(d - radius) - half; break;
             }
-            return detail::clampf(0.5f - e, 0, 1);
+            return detail::clampf(0.5f - e, 0, 1) * (alpha / 255.0f);
         }, c);
     }
 
