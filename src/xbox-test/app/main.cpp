@@ -577,6 +577,7 @@ static void dl_thread() {
 #include "launch.h"
 #include "launch_picker.h"
 #include "launch_report.h"
+#include "selftest.h"
 #include "guest_overlay.h"
 #include "../uwph/user32/corewindow_feed.h"
 #include "game_delete.h"
@@ -779,7 +780,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void detail_play(const char* via) {
         m_dInst = read_install(m_dApp);
         std::vector<launch_target::Choice> rows = launch_options(m_dApp);
-        if (!launch_picker::needed(rows)) { logf("detail: Play pressed appid=%u (%s)", m_dApp, via); start_launch(m_dApp, m_dName, m_dInst.dir, via); return; }
+        if (!launch_picker::needed(rows)) { logf("detail: Play pressed appid=%u (%s)", m_dApp, via); if (std::string why = start_launch(m_dApp, m_dName, m_dInst.dir, via); !why.empty()) m_dNote = why; return; }
         launch_picker::open(m_pick, std::move(rows), remembered_option(m_dApp));
         logf("detail: Play opens the launch-option picker appid=%u options=%zu selected=%d (%s)", m_dApp, m_pick.rows.size(), m_pick.sel, via);
     }
@@ -789,7 +790,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         launch_picker::close(m_pick);
         remember_option(m_dApp, exe);
         logf("detail: Play pressed appid=%u option=\"%s\" (%s)", m_dApp, exe.c_str(), via);
-        start_launch(m_dApp, m_dName, m_dInst.dir, via, &exe);
+        if (std::string why = start_launch(m_dApp, m_dName, m_dInst.dir, via, &exe); !why.empty()) m_dNote = why;
     }
     std::string game_name(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return g->name; return id == 480 ? "Spacewar" : id == 3405340 ? "Megabonk" : id == 1007 ? "Steamworks SDK Redist" : ""; }
     bool owned(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return true; return false; }
@@ -1569,6 +1570,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         play_graphics::configure((::IUnknown*)winrt::get_abi(m_window),GuestSurface,
             [](const char* message){if(play_runtime::state)play_runtime::state->event(message);});
         std::thread(net_thread).detach();
+        // The console self-test (selftest.h): a LocalState\selftest.txt request,
+        // or a queue a restart did not finish, runs the packaged diag fixtures
+        // through Play and appends SELFTEST RESULT lines to LocalState\selftest.log.
+        if (selftest::resume()) selftest::run_async(m_window.Dispatcher());
         double lastBeat = 0;
         while (!m_closed) {
             m_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
@@ -1579,6 +1584,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             if (n) rd = pads.GetAt(0).GetCurrentReading();
             input(t, rd, n > 0);
             autotest(t); cmdhook(t); detail_tick(t);
+            if (selftest::tick()) selftest::run_async(m_window.Dispatcher());
             if(m_guestSurface){guest_menu(t,n?rd.Buttons:GamepadButtons::None);Sleep(1);continue;}
             draw(t);
             m_ctx->UpdateSubresource(m_bb.get(), 0, nullptr, g_fb.data(), W * 4, 0);

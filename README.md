@@ -98,6 +98,8 @@ src/xbox-test/smoke-all.sh --offline                                    # off-de
 src/xbox-test/tools/play-test.sh 3405340                                # "Play Megabonk via the launcher"
 ```
 See `src/xbox-test/dp/README.md` for Device Portal setup and `src/xbox-test/kit/INSTALL.md` for installing on a console.
+The launcher can also run its own packaged fixtures for the Vulkan, D3D9, D3D10 and 32-bit paths on a console, without a
+game: see [docs/SELFTEST.md](docs/SELFTEST.md).
 
 ## Rules of the road
 Owned games only, never piracy: your own account via our launcher's login, official depots. An emulated Steam API

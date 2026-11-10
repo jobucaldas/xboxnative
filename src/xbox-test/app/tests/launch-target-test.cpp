@@ -139,7 +139,32 @@ int main() {
     assert(arguments(choose(workOptions),false)=="-dx11");
     assert(relative_path(workOptions[0].workingdir,rel) && rel=="bin");
 
-    std::puts("LAUNCH-TARGET-OK: 64-bit launch option wins; picker lists options 64-bit first, both startable; PE32+ preferred in the fallback");
+    // Unity engine options: D3D11 by default, Vulkan only when asked
+    // (PLAY_FORCE_VULKAN), and the game's own arguments always stay first.
+    assert(std::string(unity_arguments()).find("-force-d3d11")!=std::string::npos);
+    assert(std::string(unity_arguments()).find("-force-vulkan")==std::string::npos);
+    assert(std::string(unity_arguments(true)).find("-force-vulkan")!=std::string::npos);
+    assert(std::string(unity_arguments(true)).find("-force-d3d11")==std::string::npos);
+    assert(arguments(nullptr,false).empty());
+    assert(arguments(nullptr,false,true).empty());
+    assert(arguments(choose(workOptions),true)=="-dx11 -screen-fullscreen 0 -force-d3d11 -logFile vis-player.log");
+    assert(arguments(choose(workOptions),true,true)=="-dx11 -screen-fullscreen 0 -force-vulkan -logFile vis-player.log");
+    assert(arguments(nullptr,true)=="-screen-fullscreen 0 -force-d3d11 -logFile vis-player.log");
+    // The opt-in's values: only an explicit on-switch asks for Vulkan; the
+    // default (no value, "0", a typo) stays D3D11.
+    assert(vulkan_flag("1") && vulkan_flag("on") && vulkan_flag("TRUE") && vulkan_flag(" yes\r\n"));
+    assert(!vulkan_flag("") && !vulkan_flag("0") && !vulkan_flag("off") && !vulkan_flag("false"));
+    assert(!vulkan_flag("vulkan") && !vulkan_flag("2"));
+    // A settings file may hold the bare value or a keyed line.
+    assert(vulkan_setting("1\n"));
+    assert(vulkan_setting("vulkan=1\n"));
+    assert(vulkan_setting("force-vulkan = on\n"));
+    assert(vulkan_setting("PLAY_FORCE_VULKAN=yes\n"));
+    assert(!vulkan_setting("vulkan=0\n"));
+    assert(!vulkan_setting("fps=1\n"));
+    assert(!vulkan_setting(""));
+
+    std::puts("LAUNCH-TARGET-OK: 64-bit launch option wins; picker lists options 64-bit first, both startable; PE32+ preferred in the fallback; Unity runs D3D11 unless PLAY_FORCE_VULKAN asks for Vulkan");
 
     // ---- the picker: only a game with more than one runnable option asks.
     using namespace launch_picker;

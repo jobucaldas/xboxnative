@@ -29,6 +29,7 @@ jobs:
           bash src/xbox-test/app/tests/session-restore.sh
           bash src/xbox-test/app/tests/launch-status.sh
           bash src/xbox-test/app/tests/launch-target.sh
+          bash src/xbox-test/app/tests/selftest-plan.sh
           bash src/xbox-test/app/tests/steam-app-ticket.sh
           bash src/xbox-test/app/tests/steam-client-package.sh
           bash src/xbox-test/app/tests/launch-report.sh
@@ -160,6 +161,17 @@ jobs:
       # pinned donor still compiles CRT-free and keeps its single export.
       - name: build the D3D9 shader translator and inspect its PE
         run: bash src/tools/build-d3d9-translator.sh "$RUNNER_TEMP/d3d9-translator"
+  diag-fixtures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install cross compilers and PE tools
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64 gcc-mingw-w64-i686 llvm lld
+      # The console self-test's fixtures must build from source at package time
+      # and stay small; the script fails on either. Running them is the console's
+      # job (LocalState\selftest.txt).
+      - name: build the console self-test fixtures
+        run: bash src/xbox-test/app/tests/build-diag-fixtures.sh "$RUNNER_TEMP/diag"
   x86-core:
     runs-on: ubuntu-latest
     steps:
