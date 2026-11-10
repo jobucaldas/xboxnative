@@ -47,6 +47,37 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     const FLOAT black[4]={0,0,0,1};
     context->ClearRenderTargetView(rtv,black);
     CHECK(d3d11_diag::clears[0].load()>=1);
+    // ID3D11DeviceContext1::ClearView is the 11.1 way to clear the same view:
+    // a game that only clears through it must not show clears=0.
+    ID3D11DeviceContext1* context1=nullptr;
+    if(SUCCEEDED(context->QueryInterface(__uuidof(ID3D11DeviceContext1),reinterpret_cast<void**>(&context1)))&&context1) {
+        // The hook must occupy the ClearView slot itself. The counter alone
+        // cannot prove that: Wine's ClearView may reach ClearRenderTargetView
+        // internally, which would move clears[0] even with no hook installed.
+        void* saved=d3d11_diag::original(context1,d3d11_diag::Context1ClearView);
+        void** vtable=*reinterpret_cast<void***>(context1);
+        size_t patchCount=0;const d3d11_diag::Patch* patches=d3d11_diag::context1Patches(patchCount);
+        CHECK(saved!=nullptr);
+        CHECK(patchCount==1&&patches[0].slot==d3d11_diag::Context1ClearView);
+        CHECK(vtable[d3d11_diag::Context1ClearView]==patches[0].hook);
+        CHECK(saved!=patches[0].hook);
+        uint64_t beforeView=d3d11_diag::clears[0].load();
+        context1->ClearView(rtv,black,nullptr,0);
+        CHECK(d3d11_diag::clears[0].load()==beforeView+1);
+        // A depth view cannot be reached through ClearRenderTargetView, so
+        // this counts only if the hook body itself ran and classified it.
+        D3D11_TEXTURE2D_DESC depth{};depth.Width=64;depth.Height=64;depth.MipLevels=1;depth.ArraySize=1;
+        depth.Format=DXGI_FORMAT_D32_FLOAT;depth.SampleDesc.Count=1;depth.Usage=D3D11_USAGE_DEFAULT;depth.BindFlags=D3D11_BIND_DEPTH_STENCIL;
+        ID3D11Texture2D* depthTexture=nullptr;ID3D11DepthStencilView* dsv=nullptr;
+        if(SUCCEEDED(device->CreateTexture2D(&depth,nullptr,&depthTexture))&&SUCCEEDED(device->CreateDepthStencilView(depthTexture,nullptr,&dsv))) {
+            uint64_t beforeDepth=d3d11_diag::clears[1].load();
+            context1->ClearView(dsv,black,nullptr,0);
+            CHECK(d3d11_diag::clears[1].load()==beforeDepth+1);
+        }
+        if(dsv)dsv->Release();
+        if(depthTexture)depthTexture->Release();
+        context1->Release();
+    }
     uint64_t beforeIndexed=d3d11_diag::draws[0][0][0].load(),beforeTriangle=d3d11_diag::draws[1][0][0].load();
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context->Draw(3,0);
@@ -67,6 +98,127 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     CHECK(d3d11_diag::zeroCounts[2].load()==beforeZero+1);
     context->DrawInstanced(3,0,0,0);   // zero instances
     CHECK(d3d11_diag::zeroCounts[3].load()>=1);
+    // Submissions whose counts live on the GPU: the terrain layer of a
+    // tessellating game goes through these, and the direct-draw counters
+    // cannot see them. Zeroed argument buffers draw nothing, so the calls are
+    // legal on any device.
+    D3D11_BUFFER_DESC argsDesc{};argsDesc.ByteWidth=64;argsDesc.Usage=D3D11_USAGE_DEFAULT;
+    argsDesc.BindFlags=D3D11_BIND_UNORDERED_ACCESS;argsDesc.MiscFlags=D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
+    D3D11_SUBRESOURCE_DATA zeroArgs{};unsigned char args[64]{};
+    argsDesc.ByteWidth=sizeof args;zeroArgs.pSysMem=args;
+    ID3D11Buffer* argsBuffer=nullptr;
+    CHECK(SUCCEEDED(device->CreateBuffer(&argsDesc,&zeroArgs,&argsBuffer)));
+    // The arguments of an indirect draw are uploaded, not passed: the counts
+    // the guest supplied are logged so a zero-count submission is visible.
+    CHECK(count("indirect args buffer bytes=64")==1);
+    CHECK(count("index=0 instances=0 startIndex=0 baseVertex=0 startInstance=0")==1);
+    // A tightly sized argument buffer is read only as far as it goes: a
+    // 16-byte DrawInstancedIndirect upload must not be read as 20 bytes.
+    D3D11_BUFFER_DESC shortDesc=argsDesc;shortDesc.ByteWidth=16;
+    UINT shortArgs[4]={5,1,0,0};D3D11_SUBRESOURCE_DATA shortInit{};shortInit.pSysMem=shortArgs;
+    ID3D11Buffer* shortBuffer=nullptr;
+    CHECK(SUCCEEDED(device->CreateBuffer(&shortDesc,&shortInit,&shortBuffer)));
+    CHECK(count("indirect args buffer bytes=16")==1);
+    CHECK(count("words=5,1,0,0 (16 bytes)")==1);
+    if(argsBuffer) {
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+        uint64_t beforeAuto=d3d11_diag::draws[d3d11_diag::kDrawAuto][1][0].load();
+        context->DrawAuto();
+        CHECK(d3d11_diag::draws[d3d11_diag::kDrawAuto][1][0].load()==beforeAuto+1);
+        CHECK(count("draw summary: first DrawAuto topology=35(patchlist-3) hs/ds=none")==1);
+        uint64_t beforeIndexedIndirect=d3d11_diag::draws[d3d11_diag::kDrawIndexedIndirect][1][0].load();
+        context->DrawIndexedInstancedIndirect(argsBuffer,0);
+        CHECK(d3d11_diag::draws[d3d11_diag::kDrawIndexedIndirect][1][0].load()==beforeIndexedIndirect+1);
+        uint64_t beforeInstancedIndirect=d3d11_diag::draws[d3d11_diag::kDrawInstancedIndirect][1][0].load();
+        context->DrawInstancedIndirect(argsBuffer,0);
+        CHECK(d3d11_diag::draws[d3d11_diag::kDrawInstancedIndirect][1][0].load()==beforeInstancedIndirect+1);
+        CHECK(count("draw summary: first DrawIndexedInstancedIndirect topology=35(patchlist-3) hs/ds=none")==1);
+        CHECK(count("draw summary: first DrawInstancedIndirect topology=35(patchlist-3) hs/ds=none")==1);
+        uint64_t beforeDispatchIndirect=d3d11_diag::dispatchIndirects.load();
+        context->DispatchIndirect(argsBuffer,0);
+        CHECK(d3d11_diag::dispatchIndirects.load()==beforeDispatchIndirect+1);
+        // A later upload of the same buffer is read where the guest writes it.
+        UINT newArgs[5]={36,1,0,0,0};
+        context->UpdateSubresource(argsBuffer,0,nullptr,newArgs,0,0);
+        CHECK(count("indirect args upload count=36 instances=1 startIndex=0 baseVertex=0 startInstance=0")==1);
+        // A 12-byte DispatchIndirect upload is read as three words, not five.
+        D3D11_BUFFER_DESC dispatchDesc=argsDesc;dispatchDesc.ByteWidth=12;
+        UINT groups[3]={8,4,1};D3D11_SUBRESOURCE_DATA dispatchInit{};dispatchInit.pSysMem=groups;
+        ID3D11Buffer* dispatchBuffer=nullptr;
+        if(SUCCEEDED(device->CreateBuffer(&dispatchDesc,&dispatchInit,&dispatchBuffer))&&dispatchBuffer) {
+            UINT newGroups[3]={16,8,1};
+            context->UpdateSubresource(dispatchBuffer,0,nullptr,newGroups,0,0);
+            CHECK(count("indirect args upload words=16,8,1 (12 bytes)")==1);
+            dispatchBuffer->Release();
+        }
+        if(shortBuffer)shortBuffer->Release();
+        // Bound together with UAVs, and sampled with a null entry: the two
+        // shapes a layer that renders off-screen and samples what it wrote has.
+        D3D11_TEXTURE2D_DESC uavTextureDesc=target;uavTextureDesc.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
+        ID3D11Texture2D* uavTexture=nullptr;ID3D11UnorderedAccessView* uav=nullptr;
+        D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};uavDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+        uavDesc.ViewDimension=D3D11_UAV_DIMENSION_TEXTURE2D;
+        CHECK(SUCCEEDED(device->CreateTexture2D(&uavTextureDesc,nullptr,&uavTexture)));
+        CHECK(SUCCEEDED(device->CreateUnorderedAccessView(uavTexture,&uavDesc,&uav)));
+        if(uav) {
+            uint64_t beforeUavSets=d3d11_diag::uavSets.load();
+            context->OMSetRenderTargetsAndUnorderedAccessViews(1,&rtv,nullptr,1,1,&uav,nullptr);
+            CHECK(d3d11_diag::rtvUavSets.load()>=1);
+            CHECK(d3d11_diag::uavSets.load()==beforeUavSets+1);
+            // D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL is a sentinel, not a
+            // view count: binding a UAV while keeping the targets must not walk
+            // the view array 0xffffffff times, and must leave the format alone.
+            unsigned beforeKeep=d3d11_diag::stateOf(context).rtFormat.load();
+            context->OMSetRenderTargetsAndUnorderedAccessViews(D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL,nullptr,nullptr,1,1,&uav,nullptr);
+            CHECK(d3d11_diag::stateOf(context).rtFormat.load()==beforeKeep);
+            CHECK(d3d11_diag::uavSets.load()==beforeUavSets+2);
+            uav->Release();
+        }
+        if(uavTexture)uavTexture->Release();
+        // Unbinding the targets leaves no format: a later draw must not be
+        // bucketed as the target that was bound before.
+        context->OMSetRenderTargets(0,nullptr,nullptr);
+        CHECK(d3d11_diag::stateOf(context).rtFormat.load()==0);
+        uint64_t beforeNoTarget=d3d11_diag::drawsNoTarget.load();
+        context->Draw(3,0);
+        CHECK(d3d11_diag::drawsNoTarget.load()==beforeNoTarget+1);
+        context->OMSetRenderTargets(1,&rtv,nullptr);
+        ID3D11ShaderResourceView* nullView=nullptr;
+        uint64_t beforeSrvSets=d3d11_diag::srvSets[1].load(),beforeSrvNulls=d3d11_diag::srvNulls[1].load();
+        context->PSSetShaderResources(0,1,&nullView);
+        CHECK(d3d11_diag::srvSets[1].load()==beforeSrvSets+1);
+        CHECK(d3d11_diag::srvNulls[1].load()==beforeSrvNulls+1);
+        // A target that reaches the frame by copy/resolve, not by a draw.
+        D3D11_TEXTURE2D_DESC copyDesc=target;copyDesc.Width=32;copyDesc.Height=32;
+        ID3D11Texture2D* copyTexture=nullptr;
+        CHECK(SUCCEEDED(device->CreateTexture2D(&copyDesc,nullptr,&copyTexture)));
+        D3D11_TEXTURE2D_DESC msaaDesc=target;msaaDesc.SampleDesc.Count=2;
+        ID3D11Texture2D* msaaTexture=nullptr;
+        HRESULT msaa=copyTexture?device->CreateTexture2D(&msaaDesc,nullptr,&msaaTexture):E_FAIL;
+        uint64_t beforeCopies=d3d11_diag::copies.load(),beforeResolves=d3d11_diag::resolves.load();
+        if(copyTexture) {
+            context->CopyResource(targetTexture,copyTexture);
+            CHECK(d3d11_diag::copies.load()==beforeCopies+1);
+        }
+        if(SUCCEEDED(msaa)&&msaaTexture) {
+            context->ResolveSubresource(targetTexture,0,msaaTexture,0,DXGI_FORMAT_R8G8B8A8_UNORM);
+            CHECK(d3d11_diag::resolves.load()==beforeResolves+1);
+        }
+        if(msaaTexture)msaaTexture->Release();
+        if(copyTexture)copyTexture->Release();
+        // A draw under a predicate can be skipped entirely by the driver.
+        ID3D11Predicate* predicate=nullptr;
+        D3D11_QUERY_DESC queryDesc{};queryDesc.Query=D3D11_QUERY_OCCLUSION_PREDICATE;
+        if(SUCCEEDED(device->CreatePredicate(&queryDesc,&predicate))&&predicate) {
+            uint64_t beforePredicated=d3d11_diag::predicated.load();
+            context->SetPredication(predicate,FALSE);
+            CHECK(d3d11_diag::predicated.load()==beforePredicated+1);
+            context->SetPredication(nullptr,FALSE);
+            predicate->Release();
+        }
+        argsBuffer->Release();
+    }
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     // A deferred context records with its own topology, and its command list is
     // counted when finished and when executed.
     ID3D11DeviceContext* deferred=nullptr;
@@ -95,9 +247,25 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     CHECK(count("draw summary 1/7: DrawIndexed calls=")==1);
     CHECK(count("draw summary 1/7: DrawIndexedInstanced calls=")==1);
     CHECK(count("draw summary 1/7: DrawInstanced calls=")==1);
+    // The GPU-counted kinds are summarised with the same buckets, so a
+    // tessellated layer that only submits them is visible.
+    CHECK(count("draw summary 1/7: DrawAuto calls=1 patchlist=1 hull-domain=0")==1);
+    CHECK(count("draw summary 1/7: DrawIndexedInstancedIndirect calls=1 patchlist=1")==1);
+    CHECK(count("draw summary 1/7: DrawInstancedIndirect calls=1 patchlist=1")==1);
+    CHECK(count("draw summary 1/7: Dispatch calls=0 indirect=1")==1);
+    CHECK(count("draw summary 1/7: targets with UAVs sets=2 uav=2")==1);
+    CHECK(count("draw summary 1/7: shader resources vs=0/0 ps=1/1")==1);
+    // Draws are bucketed by the format of the target they were submitted to,
+    // so a layer that never reaches the swapchain's format is visible.
+    CHECK(count("draw summary 1/7: draws by target format 28(R8G8B8A8_UNORM)=")==1);
+    // Draws with nothing bound are reported apart from the format buckets: the
+    // one here and the deferred context's, which never had a target bound.
+    CHECK(count("no-target=2")==1);
     CHECK(count("draw summary 1/7: command lists finish=")==1);
     CHECK(count("draw summary 1/7: shader creates vs=")==1);
     CHECK(count("draw summary 1/7: render targets sets=")==1);
+    // The 11.1 ClearView count is reported next to the 11.0 clears.
+    CHECK(count("clearview=0")==1);
     CHECK(count("draw summary 1/7: render target fmt=28(R8G8B8A8_UNORM) 64x64")==1);
     CHECK(count("draw summary 1/7: main render target 64x64 swapchain 1920x1080 fmt=28(R8G8B8A8_UNORM) buffers=2")==1);
     // The summary is bounded like the rest of the log.
