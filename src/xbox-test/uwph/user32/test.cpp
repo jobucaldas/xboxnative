@@ -64,6 +64,13 @@ static int rejectedDestroyed,rejectedCreated;
 static LRESULT CALLBACK reject(HWND,UINT m,WPARAM,LPARAM){if(m==WM_NCDESTROY)++rejectedDestroyed;if(m==WM_CREATE)++rejectedCreated;return 0;}
 static BOOL CALLBACK count(HWND,LPARAM p){++*(int*)p;return TRUE;}
 extern "C" DWORD WINAPI u32c_entry(){
+ // The gate is re-entrant: a second run in one process is normal (a launcher
+ // that did not restart between Plays, or a self-test step that ran a PE32
+ // fixture and then the gate). Every counter below and every class this PE
+ // registers is module/process state, so it is reset here instead of assumed
+ // fresh; the classes are also unregistered where they are registered.
+ checks=failures=created=destroyed=0;sizedParam=0;
+ rejectedDestroyed=rejectedCreated=0;
  OutputDebugStringA(anchor);
  WNDCLASSEXW wc={};wc.cbSize=sizeof(wc);wc.lpfnWndProc=proc;wc.lpszClassName=L"U32cClass";wc.cbWndExtra=16;wc.cbClsExtra=8;
  ATOM a=RegisterClassExW(&wc);check(a!=0);
@@ -161,7 +168,7 @@ extern "C" DWORD WINAPI u32c_entry(){
   check(PeekMessageW(&fm,fw,0,0,PM_REMOVE)&&fm.message==WM_MOUSEMOVE&&(fm.wParam&MK_LBUTTON));
   m.mi.dwFlags=MOUSEEVENTF_LEFTUP;check(SendInput(1,&m,sizeof m)==1&&PeekMessageW(&fm,fw,0,0,PM_REMOVE)&&fm.message==WM_LBUTTONUP);
   check(uwph_u32c_input_key('Q',0x10,FALSE,TRUE,1)&&(GetAsyncKeyState('Q')&0x8000));uwph_u32c_input_release_all();check(!(GetAsyncKeyState('Q')&0x8000));
-  uwph_u32c_input_set_fallback(0);while(PeekMessageW(&fm,fw,0,0,PM_REMOVE)){}check(DestroyWindow(fw));}
+  uwph_u32c_input_set_fallback(0);while(PeekMessageW(&fm,fw,0,0,PM_REMOVE)){}check(DestroyWindow(fw));check(UnregisterClassW(fc.lpszClassName,0));}
  // ANSI class and messages over the W records: window text converts, posted messages pass through.
  {WNDCLASSA ac={};ac.lpfnWndProc=ansiProc;ac.lpszClassName="u32cansi";check(RegisterClassA(&ac));
   HWND ah=CreateWindowExA(0,"u32cansi","",0,0,0,10,10,0,0,0,0);check(ah);

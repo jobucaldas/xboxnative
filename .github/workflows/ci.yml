@@ -148,8 +148,10 @@ jobs:
       # launcher's own process where the UI thread publishes the connected pad
       # slots every frame. Running it only with no pad connected is what let a
       # stale empty-device-list assertion reach the console and block every
-      # launch once a pad was plugged in; this runs it with pads published too.
-      - name: mapped user32 regression PE with and without pads published
+      # launch once a pad was plugged in; this runs it with pads published too,
+      # and twice in one process (the gate is re-entrant: a failed run is
+      # retried, and a self-test step can follow a PE32 fixture).
+      - name: mapped user32 regression PE with pads published, and twice in one process
         run: bash src/xbox-test/uwph/user32/tests/run-u32c-gate-test.sh
   d3d10-shim:
     runs-on: ubuntu-latest

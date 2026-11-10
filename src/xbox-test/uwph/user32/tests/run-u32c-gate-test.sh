@@ -74,3 +74,22 @@ run() {
 run "no-pad"
 run "one-pad" --pads 1
 run "two-pads" --pads 5
+
+# Re-entrancy: the gate runs inside the launcher's own process, where a second
+# call is normal (probe.h caches only a PASS, so a failed run is retried in the
+# same process, and a self-test step can follow a PE32 fixture). The classes and
+# counters the PE registers are process state; a second run must see none of the
+# first run's leftovers. Run the entry twice in one process with a pad published
+# before each call, and require both to return 42.
+twice_log="$work/run-twice.log"
+if ! ( cd "$work" && "$WINE" ./u32c-offdevice.exe --twice ) >"$twice_log" 2>&1; then
+  echo "FAIL u32c gate twice in one process" >&2; cat "$twice_log" >&2; exit 1
+fi
+tr -d '\r' <"$twice_log" | grep -q '^U32C OFFDEVICE entry1=42$' || { echo "FAIL u32c gate twice: first entry != 42" >&2; cat "$twice_log" >&2; exit 1; }
+tr -d '\r' <"$twice_log" | grep -q '^U32C OFFDEVICE entry2=42$' || { echo "FAIL u32c gate twice: second entry != 42" >&2; cat "$twice_log" >&2; exit 1; }
+# Both runs must have reached the end of the PE, not just returned the code.
+[[ $(tr -d '\r' <"$twice_log" | grep -c '^U32C TEST PASS ') -eq 2 ]] || { echo "FAIL u32c gate twice: expected two pass markers" >&2; cat "$twice_log" >&2; exit 1; }
+if tr -d '\r' <"$twice_log" | grep -q '^U32C CHECK FAIL '; then
+  echo "FAIL u32c gate twice: a check failed" >&2; cat "$twice_log" >&2; exit 1
+fi
+echo "OK u32c gate twice in one process with pads published"
