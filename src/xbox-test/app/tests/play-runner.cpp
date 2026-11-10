@@ -320,7 +320,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // which the launcher always maps to its CoreWindow. Give them the same
     // stand-in.
     if(std::string(args)=="d3d10-diag"||std::string(args)=="d3d12-diag"||
-       std::string(args).rfind("d3d9-",0)==0||std::string(args)=="vulkan-dzn") {
+       std::string(args).rfind("d3d9-",0)==0||std::string(args)=="vulkan-dzn"||std::string(args)=="opengl") {
         if(!host_surface::create()) {logline("HOST SURFACE FAIL native Wine window unavailable");return 3;}
         play_graphics::configure(&host_surface::token,host_surface::present,logline);
         logline("HOST SURFACE native Wine window stands in for the CoreWindow (off-device only)");
@@ -473,7 +473,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // Engine options come from the game's files, as in the launcher.
     std::wstring gameExe=L"Megabonk.exe";
     {wchar_t value[260];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_EXE",value,260);if(n&&n<260)gameExe.assign(value,n);}
-    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="d3d9-triangle"?L"play-d3d9-triangle.exe":std::string(args)=="d3d9-textured"?L"play-d3d9-textured.exe":std::string(args)=="fault-in-dll"?L"play-fault-guest.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="leaderboards"?L"play-leaderboard.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":std::string(args)=="vulkan-dzn"?L"play-vulkan-dzn.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
+    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="d3d9-triangle"?L"play-d3d9-triangle.exe":std::string(args)=="d3d9-textured"?L"play-d3d9-textured.exe":std::string(args)=="fault-in-dll"?L"play-fault-guest.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="leaderboards"?L"play-leaderboard.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":std::string(args)=="vulkan-dzn"?L"play-vulkan-dzn.exe":std::string(args)=="opengl"?L"play-opengl.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
     // guest stop (fatal dialog). Progress must never mask that failure.
@@ -588,6 +588,16 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         auto dzn=play_runtime::named(L"vulkan_dzn.dll");
         ok=ok&&r->finished&&r->success&&(r->code==42||r->code==43)&&loader&&loader->mapped&&loader->initialized&&
             dzn&&dzn->mapped&&dzn->initialized;
+    }
+    else if(mode=="opengl") {
+        // opengl32.dll was mapped from the runtime directory (Mesa's WGL
+        // driver) and the guest got a pixel format and a context. The fixture
+        // exits 42 when it also read its cleared pixel back; 43 means the
+        // readback did not match after every earlier stage worked, which is a
+        // BLOCKED result, never a pass. play-runtime.sh picks PASS or BLOCKED
+        // from the fixture's own lines.
+        auto ogl=play_runtime::named(L"opengl32.dll");
+        ok=ok&&r->finished&&r->success&&(r->code==42||r->code==43)&&ogl&&ogl->mapped&&ogl->initialized;
     }
     else if(mode=="leaderboards") {
         // The fixture exits 42 only when the provider read real players out of
