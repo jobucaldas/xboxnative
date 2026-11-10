@@ -17,8 +17,16 @@ mingw_lib=$(dirname "$(x86_64-w64-mingw32-g++ -print-file-name=libkernel32.a)")
 # Same flags as the D3D10 shim: no CRT, no exceptions, and the loop-distribution
 # pass disabled so this file's own memset/memcpy loops do not become calls to
 # themselves.
+#
+# Unwind tables are ON, deliberately. Play maps this DLL and runs it on the
+# guest's thread; when code inside it faults, the OS has to unwind to that
+# thread's __try/__except to reach Play's filter, and it can only do that
+# through this image's .pdata. -fno-asynchronous-unwind-tables leaves the
+# exception directory empty, the mapper accepts that silently (there is nothing
+# to register), and a fault here is then never dispatched: the launcher dies
+# with no crash record at all. The gate at the end of this script keeps it.
 x86_64-w64-mingw32-g++ -c -O2 -std=c++17 -fno-builtin -fno-tree-loop-distribute-patterns \
-    -fno-exceptions -fno-rtti -fno-stack-protector -fno-asynchronous-unwind-tables \
+    -fno-exceptions -fno-rtti -fno-stack-protector \
     -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type \
     "$here/d3d9.cpp" -o "$work/d3d9.obj"
 # CI installs plain lld; development hosts here carry the versioned name.
@@ -40,3 +48,8 @@ for name in Direct3DCreate9 Direct3DCreate9Ex D3DPERF_BeginEvent D3DPERF_EndEven
     llvm-readobj --coff-exports "$out/d3d9.dll" | grep -q "Name: $name\$" \
         || { echo "d3d9.dll does not export $name" >&2; exit 1; }
 done
+# Play can only hand a fault inside this DLL to the guest thread's handler if the
+# image carries unwind data: an empty exception directory means the OS cannot
+# unwind out of it, so the fault is never dispatched and the launcher dies with
+# no crash record. An empty table is a build failure, not a runtime surprise.
+python3 -I "$here/check-unwind-data.py" "$out/d3d9.dll"

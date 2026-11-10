@@ -26,8 +26,12 @@ mingw_lib=$(dirname "$("$cc64" -print-file-name=libkernel32.a)")
 lld() { lld-link-19 "$@" 2>/dev/null || lld-link "$@"; }
 clangxx() { clang++-19 "$@" 2>/dev/null || clang++ "$@"; }
 
-# The 64-bit fixtures: no CRT, no exceptions, no unwinding.
-fixture_flags=(-O1 -fno-stack-protector -fno-exceptions -fno-rtti -fno-asynchronous-unwind-tables)
+# The 64-bit fixtures: no CRT, no exceptions, but WITH unwind tables. Play maps
+# these into the launcher and runs them on the guest thread, so a fault inside
+# one has to be unwindable to that thread's __try/__except or the launcher dies
+# with no crash record (see src/xbox-test/uwph/d3d9/build.sh). A fixture that
+# dies silently would hide the very thing the self-test is there to show.
+fixture_flags=(-O1 -fno-stack-protector -fno-exceptions -fno-rtti)
 common=(/nodefaultlib /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat)
 libs=("$mingw_lib/libkernel32.a" "$mingw_lib/libuser32.a")
 
@@ -72,5 +76,11 @@ PATH="$(dirname "$cc32"):$PATH" "$rc32" -O coff -I "$here/x86-guest" -i "$here/x
 for f in "$out"/*.exe; do
   size=$(stat -c%s "$f")
   [[ $size -lt 5242880 ]] || { echo "build-diag-fixtures: $(basename "$f") is $size bytes (limit 5 MB)" >&2; exit 1; }
+done
+# A 64-bit fixture with no exception directory could not be unwound out of if it
+# faults, so the launcher would die with no crash record and the self-test would
+# report nothing at all. Gate the images the guest thread runs.
+for f in "$out"/play-*.exe; do
+  python3 -I "$here/../../uwph/d3d9/check-unwind-data.py" "$f"
 done
 ls -l "$out"
