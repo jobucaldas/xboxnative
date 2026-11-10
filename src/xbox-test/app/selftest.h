@@ -243,10 +243,17 @@ static bool tick() {
     if (!DeleteFileW(request_path().c_str())) { g_requested.store(false, std::memory_order_release); logf("selftest: request file could not be consumed; no run"); return false; }
     selftest_plan::Queue q;
     q.pending = selftest_plan::parse_request(text);
-    // An empty request is a FAIL line the summary counts, not a silent no-op.
-    if (q.pending.empty()) { append_log("SELFTEST RESULT request FAIL empty-request"); summary(); g_requested.store(false, std::memory_order_release); return false; }
     // A new request starts a new record: the log is per request, not per app.
+    // An empty request is one too, so its FAIL line is not tallied with a
+    // previous run's results.
     DeleteFileW(log_path().c_str());
+    if (q.pending.empty()) {
+        append_log("SELFTEST BEGIN request=0 modes");
+        append_log("SELFTEST RESULT request FAIL empty-request");
+        summary();
+        g_requested.store(false, std::memory_order_release);
+        return false;
+    }
     append_log("SELFTEST BEGIN request=" + std::to_string(q.pending.size()) + " modes");
     write_queue(q);
     return true;
@@ -272,11 +279,18 @@ static bool resume() {
 // in one process. `dispatcher` is the CoreWindow's, taken on the UI thread.
 static void run_async(const winrt::Windows::UI::Core::CoreDispatcher& dispatcher) {
     if (g_running.exchange(true, std::memory_order_acq_rel)) { logf("selftest: a step is already running; request ignored"); return; }
+    // A Play from the UI must not start a second guest or take the probe sink
+    // while a fixture runs (launch.h start_launch checks the same flag).
+    g_selftest_busy.store(true, std::memory_order_release);
     std::thread([dispatcher] {
         init_apartment(apartment_type::multi_threaded);
         bool more = false;
         try { more = step(); } catch (...) { logf("selftest: step threw"); }
         g_running.store(false, std::memory_order_release);
+        // The fixture has finished. If the restart below is refused the launcher
+        // stays alive, and a Play must work again (a 64-bit fixture that loaded a
+        // guest is still refused by play_runtime::observed, as any launch is).
+        g_selftest_busy.store(false, std::memory_order_release);
         // No guest is in this process (only 32-bit modes ran, or nothing was
         // packaged), so another request may be taken without a restart.
         if (!more) { g_requested.store(false, std::memory_order_release); logf("selftest: run finished"); return; }

@@ -28,6 +28,10 @@ struct LaunchState {
     std::mutex m; std::string result, attempt; bool ok=false;
 };
 static LaunchState g_launch;
+// Set while the console self-test (selftest.h) owns Play: it starts a guest
+// without a launch, so a Play from the UI must not start a second one or take
+// the probe sink away from the run.
+static std::atomic<bool> g_selftest_busy{false};
 
 // ---- install state (marker dl_<appid>.done written by the downloader; see installs.h)
 using InstallInfo = installs::Info;
@@ -1084,6 +1088,12 @@ static void lp_watchdog() {
 // option (the picker's choice, an appinfo executable) starts that launch option
 // instead of the preferred one; nullptr picks the preferred option as before.
 static void start_launch(uint32_t appid, const std::string& name, const std::string& dir, const char* via, const std::string* option=nullptr) {
+    if(g_selftest_busy.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> lock(g_launch.m);
+        g_launch.result="The launcher self-test is running; restart the launcher to play a game. See LocalState\\selftest.log.";
+        logf("launch: Play rejected: the console self-test is running");
+        return;
+    }
     if(auto guest=play_runtime::observed.load(std::memory_order_acquire)) {
         std::lock_guard<std::mutex> lock(g_launch.m);
         g_launch.result="Game code from the last launch is still loaded; the launcher restarts to end it. Last event: "+guest->snapshot();
