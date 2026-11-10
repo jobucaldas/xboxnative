@@ -99,13 +99,23 @@ UINT cpuAccessFor(D3DPOOL pool,DWORD d3d9Usage) {
 }
 // D3D9 lock flags -> D3D11 map mode. A staging resource (SYSTEMMEM, SCRATCH) is
 // the guest's own memory, so a plain lock is read-write there and only
-// D3DLOCK_READONLY takes the write away. A dynamic resource accepts only
-// WRITE_DISCARD or WRITE_NO_OVERWRITE, never plain WRITE: a lock that does not
-// ask to discard must keep what earlier locks wrote, which is WRITE_NO_OVERWRITE
-// (what Wine's d3d9 does for the same case).
-D3D11_MAP mapMode(bool staging,DWORD flags) {
+// D3DLOCK_READONLY takes the write away.
+//
+// A dynamic buffer accepts only WRITE_DISCARD or WRITE_NO_OVERWRITE, never plain
+// WRITE: a lock that does not ask to discard must keep what earlier locks wrote,
+// which is WRITE_NO_OVERWRITE (what Wine's d3d9 does for the same case).
+D3D11_MAP bufferMapMode(bool staging,DWORD flags) {
     if(staging)return flags&D3DLOCK_READONLY?D3D11_MAP_READ:D3D11_MAP_READ_WRITE;
     return flags&D3DLOCK_DISCARD?D3D11_MAP_WRITE_DISCARD:D3D11_MAP_WRITE_NO_OVERWRITE;
+}
+// A dynamic texture has no such choice: D3D11 allows WRITE_NO_OVERWRITE on
+// buffers only, and WRITE_DISCARD is the one writable mode a dynamic texture
+// accepts. A D3D9 lock that does not discard therefore loses the texture's
+// earlier contents; a guest that fills the level it locks (the usual MANAGED
+// upload) is unaffected.
+D3D11_MAP textureMapMode(bool staging,DWORD flags) {
+    if(staging)return flags&D3DLOCK_READONLY?D3D11_MAP_READ:D3D11_MAP_READ_WRITE;
+    return D3D11_MAP_WRITE_DISCARD;
 }
 bool stagingPool(D3DPOOL pool) { return pool==D3DPOOL_SYSTEMMEM||pool==D3DPOOL_SCRATCH; }
 // D3D9's Levels=0 means the full chain: as many levels as halving both sides
@@ -448,7 +458,7 @@ struct Surface : d3dshim::Base, IDirect3DSurface9 {
         }
         if(locked)return D3DERR_INVALIDCALL;   // D3D9 allows one lock at a time
         D3D11_MAPPED_SUBRESOURCE mapped{};
-        HRESULT hr=context->Map(texture,level,mapMode(stagingPool(desc.Pool),flags),0,&mapped);
+        HRESULT hr=context->Map(texture,level,textureMapMode(stagingPool(desc.Pool),flags),0,&mapped);
         if(FAILED(hr))return D3DERR_INVALIDCALL;
         locked=true;
         out->pBits=mapped.pData;
@@ -527,7 +537,7 @@ struct VertexBuffer : Resource<IDirect3DVertexBuffer9> {
         // the same buffer wrote (a streaming lock at a non-zero offset).
         // Every buffer here is dynamic, SYSTEMMEM included (CreateVertexBuffer
         // serves it as dynamic storage), so no lock is a staging read.
-        HRESULT hr=context->Map(buffer,0,mapMode(false,flags),0,&mapped);
+        HRESULT hr=context->Map(buffer,0,bufferMapMode(false,flags),0,&mapped);
         if(FAILED(hr))return D3DERR_INVALIDCALL;
         locked=true;
         // D3D9's offset is in bytes from the start of the buffer; D3D11's Map
@@ -570,7 +580,7 @@ struct IndexBuffer : Resource<IDirect3DIndexBuffer9> {
         D3D11_MAPPED_SUBRESOURCE mapped{};
         // Same flag translation as VertexBuffer::Lock: the buffer is dynamic
         // whatever its D3D9 pool, so only D3DLOCK_DISCARD discards.
-        HRESULT hr=context->Map(buffer,0,mapMode(false,flags),0,&mapped);
+        HRESULT hr=context->Map(buffer,0,bufferMapMode(false,flags),0,&mapped);
         if(FAILED(hr))return D3DERR_INVALIDCALL;
         locked=true;
         *data=static_cast<unsigned char*>(mapped.pData)+offset;
@@ -677,7 +687,7 @@ struct Texture : Resource<IDirect3DTexture9> {
         }
         if(locked)return D3DERR_INVALIDCALL;
         D3D11_MAPPED_SUBRESOURCE mapped{};
-        HRESULT hr=context->Map(texture,level,mapMode(stagingPool(pool),flags),0,&mapped);
+        HRESULT hr=context->Map(texture,level,textureMapMode(stagingPool(pool),flags),0,&mapped);
         if(FAILED(hr))return D3DERR_INVALIDCALL;
         locked=true;
         lockedLevel=level;
