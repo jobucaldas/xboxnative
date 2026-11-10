@@ -8,8 +8,14 @@ extern "C" __declspec(dllimport) void WINAPI uwph_u32c_key_event(int,BOOL);
 extern "C" __declspec(dllimport) void WINAPI uwph_u32c_input_set_fallback(HWND);
 extern "C" __declspec(dllimport) void WINAPI uwph_u32c_input_release_all();
 extern "C" __declspec(dllimport) BOOL WINAPI uwph_u32c_input_key(UINT,UINT,BOOL,BOOL,UINT);
+extern "C" __declspec(dllimport) void WINAPI uwph_u32c_pads(unsigned);
 static bool streq(const char* a,const char* b){while(*a&&*b){if(*a++!=*b++)return false;}return *a==*b;}
 static bool wstreq(const wchar_t* a,const wchar_t* b){while(*a&&*b){if(*a++!=*b++)return false;}return *a==*b;}
+// The test links without a CRT, so it carries its own substring search.
+static bool wscontains(const wchar_t* haystack,const wchar_t* needle){
+ for(;*haystack;++haystack){const wchar_t* h=haystack;const wchar_t* n=needle;while(*n&&*h==*n){++h;++n;}if(!*n)return true;}
+ return !*needle;
+}
 static int checks,failures,created,destroyed;static LPARAM sizedParam;
 static void check_result(bool ok,const char* expression){++checks;if(!ok){++failures;OutputDebugStringA(expression);}}
 #define check(...) check_result((__VA_ARGS__),"U32C CHECK FAIL " #__VA_ARGS__)
@@ -174,6 +180,21 @@ extern "C" DWORD WINAPI u32c_entry(){
  DISPLAY_DEVICEA dd={};dd.cb=sizeof(dd);check(EnumDisplayDevicesA(0,0,&dd,0)&&streq(dd.DeviceName,"\\\\.\\DISPLAY1"));check(!EnumDisplayDevicesA(0,1,&dd,0));
  WINDOWPLACEMENT wp={sizeof(wp)};check(GetWindowPlacement(h2,&wp)&&wp.showCmd==SW_SHOWNORMAL&&wp.rcNormalPosition.right==10);
  RAWINPUTDEVICE rid={1,6,0,h2};check(RegisterRawInputDevices(&rid,1,sizeof(rid)));UINT rc=0;check(GetRawInputDeviceList(0,&rc,sizeof(RAWINPUTDEVICELIST))==0&&rc==0);
+ // A pad the launcher publishes in an XInput slot is one RIM_TYPEHID device
+ // (hid/pad_device.h); Unity's legacy joystick enumeration needs exactly this.
+ uwph_u32c_pads(1);
+ check(GetRawInputDeviceList(0,&rc,sizeof(RAWINPUTDEVICELIST))==0&&rc==1);
+ RAWINPUTDEVICELIST devs[2]={};rc=2;check(GetRawInputDeviceList(devs,&rc,sizeof(RAWINPUTDEVICELIST))==1&&rc==1&&devs[0].dwType==RIM_TYPEHID);
+ rc=0;check(GetRawInputDeviceList(devs,&rc,sizeof(RAWINPUTDEVICELIST))==(UINT)-1&&GetLastError()==ERROR_INSUFFICIENT_BUFFER&&rc==1);
+ UINT infoSize=0;check(GetRawInputDeviceInfoW(devs[0].hDevice,RIDI_DEVICEINFO,0,&infoSize)==0&&infoSize==sizeof(RID_DEVICE_INFO));
+ RID_DEVICE_INFO deviceInfo={};deviceInfo.cbSize=sizeof(deviceInfo);infoSize=sizeof(deviceInfo);
+ check(GetRawInputDeviceInfoW(devs[0].hDevice,RIDI_DEVICEINFO,&deviceInfo,&infoSize)==sizeof(deviceInfo)&&deviceInfo.dwType==RIM_TYPEHID);
+ check(deviceInfo.hid.dwVendorId==0x045e&&deviceInfo.hid.dwProductId==0x028e&&deviceInfo.hid.usUsagePage==1&&deviceInfo.hid.usUsage==5);
+ WCHAR name[128]={};UINT nameSize=sizeof(name);
+ check(GetRawInputDeviceInfoW(devs[0].hDevice,RIDI_DEVICENAME,name,&nameSize)>0&&wscontains(name,L"IG_")&&name[0]=='\\');
+ check(GetRawInputDeviceInfoW((HANDLE)0x1234,RIDI_DEVICEINFO,&deviceInfo,&infoSize)==(UINT)-1&&GetLastError()==ERROR_INVALID_HANDLE);
+ uwph_u32c_pads(0);
+ check(GetRawInputDeviceList(0,&rc,sizeof(RAWINPUTDEVICELIST))==0&&rc==0);
  // CCD describes the one record display (Unity's display layout needs it).
  UINT32 npath=0,nmode=0;check(GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS,&npath,&nmode)==ERROR_SUCCESS&&npath==1&&nmode==2);
  check(GetDisplayConfigBufferSizes(0,&npath,&nmode)==ERROR_INVALID_PARAMETER);

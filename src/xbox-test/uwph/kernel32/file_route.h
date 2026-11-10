@@ -4,9 +4,13 @@
 #include <cstring>
 #include <string>
 #include "pipe_route.h"
+#include "../hid/pad_registry.h"
 namespace kernel32_core {
 inline HANDLE WINAPI create_file_w(LPCWSTR path, DWORD access, DWORD share,
         LPSECURITY_ATTRIBUTES security, DWORD disposition, DWORD flags, HANDLE template_file) {
+    // A device path the synthetic pad registry issued is that pad, not a file:
+    // the console has no such device, and opening it as a file would fail.
+    if (path && pad_hid::slot_from_path(path) >= 0) return pad_hid::open(path);
     CREATEFILE2_EXTENDED_PARAMETERS parameters{};
     parameters.dwSize = sizeof(parameters);
     parameters.dwFileAttributes = flags & 0xffff;
@@ -173,6 +177,17 @@ inline BOOL WINAPI write_file(HANDLE file, LPCVOID buffer, DWORD count, LPDWORD 
     return ok;
 }
 
+// A pad handle has no reports of its own: Play feeds the pad through XInput, so
+// the read stays pending the way a HID device with nothing new to say does.
+inline BOOL WINAPI read_file(HANDLE file, LPVOID buffer, DWORD count, LPDWORD read, LPOVERLAPPED overlapped) {
+    if (pad_hid::slot_of(file) >= 0) return pad_hid::read(file, buffer, count, read, overlapped);
+    return ::ReadFile(file, buffer, count, read, overlapped);
+}
+inline BOOL WINAPI get_overlapped_result(HANDLE file, LPOVERLAPPED overlapped, LPDWORD transferred, BOOL wait) {
+    if (pad_hid::slot_of(file) >= 0) return pad_hid::overlapped_result(file, overlapped, transferred, wait);
+    return ::GetOverlappedResult(file, overlapped, transferred, wait);
+}
+
 // The runtime installs the guest's native current directory. Files opened by
 // these routes are OS handles; access remains subject to AppContainer policy.
 // No path sandbox escape or policy bypass is attempted.
@@ -186,7 +201,7 @@ inline uintptr_t resolve_file(const char* dll, const char* name) {
 #define K32_FILE(symbol) if (!strcmp(name, #symbol)) return reinterpret_cast<uintptr_t>(&::symbol)
     if (kernel || file) { if (!strcmp(name, "CreateFileA")) return reinterpret_cast<uintptr_t>(&create_file_a); }
     if (kernel || file) { if (!strcmp(name, "CreateFileW")) return reinterpret_cast<uintptr_t>(&create_file_w); }
-    if (kernel || file) { K32_FILE(ReadFile); }
+    if (kernel || file) { if (!strcmp(name, "ReadFile")) return reinterpret_cast<uintptr_t>(&read_file); }
     if (kernel || file) { if (!strcmp(name, "WriteFile")) return reinterpret_cast<uintptr_t>(&write_file); }
     if (kernel || file) { K32_FILE(FlushFileBuffers); }
     if (kernel || file) { K32_FILE(SetFilePointer); }
@@ -220,7 +235,7 @@ inline uintptr_t resolve_file(const char* dll, const char* name) {
     if (kernel || file) { K32_FILE(CopyFile2); }
     if (kernel || file) { K32_FILE(MoveFileExW); }
     if (kernel || file) { K32_FILE(ReplaceFileW); }
-    if (kernel || io) { K32_FILE(GetOverlappedResult); }
+    if (kernel || io) { if (!strcmp(name, "GetOverlappedResult")) return reinterpret_cast<uintptr_t>(&get_overlapped_result); }
     if (kernel || io) { K32_FILE(CancelIo); }
     if (kernel || io) { K32_FILE(CancelIoEx); }
     if (kernel) { K32_FILE(CreatePipe); }

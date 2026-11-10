@@ -22,6 +22,10 @@ jobs:
         run: bash src/xbox-test/uwph/input/tests/run-route-test.sh
       - name: DPI awareness context encoding
         run: bash src/xbox-test/uwph/user32/tests/run-dpi-context-test.sh
+      - name: synthetic pad HID device layout
+        run: bash src/xbox-test/uwph/hid/tests/run-pad-device-test.sh
+      - name: synthetic pad handle registry and hid.dll answers
+        run: bash src/xbox-test/uwph/hid/tests/run-pad-registry-test.sh
       - name: offline unit tests
         run: |
           set -e
