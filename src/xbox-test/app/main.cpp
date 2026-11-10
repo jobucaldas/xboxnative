@@ -577,6 +577,7 @@ static void dl_thread() {
 #include "launch.h"
 #include "launch_picker.h"
 #include "launch_report.h"
+#include "selftest.h"
 #include "guest_overlay.h"
 #include "../uwph/user32/corewindow_feed.h"
 #include "game_delete.h"
@@ -1569,6 +1570,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         play_graphics::configure((::IUnknown*)winrt::get_abi(m_window),GuestSurface,
             [](const char* message){if(play_runtime::state)play_runtime::state->event(message);});
         std::thread(net_thread).detach();
+        // The console self-test (selftest.h): a LocalState\selftest.txt request,
+        // or a queue a restart did not finish, runs the packaged diag fixtures
+        // through Play and appends SELFTEST RESULT lines to LocalState\selftest.log.
+        if (selftest::resume()) selftest::run_async(m_window.Dispatcher());
         double lastBeat = 0;
         while (!m_closed) {
             m_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
@@ -1579,6 +1584,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             if (n) rd = pads.GetAt(0).GetCurrentReading();
             input(t, rd, n > 0);
             autotest(t); cmdhook(t); detail_tick(t);
+            if (selftest::tick()) selftest::run_async(m_window.Dispatcher());
             if(m_guestSurface){guest_menu(t,n?rd.Buttons:GamepadButtons::None);Sleep(1);continue;}
             draw(t);
             m_ctx->UpdateSubresource(m_bb.get(), 0, nullptr, g_fb.data(), W * 4, 0);

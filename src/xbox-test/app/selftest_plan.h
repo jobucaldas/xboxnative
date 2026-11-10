@@ -1,0 +1,142 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The console self-test's decisions, with no Windows dependency: which packaged
+// fixtures exist, what a request file asks for, how the queue survives a
+// launcher restart, and what a fixture's exit code means. selftest.h does the
+// Play work and calls these; the off-device test (tests/selftest-plan-test.cpp)
+// compiles this file alone.
+#pragma once
+#include <algorithm>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace selftest_plan {
+// The fixtures app/build.sh packs into layout\diag. `pe32` runs in the x86
+// interpreter instead of Play's 64-bit loader, so it needs no launcher restart.
+struct Mode {
+    const char* name;
+    const char* exe;
+    bool pe32;
+};
+inline const Mode* modes(size_t& count) {
+    static const Mode table[] = {
+        {"x86", "fixture-crt.exe", true},
+        {"vulkan-dzn", "play-vulkan-dzn.exe", false},
+        {"d3d9", "play-d3d9.exe", false},
+        {"d3d10", "play-d3d10.exe", false},
+    };
+    count = sizeof(table) / sizeof(*table);
+    return table;
+}
+inline const Mode* find(const std::string& name) {
+    size_t count = 0;
+    const Mode* table = modes(count);
+    for (size_t i = 0; i < count; ++i) if (name == table[i].name) return &table[i];
+    return nullptr;
+}
+inline std::string trim(const std::string& s) {
+    size_t start = 0, end = s.size();
+    while (start < end && (s[start] == ' ' || s[start] == '\t' || s[start] == '\r')) ++start;
+    while (end > start && (s[end - 1] == ' ' || s[end - 1] == '\t' || s[end - 1] == '\r')) --end;
+    return s.substr(start, end - start);
+}
+inline std::string lower(std::string s) {
+    for (auto& c : s) if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+    return s;
+}
+// A request file: one mode per line, blank lines and '#' comments ignored,
+// case-insensitive. "all" asks for every fixture in the canonical order (x86
+// first: it costs no launcher restart). Unknown names are kept so the run can
+// report them as SKIP instead of silently dropping them.
+inline std::vector<std::string> parse_request(const std::string& text) {
+    std::vector<std::string> out;
+    bool all = false;
+    size_t pos = 0;
+    while (pos <= text.size()) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string line = lower(trim(text.substr(pos, end - pos)));
+        pos = end + 1;
+        if (line.empty() || line[0] == '#') continue;
+        if (line == "all") { all = true; continue; }
+        if (std::find(out.begin(), out.end(), line) == out.end()) out.push_back(line);
+    }
+    if (!all) return out;
+    out.clear();
+    size_t count = 0;
+    const Mode* table = modes(count);
+    for (size_t i = 0; i < count; ++i) out.push_back(table[i].name);
+    return out;
+}
+// The queue file carries a request across launcher restarts: Play starts one
+// 64-bit guest per process, so each fixture needs its own launch. `restarts`
+// bounds a launcher that restarts without making progress.
+struct Queue {
+    int restarts = 0;
+    std::vector<std::string> pending;
+};
+inline std::string format_queue(const Queue& q) {
+    std::string out = "restarts " + std::to_string(q.restarts) + "\n";
+    for (auto& name : q.pending) out += "mode " + name + "\n";
+    return out;
+}
+inline bool parse_queue(const std::string& text, Queue& q) {
+    q = Queue{};
+    bool restarts = false;
+    size_t pos = 0;
+    while (pos <= text.size()) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string line = trim(text.substr(pos, end - pos));
+        pos = end + 1;
+        if (line.empty()) continue;
+        if (line.rfind("restarts ", 0) == 0) {
+            try { q.restarts = std::stoi(line.substr(9)); } catch (...) { return false; }
+            restarts = true;
+        } else if (line.rfind("mode ", 0) == 0) {
+            q.pending.push_back(trim(line.substr(5)));
+        } else return false;
+    }
+    return restarts;
+}
+// What a finished fixture's exit code means. The fixtures return 42 when every
+// step succeeded; the Vulkan one returns 43 when the host's D3D12 refuses dzn's
+// device, which is BLOCKED (the platform said no), never a pass. A guest that
+// ran code but never exited (a fault, a hang) is a failure, and the caller's
+// detail line says which.
+inline std::string verdict(const std::string& mode, bool finished, bool executed, uint32_t code) {
+    if (!executed) return "FAIL no-guest-code";
+    if (!finished) return "FAIL did-not-exit";
+    if (mode == "vulkan-dzn") {
+        if (code == 42) return "PASS frame-presented";
+        if (code == 43) return "BLOCKED device-creation";
+    }
+    if (code == 42) return "PASS";
+    return "FAIL exit-" + std::to_string(code);
+}
+struct Tally { int pass = 0, fail = 0, blocked = 0, skip = 0; };
+// Counts the "SELFTEST RESULT <mode> <verdict>" lines a request produced. The
+// log is appended across restarts, so this is the whole request's record.
+inline Tally tally(const std::string& log) {
+    Tally t;
+    size_t pos = 0;
+    while (pos < log.size()) {
+        size_t end = log.find('\n', pos);
+        if (end == std::string::npos) end = log.size();
+        std::string line = log.substr(pos, end - pos);
+        pos = end + 1;
+        static const std::string prefix = "SELFTEST RESULT ";
+        if (line.rfind(prefix, 0) != 0) continue;
+        size_t nameEnd = line.find(' ', prefix.size());
+        if (nameEnd == std::string::npos) continue;
+        size_t verdictStart = line.find_first_not_of(' ', nameEnd);
+        if (verdictStart == std::string::npos) continue;
+        std::string word = line.substr(verdictStart, line.find(' ', verdictStart) - verdictStart);
+        if (word == "PASS") ++t.pass;
+        else if (word == "FAIL") ++t.fail;
+        else if (word == "BLOCKED") ++t.blocked;
+        else if (word == "SKIP") ++t.skip;
+    }
+    return t;
+}
+}
