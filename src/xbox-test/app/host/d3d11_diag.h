@@ -17,6 +17,21 @@
 // target sets by format and size, clears, and deferred-context command lists.
 // Those are counted with relaxed atomics (no per-call logging) and summarised
 // through the sink every ~10 s for the first minutes.
+// A draw can also be submitted without a count: DrawAuto, the indirect draws
+// (the arguments live in a GPU buffer) and DispatchIndirect. Those carry the
+// same topology and shader state, so they are bucketed the same way; a summary
+// that only counts the direct draws cannot tell whether a tessellated layer
+// was submitted at all. Render targets set together with UAVs
+// (OMSetRenderTargetsAndUnorderedAccessViews), MSAA resolves and resource
+// copies are counted for the same reason: a layer that renders into its own
+// target and is then resolved/copied into the frame is invisible in a
+// direct-draw-only summary. Draws are also bucketed by the format of the
+// target they were submitted to. Null shader-resource entries are counted per
+// stage, because a layer that samples a texture the guest never bound renders
+// black with no failed call anywhere. The arguments of an indirect draw are
+// read where the guest writes them (CreateBuffer's initial data,
+// UpdateSubresource, and the Unmap of a write-only Map), so a zero-count
+// submission is visible.
 #pragma once
 #include <d3d11.h>
 #include <d3d11_1.h>
@@ -56,12 +71,18 @@ static_assert(CheckFeatureSupport==33&&CreateDeferredContext==27&&CreateSamplerS
 // ID3D11DeviceContext slots (ID3D11DeviceChild's 3 come first). Only the ones
 // the draw summary reads are named.
 enum ContextSlot {
-    DrawIndexed=12,Draw=13,DrawIndexedInstanced=20,DrawInstanced=21,IASetPrimitiveTopology=24,OMSetRenderTargets=33,
-    Dispatch=41,ClearRenderTargetView=50,ClearDepthStencilView=53,ExecuteCommandList=58,HSSetShader=60,DSSetShader=64,
-    FinishCommandList=114
+    PSSetShaderResources=8,DrawIndexed=12,Draw=13,Map=14,Unmap=15,DrawIndexedInstanced=20,DrawInstanced=21,IASetPrimitiveTopology=24,
+    VSSetShaderResources=25,SetPredication=30,OMSetRenderTargets=33,
+    OMSetRenderTargetsAndUnorderedAccessViews=34,DrawAuto=38,DrawIndexedInstancedIndirect=39,DrawInstancedIndirect=40,
+    Dispatch=41,DispatchIndirect=42,CopySubresourceRegion=46,CopyResource=47,UpdateSubresource=48,
+    ClearRenderTargetView=50,ClearDepthStencilView=53,ResolveSubresource=57,ExecuteCommandList=58,HSSetShaderResources=59,HSSetShader=60,
+    DSSetShaderResources=63,DSSetShader=64,FinishCommandList=114
 };
-static_assert(ContextMap==14&&DrawIndexed==12&&DrawIndexedInstanced==20&&OMSetRenderTargets==33&&
-    ExecuteCommandList==58&&HSSetShader==60&&DSSetShader==64&&FinishCommandList==114,"ID3D11DeviceContext slot layout");
+static_assert(ContextMap==14&&Unmap==15&&DrawIndexed==12&&DrawIndexedInstanced==20&&OMSetRenderTargets==33&&
+    OMSetRenderTargetsAndUnorderedAccessViews==34&&DrawAuto==38&&DrawIndexedInstancedIndirect==39&&
+    DrawInstancedIndirect==40&&DispatchIndirect==42&&UpdateSubresource==48&&
+    ResolveSubresource==57&&ExecuteCommandList==58&&HSSetShader==60&&DSSetShader==64&&FinishCommandList==114,
+    "ID3D11DeviceContext slot layout");
 
 // ---- reporting: once per key, bounded
 inline std::mutex reportM;
@@ -139,14 +160,20 @@ inline uint64_t fnv(const void* data,size_t n,uint64_t h=1469598103934665603ull)
 // kSummaryWindows windows. Nothing here changes a call's result.
 constexpr ULONGLONG kSummaryMs=10000;
 constexpr unsigned kSummaryWindows=7;   // ~70 s, then one line saying so
-// Upper bound on the lines the summary can print: 11 fixed lines and up to
+// Draw kinds the summary buckets. The last three take their counts from a GPU
+// buffer (or, for DrawAuto, from the stream-output state), so a game whose
+// terrain goes through them shows nothing in a direct-draw-only summary.
+constexpr int kDrawKinds=7;
+constexpr int kDrawAuto=4,kDrawIndexedIndirect=5,kDrawInstancedIndirect=6;
+// Upper bound on the lines the summary can print: the fixed lines and up to
 // kMaxRtvKinds render-target lines per window, one line per draw bucket
-// (4 kinds x patchlist x hull/domain), one per described render target view,
+// (kDrawKinds x patchlist x hull/domain), one per described render target view,
 // and the closing line.
-constexpr size_t kMaxDrawBuckets=16;
+constexpr size_t kMaxDrawBuckets=size_t(kDrawKinds)*4;
 constexpr size_t kMaxRtvKinds=24;
 constexpr size_t kMaxRtvViews=32;
-constexpr size_t kMaxSummaryLines=kSummaryWindows*(11+kMaxRtvKinds)+kMaxDrawBuckets+kMaxRtvViews+2;
+constexpr size_t kFixedSummaryLines=16;   // topology, kDrawKinds, dispatch, lists, shaders, targets, UAVs, resources, formats, main target
+constexpr size_t kMaxSummaryLines=kSummaryWindows*(kFixedSummaryLines+kMaxRtvKinds+kMaxDrawBuckets)+kMaxDrawBuckets+kMaxRtvViews+2;
 inline std::atomic<bool> summaryStarted{false};
 inline std::atomic<unsigned> summaryWindows{0};
 inline std::atomic<ULONGLONG> summaryNext{0};
@@ -158,6 +185,7 @@ struct ContextState {
     std::atomic<void*> context{nullptr};
     std::atomic<unsigned> topology{0};
     std::atomic<unsigned> shaders{0};
+    std::atomic<unsigned> rtFormat{0};   // format of the first render target bound
 };
 constexpr size_t kMaxContexts=32;
 inline ContextState contextStates[kMaxContexts];
@@ -179,14 +207,76 @@ inline ContextState& stateOf(void* self) {
 inline void resetContext(void* self) {
     ContextState& s=stateOf(self);
     s.topology.store(0,std::memory_order_relaxed);s.shaders.store(0,std::memory_order_relaxed);
+    s.rtFormat.store(0,std::memory_order_relaxed);
 }
-inline std::atomic<uint64_t> draws[4][2][2];     // [kind][patchlist][hull+domain]
-inline std::atomic<uint64_t> zeroCounts[4];      // draws with 0 index/vertex/instance count
-inline std::atomic<uint64_t> dispatches,dispatchZero,commandLists,executedLists;
+inline std::atomic<uint64_t> draws[kDrawKinds][2][2];   // [kind][patchlist][hull+domain]
+// Draws per render-target format. A layer that renders into an off-screen
+// target (deferred/HDR) and is then tonemapped into the backbuffer shows up
+// here as draws into that format and none into the swapchain's; a layer that
+// is drawn but never composited shows up as draws into a format the frame
+// never receives.
+constexpr size_t kMaxDrawFormats=16;
+inline std::atomic<unsigned> drawFormatValue[kMaxDrawFormats];
+inline std::atomic<uint64_t> drawFormatCount[kMaxDrawFormats];
+inline std::atomic<unsigned> drawFormatUsed{0};
+inline void countDrawFormat(unsigned format) {
+    if(!format)return;
+    unsigned used=drawFormatUsed.load(std::memory_order_relaxed);
+    for(unsigned i=0;i<used&&i<kMaxDrawFormats;++i)
+        if(drawFormatValue[i].load(std::memory_order_relaxed)==format) {
+            drawFormatCount[i].fetch_add(1,std::memory_order_relaxed);return;
+        }
+    for(unsigned i=0;i<kMaxDrawFormats;++i) {
+        unsigned expected=0;
+        if(drawFormatValue[i].compare_exchange_strong(expected,format,std::memory_order_acq_rel)) {
+            drawFormatCount[i].fetch_add(1,std::memory_order_relaxed);
+            unsigned n=drawFormatUsed.load(std::memory_order_relaxed);
+            while(n<i+1&&!drawFormatUsed.compare_exchange_weak(n,i+1,std::memory_order_acq_rel)) {}
+            return;
+        }
+    }
+}
+inline std::atomic<uint64_t> zeroCounts[kDrawKinds];    // draws with 0 index/vertex/instance count
+inline std::atomic<uint64_t> dispatches,dispatchZero,dispatchIndirects,commandLists,executedLists;
 inline std::atomic<uint64_t> shaderCreates[6];   // vs gs ps hs ds cs, successful
 inline std::atomic<uint64_t> clears[2];          // render target, depth stencil
 inline std::atomic<uint64_t> rtvSets;            // OMSetRenderTargets with a render target
 inline std::atomic<uint64_t> rtvUnknown;         // ... whose view or resource could not be read
+inline std::atomic<uint64_t> rtvUavSets;         // OMSetRenderTargetsAndUnorderedAccessViews with a view
+inline std::atomic<uint64_t> uavSets;            // ... and with at least one UAV
+inline std::atomic<uint64_t> resolves;           // ResolveSubresource (MSAA -> single sample)
+inline std::atomic<uint64_t> copies;             // CopyResource + CopySubresourceRegion
+inline std::atomic<uint64_t> srvSets[4];         // SetShaderResources calls, vs ps hs ds
+inline std::atomic<uint64_t> srvNulls[4];        // ... with at least one null entry (an unbound texture)
+inline std::atomic<uint64_t> predicated;         // SetPredication with a predicate object
+// Buffers the guest created for indirect draw arguments, so a later
+// UpdateSubresource/Map of one can be read without a GetDesc per call. The
+// mapped pointer is kept per buffer because a write-only Map is read back
+// after Unmap, when the guest has finished writing.
+constexpr size_t kMaxIndirectBuffers=64;
+inline std::atomic<void*> indirectBuffers[kMaxIndirectBuffers];
+inline std::atomic<void*> indirectMapped[kMaxIndirectBuffers];
+inline void noteIndirectBuffer(void* buffer) {
+    for(size_t i=0;i<kMaxIndirectBuffers;++i) {
+        void* expected=nullptr;
+        if(indirectBuffers[i].compare_exchange_strong(expected,buffer,std::memory_order_acq_rel))return;
+        if(expected==buffer)return;
+    }
+}
+inline int indirectIndex(void* buffer) {
+    for(size_t i=0;i<kMaxIndirectBuffers;++i) if(indirectBuffers[i].load(std::memory_order_relaxed)==buffer)return int(i);
+    return -1;
+}
+inline bool isIndirectBuffer(void* buffer) {return indirectIndex(buffer)>=0;}
+// The five words of an indirect draw's arguments (index/vertex count,
+// instances, start index, base vertex, start instance). A zero count submits
+// no work: that is what a silently missing layer looks like when the
+// submission is indirect.
+inline std::string indirectArgsText(const void* data,size_t bytes) {
+    if(!data||bytes<20)return "args=short";
+    const UINT* a=static_cast<const UINT*>(data);
+    return fmt("count=%u instances=%u startIndex=%u baseVertex=%u startInstance=%u",a[0],a[1],a[2],a[3],a[4]);
+}
 inline std::mutex rtvM;
 inline std::vector<std::string> rtvKinds;        // distinct "fmt WxH" bound as render target
 inline std::atomic<void*> rtvViews[kMaxRtvViews];   // views already described: no GetDesc per frame
@@ -213,7 +303,8 @@ inline std::string topologyName(unsigned t) {
 // effect tessellates, so this is the bucket that says whether it ran.
 inline bool patchList(unsigned t){return t>=33&&t<=64;}
 inline const char* drawKindName(int k){
-    static const char* names[]={"DrawIndexed","Draw","DrawIndexedInstanced","DrawInstanced"};return names[k];
+    static const char* names[kDrawKinds]={"DrawIndexed","Draw","DrawIndexedInstanced","DrawInstanced",
+        "DrawAuto","DrawIndexedInstancedIndirect","DrawInstancedIndirect"};return names[k];
 }
 inline std::string rtvText(ID3D11RenderTargetView* view) {
     if(!view)return "null";
@@ -265,7 +356,7 @@ inline void printSummary(unsigned window) {
     unsigned t=lastTopology.load(std::memory_order_relaxed);
     emit(fmt("draw summary %u/%u: last topology=%u(%s) contexts=%u deferred=%u",window,kSummaryWindows,t,topologyName(t).c_str(),
         contextsPatched.load(),deferredContexts.load()));
-    for(int k=0;k<4;++k) {
+    for(int k=0;k<kDrawKinds;++k) {
         uint64_t total=0,patched=0,withHull=0,zero=zeroCounts[k].load(std::memory_order_relaxed);
         for(int p=0;p<2;++p)for(int h=0;h<2;++h) {
             uint64_t n=draws[k][p][h].load(std::memory_order_relaxed);
@@ -275,16 +366,38 @@ inline void printSummary(unsigned window) {
         emit(fmt("draw summary %u/%u: %s calls=%llu patchlist=%llu hull-domain=%llu zero-count=%llu",window,kSummaryWindows,drawKindName(k),
             (unsigned long long)total,(unsigned long long)patched,(unsigned long long)withHull,(unsigned long long)zero));
     }
-    uint64_t d=dispatches.load(std::memory_order_relaxed);
-    if(d||dispatchZero.load(std::memory_order_relaxed))
-        emit(fmt("draw summary %u/%u: Dispatch calls=%llu zero-groups=%llu",window,kSummaryWindows,(unsigned long long)d,(unsigned long long)dispatchZero.load()));
-    emit(fmt("draw summary %u/%u: command lists finish=%llu execute=%llu",window,kSummaryWindows,
-        (unsigned long long)commandLists.load(),(unsigned long long)executedLists.load()));
+    uint64_t d=dispatches.load(std::memory_order_relaxed),di=dispatchIndirects.load(std::memory_order_relaxed);
+    if(d||di||dispatchZero.load(std::memory_order_relaxed))
+        emit(fmt("draw summary %u/%u: Dispatch calls=%llu indirect=%llu zero-groups=%llu",window,kSummaryWindows,
+            (unsigned long long)d,(unsigned long long)di,(unsigned long long)dispatchZero.load()));
+    emit(fmt("draw summary %u/%u: command lists finish=%llu execute=%llu predicated=%llu",window,kSummaryWindows,
+        (unsigned long long)commandLists.load(),(unsigned long long)executedLists.load(),(unsigned long long)predicated.load()));
     emit(fmt("draw summary %u/%u: shader creates vs=%llu gs=%llu ps=%llu hs=%llu ds=%llu cs=%llu",window,kSummaryWindows,
         (unsigned long long)shaderCreates[0].load(),(unsigned long long)shaderCreates[1].load(),(unsigned long long)shaderCreates[2].load(),
         (unsigned long long)shaderCreates[3].load(),(unsigned long long)shaderCreates[4].load(),(unsigned long long)shaderCreates[5].load()));
     emit(fmt("draw summary %u/%u: render targets sets=%llu unreadable=%llu clears=rt %llu/ds %llu",window,kSummaryWindows,
         (unsigned long long)rtvSets.load(),(unsigned long long)rtvUnknown.load(),(unsigned long long)clears[0].load(),(unsigned long long)clears[1].load()));
+    // A layer that renders into its own target and is then resolved or copied
+    // into the frame never appears as a draw into the swapchain.
+    emit(fmt("draw summary %u/%u: targets with UAVs sets=%llu uav=%llu resolves=%llu copies=%llu",window,kSummaryWindows,
+        (unsigned long long)rtvUavSets.load(),(unsigned long long)uavSets.load(),
+        (unsigned long long)resolves.load(),(unsigned long long)copies.load()));
+    // Null entries are the textures the guest never bound: a black layer with
+    // no failed call is what that looks like.
+    emit(fmt("draw summary %u/%u: shader resources vs=%llu/%llu ps=%llu/%llu hs=%llu/%llu ds=%llu/%llu (null sets)",
+        window,kSummaryWindows,(unsigned long long)srvSets[0].load(),(unsigned long long)srvNulls[0].load(),
+        (unsigned long long)srvSets[1].load(),(unsigned long long)srvNulls[1].load(),(unsigned long long)srvSets[2].load(),
+        (unsigned long long)srvNulls[2].load(),(unsigned long long)srvSets[3].load(),(unsigned long long)srvNulls[3].load()));
+    // Draws per target format: the format the swapchain presents vs the ones
+    // the guest renders into and may or may not composite.
+    unsigned formatUsed=drawFormatUsed.load(std::memory_order_relaxed);
+    std::string formats;
+    for(unsigned i=0;i<formatUsed&&i<kMaxDrawFormats;++i) {
+        unsigned f=drawFormatValue[i].load(std::memory_order_relaxed);
+        if(!formats.empty())formats+=" ";
+        formats+=fmt("%s=%llu",formatText(DXGI_FORMAT(f)).c_str(),(unsigned long long)drawFormatCount[i].load(std::memory_order_relaxed));
+    }
+    if(!formats.empty())emit(fmt("draw summary %u/%u: draws by target format %s",window,kSummaryWindows,formats.c_str()));
     std::vector<std::string> kinds;
     {std::lock_guard<std::mutex> lock(rtvM);kinds=rtvKinds;}
     for(auto& k:kinds)emit(fmt("draw summary %u/%u: render target %s",window,kSummaryWindows,k.c_str()));
@@ -404,6 +517,20 @@ static HRESULT STDMETHODCALLTYPE createBuffer(DevicePtr self,const D3D11_BUFFER_
     if(FAILED(hr)&&d)D3D11_DIAG_FAILED("CreateBuffer",fmt("%x/%d/%x/%x/%u/%d",d->BindFlags,int(d->Usage),d->MiscFlags,d->CPUAccessFlags,d->StructureByteStride,init!=nullptr),
         fmt("bytes=%u bind=0x%x usage=%d cpu=0x%x misc=0x%x stride=%u init=%d",d->ByteWidth,d->BindFlags,int(d->Usage),d->CPUAccessFlags,d->MiscFlags,d->StructureByteStride,init!=nullptr));
     else if(FAILED(hr))D3D11_DIAG_FAILED("CreateBuffer","null","desc=null");
+    // An indirect draw's arguments live in a buffer. When the guest supplies
+    // them at creation the counts are visible here; a zero index/vertex count
+    // is a draw that submits no work, which is what a silently missing layer
+    // looks like when the submission is indirect.
+    if(SUCCEEDED(hr)&&d&&(d->MiscFlags&D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS)) {
+        if(out&&*out)noteIndirectBuffer(*out);
+        std::string words="no-initial-data (written by the GPU or later)";
+        if(init&&init->pSysMem&&d->ByteWidth>=20) {
+            const UINT* a=static_cast<const UINT*>(init->pSysMem);
+            words=fmt("index=%u instances=%u startIndex=%u baseVertex=%u startInstance=%u",a[0],a[1],a[2],a[3],a[4]);
+        }
+        report(true,fmt("indirect args buffer %u/%x/%d/%s",d->ByteWidth,d->BindFlags,int(d->Usage),words.c_str()),
+            fmt("indirect args buffer bytes=%u bind=0x%x usage=%d %s",d->ByteWidth,d->BindFlags,int(d->Usage),words.c_str()));
+    }
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createTexture1D(DevicePtr self,const D3D11_TEXTURE1D_DESC* d,const D3D11_SUBRESOURCE_DATA* init,ID3D11Texture1D** out) {
@@ -583,10 +710,29 @@ inline bool patchContext(ID3D11DeviceContext* context);
 static HRESULT STDMETHODCALLTYPE contextMap(DevicePtr self,ID3D11Resource* r,UINT subresource,D3D11_MAP type,UINT flags,D3D11_MAPPED_SUBRESOURCE* mapped) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT,D3D11_MAP,UINT,D3D11_MAPPED_SUBRESOURCE*);
     auto call=reinterpret_cast<Fn>(original(self,ContextMap));if(!call)return E_FAIL;
+    // A write-only Map of an indirect-arguments buffer is the guest uploading
+    // the counts: remember the pointer and read it back at Unmap.
+    int indirect=indirectIndex(r);
     HRESULT hr=call(self,r,subresource,type,flags,mapped);
+    if(SUCCEEDED(hr)&&indirect>=0&&mapped&&mapped->pData&&
+            (type==D3D11_MAP_WRITE||type==D3D11_MAP_WRITE_DISCARD||type==D3D11_MAP_WRITE_NO_OVERWRITE))
+        indirectMapped[indirect].store(mapped->pData,std::memory_order_relaxed);
     if(FAILED(hr)&&hr!=DXGI_ERROR_WAS_STILL_DRAWING)   // expected with D3D11_MAP_FLAG_DO_NOT_WAIT
         D3D11_DIAG_FAILED("Map",fmt("%d/%x/%s",int(type),flags,resourceKey(r).c_str()),fmt("type=%d flags=0x%x subresource=%u %s",int(type),flags,subresource,resourceText(r).c_str()));
     return hr;
+}
+static void STDMETHODCALLTYPE contextUnmap(DevicePtr self,ID3D11Resource* r,UINT subresource) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT);
+    auto call=reinterpret_cast<Fn>(original(self,Unmap));if(!call)return;
+    int indirect=indirectIndex(r);
+    if(indirect>=0) {
+        void* data=indirectMapped[indirect].exchange(nullptr,std::memory_order_relaxed);
+        if(data) {
+            std::string text=indirectArgsText(data,20);
+            report(true,fmt("indirect args upload %s",text.c_str()),fmt("indirect args upload %s",text.c_str()));
+        }
+    }
+    call(self,r,subresource);
 }
 // One counter per draw, bucketed by the topology last set on this context and
 // by whether a hull and a domain shader are bound there. A bucket seen for the
@@ -598,8 +744,25 @@ inline void countDraw(void* self,int kind,unsigned count,unsigned instances) {
     unsigned s=state.shaders.load(std::memory_order_relaxed);
     bool patch=patchList(t),hull=(s&3)==3;
     draws[kind][patch?1:0][hull?1:0].fetch_add(1,std::memory_order_relaxed);
-    if(!count||(kind>=2&&!instances))zeroCounts[kind].fetch_add(1,std::memory_order_relaxed);
-    static std::atomic<bool> named[4][2][2];
+    countDrawFormat(state.rtFormat.load(std::memory_order_relaxed));
+    if(!count||(kind>=2&&kind<4&&!instances))zeroCounts[kind].fetch_add(1,std::memory_order_relaxed);
+    static std::atomic<bool> named[kDrawKinds][2][2];
+    if(!named[kind][patch?1:0][hull?1:0].exchange(true,std::memory_order_relaxed))
+        emit(fmt("draw summary: first %s topology=%u(%s) hs/ds=%s",drawKindName(kind),t,topologyName(t).c_str(),
+            hull?"both":((s&1)?"hs":((s&2)?"ds":"none"))));
+    tick();
+}
+// The indirect kinds and DrawAuto carry no counts on the CPU side: the
+// arguments live in a GPU buffer (or in the stream-output state), so the
+// bucket is all that can be said.
+inline void countDrawUnknown(void* self,int kind) {
+    ContextState& state=stateOf(self);
+    unsigned t=state.topology.load(std::memory_order_relaxed);
+    unsigned s=state.shaders.load(std::memory_order_relaxed);
+    bool patch=patchList(t),hull=(s&3)==3;
+    draws[kind][patch?1:0][hull?1:0].fetch_add(1,std::memory_order_relaxed);
+    countDrawFormat(state.rtFormat.load(std::memory_order_relaxed));
+    static std::atomic<bool> named[kDrawKinds][2][2];
     if(!named[kind][patch?1:0][hull?1:0].exchange(true,std::memory_order_relaxed))
         emit(fmt("draw summary: first %s topology=%u(%s) hs/ds=%s",drawKindName(kind),t,topologyName(t).c_str(),
             hull?"both":((s&1)?"hs":((s&2)?"ds":"none"))));
@@ -625,6 +788,30 @@ static void STDMETHODCALLTYPE contextDrawInstanced(DevicePtr self,UINT vertexCou
     auto call=reinterpret_cast<Fn>(original(self,DrawInstanced));if(!call)return;
     countDraw(self,3,vertexCount,instances);call(self,vertexCount,instances,startVertex,startInstance);
 }
+// Draws whose counts the guest keeps on the GPU. They are the paths a
+// tessellated or GPU-generated layer uses, and the direct-draw counters above
+// cannot see them.
+static void STDMETHODCALLTYPE contextDrawAuto(DevicePtr self) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr);
+    auto call=reinterpret_cast<Fn>(original(self,DrawAuto));if(!call)return;
+    countDrawUnknown(self,kDrawAuto);call(self);
+}
+static void STDMETHODCALLTYPE contextDrawIndexedInstancedIndirect(DevicePtr self,ID3D11Buffer* buffer,UINT offset) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Buffer*,UINT);
+    auto call=reinterpret_cast<Fn>(original(self,DrawIndexedInstancedIndirect));if(!call)return;
+    countDrawUnknown(self,kDrawIndexedIndirect);call(self,buffer,offset);
+}
+static void STDMETHODCALLTYPE contextDrawInstancedIndirect(DevicePtr self,ID3D11Buffer* buffer,UINT offset) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Buffer*,UINT);
+    auto call=reinterpret_cast<Fn>(original(self,DrawInstancedIndirect));if(!call)return;
+    countDrawUnknown(self,kDrawInstancedIndirect);call(self,buffer,offset);
+}
+static void STDMETHODCALLTYPE contextDispatchIndirect(DevicePtr self,ID3D11Buffer* buffer,UINT offset) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Buffer*,UINT);
+    auto call=reinterpret_cast<Fn>(original(self,DispatchIndirect));if(!call)return;
+    dispatchIndirects.fetch_add(1,std::memory_order_relaxed);
+    call(self,buffer,offset);tick();
+}
 static void STDMETHODCALLTYPE contextIASetPrimitiveTopology(DevicePtr self,D3D11_PRIMITIVE_TOPOLOGY t) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,D3D11_PRIMITIVE_TOPOLOGY);
     auto call=reinterpret_cast<Fn>(original(self,IASetPrimitiveTopology));if(!call)return;
@@ -646,30 +833,67 @@ static void STDMETHODCALLTYPE contextDSSetShader(DevicePtr self,ID3D11DomainShad
     if(shader)s.fetch_or(2,std::memory_order_relaxed);else s.fetch_and(~2u,std::memory_order_relaxed);
     call(self,shader,instances,count);
 }
+// Describes the render target views of an OM set once per distinct view.
+inline void noteRenderTargets(UINT count,ID3D11RenderTargetView* const* views) {
+    if(!count||!views)return;
+    rtvSets.fetch_add(1,std::memory_order_relaxed);
+    for(UINT i=0;i<count;++i) {
+        ID3D11RenderTargetView* view=views[i];if(!view)continue;
+        bool known=false;
+        for(auto& seen:rtvViews) if(seen.load(std::memory_order_relaxed)==view){known=true;break;}
+        if(known)continue;
+        std::string text=rtvText(view);
+        if(text=="unknown"||text=="no-resource"){rtvUnknown.fetch_add(1,std::memory_order_relaxed);continue;}
+        for(auto& seen:rtvViews) {
+            void* expected=nullptr;
+            if(seen.compare_exchange_strong(expected,view,std::memory_order_acq_rel))break;
+        }
+        {
+            std::lock_guard<std::mutex> lock(rtvM);
+            noteKind(rtvKinds,text,kMaxRtvKinds);
+        }
+        emit(fmt("draw summary: first render target %s",text.c_str()));
+    }
+}
+// The first view's format is what the draw-format counter buckets by: it is
+// the target the layer writes, and a summary that shows no draws into the
+// swapchain's format says the layer never reaches the frame.
+inline void noteRenderTargetFormat(void* self,UINT count,ID3D11RenderTargetView* const* views) {
+    if(!count||!views||!views[0])return;
+    D3D11_RENDER_TARGET_VIEW_DESC v{};
+    views[0]->GetDesc(&v);
+    stateOf(self).rtFormat.store(unsigned(v.Format),std::memory_order_relaxed);
+}
 static void STDMETHODCALLTYPE contextOMSetRenderTargets(DevicePtr self,UINT count,ID3D11RenderTargetView* const* views,ID3D11DepthStencilView* depth) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*);
     auto call=reinterpret_cast<Fn>(original(self,OMSetRenderTargets));if(!call)return;
-    if(count&&views) {
-        rtvSets.fetch_add(1,std::memory_order_relaxed);
-        for(UINT i=0;i<count;++i) {
-            ID3D11RenderTargetView* view=views[i];if(!view)continue;
-            bool known=false;
-            for(auto& seen:rtvViews) if(seen.load(std::memory_order_relaxed)==view){known=true;break;}
-            if(known)continue;
-            std::string text=rtvText(view);
-            if(text=="unknown"||text=="no-resource"){rtvUnknown.fetch_add(1,std::memory_order_relaxed);continue;}
-            for(auto& seen:rtvViews) {
-                void* expected=nullptr;
-                if(seen.compare_exchange_strong(expected,view,std::memory_order_acq_rel))break;
-            }
-            {
-                std::lock_guard<std::mutex> lock(rtvM);
-                noteKind(rtvKinds,text,kMaxRtvKinds);
-            }
-            emit(fmt("draw summary: first render target %s",text.c_str()));
-        }
-    }
+    noteRenderTargets(count,views);
+    noteRenderTargetFormat(self,count,views);
     call(self,count,views,depth);
+}
+// The same bind with UAVs: a layer that writes through UAVs (or renders into a
+// target it later reads back) binds its targets this way, not through
+// OMSetRenderTargets.
+static void STDMETHODCALLTYPE contextOMSetRenderTargetsAndUnorderedAccessViews(DevicePtr self,UINT count,ID3D11RenderTargetView* const* views,
+        ID3D11DepthStencilView* depth,UINT uavStart,UINT uavCount,ID3D11UnorderedAccessView* const* uavs,const UINT* initialCounts) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*,UINT,UINT,ID3D11UnorderedAccessView* const*,const UINT*);
+    auto call=reinterpret_cast<Fn>(original(self,OMSetRenderTargetsAndUnorderedAccessViews));if(!call)return;
+    rtvUavSets.fetch_add(1,std::memory_order_relaxed);
+    if(uavCount&&uavs)uavSets.fetch_add(1,std::memory_order_relaxed);
+    noteRenderTargets(count,views);
+    noteRenderTargetFormat(self,count,views);
+    call(self,count,views,depth,uavStart,uavCount,uavs,initialCounts);tick();
+}
+// Null entries in a shader-resource bind are textures the guest never set: a
+// layer that samples one renders black without any call failing.
+template<int Slot,int Stage>
+static void STDMETHODCALLTYPE contextSetShaderResources(DevicePtr self,UINT start,UINT count,ID3D11ShaderResourceView* const* views) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,ID3D11ShaderResourceView* const*);
+    auto call=reinterpret_cast<Fn>(original(self,Slot));if(!call)return;
+    srvSets[Stage].fetch_add(1,std::memory_order_relaxed);
+    if(!views||!count)srvNulls[Stage].fetch_add(1,std::memory_order_relaxed);
+    else for(UINT i=0;i<count;++i) if(!views[i]){srvNulls[Stage].fetch_add(1,std::memory_order_relaxed);break;}
+    call(self,start,count,views);
 }
 static void STDMETHODCALLTYPE contextDispatch(DevicePtr self,UINT x,UINT y,UINT z) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,UINT);
@@ -687,6 +911,43 @@ static void STDMETHODCALLTYPE contextClearDepthStencilView(DevicePtr self,ID3D11
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11DepthStencilView*,UINT,FLOAT,UINT8);
     auto call=reinterpret_cast<Fn>(original(self,ClearDepthStencilView));if(!call)return;
     clears[1].fetch_add(1,std::memory_order_relaxed);call(self,view,flags,depth,stencil);
+}
+// A layer rendered at one size and resolved/copied into the frame is the other
+// way a target's content reaches the screen without a direct draw into it.
+static void STDMETHODCALLTYPE contextResolveSubresource(DevicePtr self,ID3D11Resource* dst,UINT dstSub,ID3D11Resource* src,UINT srcSub,DXGI_FORMAT format) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT,ID3D11Resource*,UINT,DXGI_FORMAT);
+    auto call=reinterpret_cast<Fn>(original(self,ResolveSubresource));if(!call)return;
+    resolves.fetch_add(1,std::memory_order_relaxed);call(self,dst,dstSub,src,srcSub,format);
+}
+static void STDMETHODCALLTYPE contextCopyResource(DevicePtr self,ID3D11Resource* dst,ID3D11Resource* src) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,ID3D11Resource*);
+    auto call=reinterpret_cast<Fn>(original(self,CopyResource));if(!call)return;
+    copies.fetch_add(1,std::memory_order_relaxed);call(self,dst,src);
+}
+static void STDMETHODCALLTYPE contextCopySubresourceRegion(DevicePtr self,ID3D11Resource* dst,UINT dstSub,UINT x,UINT y,UINT z,ID3D11Resource* src,UINT srcSub,const D3D11_BOX* box) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT,UINT,UINT,UINT,ID3D11Resource*,UINT,const D3D11_BOX*);
+    auto call=reinterpret_cast<Fn>(original(self,CopySubresourceRegion));if(!call)return;
+    copies.fetch_add(1,std::memory_order_relaxed);call(self,dst,dstSub,x,y,z,src,srcSub,box);
+}
+// A draw under a predicate object is skipped when the predicate is false: a
+// layer that is culled this way submits no work at all.
+static void STDMETHODCALLTYPE contextSetPredication(DevicePtr self,ID3D11Predicate* predicate,BOOL value) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Predicate*,BOOL);
+    auto call=reinterpret_cast<Fn>(original(self,SetPredication));if(!call)return;
+    if(predicate)predicated.fetch_add(1,std::memory_order_relaxed);
+    call(self,predicate,value);
+}
+// An indirect draw's arguments are uploaded, not passed: reading them where
+// the guest writes them is the only way to tell a zero-count submission (a
+// layer that draws nothing) from a real one.
+static void STDMETHODCALLTYPE contextUpdateSubresource(DevicePtr self,ID3D11Resource* resource,UINT subresource,const D3D11_BOX* box,const void* data,UINT rowPitch,UINT depthPitch) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT,const D3D11_BOX*,const void*,UINT,UINT);
+    auto call=reinterpret_cast<Fn>(original(self,UpdateSubresource));if(!call)return;
+    if(data&&isIndirectBuffer(resource)) {
+        std::string text=indirectArgsText(data,20);
+        report(true,fmt("indirect args upload %s",text.c_str()),fmt("indirect args upload %s",text.c_str()));
+    }
+    call(self,resource,subresource,box,data,rowPitch,depthPitch);
 }
 static HRESULT STDMETHODCALLTYPE contextFinishCommandList(DevicePtr self,BOOL restore,ID3D11CommandList** list) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,BOOL,ID3D11CommandList**);
@@ -719,10 +980,20 @@ static HRESULT STDMETHODCALLTYPE createDeferredContext1(DevicePtr self,UINT flag
 }
 inline const Patch* contextPatches(size_t& count){
     static const Patch table[]={
-        {ContextMap,(void*)&contextMap},{DrawIndexed,(void*)&contextDrawIndexed},{Draw,(void*)&contextDraw},
+        {ContextMap,(void*)&contextMap},{Unmap,(void*)&contextUnmap},{DrawIndexed,(void*)&contextDrawIndexed},{Draw,(void*)&contextDraw},
         {DrawIndexedInstanced,(void*)&contextDrawIndexedInstanced},{DrawInstanced,(void*)&contextDrawInstanced},
+        {DrawAuto,(void*)&contextDrawAuto},{DrawIndexedInstancedIndirect,(void*)&contextDrawIndexedInstancedIndirect},
+        {DrawInstancedIndirect,(void*)&contextDrawInstancedIndirect},{DispatchIndirect,(void*)&contextDispatchIndirect},
         {IASetPrimitiveTopology,(void*)&contextIASetPrimitiveTopology},{HSSetShader,(void*)&contextHSSetShader},
         {DSSetShader,(void*)&contextDSSetShader},{OMSetRenderTargets,(void*)&contextOMSetRenderTargets},
+        {OMSetRenderTargetsAndUnorderedAccessViews,(void*)&contextOMSetRenderTargetsAndUnorderedAccessViews},
+        {PSSetShaderResources,(void*)&contextSetShaderResources<PSSetShaderResources,1>},
+        {VSSetShaderResources,(void*)&contextSetShaderResources<VSSetShaderResources,0>},
+        {HSSetShaderResources,(void*)&contextSetShaderResources<HSSetShaderResources,2>},
+        {DSSetShaderResources,(void*)&contextSetShaderResources<DSSetShaderResources,3>},
+        {SetPredication,(void*)&contextSetPredication},{UpdateSubresource,(void*)&contextUpdateSubresource},
+        {CopyResource,(void*)&contextCopyResource},{CopySubresourceRegion,(void*)&contextCopySubresourceRegion},
+        {ResolveSubresource,(void*)&contextResolveSubresource},
         {Dispatch,(void*)&contextDispatch},{ClearRenderTargetView,(void*)&contextClearRenderTargetView},
         {ClearDepthStencilView,(void*)&contextClearDepthStencilView},{FinishCommandList,(void*)&contextFinishCommandList},
         {ExecuteCommandList,(void*)&contextExecuteCommandList}};
