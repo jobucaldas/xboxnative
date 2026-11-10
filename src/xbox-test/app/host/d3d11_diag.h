@@ -47,6 +47,8 @@
 #include <d3d11.h>
 #include <d3d11_1.h>
 #include <dxgi.h>
+#include <dxgi1_2.h>
+#include <dxgi1_4.h>   // IDXGIAdapter3::QueryVideoMemoryInfo
 #include <algorithm>
 #include <atomic>
 #include <cstdarg>
@@ -240,6 +242,58 @@ inline void resetContext(void* self) {
     s.topology.store(0,std::memory_order_relaxed);s.shaders.store(0,std::memory_order_relaxed);
     s.rtFormat.store(0,std::memory_order_relaxed);
     for(size_t i=0;i<kFormatCache;++i)s.formatView[i].store(nullptr,std::memory_order_relaxed);
+}
+// ---- device health
+// The guest's device may be removed under memory or timeout pressure (Slime
+// Rancher: DXGI_ERROR_DEVICE_REMOVED mid-menu, after which every Create fails
+// and only the log shows why). The device pointer is retained at adopt() so
+// any hook can ask GetDeviceRemovedReason without threading it through every
+// call; the transition to removed is logged once with the memory state around
+// it, and the summary line records the last state seen.
+inline std::atomic<ID3D11Device*> healthDevice{nullptr};
+inline std::atomic<bool> deviceRemoved{false};   // a removal reason was observed
+inline std::atomic<unsigned> deviceLostReports{0};   // transitions seen (removal is sticky)
+// Asked on every failed Create*/Map: the first failure whose hr is a
+// device-removed error marks the transition (timestamped by the sink), and
+// the first failure after it reports GetDeviceRemovedReason plus the memory
+// state at removal instead of the caller's error hiding the reason.
+inline void noteFailure(HRESULT hr) {
+    ID3D11Device* device=healthDevice.load(std::memory_order_relaxed);
+    if(!device)return;
+    static constexpr HRESULT lost[]={DXGI_ERROR_DEVICE_REMOVED,DXGI_ERROR_DEVICE_HUNG,
+        DXGI_ERROR_DEVICE_RESET,DXGI_ERROR_DRIVER_INTERNAL_ERROR};
+    for(HRESULT e:lost) if(hr==e&&!deviceRemoved.exchange(true,std::memory_order_acq_rel))
+        deviceLostReports.fetch_add(1,std::memory_order_relaxed);   // the transition itself
+    if(!deviceRemoved.load(std::memory_order_acquire))return;
+    static std::atomic<bool> reported{false};
+    if(reported.exchange(true))return;   // one reason line per removal
+    HRESULT reason=device->GetDeviceRemovedReason();
+    emit(fmt("device removed: reason hr=0x%08lx (%s)",(unsigned long)reason,
+        reason==DXGI_ERROR_DEVICE_REMOVED?"driver/GPU reset or budget eviction":
+        reason==DXGI_ERROR_DEVICE_HUNG?"device hung (TDR or infinite loop)":
+        reason==DXGI_ERROR_DEVICE_RESET?"device reset (invalid command)":
+        reason==DXGI_ERROR_DRIVER_INTERNAL_ERROR?"driver internal error":"see DXGI_ERROR_*"));
+    // The memory state at removal: a budget eviction shows up as usage at the
+    // shared limit; a timeout shows usage nowhere near it.
+    IDXGIDevice* dxgi=nullptr;
+    if(SUCCEEDED(device->QueryInterface(__uuidof(IDXGIDevice),reinterpret_cast<void**>(&dxgi)))&&dxgi) {
+        IDXGIAdapter* raw=nullptr;
+        if(SUCCEEDED(dxgi->GetAdapter(&raw))&&raw) {
+            IDXGIAdapter3* adapter=nullptr;
+            if(SUCCEEDED(raw->QueryInterface(__uuidof(IDXGIAdapter3),reinterpret_cast<void**>(&adapter)))&&adapter) {
+                DXGI_QUERY_VIDEO_MEMORY_INFO local{},nonlocal{};
+                if(SUCCEEDED(adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&local)))
+                    emit(fmt("device removed: memory local budget=%llu used=%llu reserved=%llu avail_reserve=%llu",
+                        (unsigned long long)local.Budget,(unsigned long long)local.CurrentUsage,(unsigned long long)local.CurrentReservation,(unsigned long long)local.AvailableForReservation));
+                if(SUCCEEDED(adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,&nonlocal)))
+                    emit(fmt("device removed: memory nonlocal budget=%llu used=%llu reserved=%llu avail_reserve=%llu",
+                        (unsigned long long)nonlocal.Budget,(unsigned long long)nonlocal.CurrentUsage,(unsigned long long)nonlocal.CurrentReservation,(unsigned long long)nonlocal.AvailableForReservation));
+                adapter->Release();
+            }
+            raw->Release();
+        }
+        dxgi->Release();
+    }
 }
 inline std::atomic<uint64_t> draws[kDrawKinds][2][2];   // [kind][patchlist][hull+domain]
 // The geometry shader's presence on a draw, tracked like hull/domain but for
@@ -441,6 +495,31 @@ inline void summary() {
     summaryNext.store(GetTickCount64()+kSummaryMs,std::memory_order_relaxed);
 }
 inline void printSummary(unsigned window);
+// Video-memory usage at this instant, one line: budget, committed, current.
+// A growth trend across windows is the shape that precedes a budget-eviction
+// device removal (Slime Rancher: removed mid-menu, 128 MB local / 1280 MB
+// shared on this adapter); a flat line next to a removal rules memory out.
+inline void logMemory() {
+    ID3D11Device* device=healthDevice.load(std::memory_order_relaxed);
+    if(!device)return;
+    IDXGIDevice* dxgi=nullptr;
+    if(FAILED(device->QueryInterface(__uuidof(IDXGIDevice),reinterpret_cast<void**>(&dxgi)))||!dxgi)return;
+    IDXGIAdapter* raw=nullptr;
+    if(SUCCEEDED(dxgi->GetAdapter(&raw))&&raw) {
+        IDXGIAdapter3* adapter=nullptr;
+        if(SUCCEEDED(raw->QueryInterface(__uuidof(IDXGIAdapter3),reinterpret_cast<void**>(&adapter)))&&adapter) {
+            DXGI_QUERY_VIDEO_MEMORY_INFO local{},nonlocal{};
+            adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&local);
+            adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,&nonlocal);
+            emit(fmt("video memory local budget=%llu used=%llu reserved=%llu avail_reserve=%llu nonlocal used=%llu",
+                (unsigned long long)local.Budget,(unsigned long long)local.CurrentUsage,(unsigned long long)local.CurrentReservation,
+                (unsigned long long)local.AvailableForReservation,(unsigned long long)nonlocal.CurrentUsage));
+            adapter->Release();
+        }
+        raw->Release();
+    }
+    dxgi->Release();
+}
 // Called from the hooks after they counted; cheap until the next window.
 inline void tick() {
     if(!summaryStarted.load(std::memory_order_acquire))return;
@@ -461,6 +540,14 @@ inline void printSummary(unsigned window) {
     unsigned t=lastTopology.load(std::memory_order_relaxed);
     emit(fmt("draw summary %u/%u: last topology=%u(%s) contexts=%u deferred=%u",window,kSummaryWindows,t,topologyName(t).c_str(),
         contextsPatched.load(),deferredContexts.load()));
+    // Memory trend across windows: growth towards the budget is what precedes
+    // a budget-eviction device removal (Slime Rancher: removed mid-menu).
+    logMemory();
+    // Device-lost state: a removal is sticky and every later Create fails with
+    // the caller's error hiding the reason, so the summary carries the last
+    // state and how many transitions were seen.
+    emit(fmt("draw summary %u/%u: device lost=%u transitions=%llu",window,kSummaryWindows,
+        deviceRemoved.load(std::memory_order_relaxed),(unsigned long long)deviceLostReports.load()));
     for(int k=0;k<kDrawKinds;++k) {
         uint64_t total=0,patched=0,withHull=0,withGs=drawsWithGs[k].load(std::memory_order_relaxed),
                  zero=zeroCounts[k].load(std::memory_order_relaxed);
@@ -644,7 +731,10 @@ inline std::string shaderText(const void* code,SIZE_T length,std::string* key=nu
 }
 
 #define D3D11_DIAG_HOOK(Type,slot) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return E_FAIL;
-#define D3D11_DIAG_FAILED(name,key,text) do{if(FAILED(hr))report(false,std::string(name)+" "+hex(hr)+" "+(key),std::string(name)+" hr="+hex(hr)+" "+(text));}while(0)
+// Every failed call also feeds the device-health path: the first failure after
+// a removal reports GetDeviceRemovedReason and the memory state, instead of
+// the caller's error hiding the removal.
+#define D3D11_DIAG_FAILED(name,key,text) do{if(FAILED(hr)){report(false,std::string(name)+" "+hex(hr)+" "+(key),std::string(name)+" hr="+hex(hr)+" "+(text));noteFailure(hr);}}while(0)
 
 using DevicePtr=void*;
 static HRESULT STDMETHODCALLTYPE createBuffer(DevicePtr self,const D3D11_BUFFER_DESC* d,const D3D11_SUBRESOURCE_DATA* init,ID3D11Buffer** out) {
@@ -1358,6 +1448,7 @@ inline void configure(Sink s){sink=s;}
 // capability answers that pick engine code paths.
 inline void adopt(ID3D11Device* device) {
     if(!device||!sink)return;
+    healthDevice.store(device,std::memory_order_relaxed);   // not AddRef'd: the guest owns it
     size_t baseCount=0,extendedCount=0;
     const Patch* base=basePatches(baseCount);const Patch* extended=extendedPatches(extendedCount);
     bool ok=patchClass(*reinterpret_cast<void***>(device),base,baseCount);
