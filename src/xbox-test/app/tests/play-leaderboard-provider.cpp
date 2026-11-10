@@ -133,13 +133,16 @@ __declspec(dllexport) int __cdecl SteamAPI_Init(void) { return 1; }
 static uint64_t nextCall = 100;
 static uint64_t callBoard[MAX_CALLS];
 
-// SteamLeaderboard_t is an index into the provider's own cache, 1-based.
+// SteamLeaderboard_t is an index into the provider's own cache, 1-based, and it
+// is stable for a board: a second Find of the same board answers the same
+// handle, as gbe_fork's cached_leaderboards index does.
 __declspec(dllexport) uint64_t __cdecl SteamAPI_ISteamUserStats_FindLeaderboard(void* self, const char* name) {
     (void)self;
     if (!name || !*name) return 0;
-    if (!find(name)) return 0;
+    Board* b = find(name);
+    if (!b) return 0;
     if (nextCall >= 100 + MAX_CALLS) return 0;
-    callBoard[nextCall - 100] = (uint64_t)boardCount;
+    callBoard[nextCall - 100] = (uint64_t)(b - boards) + 1;
     return nextCall++;
 }
 __declspec(dllexport) uint64_t __cdecl SteamAPI_ISteamUserStats_FindOrCreateLeaderboard(void* self, const char* name, int sort, int display) {
@@ -151,14 +154,6 @@ __declspec(dllexport) const char* __cdecl SteamAPI_ISteamUserStats_GetLeaderboar
     (void)self;
     if (board == 0 || board > (uint64_t)boardCount) return "";
     return boards[board - 1].name;
-}
-// Like gbe_fork: the local account's name is known, and every other account is
-// "Unknown User" unless a LAN peer pushed a Friend record. The leaderboard
-// bridge's name tap is what replaces that answer for real Steam rows, so this
-// fixture must return the placeholder for the seeded ids on its own.
-__declspec(dllexport) const char* __cdecl SteamAPI_ISteamFriends_GetFriendPersonaName(void* self, uint64_t steamid) {
-    (void)self; (void)steamid;
-    return "Unknown User";
 }
 __declspec(dllexport) uint64_t __cdecl SteamAPI_ISteamUserStats_DownloadLeaderboardEntries(void* self, uint64_t board, int request, int start, int end) {
     (void)self; (void)request;
@@ -191,6 +186,27 @@ __declspec(dllexport) uint64_t __cdecl SteamAPI_ISteamUserStats_UploadLeaderboar
     append("upload="); appendInt((int)board); append(";");
     return 1;
 }
+// ---- ISteamFriends, answering the way gbe_fork does with disable_networking=1
+// (dll/steam_friends.cpp): its friend list is only ever filled from its own LAN
+// network, so every SteamID that is not the local user reads "Unknown User";
+// RequestUserInformation is a TODO that answers false; GetPersonaName is the
+// staged account name. The launcher's persona tap replaces these answers in
+// memory, and the provider's own call still runs (the call counter proves it).
+static int personaNameCalls, personaRequestCalls;
+__declspec(dllexport) const char* __cdecl SteamAPI_ISteamFriends_GetFriendPersonaName(void* self, uint64_t steamid) {
+    (void)self; (void)steamid;
+    ++personaNameCalls;
+    return "Unknown User";
+}
+__declspec(dllexport) const char* __cdecl SteamAPI_ISteamFriends_GetPersonaName(void* self) {
+    (void)self;
+    return "Player";
+}
+__declspec(dllexport) int __cdecl SteamAPI_ISteamFriends_RequestUserInformation(void* self, uint64_t steamid, int nameOnly) {
+    (void)self; (void)steamid; (void)nameOnly;
+    ++personaRequestCalls;
+    return 0;   // gbe_fork's TODO: "we already know everything"
+}
 // Test-only: what LeaderboardFindResult_t.m_hSteamLeaderboard carries for the
 // call Find returned. The fixture guest has no CallResult plumbing, so it reads
 // the handle here; a real game gets it from the callback.
@@ -201,6 +217,11 @@ __declspec(dllexport) uint64_t __cdecl PlayLeaderboardCallBoard(uint64_t call) {
 // Test-only: what the provider read, so the guest can assert the seed landed
 // before the first Find and that the rows are the ones Steam sent.
 __declspec(dllexport) const char* __cdecl PlayLeaderboardTrace(void) { return traceBuf; }
+// Test-only: how many times the provider's own persona calls ran, so the guest
+// can prove the launcher replaced an answer instead of skipping the call.
+__declspec(dllexport) int __cdecl PlayLeaderboardPersonaCalls(int which) {
+    return which == 0 ? personaNameCalls : personaRequestCalls;
+}
 }
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, void* reserved) { (void)h; (void)reason; (void)reserved; return TRUE; }

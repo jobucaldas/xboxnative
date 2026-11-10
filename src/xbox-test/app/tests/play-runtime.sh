@@ -106,8 +106,11 @@ EXPORTS
  SteamAPI_ISteamUserStats_UploadLeaderboardScore
  SteamAPI_ISteamUserStats_GetLeaderboardName
  SteamAPI_ISteamFriends_GetFriendPersonaName
+ SteamAPI_ISteamFriends_GetPersonaName
+ SteamAPI_ISteamFriends_RequestUserInformation
  PlayLeaderboardTrace
  PlayLeaderboardCallBoard
+ PlayLeaderboardPersonaCalls
 DEF
 llvm-dlltool-19 -m i386:x86-64 -d "$out/obj/steam-api.def" -l "$out/obj/steam-api.lib"
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -c tests/play-leaderboard-provider.cpp -o "$out/obj/leaderboard-provider.obj"
@@ -232,7 +235,18 @@ grep -q "STEAM leaderboards: 'v2_kills' seeded 3 rows (id 7, 3 on Steam, file wr
 grep -q "STEAM leaderboards: score 2000 sent to 'v2_kills' (changed=1, rank 0 -> 1)" "$out/leaderboards.log"
 [[ $(grep -c "'v2_kills' seeded" "$out/leaderboards.log") == 1 ]]
 if grep -q "v2_unseeded' seeded" "$out/leaderboards.log";then exit 1;fi
-grep -q "STEAM persona names: SteamAPI_ISteamFriends_GetFriendPersonaName observed; names come from the launcher's Steam session" "$out/leaderboards.log"
+# Persona names: the provider stand-in answers "Unknown User" for every SteamID
+# (gbe_fork's LAN-only friend list), and the launcher's persona tap replaces that
+# with the name Steam gave, in memory, after the provider's own call ran. The
+# guest exits 42 only when the names, the RequestUserInformation contract and the
+# refreshed rows after its own upload all came from the launcher.
+grep -q "STEAM persona: SteamAPI_ISteamFriends_GetFriendPersonaName observed; names come from the launcher's Steam session" "$out/leaderboards.log"
+grep -q "STEAM persona: SteamAPI_ISteamFriends_GetPersonaName observed; names come from the launcher's Steam session" "$out/leaderboards.log"
+grep -q "STEAM persona: SteamAPI_ISteamFriends_RequestUserInformation observed; names come from the launcher's Steam session" "$out/leaderboards.log"
+grep -q "STEAM persona: 3 of 3 leaderboard names resolved" "$out/leaderboards.log"
+grep -q "STEAM leaderboards: 'v2_kills' refreshed 4 rows (id 7, 4 on Steam)" "$out/leaderboards.log"
+# Counts only: no persona name and no SteamID may reach the log.
+if grep -qE "Player (Two|Three|Four)|Fixture Owner|1100001000" "$out/leaderboards.log";then exit 1;fi
 # Vulkan (research/VULKAN-PLAN.md): a guest's LoadLibrary("vulkan-1.dll") is served by the Khronos loader from the
 # runtime directory, and Play must have listed the packaged ICD manifests in the guest registry, which is the route
 # the loader reads (VK_DRIVER_FILES is ignored at the process's integrity level).
