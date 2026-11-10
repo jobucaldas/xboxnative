@@ -25,6 +25,16 @@ int main() {
     assert(find("x86") && find("x86")->pe32);
     assert(!find("d3d11") && !find(""));
 
+    // "all" must fit inside the restart cap: each 64-bit fixture costs one
+    // launcher restart, so a cap below the guest count would mark the last
+    // modes FAIL restart-limit without ever running them (which is what a
+    // fixed cap of four did once the table grew past five guests).
+    int guests = 0;
+    for (size_t i = 0; i < count; ++i) if (!table[i].pe32) ++guests;
+    assert(guests == 5);
+    assert(max_restarts() > guests);
+    assert(max_restarts() == guests + 1);
+
     // A request: one mode per line, blanks and comments ignored, names
     // case-insensitive, duplicates collapsed, unknown names kept (they are
     // reported as SKIP, never silently dropped).

@@ -30,6 +30,18 @@ inline const Mode* modes(size_t& count) {
     count = sizeof(table) / sizeof(*table);
     return table;
 }
+// How many launcher restarts a run may take. Play keeps one 64-bit guest per
+// process, so every non-pe32 fixture costs a restart; the extra one lets a
+// fixture that faults before game code be retried. Derived from the table so
+// "all" can never outgrow a fixed cap: a limit below the guest count marks the
+// last fixtures FAIL restart-limit without ever running them.
+inline int max_restarts() {
+    size_t count = 0;
+    const Mode* table = modes(count);
+    int guests = 0;
+    for (size_t i = 0; i < count; ++i) if (!table[i].pe32) ++guests;
+    return guests + 1;
+}
 inline const Mode* find(const std::string& name) {
     size_t count = 0;
     const Mode* table = modes(count);

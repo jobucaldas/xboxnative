@@ -72,8 +72,9 @@ queue: the pending modes go to `selftest_queue.txt`, the launcher runs one 64-bi
 and restarts itself (`CoreApplication::RequestRestartAsync`) for the next one. The log is
 appended across those restarts, so it is the whole request's record. The 32-bit fixture
 runs in the interpreter and needs no restart, so it comes first. A queue left behind by a
-previous process resumes on the next start while it is fresh (30 minutes); after four
-restarts without progress the remaining modes are reported `FAIL restart-limit`.
+previous process resumes on the next start while it is fresh (30 minutes); after one
+restart per 64-bit fixture (plus one spare, so a fixture that faults before game code can
+be retried) without progress the remaining modes are reported `FAIL restart-limit`.
 
 While a fixture runs, Play belongs to the self-test: starting a game from the grid is
 refused, and the game's page says so. Once the run ends (or the launcher restarts for
