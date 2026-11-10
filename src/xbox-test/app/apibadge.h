@@ -93,9 +93,9 @@ static Result combine(Result r, int storeKind, const std::string& storeNote) {  
 static int draw(int x, int y, int sc, const Result& r) {
     const char* lab = r.kind == K_D3D11 ? "D3D11" : r.kind == K_D3D12 ? "D3D12" : r.kind == K_LEGACY ? "D3D9/LEGACY" : nullptr; if (!lab) return 0;
     int w = twidth(lab, sc) + 8 * sc, h = 8 * sc + 6 * sc / 2 + 2;
-    if (r.kind == K_D3D11) { if (r.src == 1) { fill(x, y, w, h, C3(30, 150, 70)); text(x + 4 * sc, y + 2 + 3 * sc / 4, lab, sc, C3(255, 255, 255)); }
-                             else { fill(x, y, w, h, C3(12, 30, 20)); frame(x, y, w, h, 2, C3(60, 200, 110)); text(x + 4 * sc, y + 2 + 3 * sc / 4, lab, sc, C3(120, 255, 160)); } }
-    else { fill(x, y, w, h, C3(52, 58, 70)); frame(x, y, w, h, 1, C3(85, 92, 106)); text(x + 4 * sc, y + 2 + 3 * sc / 4, lab, sc, C3(135, 143, 158)); }
+    if (r.kind == K_D3D11) { if (r.src == 1) { fill(x, y, w, h, C3(30, 150, 70)); text8(x + 4 * sc, y + 2 + 3 * sc / 4, lab, sc, C3(255, 255, 255)); }
+                             else { fill(x, y, w, h, C3(12, 30, 20)); frame(x, y, w, h, 2, C3(60, 200, 110)); text8(x + 4 * sc, y + 2 + 3 * sc / 4, lab, sc, C3(120, 255, 160)); } }
+    else { fill(x, y, w, h, C3(52, 58, 70)); frame(x, y, w, h, 1, C3(85, 92, 106)); text8(x + 4 * sc, y + 2 + 3 * sc / 4, lab, sc, C3(135, 143, 158)); }
     return w;
 }
 static std::string describe(const Result& r) {

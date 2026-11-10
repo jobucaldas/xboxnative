@@ -605,6 +605,7 @@ static void dl_thread() {
 #include "ui_unlocks.h"
 #include "../uwph/user32/corewindow_feed.h"
 #include "game_delete.h"
+#include "apibadge.h"
 
 // The in-game guide (guest_overlay.h) loads the same three Selawik TTFs from
 // their package paths; without them it falls back to its 8x8 bitmap text.
@@ -1224,6 +1225,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         refresh_install(t);
         auto si = m_dSi; int st = si ? (int)si->state : 2;
         bool installing = si && st == 1;
+        apib::Result gfx = apib::combine(apib::lookup(m_dApp), si && st == 1 ? si->dxKind : 0, si && st == 1 ? si->dxNote : std::string());   // store fields are read only once published
         std::string title = (installing && !si->name.empty()) ? si->name : m_dName;
         int dl = g_dl.state; bool mine = g_dl.appid == m_dApp, down = mine && dl == 1, queued = !down && is_queued(m_dApp);
         bool launching = (g_launch.phase == 1 || g_launch.phase == 3) && g_launch.appid == m_dApp;
@@ -1236,6 +1238,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         vTitle = title;
         if (installing) vSub = si->dev.empty() ? si->genres : si->dev + "  \xC2\xB7  " + si->genres;
         else vSub = "App " + std::to_string(m_dApp);
+        { const std::string gd = apib::describe(gfx); if (!gd.empty() && gfx.ready) vSub += "  \xC2\xB7  " + gd; }   // graphics API (was the tile badge)
         Game* gm = nullptr; { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == m_dApp) { gm = g.get(); break; } }
         if (gm && gm->playtime > 0) { char b[48]; snprintf(b, sizeof b, "%u min", gm->playtime); vTime = b; } else vTime = "Not played yet";
         vAch = "Not tracked yet";   // achievements sync after play (steam_achievements.h); no schema on this page yet
