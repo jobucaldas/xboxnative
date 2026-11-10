@@ -243,9 +243,11 @@ claim that they run Vulkan today):
   prints PASS or BLOCKED from those lines and never counts BLOCKED as a pass; `PRUN_REQUIRE_DZN=1` turns BLOCKED into
   a failure for a host that should run it.
 
-Off-device the result is BLOCKED at device creation (Wine's vkd3d). On the console, via the launcher, the same runner
-mode with dzn packaged is the check: PASS means `dzn` presented frames through the CoreWindow adapter, BLOCKED means
-the console's D3D12 refused `dzn`'s device or shaders and the guest still gets milestone 1's answer. **[unverified]**
+Off-device the result is BLOCKED at device creation (Wine's vkd3d). The console answer is still open, and the
+launcher package cannot produce it today: `app/build.sh` ships `layout/xbtest.exe` and the Play runtime, not
+`play-runner.exe` or the fixtures, which `play-runtime.sh` builds off-device only. So `vulkan-dzn` is an off-device
+proof, and a console verdict needs either the runner packaged (a deliberate change, not made here) or a title that
+actually asks for Vulkan. **[unverified on console]**
 
 ### A Vulkan game to test with
 
