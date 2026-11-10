@@ -190,6 +190,12 @@ struct Bridge {
     // profile) and still be Steam's whole answer, so the wait counts pushes,
     // not names, to know the reply arrived.
     uint64_t pushes = 0;
+    // The seed runs on the game's thread, which is drawing behind it, so the
+    // wait is bounded hard: a Find that has to wait for Steam costs a fraction
+    // of a second, not the two seconds the caller asks for. The names that
+    // arrive after that are still handed out by the tap (the game re-reads
+    // them on its next draw) and still cached for the next launch.
+    enum : int { SeedWaitMs = 250 };
 
     bool known(uint64_t id) const { return names.find(id) != names.end(); }
     // A persona push arrived. Returns the number of names it added or changed.
@@ -226,6 +232,9 @@ struct Bridge {
     // `timeoutMs` — whichever comes first. A missing reply leaves the
     // provider's own answer exactly as it was.
     void ensure(Io& io, const std::vector<uint64_t>& ids, int timeoutMs) {
+        // Never hold the game's thread for the caller's full timeout: that
+        // timeout is an upper bound, and the game is drawing behind this call.
+        timeoutMs = std::min(timeoutMs, int(SeedWaitMs));
         std::vector<uint64_t> missing;
         std::set<uint64_t> seen;
         uint64_t pushesBefore = 0;

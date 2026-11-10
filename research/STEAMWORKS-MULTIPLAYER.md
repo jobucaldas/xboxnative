@@ -314,10 +314,15 @@ The launcher answers the same three exports from its own signed-in session:
    return the provider's answer until Steam's name lands, at which point the tap
    hands out the real one.
 4. The seed waits on the game's thread only for a bounded time: at most
-   `timeoutMs` (2 s) for Steam's first push, then a 500 ms quiet window after
-   each push. A push that names nobody (private profiles) still ends the wait,
-   so a rank screen is not stalled for accounts Steam will not name, and a
-   reply slower than the quiet window is still waited for.
+   `SeedWaitMs` (250 ms) for Steam's first push, then a 500 ms quiet window
+   after each push, and never past the caller's own timeout. The game is
+   drawing behind this call, so a Find that has to wait for Steam costs a
+   fraction of a second rather than the two seconds the caller asks for; a
+   name that lands after the seed returned is still handed out by the tap on
+   the game's next draw and still cached for the next launch. A push that names
+   nobody (private profiles) still ends the wait, so a rank screen is not
+   stalled for accounts Steam will not name, and a reply slower than the quiet
+   window is still waited for.
 5. Names are kept in the app's own `LocalState` (`persona_names.txt`, hex-encoded
    so a name with a space or newline cannot corrupt the record, 7-day TTL) and
    adopted at launch, so a row drawn before Steam answers still reads correctly.

@@ -150,12 +150,13 @@ int main() {
         auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
         reader.join();
         assert(bridge.known(0x110000100000002ull) && !bridge.known(0x110000100000009ull));
-        assert(waited < 2500);   // one quiet slice after the push, not the whole timeout
+        assert(waited < Bridge::SeedWaitMs + 150);   // the push answered at once, no quiet window needed
     }
 
-    // ---- a first reply slower than the quiet slice is still waited for: the
-    // quiet window only starts once Steam has answered, so a laggy session does
-    // not leave the rank screen on "Unknown User"
+    // ---- the seed never holds the game's thread for the caller's full
+    // timeout, even when the caller asks for seconds: the game is drawing
+    // behind it.
+    // A reply that comes later still lands, and the tap answers it then.
     {
         Server server;
         server.names = {{0x110000100000002ull, "Player Two"}};
@@ -166,12 +167,18 @@ int main() {
         std::vector<uint64_t> ids = {0x110000100000002ull};
         std::thread reader([&] {
             while (server.requests == 0) std::this_thread::yield();
-            std::this_thread::sleep_for(std::chrono::milliseconds(QuietMs + 200));
+            std::this_thread::sleep_for(std::chrono::milliseconds(Bridge::SeedWaitMs + 300));
             bridge.on_state(server.state_body(ids));
         });
-        bridge.ensure(io, ids, 3000);
+        auto start = std::chrono::steady_clock::now();
+        bridge.ensure(io, ids, 5000);   // asks for 5 s; the seed still returns within SeedWaitMs
+        auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        // The seed gave up before the push; the row reads the provider's answer.
+        assert(!bridge.known(0x110000100000002ull));
+        assert(waited < Bridge::SeedWaitMs + 150);
+        // The push arrives afterwards, and the tap answers it from then on.
         reader.join();
-        assert(bridge.known(0x110000100000002ull));
+        assert(std::string(bridge.name(0x110000100000002ull)) == "Player Two");
     }
 
     // ---- a push that names nobody is still Steam's answer: the wait ends on it
@@ -193,7 +200,7 @@ int main() {
         auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
         reader.join();
         assert(!bridge.known(0x110000100000009ull));
-        assert(waited < 2500);
+        assert(waited < Bridge::SeedWaitMs + 150);
         bool counted = false;
         for (auto& l : log) if (l.find("0 of 1 leaderboard names resolved") != std::string::npos) counted = true;
         assert(counted);
