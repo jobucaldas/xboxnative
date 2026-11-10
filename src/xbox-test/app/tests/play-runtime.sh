@@ -100,6 +100,13 @@ lld-link-19 /nodefaultlib /entry:vk_entry /include:vk_relocation /subsystem:wind
 # presented, 43 when the host's D3D12 refuses dzn's device (BLOCKED, not a pass).
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -fno-builtin -c tests/play-vulkan-dzn.cpp -o "$out/obj/vulkan-dzn.obj"
 lld-link-19 /nodefaultlib /entry:vk_dzn_entry /include:vk_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-vulkan-dzn.exe" "$out/obj/vulkan-dzn.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a /usr/x86_64-w64-mingw32/lib/libuser32.a
+# EXE that runs the OpenGL startup path an SDL3 GL game takes (research/
+# OPENGL-PLAN.md): opengl32.dll from the runtime directory (Mesa's d3d12 WGL
+# driver), a pixel format through gdi32's forwarded wgl*, a context, a cleared
+# frame presented with SwapBuffers and a glReadPixels readback. Exits 42 when
+# the rendered pixel came back, 43 when it did not (BLOCKED, not a pass).
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -fno-builtin -c tests/play-opengl.cpp -o "$out/obj/opengl.obj"
+lld-link-19 /nodefaultlib /entry:opengl_entry /include:opengl_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-opengl.exe" "$out/obj/opengl.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a /usr/x86_64-w64-mingw32/lib/libuser32.a
 # A guest that uses a Discord SDK as a game does. The SDK is our own stand-in
 # (never Discord's binary): it connects to \?\pipe\discord-ipc-N exactly as
 # discord-rpc and the Game SDK do, so Play's answer is what a real game sees.
@@ -223,7 +230,7 @@ tail -1 "$out/leaderboards.log"
 # The root copy was only for this run: later modes prove what happens when a
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d9-diag d3d9-triangle d3d9-textured fault-in-dll discord-sdk vulkan-dzn;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d9-diag d3d9-triangle d3d9-textured fault-in-dll discord-sdk vulkan-dzn opengl;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -320,6 +327,20 @@ if [ -f out/layout/runtime/vulkan-dzn.json ]; then
   fi
 else
   echo "PLAY-VULKAN-DZN FAIL: the launcher build did not package dzn"; exit 1
+fi
+# OpenGL (research/OPENGL-PLAN.md): the guest's LoadLibrary("opengl32.dll") is
+# served by Mesa's WGL driver from the runtime directory, the pixel format goes
+# through gdi32's forwarded wgl*, and the cleared frame must read back. The
+# readback is from the bound framebuffer after three presented frames, so a
+# mismatch means the driver answered but drew nothing (BLOCKED, never a pass).
+grep -q 'PLAY-OPENGL STAGE pixel-format index=[1-9]' "$out/opengl.log"
+grep -q 'PLAY-OPENGL STAGE context-current renderer=' "$out/opengl.log"
+if grep -q 'PLAY-OPENGL PASS pixel-readback' "$out/opengl.log"; then
+  echo "PLAY-OPENGL PASS pixel-readback"
+elif grep -q 'PLAY-OPENGL BLOCKED pixel-readback' "$out/opengl.log"; then
+  echo "PLAY-OPENGL BLOCKED pixel-readback on this host; not a pass"
+else
+  echo "PLAY-OPENGL FAIL (see $out/opengl.log)"; exit 1
 fi
 # A guest's rejected D3D11 calls are logged by Play, once per distinct call, with
 # the feature levels it asked for and got. (Results pass through: exit code 42.)

@@ -27,6 +27,7 @@ does not carry is reported as `SKIP`, never silently dropped.
 | `vulkan-dzn` | `diag\play-vulkan-dzn.exe` | Vulkan through the packaged Mesa dzn ICD and Khronos loader |
 | `d3d9` | `diag\play-d3d9.exe` | The D3D9 shim over D3D11 |
 | `d3d10` | `diag\play-d3d10.exe` | The D3D10 shim over D3D11 |
+| `opengl` | `diag\play-opengl.exe` | Mesa's d3d12 WGL driver: pixel format, context, clear, SwapBuffers, glReadPixels |
 
 The fixtures are built from this repository's sources when the package is built
 (`src/xbox-test/app/tests/build-diag-fixtures.sh`) and packed under `diag\` beside the
@@ -57,6 +58,7 @@ actually ran guest code and the guest exited. It is not a visual or playability 
 | `PASS` | The fixture ran and exited 42 |
 | `PASS frame-presented` | `vulkan-dzn` ran and presented a frame |
 | `BLOCKED device-creation` | `vulkan-dzn` ran, but the host's D3D12 refused the dzn device |
+| `BLOCKED pixel-readback` | `opengl` ran to a context, but the cleared frame did not read back as drawn |
 | `FAIL exit-N` | The fixture ran and exited N |
 | `FAIL no-guest-code` | The image mapped but no guest code ran |
 | `FAIL did-not-exit` | Guest code ran and the fixture never exited |

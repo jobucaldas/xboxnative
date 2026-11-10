@@ -15,11 +15,12 @@ int main() {
     // first because it costs no launcher restart.
     size_t count = 0;
     const Mode* table = modes(count);
-    assert(count == 6);
+    assert(count == 7);
     assert(std::string(table[0].name) == "x86" && table[0].pe32);
     assert(std::string(table[1].name) == "vulkan-dzn" && !table[1].pe32);
     assert(std::string(table[2].name) == "d3d9" && std::string(table[5].name) == "d3d10");
     assert(std::string(table[3].name) == "d3d9-triangle" && std::string(table[4].name) == "d3d9-textured");
+    assert(std::string(table[6].name) == "opengl" && std::string(table[6].exe) == "play-opengl.exe" && !table[6].pe32);
     assert(find("d3d9") && find("d3d9")->pe32 == false);
     assert(find("d3d9-triangle") && std::string(find("d3d9-triangle")->exe) == "play-d3d9-triangle.exe");
     assert(find("x86") && find("x86")->pe32);
@@ -31,7 +32,7 @@ int main() {
     // fixed cap of four did once the table grew past five guests).
     int guests = 0;
     for (size_t i = 0; i < count; ++i) if (!table[i].pe32) ++guests;
-    assert(guests == 5);
+    assert(guests == 6);
     assert(max_restarts() > guests);
     assert(max_restarts() == guests + 1);
 
@@ -46,7 +47,7 @@ int main() {
     assert(unknown.size() == 2 && unknown[0] == "nope");
     // "all" expands to every fixture in canonical order, whatever else is named.
     auto all = parse_request("d3d10\nall\n");
-    assert(all.size() == 6 && all[0] == "x86" && all[5] == "d3d10");
+    assert(all.size() == 7 && all[0] == "x86" && all[5] == "d3d10" && all[6] == "opengl");
 
     // The queue survives a launcher restart: restarts count and pending modes
     // round-trip; a malformed file is refused rather than half-read.
@@ -72,6 +73,11 @@ int main() {
     assert(verdict("vulkan-dzn", true, true, 42) == "PASS frame-presented");
     assert(verdict("vulkan-dzn", true, true, 43) == "BLOCKED device-creation");
     assert(verdict("vulkan-dzn", true, true, 13) == "FAIL exit-13");
+    // The OpenGL one has a BLOCKED outcome too: everything up to the context
+    // worked but the rendered pixels did not match (the host drew nothing).
+    assert(verdict("opengl", true, true, 42) == "PASS");
+    assert(verdict("opengl", true, true, 43) == "BLOCKED pixel-readback");
+    assert(verdict("opengl", true, true, 13) == "FAIL exit-13");
     // A guest that never ran code, or ran it and never exited, is a failure.
     assert(verdict("d3d9", true, false, 0) == "FAIL no-guest-code");
     assert(verdict("d3d9", false, true, 0) == "FAIL did-not-exit");
