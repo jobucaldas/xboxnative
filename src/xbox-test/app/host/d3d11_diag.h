@@ -280,6 +280,11 @@ inline std::string indirectArgsText(const void* data,size_t bytes) {
 inline std::mutex rtvM;
 inline std::vector<std::string> rtvKinds;        // distinct "fmt WxH" bound as render target
 inline std::atomic<void*> rtvViews[kMaxRtvViews];   // views already described: no GetDesc per frame
+// Format of the first view of an OM set, cached per view: Halo Wars sets render
+// targets 200k+ times a minute, and a GetDesc on each would be a per-call cost
+// the diagnostics must not add.
+inline std::atomic<void*> rtvFormatViews[kMaxRtvViews];
+inline std::atomic<unsigned> rtvFormatValues[kMaxRtvViews];
 inline std::atomic<unsigned> mainWidth{0},mainHeight{0};   // largest render target bound
 inline std::atomic<unsigned> chainWidth{0},chainHeight{0}; // guest swapchain buffers
 inline std::atomic<unsigned> chainFormat{0},chainBuffers{0};
@@ -860,9 +865,24 @@ inline void noteRenderTargets(UINT count,ID3D11RenderTargetView* const* views) {
 // swapchain's format says the layer never reaches the frame.
 inline void noteRenderTargetFormat(void* self,UINT count,ID3D11RenderTargetView* const* views) {
     if(!count||!views||!views[0])return;
-    D3D11_RENDER_TARGET_VIEW_DESC v{};
-    views[0]->GetDesc(&v);
-    stateOf(self).rtFormat.store(unsigned(v.Format),std::memory_order_relaxed);
+    ID3D11RenderTargetView* view=views[0];
+    unsigned format=0;
+    bool known=false;
+    for(size_t i=0;i<kMaxRtvViews;++i)
+        if(rtvFormatViews[i].load(std::memory_order_relaxed)==view){format=rtvFormatValues[i].load(std::memory_order_relaxed);known=true;break;}
+    if(!known) {
+        D3D11_RENDER_TARGET_VIEW_DESC v{};
+        view->GetDesc(&v);
+        format=unsigned(v.Format);
+        for(size_t i=0;i<kMaxRtvViews;++i) {
+            void* expected=nullptr;
+            if(rtvFormatViews[i].compare_exchange_strong(expected,view,std::memory_order_acq_rel)) {
+                rtvFormatValues[i].store(format,std::memory_order_relaxed);break;
+            }
+            if(expected==view)break;
+        }
+    }
+    stateOf(self).rtFormat.store(format,std::memory_order_relaxed);
 }
 static void STDMETHODCALLTYPE contextOMSetRenderTargets(DevicePtr self,UINT count,ID3D11RenderTargetView* const* views,ID3D11DepthStencilView* depth) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*);
