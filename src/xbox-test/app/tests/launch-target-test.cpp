@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Launch option selection and the Play picker: Play executes 64-bit guests
-// only, so a 64-bit option wins even over a 32-bit one typed "default"
-// (Hades ships both), and a game with several run options must not pick one
-// silently.
+// Launch option selection and the Play picker: both architectures are
+// startable (64-bit natively, 32-bit in the in-process x86 interpreter), so a
+// 64-bit option still wins over a 32-bit one typed "default" (Hades ships
+// both), and a game with several run options must not pick one silently.
 #include "../launch_target.h"
 #include "../launch_picker.h"
 #include <cassert>
@@ -89,22 +89,22 @@ int main() {
     assert(!choose(excludedOptions));
 
     // The picker lists the game's own options, 64-bit first, labelled by
-    // description (else the executable) and with 32-bit rows unselectable.
+    // description (else the executable); both architectures are startable.
     auto rows=choices(options);
     assert(rows.size()==2);
     assert(rows[0].label=="DirectX" && rows[0].selectable && rows[0].arch==arch64);
-    assert(rows[1].label=="32-bit" && !rows[1].selectable && rows[1].arch==arch32);
+    assert(rows[1].label=="32-bit" && rows[1].selectable && rows[1].arch==arch32);
     assert(arch_note(arch32) && !arch_note(arch64) && !arch_note(archUnknown));
     // No description: the executable path is the label. Without a PE probe the
     // architecture is unstated, so the client's type order still decides.
     assert(choices(unstatedOptions)[0].label=="Game32.exe");
     auto probed=choices(unstatedOptions,[&](const std::string& exe){return pe.count(exe)?pe[exe]:archUnknown;});
-    assert(probed[0].label=="Game64.exe" && probed[0].selectable && !probed[1].selectable);
-    // Preselection: nothing remembered -> the first runnable row; a remembered
-    // option is kept when it is still offered and runnable; a remembered 32-bit
-    // or missing option falls back to the first runnable one.
+    assert(probed[0].label=="Game64.exe" && probed[0].selectable && probed[1].selectable && probed[1].arch==arch32);
+    // Preselection: nothing remembered -> the first row (64-bit comes first); a
+    // remembered option is kept when it is still offered; a missing one falls
+    // back to the first row.
     assert(preselect(rows,"")==0);
-    assert(preselect(rows,"x86\\Hades.exe")==0);   // 32-bit memory is not offered
+    assert(preselect(rows,"x86\\Hades.exe")==1);   // a 32-bit option is runnable and remembered
     assert(preselect(rows,"x64\\Hades.exe")==0);
     assert(preselect(rows,"gone.exe")==0);
     assert(preselect({},"")==0);
@@ -139,7 +139,7 @@ int main() {
     assert(arguments(choose(workOptions),false)=="-dx11");
     assert(relative_path(workOptions[0].workingdir,rel) && rel=="bin");
 
-    std::puts("LAUNCH-TARGET-OK: 64-bit launch option wins; picker lists options 64-bit first; PE32+ preferred in the fallback");
+    std::puts("LAUNCH-TARGET-OK: 64-bit launch option wins; picker lists options 64-bit first, both startable; PE32+ preferred in the fallback");
 
     // ---- the picker: only a game with more than one runnable option asks.
     using namespace launch_picker;
@@ -147,11 +147,10 @@ int main() {
     State s;
     open(s, rows, "");
     assert(s.open && s.sel == 0 && current(s) && current(s)->label == "DirectX");
-    move(s, 1);   // the 32-bit row is reachable but cannot start
+    move(s, 1);   // the 32-bit row is reachable and starts in the interpreter
     assert(s.sel == 1 && current(s)->label == "32-bit");
-    assert(press_a(s) == Press::refused && !s.note.empty() && s.note.find("32-bit") != std::string::npos);
-    assert(started(s) == "x86\\Hades.exe");
-    move(s, 1);   // wraps back to the runnable row
+    assert(press_a(s) == Press::start && started(s) == "x86\\Hades.exe");
+    move(s, 1);   // wraps back to the 64-bit row
     assert(s.sel == 0 && s.note.empty());
     assert(press_a(s) == Press::start && started(s) == "x64\\Hades.exe");
     move(s, -1);
@@ -159,7 +158,9 @@ int main() {
     // The remembered option reopens preselected; a stale one does not.
     open(s, rows, "x64\\Hades.exe");
     assert(s.sel == 0);
-    open(s, rows, "x86\\Hades.exe");   // remembered 32-bit: not runnable, first runnable wins
+    open(s, rows, "x86\\Hades.exe");   // a remembered 32-bit option reopens on its own row
+    assert(s.sel == 1);
+    open(s, rows, "gone.exe");
     assert(s.sel == 0);
     close(s);
     assert(!s.open && s.rows.empty() && s.sel == 0);
@@ -189,5 +190,5 @@ int main() {
     assert(detached[0].entry.executable=="x64\\Hades.exe" && detached[0].entry.arguments=="-dx11" && detached[0].entry.workingdir=="x64");
     assert(preselect(detached,"x64\\Hades.exe")==0 && detached[1].entry.executable=="x86\\Hades.exe");
 
-    std::puts("LAUNCH-PICKER-OK: several options ask; 32-bit rows explain instead of starting; last choice remembered");
+    std::puts("LAUNCH-PICKER-OK: several options ask; a 32-bit row starts in the interpreter; last choice remembered");
 }

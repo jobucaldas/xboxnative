@@ -458,13 +458,112 @@ static uintptr_t richPresenceHook(const char* name,uintptr_t real) {
     }
     return 0;
 }
+// ---- Leaderboards the game asks for through the Steam API provider
+// (steam_leaderboards.h). gbe_fork answers Find/Download from its own disk
+// cache and its LAN peer network, so with no peers a rank screen shows no
+// players. The launcher asks the real Steam backend over its own CM session and
+// writes the provider's cache file. The provider reads that file once, the
+// first time a board is found in the process, so the seed runs BEFORE the
+// provider's own Find; the game's call then still runs and still receives the
+// provider's handle, and the rows it downloads are the real ones.
+struct LeaderboardTap {
+    // Runs on the game's thread before the provider's Find. Must be bounded:
+    // the game is blocked in it. Returning false leaves the provider's answer
+    // exactly as it was.
+    std::function<bool(const std::string& name,int sort,int display,bool create)> seed;
+    std::function<void(const std::string& name,int32_t score,const int32_t* details,int count,int method)> upload;
+};
+static std::mutex leaderboardMutex;
+static LeaderboardTap leaderboard;
+static void set_leaderboard_tap(LeaderboardTap tap) {
+    std::lock_guard<std::mutex> lock(leaderboardMutex);
+    leaderboard=std::move(tap);
+}
+static bool leaderboardSeed(const std::string& name,int sort,int display,bool create) {
+    LeaderboardTap tap; {std::lock_guard<std::mutex> lock(leaderboardMutex);tap=leaderboard;}
+    return tap.seed?tap.seed(name,sort,display,create):false;
+}
+static void leaderboardUpload(const std::string& name,int32_t score,const int32_t* details,int count,int method) {
+    LeaderboardTap tap; {std::lock_guard<std::mutex> lock(leaderboardMutex);tap=leaderboard;}
+    if(tap.upload)tap.upload(name,score,details,count,method);
+}
+// A score is addressed by the SteamLeaderboard_t the game passes back, which is
+// the handle from LeaderboardFindResult_t, NOT the SteamAPICall_t that Find
+// returns. That handle is the provider's own (gbe_fork: an index into its
+// cached_leaderboards), so the provider is asked which board it names rather
+// than the launcher guessing from Find order.
+static std::atomic<Module*> leaderboardModule{nullptr};   // the provider image, while a launch runs
+static void set_leaderboard_provider(Module* module) { leaderboardModule.store(module,std::memory_order_release); }
+static std::string leaderboardHandleName(void* self,uint64_t handle) {
+    Module* module=leaderboardModule.load(std::memory_order_acquire);
+    if(!module||!state) return std::string();
+    // exported() reads the image's export table, so this is the provider's real
+    // GetLeaderboardName even when the game also bound a hook of ours. Resolve
+    // under the loader lock, call outside it: the provider is guest code.
+    uintptr_t p=0;
+    {std::lock_guard<LoaderMutex> lock(state->loaderMutex);
+     p=exported(*module,"SteamAPI_ISteamUserStats_GetLeaderboardName",0);}
+    if(!p) return std::string();
+    using Fn=const char*(*)(void*,uint64_t);
+    const char* name=((Fn)p)(self,handle);
+    return name?std::string(name):std::string();
+}
+static std::atomic<uintptr_t> leaderboardRealFind{0}, leaderboardRealCreate{0}, leaderboardRealUpload{0};
+static uintptr_t leaderboardHook(const char* name,uintptr_t real) {
+    if(!real) return 0;
+    if(!strcmp(name,"SteamAPI_ISteamUserStats_FindLeaderboard")) {
+        using Fn=uint64_t(*)(void*,const char*);
+        leaderboardRealFind.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,const char* board)->uint64_t{
+            auto inner=(Fn)leaderboardRealFind.load(std::memory_order_acquire);
+            // Seed first: the provider reads the cache file only on the first
+            // Find of a board in this process.
+            if(board&&*board)leaderboardSeed(board,2/*Descending*/,1/*Numeric*/,false);
+            return inner?inner(self,board):0;
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamUserStats_FindOrCreateLeaderboard")) {
+        using Fn=uint64_t(*)(void*,const char*,int,int);
+        leaderboardRealCreate.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,const char* board,int sort,int display)->uint64_t{
+            auto inner=(Fn)leaderboardRealCreate.load(std::memory_order_acquire);
+            if(board&&*board)leaderboardSeed(board,sort,display,true);
+            return inner?inner(self,board,sort,display):0;
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamUserStats_UploadLeaderboardScore")) {
+        using Fn=uint64_t(*)(void*,uint64_t,int,int32_t,const int32_t*,int);
+        leaderboardRealUpload.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t board,int method,int32_t score,const int32_t* details,int count)->uint64_t{
+            auto inner=(Fn)leaderboardRealUpload.load(std::memory_order_acquire);
+            uint64_t call=inner?inner(self,board,method,score,details,count):0;
+            // The provider's own handle -> name, so the score reaches the board
+            // the game actually uploaded to.
+            auto found=leaderboardHandleName(self,board);
+            if(!found.empty())leaderboardUpload(found,score,details,count,method);
+            return call;
+        };
+        return (uintptr_t)hook;
+    }
+    return 0;
+}
 // Every Steam API export the game binds (static imports and GetProcAddress)
-// passes here first; only the two rich-presence calls are wrapped.
+// passes here first; only the rich-presence and leaderboard calls are wrapped.
 static uintptr_t steamApiExport(Module& module,const char* name,uintptr_t address) {
     if(!address||!name||strcmp(module.key.c_str(),"steam_api64.dll")) return address;
+    // The provider image is the only image whose exports reach here, so it is
+    // the one to ask for a leaderboard handle's name later.
+    if(&module!=leaderboardModule.load(std::memory_order_acquire))set_leaderboard_provider(&module);
     if(auto hook=richPresenceHook(name,address)) {
         if(state->log&&mlp::first_report(std::string("steam rich presence ")+name))
             state->log((std::string("STEAM rich presence: ")+name+" observed; the set is uploaded to Steam by the launcher").c_str());
+        return hook;
+    }
+    if(auto hook=leaderboardHook(name,address)) {
+        if(state->log&&mlp::first_report(std::string("steam leaderboards ")+name))
+            state->log((std::string("STEAM leaderboards: ")+name+" observed; rows come from the launcher's Steam session").c_str());
         return hook;
     }
     return address;
@@ -1540,6 +1639,8 @@ static bool start(const std::wstring& root,const std::wstring& exe,const std::ws
 static void reset_launch_config() {
     steamProvider.clear();steamClient.clear();steamClientSigned.clear();appTicket.clear();emulatedCreate=nullptr;
     set_rich_presence_tap({});
+    set_leaderboard_tap({});
+    set_leaderboard_provider(nullptr);   // the image may be unloaded with the launch
     clearVulkanDriverFiles();
 }
 // A launch that ended before any game code ran (no TLS callback, DllMain or

@@ -1156,7 +1156,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
     }
     // The launch-option picker (launch_picker.h): the game's own run options,
-    // 64-bit first, with the 32-bit ones marked and refused until 32-bit lands.
+    // 64-bit first, each row saying which engine runs it (64-bit natively,
+    // 32-bit in the x86 interpreter).
     void draw_picker() {
         const uint32_t TXT = C3(255, 255, 255), DIM = C3(170, 180, 195), YEL = C3(255, 210, 63), GRN = C3(120, 255, 140), RED = C3(255, 110, 110);
         const int x = 360, w = 1200, rowH = 74;
@@ -1174,7 +1175,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             if (sel) frame(x + 30, ry, w - 60, rowH - 10, 3, YEL);
             text(x + 50, ry + 14, clip(c.label, 60), 3, c.selectable ? TXT : DIM);
             const char* note = launch_target::arch_note(c.arch);
-            if (note) text(x + 50, ry + 42, note, 2, RED);
+            if (note) text(x + 50, ry + 42, note, 2, DIM);
             else if (c.arch == launch_target::arch64) text(x + 50, ry + 42, "64-bit", 2, GRN);
             ry += rowH;
         }
