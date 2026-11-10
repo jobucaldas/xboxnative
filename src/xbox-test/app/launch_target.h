@@ -12,7 +12,9 @@
 // app's own launch options (appinfo config/launch), not a per-title table.
 namespace launch_target {
 // An option's architecture: stated by appinfo when it says, otherwise read
-// from the executable's PE header. Play executes 64-bit guests only.
+// from the executable's PE header. Play runs 64-bit guests natively and 32-bit
+// ones in the in-process x86 interpreter (host/x86), so both are startable; a
+// 64-bit option is still preferred when a game offers both.
 enum Arch { archUnknown = 0, arch32 = 32, arch64 = 64 };
 struct Entry {
     std::string executable, arguments, workingdir, description, type, oslist, osarch, betakey, ownsdlc;
@@ -63,13 +65,14 @@ inline int arch_of(const Entry& e, const PeArch& pe = PeArch()) {
 // Ownership of a DLC we cannot check: "0" and an empty value state none.
 inline bool needs_dlc(const Entry& e) { return !e.ownsdlc.empty() && e.ownsdlc != "0"; }
 // Same preference as the client on 64-bit Windows, except that architecture
-// comes first: Play executes 64-bit guests only, so a 64-bit option wins even
-// when a 32-bit one is typed "default" (Hades ships both). Among options of
-// equal architecture: a public (no beta key) Windows option, explicit
-// "default" type first, then untyped or "none" (many apps store their Play
-// entry that way), then "option1"; appinfo order among equals. Tools, servers,
-// editors and VR options are never the game's main launch, and an option that
-// needs a DLC we cannot check ownership for is skipped.
+// comes first: a 64-bit option wins even when a 32-bit one is typed "default"
+// (Hades ships both), because the 64-bit guest runs natively while a 32-bit one
+// runs in the interpreter. Among options of equal architecture: a public (no
+// beta key) Windows option, explicit "default" type first, then untyped or
+// "none" (many apps store their Play entry that way), then "option1"; appinfo
+// order among equals. Tools, servers, editors and VR options are never the
+// game's main launch, and an option that needs a DLC we cannot check ownership
+// for is skipped.
 inline std::vector<const Entry*> ranked(const std::vector<Entry>& all, const PeArch& pe = PeArch()) {
     std::vector<std::pair<int, const Entry*>> scored;
     for (auto& e : all) {
@@ -94,21 +97,21 @@ inline const Entry* choose(const std::vector<Entry>& all, const PeArch& pe = PeA
 }
 
 // ---- launch-option picker (a game with several run options must not pick silently)
-// One row of the selection screen. Play executes 64-bit guests only, so a
-// 32-bit row is listed (the player should see the game's own options) but
-// cannot be started until 32-bit support lands. The entry is owned: the
-// picker outlives the appinfo buffer the options were parsed from.
+// One row of the selection screen. Both architectures are startable: 64-bit
+// rows run natively, 32-bit rows in the in-process x86 interpreter, and the
+// row says which. The entry is owned: the picker outlives the appinfo buffer
+// the options were parsed from.
 struct Choice {
     Entry entry;
     int arch = archUnknown;
     std::string label;        // the option's description, else its executable
-    bool selectable = false;
+    bool selectable = true;
 };
 inline std::vector<Choice> choices(const std::vector<Entry>& all, const PeArch& pe = PeArch()) {
     std::vector<Choice> out;
     for (const Entry* e : ranked(all, pe)) {
         int arch = arch_of(*e, pe);
-        out.push_back({*e, arch, e->description.empty() ? e->executable : e->description, arch != arch32});
+        out.push_back({*e, arch, e->description.empty() ? e->executable : e->description, true});
     }
     return out;
 }
@@ -124,7 +127,7 @@ inline int preselect(const std::vector<Choice>& list, const std::string& remembe
     return firstSelectable >= 0 ? firstSelectable : 0;
 }
 // Why a row cannot be started today, or nullptr when it can.
-inline const char* arch_note(int arch) { return arch == arch32 ? "needs 32-bit support (not yet available)" : nullptr; }
+inline const char* arch_note(int arch) { return arch == arch32 ? "32-bit (runs in the x86 interpreter)" : nullptr; }
 
 // Executable as an install-relative Windows path: forward slashes become
 // backslashes; a leading ".\" and rooted or parent-escaping paths are refused.
@@ -147,7 +150,7 @@ inline bool relative_path(const std::string& executable, std::string& out) {
 }
 // Fallback when no Windows launch option names an installed executable: the
 // largest top-level .exe, but a 64-bit (PE32+) one wins over a larger 32-bit
-// one when the install has both (Play executes 64-bit guests only). `arch` is
+// one when the install has both (the 64-bit guest runs natively). `arch` is
 // the PE header's class; anything that is not 64-bit keeps today's size order.
 struct Candidate { std::string name; uint64_t size = 0; int arch = archUnknown; };
 inline const Candidate* largest(const std::vector<Candidate>& all) {
