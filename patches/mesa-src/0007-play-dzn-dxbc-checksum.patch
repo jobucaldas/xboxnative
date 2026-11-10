@@ -9,11 +9,14 @@ vkCreateDevice returns VK_ERROR_INITIALIZATION_FAILED.
 
 Compute the checksum in dxil_container_write() once the container is complete. It is MD5 with DXBC's variant
 padding: the bit count goes at the start of the final block, the data is shifted one word in, and the block ends
-with (bit_count >> 2) | 1. Verified against the value vkd3d computes for the same container.
+with (bit_count >> 2) | 1. When the tail does not fit in one block the first block is padded as a plain MD5 block
+and only the second one carries the bit count; the payload after the 20-byte header is 4-byte aligned, so the tail
+is 56 or 60 bytes and both are full blocks of data. Verified against the value vkd3d computes for the same
+container (wine-10.0/libs/vkd3d/libs/vkd3d-shader/checksum.c, md5_final with VKD3D_MD5_DXBC).
 
---- a/src/microsoft/compiler/dxil_container.c
-+++ b/src/microsoft/compiler/dxil_container.c
-@@ -355,6 +355,109 @@
+--- a/src/microsoft/compiler/dxil_container.c	2026-02-19 15:55:18.000000000 -0300
++++ b/src/microsoft/compiler/dxil_container.c	2026-11-09 20:57:53.143659153 -0300
+@@ -355,6 +355,112 @@
            blob_write_bytes(&c->parts, m->buf.blob.data, m->buf.blob.size);
  }
  
@@ -108,8 +111,11 @@ with (bit_count >> 2) | 1. Verified against the value vkd3d computes for the sam
 +      dxbc_put_u32(last + 60, tail);
 +      dxbc_md5_block(state, last);
 +   } else {
-+      memcpy(last + 4, data + i, 56);
-+      last[60] = 0x80;
++      /* The payload after the 20-byte header is 4-byte aligned, so a full
++       * block leaves 56 or 60 bytes. The first block is padded as a plain
++       * block (no shift); only the second one carries the bit count. */
++      memcpy(last, data + i, rem);
++      last[rem] = 0x80;
 +      dxbc_md5_block(state, last);
 +      memset(last, 0, sizeof(last));
 +      dxbc_put_u32(last, bits);
@@ -123,7 +129,7 @@ with (bit_count >> 2) | 1. Verified against the value vkd3d computes for the sam
  bool
  dxil_container_write(struct dxil_container *c, struct blob *blob)
  {
-@@ -391,5 +494,10 @@
+@@ -391,5 +497,10 @@
         !blob_write_bytes(blob, c->parts.data, c->parts.size))
        return false;
  

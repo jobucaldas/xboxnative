@@ -10,11 +10,14 @@ Every release in dzn_meta_finish() therefore has to be idempotent:
 2. dzn_meta_triangle_fan_rewrite_index_finish() had the same problem for root_sig, pipeline_state and cmd_sig.
 3. dzn_meta_blits_finish() iterated meta->fs and meta->contexts after destroying them (access violation inside
    _mesa_hash_table_next_entry) and freed the blit vertex shader twice.
+4. dzn_meta_blits_finish() destroyed shaders_lock and contexts_lock unconditionally, so the second call destroyed
+   both mutexes again (undefined behaviour). A locks_initialized flag, set after mtx_init() and cleared after
+   mtx_destroy(), makes the destroy run once.
 
 Each pointer/table is cleared or detached as it is released. Nothing changes on the success path.
 
---- a/src/microsoft/vulkan/dzn_meta.c	2026-11-09 10:06:57.799227352 -0300
-+++ b/src/microsoft/vulkan/dzn_meta.c	2026-11-09 10:09:15.410723988 -0300
+--- a/src/microsoft/vulkan/dzn_meta.c	2026-11-09 20:58:16.693872839 -0300
++++ b/src/microsoft/vulkan/dzn_meta.c	2026-11-09 20:58:52.341196299 -0300
 @@ -107,11 +107,19 @@
  {
     struct dzn_meta_indirect_draw *meta = &device->indirect_draws[type.value];
@@ -62,7 +65,7 @@ Each pointer/table is cleared or detached as it is released. Nothing changes on 
  }
  
  static VkResult
-@@ -757,18 +774,25 @@
+@@ -757,22 +774,32 @@
  {
     struct dzn_meta_blits *meta = &device->blits;
  
@@ -87,4 +90,34 @@ Each pointer/table is cleared or detached as it is released. Nothing changes on 
 +      meta->contexts = NULL;
     }
  
-    mtx_destroy(&meta->shaders_lock);
+-   mtx_destroy(&meta->shaders_lock);
+-   mtx_destroy(&meta->contexts_lock);
++   if (meta->locks_initialized) {
++      mtx_destroy(&meta->shaders_lock);
++      mtx_destroy(&meta->contexts_lock);
++      meta->locks_initialized = false;
++   }
+ }
+ 
+ static VkResult
+@@ -784,6 +811,7 @@
+ 
+    mtx_init(&meta->shaders_lock, mtx_plain);
+    mtx_init(&meta->contexts_lock, mtx_plain);
++   meta->locks_initialized = true;
+ 
+    meta->fs = _mesa_hash_table_create_u32_keys(NULL);
+    if (!meta->fs) {
+--- a/src/microsoft/vulkan/dzn_private.h	2026-11-09 20:58:16.694872848 -0300
++++ b/src/microsoft/vulkan/dzn_private.h	2026-11-09 20:58:41.668099451 -0300
+@@ -170,6 +170,10 @@
+    struct hash_table *fs;
+    mtx_t contexts_lock;
+    struct hash_table_u64 *contexts;
++   /* Play: set once the locks above are initialised and cleared when they are
++    * destroyed, so dzn_meta_blits_finish() can run more than once (it does when
++    * device creation fails) without destroying a lock twice. */
++   bool locks_initialized;
+ };
+ 
+ const struct dzn_meta_blit *
