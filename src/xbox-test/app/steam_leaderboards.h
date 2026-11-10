@@ -352,14 +352,17 @@ struct Bridge {
         io.log(line);
         return true;
     }
-    // The rows the launcher holds for a board, or nullptr. Used by the
+    // The rows the launcher holds for a board, or nothing. Used by the
     // GetDownloadedLeaderboardEntry tap to hand the game fresher rows than the
     // provider cached at its first Find, and by the seed to ask Steam for the
-    // persona names of the players on it.
-    const std::vector<Entry>* entries(const std::string& name) const {
+    // persona names of the players on it. Returned by value: the caller reads
+    // them on the game's thread, and a reset on another thread must not pull
+    // the rows out from under it.
+    std::optional<std::vector<Entry>> entries(const std::string& name) const {
         std::lock_guard<std::mutex> lock(m);
         auto it = rows.find(name);
-        return it == rows.end() ? nullptr : &it->second;
+        if (it == rows.end()) return std::nullopt;
+        return it->second;
     }
     void reset() {
         std::lock_guard<std::mutex> lock(m);
