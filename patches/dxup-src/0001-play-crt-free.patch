@@ -241,3 +241,19 @@ diff -ruN a/src/dx9asm/dxbc_chunks.cpp b/src/dx9asm/dxbc_chunks.cpp
  
              uint32_t baseMask = 0;
              forEachValidElement<isInput(ChunkType)>(bytecode, shdrCode, [&](const RegisterMapping& mapping, uint32_t i) {
+diff -ruN a/src/dx9asm/dxbc_chunks.cpp b/src/dx9asm/dxbc_chunks.cpp
+--- a/src/dx9asm/dxbc_chunks.cpp
++++ b/src/dx9asm/dxbc_chunks.cpp
+@@ -213,7 +213,11 @@
+           PlaceholderPtr<uint32_t> cbufVariableOffset{ "[RDEF] Constant Buffer Variable Offset", nextPtr(obj) };
+           obj.push_back(0); // [PUSH] Constant Buffer Variable Offset
+ 
+-          obj.push_back(cbufferVariableCount * sizeof(float)); // [PUSH] Constant Buffer Size (bytes)
++          // Play's fix: every D3D9 constant register is a float4, so the buffer
++          // is 16 bytes per variable. The donor wrote sizeof(float), declaring a
++          // 16-byte buffer whose variables sit at 0, 16, 32, 48 - D3D11 then
++          // binds a buffer too small for the reads and the draw produces nothing.
++          obj.push_back(cbufferVariableCount * 4 * sizeof(float)); // [PUSH] Constant Buffer Size (bytes)
+           obj.push_back(0); // [PUSH] Constant Buffer Flags (None)
+           obj.push_back(0); // [PUSH] Constant Buffer Type (CBuffer)
+ 
