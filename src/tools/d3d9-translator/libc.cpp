@@ -75,11 +75,19 @@ int __mingw_snprintf(char* out,size_t size,const char* fmt,...) {
 }
 // libstdc++'s headers call these on container size overflow. This build has no
 // exceptions, so they end the process the way an uncaught exception would;
-// nothing in the translator should reach them.
+// nothing in the translator should reach them. They say so first: an
+// ExitProcess here kills the launcher with no exception record and no result
+// line, which is indistinguishable in the log from a fault inside the donor.
 namespace std {
-void __throw_length_error(const char*) { ExitProcess(3); }
-void __throw_logic_error(const char*) { ExitProcess(3); }
-void __throw_bad_alloc() { ExitProcess(3); }
-void __throw_out_of_range_fmt(const char*, ...) { ExitProcess(3); }
-void __throw_bad_array_new_length() { ExitProcess(3); }
+static void die(const char* what) {
+    OutputDebugStringA("D3D9 translator: aborting on ");
+    OutputDebugStringA(what);
+    OutputDebugStringA("\n");
+    ExitProcess(3);
+}
+void __throw_length_error(const char*) { die("length_error"); }
+void __throw_logic_error(const char*) { die("logic_error"); }
+void __throw_bad_alloc() { die("bad_alloc"); }
+void __throw_out_of_range_fmt(const char*, ...) { die("out_of_range"); }
+void __throw_bad_array_new_length() { die("bad_array_new_length"); }
 }
