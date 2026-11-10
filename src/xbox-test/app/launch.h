@@ -386,19 +386,24 @@ static void cloud_async(uint32_t appid,const std::wstring& gameRoot,bool sync,st
 // BEFORE the provider answers. The provider reads that file once, the first
 // time a board is found in the process, so the game's own rank screen lists
 // real players. Its own Find still runs and still hands the game its handle.
+// A later Find refetches when the rows are older than the bridge's TTL or when
+// this account uploaded a score, and the fresher rows are handed to the game
+// from GetDownloadedLeaderboardEntry (the provider never re-reads its file).
 #include "steam_leaderboards.h"
+// ---- Steam persona names (steam_persona.h): the rows name SteamIDs that are
+// not friends, and the provider answers "Unknown User" for those. The launcher
+// asks Steam for the names on its own session and answers GetFriendPersonaName,
+// GetPersonaName and RequestUserInformation in memory.
+#include "steam_persona.h"
 struct LeaderboardBridge {
     std::mutex m;
     steam_leaderboards::Bridge bridge;   // seed policy and board ids, per launch
+    steam_persona::Bridge persona;       // names the game may draw, per launch
     std::shared_ptr<CmSession> session;
     uint32_t appid = 0;
-    // Names Steam gave for the players on the seeded boards. The provider's
-    // cache file has no name field, so without these its GetFriendPersonaName
-    // answers "Unknown User" for every row that is not this account.
-    std::map<uint64_t, std::string> names;
-    std::set<uint64_t> namesAsked;   // ids already requested this launch
 };
 static LeaderboardBridge g_leaderboards;
+static double leaderboard_now() { return now_s(); }
 static steam_leaderboards::Io leaderboard_io(std::shared_ptr<CmSession> session) {
     steam_leaderboards::Io io;
     // The seed runs on the game's thread, which is blocked inside its own Find
@@ -410,35 +415,23 @@ static steam_leaderboards::Io leaderboard_io(std::shared_ptr<CmSession> session)
     io.log=[](const std::string& line){lp_sink(redact::steam_ids("STEAM "+line).c_str());};
     return io;
 }
-// The rows are in the provider's file, but the file has no names: ask Steam for
-// them on the same session. The answer arrives as an unsolicited
-// CMsgClientPersonaState push, which presence_push already receives; the names
-// are then served in memory by the provider's GetFriendPersonaName tap.
-// Requests are batched and each id is asked for once per launch.
-static void leaderboard_ask_names(std::shared_ptr<CmSession> session) {
-    if(!session || !session->up || session->anon) return;
-    // The bridge's ids are copied before the launcher's own lock is taken: the
-    // two mutexes are never held together, so no ordering has to be maintained.
-    auto ids = g_leaderboards.bridge.player_ids();
-    std::vector<uint64_t> ask;
-    {
-        std::lock_guard<std::mutex> l(g_leaderboards.m);
-        if(!g_leaderboards.appid) return;
-        for(auto id : ids) {
-            if(!id) continue;
-            if(g_leaderboards.names.count(id)) continue;
-            if(!g_leaderboards.namesAsked.insert(id).second) continue;
-            ask.push_back(id);
-            if(ask.size() >= 100) break;   // one request per board page
-        }
-    }
-    if(ask.empty()) return;
-    session->send_raw(steam_presence::ClientRequestFriendData,
-                      steam_presence::persona_names_request_body(ask),0,"");
+static steam_persona::Io persona_io(std::shared_ptr<CmSession> session) {
+    steam_persona::Io io;
+    // CMsgClientRequestFriendData has no job id; the answer is an unsolicited
+    // CMsgClientPersonaState push on the same session, which the keeper's push
+    // handler routes into the bridge.
+    io.send=[session](uint32_t emsg,const std::string& body){
+        if(!session||!session->up)return false;
+        session->send_raw(emsg,body,0,"");
+        return true;};
+    io.log=[](const std::string& line){lp_sink(redact::steam_ids("STEAM "+line).c_str());};
+    return io;
 }
 // The game's Find, observed from the game's thread before the provider answers.
 // The provider reads a board's cache file only on its first Find in the
-// process, so this is the one moment the rows can be put in place.
+// process, so this is the one moment the rows can be put in place; later Finds
+// refetch through the bridge and the fresher rows reach the game from the
+// GetDownloadedLeaderboardEntry tap.
 static bool leaderboard_tap_seed(const std::string& name,int sort,int display,bool create) {
     if(name.empty()) return false;
     std::shared_ptr<CmSession> session; uint32_t appid = 0;
@@ -452,9 +445,26 @@ static bool leaderboard_tap_seed(const std::string& name,int sort,int display,bo
     auto io = leaderboard_io(session);
     namespace fs = std::filesystem;
     fs::path saves = fs::path(provider_dir(appid))/"saves";
-    bool seeded = g_leaderboards.bridge.seed(io,appid,saves,name,sort,display,create);
-    if(seeded) leaderboard_ask_names(session);
-    return seeded;
+    bool ok = g_leaderboards.bridge.seed(io,appid,saves,name,sort,display,create,leaderboard_now());
+    // The rows name players; ask Steam for their persona names now, so the rank
+    // screen the game is about to draw can read them instead of "Unknown User".
+    if(auto rows = g_leaderboards.bridge.entries(name)) {
+        std::vector<uint64_t> ids;
+        for(auto& e : *rows) ids.push_back(e.steamid);
+        auto pio = persona_io(session);
+        g_leaderboards.persona.ensure(pio,ids,2000);
+    }
+    return ok;
+}
+// The rows the game is about to read. The provider answers from the copy it
+// read at the board's first Find; the launcher's copy is the one a refresh (or
+// this account's own upload) updated.
+static std::vector<play_runtime::LeaderboardTap::Row> leaderboard_tap_rows(const std::string& name) {
+    std::vector<play_runtime::LeaderboardTap::Row> out;
+    auto rows = g_leaderboards.bridge.entries(name);
+    if(!rows) return out;
+    for(auto& e : *rows) out.push_back({e.steamid,e.rank,e.score});
+    return out;
 }
 // A score the game uploaded, observed after the provider answered. The board
 // name is the one this thread last found, which is the handle the game passed.
@@ -470,60 +480,61 @@ static void leaderboard_tap_upload(const std::string& name,int32_t score,const i
     auto io = leaderboard_io(session);
     g_leaderboards.bridge.upload(io,appid,name,score,details,count,method);
 }
+// The game's GetFriendPersonaName / GetPersonaName / RequestUserInformation,
+// observed from the game's thread. Only names Steam answered for are handed
+// back; anything else leaves the provider's own answer in place.
+static const char* persona_tap_name(uint64_t steamid) { return g_leaderboards.persona.name(steamid); }
+static const char* persona_tap_self() { return g_leaderboards.persona.self_name(); }
+static void persona_tap_want(uint64_t steamid) {
+    std::lock_guard<std::mutex> l(g_leaderboards.m);
+    if(!g_leaderboards.appid) return;
+    g_leaderboards.persona.want({steamid});
+}
+// The names from the last launch, so a row drawn before Steam answers still
+// reads correctly. Private on-device state under the app's own LocalState.
+static std::filesystem::path persona_cache_path(uint32_t appid) {
+    return std::filesystem::path(provider_dir(appid))/"persona_names.txt";
+}
 static void leaderboard_start(uint32_t appid) {
+    namespace fs = std::filesystem;
     {
         std::lock_guard<std::mutex> l(g_leaderboards.m);
-        g_leaderboards.appid = appid; g_leaderboards.bridge.reset();
+        g_leaderboards.appid = appid; g_leaderboards.bridge.reset(); g_leaderboards.persona.reset();
         g_leaderboards.session.reset();
-        g_leaderboards.names.clear(); g_leaderboards.namesAsked.clear();
         auto now = user_session();
-        if(now && now->up && !now->anon) g_leaderboards.session = now;
+        if(now && now->up && !now->anon) {
+            g_leaderboards.session = now;
+            g_leaderboards.persona.self = now->steamid;
+        }
+        std::map<uint64_t,std::string> cached;
+        if(steam_persona::load_cache(persona_cache_path(appid),uint64_t(time(nullptr)),
+                                     uint64_t(7*24*3600),cached))
+            g_leaderboards.persona.adopt(cached);
     }
     play_runtime::set_leaderboard_tap({[](const std::string& name,int sort,int display,bool create){return leaderboard_tap_seed(name,sort,display,create);},
-                                       [](const std::string& name,int32_t score,const int32_t* details,int count,int method){leaderboard_tap_upload(name,score,details,count,method);}});
-    // The provider's own GetFriendPersonaName still runs; this only replaces
-    // its answer for accounts Steam has told us a name for. std::map nodes are
-    // stable, so the pointer stays valid until leaderboard_end clears the map,
-    // which is when the launch is over and no guest can call again.
-    play_runtime::set_persona_name_tap({[](uint64_t steamid)->const char*{
-        std::lock_guard<std::mutex> l(g_leaderboards.m);
-        auto it = g_leaderboards.names.find(steamid);
-        return it == g_leaderboards.names.end() ? nullptr : it->second.c_str();}});
+                                       [](const std::string& name,int32_t score,const int32_t* details,int count,int method){leaderboard_tap_upload(name,score,details,count,method);},
+                                       [](const std::string& name){return leaderboard_tap_rows(name);}});
+    play_runtime::set_persona_tap({[](uint64_t id){return persona_tap_name(id);},
+                                   []{return persona_tap_self();},
+                                   [](uint64_t id){persona_tap_want(id);}});
 }
 static void leaderboard_end() {
-    { std::lock_guard<std::mutex> l(g_leaderboards.m);
-      g_leaderboards.appid = 0;
-      g_leaderboards.bridge.reset(); g_leaderboards.session.reset();
-      g_leaderboards.names.clear(); g_leaderboards.namesAsked.clear(); }
-    play_runtime::set_leaderboard_tap({});
-    play_runtime::set_persona_name_tap({});
-}
-// A persona-state push carrying names for the seeded boards' players. Steam
-// answers a multi-id request in one message; entries for accounts we did not
-// ask about are ignored, so the cache only holds what a row can show.
-static void leaderboard_take_names(const std::string& body) {
-    std::map<uint64_t, std::string> found;
+    uint32_t appid = 0;
     {
         std::lock_guard<std::mutex> l(g_leaderboards.m);
-        if(!g_leaderboards.appid) return;
-        if(g_leaderboards.namesAsked.empty()) return;
-    }
-    found = steam_presence::parse_persona_names(body);
-    if(found.empty()) return;
-    size_t added = 0, known = 0;
-    {
-        std::lock_guard<std::mutex> l(g_leaderboards.m);
-        if(!g_leaderboards.appid) return;
-        for(auto& [id,name] : found) {
-            if(!g_leaderboards.namesAsked.count(id)) continue;
-            if(g_leaderboards.names.emplace(id,name).second) ++added;
+        appid = g_leaderboards.appid;
+        play_runtime::set_leaderboard_tap({});
+        play_runtime::set_persona_tap({});
+        if(appid) {
+            // Names learned this launch outlive it: the next launch draws them
+            // before Steam answers.
+            auto names = g_leaderboards.persona.snapshot();
+            if(!names.empty())
+                steam_persona::save_cache(persona_cache_path(appid),uint64_t(time(nullptr)),names);
         }
-        known = g_leaderboards.names.size();
+        g_leaderboards.appid = 0;
+        g_leaderboards.bridge.reset(); g_leaderboards.persona.reset(); g_leaderboards.session.reset();
     }
-    if(!added) return;
-    char line[160];
-    snprintf(line,sizeof line,"STEAM leaderboards: %zu player names received from Steam (%zu known)",added,known);
-    lp_sink(line);
 }
 // ---- Steam achievements/stats for the provider-served game (steam_achievements.h)
 #include "steam_achievements.h"
@@ -626,10 +637,17 @@ static void presence_push(const JobMsg& m) {
         return;
     }
     if(m.emsg!=steam_presence::ClientPersonaState) return;
-    // A reply to the leaderboard name request carries one entry per player on
-    // the seeded boards. It is collected before the self-check below, which
-    // only looks at this account's own entry and returns early otherwise.
-    leaderboard_take_names(m.body);
+    // Every persona push is also a name answer: the leaderboard rows asked for
+    // these SteamIDs, and the game draws them on its own thread. Collected
+    // before the self-check below, which only looks at this account's own entry
+    // and returns early otherwise.
+    {
+        size_t added = g_leaderboards.persona.on_state(m.body);
+        if(added) {
+            char line[120];snprintf(line,sizeof line,"STEAM persona: Steam answered %zu names",added);
+            lp_sink(redact::steam_ids(line).c_str());
+        }
+    }
     uint64_t self = 0; { auto s = user_session(); if(s) self = s->steamid; }
     if(!self) return;
     auto p = steam_presence::parse_persona(m.body,self);
@@ -679,6 +697,14 @@ static void presence_start(uint32_t appid) {
                 }
                 session = now;
             }
+            // Names the game asked about outside the seeded leaderboard rows.
+            // Requested here, never on the game's thread, and answered by the
+            // same persona push the keeper already takes on this session.
+            try {
+                auto waiting = g_leaderboards.persona.take_pending();
+                if(!waiting.empty()) persona_io(session).send(steam_persona::ClientRequestFriendData,
+                                                             steam_persona::request_body(waiting));
+            } catch(...) {}
             if(!send) continue;
             try { presence_send(session,appid,kv,full); } catch(...) { continue; }
             if(kv.empty()) continue;
