@@ -19,6 +19,7 @@
 // from the exit code and Play's own PRUN EVENT lines, both of which the log
 // carries. Nothing here is a visual or playability claim.
 #pragma once
+#include <atomic>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -222,20 +223,24 @@ static bool step() {
 // Called every frame from the render loop. A request file starts a run; until
 // it is consumed, every frame is a no-op. Returns true when a step must run now
 // (the caller runs it on a worker thread and restarts the launcher afterwards).
+// A step already in flight owns the queue: a request that arrives meanwhile
+// must not start a second one (resume() and tick() both reach run_async).
+static std::atomic<bool> g_running{false};
+static bool g_requested = false;   // this process has consumed a request
 static bool tick() {
     static double next = 0;
-    static bool started = false;
-    if (started) return false;
+    if (g_requested || g_running.load(std::memory_order_acquire)) return false;
     double t = now_s();
     if (t < next) return false;
     next = t + 1.0;
     std::string text;
     if (!read_file_s(request_path(), text)) return false;
-    started = true;
-    if (!DeleteFileW(request_path().c_str())) { started = false; logf("selftest: request file could not be consumed; no run"); return false; }
+    g_requested = true;
+    if (!DeleteFileW(request_path().c_str())) { g_requested = false; logf("selftest: request file could not be consumed; no run"); return false; }
     selftest_plan::Queue q;
     q.pending = selftest_plan::parse_request(text);
-    if (q.pending.empty()) { append_log("SELFTEST RESULT request empty FAIL no modes named"); summary(); return false; }
+    // An empty request is a FAIL line the summary counts, not a silent no-op.
+    if (q.pending.empty()) { append_log("SELFTEST RESULT request FAIL empty-request"); summary(); g_requested = false; return false; }
     // A new request starts a new record: the log is per request, not per app.
     DeleteFileW(log_path().c_str());
     append_log("SELFTEST BEGIN request=" + std::to_string(q.pending.size()) + " modes");
@@ -262,11 +267,15 @@ static bool resume() {
 // restart the launcher when more fixtures are queued. Never runs a second guest
 // in one process. `dispatcher` is the CoreWindow's, taken on the UI thread.
 static void run_async(const winrt::Windows::UI::Core::CoreDispatcher& dispatcher) {
+    if (g_running.exchange(true, std::memory_order_acq_rel)) { logf("selftest: a step is already running; request ignored"); return; }
     std::thread([dispatcher] {
         init_apartment(apartment_type::multi_threaded);
         bool more = false;
         try { more = step(); } catch (...) { logf("selftest: step threw"); }
-        if (!more) { logf("selftest: run finished"); return; }
+        g_running.store(false, std::memory_order_release);
+        // No guest is in this process (only 32-bit modes ran, or nothing was
+        // packaged), so another request may be taken without a restart.
+        if (!more) { g_requested = false; logf("selftest: run finished"); return; }
         try {
             dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [] {
                 logf("selftest: requesting app restart for the next fixture");
