@@ -133,9 +133,14 @@ struct Factory final : IDXGIFactory7 {
     IUnknown* (*corewindow)(HWND);
     void (*report)(HRESULT);
     PresentSurface createSurface;
+    // A composition swapchain is bound to a visual, not to a window, so this
+    // adapter cannot map it to the CoreWindow. It is passed to the real
+    // factory unchanged and its result logged separately, because a caller
+    // that gets one back has a swapchain that never reaches the screen.
+    void (*composition)(HRESULT);
     Factory(IDXGIFactory2* f, IUnknown* (*window)(HWND), void (*logger)(HRESULT),
-            PresentSurface create = nullptr)
-        : real(f), corewindow(window), report(logger), createSurface(create) {}
+            PresentSurface create = nullptr, void (*composed)(HRESULT) = nullptr)
+        : real(f), corewindow(window), report(logger), createSurface(create), composition(composed) {}
     ~Factory() { real->Release(); }
     template<class T> T* level() const {   // the real factory at a higher interface level, or null
         T* p=nullptr;if(FAILED(real->QueryInterface(__uuidof(T),(void**)&p)))return nullptr;p->Release();return p;
@@ -199,8 +204,12 @@ struct Factory final : IDXGIFactory7 {
     BOOL STDMETHODCALLTYPE IsWindowedStereoEnabled() override { return real->IsWindowedStereoEnabled(); }
     HRESULT STDMETHODCALLTYPE CreateSwapChainForHwnd(IUnknown* d,HWND h,const DXGI_SWAP_CHAIN_DESC1* s,const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* f,IDXGIOutput* r,IDXGISwapChain1** out) override {
         if(!out)return E_POINTER; *out=nullptr;
-        if(!s || (f && !f->Windowed))return DXGI_ERROR_INVALID_CALL;
-        IUnknown* c=corewindow(h); if(!c)return DXGI_ERROR_INVALID_CALL;
+        // A refusal here leaves the caller with no swapchain at all, so it is
+        // reported like the result of the handoff itself: otherwise the only
+        // trace of a failed presentation path is the caller's error.
+        if(!s || (f && !f->Windowed)){if(report)report(DXGI_ERROR_INVALID_CALL);return DXGI_ERROR_INVALID_CALL;}
+        IUnknown* c=corewindow(h);
+        if(!c){if(report)report(DXGI_ERROR_INVALID_CALL);return DXGI_ERROR_INVALID_CALL;}
         HRESULT hr=createSurface ? createSurface(real,d,c,s,r,out)
             : real->CreateSwapChainForCoreWindow(d,c,s,r,out); c->Release();
         if(report)report(hr); return hr;
@@ -213,7 +222,10 @@ struct Factory final : IDXGIFactory7 {
     HRESULT STDMETHODCALLTYPE RegisterOcclusionStatusWindow(HWND,UINT,DWORD*) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE RegisterOcclusionStatusEvent(HANDLE a,DWORD* b) override { return real->RegisterOcclusionStatusEvent(a,b); }
     void STDMETHODCALLTYPE UnregisterOcclusionStatus(DWORD a) override { real->UnregisterOcclusionStatus(a); }
-    HRESULT STDMETHODCALLTYPE CreateSwapChainForComposition(IUnknown* a,const DXGI_SWAP_CHAIN_DESC1* b,IDXGIOutput* c,IDXGISwapChain1** d) override { return real->CreateSwapChainForComposition(a,b,c,d); }
+    HRESULT STDMETHODCALLTYPE CreateSwapChainForComposition(IUnknown* a,const DXGI_SWAP_CHAIN_DESC1* b,IDXGIOutput* c,IDXGISwapChain1** d) override {
+        HRESULT hr=real->CreateSwapChainForComposition(a,b,c,d);
+        if(composition)composition(hr); return hr;
+    }
     // IDXGIFactory3..7: only reachable when level<T>() succeeded in
     // QueryInterface. Adapter-returning entries wrap what the real factory
     // returns, so the virtual output and guest-window routing still apply.

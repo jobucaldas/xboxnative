@@ -1,11 +1,14 @@
 # Vulkan for Play on the console: plan
 
 Status: milestone 1 (a guest's `LoadLibrary("vulkan-1.dll")` succeeds and reports zero physical devices) is built,
-packaged and verified off-device. Milestone 2 (Mesa's `dzn`, Vulkan on D3D12, as the real ICD) is built and packaged
-and verified off-device as far as the host allows: the loader finds a real physical device and creates a
-`VK_KHR_win32_surface`, but `vkCreateDevice` stops under Wine because Wine's vkd3d DXIL parser rejects the shader
-model `dzn` emits. Nothing here claims a game renders through Vulkan on the console. Evidence labels: **[verified]**
-read in the pinned source or run off-device, **[unverified]** needs the console.
+packaged and verified off-device. Milestone 2 (Mesa's `dzn`, Vulkan on D3D12, as the real ICD) is built, packaged and
+**verified on the console**: `selftest.txt` naming `vulkan-dzn` reports `SELFTEST RESULT vulkan-dzn PASS
+frame-presented` (exit 42) on 0.5.270.0 — a real physical device, a `VK_KHR_win32_surface` on a guest HWND, a device,
+a three-image swapchain on Play's CoreWindow adapter, a cleared render pass and two presented frames. Off-device the
+same fixture stops at `vkCreateDevice` because Wine's vkd3d DXIL parser rejects the shader model `dzn` emits; that is
+a Wine-host limitation, not the console's. Nothing here claims a *game* renders through Vulkan: no owned title asks
+for Vulkan yet, so the fixture is the acceptance. Evidence labels: **[verified]** read in the pinned source, run
+off-device, or run on the console as labelled, **[unverified]** needs the console.
 
 ## Problem
 
@@ -121,7 +124,9 @@ enumerations return `VK_ERROR_INITIALIZATION_FAILED` without writing a device. T
 real behaviour: `terminator_EnumeratePhysicalDevices` returns before it writes `*pPhysicalDeviceCount` when
 `setup_loader_term_phys_devs` finds no devices, so the caller's sentinel survives — asserting a zero there would be a
 fiction. The runner additionally asserts the loader module is mapped and initialized, and the script greps Play's log
-for the registry publication and the ICD mapping. This runs under Wine off-device; the console check is in the PR.
+for the registry publication and the ICD mapping. This runs under Wine off-device; on the console the same contract is
+covered by the `vulkan-dzn` fixture's `instance-created` stage, and the `PLAY_DZN=0` shape by the `vulkan-null-runtime`
+mode below.
 
 Milestone 2 changes what the packaged runtime directory answers: once `dzn` ships, the same fixture finds a real
 physical device, so its zero-device assertion only holds against a runtime directory without `dzn`. `play-runtime.sh`
@@ -151,16 +156,21 @@ already done and exercised. It is MIT, in the pinned `mesa-src` tarball, and bui
     time; `--wrap-mode=nodownload` means meson downloads nothing else.
 * **Patches** (`patches/mesa-src/`, applied with `patch --fuzz=0`): 0003 makes the DXIL signer optional (the console
   has no `dxil.dll`; `dzn` then emits unsigned DXIL instead of failing), 0004 makes DirectComposition optional and
-  creates the swap chain for the surface's HWND (the console has no DirectComposition; Play maps a guest HWND to its
-  CoreWindow), 0005 turns a failed `EnableExperimentalFeatures` into a warning, 0006 makes the meta cleanup idempotent
-  on a failed device creation, and 0007 fills in the DXBC container checksum (MD5 with DXBC's variant padding) so an
-  unsigned container is well-formed. 0001 and 0002 are the shared d3d12-backend patches the GL driver needs.
+  creates the swap chain for the surface's HWND (Play maps a guest HWND to its CoreWindow), 0005 turns a failed
+  `EnableExperimentalFeatures` into a warning, 0006 makes the meta cleanup idempotent on a failed device creation,
+  0007 fills in the DXBC container checksum (MD5 with DXBC's variant padding) so an unsigned container is well-formed,
+  0008 logs every DirectComposition/swapchain decision, and 0009 probes and discards the composition device so the
+  HWND path is the only one. 0001 and 0002 are the shared d3d12-backend patches the GL driver needs.
   0006 and 0007 were corrected after review: 0007's two-block tail is 56 or 60 bytes (the payload after the 20-byte
   header is 4-byte aligned) and now pads the first block as a plain block with the whole remainder, which matches
   vkd3d's `md5_final(VKD3D_MD5_DXBC)`; 0006 now destroys `shaders_lock`/`contexts_lock` once, guarded by a flag, so
   the second `dzn_meta_finish()` on the failure path does not destroy a mutex twice. The checksum is checked by
   compiling the patched function against a port of vkd3d's implementation over container sizes whose tail is 56 and
   60 bytes. **[verified off-device]**
+  0009 exists because the console **does** create a DirectComposition device (0.5.270.0 log: `DirectComposition device
+  created`, then `composition device discarded`), so 0004's "the console has no DirectComposition" premise was wrong;
+  a composition swapchain is bound to a visual and no CoreWindow can root one, so keeping the device would have taken
+  the fixture off Play's CoreWindow adapter. **[verified on console 0.5.270.0]**
 * **Packaging**: `app/build.sh` copies `vulkan_dzn.dll`, `vulkan-dzn.json`, the licences, the patches, `SHA256SUMS`
   and `SOURCE.txt` into `layout/runtime/` behind `PLAY_DZN` (default on; a dzn build failure fails the launcher build;
   `PLAY_DZN=0` is the explicit way to package without it). `redistributable()` in
@@ -171,7 +181,18 @@ already done and exercised. It is MIT, in the pinned `mesa-src` tarball, and bui
   `terminator_CreateInstance` skips an ICD whose `CreateInstance` fails and only returns
   `VK_ERROR_INCOMPATIBLE_DRIVER` when none succeed, so a `dzn` that cannot initialise leaves the guest with milestone
   1's clean "no devices" answer rather than a hard failure. A manifest that is not packaged is skipped, so a
-  `PLAY_DZN=0` launcher behaves exactly as before. **[verified off-device]**
+  `PLAY_DZN=0` launcher behaves exactly as before. Registration **replaces** rather than appends
+  (`shared/vulkan_driver_registry.h`): the key is machine-wide and survives an upgrade, and the loader de-duplicates
+  it by manifest basename keeping the first entry it enumerates, so an entry left by an earlier install would shadow
+  the live manifest and the loader would report no driver at all. Every Play manifest pointing anywhere but the
+  runtime directory being registered is deleted first, as is any entry whose manifest file no longer exists; a
+  third-party driver whose manifest is on disk is left alone. **[verified off-device and on console 0.5.270.0]**
+  * Console evidence for why this matters: 0.5.264.0 onwards failed the `vulkan-dzn` self-test with exit 12 (no
+    driver found) rather than 0.5.263.0's exit 19, because four stale entries from two earlier installs shadowed the
+    live `vulkan-dzn.json`, with a byte-identical driver DLL. The 0.5.270.0 run removed **6** (0.5.269.0's own pair
+    had gone stale too) and the loader then mapped dzn and listed the null ICD as fallback.
+  * The fixture's own stage lines reach the console only through `OutputDebugStringA` (Play routes it into the probe
+    log): a packaged process has no stdout handle, so `WriteFile` to `STD_OUTPUT_HANDLE` writes nowhere.
 
 ### What `dzn` does off-device, and where it stops
 
@@ -207,9 +228,13 @@ route now implements `StretchBlt` as a nearest-neighbour `SRCCOPY` between guest
 `BitBlt`; a window DC still has no surface and the call fails with `ERROR_NOT_SUPPORTED`. `uwph/gdi32/test.cpp` covers
 it (copy, scaling, non-`SRCCOPY`, unknown DC). **[verified off-device]**
 
-This is a **Wine-host limitation, not a proven console limitation**: the console's D3D12 is Microsoft's, not vkd3d.
-Whether it accepts unsigned DXIL from `dzn` is **[unverified]** and is the console check in the PR. If it refuses, the
-failure is graceful: the loader falls through to the null ICD and the guest sees milestone 1's answer.
+This is a **Wine-host limitation, not a console limitation**: the console's D3D12 is Microsoft's, not vkd3d.
+Whether it accepts unsigned DXIL from `dzn` is **[verified on console 0.5.270.0: yes]**. The console has no
+`dxil.dll`, so patch 0003 leaves the validator NULL and `dzn` emits unsigned DXIL at the newest validator version it
+understands; the console's D3D12 accepted it, the device was created, and the meta shaders the swapchain path needs
+compiled (`device-created`, `swapchain images=3`, two `frame-presented` lines). No signer is needed for milestone 2.
+If a future runtime refuses unsigned DXIL, the failure is graceful: the loader falls through to the null ICD and the
+guest sees milestone 1's answer.
 
 ### Needed extensions and `dzn` gaps
 
@@ -243,11 +268,23 @@ claim that they run Vulkan today):
   prints PASS or BLOCKED from those lines and never counts BLOCKED as a pass; `PRUN_REQUIRE_DZN=1` turns BLOCKED into
   a failure for a host that should run it.
 
-Off-device the result is BLOCKED at device creation (Wine's vkd3d). The console answer is still open, and the
-launcher package cannot produce it today: `app/build.sh` ships `layout/xbtest.exe` and the Play runtime, not
-`play-runner.exe` or the fixtures, which `play-runtime.sh` builds off-device only. So `vulkan-dzn` is an off-device
-proof, and a console verdict needs either the runner packaged (a deliberate change, not made here) or a title that
-actually asks for Vulkan. **[unverified on console]**
+Off-device the result is BLOCKED at device creation (Wine's vkd3d). On the console the fixture is packaged: the
+launcher's build packs the self-test fixtures into `layout\diag`, and a `selftest.txt` request naming `vulkan-dzn`
+runs it under Play with the verdict taken from the exit code (42 PASS, 43 BLOCKED) and the fixture's own
+`PLAY-VULKAN-DZN` lines — which reach `LocalState\selftest_probe.log` through `OutputDebugStringA`, since a packaged
+process has no stdout handle. **[verified on console 0.5.270.0: `SELFTEST RESULT vulkan-dzn PASS frame-presented`,
+exit 42, two frames presented, `swapchain images=3 requested=3`]**
+
+The console run also corrected two assumptions:
+
+* The registry replace is what makes the driver map at all. The launch that passed removed **6** stale manifest
+  entries (0.5.263.0, 0.5.264.0 and 0.5.269.0's own pair) and left exactly the current pair; before it, the loader
+  reported no driver and the fixture exited 12.
+* `DCompositionCreateDevice` **succeeds** on the console, so patch 0004's premise ("the console has no DirectComposition
+  device") was wrong. What makes the frame work is patch 0009: the composition device is probed, logged and discarded,
+  so the swapchain always takes the HWND path and reaches Play's CoreWindow adapter
+  (`CreateSwapChainForHwnd 632x453 buffers=3 hr=0x00000000` → `guest DXGI CoreWindow swapchain returned hr=0x00000000`).
+  A composition swapchain would have been bound to a visual no CoreWindow can root.
 
 ### A Vulkan game to test with
 

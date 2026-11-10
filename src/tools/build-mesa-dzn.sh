@@ -11,7 +11,8 @@
 # Default: fetch, verify, extract and run `meson setup`. --build also compiles and copies the DLL to <outdir>.
 # --dry-run only prints the recipe (offline; what CI runs).
 # Patches: patches/mesa-src/*.patch (the dzn ones: optional DXIL signer, CoreWindow swapchain without DirectComposition,
-# optional experimental shader models, idempotent meta cleanup on a failed device creation), applied with
+# optional experimental shader models, idempotent meta cleanup on a failed device creation, the swapchain-path log and
+# the HWND-only swapchain decision), applied with
 # `patch --fuzz=0` after the SHA-256 check. Needs: a UCRT-flavoured x86_64-w64-mingw32-gcc/g++ (the console has no
 # msvcrt.dll; on NixOS pkgsCross.ucrt64), meson, ninja, python3 with mako and pyyaml, bison, flex, curl, xz, sha256sum, git.
 # Env: MCFGTHREAD_LIBDIR/MCFGTHREAD_INCDIR as for build-mesa-d3d12.sh. The result is checked: only DLLs the console

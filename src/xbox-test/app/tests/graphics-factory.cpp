@@ -29,13 +29,16 @@ static HRESULT surface(IDXGIFactory2* real,IUnknown* device,IUnknown* core,
     CHECK(core==&window);CHECK(window.refs==2);CHECK(!restricted);CHECK(out&&!*out);
     observed=*desc;return E_ABORT;
 }
-static void report(HRESULT hr){++reports;CHECK(hr==E_ABORT);}
+static void report(HRESULT hr){++reports;CHECK(hr==E_ABORT||hr==DXGI_ERROR_INVALID_CALL);}
+static unsigned composedCalls=0;
+static HRESULT composedHr=0x7fffffff;
+static void composed(HRESULT hr){++composedCalls;composedHr=hr;}
 int main(){
     IDXGIFactory2* native=nullptr;
     HRESULT hr=CreateDXGIFactory1(__uuidof(IDXGIFactory2),reinterpret_cast<void**>(&native));
     if(FAILED(hr)){printf("OFF-DEVICE factory unavailable hr=%08lx\n",(unsigned long)hr);return 2;}
     expectedFactory=native;
-    auto proxy=new corewindow_dxgi::Factory(native,lookup,report,surface);
+    auto proxy=new corewindow_dxgi::Factory(native,lookup,report,surface,composed);
     void* queried=reinterpret_cast<void*>(UINT_PTR(1));
     CHECK(proxy->QueryInterface(__uuidof(ID3D11Device),&queried)==E_NOINTERFACE&&!queried);
     CHECK(proxy->QueryInterface(__uuidof(IUnknown),nullptr)==E_POINTER);
@@ -102,14 +105,14 @@ int main(){
     desc.SwapEffect=DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
     IDXGISwapChain1* chain=reinterpret_cast<IDXGISwapChain1*>(UINT_PTR(1));
     CHECK(proxy->CreateSwapChainForHwnd(expectedDevice,nullptr,&desc,nullptr,nullptr,&chain)==DXGI_ERROR_INVALID_CALL&&!chain);
-    CHECK(calls==0&&window.refs==1);
+    CHECK(calls==0&&reports==1&&window.refs==1);   // a refusal is reported, not silent
     CHECK(proxy->CreateSwapChainForHwnd(expectedDevice,guestWindow,&desc,nullptr,nullptr,nullptr)==E_POINTER);
     CHECK(proxy->CreateSwapChainForHwnd(expectedDevice,guestWindow,nullptr,nullptr,nullptr,&chain)==DXGI_ERROR_INVALID_CALL&&!chain);
     DXGI_SWAP_CHAIN_FULLSCREEN_DESC fullscreen{};fullscreen.Windowed=FALSE;
     CHECK(proxy->CreateSwapChainForHwnd(expectedDevice,guestWindow,&desc,&fullscreen,nullptr,&chain)==DXGI_ERROR_INVALID_CALL&&!chain);
-    CHECK(calls==0&&window.refs==1);
+    CHECK(calls==0&&reports==3&&window.refs==1);
     CHECK(proxy->CreateSwapChainForHwnd(expectedDevice,guestWindow,&desc,nullptr,nullptr,&chain)==E_ABORT&&!chain);
-    CHECK(calls==1&&reports==1&&window.refs==1);
+    CHECK(calls==1&&reports==4&&window.refs==1);
     CHECK(observed.Width==1920&&observed.Height==1080&&observed.SwapEffect==desc.SwapEffect);
     DXGI_SWAP_CHAIN_DESC legacy{};legacy.OutputWindow=guestWindow;legacy.Windowed=TRUE;
     legacy.BufferDesc.Width=640;legacy.BufferDesc.Height=480;legacy.BufferDesc.Format=desc.Format;
@@ -117,13 +120,13 @@ int main(){
     legacy.SwapEffect=DXGI_SWAP_EFFECT_DISCARD;
     IDXGISwapChain* oldChain=nullptr;
     CHECK(proxy->CreateSwapChain(expectedDevice,&legacy,&oldChain)==E_ABORT&&!oldChain);
-    CHECK(calls==2&&reports==2&&window.refs==1);
+    CHECK(calls==2&&reports==5&&window.refs==1);
     CHECK(observed.BufferCount==2&&observed.SwapEffect==DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL);
     CHECK(observed.Width==640&&observed.Height==480&&legacy.BufferCount==1);
     // Desktop games commonly ask for display-mode switching; it is dropped.
     legacy.Flags=DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
     CHECK(proxy->CreateSwapChain(expectedDevice,&legacy,&oldChain)==E_ABORT&&!oldChain);
-    CHECK(calls==3&&reports==3&&observed.Flags==0);
+    CHECK(calls==3&&reports==6&&observed.Flags==0);
     legacy.Flags=DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
     CHECK(proxy->CreateSwapChain(expectedDevice,&legacy,&oldChain)==DXGI_ERROR_INVALID_CALL&&!oldChain);
     legacy.Flags=0;
@@ -131,7 +134,18 @@ int main(){
     CHECK(proxy->CreateSwapChain(expectedDevice,&legacy,&oldChain)==DXGI_ERROR_INVALID_CALL&&!oldChain);
     legacy.SampleDesc.Count=1;legacy.Windowed=FALSE;
     CHECK(proxy->CreateSwapChain(expectedDevice,&legacy,&oldChain)==DXGI_ERROR_INVALID_CALL&&!oldChain);
-    CHECK(calls==3&&reports==3&&window.refs==1);
+    CHECK(calls==3&&reports==6&&window.refs==1);
+    // A composition swapchain is bound to a visual, not to a window, so this
+    // adapter cannot put it on the CoreWindow: it must reach the real factory
+    // unchanged (never the surface callback, never a guest-window lookup) and
+    // its result must be reported separately, so a caller that gets one back
+    // is not left with a swapchain that silently never reaches the screen.
+    IDXGISwapChain1* composedChain=nullptr;
+    HRESULT composedResult=proxy->CreateSwapChainForComposition(expectedDevice,&desc,nullptr,&composedChain);
+    CHECK(composedCalls==1&&composedHr==composedResult);
+    CHECK(calls==3&&reports==6&&window.refs==1);   // the CoreWindow route was not taken
+    CHECK(SUCCEEDED(composedResult)==(composedChain!=nullptr));
+    if(composedChain)composedChain->Release();
     CHECK(proxy->Release()==0);
     printf("OFF-DEVICE CoreWindow factory contracts checks=%u failures=%u; no rendering claim\n",checks,failures);
     return failures?1:0;

@@ -1,0 +1,78 @@
+diff -ruN a/src/vulkan/wsi/wsi_common_win32.cpp b/src/vulkan/wsi/wsi_common_win32.cpp
+--- a/src/vulkan/wsi/wsi_common_win32.cpp	2026-11-10 04:10:30.073262883 -0300
++++ b/src/vulkan/wsi/wsi_common_win32.cpp	2026-11-10 04:11:07.852584105 -0300
+@@ -800,18 +800,33 @@
+    if (create_info->imageUsage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+       desc.BufferUsage |= DXGI_USAGE_RENDER_TARGET_OUTPUT;
+ 
+-   IDXGISwapChain1 *swapchain1;
++   IDXGISwapChain1 *swapchain1 = NULL;
+    /* Play: DirectComposition is absent on the console, so the swapchain is
+     * created for the surface's HWND. Under Play that HWND is a guest window
+     * the launcher's DXGI adapter maps to its CoreWindow; on a desktop it is
+     * the window itself. A CoreWindow swapchain takes neither the tearing nor
+     * the frame-latency-waitable flag, so neither is requested here. */
+-   HRESULT hr = wsi->dxgi.dcomp ?
+-      factory->CreateSwapChainForComposition(queue, &desc, NULL, &swapchain1) :
+-      factory->CreateSwapChainForHwnd(queue, surface->base.hwnd, &desc, NULL, NULL, &swapchain1);
+-   if (FAILED(hr) ||
+-       FAILED(swapchain1->QueryInterface(&chain->dxgi)))
++   HRESULT hr;
++   if (wsi->dxgi.dcomp) {
++      hr = factory->CreateSwapChainForComposition(queue, &desc, NULL, &swapchain1);
++      mesa_logi("Play WSI: CreateSwapChainForComposition %ux%u buffers=%u hr=0x%08x\n",
++                desc.Width, desc.Height, desc.BufferCount, (unsigned)hr);
++   } else {
++      hr = factory->CreateSwapChainForHwnd(queue, surface->base.hwnd, &desc, NULL, NULL, &swapchain1);
++      mesa_logi("Play WSI: CreateSwapChainForHwnd %ux%u buffers=%u hr=0x%08x\n",
++                desc.Width, desc.Height, desc.BufferCount, (unsigned)hr);
++   }
++   if (FAILED(hr) || !swapchain1) {
++      mesa_logi("Play WSI: no swapchain from the host factory; "
++                "vkCreateSwapchainKHR fails\n");
+       return VK_ERROR_INITIALIZATION_FAILED;
++   }
++   if (FAILED(swapchain1->QueryInterface(&chain->dxgi))) {
++      mesa_logi("Play WSI: the host swapchain is not an IDXGISwapChain3; "
++                "vkCreateSwapchainKHR fails\n");
++      swapchain1->Release();
++      return VK_ERROR_INITIALIZATION_FAILED;
++   }
+ 
+    swapchain1->Release();
+ 
+@@ -961,8 +976,13 @@
+ static IDCompositionDevice *
+ dcomp_get_device()
+ {
++   /* Play: which swapchain path the WSI takes is decided here, and the
++    * difference is invisible from the guest (both paths end in a swapchain
++    * or in VK_ERROR_INITIALIZATION_FAILED). Log the outcome of each step so
++    * a console run says why composition was or was not used. */
+    HMODULE dcomp_mod = LoadLibraryA("DComp.DLL");
+    if (!dcomp_mod) {
++      mesa_logi("Play WSI: no DComp.DLL; swapchains go to the surface HWND\n");
+       return NULL;
+    }
+ 
+@@ -971,15 +991,20 @@
+ 
+    DCompositionCreateDevice = (PFN_DCOMP_CREATE_DEVICE)GetProcAddress(dcomp_mod, "DCompositionCreateDevice");
+    if (!DCompositionCreateDevice) {
++      mesa_logi("Play WSI: DComp.DLL has no DCompositionCreateDevice; "
++                "swapchains go to the surface HWND\n");
+       return NULL;
+    }
+ 
+    IDCompositionDevice *device;
+    HRESULT hr = DCompositionCreateDevice(NULL, IID_PPV_ARGS(&device));
+    if (FAILED(hr)) {
++      mesa_logi("Play WSI: DCompositionCreateDevice failed hr=0x%08x; "
++                "swapchains go to the surface HWND\n", (unsigned)hr);
+       return NULL;
+    }
+ 
++   mesa_logi("Play WSI: DirectComposition device created\n");
+    return device;
+ }
+ 

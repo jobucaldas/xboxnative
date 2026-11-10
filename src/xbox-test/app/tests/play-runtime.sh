@@ -276,14 +276,17 @@ fi
 rm -rf "$out/runtime-null";mkdir -p "$out/runtime-null"
 cp out/layout/runtime/*.dll out/layout/runtime/*.json "$out/runtime-null/"
 rm -f "$out/runtime-null/vulkan_dzn.dll" "$out/runtime-null/vulkan-dzn.json"
-# A fresh guest registry: the previous run's entries name the other runtime directory, and
-# clearVulkanDriverFiles() only removes the manifests of the directory it is given.
-rm -f "$out"/registry.sqlite*
+# The guest registry is deliberately NOT wiped here. The previous run seeded entries naming the other runtime
+# directory, and the loader de-duplicates the key by manifest basename keeping the first it enumerates, so a stale
+# entry would shadow this run's manifest and the loader would report no driver. Play prunes its own manifests that
+# point anywhere but the current runtime directory, which is what makes this second run work.
 PRUN_RUNTIME_DIR=$(winepath -w "$out/runtime-null") WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d \
  timeout -k 2 20 wine "$out/play-runner.exe" vulkan > "$out/vulkan-null-runtime.log" 2>&1
 tail -1 "$out/vulkan-null-runtime.log"
 grep -q 'PRUN EVENT Vulkan loader mapped from the runtime directory; the guest registry lists the packaged null ICD' "$out/vulkan-null-runtime.log"
 grep -q 'PRUN EVENT mapping vulkan-null-icd.dll' "$out/vulkan-null-runtime.log"
+# The stale dzn entry from the first run is gone, not merely shadowed.
+! grep -q 'vulkan-dzn.json' "$out/vulkan-null-runtime.log"
 # dzn (research/VULKAN-PLAN.md, milestone 2): the guest gets a real physical device and a win32 surface from the
 # packaged ICD, and either presents a frame (PASS) or stops at device creation on a host whose D3D12 refuses dzn's
 # device (BLOCKED, never a pass). The launcher build always packages dzn, so a missing manifest is a failure.
@@ -291,7 +294,14 @@ if [ -f out/layout/runtime/vulkan-dzn.json ]; then
   grep -q 'PLAY-VULKAN-DZN STAGE instance-created' "$out/vulkan-dzn.log"
   grep -q 'PLAY-VULKAN-DZN STAGE physical-device count=[1-9]' "$out/vulkan-dzn.log"
   grep -q 'PLAY-VULKAN-DZN STAGE win32-surface-created' "$out/vulkan-dzn.log"
+  # The swapchain path is chosen inside the WSI and used to be invisible from
+  # the guest. The driver now logs the DirectComposition probe and the branch
+  # it took; the HWND branch is the only one that reaches Play's CoreWindow.
+  grep -q 'Play WSI: DirectComposition device created\|Play WSI: DCompositionCreateDevice failed\|Play WSI: no DComp.DLL' "$out/vulkan-dzn.log"
+  grep -q 'Play WSI: composition device discarded; swapchains are created for the guest HWND' "$out/vulkan-dzn.log"
   if grep -q 'PLAY-VULKAN-DZN PASS frame-presented' "$out/vulkan-dzn.log"; then
+    grep -q 'Play WSI: CreateSwapChainForHwnd [0-9]*x[0-9]* buffers=[0-9]* hr=0x00000000' "$out/vulkan-dzn.log"
+    grep -q 'guest DXGI CoreWindow swapchain returned hr=0x00000000' "$out/vulkan-dzn.log"
     echo "PLAY-VULKAN-DZN PASS frame-presented"
   elif grep -q 'PLAY-VULKAN-DZN BLOCKED device-creation' "$out/vulkan-dzn.log"; then
     echo "PLAY-VULKAN-DZN BLOCKED device-creation on this host; not a pass"

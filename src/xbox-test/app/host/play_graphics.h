@@ -34,6 +34,13 @@ static void result(HRESULT hr) {
     if(!event)return;
     char line[128];snprintf(line,sizeof line,"guest DXGI CoreWindow swapchain returned hr=0x%08lx",(unsigned long)hr);event(line);
 }
+// A composition swapchain is bound to a visual, not to a window, so it is the
+// one swapchain this adapter cannot put on the CoreWindow: say so when one is
+// asked for, or a caller that gets one back fails later with no trace of why.
+static void composed(HRESULT hr) {
+    if(!event)return;
+    char line[160];snprintf(line,sizeof line,"guest DXGI composition swapchain returned hr=0x%08lx; it is not presented on the CoreWindow",(unsigned long)hr);event(line);
+}
 static HRESULT factoryImpl(UINT flags,bool modern,REFIID id,void** out) {
     if(!out)return E_POINTER;*out=nullptr;
     IDXGIFactory2* native=nullptr;HRESULT hr;
@@ -47,7 +54,7 @@ static HRESULT factoryImpl(UINT flags,bool modern,REFIID id,void** out) {
         hr=fn?fn(__uuidof(IDXGIFactory2),(void**)&native):E_NOTIMPL;
     }
     if(FAILED(hr))return hr;
-    auto proxy=new corewindow_dxgi::Factory(native,lookup,result,createSurface);
+    auto proxy=new corewindow_dxgi::Factory(native,lookup,result,createSurface,composed);
     hr=proxy->QueryInterface(id,out);proxy->Release();
     if(event)event("guest DXGI factory uses validated CoreWindow adapter");
     return hr;
@@ -76,7 +83,7 @@ static bool guestWindow(HWND window) {
 template<class Call> static HRESULT throughAdapter(IUnknown* self,Call call) {
     IDXGIFactory2* native=nullptr;HRESULT hr=self->QueryInterface(__uuidof(IDXGIFactory2),(void**)&native);
     if(SUCCEEDED(hr)) {
-        auto proxy=new corewindow_dxgi::Factory(native,lookup,result,createSurface);   // takes `native`
+        auto proxy=new corewindow_dxgi::Factory(native,lookup,result,createSurface,composed);   // takes `native`
         hr=call(proxy);proxy->Release();
     }
     if(event){char line[128];snprintf(line,sizeof line,"guest device factory: guest-window swapchain hr=0x%08lx",(unsigned long)hr);event(line);}
