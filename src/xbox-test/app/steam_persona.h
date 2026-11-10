@@ -228,8 +228,12 @@ struct Bridge {
     void ensure(Io& io, const std::vector<uint64_t>& ids, int timeoutMs) {
         std::vector<uint64_t> missing;
         std::set<uint64_t> seen;
+        uint64_t pushesBefore = 0;
         {
             std::lock_guard<std::mutex> lock(m);
+            // Taken before the send: a push that lands between the send and the
+            // wait below is Steam's answer, not one that was already there.
+            pushesBefore = pushes;
             for (auto id : ids)
                 if (id && !known(id) && !asked.count(id) && seen.insert(id).second) missing.push_back(id);
         }
@@ -255,7 +259,7 @@ struct Bridge {
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
         size_t want = seen.size();
         size_t got = known_count(), last = got;
-        uint64_t pushesSeen = pushes;
+        uint64_t pushesSeen = pushesBefore;
         bool replied = false;
         while (got < want) {
             auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
