@@ -155,6 +155,15 @@ int main(void) {
     check(st[16] == 0xEE && st[23] == 0xEE);
     char mod[260];
     check(GetModuleFileNameA(NULL, mod, sizeof mod) > 0);
+    /* Module names are case-insensitive on Windows: the image's own name in a
+     * different case must find the same module. The launcher passes a
+     * mixed-case executable name, so a case-sensitive module map misses here. */
+    char up[260];
+    int mi = 0;
+    for (; mod[mi] && mi < (int)sizeof up - 1; ++mi)
+        up[mi] = mod[mi] >= 'a' && mod[mi] <= 'z' ? (char)(mod[mi] - 32) : mod[mi];
+    up[mi] = 0;
+    check(GetModuleHandleA(up) != NULL && GetModuleHandleA(up) == GetModuleHandleA(NULL));
     puts("x86-crt: kernel32 ok");
 
     /* Interlocked and critical sections on the single guest thread. */

@@ -41,7 +41,7 @@ x86-crt: strings ok
 x86-crt: varargs 60 4.00
 x86-crt: kernel32 ok
 x86-crt: sync ok
-x86-crt: checks 38 failed 0'
+x86-crt: checks 39 failed 0'
 [[ $body == "$want" ]] || { echo "X86-GUEST FAIL: stdout differs"; diff <(echo "$want") <(echo "$body") || true; exit 1; }
 echo "X86-GUEST PASS: mingw CRT program (printf with doubles, heap, qsort, TLS, VirtualAlloc) ran in the interpreter to exit 42"
 # The launcher's own PE32 entry point (host/x86/x86_play.h): the structured
@@ -60,6 +60,10 @@ read -r pimports pbound < <(sed -n 's/^play: .* imports=\([0-9]\+\) bound=\([0-9
 [[ -n ${pimports:-} && $pimports -ge 65 && $pimports -eq $pbound ]] || {
   echo "X86-GUEST FAIL: x86_play imports=$pimports bound=$pbound (want all bound, at least 65)"; echo "$pout"; exit 1; }
 grep -q '^play: on_loaded calls=1 before-entry=1 ' <<<"$pout" || { echo "X86-GUEST FAIL: x86_play progress callback"; echo "$pout"; exit 1; }
+# The launcher runs a game with a cap no real session reaches; the interpreter's
+# default 500 million would stop a running 32-bit game after a few seconds.
+grep -q '^play: limit-default=500000000 limit-game=1000000000000$' <<<"$pout" || {
+  echo "X86-GUEST FAIL: x86_play instruction limit"; echo "$pout"; exit 1; }
 ! grep -q '^play: unresolved\|^play: fault' <<<"$pout" || { echo "X86-GUEST FAIL: x86_play reported a fault or unresolved import"; echo "$pout"; exit 1; }
 pbody=$(sed '/^play: /d' <<<"$pout")
 [[ $pbody == "$want" ]] || { echo "X86-GUEST FAIL: x86_play tee differs"; diff <(echo "$want") <(echo "$pbody") || true; exit 1; }
