@@ -153,6 +153,52 @@ int main() {
         assert(waited < 2500);   // one quiet slice after the push, not the whole timeout
     }
 
+    // ---- a first reply slower than the quiet slice is still waited for: the
+    // quiet window only starts once Steam has answered, so a laggy session does
+    // not leave the rank screen on "Unknown User"
+    {
+        Server server;
+        server.names = {{0x110000100000002ull, "Player Two"}};
+        Io io;
+        io.send = [&](uint32_t emsg, const std::string& body) { return server.send(emsg, body); };
+        io.log = [](const std::string&) {};
+        Bridge bridge;
+        std::vector<uint64_t> ids = {0x110000100000002ull};
+        std::thread reader([&] {
+            while (server.requests == 0) std::this_thread::yield();
+            std::this_thread::sleep_for(std::chrono::milliseconds(QuietMs + 200));
+            bridge.on_state(server.state_body(ids));
+        });
+        bridge.ensure(io, ids, 3000);
+        reader.join();
+        assert(bridge.known(0x110000100000002ull));
+    }
+
+    // ---- a push that names nobody is still Steam's answer: the wait ends on it
+    // rather than burning the whole timeout on the game's thread
+    {
+        Server server;
+        Io io;
+        io.send = [&](uint32_t emsg, const std::string& body) { return server.send(emsg, body); };
+        std::vector<std::string> log;
+        io.log = [&](const std::string& line) { log.push_back(line); };
+        Bridge bridge;
+        std::vector<uint64_t> ids = {0x110000100000009ull};
+        std::thread reader([&] {
+            while (server.requests == 0) std::this_thread::yield();
+            bridge.on_state(std::string());   // a persona push with no friends
+        });
+        auto start = std::chrono::steady_clock::now();
+        bridge.ensure(io, ids, 5000);
+        auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        reader.join();
+        assert(!bridge.known(0x110000100000009ull));
+        assert(waited < 2500);
+        bool counted = false;
+        for (auto& l : log) if (l.find("0 of 1 leaderboard names resolved") != std::string::npos) counted = true;
+        assert(counted);
+    }
+
     // ---- names the game asked for outside the seeded rows are queued, not sent
     // on the game's thread, and are requested once by the keeper
     {
@@ -164,6 +210,19 @@ int main() {
         assert(bridge.take_pending().empty());
         // Already requested: asking again this launch would be a duplicate.
         bridge.want({0x110000100000005ull});
+        assert(bridge.take_pending().empty());
+    }
+
+    // ---- the queue is bounded by distinct ids, so a rank screen polling the
+    // same unresolved rows never exhausts it
+    {
+        Bridge bridge;
+        std::vector<uint64_t> ids;
+        for (size_t i = 0; i < MaxTracked + 50; ++i) ids.push_back(0x110000200000000ull + i);
+        bridge.want(ids);
+        assert(bridge.take_pending().size() == MaxTracked);
+        // Repeats of ids already queued or asked add nothing.
+        bridge.want(ids);
         assert(bridge.take_pending().empty());
     }
 

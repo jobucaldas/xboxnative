@@ -46,10 +46,16 @@ enum : uint32_t {
 enum : uint32_t { FlagStatus = 1, FlagPlayerName = 2 };
 // Steam answers a batch; keep one request well inside a single CM frame.
 enum : unsigned { RequestBatch = 100 };
-// How long the seed waits after the names stop arriving before it lets the
-// game draw: Steam sends one push per reply, and an account it will not name
-// never arrives, so waiting for "all" would always burn the full timeout.
+// How long the seed waits after a reply before it lets the game draw: Steam
+// sends one push per request, and an account it will not name (a private
+// profile) never arrives, so waiting for "all" would always burn the timeout.
+// The quiet slice only starts once a push has arrived: a first reply slower
+// than this must still be waited for, up to the caller's timeout.
 enum : int { QuietMs = 500 };
+// Most SteamIDs one launch will track. A rank screen that polls unresolved
+// names must not grow the request set without bound. Distinct ids only: the
+// sets below dedupe, so a repeat of an id already asked for costs nothing.
+enum : size_t { MaxTracked = 2000 };
 
 struct Io {
     // Fire and forget: CMsgClientRequestFriendData has no job id, and the answer
@@ -180,6 +186,10 @@ struct Bridge {
     std::set<uint64_t> asked;     // requested this launch (answered or not)
     std::set<uint64_t> pending;   // wanted by the game, not yet requested
     uint64_t self = 0;            // the signed-in account, for GetPersonaName
+    // Persona pushes seen this launch. A push can name nobody (a private
+    // profile) and still be Steam's whole answer, so the wait counts pushes,
+    // not names, to know the reply arrived.
+    uint64_t pushes = 0;
 
     bool known(uint64_t id) const { return names.find(id) != names.end(); }
     // A persona push arrived. Returns the number of names it added or changed.
@@ -188,6 +198,7 @@ struct Bridge {
     size_t on_state(const std::string& body) {
         size_t added = 0;
         std::lock_guard<std::mutex> lock(m);
+        ++pushes;
         for (auto& p : parse_state(body)) {
             if (!p.name.empty()) {
                 auto it = names.find(p.steamid);
@@ -203,7 +214,7 @@ struct Bridge {
             }
             if (p.has_state) states[p.steamid] = p.state;
         }
-        if (added) cv.notify_all();
+        cv.notify_all();
         return added;
     }
     // Ask Steam for the names of `ids` that are not known yet, and wait a
@@ -216,10 +227,11 @@ struct Bridge {
     // provider's own answer exactly as it was.
     void ensure(Io& io, const std::vector<uint64_t>& ids, int timeoutMs) {
         std::vector<uint64_t> missing;
+        std::set<uint64_t> seen;
         {
             std::lock_guard<std::mutex> lock(m);
             for (auto id : ids)
-                if (id && !known(id) && !asked.count(id)) missing.push_back(id);
+                if (id && !known(id) && !asked.count(id) && seen.insert(id).second) missing.push_back(id);
         }
         if (missing.empty()) return;
         bool sent = true;
@@ -235,35 +247,58 @@ struct Bridge {
         }
         auto known_count = [&] {
             size_t got = 0;
-            for (auto id : ids)
-                if (id && known(id)) ++got;
+            for (auto id : seen)
+                if (known(id)) ++got;
             return got;
         };
         std::unique_lock<std::mutex> lock(m);
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+        size_t want = seen.size();
         size_t got = known_count(), last = got;
-        while (got < ids.size()) {
+        uint64_t pushesSeen = pushes;
+        bool replied = false;
+        while (got < want) {
             auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now()).count();
             if (left <= 0) break;
+            if (!replied) {
+                // No push yet: wait for Steam's first answer for the whole
+                // timeout. A reply slower than QuietMs is still a reply, and
+                // returning before it lands is how a rank screen ends up with
+                // "Unknown User" on rows Steam was about to name.
+                cv.wait_for(lock, std::chrono::milliseconds(left), [&] { return pushes != pushesSeen; });
+                if (pushes == pushesSeen) break;   // nothing came: the provider's answers stand
+                replied = true;
+                pushesSeen = pushes;
+                got = known_count();
+                last = got;
+                continue;
+            }
             auto slice = std::chrono::milliseconds(std::min<long long>(QuietMs, left));
-            cv.wait_for(lock, slice, [&] { return known_count() != got; });
+            cv.wait_for(lock, slice, [&] { return pushes != pushesSeen || known_count() != got; });
             got = known_count();
-            // Steam sends the reply as one push; if nothing new arrived for a
-            // slice, the rest are accounts it will not name. Draw what it named.
-            if (got == last) break;
+            // Steam answers one push per request, and the accounts it will not
+            // name (private profiles) simply do not appear in it. A quiet slice
+            // after a push therefore means it has said all it is going to say.
+            if (pushes == pushesSeen && got == last) break;
+            pushesSeen = pushes;
             last = got;
         }
         lock.unlock();
         // Counts only: a SteamID or a persona name must never reach the log.
-        io.log("persona: " + std::to_string(got) + " of " + std::to_string(ids.size()) + " leaderboard names resolved");
+        io.log("persona: " + std::to_string(got) + " of " + std::to_string(want) + " leaderboard names resolved");
     }
     // Names the game asked for outside the seeded rows: queued for the keeper,
-    // which requests them on its next pass (never on the game's thread).
+    // which requests them on its next pass (never on the game's thread). Bounded
+    // by distinct ids: a rank screen polling the same unresolved rows adds
+    // nothing, and a game that walks thousands of users cannot grow this.
     void want(const std::vector<uint64_t>& ids) {
         std::lock_guard<std::mutex> lock(m);
-        for (auto id : ids)
-            if (id && !known(id) && !asked.count(id)) pending.insert(id);
+        for (auto id : ids) {
+            if (!id || known(id) || asked.count(id) || pending.count(id)) continue;
+            if (asked.size() + pending.size() >= MaxTracked) return;
+            pending.insert(id);
+        }
     }
     std::vector<uint64_t> take_pending() {
         std::lock_guard<std::mutex> lock(m);
@@ -311,7 +346,7 @@ struct Bridge {
     }
     void reset() {
         std::lock_guard<std::mutex> lock(m);
-        arena.clear(); names.clear(); states.clear(); asked.clear(); pending.clear(); self = 0;
+        arena.clear(); names.clear(); states.clear(); asked.clear(); pending.clear(); self = 0; pushes = 0;
     }
 };
 } // namespace steam_persona

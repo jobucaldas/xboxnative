@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <new>
+#include <optional>
 #include <thread>
 // Wine 10 lacks VirtualProtectFromApp; this host-only alias preserves W^X.
 static BOOL WINAPI hostProtect(void* p,SIZE_T n,DWORD flags,DWORD* old) {
@@ -460,10 +461,11 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
             [appid](const std::string& name,int32_t score,const int32_t* details,int count,int method){
                 bridge.upload(io,appid,name,score,details,count,method);},
             [](const std::string& name){
+                auto rows=bridge.entries(name);
+                if(!rows)return std::optional<std::vector<play_runtime::LeaderboardTap::Row>>{};
                 std::vector<play_runtime::LeaderboardTap::Row> out;
-                if(auto rows=bridge.entries(name))
-                    for(auto& e:*rows)out.push_back({e.steamid,e.rank,e.score});
-                return out;}});
+                for(auto& e:*rows)out.push_back({e.steamid,e.rank,e.score,e.details});
+                return std::optional<std::vector<play_runtime::LeaderboardTap::Row>>(std::move(out));}});
         logline("PRUN leaderboard bridge staged (off-device fixture backend)");
     }
     // Game mode runs Megabonk unless PRUN_GAME_EXE names another owned game.

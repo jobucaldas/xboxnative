@@ -254,11 +254,19 @@ through a second export tap, `GetDownloadedLeaderboardEntry`:
 - A failed refresh keeps the previous rows and logs
   `refresh unavailable … keeping N rows`; the game is never shown less than it
   already had.
+- A successful fetch that returns no rows is Steam's answer, not a failure: a
+  weekly board that reset really is empty, so the held rows are replaced with
+  the empty set, the provider's cache file is emptied, and a download of that
+  board returns no entries.
 
 The tap calls the provider's own `GetDownloadedLeaderboardEntry` first and then
-overwrites `user`, `rank` and `score` in the entry struct the game passed, only
-when the launcher holds rows for the board the provider's handle names. The
-provider's call, its handle and its callbacks are unchanged.
+overwrites `user`, `rank`, `score` and `details` in the entry struct the game
+passed, only when the launcher holds rows for the board the provider's handle
+names. It patches only when the launcher's row carries the same global rank as
+the index the game asked for, so a shorter refresh or a ranged download cannot
+mix rows from different positions; an index past the launcher's rows reports no
+entry, because that player is no longer on the board. The provider's call, its
+handle and its callbacks are unchanged.
 
 ### Persona names on those rows
 
@@ -284,15 +292,26 @@ The launcher answers the same three exports from its own signed-in session:
    and `player_name[15]`; each name is stored against its SteamID.
 3. `GetFriendPersonaName` returns the launcher's name when it has one and the
    provider's own answer otherwise; `GetPersonaName` returns the account's own
-   name once Steam answered for it; `RequestUserInformation` returns `false`
-   ("known, call the getters now") for a name the launcher holds and `true`
-   ("in flight") for one it does not, queueing it so the keeper requests it on
-   its next pass — never on the game's thread.
-4. Names are kept in the app's own `LocalState` (`persona_names.txt`, hex-encoded
+   name once Steam answered for it. `RequestUserInformation` answers `false`
+   ("known, call the getters now") in every case: a name the launcher holds is
+   known, and one it does not is queued for the keeper and reported as known
+   too. Answering `true` ("in flight, wait for `PersonaStateChange_t`") would
+   strand a game that waits on that callback, because Play does not post it —
+   the provider owns the callback plumbing. The getters are called instead and
+   return the provider's answer until Steam's name lands, at which point the tap
+   hands out the real one.
+4. The seed waits on the game's thread only for a bounded time: at most
+   `timeoutMs` (2 s) for Steam's first push, then a 500 ms quiet window after
+   each push. A push that names nobody (private profiles) still ends the wait,
+   so a rank screen is not stalled for accounts Steam will not name, and a
+   reply slower than the quiet window is still waited for.
+5. Names are kept in the app's own `LocalState` (`persona_names.txt`, hex-encoded
    so a name with a space or newline cannot corrupt the record, 7-day TTL) and
    adopted at launch, so a row drawn before Steam answers still reads correctly.
    The file is private on-device state: never logged, never committed.
-5. Log lines carry counts only (`persona: N of M leaderboard names resolved`);
+6. The request set is bounded by distinct SteamIDs (2000 per launch): a rank
+   screen polling the same unresolved rows adds nothing.
+7. Log lines carry counts only (`persona: N of M leaderboard names resolved`);
    no SteamID and no persona name is ever written to a log.
 
 The provider's own call always runs and its answer is replaced only when the
@@ -444,16 +463,18 @@ Verified off-device:
   scores. With the file removed the same guest gets an empty board. That is the
   link a new pin or a changed path would break silently.
 - The refresh policy: a Find inside the TTL asks Steam nothing, a Find past it
-  refetches, an upload dirties the board so the next Find refetches at once, and
-  a failed refresh keeps the previous rows
+  refetches, an upload dirties the board so the next Find refetches at once, a
+  failed refresh keeps the previous rows, and a successful empty fetch replaces
+  them (a reset weekly board really is empty)
   (`app/tests/steam_leaderboards_test.cpp`).
 - Persona names: the request and push wire shapes round-trip, a name is only
   handed out once Steam answered, a rename replaces the name in place, the
   private cache round-trips and expires, and no SteamID or name reaches the log
   (`app/tests/steam_persona_test.cpp`, run by CI). Off-device under Wine, the
   provider stand-in answers "Unknown User" and the launcher's tap replaces it
-  with the name the fixture backend sent, `RequestUserInformation` follows the
-  API contract, and the rows after the guest's own upload are the refreshed ones
+  with the name the fixture backend sent, `RequestUserInformation` never reports
+  a name as in flight (Play posts no `PersonaStateChange_t`), and the rows after
+  the guest's own upload are the refreshed ones
   (`app/tests/play-runtime.sh leaderboards`).
 - The launcher sources compile with the UWP toolchain.
 - gbe_fork exports 1,032 `SteamAPI_ISteam*` names. Of the 894 Megabonk

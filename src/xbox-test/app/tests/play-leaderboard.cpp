@@ -97,12 +97,14 @@ DWORD lb_entry() {
     // The provider's own call still ran: the launcher replaced its answer, it
     // did not skip it.
     if (PlayLeaderboardPersonaCalls(0) < 1) return 26;
-    // The API contract: false means "known, call the getters now" (what the
-    // provider's TODO always says); true means "in flight, wait for the
-    // callback". A name the launcher holds is known; one it does not is in
-    // flight, so the game waits instead of drawing "Unknown User" for good.
+    // The API contract: false means "known, call the getters now"; true means
+    // "in flight, wait for PersonaStateChange_t". Nothing in Play posts that
+    // callback (the provider owns the callback plumbing), so the tap must never
+    // answer true: a game that waited would never be woken. Both a name the
+    // launcher holds and one it does not answer false; the getters are then
+    // called, and the queued name arrives for the next frame.
     if (SteamAPI_ISteamFriends_RequestUserInformation(nullptr, top.user, 1) != 0) return 27;
-    if (SteamAPI_ISteamFriends_RequestUserInformation(nullptr, 0x110000100000009ull, 1) != 1) return 28;
+    if (SteamAPI_ISteamFriends_RequestUserInformation(nullptr, 0x110000100000009ull, 1) != 0) return 28;
     if (PlayLeaderboardPersonaCalls(1) < 1) return 29;
 
     // This account's own score changed the board. The provider still answers

@@ -302,7 +302,7 @@ struct Bridge {
         if (!refresh) return had;
         std::vector<Entry> entries; int32_t count = 0;
         bool got = fetch_rows(io, appid, name, id, entries, count);
-        if (!got || entries.empty()) {
+        if (!got) {
             // Keep whatever the last successful fetch left: a failed refresh is
             // not a reason to show the game less than it already had.
             char line[240];
@@ -311,10 +311,13 @@ struct Bridge {
                          name.c_str(), id, rows.count(name) ? rows[name].size() : size_t(0));
             else
                 snprintf(line, sizeof line, "leaderboards: '%s' seeded 0 rows (id %d, %d on Steam, file %s)",
-                         name.c_str(), id, count, got ? "empty" : "unavailable");
+                         name.c_str(), id, count, "unavailable");
             io.log(line);
             return had;
         }
+        // A successful fetch with no rows is Steam's answer, not a failure: a
+        // weekly board that reset really is empty, so last week's players must
+        // go. The empty set is stored and the provider's file is emptied too.
         rows[name] = entries;
         rowsAt[name] = now;
         dirty.erase(name);

@@ -316,6 +316,19 @@ int main() {
         bool kept = false;
         for (auto& l : lines) if (l.find("refresh unavailable") != std::string::npos && l.find("keeping 3 rows") != std::string::npos) kept = true;
         assert(kept);
+        // A successful fetch that returns no rows is Steam's answer, not a
+        // failure: a weekly board that reset is empty, so last week's players go.
+        s4.rows[id4].clear();
+        assert(bridge.seed(io4, 3405340, root4, "v2_kills_weekly", SortDescending, DisplayNumeric, false, 100 + 300));
+        rows = bridge.entries("v2_kills_weekly");
+        assert(rows && rows->empty());
+        bool emptied = false;
+        for (auto& l : lines) if (l.find("'v2_kills_weekly' refreshed 0 rows") != std::string::npos) emptied = true;
+        assert(emptied);
+        // The provider's cache file is emptied too, so a board found for the
+        // first time after the reset reads no players either.
+        auto file4 = cache_path(root4, 3405340, "v2_kills_weekly");
+        assert(file4 && fs::exists(*file4) && fs::file_size(*file4) == 0);
         // No SteamID or name reaches the log.
         for (auto& l : lines) assert(l.find("7656119") == std::string::npos);
         fs::remove_all(root4);

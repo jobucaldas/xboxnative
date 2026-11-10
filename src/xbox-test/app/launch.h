@@ -459,11 +459,11 @@ static bool leaderboard_tap_seed(const std::string& name,int sort,int display,bo
 // The rows the game is about to read. The provider answers from the copy it
 // read at the board's first Find; the launcher's copy is the one a refresh (or
 // this account's own upload) updated.
-static std::vector<play_runtime::LeaderboardTap::Row> leaderboard_tap_rows(const std::string& name) {
-    std::vector<play_runtime::LeaderboardTap::Row> out;
+static std::optional<std::vector<play_runtime::LeaderboardTap::Row>> leaderboard_tap_rows(const std::string& name) {
     auto rows = g_leaderboards.bridge.entries(name);
-    if(!rows) return out;
-    for(auto& e : *rows) out.push_back({e.steamid,e.rank,e.score});
+    if(!rows) return std::nullopt;
+    std::vector<play_runtime::LeaderboardTap::Row> out;
+    for(auto& e : *rows) out.push_back({e.steamid,e.rank,e.score,e.details});
     return out;
 }
 // A score the game uploaded, observed after the provider answered. The board
