@@ -186,10 +186,11 @@ already done and exercised. It is MIT, in the pinned `mesa-src` tarball, and bui
   it by manifest basename keeping the first entry it enumerates, so an entry left by an earlier install would shadow
   the live manifest and the loader would report no driver at all. Every Play manifest pointing anywhere but the
   runtime directory being registered is deleted first, as is any entry whose manifest file no longer exists; a
-  third-party driver whose manifest is on disk is left alone. **[verified off-device]**
+  third-party driver whose manifest is on disk is left alone. **[verified off-device and on console 0.5.270.0]**
   * Console evidence for why this matters: 0.5.264.0 onwards failed the `vulkan-dzn` self-test with exit 12 (no
     driver found) rather than 0.5.263.0's exit 19, because four stale entries from two earlier installs shadowed the
-    live `vulkan-dzn.json`, with a byte-identical driver DLL.
+    live `vulkan-dzn.json`, with a byte-identical driver DLL. The 0.5.270.0 run removed **6** (0.5.269.0's own pair
+    had gone stale too) and the loader then mapped dzn and listed the null ICD as fallback.
   * The fixture's own stage lines reach the console only through `OutputDebugStringA` (Play routes it into the probe
     log): a packaged process has no stdout handle, so `WriteFile` to `STD_OUTPUT_HANDLE` writes nowhere.
 
