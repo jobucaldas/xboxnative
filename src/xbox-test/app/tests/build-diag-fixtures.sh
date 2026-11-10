@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # build-diag-fixtures.sh OUTDIR -> OUTDIR/{fixture-crt.exe,play-vulkan-dzn.exe,
-# play-d3d9.exe,play-d3d9-triangle.exe,play-d3d9-textured.exe,play-d3d10.exe},
-# the console self-test's fixtures (selftest.h).
+# play-d3d9.exe,play-d3d9-triangle.exe,play-d3d9-textured.exe,play-d3d10.exe,
+# play-opengl.exe}, the console self-test's fixtures (selftest.h).
 #
 # These are the same guest programs tests/play-runtime.sh builds for the
 # off-device runner, compiled from this repository's sources so the package
@@ -54,6 +54,15 @@ lld "${common[@]}" /entry:d3d9_textured_entry /include:d3d9_textured_relocation 
 clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d10.cpp" -o "$work/d3d10.obj"
 lld "${common[@]}" /entry:d3d10_entry /include:d3d10_relocation /out:"$out/play-d3d10.exe" \
   "$work/d3d10.obj" "$mingw_lib/libd3d10.a" "$mingw_lib/libdxgi.a" "$mingw_lib/libuuid.a" "${libs[@]}"
+
+# The OpenGL fixture runs the startup path an SDL3 GL game takes (research/
+# OPENGL-PLAN.md): opengl32.dll from the runtime directory (Mesa's d3d12 WGL
+# driver), a pixel format through gdi32's forwarded wgl*, a context, a cleared
+# frame presented with SwapBuffers and a glReadPixels readback. Exit 42 only
+# when the rendered pixel came back; 43 is BLOCKED (never a pass).
+clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-opengl.cpp" -o "$work/opengl.obj"
+lld "${common[@]}" /entry:opengl_entry /include:opengl_relocation /out:"$out/play-opengl.exe" \
+  "$work/opengl.obj" "${libs[@]}"
 
 # The 32-bit fixture: a mingw-CRT PE32 program the interpreter runs to exit 42
 # (x86-guest.sh asserts the same binary's stdout and exit code under Wine).

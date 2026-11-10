@@ -26,6 +26,7 @@ inline const Mode* modes(size_t& count) {
         {"d3d9-triangle", "play-d3d9-triangle.exe", false},
         {"d3d9-textured", "play-d3d9-textured.exe", false},
         {"d3d10", "play-d3d10.exe", false},
+        {"opengl", "play-opengl.exe", false},
     };
     count = sizeof(table) / sizeof(*table);
     return table;
@@ -125,6 +126,9 @@ inline std::string verdict(const std::string& mode, bool finished, bool executed
         if (code == 42) return "PASS frame-presented";
         if (code == 43) return "BLOCKED device-creation";
     }
+    // The OpenGL fixture's readback mismatch: the context worked but the host
+    // drew nothing the guest could read. A platform limit, never a pass.
+    if (mode == "opengl" && code == 43) return "BLOCKED pixel-readback";
     if (code == 42) return "PASS";
     return "FAIL exit-" + std::to_string(code);
 }
