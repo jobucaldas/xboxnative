@@ -1299,6 +1299,16 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         } catch(winrt::hresult_error const&) {
             for(unsigned i=0;i<assigned.size();++i)xinput_core::publish(i,nullptr);
         }
+        // The record DLL's raw-input enumeration presents one HID device per
+        // connected pad (uwph_u32c_pads), which is what a guest's legacy
+        // joystick enumeration looks for; with no pad it reports none.
+        static auto reportPads=reinterpret_cast<void (WINAPI*)(unsigned)>(
+            user32_core::resolve("user32.dll","uwph_u32c_pads"));
+        if(reportPads) {
+            unsigned mask=0;
+            for(unsigned i=0;i<assigned.size();++i)if(assigned[i])mask|=1u<<i;
+            reportPads(mask);
+        }
     }
 
     bool InitD3D() {

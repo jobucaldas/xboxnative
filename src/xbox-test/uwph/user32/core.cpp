@@ -11,6 +11,7 @@
 #include <algorithm>
 #include "keymap.h"
 #include "corewindow_feed.h"
+#include "../hid/pad_device.h"
 // The APP family this DLL compiles under (build.sh --uwp) hides several
 // desktop-only SDK declarations this record module still needs to export
 // (they are plain data layouts/constants, not calls to restricted entry
@@ -313,14 +314,73 @@ extern "C" UINT WINAPI c_GetRegisteredRawInputDevices(RawInputDevice2* devices,U
  if(needed)memcpy(devices,rawDevices.data(),needed);
  return *count;
 }
-// No HID backend feeds this record module, so the honest device list is empty
-// and any raw-input handle is unknown; both match real Windows error paths.
+// No HID backend feeds this record module, so the device list holds only the
+// pads the launcher publishes (below) and any other raw-input handle is
+// unknown; both match real Windows error paths.
+// A pad the launcher publishes in an XInput slot is presented as one
+// RIM_TYPEHID device (hid/pad_device.h), which is what a guest's legacy
+// joystick enumeration looks for. The launcher reports the connected slots
+// through uwph_u32c_pads; with no pad the list stays empty.
+static unsigned padSlots;   // bit i: XInput slot i holds a published pad
+static int padToken[pad_device::slot_count];   // stable per-slot device handles
+extern "C" void WINAPI uwph_u32c_pads(unsigned mask){
+ if(mask&~((1u<<pad_device::slot_count)-1))return;
+ std::lock_guard<std::recursive_mutex> l(mutex);
+ padSlots=mask;
+}
+static int padSlotOf(HANDLE device){
+ if(!device)return -1;
+ for(unsigned i=0;i<pad_device::slot_count;++i)if(device==(HANDLE)&padToken[i])return (padSlots>>i&1)?int(i):-1;
+ return -1;
+}
+static UINT padCount(){unsigned n=0;for(unsigned i=0;i<pad_device::slot_count;++i)if(padSlots>>i&1)++n;return n;}
+// GetRawInputDeviceList: the two-call pattern (NULL list, then the sized list)
+// with ERROR_INSUFFICIENT_BUFFER when the caller's list is too small.
 extern "C" UINT WINAPI c_GetRawInputDeviceList(RawInputDeviceList2* list,UINT* count,UINT size){
  if(!count||size!=sizeof(RawInputDeviceList2)){SetLastError(ERROR_INVALID_PARAMETER);return (UINT)-1;}
- if(!list){*count=0;return 0;}
- *count=0;return 0;
+ std::lock_guard<std::recursive_mutex> l(mutex);
+ UINT n=padCount();
+ if(!list){*count=n;return 0;}
+ if(*count<n){*count=n;SetLastError(ERROR_INSUFFICIENT_BUFFER);return (UINT)-1;}
+ UINT at=0;
+ for(unsigned i=0;i<pad_device::slot_count&&at<n;++i)if(padSlots>>i&1){
+  list[at].hDevice=(HANDLE)&padToken[i];
+  list[at].dwType=pad_device::rid_type_hid;
+  ++at;
+ }
+ *count=n;
+ return n;
 }
-extern "C" UINT WINAPI c_GetRawInputDeviceInfoW(HANDLE,UINT,LPVOID,PUINT){SetLastError(ERROR_INVALID_PARAMETER);return (UINT)-1;}
+// GetRawInputDeviceInfoW: the size query (NULL data), RIDI_DEVICEINFO and
+// RIDI_DEVICENAME for a pad handle. Both commands size and report bytes, so a
+// guest that allocates what the query asked for gets a whole name. The device
+// path carries "IG_", which is how the guest recognises an XInput-compatible
+// interface.
+extern "C" UINT WINAPI c_GetRawInputDeviceInfoW(HANDLE device,UINT command,LPVOID data,PUINT size){
+ if(!size){SetLastError(ERROR_INVALID_PARAMETER);return (UINT)-1;}
+ std::lock_guard<std::recursive_mutex> l(mutex);
+ int slot=padSlotOf(device);
+ if(slot<0){SetLastError(ERROR_INVALID_HANDLE);return (UINT)-1;}
+ if(command==pad_device::ridi_device_info){
+  const UINT needed=sizeof(pad_device::RidDeviceInfo);
+  if(!data){*size=needed;return 0;}
+  if(*size<needed){*size=needed;SetLastError(ERROR_INSUFFICIENT_BUFFER);return (UINT)-1;}
+  *reinterpret_cast<pad_device::RidDeviceInfo*>(data)=pad_device::device_info();
+  *size=needed;
+  return needed;
+ }
+ if(command==pad_device::ridi_device_name){
+  char16_t path[128];
+  unsigned length=pad_device::path(unsigned(slot),path,128);
+  const UINT needed=UINT((length+1)*sizeof(char16_t));
+  if(!data){*size=needed;return 0;}
+  if(*size<needed){*size=needed;SetLastError(ERROR_INSUFFICIENT_BUFFER);return (UINT)-1;}
+  memcpy(data,path,needed);
+  *size=needed;
+  return needed;
+ }
+ SetLastError(ERROR_INVALID_PARAMETER);return (UINT)-1;
+}
 extern "C" UINT WINAPI c_GetRawInputData(HANDLE,UINT,LPVOID data,PUINT size,UINT headerSize){
  if(!size||headerSize!=sizeof(RawInputHeader2)){SetLastError(ERROR_INVALID_PARAMETER);return (UINT)-1;}
  if(!data){*size=0;return 0;}

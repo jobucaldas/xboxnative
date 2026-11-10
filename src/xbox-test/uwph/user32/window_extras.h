@@ -209,7 +209,22 @@ extern "C" BOOL WINAPI c_EnumDisplayDevicesW(LPCWSTR device,DWORD num,DISPLAY_DE
  copy(dd->DeviceID,a.DeviceID,128);copy(dd->DeviceKey,a.DeviceKey,128);return TRUE;
 }
 extern "C" BOOL WINAPI c_SystemParametersInfoA(UINT action,UINT param,void* pv,UINT ini){return c_SystemParametersInfoW(action,param,pv,ini);}   // non-string actions only
-extern "C" UINT WINAPI c_GetRawInputDeviceInfoA(HANDLE device,UINT command,LPVOID data,PUINT size){return c_GetRawInputDeviceInfoW(device,command,data,size);}
+// Only RIDI_DEVICENAME differs between the two: the pad's path is UTF-16, so an
+// ANSI caller gets the narrow form of it. Every other command answers the same.
+extern "C" UINT WINAPI c_GetRawInputDeviceInfoA(HANDLE device,UINT command,LPVOID data,PUINT size){
+ if(command!=RIDI_DEVICENAME)return c_GetRawInputDeviceInfoW(device,command,data,size);
+ if(!size){SetLastError(ERROR_INVALID_PARAMETER);return (UINT)-1;}
+ WCHAR wide[128];UINT wideSize=sizeof(wide);
+ UINT result=c_GetRawInputDeviceInfoW(device,command,wide,&wideSize);
+ if(result==(UINT)-1||!result)return result;
+ int narrow=WideCharToMultiByte(CP_ACP,0,wide,-1,nullptr,0,nullptr,nullptr);
+ if(narrow<=0){SetLastError(ERROR_INVALID_PARAMETER);return (UINT)-1;}
+ if(!data){*size=UINT(narrow);return 0;}
+ if(*size<UINT(narrow)){*size=UINT(narrow);SetLastError(ERROR_INSUFFICIENT_BUFFER);return (UINT)-1;}
+ WideCharToMultiByte(CP_ACP,0,wide,-1,static_cast<char*>(data),narrow,nullptr,nullptr);
+ *size=UINT(narrow);
+ return UINT(narrow);
+}
 extern "C" HCURSOR WINAPI c_LoadCursorW(HINSTANCE inst,LPCWSTR name){return (HCURSOR)c_LoadImageW(inst,name,IMAGE_CURSOR,0,0,LR_DEFAULTSIZE|LR_SHARED);}
 extern "C" HICON WINAPI c_CreateIconFromResource(BYTE* bits,DWORD size,BOOL icon,DWORD version){return c_CreateIconFromResourceEx(bits,size,icon,version,0,0,0);}
 // Icons from caller bitmaps need GDI bitmap contents this user32 cannot read.

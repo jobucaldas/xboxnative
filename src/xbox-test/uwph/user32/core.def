@@ -2,6 +2,7 @@ LIBRARY uwph-u32c.dll
 EXPORTS
  uwph_u32c_device_caps
  uwph_u32c_configure
+ uwph_u32c_pads
  RegisterClassExW=c_RegisterClassExW
  RegisterClassW=c_RegisterClassW
  UnregisterClassW=c_UnregisterClassW
