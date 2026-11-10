@@ -82,7 +82,7 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context->Draw(3,0);
     CHECK(d3d11_diag::draws[1][0][0].load()==beforeTriangle+1);
-    CHECK(count("draw summary: first Draw topology=4(trianglelist) hs/ds/gs=-/-/-")==1);
+    CHECK(count("draw summary: first Draw topology=4(trianglelist) hs/ds/gs/ps=-/-/-/-")==1);
     context->DrawIndexed(3,0,0);
     CHECK(d3d11_diag::draws[0][0][0].load()==beforeIndexed+1);
     // A patch list with no hull shader bound is still a patch-list draw.
@@ -139,15 +139,15 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         uint64_t beforeAuto=d3d11_diag::draws[d3d11_diag::kDrawAuto][1][0].load();
         context->DrawAuto();
         CHECK(d3d11_diag::draws[d3d11_diag::kDrawAuto][1][0].load()==beforeAuto+1);
-        CHECK(count("draw summary: first DrawAuto topology=35(patchlist-3) hs/ds/gs=-/-/-")==1);
+        CHECK(count("draw summary: first DrawAuto topology=35(patchlist-3) hs/ds/gs/ps=-/-/-/-")==1);
         uint64_t beforeIndexedIndirect=d3d11_diag::draws[d3d11_diag::kDrawIndexedIndirect][1][0].load();
         context->DrawIndexedInstancedIndirect(argsBuffer,0);
         CHECK(d3d11_diag::draws[d3d11_diag::kDrawIndexedIndirect][1][0].load()==beforeIndexedIndirect+1);
         uint64_t beforeInstancedIndirect=d3d11_diag::draws[d3d11_diag::kDrawInstancedIndirect][1][0].load();
         context->DrawInstancedIndirect(argsBuffer,0);
         CHECK(d3d11_diag::draws[d3d11_diag::kDrawInstancedIndirect][1][0].load()==beforeInstancedIndirect+1);
-        CHECK(count("draw summary: first DrawIndexedInstancedIndirect topology=35(patchlist-3) hs/ds/gs=-/-/-")==1);
-        CHECK(count("draw summary: first DrawInstancedIndirect topology=35(patchlist-3) hs/ds/gs=-/-/-")==1);
+        CHECK(count("draw summary: first DrawIndexedInstancedIndirect topology=35(patchlist-3) hs/ds/gs/ps=-/-/-/-")==1);
+        CHECK(count("draw summary: first DrawInstancedIndirect topology=35(patchlist-3) hs/ds/gs/ps=-/-/-/-")==1);
         uint64_t beforeDispatchIndirect=d3d11_diag::dispatchIndirects.load();
         context->DispatchIndirect(argsBuffer,0);
         CHECK(d3d11_diag::dispatchIndirects.load()==beforeDispatchIndirect+1);
