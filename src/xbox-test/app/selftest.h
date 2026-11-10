@@ -280,11 +280,26 @@ static void run_async(const winrt::Windows::UI::Core::CoreDispatcher& dispatcher
         // No guest is in this process (only 32-bit modes ran, or nothing was
         // packaged), so another request may be taken without a restart.
         if (!more) { g_requested = false; logf("selftest: run finished"); return; }
+        // Same rule as back_to_games: a pending restart replaces the app, so
+        // Exit() only when the shell did not take it (the queue then resumes
+        // on the next start). RestartPending means the restart is coming.
         try {
             dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [] {
                 logf("selftest: requesting app restart for the next fixture");
-                winrt::Windows::ApplicationModel::Core::CoreApplication::RequestRestartAsync(L"").Completed(
-                    [](auto const&, auto) { winrt::Windows::ApplicationModel::Core::CoreApplication::Exit(); });
+                auto exitOnUi = [] {
+                    winrt::Windows::ApplicationModel::Core::CoreApplication::Exit();
+                };
+                try {
+                    winrt::Windows::ApplicationModel::Core::CoreApplication::RequestRestartAsync(L"").Completed(
+                        [exitOnUi](auto const& operation, auto status) {
+                            auto reason = winrt::Windows::ApplicationModel::Core::AppRestartFailureReason::Other;
+                            try {
+                                if (status == winrt::Windows::Foundation::AsyncStatus::Completed) reason = operation.GetResults();
+                            } catch (...) {}
+                            logf("selftest: restart status=%d reason=%d", (int)status, (int)reason);
+                            if (reason != winrt::Windows::ApplicationModel::Core::AppRestartFailureReason::RestartPending) exitOnUi();
+                        });
+                } catch (...) { logf("selftest: restart unavailable; closing, the queue resumes on the next start"); exitOnUi(); }
             });
         } catch (...) { logf("selftest: restart request failed; the queue resumes on the next start"); }
     }).detach();
