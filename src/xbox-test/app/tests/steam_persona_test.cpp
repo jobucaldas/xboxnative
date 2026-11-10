@@ -181,8 +181,9 @@ int main() {
         assert(std::string(bridge.name(0x110000100000002ull)) == "Player Two");
     }
 
-    // ---- a push that names nobody is still Steam's answer: the wait ends on it
-    // rather than burning the whole timeout on the game's thread
+    // ---- a push that mentions the requested id but names nobody (a private
+    // profile) is still Steam's answer: the wait ends on it rather than burning
+    // the whole timeout on the game's thread
     {
         Server server;
         Io io;
@@ -193,7 +194,10 @@ int main() {
         std::vector<uint64_t> ids = {0x110000100000009ull};
         std::thread reader([&] {
             while (server.requests == 0) std::this_thread::yield();
-            bridge.on_state(std::string());   // a persona push with no friends
+            // The requested account, with a state and no player_name.
+            std::string f; pb_fixed64(f, 1, 0x110000100000009ull); pb_u(f, 2, 1);
+            std::string body; pb_s(body, 2, f);
+            bridge.on_state(body);
         });
         auto start = std::chrono::steady_clock::now();
         bridge.ensure(io, ids, 5000);
@@ -204,6 +208,54 @@ int main() {
         bool counted = false;
         for (auto& l : log) if (l.find("0 of 1 leaderboard names resolved") != std::string::npos) counted = true;
         assert(counted);
+    }
+
+    // ---- a persona push about somebody else (the account itself, a friend,
+    // another board) is not this request's answer: it must not count as one
+    {
+        Bridge bridge;
+        auto push = [](uint64_t id, const char* name) {
+            std::string f; pb_fixed64(f, 1, id); pb_u(f, 2, 1); pb_s(f, 15, name);
+            std::string body; pb_s(body, 2, f); return body;
+        };
+        // Somebody else's persona state, as the presence push and the keeper's
+        // own lookups deliver it: the name is kept, but no reply is counted.
+        bridge.on_state(push(0x110000100000001ull, "Somebody Else"));
+        assert(std::string(bridge.name(0x110000100000001ull)) == "Somebody Else");
+        assert(bridge.replies == 0);
+        // The same for a push that names nobody at all.
+        bridge.on_state(std::string());
+        assert(bridge.replies == 0);
+    }
+    {
+        Server server;
+        server.names = {{0x110000100000002ull, "Player Two"}};
+        Io io;
+        io.send = [&](uint32_t emsg, const std::string& body) { return server.send(emsg, body); };
+        std::vector<std::string> log;
+        io.log = [&](const std::string& line) { log.push_back(line); };
+        Bridge bridge;
+        std::vector<uint64_t> ids = {0x110000100000002ull};
+        std::thread reader([&] {
+            while (server.requests == 0) std::this_thread::yield();
+            // An unrelated push lands first, then the answer to this request.
+            std::string other; pb_fixed64(other, 1, 0x110000100000001ull); pb_u(other, 2, 1);
+            pb_s(other, 15, "Somebody Else");
+            std::string body; pb_s(body, 2, other);
+            bridge.on_state(body);
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+            bridge.on_state(server.state_body(ids));
+        });
+        bridge.ensure(io, ids, 5000);
+        reader.join();
+        assert(std::string(bridge.name(0x110000100000002ull)) == "Player Two");
+        bool counted = false;
+        for (auto& l : log) if (l.find("1 of 1 leaderboard names resolved") != std::string::npos) counted = true;
+        assert(counted);
+        // The wait is over: the ids are no longer awaited, so a later push
+        // about them is an ordinary update, not a reply.
+        assert(bridge.awaiting.empty());
+        assert(bridge.replies == 1);
     }
 
     // ---- names the game asked for outside the seeded rows are queued, not sent

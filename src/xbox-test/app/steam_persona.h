@@ -186,10 +186,14 @@ struct Bridge {
     std::set<uint64_t> asked;     // requested this launch (answered or not)
     std::set<uint64_t> pending;   // wanted by the game, not yet requested
     uint64_t self = 0;            // the signed-in account, for GetPersonaName
-    // Persona pushes seen this launch. A push can name nobody (a private
-    // profile) and still be Steam's whole answer, so the wait counts pushes,
-    // not names, to know the reply arrived.
-    uint64_t pushes = 0;
+    // The ids the seed is waiting on. Only a push that mentions one of them is
+    // this request's answer: Steam also pushes persona state for the account
+    // itself, for friends and for anything else the game looks at, and one of
+    // those must not end the wait before the names arrive. A push that mentions
+    // a requested id but carries no name (a private profile) is still the
+    // answer, so the wait counts replies, not names.
+    std::set<uint64_t> awaiting;
+    uint64_t replies = 0;
     // The seed runs on the game's thread, which is drawing behind it, so the
     // wait is bounded hard: a Find that has to wait for Steam costs a fraction
     // of a second, not the two seconds the caller asks for. The names that
@@ -204,8 +208,9 @@ struct Bridge {
     size_t on_state(const std::string& body) {
         size_t added = 0;
         std::lock_guard<std::mutex> lock(m);
-        ++pushes;
+        bool ours = false;
         for (auto& p : parse_state(body)) {
+            if (awaiting.count(p.steamid)) ours = true;
             if (!p.name.empty()) {
                 auto it = names.find(p.steamid);
                 if (it == names.end()) {
@@ -220,6 +225,7 @@ struct Bridge {
             }
             if (p.has_state) states[p.steamid] = p.state;
         }
+        if (ours) ++replies;
         cv.notify_all();
         return added;
     }
@@ -237,14 +243,18 @@ struct Bridge {
         timeoutMs = std::min(timeoutMs, int(SeedWaitMs));
         std::vector<uint64_t> missing;
         std::set<uint64_t> seen;
-        uint64_t pushesBefore = 0;
+        uint64_t repliesBefore = 0;
         {
             std::lock_guard<std::mutex> lock(m);
             // Taken before the send: a push that lands between the send and the
             // wait below is Steam's answer, not one that was already there.
-            pushesBefore = pushes;
+            repliesBefore = replies;
             for (auto id : ids)
                 if (id && !known(id) && !asked.count(id) && seen.insert(id).second) missing.push_back(id);
+            // Registered before the send so a push that beats the wait still
+            // counts. Only the ids actually asked for: a push about a row that
+            // was already known is not this request's answer.
+            awaiting.insert(missing.begin(), missing.end());
         }
         if (missing.empty()) return;
         bool sent = true;
@@ -253,7 +263,12 @@ struct Bridge {
             std::vector<uint64_t> batch(missing.begin() + i, missing.begin() + end);
             sent = io.send(ClientRequestFriendData, request_body(batch));
         }
-        if (!sent) { io.log("persona: name request not sent (transport)"); return; }
+        if (!sent) {
+            std::lock_guard<std::mutex> lock(m);
+            for (auto id : missing) awaiting.erase(id);
+            io.log("persona: name request not sent (transport)");
+            return;
+        }
         {
             std::lock_guard<std::mutex> lock(m);
             for (auto id : missing) asked.insert(id);
@@ -268,35 +283,39 @@ struct Bridge {
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
         size_t want = seen.size();
         size_t got = known_count(), last = got;
-        uint64_t pushesSeen = pushesBefore;
+        uint64_t repliesSeen = repliesBefore;
         bool replied = false;
         while (got < want) {
             auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now()).count();
             if (left <= 0) break;
             if (!replied) {
-                // No push yet: wait for Steam's first answer for the whole
-                // timeout. A reply slower than QuietMs is still a reply, and
-                // returning before it lands is how a rank screen ends up with
-                // "Unknown User" on rows Steam was about to name.
-                cv.wait_for(lock, std::chrono::milliseconds(left), [&] { return pushes != pushesSeen; });
-                if (pushes == pushesSeen) break;   // nothing came: the provider's answers stand
+                // No answer yet: wait for Steam's first push that mentions one
+                // of these ids for the whole timeout. A reply slower than
+                // QuietMs is still a reply, and returning before it lands is
+                // how a rank screen ends up with "Unknown User" on rows Steam
+                // was about to name. A push about anything else (the account
+                // itself, a friend, another board) is not this answer and does
+                // not end the wait.
+                cv.wait_for(lock, std::chrono::milliseconds(left), [&] { return replies != repliesSeen; });
+                if (replies == repliesSeen) break;   // nothing came: the provider's answers stand
                 replied = true;
-                pushesSeen = pushes;
+                repliesSeen = replies;
                 got = known_count();
                 last = got;
                 continue;
             }
             auto slice = std::chrono::milliseconds(std::min<long long>(QuietMs, left));
-            cv.wait_for(lock, slice, [&] { return pushes != pushesSeen || known_count() != got; });
+            cv.wait_for(lock, slice, [&] { return replies != repliesSeen || known_count() != got; });
             got = known_count();
             // Steam answers one push per request, and the accounts it will not
             // name (private profiles) simply do not appear in it. A quiet slice
             // after a push therefore means it has said all it is going to say.
-            if (pushes == pushesSeen && got == last) break;
-            pushesSeen = pushes;
+            if (replies == repliesSeen && got == last) break;
+            repliesSeen = replies;
             last = got;
         }
+        for (auto id : missing) awaiting.erase(id);
         lock.unlock();
         // Counts only: a SteamID or a persona name must never reach the log.
         io.log("persona: " + std::to_string(got) + " of " + std::to_string(want) + " leaderboard names resolved");
@@ -359,7 +378,8 @@ struct Bridge {
     }
     void reset() {
         std::lock_guard<std::mutex> lock(m);
-        arena.clear(); names.clear(); states.clear(); asked.clear(); pending.clear(); self = 0; pushes = 0;
+        arena.clear(); names.clear(); states.clear(); asked.clear(); pending.clear();
+        awaiting.clear(); self = 0; replies = 0;
     }
 };
 } // namespace steam_persona

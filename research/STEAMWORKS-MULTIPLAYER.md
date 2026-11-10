@@ -302,7 +302,11 @@ The launcher answers the same three exports from its own signed-in session:
    unsolicited `CMsgClientPersonaState` (EMsg 766) push, which the launcher's
    existing presence push handler already receives on that session.
 2. `CMsgClientPersonaState.friends[]` carries `friendid[1]`, `persona_state[2]`
-   and `player_name[15]`; each name is stored against its SteamID.
+   and `player_name[15]`; each name is stored against its SteamID. Only a push
+   that mentions one of the SteamIDs this request asked for counts as its
+   answer: the same session also carries persona state for the account itself,
+   for friends and for other lookups, and one of those arriving first must not
+   end the wait before the names do.
 3. `GetFriendPersonaName` returns the launcher's name when it has one and the
    provider's own answer otherwise; `GetPersonaName` returns the account's own
    name once Steam answered for it. `RequestUserInformation` answers `false`
@@ -314,15 +318,16 @@ The launcher answers the same three exports from its own signed-in session:
    return the provider's answer until Steam's name lands, at which point the tap
    hands out the real one.
 4. The seed waits on the game's thread only for a bounded time: at most
-   `SeedWaitMs` (250 ms) for Steam's first push, then a 500 ms quiet window
-   after each push, and never past the caller's own timeout. The game is
-   drawing behind this call, so a Find that has to wait for Steam costs a
-   fraction of a second rather than the two seconds the caller asks for; a
-   name that lands after the seed returned is still handed out by the tap on
-   the game's next draw and still cached for the next launch. A push that names
-   nobody (private profiles) still ends the wait, so a rank screen is not
-   stalled for accounts Steam will not name, and a reply slower than the quiet
-   window is still waited for.
+   `SeedWaitMs` (250 ms) for Steam's first push that mentions a requested
+   SteamID, then a 500 ms quiet window after each such push, and never past the
+   caller's own timeout. The game is drawing behind this call, so a Find that
+   has to wait for Steam costs a fraction of a second rather than the two
+   seconds the caller asks for; a name that lands after the seed returned is
+   still handed out by the tap on the game's next draw and still cached for the
+   next launch. A push that mentions a requested SteamID but carries no name
+   (private profiles) still ends the wait, so a rank screen is not stalled for
+   accounts Steam will not name, and a reply slower than the quiet window is
+   still waited for.
 5. Names are kept in the app's own `LocalState` (`persona_names.txt`, hex-encoded
    so a name with a space or newline cannot corrupt the record, 7-day TTL) and
    adopted at launch, so a row drawn before Steam answers still reads correctly.
@@ -486,14 +491,17 @@ Verified off-device:
   them (a reset weekly board really is empty)
   (`app/tests/steam_leaderboards_test.cpp`).
 - Persona names: the request and push wire shapes round-trip, a name is only
-  handed out once Steam answered, a rename replaces the name in place, the
-  private cache round-trips and expires, and no SteamID or name reaches the log
-  (`app/tests/steam_persona_test.cpp`, run by CI). Off-device under Wine, the
-  provider stand-in answers "Unknown User" and the launcher's tap replaces it
-  with the name the fixture backend sent, `RequestUserInformation` never reports
-  a name as in flight (Play posts no `PersonaStateChange_t`), and the rows after
-  the guest's own upload are the refreshed ones
-  (`app/tests/play-runtime.sh leaderboards`).
+  handed out once Steam answered, a rename replaces the name in place, a push
+  about somebody else (the account, a friend, another board) neither ends the
+  wait nor is counted as its answer, a push that mentions a requested id without
+  naming it does end it, the seed never holds the game's thread past
+  `SeedWaitMs`, the private cache round-trips and expires, and no SteamID or
+  name reaches the log (`app/tests/steam_persona_test.cpp`, run by CI).
+  Off-device under Wine, the provider stand-in answers "Unknown User" and the
+  launcher's tap replaces it with the name the fixture backend sent,
+  `RequestUserInformation` never reports a name as in flight (Play posts no
+  `PersonaStateChange_t`), and the rows after the guest's own upload are the
+  refreshed ones (`app/tests/play-runtime.sh leaderboards`).
 - The launcher sources compile with the UWP toolchain.
 - gbe_fork exports 1,032 `SteamAPI_ISteam*` names. Of the 894 Megabonk
   references, 890 are exported; the 4 that are not are the
