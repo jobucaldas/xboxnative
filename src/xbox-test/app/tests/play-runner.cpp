@@ -473,7 +473,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // Engine options come from the game's files, as in the launcher.
     std::wstring gameExe=L"Megabonk.exe";
     {wchar_t value[260];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_EXE",value,260);if(n&&n<260)gameExe.assign(value,n);}
-    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="d3d9-triangle"?L"play-d3d9-triangle.exe":std::string(args)=="d3d9-textured"?L"play-d3d9-textured.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="leaderboards"?L"play-leaderboard.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":std::string(args)=="vulkan-dzn"?L"play-vulkan-dzn.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
+    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="d3d9-triangle"?L"play-d3d9-triangle.exe":std::string(args)=="d3d9-textured"?L"play-d3d9-textured.exe":std::string(args)=="fault-in-dll"?L"play-fault-guest.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="leaderboards"?L"play-leaderboard.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":std::string(args)=="vulkan-dzn"?L"play-vulkan-dzn.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
     // guest stop (fatal dialog). Progress must never mask that failure.
@@ -637,6 +637,17 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     else if(mode=="wide-dialog")ok=ok&&r->finished&&!r->success&&last.find("user32.dll!MessageBoxW caption=\"Erro \xc3\xa7\"")!=std::string::npos&&last.find("Falha IL2CPP \xc3\xa7\\nprobe \\\"quoted\\\"")!=std::string::npos&&last.find("caller=0x")!=std::string::npos;
     else if(mode=="dialog")ok=ok&&r->finished&&!r->success&&last.find("user32.dll!MessageBoxA caption=\"Fatal error\"")!=std::string::npos&&last.find("Failed to initialize IL2CPP\\nprobe \\\"quoted\\\"")!=std::string::npos&&last.find("caller=0x")!=std::string::npos;
     else if(mode=="crash")ok=ok&&r->finished&&!r->success&&last.find("unhandled exception code=0xe0424242")!=std::string::npos;
+    else if(mode=="fault-in-dll") {
+        // The fault happened inside a mapped DLL, three frames down, so the OS
+        // had to unwind out of that image to reach Play's handler. The crash
+        // record must name the code, the module and an offset in it: that is
+        // what a silent launcher death never gave, and what a shim or donor
+        // built without unwind data would still never give.
+        auto dll=play_runtime::named(L"play-fault.dll");
+        ok=ok&&r->finished&&!r->success&&dll&&dll->mapped&&dll->initialized&&
+            last.find("unhandled exception code=0xc0000005")!=std::string::npos&&
+            last.find("play-fault.dll+0x")!=std::string::npos;
+    }
     else if(mode=="exit")ok=ok&&r->finished&&r->success&&r->code==37;
     else if(mode=="rwx-jit") {
         // The guest saw no access violation, yet pages really flipped both ways.

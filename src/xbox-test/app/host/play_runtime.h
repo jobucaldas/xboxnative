@@ -1206,6 +1206,19 @@ static bool prepare(Module& m) {
     }
     state->event("registering unwind for "+m.key);
     if(!wxl::prepareUnwind(image,state->log)) {state->event("unwind registration failed: "+m.key);return false;}
+    // No exception directory means no unwind data: a fault inside this image
+    // cannot be unwound to the guest thread's __try/__except, so it reaches no
+    // handler at all and the launcher dies with no crash record. That is how a
+    // fault in a mapped shim or donor stayed invisible; name the image at load
+    // time so the next one is not silent. Play's own shims and donors carry
+    // unwind data (their build scripts gate on it), so this is a diagnostic for
+    // a guest or third-party image, not an expected line.
+    {
+        auto nt=(IMAGE_NT_HEADERS64*)(image.base+((IMAGE_DOS_HEADER*)image.base)->e_lfanew);
+        auto xd=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+        if(!xd.Size)
+            state->event("unwind none for "+m.key+": no exception directory, a fault inside it cannot be dispatched");
+    }
     m.prepared=true;return true;
 }
 static bool initialize(Module& m) {

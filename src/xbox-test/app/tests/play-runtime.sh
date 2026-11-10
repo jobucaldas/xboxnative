@@ -77,6 +77,15 @@ for fixture in triangle textured;do
   clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c "tests/play-d3d9-$fixture.cpp" -o "$out/obj/d3d9-$fixture.obj"
   lld-link-19 /nodefaultlib /entry:d3d9_${fixture}_entry /include:d3d9_${fixture}_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d9-$fixture.exe" "$out/obj/d3d9-$fixture.obj" /usr/x86_64-w64-mingw32/lib/libd3d9.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 done
+# A DLL that faults inside itself and the EXE that calls it: Play must record
+# the crash (code, module, offset) rather than the launcher dying silently, and
+# only the guest thread may end. The DLL is built WITH unwind tables on purpose:
+# an image without them cannot be unwound out of, so the fault is never
+# dispatched at all (that is the bug this fixture guards).
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-fault-dll.cpp -o "$out/obj/fault-dll.obj"
+lld-link-19 /dll /noentry /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-fault.dll" "$out/obj/fault-dll.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-fault-guest.cpp -o "$out/obj/fault-guest.obj"
+lld-link-19 /nodefaultlib /entry:fault_guest_entry /include:fault_guest_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-fault-guest.exe" "$out/obj/fault-guest.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
 # EXE that probes Vulkan the way a Vulkan-optional engine does: it loads
 # vulkan-1.dll by name (Play serves the Khronos loader from the runtime
 # directory), creates an instance and enumerates physical devices. The console
@@ -214,7 +223,7 @@ tail -1 "$out/leaderboards.log"
 # The root copy was only for this run: later modes prove what happens when a
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d9-diag d3d9-triangle d3d9-textured discord-sdk vulkan-dzn;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d9-diag d3d9-triangle d3d9-textured fault-in-dll discord-sdk vulkan-dzn;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done

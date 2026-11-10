@@ -18,8 +18,12 @@ mingw_lib=$(dirname "$(x86_64-w64-mingw32-g++ -print-file-name=libkernel32.a)")
 # the libc calls they implement: its loop-distribution pass rewrote the byte
 # loop in memset() into a call to memset(), which then jumped to itself forever.
 # -ffreestanding is deliberately not used: it hides malloc from the headers.
+#
+# Unwind tables are ON, deliberately: Play maps this DLL and runs it on the
+# guest's thread, and a fault inside it can only be unwound to that thread's
+# __try/__except through this image's .pdata. See src/xbox-test/uwph/d3d9/build.sh.
 x86_64-w64-mingw32-g++ -c -O2 -std=c++17 -fno-builtin -fno-tree-loop-distribute-patterns \
-    -fno-exceptions -fno-rtti -fno-stack-protector -fno-asynchronous-unwind-tables \
+    -fno-exceptions -fno-rtti -fno-stack-protector \
     -Wall -Wextra -Wno-unused-parameter -Wno-cast-function-type \
     "$here/d3d10.cpp" -o "$work/d3d10.obj"
 # CI installs plain lld; development hosts here carry the versioned name.
@@ -41,6 +45,9 @@ for name in D3D10CreateDevice D3D10CreateDeviceAndSwapChain D3D10CreateDevice1 D
     llvm-readobj --coff-exports "$out/d3d10.dll" | grep -q "Name: $name\$" \
         || { echo "d3d10.dll does not export $name" >&2; exit 1; }
 done
+# A fault inside this DLL must reach the guest thread's handler, which needs the
+# image's unwind data (see src/xbox-test/uwph/d3d9/build.sh).
+python3 -I "$here/../d3d9/check-unwind-data.py" "$out/d3d10.dll"
 # d3d10_1.dll forwards to d3d10.dll and d3d10core.dll is the layer below it, so
 # the same image answers all three names; Play maps it under whichever the guest
 # asked for.
