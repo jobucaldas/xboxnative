@@ -35,9 +35,13 @@ cp "$donors"/runtime/*.dll "$donors"/runtime/SHA256SUMS "$out/layout/runtime/"
 # d3d10_1.dll, and one PE answers both names plus d3d10core.dll.
 bash ../uwph/d3d10/build.sh "$out/layout/runtime"
 # Play's D3D9 shim (source in uwph/d3d9, research/D3D9-PLAN.md): the console has
-# no d3d9.dll. Milestone 1 serves the factory, device, swap chain and surfaces
-# over D3D11; the rest of the API answers D3DERR_INVALIDCALL and says so.
+# no d3d9.dll. It serves the device, buffers, textures, states and drawing over
+# D3D11, and translates shader model 1-3 bytecode with the DLL below.
 bash ../uwph/d3d9/build.sh "$out/layout/runtime"
+# The shim's shader translator (src/tools/build-d3d9-translator.sh): DXUP's
+# dx9asm built from pinned source. The shim loads it by name, so it lives in the
+# runtime directory beside the shims; Play's loader serves it from there.
+bash ../../tools/build-d3d9-translator.sh "$out/layout/runtime"
 cp "$donors"/SOURCE.txt "$here/donors/COPYING.LIB" "$here/donors/LICENSE" "$out/layout/runtime/"
 # OpenGL for games that load OPENGL32.DLL (research/OPENGL-PLAN.md): Mesa's d3d12 driver, built from the pinned source.
 # Play maps these from runtime/ after any copy the game ships. PLAY_MESA=0 builds a launcher without them (Play's

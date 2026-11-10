@@ -129,8 +129,8 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
     CHECK_HR(ex->CheckDeviceType(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DFMT_X8R8G8B8,TRUE));
     CHECK_HR_IS(ex->CheckDeviceType(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DFMT_UNKNOWN,TRUE),D3DERR_NOTAVAILABLE);
     CHECK_HR(ex->CheckDeviceFormat(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,0,D3DRTYPE_TEXTURE,D3DFMT_A8R8G8B8));
-    CHECK_HR_IS(ex->CheckDeviceFormat(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DUSAGE_RENDERTARGET,
-        D3DRTYPE_TEXTURE,D3DFMT_A8R8G8B8),D3DERR_NOTAVAILABLE);
+    CHECK_HR(ex->CheckDeviceFormat(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DUSAGE_RENDERTARGET,
+        D3DRTYPE_TEXTURE,D3DFMT_A8R8G8B8));
     DWORD quality=0;
     CHECK_HR(ex->CheckDeviceMultiSampleType(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,TRUE,D3DMULTISAMPLE_NONE,&quality));
     CHECK(quality==1);
@@ -315,18 +315,143 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
         staging->Release();
     }
 
-    // The unimplemented half answers with the API's own failure code and says
-    // so in the log, rather than pretending to work.
-    IDirect3DVertexBuffer9* vertexBuffer=nullptr;
-    CHECK_HR_IS(device->CreateVertexBuffer(64,D3DUSAGE_WRITEONLY,0,D3DPOOL_DEFAULT,&vertexBuffer,nullptr),
-        D3DERR_INVALIDCALL);
-    CHECK(vertexBuffer==nullptr);
-    IDirect3DVertexShader9* vertexShader=nullptr;
-    CHECK_HR_IS(device->CreateVertexShader(nullptr,&vertexShader),D3DERR_INVALIDCALL);
-    CHECK_HR_IS(device->DrawPrimitive(D3DPT_TRIANGLELIST,0,1),D3DERR_INVALIDCALL);
-    IDirect3DTexture9* texture=nullptr;
-    CHECK_HR_IS(device->CreateTexture(16,16,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&texture,nullptr),
-        D3DERR_INVALIDCALL);
+    // Drawing. The shim renders a triangle into an offscreen render target,
+    // reads the pixels back through a SYSTEMMEM surface, and checks the colour
+    // the fixed-function pipeline was asked for is where the triangle is and
+    // nowhere else. This is the whole draw path: buffers, a vertex declaration,
+    // the generated fixed-function shaders, the translator, the states.
+    {
+        IDirect3DSurface9* target=nullptr;
+        CHECK_HR(device->CreateRenderTarget(64,64,D3DFMT_X8R8G8B8,D3DMULTISAMPLE_NONE,0,FALSE,
+            &target,nullptr));
+        IDirect3DSurface9* staging=nullptr;
+        CHECK_HR(device->CreateOffscreenPlainSurface(64,64,D3DFMT_X8R8G8B8,D3DPOOL_SYSTEMMEM,
+            &staging,nullptr));
+        IDirect3DVertexBuffer9* buffer=nullptr;
+        CHECK_HR(device->CreateVertexBuffer(3*sizeof(float)*5,D3DUSAGE_WRITEONLY,0,D3DPOOL_MANAGED,
+            &buffer,nullptr));
+        if(target&&staging&&buffer) {
+            // Three vertices in clip space: a triangle over the left half of the
+            // target. D3D9's XYZRHW vertices are already in screen space, so
+            // the generated shader passes them through untransformed.
+            // D3DFVF_XYZRHW|D3DFVF_DIFFUSE: four floats then a D3DCOLOR, so the
+            // vertex is a struct rather than an array of floats (a D3DCOLOR
+            // written as a float literal is a different bit pattern).
+            struct Vertex { float x,y,z,w; DWORD colour; };
+            Vertex* vertices=nullptr;
+            CHECK_HR(buffer->Lock(0,0,reinterpret_cast<void**>(&vertices),0));
+            if(vertices) {
+                const Vertex data[3]={
+                    { 8.0f, 8.0f,0.0f,1.0f,0xffff0000},   // red, top left
+                    {56.0f, 8.0f,0.0f,1.0f,0xffff0000},   // red, top right
+                    {32.0f,56.0f,0.0f,1.0f,0xffff0000},   // red, bottom middle
+                };
+                for(unsigned i=0;i<3;++i)vertices[i]=data[i];
+            }
+            CHECK_HR(buffer->Unlock());
+            CHECK_HR(device->SetStreamSource(0,buffer,0,sizeof(Vertex)));
+            CHECK_HR(device->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE));
+            CHECK_HR(device->SetRenderState(D3DRS_LIGHTING,FALSE));
+            CHECK_HR(device->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE));
+            CHECK_HR(device->SetRenderState(D3DRS_ZENABLE,FALSE));
+            CHECK_HR(device->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE));
+            // Stage 0 selects the vertex colour: no texture in this draw.
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_SELECTARG1));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_DIFFUSE));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG1));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_ALPHAARG1,D3DTA_DIFFUSE));
+            CHECK_HR(device->SetRenderTarget(0,target));
+            CHECK_HR(device->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1.0f,0));
+            D3DVIEWPORT9 full{0,0,64,64,0.0f,1.0f};
+            CHECK_HR(device->SetViewport(&full));
+            CHECK_HR(device->BeginScene());
+            CHECK_HR(device->DrawPrimitive(D3DPT_TRIANGLELIST,0,1));
+            CHECK_HR(device->EndScene());
+            CHECK_HR(device->GetRenderTargetData(target,staging));
+            D3DLOCKED_RECT locked{};
+            CHECK_HR(staging->LockRect(&locked,nullptr,D3DLOCK_READONLY));
+            if(locked.pBits) {
+                // Inside the triangle: the vertex colour. Outside: the clear
+                // colour. A draw that silently did nothing fails both.
+                const unsigned char* inside=static_cast<const unsigned char*>(locked.pBits)
+                    +32*locked.Pitch+32*4;
+                const unsigned char* outside=static_cast<const unsigned char*>(locked.pBits)
+                    +4*locked.Pitch+4*4;
+                outHex("INFO inside bgra=",unsigned(inside[0])|unsigned(inside[1])<<8
+                    |unsigned(inside[2])<<16|unsigned(inside[3])<<24);
+                for(unsigned y=0;y<64;y+=8) {
+                    char row[80];unsigned used=0;
+                    for(unsigned x=0;x<64;x+=8) {
+                        const unsigned char* p=static_cast<const unsigned char*>(locked.pBits)
+                            +y*locked.Pitch+x*4;
+                        row[used++]=p[2]>0x80?'R':p[1]>0x80?'G':p[0]>0x80?'B':'.';
+                    }
+                    row[used++]='\n';row[used]=0;out(row);
+                }
+                CHECK(inside[2]>0x80&&inside[0]<0x40&&inside[1]<0x40);   // red
+                CHECK(outside[0]<0x20&&outside[1]<0x20&&outside[2]<0x20); // black
+            }
+            CHECK_HR(staging->UnlockRect());
+            CHECK_HR(device->SetRenderTarget(0,backBuffer));
+        }
+        if(buffer)buffer->Release();
+        if(staging)staging->Release();
+        if(target)target->Release();
+    }
+
+    // A texture, a sampler and a texture-stage operation: the shim uploads the
+    // pixels, binds the view and the sampler, and the generated pixel shader
+    // samples them.
+    {
+        IDirect3DTexture9* texture=nullptr;
+        CHECK_HR(device->CreateTexture(2,2,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&texture,nullptr));
+        if(texture) {
+            D3DLOCKED_RECT locked{};
+            CHECK_HR(texture->LockRect(0,&locked,nullptr,0));
+            if(locked.pBits) {
+                for(unsigned y=0;y<2;++y) {
+                    unsigned* row=reinterpret_cast<unsigned*>(
+                        static_cast<unsigned char*>(locked.pBits)+y*locked.Pitch);
+                    row[0]=0xff00ff00u;row[1]=0xff00ff00u;   // green
+                }
+            }
+            CHECK_HR(texture->UnlockRect(0));
+            CHECK_HR(device->SetTexture(0,texture));
+            IDirect3DBaseTexture9* bound=nullptr;
+            CHECK_HR(device->GetTexture(0,&bound));
+            CHECK(bound==static_cast<IDirect3DBaseTexture9*>(texture));
+            if(bound)bound->Release();
+            CHECK_HR(device->SetTexture(0,nullptr));
+            CHECK_HR(device->GetTexture(0,&bound));
+            CHECK(bound==nullptr);
+            texture->Release();
+        }
+    }
+
+    // A shader the guest compiles itself goes through the translator: this is
+    // the same vs_1_1 the translator's own regression uses.
+    {
+        const DWORD tokens[]={
+            0xFFFE0101,                                     // vs_1_1
+            (0x1F)|(2<<24),0x00000000,0xE4000000,           // dcl_position v0
+            (0x18)|(3<<24),0xC0000000,0xE4000000,0xA0000000,// m4x4 oPos, v0, c0
+            0x0000FFFF,                                     // end
+        };
+        IDirect3DVertexShader9* shader=nullptr;
+        CHECK_HR(device->CreateVertexShader(tokens,&shader));
+        CHECK(shader!=nullptr);
+        if(shader) {
+            UINT size=0;
+            CHECK_HR(shader->GetFunction(nullptr,&size));
+            CHECK(size==sizeof tokens);
+            shader->Release();
+        }
+        // A blob with no END token is not a shader, and the shim says so.
+        const DWORD truncated[]={0xFFFE0101,0x0000FFFF|(1<<24)};
+        IDirect3DVertexShader9* bad=nullptr;
+        CHECK_HR_IS(device->CreateVertexShader(truncated,&bad),D3DERR_INVALIDCALL);
+        CHECK(bad==nullptr);
+    }
 
     // Reset rebuilds the swap chain, as D3D9 documents.
     CHECK_HR(device->Reset(&present));

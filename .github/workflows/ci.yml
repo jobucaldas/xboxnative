@@ -145,6 +145,11 @@ jobs:
       # against Wine's d3d11 is src/xbox-test/uwph/d3d9/test.sh, run locally.
       - name: build the D3D9 shim and inspect its PE
         run: bash src/xbox-test/uwph/d3d9/build.sh "$RUNNER_TEMP/d3d9-shim"
+      # The shim translates shader model 1-3 bytecode with this DLL, which it
+      # loads by name from the runtime directory. Building it here proves the
+      # pinned donor still compiles CRT-free and keeps its single export.
+      - name: build the D3D9 shader translator and inspect its PE
+        run: bash src/tools/build-d3d9-translator.sh "$RUNNER_TEMP/d3d9-translator"
   x86-core:
     runs-on: ubuntu-latest
     steps:
