@@ -109,12 +109,19 @@ def parse_workflow(text):
             step['run'] = '\n'.join(block)
         elif key in ('name', 'run', 'uses'):
             step[key] = _unquote(value)
+        elif key == 'timeout-minutes':
+            # Runner-side pacing only; the local run needs no timeout.
+            pass
         elif key in ('with', 'env', 'if', 'shell', 'working-directory'):
             if key in ('shell', 'working-directory', 'env', 'if'):
                 raise ParseError('line %d: step key %r changes how the step runs; not supported' % (i, key))
-            # `with:` carries only inputs for `uses:` steps; skip its nested lines.
+            # `with:` carries only inputs for `uses:` steps; keep the raw
+            # lines so job_needs can read a local action's packages input.
+            with_lines = []
             while i < n and (lines[i].strip() == '' or len(lines[i]) - len(lines[i].lstrip(' ')) > 8):
+                with_lines.append(lines[i].strip())
                 i += 1
+            step['with'] = with_lines
         else:
             raise ParseError('line %d: unsupported step key %r' % (i, key))
     for j in jobs:
@@ -132,6 +139,20 @@ def job_needs(job):
             for pkg in re.findall(r'[A-Za-z0-9+.-]+', run.split('install', 1)[1]):
                 if pkg in APT_COMMANDS:
                     needs.append(APT_COMMANDS[pkg])
+        # A local composite action carries the apt packages inline
+        # (`with: packages: ...`); resolve it relative to the checkout.
+        uses = s['uses'] or ''
+        if uses.startswith('./'):
+            action = ROOT / uses[2:] / 'action.yml'
+            if action.is_file():
+                text = action.read_text()
+                for line in s.get('with', []):
+                    m = re.match(r'packages:\s*(.+)$', line)
+                    if not m:
+                        continue
+                    for pkg in re.findall(r'[A-Za-z0-9+.-]+', m.group(1)):
+                        if pkg in APT_COMMANDS:
+                            needs.append(APT_COMMANDS[pkg])
     return list(dict.fromkeys(needs))
 
 
