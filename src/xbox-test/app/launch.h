@@ -106,7 +106,7 @@ static std::string read_bytes(const std::wstring& p) {
     std::string out; FILE* f=_wfopen(p.c_str(),L"rb"); if(!f) return out;
     char b[65536]; size_t n; while((n=fread(b,1,sizeof b,f))>0) out.append(b,n); fclose(f); return out;
 }
-// Ownership gate (AGENTS.md rule 3): before any emulated Steam component is
+// Ownership gate (the ownership rule): before any emulated Steam component is
 // staged, Steam itself must issue the signed-in account an app ownership
 // ticket for this app (CM ClientGetAppOwnershipTicket). Steam refuses it for an
 // app the account does not own. The genuine ticket is also what Steam's DRM
@@ -177,7 +177,7 @@ static std::wstring valve_client() {
     lp_sink("STEAM client: Valve's signed client stored (SHA-256 matched Valve's manifest)");
     return dll;
 }
-// Emulated Steam for the signed-in account's game (AGENTS.md rule 3), only
+// Emulated Steam for the signed-in account's game (the ownership rule), only
 // after Steam issued this account an ownership ticket for the app (above). The
 // packaged, pinned gbe_fork files are copied to LocalState\steam\<appid> with
 // steam_settings for this account; the game's own files are untouched. The
@@ -1148,7 +1148,7 @@ static std::string start_launch(uint32_t appid, const std::string& name, const s
         init_apartment(apartment_type::multi_threaded);
         auto finish = [&](const std::string& r,bool ok,int mapped,int total) {lp_finish(gen,appid,r,ok,mapped,total);};
         try {
-            // 1. app activation of a game-host package: only if one registers a protocol (none does today; see LANE_NOTES)
+            // 1. app activation of a game-host package: only if one registers a protocol (none does today)
             try { winrt::Windows::Foundation::Uri uri(L"xboxsteam-host://launch");
                   auto q = winrt::Windows::System::Launcher::QueryUriSupportAsync(uri, winrt::Windows::System::LaunchQuerySupportType::Uri).get();
                   logf("launch: activation query xboxsteam-host:// -> %d (0=Available,1=AppNotInstalled,2=AppUnavailable,3=NotSupported,4=Unknown); %s", (int)q, (int)q == 0 ? "would activate host" : "no host package registers it, using in-process guest runtime");

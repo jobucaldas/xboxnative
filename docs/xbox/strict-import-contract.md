@@ -116,7 +116,7 @@ host/TLS package and the full `src/xbox-test/smoke-all.sh` console run. Launcher
 acceptance is `src/xbox-test/tools/play-test.sh <appid>`; report actual guest execution
 separately from a probe or launch attempt. Desktop Wine's FromApp aliases and
 historical lane results cannot replace those checks. Use the shared console lock
-and advance package versions before reinstalling, as required by `AGENTS.md`.
+and advance package versions before reinstalling, as required by the contributing rules.
 
 Record tested source/package identities, current review status and evidence
 summaries in the PR rather than keeping machine-specific checkpoints here.

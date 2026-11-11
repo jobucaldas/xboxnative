@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 // Steam presence for owned games run through the Steam API provider
-// (AGENTS.md rule 3): the account shows "In-Game: <game>" to friends on the
+// (the ownership rule): the account shows "In-Game: <game>" to friends on the
 // real Steam network, and the game's ISteamFriends::SetRichPresence calls reach
 // them as rich presence. Portable: the CM transport is injected, so the wire
 // shapes and the coalescing policy are tested natively.

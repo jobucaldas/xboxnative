@@ -3,7 +3,7 @@
 # fetch-gbe-fork.sh [outdir] -> <outdir>/steam_api64.dll, steamclient64.dll, LICENSE, SOURCE.txt (default: out/gbe-fork)
 # Fetches the pinned gbe_fork release (`gbe-fork-win`, `gbe-fork-license` in deps.pin, SHA-256 verified) and
 # extracts only the regular x64 steam_api64.dll (the Steam API provider Play maps for games the signed-in
-# account owns, AGENTS.md rule 3) and the x64 emulated steamclient64.dll (the client behind Valve's signed
+# account owns, the ownership rule) and the x64 emulated steamclient64.dll (the client behind Valve's signed
 # one, for SteamStub-wrapped games). gbe_fork is LGPL-3.0. Outputs are git-ignored and must never be committed.
 # Needs: curl, 7z, sha256sum. Cache: third_party/gbe-fork/<sha prefix>/ (git-ignored).
 set -euo pipefail

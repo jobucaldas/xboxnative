@@ -52,7 +52,7 @@ the full log is `out/xn/build.log`.
 | `DP_HOST` | Device Portal host, bare or as a URL (required) |
 | `DP_USER`, `DP_PASS` | Device Portal credentials (`DP_PASS` is required and is never printed) |
 | `DP_PORT` | Optional, default 11443 |
-| `DP_SOCKS` | Optional SOCKS5 proxy, default `localhost:1055`; set it empty to connect directly |
+| `DP_SOCKS` | Optional SOCKS5 proxy, default empty (direct connection) |
 | `DP_LOCK` | Optional console lock path shared by every session that uses this console |
 | `UWP_CROSSBUILD` | Optional path of the cross-build wrapper checkout |
 
