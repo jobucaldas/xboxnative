@@ -1,10 +1,12 @@
 // Store info for the detail screen: Steam public store API over the same http() path as the covers, cached in LocalState\storecache\<appid>.json.
 #pragma once
 #include "apibadge_core.h"
+#include "store_size.h"
 struct StoreInfo {
     uint32_t appid = 0;
     std::atomic<int> state{0};      // 0 loading, 1 ok (fields below immutable), 2 unavailable
     std::string name, desc, release, dev, genres, price, why; bool free = false;
+    std::string download_size;      // item D9: the store's "Storage: N GB" figure ("" when it lists none)
     int dxKind = 0; std::string dxNote;   // apib::Kind from the store pc_requirements text (0 = says nothing)
     std::atomic<int> img{0};        // 0 loading, 1 ok, 2 failed
     Game hdr;                       // header image pixels (iw, ih, pix)
@@ -101,7 +103,8 @@ static bool store_parse(const std::string& body, uint32_t appid, StoreInfo& si, 
         if (d.HasKey(L"pc_requirements") && d.GetNamedValue(L"pc_requirements").ValueType() == Windows::Data::Json::JsonValueType::Object) {   // [] when the store lists none
             auto pr = d.GetNamedObject(L"pc_requirements"); std::string t;
             for (auto k : {L"minimum", L"recommended"}) if (pr.HasKey(k) && pr.GetNamedValue(k).ValueType() == Windows::Data::Json::JsonValueType::String) t += winrt::to_string(pr.GetNamedString(k)) + "\n";
-            si.dxKind = apib::classify_store_text(t, &si.dxNote); }
+            si.dxKind = apib::classify_store_text(t, &si.dxNote);
+            si.download_size = store_size::from_requirements(ascii_clean(t)); }   // item D9
         if (si.price.empty()) si.price = si.free ? "Free to play" : "Price not listed";
         return true;
     } catch (winrt::hresult_error const& ex) { char b[64]; snprintf(b, sizeof b, "parse error hr=0x%08x", (unsigned)ex.code().value); why = b; return false; }

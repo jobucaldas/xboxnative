@@ -1568,9 +1568,18 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (deleting) vStatus = "Deleting...";
         else if (down) { char b[48]; snprintf(b, sizeof b, "Downloading %.0f%%", pct * 100); vStatus = b; }
         else if (queued) vStatus = "Queued...";
-        else if (m_dInst.installed) vStatus = m_dInst.bytes ? storage_roots::size_text(m_dInst.bytes) : "Installed";
+        else if (m_dInst.installed) vStatus = "Installed";
         else vStatus = "Not installed";
-        vSize = m_dInst.installed ? (m_dInst.bytes ? storage_roots::size_text(m_dInst.bytes) : "Unknown") : "Not installed";
+        // Item D9: ONE size row. Installed -> the size on disk. Not installed
+        // -> the store's own download figure (the pc_requirements "Storage:"
+        // line), "Calculating..." while the store reply is still in flight,
+        // and "Unknown" when the store lists no figure at all.
+        if (m_dInst.installed) vSize = m_dInst.bytes ? storage_roots::size_text(m_dInst.bytes) : "Unknown";
+        else if (down) { char b[48]; snprintf(b, sizeof b, "%s of %s", storage_roots::size_text(g_dl.done).c_str(),
+                                              g_dl.total ? storage_roots::size_text(g_dl.total).c_str() : "?"); vSize = b; }
+        else if (si && st == 1) vSize = si->download_size.empty() ? "Unknown" : si->download_size;
+        else if (si && st == 2) vSize = "Unknown";   // the store could not be read
+        else vSize = "Calculating...";
         vLoc = "Internal storage";
         if (m_dInst.installed && !m_dInst.root.empty()) {
             vLoc = m_dInst.root; for (auto& rc : m_roots) if (rc.root == m_dInst.root) { vLoc = rc.name; break; }
@@ -1591,7 +1600,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         ui_launcher::GameVM g;
         g.title = vTitle.c_str(); g.subtitle = vSub.c_str();
         g.time_played = vTime.c_str(); g.achievements = vAch.c_str(); g.last_played = vLast.c_str();
-        g.install_status = vStatus.c_str(); g.size_on_disk = vSize.c_str(); g.location = vLoc.c_str();
+        g.install_status = vStatus.c_str(); g.game_size = vSize.c_str(); g.location = vLoc.c_str();
         g.last_updated = vUpdated.c_str(); g.cloud_saves = vCloud.c_str();
         g.about = vAbout.c_str(); g.players = vPlayers.c_str(); g.language = vLang.c_str();
         g.primary = pv; g.primary_focus = m_dFocus == 0; g.install_pct = float(pct);

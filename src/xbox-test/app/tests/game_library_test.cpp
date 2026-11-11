@@ -2,6 +2,7 @@
 // Native regression for the Delete-game and Installed-filter rules.
 #include "../game_library.h"
 #include "../storage_roots.h"
+#include "../store_size.h"
 #include <cassert>
 #include <cstdio>
 #include <memory>
@@ -69,6 +70,18 @@ int main() {
         assert(count_label(3, 772, true) == "3 of 772 games");
         assert(count_label(772, 772, false) == "772 games");
         assert(count_label(0, 772, true) == "0 of 772 games");
+    }
+
+    // Item D9: the store's "Storage: N GB" requirement becomes the Game size
+    // row before a download starts.
+    {
+        assert(store_size::from_requirements("OS: Windows 10\nProcessor: x64\nStorage: 30 GB available space") == "30 GB");
+        assert(store_size::from_requirements("Storage: 512 MB available space") == "512 MB");
+        assert(store_size::from_requirements("storage:1.5 gb") == "1.5 GB");
+        assert(store_size::from_requirements("Hard Drive: 20 GB") == "");          // no 'storage' word
+        assert(store_size::from_requirements("Storage: plenty") == "");            // no figure
+        assert(store_size::from_requirements("Storage: 30") == "");                // no unit
+        assert(store_size::from_requirements("") == "");
     }
 
     // install records with a root: parse, validity, path joining, shared-folder identity

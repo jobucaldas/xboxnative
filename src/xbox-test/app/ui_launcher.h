@@ -46,6 +46,10 @@ constexpr float kTileW      = 232.0f, kTileH = 348.0f;   // 2:3 tiles
 constexpr float kTilePitchX = 272.0f, kTilePitchY = 372.0f;
 constexpr int   kGridCols   = 5;
 constexpr float kGridClipY  = 996.0f;   // grid clips here, at the hint band top
+// Item D8: the grid also clips at the TOP, below the header row (Sort/Filters
+// at y 168..228). A scrolled row would otherwise paint over the title and the
+// header controls; 240 leaves the header's 12px breathing room.
+constexpr float kGridClipTop = 240.0f;
 constexpr float kSidebarX   = 32.0f, kSidebarY = 32.0f;
 constexpr float kSidebarW   = 411.0f, kSidebarH = 1016.0f;
 
@@ -266,7 +270,11 @@ struct GameVM {
     const char* last_played = "Never";
     const char* install_status = "Not installed";
     bool install_ok = false;             // status value draws in accentSoft when the game is in
-    const char* size_on_disk = "Not installed";
+    // Item D9: ONE size row. Installed: the size on disk. Not installed: the
+    // store's download figure, or "Calculating..." while it loads, or "Unknown"
+    // when the store lists none. ("Size on disk" was a duplicate of the
+    // Status row's figure and is gone.)
+    const char* game_size = "Calculating...";
     const char* location = "Internal storage";
     const char* last_updated = "Never";
     const char* cloud_saves = "In the cloud";
@@ -959,13 +967,15 @@ inline void draw_library(ui::Canvas& c, const Font& f, const SidebarVM& sb, cons
     if (count && *count) text_r(c, f, Face::Regular, 22, 1444.0f, 184.5f, count, ui::theme::textDim);
     draw_query_chip(c, f, lib);   // item D7: the active query, so the count's "N of M" has a cause
     draw_filters_control(c, f, lib, 1692.0f, 168.0f);
-    // grid: 5 columns, clipped above the hint bar (item 4)
+    // grid: 5 columns, clipped to the viewport between the header row and the
+    // hint band (item 4; item D8: the TOP edge matters too — a scrolled row
+    // used to draw over the Sort/Filters controls and the count)
     int lo, hi;
     grid_visible(lib.tile_count, lib.top_row, lo, hi, lib.cols);
-    c.set_clip(rect(0, 0, 1920, kGridClipY));
+    c.set_clip(rect(0, kGridClipTop, 1920, kGridClipY - kGridClipTop));
     for (int i = lo; i < hi; ++i) {
         const Rect g = grid_tile(i, lib.top_row, lib.cols);
-        if (g.y > kGridClipY || g.y + g.h < 0) continue;
+        if (g.y > kGridClipY || g.y + g.h < kGridClipTop) continue;
         draw_tile(c, f, lib.tiles[i], g, lib.focus_tile && i == lib.sel && lib.header_focus < 0, lib.t);
     }
     c.reset_clip();
@@ -1047,14 +1057,17 @@ inline void draw_download_queue(ui::Canvas& c, const Font& f, const SidebarVM& s
     char b[32];
     std::snprintf(b, sizeof b, "%d items", q.row_count);
     text_r(c, f, Face::Regular, 22, 1844, 274, b, ui::theme::textDim);
-    // queue rows: clip above the reserved hint band (item 21) — an overflowing
-    // list must never paint into it
-    c.set_clip(rect(0, 0, 1920, kGridClipY));
+    // queue rows: clipped to their own band (item 21 + item D8) — a long
+    // queue must never paint over the Updates heading below it or into the
+    // reserved hint band
+    c.set_clip(rect(0, 300, 1920, 680 - 300));
     for (int i = 0; i < q.row_count; ++i) draw_queue_card(c, f, q.rows[i], 320 + 112.0f * i, false);
+    c.reset_clip();
     // updates section
     text(c, f, Face::Semibold, 26, 524, 680, "Updates", ui::theme::text);
     std::snprintf(b, sizeof b, "%d pending", q.update_count);
     text_r(c, f, Face::Regular, 22, 1844, 682, b, ui::theme::textDim);
+    c.set_clip(rect(0, 700, 1920, kGridClipY - 700));
     for (int i = 0; i < q.update_count; ++i) draw_queue_card(c, f, q.updates[i], 728 + 112.0f * i, true);
     c.reset_clip();
     if (draw_hints) draw_hint_bar(c, f, kQueueHints, 3, 524.0f);
@@ -1254,7 +1267,7 @@ inline void draw_game(ui::Canvas& c, const Font& f, const GameVM& g, bool draw_h
     text(c, f, Face::Regular, 24, 932 + 256.0f - f.measure(Face::Regular, 24, g.install_status, std::strlen(g.install_status)),
          664, g.install_status, g.install_ok ? ui::theme::accentSoft : ui::theme::textDim);
     c.fill_rect(732, 708, 456, 1, ui::theme::controlDark);
-    draw_kv(c, f, 732, 932, 724, "Size on disk", g.size_on_disk);
+    draw_kv(c, f, 732, 932, 724, "Game size", g.game_size);
     c.fill_rect(732, 768, 456, 1, ui::theme::controlDark);
     draw_kv(c, f, 732, 932, 784, "Location", g.location);
     c.fill_rect(732, 828, 456, 1, ui::theme::controlDark);

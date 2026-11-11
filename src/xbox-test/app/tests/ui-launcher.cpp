@@ -461,7 +461,7 @@ int main(int argc, char** argv) {
         g.achievements = "18 / 42";
         g.last_played = "2 days ago";
         g.install_status = "Installed";
-        g.size_on_disk = "48.2 GB";
+        g.game_size = "48.2 GB";
         g.last_updated = "12 Oct 2026";
         g.cloud_saves = "Synced";
         g.about =
@@ -496,7 +496,7 @@ int main(int argc, char** argv) {
         g.install_pct = 0.62f;
         g.primary.install_pct = 0.62f;         // the label reads the same progress
         g.install_status = "Downloading";
-        g.size_on_disk = "1.8 GB of 48.2 GB";
+        g.game_size = "1.8 GB of 48.2 GB";
         g.last_updated = "Not installed";
         g.achievement = "First Light";
         g.achievement_sub = "Locked";
@@ -514,7 +514,7 @@ int main(int argc, char** argv) {
         g.primary.install_pct = 0.62f;         // the label reads the same progress
         g.primary_focus = true;
         g.install_status = "Downloading";
-        g.size_on_disk = "1.8 GB of 48.2 GB";
+        g.game_size = "1.8 GB of 48.2 GB";
         g.last_updated = "Not installed";
         g.achievement = "First Light";
         g.achievement_sub = "Locked";
@@ -548,7 +548,7 @@ int main(int argc, char** argv) {
         g.achievements = "18 / 42";
         g.last_played = "2 days ago";
         g.install_status = "Installed";
-        g.size_on_disk = "48.2 GB";
+        g.game_size = "48.2 GB";
         g.last_updated = "12 Oct 2026";
         g.cloud_saves = "Synced";
         g.achievement = "First Light";
@@ -584,7 +584,7 @@ int main(int argc, char** argv) {
         g.achievements = "18 / 42";
         g.last_played = "2 days ago";
         g.install_status = "Installed";
-        g.size_on_disk = "48.2 GB";
+        g.game_size = "48.2 GB";
         g.last_updated = "12 Oct 2026";
         g.cloud_saves = "Synced";
         g.achievement = "First Light";
@@ -1281,6 +1281,38 @@ int main(int argc, char** argv) {
         disc_boxes("sign-in", kSignHints, 2);
     }
 
+    // ---- item D8: the grid is clipped to its viewport -------------------------
+    // A scrolled row (top_row = 1 puts row 0 at y = 264 - 372 = -108, so its
+    // bottom half lands in the header band) must not paint over the Sort
+    // control, the count or the title. The tiles are solid-colour stand-ins.
+    {
+        std::vector<TileVM> many(40);
+        for (auto& t : many) { t.name = "Tile"; t.art_top = 0xFF00FF00; t.art_mid = 0xFF00FF00; t.art_bot = 0xFF00FF00; }
+        SidebarVM sb; sb.all_count = 40; sb.installed_count = 0;
+        LibraryVM lib; lib.tiles = many.data(); lib.tile_count = int(many.size());
+        lib.top_row = 1; lib.sel = 5; lib.count_label = "40 games";
+        c.fill(ui::theme::page);
+        draw_library(c, font, sb, lib);
+        // the header band (Sort at y 168..228) and the title line stay clean
+        int tile_ink_header = 0;
+        for (int y = 0; y < int(kGridClipTop); ++y)
+            for (int x = int(kGridX); x < 1900; ++x)
+                if (px[size_t(y) * W + x] == 0xFF00FF00) ++tile_ink_header;
+        check(tile_ink_header == 0, "D8: no tile ink above the grid viewport (header row stays clear)");
+        // and the grid still draws below the header (the clip did not eat the viewport)
+        int tile_ink_body = 0;
+        for (int y = int(kGridClipTop); y < int(kGridClipY); ++y)
+            for (int x = int(kGridX); x < 1900; ++x)
+                if (px[size_t(y) * W + x] == 0xFF00FF00) ++tile_ink_body;
+        check(tile_ink_body > 1000, "D8: the grid still draws inside its viewport");
+        // the hint band stays clear too
+        int tile_ink_band = 0;
+        for (int y = int(kHintBandTop); y < H; ++y)
+            for (int x = 0; x < W; ++x)
+                if (px[size_t(y) * W + x] == 0xFF00FF00) ++tile_ink_band;
+        check(tile_ink_band == 0, "D8: no tile ink in the hint band");
+    }
+
     // ---- round 6 --------------------------------------------------------------
     // item 31: 'Storage management' is no longer a sidebar list row; the disk
     // widget is the button-like region with focus/active looks.
@@ -1789,6 +1821,26 @@ int main(int argc, char** argv) {
             GameVM fo2 = g; fo2.focus = 1;
             run_case("game trash button", rect(330, 378, 92, 92),
                      [&] { draw_g(un2); }, [&] { draw_g(fo2); });
+        }
+        // Item D9: the Install card carries ONE size row ("Game size"); the
+        // old duplicate "Size on disk" label is gone.
+        {
+            GameVM g; g.has_art = true; g.primary.installed = true;
+            g.install_status = "Installed"; g.game_size = "48.2 GB";
+            c.fill(ui::theme::page);
+            draw_game(c, font, g, false);
+            auto ink_in = [&](float x0, float y0, float w, float h) {
+                int n = 0;
+                for (int y = int(y0); y < int(y0 + h); ++y)
+                    for (int x = int(x0); x < int(x0 + w); ++x)
+                        if (px[size_t(y) * W + x] != ui::theme::panel) ++n;
+                return n;
+            };
+            check(ink_in(732, 724, 200, 32) > 0, "D9: the Game size row draws its label");
+            const float old_w = font.measure(ui::Face::Regular, 24, "Size on disk");
+            const float new_w = font.measure(ui::Face::Regular, 24, "Game size");
+            check(new_w < old_w, "D9: 'Game size' is the single, shorter label");
+            check(ink_in(732 + new_w + 8.0f, 724, 24, 32) == 0, "D9: no second size label after 'Game size'");
         }
         // confirm sheet buttons
         {
