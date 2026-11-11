@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Native regression for the Delete-game and Installed-filter rules.
+#include "../favorites.h"
 #include "../game_library.h"
 #include "../storage_roots.h"
 #include "../store_size.h"
@@ -203,6 +204,33 @@ int main() {
     assert(n1.empty() && n2.empty());
 
     assert(clamp_selection(5, 0) == 0 && clamp_selection(5, 3) == 2 && clamp_selection(-1, 3) == 0 && clamp_selection(1, 3) == 1);
+
+    // item D10: favorites round-trip through LocalState\favorites.txt. The
+    // file is the launcher's only record, so a restart must read back exactly
+    // what the previous run wrote.
+    {
+        using namespace favorites;
+        assert(parse("").empty());
+        assert(parse("10\n20\n") == (std::set<uint32_t>{10, 20}));
+        assert(parse("  480  \r\n# a comment\n\n\t3405340\t\n") == (std::set<uint32_t>{480, 3405340}));
+        assert(parse("10\n10\n") == (std::set<uint32_t>{10}));                        // duplicates collapse
+        assert(parse("10 # trailing note\n") == (std::set<uint32_t>{10}));
+        // junk lines are dropped, never turned into a bogus appid
+        for (const char* junk : {"abc", "0", "12a", "a12", "99999999999", "-5", "1.5", "#10"}) assert(parse(junk).empty());
+        std::set<uint32_t> ids = {3405340, 480, 459220};
+        const std::string text = format(ids);
+        assert(text == "480\n459220\n3405340\n");                                     // sorted, one id per line
+        assert(parse(text) == ids);                                                   // round trip
+        assert(parse(format(parse(text))) == ids);                                    // and again, as on a second restart
+        assert(format({}).empty() && parse(format({})).empty());
+        assert(contains(ids, 480) && !contains(ids, 481));
+        assert(toggle(ids, 481) && contains(ids, 481));                               // added
+        assert(!toggle(ids, 481) && !contains(ids, 481));                             // removed again
+        assert(!toggle(ids, 480) && ids.size() == 2 && !contains(ids, 480));
+        std::set<uint32_t> back = parse(format(ids));                                 // the toggle survives a restart
+        assert(back == ids && !contains(back, 480) && contains(back, 459220));
+    }
+
     std::puts("game_library: all checks passed");
     return 0;
 }

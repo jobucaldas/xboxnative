@@ -95,6 +95,21 @@ inline void cloud(Canvas& c, Rect r, uint32_t color, float strokePx = 2.0f) {
     c.stroke_polyline(p, n, true, strokePx, color);
 }
 
+// Item D10: star (favorite marker) — a filled five-point star in a unit
+// 24x24 box, so it reads at tile-badge and header sizes alike.
+inline void star(Canvas& c, Rect r, uint32_t color) {
+    float p[2 * 10];
+    const float cx = r.x + r.w * 0.5f, cy = r.y + r.h * 0.5f;
+    const float ro = std::min(r.w, r.h) * 0.5f, ri = ro * 0.42f;
+    for (int i = 0; i < 10; ++i) {
+        const float a = -1.5707963f + float(i) * 0.62831853f;   // start at 12 o'clock
+        const float rad = (i % 2) ? ri : ro;
+        p[i * 2] = cx + std::cos(a) * rad;
+        p[i * 2 + 1] = cy + std::sin(a) * rad;
+    }
+    c.fill_polygon(p, 10, color);
+}
+
 // Cog: four teeth, a ring and a hub. Design box 34x34, 2px stroke.
 inline void cog(Canvas& c, Rect r, uint32_t color, float strokePx = 2.0f) {
     const float dw = 34, dh = 34;

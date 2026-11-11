@@ -1927,6 +1927,139 @@ int main(int argc, char** argv) {
         snap("launcher-r6-filters-playable");
     }
 
+    // item D10: the game options popup — one sheet for the detail cog and for
+    // Menu on either screen. Cancel is the LAST row and the default focus, so
+    // a stray A never lands on Delete or Move; the Favorites row sits first.
+    {
+        const char* labels[5] = {"Add to favorites", "Move to USB E:", "Sync cloud saves", "Delete", "Cancel"};
+        const char* reasons[5] = {"", "", "", "", ""};
+        ActionSheetVM as;
+        as.title = "Halo Wars: Definitive Edition"; as.subtitle = "24.1 GB \xC2\xB7 Internal";
+        as.labels = labels; as.reasons = reasons; as.n = 5;
+        as.sel = ui_nav::options_open_sel(as.n);
+        check(as.sel == 4, "D10: the options popup defaults to Cancel, never Delete or Move");
+        c.fill(ui::theme::page);
+        draw_action_sheet(c, font, as);
+        // every row's label renders inside its own button (5 rows, 64 high,
+        // 12 gap; the sheet is 800 wide, 32 pad)
+        const float pad = 32.0f, opt_h = 64.0f, opt_gap = 12.0f;
+        const float first_opt = 114.0f + 24.0f;
+        const float sh = first_opt + (opt_h + opt_gap) * 5 - opt_gap + pad;
+        const float st = (1080.0f - sh) * 0.5f;
+        int rows_with_ink = 0;
+        for (int i = 0; i < 5; ++i) {
+            const Rect b = rect(560.0f + pad, st + first_opt + float(i) * (opt_h + opt_gap), 800.0f - pad * 2, opt_h);
+            bool ink = false;
+            for (int y = int(b.y) + 8; y < int(b.y + b.h) - 8 && !ink; ++y)
+                for (int x = int(b.x) + 24; x < int(b.x + b.w) - 24; ++x)
+                    if (px[size_t(y) * W + x] == ui::theme::text) { ink = true; break; }
+            if (ink) ++rows_with_ink;
+        }
+        check(rows_with_ink == 5, "D10: all five options draw their labels");
+        bool cancel_ring = false;
+        const Rect cb = rect(560.0f + pad, st + first_opt + 4.0f * (opt_h + opt_gap), 800.0f - pad * 2, opt_h);
+        for (int y = int(cb.y - 8); y < int(cb.y + cb.h + 8) && !cancel_ring; ++y)
+            for (int x = int(cb.x - 8); x < int(cb.x + cb.w + 8); ++x)
+                if (px[size_t(y) * W + x] == ui::theme::focus) { cancel_ring = true; break; }
+        check(cancel_ring, "D10: the Cancel row wears the focus ring on open");
+        snap("launcher-d10-options");
+
+        // a disabled Move row (destination full) draws muted with its reason
+        const char* reasons2[5] = {"", "Not enough free space on USB E:", "", "", ""};
+        as.reasons = reasons2;
+        c.fill(ui::theme::page);
+        draw_action_sheet(c, font, as);
+        bool muted2 = false;
+        const Rect mb = rect(560.0f + pad, st + first_opt + (opt_h + opt_gap), 800.0f - pad * 2, 72.0f);
+        for (int y = int(mb.y); y < int(mb.y + mb.h) && !muted2; ++y)
+            for (int x = int(mb.x); x < int(mb.x + mb.w); ++x)
+                if (px[size_t(y) * W + x] == ui::theme::textMuted) { muted2 = true; break; }
+        check(muted2, "D10: an impossible Move row draws muted with its reason");
+    }
+
+    // item D10: the favorite marker — a star badge in the tile's top-RIGHT
+    // corner (the INSTALLED badge owns the left, so both can show at once)
+    // and a star beside the game page's title.
+    {
+        TileVM t; t.name = "Hades"; t.art_top = 0xFF421334; t.art_mid = 0xFFAF3A6E; t.art_bot = 0xFF200A18;
+        t.installed = true;
+        const Rect g = grid_tile(0, 0);
+        const auto draw_t = [&](bool fav) {
+            c.fill(ui::theme::page);
+            TileVM tt = t; tt.favorite = fav;
+            draw_tile(c, font, tt, g, false);
+        };
+        draw_t(false);
+        const std::vector<uint32_t> plain = px;
+        draw_t(true);
+        auto star_ink = [&](float x0, float y0, float w, float h) {
+            int n = 0;
+            for (int y = int(y0); y < int(y0 + h); ++y)
+                for (int x = int(x0); x < int(x0 + w); ++x)
+                    if (px[size_t(y) * W + x] == ui::theme::accentSoft &&
+                        plain[size_t(y) * W + x] != ui::theme::accentSoft) ++n;
+            return n;
+        };
+        const float d = 34.0f;
+        const float fx = g.x + g.w - 12.0f - d, fy = g.y + 12.0f;
+        check(star_ink(fx, fy, d, d) > 20, "D10: a favorite tile draws its star in the top-right corner");
+        check(star_ink(g.x + 12.0f, g.y + 12.0f, 94.0f, 26.0f) == 0,
+              "D10: the star never lands on the INSTALLED badge");
+        draw_t(false);
+        int any_star = 0;
+        for (int y = int(g.y); y < int(g.y + g.h); ++y)
+            for (int x = int(g.x); x < int(g.x + g.w); ++x)
+                if (px[size_t(y) * W + x] == ui::theme::accentSoft) ++any_star;
+        check(any_star == 0, "D10: a non-favorite tile draws no star");
+
+        // the game page: the star sits right of the title's ink
+        GameVM gv; gv.has_art = true; gv.primary.installed = true; gv.title = "Halo Wars";
+        const auto draw_g = [&](bool fav) {
+            c.fill(ui::theme::page);
+            GameVM gg = gv; gg.favorite = fav;
+            draw_game(c, font, gg, false);
+        };
+        draw_g(false);
+        const std::vector<uint32_t> page_plain = px;
+        draw_g(true);
+        const float tw = font.measure(ui::Face::Semibold, 56, "Halo Wars");
+        int star_page = 0;
+        for (int y = 192; y < 238; ++y)
+            for (int x = int(64.0f + tw + 16.0f); x < int(64.0f + tw + 60.0f); ++x)
+                if (px[size_t(y) * W + x] == ui::theme::accentSoft &&
+                    page_plain[size_t(y) * W + x] != ui::theme::accentSoft) ++star_page;
+        check(star_page > 20, "D10: a favorite game page draws a star beside its title");
+        draw_g(false);
+        bool title_star = false;
+        for (int y = 192; y < 238; ++y)
+            for (int x = int(64.0f + tw + 16.0f); x < int(64.0f + tw + 60.0f); ++x)
+                if (px[size_t(y) * W + x] == ui::theme::accentSoft) { title_star = true; break; }
+        check(!title_star, "D10: a non-favorite game page draws no title star");
+    }
+
+    // item D10: the Filters panel now carries TWO rows (Playable, Favorites),
+    // each with its own on state.
+    {
+        c.fill(ui::theme::page);
+        FilterRowVM rows[2] = {{"Playable", false}, {"Favorites", true}};
+        draw_filters_panel(c, font, rows, 2, 1);
+        const float x = 1844.0f - 430.0f, ry = 236.0f + 8.0f;
+        const float px0 = x + 430.0f - 92.0f;
+        const float row2y = ry + 64.0f;
+        check(px[size_t(int(row2y + 16.0f) + 16) * W + int(px0) + 6] == ui::theme::accent,
+              "D10: the Favorites row's on pill fills accent");
+        check(px[size_t(int(row2y + 16.0f) + 16) * W + int(px0) + 40] == ui::theme::onAccent,
+              "D10: the Favorites pill's knob sits right (on)");
+        const auto row_has_label = [&](float top) {
+            for (int y = int(top); y < int(top + 64.0f); ++y)
+                for (int xx = int(x) + 28; xx < int(x) + 300; ++xx)
+                    if (px[size_t(y) * W + xx] == ui::theme::text2 || px[size_t(y) * W + xx] == ui::theme::text) return true;
+            return false;
+        };
+        check(row_has_label(ry) && row_has_label(row2y), "D10: both filter rows draw their labels");
+        snap("launcher-d10-filters");
+    }
+
     std::printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "OK", g_failures, g_failures == 1 ? "" : "s");
     return g_failures ? 1 : 0;
 }

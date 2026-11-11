@@ -314,6 +314,7 @@ static bool file_exists(const std::wstring& p) { return GetFileAttributesW(p.c_s
 // ---------------------------------------------------------------- Xbox-style screens (ui_launcher.h) + navigation (ui_nav.h)
 #include "playable.h"   // item 32: the owner-verified playable set + LocalState\playable.txt
 #include "move_game.h"  // item 33: the storage move job (copy, verify, marker rewrite)
+#include "favorites.h"  // item D10: per-game favorites, LocalState\favorites.txt
 #include "ui_nav.h"
 #include "ui_launcher.h"
 
@@ -488,13 +489,18 @@ static void hero_release(uint32_t appid) { std::lock_guard<std::mutex> l(g_heroM
 static std::atomic<int> g_sortMode{ui_nav::kSortAlphabetical};   // item 25: the launcher opens on Alphabetical
 // item 25: mode order 0 Alphabetical, 1 Most played, 2 Recently played —
 // the same indexes the sort popup shows (ui_nav::kSortAlphabetical...).
-static const char* SORT_NAMES[] = {"Alphabetical", "Most played", "Recently played"};
+static const char* SORT_NAMES[] = {"Alphabetical", "Most played", "Recently played", "Favorites"};   // item D10 adds Favorites
 static std::string lower(std::string s) { for (auto& c : s) c = (char)tolower((unsigned char)c); return s; }
+static std::set<uint32_t> g_favSort;   // item D10: the favorite set the 'Favorites' sort key reads (guarded by g_gm)
 static void sort_games(int mode) {   // caller holds g_gm
     logf("grid list resort/reload mode=%d count=%zu (position unchanged)", mode, g_games.size());
     std::stable_sort(g_games.begin(), g_games.end(), [mode](const std::shared_ptr<Game>& a, const std::shared_ptr<Game>& b) {
         if (mode == ui_nav::kSortMostPlayed) return a->playtime > b->playtime;
         if (mode == ui_nav::kSortRecentlyPlayed) return a->lastPlayed > b->lastPlayed;
+        if (mode == ui_nav::kSortFavorites) {   // item D10: favorites first, then alphabetical
+            const bool fa = g_favSort.count(a->appid) != 0, fb = g_favSort.count(b->appid) != 0;
+            if (fa != fb) return fa;
+        }
         return lower(a->name) < lower(b->name); });
 }
 
@@ -935,6 +941,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     ui_nav::SearchState m_search;   // item D13: query + caret + caps lock
     bool m_onlyInstalled = false;                            // tab: Installed (the tab stays; Playable filters within it, item 32)
     bool m_filterPlayable = false;                           // item 32: the 'Playable' filter (resets on app start only)
+    bool m_filterFavorites = false;                          // item D10: the 'Favorites' filter row
+    static constexpr int kFilterRows = 2;                    // Playable, Favorites (the panel's row order)
     ui_nav::Focus m_focus = ui_nav::Focus::grid;             // library: grid tiles or the sidebar
     int m_sidebar = 0;                                       // sidebar row the focus sits on
     int m_qSel = 0;                                          // queue screen: focused row (0 = the Auto-update row, item 28)
@@ -1088,6 +1096,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     std::vector<std::shared_ptr<Game>> shown_games() {   // caller holds g_gm
         auto tab = game_library::shown(g_games, m_onlyInstalled, m_installed);
         if (m_filterPlayable) tab = ui_nav::tab_games(tab, true, [this](uint32_t a) { return is_playable(a); });
+        if (m_filterFavorites) {   // item D10: the Favorites filter row
+            load_favorites();
+            std::vector<std::shared_ptr<Game>> only;
+            for (auto& g : tab) if (favorites::contains(m_favorites, g->appid)) only.push_back(g);
+            tab.swap(only);
+        }
         if (!m_search.query.empty()) {
             std::string q;
             q.reserve(m_search.query.size());
@@ -1152,6 +1166,40 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // cloud sheet (m_cloudOpen / m_cloudFocus).
     int m_dFocus = 0;
     bool m_cloudOpen = false; int m_cloudFocus = 0;
+    // Item D10: the game options popup — ONE sheet, opened by the detail
+    // cog, by Menu on the detail page and by Menu on the library's focused
+    // tile. Rows: Favorite/Unfavorite, Move to <drive> (installed), Sync
+    // cloud saves (installed), Delete (installed), Cancel. Destructive rows
+    // still go through their own Cancel-default confirm.
+    bool m_optOpen = false;
+    int m_optSel = 0;                     // highlighted row (Cancel by default)
+    uint32_t m_optGame = 0;               // the game the popup is open for (the launch-option cache below is m_optApp)
+    std::string m_optName;                // its name (sheet title)
+    std::vector<std::string> m_optLabels, m_optReasons;   // rows (owned strings)
+    std::vector<int> m_optKind, m_optDst; // per row: OptKind, and the Move row's drive index
+    enum OptKind { kOptFavorite = 0, kOptMove = 1, kOptCloud = 2, kOptDelete = 3, kOptLocation = 4, kOptCancel = 5 };
+    // Item D10: favorites live in LocalState\favorites.txt and survive
+    // restarts; the set is the source of truth for the tile/header markers.
+    std::set<uint32_t> m_favorites;
+    bool m_favoritesLoaded = false;
+    void load_favorites() {
+        if (m_favoritesLoaded) return;
+        m_favoritesLoaded = true;
+        std::string text;
+        if (read_file_s(g_dir + L"\\favorites.txt", text)) m_favorites = favorites::parse(text);
+        { std::lock_guard<std::mutex> l(g_gm); g_favSort = m_favorites; }
+        logf("favorites: %zu game(s) loaded", m_favorites.size());
+    }
+    void save_favorites() { write_text(g_dir + L"\\favorites.txt", favorites::format(m_favorites)); }
+    bool is_favorite(uint32_t appid) { load_favorites(); return favorites::contains(m_favorites, appid); }
+    void toggle_favorite(uint32_t appid, const char* via) {
+        load_favorites();
+        const bool now = favorites::toggle(m_favorites, appid);
+        save_favorites();
+        // item D10: the Favorites sort/filter read the same set
+        { std::lock_guard<std::mutex> l(g_gm); g_favSort = m_favorites; if (g_sortMode.load() == ui_nav::kSortFavorites) sort_games(ui_nav::kSortFavorites); }
+        logf("favorites: appid=%u -> %s (%s)", appid, now ? "favorite" : "not favorite", via);
+    }
     std::string m_achName, m_achSub; float m_achPct = 0; bool m_focusAch = false;   // latest achievement (no live schema feed yet; stays off)
     std::string remembered_option(uint32_t id) {   // LocalState\launch_choice_<appid>.txt beside the install marker
         std::string text; return read_file_s(g_dir + L"\\" + widen(launch_picker::remember_name(id)), text) ? launch_picker::parse_remember(text) : std::string();
@@ -1243,6 +1291,120 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (m_dInst.installed || g_demo || dl_is_mine() || is_queued(m_dApp)) return;
         refresh_roots("refresh"); m_rootSel = storage_roots::cycle(m_rootSel, m_roots.size(), 1); m_dNote.clear();
         logf("detail: install location appid=%u -> %s (%s)", m_dApp, storage_roots::label_capacity(m_roots[m_rootSel]).c_str(), via);
+    }
+    // ---- Item D10: the game options popup (detail cog, Menu on detail and
+    // Menu on the library's focused tile all open THIS one).
+    // Rows: Favorite/Unfavorite always; for an installed game also one
+    // 'Move to <drive>' per other usable root (disabled with the plan's
+    // reason), 'Sync cloud saves' and 'Delete'; Cancel last and focused
+    // first. Destructive rows keep their own Cancel-default confirm.
+    void open_options(uint32_t appid, const char* via) {
+        if (!appid) return;
+        load_favorites();
+        refresh_install(now_s());
+        InstallInfo ii = appid == m_dApp ? m_dInst : read_install(appid);
+        m_optGame = appid;
+        m_optName = game_name(appid);
+        if (m_optName.empty()) m_optName = "App " + std::to_string(appid);
+        m_optLabels.clear(); m_optReasons.clear(); m_optKind.clear(); m_optDst.clear();
+        m_optLabels.push_back(favorites::contains(m_favorites, appid) ? "Remove from favorites" : "Add to favorites");
+        m_optReasons.push_back(std::string()); m_optKind.push_back(kOptFavorite); m_optDst.push_back(-1);
+        if (ii.installed) {
+            refresh_roots("game options");
+            bool busy = false;
+            { std::lock_guard<std::mutex> l(g_dqm); busy = g_fsDownloading || g_fsDeleting || !g_dq.empty(); }
+            for (size_t i = 0; i < m_roots.size(); ++i) {
+                const storage_roots::Choice& dst = m_roots[i];
+                if (dst.root == ii.root) continue;   // no 'Move to' onto the drive it already sits on
+                std::wstring dstDir = (dst.root.empty() ? g_dir : installs::ascii(dst.root)) + L"\\" + installs::ascii(ii.dir);
+                bool dst_exists = !ii.dir.empty() && GetFileAttributesW(dstDir.c_str()) != INVALID_FILE_ATTRIBUTES;
+                auto ref = move_game::plan_check(busy, ii.root, dst.root, ii.bytes, dst_exists, dst.freeBytes);
+                m_optLabels.push_back("Move to " + dst.name);
+                m_optReasons.push_back(ref == move_game::Refusal::none ? std::string() : move_game::refusal_text(ref));
+                m_optKind.push_back(kOptMove); m_optDst.push_back((int)i);
+            }
+            m_optLabels.push_back("Sync cloud saves");
+            m_optReasons.push_back(std::string()); m_optKind.push_back(kOptCloud); m_optDst.push_back(-1);
+            m_optLabels.push_back("Delete");
+            m_optReasons.push_back(std::string()); m_optKind.push_back(kOptDelete); m_optDst.push_back(-1);
+        } else {
+            // the cog used to cycle the install location; that option lives
+            // in this popup now, so the cog no longer hides it
+            m_optLabels.push_back("Change install location");
+            m_optReasons.push_back(std::string()); m_optKind.push_back(kOptLocation); m_optDst.push_back(-1);
+        }
+        m_optLabels.push_back("Cancel");
+        m_optReasons.push_back(std::string()); m_optKind.push_back(kOptCancel); m_optDst.push_back(-1);
+        m_optSel = ui_nav::options_open_sel((int)m_optLabels.size());   // item 14/D10: Cancel is the default focus
+        m_optOpen = true;
+        logf("options: sheet open appid=%u rows=%zu (%s)", appid, m_optLabels.size(), via);
+    }
+    // A on an enabled row. Move/Delete/Log out style actions never run from
+    // the popup itself: they hand over to the existing sheets.
+    void options_activate(const char* via) {
+        if (m_optSel < 0 || m_optSel >= (int)m_optKind.size()) return;
+        if (ui_nav::options_refused(m_optReasons[(size_t)m_optSel].c_str())) {
+            logf("options: row refused (disabled): %s", m_optReasons[(size_t)m_optSel].c_str());
+            return;
+        }
+        const int kind = m_optKind[(size_t)m_optSel];
+        const uint32_t appid = m_optGame;
+        m_optOpen = false;
+        if (kind == kOptCancel) { logf("options: closed (%s)", via); return; }
+        if (kind == kOptFavorite) { toggle_favorite(appid, via); return; }
+        if (kind == kOptLocation) { detail_storage(via); return; }
+        if (kind == kOptMove) {
+            const int dsti = m_optDst[(size_t)m_optSel];
+            if (dsti < 0 || dsti >= (int)m_roots.size()) return;
+            // the move job's source is the game's own drive, not the storage
+            // screen's focus: find it in the roots list
+            m_stSel = 0;
+            for (size_t i = 0; i < m_roots.size(); ++i) {
+                installs::Info ii = installs::read(g_dir, appid);
+                if (m_roots[i].root == ii.root) { m_stSel = (int)i; break; }
+            }
+            m_stActionApp = appid;
+            m_stActionBytes = read_install(appid).bytes;
+            storage_start_move((size_t)dsti, via);
+            return;
+        }
+        if (appid != m_dApp) { g_screen = S_DETAIL; m_dApp = appid; m_dName = m_optName; m_dInstT = -10; m_dFocus = 0; }
+        if (kind == kOptCloud) { detail_cloud("game options"); return; }
+        if (kind == kOptDelete) { detail_delete("game options"); return; }
+    }
+    // Up/down walk every row (disabled ones stay focusable, like the storage
+    // sheet); B closes. Returns true when the popup owned the press.
+    bool options_input(GamepadButtons edge, const char* source) {
+        if (!m_optOpen) return false;
+        const int n = (int)m_optLabels.size();
+        if (!n) { m_optOpen = false; return true; }
+        if (has(edge, GamepadButtons::DPadUp)) { ui_nav::options_move(m_optSel, n, false); logf("options: row %d/%d (%s)", m_optSel + 1, n, source); }
+        else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::options_move(m_optSel, n, true); logf("options: row %d/%d (%s)", m_optSel + 1, n, source); }
+        else if (has(edge, GamepadButtons::A)) options_activate(source);
+        else if (has(edge, GamepadButtons::B) || has(edge, GamepadButtons::Menu)) { m_optOpen = false; logf("options: closed (%s)", source); }
+        return true;
+    }
+    // The shared sheet fill (draw side): title = game name, subtitle = size
+    // and drive when installed, else the library's only line.
+    void draw_options(ui::Canvas& c) {
+        ui_launcher::ActionSheetVM a;
+        static std::string aTitle, aSubtitle;
+        static std::vector<const char*> labelPtrs, reasonPtrs;
+        aTitle = clip(m_optName.empty() ? "App " + std::to_string(m_optGame) : m_optName, 36);
+        InstallInfo ii = read_install(m_optGame);
+        if (ii.installed) {
+            std::string where = "Internal";
+            for (auto& rc : m_roots) if (rc.root == ii.root) { where = rc.name; break; }
+            aSubtitle = (ii.bytes ? storage_roots::size_text(ii.bytes) : std::string("Installed")) + " \xC2\xB7 " + where;
+        } else aSubtitle = "Not installed";
+        labelPtrs.clear(); reasonPtrs.clear();
+        for (const std::string& l : m_optLabels) labelPtrs.push_back(l.c_str());
+        for (const std::string& r : m_optReasons) reasonPtrs.push_back(r.c_str());
+        a.title = aTitle.c_str(); a.subtitle = aSubtitle.c_str();
+        a.labels = labelPtrs.data(); a.reasons = reasonPtrs.data();
+        a.n = (int)labelPtrs.size();
+        a.sel = m_optSel;
+        ui_launcher::draw_action_sheet(c, g_font, a);
     }
     // ---- storage screen (item 22): the focused drive's installed-games list
     // Games installed under the focused root: appid -> (dir, root, bytes) from
@@ -1604,6 +1766,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         g.last_updated = vUpdated.c_str(); g.cloud_saves = vCloud.c_str();
         g.about = vAbout.c_str(); g.players = vPlayers.c_str(); g.language = vLang.c_str();
         g.primary = pv; g.primary_focus = m_dFocus == 0; g.install_pct = float(pct);
+        g.favorite = is_favorite(m_dApp);   // item D10: the star beside the title
         // item 13: the tall box on the right is the TALL library capsule (the
         // same portrait art the tile uses), not the cropped header.
         if (gm && gm->cover == 1 && !gm->pix.empty()) { g.has_art = true; g.no_cover = false; g.art = ui::Image{gm->pix.data(), gm->iw, gm->ih, gm->iw}; }
@@ -1633,9 +1796,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         g.cloud_saves = cloudShort;
 
         ui::Canvas c(g_fb.data(), W, H, W);
-        ui_launcher::draw_game(c, g_font, g, !(m_confirmDelete || m_cloudOpen));   // item 17: a sheet brings its own hint bar
+        ui_launcher::draw_game(c, g_font, g, !(m_confirmDelete || m_cloudOpen || m_optOpen));   // item 17: a sheet brings its own hint bar
         ui_launcher::draw_game_note(c, g_font, g, vNote.c_str());
         if (m_pick.open) draw_picker();
+        if (m_optOpen) draw_options(c);   // item D10: the game options popup
         if (m_confirmDelete) {
             ui_launcher::DeleteVM d;
             static std::string dTitle, dBody;
@@ -1734,6 +1898,18 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             return;
         }
         if (c == "profile") { if (g_screen == S_LIBRARY) { m_focus = ui_nav::Focus::sidebar; m_sidebar = ui_nav::kSidebarProfile; logf("cmd.txt: profile row focused (nothing opened)"); } return; }
+        // item D10: 'menu' opens the game options popup for the focused tile
+        // (library) or the open page's game (detail) — the same sheet Menu
+        // and the cog open.
+        if (c == "menu") {
+            if (g_screen == S_LIBRARY) {
+                std::vector<std::shared_ptr<Game>> list; { std::lock_guard<std::mutex> l(g_gm); list = shown_games(); }
+                if (!list.empty() && m_sel < (int)list.size()) open_options(list[(size_t)m_sel]->appid, "cmd.txt menu");
+                else logf("cmd.txt: menu ignored (no focused tile)");
+            } else if (g_screen == S_DETAIL) open_options(m_dApp, "cmd.txt menu");
+            else logf("cmd.txt: menu ignored on this screen");
+            return;
+        }
         GamepadButtons m = GamepadButtons::None;
         if (c == "press" || c == "a") m = GamepadButtons::A; else if (c == "back" || c == "b") m = GamepadButtons::B;
         else if (c == "up") m = GamepadButtons::DPadUp; else if (c == "down") m = GamepadButtons::DPadDown; else if (c == "left") m = GamepadButtons::DPadLeft; else if (c == "right") m = GamepadButtons::DPadRight;
@@ -2040,6 +2216,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
               ui_launcher::TileVM tv;
               tv.name = g.name.c_str();
               tv.installed = m_installed.count(g.appid) != 0;
+              tv.favorite = is_favorite(g.appid);   // item D10: the star badge
               if (g.cover == 1 && !g.pix.empty()) { arts.push_back(ui::Image{g.pix.data(), g.iw, g.ih, g.iw}); tv.art = arts.back(); }
               // item 12: cover state 2 (failed) or 0 (not loaded) -> grey gradient tile
               tv.no_cover = g.cover != 1;
@@ -2059,8 +2236,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         lib.sort_open = m_sortOpen; lib.sort_focus = m_sortFocus;
         lib.filters_open = m_filtersOpen; lib.filters_focus = m_filtersFocus;
         lib.filter_playable = m_filterPlayable;   // the panel's Playable row shows the real state
-        bool filterOn[1] = {m_filterPlayable};   // item 26/32: the Filters button's '· N' count
-        lib.filters_active = ui_nav::filters_active(filterOn, 1);
+        lib.filter_favorites = m_filterFavorites; // item D10: the Favorites row
+        bool filterOn[kFilterRows] = {m_filterPlayable, m_filterFavorites};   // item 26/32: the Filters button's '· N' count
+        lib.filters_active = ui_nav::filters_active(filterOn, kFilterRows);
         lib.search_open = m_searchOpen; lib.search_key = m_searchKey;
         lib.search_caret = m_search.caret; lib.search_caps = m_search.caps;
         static std::string query_buf; query_buf = m_search.query;
@@ -2075,7 +2253,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (loading) lib.loading = true;
         else if (m_onlyInstalled) snprintf(count, sizeof count, "%zu installed of %d games", listed, (int)g_ownedCount.load()), lib.count_label = count;
         else { snprintf(count, sizeof count, "%s", game_library::count_label(listed, (size_t)g_ownedCount.load(), searching).c_str()); lib.count_label = count; }
-        ui_launcher::draw_library(c, g_font, sb, lib, !m_confirmLogout);   // item 17: the logout sheet brings its own hint bar
+        ui_launcher::draw_library(c, g_font, sb, lib, !(m_confirmLogout || m_optOpen));
+        if (m_optOpen) draw_options(c);   // item D10: Menu on the focused tile
         if (g_demo) {   // demo marker replaces the count line (honest: not your account)
             c.fill_rect_alpha(524, 168, 430, 60, ui::theme::page, 255);
             c.fill_round_rect(ui::rect(524, 168, 430, 60), ui::theme::radiusControl, ui::theme::control);
@@ -2296,6 +2475,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         int s = g_screen;
         if (s == S_LOGIN) { if (has(edge, GamepadButtons::A) || has(edge, GamepadButtons::X)) { g_refreshReq = true; set_status("Refreshing QR..."); logf("Refresh button pressed"); } }
         else if (s == S_DETAIL) {
+            // item D10: the game options popup owns the pad while it is up
+            if (options_input(edge, source)) return;
             if (m_pick.open) {   // the launch-option picker owns the pad while it is up
                 if (has(edge, GamepadButtons::DPadUp)) { launch_picker::move(m_pick, -1); logf("detail: launch option %d/%zu (%s)", m_pick.sel + 1, m_pick.rows.size(), source); }
                 else if (has(edge, GamepadButtons::DPadDown)) { launch_picker::move(m_pick, 1); logf("detail: launch option %d/%zu (%s)", m_pick.sel + 1, m_pick.rows.size(), source); }
@@ -2339,15 +2520,20 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 if (icon == 0) detail_action(source);             // the primary button (or its id)
                 else if (icon == 1) detail_delete(source);        // trash
                 else if (icon == 2) { m_cloudOpen = true; m_cloudFocus = 0; logf("detail: cloud sheet open (%s)", source); }   // cloud
-                else detail_storage(source);                      // cog: cycle the install location
+                else open_options(m_dApp, "detail cog");          // item D10: the cog opens the game options popup
             }
             if (has(edge, GamepadButtons::B)) detail_back(source);
+            // item D10: Menu opens the SAME options popup the cog does (the
+            // hint bar already labels it "Manage").
+            if (has(edge, GamepadButtons::Menu)) open_options(m_dApp, "detail Menu");
             // item 14: Menu/View no longer leaves the page — B is the one back
             // route, like every other screen (a single press that leaves the
             // page invited stray confirms on the next screen).
         }
         else if (s == S_LIBRARY) {
             std::vector<std::shared_ptr<Game>> list; { std::lock_guard<std::mutex> l(g_gm); list = shown_games(); } size_t n = list.size();
+            // item D10: the game options popup owns the pad while it is up
+            if (options_input(edge, source)) return;
             if (m_confirmLogout) {   // item 14: focus starts on Cancel; left/right toggles; only A on 'Log out' logs out
                 if (has(edge, GamepadButtons::DPadLeft) || has(edge, GamepadButtons::DPadRight)) { m_logoutYes = !m_logoutYes; logf("logout sheet: focus -> %s (%s)", m_logoutYes ? "Log out" : "Cancel", source); }
                 else if (has(edge, GamepadButtons::A)) {
@@ -2360,13 +2546,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             // item 1: the sort dropdown owns the pad while it is up (A confirms,
             // B closes, up/down moves with wrap).
             if (m_sortOpen) {
-                if (has(edge, GamepadButtons::DPadUp)) { ui_nav::sort_open_move(m_sortFocus, 3, false); logf("sort: up -> option %d (%s)", m_sortFocus, source); }
-                else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::sort_open_move(m_sortFocus, 3, true); logf("sort: down -> option %d (%s)", m_sortFocus, source); }
+                if (has(edge, GamepadButtons::DPadUp)) { ui_nav::sort_open_move(m_sortFocus, ui_nav::kSortOptionCount, false); logf("sort: up -> option %d (%s)", m_sortFocus, source); }
+                else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::sort_open_move(m_sortFocus, ui_nav::kSortOptionCount, true); logf("sort: down -> option %d (%s)", m_sortFocus, source); }
                 else if (has(edge, GamepadButtons::A)) {
                     int selected = g_sortMode.load();
                     if (ui_nav::sort_confirm(m_sortFocus, selected, m_sortOpen)) {
-                        g_sortMode = selected; { std::lock_guard<std::mutex> l(g_gm); sort_games(selected); } grid_position(0, 0, "sort confirm"); logf("sort mode -> %s", SORT_NAMES[selected]);
-                    }
+                        g_sortMode = selected; { std::lock_guard<std::mutex> l(g_gm); sort_games(selected); } grid_position(0, 0, "sort confirm"); logf("sort mode -> %s", SORT_NAMES[selected]);                    }
                 }
                 else if (has(edge, GamepadButtons::B)) { ui_nav::sort_close(m_sortOpen); logf("sort popup closed (%s)", source); }
                 return;
@@ -2374,10 +2559,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             // item 1: the filters panel owns the pad while it is up (A toggles
             // the focused row, B closes, up/down moves with wrap).
             if (m_filtersOpen) {
-                bool playableOn = m_filterPlayable;   // item 32: the one real filter row is 'Playable'
-                if (has(edge, GamepadButtons::DPadUp)) { ui_nav::filters_move(m_filtersFocus, 1, false); logf("filters: up -> row %d (%s)", m_filtersFocus, source); }
-                else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::filters_move(m_filtersFocus, 1, true); logf("filters: down -> row %d (%s)", m_filtersFocus, source); }
-                else if (has(edge, GamepadButtons::A)) { ui_nav::filters_toggle(&playableOn, 1, m_filtersFocus); if (m_filterPlayable != playableOn) { m_filterPlayable = playableOn; grid_position(0, 0, "filters toggle"); logf("filters: playable -> %s (%s)", m_filterPlayable ? "on" : "off", source); } }
+                bool on[kFilterRows] = {m_filterPlayable, m_filterFavorites};   // item D10: Playable, Favorites
+                if (has(edge, GamepadButtons::DPadUp)) { ui_nav::filters_move(m_filtersFocus, kFilterRows, false); logf("filters: up -> row %d (%s)", m_filtersFocus, source); }
+                else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::filters_move(m_filtersFocus, kFilterRows, true); logf("filters: down -> row %d (%s)", m_filtersFocus, source); }
+                else if (has(edge, GamepadButtons::A)) {
+                    ui_nav::filters_toggle(on, kFilterRows, m_filtersFocus);
+                    if (m_filterPlayable != on[0] || m_filterFavorites != on[1]) {
+                        m_filterPlayable = on[0]; m_filterFavorites = on[1];
+                        grid_position(0, 0, "filters toggle");
+                        logf("filters: playable -> %s, favorites -> %s (%s)", m_filterPlayable ? "on" : "off", m_filterFavorites ? "on" : "off", source);
+                    }
+                }
                 else if (has(edge, GamepadButtons::B)) { m_filtersOpen = false; logf("filters panel closed (%s)", source); }
                 return;
             }
@@ -2452,6 +2644,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             int top = m_top, r = sel / COLS; if (r < top) top = r; if (r > top + 1) top = r - 1;
             grid_position(sel, top, source);
             if (has(edge, GamepadButtons::A) && n) { uint32_t aid; std::string nm; { std::lock_guard<std::mutex> l(g_gm); aid = list[m_sel]->appid; nm = list[m_sel]->name; } open_detail(aid, nm, source); return; }
+            // item D10: Menu on the focused tile opens the SAME game options
+            // popup the detail cog does (the hint bar labels it "Manage").
+            if (has(edge, GamepadButtons::Menu) && n) { uint32_t aid = 0; { std::lock_guard<std::mutex> l(g_gm); aid = list[m_sel]->appid; } open_options(aid, "library Menu"); return; }
             // item 14: B on the library root does NOTHING destructive (Xbox
             // convention) — no popup/sheet is open here (each popup's handler
             // returned above). Item D5: the root has nowhere to go back TO, so

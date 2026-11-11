@@ -64,19 +64,36 @@ inline bool sidebar_move(int& active, bool down) {
 // the sidebar; the other two draw their own page and B returns to the library.
 inline int sidebar_target(int active) { return active; }
 
-// ---- sort modes (item 25) ----
+// ---- sort modes (item 25; item D10 adds Favorites) ----
 // The sort popup's option order AND the model mode indexes are the same
 // numbers: 0 Alphabetical (the startup default), 1 Most played, 2 Recently
-// played. main.cpp's SORT_NAMES and sort_games() key off these.
+// played, 3 Favorites (favorites first, then alphabetical). main.cpp's
+// SORT_NAMES and sort_games() key off these.
 constexpr int kSortAlphabetical = 0;
 constexpr int kSortMostPlayed = 1;
 constexpr int kSortRecentlyPlayed = 2;
-constexpr int kSortOptionCount = 3;
+constexpr int kSortFavorites = 3;
+constexpr int kSortOptionCount = 4;
 
 // ---- sort mode cycling ----
 // The sidebar's sort row cycles the launcher's existing modes; the label is
 // SORT_NAMES[mode] ("Alphabetical", "Most played", "Recently played").
 inline int cycle_sort(int mode, int n) { return n <= 0 ? 0 : (mode + 1) % n; }
+
+// ---- game options popup (item D10) ----
+// ONE sheet, opened by the detail page's cog, by Menu on the detail page and
+// by Menu on the library's focused tile. Rows walk with wrap and disabled
+// rows stay focusable (the same rule as the storage sheet), so the D-pad can
+// always pass a refusal to reach the rows below it. The sheet OPENS on its
+// last row, which is always Cancel: a stray A never lands on Delete or Move.
+inline int options_open_sel(int n) { return n <= 0 ? 0 : n - 1; }
+inline bool options_move(int& sel, int n, bool down) {
+    if (n <= 0) return false;
+    sel = down ? (sel + 1) % n : (sel + n - 1) % n;
+    return true;
+}
+// A row is refused (drawn muted with its reason) when it carries a reason.
+inline bool options_refused(const char* reason) { return reason && *reason; }
 
 // ---- storage screen (item 22): drive rows + per-drive game lists ----
 // A drive row: the figures the drive list shows. main.cpp fills them from

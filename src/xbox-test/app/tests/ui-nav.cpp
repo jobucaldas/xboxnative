@@ -77,7 +77,34 @@ int main() {
     {
         check(ui_nav::kSortAlphabetical == 0 && ui_nav::kSortMostPlayed == 1 && ui_nav::kSortRecentlyPlayed == 2,
               "sort mode indexes: 0 alphabetical, 1 most played, 2 recently played");
-        check(ui_nav::kSortOptionCount == 3, "the sort popup shows three options");
+        // item D10: Favorites is the fourth option (deliberate change: the
+        // popup grew one row, so the old "three options" pin moves to four)
+        check(ui_nav::kSortFavorites == 3 && ui_nav::kSortOptionCount == 4,
+              "item D10: the sort popup shows four options, Favorites last");
+        check(cycle_sort(2, ui_nav::kSortOptionCount) == ui_nav::kSortFavorites &&
+              cycle_sort(ui_nav::kSortFavorites, ui_nav::kSortOptionCount) == 0,
+              "item D10: cycling reaches Favorites and wraps back to Alphabetical");
+    }
+
+    // ---- item D10: the game options popup's focus rules ----
+    {
+        // the sheet always opens on Cancel (its last row), so a stray A on
+        // open never lands on Delete or Move
+        check(ui_nav::options_open_sel(5) == 4 && ui_nav::options_open_sel(2) == 1,
+              "item D10: the options popup opens on its last row (Cancel)");
+        check(ui_nav::options_open_sel(0) == 0 && ui_nav::options_open_sel(-3) == 0,
+              "item D10: an empty popup still yields a valid index");
+        // up/down walk every row with wrap, disabled ones included
+        int sel = ui_nav::options_open_sel(5);   // Cancel
+        check(ui_nav::options_move(sel, 5, true) && sel == 0, "item D10: Down from Cancel wraps to the first row");
+        check(ui_nav::options_move(sel, 5, false) && sel == 4, "item D10: Up from the first row wraps to Cancel");
+        check(!ui_nav::options_move(sel, 0, true) && sel == 4, "item D10: an empty popup never moves");
+        for (int i = 0; i < 5; ++i) ui_nav::options_move(sel, 5, true);
+        check(sel == 4, "item D10: a full lap of the popup returns to Cancel");
+        // a row with a reason is refused; an empty reason is enabled
+        check(!ui_nav::options_refused("") && ui_nav::options_refused("Not enough free space"),
+              "item D10: only a row with a reason is refused");
+        check(!ui_nav::options_refused(nullptr), "item D10: a null reason is an enabled row");
     }
 
     // ---- storage screen (item 22): drive focus + game list model ----

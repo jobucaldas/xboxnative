@@ -209,6 +209,7 @@ struct TileVM {
     const char* name = "";
     uint32_t art_top = 0xFF1B2A4A, art_mid = 0xFF3E6FA8, art_bot = 0xFF0B1220;
     bool installed = false;
+    bool favorite = false;   // item D10: a star badge in the tile's top-right corner
     bool no_cover = false;   // item 12: grey gradient tile, not the motif
     ui::Image art{};   // real cover art (main.cpp); empty falls back to the grey gradient
     float name_w = 0.0f;   // measured label width (font-dependent); 0 = fits, no marquee
@@ -231,6 +232,7 @@ struct LibraryVM {
     bool filters_open = false;
     int filters_focus = 0;
     bool filter_playable = false;   // the Playable row's real state (main.cpp sets it from m_filterPlayable)
+    bool filter_favorites = false;  // item D10: the Favorites row's state
     bool search_open = false;    // on-screen keyboard overlay is up
     int search_key = 0;          // keyboard cursor (ui_nav::search_key ids)
     const char* query = "";      // live query text; filters the caller's tiles
@@ -270,6 +272,7 @@ struct GameVM {
     const char* last_played = "Never";
     const char* install_status = "Not installed";
     bool install_ok = false;             // status value draws in accentSoft when the game is in
+    bool favorite = false;               // item D10: a star beside the page title
     // Item D9: ONE size row. Installed: the size on disk. Not installed: the
     // store's download figure, or "Calculating..." while it loads, or "Unknown"
     // when the store lists none. ("Size on disk" was a duplicate of the
@@ -639,8 +642,10 @@ constexpr const char* kLibraryHints[6] = {"A", "Select", "B", "Back", "M", "Mana
 // Item D7: while a query is filtering the grid, the bar also offers the clear
 // (X on the sidebar's Search row) — the filtered state is never a dead end.
 constexpr const char* kLibrarySearchHints[8] = {"A", "Select", "B", "Back", "X", "Clear search", "M", "Manage"};
-// sort options (item 1); mode indexes match ui_nav::cycle_sort's caller
-constexpr const char* kSortOptions[3] = {"Alphabetical", "Most played", "Recently played"};
+// sort options (item 1; item D10 adds Favorites); mode indexes match
+// ui_nav::cycle_sort's caller
+constexpr const char* kSortOptions[4] = {"Alphabetical", "Most played", "Recently played", "Favorites"};
+constexpr int kSortOptionCount = ui_nav::kSortOptionCount;   // one source of truth with main.cpp
 
 // item 11 + 23: marquee offset for a focused tile's label. Static when the
 // text fits box_w. Otherwise, in READING order only (item 23): hold at the
@@ -758,6 +763,14 @@ inline void draw_tile(ui::Canvas& c, const Font& f, const TileVM& t, const ui::R
         c.fill_round_rect(rect(g.x + 12, g.y + 12, 94, 26), radiusBadge, ui::theme::accent);
         text_c(c, f, Face::Bold, 15, g.x + 59, g.y + 16, "INSTALLED", ui::theme::onAccent);
     }
+    // item D10: the favorite marker sits top-RIGHT (the INSTALLED badge owns
+    // the left corner), so both can show at once on a 232-wide tile.
+    if (t.favorite) {
+        const float d = 34.0f;
+        const float fx = g.x + g.w - 12.0f - d, fy = g.y + 12.0f;
+        c.fill_round_rect(rect(fx, fy, d, d), d * 0.5f, ui::theme::argb(180, 0, 0, 0));
+        ui::glyphs::star(c, rect(fx + 8.0f, fy + 8.0f, d - 16.0f, d - 16.0f), ui::theme::accentSoft);
+    }
     c.set_clip(outer);  // restore the caller's clip (the tile clip above was narrower)
     if (focus)
         focus_ring(c, rect(g.x - ringOffset, g.y - ringOffset, g.w + ringOffset * 2, g.h + ringOffset * 2),
@@ -802,7 +815,7 @@ inline void draw_sort_popup(ui::Canvas& c, const Font& f, const LibraryVM& lib) 
     using namespace ui::theme;
     if (!lib.sort_open) return;
     const float x = 524.0f, y = 236.0f, w = 430.0f, row_h = 64.0f;
-    const int n = 3;
+    const int n = kSortOptionCount;
     c.fill_round_rect(rect(x, y, w, row_h * n + 16), radiusCard, panel);
     for (int i = 0; i < n; ++i) {
         const float ry = y + 8.0f + row_h * i;
@@ -995,8 +1008,9 @@ inline void draw_library(ui::Canvas& c, const Font& f, const SidebarVM& sb, cons
     // itself never paints it.
     draw_sort_popup(c, f, lib);
     if (lib.filters_open) {
-        FilterRowVM installed_only[1] = {{"Playable", lib.filter_playable}};   // the real filter: label + live state
-        draw_filters_panel(c, f, installed_only, 1, lib.filters_focus);
+        // item D10: the Favorites row joins Playable; both filter the grid
+        FilterRowVM installed_only[2] = {{"Playable", lib.filter_playable}, {"Favorites", lib.filter_favorites}};
+        draw_filters_panel(c, f, installed_only, 2, lib.filters_focus);
     }
     draw_search_overlay(c, f, lib);
 }
@@ -1237,6 +1251,11 @@ inline void draw_game(ui::Canvas& c, const Font& f, const GameVM& g, bool draw_h
     // item D4: a long title ellipsizes (with U+2026) instead of running off the page
     const std::string hero_title = f.ellipsize(Face::Semibold, 56, g.title, 1500.0f);
     text(c, f, Face::Semibold, 56, 64, 230, hero_title.c_str(), ui::theme::text, -0.4f);
+    // item D10: a favorite game says so beside its title
+    if (g.favorite) {
+        const float tw = f.measure(Face::Semibold, 56, hero_title);
+        ui::glyphs::star(c, rect(64.0f + tw + 20.0f, 196.0f, 36.0f, 36.0f), ui::theme::accentSoft);
+    }
     text(c, f, Face::Regular, 24, 64, 306, g.subtitle, ui::theme::textDim);
 
     draw_primary_button(c, f, g);
