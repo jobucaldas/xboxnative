@@ -71,9 +71,10 @@ lld-link-19 /nodefaultlib /entry:d3d10_entry /include:d3d10_relocation /subsyste
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d9.cpp -o "$out/obj/d3d9.obj"
 lld-link-19 /nodefaultlib /entry:d3d9_entry /include:d3d9_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d9.exe" "$out/obj/d3d9.obj" /usr/x86_64-w64-mingw32/lib/libd3d9.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 # EXEs that draw with D3D9 through the shim: one fixed-function triangle, one
-# with a game's own vs_1_1/ps_1_1, a texture and a vertex declaration. Both read
-# their pixels back and exit 42 only when the draw landed where it should.
-for fixture in triangle textured;do
+# with a game's own vs_1_1/ps_1_1, a texture and a vertex declaration, and the
+# variants fixture (the same triangle run several ways). All read their pixels
+# back and exit 42 only when the draw landed where it should.
+for fixture in triangle textured triangle-variants;do
   clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c "tests/play-d3d9-$fixture.cpp" -o "$out/obj/d3d9-$fixture.obj"
   lld-link-19 /nodefaultlib /entry:d3d9_${fixture}_entry /include:d3d9_${fixture}_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d9-$fixture.exe" "$out/obj/d3d9-$fixture.obj" /usr/x86_64-w64-mingw32/lib/libd3d9.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 done

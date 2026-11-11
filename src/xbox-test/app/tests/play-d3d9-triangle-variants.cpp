@@ -46,6 +46,12 @@ static HWND guestWindow() {
 
 // D3DFVF_XYZRHW|D3DFVF_DIFFUSE: four floats then a D3DCOLOR.
 struct Vertex { float x,y,z,w; DWORD colour; };
+// The textured variant's vertex: position + diffuse + one texcoord pair. The
+// stride named by the vertex declaration, SetStreamSource and the allocation
+// must all be this size - a mismatch reads past the vertex buffer.
+struct TexturedVertex { float x,y,z; DWORD colour; float u,v; };
+static_assert(sizeof(Vertex)==20 && sizeof(TexturedVertex)==24,
+    "vertex sizes are part of the FVF/declaration contracts below");
 
 // One variant's draw: the triangle over the left of the target, the stage
 // state the variant names, then the readback check. Returns 0 when the inside
@@ -152,11 +158,12 @@ static unsigned texturedVariant(IDirect3DDevice9Ex* device,IDirect3DSurface9* ta
         pixelShader->Release();vertexShader->Release();return 3;
     }
     IDirect3DVertexBuffer9* buffer=nullptr;
-    if(FAILED(device->CreateVertexBuffer(3*sizeof(Vertex),D3DUSAGE_WRITEONLY,0,D3DPOOL_MANAGED,
+    // Three TexturedVertex records (24 bytes each): the stride the declaration,
+    // the stream source and the allocation all name must be this one.
+    if(FAILED(device->CreateVertexBuffer(3*sizeof(TexturedVertex),D3DUSAGE_WRITEONLY,0,D3DPOOL_MANAGED,
         &buffer,nullptr))||!buffer){
         layout->Release();pixelShader->Release();vertexShader->Release();return 4;
     }
-    struct TexturedVertex { float x,y,z; DWORD colour; float u,v; };
     TexturedVertex* vertices=nullptr;
     if(FAILED(buffer->Lock(0,0,reinterpret_cast<void**>(&vertices),0))||!vertices){
         buffer->Release();layout->Release();pixelShader->Release();vertexShader->Release();return 5;
