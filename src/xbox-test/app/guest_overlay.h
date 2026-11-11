@@ -166,10 +166,15 @@ inline bool supported_format(DXGI_FORMAT f) {
            f==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB||f==DXGI_FORMAT_B8G8R8X8_UNORM;
 }
 inline void probe(IDXGISwapChain* chain) {
-    if(probed.exchange(true))return;
+    // Only a conclusive answer latches: the first Present can arrive before
+    // the chain answers GetDevice/GetBuffer (the console's CoreWindow chain
+    // did), and latching that failure left the guide menu permanently
+    // unavailable while the FPS counter — the same draw path, later Presents —
+    // worked. Retry until the chain gives a device and a back buffer.
+    if(probed.load())return;
     winrt::com_ptr<ID3D11Device> dev;winrt::com_ptr<ID3D11Texture2D> bb;
     if(FAILED(chain->GetDevice(__uuidof(ID3D11Device),dev.put_void()))||FAILED(chain->GetBuffer(0,__uuidof(ID3D11Texture2D),bb.put_void())))return;
-    D3D11_TEXTURE2D_DESC d{};bb->GetDesc(&d);drawable=supported_format(d.Format);
+    D3D11_TEXTURE2D_DESC d{};bb->GetDesc(&d);drawable=supported_format(d.Format);probed=true;
 }
 // Dims the WHOLE game frame behind the guide card by 55% black, CPU-side:
 // CopySubresourceRegion the full back buffer into a staging texture, Map(READ),
