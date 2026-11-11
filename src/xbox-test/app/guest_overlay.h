@@ -173,8 +173,15 @@ inline void probe(IDXGISwapChain* chain) {
     // worked. Retry until the chain gives a device and a back buffer.
     if(probed.load())return;
     winrt::com_ptr<ID3D11Device> dev;winrt::com_ptr<ID3D11Texture2D> bb;
-    if(FAILED(chain->GetDevice(__uuidof(ID3D11Device),dev.put_void()))||FAILED(chain->GetBuffer(0,__uuidof(ID3D11Texture2D),bb.put_void())))return;
+    HRESULT hd=chain->GetDevice(__uuidof(ID3D11Device),dev.put_void());
+    HRESULT hb=hd==S_OK?chain->GetBuffer(0,__uuidof(ID3D11Texture2D),bb.put_void()):E_FAIL;
+    if(FAILED(hd)||FAILED(hb)){
+        static std::atomic<unsigned> tries{0};
+        if(tries.fetch_add(1)==0&&d3d11_diag::sink){char b[128];snprintf(b,sizeof b,"overlay: probe GetDevice hr=0x%08lx GetBuffer hr=0x%08lx",(unsigned long)hd,(unsigned long)hb);d3d11_diag::sink(b);}
+        return;
+    }
     D3D11_TEXTURE2D_DESC d{};bb->GetDesc(&d);drawable=supported_format(d.Format);probed=true;
+    if(d3d11_diag::sink){char b[128];snprintf(b,sizeof b,"overlay: probe back buffer %ux%u format=%u drawable=%d",d.Width,d.Height,(unsigned)d.Format,drawable.load()?1:0);d3d11_diag::sink(b);}
 }
 // Dims the WHOLE game frame behind the guide card by 55% black, CPU-side:
 // CopySubresourceRegion the full back buffer into a staging texture, Map(READ),
