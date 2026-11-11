@@ -1681,6 +1681,55 @@ inline void draw_accounts_sheet(ui::Canvas& c, const Font& f, const AccountVM& v
     }
 }
 
+// Item D18: the launch-option picker, in the same sheet language as the
+// account list and the confirm sheets (scrim, panel, 64px rows, focus ring on
+// the selected row, one hint bar) — it was still the old bitmap popup.
+struct PickerVM {
+    const char* title = "How should this game start?";
+    const char* subtitle = "";                       // "<game> offers more than one run option"
+    const char* const* labels = nullptr;             // n run options
+    const char* const* notes = nullptr;              // per row: "64-bit", the 32-bit note, or ""
+    const char* selectable = nullptr;                // per row: non-zero = runnable (null = all)
+    int n = 0;
+    int sel = 0;
+    const char* note = "";                           // why the last A did not start ("" = none)
+};
+
+inline void draw_picker_sheet(ui::Canvas& c, const Font& f, const PickerVM& v) {
+    using namespace ui::theme;
+    draw_scrim(c);
+    const float x = 560.0f, w = 800.0f, pad = 32.0f;
+    const float row_h = 64.0f, gap = 12.0f;
+    const float title_top = 40.0f, sub_top = 84.0f;
+    const float first = sub_top + 30.0f + 24.0f;
+    const int n = v.n < 0 ? 0 : v.n;
+    const float note_h = v.note && *v.note ? 44.0f : 0.0f;
+    const float h = first + float(n) * (row_h + gap) - gap + note_h + pad;
+    const float top = (1080.0f - h) * 0.5f;
+    c.fill_round_rect(rect(x, top, w, h), radiusGuide, panel);
+    text(c, f, Face::Semibold, 32, x + pad, top + title_top, v.title, ui::theme::text);
+    if (v.subtitle && *v.subtitle)
+        text(c, f, Face::Regular, 22, x + pad, top + sub_top, v.subtitle, ui::theme::text2);
+    for (int i = 0; i < n; ++i) {
+        const float ry = top + first + float(i) * (row_h + gap);
+        const Rect btn = rect(x + pad, ry, w - pad * 2, row_h);
+        const bool on = i == v.sel;
+        const bool ok = !v.selectable || v.selectable[i];
+        c.fill_round_rect(btn, radiusCard, on ? chip : ui::theme::controlDark);
+        text(c, f, Face::Regular, 26, btn.x + 24, btn.y + 17.5f, v.labels ? v.labels[i] : "", ok ? ui::theme::text : ui::theme::textMuted);
+        if (v.notes && v.notes[i] && *v.notes[i])
+            text_r(c, f, Face::Regular, 20, btn.x + btn.w - 24, btn.y + 22.0f, v.notes[i],
+                   ok ? ui::theme::textMuted : ui::theme::textMuted);
+        if (on)
+            focus_ring(c, rect(btn.x - ringOffset, btn.y - ringOffset, btn.w + ringOffset * 2, btn.h + ringOffset * 2),
+                       radiusCard + ringRadiusDelta, ringWidth);
+    }
+    if (note_h > 0.0f)
+        text(c, f, Face::Regular, 22, x + pad, top + first + float(n) * (row_h + gap) - gap + 14.0f, v.note, ui::theme::danger);
+    const char* pairs[4] = {"A", "Start", "B", "Cancel"};
+    draw_hint_bar(c, f, pairs, 2, 524.0f);
+}
+
 // item 7: the cloud value shortened to the card's 256px value column
 // ("Cloud: synced 2026-11-10 10:15" -> "Synced 10 Nov"). Writes into `buf`
 // (>= 32 bytes); pass the result as GameVM::cloud_saves before drawing.

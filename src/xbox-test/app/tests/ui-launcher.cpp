@@ -1716,6 +1716,51 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- item D18: the launch-option picker uses the sheet language ----
+    {
+        const char* labels[2] = {"Play (DirectX 11)", "Play (32-bit)"};
+        const char* notes[2] = {"64-bit", "32-bit (runs in the x86 interpreter)"};
+        const char sel[2] = {1, 1};
+        PickerVM v; v.subtitle = "Halo Wars offers more than one run option";
+        v.labels = labels; v.notes = notes; v.selectable = sel; v.n = 2; v.sel = 0;
+        c.fill(ui::theme::page);
+        draw_picker_sheet(c, font, v);
+        // panel geometry matches the account sheet: x 560, w 800, rows 64 + 12
+        const float x = 560.0f, pad = 32.0f, row_h = 64.0f, gap = 12.0f;
+        const float first = 84.0f + 30.0f + 24.0f;
+        const float h = first + 2.0f * (row_h + gap) - gap + pad;
+        const float top = (1080.0f - h) * 0.5f;
+        check(px[size_t(int(top + 10)) * W + int(x + 10)] == ui::theme::panel, "D18: the picker draws a panel");
+        const auto ink_in = [&](float x0, float y0, float ww, float hh, uint32_t col) {
+            int n = 0;
+            for (int yy = int(y0); yy < int(y0 + hh); ++yy)
+                for (int xx = int(x0); int(xx) < int(x0 + ww); ++xx)
+                    if (px[size_t(yy) * W + xx] == col) ++n;
+            return n;
+        };
+        for (int i = 0; i < 2; ++i) {
+            const float ry = top + first + float(i) * (row_h + gap);
+            const std::string tag = std::string("D18: picker row ") + std::to_string(i + 1) + " draws its label";
+            check(ink_in(x + pad + 24, ry + 10, 400, row_h - 20, ui::theme::text) > 0, tag.c_str());
+        }
+        // the ring is around the SELECTED row only
+        const auto ring_at = [&](int i) {
+            const float ry = top + first + float(i) * (row_h + gap);
+            for (int yy = int(ry - 12); yy < int(ry + row_h + 12); ++yy)
+                for (int xx = int(x + pad - 12); xx < int(x + pad - 3); ++xx)
+                    if (px[size_t(yy) * W + xx] == ui::theme::focus) return true;
+            return false;
+        };
+        check(ring_at(0) && !ring_at(1), "D18: the picker ring is on the selected row");
+        // a refusal note draws in danger red under the rows
+        PickerVM bad = v; bad.note = "This option cannot be started.";
+        c.fill(ui::theme::page);
+        draw_picker_sheet(c, font, bad);
+        check(ink_in(x + pad, top + first + 2.0f * (row_h + gap) - gap, 900, 40, ui::theme::danger) > 0,
+              "D18: a refused option explains itself in the sheet");
+        snap("launcher-d18-picker");
+    }
+
     // item 28: the Auto-update row — ring when focused, pill fully inside the
     // row with >=24px right padding (pixel-scan at 1920x1080).
     {

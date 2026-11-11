@@ -1944,7 +1944,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         ui::Canvas c(g_fb.data(), W, H, W);
         ui_launcher::draw_game(c, g_font, g, !(m_confirmDelete || m_cloudOpen || m_optOpen));   // item 17: a sheet brings its own hint bar
         ui_launcher::draw_game_note(c, g_font, g, vNote.c_str());
-        if (m_pick.open) draw_picker();
+        if (m_pick.open) draw_picker(c);
         if (m_optOpen) draw_options(c);   // item D10: the game options popup
         if (m_confirmDelete) {
             ui_launcher::DeleteVM d;
@@ -1974,30 +1974,27 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     }
     // The launch-option picker (launch_picker.h): the game's own run options,
     // 64-bit first, each row saying which engine runs it (64-bit natively,
-    // 32-bit in the x86 interpreter).
-    void draw_picker() {
-        const uint32_t TXT = C3(255, 255, 255), DIM = C3(170, 180, 195), YEL = C3(255, 210, 63), GRN = C3(120, 255, 140), RED = C3(255, 110, 110);
-        const int x = 360, w = 1200, rowH = 74;
-        int rows = (int)m_pick.rows.size();
-        int h = 172 + rows * rowH + (m_pick.note.empty() ? 0 : 44);
-        int y = std::max(40, (1080 - h) / 2);
-        fill(x, y, w, h, C3(10, 12, 16)); frame(x, y, w, h, 6, YEL);
-        text8(x + 40, y + 30, "How should this game start?", 4, TXT);
-        text8(x + 40, y + 84, clip8(m_dName, 44) + " offers more than one run option. D-pad up/down to choose, A to run, B to cancel.", 2, DIM);
-        int ry = y + 132;
-        for (int i = 0; i < rows; i++) {
-            const launch_target::Choice& c = m_pick.rows[i];
-            bool sel = i == m_pick.sel;
-            fill(x + 30, ry, w - 60, rowH - 10, sel ? C3(45, 90, 200) : C3(27, 35, 48));
-            if (sel) frame(x + 30, ry, w - 60, rowH - 10, 3, YEL);
-            text8(x + 50, ry + 14, clip8(c.label, 60), 3, c.selectable ? TXT : DIM);
+    // 32-bit in the x86 interpreter). Item D18: drawn as the same sheet as the
+    // account list and the confirm sheets, not the old bitmap popup.
+    void draw_picker(ui::Canvas& c) {
+        static std::vector<const char*> labels, notes;
+        static std::vector<char> selectable;   // vector<bool> has no data()
+        static std::string subtitle;
+        labels.clear(); notes.clear(); selectable.clear();
+        for (const launch_target::Choice& c : m_pick.rows) {
+            labels.push_back(c.label.c_str());
             const char* note = launch_target::arch_note(c.arch);
-            if (note) text8(x + 50, ry + 42, note, 2, DIM);
-            else if (c.arch == launch_target::arch64) text8(x + 50, ry + 42, "64-bit", 2, GRN);
-            ry += rowH;
+            notes.push_back(note ? note : (c.arch == launch_target::arch64 ? "64-bit" : ""));
+            selectable.push_back(c.selectable ? 1 : 0);
         }
-        if (!m_pick.note.empty()) text8(x + 40, ry + 8, clip8(m_pick.note, 90), 2, RED);
-        text8(x + 40, y + h - 40, "A: run this option        B: cancel", 3, TXT);
+        subtitle = clip(m_dName, 40) + " offers more than one run option";
+        ui_launcher::PickerVM v;
+        v.subtitle = subtitle.c_str();
+        v.labels = labels.data(); v.notes = notes.data(); v.selectable = selectable.data();
+        v.n = (int)labels.size();
+        v.sel = m_pick.sel;
+        v.note = m_pick.note.c_str();
+        ui_launcher::draw_picker_sheet(c, g_font, v);
     }
     // One-shot synthetic command file LocalState\cmd.txt (consumed on read). Lines: open <appid> | press (=A) | back (=B) | view | up | down | left | right | lb | rb | l3 | x | y | sort | filters | search | type <text> | profile | sleep <s>.
     // Semantics follow the new screens: B does nothing on the library root (item 14 — logout is
