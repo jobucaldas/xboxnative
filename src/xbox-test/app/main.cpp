@@ -349,7 +349,9 @@ static void load_fonts() {
 #include "storage_report.h"
 
 // ---------------------------------------------------------------- library model + covers
-struct Game { uint32_t appid = 0; std::string name; uint32_t playtime = 0; uint64_t lastPlayed = 0; std::atomic<int> cover{0}; int iw = 0, ih = 0; std::vector<uint32_t> pix; };
+struct Game { uint32_t appid = 0; std::string name; uint32_t playtime = 0; uint64_t lastPlayed = 0; std::atomic<int> cover{0}; int iw = 0, ih = 0; std::vector<uint32_t> pix;
+              float nameW = 0;   // measured tile-label width (item 11 marquee); 0 = not measured yet (remeasured once the font loads)
+};
 static const int COVER_W = 260, COVER_H = 390;
 static std::mutex g_gm;
 static std::vector<std::shared_ptr<Game>> g_games;
@@ -399,6 +401,37 @@ static void cover_worker() {
     }
 }
 static void start_covers() { static bool started = false; if (started) return; started = true; for (int i = 0; i < 4; i++) std::thread(cover_worker).detach(); }
+
+// ---------------------------------------------------------------- detail-page hero banner (item 13)
+// Steam's wide library_hero.jpg for the game page background, fetched
+// asynchronously when the detail page opens (header.jpg fallback). One
+// decoded copy per appid, kept while the page shows it, freed on close.
+struct Hero { std::shared_ptr<std::vector<uint32_t>> pix; int w = 0, h = 0; int state = 0; };   // state: 0 none, 1 loading, 2 ready, 3 failed
+static std::mutex g_heroM;
+static std::map<uint32_t, Hero> g_heroes;   // guarded by g_heroM
+static void hero_fetch(uint32_t appid) {
+    init_apartment(apartment_type::multi_threaded);
+    const char* kinds[] = {"library_hero.jpg", "header.jpg"};
+    for (int k = 0; k < 2; k++) {
+        std::string url = "https://cdn.fastly.steamstatic.com/steam/apps/" + std::to_string(appid) + "/" + kinds[k];
+        Resp r = http(false, url, "", "hero");
+        if (r.status != 200 || r.body.size() < 100) continue;
+        std::vector<uint32_t> pix; int w = 0, h = 0, hr = 0;
+        if (!wic_decode_buf(r.body, pix, w, h, 1920, 620, hr)) { logf("hero appid=%u %s WIC decode failed hr=0x%08x", appid, kinds[k], (unsigned)hr); continue; }
+        auto held = std::make_shared<std::vector<uint32_t>>(std::move(pix));
+        { std::lock_guard<std::mutex> l(g_heroM); Hero& h2 = g_heroes[appid]; h2.pix = held; h2.w = w; h2.h = h; h2.state = 2; }
+        return;
+    }
+    logf("hero: appid=%u no hero image (fallback failed too)", appid);
+    { std::lock_guard<std::mutex> l(g_heroM); g_heroes[appid].state = 3; }
+}
+static Hero hero_get(uint32_t appid) {   // every frame from the draw: starts the fetch once, never blocks
+    std::lock_guard<std::mutex> l(g_heroM);
+    Hero& h = g_heroes[appid];
+    if (h.state == 0) { h.state = 1; std::thread(hero_fetch, appid).detach(); }
+    return h;   // shared_ptr copy, no pixel copy
+}
+static void hero_release(uint32_t appid) { std::lock_guard<std::mutex> l(g_heroM); g_heroes.erase(appid); }
 #include "store.h"
 
 static std::atomic<int> g_sortMode{0};
@@ -833,9 +866,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     com_ptr<ID3D11Device> m_dev; com_ptr<ID3D11DeviceContext> m_ctx; com_ptr<IDXGISwapChain1> m_sc; com_ptr<ID3D11Texture2D> m_bb;
     Pad m_pad; int m_prevPads = -1; uint64_t m_frame = 0;
     int m_sel = 0, m_top = 0; double m_scroll = 0, m_scrollT = 0; bool m_btnFocus = true, m_confirmLogout = false;
+    // library header selectors (item 1): sort dropdown, filters panel, search
+    // overlay; m_hdrFocus follows ui_nav::kHeaderControlCount (0 sort, 1
+    // filters, 2 search, -1 grid/sidebar).
+    int m_hdrFocus = -1; bool m_sortOpen = false; int m_sortFocus = 0;
+    bool m_filtersOpen = false; int m_filtersFocus = 0;
+    bool m_searchOpen = false; int m_searchKey = 0; std::string m_query;
     bool m_onlyInstalled = false;                            // View: library shows installed games only
     ui_nav::Focus m_focus = ui_nav::Focus::grid;             // library: grid tiles or the sidebar
     int m_sidebar = 0;                                       // sidebar row the focus sits on
+    int m_qSel = 0;                                          // queue screen: focused row (0 = the active download, 1.. queued)
+    int m_stSel = 0;                                         // storage screen: focused install root
     bool m_autoUpdate = true;                                // queue screen pill (no update backend yet; memory only)
     std::set<uint32_t> m_installed; double m_installedT = -10; int m_installedDel = -1, m_installedDl = -1;
     void refresh_installed(double t) {                       // dl_<appid>.done markers; rescanned every 2 s and after a download/delete
@@ -939,9 +980,27 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         m_optApp = 0;   // a fresh page: the run-option count is read again (a download may have cached appinfo)
         auto si = std::make_shared<StoreInfo>(); si->appid = id; m_dSi = si; std::thread(store_worker, si).detach();
         { InstallInfo ii = read_install(id); if (ii.installed && !g_demo) cloud_async(id, ii.folder, false); }   // status line: what the cloud holds
-        m_confirmLogout = false; g_screen = S_DETAIL; logf("detail: open appid=%u name='%s' via=%s", id, m_dName.c_str(), via);
+        m_confirmLogout = false; m_cloudOpen = false; m_cloudFocus = 0; m_dFocus = 0;
+        m_sortOpen = false; m_sortFocus = 0; m_hdrFocus = -1; m_filtersOpen = false; m_filtersFocus = 0; m_searchOpen = false;
+        g_screen = S_DETAIL; logf("detail: open appid=%u name='%s' via=%s", id, m_dName.c_str(), via);
     }
-    void close_detail(const char* why) { logf("detail: back to library (%s)", why); m_dSi.reset(); g_screen = S_LIBRARY; }
+    void close_detail(const char* why) {
+        // nothing of this page leaks into the next one (CONSOLE-ISSUES 3)
+        logf("detail: back to library (%s)", why); m_dSi.reset(); m_confirmDelete = false; m_cloudOpen = false; m_cloudFocus = 0; m_dFocus = 0; g_screen = S_LIBRARY;
+    }
+    // A on a sidebar entry, shared by the library, queue and storage screens
+    // (the sidebar stays live on every screen that draws it): 0/1 switch the
+    // library view, 2 opens the download queue, 3 storage management.
+    void sidebar_activate(double t, const char* source) {
+        int target = ui_nav::sidebar_target(m_sidebar);
+        if (target == 0 || target == 1) {
+            bool want = target == 1;
+            if (m_onlyInstalled != want) { m_onlyInstalled = want; m_installedT = -10; refresh_installed(t); grid_position(0, 0, "sidebar view"); }
+            g_screen = S_LIBRARY;
+            logf("sidebar: %s view (%zu installed)", m_onlyInstalled ? "installed" : "all games", m_installed.size());
+        } else if (target == 2) { m_qSel = 0; m_focus = ui_nav::Focus::sidebar; g_screen = S_QUEUE; logf("sidebar: download queue (%s)", source); }
+        else if (target == 3) { refresh_roots("storage screen"); m_stSel = m_rootSel < m_roots.size() ? (int)m_rootSel : 0; m_focus = ui_nav::Focus::sidebar; g_screen = S_STORAGE; logf("sidebar: storage management (%s)", source); }
+    }
     int m_dInstDel = -1;   // g_del.gen seen by m_dInst: a finished delete refreshes it at once
     void refresh_install(double t) { if (t - m_dInstT > 0.5 || m_dInstDel != g_del.gen) { m_dInstDel = g_del.gen; m_dInst = read_install(m_dApp); m_dInstT = t; } }
     bool dl_is_mine() { return g_dl.appid == m_dApp && g_dl.state == 1; }
@@ -1273,7 +1332,15 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         g.last_updated = vUpdated.c_str(); g.cloud_saves = vCloud.c_str();
         g.about = vAbout.c_str(); g.players = vPlayers.c_str(); g.language = vLang.c_str();
         g.primary = pv; g.primary_focus = m_dFocus == 0; g.install_pct = float(pct);
-        if (si && si->img == 1 && !si->hdr.pix.empty()) { g.has_art = true; g.art = ui::Image{si->hdr.pix.data(), si->hdr.iw, si->hdr.ih, si->hdr.iw}; }
+        // item 13: the tall box on the right is the TALL library capsule (the
+        // same portrait art the tile uses), not the cropped header.
+        if (gm && gm->cover == 1 && !gm->pix.empty()) { g.has_art = true; g.no_cover = false; g.art = ui::Image{gm->pix.data(), gm->iw, gm->ih, gm->iw}; }
+        else { g.has_art = false; g.no_cover = true; }   // item 12: grey gradient while the cover loads or is missing
+        // item 13: the wide background is Steam's library_hero.jpg (header.jpg
+        // fallback), fetched asynchronously on page open, cached per page.
+        Hero hm = hero_get(m_dApp);
+        if (hm.state == 2 && hm.pix && !hm.pix->empty()) { g.has_hero = true; g.hero = ui::Image{hm.pix->data(), hm.w, hm.h, hm.w}; }
+        else { g.has_hero = false; }
         if (m_focusAch) {   // latest achievement row when the schema is around (steam_achievements.h cache)
             g.achievement = m_achName.c_str(); g.achievement_sub = m_achSub.c_str();
             g.progress_pct = m_achPct;
@@ -1288,6 +1355,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         else if (deleting) { char b[64]; snprintf(b, sizeof b, "%llu files removed", (unsigned long long)g_del.progress.removed.load()); vNote = b; }
         else if (mine && (dl == 3 || dl == 4) && !m_dInst.installed) { std::string ms; { std::lock_guard<std::mutex> l(g_dl.m); ms = g_dl.msg; } vNote = (dl == 4 ? "Cancelled: " : "Failed: ") + ms; }
         g.focus = m_dFocus;
+        // item 7: the Cloud saves row takes the shortened value ("Synced 10 Nov")
+        static char cloudShort[64];
+        ui_launcher::cloud_saves_short(cloudShort, sizeof cloudShort, vCloud.c_str());
+        g.cloud_saves = cloudShort;
 
         ui::Canvas c(g_fb.data(), W, H, W);
         ui_launcher::draw_game(c, g_font, g);
@@ -1572,7 +1643,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     }
 
     void draw_login() {
-        m_btnFocus = true; m_confirmLogout = false; // Refresh is the sole action
+        m_btnFocus = true; m_confirmLogout = false; m_sortOpen = false; m_sortFocus = 0; m_hdrFocus = -1; m_filtersOpen = false; m_searchOpen = false; // item 4: reset every sheet state on screen changes
         build_qr_runs();
         static std::string status_buf; static char timer[64];
         {   // fill the view-model from the shared login state
@@ -1644,6 +1715,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
               tv.name = g.name.c_str();
               tv.installed = m_installed.count(g.appid) != 0;
               if (g.cover == 1 && !g.pix.empty()) { arts.push_back(ui::Image{g.pix.data(), g.iw, g.ih, g.iw}); tv.art = arts.back(); }
+              // item 12: cover state 2 (failed) or 0 (not loaded) -> grey gradient tile
+              tv.no_cover = g.cover != 1;
+              // item 11: measure the label once per game with the Selawik font
+              // and cache it in the Game struct; a game measured before the
+              // font loaded (nameW 0 while g_fontOk was false) remeasures.
+              if (g_fontOk && g.nameW <= 0) g.nameW = g_font.measure(ui::Face::Regular, 20, g.name);
+              tv.name_w = g.nameW;
               tiles.push_back(tv);
           }
         }
@@ -1651,6 +1729,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         ui_launcher::LibraryVM lib;
         lib.tiles = tiles.data(); lib.tile_count = (int)tiles.size();
         lib.sel = m_sel; lib.top_row = m_top; lib.focus_tile = m_focus == ui_nav::Focus::grid;
+        lib.header_focus = m_hdrFocus;
+        lib.sort_open = m_sortOpen; lib.sort_focus = m_sortFocus;
+        lib.filters_open = m_filtersOpen; lib.filters_focus = m_filtersFocus;
+        lib.search_open = m_searchOpen; lib.search_key = m_searchKey;
+        static std::string query_buf; query_buf = m_query;
+        lib.query = query_buf.c_str();
+        lib.t = float(t);   // item 11: marquee clock for the focused tile
         static std::string sort_label; sort_label = std::string("Sort by ") + SORT_NAMES[g_sortMode.load(std::memory_order_relaxed)];
         lib.sort_label = sort_label.c_str();
         static char count[128];
@@ -1668,14 +1753,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             ui_launcher::text(c, g_font, ui::Face::Regular, 24, 524, 216, err.c_str(), ui::theme::danger);
         }
         if (m_confirmLogout) {
-            // restyled logout confirm over the dimmed library (delete-sheet layout)
-            ui_launcher::draw_scrim(c);
-            c.fill_round_rect(ui::rect(560, 368, 800, 344), ui::theme::radiusCard, ui::theme::panel);
-            ui_launcher::text(c, g_font, ui::Face::Semibold, 36, 608, 416, "Log out of Steam?", ui::theme::text);
-            ui_launcher::text(c, g_font, ui::Face::Regular, 24, 608, 475, "This deletes the saved login on this console only.", ui::theme::textDim);
-            ui_launcher::text(c, g_font, ui::Face::Regular, 22, 608, 516, "You can sign in again with the QR code.", ui::theme::textMuted);
-            const char* pairs[4] = {"A", "Yes, log out", "B", "Cancel"};
-            ui_launcher::draw_hint_bar(c, g_font, pairs, 2);
+            // item 8: the SAME confirmation sheet component as Delete — title,
+            // body, two real buttons with focus — over the dimmed library.
+            ui_launcher::LogoutVM lo;
+            lo.focus_yes = true;   // A confirms (focus on Log out), B cancels
+            ui_launcher::draw_logout_sheet(c, g_font, lo);
         }
     }
 
@@ -1721,7 +1803,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         q.auto_update = m_autoUpdate;
         q.rows = rows.data(); q.row_count = (int)rows.size();
         q.updates = nullptr; q.update_count = 0;
-        q.focus = -1;
+        q.focus = m_focus == ui_nav::Focus::grid ? m_qSel + 1 : -1;   // 0 is the auto-update pill; the rows start at 1
         ui_launcher::draw_download_queue(c, g_font, sb, q);
         if (rows.empty()) {   // honest empty state over the (empty) section
             ui_launcher::text(c, g_font, ui::Face::Regular, 24, 524, 340, "No downloads.", ui::theme::textDim);
@@ -1740,14 +1822,18 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         ui_launcher::text(c, g_font, ui::Face::Semibold, 44, 524, 73.5f, "Storage", ui::theme::text);
         std::vector<storage_roots::Choice> roots = m_roots.empty() ? std::vector<storage_roots::Choice>{storage_report::internal_root(g_dir)} : m_roots;
         float y = 200;
-        for (auto& r : roots) {
+        for (size_t i = 0; i < roots.size(); ++i) {
+            const storage_roots::Choice& r = roots[i];
+            bool sel = m_focus == ui_nav::Focus::grid && (int)i == m_stSel;   // the pad's row
             std::string line = storage_roots::label_capacity(r);
-            ui_launcher::text(c, g_font, ui::Face::Regular, 24, 524, y, line.c_str(), ui::theme::text2);
+            ui_launcher::text(c, g_font, ui::Face::Regular, 24, 548, y, line.c_str(), sel ? ui::theme::text : ui::theme::text2);
             if (r.space.ok && r.space.total) {
                 int pct = (int)(100 - 100.0 * r.space.freeTotal / (double)r.space.total);
                 std::string used = std::to_string(pct) + "% used of " + storage_roots::size_text(r.space.total);
-                ui_launcher::text(c, g_font, ui::Face::Regular, 20, 524, y + 34, used.c_str(), ui::theme::textDim);
+                ui_launcher::text(c, g_font, ui::Face::Regular, 20, 548, y + 34, used.c_str(), sel ? ui::theme::text2 : ui::theme::textDim);
             }
+            if ((int)i == (int)m_rootSel) fill(524, (int)y, 6, 56, ui::theme::accent);   // where new installs go
+            if (sel) ui_launcher::focus_ring(c, ui::rect(512, y - 10, 1332, 84), ui::theme::radiusControl + ui::theme::ringRadiusDelta, ui::theme::ringWidth);
             y += 96;
         }
         ui_launcher::text(c, g_font, ui::Face::Regular, 20, 524, y + 16,
@@ -1763,6 +1849,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             else { fill(0, 0, W, H, C3(14, 17, 22)); text8(80, 480, "Fonts failed to load - see boot.log", 4, C3(255, 120, 120)); }
             return;
         }
+        // The 1920x1080 g_fb persists across screens: every frame starts from
+        // a clean page so no screen draws over the previous one's remnants.
+        fill(0, 0, W, H, ui::theme::page);
         if (s == S_LOGIN) draw_login();
         else if (s == S_LIBRARY || s == S_LOADING) draw_library(t);
         else if (s == S_QUEUE) draw_queue();
@@ -1849,6 +1938,41 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 else if (has(edge, GamepadButtons::B)) { m_confirmLogout = false; logf("logout cancelled"); }
                 return;
             }
+            // item 1: the sort dropdown owns the pad while it is up (A confirms,
+            // B closes, up/down moves with wrap).
+            if (m_sortOpen) {
+                if (has(edge, GamepadButtons::DPadUp)) { ui_nav::sort_open_move(m_sortFocus, 3, false); logf("sort: up -> option %d (%s)", m_sortFocus, source); }
+                else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::sort_open_move(m_sortFocus, 3, true); logf("sort: down -> option %d (%s)", m_sortFocus, source); }
+                else if (has(edge, GamepadButtons::A)) {
+                    int selected = g_sortMode.load();
+                    if (ui_nav::sort_confirm(m_sortFocus, selected, m_sortOpen)) {
+                        g_sortMode = selected; { std::lock_guard<std::mutex> l(g_gm); sort_games(selected); } grid_position(0, 0, "sort confirm"); logf("sort mode -> %s", SORT_NAMES[selected]);
+                    }
+                }
+                else if (has(edge, GamepadButtons::B)) { ui_nav::sort_close(m_sortOpen); logf("sort popup closed (%s)", source); }
+                return;
+            }
+            // item 1: the filters panel owns the pad while it is up (A toggles
+            // the focused row, B closes, up/down moves with wrap).
+            if (m_filtersOpen) {
+                static bool installedOnly = false;   // the one real filter row
+                if (has(edge, GamepadButtons::DPadUp)) { ui_nav::filters_move(m_filtersFocus, 1, false); logf("filters: up -> row %d (%s)", m_filtersFocus, source); }
+                else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::filters_move(m_filtersFocus, 1, true); logf("filters: down -> row %d (%s)", m_filtersFocus, source); }
+                else if (has(edge, GamepadButtons::A)) { ui_nav::filters_toggle(&installedOnly, 1, m_filtersFocus); if (m_onlyInstalled != installedOnly) { m_onlyInstalled = installedOnly; m_installedT = -10; refresh_installed(t); grid_position(0, 0, "filters toggle"); logf("filters: installed only -> %s (%s)", m_onlyInstalled ? "on" : "off", source); } }
+                else if (has(edge, GamepadButtons::B)) { m_filtersOpen = false; logf("filters panel closed (%s)", source); }
+                return;
+            }
+            // item 1: the search overlay owns the pad while it is up (existing
+            // wiring: A types/activates, B closes; the query live-filters).
+            if (m_searchOpen) {
+                if (has(edge, GamepadButtons::DPadUp)) { ui_nav::search_move(m_searchKey, 0, -1); logf("search: key %d (%s)", m_searchKey, source); }
+                else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::search_move(m_searchKey, 0, 1); logf("search: key %d (%s)", m_searchKey, source); }
+                else if (has(edge, GamepadButtons::DPadLeft)) { ui_nav::search_move(m_searchKey, -1, 0); logf("search: key %d (%s)", m_searchKey, source); }
+                else if (has(edge, GamepadButtons::DPadRight)) { ui_nav::search_move(m_searchKey, 1, 0); logf("search: key %d (%s)", m_searchKey, source); }
+                else if (has(edge, GamepadButtons::A)) { if (ui_nav::search_activate(m_searchKey, m_query, m_searchOpen)) grid_position(0, 0, "search type"); logf("search: activate (%s)", source); }
+                else if (has(edge, GamepadButtons::B)) { m_searchOpen = false; logf("search overlay closed (%s)", source); }
+                return;
+            }
             // Sidebar focus: up/down moves the entry, A switches the view, right
             // returns to the grid. The View filter chip is gone; Installed is a
             // sidebar entry now. The drawer derives its focused row from
@@ -1858,15 +1982,25 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 if (has(edge, GamepadButtons::DPadUp)) { ui_nav::sidebar_move(m_sidebar, false); logf("sidebar: entry %d (%s)", m_sidebar, source); }
                 else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::sidebar_move(m_sidebar, true); logf("sidebar: entry %d (%s)", m_sidebar, source); }
                 else if (has(edge, GamepadButtons::DPadRight)) { ui_nav::lateral(m_focus, 0, false); logf("sidebar: back to the grid (%s)", source); }
-                else if (has(edge, GamepadButtons::A)) {
-                    int target = ui_nav::sidebar_target(m_sidebar);
-                    if (target == 0 || target == 1) {
-                        bool want = target == 1;
-                        if (m_onlyInstalled != want) { m_onlyInstalled = want; m_installedT = -10; refresh_installed(t); grid_position(0, 0, "sidebar view"); }
-                        logf("sidebar: %s view (%zu installed)", m_onlyInstalled ? "installed" : "all games", m_installed.size());
-                    } else if (target == 2) { g_screen = S_QUEUE; logf("sidebar: download queue (%s)", source); }
-                    else if (target == 3) { refresh_roots("storage screen"); g_screen = S_STORAGE; logf("sidebar: storage management (%s)", source); }
+                else if (has(edge, GamepadButtons::A)) sidebar_activate(t, source);
+                return;
+            }
+            // Header controls row (item 1): left/right walk Sort/Filters/Search,
+            // down returns to the grid, left from Sort to the sidebar. A opens
+            // the focused control; B on an open popup closes it.
+            if (m_hdrFocus >= 0) {
+                if (has(edge, GamepadButtons::DPadRight)) { m_hdrFocus = ui_nav::header_move(m_hdrFocus, true); logf("header: focus %d (%s)", m_hdrFocus, source); }
+                else if (has(edge, GamepadButtons::DPadLeft)) {
+                    if (m_hdrFocus == 0) { m_hdrFocus = -1; m_focus = ui_nav::Focus::sidebar; logf("header: focus -> sidebar (%s)", source); }
+                    else { m_hdrFocus = ui_nav::header_move(m_hdrFocus, false); logf("header: focus %d (%s)", m_hdrFocus, source); }
                 }
+                else if (has(edge, GamepadButtons::DPadDown)) { m_hdrFocus = -1; logf("header: focus -> grid (%s)", source); }
+                else if (has(edge, GamepadButtons::A)) {
+                    if (m_hdrFocus == 0) { m_sortOpen = true; m_sortFocus = g_sortMode.load(); logf("sort popup open (%s)", source); }
+                    else if (m_hdrFocus == 1) { m_filtersOpen = true; m_filtersFocus = 0; logf("filters panel open (%s)", source); }
+                    else if (m_hdrFocus == 2) { m_searchOpen = true; m_searchKey = 0; logf("search overlay open (%s)", source); }
+                }
+                else if (has(edge, GamepadButtons::B)) { m_hdrFocus = -1; logf("header: focus -> grid (%s)", source); }
                 return;
             }
             // Grid focus. The grid draws kGridCols columns (ui_launcher.h geometry);
@@ -1876,7 +2010,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             if (has(edge, GamepadButtons::DPadRight) && sel + 1 < (int)n) sel++;
             if (has(edge, GamepadButtons::DPadLeft)) { if (!ui_nav::lateral(m_focus, sel % COLS, true)) { if (sel > 0) sel--; } else { logf("grid: focus -> sidebar (%s)", source); } }
             if (has(edge, GamepadButtons::DPadDown) && (sel / COLS + 1) * COLS < (int)n) sel = std::min((int)n - 1, sel + COLS);
-            if (has(edge, GamepadButtons::DPadUp) && sel - COLS >= 0) sel -= COLS;
+            if (has(edge, GamepadButtons::DPadUp)) { if (sel - COLS >= 0) sel -= COLS; else { m_hdrFocus = 0; logf("grid: focus -> header Sort (%s)", source); } }
             if (has(edge, GamepadButtons::RightShoulder)) sel = std::min((int)n - 1, sel + 2 * COLS);
             if (has(edge, GamepadButtons::LeftShoulder)) sel = std::max(0, sel - 2 * COLS);
             if (n == 0) sel = 0;
@@ -1884,26 +2018,57 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             int top = m_top, r = sel / COLS; if (r < top) top = r; if (r > top + 1) top = r - 1;
             grid_position(sel, top, source);
             if (has(edge, GamepadButtons::A) && n) { uint32_t aid; std::string nm; { std::lock_guard<std::mutex> l(g_gm); aid = list[m_sel]->appid; nm = list[m_sel]->name; } open_detail(aid, nm, source); return; }
-            if (has(edge, GamepadButtons::X)) {   // sort cycles the existing modes (kLibraryHints "X Sort")
-                int m = ui_nav::cycle_sort(g_sortMode.load(), 3); g_sortMode = m; { std::lock_guard<std::mutex> l(g_gm); sort_games(m); } grid_position(0, 0, "sort cycle"); logf("sort mode -> %s", SORT_NAMES[m]);
-            }
-            if (has(edge, GamepadButtons::Y) && !g_demo) { g_reloadReq = true; grid_position(0, 0, "Y library reload"); }   // the old X reload moved to Y
+            // item 1: X/Y shortcuts removed. Menu opens the logout confirm sheet
+            // (refresh moved to the Menu button on the sidebar's own semantics).
+            if (has(edge, GamepadButtons::Menu)) { m_confirmLogout = true; logf("logout confirm open (%s)", source); return; }
             if (has(edge, GamepadButtons::B) && !g_demo && ui_nav::logout_request(m_confirmLogout, m_focus, m_sel, m_sidebar, true)) m_confirmLogout = true;   // B never stops a download
         }
         else if (s == S_QUEUE) {
-            // A on a busy row cancels it (running download or queued job); B back to the library.
+            // The shared sidebar stays live (up/down/A as on the library);
+            // right moves to the rows. In the rows: up/down move the focus, A
+            // cancels the focused row (the running download or a queued job),
+            // B back to the library. Pause has no backend and is not offered.
             std::deque<uint32_t> dq; { std::lock_guard<std::mutex> l(g_dqm); dq = g_dq; }
             uint32_t dlApp = g_dl.appid.load(); int dlState = g_dl.state.load();
-            bool hasRows = (dlState == 1 || (dlState != 0 && dlApp)) || !dq.empty();
-            if (has(edge, GamepadButtons::B)) { g_screen = S_LIBRARY; logf("queue: back to the library (%s)", source); return; }
-            if (has(edge, GamepadButtons::A) && hasRows) {
-                if (dlState == 1 || (dlState != 0 && dlApp)) { g_dl.cancel = true; logf("queue: download cancel requested appid=%u (%s)", dlApp, source); }
-                else if (!dq.empty()) { uint32_t id = dq.front(); cancel_queued(id); logf("queue: cancel asked appid=%u (%s)", id, source); }
+            bool activeRow = dlState == 1 || (dlState != 0 && dlApp);   // the same row draw_queue puts first
+            int nrows = (int)dq.size() + (activeRow ? 1 : 0);
+            if (m_focus == ui_nav::Focus::sidebar) {
+                if (has(edge, GamepadButtons::DPadUp)) { ui_nav::sidebar_move(m_sidebar, false); logf("sidebar: entry %d (%s)", m_sidebar, source); }
+                else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::sidebar_move(m_sidebar, true); logf("sidebar: entry %d (%s)", m_sidebar, source); }
+                else if (has(edge, GamepadButtons::DPadRight) && ui_nav::lateral(m_focus, 0, false)) { m_qSel = 0; }
+                else if (has(edge, GamepadButtons::A)) sidebar_activate(t, source);
+            } else {
+                if (m_qSel >= nrows) m_qSel = nrows ? nrows - 1 : 0;   // rows may have drained since the last frame
+                if (has(edge, GamepadButtons::B)) { g_screen = S_LIBRARY; logf("queue: back to the library (%s)", source); }
+                else if (has(edge, GamepadButtons::DPadLeft)) { ui_nav::lateral(m_focus, 0, true); logf("queue: focus -> sidebar (%s)", source); }
+                else if (has(edge, GamepadButtons::DPadDown) && nrows) { m_qSel = (m_qSel + 1) % nrows; logf("queue: row %d/%d (%s)", m_qSel, nrows, source); }
+                else if (has(edge, GamepadButtons::DPadUp) && nrows) { m_qSel = (m_qSel + nrows - 1) % nrows; logf("queue: row %d/%d (%s)", m_qSel, nrows, source); }
+                else if (has(edge, GamepadButtons::A) && nrows) {
+                    if (activeRow && m_qSel == 0) { g_dl.cancel = true; logf("queue: download cancel requested appid=%u (%s)", dlApp, source); }
+                    else if (activeRow || m_qSel < (int)dq.size()) { uint32_t id = dq[activeRow ? m_qSel - 1 : m_qSel]; cancel_queued(id); logf("queue: cancel asked appid=%u (%s)", id, source); }
+                }
+                else if (has(edge, GamepadButtons::Y)) { m_autoUpdate = !m_autoUpdate; logf("queue: auto-update -> %s (memory only, %s)", m_autoUpdate ? "on" : "off", source); }
             }
-            if (has(edge, GamepadButtons::Y)) { m_autoUpdate = !m_autoUpdate; logf("queue: auto-update -> %s (memory only, %s)", m_autoUpdate ? "on" : "off", source); }
         }
         else if (s == S_STORAGE) {
-            if (has(edge, GamepadButtons::B)) { g_screen = S_LIBRARY; logf("storage: back to the library (%s)", source); }
+            // The shared sidebar stays live (up/down/A); right moves to the
+            // root list. In the list: up/down move the focus, A makes the
+            // focused root the install location for new installs (the old
+            // X-cycle pick, now explicit), B back to the library.
+            if (m_focus == ui_nav::Focus::sidebar) {
+                if (has(edge, GamepadButtons::DPadUp)) { ui_nav::sidebar_move(m_sidebar, false); logf("sidebar: entry %d (%s)", m_sidebar, source); }
+                else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::sidebar_move(m_sidebar, true); logf("sidebar: entry %d (%s)", m_sidebar, source); }
+                else if (has(edge, GamepadButtons::DPadRight) && ui_nav::lateral(m_focus, 0, false)) { logf("storage: focus -> roots (%s)", source); }
+                else if (has(edge, GamepadButtons::A)) sidebar_activate(t, source);
+            } else {
+                int nroots = (int)m_roots.size();
+                if (m_stSel >= nroots) m_stSel = nroots ? nroots - 1 : 0;
+                if (has(edge, GamepadButtons::B)) { g_screen = S_LIBRARY; logf("storage: back to the library (%s)", source); }
+                else if (has(edge, GamepadButtons::DPadLeft)) { ui_nav::lateral(m_focus, 0, true); logf("storage: focus -> sidebar (%s)", source); }
+                else if (has(edge, GamepadButtons::DPadDown) && nroots) { m_stSel = (m_stSel + 1) % nroots; logf("storage: root %d/%d (%s)", m_stSel, nroots, source); }
+                else if (has(edge, GamepadButtons::DPadUp) && nroots) { m_stSel = (m_stSel + nroots - 1) % nroots; logf("storage: root %d/%d (%s)", m_stSel, nroots, source); }
+                else if (has(edge, GamepadButtons::A) && nroots) { m_rootSel = (size_t)m_stSel; logf("storage: new installs -> %s (%s)", m_roots[m_rootSel].name.c_str(), source); }
+            }
         }
     }
 

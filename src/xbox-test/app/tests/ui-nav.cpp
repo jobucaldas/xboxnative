@@ -8,6 +8,7 @@
 #include <string>
 
 #include "../ui_nav.h"
+#include "../ui_launcher.h"
 
 namespace {
 
@@ -22,6 +23,14 @@ void check(bool ok, const char* what) {
 int main() {
     using namespace ui_nav;
 
+    // ---- 5-column grid constants (item 4) ----
+    {
+        check(ui_launcher::kGridCols == 5, "the grid is 5 columns wide");
+        check(ui_launcher::kTileW == 240.0f && ui_launcher::kTileH == 360.0f, "tiles are 2:3 (240x360)");
+        check(ui_launcher::kGridX + 5 * ui_launcher::kTilePitchX - (ui_launcher::kTilePitchX - ui_launcher::kTileW)
+              <= 1844.0f + 0.5f, "5 columns fit the content width (524..1844)");
+    }
+
     // ---- lateral: left from the first grid column reaches the sidebar ----
     {
         Focus f = Focus::grid;
@@ -34,18 +43,21 @@ int main() {
         check(!lateral(f, 0, false) && f == Focus::grid, "right inside the grid does nothing");
     }
 
-    // ---- sidebar movement wraps over the four entries ----
+    // ---- sidebar movement wraps over the five entries ----
     {
         int a = 0;
         sidebar_move(a, true);  check(a == 1, "sidebar down 0->1");
         sidebar_move(a, true);  check(a == 2, "sidebar down 1->2");
         sidebar_move(a, true);  check(a == 3, "sidebar down 2->3");
-        sidebar_move(a, true);  check(a == 0, "sidebar down wraps 3->0");
-        sidebar_move(a, false); check(a == 3, "sidebar up wraps 0->3");
-        // targets: 0/1 library, 2 download queue, 3 storage management
-        check(sidebar_target(0) == 0 && sidebar_target(1) == 1, "entry 1 targets the installed view");
-        check(sidebar_target(2) == 2, "entry 2 opens the download queue");
-        check(sidebar_target(3) == 3, "entry 3 opens storage management");
+        sidebar_move(a, true);  check(a == 4, "sidebar down 3->4");
+        sidebar_move(a, true);  check(a == 0, "sidebar down wraps 4->0");
+        sidebar_move(a, false); check(a == 4, "sidebar up wraps 0->4");
+        sidebar_move(a, false); check(a == 3, "sidebar up 4->3");
+        // targets: 0 search overlay, 1/2 library, 3 download queue, 4 storage
+        check(sidebar_target(0) == 0, "the Search row targets the search overlay");
+        check(sidebar_target(1) == 1 && sidebar_target(2) == 2, "entries 1/2 target the installed/all views");
+        check(sidebar_target(3) == 3, "entry 3 opens the download queue");
+        check(sidebar_target(4) == 4, "entry 4 opens storage management");
     }
 
     // ---- sort cycling wraps over the existing three modes ----
@@ -108,6 +120,90 @@ int main() {
         check(logout_request(false, Focus::grid, 0, 0, true), "B on the grid asks to log out");
         check(!logout_request(false, Focus::sidebar, 0, 0, true), "B in the sidebar does not");
         check(!logout_request(true, Focus::grid, 0, 0, true), "an open confirm sheet does not re-open");
+    }
+
+    // ---- header controls: focus walk clamps (item 1; review fix 3: 2 controls) ----
+    {
+        int h = 0;
+        check(header_move(h, true) == 1, "header right 0->1 (sort->filters)");
+        h = 1;
+        check(header_move(h, true) == 1, "header right clamps at filters (no search pill)");
+        check(header_move(h, false) == 0, "header left 1->0");
+        h = 0; check(header_move(h, false) == 0, "header left clamps at sort");
+    }
+
+    // ---- popup exclusivity (review fix 2/5): one popup at a time ----
+    {
+        bool s = false, f = false, q = false;
+        popup_exclusive(s, f, q, 0);
+        check(s && !f && !q, "opening the sort popup closes filters and search");
+        popup_exclusive(s, f, q, 1);
+        check(!s && f && !q, "opening the filters popup closes sort and search");
+        popup_exclusive(s, f, q, 2);
+        check(!s && !f && q, "opening the search overlay closes sort and filters");
+        popup_exclusive(s, f, q, 7);
+        check(!s && !f && !q, "an unknown index closes every popup");
+    }
+
+    // ---- sort dropdown: move/confirm/close (item 1) ----
+    {
+        int focus = 1, selected = 0; bool open = true;
+        check(sort_open_move(focus, 3, true) && focus == 2, "sort down 1->2");
+        check(sort_open_move(focus, 3, true) && focus == 0, "sort down wraps 2->0");
+        check(sort_open_move(focus, 3, false) && focus == 2, "sort up wraps 0->2");
+        check(sort_confirm(focus, selected, open) && selected == 2 && !open, "A confirms the focused option");
+        bool was = sort_close(open);
+        check(!was && !open, "B on a closed dropdown is a no-op");
+        open = true;
+        check(sort_close(open) && !open, "B closes the dropdown");
+        int f2 = 0;
+        check(!sort_open_move(f2, 0, true), "no options: no movement");
+    }
+
+    // ---- filters panel: move + toggle (item 1) ----
+    {
+        int focus = 0;
+        bool on[2] = {false, true};
+        check(filters_move(focus, 2, true) && focus == 1, "filters down 0->1");
+        check(filters_move(focus, 2, true) && focus == 0, "filters down wraps 1->0");
+        check(filters_toggle(on, 2, 0) && on[0], "A toggles the focused row on");
+        check(filters_toggle(on, 2, 0) && !on[0], "A toggles it back off");
+        check(!filters_toggle(nullptr, 2, 0), "no rows: no toggle");
+        check(!filters_toggle(on, 2, 5), "out-of-range focus: no toggle");
+    }
+
+    // ---- search overlay keyboard: layout + movement + typing (item 1) ----
+    {
+        check(kSearchKeyCount == 39, "39 keys: 26 letters, 10 digits, space, backspace, done");
+        check(search_key_at(0, 0) == 0 && search_key_at(1, 0) == 10, "row stride is 10 keys");
+        check(search_key_at(3, 9) == 38, "the last key is Done");
+        check(search_key_at(9, 9) == 38, "out-of-grid lookups clamp to the last key");
+        int idx = 0;
+        check(search_move(idx, 1, 0) && idx == 1, "right moves one key");
+        idx = 9;
+        check(search_move(idx, 1, 0) && idx == 0, "right at the row end wraps to its start");
+        idx = 0;
+        check(search_move(idx, 0, 1) && idx == 10, "down moves one row");
+        idx = 25;   // Z: row 2 col 5 -> straight down to row 3 col 5
+        check(search_move(idx, 0, 1) && idx == 35, "down from Z keeps the column");
+        idx = 29;   // row 2 col 9 -> the last row has 9 keys: clamp onto Done
+        check(search_move(idx, 0, 1) && idx == 38, "down from the row-2 end clamps onto Done");
+        idx = 35;   // digit 9, row 3 col 5 -> the last row wraps to row 0
+        check(search_move(idx, 0, 1) && idx == 5, "down from the last row wraps to the top");
+        idx = 38;   // Done, row 3 col 8
+        check(search_move(idx, 0, 1) && idx == 8, "down from Done wraps to the top row");
+        idx = 0;
+        check(search_move(idx, 0, -1) && idx == 30, "up from A wraps to the last row's first key");
+        check(!search_move(idx, 0, 0), "no input: no movement");
+        // typing
+        std::string q; bool open = true;
+        check(search_activate(0, q, open) && q == "A", "A types the letter");
+        check(search_activate(36, q, open) && q == "A ", "Space appends a space");
+        check(search_activate(37, q, open) && q == "A", "Backspace deletes one character");
+        check(search_activate(37, q, open) && q.empty() && open, "Backspace on empty keeps the overlay open");
+        search_activate(38, q, open);   // Done: closes, query unchanged (returns false)
+        check(!open, "Done closes the overlay");
+        check(!search_activate(39, q, open), "out-of-range key: no-op");
     }
 
     std::printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "OK", g_failures, g_failures == 1 ? "" : "s");

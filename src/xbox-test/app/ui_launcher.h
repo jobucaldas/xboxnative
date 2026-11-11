@@ -18,6 +18,7 @@
 #include "ui_canvas.h"
 #include "ui_font.h"
 #include "ui_glyphs.h"
+#include "ui_nav.h"
 #include "ui_theme.h"
 
 namespace ui_launcher {
@@ -28,14 +29,19 @@ using ui::Font;
 using ui::Rect;
 using ui::rect;
 
-// ---- shared geometry (1920x1080, from the mockups) ----
+// ---- shared geometry (1920x1080) ----
+// Library grid: item 4 — MAX 5 columns of 2:3 tiles inside the content area
+// (x 524..1844 = 1320px): 5 tiles of 240 + 4 gaps of 30 = 1320. Two rows of
+// 360 + a 24px row gap end at y=1028; rows scroll by one and clip above the
+// hint bar (kGridClipY).
 constexpr float kHintDiscPx = 26.0f;    // prompt disc diameter in the theme::hint bar
 constexpr float kHintY      = 1007.0f;  // prompt disc top row
 constexpr float kTitleX     = 524.0f, kTitleY = 73.5f;   // screen title, top-left
 constexpr float kGridX      = 524.0f, kGridY = 264.0f;   // first tile's top-left
-constexpr float kTileW      = 168.0f, kTileH = 252.0f;
-constexpr float kTilePitchX = 192.0f, kTilePitchY = 276.0f;
-constexpr int   kGridCols   = 7;
+constexpr float kTileW      = 240.0f, kTileH = 360.0f;   // 2:3 tiles
+constexpr float kTilePitchX = 248.0f, kTilePitchY = 384.0f;
+constexpr int   kGridCols   = 5;
+constexpr float kGridClipY  = 988.0f;   // grid clips here, above the hint bar
 constexpr float kSidebarX   = 32.0f, kSidebarY = 32.0f;
 constexpr float kSidebarW   = 411.0f, kSidebarH = 1016.0f;
 
@@ -68,14 +74,24 @@ inline void text_r(ui::Canvas& c, const Font& f, ui::Face face, float px, float 
 }
 
 // ---- pure grid geometry (unit-tested with assert) ----
-inline Rect grid_tile(int index, int top_row) {
-    const int row = index / kGridCols, col = index % kGridCols;
-    return rect(kGridX + col * kTilePitchX, kGridY + (row - top_row) * kTilePitchY, kTileW, kTileH);
+// The live grid is 5 columns of 2:3 tiles (item 4). The mockup-comparison
+// test passes cols=7, which restores the ORIGINAL mockup layout (168x252
+// tiles, pitch 192x276) so the RMSE gate stays meaningful.
+inline float tile_w(int cols) { return cols <= 5 ? 240.0f : 168.0f; }
+inline float tile_h(int cols) { return cols <= 5 ? 360.0f : 252.0f; }
+inline float tile_pitch_x(int cols) { return cols <= 5 ? 264.0f : 192.0f; }
+inline float tile_pitch_y(int cols) { return cols <= 5 ? 384.0f : 276.0f; }
+// cols lets the mockup-comparison test keep the original 7-column layout
+// (LibraryVM::cols, default 5 per item 4); pass 7 there.
+inline Rect grid_tile(int index, int top_row, int cols = kGridCols) {
+    const int row = index / cols, col = index % cols;
+    return rect(kGridX + col * tile_pitch_x(cols), kGridY + (row - top_row) * tile_pitch_y(cols),
+                tile_w(cols), tile_h(cols));
 }
 // Rows that can be visible for a scroll offset; one row of slack on each side.
-inline void grid_visible(int tile_count, int top_row, int& lo, int& hi) {
-    lo = top_row > 0 ? (top_row - 1) * kGridCols : 0;
-    hi = tile_count < (top_row + 3) * kGridCols ? tile_count : (top_row + 3) * kGridCols;
+inline void grid_visible(int tile_count, int top_row, int& lo, int& hi, int cols = kGridCols) {
+    lo = top_row > 0 ? (top_row - 1) * cols : 0;
+    hi = tile_count < (top_row + 3) * cols ? tile_count : (top_row + 3) * cols;
 }
 
 // ---- primary button state machine (pure) ----
@@ -140,13 +156,18 @@ struct SidebarVM {
     int active = 0;   // 0 All games, 1 Installed, 2 Download queue, 3 Storage management
     int focus = -1;   // row with the pad focus (pill fill); -1 = the sidebar is
                       // not focused (mockups: only the active row is highlighted)
+    // item 3: the sidebar's Search row is the search entry — the live query
+    // shows in the field; empty = the "Search" placeholder.
+    const char* search_query = "";
 };
 
 struct TileVM {
     const char* name = "";
     uint32_t art_top = 0xFF1B2A4A, art_mid = 0xFF3E6FA8, art_bot = 0xFF0B1220;
     bool installed = false;
-    ui::Image art{};   // real cover art (main.cpp); empty falls back to the gradient wash
+    bool no_cover = false;   // item 12: grey gradient tile, not the motif
+    ui::Image art{};   // real cover art (main.cpp); empty falls back to the grey gradient
+    float name_w = 0.0f;   // measured label width (font-dependent); 0 = fits, no marquee
 };
 
 struct LibraryVM {
@@ -155,9 +176,20 @@ struct LibraryVM {
     int sel = 0;             // focused tile index
     int top_row = 0;         // first visible grid row
     bool focus_tile = true;
+    int cols = kGridCols;    // mockup-comparison test passes 7 (see grid_tile)
     const char* sort_label = "Sort by recently played";
     const char* count_label = "";   // e.g. "128 games"; empty hides it
     bool loading = false;    // true: count label reads "Loading..."
+    // header selectors (item 1): real controls in the row above the grid
+    int header_focus = -1;   // 0 sort, 1 filters, 2 search; -1 grid/sidebar
+    bool sort_open = false;  // dropdown is up
+    int sort_focus = 0;      // highlighted option while open
+    bool filters_open = false;
+    int filters_focus = 0;
+    bool search_open = false;    // on-screen keyboard overlay is up
+    int search_key = 0;          // keyboard cursor (ui_nav::search_key ids)
+    const char* query = "";      // live query text; filters the caller's tiles
+    float t = 0.0f;              // seconds (item 11): drives the marquee scroll
 };
 
 struct QueueRowVM {
@@ -177,7 +209,11 @@ struct QueueVM {
     int focus = -1;          // 0 auto-update pill, 1..n queue rows (ring drawn)
 };
 
-// detail page: one layout for every state; fields shared, placeholders when unknown
+// detail page: one layout for every state; fields shared, placeholders when unknown.
+// Item 13: two image slots — hero (the wide library_hero.jpg, cover-fit across
+// the 1920x520 region under the veil) and capsule (the portrait
+// library_600x900 on the right, same art the tile uses). Grey-gradient
+// fallbacks (item 12) while loading or missing; main.cpp fetches both.
 struct GameVM {
     const char* title = "Megabonk";
     const char* subtitle = "Single-player  \xC2\xB7  Action, Roguelite  \xC2\xB7  48.2 GB";
@@ -204,8 +240,21 @@ struct GameVM {
     bool primary_focus = false;
     float install_pct = 0.0f;   // 0..1 while installing
     bool has_art = false;
-    ui::Image art{};   // header image (main.cpp); empty falls back to the gradient wash
+    bool no_cover = false;   // item 12: grey-gradient fallbacks, not the wash
+    ui::Image art{};   // capsule art (library_600x900; main.cpp, header.jpg fallback)
+    ui::Image hero{};  // wide hero banner (library_hero.jpg; main.cpp, item 13)
+    bool has_hero = false;
     uint32_t art_top = 0xFF1A3F6B, art_mid = 0xFF14304F, art_bottom = 0xFF0A0E14;
+};
+
+// logout confirm (item 8): the SAME sheet component as Delete — title, body,
+// two buttons with focus — over the dimmed page.
+struct LogoutVM {
+    const char* title = "Log out of Steam?";
+    const char* body = "This deletes the saved login on this console only. "
+                       "You can sign in again with the QR code.";
+    const char* note = "";
+    bool focus_yes = true;   // true: the second button (Log out) carries the ring
 };
 
 // sheets over the dimmed game page (mockups 05 / 07)
@@ -241,6 +290,52 @@ struct SignVM {
 
 // ---- drawing ----------------------------------------------------------------
 
+// ---- drawing ----------------------------------------------------------------
+//
+// PUBLIC API for main.cpp wiring (items 1, 3, 4, 5, 7, 8, 9, 11, 12, 13) — the
+// later main.cpp change fills these structs and calls the draw functions; every
+// draw_* paints the FULL 1920x1080 page first (item 3: no last-screen remnants).
+//
+// Library (draw_library(c, f, sb, lib)):
+//   LibraryVM gains: cols (default 5; the mockup test passes 7),
+//   header_focus (-1 grid/sidebar, 0 sort, 1 filters — the header Search pill
+//   is GONE, review fix 3: the sidebar's Search row is the search entry),
+//   sort_open/sort_focus (dropdown VM), filters_open/filters_focus,
+//   search_open/search_key/query (on-screen keyboard overlay), t (seconds,
+//   drives the focused tile's marquee). Tiles carry name_w (measured label
+//   width; 0 = fits). Sort options live in kSortOptions (3); the Filters panel
+//   rows come from the caller (draw_filters_panel).
+//   Grid (review fix 1): 5 columns of 240x360, pitch x 264 (24px gaps),
+//   left-aligned at x=524 like the title; 5x240+4x24 = 1296 of the 1320
+//   content width, rows pitch 384 (24px row gaps).
+//   Popups (review fix 2): draw_sort_popup — ONLY the sort options, left-
+//   aligned under the Sort control (x=524, w=430); draw_filters_panel — the
+//   toggle rows under the Filters button, right edge at 1844; only one popup
+//   open at a time — open them through ui_nav::popup_exclusive.
+//   Sidebar (review fix 3): SidebarVM.search_query shows the active query in
+//   the focusable Search row (ui_nav::kSidebarSearch = 0; nav order Search,
+//   All games, Installed, Download queue, Storage management over
+//   ui_nav::kSidebarEntries = 5).
+//   Search overlay (review fix 4): keys are text-labelled ("Space", "Delete",
+//   "Done" — no glyph needed); the sheet shrinks to its content; the focused
+//   key is accent-highlighted; the hint bar sits at x=524 like every screen.
+//   Hints (review fix 5): every library-family screen and popup draws its hint
+//   bar ONCE, at the same x (524) and y (kHintY) — the sidebar is never
+//   overlapped.
+//   New: draw_sort_popup(c, f, lib) — dropdown under the sort control;
+//        draw_filters_panel(c, f, rows, n, focus) — toggle rows popup;
+//        draw_search_overlay(c, f, lib) — centred keyboard sheet.
+//   Hints: kLibraryHints = A Select, B Back, M Menu (X/Y removed, item 1).
+// Game page (draw_game): GameVM gains hero (ui::Image) + has_hero (item 13:
+//   wide library_hero.jpg cover-fit across the 1920x520 region under the
+//   existing veil; grey-gradient fallback = item 12's wash). art stays the
+//   tall capsule (library_600x900) drawn in the right-hand box. Cloud values
+//   should arrive pre-shortened via cloud_saves_short() ("Synced 10 Nov").
+// Confirmation sheet (item 8): draw_confirm_sheet(c, f, title, body, note,
+//   yes_label, no_label, focus_yes) — shared by draw_delete_sheet (DeleteVM,
+//   unchanged) and draw_logout_sheet(c, f, LogoutVM). Both over draw_scrim.
+// Sidebar (item 9): an empty persona draws "Signed in".
+
 // The mockup's focus ring is a 3px white band just inside the focus rect (measured:
 // rect edge 138 → band 138..141). Stroke centred on the rect inset by half the width.
 inline void focus_ring(ui::Canvas& c, const ui::Rect& r, float radius, float width) {
@@ -249,16 +344,21 @@ inline void focus_ring(ui::Canvas& c, const ui::Rect& r, float radius, float wid
                         ui::theme::focus, Align::Center);
 }
 
-// The bottom hint bar: A/B/X/Y/Menu prompts on the page background.
-// pairs = {"A","Select", "B","Back", "X","Sort", "Y","Filter", "M","Menu"}; n = number of pairs.
+// The bottom hint bar (item 5): ONE consistent component — same position on
+// every screen, all items on one line, vertically centred on the disc row,
+// equal 40px gaps. pairs = {"A","Select", "B","Back", "M","Menu"}; n = pairs.
 // A is a filled disc; B/X/Y are outlined; M is the hamburger.
 inline float draw_hint_bar(ui::Canvas& c, const Font& f, const char* const* pairs, int n, float x0 = ui::theme::margin) {
     const float px = ui::theme::hintText.px;
+    const float cy = kHintY + kHintDiscPx * 0.5f;
+    // text() is top-anchored: top = disc-centre minus half the line box puts
+    // the label's vertical centre on the disc centre (item 5: centred labels).
+    const float lh = f.line_height(Face::Regular, px);
+    const float label_top = cy - lh * 0.5f;
     float x = x0;
     for (int i = 0; i + 1 < n * 2; i += 2) {
         const char key = pairs[i][0];
         const char* label = pairs[i + 1];
-        const float cy = kHintY + kHintDiscPx * 0.5f;
         if (key == 'M') {
             // mockup: the hamburger sits in the same 28px disc as the outlined prompts
             ui::glyphs::menu(c, x + kHintDiscPx * 0.5f, cy, kHintDiscPx + 2.0f, ui::theme::glyph, 0xFFC8C8C8);
@@ -278,7 +378,7 @@ inline float draw_hint_bar(ui::Canvas& c, const Font& f, const char* const* pair
                            std::string(1, key), letter);
             }
         }
-        text(c, f, Face::Regular, px, x + kHintDiscPx + 12.0f, kHintY + 1.0f, label, ui::theme::hint);
+        text(c, f, Face::Regular, px, x + kHintDiscPx + 12.0f, label_top, label, ui::theme::hint);
         x += kHintDiscPx + 12.0f + f.measure(Face::Regular, px, label) + 40.0f;
     }
     return x;
@@ -292,11 +392,21 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
     c.fill_circle(kSidebarX + 60, 100, 28, kAvatarBg);
     c.fill_circle(kSidebarX + 60, 94, 10, 0xFFC8C8C8);
     c.fill_round_rect(rect(kSidebarX + 44, 106, 32, 14), 7, 0xFFC8C8C8);
-    text(c, f, Face::Regular, 24, 136, 85.5f, sb.persona, ui::theme::textDim);
-    // search pill
-    c.fill_round_rect(rect(64, 160, 347, 56), radiusPill, ui::theme::control);
-    text(c, f, Face::Regular, 22, 88, 174.5f, "Search", ui::theme::textDim);
+    // item 9: persona not resolved -> a neutral label, never a blank row
+    text(c, f, Face::Regular, 24, 136, 85.5f, sb.persona && *sb.persona ? sb.persona : "Signed in",
+         ui::theme::textDim);
     c.fill_rect(64, 248, 347, 1, ui::theme::separator);
+    // nav rows (review fix 3): the Search field is THE search entry (row 0) —
+    // a focusable pill like the other rows; an active query shows in it.
+    {
+        const bool on = ui_nav::kSidebarSearch == sb.active;
+        const bool focused = ui_nav::kSidebarSearch == sb.focus;
+        c.fill_round_rect(rect(40, 160, 395, 64), radiusControl, ui::theme::control);
+        const char* q = sb.search_query && *sb.search_query ? sb.search_query : "Search";
+        text(c, f, Face::Regular, 22, 64, 160 + 17.5f, q,
+             on || focused || (sb.search_query && *sb.search_query) ? ui::theme::text : ui::theme::textDim);
+        if (on) c.fill_rect(429, 160, 6, 64, ui::theme::accent);
+    }
     // nav rows
     struct Row { const char* label; int count; };
     const Row rows[4] = {{"All games", sb.all_count}, {"Installed", sb.installed_count},
@@ -339,7 +449,28 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
 }
 
 // ---- library screen (mockup 01) ----
-constexpr const char* kLibraryHints[10] = {"A", "Select", "B", "Back", "X", "Sort", "Y", "Filter", "M", "Menu"};
+constexpr const char* kLibraryHints[6] = {"A", "Select", "B", "Back", "M", "Menu"};
+// sort options (item 1); mode indexes match ui_nav::cycle_sort's caller
+constexpr const char* kSortOptions[3] = {"Most played", "Recently played", "Alphabetical"};
+
+// item 11: marquee scroll offset for a focused tile's label. Static when the
+// text fits box_w; otherwise a smooth leftward scroll with a 1.2s pause at
+// each end, looping. text_w > box_w required for any movement.
+inline float marquee_offset(float text_w, float box_w, float t) {
+    if (text_w <= box_w || text_w <= 0) return 0.0f;
+    if (t < 0) t = 0.0f;                                 // negative times clamp to the start
+    const float travel = text_w - box_w + 24.0f;        // + ellipsis gap
+    const float pause = 1.2f, speed = 30.0f;            // px/s
+    const float move = travel / speed, period = 2.0f * pause + 2.0f * move;
+    float k = t - std::floor(t / period) * period;      // [0, period)
+    if (k < pause) return 0.0f;                         // pause at the start
+    k -= pause;
+    if (k < move) return travel * (k / move);           // scroll left
+    k -= move;
+    if (k < pause) return travel;                       // pause at the end
+    k -= pause;
+    return travel * (1.0f - k / move);                  // scroll back
+}
 
 // 3-stop gradient into `dst` (one pixel per call site loop); used for tile and hero art.
 // k is the position along the gradient axis: 0 → top, 0.5 → mid, 1 → bottom stop.
@@ -353,12 +484,33 @@ inline uint32_t grad3(uint32_t top, uint32_t mid, uint32_t bot, float k) {
     return ui::theme::argb(255, r, g, bl);
 }
 
-inline void draw_tile(ui::Canvas& c, const Font& f, const TileVM& t, const ui::Rect& g, bool focus) {
-    using namespace ui::theme;
-    if (t.art.px && t.art.w > 0 && t.art.h > 0) {
+// item 12: games without cover art get a plain grey vertical gradient tile
+// (#3A3A3A -> #232323), no ring/placeholder motif.
+constexpr uint32_t kNoCoverTop = 0xFF3A3A3A, kNoCoverBot = 0xFF232323;
+
+// scrim over a freshly drawn page (sheets/popups, items 3 + 8)
+inline void draw_scrim(ui::Canvas& c) { c.fill_rect_alpha(0, 0, 1920, 1080, ui::theme::scrim, ui::theme::scrimAlpha); }
+
+// check-mark polyline for the sort popup's current option (drawn inline)
+
+inline void draw_tile(ui::Canvas& c, const Font& f, const TileVM& t, const ui::Rect& g, bool focus, float
+ time_s = 0.0f) {
+    using
+ namespace ui::theme;
+    // clip everything (art, label, marquee) to the tile rect (item 4);
+    // set_clip REPLACES, so intersect with the caller's clip by hand
+    const ui::Canvas::Clip outer = c.clip();
+    c.set_clip(ui::Canvas::Clip{std::max(outer.x0, int(g.x)), std::max(outer.y0, int(g.y)),
+                                std::min(outer.x1, int(g.x + g.w)), std::min(outer.y1, int(g.y + g.h))});
+    const bool has_art = t.art.px && t.art.w > 0 && t.art.h > 0;
+    if (has_art) {
         c.draw_image(t.art, g, ui::Fit::Cover, radiusTile);
+    } else if (t.no_cover) {
+        // item 12: plain grey vertical gradient, no motif
+        for (int yy = 0; yy < int(g.h); ++yy)
+            c.fill_rect(g.x, g.y + float(yy), g.w, 1, grad3(kNoCoverTop, kNoCoverTop, kNoCoverBot, float(yy) / (g.h - 1)));
     } else {
-        // mockup art is a 3-stop diagonal from the tile's top-left to bottom-right
+        // legacy gradient art (mockup fixtures)
         for (int yy = 0; yy < int(g.h); ++yy) {
             const float v = float(yy) / (g.h - 1);
             for (int xx = 0; xx < int(g.w); ++xx) {
@@ -371,44 +523,180 @@ inline void draw_tile(ui::Canvas& c, const Font& f, const TileVM& t, const ui::R
         c.stroke_circle(g.x + g.w * 0.5f, g.y + 150, 48, 8, t.art_bot, Align::Center, 77);
         c.fill_rect_alpha(float(g.x + 112), float(g.y + 12), 44.0f, 44.0f, t.art_bot, 56);
     }
-    // label scrim band: transparent until mid, 0.78 black at the bottom (mockup band)
-    for (int yy = int(g.h) / 2; yy < int(g.h); ++yy) {
-        const float k = (yy - g.h * 0.5f) / (g.h * 0.5f);
-        c.fill_rect_alpha(g.x, g.y + yy, g.w, 1, scrim, uint8_t(0.78f * 255.0f * k));
+    if (!has_art && !t.no_cover) {
+        // label scrim band: transparent until mid, 0.78 black at the bottom (mockup band)
+        for (int yy = int(g.h) / 2; yy < int(g.h); ++yy) {
+            const float k = (yy - g.h * 0.5f) / (g.h * 0.5f);
+            c.fill_rect_alpha(g.x, g.y + yy, g.w, 1, scrim, uint8_t(0.78f * 255.0f * k));
+        }
     }
-    text(c, f, Face::Regular, 20, g.x + 12, g.y + 216, t.name, ui::theme::text);
+    // label: ellipsized to the tile width; the FOCUSED tile marquees (item 11)
+    const float label_w = g.w - 24.0f;
+    if (focus && t.name_w > label_w && t.name_w > 0) {
+        // full name, clipped at the tile edge, scrolled by the marquee offset
+        const float off = marquee_offset(t.name_w, label_w, time_s);
+        text(c, f, Face::Regular, 20, g.x + 12 - off, g.y + 216, t.name, ui::theme::text);
+    } else {
+        const std::string s = f.ellipsize(Face::Regular, 20, t.name, label_w);
+        text(c, f, Face::Regular, 20, g.x + 12, g.y + 216, s.c_str(), ui::theme::text);
+    }
     if (t.installed) {
         c.fill_round_rect(rect(g.x + 12, g.y + 12, 94, 26), radiusBadge, ui::theme::accent);
         text_c(c, f, Face::Bold, 15, g.x + 59, g.y + 16, "INSTALLED", ui::theme::onAccent);
     }
+    c.set_clip(outer);  // restore the caller's clip (the tile clip above was narrower)
     if (focus)
         focus_ring(c, rect(g.x - ringOffset, g.y - ringOffset, g.w + ringOffset * 2, g.h + ringOffset * 2),
                    radiusTile + ringRadiusDelta, ringWidth);
 }
 
+inline void draw_sort_control(ui::Canvas& c, const Font& f, const LibraryVM& lib, float x, float y) {
+    using namespace ui::theme;
+    // closed control: pill with the current option; the OPEN control wears
+    // the same focus treatment as every focusable control (item 1)
+    const float w = 430.0f;
+    c.fill_round_rect(rect(x, y, w, 60), radiusPill, lib.sort_open ? ui::theme::controlDark : ui::theme::control);
+    if (lib.sort_open || lib.header_focus == 0)
+        focus_ring(c, rect(x - ringOffset, y - ringOffset, w + ringOffset * 2, 60 + ringOffset * 2),
+                   radiusPill + ringRadiusDelta, ringWidth);
+    text(c, f, Face::Regular, 24, x + 24, y + 15.5f, lib.sort_label, ui::theme::text2);
+}
+
+// Filters control (item 1, review fix 3): the header keeps Sort + Filters
+// only — the Search pill is gone (the sidebar's Search row is the entry).
+inline void draw_filters_control(ui::Canvas& c, const Font& f, const LibraryVM& lib, float x, float y) {
+    using namespace ui::theme;
+    const float w = 152.0f;
+    c.fill_round_rect(rect(x, y, w, 60), radiusPill, lib.filters_open ? ui::theme::controlDark : ui::theme::control);
+    if (lib.filters_open || lib.header_focus == 1)
+        focus_ring(c, rect(x - ringOffset, y - ringOffset, w + ringOffset * 2, 60 + ringOffset * 2),
+                   radiusPill + ringRadiusDelta, ringWidth);
+    text_c(c, f, Face::Regular, 24, x + w * 0.5f, y + 15.5f, "Filters", ui::theme::text2);
+}
+
+// Sort dropdown (item 1, review fix 2): ONLY the sort options, left-aligned
+// under the Sort control, same width (430). The Filters popup is a SEPARATE
+// card under the Filters button, right edge aligned to the button's right
+// edge (1844). Only one popup is open at a time (the caller guarantees it:
+// opening one closes the other — see ui_nav::popup_exclusive).
+inline void draw_sort_popup(ui::Canvas& c, const Font& f, const LibraryVM& lib) {
+    using namespace ui::theme;
+    if (!lib.sort_open) return;
+    const float x = 524.0f, y = 236.0f, w = 430.0f, row_h = 64.0f;
+    const int n = 3;
+    c.fill_round_rect(rect(x, y, w, row_h * n + 16), radiusCard, panel);
+    for (int i = 0; i < n; ++i) {
+        const float ry = y + 8.0f + row_h * i;
+        if (i == lib.sort_focus) c.fill_round_rect(rect(x + 8, ry, w - 16, row_h), radiusControl, rowHover);
+        text(c, f, Face::Regular, 24, x + 28, ry + 17.5f, kSortOptions[i],
+             i == lib.sort_focus ? ui::theme::text : ui::theme::text2);
+        if (i == lib.sort_focus) {   // check mark (accent) right of the label
+            const float cw = 18.0f, ch = 14.0f;
+            const float cx = x + 28 + f.measure(Face::Regular, 24, kSortOptions[i]) + 16.0f, cy2 = ry + 25.0f;
+            const float p[6] = {cx, cy2 + ch * 0.6f, cx + cw * 0.35f, cy2 + ch, cx + cw, cy2};
+            c.stroke_polyline(p, 3, false, 3.0f, ui::theme::accent);
+        }    }
+}
+
+// Filters panel (item 1, review fix 2): toggle rows the caller provides,
+// anchored under the FILTERS button (right edge 1844 = the button's right
+// edge), NOT under Sort. The popup is 430 wide like the Sort dropdown.
+struct FilterRowVM { const char* label = ""; bool on = false; };
+
+inline void draw_filters_panel(ui::Canvas& c, const Font& f, const FilterRowVM* rows, int n, int focus) {
+    using namespace ui::theme;
+    if (!rows || n <= 0) return;
+    const float w = 430.0f, row_h = 64.0f;
+    const float x = 1844.0f - w, y = 236.0f;   // right edge under the Filters button
+    c.fill_round_rect(rect(x, y, w, row_h * n + 16), radiusCard, panel);
+    for (int i = 0; i < n; ++i) {
+        const float ry = y + 8.0f + row_h * i;
+        if (i == focus) c.fill_round_rect(rect(x + 8, ry, w - 16, row_h), radiusControl, rowHover);
+        text(c, f, Face::Regular, 24, x + 28, ry + 17.5f, rows[i].label,
+             i == focus ? ui::theme::text : ui::theme::text2);
+        // On/Off pill with a round knob (item 2: pill = h/2)
+        const float px = x + w - 92.0f, py = ry + 16.0f;
+        c.fill_round_rect(rect(px, py, 56, 32), 16, rows[i].on ? ui::theme::accent : ui::theme::controlDark);
+        c.fill_circle(rows[i].on ? px + 40 : px + 16, py + 16, 12, ui::theme::onAccent);
+        if (rows[i].on) text(c, f, Face::Semibold, 16, px + 12, py + 6.5f, "On", ui::theme::onAccent);
+    }
+}
+
+// Search overlay (item 1): centred sheet over the dimmed page — letter grid
+// (A-Z, 0-9, Space, Backspace, Done), the current query above it. Pure nav in
+// ui_nav.h (search_move/search_activate); this only draws the state. Key ids:
+// 0..25 A-Z, 26..35 0-9, 36 space, 37 backspace, 38 done.
+constexpr char kSearchLetter = 'A';
+
+inline const char* search_key_label(int i) {
+    static char buf[2];
+    if (i < 26) { buf[0] = char('A' + i); buf[1] = 0; return buf; }
+    if (i < 36) { buf[0] = char('0' + i - 26); buf[1] = 0; return buf; }
+    // review fix 4: Selawik has no backspace glyph — text labels for the
+    // three non-alphanumeric keys
+    return i == 36 ? "Space" : i == 37 ? "Delete" : "Done";
+}
+
+inline void draw_search_overlay(ui::Canvas& c, const Font& f, const LibraryVM& lib) {
+    using namespace ui::theme;
+    if (!lib.search_open) return;
+    draw_scrim(c);
+    // review fix 4: the sheet shrinks to its content (query line + 4 key
+    // rows + padding); the hint bar stays at the SAME position as every
+    // other screen (x=524, kHintY — the library family's x).
+    const float w = 900.0f;
+    const float key_w = 80.0f, key_h = 56.0f, gap = 8.0f;
+    const float grid_top = 88.0f, pad_bottom = 24.0f;
+    const float h = grid_top + 4 * key_h + 3 * gap + pad_bottom;
+    const float x0 = (1920.0f - w) * 0.5f, y0 = (1080.0f - h - 40.0f) * 0.5f;
+    c.fill_round_rect(rect(x0, y0, w, h), radiusGuide, panel);
+    // query line
+    text(c, f, Face::Regular, 28, x0 + 32, y0 + 24, lib.query && *lib.query ? lib.query : "Search games",
+         lib.query && *lib.query ? ui::theme::text : ui::theme::textDim);
+    // key grid: 10 columns, 4 rows (26+10+3 keys)
+    const float gx = x0 + (w - (10 * key_w + 9 * gap)) * 0.5f, gy = y0 + grid_top;
+    for (int i = 0; i < ui_nav::kSearchKeyCount; ++i) {
+        const int row = ui_nav::search_key_row(i), col = ui_nav::search_key_col(i);
+        const float kx = gx + col * (key_w + gap), ky = gy + row * (key_h + gap);
+        const bool focused = i == lib.search_key;
+        // review fix 4: the focused key reads clearly — accent fill, onAccent
+        // label (the hover grey was too subtle against the key grid)
+        c.fill_round_rect(rect(kx, ky, key_w, key_h), radiusControl,
+                          focused ? ui::theme::accent : ui::theme::controlDark);
+        text_c(c, f, Face::Regular, i < 36 ? 24 : 18, kx + key_w * 0.5f, ky + 13.0f, search_key_label(i),
+               focused ? ui::theme::onAccent : ui::theme::text2);
+    }
+    const char* pairs[6] = {"A", "Type", "B", "Close", "M", "Menu"};
+    draw_hint_bar(c, f, pairs, 3, 524.0f);   // review fix 4: same x as the library
+}
+
 inline void draw_library(ui::Canvas& c, const Font& f, const SidebarVM& sb, const LibraryVM& lib) {
     using namespace ui::theme;
-    c.fill(ui::theme::page);
+    c.fill(ui::theme::page);   // item 3: full clear first
     draw_sidebar(c, f, sb);
-    // title + sort bar
+    // title + header row: Sort control, count, Filters (item 1; review fix 3:
+    // the header Search pill is GONE — the sidebar's Search row is the entry)
     text(c, f, Face::Semibold, 44, kTitleX, kTitleY, "Library", ui::theme::text, -0.2f);
-    c.fill_round_rect(rect(524, 168, 430, 60), radiusControl, ui::theme::control);
-    text(c, f, Face::Regular, 24, 548, 183.5f, lib.sort_label, ui::theme::text2);
+    draw_sort_control(c, f, lib, 524.0f, 168.0f);
     const char* count = lib.loading ? "Loading..." : lib.count_label;
-    if (count && *count) text(c, f, Face::Regular, 22, 1556, 184.5f, count, ui::theme::textDim);
-    c.fill_round_rect(rect(1692, 168, 152, 60), radiusControl, ui::theme::control);
-    text_c(c, f, Face::Regular, 24, 1765, 183.5f, "Filters", ui::theme::text2);
-    // grid
+    if (count && *count) text_r(c, f, Face::Regular, 22, 1444.0f, 184.5f, count, ui::theme::textDim);
+    draw_filters_control(c, f, lib, 1692.0f, 168.0f);
+    // grid: 5 columns, clipped above the hint bar (item 4)
     int lo, hi;
-    grid_visible(lib.tile_count, lib.top_row, lo, hi);
-    c.set_clip(rect(0, 0, 1920, 988));   // rows scroll out above the hint bar, as in the mockup
+    grid_visible(lib.tile_count, lib.top_row, lo, hi, lib.cols);
+    c.set_clip(rect(0, 0, 1920, kGridClipY));
     for (int i = lo; i < hi; ++i) {
-        const Rect g = grid_tile(i, lib.top_row);
-        if (g.y > 1040 || g.y + g.h < 0) continue;
-        draw_tile(c, f, lib.tiles[i], g, lib.focus_tile && i == lib.sel);
+        const Rect g = grid_tile(i, lib.top_row, lib.cols);
+        if (g.y > kGridClipY || g.y + g.h < 0) continue;
+        draw_tile(c, f, lib.tiles[i], g, lib.focus_tile && i == lib.sel && lib.header_focus < 0, lib.t);
     }
     c.reset_clip();
-    draw_hint_bar(c, f, kLibraryHints, 5, 524.0f);
+    draw_hint_bar(c, f, kLibraryHints, 3, 524.0f);
+    // popups over the page (item 1)
+    draw_sort_popup(c, f, lib);
+    FilterRowVM installed_only[1] = {{"Installed only", false}};
+    draw_filters_panel(c, f, installed_only, 1, lib.filters_open ? lib.filters_focus : -1);
+    draw_search_overlay(c, f, lib);
 }
 
 // ---- download queue screen (mockup 06) ----
@@ -451,8 +739,9 @@ inline void draw_download_queue(ui::Canvas& c, const Font& f, const SidebarVM& s
     text(c, f, Face::Semibold, 26, 556, 162, "Auto-update games", ui::theme::text);
     text(c, f, Face::Regular, 20, 556, 197, q.update_note, ui::theme::textDim);
     text_r(c, f, Face::Regular, 22, 1744, 178.5f, q.auto_update ? "On" : "Off", ui::theme::textDim);
+    // auto-update pill: real pill (radius = h/2) with a round knob (item 2)
     c.fill_round_rect(rect(1756, 176, 56, 32), 16, q.auto_update ? ui::theme::accent : ui::theme::controlDark);
-    c.fill_circle(q.auto_update ? 1796 : 1768, 192, 12, ui::theme::onAccent);
+    c.fill_circle(q.auto_update ? 1796 : 1768, 192, 12, q.auto_update ? ui::theme::onAccent : ui::theme::textDim);
     if (q.focus == 0)
         focus_ring(c, rect(518, 138, 1332, 108), radiusCard + ringRadiusDelta, ringWidth);
     // queue section
@@ -515,27 +804,39 @@ inline void draw_icon_buttons(ui::Canvas& c, const GameVM& g, bool installed) {
 
 inline void draw_kv(ui::Canvas& c, const Font& f, float kx, float vx, float y, const char* k, const char* v) {
     text(c, f, Face::Regular, 24, kx, y, k, ui::theme::text2);
-    // the mockup right-aligns values in their 256-wide column
-    const float w = f.measure(Face::Regular, 24, v);
-    text(c, f, Face::Regular, 24, vx + 256.0f - w, y, v, ui::theme::textDim);
+    // item 7: the value ellipsizes to the 256-wide value column (mockup
+    // right-aligns values), so a long value can never collide with its label
+    const std::string s = f.ellipsize(Face::Regular, 24, v, 256.0f);
+    const float w = f.measure(Face::Regular, 24, s);
+    text(c, f, Face::Regular, 24, vx + 256.0f - w, y, s.c_str(), ui::theme::textDim);
 }
 
 inline void draw_game(ui::Canvas& c, const Font& f, const GameVM& g) {
     using namespace ui::theme;
-    // hero: art gradient, ring+disc+block motif, dim veil, fade into the ui::theme::page.
-    // Mockup layer model (measured): the 3-stop gradient maps over the whole 1920x520
-    // hero (k = (x/1920 + y/520) / 2); the motif shapes sit on the art at partial
-    // opacity (ring 0.35, disc 0.22, block 0.10); the veil and fade come last.
-    for (int y = 0; y < 520; ++y) {
-        const float v = float(y) / 520.0f;
-        for (int x = 0; x < 1920; ++x) {
-            const float u = float(x) / 1920.0f;
-            c.fill_rect(float(x), float(y), 1, 1, grad3(kHeroTop, kHeroMid, kHeroBot, (u + v) * 0.5f));
+    c.fill(ui::theme::page);   // item 3: full clear first
+    // hero (item 13): the wide library_hero.jpg cover-fit across 1920x520
+    // under the existing veil; the mockup's blue wash while loading
+    // (fixtures), grey (item 12) when no_cover.
+    if (g.has_hero && g.hero.px && g.hero.w > 0 && g.hero.h > 0) {
+        c.draw_image(g.hero, rect(0, 0, 1920, 520), ui::Fit::Cover);
+    } else if (g.no_cover) {
+        for (int y = 0; y < 520; ++y)
+            c.fill_rect(0, float(y), 1920, 1, grad3(kNoCoverTop, kNoCoverTop, kNoCoverBot, float(y) / 519.0f));
+    } else {
+        // mockup wash: 3-stop gradient over the hero, motif shapes at partial
+        // opacity (ring 0.35, disc 0.22, block 0.10), veil + fade come last
+        for (int y = 0; y < 520; ++y) {
+            const float v = float(y) / 520.0f;
+            for (int x = 0; x < 1920; ++x) {
+                const float u = float(x) / 1920.0f;
+                c.fill_rect(float(x), float(y), 1, 1, grad3(kHeroTop, kHeroMid, kHeroBot, (u + v) * 0.5f));
+            }
         }
+        c.stroke_circle(1180, 250, 210, 26, kHeroBot, Align::Center, 89);
+        c.fill_circle(1180, 250, 120, kHeroBot, 56);  // mockup hero-disc: #0A1018 at 0.22
+        c.fill_rect_alpha(240.0f, 40.0f, 520.0f, 440.0f, kHeroBot, 26);    // block at 0.10
     }
-    c.stroke_circle(1180, 250, 210, 26, kHeroBot, Align::Center, 89);
-    c.fill_circle(1180, 250, 120, kHeroBot, 56);  // mockup hero-disc: #0A1018 at 0.22
-    c.fill_rect_alpha(240.0f, 40.0f, 520.0f, 440.0f, kHeroBot, 26);    // block at 0.10
+    // veil + fade into the page (unchanged layer model)
     c.fill_rect_alpha(0, 0, 1920, 520, ui::theme::page, 158);
     for (int y = 370; y < 520; ++y)
         c.fill_rect_alpha(0, float(y), 1920, 1, ui::theme::page, uint8_t(255.0f * (y - 370) / 150.0f));
@@ -590,19 +891,22 @@ inline void draw_game(ui::Canvas& c, const Font& f, const GameVM& g) {
     c.fill_rect(1368, 892, 456, 1, ui::theme::controlDark);
     draw_kv(c, f, 1368, 1568, 908, "Language", g.language);
 
-    // capsule art right: the store header image when it is in, else the wash
+    // capsule art right (item 13): the TALL library capsule (library_600x900,
+    // the same portrait art the tile uses) in the right-hand box; the mockup's
+    // blue wash while loading (fixtures), grey (item 12) when no_cover.
     if (g.has_art && g.art.px && g.art.w > 0 && g.art.h > 0) {
         c.draw_image(g.art, rect(1632, 72, 224, 336), ui::Fit::Cover, radiusTile);
+    } else if (g.no_cover) {
+        for (int yy = 0; yy < 336; ++yy)
+            c.fill_rect(1632, 72.0f + yy, 224, 1, grad3(kNoCoverTop, kNoCoverTop, kNoCoverBot, yy / 335.0f));
     } else {
         for (int yy = 0; yy < 336; ++yy)
             c.fill_rect(1632, 72.0f + yy, 224, 1, grad3(g.art_top, g.art_mid, g.art_bottom, yy / 335.0f));
-        c.stroke_circle(1744, 222, 72, 10, kRingDark, Align::Center);
-        c.fill_round_rect(rect(1800, 84, 44, 44), 3, kRingDark);
     }
 
     // ui::theme::hint bar: the A ui::theme::hint follows the primary state
     const char* pairs[6] = {"A", primary_hint(g.primary, g.primary_focus), "M", "Manage", "B", "Back"};
-    draw_hint_bar(c, f, pairs, 3);
+    draw_hint_bar(c, f, pairs, 3, 524.0f);   // review fix 5: same x as the library
 }
 
 // One transient note line over the dimmed game page (refusals, cloud warnings,
@@ -645,24 +949,55 @@ inline void draw_signin(ui::Canvas& c, const Font& f, const SignVM& s) {
     draw_hint_bar(c, f, kSignHints, 2, 823.5f);
 }
 
-// ---- sheets over the dimmed game page (mockups 05 / 07) ----
-inline void draw_scrim(ui::Canvas& c) { c.fill_rect_alpha(0, 0, 1920, 1080, ui::theme::scrim, ui::theme::scrimAlpha); }
+// ---- sheets over the dimmed page (mockups 05 / 07) ----
+// (draw_scrim lives above, with the popup draw functions)
 
-inline void draw_delete_sheet(ui::Canvas& c, const Font& f, const DeleteVM& d) {
+// item 8: the ONE confirmation sheet component, shared by Delete and Log out —
+// title, body, note, two real buttons with focus, over the dimmed page.
+inline void draw_confirm_sheet(ui::Canvas& c, const Font& f, const char* title, const char* body,
+                               const char* note, const char* no_label, const char* yes_label, bool focus_yes) {
     using namespace ui::theme;
     draw_scrim(c);
-    c.fill_round_rect(rect(560, 368, 800, 344), radiusCard, ui::theme::panel);
-    text(c, f, Face::Semibold, 36, 608, 416, d.title, ui::theme::text);
-    text(c, f, Face::Regular, 24, 608, 475, d.body, ui::theme::textDim);
-    text(c, f, Face::Regular, 22, 608, 516, d.note, ui::theme::textMuted);
+    c.fill_round_rect(rect(560, 368, 800, 344), radiusGuide, panel);
+    text(c, f, Face::Semibold, 36, 608, 416, title, ui::theme::text);
+    text(c, f, Face::Regular, 24, 608, 475, body, ui::theme::textDim);
+    if (note && *note) text(c, f, Face::Regular, 22, 608, 516, note, ui::theme::textMuted);
     c.fill_round_rect(rect(1018, 600, 170, 64), radiusControl, ui::theme::controlDark);
-    text_c(c, f, Face::Semibold, 26, 1103, 616.5f, "Cancel", ui::theme::text2);
+    text_c(c, f, Face::Semibold, 26, 1103, 616.5f, no_label, ui::theme::text2);
     c.fill_round_rect(rect(1204, 600, 108, 64), radiusControl, ui::theme::accent);
-    text_c(c, f, Face::Semibold, 26, 1258, 616.5f, "Delete", ui::theme::onAccent);
-    if (d.focus_delete)
+    text_c(c, f, Face::Semibold, 26, 1258, 616.5f, yes_label, ui::theme::onAccent);
+    if (focus_yes)
         focus_ring(c, rect(1198, 594, 120, 76), radiusControl + ringRadiusDelta, ringWidth);
-    const char* pairs[4] = {"A", "Yes, delete", "B", "Cancel"};
-    draw_hint_bar(c, f, pairs, 2);
+    const char* pairs[4] = {"A", yes_label, "B", no_label};
+    draw_hint_bar(c, f, pairs, 2, 524.0f);   // review fix 5: same x as the library
+}
+
+// item 7: the cloud value shortened to the card's 256px value column
+// ("Cloud: synced 2026-11-10 10:15" -> "Synced 10 Nov"). Writes into `buf`
+// (>= 32 bytes); pass the result as GameVM::cloud_saves before drawing.
+inline void cloud_saves_short(char* buf, size_t n, const char* synced) {
+    // steam_cloud.h writes "Cloud: synced YYYY-MM-DD HH:MM" (or similar);
+    // keep the short "Synced D Mon" form, anything unknown passes through
+    // (draw_kv ellipsizes it to the column width anyway).
+    int y = 0, m = 0, d = 0, hh = 0, mm = 0;
+    if (synced && (std::sscanf(synced, "Cloud: synced %d-%d-%d %d:%d", &y, &m, &d, &hh, &mm) == 5 ||
+                   std::sscanf(synced, "synced %d-%d-%d %d:%d", &y, &m, &d, &hh, &mm) == 5) &&
+        m >= 1 && m <= 12) {
+        static const char* mon[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+        std::snprintf(buf, n, "Synced %d %s", d, mon[m - 1]);
+        return;
+    }
+    std::snprintf(buf, n, "%s", synced ? synced : "");
+}
+
+inline void draw_delete_sheet(ui::Canvas& c, const Font& f, const DeleteVM& d) {
+    draw_confirm_sheet(c, f, d.title, d.body, d.note, "Cancel", "Delete", d.focus_delete);
+}
+
+// logout confirm (item 8): the same sheet as Delete
+inline void draw_logout_sheet(ui::Canvas& c, const Font& f, const LogoutVM& v) {
+    draw_confirm_sheet(c, f, v.title, v.body, v.note, "Cancel", "Log out", v.focus_yes);
 }
 
 inline void draw_cloud_sheet(ui::Canvas& c, const Font& f, const CloudVM& v) {
@@ -687,7 +1022,7 @@ inline void draw_cloud_sheet(ui::Canvas& c, const Font& f, const CloudVM& v) {
             focus_ring(c, rect(602, y - 6, 716, 68), radiusControl + ringRadiusDelta, ringWidth);
     }
     const char* pairs[4] = {"A", "Select", "B", "Close"};
-    draw_hint_bar(c, f, pairs, 2);
+    draw_hint_bar(c, f, pairs, 2, 524.0f);   // review fix 5: same x as the library
 }
 
 }  // namespace ui_launcher

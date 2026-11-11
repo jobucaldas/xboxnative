@@ -6,7 +6,10 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 app="$(cd "$here/.." && pwd)"
+root="$(cd "$app/../../.." && pwd)"
+assets="$root/out/ui-assets"
+[[ -f $assets/stb_truetype.h ]] || bash "$root/src/tools/fetch-ui-assets.sh" "$assets"
 bin=$(mktemp /tmp/ui-nav.XXXXXX)
 trap 'rm -f "$bin"' EXIT
-"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -I"$app" "$here/ui-nav.cpp" -o "$bin"
+"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -I"$assets" -I"$app" "$here/ui-nav.cpp" -o "$bin"
 "$bin"
