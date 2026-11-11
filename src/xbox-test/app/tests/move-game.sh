@@ -8,7 +8,10 @@ cd "$(dirname "$0")/.."
 out=out/move-game-tests
 rm -rf "$out"
 mkdir -p "$out/root"
-"${CONFIG_CXX:-x86_64-w64-mingw32-g++}" -std=c++17 -O2 -Wall -Wextra ${CONFIG_CXX_FLAGS:-} tests/move-game.cpp -o "$out/move-game.exe"
+# -static like game-delete.sh/storage-report.sh: CI installs no mingw runtime
+# DLLs, and a non-static exe dies there with STATUS_DLL_NOT_FOUND (exit 53)
+# before printing any test output.
+"${CONFIG_CXX:-x86_64-w64-mingw32-g++}" -std=c++17 -O2 -Wall -Wextra -static ${CONFIG_CXX_FLAGS:-} tests/move-game.cpp -o "$out/move-game.exe"
 root=$(winepath -w "$out/root" | tr -d '\r')
 # The mingw runtime DLLs must sit beside the exe for Wine to load it
 # (deps built from a pinned source; never committed — rule 5/9).
