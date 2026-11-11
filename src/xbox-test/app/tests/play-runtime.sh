@@ -338,9 +338,11 @@ grep -q 'PLAY-OPENGL STAGE context-current renderer=' "$out/opengl.log"
 # Version refusal (patches/mesa-src/0010): when the driver reports a GL version
 # below 3.0, a compat 3.0 request must fail with a real error, not error 0 —
 # the lost SetLastError made SDL3 report its stale pixel-format string. The
-# fixture only emits the stage when it ran the check (a 3.0+-capable driver
-# skips it), so an old Mesa build without the patch fails here.
-grep -q 'PLAY-OPENGL STAGE version-refusal err=[1-9]' "$out/opengl.log"
+# stage always reports: err=N when the refusal ran (an old Mesa build without
+# the patch yields err=0 and the fixture fails before any verdict line), or
+# "skipped version=X.Y" when the driver provides 3.0+ (the console's d3d12
+# reports 4.1; nothing to refuse there).
+grep -qE 'PLAY-OPENGL STAGE version-refusal (err=[1-9]|skipped version=[0-9]+\.)' "$out/opengl.log"
 if grep -q 'PLAY-OPENGL PASS pixel-readback' "$out/opengl.log"; then
   echo "PLAY-OPENGL PASS pixel-readback"
 elif grep -q 'PLAY-OPENGL BLOCKED pixel-readback' "$out/opengl.log"; then

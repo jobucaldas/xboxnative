@@ -151,15 +151,16 @@ int opengl_entry() {
      p = append(p, version ? version : "?"); p = append(p, "\"\n"); *p = 0; emit(line);}
 
     // Version refusal (the Fields of Mistria report): a request the driver
-    // cannot satisfy must fail with a real error. Mesa's d3d12 driver caps the
-    // GL version at 2.1 (no R9G9B9E5_FLOAT on the console's D3D12), so when the
-    // reported version is below 3.0 a compat 3.0 request is refused by the
-    // state tracker; wglCreateContextAttribsARB must then return NULL with
-    // GetLastError() set — patches/mesa-src/0010 maps the state tracker's
+    // cannot satisfy must fail with a real error. A host whose D3D12 refuses
+    // R9G9B9E5_SHAREDEXP caps Mesa at GL 2.1, so when the reported version is
+    // below 3.0 a compat 3.0 request is refused by the state tracker;
+    // wglCreateContextAttribsARB must then return NULL with GetLastError() set
+    // — patches/mesa-src/0010 maps the state tracker's
     // ST_CONTEXT_ERROR_BAD_VERSION to ERROR_INVALID_VERSION_ARB, and without it
     // the error is 0, which sent SDL3's "No matching GL pixel format available"
-    // investigation down the wrong path. A driver that does provide 3.0 skips
-    // the check (nothing to refuse).
+    // investigation down the wrong path. The stage always reports: err=N when
+    // the refusal ran, "skipped version=X.Y" when the driver provides 3.0+
+    // (nothing to refuse — the console's d3d12 reports GL 4.1).
     if (version && version[0] >= '0' && version[0] <= '9') {
         int major = version[0] - '0';
         if (major < 3) {
@@ -174,6 +175,9 @@ int opengl_entry() {
              p = appendInt(p, (int32_t)err); p = append(p, "\n"); *p = 0; emit(line);}
             if (refused) return fail(17, "version-refusal: 3.0 succeeded under a 2.1 driver", 0);
             if (!err) return fail(17, "version-refusal: NULL with error 0 (SetLastError lost)", 0);
+        } else {
+            {char line[160]; char* p = append(line, "PLAY-OPENGL STAGE version-refusal skipped version=");
+             p = append(p, version); p = append(p, "\n"); *p = 0; emit(line);}
         }
     }
 
