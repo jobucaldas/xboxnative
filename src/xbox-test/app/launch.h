@@ -1118,6 +1118,27 @@ static void lp_watchdog() {
         std::string("watchdog timeout 600 s preparing Steam before the game started; the game was not started"),false,0,0,"timeout");
 }
 
+// Item D22: B on the launch banner. A launch is cancelled only while it is
+// still preparing (phase 1) and no game code has started: the guard flags are
+// checked under the same lock lp_publish uses, so a cancel can never race a
+// publish that already reported the guest running. The worker notices the
+// abandoned generation at its next checkpoint (before the guest starts, in
+// the watchdog, and in lp_publish) and stops without starting it; the launch
+// is reported as cancelled so the page and launch_result.json agree.
+static bool cancel_launch(const char* via) {
+    std::lock_guard<std::mutex> lock(g_launch.m);
+    if(g_launch.phase!=1) return false;
+    if(g_launch.loaderStarted.load()!=0 || g_launch.pe32Executed.load()) return false;   // game code already started
+    if(play_runtime::observed.load(std::memory_order_acquire)) return false;
+    g_launch.result="Launch cancelled";g_launch.ok=false;g_launch.phase=2;
+    logf("launch: cancelled by the player before the game started (%s) attempt=%s",via,g_launch.attempt.c_str());
+    // lp_publish refuses a stale generation, so the terminal record is written
+    // here, in the same shape the worker writes it.
+    std::string json="{\"appid\":"+std::to_string(g_launch.appid.load())+",\"attemptId\":\""+g_launch.attempt+"\",\"time\":\""+utc_iso()+"\",\"stage\":\"loader\",\"state\":\"cancelled\",\"terminal\":true,\"ok\":false,\"mapped\":0,\"total\":0,\"gameCodeExecuted\":false,\"exitCode\":null,\"lastEvent\":\"launch cancelled\",\"result\":\"Launch cancelled\"}\n";
+    write_text(g_dir+L"\\launch_result.json",json);
+    return true;
+}
+
 // Entry: called on the render thread; returns immediately (work happens on a worker thread).
 // option (the picker's choice, an appinfo executable) starts that launch option
 // instead of the preferred one; nullptr picks the preferred option as before.

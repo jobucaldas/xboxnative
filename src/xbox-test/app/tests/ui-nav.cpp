@@ -356,6 +356,19 @@ int main() {
         check(g == Focus::grid, "D5: the grid keeps the focus without B");
     }
 
+    // ---- item D22: the launch banner and its cancel rule ----
+    {
+        // phases: 0 never, 1 starting, 2 finished, 3 guest running
+        check(ui_nav::launch_banner_up(1, false), "D22: the banner covers the screen while a launch prepares");
+        check(!ui_nav::launch_banner_up(1, true), "D22: the banner goes away when the guest window is up");
+        check(!ui_nav::launch_banner_up(2, false), "D22: the banner goes away when the launch ends");
+        check(!ui_nav::launch_banner_up(3, false), "D22: the banner goes away once the guest runs");
+        check(!ui_nav::launch_banner_up(0, false), "D22: no banner without a launch");
+        check(ui_nav::launch_cancel_allowed(1), "D22: B cancels a launch that is still preparing");
+        check(!ui_nav::launch_cancel_allowed(2) && !ui_nav::launch_cancel_allowed(3),
+              "D22: B cancels nothing once the launch ended or the guest runs");
+    }
+
     // ---- destructive sheets default to CANCEL (item 14) ----
     {
         ui_launcher::LogoutVM lo;

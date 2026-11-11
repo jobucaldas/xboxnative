@@ -1498,6 +1498,49 @@ inline void draw_signin(ui::Canvas& c, const Font& f, const SignVM& s) {
     draw_hint_bar(c, f, kSignHints, 2, 823.5f);
 }
 
+// ---- launch banner (item D22) ----
+// Play covers the whole screen with the game's wide library art and the launch
+// status along the bottom, so a launch reads as one deliberate action instead
+// of a note on the game page. B cancels while the launch is still preparing
+// (ui_nav::launch_cancel_allowed); the banner goes away when the guest window
+// comes up or the launch ends.
+struct LaunchBannerVM {
+    const char* title = "";
+    const char* status = "Launching...";
+    ui::Image art{};          // the wide library hero; empty -> the grey wash
+    float phase = 0.0f;       // 0..1 clock for the indeterminate bar
+    bool cancellable = true;
+};
+
+inline void draw_launch_banner(ui::Canvas& c, const Font& f, const LaunchBannerVM& v) {
+    using namespace ui::theme;
+    c.fill(ui::theme::page);
+    // the wide art cover-fit across the whole screen, then the same veil the
+    // game page uses so the text stays readable over any image
+    if (v.art.px && v.art.w > 0 && v.art.h > 0) {
+        c.draw_image(v.art, rect(0, 0, 1920, 1080), ui::Fit::Cover);
+    } else {
+        for (int y = 0; y < 1080; ++y)
+            c.fill_rect(0, float(y), 1920, 1, grad3(kNoCoverTop, kNoCoverTop, kNoCoverBot, float(y) / 1079.0f));
+    }
+    c.fill_rect_alpha(0, 0, 1920, 1080, ui::theme::page, 150);
+    // the bottom band: a solid page strip so the launch text never sits on art
+    for (int y = 760; y < 1080; ++y)
+        c.fill_rect_alpha(0, float(y), 1920, 1, ui::theme::page, uint8_t(255.0f * (y - 760) / 320.0f));
+    // title + status along the bottom-left, on the content margin
+    const std::string title = f.ellipsize(Face::Semibold, 56, v.title, 1400.0f);
+    text(c, f, Face::Semibold, 56, 64, 856, title.c_str(), ui::theme::text, -0.4f);
+    text(c, f, Face::Regular, 28, 64, 940, v.status, ui::theme::text2);
+    // indeterminate bar under the status (the same component the startup
+    // splash uses): a 160px accent segment sliding along the track
+    const float bx = 64.0f, by = 990.0f;
+    c.fill_round_rect(rect(bx, by, 480, 6), 3, ui::theme::track);
+    const float ph = v.phase - std::floor(v.phase);
+    c.fill_round_rect(rect(bx + (480.0f - 160.0f) * ph, by, 160, 6), 3, ui::theme::accent);
+    const char* pairs[2] = {"B", "Cancel"};
+    if (v.cancellable) draw_hint_bar(c, f, pairs, 1, 524.0f);
+}
+
 // ---- startup / loading splash (item D15) ----
 // The full-screen state at launch while the saved Steam session is restored and
 // the library is fetched. Same design language as the rest of the launcher:

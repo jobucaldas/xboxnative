@@ -1801,6 +1801,41 @@ int main(int argc, char** argv) {
         snap("launcher-d18-picker");
     }
 
+    // item D22: the fullscreen launch banner — the game's wide art behind a
+    // veil, the title and "Launching..." along the bottom, and a B/Cancel hint
+    // while the launch can still be cancelled.
+    {
+        ui_launcher::LaunchBannerVM v;
+        v.title = "Halo Wars: Definitive Edition";
+        v.status = "Launching...  (3 s)";
+        v.phase = 0.25f;
+        v.cancellable = true;
+        c.fill(ui::theme::page);
+        draw_launch_banner(c, font, v);
+        const auto ink_in = [&](float x0, float y0, float ww, float hh, uint32_t col) {
+            int n = 0;
+            for (int yy = int(y0); yy < int(y0 + hh); ++yy)
+                for (int xx = int(x0); int(xx) < int(x0 + ww); ++xx)
+                    if (px[size_t(yy) * W + xx] == col) ++n;
+            return n;
+        };
+        check(ink_in(64, 856, 1200, 70, ui::theme::text) > 0, "D22: the banner draws the game title");
+        check(ink_in(64, 940, 700, 40, ui::theme::text2) > 0, "D22: the banner draws the launch status");
+        // the indeterminate bar's accent segment is on the track
+        bool accent = false;
+        for (int x = 64; x < 544 && !accent; ++x)
+            if (px[size_t(992) * W + x] == ui::theme::accent) accent = true;
+        check(accent, "D22: the launch bar shows progress");
+        // the hint bar offers B / Cancel while the launch can be cancelled
+        check(ink_in(1200, 996, 644, 60, ui::theme::glyph) > 0, "D22: B / Cancel is offered while cancellable");
+        snap("launcher-d22-launch-banner");
+        // not cancellable: no hint bar
+        v.cancellable = false;
+        c.fill(ui::theme::page);
+        draw_launch_banner(c, font, v);
+        check(ink_in(1200, 996, 644, 60, ui::theme::glyph) == 0, "D22: no B hint once the game has started");
+    }
+
     // item 28: the Auto-update row — ring when focused, pill fully inside the
     // row with >=24px right padding (pixel-scan at 1920x1080).
     {

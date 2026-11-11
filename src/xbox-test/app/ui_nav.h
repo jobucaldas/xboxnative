@@ -493,4 +493,13 @@ inline bool back_at_root(Focus& focus, bool b_pressed) {
     return true;
 }
 
+// ---- launch banner (item D22) ----
+// Play shows a fullscreen banner (the game's wide art + "Launching...") until
+// the guest's own window is up. B cancels, but only while the launch is still
+// preparing: once game code has started (phase 3) or the launch has ended
+// (phase 2) there is nothing left to cancel. g_launch phases: 0 never,
+// 1 starting, 2 finished, 3 guest running.
+inline bool launch_banner_up(int phase, bool guest_surface) { return phase == 1 && !guest_surface; }
+inline bool launch_cancel_allowed(int phase) { return phase == 1; }
+
 }  // namespace ui_nav

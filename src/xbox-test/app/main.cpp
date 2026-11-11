@@ -1843,9 +1843,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // restarts to unload it, with or without a game window.
     void guest_ended() {
         if(g_launch.phase!=2 || m_guestEndGen==g_launch.gen)return;
-        if(!m_guestSurface && !play_runtime::observed.load(std::memory_order_acquire))return;
         std::string result;bool ok;
         {std::lock_guard<std::mutex> lock(g_launch.m);ok=g_launch.ok;result=g_launch.result;}
+        // item D22: a launch the player cancelled never started game code, so
+        // there is nothing to unload and no crash to explain — the page just
+        // shows the cancellation note. (Checked before the guest-surface guard:
+        // a cancelled launch has no surface and no runtime.)
+        if(result=="Launch cancelled"){m_guestEndGen=g_launch.gen;logf("launch: cancelled launch ended; staying on the game page");m_dNote=result;return;}
+        if(!m_guestSurface && !play_runtime::observed.load(std::memory_order_acquire))return;
         m_guestEndGen=g_launch.gen;
         achievement_poller_stop();   // the guest is exiting; stop watching its achievements.json
         m_achPollStarted=false;      // the next launch starts its own poller
@@ -2422,6 +2427,39 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         return sb;
     }
 
+    // item D22: the fullscreen launch banner. The wide art is the same
+    // library_hero.jpg the game page uses (header.jpg fallback), fetched on
+    // demand and cached per appid for the session.
+    void draw_launch_banner(double t) {
+        ui::Canvas c(g_fb.data(), W, H, W);
+        static std::map<uint32_t, ui::Image> banners;   // pixel memory the VM points into
+        const uint32_t appid = g_launch.appid.load();
+        ui::Image art;
+        auto it = banners.find(appid);
+        if (it == banners.end()) {
+            Hero hm = hero_get(appid);
+            if (hm.state == 2 && hm.pix && !hm.pix->empty()) {
+                art = ui::Image{hm.pix->data(), hm.w, hm.h, hm.w};
+                banners[appid] = art;
+            }
+        } else {
+            art = it->second;
+        }
+        static std::string title, status;
+        title = game_name(appid);
+        if (title.empty()) title = "App " + std::to_string(appid);
+        char b[96];
+        snprintf(b, sizeof b, "Launching...  (%.0f s)", now_s() - g_launch.started);
+        status = b;
+        ui_launcher::LaunchBannerVM v;
+        v.title = title.c_str();
+        v.status = status.c_str();
+        v.art = art;
+        v.phase = float(t) * 0.5f;
+        v.cancellable = ui_nav::launch_cancel_allowed(g_launch.phase.load()) && g_launch.loaderStarted.load() == 0;
+        ui_launcher::draw_launch_banner(c, g_font, v);
+    }
+
     void draw_library(double t) {
         refresh_installed(t);
         ui::Canvas c(g_fb.data(), W, H, W);
@@ -2701,6 +2739,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // The 1920x1080 g_fb persists across screens: every frame starts from
         // a clean page so no screen draws over the previous one's remnants.
         fill(0, 0, W, H, ui::theme::page);
+        // item D22: Play covers the screen with the game's wide art and the
+        // launch status until the guest's own window is up (or the launch
+        // ends). It sits above every screen, since Play can start from the
+        // library or the game page.
+        if (ui_nav::launch_banner_up(g_launch.phase.load(), m_guestSurface)) { draw_launch_banner(t); return; }
         if (s == S_LOGIN) draw_login();
         else if (s == S_BOOT || s == S_LOADING) draw_startup(t);   // item D15: the launch/loading screens
         else if (s == S_LIBRARY) draw_library(t);
@@ -2725,6 +2768,16 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         for (auto m : {GamepadButtons::A, GamepadButtons::B, GamepadButtons::X, GamepadButtons::Y, GamepadButtons::DPadUp, GamepadButtons::DPadDown, GamepadButtons::DPadLeft, GamepadButtons::DPadRight})
             if (has(edge, m)) logf("button event mask=0x%x screen=%d", (unsigned)m, (int)g_screen);
         logf("input source=%s edge=0x%x buttons=0x%x stick=(%.3f,%.3f) held=%.3f", source, (unsigned)edge, (unsigned)rd.Buttons, rd.LeftThumbstickX, rd.LeftThumbstickY, t - m_pad.heldSince);
+        // item D22: the launch banner owns the screen while a launch prepares;
+        // B cancels it (only before game code starts), A and every other
+        // button are ignored so the game page underneath cannot act.
+        if (ui_nav::launch_banner_up(g_launch.phase.load(), m_guestSurface)) {
+            if (has(edge, GamepadButtons::B)) {
+                if (cancel_launch(source)) logf("launch banner: cancelled (%s)", source);
+                else logf("launch banner: B ignored, the game already started (%s)", source);
+            }
+            return;
+        }
         // A running guest owns the controller (it reads the same pad through XInput/WGI).
         // While its surface is up the launcher UI is not visible either (also during the
         // final save upload before the restart), so it must not act on those presses.
