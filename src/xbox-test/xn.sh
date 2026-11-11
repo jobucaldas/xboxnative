@@ -323,8 +323,12 @@ console_run() {
   echo "PASS: launcher running"
 
   echo "-- self-test ($modes) --"
-  local before=0 tmp; tmp=$(mktemp -d)
-  if bash "$dp/get-file.sh" "$full_new" '\LocalState' selftest.log "$tmp/prev.log" >/dev/null 2>&1; then before=$(wc -l < "$tmp/prev.log"); fi
+  # The launcher deletes selftest.log when it consumes a request (selftest.h: "a new
+  # request starts a new record"), so the fetched log is a fresh replacement, not an
+  # append — judging it needs no line offset. Wait until the request file is gone
+  # (consumption deletes it), then the log belongs to this run alone; an earlier
+  # run's summary can never satisfy the verdict.
+  local tmp consumed=0; tmp=$(mktemp -d)
   printf '%s\n' "$modes" | tr ',' '\n' > "$tmp/selftest.txt"
   if ! bash "$dp/put-file.sh" "$full_new" '\LocalState' "$tmp/selftest.txt" 2>/dev/null | grep -Eq 'put HTTP 2[0-9][0-9]'; then
     echo "FAIL: could not upload selftest.txt"; rm -rf "$tmp"; return 1
@@ -332,10 +336,19 @@ console_run() {
   local end=$((SECONDS + timeout)) vcode=4
   while [ $SECONDS -lt $end ]; do
     sleep 10
+    if [ "$consumed" -eq 0 ]; then
+      # the request file disappears once the launcher has taken the run
+      rm -f "$out/selftest-gone.txt" "$out/selftest-gone.log"
+      if bash "$dp/get-file.sh" "$full_new" '\LocalState' selftest.txt "$out/selftest-gone.txt" > "$out/selftest-gone.log" 2>&1; then
+        continue   # still there: the launcher has not consumed the request yet
+      fi
+      grep -q 'HTTP 404' "$out/selftest-gone.log" || continue   # a network error is not consumption
+      consumed=1
+    fi
     # the launcher restarts between fixtures, so a failed pull is normal now and then
     rm -f "$out/selftest.log"
     bash "$dp/get-file.sh" "$full_new" '\LocalState' selftest.log "$out/selftest.log" >/dev/null 2>&1 || continue
-    python3 -I "$helper" selftest-verdict "$out/selftest.log" "$before" > "$out/selftest-report.txt"; vcode=$?
+    python3 -I "$helper" selftest-verdict "$out/selftest.log" > "$out/selftest-report.txt"; vcode=$?
     [ "$vcode" -eq 4 ] || break
   done
   rm -rf "$tmp"

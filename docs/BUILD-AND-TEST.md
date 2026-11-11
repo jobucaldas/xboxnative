@@ -83,7 +83,9 @@ What a full run does, in order, each step a PASS or FAIL line:
    actually listed (the install call can report success before the deployment finishes).
 6. Launches it and waits for the main loop.
 7. Uploads `selftest.txt` and waits for the launcher's own `SELFTEST SUMMARY`
-   (see [SELFTEST.md](SELFTEST.md)). Only lines written by this run count; an earlier run's summary never satisfies it.
+   (see [SELFTEST.md](SELFTEST.md)). The launcher deletes the log when it takes the
+   request, so `xn` waits until `selftest.txt` is gone and then judges the fresh log
+   with no line offset; an earlier run's summary never satisfies it.
 8. Collects `selftest.log`, `selftest_probe.log`, `boot.log` and a screenshot.
 9. With `--game APPID`, then runs the acceptance test `src/xbox-test/tools/play-test.sh APPID` against the new package
    (an owned game and a signed-in launcher are needed).

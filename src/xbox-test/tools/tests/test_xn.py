@@ -216,6 +216,9 @@ if op == 'waitlog':
 if op == 'put':
     f = Path(a[2])
     if f.name == 'selftest.txt':
+        # The real launcher consumes the request (deletes selftest.txt) and starts a
+        # fresh selftest.log — a new request is a new record, not an append.
+        st['request_pending'] = True
         modes = [m for m in f.read_text().split() if m]
         st['requested'] = modes
         scenario = st['selftest']
@@ -227,10 +230,16 @@ if op == 'put':
             p = 1 + (scenario == 'pass')
             lines.append('SELFTEST SUMMARY pass=%d fail=%d blocked=%d skip=%d' % (
                 p, scenario == 'fail', scenario == 'blocked', scenario == 'skip'))
-        st['log'] += '\n'.join(lines) + '\n'
+        st['log'] = '\n'.join(lines) + '\n'
     save(); print('put HTTP 200'); sys.exit(0)
 if op == 'get':
     fname, out = a[2], a[3]
+    if fname == 'selftest.txt':
+        # The launcher takes the request on its own tick: the first poll still sees
+        # it, afterwards it is consumed (deleted) and the log belongs to the run.
+        if st.pop('request_pending', False):
+            Path(out).write_text('pending'); print('get HTTP 200'); save(); sys.exit(0)
+        Path(out).write_text('{"ErrorCode":404}'); print('get HTTP 404'); sys.exit(1)
     if fname == 'selftest.log':
         if st['log'] == '' and not st.get('log_exists', True):
             Path(out).write_text('{"ErrorCode":404}'); print('get HTTP 404'); sys.exit(1)
