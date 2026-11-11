@@ -1412,6 +1412,69 @@ int main(int argc, char** argv) {
                     if (px[size_t(yy) * W + xx] == ui::theme::focus) { bring = true; break; }
             check(bring, "D11: the focused block wears the focus ring");
         }
+
+        // item D12: the disk ring starts at 6 o'clock and sweeps CLOCKWISE.
+        // Probe the four compass points of the ring band (r 21..26 around
+        // 383,981): 25% fills the LEFT side (9 o'clock), 50% reaches the top,
+        // 75% the right side, and 100% covers the whole band.
+        {
+            const auto ring_px = [&](int pct) {
+                SidebarVM s5; s5.focus = -1; s5.used_pct = pct;
+                c.fill(ui::theme::page);
+                draw_sidebar(c, font, s5);
+                return px;
+            };
+            const auto at = [&](const std::vector<uint32_t>& img, float x, float y) {
+                return img[size_t(int(y)) * W + int(x)];
+            };
+            const float cx = 383.0f, cy = 981.0f, rmid = 23.5f;
+            // (55/80 rather than 50/75: the arc's END is anti-aliased, so a
+            // probe exactly on the boundary is a partial blend by design)
+            const auto left = ring_px(25), over = ring_px(55), three = ring_px(80), full = ring_px(100);
+            check(at(left, cx - rmid, cy) == ui::theme::accent && at(left, cx + rmid, cy) != ui::theme::accent,
+                  "D12: 25% fills the ring from 6 o'clock clockwise to 9 o'clock (left side only)");
+            check(at(over, cx, cy - rmid) == ui::theme::accent && at(over, cx + rmid, cy) != ui::theme::accent,
+                  "D12: past 50% the arc reaches 12 o'clock and not the right side");
+            check(at(three, cx + rmid, cy) == ui::theme::accent && at(three, cx, cy - rmid) == ui::theme::accent,
+                  "D12: past 75% the arc reaches 3 o'clock");
+            check(at(full, cx - rmid, cy) == ui::theme::accent && at(full, cx + rmid, cy) == ui::theme::accent &&
+                  at(full, cx, cy + rmid) == ui::theme::accent,
+                  "D12: 100% fills the whole ring");
+            // 0%: nothing but the track
+            const auto zero = ring_px(0);
+            check(at(zero, cx - rmid, cy) == ui::theme::track && at(zero, cx, cy - rmid) == ui::theme::track,
+                  "D12: 0% draws the track only");
+        }
+        // item D12: the % label fits INSIDE the ring at 0/9/34/100, focused or
+        // not, and reads brighter while focused.
+        {
+            const float inner_d = 2.0f * (26.0f - 5.0f);
+            for (const char* s6 : {"0%", "9%", "34%", "100%"})
+                check(font.measure(ui::Face::Regular, ring_pct_px(font, s6, inner_d), s6) + 4.0f <= inner_d,
+                      (std::string("D12: '") + s6 + "' fits inside the ring").c_str());
+            check(ring_pct_px(font, "100%", inner_d) <= ring_pct_px(font, "0%", inner_d),
+                  "D12: the label shrinks for the widest value");
+            const auto pct_ink = [&](int pct, bool focus, uint32_t col) {
+                SidebarVM s7; s7.focus = focus ? ui_nav::kSidebarStorage : -1; s7.used_pct = pct;
+                c.fill(ui::theme::page);
+                draw_sidebar(c, font, s7);
+                int n = 0;
+                // the ring's inner circle: anything of this colour inside it
+                for (int y = int(981 - 20); y < int(981 + 20); ++y)
+                    for (int x = int(383 - 20); x < int(383 + 20); ++x) {
+                        const float dx = float(x) - 383.0f, dy = float(y) - 981.0f;
+                        if (dx * dx + dy * dy <= 19.0f * 19.0f && px[size_t(y) * W + x] == col) ++n;
+                    }
+                return n;
+            };
+            for (int pct : {0, 9, 34, 100}) {
+                const std::string tag = "D12: " + std::to_string(pct) + "% draws inside the ring";
+                check(pct_ink(pct, false, ui::theme::textDim) > 0, tag.c_str());
+                check(pct_ink(pct, false, ui::theme::text2) == 0, "D12: the unfocused label is the dim colour");
+                check(pct_ink(pct, true, ui::theme::text2) > 0, "D12: the focused label reads brighter (text2)");
+            }
+            snap("launcher-d12-disk-ring");
+        }
         // ring containment: the focus-ink bbox lies within the sidebar rect
         // inset by 8px (x 40..435, y 40..1040)
         {

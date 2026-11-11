@@ -519,6 +519,17 @@ inline float draw_hint_bar(ui::Canvas& c, const Font& f, const char* const* pair
 }
 
 // ---- sidebar (shared by library and download-queue screens) ----
+// Item D12: the % inside the disk ring. The ring's inner circle is 2*(r-t)
+// across; the label uses the largest of these sizes whose measured width fits
+// inside it with a 4px margin, so 0%, 9%, 34% and 100% all sit inside the ring
+// instead of spilling over the stroke.
+inline float ring_pct_px(const Font& f, const char* s, float inner_d) {
+    const float sizes[3] = {18.0f, 16.0f, 14.0f};
+    for (float px : sizes)
+        if (f.measure(Face::Regular, px, s) + 4.0f <= inner_d) return px;
+    return sizes[2];
+}
+
 inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
     using namespace ui::theme;
     c.fill_round_rect(rect(kSidebarX, kSidebarY, kSidebarW, kSidebarH), radiusPanel, ui::theme::panel);
@@ -675,12 +686,21 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
         const uint32_t track = active ? ui::theme::accent : ui::theme::track;
         const uint32_t arc = active ? ui::theme::accentSoft : ui::theme::accent;
         c.fill_donut(383, 981, 26, 5, -ui::kPi * 0.5f, ui::kTau, track);
+        // Item D12: the used arc STARTS at 6 o'clock and sweeps CLOCKWISE
+        // (screen angles grow clockwise), so 0% is empty, 25% reaches 9
+        // o'clock, 50% the top and 100% the full ring.
         if (sb.used_pct > 0) {
             const float sweep = ui::kTau * sb.used_pct / 100.0f;
-            c.fill_donut(383, 981, 26, 5, ui::kPi * 0.5f - sweep * 0.5f, sweep, arc);
+            c.fill_donut(383, 981, 26, 5, ui::kPi * 0.5f, sweep, arc);
         }
+        // Item D12: the % label sits INSIDE the ring and stays readable when
+        // the widget has focus: the size shrinks to the largest one whose ink
+        // fits the ring's inner circle, so 0/9/34/100 all fit, and the colour
+        // steps up to text2 while focused.
         std::snprintf(b, sizeof b, "%d%%", sb.used_pct);
-        text_c(c, f, Face::Regular, 16, 383, 970.5f, b, ui::theme::textDim);
+        const float pct_px = ring_pct_px(f, b, 2.0f * (26.0f - 5.0f));
+        const float pct_top = 981.0f - f.line_height(Face::Regular, pct_px) * 0.5f;
+        text_c(c, f, Face::Regular, pct_px, 383, pct_top, b, focused ? ui::theme::text2 : ui::theme::textDim);
         if (focused)
             focus_ring(c, rect(52 - ringOffset, 940 - ringOffset, 372 + ringOffset * 2, 92 + ringOffset * 2),
                        radiusCard + ringRadiusDelta, ringWidth);
