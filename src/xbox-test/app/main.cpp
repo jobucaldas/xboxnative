@@ -528,14 +528,19 @@ static std::atomic<int> g_sortMode{ui_nav::kSortAlphabetical};   // item 25: the
 // the same indexes the sort popup shows (ui_nav::kSortAlphabetical...).
 static const char* SORT_NAMES[] = {"Alphabetical", "Most played", "Recently played", "Favorites"};   // item D10 adds Favorites
 static std::string lower(std::string s) { for (auto& c : s) c = (char)tolower((unsigned char)c); return s; }
-static std::set<uint32_t> g_favSort;   // item D10: the favorite set the 'Favorites' sort key reads (guarded by g_gm)
+// Item D10: guarded by its OWN mutex, never by g_gm — the library's draw holds
+// g_gm while it asks is_favorite(), and the favorites load must not take it a
+// second time (a non-recursive mutex deadlocks the UI thread there).
+static std::mutex g_favM;
+static std::set<uint32_t> g_favSort;   // the favorite set the 'Favorites' sort key reads (guarded by g_favM)
 static void sort_games(int mode) {   // caller holds g_gm
     logf("grid list resort/reload mode=%d count=%zu (position unchanged)", mode, g_games.size());
-    std::stable_sort(g_games.begin(), g_games.end(), [mode](const std::shared_ptr<Game>& a, const std::shared_ptr<Game>& b) {
+    std::set<uint32_t> fav; { std::lock_guard<std::mutex> l(g_favM); fav = g_favSort; }
+    std::stable_sort(g_games.begin(), g_games.end(), [mode, &fav](const std::shared_ptr<Game>& a, const std::shared_ptr<Game>& b) {
         if (mode == ui_nav::kSortMostPlayed) return a->playtime > b->playtime;
         if (mode == ui_nav::kSortRecentlyPlayed) return a->lastPlayed > b->lastPlayed;
         if (mode == ui_nav::kSortFavorites) {   // item D10: favorites first, then alphabetical
-            const bool fa = g_favSort.count(a->appid) != 0, fb = g_favSort.count(b->appid) != 0;
+            const bool fa = fav.count(a->appid) != 0, fb = fav.count(b->appid) != 0;
             if (fa != fb) return fa;
         }
         return lower(a->name) < lower(b->name); });
@@ -1234,7 +1239,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         m_favoritesLoaded = true;
         std::string text;
         if (read_file_s(g_dir + L"\\favorites.txt", text)) m_favorites = favorites::parse(text);
-        { std::lock_guard<std::mutex> l(g_gm); g_favSort = m_favorites; }
+        { std::lock_guard<std::mutex> l(g_favM); g_favSort = m_favorites; }
         logf("favorites: %zu game(s) loaded", m_favorites.size());
     }
     void save_favorites() { write_text(g_dir + L"\\favorites.txt", favorites::format(m_favorites)); }
@@ -1244,7 +1249,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         const bool now = favorites::toggle(m_favorites, appid);
         save_favorites();
         // item D10: the Favorites sort/filter read the same set
-        { std::lock_guard<std::mutex> l(g_gm); g_favSort = m_favorites; if (g_sortMode.load() == ui_nav::kSortFavorites) sort_games(ui_nav::kSortFavorites); }
+        { std::lock_guard<std::mutex> l(g_favM); g_favSort = m_favorites; } if (g_sortMode.load() == ui_nav::kSortFavorites) { std::lock_guard<std::mutex> l(g_gm); sort_games(ui_nav::kSortFavorites); }
         logf("favorites: appid=%u -> %s (%s)", appid, now ? "favorite" : "not favorite", via);
     }
     std::string m_achName, m_achSub; float m_achPct = 0; bool m_focusAch = false;   // latest achievement (no live schema feed yet; stays off)
