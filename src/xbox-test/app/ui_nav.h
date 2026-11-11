@@ -78,6 +78,25 @@ constexpr int kSortRecentlyPlayed = 2;
 constexpr int kSortFavorites = 3;
 constexpr int kSortOptionCount = 4;
 
+// ---- account list popup (item D14) ----
+// Rows: the console's Xbox users, the Steam account, 'Log out of Steam', and
+// Cancel last (focused on open, so a stray A never logs out). The account
+// rows are informational: A on one does nothing, B/Cancel closes the popup.
+inline int accounts_open_sel(int accounts) { return accounts + 1; }   // the Cancel row
+inline bool accounts_move(int& sel, int accounts, bool down) {
+    const int n = (accounts < 0 ? 0 : accounts) + 2;   // Log out + Cancel always exist
+    if (n <= 0) return false;
+    sel = down ? (sel + 1) % n : (sel + n - 1) % n;
+    return true;
+}
+// A on row `sel`: 0 cancel, 1 log out (n = the accounts count), 2 nothing.
+enum class AccountAction { cancel, logout, none };
+inline AccountAction accounts_activate(int sel, int accounts) {
+    if (sel == accounts + 1) return AccountAction::cancel;
+    if (sel == accounts) return AccountAction::logout;
+    return AccountAction::none;
+}
+
 // ---- Downloads block (item D11) ----
 // The sidebar's bottom block replaces the old 'Download queue' list row. Its
 // queued count is a short label, empty when nothing waits: '3 queued'.

@@ -1507,6 +1507,73 @@ int main(int argc, char** argv) {
         snap("launcher-r6-disk-active");
     }
 
+    // ---- item D14: the account list popup and the profile row's source label ----
+    {
+        const auto ink_in = [&](float x0, float y0, float w, float h, uint32_t col) {
+            int n = 0;
+            for (int yy = int(y0); yy < int(y0 + h); ++yy)
+                for (int xx = int(x0); xx < int(x0 + w); ++xx)
+                    if (px[size_t(yy) * W + xx] == col) ++n;
+            return n;
+        };
+        // the profile row labels which account it shows; an empty source draws
+        // nothing there (the mockups' unlabelled row)
+        {
+            SidebarVM sp; sp.all_count = 40; sp.persona = "Alex"; sp.persona_source = "Xbox";
+            c.fill(ui::theme::page);
+            draw_sidebar(c, font, sp);
+            check(ink_in(300, 86, 112, 28, ui::theme::textMuted) > 0, "D14: the profile row names the account source");
+            SidebarVM sn; sn.all_count = 40; sn.persona = "Alex"; sn.persona_source = "";
+            c.fill(ui::theme::page);
+            draw_sidebar(c, font, sn);
+            check(ink_in(300, 86, 112, 28, ui::theme::textMuted) == 0, "D14: no source, no label");
+            snap("launcher-d14-profile-source");
+        }
+        // the sheet: one row per account (with its source), then Log out, then
+        // Cancel; the ring starts on Cancel
+        {
+            const char* names[2] = {"Alex", "SteamPlayer"};
+            const char* sources[2] = {"Xbox", "Steam"};
+            AccountVM v; v.names = names; v.sources = sources; v.n = 2;
+            v.sel = ui_nav::accounts_open_sel(v.n);
+            check(account_row_count(v) == 4, "D14: two accounts make four rows (accounts, Log out, Cancel)");
+            c.fill(ui::theme::page);
+            draw_accounts_sheet(c, font, v);
+            // panel geometry: x 560..1360, rows 64 tall with 12 gaps
+            const float x = 560.0f, w = 800.0f, pad = 32.0f, row_h = 64.0f, gap = 12.0f;
+            const float first = 84.0f + 30.0f + 24.0f;
+            const float h = first + 4.0f * (row_h + gap) - gap + pad;
+            const float top = (1080.0f - h) * 0.5f;
+            check(px[size_t(int(top + 10)) * W + int(x + 10)] == ui::theme::panel, "D14: the sheet draws a panel");
+            for (int i = 0; i < 4; ++i) {
+                const float ry = top + first + float(i) * (row_h + gap);
+                const std::string tag = std::string("D14: row ") + std::to_string(i + 1) + " draws its label";
+                check(ink_in(x + pad + 24, ry + 10, 400, row_h - 20, ui::theme::text) +
+                      ink_in(x + pad + 24, ry + 10, 400, row_h - 20, ui::theme::text2) > 0, tag.c_str());
+            }
+            // the source labels sit at the rows' right edge
+            const float r0 = top + first, r1 = top + first + (row_h + gap);
+            check(ink_in(x + w - pad - 140, r0 + 12, 140, row_h - 24, ui::theme::textMuted) > 0, "D14: the Xbox row's source label draws");
+            check(ink_in(x + w - pad - 140, r1 + 12, 140, row_h - 24, ui::theme::textMuted) > 0, "D14: the Steam row's source label draws");
+            // the ring is around the LAST row (Cancel), never an account row
+            // the ring is an outline just outside the row's left edge (the
+            // rows' own labels are white too, so probe the ring band only)
+            const auto ring_at = [&](int i) {
+                const float ry = top + first + float(i) * (row_h + gap);
+                for (int yy = int(ry - 12); yy < int(ry + row_h + 12); ++yy)
+                    for (int xx = int(x + pad - 12); xx < int(x + pad - 3); ++xx)
+                        if (px[size_t(yy) * W + xx] == ui::theme::focus) return true;
+                return false;
+            };
+            const bool ring_cancel = ring_at(3);
+            const bool ring_other = ring_at(0) || ring_at(1) || ring_at(2);
+            check(ring_cancel, "D14: the sheet opens with the ring on Cancel");
+            check(!ring_other, "D14: no account row is focused on open");
+            check(ink_in(0, 0, float(W), float(H), ui::theme::scrim) == 0, "D14: the scrim is blended, not a flat fill");
+            snap("launcher-d14-accounts");
+        }
+    }
+
     // item 28: the Auto-update row — ring when focused, pill fully inside the
     // row with >=24px right padding (pixel-scan at 1920x1080).
     {

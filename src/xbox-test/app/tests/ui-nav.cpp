@@ -75,6 +75,27 @@ int main() {
         check(std::string(ui_nav::downloads_title("Hades")) == "Hades", "D11: a running download names the game");
     }
 
+    // ---- item D14: the account list opens on Cancel and never logs out by accident ----
+    {
+        check(ui_nav::accounts_open_sel(0) == 1, "D14: no accounts still opens on Cancel");
+        check(ui_nav::accounts_open_sel(1) == 2, "D14: one account opens on Cancel (row 2)");
+        check(ui_nav::accounts_open_sel(3) == 4, "D14: three accounts open on Cancel (row 4)");
+        int sel = ui_nav::accounts_open_sel(2);
+        check(ui_nav::accounts_move(sel, 2, true) && sel == 0, "D14: down from Cancel wraps to the first account");
+        check(ui_nav::accounts_move(sel, 2, false) && sel == 3, "D14: up from the first account wraps to Cancel");
+        int lap = ui_nav::accounts_open_sel(2);
+        for (int i = 0; i < 4; ++i) ui_nav::accounts_move(lap, 2, true);
+        check(lap == ui_nav::accounts_open_sel(2), "D14: a full lap returns to Cancel");
+        int none = 0;
+        check(ui_nav::accounts_move(none, -1, true) && none == 1, "D14: a negative count still has Log out + Cancel");
+        check(ui_nav::accounts_move(none, -1, true) && none == 0, "D14: and wraps between them");
+        check(ui_nav::accounts_activate(3, 2) == ui_nav::AccountAction::cancel, "D14: A on Cancel only closes");
+        check(ui_nav::accounts_activate(2, 2) == ui_nav::AccountAction::logout, "D14: A on Log out asks for confirmation");
+        check(ui_nav::accounts_activate(0, 2) == ui_nav::AccountAction::none, "D14: A on an account row does nothing destructive");
+        check(ui_nav::accounts_activate(0, 0) == ui_nav::AccountAction::logout, "D14: with no accounts the logout row is row 0");
+        check(ui_nav::accounts_activate(1, 0) == ui_nav::AccountAction::cancel, "D14: with no accounts Cancel is row 1");
+    }
+
     // ---- sort cycling wraps over the existing three modes ----
     {
         check(cycle_sort(0, 3) == 1, "sort 0->1 (recently played exists)");

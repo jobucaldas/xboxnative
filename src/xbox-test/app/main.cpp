@@ -40,6 +40,7 @@
 #include <winrt/Windows.Data.Json.h>
 #include <winrt/Windows.Networking.h>
 #include <winrt/Windows.Networking.Sockets.h>
+#include <winrt/Windows.System.h>
 #include <chrono>
 #include "qrcodegen.hpp"
 extern "C" {
@@ -324,6 +325,42 @@ static bool file_exists(const std::wstring& p) { return GetFileAttributesW(p.c_s
 // default, never an invented name.
 static std::mutex g_personaM; static std::string g_personaName;
 static std::string persona_name() { std::lock_guard<std::mutex> l(g_personaM); return g_personaName; }
+
+// Item D14: the console's signed-in XBOX user (Windows.System.User), read once
+// on a worker thread. The sidebar's profile row prefers it and labels which
+// account it is showing ("Xbox" / "Steam"); with none it falls back to the
+// Steam persona. Names are the owner's own: never logged, never written to
+// disk, and the tests use fake names only.
+static std::mutex g_xboxM; static std::vector<std::string> g_xboxNames;
+static std::atomic<int> g_xboxState{0};   // 0 none, 1 loading, 2 ready, 3 unavailable
+static std::vector<std::string> xbox_user_names() { std::lock_guard<std::mutex> l(g_xboxM); return g_xboxNames; }
+static void xbox_users_fetch() {
+    init_apartment(apartment_type::multi_threaded);
+    std::vector<std::string> names;
+    try {
+        auto users = winrt::Windows::System::User::FindAllAsync(winrt::Windows::System::UserType::LocalUser).get();
+        for (auto const& u : users) {
+            std::string name;
+            try {
+                auto v = u.GetPropertyAsync(winrt::Windows::System::KnownUserProperties::DisplayName()).get();
+                name = winrt::to_string(winrt::unbox_value<winrt::hstring>(v));
+            } catch (...) {}
+            if (name.empty()) name = "Xbox user";
+            names.push_back(name);
+        }
+    } catch (...) { logf("accounts: Windows.System.User unavailable on this console"); }
+    { std::lock_guard<std::mutex> l(g_xboxM); g_xboxNames = names; }
+    g_xboxState = names.empty() ? 3 : 2;
+    logf("accounts: %zu Xbox user(s) found (names not logged)", names.size());
+}
+static void start_xbox_users_fetch() {
+    int st = 0;
+    if (g_xboxState.compare_exchange_strong(st, 1)) std::thread(xbox_users_fetch).detach();
+}
+// Item D14: the account list's rows — every Xbox user the console reports,
+// plus the Steam account once a persona has arrived (labelled "Steam"). The
+// order is Xbox users first, Steam last, so the row the sidebar names is first.
+static int accounts_count() { return (int)xbox_user_names().size() + (persona_name().empty() ? 0 : 1); }
 
 // Selawik fonts for the ui:: toolkit, loaded once from the package's fonts/
 // folder (build.sh copies out/ui-assets into layout/fonts/). The bytes must
@@ -932,6 +969,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     Pad m_pad; int m_prevPads = -1; uint64_t m_frame = 0;
     int m_sel = 0, m_top = 0; double m_scroll = 0, m_scrollT = 0; bool m_btnFocus = true, m_confirmLogout = false;
     bool m_logoutYes = false;   // item 14: logout sheet focus, false = Cancel (never defaults to the destructive button)
+    // Item D14: the account list popup (A on the profile row). Rows: the
+    // console's Xbox users, the Steam account, Log out of Steam, Cancel last
+    // and focused on open.
+    bool m_accountsOpen = false;
+    int m_accountsSel = 0;
     // library header selectors (item 1): sort dropdown, filters panel, search
     // overlay; m_hdrFocus follows ui_nav::kHeaderControlCount (0 sort, 1
     // filters, 2 search, -1 grid/sidebar).
@@ -1250,7 +1292,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         m_optApp = 0;   // a fresh page: the run-option count is read again (a download may have cached appinfo)
         auto si = std::make_shared<StoreInfo>(); si->appid = id; m_dSi = si; std::thread(store_worker, si).detach();
         { InstallInfo ii = read_install(id); if (ii.installed && !g_demo) cloud_async(id, ii.folder, false); }   // status line: what the cloud holds
-        m_confirmLogout = false; m_logoutYes = false; m_cloudOpen = false; m_cloudFocus = 0; m_dFocus = 0;
+        m_confirmLogout = false; m_logoutYes = false; m_accountsOpen = false; m_cloudOpen = false; m_cloudFocus = 0; m_dFocus = 0;
         g_screen = S_DETAIL; logf("detail: open appid=%u name='%s' via=%s", id, m_dName.c_str(), via);
     }
     void close_detail(const char* why) {
@@ -1264,7 +1306,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // 5 storage management.
     void sidebar_activate(double t, const char* source) {
         int target = ui_nav::sidebar_target(m_sidebar);
-        if (target == ui_nav::kSidebarProfile) { g_screen = S_LIBRARY; m_confirmLogout = true; m_logoutYes = false; logf("sidebar: profile row -> logout sheet, focus on Cancel (%s)", source); }   // the sheet draws on the library
+        if (target == ui_nav::kSidebarProfile) {   // item D14: the account list, not the logout sheet directly
+            g_screen = S_LIBRARY; m_accountsOpen = true; m_accountsSel = ui_nav::accounts_open_sel(accounts_count());
+            logf("sidebar: profile row -> accounts popup, focus on Cancel (%s)", source);
+        }
         else if (target == ui_nav::kSidebarSearch) { g_screen = S_LIBRARY; m_hdrFocus = -1; m_focus = ui_nav::Focus::grid; ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 2); m_searchKey = 0; ui_nav::search_clamp_caret(m_search); logf("sidebar: search overlay open (%s)", source); }   // the overlay draws on the library
         else if (target == 2 || target == 3) {
             bool want = target == 3;
@@ -1383,6 +1428,40 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         else if (has(edge, GamepadButtons::A)) options_activate(source);
         else if (has(edge, GamepadButtons::B) || has(edge, GamepadButtons::Menu)) { m_optOpen = false; logf("options: closed (%s)", source); }
         return true;
+    }
+    // ---- Item D14: the account list popup (A on the profile row). Rows are
+    // the console's Xbox users and the Steam account, then Log out and Cancel;
+    // it opens on Cancel, so a stray A never logs out. A on Log out hands over
+    // to the existing confirmation sheet (which itself starts on Cancel).
+    bool accounts_input(GamepadButtons edge, const char* source) {
+        if (!m_accountsOpen) return false;
+        const int n = accounts_count();
+        if (has(edge, GamepadButtons::DPadUp)) { ui_nav::accounts_move(m_accountsSel, n, false); logf("accounts: row %d/%d (%s)", m_accountsSel + 1, n + 2, source); }
+        else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::accounts_move(m_accountsSel, n, true); logf("accounts: row %d/%d (%s)", m_accountsSel + 1, n + 2, source); }
+        else if (has(edge, GamepadButtons::A)) {
+            switch (ui_nav::accounts_activate(m_accountsSel, n)) {
+            case ui_nav::AccountAction::cancel: m_accountsOpen = false; logf("accounts: cancelled (%s)", source); break;
+            case ui_nav::AccountAction::logout: m_accountsOpen = false; m_confirmLogout = true; m_logoutYes = false; logf("accounts: log out -> confirmation sheet, focus on Cancel (%s)", source); break;
+            default: logf("accounts: row %d is information only (%s)", m_accountsSel, source); break;
+            }
+        }
+        else if (has(edge, GamepadButtons::B) || has(edge, GamepadButtons::Menu)) { m_accountsOpen = false; logf("accounts: closed (%s)", source); }
+        return true;
+    }
+    void draw_accounts(ui::Canvas& c) {
+        static std::vector<std::string> names, sources;
+        static std::vector<const char*> namePtrs, sourcePtrs;
+        names.clear(); sources.clear(); namePtrs.clear(); sourcePtrs.clear();
+        for (const std::string& n : xbox_user_names()) { names.push_back(n); sources.push_back("Xbox"); }
+        const std::string steam = persona_name();
+        if (!steam.empty()) { names.push_back(steam); sources.push_back("Steam"); }
+        for (size_t i = 0; i < names.size(); ++i) { namePtrs.push_back(names[i].c_str()); sourcePtrs.push_back(sources[i].c_str()); }
+        ui_launcher::AccountVM v;
+        v.names = namePtrs.empty() ? nullptr : namePtrs.data();
+        v.sources = sourcePtrs.empty() ? nullptr : sourcePtrs.data();
+        v.n = (int)namePtrs.size();
+        v.sel = m_accountsSel;
+        ui_launcher::draw_accounts_sheet(c, g_font, v);
     }
     // The shared sheet fill (draw side): title = game name, subtitle = size
     // and drive when installed, else the library's only line.
@@ -2115,7 +2194,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     }
 
     void draw_login() {
-        m_btnFocus = true; m_confirmLogout = false; m_logoutYes = false; m_sortOpen = false; m_sortFocus = 0; m_hdrFocus = -1; m_filtersOpen = false; m_searchOpen = false; // item 4: reset every sheet state on screen changes
+        m_btnFocus = true; m_confirmLogout = false; m_logoutYes = false; m_accountsOpen = false; m_sortOpen = false; m_sortFocus = 0; m_hdrFocus = -1; m_filtersOpen = false; m_searchOpen = false; // item 4: reset every sheet state on screen changes
         build_qr_runs();
         static std::string status_buf; static char timer[64];
         {   // fill the view-model from the shared login state
@@ -2144,8 +2223,20 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     int sidebar_focus_row() const { return m_focus == ui_nav::Focus::sidebar ? m_sidebar : -1; }
     ui_launcher::SidebarVM sidebar_vm() {
         ui_launcher::SidebarVM sb;
-        static std::string persona; persona = persona_name();
+        // Item D14: the profile row names the CONSOLE's signed-in Xbox user
+        // when Windows.System.User reports one, and says which account it is
+        // showing; the Steam persona is the labelled fallback.
+        start_xbox_users_fetch();
+        static std::string persona; static const char* personaSource = "";
+        persona = persona_name();
+        {
+            std::vector<std::string> xb = xbox_user_names();
+            if (!xb.empty()) { persona = xb.front(); personaSource = "Xbox"; }
+            else if (!persona.empty()) personaSource = "Steam";
+            else personaSource = "";
+        }
         sb.persona = persona.c_str();
+        sb.persona_source = personaSource;
         // item 24: the avatar once its fetch decoded (px != nullptr), else the
         // placeholder circle the sidebar draws for an empty image.
         { std::lock_guard<std::mutex> l(g_avatarM);
@@ -2273,8 +2364,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (loading) lib.loading = true;
         else if (m_onlyInstalled) snprintf(count, sizeof count, "%zu installed of %d games", listed, (int)g_ownedCount.load()), lib.count_label = count;
         else { snprintf(count, sizeof count, "%s", game_library::count_label(listed, (size_t)g_ownedCount.load(), searching).c_str()); lib.count_label = count; }
-        ui_launcher::draw_library(c, g_font, sb, lib, !(m_confirmLogout || m_optOpen));
+        ui_launcher::draw_library(c, g_font, sb, lib, !(m_confirmLogout || m_optOpen || m_accountsOpen));
         if (m_optOpen) draw_options(c);   // item D10: Menu on the focused tile
+        if (m_accountsOpen) draw_accounts(c);   // item D14: A on the profile row
         if (g_demo) {   // demo marker replaces the count line (honest: not your account)
             c.fill_rect_alpha(524, 168, 430, 60, ui::theme::page, 255);
             c.fill_round_rect(ui::rect(524, 168, 430, 60), ui::theme::radiusControl, ui::theme::control);
@@ -2554,6 +2646,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             std::vector<std::shared_ptr<Game>> list; { std::lock_guard<std::mutex> l(g_gm); list = shown_games(); } size_t n = list.size();
             // item D10: the game options popup owns the pad while it is up
             if (options_input(edge, source)) return;
+            if (accounts_input(edge, source)) return;   // item D14: the account list
             if (m_confirmLogout) {   // item 14: focus starts on Cancel; left/right toggles; only A on 'Log out' logs out
                 if (has(edge, GamepadButtons::DPadLeft) || has(edge, GamepadButtons::DPadRight)) { m_logoutYes = !m_logoutYes; logf("logout sheet: focus -> %s (%s)", m_logoutYes ? "Log out" : "Cancel", source); }
                 else if (has(edge, GamepadButtons::A)) {

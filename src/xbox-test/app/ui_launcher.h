@@ -177,6 +177,11 @@ inline const char* primary_hint(const PrimaryVM& vm, bool /*focus*/) {
 
 struct SidebarVM {
     const char* persona = "Player One";
+    // Item D14: which account the profile row is showing — "Xbox" for the
+    // console's signed-in user (Windows.System.User), "Steam" for the
+    // persona-name fallback. Drawn small at the row's right edge; empty draws
+    // nothing (the mockups' unlabelled row).
+    const char* persona_source = "";
     int all_count = 0, installed_count = 0;
     int queue_count = 0;   // item D11: jobs waiting behind the running download
     int free_gb_x10 = 4126, used_pct = 34;
@@ -552,6 +557,10 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
     // item 9: persona not resolved -> a neutral label, never a blank row
     text(c, f, Face::Regular, 24, 136, 85.5f, sb.persona && *sb.persona ? sb.persona : "Signed in",
          sb.profile_focus || ui_nav::kSidebarProfile == sb.focus ? ui::theme::text : ui::theme::textDim);
+    // Item D14: the account's source, so an Xbox name is never mistaken for a
+    // Steam one (and the fallback is visibly the fallback).
+    if (sb.persona_source && *sb.persona_source)
+        text_r(c, f, Face::Regular, 16, 411, 91.0f, sb.persona_source, ui::theme::textMuted);
     c.fill_rect(64, 248, 347, 1, ui::theme::separator);
     // item 16: the Search row is a search FIELD — control fill, dim
     // placeholder ('Search'), the query when one is active; never the
@@ -1530,6 +1539,58 @@ inline void draw_confirm_sheet(ui::Canvas& c, const Font& f, const char* title, 
     const char* pairs[4];
     confirm_hint_labels(focus_yes, yes_label, no_label, pairs);
     draw_hint_bar(c, f, pairs, 2, 524.0f);   // review fix 5: same x as the library
+}
+
+// Item D14: the ACCOUNT LIST popup — opened by A on the sidebar's profile
+// row. It lists the console's signed-in Xbox users (Windows.System.User) and
+// the Steam account the launcher is signed in as, each with the account's
+// source, then 'Log out of Steam' (which hands over to the existing
+// Cancel-default confirm sheet) and Cancel last. Informational rows are not
+// actions: A on one does nothing, and the focus ring still walks them so the
+// player can read what is listed.
+struct AccountVM {
+    const char* const* names = nullptr;     // n account names
+    const char* const* sources = nullptr;   // n sources: "Xbox", "Steam"
+    int n = 0;
+    const char* logout_label = "Log out of Steam";
+    int sel = 0;                            // 0..n-1 accounts, n logout, n+1 cancel
+};
+
+// Total focusable rows: the accounts, Log out, Cancel.
+inline int account_row_count(const AccountVM& v) { return v.n + 2; }
+
+inline void draw_accounts_sheet(ui::Canvas& c, const Font& f, const AccountVM& v, bool draw_hints = true) {
+    using namespace ui::theme;
+    draw_scrim(c);
+    const float x = 560.0f, w = 800.0f, pad = 32.0f;
+    const float row_h = 64.0f, gap = 12.0f;
+    const float title_top = 40.0f, sub_top = 84.0f;
+    const float first = sub_top + 30.0f + 24.0f;
+    const int total = account_row_count(v);
+    const float h = first + float(total) * (row_h + gap) - gap + pad;
+    const float top = (1080.0f - h) * 0.5f;
+    c.fill_round_rect(rect(x, top, w, h), radiusGuide, panel);
+    text(c, f, Face::Semibold, 32, x + pad, top + title_top, "Accounts", ui::theme::text);
+    text(c, f, Face::Regular, 22, x + pad, top + sub_top, "Signed in on this console", ui::theme::text2);
+    for (int i = 0; i < total; ++i) {
+        const float ry = top + first + float(i) * (row_h + gap);
+        const Rect btn = rect(x + pad, ry, w - pad * 2, row_h);
+        const bool info = i < v.n;
+        const bool danger = i == v.n;
+        c.fill_round_rect(btn, radiusCard, danger ? chip : ui::theme::controlDark);
+        const char* label = info ? v.names[i] : danger ? v.logout_label : "Cancel";
+        text(c, f, Face::Regular, 26, btn.x + 24, btn.y + 17.5f, label,
+             danger ? ui::theme::text2 : ui::theme::text);
+        if (info && v.sources && v.sources[i] && *v.sources[i])
+            text_r(c, f, Face::Regular, 20, btn.x + btn.w - 24, btn.y + 22.0f, v.sources[i], ui::theme::textMuted);
+        if (i == v.sel)
+            focus_ring(c, rect(btn.x - ringOffset, btn.y - ringOffset, btn.w + ringOffset * 2, btn.h + ringOffset * 2),
+                       radiusCard + ringRadiusDelta, ringWidth);
+    }
+    if (draw_hints) {
+        const char* pairs[4] = {"A", "Select", "B", "Back"};
+        draw_hint_bar(c, f, pairs, 2, 524.0f);
+    }
 }
 
 // item 7: the cloud value shortened to the card's 256px value column
