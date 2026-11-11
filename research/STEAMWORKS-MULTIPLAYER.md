@@ -110,7 +110,7 @@ build. Nothing is persisted, so there is no file for the launcher to watch.
 
 ## Leaderboards (part 2 of #55)
 
-The owner's check: launch Megabonk, open the Rank screen in the main menu, and
+The acceptance check: launch Megabonk, open the Rank screen in the main menu, and
 other players' entries should be listed. They are not.
 
 **What the game asks for.** Megabonk's IL2CPP metadata carries the flat export
@@ -225,7 +225,7 @@ rather than as "the bridge did nothing":
    for the top of the board and wrong for the user's own row whenever they are
    not inside the seeded slice.
 
-The GLOBAL tab — the owner's stated check — is unaffected by the first gap: it
+The GLOBAL tab — the stated check — is unaffected by the first gap: it
 lists real players' scores and ranks, and it is the tab the console runs above
 captured. The AMIGOS tab shares the same seeded rows, so it is expected to list
 them too; that is read from the provider's source, not yet photographed.
@@ -249,7 +249,7 @@ through a second export tap, `GetDownloadedLeaderboardEntry`:
 - A Find past the TTL refetches `CMsgClientLBSGetLBEntries` and replaces the
   held rows.
 - A successful `UploadLeaderboardScore` marks the board dirty, so the next Find
-  refetches at once, inside the TTL: the owner sees their own new score and rank
+  refetches at once, inside the TTL: the player sees their own new score and rank
   without waiting.
 - A failed refresh keeps the previous rows and logs
   `refresh unavailable … keeping N rows`; the game is never shown less than it
@@ -277,7 +277,7 @@ more. A board that **grew** since its first Find therefore shows only the rows
 the provider knew at that Find. A board that was **empty** at its first Find
 stays empty for the launch, with one exception: this account's own upload,
 which the provider appends to its copy itself
-(`UploadLeaderboardScore` → `update_leaderboard_entry`), so the owner's row
+(`UploadLeaderboardScore` → `update_leaderboard_entry`), so the player's row
 appears. Growing the count for other players would mean writing into the
 provider's board, which only its own score-upload path may do.
 
@@ -525,10 +525,10 @@ Not verified:
 - That the AMIGOS tab lists only the account's real friends, or that ranks match
   Steam's `global_rank` for a row outside the seeded slice (gaps 1 and 2 above).
 - That the refresh policy is what the console shows: a Find past the 30 s TTL,
-  or one after this account's own upload, giving the owner their new score and
+  or one after this account's own upload, giving the player their new score and
   rank without a relaunch. The checks are
   `STEAM leaderboards: '…' refreshed N rows (id …, N on Steam)` and, on the
-  screen, the owner's row moved. Off-device the policy is proven
+  screen, the player's row moved. Off-device the policy is proven
   (`app/tests/steam_leaderboards_test.cpp`, `app/tests/play-runtime.sh
   leaderboards`); on the console it has not been observed yet.
 - That the persona route in `steam_persona.h` — the request batch, the wait for
@@ -571,7 +571,7 @@ RANK  PLAYER          KILLS
 #10   Unknown User    934.01K
 ```
 
-Real other players, real scores, ranked 1..10 — the owner's acceptance check on
+Real other players, real scores, ranked 1..10 — the acceptance check on
 this build. The JOGADOR column read "Unknown User" on every row, which is gap 2
 above; the name fix was verified on the next package (below).
 

@@ -106,7 +106,7 @@ before sharing and never commit it.
 ### Risks
 
 * Installing replaces the launcher on a shared console. Once, an upgrade removed the app's local data: the Steam
-  login and installed games had to be redone by the owner. `xn` records the `LocalState` file names before and
+  login and installed games had to be redone by the user. `xn` records the `LocalState` file names before and
   after and warns if `steam_session.bin` disappeared. It never reads or copies that file.
 * Check that nobody else is using the console before a run. The lock only orders `xn` and the other scripts.
 * The launcher restarts between self-test fixtures; that is expected.

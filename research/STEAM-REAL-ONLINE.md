@@ -1,6 +1,6 @@
 # Real Steam online play: what GameNative does, and what an owned game can get on Xbox
 
-Issue #55's owner request: *"steamworks should let me play online for real; how
+Issue #55 asked: *"steamworks should let me play online for real; how
 does GameNative do this? I want to actually have normal access to steam."*
 
 Today a Play-launched game's Steamworks is answered by the in-memory gbe_fork
@@ -13,7 +13,7 @@ games run in-process, and which route this project should take — plus the slic
 of it that is implemented and verified off-device.
 
 Nothing here claims online play works. No console run has happened for any part
-of it, and the checks the owner can make are listed at the end.
+of it, and the checks a user can make are listed at the end.
 
 ## 1. How GameNative actually does it
 
@@ -178,7 +178,7 @@ on a personal computer; an Xbox console in Dev Mode is not one, and the client
 would be running outside its supported platform. This project's ownership rule
 permits *running* the genuine client — nothing is patched, stripped or cracked,
 and the games are owned — but that rule is the repository's, not Valve's. The
-honest position is that (a) carries a real account-risk question the owner has
+honest position is that (a) carries a real account-risk question the user has
 to decide, and that shipping it to users would be a policy decision, not a
 technical one. It also does not bypass any Xbox security or Dev-Mode
 restriction, which rule 3 forbids and which nothing here does.
@@ -241,7 +241,7 @@ from `stage_steam_provider` today.
 
 ### Recommendation
 
-**Do (b), starting with lobbies, and treat (a) as a research track the owner
+**Do (b), starting with lobbies, and treat (a) as a research track the user
 must approve on policy grounds before any console work.** Reasons:
 
 1. It is the only route that is unambiguously inside rule 3 and Valve's terms:
@@ -254,7 +254,7 @@ must approve on policy grounds before any console work.** Reasons:
    `ISteamMatchmaking` for the game, or feed the provider's queue), not an
    unknown like the client's account store.
 4. (a) is not ruled out — the measurements in section 2 make it a real option —
-   but it needs an owner decision about running an unsupported client on the
+   but it needs a user decision about running an unsupported client on the
    account, and it needs the account-store and bootstrapper work before it can
    even log on.
 
@@ -319,7 +319,7 @@ Not verified:
 - That the callback-queue gate can be opened without replacing the provider's
   interface object.
 
-## The console checks the owner can make
+## The console checks a user can make
 
 Nothing here claims online play works. When a build with a lobby bridge is on
 the console, these are the checks, in order:
@@ -330,7 +330,7 @@ the console, these are the checks, in order:
    host/co-op screen. If there is no line, no lobby message was sent.
 2. **A friend can see the lobby.** With a second Steam account on a PC, open the
    game's server browser or the friend's Steam overlay: the lobby should appear
-   in the game's lobby list, and the owner's Steam friends list should show
+   in the game's lobby list, and the player's Steam friends list should show
    "In-Game: Megabonk" with the lobby joinable. This is the first end-to-end
    evidence that the CM accepted the create.
 3. **A friend can join.** The friend joins the lobby; the console log should
