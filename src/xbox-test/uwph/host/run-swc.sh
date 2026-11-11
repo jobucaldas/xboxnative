@@ -5,8 +5,8 @@ root=$(cd "$(dirname "$0")/../../../.." && pwd)
 cd "$root"
 dp="$root/src/xbox-test/dp"
 runs=/workspace/x64-run/runs/swc
-full=Joao.XboxSteam.Swc_0.1.0.0_x64__0bdeywx3x8szp
-rid='Joao.XboxSteam.Swc_0bdeywx3x8szp!App'
+full=Xboxnative.Swc_0.1.0.0_x64__0bdeywx3x8szp
+rid='Xboxnative.Swc_0bdeywx3x8szp!App'
 mkdir -p "$runs"
 exec 9>/workspace/x64-run/CONSOLE.lock
 flock -w 600 9

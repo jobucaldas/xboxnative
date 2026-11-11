@@ -4,7 +4,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/dp-lib.sh"
 OUT="${1:-/workspace/megabonk-from-console}"; REM="${2:-\\LocalState\\megabonk}"
-PKG="${PKG_OLD:-Joao.Boxedwine.DevMode_0.1.6.0_x64__8j5c92gwe8f3c}"
+PKG="${PKG_OLD:-Xboxnative.Boxedwine.DevMode_0.1.6.0_x64__8j5c92gwe8f3c}"
 mkdir -p "$OUT"; : > "$OUT/.list"
 walk() { # remote dir
   local d="$1" json

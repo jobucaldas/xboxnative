@@ -8,7 +8,7 @@ Find out on the real console how AppContainer's real `kernel32.dll` handles:
 — in each case: write a tiny `mov eax,42; ret` stub and call through a function pointer, wrapped in SEH.
 This answers which memory-allocation path Wine's loader must use for JIT/codegen-style W^X code inside
 the Xbox AppContainer sandbox (feeds into `uwph-kernel32-ntdll`, item 3 in `x64-run/LANES.md` §"uwph
-track"). Separate throwaway package `Joao.XboxSteam.Vrx` so it never collides with the `Xboxnative.Launcher`
+track"). Separate throwaway package `Xboxnative.Vrx` so it never collides with the `Xboxnative.Launcher`
 launcher package that lanes `app`/`dl` are actively using on the same shared console.
 
 ## Resume state (2026-10-25, session start)
@@ -21,7 +21,7 @@ building it from scratch.
    commit `2ab0b569`, not the full launcher) that on boot runs the 3 SEH-wrapped test cases once, logs
    `caseA/B/C: ... OK value=42 | FAILED err=N | EXCEPTION code=0x...` to `LocalState\vrx.log`, then idles
    rendering a heartbeat frame (so it behaves like a normal foreground UWP app and doesn't get reaped).
-2. `src/xbox-test/vrx/AppxManifest.xml` — Identity `Joao.XboxSteam.Vrx`, same Publisher CN convention as
+2. `src/xbox-test/vrx/AppxManifest.xml` — Identity `Xboxnative.Vrx`, same Publisher CN convention as
    `src/xbox-test/app` (`CN=xboxnative-dev`, so the existing self-signed test cert flow in build.sh just works
    unmodified — the prompt's example `CN=BoxedwineDev` was illustrative, what matters is a distinct
    package Name). `codeGeneration` capability included (needed for the FromApp JIT path, case c).
@@ -36,7 +36,7 @@ building it from scratch.
 - Never log/print `DP_PASS`/`TS_AUTHKEY`.
 - `src/xbox-test/dp/*.sh` take `CONSOLE.lock` themselves — don't double-wrap with an outer `flock`.
 - Console is shared with other running lanes (`app`, `deploy`/`dl`) — keep sessions short, only
-  kill/uninstall the `Joao.XboxSteam.Vrx` package, never touch `Xboxnative.Launcher`.
+  kill/uninstall the `Xboxnative.Vrx` package, never touch `Xboxnative.Launcher`.
 - Local-only branch, never push.
 
 ## Status
@@ -52,7 +52,7 @@ use MEM_COMMIT|MEM_RESERVE at a null address. Console testing is next.
 Installed the signed isolated package successfully, launched via Device Portal (HTTP 200), and
 fetched LocalState\\vrx.log to `/workspace/x64-run/runs/vrx/vrx.log`. A copy is committed at
 `src/xbox-test/vrx/results/console-vrx.log`. Package full name:
-`Joao.XboxSteam.Vrx_0.1.0.0_x64__dk715arakrne0`, publisher `CN=xboxnative-dev`.
+`Xboxnative.Vrx_0.1.0.0_x64__dk715arakrne0`, publisher `CN=xboxnative-dev`.
 
 - A: VirtualAlloc(MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE) failed, GetLastError=87.
 - B: VirtualAlloc(RW), write stub, VirtualProtect(RX), flush instruction cache, call: OK value=42.

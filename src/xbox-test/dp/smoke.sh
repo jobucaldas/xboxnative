@@ -3,8 +3,8 @@
 # One-command pipeline: (install if MSIX given) -> launch -> wait-log -> screenshot -> kill.
 # Prints PASS/FAIL per step plus a summary line; exit code is the failure count.
 # Example (already-installed Boxedwine DevMode probe app, verified live):
-#   ./smoke.sh 'Joao.Boxedwine.DevMode_8j5c92gwe8f3c!App' \
-#     Joao.Boxedwine.DevMode_0.1.6.0_x64__8j5c92gwe8f3c ladder-native.log 'corewindow-swapchain PASS'
+#   ./smoke.sh 'Xboxnative.Boxedwine.DevMode_8j5c92gwe8f3c!App' \
+#     Xboxnative.Boxedwine.DevMode_0.1.6.0_x64__8j5c92gwe8f3c ladder-native.log 'corewindow-swapchain PASS'
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/dp-lib.sh"
 rid="$1"; full="$2"; logfile="$3"; pattern="$4"; to="${5:-60}"; shot="${6:-/tmp/smoke-shot.png}"; msix="$7"; cer="$8"
 [ -n "$rid" ] && [ -n "$full" ] && [ -n "$logfile" ] && [ -n "$pattern" ] || {
