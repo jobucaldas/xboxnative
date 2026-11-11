@@ -2,7 +2,12 @@
 # An optional environment file (git-ignored) is sourced first if present: $DP_ENV_FILE, or .env in the repo root.
 # DP_HOST may be a bare host or a URL ("https://host[:port][/]"); DP_PORT wins over a port in the URL (default 11443).
 _dp_env="${DP_ENV_FILE:-}"
-[ -n "$_dp_env" ] || _dp_env="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/.env"
+if [ -z "$_dp_env" ]; then
+  _dp_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  _dp_root="$(git -C "$_dp_here" rev-parse --show-toplevel 2>/dev/null)" || _dp_root="$(cd "$_dp_here/../../.." && pwd)"
+  _dp_env="$_dp_root/.env"
+  unset _dp_here _dp_root
+fi
 [ -f "$_dp_env" ] && . "$_dp_env"
 unset _dp_env
 if [ -z "${DP_HOST:-}" ]; then
