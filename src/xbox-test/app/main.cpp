@@ -101,7 +101,17 @@ static void text8(int x, int y, const std::string& s, int sc, uint32_t c) {
             for (int b = 0; b < 8; b++) if (row & (1 << b)) fill(x + (int)k * 8 * sc + b * sc, y + r * sc, sc, sc, c); }
     }
 }
-static std::string clip(const std::string& s, size_t n) { return s.size() <= n ? s : s.substr(0, n - 2) + ".."; }
+// Item D4: truncation for the UI font cuts at a UTF-8 character boundary and
+// marks the cut with U+2026 (Selawik has the glyph), never mid-glyph and
+// never with a bare "." that reads as part of the name.
+static std::string clip(const std::string& s, size_t n) {
+    if (s.size() <= n) return s;
+    size_t cut = n >= 3 ? n - 3 : 0;   // room for the 3-byte ellipsis
+    while (cut > 0 && ((unsigned char)s[cut] & 0xC0) == 0x80) --cut;
+    return s.substr(0, cut) + "\xE2\x80\xA6";
+}
+// Same for the bitmap fallback font, which has ASCII glyphs only.
+static std::string clip8(const std::string& s, size_t n) { return s.size() <= n ? s : s.substr(0, n - 2) + ".."; }
 
 // ---------------------------------------------------------------- HTTP (Windows.Web.Http, default TLS validation)
 struct Resp { int status = 0; int eresult = -1; std::string body; std::string err; };
@@ -1644,20 +1654,20 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         int y = std::max(40, (1080 - h) / 2);
         fill(x, y, w, h, C3(10, 12, 16)); frame(x, y, w, h, 6, YEL);
         text8(x + 40, y + 30, "How should this game start?", 4, TXT);
-        text8(x + 40, y + 84, clip(m_dName, 44) + " offers more than one run option. D-pad up/down to choose, A to run, B to cancel.", 2, DIM);
+        text8(x + 40, y + 84, clip8(m_dName, 44) + " offers more than one run option. D-pad up/down to choose, A to run, B to cancel.", 2, DIM);
         int ry = y + 132;
         for (int i = 0; i < rows; i++) {
             const launch_target::Choice& c = m_pick.rows[i];
             bool sel = i == m_pick.sel;
             fill(x + 30, ry, w - 60, rowH - 10, sel ? C3(45, 90, 200) : C3(27, 35, 48));
             if (sel) frame(x + 30, ry, w - 60, rowH - 10, 3, YEL);
-            text8(x + 50, ry + 14, clip(c.label, 60), 3, c.selectable ? TXT : DIM);
+            text8(x + 50, ry + 14, clip8(c.label, 60), 3, c.selectable ? TXT : DIM);
             const char* note = launch_target::arch_note(c.arch);
             if (note) text8(x + 50, ry + 42, note, 2, DIM);
             else if (c.arch == launch_target::arch64) text8(x + 50, ry + 42, "64-bit", 2, GRN);
             ry += rowH;
         }
-        if (!m_pick.note.empty()) text8(x + 40, ry + 8, clip(m_pick.note, 90), 2, RED);
+        if (!m_pick.note.empty()) text8(x + 40, ry + 8, clip8(m_pick.note, 90), 2, RED);
         text8(x + 40, y + h - 40, "A: run this option        B: cancel", 3, TXT);
     }
     // One-shot synthetic command file LocalState\cmd.txt (consumed on read). Lines: open <appid> | press (=A) | back (=B) | view | up | down | left | right | lb | rb | x | y | sort | filters | search | profile | sleep <s>.

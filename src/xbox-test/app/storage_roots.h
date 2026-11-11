@@ -120,7 +120,8 @@ inline std::string space_line(const std::string& name, const std::string& path, 
 
 // Split a detail-page note into the two lines it is drawn on: an explicit '\n'
 // first, then a word wrap at `n` characters (the page's 2x text, 42 to the
-// right column). Overflow is cut with ".." rather than drawn past the column.
+// right column). Overflow is cut with U+2026 (item D4: Selawik has the glyph,
+// and a bare "." reads as part of the name) rather than drawn past the column.
 inline void note_lines(const std::string& s, size_t n, std::string& l1, std::string& l2) {
     l1.clear(); l2.clear();
     size_t br = s.find('\n');
@@ -136,7 +137,11 @@ inline void note_lines(const std::string& s, size_t n, std::string& l1, std::str
         rest = first.substr(st);
     }
     wrap(rest, l2);
-    if (l2.size() < rest.size()) l2 = l2.substr(0, n > 2 ? n - 2 : 0) + "..";
+    if (l2.size() < rest.size()) {
+        size_t cut = n > 3 ? n - 3 : 0;
+        while (cut > 0 && ((unsigned char)l2[cut] & 0xC0) == 0x80) --cut;   // whole glyphs only
+        l2 = l2.substr(0, cut) + "\xE2\x80\xA6";
+    }
 }
 
 // Detail-page message when an install is refused for space: the figure with the

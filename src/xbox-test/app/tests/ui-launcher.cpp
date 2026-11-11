@@ -381,6 +381,9 @@ int main(int argc, char** argv) {
     // The check that the wrapped lines fit and the buttons sit under the text
     // needs a real Font, so it runs in the rendering section.
 
+    // ---- pure logic: the focused-tile cut mark (item D4) ----
+    // Needs the real Font (glyph advances), so it runs in the rendering section.
+
     // ---- pure logic: marquee offsets (item 11 + item 23: reading order only) ----
     {
         using ui_launcher::marquee_offset;
@@ -817,6 +820,31 @@ int main(int argc, char** argv) {
         check(L.buttons_y - text_bottom <= 60.0f,
               "D3: no big blank gap between the body and the buttons");
         check(L.buttons_y - text_bottom >= 24.0f, "D3: the buttons keep clear of the text");
+    }
+
+    // item D4: the focused tile's label is trimmed at a whole glyph and marked
+    // with U+2026 (never a mid-glyph cut, never the ambiguous "." form).
+    {
+        const std::string name = "Halo Wars: Definitive Edition";
+        const float box = 208.0f;
+        float x0 = 0.0f;
+        const std::string at0 = marquee_view(font, Face::Semibold, 22, name, 0.0f, box, 100.0f, x0);
+        check(x0 == 100.0f, "D4: the label starts at the box edge before the marquee moves");
+        check(font.measure(Face::Semibold, 22, at0) <= box + 0.5f, "D4: the label fits the box");
+        check(at0.size() >= 3 && at0.substr(at0.size() - 3) == "\xE2\x80\xA6",
+              "D4: the cut is marked with U+2026, not '.'");
+        check(at0.find("..") == std::string::npos, "D4: no ASCII '..' truncation mark");
+        // every glyph of the drawn text is whole: re-encoding it must round-trip
+        bool whole = true;
+        const char* p = at0.data(); const char* e = p + at0.size();
+        while (p < e) { uint32_t cp; ui::utf8_next(p, e, cp); if (cp == 0xFFFD) whole = false; }
+        check(whole, "D4: the drawn label is valid UTF-8 (no mid-glyph cut)");
+        // scrolled to the end: the tail is visible, so no ellipsis is needed
+        const float travel = font.measure(Face::Semibold, 22, name) - box + 24.0f;
+        const std::string atEnd = marquee_view(font, Face::Semibold, 22, name, travel, box, 100.0f, x0);
+        check(atEnd.size() < 3 || atEnd.substr(atEnd.size() - 3) != "\xE2\x80\xA6",
+              "D4: no ellipsis once the tail is fully in view");
+        check(x0 >= 100.0f, "D4: the marquee never starts a glyph left of the box");
     }
 
     // item 20: button labels are centred by their true ink box. The scan

@@ -616,6 +616,27 @@ inline float marquee_offset(float text_w, float box_w, float t) {
     return travel;                                       // hold at the end, then the loop resets
 }
 
+// Item D4: the focused tile's label at marquee offset `off`, trimmed at a
+// UTF-8 character boundary and marked with U+2026 when the tail is still
+// outside the box — never a mid-glyph cut, and never the ambiguous "." form.
+// Returns the text to draw and, in out_x, the pen x it starts at.
+inline std::string marquee_view(const Font& f, Face face, float px, const std::string& name,
+                                float off, float box_w, float x0, float& out_x) {
+    const char* p = name.data(); const char* end = p + name.size();
+    const char* cut = p;
+    float adv = 0.0f;
+    while (cut < end) {                       // skip whole glyphs that start before the offset
+        const char* st = cut;
+        uint32_t cp;
+        ui::utf8_next(cut, end, cp);
+        if (adv >= off) { cut = st; break; }
+        adv += f.measure(face, px, std::string(st, std::size_t(cut - st)));
+    }
+    out_x = x0 + (adv - off);                 // never left of the box (no partial glyph)
+    const float room = box_w - (out_x - x0);
+    return f.ellipsize(face, px, std::string(cut, std::size_t(end - cut)), room > 0 ? room : 0.0f);
+}
+
 // 3-stop gradient into `dst` (one pixel per call site loop); used for tile and hero art.
 // k is the position along the gradient axis: 0 → top, 0.5 → mid, 1 → bottom stop.
 inline uint32_t grad3(uint32_t top, uint32_t mid, uint32_t bot, float k) {
@@ -678,9 +699,13 @@ inline void draw_tile(ui::Canvas& c, const Font& f, const TileVM& t, const ui::R
     const float label_w = g.w - 24.0f;
     const float label_top = g.y + g.h - 34.0f;   // 22px line box, 12px bottom pad
     if (focus && t.name_w > label_w && t.name_w > 0) {
-        // full name, clipped at the tile edge, scrolled by the marquee offset
+        // full name, scrolled by the marquee offset. Item D4: the visible part
+        // is trimmed at a whole glyph and marked with U+2026, so the label is
+        // never cut mid-glyph and never ends in an ambiguous ".".
         const float off = marquee_offset(t.name_w, label_w, time_s);
-        text(c, f, Face::Semibold, 22, g.x + 12 - off, label_top, t.name, ui::theme::text);
+        float tx = 0.0f;
+        const std::string s = marquee_view(f, Face::Semibold, 22, t.name, off, label_w, g.x + 12, tx);
+        text(c, f, Face::Semibold, 22, tx, label_top, s.c_str(), ui::theme::text);
     } else {
         const std::string s = f.ellipsize(Face::Semibold, 22, t.name, label_w);
         text(c, f, Face::Semibold, 22, g.x + 12, label_top, s.c_str(), ui::theme::text);
@@ -880,7 +905,10 @@ inline void draw_queue_card(ui::Canvas& c, const Font& f, const QueueRowVM& r, f
     c.stroke_circle(564, y + 52, 14, 4, kRingDark, Align::Center);
     // the busy row stacks name/status/progress from the top; a 2-row card centres them
     const float top = r.busy ? 16.0f : 24.0f;
-    text(c, f, Face::Regular, 22, 604, y + top, r.name, ui::theme::text);
+    // item D4: a long game name is ellipsized to the row (the progress bar and
+    // the buttons start at x=1556, so the name column ends well before that)
+    const std::string row_name = f.ellipsize(Face::Regular, 22, r.name, 920.0f);
+    text(c, f, Face::Regular, 22, 604, y + top, row_name.c_str(), ui::theme::text);
     text(c, f, Face::Regular, 20, 604, y + top + 31.0f, r.status, ui::theme::textDim);
     if (r.busy) {
         c.fill_round_rect(rect(604, y + 80, 920, 8), 4, ui::theme::track);
@@ -992,7 +1020,9 @@ inline void draw_storage(ui::Canvas& c, const Font& f, const SidebarVM& sb, cons
             const StorageGameVM& gm = st.games[i];
             const float ry = list_top + row_pitch * float(i - first);
             const bool action = i == 0 && (!gm.size || !*gm.size);   // the install-target action row
-            text(c, f, Face::Regular, 26, 548, ry + 20.0f, gm.name, action ? ui::theme::accentSoft : ui::theme::text);
+            // item D4: the name ellipsizes before the right-aligned size column
+            const std::string row_name = f.ellipsize(Face::Regular, 26, gm.name, 1080.0f);
+            text(c, f, Face::Regular, 26, 548, ry + 20.0f, row_name.c_str(), action ? ui::theme::accentSoft : ui::theme::text);
             if (!action)
                 text_r(c, f, Face::Regular, 22, 1812, ry + 22.0f, gm.size, ui::theme::text2);
             if (gm.focused)
@@ -1094,7 +1124,9 @@ inline void draw_game(ui::Canvas& c, const Font& f, const GameVM& g, bool draw_h
         c.fill_rect_alpha(0, float(y), 1920, 1, ui::theme::page, uint8_t(255.0f * (y - 370) / 150.0f));
 
     text(c, f, Face::Regular, 22, 64, 50.5f, "Library", ui::theme::textDim);
-    text(c, f, Face::Semibold, 56, 64, 230, g.title, ui::theme::text, -0.4f);
+    // item D4: a long title ellipsizes (with U+2026) instead of running off the page
+    const std::string hero_title = f.ellipsize(Face::Semibold, 56, g.title, 1500.0f);
+    text(c, f, Face::Semibold, 56, 64, 230, hero_title.c_str(), ui::theme::text, -0.4f);
     text(c, f, Face::Regular, 24, 64, 306, g.subtitle, ui::theme::textDim);
 
     draw_primary_button(c, f, g);

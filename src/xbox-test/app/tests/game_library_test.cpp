@@ -147,8 +147,23 @@ int main() {
     assert(n1 == "Wait for the delete to finish." && n2.empty());
     note_lines(std::string(60, 'x'), 42, n1, n2);   // one long word: cut at the column, the tail starts line two
     assert(n1.size() == 42 && n2 == std::string(18, 'x'));
-    note_lines(std::string(100, 'x'), 42, n1, n2);   // more than two lines: the second is ellipsized
-    assert(n1.size() == 42 && n2.size() == 42 && n2.substr(40) == "..");
+    note_lines(std::string(100, 'x'), 42, n1, n2);   // more than two lines: the second ends with U+2026 (item D4)
+    assert(n1.size() == 42 && n2.size() == 42 && n2.substr(39) == "\xE2\x80\xA6");
+    // a multi-byte character at the cut point is never split (item D4): the
+    // 'e-acute' straddles byte 39 of the second line, so the cut backs off to
+    // the previous whole glyph instead of emitting half of it
+    note_lines(std::string(42, 'x') + std::string(38, 'x') + "\xC3\xA9" + std::string(30, 'y'), 42, n1, n2);
+    assert(n2.size() >= 3 && n2.substr(n2.size() - 3) == "\xE2\x80\xA6");
+    bool whole = true;
+    for (size_t i = 0; i < n2.size();) {   // every sequence is a complete UTF-8 codepoint
+        const unsigned char ch = (unsigned char)n2[i];
+        const size_t need = ch < 0x80 ? 1 : (ch & 0xE0) == 0xC0 ? 2 : (ch & 0xF0) == 0xE0 ? 3 : 4;
+        if (i + need > n2.size()) { whole = false; break; }
+        for (size_t k = 1; k < need; ++k)
+            if (((unsigned char)n2[i + k] & 0xC0) != 0x80) whole = false;
+        i += need;
+    }
+    assert(whole);
     note_lines("", 42, n1, n2);
     assert(n1.empty() && n2.empty());
 
