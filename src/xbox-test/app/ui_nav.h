@@ -67,15 +67,16 @@ inline bool sidebar_move(int& active, bool down) {
 // the sidebar; the other two draw their own page and B returns to the library.
 inline int sidebar_target(int active) { return active; }
 
-// ---- sort modes (item 25; item D10 adds Favorites) ----
+// ---- sort modes (item 25; item D23 replaces Favorites with Date added) ----
 // The sort popup's option order AND the model mode indexes are the same
 // numbers: 0 Alphabetical (the startup default), 1 Most played, 2 Recently
-// played, 3 Favorites (favorites first, then alphabetical). main.cpp's
-// SORT_NAMES and sort_games() key off these.
+// played, 3 Date added (newest first). main.cpp's SORT_NAMES and sort_games()
+// key off these. Favorites is a FILTER, not a sort: sorting by a boolean put
+// every favorite above everything else, which said nothing about the rest.
 constexpr int kSortAlphabetical = 0;
 constexpr int kSortMostPlayed = 1;
 constexpr int kSortRecentlyPlayed = 2;
-constexpr int kSortFavorites = 3;
+constexpr int kSortDateAdded = 3;
 constexpr int kSortOptionCount = 4;
 
 // ---- account list popup (item D14) ----

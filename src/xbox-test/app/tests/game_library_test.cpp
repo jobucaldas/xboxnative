@@ -2,6 +2,7 @@
 // Native regression for the Delete-game and Installed-filter rules.
 #include "../favorites.h"
 #include "../game_library.h"
+#include "../library_added.h"
 #include "../storage_roots.h"
 #include "../store_size.h"
 #include <cassert>
@@ -229,6 +230,39 @@ int main() {
         assert(!toggle(ids, 480) && ids.size() == 2 && !contains(ids, 480));
         std::set<uint32_t> back = parse(format(ids));                                 // the toggle survives a restart
         assert(back == ids && !contains(back, 480) && contains(back, 459220));
+    }
+
+    // item D23: the Date added key round-trips through LocalState\library_added.txt.
+    // A first fetch stamps the whole library at once; later fetches keep the
+    // first stamp, so the order is stable across restarts.
+    {
+        using namespace library_added;
+        assert(parse("").empty());
+        assert(parse("3405340\t1700000000\n") == (Seen{{3405340, 1700000000ull}}));
+        assert(parse(" 480 \t 170 \r\n# comment\n\n\t\n") == (Seen{{480, 170ull}}));
+        // junk lines are dropped, never turned into a bogus entry
+        for (const char* junk : {"", "abc", "0\t170", "12a\t170", "480", "480\tx", "480\t170\textra", "99999999999\t170"})
+            assert(parse(junk).empty());
+        Seen seen = parse("480\t100\n459220\t300\n");
+        assert(format(seen) == "480\t100\n459220\t300\n");        // sorted by appid, one line each
+        assert(parse(format(seen)) == seen);                      // round trip
+        // a first fetch stamps every unseen id with the same second
+        Seen fresh;
+        assert(update(fresh, {480, 459220, 3405340}, 1000));
+        assert(fresh.size() == 3 && fresh[480] == 1000 && fresh[3405340] == 1000);
+        // a later fetch keeps the first stamps and adds only the new game
+        assert(update(fresh, {480, 459220, 3405340, 620}, 2000));
+        assert(fresh[480] == 1000 && fresh[620] == 2000);
+        assert(!update(fresh, {480, 459220, 3405340, 620}, 3000));  // nothing new -> no write
+        assert(fresh[620] == 2000);
+        // newest first; a tie and an unknown id both fall back to the caller
+        assert(newer_first(fresh, 620, 480) && !newer_first(fresh, 480, 620));
+        assert(!newer_first(fresh, 480, 459220) && !newer_first(fresh, 459220, 480));
+        assert(newer_first(fresh, 480, 70) && !newer_first(fresh, 70, 480));   // an unknown id (0) sorts last
+        assert(!newer_first(fresh, 70, 71));                                    // two unknowns tie
+        // the file survives a restart with the order it was written in
+        Seen back = parse(format(fresh));
+        assert(back == fresh && newer_first(back, 620, 3405340));
     }
 
     std::puts("game_library: all checks passed");

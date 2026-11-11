@@ -739,9 +739,9 @@ constexpr const char* kLibraryHints[6] = {"A", "Select", "B", "Back", "M", "Mana
 // Item D7: while a query is filtering the grid, the bar also offers the clear
 // (X on the sidebar's Search row) — the filtered state is never a dead end.
 constexpr const char* kLibrarySearchHints[8] = {"A", "Select", "B", "Back", "X", "Clear search", "M", "Manage"};
-// sort options (item 1; item D10 adds Favorites); mode indexes match
-// ui_nav::cycle_sort's caller
-constexpr const char* kSortOptions[4] = {"Alphabetical", "Most played", "Recently played", "Favorites"};
+// sort options (item 1; item D23 replaces Favorites with Date added); mode
+// indexes match ui_nav::cycle_sort's caller
+constexpr const char* kSortOptions[4] = {"Alphabetical", "Most played", "Recently played", "Date added"};
 constexpr int kSortOptionCount = ui_nav::kSortOptionCount;   // one source of truth with main.cpp
 
 // item 11 + 23: marquee offset for a focused tile's label. Static when the
