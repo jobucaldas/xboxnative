@@ -3,11 +3,11 @@
 # registry.json import, kill-mid-write consistency. One short window under CONSOLE.lock. REG_INSTALL=0 skips (re)install.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../../.." && pwd); cd "$root"; dp="$root/src/xbox-test/dp"
-runs=${REG_RUNS:-/workspace/x64-run/runs/regsql}; mkdir -p "$runs"
-seed=${REG_SEED:-/workspace/x64-run/runs/reg/evidence/registry-after-run2.json}
+runs=${REG_RUNS:-${RUNS_DIR:-out/runs}/regsql}; mkdir -p "$runs"
+seed=${REG_SEED:-${RUNS_DIR:-out/runs}/reg/evidence/registry-after-run2.json}
 ver=$(sed -n 's/.*Name="Xboxnative.Reg".*Version="\([0-9.]*\)".*/\1/p' src/xbox-test/uwph/host/AppxManifest.Reg.xml)
 full=Xboxnative.Reg_${ver}_x64__0bdeywx3x8szp; rid='Xboxnative.Reg_0bdeywx3x8szp!App'; cycles=${REG_KILL_CYCLES:-4}
-exec 9>/workspace/x64-run/CONSOLE.lock; flock -w 900 9; export DP_LOCK_FD=9
+exec 9>${TMPDIR:-/tmp}/xboxnative-console.lock; flock -w 900 9; export DP_LOCK_FD=9
 put() { bash "$dp/put-file.sh" "$full" '\LocalState' "$1" | tail -1; }
 mark() { printf '%s\n' "${2:-1}" > "$runs/$1"; put "$runs/$1"; }
 launch() { bash "$dp/kill.sh" "$full" >/dev/null || true; printf 'REG awaiting fresh activation\n' > "$runs/k32.log"; put "$runs/k32.log" >/dev/null; bash "$dp/launch.sh" "$rid" "$full" | tail -1; }

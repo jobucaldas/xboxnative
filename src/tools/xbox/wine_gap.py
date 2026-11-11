@@ -78,7 +78,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('directory', type=Path)
     p.add_argument('--map', type=Path, default=Path(__file__).with_name('import_map.json'))
-    p.add_argument('--wine-source', type=Path, default=Path('/workspace/research/wine'))
+    p.add_argument('--wine-source', type=Path, default=Path('${WINE_SOURCE:-$HOME/.cache/wine-source}'))
     p.add_argument('--pe', action='append', help='Relative PE path, repeatable; default all top-level EXE/DLL files')
     p.add_argument('--csv', required=True, type=Path)
     p.add_argument('--catalog', type=Path, help='Write a C++ Wine classification catalog for the launcher')

@@ -9,7 +9,7 @@ import unittest
 import pefile
 
 ROOT = pathlib.Path(__file__).resolve().parents[4]
-GAMES = pathlib.Path('/workspace/x64-run/runs/wgap/pe')
+GAMES = pathlib.Path('${RUNS_DIR:-out/runs}/wgap/pe')
 
 class Mapper(unittest.TestCase):
     @classmethod

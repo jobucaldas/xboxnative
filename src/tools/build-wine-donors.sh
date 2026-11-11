@@ -6,7 +6,7 @@
 # Also builds Wine's C++ runtime DLLs (msvcp140 family, concrt140) into <outdir>/runtime/: launcher Play maps them for
 # games that do not ship their own copy, as an installed VC++ redistributable serves them on Windows.
 # Wine is LGPL-2.1-or-later. The DLLs are build outputs: they are git-ignored (out/ and *.dll) and must never be committed;
-# pr-lane.sh refuses DLLs. Output: <outdir>/*.dll, SHA256SUMS, SOURCE.txt, runtime/ (default: out/wine-donors).
+# CI refuses committed DLLs. Output: <outdir>/*.dll, SHA256SUMS, SOURCE.txt, runtime/ (default: out/wine-donors).
 # Needs: x86_64-w64-mingw32-gcc, make, flex, bison, curl, xz, sha256sum, patch.
 # Cache/scratch dir: third_party/wine-donors-build/<pin hash>/ (git-ignored). Env: JOBS (default nproc).
 set -euo pipefail

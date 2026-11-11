@@ -16,7 +16,7 @@ bash ../../tools/fetch-sdl.sh out/sdl
 bash tests/play-runtime.sh >/dev/null   # builds the Play runner; its own gates must pass
 out=out/play-tests
 mkdir -p "$out/donors"; cp out/layout/donors/*.dll "$out/donors/"
-CB=${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}
+CB=${UWP_CROSSBUILD:-out/uwp-crossbuild}
 crt=${XWIN_ROOT:-$HOME/.cache/uwp-crossbuild/xwin}
 game=out/play-sdl/sdl3gl; rm -rf "$game" "$out/obj/sdl3gl"; mkdir -p "$game"
 UWP_OBJ_DIR="$out/obj/sdl3gl" "$CB/scripts/build.sh" --out "$game/play-sdl3-gl.exe" --link-arg "out/sdl/SDL3/lib/x64/SDL3.lib" tests/play-sdl3-gl.c -- /MT /O2 "/Iout/sdl/SDL3/include" >/dev/null

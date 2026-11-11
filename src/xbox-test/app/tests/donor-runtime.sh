@@ -9,7 +9,7 @@ mkdir -p "$WINEPREFIX"
 if [[ ! -f "$WINEPREFIX/system.reg" ]];then timeout -k 2 60 wineboot -u;fi
 out=out/donor-tests
 mkdir -p "$out/donors" "$out/obj"
-CB=${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}
+CB=${UWP_CROSSBUILD:-out/uwp-crossbuild}
 sdk=${UWP_XWIN_ROOT:-$HOME/.cache/uwp-crossbuild/xwin}
 # Import libraries describe only this owned fixture's donor calls. They do not
 # replace a donor DLL or alter the production router or game acceptance oracle.

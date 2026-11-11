@@ -200,7 +200,7 @@ static bool gen_access(const std::string& refresh, std::string& access) {
     access = a->s; return true;
 }
 
-// ---------------------------------------------------------------- Steam CM (websocket) client: connect + ClientLogon only (BACKLOG dl-megabonk, phase 1)
+// ---------------------------------------------------------------- Steam CM (websocket) client: connect + ClientLogon only
 // Wire format matches steam-user's CM websocket transport (wss://<cm>:443/cmsocket/, binary frames; no
 // ChannelEncrypt handshake since TLS already secures the channel). Each frame = [u32le rawEMsg][u32le
 // protoHeaderLen][protoHeaderBytes][bodyBytes], rawEMsg = EMsg | 0x80000000. Reuses pb_* from above.

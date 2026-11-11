@@ -4,11 +4,11 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../../../.." && pwd)
 cd "$root"
 dp="$root/src/xbox-test/dp"
-runs=${MLP_RUNS:-/workspace/x64-run/runs/mlp}
+runs=${MLP_RUNS:-${RUNS_DIR:-out/runs}/mlp}
 full=Xboxnative.Mlp_0.1.32.0_x64__0bdeywx3x8szp
 rid='Xboxnative.Mlp_0bdeywx3x8szp!App'
 mkdir -p "$runs"
-exec 9>/workspace/x64-run/CONSOLE.lock
+exec 9>${TMPDIR:-/tmp}/xboxnative-console.lock
 flock -w "${MLP_LOCK_WAIT:-600}" 9
 export DP_LOCK_FD=9
 export DP_TIMEOUT=${DP_TIMEOUT:-600}
@@ -18,7 +18,7 @@ if [[ ${MLP_REPLACE:-0} == 1 ]]; then
     bash "$dp/uninstall.sh" "$full"
     sleep 3
 fi
-/workspace/x64-run/dp.sh /ext/user > "$runs/user.json"
+dp-placeholder.sh /ext/user > "$runs/user.json"
 if [[ ${MLP_SKIP_INSTALL:-0} != 1 ]]; then
     bash "$dp/install.sh" src/xbox-test/uwph/host/out/mlp/k32.msix src/xbox-test/uwph/host/out/mlp/test.cer
 fi
@@ -31,7 +31,7 @@ if [[ ${MLP_SKIP_UPLOAD:-0} != 1 ]]; then
 for binary in Megabonk.exe UnityPlayer.dll baselib.dll; do
     uploaded=0
     for attempt in 1 2 3 4; do
-        if bash "$dp/put-file.sh" "$full" '\LocalState' "/workspace/megabonk-from-console/$binary" | tee "$runs/put-$binary.log" &&
+        if bash "$dp/put-file.sh" "$full" '\LocalState' "${MEGABONK_DIR:-megabonk-from-console}/$binary" | tee "$runs/put-$binary.log" &&
            grep -Eq '^put HTTP 2[0-9][0-9]$' "$runs/put-$binary.log"; then
             uploaded=1; break
         fi
@@ -48,7 +48,7 @@ bash "$dp/get-file.sh" "$full" '\LocalState' k32.log "$runs/reset.log"
 cmp "$runs/k32.log" "$runs/reset.log"
 bash "$dp/launch.sh" "$rid" "$full"
 bash "$dp/wait-log.sh" "$full" k32.log 'MLP-PROBE-DONE|MLP-PROBE-FAILED' 120 "$runs/console-mlp.log"
-python3 src/xbox-test/uwph/host/check-mlp.py "$runs/console-mlp.log" /workspace/megabonk-from-console
+python3 src/xbox-test/uwph/host/check-mlp.py "$runs/console-mlp.log" ${MEGABONK_DIR:-megabonk-from-console}
 bash "$dp/ps.sh" "$full" | tee "$runs/process.log"
 grep -Fq "pkg=$full" "$runs/process.log"
 # Leave running for acceptance observation; later smoke uses its own identity.

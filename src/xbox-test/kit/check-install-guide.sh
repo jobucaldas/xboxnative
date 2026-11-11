@@ -35,7 +35,7 @@ check_word() {  # single space-free word taken from a command or a bare token
     local w="${1#\'}"; w="${w%\'}"
     case "$w" in
         src/xbox-test/*|docs/*|tools/*) [ -e "$w" ] && good || bad "path $w";;
-        /tmp/*|/workspace/*|'<'*|.*) ;;
+        /tmp/*|'<'*|.*) ;;
         *.msix|*.cer)
             local n="${w##*/}"; n="${n%.*}"
             if kit_names | grep -qx "$n"; then good; else bad "kit package '$n' not produced by build-kit.sh ($w)"; fi;;

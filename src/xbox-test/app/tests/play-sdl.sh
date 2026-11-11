@@ -12,7 +12,7 @@ bash ../../tools/fetch-sdl.sh out/sdl
 bash tests/play-runtime.sh >/dev/null   # builds the Play runner; its own gates must pass
 out=out/play-tests
 mkdir -p "$out/donors"; cp out/layout/donors/*.dll "$out/donors/"
-CB=${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}
+CB=${UWP_CROSSBUILD:-out/uwp-crossbuild}
 crt=${XWIN_ROOT:-$HOME/.cache/uwp-crossbuild/xwin}
 status=0
 for v in 3 2;do

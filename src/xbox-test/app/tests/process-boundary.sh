@@ -9,7 +9,7 @@ logs=${PROCESS_TEST_LOG_DIR:-$out/logs}
 export WINEPREFIX=${PRUN_WINEPREFIX:-/tmp/process-boundary-wine}
 export WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d
 mkdir -p "$out/obj" "$logs" "$WINEPREFIX"
-cb=${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}
+cb=${UWP_CROSSBUILD:-out/uwp-crossbuild}
 cc=${PROCESS_CC:-clang++-19}
 link=${PROCESS_LINKER:-lld-link-19}
 common=(/nodefaultlib /entry:process_entry /include:process_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat)

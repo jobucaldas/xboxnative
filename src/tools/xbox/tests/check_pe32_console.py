@@ -7,7 +7,7 @@ import re
 import sys
 
 root = Path(__file__).resolve().parents[4]
-evidence = Path(sys.argv[1]) if len(sys.argv) == 2 else Path('/workspace/x64-run/runs/pe32')
+evidence = Path(sys.argv[1]) if len(sys.argv) == 2 else Path('${RUNS_DIR:-out/runs}/pe32')
 results = []
 for app, game in [(480, 'spacewar'), (48000, 'limbo')]:
     run = evidence/f'play-{app}'

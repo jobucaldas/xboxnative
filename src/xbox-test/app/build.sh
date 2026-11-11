@@ -8,7 +8,7 @@ python3 "$here/../../tools/xbox/gen-gap-routes.py"
 donors="$here/../../../out/wine-donors"
 bash "$here/../../tools/build-wine-donors.sh" "$donors"
 python3 -I "$here/donors/inspect.py" --donor-dir "$donors" --output "$out/obj/donor_imports.generated.h"
-CB="${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}"
+CB="${UWP_CROSSBUILD:-out/uwp-crossbuild}"
 bash ../uwph/host/build-sqlite-lib.sh "$out/obj/sqlite3.lib"
 # host/tls_slot0.cpp must stay the FIRST object: it reserves the start of the launcher's static TLS
 # block so guest EXEs that assume TLS slot 0 (MSVC /GA code) get it. See host/tls_slot0.cpp.

@@ -7,7 +7,7 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"; lib="$1"
 bash "$here/fetch-sqlite.sh" >/dev/null
 [ -s "$lib" ] && exit 0
-CB=${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}
+CB=${UWP_CROSSBUILD:-out/uwp-crossbuild}
 SQL_DEFS=(/DSQLITE_THREADSAFE=1 /DSQLITE_OMIT_LOAD_EXTENSION /DSQLITE_OMIT_SHARED_CACHE /DSQLITE_TEMP_STORE=3 /DSQLITE_DEFAULT_MEMSTATUS=0 /DSQLITE_OMIT_DEPRECATED)
 mkdir -p "$(dirname "$lib")"
 # Relative paths only: clang-cl style tools read "/abs/path" as an option.

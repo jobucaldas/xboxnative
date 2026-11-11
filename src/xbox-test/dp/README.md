@@ -1,17 +1,19 @@
 # src/xbox-test/dp — Device Portal tooling
 
-Bash+curl scripts for the Xbox Series S Device Portal (`https://<console>:11443`), reached either
-directly on the LAN or via a tailscale SOCKS5 proxy (through "Encom", default `localhost:1055`).
-All scripts source `dp-lib.sh` and serialize console access with
-`flock /workspace/x64-run/CONSOLE.lock` (safe for multiple concurrent lanes).
+# src/xbox-test/dp — Device Portal tooling
 
-Auth: HTTP Basic (`jobucaldas:$DP_PASS`, `DP_PASS` from env, never printed/logged) plus a
+Bash+curl scripts for the Xbox Series S Device Portal (`https://<console>:11443`), reached either
+directly on the LAN or via a SOCKS5 proxy (`DP_SOCKS`; default empty = direct).
+All scripts source `dp-lib.sh` and serialize console access with
+`flock ${DP_LOCK:-${TMPDIR:-/tmp}/xboxnative-console.lock}`.
+
+Auth: HTTP Basic (`$DP_USER:$DP_PASS`, `DP_PASS` from env, never printed/logged) plus a
 CSRF token read back from the `CSRF-Token` cookie set by an initial `GET /api/os/info` — every
 subsequent request sends `X-CSRF-Token: <cookie value>`. `dp-lib.sh` handles this automatically
 via a per-process cookie jar.
 
-Env overrides: `DP_HOST` (default `192.168.15.96`, LAN IP can change; a bare host or a URL like `https://host[:port]`), `DP_PORT` (default `11443`; wins over a port in `DP_HOST`), `DP_SOCKS` (default
-`localhost:1055`), `DP_LOCK`, `DP_TIMEOUT` (default 120s per request).
+Env overrides: `DP_HOST` (required; a bare host or a URL like `https://host[:port]`), `DP_PORT` (default `11443`; wins over a port in `DP_HOST`), `DP_SOCKS` (default
+empty = direct), `DP_LOCK`, `DP_TIMEOUT` (default 120s per request).
 
 ## Scripts (all verified live against the console 2026-10-25, except where noted)
 
@@ -28,7 +30,7 @@ Env overrides: `DP_HOST` (default `192.168.15.96`, LAN IP can change; a bare hos
 | `screenshot.sh OUT.png` | yes | `GET /ext/screenshot` (not the undocumented `/api/xbox/screenshot` or other `/ext/xbox*` guesses — those were not needed, `/ext/screenshot` alone returns a real PNG, HTTP 200, ~180-900 KB depending on scene). |
 | `wait-log.sh FULL FILE PATTERN [TIMEOUT_S] [OUT]` | yes | Polls `get-file.sh` every 3s and greps the pulled copy with `grep -E`. Since `get-file.sh` is now resume-aware, repeated polls against a growing log append rather than re-downloading the whole file each time; if the remote file is ever truncated/recreated smaller than the local copy, delete the local `OUT` first (Range past EOF returns HTTP 416, treated as "already complete" rather than "stale"). |
 | `user-signin.sh [USER]` | partially | `PUT /ext/user?user=..`. Returned HTTP 400 when the user was (most likely) already signed in; launch worked regardless without calling this first in that case. Treat failures here as non-fatal and retry `launch.sh` anyway — not yet root-caused.
-| `pull-megabonk.sh [LOCALDIR] [REMOTE_SUBPATH]` | yes | Recursively mirrors `LocalState\megabonk` (default, override via args/`PKG_OLD`) to a local directory with retries + a final `sha256sum` manifest. Used to pull 24 files / ~237 MB off the console (old `Xboxnative.Boxedwine.DevMode_0.1.6.0...` package) into `/workspace/megabonk-from-console` — this is a **partial** copy (24 of the known 69 files / ~523 MB); a full copy still needs a fresh Steam download via João's login, not a console pull. |
+| `pull-megabonk.sh [LOCALDIR] [REMOTE_SUBPATH]` | yes | Recursively mirrors `LocalState\megabonk` (default, override via args/`PKG_OLD`) to a local directory with retries + a final `sha256sum` manifest. Used to pull 24 files / ~237 MB off the console (old `Xboxnative.Boxedwine.DevMode_0.1.6.0...` package) into a local directory — this is a **partial** copy (24 of the known 69 files / ~523 MB); a full copy still needs a fresh Steam download, not a console pull. |
 | `logs.sh list\|enable\|disable\|get ...` | yes | See "ETW / crash dump findings" below. |
 | `smoke.sh RID FULL LOGFILE PATTERN [...]` | yes | One-command `install?`→`launch`→`wait-log`→`screenshot`→`kill` pipeline with a PASS/FAIL summary (exit code = failure count). Verified live end-to-end (4/4 pass) against the Boxedwine DevMode probe app: `./smoke.sh 'Xboxnative.Boxedwine.DevMode_8j5c92gwe8f3c!App' Xboxnative.Boxedwine.DevMode_0.1.6.0_x64__8j5c92gwe8f3c ladder-native.log 'corewindow-swapchain PASS'`. Not run against `Xboxnative.Launcher` (the live shared launcher owned by lane `app`/`launcher`) — the `install`+`kill` steps would upgrade/downgrade and then terminate that package in place, which would have clobbered another lane's live session (QR login, `steam_session.bin`) rather than testing anything new. |
 
@@ -57,7 +59,7 @@ Env overrides: `DP_HOST` (default `192.168.15.96`, LAN IP can change; a bare hos
   filesystem and packagemanager endpoints.
 
 ## Evidence
-Screenshots/logs from this verification pass are under `/workspace/x64-run/runs/deploy/`
+Screenshots/logs from verification passes are kept in local run directories
 (not committed — console output, kept with the other run artifacts).
 
 ## Combined lane smoke runner
@@ -65,7 +67,7 @@ Screenshots/logs from this verification pass are under `/workspace/x64-run/runs/
 From the repository, `bash src/xbox-test/smoke-all.sh` checks off-device dispatch,
 the Megabonk import map, and the installed `Xboxnative.Uwph` 0.1.5.0 app
 (71 k32/ws checks plus 300 D3D frames). `--offline` skips console work.
-Logs append to `/workspace/x64-run/runs/smoke-YYYY-MM-DD-HHMM.log`; each run
+Logs append to a timestamped local run log; each run
 keeps its own evidence directory. A failed section makes the runner exit nonzero.
 Only the existing Uwph test identity is stopped/launched; no package is installed.
 The runner overwrites that identity's old k32.log while stopped before launching.

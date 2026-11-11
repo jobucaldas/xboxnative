@@ -3,7 +3,7 @@
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 here="$(cd "$(dirname "$0")" && pwd)"; cd "$here"; out="${1:-out}"; mkdir -p "$out/layout" "$out/obj"   # relative paths: clang-cl treats /abs/paths as options
-CB="${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}"
+CB="${UWP_CROSSBUILD:-out/uwp-crossbuild}"
 UWP_OBJ_DIR="$out/obj" "$CB/scripts/build.sh" --uwp --out "$out/layout/vrx.exe" --jobs 4 main.cpp -- /MT /O2 /DNDEBUG
 cp -r "$here/Assets" "$here/AppxManifest.xml" "$out/layout/"
 # test certificate (subject must equal manifest Publisher); created once, never committed

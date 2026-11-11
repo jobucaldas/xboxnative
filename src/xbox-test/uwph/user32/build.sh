@@ -5,7 +5,7 @@ export PATH="$HOME/.local/bin:$PATH"
 here="$(cd "$(dirname "$0")" && pwd)"   # before cd: callers pass a relative path
 cd "$here"
 out=${1:-out}; mkdir -p "$out/layout" "$out/obj"
-CB=${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}
+CB=${UWP_CROSSBUILD:-out/uwp-crossbuild}
 UWP_OBJ_DIR="$out/obj" "$CB/scripts/build.sh" --uwp --out "$out/layout/uwph-u32c.dll" --link-arg /dll --link-arg /def:core.def core.cpp -- /MT /O2 /DNDEBUG
 printf "LIBRARY uwph-u32c.dll\nEXPORTS\n uwph_atom_add\n uwph_atom_find\n uwph_atom_delete\n uwph_u32c_key_event\n uwph_u32c_input_set_fallback\n uwph_u32c_input_release_all\n uwph_u32c_input_key\n uwph_u32c_pads\n uwph_u32c_pads_test\n uwph_u32c_pads_test_end\n uwph_u32c_pads_current\n" > "$out/obj/atoms.def"
 x86_64-w64-mingw32-dlltool -d "$out/obj/atoms.def" -l "$out/obj/atoms.a"

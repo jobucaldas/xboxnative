@@ -10,7 +10,7 @@ name=${1:?usage: fetch-dep.sh <boxedwine|uwp-crossbuild|msix-packaging> [dest] [
 read -r _ url sha < <(grep -E "^$name[[:space:]]" "$root/deps.pin") || { echo "unknown dependency: $name" >&2; exit 2; }
 if [[ -z "$dest" ]]; then
   case "$name" in
-    uwp-crossbuild) dest=${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild} ;;
+    uwp-crossbuild) dest=${UWP_CROSSBUILD:-out/uwp-crossbuild} ;;
     *) dest=$root/third_party/$name ;;
   esac
 fi

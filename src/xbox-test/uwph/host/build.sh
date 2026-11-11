@@ -4,7 +4,7 @@ set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 here="$(cd "$(dirname "$0")" && pwd)"; cd "$here"; out="${1:-out}"; mkdir -p "$out/layout" "$out/obj"   # relative paths: clang-cl treats /abs/paths as options
 python3 gen-mlp-map.py
-CB="${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}"
+CB="${UWP_CROSSBUILD:-out/uwp-crossbuild}"
 case "${2:-uwph}" in
   uwph) manifest=AppxManifest.xml; lane_flags=() ;;
   wxl) manifest=AppxManifest.Wxl.xml; lane_flags=() ;;

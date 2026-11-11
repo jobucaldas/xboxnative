@@ -33,7 +33,7 @@ invalid handles and class duplication, and presents 180 green frames. Final
 rendering references live until process exit so Device Portal can capture the
 frame after the test returns. The host continues calling the guest presenter.
 
-`generate_routes.py` consumes lane imap's `src/tools/xbox/import_map.json` to build
+`generate_routes.py` consumes `src/tools/xbox/import_map.json` to build
 the runtime policy in `dll_map.cpp`. `uwph_resolve_import` uses the real OS DLL
 for classified native routes, and requires an installed callback for Wine,
 game-supplied and stub modules. Unknowns and uninstalled builtin callbacks fail;
@@ -41,9 +41,9 @@ there is no native fallback for user32/win32u/kernel32/ntdll. Successful native
 module references are retained for process lifetime. The package contains no
 replacement d3d11/dxgi/ws2_32/bcrypt/ole32/version DLLs.
 
-## Scope note: BACKLOG item 11 acceptance vs. a full Wine syscall backend
+## Scope note: the original acceptance vs. a full Wine syscall backend
 
-BACKLOG.md item 11's literal acceptance is: "test PE RegisterClassExW+
+The original acceptance for this component was: "test PE RegisterClassExW+
 CreateWindowExW+message loop survives N frames, WM_SIZE/WM_ACTIVATE logged on
 console." Item 12's is: "one process renders a D3D11 frame with real d3d11
 while uwph user32 owns the window (dp screenshot)." Both are met and verified
@@ -56,14 +56,14 @@ policy: `system`-classified DLLs (d3d11/dxgi/ws2_32/bcrypt/ole32/version)
 resolve to the real OS modules, `uwph`/`stub`-classified ones (user32/win32u/
 kernel32/ntdll) require an installed builtin callback and explicitly refuse to
 fall back to native — this is what "user32/kernel32/ntdll go to uwph builtins"
-in the lane brief means, and it is what's built and tested here.
+in the component brief means, and it is what's built and tested here.
 
 What this is **not**: Wine 10's actual `struct user_driver_funcs` /
 `__wine_set_user_driver` mechanism (`include/wine/gdi_driver.h`,
 `WINE_UNIX_LIB`), Wine's own HWND/message/server state, or a patched game
 import table. That is a much larger, separate effort (porting Wine's win32u
 Unix-side backend and loader/syscall bridge) that was never implied by this
-lane's concrete acceptance line, only by LANES.md's longer-term architecture
+component's concrete acceptance line, only by the design docs' longer-term architecture
 narrative. If/when that port is attempted, it must preserve Wine-owned HWND/
 message/server state and connect CreateWindow/DestroyWindow,
 WindowPosChanging/Changed, ProcessEvents, focus and input callbacks to
@@ -77,7 +77,7 @@ test PE is not a Wine-produced binary) and do not demonstrate Wine kernel32
 routing. Do not interpret these passing results as evidence that Wine, Steam
 or Megabonk runs on Xbox — only that the HWND-to-CoreWindow adapter, the
 gamepad-to-XInput mapping, and the system/uwph import-routing policy this
-lane was asked to build all work, verified on the real console.
+component was asked to build all work, verified on the real console.
 
 Console evidence: `results/console-final.log` and `results/green-frame.png` are
 from package 0.1.3.0 on the Series S, PID 4908. The console returned zero failures
