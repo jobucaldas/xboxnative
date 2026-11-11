@@ -255,6 +255,19 @@ int main() {
         check(!logout_request(true, Focus::grid, 0, 0, true), "an open confirm sheet does not re-open");
     }
 
+    // ---- B at the library root (item D5: moves the focus to the rail,
+    // never opens Log out) ----
+    {
+        Focus f = Focus::grid;
+        check(back_at_root(f, true), "D5: B at the root moves the focus");
+        check(f == Focus::sidebar, "D5: B at the root lands on the sidebar rail");
+        check(!back_at_root(f, true), "D5: B on the rail is a no-op (nowhere further back)");
+        check(f == Focus::sidebar, "D5: the rail keeps the focus");
+        Focus g = Focus::grid;
+        check(!back_at_root(g, false), "D5: no B press, no move");
+        check(g == Focus::grid, "D5: the grid keeps the focus without B");
+    }
+
     // ---- destructive sheets default to CANCEL (item 14) ----
     {
         ui_launcher::LogoutVM lo;

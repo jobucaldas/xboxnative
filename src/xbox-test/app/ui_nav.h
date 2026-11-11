@@ -348,4 +348,15 @@ inline bool logout_request(bool confirm_open, Focus focus, int sel, int sidebar_
     return false;
 }
 
+// Item D5: B at the library root. The root has nowhere to go back to, so B
+// moves the focus to the sidebar (the app's left-hand rail) instead of doing
+// nothing — a visible, non-destructive answer that keeps the hint bar honest
+// ("B Back" from the grid lands on the rail; B on the rail does nothing).
+// Returns true when the focus moved.
+inline bool back_at_root(Focus& focus, bool b_pressed) {
+    if (!b_pressed || focus == Focus::sidebar) return false;
+    focus = Focus::sidebar;
+    return true;
+}
+
 }  // namespace ui_nav

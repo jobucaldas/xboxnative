@@ -2399,11 +2399,16 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             int top = m_top, r = sel / COLS; if (r < top) top = r; if (r > top + 1) top = r - 1;
             grid_position(sel, top, source);
             if (has(edge, GamepadButtons::A) && n) { uint32_t aid; std::string nm; { std::lock_guard<std::mutex> l(g_gm); aid = list[m_sel]->appid; nm = list[m_sel]->name; } open_detail(aid, nm, source); return; }
-            // item 14: B on the library root does NOTHING (Xbox convention) —
-            // no popup/sheet is open here (each popup's handler returned above),
-            // so B falls through to nothing. Logout lives on the sidebar's
-            // PROFILE row (A); the Menu button no longer opens logout either.
-            if (has(edge, GamepadButtons::B)) logf("library: B ignored at the root (item 14) (%s)", source);
+            // item 14: B on the library root does NOTHING destructive (Xbox
+            // convention) — no popup/sheet is open here (each popup's handler
+            // returned above). Item D5: the root has nowhere to go back TO, so
+            // B moves the focus to the sidebar rail instead of doing nothing:
+            // a visible answer that matches the "B Back" hint. Logout lives on
+            // the sidebar's PROFILE row (A) and is never reachable from B.
+            if (has(edge, GamepadButtons::B)) {
+                if (ui_nav::back_at_root(m_focus, true)) logf("library: B -> sidebar rail (item D5) (%s)", source);
+                else logf("library: B ignored on the sidebar rail (item 14) (%s)", source);
+            }
         }
         else if (s == S_QUEUE) {
             // The shared sidebar stays live (up/down/A as on the library);
