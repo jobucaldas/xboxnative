@@ -767,11 +767,12 @@ inline std::string shaderText(const void* code,SIZE_T length,std::string* key=nu
 // - the output topology dcl_gs_output_topology (opcode 92), carried in the
 //   opcode token's bits [16:11] (D3D10_SB_PRIMITIVE_TOPOLOGY: pointlist=1):
 //   pointlist output is what a point-sprite terrain layer expands to
-// - stream declarations (dcl_stream m<N>, opcode 138, operand type STREAM=16
-//   in operand-token bits [19:12]): more than one stream means stream-out
-//   expansion, the shape dxilconv is most likely to drop
+// - stream declarations (dcl_stream m<N>, opcode D3D11_SB_OPCODE_DCL_STREAM,
+//   operand type STREAM=16 in operand-token bits [19:12]): more than one
+//   stream means stream-out expansion, the shape dxilconv is most likely to
+//   drop
 // - SV_ViewportArrayIndex/SV_RenderTargetArrayIndex output declarations
-//   (dcl_output_siv, opcode 103, name token = the instruction's last DWORD;
+//   (dcl_output_siv, name token = the instruction's last DWORD;
 //   D3D10_SB_NAME_RENDER_TARGET_ARRAY_INDEX=4, D3D10_SB_NAME_VIEWPORT_ARRAY_
 //   INDEX=5)
 // Container layout: DXBC header is 32 bytes of fixed fields + a DWORD chunk
@@ -780,10 +781,24 @@ inline std::string shaderText(const void* code,SIZE_T length,std::string* key=nu
 // DWORDs are the version token and the program length in DWORDs (the layout
 // shaderText already reads). Instruction format per d3d11TokenizedProgram-
 // Format.hpp: opcode token bits [10:00] opcode, [30:24] the instruction's
-// total length in DWORDs INCLUDING the opcode token; a CUSTOMDATA opcode (53)
-// is followed by its own DWORD length (also self-inclusive); ret (62) ends
-// the program. Only the declarations are looked for; the body is skipped by
-// length fields, and any malformed stream just ends the scan.
+// total length in DWORDs INCLUDING the opcode token; a CUSTOMDATA opcode
+// (D3D10_SB_OPCODE_CUSTOMDATA) leaves that field 0 and is followed by its own
+// DWORD length (self-inclusive); ret (D3D10_SB_OPCODE_RET) ends the program.
+// Only the declarations are looked for; the body is skipped by length fields,
+// and any malformed stream just ends the scan.
+// The opcode/name constants in gsOp* below are the enum positions from the
+// donor d3d11TokenizedProgramFormat.hpp, not hand-typed values; the
+// gsBytecodeText contract tests decode real compiled containers and pin them.
+enum : unsigned {
+    gsOpMaxOutputVertexCount=94,   // D3D10_SB_OPCODE_DCL_MAX_OUTPUT_VERTEX_COUNT
+    gsOpOutputTopology=92,         // D3D10_SB_OPCODE_DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY
+    gsOpStream=143,                // D3D11_SB_OPCODE_DCL_STREAM (138 is ubfe)
+    gsOpOutputSiv=103,             // D3D10_SB_OPCODE_DCL_OUTPUT_SIV
+    gsOpCustomData=53,             // D3D10_SB_OPCODE_CUSTOMDATA
+    gsOpRet=62,                    // D3D10_SB_OPCODE_RET
+    gsSivRtArrayIndex=4,           // D3D10_SB_NAME_RENDER_TARGET_ARRAY_INDEX
+    gsSivViewportIndex=5,          // D3D10_SB_NAME_VIEWPORT_ARRAY_INDEX
+};
 inline std::string gsBytecodeText(const void* code,SIZE_T length) {
     if(!code||length<48)return "";
     auto bytes=static_cast<const unsigned char*>(code);
@@ -809,9 +824,15 @@ inline std::string gsBytecodeText(const void* code,SIZE_T length) {
             uint32_t op=word(at);
             uint32_t opcode=op&0x7ff;
             uint32_t len=(op>>24)&0x7f;   // total instruction length incl. this token
+            if(opcode==gsOpCustomData&&at+8<=end) {   // CUSTOMDATA: length field is 0, its own DWORD follows (self-inclusive)
+                uint32_t cdLen=word(at+4);
+                if(!cdLen||at+size_t(cdLen)*4>end)break;
+                at+=size_t(cdLen)*4;
+                continue;
+            }
             if(!len)break;   // malformed: no sane way to step
-            if(opcode==94&&at+8<=end)maxVerts=word(at+4);   // dcl_maxOutputVertexCount: opcode + literal
-            else if(opcode==92) {   // dcl_gs_output_topology: enum in bits [16:11]
+            if(opcode==gsOpMaxOutputVertexCount&&at+8<=end)maxVerts=word(at+4);   // opcode + literal
+            else if(opcode==gsOpOutputTopology) {   // enum in bits [16:11]
                 switch((op>>11)&0x1f) {
                 case 1:outTopo="pointlist";break;case 2:outTopo="linelist";break;case 3:outTopo="linestrip";break;
                 case 4:outTopo="trianglelist";break;case 5:outTopo="trianglestrip";break;
@@ -820,20 +841,14 @@ inline std::string gsBytecodeText(const void* code,SIZE_T length) {
                 default:outTopo="?";break;
                 }
             }
-            else if(opcode==138)++streams;   // dcl_stream
-            else if(opcode==103&&len>=2) {   // dcl_output_siv: operand then NameToken
+            else if(opcode==gsOpStream)++streams;   // dcl_stream
+            else if(opcode==gsOpOutputSiv&&len>=2) {   // operand then NameToken
                 uint32_t name=word(at+4*(len-1));   // the instruction's last DWORD
-                if(name==5)viewportIndex=true;      // D3D10_SB_NAME_VIEWPORT_ARRAY_INDEX
-                else if(name==4)rtArrayIndex=true;  // D3D10_SB_NAME_RENDER_TARGET_ARRAY_INDEX
-            }
-            if(opcode==53&&at+8<=end) {   // CUSTOMDATA: its own DWORD length follows
-                uint32_t cdLen=word(at+4);
-                if(!cdLen||at+size_t(cdLen)*4>end)break;
-                at+=size_t(cdLen)*4;
-                continue;
+                if(name==gsSivViewportIndex)viewportIndex=true;
+                else if(name==gsSivRtArrayIndex)rtArrayIndex=true;
             }
             if(at+size_t(len)*4>end)break;   // malformed: stop
-            if(opcode==62)break;   // ret: end of program
+            if(opcode==gsOpRet)break;   // ret: end of program
             at+=size_t(len)*4;
         }
         std::string text=fmt("gs scan model=gs_%u_%u maxVerts=%u outTopo=%s streams=%u viewportIndex=%d rtArrayIndex=%d",

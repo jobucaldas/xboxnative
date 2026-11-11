@@ -425,15 +425,24 @@ int main(int argc,char** argv) {
 
 
     // Real GS containers (Wine d3dcompiler_47, gs_5_0): the scanner must read
-    // the version token, maxvertexcount, output topology and stream count the
-    // same way the console's converter will.
+    // the version token, maxvertexcount, output topology, stream count and
+    // array-index SIVs the same way the console's converter will. Each blob's
+    // expected fields come from the HLSL it was compiled from.
     {
+        // maxvertexcount(3), PointStream, SV_ViewportArrayIndex: one stream.
         std::string scan=d3d11_diag::gsBytecodeText(d3d11_diag::kGsViewportBlob,sizeof d3d11_diag::kGsViewportBlob);
-        CHECK(scan.find("model=gs_5_0")!=std::string::npos&&scan.find("maxVerts=3")!=std::string::npos&&scan.find("outTopo=pointlist")!=std::string::npos);
+        CHECK(scan=="gs scan model=gs_5_0 maxVerts=3 outTopo=pointlist streams=1 viewportIndex=1 rtArrayIndex=0");
+        // maxvertexcount(3), TriangleStream, SV_RenderTargetArrayIndex.
         scan=d3d11_diag::gsBytecodeText(d3d11_diag::kGsRtarrayBlob,sizeof d3d11_diag::kGsRtarrayBlob);
-        CHECK(scan.find("model=gs_5_0")!=std::string::npos&&scan.find("maxVerts=3")!=std::string::npos&&scan.find("outTopo=trianglestrip")!=std::string::npos);
+        CHECK(scan=="gs scan model=gs_5_0 maxVerts=3 outTopo=trianglestrip streams=1 viewportIndex=0 rtArrayIndex=1");
+        // maxvertexcount(4), two PointStreams: two dcl_stream declarations.
         scan=d3d11_diag::gsBytecodeText(d3d11_diag::kGsMultistreamBlob,sizeof d3d11_diag::kGsMultistreamBlob);
-        CHECK(scan.find("model=gs_5_0")!=std::string::npos&&scan.find("maxVerts=4")!=std::string::npos&&scan.find("outTopo=pointlist")!=std::string::npos);
+        CHECK(scan=="gs scan model=gs_5_0 maxVerts=4 outTopo=pointlist streams=2 viewportIndex=0 rtArrayIndex=0");
+        // A static-const table compiles to a dcl_immediateConstantBuffer
+        // CUSTOMDATA block before the declarations: the scan must skip it as a
+        // unit (its length field is 0) and still read what follows.
+        scan=d3d11_diag::gsBytecodeText(d3d11_diag::kGsCustomdataBlob,sizeof d3d11_diag::kGsCustomdataBlob);
+        CHECK(scan=="gs scan model=gs_5_0 maxVerts=5 outTopo=pointlist streams=1 viewportIndex=1 rtArrayIndex=0");
         CHECK(d3d11_diag::gsBytecodeText(nullptr,0).empty());
         CHECK(d3d11_diag::gsBytecodeText("junk",4).empty());
     }
