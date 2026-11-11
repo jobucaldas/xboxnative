@@ -11,6 +11,7 @@ __pycache__/
 *.cer
 .env
 .env.*
+!.env.example
 steam_session.bin
 *.token
 # game files and binaries

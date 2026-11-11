@@ -50,6 +50,11 @@ Build outputs and fetched third-party sources are ignored at any source-tree dep
 | `research`, `docs` | Reports, evidence logs, backlog, lane notes |
 | `deps.pin`, `src/tools/fetch-*.sh`, `patches/` | Pinned external dependencies (not copied here) |
 
+## Build and test in one command
+`./xn --help`: `./xn check` runs the offline checks CI runs, `./xn build` builds the launcher, `./xn local` does both, and
+`./xn console` builds, deploys to the console and runs the automated console tests (credentials from a git-ignored `.env`,
+template in `.env.example`). See [docs/BUILD-AND-TEST.md](docs/BUILD-AND-TEST.md). The sections below are the underlying steps.
+
 ## Build
 Linux host. Needs `clang-cl`/`lld-link` (LLVM 19), the xwin-provided Windows SDK/CRT, `makemsix`, `osslsigncode`, `python3`.
 ```sh
