@@ -86,6 +86,11 @@ if [ "${PLAY_SELFTEST:-1}" != 0 ]; then
   bash "$here/tests/build-diag-fixtures.sh" "$out/layout/diag"
 fi
 cp -r "$here/Assets" "$here/AppxManifest.xml" "$out/layout/"
+# PACKAGE_VERSION=a.b.c.d (set by `xn console`) stamps only the packaged copy; the tracked manifest is untouched.
+if [ -n "${PACKAGE_VERSION:-}" ]; then
+  [[ $PACKAGE_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "PACKAGE_VERSION must be a.b.c.d" >&2; exit 2; }
+  sed -i -E "s/(<Identity [^>]*Version=\")[0-9.]+(\")/\1$PACKAGE_VERSION\2/" "$out/layout/AppxManifest.xml"
+fi
 # test certificate (subject must equal manifest Publisher); created once, never committed
 # A cert from before the publisher rename (or any other subject) is replaced.
 if [ ! -f "$out/test.pfx" ] || ! openssl x509 -in "$out/test.pem" -noout -subject 2>/dev/null | grep -q "CN *= *xboxnative-dev"; then

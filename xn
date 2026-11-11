@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Entry point for building and testing: ./xn --help (see docs/BUILD-AND-TEST.md). The logic lives in src/xbox-test/xn.sh.
+exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/src/xbox-test/xn.sh" "$@"
