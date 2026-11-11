@@ -12,6 +12,7 @@
 #include "ui_font.h"
 #include "ui_glyphs.h"
 #include "ui_theme.h"
+#include "../ui_launcher.h"   // item D15: the startup/loading and sign-in screens render here too
 
 namespace {
 
@@ -287,6 +288,65 @@ int main(int argc, char** argv) {
         char msg[64]; std::snprintf(msg, sizeof msg, "glyph %c letter is centred in its disc", letter);
         check(x1 >= 0 && std::fabs(cx - D * 0.5f) <= 0.75f && std::fabs(cy - D * 0.5f) <= 0.75f, msg);
     }
+    // ---- item D15: the startup/loading splash and the sign-in screen, in the
+    // same design language (page background, panel card, accent-green
+    // indeterminate bar, one status line, a hint bar). Rendered here so the
+    // suite covers the full-screen states the launcher shows before the library.
+    {
+        std::vector<uint32_t> spx(size_t(W) * H, ui::theme::page);
+        ui::Canvas sc(spx.data(), W, H, W);
+        ui_launcher::StartupVM st;
+        st.status = "Signing in to Steam";
+        st.detail = "This can take a few seconds";
+        st.phase = 0.25f;
+        ui_launcher::draw_startup(sc, font, st);
+        const std::string sp = out + "/ui-startup.png";
+        check(write_png(sp.c_str(), spx.data(), W, H), "startup splash PNG written");
+        std::printf("render: %s\n", sp.c_str());
+        auto sat = [&](int xx, int yy) { return spx[size_t(yy) * W + xx]; };
+        check(sat(600, 320) == ui::theme::panel, "startup: the card is panel");
+        // the mark is a donut r 21..26 around (960, 376): probe its left band
+        check(sat(937, 376) == ui::theme::accent, "startup: the mark is the accent green");
+        // the indeterminate bar: accent segment left of the track's centre at phase .25
+        int bar = 0;
+        for (int xx = 720; xx < 1200; ++xx) if (sat(xx, 568) == ui::theme::accent) ++bar;
+        check(bar > 100, "startup: the indeterminate bar draws an accent segment");
+        check(sat(850, 571) == ui::theme::accent && sat(1190, 571) == ui::theme::track,
+              "startup: the segment slides along the track");
+        // failure state: danger status, no bar, an A Retry hint
+        std::vector<uint32_t> fpx(size_t(W) * H, ui::theme::page);
+        ui::Canvas fc(fpx.data(), W, H, W);
+        ui_launcher::StartupVM ft;
+        ft.status = "Could not load your games";
+        ft.detail = "Press A to retry, or check boot.log";
+        ft.failed = true;
+        ui_launcher::draw_startup(fc, font, ft);
+        const std::string fp = out + "/ui-startup-failed.png";
+        check(write_png(fp.c_str(), fpx.data(), W, H), "startup failure PNG written");
+        std::printf("render: %s\n", fp.c_str());
+        int danger = 0, barfail = 0, hints = 0;
+        for (int yy = 400; yy < 620; ++yy)
+            for (int xx = 600; xx < 1320; ++xx) {
+                if (fpx[size_t(yy) * W + xx] == ui::theme::danger) ++danger;
+                if (fpx[size_t(yy) * W + xx] == ui::theme::accent) ++barfail;
+            }
+        for (int yy = int(ui_launcher::kHintBandTop); yy < H; ++yy)
+            for (int xx = 0; xx < W; ++xx) if (fpx[size_t(yy) * W + xx] == ui::theme::glyph) ++hints;
+        check(danger > 100, "startup: the failure status is the danger colour");
+        check(barfail == 0, "startup: no progress bar while failed");
+        check(hints > 0, "startup: the failure state draws its hint bar");
+        // sign-in still renders (the QR screen shares the design language)
+        std::vector<uint32_t> qpx(size_t(W) * H, ui::theme::page);
+        ui::Canvas qc(qpx.data(), W, H, W);
+        ui_launcher::SignVM sv;
+        sv.source = "Steam";
+        ui_launcher::draw_signin(qc, font, sv);
+        const std::string qp = out + "/ui-signin.png";
+        check(write_png(qp.c_str(), qpx.data(), W, H), "sign-in PNG written");
+        std::printf("render: %s\n", qp.c_str());
+        check(qpx[size_t(560) * W + 500] == 0xFFFFFFFF, "sign-in: the QR card stays white");
+    }
+
     bool wrote = write_png(png.c_str(), px.data(), W, H);
     check(wrote, "PNG written");
     if (wrote) std::printf("render: %s\n", png.c_str());

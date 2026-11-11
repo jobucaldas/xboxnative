@@ -1507,6 +1507,78 @@ int main(int argc, char** argv) {
         snap("launcher-r6-disk-active");
     }
 
+    // ---- item D15: the startup/loading splash ----
+    {
+        StartupVM st;
+        st.status = "Signing in to Steam";
+        st.detail = "This can take a few seconds";
+        st.phase = 0.4f;
+        c.fill(ui::theme::page);
+        draw_startup(c, font, st);
+        const std::vector<uint32_t> once = px;
+        draw_startup(c, font, st);
+        check(px == once, "D15: draw_startup is idempotent");
+        // the card is panel, the mark accent, the bar has an accent segment
+        check(px[size_t(320) * W + 600] == ui::theme::panel, "D15: the splash draws its panel card");
+        int accent = 0, track = 0;
+        for (int x = 720; x < 1200; ++x) {
+            if (px[size_t(571) * W + x] == ui::theme::accent) ++accent;
+            if (px[size_t(571) * W + x] == ui::theme::track) ++track;
+        }
+        check(accent > 100 && track > 100, "D15: the indeterminate bar has an accent segment on a track");
+        // the phase moves the segment: two phases differ at the track's left end
+        StartupVM st2 = st; st2.phase = 0.9f;
+        c.fill(ui::theme::page);
+        draw_startup(c, font, st2);
+        check(px[size_t(571) * W + 730] == ui::theme::track, "D15: the segment moves with the phase");
+        // status wraps inside the card instead of running past it
+        StartupVM st3;
+        st3.status = "Cannot reach Steam - retrying with the saved login, this can take a while";
+        c.fill(ui::theme::page);
+        draw_startup(c, font, st3);
+        int outside = 0;
+        for (int y = 300; y < 660; ++y)
+            for (int x = 0; x < 560; ++x)
+                if (px[size_t(y) * W + x] == ui::theme::text2) ++outside;
+        check(outside == 0, "D15: a long status stays inside the card");
+        // failure: danger status, no bar, one hint pair
+        StartupVM st4;
+        st4.status = "Could not load your games";
+        st4.detail = "Press A to retry, or check boot.log";
+        st4.failed = true;
+        c.fill(ui::theme::page);
+        draw_startup(c, font, st4);
+        int danger = 0, bar = 0;
+        for (int y = 300; y < 660; ++y)
+            for (int x = 560; x < 1360; ++x) {
+                if (px[size_t(y) * W + x] == ui::theme::danger) ++danger;
+                if (px[size_t(y) * W + x] == ui::theme::accent) ++bar;
+            }
+        check(danger > 100, "D15: the failure status is the danger colour");
+        check(bar == 0, "D15: the failure state draws no progress bar");
+        int discs = 0;
+        for (int y = int(kHintBandTop); y < H; ++y)
+            for (int x = 0; x < W; ++x) if (px[size_t(y) * W + x] == ui::theme::glyph) ++discs;
+        check(discs > 0, "D15: the failure state draws a hint bar");
+        snap("launcher-d15-startup");
+        c.fill(ui::theme::page);
+        StartupVM st5; st5.failed = true; st5.status = "Could not load your games";
+        st5.detail = "Press A to retry, or check boot.log";
+        draw_startup(c, font, st5);
+        snap("launcher-d15-startup-failed");
+        // the sign-in screen carries the same account label as the sidebar
+        {
+            SignVM sv; sv.persona = "SteamPlayer"; sv.source = "Steam";
+            c.fill(ui::theme::page);
+            draw_signin(c, font, sv);
+            int muted = 0;
+            for (int y = 80; y < 120; ++y)
+                for (int x = 136; x < 500; ++x) if (px[size_t(y) * W + x] == ui::theme::textMuted) ++muted;
+            check(muted > 0, "D15: the sign-in pill labels the account source");
+            snap("launcher-d15-signin-source");
+        }
+    }
+
     // ---- item D14: the account list popup and the profile row's source label ----
     {
         const auto ink_in = [&](float x0, float y0, float w, float h, uint32_t col) {

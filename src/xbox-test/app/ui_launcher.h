@@ -378,6 +378,7 @@ struct SignVM {
     const char* status = "Waiting for approval";
     const char* timer = "The code refreshes automatically";
     const char* persona = "Not signed in";
+    const char* source = "";   // item D15: which account the pill names ("Steam")
     const char* avatar_letter = "";
     const char* clock = "";
     const QrRun* qr = nullptr; int qr_count = 0;
@@ -1453,9 +1454,71 @@ inline void draw_signin(ui::Canvas& c, const Font& f, const SignVM& s) {
     c.fill_circle(92, 100, 28, 0xFF2E2E2E);
     if (s.avatar_letter && *s.avatar_letter) text_c(c, f, Face::Semibold, 22, 92, 86.5f, s.avatar_letter, ui::theme::textDim);
     text(c, f, Face::Regular, 24, 136, 85.5f, s.persona, ui::theme::textDim);
+    // item D15: the same small 'Steam' source label the sidebar row carries, so
+    // the sign-in screen never implies the console account is the Steam one.
+    if (s.source && *s.source) {
+        const float pw = f.measure(Face::Regular, 24, s.persona);
+        text(c, f, Face::Regular, 18, 136 + pw + 14.0f, 89.0f, s.source, ui::theme::textMuted);
+    }
     if (s.clock && *s.clock) text_r(c, f, Face::Semibold, 36, 1848, 78, s.clock, ui::theme::text);
     // mockup 04: the prompt pair sits left of centre (A disc at 823.5)
     draw_hint_bar(c, f, kSignHints, 2, 823.5f);
+}
+
+// ---- startup / loading splash (item D15) ----
+// The full-screen state at launch while the saved Steam session is restored and
+// the library is fetched. Same design language as the rest of the launcher:
+// page background, Selawik type, a panel card, an accent-green indeterminate
+// bar, one concise status line, and a failure state that says what is wrong
+// and that it retries (A retries at once). Behaviour is unchanged: the net
+// thread still owns the retry loop; only the drawing moved out of the bitmap
+// fallback.
+struct StartupVM {
+    const char* title = "Xbox Native";
+    const char* status = "Starting...";
+    const char* detail = "";      // the hint line under the status
+    bool failed = false;          // status is a failure: danger colour, no bar
+    float phase = 0.0f;           // 0..1 clock for the indeterminate bar
+    const char* persona = "Not signed in";
+    const char* clock = "";
+};
+
+constexpr const char* kStartupHints[2] = {"A", "Retry"};
+
+inline void draw_startup(ui::Canvas& c, const Font& f, const StartupVM& s) {
+    using namespace ui::theme;
+    c.fill(ui::theme::page);
+    // user pill top-left, clock top-right (same treatment as the sign-in screen)
+    c.fill_circle(92, 100, 28, 0xFF2E2E2E);
+    text(c, f, Face::Regular, 24, 136, 85.5f, s.persona, ui::theme::textDim);
+    if (s.clock && *s.clock) text_r(c, f, Face::Semibold, 36, 1848, 78, s.clock, ui::theme::text);
+    // centred card: mark, title, status, indeterminate bar / failure hint
+    const float x = 560.0f, w = 800.0f, y = 300.0f, h = 360.0f;
+    c.fill_round_rect(rect(x, y, w, h), radiusPanel, panel);
+    const float cx = x + w * 0.5f;
+    // the mark: an accent ring, the same donut the storage widget uses
+    c.fill_donut(cx, y + 76.0f, 26, 5, -ui::kPi * 0.5f, ui::kTau, s.failed ? ui::theme::danger : ui::theme::accent);
+    text_c(c, f, Face::Semibold, 44, cx, y + 118.0f, s.title, ui::theme::text, -0.2f);
+    // status: wraps to the card's inner width so a long line never overflows
+    const float inner_w = w - 96.0f;
+    {
+        const std::vector<std::string> lines = f.wrap(Face::Regular, 28, s.status, inner_w);
+        const float lh = f.line_height(Face::Regular, 28);
+        float ty = y + 186.0f;
+        for (const std::string& ln : lines) {
+            text_c(c, f, Face::Regular, 28, cx, ty, ln.c_str(), s.failed ? ui::theme::danger : ui::theme::text2);
+            ty += lh;
+        }
+    }
+    if (!s.failed) {
+        // indeterminate bar: a 160px accent segment sliding along the track
+        const float bx = cx - 240.0f, by = y + 268.0f;
+        c.fill_round_rect(rect(bx, by, 480, 6), 3, ui::theme::track);
+        float ph = s.phase - std::floor(s.phase);   // ui_canvas.h brings <cmath>
+        c.fill_round_rect(rect(bx + (480.0f - 160.0f) * ph, by, 160, 6), 3, ui::theme::accent);
+    }
+    if (s.detail && *s.detail) text_c(c, f, Face::Regular, 22, cx, y + 292.0f, s.detail, ui::theme::textDim);
+    if (s.failed) draw_hint_bar(c, f, kStartupHints, 1, 524.0f);
 }
 
 // ---- sheets over the dimmed page (mockups 05 / 07) ----

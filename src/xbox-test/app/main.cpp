@@ -577,7 +577,7 @@ static void demo_library() {
 }
 static void enter_library(const std::string& access, const std::string& steamid) {
     g_screen = S_LOADING;
-    if (!fetch_library(access, steamid)) { { std::lock_guard<std::mutex> l(g_sm); g_err = "Could not load your games (see boot.log)"; } g_screen = S_LIBRARY; return; }
+    if (!fetch_library(access, steamid)) { { std::lock_guard<std::mutex> l(g_sm); g_err = "Could not load your games"; } return; }   // item D15: stay on the splash, which shows the failure and A Retry
     { std::lock_guard<std::mutex> l(g_sm); g_err.clear(); }
     start_covers(); g_screen = S_LIBRARY;
 }
@@ -610,7 +610,7 @@ static bool fetch_library_cm(CmSession& cm) {
 }
 static void enter_library_cm(CmSession& cm) {
     g_screen = S_LOADING;
-    if (!fetch_library_cm(cm)) { { std::lock_guard<std::mutex> l(g_sm); g_err = "Could not load your games (see boot.log)"; } g_screen = S_LIBRARY; return; }
+    if (!fetch_library_cm(cm)) { { std::lock_guard<std::mutex> l(g_sm); g_err = "Could not load your games"; } return; }   // item D15: stay on the splash (failure state + A Retry)
     { std::lock_guard<std::mutex> l(g_sm); g_err.clear(); }
     start_covers(); g_screen = S_LIBRARY;
 }
@@ -913,6 +913,11 @@ static void net_thread() {
     g_authResolved = true;
     while (!g_quit) {
         if (g_screen == S_LIBRARY || g_screen == S_LOADING || g_screen == S_DETAIL || g_screen == S_QUEUE || g_screen == S_STORAGE) {
+            if (g_reloadReq.exchange(false)) {   // item D15: A on the failure screen retries the library fetch now
+                auto u = user_session();
+                if (u && u->up) { { std::lock_guard<std::mutex> l(g_gm); g_games.clear(); } enter_library_cm(*u); continue; }
+                // no live session: the loop below logs on again with the saved token
+            }
             if (g_logoutReq.exchange(false)) { delete_token(); if (auto u = user_session()) { u->close(); set_user_session(nullptr); } g_screen = S_LOGIN; refresh.clear(); access.clear(); { std::lock_guard<std::mutex> l(g_gm); g_games.clear(); } continue; }
             if (!refresh.empty() && !g_demo) {
                 auto u = user_session();
@@ -1942,7 +1947,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void cmdhook(double t) {
         static double next = 0, holdUntil = 0; static std::deque<std::string> q;
         if (t < next) return; next = t + 0.25;
-        if (g_screen == S_BOOT || g_screen == S_LOGIN || g_screen == S_LOADING) return;   // item 19: every live screen accepts cmd.txt (S_STORAGE included)
+        if (g_screen == S_BOOT || g_screen == S_LOGIN || g_screen == S_LOADING) {   // item 19: every live screen accepts cmd.txt (S_STORAGE included)
+            std::string e; { std::lock_guard<std::mutex> l(g_sm); e = g_err; }
+            if (g_screen != S_LOADING || e.empty()) return;   // item D15: the splash's failure state stays scriptable
+        }
         std::wstring path = g_dir + L"\\cmd.txt"; std::string all;
         if (read_file_s(path, all)) {
             if (!DeleteFileW(path.c_str())) { logf("cmd.txt: consume failed; no input"); }
@@ -2191,6 +2199,29 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 x += w;
             }
         }
+    }
+
+    // Item D15: the launch/loading screen (S_BOOT and S_LOADING) in the new
+    // design language. The net thread owns every transition and retry; this
+    // only reports what it is doing, in the same words the log uses.
+    void draw_startup(double t) {
+        static std::string status_buf, detail_buf;
+        { std::lock_guard<std::mutex> l(g_sm); status_buf = g_status; }
+        std::string err; { std::lock_guard<std::mutex> l(g_sm); err = g_err; }
+        ui_launcher::StartupVM v;
+        v.status = status_buf.c_str();
+        v.failed = !err.empty();
+        if (v.failed) { v.status = err.c_str(); detail_buf = "Press A to retry, or check boot.log"; }
+        else { detail_buf = g_screen == S_BOOT ? "Preparing the launcher" : "This can take a few seconds"; }
+        v.detail = detail_buf.c_str();
+        v.phase = float(std::fmod(t * 0.5, 1.0));
+        // the console's user, when Windows.System.User has answered
+        start_xbox_users_fetch();
+        static std::string who;
+        { std::vector<std::string> xb = xbox_user_names(); who = xb.empty() ? "Not signed in" : xb.front(); }
+        v.persona = who.c_str();
+        ui::Canvas c(g_fb.data(), W, H, W);
+        ui_launcher::draw_startup(c, g_font, v);
     }
 
     void draw_login() {
@@ -2556,7 +2587,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // a clean page so no screen draws over the previous one's remnants.
         fill(0, 0, W, H, ui::theme::page);
         if (s == S_LOGIN) draw_login();
-        else if (s == S_LIBRARY || s == S_LOADING) draw_library(t);
+        else if (s == S_BOOT || s == S_LOADING) draw_startup(t);   // item D15: the launch/loading screens
+        else if (s == S_LIBRARY) draw_library(t);
         else if (s == S_QUEUE) draw_queue();
         else if (s == S_STORAGE) draw_storage();
         else if (s == S_DETAIL) draw_detail(t);
@@ -2586,6 +2618,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
         int s = g_screen;
         if (s == S_LOGIN) { if (has(edge, GamepadButtons::A) || has(edge, GamepadButtons::X)) { g_refreshReq = true; set_status("Refreshing QR..."); logf("Refresh button pressed"); } }
+        else if (s == S_BOOT || s == S_LOADING) {   // item D15: the failure state's 'A Retry' (nothing else is actionable while loading)
+            std::string err; { std::lock_guard<std::mutex> l(g_sm); err = g_err; }
+            if (!err.empty() && has(edge, GamepadButtons::A)) { g_reloadReq = true; set_status("Retrying..."); logf("startup: retry requested (%s)", source); }
+        }
         else if (s == S_DETAIL) {
             // item D10: the game options popup owns the pad while it is up
             if (options_input(edge, source)) return;
