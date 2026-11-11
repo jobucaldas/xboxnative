@@ -2905,7 +2905,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             bool activeRow = dlState == 1 || (dlState != 0 && dlApp);   // the same row draw_queue puts first
             int nrows = ui_nav::queue_row_total((activeRow ? 1 : 0) + (int)dq.size(), 0);   // row 0 Auto-update, then downloads, then the queue (0 updates)
             if (m_focus == ui_nav::Focus::sidebar) {
-                if (has(edge, GamepadButtons::DPadUp)) { ui_nav::sidebar_move(m_sidebar, false); logf("sidebar: entry %d (%s)", m_sidebar, source); }
+                // item D19: B leaves the queue from EITHER focus — with the
+                // sidebar live (the entry point) it was a dead key.
+                if (has(edge, GamepadButtons::B)) { g_screen = S_LIBRARY; logf("queue: back to the library (%s)", source); }
+                else if (has(edge, GamepadButtons::DPadUp)) { ui_nav::sidebar_move(m_sidebar, false); logf("sidebar: entry %d (%s)", m_sidebar, source); }
                 else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::sidebar_move(m_sidebar, true); logf("sidebar: entry %d (%s)", m_sidebar, source); }
                 else if (has(edge, GamepadButtons::DPadRight) && ui_nav::lateral(m_focus, 0, false)) { m_qSel = 0; }
                 else if (has(edge, GamepadButtons::A)) sidebar_activate(t, source);
@@ -2979,7 +2982,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 return;
             }
             if (m_focus == ui_nav::Focus::sidebar) {
-                if (has(edge, GamepadButtons::DPadUp)) { ui_nav::sidebar_move(m_sidebar, false); logf("sidebar: entry %d (%s)", m_sidebar, source); }
+                // item D19: B leaves the screen from EITHER focus (same dead key as the queue).
+                if (has(edge, GamepadButtons::B)) { g_screen = S_LIBRARY; logf("storage: back to the library (%s)", source); }
+                else if (has(edge, GamepadButtons::DPadUp)) { ui_nav::sidebar_move(m_sidebar, false); logf("sidebar: entry %d (%s)", m_sidebar, source); }
                 else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::sidebar_move(m_sidebar, true); logf("sidebar: entry %d (%s)", m_sidebar, source); }
                 else if (has(edge, GamepadButtons::DPadRight) && ui_nav::lateral(m_focus, 0, false)) { logf("storage: focus -> roots (%s)", source); }
                 else if (has(edge, GamepadButtons::A)) sidebar_activate(t, source);
