@@ -125,6 +125,11 @@ jobs:
       # host logic, so Wine runs it headless.
       - name: Shared legacy swap-chain conversion rules
         run: bash src/xbox-test/app/tests/swap-chain-convert.sh
+      # The GPU drain the ResizeBuffers hook runs must submit the event query
+      # (End, Flush) before polling GetData; fake COM objects assert the exact
+      # call order. Host logic, so Wine runs it headless.
+      - name: Resize drain submits the query before waiting on it
+        run: bash src/xbox-test/app/tests/drain-order.sh
   strict-imports:
     runs-on: ubuntu-latest
     steps:

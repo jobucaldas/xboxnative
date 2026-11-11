@@ -8,6 +8,7 @@
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include "host/d3d11_diag.h"   // the Present-failure path reports through its sink
+#include "host/resize_drain.h" // the GPU drain the resize hook runs (tested directly)
 #include <array>
 #include <atomic>
 #include <mutex>
@@ -199,9 +200,44 @@ using ResizeFn=HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*,UINT,UINT,UINT,DXGI_F
 inline ResizeFn realResize=nullptr;
 inline std::atomic<unsigned> resizes{0};inline std::atomic<unsigned> lastResizeCount{0};inline std::atomic<long> lastResizeHr{0};
 inline std::atomic<unsigned> lastResizeW{0},lastResizeH{0};
-inline UINT resize_flags(UINT flags){return flags&~UINT(DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);}
-inline UINT resize_count(UINT count){return count==0?0:std::max<UINT>(count,3);}
+//
+// A resize releases and recreates the back buffers. Real DXGI refuses it with
+// DXGI_ERROR_INVALID_CALL while any reference is still outstanding, which is
+// what forces apps to unbind first; a chain that tolerates outstanding
+// references instead submits commands against freed buffers, and the
+// d3d11on12 layer surfaces that to the driver as an invalid command — the
+// Slime Rancher device reset (0x887a0007) hit between the 3rd and 4th resize,
+// with Unity's deferred contexts still holding the old RTVs. So the hook
+// unbinds the immediate context's render targets (the references that matter
+// for buffer release; the game rebinds its targets every frame anyway — no
+// ClearState, which would also wipe shader/IA state the engine caches on the
+// CPU and only rebinds when dirty), then drains: end the event query, Flush
+// (submits both the unbind and the query — a wait before this Flush would
+// spin on a query the driver has not received while real work stays queued),
+// then poll the query until in-flight work completes (bounded: a wedged
+// device must not wedge the guest; the resize then fails honestly with the
+// driver's error instead of adding a hang). Results pass through unchanged.
+// The body lives in host/resize_drain.h so tests can assert the call order.
+using DrainFn=void(*)(ID3D11Device*);
+inline DrainFn realDrain=nullptr;   // test seam
+inline void drain_device(ID3D11Device* dev) {
+    if(realDrain){realDrain(dev);return;}
+    resize_drain::drain(dev);   // shared body, order-asserted in tests/drain-order
+}
 inline HRESULT STDMETHODCALLTYPE resize(IDXGISwapChain* c,UINT count,UINT w,UINT h,DXGI_FORMAT f,UINT flags) {
+    // Experiment switch (LocalState\lockmode.txt, read at install): every
+    // resize after the first returns S_OK without touching the chain. RCA
+    // hypothesis: the device reset (0x887a0007) is triggered by the resize
+    // path, so locking the mode should keep the game alive — at its first
+    // resolution — if that is right. First resize still goes through so the
+    // chain matches the window; the S_OK suppressions are counted and logged.
+    if(lockFirstMode&&resizes.load()>0) {
+        ++resizes;lastResizeCount=count;lastResizeW=w;lastResizeH=h;lastResizeHr=S_OK;
+        if(auto s=d3d11_diag::sink)s("overlay: resize suppressed (lockmode), chain keeps its first mode");
+        return S_OK;
+    }
+    winrt::com_ptr<ID3D11Device> dev;
+    if(SUCCEEDED(c->GetDevice(__uuidof(ID3D11Device),dev.put_void()))&&dev)drain_device(dev.get());
     HRESULT hr=realResize(c,resize_count(count),w,h,f,resize_flags(flags));
     ++resizes;lastResizeCount=count;lastResizeW=w;lastResizeH=h;lastResizeHr=hr;return hr;
 }
@@ -212,6 +248,10 @@ inline bool install(IDXGISwapChain1* chain) {
            patch(&vtable[13],(void*)&resize,(void**)&realResize)&&
            patch(&vtable[22],(void*)&present1,(void**)&realPresent1);
 }
+// RCA experiment, opt-in via LocalState\lockmode.txt (read at the install site
+// in main.cpp, on the launcher UI thread before any guest resize runs; the
+// flag is only read on the guest thread afterwards, hence the atomic).
+inline std::atomic<bool> lockFirstMode{false};
 
 // ---- Input capture while the menu is open. The game reads its pads through
 // Windows.Gaming.Input in this process; GetCurrentReading on the Gamepad and
