@@ -1,6 +1,7 @@
 """Exercise the exact portable inspection mapper used by launcher Play.
 Real-game imports are independently compared with pefile, not mapper output.
 """
+import os
 import pathlib
 import struct
 import subprocess
@@ -9,7 +10,7 @@ import unittest
 import pefile
 
 ROOT = pathlib.Path(__file__).resolve().parents[4]
-GAMES = pathlib.Path('${RUNS_DIR:-out/runs}/wgap/pe')
+GAMES = pathlib.Path(os.environ.get('RUNS_DIR', ROOT / 'out/runs')) / 'wgap/pe'
 
 class Mapper(unittest.TestCase):
     @classmethod

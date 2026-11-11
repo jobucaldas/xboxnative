@@ -1,11 +1,11 @@
-import csv, hashlib, json, re, subprocess, sys
+import csv, hashlib, json, os, re, subprocess, sys
 from pathlib import Path
 import pefile
 root=Path(__file__).resolve().parents[4]; research=root/'research'; coverage=research/'wine-coverage'
 sys.path.insert(0,str(root/'src/tools/xbox'))
 import wine_gap as gap
 import wine_graph as graph
-source=Path('${MEGABONK_DIR:-megabonk-from-console}')
+source=Path(os.environ.get('MEGABONK_DIR', root/'megabonk-from-console'))
 paths=sorted(p for p in source.iterdir() if p.suffix.lower() in ('.exe','.dll'))
 pairs=set(); second=set(); evidence=[]
 for path in paths:
@@ -44,7 +44,7 @@ for r in old:
 assert len(changes)==101, f'Expected 101 changed verdicts, got {len(changes)}'
 with original.open('w',newline='') as f:
     w=csv.DictWriter(f,gap.FIELDS); w.writeheader(); w.writerows(rows)
-run=Path('${RUNS_DIR:-out/runs}/wgap')
+run=Path(os.environ.get('RUNS_DIR', root/'out/runs'))/'wgap'
 (run/'oracle-llvm.txt').write_text('\n'.join(evidence))
 (run/'oracle-imports.json').write_text(json.dumps(sorted(pairs),indent=2)+'\n')
 (run/'oracle-input-sha256.txt').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+str(p)+'\n' for p in paths))

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 import re,os,glob,csv,subprocess
 from pathlib import Path
-W='${WINE_SOURCE:-$HOME/.cache/wine-source}'
+ROOT=Path(__file__).resolve().parents[3]
+W=os.environ.get('WINE_SOURCE', str(ROOT/'third_party/wine'))
 PE='/usr/lib/x86_64-linux-gnu/wine/x86_64-windows'
-OUT=Path(__file__).resolve().parents[3] / 'research/wine-coverage'
+OUT=ROOT / 'research/wine-coverage'
 dlls='''ntdll kernel32 kernelbase win32u user32 gdi32 gdi32full advapi32 sechost ole32 combase oleaut32 rpcrt4 msvcrt ucrtbase msvcp140 vcruntime140 xaudio2_9 xaudio2_7 xactengine3_7 x3daudio1_7 mmdevapi winmm dsound dinput dinput8 xinput1_3 xinput1_4 hid setupapi imm32 shell32 shlwapi shcore comctl32 comdlg32 version d3d9 d3d11 dxgi wined3d d3d12 d3dcompiler_47 opengl32 dwmapi dwrite gdiplus windowscodecs ws2_32 iphlpapi bcrypt crypt32 secur32 winhttp wininet uxtheme avrt psapi dbghelp mscoree mfplat'''.split()
 rows=[]
 for d in dlls:

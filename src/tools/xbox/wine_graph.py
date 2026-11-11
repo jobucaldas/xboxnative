@@ -4,7 +4,7 @@ Not a proof of runtime portability; unresolved indirect calls remain invisible.
 """
 import re, os, glob, collections
 from pathlib import Path
-W = os.environ.get("WINE_SOURCE", "${WINE_SOURCE:-$HOME/.cache/wine-source}")
+W = os.environ.get("WINE_SOURCE", str(Path(__file__).resolve().parents[3] / "third_party/wine"))
 # ---------- 2. spec parsing ----------
 def parse_spec(path):
     d = {}

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Wine-coverage analysis for Megabonk's non-system imports (research only).
-Inputs : Wine 11.0 source (${WINE_SOURCE:-$HOME/.cache/wine-source}), console probe log.
+Inputs : Wine 11.0 source ($WINE_SOURCE, default third_party/wine), console probe log.
 Outputs: CSVs in research/wine-coverage. Approximate: regex call graph, not a compiler.
 """
 import re, os, sys, csv, glob, collections
 from pathlib import Path
-W = '${WINE_SOURCE:-$HOME/.cache/wine-source}'
-OUT = Path(__file__).resolve().parents[3] / 'research/wine-coverage'
-LOG = '${RUNS_DIR:-out/runs}/stubs/native-discovery-console.log'
+ROOT = Path(__file__).resolve().parents[3]
+W = os.environ.get('WINE_SOURCE', str(ROOT / 'third_party/wine'))
+OUT = ROOT / 'research/wine-coverage'
+LOG = str(Path(os.environ.get('RUNS_DIR', ROOT / 'out/runs')) / 'stubs/native-discovery-console.log')
 
 # ---------- 1. imports to classify ----------
 imps = collections.OrderedDict()   # (dll,sym) -> route
