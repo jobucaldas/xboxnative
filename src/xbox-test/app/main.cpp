@@ -866,6 +866,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     com_ptr<ID3D11Device> m_dev; com_ptr<ID3D11DeviceContext> m_ctx; com_ptr<IDXGISwapChain1> m_sc; com_ptr<ID3D11Texture2D> m_bb;
     Pad m_pad; int m_prevPads = -1; uint64_t m_frame = 0;
     int m_sel = 0, m_top = 0; double m_scroll = 0, m_scrollT = 0; bool m_btnFocus = true, m_confirmLogout = false;
+    bool m_logoutYes = false;   // item 14: logout sheet focus, false = Cancel (never defaults to the destructive button)
     // library header selectors (item 1): sort dropdown, filters panel, search
     // overlay; m_hdrFocus follows ui_nav::kHeaderControlCount (0 sort, 1
     // filters, 2 search, -1 grid/sidebar).
@@ -919,6 +920,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
 
     // ---------------------------------------------------------------- detail screen (store info + Install/Play)
     uint32_t m_dApp = 0; std::string m_dName, m_dNote; int m_dScroll = 0; std::shared_ptr<StoreInfo> m_dSi; bool m_confirmDelete = false;
+    bool m_delYes = false;   // item 14: delete sheet focus, false = Cancel (never defaults to the destructive button)
     double m_dlStartT = -1e9;   // when this page started the install: A cancels a download only after detail_input::cancel_guard
     uint32_t m_dlWatch = 0; int m_dlWatchSeq = 0;   // the install this page started: on finish it refreshes, never launches
     game_library::DeleteKind m_delKind = game_library::DeleteKind::folder;   // decided when the confirm dialog opens
@@ -972,34 +974,39 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     std::string game_name(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return g->name; return id == 480 ? "Spacewar" : id == 3405340 ? "Megabonk" : id == 1007 ? "Steamworks SDK Redist" : ""; }
     bool owned(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return true; return false; }
     void open_detail(uint32_t id, const std::string& nm, const char* via) {
-        m_dApp = id; m_dName = nm.empty() ? "App " + std::to_string(id) : nm; m_dNote.clear(); m_dScroll = 0; m_dInstT = -10; m_confirmDelete = false; m_dlStartT = -1e9; m_dlWatch = 0;
+        m_dApp = id; m_dName = nm.empty() ? "App " + std::to_string(id) : nm; m_dNote.clear(); m_dScroll = 0; m_dInstT = -10; m_confirmDelete = false; m_delYes = false; m_dlStartT = -1e9; m_dlWatch = 0;
         launch_picker::close(m_pick);   // a picker left open belongs to the previous game
+        // header popups are closed with the screen (item 15: only one can be open)
+        m_sortOpen = false; m_sortFocus = 0; m_hdrFocus = -1; m_filtersOpen = false; m_filtersFocus = 0; m_searchOpen = false;
         // After a restart that unloaded a failed game, its page says why (this session's launches show in the launch panel).
         if (g_launch.phase == 0) { std::string why = launch_report::failure(read_bytes(g_dir + L"\\launch_result.json"), id); if (!why.empty()) m_dNote = "Last launch failed: " + why; }
         m_roots.clear(); m_rootSel = 0; refresh_roots("detail open");
         m_optApp = 0;   // a fresh page: the run-option count is read again (a download may have cached appinfo)
         auto si = std::make_shared<StoreInfo>(); si->appid = id; m_dSi = si; std::thread(store_worker, si).detach();
         { InstallInfo ii = read_install(id); if (ii.installed && !g_demo) cloud_async(id, ii.folder, false); }   // status line: what the cloud holds
-        m_confirmLogout = false; m_cloudOpen = false; m_cloudFocus = 0; m_dFocus = 0;
-        m_sortOpen = false; m_sortFocus = 0; m_hdrFocus = -1; m_filtersOpen = false; m_filtersFocus = 0; m_searchOpen = false;
+        m_confirmLogout = false; m_logoutYes = false; m_cloudOpen = false; m_cloudFocus = 0; m_dFocus = 0;
         g_screen = S_DETAIL; logf("detail: open appid=%u name='%s' via=%s", id, m_dName.c_str(), via);
     }
     void close_detail(const char* why) {
         // nothing of this page leaks into the next one (CONSOLE-ISSUES 3)
-        logf("detail: back to library (%s)", why); m_dSi.reset(); m_confirmDelete = false; m_cloudOpen = false; m_cloudFocus = 0; m_dFocus = 0; g_screen = S_LIBRARY;
+        logf("detail: back to library (%s)", why); m_dSi.reset(); m_confirmDelete = false; m_delYes = false; m_cloudOpen = false; m_cloudFocus = 0; m_dFocus = 0; g_screen = S_LIBRARY;
     }
     // A on a sidebar entry, shared by the library, queue and storage screens
-    // (the sidebar stays live on every screen that draws it): 0/1 switch the
-    // library view, 2 opens the download queue, 3 storage management.
+    // (the sidebar stays live on every screen that draws it). Item 14's new
+    // order: 0 PROFILE (opens the logout sheet), 1 Search (opens the search
+    // overlay), 2/3 library views (All games / Installed), 4 download queue,
+    // 5 storage management.
     void sidebar_activate(double t, const char* source) {
         int target = ui_nav::sidebar_target(m_sidebar);
-        if (target == 0 || target == 1) {
-            bool want = target == 1;
+        if (target == ui_nav::kSidebarProfile) { m_confirmLogout = true; m_logoutYes = false; logf("sidebar: profile row -> logout sheet, focus on Cancel (%s)", source); }
+        else if (target == ui_nav::kSidebarSearch) { m_hdrFocus = -1; m_focus = ui_nav::Focus::grid; ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 2); m_searchKey = 0; logf("sidebar: search overlay open (%s)", source); }
+        else if (target == 2 || target == 3) {
+            bool want = target == 3;
             if (m_onlyInstalled != want) { m_onlyInstalled = want; m_installedT = -10; refresh_installed(t); grid_position(0, 0, "sidebar view"); }
             g_screen = S_LIBRARY;
             logf("sidebar: %s view (%zu installed)", m_onlyInstalled ? "installed" : "all games", m_installed.size());
-        } else if (target == 2) { m_qSel = 0; m_focus = ui_nav::Focus::sidebar; g_screen = S_QUEUE; logf("sidebar: download queue (%s)", source); }
-        else if (target == 3) { refresh_roots("storage screen"); m_stSel = m_rootSel < m_roots.size() ? (int)m_rootSel : 0; m_focus = ui_nav::Focus::sidebar; g_screen = S_STORAGE; logf("sidebar: storage management (%s)", source); }
+        } else if (target == 4) { m_qSel = 0; m_focus = ui_nav::Focus::sidebar; g_screen = S_QUEUE; logf("sidebar: download queue (%s)", source); }
+        else if (target == 5) { refresh_roots("storage screen"); m_stSel = m_rootSel < m_roots.size() ? (int)m_rootSel : 0; m_focus = ui_nav::Focus::sidebar; g_screen = S_STORAGE; logf("sidebar: storage management (%s)", source); }
     }
     int m_dInstDel = -1;   // g_del.gen seen by m_dInst: a finished delete refreshes it at once
     void refresh_install(double t) { if (t - m_dInstT > 0.5 || m_dInstDel != g_del.gen) { m_dInstDel = g_del.gen; m_dInst = read_install(m_dApp); m_dInstT = t; } }
@@ -1361,7 +1368,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         g.cloud_saves = cloudShort;
 
         ui::Canvas c(g_fb.data(), W, H, W);
-        ui_launcher::draw_game(c, g_font, g);
+        ui_launcher::draw_game(c, g_font, g, !(m_confirmDelete || m_cloudOpen));   // item 17: a sheet brings its own hint bar
         ui_launcher::draw_game_note(c, g_font, g, vNote.c_str());
         if (m_pick.open) draw_picker();
         if (m_confirmDelete) {
@@ -1373,7 +1380,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             else if (m_dInst.bytes >= 107374182) dBody = "Frees " + storage_roots::size_text(m_dInst.bytes) + " on this console. Saves are kept.";
             else if (m_dInst.bytes) dBody = "Frees " + storage_roots::size_text(m_dInst.bytes) + " on this console. Saves are kept.";
             else dBody = "Removes the game files from this console. Saves are kept.";
-            d.title = dTitle.c_str(); d.body = dBody.c_str(); d.focus_delete = true;
+            d.title = dTitle.c_str(); d.body = dBody.c_str(); d.focus_delete = m_delYes;   // item 14: false = the ring sits on Cancel
             ui_launcher::draw_delete_sheet(c, g_font, d);
         }
         if (m_cloudOpen) {
@@ -1417,16 +1424,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (!m_pick.note.empty()) text8(x + 40, ry + 8, clip(m_pick.note, 90), 2, RED);
         text8(x + 40, y + h - 40, "A: run this option        B: cancel", 3, TXT);
     }
-    // One-shot synthetic command file LocalState\cmd.txt (consumed on read). Lines: open <appid> | press (=A) | back (=B) | view | up | down | left | right | lb | rb | x | y | sleep <s>.
-    // Semantics follow the new screens: on the library X cycles the sort and Y reloads,
-    // the View filter is gone (the sidebar's Installed entry switches the view); on the
-    // detail page X/Y are no longer shortcuts (focus the trash/cloud/cog buttons with
-    // left/right, then A). lb/rb keep their conflict-pick role.
+    // One-shot synthetic command file LocalState\cmd.txt (consumed on read). Lines: open <appid> | press (=A) | back (=B) | view | up | down | left | right | lb | rb | x | y | sort | filters | search | profile | sleep <s>.
+    // Semantics follow the new screens: B does nothing on the library root (item 14 — logout is
+    // the sidebar PROFILE row's A, with a Cancel-default confirm sheet); on the detail page X/Y
+    // are no longer shortcuts (focus the trash/cloud/cog buttons with left/right, then A).
+    // lb/rb keep their conflict-pick role. 'view' is accepted as a no-op alias (the old filter
+    // chip is gone; the sidebar's Installed entry switches the view).
     // Never periodic, never present unless a tester/script writes it; every executed line is logged as SYNTHETIC.
     void cmdhook(double t) {
         static double next = 0, holdUntil = 0; static std::deque<std::string> q;
         if (t < next) return; next = t + 0.25;
-        if (g_screen != S_LIBRARY && g_screen != S_DETAIL && g_screen != S_QUEUE) return;
+        if (g_screen == S_BOOT || g_screen == S_LOGIN || g_screen == S_LOADING) return;   // item 19: every live screen accepts cmd.txt (S_STORAGE included)
         std::wstring path = g_dir + L"\\cmd.txt"; std::string all;
         if (read_file_s(path, all)) {
             if (!DeleteFileW(path.c_str())) { logf("cmd.txt: consume failed; no input"); }
@@ -1444,10 +1452,16 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             menu_command(c == "gmenu" ? "toggle" : c == "gquit" ? "quit" : c == "gforce" ? "force" : "fps", "cmd.txt (synthetic)"); return;
         }
         if (c == "stacks") { dump_thread_stacks(); logf("cmd.txt: thread stacks written to launch_probe.log"); return; }
+        // item 19: named shortcuts for testers — harmless openers only.
+        if (c == "sort") { if (g_screen == S_LIBRARY) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 0); m_sortFocus = g_sortMode.load(); logf("cmd.txt: sort dropdown open"); } return; }
+        if (c == "filters") { if (g_screen == S_LIBRARY) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 1); m_filtersFocus = 0; logf("cmd.txt: filters panel open"); } return; }
+        if (c == "search") { if (g_screen == S_LIBRARY) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 2); m_searchKey = 0; logf("cmd.txt: search overlay open"); } return; }
+        if (c == "profile") { if (g_screen == S_LIBRARY) { m_focus = ui_nav::Focus::sidebar; m_sidebar = ui_nav::kSidebarProfile; logf("cmd.txt: profile row focused (nothing opened)"); } return; }
         GamepadButtons m = GamepadButtons::None;
-        if (c == "press" || c == "a") m = GamepadButtons::A; else if (c == "back" || c == "b") m = GamepadButtons::B; else if (c == "view") m = GamepadButtons::View;
+        if (c == "press" || c == "a") m = GamepadButtons::A; else if (c == "back" || c == "b") m = GamepadButtons::B;
         else if (c == "up") m = GamepadButtons::DPadUp; else if (c == "down") m = GamepadButtons::DPadDown; else if (c == "left") m = GamepadButtons::DPadLeft; else if (c == "right") m = GamepadButtons::DPadRight;
         else if (c == "lb") m = GamepadButtons::LeftShoulder; else if (c == "rb") m = GamepadButtons::RightShoulder; else if (c == "x") m = GamepadButtons::X; else if (c == "y") m = GamepadButtons::Y;
+        else if (c == "view") { logf("cmd.txt: 'view' is a no-op (the View filter chip is gone; use 'profile'/'filters'/'search')"); return; }
         if (m == GamepadButtons::None) { logf("cmd.txt: unknown command ignored"); return; }
         GamepadReading fake{}; fake.Buttons = m; input(t, fake, true, "cmd.txt (synthetic)"); input(t + 0.001, GamepadReading{}, true, "cmd.txt release (synthetic)");
     }
@@ -1643,7 +1657,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     }
 
     void draw_login() {
-        m_btnFocus = true; m_confirmLogout = false; m_sortOpen = false; m_sortFocus = 0; m_hdrFocus = -1; m_filtersOpen = false; m_searchOpen = false; // item 4: reset every sheet state on screen changes
+        m_btnFocus = true; m_confirmLogout = false; m_logoutYes = false; m_sortOpen = false; m_sortFocus = 0; m_hdrFocus = -1; m_filtersOpen = false; m_searchOpen = false; // item 4: reset every sheet state on screen changes
         build_qr_runs();
         static std::string status_buf; static char timer[64];
         {   // fill the view-model from the shared login state
@@ -1679,8 +1693,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
           sb.installed_count = (int)m_installed.size();
           size_t q; { std::lock_guard<std::mutex> ql(g_dqm); q = g_dq.size(); }
           sb.queue_count = (int)q + (g_dl.state == 1 ? 1 : 0); }
-        sb.active = m_onlyInstalled ? 1 : 0;
+        sb.active = m_onlyInstalled ? 1 : 0;   // item 14 mapping: 0 profile, 1 search, 2 all, 3 installed, 4 queue, 5 storage
         sb.focus = sidebar_focus_row();
+        sb.profile_focus = sidebar_focus_row() == ui_nav::kSidebarProfile;   // the UI worker draws the logout affordance from this
         return sb;
     }
 
@@ -1742,7 +1757,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (loading) lib.loading = true;
         else if (m_onlyInstalled) snprintf(count, sizeof count, "%zu installed of %d games", listed, (int)g_ownedCount.load()), lib.count_label = count;
         else { snprintf(count, sizeof count, "%d games", (int)listed); lib.count_label = count; }
-        ui_launcher::draw_library(c, g_font, sb, lib);
+        ui_launcher::draw_library(c, g_font, sb, lib, !m_confirmLogout);   // item 17: the logout sheet brings its own hint bar
         if (g_demo) {   // demo marker replaces the count line (honest: not your account)
             c.fill_rect_alpha(524, 168, 430, 60, ui::theme::page, 255);
             c.fill_round_rect(ui::rect(524, 168, 430, 60), ui::theme::radiusControl, ui::theme::control);
@@ -1753,10 +1768,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             ui_launcher::text(c, g_font, ui::Face::Regular, 24, 524, 216, err.c_str(), ui::theme::danger);
         }
         if (m_confirmLogout) {
-            // item 8: the SAME confirmation sheet component as Delete — title,
-            // body, two real buttons with focus — over the dimmed library.
+            // item 8/14: the SAME confirmation sheet component as Delete —
+            // title, body, two real buttons — over the dimmed library. The
+            // ring starts on CANCEL (item 14): only A on 'Log out' logs out.
             ui_launcher::LogoutVM lo;
-            lo.focus_yes = true;   // A confirms (focus on Log out), B cancels
+            lo.focus_yes = m_logoutYes;
             ui_launcher::draw_logout_sheet(c, g_font, lo);
         }
     }
@@ -1891,8 +1907,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 else if (has(edge, GamepadButtons::B)) { launch_picker::close(m_pick); logf("detail: launch-option picker cancelled (%s)", source); }
                 return;
             }
-            if (m_confirmDelete) {
-                if (has(edge, GamepadButtons::A)) detail_delete_confirm(source);
+            if (m_confirmDelete) {   // item 14: focus starts on Cancel; left/right toggles; A on 'Delete' deletes
+                if (has(edge, GamepadButtons::DPadLeft) || has(edge, GamepadButtons::DPadRight)) { m_delYes = !m_delYes; logf("detail: delete sheet focus -> %s (%s)", m_delYes ? "Delete" : "Cancel", source); }
+                else if (has(edge, GamepadButtons::A)) { if (m_delYes) detail_delete_confirm(source); else { m_confirmDelete = false; logf("detail: delete cancelled (%s)", source); } }
                 else if (has(edge, GamepadButtons::B)) { m_confirmDelete = false; logf("detail: delete cancelled (%s)", source); }
                 return;
             }
@@ -1929,12 +1946,18 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 else detail_storage(source);                      // cog: cycle the install location
             }
             if (has(edge, GamepadButtons::B)) detail_back(source);
-            if (has(edge, GamepadButtons::View) || has(edge, GamepadButtons::Menu)) close_detail("Menu/View");
+            // item 14: Menu/View no longer leaves the page — B is the one back
+            // route, like every other screen (a single press that leaves the
+            // page invited stray confirms on the next screen).
         }
         else if (s == S_LIBRARY) {
             std::vector<std::shared_ptr<Game>> list; { std::lock_guard<std::mutex> l(g_gm); list = shown_games(); } size_t n = list.size();
-            if (m_confirmLogout) {
-                if (has(edge, GamepadButtons::A)) { m_confirmLogout = false; g_logoutReq = true; grid_position(0, 0, "logout confirmed"); logf("logout confirmed: deleting local session file only (no revoke call)"); }
+            if (m_confirmLogout) {   // item 14: focus starts on Cancel; left/right toggles; only A on 'Log out' logs out
+                if (has(edge, GamepadButtons::DPadLeft) || has(edge, GamepadButtons::DPadRight)) { m_logoutYes = !m_logoutYes; logf("logout sheet: focus -> %s (%s)", m_logoutYes ? "Log out" : "Cancel", source); }
+                else if (has(edge, GamepadButtons::A)) {
+                    if (m_logoutYes) { m_confirmLogout = false; g_logoutReq = true; grid_position(0, 0, "logout confirmed"); logf("logout confirmed: deleting local session file only (no revoke call)"); }
+                    else { m_confirmLogout = false; logf("logout cancelled (%s)", source); }
+                }
                 else if (has(edge, GamepadButtons::B)) { m_confirmLogout = false; logf("logout cancelled"); }
                 return;
             }
@@ -1996,9 +2019,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 }
                 else if (has(edge, GamepadButtons::DPadDown)) { m_hdrFocus = -1; logf("header: focus -> grid (%s)", source); }
                 else if (has(edge, GamepadButtons::A)) {
-                    if (m_hdrFocus == 0) { m_sortOpen = true; m_sortFocus = g_sortMode.load(); logf("sort popup open (%s)", source); }
-                    else if (m_hdrFocus == 1) { m_filtersOpen = true; m_filtersFocus = 0; logf("filters panel open (%s)", source); }
-                    else if (m_hdrFocus == 2) { m_searchOpen = true; m_searchKey = 0; logf("search overlay open (%s)", source); }
+                    // item 15: opening one popup closes the others (ui_nav::popup_exclusive)
+                    if (m_hdrFocus == 0) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 0); m_sortFocus = g_sortMode.load(); logf("sort popup open (%s)", source); }
+                    else if (m_hdrFocus == 1) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 1); m_filtersFocus = 0; logf("filters panel open (%s)", source); }
+                    else if (m_hdrFocus == 2) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 2); m_searchKey = 0; logf("search overlay open (%s)", source); }
                 }
                 else if (has(edge, GamepadButtons::B)) { m_hdrFocus = -1; logf("header: focus -> grid (%s)", source); }
                 return;
@@ -2018,10 +2042,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             int top = m_top, r = sel / COLS; if (r < top) top = r; if (r > top + 1) top = r - 1;
             grid_position(sel, top, source);
             if (has(edge, GamepadButtons::A) && n) { uint32_t aid; std::string nm; { std::lock_guard<std::mutex> l(g_gm); aid = list[m_sel]->appid; nm = list[m_sel]->name; } open_detail(aid, nm, source); return; }
-            // item 1: X/Y shortcuts removed. Menu opens the logout confirm sheet
-            // (refresh moved to the Menu button on the sidebar's own semantics).
-            if (has(edge, GamepadButtons::Menu)) { m_confirmLogout = true; logf("logout confirm open (%s)", source); return; }
-            if (has(edge, GamepadButtons::B) && !g_demo && ui_nav::logout_request(m_confirmLogout, m_focus, m_sel, m_sidebar, true)) m_confirmLogout = true;   // B never stops a download
+            // item 14: B on the library root does NOTHING (Xbox convention) —
+            // no popup/sheet is open here (each popup's handler returned above),
+            // so B falls through to nothing. Logout lives on the sidebar's
+            // PROFILE row (A); the Menu button no longer opens logout either.
+            if (has(edge, GamepadButtons::B)) logf("library: B ignored at the root (item 14) (%s)", source);
         }
         else if (s == S_QUEUE) {
             // The shared sidebar stays live (up/down/A as on the library);

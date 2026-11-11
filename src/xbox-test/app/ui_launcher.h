@@ -159,6 +159,9 @@ struct SidebarVM {
     // item 3: the sidebar's Search row is the search entry — the live query
     // shows in the field; empty = the "Search" placeholder.
     const char* search_query = "";
+    // item 14: the PROFILE row is focusable (logout affordance); main.cpp
+    // derives it from (m_focus, m_sidebar) at draw time.
+    bool profile_focus = false;
 };
 
 struct TileVM {
@@ -248,21 +251,23 @@ struct GameVM {
 };
 
 // logout confirm (item 8): the SAME sheet component as Delete — title, body,
-// two buttons with focus — over the dimmed page.
+// two buttons with focus — over the dimmed page. Item 14: focus_yes defaults
+// FALSE — the ring starts on Cancel, never on the destructive button.
 struct LogoutVM {
     const char* title = "Log out of Steam?";
     const char* body = "This deletes the saved login on this console only. "
                        "You can sign in again with the QR code.";
     const char* note = "";
-    bool focus_yes = true;   // true: the second button (Log out) carries the ring
+    bool focus_yes = false;
 };
 
-// sheets over the dimmed game page (mockups 05 / 07)
+// sheets over the dimmed game page (mockups 05 / 07). Item 14: focus_delete
+// defaults FALSE — the ring starts on Cancel, never on the destructive button.
 struct DeleteVM {
     const char* title = "Delete Megabonk?";
     const char* body = "Frees 48.2 GB on this console. Saves are kept.";
     const char* note = "You can install it again from your library at any time.";
-    bool focus_delete = true;
+    bool focus_delete = false;
 };
 
 struct CloudSlotVM { const char* name = ""; const char* detail = ""; };
@@ -388,33 +393,41 @@ inline float draw_hint_bar(ui::Canvas& c, const Font& f, const char* const* pair
 inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
     using namespace ui::theme;
     c.fill_round_rect(rect(kSidebarX, kSidebarY, kSidebarW, kSidebarH), radiusPanel, ui::theme::panel);
+    // item 14: the PROFILE row (avatar + persona, sidebar index 0) is a
+    // focusable entry; A on it opens the logout confirm sheet. It only ever
+    // wears the focus pill — the green bar stays reserved for the active
+    // VIEW entry (item 16's rule applied to every non-view row). The pill is
+    // drawn BEFORE the avatar/persona so they sit on top of it.
+    if (sb.profile_focus || ui_nav::kSidebarProfile == sb.focus)
+        c.fill_round_rect(rect(40, 68, 395, 64), radiusControl, ui::theme::control);
     // avatar: circle + head + shoulders
     c.fill_circle(kSidebarX + 60, 100, 28, kAvatarBg);
     c.fill_circle(kSidebarX + 60, 94, 10, 0xFFC8C8C8);
     c.fill_round_rect(rect(kSidebarX + 44, 106, 32, 14), 7, 0xFFC8C8C8);
     // item 9: persona not resolved -> a neutral label, never a blank row
     text(c, f, Face::Regular, 24, 136, 85.5f, sb.persona && *sb.persona ? sb.persona : "Signed in",
-         ui::theme::textDim);
+         sb.profile_focus || ui_nav::kSidebarProfile == sb.focus ? ui::theme::text : ui::theme::textDim);
     c.fill_rect(64, 248, 347, 1, ui::theme::separator);
-    // nav rows (review fix 3): the Search field is THE search entry (row 0) —
-    // a focusable pill like the other rows; an active query shows in it.
+    // item 16: the Search row is a search FIELD — control fill, dim
+    // placeholder ('Search'), the query when one is active; never the
+    // active-entry green bar, only the focus look when focused.
     {
-        const bool on = ui_nav::kSidebarSearch == sb.active;
         const bool focused = ui_nav::kSidebarSearch == sb.focus;
         c.fill_round_rect(rect(40, 160, 395, 64), radiusControl, ui::theme::control);
         const char* q = sb.search_query && *sb.search_query ? sb.search_query : "Search";
         text(c, f, Face::Regular, 22, 64, 160 + 17.5f, q,
-             on || focused || (sb.search_query && *sb.search_query) ? ui::theme::text : ui::theme::textDim);
-        if (on) c.fill_rect(429, 160, 6, 64, ui::theme::accent);
+             focused || (sb.search_query && *sb.search_query) ? ui::theme::text : ui::theme::textDim);
     }
-    // nav rows
+    // nav rows: the view entries, sidebar indexes 2..5 (item 14's order —
+    // 0 is the profile row above, 1 the Search pill above).
     struct Row { const char* label; int count; };
     const Row rows[4] = {{"All games", sb.all_count}, {"Installed", sb.installed_count},
                          {"Download queue", sb.queue_count}, {"Storage management", -1}};
     float y = 264.0f;
     for (int i = 0; i < 4; ++i) {
-        const bool on = i == sb.active;
-        const bool focused = i == sb.focus;
+        const int entry = i + 2;   // sidebar index: the view rows start at 2 (item 14)
+        const bool on = entry == sb.active;
+        const bool focused = entry == sb.focus;
         // mockup 01: the ACTIVE row wears the control pill + green bar; the
         // row with the pad FOCUS wears the same pill (focus == active reads
         // as the mockup's single highlighted row). No ring on sidebar rows.
@@ -596,6 +609,9 @@ inline void draw_sort_popup(ui::Canvas& c, const Font& f, const LibraryVM& lib) 
             const float p[6] = {cx, cy2 + ch * 0.6f, cx + cw * 0.35f, cy2 + ch, cx + cw, cy2};
             c.stroke_polyline(p, 3, false, 3.0f, ui::theme::accent);
         }    }
+    // item 17: the popup's own hint bar (the base screen's is suppressed)
+    const char* pairs[4] = {"A", "Select", "B", "Close"};
+    draw_hint_bar(c, f, pairs, 2, 524.0f);
 }
 
 // Filters panel (item 1, review fix 2): toggle rows the caller provides,
@@ -620,6 +636,9 @@ inline void draw_filters_panel(ui::Canvas& c, const Font& f, const FilterRowVM* 
         c.fill_circle(rows[i].on ? px + 40 : px + 16, py + 16, 12, ui::theme::onAccent);
         if (rows[i].on) text(c, f, Face::Semibold, 16, px + 12, py + 6.5f, "On", ui::theme::onAccent);
     }
+    // item 17: the popup draws its own hint bar (the base screen's is suppressed)
+    const char* pairs[4] = {"A", "Toggle", "B", "Close"};
+    draw_hint_bar(c, f, pairs, 2, 524.0f);
 }
 
 // Search overlay (item 1): centred sheet over the dimmed page — letter grid
@@ -670,7 +689,10 @@ inline void draw_search_overlay(ui::Canvas& c, const Font& f, const LibraryVM& l
     draw_hint_bar(c, f, pairs, 3, 524.0f);   // review fix 4: same x as the library
 }
 
-inline void draw_library(ui::Canvas& c, const Font& f, const SidebarVM& sb, const LibraryVM& lib) {
+// item 17: draw_hints = false suppresses the base screen's hint bar (a sheet
+// drawn over the page brings its own bar; the two must never stack).
+inline void draw_library(ui::Canvas& c, const Font& f, const SidebarVM& sb, const LibraryVM& lib,
+                         bool draw_hints = true) {
     using namespace ui::theme;
     c.fill(ui::theme::page);   // item 3: full clear first
     draw_sidebar(c, f, sb);
@@ -691,11 +713,21 @@ inline void draw_library(ui::Canvas& c, const Font& f, const SidebarVM& sb, cons
         draw_tile(c, f, lib.tiles[i], g, lib.focus_tile && i == lib.sel && lib.header_focus < 0, lib.t);
     }
     c.reset_clip();
-    draw_hint_bar(c, f, kLibraryHints, 3, 524.0f);
-    // popups over the page (item 1)
+    // item 17: ONE hint bar per frame. When any sheet/overlay is up, the base
+    // screen's own bar must not remain under the sheet's — the sheet draws
+    // its own bar over the scrim. So the base bar is drawn only when nothing
+    // is open (the popups below draw their own). Sheets OUTSIDE LibraryVM
+    // (logout, delete, cloud) suppress the bar through `draw_hints` = false.
+    const bool sheet_up = lib.sort_open || lib.filters_open || lib.search_open;
+    if (!sheet_up && draw_hints) draw_hint_bar(c, f, kLibraryHints, 3, 524.0f);
+    // popups over the page (item 1); each draws its own hint bar when open.
+    // Item 15: the filters panel draws ONLY while open — the library render
+    // itself never paints it.
     draw_sort_popup(c, f, lib);
-    FilterRowVM installed_only[1] = {{"Installed only", false}};
-    draw_filters_panel(c, f, installed_only, 1, lib.filters_open ? lib.filters_focus : -1);
+    if (lib.filters_open) {
+        FilterRowVM installed_only[1] = {{"Installed only", false}};
+        draw_filters_panel(c, f, installed_only, 1, lib.filters_focus);
+    }
     draw_search_overlay(c, f, lib);
 }
 
@@ -729,7 +761,9 @@ inline void draw_queue_card(ui::Canvas& c, const Font& f, const QueueRowVM& r, f
     }
 }
 
-inline void draw_download_queue(ui::Canvas& c, const Font& f, const SidebarVM& sb, const QueueVM& q) {
+// item 17: draw_hints = false suppresses the base hint bar (see draw_library).
+inline void draw_download_queue(ui::Canvas& c, const Font& f, const SidebarVM& sb, const QueueVM& q,
+                                bool draw_hints = true) {
     using namespace ui::theme;
     c.fill(ui::theme::page);
     draw_sidebar(c, f, sb);
@@ -755,7 +789,7 @@ inline void draw_download_queue(ui::Canvas& c, const Font& f, const SidebarVM& s
     std::snprintf(b, sizeof b, "%d pending", q.update_count);
     text_r(c, f, Face::Regular, 22, 1844, 682, b, ui::theme::textDim);
     for (int i = 0; i < q.update_count; ++i) draw_queue_card(c, f, q.updates[i], 728 + 112.0f * i, true);
-    draw_hint_bar(c, f, kQueueHints, 3, 524.0f);
+    if (draw_hints) draw_hint_bar(c, f, kQueueHints, 3, 524.0f);
 }
 
 // ---- game screen (mockups 02 / 02b / 03 / 03b: one layout, state-driven) ----
@@ -811,7 +845,8 @@ inline void draw_kv(ui::Canvas& c, const Font& f, float kx, float vx, float y, c
     text(c, f, Face::Regular, 24, vx + 256.0f - w, y, s.c_str(), ui::theme::textDim);
 }
 
-inline void draw_game(ui::Canvas& c, const Font& f, const GameVM& g) {
+// item 17: draw_hints = false suppresses the base hint bar (see draw_library).
+inline void draw_game(ui::Canvas& c, const Font& f, const GameVM& g, bool draw_hints = true) {
     using namespace ui::theme;
     c.fill(ui::theme::page);   // item 3: full clear first
     // hero (item 13): the wide library_hero.jpg cover-fit across 1920x520
@@ -906,7 +941,7 @@ inline void draw_game(ui::Canvas& c, const Font& f, const GameVM& g) {
 
     // ui::theme::hint bar: the A ui::theme::hint follows the primary state
     const char* pairs[6] = {"A", primary_hint(g.primary, g.primary_focus), "M", "Manage", "B", "Back"};
-    draw_hint_bar(c, f, pairs, 3, 524.0f);   // review fix 5: same x as the library
+    if (draw_hints) draw_hint_bar(c, f, pairs, 3, 524.0f);   // review fix 5: same x as the library
 }
 
 // One transient note line over the dimmed game page (refusals, cloud warnings,
@@ -932,9 +967,21 @@ inline void draw_signin(ui::Canvas& c, const Font& f, const SignVM& s) {
     for (int i = 0; i < s.qr_count; ++i)
         c.fill_rect(467.0f + s.qr[i].col * 10.0f, 415.0f + s.qr[i].row * 10.0f, s.qr[i].w * 10.0f, 10.0f,
                     0xFF000000);
-    // status card
+    // status card. Item 18: the status wraps to the card's inner width
+    // (648 - 2x32 padding = 584) so a long line can never overflow the card;
+    // the block stays vertically centred on the card's text slot.
     c.fill_round_rect(rect(840, 380, 648, 360), radiusCard, ui::theme::panel);
-    text_c(c, f, Face::Semibold, 32, 1164, 464, s.status, ui::theme::text);
+    {
+        const float inner_w = 648.0f - 64.0f;
+        const std::vector<std::string> lines = f.wrap(Face::Semibold, 32, s.status, inner_w);
+        const float lh = f.line_height(Face::Semibold, 32);
+        const float block_h = float(lines.size()) * lh;
+        float ty = 464.0f - block_h * 0.5f + (lh - 32.0f) * 0.5f;   // centre the block on the single-line slot
+        for (const std::string& ln : lines) {
+            text_c(c, f, Face::Semibold, 32, 1164, ty, ln.c_str(), ui::theme::text);
+            ty += lh;
+        }
+    }
     text(c, f, Face::Regular, 22, 953, 510, s.timer, ui::theme::textDim);
     c.fill_round_rect(rect(981, 576, 366, 80), radiusControl, ui::theme::accent);
     text_c(c, f, Face::Semibold, 26, 1158, 600.5f, "REFRESH QR", ui::theme::onAccent);
@@ -954,6 +1001,8 @@ inline void draw_signin(ui::Canvas& c, const Font& f, const SignVM& s) {
 
 // item 8: the ONE confirmation sheet component, shared by Delete and Log out —
 // title, body, note, two real buttons with focus, over the dimmed page.
+// Item 14: focus_yes = false draws the ring on the CANCEL button (the
+// default) — the destructive button is never focused first.
 inline void draw_confirm_sheet(ui::Canvas& c, const Font& f, const char* title, const char* body,
                                const char* note, const char* no_label, const char* yes_label, bool focus_yes) {
     using namespace ui::theme;
@@ -968,6 +1017,8 @@ inline void draw_confirm_sheet(ui::Canvas& c, const Font& f, const char* title, 
     text_c(c, f, Face::Semibold, 26, 1258, 616.5f, yes_label, ui::theme::onAccent);
     if (focus_yes)
         focus_ring(c, rect(1198, 594, 120, 76), radiusControl + ringRadiusDelta, ringWidth);
+    else
+        focus_ring(c, rect(1012, 594, 182, 76), radiusControl + ringRadiusDelta, ringWidth);
     const char* pairs[4] = {"A", yes_label, "B", no_label};
     draw_hint_bar(c, f, pairs, 2, 524.0f);   // review fix 5: same x as the library
 }

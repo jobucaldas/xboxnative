@@ -43,21 +43,26 @@ int main() {
         check(!lateral(f, 0, false) && f == Focus::grid, "right inside the grid does nothing");
     }
 
-    // ---- sidebar movement wraps over the five entries ----
+    // ---- 6-entry sidebar (item 14): Profile, Search, All games, Installed,
+    // Download queue, Storage management ----
     {
-        int a = 0;
-        sidebar_move(a, true);  check(a == 1, "sidebar down 0->1");
-        sidebar_move(a, true);  check(a == 2, "sidebar down 1->2");
+        check(ui_nav::kSidebarEntries == 6, "the sidebar has 6 entries (profile + search + 4 views)");
+        check(ui_nav::kSidebarProfile == 0, "the profile row is entry 0");
+        check(ui_nav::kSidebarSearch == 1, "the Search pill is entry 1");
+        int a = 1;
+        sidebar_move(a, true);  check(a == 2, "sidebar down 1->2 (search -> all games)");
         sidebar_move(a, true);  check(a == 3, "sidebar down 2->3");
         sidebar_move(a, true);  check(a == 4, "sidebar down 3->4");
-        sidebar_move(a, true);  check(a == 0, "sidebar down wraps 4->0");
-        sidebar_move(a, false); check(a == 4, "sidebar up wraps 0->4");
-        sidebar_move(a, false); check(a == 3, "sidebar up 4->3");
-        // targets: 0 search overlay, 1/2 library, 3 download queue, 4 storage
-        check(sidebar_target(0) == 0, "the Search row targets the search overlay");
-        check(sidebar_target(1) == 1 && sidebar_target(2) == 2, "entries 1/2 target the installed/all views");
-        check(sidebar_target(3) == 3, "entry 3 opens the download queue");
-        check(sidebar_target(4) == 4, "entry 4 opens storage management");
+        sidebar_move(a, true);  check(a == 5, "sidebar down 4->5");
+        sidebar_move(a, true);  check(a == 0, "sidebar down wraps 5->0 (storage -> profile)");
+        sidebar_move(a, false); check(a == 5, "sidebar up wraps 0->5");
+        sidebar_move(a, false); check(a == 4, "sidebar up 5->4");
+        // targets: 0 logout sheet, 1 search overlay, 2/3 library, 4 queue, 5 storage
+        check(sidebar_target(0) == 0, "the Profile row targets the logout sheet");
+        check(sidebar_target(1) == 1, "the Search row targets the search overlay");
+        check(sidebar_target(2) == 2 && sidebar_target(3) == 3, "entries 2/3 target the installed/all views");
+        check(sidebar_target(4) == 4, "entry 4 opens the download queue");
+        check(sidebar_target(5) == 5, "entry 5 opens storage management");
     }
 
     // ---- sort cycling wraps over the existing three modes ----
@@ -115,11 +120,20 @@ int main() {
         }
     }
 
-    // ---- logout reachability ----
+    // ---- logout reachability (item 14: B on the library root does NOTHING;
+    // logout lives on the sidebar's PROFILE row only) ----
     {
-        check(logout_request(false, Focus::grid, 0, 0, true), "B on the grid asks to log out");
+        check(!logout_request(false, Focus::grid, 0, 0, true), "B on the grid never opens logout");
         check(!logout_request(false, Focus::sidebar, 0, 0, true), "B in the sidebar does not");
         check(!logout_request(true, Focus::grid, 0, 0, true), "an open confirm sheet does not re-open");
+    }
+
+    // ---- destructive sheets default to CANCEL (item 14) ----
+    {
+        ui_launcher::LogoutVM lo;
+        check(!lo.focus_yes, "logout sheet focus defaults to Cancel (never Log out)");
+        ui_launcher::DeleteVM d;
+        check(!d.focus_delete, "delete sheet focus defaults to Cancel (never Delete)");
     }
 
     // ---- header controls: focus walk clamps (item 1; review fix 3: 2 controls) ----

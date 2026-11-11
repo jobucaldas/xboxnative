@@ -313,6 +313,8 @@ int main(int argc, char** argv) {
         sb.installed_count = 7;
         sb.queue_count = 3;
         check(sb.free_gb_x10 / 10 == 412 && sb.free_gb_x10 % 10 == 6, "free space reads 412.6 GB");
+        // item 14: the view entries start at index 2 (0 profile, 1 search)
+        check(ui_nav::kSidebarEntries == 6, "sidebar VM serves 6 entries");
     }
 
     // ---- pure logic: queue row model ----
@@ -518,7 +520,7 @@ int main(int argc, char** argv) {
     {
         const std::vector<QueueRowVM> rows = make_rows(3, false);
         const std::vector<QueueRowVM> ups = make_rows(2, true);
-        SidebarVM sb; sb.all_count = 128; sb.installed_count = 9; sb.queue_count = 1; sb.active = 2;
+        SidebarVM sb; sb.all_count = 128; sb.installed_count = 9; sb.queue_count = 1; sb.active = 4;   // item 14: queue is entry 4
         QueueVM q; q.rows = rows.data(); q.row_count = 3; q.updates = ups.data(); q.update_count = 2;
         q.focus = 0;  // mockup 06: the auto-update pill carries the focus ring
         c.fill(ui::theme::page);
@@ -566,7 +568,7 @@ int main(int argc, char** argv) {
 
     // extras: queue empty
     {
-        SidebarVM sb; sb.active = 2;
+        SidebarVM sb; sb.active = 4;   // item 14: queue is entry 4
         QueueVM q;  // no rows, no updates
         c.fill(ui::theme::page);
         draw_download_queue(c, font, sb, q);
@@ -702,6 +704,71 @@ int main(int argc, char** argv) {
         for (int i = 0; i < 5; ++i)
             if (probes[i][0] == 0xFFFF00FFu) ++magenta;
         check(magenta == 0, "game render covers the page (no garbage left)");
+    }
+
+    // item 15: the filters panel draws ONLY while open — a library render with
+    // filters_open = false leaves the panel's strip pure page (the strip
+    // y 237..262 under the Filters button is panel-only territory: the grid
+    // starts at y=264, the Filters control ends at y=228+ring).
+    {
+        const std::vector<TileVM> tiles = make_tiles(21);
+        SidebarVM sb; sb.all_count = 21; sb.installed_count = 9; sb.queue_count = 1;
+        LibraryVM lib; lib.tiles = tiles.data(); lib.tile_count = 21; lib.sel = 0; lib.cols = 5;
+        lib.filters_open = false;
+        c.fill(ui::theme::page);
+        draw_library(c, font, sb, lib);
+        bool panel_pixels = false;
+        for (int y = 237; y < 262 && !panel_pixels; ++y)
+            for (int x = 1414; x < 1844; ++x)
+                if (px[size_t(y) * W + x] != ui::theme::page) { panel_pixels = true; break; }
+        check(!panel_pixels, "filters closed: the panel strip is pure page (item 15)");
+        // and with the panel open the SAME strip lights up with panel pixels
+        lib.filters_open = true; lib.filters_focus = 0;
+        c.fill(ui::theme::page);
+        draw_library(c, font, sb, lib);
+        bool panel_seen = false;
+        for (int y = 237; y < 262 && !panel_seen; ++y)
+            for (int x = 1414; x < 1844; ++x)
+                if (px[size_t(y) * W + x] != ui::theme::page) { panel_seen = true; break; }
+        check(panel_seen, "filters open: the panel strip carries panel pixels (item 15)");
+    }
+
+    // item 17: ONE hint bar per frame — with the base bar suppressed the hint
+    // band (y 1001..1047, right of the sidebar) carries ONLY page pixels; the
+    // sheet's own bar is what main.cpp draws over the scrim.
+    {
+        const auto band_clean = [&]() {
+            for (int y = 1001; y < 1048; ++y)
+                for (int x = 524; x < 1844; ++x)
+                    if (px[size_t(y) * W + x] != ui::theme::page) return false;
+            return true;
+        };
+        SidebarVM sb; sb.all_count = 21; sb.installed_count = 9; sb.queue_count = 1;
+        LibraryVM lib; lib.tiles = nullptr; lib.tile_count = 0;
+        // base bar drawn: the band carries the prompts
+        c.fill(ui::theme::page);
+        draw_library(c, font, sb, lib);
+        bool bar_drawn = !band_clean();
+        // base bar suppressed (what main.cpp passes while a sheet is up): pure page
+        c.fill(ui::theme::page);
+        draw_library(c, font, sb, lib, /*draw_hints=*/false);
+        bool bar_gone = band_clean();
+        check(bar_drawn, "default draw_library still paints its hint bar");
+        check(bar_gone, "draw_hints=false leaves the hint band pure page (item 17)");
+    }
+
+    // item 18: the sign-in status wraps inside the status card — measured
+    // lines stay within the card's inner width for the default strings.
+    {
+        const float inner_w = 648.0f - 64.0f;   // card w 648, 32px padding each side
+        const char* status = "Scan with the Steam mobile app, then approve";
+        std::vector<std::string> lines = font.wrap(Face::Semibold, 32, status, inner_w);
+        check(lines.size() >= 1, "sign-in status wraps to at least one line");
+        bool fits = true;
+        for (const std::string& ln : lines)
+            if (font.measure(Face::Semibold, 32, ln) > inner_w + 0.5f) fits = false;
+        check(fits, "every wrapped status line fits the card inner width (item 18)");
+        check(lines.size() >= 2, "the long default status wraps to 2 lines (item 18)");
     }
 
     std::printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "OK", g_failures, g_failures == 1 ? "" : "s");

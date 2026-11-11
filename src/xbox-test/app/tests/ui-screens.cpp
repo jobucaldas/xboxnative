@@ -24,14 +24,14 @@ int main() {
 
     // ---- the sidebar entries the queue/storage screens hang off ----
     {
-        // new nav order (review fix 3): Search(0), All games(1), Installed(2),
-        // Download queue(3), Storage management(4)
-        check(sidebar_target(3) == 3, "entry 3 opens the download queue");
-        check(sidebar_target(4) == 4, "entry 4 opens storage management");
-        int a = 3;
-        sidebar_move(a, true);  check(a == 4, "sidebar down 3->4 (queue -> storage)");
-        sidebar_move(a, false); check(a == 3, "sidebar up 4->3");
-        sidebar_move(a, true);  sidebar_move(a, true);  check(a == 0, "sidebar down wraps 4->0");
+        // item 14's order: Profile(0), Search(1), All games(2), Installed(3),
+        // Download queue(4), Storage management(5)
+        check(sidebar_target(4) == 4, "entry 4 opens the download queue");
+        check(sidebar_target(5) == 5, "entry 5 opens storage management");
+        int a = 4;
+        sidebar_move(a, true);  check(a == 5, "sidebar down 4->5 (queue -> storage)");
+        sidebar_move(a, false); check(a == 4, "sidebar up 5->4");
+        sidebar_move(a, true);  sidebar_move(a, true);  check(a == 0, "sidebar down wraps 5->0 (storage -> profile)");
     }
 
     // ---- focus walk between the sidebar and the page rows ----

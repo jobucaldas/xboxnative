@@ -17,12 +17,13 @@ namespace ui_nav {
 // D-pad left from the first grid column moves focus to the sidebar; right
 // from the sidebar returns to the grid. Up/down inside the sidebar moves the
 // active entry; A on an entry switches the view.
-// Review fix 3: the Search field is a focusable sidebar ROW (index 0) — the
-// search entry; the nav order is Search, All games, Installed, Download
-// queue, Storage management. main.cpp maps the other indexes through
-// sidebar_target; index kSidebarSearch opens the search overlay.
-constexpr int kSidebarEntries = 5;   // Search, All games, Installed, Download queue, Storage management
-constexpr int kSidebarSearch = 0;    // the Search row's index (opens the search overlay)
+// Item 14: the sidebar is SIX entries — PROFILE (index 0, focusable; A opens
+// the logout confirm sheet), Search (1, opens the search overlay), All games,
+// Installed, Download queue, Storage management. main.cpp maps the indexes
+// through sidebar_target; index kSidebarSearch opens the search overlay.
+constexpr int kSidebarEntries = 6;   // Profile, Search, All games, Installed, Download queue, Storage management
+constexpr int kSidebarProfile = 0;   // the profile row (A opens the logout confirm sheet)
+constexpr int kSidebarSearch = 1;    // the Search row's index (opens the search overlay)
 
 enum class Focus { grid, sidebar };
 
@@ -47,10 +48,11 @@ inline bool sidebar_move(int& active, bool down) {
     return true;
 }
 
-// Which screen the sidebar's active entry opens: kSidebarSearch (0) opens the
-// search overlay, 1/2 library (All games / Installed), 3 download queue,
-// 4 storage management. The library screen itself shows the sidebar; the
-// other two draw their own page and B returns to the library.
+// Which screen the sidebar's active entry opens: kSidebarProfile (0) opens
+// the logout confirm sheet, kSidebarSearch (1) the search overlay, 2/3
+// library (All games / Installed), 4 download queue, 5 storage management.
+// The library screen itself shows the sidebar; the other two draw their own
+// page and B returns to the library.
 inline int sidebar_target(int active) { return active; }
 
 // ---- sort mode cycling ----
@@ -213,15 +215,14 @@ inline bool search_activate(int idx, std::string& query, bool& open) {
 }
 
 // ---- logout reachability ----
-// The old View filter chip is gone (Installed is a sidebar entry now); the
-// logout confirm sheet opens from the library screen with B when the grid
-// has focus (B never stops a download and never cancels an install), and the
-// sheet itself is drawn by main.cpp with the restyled confirm copy. A
-// confirms, B cancels.
+// Item 14: B on the library root does NOTHING (Xbox convention; it used to
+// open the logout sheet with focus on the destructive button). Logout lives
+// on the sidebar's PROFILE row: up from Search reaches it, A opens the
+// confirm sheet (main.cpp). This helper stays for the sheet-open guard so a
+// B press can never open it; it always returns false now.
 inline bool logout_request(bool confirm_open, Focus focus, int sel, int sidebar_active, bool b_pressed) {
-    (void)sel; (void)sidebar_active;
-    if (confirm_open) return false;
-    return focus == Focus::grid && b_pressed;
+    (void)confirm_open; (void)focus; (void)sel; (void)sidebar_active; (void)b_pressed;
+    return false;
 }
 
 }  // namespace ui_nav
