@@ -11,4 +11,7 @@ mkdir -p out/graphics-tests
 extra=()
 for d in /nix/store/*-mcfgthread-x86_64-w64-mingw32-*/lib; do [[ -d $d ]] && extra+=("-L$d"); done
 x86_64-w64-mingw32-g++ -std=c++17 -O2 tests/swap-chain-convert.cpp -o out/graphics-tests/swap-chain-convert.exe -ldxgi -ldxguid "${extra[@]}"
-WINEPREFIX=${PRUN_WINEPREFIX:-/tmp/vis-wine} WINEDEBUG=-all timeout -k 2 30 wine out/graphics-tests/swap-chain-convert.exe
+# Wine refuses a prefix under /tmp on CI (not owned by the runner); default
+# to a directory beside the build output like the registry selftest does.
+export WINEPREFIX=${WINEPREFIX:-$PWD/out/graphics-tests/wine-prefix}
+WINEDEBUG=-all timeout -k 2 30 wine out/graphics-tests/swap-chain-convert.exe
