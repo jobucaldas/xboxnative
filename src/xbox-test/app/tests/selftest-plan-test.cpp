@@ -15,16 +15,21 @@ int main() {
     // first because it costs no launcher restart.
     size_t count = 0;
     const Mode* table = modes(count);
-    assert(count == 7);
+    assert(count == 9);
     assert(std::string(table[0].name) == "x86" && table[0].pe32);
     assert(std::string(table[1].name) == "vulkan-dzn" && !table[1].pe32);
     assert(std::string(table[2].name) == "d3d9" && std::string(table[5].name) == "d3d10");
     assert(std::string(table[3].name) == "d3d9-triangle" && std::string(table[4].name) == "d3d9-textured");
     assert(std::string(table[6].name) == "opengl" && std::string(table[6].exe) == "play-opengl.exe" && !table[6].pe32);
+    assert(std::string(table[7].name) == "d3d11" && std::string(table[7].exe) == "play-d3d11.exe" && !table[7].pe32);
+    assert(std::string(table[8].name) == "d3d12" && std::string(table[8].exe) == "play-d3d12.exe" && !table[8].pe32);
     assert(find("d3d9") && find("d3d9")->pe32 == false);
     assert(find("d3d9-triangle") && std::string(find("d3d9-triangle")->exe) == "play-d3d9-triangle.exe");
+    assert(find("d3d11") && std::string(find("d3d11")->exe) == "play-d3d11.exe");
+    assert(find("d3d12") && std::string(find("d3d12")->exe) == "play-d3d12.exe");
+    assert(!find("d3d11")->pe32 && !find("d3d12")->pe32);
     assert(find("x86") && find("x86")->pe32);
-    assert(!find("d3d11") && !find(""));
+    assert(!find(""));
 
     // "all" must fit inside the restart cap: each 64-bit fixture costs one
     // launcher restart, so a cap below the guest count would mark the last
@@ -32,7 +37,7 @@ int main() {
     // fixed cap of four did once the table grew past five guests).
     int guests = 0;
     for (size_t i = 0; i < count; ++i) if (!table[i].pe32) ++guests;
-    assert(guests == 6);
+    assert(guests == 8);
     assert(max_restarts() > guests);
     assert(max_restarts() == guests + 1);
 
@@ -47,7 +52,7 @@ int main() {
     assert(unknown.size() == 2 && unknown[0] == "nope");
     // "all" expands to every fixture in canonical order, whatever else is named.
     auto all = parse_request("d3d10\nall\n");
-    assert(all.size() == 7 && all[0] == "x86" && all[5] == "d3d10" && all[6] == "opengl");
+    assert(all.size() == 9 && all[0] == "x86" && all[5] == "d3d10" && all[6] == "opengl" && all[7] == "d3d11" && all[8] == "d3d12");
 
     // The queue survives a launcher restart: restarts count and pending modes
     // round-trip; a malformed file is refused rather than half-read.
@@ -68,8 +73,12 @@ int main() {
     // outcome (the host's D3D12 refused dzn's device) that is never a pass.
     assert(verdict("d3d9", true, true, 42) == "PASS");
     assert(verdict("d3d10", true, true, 42) == "PASS");
+    assert(verdict("d3d11", true, true, 42) == "PASS");
+    assert(verdict("d3d12", true, true, 42) == "PASS");
     assert(verdict("x86", true, true, 42) == "PASS");
     assert(verdict("d3d9", true, true, 17) == "FAIL exit-17");
+    assert(verdict("d3d11", true, true, 13) == "FAIL exit-13");
+    assert(verdict("d3d12", true, true, 29) == "FAIL exit-29");
     assert(verdict("vulkan-dzn", true, true, 42) == "PASS frame-presented");
     assert(verdict("vulkan-dzn", true, true, 43) == "BLOCKED device-creation");
     assert(verdict("vulkan-dzn", true, true, 13) == "FAIL exit-13");
@@ -78,6 +87,10 @@ int main() {
     assert(verdict("opengl", true, true, 42) == "PASS");
     assert(verdict("opengl", true, true, 43) == "BLOCKED pixel-readback");
     assert(verdict("opengl", true, true, 13) == "FAIL exit-13");
+    // The D3D11/D3D12 ones block the same way: everything ran but the pixels
+    // did not read back as drawn (never a pass).
+    assert(verdict("d3d11", true, true, 43) == "BLOCKED pixel-readback");
+    assert(verdict("d3d12", true, true, 43) == "BLOCKED pixel-readback");
     // A guest that never ran code, or ran it and never exited, is a failure.
     assert(verdict("d3d9", true, false, 0) == "FAIL no-guest-code");
     assert(verdict("d3d9", false, true, 0) == "FAIL did-not-exit");
