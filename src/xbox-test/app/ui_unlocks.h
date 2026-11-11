@@ -68,10 +68,14 @@ inline int index_of(const steam_achievements::Schema& s, const std::vector<ui_gu
 
 // Steam community CDN URL for an achievement icon hash (public images, no
 // account data). Empty hash -> empty URL (the view keeps its fallback tile).
+// The schema's icon/icon_gray values already carry their extension
+// ("4c378f...ef4c.jpg"), so the suffix is added only when it is missing: the
+// doubled ".jpg.jpg" the old code produced 404'd every icon on the console.
 inline std::string icon_url(uint32_t appid, const std::string& hash) {
     if (hash.empty()) return {};
-    return "https://cdn.fastly.steamstatic.com/steamcommunity/public/images/apps/" +
-           std::to_string(appid) + "/" + hash + ".jpg";
+    const std::string base = "https://cdn.fastly.steamstatic.com/steamcommunity/public/images/apps/" +
+                             std::to_string(appid) + "/" + hash;
+    return hash.find('.') == std::string::npos ? base + ".jpg" : base;
 }
 
 }  // namespace ui_unlocks

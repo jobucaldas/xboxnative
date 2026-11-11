@@ -102,6 +102,12 @@ int main() {
                   "https://cdn.fastly.steamstatic.com/steamcommunity/public/images/apps/3405340/abc123.jpg",
               "icon_url: CDN pattern with appid and hash");
         check(icon_url(1, "").empty(), "icon_url: empty hash gives an empty URL");
+        // item D20: the schema's icon value already ends in .jpg — appending
+        // another one 404'd every achievement icon on the console.
+        check(icon_url(3405340, "4c378fd9006af550a537466bc7a9ff876c05ef4c.jpg") ==
+                  "https://cdn.fastly.steamstatic.com/steamcommunity/public/images/apps/3405340/"
+                  "4c378fd9006af550a537466bc7a9ff876c05ef4c.jpg",
+              "D20: a hash that already carries .jpg is not suffixed twice");
     }
 
     // ---- fake achievements.json: the poller's parse -> diff -> view round-trip ----
