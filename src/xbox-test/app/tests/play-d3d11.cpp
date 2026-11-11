@@ -132,6 +132,43 @@ DWORD d3d_entry() {
     // the host drew nothing the guest could read.
     if(!insideRed||!outsideBlack)return 43;
 
+    // ---- the geometry-shader pass: one point expanded through the GS ----
+    // The shape Halo Wars' terrain/minimap layer uses (pointlist input, a GS
+    // that appends vertices): if the host's GS route drops the expansion the
+    // pixels stay black exactly as the game's terrain does. Same target, a
+    // fresh clear, one point at the center expanded to a green triangle.
+    ID3D11GeometryShader* gs=nullptr;
+    if(FAILED(device->CreateGeometryShader(triangle_gs,sizeof triangle_gs,nullptr,&gs))||!gs)return 44;
+    // The GS's input is the VS output: one vertex carrying POSITION (the VS
+    // passes it through) plus COLOR for the PS. Feed the same stride the
+    // triangle pass uses so the input layout applies unchanged.
+    const float pointV[6]={0.0f,0.0f,0,1,0,1};   // POSITION + COLOR, green
+    D3D11_BUFFER_DESC pvb{};
+    pvb.ByteWidth=sizeof pointV;pvb.Usage=D3D11_USAGE_IMMUTABLE;pvb.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA pvInit{};pvInit.pSysMem=pointV;
+    ID3D11Buffer* pointFullBuffer=nullptr;
+    if(FAILED(device->CreateBuffer(&pvb,&pvInit,&pointFullBuffer))||!pointFullBuffer)return 45;
+    context->ClearRenderTargetView(rtv,clear);
+    ID3D11Buffer* pointBinds[]={pointFullBuffer};
+    context->IASetVertexBuffers(0,1,pointBinds,&stride,&offset);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+    context->GSSetShader(gs,nullptr,0);
+    context->Draw(1,0);
+    context->GSSetShader(nullptr,nullptr,0);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11Buffer* triBinds[]={verticesBuffer};
+    context->IASetVertexBuffers(0,1,triBinds,&stride,&offset);
+
+    context->CopyResource(staging,target);
+    D3D11_MAPPED_SUBRESOURCE gMapped{};
+    if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&gMapped))||!gMapped.pData)return 46;
+    // The GS expands the center point to a triangle spanning y+0.4, y-0.4,
+    // x±0.4: pixel (32,32) lands inside it, green through the PS.
+    const unsigned char* gInside=static_cast<const unsigned char*>(gMapped.pData)+32*gMapped.RowPitch+32*4;
+    const bool insideGreen=gInside[1]>0x80&&gInside[0]<0x40&&gInside[2]<0x40;
+    context->Unmap(staging,0);
+    if(!insideGreen)return 47;   // BLOCKED: the GS expansion did not reach the target
+
     // The draw reaches the swap chain's back buffer too, as a game's does:
     // present one frame with the triangle in it.
     ID3D11RenderTargetView* backView=nullptr;
@@ -160,7 +197,8 @@ DWORD d3d_entry() {
     if(!FAILED(device->CheckFormatSupport(DXGI_FORMAT(0x7fff),&support))&&support)return 31;
 
     backView->Release();backBuffer->Release();
-    rtv->Release();verticesBuffer->Release();layout->Release();
+    rtv->Release();pointFullBuffer->Release();gs->Release();
+    verticesBuffer->Release();layout->Release();
     ps->Release();vs->Release();
     staging->Release();target->Release();
     swapchain->Release();context->Release();device->Release();
