@@ -194,7 +194,7 @@ DWORD d3d12_entry() {
     vbDesc.SampleDesc.Count=1;vbDesc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     ID3D12Resource* vertexBuffer=nullptr;
     if(FAILED(device->CreateCommittedResource(&uploadHeap,D3D12_HEAP_FLAG_NONE,&vbDesc,
-            D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,__uuidof(ID3D12Resource),(void**)&vertexBuffer))||!vertexBuffer)return 43;
+            D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,__uuidof(ID3D12Resource),(void**)&vertexBuffer))||!vertexBuffer)return 54;
     void* mappedVertices=nullptr;
     D3D12_RANGE readNone{0,0};
     if(FAILED(vertexBuffer->Map(0,&readNone,&mappedVertices))||!mappedVertices)return 44;
