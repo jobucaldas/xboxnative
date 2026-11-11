@@ -84,7 +84,7 @@ static_assert(CheckFeatureSupport==33&&CreateDeferredContext==27&&CreateSamplerS
 // ID3D11DeviceContext slots (ID3D11DeviceChild's 3 come first). Only the ones
 // the draw summary reads are named.
 enum ContextSlot {
-    PSSetShaderResources=8,DrawIndexed=12,Draw=13,Map=14,Unmap=15,DrawIndexedInstanced=20,DrawInstanced=21,
+    PSSetShaderResources=8,PSSetShader=9,DrawIndexed=12,Draw=13,Map=14,Unmap=15,DrawIndexedInstanced=20,DrawInstanced=21,
     GSSetShader=23,IASetPrimitiveTopology=24,VSSetShaderResources=25,SetPredication=30,GSSetShaderResources=31,
     OMSetRenderTargets=33,OMSetRenderTargetsAndUnorderedAccessViews=34,SOSetTargets=37,DrawAuto=38,
     DrawIndexedInstancedIndirect=39,DrawInstancedIndirect=40,Dispatch=41,DispatchIndirect=42,
@@ -103,7 +103,7 @@ enum ContextSlot {
 static_assert(Context1ClearView==FinishCommandList+18&&Context1ClearView+1<kSlots,
     "ID3D11DeviceContext1::ClearView must fit inside kSlots");
 static_assert(ContextMap==14&&Unmap==15&&DrawIndexed==12&&DrawIndexedInstanced==20&&DrawInstanced==21&&
-    GSSetShader==23&&IASetPrimitiveTopology==24&&VSSetShaderResources==25&&SetPredication==30&&GSSetShaderResources==31&&
+    PSSetShader==9&&GSSetShader==23&&IASetPrimitiveTopology==24&&VSSetShaderResources==25&&SetPredication==30&&GSSetShaderResources==31&&
     OMSetRenderTargets==33&&OMSetRenderTargetsAndUnorderedAccessViews==34&&SOSetTargets==37&&DrawAuto==38&&
     DrawIndexedInstancedIndirect==39&&DrawInstancedIndirect==40&&Dispatch==41&&DispatchIndirect==42&&
     RSSetViewports==44&&RSSetScissorRects==45&&CopySubresourceRegion==46&&CopyResource==47&&UpdateSubresource==48&&
@@ -199,7 +199,7 @@ constexpr int kDrawAuto=4,kDrawIndexedIndirect=5,kDrawInstancedIndirect=6;
 constexpr size_t kMaxDrawBuckets=size_t(kDrawKinds)*4;
 constexpr size_t kMaxRtvKinds=24;
 constexpr size_t kRtvSeenSlots=256;   // power of two
-constexpr size_t kFixedSummaryLines=18;   // topology, kDrawKinds, context split, SRV feedback, dispatch, lists, shaders, targets, UAVs, resources, formats, main target
+constexpr size_t kFixedSummaryLines=19;   // topology, kDrawKinds, gs-topology split, context split, SRV feedback, dispatch, lists, shaders, targets, UAVs, resources, formats, main target
 constexpr size_t kMaxSummaryLines=kSummaryWindows*(kFixedSummaryLines+kMaxRtvKinds+kMaxDrawBuckets)+kMaxDrawBuckets+2;
 inline std::atomic<bool> summaryStarted{false};
 inline std::atomic<unsigned> summaryWindows{0};
@@ -214,7 +214,7 @@ constexpr size_t kFormatCache=8;   // power of two
 struct ContextState {
     std::atomic<void*> context{nullptr};
     std::atomic<unsigned> topology{0};
-    std::atomic<unsigned> shaders{0};    // bit0=HS bit1=DS bit2=GS bound
+    std::atomic<unsigned> shaders{0};    // bit0=HS bit1=DS bit2=GS bit3=PS bound
     std::atomic<unsigned> rtFormat{0};   // format of the first render target bound
     std::atomic<unsigned> deferred{0};   // 1 for a context CreateDeferredContext returned
     std::atomic<void*> formatView[kFormatCache];   // view the cached format is for
@@ -299,6 +299,17 @@ inline std::atomic<uint64_t> draws[kDrawKinds][2][2];   // [kind][patchlist][hul
 // The geometry shader's presence on a draw, tracked like hull/domain but for
 // the stage Halo Wars' point-sprite terrain actually uses.
 inline std::atomic<uint64_t> drawsWithGs[kDrawKinds];
+// A draw with a GS bound is where a mis-converted geometry shader hides: the
+// runtime converts the guest's DXBC GS to DXIL for the host, and a conversion
+// that drops its output renders nothing while every counter on the CPU side
+// still advances. Per draw kind: how many draws carried a GS, how many of
+// those also carried a PS, and how many drew 0/index/instance-count vertices
+// (a GS-only point-sprite layer is the shape of terrain and of the minimap).
+inline std::atomic<uint64_t> drawsWithGsAndPs[kDrawKinds];
+// GS-bound draws per input topology (raw D3D11 value, 0..64): pointlist + GS
+// is the point-sprite shape, and per-topology counts say which layers ride it.
+constexpr unsigned kTopologyBuckets=65;
+inline std::atomic<uint64_t> gsDrawTopologies[kDrawKinds][kTopologyBuckets];
 // Draws split by the context that made the call. A deferred context records
 // with its own state, so a layer recorded there and replayed through
 // ExecuteCommandList is invisible to a summary that only knows one context
@@ -550,14 +561,31 @@ inline void printSummary(unsigned window) {
         deviceRemoved.load(std::memory_order_relaxed),(unsigned long long)deviceLostReports.load()));
     for(int k=0;k<kDrawKinds;++k) {
         uint64_t total=0,patched=0,withHull=0,withGs=drawsWithGs[k].load(std::memory_order_relaxed),
+                 withGsPs=drawsWithGsAndPs[k].load(std::memory_order_relaxed),
                  zero=zeroCounts[k].load(std::memory_order_relaxed);
         for(int p=0;p<2;++p)for(int h=0;h<2;++h) {
             uint64_t n=draws[k][p][h].load(std::memory_order_relaxed);
             total+=n;if(p)patched+=n;if(h)withHull+=n;
         }
         if(!total)continue;
-        emit(fmt("draw summary %u/%u: %s calls=%llu patchlist=%llu hull-domain=%llu gs=%llu zero-count=%llu",window,kSummaryWindows,drawKindName(k),
-            (unsigned long long)total,(unsigned long long)patched,(unsigned long long)withHull,(unsigned long long)withGs,(unsigned long long)zero));
+        emit(fmt("draw summary %u/%u: %s calls=%llu patchlist=%llu hull-domain=%llu gs=%llu gs+ps=%llu zero-count=%llu",window,kSummaryWindows,drawKindName(k),
+            (unsigned long long)total,(unsigned long long)patched,(unsigned long long)withHull,(unsigned long long)withGs,
+            (unsigned long long)withGsPs,(unsigned long long)zero));
+    }
+    // GS-bound draws per input topology: pointlist+GS is the point-sprite
+    // expansion shape (Halo Wars' terrain and minimap ride it), and a
+    // topology the runtime's GS conversion cannot represent shows up here as
+    // a count with no visible output.
+    {
+        std::string gsTopos;
+        for(int k=0;k<kDrawKinds;++k)
+            for(unsigned t=0;t<kTopologyBuckets;++t) {
+                uint64_t n=gsDrawTopologies[k][t].load(std::memory_order_relaxed);
+                if(!n)continue;
+                if(!gsTopos.empty())gsTopos+=" ";
+                gsTopos+=fmt("%s/%s=%llu",drawKindName(k),topologyName(t).c_str(),(unsigned long long)n);
+            }
+        if(!gsTopos.empty())emit(fmt("draw summary %u/%u: gs draws by topology %s",window,kSummaryWindows,gsTopos.c_str()));
     }
     // A zero-area viewport or scissor clips every draw to nothing: the silent
     // shape of a layer that renders black with no failed call anywhere.
@@ -729,6 +757,111 @@ inline std::string shaderText(const void* code,SIZE_T length,std::string* key=nu
     if(key)*key=fmt("%016llx",(unsigned long long)hash);
     return fmt("model=%s bytes=%zu hash=%016llx",model.c_str(),size_t(length),(unsigned long long)hash);
 }
+// A geometry shader's bytecode features, read straight from the DXBC token
+// stream (no d3dcompiler dependency). The console path converts the guest's
+// DXBC GS to DXIL, and a conversion that mishandles a feature renders nothing
+// for exactly the draws that use it — with no failed call anywhere. Scanned
+// once per distinct container (by hash) at creation:
+// - SM version (from the SHDR/SHEX version token)
+// - dcl_maxOutputVertexCount (opcode 94), the GS's expansion bound
+// - the output topology dcl_gs_output_topology (opcode 92), carried in the
+//   opcode token's bits [16:11] (D3D10_SB_PRIMITIVE_TOPOLOGY: pointlist=1):
+//   pointlist output is what a point-sprite terrain layer expands to
+// - stream declarations (dcl_stream m<N>, opcode D3D11_SB_OPCODE_DCL_STREAM,
+//   operand type STREAM=16 in operand-token bits [19:12]): more than one
+//   stream means stream-out expansion, the shape dxilconv is most likely to
+//   drop
+// - SV_ViewportArrayIndex/SV_RenderTargetArrayIndex output declarations
+//   (dcl_output_siv, name token = the instruction's last DWORD;
+//   D3D10_SB_NAME_RENDER_TARGET_ARRAY_INDEX=4, D3D10_SB_NAME_VIEWPORT_ARRAY_
+//   INDEX=5)
+// Container layout: DXBC header is 32 bytes of fixed fields + a DWORD chunk
+// count at 28 + chunk offsets from 32; each chunk is FourCC + DWORD size +
+// payload, so the shader chunk's payload starts at chunk+8 and its first two
+// DWORDs are the version token and the program length in DWORDs (the layout
+// shaderText already reads). Instruction format per d3d11TokenizedProgram-
+// Format.hpp: opcode token bits [10:00] opcode, [30:24] the instruction's
+// total length in DWORDs INCLUDING the opcode token; a CUSTOMDATA opcode
+// (D3D10_SB_OPCODE_CUSTOMDATA) leaves that field 0 and is followed by its own
+// DWORD length (self-inclusive); ret (D3D10_SB_OPCODE_RET) ends the program.
+// Only the declarations are looked for; the body is skipped by length fields,
+// and any malformed stream just ends the scan.
+// The opcode/name constants in gsOp* below are the enum positions from the
+// donor d3d11TokenizedProgramFormat.hpp, not hand-typed values; the
+// gsBytecodeText contract tests decode real compiled containers and pin them.
+enum : unsigned {
+    gsOpMaxOutputVertexCount=94,   // D3D10_SB_OPCODE_DCL_MAX_OUTPUT_VERTEX_COUNT
+    gsOpOutputTopology=92,         // D3D10_SB_OPCODE_DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY
+    gsOpStream=143,                // D3D11_SB_OPCODE_DCL_STREAM (138 is ubfe)
+    gsOpOutputSiv=103,             // D3D10_SB_OPCODE_DCL_OUTPUT_SIV
+    gsOpCustomData=53,             // D3D10_SB_OPCODE_CUSTOMDATA
+    gsOpRet=62,                    // D3D10_SB_OPCODE_RET
+    gsSivRtArrayIndex=4,           // D3D10_SB_NAME_RENDER_TARGET_ARRAY_INDEX
+    gsSivViewportIndex=5,          // D3D10_SB_NAME_VIEWPORT_ARRAY_INDEX
+};
+inline std::string gsBytecodeText(const void* code,SIZE_T length) {
+    if(!code||length<48)return "";
+    auto bytes=static_cast<const unsigned char*>(code);
+    auto word=[&](size_t at)->uint32_t{uint32_t v=0;if(at+4<=length)memcpy(&v,bytes+at,4);return v;};
+    if(memcmp(bytes,"DXBC",4))return "";
+    uint32_t chunks=word(28);
+    for(uint32_t i=0;i<chunks&&i<64;++i) {
+        size_t base=word(32+4*i);
+        if(base+8>length)break;
+        bool shex=!memcmp(bytes+base,"SHEX",4);
+        if(!shex&&!memcmp(bytes+base,"SHDR",4)) {}
+        else if(!shex)continue;   // not a shader chunk
+        uint32_t chunkSize=word(base+4);   // chunk header: FourCC then size
+        size_t end=std::min<size_t>(base+8+chunkSize,length);
+        uint32_t token=word(base+8);   // first payload DWORD: the version token
+        unsigned type=token>>16;
+        if(type!=2)return "";   // not a GS
+        unsigned minor=token&0xf,major=(token>>4)&0xf;
+        size_t at=base+16;   // payload: version token, program length, 2 reserved
+        unsigned maxVerts=0;const char* outTopo=nullptr;unsigned streams=0;
+        bool viewportIndex=false,rtArrayIndex=false;
+        for(uint32_t inst=0;at+4<=end&&inst<100000;++inst) {
+            uint32_t op=word(at);
+            uint32_t opcode=op&0x7ff;
+            uint32_t len=(op>>24)&0x7f;   // total instruction length incl. this token
+            if(opcode==gsOpCustomData&&at+8<=end) {   // CUSTOMDATA: length field is 0, its own DWORD follows (self-inclusive)
+                uint32_t cdLen=word(at+4);
+                if(!cdLen||at+size_t(cdLen)*4>end)break;
+                at+=size_t(cdLen)*4;
+                continue;
+            }
+            if(!len)break;   // malformed: no sane way to step
+            if(opcode==gsOpMaxOutputVertexCount&&at+8<=end)maxVerts=word(at+4);   // opcode + literal
+            else if(opcode==gsOpOutputTopology) {   // enum in bits [16:11]
+                switch((op>>11)&0x1f) {
+                case 1:outTopo="pointlist";break;case 2:outTopo="linelist";break;case 3:outTopo="linestrip";break;
+                case 4:outTopo="trianglelist";break;case 5:outTopo="trianglestrip";break;
+                case 10:outTopo="linelist-adj";break;case 11:outTopo="linestrip-adj";break;
+                case 12:outTopo="trianglelist-adj";break;case 13:outTopo="trianglestrip-adj";break;
+                default:outTopo="?";break;
+                }
+            }
+            else if(opcode==gsOpStream)++streams;   // dcl_stream
+            else if(opcode==gsOpOutputSiv&&len>=2) {   // operand then NameToken
+                uint32_t name=word(at+4*(len-1));   // the instruction's last DWORD
+                if(name==gsSivViewportIndex)viewportIndex=true;
+                else if(name==gsSivRtArrayIndex)rtArrayIndex=true;
+            }
+            if(at+size_t(len)*4>end)break;   // malformed: stop
+            if(opcode==gsOpRet)break;   // ret: end of program
+            at+=size_t(len)*4;
+        }
+        std::string text=fmt("gs scan model=gs_%u_%u maxVerts=%u outTopo=%s streams=%u viewportIndex=%d rtArrayIndex=%d",
+            major,minor,maxVerts,outTopo?outTopo:"none",streams,int(viewportIndex),int(rtArrayIndex));
+        return text;
+    }
+    return "";
+}
+
+// Real GS containers for the gsBytecodeText contract tests, compiled by Wine's
+// d3dcompiler_47 (gs_5_0): point-sprite expansion with SV_ViewportArrayIndex,
+// and a two-stream variant. Included so the test binary is self-contained.
+#include "gs-blobs.h"
 
 #define D3D11_DIAG_HOOK(Type,slot) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return E_FAIL;
 // Every failed call also feeds the device-health path: the first failure after
@@ -850,6 +983,14 @@ static HRESULT STDMETHODCALLTYPE createShader(DevicePtr self,const void* code,SI
             if(SUCCEEDED(hr))shaderCreates[index].fetch_add(1,std::memory_order_relaxed);
         }
     }
+    // The GS is the stage the console converts from DXBC by hand (dxilconv);
+    // its features decide whether the conversion can even represent the
+    // shader. One line per distinct container, on creation.
+    if(SUCCEEDED(hr)&&Slot==CreateGeometryShader) {
+        std::string scan=gsBytecodeText(code,length);
+        if(!scan.empty())report(true,scan,scan+fmt(" bytes=%zu hash=%016llx",size_t(length),
+            (unsigned long long)fnv(code,size_t(std::min<SIZE_T>(length,16u<<20)))));
+    }
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createGeometryShaderWithStreamOutput(DevicePtr self,const void* code,SIZE_T length,const D3D11_SO_DECLARATION_ENTRY* entries,UINT entryCount,
@@ -857,6 +998,11 @@ static HRESULT STDMETHODCALLTYPE createGeometryShaderWithStreamOutput(DevicePtr 
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const void*,SIZE_T,const D3D11_SO_DECLARATION_ENTRY*,UINT,const UINT*,UINT,UINT,ID3D11ClassLinkage*,ID3D11GeometryShader**);
     D3D11_DIAG_HOOK(Fn,CreateGeometryShaderWithStreamOutput)HRESULT hr=call(self,code,length,entries,entryCount,strides,strideCount,rasterized,linkage,out);
     if(FAILED(hr)){std::string key,text=shaderText(code,length,&key);D3D11_DIAG_FAILED("CreateGeometryShaderWithStreamOutput",key,text+fmt(" so-entries=%u strides=%u rasterized=%u",entryCount,strideCount,rasterized));}
+    else if(SUCCEEDED(hr)) {
+        std::string scan=gsBytecodeText(code,length);
+        if(!scan.empty())report(true,scan+" so",scan+fmt(" so-entries=%u rasterized=%u bytes=%zu hash=%016llx",entryCount,rasterized,size_t(length),
+            (unsigned long long)fnv(code,size_t(std::min<SIZE_T>(length,16u<<20)))));
+    }
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createClassLinkage(DevicePtr self,ID3D11ClassLinkage** out) {
@@ -974,17 +1120,24 @@ inline void countDraw(void* self,int kind,unsigned count,unsigned instances) {
     ContextState& state=stateOf(self);
     unsigned t=state.topology.load(std::memory_order_relaxed);
     unsigned s=state.shaders.load(std::memory_order_relaxed);
-    bool patch=patchList(t),hull=(s&3)==3,gs=(s&4)!=0;
+    bool patch=patchList(t),hull=(s&3)==3,gs=(s&4)!=0,ps=(s&8)!=0;
     draws[kind][patch?1:0][hull?1:0].fetch_add(1,std::memory_order_relaxed);
     if(state.deferred.load(std::memory_order_relaxed))drawsDeferred.fetch_add(1,std::memory_order_relaxed);
     else drawsImmediate.fetch_add(1,std::memory_order_relaxed);
-    if(gs)drawsWithGs[kind].fetch_add(1,std::memory_order_relaxed);
+    if(gs) {
+        drawsWithGs[kind].fetch_add(1,std::memory_order_relaxed);
+        if(ps)drawsWithGsAndPs[kind].fetch_add(1,std::memory_order_relaxed);
+        // Per-topology split of the GS-bound draws: a point-sprite layer is
+        // pointlist + GS, and that is the bucket the black terrain hides in.
+        unsigned top=std::min(t,64u);
+        gsDrawTopologies[kind][top].fetch_add(1,std::memory_order_relaxed);
+    }
     countDrawFormat(state.rtFormat.load(std::memory_order_relaxed));
     if(!count||(kind>=2&&kind<4&&!instances))zeroCounts[kind].fetch_add(1,std::memory_order_relaxed);
     static std::atomic<bool> named[kDrawKinds];
     if(!named[kind].exchange(true,std::memory_order_relaxed))
-        emit(fmt("draw summary: first %s topology=%u(%s) hs/ds/gs=%s/%s/%s",drawKindName(kind),t,topologyName(t).c_str(),
-            (s&1)?"hs":"-",((s&2)?"ds":"-"),gs?"gs":"-"));
+        emit(fmt("draw summary: first %s topology=%u(%s) hs/ds/gs/ps=%s/%s/%s/%s",drawKindName(kind),t,topologyName(t).c_str(),
+            (s&1)?"hs":"-",((s&2)?"ds":"-"),gs?"gs":"-",ps?"ps":"-"));
     tick();
 }
 // The indirect kinds and DrawAuto carry no counts on the CPU side: the
@@ -994,16 +1147,24 @@ inline void countDrawUnknown(void* self,int kind) {
     ContextState& state=stateOf(self);
     unsigned t=state.topology.load(std::memory_order_relaxed);
     unsigned s=state.shaders.load(std::memory_order_relaxed);
-    bool patch=patchList(t),hull=(s&3)==3,gs=(s&4)!=0;
+    bool patch=patchList(t),hull=(s&3)==3,gs=(s&4)!=0,ps=(s&8)!=0;
     draws[kind][patch?1:0][hull?1:0].fetch_add(1,std::memory_order_relaxed);
     if(state.deferred.load(std::memory_order_relaxed))drawsDeferred.fetch_add(1,std::memory_order_relaxed);
     else drawsImmediate.fetch_add(1,std::memory_order_relaxed);
-    if(gs)drawsWithGs[kind].fetch_add(1,std::memory_order_relaxed);
+    if(gs) {
+        drawsWithGs[kind].fetch_add(1,std::memory_order_relaxed);
+        if(ps)drawsWithGsAndPs[kind].fetch_add(1,std::memory_order_relaxed);
+        // The indirect kinds land here with the context's current topology, the
+        // same state an immediate draw would carry (the arguments live in the
+        // buffer, the pipeline state does not): bucket them like countDraw so
+        // an indirect GS layer is visible on the by-topology line.
+        gsDrawTopologies[kind][std::min(t,64u)].fetch_add(1,std::memory_order_relaxed);
+    }
     countDrawFormat(state.rtFormat.load(std::memory_order_relaxed));
     static std::atomic<bool> named[kDrawKinds];
     if(!named[kind].exchange(true,std::memory_order_relaxed))
-        emit(fmt("draw summary: first %s topology=%u(%s) hs/ds/gs=%s/%s/%s",drawKindName(kind),t,topologyName(t).c_str(),
-            (s&1)?"hs":"-",((s&2)?"ds":"-"),gs?"gs":"-"));
+        emit(fmt("draw summary: first %s topology=%u(%s) hs/ds/gs/ps=%s/%s/%s/%s",drawKindName(kind),t,topologyName(t).c_str(),
+            (s&1)?"hs":"-",((s&2)?"ds":"-"),gs?"gs":"-",ps?"ps":"-"));
     tick();
 }
 static void STDMETHODCALLTYPE contextDrawIndexed(DevicePtr self,UINT indexCount,UINT startIndex,INT baseVertex) {
@@ -1076,6 +1237,13 @@ static void STDMETHODCALLTYPE contextGSSetShader(DevicePtr self,ID3D11GeometrySh
     auto call=reinterpret_cast<Fn>(original(self,GSSetShader));if(!call)return;
     auto& s=stateOf(self).shaders;
     if(shader)s.fetch_or(4,std::memory_order_relaxed);else s.fetch_and(~4u,std::memory_order_relaxed);
+    call(self,shader,instances,count);
+}
+static void STDMETHODCALLTYPE contextPSSetShader(DevicePtr self,ID3D11PixelShader* shader,ID3D11ClassInstance* const* instances,UINT count) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11PixelShader*,ID3D11ClassInstance* const*,UINT);
+    auto call=reinterpret_cast<Fn>(original(self,PSSetShader));if(!call)return;
+    auto& s=stateOf(self).shaders;
+    if(shader)s.fetch_or(8,std::memory_order_relaxed);else s.fetch_and(~8u,std::memory_order_relaxed);
     call(self,shader,instances,count);
 }
 // The geometry stage's resource binds land in the same table as the other
@@ -1349,6 +1517,7 @@ inline const Patch* contextPatches(size_t& count){
         {HSSetShaderResources,(void*)&contextSetShaderResources<HSSetShaderResources,3>},
         {DSSetShaderResources,(void*)&contextSetShaderResources<DSSetShaderResources,4>},
         {GSSetShader,(void*)&contextGSSetShader},{GSSetShaderResources,(void*)&contextSetShaderResources<GSSetShaderResources,1>},
+        {PSSetShader,(void*)&contextPSSetShader},
         {RSSetViewports,(void*)&contextRSSetViewports},{RSSetScissorRects,(void*)&contextRSSetScissorRects},
         {GenerateMips,(void*)&contextGenerateMips},{SOSetTargets,(void*)&contextSOSetTargets},
         {SetPredication,(void*)&contextSetPredication},{UpdateSubresource,(void*)&contextUpdateSubresource},

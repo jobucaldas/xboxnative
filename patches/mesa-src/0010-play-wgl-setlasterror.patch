@@ -1,0 +1,57 @@
+Play: report a truthful WGL error when context creation fails (research/OPENGL-PLAN.md).
+SPDX-License-Identifier: MIT (same licence as the files patched; Mesa is MIT)
+
+Mesa's WGL frontend loses the state tracker's failure reason: stw_create_context_attribs()
+(stw_context.c) receives enum st_context_error from st_api_create_context() but never maps
+it to SetLastError(), and wglCreateContextAttribsARB() (stw_ext_context.c) returns NULL
+without an error whenever the inner call fails. A guest that asks for a GL version the
+driver cannot provide (here: anything >= 3.0, because the d3d12 driver lacks
+PIPE_FORMAT_R9G9B9E5_FLOAT, which caps Mesa at 2.1) sees wglCreateContextAttribsARB fail
+with GetLastError() == 0 -- SDL3 then reports its stale fallback string ("No matching GL
+pixel format available") instead of the actual cause, which sent the Fields of Mistria
+investigation down the wrong path. Map the two st_context_error values the state tracker
+can report to their WGL_ARB_create_context equivalents (NO_MEMORY -> ERROR_OUTOFMEMORY,
+BAD_VERSION -> ERROR_INVALID_VERSION_ARB) at the single funnel both entry points share,
+and preserve that error across the pfnwglDeleteContext cleanup call, which clobbers it.
+--- a/src/gallium/frontends/wgl/stw_context.c	2026-11-10 20:31:46.400309772 -0300
++++ b/src/gallium/frontends/wgl/stw_context.c	2026-11-10 20:31:53.626259968 -0300
+@@ -260,6 +260,16 @@
+    return ctx;
+ 
+ no_st_ctx:
++   switch (ctx_err) {
++   case ST_CONTEXT_ERROR_BAD_VERSION:
++      SetLastError(ERROR_INVALID_VERSION_ARB);
++      break;
++   case ST_CONTEXT_ERROR_NO_MEMORY:
++      SetLastError(ERROR_OUTOFMEMORY);
++      break;
++   default:
++      break;
++   }
+    FREE(ctx);
+ no_ctx:
+    return NULL;
+--- a/src/gallium/frontends/wgl/stw_ext_context.c	2026-11-10 20:31:46.404309744 -0300
++++ b/src/gallium/frontends/wgl/stw_ext_context.c	2026-11-10 20:32:01.105208589 -0300
+@@ -234,14 +234,20 @@
+                                                                resetStrategy);
+ 
+       if (!stw_ctx) {
++         /* stw_create_context_attribs() reported the failure via SetLastError();
++          * wglDeleteContext() must not clobber it before the caller sees it. */
++         DWORD err = GetLastError();
+          pfnwglDeleteContext(context);
++         SetLastError(err);
+          return NULL;
+       }
+ 
+       c = stw_create_context_handle(stw_ctx, dhglrc);
+       if (!c) {
++         DWORD err = GetLastError();
+          stw_destroy_context(stw_ctx);
+          pfnwglDeleteContext(context);
++         SetLastError(err);
+          context = NULL;
+       }
+    }

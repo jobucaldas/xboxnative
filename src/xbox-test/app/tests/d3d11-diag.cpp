@@ -82,7 +82,7 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context->Draw(3,0);
     CHECK(d3d11_diag::draws[1][0][0].load()==beforeTriangle+1);
-    CHECK(count("draw summary: first Draw topology=4(trianglelist) hs/ds/gs=-/-/-")==1);
+    CHECK(count("draw summary: first Draw topology=4(trianglelist) hs/ds/gs/ps=-/-/-/-")==1);
     context->DrawIndexed(3,0,0);
     CHECK(d3d11_diag::draws[0][0][0].load()==beforeIndexed+1);
     // A patch list with no hull shader bound is still a patch-list draw.
@@ -139,15 +139,28 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         uint64_t beforeAuto=d3d11_diag::draws[d3d11_diag::kDrawAuto][1][0].load();
         context->DrawAuto();
         CHECK(d3d11_diag::draws[d3d11_diag::kDrawAuto][1][0].load()==beforeAuto+1);
-        CHECK(count("draw summary: first DrawAuto topology=35(patchlist-3) hs/ds/gs=-/-/-")==1);
+        CHECK(count("draw summary: first DrawAuto topology=35(patchlist-3) hs/ds/gs/ps=-/-/-/-")==1);
         uint64_t beforeIndexedIndirect=d3d11_diag::draws[d3d11_diag::kDrawIndexedIndirect][1][0].load();
         context->DrawIndexedInstancedIndirect(argsBuffer,0);
         CHECK(d3d11_diag::draws[d3d11_diag::kDrawIndexedIndirect][1][0].load()==beforeIndexedIndirect+1);
         uint64_t beforeInstancedIndirect=d3d11_diag::draws[d3d11_diag::kDrawInstancedIndirect][1][0].load();
         context->DrawInstancedIndirect(argsBuffer,0);
         CHECK(d3d11_diag::draws[d3d11_diag::kDrawInstancedIndirect][1][0].load()==beforeInstancedIndirect+1);
-        CHECK(count("draw summary: first DrawIndexedInstancedIndirect topology=35(patchlist-3) hs/ds/gs=-/-/-")==1);
-        CHECK(count("draw summary: first DrawInstancedIndirect topology=35(patchlist-3) hs/ds/gs=-/-/-")==1);
+        CHECK(count("draw summary: first DrawIndexedInstancedIndirect topology=35(patchlist-3) hs/ds/gs/ps=-/-/-/-")==1);
+        CHECK(count("draw summary: first DrawInstancedIndirect topology=35(patchlist-3) hs/ds/gs/ps=-/-/-/-")==1);
+        // An indirect draw with a GS bound lands in the by-topology buckets too:
+        // the arguments live in the buffer, the pipeline state does not.
+        {
+            ID3D11GeometryShader* gs=nullptr;
+            if(SUCCEEDED(device->CreateGeometryShader(d3d11_diag::kGsViewportBlob,sizeof d3d11_diag::kGsViewportBlob,nullptr,&gs))&&gs) {
+                context->GSSetShader(gs,nullptr,0);
+                uint64_t beforeIndirectGs=d3d11_diag::gsDrawTopologies[d3d11_diag::kDrawInstancedIndirect][35].load();
+                context->DrawInstancedIndirect(argsBuffer,0);
+                CHECK(d3d11_diag::gsDrawTopologies[d3d11_diag::kDrawInstancedIndirect][35].load()==beforeIndirectGs+1);
+                context->GSSetShader(nullptr,nullptr,0);
+                gs->Release();
+            }
+        }
         uint64_t beforeDispatchIndirect=d3d11_diag::dispatchIndirects.load();
         context->DispatchIndirect(argsBuffer,0);
         CHECK(d3d11_diag::dispatchIndirects.load()==beforeDispatchIndirect+1);
@@ -354,7 +367,9 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     // tessellated layer that only submits them is visible.
     CHECK(count("draw summary 1/7: DrawAuto calls=1 patchlist=1 hull-domain=0")==1);
     CHECK(count("draw summary 1/7: DrawIndexedInstancedIndirect calls=1 patchlist=1")==1);
-    CHECK(count("draw summary 1/7: DrawInstancedIndirect calls=1 patchlist=1")==1);
+    // The indirect GS test below adds one more InstancedIndirect draw to the
+    // same window: 2 total, both patch-list, one carrying a GS.
+    CHECK(count("draw summary 1/7: DrawInstancedIndirect calls=2 patchlist=2 hull-domain=0 gs=1")==1);
     CHECK(count("draw summary 1/7: Dispatch calls=0 indirect=1")==1);
     CHECK(count("draw summary 1/7: targets with UAVs sets=2 uav=2")==1);
     CHECK(count("draw summary 1/7: shader resources vs=0/0 gs=0/0 ps=2/1 hs=0/0 ds=0/0 (null sets)")==1);
@@ -365,7 +380,7 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     // the immediate context except the deferred one's own Draw. The line is
     // printed once per summary window and two windows fired in this test.
     CHECK(count("draw summary 1/7: draws by context immediate=")>=1);
-    CHECK(count("draws by context immediate=11 deferred=1")>=1);
+    CHECK(count("draws by context immediate=12 deferred=1")>=1);
     // Draws are bucketed by the format of the target they were submitted to,
     // so a layer that never reaches the swapchain's format is visible.
     CHECK(count("draw summary 1/7: draws by target format 28(R8G8B8A8_UNORM)=")==1);
@@ -407,6 +422,30 @@ int main(int argc,char** argv) {
     CHECK(text.find("model=ps_5_0")!=std::string::npos&&key.size()==16);
     CHECK(d3d11_diag::shaderText("junk",4).find("model=not-dxbc")!=std::string::npos);
     CHECK(d3d11_diag::shaderText(nullptr,0)=="bytecode=none");
+
+
+    // Real GS containers (Wine d3dcompiler_47, gs_5_0): the scanner must read
+    // the version token, maxvertexcount, output topology, stream count and
+    // array-index SIVs the same way the console's converter will. Each blob's
+    // expected fields come from the HLSL it was compiled from.
+    {
+        // maxvertexcount(3), PointStream, SV_ViewportArrayIndex: one stream.
+        std::string scan=d3d11_diag::gsBytecodeText(d3d11_diag::kGsViewportBlob,sizeof d3d11_diag::kGsViewportBlob);
+        CHECK(scan=="gs scan model=gs_5_0 maxVerts=3 outTopo=pointlist streams=1 viewportIndex=1 rtArrayIndex=0");
+        // maxvertexcount(3), TriangleStream, SV_RenderTargetArrayIndex.
+        scan=d3d11_diag::gsBytecodeText(d3d11_diag::kGsRtarrayBlob,sizeof d3d11_diag::kGsRtarrayBlob);
+        CHECK(scan=="gs scan model=gs_5_0 maxVerts=3 outTopo=trianglestrip streams=1 viewportIndex=0 rtArrayIndex=1");
+        // maxvertexcount(4), two PointStreams: two dcl_stream declarations.
+        scan=d3d11_diag::gsBytecodeText(d3d11_diag::kGsMultistreamBlob,sizeof d3d11_diag::kGsMultistreamBlob);
+        CHECK(scan=="gs scan model=gs_5_0 maxVerts=4 outTopo=pointlist streams=2 viewportIndex=0 rtArrayIndex=0");
+        // A dcl_immediateConstantBuffer CUSTOMDATA block before the
+        // declarations: the scan must skip it as a unit (its length field is
+        // 0) and still read what follows (see gs-blobs.h for how it was made).
+        scan=d3d11_diag::gsBytecodeText(d3d11_diag::kGsIcbBlob,sizeof d3d11_diag::kGsIcbBlob);
+        CHECK(scan=="gs scan model=gs_5_0 maxVerts=3 outTopo=pointlist streams=1 viewportIndex=1 rtArrayIndex=0");
+        CHECK(d3d11_diag::gsBytecodeText(nullptr,0).empty());
+        CHECK(d3d11_diag::gsBytecodeText("junk",4).empty());
+    }
 
     // Nothing is logged, and nothing is patched, before the sink is set.
     d3d11_diag::adopt(device);
