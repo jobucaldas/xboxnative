@@ -1,0 +1,73 @@
+name: 'apt install with mirror failover'
+description: >
+  Installs apt packages, surviving ubuntu.com archive DNS outages by
+  falling back to a third-party mirror when the configured mirrors are
+  unreachable. Fails fast when no mirror answers instead of hanging in
+  apt retry loops for an hour.
+inputs:
+  packages:
+    description: 'apt package names to install, space separated'
+    required: true
+runs:
+  using: 'composite'
+  steps:
+    - shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+
+        sources_file=/etc/apt/sources.list.d/ubuntu.sources
+        mirrors_file=/etc/apt/apt-mirrors.txt
+
+        # probe <mirror-root-url>: serves this suite's InRelease?
+        probe() {
+            curl -fsSI --max-time 8 "$1/dists/${SUITE:-resolute}/InRelease" \
+                -o /dev/null
+        }
+
+        # default_mirrors_ok: can apt reach the mirrors it is configured
+        # with right now? The runner's mirror+file list points at the
+        # ubuntu.com hosts, whose DNS is what fails during an outage.
+        default_mirrors_ok() {
+            [ -f "$mirrors_file" ] || return 0
+            while IFS=$'\t' read -r url _prio; do
+                case $url in '' | '#'*) continue ;; esac
+                if probe "$url"; then
+                    return 0
+                fi
+            done <"$mirrors_file"
+            return 1
+        }
+
+        if ! default_mirrors_ok; then
+            echo "apt-install: ubuntu.com mirrors unreachable; probing fallbacks" >&2
+            picked=''
+            for candidate in \
+                https://mirror.rackspace.com/ubuntu \
+                https://mirrors.kernel.org/ubuntu \
+                https://mirror.math.princeton.edu/pub/ubuntu \
+                https://ubuntu.mirror.constant.com; do
+                if probe "$candidate"; then
+                    picked=$candidate
+                    break
+                fi
+            done
+            if [ -z "$picked" ]; then
+                echo "apt-install: no Ubuntu mirror reachable; failing fast" >&2
+                exit 1
+            fi
+            echo "apt-install: using fallback mirror $picked" >&2
+            sudo sed -i "s|^URIs:.*|URIs: $picked|" "$sources_file"
+        fi
+
+        export DEBIAN_FRONTEND=noninteractive
+        sudo apt-get update \
+            -o Acquire::Retries=5 \
+            -o Acquire::https::Timeout=20 \
+            -o Acquire::http::Timeout=20
+        sudo apt-get install -y \
+            -o Acquire::Retries=5 \
+            -o Acquire::https::Timeout=20 \
+            -o Acquire::http::Timeout=20 \
+            $PACKAGES

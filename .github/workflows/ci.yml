@@ -110,7 +110,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install registry test toolchain
         timeout-minutes: 15
-        run: .github/scripts/apt-install.sh gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 wine64 wine lld
+        uses: ./.github/actions/apt-install
+        with:
+          packages: gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 wine64 wine lld
       - name: Registry persistence and write-failure regression
         run: bash src/xbox-test/uwph/host/run-reg-selftest.sh
       - name: Registry crash consistency (eight cycles)
@@ -139,7 +141,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: install cross compiler and Wine
         timeout-minutes: 15
-        run: .github/scripts/apt-install.sh gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 llvm lld wine64
+        uses: ./.github/actions/apt-install
+        with:
+          packages: gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 llvm lld wine64
       - name: exercise strict named and ordinal imports
         run: bash src/xbox-test/uwph/host/tests/run-strict-imports.sh --run
       - name: retain logging in the SWC mapped-entry caller
@@ -150,7 +154,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: install PE inspection tools
         timeout-minutes: 15
-        run: .github/scripts/apt-install.sh gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 llvm lld
+        uses: ./.github/actions/apt-install
+        with:
+          packages: gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 llvm lld
       - name: inspect synthetic no-CRT guest
         run: bash src/xbox-test/uwph/guest-fixture/check-pe.sh
   u32c-gate:
@@ -159,7 +165,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: install cross compiler, PE tools and Wine
         timeout-minutes: 15
-        run: .github/scripts/apt-install.sh g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 llvm lld wine64 wine
+        uses: ./.github/actions/apt-install
+        with:
+          packages: g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 llvm lld wine64 wine
       # The mapped regression PE gates every Play launch, and it runs inside the
       # launcher's own process where the UI thread publishes the connected pad
       # slots every frame. Running it only with no pad connected is what let a
@@ -175,7 +183,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: install cross compiler and PE tools
         timeout-minutes: 15
-        run: .github/scripts/apt-install.sh g++-mingw-w64-x86-64 llvm lld
+        uses: ./.github/actions/apt-install
+        with:
+          packages: g++-mingw-w64-x86-64 llvm lld
       # Build and inspect only: the shim must import nothing but what Play routes,
       # have no writable code section, and export the entry points. Driving it
       # against Wine's d3d11 is src/xbox-test/uwph/d3d10/test.sh, run locally.
@@ -187,7 +197,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: install cross compiler and PE tools
         timeout-minutes: 15
-        run: .github/scripts/apt-install.sh g++-mingw-w64-x86-64 llvm lld wine64
+        uses: ./.github/actions/apt-install
+        with:
+          packages: g++-mingw-w64-x86-64 llvm lld wine64
       # Build and inspect only: the shim must import nothing but what Play routes,
       # have no writable code section, and export the entry points. Driving it
       # against Wine's d3d11 is src/xbox-test/uwph/d3d9/test.sh, run locally.
@@ -218,7 +230,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: install cross compilers and PE tools
         timeout-minutes: 15
-        run: .github/scripts/apt-install.sh g++-mingw-w64-x86-64 gcc-mingw-w64-i686 llvm lld
+        uses: ./.github/actions/apt-install
+        with:
+          packages: g++-mingw-w64-x86-64 gcc-mingw-w64-i686 llvm lld
       # The console self-test's fixtures must build from source at package time
       # and stay small; the script fails on either. Running them is the console's
       # job (LocalState\selftest.txt).
@@ -230,7 +244,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: install i686 cross compiler
         timeout-minutes: 15
-        run: .github/scripts/apt-install.sh gcc-mingw-w64-i686
+        uses: ./.github/actions/apt-install
+        with:
+          packages: gcc-mingw-w64-i686
       - name: x86 execution core (hardware-compared ALU, faults, thunks, owned i686 fixture)
         run: bash src/xbox-test/app/tests/x86-core.sh
       - name: "x86 guest surface (mingw CRT program through the interpreter: printf, heap, TLS, VirtualAlloc)"
