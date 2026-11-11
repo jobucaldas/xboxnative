@@ -229,7 +229,7 @@ static HMODULE WINAPI moduleW(LPCWSTR name) {
 }
 #include "../../uwph/kernel32/guest_module_filename.h"
 #include "../../uwph/kernel32/guest_loader_lifetime.h"
-// Emulated Steam client for an owned game (AGENTS.md rule 3): when the
+// Emulated Steam client for an owned game (the ownership rule): when the
 // launcher has staged one after its ownership check, a guest load of
 // steamclient64.dll (SteamStub's locator, the game's own steam_api64) maps
 // that file. Without one, steamclient64.dll stays refused (item 36).
@@ -951,7 +951,7 @@ static std::string slot0Refusal(Module& m,const IMAGE_NT_HEADERS64* nt) {
         return "TLS template ("+std::to_string(size)+"+"+std::to_string(t->SizeOfZeroFill)+" bytes) exceeds the "+std::to_string(info.capacity)+"-byte reserve";
     return {};
 }
-// Optional Steam API provider for an owned game (AGENTS rule 3), e.g. a pinned
+// Optional Steam API provider for an owned game (the ownership rule), e.g. a pinned
 // gbe_fork steam_api64.dll staged with its steam_settings in a writable folder.
 // When set, any steam_api64.dll the game loads is mapped from this file instead;
 // the game's own file on disk is never modified. Set before start().

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 // Steam leaderboards for owned games served by the Steam API provider
-// (gbe_fork; AGENTS.md rule 3). gbe_fork answers ISteamUserStats leaderboard
+// (gbe_fork; the ownership rule). gbe_fork answers ISteamUserStats leaderboard
 // calls from its own disk cache and its LAN peer network, so with no peers the
 // game sees an empty board. The launcher asks the real Steam backend over its
 // own signed-in CM session (CMsgClientLBSFindOrCreateLB / GetLBEntries /

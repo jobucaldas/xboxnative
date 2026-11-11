@@ -12,7 +12,7 @@ case "${1:-}" in
     *) echo "usage: $0 [--offline]" >&2; exit 2 ;;
 esac
 if (( $# > 1 )); then echo "usage: $0 [--offline]" >&2; exit 2; fi
-runs=${SMOKE_RUNS:-/workspace/x64-run/runs}
+runs=${SMOKE_RUNS:-${XDG_STATE_HOME:-$HOME/.local/state}/xboxnative/runs}
 mkdir -p "$runs"
 log="$runs/smoke-$(date +%F-%H%M).log"
 # Preserve multiple invocations in the same minute, including offline runs.
@@ -42,7 +42,8 @@ dispatch() {
     grep -Fx 'run.sh: ALL OK' "$artifacts/dispatch.log"
 }
 imports() {
-    python3 src/tools/xbox/check_import_map.py /workspace/megabonk-from-console | tee "$artifacts/import-map.log"
+    [ -n "${MEGABONK_DIR:-}" ] || { echo 'SKIP: import map (MEGABONK_DIR not set)'; return 0; }
+    python3 src/tools/xbox/check_import_map.py "$MEGABONK_DIR" | tee "$artifacts/import-map.log"
     grep -E '^0 unclassified DLLs .*4/4 binaries scanned\)$' "$artifacts/import-map.log"
 }
 section 'dispatch (off-device Wine)' dispatch
@@ -105,14 +106,14 @@ echo "smoke build commit: $(build_commit)"
 # any HTTP status, even 401, means the console answered).
 # host:port for the Device Portal, from DP_HOST (bare host or URL) and DP_PORT (default 11443).
 dp_host() {
-    local h="${DP_HOST:-192.168.15.96}" p="${DP_PORT:-}"
+    local h="${DP_HOST:?DP_HOST not set}" p="${DP_PORT:-}"
     h="${h#*://}"; h="${h%%/*}"
     if [[ $h == *:* ]]; then p="${p:-${h##*:}}"; h="${h%:*}"; fi
     printf '%s:%s' "$h" "${p:-11443}"
 }
 console_probe() {
     local code
-    code=$(flock /workspace/x64-run/CONSOLE.lock curl -sk -m 20 --socks5-hostname "${DP_SOCKS:-localhost:1055}" -o /dev/null -w '%{http_code}' \
+    code=$(flock "${DP_LOCK:-${TMPDIR:-/tmp}/xboxnative-console.lock}" curl -sk -m 20 ${DP_SOCKS:+--socks5-hostname "$DP_SOCKS"} -o /dev/null -w '%{http_code}' \
         "https://$(dp_host)/" 2>/dev/null) || true
     [[ $code =~ ^[1-5][0-9][0-9]$ ]]
 }
@@ -140,7 +141,7 @@ else
     console_log="$artifacts/console.log"
     # Hold the actual shared lock across stop/clear/launch/read/check; helpers
     # reuse fd 9 through dp-lib.sh, including wait-log's child get-file calls.
-    export DP_LOCK=/workspace/x64-run/CONSOLE.lock
+    export DP_LOCK="${DP_LOCK:-${TMPDIR:-/tmp}/xboxnative-console.lock}"
     exec 9>"$DP_LOCK"
     flock -w 600 9
     export DP_LOCK_FD=9
@@ -148,7 +149,7 @@ else
     # advance Uwph between runs. All existing assertions remain mandatory.
     full=${SMOKE_PACKAGE_FULL_NAME:-}
     if [[ -z $full ]]; then
-        /workspace/x64-run/dp.sh /api/app/packagemanager/packages > "$artifacts/packages.json"
+        bash "$dp/packages-json.sh" > "$artifacts/packages.json"
         full=$(python3 - "$artifacts/packages.json" <<'PY'
 import json, re, sys
 pattern = r'Xboxnative\.Uwph_(\d+)\.(\d+)\.(\d+)\.(\d+)_x64__0bdeywx3x8szp'
@@ -239,7 +240,7 @@ PY
     tls_console() {
     full=${SMOKE_TLS_PACKAGE_FULL_NAME:-}
     if [[ -z $full ]]; then
-        /workspace/x64-run/dp.sh /api/app/packagemanager/packages > "$artifacts/packages.json"
+        bash "$dp/packages-json.sh" > "$artifacts/packages.json"
         full=$(python3 - "$artifacts/packages.json" <<'PY'
 import json, re, sys
 pattern = r'Xboxnative\.Tls_(\d+)\.(\d+)\.(\d+)\.(\d+)_x64__0bdeywx3x8szp'

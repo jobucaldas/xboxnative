@@ -17,9 +17,9 @@
 #     unix_call_funcs[] order) and with the handler tagged
 #     __attribute__((sysv_abi)) to match the real dispatcher's internal
 #     calling convention. This is the literal "load a copy of ntdll.dll"
-#     step from the lane prompt, and it succeeds.
+#     step from the task brief, and it succeeds.
 #
-# See LANE_NOTES.md for the full verdict and caveats.
+# See the spike's report for the full verdict and caveats.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here"

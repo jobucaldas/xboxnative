@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Requires freshly source-built app/layout donors and record API, not a console.
 set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)   # repo root: defaults below must not depend on the cwd
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.local/bin:$PATH"
 export WINEPREFIX=${DONOR_WINEPREFIX:-${WINEPREFIX:-/tmp/xboxnative-donor-wine}}
@@ -9,7 +10,7 @@ mkdir -p "$WINEPREFIX"
 if [[ ! -f "$WINEPREFIX/system.reg" ]];then timeout -k 2 60 wineboot -u;fi
 out=out/donor-tests
 mkdir -p "$out/donors" "$out/obj"
-CB=${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}
+CB=${UWP_CROSSBUILD:-$root/out/uwp-crossbuild}
 sdk=${UWP_XWIN_ROOT:-$HOME/.cache/uwp-crossbuild/xwin}
 # Import libraries describe only this owned fixture's donor calls. They do not
 # replace a donor DLL or alter the production router or game acceptance oracle.

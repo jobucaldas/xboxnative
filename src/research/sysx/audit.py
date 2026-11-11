@@ -6,6 +6,7 @@ proof. This inventory deliberately does not equate routing with implementation.
 """
 import argparse
 import csv
+import os
 import pathlib
 import re
 
@@ -69,7 +70,7 @@ def audit(source):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=pathlib.Path,
-        default=pathlib.Path('/workspace/x64-run/research/u32m-wave-gap.csv'))
+        default=pathlib.Path(os.environ.get('RUNS_ROOT', pathlib.Path(__file__).resolve().parents[3] / 'out')) / 'research/u32m-wave-gap.csv')
     args = parser.parse_args()
     with args.source.open(newline='') as source:
         rows = audit(source)

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 // Steam Auto-Cloud sync for owned games run through the Steam API provider
-// (AGENTS.md rule 3): the player's real Steam Cloud files are downloaded before
+// (the ownership rule): the player's real Steam Cloud files are downloaded before
 // launch and changed files uploaded after exit, over the launcher's own Steam
 // session. Portable: all network, hashing and logging is injected, so the
 // planner and wire format are tested natively. Message shapes follow

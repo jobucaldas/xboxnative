@@ -3,13 +3,14 @@
 # OFFLINE owned-fixture evidence only. No console, Steam, or sandbox claim.
 # Requires an already installed crossbuild/SDK, MinGW import libs and Wine.
 set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)   # repo root: defaults below must not depend on the cwd
 cd "$(dirname "$0")/.."
 out=out/process-boundary-tests
 logs=${PROCESS_TEST_LOG_DIR:-$out/logs}
 export WINEPREFIX=${PRUN_WINEPREFIX:-/tmp/process-boundary-wine}
 export WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d
 mkdir -p "$out/obj" "$logs" "$WINEPREFIX"
-cb=${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}
+cb=${UWP_CROSSBUILD:-$root/out/uwp-crossbuild}
 cc=${PROCESS_CC:-clang++-19}
 link=${PROCESS_LINKER:-lld-link-19}
 common=(/nodefaultlib /entry:process_entry /include:process_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat)

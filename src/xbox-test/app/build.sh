@@ -1,6 +1,7 @@
 #!/bin/bash
 # build.sh [OUTDIR=./out] -> out/layout, out/xbtest.msix (signed with out/test.pfx), out/test.cer
 set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)   # repo root: defaults below must not depend on the cwd
 export PATH="$HOME/.local/bin:$PATH"
 here="$(cd "$(dirname "$0")" && pwd)"; cd "$here"; out="${1:-out}"; mkdir -p "$out/layout" "$out/obj"   # relative paths: clang-cl treats /abs/paths as options
 python3 "$here/../../tools/xbox/gen-gap-routes.py"
@@ -8,7 +9,7 @@ python3 "$here/../../tools/xbox/gen-gap-routes.py"
 donors="$here/../../../out/wine-donors"
 bash "$here/../../tools/build-wine-donors.sh" "$donors"
 python3 -I "$here/donors/inspect.py" --donor-dir "$donors" --output "$out/obj/donor_imports.generated.h"
-CB="${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}"
+CB="${UWP_CROSSBUILD:-$root/out/uwp-crossbuild}"
 bash ../uwph/host/build-sqlite-lib.sh "$out/obj/sqlite3.lib"
 # host/tls_slot0.cpp must stay the FIRST object: it reserves the start of the launcher's static TLS
 # block so guest EXEs that assume TLS slot 0 (MSVC /GA code) get it. See host/tls_slot0.cpp.

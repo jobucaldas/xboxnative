@@ -2,7 +2,7 @@
 
 This comparison explains which public-source ideas inform the
 [legitimate Xbox Steam architecture](STEAM-API-PATH.md), and which do not meet
-its requirements. For the owner's "play online for real" question — GameNative's
+its requirements. For the "play online for real" question — GameNative's
 three Steam modes, what a hosted Valve client needs in-process, and the lobby
 bridge this project is building instead — see
 [STEAM-REAL-ONLINE.md](STEAM-REAL-ONLINE.md). It does not supply an implementation, a client ABI map or

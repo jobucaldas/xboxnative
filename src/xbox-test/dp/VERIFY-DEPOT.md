@@ -1,7 +1,7 @@
 Run from any directory (Python 3.9+ and bash):
 
 ```sh
-src/xbox-test/dp/verify-depot.sh --local /workspace/steam-owned/games/megabonk
+src/xbox-test/dp/verify-depot.sh --local <a local depot dump directory>
 src/xbox-test/dp/verify-depot.sh --local /path/to/game --manifest files.json
 src/xbox-test/dp/verify-depot.sh --package PACKAGE_FULL_NAME --remote '\LocalState\spacewar' --manifest files.json
 # Downloads into a temporary host directory, removed after verification:
@@ -9,7 +9,7 @@ src/xbox-test/dp/verify-depot.sh --package PACKAGE_FULL_NAME --remote '\LocalSta
 ```
 
 Console mode only lists and downloads files using ls-dir.sh/get-file.sh. Those helpers
-acquire /workspace/x64-run/CONSOLE.lock for each request; do not wrap this script
+acquire a local run directory/CONSOLE.lock for each request; do not wrap this script
 in another lock on the same file. Set DP_PASS in the environment as usual. Package
 updates can change PackageFullName while running; rerun with the current name if
 Device Portal says the package does not exist. Remote paths are relative to LocalAppData.

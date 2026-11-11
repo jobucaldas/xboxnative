@@ -12,8 +12,8 @@
 #       1 = runtime/install failure, nonterminal progress, stale evidence, timeout, missing GAP or a Device Portal
 #       transport error (any helper that cannot report its HTTP status fails the run; it never counts as "not yet").
 # Never touches steam_session.bin. DP_PASS comes from the env and is never printed. Needs PATH with $HOME/.local/bin.
-HERE="$(cd "$(dirname "$0")" && pwd)"; DP="$HERE/../dp"; . "$DP/dp-lib.sh"
-app="$1"; to="${2:-600}"; out="${3:-/workspace/x64-run/runs/play-$1-$(date +%Y%m%d-%H%M%S)}"
+HERE="$(cd "$(dirname "$0")" && pwd)"; root=$(cd "$HERE/../../.." && pwd); DP="$HERE/../dp"; . "$DP/dp-lib.sh"
+app="$1"; to="${2:-600}"; out="${3:-$root/out/runs/play-$1-$(date +%Y%m%d-%H%M%S)}"
 [[ "$app" =~ ^[0-9]+$ ]] || { echo "usage: $0 <appid> [timeout_s] [outdir]"; exit 2; }
 mkdir -p "$out"; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 full="${PKG:-}"

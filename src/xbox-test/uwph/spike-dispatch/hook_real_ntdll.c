@@ -5,7 +5,7 @@
  * in-process and redirect RtlGetSystemTimePrecise's unix call to our own
  * handler table, instead of reimplementing the protocol from scratch
  * (dispatch_shim.c). This is the literal "load a copy of ntdll.dll" step
- * from the lane prompt. See LANE_NOTES.md for the result and why it does
+ * See the spike's report for the result and why it does
  * or doesn't work.
  */
 #include <windows.h>
@@ -26,7 +26,7 @@ static NTSTATUS WINAPI hook_system_time_precise( void *args )
 }
 
 /* Wine 10.0's real dlls/ntdll/unix/loader.c:unix_call_funcs[] order
- * (confirmed by reading the source in /workspace/ref/wine-10.0-src):
+ * (confirmed by reading the source in a local Wine source checkout):
  * load_so_dll, unwind_builtin_dll, unixcall_wine_dbg_write,
  * unixcall_wine_server_call, unixcall_wine_server_fd_to_handle,
  * unixcall_wine_server_handle_to_fd, unixcall_wine_spawnvp,

@@ -52,7 +52,7 @@ the full log is `out/xn/build.log`.
 | `DP_HOST` | Device Portal host, bare or as a URL (required) |
 | `DP_USER`, `DP_PASS` | Device Portal credentials (`DP_PASS` is required and is never printed) |
 | `DP_PORT` | Optional, default 11443 |
-| `DP_SOCKS` | Optional SOCKS5 proxy, default `localhost:1055`; set it empty to connect directly |
+| `DP_SOCKS` | Optional SOCKS5 proxy, default empty (direct connection) |
 | `DP_LOCK` | Optional console lock path shared by every session that uses this console |
 | `UWP_CROSSBUILD` | Optional path of the cross-build wrapper checkout |
 
@@ -83,7 +83,7 @@ What a full run does, in order, each step a PASS or FAIL line:
    actually listed (the install call can report success before the deployment finishes).
 6. Launches it and waits for the main loop.
 7. Uploads `selftest.txt` and waits for the launcher's own `SELFTEST SUMMARY`
-   (see [SELFTEST.md](SELFTEST.md)). The launcher deletes the log when it takes the
+   line. The launcher deletes the log when it takes the
    request, so `xn` waits until `selftest.txt` is gone and then judges the fresh log
    with no line offset; an earlier run's summary never satisfies it.
 8. Collects `selftest.log`, `selftest_probe.log`, `boot.log` and a screenshot.
@@ -98,7 +98,7 @@ Options: `--modes x86,d3d9` (default `all`), `--timeout SECONDS` (default 900), 
 partial credit, and a summary that disagrees with its result lines is a failure. The last line is
 `xn console: PASS` or `xn console: FAIL`, with exit status 0 or 1; exit 2 is a setup problem (missing variable,
 tool, refused credentials, unreachable console). A self-test pass says the packaged fixtures ran; it is not a claim
-that a game is playable ([PLAYABLE.md](PLAYABLE.md)).
+that a game is playable.
 
 Evidence goes to `out/xn/console-<time>/` (git-ignored). `boot.log` can contain account details: review it
 before sharing and never commit it.
@@ -106,7 +106,7 @@ before sharing and never commit it.
 ### Risks
 
 * Installing replaces the launcher on a shared console. Once, an upgrade removed the app's local data: the Steam
-  login and installed games had to be redone by the owner. `xn` records the `LocalState` file names before and
+  login and installed games had to be redone by the user. `xn` records the `LocalState` file names before and
   after and warns if `steam_session.bin` disappeared. It never reads or copies that file.
 * Check that nobody else is using the console before a run. The lock only orders `xn` and the other scripts.
 * The launcher restarts between self-test fixtures; that is expected.

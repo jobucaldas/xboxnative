@@ -7,7 +7,7 @@ private signing keys are never copied into the kit.
 ## Build and verify
 
 Use the toolchains described in `src/xbox-test/uwph/host/README.md` and
-`docs/xbox/REBUILD.md`: Python 3, OpenSSL, MinGW, LLVM, the UWP cross-build
+the repository README's Build section: Python 3, OpenSSL, MinGW, LLVM, the UWP cross-build
 SDK/CRT, `makemsix` and `osslsigncode`. Put tools on `PATH` and set
 `UWP_CROSSBUILD` to the cross-build checkout. Individual builders may need the
 additional setup documented in their directories.

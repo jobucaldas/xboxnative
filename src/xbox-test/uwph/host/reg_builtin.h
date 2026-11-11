@@ -2,7 +2,7 @@
 // uwph registry builtin: the nine advapi32 Reg* imports of UnityPlayer.dll, backed by a SQLite
 // database (LocalState\registry.sqlite, WAL, one table keyed by (key path, value name)). The old
 // LocalState\registry.json (format uwph-registry/1) is imported once, then renamed *.imported. The console refuses RegCreateKey*/Set* under HKCU
-// (ERROR_ACCESS_DENIED, see LANE_NOTES.md), so guests get this instead of the real advapi32.
+// (ERROR_ACCESS_DENIED, observed on the console), so guests get this instead of the real advapi32.
 // Same signatures and Win32 error codes as advapi32 for the paths Unity PlayerPrefs uses.
 #include <windows.h>
 #include <map>

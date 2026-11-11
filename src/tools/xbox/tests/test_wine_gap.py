@@ -3,6 +3,7 @@ import csv
 import io
 import json
 import importlib.util
+import os
 from pathlib import Path
 import unittest
 import sys
@@ -14,6 +15,11 @@ SPEC = importlib.util.spec_from_file_location('wine_gap', Path(__file__).parents
 gap = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gap)
 
+ROOT = Path(__file__).resolve().parents[4]
+GAME_DIR = Path(os.environ.get('MEGABONK_DIR', ROOT / 'megabonk-from-console'))
+WINE_SRC = Path(os.environ.get('WINE_SOURCE', ROOT / 'third_party/wine'))
+COVERAGE = ROOT / 'research/wine-coverage'
+
 
 class GapTests(unittest.TestCase):
     def test_summary_counts_imports_not_syscalls(self):
@@ -22,7 +28,7 @@ class GapTests(unittest.TestCase):
         self.assertEqual(gap.summary(rows), 'GAP: total=5 missing=3 win32u=2')
 
     def test_real_pe_imports_are_deduplicated(self):
-        path = Path('/workspace/megabonk-from-console/baselib.dll')
+        path = GAME_DIR / 'baselib.dll'
         if not path.exists():
             self.skipTest('local game fixture absent')
         self.assertEqual(gap.scan([path]), gap.scan([path, path]))
@@ -34,7 +40,7 @@ class GapTests(unittest.TestCase):
 
     def test_import_pairs_against_independent_llvm_reader(self):
         reader = shutil.which('llvm-readobj-19') or shutil.which('llvm-readobj')
-        root = Path('/workspace/megabonk-from-console')
+        root = GAME_DIR
         if not reader or not root.exists():
             self.skipTest('local LLVM/game fixture absent')
         paths = sorted(p for p in root.iterdir() if p.suffix.lower() in ('.exe', '.dll'))
@@ -52,8 +58,8 @@ class GapTests(unittest.TestCase):
         self.assertEqual(set(gap.scan(paths)), expected)
 
     def test_historical_log_dropped_real_imports(self):
-        root = Path('/workspace/megabonk-from-console')
-        baseline = Path('/workspace/x64-run/research/wine-coverage/megabonk-imports-vs-wine.v1-391rows.csv')
+        root = GAME_DIR
+        baseline = COVERAGE / 'megabonk-imports-vs-wine.v1-391rows.csv'
         if not root.exists() or not baseline.exists():
             self.skipTest('local research fixture absent')
         with baseline.open() as f:
@@ -66,15 +72,15 @@ class GapTests(unittest.TestCase):
 class WineSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if not Path('/workspace/research/wine/dlls/opengl32/wgl.c').exists():
+        if not (WINE_SRC / 'dlls/opengl32/wgl.c').exists():
             raise unittest.SkipTest('local Wine source absent')
         sys.path.insert(0, str(Path(__file__).parents[1]))
         import wine_graph
         cls.graph = wine_graph
 
     def test_corrected_oracle_exact_bytes(self):
-        root = Path('/workspace/megabonk-from-console')
-        baseline = Path('/workspace/x64-run/research/wine-coverage/megabonk-imports-vs-wine.csv')
+        root = GAME_DIR
+        baseline = COVERAGE / 'megabonk-imports-vs-wine.csv'
         if not root.exists() or not baseline.exists():
             self.skipTest('local research fixture absent')
         paths = sorted(p for p in root.iterdir() if p.suffix.lower() in ('.exe', '.dll'))

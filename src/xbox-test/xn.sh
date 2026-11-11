@@ -195,13 +195,11 @@ cmd_console() {
   [ -n "${DP_HOST:-}" ] || m="$m DP_HOST"
   [ -n "${DP_PASS:-}" ] || m="$m DP_PASS"
   [ -z "$m" ] || die "missing in .env or the environment:$m. Copy .env.example to .env and fill it in (never commit it)."
-  [ -n "${DP_USER:-}" ] || note "DP_USER is not set; the Device Portal scripts fall back to their built-in default user"
+  [ -n "${DP_USER:-}" ] || note "DP_USER is not set; the Device Portal scripts send an empty user (set DP_USER in .env)"
   [ "$game" = "" ] || [ -x "$here/tools/play-test.sh" ] || die "tools/play-test.sh is missing"
 
   # The console lock is shared by every session using this console; keep it on a path they can agree on.
-  if [ -z "${DP_LOCK:-}" ]; then
-    if [ -d /workspace/x64-run ]; then DP_LOCK=/workspace/x64-run/CONSOLE.lock; else DP_LOCK="${XDG_RUNTIME_DIR:-/tmp}/xboxnative-CONSOLE.lock"; fi
-  fi
+  if [ -z "${DP_LOCK:-}" ]; then DP_LOCK="${XDG_RUNTIME_DIR:-/tmp}/xboxnative-CONSOLE.lock"; fi
   export DP_LOCK
   : "${out:=$root/out/xn/console-$(date +%Y%m%d-%H%M%S)}"
   mkdir -p "$out" || die "cannot create $out"

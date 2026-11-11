@@ -39,8 +39,8 @@ three launcher targets have 512 direct pairs; all top-level PEs plus delay loads
 have 628. Do not remove real imports to force equality with the historical subset.
 
 The corrected acceptance oracle is `research/wine-coverage/megabonk-imports-vs-wine.csv`
-under `/workspace/x64-run`. Its inputs come from LLVM, independently cross-checked
+under `.git-ignored local run directory`. Its inputs come from LLVM, independently cross-checked
 with pefile. Historical 391 rows remain unchanged in the `.v1-391rows.csv` archive.
 Both current CSVs sort by `(lowercase DLL, case-sensitive symbol)` with the same
 FIELDS column order and CRLF CSV output. Acceptance requires byte-for-byte equality.
-The report and LANE_NOTES record each of the 101 corrected historical verdicts.
+The report records each of the 101 corrected historical verdicts.

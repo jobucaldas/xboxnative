@@ -3,7 +3,7 @@
 // In-process host for Valve's signed Steam client (steamclient64.dll).
 //
 // Play runs an owned game inside the launcher process; there is no steam.exe to
-// own the account's global user, and no way to spawn one (AGENTS.md rule 3 keeps
+// own the account's global user, and no way to spawn one (the ownership rule keeps
 // the client genuine, and Play refuses guest processes). Valve's client exports
 // the same engine entry points steam.exe itself calls, so the launcher can host
 // the engine in its own process: create the global user, create a pipe, connect

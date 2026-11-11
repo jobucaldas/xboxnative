@@ -1,8 +1,8 @@
 # kernel32 / historical PE tail audit
 
-Inputs: Wine 11 source in `/workspace/research/wine`, report and archived CSVs
-in `/workspace/x64-run/research`. The CSV is a historical 391-row subset, not
-all game imports. The report already carries lane/wgap's full-set corrections.
+Inputs: Wine 11 source in `<local Wine source tree>`, report and archived CSVs
+in `<local research archive>`. The CSV is a historical 391-row subset, not
+all game imports. The report already carries wgap's full-set corrections.
 
 The non-system PE_PURE/PE_NEEDS_NT subset has 82 pairs: 10 kernel32, 20 user32,
 52 other DLLs. The classifier cannot establish a portable implementation:
@@ -34,7 +34,7 @@ The non-system PE_PURE/PE_NEEDS_NT subset has 82 pairs: 10 kernel32, 20 user32,
 Console discovery through launcher 0.5.2.0 found all ten kernel exports in the
 real kernel32 DLL. The old probe searched kernelbase/API sets only. This is
 export evidence, not evidence of successful invocation. Behavioral checks and
-remaining tail discovery are recorded in LANE_NOTES.md as they complete.
+remaining tail discovery are recorded in the historical notes as they complete.
 
 The shared kernel adapter uses only the system loader and real exports. Memory
 calls retain VirtualAllocFromApp/VirtualProtectFromApp and reject RWX. No direct

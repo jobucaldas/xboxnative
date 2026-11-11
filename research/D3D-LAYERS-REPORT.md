@@ -8,12 +8,12 @@ Question (pt136u): "can we dxvk to direct3d 11 or some similar project?"
 - Vulkan route (DXVK on Mesa dzn) is **blocked**: dzn lacks features DXVK needs and DXVK itself says dzn cannot run it.
 - dgVoodoo2 is **out**: closed source, "no bundling" licence, and the DLLs are packed in one RWX section (entropy 0 + 7.92). Breaks W^X.
 - D3D9On12 (MIT, 35k lines) is a DDI driver, not a runtime; needs the OS d3d9.dll we lack. But its ShaderConverter (15k lines, MIT, SM1-3 + fixed-function VS -> DXBC) is a great donor for the long-term own-shim option.
-- Recommendation: Lane A = Mesa GLon12 UWP as a loadable DLL + GL triangle. Lane B = wined3d/d3d9 PE + our gdi32/opengl32 glue, D3D9 triangle, then Spacewar. Long-term option = a D3D11 backend for wined3d (reuse wined3d + donors) if GL-on-D3D12 perf/shader stutter is a problem.
+- Recommendation: Option A = Mesa GLon12 UWP as a loadable DLL + GL triangle. Option B = wined3d/d3d9 PE + our gdi32/opengl32 glue, D3D9 triangle, then Spacewar. Long-term option = a D3D11 backend for wined3d (reuse wined3d + donors) if GL-on-D3D12 perf/shader stutter is a problem.
 
 ## 1. Constraints that drive the ranking
 - Our wxl loader maps PE DLLs itself and resolves imports via import_map. A vendored DLL is fine if its imports route to something we implement and it has no RWX sections / runtime codegen. W^X via VirtualAllocFromApp/VirtualProtectFromApp.
 - Real d3d11/d3d12/dxgi exist. D3DCompile (d3dcompiler_47) is documented as available to UWP/Xbox (walbourn blog, devdocs.xbox.com), unverified on our device (our d3tri compiles offline on purpose).
-- HWND swapchain: lane swc (item 37) already presents an HWND on the CoreWindow. HDC/GL-context creation on HWND still needs glue (see Lane B).
+- HWND swapchain: the swc spike (item 37) already presents an HWND on the CoreWindow. HDC/GL-context creation on HWND still needs glue (see Lane B).
 - 32-bit: Spacewar/LIMBO/Undertale are PE32. Any 32-bit D3D layer would call 64-bit d3d11 via ~hundreds of COM thunks. Cheaper: run the layer as 64-bit and thunk only the D3D9 boundary (IDirect3D9/Device9/Texture9/VB9/IB9/Surface9/Query9/Shader9/StateBlock ~300 methods, pointers < 4GB) from the 32-bit side. Applies to every candidate; do not compare candidates on 32-bit.
 - Games believed to be D3D9: Spacewar 480 (SteamworksExample, d3d9.h + D3DX on Windows; ToGL is macOS only), LIMBO 48000 (SM3, believed), Undertale 391540 (GameMaker Studio 1.x runner, D3D9, believed). Verify with the import list (item 47/40 output) before betting.
 
@@ -35,24 +35,24 @@ Legend effort = to first working game on console, rough.
 
 ## 3. Why #1 wins on "least integration, acceptable licence"
 - Zero new translation code: Wine's D3D9 is the most compatible open implementation, and it is the lowest-risk part for "some games broken, fine".
-- All modules are source, buildable as PE with mingw from the tree already in /workspace/research/wine (wined3d, d3d9, d3d8, ddraw; libs/vkd3d). LGPL: ship as separate DLLs, publish modifications.
+- All modules are source, buildable as PE with mingw from the tree already in <local Wine source tree> (wined3d, d3d9, d3d8, ddraw; libs/vkd3d). LGPL: ship as separate DLLs, publish modifications.
 - GLon12 on Xbox UWP is not hypothetical: it runs shipped homebrew. Microsoft's own blog (devblogs.microsoft.com/directx/opengl-on-dx12-enables-steel-assault-to-launch-on-xbox) shows GLon12 on Xbox via GDK.
 - Cost: two translations (D3D9->GL->D3D12), mesa-uwp fork is stale (2024-03), and shader compile hitching. Acceptable for the target games.
 
-## 4. Plan (1-2 lanes)
-Lane A: **glon12-uwp-dll** (parallel with item 37/42/43 prerequisites, no dependency on PE32 work)
+## 4. Plan (two options)
+Option A: **glon12-uwp-dll** (parallel with item 37/42/43 prerequisites, no dependency on PE32 work)
 1. Rebase or build aerisarn/mesa-uwp (2c7c63e) `libgallium_wgl`/GLon12 for x64 (MSVC or mingw; see aerisarn/SDL-uwp-gl and glxgears-uwp for build recipe). No ICD loader, no Win32 window hooks: build as non-ICD GL (Jesse Natalie's advice on RetroArch issue 13462: avoid opengl32 ICD loader, strip window hooks).
 2. Our host loads it; provide a small "wgl glue" that creates the context offscreen and presents to the CoreWindow swapchain (route from lane swc).
 3. Acceptance: x64 test exe `gltri.exe` (GL 3.3 triangle via wglCreateContext path) runs `src/xbox-test/tools/play-test.sh <gltri-appid>`: log shows GL_RENDERER containing D3D12, 300 presents, hr=0, no RWX/VirtualProtect denials. Record DXIL signing method used.
-Lane B: **d3d9-wined3d-pe** (after A step 3)
-1. mingw-build wine d3d9.dll, wined3d.dll, vkd3d-shader (PE, GL path only; d3d8/ddraw optional) from /workspace/research/wine (wine-10.0). Route their imports (user32/gdi32/advapi32/opengl32) in import_map: opengl32 -> Lane A glue; gdi32 HDC/pixel format/SwapBuffers -> CoreWindow swapchain; window APIs from items 42/43.
+Option B: **d3d9-wined3d-pe** (after A step 3)
+1. mingw-build wine d3d9.dll, wined3d.dll, vkd3d-shader (PE, GL path only; d3d8/ddraw optional) from <local Wine source tree> (wine-10.0). Route their imports (user32/gdi32/advapi32/opengl32) in import_map: opengl32 -> Lane A glue; gdi32 HDC/pixel format/SwapBuffers -> CoreWindow swapchain; window APIs from items 42/43.
 2. Write `d3d9tri.exe` (64-bit, D3D9 FFP + one SM3 shader triangle).
 3. Acceptance: `play-test.sh <d3d9tri-appid>`: Direct3DCreate9 -> CreateDevice hr=0 -> 300 Present hr=0, visible colour via screenshot/log. Then `play-test.sh 480`: after PE32 mapper (47) + 32-bit thunk of the D3D9 boundary (49), log reaches Direct3DCreate9 -> CreateDevice OK -> Present. Then LIMBO 48000, Undertale 391540.
-Decision gate after Lane B step 3: if frame time on d3d9tri-with-many-draws or shader hitches are unacceptable on the console, start option #3 (wined3d D3D11 backend with ShaderConverter/dx9asm donors) as its own lane.
-Cheap parallel check (no lane): confirm on console that D3DCompile works in UWP and that D3D12 accepts DXIL (item 40-type probe), since both choices depend on them.
+Decision gate after Option B step 3: if frame time on d3d9tri-with-many-draws or shader hitches are unacceptable on the console, start option #3 (wined3d D3D11 backend with ShaderConverter/dx9asm donors) as its own effort.
+Cheap parallel check: confirm on console that D3DCompile works in UWP and that D3D12 accepts DXIL (item 40-type probe), since both choices depend on them.
 
 ## 5. Honest uncertainty
-- GLon12 DXIL on the console: Mesa d3d12 emits DXIL and normally signs through dxil.dll. mesa-uwp evidence says it works on retail Dev Mode, but I did not read how (validator fallback / experimental shader models). Must be re-checked when rebasing; if signing fails, lane A is dead and #2/#3 take over.
+- GLon12 DXIL on the console: Mesa d3d12 emits DXIL and normally signs through dxil.dll. mesa-uwp evidence says it works on retail Dev Mode, but I did not read how (validator fallback / experimental shader models). Must be re-checked when rebasing; if signing fails, option A is dead and #2/#3 take over.
 - mesa-uwp is a 2024-03 fork on an old Mesa; rebasing to current Mesa (ec7b2f3, 2026-10-26) may be heavy. aerisarn repos are unmaintained (last push 2024-05) and mesa-uwp has no licence field (code is MIT, Mesa upstream).
 - wined3d GL requires GL 3.x+ core/compat features (e.g. dual-source blend, geometry shaders optional); GLon12 coverage on Series S not measured. Perf numbers: none measured.
 - Wine's `wined3d` build without the Wine unix side was inferred from Makefile.in and grep, not built. Not verified that it loads against Mesa's WGL.
@@ -62,7 +62,7 @@ Cheap parallel check (no lane): confirm on console that D3DCompile works in UWP 
 - DXVK-on-dzn "cannot run" is from DXVK wiki; I did not run it. Old DXVK (1.10.x) might need fewer features; long shot.
 - No dependency verified for 32-bit boundary thunk size (approximate method count).
 
-## 6. Sources (all read-only; clones in /workspace/research/d3d, binaries in /workspace/research/d3d/bin)
+## 6. Sources (all read-only; clones in <local D3D research tree>, binaries in <local D3D research tree>/bin)
 - microsoft/D3D9On12 f3352d1 (2026-09-30), MIT; README (DDI layer).
 - doitsujin/dxvk cbd2206 (2026-10-24); release v3.1.1 (d3d9.dll imports analysed); wiki "Driver support".
 - Mesa ec7b2f3 (2026-10-26) src/microsoft/vulkan/dzn_device.c, src/vulkan/wsi/wsi_common_win32.cpp.
@@ -71,7 +71,7 @@ Cheap parallel check (no lane): confirm on console that D3DCompile works in UWP 
 - https://devblogs.microsoft.com/directx/opengl-on-dx12-enables-steel-assault-to-launch-on-xbox/
 - dgVoodoo2 2.87.6 (dege-diosg/dgVoodoo2 release; MS/x64/D3D9.dll, MS/x86/D3D9.dll).
 - Joshua-Ashton/dxup 7cce9ee (2019-02-04, zlib, archived); GabrielMajeri/d3d9-to-11; elishacloud/dxwrapper dba1ac6; crosire/d3d8to9 (255338f 2026-09-24, BSD-2).
-- Wine 10.0 tree /workspace/research/wine: dlls/wined3d (Makefile.in, adapter_gl.c, adapter_vk.c, ffp_hlsl.c), libs/vkd3d/libs/vkd3d-shader/vkd3d_shader_main.c (d3dbc target list).
-- ANGLE ab90d2a; xbox-homebrew/angle 239b5a4 via /workspace/ref/RetroArch/pkg/msvc-uwp/RetroArch-msvcUWP/ANGLE/README.md.
+- Wine 10.0 tree <local Wine source tree>: dlls/wined3d (Makefile.in, adapter_gl.c, adapter_vk.c, ffp_hlsl.c), libs/vkd3d/libs/vkd3d-shader/vkd3d_shader_main.c (d3dbc target list).
+- ANGLE ab90d2a; xbox-homebrew/angle 239b5a4 via <local prior-art tree>/RetroArch/pkg/msvc-uwp/RetroArch-msvcUWP/ANGLE/README.md.
 - Steamworks SDK docs (SteamworksExample D3D9): https://partner.steamgames.com/doc/sdk/api/example
 - D3DCompile in UWP/Xbox: https://walbourn.github.io/hlsl-fxc-and-d3dcompile/, devdocs.xbox.com (packaging-framework-packages).

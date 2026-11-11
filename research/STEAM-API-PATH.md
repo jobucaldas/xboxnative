@@ -147,4 +147,4 @@ account-free artifact basenames, checks actually run and precise failures—not 
 account-bearing logs. Do not commit game/Valve binaries or inventories of private
 installations. No Valve/game-file patching or Xbox security bypass is part of this
 design. (Policy since 2026-11-05: an emulated Steam API for owned games is also
-allowed, with achievements and cloud saves synced to the real account; see AGENTS.md.)
+allowed, with achievements and cloud saves synced to the real account; see CONTRIBUTING.md.)
