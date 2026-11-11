@@ -269,7 +269,7 @@ struct QueueRowVM {
     const char* name = "";
     const char* status = "";
     float pct = 0.0f;
-    uint32_t art = 0xFF1A3F6B;
+    ui::Image cover{};       // item D21: the game's tall library art (library_600x900)
     bool busy = false;       // progress + status ring (currently downloading)
     bool paused = false;     // paused row: button reads RESUME
 };
@@ -1125,7 +1125,18 @@ constexpr const char* kQueueHints[6] = {"A", "Select", "B", "Back", "M", "Menu"}
 inline void draw_queue_card(ui::Canvas& c, const Font& f, const QueueRowVM& r, float y, bool update) {
     using namespace ui::theme;
     c.fill_round_rect(rect(524, y, 1320, 104), radiusCard, ui::theme::panel);
-    c.fill_round_rect(rect(540, y + 16, 48, 72), radiusControl, r.art);
+    // item D21: the row's thumb is the game's tall library art (2:3, the same
+    // capsule the grid shows), not a flat colour block; a game whose art is
+    // still loading gets the neutral grey tile the grid uses, never a blue
+    // placeholder. The thumb keeps the 48x72 slot the mockup measured.
+    const Rect thumb = rect(540, y + 16, 48, 72);
+    if (r.cover.px && r.cover.w > 0 && r.cover.h > 0) {
+        c.draw_image(r.cover, thumb, ui::Fit::Cover, radiusControl);
+    } else {
+        for (int yy = 0; yy < int(thumb.h); ++yy)
+            c.fill_rect(thumb.x, thumb.y + float(yy), thumb.w, 1,
+                        grad3(kNoCoverTop, kNoCoverTop, kNoCoverBot, float(yy) / (thumb.h - 1)));
+    }
     // mockup: every row carries the dark status ring (26px, stroke 4) at its thumb
     c.stroke_circle(564, y + 52, 14, 4, kRingDark, Align::Center);
     // the busy row stacks name/status/progress from the top; a 2-row card centres them

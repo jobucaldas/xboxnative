@@ -149,7 +149,22 @@ std::vector<ui_launcher::TileVM> make_tiles(int n) {
 
 std::vector<ui_launcher::QueueRowVM> make_rows(int n, bool updates) {
     std::vector<ui_launcher::QueueRowVM> r{size_t(n)};
-    const uint32_t arts[5] = {0xFF1A3F6B, 0xFF6B2A55, 0xFF2A6B4A, 0xFF6B4A1B, 0xFF4A2A6B};
+    // item D21: the rows carry the game's tall library art, not a flat colour
+    // block. Synthetic 2:3 capsules (the real ones are 260x390).
+    static std::vector<std::vector<uint32_t>> arts;
+    if (arts.empty()) {
+        const uint32_t bases[5] = {0xFF1D2E50, 0xFF421334, 0xFF152D24, 0xFF32271A, 0xFF2A1E3B};
+        for (uint32_t base : bases) {
+            std::vector<uint32_t> px(size_t(64) * 96);
+            for (int y = 0; y < 96; ++y)
+                for (int x = 0; x < 64; ++x) {
+                    const unsigned k = unsigned((x + y) * 70 / 160);
+                    auto ch = [&](int shift) { const unsigned v = ((base >> shift) & 0xFF) + k; return v > 255 ? 255u : v; };
+                    px[size_t(y) * 64 + x] = ui::theme::rgb(ch(16), ch(8), ch(0));
+                }
+            arts.push_back(std::move(px));
+        }
+    }
     const char* names[5] = {"Megabonk", "Hades", "Celeste", "Hollow Knight", "Terraria"};
     const char* sts[5] = {
         "Downloading  \xC2\xB7  62%  \xC2\xB7  12.4 MB/s  \xC2\xB7  about 1 hour left",
@@ -164,7 +179,7 @@ std::vector<ui_launcher::QueueRowVM> make_rows(int n, bool updates) {
         r[i].name = names[(first + i) % 5];
         r[i].status = sts[(first + i) % 5];
         r[i].pct = !updates && i == 0 ? 0.62f : 0.0f;
-        r[i].art = arts[(first + i) % 5];
+        r[i].cover = ui::Image{arts[size_t((first + i) % 5)].data(), 64, 96, 64};
         r[i].busy = !updates && i == 0;
     }
     return r;
@@ -933,6 +948,31 @@ int main(int argc, char** argv) {
             label_centred("CANCEL", 1700, 348, 128, 48, false);
             label_centred("UPDATE NOW", 1668, 756, 160, 48, false);
             snap("launcher-20-label-queue");
+        }
+        // item D21: the queue row's thumb is the game's tall library art, not a
+        // flat blue block. The 48x72 slot at (540, y+16) must carry the
+        // capsule's own pixels; a row with no art falls back to the neutral
+        // grey tile (never the old blue placeholder).
+        {
+            std::vector<QueueRowVM> rows = make_rows(2, false);
+            rows[1].cover = ui::Image{};   // second row: art still loading
+            SidebarVM sb; sb.active = 4;
+            QueueVM q; q.rows = rows.data(); q.row_count = int(rows.size());
+            c.fill(ui::theme::page);
+            draw_download_queue(c, font, sb, q, /*draw_hints=*/false);
+            auto at = [&](int x, int y) { return px[size_t(y) * W + x]; };
+            // x 545 is inside the thumb and left of the 26px status ring
+            // (centre 564, stroke 4) so the sample is the art itself.
+            const uint32_t art_px = at(545, 360);
+            check(art_px != ui::theme::panel, "D21: the queue row's thumb is not the panel");
+            check(art_px != 0xFF1A3F6B, "D21: the queue row's thumb is not the blue placeholder");
+            // the capsule is a gradient: two rows of it differ
+            check(at(545, 340) != at(545, 400), "D21: the thumb carries the capsule's gradient");
+            // row 1 (no art): the grey gradient, top lighter than bottom
+            const uint32_t top = at(545, 452), bot = at(545, 516);
+            check((top & 0xFF) > (bot & 0xFF) && (top >> 16 & 0xFF) == (top & 0xFF),
+                  "D21: a row without art falls back to the neutral grey tile");
+            snap("launcher-d21-queue-art");
         }
         // sheet buttons: Cancel (dark) + Delete (green). Item D3 made the sheet
         // height follow its wrapped content, so the button row is derived from

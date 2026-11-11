@@ -454,6 +454,36 @@ static void cover_worker() {
 }
 static void start_covers() { static bool started = false; if (started) return; started = true; for (int i = 0; i < 4; i++) std::thread(cover_worker).detach(); }
 
+// Item D21: the download queue's rows show the same tall library art the grid
+// tile uses. The queue is short and its rows are always on screen, so the
+// covers are fetched on demand here (the grid's lazy worker only knows the
+// visible grid rows) and cached per appid for the session.
+static std::mutex g_qcoverM;
+static std::map<uint32_t, std::shared_ptr<Game>> g_qcovers;   // guarded by g_qcoverM
+static void queue_cover_fetch(uint32_t appid) {
+    init_apartment(apartment_type::multi_threaded);
+    auto g = std::make_shared<Game>();
+    g->appid = appid;
+    const char* kinds[] = {"library_600x900.jpg", "header.jpg"}; bool ok = false;
+    for (int k = 0; k < 2 && !ok; k++) {
+        std::string url = "https://cdn.cloudflare.steamstatic.com/steam/apps/" + std::to_string(appid) + "/" + kinds[k];
+        Resp r = http(false, url, "", "qcover");
+        if (r.status != 200 || r.body.size() < 100) continue;
+        int hr = 0; if (wic_decode(r.body, *g, hr)) ok = true; else logf("qcover appid=%u %s WIC decode failed hr=0x%08x", appid, kinds[k], (unsigned)hr);
+    }
+    if (!ok) { g->pix.clear(); logf("qcover: appid=%u no art", appid); }
+    g->cover = ok ? 1 : 2;
+    std::lock_guard<std::mutex> l(g_qcoverM);
+    g_qcovers[appid] = std::move(g);
+}
+static ui::Image queue_cover(uint32_t appid) {   // every frame from the draw: starts the fetch once, never blocks
+    std::lock_guard<std::mutex> l(g_qcoverM);
+    auto it = g_qcovers.find(appid);
+    if (it == g_qcovers.end()) { g_qcovers[appid] = nullptr; std::thread(queue_cover_fetch, appid).detach(); return {}; }
+    if (!it->second || it->second->cover != 1 || it->second->pix.empty()) return {};
+    return ui::Image{it->second->pix.data(), it->second->iw, it->second->ih, it->second->iw};
+}
+
 // The signed-in account's Steam avatar (issue 51 item 24): hex form of the
 // persona push's avatar_hash, the decoded ARGB pixels, and the fetch state —
 // same lazy one-shot pattern as the detail page's hero banner. The pixels are
@@ -2508,7 +2538,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // row model under the same locks the queue state uses
         static std::vector<ui_launcher::QueueRowVM> rows;
         static std::vector<std::string> rowNames, rowStatus;
-        rows.clear(); rowNames.clear(); rowStatus.clear();
+        static std::vector<ui::Image> rowArts;   // item D21: pixel memory the rows point into
+        rows.clear(); rowNames.clear(); rowStatus.clear(); rowArts.clear();
         std::deque<uint32_t> dq; uint32_t dlApp = 0; int dlState = 0; double dlPct = 0; std::string dlName, dlMsg;
         { std::lock_guard<std::mutex> l(g_dqm); dq = g_dq; }
         dlApp = g_dl.appid.load(); dlState = g_dl.state.load();
@@ -2525,6 +2556,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             r.status = rowStatus.back().c_str();
             r.pct = dlState == 1 ? float(dlPct) : 0.0f;
             r.busy = dlState == 1;
+            rowArts.push_back(queue_cover(dlApp));   // item D21: the tall library art
+            r.cover = rowArts.back();
             rows.push_back(r);
         }
         for (uint32_t id : dq) {
@@ -2533,6 +2566,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             ui_launcher::QueueRowVM r;
             r.name = rowNames.back().c_str();
             r.status = "Queued";
+            rowArts.push_back(queue_cover(id));
+            r.cover = rowArts.back();
             rows.push_back(r);
         }
         ui_launcher::QueueVM q;
