@@ -199,9 +199,45 @@ using ResizeFn=HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*,UINT,UINT,UINT,DXGI_F
 inline ResizeFn realResize=nullptr;
 inline std::atomic<unsigned> resizes{0};inline std::atomic<unsigned> lastResizeCount{0};inline std::atomic<long> lastResizeHr{0};
 inline std::atomic<unsigned> lastResizeW{0},lastResizeH{0};
-inline UINT resize_flags(UINT flags){return flags&~UINT(DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);}
-inline UINT resize_count(UINT count){return count==0?0:std::max<UINT>(count,3);}
+//
+// A resize releases and recreates the back buffers. Real DXGI refuses it with
+// DXGI_ERROR_INVALID_CALL while any reference is still outstanding, which is
+// what forces apps to unbind first; a chain that tolerates outstanding
+// references instead submits commands against freed buffers, and the
+// d3d11on12 layer surfaces that to the driver as an invalid command — the
+// Slime Rancher device reset (0x887a0007) hit between the 3rd and 4th resize,
+// with Unity's deferred contexts still holding the old RTVs. So the hook
+// drains the GPU first: unbind the pipeline (ClearState on the immediate
+// context — the game rebinds every frame anyway), Flush, then wait on an
+// event query until in-flight work completes (bounded: a wedged device must
+// not wedge the guest; the resize then fails honestly with the driver's
+// error instead of adding a hang). Results pass through unchanged.
+using DrainFn=void(*)(ID3D11Device*);
+inline DrainFn realDrain=nullptr;   // test seam
+inline void drain_device(ID3D11Device* dev) {
+    if(realDrain){realDrain(dev);return;}
+    ID3D11DeviceContext* ctx=nullptr;dev->GetImmediateContext(&ctx);
+    if(!ctx)return;
+    ctx->ClearState();
+    ID3D11Query* q=nullptr;
+    D3D11_QUERY_DESC d{};d.Query=D3D11_QUERY_EVENT;
+    if(SUCCEEDED(dev->CreateQuery(&d,&q))&&q) {
+        ctx->End(q);
+        BOOL done=FALSE;DWORD spins=0;
+        while(++spins<=1000) {   // ~1 s at 1 ms/spin; a healthy idle is sub-ms
+            HRESULT hr=ctx->GetData(q,&done,sizeof done,0);
+            if(hr==S_OK&&done)break;
+            if(hr!=S_FALSE)break;   // error: report it through the resize below
+            Sleep(1);
+        }
+        q->Release();
+    }
+    ctx->Flush();
+    ctx->Release();
+}
 inline HRESULT STDMETHODCALLTYPE resize(IDXGISwapChain* c,UINT count,UINT w,UINT h,DXGI_FORMAT f,UINT flags) {
+    winrt::com_ptr<ID3D11Device> dev;
+    if(SUCCEEDED(c->GetDevice(__uuidof(ID3D11Device),dev.put_void()))&&dev)drain_device(dev.get());
     HRESULT hr=realResize(c,resize_count(count),w,h,f,resize_flags(flags));
     ++resizes;lastResizeCount=count;lastResizeW=w;lastResizeH=h;lastResizeHr=hr;return hr;
 }
