@@ -83,7 +83,7 @@ What a full run does, in order, each step a PASS or FAIL line:
    actually listed (the install call can report success before the deployment finishes).
 6. Launches it and waits for the main loop.
 7. Uploads `selftest.txt` and waits for the launcher's own `SELFTEST SUMMARY`
-   (see [SELFTEST.md](SELFTEST.md)). The launcher deletes the log when it takes the
+   line. The launcher deletes the log when it takes the
    request, so `xn` waits until `selftest.txt` is gone and then judges the fresh log
    with no line offset; an earlier run's summary never satisfies it.
 8. Collects `selftest.log`, `selftest_probe.log`, `boot.log` and a screenshot.
@@ -98,7 +98,7 @@ Options: `--modes x86,d3d9` (default `all`), `--timeout SECONDS` (default 900), 
 partial credit, and a summary that disagrees with its result lines is a failure. The last line is
 `xn console: PASS` or `xn console: FAIL`, with exit status 0 or 1; exit 2 is a setup problem (missing variable,
 tool, refused credentials, unreachable console). A self-test pass says the packaged fixtures ran; it is not a claim
-that a game is playable ([PLAYABLE.md](PLAYABLE.md)).
+that a game is playable.
 
 Evidence goes to `out/xn/console-<time>/` (git-ignored). `boot.log` can contain account details: review it
 before sharing and never commit it.
