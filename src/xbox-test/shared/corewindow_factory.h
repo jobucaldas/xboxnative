@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <dxgi1_6.h>
 // Shared native factory adapter; the owner validates every guest HWND.
 namespace corewindow_dxgi {
@@ -118,6 +119,30 @@ inline IDXGIAdapter* real_adapter(IDXGIAdapter* a) {
     return SUCCEEDED(a->QueryInterface(realAdapterId,(void**)&real))?real:nullptr;
 }
 inline UINT outputWidth=1920, outputHeight=1080;
+// One legacy DXGI_SWAP_CHAIN_DESC -> flip-model DESC1 conversion, shared by
+// the factory's CreateSwapChain override and the host's
+// D3D11CreateDeviceAndSwapChain route, so no rule can differ between the two
+// ways a guest hands over a legacy chain. The rules are the CoreWindow
+// adapter's: windowed only (a CoreWindow chain has no exclusive-fullscreen
+// mode), no legacy flag beyond ALLOW_MODE_SWITCH (mode switching concerns
+// desktop fullscreen display modes, which a CoreWindow chain never has), and
+// no multisampling (a resolve pass is outside this route). Legacy
+// discard/sequential maps to FLIP_SEQUENTIAL, the buffer count is at least 2,
+// scaling is STRETCH and alpha is ignored.
+inline HRESULT legacy_swap_chain_desc1(const DXGI_SWAP_CHAIN_DESC* s,DXGI_SWAP_CHAIN_DESC1* v) {
+    if(!s || !v)return DXGI_ERROR_INVALID_CALL;
+    if(!s->Windowed || (s->Flags&~UINT(DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH)))return DXGI_ERROR_INVALID_CALL;
+    *v={};
+    v->Width=s->BufferDesc.Width;v->Height=s->BufferDesc.Height;
+    v->Format=s->BufferDesc.Format;v->SampleDesc=s->SampleDesc;v->BufferUsage=s->BufferUsage;
+    if(s->SampleDesc.Count!=1 || s->SampleDesc.Quality)return DXGI_ERROR_INVALID_CALL;
+    v->BufferCount=std::max(2u,s->BufferCount);
+    v->SwapEffect=(s->SwapEffect==DXGI_SWAP_EFFECT_DISCARD || s->SwapEffect==DXGI_SWAP_EFFECT_SEQUENTIAL)
+        ? DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL : s->SwapEffect;
+    v->Scaling=DXGI_SCALING_STRETCH;
+    v->AlphaMode=DXGI_ALPHA_MODE_IGNORE;
+    return S_OK;
+}
 using PresentSurface = HRESULT (*)(IDXGIFactory2*, IUnknown*, IUnknown*,
     const DXGI_SWAP_CHAIN_DESC1*, IDXGIOutput*, IDXGISwapChain1**);
 // IDXGIFactory2..7. A D3D12 guest asks CreateDXGIFactory2 for IDXGIFactory4
@@ -178,21 +203,11 @@ struct Factory final : IDXGIFactory7 {
     HRESULT STDMETHODCALLTYPE GetWindowAssociation(HWND* h) override { if(!h)return E_POINTER; *h=nullptr; return S_OK; }
     HRESULT STDMETHODCALLTYPE CreateSwapChain(IUnknown* d,DXGI_SWAP_CHAIN_DESC* s,IDXGISwapChain** out) override {
         if(!out)return E_POINTER; *out=nullptr;
-        // Mode switching only concerns desktop fullscreen display modes, which a
-        // CoreWindow swapchain never has; any other legacy flag is refused.
-        if(!s || !s->Windowed || (s->Flags&~UINT(DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH)))return DXGI_ERROR_INVALID_CALL;
-        DXGI_SWAP_CHAIN_DESC1 v{}; v.Width=s->BufferDesc.Width; v.Height=s->BufferDesc.Height;
-        v.Format=s->BufferDesc.Format; v.SampleDesc=s->SampleDesc; v.BufferUsage=s->BufferUsage;
-        // CoreWindow needs flip presentation; desktop legacy discard is common.
-        // Multisampled legacy buffers need a resolve layer, outside this route.
-        if(s->SampleDesc.Count!=1 || s->SampleDesc.Quality)return DXGI_ERROR_INVALID_CALL;
-        v.BufferCount=std::max(2u,s->BufferCount);
-        v.SwapEffect=(s->SwapEffect==DXGI_SWAP_EFFECT_DISCARD || s->SwapEffect==DXGI_SWAP_EFFECT_SEQUENTIAL)
-            ? DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL : s->SwapEffect;
-        v.Scaling=DXGI_SCALING_STRETCH;
-        v.AlphaMode=DXGI_ALPHA_MODE_IGNORE;
+        DXGI_SWAP_CHAIN_DESC1 v{};
+        HRESULT hr=legacy_swap_chain_desc1(s,&v);
+        if(FAILED(hr))return hr;
         IDXGISwapChain1* chain=nullptr;
-        HRESULT hr=CreateSwapChainForHwnd(d,s->OutputWindow,&v,nullptr,nullptr,&chain);
+        hr=CreateSwapChainForHwnd(d,s->OutputWindow,&v,nullptr,nullptr,&chain);
         if(SUCCEEDED(hr))*out=chain;
         return hr;
     }

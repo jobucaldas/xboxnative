@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # build-diag-fixtures.sh OUTDIR -> OUTDIR/{fixture-crt.exe,play-vulkan-dzn.exe,
-# play-d3d9.exe,play-d3d9-triangle.exe,play-d3d9-textured.exe,play-d3d10.exe,
-# play-opengl.exe}, the console self-test's fixtures (selftest.h).
+# play-d3d9.exe,play-d3d9-triangle.exe,play-d3d9-triangle-variants.exe,
+# play-d3d9-textured.exe,play-d3d10.exe,play-d3d11.exe,play-d3d12.exe,
+# play-opengl.exe} - the console self-test's fixtures (selftest_plan.h).
 #
 # These are the same guest programs tests/play-runtime.sh builds for the
 # off-device runner, compiled from this repository's sources so the package
@@ -47,6 +48,13 @@ clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d
 lld "${common[@]}" /entry:d3d9_triangle_entry /include:d3d9_triangle_relocation /out:"$out/play-d3d9-triangle.exe" \
   "$work/d3d9-triangle.obj" "$mingw_lib/libd3d9.a" "${libs[@]}"
 
+# The triangle drawn several ways (the dxilconv sampler-fault variants): one
+# guest, the variants ordered so the crash-shaped one runs first and every
+# later one's SELFTEST RESULT line is already out if it still faults.
+clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d9-triangle-variants.cpp" -o "$work/d3d9-triangle-variants.obj"
+lld "${common[@]}" /entry:d3d9_triangle_variants_entry /include:d3d9_triangle_variants_relocation /out:"$out/play-d3d9-triangle-variants.exe" \
+  "$work/d3d9-triangle-variants.obj" "$mingw_lib/libd3d9.a" "${libs[@]}"
+
 clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d9-textured.cpp" -o "$work/d3d9-textured.obj"
 lld "${common[@]}" /entry:d3d9_textured_entry /include:d3d9_textured_relocation /out:"$out/play-d3d9-textured.exe" \
   "$work/d3d9-textured.obj" "$mingw_lib/libd3d9.a" "${libs[@]}"
@@ -63,6 +71,19 @@ lld "${common[@]}" /entry:d3d10_entry /include:d3d10_relocation /out:"$out/play-
 clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-opengl.cpp" -o "$work/opengl.obj"
 lld "${common[@]}" /entry:opengl_entry /include:opengl_relocation /out:"$out/play-opengl.exe" \
   "$work/opengl.obj" "${libs[@]}"
+
+# The D3D11 fixture draws with the committed DXBC and reads the pixels back; it
+# statically imports d3d11.dll, which the console has natively and Play routes.
+# The include path carries the shaders beside the fixture's sources.
+clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -I"$here" -c "$here/play-d3d11.cpp" -o "$work/d3d11.obj"
+lld "${common[@]}" /entry:d3d_entry /include:d3d_relocation /out:"$out/play-d3d11.exe" \
+  "$work/d3d11.obj" "$mingw_lib/libd3d11.a" "$mingw_lib/libdxgi.a" "$mingw_lib/libdxguid.a" "${libs[@]}"
+
+# The D3D12 fixture draws the same triangle through a minimal PSO and reads it
+# back; it statically imports d3d12.dll, which the console has natively.
+clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -I"$here" -c "$here/play-d3d12.cpp" -o "$work/d3d12.obj"
+lld "${common[@]}" /entry:d3d12_entry /include:d3d12_relocation /out:"$out/play-d3d12.exe" \
+  "$work/d3d12.obj" "$mingw_lib/libd3d12.a" "$mingw_lib/libdxgi.a" "$mingw_lib/libdxguid.a" "${libs[@]}"
 
 # The 32-bit fixture: a mingw-CRT PE32 program the interpreter runs to exit 42
 # (x86-guest.sh asserts the same binary's stdout and exit code under Wine).

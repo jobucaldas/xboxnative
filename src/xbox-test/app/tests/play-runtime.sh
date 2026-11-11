@@ -49,9 +49,11 @@ lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-unresolve
 # EXE that reads its TLS through TEB slot 0, as MSVC /GA code does (no _tls_index).
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-slot0.cpp -o "$out/obj/slot0.obj"
 lld-link-19 /nodefaultlib /include:_tls_used /entry:slot0_exe_entry /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-slot0.exe" "$out/obj/slot0.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
-# EXE whose D3D11 device (through Play's D3D11CreateDevice) rejects calls; Play must log them.
+# EXE that draws one D3D11 triangle through Play's routes: device, swap chain on
+# a guest HWND, the committed DXBC shaders, pixel readback (exit 42 only when the
+# triangle landed where it should; 43 is BLOCKED, never a pass).
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d11.cpp -o "$out/obj/d3d11.obj"
-lld-link-19 /nodefaultlib /entry:d3d_entry /include:d3d_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d11.exe" "$out/obj/d3d11.obj" /usr/x86_64-w64-mingw32/lib/libd3d11.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 /nodefaultlib /entry:d3d_entry /include:d3d_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d11.exe" "$out/obj/d3d11.obj" /usr/x86_64-w64-mingw32/lib/libd3d11.a /usr/x86_64-w64-mingw32/lib/libdxgi.a /usr/x86_64-w64-mingw32/lib/libdxguid.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 # EXE that renders D3D12 frames through Play's routes: device, queue, flip-model
 # swap chain on a guest HWND, RTVs, clear, present, fence wait. Play must log the
 # device it got and the calls the device rejects, once each.
@@ -71,9 +73,10 @@ lld-link-19 /nodefaultlib /entry:d3d10_entry /include:d3d10_relocation /subsyste
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d9.cpp -o "$out/obj/d3d9.obj"
 lld-link-19 /nodefaultlib /entry:d3d9_entry /include:d3d9_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d9.exe" "$out/obj/d3d9.obj" /usr/x86_64-w64-mingw32/lib/libd3d9.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 # EXEs that draw with D3D9 through the shim: one fixed-function triangle, one
-# with a game's own vs_1_1/ps_1_1, a texture and a vertex declaration. Both read
-# their pixels back and exit 42 only when the draw landed where it should.
-for fixture in triangle textured;do
+# with a game's own vs_1_1/ps_1_1, a texture and a vertex declaration, and the
+# variants fixture (the same triangle run several ways). All read their pixels
+# back and exit 42 only when the draw landed where it should.
+for fixture in triangle textured triangle-variants;do
   clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c "tests/play-d3d9-$fixture.cpp" -o "$out/obj/d3d9-$fixture.obj"
   lld-link-19 /nodefaultlib /entry:d3d9_${fixture}_entry /include:d3d9_${fixture}_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d9-$fixture.exe" "$out/obj/d3d9-$fixture.obj" /usr/x86_64-w64-mingw32/lib/libd3d9.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 done
@@ -230,7 +233,7 @@ tail -1 "$out/leaderboards.log"
 # The root copy was only for this run: later modes prove what happens when a
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d9-diag d3d9-triangle d3d9-textured fault-in-dll discord-sdk vulkan-dzn opengl;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn opengl;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -335,6 +338,14 @@ fi
 # mismatch means the driver answered but drew nothing (BLOCKED, never a pass).
 grep -q 'PLAY-OPENGL STAGE pixel-format index=[1-9]' "$out/opengl.log"
 grep -q 'PLAY-OPENGL STAGE context-current renderer=' "$out/opengl.log"
+# Version refusal (patches/mesa-src/0010): when the driver reports a GL version
+# below 3.0, a compat 3.0 request must fail with a real error, not error 0 —
+# the lost SetLastError made SDL3 report its stale pixel-format string. The
+# stage always reports: err=N when the refusal ran (an old Mesa build without
+# the patch yields err=0 and the fixture fails before any verdict line), or
+# "skipped version=X.Y" when the driver provides 3.0+ (the console's d3d12
+# reports 4.1; nothing to refuse there).
+grep -qE 'PLAY-OPENGL STAGE version-refusal (err=[1-9]|skipped version=[0-9]+\.)' "$out/opengl.log"
 if grep -q 'PLAY-OPENGL PASS pixel-readback' "$out/opengl.log"; then
   echo "PLAY-OPENGL PASS pixel-readback"
 elif grep -q 'PLAY-OPENGL BLOCKED pixel-readback' "$out/opengl.log"; then
@@ -390,6 +401,9 @@ grep -q 'guest DXGI CoreWindow swapchain returned hr=0x00000000' "$out/d3d9-diag
 grep -q 'PRUN EVENT mapping d3d9.dll' "$out/d3d9-triangle.log"
 grep -q 'PRUN EVENT mapping d3d9translator.dll' "$out/d3d9-triangle.log"
 grep -q 'PLAY-TEST .*code=42' "$out/d3d9-triangle.log"
+grep -q 'PLAY-TEST .*code=42' "$out/d3d9-triangle-variants.log"
+grep -q 'SELFTEST RESULT d3d9-triangle-v1 PASS' "$out/d3d9-triangle-variants.log"
+grep -q 'SELFTEST RESULT d3d9-triangle-v4 PASS' "$out/d3d9-triangle-variants.log"
 grep -q 'PLAY-TEST .*code=42' "$out/d3d9-textured.log"
 if grep -q 'the shader translator refused the bytecode' "$out/d3d9-textured.log";then exit 1;fi
 # Guest RWX (JIT) memory is emulated over W^X: pages flip RW<->RX on fault.

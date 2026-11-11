@@ -190,6 +190,38 @@ namespace {
 // this shim. It is loaded on first use and never at load time: a shim without
 // it still serves the fixed-function path, which synthesises its shaders from
 // the same bytecode format.
+// Diagnostic, default off: when the environment names a switch, every shader
+// the shim translates is logged as hex (source tokens, then the translated
+// DXBC), so a console-only crash inside a translated shader can be diffed
+// against the same blob built off-device. Enabled by setting the value to
+// anything non-empty.
+bool dumpWanted() {
+    static int state=0;   // 0 unknown, 1 off, 2 on
+    if(!state) {
+        wchar_t value[8];
+        DWORD n=GetEnvironmentVariableW(L"D3D9_SHIM_DUMP_SHADERS",value,8);
+        state=n&&n<8&&value[0]!=L'0'?2:1;
+    }
+    return state==2;
+}
+void dumpHex(const char* label,const DWORD* words,unsigned count) {
+    d3dshim::Line line(label);
+    line.hex(unsigned(count));line.emit();
+    // One line per 16 words: a whole shader on a handful of lines. A full
+    // line writes 16 words at 9 bytes each (space + 8 hex digits), then the
+    // newline and the terminator: 146 bytes.
+    char text[16*9+2];
+    for(unsigned base=0;base<count;base+=16) {
+        unsigned used=0;
+        for(unsigned i=base;i<count&&i<base+16;++i) {
+            text[used++]=' ';
+            for(int nibble=7;nibble>=0;--nibble)
+                text[used++]="0123456789abcdef"[(words[i]>>(nibble*4))&15];
+        }
+        text[used++]='\n';text[used]=0;
+        d3dshim::note(text);
+    }
+}
 struct Translator {
     bool tried=false;
     using Function=int(*)(const unsigned*,unsigned*,unsigned,unsigned*);
@@ -1606,6 +1638,10 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         unsigned bytes=0;
         const int rc=translate(reinterpret_cast<const unsigned*>(code),
                                reinterpret_cast<unsigned*>(buffer),capacity,&bytes);
+        if(dumpWanted()) {
+            dumpHex(vertex?"D3D9 shim: dump vs-src words=":"D3D9 shim: dump ps-src words=",code,words);
+            if(!rc)dumpHex(vertex?"D3D9 shim: dump vs-dxbc words=":"D3D9 shim: dump ps-dxbc words=",reinterpret_cast<const DWORD*>(buffer),bytes/4);
+        }
         if(rc) {
             d3dshim::release(buffer);
             d3dshim::Line line("D3D9 shim: the shader translator refused the bytecode rc=");
@@ -1643,6 +1679,10 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         unsigned bytes=0;
         const int rc=translate(reinterpret_cast<const unsigned*>(code),
                                reinterpret_cast<unsigned*>(buffer),capacity,&bytes);
+        if(dumpWanted()) {
+            dumpHex(vertex?"D3D9 shim: dump vs-src words=":"D3D9 shim: dump ps-src words=",code,words);
+            if(!rc)dumpHex(vertex?"D3D9 shim: dump vs-dxbc words=":"D3D9 shim: dump ps-dxbc words=",reinterpret_cast<const DWORD*>(buffer),bytes/4);
+        }
         if(rc) {
             d3dshim::release(buffer);
             d3dshim::Line line("D3D9 shim: the shader translator refused the bytecode rc=");

@@ -131,6 +131,16 @@ jobs:
           bash src/xbox-test/app/tests/ui-guide.sh
           bash src/xbox-test/app/tests/ui-nav.sh
           bash src/xbox-test/app/tests/ui-unlocks.sh
+      # The legacy->flip swap-chain conversion both guest routes share (the
+      # factory's CreateSwapChain override and D3D11CreateDeviceAndSwapChain):
+      # host logic, so Wine runs it headless.
+      - name: Shared legacy swap-chain conversion rules
+        run: bash src/xbox-test/app/tests/swap-chain-convert.sh
+      # The GPU drain the ResizeBuffers hook runs must submit the event query
+      # (End, Flush) before polling GetData; fake COM objects assert the exact
+      # call order. Host logic, so Wine runs it headless.
+      - name: Resize drain submits the query before waiting on it
+        run: bash src/xbox-test/app/tests/drain-order.sh
   strict-imports:
     runs-on: ubuntu-latest
     steps:
@@ -159,8 +169,10 @@ jobs:
       # launcher's own process where the UI thread publishes the connected pad
       # slots every frame. Running it only with no pad connected is what let a
       # stale empty-device-list assertion reach the console and block every
-      # launch once a pad was plugged in; this runs it with pads published too.
-      - name: mapped user32 regression PE with and without pads published
+      # launch once a pad was plugged in; this runs it with pads published too,
+      # and twice in one process (the gate is re-entrant: a failed run is
+      # retried, and a self-test step can follow a PE32 fixture).
+      - name: mapped user32 regression PE with pads published, and twice in one process
         run: bash src/xbox-test/uwph/user32/tests/run-u32c-gate-test.sh
   d3d10-shim:
     runs-on: ubuntu-latest
@@ -195,6 +207,14 @@ jobs:
       # The driver never opens a d3d11 device, so headless CI can run it.
       - name: D3D9 translator POSITIONT signature regression
         run: bash src/tools/d3d9-translator/test-positiont.sh "$RUNNER_TEMP/d3d9-translator"
+      # The console's d3d9-triangle selftest faulted inside dxilconv because the
+      # fixed-function pixel shader declared a sampler for a stage that never
+      # reads its texture. This regression pins the fix: the textureless stage's
+      # DXBC carries no dcl_sampler/dcl_resource/sample, and the textured one
+      # keeps all three. The driver includes ffp.h itself, so the tokens are the
+      # shim's own, and it never opens a d3d11 device (headless CI can run it).
+      - name: D3D9 fixed-function pixel shader texture-stage regression
+        run: bash src/tools/d3d9-translator/test-ffp-no-texture.sh "$RUNNER_TEMP/d3d9-translator"
   diag-fixtures:
     runs-on: ubuntu-latest
     steps:

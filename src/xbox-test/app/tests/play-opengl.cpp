@@ -58,6 +58,7 @@ typedef HANDLE_GL (WINAPI* PFN_wglCreateContext)(HDC);
 typedef BOOL (WINAPI* PFN_wglDeleteContext)(HANDLE_GL);
 typedef BOOL (WINAPI* PFN_wglMakeCurrent)(HDC, HANDLE_GL);
 typedef PROC (WINAPI* PFN_wglGetProcAddress)(LPCSTR);
+typedef HANDLE_GL (WINAPI* PFN_wglCreateContextAttribsARB)(HDC, HANDLE_GL, const int*);
 typedef const char* (WINAPI* PFN_glGetString)(uint32_t);
 typedef void (WINAPI* PFN_glClearColor)(float, float, float, float);
 typedef void (WINAPI* PFN_glClear)(uint32_t);
@@ -149,20 +150,45 @@ int opengl_entry() {
      p = append(p, renderer ? renderer : "?"); p = append(p, "\" version=\"");
      p = append(p, version ? version : "?"); p = append(p, "\"\n"); *p = 0; emit(line);}
 
-    // Three frames, as a game's first frames: the third is read back.
-    glViewport(0, 0, 320, 240);
-    for (int frame = 0; frame < 3; ++frame) {
-        glClearColor(0.0f, 0.25f, 0.5f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        if (!swapBuffers(dc)) return fail(16, "wglSwapBuffers", GetLastError());
+    // Version refusal (the Fields of Mistria report): a request the driver
+    // cannot satisfy must fail with a real error. A host whose D3D12 refuses
+    // R9G9B9E5_SHAREDEXP caps Mesa at GL 2.1, so when the reported version is
+    // below 3.0 a compat 3.0 request is refused by the state tracker;
+    // wglCreateContextAttribsARB must then return NULL with GetLastError() set
+    // — patches/mesa-src/0010 maps the state tracker's
+    // ST_CONTEXT_ERROR_BAD_VERSION to ERROR_INVALID_VERSION_ARB, and without it
+    // the error is 0, which sent SDL3's "No matching GL pixel format available"
+    // investigation down the wrong path. The stage always reports: err=N when
+    // the refusal ran, "skipped version=X.Y" when the driver provides 3.0+
+    // (nothing to refuse — the console's d3d12 reports GL 4.1).
+    if (version && version[0] >= '0' && version[0] <= '9') {
+        int major = version[0] - '0';
+        if (major < 3) {
+            auto createAttribs = (PFN_wglCreateContextAttribsARB)(uintptr_t)
+                wglGetProcAddress("wglCreateContextAttribsARB");
+            if (!createAttribs) return fail(17, "wglCreateContextAttribsARB", 0);
+            int attrs[] = {0x2091, 3, 0x2092, 0, 0};   // WGL_CONTEXT_MAJOR_VERSION_ARB/minor
+            SetLastError(0);
+            HANDLE_GL refused = createAttribs(dc, nullptr, attrs);
+            DWORD err = GetLastError();
+            {char line[160]; char* p = append(line, "PLAY-OPENGL STAGE version-refusal err=");
+             p = appendInt(p, (int32_t)err); p = append(p, "\n"); *p = 0; emit(line);}
+            if (refused) return fail(17, "version-refusal: 3.0 succeeded under a 2.1 driver", 0);
+            if (!err) return fail(17, "version-refusal: NULL with error 0 (SetLastError lost)", 0);
+        } else {
+            {char line[160]; char* p = append(line, "PLAY-OPENGL STAGE version-refusal skipped version=");
+             p = append(p, version); p = append(p, "\n"); *p = 0; emit(line);}
+        }
     }
-    glFinish();
-    emit("PLAY-OPENGL STAGE frame-presented\n");
 
     // The verdict is a pixel, not a call: read the centre of the cleared frame
-    // back and compare to the colour set above. The readback is from the bound
-    // framebuffer, so it validates context, clear and the driver's state, and
-    // the swap chain present is proven by the stage line above.
+    // BEFORE any present — after SwapBuffers the back-buffer contents are
+    // undefined (the swapchain rotates/discards buffers), so the readback must
+    // happen while the cleared buffer is still bound.
+    glViewport(0, 0, 320, 240);
+    glClearColor(0.0f, 0.25f, 0.5f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glFinish();
     unsigned char pixel[4] = {0, 0, 0, 0};
     glReadPixels(160, 120, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
     bool blocked = false;
@@ -173,6 +199,18 @@ int opengl_entry() {
         p = appendInt(p, pixel[2]); *p++ = ','; p = appendInt(p, pixel[3]);
         p = append(p, " want=0,64,128,255\n"); *p = 0; emit(line);
     }
+
+    // Three presented frames, as a game's first frames: present is proven by
+    // the stage line and the swap chain's hr in the log; the pixel verdict has
+    // already been read back above, before any present invalidated the buffer.
+    glViewport(0, 0, 320, 240);
+    for (int frame = 0; frame < 3; ++frame) {
+        glClearColor(0.0f, 0.25f, 0.5f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        if (!swapBuffers(dc)) return fail(16, "wglSwapBuffers", GetLastError());
+    }
+    glFinish();
+    emit("PLAY-OPENGL STAGE frame-presented\n");
     wglMakeCurrent(nullptr, nullptr);
     wglDeleteContext(context);
     ReleaseDC(window, dc);
