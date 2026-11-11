@@ -24,6 +24,7 @@ inline const Mode* modes(size_t& count) {
         {"vulkan-dzn", "play-vulkan-dzn.exe", false},
         {"d3d9", "play-d3d9.exe", false},
         {"d3d9-triangle", "play-d3d9-triangle.exe", false},
+        {"d3d9-triangle-variants", "play-d3d9-triangle-variants.exe", false},
         {"d3d9-textured", "play-d3d9-textured.exe", false},
         {"d3d10", "play-d3d10.exe", false},
         {"opengl", "play-opengl.exe", false},

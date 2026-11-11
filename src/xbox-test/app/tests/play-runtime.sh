@@ -73,9 +73,10 @@ lld-link-19 /nodefaultlib /entry:d3d10_entry /include:d3d10_relocation /subsyste
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d9.cpp -o "$out/obj/d3d9.obj"
 lld-link-19 /nodefaultlib /entry:d3d9_entry /include:d3d9_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d9.exe" "$out/obj/d3d9.obj" /usr/x86_64-w64-mingw32/lib/libd3d9.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 # EXEs that draw with D3D9 through the shim: one fixed-function triangle, one
-# with a game's own vs_1_1/ps_1_1, a texture and a vertex declaration. Both read
-# their pixels back and exit 42 only when the draw landed where it should.
-for fixture in triangle textured;do
+# with a game's own vs_1_1/ps_1_1, a texture and a vertex declaration, and the
+# variants fixture (the same triangle run several ways). All read their pixels
+# back and exit 42 only when the draw landed where it should.
+for fixture in triangle textured triangle-variants;do
   clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c "tests/play-d3d9-$fixture.cpp" -o "$out/obj/d3d9-$fixture.obj"
   lld-link-19 /nodefaultlib /entry:d3d9_${fixture}_entry /include:d3d9_${fixture}_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d9-$fixture.exe" "$out/obj/d3d9-$fixture.obj" /usr/x86_64-w64-mingw32/lib/libd3d9.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 done
@@ -232,7 +233,7 @@ tail -1 "$out/leaderboards.log"
 # The root copy was only for this run: later modes prove what happens when a
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d9-diag d3d9-triangle d3d9-textured fault-in-dll discord-sdk vulkan-dzn opengl;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn opengl;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -400,6 +401,9 @@ grep -q 'guest DXGI CoreWindow swapchain returned hr=0x00000000' "$out/d3d9-diag
 grep -q 'PRUN EVENT mapping d3d9.dll' "$out/d3d9-triangle.log"
 grep -q 'PRUN EVENT mapping d3d9translator.dll' "$out/d3d9-triangle.log"
 grep -q 'PLAY-TEST .*code=42' "$out/d3d9-triangle.log"
+grep -q 'PLAY-TEST .*code=42' "$out/d3d9-triangle-variants.log"
+grep -q 'SELFTEST RESULT d3d9-triangle-v1 PASS' "$out/d3d9-triangle-variants.log"
+grep -q 'SELFTEST RESULT d3d9-triangle-v4 PASS' "$out/d3d9-triangle-variants.log"
 grep -q 'PLAY-TEST .*code=42' "$out/d3d9-textured.log"
 if grep -q 'the shader translator refused the bytecode' "$out/d3d9-textured.log";then exit 1;fi
 # Guest RWX (JIT) memory is emulated over W^X: pages flip RW<->RX on fault.

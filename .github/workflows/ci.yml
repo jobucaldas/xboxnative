@@ -196,6 +196,14 @@ jobs:
       # The driver never opens a d3d11 device, so headless CI can run it.
       - name: D3D9 translator POSITIONT signature regression
         run: bash src/tools/d3d9-translator/test-positiont.sh "$RUNNER_TEMP/d3d9-translator"
+      # The console's d3d9-triangle selftest faulted inside dxilconv because the
+      # fixed-function pixel shader declared a sampler for a stage that never
+      # reads its texture. This regression pins the fix: the textureless stage's
+      # DXBC carries no dcl_sampler/dcl_resource/sample, and the textured one
+      # keeps all three. The driver includes ffp.h itself, so the tokens are the
+      # shim's own, and it never opens a d3d11 device (headless CI can run it).
+      - name: D3D9 fixed-function pixel shader texture-stage regression
+        run: bash src/tools/d3d9-translator/test-ffp-no-texture.sh "$RUNNER_TEMP/d3d9-translator"
   diag-fixtures:
     runs-on: ubuntu-latest
     steps:

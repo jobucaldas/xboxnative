@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # build-diag-fixtures.sh OUTDIR -> OUTDIR/{fixture-crt.exe,play-vulkan-dzn.exe,
-# play-d3d9.exe,play-d3d9-triangle.exe,play-d3d9-textured.exe,play-d3d10.exe,
-# play-opengl.exe,play-d3d11.exe,play-d3d12.exe},
-# the console self-test's fixtures (selftest.h).
+# play-d3d9.exe,play-d3d9-triangle.exe,play-d3d9-triangle-variants.exe,
+# play-d3d9-textured.exe,play-d3d10.exe,play-d3d11.exe,play-d3d12.exe,
+# play-opengl.exe} - the console self-test's fixtures (selftest_plan.h).
 #
 # These are the same guest programs tests/play-runtime.sh builds for the
 # off-device runner, compiled from this repository's sources so the package
@@ -47,6 +47,13 @@ lld "${common[@]}" /entry:d3d9_entry /include:d3d9_relocation /out:"$out/play-d3
 clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d9-triangle.cpp" -o "$work/d3d9-triangle.obj"
 lld "${common[@]}" /entry:d3d9_triangle_entry /include:d3d9_triangle_relocation /out:"$out/play-d3d9-triangle.exe" \
   "$work/d3d9-triangle.obj" "$mingw_lib/libd3d9.a" "${libs[@]}"
+
+# The triangle drawn several ways (the dxilconv sampler-fault variants): one
+# guest, the variants ordered so the crash-shaped one runs first and every
+# later one's SELFTEST RESULT line is already out if it still faults.
+clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d9-triangle-variants.cpp" -o "$work/d3d9-triangle-variants.obj"
+lld "${common[@]}" /entry:d3d9_triangle_variants_entry /include:d3d9_triangle_variants_relocation /out:"$out/play-d3d9-triangle-variants.exe" \
+  "$work/d3d9-triangle-variants.obj" "$mingw_lib/libd3d9.a" "${libs[@]}"
 
 clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d9-textured.cpp" -o "$work/d3d9-textured.obj"
 lld "${common[@]}" /entry:d3d9_textured_entry /include:d3d9_textured_relocation /out:"$out/play-d3d9-textured.exe" \
