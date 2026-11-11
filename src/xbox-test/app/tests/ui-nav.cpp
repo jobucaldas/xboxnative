@@ -87,13 +87,43 @@ int main() {
         for (int i = 0; i < 4; ++i) ui_nav::accounts_move(lap, 2, true);
         check(lap == ui_nav::accounts_open_sel(2), "D14: a full lap returns to Cancel");
         int none = 0;
-        check(ui_nav::accounts_move(none, -1, true) && none == 1, "D14: a negative count still has Log out + Cancel");
+        check(ui_nav::accounts_move(none, -1, true) && none == 1, "D14: a negative count still has the action row + Cancel");
         check(ui_nav::accounts_move(none, -1, true) && none == 0, "D14: and wraps between them");
         check(ui_nav::accounts_activate(3, 2) == ui_nav::AccountAction::cancel, "D14: A on Cancel only closes");
-        check(ui_nav::accounts_activate(2, 2) == ui_nav::AccountAction::logout, "D14: A on Log out asks for confirmation");
+        check(ui_nav::accounts_activate(2, 2) == ui_nav::AccountAction::steam, "D14: A on the Steam row is the account action");
         check(ui_nav::accounts_activate(0, 2) == ui_nav::AccountAction::none, "D14: A on an account row does nothing destructive");
-        check(ui_nav::accounts_activate(0, 0) == ui_nav::AccountAction::logout, "D14: with no accounts the logout row is row 0");
+        check(ui_nav::accounts_activate(0, 0) == ui_nav::AccountAction::steam, "D14: with no accounts the Steam row is row 0");
         check(ui_nav::accounts_activate(1, 0) == ui_nav::AccountAction::cancel, "D14: with no accounts Cancel is row 1");
+    }
+
+    // ---- item D16: the account popup offers Sign in when signed out ----
+    {
+        check(ui_nav::account_rows(0) == 1, "D16: the Steam row exists with no Xbox user");
+        check(ui_nav::account_rows(2) == 3, "D16: Xbox users + the Steam row");
+        check(ui_nav::account_rows(-1) == 1, "D16: a negative count still has the Steam row");
+        // the Steam row is the last account row, whatever the count
+        check(ui_nav::accounts_activate(ui_nav::account_rows(0), ui_nav::account_rows(0)) == ui_nav::AccountAction::steam,
+              "D16: signed out, A on the Steam row starts sign-in");
+        check(ui_nav::accounts_activate(ui_nav::account_rows(2), ui_nav::account_rows(2)) == ui_nav::AccountAction::steam,
+              "D16: with Xbox users the Steam row is still the action row");
+    }
+
+    // ---- item D16: the sidebar session hint ----
+    {
+        check(std::string(ui_nav::session_hint(ui_nav::session_state(false, 1))) == "Connecting to Steam...",
+              "D16: a restore in flight says Connecting");
+        check(std::string(ui_nav::session_hint(ui_nav::session_state(false, 0))) == "Connecting to Steam...",
+              "D16: before the restore starts it also says Connecting");
+        check(std::string(ui_nav::session_hint(ui_nav::session_state(false, 3))) == "Steam offline",
+              "D16: a failed restore says Steam offline");
+        check(std::string(ui_nav::session_hint(ui_nav::session_state(false, 4))) == "Sign in required",
+              "D16: no saved session says Sign in required");
+        check(std::string(ui_nav::session_hint(ui_nav::session_state(false, 2))) == "Sign in required",
+              "D16: done but not signed in (logged out) says Sign in required");
+        check(std::string(ui_nav::session_hint(ui_nav::session_state(true, 2))).empty(),
+              "D16: a signed-in account shows no hint");
+        check(std::string(ui_nav::session_hint(ui_nav::session_state(true, 3))).empty(),
+              "D16: signed in wins over a stale failure");
     }
 
     // ---- sort cycling wraps over the existing three modes ----

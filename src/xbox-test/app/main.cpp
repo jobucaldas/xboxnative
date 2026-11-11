@@ -358,9 +358,10 @@ static void start_xbox_users_fetch() {
     if (g_xboxState.compare_exchange_strong(st, 1)) std::thread(xbox_users_fetch).detach();
 }
 // Item D14: the account list's rows — every Xbox user the console reports,
-// plus the Steam account once a persona has arrived (labelled "Steam"). The
-// order is Xbox users first, Steam last, so the row the sidebar names is first.
-static int accounts_count() { return (int)xbox_user_names().size() + (persona_name().empty() ? 0 : 1); }
+// plus the Steam row (item D16: the account when signed in, the sign-in action
+// when not). The order is Xbox users first, Steam last, so the row the sidebar
+// names is first. The count does not change with the sign-in state.
+static int accounts_count() { return (int)xbox_user_names().size() + 1; }
 
 // Selawik fonts for the ui:: toolkit, loaded once from the package's fonts/
 // folder (build.sh copies out/ui-assets into layout/fonts/). The bytes must
@@ -548,10 +549,20 @@ static void sort_games(int mode) {   // caller holds g_gm
 
 // ---------------------------------------------------------------- app state + network thread
 enum Screen { S_BOOT, S_LOGIN, S_LOADING, S_LIBRARY, S_DETAIL, S_QUEUE, S_STORAGE };
-static std::atomic<int> g_screen{S_BOOT};
+// Item D16: the library is the first screen. Steam's session is restored in the
+// background and never gates the UI, so no startup splash is shown on launch.
+static std::atomic<int> g_screen{S_LIBRARY};
 static std::mutex g_sm;                       // guards the strings below
 static std::string g_status = "Starting...", g_qrUrl, g_err;
 static std::atomic<bool> g_scanned{false}, g_refreshReq{false}, g_logoutReq{false}, g_reloadReq{false};
+// Item D16: the Steam session runs in the BACKGROUND — the library is the
+// first screen and never waits on it. These atomics say what it is doing:
+//   g_steamSignedIn: a Steam account is attached (session restored or QR done)
+//   g_steamRestore:  0 not tried, 1 in flight, 2 done, 3 failed (retryable), 4 no saved session
+//   g_signInReq:     the account popup asked for the QR screen
+static std::atomic<bool> g_steamSignedIn{false};
+static std::atomic<int> g_steamRestore{0};
+static std::atomic<bool> g_signInReq{false};
 static std::atomic<double> g_qrStart{0};
 static std::atomic<int> g_qrGen{0};
 static void set_status(const std::string& s) { std::lock_guard<std::mutex> l(g_sm); g_status = s; }
@@ -581,8 +592,9 @@ static void demo_library() {
     g_ownedCount = (int)v.size(); { std::lock_guard<std::mutex> l(g_gm); g_games = std::move(v); }
 }
 static void enter_library(const std::string& access, const std::string& steamid) {
-    g_screen = S_LOADING;
-    if (!fetch_library(access, steamid)) { { std::lock_guard<std::mutex> l(g_sm); g_err = "Could not load your games"; } return; }   // item D15: stay on the splash, which shows the failure and A Retry
+    // Item D16: the library is already on screen — it fills in when the fetch
+    // lands, and a failure only sets the error line (the grid stays usable).
+    if (!fetch_library(access, steamid)) { { std::lock_guard<std::mutex> l(g_sm); g_err = "Could not load your games"; } g_screen = S_LIBRARY; return; }
     { std::lock_guard<std::mutex> l(g_sm); g_err.clear(); }
     start_covers(); g_screen = S_LIBRARY;
 }
@@ -614,8 +626,9 @@ static bool fetch_library_cm(CmSession& cm) {
     return true;
 }
 static void enter_library_cm(CmSession& cm) {
-    g_screen = S_LOADING;
-    if (!fetch_library_cm(cm)) { { std::lock_guard<std::mutex> l(g_sm); g_err = "Could not load your games"; } return; }   // item D15: stay on the splash (failure state + A Retry)
+    // Item D16: same as enter_library — the library is already up and fills in;
+    // a failure leaves the grid and sets the error line, never a splash.
+    if (!fetch_library_cm(cm)) { { std::lock_guard<std::mutex> l(g_sm); g_err = "Could not load your games"; } g_screen = S_LIBRARY; return; }
     { std::lock_guard<std::mutex> l(g_sm); g_err.clear(); }
     start_covers(); g_screen = S_LIBRARY;
 }
@@ -902,62 +915,95 @@ static void net_thread() {
         g_demo = true; logf("DEMO mode (demo.txt present): not using any Steam account"); demo_library(); start_covers(); g_screen = S_LIBRARY; g_authResolved = true;
         while (!g_quit) Sleep(200); return;
     }
+    // Item D16: the library is the FIRST screen and never waits on Steam. The
+    // saved session is restored here, in the background; the sidebar's account
+    // row carries the state ("Connecting to Steam...", "Steam offline", "Sign
+    // in required"). The QR screen is only ever reached from the account popup.
+    g_screen = S_LIBRARY;
     std::string savedAccess; double lastRelog = 0;
-    if (load_token2(refresh, savedAccess)) {
-        set_status("Restoring Steam session...");
-        for (int attempt = 0; !g_quit; attempt++) {
+    bool haveToken = load_token2(refresh, savedAccess);
+    if (haveToken) g_steamRestore = 1; else g_steamRestore = 4;   // nothing saved: signed out, not "offline"
+    g_authResolved = true;   // item D16: the session question is answered by the flags above; nothing waits on it now
+    bool restorePending = haveToken;
+    int restoreAttempts = 0;
+    while (!g_quit) {
+        // ---- the background restore (one attempt per loop pass, never blocking the UI)
+        if (restorePending) {
             int er = 0; std::string err; auto s = cm_logon(refresh, er, err);
             auto result = restore_result(bool(s), er, refresh);
-            if (result == session_restore::Result::restored) { logf("session restored via CM logon (refresh token)"); adopt_user_session(s); enter_library_cm(*s); break; }
-            if (result == session_restore::Result::qr) break;
-            set_status(er == 84 ? "Steam asks to wait - retrying (saved login kept)..." : "Cannot reach Steam - retrying (saved login kept)...");
-            logf("session restore: transient failure (eresult %d %s), retry %d", er, err.c_str(), attempt + 1);
-            for (int k = 0; k < (er == 84 ? 600 : 80) && !g_quit; k++) Sleep(100);
+            if (result == session_restore::Result::restored) {
+                logf("session restored via CM logon (refresh token)"); adopt_user_session(s);
+                g_steamSignedIn = true; g_steamRestore = 2; restorePending = false;
+                enter_library_cm(*s);
+            } else if (result == session_restore::Result::qr) {
+                // the saved token is dead: stay on the library, signed out, and
+                // let the account popup offer Sign in (never force the QR screen)
+                g_steamRestore = 4; g_steamSignedIn = false; restorePending = false; refresh.clear(); access.clear();
+                set_status("Sign in to Steam");
+            } else if (++restoreAttempts >= 3) {
+                logf("session restore: giving up after %d attempts (eresult %d); library stays usable", restoreAttempts, er);
+                g_steamRestore = 3; restorePending = false;
+            } else {
+                logf("session restore: transient failure (eresult %d %s), retry %d", er, err.c_str(), restoreAttempts);
+                for (int k = 0; k < (er == 84 ? 600 : 200) && !g_quit; k++) Sleep(100);   // then the next pass retries
+            }
+            if (restorePending) { Sleep(100); continue; }
         }
-    }
-    g_authResolved = true;
-    while (!g_quit) {
-        if (g_screen == S_LIBRARY || g_screen == S_LOADING || g_screen == S_DETAIL || g_screen == S_QUEUE || g_screen == S_STORAGE) {
-            if (g_reloadReq.exchange(false)) {   // item D15: A on the failure screen retries the library fetch now
+        // ---- the QR screen, only on request from the account popup
+        if (g_signInReq.exchange(false)) {
+            g_screen = S_LOGIN; g_scanned = false; g_refreshReq = false;
+            QrSession q; set_status("Requesting QR code...");
+            if (!begin_qr(q)) { set_status("Cannot reach Steam (HTTPS). Retrying in 10 s - or press A/X"); for (int i = 0; i < 100 && !g_refreshReq && !g_quit; i++) Sleep(100); continue; }
+            { std::lock_guard<std::mutex> l(g_sm); g_qrUrl = q.url; g_status = "Scan with the Steam mobile app, then approve"; }
+            g_qrStart = now_s(); g_qrGen++; logf("QR session started (clientId set, interval %.1fs)", q.interval);
+            for (;;) {
+                for (int i = 0; i < (int)(q.interval * 10) && !g_refreshReq && !g_quit; i++) Sleep(100);
+                if (g_quit || g_refreshReq.exchange(false)) { logf("QR refresh requested"); break; }
+                if (now_s() - g_qrStart > 270) { logf("QR auto-refresh before expiry"); break; }
+                PollRes pr = poll_qr(q, refresh, access);
+                { std::lock_guard<std::mutex> l(g_sm); if (g_qrUrl != q.url) { g_qrUrl = q.url; g_qrStart = now_s(); g_qrGen++; } }
+                if (pr == POLL_SCANNED && !g_scanned) { g_scanned = true; set_status("Scanned - approve the sign-in on your phone"); logf("QR scanned, waiting for approval"); }
+                if (pr == POLL_FAIL) { logf("poll failed -> new QR"); break; }
+                if (pr == POLL_OK) {
+                    if (access.empty()) gen_access(refresh, access);
+                    save_token2(refresh, access); logf("login approved");
+                    int er = 0; std::string err; auto s = cm_logon(refresh, er, err);
+                    if (s) { adopt_user_session(s); g_steamSignedIn = true; g_steamRestore = 2; enter_library_cm(*s); }
+                    else { logf("post-QR CM logon failed (eresult %d %s); trying HTTPS library", er, err.c_str()); g_steamSignedIn = true; g_steamRestore = 2; enter_library(access, jwt_sub(refresh)); }
+                    g_authResolved = true; break;
+                }
+            }
+            // B on the QR screen returns to the library, whatever the outcome
+            if (g_screen == S_LOGIN) { g_screen = S_LIBRARY; logf("sign-in screen closed; back to the library"); }
+            continue;
+        }
+        // ---- the live screens: reload, logout, session keep-alive
+        {
+            if (g_reloadReq.exchange(false)) {   // item D15: A on the failure line retries the library fetch now
                 auto u = user_session();
                 if (u && u->up) { { std::lock_guard<std::mutex> l(g_gm); g_games.clear(); } enter_library_cm(*u); continue; }
-                // no live session: the loop below logs on again with the saved token
+                // item D16: no live session — retry the background restore with the saved token
+                if (!refresh.empty()) { restoreAttempts = 0; restorePending = true; g_steamRestore = 1; continue; }
             }
-            if (g_logoutReq.exchange(false)) { delete_token(); if (auto u = user_session()) { u->close(); set_user_session(nullptr); } g_screen = S_LOGIN; refresh.clear(); access.clear(); { std::lock_guard<std::mutex> l(g_gm); g_games.clear(); } continue; }
+            if (g_logoutReq.exchange(false)) {
+                delete_token(); if (auto u = user_session()) { u->close(); set_user_session(nullptr); }
+                g_steamSignedIn = false; g_steamRestore = 4; refresh.clear(); access.clear();
+                { std::lock_guard<std::mutex> l(g_gm); g_games.clear(); }
+                g_screen = S_LIBRARY; set_status("Sign in to Steam"); logf("logged out: library stays, account row offers Sign in");
+                continue;
+            }
             if (!refresh.empty() && !g_demo) {
                 auto u = user_session();
-                bool want = g_reloadReq.exchange(false);
+                bool want = false;
                 if ((!u || !u->up) && now_s() - lastRelog > 20) {   // session dropped: log on again with the same refresh token
                     lastRelog = now_s(); int er = 0; std::string err; auto s = cm_logon(refresh, er, err);
-                    if (s) { logf("session re-established via CM logon"); adopt_user_session(s); u = s; want = true; }
-                    else if (restore_result(false, er, refresh) == session_restore::Result::qr) continue;
+                    if (s) { logf("session re-established via CM logon"); adopt_user_session(s); u = s; want = true; g_steamSignedIn = true; g_steamRestore = 2; }
+                    else if (restore_result(false, er, refresh) == session_restore::Result::qr) { g_steamSignedIn = false; g_steamRestore = 4; refresh.clear(); continue; }
                 }
                 if (want && u && u->up) { { std::lock_guard<std::mutex> l(g_gm); g_games.clear(); } enter_library_cm(*u); }
             }
-            Sleep(100); continue;
         }
-        g_screen = S_LOGIN; g_scanned = false; g_refreshReq = false;
-        QrSession q; set_status("Requesting QR code...");
-        if (!begin_qr(q)) { set_status("Cannot reach Steam (HTTPS). Retrying in 10 s - or press A/X"); for (int i = 0; i < 100 && !g_refreshReq && !g_quit; i++) Sleep(100); continue; }
-        { std::lock_guard<std::mutex> l(g_sm); g_qrUrl = q.url; g_status = "Scan with the Steam mobile app, then approve"; }
-        g_qrStart = now_s(); g_qrGen++; logf("QR session started (clientId set, interval %.1fs)", q.interval);
-        for (;;) {
-            for (int i = 0; i < (int)(q.interval * 10) && !g_refreshReq && !g_quit; i++) Sleep(100);
-            if (g_quit || g_refreshReq.exchange(false)) { logf("QR refresh requested"); break; }
-            if (now_s() - g_qrStart > 270) { logf("QR auto-refresh before expiry"); break; }
-            PollRes pr = poll_qr(q, refresh, access);
-            { std::lock_guard<std::mutex> l(g_sm); if (g_qrUrl != q.url) { g_qrUrl = q.url; g_qrStart = now_s(); g_qrGen++; } }
-            if (pr == POLL_SCANNED && !g_scanned) { g_scanned = true; set_status("Scanned - approve the sign-in on your phone"); logf("QR scanned, waiting for approval"); }
-            if (pr == POLL_FAIL) { logf("poll failed -> new QR"); break; }
-            if (pr == POLL_OK) {
-                if (access.empty()) gen_access(refresh, access);
-                save_token2(refresh, access); logf("login approved");
-                int er = 0; std::string err; auto s = cm_logon(refresh, er, err);
-                if (s) { adopt_user_session(s); enter_library_cm(*s); }
-                else { logf("post-QR CM logon failed (eresult %d %s); trying HTTPS library", er, err.c_str()); enter_library(access, jwt_sub(refresh)); }
-                g_authResolved = true; break;
-            }
-        }
+        Sleep(100);
     }
 }
 
@@ -1440,9 +1486,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         return true;
     }
     // ---- Item D14: the account list popup (A on the profile row). Rows are
-    // the console's Xbox users and the Steam account, then Log out and Cancel;
-    // it opens on Cancel, so a stray A never logs out. A on Log out hands over
-    // to the existing confirmation sheet (which itself starts on Cancel).
+    // the console's Xbox users and the Steam row, then the Steam action row
+    // and Cancel; it opens on Cancel, so a stray A never logs out. Item D16:
+    // the action row is 'Log out of Steam' when signed in (hands over to the
+    // Cancel-default confirm sheet) and 'Sign in to Steam' when not (opens the
+    // QR screen; B there returns to the library).
     bool accounts_input(GamepadButtons edge, const char* source) {
         if (!m_accountsOpen) return false;
         const int n = accounts_count();
@@ -1451,7 +1499,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         else if (has(edge, GamepadButtons::A)) {
             switch (ui_nav::accounts_activate(m_accountsSel, n)) {
             case ui_nav::AccountAction::cancel: m_accountsOpen = false; logf("accounts: cancelled (%s)", source); break;
-            case ui_nav::AccountAction::logout: m_accountsOpen = false; m_confirmLogout = true; m_logoutYes = false; logf("accounts: log out -> confirmation sheet, focus on Cancel (%s)", source); break;
+            case ui_nav::AccountAction::steam:
+                m_accountsOpen = false;
+                if (g_steamSignedIn.load()) { m_confirmLogout = true; m_logoutYes = false; logf("accounts: log out -> confirmation sheet, focus on Cancel (%s)", source); }
+                else { g_signInReq = true; logf("accounts: sign in -> QR screen (%s)", source); }
+                break;
             default: logf("accounts: row %d is information only (%s)", m_accountsSel, source); break;
             }
         }
@@ -1463,13 +1515,18 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         static std::vector<const char*> namePtrs, sourcePtrs;
         names.clear(); sources.clear(); namePtrs.clear(); sourcePtrs.clear();
         for (const std::string& n : xbox_user_names()) { names.push_back(n); sources.push_back("Xbox"); }
-        const std::string steam = persona_name();
-        if (!steam.empty()) { names.push_back(steam); sources.push_back("Steam"); }
+        // Item D16: the Steam row is the persona when signed in, else the
+        // sign-in action; the action row below it says what A will do.
+        const bool signedIn = g_steamSignedIn.load();
+        const std::string steam = signedIn ? persona_name() : std::string();
+        names.push_back(signedIn ? (steam.empty() ? "Steam" : steam) : "Sign in to Steam");
+        sources.push_back(signedIn ? "Steam" : "Not signed in");
         for (size_t i = 0; i < names.size(); ++i) { namePtrs.push_back(names[i].c_str()); sourcePtrs.push_back(sources[i].c_str()); }
         ui_launcher::AccountVM v;
         v.names = namePtrs.empty() ? nullptr : namePtrs.data();
         v.sources = sourcePtrs.empty() ? nullptr : sourcePtrs.data();
         v.n = (int)namePtrs.size();
+        v.action_label = ui_nav::account_steam_label(signedIn);
         v.sel = m_accountsSel;
         ui_launcher::draw_accounts_sheet(c, g_font, v);
     }
@@ -1952,10 +2009,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void cmdhook(double t) {
         static double next = 0, holdUntil = 0; static std::deque<std::string> q;
         if (t < next) return; next = t + 0.25;
-        if (g_screen == S_BOOT || g_screen == S_LOGIN || g_screen == S_LOADING) {   // item 19: every live screen accepts cmd.txt (S_STORAGE included)
-            std::string e; { std::lock_guard<std::mutex> l(g_sm); e = g_err; }
-            if (g_screen != S_LOADING || e.empty()) return;   // item D15: the splash's failure state stays scriptable
-        }
+        // Item D16: the library is the live screen from the first frame, so
+        // cmd.txt is accepted there; the QR screen stays scriptable too.
+        if (g_screen == S_LOGIN) return;
         std::wstring path = g_dir + L"\\cmd.txt"; std::string all;
         if (read_file_s(path, all)) {
             if (!DeleteFileW(path.c_str())) { logf("cmd.txt: consume failed; no input"); }
@@ -2217,7 +2273,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         v.status = status_buf.c_str();
         v.failed = !err.empty();
         if (v.failed) { v.status = err.c_str(); detail_buf = "Press A to retry, or check boot.log"; }
-        else { detail_buf = g_screen == S_BOOT ? "Preparing the launcher" : "This can take a few seconds"; }
+        else if (!g_steamSignedIn.load()) {   // item D16: the transient connecting state
+            v.status = ui_nav::session_hint(ui_nav::session_state(false, g_steamRestore.load()));
+            detail_buf = "The library is ready - this only fills in your games";
+        }
+        else detail_buf = "This can take a few seconds";
         v.detail = detail_buf.c_str();
         v.phase = float(std::fmod(t * 0.5, 1.0));
         // the console's user, when Windows.System.User has answered
@@ -2273,6 +2333,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
         sb.persona = persona.c_str();
         sb.persona_source = personaSource;
+        // Item D16: the background Steam session's state, in the account row.
+        sb.session_hint = ui_nav::session_hint(ui_nav::session_state(g_steamSignedIn.load(), g_steamRestore.load()));
         // item 24: the avatar once its fetch decoded (px != nullptr), else the
         // placeholder circle the sidebar draws for an empty image.
         { std::lock_guard<std::mutex> l(g_avatarM);
@@ -2347,7 +2409,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         { std::lock_guard<std::mutex> l(g_gm);
           auto list = shown_games();
           listed = list.size();
-          loading = g_screen == S_LOADING || (g_games.empty() && !g_authResolved);
+          // Item D16: "Loading..." only while the background restore is still
+          // running; signed out (or offline) the grid is simply empty.
+          loading = g_games.empty() && g_steamRestore.load() == 1;
           if (!list.empty() && m_sel >= (int)list.size()) { int ns = game_library::clamp_selection(m_sel, list.size()); grid_position(ns, std::min(m_top, ns / COLS), "shown list shrank"); }
           int lo = std::max(0, (m_top - 1) * COLS), hi = (int)std::min<size_t>(list.size(), (size_t)(m_top + 3) * COLS);
           auto evict = [](Game& g) { int cc = g.cover; if (cc == 1 || cc == 2) { g.cover = 0; std::vector<uint32_t>().swap(g.pix); } };
@@ -2400,6 +2464,19 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (loading) lib.loading = true;
         else if (m_onlyInstalled) snprintf(count, sizeof count, "%zu installed of %d games", listed, (int)g_ownedCount.load()), lib.count_label = count;
         else { snprintf(count, sizeof count, "%s", game_library::count_label(listed, (size_t)g_ownedCount.load(), searching).c_str()); lib.count_label = count; }
+        // Item D16: an empty grid says what the session is doing, so the first
+        // frame reads as a real screen instead of a blank page.
+        static std::string emptyTitle, emptyDetail;
+        emptyTitle.clear(); emptyDetail.clear();
+        if (listed == 0 && !m_onlyInstalled && !searching) {
+            switch (ui_nav::session_state(g_steamSignedIn.load(), g_steamRestore.load())) {
+            case ui_nav::SessionState::connecting: emptyTitle = "Connecting to Steam..."; emptyDetail = "Your library appears here when the session is ready"; break;
+            case ui_nav::SessionState::offline: emptyTitle = "Steam is offline"; emptyDetail = "Check the network, then sign in from the profile row"; break;
+            case ui_nav::SessionState::signed_out: emptyTitle = "No Steam account"; emptyDetail = "A on the profile row, then Sign in to Steam"; break;
+            default: break;
+            }
+        }
+        lib.empty_title = emptyTitle.c_str(); lib.empty_detail = emptyDetail.c_str();
         ui_launcher::draw_library(c, g_font, sb, lib, !(m_confirmLogout || m_optOpen || m_accountsOpen));
         if (m_optOpen) draw_options(c);   // item D10: Menu on the focused tile
         if (m_accountsOpen) draw_accounts(c);   // item D14: A on the profile row
@@ -2409,8 +2486,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             ui_launcher::text(c, g_font, ui::Face::Regular, 24, 548, 183.5f, "DEMO LIST - not your account", ui::theme::text);
         }
         std::string err; { std::lock_guard<std::mutex> l(g_sm); err = g_err; }
-        if (!err.empty()) {   // load failure line above the grid
+        if (!err.empty()) {   // load failure line above the grid (item D16: A retries, the grid stays usable)
             ui_launcher::text(c, g_font, ui::Face::Regular, 24, 524, 216, err.c_str(), ui::theme::danger);
+            ui_launcher::text(c, g_font, ui::Face::Regular, 22, 524, 248, "Press A to try again", ui::theme::textDim);
         }
         if (m_confirmLogout) {
             // item 8/14: the SAME confirmation sheet component as Delete —
@@ -2622,7 +2700,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             logf("input: game surface up; launcher UI ignores controller"); return;
         }
         int s = g_screen;
-        if (s == S_LOGIN) { if (has(edge, GamepadButtons::A) || has(edge, GamepadButtons::X)) { g_refreshReq = true; set_status("Refreshing QR..."); logf("Refresh button pressed"); } }
+        if (s == S_LOGIN) {   // item D16: the QR screen is reached from the account popup; B returns to the library
+            if (has(edge, GamepadButtons::A) || has(edge, GamepadButtons::X)) { g_refreshReq = true; set_status("Refreshing QR..."); logf("Refresh button pressed"); }
+            else if (has(edge, GamepadButtons::B)) { g_screen = S_LIBRARY; logf("sign-in screen: B back to the library (%s)", source); }
+        }
         else if (s == S_BOOT || s == S_LOADING) {   // item D15: the failure state's 'A Retry' (nothing else is actionable while loading)
             std::string err; { std::lock_guard<std::mutex> l(g_sm); err = g_err; }
             if (!err.empty() && has(edge, GamepadButtons::A)) { g_reloadReq = true; set_status("Retrying..."); logf("startup: retry requested (%s)", source); }
@@ -2697,6 +2778,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 else if (has(edge, GamepadButtons::B)) { m_confirmLogout = false; logf("logout cancelled"); }
                 return;
             }
+            // item D16: with the library load failed and nothing focused to act
+            // on, A retries the fetch (the grid stays usable either way). After
+            // the modal sheets, so A on a sheet never doubles as a retry.
+            { std::string err; { std::lock_guard<std::mutex> l(g_sm); err = g_err; }
+              if (!err.empty() && n == 0 && has(edge, GamepadButtons::A)) { g_reloadReq = true; set_status("Retrying..."); logf("library: retry requested (%s)", source); return; } }
             // item 1: the sort dropdown owns the pad while it is up (A confirms,
             // B closes, up/down moves with wrap).
             if (m_sortOpen) {

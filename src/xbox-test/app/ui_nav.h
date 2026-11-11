@@ -79,22 +79,58 @@ constexpr int kSortFavorites = 3;
 constexpr int kSortOptionCount = 4;
 
 // ---- account list popup (item D14) ----
-// Rows: the console's Xbox users, the Steam account, 'Log out of Steam', and
-// Cancel last (focused on open, so a stray A never logs out). The account
+// Rows: the console's Xbox users, the Steam account, the Steam ACTION row,
+// and Cancel last (focused on open, so a stray A never logs out). The account
 // rows are informational: A on one does nothing, B/Cancel closes the popup.
+// Item D16: the action row is 'Log out of Steam' while an account is attached
+// and 'Sign in to Steam' when there is none, so a signed-out player starts the
+// QR flow from this popup. The row count is the same either way.
 inline int accounts_open_sel(int accounts) { return accounts + 1; }   // the Cancel row
 inline bool accounts_move(int& sel, int accounts, bool down) {
-    const int n = (accounts < 0 ? 0 : accounts) + 2;   // Log out + Cancel always exist
+    const int n = (accounts < 0 ? 0 : accounts) + 2;   // the action row + Cancel
     if (n <= 0) return false;
     sel = down ? (sel + 1) % n : (sel + n - 1) % n;
     return true;
 }
-// A on row `sel`: 0 cancel, 1 log out (n = the accounts count), 2 nothing.
-enum class AccountAction { cancel, logout, none };
+// A on row `sel` (n = the account-row count): Cancel is row n+1, the Steam
+// action row is row n. main.cpp turns `steam` into log-out or sign-in from the
+// launcher's own signed-in state.
+enum class AccountAction { cancel, steam, none };
 inline AccountAction accounts_activate(int sel, int accounts) {
     if (sel == accounts + 1) return AccountAction::cancel;
-    if (sel == accounts) return AccountAction::logout;
+    if (sel == accounts) return AccountAction::steam;
     return AccountAction::none;
+}
+// Item D16: the account list's row count. `xbox` console users come first,
+// then the Steam row (the account when signed in, else the sign-in action).
+// The count is the same signed in or out, so the popup never changes shape.
+inline int account_rows(int xbox_users) { return (xbox_users < 0 ? 0 : xbox_users) + 1; }
+// The action row's label: sign out while an account is attached, offer sign-in
+// when there is none. The row count never changes, only its label.
+inline const char* account_steam_label(bool signed_in) { return signed_in ? "Log out of Steam" : "Sign in to Steam"; }
+// The sidebar profile row's status line (item D16): the background session
+// restore reports itself here, never on a blocking splash.
+//   connecting: "Connecting to Steam..."   (restore in flight)
+//   offline:    "Steam offline"            (restore failed, retryable)
+//   signed_out: "Sign in required"         (no saved session at all)
+//   ready:      ""                         (the persona row speaks for itself)
+enum class SessionState { connecting, offline, signed_out, ready };
+inline const char* session_hint(SessionState s) {
+    switch (s) {
+    case SessionState::connecting: return "Connecting to Steam...";
+    case SessionState::offline: return "Steam offline";
+    case SessionState::signed_out: return "Sign in required";
+    default: return "";
+    }
+}
+// Item D16: the state the sidebar hint reports, from the two session flags
+// main.cpp keeps (restore: 0/1 pending, 2 done, 3 failed, 4 no saved session;
+// signed in). A failed restore is 'offline' (retryable); having no session at
+// all - never saved, or logged out - is 'signed_out'.
+inline SessionState session_state(bool signed_in, int restore) {
+    if (signed_in) return SessionState::ready;
+    if (restore == 1 || restore == 0) return SessionState::connecting;
+    return restore == 3 ? SessionState::offline : SessionState::signed_out;
 }
 
 // ---- Downloads block (item D11) ----

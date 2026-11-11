@@ -1646,6 +1646,66 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- item D16: the session hint and the signed-out account sheet ----
+    {
+        const auto ink_in = [&](float x0, float y0, float w, float h, uint32_t col) {
+            int n = 0;
+            for (int yy = int(y0); yy < int(y0 + h); ++yy)
+                for (int xx = int(x0); int(xx) < int(x0 + w); ++xx)
+                    if (px[size_t(yy) * W + xx] == col) ++n;
+            return n;
+        };
+        // the connecting hint sits under the persona, in the account row
+        {
+            SidebarVM sb; sb.all_count = 40; sb.persona = "Signed in";
+            sb.session_hint = ui_nav::session_hint(ui_nav::session_state(false, 1));
+            c.fill(ui::theme::page);
+            draw_sidebar(c, font, sb);
+            check(ink_in(136, 136, 300, 22, ui::theme::textDim) > 0, "D16: the sidebar draws the connecting hint");
+            snap("launcher-d16-connecting");
+            SidebarVM off = sb; off.session_hint = ui_nav::session_hint(ui_nav::session_state(false, 3));
+            c.fill(ui::theme::page);
+            draw_sidebar(c, font, off);
+            check(ink_in(136, 136, 300, 22, ui::theme::textDim) > 0, "D16: the offline hint draws too");
+            SidebarVM none; none.all_count = 40; none.persona = "Signed in"; none.session_hint = "";
+            c.fill(ui::theme::page);
+            draw_sidebar(c, font, none);
+            check(ink_in(136, 136, 300, 22, ui::theme::textDim) == 0, "D16: no hint, nothing under the persona");
+        }
+        // signed out: the sheet offers Sign in, the row count does not change
+        {            const char* names[1] = {"Sign in to Steam"};
+            const char* sources[1] = {"Not signed in"};
+            AccountVM v; v.names = names; v.sources = sources; v.n = 1;
+            v.action_label = ui_nav::account_steam_label(false);
+            check(!std::strcmp(v.action_label, "Sign in to Steam"), "D16: signed out the action row offers Sign in");
+            check(account_row_count(v) == 3, "D16: signed out the sheet is account + action + Cancel");
+            v.sel = ui_nav::accounts_open_sel(v.n);
+            c.fill(ui::theme::page);
+            draw_accounts_sheet(c, font, v);
+            snap("launcher-d16-signed-out");
+            AccountVM in = v;
+            in.action_label = ui_nav::account_steam_label(true);
+            check(!std::strcmp(in.action_label, "Log out of Steam"), "D16: signed in the action row logs out");
+        }
+        // the empty grid says why, so the first frame is a finished screen
+        {
+            SidebarVM sb; sb.all_count = 0; sb.persona = "Signed in";
+            sb.session_hint = ui_nav::session_hint(ui_nav::session_state(false, 1));
+            LibraryVM lib; lib.loading = true;
+            lib.empty_title = "Connecting to Steam...";
+            lib.empty_detail = "Your library appears here when the session is ready";
+            c.fill(ui::theme::page);
+            draw_library(c, font, sb, lib);
+            check(ink_in(524, 460, 800, 40, ui::theme::text2) > 0, "D16: the empty grid draws its title");
+            check(ink_in(524, 508, 900, 32, ui::theme::textDim) > 0, "D16: and its detail line");
+            snap("launcher-d16-empty-connecting");
+            LibraryVM blank; blank.loading = true;
+            c.fill(ui::theme::page);
+            draw_library(c, font, sb, blank);
+            check(ink_in(524, 460, 800, 40, ui::theme::text2) == 0, "D16: no empty title, nothing in the grid");
+        }
+    }
+
     // item 28: the Auto-update row — ring when focused, pill fully inside the
     // row with >=24px right padding (pixel-scan at 1920x1080).
     {

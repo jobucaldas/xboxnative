@@ -182,6 +182,10 @@ struct SidebarVM {
     // persona-name fallback. Drawn small at the row's right edge; empty draws
     // nothing (the mockups' unlabelled row).
     const char* persona_source = "";
+    // Item D16: the background Steam session's state line under the name
+    // ("Connecting to Steam...", "Steam offline", "Sign in required"); empty
+    // once the account is ready. The library renders regardless.
+    const char* session_hint = "";
     int all_count = 0, installed_count = 0;
     int queue_count = 0;   // item D11: jobs waiting behind the running download
     int free_gb_x10 = 4126, used_pct = 34;
@@ -239,6 +243,11 @@ struct LibraryVM {
     const char* sort_label = "Sort by recently played";
     const char* count_label = "";   // e.g. "128 games"; empty hides it
     bool loading = false;    // true: count label reads "Loading..."
+    // Item D16: the grid's empty state, drawn in the grid's own area so the
+    // library never looks broken while the background session is still being
+    // restored (or when it failed). Empty = draw nothing.
+    const char* empty_title = "";
+    const char* empty_detail = "";
     // header selectors (item 1): real controls in the row above the grid
     int header_focus = -1;   // 0 sort, 1 filters, 2 search; -1 grid/sidebar
     bool sort_open = false;  // dropdown is up
@@ -562,6 +571,10 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
     // Steam one (and the fallback is visibly the fallback).
     if (sb.persona_source && *sb.persona_source)
         text_r(c, f, Face::Regular, 16, 411, 91.0f, sb.persona_source, ui::theme::textMuted);
+    // Item D16: the background Steam session's state, in the account row's own
+    // column — the library is never blocked by a splash while this is pending.
+    if (sb.session_hint && *sb.session_hint)
+        text(c, f, Face::Regular, 16, 136, 138.0f, sb.session_hint, ui::theme::textDim);
     c.fill_rect(64, 248, 347, 1, ui::theme::separator);
     // item 16: the Search row is a search FIELD — control fill, dim
     // placeholder ('Search'), the query when one is active; never the
@@ -1074,6 +1087,13 @@ inline void draw_library(ui::Canvas& c, const Font& f, const SidebarVM& sb, cons
         draw_tile(c, f, lib.tiles[i], g, lib.focus_tile && i == lib.sel && lib.header_focus < 0, lib.t);
     }
     c.reset_clip();
+    // Item D16: an empty grid says why (connecting / signed out / offline), so
+    // the first frame is a finished-looking screen rather than a blank page.
+    if (lib.tile_count == 0 && lib.empty_title && *lib.empty_title) {
+        text(c, f, Face::Semibold, 30, 524, 470.0f, lib.empty_title, ui::theme::text2);
+        if (lib.empty_detail && *lib.empty_detail)
+            text(c, f, Face::Regular, 22, 524, 516.0f, lib.empty_detail, ui::theme::textDim);
+    }
     // item 17: ONE hint bar per frame. When any sheet/overlay is up, the base
     // screen's own bar must not remain under the sheet's — the sheet draws
     // its own bar over the scrim. So the base bar is drawn only when nothing
@@ -1615,8 +1635,11 @@ struct AccountVM {
     const char* const* names = nullptr;     // n account names
     const char* const* sources = nullptr;   // n sources: "Xbox", "Steam"
     int n = 0;
-    const char* logout_label = "Log out of Steam";
-    int sel = 0;                            // 0..n-1 accounts, n logout, n+1 cancel
+    // Item D16: the action row's label — 'Log out of Steam' while an account is
+    // attached, 'Sign in to Steam' when there is none (main.cpp picks it from
+    // ui_nav::account_steam_label). The row count is the same either way.
+    const char* action_label = "Log out of Steam";
+    int sel = 0;                            // 0..n-1 accounts, n action, n+1 cancel
 };
 
 // Total focusable rows: the accounts, Log out, Cancel.
@@ -1641,7 +1664,7 @@ inline void draw_accounts_sheet(ui::Canvas& c, const Font& f, const AccountVM& v
         const bool info = i < v.n;
         const bool danger = i == v.n;
         c.fill_round_rect(btn, radiusCard, danger ? chip : ui::theme::controlDark);
-        const char* label = info ? v.names[i] : danger ? v.logout_label : "Cancel";
+        const char* label = info ? v.names[i] : danger ? v.action_label : "Cancel";
         text(c, f, Face::Regular, 26, btn.x + 24, btn.y + 17.5f, label,
              danger ? ui::theme::text2 : ui::theme::text);
         if (info && v.sources && v.sources[i] && *v.sources[i])
