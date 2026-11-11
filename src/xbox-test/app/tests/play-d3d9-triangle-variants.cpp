@@ -93,7 +93,7 @@ static void report(unsigned variant,const char* what,bool pass) {
     unsigned i=0;
     for(const char* p="SELFTEST RESULT d3d9-triangle-v";*p;++p)line[i++]=*p;
     line[i++]=char('0'+variant);line[i++]=' ';
-    for(const char* p=pass?"PASS":(what?"FAIL":"FAIL");*p;++p)line[i++]=*p;
+    for(const char* p=pass?"PASS":"FAIL";*p;++p)line[i++]=*p;
     line[i++]=' ';line[i++]='(';line[i]=0;
     while(*what&&i<sizeof line-2)line[i++]=*what++;
     line[i++]=')';line[i]=0;
