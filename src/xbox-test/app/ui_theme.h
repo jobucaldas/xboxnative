@@ -24,6 +24,8 @@ constexpr uint32_t controlDark = 0xFF2A2A2A;  // icon-only buttons
 constexpr uint32_t rowHover    = 0xFF333333;
 constexpr uint32_t chip        = 0xFF2A2A2A;
 constexpr uint32_t track       = 0xFF2E2E2E;  // progress bars, donut track
+constexpr uint32_t trackStrong = 0xFF4A4A4A;  // the same track ON a selected/focused fill
+                                              // (control is 0xFF303030: `track` would vanish)
 constexpr uint32_t line        = 0xFF292929;  // 1px sidebar/content divider
 constexpr uint32_t separator   = 0xFF2C2C2C;  // 1px rule inside a panel
 constexpr uint32_t iconTile    = 0xFF262626;  // achievement icon square

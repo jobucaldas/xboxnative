@@ -583,7 +583,10 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
     // with a magnifier mark, the typed text live and a caret at the end.
     {
         const bool focused = ui_nav::kSidebarSearch == sb.focus;
-        const Rect field = rect(40, 160, 300, 64);
+        // Item D17: the field is narrower than the view rows, so it is CENTRED
+        // in the sidebar's content column (40..435) instead of hugging the left
+        // edge and leaving 95px of dead space on the right.
+        const Rect field = rect(88, 160, 300, 64);
         c.fill_round_rect(field, radiusControl, ui::theme::control);
         if (focused) focus_ring(c, rect(field.x - ringOffset, field.y - ringOffset, field.w + ringOffset * 2, field.h + ringOffset * 2),
                                 radiusControl + ringRadiusDelta, ringWidth);
@@ -702,11 +705,10 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
         text(c, f, Face::Regular, 20, 64, 976.0f, b, ui::theme::textDim);
         // donut: track ring r=26 stroke 5; the used arc centred on 6 o'clock.
         // Active: the track+arc draw in ACCENT (item 31: accent donut stroke).
-        // Donut centre (383, 981): its box 351..415 x 949..1013 stays inside
-        // the widget rect with 12px padding right (424-415=9... the rect is
-        // 52..424 and the donut 351..415 -> 9px; keep the rect at 52..424 and
-        // the donut inside it).
-        const uint32_t track = active ? ui::theme::accent : ui::theme::track;
+        // Item D17: FOCUSED fills the widget with `control` (0xFF303030), and
+        // the plain `track` (0xFF2E2E2E) is 2 levels off it, so the ring
+        // vanished on the selected row — the focused track steps up instead.
+        const uint32_t track = focused ? ui::theme::trackStrong : active ? ui::theme::accent : ui::theme::track;
         const uint32_t arc = active ? ui::theme::accentSoft : ui::theme::accent;
         c.fill_donut(383, 981, 26, 5, -ui::kPi * 0.5f, ui::kTau, track);
         // Item D12: the used arc STARTS at 6 o'clock and sweeps CLOCKWISE

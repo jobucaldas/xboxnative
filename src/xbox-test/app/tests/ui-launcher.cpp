@@ -1348,6 +1348,16 @@ int main(int argc, char** argv) {
             for (int x = 42; x < 436; ++x)
                 if (px[size_t(y) * W + x] == ui::theme::focus) { ring_seen = true; break; }
         check(ring_seen, "item 31: the focused disk widget wears the focus ring");
+        // item D17: the donut track must stay VISIBLE on the focused fill —
+        // the plain track is 2 levels off `control` and disappeared.
+        {
+            auto track_px = [&](int y, int x) { return px[size_t(y) * W + x]; };
+            // sample mid-stroke at 3 o'clock (centre 383,981, r 21..26 -> 23)
+            // — the used arc starts at 6 o'clock and never reaches it at 34%
+            const uint32_t on_focus = track_px(981, 406);
+            check(on_focus != ui::theme::control, "D17: the donut track contrasts with the focused fill");
+            check(on_focus == ui::theme::trackStrong, "D17: and it is the strong track");
+        }
 
         // item D11: the Downloads block replaces the 'Download queue' list row.
         // Idle: titled Downloads, 'No active downloads', no progress bar.
@@ -2098,6 +2108,18 @@ int main(int argc, char** argv) {
             run_case("sidebar search row", rect(40, 160, 395, 64),
                      [&] { SidebarVM s = sb; s.focus = -1; c.fill(ui::theme::page); draw_sidebar(c, font, s); },
                      [&] { SidebarVM s = sb; s.focus = 1; c.fill(ui::theme::page); draw_sidebar(c, font, s); });
+            // item D17: the field is centred in the content column (40..435),
+            // not pinned to its left edge: equal gaps either side.
+            c.fill(ui::theme::page);
+            { SidebarVM s = sb; s.focus = -1; draw_sidebar(c, font, s); }
+            int left = -1, right = -1;
+            for (int x = 40; x < 435; ++x) {
+                bool ink = false;
+                for (int y = 160; y < 224; ++y) if (px[size_t(y) * W + x] != ui::theme::page) { ink = true; break; }
+                if (ink) { if (left < 0) left = x; right = x; }
+            }
+            check(left >= 0 && std::abs((left - 40) - (435 - right)) <= 2,
+                  "D17: the search field is centred in the sidebar column");
         }
         // disk widget
         {
