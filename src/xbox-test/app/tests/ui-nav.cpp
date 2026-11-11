@@ -349,19 +349,45 @@ int main() {
         idx = 0;
         check(search_move(idx, 0, -1) && idx == 30, "up from A wraps to the last row's first key");
         check(!search_move(idx, 0, 0), "no input: no movement");
-        // typing
-        std::string q; bool open = true;
-        check(search_activate(0, q, open) && q == "A", "A types the letter");
-        check(search_activate(26, q, open) && q == "A0", "the first digit key types 0");
-        check(search_activate(35, q, open) && q == "A09", "the last digit key types 9");
-        check(search_activate(36, q, open) && q == "A09 ", "Space appends a space");
-        check(search_activate(37, q, open) && q == "A09", "Backspace deletes one character");
-        check(search_activate(37, q, open) && q == "A0", "Backspace deletes the 9");
-        check(search_activate(37, q, open) && q == "A", "Backspace deletes the 0");
-        check(search_activate(37, q, open) && q.empty() && open, "Backspace on empty keeps the overlay open");
-        search_activate(38, q, open);   // Done: closes, query unchanged (returns false)
+        // typing (item D13: the query is a real field with a caret)
+        SearchState st; bool open = true;
+        check(search_activate(0, st, open) && st.query == "a", "A types the letter (lower case by default)");
+        check(st.caret == 1, "the caret follows the typed character");
+        check(search_activate(26, st, open) && st.query == "a0", "the first digit key types 0");
+        check(search_activate(35, st, open) && st.query == "a09", "the last digit key types 9");
+        check(search_activate(36, st, open) && st.query == "a09 ", "Space types a space");
+        check(search_activate(37, st, open) && st.query == "a09", "Backspace deletes before the caret");
+        check(search_activate(37, st, open) && st.query == "a0", "Backspace deletes the 9");
+        check(search_activate(37, st, open) && st.query == "a", "Backspace deletes the 0");
+        check(search_activate(37, st, open) && st.query.empty() && open, "Backspace on empty keeps the overlay open");
+        check(st.caret == 0, "the caret never goes below zero");
+        search_activate(38, st, open);   // Done: closes, query unchanged (returns false)
         check(!open, "Done closes the overlay");
-        check(!search_activate(39, q, open), "out-of-range key: no-op");
+        check(!search_activate(39, st, open), "out-of-range key: no-op");
+        // caps lock (L3): letters type upper case, digits unaffected
+        SearchState caps;
+        check(search_toggle_caps(caps), "L3 turns caps lock on");
+        search_activate(0, caps, open); search_activate(25, caps, open); search_activate(26, caps, open);
+        check(caps.query == "AZ0", "caps lock types upper-case letters and leaves digits alone");
+        check(!search_toggle_caps(caps) && !caps.caps, "L3 turns caps lock back off");
+        // X / caret: insert in the middle, delete before the caret, move the caret
+        SearchState mid; search_insert(mid, 'h'); search_insert(mid, 'l'); search_insert(mid, 'o');
+        check(mid.query == "hlo" && mid.caret == 3, "typing appends and tracks the caret");
+        check(search_caret_move(mid, -1) && mid.caret == 2, "LB moves the caret left");
+        check(search_insert(mid, 'a') && mid.query == "hlao" && mid.caret == 3, "typing inserts AT the caret");
+        check(search_backspace(mid) && mid.query == "hlo" && mid.caret == 2, "X deletes the character before the caret");
+        check(search_caret_move(mid, 1) && mid.caret == 3, "RB moves the caret right");
+        check(!search_caret_move(mid, 1) && mid.caret == 3, "the caret clamps at the end");
+        check(search_caret_move(mid, -9) && mid.caret == 0, "the caret clamps at the start");
+        check(!search_backspace(mid) && mid.query == "hlo", "X at the start deletes nothing");
+        check(search_caret_move(mid, 9) && mid.caret == 3, "the caret returns to the end");
+        check(search_backspace(mid) && mid.query == "hl", "X deletes the last character");
+        // caret arithmetic counts codepoints, not bytes (UTF-8 safe)
+        SearchState u; u.query = "caf\xC3\xA9"; u.caret = 4;
+        check(search_count(u.query) == 4, "the caret counts characters, not bytes");
+        check(search_backspace(u) && u.query == "caf" && u.caret == 3, "X drops a whole multi-byte character");
+        check(search_offset(u.query, 99) == u.query.size(), "an out-of-range caret offset clamps to the end");
+        search_clamp_caret(u); check(u.caret == 3, "clamping keeps a valid caret");
     }
 
     std::printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "OK", g_failures, g_failures == 1 ? "" : "s");

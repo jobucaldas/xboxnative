@@ -280,8 +280,67 @@ inline void popup_exclusive(bool& sort_open, bool& filters_open, bool& search_op
 // One grid of keys: rows of A-Z, then 0-9, Space, Backspace, Done; the D-pad
 // moves the cursor with wrap on every axis, A types/activates, B closes.
 // Key ids: 0..25 A-Z, 26..35 0-9, 36 space, 37 backspace, 38 done.
+//
+// Item D13: the query is a real text field — the caret sits between two
+// characters, X deletes the character BEFORE it, LB/RB move it, Y applies
+// (closes the keyboard, keeping the query), L3 toggles caps lock and A types
+// the focused key. The state lives here so the rules are unit-tested.
 constexpr int kSearchKeyCount = 39;
 constexpr int kSearchCols = 10;
+
+struct SearchState {
+    std::string query;
+    int caret = 0;      // codepoint index in [0, count(query)]
+    bool caps = false;  // L3: letters type upper-case
+};
+
+// Codepoints in a UTF-8 string (the caret counts characters, not bytes).
+inline int search_count(const std::string& s) {
+    int n = 0; const char* p = s.data(); const char* end = p + s.size();
+    while (p < end) { uint32_t cp; ui::utf8_next(p, end, cp); ++n; }
+    return n;
+}
+// Byte offset of codepoint `index` (clamped); index == count -> s.size().
+inline std::size_t search_offset(const std::string& s, int index) {
+    const char* p = s.data(); const char* end = p + s.size();
+    int i = 0;
+    while (p < end && i < index) { uint32_t cp; ui::utf8_next(p, end, cp); ++i; }
+    return std::size_t(p - s.data());
+}
+// Keeps the caret inside [0, count] after the query changes from elsewhere.
+inline void search_clamp_caret(SearchState& st) {
+    const int n = search_count(st.query);
+    if (st.caret < 0) st.caret = 0;
+    if (st.caret > n) st.caret = n;
+}
+// A types `c` at the caret (letters honour caps lock); the caret follows it.
+inline bool search_insert(SearchState& st, char c) {
+    if (c >= 'a' && c <= 'z' && st.caps) c = char(c - 'a' + 'A');
+    const std::size_t at = search_offset(st.query, st.caret);
+    st.query.insert(at, 1, c);
+    ++st.caret;
+    return true;
+}
+// X: delete the character before the caret. False at the start (nothing to do).
+inline bool search_backspace(SearchState& st) {
+    if (st.caret <= 0 || st.query.empty()) return false;
+    const std::size_t at = search_offset(st.query, st.caret);
+    const std::size_t prev = search_offset(st.query, st.caret - 1);
+    st.query.erase(prev, at - prev);
+    --st.caret;
+    return true;
+}
+// LB/RB: move the caret one character; clamps at both ends.
+inline bool search_caret_move(SearchState& st, int dx) {
+    const int n = search_count(st.query);
+    int next = st.caret + dx;
+    if (next < 0) next = 0;
+    if (next > n) next = n;
+    if (next == st.caret) return false;
+    st.caret = next;
+    return true;
+}
+inline bool search_toggle_caps(SearchState& st) { st.caps = !st.caps; return st.caps; }
 inline int search_key_at(int row, int col) {
     row = row < 0 ? 0 : row;
     int idx = row * kSearchCols + col;
@@ -317,24 +376,15 @@ inline bool search_move(int& idx, int dx, int dy) {
     idx = next;
     return true;
 }
-// A on a key: appends to query / deletes the last character / closes. Returns
-// true when the query changed (caller re-filters the library).
-inline bool search_activate(int idx, std::string& query, bool& open) {
+// A on a key: types at the caret / deletes before it / closes. Returns true
+// when the query changed (caller re-filters the library). Item D13: the
+// Backspace key and the X button do the same thing, and Done keeps the query.
+inline bool search_activate(int idx, SearchState& st, bool& open) {
     if (idx < 0 || idx >= kSearchKeyCount) return false;
     if (idx == 38) { open = false; return false; }            // Done
-    if (idx == 37) {                                          // Backspace
-        if (query.empty()) return false;
-        // drop one UTF-8 codepoint
-        std::size_t n = 0; const char* p = query.data(); const char* end = p + query.size();
-        const char* last = p; uint32_t cp;
-        while (p < end) { last = p; ui::utf8_next(p, end, cp); ++n; }
-        (void)n; (void)cp;
-        query.resize(size_t(last - query.data()));
-        return true;
-    }
-    if (idx == 36) { query += ' '; return true; }
-    query += idx < 26 ? char('A' + idx) : char('0' + (idx - 26));   // 0..25 A-Z, 26..35 0-9 (search_key_label's ids)
-    return true;
+    if (idx == 37) return search_backspace(st);               // Backspace
+    if (idx == 36) return search_insert(st, ' ');
+    return search_insert(st, idx < 26 ? char('a' + idx) : char('0' + (idx - 26)));   // 0..25 A-Z, 26..35 0-9
 }
 
 // ---- logout reachability ----

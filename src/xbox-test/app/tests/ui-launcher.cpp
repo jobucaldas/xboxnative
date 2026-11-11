@@ -1814,19 +1814,41 @@ int main(int argc, char** argv) {
             LibraryVM fo = lib; fo.search_key = 0;
             c.fill(ui::theme::page);
             draw_search_overlay(c, font, fo);
-            const float key_w = 80.0f, key_h = 56.0f, gap = 8.0f;
-            const float w = 900.0f, grid_top = 88.0f;
-            const float h = grid_top + 4 * key_h + 3 * gap + 24.0f;
-            const float x0 = (1920.0f - w) * 0.5f, y0 = (1080.0f - h - 40.0f) * 0.5f;
-            const float gx = x0 + (w - (10 * key_w + 9 * gap)) * 0.5f, gy = y0 + grid_top;
-            const int row = ui_nav::search_key_row(0), col = ui_nav::search_key_col(0);
-            const Rect kr = rect(gx + col * (key_w + gap), gy + row * (key_h + gap), key_w, key_h);
+            // Item D13: the panel is bottom-anchored; its geometry comes from
+            // the same helper the draw uses, so the key rect is exact.
+            const SearchPanel p = search_panel();
+            const Rect kr = search_key_rect(p, 0);
             int accent_in = 0;
             for (int y = int(kr.y); y < int(kr.y + kr.h); ++y)
                 for (int x = int(kr.x); x < int(kr.x + kr.w); ++x)
                     if (px[size_t(y) * W + x] == ui::theme::accent &&
                         base[size_t(y) * W + x] != ui::theme::accent) ++accent_in;
             check(accent_in > 0, "item 30: the focused search key is accent-filled");
+            // D13: the keyboard sits at the bottom, above the hint band, and
+            // spans the content area — the library stays visible above it.
+            check(p.y > 600.0f && p.y + p.h <= kHintBandTop, "D13: the keyboard is anchored above the hint band");
+            check(p.x >= kGridX - 0.5f && p.x + p.w <= kHintRight + 0.5f, "D13: the keyboard spans the content area");
+            check(kr.y >= p.gy && kr.y + kr.h <= p.y + p.h, "D13: every key is inside the panel");
+            // D13: letters follow caps lock; the three action keys keep text labels
+            check(search_key_text(0, false) == "a" && search_key_text(0, true) == "A", "D13: keys show the case caps lock will type");
+            check(search_key_text(26, true) == "0", "D13: digits ignore caps lock");
+            check(search_key_text(36, true) == "Space" && search_key_text(37, true) == "Delete" &&
+                  search_key_text(38, true) == "Done", "D13: the action keys keep text labels");
+            // D13: the caret is drawn at the caret position (accent ink moves right)
+            LibraryVM q1 = lib; q1.search_key = -1; q1.query = "halo"; q1.search_caret = 0;
+            c.fill(ui::theme::page); draw_search_overlay(c, font, q1);
+            const std::vector<uint32_t> at0 = px;
+            LibraryVM q2 = q1; q2.search_caret = 4;
+            c.fill(ui::theme::page); draw_search_overlay(c, font, q2);
+            auto accent_col = [&](const std::vector<uint32_t>& img, float x) {
+                int n = 0;
+                for (int y = int(p.query_y); y < int(p.query_y + 40.0f); ++y)
+                    if (img[size_t(y) * W + int(x)] == ui::theme::accent) ++n;
+                return n;
+            };
+            const float caret0_x = p.query_x + 1.0f, caret4_x = p.query_x + font.measure(ui::Face::Regular, 28, "halo") + 1.0f;
+            check(accent_col(at0, caret0_x) > 0, "D13: the caret is drawn at the start when the caret is 0");
+            check(accent_col(px, caret4_x) > 0, "D13: the caret follows the caret position");
         }
     }
 

@@ -49,6 +49,28 @@ int main() {
     assert(only.size() == 2 && only[0]->appid == 10 && only[1]->appid == 30);
     assert(shown(all, true, {}).empty());
 
+    // Item D7: the live search filter is a case-insensitive substring match
+    // that keeps library order; the header count says how much is showing.
+    {
+        struct N { uint32_t appid; std::string name; };
+        std::vector<std::shared_ptr<N>> lib = {
+            std::make_shared<N>(N{1, "Halo Wars: Definitive Edition"}),
+            std::make_shared<N>(N{2, "Megabonk"}),
+            std::make_shared<N>(N{3, "Halo Infinite"}),
+            std::make_shared<N>(N{4, "HALO 3"}),
+        };
+        assert(search(lib, "").size() == 4);                     // no query: everything
+        auto halo = search(lib, "halo");
+        assert(halo.size() == 3 && halo[0]->appid == 1 && halo[1]->appid == 3 && halo[2]->appid == 4);
+        assert(search(lib, "HALO").size() == 3);                 // the query's case does not matter
+        assert(search(lib, "halo i").size() == 1 && search(lib, "halo i")[0]->appid == 3);
+        assert(search(lib, "zzz").empty());
+        assert(search(lib, " ").size() == 3);                    // every name with a space (Megabonk has none)
+        assert(count_label(3, 772, true) == "3 of 772 games");
+        assert(count_label(772, 772, false) == "772 games");
+        assert(count_label(0, 772, true) == "0 of 772 games");
+    }
+
     // install records with a root: parse, validity, path joining, shared-folder identity
     Marker usb = parse_marker("app 5 build 1 files 2 bytes 77 root E:\\XboxNativeGames installdir hades\n");
     assert(usb.root == "E:\\XboxNativeGames" && usb.installdir == "hades" && usb.bytes == 77);

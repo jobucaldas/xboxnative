@@ -230,6 +230,8 @@ struct LibraryVM {
     bool search_open = false;    // on-screen keyboard overlay is up
     int search_key = 0;          // keyboard cursor (ui_nav::search_key ids)
     const char* query = "";      // live query text; filters the caller's tiles
+    int search_caret = 0;        // item D13: caret position in the query (codepoints)
+    bool search_caps = false;    // item D13: caps lock (L3), keys show upper case
     int filters_active = 0;      // item 26: enabled filter count (label + accent)
     float t = 0.0f;              // seconds (item 11): drives the marquee scroll
 };
@@ -447,18 +449,31 @@ inline float draw_hint_bar(ui::Canvas& c, const Font& f, const char* const* pair
     // the label's vertical centre on the disc centre (item 5: centred labels).
     const float lh = f.line_height(Face::Regular, px);
     const float label_top = cy - lh * 0.5f;
+    // Item D13: a key with more than one character (LB, RB, L3) is drawn as a
+    // pill wide enough for its text instead of a letter disc. Both passes use
+    // this same width so the right-aligned bar stays exact.
+    auto key_width = [&](int i) {
+        const char* k = pairs[i];
+        return k[1] ? f.measure(Face::Regular, 15.0f, k) + 20.0f : kHintDiscPx;
+    };
     // measure pass for the right alignment (item 21)
     float total_w = 0.0f;
     int count = 0;
     for (int i = 0; i + 1 < n * 2; i += 2, ++count)
-        total_w += kHintDiscPx + 12.0f + f.measure(Face::Regular, px, pairs[i + 1]);
+        total_w += key_width(i) + 12.0f + f.measure(Face::Regular, px, pairs[i + 1]);
     if (count > 1) total_w += 40.0f * (count - 1);
     float x = kHintRight - total_w;
     if (x < x0) x = x0;   // never run past the content's left edge
     for (int i = 0; i + 1 < n * 2; i += 2) {
         const char key = pairs[i][0];
         const char* label = pairs[i + 1];
-        if (key == 'M') {
+        const float kw = key_width(i);
+        if (pairs[i][1]) {
+            // multi-character key: a pill with its text centred
+            c.stroke_round_rect(rect(x, cy - kHintDiscPx * 0.5f + 1.0f, kw, kHintDiscPx - 2.0f), (kHintDiscPx - 2.0f) * 0.5f,
+                                2.0f, ui::theme::glyph, Align::Center);
+            text_c(c, f, Face::Regular, 15, x + kw * 0.5f, cy - 9.0f, pairs[i], 0xFFC8C8C8);
+        } else if (key == 'M') {
             // item 20: same disc size as every other prompt (complete, equal)
             ui::glyphs::menu(c, x + kHintDiscPx * 0.5f, cy, kHintDiscPx, ui::theme::glyph, 0xFFC8C8C8);
         } else {
@@ -477,8 +492,8 @@ inline float draw_hint_bar(ui::Canvas& c, const Font& f, const char* const* pair
                            std::string(1, key), letter);
             }
         }
-        text(c, f, Face::Regular, px, x + kHintDiscPx + 12.0f, label_top, label, ui::theme::hint);
-        x += kHintDiscPx + 12.0f + f.measure(Face::Regular, px, label) + 40.0f;
+        text(c, f, Face::Regular, px, x + kw + 12.0f, label_top, label, ui::theme::hint);
+        x += kw + 12.0f + f.measure(Face::Regular, px, label) + 40.0f;
     }
     return x;
 }
@@ -510,12 +525,28 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
     // item 16: the Search row is a search FIELD — control fill, dim
     // placeholder ('Search'), the query when one is active; never the
     // active-entry green bar, only the focus look when focused.
+    // Item D13: it is a real-looking input — narrower than the view rows,
+    // with a magnifier mark, the typed text live and a caret at the end.
     {
         const bool focused = ui_nav::kSidebarSearch == sb.focus;
-        c.fill_round_rect(rect(40, 160, 395, 64), radiusControl, ui::theme::control);
+        const Rect field = rect(40, 160, 300, 64);
+        c.fill_round_rect(field, radiusControl, ui::theme::control);
+        if (focused) focus_ring(c, rect(field.x - ringOffset, field.y - ringOffset, field.w + ringOffset * 2, field.h + ringOffset * 2),
+                                radiusControl + ringRadiusDelta, ringWidth);
+        // magnifier: a ring and its handle, 20px, at the field's left pad
+        const float mx = field.x + 26.0f, my = field.y + 32.0f;
+        c.stroke_circle(mx, my - 2.0f, 7.0f, 2.0f, ui::theme::textDim, Align::Center);
+        { const float h[4] = {mx + 5.0f, my + 3.0f, mx + 10.0f, my + 8.0f};
+          c.stroke_polyline(h, 2, false, 2.0f, ui::theme::textDim); }
         const char* q = sb.search_query && *sb.search_query ? sb.search_query : "Search";
-        text(c, f, Face::Regular, 22, 64, 160 + 17.5f, q,
-             focused || (sb.search_query && *sb.search_query) ? ui::theme::text : ui::theme::textDim);
+        const bool typed = sb.search_query && *sb.search_query;
+        const float tx = field.x + 48.0f;
+        text(c, f, Face::Regular, 22, tx, field.y + 17.5f, q, focused || typed ? ui::theme::text : ui::theme::textDim);
+        if (focused) {   // the caret sits after the text (the field edits at the end)
+            const float w = typed ? f.measure(Face::Regular, 22, sb.search_query) : 0.0f;
+            const float lh = f.line_height(Face::Regular, 22);
+            c.fill_rect(tx + w + 1.0f, field.y + 16.0f, 2.0f, lh, ui::theme::accent);
+        }
     }
     // nav rows: the view entries, sidebar indexes 2..4 (item 31: only
     // All games / Installed / Download queue — Storage is the disk widget).
@@ -594,7 +625,12 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
 }
 
 // ---- library screen (mockup 01) ----
-constexpr const char* kLibraryHints[6] = {"A", "Select", "B", "Back", "M", "Menu"};
+// Item D10: the Menu button opens the focused tile's game options, so the
+// library bar labels it "Manage" (the detail page already says the same).
+constexpr const char* kLibraryHints[6] = {"A", "Select", "B", "Back", "M", "Manage"};
+// Item D7: while a query is filtering the grid, the bar also offers the clear
+// (X on the sidebar's Search row) — the filtered state is never a dead end.
+constexpr const char* kLibrarySearchHints[8] = {"A", "Select", "B", "Back", "X", "Clear search", "M", "Manage"};
 // sort options (item 1); mode indexes match ui_nav::cycle_sort's caller
 constexpr const char* kSortOptions[3] = {"Alphabetical", "Most played", "Recently played"};
 
@@ -804,18 +840,47 @@ inline void draw_filters_panel(ui::Canvas& c, const Font& f, const FilterRowVM* 
     draw_hint_bar(c, f, pairs, 2, 524.0f);
 }
 
-// Search overlay (item 1): centred sheet over the dimmed page — letter grid
-// (A-Z, 0-9, Space, Backspace, Done), the current query above it. Pure nav in
-// ui_nav.h (search_move/search_activate); this only draws the state. Key ids:
-// 0..25 A-Z, 26..35 0-9, 36 space, 37 backspace, 38 done.
+// Search overlay (item 1, item D13): the on-screen keyboard is a panel anchored
+// to the BOTTOM of the page, just above the hint band, spanning the content
+// area — the library stays visible above it. Pure nav in ui_nav.h
+// (search_move/search_activate/SearchState); this only draws the state. Key
+// ids: 0..25 A-Z, 26..35 0-9, 36 space, 37 backspace, 38 done.
 constexpr char kSearchLetter = 'A';
 
-inline const char* search_key_label(int i) {
-    static char buf[2];
-    if (i < 26) { buf[0] = char('A' + i); buf[1] = 0; return buf; }
-    if (i < 36) { buf[0] = char('0' + i - 26); buf[1] = 0; return buf; }
-    // review fix 4: Selawik has no backspace glyph — text labels for the
-    // three non-alphanumeric keys
+// Item D13: the panel's geometry, shared by the draw and the tests so a key's
+// rect is never guessed. Bottom-anchored: the panel's bottom sits 16px above
+// the hint band; the query line is the first row inside it.
+struct SearchPanel {
+    float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;   // the panel rect
+    float query_x = 0.0f, query_y = 0.0f;           // the query line's top-left
+    float gx = 0.0f, gy = 0.0f;                     // the key grid's top-left
+    float key_w = 0.0f, key_h = 0.0f, gap = 0.0f;
+};
+inline SearchPanel search_panel() {
+    SearchPanel p;
+    p.x = kGridX;                                  // the content area's left edge
+    p.w = kHintRight - kGridX;                     // ... and its right edge
+    p.key_h = 56.0f; p.gap = 8.0f;
+    const float pad = 40.0f;
+    p.key_w = (p.w - pad * 2.0f - 9.0f * p.gap) / 10.0f;
+    const float query_h = 56.0f, query_gap = 16.0f, pad_bottom = 24.0f;
+    p.h = 24.0f + query_h + query_gap + 4.0f * p.key_h + 3.0f * p.gap + pad_bottom;
+    p.y = kHintBandTop - 16.0f - p.h;              // bottom-anchored above the hint band
+    p.query_x = p.x + pad; p.query_y = p.y + 24.0f;
+    p.gx = p.x + pad; p.gy = p.query_y + query_h + query_gap;
+    return p;
+}
+inline Rect search_key_rect(const SearchPanel& p, int idx) {
+    const int row = ui_nav::search_key_row(idx), col = ui_nav::search_key_col(idx);
+    return rect(p.gx + col * (p.key_w + p.gap), p.gy + row * (p.key_h + p.gap), p.key_w, p.key_h);
+}
+
+// Item D13: the key's label. Letters follow caps lock (the focused key types
+// what it shows), and the three non-alphanumeric keys keep text labels
+// (Selawik has no backspace glyph).
+inline std::string search_key_text(int i, bool caps) {
+    if (i < 26) return std::string(1, char((caps ? 'A' : 'a') + i));
+    if (i < 36) return std::string(1, char('0' + i - 26));
     return i == 36 ? "Space" : i == 37 ? "Delete" : "Done";
 }
 
@@ -823,33 +888,60 @@ inline void draw_search_overlay(ui::Canvas& c, const Font& f, const LibraryVM& l
     using namespace ui::theme;
     if (!lib.search_open) return;
     draw_scrim(c);
-    // review fix 4: the sheet shrinks to its content (query line + 4 key
-    // rows + padding); the hint bar stays at the SAME position as every
-    // other screen (x=524, kHintY — the library family's x).
-    const float w = 900.0f;
-    const float key_w = 80.0f, key_h = 56.0f, gap = 8.0f;
-    const float grid_top = 88.0f, pad_bottom = 24.0f;
-    const float h = grid_top + 4 * key_h + 3 * gap + pad_bottom;
-    const float x0 = (1920.0f - w) * 0.5f, y0 = (1080.0f - h - 40.0f) * 0.5f;
-    c.fill_round_rect(rect(x0, y0, w, h), radiusGuide, panel);
-    // query line
-    text(c, f, Face::Regular, 28, x0 + 32, y0 + 24, lib.query && *lib.query ? lib.query : "Search games",
-         lib.query && *lib.query ? ui::theme::text : ui::theme::textDim);
-    // key grid: 10 columns, 4 rows (26+10+3 keys)
-    const float gx = x0 + (w - (10 * key_w + 9 * gap)) * 0.5f, gy = y0 + grid_top;
+    const SearchPanel p = search_panel();
+    c.fill_round_rect(rect(p.x, p.y, p.w, p.h), radiusGuide, panel);
+    // query line: the typed text with a caret at the caret position, or the
+    // dim placeholder when nothing is typed yet.
+    const char* q = lib.query ? lib.query : "";
+    float qx = p.query_x;
+    if (*q) {
+        text(c, f, Face::Regular, 28, qx, p.query_y, q, ui::theme::text);
+        const std::size_t cut = ui_nav::search_offset(q, lib.search_caret);
+        qx += f.measure(Face::Regular, 28, std::string(q, cut));
+    } else {
+        text(c, f, Face::Regular, 28, qx, p.query_y, "Search games", ui::theme::textDim);
+    }
+    {   // the caret: a 2px accent bar on the text's line
+        const float lh = f.line_height(Face::Regular, 28);
+        c.fill_rect(qx + 1.0f, p.query_y + 4.0f, 2.0f, lh - 8.0f, ui::theme::accent);
+    }
+    if (lib.search_caps) {   // L3 state, so the letter keys' case is never a mystery
+        const float bw = 78.0f, bh = 32.0f;
+        const float bx = p.x + p.w - 40.0f - bw, by = p.query_y + 6.0f;
+        c.fill_round_rect(rect(bx, by, bw, bh), radiusBadge, ui::theme::accent);
+        text_c(c, f, Face::Bold, 15, bx + bw * 0.5f, by + 6.0f, "CAPS", ui::theme::onAccent);
+    }
     for (int i = 0; i < ui_nav::kSearchKeyCount; ++i) {
-        const int row = ui_nav::search_key_row(i), col = ui_nav::search_key_col(i);
-        const float kx = gx + col * (key_w + gap), ky = gy + row * (key_h + gap);
+        const Rect kr = search_key_rect(p, i);
         const bool focused = i == lib.search_key;
         // review fix 4: the focused key reads clearly — accent fill, onAccent
         // label (the hover grey was too subtle against the key grid)
-        c.fill_round_rect(rect(kx, ky, key_w, key_h), radiusControl,
-                          focused ? ui::theme::accent : ui::theme::controlDark);
-        text_c(c, f, Face::Regular, i < 36 ? 24 : 18, kx + key_w * 0.5f, ky + 13.0f, search_key_label(i),
+        c.fill_round_rect(kr, radiusControl, focused ? ui::theme::accent : ui::theme::controlDark);
+        const std::string label = search_key_text(i, lib.search_caps);
+        text_c(c, f, Face::Regular, i < 36 ? 24 : 18, kr.x + kr.w * 0.5f, kr.y + 13.0f, label.c_str(),
                focused ? ui::theme::onAccent : ui::theme::text2);
     }
-    const char* pairs[6] = {"A", "Type", "B", "Close", "M", "Menu"};
-    draw_hint_bar(c, f, pairs, 3, 524.0f);   // review fix 4: same x as the library
+    // Item D13: the keyboard's own controls — X deletes, LB/RB move the caret,
+    // Y applies and closes, L3 toggles caps, A types, B closes.
+    const char* pairs[12] = {"A", "Type", "X", "Delete", "LB", "RB", "Move", "Y", "Search", "L3", "Caps", "B"};
+    draw_hint_bar(c, f, pairs, 6, 524.0f);
+}
+
+// Item D7: the active search query shows in the header as a chip, so a
+// filtered grid is never mistaken for the whole library. It sits between the
+// Sort control and the right-aligned count; the text is ellipsized into the
+// room it has.
+inline void draw_query_chip(ui::Canvas& c, const Font& f, const LibraryVM& lib) {
+    using namespace ui::theme;
+    if (!lib.query || !*lib.query) return;
+    const float x = 970.0f, h = 44.0f, y = 176.0f, max_w = 300.0f;
+    const std::string chip_text = f.ellipsize(Face::Regular, 22, lib.query, max_w - 96.0f);
+    const float w = std::min(max_w, 96.0f + f.measure(Face::Regular, 22, chip_text));
+    c.fill_round_rect(rect(x, y, w, h), radiusPill, ui::theme::control);
+    c.stroke_circle(x + 24.0f, y + h * 0.5f - 1.0f, 6.0f, 2.0f, ui::theme::accent, Align::Center);
+    { const float hd[4] = {x + 28.0f, y + h * 0.5f + 3.0f, x + 33.0f, y + h * 0.5f + 8.0f};
+      c.stroke_polyline(hd, 2, false, 2.0f, ui::theme::accent); }
+    text(c, f, Face::Regular, 22, x + 44.0f, y + 8.0f, chip_text.c_str(), ui::theme::text);
 }
 
 // item 17: draw_hints = false suppresses the base screen's hint bar (a sheet
@@ -865,6 +957,7 @@ inline void draw_library(ui::Canvas& c, const Font& f, const SidebarVM& sb, cons
     draw_sort_control(c, f, lib, 524.0f, 168.0f);
     const char* count = lib.loading ? "Loading..." : lib.count_label;
     if (count && *count) text_r(c, f, Face::Regular, 22, 1444.0f, 184.5f, count, ui::theme::textDim);
+    draw_query_chip(c, f, lib);   // item D7: the active query, so the count's "N of M" has a cause
     draw_filters_control(c, f, lib, 1692.0f, 168.0f);
     // grid: 5 columns, clipped above the hint bar (item 4)
     int lo, hi;
@@ -882,7 +975,11 @@ inline void draw_library(ui::Canvas& c, const Font& f, const SidebarVM& sb, cons
     // is open (the popups below draw their own). Sheets OUTSIDE LibraryVM
     // (logout, delete, cloud) suppress the bar through `draw_hints` = false.
     const bool sheet_up = lib.sort_open || lib.filters_open || lib.search_open;
-    if (!sheet_up && draw_hints) draw_hint_bar(c, f, kLibraryHints, 3, 524.0f);
+    const bool searching = lib.query && *lib.query;
+    if (!sheet_up && draw_hints) {
+        if (searching) draw_hint_bar(c, f, kLibrarySearchHints, 4, 524.0f);
+        else draw_hint_bar(c, f, kLibraryHints, 3, 524.0f);
+    }
     // popups over the page (item 1); each draws its own hint bar when open.
     // Item 15: the filters panel draws ONLY while open — the library render
     // itself never paints it.

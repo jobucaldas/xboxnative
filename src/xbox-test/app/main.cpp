@@ -931,7 +931,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // filters, 2 search, -1 grid/sidebar).
     int m_hdrFocus = -1; bool m_sortOpen = false; int m_sortFocus = 0;
     bool m_filtersOpen = false; int m_filtersFocus = 0;
-    bool m_searchOpen = false; int m_searchKey = 0; std::string m_query;
+    bool m_searchOpen = false; int m_searchKey = 0;
+    ui_nav::SearchState m_search;   // item D13: query + caret + caps lock
     bool m_onlyInstalled = false;                            // tab: Installed (the tab stays; Playable filters within it, item 32)
     bool m_filterPlayable = false;                           // item 32: the 'Playable' filter (resets on app start only)
     ui_nav::Focus m_focus = ui_nav::Focus::grid;             // library: grid tiles or the sidebar
@@ -1087,10 +1088,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     std::vector<std::shared_ptr<Game>> shown_games() {   // caller holds g_gm
         auto tab = game_library::shown(g_games, m_onlyInstalled, m_installed);
         if (m_filterPlayable) tab = ui_nav::tab_games(tab, true, [this](uint32_t a) { return is_playable(a); });
-        if (!m_query.empty()) {
+        if (!m_search.query.empty()) {
             std::string q;
-            q.reserve(m_query.size());
-            for (char c : m_query) q += (char)std::tolower((unsigned char)c);
+            q.reserve(m_search.query.size());
+            for (char c : m_search.query) q += (char)std::tolower((unsigned char)c);
             std::vector<std::shared_ptr<Game>> out;
             for (auto& g : tab) {
                 std::string lower = g->name;
@@ -1216,7 +1217,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void sidebar_activate(double t, const char* source) {
         int target = ui_nav::sidebar_target(m_sidebar);
         if (target == ui_nav::kSidebarProfile) { g_screen = S_LIBRARY; m_confirmLogout = true; m_logoutYes = false; logf("sidebar: profile row -> logout sheet, focus on Cancel (%s)", source); }   // the sheet draws on the library
-        else if (target == ui_nav::kSidebarSearch) { g_screen = S_LIBRARY; m_hdrFocus = -1; m_focus = ui_nav::Focus::grid; ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 2); m_searchKey = 0; logf("sidebar: search overlay open (%s)", source); }   // the overlay draws on the library
+        else if (target == ui_nav::kSidebarSearch) { g_screen = S_LIBRARY; m_hdrFocus = -1; m_focus = ui_nav::Focus::grid; ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 2); m_searchKey = 0; ui_nav::search_clamp_caret(m_search); logf("sidebar: search overlay open (%s)", source); }   // the overlay draws on the library
         else if (target == 2 || target == 3) {
             bool want = target == 3;
             if (m_onlyInstalled != want) { m_onlyInstalled = want; m_installedT = -10; refresh_installed(t); grid_position(0, 0, "sidebar view"); }
@@ -1679,7 +1680,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (!m_pick.note.empty()) text8(x + 40, ry + 8, clip8(m_pick.note, 90), 2, RED);
         text8(x + 40, y + h - 40, "A: run this option        B: cancel", 3, TXT);
     }
-    // One-shot synthetic command file LocalState\cmd.txt (consumed on read). Lines: open <appid> | press (=A) | back (=B) | view | up | down | left | right | lb | rb | x | y | sort | filters | search | profile | sleep <s>.
+    // One-shot synthetic command file LocalState\cmd.txt (consumed on read). Lines: open <appid> | press (=A) | back (=B) | view | up | down | left | right | lb | rb | l3 | x | y | sort | filters | search | type <text> | profile | sleep <s>.
     // Semantics follow the new screens: B does nothing on the library root (item 14 — logout is
     // the sidebar PROFILE row's A, with a Cancel-default confirm sheet); on the detail page X/Y
     // are no longer shortcuts (focus the trash/cloud/cog buttons with left/right, then A).
@@ -1710,12 +1711,25 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // item 19: named shortcuts for testers — harmless openers only.
         if (c == "sort") { if (g_screen == S_LIBRARY) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 0); m_sortFocus = g_sortMode.load(); logf("cmd.txt: sort dropdown open"); } return; }
         if (c == "filters") { if (g_screen == S_LIBRARY) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 1); m_filtersFocus = 0; logf("cmd.txt: filters panel open"); } return; }
-        if (c == "search") { if (g_screen == S_LIBRARY) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 2); m_searchKey = 0; logf("cmd.txt: search overlay open"); } return; }
+        if (c == "search") { if (g_screen == S_LIBRARY) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 2); m_searchKey = 0; ui_nav::search_clamp_caret(m_search); logf("cmd.txt: search overlay open"); } return; }
+        // Item D13: 'type <text>' sets the on-screen keyboard's query through
+        // the same state machine A uses, so a tester can enter (or clear, with
+        // an empty text) a query without 30 D-pad steps. Only while the
+        // keyboard is up.
+        if (c.rfind("type", 0) == 0 && (c.size() == 4 || c[4] == ' ')) {
+            if (!m_searchOpen) { logf("cmd.txt: type ignored (keyboard closed)"); return; }
+            m_search.query.clear(); m_search.caret = 0;
+            for (char ch : c.size() > 5 ? c.substr(5) : std::string()) ui_nav::search_insert(m_search, ch);
+            grid_position(0, 0, "cmd.txt type");
+            logf("cmd.txt: query now '%s' (%zu chars)", m_search.query.c_str(), m_search.query.size());
+            return;
+        }
         if (c == "profile") { if (g_screen == S_LIBRARY) { m_focus = ui_nav::Focus::sidebar; m_sidebar = ui_nav::kSidebarProfile; logf("cmd.txt: profile row focused (nothing opened)"); } return; }
         GamepadButtons m = GamepadButtons::None;
         if (c == "press" || c == "a") m = GamepadButtons::A; else if (c == "back" || c == "b") m = GamepadButtons::B;
         else if (c == "up") m = GamepadButtons::DPadUp; else if (c == "down") m = GamepadButtons::DPadDown; else if (c == "left") m = GamepadButtons::DPadLeft; else if (c == "right") m = GamepadButtons::DPadRight;
         else if (c == "lb") m = GamepadButtons::LeftShoulder; else if (c == "rb") m = GamepadButtons::RightShoulder; else if (c == "x") m = GamepadButtons::X; else if (c == "y") m = GamepadButtons::Y;
+        else if (c == "l3") m = GamepadButtons::LeftThumbstick;   // item D13: caps lock on the search keyboard
         else if (c == "view") { logf("cmd.txt: 'view' is a no-op (the View filter chip is gone; use 'profile'/'filters'/'search')"); return; }
         if (m == GamepadButtons::None) { logf("cmd.txt: unknown command ignored"); return; }
         GamepadReading fake{}; fake.Buttons = m; input(t, fake, true, "cmd.txt (synthetic)"); input(t + 0.001, GamepadReading{}, true, "cmd.txt release (synthetic)");
@@ -1961,6 +1975,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // storage screens override it with their own entry.
         sb.active = m_onlyInstalled ? 3 : 2;
         sb.focus = sidebar_focus_row();
+        // Item D13: the sidebar field shows the live query (the keyboard types
+        // into the same string the grid filters on).
+        sb.search_query = m_search.query.c_str();
         sb.profile_focus = sidebar_focus_row() == ui_nav::kSidebarProfile;   // the UI worker draws the logout affordance from this
         // item 31: the disk widget is sidebar entry 5 — same focus mechanism,
         // plus its own states (focused when the pad is on it, active while the
@@ -2036,15 +2053,19 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         bool filterOn[1] = {m_filterPlayable};   // item 26/32: the Filters button's '· N' count
         lib.filters_active = ui_nav::filters_active(filterOn, 1);
         lib.search_open = m_searchOpen; lib.search_key = m_searchKey;
-        static std::string query_buf; query_buf = m_query;
+        lib.search_caret = m_search.caret; lib.search_caps = m_search.caps;
+        static std::string query_buf; query_buf = m_search.query;
         lib.query = query_buf.c_str();
         lib.t = float(t);   // item 11: marquee clock for the focused tile
         static std::string sort_label; sort_label = std::string("Sort by ") + SORT_NAMES[g_sortMode.load(std::memory_order_relaxed)];
         lib.sort_label = sort_label.c_str();
         static char count[128];
+        // Item D7: a filtered grid says how much of the library is showing
+        // ("12 of 772 games"), so the count is never mistaken for the total.
+        const bool searching = !m_search.query.empty();
         if (loading) lib.loading = true;
         else if (m_onlyInstalled) snprintf(count, sizeof count, "%zu installed of %d games", listed, (int)g_ownedCount.load()), lib.count_label = count;
-        else { snprintf(count, sizeof count, "%d games", (int)listed); lib.count_label = count; }
+        else { snprintf(count, sizeof count, "%s", game_library::count_label(listed, (size_t)g_ownedCount.load(), searching).c_str()); lib.count_label = count; }
         ui_launcher::draw_library(c, g_font, sb, lib, !m_confirmLogout);   // item 17: the logout sheet brings its own hint bar
         if (g_demo) {   // demo marker replaces the count line (honest: not your account)
             c.fill_rect_alpha(524, 168, 430, 60, ui::theme::page, 255);
@@ -2351,14 +2372,21 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 else if (has(edge, GamepadButtons::B)) { m_filtersOpen = false; logf("filters panel closed (%s)", source); }
                 return;
             }
-            // item 1: the search overlay owns the pad while it is up (existing
-            // wiring: A types/activates, B closes; the query live-filters).
+            // item 1: the search overlay owns the pad while it is up. Item D13:
+            // D-pad moves the key cursor, A types the focused key, X deletes,
+            // LB/RB move the caret, Y applies (closes, keeps the query), L3
+            // toggles caps lock, B closes.
             if (m_searchOpen) {
                 if (has(edge, GamepadButtons::DPadUp)) { ui_nav::search_move(m_searchKey, 0, -1); logf("search: key %d (%s)", m_searchKey, source); }
                 else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::search_move(m_searchKey, 0, 1); logf("search: key %d (%s)", m_searchKey, source); }
                 else if (has(edge, GamepadButtons::DPadLeft)) { ui_nav::search_move(m_searchKey, -1, 0); logf("search: key %d (%s)", m_searchKey, source); }
                 else if (has(edge, GamepadButtons::DPadRight)) { ui_nav::search_move(m_searchKey, 1, 0); logf("search: key %d (%s)", m_searchKey, source); }
-                else if (has(edge, GamepadButtons::A)) { if (ui_nav::search_activate(m_searchKey, m_query, m_searchOpen)) grid_position(0, 0, "search type"); logf("search: activate (%s)", source); }
+                else if (has(edge, GamepadButtons::A)) { if (ui_nav::search_activate(m_searchKey, m_search, m_searchOpen)) grid_position(0, 0, "search type"); logf("search: activate (%s)", source); }
+                else if (has(edge, GamepadButtons::X)) { if (ui_nav::search_backspace(m_search)) grid_position(0, 0, "search delete"); logf("search: X delete (%s)", source); }
+                else if (has(edge, GamepadButtons::LeftShoulder)) { ui_nav::search_caret_move(m_search, -1); logf("search: caret -> %d (%s)", m_search.caret, source); }
+                else if (has(edge, GamepadButtons::RightShoulder)) { ui_nav::search_caret_move(m_search, 1); logf("search: caret -> %d (%s)", m_search.caret, source); }
+                else if (has(edge, GamepadButtons::Y)) { m_searchOpen = false; logf("search: applied '%s' (%s)", m_search.query.c_str(), source); }
+                else if (has(edge, GamepadButtons::LeftThumbstick)) { logf("search: caps -> %s (%s)", ui_nav::search_toggle_caps(m_search) ? "on" : "off", source); }
                 else if (has(edge, GamepadButtons::B)) { m_searchOpen = false; logf("search overlay closed (%s)", source); }
                 return;
             }
@@ -2372,6 +2400,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::sidebar_move(m_sidebar, true); logf("sidebar: entry %d (%s)", m_sidebar, source); }
                 else if (has(edge, GamepadButtons::DPadRight)) { ui_nav::lateral(m_focus, 0, false); logf("sidebar: back to the grid (%s)", source); }
                 else if (has(edge, GamepadButtons::A)) sidebar_activate(t, source);
+                // Item D7: X on the Search row clears the query, so a filtered
+                // grid is always one press from the whole library again.
+                else if (has(edge, GamepadButtons::X) && m_sidebar == ui_nav::kSidebarSearch && !m_search.query.empty()) {
+                    m_search.query.clear(); m_search.caret = 0;
+                    grid_position(0, 0, "search cleared");
+                    logf("search: query cleared (X on the sidebar Search row, %s)", source);
+                }
                 return;
             }
             // Header controls row (item 1): left/right walk Sort/Filters/Search,
@@ -2388,7 +2423,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                     // item 15: opening one popup closes the others (ui_nav::popup_exclusive)
                     if (m_hdrFocus == 0) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 0); m_sortFocus = g_sortMode.load(); logf("sort popup open (%s)", source); }
                     else if (m_hdrFocus == 1) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 1); m_filtersFocus = 0; logf("filters panel open (%s)", source); }
-                    else if (m_hdrFocus == 2) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 2); m_searchKey = 0; logf("search overlay open (%s)", source); }
+                    else if (m_hdrFocus == 2) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 2); m_searchKey = 0; ui_nav::search_clamp_caret(m_search); logf("search overlay open (%s)", source); }
                 }
                 else if (has(edge, GamepadButtons::B)) { m_hdrFocus = -1; logf("header: focus -> grid (%s)", source); }
                 return;
