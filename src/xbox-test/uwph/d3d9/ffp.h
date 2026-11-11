@@ -239,8 +239,20 @@ inline void operation(Bytecode& b,DWORD op,DWORD arg1,DWORD arg2,unsigned stage,
     }
 }
 
-// Writes a ps_3_0 that samples the stages' textures and combines them. Returns
-// the token count, or 0 when the buffer is too small.
+// True when one of a stage's arguments names the stage's texture. The mask
+// strips the complement and alpha-replicate modifiers, which do not change
+// what the argument reads.
+inline bool stageUsesTexture(const Stage& stage) {
+    return (stage.colorArg1&TaSelectMask)==TaTexture || (stage.colorArg2&TaSelectMask)==TaTexture
+        || (stage.alphaArg1&TaSelectMask)==TaTexture || (stage.alphaArg2&TaSelectMask)==TaTexture;
+}
+
+// Writes a ps_3_0 that samples the stages' textures and combines them. A stage
+// whose arguments never name D3DTA_TEXTURE gets no sampler declaration and no
+// tex instruction, which is what D3D9 does for a stage with no texture bound;
+// declaring and sampling one anyway hands the console's d3d11on12 a resource
+// nothing binds, and its shader translation derefs null. Returns the token
+// count, or 0 when the buffer is too small.
 inline unsigned writePixelShader(const PixelOptions& options,DWORD* out,unsigned capacity) {
     Bytecode b(out,capacity);
     b.push(Ps30);
@@ -248,7 +260,11 @@ inline unsigned writePixelShader(const PixelOptions& options,DWORD* out,unsigned
         dcl(b,D3DDECLUSAGE_TEXCOORD,i,unsigned(options.texcoordReg[i]),RegInput);
     dcl(b,D3DDECLUSAGE_COLOR,0,PsColourReg,RegInput);
     dcl(b,D3DDECLUSAGE_COLOR,0,0,RegOutput);
+    // Per-stage emission: a stage that never names its texture gets no sampler
+    // declaration and no tex instruction. The dcl loop runs first because the
+    // declarations must precede the instructions that use them.
     for(unsigned i=0;i<options.stageCount;++i) {
+        if(!stageUsesTexture(options.stages[i]))continue;
         b.op(OpDcl,2);
         b.push(Texture2D);
         b.push(Bytecode::dst(i,RegSampler));
@@ -259,11 +275,13 @@ inline unsigned writePixelShader(const PixelOptions& options,DWORD* out,unsigned
     for(unsigned i=0;i<options.stageCount;++i) {
         const Stage& stage=options.stages[i];
         if(stage.colorOp==TopDisable)break;
-        b.op(OpTex,3);
-        b.push(Bytecode::dst(PsTexture,RegTemp));
-        b.push(i<options.texcoordCount?Bytecode::src(unsigned(options.texcoordReg[i]),RegInput)
-                                      :Bytecode::src(PsTexture,RegTemp));
-        b.push(Bytecode::src(i,RegSampler));
+        if(stageUsesTexture(stage)) {
+            b.op(OpTex,3);
+            b.push(Bytecode::dst(PsTexture,RegTemp));
+            b.push(i<options.texcoordCount?Bytecode::src(unsigned(options.texcoordReg[i]),RegInput)
+                                          :Bytecode::src(PsTexture,RegTemp));
+            b.push(Bytecode::src(i,RegSampler));
+        }
         operation(b,stage.colorOp,stage.colorArg1,stage.colorArg2,i,0x7);
         if(stage.alphaOp!=TopDisable)
             operation(b,stage.alphaOp,stage.alphaArg1,stage.alphaArg2,i,0x8);

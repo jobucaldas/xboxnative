@@ -15,12 +15,12 @@ int main() {
     // first because it costs no launcher restart.
     size_t count = 0;
     const Mode* table = modes(count);
-    assert(count == 7);
+    assert(count == 8);
     assert(std::string(table[0].name) == "x86" && table[0].pe32);
     assert(std::string(table[1].name) == "vulkan-dzn" && !table[1].pe32);
-    assert(std::string(table[2].name) == "d3d9" && std::string(table[5].name) == "d3d10");
-    assert(std::string(table[3].name) == "d3d9-triangle" && std::string(table[4].name) == "d3d9-textured");
-    assert(std::string(table[6].name) == "opengl" && std::string(table[6].exe) == "play-opengl.exe" && !table[6].pe32);
+    assert(std::string(table[2].name) == "d3d9" && std::string(table[6].name) == "d3d10");
+    assert(std::string(table[3].name) == "d3d9-triangle" && std::string(table[4].name) == "d3d9-triangle-variants");
+    assert(std::string(table[7].name) == "opengl" && std::string(table[7].exe) == "play-opengl.exe" && !table[7].pe32);
     assert(find("d3d9") && find("d3d9")->pe32 == false);
     assert(find("d3d9-triangle") && std::string(find("d3d9-triangle")->exe) == "play-d3d9-triangle.exe");
     assert(find("x86") && find("x86")->pe32);
@@ -32,7 +32,7 @@ int main() {
     // fixed cap of four did once the table grew past five guests).
     int guests = 0;
     for (size_t i = 0; i < count; ++i) if (!table[i].pe32) ++guests;
-    assert(guests == 6);
+    assert(guests == 7);
     assert(max_restarts() > guests);
     assert(max_restarts() == guests + 1);
 
@@ -47,7 +47,8 @@ int main() {
     assert(unknown.size() == 2 && unknown[0] == "nope");
     // "all" expands to every fixture in canonical order, whatever else is named.
     auto all = parse_request("d3d10\nall\n");
-    assert(all.size() == 7 && all[0] == "x86" && all[5] == "d3d10" && all[6] == "opengl");
+    assert(all.size() == 8 && all[0] == "x86" && all[6] == "d3d10" && all[7] == "opengl");
+    assert(all[3] == "d3d9-triangle" && all[4] == "d3d9-triangle-variants");
 
     // The queue survives a launcher restart: restarts count and pending modes
     // round-trip; a malformed file is refused rather than half-read.
