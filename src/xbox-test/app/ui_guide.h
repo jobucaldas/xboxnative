@@ -272,10 +272,10 @@ inline std::string format_date(long long unixSecs) {
 // vectors traced vertex-for-vertex (2.5px centred round-cap stroke).
 namespace icons {
 
-// Resume: filled triangle. Design box 14 x 18.667.
-inline void play(Canvas& c, const Rect& r, uint32_t color) {
+// Resume: outlined triangle (2.5px round stroke, as the mockup vector). Design box 14 x 18.667.
+inline void play(Canvas& c, const Rect& r, uint32_t color, float strokePx = 2.5f) {
     const float p[6] = {r.x, r.y, r.x + r.w, r.y + r.h * 0.5f, r.x, r.y + r.h};
-    c.fill_polygon(p, 3, color);
+    c.stroke_polyline(p, 3, true, strokePx, color);
 }
 // Quit game: door with an arrow out. Design box 15.167 x 18.667.
 inline void quit(Canvas& c, const Rect& r, uint32_t color, float strokePx) {
@@ -498,9 +498,11 @@ inline void draw_home(Canvas& c, const Font& f, const Model& m) {
         const Rect row = rect(16, y, 528, kHomeRowH);
         if (i == m.sel && !m.busy) draw_focus_row(c, row, ui::theme::radiusCard);
         const uint32_t color = m.busy ? textMuted : text;
-        icons::play(c, rect(33, y + 23, 14, 18), color);
-        if (i == 1) icons::quit(c, rect(30, y + 22, 20, 20), color, 2.0f);
-        if (i == 2) icons::power(c, rect(31, y + 25, 16, 16), color, 2.5f);
+        // Each glyph keeps its design size, centred on the row (x 40, row middle y + 32.667).
+        const float cy = y + 32.667f;
+        if (i == 0) icons::play(c, rect(33, cy - 9.333f, 14, 18.667f), color);
+        if (i == 1) icons::quit(c, rect(40 - 7.583f, cy - 9.333f, 15.167f, 18.667f), color, 2.5f);
+        if (i == 2) icons::power(c, rect(33, cy - 7, 14, 14), color, 2.5f);
         f.draw(c, i == 0 ? Face::Semibold : Face::Regular, 24, 68,
                detail::baseline(f, i == 0 ? Face::Semibold : Face::Regular, 24, y, kHomeRowH), labels[i], color);
     }
