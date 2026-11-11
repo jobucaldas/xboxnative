@@ -67,7 +67,7 @@ PRUN D3D12 CheckFeatureSupport feature=7(SHADER_MODEL) size=4 highest=0x60
 
 ## Which owned games use D3D12
 
-Static imports of the installed copies (`/home/jobu/steam-owned/games`, never committed) **[verified with
+Static imports of the installed copies (`<local steam-owned games directory>`, never committed) **[verified with
 `llvm-readobj --coff-imports`]**:
 
 | Game | Module | `d3d12.dll` imported | Notes |

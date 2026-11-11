@@ -1,9 +1,9 @@
 # Wine as a base for "any Windows game boots" on Xbox (uwph) — research report
 
-Date: 2026-10-26 (America/Sao_Paulo). Author: agent executor (research only; no product code changed, no console used).
-Requested by João in pt132u: "32 bit should work too though / … can't we use [wine] as a base? Or at least to know what might be missing because any windows game should boot".
+Date: 2026-10-26 (America/Sao_Paulo). Author: research note (no product code changed, no console used)..
+Requested: "32 bit should work too though / … can't we use [wine] as a base? Or at least to know what might be missing because any windows game should boot".
 
-All coverage numbers come from `src/research/wine-coverage/analyze.py` + `dll-table.py` run on **Wine 11.0 source** (`/workspace/research/wine`) and the Debian **Wine 10** PE builtins on the box. They are produced by a regex/call-graph walk of the C sources, **not a compiler**: treat percentages as ±5 points and the win32u syscall count as an upper bound. Everything marked (UNVERIFIED) is reasoning, not measurement.
+All coverage numbers come from `src/research/wine-coverage/analyze.py` + `dll-table.py` run on **Wine 11.0 source** (`<local Wine source tree>`) and the Debian **Wine 10** PE builtins on the box. They are produced by a regex/call-graph walk of the C sources, **not a compiler**: treat percentages as ±5 points and the win32u syscall count as an upper bound. Everything marked (UNVERIFIED) is reasoning, not measurement.
 
 ## 0. TL;DR
 
@@ -11,7 +11,7 @@ All coverage numbers come from `src/research/wine-coverage/analyze.py` + `dll-ta
 2. **Do use Wine as (a) the authoritative checklist of what each Win32 symbol needs underneath (`*.spec` + call graph), (b) a donor of *PE-only* DLL code, (c) the model for 32-bit (new WoW64 splits "thunk at the syscall boundary", which is a ~760-function surface, instead of thunking the whole Win32 API).**
 3. Recommendation = **hybrid (c)**: keep the current stack (real system DLLs + our wxl mapper + mlp router + uwph), fill the gap with a thin CoreWindow-backed user32/gdi32 layer written to Wine's semantics, borrow Wine PE code where it only needs Nt*.
 4. Megabonk's 391 distinct imports: all 391 exist in Wine; 35% are pure PE code, 38% need only ntdll Nt* syscalls, **27% need win32u (NtUser/NtGdi)**. The 188 symbols the console does not already satisfy are 56% win32u-bound, so **user32/win32u semantics are the keystone**, which matches the repo's PLAN A/B.
-5. **32-bit**: the console CPU is x86-64, so a 32-bit PE can in principle run natively through `ljmp 0x23` (compat mode) with *no emulator*, but whether Xbox's kernel allows it, and how to provide FS/TEB32, is unknown: a 1-lane console spike answers it. Fallback: in-process x86 interpreter/JIT (Boxedwine core, GPL-2) with API-boundary break-out à la Hangover. Boxedwine is already known to run on Xbox Dev Mode (32/16-bit, "lag/stutter"), so 32-bit *is possible* on this hardware. **Bigger blocker than the CPU: UWP has no D3D9/OpenGL**, and Spacewar/LIMBO/Undertale-class 32-bit games are D3D9/GL.
+5. **32-bit**: the console CPU is x86-64, so a 32-bit PE can in principle run natively through `ljmp 0x23` (compat mode) with *no emulator*, but whether Xbox's kernel allows it, and how to provide FS/TEB32, is unknown: a small console spike answers it. Fallback: in-process x86 interpreter/JIT (Boxedwine core, GPL-2) with API-boundary break-out à la Hangover. Boxedwine is already known to run on Xbox Dev Mode (32/16-bit, "lag/stutter"), so 32-bit *is possible* on this hardware. **Bigger blocker than the CPU: UWP has no D3D9/OpenGL**, and Spacewar/LIMBO/Undertale-class 32-bit games are D3D9/GL.
 
 ---
 
@@ -55,7 +55,7 @@ Acceptance must count actual implemented routes against the complete 121-symbol
 user32 set, and must not count notification placeholders or export presence as
 working notification delivery. Independently derived list: u32c/megabonk-real-imports.csv.
 
-**2026-10-26 lane/wgap correction (source and PE audit):** The 391-row CSV is a
+**2026-10-26 wgap correction (source and PE audit):** The 391-row CSV is a
 subset extracted from a log, not the complete unique import set. Direct imports of
 `baselib.dll`, `UnityPlayer.dll`, and `Megabonk.exe` contain 512 unique DLL/symbol
 pairs; the archived CSV omits 121 (including system-routed symbols). Scanning all
@@ -110,7 +110,7 @@ Caveats: (1) static analysis ignores runtime-only paths (COM, delay-loads, `GetP
 ### A3. Why not run Wine's real stack on uwph (option b), concretely
 * win32u.so: window management, message queues, GDI, input, clipboard, fonts, ~96K lines, all wineserver clients (`wine_server_call` ×306 request types). wineserver itself is 50K lines of POSIX C (sockets, fds, poll, signals).
 * ntdll.so: signal-based SEH, `mmap`-style VM (we have W^X `…FromApp`), thread creation via pthread, `fork`-less but fd-heavy file I/O.
-* Earlier lane research (`x64-run/LANES.md` §2) *did* recommend "Wine's loader + builtin PE set + a new uwph unixlib backend"; its own §3 flagged that as "the core unverified assumption". PLAN-0600 later moved to our mapper+router instead and delivered more: real-DLL routing, W^X mapper, TLS, HID stub, triangle on console (smoke 8/8 PASS at 06:30). That decision holds up under this analysis.
+* Earlier research notes (§2) *did* recommend "Wine's loader + builtin PE set + a new uwph unixlib backend"; its own §3 flagged that as "the core unverified assumption". PLAN-0600 later moved to our mapper+router instead and delivered more: real-DLL routing, W^X mapper, TLS, HID stub, triangle on console (smoke 8/8 PASS at 06:30). That decision holds up under this analysis.
 
 ---
 
@@ -130,11 +130,11 @@ Caveats: (1) static analysis ignores runtime-only paths (COM, delay-loads, `GetP
 5. 32-bit track in parallel (feasibility spike first, section C). 
 6. D3D9→D3D11 decision (gates most older 32-bit games).
 
-### What already exists in the repo / earlier lanes proved
-* wxl mapper (W^X via `VirtualAllocFromApp`/`VirtualProtectFromApp`, zero RWX), mlp import router (system/uwph/stub per `src/tools/xbox/import_map.json`; `mlp_routes.h` generated), uwph host private ABI v1, TLS lane (tls/tlm), HID stub 20/23, native D3D11 triangle (d3tri) 300 presents hr=0 on the Series S, smoke-all 8 PASS (BACKLOG watcher 06:30).
-* smap lane: pinned steamclient map (340 entries validated, fail-closed validator); **Megabonk reached its main menu under Wine on the box** (BACKLOG item 5/16 DONE). Per the delegated brief: wine64 loader runs a 64-bit PE and Valheim server booted under wine64 — I found no artefact for the Valheim claim in /workspace notes, so I cite it as reported, not re-verified.
+### What already exists in the repo / earlier work proved
+* wxl mapper (W^X via `VirtualAllocFromApp`/`VirtualProtectFromApp`, zero RWX), mlp import router (system/uwph/stub per `src/tools/xbox/import_map.json`; `mlp_routes.h` generated), uwph host private ABI v1, TLS work (tls/tlm), HID stub 20/23, native D3D11 triangle (d3tri) 300 presents hr=0 on the Series S, smoke-all 8 PASS.
+* smap: pinned steamclient map (340 entries validated, fail-closed validator); **Megabonk reached its main menu under Wine on the box** (BACKLOG item 5/16 DONE). Per the delegated brief: wine64 loader runs a 64-bit PE and Valheim server booted under wine64 — I found no artefact for the Valheim claim in local notes, so I cite it as reported, not re-verified.
 * Both prove the *game* side is fine under a full Wine; the open problem is only our substitute for Wine's Unix half.
-* Prior art in /workspace/ref: dolphin-uwp, RetroArch, XBSX2, DuckStation-uwp, UnleashedRecomp-uwp (JIT/W^X on Xbox UWP is established practice), Boxedwine-uwp-upstream and Boxedwine-xbox-64.
+* Prior art in <local prior-art tree>: dolphin-uwp, RetroArch, XBSX2, DuckStation-uwp, UnleashedRecomp-uwp (JIT/W^X on Xbox UWP is established practice), Boxedwine-uwp-upstream and Boxedwine-xbox-64.
 
 ### Graphics/API gap (cross-cutting, not Wine-specific)
 Xbox UWP offers **D3D11/D3D12 only** (Microsoft Learn "Map DirectX 9 features to DirectX 11 APIs — UWP applications": UWP apps cannot use d3d9; https://learn.microsoft.com/en-us/windows/uwp/gaming/feature-mapping). D3D9On12 is a desktop component (https://github.com/microsoft/D3D9On12), DxWrapper only redirects desktop d3d9 (https://github.com/elishacloud/dxwrapper). Wine's d3d9 → wined3d needs OpenGL/Vulkan; no GL/Vulkan in UWP. So **D3D9 and OpenGL games need a translation layer we own or port** (candidates: write a small D3D9→D3D11 shim for the fixed-function/SM3 subset; DXVK's D3D9 front-end is Vulkan-bound; ANGLE gives GLES-over-D3D11 but wined3d wants desktop GL — all UNVERIFIED, needs its own spike, item 48). D3D11/D3D12 games (Megabonk/Unity, most 64-bit titles) are unaffected.
@@ -154,7 +154,7 @@ Xbox UWP offers **D3D11/D3D12 only** (Microsoft Learn "Map DirectX 9 features to
 | **1. Native far-jump (Heaven's Gate)** | In our x64 process: map a PE32 with our mapper, allocate it below 4 GB, `ljmp 0x23:eip`; 32-bit stubs jump back `ljmp 0x33:` into thunk code that calls our 64-bit router | **Native speed, no emulator, smallest code**. Desktop observations do not establish selector availability or compatibility transitions in Xbox AppContainer; Wine obtains selectors from actual thread context (ReWolf, https://github.com/rwfpl/rewolf-wow64ext) | (i) Does Xbox's NT kernel let a non-WoW64 AppContainer thread run compat mode? (ii) **FS/TEB32**: 32-bit CRT/SEH read `fs:[0]/[0x18]/[0x30]`; for non-WoW64 threads the kernel does not maintain a TEB32 (UNVERIFIED) → need binary-patching or a different FS strategy. (iii) Exceptions/APC/callbacks across modes are fragile, CFG bitmaps on Win10 (Ionescu, SentinelOne write-ups). (iv) Allocation <4 GB via `VirtualAllocFromApp` (probably fine, UNVERIFIED). (v) W^X for 32-bit code identical to now. My guess: ≤30% chance it works end-to-end unmodified |
 | **2. Wine new WoW64 (Wine 10/11)** | 32-bit PE DLLs + `wow64.dll`/`wow64win.dll`/`wow64cpu.dll`: the thunk surface is the **syscall surface** (258 wow64_ NT thunks in `wow64/*.c`, ~503 in `wow64win/*.c`, 8.3K lines in wow64win) not the whole Win32 API. Wine 11 implements this model; loader naming must be checked in loader/Makefile.in and configure.ac, not inferred from dlls/wow64*. This does not imply UWP compatibility | Real, maintained mapping of 32-bit syscalls to 64-bit; i386 PE DLLs are ordinary PEs; reusable for any CPU backend | `wow64cpu.dll` uses far jumps through `cs32_sel`; on Linux Wine gets cs=0x23 and **an FS selector from `set_thread_area`/LDT** (`ntdll/unix/signal_x86_64.c`: `cs32_sel = 0x23; fs32_sel = alloc_fs_sel(...)`) — exactly the piece Windows user mode can't do; on Windows the kernel provides it only to real WoW64 threads. So Wine WoW64 needs the *same unknowns* as option 1 for native x86, **or** a replacement `wow64cpu` backed by an emulator |
 | **3. Emulated x86 CPU, break out at the API boundary** | Replace `wow64cpu.dll` (or our own thunk layer) with an x86 interpreter/JIT; 32-bit app code is emulated, **every API/syscall runs natively on the 64-bit side**. Precedent: Hangover (https://github.com/AndreRH/hangover) plugs `wowbox64.dll` (Box64), `libwow64fex.dll` (FEX), or `wow64cpu.dll` into Wine WoW64 via `HODLL`, "everything Unix related is never emulated"; FEX docs: Windows FEX modules "purely handle CPU emulation" (https://wiki.fex-emu.com/index.php/Development:ARM64EC) | Works regardless of what Xbox's kernel allows; our JIT-capable UWP can host a JIT (codeGeneration capability + `VirtualProtectFromApp`; Dolphin/RetroArch Xbox prove it: https://github.com/dolphin-emu/dolphin/pull/11339, https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/app-capability-declarations) | **Box64/FEX dynarecs target ARM64/RISC-V/LoongArch (Hangover COMPILE: `-DARM_DYNAREC=ON`), not an x86 host** (UNVERIFIED for very recent versions): the Xbox host is x86-64 so we'd need an x86→x86 engine: Boxedwine's CPU core (interpreter "normal", plus JIT for x86/x64/ARMv8 hosts; https://github.com/danoon2/Boxedwine/blob/master/docs/CPUemulation.md; **GPL-2**, licensing implication for us) or QEMU TCG or a purpose-built simple interpreter |
-| **4. Full Boxedwine as a fallback** | Boxedwine fork already in /workspace/Boxedwine-xbox-64 / Boxedwine-uwp-upstream: emulated Linux + 32-bit Wine + wined3d(OpenGL) | Exists, runs on Xbox | Heaviest, emulates the whole OS, GL-only graphics, speed "lag/stutter"; not our architecture, but it's the **known-works** baseline for "does a 32-bit game boot at all" |
+| **4. Full Boxedwine as a fallback** | Boxedwine fork already in <local Boxedwine fork> / Boxedwine-uwp-upstream: emulated Linux + 32-bit Wine + wined3d(OpenGL) | Exists, runs on Xbox | Heaviest, emulates the whole OS, GL-only graphics, speed "lag/stutter"; not our architecture, but it's the **known-works** baseline for "does a 32-bit game boot at all" |
 
 ### C3. Performance expectations (estimates, not measurements)
 * Boxedwine's own benchmark (`docs/Performance.md`, Wine 10/11 era): Quake II 800×600 *software renderer* timedemo on an i7-14700: 57 fps (68.7 with Wine 11) for the 32-bit guest build vs 73–99 fps for 64-bit on the same host; ARMv8 hosts 57–84 fps. That's the **JIT** class: guest 32-bit CPU-bound code costs roughly 1.3–2× native on a fast desktop CPU. Series S cores are slower (≈3.4 GHz Zen 2 vs i7-14700), so expect Quake-II-class software rendering to land in the 20–40 fps range **if a JIT is used (UNVERIFIED extrapolation)**.
@@ -172,9 +172,9 @@ Xbox UWP offers **D3D11/D3D12 only** (Microsoft Learn "Map DirectX 9 features to
 
 ---
 
-## D. Next 10 backlog items (ranked; each fits one Codex/agent lane)
+## D. Next 10 backlog items (ranked)
 
-Conventions: appids Megabonk 3405340, Spacewar 480 (free, any account), LIMBO 48000, Undertale 391540 (the last two only if João owns/can install them). `play-test.sh` = `src/xbox-test/tools/play-test.sh <appid>` (lives in wt/gdet at the moment). Numbers continue after BACKLOG item 39.
+Conventions: appids Megabonk 3405340, Spacewar 480 (free, any account), LIMBO 48000, Undertale 391540 (the last two only if the tester owns/can install them). `play-test.sh` = `src/xbox-test/tools/play-test.sh <appid>` (lives in wt/gdet at the moment). Numbers continue after BACKLOG item 39.
 
 | # | Item | Work | Acceptance (all must hold) |
 |---|---|---|---|
@@ -184,7 +184,7 @@ Conventions: appids Megabonk 3405340, Spacewar 480 (free, any account), LIMBO 48
 | 43 | **user32-message-pump-corewindow** (builds on swc item 37) | Message queue (GetMessage/PeekMessage/PostMessage/SendMessage/Translate/Dispatch, timers, WM_PAINT/SIZE/ACTIVATE/CLOSE) driven by CoreWindow dispatcher events | `play-test.sh 3405340`: UnityPlayer reaches its first `GetMessage/PeekMessage` and log shows ≥300 pump iterations without the app being killed; screenshot (dp) shows non-black swap chain |
 | 44 | **user32-input-cursor-focus** | GetAsyncKeyState/GetKeyState, cursor clip/capture/visibility, focus/foreground, monitor/DisplayConfig metrics, raw input registration → CoreWindow keyboard/pointer/gamepad | `play-test.sh 3405340` log: Unity input init completes, controller button press (one-shot `cmd.txt`) arrives as WM_/XInput event; no synthetic input left running |
 | 45 | **donor-wine-pe** | Build/vendor Wine PE-only DLLs that need only Nt*: hid, setupapi, version, shcore, avrt; route in import_map as `wine-pe`; prove the loader runs them with the mapper | smoke-all.sh exit 0; `play-test.sh 3405340`: `hid/setupapi/winmm STUB` count from 67 → ≤ 40 |
-| 46 | **x86-compat-mode-spike** (32-bit, console) | Throwaway identity `Xboxnative.Cs32`: low alloc via `VirtualAllocFromApp`, `ljmp 0x23` round-trip, WoW64 probes, selector dump, FS strategy test | One console log with `CS32-OK` or the exact exception code/selector values; written conclusion in LANE_NOTES: native-32 viable yes/no. Does not need play-test (no game) — gate = `smoke-all.sh` still exit 0 |
+| 46 | **x86-compat-mode-spike** (32-bit, console) | Throwaway identity `Xboxnative.Cs32`: low alloc via `VirtualAllocFromApp`, `ljmp 0x23` round-trip, WoW64 probes, selector dump, FS strategy test | One console log with `CS32-OK` or the exact exception code/selector values; written conclusion in the historical notes: native-32 viable yes/no. Does not need play-test (no game) — gate = `smoke-all.sh` still exit 0 |
 | 47 | **pe32-mapper-and-gap** | wxl maps a PE32 (relocs, imports classified by wine_gap, no execution); i386 import list per game | Offline test maps Spacewar and LIMBO PE32 with 0 reloc errors; `play-test.sh 480` and `play-test.sh 48000` print `PE32 mapped, imports=N, gap=M` and the `launch: RESULT` line |
 | 48 | **d3d9-layer-decision** | 1-week-sized design+spike: a minimal D3D9→D3D11 path for SM3/fixed-function (own shim vs ports), plus a D3D9 triangle test exe through it | Test exe draws a D3D9 triangle on the console (300 presents, hr=0); `play-test.sh 480` log reaches `Direct3DCreate9` → `CreateDevice` OK |
 | 49 | **x86-engine-or-native-32** (after 46) | Either (a) native 32→64 thunk layer from Wine's wow64 tables or (b) Boxedwine CPU core as library behind the thunks; run a hello 32-bit console exe | `play-test.sh 480` shows the 32-bit entry point reached and returns from `main`/`WinMain` with API calls logged; no RWX |
@@ -196,7 +196,7 @@ Not in the ten (next wave): xaudio2 via FAudio, winmm/imm32/shell32 donors after
 |---|---|---|---|---|
 | 0 | tiny own PEs (hello, window, d3d11 triangle) | 64-bit, D3D11 | smoke-all.sh | exists (d3tri/swc) |
 | 1 | **Megabonk (3405340)** | 64-bit Unity, D3D11 | `play-test.sh 3405340` reaches main menu frame on console (screenshot) | items 41–45 |
-| 2 | a small 64-bit D3D11 game João owns (suggest one with Steam API but no anti-cheat; pick from `steam-owned`) | 64-bit D3D11 | same as rung 1 | rung 1 |
+| 2 | a small 64-bit D3D11 game the tester owns (suggest one with Steam API but no anti-cheat; pick from `steam-owned`) | 64-bit D3D11 | same as rung 1 | rung 1 |
 | 3 | **Spacewar (480)** | 32-bit, D3D9 | reaches its window and first frame | 46–49 |
 | 4 | **LIMBO (48000)** | 32-bit, D3D9 SM3 | main menu | rung 3 + perf (JIT) |
 | 5 | **Undertale (391540)** | 32-bit GameMaker (D3D9 per UNVERIFIED) | title screen at ≥ 30 fps | rung 4 |
@@ -206,8 +206,8 @@ Keep the order **1 → 2 before 3**: the 64-bit path has no CPU or D3D9 unknowns
 ---
 
 ## Sources
-* This repo: `x64-run/PLAN-0600.md`, `REBUILD.md`, `BACKLOG.md`, `LANES.md`; `wt/gdet/LANE_NOTES.md`, `wt/stubs/LANE_NOTES.md`; `runs/stubs/native-discovery-console.log`; `runs/gdet/play-3405340/launch_probe.log`; `src/tools/xbox/import_map.json`.
-* Wine 11.0 source (shallow clone `/workspace/research/wine`; `dlls/*/*.spec`, `dlls/wow64cpu/cpu.c`, `dlls/ntdll/unix/signal_x86_64.c`, `dlls/wow64win/*.c`); Debian Wine 10 PE builtins `/usr/lib/x86_64-linux-gnu/wine/x86_64-windows` (note: `i386-windows` on the box has only zlib1.dll, so no 32-bit builtins are installed).
+* This repo: historical planning docs (removed during genericization).
+* Wine 11.0 source (shallow clone `<local Wine source tree>`; `dlls/*/*.spec`, `dlls/wow64cpu/cpu.c`, `dlls/ntdll/unix/signal_x86_64.c`, `dlls/wow64win/*.c`); Debian Wine 10 PE builtins `/usr/lib/x86_64-linux-gnu/wine/x86_64-windows` (note: `i386-windows` on the box has only zlib1.dll, so no 32-bit builtins are installed).
 * Hangover https://github.com/AndreRH/hangover (README, COMPILE.md); FEX https://wiki.fex-emu.com/index.php/Development:ARM64EC.
 * Boxedwine https://github.com/danoon2/Boxedwine (docs/CPUemulation.md, docs/Performance.md; GPL-2), https://github.com/worleydl/Boxedwine-uwp, https://xbdev.store/news/9/, issue #5.
 * Microsoft Learn: UWP D3D9→D3D11 mapping https://learn.microsoft.com/en-us/windows/uwp/gaming/feature-mapping; Xbox FAQ https://learn.microsoft.com/en-us/windows/uwp/xbox-apps/frequently-asked-questions; capabilities https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/app-capability-declarations; VirtualProtectFromApp https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotectfromapp.
@@ -215,7 +215,7 @@ Keep the order **1 → 2 before 3**: the 64-bit path has no CPU or D3D9 unknowns
 * LIMBO store page https://store.steampowered.com/app/48000/LIMBO/; Spacewar sample https://partner.steamgames.com/doc/sdk/api/example.
 
 ## Known limits of this report
-Call-graph numbers are approximate (regex, not a compiler). The original research pass ran no console experiments. Item 46 now has actual console evidence below; broader PE32 runtime claims remain unverified. The claim that Wine 11 removed the wine64 loader comes from the earlier research pass, not re-checked in this one. GPL-2 of Boxedwine matters if its core is linked into a shipped binary (João to decide; this is only a research note).
+Call-graph numbers are approximate (regex, not a compiler). The original research pass ran no console experiments. Item 46 now has actual console evidence below; broader PE32 runtime claims remain unverified. The claim that Wine 11 removed the wine64 loader comes from the earlier research pass, not re-checked in this one. GPL-2 of Boxedwine matters if its core is linked into a shipped binary (a maintainer decision; this is only a research note).
 
 
 ### C5. cs32 source audit (2026-10-26)
@@ -246,7 +246,7 @@ should remain a research overestimate, not a generated x64 implementation gate.
 No CSV result establishes PE32 runtime, native FS/TEB32, or Xbox compatibility.
 The external original CSVs are retained unchanged as research inputs.
 
-Console results and exact evidence for item 46 are recorded in LANE_NOTES.md.
+Console results and exact evidence for item 46 are recorded in the historical notes.
 
 Actual Xbox Series S result (Cs32 0.1.1.0, PID 5616): VirtualAllocFromApp
 at 0x10000000 and RW-to-RX protection succeed; an x64 control routine in the
@@ -279,11 +279,11 @@ fresh console resolver log must be counted separately. These source corrections
 are off-device; they do not claim donor code ran on Xbox.
 
 
-### A2/C5. pe32 lane re-audit (2026-10-26)
+### A2/C5. pe32 re-audit (2026-10-26)
 
 The A2 text saying exact equality remains failing is stale: wgap's authorised
 628-pair oracle correction passed equality and console acceptance (see committed
-LANE_NOTES). External `summary-by-dll.csv` still totals 391, including 111 user32
+notes). External `summary-by-dll.csv` still totals 391, including 111 user32
 pairs, whereas the corrected per-import CSV has 628 pairs and 121 user32 pairs.
 Do not combine those summaries as if regenerated from the current oracle.
 

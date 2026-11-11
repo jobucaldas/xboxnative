@@ -14,7 +14,7 @@ the older half of the catalogue (Spacewar-class samples, GameMaker and older Uni
 
 ### Which owned games actually need it
 
-Static imports of every EXE and DLL under `/home/jobu/steam-owned/games` (39 files, `llvm-readobj --coff-imports`):
+Static imports of every EXE and DLL under `<local steam-owned games directory>` (39 files, `llvm-readobj --coff-imports`):
 
 | Game | Renderer imports | D3D9? |
 |---|---|---|

@@ -13,7 +13,7 @@ compatibility claim: nothing here has been run on the console, and a static
 string in a binary is a lower bound on what the game calls, never proof that a
 call executes.
 
-Scope rule (AGENTS.md rule 3): every path below runs a game the signed-in
+Scope rule (the ownership rule): every path below runs a game the signed-in
 account owns, installed from official depots. No path patches a game or Valve
 file on disk, and every path keeps the ownership gate
 (`owner_ticket()` → `ClientGetAppOwnershipTicket`, EMsg 857/858) in front of
@@ -22,7 +22,7 @@ anything that is staged.
 ## Method and limits
 
 - Inventory: `strings`/byte scan of the game's own binaries under
-  `/home/jobu/steam-owned/games/*`, excluding `steam_api*.dll`,
+  `<local steam-owned games directory>/*`, excluding `steam_api*.dll`,
   `steamclient*.dll`, `steamclient_loader*` and `GameOverlayRenderer*` — those
   contain every symbol by construction and would only report the SDK's surface.
   Matched `SteamAPI_ISteam<Interface>_<Function>` and `Steam<Interface>_vNNN`

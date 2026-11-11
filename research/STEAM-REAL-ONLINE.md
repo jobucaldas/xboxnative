@@ -4,7 +4,7 @@ Issue #55's owner request: *"steamworks should let me play online for real; how
 does GameNative do this? I want to actually have normal access to steam."*
 
 Today a Play-launched game's Steamworks is answered by the in-memory gbe_fork
-provider (AGENTS.md rule 3): achievements, cloud, presence and leaderboards are
+provider (the ownership rule): achievements, cloud, presence and leaderboards are
 bridged from the launcher's own signed-in CM session, but lobbies, matchmaking,
 P2P/relay networking, auth tickets to game servers, friends/invites, inventory
 and workshop are offline. This document answers three questions with evidence:
@@ -84,7 +84,7 @@ emulator serves the game and online play works.
   batch file and runs it under Wine before launching
   (`Skipping Steamless (launchRealSteam=…, launchBionicSteam=…)` is the line
   that says it did not). That is a DRM-stripping tool writing a modified game
-  executable. AGENTS.md rule 3 forbids exactly this ("no Steamless or cracks"),
+  executable. the contributing rules forbid exactly this ("no Steamless or cracks"),
   so this is the one GameNative technique this project must not adopt even as a
   fallback — which is why the SteamStub path here serves an emulated
   `steamclient64.dll` in memory instead (`steam_client_package.h`,
@@ -175,7 +175,7 @@ each need console work:
 
 **ToS / policy.** Valve's Steam Subscriber Agreement licenses the client for use
 on a personal computer; an Xbox console in Dev Mode is not one, and the client
-would be running outside its supported platform. This project's AGENTS.md rule 3
+would be running outside its supported platform. This project's ownership rule
 permits *running* the genuine client — nothing is patched, stripped or cracked,
 and the games are owned — but that rule is the repository's, not Valve's. The
 honest position is that (a) carries a real account-risk question the owner has

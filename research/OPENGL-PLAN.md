@@ -145,7 +145,7 @@ Play: maps both from the runtime layout like Wine's msvcp140 ──> console d3d
 ## Licensing and policy
 
 Mesa and DirectX-Headers are MIT; listed in `NOTICE`; built from pinned sources, outputs git-ignored, never
-committed (AGENTS.md rules 5 and 9). No game or Valve files are touched; the GL stack is substituted in memory like
+committed (the contributing rules on binaries and licensing). No game or Valve files are touched; the GL stack is substituted in memory like
 the other Play modules. Nothing here weakens a gate: the SDL fixture still prints `BLOCKED` (never PASS) for a stage
 the host cannot run rather than counting it as a pass.
 
