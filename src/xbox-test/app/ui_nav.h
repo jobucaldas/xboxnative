@@ -22,16 +22,19 @@ namespace ui_nav {
 // active entry; A on an entry switches the view.
 // Item 14: the sidebar is SIX entries — PROFILE (index 0, focusable; A opens
 // the logout confirm sheet), Search (1, opens the search overlay), All games,
-// Installed, Download queue, and the DISK widget (item 31: not a list row —
-// the bottom disk-information widget, selectable; A opens the Storage screen
-// and it wears the active look while Storage is shown). main.cpp maps the
-// indexes through sidebar_target; index kSidebarSearch opens the search
+// Installed, the DOWNLOADS block and the DISK widget (item 31: not a list row
+// — the bottom disk-information widget, selectable; A opens the Storage
+// screen and it wears the active look while Storage is shown). main.cpp maps
+// the indexes through sidebar_target; index kSidebarSearch opens the search
 // overlay.
-constexpr int kSidebarEntries = 6;   // Profile, Search, All games, Installed, Download queue, disk widget
+// Item D11: entry 4 is the Downloads block above the disk widget, not a
+// 'Download queue' list row — it shows the running download (name, progress,
+// speed, queued count) or 'No active downloads', and A opens the queue screen.
+constexpr int kSidebarEntries = 6;   // Profile, Search, All games, Installed, Downloads block, disk widget
 constexpr int kSidebarProfile = 0;   // the profile row (A opens the logout confirm sheet)
 constexpr int kSidebarSearch = 1;    // the Search row's index (opens the search overlay)
-constexpr int kSidebarQueue = 4;     // the Download queue row (the queue screen's active entry)
-constexpr int kSidebarStorage = 5;   // the disk widget (item 31: reached by Down from the queue row; A opens Storage)
+constexpr int kSidebarQueue = 4;     // the Downloads block (the queue screen's active entry)
+constexpr int kSidebarStorage = 5;   // the disk widget (item 31: reached by Down from the Downloads block; A opens Storage)
 
 enum class Focus { grid, sidebar };
 
@@ -74,6 +77,15 @@ constexpr int kSortMostPlayed = 1;
 constexpr int kSortRecentlyPlayed = 2;
 constexpr int kSortFavorites = 3;
 constexpr int kSortOptionCount = 4;
+
+// ---- Downloads block (item D11) ----
+// The sidebar's bottom block replaces the old 'Download queue' list row. Its
+// queued count is a short label, empty when nothing waits: '3 queued'.
+inline std::string downloads_queued_text(int queued) {
+    return queued > 0 ? std::to_string(queued) + " queued" : std::string();
+}
+// The block's title line: the running game's name, or nothing (idle).
+inline const char* downloads_title(const char* running) { return running && *running ? running : "Downloads"; }
 
 // ---- sort mode cycling ----
 // The sidebar's sort row cycles the launcher's existing modes; the label is

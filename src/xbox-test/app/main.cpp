@@ -2154,7 +2154,27 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
           sb.all_count = (int)g_games.size();
           sb.installed_count = (int)m_installed.size();
           size_t q; { std::lock_guard<std::mutex> ql(g_dqm); q = g_dq.size(); }
-          sb.queue_count = (int)q + (g_dl.state == 1 ? 1 : 0); }
+          sb.queue_count = (int)q; }   // item D11: jobs waiting behind the running one
+        // Item D11: the Downloads block shows the RUNNING download (name,
+        // progress, speed) and how many jobs wait behind it; idle when none is
+        // running. The strings are owned statics, like the queue screen's rows.
+        {
+            static std::string dlName, dlStatus;
+            dlName.clear(); dlStatus.clear();
+            int state = g_dl.state.load();
+            if (state == 1) {
+                { std::lock_guard<std::mutex> l(g_dl.m); dlName = g_dl.name; }
+                if (dlName.empty()) dlName = "App " + std::to_string(g_dl.appid.load());
+                const uint64_t total = g_dl.total.load(), done = g_dl.done.load();
+                sb.dl_pct = total ? float(std::min<double>(1.0, double(done) / double(total))) : 0.0f;
+                char b[48];
+                std::snprintf(b, sizeof b, "%.1f MB/s", g_dl.speed.load() / 1048576.0);
+                dlStatus = b;
+            }
+            size_t q; { std::lock_guard<std::mutex> ql(g_dqm); q = g_dq.size(); }
+            sb.dl_name = dlName.c_str();
+            sb.dl_status = dlStatus.c_str();
+        }
         // item 14 mapping: 0 profile, 1 search, 2 all, 3 installed, 4 queue, 5 storage.
         // On the library screen the active row follows the view; the queue and
         // storage screens override it with their own entry.

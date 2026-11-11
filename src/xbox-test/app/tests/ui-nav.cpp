@@ -44,7 +44,7 @@ int main() {
     }
 
     // ---- 6-entry sidebar (item 14): Profile, Search, All games, Installed,
-    // Download queue, Storage management ----
+    // Downloads block (item D11), disk widget ----
     {
         check(ui_nav::kSidebarEntries == 6, "the sidebar has 6 entries (profile + search + 4 views)");
         check(ui_nav::kSidebarProfile == 0, "the profile row is entry 0");
@@ -61,8 +61,18 @@ int main() {
         check(sidebar_target(0) == 0, "the Profile row targets the logout sheet");
         check(sidebar_target(1) == 1, "the Search row targets the search overlay");
         check(sidebar_target(2) == 2 && sidebar_target(3) == 3, "entries 2/3 target the installed/all views");
-        check(sidebar_target(4) == 4, "entry 4 opens the download queue");
+        check(sidebar_target(4) == 4, "entry 4 opens the download queue (the Downloads block)");
         check(sidebar_target(5) == 5, "entry 5 opens storage management");
+    }
+
+    // ---- item D11: the Downloads block's labels ----
+    {
+        check(ui_nav::downloads_queued_text(0).empty(), "D11: nothing queued draws no count");
+        check(ui_nav::downloads_queued_text(1) == "1 queued", "D11: one queued job reads '1 queued'");
+        check(ui_nav::downloads_queued_text(7) == "7 queued", "D11: the count is the number waiting");
+        check(std::string(ui_nav::downloads_title("")) == "Downloads", "D11: an idle block is titled Downloads");
+        check(std::string(ui_nav::downloads_title(nullptr)) == "Downloads", "D11: a null name is idle too");
+        check(std::string(ui_nav::downloads_title("Hades")) == "Hades", "D11: a running download names the game");
     }
 
     // ---- sort cycling wraps over the existing three modes ----
@@ -150,7 +160,7 @@ int main() {
     }
 
     // ---- item 31: the disk widget is sidebar entry 5, reached by Down from
-    // the queue row (4); Up from it returns to the queue row ----
+    // the Downloads block (4, item D11); Up from it returns to the block ----
     {
         check(ui_nav::kSidebarEntries == 6, "the sidebar has 6 entries");
         check(ui_nav::kSidebarQueue == 4 && ui_nav::kSidebarStorage == 5,

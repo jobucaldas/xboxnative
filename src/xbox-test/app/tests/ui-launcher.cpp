@@ -1325,7 +1325,7 @@ int main(int argc, char** argv) {
         for (int y = 456; y < 520; ++y)
             for (int x = 44; x < 431; ++x)
                 if (px[size_t(y) * W + x] == ui::theme::control) { row4 = true; break; }
-        check(!row4, "item 31: no 'Storage management' row — the view rows end at Download queue");
+        check(!row4, "item 31: no 'Storage management' row — the view rows end at Installed");
         // idle widget: no fill, no ring
         check(px[size_t(945) * W + 100] == ui::theme::panel,
               "item 31: the idle disk widget carries no region fill");
@@ -1348,6 +1348,70 @@ int main(int argc, char** argv) {
             for (int x = 42; x < 436; ++x)
                 if (px[size_t(y) * W + x] == ui::theme::focus) { ring_seen = true; break; }
         check(ring_seen, "item 31: the focused disk widget wears the focus ring");
+
+        // item D11: the Downloads block replaces the 'Download queue' list row.
+        // Idle: titled Downloads, 'No active downloads', no progress bar.
+        {
+            SidebarVM s2 = sb; s2.focus = -1; s2.active = 2;
+            c.fill(ui::theme::page);
+            draw_sidebar(c, font, s2);
+            auto ink_in = [&](float x0, float y0, float w, float h, uint32_t col) {
+                int n = 0;
+                for (int yy = int(y0); yy < int(y0 + h); ++yy)
+                    for (int xx = int(x0); xx < int(x0 + w); ++xx)
+                        if (px[size_t(yy) * W + xx] == col) ++n;
+                return n;
+            };
+            check(ink_in(64, 812, 340, 30, ui::theme::text2) > 0, "D11: the idle block is titled Downloads");
+            check(ink_in(64, 844, 340, 30, ui::theme::textDim) > 0, "D11: the idle block says 'No active downloads'");
+            check(ink_in(64, 876, 348, 14, ui::theme::track) == 0, "D11: the idle block draws no progress bar");
+            // the old 'Download queue' view row is gone: the row band below
+            // Installed (y 392..456) stays panel
+            bool oldRow = false;
+            for (int yy = 392; yy < 456 && !oldRow; ++yy)
+                for (int xx = 44; xx < 431; ++xx)
+                    if (px[size_t(yy) * W + xx] == ui::theme::control) { oldRow = true; break; }
+            check(!oldRow, "D11: no 'Download queue' list row — the view rows end at Installed");
+            snap("launcher-d11-downloads-idle");
+        }
+        // Active: the game's name, its progress bar and percentage, the speed,
+        // and the queued count.
+        {
+            SidebarVM s3 = sb; s3.focus = -1; s3.active = 2;
+            s3.dl_name = "Halo Wars: Definitive Edition"; s3.dl_pct = 0.62f;
+            s3.dl_status = "12.4 MB/s"; s3.queue_count = 3;
+            c.fill(ui::theme::page);
+            draw_sidebar(c, font, s3);
+            auto ink_in = [&](float x0, float y0, float w, float h, uint32_t col) {
+                int n = 0;
+                for (int yy = int(y0); yy < int(y0 + h); ++yy)
+                    for (int xx = int(x0); xx < int(x0 + w); ++xx)
+                        if (px[size_t(yy) * W + xx] == col) ++n;
+                return n;
+            };
+            check(ink_in(64, 846, 348, 26, ui::theme::text) > 0, "D11: the running download's name draws");
+            const int fill_end = int(64.0f + 348.0f * 0.62f);
+            check(px[size_t(884) * W + (fill_end - 10)] == ui::theme::accent, "D11: the progress bar fills pct");
+            check(px[size_t(884) * W + int(64.0f + 348.0f) - 6] == ui::theme::track,
+                  "D11: the progress track extends past the fill");
+            check(ink_in(64, 888, 120, 26, ui::theme::textDim) > 0, "D11: the percentage draws under the bar");
+            check(ink_in(300, 888, 112, 26, ui::theme::textDim) > 0, "D11: the speed is right-aligned under the bar");
+            check(ink_in(300, 812, 112, 26, ui::theme::textDim) > 0, "D11: the queued count draws at the title line");
+            // the name never overflows the block: no ink in the 12px gutter
+            // between the block's right edge (424) and the sidebar's (443)
+            check(ink_in(426, 846, 16, 30, ui::theme::text) == 0, "D11: a long name is truncated inside the block");
+            snap("launcher-d11-downloads-active");
+            // focused: control fill + focus ring, like the disk widget
+            SidebarVM s4 = s3; s4.focus = ui_nav::kSidebarQueue;
+            c.fill(ui::theme::page);
+            draw_sidebar(c, font, s4);
+            check(px[size_t(812) * W + 60] == ui::theme::control, "D11: the focused block fills control");
+            bool bring = false;
+            for (int yy = 800; yy < 922 && !bring; ++yy)
+                for (int xx = 42; xx < 436; ++xx)
+                    if (px[size_t(yy) * W + xx] == ui::theme::focus) { bring = true; break; }
+            check(bring, "D11: the focused block wears the focus ring");
+        }
         // ring containment: the focus-ink bbox lies within the sidebar rect
         // inset by 8px (x 40..435, y 40..1040)
         {

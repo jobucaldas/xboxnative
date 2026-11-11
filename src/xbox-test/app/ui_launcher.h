@@ -177,7 +177,8 @@ inline const char* primary_hint(const PrimaryVM& vm, bool /*focus*/) {
 
 struct SidebarVM {
     const char* persona = "Player One";
-    int all_count = 0, installed_count = 0, queue_count = 0;
+    int all_count = 0, installed_count = 0;
+    int queue_count = 0;   // item D11: jobs waiting behind the running download
     int free_gb_x10 = 4126, used_pct = 34;
     // item 31: the view rows are ONLY All games / Installed / Download queue
     // (indexes 2, 3, 4) — 'Storage management' is NOT a list row any more. The
@@ -203,6 +204,14 @@ struct SidebarVM {
     // item 24 (drawing side): the signed-in user's avatar, circle-masked in
     // the sidebar's profile row; empty falls back to the placeholder circle.
     ui::Image avatar{};
+    // Item D11: the DOWNLOADS block at the bottom of the sidebar, above the
+    // disk widget (sidebar entry 4 — the old 'Download queue' list row is
+    // gone). Idle: "Downloads" + "No active downloads". Active: the running
+    // game's name, a progress bar with its percentage and speed, and the
+    // count of queued jobs. Focusable: A opens the Download queue screen.
+    const char* dl_name = "";     // the running download's name; empty = idle
+    float dl_pct = 0.0f;          // 0..1, the running download's progress
+    const char* dl_status = "";   // "12.4 MB/s" while running
 };
 
 struct TileVM {
@@ -559,13 +568,12 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
             c.fill_rect(tx + w + 1.0f, field.y + 16.0f, 2.0f, lh, ui::theme::accent);
         }
     }
-    // nav rows: the view entries, sidebar indexes 2..4 (item 31: only
-    // All games / Installed / Download queue — Storage is the disk widget).
+    // nav rows: the view entries, sidebar indexes 2..3 (item 31: only
+    // All games / Installed; item D11: the queue is the Downloads block below).
     struct Row { const char* label; int count; };
-    const Row rows[3] = {{"All games", sb.all_count}, {"Installed", sb.installed_count},
-                         {"Download queue", sb.queue_count}};
+    const Row rows[2] = {{"All games", sb.all_count}, {"Installed", sb.installed_count}};
     float y = 264.0f;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 2; ++i) {
         const int entry = i + 2;   // sidebar index: the view rows start at 2 (item 14)
         const bool on = entry == sb.active;
         const bool focused = entry == sb.focus;
@@ -589,8 +597,52 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
         y += 64.0f;
     }
     c.fill_rect(64, 920, 347, 1, ui::theme::separator);
+    // Item D11: the DOWNLOADS block sits at the bottom of the sidebar, above
+    // the disk widget. It replaces the old 'Download queue' list row, so the
+    // queue still has a home on every screen. Idle says so in words; active
+    // shows the running game (truncated), a progress bar with its percentage
+    // and speed, and how many jobs wait behind it. Focusable (entry 4): A
+    // opens the queue screen, and it wears the same focus/active looks as the
+    // disk widget below it.
+    {
+        const bool focused = sb.focus == ui_nav::kSidebarQueue;
+        const bool active = sb.active == ui_nav::kSidebarQueue;
+        const Rect w = rect(52, 808, 372, 104);
+        if (focused) {
+            c.fill_round_rect(w, radiusCard, ui::theme::control);
+            focus_ring(c, rect(w.x - ringOffset, w.y - ringOffset, w.w + ringOffset * 2, w.h + ringOffset * 2),
+                       radiusCard + ringRadiusDelta, ringWidth);
+        } else if (active) {
+            c.fill_round_rect(w, radiusCard, ui::theme::controlDark);
+            c.fill_rect(429, 808, 6, 104, ui::theme::accent);
+        }
+        const bool running = sb.dl_name && *sb.dl_name;
+        text(c, f, Face::Semibold, 22, 64, 820.0f, "Downloads", ui::theme::text2);
+        if (!running) {
+            text(c, f, Face::Regular, 20, 64, 852.0f, "No active downloads", ui::theme::textDim);
+        } else {
+            const std::string nm = f.ellipsize(Face::Regular, 20, sb.dl_name, 348.0f);
+            text(c, f, Face::Regular, 20, 64, 850.0f, nm.c_str(), ui::theme::text);
+            int pct = int(sb.dl_pct * 100.0f + 0.5f);
+            pct = pct < 0 ? 0 : pct > 100 ? 100 : pct;
+            c.fill_round_rect(rect(64, 880, 348, 8), 4, ui::theme::track);
+            if (pct > 0) c.fill_round_rect(rect(64, 880, 348.0f * float(pct) / 100.0f, 8), 4, ui::theme::accent);
+            char b[64];
+            std::snprintf(b, sizeof b, "%d%%", pct);
+            text(c, f, Face::Regular, 18, 64, 892.0f, b, ui::theme::textDim);
+            if (sb.dl_status && *sb.dl_status)
+                text_r(c, f, Face::Regular, 18, 412, 892.0f, sb.dl_status, ui::theme::textDim);
+        }
+        // jobs waiting behind the running one (or the whole list when idle)
+        const std::string queued = ui_nav::downloads_queued_text(sb.queue_count);
+        if (!queued.empty()) text_r(c, f, Face::Regular, 18, 412, 820.0f, queued.c_str(), ui::theme::textDim);
+    }
     // item 31: the DISK WIDGET is a button-like region (sidebar entry 5), not a
     // list row: rounded-8 rect spanning the widget area with 12px padding.
+    //   focused (sb.focus == 5 / sb.disk_focus): control fill + focus ring;
+    //   active  (sb.disk_active, the Storage screen is shown): subtle fill +
+    //           accent donut stroke;
+    //   otherwise: today's plain look (no fill, no ring).
     //   focused (sb.focus == 5 / sb.disk_focus): control fill + focus ring;
     //   active  (sb.disk_active, the Storage screen is shown): subtle fill +
     //           accent donut stroke;
