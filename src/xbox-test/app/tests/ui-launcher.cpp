@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "../ui_launcher.h"
+#include "../playtime.h"
 
 namespace {
 
@@ -383,6 +384,19 @@ int main(int argc, char** argv) {
 
     // ---- pure logic: the focused-tile cut mark (item D4) ----
     // Needs the real Font (glyph advances), so it runs in the rendering section.
+
+    // ---- pure logic: playtime reads as hours and minutes (item D6) ----
+    {
+        using playtime::format_minutes;
+        check(format_minutes(491) == "8 h 11 min", "D6: 491 min reads as 8 h 11 min");
+        check(format_minutes(45) == "45 min", "D6: under an hour stays minutes");
+        check(format_minutes(59) == "59 min", "D6: a minute short of an hour stays minutes");
+        check(format_minutes(60) == "1 h", "D6: an exact hour drops the minutes");
+        check(format_minutes(120) == "2 h", "D6: two exact hours");
+        check(format_minutes(61) == "1 h 1 min", "D6: an hour and a minute");
+        check(format_minutes(0) == "0 min", "D6: zero minutes (the page says Not played yet)");
+        check(format_minutes(6000) == "100 h", "D6: large values stay readable");
+    }
 
     // ---- pure logic: marquee offsets (item 11 + item 23: reading order only) ----
     {

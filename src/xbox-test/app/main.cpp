@@ -51,6 +51,7 @@ extern "C" unsigned ZSTD_isError(size_t code);
 #include "font8x8_basic.h"
 #include "launch_button.h"
 #include "detail_input.h"
+#include "playtime.h"
 #include <xinput.h>
 #include "../uwph/display/gamepad.h"
 
@@ -1552,8 +1553,16 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         else vSub = "App " + std::to_string(m_dApp);
         { const std::string gd = apib::describe(gfx); if (!gd.empty() && gfx.ready) vSub += "  \xC2\xB7  " + gd; }   // graphics API (was the tile badge)
         Game* gm = nullptr; { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == m_dApp) { gm = g.get(); break; } }
-        if (gm && gm->playtime > 0) { char b[48]; snprintf(b, sizeof b, "%u min", gm->playtime); vTime = b; } else vTime = "Not played yet";
-        vAch = "Not tracked yet";   // achievements sync after play (steam_achievements.h); no schema on this page yet
+        if (gm && gm->playtime > 0) vTime = playtime::format_minutes(gm->playtime); else vTime = "Not played yet";
+        // item D6: the achievement count comes from the files the last sync
+        // prepared (schema names + gbe's earned set); without them the row says
+        // so instead of showing a made-up figure.
+        {
+            const std::string ach = steam_achievements::count_from_files(
+                std::filesystem::path(provider_dir(m_dApp)) / "steam_settings" / "achievements.json",
+                std::filesystem::path(provider_dir(m_dApp)) / "saves" / std::to_string(m_dApp) / "achievements.json");
+            vAch = ach.empty() ? "Not tracked yet" : ach;
+        }
         if (gm && gm->lastPlayed > 0) { time_t lt = (time_t)gm->lastPlayed; char b[32]; struct tm tmv{}; localtime_s(&tmv, &lt); strftime(b, sizeof b, "%d %b %Y", &tmv); vLast = b; } else vLast = "Never";
         if (deleting) vStatus = "Deleting...";
         else if (down) { char b[48]; snprintf(b, sizeof b, "Downloading %.0f%%", pct * 100); vStatus = b; }
