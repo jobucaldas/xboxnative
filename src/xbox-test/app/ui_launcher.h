@@ -1223,23 +1223,79 @@ inline void draw_signin(ui::Canvas& c, const Font& f, const SignVM& s) {
 // title, body, note, two real buttons with focus, over the dimmed page.
 // Item 14: focus_yes = false draws the ring on the CANCEL button (the
 // default) — the destructive button is never focused first.
+// Item D3: the body and note WRAP inside the sheet's 704px inner width (the
+// sheet is 800 wide with 48px padding) and the sheet's height follows the
+// wrapped content, so a long line never runs past the right edge and the
+// buttons sit directly under the text instead of after a fixed gap.
+// The layout is pure (confirm_sheet_layout) so tests can pin it without pixels.
+struct ConfirmSheetLayout {
+    float x = 560.0f, w = 800.0f, pad = 48.0f;
+    float top = 0.0f, h = 0.0f;          // the sheet rect
+    float title_y = 0.0f, body_y = 0.0f; // top-anchored text rows
+    float buttons_y = 0.0f;              // the two buttons' top
+    std::vector<std::string> body_lines, note_lines;
+};
+
+inline ConfirmSheetLayout confirm_sheet_layout(const Font& f, const char* body, const char* note) {
+    ConfirmSheetLayout L;
+    const float inner_w = L.w - L.pad * 2.0f;      // 704
+    const float title_top = 40.0f;
+    const float body_top = title_top + 46.0f;      // under the 36px title
+    const float lh_body = f.line_height(Face::Regular, 24);
+    const float lh_note = f.line_height(Face::Regular, 22);
+    L.body_lines = f.wrap(Face::Regular, 24, body ? body : "", inner_w);
+    if (note && *note) L.note_lines = f.wrap(Face::Regular, 22, note, inner_w);
+    const float note_top = body_top + float(L.body_lines.size()) * lh_body + 10.0f;
+    const float buttons_top = note_top + (L.note_lines.empty() ? 0.0f : float(L.note_lines.size()) * lh_note) + 30.0f;
+    L.h = buttons_top + 64.0f + L.pad;
+    L.top = (1080.0f - L.h) * 0.5f;
+    L.title_y = L.top + title_top;
+    L.body_y = L.top + body_top;
+    L.buttons_y = L.top + buttons_top;
+    return L;
+}
+
+// Item D2: what the hint bar offers for the CURRENT focus. A names the
+// focused button (Cancel while Cancel wears the ring; Delete / Log out only
+// once the destructive button does), B always cancels. Pure so tests pin it.
+inline void confirm_hint_labels(bool focus_yes, const char* yes_label, const char* no_label,
+                                const char* out[4]) {
+    out[0] = "A";
+    out[1] = focus_yes ? yes_label : no_label;
+    out[2] = "B";
+    out[3] = no_label;
+}
+
 inline void draw_confirm_sheet(ui::Canvas& c, const Font& f, const char* title, const char* body,
                                const char* note, const char* no_label, const char* yes_label, bool focus_yes) {
     using namespace ui::theme;
     draw_scrim(c);
-    c.fill_round_rect(rect(560, 368, 800, 344), radiusGuide, panel);
-    text(c, f, Face::Semibold, 36, 608, 416, title, ui::theme::text);
-    text(c, f, Face::Regular, 24, 608, 475, body, ui::theme::textDim);
-    if (note && *note) text(c, f, Face::Regular, 22, 608, 516, note, ui::theme::textMuted);
-    c.fill_round_rect(rect(1018, 600, 170, 64), radiusControl, ui::theme::controlDark);
-    button_label(c, f, Face::Semibold, 26, rect(1018, 600, 170, 64), no_label, ui::theme::text2);
-    c.fill_round_rect(rect(1204, 600, 108, 64), radiusControl, ui::theme::accent);
-    button_label(c, f, Face::Semibold, 26, rect(1204, 600, 108, 64), yes_label, ui::theme::onAccent);
+    const ConfirmSheetLayout L = confirm_sheet_layout(f, body, note);
+    const float lh_body = f.line_height(Face::Regular, 24);
+    const float lh_note = f.line_height(Face::Regular, 22);
+    c.fill_round_rect(rect(L.x, L.top, L.w, L.h), radiusGuide, panel);
+    text(c, f, Face::Semibold, 36, L.x + L.pad, L.title_y, title, ui::theme::text);
+    float ty = L.body_y;
+    for (const std::string& ln : L.body_lines) { text(c, f, Face::Regular, 24, L.x + L.pad, ty, ln.c_str(), ui::theme::textDim); ty += lh_body; }
+    ty += 10.0f;
+    for (const std::string& ln : L.note_lines) { text(c, f, Face::Regular, 22, L.x + L.pad, ty, ln.c_str(), ui::theme::textMuted); ty += lh_note; }
+    const float by = L.buttons_y;
+    const Rect no_btn = rect(L.x + L.w - L.pad - 108.0f - 16.0f - 170.0f, by, 170, 64);
+    const Rect yes_btn = rect(L.x + L.w - L.pad - 108.0f, by, 108, 64);
+    c.fill_round_rect(no_btn, radiusControl, ui::theme::controlDark);
+    button_label(c, f, Face::Semibold, 26, no_btn, no_label, ui::theme::text2);
+    c.fill_round_rect(yes_btn, radiusControl, ui::theme::accent);
+    button_label(c, f, Face::Semibold, 26, yes_btn, yes_label, ui::theme::onAccent);
     if (focus_yes)
-        focus_ring(c, rect(1198, 594, 120, 76), radiusControl + ringRadiusDelta, ringWidth);
+        focus_ring(c, rect(yes_btn.x - 6.0f, by - 6.0f, 120, 76), radiusControl + ringRadiusDelta, ringWidth);
     else
-        focus_ring(c, rect(1012, 594, 182, 76), radiusControl + ringRadiusDelta, ringWidth);
-    const char* pairs[4] = {"A", yes_label, "B", no_label};
+        focus_ring(c, rect(no_btn.x - 6.0f, by - 6.0f, 182, 76), radiusControl + ringRadiusDelta, ringWidth);
+    // Item D2: the hint bar says what A does for the CURRENT focus — A Cancel
+    // while Cancel wears the ring, A Delete / A Log out only once the
+    // destructive button does. B always cancels, so it is never offered as
+    // the destructive label.
+    const char* pairs[4];
+    confirm_hint_labels(focus_yes, yes_label, no_label, pairs);
     draw_hint_bar(c, f, pairs, 2, 524.0f);   // review fix 5: same x as the library
 }
 

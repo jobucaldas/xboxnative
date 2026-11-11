@@ -359,6 +359,28 @@ int main(int argc, char** argv) {
         check(!std::strstr(shared.body, " GB"), "shared delete copy quotes no size");
     }
 
+    // ---- pure logic: confirmation sheet hints follow the focus (item D2) ----
+    {
+        const char* p[4];
+        ui_launcher::confirm_hint_labels(false, "Delete", "Cancel", p);
+        check(std::strcmp(p[0], "A") == 0 && std::strcmp(p[1], "Cancel") == 0,
+              "D2: Cancel focused -> A Cancel (never A Delete)");
+        check(std::strcmp(p[2], "B") == 0 && std::strcmp(p[3], "Cancel") == 0,
+              "D2: B is always Cancel");
+        ui_launcher::confirm_hint_labels(true, "Delete", "Cancel", p);
+        check(std::strcmp(p[1], "Delete") == 0, "D2: Delete focused -> A Delete");
+        ui_launcher::confirm_hint_labels(false, "Log out", "Cancel", p);
+        check(std::strcmp(p[1], "Cancel") == 0, "D2: log-out sheet offers A Cancel while Cancel is focused");
+        ui_launcher::confirm_hint_labels(true, "Log out", "Cancel", p);
+        check(std::strcmp(p[1], "Log out") == 0, "D2: log-out sheet offers A Log out once Log out is focused");
+    }
+
+    // ---- pure logic: confirmation sheet wraps inside its width (item D3) ----
+    // (rendering section below owns the Font; this block uses a local one via
+    // the helper's own wrap, so it lives with the other sheet logic checks)
+    // The check that the wrapped lines fit and the buttons sit under the text
+    // needs a real Font, so it runs in the rendering section.
+
     // ---- pure logic: marquee offsets (item 11 + item 23: reading order only) ----
     {
         using ui_launcher::marquee_offset;
@@ -777,6 +799,26 @@ int main(int argc, char** argv) {
         check(lines.size() >= 2, "the long default status wraps to 2 lines (item 18)");
     }
 
+    // item D3: the confirmation sheet wraps its body inside the sheet and the
+    // buttons sit directly under the wrapped text (no fixed gap, no overflow).
+    {
+        LogoutVM v;
+        const ConfirmSheetLayout L = confirm_sheet_layout(font, v.body, v.note);
+        const float inner_w = L.w - L.pad * 2.0f;
+        bool fits = true;
+        for (const std::string& ln : L.body_lines)
+            if (font.measure(Face::Regular, 24, ln) > inner_w + 0.5f) fits = false;
+        check(fits, "D3: every wrapped body line fits inside the sheet width");
+        check(L.body_lines.size() >= 2, "D3: the long log-out body wraps to 2+ lines");
+        check(L.top >= 0.0f && L.top + L.h <= 1080.0f, "D3: the sheet fits the screen height");
+        check(L.buttons_y + 64.0f + L.pad <= L.top + L.h + 0.5f,
+              "D3: the buttons sit inside the sheet (height follows content)");
+        const float text_bottom = L.body_y + float(L.body_lines.size()) * font.line_height(Face::Regular, 24);
+        check(L.buttons_y - text_bottom <= 60.0f,
+              "D3: no big blank gap between the body and the buttons");
+        check(L.buttons_y - text_bottom >= 24.0f, "D3: the buttons keep clear of the text");
+    }
+
     // item 20: button labels are centred by their true ink box. The scan
     // classifies LABEL pixels only: inside the button, brighter than the
     // accent fill (the label is white onAccent; AA between fill and label
@@ -850,22 +892,26 @@ int main(int argc, char** argv) {
             label_centred("UPDATE NOW", 1668, 756, 160, 48, false);
             snap("launcher-20-label-queue");
         }
-        // sheet buttons: Cancel (dark) + Delete (green)
+        // sheet buttons: Cancel (dark) + Delete (green). Item D3 made the sheet
+        // height follow its wrapped content, so the button row is derived from
+        // the same pure layout the draw uses — never a hardcoded y.
         {
             DeleteVM d;
+            const ConfirmSheetLayout L = confirm_sheet_layout(font, d.body, d.note);
             c.fill(ui::theme::page);
             draw_delete_sheet(c, font, d);
-            label_centred("Cancel", 1018, 600, 170, 64, false);
-            label_centred("Delete", 1204, 600, 108, 64, true);
+            label_centred("Cancel", int(L.x + L.w - L.pad - 108.0f - 16.0f - 170.0f), int(L.buttons_y), 170, 64, false);
+            label_centred("Delete", int(L.x + L.w - L.pad - 108.0f), int(L.buttons_y), 108, 64, true);
             snap("launcher-20-label-sheet");
         }
         // Log out sheet: "Log out" (green) + Cancel
         {
             LogoutVM v;
+            const ConfirmSheetLayout L = confirm_sheet_layout(font, v.body, v.note);
             c.fill(ui::theme::page);
             draw_logout_sheet(c, font, v);
-            label_centred("Cancel", 1018, 600, 170, 64, false);
-            label_centred("Log out", 1204, 600, 108, 64, true);
+            label_centred("Cancel", int(L.x + L.w - L.pad - 108.0f - 16.0f - 170.0f), int(L.buttons_y), 170, 64, false);
+            label_centred("Log out", int(L.x + L.w - L.pad - 108.0f), int(L.buttons_y), 108, 64, true);
             snap("launcher-20-label-logout");
         }
     }
@@ -1569,9 +1615,13 @@ int main(int argc, char** argv) {
     {
         const int margin = int(ui::theme::ringOffset) + int(ui::theme::ringWidth) + 2;
         // item 30: every focusable element wears the ring when focused.
+        // `ignore` is a region whose pixels may legitimately differ between the
+        // two states (the hint bar, which item D2 makes follow the focus); it
+        // still counts as a failure that the ring leaks anywhere else.
         const auto run_case = [&](const char* tag, const ui::Rect& r,
                                   const std::function<void()>& unfocused,
-                                  const std::function<void()>& focused) {
+                                  const std::function<void()>& focused,
+                                  const ui::Rect& ignore = rect(0, 0, 0, 0)) {
             c.fill(ui::theme::page);
             unfocused();
             const std::vector<uint32_t> base = px;
@@ -1584,9 +1634,11 @@ int main(int argc, char** argv) {
                     if (!changed) continue;
                     const bool inside = x >= r.x - margin && x < r.x + r.w + margin &&
                                         y >= r.y - margin && y < r.y + r.h + margin;
+                    const bool ignored = ignore.w > 0 && x >= ignore.x && x < ignore.x + ignore.w &&
+                                         y >= ignore.y && y < ignore.y + ignore.h;
                     if (inside) {
                         if (px[size_t(y) * W + x] == ui::theme::focus) ++ring_inside;
-                    } else {
+                    } else if (!ignored) {
                         ++diff_outside;
                     }
                 }
@@ -1702,9 +1754,14 @@ int main(int argc, char** argv) {
                 c.fill(ui::theme::page);
                 draw_confirm_sheet(c, font, "Delete Megabonk?", "Frees 48.2 GB.", "", "Cancel", "Delete", focus_yes);
             };
-            // the ring moves between the two buttons; test the union rect
-            run_case("confirm sheet buttons", rect(1012, 594, 306, 76),
-                     [&] { draw_sheet(true); }, [&] { draw_sheet(false); });
+            // the ring moves between the two buttons; test the union rect,
+            // derived from the same variable-height layout the draw uses (D3)
+            const ConfirmSheetLayout L = confirm_sheet_layout(font, "Frees 48.2 GB.", "");
+            const float no_x = L.x + L.w - L.pad - 108.0f - 16.0f - 170.0f;
+            const float yes_x = L.x + L.w - L.pad - 108.0f;
+            run_case("confirm sheet buttons", rect(no_x - 6.0f, L.buttons_y - 6.0f, (yes_x + 108.0f) - no_x + 12.0f, 76),
+                     [&] { draw_sheet(true); }, [&] { draw_sheet(false); },
+                     rect(0, kHintBandTop, float(W), float(H) - kHintBandTop));
         }
         // search keys: the focused key is accent-filled (distinct focus look)
         {
