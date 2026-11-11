@@ -1367,8 +1367,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                         logf("guest surface handoff native hr=0x%08lx",(unsigned long)result);
                         if(SUCCEEDED(result)&&chain&&*chain) {
                             std::string saved;guest_overlay::fpsOn=read_file_s(g_dir+L"\\overlay.txt",saved)&&saved.find("fps=1")!=std::string::npos;
+                            // RCA experiment: lockmode.txt present => the chain keeps its
+                            // first mode (later ResizeBuffers suppressed with S_OK).
+                            guest_overlay::lockFirstMode=read_file_s(g_dir+L"\\lockmode.txt",saved);
                             DeleteFileW((g_dir+L"\\frametimes.csv").c_str());
-                            logf("overlay: present hooks %s (View+Menu opens the launcher menu)",guest_overlay::install(*chain)?"installed":"unavailable");
+                            logf("overlay: present hooks %s (View+Menu opens the launcher menu)%s",guest_overlay::install(*chain)?"installed":"unavailable",
+                                 guest_overlay::lockFirstMode.load()?" [lockmode: chain locked to its first mode]":"");
                         }
                     } catch(hresult_error const& e) {result=e.code();}
                     SetEvent(done);

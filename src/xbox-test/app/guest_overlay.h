@@ -236,6 +236,17 @@ inline void drain_device(ID3D11Device* dev) {
     ctx->Release();
 }
 inline HRESULT STDMETHODCALLTYPE resize(IDXGISwapChain* c,UINT count,UINT w,UINT h,DXGI_FORMAT f,UINT flags) {
+    // Experiment switch (LocalState\lockmode.txt, read at install): every
+    // resize after the first returns S_OK without touching the chain. RCA
+    // hypothesis: the device reset (0x887a0007) is triggered by the resize
+    // path, so locking the mode should keep the game alive — at its first
+    // resolution — if that is right. First resize still goes through so the
+    // chain matches the window; the S_OK suppressions are counted and logged.
+    if(lockFirstMode&&resizes.load()>0) {
+        ++resizes;lastResizeCount=count;lastResizeW=w;lastResizeH=h;lastResizeHr=S_OK;
+        if(auto s=d3d11_diag::sink)s("overlay: resize suppressed (lockmode), chain keeps its first mode");
+        return S_OK;
+    }
     winrt::com_ptr<ID3D11Device> dev;
     if(SUCCEEDED(c->GetDevice(__uuidof(ID3D11Device),dev.put_void()))&&dev)drain_device(dev.get());
     HRESULT hr=realResize(c,resize_count(count),w,h,f,resize_flags(flags));
@@ -248,6 +259,10 @@ inline bool install(IDXGISwapChain1* chain) {
            patch(&vtable[13],(void*)&resize,(void**)&realResize)&&
            patch(&vtable[22],(void*)&present1,(void**)&realPresent1);
 }
+// RCA experiment, opt-in via LocalState\lockmode.txt (read at the install site
+// in main.cpp, on the launcher UI thread before any guest resize runs; the
+// flag is only read on the guest thread afterwards, hence the atomic).
+inline std::atomic<bool> lockFirstMode{false};
 
 // ---- Input capture while the menu is open. The game reads its pads through
 // Windows.Gaming.Input in this process; GetCurrentReading on the Gamepad and
