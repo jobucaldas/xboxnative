@@ -107,10 +107,14 @@ struct Persona {
     uint32_t game_played_app_id = 0;
     uint64_t gameid = 0;
     std::string game_name;
+    std::string player_name;   // CMsgClientPersonaState.Friend.player_name (15)
+    std::string avatar_hash;   // CMsgClientPersonaState.Friend.avatar_hash (31), raw 20 bytes
     std::map<std::string, std::string> rich_presence;
 };
 // CMsgClientPersonaState: friends[] (2) -> friendid (1), persona_state (2),
-// game_played_app_id (3), game_name (55), gameid (56), rich_presence (71).
+// game_played_app_id (3), player_name (15), avatar_hash (31), game_name (55),
+// gameid (56), rich_presence (71) — field numbers per
+// SteamDatabase/Protobufs (steam_persona.h parses the same shape).
 inline Persona parse_persona(const std::string& body, uint64_t steamid) {
     Persona out;
     for (auto& friendField : pb_parse(body)) {
@@ -120,6 +124,8 @@ inline Persona parse_persona(const std::string& body, uint64_t steamid) {
             if (f.f == 1) id = f.u;
             else if (f.f == 2) p.state = uint32_t(f.u);
             else if (f.f == 3) p.game_played_app_id = uint32_t(f.u);
+            else if (f.f == 15) p.player_name = f.s;
+            else if (f.f == 31) p.avatar_hash = f.s;
             else if (f.f == 55) p.game_name = f.s;
             else if (f.f == 56) p.gameid = f.u;
             else if (f.f == 71) {
@@ -131,6 +137,23 @@ inline Persona parse_persona(const std::string& body, uint64_t steamid) {
         if (id == steamid) { p.found = true; return p; }
     }
     return out;
+}
+// avatar_hash (20 raw bytes) -> the lowercase hex form the avatar URL embeds.
+// An all-zero hash (no avatar set) yields an empty string: the caller keeps
+// its placeholder.
+inline std::string avatar_hash_hex(const std::string& hash) {
+    static const char* digits = "0123456789abcdef";
+    bool all_zero = true;
+    for (unsigned char c : hash) if (c) { all_zero = false; break; }
+    if (hash.empty() || all_zero) return {};
+    std::string out;
+    out.reserve(hash.size() * 2);
+    for (unsigned char c : hash) { out += digits[c >> 4]; out += digits[c & 15]; }
+    return out;
+}
+// The profile picture URL for an avatar hash; empty hex -> empty URL.
+inline std::string avatar_url(const std::string& hex) {
+    return hex.empty() ? std::string() : "https://avatars.fastly.steamstatic.com/" + hex + "_full.jpg";
 }
 // CMsgClientRichPresenceInfo: rich_presence[] (1) -> steamid_user (1),
 // rich_presence_kv (2). The key/value pairs are the same "RP" blob.

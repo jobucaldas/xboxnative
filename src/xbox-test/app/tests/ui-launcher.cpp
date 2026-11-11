@@ -239,17 +239,17 @@ int main(int argc, char** argv) {
     // Selawik-reference comparison stays within RMSE blurred <= 0.02.
     using ui_launcher::grid_tile;
     const ui::Rect g0 = grid_tile(0, 0);
-    check(g0.x == 524 && g0.y == 264 && g0.w == 240 && g0.h == 360, "grid tile 0 at (524,264) 240x360");
+    check(g0.x == 524 && g0.y == 264 && g0.w == 232 && g0.h == 348, "grid tile 0 at (524,264) 232x348");
     const ui::Rect g1 = grid_tile(1, 0);
-    check(g1.x == 524 + 264 && g1.y == 264, "grid pitch x is 264 (240 tile + 24 gap, left-aligned at 524)");
+    check(g1.x == 524 + 272 && g1.y == 264, "grid pitch x is 272 (232 tile + 40 gap, left-aligned at 524)");
     const ui::Rect g4 = grid_tile(4, 0);
-    check(g4.x == 524 + 4 * 264 && g4.x + g4.w == 1820, "5 columns of 240 + 4 gaps of 24 end at 1820, 24px short of 1844");
-    // review fix 1: 5 x 240 + 4 x 24 gap = 1296, left-aligned at 524 like the
-    // title; the pitch is 264 (240 tile + 24 gap), so the last tile's right
-    // edge sits at 524 + 4*264 + 240 = 1820, 24px short of the 1844 edge.
-    check(5 * 240 + 4 * 24 == 1296, "5x240 + 4x24 gap = 1296 across the 1320 content width");
+    check(g4.x == 524 + 4 * 272 && g4.x + g4.w == 1844, "5 columns of 232 + 4 gaps of 40 fill 524..1844 exactly");
+    // review fix 1: 5 x 232 + 4 x 40 = 1320 — the full content width; two
+    // rows pitch 372 (24px gap), row 2 ends exactly at the band top 984.
+    check(5 * 232 + 4 * 40 == 1320, "5x232 + 4x40 gap = 1320 across the content width");
+    check(264 + 372 + 348 == 984, "row 2 (at 636, +348) ends exactly at the band top 984");
     const ui::Rect g5 = grid_tile(5, 0);
-    check(g5.x == 524 && g5.y == 264 + 384, "grid wraps to row 2 with pitch y 384");
+    check(g5.x == 524 && g5.y == 264 + 372 && g5.y + g5.h == 984, "grid wraps to row 2 (636..984, full above band)");
     const ui::Rect gscroll = grid_tile(5, 1);
     check(gscroll.y == 264, "scrolling by one row keeps pitch");
     // cols=7 keeps the mockup's COLUMN COUNT; tile size is shared (the mockup
@@ -358,20 +358,25 @@ int main(int argc, char** argv) {
         check(!std::strstr(shared.body, " GB"), "shared delete copy quotes no size");
     }
 
-    // ---- pure logic: marquee scroll offsets (item 11) ----
+    // ---- pure logic: marquee offsets (item 11 + item 23: reading order only) ----
     {
         using ui_launcher::marquee_offset;
         check(marquee_offset(300, 200, 0) == 0.0f, "static when the text fits the box");
         check(marquee_offset(200, 300, 999) == 0.0f, "no scroll for a short label at any time");
-        check(marquee_offset(300, 200, 0.5f) == marquee_offset(300, 200, 0.5f + 2.0f * (1.2f + 124.0f / 30.0f)),
-              "marquee loop is periodic (same phase, same offset)");
-        check(marquee_offset(300, 100, 0.5f) == marquee_offset(300, 100, 0.5f + 2.0f * (1.2f + 224.0f / 30.0f)),
-              "marquee loop is periodic (same phase, same offset)");
-        check(marquee_offset(300, 100, 0.5f) == 0.0f, "marquee holds before scrolling");
+        check(marquee_offset(300, 100, 0.5f) == 0.0f, "marquee holds at the start (pause)");
         check(marquee_offset(300, 100, 2.0f) > 0.0f, "marquee scrolls after the pause");
+        // the sweep is monotonic (no reverse scroll): the offset grows through
+        // the move phase...
+        const float sweep = 1.2f + 224.0f / 30.0f;   // pause + move for travel 224
+        check(marquee_offset(300, 100, 1.3f) < marquee_offset(300, 100, sweep - 0.1f),
+              "offset grows monotonically through the sweep (no reverse scroll)");
+        // ...and after the end hold the loop RESETS to the start
+        check(marquee_offset(300, 100, sweep + 1.2f + 0.5f) == 0.0f,
+              "resets to the start after the end hold (reading order only)");
         const float a = marquee_offset(300, 100, 100.0f);
         check(a >= 0.0f && a <= 224.0f, "marquee offset stays within text_w + gap");
-        check(marquee_offset(300, 100, 1.0e6f) >= 0.0f, "marquee survives large times (no NaN)");
+        check(marquee_offset(300, 100, 1.0e6f) >= 0.0f && marquee_offset(300, 100, 1.0e6f) <= 224.0f,
+              "marquee survives large times (no NaN)");
     }
 
     // ---- rendering ----
@@ -769,6 +774,422 @@ int main(int argc, char** argv) {
             if (font.measure(Face::Semibold, 32, ln) > inner_w + 0.5f) fits = false;
         check(fits, "every wrapped status line fits the card inner width (item 18)");
         check(lines.size() >= 2, "the long default status wraps to 2 lines (item 18)");
+    }
+
+    // item 20: button labels are centred by their true ink box. The scan
+    // classifies LABEL pixels only: inside the button, brighter than the
+    // accent fill (the label is white onAccent; AA between fill and label
+    // is between the two colours, so the brightness cut keeps it out) and
+    // away from the rounded corners by 4px. Requires |dx|<=1, |dy|<=1 of
+    // the button centre on every button in the launcher.
+    {
+        // shared: ink-centre check of one button rect from the live buffer
+        const auto label_centred = [&](const char* tag, int bx, int by, int bw, int bh, bool on_accent) {
+            const uint32_t fill = on_accent ? ui::theme::accent : ui::theme::controlDark;
+            float lx0 = 1e9f, ly0 = 1e9f, lx1 = -1e9f, ly1 = -1e9f;
+            for (int y = by + 4; y < by + bh - 4; ++y)
+                for (int x = bx + 4; x < bx + bw - 4; ++x) {
+                    const uint32_t p = px[size_t(y) * W + x];
+                    if (p == fill) continue;
+                    // label ink is much brighter than either fill colour
+                    const int pr = int((p >> 16) & 0xFF), pg = int((p >> 8) & 0xFF), pb = int(p & 0xFF);
+                    const int fr = int((fill >> 16) & 0xFF), fg = int((fill >> 8) & 0xFF), fb = int(fill & 0xFF);
+                    if (pr <= fr + 24 || pg <= fg + 24 || pb <= fb + 24) continue;   // fill AA, not label ink
+                    if (float(x) < lx0) lx0 = float(x);
+                    if (float(x) > lx1) lx1 = float(x);
+                    if (float(y) < ly0) ly0 = float(y);
+                    if (float(y) > ly1) ly1 = float(y);
+                }
+            check(lx1 > lx0, (std::string(tag) + ": label ink found inside its button").c_str());
+            if (lx1 <= lx0) return;
+            const float bcx = float(bx) + float(bw) * 0.5f, bcy = float(by) + float(bh) * 0.5f;
+            const float dx = (lx0 + lx1) * 0.5f - bcx, dy = (ly0 + ly1) * 0.5f - bcy;
+            const std::string msg = (std::string(tag) + ": label ink centre within 1px of the button centre (item 20)");
+            check(std::fabs(dx) <= 1.0f && std::fabs(dy) <= 1.0f, msg.c_str());
+        };
+        // REFRESH QR: green accent button on sign-in
+        {
+            SignVM s;
+            c.fill(ui::theme::page);
+            draw_signin(c, font, s);
+            label_centred("REFRESH QR", 981, 576, 366, 80, true);
+            snap("launcher-04-signin");
+        }
+        // primary buttons on the game page: PLAY (green) and INSTALL
+        {
+            GameVM g;
+            g.has_art = true;
+            g.primary.installed = true;
+            g.install_ok = true;
+            c.fill(ui::theme::page);
+            draw_game(c, font, g);
+            label_centred("PLAY", 64, 384, 256, 80, true);
+            snap("launcher-20-label-play");
+        }
+        {
+            GameVM g;
+            g.has_art = true;
+            c.fill(ui::theme::page);
+            draw_game(c, font, g);
+            label_centred("INSTALL", 64, 384, 256, 80, true);
+            snap("launcher-20-label-install");
+        }
+        // UPDATE NOW / RESUME / CANCEL / PAUSE on the queue rows
+        {
+            const std::vector<QueueRowVM> rows = make_rows(2, false);
+            const std::vector<QueueRowVM> ups = make_rows(1, true);
+            SidebarVM sb; sb.active = 4;
+            QueueVM q; q.rows = rows.data(); q.row_count = int(rows.size());
+            q.updates = ups.data(); q.update_count = int(ups.size());
+            // rows[0] is busy (make_rows sets 62% downloading): PAUSE + CANCEL both show
+            c.fill(ui::theme::page);
+            draw_download_queue(c, font, sb, q, /*draw_hints=*/false);
+            label_centred("PAUSE", 1556, 348, 128, 48, false);
+            label_centred("CANCEL", 1700, 348, 128, 48, false);
+            label_centred("UPDATE NOW", 1668, 756, 160, 48, false);
+            snap("launcher-20-label-queue");
+        }
+        // sheet buttons: Cancel (dark) + Delete (green)
+        {
+            DeleteVM d;
+            c.fill(ui::theme::page);
+            draw_delete_sheet(c, font, d);
+            label_centred("Cancel", 1018, 600, 170, 64, false);
+            label_centred("Delete", 1204, 600, 108, 64, true);
+            snap("launcher-20-label-sheet");
+        }
+        // Log out sheet: "Log out" (green) + Cancel
+        {
+            LogoutVM v;
+            c.fill(ui::theme::page);
+            draw_logout_sheet(c, font, v);
+            label_centred("Cancel", 1018, 600, 170, 64, false);
+            label_centred("Log out", 1204, 600, 108, 64, true);
+            snap("launcher-20-label-logout");
+        }
+    }
+
+    // item 21: the reserved hint band (kHintBandTop..bottom, right of the
+    // sidebar) carries ONLY the hint bar. Realistic library (772 tiles) with
+    // the base bar suppressed: every pixel in the band must be page.
+    {
+        const std::vector<TileVM> tiles = make_tiles(772);
+        SidebarVM sb; sb.all_count = 772; sb.installed_count = 4; sb.queue_count = 1;
+        LibraryVM lib; lib.tiles = tiles.data(); lib.tile_count = 772;
+        c.fill(ui::theme::page);
+        draw_library(c, font, sb, /*lib*/ lib, /*draw_hints=*/false);
+        bool band_pure = true;
+        for (int y = int(kHintBandTop); y < H && band_pure; ++y)
+            for (int x = 524; x < 1844; ++x)
+                if (px[size_t(y) * W + x] != ui::theme::page) { band_pure = false; break; }
+        check(band_pure, "item 21: hint band pure page with hints off (772 tiles)");
+    }
+
+    // round-5 item 1: two FULL rows end above the hint band. 772-tile library
+    // with focus on a bottom-row tile: (a) the last visible row's full tile
+    // rect + focus ring ends at or above the band top, and (b) every visible
+    // tile in both rows carries name-label ink in its bottom 40px.
+    {
+        const std::vector<TileVM> tiles = make_tiles(772);
+        SidebarVM sb; sb.all_count = 772; sb.installed_count = 4; sb.queue_count = 1;
+        LibraryVM lib; lib.tiles = tiles.data(); lib.tile_count = 772;
+        lib.sel = 9;   // row 1 (second visible row), column 4: bottom-right tile
+        c.fill(ui::theme::page);
+        draw_library(c, font, sb, lib, /*draw_hints=*/false);
+        // (a) the focused bottom-row tile's ring bottom (tile.y + h + ring
+        // offset 6 + half the 3px stroke) stays at or above the band top
+        const Rect g9 = grid_tile(9, lib.top_row);
+        check(g9.y == 636.0f && g9.y + g9.h == 984.0f,
+              "round-5: the second row sits at 636..984, fully above the band");
+        bool ring_bottom_clean = true;
+        for (int y = int(kHintBandTop); y < H && ring_bottom_clean; ++y)
+            for (int x = int(g9.x) - 10; x < int(g9.x + g9.w) + 10; ++x)
+                if (px[size_t(y) * W + x] != ui::theme::page) { ring_bottom_clean = false; break; }
+        check(ring_bottom_clean, "round-5: the focused bottom-row tile's ring ends at or above the band top");
+        // (b) name-label ink in the bottom 40px of every visible tile
+        int missing = 0;
+        for (int i = 0; i < 10; ++i) {
+            const Rect g = grid_tile(i, lib.top_row);
+            bool ink = false;
+            for (int y = int(g.y + g.h) - 40; y < int(g.y + g.h) && !ink; ++y)
+                for (int x = int(g.x); x < int(g.x + g.w); ++x) {
+                    const uint32_t p = px[size_t(y) * W + x];
+                    // white label ink on the dark scrim: clearly bright
+                    if (((p >> 16) & 0xFF) > 180 && ((p >> 8) & 0xFF) > 180 && (p & 0xFF) > 180) { ink = true; break; }
+                }
+            if (!ink) ++missing;
+        }
+        check(missing == 0, "round-5: every visible tile in both rows has name-label ink");
+    }
+
+    // item 21: the band stays pure on the other page screens too — queue and
+    // storage (both views) rendered with hints off, realistic data.
+    {
+        const auto band_pure_check = [&](const char* tag) {
+            for (int y = int(kHintBandTop); y < H; ++y)
+                for (int x = 524; x < 1844; ++x)
+                    if (px[size_t(y) * W + x] != ui::theme::page) {
+                        check(false, (std::string(tag) + ": hint band pure page with hints off (item 21)").c_str());
+                        return;
+                    }
+            check(true, (std::string(tag) + ": hint band pure page with hints off (item 21)").c_str());
+        };
+        // queue: a row busy + finished downloads and two updates
+        {
+            const std::vector<QueueRowVM> rows = make_rows(8, false);
+            const std::vector<QueueRowVM> ups = make_rows(2, true);
+            SidebarVM sb; sb.all_count = 772; sb.installed_count = 4; sb.queue_count = 1; sb.active = 4;
+            QueueVM q; q.rows = rows.data(); q.row_count = int(rows.size());
+            q.updates = ups.data(); q.update_count = int(ups.size());
+            c.fill(ui::theme::page);
+            draw_download_queue(c, font, sb, q, /*draw_hints=*/false);
+            band_pure_check("queue");
+        }
+        // storage drive list: 2 drives, one the install target
+        {
+            SidebarVM sb; sb.active = 5;
+            StorageDriveVM dv[2] = {
+                {"Internal", "49% used of 476 GB", 49, true, false},
+                {"E:", "12% used of 1.8 TB", 12, false, false},
+            };
+            StorageVM st; st.drives = dv; st.n_drives = 2;
+            c.fill(ui::theme::page);
+            draw_storage(c, font, sb, st, /*draw_hints=*/false);
+            band_pure_check("storage drives");
+        }
+        // storage open drive: 8 games (scrolls) with realistic names; row 0
+        // is the caller-supplied action row (empty size -> accent style)
+        {
+            SidebarVM sb; sb.active = 5;
+            std::vector<StorageGameVM> games(8);
+            for (size_t i = 0; i < games.size(); ++i) {
+                games[i].name = i == 0 ? "Use for new installs"
+                                       : "Game with a long installed name that must fit the row";
+                games[i].size = i == 0 ? "" : "48.2 GB";
+            }
+            games[0].focused = true;
+            StorageVM st; st.games = games.data(); st.n_games = int(games.size());
+            st.open_drive = 1; st.drive_title = "E:";
+            c.fill(ui::theme::page);
+            draw_storage(c, font, sb, st, /*draw_hints=*/false);
+            band_pure_check("storage games");
+        }
+    }
+
+    // item 22: the storage screen's two views — drive cards (112 high, 24px
+    // gaps, focus ring + lighter fill, install-target accent bar + pill
+    // marker, 10px usage bar with a full track) and the open drive's games
+    // list (72px rows, name/size, action row 0, ring offset 4, empty state,
+    // scroll).
+    {
+        SidebarVM sb; sb.active = 5;
+        // drive list: the focused card fills controlDark, the other control
+        StorageDriveVM dv[2] = {
+            {"Internal", "49% used of 476 GB", 49, true, true},
+            {"E:", "12% used of 1.8 TB", 12, false, false},
+        };
+        StorageVM st; st.drives = dv; st.n_drives = 2;
+        c.fill(ui::theme::page);
+        draw_storage(c, font, sb, st);
+        // pixel checks first — snap() resets the buffer to page colour.
+        // Cards: y 200..312 and 336..448 (112 high + 24 gap).
+        const uint32_t f0 = px[size_t(232) * W + 1184];
+        const uint32_t f1 = px[size_t(380) * W + 1184];
+        check(f0 == ui::theme::controlDark, "item 22: the focused drive card fills controlDark");
+        check(f1 == ui::theme::control, "item 22: the unfocused drive card fills control");
+        check(px[size_t(320) * W + 1184] == ui::theme::page,
+              "item 22: a 24px page gap separates the drive cards");
+        check(px[size_t(311) * W + 1184] == ui::theme::controlDark &&
+              px[size_t(336) * W + 1184] == ui::theme::control,
+              "item 22: cards are 112 high starting at y=200");
+        // the install target wears the accent bar at the card's left edge
+        check(px[size_t(232) * W + 527] == ui::theme::accent,
+              "item 22: the install target wears the accent bar");
+        // the pill marker: non-fill ink right of x=1600 inside the card
+        bool marker = false;
+        for (int y = 205; y < 308 && !marker; ++y)
+            for (int x = 1600; x < 1810; ++x) {
+                const uint32_t p = px[size_t(y) * W + x];
+                if (p != ui::theme::controlDark && p != ui::theme::control && p != ui::theme::page &&
+                    p != ui::theme::track && p != ui::theme::accent) { marker = true; break; }
+            }
+        check(marker, "item 22: the install-target pill renders in the drive card");
+        // the 10px usage bar sits at y+51 (=251 on card 1); probes stay
+        // inside the fill/track, away from the rounded ends
+        check(px[size_t(253) * W + 852 + 150] == ui::theme::accent &&
+              px[size_t(257) * W + 852 + 150] == ui::theme::accent,
+              "item 22: the 10px usage bar fills used_pct of the track");
+        check(px[size_t(253) * W + 852 + 430] == ui::theme::track &&
+              px[size_t(257) * W + 852 + 430] == ui::theme::track,
+              "item 22: the usage bar's track extends across the card");
+        snap("launcher-08-storage-drives");
+
+        // games view: row 0 is the accent action row, 72px rows on an 84
+        // pitch, ring offset 4, muted "Installed games" subtitle
+        std::vector<StorageGameVM> games(8);
+        for (size_t i = 0; i < games.size(); ++i) {
+            games[i].name = i == 0 ? "Use for new installs" : "Installed game";
+            games[i].size = i == 0 ? "" : "12.4 GB";
+        }
+        games[2].focused = true;
+        StorageVM stg; stg.games = games.data(); stg.n_games = int(games.size());
+        stg.open_drive = 1; stg.drive_title = "E:";
+        c.fill(ui::theme::page);
+        draw_storage(c, font, sb, stg);
+        bool row0 = false, action_accent = false;
+        for (int y = 220; y < 268; ++y)
+            for (int x = 548; x < 900; ++x) {
+                const uint32_t p = px[size_t(y) * W + x];
+                if (p == ui::theme::accentSoft) action_accent = true;
+                if (p != ui::theme::page && p != ui::theme::control && p != ui::theme::controlDark)
+                    row0 = true;
+            }
+        check(row0, "item 22: row 0 is the 'Use for new installs' action row");
+        check(action_accent, "item 22: the action row (empty size) draws accent-soft");
+        bool ring_seen = false;
+        for (int y = 356; y < 456 && !ring_seen; ++y)
+            for (int x = 506; x < 530; ++x)
+                if (px[size_t(y) * W + x] == ui::theme::focus) { ring_seen = true; break; }
+        check(ring_seen, "item 22: the focused row carries the 4px-off ring");
+        bool gap_pure = true;
+        for (int x = 524; x < 1844; ++x)
+            if (px[size_t(276) * W + x] != ui::theme::page) { gap_pure = false; break; }
+        check(gap_pure, "item 22: no dividers — the row gap stays page");
+        bool sub = false;
+        for (int y = 133; y < 165 && !sub; ++y)
+            for (int x = 524; x < 900; ++x)
+                if (px[size_t(y) * W + x] == ui::theme::textDim) { sub = true; break; }
+        check(sub, "item 22: the drive page title carries a muted 'Installed games' subtitle");
+        snap("launcher-09-storage-games");
+
+        // scrolling: 20 distinct names; scroll=2 moves the first visible row,
+        // and the band stays clear
+        std::vector<StorageGameVM> many(20);
+        static char gname[20][32];
+        for (size_t i = 0; i < many.size(); ++i) {
+            std::snprintf(gname[i], sizeof gname[i], "Installed game %d", int(i));
+            many[i].name = gname[i];
+            many[i].size = "12.4 GB";
+        }
+        StorageVM st2; st2.games = many.data(); st2.n_games = int(many.size());
+        st2.open_drive = 1; st2.drive_title = "E:";
+        c.fill(ui::theme::page);
+        draw_storage(c, font, sb, st2, /*draw_hints=*/false);
+        const std::vector<uint32_t> unscrolled = px;
+        st2.game_scroll = 2;
+        c.fill(ui::theme::page);
+        draw_storage(c, font, sb, st2, /*draw_hints=*/false);
+        bool differs = false;
+        for (int y = 200; y < 272 && !differs; ++y)
+            for (int x = 548; x < 900; ++x)
+                if (px[size_t(y) * W + x] != unscrolled[size_t(y) * W + x]) { differs = true; break; }
+        check(differs, "item 22: game_scroll moves the first visible row");
+        bool band2 = true;
+        for (int y = int(kHintBandTop); y < H && band2; ++y)
+            for (int x = 524; x < 1844; ++x)
+                if (px[size_t(y) * W + x] != ui::theme::page) { band2 = false; break; }
+        check(band2, "item 22: a scrolled games list never paints the hint band");
+
+        // empty state
+        StorageVM empty; empty.games = nullptr; empty.n_games = 0; empty.open_drive = 0;
+        empty.drive_title = "Internal";
+        c.fill(ui::theme::page);
+        draw_storage(c, font, sb, empty, /*draw_hints=*/false);
+        bool empty_seen = false;
+        for (int y = 208; y < 250 && !empty_seen; ++y)
+            for (int x = 548; x < 900; ++x)
+                if (px[size_t(y) * W + x] != ui::theme::page) { empty_seen = true; break; }
+        check(empty_seen, "item 22: the empty drive shows 'No games installed here'");
+    }
+
+    // item 26: the Filters button shows its active state when any filter is
+    // on — label "Filters · N" and an accent border; the off state is the
+    // plain label with no accent ring.
+    {
+        const auto filters_pixels = [&](bool active, int& label_found, int& accent_found) {
+            LibraryVM lib; lib.filters_active = active ? 1 : 0;
+            c.fill(ui::theme::page);
+            draw_filters_control(c, font, lib, 1692.0f, 168.0f);
+            label_found = 0; accent_found = 0;
+            for (int y = 168; y < 228; ++y)
+                for (int x = 1692; x < 1844; ++x) {
+                    const uint32_t p = px[size_t(y) * W + x];
+                    if (p == ui::theme::accent) ++accent_found;
+                    else if (p != ui::theme::control && p != ui::theme::page) ++label_found;
+                }
+        };
+        int label, accent;
+        filters_pixels(false, label, accent);
+        check(label > 0 && accent == 0, "item 26: Filters off — label drawn, no accent border");
+        filters_pixels(true, label, accent);
+        check(accent > 0, "item 26: Filters on — the accent border renders");
+        // the count label: with filters_active=1 the button's text is longer
+        // ("Filters · 1") than the plain label — more label pixels
+        int label0, accent0;
+        filters_pixels(false, label0, accent0);
+        filters_pixels(true, label, accent);
+        check(label > label0, "item 26: the Filters label reads 'Filters · N' when active");
+    }
+
+    // item 20: hint discs are complete, identical in size, and share one
+    // centre y — scanned from real renders of every hint-bearing screen.
+    {
+        // scan a disc row: columns where the hint band carries non-page pixels
+        // in the disc's y range; the leftmost run of disc-sized columns is the
+        // first disc. Simple completeness check: every prompt disc's ink bbox
+        // is kHintDiscPx wide/tall (+-1) and all discs share a centre y.
+        const auto disc_boxes = [&](const char* tag, const char* const* pairs, int n) {
+            c.fill(ui::theme::page);
+            draw_hint_bar(c, font, pairs, n, 524.0f);
+            // scan the band for the discs' ink: columns with any non-page pixel
+            // in the disc y-range [kHintY, kHintY+kHintDiscPx]
+            const int y0 = int(kHintY), y1 = int(kHintY + kHintDiscPx) + 1;
+            // find connected column runs (each run = one disc or a label)
+            std::vector<int> cols;
+            for (int x = 0; x < W; ++x) {
+                bool ink = false;
+                for (int y = y0; y < y1; ++y)
+                    if (px[size_t(y) * W + x] != ui::theme::page) { ink = true; break; }
+                cols.push_back(ink ? 1 : 0);
+            }
+            // disc runs: for each pair, the disc is the first kHintDiscPx-wide run
+            float first_cy = -1;
+            int found = 0;
+            int x = 0;
+            while (x < W) {
+                if (!cols[size_t(x)]) { ++x; continue; }
+                int run0 = x;
+                while (x < W && cols[size_t(x)]) ++x;
+                const int run_w = x - run0;
+                // measure the run's vertical ink bbox
+                float by0 = 1e9f, by1 = -1e9f;
+                for (int yy = y0 - 2; yy < y1 + 2; ++yy)
+                    for (int xx = run0; xx < x; ++xx)
+                        if (px[size_t(yy) * W + xx] != ui::theme::page) {
+                            if (yy < by0) by0 = float(yy);
+                            if (yy > by1) by1 = float(yy);
+                        }
+                const float h = by1 - by0 + 1;
+                // labels are ~14-16px tall (hintText); only disc-sized runs
+                // count. The B ring's AA ink is ~kHintDiscPx-2 wide, so a run
+                // from kHintDiscPx-3 already means a disc (labels never reach
+                // that width in this y range).
+                if (run_w < int(kHintDiscPx) - 3 || h < kHintDiscPx - 3.0f) continue;
+                check(h >= kHintDiscPx - 3.0f && h <= kHintDiscPx + 2.0f,
+                        (std::string(tag) + ": disc is complete (bbox h " +
+                         std::to_string(int(h)) + " ~ kHintDiscPx)").c_str());
+                const float cy = (by0 + by1) * 0.5f;
+                if (first_cy < 0) first_cy = cy;
+                else check(std::fabs(cy - first_cy) <= 1.0f,
+                           (std::string(tag) + ": all discs share one centre y").c_str());
+                ++found;
+            }
+            check(found >= n, (std::string(tag) + ": found all prompt discs").c_str());
+        };
+        // item 20: every hint-bearing screen's discs are complete and aligned
+        disc_boxes("library", kLibraryHints, 3);
+        disc_boxes("queue", kQueueHints, 3);
+        disc_boxes("sign-in", kSignHints, 2);
     }
 
     std::printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "OK", g_failures, g_failures == 1 ? "" : "s");

@@ -31,17 +31,21 @@ using ui::rect;
 
 // ---- shared geometry (1920x1080) ----
 // Library grid: item 4 — MAX 5 columns of 2:3 tiles inside the content area
-// (x 524..1844 = 1320px): 5 tiles of 240 + 4 gaps of 30 = 1320. Two rows of
-// 360 + a 24px row gap end at y=1028; rows scroll by one and clip above the
-// hint bar (kGridClipY).
+// (x 524..1844 = 1320px): 5 tiles of 232 + 4 gaps of 40 = 1320. Two rows of
+// 348 + a 24px row gap end at y=984 (row 1 at 264..612, row 2 at 636..984);
+// rows scroll by one and clip above the hint band (kGridClipY). The focused
+// bottom-row tile's ring extends 6px below the tile (to y=990), so the band
+// top sits at 996 — the ring stays complete and the bar keeps its place.
 constexpr float kHintDiscPx = 26.0f;    // prompt disc diameter in the theme::hint bar
-constexpr float kHintY      = 1007.0f;  // prompt disc top row
+constexpr float kHintY      = 1007.0f;  // prompt disc top row (inside the reserved band)
+constexpr float kHintBandTop = 996.0f;  // item 21: reserved bottom band; page body ends here
+constexpr float kHintRight  = 1844.0f;  // item 21: the hint bar right-aligns to this edge
 constexpr float kTitleX     = 524.0f, kTitleY = 73.5f;   // screen title, top-left
 constexpr float kGridX      = 524.0f, kGridY = 264.0f;   // first tile's top-left
-constexpr float kTileW      = 240.0f, kTileH = 360.0f;   // 2:3 tiles
-constexpr float kTilePitchX = 248.0f, kTilePitchY = 384.0f;
+constexpr float kTileW      = 232.0f, kTileH = 348.0f;   // 2:3 tiles
+constexpr float kTilePitchX = 272.0f, kTilePitchY = 372.0f;
 constexpr int   kGridCols   = 5;
-constexpr float kGridClipY  = 988.0f;   // grid clips here, above the hint bar
+constexpr float kGridClipY  = 996.0f;   // grid clips here, at the hint band top
 constexpr float kSidebarX   = 32.0f, kSidebarY = 32.0f;
 constexpr float kSidebarW   = 411.0f, kSidebarH = 1016.0f;
 
@@ -73,14 +77,32 @@ inline void text_r(ui::Canvas& c, const Font& f, ui::Face face, float px, float 
     text(c, f, face, px, right - w, y_top, s, color, ls);
 }
 
+// item 20: a button label centred by its true ink box (whole string, both
+// axes). text_c centres by advance width, which lands a pixel or two off
+// whenever the first/last side bearings differ; the ink box puts the
+// visible glyphs' centre exactly on the button centre.
+inline void button_label(ui::Canvas& c, const Font& f, ui::Face face, float px_size,
+                         const ui::Rect& button, const char* s, uint32_t color) {
+    float bx0, by0, bx1, by1;
+    if (f.string_ink_box(face, px_size, s, bx0, by0, bx1, by1)) {
+        f.draw(c, face, px_size,
+               button.x + button.w * 0.5f - (bx0 + bx1) * 0.5f,
+               button.y + button.h * 0.5f - (by0 + by1) * 0.5f,
+               s, std::strlen(s), color);
+    } else {
+        text_c(c, f, face, px_size, button.x + button.w * 0.5f,
+               button.y + button.h * 0.5f - px_size * 0.6f, s, color);
+    }
+}
+
 // ---- pure grid geometry (unit-tested with assert) ----
 // The live grid is 5 columns of 2:3 tiles (item 4). The mockup-comparison
 // test passes cols=7, which restores the ORIGINAL mockup layout (168x252
 // tiles, pitch 192x276) so the RMSE gate stays meaningful.
-inline float tile_w(int cols) { return cols <= 5 ? 240.0f : 168.0f; }
-inline float tile_h(int cols) { return cols <= 5 ? 360.0f : 252.0f; }
-inline float tile_pitch_x(int cols) { return cols <= 5 ? 264.0f : 192.0f; }
-inline float tile_pitch_y(int cols) { return cols <= 5 ? 384.0f : 276.0f; }
+inline float tile_w(int cols) { return cols <= 5 ? 232.0f : 168.0f; }
+inline float tile_h(int cols) { return cols <= 5 ? 348.0f : 252.0f; }
+inline float tile_pitch_x(int cols) { return cols <= 5 ? 272.0f : 192.0f; }
+inline float tile_pitch_y(int cols) { return cols <= 5 ? 372.0f : 276.0f; }
 // cols lets the mockup-comparison test keep the original 7-column layout
 // (LibraryVM::cols, default 5 per item 4); pass 7 there.
 inline Rect grid_tile(int index, int top_row, int cols = kGridCols) {
@@ -162,6 +184,9 @@ struct SidebarVM {
     // item 14: the PROFILE row is focusable (logout affordance); main.cpp
     // derives it from (m_focus, m_sidebar) at draw time.
     bool profile_focus = false;
+    // item 24 (drawing side): the signed-in user's avatar, circle-masked in
+    // the sidebar's profile row; empty falls back to the placeholder circle.
+    ui::Image avatar{};
 };
 
 struct TileVM {
@@ -192,6 +217,7 @@ struct LibraryVM {
     bool search_open = false;    // on-screen keyboard overlay is up
     int search_key = 0;          // keyboard cursor (ui_nav::search_key ids)
     const char* query = "";      // live query text; filters the caller's tiles
+    int filters_active = 0;      // item 26: enabled filter count (label + accent)
     float t = 0.0f;              // seconds (item 11): drives the marquee scroll
 };
 
@@ -293,7 +319,29 @@ struct SignVM {
     bool refresh_focused = true;
 };
 
-// ---- drawing ----------------------------------------------------------------
+// ---- storage management (item 22) -------------------------------------------
+// Drive rows as selectable cards; open_drive >= 0 shows that drive's games.
+struct StorageDriveVM {
+    const char* title = "";        // "Internal", "E:" ...
+    const char* detail = "";       // e.g. "49% used of 30.0 GB"
+    int used_pct = 0;              // 0..100 — drives the usage bar under the detail
+    bool install_target = false;   // the drive new installs go to
+    bool focused = false;          // the pad's row (ring)
+};
+
+struct StorageGameVM {
+    const char* name = "";
+    const char* size = "";
+    bool focused = false;
+};
+
+struct StorageVM {
+    const StorageDriveVM* drives = nullptr; int n_drives = 0;
+    const StorageGameVM* games = nullptr;   int n_games = 0;
+    int open_drive = -1;           // >= 0: the drive list is open at this index
+    const char* drive_title = "";  // the open drive's name (page title when open)
+    int game_scroll = 0;           // the open drive's list: first visible row
+};
 
 // ---- drawing ----------------------------------------------------------------
 //
@@ -310,9 +358,9 @@ struct SignVM {
 //   drives the focused tile's marquee). Tiles carry name_w (measured label
 //   width; 0 = fits). Sort options live in kSortOptions (3); the Filters panel
 //   rows come from the caller (draw_filters_panel).
-//   Grid (review fix 1): 5 columns of 240x360, pitch x 264 (24px gaps),
-//   left-aligned at x=524 like the title; 5x240+4x24 = 1296 of the 1320
-//   content width, rows pitch 384 (24px row gaps).
+//   Grid (review fix 1): 5 columns of 232x348, pitch x 272 (40px gaps),
+//   left-aligned at x=524 like the title; 5x232+4x40 = 1320 of the 1320
+//   content width, rows pitch 372 (24px row gaps), two rows end at 984.
 //   Popups (review fix 2): draw_sort_popup — ONLY the sort options, left-
 //   aligned under the Sort control (x=524, w=430); draw_filters_panel — the
 //   toggle rows under the Filters button, right edge at 1844; only one popup
@@ -349,10 +397,11 @@ inline void focus_ring(ui::Canvas& c, const ui::Rect& r, float radius, float wid
                         ui::theme::focus, Align::Center);
 }
 
-// The bottom hint bar (item 5): ONE consistent component — same position on
-// every screen, all items on one line, vertically centred on the disc row,
-// equal 40px gaps. pairs = {"A","Select", "B","Back", "M","Menu"}; n = pairs.
-// A is a filled disc; B/X/Y are outlined; M is the hamburger.
+// The bottom hint bar (item 5 + item 21): ONE component on every screen,
+// RIGHT-ALIGNED to kHintRight inside the reserved bottom band (y >= kHintBandTop),
+// all items on one line, equal 40px gaps. pairs = {"A","Select",...}, n = pairs.
+// x0 stays the LEFT limit (the bar never crosses it); the layout starts from
+// the right edge and runs left.
 inline float draw_hint_bar(ui::Canvas& c, const Font& f, const char* const* pairs, int n, float x0 = ui::theme::margin) {
     const float px = ui::theme::hintText.px;
     const float cy = kHintY + kHintDiscPx * 0.5f;
@@ -360,13 +409,20 @@ inline float draw_hint_bar(ui::Canvas& c, const Font& f, const char* const* pair
     // the label's vertical centre on the disc centre (item 5: centred labels).
     const float lh = f.line_height(Face::Regular, px);
     const float label_top = cy - lh * 0.5f;
-    float x = x0;
+    // measure pass for the right alignment (item 21)
+    float total_w = 0.0f;
+    int count = 0;
+    for (int i = 0; i + 1 < n * 2; i += 2, ++count)
+        total_w += kHintDiscPx + 12.0f + f.measure(Face::Regular, px, pairs[i + 1]);
+    if (count > 1) total_w += 40.0f * (count - 1);
+    float x = kHintRight - total_w;
+    if (x < x0) x = x0;   // never run past the content's left edge
     for (int i = 0; i + 1 < n * 2; i += 2) {
         const char key = pairs[i][0];
         const char* label = pairs[i + 1];
         if (key == 'M') {
-            // mockup: the hamburger sits in the same 28px disc as the outlined prompts
-            ui::glyphs::menu(c, x + kHintDiscPx * 0.5f, cy, kHintDiscPx + 2.0f, ui::theme::glyph, 0xFFC8C8C8);
+            // item 20: same disc size as every other prompt (complete, equal)
+            ui::glyphs::menu(c, x + kHintDiscPx * 0.5f, cy, kHintDiscPx, ui::theme::glyph, 0xFFC8C8C8);
         } else {
             const bool filled = key == 'A';
             const uint32_t disc = filled ? ui::theme::glyph : 0;
@@ -374,8 +430,8 @@ inline float draw_hint_bar(ui::Canvas& c, const Font& f, const char* const* pair
             if (filled) {
                 ui::glyphs::face_button(c, x + kHintDiscPx * 0.5f, cy, kHintDiscPx, key, f, disc, letter);
             } else {
-                // mockup: 2px stroke centred on r=13 → 28px outer ring
-                c.stroke_circle(x + kHintDiscPx * 0.5f, cy, kHintDiscPx * 0.5f, 2.0f,
+                // item 20: outer diameter == kHintDiscPx (stroke centred on r-1)
+                c.stroke_circle(x + kHintDiscPx * 0.5f, cy, kHintDiscPx * 0.5f - 1.0f, 2.0f,
                                 ui::theme::glyph, Align::Center);
                 float ix0, iy0, ix1, iy1;   // centre the visible letter on the ring
                 if (f.ink_box(Face::Bold, 15.0f, std::string(1, key), ix0, iy0, ix1, iy1))
@@ -400,10 +456,15 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
     // drawn BEFORE the avatar/persona so they sit on top of it.
     if (sb.profile_focus || ui_nav::kSidebarProfile == sb.focus)
         c.fill_round_rect(rect(40, 68, 395, 64), radiusControl, ui::theme::control);
-    // avatar: circle + head + shoulders
-    c.fill_circle(kSidebarX + 60, 100, 28, kAvatarBg);
-    c.fill_circle(kSidebarX + 60, 94, 10, 0xFFC8C8C8);
-    c.fill_round_rect(rect(kSidebarX + 44, 106, 32, 14), 7, 0xFFC8C8C8);
+    // item 24: the signed-in user's avatar, circle-masked; empty draws the
+    // placeholder (head + shoulders). Same diameter as the placeholder (56).
+    if (sb.avatar.px && sb.avatar.w > 0 && sb.avatar.h > 0)
+        c.draw_image(sb.avatar, rect(kSidebarX + 32, 72, 56, 56), ui::Fit::Cover, 28.0f);
+    else {
+        c.fill_circle(kSidebarX + 60, 100, 28, kAvatarBg);
+        c.fill_circle(kSidebarX + 60, 94, 10, 0xFFC8C8C8);
+        c.fill_round_rect(rect(kSidebarX + 44, 106, 32, 14), 7, 0xFFC8C8C8);
+    }
     // item 9: persona not resolved -> a neutral label, never a blank row
     text(c, f, Face::Regular, 24, 136, 85.5f, sb.persona && *sb.persona ? sb.persona : "Signed in",
          sb.profile_focus || ui_nav::kSidebarProfile == sb.focus ? ui::theme::text : ui::theme::textDim);
@@ -464,25 +525,24 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
 // ---- library screen (mockup 01) ----
 constexpr const char* kLibraryHints[6] = {"A", "Select", "B", "Back", "M", "Menu"};
 // sort options (item 1); mode indexes match ui_nav::cycle_sort's caller
-constexpr const char* kSortOptions[3] = {"Most played", "Recently played", "Alphabetical"};
+constexpr const char* kSortOptions[3] = {"Alphabetical", "Most played", "Recently played"};
 
-// item 11: marquee scroll offset for a focused tile's label. Static when the
-// text fits box_w; otherwise a smooth leftward scroll with a 1.2s pause at
-// each end, looping. text_w > box_w required for any movement.
+// item 11 + 23: marquee offset for a focused tile's label. Static when the
+// text fits box_w. Otherwise, in READING order only (item 23): hold at the
+// start (pause), scroll left until the end is visible, hold at the end, then
+// reset INSTANTLY to the start (no slow scroll back) and loop.
 inline float marquee_offset(float text_w, float box_w, float t) {
     if (text_w <= box_w || text_w <= 0) return 0.0f;
     if (t < 0) t = 0.0f;                                 // negative times clamp to the start
     const float travel = text_w - box_w + 24.0f;        // + ellipsis gap
     const float pause = 1.2f, speed = 30.0f;            // px/s
-    const float move = travel / speed, period = 2.0f * pause + 2.0f * move;
+    const float move = travel / speed;
+    const float period = 2.0f * pause + move;           // start hold + sweep + end hold, then reset
     float k = t - std::floor(t / period) * period;      // [0, period)
     if (k < pause) return 0.0f;                         // pause at the start
     k -= pause;
     if (k < move) return travel * (k / move);           // scroll left
-    k -= move;
-    if (k < pause) return travel;                       // pause at the end
-    k -= pause;
-    return travel * (1.0f - k / move);                  // scroll back
+    return travel;                                       // hold at the end, then the loop resets
 }
 
 // 3-stop gradient into `dst` (one pixel per call site loop); used for tile and hero art.
@@ -536,22 +596,23 @@ inline void draw_tile(ui::Canvas& c, const Font& f, const TileVM& t, const ui::R
         c.stroke_circle(g.x + g.w * 0.5f, g.y + 150, 48, 8, t.art_bot, Align::Center, 77);
         c.fill_rect_alpha(float(g.x + 112), float(g.y + 12), 44.0f, 44.0f, t.art_bot, 56);
     }
-    if (!has_art && !t.no_cover) {
-        // label scrim band: transparent until mid, 0.78 black at the bottom (mockup band)
-        for (int yy = int(g.h) / 2; yy < int(g.h); ++yy) {
-            const float k = (yy - g.h * 0.5f) / (g.h * 0.5f);
-            c.fill_rect_alpha(g.x, g.y + yy, g.w, 1, scrim, uint8_t(0.78f * 255.0f * k));
-        }
+    // item 23: the label scrim runs on EVERY tile (art, no-cover, fixtures):
+    // transparent at ~55% height down to 0.85 black at the bottom edge
+    for (int yy = int(g.h) * 55 / 100; yy < int(g.h); ++yy) {
+        const float k = (yy - g.h * 0.55f) / (g.h * 0.45f);
+        c.fill_rect_alpha(g.x, g.y + yy, g.w, 1, scrim, uint8_t(0.85f * 255.0f * k));
     }
-    // label: ellipsized to the tile width; the FOCUSED tile marquees (item 11)
+    // item 23: the name sits at the BOTTOM of the card — semibold 22, white,
+    // single line, ellipsized to the tile width; the FOCUSED tile marquees
     const float label_w = g.w - 24.0f;
+    const float label_top = g.y + g.h - 34.0f;   // 22px line box, 12px bottom pad
     if (focus && t.name_w > label_w && t.name_w > 0) {
         // full name, clipped at the tile edge, scrolled by the marquee offset
         const float off = marquee_offset(t.name_w, label_w, time_s);
-        text(c, f, Face::Regular, 20, g.x + 12 - off, g.y + 216, t.name, ui::theme::text);
+        text(c, f, Face::Semibold, 22, g.x + 12 - off, label_top, t.name, ui::theme::text);
     } else {
-        const std::string s = f.ellipsize(Face::Regular, 20, t.name, label_w);
-        text(c, f, Face::Regular, 20, g.x + 12, g.y + 216, s.c_str(), ui::theme::text);
+        const std::string s = f.ellipsize(Face::Semibold, 22, t.name, label_w);
+        text(c, f, Face::Semibold, 22, g.x + 12, label_top, s.c_str(), ui::theme::text);
     }
     if (t.installed) {
         c.fill_round_rect(rect(g.x + 12, g.y + 12, 94, 26), radiusBadge, ui::theme::accent);
@@ -584,7 +645,12 @@ inline void draw_filters_control(ui::Canvas& c, const Font& f, const LibraryVM& 
     if (lib.filters_open || lib.header_focus == 1)
         focus_ring(c, rect(x - ringOffset, y - ringOffset, w + ringOffset * 2, 60 + ringOffset * 2),
                    radiusPill + ringRadiusDelta, ringWidth);
-    text_c(c, f, Face::Regular, 24, x + w * 0.5f, y + 15.5f, "Filters", ui::theme::text2);
+    text_c(c, f, Face::Regular, 24, x + w * 0.5f, y + 15.5f,
+           lib.filters_active > 0 ? (std::string("Filters \xC2\xB7 ") + std::to_string(lib.filters_active)).c_str()
+                                  : "Filters", ui::theme::text2);
+    if (lib.filters_active > 0) {   // item 26: accent state when any filter is on
+        c.stroke_round_rect(rect(x, y, w, 60), radiusPill, ringWidth, ui::theme::accent, Align::Center);
+    }
 }
 
 // Sort dropdown (item 1, review fix 2): ONLY the sort options, left-aligned
@@ -750,13 +816,14 @@ inline void draw_queue_card(ui::Canvas& c, const Font& f, const QueueRowVM& r, f
     }
     if (update) {
         c.fill_round_rect(rect(1668, y + 28, 160, 48), radiusControl, ui::theme::controlDark);
-        text_c(c, f, Face::Semibold, 20, 1748, y + 40, "UPDATE NOW", ui::theme::text2);
+        button_label(c, f, Face::Semibold, 20, rect(1668, y + 28, 160, 48), "UPDATE NOW", ui::theme::text2);
     } else {
         c.fill_round_rect(rect(1700, y + 28, 128, 48), radiusControl, ui::theme::controlDark);
-        text_c(c, f, Face::Semibold, 20, 1764, y + 40, r.paused ? "RESUME" : "CANCEL", ui::theme::text2);
+        button_label(c, f, Face::Semibold, 20, rect(1700, y + 28, 128, 48), r.paused ? "RESUME" : "CANCEL",
+                     ui::theme::text2);
         if (r.busy) {   // the downloading row also shows PAUSE (mockup q0)
             c.fill_round_rect(rect(1556, y + 28, 128, 48), radiusControl, ui::theme::controlDark);
-            text_c(c, f, Face::Semibold, 20, 1620, y + 40, "PAUSE", ui::theme::text2);
+            button_label(c, f, Face::Semibold, 20, rect(1556, y + 28, 128, 48), "PAUSE", ui::theme::text2);
         }
     }
 }
@@ -783,13 +850,90 @@ inline void draw_download_queue(ui::Canvas& c, const Font& f, const SidebarVM& s
     char b[32];
     std::snprintf(b, sizeof b, "%d items", q.row_count);
     text_r(c, f, Face::Regular, 22, 1844, 274, b, ui::theme::textDim);
+    // queue rows: clip above the reserved hint band (item 21) — an overflowing
+    // list must never paint into it
+    c.set_clip(rect(0, 0, 1920, kGridClipY));
     for (int i = 0; i < q.row_count; ++i) draw_queue_card(c, f, q.rows[i], 320 + 112.0f * i, false);
     // updates section
     text(c, f, Face::Semibold, 26, 524, 680, "Updates", ui::theme::text);
     std::snprintf(b, sizeof b, "%d pending", q.update_count);
     text_r(c, f, Face::Regular, 22, 1844, 682, b, ui::theme::textDim);
     for (int i = 0; i < q.update_count; ++i) draw_queue_card(c, f, q.updates[i], 728 + 112.0f * i, true);
+    c.reset_clip();
     if (draw_hints) draw_hint_bar(c, f, kQueueHints, 3, 524.0f);
+}
+
+// ---- storage management (item 22): drive cards + per-drive games ------------
+inline void draw_storage(ui::Canvas& c, const Font& f, const SidebarVM& sb, const StorageVM& st,
+                         bool draw_hints = true) {
+    using namespace ui::theme;
+    c.fill(ui::theme::page);
+    draw_sidebar(c, f, sb);
+    if (st.open_drive < 0) {
+        // drive list: title + selectable drive cards (112 high, 24px gaps,
+        // x 524..1844); content ends above the reserved hint band
+        text(c, f, Face::Semibold, 44, kTitleX, kTitleY, "Storage", ui::theme::text, -0.2f);
+        float y = 200.0f;
+        for (int i = 0; i < st.n_drives && y + 112.0f <= kHintBandTop; ++i) {
+            const StorageDriveVM& d = st.drives[i];
+            const Rect card = rect(524.0f, y, 1320.0f, 112.0f);
+            if (d.focused)
+                focus_ring(c, rect(524 - ringOffset, y - ringOffset, 1320 + ringOffset * 2, 112 + ringOffset * 2),
+                           radiusControl + ringRadiusDelta, ringWidth);
+            c.fill_round_rect(card, radiusControl, d.focused ? ui::theme::controlDark : ui::theme::control);
+            if (d.install_target) c.fill_rect(524, y, 6, 112, ui::theme::accent);
+            text(c, f, Face::Semibold, 28, 548, y + 20, d.title, ui::theme::text);
+            text(c, f, Face::Regular, 22, 548, y + 60, d.detail, ui::theme::textDim);
+            // item 22: usage bar — 10px, rounded, full-width visible track
+            c.fill_round_rect(rect(852, y + 51, 456, 10), 5, ui::theme::track);
+            if (d.used_pct > 0)
+                c.fill_round_rect(rect(852, y + 51, 456.0f * std::min(d.used_pct, 100) / 100.0f, 10), 5,
+                                  ui::theme::accent);
+            if (d.install_target) {
+                // the marker as a real pill (radius = h/2) on the right
+                const char* mk = "New installs go here";
+                const float mw = f.measure(Face::Regular, 20, mk) + 32.0f;
+                const float mh = 36.0f;
+                c.fill_round_rect(rect(1812 - mw, y + (112 - mh) * 0.5f, mw, mh), mh * 0.5f,
+                                  d.focused ? ui::theme::control : ui::theme::controlDark);
+                text_r(c, f, Face::Regular, 20, 1812 - 16.0f, y + (112 - mh) * 0.5f + 8.0f, mk,
+                       ui::theme::accentSoft);
+            }
+            y += 112.0f + 24.0f;
+        }
+        if (st.n_drives == 0)
+            text(c, f, Face::Regular, 22, 548, y + 8.0f, "No drives found", ui::theme::textDim);
+    } else {
+        // the open drive's games list (item 22b): the page title carries the
+        // drive's name with a muted "Installed games" subtitle; row 0 is the
+        // caller-supplied "Use for new installs" action row (accent styling
+        // when its size string is empty), then 72px rows: name Regular 26
+        // left, size Regular 22 right in text2, no dividers; the focus ring
+        // sits 4px off the row with 12px gaps so it never touches neighbours.
+        text(c, f, Face::Semibold, 44, kTitleX, kTitleY, st.drive_title, ui::theme::text, -0.2f);
+        text(c, f, Face::Regular, 22, kTitleX, kTitleY + 60.0f, "Installed games", ui::theme::textDim);
+        const float list_top = 200.0f, row_h = 72.0f, row_pitch = 84.0f;   // 12px gaps: the 4px-off ring never touches a neighbour
+        const float list_bottom = kHintBandTop - 16.0f;   // keep the band clear (item 21)
+        const int visible = int((list_bottom - list_top) / row_pitch);
+        const int first = std::max(0, std::min(st.game_scroll, st.n_games - visible));
+        for (int i = first; i < st.n_games && i < first + visible; ++i) {
+            const StorageGameVM& gm = st.games[i];
+            const float ry = list_top + row_pitch * float(i - first);
+            const bool action = i == 0 && (!gm.size || !*gm.size);   // the install-target action row
+            text(c, f, Face::Regular, 26, 548, ry + 20.0f, gm.name, action ? ui::theme::accentSoft : ui::theme::text);
+            if (!action)
+                text_r(c, f, Face::Regular, 22, 1812, ry + 22.0f, gm.size, ui::theme::text2);
+            if (gm.focused)
+                focus_ring(c, rect(524 - 4.0f, ry - 4.0f, 1320 + 8.0f, row_h + 8.0f),
+                           radiusControl + ringRadiusDelta, ringWidth);
+        }
+        if (st.n_games == 0)
+            text(c, f, Face::Regular, 22, 548, list_top + 8.0f, "No games installed here", ui::theme::textDim);
+    }
+    if (draw_hints) {
+        const char* pairs[4] = {"A", "Select", "B", "Back"};
+        draw_hint_bar(c, f, pairs, 2, 524.0f);
+    }
 }
 
 // ---- game screen (mockups 02 / 02b / 03 / 03b: one layout, state-driven) ----
@@ -806,11 +950,12 @@ inline void draw_primary_button(ui::Canvas& c, const Font& f, const GameVM& g) {
         if (g.install_pct > 0)
             c.fill_round_rect(rect(64, y, 256 * g.install_pct, 80), radiusControl, ui::theme::accent);
         // mockup 03: the progress label is centred in the button, like the other states
-        text_c(c, f, Face::Semibold, 26, 192, y + 24.5f, label, ui::theme::text2);
+        button_label(c, f, Face::Semibold, 26, rect(64, y, 256, 80), label, ui::theme::text2);
     } else {
         const bool green = st == Primary::play || st == Primary::install;
         c.fill_round_rect(rect(64, y, 256, 80), radiusControl, green ? ui::theme::accent : ui::theme::controlDark);
-        text_c(c, f, Face::Semibold, 30, 192, y + 22, label, green ? ui::theme::onAccent : ui::theme::text2);
+        button_label(c, f, Face::Semibold, 30, rect(64, y, 256, 80), label,
+                     green ? ui::theme::onAccent : ui::theme::text2);
     }
     if (focus || st == Primary::deleting)
         focus_ring(c, rect(58, y - 6, 268, 92), radiusControl + ringRadiusDelta, ringWidth);
@@ -984,7 +1129,10 @@ inline void draw_signin(ui::Canvas& c, const Font& f, const SignVM& s) {
     }
     text(c, f, Face::Regular, 22, 953, 510, s.timer, ui::theme::textDim);
     c.fill_round_rect(rect(981, 576, 366, 80), radiusControl, ui::theme::accent);
-    text_c(c, f, Face::Semibold, 26, 1158, 600.5f, "REFRESH QR", ui::theme::onAccent);
+    // item 20: centre the label by its whole-string ink box (both axes) —
+    // the first-glyph ink_box left the label ~67px right of centre.
+    button_label(c, f, Face::Semibold, 26, rect(981, 576, 366, 80), "REFRESH QR",
+                 ui::theme::onAccent);
     if (s.refresh_focused)
         focus_ring(c, rect(975, 570, 378, 92), radiusControl + ringRadiusDelta, ringWidth);
     // user pill top-left, clock top-right
@@ -1012,9 +1160,9 @@ inline void draw_confirm_sheet(ui::Canvas& c, const Font& f, const char* title, 
     text(c, f, Face::Regular, 24, 608, 475, body, ui::theme::textDim);
     if (note && *note) text(c, f, Face::Regular, 22, 608, 516, note, ui::theme::textMuted);
     c.fill_round_rect(rect(1018, 600, 170, 64), radiusControl, ui::theme::controlDark);
-    text_c(c, f, Face::Semibold, 26, 1103, 616.5f, no_label, ui::theme::text2);
+    button_label(c, f, Face::Semibold, 26, rect(1018, 600, 170, 64), no_label, ui::theme::text2);
     c.fill_round_rect(rect(1204, 600, 108, 64), radiusControl, ui::theme::accent);
-    text_c(c, f, Face::Semibold, 26, 1258, 616.5f, yes_label, ui::theme::onAccent);
+    button_label(c, f, Face::Semibold, 26, rect(1204, 600, 108, 64), yes_label, ui::theme::onAccent);
     if (focus_yes)
         focus_ring(c, rect(1198, 594, 120, 76), radiusControl + ringRadiusDelta, ringWidth);
     else

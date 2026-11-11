@@ -26,7 +26,7 @@ int main() {
     // ---- 5-column grid constants (item 4) ----
     {
         check(ui_launcher::kGridCols == 5, "the grid is 5 columns wide");
-        check(ui_launcher::kTileW == 240.0f && ui_launcher::kTileH == 360.0f, "tiles are 2:3 (240x360)");
+        check(ui_launcher::kTileW == 232.0f && ui_launcher::kTileH == 348.0f, "tiles are 2:3 (232x348)");
         check(ui_launcher::kGridX + 5 * ui_launcher::kTilePitchX - (ui_launcher::kTilePitchX - ui_launcher::kTileW)
               <= 1844.0f + 0.5f, "5 columns fit the content width (524..1844)");
     }
@@ -71,6 +71,55 @@ int main() {
         check(cycle_sort(1, 3) == 2, "sort 1->2");
         check(cycle_sort(2, 3) == 0, "sort 2->0 wraps");
         check(cycle_sort(0, 0) == 0, "no modes keeps 0");
+    }
+
+    // ---- sort mode constants (item 25): 0 Alphabetical, 1 Most played, 2 Recently played ----
+    {
+        check(ui_nav::kSortAlphabetical == 0 && ui_nav::kSortMostPlayed == 1 && ui_nav::kSortRecentlyPlayed == 2,
+              "sort mode indexes: 0 alphabetical, 1 most played, 2 recently played");
+        check(ui_nav::kSortOptionCount == 3, "the sort popup shows three options");
+    }
+
+    // ---- storage screen (item 22): drive focus + game list model ----
+    {
+        // focus clamps into range; an empty list keeps 0 and never moves
+        int sel = 0;
+        check(storage_drive_clamp(sel, 0) == 0, "no drives: focus stays 0");
+        check(!storage_drive_move(sel, 0, true), "no drives: no movement");
+        sel = 2;
+        check(storage_drive_clamp(sel, 2) == 1, "focus past the last drive clamps onto it");
+        sel = -3;
+        check(storage_drive_clamp(sel, 2) == 0, "negative focus clamps to the first drive");
+        sel = 0;
+        check(storage_drive_move(sel, 2, true) && sel == 1, "drive down 0->1");
+        check(storage_drive_move(sel, 2, true) && sel == 0, "drive down wraps 1->0");
+        check(storage_drive_move(sel, 2, false) && sel == 1, "drive up wraps 0->1");
+        check(storage_drive_move(sel, 2, false) && sel == 0, "drive up 1->0");
+
+        // list model: only the installs whose marker names this drive root are
+        // listed; empty names fall back to "App <id>"; sizes ride along
+        std::vector<std::tuple<uint32_t, std::string, std::string, uint64_t, std::string>> installs = {
+            {3405340, "megabonk", "", 123456789, "Megabonk"},        // LocalState (root "")
+            {1145360, "hades", "E:\\XboxNativeGames", 999, "Hades"}, // E: drive
+            {367520, "hollowknight", "E:\\XboxNativeGames", 555, ""} // E: drive, no cached name
+        };
+        auto local = storage_game_rows("", installs);
+        check(local.size() == 1 && local[0].appid == 3405340 && local[0].name == "Megabonk",
+              "the internal drive lists only its own installs");
+        auto e = storage_game_rows("E:\\XboxNativeGames", installs);
+        check(e.size() == 2 && e[0].name == "Hades" && e[0].bytes == 999, "the drive lists its installs with sizes");
+        check(e[1].appid == 367520 && e[1].name == "App 367520", "a game without a cached name reads App <id>");
+        auto none = storage_game_rows("F:\\XboxNativeGames", installs);
+        check(none.empty(), "a drive with no installs lists nothing (the empty state)");
+    }
+
+    // ---- filters state (item 26): the count of enabled filters ----
+    {
+        bool on[1] = {false};
+        check(filters_active(on, 1) == 0, "no filter enabled: count 0");
+        on[0] = true;
+        check(filters_active(on, 1) == 1, "'Installed only' on: count 1");
+        check(filters_active(nullptr, 1) == 0, "no rows: count 0");
     }
 
     // ---- queue row status copy per download state ----

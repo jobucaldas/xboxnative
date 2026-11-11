@@ -47,16 +47,31 @@ static void test_requests() {
 
 static void test_replies() {
     // CMsgClientPersonaState with our friend entry: online, playing 3405340,
-    // game name, and one rich presence pair.
+    // game name, and one rich presence pair. player_name (15) and avatar_hash
+    // (31) ride the same friend entry (issue 51 item 24: the sidebar's profile
+    // row reads them).
     std::string kv; pb_s(kv, 1, "status"); pb_s(kv, 2, "In a run");
     std::string friendEntry; pb_fixed64(friendEntry, 1, 555); pb_u(friendEntry, 2, PersonaOnline);
-    pb_u(friendEntry, 3, 3405340); pb_s(friendEntry, 55, "Megabonk"); pb_fixed64(friendEntry, 56, 3405340);
+    pb_u(friendEntry, 3, 3405340); pb_s(friendEntry, 15, "Player Two");   // synthetic name
+    const std::string avatar("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14", 20);
+    pb_s(friendEntry, 31, avatar);
+    pb_s(friendEntry, 55, "Megabonk"); pb_fixed64(friendEntry, 56, 3405340);
     pb_s(friendEntry, 71, kv);
     std::string body; pb_s(body, 2, friendEntry);
     auto p = parse_persona(body, 555);
     assert(p.found && p.state == PersonaOnline && p.game_played_app_id == 3405340);
     assert(p.game_name == "Megabonk" && p.rich_presence.at("status") == "In a run");
+    assert(p.player_name == "Player Two" && p.avatar_hash == avatar);
     assert(!parse_persona(body, 556).found);   // another account's entry is not ours
+
+    // avatar hash -> lowercase hex URL; all-zero / empty hashes stay empty so
+    // the caller keeps its placeholder
+    assert(avatar_hash_hex(avatar) == "0102030405060708090a0b0c0d0e0f1011121314");
+    assert(avatar_hash_hex(std::string(20, '\0')).empty());
+    assert(avatar_hash_hex(std::string()).empty());
+    assert(avatar_url(avatar_hash_hex(avatar)) ==
+           "https://avatars.fastly.steamstatic.com/0102030405060708090a0b0c0d0e0f1011121314_full.jpg");
+    assert(avatar_url("").empty());
 
     std::string infoEntry; pb_fixed64(infoEntry, 1, 555); pb_s(infoEntry, 2, encode_kv({{"status", "Lobby"}}));
     std::string info; pb_s(info, 1, infoEntry);

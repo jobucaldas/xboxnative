@@ -305,9 +305,9 @@ static bool file_exists(const std::wstring& p) { return GetFileAttributesW(p.c_s
 #include "ui_launcher.h"
 
 // The account's persona name for the sidebar profile row, parsed from
-// ClientPersonaState field 4 (player_name) here, because steam_presence.h's
-// Persona has no name field. Empty until Steam answers: the sidebar then
-// shows the honest default, never an invented name.
+// ClientPersonaState's player_name (field 15; steam_presence.h's parse_persona
+// carries it). Empty until Steam answers: the sidebar then shows the honest
+// default, never an invented name.
 static std::mutex g_personaM; static std::string g_personaName;
 static std::string persona_name() { std::lock_guard<std::mutex> l(g_personaM); return g_personaName; }
 
@@ -402,6 +402,38 @@ static void cover_worker() {
 }
 static void start_covers() { static bool started = false; if (started) return; started = true; for (int i = 0; i < 4; i++) std::thread(cover_worker).detach(); }
 
+// The signed-in account's Steam avatar (issue 51 item 24): hex form of the
+// persona push's avatar_hash, the decoded ARGB pixels, and the fetch state —
+// same lazy one-shot pattern as the detail page's hero banner. The pixels are
+// fetched on a worker thread (WinHTTP + WIC) and never block the UI; the
+// decoded copy is cached for the session. The hash and the pixels are the
+// owner's own: never logged, never written outside the process.
+static std::mutex g_avatarM; static std::string g_avatarHex;
+static ui::Image g_avatarPix;   // px points into g_avatarBuf (guarded by g_avatarM)
+static std::vector<uint32_t> g_avatarBuf;
+static std::atomic<int> g_avatarState{0};   // 0 none, 1 loading, 2 ready, 3 failed
+static void avatar_fetch() {
+    init_apartment(apartment_type::multi_threaded);
+    std::string hex;
+    { std::lock_guard<std::mutex> l(g_avatarM); hex = g_avatarHex; }
+    if (hex.empty()) { g_avatarState = 3; return; }
+    std::string url = steam_presence::avatar_url(hex);
+    Resp r = http(false, url, "", "avatar");
+    if (r.status != 200 || r.body.size() < 100) { logf("avatar: fetch failed (status %d)", r.status); g_avatarState = 3; return; }
+    std::vector<uint32_t> pix; int w = 0, h = 0, hr = 0;
+    if (!wic_decode_buf(r.body, pix, w, h, 184, 184, hr)) { logf("avatar: WIC decode failed hr=0x%08x", (unsigned)hr); g_avatarState = 3; return; }
+    auto held = std::make_shared<std::vector<uint32_t>>(std::move(pix));
+    std::lock_guard<std::mutex> l(g_avatarM);
+    g_avatarBuf = std::move(*held);
+    g_avatarPix = ui::Image{g_avatarBuf.data(), w, h, w};
+    g_avatarState = 2;
+}
+static void start_avatar_fetch() {
+    int none = 0;
+    if (!g_avatarState.compare_exchange_strong(none, 1)) return;
+    std::thread(avatar_fetch).detach();
+}
+
 // ---------------------------------------------------------------- detail-page hero banner (item 13)
 // Steam's wide library_hero.jpg for the game page background, fetched
 // asynchronously when the detail page opens (header.jpg fallback). One
@@ -434,14 +466,16 @@ static Hero hero_get(uint32_t appid) {   // every frame from the draw: starts th
 static void hero_release(uint32_t appid) { std::lock_guard<std::mutex> l(g_heroM); g_heroes.erase(appid); }
 #include "store.h"
 
-static std::atomic<int> g_sortMode{0};
-static const char* SORT_NAMES[] = {"Most played", "Recently played", "Alphabetical"};
+static std::atomic<int> g_sortMode{ui_nav::kSortAlphabetical};   // item 25: the launcher opens on Alphabetical
+// item 25: mode order 0 Alphabetical, 1 Most played, 2 Recently played —
+// the same indexes the sort popup shows (ui_nav::kSortAlphabetical...).
+static const char* SORT_NAMES[] = {"Alphabetical", "Most played", "Recently played"};
 static std::string lower(std::string s) { for (auto& c : s) c = (char)tolower((unsigned char)c); return s; }
 static void sort_games(int mode) {   // caller holds g_gm
     logf("grid list resort/reload mode=%d count=%zu (position unchanged)", mode, g_games.size());
     std::stable_sort(g_games.begin(), g_games.end(), [mode](const std::shared_ptr<Game>& a, const std::shared_ptr<Game>& b) {
-        if (mode == 0) return a->playtime > b->playtime;
-        if (mode == 1) return a->lastPlayed > b->lastPlayed;
+        if (mode == ui_nav::kSortMostPlayed) return a->playtime > b->playtime;
+        if (mode == ui_nav::kSortRecentlyPlayed) return a->lastPlayed > b->lastPlayed;
         return lower(a->name) < lower(b->name); });
 }
 
@@ -519,28 +553,34 @@ static void enter_library_cm(CmSession& cm) {
     start_covers(); g_screen = S_LIBRARY;
 }
 
-// Persona name for the sidebar profile row (field 4 of ClientPersonaState's
-// friends[] entry; steam_presence.h's Persona has no name field). Runs on the
-// CM reader thread. The keeper in launch.h replaces the push handler when a
-// game launches; the launcher restarts when the game ends, so the name keeps
-// working for every library screen.
+// Persona name + avatar hash for the sidebar profile row (issue 51 item 24).
+// Root cause of the empty name fixed here: player_name is field 15 of
+// CMsgClientPersonaState's friends[] entry (avatar_hash 31), not field 4 —
+// steam_persona.h's parser and research/STEAMWORKS-MULTIPLAYER.md both carry
+// 15, and the hand-built protobuf test in tests/steam_presence_test.cpp pins
+// the shape. Runs on the CM reader thread. The keeper in launch.h replaces
+// the push handler when a game launches; the launcher restarts when the game
+// ends, so the name keeps working for every library screen. Nothing here is
+// ever logged: the name and the hash are the owner's own.
 static void persona_push(const JobMsg& m) {
     if (m.emsg != steam_presence::ClientPersonaState) return;
     uint64_t self = 0; { auto s = user_session(); if (s) self = s->steamid; }
     if (!self) return;
-    for (auto& friendField : pb_parse(m.body)) {
-        if (friendField.f != 2) continue;
-        uint64_t id = 0; std::string name;
-        for (auto& f : pb_parse(friendField.s)) {
-            if (f.f == 1) id = f.u;
-            else if (f.f == 4) name = f.s;
-        }
-        if (id == self && !name.empty()) {
-            std::lock_guard<std::mutex> l(g_personaM);
-            if (g_personaName != name) { g_personaName = name; logf("persona: name updated (%zu chars, not logged)", name.size()); }
-            return;
+    auto p = steam_presence::parse_persona(m.body, self);
+    if (!p.found) return;
+    bool changed = false;
+    if (!p.player_name.empty()) {
+        std::lock_guard<std::mutex> l(g_personaM);
+        if (g_personaName != p.player_name) { g_personaName = p.player_name; changed = true; logf("persona: name updated (%zu chars, not logged)", p.player_name.size()); }
+    }
+    if (!p.avatar_hash.empty()) {
+        std::string hex = steam_presence::avatar_hash_hex(p.avatar_hash);
+        if (!hex.empty()) {
+            std::lock_guard<std::mutex> l(g_avatarM);
+            if (g_avatarHex != hex) { g_avatarHex = hex; changed = true; logf("persona: avatar hash updated (not logged)"); }
         }
     }
+    if (changed) start_avatar_fetch();
 }
 // Installs the persona push handler on a freshly (re-)established user
 // session, then asks Steam for this account's own persona state.
@@ -878,6 +918,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     int m_sidebar = 0;                                       // sidebar row the focus sits on
     int m_qSel = 0;                                          // queue screen: focused row (0 = the active download, 1.. queued)
     int m_stSel = 0;                                         // storage screen: focused install root
+    bool m_stOpen = false;                                   // storage: the focused drive's games list is open (item 22)
+    int m_stGameSel = 0;                                     // storage games list focus: 0 = "Set as install location", 1.. games
+    uint32_t m_stConfirmApp = 0;                             // storage: the appid the delete sheet is open for
+    bool m_stDelYes = false;                                 // storage delete sheet focus, false = Cancel (item 14)
     bool m_autoUpdate = true;                                // queue screen pill (no update backend yet; memory only)
     std::set<uint32_t> m_installed; double m_installedT = -10; int m_installedDel = -1, m_installedDl = -1;
     void refresh_installed(double t) {                       // dl_<appid>.done markers; rescanned every 2 s and after a download/delete
@@ -1006,7 +1050,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             g_screen = S_LIBRARY;
             logf("sidebar: %s view (%zu installed)", m_onlyInstalled ? "installed" : "all games", m_installed.size());
         } else if (target == 4) { m_qSel = 0; m_focus = ui_nav::Focus::sidebar; g_screen = S_QUEUE; logf("sidebar: download queue (%s)", source); }
-        else if (target == 5) { refresh_roots("storage screen"); m_stSel = m_rootSel < m_roots.size() ? (int)m_rootSel : 0; m_focus = ui_nav::Focus::sidebar; g_screen = S_STORAGE; logf("sidebar: storage management (%s)", source); }
+        else if (target == 5) { refresh_roots("storage screen"); m_stSel = m_rootSel < m_roots.size() ? (int)m_rootSel : 0; m_stOpen = false; m_stGameSel = 0; m_focus = ui_nav::Focus::grid; g_screen = S_STORAGE; logf("sidebar: storage management, drive list focused (%s)", source); }
     }
     int m_dInstDel = -1;   // g_del.gen seen by m_dInst: a finished delete refreshes it at once
     void refresh_install(double t) { if (t - m_dInstT > 0.5 || m_dInstDel != g_del.gen) { m_dInstDel = g_del.gen; m_dInst = read_install(m_dApp); m_dInstT = t; } }
@@ -1025,6 +1069,33 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (m_dInst.installed || g_demo || dl_is_mine() || is_queued(m_dApp)) return;
         refresh_roots("refresh"); m_rootSel = storage_roots::cycle(m_rootSel, m_roots.size(), 1); m_dNote.clear();
         logf("detail: install location appid=%u -> %s (%s)", m_dApp, storage_roots::label_capacity(m_roots[m_rootSel]).c_str(), via);
+    }
+    // ---- storage screen (item 22): the focused drive's installed-games list
+    // Games installed under the focused root: appid -> (dir, root, bytes) from
+    // the dl_<appid>.done markers, name from the library cache, size formatted
+    // by storage_roots::size_text at draw time.
+    std::vector<ui_nav::StorageGameRow> storage_game_list() {
+        std::string drive_root = m_stSel < (int)m_roots.size() ? m_roots[m_stSel].root : std::string();
+        std::vector<std::tuple<uint32_t, std::string, std::string, uint64_t, std::string>> recs;
+        { std::lock_guard<std::mutex> l(g_gm);
+          for (uint32_t id : m_installed) {
+              installs::Info ii = read_install(id);
+              if (!ii.installed) continue;
+              std::string name; for (auto& g : g_games) if (g->appid == id) { name = g->name; break; }
+              recs.emplace_back(id, ii.dir, ii.root, ii.bytes, name);
+          } }
+        auto rows = ui_nav::storage_game_rows(drive_root, recs);
+        std::stable_sort(rows.begin(), rows.end(), [](const ui_nav::StorageGameRow& a, const ui_nav::StorageGameRow& b) { return lower(a.name) < lower(b.name); });
+        return rows;
+    }
+    // A on 'Yes, delete' in the storage screen's sheet: the same uninstall as
+    // the game page (start_delete), then the list refreshes on the next draw.
+    void storage_delete_confirm(const char* via) {
+        m_confirmDelete = false;
+        std::string why = start_delete(m_stConfirmApp);
+        if (!why.empty()) logf("storage: delete not started appid=%u (%s): %s", m_stConfirmApp, via, why.c_str());
+        else { logf("storage: delete started appid=%u (%s)", m_stConfirmApp, via); m_stGameSel = 0; }
+        m_stConfirmApp = 0;
     }
     void detail_delete(const char* via) {     // X: ask to delete an installed game
         m_dInst = read_install(m_dApp); m_dInstT = now_s();
@@ -1688,12 +1759,19 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         ui_launcher::SidebarVM sb;
         static std::string persona; persona = persona_name();
         sb.persona = persona.c_str();
+        // item 24: the avatar once its fetch decoded (px != nullptr), else the
+        // placeholder circle the sidebar draws for an empty image.
+        { std::lock_guard<std::mutex> l(g_avatarM);
+          if (g_avatarState.load(std::memory_order_relaxed) == 2 && g_avatarPix.px) sb.avatar = g_avatarPix; }
         { std::lock_guard<std::mutex> l(g_gm);
           sb.all_count = (int)g_games.size();
           sb.installed_count = (int)m_installed.size();
           size_t q; { std::lock_guard<std::mutex> ql(g_dqm); q = g_dq.size(); }
           sb.queue_count = (int)q + (g_dl.state == 1 ? 1 : 0); }
-        sb.active = m_onlyInstalled ? 1 : 0;   // item 14 mapping: 0 profile, 1 search, 2 all, 3 installed, 4 queue, 5 storage
+        // item 14 mapping: 0 profile, 1 search, 2 all, 3 installed, 4 queue, 5 storage.
+        // On the library screen the active row follows the view; the queue and
+        // storage screens override it with their own entry.
+        sb.active = m_onlyInstalled ? 3 : 2;
         sb.focus = sidebar_focus_row();
         sb.profile_focus = sidebar_focus_row() == ui_nav::kSidebarProfile;   // the UI worker draws the logout affordance from this
         return sb;
@@ -1784,7 +1862,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void draw_queue() {
         ui::Canvas c(g_fb.data(), W, H, W);
         refresh_installed(now_s());
-        ui_launcher::SidebarVM sb = sidebar_vm(); sb.active = 2;
+        ui_launcher::SidebarVM sb = sidebar_vm(); sb.active = ui_nav::kSidebarQueue;
         // row model under the same locks the queue state uses
         static std::vector<ui_launcher::QueueRowVM> rows;
         static std::vector<std::string> rowNames, rowStatus;
@@ -1829,33 +1907,69 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         ui_launcher::draw_hint_bar(c, g_font, pairs, 2);
     }
 
-    // Storage management: the sidebar entry opens the same figures the detail
-    // page's storage report already collects (no new probing here).
+    // Storage management (item 22): the sidebar entry opens the same figures
+    // the detail page's storage report already collects (no new probing).
+    // Two levels: the drive list, and (A) the focused drive's installed-games
+    // list whose first row is 'Set as install location'. The sidebar's active
+    // row is THIS screen's entry (item 22b).
     void draw_storage() {
         ui::Canvas c(g_fb.data(), W, H, W);
-        ui_launcher::SidebarVM sb = sidebar_vm(); sb.active = 3;
+        ui_launcher::SidebarVM sb = sidebar_vm(); sb.active = ui_nav::kSidebarStorage;
         ui_launcher::draw_sidebar(c, g_font, sb);
         ui_launcher::text(c, g_font, ui::Face::Semibold, 44, 524, 73.5f, "Storage", ui::theme::text);
         std::vector<storage_roots::Choice> roots = m_roots.empty() ? std::vector<storage_roots::Choice>{storage_report::internal_root(g_dir)} : m_roots;
-        float y = 200;
-        for (size_t i = 0; i < roots.size(); ++i) {
-            const storage_roots::Choice& r = roots[i];
-            bool sel = m_focus == ui_nav::Focus::grid && (int)i == m_stSel;   // the pad's row
-            std::string line = storage_roots::label_capacity(r);
-            ui_launcher::text(c, g_font, ui::Face::Regular, 24, 548, y, line.c_str(), sel ? ui::theme::text : ui::theme::text2);
-            if (r.space.ok && r.space.total) {
-                int pct = (int)(100 - 100.0 * r.space.freeTotal / (double)r.space.total);
-                std::string used = std::to_string(pct) + "% used of " + storage_roots::size_text(r.space.total);
-                ui_launcher::text(c, g_font, ui::Face::Regular, 20, 548, y + 34, used.c_str(), sel ? ui::theme::text2 : ui::theme::textDim);
+        if (!m_stOpen) {   // drive list
+            float y = 200;
+            for (size_t i = 0; i < roots.size(); ++i) {
+                const storage_roots::Choice& r = roots[i];
+                bool sel = m_focus == ui_nav::Focus::grid && (int)i == m_stSel;   // the pad's row
+                std::string line = storage_roots::label_capacity(r);
+                ui_launcher::text(c, g_font, ui::Face::Regular, 24, 548, y, line.c_str(), sel ? ui::theme::text : ui::theme::text2);
+                if (r.space.ok && r.space.total) {
+                    int pct = (int)(100 - 100.0 * r.space.freeTotal / (double)r.space.total);
+                    std::string used = std::to_string(pct) + "% used of " + storage_roots::size_text(r.space.total);
+                    ui_launcher::text(c, g_font, ui::Face::Regular, 20, 548, y + 34, used.c_str(), sel ? ui::theme::text2 : ui::theme::textDim);
+                }
+                if ((int)i == (int)m_rootSel) fill(524, (int)y, 6, 56, ui::theme::accent);   // where new installs go
+                if (sel) ui_launcher::focus_ring(c, ui::rect(512, y - 10, 1332, 84), ui::theme::radiusControl + ui::theme::ringRadiusDelta, ui::theme::ringWidth);
+                y += 96;
             }
-            if ((int)i == (int)m_rootSel) fill(524, (int)y, 6, 56, ui::theme::accent);   // where new installs go
-            if (sel) ui_launcher::focus_ring(c, ui::rect(512, y - 10, 1332, 84), ui::theme::radiusControl + ui::theme::ringRadiusDelta, ui::theme::ringWidth);
-            y += 96;
+            ui_launcher::text(c, g_font, ui::Face::Regular, 20, 524, y + 16,
+                              "The full report is in LocalState\\storage_report.txt", ui::theme::textMuted);
+            const char* pairs[4] = {"A", "Select", "B", "Back"};
+            ui_launcher::draw_hint_bar(c, g_font, pairs, 2);
+        } else {   // the focused drive's games list; row 0 = 'Set as install location'
+            std::string title = m_stSel < (int)roots.size() ? roots[m_stSel].name : std::string("Drive");
+            ui_launcher::text(c, g_font, ui::Face::Semibold, 30, 524, 150, title.c_str(), ui::theme::text2);
+            auto rows = storage_game_list();
+            float y = 200;
+            bool sel0 = m_focus == ui_nav::Focus::grid && m_stGameSel == 0;
+            bool isTarget = m_rootSel == (size_t)m_stSel;
+            static std::string targetLabel; targetLabel = isTarget ? "Use for new installs (current)" : "Use for new installs";
+            ui_launcher::text(c, g_font, ui::Face::Regular, 24, 548, y, targetLabel.c_str(), sel0 ? ui::theme::text : ui::theme::text2);
+            if (sel0) ui_launcher::focus_ring(c, ui::rect(512, y - 10, 1332, 50), ui::theme::radiusControl + ui::theme::ringRadiusDelta, ui::theme::ringWidth);
+            y += 64;
+            for (size_t i = 0; i < rows.size(); ++i) {
+                bool sel = m_focus == ui_nav::Focus::grid && m_stGameSel == (int)(i + 1);
+                ui_launcher::text(c, g_font, ui::Face::Regular, 24, 548, y, rows[i].name.c_str(), sel ? ui::theme::text : ui::theme::text2);
+                std::string size = storage_roots::size_text(rows[i].bytes);
+                ui_launcher::text(c, g_font, ui::Face::Regular, 20, 1700, y + 4, size.c_str(), sel ? ui::theme::text2 : ui::theme::textDim);
+                if (sel) ui_launcher::focus_ring(c, ui::rect(512, y - 10, 1332, 50), ui::theme::radiusControl + ui::theme::ringRadiusDelta, ui::theme::ringWidth);
+                y += 56;
+            }
+            if (rows.empty()) ui_launcher::text(c, g_font, ui::Face::Regular, 22, 548, y + 8, "No games installed here", ui::theme::textDim);
+            const char* pairs[4] = {"A", "Select", "B", "Back"};
+            ui_launcher::draw_hint_bar(c, g_font, pairs, 2);
+            if (m_confirmDelete) {   // the SAME sheet component as the game page, focus on Cancel
+                ui_launcher::DeleteVM d;
+                static std::string dTitle, dBody;
+                std::string nm = game_name(m_stConfirmApp);
+                dTitle = "Delete " + clip(nm.empty() ? "App " + std::to_string(m_stConfirmApp) : nm, 30) + "?";
+                dBody = "Removes the game files from this console. Saves are kept.";
+                d.title = dTitle.c_str(); d.body = dBody.c_str(); d.focus_delete = m_stDelYes;
+                ui_launcher::draw_delete_sheet(c, g_font, d);
+            }
         }
-        ui_launcher::text(c, g_font, ui::Face::Regular, 20, 524, y + 16,
-                          "The full report is in LocalState\\storage_report.txt", ui::theme::textMuted);
-        const char* pairs[4] = {"A", "Select", "B", "Back"};
-        ui_launcher::draw_hint_bar(c, g_font, pairs, 2);
     }
 
     void draw(double t) {
@@ -2077,22 +2191,44 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
         else if (s == S_STORAGE) {
             // The shared sidebar stays live (up/down/A); right moves to the
-            // root list. In the list: up/down move the focus, A makes the
-            // focused root the install location for new installs (the old
-            // X-cycle pick, now explicit), B back to the library.
+            // root list. Item 22: A on a drive opens its games list (the first
+            // row is 'Set as install location'); up/down move, A on a game
+            // opens the detail page's Delete confirm sheet, B backs out one
+            // level (games list -> drive list -> library).
+            if (m_confirmDelete) {   // item 14: focus starts on Cancel; left/right toggles; A on 'Yes, delete' uninstalls
+                if (has(edge, GamepadButtons::DPadLeft) || has(edge, GamepadButtons::DPadRight)) { m_stDelYes = !m_stDelYes; logf("storage: delete sheet focus -> %s (%s)", m_stDelYes ? "Delete" : "Cancel", source); }
+                else if (has(edge, GamepadButtons::A)) { if (m_stDelYes) storage_delete_confirm(source); else { m_confirmDelete = false; logf("storage: delete cancelled (%s)", source); } }
+                else if (has(edge, GamepadButtons::B)) { m_confirmDelete = false; logf("storage: delete cancelled (%s)", source); }
+                return;
+            }
             if (m_focus == ui_nav::Focus::sidebar) {
                 if (has(edge, GamepadButtons::DPadUp)) { ui_nav::sidebar_move(m_sidebar, false); logf("sidebar: entry %d (%s)", m_sidebar, source); }
                 else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::sidebar_move(m_sidebar, true); logf("sidebar: entry %d (%s)", m_sidebar, source); }
                 else if (has(edge, GamepadButtons::DPadRight) && ui_nav::lateral(m_focus, 0, false)) { logf("storage: focus -> roots (%s)", source); }
                 else if (has(edge, GamepadButtons::A)) sidebar_activate(t, source);
+            } else if (m_stOpen) {
+                size_t ngames = storage_game_list().size();
+                if ((size_t)m_stGameSel > ngames) m_stGameSel = (int)ngames;   // the list may have shrunk (a delete finished)
+                if (has(edge, GamepadButtons::B)) { m_stOpen = false; m_stGameSel = 0; logf("storage: back to the drive list (%s)", source); }
+                else if (has(edge, GamepadButtons::DPadDown) && ngames) { m_stGameSel = (m_stGameSel + 1) % (int)(ngames + 1); logf("storage: game row %d/%zu (%s)", m_stGameSel, ngames, source); }
+                else if (has(edge, GamepadButtons::DPadUp) && ngames) { m_stGameSel = (m_stGameSel + (int)ngames) % (int)(ngames + 1); logf("storage: game row %d/%zu (%s)", m_stGameSel, ngames, source); }
+                else if (has(edge, GamepadButtons::A)) {
+                    if (m_stGameSel == 0) { m_rootSel = (size_t)m_stSel; m_stOpen = false; logf("storage: new installs -> %s (%s)", m_roots[m_stSel].name.c_str(), source); }
+                    else {
+                        auto rows = storage_game_list();
+                        const auto& g = rows[(size_t)m_stGameSel - 1];
+                        m_stConfirmApp = g.appid; m_stDelYes = false; m_confirmDelete = true;
+                        logf("storage: delete asked appid=%u (%s)", g.appid, source);
+                    }
+                }
             } else {
                 int nroots = (int)m_roots.size();
                 if (m_stSel >= nroots) m_stSel = nroots ? nroots - 1 : 0;
                 if (has(edge, GamepadButtons::B)) { g_screen = S_LIBRARY; logf("storage: back to the library (%s)", source); }
                 else if (has(edge, GamepadButtons::DPadLeft)) { ui_nav::lateral(m_focus, 0, true); logf("storage: focus -> sidebar (%s)", source); }
-                else if (has(edge, GamepadButtons::DPadDown) && nroots) { m_stSel = (m_stSel + 1) % nroots; logf("storage: root %d/%d (%s)", m_stSel, nroots, source); }
-                else if (has(edge, GamepadButtons::DPadUp) && nroots) { m_stSel = (m_stSel + nroots - 1) % nroots; logf("storage: root %d/%d (%s)", m_stSel, nroots, source); }
-                else if (has(edge, GamepadButtons::A) && nroots) { m_rootSel = (size_t)m_stSel; logf("storage: new installs -> %s (%s)", m_roots[m_rootSel].name.c_str(), source); }
+                else if (has(edge, GamepadButtons::DPadDown) && nroots) { ui_nav::storage_drive_move(m_stSel, nroots, true); logf("storage: root %d/%d (%s)", m_stSel, nroots, source); }
+                else if (has(edge, GamepadButtons::DPadUp) && nroots) { ui_nav::storage_drive_move(m_stSel, nroots, false); logf("storage: root %d/%d (%s)", m_stSel, nroots, source); }
+                else if (has(edge, GamepadButtons::A) && nroots) { m_stOpen = true; m_stGameSel = 0; logf("storage: drive %s games list open (%s)", m_roots[m_stSel].name.c_str(), source); }
             }
         }
     }

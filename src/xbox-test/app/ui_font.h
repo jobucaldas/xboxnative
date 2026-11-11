@@ -137,6 +137,36 @@ public:
         return true;
     }
 
+    // Ink box of the WHOLE string relative to the pen origin (x) and baseline (y):
+    // unions every glyph's bitmap box, so centring with it centres the real label
+    // ink (ink_box is deliberately the first codepoint only, for glyph prompts).
+    bool string_ink_box(Face face, float px, const std::string& s, float& x0, float& y0, float& x1, float& y1) const {
+        const FaceData& f = faces_[static_cast<int>(face)];
+        if (!f.ok || s.empty()) return false;
+        float scale = scale_of(f, px), pen = 0;
+        float bx0 = 1e9f, by0 = 1e9f, bx1 = -1e9f, by1 = -1e9f;
+        const char* p = s.data(); const char* end = p + s.size();
+        uint32_t prev = 0;
+        bool any = false;
+        while (p < end) {
+            uint32_t cp; utf8_next(p, end, cp);
+            const Glyph& g = glyph(face, px, cp);
+            if (prev) pen += float(stbtt_GetGlyphKernAdvance(&f.info, int(prev), glyph_index(f, prev))) * scale;
+            if (g.w > 0 && g.h > 0) {
+                bx0 = bx0 < pen + g.xoff ? bx0 : pen + g.xoff;
+                bx1 = bx1 > pen + g.xoff + g.w ? bx1 : pen + g.xoff + g.w;
+                by0 = by0 < g.yoff ? by0 : float(g.yoff);
+                by1 = by1 > g.yoff + g.h ? by1 : float(g.yoff + g.h);
+                any = true;
+            }
+            pen += g.adv;
+            prev = cp;
+        }
+        if (!any) return false;
+        x0 = bx0; x1 = bx1; y0 = by0; y1 = by1;
+        return true;
+    }
+
     // Advance width of `s`, including pair kerning.
     float measure(Face face, float px, const std::string& s, float ls = 0.0f) const {
         return measure(face, px, s.data(), s.size(), ls);

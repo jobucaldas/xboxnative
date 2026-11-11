@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "ui_font.h"   // ui::utf8_next (Backspace drops one codepoint)
@@ -24,6 +25,8 @@ namespace ui_nav {
 constexpr int kSidebarEntries = 6;   // Profile, Search, All games, Installed, Download queue, Storage management
 constexpr int kSidebarProfile = 0;   // the profile row (A opens the logout confirm sheet)
 constexpr int kSidebarSearch = 1;    // the Search row's index (opens the search overlay)
+constexpr int kSidebarQueue = 4;     // the Download queue row (the queue screen's active entry)
+constexpr int kSidebarStorage = 5;   // the Storage management row (the storage screen's active entry)
 
 enum class Focus { grid, sidebar };
 
@@ -55,10 +58,76 @@ inline bool sidebar_move(int& active, bool down) {
 // page and B returns to the library.
 inline int sidebar_target(int active) { return active; }
 
+// ---- sort modes (item 25) ----
+// The sort popup's option order AND the model mode indexes are the same
+// numbers: 0 Alphabetical (the startup default), 1 Most played, 2 Recently
+// played. main.cpp's SORT_NAMES and sort_games() key off these.
+constexpr int kSortAlphabetical = 0;
+constexpr int kSortMostPlayed = 1;
+constexpr int kSortRecentlyPlayed = 2;
+constexpr int kSortOptionCount = 3;
+
 // ---- sort mode cycling ----
 // The sidebar's sort row cycles the launcher's existing modes; the label is
-// SORT_NAMES[mode] ("Most played", "Recently played", "Alphabetical").
+// SORT_NAMES[mode] ("Alphabetical", "Most played", "Recently played").
 inline int cycle_sort(int mode, int n) { return n <= 0 ? 0 : (mode + 1) % n; }
+
+// ---- storage screen (item 22): drive rows + per-drive game lists ----
+// A drive row: the figures the drive list shows. main.cpp fills them from
+// storage_roots::Choice (label_capacity / size_text); the pure rules here are
+// the focus walk and the list model.
+struct StorageDriveRow {
+    std::string name;        // "Internal", "E:" ...
+    std::string used_line;   // "34% used of 476 GB"
+    int used_pct = 0;        // 0..100, -1 unknown
+    bool is_target = false;  // the drive new installs go to (the old X-cycle pick)
+    uint64_t free_bytes = 0, total_bytes = 0;
+};
+
+// Clamp a drive-row focus into range; an empty list keeps 0.
+inline int storage_drive_clamp(int sel, int n) { return n <= 0 ? 0 : sel < 0 ? 0 : sel >= n ? n - 1 : sel; }
+// D-pad move with wrap; returns true when it moved.
+inline bool storage_drive_move(int& sel, int n, bool down) {
+    if (n <= 0) return false;
+    sel = down ? (sel + 1) % n : (sel + n - 1) % n;
+    return true;
+}
+
+// One row of a drive's installed-games list.
+struct StorageGameRow {
+    std::string name;      // library cache name, "App <id>" when unknown
+    std::string size_text; // storage_roots::size_text of the install record
+    uint32_t appid = 0;
+    uint64_t bytes = 0;
+};
+
+// The rows of one drive's installed-games list, built from (appid, dir, root,
+// bytes, name) records. Games whose marker names another root are skipped (a
+// drive only lists what sits on it); the order is the caller's (alphabetical
+// upstream). Pure so tests can pin the filtering without Win32.
+inline std::vector<StorageGameRow> storage_game_rows(const std::string& drive_root,
+                                                     const std::vector<std::tuple<uint32_t, std::string, std::string, uint64_t, std::string>>& installs) {
+    std::vector<StorageGameRow> out;
+    for (auto& [appid, dir, root, bytes, name] : installs) {
+        if (root != drive_root) continue;
+        StorageGameRow r;
+        r.appid = appid;
+        r.name = name.empty() ? "App " + std::to_string(appid) : name;
+        r.bytes = bytes;
+        out.push_back(std::move(r));
+    }
+    return out;
+}
+
+// ---- filters state (item 26) ----------------------------------------------
+// The one real filter today is 'Installed only'. filters_active counts the
+// enabled filters so the Filters button can show an accent state; with more
+// filters later, extend the caller's bool list, not this helper.
+inline int filters_active(const bool* on, int n) {
+    int count = 0;
+    for (int i = 0; i < n; ++i) if (on && on[i]) ++count;
+    return count;
+}
 
 // ---- queue row model (download queue screen) ----
 // One row per queued or finished download; the row the queue thread is
