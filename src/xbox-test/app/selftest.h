@@ -158,7 +158,8 @@ static void run_64(const std::string& mode, const std::wstring& path) {
     const std::wstring exe = path.substr(path.find_last_of(L"\\/") + 1);
     if (!donor_pe::probe(lp_sink)) { result(mode, "FAIL donor-gate", ""); return; }
     mlp::donor_resolve = donor_pe::exported;
-    if (!user32_core::test(lp_sink)) { result(mode, "FAIL u32c-test", ""); return; }
+    std::string gate;
+    if (!user32_core::test(lp_sink, &gate)) { result(mode, "FAIL u32c-test", gate); return; }
     regb::init(g_dir, lp_sink);
     {   // Wine's C++ runtime beside the launcher, as a launch sets it.
         wchar_t self[2048];

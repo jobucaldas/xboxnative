@@ -181,20 +181,14 @@ int opengl_entry() {
         }
     }
 
-    // Three frames, as a game's first frames: the third is read back.
-    glViewport(0, 0, 320, 240);
-    for (int frame = 0; frame < 3; ++frame) {
-        glClearColor(0.0f, 0.25f, 0.5f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        if (!swapBuffers(dc)) return fail(16, "wglSwapBuffers", GetLastError());
-    }
-    glFinish();
-    emit("PLAY-OPENGL STAGE frame-presented\n");
-
     // The verdict is a pixel, not a call: read the centre of the cleared frame
-    // back and compare to the colour set above. The readback is from the bound
-    // framebuffer, so it validates context, clear and the driver's state, and
-    // the swap chain present is proven by the stage line above.
+    // BEFORE any present — after SwapBuffers the back-buffer contents are
+    // undefined (the swapchain rotates/discards buffers), so the readback must
+    // happen while the cleared buffer is still bound.
+    glViewport(0, 0, 320, 240);
+    glClearColor(0.0f, 0.25f, 0.5f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glFinish();
     unsigned char pixel[4] = {0, 0, 0, 0};
     glReadPixels(160, 120, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
     bool blocked = false;
@@ -205,6 +199,18 @@ int opengl_entry() {
         p = appendInt(p, pixel[2]); *p++ = ','; p = appendInt(p, pixel[3]);
         p = append(p, " want=0,64,128,255\n"); *p = 0; emit(line);
     }
+
+    // Three presented frames, as a game's first frames: present is proven by
+    // the stage line and the swap chain's hr in the log; the pixel verdict has
+    // already been read back above, before any present invalidated the buffer.
+    glViewport(0, 0, 320, 240);
+    for (int frame = 0; frame < 3; ++frame) {
+        glClearColor(0.0f, 0.25f, 0.5f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        if (!swapBuffers(dc)) return fail(16, "wglSwapBuffers", GetLastError());
+    }
+    glFinish();
+    emit("PLAY-OPENGL STAGE frame-presented\n");
     wglMakeCurrent(nullptr, nullptr);
     wglDeleteContext(context);
     ReleaseDC(window, dc);

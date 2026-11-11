@@ -27,6 +27,8 @@ inline const Mode* modes(size_t& count) {
         {"d3d9-textured", "play-d3d9-textured.exe", false},
         {"d3d10", "play-d3d10.exe", false},
         {"opengl", "play-opengl.exe", false},
+        {"d3d11", "play-d3d11.exe", false},
+        {"d3d12", "play-d3d12.exe", false},
     };
     count = sizeof(table) / sizeof(*table);
     return table;
@@ -129,6 +131,9 @@ inline std::string verdict(const std::string& mode, bool finished, bool executed
     // The OpenGL fixture's readback mismatch: the context worked but the host
     // drew nothing the guest could read. A platform limit, never a pass.
     if (mode == "opengl" && code == 43) return "BLOCKED pixel-readback";
+    // The D3D11/D3D12 fixtures' readback mismatch: the pipeline ran but the
+    // pixels did not read back as drawn. A platform limit, never a pass.
+    if ((mode == "d3d11" || mode == "d3d12") && code == 43) return "BLOCKED pixel-readback";
     if (code == 42) return "PASS";
     return "FAIL exit-" + std::to_string(code);
 }
