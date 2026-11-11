@@ -1,10 +1,11 @@
 #!/bin/bash
 # build.sh [OUTDIR=./out] -> out/layout, out/k32.msix (signed with out/test.pfx), out/test.cer
 set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)   # repo root: defaults below must not depend on the cwd
 export PATH="$HOME/.local/bin:$PATH"
 here="$(cd "$(dirname "$0")" && pwd)"; cd "$here"; out="${1:-out}"; mkdir -p "$out/layout" "$out/obj"   # relative paths: clang-cl treats /abs/paths as options
 python3 gen-mlp-map.py
-CB="${UWP_CROSSBUILD:-out/uwp-crossbuild}"
+CB="${UWP_CROSSBUILD:-$root/out/uwp-crossbuild}"
 case "${2:-uwph}" in
   uwph) manifest=AppxManifest.xml; lane_flags=() ;;
   wxl) manifest=AppxManifest.Wxl.xml; lane_flags=() ;;

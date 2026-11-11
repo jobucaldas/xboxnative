@@ -1,9 +1,10 @@
 #!/bin/bash
 set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)   # repo root: defaults below must not depend on the cwd
 export PATH="$HOME/.local/bin:$PATH"
 cd "$(dirname "$0")"
 out="${1:-out}";mkdir -p "$out/layout"
-CB="${UWP_CROSSBUILD:-out/uwp-crossbuild}"
+CB="${UWP_CROSSBUILD:-$root/out/uwp-crossbuild}"
 python3 generate_routes.py "$out/routes.generated.h"
 UWP_OBJ_DIR="$out/driver-obj" "$CB/scripts/build.sh" --uwp --out "$out/layout/uwph-user32.dll" --link-arg /dll --link-arg /def:display.def display.cpp dll_map.cpp -- /MT /O2 /I"$out"
 x86_64-w64-mingw32-dlltool -d imports.def -l "$out/libuwph-user32.a"

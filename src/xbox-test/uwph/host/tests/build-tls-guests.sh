@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)   # repo root: defaults below must not depend on the cwd
 cd "$(dirname "$0")/.."
 out=${1:-out-tls}
 mkdir -p "$out/obj" "$out/layout"
@@ -21,5 +22,5 @@ lld-link-19 "${common[@]}" /dll /entry:tls_dll_entry /out:"$out/layout/tls-test.
 lld-link-19 "${common[@]}" /entry:tls_exe_entry /out:"$out/layout/tls-test.exe" "$out/obj/tls-exe.obj" "$out/obj/cxx-exe.obj" "$out/obj/tls-test.lib" /usr/x86_64-w64-mingw32/lib/libkernel32.a
 for slot in a b; do
   define=/DCARRIER_A; [[ $slot == b ]] && define=/DCARRIER_B
-  UWP_OBJ_DIR="$out/carrier-$slot-obj" "${UWP_CROSSBUILD:-out/uwp-crossbuild}/scripts/build.sh" --uwp --out "$out/layout/tls-carrier-$slot.dll" --link-arg /dll tls_carrier.cpp -- /MT /O2 /GS- "$define"
+  UWP_OBJ_DIR="$out/carrier-$slot-obj" "${UWP_CROSSBUILD:-$root/out/uwp-crossbuild}/scripts/build.sh" --uwp --out "$out/layout/tls-carrier-$slot.dll" --link-arg /dll tls_carrier.cpp -- /MT /O2 /GS- "$define"
 done

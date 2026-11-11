@@ -1,9 +1,10 @@
 #!/bin/bash
 # build.sh [OUTDIR=./out] -> out/layout, out/vrx.msix (signed with out/test.pfx), out/test.cer
 set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)   # repo root: defaults below must not depend on the cwd
 export PATH="$HOME/.local/bin:$PATH"
 here="$(cd "$(dirname "$0")" && pwd)"; cd "$here"; out="${1:-out}"; mkdir -p "$out/layout" "$out/obj"   # relative paths: clang-cl treats /abs/paths as options
-CB="${UWP_CROSSBUILD:-out/uwp-crossbuild}"
+CB="${UWP_CROSSBUILD:-$root/out/uwp-crossbuild}"
 UWP_OBJ_DIR="$out/obj" "$CB/scripts/build.sh" --uwp --out "$out/layout/vrx.exe" --jobs 4 main.cpp -- /MT /O2 /DNDEBUG
 cp -r "$here/Assets" "$here/AppxManifest.xml" "$out/layout/"
 # test certificate (subject must equal manifest Publisher); created once, never committed

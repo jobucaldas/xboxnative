@@ -31,7 +31,7 @@ if [[ ${MLP_SKIP_UPLOAD:-0} != 1 ]]; then
 for binary in Megabonk.exe UnityPlayer.dll baselib.dll; do
     uploaded=0
     for attempt in 1 2 3 4; do
-        if bash "$dp/put-file.sh" "$full" '\LocalState' "${MEGABONK_DIR:-megabonk-from-console}/$binary" | tee "$runs/put-$binary.log" &&
+        if bash "$dp/put-file.sh" "$full" '\LocalState' "${MEGABONK_DIR:-$root/megabonk-from-console}/$binary" | tee "$runs/put-$binary.log" &&
            grep -Eq '^put HTTP 2[0-9][0-9]$' "$runs/put-$binary.log"; then
             uploaded=1; break
         fi
@@ -48,7 +48,7 @@ bash "$dp/get-file.sh" "$full" '\LocalState' k32.log "$runs/reset.log"
 cmp "$runs/k32.log" "$runs/reset.log"
 bash "$dp/launch.sh" "$rid" "$full"
 bash "$dp/wait-log.sh" "$full" k32.log 'MLP-PROBE-DONE|MLP-PROBE-FAILED' 120 "$runs/console-mlp.log"
-python3 src/xbox-test/uwph/host/check-mlp.py "$runs/console-mlp.log" ${MEGABONK_DIR:-megabonk-from-console}
+python3 src/xbox-test/uwph/host/check-mlp.py "$runs/console-mlp.log" ${MEGABONK_DIR:-$root/megabonk-from-console}
 bash "$dp/ps.sh" "$full" | tee "$runs/process.log"
 grep -Fq "pkg=$full" "$runs/process.log"
 # Leave running for acceptance observation; later smoke uses its own identity.

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Owned fixture only; offline Wine evidence, never a gameplay/console claim.
 set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)   # repo root: defaults below must not depend on the cwd
 cd "$(dirname "$0")/.."
 out=out/msvc-cookie-tests
 mkdir -p "$out/obj"
@@ -12,7 +13,7 @@ link=${CONFIG_LINKER:-lld-link}
 dlltool=${CONFIG_DLLTOOL:-llvm-dlltool-19}
 printf 'LIBRARY cookie-observer.dll\nEXPORTS\nobserve_cookie\n' > "$out/obj/observer.def"
 "$dlltool" -m i386:x86-64 -d "$out/obj/observer.def" -l "$out/obj/observer.lib"
-CB=${UWP_CROSSBUILD:-out/uwp-crossbuild}
+CB=${UWP_CROSSBUILD:-$root/out/uwp-crossbuild}
 UWP_OBJ_DIR="$out/obj/guest" "$CB/scripts/build.sh" --out "$out/guest.dll" --link-arg /dll \
  --link-arg /entry:fixture_entry --link-arg "$out/obj/observer.lib" tests/msvc-cookie-guest.cpp -- /MT /O2 /EHsc /GS
 crt=${XWIN_ROOT:-$HOME/.cache/uwp-crossbuild/xwin}
