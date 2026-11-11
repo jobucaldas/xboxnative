@@ -152,6 +152,23 @@ int main() {
         check(queue_row_move(sel, 3, false) && sel == 1, "queue up 2->1");
         sel = 0;
         check(!queue_row_move(sel, 0, true), "no rows: no movement");
+        // the row model matches the draw: 0 Auto-update, then the active
+        // download (if any), then the queued jobs
+        check(queue_row_total(0, 0) == 1, "an empty queue is one row (Auto-update)");
+        check(queue_row_total(1, 0) == 2, "one download: two rows");
+        check(queue_row_total(0, 2) == 3, "two queued jobs with no active download: three rows");
+        check(queue_row_total(2, 3) == 6, "downloads + updates + the Auto-update row");
+        check(queue_row_index(0, false) == -1, "row 0 is the Auto-update row (no queue entry)");
+        check(queue_row_index(1, false) == 0, "row 1 is the first queued job");
+        check(queue_row_index(2, false) == 1, "row 2 is the second queued job");
+        check(queue_row_index(1, true) == -1, "row 1 with an active download is the download, not a job");
+        check(queue_row_index(2, true) == 0, "row 2 with an active download is the first queued job");
+        check(queue_row_index(3, true) == 1, "row 3 with an active download is the second queued job");
+        // the bug this pins: with one download and no active row, Down from
+        // Auto-update must land on that download (2 rows total, not 1)
+        int one = 0;
+        check(queue_row_move(one, queue_row_total(1, 0), true) && one == 1, "one download: Down leaves Auto-update");
+        check(queue_row_move(one, queue_row_total(1, 0), true) && one == 0, "one download: Down wraps back to Auto-update");
     }
 
     // ---- item 32: tab_games applies Playable WITHIN the tab (the caller
@@ -322,8 +339,12 @@ int main() {
         // typing
         std::string q; bool open = true;
         check(search_activate(0, q, open) && q == "A", "A types the letter");
-        check(search_activate(36, q, open) && q == "A ", "Space appends a space");
-        check(search_activate(37, q, open) && q == "A", "Backspace deletes one character");
+        check(search_activate(26, q, open) && q == "A0", "the first digit key types 0");
+        check(search_activate(35, q, open) && q == "A09", "the last digit key types 9");
+        check(search_activate(36, q, open) && q == "A09 ", "Space appends a space");
+        check(search_activate(37, q, open) && q == "A09", "Backspace deletes one character");
+        check(search_activate(37, q, open) && q == "A0", "Backspace deletes the 9");
+        check(search_activate(37, q, open) && q == "A", "Backspace deletes the 0");
         check(search_activate(37, q, open) && q.empty() && open, "Backspace on empty keeps the overlay open");
         search_activate(38, q, open);   // Done: closes, query unchanged (returns false)
         check(!open, "Done closes the overlay");

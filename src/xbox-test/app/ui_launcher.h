@@ -226,6 +226,7 @@ struct LibraryVM {
     int sort_focus = 0;      // highlighted option while open
     bool filters_open = false;
     int filters_focus = 0;
+    bool filter_playable = false;   // the Playable row's real state (main.cpp sets it from m_filterPlayable)
     bool search_open = false;    // on-screen keyboard overlay is up
     int search_key = 0;          // keyboard cursor (ui_nav::search_key ids)
     const char* query = "";      // live query text; filters the caller's tiles
@@ -862,7 +863,7 @@ inline void draw_library(ui::Canvas& c, const Font& f, const SidebarVM& sb, cons
     // itself never paints it.
     draw_sort_popup(c, f, lib);
     if (lib.filters_open) {
-        FilterRowVM installed_only[1] = {{"Installed only", false}};
+        FilterRowVM installed_only[1] = {{"Playable", lib.filter_playable}};   // the real filter: label + live state
         draw_filters_panel(c, f, installed_only, 1, lib.filters_focus);
     }
     draw_search_overlay(c, f, lib);
@@ -1337,7 +1338,7 @@ inline void draw_action_sheet(ui::Canvas& c, const Font& f, const ActionSheetVM&
              dis ? ui::theme::textMuted : ui::theme::text);
         if (dis)
             text(c, f, Face::Regular, 20, btn.x + 24, btn.y + 42.0f, v.reasons[i], ui::theme::textMuted);
-        if (i == v.sel && !dis)
+        if (i == v.sel)   // the ring follows focus even on a disabled row (navigation walks them)
             focus_ring(c, rect(btn.x - ringOffset, btn.y - ringOffset, btn.w + ringOffset * 2, btn.h + ringOffset * 2),
                        radiusCard + ringRadiusDelta, ringWidth);
         oy += bh + opt_gap;

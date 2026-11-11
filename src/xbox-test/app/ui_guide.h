@@ -218,10 +218,15 @@ struct Model {
     const std::vector<AchievementView>* achievements = nullptr;
 };
 
+// The Settings tab's visible rows: the FPS counter row, plus the frame-time
+// graph row only while the counter is on. Shared with guest_overlay.h's
+// guide_press so navigation and the draw always walk the same rows.
+inline int settings_rows(bool fps_on) { return fps_on ? 2 : 1; }
+
 inline int row_count(const Model& m) {
     if (m.tab == 0) return 3;                                     // Resume, Quit game, Force quit
     if (m.tab == 1) return m.achievements ? int(m.achievements->size()) : 0;
-    return m.fpsOn ? 2 : 1;                                       // FPS counter; frame-time graph only while it is on
+    return settings_rows(m.fpsOn);                                // FPS counter; frame-time graph only while it is on
 }
 
 inline void sync_scroll(Model& m) {

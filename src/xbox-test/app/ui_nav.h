@@ -180,9 +180,18 @@ inline const char* dl_status_text(int state, int pct, const char* msg) {
 
 // ---- queue focus walk (item 28) ----
 // The queue screen's rows: 0 is the Auto-update row (a real focusable row —
-// A toggles it), then the downloads. Right from the sidebar lands on row 0;
-// up/down move with wrap; B returns to the library (main.cpp). Clamped, so a
+// A toggles it), then the active download (if any), then the queue. The row
+// count is 1 + downloads + updates; main.cpp passes the same count to the
+// clamp/move helpers and indexes g_dq with queue_row_index. Clamped, so a
 // drained queue keeps the focus on Auto-update.
+inline int queue_row_total(int downloads, int updates) { return 1 + downloads + updates; }
+// The queue index a focused row maps to: row 0 is Auto-update (no queue
+// entry), row 1 with an active download is the download itself; the rest
+// index the queued jobs in order. -1 = no queued job on this row.
+inline int queue_row_index(int sel, bool active_row) {
+    if (sel <= 0 || (active_row && sel == 1)) return -1;
+    return sel - 1 - (active_row ? 1 : 0);         // index into the queued list
+}
 inline int queue_row_clamp(int sel, int n) { return n <= 0 ? 0 : sel < 0 ? 0 : sel >= n ? n - 1 : sel; }
 inline bool queue_row_move(int& sel, int n, bool down) {
     if (n <= 0) return false;
@@ -324,7 +333,7 @@ inline bool search_activate(int idx, std::string& query, bool& open) {
         return true;
     }
     if (idx == 36) { query += ' '; return true; }
-    query += char('A' + idx);
+    query += idx < 26 ? char('A' + idx) : char('0' + (idx - 26));   // 0..25 A-Z, 26..35 0-9 (search_key_label's ids)
     return true;
 }
 

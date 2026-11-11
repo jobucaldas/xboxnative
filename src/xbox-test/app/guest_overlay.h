@@ -451,7 +451,9 @@ inline ui_guide::Action guide_press(ui_guide::Button b,bool rowUsesLeftRight) {
         case ui_guide::Action::TabPrev: tab=(tab+2)%3;sel=0;achTop=0;ui_guideTab=tab;selection=0;break;
         case ui_guide::Action::TabNext: tab=(tab+1)%3;sel=0;achTop=0;ui_guideTab=tab;selection=0;break;
         case ui_guide::Action::Up: case ui_guide::Action::Down: {
-            int n=tab==0?3:tab==1?int(achievements.snapshot().size()):2;
+            // the same row count the draw uses (ui_guide::row_count): the
+            // graph row exists only while the FPS counter is on
+            int n=tab==0?3:tab==1?int(achievements.snapshot().size()):ui_guide::settings_rows(fpsOn.load());
             if(n>0) {
                 sel=(sel+(a==ui_guide::Action::Down?1:n-1))%n;
                 selection=sel;

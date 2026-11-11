@@ -165,6 +165,27 @@ int main(int argc, char** argv) {
         check(m.files == 0, "the cancelled move left no partial copy");
     }
 
+    // ---- run(): an Internal move keeps the LocalState marker ----
+    // marker_dst == marker_src (both the LocalState path): the marker must be
+    // REWRITTEN in place (not deleted) and the move still completes.
+    {
+        const std::wstring g = src_root + L"\\internal";
+        make_dir(g); make_file(g + L"\\game.exe", std::string(777, 'h'));
+        const std::wstring msrc = src_root + L"\\dl_444.done";
+        make_file(msrc, "app 444 root E:\\XboxNativeGames\ninstalldir internal\nbytes 777\n");
+        const std::wstring d = dst_root + L"\\internal";
+        Progress p; p.total = 777;
+        std::atomic<bool> stop{false};
+        const std::string dst_text = "app 444 installdir internal\nbytes 777\n";   // no root: LocalState
+        check(run(g, d, msrc, msrc, dst_text, p, &stop), "the Internal move (same marker path) completes");
+        FILE* f = _wfopen(msrc.c_str(), L"rb");
+        char buf[128] = {}; size_t n = f ? fread(buf, 1, 128, f) : 0; if (f) fclose(f);
+        check(n > 0 && std::string(buf, n) == dst_text, "the LocalState marker is rewritten, not deleted");
+        check(verify_tree(d, 777, 1), "the destination holds the copy");
+        DWORD a = GetFileAttributesW(g.c_str());
+        check(a == INVALID_FILE_ATTRIBUTES, "the source tree is removed");
+    }
+
     std::printf("%s (%d failure%s)\n", g_failures ? "MOVE-GAME FAILED" : "MOVE-GAME OK",
                 g_failures, g_failures == 1 ? "" : "s");
     return g_failures ? 1 : 0;

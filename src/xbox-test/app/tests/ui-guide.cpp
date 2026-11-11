@@ -207,6 +207,27 @@ int main(int argc, char** argv) {
         check(m.achTop == 0, "middle row needs no scroll");
     }
 
+    // ---- pure logic: Settings rows follow the FPS counter (Bugbot: focus
+    // walked a hidden row) ----
+    {
+        Model m;
+        m.tab = 2;
+        m.fpsOn = false; m.graphOn = false;
+        check(ui_guide::settings_rows(false) == 1 && ui_guide::row_count(m) == 1,
+              "FPS off: one Settings row (the hidden graph row is not focusable)");
+        ui_guide::move(m, Action::Down);
+        check(m.sel == 0, "FPS off: Down from the FPS row stays on it");
+        ui_guide::move(m, Action::Up);
+        check(m.sel == 0, "FPS off: Up from the FPS row stays on it");
+        m.fpsOn = true;
+        check(ui_guide::settings_rows(true) == 2 && ui_guide::row_count(m) == 2,
+              "FPS on: two Settings rows (counter + graph)");
+        ui_guide::move(m, Action::Down);
+        check(m.sel == 1, "FPS on: Down reaches the graph row");
+        ui_guide::move(m, Action::Down);
+        check(m.sel == 0, "FPS on: Down wraps back to the FPS row");
+    }
+
     // ---- pure logic: date formatting ----
     {
         // 2026-11-09 12:00:00 UTC = 1794225600

@@ -431,9 +431,15 @@ static void avatar_fetch() {
     g_avatarState = 2;
 }
 static void start_avatar_fetch() {
-    int none = 0;
-    if (!g_avatarState.compare_exchange_strong(none, 1)) return;
-    std::thread(avatar_fetch).detach();
+    int state = g_avatarState.load(std::memory_order_relaxed);
+    // 0 none or 3 failed: (re)start. A failed fetch retries on the next call;
+    // loading (1) and ready (2) stay.
+    while (state == 0 || state == 3) {
+        if (g_avatarState.compare_exchange_weak(state, 1)) {
+            std::thread(avatar_fetch).detach();
+            return;
+        }
+    }
 }
 
 // ---------------------------------------------------------------- detail-page hero banner (item 13)
@@ -970,7 +976,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             for (size_t i = 0; i < m_roots.size(); ++i) {
                 if (i == (size_t)m_stSel) continue;   // no 'Move to' onto the same drive
                 const storage_roots::Choice& dst = m_roots[i];
-                std::wstring dstDir = installs::ascii(dst.root) + L"\\" + installs::ascii(ii.dir);
+                std::wstring dstDir = (dst.root.empty() ? g_dir : installs::ascii(dst.root)) + L"\\" + installs::ascii(ii.dir);
                 bool dst_exists = !ii.dir.empty() && GetFileAttributesW(dstDir.c_str()) != INVALID_FILE_ATTRIBUTES;
                 auto ref = move_game::plan_check(busy, src_root, dst.root, bytes, dst_exists, dst.freeBytes);
                 m_actionDst.push_back((int)i);   // Move row → its target drive index
@@ -1001,11 +1007,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         {
             std::lock_guard<std::mutex> l(m_moveM);
             m_moveSrc = ii.folder;
-            m_moveDst = installs::ascii(dst.root) + L"\\" + installs::ascii(ii.dir);
+            m_moveDst = (dst.root.empty() ? g_dir : installs::ascii(dst.root)) + L"\\" + installs::ascii(ii.dir);
             m_moveMarkerSrc = installs::marker_path(g_dir, m_stActionApp);
-            m_moveMarkerDst = installs::marker_path(installs::ascii(dst.root), m_stActionApp);
+            m_moveMarkerDst = m_moveMarkerSrc;   // the marker stays in LocalState; only its text changes
             // the marker text keeps installdir and bytes but names the new root
-            m_moveMarkerText = "app " + std::to_string(m_stActionApp) + " root " + dst.root +
+            m_moveMarkerText = "app " + std::to_string(m_stActionApp) +
+                               (dst.root.empty() ? std::string() : " root " + dst.root) +
                                " installdir " + ii.dir + "\nbytes " + std::to_string(ii.bytes) + "\n";
         }
         m_move.running = true; m_move.cancel = false; m_move.failed = false; m_move.done = false;
@@ -1063,12 +1070,25 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
         return m_playableExtra.count(appid) != 0;
     }
-    // item 32: the tab list, then the Playable filter WITHIN it. The caller
+    // item 32: the tab list, then the Playable filter WITHIN it, then the
+    // live search query (case-insensitive substring on the name). The caller
     // sorts afterwards (sort_games), so order is the library's.
     std::vector<std::shared_ptr<Game>> shown_games() {   // caller holds g_gm
         auto tab = game_library::shown(g_games, m_onlyInstalled, m_installed);
-        if (!m_filterPlayable) return tab;
-        return ui_nav::tab_games(tab, true, [this](uint32_t a) { return is_playable(a); });
+        if (m_filterPlayable) tab = ui_nav::tab_games(tab, true, [this](uint32_t a) { return is_playable(a); });
+        if (!m_query.empty()) {
+            std::string q;
+            q.reserve(m_query.size());
+            for (char c : m_query) q += (char)std::tolower((unsigned char)c);
+            std::vector<std::shared_ptr<Game>> out;
+            for (auto& g : tab) {
+                std::string lower = g->name;
+                for (char& c : lower) c = (char)std::tolower((unsigned char)c);
+                if (lower.find(q) != std::string::npos) out.push_back(g);
+            }
+            tab.swap(out);
+        }
+        return tab;
     }
     static constexpr int COLS = ui_launcher::kGridCols;   // same 7 columns the grid draws
 
@@ -1174,7 +1194,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     }
     void close_detail(const char* why) {
         // nothing of this page leaks into the next one (CONSOLE-ISSUES 3)
-        logf("detail: back to library (%s)", why); m_dSi.reset(); m_confirmDelete = false; m_delYes = false; m_cloudOpen = false; m_cloudFocus = 0; m_dFocus = 0; g_screen = S_LIBRARY;
+        logf("detail: back to library (%s)", why); hero_release(m_dApp); m_dSi.reset(); m_confirmDelete = false; m_delYes = false; m_cloudOpen = false; m_cloudFocus = 0; m_dFocus = 0; g_screen = S_LIBRARY;
     }
     // A on a sidebar entry, shared by the library, queue and storage screens
     // (the sidebar stays live on every screen that draws it). Item 14's new
@@ -1183,8 +1203,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // 5 storage management.
     void sidebar_activate(double t, const char* source) {
         int target = ui_nav::sidebar_target(m_sidebar);
-        if (target == ui_nav::kSidebarProfile) { m_confirmLogout = true; m_logoutYes = false; logf("sidebar: profile row -> logout sheet, focus on Cancel (%s)", source); }
-        else if (target == ui_nav::kSidebarSearch) { m_hdrFocus = -1; m_focus = ui_nav::Focus::grid; ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 2); m_searchKey = 0; logf("sidebar: search overlay open (%s)", source); }
+        if (target == ui_nav::kSidebarProfile) { g_screen = S_LIBRARY; m_confirmLogout = true; m_logoutYes = false; logf("sidebar: profile row -> logout sheet, focus on Cancel (%s)", source); }   // the sheet draws on the library
+        else if (target == ui_nav::kSidebarSearch) { g_screen = S_LIBRARY; m_hdrFocus = -1; m_focus = ui_nav::Focus::grid; ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 2); m_searchKey = 0; logf("sidebar: search overlay open (%s)", source); }   // the overlay draws on the library
         else if (target == 2 || target == 3) {
             bool want = target == 3;
             if (m_onlyInstalled != want) { m_onlyInstalled = want; m_installedT = -10; refresh_installed(t); grid_position(0, 0, "sidebar view"); }
@@ -1397,6 +1417,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if(c=="toggle"&&!menuOpen&&!guest_overlay::drawable){logf("overlay: menu unavailable (present hooks or back-buffer format unsupported) (%s)",via);return;}
         if(c=="toggle"){if(busy)return;menuOpen=!menuOpen;guest_overlay::ui_guideTab=0;selection=0;guest_overlay::achTop=0;
                         if(menuOpen)block_input(true);logf("overlay: menu %s (Home) (%s)",menuOpen?"opened":"closed",via);return;}
+        // Turning the FPS counter off can strand the selection on the graph
+        // row (Settings row 1), which disappears; re-clamp into range.
+        auto reclamp=[this](bool on){ if(!on&&ui_guideTab.load()==2&&selection.load()>0)selection=0; };
         // `selection` is the active tab's focused row (guide_press keeps the
         // atomics in sync); map it to the tab's commands.
         const int tab=ui_guideTab.load(),row=selection.load();
@@ -1409,7 +1432,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                       guest_overlay::set_status(n?"Closing the game...":"No game window; force quitting");
                       if(!n){force_quit();return;}m_quitDeadline=now_s()+15;return;}
         if(c=="force"){busy=true;force_quit();return;}
-        if(c=="fps"){fpsOn=!fpsOn;write_text(g_dir+L"\\overlay.txt",fpsOn?"fps=1\n":"fps=0\n");logf("overlay: FPS counter now %s",fpsOn?"on":"off");return;}
+        if(c=="fps"){fpsOn=!fpsOn;write_text(g_dir+L"\\overlay.txt",fpsOn?"fps=1\n":"fps=0\n");logf("overlay: FPS counter now %s",fpsOn?"on":"off");reclamp(fpsOn);return;}
         if(c=="select"&&*name)logf("overlay: %s (tab %d row %d) (%s)",name,tab,row,via);
         if(c=="select"&&tab==0) {
             if(row==0){menuOpen=false;return;}   // Resume: input returns once buttons are released
@@ -1425,7 +1448,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             return;
         }
         if(c=="select"&&tab==2) {
-            if(row==0){fpsOn=!fpsOn;write_text(g_dir+L"\\overlay.txt",fpsOn?"fps=1\n":"fps=0\n");logf("overlay: FPS counter now %s",fpsOn?"on":"off");return;}
+            if(row==0){fpsOn=!fpsOn;write_text(g_dir+L"\\overlay.txt",fpsOn?"fps=1\n":"fps=0\n");logf("overlay: FPS counter now %s",fpsOn?"on":"off");reclamp(fpsOn);return;}
             if(row==1&&fpsOn){graphOn=!graphOn;logf("overlay: frame-time graph now %s",graphOn?"on":"off");return;}   // reachable only while the counter is on
             return;
         }
@@ -1975,6 +1998,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         lib.header_focus = m_hdrFocus;
         lib.sort_open = m_sortOpen; lib.sort_focus = m_sortFocus;
         lib.filters_open = m_filtersOpen; lib.filters_focus = m_filtersFocus;
+        lib.filter_playable = m_filterPlayable;   // the panel's Playable row shows the real state
         bool filterOn[1] = {m_filterPlayable};   // item 26/32: the Filters button's '· N' count
         lib.filters_active = ui_nav::filters_active(filterOn, 1);
         lib.search_open = m_searchOpen; lib.search_key = m_searchKey;
@@ -2103,6 +2127,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         static std::vector<std::string> gameNames, gameSizes;
         gameRows.clear(); gameNames.clear(); gameSizes.clear();
         if (m_stOpen) {
+            // row 0 is the "Use for new installs" action row (empty size string
+            // switches draw_storage's accent styling on); the games follow.
+            gameNames.push_back("Use for new installs");
+            gameSizes.push_back(std::string());
             auto rows = storage_game_list();
             for (size_t i = 0; i < rows.size(); ++i) {
                 gameNames.push_back(rows[i].name);
@@ -2112,7 +2140,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 ui_launcher::StorageGameVM gm;
                 gm.name = gameNames[i].c_str();
                 gm.size = gameSizes[i].c_str();
-                gm.focused = m_focus == ui_nav::Focus::grid && m_stGameSel == (int)(i + 1);
+                gm.focused = m_focus == ui_nav::Focus::grid && m_stGameSel == (int)i;   // 0 = the action row
                 gameRows.push_back(gm);
             }
             st.games = gameRows.data();
@@ -2148,7 +2176,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             psTitle = clip(!nm.empty() ? nm : "App " + std::to_string(m_move.appid), 36);
             psDetail = "Moving to " + m_move.dstName;
             ps.title = psTitle.c_str(); ps.detail = psDetail.c_str();
-            ps.pct = m_move.total ? (int)(m_move.copied.load() * 100 / m_move.total) : 0;
+            ps.pct = m_moveProgress.pct();   // the worker's Progress (m_move.copied is never written)
             ps.cancel_focus = true;
             ui_launcher::draw_progress_sheet(c, g_font, ps);
         } else if (m_confirmDelete) {   // the SAME sheet component as the game page, focus on Cancel
@@ -2360,7 +2388,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             std::deque<uint32_t> dq; { std::lock_guard<std::mutex> l(g_dqm); dq = g_dq; }
             uint32_t dlApp = g_dl.appid.load(); int dlState = g_dl.state.load();
             bool activeRow = dlState == 1 || (dlState != 0 && dlApp);   // the same row draw_queue puts first
-            int nrows = (int)dq.size() + (activeRow ? 1 : 0);
+            int nrows = ui_nav::queue_row_total((activeRow ? 1 : 0) + (int)dq.size(), 0);   // row 0 Auto-update, then downloads, then the queue (0 updates)
             if (m_focus == ui_nav::Focus::sidebar) {
                 if (has(edge, GamepadButtons::DPadUp)) { ui_nav::sidebar_move(m_sidebar, false); logf("sidebar: entry %d (%s)", m_sidebar, source); }
                 else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::sidebar_move(m_sidebar, true); logf("sidebar: entry %d (%s)", m_sidebar, source); }
@@ -2377,7 +2405,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 else if (has(edge, GamepadButtons::A)) {
                     if (m_qSel == 0) { m_autoUpdate = !m_autoUpdate; logf("queue: auto-update -> %s (A on the row, %s)", m_autoUpdate ? "on" : "off", source); }   // item 28: A on Auto-update toggles
                     else if (activeRow && m_qSel == 1) { g_dl.cancel = true; logf("queue: download cancel requested appid=%u (%s)", dlApp, source); }
-                    else if (m_qSel < (int)dq.size() + (activeRow ? 1 : 0)) { uint32_t id = dq[m_qSel - (activeRow ? 1 : 0)]; cancel_queued(id); logf("queue: cancel asked appid=%u (%s)", id, source); }
+                    else {
+                        int qi = ui_nav::queue_row_index(m_qSel, activeRow);
+                        if (qi >= 0 && qi < (int)dq.size()) { uint32_t id = dq[(size_t)qi]; cancel_queued(id); logf("queue: cancel asked appid=%u (%s)", id, source); }
+                    }
                 }
             }
         }

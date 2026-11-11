@@ -166,11 +166,12 @@ inline void remove_tree(const std::wstring& dir, int depth = 0) {
 }
 
 // The whole move, run on a worker thread (main.cpp starts it). Order: copy,
-// verify, write the destination marker, delete the source marker, remove the
-// source tree. Cancel or any failure removes the partial copy (and the dst
-// marker if it got written) and keeps the source untouched; the source marker
-// only goes once the destination is verified and marked. Returns false when
-// the move did not complete (with the partial copy already removed).
+// verify, write the destination marker, delete the source marker (skipped when
+// marker_dst IS marker_src — an Internal move keeps the LocalState marker),
+// remove the source tree. Cancel or any failure removes the partial copy (and
+// the dst marker if it got written) and keeps the source untouched; the source
+// marker only goes once the destination is verified and marked. Returns false
+// when the move did not complete (with the partial copy already removed).
 inline bool run(const std::wstring& src, const std::wstring& dst,
                 const std::wstring& marker_src, const std::wstring& marker_dst,
                 const std::string& marker_text_dst,
@@ -184,6 +185,7 @@ inline bool run(const std::wstring& src, const std::wstring& dst,
     if (stop && *stop) { remove_tree(dst); return false; }
     // destination marker first, then the source marker, then the source tree:
     // a crash between these steps leaves the game installed at exactly one root
+    const bool same_marker = marker_src == marker_dst;   // an Internal move rewrites the one LocalState marker
     {
         FILE* f = _wfopen(marker_dst.c_str(), L"wb");
         if (!f) { remove_tree(dst); return false; }
@@ -191,7 +193,7 @@ inline bool run(const std::wstring& src, const std::wstring& dst,
         ok = fclose(f) == 0 && ok;
         if (!ok) { remove_tree(dst); return false; }
     }
-    if (!DeleteFileW(marker_src.c_str())) { DeleteFileW(marker_dst.c_str()); remove_tree(dst); return false; }
+    if (!same_marker && !DeleteFileW(marker_src.c_str())) { DeleteFileW(marker_dst.c_str()); remove_tree(dst); return false; }
     remove_tree(src);
     return true;
 }
