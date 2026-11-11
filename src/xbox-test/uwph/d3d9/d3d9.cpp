@@ -207,8 +207,10 @@ bool dumpWanted() {
 void dumpHex(const char* label,const DWORD* words,unsigned count) {
     d3dshim::Line line(label);
     line.hex(unsigned(count));line.emit();
-    // One line per 16 words: a whole shader on a handful of lines.
-    char text[16*9+1];
+    // One line per 16 words: a whole shader on a handful of lines. A full
+    // line writes 16 words at 9 bytes each (space + 8 hex digits), then the
+    // newline and the terminator: 146 bytes.
+    char text[16*9+2];
     for(unsigned base=0;base<count;base+=16) {
         unsigned used=0;
         for(unsigned i=base;i<count&&i<base+16;++i) {

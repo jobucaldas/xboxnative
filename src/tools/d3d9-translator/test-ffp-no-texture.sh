@@ -151,13 +151,14 @@ int main(int argc,char** argv) {
     return 0;
 }
 EOF
-mcfg=""
-for f in /nix/store/*mcfgthread*x86_64-w64-mingw32*/lib/libmcfgthread.a; do [[ -f $f ]] && mcfg=$(dirname "$f") && break; done
-build() { # build OUT SRC... - mingw-w64 on NixOS keeps libmcfgthread outside the
-          # compiler's search path, so its directory is passed explicitly
+# mingw-w64 on NixOS keeps libmcfgthread outside the compiler's search path, so
+# its directory is passed when it exists; CI's Debian/Ubuntu mingw has the
+# static runtime in its default search path already (as swap-chain-convert.sh).
+extra=()
+for d in /nix/store/*-mcfgthread-x86_64-w64-mingw32-*/lib; do [[ -d $d ]] && extra+=("-L$d"); done
+build() { # build OUT SRC...
     local out=$1; shift
-    [[ -n $mcfg ]] || { echo "cannot link: libmcfgthread not found" >&2; exit 2; }
-    x86_64-w64-mingw32-g++ -O2 -std=c++17 -o "$out" "$@" -L"$mcfg" -lkernel32 -static
+    x86_64-w64-mingw32-g++ -O2 -std=c++17 -o "$out" "$@" "${extra[@]}" -lkernel32 -static
 }
 build "$work/driver.exe" "$work/driver.cpp"
 build "$work/translate.exe" "$work/translate.cpp"
