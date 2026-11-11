@@ -2078,6 +2078,16 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             if (!m_guestSurface) { logf("cmd.txt: no game running"); return; }
             menu_command(c == "gmenu" ? "toggle" : c == "gquit" ? "quit" : c == "gforce" ? "force" : "fps", "cmd.txt (synthetic)"); return;
         }
+        // Item D20: the guide's tabs are switched by the pad's shoulders, which a
+        // script cannot press; 'gtab N' selects Home/Achievements/Settings the
+        // same way guide_press does, so the console can capture each tab.
+        if (c.rfind("gtab ", 0) == 0) {
+            if (!guest_overlay::menuOpen) { logf("cmd.txt: gtab ignored (guide closed)"); return; }
+            const int n = atoi(c.c_str() + 5);
+            if (n < 0 || n > 2) { logf("cmd.txt: gtab %d out of range", n); return; }
+            guest_overlay::ui_guideTab = n; guest_overlay::selection = 0; guest_overlay::achTop = 0;
+            logf("cmd.txt: guide tab -> %d (synthetic)", n); return;
+        }
         if (c == "stacks") { dump_thread_stacks(); logf("cmd.txt: thread stacks written to launch_probe.log"); return; }
         // item 19: named shortcuts for testers — harmless openers only.
         if (c == "sort") { if (g_screen == S_LIBRARY) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 0); m_sortFocus = g_sortMode.load(); logf("cmd.txt: sort dropdown open"); } return; }
