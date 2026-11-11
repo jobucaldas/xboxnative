@@ -8,8 +8,8 @@ mkdir -p "$runs"
 exec 9>/workspace/x64-run/CONSOLE.lock
 flock -w 600 9
 export DP_LOCK_FD=9
-full=Joao.XboxSteam.Cs32_0.1.1.0_x64__0bdeywx3x8szp
-rid='Joao.XboxSteam.Cs32_0bdeywx3x8szp!App'
+full=Xboxnative.Cs32_0.1.1.0_x64__0bdeywx3x8szp
+rid='Xboxnative.Cs32_0bdeywx3x8szp!App'
 dp=src/xbox-test/dp
 bash "$dp/install.sh" src/xbox-test/uwph/host/out/cs32/k32.msix src/xbox-test/uwph/host/out/cs32/test.cer
 bash "$dp/launch.sh" "$rid" "$full"

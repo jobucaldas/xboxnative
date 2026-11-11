@@ -1,6 +1,6 @@
 # CoreWindow window-layer spike
 
-`./build.sh` builds and signs the isolated `Joao.XboxSteam.W32u` package on Linux.
+`./build.sh` builds and signs the isolated `Xboxnative.W32u` package on Linux.
 `w32u.exe` is a GUI/MTA/AppContainer CoreApplication host. It ignores activation
 arguments, owns one CoreWindow, forwards its events, and logs to LocalState/w32u.log.
 `window-test.dll` is a separate mingw x64 PE with no CRT/entrypoint; its exported

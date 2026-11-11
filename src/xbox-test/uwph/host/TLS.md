@@ -84,6 +84,6 @@ lacks VirtualProtectFromApp; its success is not Xbox W^X evidence. Build the
 isolated console package with `bash build.sh out-tls tls`. After installing only
 that package with the locked Device Portal helpers, run
 `bash src/xbox-test/smoke-all.sh` from the worktree root. This lane's smoke defaults
-to Joao.XboxSteam.Tls, preserves the exact original WXL assertions and adds strict
+to Xboxnative.Tls, preserves the exact original WXL assertions and adds strict
 TLS/exception/lifecycle/protection checks. Read LANE_NOTES.md for actual console
 results and limitations; this document is the API contract, not execution proof.
