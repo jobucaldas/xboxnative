@@ -81,6 +81,20 @@ inline size_t best_other(const std::vector<Choice>& v, size_t cur) {
     return best;
 }
 
+// The sidebar disk widget's figures for ONE install location, computed exactly
+// like the Storage screen's drive row (free_total / total), so the widget and
+// the screen can never disagree. free_gb_x10 is the volume's free space in
+// tenths of a GB (the widget's "412.6 GB free"); used_pct is what the ring
+// fills. Returns false when the drive's space could not be read.
+inline bool widget_figures(const Choice& c, int& free_gb_x10, int& used_pct) {
+    if (!c.space.ok || !c.space.total) return false;
+    free_gb_x10 = int((double(c.space.freeTotal) * 10.0 / 1073741824.0) + 0.5);
+    used_pct = int(100.0 - 100.0 * double(c.space.freeTotal) / double(c.space.total));
+    if (used_pct < 0) used_pct = 0;
+    if (used_pct > 100) used_pct = 100;
+    return true;
+}
+
 // Detail-page storage line: what this app may still write, the size of the
 // space it is writing into, and the volume's own free space when that differs
 // (a quota or a separate pool), so "0 MB free" is not read as "disk full".

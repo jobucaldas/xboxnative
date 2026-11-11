@@ -93,6 +93,25 @@ int main() {
     assert(space_line("Internal", "Q:\\Local", wr).find("WinRT System.FreeSpace=1.0 GB System.Capacity=5.0 GB") != std::string::npos);
     assert(space_line("USB E:", "E:\\XboxNativeGames", internal, "type=removable").find("type=removable") != std::string::npos);
 
+    // item D1: the sidebar widget's figures come from the SAME volume figures
+    // the Storage screen's drive row shows (freeTotal / total), so the two can
+    // never disagree; an unreadable drive leaves the widget's defaults alone.
+    {
+        int gb10 = -1, pct = -1;
+        Space vol; vol.ok = true; vol.total = 100ull << 30; vol.freeTotal = 66ull << 30;
+        Choice c; c.name = "Internal"; c.space = vol;
+        assert(widget_figures(c, gb10, pct) && gb10 == 660 && pct == 34);   // 66 of 100 GB free = 34% used
+        vol.freeTotal = 0; c.space = vol;
+        assert(widget_figures(c, gb10, pct) && gb10 == 0 && pct == 100);
+        vol.freeTotal = vol.total; c.space = vol;
+        assert(widget_figures(c, gb10, pct) && gb10 == 1000 && pct == 0);   // 100 GB = 1000 tenths
+        Space bad; Choice none2; none2.space = bad;
+        assert(!widget_figures(none2, gb10, pct));
+        Space zero_total; zero_total.ok = true; zero_total.total = 0;
+        Choice zt; zt.space = zero_total;
+        assert(!widget_figures(zt, gb10, pct));   // never divides by zero
+    }
+
     // the size of the pool beside the free figure, so 5 GB of dev storage is not read as 5 GB of disk
     Choice cap; cap.name = "Internal"; cap.freeBytes = 4421ull << 20; cap.space = internal;
     assert(label_capacity(cap) == "Internal (4.3 GB free of 5.0 GB)");

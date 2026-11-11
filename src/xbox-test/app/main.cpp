@@ -1131,6 +1131,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     game_library::DeleteKind m_delKind = game_library::DeleteKind::folder;   // decided when the confirm dialog opens
     InstallInfo m_dInst; double m_dInstT = -10;
     std::vector<storage_roots::Choice> m_roots; size_t m_rootSel = 0;   // install locations of the detail page (X cycles them before Install)
+    bool m_rootsProbed = false;   // the sidebar widget probed the roots once on the library
     // Launch-option picker (launch_picker.h): a game with several run options
     // asks before Play instead of picking one silently.
     launch_picker::State m_pick;
@@ -1947,6 +1948,20 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // Storage screen is shown).
         sb.disk_focus = sidebar_focus_row() == ui_nav::kSidebarStorage;
         sb.disk_active = g_screen == S_STORAGE;
+        // Item D1: the widget reports the drive new installs go to (the same
+        // m_roots[m_rootSel] the Storage screen marks 'New installs go here'),
+        // through the SAME figures draw_storage uses, so the two can never
+        // disagree. The roots are probed once on the first draw (the library
+        // never opened the detail page or Storage yet) and refreshed by every
+        // refresh_roots() call after that.
+        if (m_roots.empty() && !m_rootsProbed) { m_rootsProbed = true; refresh_roots("sidebar widget"); }
+        if (m_rootSel < m_roots.size()) {
+            int free_gb_x10 = 0, used_pct = 0;
+            if (storage_roots::widget_figures(m_roots[m_rootSel], free_gb_x10, used_pct)) {
+                sb.free_gb_x10 = free_gb_x10;
+                sb.used_pct = used_pct;
+            }
+        }
         return sb;
     }
 
