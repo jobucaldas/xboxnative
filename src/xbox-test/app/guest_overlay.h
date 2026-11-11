@@ -8,6 +8,7 @@
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include "host/d3d11_diag.h"   // the Present-failure path reports through its sink
+#include "host/resize_drain.h" // the GPU drain the resize hook runs (tested directly)
 #include <array>
 #include <atomic>
 #include <mutex>
@@ -210,36 +211,18 @@ inline std::atomic<unsigned> lastResizeW{0},lastResizeH{0};
 // unbinds the immediate context's render targets (the references that matter
 // for buffer release; the game rebinds its targets every frame anyway — no
 // ClearState, which would also wipe shader/IA state the engine caches on the
-// CPU and only rebinds when dirty), then drains: Flush, then wait on an
-// event query until in-flight work completes (bounded: a wedged device must
-// not wedge the guest; the resize then fails honestly with the driver's
-// error instead of adding a hang). Results pass through unchanged.
+// CPU and only rebinds when dirty), then drains: end the event query, Flush
+// (submits both the unbind and the query — a wait before this Flush would
+// spin on a query the driver has not received while real work stays queued),
+// then poll the query until in-flight work completes (bounded: a wedged
+// device must not wedge the guest; the resize then fails honestly with the
+// driver's error instead of adding a hang). Results pass through unchanged.
+// The body lives in host/resize_drain.h so tests can assert the call order.
 using DrainFn=void(*)(ID3D11Device*);
 inline DrainFn realDrain=nullptr;   // test seam
 inline void drain_device(ID3D11Device* dev) {
     if(realDrain){realDrain(dev);return;}
-    ID3D11DeviceContext* ctx=nullptr;dev->GetImmediateContext(&ctx);
-    if(!ctx)return;
-    ctx->OMSetRenderTargets(0,nullptr,nullptr);
-    // Order matters: Flush first (submits everything already recorded, so the
-    // wait below covers it), then end the query, then Flush again to submit
-    // the query itself. No new GPU work is recorded after the first Flush, so
-    // once the query completes the device is genuinely idle.
-    ctx->Flush();
-    ID3D11Query* q=nullptr;
-    D3D11_QUERY_DESC d{};d.Query=D3D11_QUERY_EVENT;
-    if(SUCCEEDED(dev->CreateQuery(&d,&q))&&q) {
-        ctx->End(q);
-        BOOL done=FALSE;DWORD spins=0;
-        while(++spins<=1000) {   // ~1 s at 1 ms/spin; a healthy idle is sub-ms
-            HRESULT hr=ctx->GetData(q,&done,sizeof done,0);
-            if(hr!=S_FALSE)break;   // S_OK (done) or an error: leave the loop
-            Sleep(1);
-        }
-        q->Release();
-    }
-    ctx->Flush();
-    ctx->Release();
+    resize_drain::drain(dev);   // shared body, order-asserted in tests/drain-order
 }
 inline HRESULT STDMETHODCALLTYPE resize(IDXGISwapChain* c,UINT count,UINT w,UINT h,DXGI_FORMAT f,UINT flags) {
     // Experiment switch (LocalState\lockmode.txt, read at install): every

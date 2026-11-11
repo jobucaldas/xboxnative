@@ -46,16 +46,37 @@ Date: 2026-11-11. Evidence: read-only console pull in `/tmp/xbn-evidence-crash-0
    device. The crash is secondary; the primary event is the driver-level
    device reset.
 
+## When it appeared (build history)
+
+| build | evidence | device removal (0x887a0005 / reason 0x887a0007) |
+|-------|----------|--------------------------------------------------|
+| 0.5.252 | `/tmp/xbn-runs/play-252-433340/` (+ `boot-252-*.log`) | **none** — 2 resizes, every resize `hr=0x00000000`, zero removal lines |
+| 0.5.275 | `/tmp/xbn-evidence-275/slime-relaunch/run{1,2,3}` | present in all 3 runs (25/12/47 `0x887a0005` lines; reason 0x887a0007) |
+| 0.5.279 | `/tmp/xbn-evidence-crash-0713/` | present; this run the removal killed the guest (crash above) |
+
+The removal is first seen in kept evidence on 0.5.274-and-later builds (no
+0.5.274-specific capture is kept; 0.5.252 predates it and is clean, 0.5.275
+shows it). It has **not** been bisected against #131 (HID pad presentation),
+#133 (device-removal reporting) or #137 (GS draw diagnostics) — #131 and #133
+are already in 0.5.275, so "predates those PRs" cannot be claimed either way.
+The kill-switch experiment below (locking the swapchain to its first mode) is
+the discriminator: if the game survives with resizes suppressed, the trigger is
+in the resize path, not in the PRs' code paths.
+
 ## Proven vs. unproven
 
 **Proven:** device removal with reason DXGI_ERROR_DEVICE_RESET between the 3rd
 and 4th swapchain resize; memory was not exhausted; the guest zombie state
-follows Unity's failed device-lost recovery.
+follows Unity's failed device-lost recovery; the same signature family on
+0.5.275 (three runs) and 0.5.279, with 0.5.252 clean.
 
 **Unproven (needs a follow-up console run with more diagnostics):** the exact
 command that triggered the reset. The d3d11_diag Create*/Check*/Map hooks show
 no failed resource creation immediately before the removal, so the invalid
 command reached the driver at Present/flush time. Unity's crash is downstream.
+Also unproven: which change between 0.5.252 and 0.5.275 introduced the trigger
+(candidates #131/#133/#137 are untested; the lockmode experiment discriminates
+resize-path vs not, not PR-vs-PR).
 
 ## Next steps
 
@@ -63,8 +84,11 @@ command reached the driver at Present/flush time. Unity's crash is downstream.
    context commands and flush it when `GetDeviceRemovedReason` first reports a
    removal — that names the triggering submission.
 2. Test whether disabling the 4th resize (locking the game to its initial
-   mode) avoids the reset; that would confirm the trigger is in the
-   resize/mode-change path rather than in scene-load rendering.
+   mode, the `LocalState\lockmode.txt` opt-in shipped with this RCA) avoids
+   the reset; that would confirm the trigger is in the resize/mode-change
+   path rather than in scene-load rendering. It also bounds the regression:
+   if 0.5.275+ survives under lockmode where 0.5.252 survived without it,
+   the trigger is resize-coupled regardless of which PR moved it.
 3. Make Unity's recovery survivable: the null-deref is in Unity's own code, so
    the practical mitigation is preventing the reset (1) or returning a
    recoverable error code from the resize path instead of letting the reset
