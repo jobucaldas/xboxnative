@@ -359,6 +359,17 @@ int main() {
         check(g == Focus::grid, "D5: the grid keeps the focus without B");
     }
 
+    // ---- item D24: B anywhere on the main screen lands on the sidebar ----
+    {
+        // from the header controls row (Sort/Filters/Search), B used to drop
+        // the focus back into the grid; the owner wants the rail instead
+        int hdr = 1; Focus f = Focus::grid;
+        check(header_back(hdr, f), "D24: B on the header row moves the focus");
+        check(hdr == -1 && f == Focus::sidebar, "D24: B on the header row lands on the sidebar rail");
+        int none = -1; Focus g = Focus::grid;
+        check(!header_back(none, g) && g == Focus::grid, "D24: no header focus, no move");
+    }
+
     // ---- item D22: the launch banner and its cancel rule ----
     {
         // phases: 0 never, 1 starting, 2 finished, 3 guest running

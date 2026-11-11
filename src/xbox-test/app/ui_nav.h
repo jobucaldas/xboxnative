@@ -494,6 +494,16 @@ inline bool back_at_root(Focus& focus, bool b_pressed) {
     return true;
 }
 
+// Item D24: B anywhere on the main screen lands on the sidebar rail. The grid
+// root already did (item D5); the header controls row now does too, instead of
+// dropping the focus back into the grid.
+inline bool header_back(int& hdr_focus, Focus& focus) {
+    if (hdr_focus < 0) return false;
+    hdr_focus = -1;
+    focus = Focus::sidebar;
+    return true;
+}
+
 // ---- launch banner (item D22) ----
 // Play shows a fullscreen banner (the game's wide art + "Launching...") until
 // the guest's own window is up. B cancels, but only while the launch is still

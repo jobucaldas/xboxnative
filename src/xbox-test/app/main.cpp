@@ -2969,7 +2969,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                     else if (m_hdrFocus == 1) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 1); m_filtersFocus = 0; logf("filters panel open (%s)", source); }
                     else if (m_hdrFocus == 2) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 2); m_searchKey = 0; ui_nav::search_clamp_caret(m_search); logf("search overlay open (%s)", source); }
                 }
-                else if (has(edge, GamepadButtons::B)) { m_hdrFocus = -1; logf("header: focus -> grid (%s)", source); }
+                // Item D24: B anywhere on the main screen lands on the sidebar
+                // rail — from the header controls too, not back into the grid.
+                else if (has(edge, GamepadButtons::B)) { ui_nav::header_back(m_hdrFocus, m_focus); logf("header: B -> sidebar rail (item D24) (%s)", source); }
                 return;
             }
             // Grid focus. The grid draws kGridCols columns (ui_launcher.h geometry);
