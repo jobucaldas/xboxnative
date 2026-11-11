@@ -120,6 +120,11 @@ jobs:
         run: bash src/xbox-test/app/tests/game-delete.sh
       - name: Free space figures and launcher leftovers
         run: bash src/xbox-test/app/tests/storage-report.sh
+      # The legacy->flip swap-chain conversion both guest routes share (the
+      # factory's CreateSwapChain override and D3D11CreateDeviceAndSwapChain):
+      # host logic, so Wine runs it headless.
+      - name: Shared legacy swap-chain conversion rules
+        run: bash src/xbox-test/app/tests/swap-chain-convert.sh
   strict-imports:
     runs-on: ubuntu-latest
     steps:

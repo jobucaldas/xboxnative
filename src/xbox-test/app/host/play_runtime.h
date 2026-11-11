@@ -1609,23 +1609,13 @@ static HRESULT WINAPI createDeviceAndSwapChain(IDXGIAdapter* adapter,D3D_DRIVER_
         dxgi->Release();
     }
     if(!factory)return DXGI_ERROR_INVALID_CALL;
-    // The legacy DXGI_SWAP_CHAIN_DESC the guest filled in becomes the DESC1
-    // the CoreWindow adapter takes, with the same conversion the factory's
-    // legacy CreateSwapChain override applies: CoreWindow presents flip-only,
-    // so a legacy discard/sequential swap effect maps to FLIP_SEQUENTIAL, the
-    // buffer count is at least 2, and multisampled legacy buffers (which would
-    // need a resolve pass this route does not have) are refused.
-    if(swapDesc->SampleDesc.Count!=1 || swapDesc->SampleDesc.Quality)return DXGI_ERROR_INVALID_CALL;
+    // The legacy chain goes through the same conversion the factory's
+    // CreateSwapChain override applies (corewindow_dxgi::legacy_swap_chain_desc1):
+    // windowed only, no legacy flag beyond ALLOW_MODE_SWITCH, no multisampling,
+    // flip-model presentation with at least two buffers.
     DXGI_SWAP_CHAIN_DESC1 flip{};
-    flip.Width=swapDesc->BufferDesc.Width;flip.Height=swapDesc->BufferDesc.Height;
-    flip.Format=swapDesc->BufferDesc.Format;flip.SampleDesc=swapDesc->SampleDesc;
-    flip.BufferUsage=swapDesc->BufferUsage;
-    flip.BufferCount=swapDesc->BufferCount<2?2:swapDesc->BufferCount;
-    flip.SwapEffect=(swapDesc->SwapEffect==DXGI_SWAP_EFFECT_DISCARD || swapDesc->SwapEffect==DXGI_SWAP_EFFECT_SEQUENTIAL)
-        ? DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL : swapDesc->SwapEffect;
-    flip.Scaling=DXGI_SCALING_STRETCH;
-    flip.AlphaMode=DXGI_ALPHA_MODE_IGNORE;
-    flip.Flags=swapDesc->Flags;
+    hr=corewindow_dxgi::legacy_swap_chain_desc1(swapDesc,&flip);
+    if(FAILED(hr)){factory->Release();return hr;}
     IDXGISwapChain1* made=nullptr;
     hr=factory->CreateSwapChainForHwnd(*device,swapDesc->OutputWindow,&flip,nullptr,nullptr,&made);
     factory->Release();
