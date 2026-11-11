@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -1190,6 +1191,567 @@ int main(int argc, char** argv) {
         disc_boxes("library", kLibraryHints, 3);
         disc_boxes("queue", kQueueHints, 3);
         disc_boxes("sign-in", kSignHints, 2);
+    }
+
+    // ---- round 6 --------------------------------------------------------------
+    // item 31: 'Storage management' is no longer a sidebar list row; the disk
+    // widget is the button-like region with focus/active looks.
+    {
+        SidebarVM sb; sb.all_count = 772; sb.installed_count = 4; sb.queue_count = 1;
+        // no 4th view row: the row area below the 3rd row stays panel
+        c.fill(ui::theme::page);
+        draw_sidebar(c, font, sb);
+        bool row4 = false;
+        for (int y = 456; y < 520; ++y)
+            for (int x = 44; x < 431; ++x)
+                if (px[size_t(y) * W + x] == ui::theme::control) { row4 = true; break; }
+        check(!row4, "item 31: no 'Storage management' row — the view rows end at Download queue");
+        // idle widget: no fill, no ring
+        check(px[size_t(945) * W + 100] == ui::theme::panel,
+              "item 31: the idle disk widget carries no region fill");
+        bool ring_idle = false;
+        for (int y = 934; y < 1062 && !ring_idle; ++y)
+            for (int x = 46; x < 429; ++x)
+                if (px[size_t(y) * W + x] == ui::theme::focus) { ring_idle = true; break; }
+        check(!ring_idle, "item 31: the idle disk widget carries no ring");
+
+        // focused widget: control fill + focus ring fully INSIDE the sidebar
+        // panel (x 32..443, y 32..1048) with >=8px margin (widget rect
+        // 52,940,372,92 -> ring band 43..433 x 931..1041)
+        SidebarVM sbf; sbf = sb; sbf.focus = 5;
+        c.fill(ui::theme::page);
+        draw_sidebar(c, font, sbf);
+        check(px[size_t(945) * W + 100] == ui::theme::control,
+              "item 31: the focused disk widget fills control");
+        bool ring_seen = false;
+        for (int y = 930; y < 1045 && !ring_seen; ++y)
+            for (int x = 42; x < 436; ++x)
+                if (px[size_t(y) * W + x] == ui::theme::focus) { ring_seen = true; break; }
+        check(ring_seen, "item 31: the focused disk widget wears the focus ring");
+        // ring containment: the focus-ink bbox lies within the sidebar rect
+        // inset by 8px (x 40..435, y 40..1040)
+        {
+            int rx0 = W, ry0 = H, rx1 = -1, ry1 = -1;
+            for (int y = 920; y < 1060; ++y)
+                for (int x = 32; x < 444; ++x)
+                    if (px[size_t(y) * W + x] == ui::theme::focus) {
+                        if (x < rx0) rx0 = x;
+                        if (x > rx1) rx1 = x;
+                        if (y < ry0) ry0 = y;
+                        if (y > ry1) ry1 = y;
+                    }
+            check(rx0 >= 40 && ry0 >= 40 && rx1 <= 435 && ry1 <= 1040,
+                  "item 31: the disk widget's ring stays inside the sidebar inset by 8px");
+        }
+        // render the focused frame for the coordinator's review
+        snap("launcher-r6-disk-focus");
+
+        // active widget (Storage screen): subtle fill + accent donut stroke
+        SidebarVM sba; sba = sb; sba.disk_active = true;
+        c.fill(ui::theme::page);
+        draw_sidebar(c, font, sba);
+        check(px[size_t(945) * W + 100] == ui::theme::controlDark,
+              "item 31: the active disk widget wears the subtle fill");
+        bool accent_donut = false;
+        for (int y = 949; y < 1014 && !accent_donut; ++y)
+            for (int x = 351; x < 416; ++x)
+                if (px[size_t(y) * W + x] == ui::theme::accent) { accent_donut = true; break; }
+        check(accent_donut, "item 31: the active disk widget's donut stroke is accent");
+        snap("launcher-r6-disk-active");
+    }
+
+    // item 28: the Auto-update row — ring when focused, pill fully inside the
+    // row with >=24px right padding (pixel-scan at 1920x1080).
+    {
+        const std::vector<QueueRowVM> rows = make_rows(2, false);
+        SidebarVM sb; sb.active = 4;
+        QueueVM q; q.rows = rows.data(); q.row_count = int(rows.size());
+        q.focus = 0;
+        c.fill(ui::theme::page);
+        draw_download_queue(c, font, sb, q, /*draw_hints=*/false);
+        // ring present on the auto-update row
+        bool ring = false;
+        for (int y = 132; y < 252 && !ring; ++y)
+            for (int x = 512; x < 1856; ++x)
+                if (px[size_t(y) * W + x] == ui::theme::focus) { ring = true; break; }
+        check(ring, "item 28: the Auto-update row wears the focus ring when focused");
+        // pill: rightmost ACCENT/label ink inside the row (excluding the ring
+        // and the card's rounded-corner AA) must be <= row right (1844) - 24
+        int pill_right = -1;
+        for (int x = 1843; x > 1500; --x) {
+            bool ink = false;
+            for (int y = 150; y < 234; ++y) {
+                const uint32_t p = px[size_t(y) * W + x];
+                if (p == ui::theme::accent || p == ui::theme::onAccent) { ink = true; break; }
+            }
+            if (ink) { pill_right = x; break; }
+        }
+        check(pill_right > 0 && pill_right <= 1844 - 24,
+              "item 28: the On/Off pill keeps >=24px right padding inside the row");
+        snap("launcher-r6-queue-autoupdate");
+    }
+
+    // item 29: ONE hint bar per screen — disc-count + idempotence.
+    {
+        // count the prompt discs in the band: runs of disc-sized ink columns.
+        // The scan starts at x=524 (the sidebar panel + its donut widget sit
+        // left of it and must never count) and takes a background predicate —
+        // sheets draw over draw_scrim, so the band behind them is page*scrim,
+        // not page.
+        const auto count_discs = [&](uint32_t bg) {
+            const int y0 = int(kHintY), y1 = int(kHintY + kHintDiscPx) + 1;
+            int runs = 0;
+            int x = 524;
+            while (x < W) {
+                bool ink = false;
+                for (int y = y0; y < y1; ++y)
+                    if (px[size_t(y) * W + x] != bg) { ink = true; break; }
+                if (!ink) { ++x; continue; }
+                const int run0 = x;
+                while (x < W) {
+                    bool in2 = false;
+                    for (int y = y0; y < y1; ++y)
+                        if (px[size_t(y) * W + x] != bg) { in2 = true; break; }
+                    if (!in2) break;
+                    ++x;
+                }
+                // only disc-sized runs count (labels are ~14-16px tall)
+                float by0 = 1e9f, by1 = -1e9f;
+                for (int yy = y0 - 2; yy < y1 + 2; ++yy)
+                    for (int xx = run0; xx < x; ++xx)
+                        if (px[size_t(yy) * W + xx] != bg) {
+                            if (yy < by0) by0 = float(yy);
+                            if (yy > by1) by1 = float(yy);
+                        }
+                if (x - run0 >= int(kHintDiscPx) - 3 && by1 - by0 + 1 >= kHintDiscPx - 3.0f) ++runs;
+            }
+            return runs;
+        };
+        // the band background under a sheet: page blended with scrim (alpha 140)
+        const uint32_t bg_scrim = ui::theme::argb(
+            255, ((ui::theme::page >> 16) & 0xFF) * (255 - 140) / 255,
+            ((ui::theme::page >> 8) & 0xFF) * (255 - 140) / 255,
+            (ui::theme::page & 0xFF) * (255 - 140) / 255);
+        const auto expect_discs = [&](const char* tag, int want, uint32_t bg = ui::theme::page) {
+            const int got = count_discs(bg);
+            check(got == want, (std::string(tag) + ": hint band holds exactly " +
+                                std::to_string(want) + " prompt discs (got " +
+                                std::to_string(got) + ")").c_str());
+        };
+        // library (no popups): 3 prompts
+        {
+            const std::vector<TileVM> tiles = make_tiles(21);
+            SidebarVM sb; sb.all_count = 128; sb.installed_count = 9; sb.queue_count = 1;
+            LibraryVM lib; lib.tiles = tiles.data(); lib.tile_count = 21; lib.sel = 0;
+            lib.count_label = "128 games";
+            c.fill(ui::theme::page);
+            draw_library(c, font, sb, lib);
+            expect_discs("library", 3);
+            const std::vector<uint32_t> once = px;
+            draw_library(c, font, sb, lib);
+            check(px == once, "item 29: draw_library is idempotent (no double hint bar)");
+        }
+        // queue with hints OFF: the band must hold ZERO discs — main.cpp's own
+        // unconditional draw_hint_bar after draw_download_queue (item 29's
+        // console double-draw) would show up as 3 discs instead of 0.
+        {
+            const std::vector<QueueRowVM> rows = make_rows(2, false);
+            SidebarVM sb; sb.active = 4;
+            QueueVM q; q.rows = rows.data(); q.row_count = int(rows.size());
+            c.fill(ui::theme::page);
+            draw_download_queue(c, font, sb, q, /*draw_hints=*/false);
+            expect_discs("queue hints-off", 0);
+        }
+        // queue with hints on: 3 discs, idempotent
+        {
+            const std::vector<QueueRowVM> rows = make_rows(2, false);
+            SidebarVM sb; sb.active = 4;
+            QueueVM q; q.rows = rows.data(); q.row_count = int(rows.size());
+            c.fill(ui::theme::page);
+            draw_download_queue(c, font, sb, q);
+            expect_discs("queue", 3);
+            const std::vector<uint32_t> once = px;
+            draw_download_queue(c, font, sb, q);
+            check(px == once, "item 29: draw_download_queue is idempotent");
+        }
+        // storage: 2 discs, idempotent
+        {
+            SidebarVM sb; sb.active = 5; sb.disk_active = true;
+            StorageDriveVM dv[1] = {{"Internal", "49% used of 476 GB", 49, true, false}};
+            StorageVM st; st.drives = dv; st.n_drives = 1;
+            c.fill(ui::theme::page);
+            draw_storage(c, font, sb, st);
+            expect_discs("storage", 2);
+            const std::vector<uint32_t> once = px;
+            draw_storage(c, font, sb, st);
+            check(px == once, "item 29: draw_storage is idempotent");
+        }
+        // game page: 3 prompts, idempotent
+        {
+            GameVM g; g.has_art = true; g.primary.installed = true; g.install_ok = true;
+            c.fill(ui::theme::page);
+            draw_game(c, font, g, /*draw_hints=*/false);
+            expect_discs("game hints-off", 0);
+            c.fill(ui::theme::page);
+            draw_game(c, font, g);
+            expect_discs("game", 3);
+            const std::vector<uint32_t> once = px;
+            draw_game(c, font, g);
+            check(px == once, "item 29: draw_game is idempotent");
+        }
+        // sign-in: 2 prompts
+        {
+            SignVM s;
+            c.fill(ui::theme::page);
+            draw_signin(c, font, s);
+            expect_discs("sign-in", 2);
+            const std::vector<uint32_t> once = px;
+            draw_signin(c, font, s);
+            check(px == once, "item 29: draw_signin is idempotent");
+        }
+        // sheets: 2 discs each (confirm/logout/action/progress). The scrim
+        // under a sheet is NOT byte-idempotent on a re-blend, so instead of a
+        // byte-equal double draw these re-count the discs after a second draw.
+        {
+            c.fill(ui::theme::page);
+            draw_delete_sheet(c, font, DeleteVM{});
+            expect_discs("delete sheet", 2, bg_scrim);
+            c.fill(ui::theme::page);
+            draw_logout_sheet(c, font, LogoutVM{});
+            expect_discs("logout sheet", 2, bg_scrim);
+            c.fill(ui::theme::page);
+            ActionSheetVM as;
+            const char* labels[2] = {"Move to E:", "Delete"};
+            const char* reasons[2] = {"", ""};
+            as.title = "Megabonk"; as.subtitle = "48.2 GB on Internal";
+            as.labels = labels; as.reasons = reasons; as.n = 2; as.sel = 1;
+            draw_action_sheet
+(c, font, as);
+            expect_discs("action sheet", 2, bg_scrim);
+            c.fill(ui::theme::page);
+            ProgressSheetVM ps; ps.title = "Megabonk"; ps.detail = "Moving to E:"; ps.pct = 42;
+            draw_progress_sheet(c, font, ps);
+            expect_discs("progress sheet", 2, bg_scrim);
+        }
+        snap("launcher-r6-hint-bars");
+    }
+
+    // item 33 drawing: the action sheet renders disabled options with reason
+    // lines and the focused enabled option with a ring; the progress sheet
+    // draws the bar fill at pct, the NN% label, and the focused Cancel.
+    // Round-6 layout: 32px padding, title Semibold 32, subtitle 22 text2,
+    // 24px gap, 64px options with 12px gaps, Cancel as the LAST label
+    // (default sel = the Cancel index); the sheet grows with n and stays
+    // centred; the ring never touches neighbours. The progress sheet keeps
+    // the % text clear of the bar (>=16px) and the Cancel under the bar row.
+    {
+        c.fill(ui::theme::page);
+        ActionSheetVM as;
+        // Cancel is the LAST label; the fixture includes it, sel = its index
+        const char* labels[4] = {"Move to E:", "Move to USB:", "Delete", "Cancel"};
+        const char* reasons[4] = {"", "Not enough free space", "", ""};
+        as.title = "Megabonk"; as.subtitle = "48.2 GB on Internal";
+        as.labels = labels; as.reasons = reasons; as.n = 4; as.sel = 3;
+        draw_action_sheet(c, font, as);
+        // geometry: sheet centred, 800 wide; layout constants mirror the draw
+        const float pad = 32.0f, opt_h = 64.0f, opt_gap = 12.0f;
+        const float head_end = 114.0f, subtitle_top = 84.0f;
+        const float first_opt = head_end + 24.0f;
+        // option 1 is disabled -> 72 high
+        const float o0 = first_opt, o1 = o0 + opt_h + opt_gap, o2 = o1 + 72.0f + opt_gap;
+        const float o3 = o2 + opt_h + opt_gap;
+        float opts_h = (opt_h + opt_gap) + (72.0f + opt_gap) + (opt_h + opt_gap) + opt_h;
+        const float sh = first_opt + opts_h + pad;
+        const float st = (1080.0f - sh) * 0.5f;
+        // subtitle bottom + 20 (draw guarantees 24) <= first option top
+        check(st + subtitle_top + 22.0f + 20.0f <= st + first_opt - 1.0f,
+              "item 33: the subtitle clears the first option by >=20px");
+        // 12px gaps between consecutive option buttons
+        check(o1 - (o0 + opt_h) == opt_gap && o2 - (o1 + 72.0f) == opt_gap &&
+              o3 - (o2 + opt_h) == opt_gap,
+              "item 33: action-sheet options keep 12px gaps");
+        // the sheet is centred: top + h == bottom
+        check(std::fabs((st + sh) - (1080.0f - st)) <= 1.0f,
+              "item 33: the action sheet stays vertically centred as it grows");
+        // pixel asserts: the sheet panel spans the computed rect
+        check(px[size_t(int(st + 4)) * W + 960] == ui::theme::panel,
+              "item 33: the action sheet panel sits at the computed top");
+        // the focused option (3, Cancel) wears the ring inside its rect
+        const Rect b3 = rect(560.0f + pad, st + o3, 800.0f - pad * 2, opt_h);
+        bool ring3 = false;
+        for (int y = int(b3.y - 8); y < int(b3.y + b3.h + 8) && !ring3; ++y)
+            for (int x = int(b3.x - 8); x < int(b3.x + b3.w + 8); ++x)
+                if (px[size_t(y) * W + x] == ui::theme::focus) { ring3 = true; break; }
+        check(ring3, "item 33: the focused Cancel option wears the ring");
+        // the ring never overlaps a NEIGHBOURING OPTION's button: no focus
+        // ink on option 2's button EDGES (the ring band would sit on the
+        // button's border). White label ink (== focus colour) inside the
+        // button is fine; only the band 9..3px inside the border must be
+        // clean (the ring is 3px wide, centred 6px outside the button).
+        bool btn_dirty = false;
+        const Rect b2 = rect(560.0f + pad, st + o2, 800.0f - pad * 2, 72.0f);
+        for (int y = int(b2.y) + 2; y < int(b2.y + b2.h) - 2 && !btn_dirty; ++y)
+            for (int x = int(b2.x) + 2; x < int(b2.x + b2.w) - 2; ++x) {
+                const bool on_edge =
+                    y < int(b2.y) + 4 || y >= int(b2.y + b2.h) - 4 ||
+                    x < int(b2.x) + 4 || x >= int(b2.x + b2.w) - 4;
+                if (!on_edge) continue;
+                if (px[size_t(y) * W + x] == ui::theme::focus) { btn_dirty = true; break; }
+            }
+        check(!btn_dirty, "item 33: the ring never overlaps a neighbouring option's button");
+        // disabled option: muted ink + reason line inside its 72px button
+        const Rect b1 = rect(560.0f + pad, st + o1, 800.0f - pad * 2, 72.0f);
+        bool muted = false;
+        for (int y = int(b1.y); y < int(b1.y + b1.h) && !muted; ++y)
+            for (int x = int(b1.x); x < int(b1.x + b1.w); ++x)
+                if (px[size_t(y) * W + x] == ui::theme::textMuted) { muted = true; break; }
+        check(muted, "item 33: a disabled action-sheet option draws muted with its reason");
+        snap("launcher-r6-action-sheet");
+
+        c.fill(ui::theme::page);
+        ProgressSheetVM ps; ps.title = "Megabonk"; ps.detail = "Moving to E:"; ps.pct = 42;
+        draw_progress_sheet(c, font, ps);
+        // geometry mirrors the draw: pad 48, title 40, detail 92,
+        // bar_y = detail_top+36+20 = 92+56 = 148; bar_w = 800-96-96-16 = 592
+        const float pad2 = 48.0f;
+        const float bar_y2 = 40.0f + 52.0f + 36.0f + 20.0f;
+        const float bar_w2 = 800.0f - pad2 * 2 - 96.0f - 16.0f;
+        const float sh2 = bar_y2 + 12.0f + 28.0f + 64.0f + 28.0f;
+        const float sy = (1080.0f - sh2) * 0.5f;
+        const float bar_abs_y = sy + bar_y2;
+        const float bar_abs_x = 560.0f + pad2;
+        // bar fill: accent at ~42% of the track, track beyond it
+        const int fill_end = int(bar_abs_x + bar_w2 * 0.42f);
+        check(px[size_t(int(bar_abs_y) + 5) * W + fill_end - 20] == ui::theme::accent,
+              "item 33: the progress bar fills pct of the track");
+        check(px[size_t(int(bar_abs_y) + 5) * W + int(bar_abs_x + bar_w2) - 20] == ui::theme::track,
+              "item 33: the progress bar's track extends past the fill");
+        // NO overlap: the bar ends >=16px before the % text's ink bbox, and
+        // the Cancel button rect sits fully below the bar row
+        char pctb[16];
+        std::snprintf(pctb, sizeof pctb, "%d%%", 42);
+        const float pct_w2 = font.measure(Face::Regular, 22, pctb);
+        const float pct_col_x = 560.0f + 800.0f - pad2 - 96.0f;
+        const float pct_ink_x0 = pct_col_x + (96.0f - pct_w2) * 0.5f;
+        check(bar_abs_x + bar_w2 + 16.0f <= pct_ink_x0,
+              "item 33: the bar ends >=16px before the % text (no overlap)");
+        // % ink bbox: scan for text2 ink in the % column near the bar row
+        bool pct_ink = false;
+        int pct_ink_xmin = W, pct_ink_xmax = -1;
+        for (int y = int(bar_abs_y) - 14; y < int(bar_abs_y) + 26; ++y)
+            for (int x = int(pct_col_x) - 4; x < 1920; ++x)
+                if (px[size_t(y) * W + x] == ui::theme::text2) {
+                    pct_ink = true;
+                    if (x < pct_ink_xmin) pct_ink_xmin = x;
+                    if (x > pct_ink_xmax) pct_ink_xmax = x;
+                }
+        check(pct_ink, "item 33: the progress sheet's NN% label renders");
+        check(pct_ink_xmin >= int(bar_abs_x + bar_w2 + 16.0f) - 2,
+              "item 33: the % ink starts >=16px after the bar's right edge");
+        // the Cancel button rect: below the bar row, inside the sheet padding
+        const Rect cancel2 = rect(560.0f + (800.0f - 170.0f) * 0.5f,
+                                  sy + bar_y2 + 12.0f + 28.0f, 170.0f, 64.0f);
+        check(cancel2.y >= bar_abs_y + 12.0f + 28.0f - 0.5f,
+              "item 33: the Cancel button sits 28px under the bar row");
+        check(cancel2.y + cancel2.h + 28.0f <= sy + sh2 + 0.5f,
+              "item 33: the sheet keeps >=28px bottom padding under Cancel");
+        bool cring = false;
+        for (int y = int(cancel2.y - 8); y < int(cancel2.y + cancel2.h + 8) && !cring; ++y)
+            for (int x = int(cancel2.x - 8); x < int(cancel2.x + cancel2.w + 8); ++x)
+                if (px[size_t(y) * W + x] == ui::theme::focus) { cring = true; break; }
+        check(cring, "item 33: the progress sheet's Cancel wears the ring");
+        snap("launcher-r6-progress-sheet");
+    }
+
+    // item 30: FOCUS VISIBILITY — table-driven: for every screen x focusable
+    // element, the render with that element focused differs from the unfocused
+    // render by focus ink inside the element's rect (+ ring margin) only.
+    {
+        const int margin = int(ui::theme::ringOffset) + int(ui::theme::ringWidth) + 2;
+        // item 30: every focusable element wears the ring when focused.
+        const auto run_case = [&](const char* tag, const ui::Rect& r,
+                                  const std::function<void()>& unfocused,
+                                  const std::function<void()>& focused) {
+            c.fill(ui::theme::page);
+            unfocused();
+            const std::vector<uint32_t> base = px;
+            c.fill(ui::theme::page);
+            focused();
+            int ring_inside = 0, diff_outside = 0;
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x) {
+                    const bool changed = px[size_t(y) * W + x] != base[size_t(y) * W + x];
+                    if (!changed) continue;
+                    const bool inside = x >= r.x - margin && x < r.x + r.w + margin &&
+                                        y >= r.y - margin && y < r.y + r.h + margin;
+                    if (inside) {
+                        if (px[size_t(y) * W + x] == ui::theme::focus) ++ring_inside;
+                    } else {
+                        ++diff_outside;
+                    }
+                }
+            check(ring_inside > 0, (std::string(tag) + ": focused element shows ring ink (item 30)").c_str());
+            check(diff_outside == 0,
+                  (std::string(tag) + ": focus changes stay inside the element (item 30)").c_str());
+        };
+
+        // sidebar rows: focused = ring + fill; ACTIVE row = green bar only
+        // (the two must stay distinct: focusing the active row adds ring ink)
+        {
+            SidebarVM sb; sb.all_count = 12; sb.installed_count = 4; sb.queue_count = 1;
+            sb.active = 2;
+            const auto draw_sb = [&](SidebarVM s) {
+                c.fill(ui::theme::page);
+                draw_sidebar(c, font, s);
+            };
+            SidebarVM un = sb; un.focus = -1;
+            SidebarVM fo = sb; fo.focus = 2;
+            run_case("sidebar row focused", rect(40, 264, 395, 64),
+                     [&] { draw_sb(un); }, [&] { draw_sb(fo); });
+            // active vs focus: the ACTIVE row (focus=-1) shows the green bar,
+            // NOT the focus ring
+            SidebarVM act = sb; act.focus = -1;
+            SidebarVM idle; idle.all_count = 12; idle.installed_count = 4; idle.queue_count = 1;
+            idle.active = -1; idle.focus = -1;
+            c.fill(ui::theme::page);
+            draw_sb(idle);
+            const std::vector<uint32_t> idle_px = px;
+            c.fill(ui::theme::page);
+            draw_sb(act);
+            int bar_ink = 0, ring_ink = 0;
+            for (int y = 264; y < 328; ++y)
+                for (int x = 40; x < 435; ++x) {
+                    if (px[size_t(y) * W + x] != idle_px[size_t(y) * W + x]) {
+                        if (px[size_t(y) * W + x] == ui::theme::accent) ++bar_ink;
+                        // ring ink counts only OUTSIDE the row rect (the
+                        // active row's text turns white == focus colour);
+                        // a ring on an active-only row would live 6px out
+                        const bool inside = x >= 40 && x < 435 && y >= 264 && y < 328;
+                        if (!inside && px[size_t(y) * W + x] == ui::theme::focus) ++ring_ink;
+                    }
+                }
+            check(bar_ink > 0, "item 30: the active sidebar row shows the green bar");
+            check(ring_ink == 0, "item 30: the active-only sidebar row shows NO focus ring");
+        }
+        // profile row
+        {
+            SidebarVM sb; sb.all_count = 12; sb.installed_count = 4; sb.queue_count = 1;
+            run_case("sidebar profile row", rect(40, 68, 395, 64),
+                     [&] { SidebarVM s = sb; s.profile_focus = false; c.fill(ui::theme::page); draw_sidebar(c, font, s); },
+                     [&] { SidebarVM s = sb; s.profile_focus = true; c.fill(ui::theme::page); draw_sidebar(c, font, s); });
+        }
+        // search field row
+        {
+            SidebarVM sb; sb.all_count = 12; sb.installed_count = 4; sb.queue_count = 1;
+            run_case("sidebar search row", rect(40, 160, 395, 64),
+                     [&] { SidebarVM s = sb; s.focus = -1; c.fill(ui::theme::page); draw_sidebar(c, font, s); },
+                     [&] { SidebarVM s = sb; s.focus = 1; c.fill(ui::theme::page); draw_sidebar(c, font, s); });
+        }
+        // disk widget
+        {
+            SidebarVM sb; sb.all_count = 12; sb.installed_count = 4; sb.queue_count = 1;
+            run_case("sidebar disk widget", rect(52, 940, 372, 92),
+                     [&] { SidebarVM s = sb; s.focus = -1; c.fill(ui::theme::page); draw_sidebar(c, font, s); },
+                     [&] { SidebarVM s = sb; s.focus = 5; c.fill(ui::theme::page); draw_sidebar(c, font, s); });
+        }
+        // queue auto-update row
+        {
+            const std::vector<QueueRowVM> rows = make_rows(2, false);
+            SidebarVM sb; sb.active = 4;
+            const auto draw_q = [&](QueueVM q) {
+                c.fill(ui::theme::page);
+                draw_download_queue(c, font, sb, q, /*draw_hints=*/false);
+            };
+            QueueVM un; un.rows = rows.data(); un.row_count = int(rows.size()); un.focus = -1;
+            QueueVM fo = un; fo.focus = 0;
+            run_case("queue auto-update row", rect(518, 138, 1332, 108),
+                     [&] { draw_q(un); }, [&] { draw_q(fo); });
+        }
+        // sort popup option
+        {
+            LibraryVM lib; lib.sort_open = true;
+            const auto draw_p = [&](LibraryVM l) { draw_sort_popup(c, font, l); };
+            LibraryVM un = lib; un.sort_focus = -1;
+            LibraryVM fo = lib; fo.sort_focus = 0;
+            run_case("sort popup option", rect(532, 244, 414, 64),
+                     [&] { draw_p(un); }, [&] { draw_p(fo); });
+        }
+        // filters panel row
+        {
+            FilterRowVM fr[1] = {{"Playable", true}};
+            const auto draw_f = [&](int focus) { draw_filters_panel(c, font, fr, 1, focus); };
+            run_case("filters panel row", rect(1422, 244, 414, 64),
+                     [&] { draw_f(-1); }, [&] { draw_f(0); });
+        }
+        // game page: primary + icon buttons
+        {
+            GameVM g; g.has_art = true; g.primary.installed = true;
+            const auto draw_g = [&](GameVM gg) { c.fill(ui::theme::page); draw_game(c, font, gg, false); };
+            GameVM un = g; un.primary_focus = false; un.focus = -1;
+            GameVM fo = g; fo.primary_focus = true; fo.focus = -1;
+            run_case("game primary button", rect(58, 378, 268, 92),
+                     [&] { draw_g(un); }, [&] { draw_g(fo); });
+            GameVM un2 = g; un2.focus = -1;
+            GameVM fo2 = g; fo2.focus = 1;
+            run_case("game trash button", rect(330, 378, 92, 92),
+                     [&] { draw_g(un2); }, [&] { draw_g(fo2); });
+        }
+        // confirm sheet buttons
+        {
+            const auto draw_sheet = [&](bool focus_yes) {
+                c.fill(ui::theme::page);
+                draw_confirm_sheet(c, font, "Delete Megabonk?", "Frees 48.2 GB.", "", "Cancel", "Delete", focus_yes);
+            };
+            // the ring moves between the two buttons; test the union rect
+            run_case("confirm sheet buttons", rect(1012, 594, 306, 76),
+                     [&] { draw_sheet(true); }, [&] { draw_sheet(false); });
+        }
+        // search keys: the focused key is accent-filled (distinct focus look)
+        {
+            LibraryVM lib; lib.search_open = true; lib.search_key = -1;
+            c.fill(ui::theme::page);
+            draw_search_overlay(c, font, lib);
+            const std::vector<uint32_t> base = px;
+            LibraryVM fo = lib; fo.search_key = 0;
+            c.fill(ui::theme::page);
+            draw_search_overlay(c, font, fo);
+            const float key_w = 80.0f, key_h = 56.0f, gap = 8.0f;
+            const float w = 900.0f, grid_top = 88.0f;
+            const float h = grid_top + 4 * key_h + 3 * gap + 24.0f;
+            const float x0 = (1920.0f - w) * 0.5f, y0 = (1080.0f - h - 40.0f) * 0.5f;
+            const float gx = x0 + (w - (10 * key_w + 9 * gap)) * 0.5f, gy = y0 + grid_top;
+            const int row = ui_nav::search_key_row(0), col = ui_nav::search_key_col(0);
+            const Rect kr = rect(gx + col * (key_w + gap), gy + row * (key_h + gap), key_w, key_h);
+            int accent_in = 0;
+            for (int y = int(kr.y); y < int(kr.y + kr.h); ++y)
+                for (int x = int(kr.x); x < int(kr.x + kr.w); ++x)
+                    if (px[size_t(y) * W + x] == ui::theme::accent &&
+                        base[size_t(y) * W + x] != ui::theme::accent) ++accent_in;
+            check(accent_in > 0, "item 30: the focused search key is accent-filled");
+        }
+    }
+
+    // item 32: the filters panel renders a single 'Playable' row with its on
+    // state (green pill, knob right, 'On' label).
+    {
+        c.fill(ui::theme::page);
+        FilterRowVM rows[1] = {{"Playable", true}};
+        draw_filters_panel(c, font, rows, 1, -1);
+        const float x = 1844.0f - 430.0f, ry = 236.0f + 8.0f;
+        const float px0 = x + 430.0f - 92.0f, py = ry + 16.0f;
+        // probe the pill fill between the pill's left edge and the knob
+        // (px0+12 can land on the 'On' label, px0+40 is the knob itself)
+        check(px[size_t(int(py) + 16) * W + int(px0) + 6] == ui::theme::accent,
+              "item 32: the Playable row's on pill fills accent");
+        check(px[size_t(int(py) + 16) * W + int(px0) + 40] == ui::theme::onAccent,
+              "item 32: the Playable pill's knob sits right (on)");
+        bool label = false;
+        for (int y = int(ry); y < int(ry + 64) && !label; ++y)
+            for (int xx = int(x) + 28; xx < int(x) + 300; ++xx)
+                if (px[size_t(y) * W + xx] == ui::theme::text2 ||
+                    px[size_t(y) * W + xx] == ui::theme::text) { label = true; break; }
+        check(label, "item 32: the Playable filter row's label renders");
+        snap("launcher-r6-filters-playable");
     }
 
     std::printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "OK", g_failures, g_failures == 1 ? "" : "s");

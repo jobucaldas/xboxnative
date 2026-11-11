@@ -175,15 +175,27 @@ struct SidebarVM {
     const char* persona = "Player One";
     int all_count = 0, installed_count = 0, queue_count = 0;
     int free_gb_x10 = 4126, used_pct = 34;
-    int active = 0;   // 0 All games, 1 Installed, 2 Download queue, 3 Storage management
-    int focus = -1;   // row with the pad focus (pill fill); -1 = the sidebar is
-                      // not focused (mockups: only the active row is highlighted)
+    // item 31: the view rows are ONLY All games / Installed / Download queue
+    // (indexes 2, 3, 4) — 'Storage management' is NOT a list row any more. The
+    // bottom DISK widget (free GB / % used / donut) is the sidebar entry with
+    // index 5 (profile 0, search 1). Focus still arrives through `focus`:
+    // main.cpp keeps driving it with sidebar_focus_row(), which returns 5 when
+    // the disk widget has the pad focus; `disk_focus`/`disk_active` below carry
+    // the same states for the widget's own drawing.
+    int active = 0;   // 2 All games, 3 Installed, 4 Download queue (view rows only)
+    int focus = -1;   // row with the pad focus (pill fill); 5 = the disk widget;
+                      // -1 = the sidebar is not focused (mockups: only the
+                      // active row is highlighted)
     // item 3: the sidebar's Search row is the search entry — the live query
     // shows in the field; empty = the "Search" placeholder.
     const char* search_query = "";
     // item 14: the PROFILE row is focusable (logout affordance); main.cpp
     // derives it from (m_focus, m_sidebar) at draw time.
     bool profile_focus = false;
+    // item 31: the disk widget's own focus/active states (see `focus` above —
+    // focus == 5 means the same thing as disk_focus; main.cpp may drive either).
+    bool disk_focus = false;
+    bool disk_active = false;   // true while the Storage screen is shown
     // item 24 (drawing side): the signed-in user's avatar, circle-masked in
     // the sidebar's profile row; empty falls back to the placeholder circle.
     ui::Image avatar{};
@@ -304,6 +316,31 @@ struct CloudVM {
     const CloudSlotVM* slots = nullptr; int slot_count = 0;
     const CloudOptVM* opts = nullptr;   int opt_count = 0;
     int focus_opt = 0;
+};
+
+// item 33: ACTION SHEET from a storage drive's game list — title = game name,
+// subtitle = size + drive; full-width vertical option buttons, one per entry.
+// `reasons[i]` empty = the option is enabled; otherwise the option draws dim
+// with its reason line under the label (and main.cpp must refuse to run it).
+// `sel` is the focused option (ring); default focus lands on Cancel.
+struct ActionSheetVM {
+    const char* title = "";
+    const char* subtitle = "";
+    const char* const* labels = nullptr;   // n option labels
+    const char* const* reasons = nullptr;  // per option; empty string = enabled,
+                                           // else disabled with this reason line
+    int n = 0;
+    int sel = 0;
+};
+
+// item 33: PROGRESS SHEET for a background move — title (game name), detail
+// ('Moving to <drive>'), a 12px rounded progress bar with accent fill, the
+// percentage right of the bar, and a focused Cancel button.
+struct ProgressSheetVM {
+    const char* title = "";
+    const char* detail = "";
+    int pct = 0;              // 0..100
+    bool cancel_focus = true; // the Cancel button wears the ring (default)
 };
 
 // sign-in (mockup 04): 29x29 QR module runs at 10px, origin (467,415)
@@ -479,23 +516,26 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
         text(c, f, Face::Regular, 22, 64, 160 + 17.5f, q,
              focused || (sb.search_query && *sb.search_query) ? ui::theme::text : ui::theme::textDim);
     }
-    // nav rows: the view entries, sidebar indexes 2..5 (item 14's order —
-    // 0 is the profile row above, 1 the Search pill above).
+    // nav rows: the view entries, sidebar indexes 2..4 (item 31: only
+    // All games / Installed / Download queue — Storage is the disk widget).
     struct Row { const char* label; int count; };
-    const Row rows[4] = {{"All games", sb.all_count}, {"Installed", sb.installed_count},
-                         {"Download queue", sb.queue_count}, {"Storage management", -1}};
+    const Row rows[3] = {{"All games", sb.all_count}, {"Installed", sb.installed_count},
+                         {"Download queue", sb.queue_count}};
     float y = 264.0f;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 3; ++i) {
         const int entry = i + 2;   // sidebar index: the view rows start at 2 (item 14)
         const bool on = entry == sb.active;
         const bool focused = entry == sb.focus;
-        // mockup 01: the ACTIVE row wears the control pill + green bar; the
-        // row with the pad FOCUS wears the same pill (focus == active reads
-        // as the mockup's single highlighted row). No ring on sidebar rows.
-        if (on || focused) {
+        // item 30: the FOCUSED row wears ring + fill; the ACTIVE view row keeps
+        // only the control pill + green bar (the two must stay visually distinct).
+        if (focused) {
             c.fill_round_rect(rect(40, y, 395, 64), radiusControl, ui::theme::control);
-            if (on) c.fill_rect(429, y, 6, 64, ui::theme::accent);
+            focus_ring(c, rect(40 - ringOffset, y - ringOffset, 395 + ringOffset * 2, 64 + ringOffset * 2),
+                       radiusControl + ringRadiusDelta, ringWidth);
+        } else if (on) {
+            c.fill_round_rect(rect(40, y, 395, 64), radiusControl, ui::theme::control);
         }
+        if (on) c.fill_rect(429, y, 6, 64, ui::theme::accent);
         text(c, f, Face::Regular, 24, 64, y + 17.5f, rows[i].label,
              on || focused ? ui::theme::text : ui::theme::text2);
         if (rows[i].count >= 0) {
@@ -506,20 +546,50 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
         y += 64.0f;
     }
     c.fill_rect(64, 920, 347, 1, ui::theme::separator);
-    // storage management: free GB, % used, donut (5px inside stroke, arc from 12 o'clock)
-    char b[48];
-    std::snprintf(b, sizeof b, "%d.%d GB free", sb.free_gb_x10 / 10, sb.free_gb_x10 % 10);
-    text(c, f, Face::Regular, 22, 64, 952.0f, b, ui::theme::text2);
-    std::snprintf(b, sizeof b, "%d%% used", sb.used_pct);
-    text(c, f, Face::Regular, 20, 64, 984.0f, b, ui::theme::textDim);
-    // donut: track ring r=26 stroke 5; the used arc is centred on 6 o'clock (mockup 01/06)
-    c.fill_donut(383, 981, 26, 5, -ui::kPi * 0.5f, ui::kTau, ui::theme::track);
-    if (sb.used_pct > 0) {
-        const float sweep = ui::kTau * sb.used_pct / 100.0f;
-        c.fill_donut(383, 981, 26, 5, ui::kPi * 0.5f - sweep * 0.5f, sweep, ui::theme::accent);
+    // item 31: the DISK WIDGET is a button-like region (sidebar entry 5), not a
+    // list row: rounded-8 rect spanning the widget area with 12px padding.
+    //   focused (sb.focus == 5 / sb.disk_focus): control fill + focus ring;
+    //   active  (sb.disk_active, the Storage screen is shown): subtle fill +
+    //           accent donut stroke;
+    //   otherwise: today's plain look (no fill, no ring).
+    {
+        const bool focused = sb.focus == 5 || sb.disk_focus;
+        const bool active = sb.disk_active;
+        // item 31 round-6: the widget rect + its focus ring (offset 6 + 3px
+        // width) must lie fully inside the sidebar panel (x 32..443,
+        // y 32..1048) with >=8px margin. Widget rect x 52..424, y 936..1032:
+        // ring band 43..433 / 927..1041 — inside the panel with 11px margin
+        // left/right, 5px top... so the rect is y 940..1032 (ring 931..1041,
+        // >=7px margin bottom). Text and donut keep >=12px padding inside it.
+        const Rect w = rect(52, 940, 372, 92);
+        if (focused)
+            c.fill_round_rect(w, radiusCard, ui::theme::control);
+        else if (active)
+            c.fill_round_rect(w, radiusCard, ui::theme::controlDark);
+        char b[48];
+        std::snprintf(b, sizeof b, "%d.%d GB free", sb.free_gb_x10 / 10, sb.free_gb_x10 % 10);
+        text(c, f, Face::Regular, 22, 64, 946.0f, b, ui::theme::text2);
+        std::snprintf(b, sizeof b, "%d%% used", sb.used_pct);
+        text(c, f, Face::Regular, 20, 64, 976.0f, b, ui::theme::textDim);
+        // donut: track ring r=26 stroke 5; the used arc centred on 6 o'clock.
+        // Active: the track+arc draw in ACCENT (item 31: accent donut stroke).
+        // Donut centre (383, 981): its box 351..415 x 949..1013 stays inside
+        // the widget rect with 12px padding right (424-415=9... the rect is
+        // 52..424 and the donut 351..415 -> 9px; keep the rect at 52..424 and
+        // the donut inside it).
+        const uint32_t track = active ? ui::theme::accent : ui::theme::track;
+        const uint32_t arc = active ? ui::theme::accentSoft : ui::theme::accent;
+        c.fill_donut(383, 981, 26, 5, -ui::kPi * 0.5f, ui::kTau, track);
+        if (sb.used_pct > 0) {
+            const float sweep = ui::kTau * sb.used_pct / 100.0f;
+            c.fill_donut(383, 981, 26, 5, ui::kPi * 0.5f - sweep * 0.5f, sweep, arc);
+        }
+        std::snprintf(b, sizeof b, "%d%%", sb.used_pct);
+        text_c(c, f, Face::Regular, 16, 383, 970.5f, b, ui::theme::textDim);
+        if (focused)
+            focus_ring(c, rect(52 - ringOffset, 940 - ringOffset, 372 + ringOffset * 2, 92 + ringOffset * 2),
+                       radiusCard + ringRadiusDelta, ringWidth);
     }
-    std::snprintf(b, sizeof b, "%d%%", sb.used_pct);
-    text_c(c, f, Face::Regular, 16, 383, 970.5f, b, ui::theme::textDim);
 }
 
 // ---- library screen (mockup 01) ----
@@ -696,11 +766,12 @@ inline void draw_filters_panel(ui::Canvas& c, const Font& f, const FilterRowVM* 
         if (i == focus) c.fill_round_rect(rect(x + 8, ry, w - 16, row_h), radiusControl, rowHover);
         text(c, f, Face::Regular, 24, x + 28, ry + 17.5f, rows[i].label,
              i == focus ? ui::theme::text : ui::theme::text2);
-        // On/Off pill with a round knob (item 2: pill = h/2)
+        // On/Off pill with a round knob (item 2: pill = h/2); round 6: NO
+        // inner text (it overlapped the knob) — the knob position + the
+        // accent track carry the state
         const float px = x + w - 92.0f, py = ry + 16.0f;
         c.fill_round_rect(rect(px, py, 56, 32), 16, rows[i].on ? ui::theme::accent : ui::theme::controlDark);
         c.fill_circle(rows[i].on ? px + 40 : px + 16, py + 16, 12, ui::theme::onAccent);
-        if (rows[i].on) text(c, f, Face::Semibold, 16, px + 12, py + 6.5f, "On", ui::theme::onAccent);
     }
     // item 17: the popup draws its own hint bar (the base screen's is suppressed)
     const char* pairs[4] = {"A", "Toggle", "B", "Close"};
@@ -1222,6 +1293,104 @@ inline void draw_cloud_sheet(ui::Canvas& c, const Font& f, const CloudVM& v) {
     }
     const char* pairs[4] = {"A", "Select", "B", "Close"};
     draw_hint_bar(c, f, pairs, 2, 524.0f);   // review fix 5: same x as the library
+}
+
+// item 33: the ACTION SHEET — title (game name), subtitle (size + drive), then
+// one FULL-WIDTH vertical option button per entry (radius 8). The focused
+// option wears the focus ring; a disabled option draws dim text with its
+// reason line under the label (72 high so the reason fits; siblings are 64).
+// The caller supplies Cancel as the LAST label and defaults sel to it.
+// Layout: 32px padding, title Semibold 32, subtitle 22 text2, 24px gap,
+// 64px options with 12px gaps, label inset 24. Hints: A Select / B Back.
+inline void draw_action_sheet(ui::Canvas& c, const Font& f, const ActionSheetVM& v,
+                              bool draw_hints = true) {
+    using namespace ui::theme;
+    draw_scrim(c);
+    // sheet: 800 wide, centred; height follows the option count
+    const float x = 560.0f, w = 800.0f;
+    const float pad = 32.0f;
+    const float opt_h = 64.0f, opt_gap = 12.0f;
+    const float title_top = 40.0f;
+    const float subtitle_top = title_top + 44.0f;
+    const float head_end = subtitle_top + 30.0f;
+    const float first_opt = head_end + 24.0f;        // 24px gap after subtitle
+    // disabled options grow to 72 so the reason line fits inside the button
+    float opts_h = 0.0f;
+    for (int i = 0; i < v.n; ++i) {
+        const bool dis = v.reasons && i < v.n && v.reasons[i] && *v.reasons[i];
+        opts_h += (dis ? 72.0f : opt_h) + opt_gap;
+    }
+    if (opts_h > 0) opts_h -= opt_gap;
+    const float h = first_opt + opts_h + pad;
+    const float top = (1080.0f - h) * 0.5f;          // stays centred as it grows
+    c.fill_round_rect(rect(x, top, w, h), radiusGuide, panel);
+    text(c, f, Face::Semibold, 32, x + pad, top + title_top, v.title, ui::theme::text);
+    if (v.subtitle && *v.subtitle)
+        text(c, f, Face::Regular, 22, x + pad, top + subtitle_top, v.subtitle, ui::theme::text2);
+    float oy = first_opt;
+    for (int i = 0; i < v.n; ++i) {
+        const bool dis = v.reasons && i < v.n && v.reasons[i] && *v.reasons[i];
+        const float bh = dis ? 72.0f : opt_h;
+        const Rect btn = rect(x + pad, top + oy, w - pad * 2, bh);
+        c.fill_round_rect(btn, radiusCard, dis ? chip : ui::theme::controlDark);
+        text(c, f, Face::Regular, 26, btn.x + 24, btn.y + (dis ? 10.0f : 17.5f), v.labels[i],
+             dis ? ui::theme::textMuted : ui::theme::text);
+        if (dis)
+            text(c, f, Face::Regular, 20, btn.x + 24, btn.y + 42.0f, v.reasons[i], ui::theme::textMuted);
+        if (i == v.sel && !dis)
+            focus_ring(c, rect(btn.x - ringOffset, btn.y - ringOffset, btn.w + ringOffset * 2, btn.h + ringOffset * 2),
+                       radiusCard + ringRadiusDelta, ringWidth);
+        oy += bh + opt_gap;
+    }
+    if (draw_hints) {
+        const char* pairs[4] = {"A", "Select", "B", "Back"};
+        draw_hint_bar(c, f, pairs, 2, 524.0f);
+    }
+}
+
+// item 33: the PROGRESS SHEET — title, detail, 20px gap, bar row (bar left,
+// 'NN%' right-aligned in its own column, never overlapping the bar: the bar
+// ends >=16px before the % column), 28px gap, Cancel centred under the bar
+// row inside the sheet padding (>=28px bottom). Hints: A Cancel / B Back.
+inline void draw_progress_sheet(ui::Canvas& c, const Font& f, const ProgressSheetVM& v,
+                                bool draw_hints = true) {
+    using namespace ui::theme;
+    draw_scrim(c);
+    const float x = 560.0f, w = 800.0f, pad = 48.0f;
+    const float title_top = 40.0f;
+    const float detail_top = title_top + 52.0f;
+    const float bar_y = detail_top + 36.0f + 20.0f;  // detail line + 20px gap
+    const float bar_h = 12.0f;
+    // % column: 96px reserved at the right; the bar ends 16px before it
+    const float pct_col_w = 96.0f;
+    const float bar_w = w - pad * 2 - pct_col_w - 16.0f;
+    const float h = bar_y + bar_h + 28.0f + 64.0f + 28.0f;
+    const float y = (1080.0f - h) * 0.5f;
+    c.fill_round_rect(rect(x, y, w, h), radiusGuide, panel);
+    text(c, f, Face::Semibold, 36, x + pad, y + title_top, v.title, ui::theme::text);
+    if (v.detail && *v.detail)
+        text(c, f, Face::Regular, 24, x + pad, y + detail_top, v.detail, ui::theme::textDim);
+    int p = v.pct < 0 ? 0 : v.pct > 100 ? 100 : v.pct;
+    c.fill_round_rect(rect(x + pad, y + bar_y, bar_w, bar_h), bar_h * 0.5f, ui::theme::track);
+    if (p > 0)
+        c.fill_round_rect(rect(x + pad, y + bar_y, bar_w * float(p) / 100.0f, bar_h), bar_h * 0.5f, ui::theme::accent);
+    // 'NN%' in its own column, vertically centred on the bar
+    char b[16];
+    std::snprintf(b, sizeof b, "%d%%", p);
+    const float pct_w = f.measure(Face::Regular, 22, b);
+    const float pct_x = x + w - pad - pct_col_w + (pct_col_w - pct_w) * 0.5f;
+    text(c, f, Face::Regular, 22, pct_x, y + bar_y + bar_h * 0.5f - 13.0f, b, ui::theme::text2);
+    // Cancel centred under the bar row, >=28px bottom padding
+    const Rect cancel = rect(x + (w - 170.0f) * 0.5f, y + bar_y + bar_h + 28.0f, 170.0f, 64.0f);
+    c.fill_round_rect(cancel, radiusControl, ui::theme::controlDark);
+    button_label(c, f, Face::Semibold, 26, cancel, "Cancel", ui::theme::text2);
+    if (v.cancel_focus)
+        focus_ring(c, rect(cancel.x - ringOffset, cancel.y - ringOffset, cancel.w + ringOffset * 2, cancel.h + ringOffset * 2),
+                   radiusControl + ringRadiusDelta, ringWidth);
+    if (draw_hints) {
+        const char* pairs[4] = {"A", "Cancel", "B", "Back"};
+        draw_hint_bar(c, f, pairs, 2, 524.0f);
+    }
 }
 
 }  // namespace ui_launcher

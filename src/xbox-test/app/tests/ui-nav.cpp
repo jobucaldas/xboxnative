@@ -122,6 +122,67 @@ int main() {
         check(filters_active(nullptr, 1) == 0, "no rows: count 0");
     }
 
+    // ---- item 31: the disk widget is sidebar entry 5, reached by Down from
+    // the queue row (4); Up from it returns to the queue row ----
+    {
+        check(ui_nav::kSidebarEntries == 6, "the sidebar has 6 entries");
+        check(ui_nav::kSidebarQueue == 4 && ui_nav::kSidebarStorage == 5,
+              "queue is row 4, the disk widget is row 5");
+        int a = 4;
+        sidebar_move(a, true);  check(a == 5, "sidebar down 4->5 (queue -> disk widget)");
+        sidebar_move(a, true);  check(a == 0, "sidebar down wraps 5->0 (widget -> profile)");
+        sidebar_move(a, false); check(a == 5, "sidebar up wraps 0->5");
+        sidebar_move(a, false); check(a == 4, "sidebar up 5->4 (widget -> queue)");
+        check(sidebar_target(5) == 5, "the disk widget opens the Storage screen");
+    }
+
+    // ---- item 28: the Auto-update row is a real focusable queue row ----
+    {
+        int sel = 0;
+        check(queue_row_clamp(sel, 0) == 0, "no rows: focus stays 0");
+        sel = 3;
+        check(queue_row_clamp(sel, 2) == 1, "focus past the last row clamps onto it");
+        sel = -2;
+        check(queue_row_clamp(sel, 2) == 0, "negative focus clamps to the first row");
+        sel = 0;
+        check(queue_row_move(sel, 3, true) && sel == 1, "queue down 0->1 (auto-update -> first download)");
+        check(queue_row_move(sel, 3, true) && sel == 2, "queue down 1->2");
+        check(queue_row_move(sel, 3, true) && sel == 0, "queue down wraps 2->0");
+        check(queue_row_move(sel, 3, false) && sel == 2, "queue up wraps 0->2");
+        check(queue_row_move(sel, 3, false) && sel == 1, "queue up 2->1");
+        sel = 0;
+        check(!queue_row_move(sel, 0, true), "no rows: no movement");
+    }
+
+    // ---- item 32: tab_games applies Playable WITHIN the tab (the caller
+    // keeps the tab's own installed-set rule) ----
+    {
+        struct G { uint32_t appid; };
+        std::vector<G> all = {{480}, {3405340}, {1259790}, {220}};
+        std::set<uint32_t> installed = {480, 220};
+        auto is_play = [](uint32_t a) { return a == 3405340 || a == 1259790; };
+        auto tab = [&](bool installed_tab) {
+            std::vector<G> t2;
+            for (auto& g : all)
+                if (!installed_tab || installed.count(g.appid)) t2.push_back(g);
+            return t2;
+        };
+        // All tab, no filter: everything, in order
+        auto t = tab_games(tab(false), false, is_play);
+        check(t.size() == 4, "All tab without the filter lists every game");
+        // All tab, Playable on: only the playable set
+        t = tab_games(tab(false), true, is_play);
+        check(t.size() == 2 && t[0].appid == 3405340 && t[1].appid == 1259790,
+              "All tab with Playable shows only the playable games");
+        // Installed tab, no filter: the tab's own list passes through
+        t = tab_games(tab(true), false, is_play);
+        check(t.size() == 2 && t[0].appid == 480 && t[1].appid == 220,
+              "Installed tab without the filter lists the tab's games");
+        // Installed tab, Playable on: the intersection (may be empty)
+        t = tab_games(tab(true), true, is_play);
+        check(t.empty(), "Installed tab with Playable shows the intersection");
+    }
+
     // ---- queue row status copy per download state ----
     {
         check(!std::strcmp(dl_status_text(1, 62, ""), "Downloading"), "state 1 reads Downloading");
