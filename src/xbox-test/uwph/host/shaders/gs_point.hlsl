@@ -7,7 +7,9 @@ struct GSIO { float4 position : SV_POSITION; float4 color : COLOR; };
 void gs_main(point GSIO vin[1], inout TriangleStream<GSIO> stream) {
     GSIO o;
     o.color = vin[0].color;
-    o.position = float4(vin[0].position.x,      vin[0].position.y + 0.4, 0.0, 1.0); stream.Append(o);
-    o.position = float4(vin[0].position.x - 0.4, vin[0].position.y - 0.4, 0.0, 1.0); stream.Append(o);
+    // Screen-space clockwise (D3D default front face): top, bottom-right,
+    // bottom-left. NDC y+ is up, so y+0.4 is the top vertex on screen.
+    o.position = float4(vin[0].position.x,       vin[0].position.y + 0.4, 0.0, 1.0); stream.Append(o);
     o.position = float4(vin[0].position.x + 0.4, vin[0].position.y - 0.4, 0.0, 1.0); stream.Append(o);
+    o.position = float4(vin[0].position.x - 0.4, vin[0].position.y - 0.4, 0.0, 1.0); stream.Append(o);
 }
