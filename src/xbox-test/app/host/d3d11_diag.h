@@ -762,18 +762,28 @@ inline std::string shaderText(const void* code,SIZE_T length,std::string* key=nu
 // DXBC GS to DXIL, and a conversion that mishandles a feature renders nothing
 // for exactly the draws that use it — with no failed call anywhere. Scanned
 // once per distinct container (by hash) at creation:
-// - SM version and instruction count (from the SHDR/SHEX chunk header)
-// - dcl_maxOutputVertexCount (opcode 0x72), the GS's expansion bound
-// - the output topology dcl_gs_output_topology (0x0d): pointlist output is
-//   what a point-sprite terrain layer expands to
-// - stream declarations (dcl_stream m<N>, 0x85): more than one stream means
-//   stream-out expansion, the shape dxilconv is most likely to drop
-// - SV_ViewportArrayIndex/SV_RenderTargetArrayIndex writes (vGS o.x via dcl
-//   output semantic oXX with viewport/RT-array semantics in the OSG5 chunk)
-// - the rasterized-stream bit lives in the container's SFI0 chunk if present
-// Opcode token layout: bits 0-10 opcode, bit 11 extended (0x800). Only the
-// declarations are looked for; the body is skipped by length fields, and any
-// malformed stream just ends the scan.
+// - SM version (from the SHDR/SHEX version token)
+// - dcl_maxOutputVertexCount (opcode 94), the GS's expansion bound
+// - the output topology dcl_gs_output_topology (opcode 92), carried in the
+//   opcode token's bits [16:11] (D3D10_SB_PRIMITIVE_TOPOLOGY: pointlist=1):
+//   pointlist output is what a point-sprite terrain layer expands to
+// - stream declarations (dcl_stream m<N>, opcode 138, operand type STREAM=16
+//   in operand-token bits [19:12]): more than one stream means stream-out
+//   expansion, the shape dxilconv is most likely to drop
+// - SV_ViewportArrayIndex/SV_RenderTargetArrayIndex output declarations
+//   (dcl_output_siv, opcode 103, name token = the instruction's last DWORD;
+//   D3D10_SB_NAME_RENDER_TARGET_ARRAY_INDEX=4, D3D10_SB_NAME_VIEWPORT_ARRAY_
+//   INDEX=5)
+// Container layout: DXBC header is 32 bytes of fixed fields + a DWORD chunk
+// count at 28 + chunk offsets from 32; each chunk is FourCC + DWORD size +
+// payload, so the shader chunk's payload starts at chunk+8 and its first two
+// DWORDs are the version token and the program length in DWORDs (the layout
+// shaderText already reads). Instruction format per d3d11TokenizedProgram-
+// Format.hpp: opcode token bits [10:00] opcode, [30:24] the instruction's
+// total length in DWORDs INCLUDING the opcode token; a CUSTOMDATA opcode (53)
+// is followed by its own DWORD length (also self-inclusive); ret (62) ends
+// the program. Only the declarations are looked for; the body is skipped by
+// length fields, and any malformed stream just ends the scan.
 inline std::string gsBytecodeText(const void* code,SIZE_T length) {
     if(!code||length<48)return "";
     auto bytes=static_cast<const unsigned char*>(code);
@@ -782,51 +792,49 @@ inline std::string gsBytecodeText(const void* code,SIZE_T length) {
     uint32_t chunks=word(28);
     for(uint32_t i=0;i<chunks&&i<64;++i) {
         size_t base=word(32+4*i);
-        if(base+16>length)break;
+        if(base+8>length)break;
         bool shex=!memcmp(bytes+base,"SHEX",4);
         if(!shex&&!memcmp(bytes+base,"SHDR",4)) {}
         else if(!shex)continue;   // not a shader chunk
-        uint32_t chunkSize=word(base+8);
+        uint32_t chunkSize=word(base+4);   // chunk header: FourCC then size
         size_t end=std::min<size_t>(base+8+chunkSize,length);
-        uint32_t token=word(base+8+4);   // version token: type in 16-31
+        uint32_t token=word(base+8);   // first payload DWORD: the version token
         unsigned type=token>>16;
         if(type!=2)return "";   // not a GS
         unsigned minor=token&0xf,major=(token>>4)&0xf;
-        size_t at=base+16;   // after D3D10_SB_TOKENIZED_PROGRAM_HEADER (4 words: version, length, 2 reserved)
-        // The header is 7 words for SM5 (count, temp/imm arrays...): the program
-        // body starts at the length word's value. Simpler: scan tokens from
-        // base+24 (after chunk header + version + length) to chunk end; every
-        // instruction token carries its length in bits 24-30.
+        size_t at=base+16;   // payload: version token, program length, 2 reserved
         unsigned maxVerts=0;const char* outTopo=nullptr;unsigned streams=0;
         bool viewportIndex=false,rtArrayIndex=false;
         for(uint32_t inst=0;at+4<=end&&inst<100000;++inst) {
             uint32_t op=word(at);
             uint32_t opcode=op&0x7ff;
-            bool extended=(op&0x800)!=0;
-            uint32_t len=(op>>24)&0x7f;
-            if(opcode==0x72&&at+8<=end)maxVerts=word(at+4);   // dcl_maxOutputVertexCount: 1 operand (4-byte literal)
-            else if(opcode==0x0d&&at+8<=end) {   // dcl_gs_output_topology: 1 operand (enum)
-                switch(word(at+4)) {
-                case 0:outTopo="pointlist";break;case 1:outTopo="linestrip";break;case 2:outTopo="linelist";break;
-                case 3:outTopo="trianglestrip";break;case 4:outTopo="trianglelist";break;case 5:outTopo="linestrip-adj";break;
-                case 6:outTopo="linelist-adj";break;case 7:outTopo="trianglelist-adj";break;case 8:outTopo="trianglestrip-adj";break;
-                case 9:outTopo="triangle-ccw";break;case 10:outTopo="triangle-cw";break;default:outTopo="?";break;
+            uint32_t len=(op>>24)&0x7f;   // total instruction length incl. this token
+            if(!len)break;   // malformed: no sane way to step
+            if(opcode==94&&at+8<=end)maxVerts=word(at+4);   // dcl_maxOutputVertexCount: opcode + literal
+            else if(opcode==92) {   // dcl_gs_output_topology: enum in bits [16:11]
+                switch((op>>11)&0x1f) {
+                case 1:outTopo="pointlist";break;case 2:outTopo="linelist";break;case 3:outTopo="linestrip";break;
+                case 4:outTopo="trianglelist";break;case 5:outTopo="trianglestrip";break;
+                case 10:outTopo="linelist-adj";break;case 11:outTopo="linestrip-adj";break;
+                case 12:outTopo="trianglelist-adj";break;case 13:outTopo="trianglestrip-adj";break;
+                default:outTopo="?";break;
                 }
             }
-            else if(opcode==0x85)++streams;   // dcl_stream
-            else if(opcode==0x72) {}
-            // dcl_output (0x27) / dcl_output_siv (0x1d... actually dcl_output_siv is 0x1d? no: 0x1d is dcl_input_siv):
-            // dcl_output_siv opcode is 0x2b, dcl_output is 0x27. The SIV system
-            // values live in the operand token's name field.
-            else if(opcode==0x2b&&at+12<=end) {   // dcl_output_siv: operand with semantic name
-                uint32_t name=word(at+8);
-                if(name==13)viewportIndex=true;   // SV_ViewportArrayIndex
-                else if(name==14)rtArrayIndex=true;   // SV_RenderTargetArrayIndex
+            else if(opcode==138)++streams;   // dcl_stream
+            else if(opcode==103&&len>=2) {   // dcl_output_siv: operand then NameToken
+                uint32_t name=word(at+4*(len-1));   // the instruction's last DWORD
+                if(name==5)viewportIndex=true;      // D3D10_SB_NAME_VIEWPORT_ARRAY_INDEX
+                else if(name==4)rtArrayIndex=true;  // D3D10_SB_NAME_RENDER_TARGET_ARRAY_INDEX
             }
-            if(at+4+size_t(len)*4>end)break;   // malformed: stop
-            at+=4+size_t(len)*4;
-            if(!extended&&len==0&&opcode!=0x0100)break;   // end of program token (0x0100 ret) has len 0
-            if(opcode==0x0100)break;   // ret
+            if(opcode==53&&at+8<=end) {   // CUSTOMDATA: its own DWORD length follows
+                uint32_t cdLen=word(at+4);
+                if(!cdLen||at+size_t(cdLen)*4>end)break;
+                at+=size_t(cdLen)*4;
+                continue;
+            }
+            if(at+size_t(len)*4>end)break;   // malformed: stop
+            if(opcode==62)break;   // ret: end of program
+            at+=size_t(len)*4;
         }
         std::string text=fmt("gs scan model=gs_%u_%u maxVerts=%u outTopo=%s streams=%u viewportIndex=%d rtArrayIndex=%d",
             major,minor,maxVerts,outTopo?outTopo:"none",streams,int(viewportIndex),int(rtArrayIndex));
@@ -834,6 +842,11 @@ inline std::string gsBytecodeText(const void* code,SIZE_T length) {
     }
     return "";
 }
+
+// Real GS containers for the gsBytecodeText contract tests, compiled by Wine's
+// d3dcompiler_47 (gs_5_0): point-sprite expansion with SV_ViewportArrayIndex,
+// and a two-stream variant. Included so the test binary is self-contained.
+#include "gs-blobs.h"
 
 #define D3D11_DIAG_HOOK(Type,slot) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return E_FAIL;
 // Every failed call also feeds the device-health path: the first failure after
@@ -1123,8 +1136,15 @@ inline void countDrawUnknown(void* self,int kind) {
     draws[kind][patch?1:0][hull?1:0].fetch_add(1,std::memory_order_relaxed);
     if(state.deferred.load(std::memory_order_relaxed))drawsDeferred.fetch_add(1,std::memory_order_relaxed);
     else drawsImmediate.fetch_add(1,std::memory_order_relaxed);
-    if(gs)drawsWithGs[kind].fetch_add(1,std::memory_order_relaxed);
-    if(gs&&ps)drawsWithGsAndPs[kind].fetch_add(1,std::memory_order_relaxed);
+    if(gs) {
+        drawsWithGs[kind].fetch_add(1,std::memory_order_relaxed);
+        if(ps)drawsWithGsAndPs[kind].fetch_add(1,std::memory_order_relaxed);
+        // The indirect kinds land here with the context's current topology, the
+        // same state an immediate draw would carry (the arguments live in the
+        // buffer, the pipeline state does not): bucket them like countDraw so
+        // an indirect GS layer is visible on the by-topology line.
+        gsDrawTopologies[kind][std::min(t,64u)].fetch_add(1,std::memory_order_relaxed);
+    }
     countDrawFormat(state.rtFormat.load(std::memory_order_relaxed));
     static std::atomic<bool> named[kDrawKinds];
     if(!named[kind].exchange(true,std::memory_order_relaxed))
