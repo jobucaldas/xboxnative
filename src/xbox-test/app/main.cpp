@@ -301,6 +301,8 @@ static void delete_token() { DeleteFileW(token_path().c_str()); logf("session to
 static bool file_exists(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
 
 // ---------------------------------------------------------------- Xbox-style screens (ui_launcher.h) + navigation (ui_nav.h)
+#include "playable.h"   // item 32: the owner-verified playable set + LocalState\playable.txt
+#include "move_game.h"  // item 33: the storage move job (copy, verify, marker rewrite)
 #include "ui_nav.h"
 #include "ui_launcher.h"
 
@@ -913,22 +915,161 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     int m_hdrFocus = -1; bool m_sortOpen = false; int m_sortFocus = 0;
     bool m_filtersOpen = false; int m_filtersFocus = 0;
     bool m_searchOpen = false; int m_searchKey = 0; std::string m_query;
-    bool m_onlyInstalled = false;                            // View: library shows installed games only
+    bool m_onlyInstalled = false;                            // tab: Installed (the tab stays; Playable filters within it, item 32)
+    bool m_filterPlayable = false;                           // item 32: the 'Playable' filter (resets on app start only)
     ui_nav::Focus m_focus = ui_nav::Focus::grid;             // library: grid tiles or the sidebar
     int m_sidebar = 0;                                       // sidebar row the focus sits on
-    int m_qSel = 0;                                          // queue screen: focused row (0 = the active download, 1.. queued)
+    int m_qSel = 0;                                          // queue screen: focused row (0 = the Auto-update row, item 28)
+    bool m_autoUpdate = true;                                // item 28: the queue's Auto-update toggle state
     int m_stSel = 0;                                         // storage screen: focused install root
     bool m_stOpen = false;                                   // storage: the focused drive's games list is open (item 22)
-    int m_stGameSel = 0;                                     // storage games list focus: 0 = "Set as install location", 1.. games
+    int m_stGameSel = 0;                                     // storage games list focus: 0 = "Use for new installs", 1.. games
+    int m_stGameScroll = 0;                                  // storage games list: first visible row (draw_storage clamps)
     uint32_t m_stConfirmApp = 0;                             // storage: the appid the delete sheet is open for
     bool m_stDelYes = false;                                 // storage delete sheet focus, false = Cancel (item 14)
-    bool m_autoUpdate = true;                                // queue screen pill (no update backend yet; memory only)
+    // item 33: the storage action sheet (per game) and the move job
+    bool m_stActionOpen = false;                             // action sheet up for the focused game
+    int m_stActionSel = 0;                                   // highlighted sheet option (Cancel default)
+    uint32_t m_stActionApp = 0;                              // the appid the action sheet is open for
+    uint64_t m_stActionBytes = 0;                            // the game's install size (sheet subtitle)
+    std::vector<std::string> m_stActionLabels, m_stActionReasons;   // sheet rows (owned strings)
+    std::vector<int> m_actionDst;   // per Move-row dst root index; -1 = Delete/Cancel
+    bool m_moveSheetOpen = false;                            // progress sheet up while a move runs
+    struct MoveJob {
+        std::atomic<bool> running{false};
+        std::atomic<bool> cancel{false};
+        std::atomic<bool> failed{false};                     // copy/verify refused or failed
+        std::atomic<bool> done{false};
+        uint32_t appid = 0;
+        uint64_t total = 0;
+        std::atomic<uint64_t> copied{0};
+        std::string dstName;                                 // target drive label for the sheet
+    };
+    MoveJob m_move;
+    std::mutex m_moveM;   // guards the move's path strings below
+    std::wstring m_moveSrc, m_moveDst, m_moveMarkerSrc, m_moveMarkerDst;
+    std::string m_moveMarkerText;
+    move_game::Progress m_moveProgress;   // the worker fills it; the progress sheet reads it
+
+    // item 33: open the action sheet for the focused game row (A on a game in
+    // a drive's list). Options: one 'Move to <label>' per other usable root
+    // (disabled with the plan refusal's reason), then Delete, then Cancel
+    // (default focus, item 14). Nothing runs until A on an enabled row.
+    void storage_open_action(uint32_t appid, uint64_t bytes, const char* via) {
+        bool busy = false;
+        { std::lock_guard<std::mutex> l(g_dqm); busy = g_fsDownloading || g_fsDeleting || !g_dq.empty(); }
+        m_stConfirmApp = 0;
+        m_stActionApp = appid;
+        m_stActionBytes = bytes;
+        m_stActionLabels.clear();
+        m_stActionReasons.clear();
+        m_actionDst.clear();
+        if (m_stSel < (int)m_roots.size()) {
+            const std::string src_root = m_roots[m_stSel].root;
+            installs::Info ii = installs::read(g_dir, appid);
+            for (size_t i = 0; i < m_roots.size(); ++i) {
+                if (i == (size_t)m_stSel) continue;   // no 'Move to' onto the same drive
+                const storage_roots::Choice& dst = m_roots[i];
+                std::wstring dstDir = installs::ascii(dst.root) + L"\\" + installs::ascii(ii.dir);
+                bool dst_exists = !ii.dir.empty() && GetFileAttributesW(dstDir.c_str()) != INVALID_FILE_ATTRIBUTES;
+                auto ref = move_game::plan_check(busy, src_root, dst.root, bytes, dst_exists, dst.freeBytes);
+                m_actionDst.push_back((int)i);   // Move row → its target drive index
+                m_stActionLabels.push_back("Move to " + dst.name);
+                m_stActionReasons.push_back(ref == move_game::Refusal::none ? std::string() : move_game::refusal_text(ref));
+            }
+        }
+        m_actionDst.push_back(-1);   // Delete row
+        m_stActionLabels.push_back("Delete");
+        m_stActionReasons.push_back(std::string());
+        m_actionDst.push_back(-1);   // Cancel row
+        m_stActionLabels.push_back("Cancel");
+        m_stActionReasons.push_back(std::string());
+        m_stActionSel = (int)m_stActionLabels.size() - 1;   // item 14: default focus on Cancel
+        m_stActionOpen = true;
+        logf("storage: action sheet open appid=%u (%s)", appid, via);
+    }
+
+    // item 33: start the background move (A on an enabled 'Move to' row). The
+    // paths are captured under m_moveM; the worker runs move_game::run with
+    // stop = m_move.cancel and reports done/failed on the job.
+    void storage_start_move(size_t dst_index, const char* via) {
+        if (m_move.running.load(std::memory_order_acquire)) return;
+        if (dst_index >= m_roots.size() || m_stSel >= m_roots.size()) return;
+        const storage_roots::Choice& dst = m_roots[dst_index];   // the row's target drive
+        installs::Info ii = installs::read(g_dir, m_stActionApp);
+        if (!ii.installed) { logf("storage: move refused appid=%u, no install marker", m_stActionApp); return; }
+        {
+            std::lock_guard<std::mutex> l(m_moveM);
+            m_moveSrc = ii.folder;
+            m_moveDst = installs::ascii(dst.root) + L"\\" + installs::ascii(ii.dir);
+            m_moveMarkerSrc = installs::marker_path(g_dir, m_stActionApp);
+            m_moveMarkerDst = installs::marker_path(installs::ascii(dst.root), m_stActionApp);
+            // the marker text keeps installdir and bytes but names the new root
+            m_moveMarkerText = "app " + std::to_string(m_stActionApp) + " root " + dst.root +
+                               " installdir " + ii.dir + "\nbytes " + std::to_string(ii.bytes) + "\n";
+        }
+        m_move.running = true; m_move.cancel = false; m_move.failed = false; m_move.done = false;
+        m_move.appid = m_stActionApp;
+        m_move.total = ii.bytes;
+        m_move.copied = 0;
+        m_move.dstName = dst.name;
+        m_moveProgress.copied = 0;   // Progress holds atomics; reset fields in place
+        m_moveProgress.files = 0;
+        m_moveProgress.total = ii.bytes;
+        m_moveSheetOpen = true;
+        std::wstring src, dstw, msrc, mdst; std::string mtext;
+        { std::lock_guard<std::mutex> l(m_moveM); src = m_moveSrc; dstw = m_moveDst; msrc = m_moveMarkerSrc; mdst = m_moveMarkerDst; mtext = m_moveMarkerText; }
+        std::thread([this, src, dstw, msrc, mdst, mtext] {
+            bool ok = move_game::run(src, dstw, msrc, mdst, mtext, m_moveProgress, &m_move.cancel);
+            m_move.failed = !ok;
+            m_move.done = true;
+            m_move.running = false;
+        }).detach();
+        logf("storage: move started appid=%u (%s)", m_stActionApp, via);
+    }
+
+    // item 33: per-frame tick — a finished move refreshes the roots and the
+    // installed set, closes the sheets and logs one line (no names/paths).
+    void move_tick(double t) {
+        if (!m_moveSheetOpen || !m_move.done.load(std::memory_order_acquire)) return;
+        m_moveSheetOpen = false;
+        bool ok = !m_move.failed.load(std::memory_order_acquire);
+        refresh_roots("move finished");
+        refresh_installed(t);
+        if (ok) logf("storage: move done appid=%u bytes=%llu", m_move.appid, (unsigned long long)m_move.total);
+        else logf("storage: move FAILED appid=%u (source left intact)", m_move.appid);
+        if (m_stActionOpen) m_stActionOpen = false;
+        m_stActionApp = 0;
+    }
+
     std::set<uint32_t> m_installed; double m_installedT = -10; int m_installedDel = -1, m_installedDl = -1;
     void refresh_installed(double t) {                       // dl_<appid>.done markers; rescanned every 2 s and after a download/delete
         if (t - m_installedT < 2 && m_installedDel == g_del.gen && m_installedDl == g_dlSeq) return;
         m_installed = installed_appids(); m_installedT = t; m_installedDel = g_del.gen; m_installedDl = g_dlSeq;
     }
-    std::vector<std::shared_ptr<Game>> shown_games() { return game_library::shown(g_games, m_onlyInstalled, m_installed); }   // caller holds g_gm
+    // item 32: the Playable set — built-in owner-verified appids plus any
+    // extras from LocalState\playable.txt (one appid per line, '#' comments).
+    // Loaded lazily once; the file is owner-written on the console, no watch.
+    std::set<uint32_t> m_playableExtra;
+    bool m_playableLoaded = false;
+    bool is_playable(uint32_t appid) {
+        if (playable::is_builtin(appid)) return true;
+        if (!m_playableLoaded) {
+            m_playableLoaded = true;
+            std::string text;
+            if (read_file_s(g_dir + L"\\playable.txt", text))
+                for (uint32_t id : playable::parse_txt(text)) m_playableExtra.insert(id);
+            if (!m_playableExtra.empty()) logf("playable: %zu extra appid(s) from playable.txt", m_playableExtra.size());
+        }
+        return m_playableExtra.count(appid) != 0;
+    }
+    // item 32: the tab list, then the Playable filter WITHIN it. The caller
+    // sorts afterwards (sort_games), so order is the library's.
+    std::vector<std::shared_ptr<Game>> shown_games() {   // caller holds g_gm
+        auto tab = game_library::shown(g_games, m_onlyInstalled, m_installed);
+        if (!m_filterPlayable) return tab;
+        return ui_nav::tab_games(tab, true, [this](uint32_t a) { return is_playable(a); });
+    }
     static constexpr int COLS = ui_launcher::kGridCols;   // same 7 columns the grid draws
 
     void grid_position(int sel, int top, const char* cause) {
@@ -1774,6 +1915,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         sb.active = m_onlyInstalled ? 3 : 2;
         sb.focus = sidebar_focus_row();
         sb.profile_focus = sidebar_focus_row() == ui_nav::kSidebarProfile;   // the UI worker draws the logout affordance from this
+        // item 31: the disk widget is sidebar entry 5 — same focus mechanism,
+        // plus its own states (focused when the pad is on it, active while the
+        // Storage screen is shown).
+        sb.disk_focus = sidebar_focus_row() == ui_nav::kSidebarStorage;
+        sb.disk_active = g_screen == S_STORAGE;
         return sb;
     }
 
@@ -1825,6 +1971,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         lib.header_focus = m_hdrFocus;
         lib.sort_open = m_sortOpen; lib.sort_focus = m_sortFocus;
         lib.filters_open = m_filtersOpen; lib.filters_focus = m_filtersFocus;
+        bool filterOn[1] = {m_filterPlayable};   // item 26/32: the Filters button's '· N' count
+        lib.filters_active = ui_nav::filters_active(filterOn, 1);
         lib.search_open = m_searchOpen; lib.search_key = m_searchKey;
         static std::string query_buf; query_buf = m_query;
         lib.query = query_buf.c_str();
@@ -1897,78 +2045,116 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         q.auto_update = m_autoUpdate;
         q.rows = rows.data(); q.row_count = (int)rows.size();
         q.updates = nullptr; q.update_count = 0;
-        q.focus = m_focus == ui_nav::Focus::grid ? m_qSel + 1 : -1;   // 0 is the auto-update pill; the rows start at 1
+        q.focus = m_focus == ui_nav::Focus::grid ? m_qSel : -1;   // item 28: 0 IS the Auto-update row now; rows shift to 1..
         ui_launcher::draw_download_queue(c, g_font, sb, q);
         if (rows.empty()) {   // honest empty state over the (empty) section
             ui_launcher::text(c, g_font, ui::Face::Regular, 24, 524, 340, "No downloads.", ui::theme::textDim);
             ui_launcher::text(c, g_font, ui::Face::Regular, 22, 524, 748, "No updates available.", ui::theme::textDim);
         }
-        const char* pairs[4] = {"A", "Cancel", "B", "Back"};
-        ui_launcher::draw_hint_bar(c, g_font, pairs, 2);
+        // item 29: draw_download_queue already draws its own hint bar — no
+        // second draw_hint_bar here (the console showed two stacked bars).
     }
 
-    // Storage management (item 22): the sidebar entry opens the same figures
-    // the detail page's storage report already collects (no new probing).
-    // Two levels: the drive list, and (A) the focused drive's installed-games
-    // list whose first row is 'Set as install location'. The sidebar's active
-    // row is THIS screen's entry (item 22b).
+    // Storage management (items 22/31/33): the disk widget in the sidebar opens
+    // this screen (item 31: no view row active; the widget wears the active
+    // look). ui_launcher::draw_storage paints both levels; main.cpp fills the
+    // VMs and owns the item-33 action sheet (per game: move to another drive /
+    // delete / cancel) and the move job's progress sheet.
     void draw_storage() {
         ui::Canvas c(g_fb.data(), W, H, W);
-        ui_launcher::SidebarVM sb = sidebar_vm(); sb.active = ui_nav::kSidebarStorage;
-        ui_launcher::draw_sidebar(c, g_font, sb);
-        ui_launcher::text(c, g_font, ui::Face::Semibold, 44, 524, 73.5f, "Storage", ui::theme::text);
+        ui_launcher::SidebarVM sb = sidebar_vm(); sb.active = -1;   // item 31: Storage is the disk widget's screen — no view row is active
         std::vector<storage_roots::Choice> roots = m_roots.empty() ? std::vector<storage_roots::Choice>{storage_report::internal_root(g_dir)} : m_roots;
-        if (!m_stOpen) {   // drive list
-            float y = 200;
-            for (size_t i = 0; i < roots.size(); ++i) {
-                const storage_roots::Choice& r = roots[i];
-                bool sel = m_focus == ui_nav::Focus::grid && (int)i == m_stSel;   // the pad's row
-                std::string line = storage_roots::label_capacity(r);
-                ui_launcher::text(c, g_font, ui::Face::Regular, 24, 548, y, line.c_str(), sel ? ui::theme::text : ui::theme::text2);
-                if (r.space.ok && r.space.total) {
-                    int pct = (int)(100 - 100.0 * r.space.freeTotal / (double)r.space.total);
-                    std::string used = std::to_string(pct) + "% used of " + storage_roots::size_text(r.space.total);
-                    ui_launcher::text(c, g_font, ui::Face::Regular, 20, 548, y + 34, used.c_str(), sel ? ui::theme::text2 : ui::theme::textDim);
-                }
-                if ((int)i == (int)m_rootSel) fill(524, (int)y, 6, 56, ui::theme::accent);   // where new installs go
-                if (sel) ui_launcher::focus_ring(c, ui::rect(512, y - 10, 1332, 84), ui::theme::radiusControl + ui::theme::ringRadiusDelta, ui::theme::ringWidth);
-                y += 96;
-            }
-            ui_launcher::text(c, g_font, ui::Face::Regular, 20, 524, y + 16,
-                              "The full report is in LocalState\\storage_report.txt", ui::theme::textMuted);
-            const char* pairs[4] = {"A", "Select", "B", "Back"};
-            ui_launcher::draw_hint_bar(c, g_font, pairs, 2);
-        } else {   // the focused drive's games list; row 0 = 'Set as install location'
-            std::string title = m_stSel < (int)roots.size() ? roots[m_stSel].name : std::string("Drive");
-            ui_launcher::text(c, g_font, ui::Face::Semibold, 30, 524, 150, title.c_str(), ui::theme::text2);
+
+        // view models (statics keep the c_str()s alive while drawing)
+        static std::vector<ui_launcher::StorageDriveVM> drives;
+        static std::vector<std::string> driveTitles, driveDetails;
+        drives.clear(); driveTitles.clear(); driveDetails.clear();
+        for (size_t i = 0; i < roots.size(); ++i) {
+            const storage_roots::Choice& r = roots[i];
+            driveTitles.push_back(r.name);
+            int pct = -1;
+            if (r.space.ok && r.space.total) pct = (int)(100 - 100.0 * r.space.freeTotal / (double)r.space.total);
+            std::string used = pct >= 0
+                ? std::to_string(pct) + "% used of " + storage_roots::size_text(r.space.total)
+                : std::string("free ") + storage_roots::size_text(r.space.freeTotal);
+            driveDetails.push_back(used);
+            ui_launcher::StorageDriveVM d;
+            d.title = driveTitles.back().c_str();
+            d.detail = driveDetails.back().c_str();
+            d.used_pct = pct;
+            d.install_target = (int)i == (int)m_rootSel;
+            d.focused = m_focus == ui_nav::Focus::grid && (int)i == m_stSel;
+            drives.push_back(d);
+        }
+
+        ui_launcher::StorageVM st;
+        st.drives = drives.data();
+        st.n_drives = (int)drives.size();
+        st.open_drive = m_stOpen ? m_stSel : -1;
+        static std::string driveTitle;
+        driveTitle = m_stOpen && m_stSel < (int)roots.size() ? roots[m_stSel].name : std::string("Drive");
+        st.drive_title = driveTitle.c_str();
+
+        static std::vector<ui_launcher::StorageGameVM> gameRows;
+        static std::vector<std::string> gameNames, gameSizes;
+        gameRows.clear(); gameNames.clear(); gameSizes.clear();
+        if (m_stOpen) {
             auto rows = storage_game_list();
-            float y = 200;
-            bool sel0 = m_focus == ui_nav::Focus::grid && m_stGameSel == 0;
-            bool isTarget = m_rootSel == (size_t)m_stSel;
-            static std::string targetLabel; targetLabel = isTarget ? "Use for new installs (current)" : "Use for new installs";
-            ui_launcher::text(c, g_font, ui::Face::Regular, 24, 548, y, targetLabel.c_str(), sel0 ? ui::theme::text : ui::theme::text2);
-            if (sel0) ui_launcher::focus_ring(c, ui::rect(512, y - 10, 1332, 50), ui::theme::radiusControl + ui::theme::ringRadiusDelta, ui::theme::ringWidth);
-            y += 64;
             for (size_t i = 0; i < rows.size(); ++i) {
-                bool sel = m_focus == ui_nav::Focus::grid && m_stGameSel == (int)(i + 1);
-                ui_launcher::text(c, g_font, ui::Face::Regular, 24, 548, y, rows[i].name.c_str(), sel ? ui::theme::text : ui::theme::text2);
-                std::string size = storage_roots::size_text(rows[i].bytes);
-                ui_launcher::text(c, g_font, ui::Face::Regular, 20, 1700, y + 4, size.c_str(), sel ? ui::theme::text2 : ui::theme::textDim);
-                if (sel) ui_launcher::focus_ring(c, ui::rect(512, y - 10, 1332, 50), ui::theme::radiusControl + ui::theme::ringRadiusDelta, ui::theme::ringWidth);
-                y += 56;
+                gameNames.push_back(rows[i].name);
+                gameSizes.push_back(storage_roots::size_text(rows[i].bytes));
             }
-            if (rows.empty()) ui_launcher::text(c, g_font, ui::Face::Regular, 22, 548, y + 8, "No games installed here", ui::theme::textDim);
-            const char* pairs[4] = {"A", "Select", "B", "Back"};
-            ui_launcher::draw_hint_bar(c, g_font, pairs, 2);
-            if (m_confirmDelete) {   // the SAME sheet component as the game page, focus on Cancel
-                ui_launcher::DeleteVM d;
-                static std::string dTitle, dBody;
-                std::string nm = game_name(m_stConfirmApp);
-                dTitle = "Delete " + clip(nm.empty() ? "App " + std::to_string(m_stConfirmApp) : nm, 30) + "?";
-                dBody = "Removes the game files from this console. Saves are kept.";
-                d.title = dTitle.c_str(); d.body = dBody.c_str(); d.focus_delete = m_stDelYes;
-                ui_launcher::draw_delete_sheet(c, g_font, d);
+            for (size_t i = 0; i < gameNames.size(); ++i) {
+                ui_launcher::StorageGameVM gm;
+                gm.name = gameNames[i].c_str();
+                gm.size = gameSizes[i].c_str();
+                gm.focused = m_focus == ui_nav::Focus::grid && m_stGameSel == (int)(i + 1);
+                gameRows.push_back(gm);
             }
+            st.games = gameRows.data();
+            st.n_games = (int)gameRows.size();
+            st.game_scroll = m_stGameScroll;
+        }
+
+        // item 29: exactly one hint bar — draw_storage draws its own unless a
+        // sheet is up (each sheet draws its own).
+        ui_launcher::draw_storage(c, g_font, sb, st,
+                                  !(m_confirmDelete || m_stActionOpen || m_moveSheetOpen));
+
+        if (m_stActionOpen) {   // item 33: the action sheet over the dimmed page
+            ui_launcher::ActionSheetVM a;
+            static std::string aTitle, aSubtitle;
+            std::string nm = game_name(m_stActionApp);
+            aTitle = clip(!nm.empty() ? nm : "App " + std::to_string(m_stActionApp), 36);
+            aSubtitle = storage_roots::size_text(m_stActionBytes) + " \xC2\xB7 " +
+                        (m_stSel < (int)roots.size() ? roots[m_stSel].name : std::string("Drive"));
+            static std::vector<const char*> labelPtrs, reasonPtrs;
+            labelPtrs.clear(); reasonPtrs.clear();
+            for (const std::string& l : m_stActionLabels) labelPtrs.push_back(l.c_str());
+            for (const std::string& r : m_stActionReasons) reasonPtrs.push_back(r.c_str());
+            a.title = aTitle.c_str(); a.subtitle = aSubtitle.c_str();
+            a.labels = labelPtrs.data(); a.reasons = reasonPtrs.data();
+            a.n = (int)labelPtrs.size();
+            a.sel = m_stActionSel;
+            ui_launcher::draw_action_sheet(c, g_font, a);
+        } else if (m_moveSheetOpen) {   // item 33: the move job's progress sheet
+            ui_launcher::ProgressSheetVM ps;
+            static std::string psTitle, psDetail;
+            std::string nm = game_name(m_move.appid);
+            psTitle = clip(!nm.empty() ? nm : "App " + std::to_string(m_move.appid), 36);
+            psDetail = "Moving to " + m_move.dstName;
+            ps.title = psTitle.c_str(); ps.detail = psDetail.c_str();
+            ps.pct = m_move.total ? (int)(m_move.copied.load() * 100 / m_move.total) : 0;
+            ps.cancel_focus = true;
+            ui_launcher::draw_progress_sheet(c, g_font, ps);
+        } else if (m_confirmDelete) {   // the SAME sheet component as the game page, focus on Cancel
+            ui_launcher::DeleteVM d;
+            static std::string dTitle, dBody;
+            std::string nm = game_name(m_stConfirmApp);
+            dTitle = "Delete " + clip(nm.empty() ? "App " + std::to_string(m_stConfirmApp) : nm, 30) + "?";
+            dBody = "Removes the game files from this console. Saves are kept.";
+            d.title = dTitle.c_str(); d.body = dBody.c_str(); d.focus_delete = m_stDelYes;
+            ui_launcher::draw_delete_sheet(c, g_font, d);
         }
     }
 
@@ -2092,10 +2278,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             // item 1: the filters panel owns the pad while it is up (A toggles
             // the focused row, B closes, up/down moves with wrap).
             if (m_filtersOpen) {
-                static bool installedOnly = false;   // the one real filter row
+                bool playableOn = m_filterPlayable;   // item 32: the one real filter row is 'Playable'
                 if (has(edge, GamepadButtons::DPadUp)) { ui_nav::filters_move(m_filtersFocus, 1, false); logf("filters: up -> row %d (%s)", m_filtersFocus, source); }
                 else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::filters_move(m_filtersFocus, 1, true); logf("filters: down -> row %d (%s)", m_filtersFocus, source); }
-                else if (has(edge, GamepadButtons::A)) { ui_nav::filters_toggle(&installedOnly, 1, m_filtersFocus); if (m_onlyInstalled != installedOnly) { m_onlyInstalled = installedOnly; m_installedT = -10; refresh_installed(t); grid_position(0, 0, "filters toggle"); logf("filters: installed only -> %s (%s)", m_onlyInstalled ? "on" : "off", source); } }
+                else if (has(edge, GamepadButtons::A)) { ui_nav::filters_toggle(&playableOn, 1, m_filtersFocus); if (m_filterPlayable != playableOn) { m_filterPlayable = playableOn; grid_position(0, 0, "filters toggle"); logf("filters: playable -> %s (%s)", m_filterPlayable ? "on" : "off", source); } }
                 else if (has(edge, GamepadButtons::B)) { m_filtersOpen = false; logf("filters panel closed (%s)", source); }
                 return;
             }
@@ -2177,16 +2363,18 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 else if (has(edge, GamepadButtons::DPadRight) && ui_nav::lateral(m_focus, 0, false)) { m_qSel = 0; }
                 else if (has(edge, GamepadButtons::A)) sidebar_activate(t, source);
             } else {
-                if (m_qSel >= nrows) m_qSel = nrows ? nrows - 1 : 0;   // rows may have drained since the last frame
+                // item 28: row 0 is the Auto-update row (a real focusable row);
+                // up/down walk it and the downloads with wrap (ui_nav helpers).
+                m_qSel = ui_nav::queue_row_clamp(m_qSel, nrows);
                 if (has(edge, GamepadButtons::B)) { g_screen = S_LIBRARY; logf("queue: back to the library (%s)", source); }
                 else if (has(edge, GamepadButtons::DPadLeft)) { ui_nav::lateral(m_focus, 0, true); logf("queue: focus -> sidebar (%s)", source); }
-                else if (has(edge, GamepadButtons::DPadDown) && nrows) { m_qSel = (m_qSel + 1) % nrows; logf("queue: row %d/%d (%s)", m_qSel, nrows, source); }
-                else if (has(edge, GamepadButtons::DPadUp) && nrows) { m_qSel = (m_qSel + nrows - 1) % nrows; logf("queue: row %d/%d (%s)", m_qSel, nrows, source); }
-                else if (has(edge, GamepadButtons::A) && nrows) {
-                    if (activeRow && m_qSel == 0) { g_dl.cancel = true; logf("queue: download cancel requested appid=%u (%s)", dlApp, source); }
-                    else if (activeRow || m_qSel < (int)dq.size()) { uint32_t id = dq[activeRow ? m_qSel - 1 : m_qSel]; cancel_queued(id); logf("queue: cancel asked appid=%u (%s)", id, source); }
+                else if (has(edge, GamepadButtons::DPadDown)) { ui_nav::queue_row_move(m_qSel, nrows, true); logf("queue: row %d/%d (%s)", m_qSel, nrows, source); }
+                else if (has(edge, GamepadButtons::DPadUp)) { ui_nav::queue_row_move(m_qSel, nrows, false); logf("queue: row %d/%d (%s)", m_qSel, nrows, source); }
+                else if (has(edge, GamepadButtons::A)) {
+                    if (m_qSel == 0) { m_autoUpdate = !m_autoUpdate; logf("queue: auto-update -> %s (A on the row, %s)", m_autoUpdate ? "on" : "off", source); }   // item 28: A on Auto-update toggles
+                    else if (activeRow && m_qSel == 1) { g_dl.cancel = true; logf("queue: download cancel requested appid=%u (%s)", dlApp, source); }
+                    else if (m_qSel < (int)dq.size() + (activeRow ? 1 : 0)) { uint32_t id = dq[m_qSel - (activeRow ? 1 : 0)]; cancel_queued(id); logf("queue: cancel asked appid=%u (%s)", id, source); }
                 }
-                else if (has(edge, GamepadButtons::Y)) { m_autoUpdate = !m_autoUpdate; logf("queue: auto-update -> %s (memory only, %s)", m_autoUpdate ? "on" : "off", source); }
             }
         }
         else if (s == S_STORAGE) {
@@ -2195,6 +2383,45 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             // row is 'Set as install location'); up/down move, A on a game
             // opens the detail page's Delete confirm sheet, B backs out one
             // level (games list -> drive list -> library).
+            if (m_moveSheetOpen) {
+                // item 33: while a move runs the sheet owns the pad — A/B set
+                // the cancel flag (the worker removes the partial copy and
+                // keeps the source); everything else is ignored.
+                if (has(edge, GamepadButtons::A) || has(edge, GamepadButtons::B)) {
+                    m_move.cancel = true;
+                    logf("storage: move cancel requested (%s)", source);
+                }
+                return;
+            }
+            if (m_stActionOpen) {
+                // item 33: the action sheet owns the pad. Up/down walk all
+                // rows (disabled ones stay focusable); A activates an enabled
+                // row; B closes.
+                int n = (int)m_stActionLabels.size();
+                if (!n) { m_stActionOpen = false; return; }
+                if (has(edge, GamepadButtons::DPadUp)) { m_stActionSel = (m_stActionSel + n - 1) % n; logf("storage: action option %d/%d (%s)", m_stActionSel + 1, n, source); }
+                else if (has(edge, GamepadButtons::DPadDown)) { m_stActionSel = (m_stActionSel + 1) % n; logf("storage: action option %d/%d (%s)", m_stActionSel + 1, n, source); }
+                else if (has(edge, GamepadButtons::B)) { m_stActionOpen = false; logf("storage: action sheet closed (%s)", source); }
+                else if (has(edge, GamepadButtons::A) && m_stActionSel >= 0 && m_stActionSel < n) {
+                    if (!m_stActionReasons[(size_t)m_stActionSel].empty()) {
+                        logf("storage: action refused (disabled): %s", m_stActionReasons[(size_t)m_stActionSel].c_str());
+                    } else if (m_stActionSel < (int)m_actionDst.size() && m_actionDst[(size_t)m_stActionSel] >= 0) {
+                        int dsti = m_actionDst[(size_t)m_stActionSel];
+                        m_stActionOpen = false;
+                        storage_start_move((size_t)dsti, source);
+                    } else if (m_stActionLabels[(size_t)m_stActionSel] == "Delete") {
+                        m_stActionOpen = false;
+                        m_stConfirmApp = m_stActionApp;
+                        m_stDelYes = false;   // the delete confirm's focus starts on Cancel
+                        m_confirmDelete = true;
+                        logf("storage: delete asked from action sheet appid=%u (%s)", m_stActionApp, source);
+                    } else {   // Cancel
+                        m_stActionOpen = false;
+                        logf("storage: action sheet cancelled (%s)", source);
+                    }
+                }
+                return;
+            }
             if (m_confirmDelete) {   // item 14: focus starts on Cancel; left/right toggles; A on 'Yes, delete' uninstalls
                 if (has(edge, GamepadButtons::DPadLeft) || has(edge, GamepadButtons::DPadRight)) { m_stDelYes = !m_stDelYes; logf("storage: delete sheet focus -> %s (%s)", m_stDelYes ? "Delete" : "Cancel", source); }
                 else if (has(edge, GamepadButtons::A)) { if (m_stDelYes) storage_delete_confirm(source); else { m_confirmDelete = false; logf("storage: delete cancelled (%s)", source); } }
@@ -2210,15 +2437,16 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 size_t ngames = storage_game_list().size();
                 if ((size_t)m_stGameSel > ngames) m_stGameSel = (int)ngames;   // the list may have shrunk (a delete finished)
                 if (has(edge, GamepadButtons::B)) { m_stOpen = false; m_stGameSel = 0; logf("storage: back to the drive list (%s)", source); }
-                else if (has(edge, GamepadButtons::DPadDown) && ngames) { m_stGameSel = (m_stGameSel + 1) % (int)(ngames + 1); logf("storage: game row %d/%zu (%s)", m_stGameSel, ngames, source); }
-                else if (has(edge, GamepadButtons::DPadUp) && ngames) { m_stGameSel = (m_stGameSel + (int)ngames) % (int)(ngames + 1); logf("storage: game row %d/%zu (%s)", m_stGameSel, ngames, source); }
+                else if (has(edge, GamepadButtons::DPadDown) && ngames) { m_stGameSel = (m_stGameSel + 1) % (int)(ngames + 1); m_stGameScroll = m_stGameSel; logf("storage: game row %d/%zu (%s)", m_stGameSel, ngames, source); }
+                else if (has(edge, GamepadButtons::DPadUp) && ngames) { m_stGameSel = (m_stGameSel + (int)ngames) % (int)(ngames + 1); m_stGameScroll = m_stGameSel; logf("storage: game row %d/%zu (%s)", m_stGameSel, ngames, source); }
                 else if (has(edge, GamepadButtons::A)) {
                     if (m_stGameSel == 0) { m_rootSel = (size_t)m_stSel; m_stOpen = false; logf("storage: new installs -> %s (%s)", m_roots[m_stSel].name.c_str(), source); }
                     else {
                         auto rows = storage_game_list();
-                        const auto& g = rows[(size_t)m_stGameSel - 1];
-                        m_stConfirmApp = g.appid; m_stDelYes = false; m_confirmDelete = true;
-                        logf("storage: delete asked appid=%u (%s)", g.appid, source);
+                        if (m_stGameSel <= (int)rows.size()) {
+                            const auto& g = rows[(size_t)m_stGameSel - 1];
+                            storage_open_action(g.appid, g.bytes, source);   // item 33: action sheet (move/delete/cancel)
+                        }
                     }
                 }
             } else {
@@ -2255,7 +2483,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             double t = now_s();
             if (n) rd = pads.GetAt(0).GetCurrentReading();
             input(t, rd, n > 0);
-            autotest(t); cmdhook(t); detail_tick(t);
+            autotest(t); cmdhook(t); detail_tick(t); move_tick(t);   // item 33: the move job's completion tick
             if (selftest::tick()) selftest::run_async(m_window.Dispatcher());
             if(m_guestSurface){guest_menu(t,n?rd.Buttons:GamepadButtons::None);Sleep(1);continue;}
             draw(t);

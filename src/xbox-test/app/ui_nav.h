@@ -6,6 +6,8 @@
 #pragma once
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <set>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -20,13 +22,16 @@ namespace ui_nav {
 // active entry; A on an entry switches the view.
 // Item 14: the sidebar is SIX entries — PROFILE (index 0, focusable; A opens
 // the logout confirm sheet), Search (1, opens the search overlay), All games,
-// Installed, Download queue, Storage management. main.cpp maps the indexes
-// through sidebar_target; index kSidebarSearch opens the search overlay.
-constexpr int kSidebarEntries = 6;   // Profile, Search, All games, Installed, Download queue, Storage management
+// Installed, Download queue, and the DISK widget (item 31: not a list row —
+// the bottom disk-information widget, selectable; A opens the Storage screen
+// and it wears the active look while Storage is shown). main.cpp maps the
+// indexes through sidebar_target; index kSidebarSearch opens the search
+// overlay.
+constexpr int kSidebarEntries = 6;   // Profile, Search, All games, Installed, Download queue, disk widget
 constexpr int kSidebarProfile = 0;   // the profile row (A opens the logout confirm sheet)
 constexpr int kSidebarSearch = 1;    // the Search row's index (opens the search overlay)
 constexpr int kSidebarQueue = 4;     // the Download queue row (the queue screen's active entry)
-constexpr int kSidebarStorage = 5;   // the Storage management row (the storage screen's active entry)
+constexpr int kSidebarStorage = 5;   // the disk widget (item 31: reached by Down from the queue row; A opens Storage)
 
 enum class Focus { grid, sidebar };
 
@@ -53,9 +58,10 @@ inline bool sidebar_move(int& active, bool down) {
 
 // Which screen the sidebar's active entry opens: kSidebarProfile (0) opens
 // the logout confirm sheet, kSidebarSearch (1) the search overlay, 2/3
-// library (All games / Installed), 4 download queue, 5 storage management.
-// The library screen itself shows the sidebar; the other two draw their own
-// page and B returns to the library.
+// library (All games / Installed), 4 download queue, 5 the Storage screen via
+// the disk widget (item 31). Down from the queue row (4) reaches the widget
+// (5); Up from it returns to the queue row. The library screen itself shows
+// the sidebar; the other two draw their own page and B returns to the library.
 inline int sidebar_target(int active) { return active; }
 
 // ---- sort modes (item 25) ----
@@ -119,14 +125,41 @@ inline std::vector<StorageGameRow> storage_game_rows(const std::string& drive_ro
     return out;
 }
 
-// ---- filters state (item 26) ----------------------------------------------
-// The one real filter today is 'Installed only'. filters_active counts the
-// enabled filters so the Filters button can show an accent state; with more
-// filters later, extend the caller's bool list, not this helper.
+// ---- filters state (item 32) ----------------------------------------------
+// The one real filter today is 'Playable' (the old 'Installed only' toggle
+// became it: same row, same toggle behaviour; it now filters WITHIN the
+// current tab instead of switching views). filters_active counts the enabled
+// filters so the Filters button can show 'Filters · N'; with more filters
+// later, extend the caller's bool list, not this helper.
 inline int filters_active(const bool* on, int n) {
     int count = 0;
     for (int i = 0; i < n; ++i) if (on && on[i]) ++count;
     return count;
+}
+
+// The filter model (item 32): tab_games applies the Playable filter WITHIN
+// the current tab. `all` is the ALREADY tab-filtered list (All games or
+// Installed — the caller keeps the tab's own installed-set rule), so this
+// only drops the non-playable games when the filter is on. Order is kept
+// (the caller's sort runs after). Works with pointers, smart pointers and
+// value types.
+template <class T>
+inline const T& deref_game(const T& v) { return v; }
+template <class T>
+inline const T& deref_game(const T* p) { return *p; }
+template <class T>
+inline const T& deref_game(const std::shared_ptr<T>& p) { return *p; }
+template <class T>
+inline const T& deref_game(const std::unique_ptr<T>& p) { return *p; }
+template <class Ptr, class PlayableFn>
+inline std::vector<Ptr> tab_games(const std::vector<Ptr>& all, bool playable_on, PlayableFn is_playable) {
+    std::vector<Ptr> out;
+    for (auto& g : all) {
+        const auto& gv = deref_game(g);   // pointers, smart pointers and value types alike
+        if (playable_on && !is_playable(gv.appid)) continue;
+        out.push_back(g);
+    }
+    return out;
 }
 
 // ---- queue row model (download queue screen) ----
@@ -143,6 +176,18 @@ inline const char* dl_status_text(int state, int pct, const char* msg) {
         case 4: return "Cancelled";
         default: return pct > 0 ? "Queued" : "Waiting";
     }
+}
+
+// ---- queue focus walk (item 28) ----
+// The queue screen's rows: 0 is the Auto-update row (a real focusable row —
+// A toggles it), then the downloads. Right from the sidebar lands on row 0;
+// up/down move with wrap; B returns to the library (main.cpp). Clamped, so a
+// drained queue keeps the focus on Auto-update.
+inline int queue_row_clamp(int sel, int n) { return n <= 0 ? 0 : sel < 0 ? 0 : sel >= n ? n - 1 : sel; }
+inline bool queue_row_move(int& sel, int n, bool down) {
+    if (n <= 0) return false;
+    sel = down ? (sel + 1) % n : (sel + n - 1) % n;
+    return true;
 }
 
 // ---- game screen focus (icon buttons replace the old X/Y shortcuts) ----
