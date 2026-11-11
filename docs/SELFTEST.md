@@ -27,6 +27,7 @@ does not carry is reported as `SKIP`, never silently dropped.
 | `vulkan-dzn` | `diag\play-vulkan-dzn.exe` | Vulkan through the packaged Mesa dzn ICD and Khronos loader |
 | `d3d9` | `diag\play-d3d9.exe` | The D3D9 shim over D3D11 |
 | `d3d9-triangle` | `diag\play-d3d9-triangle.exe` | A D3D9 triangle drawn and read back through the shim |
+| `d3d9-triangle-variants` | `diag\play-d3d9-triangle-variants.exe` | The same triangle five ways in one guest (textureless diffuse, texture arg unbound, two-stage mixed, a compiled `ps_1_1` with a real texture, textureless again), one `SELFTEST RESULT d3d9-triangle-vN` line per variant |
 | `d3d9-textured` | `diag\play-d3d9-textured.exe` | A D3D9 textured draw through the shim |
 | `d3d10` | `diag\play-d3d10.exe` | The D3D10 shim over D3D11 |
 | `opengl` | `diag\play-opengl.exe` | Mesa's d3d12 WGL driver: pixel format, context, clear, SwapBuffers, glReadPixels |
@@ -70,6 +71,28 @@ actually ran guest code and the guest exited. It is not a visual or playability 
 | `FAIL restart-limit` / `FAIL stale-request` | The run could not continue across launcher restarts |
 | `FAIL empty-request` | `selftest.txt` named no mode |
 | `SKIP unknown-mode` / `SKIP not-packaged` | The request named a mode this build cannot run |
+
+## Last console run
+
+`all` on launcher 0.5.276.0, 2026-11-10, from a clean build — `pass=5 fail=1 blocked=1`:
+
+| Mode | Result |
+|---|---|
+| `x86` | `PASS` |
+| `vulkan-dzn` | `PASS frame-presented` |
+| `d3d9` | `PASS` |
+| `d3d9-triangle` | `FAIL exit-0` — unhandled exception `0xc0000005` at `dxilconv.dll+0x18a20`, access 0 on `0x18` |
+| `d3d9-textured` | `PASS` |
+| `d3d10` | `PASS` |
+| `opengl` | `BLOCKED pixel-readback` (`got=0,0,0,0`, want `0,64,128,255`) |
+
+Merged since that run, **unverified on console**: the `opengl` readback fix
+([#142](https://github.com/jobucaldas/xboxnative/pull/142)); the `d3d9-triangle` fix
+([#145](https://github.com/jobucaldas/xboxnative/pull/145) — the earlier POSITIONT mapping,
+[#136](https://github.com/jobucaldas/xboxnative/pull/136), was not enough); the
+`d3d9-triangle-variants` mode; and the `d3d11` and `d3d12` modes
+([#139](https://github.com/jobucaldas/xboxnative/pull/139), [#141](https://github.com/jobucaldas/xboxnative/pull/141),
+[#144](https://github.com/jobucaldas/xboxnative/pull/144)), which have never run on a console.
 
 ## How a run proceeds
 
