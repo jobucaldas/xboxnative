@@ -58,6 +58,7 @@ typedef HANDLE_GL (WINAPI* PFN_wglCreateContext)(HDC);
 typedef BOOL (WINAPI* PFN_wglDeleteContext)(HANDLE_GL);
 typedef BOOL (WINAPI* PFN_wglMakeCurrent)(HDC, HANDLE_GL);
 typedef PROC (WINAPI* PFN_wglGetProcAddress)(LPCSTR);
+typedef HANDLE_GL (WINAPI* PFN_wglCreateContextAttribsARB)(HDC, HANDLE_GL, const int*);
 typedef const char* (WINAPI* PFN_glGetString)(uint32_t);
 typedef void (WINAPI* PFN_glClearColor)(float, float, float, float);
 typedef void (WINAPI* PFN_glClear)(uint32_t);
@@ -148,6 +149,37 @@ int opengl_entry() {
     {char line[320]; char* p = append(line, "PLAY-OPENGL STAGE context-current renderer=\"");
      p = append(p, renderer ? renderer : "?"); p = append(p, "\" version=\"");
      p = append(p, version ? version : "?"); p = append(p, "\"\n"); *p = 0; emit(line);}
+
+    // Version refusal (the Fields of Mistria report): a request the driver
+    // cannot satisfy must fail with a real error. A host whose D3D12 refuses
+    // R9G9B9E5_SHAREDEXP caps Mesa at GL 2.1, so when the reported version is
+    // below 3.0 a compat 3.0 request is refused by the state tracker;
+    // wglCreateContextAttribsARB must then return NULL with GetLastError() set
+    // — patches/mesa-src/0010 maps the state tracker's
+    // ST_CONTEXT_ERROR_BAD_VERSION to ERROR_INVALID_VERSION_ARB, and without it
+    // the error is 0, which sent SDL3's "No matching GL pixel format available"
+    // investigation down the wrong path. The stage always reports: err=N when
+    // the refusal ran, "skipped version=X.Y" when the driver provides 3.0+
+    // (nothing to refuse — the console's d3d12 reports GL 4.1).
+    if (version && version[0] >= '0' && version[0] <= '9') {
+        int major = version[0] - '0';
+        if (major < 3) {
+            auto createAttribs = (PFN_wglCreateContextAttribsARB)(uintptr_t)
+                wglGetProcAddress("wglCreateContextAttribsARB");
+            if (!createAttribs) return fail(17, "wglCreateContextAttribsARB", 0);
+            int attrs[] = {0x2091, 3, 0x2092, 0, 0};   // WGL_CONTEXT_MAJOR_VERSION_ARB/minor
+            SetLastError(0);
+            HANDLE_GL refused = createAttribs(dc, nullptr, attrs);
+            DWORD err = GetLastError();
+            {char line[160]; char* p = append(line, "PLAY-OPENGL STAGE version-refusal err=");
+             p = appendInt(p, (int32_t)err); p = append(p, "\n"); *p = 0; emit(line);}
+            if (refused) return fail(17, "version-refusal: 3.0 succeeded under a 2.1 driver", 0);
+            if (!err) return fail(17, "version-refusal: NULL with error 0 (SetLastError lost)", 0);
+        } else {
+            {char line[160]; char* p = append(line, "PLAY-OPENGL STAGE version-refusal skipped version=");
+             p = append(p, version); p = append(p, "\n"); *p = 0; emit(line);}
+        }
+    }
 
     // The verdict is a pixel, not a call: read the centre of the cleared frame
     // BEFORE any present — after SwapBuffers the back-buffer contents are

@@ -97,6 +97,20 @@ Play: maps both from the runtime layout like Wine's msvcp140 ──> console d3d
    The diagnostic path, if this ever regresses: `MESA_DEBUG`/`debug_printf` is compiled out of release builds, so the
    trace comes from `OutputDebugStringA` (Play logs it) — the screen init chain is `d3d12_wgl_create_screen` →
    `d3d12_create_dxgi_screen` → `d3d12_init_screen`, and a NULL there leaves `stw` with zero formats.
+3c. **Done: truthful WGL errors** (`patches/mesa-src/0010-play-wgl-setlasterror.patch`). With the pixel format fixed,
+   the next reported stop was still `No matching GL pixel format available`, but the string is SDL3's stale fallback:
+   the real failure was `wglCreateContextAttribsARB` returning NULL with `GetLastError() == 0`. Mesa's WGL frontend
+   lost the state tracker's reason twice — `stw_create_context_attribs()` never mapped `enum st_context_error` to
+   `SetLastError()`, and the failure path's `pfnwglDeleteContext()` clobbered what it did set. The patch maps
+   `NO_MEMORY -> ERROR_OUTOFMEMORY` and `BAD_VERSION -> ERROR_INVALID_VERSION_ARB` (0x2095) at the funnel both entry
+   points share and preserves the error across the cleanup call. Why the request is refused at all: the d3d12 driver
+   needs `PIPE_FORMAT_R9G9B9E5_FLOAT` for `EXT_texture_shared_exponent`, and a D3D12 that answers
+   `CheckFeatureSupport(FORMAT_SUPPORT)` with E_FAIL for `DXGI_FORMAT_R9G9B9E5_SHAREDEXP` (Wine 11's vkd3d and, per
+   the format-support probing, the console's) drops the extension, which caps `compute_version` at GL 2.1 — so every
+   >= 3.0 request takes the `BAD_VERSION` path. Off-device the refusal now reports `err=8341`
+   (`ERROR_INVALID_VERSION_ARB`) and the SDL3 fixture still presents its frame; the opengl fixture gained a
+   version-refusal stage and the off-device gate greps for it, so an old Mesa build without the patch fails the
+   gate. **[verified off-device: Wine 11]**
 4. **Done: package + map.** `app/build.sh` copies both DLLs, the licences, the patches and `SOURCE.txt` into
    `layout/runtime/`; `loadExW` finds them there (after any copy the game ships) through `redistributable()`.
    Mesa's imports resolve through the existing routes; `d3d12.dll!D3D12CreateDevice` is routed with the real
