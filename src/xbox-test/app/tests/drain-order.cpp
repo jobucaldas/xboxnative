@@ -254,7 +254,7 @@ int main() {
         } dq; dq.ctx=&c;
         resize_drain::drain(&dq);
         std::string seq;for(auto& s:g_log)seq+=s+";";
-        CHECK(seq=="dev.GetImmediateContext;ctx.OMSetRenderTargets(0);dev.CreateQuery(fail);ctx.Release;");
+        CHECK(seq=="dev.GetImmediateContext;ctx.OMSetRenderTargets(0);dev.CreateQuery(fail);ctx.Flush;ctx.Release;");
         CHECK(seq.find("GetData")==std::string::npos);
     }
     g_log.clear();

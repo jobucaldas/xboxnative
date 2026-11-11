@@ -31,9 +31,15 @@ inline void drain(ID3D11Device* dev) {
     ctx->OMSetRenderTargets(0,nullptr,nullptr);
     ID3D11Query* q=nullptr;
     D3D11_QUERY_DESC d{};d.Query=D3D11_QUERY_EVENT;
-    if(SUCCEEDED(dev->CreateQuery(&d,&q))&&q) {
+    // CreateQuery can fail (device removed, out of memory); the flush still
+    // happens — the unbind above must reach the driver before the resize
+    // releases the buffers, with or without a query to wait on.
+    BOOL flushed=SUCCEEDED(dev->CreateQuery(&d,&q))&&q;
+    if(flushed) {
         ctx->End(q);
-        ctx->Flush();
+    }
+    ctx->Flush();
+    if(flushed) {
         BOOL done=FALSE;DWORD spins=0;
         while(++spins<=1000) {   // ~1 s at 1 ms/spin; a healthy idle is sub-ms
             HRESULT hr=ctx->GetData(q,&done,sizeof done,0);
