@@ -1,7 +1,7 @@
 // VRX spike (BACKLOG uwph-vrx-spike): does AppContainer's real kernel32 allow W^X-violating code
 // execution, and does the documented VirtualAllocFromApp/VirtualProtectFromApp path work instead?
 // Minimal CoreWindow+D3D11 UWP app (no XAML), runs the 3 test cases once at boot, logs results to
-// LocalState\vrx.log, then idles rendering a heartbeat frame. Own package identity (Joao.XboxSteam.Vrx)
+// LocalState\vrx.log, then idles rendering a heartbeat frame. Own package identity (Xboxnative.Vrx)
 // so it never touches the Xboxnative.Launcher launcher package other lanes are using on the same console.
 #define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>

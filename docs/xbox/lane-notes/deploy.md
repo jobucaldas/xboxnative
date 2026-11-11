@@ -21,7 +21,7 @@ the console, document findings in `src/xbox-test/dp/README.md`, save evidence un
 
 ## What I did this session
 - Live-verified every non-destructive script against the console using the pre-existing
-  `Joao.Boxedwine.DevMode_0.1.6.0_x64__8j5c92gwe8f3c` package (the one explicitly OK'd to use):
+  `Xboxnative.Boxedwine.DevMode_0.1.6.0_x64__8j5c92gwe8f3c` package (the one explicitly OK'd to use):
   `user-signin.sh` (got HTTP 400, non-fatal — launch worked anyway), `launch.sh` (HTTP 200),
   `ps.sh` (found the running process), `ls-dir.sh`, `get-file.sh` + `put-file.sh` (round-tripped a
   probe file), `wait-log.sh` (matched against `ladder-native.log`), `kill.sh` (HTTP 400

@@ -1,13 +1,13 @@
 # UWPH kernel host foundation
 
 `./build.sh` produces a signed `out/k32.msix` with identity
-`Joao.XboxSteam.Uwph` version `0.1.23.0` (publisher `CN=xboxnative-dev`). Requires the local
+`Xboxnative.Launcher` version `0.1.23.0` (publisher `CN=xboxnative-dev`). Requires the local
 uwp-crossbuild toolchain, makemsix, openssl and osslsigncode. Outputs and test
 certificates are ignored. No external runtime dependency is required.
 
-Use `./build.sh out/hid-variant hid` for the preserved `Joao.XboxSteam.Hid`
+Use `./build.sh out/hid-variant hid` for the preserved `Xboxnative.Hid`
 identity (0.1.1.0), or `./build.sh out/wxl-variant wxl` for
-`Joao.XboxSteam.Wxl` (0.1.1.0). All variants contain the same tests.
+`Xboxnative.Wxl` (0.1.1.0). All variants contain the same tests.
 
 The UWP executable loads five packaged x64 PE DLLs:
 
@@ -75,8 +75,8 @@ Example deployment for the current HID manifest version 0.1.0.0, from the reposi
 ```sh
 src/xbox-test/uwph/host/build.sh
 src/xbox-test/dp/install.sh src/xbox-test/uwph/host/out/k32.msix src/xbox-test/uwph/host/out/test.cer
-src/xbox-test/dp/launch.sh 'Joao.XboxSteam.Hid_0bdeywx3x8szp!App' 'Joao.XboxSteam.Hid_0.1.0.0_x64__0bdeywx3x8szp'
-src/xbox-test/dp/wait-log.sh 'Joao.XboxSteam.Hid_0.1.0.0_x64__0bdeywx3x8szp' k32.log 'K32 RESULT failures=0' 60 /workspace/x64-run/runs/k32/k32-final.log
+src/xbox-test/dp/launch.sh 'Xboxnative.Hid_0bdeywx3x8szp!App' 'Xboxnative.Hid_0.1.0.0_x64__0bdeywx3x8szp'
+src/xbox-test/dp/wait-log.sh 'Xboxnative.Hid_0.1.0.0_x64__0bdeywx3x8szp' k32.log 'K32 RESULT failures=0' 60 /workspace/x64-run/runs/k32/k32-final.log
 ```
 
 The publisher determines the family suffix; query Device Portal's
@@ -116,7 +116,7 @@ must never be passed directly to a native Windows API. This private ABI accepts
 trusted in-process pointers; it is not a memory isolation boundary.
 
 **Actual Xbox Series S evidence:** `ws-console-evidence.log`, package
-`Joao.XboxSteam.Uwph_0.1.4.0_x64__0bdeywx3x8szp`, PID 6776, 71 checks,
+`Xboxnative.Launcher_0.1.4.0_x64__0bdeywx3x8szp`, PID 6776, 71 checks,
 zero failures. Separate test PE's main thread and native worker synchronize via
 an event duplicate whose original has been closed, then wait for completion
 and thread termination together. It also checks stale/double-close rejection,
@@ -141,8 +141,8 @@ HWND translation or Wine D3D interface implementation. All graphics calls occur
 in the separate PE, and its device/swapchain remain alive until app closure.
 ## Minimal PE mapper (lane/wxl)
 
-This lane uses isolated identity `Joao.XboxSteam.Wxl`, version `0.1.0.0`, with
-family `Joao.XboxSteam.Wxl_0bdeywx3x8szp`. The publisher is unchanged. Earlier
+This lane uses isolated identity `Xboxnative.Wxl`, version `0.1.0.0`, with
+family `Xboxnative.Wxl_0bdeywx3x8szp`. The publisher is unchanged. Earlier
 Uwph package examples above refer to the inherited kernel/server foundation.
 
 `wxl_mapper.h` implements a deliberately small loader, following Wine 10's
@@ -172,8 +172,8 @@ Reproduce from the repository root (each DP helper takes CONSOLE.lock itself):
 ```sh
 src/xbox-test/uwph/host/build.sh
 src/xbox-test/dp/install.sh src/xbox-test/uwph/host/out/k32.msix src/xbox-test/uwph/host/out/test.cer
-pkg=Joao.XboxSteam.Wxl_0.1.0.0_x64__0bdeywx3x8szp
-app='Joao.XboxSteam.Wxl_0bdeywx3x8szp!App'
+pkg=Xboxnative.Wxl_0.1.0.0_x64__0bdeywx3x8szp
+app='Xboxnative.Wxl_0bdeywx3x8szp!App'
 src/xbox-test/dp/launch.sh "$app" "$pkg"
 # First launch creates LocalState; without the file it logs WXL FAIL open.
 src/xbox-test/dp/put-file.sh "$pkg" '\LocalState' src/xbox-test/uwph/host/out/layout/wxl-test.exe
@@ -198,10 +198,10 @@ All execution evidence above is from the console, not off-device Wine.
 
 ## Merged host (lane/wxm)
 
-The default build now packages Joao.XboxSteam.Uwph 0.1.6.0. It runs all 71
+The default build now packages Xboxnative.Launcher 0.1.6.0. It runs all 71
 kernel/ws checks, the LocalState mapper, then the separate D3DT PE for 300
 frames. Run `build.sh out/wxl-variant wxl` to build the same host under the preserved
-Joao.XboxSteam.Wxl identity (0.1.1.0); its manifest is AppxManifest.Wxl.xml.
+Xboxnative.Wxl identity (0.1.1.0); its manifest is AppxManifest.Wxl.xml.
 The Wxl 0.1.0.0 reproduction/evidence above is historical. Neither identity is
 Xboxnative.Launcher. Upload wxl-test.exe to the selected package's LocalState before
 acceptance. The repository smoke-all.sh uploads and verifies this guest, clears
@@ -211,7 +211,7 @@ stale logs, and checks WXL, k32/ws and D3DT under a single console lock.
 
 Build `bash src/xbox-test/uwph/host/build.sh out/swc swc`, then run
 `SWC_INSTALL=1 bash src/xbox-test/uwph/host/run-swc.sh`. Subsequent fresh runs omit
-`SWC_INSTALL`. This installs only `Joao.XboxSteam.Swc`, round-trips the guest
+`SWC_INSTALL`. This installs only `Xboxnative.Swc`, round-trips the guest
 through LocalState, resets and verifies its log, and validates a fresh activation
 before taking `/workspace/x64-run/runs/swc/swc.png`. Helpers share CONSOLE.lock.
 

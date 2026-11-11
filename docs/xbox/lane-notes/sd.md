@@ -51,7 +51,7 @@
 Branch started clean at c18b4cc6. No inherited lane notes existed at root.
 
 Objective: AppContainer host primitives, dispatch test PE and real Xbox evidence,
-using Joao.XboxSteam.Uwph independently of Xboxnative.Launcher. All console access
+using Xboxnative.Launcher independently of Xboxnative.Launcher. All console access
 uses CONSOLE.lock; never push or expose credentials.
 
 Implementation underway in src/xbox-test/uwph/host. The initial backend uses an
@@ -83,7 +83,7 @@ Nt memory/thread/file functions do NOT flow through this eight-opcode table;
 they need a separate syscall bridge. The public host ABI is intentionally
 separate from this Wine opcode ABI. Do not infer that prebuilt Wine now loads.
 
-Final console acceptance: package Joao.XboxSteam.Uwph_0.1.3.0_x64__dk715arakrne0,
+Final console acceptance: package Xboxnative.Launcher_0.1.3.0_x64__dk715arakrne0,
 PID 7156. Separate PE DLLs loaded; 52 assertions passed, zero failed; executed
 FromApp RW->RX stub returned 42; D3D11 created FL11_0 and swapchain successfully.
 Fresh evidence /workspace/x64-run/runs/k32/k32-final.log, also committed as

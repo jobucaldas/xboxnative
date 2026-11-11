@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Console proof for the SQLite registry (Joao.XboxSteam.Reg): fresh create, persistence across relaunch, one-time
+# Console proof for the SQLite registry (Xboxnative.Reg): fresh create, persistence across relaunch, one-time
 # registry.json import, kill-mid-write consistency. One short window under CONSOLE.lock. REG_INSTALL=0 skips (re)install.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../../.." && pwd); cd "$root"; dp="$root/src/xbox-test/dp"
 runs=${REG_RUNS:-/workspace/x64-run/runs/regsql}; mkdir -p "$runs"
 seed=${REG_SEED:-/workspace/x64-run/runs/reg/evidence/registry-after-run2.json}
-ver=$(sed -n 's/.*Name="Joao.XboxSteam.Reg".*Version="\([0-9.]*\)".*/\1/p' src/xbox-test/uwph/host/AppxManifest.Reg.xml)
-full=Joao.XboxSteam.Reg_${ver}_x64__0bdeywx3x8szp; rid='Joao.XboxSteam.Reg_0bdeywx3x8szp!App'; cycles=${REG_KILL_CYCLES:-4}
+ver=$(sed -n 's/.*Name="Xboxnative.Reg".*Version="\([0-9.]*\)".*/\1/p' src/xbox-test/uwph/host/AppxManifest.Reg.xml)
+full=Xboxnative.Reg_${ver}_x64__0bdeywx3x8szp; rid='Xboxnative.Reg_0bdeywx3x8szp!App'; cycles=${REG_KILL_CYCLES:-4}
 exec 9>/workspace/x64-run/CONSOLE.lock; flock -w 900 9; export DP_LOCK_FD=9
 put() { bash "$dp/put-file.sh" "$full" '\LocalState' "$1" | tail -1; }
 mark() { printf '%s\n' "${2:-1}" > "$runs/$1"; put "$runs/$1"; }

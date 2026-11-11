@@ -136,7 +136,7 @@ elif ! console_probe; then
     fail_console_sections 'console unreachable (network)'
 else
     dp="$root/src/xbox-test/dp"
-    rid='Joao.XboxSteam.Uwph_0bdeywx3x8szp!App'
+    rid='Xboxnative.Launcher_0bdeywx3x8szp!App'
     console_log="$artifacts/console.log"
     # Hold the actual shared lock across stop/clear/launch/read/check; helpers
     # reuse fd 9 through dp-lib.sh, including wait-log's child get-file calls.
@@ -151,7 +151,7 @@ else
         /workspace/x64-run/dp.sh /api/app/packagemanager/packages > "$artifacts/packages.json"
         full=$(python3 - "$artifacts/packages.json" <<'PY'
 import json, re, sys
-pattern = r'Joao\.XboxSteam\.Uwph_(\d+)\.(\d+)\.(\d+)\.(\d+)_x64__0bdeywx3x8szp'
+pattern = r'Xboxnative\.Launcher_(\d+)\.(\d+)\.(\d+)\.(\d+)_x64__0bdeywx3x8szp'
 packages = []
 for package in json.load(open(sys.argv[1])).get('InstalledPackages', []):
     name = package.get('PackageFullName', '')
@@ -164,7 +164,7 @@ print(max(packages)[1])
 PY
         )
     fi
-    [[ $full =~ ^Joao\.XboxSteam\.Uwph_[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+_x64__0bdeywx3x8szp$ ]] || {
+    [[ $full =~ ^Xboxnative\.Launcher_[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+_x64__0bdeywx3x8szp$ ]] || {
         echo 'Invalid smoke package identity'; exit 2;
     }
     echo "Console package: $full"
@@ -242,7 +242,7 @@ PY
         /workspace/x64-run/dp.sh /api/app/packagemanager/packages > "$artifacts/packages.json"
         full=$(python3 - "$artifacts/packages.json" <<'PY'
 import json, re, sys
-pattern = r'Joao\.XboxSteam\.Tls_(\d+)\.(\d+)\.(\d+)\.(\d+)_x64__0bdeywx3x8szp'
+pattern = r'Xboxnative\.Tls_(\d+)\.(\d+)\.(\d+)\.(\d+)_x64__0bdeywx3x8szp'
 packages = []
 for package in json.load(open(sys.argv[1])).get('InstalledPackages', []):
     name = package.get('PackageFullName', '')
@@ -255,11 +255,11 @@ print(max(packages)[1])
 PY
         )
     fi
-    [[ $full =~ ^Joao\.XboxSteam\.Tls_[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+_x64__0bdeywx3x8szp$ ]] || {
+    [[ $full =~ ^Xboxnative\.Tls_[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+_x64__0bdeywx3x8szp$ ]] || {
         echo 'Invalid smoke package identity'; exit 2;
     }
     echo "Console package: $full"
-        rid='Joao.XboxSteam.Tls_0bdeywx3x8szp!App'
+        rid='Xboxnative.Tls_0bdeywx3x8szp!App'
         console_log="$artifacts/tls-console.log"
         trap stop_app EXIT
         stop_app
