@@ -207,8 +207,10 @@ inline std::atomic<unsigned> lastResizeW{0},lastResizeH{0};
 // d3d11on12 layer surfaces that to the driver as an invalid command — the
 // Slime Rancher device reset (0x887a0007) hit between the 3rd and 4th resize,
 // with Unity's deferred contexts still holding the old RTVs. So the hook
-// drains the GPU first: unbind the pipeline (ClearState on the immediate
-// context — the game rebinds every frame anyway), Flush, then wait on an
+// unbinds the immediate context's render targets (the references that matter
+// for buffer release; the game rebinds its targets every frame anyway — no
+// ClearState, which would also wipe shader/IA state the engine caches on the
+// CPU and only rebinds when dirty), then drains: Flush, then wait on an
 // event query until in-flight work completes (bounded: a wedged device must
 // not wedge the guest; the resize then fails honestly with the driver's
 // error instead of adding a hang). Results pass through unchanged.
@@ -218,7 +220,12 @@ inline void drain_device(ID3D11Device* dev) {
     if(realDrain){realDrain(dev);return;}
     ID3D11DeviceContext* ctx=nullptr;dev->GetImmediateContext(&ctx);
     if(!ctx)return;
-    ctx->ClearState();
+    ctx->OMSetRenderTargets(0,nullptr,nullptr);
+    // Order matters: Flush first (submits everything already recorded, so the
+    // wait below covers it), then end the query, then Flush again to submit
+    // the query itself. No new GPU work is recorded after the first Flush, so
+    // once the query completes the device is genuinely idle.
+    ctx->Flush();
     ID3D11Query* q=nullptr;
     D3D11_QUERY_DESC d{};d.Query=D3D11_QUERY_EVENT;
     if(SUCCEEDED(dev->CreateQuery(&d,&q))&&q) {
@@ -226,8 +233,7 @@ inline void drain_device(ID3D11Device* dev) {
         BOOL done=FALSE;DWORD spins=0;
         while(++spins<=1000) {   // ~1 s at 1 ms/spin; a healthy idle is sub-ms
             HRESULT hr=ctx->GetData(q,&done,sizeof done,0);
-            if(hr==S_OK&&done)break;
-            if(hr!=S_FALSE)break;   // error: report it through the resize below
+            if(hr!=S_FALSE)break;   // S_OK (done) or an error: leave the loop
             Sleep(1);
         }
         q->Release();
