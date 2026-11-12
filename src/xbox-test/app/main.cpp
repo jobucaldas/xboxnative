@@ -1918,7 +1918,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if(t<m_frameSummary||m_frameWindow.empty())return;
         m_frameSummary=t+10;
         std::vector<double> v,pi;double sum=0,present=0;unsigned over25=0,over50=0;
-        for(auto& x:m_frameWindow){v.push_back(x.frameMs);pi.push_back(x.frameMs);sum+=x.frameMs;present+=x.presentMs;over25+=x.frameMs>25;over50+=x.frameMs>50;}
+        for(auto& x:m_frameWindow){v.push_back(x.frameMs);sum+=x.frameMs;present+=x.presentMs;over25+=x.frameMs>25;over50+=x.frameMs>50;}
         // Present-to-present interval (the delivery cadence the display sees):
         // atMs is the game's own Present timestamp, so atMs[i]-atMs[i-1] is the
         // real spacing — with a cap or forced sync this is the number that
