@@ -41,6 +41,14 @@
 #include <winrt/Windows.Networking.h>
 #include <winrt/Windows.Networking.Sockets.h>
 #include <winrt/Windows.System.h>
+// The account picture fallback (UserInformation::GetAccountPicture). The
+// projection ships this header under either casing depending on the SDK, so
+// take whichever one this build has.
+#if __has_include(<winrt/Windows.System.UserProfile.h>)
+#include <winrt/Windows.System.UserProfile.h>
+#else
+#include <winrt/windows.system.userprofile.h>
+#endif
 #include <chrono>
 #include "qrcodegen.hpp"
 extern "C" {
@@ -347,24 +355,43 @@ static ui::Image xbox_user_picture() {
 static void xbox_picture_fetch(winrt::Windows::System::User user) {
     init_apartment(apartment_type::multi_threaded);
     std::vector<uint32_t> pix; int w = 0, h = 0, hr = 0;
+    std::string raw;
     try {
         auto ref = user.GetPictureAsync(winrt::Windows::System::UserPictureSize::Size64x64).get();
-        if (!ref) { g_xboxPicState = 3; return; }
-        auto stream = ref.OpenReadAsync().get();
-        const uint32_t n = stream.Size();
-        if (n < 64 || n > 4u << 20) { logf("accounts: Xbox picture size %u rejected", n); g_xboxPicState = 3; return; }
-        // The stream is read through a DataReader: an IBuffer cannot be built
-        // from a raw array_view, and the reader gives one contiguous buffer.
-        winrt::Windows::Storage::Streams::DataReader rd(stream);
-        rd.LoadAsync(n).get();
-        std::vector<uint8_t> bytes(n);
-        rd.ReadBytes(winrt::array_view<uint8_t>(bytes.data(), bytes.data() + n));
-        std::string raw(reinterpret_cast<const char*>(bytes.data()), n);
-        if (!wic_decode_buf(raw, pix, w, h, 128, 128, hr)) { logf("accounts: Xbox picture decode failed hr=0x%08x", (unsigned)hr); g_xboxPicState = 3; return; }
+        if (ref) {
+            auto stream = ref.OpenReadAsync().get();
+            const uint32_t n = stream.Size();
+            if (n >= 64 && n <= (4u << 20)) {
+                // The stream is read through a DataReader: an IBuffer cannot be
+                // built from a raw array_view, and the reader gives one buffer.
+                winrt::Windows::Storage::Streams::DataReader rd(stream);
+                rd.LoadAsync(n).get();
+                std::vector<uint8_t> bytes(n);
+                rd.ReadBytes(winrt::array_view<uint8_t>(bytes.data(), bytes.data() + n));
+                raw.assign(reinterpret_cast<const char*>(bytes.data()), n);
+            } else logf("accounts: Xbox picture size %u rejected", n);
+        } else logf("accounts: GetPictureAsync returned no stream");
     } catch (winrt::hresult_error const& e) {
-        logf("accounts: Xbox picture unavailable hr=0x%08x", (unsigned)e.code().value);
-        g_xboxPicState = 3; return;
-    } catch (...) { g_xboxPicState = 3; return; }
+        logf("accounts: GetPictureAsync failed hr=0x%08x", (unsigned)e.code().value);
+    } catch (...) {}
+    // Fallback: the account picture file the profile APIs expose. On a console
+    // GetPictureAsync can answer with nothing even when a picture exists, and
+    // this is the same image the system profile page shows.
+    if (raw.empty()) {
+        try {
+            auto file = winrt::Windows::System::UserProfile::UserInformation::GetAccountPicture(
+                winrt::Windows::System::UserProfile::AccountPictureKind::SmallImage);
+            if (file) {
+                auto buf = winrt::Windows::Storage::FileIO::ReadBufferAsync(file).get();
+                raw.assign(reinterpret_cast<char const*>(buf.data()), buf.Length());
+                logf("accounts: account picture from UserInformation (%u bytes)", (unsigned)buf.Length());
+            }
+        } catch (winrt::hresult_error const& e) {
+            logf("accounts: GetAccountPicture failed hr=0x%08x", (unsigned)e.code().value);
+        } catch (...) {}
+    }
+    if (raw.empty()) { g_xboxPicState = 3; return; }
+    if (!wic_decode_buf(raw, pix, w, h, 128, 128, hr)) { logf("accounts: Xbox picture decode failed hr=0x%08x", (unsigned)hr); g_xboxPicState = 3; return; }
     std::lock_guard<std::mutex> l(g_xboxPicM);
     g_xboxPicBuf = std::move(pix);
     g_xboxPic = ui::Image{g_xboxPicBuf.data(), w, h, w};
@@ -375,13 +402,38 @@ static void xbox_users_fetch() {
     init_apartment(apartment_type::multi_threaded);
     std::vector<std::string> names;
     try {
-        auto users = winrt::Windows::System::User::FindAllAsync(winrt::Windows::System::UserType::LocalUser).get();
+        // GetDefault is the documented way to get the user running this process
+        // ("available from Windows 10, version 2104"); the UserType overloads
+        // are deprecated and return an EMPTY list on Xbox, which is why the
+        // library showed the Steam persona instead of the console's gamertag.
+        // FindAllAsync() (no filter) stays as the fallback for a session that
+        // reports more than one signed-in user.
+        std::vector<winrt::Windows::System::User> users;
+        try {
+            auto self = winrt::Windows::System::User::GetDefault();
+            if (self) { users.push_back(self); logf("accounts: User.GetDefault() returned the process user"); }
+        } catch (winrt::hresult_error const& e) { logf("accounts: User.GetDefault failed hr=0x%08x", (unsigned)e.code().value); }
+        if (users.empty()) {
+            auto any = winrt::Windows::System::User::FindAllAsync().get();
+            logf("accounts: FindAllAsync() reported %u user(s)", any.Size());
+            for (auto const& u : any) users.push_back(u);
+        }
         for (auto const& u : users) {
             std::string name;
             try {
                 auto v = u.GetPropertyAsync(winrt::Windows::System::KnownUserProperties::DisplayName()).get();
                 name = winrt::to_string(winrt::unbox_value<winrt::hstring>(v));
-            } catch (...) {}
+            } catch (winrt::hresult_error const& e) { logf("accounts: DisplayName failed hr=0x%08x", (unsigned)e.code().value); }
+            // The gamertag is not always the DisplayName property: on a console
+            // the account name lives in AccountName, so fall back to it before
+            // giving up on a real name.
+            if (name.empty()) {
+                try {
+                    auto v = u.GetPropertyAsync(winrt::Windows::System::KnownUserProperties::AccountName()).get();
+                    name = winrt::to_string(winrt::unbox_value<winrt::hstring>(v));
+                    if (!name.empty()) logf("accounts: name came from AccountName");
+                } catch (winrt::hresult_error const& e) { logf("accounts: AccountName failed hr=0x%08x", (unsigned)e.code().value); }
+            }
             if (name.empty()) name = "Xbox user";
             names.push_back(name);
             if (names.size() == 1) {   // the first user is the one the sidebar names
