@@ -6,9 +6,9 @@ import sys
 from pathlib import Path
 here = Path(__file__).resolve().parent
 src = Path(sys.argv[1]).resolve()
-out = src / 'vulkan_spirv.h'
+out = here / 'vulkan_spirv.h'
 names = {'triangle.vert': 'vs', 'triangle.frag': 'fs', 'scale.comp': 'cs'}
-s = '// Generated from src/xbox-test/uwph/vulkan/spirv/*.spv; regenerate with\n// src/xbox-test/uwph/vulkan/embed-spirv.py. SPIR-V 1.0 (Vulkan 1.0), compiled by\n// glslang from the .vert/.frag/.comp sources checked in beside the .spv files.\n'
+s = '// Generated from src/xbox-test/app/tests/spirv/*.spv; regenerate with\n// src/xbox-test/app/tests/embed-spirv.py. SPIR-V 1.0 (Vulkan 1.0), compiled by\n// glslang from the .vert/.frag/.comp sources checked in beside the .spv files.\n'
 for f in sorted(src.glob('*.spv')):
     stem = f.stem
     if stem not in names:

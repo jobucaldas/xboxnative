@@ -40,6 +40,15 @@ clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -fno-builtin -c "$
 lld "${common[@]}" /entry:vk_dzn_entry /include:vk_relocation /out:"$out/play-vulkan-dzn.exe" \
   "$work/vulkan-dzn.obj" "${libs[@]}"
 
+# The draw fixture (research/VULKAN-COVERAGE.md): pipeline + draw + compute +
+# push constants + timeline semaphore + synchronization2 + dynamic rendering,
+# with pixel and buffer readbacks. The SPIR-V is checked in beside the sources
+# (tests/spirv, regenerated with embed-spirv.py) and embedded through
+# tests/vulkan_spirv.h.
+clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -fno-builtin -c "$here/play-vulkan-draw.cpp" -o "$work/vulkan-draw.obj"
+lld "${common[@]}" /entry:vk_draw_entry /include:vk_draw_relocation /out:"$out/play-vulkan-draw.exe" \
+  "$work/vulkan-draw.obj" "${libs[@]}"
+
 clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d9.cpp" -o "$work/d3d9.obj"
 lld "${common[@]}" /entry:d3d9_entry /include:d3d9_relocation /out:"$out/play-d3d9.exe" \
   "$work/d3d9.obj" "$mingw_lib/libd3d9.a" "${libs[@]}"

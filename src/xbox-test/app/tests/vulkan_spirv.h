@@ -1,5 +1,5 @@
-// Generated from src/xbox-test/uwph/vulkan/spirv/*.spv; regenerate with
-// src/xbox-test/uwph/vulkan/embed-spirv.py. SPIR-V 1.0 (Vulkan 1.0), compiled by
+// Generated from src/xbox-test/app/tests/spirv/*.spv; regenerate with
+// src/xbox-test/app/tests/embed-spirv.py. SPIR-V 1.0 (Vulkan 1.0), compiled by
 // glslang from the .vert/.frag/.comp sources checked in beside the .spv files.
 static const unsigned char vulkan_cs_spv[] = {
  0x03,0x02,0x23,0x07,0x00,0x00,0x01,0x00,0x0b,0x00,0x08,0x00,0x2e,0x00,0x00,0x00,
