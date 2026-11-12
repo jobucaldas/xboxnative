@@ -44,6 +44,7 @@
 // indexed draws, 16 for DrawInstancedIndirect, 12 for DispatchIndirect), and
 // a short upload is reported as raw words rather than named fields.
 #pragma once
+#include "d3d11_diag_slots.h"
 #include <d3d11.h>
 #include <d3d11_1.h>
 #include <dxgi.h>
@@ -67,37 +68,21 @@ constexpr size_t kMaxFailures=200;   // distinct failed calls logged
 constexpr size_t kMaxProbes=160;     // distinct capability answers logged
 constexpr int kSlots=136;            // ID3D11DeviceContext reaches slot 114; Context1's ClearView is 132
 constexpr size_t kMaxClasses=16;
+// Runtime kill switch: the file d3d11diag.txt in the launcher's LocalState
+// (its presence, contents ignored) disables every vtable patch. Read at
+// hook-install time, default ON. Set through set_enabled(); the launcher
+// checks the file once at boot in its Initialize() and calls set_enabled
+// accordingly.
+inline std::atomic<bool> enabled{true};
+inline void set_enabled(bool on) { enabled.store(on,std::memory_order_release); }
+inline bool is_enabled() { return enabled.load(std::memory_order_acquire); }
 
-// ---- vtable slots (ID3D11Device, ID3D11Device1, ID3D11DeviceContext)
-enum DeviceSlot {
-    CreateBuffer=3,CreateTexture1D,CreateTexture2D,CreateTexture3D,CreateShaderResourceView,CreateUnorderedAccessView,
-    CreateRenderTargetView,CreateDepthStencilView,CreateInputLayout,CreateVertexShader,CreateGeometryShader,
-    CreateGeometryShaderWithStreamOutput,CreatePixelShader,CreateHullShader,CreateDomainShader,CreateComputeShader,
-    CreateClassLinkage,CreateBlendState,CreateDepthStencilState,CreateRasterizerState,CreateSamplerState,CreateQuery,
-    CreatePredicate,CreateCounter,CreateDeferredContext,OpenSharedResource,CheckFormatSupport,CheckMultisampleQualityLevels,
-    CheckCounterInfo,CheckCounter,CheckFeatureSupport,
-    CreateDeferredContext1=44,CreateBlendState1=45,CreateRasterizerState1=46,
-    ContextMap=14
-};
+// The slot numbers themselves live in d3d11_diag_slots.h, shared with the
+// build-time slot audit so a drifted slot fails that test's build. The DXGI
+// swap-chain hooks (guest_overlay.h) are audited by the same test's DXGI
+// section, which derives its expectations from the same vtable layout.
 static_assert(CheckFeatureSupport==33&&CreateDeferredContext==27&&CreateSamplerState==23,"ID3D11Device slot layout");
 
-// ID3D11DeviceContext slots (ID3D11DeviceChild's 3 come first). Only the ones
-// the draw summary reads are named.
-enum ContextSlot {
-    PSSetShaderResources=8,PSSetShader=9,DrawIndexed=12,Draw=13,Map=14,Unmap=15,DrawIndexedInstanced=20,DrawInstanced=21,
-    GSSetShader=23,IASetPrimitiveTopology=24,VSSetShaderResources=25,SetPredication=30,GSSetShaderResources=31,
-    OMSetRenderTargets=33,OMSetRenderTargetsAndUnorderedAccessViews=34,SOSetTargets=37,DrawAuto=38,
-    DrawIndexedInstancedIndirect=39,DrawInstancedIndirect=40,Dispatch=41,DispatchIndirect=42,
-    RSSetViewports=44,RSSetScissorRects=45,CopySubresourceRegion=46,CopyResource=47,UpdateSubresource=48,
-    ClearRenderTargetView=50,ClearDepthStencilView=53,GenerateMips=54,ResolveSubresource=57,ExecuteCommandList=58,
-    HSSetShaderResources=59,HSSetShader=60,DSSetShaderResources=63,DSSetShader=64,FinishCommandList=114,
-    // ID3D11DeviceContext1 continues the same vtable: ClearView is the 11.1
-    // way to clear a render target or depth view, and a game that clears only
-    // through it shows clears=0 in the summary. It is the 18th Context1
-    // method, so it sits 18 slots past FinishCommandList (the last base one):
-    // 114 + 18 = 132.
-    Context1ClearView=132
-};
 // The Context1 slot is derived, not restated: if FinishCommandList ever moves,
 // ClearView moves with it and kSlots must grow to cover it.
 static_assert(Context1ClearView==FinishCommandList+18&&Context1ClearView+1<kSlots,
@@ -1617,6 +1602,14 @@ inline void configure(Sink s){sink=s;}
 // capability answers that pick engine code paths.
 inline void adopt(ID3D11Device* device) {
     if(!device||!sink)return;
+    // Kill switch (LocalState\d3d11diag.txt present): skip every vtable
+    // patch. The device-health and draw-summary counters stay off with it;
+    // one line says the diagnostics were disabled, so a run's log always
+    // shows which mode it had.
+    if(!is_enabled()) {
+        emit("diagnostics off (LocalState\\d3d11diag.txt): no vtable hooks installed");
+        return;
+    }
     healthDevice.store(device,std::memory_order_relaxed);   // not AddRef'd: the guest owns it
     size_t baseCount=0,extendedCount=0;
     const Patch* base=basePatches(baseCount);const Patch* extended=extendedPatches(extendedCount);

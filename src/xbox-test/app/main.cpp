@@ -1217,6 +1217,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     IFrameworkView CreateView() { return *this; }
     void Initialize(CoreApplicationView const& v) {
         open_log(); logf("boot: Initialize (pid=%lu) launcher build", GetCurrentProcessId());
+        // Kill switch: LocalState\d3d11diag.txt present (contents ignored) ->
+        // the D3D11 vtable diagnostics stay off for this whole run (A/B
+        // testing a device-removal repro without them). Read once at boot;
+        // set_enabled is idempotent.
+        {
+            DWORD attrs = GetFileAttributesW((g_dir + L"\\d3d11diag.txt").c_str());
+            if (attrs != INVALID_FILE_ATTRIBUTES) d3d11_diag::set_enabled(false);
+        }
         v.Activated([](auto&&, IActivatedEventArgs const& a) {
             logf("Activated kind=%d (activation args ignored)", (int)a.Kind());
             CoreWindow::GetForCurrentThread().Activate();
