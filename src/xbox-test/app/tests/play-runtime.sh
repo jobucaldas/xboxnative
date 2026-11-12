@@ -5,6 +5,9 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)   # repo root: de
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.local/bin:$PATH"
 export WINEPREFIX=${PRUN_WINEPREFIX:-/tmp/prun-wine}
+# Per-mode wall clock. 20s covers CI; slower hosts (Wine-in-a-VM, software GL)
+# raise it: d3d12-diag alone needs ~40s under wine-wow64 11 on one such host.
+export PRUN_MODE_TIMEOUT=${PRUN_MODE_TIMEOUT:-20}
 export WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d
 mkdir -p "$WINEPREFIX"
 if [[ ! -f "$WINEPREFIX/system.reg" ]];then timeout -k 2 60 wineboot -u;fi
@@ -238,13 +241,13 @@ cp "$out/play-leaderboard-provider.dll" "$lb/steam_api64.dll"
 cp "$out/play-leaderboard-provider.dll" "$out/steam_api64.dll"
 PLAY_LB_SAVE_PATH=$(winepath -w "$lb/saves") PLAY_LB_APPID=3405340 \
 PRUN_STEAM_PROVIDER=$(winepath -w "$lb/steam_api64.dll") PRUN_LB_SAVES=$(winepath -w "$lb/saves") PRUN_LB_APPID=3405340 \
- WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" leaderboards > "$out/leaderboards.log" 2>&1
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" leaderboards > "$out/leaderboards.log" 2>&1
 tail -1 "$out/leaderboards.log"
 # The root copy was only for this run: later modes prove what happens when a
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
 for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn opengl;do
- WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
 # Every vcruntime import took the ucrtbase route; none was left unresolved.
@@ -310,7 +313,7 @@ rm -f "$out/runtime-null/vulkan_dzn.dll" "$out/runtime-null/vulkan-dzn.json"
 # entry would shadow this run's manifest and the loader would report no driver. Play prunes its own manifests that
 # point anywhere but the current runtime directory, which is what makes this second run work.
 PRUN_RUNTIME_DIR=$(winepath -w "$out/runtime-null") WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d \
- timeout -k 2 20 wine "$out/play-runner.exe" vulkan > "$out/vulkan-null-runtime.log" 2>&1
+ timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" vulkan > "$out/vulkan-null-runtime.log" 2>&1
 tail -1 "$out/vulkan-null-runtime.log"
 grep -q 'PRUN EVENT Vulkan loader mapped from the runtime directory; the guest registry lists the packaged null ICD' "$out/vulkan-null-runtime.log"
 grep -q 'PRUN EVENT mapping vulkan-null-icd.dll' "$out/vulkan-null-runtime.log"
@@ -447,7 +450,7 @@ grep -q 'RWX emulation: guest requested RWX' "$out/rwx-jit.log"
 # Guest registry (PlayerPrefs) persists in the uwph SQLite registry across runs.
 rm -f "$out"/registry.sqlite*
 for mode in registry-write registry-read;do
- WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
 test -s "$out/registry.sqlite"
@@ -467,7 +470,7 @@ for flags in 0x100 0x500;do
  grep -Eq 'VolatileMetadataPointer: 0x[0-9A-F]*[1-9A-F]' <<<"$config"
  log=$out/native-cxx-instrumented-$flags.log
  status=0
- WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" native-cxx > "$log" 2>&1 || status=$?
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" native-cxx > "$log" 2>&1 || status=$?
  tail -1 "$log"
  if [[ $flags == 0x100 ]];then
   [[ $status == 0 ]] && grep -q 'WXL Play MSVC load config GuardFlags=0x100 volatileMetadata=present' "$log"
@@ -478,14 +481,14 @@ done
 cp "$out/obj/play-cxx-cookie.dll" "$cxx"
 # Owned stand-in under a game-DLL name, present only for this run.
 cp "$out/play-unresolved.dll" "$out/baselib.dll"
-WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" failed-dependency > "$out/failed-dependency.log" 2>&1
+WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" failed-dependency > "$out/failed-dependency.log" 2>&1
 tail -1 "$out/failed-dependency.log"
 grep -q "PLAY-RELEASE released=1 restarted=1 ran=1 retained=1" "$out/failed-dependency.log"
 for mode in crt-exit crt-abort;do
- WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
-WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" top-level > "$out/top-level.log" 2>&1
+WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" top-level > "$out/top-level.log" 2>&1
 grep -q "PLAY-TOP-LEVEL survived=1 exit=1" "$out/top-level.log"
 rm -f "$out/baselib.dll"
 # Steam without a genuine client. A steamclient64.dll in the game root must be
@@ -493,7 +496,7 @@ rm -f "$out/baselib.dll"
 # an ordinary game DLL. Owned stand-ins only, removed afterwards.
 rm -f "$out/steamclient64.dll" "$out/steam_api64.dll"
 cp "$out/play-dependency.dll" "$out/steam_api64.dll"
-WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" root-steam > "$out/root-steam.log" 2>&1
+WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" root-steam > "$out/root-steam.log" 2>&1
 tail -1 "$out/root-steam.log"
 grep -q "steam_api64.dll is the game's original file, mapped unmodified" "$out/root-steam.log"
 # A configured Steam API provider serves steam_api64.dll for the owned game. The
@@ -501,7 +504,7 @@ grep -q "steam_api64.dll is the game's original file, mapped unmodified" "$out/r
 cp "$out/play-reject.dll" "$out/steam_api64.dll"
 mkdir -p "$out/provider"; cp "$out/play-dependency.dll" "$out/provider/steam_api64.dll"
 PRUN_STEAM_PROVIDER=$(winepath -w "$out/provider/steam_api64.dll") WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d \
- timeout -k 2 20 wine "$out/play-runner.exe" root-steam-provider > "$out/root-steam-provider.log" 2>&1
+ timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" root-steam-provider > "$out/root-steam-provider.log" 2>&1
 tail -1 "$out/root-steam-provider.log"
 grep -q "steam_api64.dll served by the configured Steam API provider" "$out/root-steam-provider.log"
 rm -rf "$out/steam_api64.dll" "$out/provider"

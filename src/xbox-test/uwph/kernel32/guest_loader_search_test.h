@@ -43,12 +43,15 @@ static DWORD testLoaderSearch() {
     // loading module's directory, not the root.
     if(!CreateDirectoryW(L"MonoBleedingEdge",nullptr) && GetLastError()!=ERROR_ALREADY_EXISTS)return 111;
     if(!CreateDirectoryW(L"MonoBleedingEdge\\EmbedRuntime",nullptr) && GetLastError()!=ERROR_ALREADY_EXISTS)return 112;
-    if(!CopyFileW(L"play-dependency.dll",L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll",FALSE))return 113;
+    // search-consumer.dll statically imports search-dependency.dll, so copying
+    // it (not play-dependency.dll, which imports nothing) makes the sub-path
+    // load actually resolve a dependency from the loading module's directory.
+    if(!CopyFileW(L"loader-search\\search-consumer.dll",L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll",FALSE))return 113;
     if(!CopyFileW(L"loader-search\\search-dependency.dll",L"MonoBleedingEdge\\EmbedRuntime\\search-dependency.dll",FALSE))return 114;
     loaded=LoadLibraryExW(L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll",nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);
     if(!loaded)return 115;
-    auto mono_check=(int(*)())GetProcAddress(loaded,"dependency_check");
-    if(!mono_check||!mono_check())return 116;
+    auto mono_check=(DWORD(WINAPI*)())GetProcAddress(loaded,"search_consumer_value");
+    if(!mono_check||mono_check()!=77)return 116;
     if(!GetModuleHandleW(L"search-dependency.dll"))return 117;   // dependency from the sub-directory
     if(!FreeLibrary(loaded))return 118;
     if(DeleteFileW(L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll")==0)return 119;
