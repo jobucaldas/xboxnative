@@ -627,6 +627,13 @@ DWORD d3d_entry() {
     context->RSSetViewports(1,&viewport);
     const FLOAT arrClear[4]={1,0,0,1};
     context->ClearRenderTargetView(arrView,arrClear);
+    // Unbind and flush before the copy: the source and destination are the
+    // same texture, and a copy while its own RTV is still bound is invalid
+    // (a hazard the debug layer rejects, and a layer that tolerates it may
+    // read or write the wrong slice).
+    ID3D11RenderTargetView* noBind[]={nullptr};
+    context->OMSetRenderTargets(1,noBind,nullptr);
+    context->Flush();
     context->CopySubresourceRegion(arrTexture,1,0,0,0,arrTexture,0,nullptr);
     // Read slice 1 back through the staging texture (same shape, one slice).
     context->CopySubresourceRegion(staging,0,0,0,0,arrTexture,1,nullptr);
