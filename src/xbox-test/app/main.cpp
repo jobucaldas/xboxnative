@@ -125,8 +125,16 @@ static std::string clip8(const std::string& s, size_t n) { return s.size() <= n 
 
 // ---------------------------------------------------------------- HTTP (Windows.Web.Http, default TLS validation)
 struct Resp { int status = 0; int eresult = -1; std::string body; std::string err; };
+// One HttpClient per thread: the object is agile, but its session state (the
+// filter chain and connection pool) failed with E_CHANGED_STATE 0x8000000C
+// ("a concurrent or interleaved operation changed the state") when many worker
+// threads sent through one process-wide instance at burst peaks (seen on the
+// cover and achievement-icon fetches). A per-thread client gives each thread
+// its own pool and headers; the User-Agent stays identical on every thread.
+// Every thread that reaches here has called init_apartment(multi_threaded)
+// first, so constructing WinRT objects on that thread is safe.
 static Http::HttpClient& client() {
-    static Http::HttpClient c = [] { Http::HttpClient h; h.DefaultRequestHeaders().UserAgent().TryParseAdd(L"Mozilla/5.0 (Windows; U; Windows NT 10.0; en-US; Valve Steam Client/default/1665786434;) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.121 Safari/537.36"); return h; }();
+    thread_local Http::HttpClient c = [] { Http::HttpClient h; h.DefaultRequestHeaders().UserAgent().TryParseAdd(L"Mozilla/5.0 (Windows; U; Windows NT 10.0; en-US; Valve Steam Client/default/1665786434;) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.121 Safari/537.36"); return h; }();
     return c;
 }
 static Resp http(bool post, const std::string& url, const std::string& form, const char* tag) {
