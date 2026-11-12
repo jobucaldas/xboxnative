@@ -5,6 +5,8 @@
 // Pure and Win32-free, so tests/detail-input.cpp and
 // tests/detail-after-download.cpp cover every download state.
 #pragma once
+#include <cstdio>
+#include <cstring>
 
 namespace detail_input {
 
@@ -33,13 +35,18 @@ inline Action press_b(const State&) { return Action::back; }
 // The d-pad never cancels either: it scrolls the description.
 inline Action press_dpad(const State&) { return Action::ignore; }
 
-// Main button text and the hint under it.
-inline const char* label(const State& s) {
-    return s.download != Download::none ? "INSTALLING... A: cancel" : s.installed ? "PLAY" : "INSTALL";
+// Main button text and the hint under it. While installing the single button
+// reads INSTALLING n% (mockup 03) and turns into CANCEL when focused (03b);
+// the hint under A says "Cancel install" in both. No X/Y shortcut hints.
+inline const char* label(const State& s, int pct = 0) {
+    if (s.download == Download::none) return s.installed ? "PLAY" : "INSTALL";
+    static char buf[16];
+    if (std::snprintf(buf, sizeof buf, "INSTALLING %d%%", pct) <= 0) buf[0] = 0;
+    return buf;
 }
 inline const char* hint(const State& s) {
-    if (s.download != Download::none) return "B: back, download keeps running";
-    return s.installed ? "Installed. Press A to play" : "press A";
+    if (s.download != Download::none) return "Cancel install";
+    return s.installed ? "Installed. Press A to play" : "Press A to install";
 }
 
 // A finished download never launches anything: the detail page only re-reads

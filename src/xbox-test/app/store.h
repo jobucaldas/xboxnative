@@ -1,10 +1,16 @@
 // Store info for the detail screen: Steam public store API over the same http() path as the covers, cached in LocalState\storecache\<appid>.json.
 #pragma once
 #include "apibadge_core.h"
+#include "depot_size.h"
+#include "store_size.h"
 struct StoreInfo {
     uint32_t appid = 0;
     std::atomic<int> state{0};      // 0 loading, 1 ok (fields below immutable), 2 unavailable
     std::string name, desc, release, dev, genres, price, why; bool free = false;
+    std::string download_size;      // item D9: the store's "Storage: N GB" figure ("" when it lists none)
+    bool want_depot = false;        // item D9: ask Steam for the depots' own download size (not-installed page)
+    std::atomic<int> depot{0};      // item D9: 0 = asking Steam, 1 = depot_bytes is the answer, 2 = no figure
+    std::atomic<uint64_t> depot_bytes{0};   // item D9: the size the download itself will fetch
     int dxKind = 0; std::string dxNote;   // apib::Kind from the store pc_requirements text (0 = says nothing)
     std::atomic<int> img{0};        // 0 loading, 1 ok, 2 failed
     Game hdr;                       // header image pixels (iw, ih, pix)
@@ -101,7 +107,8 @@ static bool store_parse(const std::string& body, uint32_t appid, StoreInfo& si, 
         if (d.HasKey(L"pc_requirements") && d.GetNamedValue(L"pc_requirements").ValueType() == Windows::Data::Json::JsonValueType::Object) {   // [] when the store lists none
             auto pr = d.GetNamedObject(L"pc_requirements"); std::string t;
             for (auto k : {L"minimum", L"recommended"}) if (pr.HasKey(k) && pr.GetNamedValue(k).ValueType() == Windows::Data::Json::JsonValueType::String) t += winrt::to_string(pr.GetNamedString(k)) + "\n";
-            si.dxKind = apib::classify_store_text(t, &si.dxNote); }
+            si.dxKind = apib::classify_store_text(t, &si.dxNote);
+            si.download_size = store_size::from_requirements(ascii_clean(t)); }   // item D9
         if (si.price.empty()) si.price = si.free ? "Free to play" : "Price not listed";
         return true;
     } catch (winrt::hresult_error const& ex) { char b[64]; snprintf(b, sizeof b, "parse error hr=0x%08x", (unsigned)ex.code().value); why = b; return false; }
@@ -123,11 +130,22 @@ static void store_worker(std::shared_ptr<StoreInfo> si) {
     }
     if (!body.empty()) {
         StoreInfo tmp; ok = store_parse(body, id, tmp, why);
-        if (ok) { si->name = tmp.name; si->desc = tmp.desc; si->release = tmp.release; si->dev = tmp.dev; si->genres = tmp.genres; si->price = tmp.price; si->free = tmp.free; si->dxKind = tmp.dxKind; si->dxNote = tmp.dxNote; }
+        if (ok) { si->name = tmp.name; si->desc = tmp.desc; si->release = tmp.release; si->dev = tmp.dev; si->genres = tmp.genres; si->price = tmp.price; si->free = tmp.free; si->dxKind = tmp.dxKind; si->dxNote = tmp.dxNote; si->download_size = tmp.download_size; }
     }
     si->why = why; si->state = ok ? 1 : 2;
     logf("store: appid %u %s (%s) name='%s' desc=%zu chars genres='%s' release='%s' dev='%s' price='%s'%s", id, ok ? "info ready" : "info UNAVAILABLE", ok ? (fromCache ? "cache" : "network") : why.c_str(), si->name.c_str(), si->desc.size(), si->genres.c_str(), si->release.c_str(), si->dev.c_str(), si->price.c_str(), "");
-    // header image (same CDN path as the covers)
+    // item D9: the depots' own download size, for a game that is not installed
+    // yet. The appinfo buffer is the one the downloader parses, so the figure
+    // is what the download will fetch, not the store's "available space" line.
+    if (si->want_depot) {
+        std::string appinfo; read_file_s(g_dir + L"\\appinfo_" + widen(std::to_string(id)) + L".vdf", appinfo);
+        if (appinfo.empty()) { auto s = user_session(); if (s && s->up) appinfo = pics_appinfo(*s, id); }
+        std::vector<uint32_t> depots; uint64_t b = depot_size::from_appinfo(appinfo, &depots);
+        if (b) { si->depot_bytes = b; si->depot = 1;
+            std::string ids; for (auto d : depots) ids += (ids.empty() ? "" : ",") + std::to_string(d);
+            logf("store: appid %u depot download size %llu bytes from %zu depot(s) [%s]", id, (unsigned long long)b, depots.size(), ids.c_str()); }
+        else { si->depot = 2; logf("store: appid %u no depot download size (appinfo %s)", id, appinfo.empty() ? "unavailable" : "has no public manifest size"); }
+    }
     const char* kinds[] = {"capsule_616x353.jpg", "header.jpg"}; bool iok = false;
     for (int k = 0; k < 2 && !iok; k++) {
         Resp r = http(false, "https://cdn.cloudflare.steamstatic.com/steam/apps/" + std::to_string(id) + "/" + kinds[k], "", "storeimg");

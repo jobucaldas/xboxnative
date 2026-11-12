@@ -65,6 +65,17 @@ int main() {
     UserStats synced=u;synced.unlocks[1]={1000,2000,50};synced.values[2]=12;
     auto none=store(io,480,7,*parsed,synced,saves);assert(!none.sent&&none.ok&&stores==1);
     synced.values[2]=40;auto back=store(io,480,7,*parsed,synced,saves);assert(!back.sent&&stores==1);
+
+    // item D6: the game page's achievements row counts the prepared files.
+    assert(count_text(*parsed,earned)=="2 / 3");   // ACH_0 (server) + ACH_2 (earned offline)
+    assert(count_text(*parsed,std::map<std::string,Earned>{})==std::string("0 / 3"));
+    assert(count_text(Schema{},earned).empty());   // no schema: the page says "Not tracked yet"
+    assert(count_from_files(settings/"achievements.json",saves/"achievements.json")=="3 / 3");
+    write(saves/"achievements.json","{\"ACH_0\":{\"earned\":true,\"earned_time\":1000}}");
+    assert(count_from_files(settings/"achievements.json",saves/"achievements.json")=="1 / 3");
+    assert(count_from_files(root/"nope.json",saves/"achievements.json").empty());   // never played here
+    write(settings/"garbled.json","not json");
+    assert(count_from_files(settings/"garbled.json",saves/"achievements.json").empty());
     fs::remove_all(root);
     puts("STEAM-ACHIEVEMENTS PASS: schema, gbe definitions, seeded unlocks/stats, OR-only store request");
 }

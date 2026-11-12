@@ -81,6 +81,20 @@ inline size_t best_other(const std::vector<Choice>& v, size_t cur) {
     return best;
 }
 
+// The sidebar disk widget's figures for ONE install location, computed exactly
+// like the Storage screen's drive row (free_total / total), so the widget and
+// the screen can never disagree. free_gb_x10 is the volume's free space in
+// tenths of a GB (the widget's "412.6 GB free"); used_pct is what the ring
+// fills. Returns false when the drive's space could not be read.
+inline bool widget_figures(const Choice& c, int& free_gb_x10, int& used_pct) {
+    if (!c.space.ok || !c.space.total) return false;
+    free_gb_x10 = int((double(c.space.freeTotal) * 10.0 / 1073741824.0) + 0.5);
+    used_pct = int(100.0 - 100.0 * double(c.space.freeTotal) / double(c.space.total));
+    if (used_pct < 0) used_pct = 0;
+    if (used_pct > 100) used_pct = 100;
+    return true;
+}
+
 // Detail-page storage line: what this app may still write, the size of the
 // space it is writing into, and the volume's own free space when that differs
 // (a quota or a separate pool), so "0 MB free" is not read as "disk full".
@@ -106,7 +120,8 @@ inline std::string space_line(const std::string& name, const std::string& path, 
 
 // Split a detail-page note into the two lines it is drawn on: an explicit '\n'
 // first, then a word wrap at `n` characters (the page's 2x text, 42 to the
-// right column). Overflow is cut with ".." rather than drawn past the column.
+// right column). Overflow is cut with U+2026 (item D4: Selawik has the glyph,
+// and a bare "." reads as part of the name) rather than drawn past the column.
 inline void note_lines(const std::string& s, size_t n, std::string& l1, std::string& l2) {
     l1.clear(); l2.clear();
     size_t br = s.find('\n');
@@ -122,7 +137,11 @@ inline void note_lines(const std::string& s, size_t n, std::string& l1, std::str
         rest = first.substr(st);
     }
     wrap(rest, l2);
-    if (l2.size() < rest.size()) l2 = l2.substr(0, n > 2 ? n - 2 : 0) + "..";
+    if (l2.size() < rest.size()) {
+        size_t cut = n > 3 ? n - 3 : 0;
+        while (cut > 0 && ((unsigned char)l2[cut] & 0xC0) == 0x80) --cut;   // whole glyphs only
+        l2 = l2.substr(0, cut) + "\xE2\x80\xA6";
+    }
 }
 
 // Detail-page message when an install is refused for space: the figure with the

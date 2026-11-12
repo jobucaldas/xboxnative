@@ -110,6 +110,28 @@ template <class Ptr> std::vector<Ptr> shown(const std::vector<Ptr>& all, bool in
     return out;
 }
 
+// Item D7: the live search filter — a case-insensitive substring match on the
+// game name, in library order. An empty query returns the list unchanged.
+inline std::string lower_ascii(std::string s) {
+    for (char& c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+template <class Ptr> std::vector<Ptr> search(const std::vector<Ptr>& all, const std::string& query) {
+    if (query.empty()) return all;
+    const std::string q = lower_ascii(query);
+    std::vector<Ptr> out;
+    for (auto& g : all) if (lower_ascii(g->name).find(q) != std::string::npos) out.push_back(g);
+    return out;
+}
+
+// Item D7: the header count. With a query it says how much of the library is
+// showing ("12 of 772 games"), so a filtered grid is never mistaken for the
+// whole library; without one it is the plain total.
+inline std::string count_label(size_t shown_count, size_t total, bool searching) {
+    if (searching) return std::to_string(shown_count) + " of " + std::to_string(total) + " games";
+    return std::to_string(shown_count) + " games";
+}
+
 inline int clamp_selection(int sel, size_t n) { return n == 0 ? 0 : sel < 0 ? 0 : sel >= (int)n ? (int)n - 1 : sel; }
 
 }  // namespace game_library

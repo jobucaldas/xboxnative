@@ -26,3 +26,11 @@ dxup-src  https://codeload.github.com/Joshua-Ashton/dxup/tar.gz/7cce9ee7ddecadbf
 # src/tools/build-vulkan-loader.sh into vulkan-1.dll plus a null ICD that reports zero physical devices.
 vulkan-loader-src  https://codeload.github.com/KhronosGroup/Vulkan-Loader/tar.gz/refs/tags/vulkan-sdk-1.4.313.0  c736fa79d974c3513f5573b74249ed002aab59f1d15d1c13fc1d00644830869a
 vulkan-headers-src  https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/refs/tags/vulkan-sdk-1.4.313.0  20743c99a96c07290f24377360e7a12bdd2c465ba202e0c7ef2ec25d446cf61d
+# UI toolkit (issue #51): stb_truetype.h (public domain / MIT) at a pinned commit, and Microsoft Selawik 1.01
+# (SIL OFL 1.1, the metric-compatible Segoe UI substitute the mockups use) plus its licence text. Fetched and
+# SHA-256 verified by src/tools/fetch-ui-assets.sh into git-ignored out/ui-assets/; the launcher packages the
+# fonts under layout/fonts/. Never committed.
+stb-truetype  https://raw.githubusercontent.com/nothings/stb/c0c982601f40183e74d84a61237e968dca08380e/stb_truetype.h  a34d8d536ce7c11b9163ab2d524721c1f4df1452cce6595c4f11d3048384f925
+stb-license  https://raw.githubusercontent.com/nothings/stb/c0c982601f40183e74d84a61237e968dca08380e/LICENSE  bebfe904b14301657e4e5d655c811d51fd31b97c455b9cc2d8600d6bac6cff63
+selawik-release  https://github.com/microsoft/Selawik/releases/download/1.01/Selawik_Release.zip  3f62c51e05e3b5a1e6241cf92a371f0be2ea1183aa87b30718bbd40832a8d423
+selawik-license  https://raw.githubusercontent.com/microsoft/Selawik/89362e84731d1f5777fa078fd4d5ebbd339e4378/LICENSE.txt  77b7c2506d4efb22e09c8ccf10159f4956eab3ef7c007fef95de136bcf45300c
