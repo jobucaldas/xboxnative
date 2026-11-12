@@ -1168,7 +1168,6 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     CoreDispatcher m_graphicsDispatcher{nullptr};
     bool m_guestSurface=false;
     gpad::Runner m_gpad;   // cmd.txt gpad/gpadseq presses; armed only with a guest running
-    bool m_gpadInjecting=false;   // latched while a program runs: keeps slot 0 connected when no physical pad exists
     int m_guestEndGen=0;
     corewindow_input::Shared m_input; // keyboard/mouse to the guest: the record DLL's one feed, shared with guest SendInput
     bool m_inputLogged=false;
@@ -2026,7 +2025,6 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if(!m_guestSurface && !play_runtime::observed.load(std::memory_order_acquire))return;
         m_guestEndGen=g_launch.gen;
         m_gpad.clear();   // an armed gpad program never outlives its game
-        m_gpadInjecting=false;
         achievement_poller_stop();   // the guest is exiting; stop watching its achievements.json
         m_achPollStarted=false;      // the next launch starts its own poller
         if(m_leaving)return;   // Force quit is already syncing and restarting
@@ -2279,7 +2277,6 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 return;
             }
             m_gpad.arm(std::move(prog), GetTickCount64());
-            m_gpadInjecting=true;
             logf("cmd.txt: gpad armed (%zu step(s))", m_gpad.program.size());
             return;
         }
@@ -2302,7 +2299,6 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 return;
             }
             m_gpad.arm(std::move(prog), GetTickCount64());
-            m_gpadInjecting=true;
             logf("cmd.txt: gpadseq '%s' armed, %zu step(s)", name, m_gpad.program.size());
             return;
         }
@@ -2454,11 +2450,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // gpad injection with no physical pad attached: keep slot 0 connected
         // for the whole program (press, release and gap alike), or the guest
         // would see the pad disconnect between frames and packet numbers
-        // would reset. m_gpadInjecting latches from arm() to clear(), so the
-        // release and gap frames stay connected. The overlay's input block
-        // wins here too: while the launcher menu is open the guest must see
-        // an empty pad, not automation.
-        if (m_gpadInjecting && !assigned[0]) {
+        // would reset. m_gpad.armed spans exactly the program (arm() to the
+        // tick that clears a finished program), so the release and gap frames
+        // stay connected and the pad disappears once the program is done.
+        // The overlay's input block wins here too: while the launcher menu is
+        // open the guest must see an empty pad, not automation.
+        if (m_gpad.armed && !assigned[0]) {
             XINPUT_GAMEPAD injected{};
             if (!guest_overlay::inputBlocked.load(std::memory_order_relaxed)) {
                 injected.wButtons=injButtons;
