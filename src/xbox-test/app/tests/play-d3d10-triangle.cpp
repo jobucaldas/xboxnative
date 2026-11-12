@@ -246,7 +246,10 @@ DWORD d3d10tri_entry() {
     cubeDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;cubeDesc.SampleDesc.Count=1;
     cubeDesc.Usage=D3D10_USAGE_DEFAULT;
     cubeDesc.BindFlags=D3D10_BIND_SHADER_RESOURCE|D3D10_BIND_RENDER_TARGET;
-    cubeDesc.MiscFlags=D3D10_RESOURCE_MISC_TEXTURECUBE;
+    // GenerateMips only works on a texture created with this misc flag (the
+    // shim forwards it to the D3D11 desc, where it is also required); a real
+    // game's mip-mapped textures set it, so the fixture must too.
+    cubeDesc.MiscFlags=D3D10_RESOURCE_MISC_TEXTURECUBE|D3D10_RESOURCE_MISC_GENERATE_MIPS;
     ID3D10Texture2D* cube=nullptr;
     if(FAILED(device->CreateTexture2D(&cubeDesc,nullptr,&cube))||!cube)return 28;
     // Every face's mip 0 is opaque blue, so mip 1 must average to it. One
