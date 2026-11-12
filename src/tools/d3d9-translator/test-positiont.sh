@@ -87,7 +87,7 @@ def src(regnum, regtype, swizzle=0xE4):
     return (regnum & 0x7FF) | ((regtype & 0x7) << 28) | (((regtype >> 3) & 0x3) << 11) | ((swizzle & 0xFF) << 16)
 # D3DSPR_* (d3d9types.h D3DSHADER_PARAM_REGISTER_TYPE) and the usages the
 # shim declares, as in ffp.h.
-RegInput, RegConst, RegOutput = 1, 2, 6
+RegInput, RegConst, RegOutput, RegTemp = 1, 2, 6, 0
 D3DDECLUSAGE_POSITION, D3DDECLUSAGE_POSITIONT, D3DDECLUSAGE_COLOR = 0, 9, 10
 D3DSIO_MOV, D3DSIO_ADD, D3DSIO_MUL, D3DSIO_DCL, D3DSIO_END = 1, 2, 5, 0x1F, 0xFFFF
 def dcl(usage, index, reg, regtype):
@@ -98,11 +98,14 @@ tokens += dcl(D3DDECLUSAGE_COLOR, 0, 1, RegInput)       # dcl_color v1
 tokens += dcl(D3DDECLUSAGE_POSITION, 0, 0, RegOutput)   # dcl_position o0
 tokens += dcl(D3DDECLUSAGE_COLOR, 0, 1, RegOutput)      # dcl_color o1
 # o0.xy = v0.xy * c5.xy + c6.xy (viewport fixup), o0.zw = v0.zw, o1 = v1,
-# exactly the positionTransformed branch of ffp.h writeVertexShader.
-tokens += op(D3DSIO_MUL, dst(0, RegOutput, 0x1), src(0, RegInput, 0x00), src(5, RegConst, 0x00))
-tokens += op(D3DSIO_ADD, dst(0, RegOutput, 0x1), src(0, RegOutput, 0x00), src(6, RegConst, 0x00))
-tokens += op(D3DSIO_MUL, dst(0, RegOutput, 0x2), src(0, RegInput, 0x55), src(5, RegConst, 0x55))
-tokens += op(D3DSIO_ADD, dst(0, RegOutput, 0x2), src(0, RegOutput, 0x55), src(6, RegConst, 0x55))
+# exactly the positionTransformed branch of ffp.h writeVertexShader. The
+# fixup goes through r0: oPos is write-only in SM3, reading it as a source
+# is what the console's DXBC->DXIL converter faults on. The MUL lands in a
+# temp, the ADD writes o0 from r0 and c6 - o0 is never a source.
+tokens += op(D3DSIO_MUL, dst(0, RegTemp, 0x1), src(0, RegInput, 0x00), src(5, RegConst, 0x00))
+tokens += op(D3DSIO_ADD, dst(0, RegOutput, 0x1), src(0, RegTemp, 0x00), src(6, RegConst, 0x00))
+tokens += op(D3DSIO_MUL, dst(0, RegTemp, 0x2), src(0, RegInput, 0x55), src(5, RegConst, 0x55))
+tokens += op(D3DSIO_ADD, dst(0, RegOutput, 0x2), src(0, RegTemp, 0x55), src(6, RegConst, 0x55))
 tokens += op(D3DSIO_MOV, dst(0, RegOutput, 0xC), src(0, RegInput, 0xEE))
 tokens += op(D3DSIO_MOV, dst(1, RegOutput), src(1, RegInput))
 tokens += [D3DSIO_END]

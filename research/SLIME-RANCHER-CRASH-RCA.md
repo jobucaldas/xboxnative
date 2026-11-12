@@ -93,3 +93,76 @@ resize-path vs not, not PR-vs-PR).
    the practical mitigation is preventing the reset (1) or returning a
    recoverable error code from the resize path instead of letting the reset
    propagate.
+
+## Kill-switch A/B (0.5.302.0 @ a9c9cb4, 2026-11-12)
+
+Six 4-minute synthetic launches (menu only, no settings interaction), three
+with `LocalState\d3d11diag.txt` (diagnostics off) and three without. Evidence:
+`/tmp/xbn-evidence-302/slime-ab/run{1,2,3}-diagoff/`, `run{4,5,6}-diagon/`.
+
+| run | diag | removal | resizes |
+|-----|------|---------|---------|
+| 1 | off | Present 0x887a0005, reason 0x887a0020, ~2 min into gameplay | #1,#2 hr=0 |
+| 2 | off | Present 0x887a0005, reason 0x887a0020, ~2 min into gameplay | #1,#2,#3 hr=0 |
+| 3 | off | none (clean 240 s) | #1,#2 hr=0 |
+| 4-6 | on | none | #1,#2 hr=0 |
+
+What this settles:
+
+* **The kill switch works**: the `diagnostics off (LocalState\d3d11diag.txt):
+  no vtable hooks installed` line appears in every OFF run and no ON run, and
+  the per-resize logging stays live with the switch armed.
+* **The vtable hooks are NOT supported as the cause — the A/B points the
+  other way**: the removal reproduced only in the diag-OFF arm (2/3) while
+  the hooks-installed arm was clean (0/3). If the hooks caused the removal,
+  the ON arm would show more removals, not fewer. What the data actually
+  show: the removal exists **without any of our hooks installed**, so it is
+  a pre-existing driver/vGPU or Play-path problem, not a hook bug (the
+  slot audit in #152 already found no mismatch statically). The ON arm's
+  cleanliness is consistent with the hooks' overhead perturbing timing and
+  masking a timing-sensitive bug — but it is equally consistent with plain
+  noise: two-sided Fisher exact on 2/3 vs 0/3 gives p≈0.4, not significant.
+  Both readings remain open at n=3.
+* **The removal is not resize-coupled here**: both failures landed ~2 min into
+  gameplay with every completed resize at hr=0, unlike the 0.5.279 crash
+  (4th-resize window). The lockmode experiment remains the discriminator for
+  the settings-change path the owner actually hit.
+* **The reason code is first-read vs second-read**: with the hooks off, the
+  only reader is `presentFailure`, which reports 0x887a0020
+  (DRIVER_INTERNAL_ERROR). The 0.5.275-era 0x887a0007 "invalid command" line
+  came from `noteFailure` (#133), a second `GetDeviceRemovedReason` call that
+  only runs when the hooks are installed — the driver answered differently on
+  the later read. "Invalid command" was possibly never the driver's first
+  answer; evidence collected with hooks on must be read with that in mind.
+
+Next discriminators, in order: more diag-OFF runs (6-8) to establish the
+OFF-arm rate; then the `lockmode.txt` opt-in for the settings-change path the
+owner actually hit.
+
+## Lockmode A/B (0.5.303.0 @ 0efeb97, 2026-11-12, gateway)
+
+Four synthetic launches on 0.5.303.0 (settings change + new session), two with
+`LocalState\lockmode.txt` (later resizes suppressed with S_OK after #1/#2 go
+through) and two without. Evidence: `/tmp/xbn-evidence-303/slime-lockmode/`.
+
+| arm | removals | behaviour |
+|-----|----------|-----------|
+| lockmode ON (2 runs) | 0 | #1/#2 hr=0, then resizes suppressed with S_OK (marker line present) |
+| lockmode OFF (2 runs) | 0 | #1–#4 all hr=0, second device created hr=0 |
+
+No device removal in any of the four runs — 0.5.303.0 survives both arms in
+synthetic runs. With the same caveat as the kill-switch A/B (n=2 per arm,
+failure is stochastic, two-sided Fisher on 0/2 vs 0/2 is uninformative), this
+neither confirms nor refutes the resize-path trigger; it only says the
+synthetic menu-only run does not reproduce the owner's settings-change crash
+in either arm. The lockmode marker line and the suppression semantics worked
+as designed in both ON runs.
+
+## Next discriminators (updated after both A/Bs)
+
+1. More diag-OFF runs (6-8) to establish the OFF-arm base rate.
+2. A longer diag-OFF soak (30+ min into real gameplay, past the ~2 min mark)
+   to check whether the removal correlates with the ~2-minute mark — the
+   asset-burst/GPU-memory window both A/B failures landed in.
+3. The `lockmode.txt` opt-in on the owner's real settings-change path (the
+   synthetic runs do not exercise it hard enough to discriminate).

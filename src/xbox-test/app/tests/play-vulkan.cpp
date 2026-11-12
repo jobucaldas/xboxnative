@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Owned fixture: a guest EXE that probes Vulkan the way a Vulkan-optional engine
-// does (research/VULKAN-PLAN.md, milestone 1). It loads vulkan-1.dll by name,
+// does (issue #177, milestone 1). It loads vulkan-1.dll by name,
 // which Play serves from the launcher's runtime directory with the Khronos
 // loader built from pinned source, creates an instance, and enumerates physical
 // devices. The console has no Vulkan driver, so the answer must be the one a
