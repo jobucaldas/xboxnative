@@ -24,10 +24,12 @@ DP = TOOLS.parent / 'dp'
 
 STUB_CURL = r'''#!/bin/bash
 # Simulated Device Portal. Scenario from $FAKE_SCENARIO:
-#   ok    every request 200
-#   stale GET 200; POST with a non-FRESH jar token 403 (recoverable staleness)
-#   stuck POST always 403 (auth failing for real)
-# Honours -D (header dump) and -w like real curl (-w output goes after the body).
+#   ok      every request 200
+#   stale   GET 200; POST with a non-FRESH jar token 403 (recoverable staleness)
+#   stuck   POST always 403 (auth failing for real)
+#   expect  like stale, but requests carrying "Expect: 100-continue" also get a
+#           "HTTP/1.1 100 Continue" line prepended to the -D dump and stdout
+# Honours -D, -w and -o like real curl (-w output goes after the body).
 mutating=no; jar=""; hdr=""; prev=""
 for a in "$@"; do
   case "$prev" in
@@ -69,11 +71,19 @@ if [ -n "$jar" ] && [ "$mutating" = no ] && [[ "$*" == *"/api/os/info"* ]]; then
   exit 0
 fi
 fresh=$(awk '$6=="CSRF-Token"{print $7}' "$jar" 2>/dev/null | tail -1)
+expect100=no
+[[ "$*" == *"100-continue"* ]] && expect100=yes
 emit() {
-  # body to -o when given (like real curl), else stdout; then the caller's -w
-  if [ -n "$o" ]; then printf 'HTTP/1.1 %s OK\n' "$code" > "$o"
-  else [ -n "$hdr" ] && printf 'HTTP/1.1 %s Forbidden\n' "$code" > "$hdr"
-       printf 'HTTP/1.1 %s\n' "$code"
+  # body to -o when given (like real curl), else stdout; -D dump and caller -w
+  if [ -n "$o" ]; then
+    printf 'HTTP/1.1 %s OK\n' "$code" > "$o"
+  else
+    if [ -n "$hdr" ]; then
+      [ "$expect100" = yes ] && printf 'HTTP/1.1 100 Continue\n\n' >> "$hdr"
+      printf 'HTTP/1.1 %s Forbidden\n' "$code" >> "$hdr"
+    fi
+    [ "$expect100" = yes ] && printf 'HTTP/1.1 100 Continue\n'
+    printf 'HTTP/1.1 %s\n' "$code"
   fi
   [ -n "$w" ] && printf '%s\n' "$(printf %s "$w" | sed "s/%{http_code}/$code/g")"
 }
@@ -142,6 +152,29 @@ class DpLibCsrfRetryTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn('refetching cookie and retrying once', out)
         self.assertNotIn('still 403', out)
+
+    def test_expect_100_continue_does_not_hide_the_403(self):
+        # Bugbot: multipart uploads send Expect: 100-continue, so the -D dump's
+        # first line is "HTTP/1.1 100 Continue"; the parse must take the LAST
+        # HTTP status line or the 403 recovery never fires for install/put-file.
+        rc, out = self.run_lib(
+            'curl_dp /api/filesystem/apps/file -X POST -H "Expect: 100-continue" -F "f=@/etc/hostname" >/dev/null',
+            scenario='expect')[:2]
+        self.assertEqual(rc, 0, out)
+        self.assertIn('refetching cookie and retrying once', out)
+        self.assertNotIn('still 403', out)
+        self.assertEqual(self.jar_fresh(), 'FRESH')
+
+    def test_recovered_403_leaks_no_failed_attempt_output(self):
+        # Bugbot: the caller's -w ran for the failed attempt too, so stdout had
+        # "HTTP 403" then "HTTP 200" and smoke.sh's HTTP [45]xx grep saw a fail.
+        # Only the final attempt's output may reach the caller.
+        rc, out = self.run_lib('curl_dp /api/taskmanager/app -X POST -w "launch HTTP %{http_code}\\n"')[:2]
+        self.assertEqual(rc, 0, out)
+        self.assertIn('launch HTTP 200', out)
+        self.assertNotIn('403', out.replace(
+            'dp-lib: 403 on /api/taskmanager/app (stale CSRF cookie?) — refetching cookie and retrying once', ''))
+        self.assertEqual(out.count('launch HTTP'), 1)
 
     def test_persistent_403_reports_clearly_and_retries_only_once(self):
         # stuck: POST 403s even with a FRESH token — the wrapper must say so and

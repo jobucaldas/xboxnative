@@ -28,7 +28,7 @@ b64() { printf %s "$1" | base64 -w0; }
 # say so clearly. Status is read from a -D header dump, so callers' own -w/-o/
 # -f handling is untouched.
 curl_dp() {
-  local p="$1" m="" a hdr rc; shift
+  local p="$1" m="" a hdr out rc; shift
   for a in "$@"; do
     case $a in
       -XPOST|-XPUT|-XDELETE|-XPATCH) m=yes ;;
@@ -42,20 +42,25 @@ curl_dp() {
   hdr=$(mktemp "${TMPDIR:-/tmp}/dp-hdr.XXXXXX")
   [ -s "$DP_JAR" ] || printf 'user = "%s:%s"\n' "${DP_USER:-}" "$DP_PASS" | curl -sk -m 30 ${DP_SOCKS:+--socks5-hostname $DP_SOCKS} -K - -c "$DP_JAR" -o /dev/null "https://$DP_HOST:$DP_PORT/api/os/info"
   local csrf; csrf=$(awk '$6=="CSRF-Token"{print $7}' "$DP_JAR" | tail -1)
-  printf 'user = "%s:%s"\n' "${DP_USER:-}" "$DP_PASS" | curl -sk -m "${DP_TIMEOUT:-120}" ${DP_SOCKS:+--socks5-hostname $DP_SOCKS} -K - -b "$DP_JAR" -D "$hdr" -H "X-CSRF-Token: $csrf" "$@" "https://$DP_HOST:$DP_PORT$p"; rc=$?
-  local code; code=$(awk 'NR==1{print $2}' "$hdr")
+  out=$(printf 'user = "%s:%s"\n' "${DP_USER:-}" "$DP_PASS" | curl -sk -m "${DP_TIMEOUT:-120}" ${DP_SOCKS:+--socks5-hostname $DP_SOCKS} -K - -b "$DP_JAR" -D "$hdr" -H "X-CSRF-Token: $csrf" "$@" "https://$DP_HOST:$DP_PORT$p"); rc=$?
+  # last HTTP/ line of the dump: multipart uploads (Expect: 100-continue) start
+  # the dump with "HTTP/1.1 100 Continue" before the real response
+  local code; code=$(awk '/^HTTP\//{c=$2} END{print c}' "$hdr")
   if [ "$m" = yes ] && [ "$code" = 403 ]; then
     echo "dp-lib: 403 on $p (stale CSRF cookie?) — refetching cookie and retrying once" >&2
     rm -f "$DP_JAR"
     [ -s "$DP_JAR" ] || printf 'user = "%s:%s"\n' "${DP_USER:-}" "$DP_PASS" | curl -sk -m 30 ${DP_SOCKS:+--socks5-hostname $DP_SOCKS} -K - -c "$DP_JAR" -o /dev/null "https://$DP_HOST:$DP_PORT/api/os/info"
     csrf=$(awk '$6=="CSRF-Token"{print $7}' "$DP_JAR" | tail -1)
-    printf 'user = "%s:%s"\n' "${DP_USER:-}" "$DP_PASS" | curl -sk -m "${DP_TIMEOUT:-120}" ${DP_SOCKS:+--socks5-hostname $DP_SOCKS} -K - -b "$DP_JAR" -D "$hdr" -H "X-CSRF-Token: $csrf" "$@" "https://$DP_HOST:$DP_PORT$p"; rc=$?
-    code=$(awk 'NR==1{print $2}' "$hdr")
+    # discard the failed attempt's stdout (-w text included): only the final
+    # attempt's output may reach the caller
+    out=$(printf 'user = "%s:%s"\n' "${DP_USER:-}" "$DP_PASS" | curl -sk -m "${DP_TIMEOUT:-120}" ${DP_SOCKS:+--socks5-hostname $DP_SOCKS} -K - -b "$DP_JAR" -D "$hdr" -H "X-CSRF-Token: $csrf" "$@" "https://$DP_HOST:$DP_PORT$p"); rc=$?
+    code=$(awk '/^HTTP\//{c=$2} END{print c}' "$hdr")
     if [ "$code" = 403 ]; then
       echo "dp-lib: still 403 on $p after cookie refetch — CSRF auth is failing for real, not staleness" >&2
     fi
   fi
   rm -f "$hdr"
+  if [ -n "$out" ]; then printf '%s\n' "$out"; fi
   return "$rc"
 }
 dp_lock() {
