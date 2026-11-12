@@ -373,7 +373,10 @@ int main() {
         check(ui_nav::launch_banner_up(1, false), "D22: the banner covers the screen while a launch prepares");
         check(!ui_nav::launch_banner_up(1, true), "D22: the banner goes away when the guest window is up");
         check(!ui_nav::launch_banner_up(2, false), "D22: the banner goes away when the launch ends");
-        check(!ui_nav::launch_banner_up(3, false), "D22: the banner goes away once the guest runs");
+        // D29: the guest reporting "running" is not the same as its surface
+        // being up — the game page must not flash before the game's first frame
+        check(ui_nav::launch_banner_up(3, false), "D29: the banner stays up once the guest runs but before its surface appears");
+        check(!ui_nav::launch_banner_up(3, true), "D29: the banner goes away when the guest surface takes the window");
         check(!ui_nav::launch_banner_up(0, false), "D22: no banner without a launch");
         check(ui_nav::launch_cancel_allowed(1), "D22: B cancels a launch that is still preparing");
         check(!ui_nav::launch_cancel_allowed(2) && !ui_nav::launch_cancel_allowed(3),

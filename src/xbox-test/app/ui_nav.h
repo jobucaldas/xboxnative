@@ -505,11 +505,20 @@ inline bool header_back(int& hdr_focus, Focus& focus) {
 
 // ---- launch banner (item D22) ----
 // Play shows a fullscreen banner (the game's wide art + "Launching...") until
-// the guest's own window is up. B cancels, but only while the launch is still
-// preparing: once game code has started (phase 3) or the launch has ended
-// (phase 2) there is nothing left to cancel. g_launch phases: 0 never,
-// 1 starting, 2 finished, 3 guest running.
-inline bool launch_banner_up(int phase, bool guest_surface) { return phase == 1 && !guest_surface; }
+// the guest's own surface takes the window. B cancels, but only while the
+// launch is still preparing: once game code has started (phase 3) or the
+// launch has ended (phase 2) there is nothing left to cancel. g_launch phases:
+// 0 never, 1 starting, 2 finished, 3 guest running.
+//
+// Item D29: the banner covers the WHOLE launch, not just phase 1. It used to
+// drop the moment the guest reported running (phase 3), which is before the
+// guest's swapchain exists — so the last frame the launcher drew was the game
+// page, and that page sat on screen until the game's first Present. Now the
+// banner stays up until the guest surface really takes over (or the launch
+// fails, phase 2, which must show the page and its failure note).
+inline bool launch_banner_up(int phase, bool guest_surface) {
+    return (phase == 1 || phase == 3) && !guest_surface;
+}
 inline bool launch_cancel_allowed(int phase) { return phase == 1; }
 
 }  // namespace ui_nav

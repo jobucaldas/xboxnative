@@ -2505,7 +2505,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         title = game_name(appid);
         if (title.empty()) title = "App " + std::to_string(appid);
         char b[96];
-        snprintf(b, sizeof b, "Launching...  (%.0f s)", now_s() - g_launch.started);
+        // Item D29: the banner now covers the guest's own start too, so its
+        // line says which half of the launch this is instead of a bare timer.
+        if (g_launch.phase.load() == 3) snprintf(b, sizeof b, "Starting the game...  (%.0f s)", now_s() - g_launch.started);
+        else snprintf(b, sizeof b, "Launching...  (%.0f s)", now_s() - g_launch.started);
         status = b;
         ui_launcher::LaunchBannerVM v;
         v.title = title.c_str();

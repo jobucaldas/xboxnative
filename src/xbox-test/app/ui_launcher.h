@@ -1437,15 +1437,20 @@ inline void draw_game(ui::Canvas& c, const Font& f, const GameVM& g, bool draw_h
     if (draw_hints) draw_hint_bar(c, f, pairs, 3, 524.0f);   // review fix 5: same x as the library
 }
 
-// One transient note line over the dimmed game page (refusals, cloud warnings,
-// launch failures): mockup 03 has no dedicated slot, so it takes the Status row
-// of the Install card while it is up. main.cpp passes "" when there is none.
+// One transient note line under the primary button (refusals, cloud warnings,
+// launch failures). Item D29: it used to sit in the middle card, far from the
+// button that produced it; it now hangs directly below the button, left-aligned
+// with it, in a pill sized to its text. main.cpp passes "" when there is none.
 inline void draw_game_note(ui::Canvas& c, const Font& f, const GameVM& /*g*/, const char* note) {
     if (!note || !*note) return;
     using namespace ui::theme;
-    c.fill_round_rect(rect(700, 560, 520, 56), radiusControl, ui::theme::controlDark);
-    const float w = f.measure(Face::Regular, 22, note, std::strlen(note));
-    text(c, f, Face::Regular, 22, 960 - w * 0.5f, 575.5f, note, ui::theme::text2);
+    // The button is rect(64, 384, 256, 80); 480 clears its focus ring (which
+    // reaches 470) and stays above the info cards at 560.
+    const float y = 480.0f, max_w = 600.0f;
+    const std::string s = f.ellipsize(Face::Regular, 22, note, max_w);
+    const float w = f.measure(Face::Regular, 22, s);
+    c.fill_round_rect(rect(64, y, w + 48.0f, 48), radiusControl, ui::theme::controlDark);
+    text(c, f, Face::Regular, 22, 88, y + 13.0f, s.c_str(), ui::theme::text2);
 }
 
 // ---- sign-in screen (mockup 04) ----
