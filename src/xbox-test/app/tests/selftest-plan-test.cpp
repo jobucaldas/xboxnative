@@ -111,6 +111,11 @@ int main() {
     assert(verdict("d3d11", true, true, 54) == "BLOCKED msaa-resolve");
     assert(verdict("d3d11", true, true, 58) == "BLOCKED generate-mips");
     assert(verdict("d3d11", true, true, 63) == "BLOCKED command-list");
+    assert(verdict("d3d11", true, true, 67) == "BLOCKED stream-out");
+    assert(verdict("d3d11", true, true, 71) == "BLOCKED indirect-draw");
+    assert(verdict("d3d11", true, true, 75) == "BLOCKED occlusion-query");
+    assert(verdict("d3d11", true, true, 82) == "BLOCKED indexed-draw");
+    assert(verdict("d3d11", true, true, 86) == "BLOCKED depth-test");
     assert(verdict("d3d11", true, true, 50) == "FAIL exit-50");   // a step failure stays a failure
     assert(verdict("d3d12", true, true, 54) == "FAIL exit-54");   // not the d3d12 fixture's code
     // A guest that never ran code, or ran it and never exited, is a failure.

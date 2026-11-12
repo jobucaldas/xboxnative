@@ -15,6 +15,12 @@
 #include "../../uwph/host/shaders/triangle_bytecode.h"
 
 extern "C" {
+// No CRT: the byte-copy the depth pass's dynamic upload needs (the same
+// definition play-d3d12.cpp carries; the dynamic-map copy is not folded to a
+// constant size the compiler can inline).
+void* memcpy(void* d,const void* s,size_t n) {
+    auto a=(unsigned char*)d;auto b=(const unsigned char*)s;while(n--)*a++=*b++;return d;
+}
 int d3d_anchor;
 void* d3d_relocation=&d3d_anchor;
 
@@ -75,6 +81,7 @@ DWORD d3d_entry() {
     if(FAILED(device->CreateTexture2D(&targetDesc,nullptr,&staging))||!staging)return 17;
 
     ID3D11Texture2D* backBuffer=nullptr;
+    ID3D11RenderTargetView* backView=nullptr;
     if(FAILED(swapchain->GetBuffer(0,__uuidof(ID3D11Texture2D),(void**)&backBuffer))||!backBuffer)return 18;
 
     // Pipeline from the committed DXBC: the same shaders the host draw test
@@ -185,18 +192,28 @@ DWORD d3d_entry() {
     if(FAILED(device->CreateTexture2D(&msaaDesc,nullptr,&msaaTarget))||!msaaTarget)return 51;
     ID3D11RenderTargetView* msaaView=nullptr;
     if(FAILED(device->CreateRenderTargetView(msaaTarget,nullptr,&msaaView))||!msaaView)return 52;
+    // ResolveSubresource needs a DEFAULT single-sample destination of the same
+    // format; a staging texture is not a legal destination (the debug layer
+    // rejects it, and a layer that tolerates the call writes nothing). Resolve
+    // into a default texture, then copy that into the staging readback.
+    D3D11_TEXTURE2D_DESC resolveDesc=msaaDesc;
+    resolveDesc.SampleDesc.Count=1;resolveDesc.BindFlags=0;
+    ID3D11Texture2D* resolveTarget=nullptr;
+    if(FAILED(device->CreateTexture2D(&resolveDesc,nullptr,&resolveTarget))||!resolveTarget)return 52;
     ID3D11RenderTargetView* msaaBinds[]={msaaView};
     context->OMSetRenderTargets(1,msaaBinds,nullptr);
-    context->ClearRenderTargetView(msaaView,clear);
-    context->ResolveSubresource(staging,0,msaaTarget,0,DXGI_FORMAT_R8G8B8A8_UNORM);
+    const FLOAT msaaClear[4]={1,0,0,1};   // red: the colour the readback checks
+    context->ClearRenderTargetView(msaaView,msaaClear);
+    context->ResolveSubresource(resolveTarget,0,msaaTarget,0,DXGI_FORMAT_R8G8B8A8_UNORM);
+    context->CopyResource(staging,resolveTarget);
     D3D11_MAPPED_SUBRESOURCE mMapped{};
     if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&mMapped))||!mMapped.pData)return 53;
-    // ResolveSubresource copies the whole resource, so the staging texture now
+    // The resolve copies the whole resource, so the staging texture now
     // holds the MSAA target's cleared red everywhere.
     const unsigned char* mPixel=static_cast<const unsigned char*>(mMapped.pData)+16*mMapped.RowPitch+16*4;
     const bool msaaRed=mPixel[0]>0x80&&mPixel[1]<0x40&&mPixel[2]<0x40;
     context->Unmap(staging,0);
-    msaaView->Release();msaaTarget->Release();
+    msaaView->Release();resolveTarget->Release();msaaTarget->Release();
     if(!msaaRed)return 54;   // BLOCKED: the resolve did not reach the readback
 
     // ---- GenerateMips pass: mip chain, SRV, one GenerateMips, readback ----
@@ -212,9 +229,15 @@ DWORD d3d_entry() {
     mipDesc.MiscFlags=D3D11_RESOURCE_MISC_GENERATE_MIPS;
     unsigned int green[16*16];
     for(unsigned int& px:green)px=0xFF00D000u;   // ABGR little-endian: green
-    D3D11_SUBRESOURCE_DATA mipInit{};mipInit.pSysMem=green;mipInit.SysMemPitch=16*4;
+    unsigned int greenSmall[8*8];
+    for(unsigned int& px:greenSmall)px=0xFF00D000u;
+    // CreateTexture2D wants MipLevels*ArraySize initial-data entries: level 0
+    // (16x16) and level 1 (8x8), both filled so nothing is read past the array.
+    D3D11_SUBRESOURCE_DATA mipInit[2]={};
+    mipInit[0].pSysMem=green;mipInit[0].SysMemPitch=16*4;
+    mipInit[1].pSysMem=greenSmall;mipInit[1].SysMemPitch=8*4;
     ID3D11Texture2D* mipTexture=nullptr;
-    if(FAILED(device->CreateTexture2D(&mipDesc,&mipInit,&mipTexture))||!mipTexture)return 55;
+    if(FAILED(device->CreateTexture2D(&mipDesc,mipInit,&mipTexture))||!mipTexture)return 55;
     ID3D11ShaderResourceView* mipSrv=nullptr;
     if(FAILED(device->CreateShaderResourceView(mipTexture,nullptr,&mipSrv))||!mipSrv)return 56;
     context->GenerateMips(mipSrv);
@@ -248,14 +271,19 @@ DWORD d3d_entry() {
     deferred->OMSetRenderTargets(1,dBinds,nullptr);
     D3D11_VIEWPORT dViewport{0,0,64,64,0.0f,1.0f};
     deferred->RSSetViewports(1,&dViewport);
-    deferred->ClearRenderTargetView(dView,clear);
+    const FLOAT dClear[4]={1,0,0,1};   // red: the colour the readback checks
+    deferred->ClearRenderTargetView(dView,dClear);
     ID3D11CommandList* list=nullptr;
     if(FAILED(deferred->FinishCommandList(FALSE,&list))||!list)return 62;
+    // ExecuteCommandList(FALSE) resets the immediate context to pipeline
+    // defaults, exactly as a game's next recorded frame expects; the passes
+    // after this one rebind everything they use (vertex buffer, RTV,
+    // viewport), so nothing here depends on stale state.
     context->ExecuteCommandList(list,FALSE);
     context->CopyResource(staging,target);
     D3D11_MAPPED_SUBRESOURCE dMapped{};
     if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&dMapped))||!dMapped.pData)return 62;
-    // The deferred clear painted the whole target red; sample two corners.
+    // The deferred clear painted the whole target red; sample a corner.
     const unsigned char* dPixel=static_cast<const unsigned char*>(dMapped.pData)+48*dMapped.RowPitch+48*4;
     const bool deferredRed=dPixel[0]>0x80&&dPixel[1]<0x40&&dPixel[2]<0x40;
     context->Unmap(staging,0);
@@ -368,17 +396,25 @@ DWORD d3d_entry() {
     // ---- ResizeBuffers pass: shrink the chain, redraw, present ----
     // Windowed games resize on every window change; a layer that keeps stale
     // buffer associations after ResizeBuffers renders into a dead buffer.
-    // Exits 76-79 name the step; 79 is BLOCKED.
-    ID3D11RenderTargetView* backView=nullptr;
-    if(FAILED(device->CreateRenderTargetView(backBuffer,nullptr,&backView))||!backView)return 26;
+    // Exits 76-79 name the step; 79 is BLOCKED. DXGI requires every back
+    // buffer reference released before the resize, so the view goes first and
+    // the buffer itself right after — the order a game's resize handler uses.
+    backView->Release();backView=nullptr;
+    backBuffer->Release();backBuffer=nullptr;
     hr=swapchain->ResizeBuffers(0,32,32,DXGI_FORMAT_UNKNOWN,0);
     if(FAILED(hr))return 76;
-    backBuffer->Release();backBuffer=nullptr;
     if(FAILED(swapchain->GetBuffer(0,__uuidof(ID3D11Texture2D),(void**)&backBuffer))||!backBuffer)return 77;
-    backView->Release();
     if(FAILED(device->CreateRenderTargetView(backBuffer,nullptr,&backView))||!backView)return 77;
     ID3D11RenderTargetView* backBinds[]={backView};
     context->OMSetRenderTargets(1,backBinds,nullptr);
+    // ExecuteCommandList(FALSE) above reset the pipeline to defaults; rebind
+    // the triangle's state the way a game's frame setup does before drawing.
+    context->IASetInputLayout(layout);
+    ID3D11Buffer* rbBinds[]={verticesBuffer};
+    context->IASetVertexBuffers(0,1,rbBinds,&stride,&offset);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->VSSetShader(vs,nullptr,0);
+    context->PSSetShader(ps,nullptr,0);
     D3D11_VIEWPORT small{0,0,32,32,0.0f,1.0f};
     context->RSSetViewports(1,&small);
     context->ClearRenderTargetView(backView,clear);
@@ -396,6 +432,97 @@ DWORD d3d_entry() {
     context->Draw(3,0);
     hr=swapchain->Present(0,0);
     if(hr==DXGI_ERROR_DEVICE_REMOVED)return 27;
+
+    // ---- Indexed-draw pass: index buffer + DrawIndexed ----
+    // Every mesh renderer draws indexed; a layer that binds the IB but reads
+    // vertices in order renders scrambled geometry. Draw the triangle's three
+    // vertices in rotated index order (1,2,0) — same triangle, so the pixel
+    // test is identical, but only a real index fetch can produce it. Exits
+    // 80-82 name the step; 82 is BLOCKED.
+    const unsigned short indices[]={1,2,0};
+    D3D11_BUFFER_DESC ibDesc{};
+    ibDesc.ByteWidth=sizeof indices;ibDesc.Usage=D3D11_USAGE_IMMUTABLE;
+    ibDesc.BindFlags=D3D11_BIND_INDEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA ibInit{};ibInit.pSysMem=indices;
+    ID3D11Buffer* indexBuffer=nullptr;
+    if(FAILED(device->CreateBuffer(&ibDesc,&ibInit,&indexBuffer))||!indexBuffer)return 80;
+    context->ClearRenderTargetView(rtv,clear);
+    ID3D11Buffer* idxBinds[]={verticesBuffer};
+    context->IASetVertexBuffers(0,1,idxBinds,&stride,&offset);
+    context->IASetIndexBuffer(indexBuffer,DXGI_FORMAT_R16_UINT,0);
+    context->OMSetRenderTargets(1,binds,nullptr);
+    context->RSSetViewports(1,&viewport);
+    context->DrawIndexed(3,0,0);
+    context->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);
+    context->CopyResource(staging,target);
+    D3D11_MAPPED_SUBRESOURCE xMapped{};
+    if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&xMapped))||!xMapped.pData)return 81;
+    const unsigned char* xPixel=static_cast<const unsigned char*>(xMapped.pData)+32*xMapped.RowPitch+32*4;
+    const bool indexedRed=xPixel[0]>0x80&&xPixel[1]<0x40&&xPixel[2]<0x40;
+    context->Unmap(staging,0);
+    indexBuffer->Release();
+    if(!indexedRed)return 82;   // BLOCKED: the indexed draw never reached the target
+
+    // ---- Depth-stencil pass: DSV + depth test ----
+    // Every 3D game writes depth; a layer that accepts the DSV but never
+    // tests draws hidden surfaces over near ones (walls over characters). A
+    // far red triangle drawn first, a near green triangle after, depth test
+    // LESS_EQUAL: the centre pixel must stay green. Exits 83-86; 86 BLOCKED.
+    D3D11_TEXTURE2D_DESC dsDesc{};
+    dsDesc.Width=64;dsDesc.Height=64;dsDesc.MipLevels=1;dsDesc.ArraySize=1;
+    dsDesc.Format=DXGI_FORMAT_D24_UNORM_S8_UINT;dsDesc.SampleDesc.Count=1;
+    dsDesc.Usage=D3D11_USAGE_DEFAULT;dsDesc.BindFlags=D3D11_BIND_DEPTH_STENCIL;
+    ID3D11Texture2D* dsTexture=nullptr;
+    if(FAILED(device->CreateTexture2D(&dsDesc,nullptr,&dsTexture))||!dsTexture)return 83;
+    ID3D11DepthStencilView* dsv=nullptr;
+    if(FAILED(device->CreateDepthStencilView(dsTexture,nullptr,&dsv))||!dsv)return 83;
+    D3D11_DEPTH_STENCIL_DESC dsDescState{};
+    dsDescState.DepthEnable=TRUE;
+    dsDescState.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
+    dsDescState.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;
+    ID3D11DepthStencilState* dsState=nullptr;
+    if(FAILED(device->CreateDepthStencilState(&dsDescState,&dsState))||!dsState)return 84;
+    context->OMSetDepthStencilState(dsState,0);
+    context->ClearRenderTargetView(rtv,clear);
+    context->ClearDepthStencilView(dsv,D3D11_CLEAR_DEPTH,1.0f,0);
+    ID3D11RenderTargetView* dsBinds[]={rtv};
+    context->OMSetRenderTargets(1,dsBinds,dsv);
+    context->RSSetViewports(1,&viewport);
+    // Far red triangle (z=0.8), then near green (z=0.2): the shared centre
+    // pixel must end green. The VS passes z through, so the two draws use
+    // different vertex data: one dynamic vertex buffer, rewritten per draw
+    // (the Map WRITE_DISCARD a game's per-frame upload uses — itself a
+    // covered feature).
+    D3D11_BUFFER_DESC dvbDesc{};
+    dvbDesc.ByteWidth=sizeof(float)*6*3;dvbDesc.Usage=D3D11_USAGE_DYNAMIC;
+    dvbDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;dvbDesc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+    ID3D11Buffer* dynVb=nullptr;
+    if(FAILED(device->CreateBuffer(&dvbDesc,nullptr,&dynVb))||!dynVb)return 85;
+    const float triRed[3][6]={
+        {-0.75f,0.75f,0.8f,1,0,0},{0.75f,0.75f,0.8f,1,0,0},{0.0f,-0.75f,0.8f,1,0,0}};
+    D3D11_MAPPED_SUBRESOURCE mM{};
+    if(FAILED(context->Map(dynVb,0,D3D11_MAP_WRITE_DISCARD,0,&mM))||!mM.pData)return 85;
+    memcpy(mM.pData,triRed,sizeof triRed);
+    context->Unmap(dynVb,0);
+    ID3D11Buffer* rBinds[]={dynVb};
+    context->IASetVertexBuffers(0,1,rBinds,&stride,&offset);
+    context->Draw(3,0);
+    const float triGreen[3][6]={
+        {-0.75f,0.75f,0.2f,0,1,0},{0.75f,0.75f,0.2f,0,1,0},{0.0f,-0.75f,0.2f,0,1,0}};
+    if(FAILED(context->Map(dynVb,0,D3D11_MAP_WRITE_DISCARD,0,&mM))||!mM.pData)return 85;
+    memcpy(mM.pData,triGreen,sizeof triGreen);
+    context->Unmap(dynVb,0);
+    context->Draw(3,0);
+    context->OMSetRenderTargets(1,binds,nullptr);
+    context->CopyResource(staging,target);
+    D3D11_MAPPED_SUBRESOURCE dMapped2{};
+    if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&dMapped2))||!dMapped2.pData)return 85;
+    const unsigned char* dPix=static_cast<const unsigned char*>(dMapped2.pData)+32*dMapped2.RowPitch+32*4;
+    const bool depthGreen=dPix[1]>0x80&&dPix[0]<0x40&&dPix[2]<0x40;
+    context->Unmap(staging,0);
+    dsState->Release();dynVb->Release();dsv->Release();dsTexture->Release();
+    context->OMSetDepthStencilState(nullptr,0);
+    if(!depthGreen)return 86;   // BLOCKED: the depth test did not order the draws
 
     // ---- the diagnostics: calls the device must reject, logged once ----
     D3D11_TEXTURE2D_DESC texture{};texture.Width=256;texture.Height=256;texture.MipLevels=1;texture.ArraySize=1;

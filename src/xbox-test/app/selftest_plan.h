@@ -141,12 +141,20 @@ inline std::string verdict(const std::string& mode, bool finished, bool executed
     // pixels did not read back as drawn. A platform limit, never a pass.
     if ((mode == "d3d11" || mode == "d3d12") && code == 43) return "BLOCKED pixel-readback";
     // The D3D11 fixture's newer passes block the same way: the calls the
-    // feature needs all succeeded, but the pixels/colour did not arrive
-    // (54 MSAA resolve, 58 GenerateMips, 63 command-list execution).
+    // feature needs all succeeded, but the effect never arrived — pixels,
+    // colour or query answer (54 MSAA resolve, 58 GenerateMips, 63
+    // command-list execution, 67 stream-out capture, 71 indirect draw, 75
+    // occlusion-query answer, 82 indexed draw, 86 depth ordering). A platform
+    // limit, never a pass.
     if (mode == "d3d11") {
         if (code == 54) return "BLOCKED msaa-resolve";
         if (code == 58) return "BLOCKED generate-mips";
         if (code == 63) return "BLOCKED command-list";
+        if (code == 67) return "BLOCKED stream-out";
+        if (code == 71) return "BLOCKED indirect-draw";
+        if (code == 75) return "BLOCKED occlusion-query";
+        if (code == 82) return "BLOCKED indexed-draw";
+        if (code == 86) return "BLOCKED depth-test";
     }
     // The D3D10 drawing fixture blocks the same way: every pass ran but the
     // pixels (or streamed vertices) did not read back as drawn.
