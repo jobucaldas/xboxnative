@@ -3,7 +3,7 @@
 //
 // Built by build.sh as a CRT-free mingw PE DLL and mapped by Play's loader, so
 // its d3d11.dll/dxgi.dll imports bind to Play's routes exactly as the D3D10
-// shim's do (see ../d3dshim/base.h and research/D3D9-PLAN.md).
+// shim's do (see issue #172).
 //
 // The device draws. Shader model 1-3 bytecode is translated to DXBC by
 // d3d9translator.dll (src/tools/build-d3d9-translator.sh, built from pinned

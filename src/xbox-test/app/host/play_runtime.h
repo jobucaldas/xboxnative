@@ -998,7 +998,7 @@ static void note_discord(const Module& m) {
     if(reported.exchange(true)) return;
     state->event("Discord SDK present ("+m.key+"); no Discord client on this console, so the game runs without Rich Presence");
 }
-// Vulkan (research/VULKAN-PLAN.md): the Khronos loader finds drivers through a JSON manifest. On Windows its search
+// Vulkan (issue #177): the Khronos loader finds drivers through a JSON manifest. On Windows its search
 // order is VK_DRIVER_FILES (an environment override), the Microsoft.D3DMappingLayers app package, then
 // HKLM\SOFTWARE\Khronos\Vulkan\Drivers (RegEnumValueA). The console has no mapping-layers package, and the loader only
 // honours the environment override when the process is not elevated: loader_secure_getenv() calls is_high_integrity()

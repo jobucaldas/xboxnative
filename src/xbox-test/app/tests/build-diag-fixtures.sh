@@ -70,8 +70,7 @@ clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d
 lld "${common[@]}" /entry:d3d10tri_entry /include:d3d10tri_relocation /out:"$out/play-d3d10-triangle.exe" \
   "$work/d3d10-triangle.obj" "$mingw_lib/libd3d10.a" "$mingw_lib/libdxgi.a" "$mingw_lib/libuuid.a" "${libs[@]}"
 
-# The OpenGL fixture runs the startup path an SDL3 GL game takes (research/
-# OPENGL-PLAN.md): opengl32.dll from the runtime directory (Mesa's d3d12 WGL
+# The OpenGL fixture runs the startup path an SDL3 GL game takes (issue #176): opengl32.dll from the runtime directory (Mesa's d3d12 WGL
 # driver), a pixel format through gdi32's forwarded wgl*, a context, a cleared
 # frame presented with SwapBuffers and a glReadPixels readback. Exit 42 only
 # when the rendered pixel came back; 43 is BLOCKED (never a pass).

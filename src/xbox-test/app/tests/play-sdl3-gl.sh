@@ -3,7 +3,7 @@
 # Off-device proof of Play's OpenGL loader path with an owned SDL3 program (official SDL3
 # release DLL, src/tools/fetch-sdl.sh): LoadLibrary("OPENGL32.DLL") must succeed with
 # Play's own module (the console has none) or, when the runtime directory carries it, Mesa's
-# d3d12 driver (research/OPENGL-PLAN.md). The program then creates a window and context,
+# d3d12 driver (issue #176). The program then creates a window and context,
 # clears and presents frames. A stage the host cannot run (Wine without a working d3d12 backend)
 # prints BLOCKED with the reason, never PASS; any other failure fails the script. No console or game claim.
 # Wine 11's d3d12 does run the driver (it answers ID3D12Device9 but not CreateCommandQueue1, which
