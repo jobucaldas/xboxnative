@@ -207,8 +207,18 @@ DWORD d3d10tri_entry() {
     device->SOSetTargets(0,nullptr,&soOffset);
     device->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     D3D10_QUERY_DATA_SO_STATISTICS stats{};
-    // Not a FLAG_NONE query: a blocking read is legal and must answer.
-    if(FAILED(soStats->GetData(&stats,sizeof stats,0)))return 37;
+    // Not a FLAG_NONE query: a blocking read is legal and must answer. With
+    // flags 0 GetData returns S_FALSE (neither FAILED nor S_OK) until the GPU
+    // catches up, so poll until it answers or the budget runs out; giving up
+    // is a failure (37), never a pass.
+    bool soAnswered=false;
+    for(unsigned poll=0;poll<1000;++poll) {
+        HRESULT qr=soStats->GetData(&stats,sizeof stats,0);
+        if(qr==S_OK) {soAnswered=true;break;}
+        if(FAILED(qr))return 37;
+        Sleep(1);
+    }
+    if(!soAnswered)return 37;
     soStats->Release();
     // The GS expands one point to one triangle: one primitive written, one
     // needed. Zero written means the SO path silently dropped the draw.
