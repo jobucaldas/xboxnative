@@ -66,6 +66,19 @@ static DWORD testLoaderSearch() {
     if(DeleteFileW(L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll")==0)return 119;
     if(DeleteFileW(L"MonoBleedingEdge\\EmbedRuntime\\search-dependency.dll")==0)return 120;
     if(DeleteFileW(L"search-dependency.dll")==0)return 121;   // root decoy removed
+    // Negative control: with the sub-directory copy missing, the fallback must
+    // pick the root copy — and the value check must see exactly that (55, not
+    // 77). A loader that cached the old sub-directory mapping, or refuses the
+    // fallback, fails here.
+    if(!CopyFileW(L"loader-search\\search-dependency-root.dll",L"search-dependency.dll",FALSE))return 122;
+    if(!CopyFileW(L"loader-search\\search-consumer.dll",L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll",FALSE))return 123;
+    loaded=LoadLibraryExW(L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll",nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);
+    if(!loaded)return 124;
+    mono_check=(DWORD(WINAPI*)())GetProcAddress(loaded,"search_consumer_value");
+    if(!mono_check||mono_check()!=55)return 125;   // the root copy is the only one left
+    if(!FreeLibrary(loaded))return 126;
+    if(!DeleteFileW(L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll"))return 127;
+    if(!DeleteFileW(L"search-dependency.dll"))return 128;   // root decoy removed
     RemoveDirectoryW(L"MonoBleedingEdge\\EmbedRuntime");
     RemoveDirectoryW(L"MonoBleedingEdge");
     if(!SetDllDirectoryW(L""))return 98;
