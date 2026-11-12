@@ -172,6 +172,10 @@ int main() {
         // forced sync=0: the flag stays (DXGI allows tearing with interval 0)
         CHECK(effectiveFlags(c,0,TEAR)==TEAR);
         CHECK(effectiveFlags(c,0,OTHER)==OTHER);
+        // the bit is DXGI's own ALLOW_TEARING (0x200), not RESTART (0x4): a
+        // wrong bit would let tearing through AND strip RESTART
+        CHECK(TEAR==0x200u);
+        CHECK(effectiveFlags(c,1,0x204u)==0x4u);   // RESTART kept, TEARING dropped
         // opposite direction: a game requesting sync 0 with tearing and no
         // override is forwarded unchanged
         Config off=parse("");

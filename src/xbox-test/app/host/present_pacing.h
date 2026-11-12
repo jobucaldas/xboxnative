@@ -84,7 +84,7 @@ inline uint32_t effectiveSync(const Config& c,uint32_t requested) {
 // frames), so a forced sync>0 clears just that flag and keeps the rest. The
 // opposite direction needs nothing: a game requesting sync 0 with tearing and
 // no override is forwarded unchanged, and a forced sync=0 keeps the flag.
-constexpr uint32_t PRESENT_ALLOW_TEARING=1u<<2;   // DXGI_PRESENT_ALLOW_TEARING's value; kept here so this header stays windows.h-free
+constexpr uint32_t PRESENT_ALLOW_TEARING=0x200u;   // DXGI_PRESENT_ALLOW_TEARING (dxgi.h); kept here so this header stays windows.h-free
 inline uint32_t effectiveFlags(const Config& c,uint32_t sync,uint32_t flags) {
     if(c.enabled&&c.syncSet&&sync>0)flags&=~PRESENT_ALLOW_TEARING;
     return flags;
