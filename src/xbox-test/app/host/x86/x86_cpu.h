@@ -524,12 +524,12 @@ struct Cpu {
             sse_write_reg(modrm_reg, out); return; }
         case 0x71: case 0x72: case 0x73: {  // packed shifts by imm8: /2 sr, /4 sar, /6 sl, 73 /3 psrldq /7 pslldq
             if (!p66) unsupported("0f 71/72/73 (MMX)");
-            // Here the reg field is the /n shift selector; the XMM operand is r/m.
-            Rm r = modrm(); if (!r.isreg) unsupported("0f 71/72/73 mem");
-            unsigned sop = modrm_reg; uint8_t cnt = fetch();
-            uint32_t a[4]; sse_reg(r.regno, a);
+            // Here the reg field is the /n shift selector; the XMM operand is r/m
+            // (register or memory — SSE2 allows a memory destination here).
+            Rm r = modrm(); unsigned sop = modrm_reg; uint8_t cnt = fetch();
+            uint32_t a[4]; sse_read(r, a);
             sse_shift(op, sop, cnt, a);
-            sse_write_reg(r.regno, a); return; }
+            sse_write(r, a); return; }
         case 0x18: { modrm(); if (modrm_reg > 2) unsupported("0f 18 /n"); return; }  // prefetcht0/t1/t2: a hint
         case 0x31: {  // rdtsc: a synthetic counter that only ever advances (games poll it for timing)
             uint64_t t = tsc += 1000;

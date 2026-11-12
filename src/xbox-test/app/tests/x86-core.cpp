@@ -776,6 +776,17 @@ static void test_sse2_stage2() {
             EXPECT(memcmp(out, want, 16) == 0, "psrlq reg cnt=%u", cnt);
             ++alu_cases;
         }
+        // memory-destination form: psllw [mem], imm8 (66 0F 71 /6 mem) writes back
+        {
+            uint32_t memv[4] = {0x03020100u, 0x07060504u, 0, 0};
+            m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
+            m.mem.w128(Machine::DATA, memv);
+            std::vector<uint8_t> code{0x66, 0x0F, 0x71, 0x35, 0x00, 0x00, 0x02, 0x00, 0x03};  // /6 sl, mem operand (mod=0 rm=5 = disp32), imm 3
+            exec(m, code, 0, 0, 0, false);
+            uint32_t got[4]; m.mem.r128(Machine::DATA, got);
+            EXPECT(got[0] == 0x18100800u && got[1] == 0x38302820u, "psllw mem dest: %08x %08x", got[0], got[1]);
+            ++alu_cases;
+        }
     }
     // ---- arithmetic: paddq, pmullw, pmuludq, pmaddwd, psadbw, pavgb, saturating, min/max ----
     {

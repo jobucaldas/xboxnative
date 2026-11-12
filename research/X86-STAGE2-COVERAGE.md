@@ -17,7 +17,7 @@ plus targeted tests per opcode class.
 | pshuflw / pshufhw | F2/F3 0F 70 /r ib | software model, 3 imm each | PASS |
 | shufps | 0F C6 /r ib | software model, 6 imm | PASS |
 | shufpd | 66 0F C6 /r ib | software model, 4 imm | PASS |
-| psllw/psrlw/psraw imm8 | 66 0F 71 /2 /4 /6 ib | 18 cases incl. count 0/16 saturation | PASS |
+| psllw/psrlw/psraw imm8 | 66 0F 71 /2 /4 /6 ib | 18 cases incl. count 0/16 saturation; memory destination tested | PASS |
 | pslld/psrld/psrad imm8 | 66 0F 72 /2 /4 /6 ib | incl. count 32 saturation | PASS |
 | pslldq/psrldq imm8 | 66 0F 73 /7 /3 ib | incl. count 16/255 saturation | PASS |
 | psrlw/d/q xmm,xmm | 66 0F D1/D2/D3 | count from low 64 bits, incl. 16/32/64 saturation | PASS |
