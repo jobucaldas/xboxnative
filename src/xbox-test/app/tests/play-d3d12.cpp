@@ -18,6 +18,19 @@
 // Dispatches over an RWByteAddressBuffer UAV and reads the result back (exit 42
 // only when the GPU wrote the expected values), a UAV barrier, and ResizeBuffers
 // on the live flip-model chain. Same exit-code conventions.
+//
+// Device-creation attempts (console evidence, PR #160: the null-adapter path
+// fails there with DXGI_ERROR_DEVICE_RESET while d3d11 passes): the fixture
+// tries, in order, null adapter at FL 11_0, then the factory's adapter 0
+// (Play wraps it; the host route unwraps it) at FL 11_0, then that adapter at
+// FL 12_0. Exit codes: 10 window, 11 no device at all (null adapter and the
+// fallback factory/enum steps failed with their own codes 81/82 first), 81
+// factory create failed, 82 EnumAdapters1 failed, 83 every D3D12CreateDevice
+// attempt failed. 12 CheckFeatureSupport, 13 queue, 14 factory, 15 swap chain,
+// 16 RTV heap, 17 GetBuffer, 18-22 allocator/list/fence/event, 40-55 the
+// triangle pipeline, 56 debug-layer errors, 57/58 root signature 1.1,
+// 59-69/79/80 the compute pass (43 = readback mismatch, BLOCKED, never a
+// pass), 70-78 ResizeBuffers. The log is the evidence.
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>

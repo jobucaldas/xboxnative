@@ -135,6 +135,14 @@ inline std::string verdict(const std::string& mode, bool finished, bool executed
     // The D3D11/D3D12 fixtures' readback mismatch: the pipeline ran but the
     // pixels did not read back as drawn. A platform limit, never a pass.
     if ((mode == "d3d11" || mode == "d3d12") && code == 43) return "BLOCKED pixel-readback";
+    // The D3D12 fixture's device-creation fallback steps (play-d3d12.cpp):
+    // 81 = the factory for the explicit-adapter attempt could not be created,
+    // 82 = EnumAdapters1(0) failed, 83 = every D3D12CreateDevice attempt
+    // failed (null and explicit adapter, FL 11_0 and 12_0). Each names the
+    // attempt that failed, and each is a FAIL, never a pass or a BLOCKED.
+    if (mode == "d3d12" && code == 81) return "FAIL d3d12-device-factory";
+    if (mode == "d3d12" && code == 82) return "FAIL d3d12-device-enum";
+    if (mode == "d3d12" && code == 83) return "FAIL d3d12-device-all-attempts";
     if (code == 42) return "PASS";
     return "FAIL exit-" + std::to_string(code);
 }
