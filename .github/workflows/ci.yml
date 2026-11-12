@@ -269,4 +269,6 @@ jobs:
         run: bash src/xbox-test/app/tests/x86-core.sh
       - name: "x86 guest surface (mingw CRT program through the interpreter: printf, heap, TLS, VirtualAlloc)"
         run: bash src/xbox-test/app/tests/x86-guest.sh
+      - name: "x86 COM thunks (guest proxies, vtable stubs, refcounts, fault-by-name against a mock host object)"
+        run: bash src/xbox-test/app/tests/x86-com.sh
   # TODO: on-device sections of src/xbox-test/smoke-all.sh need a console and cannot run in GitHub Actions.
