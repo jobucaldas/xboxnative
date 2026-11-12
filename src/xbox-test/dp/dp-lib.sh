@@ -21,12 +21,47 @@ DP_LOCK="${DP_LOCK:-${TMPDIR:-/tmp}/xboxnative-console.lock}"
 DP_JAR="${DP_JAR:-/tmp/dp-cookies.$$}"
 urlenc() { python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' "$1"; }
 b64() { printf %s "$1" | base64 -w0; }
-# curl_dp PATH [curl args]: authenticated, CSRF header from cookie jar
+# curl_dp PATH [curl args]: authenticated, CSRF header from cookie jar.
+# Mutating calls (-X POST/PUT/DELETE/PATCH or any -F/-d/-T/-t) get CSRF 403
+# recovery: a stale cookie makes every POST 403 while GETs still 200, so on a
+# 403 discard the jar, refetch the cookie and retry once; if it still 403s,
+# say so clearly. Status is read from a -D header dump, so callers' own -w/-o/
+# -f handling is untouched.
 curl_dp() {
-  local p="$1"; shift
+  local p="$1" m="" a hdr out rc; shift
+  for a in "$@"; do
+    case $a in
+      -XPOST|-XPUT|-XDELETE|-XPATCH) m=yes ;;
+      -X) m=pending ;;
+      -F|--form) m=yes ;;
+      -d|--data|--data-binary|--data-urlencode) m=yes ;;
+      -T|--upload-file) m=yes ;;
+      POST|PUT|DELETE|PATCH) [ "$m" = pending ] && m=yes ;;
+    esac
+  done
+  hdr=$(mktemp "${TMPDIR:-/tmp}/dp-hdr.XXXXXX")
   [ -s "$DP_JAR" ] || printf 'user = "%s:%s"\n' "${DP_USER:-}" "$DP_PASS" | curl -sk -m 30 ${DP_SOCKS:+--socks5-hostname $DP_SOCKS} -K - -c "$DP_JAR" -o /dev/null "https://$DP_HOST:$DP_PORT/api/os/info"
   local csrf; csrf=$(awk '$6=="CSRF-Token"{print $7}' "$DP_JAR" | tail -1)
-  printf 'user = "%s:%s"\n' "${DP_USER:-}" "$DP_PASS" | curl -sk -m "${DP_TIMEOUT:-120}" ${DP_SOCKS:+--socks5-hostname $DP_SOCKS} -K - -b "$DP_JAR" -H "X-CSRF-Token: $csrf" "$@" "https://$DP_HOST:$DP_PORT$p"
+  out=$(printf 'user = "%s:%s"\n' "${DP_USER:-}" "$DP_PASS" | curl -sk -m "${DP_TIMEOUT:-120}" ${DP_SOCKS:+--socks5-hostname $DP_SOCKS} -K - -b "$DP_JAR" -D "$hdr" -H "X-CSRF-Token: $csrf" "$@" "https://$DP_HOST:$DP_PORT$p"); rc=$?
+  # last HTTP/ line of the dump: multipart uploads (Expect: 100-continue) start
+  # the dump with "HTTP/1.1 100 Continue" before the real response
+  local code; code=$(awk '/^HTTP\//{c=$2} END{print c}' "$hdr")
+  if [ "$m" = yes ] && [ "$code" = 403 ]; then
+    echo "dp-lib: 403 on $p (stale CSRF cookie?) — refetching cookie and retrying once" >&2
+    rm -f "$DP_JAR"
+    [ -s "$DP_JAR" ] || printf 'user = "%s:%s"\n' "${DP_USER:-}" "$DP_PASS" | curl -sk -m 30 ${DP_SOCKS:+--socks5-hostname $DP_SOCKS} -K - -c "$DP_JAR" -o /dev/null "https://$DP_HOST:$DP_PORT/api/os/info"
+    csrf=$(awk '$6=="CSRF-Token"{print $7}' "$DP_JAR" | tail -1)
+    # discard the failed attempt's stdout (-w text included): only the final
+    # attempt's output may reach the caller
+    out=$(printf 'user = "%s:%s"\n' "${DP_USER:-}" "$DP_PASS" | curl -sk -m "${DP_TIMEOUT:-120}" ${DP_SOCKS:+--socks5-hostname $DP_SOCKS} -K - -b "$DP_JAR" -D "$hdr" -H "X-CSRF-Token: $csrf" "$@" "https://$DP_HOST:$DP_PORT$p"); rc=$?
+    code=$(awk '/^HTTP\//{c=$2} END{print c}' "$hdr")
+    if [ "$code" = 403 ]; then
+      echo "dp-lib: still 403 on $p after cookie refetch — CSRF auth is failing for real, not staleness" >&2
+    fi
+  fi
+  rm -f "$hdr"
+  if [ -n "$out" ]; then printf '%s\n' "$out"; fi
+  return "$rc"
 }
 dp_lock() {
   # A caller may hold the console lock for a whole multi-helper transaction.
