@@ -22,9 +22,21 @@ for d in /nix/store/*-mcfgthread-i686-w64-mingw32-*/lib; do [[ -d $d ]] && extra
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/x86-cxxrt.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
 # -static: the whole C++ runtime (libstdc++, libgcc, mcfgthread) links into the
 # exe, so the fixture exercises the interpreter against one self-contained PE
-# and CI needs no runtime DLLs beside it.
-"$cxx32" -O1 -Wall -Wextra -Werror -static "${inc[@]}" "${extra[@]}" \
-  -o "$tmp/fixture-cxx.exe" "$here/x86-cxxrt/fixture-cxx.cpp"
+# and CI needs no runtime DLLs beside it. Some toolchains (Debian's posix-
+# threaded i686 mingw among them) lack the static libs for a full -static
+# link; the fallback is a normal link with the runtime DLLs copied beside the
+# exe — which the stage-3 loader loads as guest DLLs anyway, so the run is
+# the stronger test (a real multi-DLL process).
+if ! "$cxx32" -O1 -Wall -Wextra -Werror -static "${inc[@]}" "${extra[@]}" \
+    -o "$tmp/fixture-cxx.exe" "$here/x86-cxxrt/fixture-cxx.cpp" 2>"$tmp/static-err.log"; then
+  echo "x86-cxxrt: -static link failed ($(tail -n1 "$tmp/static-err.log")); falling back to a DLL-linked runtime"
+  "$cxx32" -O1 -Wall -Wextra -Werror "${inc[@]}" "${extra[@]}" \
+    -o "$tmp/fixture-cxx.exe" "$here/x86-cxxrt/fixture-cxx.cpp"
+  for dll in libstdc++-6.dll libgcc_s_dw2-1.dll libwinpthread-1.dll libmcfgthread-2.dll; do
+    found=$("$cxx32" -print-file-name="$dll" 2>/dev/null || true)
+    [[ -n $found && -f $found ]] && cp "$found" "$tmp/"
+  done
+fi
 "${CXX:-c++}" -std=c++17 -O2 -mno-red-zone -Wall -Wextra -Werror "$here/x86-cxxrt.cpp" -o "$tmp/x86-cxxrt"
 set +e
 out=$("$tmp/x86-cxxrt" "$tmp/fixture-cxx.exe"); rc=$?
