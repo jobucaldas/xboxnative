@@ -93,3 +93,43 @@ resize-path vs not, not PR-vs-PR).
    the practical mitigation is preventing the reset (1) or returning a
    recoverable error code from the resize path instead of letting the reset
    propagate.
+
+## Kill-switch A/B (0.5.302.0 @ a9c9cb4, 2026-11-12)
+
+Six 4-minute synthetic launches (menu only, no settings interaction), three
+with `LocalState\d3d11diag.txt` (diagnostics off) and three without. Evidence:
+`/tmp/xbn-evidence-302/slime-ab/run{1,2,3}-diagoff/`, `run{4,5,6}-diagon/`.
+
+| run | diag | removal | resizes |
+|-----|------|---------|---------|
+| 1 | off | Present 0x887a0005, reason 0x887a0020, ~2 min into gameplay | #1,#2 hr=0 |
+| 2 | off | Present 0x887a0005, reason 0x887a0020, ~2 min into gameplay | #1,#2,#3 hr=0 |
+| 3 | off | none (clean 240 s) | #1,#2 hr=0 |
+| 4-6 | on | none | #1,#2 hr=0 |
+
+What this settles:
+
+* **The kill switch works**: the `diagnostics off (LocalState\d3d11diag.txt):
+  no vtable hooks installed` line appears in every OFF run and no ON run, and
+  the per-resize logging stays live with the switch armed.
+* **The vtable hooks are dynamically suggestive, not conclusive**: the removal
+  reproduced only in the diag-OFF arm (2/3 vs 0/3), the direction "the hooks
+  are implicated" predicts — but n=3 per arm and one clean OFF run prove the
+  failure is stochastic either way, so this cannot separate "the hooks cause
+  it" from "the hooks' overhead perturbs timing and masks a timing-sensitive
+  driver/vGPU bug". Both remain open.
+* **The removal is not resize-coupled here**: both failures landed ~2 min into
+  gameplay with every completed resize at hr=0, unlike the 0.5.279 crash
+  (4th-resize window). The lockmode experiment remains the discriminator for
+  the settings-change path the owner actually hit.
+* **The reason code is first-read vs second-read**: with the hooks off, the
+  only reader is `presentFailure`, which reports 0x887a0020
+  (DRIVER_INTERNAL_ERROR). The 0.5.275-era 0x887a0007 "invalid command" line
+  came from `noteFailure` (#133), a second `GetDeviceRemovedReason` call that
+  only runs when the hooks are installed — the driver answered differently on
+  the later read. "Invalid command" was possibly never the driver's first
+  answer; evidence collected with hooks on must be read with that in mind.
+
+Next discriminators, in order: more diag-OFF runs (6-8) to establish the
+OFF-arm rate; then the `lockmode.txt` opt-in for the settings-change path the
+owner actually hit.
