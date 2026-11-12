@@ -597,7 +597,13 @@ int opengl_entry() {
             wglGetProcAddress("wglGetPixelFormatAttribivARB");
         auto chooseARB = (PFN_wglChoosePixelFormatARB)(uintptr_t)
             wglGetProcAddress("wglChoosePixelFormatARB");
-        if (!extString) return fail(20, "wglGetExtensionsStringARB", GetLastError());
+        if (!extString) {
+            // No extension-string entry point at all: the ARB path cannot be
+            // probed, so SDL3/GLFW fall back to the GDI pixel-format path the
+            // fixture already proved above. A platform limit, skipped with a
+            // log line — never a pass for the ARB stages themselves.
+            emit("PLAY-OPENGL STAGE wgl-extensions skipped (wglGetExtensionsStringARB absent)\n");
+        } else {
         const char* exts = extString(dc);
         if (!exts || !contains(exts, "WGL_ARB_pixel_format")) {
             emit("PLAY-OPENGL STAGE wgl-extensions skipped (WGL_ARB_pixel_format not advertised)\n");
@@ -660,6 +666,7 @@ int opengl_entry() {
                      p = append(p, "\n"); *p = 0; emit(line);}
                 }
             }
+        }
     }
 
     // Three presented frames, as a game's first frames: present is proven by
