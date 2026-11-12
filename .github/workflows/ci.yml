@@ -277,4 +277,6 @@ jobs:
         run: bash src/xbox-test/app/tests/x86-tls.sh
       - name: "x86 launch route (i686 fixture through the launcher's PE32 entry point and result mapping)"
         run: bash src/xbox-test/app/tests/x86-launch-route.sh
+      - name: "x86 C++ runtime fixture (iostream, std::string, exceptions, std::thread)"
+        run: bash src/xbox-test/app/tests/x86-cxxrt.sh --wine
   # TODO: on-device sections of src/xbox-test/smoke-all.sh need a console and cannot run in GitHub Actions.
