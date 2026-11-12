@@ -121,27 +121,41 @@ inline void init_process(Memory& mem, Cpu& cpu, const Image& img, uint32_t pid =
 // handle = image base, reason = DLL_PROCESS_ATTACH (1), reserved = NULL. Their
 // return value is ignored and a callback that faults propagates: a game's TLS
 // initializer failing must not look like a clean start.
-constexpr uint32_t TLS_SLOT_ADDR = 0x7FFDC000;  // one page: ThreadLocalStoragePointer array + index fallback
+// Implicit TLS for the main thread, the way the Windows loader sets it up: the
+// per-thread block is a fresh allocation, not the image template — the raw data
+// ([StartAddressOfRawData, EndAddressOfRawData) in the mapped image) is copied
+// there, SizeOfZeroFill bytes are appended zeroed, TEB32.ThreadLocalStoragePointer
+// (fs:[0x2C]) points at a one-slot array holding the block address, and the image's
+// index variable gets slot 0. Then every TLS callback in the 0-terminated
+// AddressOfCallBacks array runs with DLL_PROCESS_ATTACH (the initial thread gets no
+// DLL_THREAD_ATTACH). Callback return values are ignored; a callback that faults
+// propagates, so a game's TLS initializer failing never looks like a clean start.
+// Returns the index (0).
+constexpr uint32_t TLS_SLOT_ADDR = 0x7FFDC000;  // ThreadLocalStoragePointer array + the main thread's TLS block
 inline uint32_t init_tls(Memory& mem, Cpu& cpu, const Image& img, std::vector<uint32_t>* called = nullptr) {
     if (!img.tls.present) return 0;
     uint32_t raw = img.tls.end - img.tls.start;
-    uint32_t block = img.tls.start;  // Windows places the block at StartAddressOfRawData
-    // The raw data already sits in the mapped image at tls.start (relocated in
-    // place); the block is that data followed by SizeOfZeroFill zero bytes.
-    if (!mem.mapped(block) || !mem.mapped(block + raw + img.tls.zero_fill - 1))
-        throw std::runtime_error("PE32 TLS raw data outside the mapped image");
-    // The one-slot ThreadLocalStoragePointer array for the main thread.
-    mem.map(TLS_SLOT_ADDR, 4096, PROT_R | PROT_W);
-    mem.w32(TLS_SLOT_ADDR, block);
+    // The template lives in the mapped image; reading it is bounds-checked.
+    for (uint32_t a = img.tls.start; raw && a < img.tls.end; a += Memory::PAGE)
+        if (!mem.mapped(a)) throw std::runtime_error("PE32 TLS raw data outside the mapped image");
+    uint32_t total = raw + img.tls.zero_fill;
+    // One page: slot array at +0, the block at 16 (room for ~4 KiB of TLS; a
+    // bigger template maps more pages).
+    uint32_t pages = (16 + total + Memory::PAGE - 1) / Memory::PAGE;
+    mem.map(TLS_SLOT_ADDR, pages * Memory::PAGE, PROT_R | PROT_W);
+    uint32_t block = TLS_SLOT_ADDR + 16;
+    mem.w32(TLS_SLOT_ADDR, block);          // ThreadLocalStoragePointer[0]
     mem.w32(TEB_ADDR + 0x2C, TLS_SLOT_ADDR);
-    // The index variable: implicit TLS is always slot 0 for the first module.
+    for (uint32_t i = 0; i < raw; ++i) mem.w8(block + i, mem.r8(img.tls.start + i));
+    for (uint32_t i = raw; i < total; ++i) mem.w8(block + i, 0);  // SizeOfZeroFill
+    // The index variable: implicit TLS is slot 0 for the first module.
     mem.w32(img.tls.index_ptr, 0);
-    // TLS callbacks, 0-terminated array of VAs, called with PROCESS_ATTACH.
+    // TLS callbacks, 0-terminated array of VAs, called (handle, reason, reserved).
     for (uint32_t p = img.tls.callbacks; p; p += 4) {
         uint32_t fn = mem.r32(p);
         if (!fn) break;
         if (called) called->push_back(fn);
-        cpu.call(fn, {img.base, 1, 0});  // DLL_PROCESS_ATTACH
+        cpu.call(fn, {img.base, 1, 0});     // DLL_PROCESS_ATTACH
     }
     return 0;
 }
