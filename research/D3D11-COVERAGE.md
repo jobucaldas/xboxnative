@@ -26,16 +26,16 @@ itself (hook audit, kill switch) is another work stream and out of scope here.
 | 7 | MSAA (4x render target, ResolveSubresource, quality levels) | `play-d3d11.cpp` MSAA pass (exit 50-54) | off-device only |
 | 8 | GenerateMips (mip chain texture, SRV, linear sampler) | `play-d3d11.cpp` mips pass (exit 55-58) | off-device only |
 | 9 | Deferred contexts + FinishCommandList + ExecuteCommandList | `play-d3d11.cpp` deferred pass (exit 60-63) | off-device only |
-| 10 | Stream-out (SO buffers, DrawAuto) | — | gap (planned) |
-| 11 | Indirect draws (DrawInstancedIndirect / DrawIndexedInstancedIndirect) | — | gap (planned) |
-| 12 | Compute shaders + UAVs + structured buffers | — | gap (planned) |
+| 10 | Stream-out (SO buffers, `CreateGeometryShaderWithStreamOutput`, capture readback) | `play-d3d11.cpp` stream-out pass (exit 64-67) | off-device only |
+| 11 | Indirect draws (DrawInstancedIndirect from a MISC_DRAWINDIRECT_ARGS buffer) | `play-d3d11.cpp` indirect pass (exit 68-71) | off-device only |
+| 12 | Compute shaders + UAVs + structured buffers | — | gap (needs new committed cs_5_0 DXBC) |
 | 13 | Tessellation (HS/DS) | — | gap (needs new committed DXBC) |
-| 14 | Texture arrays / cube maps (array slices, cubemap SRV) | — | gap |
-| 15 | BC1-7 compressed formats (CreateTexture2D + SRV + sample) | — | gap |
-| 16 | Queries and predication (occlusion query, SetPredication) | — | gap (planned) |
-| 17 | ResizeBuffers / fullscreen-toggle path with RTV rebinding | — | gap (planned) |
-| 18 | Indexed draws (IB + DrawIndexed) | — | gap (planned) |
-| 19 | Depth-stencil (DSV, depth test) | — | gap |
+| 14 | Texture arrays (RTV per slice, CopySubresourceRegion slice→slice) | `play-d3d11.cpp` array pass (exit 87-90) | off-device only |
+| 15 | BC1-7 compressed formats (create + copy round-trip; sampling needs a sampler PS) | `play-d3d11.cpp` BC1 pass (exit 91-94) | off-device only |
+| 16 | Queries (occlusion query, non-blocking GetData poll with bounded spin) | `play-d3d11.cpp` query pass (exit 72-75); predication still a gap | off-device only |
+| 17 | ResizeBuffers (back-buffer refs released first, re-fetched, redraw, present) | `play-d3d11.cpp` resize pass (exit 76-79) | off-device only |
+| 18 | Indexed draws (IB + DrawIndexed, rotated index order) | `play-d3d11.cpp` indexed pass (exit 80-82) | off-device only |
+| 19 | Depth-stencil (DSV, LESS_EQUAL test, dynamic VB upload per draw) | `play-d3d11.cpp` depth pass (exit 83-86) | off-device only |
 | 20 | Blend/dither state variety, dual-source blend | — | gap (diagnostics count only) |
 | 21 | Capability probes a game branches on (CheckFormatSupport, CheckMultisampleQualityLevels, CheckFeatureSupport) logged | `d3d11-diag` mode | covered |
 | 22 | Device-removed reason after a failed Present | `d3d11_diag.h` overlay (another stream) | covered there |
