@@ -318,4 +318,53 @@ inline std::string authorization(std::string_view user_hash, std::string_view to
     return "XBL3.0 x=" + std::string(user_hash) + ";" + std::string(token);
 }
 
+// A sign-in address, not a name. On a desktop KnownUserProperties.AccountName
+// is often the Microsoft address; on a console it is the Xbox account name.
+inline bool looks_like_email(std::string_view s) {
+    std::size_t at = s.find('@');
+    return at != std::string_view::npos && at > 0 && at + 1 < s.size();
+}
+
+// Which of the two Windows.System.User properties to draw. AccountName first:
+// on a console that is the Xbox account name (the gamertag the console's own
+// profile page shows), while DisplayName is the Microsoft account's display
+// name. An address is never a name, so it falls back to DisplayName.
+inline std::string choose_name(std::string_view account_name, std::string_view display_name) {
+    std::string account = clean_gamertag(account_name);
+    if (!account.empty() && !looks_like_email(account)) return account;
+    return clean_gamertag(display_name);
+}
+
+// GetPropertyAsync takes a property NAME, not an enum, so a console whose user
+// property store carries more than the documented KnownUserProperties can be
+// asked for the Xbox ones directly. These are tried in order, most specific
+// first; the first non-empty, non-address value wins.
+struct Property {
+    const char* name;
+    std::string value;
+};
+inline std::string choose_name_from_properties(const std::vector<Property>& properties,
+                                               std::string* chosen_from = nullptr) {
+    if (chosen_from) chosen_from->clear();
+    // Two passes: the Xbox-specific names first, then the documented pair with
+    // AccountName ahead of DisplayName (the console's account name beats the
+    // Microsoft account's display name). A blank or address-valued property
+    // never wins.
+    auto rank = [](std::string_view name) {
+        if (name == "AccountName") return 1;
+        if (name == "DisplayName") return 2;
+        return 0;   // the Xbox names
+    };
+    for (int wanted = 0; wanted <= 2; ++wanted) {
+        for (auto const& p : properties) {
+            if (rank(p.name) != wanted) continue;
+            std::string name = clean_gamertag(p.value);
+            if (name.empty() || looks_like_email(name)) continue;
+            if (chosen_from) *chosen_from = p.name;
+            return name;
+        }
+    }
+    return {};
+}
+
 }  // namespace xbox_gamertag

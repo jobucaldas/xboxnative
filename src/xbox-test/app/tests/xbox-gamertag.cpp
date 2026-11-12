@@ -107,6 +107,34 @@ int main() {
     assert(authorization("", "tok").empty());
     assert(authorization("uhs", "").empty());
 
+    // ---- which Windows.System.User property names the player
+    assert(looks_like_email("someone@example.com"));
+    assert(!looks_like_email("jobucaldas"));
+    assert(!looks_like_email("@example.com"));
+    assert(!looks_like_email("someone@"));
+    // the console's account name wins over the Microsoft display name
+    assert(choose_name("jobucaldas", "Jobu") == "jobucaldas");
+    // an address is never a name
+    assert(choose_name("someone@example.com", "Jobu") == "Jobu");
+    // a blank account name falls back, and both blank stays blank
+    assert(choose_name("  ", "Jobu") == "Jobu");
+    assert(choose_name("", "").empty());
+    // trimming and control-character rejection still apply
+    assert(choose_name(" jobucaldas\r\n", "Jobu") == "jobucaldas");
+    assert(choose_name("bad\x01name", "Jobu") == "Jobu");
+
+    // ---- a console that answers more than the documented properties
+    std::string from;
+    assert(choose_name_from_properties({{"Gamertag", "jobucaldas"}, {"DisplayName", "Jobu"}}, &from) == "jobucaldas");
+    assert(from == "Gamertag");
+    // the documented two are only the fallback
+    assert(choose_name_from_properties({{"DisplayName", "Jobu"}, {"AccountName", "jobucaldas"}}, &from) == "jobucaldas");
+    assert(from == "AccountName");
+    // a blank or address-valued Xbox property does not win
+    assert(choose_name_from_properties({{"Gamertag", "  "}, {"AccountName", "jobucaldas"}}, &from) == "jobucaldas");
+    assert(choose_name_from_properties({{"Gamertag", "a@b.c"}, {"DisplayName", "Jobu"}}, &from) == "Jobu");
+    assert(choose_name_from_properties({}, &from).empty() && from.empty());
+
     std::puts("xbox_gamertag: ok");
     return 0;
 }
