@@ -553,9 +553,16 @@ DWORD d3d_entry() {
     dsDescState.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;
     ID3D11DepthStencilState* dsState=nullptr;
     if(FAILED(device->CreateDepthStencilState(&dsDescState,&dsState))||!dsState)return 84;
-    // The control: depth OFF — the later (near red) draw must win on draw
-    // order alone. Both checks together prove the ordering came from the
-    // depth test, not from the draw sequence or a fixed colour.
+    // The two draws use the SAME order in both halves — near red first, far
+    // green second — so the control and the test differ only in the depth
+    // state: with DepthEnable=FALSE the later (far green) draw wins on draw
+    // order; with DepthEnable=TRUE + LESS_EQUAL the near red wins on depth.
+    // The two expected colours differ, so a layer that binds the DSV but
+    // never tests fails the depth-ON half. Vertices are float3 POSITION +
+    // float4 COLOR (7 floats, 28 bytes) matching dLayout exactly. The VS
+    // passes z through, so the two draws use different vertex data: one
+    // dynamic vertex buffer, rewritten per draw (the Map WRITE_DISCARD a
+    // game's per-frame upload uses — itself a covered feature).
     D3D11_DEPTH_STENCIL_DESC dsOffDesc{};
     dsOffDesc.DepthEnable=FALSE;
     ID3D11DepthStencilState* dsOff=nullptr;
@@ -566,55 +573,50 @@ DWORD d3d_entry() {
     ID3D11RenderTargetView* dsBinds[]={rtv};
     context->OMSetRenderTargets(1,dsBinds,dsv);
     context->RSSetViewports(1,&viewport);
-    // Far green triangle (z=0.8) first, then near red (z=0.2): the shared
-    // centre pixel must end red with the test off (draw order) AND with the
-    // test on LESS_EQUAL (depth). The VS passes z through, so the two draws
-    // use different vertex data: one dynamic vertex buffer, rewritten per
-    // draw (the Map WRITE_DISCARD a game's per-frame upload uses — itself a
-    // covered feature).
     D3D11_BUFFER_DESC dvbDesc{};
-    dvbDesc.ByteWidth=sizeof(float)*6*3;dvbDesc.Usage=D3D11_USAGE_DYNAMIC;
+    dvbDesc.ByteWidth=sizeof(float)*7*3;dvbDesc.Usage=D3D11_USAGE_DYNAMIC;
     dvbDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;dvbDesc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
     ID3D11Buffer* dynVb=nullptr;
     if(FAILED(device->CreateBuffer(&dvbDesc,nullptr,&dynVb))||!dynVb)return 85;
-    const float triFar[3][6]={
-        {-0.75f,0.75f,0.8f,0,1,0},{0.75f,0.75f,0.8f,0,1,0},{0.0f,-0.75f,0.8f,0,1,0}};
+    UINT dStrideUint=28;   // float3 POSITION + float4 COLOR = 28 bytes, matching dLayout
+    const float triNear[3][7]={
+        {-0.75f,0.75f,0.2f,1,0,0,1},{0.75f,0.75f,0.2f,1,0,0,1},{0.0f,-0.75f,0.2f,1,0,0,1}};
+    const float triFar[3][7]={
+        {-0.75f,0.75f,0.8f,0,1,0,1},{0.75f,0.75f,0.8f,0,1,0,1},{0.0f,-0.75f,0.8f,0,1,0,1}};
     D3D11_MAPPED_SUBRESOURCE mM{};
     if(FAILED(context->Map(dynVb,0,D3D11_MAP_WRITE_DISCARD,0,&mM))||!mM.pData)return 85;
-    memcpy(mM.pData,triFar,sizeof triFar);
+    memcpy(mM.pData,triNear,sizeof triNear);
     context->Unmap(dynVb,0);
     context->IASetInputLayout(dLayout);
     ID3D11Buffer* rBinds[]={dynVb};
-    context->IASetVertexBuffers(0,1,rBinds,&stride,&offset);
+    context->IASetVertexBuffers(0,1,rBinds,&dStrideUint,&offset);
     context->VSSetShader(dvs,nullptr,0);
     context->PSSetShader(dps,nullptr,0);
     context->Draw(3,0);
-    const float triNear[3][6]={
-        {-0.75f,0.75f,0.2f,1,0,0},{0.75f,0.75f,0.2f,1,0,0},{0.0f,-0.75f,0.2f,1,0,0}};
     if(FAILED(context->Map(dynVb,0,D3D11_MAP_WRITE_DISCARD,0,&mM))||!mM.pData)return 85;
-    memcpy(mM.pData,triNear,sizeof triNear);
+    memcpy(mM.pData,triFar,sizeof triFar);
     context->Unmap(dynVb,0);
     context->Draw(3,0);
     context->CopyResource(staging,target);
     D3D11_MAPPED_SUBRESOURCE dMapped2{};
     if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&dMapped2))||!dMapped2.pData)return 85;
     const unsigned char* dPix=static_cast<const unsigned char*>(dMapped2.pData)+32*dMapped2.RowPitch+32*4;
-    const bool orderRed=dPix[0]>0x80&&dPix[1]<0x40&&dPix[2]<0x40;
+    const bool orderGreen=dPix[1]>0x80&&dPix[0]<0x40&&dPix[2]<0x40;
     context->Unmap(staging,0);
-    if(!orderRed)return 86;   // BLOCKED: even draw order did not reach the target
-    // Now the real test: depth ON, LESS_EQUAL, same two draws from a cleared
-    // target. The near red triangle must still win — and a layer that ignores
-    // the depth state paints the same picture either way, so this only
-    // counts after the control above passed with the identical draw list.
+    if(!orderGreen)return 86;   // BLOCKED: even draw order did not reach the target
+    // Now the real test: depth ON, LESS_EQUAL, the identical draw list from a
+    // cleared target. The near red triangle must win — the control above
+    // proved the same list paints green without the test, so red here can
+    // only come from LESS_EQUAL ordering.
     context->ClearRenderTargetView(rtv,clear);
     context->ClearDepthStencilView(dsv,D3D11_CLEAR_DEPTH,1.0f,0);
     context->OMSetDepthStencilState(dsState,0);
     if(FAILED(context->Map(dynVb,0,D3D11_MAP_WRITE_DISCARD,0,&mM))||!mM.pData)return 85;
-    memcpy(mM.pData,triFar,sizeof triFar);
+    memcpy(mM.pData,triNear,sizeof triNear);
     context->Unmap(dynVb,0);
     context->Draw(3,0);
     if(FAILED(context->Map(dynVb,0,D3D11_MAP_WRITE_DISCARD,0,&mM))||!mM.pData)return 85;
-    memcpy(mM.pData,triNear,sizeof triNear);
+    memcpy(mM.pData,triFar,sizeof triFar);
     context->Unmap(dynVb,0);
     context->Draw(3,0);
     context->CopyResource(staging,target);
