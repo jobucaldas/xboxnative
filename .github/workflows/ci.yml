@@ -135,6 +135,12 @@ jobs:
       # call order. Host logic, so Wine runs it headless.
       - name: Resize drain submits the query before waiting on it
         run: bash src/xbox-test/app/tests/drain-order.sh
+      # Every vtable slot the diagnostics and the swap-chain overlay hook by
+      # number is checked against the SDK's own vtbl structs with offsetof; a
+      # drifted slot fails this build instead of forwarding to the wrong method
+      # on the console. Compile-only, no device or Wine needed.
+      - name: D3D11 diagnostics slot audit against the SDK vtable order
+        run: bash src/xbox-test/app/tests/d3d11-diag-slots.sh
   strict-imports:
     runs-on: ubuntu-latest
     steps:
