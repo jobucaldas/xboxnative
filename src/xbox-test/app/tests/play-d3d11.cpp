@@ -524,6 +524,69 @@ DWORD d3d_entry() {
     context->OMSetDepthStencilState(nullptr,0);
     if(!depthGreen)return 86;   // BLOCKED: the depth test did not order the draws
 
+    // ---- Texture-array pass: render to slice 0, copy to slice 1, read back ----
+    // Terrain atlases, skybox cross-fades and Cascaded Shadow Maps put array
+    // slices behind RTVArraySlice/DepthSlice; a layer that binds the view but
+    // renders into slice 0 regardless corrupts every slice's owner. Render to
+    // slice 0, CopySubresourceRegion into slice 1, read slice 1 back. Exits
+    // 87-90 name the step; 90 is BLOCKED.
+    D3D11_TEXTURE2D_DESC arrDesc{};
+    arrDesc.Width=64;arrDesc.Height=64;arrDesc.MipLevels=1;arrDesc.ArraySize=2;
+    arrDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;arrDesc.SampleDesc.Count=1;
+    arrDesc.Usage=D3D11_USAGE_DEFAULT;arrDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
+    ID3D11Texture2D* arrTexture=nullptr;
+    if(FAILED(device->CreateTexture2D(&arrDesc,nullptr,&arrTexture))||!arrTexture)return 87;
+    D3D11_RENDER_TARGET_VIEW_DESC arrRtvDesc{};
+    arrRtvDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+    arrRtvDesc.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+    arrRtvDesc.Texture2DArray.MipSlice=0;arrRtvDesc.Texture2DArray.ArraySize=1;
+    arrRtvDesc.Texture2DArray.FirstArraySlice=0;
+    ID3D11RenderTargetView* arrView=nullptr;
+    if(FAILED(device->CreateRenderTargetView(arrTexture,&arrRtvDesc,&arrView))||!arrView)return 87;
+    ID3D11RenderTargetView* arrBinds[]={arrView};
+    context->OMSetRenderTargets(1,arrBinds,nullptr);
+    context->RSSetViewports(1,&viewport);
+    const FLOAT arrClear[4]={1,0,0,1};
+    context->ClearRenderTargetView(arrView,arrClear);
+    context->CopySubresourceRegion(arrTexture,1,0,0,0,arrTexture,0,nullptr);
+    // Read slice 1 back through the staging texture (same shape, one slice).
+    context->CopySubresourceRegion(staging,0,0,0,0,arrTexture,1,nullptr);
+    D3D11_MAPPED_SUBRESOURCE aMapped{};
+    if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&aMapped))||!aMapped.pData)return 88;
+    const unsigned char* aPixel=static_cast<const unsigned char*>(aMapped.pData)+16*aMapped.RowPitch+16*4;
+    const bool arrayRed=aPixel[0]>0x80&&aPixel[1]<0x40&&aPixel[2]<0x40;
+    context->Unmap(staging,0);
+    arrView->Release();arrTexture->Release();
+    if(!arrayRed)return 90;   // BLOCKED: the slice copy never reached slice 1
+
+    // ---- BC-format pass: a BC1 block through create + staging readback ----
+    // Compressed textures are most of a game's VRAM; the layer must accept
+    // BC1-7 creation and copy them unchanged. A one-block BC1 texture (the
+    // block encodes two colours: white, black), staged and mapped back: the
+    // 8 bytes must survive byte-for-byte, which proves the format is routed
+    // without re-encoding. Exits 91-94 name the step; 94 is BLOCKED.
+    D3D11_TEXTURE2D_DESC bcDesc{};
+    bcDesc.Width=4;bcDesc.Height=4;bcDesc.MipLevels=1;bcDesc.ArraySize=1;
+    bcDesc.Format=DXGI_FORMAT_BC1_UNORM;bcDesc.SampleDesc.Count=1;
+    bcDesc.Usage=D3D11_USAGE_DEFAULT;bcDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    // One BC1 block: colour0=0xFFFF (white), colour1=0x0000, indices all 0.
+    const unsigned char bc1Block[8]={0xFF,0xFF,0x00,0x00,0x00,0x00,0x00,0x00};
+    D3D11_SUBRESOURCE_DATA bcInit{};bcInit.pSysMem=bc1Block;bcInit.SysMemPitch=8;
+    ID3D11Texture2D* bcTexture=nullptr;
+    if(FAILED(device->CreateTexture2D(&bcDesc,&bcInit,&bcTexture))||!bcTexture)return 91;
+    D3D11_TEXTURE2D_DESC bcStageDesc=bcDesc;
+    bcStageDesc.BindFlags=0;bcStageDesc.Usage=D3D11_USAGE_STAGING;
+    bcStageDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* bcStaging=nullptr;
+    if(FAILED(device->CreateTexture2D(&bcStageDesc,nullptr,&bcStaging))||!bcStaging)return 92;
+    context->CopyResource(bcStaging,bcTexture);
+    D3D11_MAPPED_SUBRESOURCE bcMapped{};
+    if(FAILED(context->Map(bcStaging,0,D3D11_MAP_READ,0,&bcMapped))||!bcMapped.pData)return 93;
+    const bool bcRoundTrip=memcmp(bcMapped.pData,bc1Block,sizeof bc1Block)==0;
+    context->Unmap(bcStaging,0);
+    bcStaging->Release();bcTexture->Release();
+    if(!bcRoundTrip)return 94;   // BLOCKED: the BC1 block did not survive the copy
+
     // ---- the diagnostics: calls the device must reject, logged once ----
     D3D11_TEXTURE2D_DESC texture{};texture.Width=256;texture.Height=256;texture.MipLevels=1;texture.ArraySize=1;
     texture.Format=DXGI_FORMAT_UNKNOWN;texture.SampleDesc.Count=1;texture.Usage=D3D11_USAGE_DEFAULT;texture.BindFlags=D3D11_BIND_SHADER_RESOURCE;

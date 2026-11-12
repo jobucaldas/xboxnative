@@ -155,6 +155,8 @@ inline std::string verdict(const std::string& mode, bool finished, bool executed
         if (code == 75) return "BLOCKED occlusion-query";
         if (code == 82) return "BLOCKED indexed-draw";
         if (code == 86) return "BLOCKED depth-test";
+        if (code == 90) return "BLOCKED texture-array-copy";
+        if (code == 94) return "BLOCKED bc1-copy";
     }
     // The D3D10 drawing fixture blocks the same way: every pass ran but the
     // pixels (or streamed vertices) did not read back as drawn.
