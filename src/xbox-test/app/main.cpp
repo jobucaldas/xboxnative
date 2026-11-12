@@ -334,6 +334,43 @@ static std::string persona_name() { std::lock_guard<std::mutex> l(g_personaM); r
 static std::mutex g_xboxM; static std::vector<std::string> g_xboxNames;
 static std::atomic<int> g_xboxState{0};   // 0 none, 1 loading, 2 ready, 3 unavailable
 static std::vector<std::string> xbox_user_names() { std::lock_guard<std::mutex> l(g_xboxM); return g_xboxNames; }
+// Item D25: the console user's own picture (Windows.System.User.GetPictureAsync),
+// decoded once on the same worker. The library's profile row shows the XBOX
+// identity — name and avatar — and the Steam persona lives on the profile page.
+static std::mutex g_xboxPicM; static ui::Image g_xboxPic; static std::vector<uint32_t> g_xboxPicBuf;
+static std::atomic<int> g_xboxPicState{0};   // 0 none, 1 loading, 2 ready, 3 failed
+static bool wic_decode_buf(const std::string& jpg, std::vector<uint32_t>& pix, int& w, int& h, int maxW, int maxH, int& hrOut);   // defined below
+static ui::Image xbox_user_picture() {
+    std::lock_guard<std::mutex> l(g_xboxPicM);
+    return g_xboxPicState.load(std::memory_order_relaxed) == 2 ? g_xboxPic : ui::Image{};
+}
+static void xbox_picture_fetch(winrt::Windows::System::User user) {
+    init_apartment(apartment_type::multi_threaded);
+    std::vector<uint32_t> pix; int w = 0, h = 0, hr = 0;
+    try {
+        auto ref = user.GetPictureAsync(winrt::Windows::System::UserPictureSize::Size64x64).get();
+        if (!ref) { g_xboxPicState = 3; return; }
+        auto stream = ref.OpenReadAsync().get();
+        const uint32_t n = stream.Size();
+        if (n < 64 || n > 4u << 20) { logf("accounts: Xbox picture size %u rejected", n); g_xboxPicState = 3; return; }
+        // The stream is read through a DataReader: an IBuffer cannot be built
+        // from a raw array_view, and the reader gives one contiguous buffer.
+        winrt::Windows::Storage::Streams::DataReader rd(stream);
+        rd.LoadAsync(n).get();
+        std::vector<uint8_t> bytes(n);
+        rd.ReadBytes(winrt::array_view<uint8_t>(bytes.data(), bytes.data() + n));
+        std::string raw(reinterpret_cast<const char*>(bytes.data()), n);
+        if (!wic_decode_buf(raw, pix, w, h, 128, 128, hr)) { logf("accounts: Xbox picture decode failed hr=0x%08x", (unsigned)hr); g_xboxPicState = 3; return; }
+    } catch (winrt::hresult_error const& e) {
+        logf("accounts: Xbox picture unavailable hr=0x%08x", (unsigned)e.code().value);
+        g_xboxPicState = 3; return;
+    } catch (...) { g_xboxPicState = 3; return; }
+    std::lock_guard<std::mutex> l(g_xboxPicM);
+    g_xboxPicBuf = std::move(pix);
+    g_xboxPic = ui::Image{g_xboxPicBuf.data(), w, h, w};
+    g_xboxPicState = 2;
+    logf("accounts: Xbox picture ready (%dx%d)", w, h);
+}
 static void xbox_users_fetch() {
     init_apartment(apartment_type::multi_threaded);
     std::vector<std::string> names;
@@ -347,6 +384,11 @@ static void xbox_users_fetch() {
             } catch (...) {}
             if (name.empty()) name = "Xbox user";
             names.push_back(name);
+            if (names.size() == 1) {   // the first user is the one the sidebar names
+                g_xboxPicState = 1;
+                winrt::Windows::System::User first = u;
+                std::thread([first] { xbox_picture_fetch(first); }).detach();
+            }
         }
     } catch (...) { logf("accounts: Windows.System.User unavailable on this console"); }
     { std::lock_guard<std::mutex> l(g_xboxM); g_xboxNames = names; }
@@ -520,6 +562,13 @@ static void start_avatar_fetch() {
             return;
         }
     }
+}
+// Item D25: the decoded Steam avatar for the PROFILE page (the account list).
+// The library's sidebar row shows the Xbox user's picture instead, so this is
+// the only place the Steam identity's face appears.
+static ui::Image steam_avatar() {
+    std::lock_guard<std::mutex> l(g_avatarM);
+    return g_avatarState.load(std::memory_order_relaxed) == 2 ? g_avatarPix : ui::Image{};
 }
 
 // ---------------------------------------------------------------- detail-page hero banner (item 13)
@@ -1530,18 +1579,26 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void draw_accounts(ui::Canvas& c) {
         static std::vector<std::string> names, sources;
         static std::vector<const char*> namePtrs, sourcePtrs;
-        names.clear(); sources.clear(); namePtrs.clear(); sourcePtrs.clear();
-        for (const std::string& n : xbox_user_names()) { names.push_back(n); sources.push_back("Xbox"); }
+        static std::vector<ui::Image> avatars;
+        names.clear(); sources.clear(); namePtrs.clear(); sourcePtrs.clear(); avatars.clear();
+        start_xbox_users_fetch();
+        const ui::Image xbPic = xbox_user_picture();
+        for (const std::string& n : xbox_user_names()) { names.push_back(n); sources.push_back("Xbox"); avatars.push_back(xbPic); }
         // Item D16: the Steam row is the persona when signed in, else the
         // sign-in action; the action row below it says what A will do.
         const bool signedIn = g_steamSignedIn.load();
         const std::string steam = signedIn ? persona_name() : std::string();
         names.push_back(signedIn ? (steam.empty() ? "Steam" : steam) : "Sign in to Steam");
         sources.push_back(signedIn ? "Steam" : "Not signed in");
+        // Item D25: the Steam account's own face — this is the profile page,
+        // the one place the Steam identity is shown.
+        if (signedIn) start_avatar_fetch();
+        avatars.push_back(signedIn ? steam_avatar() : ui::Image{});
         for (size_t i = 0; i < names.size(); ++i) { namePtrs.push_back(names[i].c_str()); sourcePtrs.push_back(sources[i].c_str()); }
         ui_launcher::AccountVM v;
         v.names = namePtrs.empty() ? nullptr : namePtrs.data();
         v.sources = sourcePtrs.empty() ? nullptr : sourcePtrs.data();
+        v.avatars = avatars.empty() ? nullptr : avatars.data();
         v.n = (int)namePtrs.size();
         v.action_label = ui_nav::account_steam_label(signedIn);
         v.sel = m_accountsSel;
@@ -2350,9 +2407,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     int sidebar_focus_row() const { return m_focus == ui_nav::Focus::sidebar ? m_sidebar : -1; }
     ui_launcher::SidebarVM sidebar_vm() {
         ui_launcher::SidebarVM sb;
-        // Item D14: the profile row names the CONSOLE's signed-in Xbox user
-        // when Windows.System.User reports one, and says which account it is
-        // showing; the Steam persona is the labelled fallback.
+        // Item D25: the library's profile row is the CONSOLE's signed-in Xbox
+        // user — name and avatar — because that is who is holding the pad. The
+        // Steam persona is the profile page's identity, not the library's; it
+        // only stands in here when the console reports no user at all.
         start_xbox_users_fetch();
         static std::string persona; static const char* personaSource = "";
         persona = persona_name();
@@ -2366,10 +2424,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         sb.persona_source = personaSource;
         // Item D16: the background Steam session's state, in the account row.
         sb.session_hint = ui_nav::session_hint(ui_nav::session_state(g_steamSignedIn.load(), g_steamRestore.load()));
-        // item 24: the avatar once its fetch decoded (px != nullptr), else the
-        // placeholder circle the sidebar draws for an empty image.
-        { std::lock_guard<std::mutex> l(g_avatarM);
-          if (g_avatarState.load(std::memory_order_relaxed) == 2 && g_avatarPix.px) sb.avatar = g_avatarPix; }
+        // Item D25: the Xbox user's own picture; the Steam avatar is the
+        // profile page's, so it never stands in for the console user here.
+        sb.avatar = xbox_user_picture();
         { std::lock_guard<std::mutex> l(g_gm);
           sb.all_count = (int)g_games.size();
           sb.installed_count = (int)m_installed.size();

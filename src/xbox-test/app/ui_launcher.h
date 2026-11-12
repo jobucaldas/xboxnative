@@ -1690,6 +1690,11 @@ inline void draw_confirm_sheet(ui::Canvas& c, const Font& f, const char* title, 
 struct AccountVM {
     const char* const* names = nullptr;     // n account names
     const char* const* sources = nullptr;   // n sources: "Xbox", "Steam"
+    // Item D25: each account's own picture (the console user's from
+    // Windows.System.User, the Steam one from the persona push). This sheet is
+    // the PROFILE page — the only place the Steam identity is shown; the
+    // library's sidebar row is the Xbox user only. Empty images draw nothing.
+    const ui::Image* avatars = nullptr;     // n images, or null
     int n = 0;
     // Item D16: the action row's label — 'Log out of Steam' while an account is
     // attached, 'Sign in to Steam' when there is none (main.cpp picks it from
@@ -1720,8 +1725,16 @@ inline void draw_accounts_sheet(ui::Canvas& c, const Font& f, const AccountVM& v
         const bool info = i < v.n;
         const bool danger = i == v.n;
         c.fill_round_rect(btn, radiusCard, danger ? chip : ui::theme::controlDark);
+        // Item D25: the account's own avatar, circle-masked at the row's left;
+        // the label shifts right to make room only when one is drawn.
+        float label_x = btn.x + 24;
+        const ui::Image* av = info && v.avatars ? &v.avatars[i] : nullptr;
+        if (av && av->px && av->w > 0 && av->h > 0) {
+            c.draw_image(*av, rect(btn.x + 16, btn.y + 8, 48, 48), ui::Fit::Cover, 24.0f);
+            label_x = btn.x + 80;
+        }
         const char* label = info ? v.names[i] : danger ? v.action_label : "Cancel";
-        text(c, f, Face::Regular, 26, btn.x + 24, btn.y + 17.5f, label,
+        text(c, f, Face::Regular, 26, label_x, btn.y + 17.5f, label,
              danger ? ui::theme::text2 : ui::theme::text);
         if (info && v.sources && v.sources[i] && *v.sources[i])
             text_r(c, f, Face::Regular, 20, btn.x + btn.w - 24, btn.y + 22.0f, v.sources[i], ui::theme::textMuted);
