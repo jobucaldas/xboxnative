@@ -14,12 +14,12 @@
 // callback queue the game reads (LobbyCreated_t, LobbyEnter_t,
 // LobbyDataUpdate_t, LobbyChatUpdate_t), so a CM answer only reaches the game
 // when the launcher owns the interface object or feeds the provider's queue.
-// That gate is described in research/STEAM-REAL-ONLINE.md; this slice is the
+// That gate is described in issue #179; this slice is the
 // part that can be verified off-device, against a fake CM service.
 //
 // Portable: the CM transport and logging are injected. Message shapes follow
 // SteamDatabase/Protobufs (public domain) as vendored in steam-user; see
-// research/STEAMWORKS-MULTIPLAYER.md.
+// issue #180.
 #include "steam_wire.h"
 #include <cstdint>
 #include <cstdio>

@@ -1,4 +1,4 @@
-Play: make Mesa's WGL frontend and d3d12 winsys usable inside a launcher guest (research/OPENGL-PLAN.md).
+Play: make Mesa's WGL frontend and d3d12 winsys usable inside a launcher guest (issue #176).
 SPDX-License-Identifier: MIT (same licence as the files patched; Mesa is MIT)
 
 1. -DSTW_NO_DESKTOP_HOOKS (set by src/tools/build-mesa-d3d12.sh) selects Mesa's existing GDK-style code paths in the

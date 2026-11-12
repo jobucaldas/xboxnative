@@ -1,4 +1,4 @@
-Play: report a truthful WGL error when context creation fails (research/OPENGL-PLAN.md).
+Play: report a truthful WGL error when context creation fails (issue #176).
 SPDX-License-Identifier: MIT (same licence as the files patched; Mesa is MIT)
 
 Mesa's WGL frontend loses the state tracker's failure reason: stw_create_context_attribs()

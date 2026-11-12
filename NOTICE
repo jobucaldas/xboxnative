@@ -34,12 +34,12 @@ External dependencies fetched at build time (never copied here; pinned in deps.p
   Mesa 25.3.6 source tarball (mesa-src)        MIT (Mesa 3D Graphics Library; DirectX-Headers, also MIT). Fetched, SHA-256
                                                verified, patched (patches/mesa-src/0001-play-corewindow-wgl.patch, MIT) and cross-built by
                                                src/tools/build-mesa-d3d12.sh (OpenGL on the Direct3D 12 Gallium driver,
-                                               research/OPENGL-PLAN.md) into the git-ignored out/mesa-d3d12/. opengl32.dll and
+                                               issue #176) into the git-ignored out/mesa-d3d12/. opengl32.dll and
                                                libgallium_wgl.dll are packaged in the launcher's runtime/ directory with Mesa's and
                                                DirectX-Headers' licence texts, the patch and SOURCE-mesa.txt; the built DLLs are never
                                                committed. DirectX-Headers is pinned to commit 64c650b0c6642ab0f3cdf674e38401e02ccd2460 (tag v1.618.1).
                                                The same tarball is also built by src/tools/build-mesa-dzn.sh (Vulkan on Direct3D 12, the
-                                               microsoft-experimental Vulkan driver, research/VULKAN-PLAN.md) into the git-ignored
+                                               microsoft-experimental Vulkan driver, issue #177) into the git-ignored
                                                out/mesa-dzn/ with patches/mesa-src/0003..0007 (MIT); vulkan_dzn.dll and its ICD manifest
                                                ship in runtime/ with the same licence texts, the patches and SOURCE-dzn.txt. Never committed.
   gbe_fork release (gbe-fork-win)              LGPL-3.0 (Detanup01/gbe_fork). Pinned prebuilt release fetched and SHA-256 verified by
@@ -57,7 +57,7 @@ External dependencies fetched at build time (never copied here; pinned in deps.p
                                                corresponding source. Packaged in the launcher's runtime/ directory with the
                                                licence text and SOURCE.txt. zlib is GPLv3-compatible.
   Vulkan-Loader (vulkan-loader-src)            Apache-2.0 (Khronos Group). Fetched, SHA-256 verified and cross-built by
-                                               src/tools/build-vulkan-loader.sh (research/VULKAN-PLAN.md) into the git-ignored
+                                               src/tools/build-vulkan-loader.sh (issue #177) into the git-ignored
                                                out/vulkan-loader/vulkan-1.dll; the built DLL is never committed. The null ICD beside it
                                                (src/tools/vulkan/null-icd.c) is original work of this repository, GPL-3.0-or-later.
                                                Shipping the loader requires its LICENSE.txt alongside.

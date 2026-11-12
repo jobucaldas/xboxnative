@@ -6,11 +6,11 @@
 // installed redistributable serves them from System32 on Windows.
 static std::wstring runtimeDirectory;
 static void set_runtime_directory(const std::wstring& path) { runtimeDirectory=path; }
-// The OpenGL stack (Mesa's d3d12 driver, research/OPENGL-PLAN.md) is served from the same directory: opengl32.dll
+// The OpenGL stack (Mesa's d3d12 driver, issue #176) is served from the same directory: opengl32.dll
 // and its driver library libgallium_wgl.dll, as the OS opengl32.dll serves a game on Windows. The console has none,
 // so a game that ships no GL DLL of its own gets these (when the package carries them; otherwise Play's WGL stubs
 // answer). dxil.dll is the optional DXIL signer Mesa loads by name (DXIL.dll) for shader validation.
-// Vulkan (research/VULKAN-PLAN.md) is the same contract: vulkan-1.dll is the Khronos loader built from pinned source,
+// Vulkan (issue #177) is the same contract: vulkan-1.dll is the Khronos loader built from pinned source,
 // vulkan_dzn.dll is Mesa's dzn driver (Vulkan on D3D12) and vulkan-null-icd.dll is the fallback driver that reports
 // zero physical devices. Both manifests name a bare DLL, so a Vulkan-optional engine's LoadLibrary succeeds and the
 // loader's own LoadLibraryW of the ICD resolves here.

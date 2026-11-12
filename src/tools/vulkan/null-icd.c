@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Null Vulkan ICD: a Vulkan-Loader driver that reports zero physical devices.
 //
-// Milestone 1 of research/VULKAN-PLAN.md. A Vulkan-optional engine probes Vulkan
+// Milestone 1 of issue #177. A Vulkan-optional engine probes Vulkan
 // with LoadLibrary("vulkan-1.dll") and, on Windows without a driver, gets
 // ERROR_MOD_NOT_FOUND and falls back to D3D11. Play ships a real loader built
 // from pinned Khronos source, so the probe now succeeds; this ICD is what makes

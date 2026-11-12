@@ -16,5 +16,7 @@
   `src/tools/build-*.sh`.
 - Third-party code stays under its own licence and is listed in [NOTICE](NOTICE). Contributions are
   accepted under GPL-3.0-or-later.
+- **Development write-ups (plans, root-cause analyses, coverage matrices) belong in GitHub issues, not
+  in the repository.** `docs/` is for how-to material for users and developers only.
 
 Build and test commands: [README.md](README.md) and [docs/BUILD-AND-TEST.md](docs/BUILD-AND-TEST.md).
