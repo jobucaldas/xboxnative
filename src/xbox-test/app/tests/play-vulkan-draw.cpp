@@ -676,7 +676,9 @@ int vk_draw_entry() {
     uint32_t memType = findMemoryType(&mem, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0);
     if (memType == UINT32_MAX) return fail(20, "host-visible memory type", 0);
     VkBuffer vertexBuffer = nullptr, storageBuffer = nullptr, readbackBuffer = nullptr;
-    VkBufferCreateInfo vbInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0, 3 * 6 * 4,
+    // Three vertices at the pipeline's stride: pos(4 floats) + colour(4), the
+    // layout the vertex input below declares and vertices[] above fills.
+    VkBufferCreateInfo vbInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0, 3 * 8 * 4,
                               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, nullptr};
     if (CreateBuffer(device, &vbInfo, nullptr, &vertexBuffer) != VK_SUCCESS || !vertexBuffer)
         return fail(20, "vkCreateBuffer(vertex)", 0);
@@ -806,10 +808,12 @@ int vk_draw_entry() {
     VkPipelineShaderStageCreateInfo stages[2]{
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vsModule, "main", nullptr},
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fsModule, "main", nullptr}};
+    // Stride and attribute offsets match the uploaded layout: pos is floats
+    // 0..3 (xyzw), colour floats 4..7 — byte 16, not 8.
     VkVertexInputBindingDescription vib{0, 8 * 4, VK_VERTEX_INPUT_RATE_VERTEX};
     VkVertexInputAttributeDescription via[2]{
-        {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
-        {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 8}};
+        {0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0},
+        {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 16}};
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, nullptr, 0, 1, &vib, 2, via};
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, nullptr, 0,
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, 0};
@@ -882,7 +886,9 @@ int vk_draw_entry() {
         0, 0, storageBuffer, 0, VK_WHOLE_SIZE};
     VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO, nullptr, 0, 0, nullptr, 1, &bufBarrier, 0, nullptr};
     CmdPipelineBarrier2(cmd, &dep);
-    VkBufferCopy copy{offsets[1], offsets[2], 64 * 4};
+    // Offsets are relative to each buffer, not to the shared allocation:
+    // both buffers were filled/bound at their own start.
+    VkBufferCopy copy{0, 0, 64 * 4};
     CmdCopyBuffer(cmd, storageBuffer, readbackBuffer, 1, &copy);
     emit("PLAY-VULKAN-DRAW STAGE compute-recorded\n");
 
@@ -1006,11 +1012,13 @@ int vk_draw_entry() {
     // go through. Fetched by name because the fixture uses it only for this.
     auto cmdCopyImageToBuffer = (void (__stdcall*)(VkCommandBuffer, VkImage, int32_t, VkBuffer, uint32_t, const void*))dpa(device, "vkCmdCopyImageToBuffer");
     if (!cmdCopyImageToBuffer) return fail(30, "vkGetDeviceProcAddr(vkCmdCopyImageToBuffer)", 0);
+    // VkBufferImageCopy: the subresource (aspect, mip, layers) sits between
+    // the buffer pitch fields and the image offset/extent.
     typedef struct { VkDeviceSize bufferOffset; uint32_t bufferRowLength, bufferImageHeight;
+                     struct { uint32_t aspectMask, mipLevel, baseArrayLayer, layerCount; } imageSubresource;
                      struct { int32_t x, y, z; } imageOffset;
-                     struct { uint32_t width, height, depth; } imageExtent;
-                     uint32_t baseArrayLayer, layerCount; } BufferImageCopy;
-    BufferImageCopy region{0, 0, 0, {0, 0, 0}, {64, 64, 1}, 0, 1};
+                     struct { uint32_t width, height, depth; } imageExtent; } BufferImageCopy;
+    BufferImageCopy region{0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {64, 64, 1}};
     cmdCopyImageToBuffer(cmd, colorImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, imageReadback, 1, &region);
     if (EndCommandBuffer(cmd) != VK_SUCCESS) return fail(30, "vkEndCommandBuffer(copy)", 0);
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &cmd, 0, nullptr};
