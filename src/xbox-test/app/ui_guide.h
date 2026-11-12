@@ -617,6 +617,23 @@ inline void draw_toast(Canvas& c, const Font& f, const Toast& t, float x = kToas
     f.draw(c, Face::Regular, 18, x + 88, detail::baseline(f, Face::Regular, 18, y + 48, 22), t.title, textDim);
 }
 
+// Composites one canvas pixel (0xAARRGGBB) onto one back-buffer pixel, by
+// a/255. The destination is read as a uint32 in the target's memory order:
+// `rgba` = R8G8B8A8 (uint32 0xAABBGGRR), otherwise B8G8R8A8 (0xAARRGGBB, the
+// canvas's own order). The destination's alpha byte is kept. The opaque and
+// translucent paths share this function so they cannot disagree: a=255
+// reproduces an opaque copy exactly.
+inline uint32_t composite_pixel(uint32_t dst, uint32_t src, unsigned a, bool rgba) {
+    const unsigned sr = (src >> 16) & 0xFF, sg = (src >> 8) & 0xFF, sb = src & 0xFF;
+    unsigned dr, dg, db;
+    if (rgba) { dr = dst & 0xFF; dg = (dst >> 8) & 0xFF; db = (dst >> 16) & 0xFF; }
+    else      { db = dst & 0xFF; dg = (dst >> 8) & 0xFF; dr = (dst >> 16) & 0xFF; }
+    const unsigned ia = 255 - a;
+    const unsigned r = (sr * a + dr * ia) / 255u, g = (sg * a + dg * ia) / 255u,
+                   b = (sb * a + db * ia) / 255u;
+    return (dst & 0xFF000000u) | (rgba ? ((b << 16) | (g << 8) | r) : ((r << 16) | (g << 8) | b));
+}
+
 // Dims one row of back-buffer pixels in place: scales the three colour bytes
 // uniformly by pct_keep/100, leaving the alpha byte untouched. Works for both
 // RGBA and BGRA memory orders, since the three colour channels scale the same.

@@ -251,6 +251,38 @@ int main(int argc, char** argv) {
         check(bad.title.empty(), "push_unlock of a bad index returns an empty toast");
     }
 
+    // ---- pure logic: canvas -> back-buffer compositing keeps the channels ----
+    // The canvas is 0xAARRGGBB. A B8G8R8A8 back buffer stores those bytes in
+    // the same order (uint32 0xAARRGGBB); an R8G8B8A8 one stores them swapped
+    // (uint32 0xAABBGGRR). A pure red canvas pixel over black must therefore
+    // land as 0xFFFF0000 (BGRA) or 0xFF0000FF (RGBA) — never the other way.
+    {
+        const uint32_t red = ui::theme::rgb(255, 0, 0);    // 0xFFFF0000
+        const uint32_t blue = ui::theme::rgb(0, 0, 255);   // 0xFF0000FF
+        check(ui_guide::composite_pixel(0xFF000000u, red, 255, false) == 0xFFFF0000u,
+              "composite_pixel: opaque red on BGRA is 0xFFFF0000 in memory");
+        check(ui_guide::composite_pixel(0xFF000000u, red, 255, true) == 0xFF0000FFu,
+              "composite_pixel: opaque red on RGBA is 0xFF0000FF in memory");
+        check(ui_guide::composite_pixel(0xFF000000u, blue, 255, false) == 0xFF0000FFu,
+              "composite_pixel: opaque blue on BGRA is 0xFF0000FF in memory");
+        check(ui_guide::composite_pixel(0xFF000000u, blue, 255, true) == 0xFFFF0000u,
+              "composite_pixel: opaque blue on RGBA is 0xFFFF0000 in memory");
+        // Translucent red at 50% over black: half intensity, same channel.
+        check(ui_guide::composite_pixel(0xFF000000u, red, 128, false) == 0xFF800000u,
+              "composite_pixel: 50% red on BGRA keeps red in the high byte");
+        check(ui_guide::composite_pixel(0xFF000000u, red, 128, true) == 0xFF000080u,
+              "composite_pixel: 50% red on RGBA keeps red in the low byte");
+        // The opaque and translucent paths agree: a=255 is an opaque copy and
+        // a=0 leaves the destination alone.
+        check(ui_guide::composite_pixel(0xFF112233u, blue, 255, false) == 0xFF0000FFu,
+              "composite_pixel: a=255 replaces the destination (BGRA)");
+        check(ui_guide::composite_pixel(0xFF112233u, blue, 0, false) == 0xFF112233u,
+              "composite_pixel: a=0 keeps the destination");
+        // The destination's alpha byte survives the blend.
+        check((ui_guide::composite_pixel(0x80112233u, red, 128, false) & 0xFF000000u) == 0x80000000u,
+              "composite_pixel: keeps the destination alpha byte");
+    }
+
     // ---- pure logic: dim_row scales colour bytes, keeps alpha ----
     {
         // One BGRA pixel (0x11, 0x22, 0x33, 0xFF) at 45% keep: colours scale, alpha stays.

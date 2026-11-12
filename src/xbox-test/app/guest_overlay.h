@@ -293,19 +293,10 @@ inline bool dim_and_composite(ID3D11Device* dev,ID3D11DeviceContext* ctx,ID3D11T
             }
             const uint32_t s=srow[x];
             uint32_t& o=dst[fx];
-            // Same byte order as the target: the canvas is 0xAARRGGBB, the
-            // buffer is BGRA (or RGBA), so read/write through the byte order.
-            if(rgba) {
-                const unsigned sr=(s>>16)&0xFF,sg=(s>>8)&0xFF,sb=s&0xFF;
-                const unsigned dr=o&0xFF,dg=(o>>8)&0xFF,db=(o>>16)&0xFF;
-                const unsigned r=(sr*cov+dr*(255-cov))/255u,g=(sg*cov+dg*(255-cov))/255u,b=(sb*cov+db*(255-cov))/255u;
-                o=(o&0xFF000000u)|(b<<16)|(g<<8)|r;
-            } else {
-                const unsigned sb=(s>>16)&0xFF,sg=(s>>8)&0xFF,sr=s&0xFF;
-                const unsigned db=o&0xFF,dg=(o>>8)&0xFF,dr=(o>>16)&0xFF;
-                const unsigned b=(sb*cov+db*(255-cov))/255u,g=(sg*cov+dg*(255-cov))/255u,r=(sr*cov+dr*(255-cov))/255u;
-                o=(o&0xFF000000u)|(r<<16)|(g<<8)|b;
-            }
+            // The canvas is 0xAARRGGBB; composite_pixel reads and writes the
+            // destination through the back buffer's byte order, so the opaque
+            // and translucent paths agree on every channel.
+            o=ui_guide::composite_pixel(o,s,cov,rgba);
         }
     }
     D3D11_TEXTURE2D_DESC up{};up.Width=d.Width;up.Height=d.Height;up.MipLevels=1;up.ArraySize=1;
@@ -353,18 +344,9 @@ inline bool blit_alpha(ID3D11Device* dev,ID3D11DeviceContext* ctx,ID3D11Texture2
             const uint32_t p=srow[col];
             const unsigned a=p>>24;
             if(!a)continue;
-            uint32_t& o=dst[col];
-            if(a>=255){   // opaque: copy through the target's byte order
-                if(rgba)o=(o&0xFF000000u)|((p&0xFF00FF00u)|((p>>16)&0xFF)|((p&0xFF)<<16));
-                else o=(o&0xFF000000u)|(p&0x00FFFFFFu);
-                continue;
-            }
-            unsigned sr,sg,sb,dr,dg,db;
-            if(rgba){sr=(p>>16)&0xFF;sg=(p>>8)&0xFF;sb=p&0xFF;dr=o&0xFF;dg=(o>>8)&0xFF;db=(o>>16)&0xFF;}
-            else    {sb=(p>>16)&0xFF;sg=(p>>8)&0xFF;sr=p&0xFF;db=o&0xFF;dg=(o>>8)&0xFF;dr=(o>>16)&0xFF;}
-            const unsigned ia=255-a;
-            const unsigned r=(sr*a+dr*ia)/255u,g=(sg*a+dg*ia)/255u,b=(sb*a+db*ia)/255u;
-            o=(o&0xFF000000u)|(rgba?((b<<16)|(g<<8)|r):((r<<16)|(g<<8)|b));
+            // One blend for opaque and translucent pixels alike, through the
+            // target's byte order (the canvas is always 0xAARRGGBB).
+            dst[col]=ui_guide::composite_pixel(dst[col],p,a,rgba);
         }
     }
     D3D11_TEXTURE2D_DESC up{};
