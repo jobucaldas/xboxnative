@@ -96,7 +96,8 @@ shader synthesis), src/tools/d3d9-translator (DXUP dx9asm, D3D9 SM1-3 -> DXBC).
 | Feature | Proven by | Status |
 |---|---|---|
 | FFP vertex shader: WVP transform (4x dp4), POSITIONT viewport fixup, colour/texcoord passthrough | shim-contract FVF triangle draws; play-d3d9-triangle exit 42 | proven, console unverified |
-| FFP pixel shader: stage ops DISABLE/SELECTARG1/2/MODULATE/MODULATE2x/4x/ADD/SUBTRACT; args DIFFUSE/CURRENT/TEXTURE/TFACTOR with COMPLEMENT and ALPHAREPLICATE | ffp.h emits them; only SELECTARG1/DIFFUSE and MODULATE-with-texture proven by fixtures | gap: no readback fixture for MODULATE2x/4x/ADD/SUBTRACT, TFACTOR, COMPLEMENT |
+| FFP pixel shader: stage ops DISABLE/SELECTARG1/2/MODULATE/MODULATE2x/4x/ADD/SUBTRACT; args DIFFUSE/CURRENT/TEXTURE/TFACTOR with COMPLEMENT and ALPHAREPLICATE | shim-contract FFP texture-op block: 9 cases with pixel readback (modulate, modulate2x, modulate4x, add, subtract, tfactor-select, complement, tfactor-modulate, alpha-replicate) | proven off-device, console unverified |
+| FFP vertex shader never reads an output register (dxilconv SSA null-deref guard) | test-ffp-no-output-read.sh: every FFP VS variant translated, DXBC walked for OUTPUT-as-source | proven off-device, console unverified |
 | Unbound stage samples white (1x1 fallback), not black | play-d3d9-triangle-variants v2 (outside check only) | partially proven, console unverified |
 | Two-stage chain (stage 0 textureless, stage 1 textured) | variants v3 (outside check only) | partially proven, console unverified |
 | Fixed-function lighting (`SetLight`, `LightEnable`, materials beyond diffuse) | reported once, drawn unlit | gap (scoped out in the decision record) |
@@ -158,9 +159,10 @@ shader synthesis), src/tools/d3d9-translator (DXUP dx9asm, D3D9 SM1-3 -> DXBC).
 
 ## 13. Priority order for closing gaps off-device
 
-1. **FFP texture-op readback fixture** (Wine host test, then console fixture):
-   MODULATE with a real texture, TFACTOR, COMPLEMENT (invert), ADD, SUBTRACT,
-   MODULATE2x/4x — the ops a GameMaker/2D game actually sets.
+1. ~~FFP texture-op readback fixture~~ — done: shim-contract FFP texture-op
+   block (9 cases with pixel readback), plus test-ffp-no-output-read.sh
+   guarding the dxilconv output-as-source crash. Console re-run of
+   d3d9-triangle / d3d9-triangle-variants still owed after PR merge.
 2. **Blending readback**: ALPHABLENDENABLE with SRCALPHA/INVSRCALPHA over a
    known background — the single most common 2D-game state.
 3. **Depth-test readback**: z-enabled draw with a quad behind/in front.
