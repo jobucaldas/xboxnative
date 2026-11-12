@@ -380,12 +380,14 @@ DWORD d3d12_entry() {
     if(FAILED(allocator->Reset()))return 62;
     if(FAILED(list->Reset(allocator,computePipeline)))return 63;
     list->SetComputeRootSignature(rootSignature11);
-    // The addend as a root CBV: a 4-byte upload-heap buffer holding one uint,
-    // the way an engine passes per-draw constants to compute.
+    // The addend as a root CBV: an upload-heap buffer holding one uint. A
+    // constant-buffer view reads in 256-byte-aligned windows, so the buffer
+    // is 256 bytes (the shader's cbuffer is 16 bytes; a 4-byte buffer would
+    // have the view read past the resource).
     const UINT addend=7;
     D3D12_RESOURCE_DESC cbDesc{};
     cbDesc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
-    cbDesc.Width=4;cbDesc.Height=1;   // buffers are Height 1
+    cbDesc.Width=256;cbDesc.Height=1;   // buffers are Height 1; CBV alignment is 256
     cbDesc.DepthOrArraySize=1;cbDesc.MipLevels=1;
     cbDesc.SampleDesc.Count=1;cbDesc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     ID3D12Resource* cbBuffer=nullptr;
@@ -411,7 +413,10 @@ DWORD d3d12_entry() {
     uavView.Format=DXGI_FORMAT_R32_TYPELESS;
     uavView.ViewDimension=D3D12_UAV_DIMENSION_BUFFER;
     uavView.Buffer.FirstElement=0;uavView.Buffer.NumElements=4;
-    uavView.Buffer.CounterOffsetInBytes=0;uavView.Buffer.Flags=D3D12_BUFFER_UAV_FLAG_NONE;
+    uavView.Buffer.CounterOffsetInBytes=0;
+    // A typeless buffer UAV must carry the RAW flag: the shader's
+    // RWByteAddressBuffer is a raw (byte-addressed) view.
+    uavView.Buffer.Flags=D3D12_BUFFER_UAV_FLAG_RAW;
     device->CreateUnorderedAccessView(uavBuffer,nullptr,&uavView,cbvHandle);
     ID3D12DescriptorHeap* visibleHeaps[]={cbvHeap};
     list->SetDescriptorHeaps(1,visibleHeaps);
