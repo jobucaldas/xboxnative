@@ -695,17 +695,18 @@ int vk_draw_entry() {
     VkMemoryRequirements req{};
     VkDeviceSize used = 0;
     VkDeviceMemory memory = nullptr;
-    // One allocation sized for the largest, each buffer bound at its own
-    // required alignment offset inside it.
+    // One allocation backs every buffer; each binds at its own required
+    // alignment offset inside it. The allocation is sized from the
+    // requirements (a driver may round a buffer's size up — dzn/D3D12 rounds
+    // placement to 64 KiB), never from the create sizes.
     VkDeviceSize offsets[3] = {0, 0, 0};
     VkBuffer buffers[3] = {vertexBuffer, storageBuffer, readbackBuffer};
-    VkDeviceSize sizes[3] = {vbInfo.size, sbInfo.size, rbInfo.size};
     VkDeviceSize total = 0;
     for (int i = 0; i < 3; ++i) {
         GetBufferMemoryRequirements(device, buffers[i], &req);
         used = (used + req.alignment - 1) & ~(req.alignment - 1);
         offsets[i] = used;
-        used += sizes[i];
+        used += req.size;
         total = used;
     }
     VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, nullptr, total, memType};
@@ -775,19 +776,19 @@ int vk_draw_entry() {
         return fail(23, "vkCreateImage", 0);
     GetImageMemoryRequirements(device, colorImage, &req);
     VkDeviceSize imgOffset = (used + req.alignment - 1) & ~(req.alignment - 1);
-    VkMemoryAllocateInfo imgAlloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, nullptr, imgOffset + req.size, memType};
-    // The colour target may need a type the vertex memory is not (device-local
-    // tiling); try the same type first, then any type the requirements allow.
+    // The image's memory type comes from its own requirements' memoryTypeBits,
+    // not from the buffers': an OPTIMAL-tiled colour target often must not use
+    // the host-visible type the linear buffers share (dzn reserves DEVICE_LOCAL
+    // heaps for it), and vkAllocateMemory does not know about the image — the
+    // mismatch surfaces at vkBindImageMemory, after allocation succeeded.
+    uint32_t imgType = UINT32_MAX;
+    for (uint32_t i = 0; i < mem.memoryTypeCount; ++i)
+        if (req.memoryTypeBits & (1u << i)) { imgType = i; break; }
+    if (imgType == UINT32_MAX) return fail(23, "image memory type", 0);
+    VkMemoryAllocateInfo imgAlloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, nullptr, imgOffset + req.size, imgType};
     VkDeviceMemory imageMemory = nullptr;
-    if (AllocateMemory(device, &imgAlloc, nullptr, &imageMemory) != VK_SUCCESS || !imageMemory) {
-        uint32_t bit = 0;
-        for (uint32_t i = 0; i < mem.memoryTypeCount; ++i)
-            if (req.memoryTypeBits & (1u << i)) { bit = i; break; }
-        if (!bit && !(req.memoryTypeBits & 1u)) return fail(23, "image memory type", 0);
-        VkMemoryAllocateInfo retry{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, nullptr, imgOffset + req.size, bit};
-        if (AllocateMemory(device, &retry, nullptr, &imageMemory) != VK_SUCCESS || !imageMemory)
-            return fail(23, "vkAllocateMemory(image)", 0);
-    }
+    if (AllocateMemory(device, &imgAlloc, nullptr, &imageMemory) != VK_SUCCESS || !imageMemory)
+        return fail(23, "vkAllocateMemory(image)", 0);
     if (BindImageMemory(device, colorImage, imageMemory, imgOffset) != VK_SUCCESS)
         return fail(23, "vkBindImageMemory", 0);
     typedef struct { int32_t sType; const void* pNext; VkFlags flags; VkImage image;
