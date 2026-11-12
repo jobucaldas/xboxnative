@@ -88,6 +88,10 @@ struct ComSpace {
         if (it == ifaces.end()) throw std::runtime_error(std::string("COM: unregistered interface ") + iface);
         Proxy p;
         p.iface = iface; p.host = host; p.slots = it->second.slots; p.space = this; p.host_release = host_release;
+        if (vtable_top + p.slots * 4 > VTABLE_BASE + VTABLE_REGION || block_top + 4 > BLOCK_BASE + BLOCK_REGION) {
+            char b[128]; snprintf(b, sizeof b, "COM: proxy region exhausted at vtable 0x%08x block 0x%08x", vtable_top, block_top);
+            throw Fault(FaultKind::AccessViolation, 0, 0, b);
+        }
         p.vtable = vtable_top; vtable_top += p.slots * 4;
         p.guest = block_top; block_top += 4;
         cpu.mem.w32(p.guest, p.vtable);

@@ -26,7 +26,7 @@ struct Mock {
 
 // A tiny flat machine like x86-core.cpp's: code/data/stack pages + thunk page.
 struct Machine {
-    Memory mem; ThunkTable thunks; ComSpace com; Mock mock; Cpu cpu{mem, thunks};
+    Memory mem; ThunkTable thunks; Mock mock; ComSpace com; Cpu cpu{mem, thunks};
     static constexpr uint32_t CODE = 0x10000, DATA = 0x20000, STACK = 0x30000;
     Machine() {
         thunks.base = 0x7FFC0000;  // below the COM regions, same page mechanics
