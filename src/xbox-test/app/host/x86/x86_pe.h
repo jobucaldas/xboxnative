@@ -131,7 +131,9 @@ inline void init_process(Memory& mem, Cpu& cpu, const Image& img, uint32_t pid =
 // DLL_THREAD_ATTACH). Callback return values are ignored; a callback that faults
 // propagates, so a game's TLS initializer failing never looks like a clean start.
 // Returns the index (0).
-constexpr uint32_t TLS_SLOT_ADDR = 0x7FFDC000;  // ThreadLocalStoragePointer array + the main thread's TLS block
+// The TLS region is anchored to end just below the TEB and grows downward with
+// the template size (the free gap between the harness's iob page at 0x7FFD0000
+// and the TEB is 52 KiB; a template that does not fit is a load error).
 inline uint32_t init_tls(Memory& mem, Cpu& cpu, const Image& img, std::vector<uint32_t>* called = nullptr) {
     if (!img.tls.present) return 0;
     uint32_t raw = img.tls.end - img.tls.start;
@@ -139,13 +141,13 @@ inline uint32_t init_tls(Memory& mem, Cpu& cpu, const Image& img, std::vector<ui
     for (uint32_t a = img.tls.start; raw && a < img.tls.end; a += Memory::PAGE)
         if (!mem.mapped(a)) throw std::runtime_error("PE32 TLS raw data outside the mapped image");
     uint32_t total = raw + img.tls.zero_fill;
-    // One page: slot array at +0, the block at 16 (room for ~4 KiB of TLS; a
-    // bigger template maps more pages).
+    // Slot array at +0, the block at 16.
     uint32_t pages = (16 + total + Memory::PAGE - 1) / Memory::PAGE;
-    mem.map(TLS_SLOT_ADDR, pages * Memory::PAGE, PROT_R | PROT_W);
-    uint32_t block = TLS_SLOT_ADDR + 16;
-    mem.w32(TLS_SLOT_ADDR, block);          // ThreadLocalStoragePointer[0]
-    mem.w32(TEB_ADDR + 0x2C, TLS_SLOT_ADDR);
+    uint32_t slot_addr = TEB_ADDR - pages * Memory::PAGE;
+    mem.map(slot_addr, pages * Memory::PAGE, PROT_R | PROT_W);
+    uint32_t block = slot_addr + 16;
+    mem.w32(slot_addr, block);              // ThreadLocalStoragePointer[0]
+    mem.w32(TEB_ADDR + 0x2C, slot_addr);
     for (uint32_t i = 0; i < raw; ++i) mem.w8(block + i, mem.r8(img.tls.start + i));
     for (uint32_t i = raw; i < total; ++i) mem.w8(block + i, 0);  // SizeOfZeroFill
     // The index variable: implicit TLS is slot 0 for the first module.
