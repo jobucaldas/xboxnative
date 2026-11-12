@@ -121,7 +121,7 @@ What this settles:
   slot audit in #152 already found no mismatch statically). The ON arm's
   cleanliness is consistent with the hooks' overhead perturbing timing and
   masking a timing-sensitive bug — but it is equally consistent with plain
-  noise: two-sided Fisher exact on 2/3 vs 0/3 gives p≈0.3, not significant.
+  noise: two-sided Fisher exact on 2/3 vs 0/3 gives p≈0.4, not significant.
   Both readings remain open at n=3.
 * **The removal is not resize-coupled here**: both failures landed ~2 min into
   gameplay with every completed resize at hr=0, unlike the 0.5.279 crash
