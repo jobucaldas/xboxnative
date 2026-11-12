@@ -2505,6 +2505,30 @@ int main(int argc, char** argv) {
         check(!title_star, "D10: a non-favorite game page draws no title star");
     }
 
+    // ---- item D31: rounded corners are really rounded ----
+    // The art was drawn rounded but the label scrim and the grey no-cover
+    // gradient filled full-width rows, so a square dark corner peeked out
+    // behind every tile. The corner pixel must stay the page colour.
+    {
+        const Rect g = grid_tile(0, 0);
+        const auto corner_is_page = [&]() {
+            const int cx = int(g.x) + 1, cy = int(g.y + g.h) - 2;   // bottom-left corner
+            return px[size_t(cy) * W + cx] == ui::theme::page;
+        };
+        TileVM t; t.name = "Hades"; t.no_cover = true;
+        c.fill(ui::theme::page);
+        draw_tile(c, font, t, g, false);
+        check(corner_is_page(), "D31: a no-cover tile's corner is page, not the grey gradient");
+        TileVM a; a.name = "Hades";   // fixture gradient art + the label scrim
+        c.fill(ui::theme::page);
+        draw_tile(c, font, a, g, false);
+        check(corner_is_page(), "D31: a fixture-art tile's corner is page, not the scrim");
+        // and the fill really is there inside the shape (the test is not vacuous)
+        check(px[size_t(int(g.y + g.h) - 2) * W + int(g.x + g.w * 0.5f)] != ui::theme::page,
+              "D31: the tile still fills its interior");
+        snap("launcher-d31-tile-corners");
+    }
+
     // item D10: the Filters panel now carries TWO rows (Playable, Favorites),
     // each with its own on state.
     {

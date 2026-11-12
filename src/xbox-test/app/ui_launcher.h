@@ -623,7 +623,9 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
         } else if (on) {
             c.fill_round_rect(rect(40, y, 395, 64), radiusControl, ui::theme::control);
         }
-        if (on) c.fill_rect(429, y, 6, 64, ui::theme::accent);
+        // Item D31: the bar is clipped to the row's rounded shape, so it does
+        // not poke square corners past the pill's curve.
+        if (on) c.fill_rect_in_round_rect(rect(429, y, 6, 64), rect(40, y, 395, 64), radiusControl, ui::theme::accent);
         text(c, f, Face::Regular, 24, 64, y + 17.5f, rows[i].label,
              on || focused ? ui::theme::text : ui::theme::text2);
         if (rows[i].count >= 0) {
@@ -651,7 +653,7 @@ inline void draw_sidebar(ui::Canvas& c, const Font& f, const SidebarVM& sb) {
                        radiusCard + ringRadiusDelta, ringWidth);
         } else if (active) {
             c.fill_round_rect(w, radiusCard, ui::theme::controlDark);
-            c.fill_rect(429, 808, 6, 104, ui::theme::accent);
+            c.fill_rect_in_round_rect(rect(429, 808, 6, 104), w, radiusCard, ui::theme::accent);
         }
         const bool running = sb.dl_name && *sb.dl_name;
         text(c, f, Face::Semibold, 22, 64, 820.0f, "Downloads", ui::theme::text2);
@@ -817,16 +819,24 @@ inline void draw_tile(ui::Canvas& c, const Font& f, const TileVM& t, const ui::R
     if (has_art) {
         c.draw_image(t.art, g, ui::Fit::Cover, radiusTile);
     } else if (t.no_cover) {
-        // item 12: plain grey vertical gradient, no motif
+        // item 12: plain grey vertical gradient, no motif. Item D31: it is
+        // painted per row inside the tile's rounded shape — a full-width fill
+        // left a square grey corner behind the rounded art.
         for (int yy = 0; yy < int(g.h); ++yy)
-            c.fill_rect(g.x, g.y + float(yy), g.w, 1, grad3(kNoCoverTop, kNoCoverTop, kNoCoverBot, float(yy) / (g.h - 1)));
+            c.fill_round_rect_row(g, radiusTile, int(g.y) + yy,
+                                  grad3(kNoCoverTop, kNoCoverTop, kNoCoverBot, float(yy) / (g.h - 1)), 255);
     } else {
-        // legacy gradient art (mockup fixtures)
+        // legacy gradient art (mockup fixtures). Item D31: the diagonal
+        // gradient stops at the tile's rounded edge, so the corner is not
+        // squared off by the art itself.
         for (int yy = 0; yy < int(g.h); ++yy) {
             const float v = float(yy) / (g.h - 1);
             for (int xx = 0; xx < int(g.w); ++xx) {
                 const float u = float(xx) / (g.w - 1);
-                c.fill_rect(g.x + xx, g.y + yy, 1, 1, grad3(t.art_top, t.art_mid, t.art_bot, (u + v) * 0.5f));
+                const float cov = ui::Canvas::round_rect_coverage(g, radiusTile, g.x + xx + 0.5f, g.y + yy + 0.5f);
+                if (cov <= 0.0f) continue;
+                c.fill_rect_alpha(g.x + xx, g.y + yy, 1, 1, grad3(t.art_top, t.art_mid, t.art_bot, (u + v) * 0.5f),
+                                  uint8_t(cov * 255.0f + 0.5f));
             }
         }
         // art motif: dark ring + corner block in the tile's own dark color
@@ -835,10 +845,12 @@ inline void draw_tile(ui::Canvas& c, const Font& f, const TileVM& t, const ui::R
         c.fill_rect_alpha(float(g.x + 112), float(g.y + 12), 44.0f, 44.0f, t.art_bot, 56);
     }
     // item 23: the label scrim runs on EVERY tile (art, no-cover, fixtures):
-    // transparent at ~55% height down to 0.85 black at the bottom edge
+    // transparent at ~55% height down to 0.85 black at the bottom edge.
+    // Item D31: each row stops at the tile's rounded edge, so the scrim never
+    // squares off the bottom corners of the art.
     for (int yy = int(g.h) * 55 / 100; yy < int(g.h); ++yy) {
         const float k = (yy - g.h * 0.55f) / (g.h * 0.45f);
-        c.fill_rect_alpha(g.x, g.y + yy, g.w, 1, scrim, uint8_t(0.85f * 255.0f * k));
+        c.fill_round_rect_row(g, radiusTile, int(g.y) + yy, scrim, uint8_t(0.85f * 255.0f * k));
     }
     // item 23: the name sits at the BOTTOM of the card — semibold 22, white,
     // single line, ellipsized to the tile width; the FOCUSED tile marquees
@@ -1134,8 +1146,8 @@ inline void draw_queue_card(ui::Canvas& c, const Font& f, const QueueRowVM& r, f
         c.draw_image(r.cover, thumb, ui::Fit::Cover, radiusControl);
     } else {
         for (int yy = 0; yy < int(thumb.h); ++yy)
-            c.fill_rect(thumb.x, thumb.y + float(yy), thumb.w, 1,
-                        grad3(kNoCoverTop, kNoCoverTop, kNoCoverBot, float(yy) / (thumb.h - 1)));
+            c.fill_round_rect_row(thumb, radiusControl, int(thumb.y) + yy,
+                                  grad3(kNoCoverTop, kNoCoverTop, kNoCoverBot, float(yy) / (thumb.h - 1)), 255);
     }
     // mockup: every row carries the dark status ring (26px, stroke 4) at its thumb
     c.stroke_circle(564, y + 52, 14, 4, kRingDark, Align::Center);
@@ -1220,7 +1232,7 @@ inline void draw_storage(ui::Canvas& c, const Font& f, const SidebarVM& sb, cons
                 focus_ring(c, rect(524 - ringOffset, y - ringOffset, 1320 + ringOffset * 2, 112 + ringOffset * 2),
                            radiusControl + ringRadiusDelta, ringWidth);
             c.fill_round_rect(card, radiusControl, d.focused ? ui::theme::controlDark : ui::theme::control);
-            if (d.install_target) c.fill_rect(524, y, 6, 112, ui::theme::accent);
+            if (d.install_target) c.fill_rect_in_round_rect(rect(524, y, 6, 112), card, radiusControl, ui::theme::accent);
             text(c, f, Face::Semibold, 28, 548, y + 20, d.title, ui::theme::text);
             text(c, f, Face::Regular, 22, 548, y + 60, d.detail, ui::theme::textDim);
             // item 22: usage bar — 10px, rounded, full-width visible track
@@ -1425,11 +1437,13 @@ inline void draw_game(ui::Canvas& c, const Font& f, const GameVM& g, bool draw_h
     if (g.has_art && g.art.px && g.art.w > 0 && g.art.h > 0) {
         c.draw_image(g.art, rect(1632, 72, 224, 336), ui::Fit::Cover, radiusTile);
     } else if (g.no_cover) {
+        const Rect box = rect(1632, 72, 224, 336);
         for (int yy = 0; yy < 336; ++yy)
-            c.fill_rect(1632, 72.0f + yy, 224, 1, grad3(kNoCoverTop, kNoCoverTop, kNoCoverBot, yy / 335.0f));
+            c.fill_round_rect_row(box, radiusTile, 72 + yy, grad3(kNoCoverTop, kNoCoverTop, kNoCoverBot, yy / 335.0f), 255);
     } else {
+        const Rect box = rect(1632, 72, 224, 336);
         for (int yy = 0; yy < 336; ++yy)
-            c.fill_rect(1632, 72.0f + yy, 224, 1, grad3(g.art_top, g.art_mid, g.art_bottom, yy / 335.0f));
+            c.fill_round_rect_row(box, radiusTile, 72 + yy, grad3(g.art_top, g.art_mid, g.art_bottom, yy / 335.0f), 255);
     }
 
     // ui::theme::hint bar: the A ui::theme::hint follows the primary state

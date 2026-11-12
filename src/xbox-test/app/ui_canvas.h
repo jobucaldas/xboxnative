@@ -95,16 +95,103 @@ public:
         }
     }
 
+    // One row of a rounded rect, painted with `c` at `alpha` (0..255). This is
+    // the per-row form of fill_round_rect, for the things that vary down the
+    // shape — a vertical gradient, a scrim that fades in — and must still stop
+    // at the rounded edge. Without it those fills ran full-width and left a
+    // square dark corner peeking out behind every rounded tile and thumbnail.
+    void fill_round_rect_row(Rect r, float radius, int y, uint32_t c, uint8_t alpha) {
+        if (!alpha || r.w <= 0 || r.h <= 0) return;
+        if (y < clip_.y0 || y >= clip_.y1) return;
+        radius = detail::clampf(radius, 0, std::min(r.w, r.h) * 0.5f);
+        // the row's own coverage against the shape's top/bottom edge
+        float vy = std::min(float(y) + 1.0f, r.y + r.h) - std::max(float(y), r.y);
+        if (vy <= 0) return;
+        if (vy > 1) vy = 1;
+        const unsigned vy_cov = unsigned(vy * 255.0f + 0.5f);
+        if (!vy_cov) return;
+        const float py = float(y) + 0.5f;
+        const float cy0 = r.y + radius, cy1 = r.y + r.h - radius;
+        const float dy = py < cy0 ? cy0 - py : py > cy1 ? py - cy1 : 0.0f;
+        const float inset = dy > 0 ? radius - std::sqrt(std::max(0.0f, radius * radius - dy * dy)) : 0.0f;
+        const float xl = r.x + inset, xr = r.x + r.w - inset;
+        const int a = std::max(clip_.x0, int(std::floor(xl))), b = std::min(clip_.x1, int(std::ceil(xr)));
+        if (a >= b) return;
+        uint32_t* row = px_ + static_cast<std::size_t>(y) * stride_;
+        const int solid0 = std::max(a, int(std::ceil(xl))), solid1 = std::min(b, int(std::floor(xr)));
+        const unsigned ca = unsigned(alpha) * vy_cov / 255u;
+        if (solid0 < solid1) {
+            if (ca >= 255) std::fill(row + solid0, row + solid1, c);
+            else for (int x = solid0; x < solid1; ++x) row[x] = blend(row[x], c, ca);
+        }
+        for (int x = a; x < solid0; ++x) {
+            unsigned cov = unsigned(detail::clampf(xl - float(x), 0, 1) * 255.0f + 0.5f);
+            cov = cov * vy_cov / 255u * alpha / 255u;
+            if (cov) row[x] = blend(row[x], c, cov);
+        }
+        for (int x = std::max(solid1, a); x < b; ++x) {
+            unsigned cov = unsigned(detail::clampf(float(x + 1) - xr, 0, 1) * 255.0f + 0.5f);
+            cov = cov * vy_cov / 255u * alpha / 255u;
+            if (cov) row[x] = blend(row[x], c, cov);
+        }
+    }
+
+    // Coverage (0..1) of the rounded rect `r` at the pixel centre (px, py):
+    // the same signed-distance test draw_image's rounded mask uses. For fills
+    // that vary per pixel (a diagonal gradient) and must still stop smoothly at
+    // the rounded edge.
+    static float round_rect_coverage(Rect r, float radius, float px, float py) {
+        if (r.w <= 0 || r.h <= 0) return 0.0f;
+        radius = detail::clampf(radius, 0, std::min(r.w, r.h) * 0.5f);
+        if (radius < 0.01f) return 1.0f;
+        const float qx = std::fabs(px - (r.x + r.w * 0.5f)) - (r.w * 0.5f - radius);
+        const float qy = std::fabs(py - (r.y + r.h * 0.5f)) - (r.h * 0.5f - radius);
+        const float ax = qx > 0 ? qx : 0.0f, ay = qy > 0 ? qy : 0.0f;
+        const float sd = std::sqrt(ax * ax + ay * ay) + std::min(std::max(qx, qy), 0.0f) - radius;
+        return detail::clampf(0.5f - sd, 0, 1);
+    }
+
+    // Fills `r` with `c`, but only where the rounded rect `shape` covers it.
+    // The accent bars that hug a pill's edge (the sidebar's active row, the
+    // disk widget) are square fills over a rounded shape, so their corners
+    // poked out past the curve; this paints them inside it instead.
+    void fill_rect_in_round_rect(Rect r, Rect shape, float shape_radius, uint32_t c) {
+        if (r.w <= 0 || r.h <= 0) return;
+        const int x0 = std::max(clip_.x0, detail::iround(r.x)), x1 = std::min(clip_.x1, detail::iround(r.x + r.w));
+        const int y0 = std::max(clip_.y0, detail::iround(r.y)), y1 = std::min(clip_.y1, detail::iround(r.y + r.h));
+        if (x0 >= x1 || y0 >= y1) return;
+        for (int y = y0; y < y1; ++y) {
+            uint32_t* row = px_ + static_cast<std::size_t>(y) * stride_;
+            const float py = float(y) + 0.5f;
+            for (int x = x0; x < x1; ++x) {
+                const float cov = round_rect_coverage(shape, shape_radius, float(x) + 0.5f, py);
+                if (cov <= 0.0f) continue;
+                const unsigned a = unsigned(cov * 255.0f + 0.5f);
+                if (a) row[x] = blend(row[x], c, a);
+            }
+        }
+    }
+
     void fill_round_rect(Rect r, float radius, uint32_t c) {
         if (r.w <= 0 || r.h <= 0) return;
         radius = detail::clampf(radius, 0, std::min(r.w, r.h) * 0.5f);
         if (radius < 0.01f) { fill_rect(r.x, r.y, r.w, r.h, c); return; }
-        int x0 = std::max(clip_.x0, detail::iround(r.x)), x1 = std::min(clip_.x1, detail::iround(r.x + r.w));
-        int y0 = std::max(clip_.y0, detail::iround(r.y)), y1 = std::min(clip_.y1, detail::iround(r.y + r.h));
-        if (x0 >= x1) return;
+        // The shape's own bounds, one pixel of slack for the anti-aliased edges.
+        int x0 = std::max(clip_.x0, detail::iround(r.x) - 1), x1 = std::min(clip_.x1, detail::iround(r.x + r.w) + 1);
+        int y0 = std::max(clip_.y0, detail::iround(r.y) - 1), y1 = std::min(clip_.y1, detail::iround(r.y + r.h) + 1);
+        if (x0 >= x1 || y0 >= y1) return;
         // At any row a rounded rect is one horizontal interval [xl, xr]; only its two edge pixels need AA.
+        // The row's own coverage against the shape's top/bottom edge scales the whole row, so the
+        // horizontal edges are anti-aliased too (snapping them to whole rows made every card and
+        // button look square-cornered and hard-edged).
         float cy0 = r.y + radius, cy1 = r.y + r.h - radius;
         for (int y = y0; y < y1; ++y) {
+            const float row_top = float(y), row_bot = float(y) + 1.0f;
+            float vy = std::min(row_bot, r.y + r.h) - std::max(row_top, r.y);
+            if (vy <= 0) continue;
+            if (vy > 1) vy = 1;
+            const unsigned vy_cov = unsigned(vy * 255.0f + 0.5f);
+            if (!vy_cov) continue;
             float py = float(y) + 0.5f;
             float dy = py < cy0 ? cy0 - py : py > cy1 ? py - cy1 : 0.0f;
             float inset = dy > 0 ? radius - std::sqrt(std::max(0.0f, radius * radius - dy * dy)) : 0.0f;
@@ -113,13 +200,18 @@ public:
             if (a >= b) continue;
             uint32_t* row = px_ + static_cast<std::size_t>(y) * stride_;
             int solid0 = std::max(a, int(std::ceil(xl))), solid1 = std::min(b, int(std::floor(xr)));
-            if (solid0 < solid1) std::fill(row + solid0, row + solid1, c);
+            if (solid0 < solid1) {
+                if (vy_cov >= 255) std::fill(row + solid0, row + solid1, c);
+                else for (int x = solid0; x < solid1; ++x) row[x] = blend(row[x], c, vy_cov);
+            }
             for (int x = a; x < solid0; ++x) {
                 unsigned cov = unsigned(detail::clampf(xl - float(x), 0, 1) * 255.0f + 0.5f);
+                cov = cov * vy_cov / 255u;
                 if (cov) row[x] = blend(row[x], c, cov);
             }
             for (int x = std::max(solid1, a); x < b; ++x) {
                 unsigned cov = unsigned(detail::clampf(float(x + 1) - xr, 0, 1) * 255.0f + 0.5f);
+                cov = cov * vy_cov / 255u;
                 if (cov) row[x] = blend(row[x], c, cov);
             }
         }
