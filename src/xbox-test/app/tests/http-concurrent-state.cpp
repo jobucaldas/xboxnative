@@ -11,8 +11,11 @@
 // ever driven from two threads at once. This test models the documented
 // failure: a send on an instance with a send already in flight fails with the
 // changed-state error. Two checks:
-//   repro  — two threads released together onto ONE shared client: exactly one
-//            of the pair fails with the changed-state error, every time.
+//   repro  — two threads onto ONE shared client, the overlap made structural:
+//            both threads arrive at a barrier INSIDE send() before either
+//            result is decided, so exactly one of the pair fails with the
+//            changed-state error, every round, on any scheduler (no sleep
+//            race; arrival is unconditional, so the barrier cannot be missed).
 //   stress — many threads, many rounds, one client PER THREAD: zero
 //            changed-state errors, every send completes, and every per-thread
 //            client carries the same cached default headers (the User-Agent
@@ -36,19 +39,27 @@ void check(bool ok, const char* what) {
 // The documented contract of one Windows.Web.Http.HttpClient instance: a send
 // that overlaps another send on the same instance fails with 0x8000000C.
 // (The real client throws hresult_error; the mock reports the same outcome.)
-constexpr long kChangedState = 0x8000000C;
 struct Client {
     std::atomic<bool> inFlight{false};
     long sends = 0, changed = 0, ok = 0;
     Client() = default;
     Client(Client&& o) : inFlight(o.inFlight.load()), sends(o.sends), changed(o.changed), ok(o.ok) {}
-    bool send() {
-        if (inFlight.exchange(true)) { ++changed; return false; }   // 0x8000000C
+    // meet: optional barrier the caller places inside send(), so both threads
+    // are provably inside the send at the same time before either result is
+    // decided. Both workers call send() unconditionally in a fixed loop, so
+    // the barrier cannot be missed and cannot hang a peer.
+    bool send(std::barrier<>* meet = nullptr) {
+        const bool got = !inFlight.exchange(true);   // false here = 0x8000000C
         ++sends;
-        std::this_thread::sleep_for(std::chrono::microseconds(50));   // the round trip
-        inFlight = false;
-        ++ok;
-        return true;
+        if (meet) meet->arrive_and_wait();
+        if (got) {
+            std::this_thread::sleep_for(std::chrono::microseconds(50));   // the round trip
+            inFlight = false;
+            ++ok;
+            return true;
+        }
+        ++changed;
+        return false;
     }
 };
 
@@ -60,20 +71,23 @@ const std::string kUserAgent =
 void repro_shared_instance() {
     constexpr int rounds = 200;
     Client c;
-    std::barrier sync(2);
-    std::atomic<long> changed{0}, ok{0};
+    std::barrier meet(2);
+    std::barrier start(2);
     auto worker = [&] {
         for (int i = 0; i < rounds; i++) {
-            sync.arrive_and_wait();   // both threads send together, every round
-            c.send() ? ++ok : 0;
+            start.arrive_and_wait();   // both threads send together, every round
+            c.send(&meet);
         }
     };
+    // Per round both sends are inside send() at the same time on the one
+    // instance: exactly one lands, the other is refused with the changed-state
+    // error. Never both, never none, no timing dependence.
     std::thread a([&] { worker(); }), b([&] { worker(); });
     a.join(); b.join();
-    changed = c.changed;
-    // Per round the two sends overlap on the one instance: exactly one lands,
-    // the other is refused with the changed-state error. Never both, never none.
-    check(changed == rounds && c.sends == rounds && c.ok == rounds,
+    // 2*rounds sends total (both threads send every round): rounds land,
+    // rounds are refused with the changed-state error. Never both, never
+    // none, no timing dependence.
+    check(c.changed == rounds && c.ok == rounds && c.sends == 2 * rounds,
           "repro: one shared client driven by two threads hits 0x8000000C every round");
 }
 
