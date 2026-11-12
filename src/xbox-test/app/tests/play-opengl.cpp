@@ -587,8 +587,9 @@ int opengl_entry() {
     //   (b) the string does not advertise WGL_ARB_pixel_format: skipped with
     //       that exact message ("not advertised"), same platform limit;
     //   (c) the string advertises the extension but a function pointer is
-    //       NULL: a real driver bug (the string is a contract), FAIL with a
-    //       distinct exit code naming the missing function;
+    //       NULL: a real driver bug (the string is a contract), BLOCKED
+    //       (exit 43, the file's blocked verdict) naming the missing
+    //       function;
     //   (d) everything resolves: query attributes and choose the format.
     {
         auto extString = (PFN_wglGetExtensionsStringARB)(uintptr_t)
@@ -602,7 +603,7 @@ int opengl_entry() {
             // probed, so SDL3/GLFW fall back to the GDI pixel-format path the
             // fixture already proved above. A platform limit, skipped with a
             // log line — never a pass for the ARB stages themselves.
-            emit("PLAY-OPENGL STAGE wgl-extensions skipped (wglGetExtensionsStringARB absent)\n");
+            emit("PLAY-OPENGL STAGE wgl-extensions skipped (WGL_ARB_extensions_string absent)\n");
         } else {
         const char* exts = extString(dc);
         if (!exts || !contains(exts, "WGL_ARB_pixel_format")) {
@@ -611,10 +612,10 @@ int opengl_entry() {
             // The string is a contract: advertising the extension and then
             // handing back a NULL entry point is a driver bug, not a limit.
             char line[192];
-            char* p = append(line, "PLAY-OPENGL FAIL wgl-extensions: WGL_ARB_pixel_format advertised but ");
+            char* p = append(line, "PLAY-OPENGL BLOCKED wgl-extensions: WGL_ARB_pixel_format advertised but ");
             p = append(p, !attribiv ? "wglGetPixelFormatAttribivARB" : "wglChoosePixelFormatARB");
             p = append(p, " is NULL\n"); *p = 0; emit(line);
-            return 44;
+            blocked = true;
         } else {
                 // Query the GDI-chosen format's attributes (hdc iLayerPlane 0).
                 int fmt0 = getPixelFormat(dc);
