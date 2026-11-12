@@ -2105,11 +2105,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         vPlayers = "1"; vLang = "English";   // the store schema carries no players/language rows
 
         ui_launcher::PrimaryVM pv;
-        // a marker alone is not an install: the primary button only plays when
-        // the payload is behind it; a broken install shows REINSTALL (A on the
-        // detail page reinstalls, it never launches)
-        pv.installed = m_dInst.installed && !m_dBroken;
-        pv.broken = m_dBroken && m_dInst.installed;
+        // the marker still claims an install (installed stays true so the
+        // delete/cloud rows behave); broken flips the primary button to
+        // REINSTALL and takes A's reinstall path instead of a launch
+        pv.installed = m_dInst.installed;
+        pv.broken = m_dBroken;
         pv.download = down ? detail_input::Download::running : queued ? detail_input::Download::queued : detail_input::Download::none;
         pv.launching = launching; pv.deleting = deleting; pv.restart_required = retained;
         pv.install_pct = float(pct);

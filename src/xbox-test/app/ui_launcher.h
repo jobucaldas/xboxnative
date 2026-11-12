@@ -140,7 +140,7 @@ inline Primary primary_state(const PrimaryVM& vm) {
     if (vm.deleting) return Primary::deleting;
     if (vm.download != detail_input::Download::none) return Primary::installing;
     if (vm.restart_required) return Primary::restart_required;
-    if (vm.broken && vm.installed) return Primary::reinstall;   // before play: a broken install cannot play
+    if (vm.broken) return Primary::reinstall;   // before play: a broken install cannot play
     return vm.installed ? Primary::play : Primary::install;
 }
 
