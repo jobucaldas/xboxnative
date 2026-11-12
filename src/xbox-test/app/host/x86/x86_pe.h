@@ -28,9 +28,54 @@ struct Image {
         bool present = false;
         uint32_t start = 0, end = 0, index_ptr = 0, callbacks = 0, zero_fill = 0;
     } tls;
+    bool is_dll = false;
+    // Export table of a mapped image (guest addresses): name/ordinal -> RVA.
+    // Filled from the PE's export directory so GetProcAddress can serve guest
+    // modules without a second copy of the file.
+    std::map<std::string, uint32_t> exports;          // lowercase name -> RVA
+    std::map<std::string, std::string> forwarded;     // lowercase name -> "dll.symbol"
+    std::vector<std::pair<uint32_t, uint32_t>> ordinals;  // ordinal -> RVA
+    uint32_t ordinal_base = 0;
+    // TLS callbacks (absolute guest addresses), run with DLL_PROCESS_ATTACH
+    // before the entry point, as the Windows loader does.
+    std::vector<uint32_t> tls_callbacks;
 };
 // stdcall argument bytes of an unresolved import are unknown; the stub faults before returning.
 inline uint32_t u32(const std::vector<uint8_t>& b, size_t p) { return wxl::Pe32::read(b, p); }
+inline uint32_t u32(const std::vector<uint8_t>& b, size_t p, unsigned n) { return wxl::Pe32::read(b, p, n); }
+// NUL-terminated string at offset `p` of a flat PE image (RVA == index).
+inline std::string pe_str(const std::vector<uint8_t>& b, size_t p) {
+    if (p >= b.size()) throw std::runtime_error("PE32 string bounds");
+    size_t e = p; while (e < b.size() && b[e]) ++e;
+    if (e >= b.size()) throw std::runtime_error("PE32 unterminated string");
+    return std::string(b.begin() + p, b.begin() + e);
+}
+// Reads the export directory of a mapped image. `bytes` is the flat image
+// (RVA == index); every export address is an RVA, rebased by the caller.
+inline void read_exports(Image& img, const std::vector<uint8_t>& bytes) {
+    size_t nt = u32(bytes, 0x3c), opt = nt + 24;
+    uint32_t exp_rva = u32(bytes, opt + 96 + 0);  // data directory 0: export table
+    if (!exp_rva) return;
+    img.ordinal_base = u32(bytes, exp_rva + 16);
+    uint32_t n_names = u32(bytes, exp_rva + 24), n_funcs = u32(bytes, exp_rva + 20);
+    uint32_t names_rva = u32(bytes, exp_rva + 32), funcs_rva = u32(bytes, exp_rva + 28), ords_rva = u32(bytes, exp_rva + 36);
+    for (uint32_t i = 0; i < n_names; ++i) {
+        uint32_t name_rva = u32(bytes, names_rva + i * 4);
+        if (!name_rva) continue;
+        std::string name = pe_str(bytes, name_rva);
+        uint32_t idx = u32(bytes, ords_rva + i * 2, 2);
+        uint32_t fn_rva = u32(bytes, funcs_rva + idx * 4);
+        // A forwarded export (RVA inside the export directory) is recorded as-is:
+        // the caller resolves the "dll.symbol" string form, as Windows answers.
+        if (fn_rva >= exp_rva && fn_rva < exp_rva + 0x10000 && n_funcs) {
+            std::string fwd = pe_str(bytes, fn_rva);
+            for (auto& ch : fwd) if (ch >= 'A' && ch <= 'Z') ch += 32;
+            img.exports[name] = 0;  // marker: forwarded; the name string is kept below
+            img.forwarded[name] = fwd;
+        } else img.exports[name] = fn_rva;
+    }
+    for (uint32_t i = 0; i < n_funcs; ++i) img.ordinals.push_back({img.ordinal_base + i, u32(bytes, funcs_rva + i * 4)});
+}
 inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, const std::vector<uint8_t>& file, uint32_t load_base = 0) {
     if (file.size() < 0x40) throw std::runtime_error("PE32 truncated");
     size_t nt = u32(file, 0x3c);
@@ -88,7 +133,135 @@ inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, cons
         uint8_t p = PROT_R | ((ch & 0x80000000u) ? PROT_W : 0) | ((ch & 0x20000000u) ? PROT_X : 0);
         mem.protect(img.base + va, vs, p);
     }
+    // TLS directory (data dir 9): the callback list a static CRT (mingw's
+    // mcfgthread) initializes its globals from. The pointer fields inside the
+    // directory are absolute VAs (relocated with the image), so each becomes
+    // an RVA by subtracting the load base; the callback list is a
+    // NUL-terminated array. The index variable is left alone (one thread, so
+    // index 0 is never used).
+    uint32_t tls_rva = u32(pe.bytes, opt + 96 + 9 * 8);
+    if (tls_rva) {
+        uint32_t cb_va = u32(pe.bytes, tls_rva + 12);
+        if (cb_va >= img.base && cb_va < img.base + img.size)  // a null/odd list is skipped
+            for (uint32_t i = 0; i < 64; ++i) {
+                uint32_t fn = u32(pe.bytes, cb_va - img.base + i * 4);
+                if (!fn) break;
+                if (fn < img.base || fn >= img.base + img.size) break;  // malformed list
+                img.tls_callbacks.push_back(fn);
+            }
+    }
     return img;
+}
+// DLL search: the host supplies the bytes for a guest LoadLibrary by module
+// file name. Returning an empty vector reports "module not found" to the
+// guest (ERROR_MOD_NOT_FOUND), matching Windows' loader.
+using DllSource = std::function<std::vector<uint8_t>(const std::string&)>;
+// One loaded DLL: the mapped image plus the LoadLibrary refcount. A real
+// unload (refcount to zero -> unmap) is not implemented; FreeLibrary says so.
+struct Dll {
+    Image image;
+    unsigned refs = 1;
+    std::string host_name;  // as the guest asked for it, for GetProcAddress diagnostics
+};
+// Resolves `sym` (already lowercase) in a loaded DLL's export table to a guest
+// address: an RVA in the image, a forwarded export resolved through the module
+// table (one hop, as Windows answers a forward with the target's address), or 0.
+inline uint32_t dll_export_addr(const Dll& dep, const std::string& sym, const std::map<std::string, Dll>& loaded) {
+    auto it = dep.image.exports.find(sym);
+    if (it == dep.image.exports.end()) return 0;
+    auto fwd = dep.image.forwarded.find(sym);
+    if (fwd != dep.image.forwarded.end()) {  // "dll.symbol": resolve one hop
+        size_t dot = fwd->second.find('.');
+        if (dot == std::string::npos) return 0;
+        auto m = loaded.find(fwd->second.substr(0, dot));
+        if (m == loaded.end()) return 0;
+        return dll_export_addr(m->second, fwd->second.substr(dot + 1), loaded);
+    }
+    return dep.image.base + it->second;  // RVA in the mapped image
+}
+// Loads a guest PE32 DLL: map at ImageBase, relocations, exports read for
+// GetProcAddress, imports bound recursively — a dependency in the registry
+// binds to host thunks, one served by `source` loads as another guest DLL
+// (depth-capped), anything else stays an UnresolvedImport fault stub. DllMain
+// is NOT called here: the caller runs it with the CPU once the thunk page is
+// mapped, so a DllMain that itself calls LoadLibrary still works.
+// `loaded` is the process module table (lowercase name -> Dll); a dependency
+// already loaded is reused and its refcount bumped, as Windows' loader does.
+inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const std::vector<uint8_t>& file,
+                    const DllSource& source, std::map<std::string, Dll>& loaded, unsigned depth = 0,
+                    std::vector<std::string>* order = nullptr) {
+    if (depth > 16) throw std::runtime_error("DLL dependencies nested too deep");
+    // Load at the ImageBase when it is free; otherwise relocate like Windows'
+    // loader does for a DLL whose base is taken. Candidate bases stay in the
+    // 0x10000000 arena a normal exe never uses (wxl::Pe32 relocates there too).
+    size_t nt0 = u32(file, 0x3c);
+    uint32_t preferred = u32(file, nt0 + 24 + 28);
+    uint32_t load_base = preferred;
+    if (!mem.free_range(preferred, uint32_t(file.size()))) {
+        uint32_t candidate = 0x10000000u;
+        while (candidate < 0xF0000000u && !mem.free_range(candidate, uint32_t(file.size()))) candidate += 0x1000000u;
+        if (candidate >= 0xF0000000u) throw std::runtime_error("DLL load: no free base for relocation");
+        load_base = candidate;
+    }
+    Image img = load_pe32(mem, table, reg, file, load_base);
+    img.is_dll = true;
+    // Export and import RVAs index the mapped image, not the raw file, so
+    // both walks below read the flat image load_pe32 produced (relocated,
+    // RVA == index), copied back out of guest memory.
+    std::vector<uint8_t> flat = mem.read_bytes(img.base, img.size);
+    read_exports(img, flat);
+    // load_pe32 bound registry imports and gave every other one a fault stub.
+    // Walk the import directory of the flat image again and rebind the slots
+    // a now-loaded guest DLL serves. Only entries whose whole DLL is a guest
+    // module are candidates: a DLL partly in the registry keeps its registry
+    // bindings (rebinding from the guest image would shadow host thunks).
+    size_t nt = u32(flat, 0x3c), opt = nt + 24;
+    uint32_t imp = u32(flat, opt + 96 + 8);
+    if (imp) for (size_t d = imp;; d += 20) {
+        uint32_t name = u32(flat, d + 12);
+        if (!name) break;
+        std::string dll = pe_str(flat, name);
+        for (auto& c : dll) if (c >= 'A' && c <= 'Z') c += 32;
+        auto known = loaded.find(dll);
+        if (known == loaded.end()) {
+            std::vector<uint8_t> bytes = source ? source(dll) : std::vector<uint8_t>{};
+            if (bytes.empty()) continue;  // stays unresolved; the stub faults by name
+            Dll dep = load_dll(mem, table, reg, bytes, source, loaded, depth + 1, order);
+            known = loaded.emplace(dll, std::move(dep)).first;
+            known->second.host_name = dll;
+            if (order) order->push_back(dll);  // load order: DllMain runs in reverse at detach
+        } else known->second.refs++;
+        // Rebind this dependency's IAT: ordinal or name -> export guest address.
+        // load_pe32 already applied section protections, so the IAT pages are
+        // read-only now; they go writable for the rebind and back afterwards
+        // (the IAT is data a guest must not write, as Windows maps it).
+        size_t src = u32(flat, d), dst = u32(flat, d + 16); if (!src) src = dst;
+        for (unsigned j = 0;; ++j) {
+            uint32_t t = u32(flat, src + size_t(j) * 4); if (!t) break;
+            uint32_t addr = 0;
+            std::string label = dll + "!" + (t & 0x80000000u ? "#" + std::to_string(t & 65535) : pe_str(flat, t + 2));
+            if (t & 0x80000000u) {
+                uint32_t ord = t & 65535;
+                for (auto& o : known->second.image.ordinals) if (o.first == ord) { addr = known->second.image.base + o.second; break; }
+            } else {
+                std::string sym = pe_str(flat, t + 2);
+                for (auto& ch : sym) if (ch >= 'A' && ch <= 'Z') ch += 32;
+                addr = dll_export_addr(known->second, sym, loaded);
+            }
+            if (addr) {
+                uint32_t slot = img.base + dst + j * 4;
+                mem.protect(slot & ~4095u, 4096, PROT_R | PROT_W);
+                mem.w32(slot, addr); ++img.bound;
+                mem.protect(slot & ~4095u, 4096, PROT_R);
+                // The fault stub from load_pe32 is replaced: drop the entry
+                // from the unresolved list so the runner reports only real gaps.
+                auto u = std::find(img.unresolved.begin(), img.unresolved.end(), label);
+                if (u != img.unresolved.end()) img.unresolved.erase(u);
+            }
+        }
+    }
+    Dll out; out.image = std::move(img);
+    return out;
 }
 // Thunk page (read+execute, never fetched through the interpreter), stack, TEB32, PEB32.
 inline void map_thunk_page(Memory& mem, const ThunkTable& table) {

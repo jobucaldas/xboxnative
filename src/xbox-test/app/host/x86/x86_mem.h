@@ -30,6 +30,14 @@ struct Memory {
         throw Fault(k, fault_eip, a, b);
     }
     bool mapped(uint32_t a) const { return page[a >> 12] != nullptr; }
+    // True when [addr, addr+size) is entirely unmapped (a load may map there).
+    bool free_range(uint32_t addr, uint32_t size) const {
+        if (addr % PAGE) return false;
+        uint64_t end = (uint64_t(addr) + size + PAGE - 1) & ~uint64_t(PAGE - 1);
+        if (end > 0x100000000ull) return false;
+        for (uint64_t a = addr; a < end; a += PAGE) if (page[a >> 12]) return false;
+        return true;
+    }
     // Zero-filled, page-aligned region. Overlap with an existing mapping is an error.
     void map(uint32_t addr, uint32_t size, uint8_t p) {
         if (addr % PAGE || !size) throw std::runtime_error("x86 map: unaligned");

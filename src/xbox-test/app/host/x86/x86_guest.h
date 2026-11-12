@@ -20,6 +20,10 @@
 #include <vector>
 #include "x86_win32.h"
 namespace x86 {
+// Loaded guest DLLs, shared between the loader and the Guest surface. Kept in
+// x86_pe.h's Dll form so GetProcAddress reads the same export tables the
+// import binder filled.
+struct Dll;
 
 // ---- guest heap: first-fit free list over a lazily mapped guest arena ----
 struct GuestHeap {
@@ -96,7 +100,22 @@ struct Guest {
     std::map<uint32_t, uint32_t> heap_handles;  // handle -> arena base
     std::map<uint32_t, uint32_t> virtual_alloc; // guest addr -> size
     uint32_t virtual_top = 0x20000000;
-    unsigned next_tls = 0;
+    unsigned next_tls = 0, thread_serial = 0;
+    std::map<uint32_t, uint32_t> sections;  // handle -> size in bytes
+    uint32_t section_serial = 0, section_top = 0x64000000u;
+    // Thread bodies CreateThread recorded; run_pending_threads executes each
+    // at the guest's first blocking wait (see the CreateThread comment).
+    std::vector<std::pair<uint32_t, uint32_t>> pending_threads;
+    // Guest DLLs loaded by the process (lowercase module name -> Dll) and the
+    // order they were mapped in (DllMain PROCESS_DETACH runs in reverse).
+    // `dll_source` supplies DLL bytes by module name; empty = not found.
+    std::map<std::string, Dll> dlls;
+    std::vector<std::string> dll_order;
+    DllSource dll_source;
+    // DllMain absolute entry addresses by module name, run by the Cpu after
+    // the thunk page is mapped; the loader records them, run_dll_mains
+    // dispatches. (Image::entry is already absolute: base + entry RVA.)
+    std::map<std::string, uint32_t> dll_entries;
     Guest(Memory& m, Host& h, Registry& r) : mem(m), host(h), reg(r), heap(m, 0x10000000) {}
     void register_all();
     // Module names are case-insensitive on Windows, and GetModuleHandleA
@@ -108,6 +127,11 @@ struct Guest {
     }
     // --- guest-memory helpers ---
     std::string str(uint32_t p) const { return p ? mem.read_cstr(p) : std::string(); }
+    std::u16string wstr(uint32_t p) const {
+        std::u16string s;
+        if (p) for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(p + i * 2, 2)); if (!w) break; s.push_back(w); }
+        return s;
+    }
     uint32_t put_str(const std::string& s) {
         uint32_t p = heap.alloc(uint32_t(s.size() + 1));
         mem.write_bytes(p, s.c_str(), uint32_t(s.size() + 1));
@@ -175,6 +199,124 @@ struct Guest {
     }
     void run_atexit(Cpu& c);
     void do_exit(Cpu& c, uint32_t code);
+    // Runs every thread body CreateThread recorded, in creation order, before
+    // the blocking wait that triggered it proceeds. Each body runs with an
+    // empty SEH chain and zeroed TEB TLS slots (fs:[0] and fs:[0xE10..]) —
+    // a real thread starts with its own — and both are restored afterwards,
+    // because the synchronous model shares one TEB between all threads.
+    void run_pending_threads(Cpu& c) {
+        while (!pending_threads.empty()) {
+            auto t = pending_threads.front(); pending_threads.erase(pending_threads.begin());
+            uint32_t seh = mem.r32(TEB_ADDR);
+            std::vector<uint32_t> tls(64);
+            for (unsigned i = 0; i < 64; ++i) tls[i] = mem.r32(TEB_ADDR + 0xE10 + i * 4);
+            mem.w32(TEB_ADDR, 0xFFFFFFFFu);  // empty exception chain
+            for (unsigned i = 0; i < 64; ++i) mem.w32(TEB_ADDR + 0xE10 + i * 4, 0);
+            c.call(t.first, {t.second});
+            mem.w32(TEB_ADDR, seh);
+            for (unsigned i = 0; i < 64; ++i) mem.w32(TEB_ADDR + 0xE10 + i * 4, tls[i]);
+        }
+    }
+    // Guest DLL loading (stage 3). `run_dll_mains` runs each loaded DLL's
+    // DllMain(DLL_PROCESS_ATTACH) in load order, like the Windows loader, and
+    // is called by the runner after init_process. A DLL without DllMain is
+    // skipped; a DllMain that faults propagates (never silently ignored).
+    void run_dll_mains(Cpu& c, uint32_t reason) {
+        (void)reason;  // only DLL_PROCESS_ATTACH (1) is dispatched today
+        for (const auto& name : dll_order) {
+            auto e = dll_entries.find(name);
+            if (e == dll_entries.end()) continue;
+            uint32_t base = dlls[name].image.base;
+            c.call(e->second, {base, static_cast<uint32_t>(1 /*DLL_PROCESS_ATTACH*/), 0});
+        }
+    }
+    // LoadLibrary core: maps `file` as a guest DLL (or bumps the refcount of a
+    // loaded one), binds imports recursively, records DllMain, and returns the
+    // guest base, or 0 with ERROR_MOD_NOT_FOUND / ERROR_BAD_EXE_FORMAT. DllMain
+    // runs here when the CPU is live (a LoadLibrary from guest code); the
+    // loader path passes cpu == nullptr and defers to run_dll_mains.
+    // Modules the OS surface itself serves (kernel32, msvcrt, ntdll) have no
+    // image: LoadLibrary answers a pseudo-handle and GetProcAddress on it
+    // binds the same host thunk the import binder would have, as Windows
+    // answers for its own modules.
+    std::map<std::string, uint32_t> os_modules;  // lowercase dll -> pseudo base
+    static constexpr uint32_t kOsModuleBase = 0x68000000u, kOsModuleStride = 0x10000u;
+    // kernelbase exports nothing here (the CRT probes it and falls back when
+    // the lookup misses), but LoadLibrary must succeed, as on Windows.
+    bool registry_serves(const std::string& dll) const {
+        if (dll == "kernelbase.dll") return true;
+        for (auto& kv : reg.map) if (kv.first.first == dll) return true;
+        return false;
+    }
+    uint32_t os_module_handle(const std::string& dll) {
+        auto it = os_modules.find(dll);
+        if (it != os_modules.end()) return it->second;
+        uint32_t h = kOsModuleBase + uint32_t(os_modules.size()) * kOsModuleStride;
+        os_modules[dll] = h;
+        add_module(dll, h);  // GetModuleHandleA("ntdll.dll") answers it too
+        return h;
+    }
+    uint32_t load_guest_dll(Cpu* cpu, const std::string& requested, ThunkTable& table) {
+        std::string lower = requested;
+        for (auto& ch : lower) ch = char(std::tolower((unsigned char)ch));
+        auto it = dlls.find(lower);
+        if (it != dlls.end()) { it->second.refs++; return it->second.image.base; }
+        if (registry_serves(lower)) return os_module_handle(lower);
+        if (!dll_source) { set_last_error(126); return 0; }  // ERROR_MOD_NOT_FOUND
+        std::vector<uint8_t> bytes = dll_source(lower);
+        if (bytes.empty()) { set_last_error(126); return 0; }
+        Dll d = load_dll(mem, table, reg, bytes, dll_source, dlls, 0, &dll_order);
+        uint32_t base = d.image.base;
+        dll_order.push_back(lower);
+        dlls[lower] = std::move(d);
+        if (d.image.entry) dll_entries[lower] = d.image.entry;  // absolute
+        if (cpu && d.image.entry) {
+            // Load-time DllMain, as the Windows loader runs it on the loading
+            // thread: (base, DLL_PROCESS_ATTACH, NULL). LoadLibrary inside
+            // DllMain works: the thunk page is mapped and load_dll recurses.
+            cpu->call(d.image.entry, {base, 1, 0});
+        }
+        return base;
+    }
+    // GetProcAddress core: `name_ptr` is a string pointer or an ordinal in the
+    // MAKEINTRESOURCE form (a value below 65536 is an ordinal, as Windows
+    // answers). Returns the guest address, or 0 with ERROR_PROC_NOT_FOUND.
+    uint32_t get_proc_address(uint32_t module, uint32_t name_ptr, ThunkTable& table) {
+        for (auto& kv : dlls) {
+            if (kv.second.image.base != module) continue;
+            uint32_t a = 0;
+            if (name_ptr < 0x10000u) {  // ordinal form: the export address table by index
+                for (auto& o : kv.second.image.ordinals)
+                    if (o.first == name_ptr) { a = kv.second.image.base + o.second; break; }
+            } else {
+                std::string sym = str(name_ptr);
+                for (auto& ch : sym) ch = char(std::tolower((unsigned char)ch));
+                a = dll_export_addr(kv.second, sym, dlls);
+            }
+            if (!a) set_last_error(127);  // ERROR_PROC_NOT_FOUND
+            return a;
+        }
+        // An OS-served module: the export is a host thunk, added on demand —
+        // the same stub the import binder installs for it.
+        for (auto& kv : os_modules) {
+            if (kv.second != module) continue;
+            if (name_ptr >= 0x10000u) {
+                std::string sym = str(name_ptr);
+                auto it = reg.map.find({kv.first, sym});
+                if (it != reg.map.end()) return table.add(it->second);
+                // Also answer the undecorated stdcall name for a decorated
+                // registry entry (a game may ask either form).
+                std::string dec = sym + "@";
+                for (auto& e : reg.map)
+                    if (e.first.first == kv.first && e.first.second.rfind(dec, 0) == 0)
+                        return table.add(e.second);
+            }
+            set_last_error(127);  // ERROR_PROC_NOT_FOUND
+            return 0;
+        }
+        set_last_error(126);  // ERROR_MOD_NOT_FOUND: not a module we track
+        return 0;
+    }
 };
 
 // ---- number formatting shared by the printf family ----
@@ -374,17 +516,22 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetModuleHandleA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         std::string n = str(c.arg(0)); if (n.empty()) return image_base;
         for (auto& ch : n) ch = char(tolower((unsigned char)ch));
-        auto it = modules.find(n); return it == modules.end() ? 0 : it->second; });
+        auto it = modules.find(n); if (it != modules.end()) return it->second;
+        auto d = dlls.find(n); return d == dlls.end() ? 0 : d->second.image.base; });
     reg.add("kernel32.dll", "GetModuleHandleW", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         if (!c.arg(0)) return image_base;
         return 0; });
-    // FreeLibrary: the guest cannot unload a module it did not load through a
-    // path this surface tracks, so a handle for the image or a known module is
-    // accepted and nothing is unmapped. Anything else fails with
-    // ERROR_MOD_NOT_FOUND, which is what Windows' LdrUnloadDll and Wine answer.
+    // FreeLibrary: decrements the refcount of a module this surface loaded or
+    // tracks, and never unmaps: a real unload (refcount to zero -> unmap +
+    // DLL_PROCESS_DETACH) is not implemented, and the coverage matrix says so.
+    // An unknown handle fails with ERROR_MOD_NOT_FOUND, as Windows answers.
     reg.add("kernel32.dll", "FreeLibrary", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t h = c.arg(0);
         if (h == image_base) return 1;
+        for (auto& kv : dlls) if (kv.second.image.base == h) {
+            if (kv.second.refs > 1) kv.second.refs--;
+            return 1;
+        }
         for (const auto& m : modules) if (m.second == h) return 1;
         set_last_error(126);  // ERROR_MOD_NOT_FOUND
         return 0; });
@@ -407,6 +554,70 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "TerminateProcess", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { do_exit(c, c.arg(1)); return 1; });
     reg.add("kernel32.dll", "Sleep", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
     reg.add("kernel32.dll", "SleepEx", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 0; });
+    // Threads: the surface runs one guest thread per CPU, so a thread body
+    // cannot run inside CreateThread — mcfgthread's creator->thread handshake
+    // (__MCF_event_await_change on the new thread's `ready` flag) spins forever
+    // there. Instead the (start, param) pair is recorded and each body runs at
+    // the guest's first blocking wait (keyed event / single object), with the
+    // TEB TLS slots and SEH chain saved and restored around it: a real thread
+    // has its own, and the synchronous model shares one TEB.
+    reg.add("kernel32.dll", "CreateThread", Conv::Stdcall, 6, [this](Cpu& c) -> uint32_t {
+        pending_threads.push_back({c.arg(2), c.arg(3)});
+        return 0x60000000u + ++thread_serial; });
+    reg.add("kernel32.dll", "ExitThread", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { do_exit(c, c.arg(0)); return 0; });
+    reg.add("kernel32.dll", "SwitchToThread", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("kernel32.dll", "GetCurrentProcessorNumberEx", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        uint32_t p = c.arg(0); if (p) { mem.w(p, 0, 2); mem.w(p + 2, 0, 2); } return 0; });
+    // Thread affinity/priority: one CPU, normal priority, affinity mask 1.
+    reg.add("kernel32.dll", "GetProcessAffinityMask", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        if (c.arg(0)) { mem.w32(c.arg(0), 1); }
+        if (c.arg(1)) { mem.w32(c.arg(1), 1); }
+        return 1; });
+    reg.add("kernel32.dll", "SetThreadAffinityMask", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { return c.arg(1) ? 1u : 0u; });
+    reg.add("kernel32.dll", "GetThreadGroupAffinity", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        uint32_t p = c.arg(1); if (p) { mem.w32(p, 1); mem.w32(p + 4, 0); mem.w(p + 8, 0, 2); } return 1; });
+    reg.add("kernel32.dll", "GetThreadPriority", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("kernel32.dll", "SetThreadPriority", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 1; });
+    // EncodePointer/DecodePointer: the security cookie; identity is fine
+    // because no guest-visible secret needs protecting in this surface.
+    reg.add("kernel32.dll", "EncodePointer", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t { return c.arg(0) ^ 0x5A5A5A5Au; });
+    // FormatMessage: no message tables; a caller must handle the failure, as
+    // on Windows when no message is found.
+    reg.add("kernel32.dll", "FormatMessageA", Conv::Stdcall, 7, [this](Cpu&) -> uint32_t { set_last_error(15100); return 0; });
+    reg.add("kernel32.dll", "FormatMessageW", Conv::Stdcall, 7, [this](Cpu&) -> uint32_t { set_last_error(15100); return 0; });
+    // File info / module enumeration used by C++ runtimes' diagnostics paths:
+    // answer "not available" the way the API does on a real failure.
+    reg.add("kernel32.dll", "GetFileInformationByHandle", Conv::Stdcall, 2, [this](Cpu&) -> uint32_t { set_last_error(6); return 0; });
+    reg.add("kernel32.dll", "K32EnumProcessModules", Conv::Stdcall, 4, [this](Cpu&) -> uint32_t { set_last_error(6); return 0; });
+    reg.add("kernel32.dll", "GetLogicalProcessorInformationEx", Conv::Stdcall, 3, [this](Cpu&) -> uint32_t { set_last_error(122); return 0; });
+    reg.add("kernel32.dll", "GetModuleHandleExW", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        // (flags, name, out): only the "from address" form is unsupported; the
+        // plain name form behaves like GetModuleHandleW.
+        uint32_t flags = c.arg(0), out = c.arg(2);
+        if (flags & 4) { if (out) mem.w32(out, 0); return 0; }
+        uint32_t p = c.arg(1); std::string n;
+        for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(p + i * 2, 2)); if (!w) break; n.push_back(char(w & 0xff)); }
+        for (auto& ch : n) ch = char(std::tolower((unsigned char)ch));
+        auto it = modules.find(n); if (it == modules.end()) { if (out) mem.w32(out, 0); return 0; }
+        if (out) { mem.w32(out, it->second); }
+        return 1; });
+    // Time/clock queries the C++ runtime's once-init and this_thread use.
+    reg.add("kernel32.dll", "QueryUnbiasedInterruptTime", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        uint32_t p = c.arg(0); if (p) { mem.w32(p, 0x00200000u); mem.w32(p + 4, 0); } return 1; });
+    // RaiseFailFastException: a fatal runtime error (fail-fast); end the run
+    // with the crash exit code instead of continuing with broken state.
+    reg.add("kernel32.dll", "RaiseFailFastException", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { do_exit(c, 0x0DEAD10Cu); return 0; });
+    // Console output: WriteConsoleW is the wide path WriteFile takes for a
+    // console handle; the UTF-16 buffer is narrowed (the surface's output is
+    // ASCII, as the module names it serves are).
+    reg.add("kernel32.dll", "WriteConsoleW", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
+        uint32_t handle = c.arg(0), buf = c.arg(1), n = c.arg(2), written = c.arg(3);
+        if (handle != Host::H_STDOUT && handle != Host::H_STDERR) { set_last_error(6); return 0; }
+        std::string s;
+        for (uint32_t i = 0; i < n; ++i) s.push_back(char(mem.r(buf + i * 2, 2) & 0xff));
+        emit(handle == Host::H_STDOUT ? 1 : 2, s);
+        if (written) mem.w32(written, n);
+        return 1; });
     reg.add("kernel32.dll", "SetUnhandledExceptionFilter", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
     reg.add("kernel32.dll", "UnhandledExceptionFilter", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "RaiseException", Conv::Stdcall, 4, [](Cpu& c) -> uint32_t {
@@ -589,12 +800,31 @@ inline void Guest::register_all() {
             if (!want.empty() && want != "C" && want != "POSIX") return 0;
         }
         return put_str("C"); });
-    reg.add("kernel32.dll", "GetProcAddress", Conv::Stdcall, 2, [](Cpu& c) -> uint32_t {
-        throw Fault(FaultKind::UnresolvedImport, c.eip, 0, "GetProcAddress: no export table for guest modules"); });
-    reg.add("kernel32.dll", "LoadLibraryA", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
-        throw Fault(FaultKind::Unsupported, c.eip, 0, "LoadLibraryA from guest code is not implemented"); });
-    reg.add("kernel32.dll", "LoadLibraryW", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
-        throw Fault(FaultKind::Unsupported, c.eip, 0, "LoadLibraryW from guest code is not implemented"); });
+    // Stage 3: guest DLL loading. `table` is captured so a LoadLibrary from
+    // guest code can add thunks for the new module's imports.
+    reg.add("kernel32.dll", "GetProcAddress", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        uint32_t module = c.arg(0), name = c.arg(1);
+        if (!module || !name) { set_last_error(126); return 0; }
+        return get_proc_address(module, name, c.thunks); });
+    reg.add("kernel32.dll", "LoadLibraryA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        return load_guest_dll(&c, str(c.arg(0)), c.thunks); });
+    reg.add("kernel32.dll", "LoadLibraryW", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        // UTF-16 in, UTF-8 out: the module names this surface serves are ASCII.
+        uint32_t p = c.arg(0); std::string n;
+        for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(p + i * 2, 2)); if (!w) break; n.push_back(char(w & 0xff)); }
+        return load_guest_dll(&c, n, c.thunks); });
+    reg.add("kernel32.dll", "LoadLibraryExA", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+        return load_guest_dll(&c, str(c.arg(0)), c.thunks); });
+    reg.add("kernel32.dll", "LoadLibraryExW", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+        uint32_t p = c.arg(0); std::string n;
+        for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(p + i * 2, 2)); if (!w) break; n.push_back(char(w & 0xff)); }
+        return load_guest_dll(&c, n, c.thunks); });
+    reg.add("kernel32.dll", "GetModuleHandleW", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        if (!c.arg(0)) return image_base;
+        std::string n;
+        for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(c.arg(0) + i * 2, 2)); if (!w) break; n.push_back(char(w & 0xff)); }
+        for (auto& ch : n) ch = char(std::tolower((unsigned char)ch));
+        auto it = modules.find(n); return it == modules.end() ? 0 : it->second; });
     reg.add("msvcrt.dll", "__set_app_type", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 0; });
     reg.add("msvcrt.dll", "__setusermatherr", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 0; });
     reg.add("msvcrt.dll", "_amsg_exit", Conv::Cdecl, 1, [this](Cpu& c) -> uint32_t { do_exit(c, c.arg(0)); return 0; });
@@ -752,13 +982,90 @@ inline void Guest::register_all() {
         uint32_t sz = c.arg(1), n = c.arg(2), total = sz * n;
         if (total) { auto b = mem.read_bytes(c.arg(0), total); emit(fi, std::string(b.begin(), b.end())); }
         return n; });
-    reg.add("msvcrt.dll", "fread", Conv::Cdecl, 4, [this](Cpu& c) -> uint32_t { (void)c; return 0; });
+    reg.add("msvcrt.dll", "fread", Conv::Cdecl, 4, [this](Cpu&) -> uint32_t { return 0; });
     reg.add("msvcrt.dll", "ferror", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 0; });
     reg.add("msvcrt.dll", "feof", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 1; });
     reg.add("msvcrt.dll", "_fileno", Conv::Cdecl, 1, [this](Cpu& c) -> uint32_t { int fi = file_index(c.arg(0)); return fi < 0 ? 0xFFFFFFFFu : uint32_t(fi); });
     reg.add("msvcrt.dll", "_isatty", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 1; });
     reg.add("msvcrt.dll", "setbuf", Conv::Cdecl, 2, [](Cpu&) -> uint32_t { return 0; });
     reg.add("msvcrt.dll", "_setmode", Conv::Cdecl, 2, [](Cpu&) -> uint32_t { return 0; });
+    // The remaining FILE*-based stdio the C++ streams layer calls on the three
+    // standard streams. There is no filesystem: fopen answers NULL (the C++
+    // fixture never opens files), and the position/character calls on the
+    // standard streams behave like their unbuffered counterparts above.
+    reg.add("msvcrt.dll", "fopen", Conv::Cdecl, 2, [this](Cpu&) -> uint32_t { set_last_error(2); return 0; });  // ENOENT
+    reg.add("msvcrt.dll", "_wfopen", Conv::Cdecl, 2, [this](Cpu&) -> uint32_t { set_last_error(2); return 0; });
+    reg.add("msvcrt.dll", "fclose", Conv::Cdecl, 1, [this](Cpu& c) -> uint32_t { return file_index(c.arg(0)) < 0 ? 0xFFFFFFFFu : 0u; });
+    reg.add("msvcrt.dll", "getc", Conv::Cdecl, 1, [this](Cpu& c) -> uint32_t { (void)c; return 0xFFFFFFFFu; });  // EOF: no input
+    reg.add("msvcrt.dll", "putc", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
+        int fi = file_index(c.arg(1)); if (fi < 0) return 0xFFFFFFFFu;
+        emit(fi, std::string(1, char(c.arg(0)))); return c.arg(0) & 0xff; });
+    reg.add("msvcrt.dll", "getwc", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 0xFFFFFFFFu; });
+    reg.add("msvcrt.dll", "putwc", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
+        int fi = file_index(c.arg(1)); if (fi < 0) return 0xFFFFFFFFu;
+        uint16_t w = uint16_t(c.arg(0)); emit(fi, std::string(1, char(w & 0xff))); return w; });
+    reg.add("msvcrt.dll", "ungetc", Conv::Cdecl, 2, [this](Cpu&) -> uint32_t { return 0xFFFFFFFFu; });
+    reg.add("msvcrt.dll", "ungetwc", Conv::Cdecl, 2, [](Cpu&) -> uint32_t { return 0xFFFFFFFFu; });
+    reg.add("msvcrt.dll", "fgetpos", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
+        // fpos_t on i386 msvcrt is a 64-bit value; a console stream has no position.
+        if (c.arg(1)) { mem.w32(c.arg(1), 0); mem.w32(c.arg(1) + 4, 0); } return 0; });
+    reg.add("msvcrt.dll", "fsetpos", Conv::Cdecl, 2, [this](Cpu&) -> uint32_t { set_last_error(9); return 0xFFFFFFFFu; });  // EBADF
+    reg.add("msvcrt.dll", "_lseeki64", Conv::Cdecl, 5, [this](Cpu&) -> uint32_t { set_last_error(9); return 0xFFFFFFFFu; });
+    reg.add("msvcrt.dll", "_read", Conv::Cdecl, 3, [this](Cpu& c) -> uint32_t { (void)c; return 0xFFFFFFFFu; });
+    reg.add("msvcrt.dll", "_write", Conv::Cdecl, 3, [this](Cpu& c) -> uint32_t {
+        uint32_t fd = c.arg(0), buf = c.arg(1), n = c.arg(2);
+        if (fd != 1 && fd != 2) { set_last_error(9); return 0xFFFFFFFFu; }
+        if (n) { auto b = mem.read_bytes(buf, n); emit(int(fd), std::string(b.begin(), b.end())); }
+        return n; });
+    reg.add("msvcrt.dll", "_fdopen", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
+        uint32_t fd = c.arg(0); return fd <= 2 ? file_ptr(int(fd)) : 0u; });
+    // File stat/length on a handle we do not serve: fail like the real API.
+    reg.add("msvcrt.dll", "_fstati64", Conv::Cdecl, 2, [this](Cpu&) -> uint32_t { set_last_error(9); return 0xFFFFFFFFu; });
+    reg.add("msvcrt.dll", "_filelengthi64", Conv::Cdecl, 1, [this](Cpu&) -> uint32_t { set_last_error(9); return 0xFFFFFFFFu; });
+    // wide ctype / collation: the "C" locale answers ASCII-only tables.
+    reg.add("msvcrt.dll", "iswctype", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
+        uint16_t w = uint16_t(c.arg(0)); uint32_t t = c.arg(1);
+        // _SPACE=0x1 _PRINT=0x2 _LOWER=0x4 _UPPER=0x8 _DIGIT=0x10 _ALPHA=0x100
+        int r = 0;
+        if (w == ' ' || (w >= 9 && w <= 13)) r |= 0x1;
+        if (w >= 0x20 && w < 0x7f) r |= 0x2;
+        if (w >= 'a' && w <= 'z') r |= 0x4 | 0x100;
+        if (w >= 'A' && w <= 'Z') r |= 0x8 | 0x100;
+        if (w >= '0' && w <= '9') r |= 0x10 | 0x100;
+        return uint32_t(t & 0x1ff ? (r & t ? 1 : 0) : 0); });
+    reg.add("msvcrt.dll", "towlower", Conv::Cdecl, 1, [](Cpu& c) -> uint32_t {
+        uint16_t w = uint16_t(c.arg(0)); return uint32_t(w >= 'A' && w <= 'Z' ? w + 32 : w); });
+    reg.add("msvcrt.dll", "towupper", Conv::Cdecl, 1, [](Cpu& c) -> uint32_t {
+        uint16_t w = uint16_t(c.arg(0)); return uint32_t(w >= 'a' && w <= 'z' ? w - 32 : w); });
+    // strcoll/wcscoll/strxfrm/wcsxfrm: the "C" locale collates by strcmp order.
+    reg.add("msvcrt.dll", "strcoll", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
+        std::string a = str(c.arg(0)), b = str(c.arg(1)); int r = a.compare(b); return uint32_t(r < 0 ? -1 : r > 0 ? 1 : 0); });
+    reg.add("msvcrt.dll", "wcscoll", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
+        auto wa = wstr(c.arg(0)), wb = wstr(c.arg(1)); int r = wa < wb ? -1 : wb < wa ? 1 : 0; return uint32_t(r); });
+    reg.add("msvcrt.dll", "strxfrm", Conv::Cdecl, 3, [this](Cpu& c) -> uint32_t {
+        std::string s = str(c.arg(1)); uint32_t n = c.arg(2);
+        if (c.arg(0) && n) { uint32_t put = uint32_t(s.size()) < n ? uint32_t(s.size()) : n - 1;
+            mem.write_bytes(c.arg(0), s.data(), put); mem.w8(c.arg(0) + put, 0); }
+        return uint32_t(s.size()); });
+    reg.add("msvcrt.dll", "wcsxfrm", Conv::Cdecl, 3, [this](Cpu& c) -> uint32_t {
+        auto w = wstr(c.arg(1)); uint32_t n = c.arg(2);
+        if (c.arg(0) && n) { uint32_t put = uint32_t(w.size()) < n ? uint32_t(w.size()) : n - 1;
+            for (uint32_t i = 0; i < put; ++i) { mem.w8(c.arg(0) + i * 2, uint8_t(w[i])); mem.w8(c.arg(0) + i * 2 + 1, uint8_t(w[i] >> 8)); }
+            mem.w8(c.arg(0) + put * 2, 0); mem.w8(c.arg(0) + put * 2 + 1, 0); }
+        return uint32_t(w.size()); });
+    reg.add("msvcrt.dll", "strftime", Conv::Cdecl, 4, [this](Cpu& c) -> uint32_t {
+        // Only the fixed deterministic date the surface's clock reports.
+        std::string fmt = str(c.arg(0)); uint32_t cap = c.arg(2), out = c.arg(1);
+        std::string r = fmt.empty() ? "" : "Wed Nov  9 00:00:00 2026";
+        if (out && cap) { uint32_t put = uint32_t(r.size()) < cap ? uint32_t(r.size()) : cap - 1;
+            mem.write_bytes(out, r.data(), put); mem.w8(out + put, 0); }
+        return uint32_t(r.size()); });
+    reg.add("msvcrt.dll", "wcsftime", Conv::Cdecl, 4, [this](Cpu&) -> uint32_t { return 0; });
+    reg.add("msvcrt.dll", "strtoul", Conv::Cdecl, 3, [this](Cpu& c) -> uint32_t {
+        std::string s = str(c.arg(0)); char* e = nullptr;
+        unsigned long v = std::strtoul(s.c_str(), &e, int(c.arg(2)));
+        if (c.arg(1)) mem.w32(c.arg(1), c.arg(0) + uint32_t(e ? e - s.c_str() : 0));
+        return uint32_t(v); });
     reg.add("msvcrt.dll", "getenv", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 0; });
     reg.add("msvcrt.dll", "clock", Conv::Cdecl, 0, [](Cpu&) -> uint32_t { return 0; });
     reg.add("msvcrt.dll", "time", Conv::Cdecl, 1, [this](Cpu& c) -> uint32_t {
@@ -776,6 +1083,59 @@ inline void Guest::register_all() {
                 swap(root, child); root = child; } };
         if (n > 1) { for (uint32_t i = n / 2; i-- > 0;) sift(i, n); for (uint32_t e = n - 1; e > 0; --e) { swap(0, e); sift(0, e); } }
         return 0; });
+
+    // ntdll: the primitives a fully static mingw C++ runtime leans on.
+    // Keyed events are NT's futex: a single-threaded surface acquires and
+    // releases without contention, so both waits answer "woke" and both
+    // releases succeed. Everything here matches what mcfgthread's static
+    // build and the CRT's once-init call at startup and exit.
+    reg.add("ntdll.dll", "NtWaitForKeyedEvent", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
+        run_pending_threads(c); return 0; });
+    reg.add("ntdll.dll", "NtReleaseKeyedEvent", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
+        run_pending_threads(c); return 0; });
+    reg.add("ntdll.dll", "NtWaitForSingleObject", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+        run_pending_threads(c); return 0; });  // STATUS_WAIT_0
+    reg.add("ntdll.dll", "NtDelayExecution", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("ntdll.dll", "NtClose", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("ntdll.dll", "NtDuplicateObject", Conv::Stdcall, 7, [](Cpu&) -> uint32_t { return 0; });
+    // Section objects: NtCreateSection/NtMapViewOfSection back a shared
+    // memory block (mcfgthread's globals arena). One process, so a section is
+    // just a zero-filled guest mapping; the handle records its size.
+    // (Section mapping itself backs the loader's memory module path; this
+    // surface maps images itself, so an unmapped-section answer keeps callers
+    // off that path.)
+    // images itself, so an unmapped section answer keeps callers off that path.
+    reg.add("ntdll.dll", "NtCreateSection", Conv::Stdcall, 6, [this](Cpu& c) -> uint32_t {
+        uint32_t out = c.arg(0), size_p = c.arg(3);
+        uint64_t size = size_p ? (uint64_t(mem.r32(size_p + 4)) << 32) | mem.r32(size_p) : 0x10000u;
+        if (!size || size > 0x10000000ull) return 0xC0000043u;  // invalid page protection/size
+        if (!out) return 0xC000000Du;  // invalid parameter
+        uint32_t h = 0x61000000u + ++section_serial;
+        sections[h] = uint32_t(size);
+        mem.w32(out, h);
+        return 0; });
+    reg.add("ntdll.dll", "NtMapViewOfSection", Conv::Stdcall, 10, [this](Cpu& c) -> uint32_t {
+        auto s = sections.find(c.arg(0));
+        if (s == sections.end()) return 0xC0000008u;  // invalid handle
+        uint32_t base_out = c.arg(2), view_size_out = c.arg(6);
+        uint32_t size = (s->second + 0xfffu) & ~0xfffu;
+        if (section_top + size < section_top) return 0xC0000017u;  // no memory
+        uint32_t a = section_top; section_top += size;
+        mem.map(a, size, PROT_R | PROT_W);
+        auto z = std::vector<uint8_t>(size, 0); mem.write_bytes(a, z.data(), size);
+        if (base_out) mem.w32(base_out, a);
+        if (view_size_out) mem.w32(view_size_out, s->second);
+        return 0; });
+    reg.add("ntdll.dll", "NtUnmapViewOfSection", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("ntdll.dll", "NtQuerySystemTime", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        if (c.arg(0)) { mem.w32(c.arg(0), 0x00A8B800u); mem.w32(c.arg(0) + 4, 0x01DC0000u); } return 0; });
+    reg.add("ntdll.dll", "NtQueryInformationFile", Conv::Stdcall, 5, [](Cpu&) -> uint32_t { return 0xC0000008u; });  // invalid handle
+    reg.add("ntdll.dll", "NtRaiseHardError", Conv::Stdcall, 6, [this](Cpu& c) -> uint32_t { do_exit(c, 3); return 0; });
+    reg.add("ntdll.dll", "RtlDllShutdownInProgress", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
+
+    // kernel32/ntdll bridge: the CRT startup asks for the named-object
+    // directory handle; a fake handle keeps the caller off the real path.
+    reg.add("kernel32.dll", "BaseGetNamedObjectDirectory", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return 0x60000100u; });
 }
 
 }

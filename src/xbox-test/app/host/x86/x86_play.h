@@ -46,7 +46,8 @@ inline constexpr uint64_t kGuestRunCap = 1000ull * 1000 * 1000 * 1000;
 inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string& name, const std::string& cmdline,
                             const std::function<void(const std::string&)>& tee = nullptr,
                             const std::function<void(const PlayResult&)>& on_loaded = nullptr,
-                            uint64_t instruction_limit = 500ull * 1000 * 1000) {
+                            uint64_t instruction_limit = 500ull * 1000 * 1000,
+                            const DllSource& dll_source = nullptr) {
     PlayResult r;
     try {
         Memory mem; ThunkTable table; Host host; Registry reg;
@@ -54,8 +55,21 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         Guest guest(mem, host, reg);
         guest.exe_path = name;
         guest.cmdline = cmdline.empty() ? name : cmdline;
+        guest.dll_source = dll_source;
         guest.register_all();
         Image img = load_pe32(mem, table, reg, file);
+        // Dependencies the registry cannot serve load as guest DLLs, tracked
+        // in the process module table; their DllMain runs after init_process.
+        std::map<std::string, Dll> dlls; std::vector<std::string> dll_order;
+        Dll top = load_dll(mem, table, reg, file, dll_source, dlls, 0, &dll_order);
+        dlls.emplace("__top__", std::move(top));  // not a named module; keeps the top image's exports reachable
+        img = dlls["__top__"].image;
+        guest.dlls = std::move(dlls);
+        guest.dll_order = std::move(dll_order);
+        for (const auto& kv : guest.dlls) {
+            if (kv.second.image.entry) guest.dll_entries[kv.first] = kv.second.image.entry;
+            guest.add_module(kv.first, kv.second.image.base);
+        }
         r.loaded = true; r.base = img.base; r.entry = img.entry;
         r.imports = img.imports; r.bound = img.bound; r.relocations = img.relocations; r.unresolved = img.unresolved;
         guest.image_base = img.base;
@@ -64,6 +78,21 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         Cpu cpu(mem, table);
         cpu.limit = instruction_limit;
         init_process(mem, cpu, img);
+        // DllMain(DLL_PROCESS_ATTACH) for every loaded guest DLL, in load
+        // order — after the thunk page and TEB/PEB exist, before the entry.
+        try { guest.run_dll_mains(cpu, 1); } catch (const Fault& f) {
+            if (!cpu.exited) throw;
+            (void)f;
+        }
+        // TLS callbacks of the top image (a static CRT registers its global
+        // initializers there), with DLL_PROCESS_ATTACH, after DllMain — the
+        // order the Windows loader uses.
+        for (uint32_t cb : img.tls_callbacks) {
+            try { cpu.call(cb, {img.base, 1, 0}); } catch (const Fault& f) {
+                if (!cpu.exited) throw;
+                (void)f;
+            }
+        }
         if (on_loaded) on_loaded(r);
         try {
             run_entry(cpu, img);
@@ -98,7 +127,8 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
 inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const std::string& cmdline,
                       const std::function<void(const std::string&)>& tee = nullptr,
                       const std::function<void(const PlayResult&)>& on_loaded = nullptr,
-                      uint64_t instruction_limit = 500ull * 1000 * 1000) {
+                      uint64_t instruction_limit = 500ull * 1000 * 1000,
+                      const DllSource& dll_source = nullptr) {
     PlayResult r;
     FILE* f = _wfopen(exe.c_str(), L"rb");
     if (!f) { r.fault = "cannot open the executable"; r.fault_kind = "Loader"; return r; }
@@ -113,7 +143,7 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
     std::string name;
     for (size_t i = exe.find_last_of(L"\\/") + 1; i < exe.size(); ++i) name += char(exe[i]);
     (void)dir;
-    return run_image(file, name, cmdline, tee, on_loaded, instruction_limit);
+    return run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source);
 }
 #endif
 }
