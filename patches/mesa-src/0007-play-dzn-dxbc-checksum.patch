@@ -1,4 +1,4 @@
-Play: fill in the DXBC container checksum so an unsigned dzn shader is well-formed (research/VULKAN-PLAN.md).
+Play: fill in the DXBC container checksum so an unsigned dzn shader is well-formed (issue #177).
 SPDX-License-Identifier: MIT (same licence as the file patched; Mesa is MIT)
 
 dxil_container_write() writes a zero checksum into the DXBC header and relies on the DXIL signer (dxil.dll) to

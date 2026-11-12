@@ -111,8 +111,7 @@ lld-link-19 /nodefaultlib /entry:vk_entry /include:vk_relocation /subsystem:wind
 # presented, 43 when the host's D3D12 refuses dzn's device (BLOCKED, not a pass).
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -fno-builtin -c tests/play-vulkan-dzn.cpp -o "$out/obj/vulkan-dzn.obj"
 lld-link-19 /nodefaultlib /entry:vk_dzn_entry /include:vk_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-vulkan-dzn.exe" "$out/obj/vulkan-dzn.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a /usr/x86_64-w64-mingw32/lib/libuser32.a
-# EXE that runs the OpenGL startup path an SDL3 GL game takes (research/
-# OPENGL-PLAN.md): opengl32.dll from the runtime directory (Mesa's d3d12 WGL
+# EXE that runs the OpenGL startup path an SDL3 GL game takes (issue #176): opengl32.dll from the runtime directory (Mesa's d3d12 WGL
 # driver), a pixel format through gdi32's forwarded wgl*, a context, a cleared
 # frame presented with SwapBuffers and a glReadPixels readback. Exits 42 when
 # the rendered pixel came back, 43 when it did not (BLOCKED, not a pass).
@@ -281,7 +280,7 @@ grep -q "STEAM persona: 3 of 3 leaderboard names resolved" "$out/leaderboards.lo
 grep -q "STEAM leaderboards: 'v2_kills' refreshed 4 rows (id 7, 4 on Steam)" "$out/leaderboards.log"
 # Counts only: no persona name and no SteamID may reach the log.
 if grep -qE "Player (Two|Three|Four)|Fixture Owner|1100001000" "$out/leaderboards.log";then exit 1;fi
-# Vulkan (research/VULKAN-PLAN.md): a guest's LoadLibrary("vulkan-1.dll") is served by the Khronos loader from the
+# Vulkan (issue #177): a guest's LoadLibrary("vulkan-1.dll") is served by the Khronos loader from the
 # runtime directory, and Play must have listed the packaged ICD manifests in the guest registry, which is the route
 # the loader reads (VK_DRIVER_FILES is ignored at the process's integrity level).
 # The launcher build packages dzn and the null ICD, so the milestone-1 fixture's "no devices" answer no longer holds
@@ -314,7 +313,7 @@ grep -q 'PRUN EVENT Vulkan loader mapped from the runtime directory; the guest r
 grep -q 'PRUN EVENT mapping vulkan-null-icd.dll' "$out/vulkan-null-runtime.log"
 # The stale dzn entry from the first run is gone, not merely shadowed.
 ! grep -q 'vulkan-dzn.json' "$out/vulkan-null-runtime.log"
-# dzn (research/VULKAN-PLAN.md, milestone 2): the guest gets a real physical device and a win32 surface from the
+# dzn (issue #177, milestone 2): the guest gets a real physical device and a win32 surface from the
 # packaged ICD, and either presents a frame (PASS) or stops at device creation on a host whose D3D12 refuses dzn's
 # device (BLOCKED, never a pass). The launcher build always packages dzn, so a missing manifest is a failure.
 if [ -f out/layout/runtime/vulkan-dzn.json ]; then
@@ -339,7 +338,7 @@ if [ -f out/layout/runtime/vulkan-dzn.json ]; then
 else
   echo "PLAY-VULKAN-DZN FAIL: the launcher build did not package dzn"; exit 1
 fi
-# OpenGL (research/OPENGL-PLAN.md): the guest's LoadLibrary("opengl32.dll") is
+# OpenGL (issue #176): the guest's LoadLibrary("opengl32.dll") is
 # served by Mesa's WGL driver from the runtime directory, the pixel format goes
 # through gdi32's forwarded wgl*, and the cleared frame must read back. The
 # readback is from the bound framebuffer after three presented frames, so a
@@ -354,7 +353,7 @@ grep -q 'PLAY-OPENGL STAGE context-current renderer=' "$out/opengl.log"
 # "skipped version=X.Y" when the driver provides 3.0+ (the console's d3d12
 # reports 4.1; nothing to refuse there).
 grep -qE 'PLAY-OPENGL STAGE version-refusal (err=[1-9]|skipped version=[0-9]+\.)' "$out/opengl.log"
-# Core 3.3 pipeline stages (research/OPENGL-COVERAGE.md): on a 3.0+-capable
+# Core 3.3 pipeline stages (issue #176): on a 3.0+-capable
 # driver the fixture must have created a core context, drawn a triangle through
 # VBO/VAO/GLSL and read the pixels back, and rendered into an FBO. On a host
 # whose driver caps below 3.0 the fixture reports neither core stage (the

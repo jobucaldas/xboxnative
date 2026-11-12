@@ -1,4 +1,4 @@
-Play: create the d3d12 command queue when CreateCommandQueue1 is not implemented (research/OPENGL-PLAN.md).
+Play: create the d3d12 command queue when CreateCommandQueue1 is not implemented (issue #176).
 SPDX-License-Identifier: MIT (same licence as the file patched; Mesa is MIT)
 
 Mesa's d3d12 screen asks ID3D12Device9::CreateCommandQueue1 (with the OpenGLOn12 creator ID) whenever the device

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # build-vulkan-loader.sh [outdir] [--dry-run] [--build]
-# Vulkan for launcher Play (research/VULKAN-PLAN.md, milestone 1): the Khronos Vulkan-Loader cross-built for Windows x64
+# Vulkan for launcher Play (issue #177, milestone 1): the Khronos Vulkan-Loader cross-built for Windows x64
 # from the pinned source (`vulkan-loader-src` in deps.pin, SHA-256 verified) against the pinned `vulkan-headers-src`, plus
 # a null ICD (src/tools/vulkan/null-icd.c) that reports zero physical devices. Result: vulkan-1.dll (the loader a game
 # loads by name), vulkan-null-icd.dll and the ICD manifest that points at it. Both are Apache-2.0; the DLLs are build

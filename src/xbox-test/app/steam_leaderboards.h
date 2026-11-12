@@ -12,7 +12,7 @@
 // Portable: the CM transport and logging are injected, so the wire shapes, the
 // provider's file format and the fetch policy are tested natively.
 // Message shapes follow SteamDatabase/Protobufs (public domain) as vendored in
-// SteamKit2 / steam-user; see research/STEAMWORKS-MULTIPLAYER.md.
+// SteamKit2 / steam-user; see issue #180.
 #include "steam_wire.h"
 #include <cstdint>
 #include <cstdio>

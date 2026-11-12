@@ -787,7 +787,7 @@ static void enter_library_cm(CmSession& cm) {
 // Persona name + avatar hash for the sidebar profile row (issue 51 item 24).
 // Root cause of the empty name fixed here: player_name is field 15 of
 // CMsgClientPersonaState's friends[] entry (avatar_hash 31), not field 4 —
-// steam_persona.h's parser and research/STEAMWORKS-MULTIPLAYER.md both carry
+// steam_persona.h's parser and issue #180 both carry
 // 15, and the hand-built protobuf test in tests/steam_presence_test.cpp pins
 // the shape. Runs on the CM reader thread. The keeper in launch.h replaces
 // the push handler when a game launches; the launcher restarts when the game

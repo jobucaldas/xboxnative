@@ -6,7 +6,7 @@
 // Shared foundation for Play's D3D10 and D3D9 shims.
 //
 // The console has d3d11.dll and dxgi.dll but no d3d9.dll, d3d10.dll or
-// d3d10_1.dll (research/D3D9-PLAN.md). Wine's d3d10core is not a thin adapter
+// d3d10_1.dll (issue #172). Wine's d3d10core is not a thin adapter
 // over an arbitrary D3D11: dlls/d3d10core/d3d10core_main.c loads d3d11.dll and
 // calls DXGID3D10CreateDevice, which registers Wine's d3d11core layer, and
 // dlls/dxgi/device.c dxgi_device_init then calls wined3d_mutex_lock and
