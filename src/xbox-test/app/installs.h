@@ -35,6 +35,33 @@ inline Info read(const std::wstring& root, uint32_t appid) {
     return r;
 }
 
+// ---- install health (marker vs payload)
+// A dl_<appid>.done marker claims an install, but the payload folder can be
+// gone or empty (a deploy that wiped app data, a move that left the marker on
+// the source drive, a crash between the first file and the last). The marker
+// text alone cannot tell; the folder is checked.
+enum class Health { ok, missing, empty };
+// Does the folder the marker names hold at least one real file? A directory
+// alone (or only empty directories) is not a payload; sizes are not verified
+// (the marker's byte total counts depot padding, not the on-disk sum).
+inline Health payload_state(const std::wstring& folder) {
+    DWORD a = GetFileAttributesW(folder.c_str());
+    if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) return Health::missing;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileExW((folder + L"\\*").c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr, 0);
+    if (h == INVALID_HANDLE_VALUE) return Health::missing;   // unreadable: as good as gone
+    bool any = false;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow) { any = true; break; }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return any ? Health::ok : Health::empty;
+}
+// Health of appid's install as the marker records it. root is the marker's
+// state root (kept for signature symmetry; the folder is already resolved).
+inline Health health_of(const std::wstring& /*root*/, const Info& i) { return i.installed && !i.dir.empty() ? payload_state(i.folder) : Health::missing; }
+
 // (appid, share key) for every marker (game_library::share_key: installdir, root-qualified off LocalState);
 // withDirs=false skips reading the markers
 inline std::vector<std::pair<uint32_t, std::string>> scan(const std::wstring& root, bool withDirs) {
