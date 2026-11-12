@@ -401,6 +401,37 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     size_t summaryLines=0;
     for(auto& l:lines)if(l.find("draw summary")!=std::string::npos)++summaryLines;
     CHECK(summaryLines<=d3d11_diag::kMaxSummaryLines);
+    // ---- deep draw state (opt-in): the signature lines name the GS/PS pair,
+    // target format and SRV bind state a draw carried. Off by default: no
+    // line from the run above. On, one draw with a GS bound: the hash the
+    // bind hooks resolve is the container's content hash, and the line is
+    // emitted once per distinct signature.
+    CHECK(count("draw state")==0);
+    d3d11_diag::deepDrawEnabled.store(true,std::memory_order_release);
+    {
+        ID3D11ShaderResourceView* nullView=nullptr;
+        ID3D11GeometryShader* gs=nullptr;
+        CHECK(SUCCEEDED(device->CreateGeometryShader(d3d11_diag::kGsViewportBlob,sizeof d3d11_diag::kGsViewportBlob,nullptr,&gs))&&gs);
+        context->GSSetShader(gs,nullptr,0);
+        context->PSSetShaderResources(0,1,&nullView);   // ps-null bit set
+        context->Draw(3,0);
+        // The signature resolves the GS hash through the creation table: the
+        // line must carry it, not zeros.
+        CHECK(count("draw state topology=4(trianglelist) gs=")==1);
+        CHECK(count(" ps-null")==1);
+        // Same signature again: no second line.
+        context->Draw(3,0);
+        CHECK(count("draw state topology=4(trianglelist) gs=")==1);
+        // Unbinding a PS that was never bound does not change the signature:
+        // still one line, and the unbound PS reads as zeros.
+        context->PSSetShader(nullptr,nullptr,0);
+        context->Draw(3,0);
+        CHECK(count("draw state topology=4(trianglelist) gs=")==1);
+        CHECK(count("draw state topology=4(trianglelist) gs=000000000000")==0);   // the GS hash resolved
+        context->GSSetShader(nullptr,nullptr,0);
+        gs->Release();
+        d3d11_diag::deepDrawEnabled.store(false,std::memory_order_release);
+    }
     if(rtv)rtv->Release();
     if(targetTexture)targetTexture->Release();
     if(failures)for(auto& l:lines)printf("  %s\n",l.c_str());
