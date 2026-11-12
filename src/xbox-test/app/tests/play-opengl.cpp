@@ -595,15 +595,23 @@ int opengl_entry() {
             wglGetProcAddress("wglGetPixelFormatAttribivARB");
         auto chooseARB = (PFN_wglChoosePixelFormatARB)(uintptr_t)
             wglGetProcAddress("wglChoosePixelFormatARB");
-        if (extString && attribiv && chooseARB) {
-            const char* exts = extString(dc);
-            bool hasPixelFormat = exts && contains(exts, "WGL_ARB_pixel_format");
-            {char line[160]; char* p = append(line, "PLAY-OPENGL STAGE wgl-extensions pixel-format=");
-             p = append(p, hasPixelFormat ? "1" : "0"); p = append(p, "\n"); *p = 0; emit(line);}
-            if (!hasPixelFormat) {
-                emit("PLAY-OPENGL BLOCKED wgl-extensions: WGL_ARB_pixel_format advertised but the entry points resolved\n");
-                blocked = true;
-            } else {
+        const char* exts = extString ? extString(dc) : nullptr;
+        bool hasPixelFormat = exts && contains(exts, "WGL_ARB_pixel_format");
+        {char line[160]; char* p = append(line, "PLAY-OPENGL STAGE wgl-extensions pixel-format=");
+         p = append(p, hasPixelFormat ? "1" : "0"); p = append(p, " entry-points=");
+         p = append(p, extString ? (attribiv && chooseARB ? "3" : "partial") : "0");
+         p = append(p, "\n"); *p = 0; emit(line);}
+        if (!extString || !hasPixelFormat) {
+            // No extension string, or the extension is not advertised: the
+            // calls SDL3/GLFW make are not served on this host. A platform
+            // limit, reported as skipped, never a pass.
+            emit("PLAY-OPENGL STAGE wgl-extensions skipped (WGL_ARB_pixel_format absent)\n");
+        } else if (!attribiv || !chooseARB) {
+            // The string advertises the extension but an entry point is NULL:
+            // a real driver gap, BLOCKED — SDL3/GLFW would fail here.
+            emit("PLAY-OPENGL BLOCKED wgl-extensions: WGL_ARB_pixel_format advertised but an entry point is NULL\n");
+            blocked = true;
+        } else {
                 // Query the GDI-chosen format's attributes (hdc iLayerPlane 0).
                 int fmt0 = getPixelFormat(dc);
                 int query[] = {WGL_NUMBER_PIXEL_FORMATS_ARB, WGL_SUPPORT_OPENGL_ARB,
@@ -654,9 +662,6 @@ int opengl_entry() {
                      p = append(p, "\n"); *p = 0; emit(line);}
                 }
             }
-        } else {
-            emit("PLAY-OPENGL STAGE wgl-extensions skipped (WGL_ARB_extensions_string/pixel_format absent)\n");
-        }
     }
 
     // Three presented frames, as a game's first frames: present is proven by
