@@ -554,11 +554,44 @@ inline void drain_device(ID3D11Device* dev) {
 // flag is only read on the guest thread afterwards, hence the atomic).
 inline std::atomic<bool> lockFirstMode{false};
 inline HRESULT STDMETHODCALLTYPE resize(IDXGISwapChain* c,UINT count,UINT w,UINT h,DXGI_FORMAT f,UINT flags) {
+    // Every guest resize is logged with its index in the run (the RCA's
+    // removal lands in the 4th-resize window; a summary that only keeps the
+    // last resize cannot say which one triggered it). Goes through the diag
+    // sink, which stays live with the kill switch armed - only adopt()'s
+    // vtable patches check that.
+    unsigned idx=resizes.load()+1;
+    {
+        char b[160];snprintf(b,sizeof b,"guest ResizeBuffers #%u count=%u %ux%u fmt=0x%x flags=0x%x",
+            idx,count,w,h,(unsigned)f,(unsigned)flags);
+        if(auto s=d3d11_diag::sink)s(b);
+    }
+    // Outstanding-RTV evidence, read before the drain unbinds anything: how
+    // many render targets the immediate context still had bound when the
+    // guest asked to resize. Non-zero on the failing resize supports the
+    // deferred-context/RTV theory; zero points elsewhere.
+    {
+        winrt::com_ptr<ID3D11Device> dev;
+        if(SUCCEEDED(c->GetDevice(__uuidof(ID3D11Device),dev.put_void()))&&dev) {
+            ID3D11DeviceContext* ctx=nullptr;
+            dev->GetImmediateContext(&ctx);
+            if(ctx) {
+                ID3D11RenderTargetView* rtv[D3D11_PS_CS_UAV_REGISTER_COUNT]={};
+                ctx->OMGetRenderTargets(UINT(std::size(rtv)),rtv,nullptr);
+                UINT bound=0;for(auto& v:rtv)if(v){++bound;v->Release();}
+                ctx->Release();
+                if(bound) {
+                    char b2[96];snprintf(b2,sizeof b2,
+                        "guest ResizeBuffers #%u: %u render target(s) still bound at resize time",idx,bound);
+                    if(auto s=d3d11_diag::sink)s(b2);
+                }
+            }
+        }
+    }
     // Experiment switch (LocalState\lockmode.txt, read at install): every
     // resize after the first returns S_OK without touching the chain. RCA
     // hypothesis: the device reset (0x887a0007) is triggered by the resize
-    // path, so locking the mode should keep the game alive — at its first
-    // resolution — if that is right. First resize still goes through so the
+    // path, so locking the mode should keep the game alive - at its first
+    // resolution - if that is right. First resize still goes through so the
     // chain matches the window; the S_OK suppressions are counted and logged.
     if(lockFirstMode&&resizes.load()>0) {
         ++resizes;lastResizeCount=count;lastResizeW=w;lastResizeH=h;lastResizeHr=S_OK;
@@ -568,7 +601,12 @@ inline HRESULT STDMETHODCALLTYPE resize(IDXGISwapChain* c,UINT count,UINT w,UINT
     winrt::com_ptr<ID3D11Device> dev;
     if(SUCCEEDED(c->GetDevice(__uuidof(ID3D11Device),dev.put_void()))&&dev)drain_device(dev.get());
     HRESULT hr=realResize(c,resize_count(count),w,h,f,resize_flags(flags));
-    ++resizes;lastResizeCount=count;lastResizeW=w;lastResizeH=h;lastResizeHr=hr;return hr;
+    ++resizes;lastResizeCount=count;lastResizeW=w;lastResizeH=h;lastResizeHr=hr;
+    {
+        char b[80];snprintf(b,sizeof b,"guest ResizeBuffers #%u returned hr=0x%08lx",idx,(unsigned long)hr);
+        if(auto s=d3d11_diag::sink)s(b);
+    }
+    return hr;
 }
 // IDXGISwapChain::Present is slot 8, ResizeBuffers 13; IDXGISwapChain1::Present1 22.
 inline bool install(IDXGISwapChain1* chain) {
