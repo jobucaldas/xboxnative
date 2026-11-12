@@ -14,10 +14,11 @@ plus targeted tests per opcode class.
 | Opcode class | Encoding | Test | Status |
 |---|---|---|---|
 | pshufd full imm sweep | 66 0F 70 /r ib | 256 software-model cases + 4 hardware-compared | PASS |
-| pshuflw / pshufhw | F2/F3 0F 70 /r ib | software model, 3 imm each | PASS |
+| pshuflw / pshufhw | F2/F3 0F 70 /r ib | software model, 3 imm each + hardware-compared 5 imm each (selects read the original lanes) | PASS |
+| saturating add/sub | 66 0F D8/D9/DC/DD/E8/E9/EC/ED | 8 opcodes x 64 edge-value pairs, all hardware-compared | PASS |
 | shufps | 0F C6 /r ib | software model, 6 imm | PASS |
 | shufpd | 66 0F C6 /r ib | software model, 4 imm | PASS |
-| psllw/psrlw/psraw imm8 | 66 0F 71 /2 /4 /6 ib | 18 cases incl. count 0/16 saturation; memory destination tested | PASS |
+| psllw/psrlw/psraw imm8 | 66 0F 71 /2 /4 /6 ib | 18 cases incl. count 0/16 saturation; memory destination #UDs on real HW and faults in the interpreter too | PASS |
 | pslld/psrld/psrad imm8 | 66 0F 72 /2 /4 /6 ib | incl. count 32 saturation | PASS |
 | pslldq/psrldq imm8 | 66 0F 73 /7 /3 ib | incl. count 16/255 saturation | PASS |
 | psrlw/d/q xmm,xmm | 66 0F D1/D2/D3 | count from low 64 bits, incl. 16/32/64 saturation | PASS |
@@ -36,14 +37,28 @@ plus targeted tests per opcode class.
 | punpckhqdq | 66 0F 6D | high qwords interleaved | PASS |
 | rdtsc | 0F 31 | strictly increasing synthetic counter | PASS |
 | cpuid | 0F A2 | leaf 0 GenuineIntel, leaf 1 feature bits (SSE2 set), unknown leaves zero | PASS |
-| movnti | 66 0F C3 | dword store | PASS |
+| movnti | 0F C3 (dword; 66 does not widen in 32-bit) | store + adjacent-byte checks on both forms | PASS |
 | prefetcht0/t1/t2 | 0F 18 /0-2 | hint, no fault | PASS |
-| fxsave/fxrstor | 0F AE /0 /1 | full 512-byte layout: x87 stack + MXCSR + XMM round trip | PASS |
+| fxsave/fxrstor | 0F AE /0 /1 | full 512-byte hardware layout (MXCSR@24, ST(i) relative to TOP at 32+16*i, XMM@160), compared with a real fxsave of the same state + round trip | PASS |
 | repne scasb | F2 AE | stops on match (ZF=1) | PASS |
 | repe cmpsb | F3 A6 | stops on mismatch, ZF reflects last compare | PASS |
 | _lrotl/_lrotr | host import | guest CRT helper added to x86_guest.h | PASS |
 
-Totals: 61,222 hardware-compared cases across the whole suite (up from 60,874).
+Totals: 61,758 hardware-compared cases across the whole suite (up from 60,874).
+
+## Bugbot regression suite (hardware-compared)
+
+A dedicated suite re-tests each bug class the review found, with the real CPU
+as the oracle, so reintroducing any of them fails against this machine:
+
+- pshuflw/pshufhw: 5 immediates each (incl. lane-reuse 0x1B) vs native.
+- psraw/psrad over-width counts: mixed-sign vector vs native (per-lane sign).
+- Saturating ops: 8 opcodes x 64 edge-value pairs vs native.
+- fxsave: emulator buffer vs a real fxsave of the same state (MXCSR, ST(0),
+  XMM1 offsets) + fxrstor round trip.
+- movnti: both prefix forms store exactly 4 bytes (adjacent sentinel bytes).
+- String ops under fs:: rep movsb/movsd copy from fs:[esi] to es:[edi]; repne
+  scasb under fs: still reads es:[edi].
 
 ## Encoding notes locked down by tests
 
@@ -67,7 +82,7 @@ Totals: 61,222 hardware-compared cases across the whole suite (up from 60,874).
 
 ## How it was verified
 
-- `x86-core.sh`: all suites PASS, 61,222 hardware-compared cases, fixture exit 42
+- `x86-core.sh`: all suites PASS, 61,758 hardware-compared cases, fixture exit 42
   at both ImageBases.
 - `x86-core.sh --wine`: fixture stdout + exit code identical under Wine.
 - `x86-guest.sh --wine`: mingw CRT program (printf doubles, heap, qsort, TLS,

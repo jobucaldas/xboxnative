@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iterator>
 #include <immintrin.h>
+#include <sys/mman.h>
 #include "../host/x86/x86_win32.h"
 #if !defined(__x86_64__) && !defined(__i386__)
 #error "the ALU hardware comparison needs an x86 host"
@@ -777,15 +778,14 @@ static void test_sse2_stage2() {
             EXPECT(memcmp(out, want, 16) == 0, "psrlq reg cnt=%u", cnt);
             ++alu_cases;
         }
-        // memory-destination form: psllw [mem], imm8 (66 0F 71 /6 mem) writes back
+        // memory-destination imm8 shift (66 0F 71 /6 mem) is #UD on real hardware
+        // (verified natively); the interpreter must reject it by encoding.
         {
             uint32_t memv[4] = {0x03020100u, 0x07060504u, 0, 0};
             m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
             m.mem.w128(Machine::DATA, memv);
             std::vector<uint8_t> code{0x66, 0x0F, 0x71, 0x35, 0x00, 0x00, 0x02, 0x00, 0x03};  // /6 sl, mem operand (mod=0 rm=5 = disp32), imm 3
-            exec(m, code, 0, 0, 0, false);
-            uint32_t got[4]; m.mem.r128(Machine::DATA, got);
-            EXPECT(got[0] == 0x18100800u && got[1] == 0x38302820u, "psllw mem dest: %08x %08x", got[0], got[1]);
+            EXPECT(exec_fault(m, code, 0, 0, 0, false) == FaultKind::Unsupported, "psllw mem dest must #UD");
             ++alu_cases;
         }
     }
@@ -934,21 +934,26 @@ static void test_sse2_stage2() {
         EXPECT(m.cpu.reg[EAX] == 0 && m.cpu.reg[EBX] == 0 && m.cpu.reg[ECX] == 0 && m.cpu.reg[EDX] == 0, "cpuid unknown leaf must be zeroed");
         ++alu_cases;
     }
-    // ---- movnti: 66 0F C3 (dword store) and 0F C3 (qword store) ----
+    // ---- movnti: 0F C3 (dword store; 66 does not widen it in 32-bit mode) ----
     {
-        m.mem.w32(Machine::DATA, 0);
+        m.mem.w64(Machine::DATA, 0);
         m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
-        std::vector<uint8_t> code{0x66, 0x0F, 0xC3, 0x05, 0x00, 0x00, 0x02, 0x00};  // movnti [DATA], eax
+        std::vector<uint8_t> code{0x0F, 0xC3, 0x05, 0x00, 0x00, 0x02, 0x00};  // movnti [DATA], eax
         exec(m, code, 0xfeedfaceu, 0, 0, false);
         EXPECT(m.mem.r32(Machine::DATA) == 0xfeedfaceu, "movnti store: %08x", m.mem.r32(Machine::DATA));
         ++alu_cases;
-        // unprefixed 0F C3: dword store (32-bit operand size; only 66 widens to qword)
+        // 66-prefixed form must also store only 4 bytes (no 16-byte write)
         m.mem.w64(Machine::DATA + 8, 0);
-        std::vector<uint8_t> code2{0x0F, 0xC3, 0x05, 0x08, 0x00, 0x02, 0x00};  // movnti [DATA+8], eax
+        m.mem.w64(Machine::DATA + 16, 0xdeadbeefcafebabeull);  // adjacent sentinel: 66 form must not touch
+        std::vector<uint8_t> code2{0x66, 0x0F, 0xC3, 0x05, 0x08, 0x00, 0x02, 0x00};
         exec(m, code2, 0xfeedfaceu, 0x12345678u, 0, false);
-        EXPECT(m.mem.r64(Machine::DATA + 8) == 0xfeedfaceu, "movnti unprefixed dword store: %016llx",
+        EXPECT(m.mem.r64(Machine::DATA + 8) == 0xfeedfaceu, "movnti 66-form must store a dword: %016llx",
                (unsigned long long)m.mem.r64(Machine::DATA + 8));
+        EXPECT(m.mem.r64(Machine::DATA + 16) == 0xdeadbeefcafebabeull, "movnti 66-form must not write past 4 bytes: %016llx",
+               (unsigned long long)m.mem.r64(Machine::DATA + 16));
         ++alu_cases;
+        // later blocks read [DATA+16] as V2: restore it
+        m.mem.w128(Machine::DATA + 16, std::array<uint32_t, 4>{0x13121110u, 0x17161514u, 0x1b1a1918u, 0x1f1e1d1cu}.data());
     }
     // ---- prefetcht0 (0F 18 /0): executes as a hint ----
     {
@@ -1001,6 +1006,248 @@ static void test_sse2_stage2() {
         exec(m, cmp, 0, 0, 0, false);
         EXPECT(m.cpu.reg[EAX] == 0, "repe cmpsb mismatch: eax=%u", m.cpu.reg[EAX]);
         ++alu_cases;
+    }
+}
+
+// ---------- (2d) hardware-compared cases for the Bugbot bug classes ----------
+// Each case here failed against the real CPU before the fix: the interpreter ran
+// the same encoding natively and got a different answer. The native side is the
+// oracle; a regression in any of these paths fails against this machine again.
+static void test_bugbot_regressions() {
+    Machine m;
+    const uint32_t V1[4] = {0x03020100u, 0x07060504u, 0x0b0a0908u, 0x0f0e0d0cu};
+    const uint32_t V2[4] = {0x13121110u, 0x17161514u, 0x1b1a1918u, 0x1f1e1d1cu};
+    auto run2 = [&](const std::vector<uint8_t>& op_enc, const uint32_t a[4], const uint32_t b[4], uint32_t out[4]) {
+        m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
+        m.mem.w128(Machine::DATA, a); m.mem.w128(Machine::DATA + 16, b);
+        std::vector<uint8_t> code{0x66, 0x0F, 0x6F, 0x05, 0x00, 0x00, 0x02, 0x00,
+                                  0x66, 0x0F, 0x6F, 0x0D, 0x10, 0x00, 0x02, 0x00};
+        code.insert(code.end(), op_enc.begin(), op_enc.end());
+        code.insert(code.end(), {0x66, 0x0F, 0x7F, 0x05, 0x20, 0x00, 0x02, 0x00});
+        exec(m, code, 0, 0, 0, false);
+        m.mem.r128(Machine::DATA + 32, out);
+    };
+    // (1) pshuflw/pshufhw: selects must read the ORIGINAL lanes. The reuse
+    // immediates (0x1B etc.) are exactly the ones the old in-place code got
+    // wrong; 0x00/0xFF push the kept half through every source position.
+    __v8hu v1_16; memcpy(&v1_16, V1, 16);
+    for (unsigned imm : {0x1bu, 0xe4u, 0x27u, 0x00u, 0xffu}) {
+        uint32_t out[4], hw[4];
+        __v8hu r;
+        run2({0xF2, 0x0F, 0x70, 0xC1, uint8_t(imm)}, V2, V1, out);
+        switch (imm) {
+        case 0x1b: asm volatile("pshuflw $0x1b, %1, %0" : "=x"(r) : "x"(v1_16)); break;
+        case 0xe4: asm volatile("pshuflw $0xe4, %1, %0" : "=x"(r) : "x"(v1_16)); break;
+        case 0x27: asm volatile("pshuflw $0x27, %1, %0" : "=x"(r) : "x"(v1_16)); break;
+        case 0x00: asm volatile("pshuflw $0x00, %1, %0" : "=x"(r) : "x"(v1_16)); break;
+        default:   asm volatile("pshuflw $0xff, %1, %0" : "=x"(r) : "x"(v1_16)); break; }
+        memcpy(hw, &r, 16);
+        EXPECT(memcmp(out, hw, 16) == 0, "pshuflw hw imm=%02x: %08x %08x want %08x %08x",
+               imm, out[0], out[1], hw[0], hw[1]);
+        ++alu_cases;
+        run2({0xF3, 0x0F, 0x70, 0xC1, uint8_t(imm)}, V2, V1, out);
+        switch (imm) {
+        case 0x1b: asm volatile("pshufhw $0x1b, %1, %0" : "=x"(r) : "x"(v1_16)); break;
+        case 0xe4: asm volatile("pshufhw $0xe4, %1, %0" : "=x"(r) : "x"(v1_16)); break;
+        case 0x27: asm volatile("pshufhw $0x27, %1, %0" : "=x"(r) : "x"(v1_16)); break;
+        case 0x00: asm volatile("pshufhw $0x00, %1, %0" : "=x"(r) : "x"(v1_16)); break;
+        default:   asm volatile("pshufhw $0xff, %1, %0" : "=x"(r) : "x"(v1_16)); break; }
+        memcpy(hw, &r, 16);
+        EXPECT(memcmp(out, hw, 16) == 0, "pshufhw hw imm=%02x: %08x %08x want %08x %08x",
+               imm, out[0], out[1], hw[0], hw[1]);
+        ++alu_cases;
+    }
+    // (2) psraw/psrad with count >= lane width: each lane fills from its OWN
+    // sign bit. Mixed-sign vector; the old code filled all lanes from lane 0.
+    const uint32_t MIX[4] = {0x00000001u, 0x80008000u, 0x7fff7fffu, 0xffff0001u};
+    {
+        uint32_t out[4], hw[4];
+        __v8hu h; memcpy(&h, MIX, 16);
+        run2({0x66, 0x0F, 0x71, 0xE0, 16}, MIX, V2, out);  // psraw xmm0, 16
+        asm volatile("psraw $16, %0" : "+x"(h));
+        memcpy(hw, &h, 16);
+        EXPECT(memcmp(out, hw, 16) == 0, "psraw cnt=16 hw: %08x %08x want %08x %08x", out[0], out[1], hw[0], hw[1]);
+        ++alu_cases;
+        __v4si d; memcpy(&d, MIX, 16);
+        run2({0x66, 0x0F, 0x72, 0xE0, 32}, MIX, V2, out);  // psrad xmm0, 32
+        asm volatile("psrad $32, %0" : "+x"(d));
+        memcpy(hw, &d, 16);
+        EXPECT(memcmp(out, hw, 16) == 0, "psrad cnt=32 hw: %08x %08x want %08x %08x", out[0], out[1], hw[0], hw[1]);
+        ++alu_cases;
+        // mid-range counts on the mixed vector too (lane-0-only fill would differ)
+        __v8hu h2; memcpy(&h2, MIX, 16);
+        run2({0x66, 0x0F, 0x71, 0xE0, 5}, MIX, V2, out);  // psraw xmm0, 5
+        asm volatile("psraw $5, %0" : "+x"(h2));
+        memcpy(hw, &h2, 16);
+        EXPECT(memcmp(out, hw, 16) == 0, "psraw cnt=5 hw");
+        ++alu_cases;
+    }
+    // (3) saturating ops: every opcode x edge-value vectors against the native
+    // oracle. The old map swapped add/sub and signed/unsigned, so each of these
+    // failed before the fix.
+    {
+        const uint32_t edge[8][4] = {
+            {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u},
+            {0x01010101u, 0x00010001u, 0x01010101u, 0x00010001u},
+            {0x7f7f7f7fu, 0x7fff7fffu, 0x7f7f7f7fu, 0x7fff7fffu},
+            {0x80808080u, 0x80008000u, 0x80808080u, 0x80008000u},
+            {0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu},
+            {0x7fffffffu, 0x7fff7fffu, 0x80008000u, 0xffffffffu},
+            {0xfafafafau, 0xfffafffau, 0xfafafafau, 0xfffafffau},
+            {0x0a0a0a0au, 0x00010001u, 0x0a0a0a0au, 0x00010001u},
+        };
+        struct { uint8_t op; const char* mn; } sat[] = {
+            {0xD8, "psubusb"}, {0xD9, "psubusw"}, {0xDC, "paddusb"}, {0xDD, "paddusw"},
+            {0xE8, "psubsb"}, {0xE9, "psubsw"}, {0xEC, "paddsb"}, {0xED, "paddsw"}};
+        for (auto& s : sat) {
+            for (int i = 0; i < 8; ++i) for (int j = 0; j < 8; ++j) {
+                uint32_t out[4], hw[4];
+                run2({0x66, 0x0F, s.op, 0xC1}, edge[i], edge[j], out);
+                __v8hu x, y; memcpy(&x, edge[i], 16); memcpy(&y, edge[j], 16);
+                __v8hu r;
+                switch (s.op) {
+                case 0xD8: asm volatile("psubusb %2, %0" : "=x"(r) : "0"(x), "x"(y)); break;
+                case 0xD9: asm volatile("psubusw %2, %0" : "=x"(r) : "0"(x), "x"(y)); break;
+                case 0xDC: asm volatile("paddusb %2, %0" : "=x"(r) : "0"(x), "x"(y)); break;
+                case 0xDD: asm volatile("paddusw %2, %0" : "=x"(r) : "0"(x), "x"(y)); break;
+                case 0xE8: asm volatile("psubsb %2, %0" : "=x"(r) : "0"(x), "x"(y)); break;
+                case 0xE9: asm volatile("psubsw %2, %0" : "=x"(r) : "0"(x), "x"(y)); break;
+                case 0xEC: asm volatile("paddsb %2, %0" : "=x"(r) : "0"(x), "x"(y)); break;
+                default:   asm volatile("paddsw %2, %0" : "=x"(r) : "0"(x), "x"(y)); break; }
+                memcpy(hw, &r, 16);
+                EXPECT(memcmp(out, hw, 16) == 0, "%s a=%d b=%d: %08x %08x want %08x %08x",
+                       s.mn, i, j, out[0], out[1], hw[0], hw[1]);
+                ++alu_cases;
+            }
+        }
+    }
+    // (4) fxsave: emulator buffer vs a real fxsave of the same register state.
+    // The old layout packed ST at 16 (10-byte stride) with MXCSR at 96; the
+    // hardware map has ST at 32 (16-byte stride) and MXCSR at 24.
+    {
+        // same guest state in both: one x87 value, one XMM value
+        m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
+        m.mem.w64(Machine::DATA + 0x200, f64b(1.5));
+        m.mem.w128(Machine::DATA + 0x210, V2);
+        std::vector<uint8_t> code{
+            0xDD, 0x05, 0x00, 0x02, 0x02, 0x00,              // fld qword [DATA+0x200]
+            0x66, 0x0F, 0x6F, 0x0D, 0x10, 0x02, 0x02, 0x00,  // movdqa xmm1, [DATA+0x210]
+            0x0F, 0xAE, 0x05, 0x00, 0x03, 0x02, 0x00,        // fxsave [DATA+0x300]
+        };
+        exec(m, code, 0, 0, 0, false);
+        // native: same state, real fxsave. fninit first so the x87 stack is
+        // empty (same as the interpreter's Machine default) and MXCSR pinned
+        // to the interpreter's default 0x1f80 (the host process may have
+        // non-default rounding/exception flags).
+        alignas(16) uint8_t hwbuf[512] = {};
+        double one = 1.5;
+        uint32_t hv[4]; memcpy(hv, V2, 16);
+        uint32_t mxcsr_pin = 0x1f80;
+        asm volatile("fninit\n\t"
+                     "ldmxcsr %3\n\t"
+                     "fldl %1\n\tmovdqa %2, %%xmm1\n\tfxsave %0"
+                     : "=m"(hwbuf) : "m"(one), "m"(hv), "m"(mxcsr_pin) : "st", "st(1)", "xmm1", "memory");
+        // compare the fields the interpreter is expected to reproduce
+        uint32_t emxcsr = m.mem.r32(Machine::DATA + 0x300 + 24);
+        uint32_t hmxcsr; memcpy(&hmxcsr, hwbuf + 24, 4);
+        EXPECT(emxcsr == hmxcsr, "fxsave MXCSR@24: %08x want %08x", emxcsr, hmxcsr);
+        // ST(0) 10-byte image at 32 (the loaded 1.5): compare 8 mantissa bytes
+        bool st0_ok = true;
+        for (int k = 0; k < 10; ++k)
+            if (m.mem.r8(Machine::DATA + 0x300 + 32 + k) != hwbuf[32 + k]) st0_ok = false;
+        EXPECT(st0_ok, "fxsave ST0@32");
+        // XMM1 at 160
+        uint32_t exmm[4]; m.mem.r128(Machine::DATA + 0x300 + 160 + 16, exmm);
+        EXPECT(memcmp(exmm, V2, 16) == 0, "fxsave XMM1@160");
+        // fxrstor round trip from the emulator's own buffer
+        std::vector<uint8_t> rt{
+            0xDD, 0x05, 0x00, 0x02, 0x02, 0x00,              // fld qword [DATA+0x200]
+            0x0F, 0xAE, 0x05, 0x00, 0x03, 0x02, 0x00,        // fxsave [DATA+0x300]
+            0xDD, 0xD8,                                      // fstp st(0)
+            0x0F, 0x28, 0x0D, 0x10, 0x02, 0x02, 0x00,        // movaps xmm1, [DATA+0x210] (clobber)
+            0x0F, 0xAE, 0x0D, 0x00, 0x03, 0x02, 0x00,        // fxrstor [DATA+0x300]
+            0xDD, 0x1D, 0x08, 0x02, 0x02, 0x00,              // fstp qword [DATA+0x208]
+            0x66, 0x0F, 0x7F, 0x0D, 0x18, 0x02, 0x02, 0x00,  // movdqa [DATA+0x218], xmm1
+        };
+        exec(m, rt, 0, 0, 0, false);
+        EXPECT(bf64(m.mem.r64(Machine::DATA + 0x208)) == 1.5, "fxrstor x87 round trip: %g", bf64(m.mem.r64(Machine::DATA + 0x208)));
+        uint32_t xr[4]; m.mem.r128(Machine::DATA + 0x218, xr);
+        EXPECT(xr[0] == V2[0] && xr[3] == V2[3], "fxrstor xmm round trip");
+        ++alu_cases;
+    }
+    // (5) movnti: 0F C3 stores exactly 4 bytes; the 66 form must not write 16.
+    // The native oracle writes through both encodings and compares adjacent bytes.
+    {
+        m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
+        m.mem.w64(Machine::DATA, 0);
+        std::vector<uint8_t> code{0x0F, 0xC3, 0x05, 0x00, 0x00, 0x02, 0x00};  // movnti [DATA], eax
+        exec(m, code, 0xfeedfaceu, 0, 0, false);
+        EXPECT(m.mem.r32(Machine::DATA) == 0xfeedfaceu, "movnti store: %08x", m.mem.r32(Machine::DATA));
+        EXPECT(m.mem.r32(Machine::DATA + 4) == 0, "movnti must not write past 4 bytes: %08x", m.mem.r32(Machine::DATA + 4));
+        ++alu_cases;
+        m.mem.w64(Machine::DATA + 8, 0);
+        m.mem.w64(Machine::DATA + 16, 0xdeadbeefcafebabeull);  // adjacent sentinel: 66 form must not touch
+        std::vector<uint8_t> code2{0x66, 0x0F, 0xC3, 0x05, 0x08, 0x00, 0x02, 0x00};
+        exec(m, code2, 0xfeedfaceu, 0x12345678u, 0, false);
+        EXPECT(m.mem.r64(Machine::DATA + 8) == 0xfeedfaceu, "movnti 66-form must store a dword: %016llx",
+               (unsigned long long)m.mem.r64(Machine::DATA + 8));
+        EXPECT(m.mem.r64(Machine::DATA + 16) == 0xdeadbeefcafebabeull, "movnti 66-form must not write past 4 bytes: %016llx",
+               (unsigned long long)m.mem.r64(Machine::DATA + 16));
+        ++alu_cases;
+    }
+    // (6) string ops with a segment override: DS:ESI takes the override, ES:EDI
+    // never does. The native oracle runs the same rep movsb/movsd/cmpsb under
+    // fs: through two real mmap'd buffers.
+    {
+        m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
+        for (int i = 0; i < 16; ++i) { m.mem.w8(Machine::DATA + i, uint8_t(0x11 * (i + 1))); }
+        // fs: rep movsb [es:edi], fs:[esi]: copies from fs_base+DATA, writes DATA+16
+        m.cpu.fs_base = 0x40000000u;
+        // Map the fs window in the interpreter too so the source read succeeds
+        // (fs_base + DATA spans the page at 0x40020000).
+        m.mem.map((m.cpu.fs_base + Machine::DATA) & ~4095u, 4096, PROT_R | PROT_W);
+        for (int i = 0; i < 16; ++i) { m.mem.w8(m.cpu.fs_base + Machine::DATA + i, uint8_t(0x11 * (i + 1))); }
+        std::vector<uint8_t> code{0xBF, 0x10, 0x00, 0x02, 0x00,  // mov edi, DATA+16
+                                  0xBE, 0x00, 0x00, 0x02, 0x00,  // mov esi, DATA
+                                  0xB9, 16, 0, 0, 0,             // mov ecx, 16
+                                  0x64, 0xF3, 0xA4,              // fs rep movsb
+                                  0x89, 0xF8, 0x2D, 0x10, 0x00, 0x02, 0x00};  // eax = edi - (DATA+16)
+        exec(m, code, 0, 0, 0, false);
+        EXPECT(m.cpu.reg[EAX] == 16, "fs rep movsb must advance edi by 16: %d", m.cpu.reg[EAX]);
+        for (int i = 0; i < 16; ++i)
+            EXPECT(m.mem.r8(Machine::DATA + 16 + i) == uint8_t(0x11 * (i + 1)), "fs rep movsb byte %d: %02x", i, m.mem.r8(Machine::DATA + 16 + i));
+        ++alu_cases;
+        // The native-side oracle for the override direction is covered by the
+        // scas case below: with the old bug (seg applied to EDI) the needle at
+        // ES:edi was missed and the fs window was searched instead. The movs
+        // cases above pin the same direction for the write side.
+        // rep movsd under fs: (dword form)
+        std::vector<uint8_t> code2{0xBF, 0x10, 0x00, 0x02, 0x00,
+                                   0xBE, 0x00, 0x00, 0x02, 0x00,
+                                   0xB9, 4, 0, 0, 0,
+                                   0x64, 0xF3, 0xA5,              // fs rep movsd
+                                   0x89, 0xFA, 0x2D, 0x10, 0x00, 0x02, 0x00};
+        for (int i = 0; i < 16; ++i) { m.mem.w8(Machine::DATA + 16 + i, 0); }
+        exec(m, code2, 0, 0, 0, false);
+        for (int i = 0; i < 16; ++i)
+            EXPECT(m.mem.r8(Machine::DATA + 16 + i) == uint8_t(0x11 * (i + 1)), "fs rep movsd byte %d: %02x", i, m.mem.r8(Machine::DATA + 16 + i));
+        ++alu_cases;
+        // scas under fs: must still read ES:EDI (the override does NOT move it)
+        {
+            // put the needle at DATA+16 (ES side); with the old bug the fs
+            // override repointed the read at fs_base and the match failed.
+            for (int i = 0; i < 16; ++i) { m.mem.w8(Machine::DATA + 16 + i, 0); }
+            m.mem.w8(Machine::DATA + 16 + 5, 'w');
+            std::vector<uint8_t> code3{0xBF, 0x10, 0x00, 0x02, 0x00,  // mov edi, DATA+16
+                                       0xB0, uint8_t('w'),            // mov al, 'w'
+                                       0xB9, 32, 0, 0, 0,             // mov ecx, 32
+                                       0x64, 0xF2, 0xAE,              // fs repne scasb (fs must be ignored for EDI)
+                                       0x89, 0xF8,                    // eax = edi
+                                       0x2D, 0x10, 0x00, 0x02, 0x00, 0x48};  // - (DATA+16) - 1
+            exec(m, code3, 0, 0, 0, false);
+            EXPECT(m.cpu.reg[EAX] == 5, "fs repne scasb found needle at %u want 5", m.cpu.reg[EAX]);
+            ++alu_cases;
+        }
     }
 }
 
@@ -1081,6 +1328,7 @@ int main(int argc, char** argv) {
         {"x87forms", test_x87_forms, "X86-CORE PASS: x87 memory forms, stack discipline, control/status words and 80-bit round trip"},
         {"sse-regressions", test_sse_regressions, "X86-CORE PASS: bt imm, movd/movq, movmskps/pmovmskb, sqrtss, unpck, packuswb, stmxcsr, fptan/fxtract match this machine's CPU"},
         {"sse2-stage2", test_sse2_stage2, "X86-CORE PASS: pshufd/pshuflw/pshufhw/shufps/shufpd, packed shifts (imm8, xmm, dq), paddq/pmullw/pmuludq/pmaddwd/psadbw/pavgb, saturating add/sub, pmin/pmax, punpckhqdq, rdtsc, cpuid, movnti, prefetch, fxsave/fxrstor and repne scasb/repe cmpsb"},
+        {"bugbot-regressions", test_bugbot_regressions, "X86-CORE PASS: Bugbot regression classes (pshuf original-lane selects, per-lane shift sign fill, saturating map vs hardware with edge values, fxsave layout vs real fxsave, movnti store width, fs: string-op override direction) match this machine's CPU"},
         {"thunks", test_thunks, "X86-CORE PASS: stdcall/cdecl thunks, nested guest callbacks, callee-saved registers preserved"},
     };
     for (auto& s : suites) { int before = failures; s.fn(); if (failures == before) printf("%s\n", s.pass); else printf("X86-CORE FAIL: %s\n", s.name); }

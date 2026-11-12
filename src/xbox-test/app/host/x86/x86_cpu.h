@@ -432,8 +432,10 @@ struct Cpu {
                 mem.w(ea + 4, 0, 4);  // fop, ip: no real 8087-style tracking
                 mem.w(ea + 8, 0, 4); mem.w(ea + 12, 0, 4);  // dp, cs/ds
                 mem.w(ea + 24, mxcsr, 4); mem.w(ea + 28, 0xffff0000u, 4);  // mxcsr + its mask field
-                for (int i = 0; i < 8; ++i) {  // ST(i) at 32 + 16*i: 10 bytes + 6 reserved
-                    for (int k = 0; k < 10; ++k) mem.w8(ea + 32 + 16 * i + k, fpu.st[i][k]);
+                for (int i = 0; i < 8; ++i) {  // ST(i) at 32 + 16*i: 10 bytes + 6 reserved.
+                    // ST(i) is relative to TOP: physical slot (top+i)&7.
+                    int ph = (fpu.top + i) & 7;
+                    for (int k = 0; k < 10; ++k) mem.w8(ea + 32 + 16 * i + k, fpu.st[ph][k]);
                     mem.w(ea + 32 + 16 * i + 10, 0, 6);
                 }
                 for (int i = 0; i < 8; ++i) mem.w128(ea + 160 + 16 * i, xmm.r[i]);
@@ -444,7 +446,11 @@ struct Cpu {
                 fpu.cw = mem.r(ea, 2);
                 fpu.sw = mem.r(ea + 2, 2) & ~uint16_t(0x3800);  // bits 11-13 are TOP, restored below
                 fpu.top = (mem.r(ea + 2, 2) >> 11) & 7;
-                for (int i = 0; i < 8; ++i) { for (int k = 0; k < 10; ++k) fpu.st[i][k] = mem.r8(ea + 32 + 16 * i + k); fpu.empty[i] = false; }
+                for (int i = 0; i < 8; ++i) {  // ST(i) relative to TOP (see fxsave)
+                    int ph = (fpu.top + i) & 7;
+                    for (int k = 0; k < 10; ++k) fpu.st[ph][k] = mem.r8(ea + 32 + 16 * i + k);
+                    fpu.empty[ph] = false;
+                }
                 mxcsr = mem.r(ea + 24, 4);
                 for (int i = 0; i < 8; ++i) mem.r128(ea + 160 + 16 * i, xmm.r[i]);
                 return; }
@@ -530,8 +536,11 @@ struct Cpu {
         case 0x71: case 0x72: case 0x73: {  // packed shifts by imm8: /2 sr, /4 sar, /6 sl, 73 /3 psrldq /7 pslldq
             if (!p66) unsupported("0f 71/72/73 (MMX)");
             // Here the reg field is the /n shift selector; the XMM operand is r/m
-            // (register or memory — SSE2 allows a memory destination here).
+            // and must be a register (mod=11): the imm8 forms have no memory
+            // destination (verified #UD on real hardware; the memory-count form
+            // is 0F F1/F2/F3/D1-D3 with an xmm destination instead).
             Rm r = modrm(); unsigned sop = modrm_reg; uint8_t cnt = fetch();
+            if (!r.isreg) unsupported("0f 71/72/73 memory destination");
             uint32_t a[4]; sse_read(r, a);
             sse_shift(op, sop, cnt, a);
             sse_write(r, a); return; }
@@ -546,11 +555,10 @@ struct Cpu {
                     reg[EDX] = (1u << 0) | (1u << 4) | (1u << 15) | (1u << 19) | (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26); return;
                     // fpu tsc cmov clflush mmx fxsr sse sse2
             default: reg[EAX] = reg[EBX] = reg[ECX] = reg[EDX] = 0; return; } }
-        case 0xC3: {  // movnti: 0F C3 r/m32 (no prefix) or 66 0F C3 r/m64 (a qword store)
+        case 0xC3: {  // movnti: 0F C3 r/m32 — a dword store in 32-bit mode; the
+                      // m64 form needs REX.W (unreachable here), so 66 does not widen it
             Rm r = modrm(); if (r.isreg) unsupported("movnti reg");
-            if (p66) { uint32_t v[4] = {getreg(modrm_reg, 4), 0, 0, 0}; mem.w128(r.ea + seg, v); }
-            else mem.w32(r.ea + seg, getreg(modrm_reg, 4));
-            return; }
+            mem.w32(r.ea + seg, getreg(modrm_reg, 4)); return; }
         case 0xC6: {  // shufps (no prefix) / shufpd (66)
             Rm r = modrm(); uint8_t imm = fetch(); uint32_t a[4], b[4]; sse_reg(modrm_reg, a); sse_read(r, b);
             uint32_t out[4];
