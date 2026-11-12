@@ -39,6 +39,8 @@ jobs:
           bash src/xbox-test/app/tests/steam-client-package.sh
           bash src/xbox-test/app/tests/launch-report.sh
           bash src/xbox-test/app/tests/redact.sh
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/x86-route.cpp -o /tmp/x86-route-test
+          /tmp/x86-route-test
           python3 -I src/xbox-test/app/tests/launch-result-test.py
           python3 -I src/xbox-test/tools/tests/test_play_test_transport.py
           python3 -I src/xbox-test/tools/tests/test_xn.py
