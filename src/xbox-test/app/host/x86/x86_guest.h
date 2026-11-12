@@ -719,8 +719,13 @@ inline void Guest::register_all() {
         // mingw's _mark_section_writable skips its VirtualProtect when this
         // field says EXECUTE_READWRITE, then its pseudo-reloc memcpy faults.
         // Real images allocate as writecopy (0x80); report that.
+        // MEMORY_BASIC_INFORMATION32: BaseAddress(0) AllocationBase(4)
+        // AllocationProtect(8) RegionSize(12) State(16) Protect(20) Type(24).
         mem.w32(p + 0, base); mem.w32(p + 4, base); mem.w32(p + 8, win ? 0x80u : 0u);
-        mem.w32(p + 12, size); mem.w32(p + 16, mem.mapped(a) ? win : 0u); mem.w32(p + 20, win ? 0x04 : 0x01); mem.w32(p + 24, 0x20000);
+        mem.w32(p + 12, size);
+        mem.w32(p + 16, mem.mapped(a) ? 0x1000u : 0x10000u);  // MEM_COMMIT / MEM_FREE
+        mem.w32(p + 20, win);                                  // Protect: the real protection
+        mem.w32(p + 24, 0x20000);                              // Type: MEM_PRIVATE
         return 28; });
     // Critical sections: one guest thread per CPU, so they are no-ops.
     for (const char* n : {"InitializeCriticalSection", "EnterCriticalSection", "LeaveCriticalSection", "DeleteCriticalSection"})

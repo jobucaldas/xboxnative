@@ -64,15 +64,24 @@ if [[ ${1:-} == --wine ]]; then
   # A 64-bit-only wine cannot start a PE32: it reports "application could not
   # be started" / bad exe format with a nonzero rc. That is an environment
   # limit, not a fixture failure — the interpreter side is the CI-relevant
-  # check — so report it loudly and pass.
-  set +e; wout=$(WINEDEBUG=-all "$wine" "$tmp/fixture-cxx.exe" 2>&1 | tr -d '\r'); wrc=$?; set -e
+  # check — so report it loudly and pass. Any OTHER nonzero rc is a real
+  # failure: the binary ran and disagreed with the interpreter.
+  set +e
+  WINEDEBUG=-all "$wine" "$tmp/fixture-cxx.exe" >"$tmp/wine-out.txt" 2>"$tmp/wine-err.txt"
+  wrc=$?
+  set -e
+  wout=$(tr -d '\r' <"$tmp/wine-out.txt")
   want='hello from i686 C++ len=19
 sum ok
 acc=55'
   if [[ $wrc -ne 42 ]]; then
-    echo "X86-CXXRT SKIP: wine could not run the PE32 (exit $wrc) — 64-bit-only wine needs wine32 for i386"
-    echo "$wout" | tail -3
-    exit 0
+    if grep -qi "bad exe format\|cannot execute\|application could not be started" "$tmp/wine-err.txt" \
+       && [[ ! -s $tmp/wine-out.txt ]]; then
+      echo "X86-CXXRT SKIP: wine could not run the PE32 (exit $wrc) — 64-bit-only wine needs wine32 for i386"
+      tail -3 "$tmp/wine-err.txt"
+      exit 0
+    fi
+    echo "X86-CXXRT FAIL: wine exited $wrc (expected 42)"; echo "$wout"; tail -3 "$tmp/wine-err.txt"; exit 1
   fi
   [[ $wout == "$want" ]] || { echo "X86-CXXRT FAIL: wine stdout differs"; echo "$wout"; exit 1; }
   echo "X86-CXXRT PASS: same binary, stdout and exit code identical under Wine (real C++ runtime)"
