@@ -137,7 +137,7 @@ enum {
     VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO = 1000314005,
     VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO = 1000314006,
 };
-enum { VK_API_VERSION_1_0 = (1u << 22) };
+enum { VK_API_VERSION_1_0 = (1u << 22), VK_API_VERSION_1_1 = (2u << 22), VK_API_VERSION_1_2 = (3u << 22), VK_API_VERSION_1_3 = (4u << 22) };
 enum { VK_QUEUE_GRAPHICS_BIT = 0x1, VK_QUEUE_COMPUTE_BIT = 0x2 };
 enum { VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT = 0x1, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT = 0x400,
        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT = 0x800, VK_PIPELINE_STAGE_HOST_BIT = 0x2000 };
@@ -185,12 +185,20 @@ typedef struct VkInstanceCreateInfo_ {
     uint32_t enabledExtensionCount; const char* const* ppEnabledExtensionNames;
 } VkInstanceCreateInfo;
 typedef struct VkExtent3D_ { uint32_t width, height, depth; } VkExtent3D;
+// Only the fields the fixture reads; the rest of the real struct (limits,
+// sparse properties, buffer/queue limits, name strings) is left out on purpose
+// — the fixture never touches it.
+typedef struct VkPhysicalDeviceProperties_ {
+    uint32_t apiVersion, driverVersion, vendorID, deviceID, deviceType;
+    char pad[256 + 8 * 256]; // deviceName[256] + pipelineCacheUUID etc.
+} VkPhysicalDeviceProperties;
 typedef struct VkQueueFamilyProperties_ {
     VkFlags queueFlags; uint32_t queueCount, timestampValidBits; VkExtent3D minImageTransferGranularity;
 } VkQueueFamilyProperties;
 typedef struct VkPhysicalDeviceMemoryProperties_ {
-    uint32_t memoryTypeCount, memoryHeapCount;
+    uint32_t memoryTypeCount;
     struct { VkFlags propertyFlags; uint32_t heapIndex; } memoryTypes[32];
+    uint32_t memoryHeapCount;
     struct { VkDeviceSize size; VkFlags flags; } memoryHeaps[16];
 } VkPhysicalDeviceMemoryProperties;
 typedef struct VkDeviceQueueCreateInfo_ {
@@ -417,6 +425,7 @@ typedef VkResult (__stdcall *PFN_vkEnumeratePhysicalDevices)(VkInstance, uint32_
 typedef void (__stdcall *PFN_vkGetPhysicalDeviceMemoryProperties)(VkPhysicalDevice, VkPhysicalDeviceMemoryProperties*);
 typedef void (__stdcall *PFN_vkGetPhysicalDeviceQueueFamilyProperties)(VkPhysicalDevice, uint32_t*, VkQueueFamilyProperties*);
 typedef void (__stdcall *PFN_vkGetPhysicalDeviceFeatures2)(VkPhysicalDevice, void*);
+typedef void (__stdcall *PFN_vkGetPhysicalDeviceProperties)(VkPhysicalDevice, VkPhysicalDeviceProperties*);
 typedef VkResult (__stdcall *PFN_vkCreateDevice)(VkPhysicalDevice, const VkDeviceCreateInfo*, const VkAllocationCallbacks*, VkDevice*);
 typedef void (__stdcall *PFN_vkGetDeviceQueue)(VkDevice, uint32_t, uint32_t, VkQueue*);
 typedef VkResult (__stdcall *PFN_vkCreateBuffer)(VkDevice, const VkBufferCreateInfo*, const VkAllocationCallbacks*, VkBuffer*);
@@ -490,10 +499,19 @@ int vk_draw_entry() {
     if (!createInstance) return fail(11, "GetProcAddress(vkCreateInstance)", 0);
 
     const char* extensions[] = { "VK_KHR_surface", "VK_KHR_win32_surface" };
-    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO, nullptr, "play-vulkan-draw", 1, "play", 1, VK_API_VERSION_1_0};
+    // The instance asks for 1.3 (the loader caps to what it and the ICD
+    // support; the spec forbids failing a higher request) so the promoted
+    // core entry points — features2 chaining at device creation, the 1.3
+    // command exports — exist. A driver that refuses the request falls back
+    // to a 1.0 instance and the fixture degrades with it.
+    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO, nullptr, "play-vulkan-draw", 1, "play", 1, VK_API_VERSION_1_3};
     VkInstanceCreateInfo instanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, nullptr, 0, &app, 0, nullptr, 2, extensions};
     VkInstance instance = nullptr;
     VkResult result = createInstance(&instanceInfo, nullptr, &instance);
+    if (result != VK_SUCCESS || !instance) {
+        app.apiVersion = VK_API_VERSION_1_0;
+        result = createInstance(&instanceInfo, nullptr, &instance);
+    }
     if (result != VK_SUCCESS || !instance) return fail(12, "vkCreateInstance", result);
     emit("PLAY-VULKAN-DRAW STAGE instance-created\n");
 
@@ -504,6 +522,8 @@ int vk_draw_entry() {
     auto createDevice = (PFN_vkCreateDevice)gipa(instance, "vkCreateDevice");
     if (!enumerate || !getMemoryProperties || !queueFamilies || !createDevice)
         return fail(12, "instance proc addrs", 0);
+    auto getProperties = (PFN_vkGetPhysicalDeviceProperties)gipa(instance, "vkGetPhysicalDeviceProperties");
+    if (!getProperties) return fail(12, "vkGetPhysicalDeviceProperties", 0);
 
     uint32_t count = 0;
     result = enumerate(instance, &count, nullptr);
@@ -513,6 +533,12 @@ int vk_draw_entry() {
     result = enumerate(instance, &listed, devices);
     if (result != VK_SUCCESS || !listed) return fail(13, "vkEnumeratePhysicalDevices(array)", result);
     VkPhysicalDevice physical = devices[0];
+    // The apiVersion a game would read off the physical device before deciding
+    // what to request (the instance itself stays 1.0 — the loader caps, the
+    // device does not).
+    VkPhysicalDeviceProperties props{};
+    getProperties(physical, &props);
+    uint32_t physicalApiVersion = props.apiVersion;
 
     // Feature probes a game does before choosing its path: the three features
     // this fixture exercises, chained off one vkGetPhysicalDeviceFeatures2.
@@ -546,7 +572,17 @@ int vk_draw_entry() {
     {char line[128]; char* p = append(line, "PLAY-VULKAN-DRAW STAGE queue-family index=");
      p = appendUInt(p, family); p = append(p, "\n"); *p = 0; emit(line);}
 
-    // Enable the three features through pNext when the driver reports them.
+    // Enable the three features through pNext when the driver reports them,
+    // and ask for the highest apiVersion the physical device actually
+    // supports: core-1.1+ commands are exported by a device only at the
+    // apiVersion it was created with (winevulkan enforces this strictly).
+    // The device's apiVersion rides in the instance's app info; a device
+    // create info takes no app info of its own (the pEnabledFeatures slot
+    // must be null when the features arrive through pNext).
+    uint32_t wantApi = VK_API_VERSION_1_0;
+    if (hasDynamicRendering || hasSync2) wantApi = VK_API_VERSION_1_3;
+    else if (hasTimeline) wantApi = VK_API_VERSION_1_2;
+    else if (physicalApiVersion >= VK_API_VERSION_1_1) wantApi = VK_API_VERSION_1_1;
     VkPhysicalDeviceTimelineSemaphoreFeatures t{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES, nullptr, hasTimeline};
     VkPhysicalDeviceSynchronization2Features s{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES, &t, hasSync2};
     VkPhysicalDeviceDynamicRenderingFeatures d{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES, &s, hasDynamicRendering};
@@ -558,7 +594,10 @@ int vk_draw_entry() {
     if (result != VK_SUCCESS || !device) return fail(17, "vkCreateDevice", result);
     emit("PLAY-VULKAN-DRAW STAGE device-created\n");
 
-    auto dpa = (PFN_vkGetDeviceProcAddr)gipa(nullptr, "vkGetDeviceProcAddr");
+    // vkGetDeviceProcAddr is only guaranteed for a valid instance (the spec
+    // allows a loader to return NULL for one); the fixture's first Wine run
+    // hit exactly that.
+    auto dpa = (PFN_vkGetDeviceProcAddr)gipa(instance, "vkGetDeviceProcAddr");
     if (!dpa) return fail(17, "vkGetDeviceProcAddr", 0);
 #define DEV(name) auto name = (PFN_vk##name)dpa(device, "vk" #name)
     DEV(GetDeviceQueue); DEV(CreateBuffer); DEV(GetBufferMemoryRequirements); DEV(AllocateMemory);
@@ -574,18 +613,58 @@ int vk_draw_entry() {
     DEV(CreateSemaphore); DEV(CreateFence); DEV(WaitForFences); DEV(ResetFences);
     DEV(WaitSemaphores); DEV(SignalSemaphore);
 #undef DEV
-    if (!GetDeviceQueue || !CreateBuffer || !GetBufferMemoryRequirements || !AllocateMemory ||
-        !BindBufferMemory || !MapMemory || !CreateImage || !GetImageMemoryRequirements ||
-        !BindImageMemory || !CreateImageView || !CreateShaderModule || !CreateDescriptorSetLayout ||
-        !CreateDescriptorPool || !AllocateDescriptorSets || !UpdateDescriptorSets ||
-        !CreatePipelineLayout || !CreateGraphicsPipelines || !CreateComputePipelines ||
-        !CreateCommandPool || !AllocateCommandBuffers || !BeginCommandBuffer || !CmdBindPipeline ||
-        !CmdBindVertexBuffers || !CmdDraw || !CmdDispatch || !CmdPushConstants ||
-        !CmdBindDescriptorSets || !CmdSetViewport || !CmdSetScissor || !CmdPipelineBarrier2 ||
-        !CmdBeginRendering || !CmdEndRendering || !CmdCopyBuffer || !EndCommandBuffer ||
-        !QueueSubmit || !QueueWaitIdle || !CreateSemaphore || !CreateFence || !WaitForFences ||
-        !ResetFences || !WaitSemaphores || !SignalSemaphore)
-        return fail(17, "device proc addrs", 0);
+    // Name the first missing entry point: a driver that stops exporting one of
+    // these is exactly what the fixture is here to catch, and "device proc
+    // addrs" alone does not say which.
+    {
+        struct { const char* name; void* p; } required[] = {
+            {"vkGetDeviceQueue", (void*)GetDeviceQueue},
+            {"vkCreateBuffer", (void*)CreateBuffer},
+            {"vkGetBufferMemoryRequirements", (void*)GetBufferMemoryRequirements},
+            {"vkAllocateMemory", (void*)AllocateMemory},
+            {"vkBindBufferMemory", (void*)BindBufferMemory},
+            {"vkMapMemory", (void*)MapMemory},
+            {"vkCreateImage", (void*)CreateImage},
+            {"vkGetImageMemoryRequirements", (void*)GetImageMemoryRequirements},
+            {"vkBindImageMemory", (void*)BindImageMemory},
+            {"vkCreateImageView", (void*)CreateImageView},
+            {"vkCreateShaderModule", (void*)CreateShaderModule},
+            {"vkCreateDescriptorSetLayout", (void*)CreateDescriptorSetLayout},
+            {"vkCreateDescriptorPool", (void*)CreateDescriptorPool},
+            {"vkAllocateDescriptorSets", (void*)AllocateDescriptorSets},
+            {"vkUpdateDescriptorSets", (void*)UpdateDescriptorSets},
+            {"vkCreatePipelineLayout", (void*)CreatePipelineLayout},
+            {"vkCreateGraphicsPipelines", (void*)CreateGraphicsPipelines},
+            {"vkCreateComputePipelines", (void*)CreateComputePipelines},
+            {"vkCreateCommandPool", (void*)CreateCommandPool},
+            {"vkAllocateCommandBuffers", (void*)AllocateCommandBuffers},
+            {"vkBeginCommandBuffer", (void*)BeginCommandBuffer},
+            {"vkCmdBindPipeline", (void*)CmdBindPipeline},
+            {"vkCmdBindVertexBuffers", (void*)CmdBindVertexBuffers},
+            {"vkCmdDraw", (void*)CmdDraw},
+            {"vkCmdDispatch", (void*)CmdDispatch},
+            {"vkCmdPushConstants", (void*)CmdPushConstants},
+            {"vkCmdBindDescriptorSets", (void*)CmdBindDescriptorSets},
+            {"vkCmdSetViewport", (void*)CmdSetViewport},
+            {"vkCmdSetScissor", (void*)CmdSetScissor},
+            {"vkCmdPipelineBarrier2", (void*)CmdPipelineBarrier2},
+            {"vkCmdBeginRendering", (void*)CmdBeginRendering},
+            {"vkCmdEndRendering", (void*)CmdEndRendering},
+            {"vkCmdCopyBuffer", (void*)CmdCopyBuffer},
+            {"vkEndCommandBuffer", (void*)EndCommandBuffer},
+            {"vkQueueSubmit", (void*)QueueSubmit},
+            {"vkQueueSubmit2", (void*)QueueSubmit2},
+            {"vkQueueWaitIdle", (void*)QueueWaitIdle},
+            {"vkCreateSemaphore", (void*)CreateSemaphore},
+            {"vkCreateFence", (void*)CreateFence},
+            {"vkWaitForFences", (void*)WaitForFences},
+            {"vkResetFences", (void*)ResetFences},
+            {"vkWaitSemaphores", (void*)WaitSemaphores},
+            {"vkSignalSemaphore", (void*)SignalSemaphore},
+        };
+        for (size_t i = 0; i < sizeof required / sizeof *required; ++i)
+            if (!required[i].p) return fail(17, required[i].name, 0);
+    }
     VkQueue queue = nullptr;
     GetDeviceQueue(device, family, 0, &queue);
     if (!queue) return fail(17, "vkGetDeviceQueue", 0);
