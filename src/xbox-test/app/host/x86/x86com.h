@@ -125,6 +125,7 @@ struct ComSpace {
         else { p.guest = block_top; block_top += 4; }
         cpu.mem.w32(p.guest, p.vtable);
         if (addref) addref();
+        ++created;
         Proxy& stored = proxies.emplace(p.guest, std::move(p)).first->second;
         host_dedupe[{stored.host, stored.iface}] = stored.guest;
         return stored.guest;
