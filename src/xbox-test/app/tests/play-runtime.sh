@@ -66,6 +66,13 @@ lld-link-19 /nodefaultlib /entry:d3d12_entry /include:d3d12_relocation /subsyste
 # with a swap chain on a guest HWND, clears and presents three frames.
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d10.cpp -o "$out/obj/d3d10.obj"
 lld-link-19 /nodefaultlib /entry:d3d10_entry /include:d3d10_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d10.exe" "$out/obj/d3d10.obj" /usr/x86_64-w64-mingw32/lib/libd3d10.a /usr/x86_64-w64-mingw32/lib/libdxgi.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libuuid.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+# EXE that draws with D3D10 through the shim: input layout, SM4 shaders (the
+# committed vs_4_0/ps_4_0 bytecode), Draw/DrawIndexed, the geometry shader,
+# stream-out, a cubemap with GenerateMips and a MSAA resolve. Every pass reads
+# pixels (or vertices) back and exits 42 only when the draw landed where it
+# should; 43 is BLOCKED, never a pass.
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d10-triangle.cpp -o "$out/obj/d3d10-triangle.obj"
+lld-link-19 /nodefaultlib /entry:d3d10tri_entry /include:d3d10tri_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d10-triangle.exe" "$out/obj/d3d10-triangle.obj" /usr/x86_64-w64-mingw32/lib/libd3d10.a /usr/x86_64-w64-mingw32/lib/libdxgi.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libuuid.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 # EXE that starts a D3D9 game: it statically imports d3d9.dll, which the console
 # lacks, so Play must serve the shim from the runtime directory and the shim's
 # own d3d11/dxgi imports must reach Play's routes. It creates a device with a
@@ -234,7 +241,7 @@ tail -1 "$out/leaderboards.log"
 # The root copy was only for this run: later modes prove what happens when a
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn opengl;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn opengl;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -382,6 +389,11 @@ grep -q 'PRUN EVENT guest D3D11CreateDevice caller=' "$out/d3d10-diag.log"
 grep -q "guest device's DXGI factory: guest-window swapchains go through the CoreWindow adapter" "$out/d3d10-diag.log"
 grep -q 'guest DXGI CoreWindow swapchain returned hr=0x00000000' "$out/d3d10-diag.log"
 [[ $(grep -c 'guest D3D11CreateDevice returned hr=0x00000000' "$out/d3d10-diag.log") == 1 ]]
+# The D3D10 shim draws: the fixture's six passes (Draw, DrawIndexed, geometry
+# shader, stream-out, GenerateMips on a cubemap, MSAA resolve) each read back
+# and exit 42 only when every one landed where it should; 43 is BLOCKED.
+grep -q 'PRUN EVENT mapping d3d10.dll' "$out/d3d10-triangle.log"
+grep -q 'PLAY-TEST .*code=42' "$out/d3d10-triangle.log"
 # A guest's static d3d9.dll import is served by Play's own D3D9 shim from the
 # runtime directory (the console has no d3d9.dll), and the shim's own
 # d3d11.dll!D3D11CreateDevice import reaches Play's device hook. The fixture
