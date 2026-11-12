@@ -1220,7 +1220,7 @@ static std::string start_launch(uint32_t appid, const std::string& name, const s
             if (dir.empty() || names.empty()) {
                 std::string gone;
                 if (!dir.empty() && names.empty()) {
-                    if (!inst.root.empty() && GetFileAttributesW(ascii(inst.root.substr(0, 3)).c_str()) == INVALID_FILE_ATTRIBUTES)
+                    if (!inst.root.empty() && GetFileAttributesW(installs::ascii(inst.root.substr(0, 3)).c_str()) == INVALID_FILE_ATTRIBUTES)
                         gone = "the drive holding this game (" + inst.root.substr(0, 2) + ") is not connected";
                     else if (installs::payload_state(folder) != installs::Health::ok)
                         gone = "the install files are missing from " + game_library::join_root("LocalState", inst.root, dir) + " (reinstall from the game page)";
