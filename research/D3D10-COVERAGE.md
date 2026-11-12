@@ -69,6 +69,7 @@ honestly instead of faked.
 | Feature / API | Proven by | Status |
 |---|---|---|
 | `CreateQuery` (occlusion) Begin/End/GetData | uwph/d3d10/test.cpp | off-device only |
+| `D3D10_QUERY_SO_STATISTICS` Begin/End/poll-GetData (S_FALSE until answered) | **new**: d3d10-triangle fixture pass 4 | gap -> new fixture |
 | `CreatePredicate` + `SetPredication` | shim code only | gap |
 | Timestamp/disjoint query pair | shim code only | gap |
 | `D3D10ReflectShader` (D3D11 reflector narrowed to the D3D10 method set) | **new**: uwph/d3d10/test.cpp reflection checks | gap -> new test |
