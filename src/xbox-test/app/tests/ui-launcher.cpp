@@ -321,6 +321,17 @@ int main(int argc, char** argv) {
         vm.restart_required = true;
         check(primary_state(vm) == Primary::restart_required &&
               !std::strcmp(primary_label(vm, false), "RESTART REQUIRED"), "restart required label");
+        // a marker whose payload is gone is not an installed game: REINSTALL,
+        // never PLAY (the status row says the files are gone; A reinstalls)
+        vm.restart_required = false;
+        vm.installed = true; vm.broken = true;
+        check(primary_state(vm) == Primary::reinstall && !std::strcmp(primary_label(vm, false), "REINSTALL"),
+              "broken install: REINSTALL");
+        check(!std::strcmp(primary_hint(vm, false), "Reinstall"), "broken install hint says reinstall");
+        vm.installed = false;
+        check(primary_state(vm) == Primary::install, "broken only matters for an installed game");
+        vm.installed = true; vm.broken = false;
+        check(primary_state(vm) == Primary::play, "healthy install still plays");
     }
 
     // ---- pure logic: sidebar view-model ----

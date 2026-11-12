@@ -50,6 +50,58 @@ int main(int argc, char** argv) {
     installs::Info dirs = installs::read(root, 400);
     CHECK(installs::health_of(root, dirs) == installs::Health::empty);
 
+    // files that live only under subfolders are a payload (a game layout keeps
+    // its files under data dirs): the walk recurses, bounded in depth
+    put(L"dl_450.done", "app 450 build 1 files 3 bytes 5000 installdir nested\n");
+    mkdir(L"nested"); mkdir(L"nested\\data"); mkdir(L"nested\\data\\bin"); mkdir(L"nested\\data\\bin\\deeper");
+    put(L"nested\\data\\bin\\deeper\\core.pack", "payload");
+    CHECK(installs::payload_state(installs::read(root, 450).folder) == installs::Health::ok);
+    CHECK(installs::health_of(root, installs::read(root, 450)) == installs::Health::ok);
+
+    // a reparse point (junction/symlink) is never followed: a folder whose only
+    // content links elsewhere does not count as a payload (needs the symlink
+    // privilege; skipped when Wine cannot grant it)
+    put(L"dl_460.done", "app 460 build 1 files 1 bytes 5 installdir linked\n");
+    mkdir(L"linked"); mkdir(L"elsewhere"); put(L"elsewhere\\far.dat", "x");
+    if (CreateSymbolicLinkW(at(L"linked\\jump").c_str(), at(L"elsewhere").c_str(), SYMBOLIC_LINK_FLAG_DIRECTORY))
+        CHECK(installs::payload_state(installs::read(root, 460).folder) == installs::Health::empty);
+    else
+        std::printf("note: symlink case skipped (no symlink privilege)\n");
+
+    // files that live only under subfolders are a payload (a game folder with
+    // a data dir): the walk recurses, bounded in depth
+    put(L"dl_450.done", "app 450 build 1 files 3 bytes 5000 installdir nested\n");
+    mkdir(L"nested"); mkdir(L"nested\\data"); mkdir(L"nested\\data\\bin"); mkdir(L"nested\\data\\bin\\deeper");
+    put(L"nested\\data\\bin\\deeper\\core.pack", "payload");
+    CHECK(installs::health_of(root, installs::read(root, 450)) == installs::Health::ok);
+    CHECK(installs::payload_state(installs::read(root, 450).folder) == installs::Health::ok);
+
+    // a reparse point (junction/symlink) is never followed: a folder whose
+    // only content links elsewhere does not count as a payload
+    put(L"dl_460.done", "app 460 build 1 files 1 bytes 5 installdir linked\n");
+    mkdir(L"linked"); mkdir(L"elsewhere"); put(L"elsewhere\\far.dat", "x");
+    if (CreateSymbolicLinkW(at(L"linked\\jump").c_str(), at(L"elsewhere").c_str(), SYMBOLIC_LINK_FLAG_DIRECTORY))
+        CHECK(installs::payload_state(installs::read(root, 460).folder) == installs::Health::empty);
+    else
+        std::printf("note: symlink case skipped (no symlink privilege)\n");
+
+    // files that live only under subfolders (a game folder with a data dir)
+    // are a payload: the check walks the tree (bounded depth)
+    put(L"dl_450.done", "app 450 build 1 files 3 bytes 5000 installdir nested\n");
+    mkdir(L"nested"); mkdir(L"nested\\data"); mkdir(L"nested\\data\\bin");
+    put(L"nested\\data\\bin\\core.pack", "payload");
+    CHECK(installs::health_of(root, installs::read(root, 450)) == installs::Health::ok);
+
+    // a junction/symlink (reparse point) is never followed, so a folder whose
+    // only content is a link to elsewhere does not count as a payload
+    put(L"dl_460.done", "app 460 build 1 files 1 bytes 5 installdir linked\n");
+    mkdir(L"linked"); mkdir(L"elsewhere"); put(L"elsewhere\\far.dat", "x");
+    {   // CreateSymbolicW needs a privilege; a junction needs a handle. When
+        // neither is available the case cannot be built and is skipped.
+        if (CreateSymbolicLinkW(at(L"linked\\jump").c_str(), at(L"elsewhere").c_str(), SYMBOLIC_LINK_FLAG_DIRECTORY))
+            CHECK(installs::payload_state(installs::read(root, 460).folder) == installs::Health::empty);
+    }
+
     // a zero-byte file does not count as a payload; one real file beside it does
     put(L"dl_500.done", "app 500 build 1 files 2 bytes 10 installdir stub\n");
     mkdir(L"stub"); put(L"stub\\placeholder", "");
@@ -65,6 +117,25 @@ int main(int argc, char** argv) {
     put(L"dl_700.done", "app 700 build 1 files 1 bytes 5 installdir fileclash\n");
     put(L"fileclash", "not a dir");
     CHECK(installs::payload_state(installs::read(root, 700).folder) == installs::Health::missing);
+
+    // clear_marker removes the stale marker so a reinstall starts fresh: the
+    // read reports not-installed (download_app then honors the chosen root),
+    // and a second call still succeeds (nothing left to remove)
+    put(L"dl_800.done", "app 800 build 1 files 42 bytes 900000000 installdir stale\n");
+    CHECK(installs::read(root, 800).installed);
+    CHECK(installs::clear_marker(root, 800));
+    CHECK(!installs::read(root, 800).installed);
+    CHECK(installs::clear_marker(root, 800));
+
+    // clear_marker removes the stale marker so a reinstall starts fresh: the
+    // read reports not-installed (download_app then honors the chosen root)
+    // and a second call still reports success (nothing left to remove)
+    put(L"dl_800.done", "app 800 build 1 files 42 bytes 900000000 installdir stale\n");
+    CHECK(installs::read(root, 800).installed);
+    CHECK(installs::clear_marker(root, 800));
+    CHECK(!installs::read(root, 800).installed);
+    CHECK(installs::clear_marker(root, 800));
+    CHECK(installs::payload_state(root + L"\\dl_800.done") == installs::Health::missing);
 
     std::printf("%s (%d failure%s)\n", failures ? "INSTALL-HEALTH FAILED" : "INSTALL-HEALTH OK",
                 failures, failures == 1 ? "" : "s");

@@ -1751,6 +1751,28 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (g_launch.phase == 1 || g_launch.phase == 3) { logf("detail: A ignored, launch attempt running"); return; }
         m_dInst = read_install(m_dApp);
         if (deleting_mine()) { logf("detail: A ignored, delete running"); return; }
+        // a running or queued download is cancelled first, broken install or
+        // not: A never queues a second download over one already going
+        if (dl_is_mine() || is_queued(m_dApp)) {
+            detail_input::State st;
+            st.installed = m_dInst.installed;
+            st.download = dl_is_mine() ? detail_input::Download::running : detail_input::Download::queued;
+            st.sinceStart = now_s() - m_dlStartT;
+            switch (detail_input::press_a(st)) {
+            case detail_input::Action::ignore:   // the press that started the install cannot also cancel it
+                logf("detail: A ignored, %.2f s after the install started (%s)", st.sinceStart, via); return;
+            case detail_input::Action::cancel:   // the same cleanup as any other cancelled download (steamdl.h fail())
+                m_dlWatch = 0;
+                if (st.download == detail_input::Download::running) { g_dl.cancel = true; logf("detail: download cancel requested (A, %s)", via); }
+                else {
+                    bool dropped = cancel_queued(m_dApp);
+                    if (!dropped && g_dl.appid == m_dApp && g_dl.state == 1) g_dl.cancel = true;   // the queue started it meanwhile
+                    logf("detail: queued download cancel (A, %s): %s", via, dropped ? "dropped from the queue" : "already started, cancel requested");
+                }
+                return;
+            default: break;
+            }
+        }
         // a marker with no payload behind it is not playable: A reinstalls (the
         // status row says the install is broken), it never starts a launch
         if (m_dInst.installed && installs::health_of(g_dir, m_dInst) != installs::Health::ok) {
@@ -1761,6 +1783,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             const storage_roots::Choice& where = m_roots[m_rootSel];
             if (where.freeBytes < (64ull << 20)) { m_dNote = storage_roots::refusal_text(where, m_roots, m_rootSel); return; }
             set_install_root(m_dApp, where.root);
+            // the stale marker would keep its drive (download_app reads the
+            // marker before the chosen root): remove it, the payload it named
+            // is gone, and the download records itself fresh (begin_partial)
+            if (!installs::clear_marker(g_dir, m_dApp)) { m_dNote = "Cannot clear the broken install record (file in use?)"; return; }
+            m_dInst.installed = false; m_dBroken = false; m_dInstT = -10;
             m_dlStartT = now_s(); m_dlWatch = m_dApp; m_dlWatchSeq = g_dlSeq;
             logf("detail: reinstall pressed appid=%u (%s) to %s", m_dApp, via, storage_roots::label(where).c_str()); enqueue_download(m_dApp);
             return;
@@ -2051,7 +2078,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             // marker, a crash) is not an installed game: say so and offer the
             // reinstall instead of a Play that cannot find its files.
             installs::Health h = installs::health_of(g_dir, m_dInst);
-            if (h == installs::Health::ok) vStatus = "Installed";
+            if (h == installs::Health::ok) { vStatus = "Installed"; m_dBroken = false; }
             else { vStatus = h == installs::Health::empty ? "Install broken: files missing" : "Install broken: folder missing"; m_dBroken = true; }
         }
         else vStatus = "Not installed";
@@ -2078,7 +2105,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         vPlayers = "1"; vLang = "English";   // the store schema carries no players/language rows
 
         ui_launcher::PrimaryVM pv;
-        pv.installed = m_dInst.installed;
+        // a marker alone is not an install: the primary button only plays when
+        // the payload is behind it; a broken install shows REINSTALL (A on the
+        // detail page reinstalls, it never launches)
+        pv.installed = m_dInst.installed && !m_dBroken;
+        pv.broken = m_dBroken && m_dInst.installed;
         pv.download = down ? detail_input::Download::running : queued ? detail_input::Download::queued : detail_input::Download::none;
         pv.launching = launching; pv.deleting = deleting; pv.restart_required = retained;
         pv.install_pct = float(pct);

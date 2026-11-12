@@ -37,30 +37,46 @@ inline Info read(const std::wstring& root, uint32_t appid) {
 
 // ---- install health (marker vs payload)
 // A dl_<appid>.done marker claims an install, but the payload folder can be
-// gone or empty (a deploy that wiped app data, a move that left the marker on
-// the source drive, a crash between the first file and the last). The marker
-// text alone cannot tell; the folder is checked.
+// gone or empty (a deploy that wiped app data, a move that left the marker, a
+// crash between the first file and the last). The marker text alone cannot
+// tell; the folder is checked, recursing into subdirectories (a game layout
+// keeps its files under bin/, data/, ...), bounded in depth.
 enum class Health { ok, missing, empty };
-// Does the folder the marker names hold at least one real file? A directory
-// alone (or only empty directories) is not a payload; sizes are not verified
-// (the marker's byte total counts depot padding, not the on-disk sum).
+// Does the folder hold at least one real file anywhere under it? A directory
+// alone (or only empty directories, or junctions/symlinks, which are never
+// followed) is not a payload; sizes are not verified (the marker's byte total
+// counts depot padding, not the on-disk sum).
+inline bool has_payload_file(const std::wstring& dir, int depth) {
+    if (depth > 16) return false;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileExW((dir + L"\\*").c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr, 0);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool found = false;
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+                && has_payload_file(dir + L"\\" + fd.cFileName, depth + 1)) { found = true; break; }
+        } else if (((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow) { found = true; break; }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return found;
+}
 inline Health payload_state(const std::wstring& folder) {
     DWORD a = GetFileAttributesW(folder.c_str());
     if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) return Health::missing;
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileExW((folder + L"\\*").c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr, 0);
-    if (h == INVALID_HANDLE_VALUE) return Health::missing;   // unreadable: as good as gone
-    bool any = false;
-    do {
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        if (((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow) { any = true; break; }
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-    return any ? Health::ok : Health::empty;
+    return has_payload_file(folder, 0) ? Health::ok : Health::empty;
 }
 // Health of appid's install as the marker records it. root is the marker's
 // state root (kept for signature symmetry; the folder is already resolved).
 inline Health health_of(const std::wstring& /*root*/, const Info& i) { return i.installed && !i.dir.empty() ? payload_state(i.folder) : Health::missing; }
+// Remove a stale dl_<appid>.done marker before a reinstall: the payload it
+// named is gone, so the marker lies. Returns false when it could not be
+// deleted (the caller must not then download over an install that still
+// claims its files).
+inline bool clear_marker(const std::wstring& root, uint32_t appid) {
+    return DeleteFileW(marker_path(root, appid).c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND;
+}
 
 // (appid, share key) for every marker (game_library::share_key: installdir, root-qualified off LocalState);
 // withDirs=false skips reading the markers
