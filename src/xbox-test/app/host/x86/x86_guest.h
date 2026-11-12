@@ -706,8 +706,21 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "VirtualQuery", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
         uint32_t a = c.arg(0), p = c.arg(1); if (!p) return 0;
         uint32_t base = a & ~0xfffu, size = 0x1000;
-        mem.w32(p + 0, base); mem.w32(p + 4, base); mem.w32(p + 8, 0x04);
-        mem.w32(p + 12, size); mem.w32(p + 16, mem.mapped(a) ? 0x1000u : 0u); mem.w32(p + 20, 0x04); mem.w32(p + 24, 0x20000);
+        // The real per-page protection: callers (mingw's pseudo-relocator)
+        // skip their own VirtualProtect when the answer says the page is
+        // already writable, so a blanket READWRITE answer makes their next
+        // write fault.
+        uint8_t pr = mem.mapped(a) ? mem.protect_of(a) : 0;
+        uint32_t win = 0x04;  // PAGE_READWRITE is the sane default
+        if (!mem.mapped(a)) win = 0;  // free: State MEM_FREE below
+        else if (!(pr & PROT_W)) win = (pr & PROT_X) ? 0x20 /*PAGE_EXECUTE_READ*/ : 0x02 /*PAGE_READONLY*/;
+        else if (pr & PROT_X) win = 0x40 /*PAGE_EXECUTE_READWRITE*/;
+        // AllocationProtect (mbi+8) must NOT read as already-fully-writable:
+        // mingw's _mark_section_writable skips its VirtualProtect when this
+        // field says EXECUTE_READWRITE, then its pseudo-reloc memcpy faults.
+        // Real images allocate as writecopy (0x80); report that.
+        mem.w32(p + 0, base); mem.w32(p + 4, base); mem.w32(p + 8, win ? 0x80u : 0u);
+        mem.w32(p + 12, size); mem.w32(p + 16, mem.mapped(a) ? win : 0u); mem.w32(p + 20, win ? 0x04 : 0x01); mem.w32(p + 24, 0x20000);
         return 28; });
     // Critical sections: one guest thread per CPU, so they are no-ops.
     for (const char* n : {"InitializeCriticalSection", "EnterCriticalSection", "LeaveCriticalSection", "DeleteCriticalSection"})

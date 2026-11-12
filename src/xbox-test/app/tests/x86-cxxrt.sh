@@ -32,14 +32,23 @@ if ! "$cxx32" -O1 -Wall -Wextra -Werror -static "${inc[@]}" "${extra[@]}" \
   echo "x86-cxxrt: -static link failed ($(tail -n1 "$tmp/static-err.log")); falling back to a DLL-linked runtime"
   "$cxx32" -O1 -Wall -Wextra -Werror "${inc[@]}" "${extra[@]}" \
     -o "$tmp/fixture-cxx.exe" "$here/x86-cxxrt/fixture-cxx.cpp"
+  gxxdir=$(dirname "$cxx32")
   for dll in libstdc++-6.dll libgcc_s_dw2-1.dll libwinpthread-1.dll libmcfgthread-2.dll; do
     found=$("$cxx32" -print-file-name="$dll" 2>/dev/null || true)
+    if [[ -z $found || ! -f $found ]]; then
+      # print-file-name answers the bare name when it cannot find the file;
+      # try the toolchain's own dirs and (NixOS) the mcfgthread store bin/.
+      for d in "$gxxdir" "$gxxdir/../lib" /nix/store/*-mcfgthread-i686-w64-mingw32-*/bin; do
+        [[ -f $d/$dll ]] && { found=$d/$dll; break; }
+      done
+    fi
     [[ -n $found && -f $found ]] && cp "$found" "$tmp/"
   done
+  ls "$tmp"/*.dll >/dev/null 2>&1 || { echo "x86-cxxrt: fallback link produced no runtime DLLs to stage" >&2; exit 1; }
 fi
 "${CXX:-c++}" -std=c++17 -O2 -mno-red-zone -Wall -Wextra -Werror "$here/x86-cxxrt.cpp" -o "$tmp/x86-cxxrt"
 set +e
-out=$("$tmp/x86-cxxrt" "$tmp/fixture-cxx.exe"); rc=$?
+out=$("$tmp/x86-cxxrt" "$tmp/fixture-cxx.exe" "$tmp"); rc=$?
 set -e
 [[ $rc -eq 0 ]] || { echo "X86-CXXRT FAIL: driver exit $rc"; echo "$out"; exit 1; }
 grep -q '^play: cxxrt ran to exit 42, all imports bound$' <<<"$out" || {

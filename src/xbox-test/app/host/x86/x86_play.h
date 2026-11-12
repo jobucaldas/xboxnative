@@ -57,13 +57,18 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         guest.cmdline = cmdline.empty() ? name : cmdline;
         guest.dll_source = dll_source;
         guest.register_all();
-        Image img = load_pe32(mem, table, reg, file);
+        // The top image loads ONCE, through load_dll: it maps at the preferred
+        // ImageBase when free (an exe's normal case) and only relocates when
+        // something already holds that range. Loading it here as well would
+        // take the preferred base with a throwaway copy and force the real
+        // load to relocate — wrong for mingw CRTs that hard-code the preferred
+        // base (e.g. __mingw_GetSectionForAddress reads headers at 0x400000).
         // Dependencies the registry cannot serve load as guest DLLs, tracked
         // in the process module table; their DllMain runs after init_process.
         std::map<std::string, Dll> dlls; std::vector<std::string> dll_order;
         Dll top = load_dll(mem, table, reg, file, dll_source, dlls, 0, &dll_order);
         dlls.emplace("__top__", std::move(top));  // not a named module; keeps the top image's exports reachable
-        img = dlls["__top__"].image;
+        Image img = dlls["__top__"].image;
         guest.dlls = std::move(dlls);
         guest.dll_order = std::move(dll_order);
         for (const auto& kv : guest.dlls) {

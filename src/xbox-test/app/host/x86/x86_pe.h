@@ -63,6 +63,9 @@ inline void read_exports(Image& img, const std::vector<uint8_t>& bytes) {
         uint32_t name_rva = u32(bytes, names_rva + i * 4);
         if (!name_rva) continue;
         std::string name = pe_str(bytes, name_rva);
+        // Import lookups lowercase the symbol, so exports are keyed the same
+        // way (Windows' own loader matches export names case-insensitively).
+        for (auto& ch : name) if (ch >= 'A' && ch <= 'Z') ch += 32;
         uint32_t idx = u32(bytes, ords_rva + i * 2, 2);
         uint32_t fn_rva = u32(bytes, funcs_rva + idx * 4);
         // A forwarded export (RVA inside the export directory) is recorded as-is:
@@ -125,12 +128,16 @@ inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, cons
             if (!img.tls.index_ptr) throw std::runtime_error("PE32 TLS directory lacks AddressOfIndex");
         }
     }
-    // Section protections (headers stay read-only).
+    // Section protections (headers stay read-only). Image pages are
+    // copy-on-write: Windows maps image sections copy-on-write, so mingw's
+    // runtime pseudo-relocator memcpy into .text (and .rdata) promotes the
+    // page instead of faulting. PROT_COW gates the promotion; the
+    // interpreter's own W^X code pages never carry it.
     size_t opt = nt + 24, ns = wxl::Pe32::read(pe.bytes, nt + 6, 2), secs = opt + wxl::Pe32::read(pe.bytes, nt + 20, 2);
-    mem.protect(img.base, img.size, PROT_R);  // headers and any gap between sections
+    mem.protect(img.base, img.size, PROT_R | PROT_COW);  // headers and any gap between sections
     for (size_t i = 0; i < ns; ++i) {
         size_t s = secs + 40 * i; uint32_t va = u32(pe.bytes, s + 12), vs = std::max(u32(pe.bytes, s + 8), u32(pe.bytes, s + 16)), ch = u32(pe.bytes, s + 36);
-        uint8_t p = PROT_R | ((ch & 0x80000000u) ? PROT_W : 0) | ((ch & 0x20000000u) ? PROT_X : 0);
+        uint8_t p = PROT_R | PROT_COW | ((ch & 0x80000000u) ? PROT_W : 0) | ((ch & 0x20000000u) ? PROT_X : 0);
         mem.protect(img.base + va, vs, p);
     }
     // TLS directory (data dir 9): the callback list a static CRT (mingw's
