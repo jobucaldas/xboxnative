@@ -15,20 +15,23 @@ int main() {
     // first because it costs no launcher restart.
     size_t count = 0;
     const Mode* table = modes(count);
-    assert(count == 10);
+    assert(count == 11);
     assert(std::string(table[0].name) == "x86" && table[0].pe32);
     assert(std::string(table[1].name) == "vulkan-dzn" && !table[1].pe32);
     assert(std::string(table[2].name) == "d3d9" && std::string(table[6].name) == "d3d10");
     assert(std::string(table[3].name) == "d3d9-triangle" && std::string(table[4].name) == "d3d9-triangle-variants");
     assert(std::string(table[5].name) == "d3d9-textured");
-    assert(std::string(table[7].name) == "opengl" && std::string(table[7].exe) == "play-opengl.exe" && !table[7].pe32);
-    assert(std::string(table[8].name) == "d3d11" && std::string(table[8].exe) == "play-d3d11.exe" && !table[8].pe32);
-    assert(std::string(table[9].name) == "d3d12" && std::string(table[9].exe) == "play-d3d12.exe" && !table[9].pe32);
+    assert(std::string(table[7].name) == "d3d10-triangle" &&
+           std::string(table[7].exe) == "play-d3d10-triangle.exe" && !table[7].pe32);
+    assert(std::string(table[8].name) == "opengl" && std::string(table[8].exe) == "play-opengl.exe" && !table[8].pe32);
+    assert(std::string(table[9].name) == "d3d11" && std::string(table[9].exe) == "play-d3d11.exe" && !table[9].pe32);
+    assert(std::string(table[10].name) == "d3d12" && std::string(table[10].exe) == "play-d3d12.exe" && !table[10].pe32);
     assert(find("d3d9") && find("d3d9")->pe32 == false);
     assert(find("d3d9-triangle") && std::string(find("d3d9-triangle")->exe) == "play-d3d9-triangle.exe");
+    assert(find("d3d10-triangle") && std::string(find("d3d10-triangle")->exe) == "play-d3d10-triangle.exe");
     assert(find("d3d11") && std::string(find("d3d11")->exe) == "play-d3d11.exe");
     assert(find("d3d12") && std::string(find("d3d12")->exe) == "play-d3d12.exe");
-    assert(!find("d3d11")->pe32 && !find("d3d12")->pe32);
+    assert(!find("d3d11")->pe32 && !find("d3d12")->pe32 && !find("d3d10-triangle")->pe32);
     assert(find("x86") && find("x86")->pe32);
     assert(!find(""));
 
@@ -38,7 +41,7 @@ int main() {
     // fixed cap of four did once the table grew past five guests).
     int guests = 0;
     for (size_t i = 0; i < count; ++i) if (!table[i].pe32) ++guests;
-    assert(guests == 9);
+    assert(guests == 10);
     assert(max_restarts() > guests);
     assert(max_restarts() == guests + 1);
 
@@ -53,8 +56,8 @@ int main() {
     assert(unknown.size() == 2 && unknown[0] == "nope");
     // "all" expands to every fixture in canonical order, whatever else is named.
     auto all = parse_request("d3d10\nall\n");
-    assert(all.size() == 10 && all[0] == "x86" && all[6] == "d3d10"
-        && all[7] == "opengl" && all[8] == "d3d11" && all[9] == "d3d12");
+    assert(all.size() == 11 && all[0] == "x86" && all[6] == "d3d10"
+        && all[7] == "d3d10-triangle" && all[8] == "opengl" && all[9] == "d3d11" && all[10] == "d3d12");
     assert(all[3] == "d3d9-triangle" && all[4] == "d3d9-triangle-variants");
 
     // The queue survives a launcher restart: restarts count and pending modes
@@ -76,6 +79,9 @@ int main() {
     // outcome (the host's D3D12 refused dzn's device) that is never a pass.
     assert(verdict("d3d9", true, true, 42) == "PASS");
     assert(verdict("d3d10", true, true, 42) == "PASS");
+    assert(verdict("d3d10-triangle", true, true, 42) == "PASS");
+    assert(verdict("d3d10-triangle", true, true, 43) == "BLOCKED pixel-readback");
+    assert(verdict("d3d10-triangle", true, true, 44) == "FAIL exit-44");
     assert(verdict("d3d11", true, true, 42) == "PASS");
     assert(verdict("d3d12", true, true, 42) == "PASS");
     assert(verdict("x86", true, true, 42) == "PASS");
