@@ -22,6 +22,7 @@ inline const Mode* modes(size_t& count) {
     static const Mode table[] = {
         {"x86", "fixture-crt.exe", true},
         {"vulkan-dzn", "play-vulkan-dzn.exe", false},
+        {"vulkan-draw", "play-vulkan-draw.exe", false},
         {"d3d9", "play-d3d9.exe", false},
         {"d3d9-triangle", "play-d3d9-triangle.exe", false},
         {"d3d9-triangle-variants", "play-d3d9-triangle-variants.exe", false},
@@ -130,6 +131,9 @@ inline std::string verdict(const std::string& mode, bool finished, bool executed
         if (code == 42) return "PASS frame-presented";
         if (code == 43) return "BLOCKED device-creation";
     }
+    // The Vulkan draw fixture's readback mismatch: the pipeline ran but the
+    // host drew nothing the guest could read. A platform limit, never a pass.
+    if (mode == "vulkan-draw" && code == 43) return "BLOCKED pixel-readback";
     // The OpenGL fixture's readback mismatch: the context worked but the host
     // drew nothing the guest could read. A platform limit, never a pass.
     if (mode == "opengl" && code == 43) return "BLOCKED pixel-readback";

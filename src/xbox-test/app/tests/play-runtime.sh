@@ -111,6 +111,14 @@ lld-link-19 /nodefaultlib /entry:vk_entry /include:vk_relocation /subsystem:wind
 # presented, 43 when the host's D3D12 refuses dzn's device (BLOCKED, not a pass).
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -fno-builtin -c tests/play-vulkan-dzn.cpp -o "$out/obj/vulkan-dzn.obj"
 lld-link-19 /nodefaultlib /entry:vk_dzn_entry /include:vk_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-vulkan-dzn.exe" "$out/obj/vulkan-dzn.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a /usr/x86_64-w64-mingw32/lib/libuser32.a
+# EXE that proves the driver renders (research/VULKAN-COVERAGE.md): a graphics
+# pipeline from the checked-in SPIR-V, a vertex buffer, one triangle into an
+# offscreen target with dynamic rendering, a compute dispatch with a push
+# constant through a storage-buffer descriptor, synchronization2 barriers, a
+# timeline semaphore signalled and waited by value, and buffer + pixel
+# readbacks. Exit 42 only when everything read back; 43 is BLOCKED, never a pass.
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -fno-exceptions -fno-rtti -fno-builtin -c tests/play-vulkan-draw.cpp -o "$out/obj/vulkan-draw.obj"
+lld-link-19 /nodefaultlib /entry:vk_draw_entry /include:vk_draw_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-vulkan-draw.exe" "$out/obj/vulkan-draw.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a /usr/x86_64-w64-mingw32/lib/libuser32.a
 # EXE that runs the OpenGL startup path an SDL3 GL game takes (issue #176): opengl32.dll from the runtime directory (Mesa's d3d12 WGL
 # driver), a pixel format through gdi32's forwarded wgl*, a context, a cleared
 # frame presented with SwapBuffers and a glReadPixels readback. Exits 42 when
@@ -240,7 +248,7 @@ tail -1 "$out/leaderboards.log"
 # The root copy was only for this run: later modes prove what happens when a
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn opengl;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn vulkan-draw opengl;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -337,6 +345,33 @@ if [ -f out/layout/runtime/vulkan-dzn.json ]; then
   fi
 else
   echo "PLAY-VULKAN-DZN FAIL: the launcher build did not package dzn"; exit 1
+fi
+# The draw fixture (research/VULKAN-COVERAGE.md): the driver must render, not
+# just answer queries. Every stage line must be there, and the verdict is PASS
+# only when both readbacks matched (exit 42); a readback mismatch after the
+# pipeline ran is BLOCKED (the host drew nothing the guest could read), never a
+# pass. A missing stage line means the fixture died before it — a failure.
+if [ -f out/layout/runtime/vulkan-dzn.json ]; then
+  grep -q 'PLAY-VULKAN-DRAW STAGE instance-created' "$out/vulkan-draw.log"
+  grep -q 'PLAY-VULKAN-DRAW STAGE device-created' "$out/vulkan-draw.log"
+  grep -q 'PLAY-VULKAN-DRAW STAGE features timeline=[01] sync2=[01] dynamicRendering=[01]' "$out/vulkan-draw.log"
+  grep -q 'PLAY-VULKAN-DRAW STAGE graphics-pipeline' "$out/vulkan-draw.log"
+  grep -q 'PLAY-VULKAN-DRAW STAGE compute-pipeline' "$out/vulkan-draw.log"
+  grep -q 'PLAY-VULKAN-DRAW STAGE timeline-semaphore' "$out/vulkan-draw.log"
+  grep -q 'PLAY-VULKAN-DRAW STAGE timeline-roundtrip' "$out/vulkan-draw.log"
+  if grep -q 'PLAY-VULKAN-DRAW PASS draw-readback' "$out/vulkan-draw.log"; then
+    grep -q 'PLAY-VULKAN-DRAW STAGE compute-readback' "$out/vulkan-draw.log"
+    grep -q 'PLAY-VULKAN-DRAW STAGE pixel-readback' "$out/vulkan-draw.log"
+    echo "PLAY-VULKAN-DRAW PASS draw-readback"
+  elif grep -q 'PLAY-VULKAN-DRAW BLOCKED compute-readback' "$out/vulkan-draw.log"; then
+    echo "PLAY-VULKAN-DRAW BLOCKED compute-readback on this host; not a pass"
+  elif grep -q 'PLAY-VULKAN-DRAW BLOCKED pixel-readback' "$out/vulkan-draw.log"; then
+    echo "PLAY-VULKAN-DRAW BLOCKED pixel-readback on this host; not a pass"
+  else
+    echo "PLAY-VULKAN-DRAW FAIL (see $out/vulkan-draw.log)"; exit 1
+  fi
+else
+  echo "PLAY-VULKAN-DRAW FAIL: the launcher build did not package dzn"; exit 1
 fi
 # OpenGL (issue #176): the guest's LoadLibrary("opengl32.dll") is
 # served by Mesa's WGL driver from the runtime directory, the pixel format goes
