@@ -268,7 +268,7 @@ jobs:
         timeout-minutes: 15
         uses: ./.github/actions/apt-install
         with:
-          packages: gcc-mingw-w64-i686
+          packages: gcc-mingw-w64-i686 g++-mingw-w64-i686 wine wine64
       - name: x86 execution core (hardware-compared ALU, faults, thunks, owned i686 fixture)
         run: bash src/xbox-test/app/tests/x86-core.sh
       - name: "x86 guest surface (mingw CRT program through the interpreter: printf, heap, TLS, VirtualAlloc)"
