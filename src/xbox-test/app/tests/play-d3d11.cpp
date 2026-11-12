@@ -169,6 +169,99 @@ DWORD d3d_entry() {
     context->Unmap(staging,0);
     if(!insideGreen)return 47;   // BLOCKED: the GS expansion did not reach the target
 
+    // ---- MSAA pass: 4x render target, clear, resolve, readback ----
+    // Games pick MSAA through CheckMultisampleQualityLevels and resolve with
+    // ResolveSubresource; if the layer answers the quality probe but drops the
+    // resolve, the pixels stay black exactly there. No shader: the cleared
+    // colour is the evidence. Exit 50-54 name the step; 54 is BLOCKED (never
+    // a pass): the calls ran but the resolved pixel is not the clear colour.
+    D3D11_TEXTURE2D_DESC msaaDesc{};
+    msaaDesc.Width=64;msaaDesc.Height=64;msaaDesc.MipLevels=1;msaaDesc.ArraySize=1;
+    msaaDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;msaaDesc.SampleDesc.Count=4;
+    msaaDesc.Usage=D3D11_USAGE_DEFAULT;msaaDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
+    ID3D11Texture2D* msaaTarget=nullptr;
+    UINT msaaQuality=0;
+    if(FAILED(device->CheckMultisampleQualityLevels(DXGI_FORMAT_R8G8B8A8_UNORM,4,&msaaQuality))||!msaaQuality)return 50;
+    if(FAILED(device->CreateTexture2D(&msaaDesc,nullptr,&msaaTarget))||!msaaTarget)return 51;
+    ID3D11RenderTargetView* msaaView=nullptr;
+    if(FAILED(device->CreateRenderTargetView(msaaTarget,nullptr,&msaaView))||!msaaView)return 52;
+    ID3D11RenderTargetView* msaaBinds[]={msaaView};
+    context->OMSetRenderTargets(1,msaaBinds,nullptr);
+    context->ClearRenderTargetView(msaaView,clear);
+    context->ResolveSubresource(staging,0,msaaTarget,0,DXGI_FORMAT_R8G8B8A8_UNORM);
+    D3D11_MAPPED_SUBRESOURCE mMapped{};
+    if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&mMapped))||!mMapped.pData)return 53;
+    // ResolveSubresource copies the whole resource, so the staging texture now
+    // holds the MSAA target's cleared red everywhere.
+    const unsigned char* mPixel=static_cast<const unsigned char*>(mMapped.pData)+16*mMapped.RowPitch+16*4;
+    const bool msaaRed=mPixel[0]>0x80&&mPixel[1]<0x40&&mPixel[2]<0x40;
+    context->Unmap(staging,0);
+    msaaView->Release();msaaTarget->Release();
+    if(!msaaRed)return 54;   // BLOCKED: the resolve did not reach the readback
+
+    // ---- GenerateMips pass: mip chain, SRV, one GenerateMips, readback ----
+    // A game's textures arrive with MipLevels>1 and the runtime fills the
+    // smaller levels on bind; a dropped GenerateMips leaves level 1 black
+    // while level 0 still samples, which reads as a shimmering surface. The
+    // top level is filled from CPU data (green), the filter must shrink it
+    // into level 1. Exits 55-58 name the step; 58 is BLOCKED (never a pass).
+    D3D11_TEXTURE2D_DESC mipDesc{};
+    mipDesc.Width=16;mipDesc.Height=16;mipDesc.MipLevels=2;mipDesc.ArraySize=1;
+    mipDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;mipDesc.SampleDesc.Count=1;
+    mipDesc.Usage=D3D11_USAGE_DEFAULT;mipDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;
+    mipDesc.MiscFlags=D3D11_RESOURCE_MISC_GENERATE_MIPS;
+    unsigned int green[16*16];
+    for(unsigned int& px:green)px=0xFF00D000u;   // ABGR little-endian: green
+    D3D11_SUBRESOURCE_DATA mipInit{};mipInit.pSysMem=green;mipInit.SysMemPitch=16*4;
+    ID3D11Texture2D* mipTexture=nullptr;
+    if(FAILED(device->CreateTexture2D(&mipDesc,&mipInit,&mipTexture))||!mipTexture)return 55;
+    ID3D11ShaderResourceView* mipSrv=nullptr;
+    if(FAILED(device->CreateShaderResourceView(mipTexture,nullptr,&mipSrv))||!mipSrv)return 56;
+    context->GenerateMips(mipSrv);
+    // Read level 1 back: a second staging texture of the same size, CopySubresourceRegion.
+    D3D11_TEXTURE2D_DESC mipStageDesc=mipDesc;
+    mipStageDesc.MipLevels=0;mipStageDesc.BindFlags=0;mipStageDesc.MiscFlags=0;
+    mipStageDesc.Usage=D3D11_USAGE_STAGING;mipStageDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* mipStaging=nullptr;
+    if(FAILED(device->CreateTexture2D(&mipStageDesc,nullptr,&mipStaging))||!mipStaging)return 57;
+    D3D11_BOX mipBox{0,0,0,8,8,1};
+    context->CopySubresourceRegion(mipStaging,0,0,0,0,mipTexture,1,&mipBox);
+    D3D11_MAPPED_SUBRESOURCE mipMapped{};
+    if(FAILED(context->Map(mipStaging,0,D3D11_MAP_READ,0,&mipMapped))||!mipMapped.pData)return 57;
+    const unsigned char* gPixel=static_cast<const unsigned char*>(mipMapped.pData)+4*mipMapped.RowPitch+4*4;
+    const bool mipGreen=gPixel[1]>0x40;   // the filter may darken; green must survive
+    context->Unmap(mipStaging,0);
+    mipSrv->Release();mipStaging->Release();mipTexture->Release();
+    if(!mipGreen)return 58;   // BLOCKED: level 1 never received the filtered colour
+
+    // ---- Deferred-context pass: record a clear+draw, ExecuteCommandList ----
+    // Unity and Unreal record whole frames on deferred contexts and hand the
+    // launcher one command list; if the layer's FinishCommandList returns an
+    // empty list or ExecuteCommandList drops it, the game renders nothing
+    // while every immediate call still succeeds. Exits 60-63 name the step;
+    // 63 is BLOCKED (never a pass): the recorded draw did not reach the target.
+    ID3D11DeviceContext* deferred=nullptr;
+    if(FAILED(device->CreateDeferredContext(0,&deferred))||!deferred)return 60;
+    ID3D11RenderTargetView* dView=nullptr;
+    if(FAILED(device->CreateRenderTargetView(target,nullptr,&dView))||!dView)return 61;
+    ID3D11RenderTargetView* dBinds[]={dView};
+    deferred->OMSetRenderTargets(1,dBinds,nullptr);
+    D3D11_VIEWPORT dViewport{0,0,64,64,0.0f,1.0f};
+    deferred->RSSetViewports(1,&dViewport);
+    deferred->ClearRenderTargetView(dView,clear);
+    ID3D11CommandList* list=nullptr;
+    if(FAILED(deferred->FinishCommandList(FALSE,&list))||!list)return 62;
+    context->ExecuteCommandList(list,FALSE);
+    context->CopyResource(staging,target);
+    D3D11_MAPPED_SUBRESOURCE dMapped{};
+    if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&dMapped))||!dMapped.pData)return 62;
+    // The deferred clear painted the whole target red; sample two corners.
+    const unsigned char* dPixel=static_cast<const unsigned char*>(dMapped.pData)+48*dMapped.RowPitch+48*4;
+    const bool deferredRed=dPixel[0]>0x80&&dPixel[1]<0x40&&dPixel[2]<0x40;
+    context->Unmap(staging,0);
+    list->Release();dView->Release();deferred->Release();
+    if(!deferredRed)return 63;   // BLOCKED: the command list did not reach the target
+
     // The draw reaches the swap chain's back buffer too, as a game's does:
     // present one frame with the triangle in it.
     ID3D11RenderTargetView* backView=nullptr;
