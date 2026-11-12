@@ -62,6 +62,11 @@ struct State {
     std::vector<Module*> order;
     Module* exe=nullptr;
     std::atomic<bool> executed{false}, finished{false};
+    // Set when a guest exception was contained (topLevelFilter/filter): the
+    // launcher's guest watchdog reads it to report GUEST_DEAD without waiting
+    // for the 10 s present-silence threshold. Never cleared: an exception
+    // that reached the filter is a terminal event for that guest.
+    std::atomic<bool> faulted{false};
     std::atomic<int> milestone{0};
     std::atomic<DWORD> thread{0};
     std::atomic<DWORD> firstChanceCode{0};
@@ -860,6 +865,7 @@ static LONG filter(EXCEPTION_POINTERS* ep) {
     auto e=ep->ExceptionRecord;
     if(e->ExceptionCode==exitException) {state->success=true;return EXCEPTION_EXECUTE_HANDLER;}
     if(e->ExceptionCode==missingException) return EXCEPTION_EXECUTE_HANDLER;
+    state->faulted.store(true,std::memory_order_release);   // guest watchdog: dead without waiting on presents
     exceptionDiagnostics(ep);
     char b[256];snprintf(b,sizeof b,"unhandled exception code=0x%08lx address=0x%llx ",e->ExceptionCode,(unsigned long long)(uintptr_t)e->ExceptionAddress);
     std::string text=b; text+=describe((uintptr_t)e->ExceptionAddress);
@@ -1380,6 +1386,7 @@ static LONG WINAPI topLevelFilter(EXCEPTION_POINTERS* ep) {
     }
     if(!guest) return hostTopLevel?hostTopLevel(ep):EXCEPTION_CONTINUE_SEARCH;
     if(auto handler=guestTopLevel) {LONG r=handler(ep);if(r==EXCEPTION_CONTINUE_EXECUTION)return r;}
+    s->faulted.store(true,std::memory_order_release);   // guest watchdog: dead without waiting on presents
     filter(ep);   // records the exception and its stack, as for Play's threads
     s->result=s->snapshot();
     if(GetCurrentThreadId()==s->thread) guestThread=false;

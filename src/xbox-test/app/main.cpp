@@ -905,6 +905,7 @@ static void dl_thread() {
 #include "launch_picker.h"
 #include "launch_report.h"
 #include "selftest.h"
+#include "host/guest_watchdog.h"
 #include "guest_overlay.h"
 #include "ui_unlocks.h"
 #include "../uwph/user32/corewindow_feed.h"
@@ -1173,6 +1174,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     inline static App* graphicsApp=nullptr;
     bool m_closed = false;
     com_ptr<ID3D11Device> m_dev; com_ptr<ID3D11DeviceContext> m_ctx; com_ptr<IDXGISwapChain1> m_sc; com_ptr<ID3D11Texture2D> m_bb;
+    // The guest's swap chain, kept at hand-off (GuestSurface): the watchdog
+    // presents the "Game not responding" screen through it when the guest dies.
+    com_ptr<IDXGISwapChain1> m_guestChain;
+    com_ptr<ID3D11Texture2D> m_guestChainBB;   // its back buffer, refreshed before each watchdog present
     Pad m_pad; int m_prevPads = -1; uint64_t m_frame = 0;
     int m_sel = 0, m_top = 0; double m_scroll = 0, m_scrollT = 0; bool m_btnFocus = true, m_confirmLogout = false;
     bool m_logoutYes = false;   // item 14: logout sheet focus, false = Cancel (never defaults to the destructive button)
@@ -1925,10 +1930,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void menu_command(const std::string& c,const char* via) {
         using namespace guest_overlay;
         // The menu only opens where it can be drawn: blocking the pad behind an
-        // invisible menu would leave the game with a dead controller.
-        if(c=="toggle"&&!menuOpen&&!guest_overlay::drawable){logf("overlay: menu unavailable (present hooks or back-buffer format unsupported) (%s)",via);return;}
+        // invisible menu would leave the game with a dead controller. The
+        // watchdog's dead state lifts this: the card is drawn by the launcher
+        // itself (draw_guest_dead), never by a guest present, so `drawable`
+        // (latched from guest presents) says nothing about the dead state.
+        const bool dead=guestDead.load(std::memory_order_acquire);
+        if(c=="toggle"&&!menuOpen&&!drawable&&!dead){logf("overlay: menu unavailable (present hooks or back-buffer format unsupported) (%s)",via);return;}
         if(c=="toggle"){if(busy)return;menuOpen=!menuOpen;guest_overlay::ui_guideTab=0;selection=0;guest_overlay::achTop=0;
-                        if(menuOpen)block_input(true);logf("overlay: menu %s (Home) (%s)",menuOpen?"opened":"closed",via);return;}
+                        if(menuOpen)block_input(true);logf("overlay: menu %s (Home)%s",menuOpen?"opened":"closed",dead?" (guest dead)":"");return;}
         // Turning the FPS counter off can strand the selection on the graph
         // row (Settings row 1), which disappears; re-clamp into range.
         auto reclamp=[this](bool on){ if(!on&&ui_guideTab.load()==2&&selection.load()>0)selection=0; };
@@ -1978,6 +1987,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void force_quit() {
         if(m_leaving)return;
         m_leaving=true;guest_overlay::set_status("Uploading saves...");
+        logf("overlay: force quit — guest threads stay contained (play_runtime), launcher keeps running");
         auto sync=g_finalSync;
         // CoreWindow is thread-affine; its CoreDispatcher is agile. Take the
         // dispatcher here, on the UI thread, for the worker to post back with.
@@ -2460,6 +2470,15 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                         result=factory->CreateSwapChainForCoreWindow(device,window,&desc,output,chain);
                         logf("guest surface handoff native hr=0x%08lx",(unsigned long)result);
                         if(SUCCEEDED(result)&&chain&&*chain) {
+                            // The watchdog keeps this chain: when the guest dies
+                            // (crash or hang) the launcher presents its "Game not
+                            // responding" screen through it — DXGI objects are not
+                            // thread-affine and the dead guest presents nothing, so
+                            // the UI thread may use the chain directly. No new
+                            // swapchain is created for the CoreWindow (the guest's
+                            // is still bound; a second would fail with
+                            // DXGI_ERROR_INVALID_CALL).
+                            app->m_guestChain.copy_from(*chain);
                             std::string saved;guest_overlay::fpsOn=read_file_s(g_dir+L"\\overlay.txt",saved)&&saved.find("fps=1")!=std::string::npos;
                             // RCA experiment: lockmode.txt present => the chain keeps its
                             // first mode (later ResizeBuffers suppressed with S_OK).
@@ -2638,6 +2657,28 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // item D22: the fullscreen launch banner. The wide art is the same
     // library_hero.jpg the game page uses (header.jpg fallback), fetched on
     // demand and cached per appid for the session.
+    // "Game not responding": the game page underneath, dimmed, with the
+    // watchdog's banner. The FPS counter reads 0 — the guest presents
+    // nothing, so the overlay's frozen value would be a lie (owner
+    // requirement: a crash must never leave a stale counter on screen).
+    void draw_guest_dead(double t) {
+        draw_detail(t);   // the game page (status, playtime) under the banner
+        ui::Canvas c(g_fb.data(), W, H, W);
+        const int bw = 900, bh = 260, bx = (W - bw) / 2, by = (H - bh) / 2;
+        c.fill_rect(float(bx), float(by), float(bw), float(bh), ui::theme::argb(230, 12, 14, 18));
+        c.stroke_round_rect({float(bx), float(by), float(bw), float(bh)}, ui::theme::radiusCard, 3, ui::theme::danger);
+        if (g_fontOk) {
+            ui_launcher::text(c, g_font, ui::Face::Semibold, 56, float(bx + 40), float(by + 40), "Game not responding", ui::theme::text);
+            ui_launcher::text(c, g_font, ui::Face::Regular, 30, float(bx + 40), float(by + 130),
+                "The game stopped or crashed. Open the guide (View+Menu) to force quit it.", ui::theme::textDim);
+            ui_launcher::text(c, g_font, ui::Face::Regular, 26, float(bx + 40), float(by + 190),
+                "FPS 0   \xC2\xB7   guide: View+Menu", ui::theme::textMuted);
+        } else {
+            text8(bx + 40, by + 60, "Game not responding - press View+Menu for the guide", 4, C3(255, 120, 120));
+            text8(bx + 40, by + 130, "FPS 0", 4, C3(255, 120, 120));
+        }
+    }
+
     void draw_launch_banner(double t) {
         ui::Canvas c(g_fb.data(), W, H, W);
         static std::map<uint32_t, ui::Image> banners;   // pixel memory the VM points into
@@ -2955,6 +2996,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // ends). It sits above every screen, since Play can start from the
         // library or the game page.
         if (ui_nav::launch_banner_up(g_launch.phase.load(), m_guestSurface)) { draw_launch_banner(t); return; }
+        // Guest watchdog: the game stopped presenting (crash or hang). The
+        // game's last frame stays on the guest's chain but the launcher draws
+        // over it here: the game page dimmed, with a "Game not responding"
+        // banner. The FPS counter the overlay froze at is replaced by 0 —
+        // the truth for a guest that presents nothing.
+        if (guest_overlay::guestDead.load(std::memory_order_acquire)) { draw_guest_dead(t); return; }
         if (s == S_LOGIN) draw_login();
         else if (s == S_BOOT || s == S_LOADING) draw_startup(t);   // item D15: the launch/loading screens
         else if (s == S_LIBRARY) draw_library(t);
@@ -3317,6 +3364,32 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
     }
 
+    // ---- Guest watchdog: a guest that stops presenting (crash, hang) must
+    // not freeze the launcher. Runs every UI-loop iteration; the verdict is
+    // pure logic (host/guest_watchdog.h, test-driven with synthetic clocks).
+    // Once dead, m_guestSurface goes false and the loop presents the
+    // launcher's "Game not responding" screen through the guest's own chain
+    // (kept at hand-off), with the guide (force quit) reachable. A guest that
+    // later presents again (it hung, not died) clears the dead state on the
+    // next watchdog tick that sees a fresh heartbeat.
+    void guest_watchdog_tick(double t) {
+        if(!m_guestSurface)return;
+        auto guest=play_runtime::observed.load(std::memory_order_acquire);
+        if(!guest)return;
+        LARGE_INTEGER qpc;QueryPerformanceCounter(&qpc);
+        guest_watchdog::Inputs in;
+        in.lastActivityTick=guest_overlay::lastPresentTick.load(std::memory_order_acquire);
+        in.nowTick=uint64_t(qpc.QuadPart);
+        in.ticksPerSecond=uint64_t(g_freq.QuadPart);
+        in.guestFault=guest->faulted.load(std::memory_order_acquire);
+        in.guestFinished=guest->finished.load(std::memory_order_acquire);
+        const auto v=guest_watchdog::evaluate(in);
+        if(!v.dead){m_guestDeadLogged=false;return;}
+        if(!m_guestDeadLogged){logf("watchdog: guest %s — launcher UI resumes (fps counter -> 0, guide available)",v.reason==guest_watchdog::Reason::fault?"raised a contained exception":"stopped presenting");m_guestDeadLogged=true;}
+        guest_overlay::guestDead=true;
+        m_guestSurface=false;   // the loop draws the launcher again below; the guide works from here
+    }
+    bool m_guestDeadLogged=false;
     void Run() {
         logf("Run: entering"); m_window.Activate();
         load_fonts();   // Selawik faces from the package's fonts/ folder; on failure the bitmap fallback stays
@@ -3341,7 +3414,33 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             input(t, rd, n > 0);
             autotest(t); cmdhook(t); detail_tick(t); move_tick(t);   // item 33: the move job's completion tick
             if (selftest::tick()) selftest::run_async(m_window.Dispatcher());
+            guest_watchdog_tick(t);
             if(m_guestSurface){guest_menu(t,n?rd.Buttons:GamepadButtons::None);Sleep(1);continue;}
+            // The guest died (watchdog) with its chain still bound to the
+            // CoreWindow: draw the launcher's "Game not responding" screen
+            // into g_fb and present it through the guest's own chain (kept at
+            // hand-off). The launcher's own chain stays released — a second
+            // swapchain on the same CoreWindow would be refused — and the
+            // guide's force quit works from here (menu_command below).
+            if(m_guestChain) {
+                guest_menu(t,n?rd.Buttons:GamepadButtons::None);   // guide input: open, navigate, force quit
+                draw(t);
+                // The back buffer may have changed size under the guest
+                // (resizes); re-fetch it each frame instead of caching a
+                // stale one. GUEST_DEAD is reported with the FPS counter at
+                // 0 (guest_overlay::fps is not trusted once dead).
+                m_guestChainBB=nullptr;
+                if(FAILED(m_guestChain->GetBuffer(0,__uuidof(ID3D11Texture2D),m_guestChainBB.put_void())))m_guestChainBB=nullptr;
+                if(m_guestChainBB) {
+                    m_ctx->UpdateSubresource(m_guestChainBB.get(), 0, nullptr, g_fb.data(), W * 4, 0);
+                    HRESULT hr = m_guestChain->Present(1, 0);
+                    if (FAILED(hr)) { logf("watchdog present hr=0x%08lx", (unsigned long)hr); Sleep(100); }
+                }
+                m_frame++;
+                if (m_frame == 1 || t - lastBeat >= 10.0) { logf("frame=%llu fps~%.1f screen=%d (guest dead, watchdog present)", (unsigned long long)m_frame, m_frame / (t > 0 ? t : 1), (int)g_screen); lastBeat = t; }
+                Sleep(1);
+                continue;
+            }
             draw(t);
             m_ctx->UpdateSubresource(m_bb.get(), 0, nullptr, g_fb.data(), W * 4, 0);
             HRESULT hr = m_sc->Present(1, 0);

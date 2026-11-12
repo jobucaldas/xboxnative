@@ -143,9 +143,21 @@ inline std::array<float,240> history{};     // newest at historyPos-1
 inline unsigned historyPos=0;
 inline LARGE_INTEGER lastPresent{},firstPresent{};
 inline double ms(LARGE_INTEGER a,LARGE_INTEGER b){return double(b.QuadPart-a.QuadPart)*1000.0/double(freq.QuadPart);}
+// ---- Guest watchdog heartbeat: the launcher UI thread reads these to decide
+// the guest is dead. `lastPresentTick` is stamped by record() on every hooked
+// guest present (the same signal the FPS counter and frame log use), so a
+// guest that hangs in the driver (device-removed present blocked) or dies
+// (crash contained by play_runtime) stops stamping and the silence is seen.
+// Pure atomics: no lock is taken on this path, the record() path stays
+// lock-free apart from its framesM section, and the UI thread never blocks on
+// a guest that cannot run.
+inline std::atomic<uint64_t> lastPresentTick{0};   // QPC of the last guest present
+inline std::atomic<bool> guestDead{false};         // UI loop set: overlay shows "not responding"
+inline void note_present(uint64_t tick){lastPresentTick.store(tick,std::memory_order_release);}
 inline void record(LARGE_INTEGER start,LARGE_INTEGER end) {
     if(!lastPresent.QuadPart){lastPresent=firstPresent=start;return;}
     Frame f{ms(firstPresent,start),ms(lastPresent,start),ms(start,end)};lastPresent=start;
+    note_present(uint64_t(start.QuadPart));   // watchdog heartbeat: the guest presented
     std::lock_guard<std::mutex> l(framesM);
     if(pending.size()<100000)pending.push_back(f);
     history[historyPos++%history.size()]=float(f.frameMs);
