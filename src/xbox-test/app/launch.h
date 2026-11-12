@@ -251,6 +251,36 @@ static steam_cloud::Roots cloud_roots(uint32_t appid,const std::wstring& gameRoo
     auto add=[&](const char* name,const GUID& id){PWSTR path=nullptr;if(known&&SUCCEEDED(known(id,0,nullptr,&path))&&path)roots[name]=path;if(path)CoTaskMemFree(path);};
     add("WinAppDataLocalLow",localLow);add("WinAppDataLocal",local);add("WinAppDataRoaming",roaming);
     add("WinMyDocuments",documents);add("WinSavedGames",savedGames);
+    // A packaged app resolves Local/LocalLow to its AppContainer folder (AC),
+    // but the Roaming known folder can fail outright here — and a missing root
+    // makes every %WinAppDataRoaming% cloud file "not under a configured root",
+    // so Stardew Valley's saves were skipped instead of downloaded. Try the
+    // packaged-app locations in the order Windows itself would, and log which
+    // one answered so the next console run says where the saves land.
+    if(!roots.count("WinAppDataRoaming")) {
+        auto try_roaming=[&](const char* what,std::wstring p){
+            if(roots.count("WinAppDataRoaming")||p.empty()) return;
+            roots["WinAppDataRoaming"]=p;
+            lp_sink((std::string("STEAM cloud: WinAppDataRoaming from ")+what+" = "+steam_cloud::path_text(p)).c_str());
+        };
+        // The game itself writes wherever %APPDATA% points, so that is the
+        // first thing to believe: if the guest has one, it is the right root.
+        wchar_t appdata[MAX_PATH]{}; DWORD n=GetEnvironmentVariableW(L"APPDATA",appdata,MAX_PATH);
+        if(n&&n<MAX_PATH) try_roaming("the APPDATA environment variable",std::wstring(appdata));
+        try { try_roaming("RoamingFolder",winrt::Windows::Storage::ApplicationData::Current().RoamingFolder().Path().c_str()); } catch(...) {}
+        try { try_roaming("LocalCache\\Roaming",(winrt::Windows::Storage::ApplicationData::Current().LocalCacheFolder().Path()+L"\\Roaming").c_str()); } catch(...) {}
+        try { try_roaming("LocalFolder\\..\\RoamingState",(winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path()+L"\\..\\RoamingState").c_str()); } catch(...) {}
+        if(!roots.count("WinAppDataRoaming")) lp_sink("STEAM cloud: no WinAppDataRoaming root; %WinAppDataRoaming% files will be skipped");
+    }
+    // Evidence for the next console run: what the guest sees for the two
+    // environment variables a game falls back to when the known-folder call
+    // fails. Paths only, no account names.
+    for(const wchar_t* v:{L"APPDATA",L"USERPROFILE"}) {
+        wchar_t buf[MAX_PATH]{}; DWORD n=GetEnvironmentVariableW(v,buf,MAX_PATH);
+        const std::wstring var(v);
+        lp_sink((std::string("STEAM cloud: env ")+std::string(var.begin(),var.end())+" = "+
+                 (n&&n<MAX_PATH?steam_cloud::path_text(buf):std::string("(unset)"))).c_str());
+    }
     roots["GameInstall"]=gameRoot;
     roots[steam_cloud::kRemoteRoot]=provider_remote_dir(appid);
     return roots;
