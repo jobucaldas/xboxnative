@@ -257,6 +257,55 @@ int main() {
         EXPECT(refused, "create after teardown is refused");
     }
 
+    // ---- churn: 100000 create/destroy cycles over two interfaces ----
+    // Freed proxy blocks are recycled, so the block window stays at a small
+    // bound and a live proxy is never corrupted by a later create.
+    {
+        struct Counting {
+            unsigned refs = 0, releases = 0;
+            void addref() { ++refs; }
+            void release() { ++releases; if (refs) --refs; }
+        } hostA, hostB;
+        Memory mem2; ThunkTable thunks2; ComSpace com2; Cpu cpu2{mem2, thunks2};
+        thunks2.base = 0x7FF90000;
+        map_thunk_page(mem2, thunks2);
+        com2.interface_("IMock", 8);
+        com2.interface_("IChurn", 5);
+        com2.method("IChurn", 3, 2, [](Proxy&, Cpu& c) -> uint32_t { return c.arg(1); });
+        uint32_t liveA = com2.create(cpu2, "IChurn", &hostA, [&] { hostA.addref(); }, [&] { hostA.release(); });
+        uint32_t liveB = com2.create(cpu2, "IMock", &hostB, [&] { hostB.addref(); }, [&] { hostB.release(); });
+        unsigned live_before = com2.live();
+        for (unsigned i = 0; i < 100000; ++i) {
+            Counting tmp;
+            uint32_t pa = com2.create(cpu2, "IChurn", &tmp, [&] { tmp.addref(); }, [&] { tmp.release(); });
+            uint32_t pb = com2.create(cpu2, "IMock", &tmp, [&] { tmp.addref(); }, [&] { tmp.release(); });
+            com2.guest_release(com2.by_guest(pa));
+            com2.guest_release(com2.by_guest(pb));
+        }
+        // The two live proxies are intact and the map holds exactly them.
+        EXPECT(com2.by_guest(liveA).host == &hostA && com2.by_guest(liveB).host == &hostB,
+               "churn never corrupts a live proxy");
+        EXPECT(com2.live() == live_before, "live count stable across churn");
+        EXPECT(com2.by_guest(liveA).guest_refs == 1 && com2.by_guest(liveB).guest_refs == 1,
+               "live proxy refcounts survived the churn");
+        // Exhausting the window with live proxies faults by name, no overwrite.
+        // (Hosts stay alive and distinct: a freed object's address would be
+        // reused by the allocator and hit the dedupe path instead.)
+        bool exhausted = false;
+        try {
+            std::vector<Counting> hosts;
+            hosts.reserve(300000);
+            for (unsigned i = 0; i < 300000; ++i) {
+                hosts.emplace_back();
+                com2.create(cpu2, "IChurn", &hosts.back(), [&] { hosts.back().addref(); }, [&] { hosts.back().release(); });
+            }
+        } catch (const Fault& f) { exhausted = std::string(f.what()).find("proxy block window exhausted") != std::string::npos; }
+        EXPECT(exhausted, "exhausting the block window with live proxies faults by name");
+        // The live proxies survived the exhaustion attempt untouched.
+        EXPECT(com2.by_guest(liveA).host == &hostA && com2.by_guest(liveB).host == &hostB,
+               "live proxies intact after exhaustion fault");
+    }
+
     printf(failures ? "X86-COM FAIL: %d failure(s) after teardown checks\n" : "X86-COM PASS: vtable stubs, stdcall pops, struct translator, guest callback, refcounts, fault-by-name, stale-proxy fault, teardown releases host refs once\n", failures);
     return failures ? 1 : 0;
 }

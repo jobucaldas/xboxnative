@@ -33,6 +33,7 @@
 // later call through the stale pointer is a named Fault, not a host crash.
 #pragma once
 #include <map>
+#include <unordered_map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -60,10 +61,10 @@ struct ComSpace {
     // count (this included) and marshaller. Slots left without a marshaller
     // fault by name when called.
     struct Slot { unsigned argc; Marshaller fn; };
-    struct Iface { unsigned slots; std::map<unsigned, Slot> methods; };
+    struct Iface { unsigned slots = 0; uint32_t vtable = 0; std::map<unsigned, Slot> methods; };
     std::map<std::string, Iface> ifaces;
 
-    void interface_(const char* iface, unsigned slots) { ifaces[iface] = Iface{slots, {}}; }
+    void interface_(const char* iface, unsigned slots) { ifaces[iface] = Iface{slots, 0, {}}; }
     void method(const char* iface, unsigned slot, unsigned argc, Marshaller fn) { ifaces[iface].methods[slot] = Slot{argc, std::move(fn)}; }
 
     // Map the guest regions the proxies and vtables live in. Called once, before
@@ -82,32 +83,51 @@ struct ComSpace {
     uint32_t create(Cpu& cpu, const char* iface, void* host, const std::function<void()>& addref, const std::function<void()>& host_release) {
         if (torn_down) throw std::runtime_error("COM: create after the space was torn down");
         map_regions(cpu);
-        for (auto& [guest, p] : proxies)
-            if (p.host == host && std::string_view(p.iface) == iface) { ++p.guest_refs; return p.guest; }
+        // Dedupe by (host, iface) via a hash index: the linear map scan made
+        // create O(live proxies), quadratic under churn.
+        auto dk = host_dedupe.find({host, iface});
+        if (dk != host_dedupe.end()) { ++proxies.find(dk->second)->second.guest_refs; return dk->second; }
         auto it = ifaces.find(iface);
         if (it == ifaces.end()) throw std::runtime_error(std::string("COM: unregistered interface ") + iface);
-        Proxy p;
-        p.iface = iface; p.host = host; p.slots = it->second.slots; p.space = this; p.host_release = host_release;
-        if (vtable_top + p.slots * 4 > VTABLE_BASE + VTABLE_REGION || block_top + 4 > BLOCK_BASE + BLOCK_REGION) {
-            char b[128]; snprintf(b, sizeof b, "COM: proxy region exhausted at vtable 0x%08x block 0x%08x", vtable_top, block_top);
+        // The vtable is shared per interface and immutable once built: every
+        // proxy of the interface points at the same stub array. It is built at
+        // first create, when the ThunkTable is reachable, and bounds-checked
+        // in the vtable window.
+        if (it->second.vtable == 0) {
+            if (vtable_top + it->second.slots * 4 > VTABLE_BASE + VTABLE_REGION) {
+                char b[128]; snprintf(b, sizeof b, "COM: vtable window exhausted registering %s (%u slots)", iface, it->second.slots);
+                throw Fault(FaultKind::AccessViolation, 0, 0, b);
+            }
+            it->second.vtable = vtable_top;
+            vtable_top += it->second.slots * 4;
+            for (unsigned s = 0; s < it->second.slots; ++s) {
+                unsigned argc = 0; Marshaller fn;
+                auto m = it->second.methods.find(s);
+                if (m != it->second.methods.end()) { argc = m->second.argc; fn = m->second.fn; }
+                else if (s == 0) { argc = 3; }
+                else if (s == 1) { argc = 1; fn = default_addref; }
+                else if (s == 2) { argc = 1; fn = default_release; }
+                cpu.mem.w32(it->second.vtable + s * 4, cpu.thunks.add(Thunk{"com", slot_label(iface, s), Conv::Stdcall, argc,
+                    [this, iface, s](Cpu& c) -> uint32_t { return dispatch(iface, s, c); }}));
+            }
+        }
+        // Proxy blocks are 4 bytes (one vtable pointer); freed blocks are
+        // recycled through a free list, so create/destroy churn never grows
+        // the block window. Exhaustion with all blocks live is a named fault.
+        if (block_free.empty() && block_top + 4 > BLOCK_BASE + BLOCK_REGION) {
+            char b[128]; snprintf(b, sizeof b, "COM: proxy block window exhausted at 0x%08x", block_top);
             throw Fault(FaultKind::AccessViolation, 0, 0, b);
         }
-        p.vtable = vtable_top; vtable_top += p.slots * 4;
-        p.guest = block_top; block_top += 4;
+        Proxy p;
+        p.iface = iface; p.host = host; p.slots = it->second.slots; p.space = this; p.host_release = host_release;
+        p.vtable = it->second.vtable;   // shared, immutable per interface
+        if (!block_free.empty()) { p.guest = block_free.back(); block_free.pop_back(); }
+        else { p.guest = block_top; block_top += 4; }
         cpu.mem.w32(p.guest, p.vtable);
-        for (unsigned s = 0; s < p.slots; ++s) {
-            unsigned argc = 0; Marshaller fn;
-            auto m = it->second.methods.find(s);
-            if (m != it->second.methods.end()) { argc = m->second.argc; fn = m->second.fn; }
-            else if (s == 0) { argc = 3; }
-            else if (s == 1) { argc = 1; fn = default_addref; }
-            else if (s == 2) { argc = 1; fn = default_release; }
-            cpu.mem.w32(p.vtable + s * 4, cpu.thunks.add(Thunk{"com", slot_label(iface, s), Conv::Stdcall, argc,
-                [this, iface, s](Cpu& c) -> uint32_t { return dispatch(iface, s, c); }}));
-        }
         if (addref) addref();
-        proxies.emplace(p.guest, std::move(p));
-        return p.guest;
+        Proxy& stored = proxies.emplace(p.guest, std::move(p)).first->second;
+        host_dedupe[{stored.host, stored.iface}] = stored.guest;
+        return stored.guest;
     }
 
     Proxy& by_guest(uint32_t guest) {
@@ -129,7 +149,10 @@ struct ComSpace {
         unsigned left = --p.guest_refs;
         if (left == 0) {
             auto fn = p.host_release;
-            proxies.erase(p.guest);
+            uint32_t guest = p.guest;
+            host_dedupe.erase({p.host, p.iface});
+            proxies.erase(guest);
+            block_free.push_back(guest);   // recycle the 4-byte block
             if (fn) fn();
         }
         return left;
@@ -155,8 +178,12 @@ struct ComSpace {
     static constexpr uint32_t BLOCK_BASE = 0x7F100000, BLOCK_REGION = 0x00100000;
 
 private:
+    struct DedupeKey { void* host; const char* iface; bool operator==(const DedupeKey& o) const { return host == o.host && (iface == o.iface || std::string_view(iface) == o.iface); } };
+    struct DedupeHash { size_t operator()(const DedupeKey& k) const { return std::hash<void*>()(k.host) ^ (std::hash<std::string_view>()(k.iface) << 1); } };
+    std::unordered_map<DedupeKey, uint32_t, DedupeHash> host_dedupe;  // (host, iface) -> guest block
     std::map<uint32_t, Proxy> proxies;      // keyed by guest block: stable under insert
     uint32_t vtable_top = VTABLE_BASE, block_top = BLOCK_BASE;
+    std::vector<uint32_t> block_free;       // recycled proxy blocks (4 bytes each)
     bool mapped = false;
     bool torn_down = false;
 
