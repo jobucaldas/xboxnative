@@ -49,6 +49,11 @@
 #else
 #include <winrt/windows.system.userprofile.h>
 #endif
+#include <winrt/Windows.ApplicationModel.h>
+// The console's own Xbox Live identity (XblIdpAuthManager): the only in-box
+// place that names the signed-in player's GAMERTAG. Windows.System.User has no
+// gamertag property — its DisplayName is the Microsoft account name.
+#include <XblIdpAuthManager.h>
 #include <chrono>
 #include "qrcodegen.hpp"
 extern "C" {
@@ -166,6 +171,7 @@ static std::string unb64url(const std::string& s) {
 
 #include "steam_wire.h"
 #include "steam_presence.h"   // ClientPersonaState / persona_request_body for the sidebar's profile row
+#include "xbox_gamertag.h"    // the console's Xbox gamertag: XSTS claims, profile response, validation
 
 // ---------------------------------------------------------------- Steam auth (matches steam-session AuthenticationClient, platform SteamClient)
 static const std::string API = "https://api.steampowered.com/";
@@ -398,9 +404,100 @@ static void xbox_picture_fetch(winrt::Windows::System::User user) {
     g_xboxPicState = 2;
     logf("accounts: Xbox picture ready (%dx%d)", w, h);
 }
+// Item D32: the console's Xbox GAMERTAG. Windows.System.User exposes no
+// gamertag — DisplayName is the Microsoft account name, which is what the
+// library was showing. The gamertag lives in Xbox Live identity, and the in-box
+// way to it is XblIdpAuthManager (um/XblIdpAuthManager.h): the manager already
+// knows the console's gamer account, mints an XSTS token for it, and
+// IXblIdpAuthTokenResult::GetGamertag names the player. The token's `gtg` claim
+// carries the same name, so it is the fallback when the accessor answers
+// nothing. Never logs the name, the token or the user hash.
+static std::string xbox_gamertag_fetch() {
+    // The app id the manager wants is the calling package's identity; the
+    // family name is the one a packaged app can always read. Some builds insist
+    // the caller be trusted for an explicit app id, so an empty one is retried.
+    std::wstring family;
+    try { family = winrt::Windows::ApplicationModel::Package::Current().Id().FamilyName().c_str(); }
+    catch (winrt::hresult_error const& e) { logf("accounts: package family name failed hr=0x%08x", (unsigned)e.code().value); }
+    catch (...) {}
+    winrt::com_ptr<IXblIdpAuthManager> mgr;
+    HRESULT hr = CoCreateInstance(__uuidof(XblIdpAuthManager), nullptr, CLSCTX_INPROC_SERVER,
+                                  __uuidof(IXblIdpAuthManager), mgr.put_void());
+    if (FAILED(hr) || !mgr) { logf("accounts: XblIdpAuthManager unavailable hr=0x%08x", (unsigned)hr); return {}; }
+    LPWSTR account = nullptr, xuid = nullptr;
+    hr = mgr->GetGamerAccount(&account, &xuid);
+    if (FAILED(hr) || !account) {
+        if (xuid) CoTaskMemFree(xuid);
+        logf("accounts: no Xbox gamer account on this console hr=0x%08x", (unsigned)hr);
+        return {};
+    }
+    CoTaskMemFree(xuid);
+    if (!family.empty()) {
+        // Declares this app as a view of the account, which is what lets the
+        // manager answer for an app that has not signed in through Xbox IDP.
+        HRESULT v = mgr->SetAppViewInitialized(family.c_str(), account);
+        if (FAILED(v)) logf("accounts: SetAppViewInitialized hr=0x%08x", (unsigned)v);
+    }
+    // The URI decides the token's target and signing policy; this is the one
+    // the profile call uses, so the token is good for it.
+    const wchar_t* uri = L"https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag";
+    winrt::com_ptr<IXblIdpAuthTokenResult> result;
+    // The package's own id first; an empty id (the caller's default) only when
+    // the family name was unreadable, so a healthy run makes one request.
+    const wchar_t* appIds[] = {family.c_str(), L""};
+    const int appIdCount = family.empty() ? 1 : 2;
+    for (int i = 0; i < appIdCount; ++i) {
+        const wchar_t* appId = appIds[i];
+        if (result) break;
+        hr = mgr->GetTokenAndSignatureWithTokenResult(account, appId, L"user.auth.xboxlive.com", L"MBI_SSL",
+                                                      L"GET", uri, nullptr, nullptr, 0, FALSE, result.put());
+        if (FAILED(hr)) { logf("accounts: XSTS token request hr=0x%08x (app id %s)", (unsigned)hr, *appId ? "package" : "empty"); continue; }
+        if (!result) { logf("accounts: XSTS token request returned no result"); continue; }
+        XBL_IDP_AUTH_TOKEN_STATUS status = XBL_IDP_AUTH_TOKEN_STATUS_UNKNOWN;
+        result->GetStatus(&status);
+        if (status != XBL_IDP_AUTH_TOKEN_STATUS_SUCCESS && status != XBL_IDP_AUTH_TOKEN_STATUS_OFFLINE_SUCCESS) {
+            logf("accounts: XSTS token status %d (app id %s)", (int)status, *appId ? "package" : "empty");
+            result = nullptr;
+        }
+    }
+    CoTaskMemFree(account);
+    if (!result) return {};
+    LPWSTR raw = nullptr;
+    std::string tag;
+    if (SUCCEEDED(result->GetGamertag(&raw)) && raw) {
+        tag = xbox_gamertag::clean_gamertag(winrt::to_string(winrt::hstring(raw)));
+        CoTaskMemFree(raw);
+        if (!tag.empty()) { logf("accounts: gamertag from IXblIdpAuthTokenResult"); return tag; }
+    }
+    // The modern gamertag (with a suffix when the name is not unique) is what
+    // the console's own profile page shows on newer accounts.
+    winrt::com_ptr<IXblIdpAuthTokenResult2> result2;
+    if (SUCCEEDED(result->QueryInterface(__uuidof(IXblIdpAuthTokenResult2), result2.put_void())) && result2) {
+        raw = nullptr;
+        if (SUCCEEDED(result2->GetModernGamertag(&raw)) && raw) {
+            tag = xbox_gamertag::clean_gamertag(winrt::to_string(winrt::hstring(raw)));
+            CoTaskMemFree(raw);
+            if (!tag.empty()) { logf("accounts: gamertag from IXblIdpAuthTokenResult2"); return tag; }
+        }
+    }
+    raw = nullptr;
+    if (SUCCEEDED(result->GetToken(&raw)) && raw) {
+        tag = xbox_gamertag::clean_gamertag(xbox_gamertag::jwt_string_claim(winrt::to_string(winrt::hstring(raw)), "gtg"));
+        CoTaskMemFree(raw);
+        if (!tag.empty()) { logf("accounts: gamertag from the XSTS gtg claim"); return tag; }
+    }
+    logf("accounts: the XSTS token carried no gamertag");
+    return {};
+}
 static void xbox_users_fetch() {
     init_apartment(apartment_type::multi_threaded);
     std::vector<std::string> names;
+    // Item D32: the Xbox GAMERTAG, which no Windows.System.User property
+    // carries. XblIdpAuthManager mints an XSTS token for the console's own
+    // gamer account and IXblIdpAuthTokenResult names the player; the token's
+    // `gtg` claim is the fallback. Filled below, after the user loop, so the
+    // first name is replaced rather than duplicated.
+    std::string gamertag;
     try {
         // GetDefault is the documented way to get the user running this process
         // ("available from Windows 10, version 2104"); the UserType overloads
@@ -443,6 +540,13 @@ static void xbox_users_fetch() {
             }
         }
     } catch (...) { logf("accounts: Windows.System.User unavailable on this console"); }
+    // The gamertag replaces the Microsoft account name the user loop found:
+    // both name the same signed-in player, and the console's own profile page
+    // shows the gamertag. Only when the identity call has nothing does the
+    // Microsoft name stay, and the source tag still says "Xbox".
+    gamertag = xbox_gamertag_fetch();
+    if (!gamertag.empty() && !names.empty()) names.front() = gamertag;
+    else if (!gamertag.empty()) names.push_back(gamertag);
     { std::lock_guard<std::mutex> l(g_xboxM); g_xboxNames = names; }
     g_xboxState = names.empty() ? 3 : 2;
     logf("accounts: %zu Xbox user(s) found (names not logged)", names.size());
