@@ -47,11 +47,10 @@ static bool makeTarget(ID3D10Device* device,ID3D10Texture2D** target,
     if(FAILED(device->CreateRenderTargetView(*target,nullptr,view))||!*view)return false;
     return true;
 }
-// Copy the target into the staging copy and answer the pixel at (x,y).
-static bool readPixel(ID3D10Device* device,ID3D10Texture2D* target,
-                      ID3D10Texture2D* staging,unsigned x,unsigned y,
-                      unsigned char out[4]) {
-    device->CopyResource(staging,target);
+// Map a staging texture that already holds the data and answer the pixel at
+// (x,y). The caller does the copy, so any staging texture works (the render
+// target's 64x64 one, a cubemap mip's 8x8 one, a resolve's copy).
+static bool readStaged(ID3D10Texture2D* staging,unsigned x,unsigned y,unsigned char out[4]) {
     D3D10_MAPPED_TEXTURE2D mapped{};
     if(FAILED(staging->Map(0,D3D10_MAP_READ,0,&mapped))||!mapped.pData)return false;
     const unsigned char* pixel=static_cast<const unsigned char*>(mapped.pData)
@@ -60,9 +59,12 @@ static bool readPixel(ID3D10Device* device,ID3D10Texture2D* target,
     staging->Unmap(0);
     return true;
 }
-static bool isColour(const unsigned char* pixel,unsigned char r,unsigned char g,unsigned char b) {
-    return pixel[0]>=r&&pixel[0]>r-0x40&&pixel[1]>=g&&pixel[1]>g-0x40
-        &&pixel[2]>=b&&pixel[2]>b-0x40;
+// Copy the target into the staging copy and answer the pixel at (x,y).
+static bool readPixel(ID3D10Device* device,ID3D10Texture2D* target,
+                      ID3D10Texture2D* staging,unsigned x,unsigned y,
+                      unsigned char out[4]) {
+    device->CopyResource(staging,target);
+    return readStaged(staging,x,y,out);
 }
 // The triangle pass's shared state: pipeline, vertex buffer, viewport.
 static const float vertices[][6]={
@@ -177,27 +179,56 @@ DWORD d3d10tri_entry() {
     if(FAILED(device->CreateGeometryShaderWithStreamOutput(d3d10_gs,sizeof d3d10_gs,
         soDecl,2,32,&soShader))||!soShader)return 25;
     D3D10_BUFFER_DESC soBuffer{};
-    soBuffer.ByteWidth=64;soBuffer.Usage=D3D10_USAGE_DEFAULT;
-    soBuffer.BindFlags=D3D10_BIND_STREAM_OUTPUT;soBuffer.CPUAccessFlags=D3D10_CPU_ACCESS_READ;
+    soBuffer.ByteWidth=3*32;soBuffer.Usage=D3D10_USAGE_DEFAULT;
+    soBuffer.BindFlags=D3D10_BIND_STREAM_OUTPUT;
     ID3D10Buffer* soTarget=nullptr;
     if(FAILED(device->CreateBuffer(&soBuffer,nullptr,&soTarget))||!soTarget)return 26;
+    // A STREAM_OUTPUT buffer cannot be mapped: the readback goes through a
+    // staging copy, as a game's GPU-vertex capture does.
+    D3D10_BUFFER_DESC soStageDesc{};
+    soStageDesc.ByteWidth=3*32;soStageDesc.Usage=D3D10_USAGE_STAGING;
+    soStageDesc.CPUAccessFlags=D3D10_CPU_ACCESS_READ;
+    ID3D10Buffer* soStaging=nullptr;
+    if(FAILED(device->CreateBuffer(&soStageDesc,nullptr,&soStaging))||!soStaging)return 35;
     const UINT soOffset=0;
+    // The primitive count comes from an SO_STATISTICS query issued around the
+    // draw, as a game's vertex-capture path reads it.
+    D3D10_QUERY_DESC soStatsDesc{D3D10_QUERY_SO_STATISTICS,D3D10_QUERY_MISC_FLAG(0)};
+    ID3D10Query* soStats=nullptr;
+    if(FAILED(device->CreateQuery(&soStatsDesc,&soStats))||!soStats)return 36;
     device->SOSetTargets(1,&soTarget,&soOffset);
     device->IASetVertexBuffers(0,1,&pointBuffer,&stride,&offset);
     device->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_POINTLIST);
     device->GSSetShader(soShader);
+    soStats->Begin();
     device->Draw(1,0);
+    soStats->End();
     device->GSSetShader(nullptr);
     device->SOSetTargets(0,nullptr,&soOffset);
     device->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    D3D10_QUERY_DATA_SO_STATISTICS stats{};
+    // Not a FLAG_NONE query: a blocking read is legal and must answer.
+    if(FAILED(soStats->GetData(&stats,sizeof stats,0)))return 37;
+    soStats->Release();
+    // The GS expands one point to one triangle: one primitive written, one
+    // needed. Zero written means the SO path silently dropped the draw.
+    if(stats.NumPrimitivesWritten!=1||stats.PrimitivesStorageNeeded!=1)return 43;   // BLOCKED
+    device->CopyResource(soStaging,soTarget);
     void* mappedSo=nullptr;
-    if(FAILED(soTarget->Map(D3D10_MAP_READ,0,&mappedSo))||!mappedSo)return 27;
-    // The GS wrote one vertex: POSITION (0,0,0,1) then COLOR (0,1,0,1).
+    if(FAILED(soStaging->Map(D3D10_MAP_READ,0,&mappedSo))||!mappedSo)return 27;
+    // The GS wrote the three expanded vertices, each POSITION then COLOR: top
+    // (0,+0.4), bottom-right (+0.4,-0.4), bottom-left (-0.4,-0.4), all green.
+    static const float expected[3][8]={
+        {0.0f, 0.4f,0.0f,1.0f, 0.0f,1.0f,0.0f,1.0f},
+        {0.4f,-0.4f,0.0f,1.0f, 0.0f,1.0f,0.0f,1.0f},
+        {-0.4f,-0.4f,0.0f,1.0f, 0.0f,1.0f,0.0f,1.0f}};
     const float* written=static_cast<const float*>(mappedSo);
-    const bool soVertex=written[0]==0.0f&&written[1]==0.0f&&written[3]==1.0f
-        &&written[6]==0.0f&&written[7]==1.0f;
-    soTarget->Unmap();
-    if(!soVertex)return 43;   // BLOCKED: the stream-out wrote nothing usable
+    bool soVertices=true;
+    for(unsigned v=0;v<3;++v)
+        for(unsigned c=0;c<8;++c)
+            if(written[v*8+c]!=expected[v][c])soVertices=false;
+    soStaging->Unmap();
+    if(!soVertices)return 43;   // BLOCKED: the stream-out wrote the wrong vertices
 
     // ---- pass 5: a cubemap, GenerateMips, and the generated mip read back ----
     D3D10_TEXTURE2D_DESC cubeDesc{};
@@ -208,17 +239,18 @@ DWORD d3d10tri_entry() {
     cubeDesc.MiscFlags=D3D10_RESOURCE_MISC_TEXTURECUBE;
     ID3D10Texture2D* cube=nullptr;
     if(FAILED(device->CreateTexture2D(&cubeDesc,nullptr,&cube))||!cube)return 28;
-    // Every face's mip 0 is opaque blue, so mip 1 must average to it.
-    D3D10_SUBRESOURCE_DATA faces[12];
+    // Every face's mip 0 is opaque blue, so mip 1 must average to it. One
+    // UpdateSubresource per face: mip 0 is the source, mip 1 gets the same
+    // pixels so a failed GenerateMips cannot be hidden by pre-filled data.
     static unsigned char faceData[6][16*16*4];
     for(unsigned f=0;f<6;++f) {
         for(unsigned i=0;i<16*16;++i) {
             faceData[f][i*4+0]=0;faceData[f][i*4+1]=0;faceData[f][i*4+2]=0xff;faceData[f][i*4+3]=0xff;
         }
-        faces[f].pSysMem=faceData[f];faces[f].SysMemPitch=16*4;
-        faces[6+f].pSysMem=faceData[f];faces[6+f].SysMemPitch=16*4;   // mip 1 is filled too
+        device->UpdateSubresource(cube,D3D10CalcSubresource(0,f,2),nullptr,faceData[f],16*4,0);
+        // Mip 1 is deliberately NOT filled: only GenerateMips can put blue
+        // there, so the readback below proves the generation ran.
     }
-    device->UpdateSubresource(cube,0,nullptr,faceData,16*4,0);
     D3D10_SHADER_RESOURCE_VIEW_DESC1 srv{};
     srv.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
     srv.ViewDimension=D3D10_SRV_DIMENSION_TEXTURECUBE;
@@ -231,10 +263,19 @@ DWORD d3d10tri_entry() {
     if(FAILED(device1->CreateShaderResourceView1(cube,&srv,&cubeView))||!cubeView){device1->Release();return 29;}
     device1->Release();
     device->GenerateMips(cubeView);
-    // The generated mip is read through the staging copy of face 0's mip 1.
-    device->CopySubresourceRegion(staging,0,0,0,0,cube,D3D10CalcSubresource(1,0,2),nullptr);
-    if(!readPixel(device,target,staging,0,0,pixel))return 30;
+    // The generated mip is read through its own staging texture, sized to the
+    // 8x8 mip and mapped before anything else touches the shared staging copy.
+    // The subresource index is mip + face*mipLevels (D3D10CalcSubresource).
+    D3D10_TEXTURE2D_DESC mipDesc{};
+    mipDesc.Width=8;mipDesc.Height=8;mipDesc.MipLevels=1;mipDesc.ArraySize=1;
+    mipDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;mipDesc.SampleDesc.Count=1;
+    mipDesc.Usage=D3D10_USAGE_STAGING;mipDesc.CPUAccessFlags=D3D10_CPU_ACCESS_READ;
+    ID3D10Texture2D* mipStaging=nullptr;
+    if(FAILED(device->CreateTexture2D(&mipDesc,nullptr,&mipStaging))||!mipStaging)return 38;
+    device->CopySubresourceRegion(mipStaging,0,0,0,0,cube,D3D10CalcSubresource(1,0,2),nullptr);
+    if(!readStaged(mipStaging,0,0,pixel))return 30;
     if(!(pixel[2]>0xc0&&pixel[0]<0x40))return 43;   // BLOCKED
+    mipStaging->Release();
     cubeView->Release();cube->Release();
 
     // ---- pass 6: ResolveSubresource from a 4x MSAA target ----
@@ -244,14 +285,36 @@ DWORD d3d10tri_entry() {
     msDesc.Usage=D3D10_USAGE_DEFAULT;msDesc.BindFlags=D3D10_BIND_RENDER_TARGET;
     ID3D10Texture2D* msTarget=nullptr;
     if(FAILED(device->CreateTexture2D(&msDesc,nullptr,&msTarget))||!msTarget)return 31;
+    ID3D10RenderTargetView* msView=nullptr;
+    if(FAILED(device->CreateRenderTargetView(msTarget,nullptr,&msView))||!msView)return 39;
+    // A known, distinct colour goes into the MSAA target first, so the resolve
+    // has something real to move (an undrawn target proves nothing).
+    const FLOAT msColour[4]={0.75f,0.25f,0.5f,1.0f};
+    device->ClearRenderTargetView(msView,msColour);
+    msView->Release();
+    // The resolve lands in its own non-MSAA texture, never in a target another
+    // pass clears afterwards, and its staging copy is read before anything
+    // else touches it.
+    D3D10_TEXTURE2D_DESC resolvedDesc=msDesc;
+    resolvedDesc.SampleDesc.Count=1;resolvedDesc.BindFlags=0;
+    resolvedDesc.Usage=D3D10_USAGE_STAGING;resolvedDesc.CPUAccessFlags=D3D10_CPU_ACCESS_READ;
+    ID3D10Texture2D* resolved=nullptr;
+    if(FAILED(device->CreateTexture2D(&resolvedDesc,nullptr,&resolved))||!resolved)return 40;
     // The console's CoreWindow adapter has no resolve layer, but an offscreen
     // resolve through the device is the path a game's post-process takes.
-    device->ResolveSubresource(target,0,msTarget,0,DXGI_FORMAT_R8G8B8A8_UNORM);
-    // Resolve from an all-zero target: the destination must stay the cleared
-    // colour it was (the copy must not fault and must not corrupt).
-    device->ClearRenderTargetView(view,clear);
-    if(!readPixel(device,target,staging,32,32,pixel))return 32;
-    if(!(pixel[0]<0x20&&pixel[1]<0x20&&pixel[2]<0x20))return 43;   // BLOCKED
+    D3D10_TEXTURE2D_DESC resolveDefault=msDesc;
+    resolveDefault.SampleDesc.Count=1;resolveDefault.BindFlags=0;
+    ID3D10Texture2D* resolveTarget=nullptr;
+    if(FAILED(device->CreateTexture2D(&resolveDefault,nullptr,&resolveTarget))||!resolveTarget)return 41;
+    device->ResolveSubresource(resolveTarget,0,msTarget,0,DXGI_FORMAT_R8G8B8A8_UNORM);
+    device->CopyResource(resolved,resolveTarget);
+    if(!readStaged(resolved,32,32,pixel))return 32;
+    // The MSAA target's clear colour must have crossed the resolve untouched.
+    const bool resolvedColour=pixel[0]>0xb0&&pixel[0]<=0xc0&&pixel[1]>0x30&&pixel[1]<0x50
+        &&pixel[2]>0x70&&pixel[2]<0x90&&pixel[3]==0xff;
+    if(!resolvedColour)return 43;   // BLOCKED
+    resolveTarget->Release();
+    resolved->Release();
     msTarget->Release();
 
     // The present path still works after the draw passes, as a game's frame does.
@@ -259,7 +322,7 @@ DWORD d3d10tri_entry() {
     device->OMSetRenderTargets(1,&view,nullptr);
     device->Draw(3,0);
 
-    soTarget->Release();
+    soTarget->Release();soStaging->Release();
     pointBuffer->Release();gs->Release();
     greenBuffer->Release();indexBuffer->Release();
     vertexBuffer->Release();layout->Release();
