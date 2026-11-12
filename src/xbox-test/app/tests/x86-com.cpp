@@ -207,5 +207,56 @@ int main() {
     }
 
     printf(failures ? "X86-COM FAIL: %d failure(s)\n" : "X86-COM PASS: vtable stubs, stdcall pops, struct translator, guest callback, refcounts, fault-by-name, stale-proxy fault\n", failures);
+    if (failures) { printf("%d failure(s)\n", failures); return 1; }
+
+    // ---- teardown: the engine releases every live proxy's host reference exactly once ----
+    {
+        struct Counting {
+            unsigned refs = 0, releases = 0;
+            void addref() { ++refs; }
+            void release() { ++releases; if (refs) --refs; }
+        } c;
+        // A fresh engine per scope: its destructor is the teardown under test.
+        Memory mem2; ThunkTable thunks2; ComSpace com2; Cpu cpu2{mem2, thunks2};
+        thunks2.base = 0x7FFA0000;
+        map_thunk_page(mem2, thunks2);
+        mem2.map(0x40000, 4096, PROT_R | PROT_W);
+        com2.interface_("IMock", 8);
+        uint32_t p1 = com2.create(cpu2, "IMock", &c, [&] { c.addref(); }, [&] { c.release(); });
+        // The second create of the same host object is the identity map's
+        // dedupe path: same proxy, one more guest ref, no second host addref.
+        uint32_t p2 = com2.create(cpu2, "IMock", &c, [&] { c.addref(); }, [&] { c.release(); });
+        // A distinct host object gets its own proxy even on the same interface.
+        Counting c2;
+        uint32_t p3 = com2.create(cpu2, "IMock", &c2, [&] { c2.addref(); }, [&] { c2.release(); });
+        EXPECT(p1 && p2 && p3 && p1 == p2 && p2 != p3, "dedupe: same host+iface returns the same proxy, a new host gets a new one");
+        EXPECT(c.refs == 1 && c2.refs == 1, "one host ref per proxy (c=%u c2=%u)", c.refs, c2.refs);
+        // The guest AddRefs the deduped proxy, then the engine is torn down with
+        // both live: each host object must reach zero exactly once.
+        com2.by_guest(p2).guest_refs += 1;   // what a guest AddRef leaves behind
+        com2.destroy_all();
+        EXPECT(c.refs == 0 && c.releases == 1, "host object fully released on teardown (refs=%u releases=%u)", c.refs, c.releases);
+        EXPECT(c2.refs == 0 && c2.releases == 1, "second host object released once (refs=%u releases=%u)", c2.refs, c2.releases);
+        EXPECT(com2.live() == 0, "identity map empty after teardown");
+        // A second destroy_all is a no-op (idempotent): no double release.
+        com2.destroy_all();
+        EXPECT(c.releases == 1 && c2.releases == 1, "teardown is idempotent");
+        // Any later use of a proxy faults loudly instead of double-releasing.
+        bool loud = false;
+        try { com2.by_guest(p1); }
+        catch (const Fault& f) { loud = f.kind == FaultKind::AccessViolation && std::string(f.what()).find("torn down") != std::string::npos; }
+        EXPECT(loud, "use after teardown faults by name");
+        bool loud_release = false;
+        try { com2.guest_release(com2.by_guest(p1)); }
+        catch (const Fault& f) { loud_release = f.kind == FaultKind::AccessViolation; }
+        EXPECT(loud_release, "Release after teardown faults instead of double-releasing");
+        // And create after teardown refuses rather than building on a dead space.
+        bool refused = false;
+        try { com2.create(cpu2, "IMock", &c, [&] { c.addref(); }, [&] { c.release(); }); }
+        catch (const std::exception&) { refused = true; }
+        EXPECT(refused, "create after teardown is refused");
+    }
+
+    printf(failures ? "X86-COM FAIL: %d failure(s) after teardown checks\n" : "X86-COM PASS: vtable stubs, stdcall pops, struct translator, guest callback, refcounts, fault-by-name, stale-proxy fault, teardown releases host refs once\n", failures);
     return failures ? 1 : 0;
 }

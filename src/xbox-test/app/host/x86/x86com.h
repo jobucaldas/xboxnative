@@ -80,6 +80,7 @@ struct ComSpace {
     // the proxy block address. `addref`/`host_release` manage the host object's
     // one reference for the proxy's whole lifetime (its IUnknown refcount).
     uint32_t create(Cpu& cpu, const char* iface, void* host, const std::function<void()>& addref, const std::function<void()>& host_release) {
+        if (torn_down) throw std::runtime_error("COM: create after the space was torn down");
         map_regions(cpu);
         for (auto& [guest, p] : proxies)
             if (p.host == host && std::string_view(p.iface) == iface) { ++p.guest_refs; return p.guest; }
@@ -106,6 +107,10 @@ struct ComSpace {
     }
 
     Proxy& by_guest(uint32_t guest) {
+        if (torn_down) {
+            char b[96]; snprintf(b, sizeof b, "COM: the space was torn down (proxy 0x%08x)", guest);
+            throw Fault(FaultKind::AccessViolation, 0, guest, b);
+        }
         auto it = proxies.find(guest);
         if (it == proxies.end()) {
             char b[96]; snprintf(b, sizeof b, "COM: use of a released or foreign proxy at 0x%08x", guest);
@@ -116,6 +121,7 @@ struct ComSpace {
     // Marshalled Release path: decrement, destroy at zero, return the new count.
     // The caller must not touch the Proxy& after this (the entry is gone).
     unsigned guest_release(Proxy& p) {
+        if (torn_down) throw Fault(FaultKind::AccessViolation, 0, p.guest, "COM: Release on a torn-down space");
         unsigned left = --p.guest_refs;
         if (left == 0) {
             auto fn = p.host_release;
@@ -128,6 +134,19 @@ struct ComSpace {
     unsigned live() const { return unsigned(proxies.size()); }
     unsigned long created = 0;   // observability for tests and the launch log
 
+    // Engine teardown: the space holds one host reference per live proxy (taken
+    // at create). Releasing it here means a guest that exits holding proxies, or
+    // a test harness torn down mid-flight, never leaks host COM references.
+    // `torn_down` makes the release idempotent and turns every later use of a
+    // live proxy into a loud fault rather than a double release.
+    ~ComSpace() { destroy_all(); }
+    void destroy_all() {
+        if (torn_down) return;
+        torn_down = true;
+        for (auto& [guest, p] : proxies) if (p.host_release) p.host_release();
+        proxies.clear();
+    }
+
     static constexpr uint32_t VTABLE_BASE = 0x7F000000, VTABLE_REGION = 0x00100000;
     static constexpr uint32_t BLOCK_BASE = 0x7F100000, BLOCK_REGION = 0x00100000;
 
@@ -135,6 +154,7 @@ private:
     std::map<uint32_t, Proxy> proxies;      // keyed by guest block: stable under insert
     uint32_t vtable_top = VTABLE_BASE, block_top = BLOCK_BASE;
     bool mapped = false;
+    bool torn_down = false;
 
     static std::string slot_label(const char* iface, unsigned s) { return std::string(iface) + "#" + std::to_string(s); }
 
