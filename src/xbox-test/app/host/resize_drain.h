@@ -4,6 +4,7 @@
 // COM objects and assert the exact call order.
 #pragma once
 #include "d3d11_diag.h"   // the diag sink the resize hook logs through
+#include "resize_elide.h" // the pure elision decision (tested directly)
 #include <d3d11.h>
 #include <algorithm>
 #include <atomic>
@@ -57,23 +58,9 @@ inline void drain(ID3D11Device* dev) {
 }
 
 // ---- Redundant-resize elision (RCA mitigation, Slime Rancher 0.5.303.0)
-// The failing run's resize sequence was #1 800x600, #2 1920x1080, #3 1920x1080,
-// #4 1920x1080 — #3 and #4 request the chain's CURRENT size/format/flags, and
-// #4 itself returned DEVICE_REMOVED (0x887a0005). Hypothesis: a same-mode
-// ResizeBuffers on the d3d11on12 flip-model chain removes the device; the
-// earlier clean runs never issued a redundant resize. Elision answers a resize
-// whose normalised request matches the chain's current mode with S_OK without
-// touching the chain: GetBuffer(0) keeps returning the same live buffer (the
-// chain is never released), and a game that released its back-buffer views
-// before resizing (Unity does) has nothing to recreate that we removed.
-//
-// The comparison is against what the chain would actually become, using the
-// same normalisations the forwarding path applies: BufferCount 0 keeps the
-// current count (and the hook never raises a count below 3, matching
-// resize_count), DXGI_FORMAT_UNKNOWN keeps the current format, and the
-// FRAME_LATENCY_WAITABLE flag is stripped (the chain was created without it;
-// a resize that adds it back is refused E_INVALIDARG anyway). Everything else
-// must match GetDesc exactly.
+// The decision itself is the dependency-free host/resize_elide.h (unit-tested
+// in tests/resize-elision.cpp); this is the DXGI-typed seam the swap-chain
+// hook calls, converting GetDesc and the request into the pure Mode form.
 inline std::atomic<bool> elideEnabled{true};   // opt-out: LocalState\resizeelide.txt containing "off"
 
 // True when a normalised ResizeBuffers request would leave the chain unchanged.
@@ -81,11 +68,9 @@ inline std::atomic<bool> elideEnabled{true};   // opt-out: LocalState\resizeelid
 // applied, UNKNOWN resolved); `cur` is the chain's GetDesc. A test seam reads
 // this directly with hand-built descs.
 inline bool same_mode(const DXGI_SWAP_CHAIN_DESC1& cur,UINT count,UINT w,UINT h,DXGI_FORMAT f,UINT flags) {
-    const UINT wantCount=count?std::max<UINT>(count,3):cur.BufferCount;
-    const DXGI_FORMAT wantFormat=f==DXGI_FORMAT_UNKNOWN?cur.Format:f;
-    const UINT wantFlags=flags&~UINT(DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
-    return wantCount==cur.BufferCount&&w==cur.Width&&h==cur.Height&&
-           wantFormat==cur.Format&&wantFlags==cur.Flags;
+    return resize_elide::same_mode(
+        {cur.BufferCount,cur.Width,cur.Height,unsigned(cur.Format),cur.Flags},
+        {count,w,h,unsigned(f),flags});
 }
 
 }
