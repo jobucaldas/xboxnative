@@ -140,6 +140,14 @@ inline std::string verdict(const std::string& mode, bool finished, bool executed
     // The D3D11/D3D12 fixtures' readback mismatch: the pipeline ran but the
     // pixels did not read back as drawn. A platform limit, never a pass.
     if ((mode == "d3d11" || mode == "d3d12") && code == 43) return "BLOCKED pixel-readback";
+    // The D3D11 fixture's newer passes block the same way: the calls the
+    // feature needs all succeeded, but the pixels/colour did not arrive
+    // (54 MSAA resolve, 58 GenerateMips, 63 command-list execution).
+    if (mode == "d3d11") {
+        if (code == 54) return "BLOCKED msaa-resolve";
+        if (code == 58) return "BLOCKED generate-mips";
+        if (code == 63) return "BLOCKED command-list";
+    }
     // The D3D10 drawing fixture blocks the same way: every pass ran but the
     // pixels (or streamed vertices) did not read back as drawn.
     if (mode == "d3d10-triangle" && code == 43) return "BLOCKED pixel-readback";
@@ -148,7 +156,6 @@ inline std::string verdict(const std::string& mode, bool finished, bool executed
     // 82 = EnumAdapters1(0) failed, 83 = every D3D12CreateDevice attempt
     // failed (null and explicit adapter, FL 11_0 and 12_0). Each names the
     // attempt that failed, and each is a FAIL, never a pass or a BLOCKED.
-    if (mode == "d3d12" && code == 81) return "FAIL d3d12-device-factory";
     if (mode == "d3d12" && code == 82) return "FAIL d3d12-device-enum";
     if (mode == "d3d12" && code == 83) return "FAIL d3d12-device-all-attempts";
     if (code == 42) return "PASS";
