@@ -581,13 +581,15 @@ int opengl_entry() {
     }
 
     // WGL_ARB_pixel_format (research/OPENGL-COVERAGE.md): the call SDL3 and
-    // GLFW actually make. The ARB functions come from wglGetProcAddress with
-    // the context current; the fixture asks for the extension string, queries
-    // attribute values for the format the GDI path chose, and then runs
-    // wglChoosePixelFormatARB with SDL3's attribute list (support-GL, RGBA,
-    // double-buffer, 24 colour bits) and verifies the chosen format's
-    // attributes answer the same values. Absent extension: skipped (platform
-    // limit, never a pass). A wrong answer: BLOCKED.
+    // GLFW actually make. Disjoint cases, each with its own verdict:
+    //   (a) wglGetExtensionsStringARB does not resolve: skipped (platform
+    //       limit) with a log line — SDL3/GLFW fall back to the GDI path;
+    //   (b) the string does not advertise WGL_ARB_pixel_format: skipped with
+    //       that exact message ("not advertised"), same platform limit;
+    //   (c) the string advertises the extension but a function pointer is
+    //       NULL: a real driver bug (the string is a contract), FAIL with a
+    //       distinct exit code naming the missing function;
+    //   (d) everything resolves: query attributes and choose the format.
     {
         auto extString = (PFN_wglGetExtensionsStringARB)(uintptr_t)
             wglGetProcAddress("wglGetExtensionsStringARB");
@@ -595,22 +597,18 @@ int opengl_entry() {
             wglGetProcAddress("wglGetPixelFormatAttribivARB");
         auto chooseARB = (PFN_wglChoosePixelFormatARB)(uintptr_t)
             wglGetProcAddress("wglChoosePixelFormatARB");
-        const char* exts = extString ? extString(dc) : nullptr;
-        bool hasPixelFormat = exts && contains(exts, "WGL_ARB_pixel_format");
-        {char line[160]; char* p = append(line, "PLAY-OPENGL STAGE wgl-extensions pixel-format=");
-         p = append(p, hasPixelFormat ? "1" : "0"); p = append(p, " entry-points=");
-         p = append(p, extString ? (attribiv && chooseARB ? "3" : "partial") : "0");
-         p = append(p, "\n"); *p = 0; emit(line);}
-        if (!extString || !hasPixelFormat) {
-            // No extension string, or the extension is not advertised: the
-            // calls SDL3/GLFW make are not served on this host. A platform
-            // limit, reported as skipped, never a pass.
-            emit("PLAY-OPENGL STAGE wgl-extensions skipped (WGL_ARB_pixel_format absent)\n");
+        if (!extString) return fail(20, "wglGetExtensionsStringARB", GetLastError());
+        const char* exts = extString(dc);
+        if (!exts || !contains(exts, "WGL_ARB_pixel_format")) {
+            emit("PLAY-OPENGL STAGE wgl-extensions skipped (WGL_ARB_pixel_format not advertised)\n");
         } else if (!attribiv || !chooseARB) {
-            // The string advertises the extension but an entry point is NULL:
-            // a real driver gap, BLOCKED — SDL3/GLFW would fail here.
-            emit("PLAY-OPENGL BLOCKED wgl-extensions: WGL_ARB_pixel_format advertised but an entry point is NULL\n");
-            blocked = true;
+            // The string is a contract: advertising the extension and then
+            // handing back a NULL entry point is a driver bug, not a limit.
+            char line[192];
+            char* p = append(line, "PLAY-OPENGL FAIL wgl-extensions: WGL_ARB_pixel_format advertised but ");
+            p = append(p, !attribiv ? "wglGetPixelFormatAttribivARB" : "wglChoosePixelFormatARB");
+            p = append(p, " is NULL\n"); *p = 0; emit(line);
+            return 44;
         } else {
                 // Query the GDI-chosen format's attributes (hdc iLayerPlane 0).
                 int fmt0 = getPixelFormat(dc);
