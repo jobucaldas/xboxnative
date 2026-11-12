@@ -4,6 +4,7 @@
 #pragma once
 #include <bcrypt.h>
 #include "depot_select.h"
+#include "depot_size.h"
 #include "installs.h"
 
 // ---------------------------------------------------------------- crypto (CNG)

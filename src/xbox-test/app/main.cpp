@@ -674,6 +674,7 @@ static Hero hero_get(uint32_t appid) {   // every frame from the draw: starts th
     return h;   // shared_ptr copy, no pixel copy
 }
 static void hero_release(uint32_t appid) { std::lock_guard<std::mutex> l(g_heroM); g_heroes.erase(appid); }
+static std::shared_ptr<CmSession> user_session();   // store.h asks Steam for the depot size on the account's own session
 #include "store.h"
 
 static std::atomic<int> g_sortMode{ui_nav::kSortAlphabetical};   // item 25: the launcher opens on Alphabetical
@@ -1485,7 +1486,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (g_launch.phase == 0) { std::string why = launch_report::failure(read_bytes(g_dir + L"\\launch_result.json"), id); if (!why.empty()) m_dNote = "Last launch failed: " + why; }
         m_roots.clear(); m_rootSel = 0; refresh_roots("detail open");
         m_optApp = 0;   // a fresh page: the run-option count is read again (a download may have cached appinfo)
-        auto si = std::make_shared<StoreInfo>(); si->appid = id; m_dSi = si; std::thread(store_worker, si).detach();
+        auto si = std::make_shared<StoreInfo>(); si->appid = id; si->want_depot = !read_install(id).installed; m_dSi = si; std::thread(store_worker, si).detach();
         { InstallInfo ii = read_install(id); if (ii.installed && !g_demo) cloud_async(id, ii.folder, false); }   // status line: what the cloud holds
         m_confirmLogout = false; m_logoutYes = false; m_accountsOpen = false; m_cloudOpen = false; m_cloudFocus = 0; m_dFocus = 0;
         g_screen = S_DETAIL; logf("detail: open appid=%u name='%s' via=%s", id, m_dName.c_str(), via);
@@ -2033,14 +2034,15 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         else if (m_dInst.installed) vStatus = "Installed";
         else vStatus = "Not installed";
         // Item D9: ONE size row. Installed -> the size on disk. Not installed
-        // -> the store's own download figure (the pc_requirements "Storage:"
-        // line), "Calculating..." while the store reply is still in flight,
-        // and "Unknown" when the store lists no figure at all.
+        // -> the depots' own download size (what the download will fetch), the
+        // store's "Storage:" line while that is still being asked for, and
+        // "Unknown" when neither is available.
         if (m_dInst.installed) vSize = m_dInst.bytes ? storage_roots::size_text(m_dInst.bytes) : "Unknown";
         else if (down) { char b[48]; snprintf(b, sizeof b, "%s of %s", storage_roots::size_text(g_dl.done).c_str(),
                                               g_dl.total ? storage_roots::size_text(g_dl.total).c_str() : "?"); vSize = b; }
-        else if (si && st == 1) vSize = si->download_size.empty() ? "Unknown" : si->download_size;
-        else if (si && st == 2) vSize = "Unknown";   // the store could not be read
+        else if (si && si->depot == 1) vSize = storage_roots::size_text(si->depot_bytes);
+        else if (si && si->depot == 2) vSize = (si->state == 1 && !si->download_size.empty()) ? si->download_size : "Unknown";
+        else if (si && st == 2 && !si->want_depot) vSize = "Unknown";   // the store could not be read
         else vSize = "Calculating...";
         vLoc = "Internal storage";
         if (m_dInst.installed && !m_dInst.root.empty()) {
