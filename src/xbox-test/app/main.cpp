@@ -1675,7 +1675,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         guest_ended();
     }
     // ---- In-game launcher menu (guest_overlay.h): View+Menu toggles it.
-    GamepadButtons m_menuPrev=GamepadButtons::None; double m_quitDeadline=0; bool m_leaving=false;
+    GamepadButtons m_menuPrev=GamepadButtons::None; bool m_leaving=false;
+    std::atomic<bool> m_quitClosing{false};   // a graceful close is in flight
     static bool held(GamepadButtons b,GamepadButtons m){return (b&m)==m;}
     bool m_inputHooks=false;
     bool m_achPollStarted=false;   // the unlock poller runs while the guest does
@@ -1712,14 +1713,6 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
         m_menuPrev=b;
         frame_log(t);
-        if(m_quitDeadline&&t>=m_quitDeadline&&!m_leaving) {
-            m_quitDeadline=0;
-            // Once the game has exited, its final save upload is running and
-            // guest_ended() restarts afterwards: never cut that upload short.
-            auto r=play_runtime::observed.load(std::memory_order_acquire);
-            if(r&&r->finished.load(std::memory_order_acquire))logf("overlay: game closed; waiting for the save upload");
-            else {logf("overlay: game did not close in 15 s; force quitting");force_quit();}
-        }
     }
     // Frame times from the game's Present (guest_overlay.h): raw rows to
     // LocalState\frametimes.csv every 2 s, a stutter summary every 10 s.
@@ -1766,21 +1759,15 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if(busy)return;
         // cmd.txt synthetic commands (gquit/gforce/gfps) act without selection.
         if(c=="quit"||c=="force"){menuOpen=true;}
-        if(c=="quit"){busy=true;unsigned n=close_guest_windows();logf("overlay: WM_CLOSE posted to %u guest window(s)",n);
-                      guest_overlay::set_status(n?"Closing the game...":"No game window; force quitting");
-                      if(!n){force_quit();return;}m_quitDeadline=now_s()+15;return;}
-        if(c=="force"){busy=true;force_quit();return;}
+        if(c=="quit"){quit_game(via);return;}
+        if(c=="force"){force_quit();return;}
         if(c=="fps"){fpsOn=!fpsOn;write_text(g_dir+L"\\overlay.txt",fpsOn?"fps=1\n":"fps=0\n");logf("overlay: FPS counter now %s",fpsOn?"on":"off");reclamp(fpsOn);return;}
         if(c=="select"&&*name)logf("overlay: %s (tab %d row %d) (%s)",name,tab,row,via);
         if(c=="select"&&tab==0) {
             if(row==0){menuOpen=false;return;}   // Resume: input returns once buttons are released
-            menuOpen=true;busy=true;
             if(row==1) {   // Quit game
-                unsigned n=close_guest_windows();
-                logf("overlay: WM_CLOSE posted to %u guest window(s)",n);
-                guest_overlay::set_status(n?"Closing the game...":"No game window; force quitting");
-                if(!n){force_quit();return;}
-                m_quitDeadline=now_s()+15;return;
+                quit_game(via);
+                return;
             }
             force_quit();   // row 2: Force quit
             return;
@@ -1791,6 +1778,21 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             return;
         }
         // tab 1 (Achievements): the rows are not commands.
+    }
+    // Quit game: ask the guest's windows to close on a worker thread and return
+    // at once. The menu stays usable (no busy latch), so the player can pick
+    // Force quit if the game does not go away; guest_ended() restarts the
+    // launcher when the game does exit (the save upload runs there).
+    void quit_game(const char* via) {
+        if(m_leaving || m_quitClosing.exchange(true)) return;
+        guest_overlay::set_status("Closing the game...");
+        logf("overlay: quit game -> WM_CLOSE on a worker (%s)", via);
+        std::thread([this] {
+            const unsigned n = guest_overlay::close_guest_windows();
+            logf("overlay: WM_CLOSE posted to %u guest window(s)", n);
+            m_quitClosing = false;
+            if (!n) { if (auto s = d3d11_diag::sink) s("overlay: no guest window answered WM_CLOSE"); }
+        }).detach();
     }
     void force_quit() {
         if(m_leaving)return;
@@ -1842,7 +1844,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         achievement_poller_stop();   // the guest is exiting; stop watching its achievements.json
         m_achPollStarted=false;      // the next launch starts its own poller
         if(m_leaving)return;   // Force quit is already syncing and restarting
-        m_leaving=true;m_quitDeadline=0;
+        m_leaving=true;m_quitClosing=false;
         if(ok){back_to_games("game quit");return;}
         // A crash: explain it above the retained guest frame, then go back.
         std::string message=result.find("real client prerequisite item 36")!=std::string::npos?
