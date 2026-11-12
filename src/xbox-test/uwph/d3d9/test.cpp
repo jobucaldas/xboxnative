@@ -637,8 +637,8 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
         IDirect3DTexture9* texture=nullptr;
         CHECK_HR(device->CreateTexture(4,4,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&texture,nullptr));
         IDirect3DVertexBuffer9* buffer=nullptr;
-        CHECK_HR(device->CreateVertexBuffer(3*sizeof(float)*6,D3DUSAGE_WRITEONLY,0,D3DPOOL_MANAGED,
-            &buffer,nullptr));
+        CHECK_HR(device->CreateVertexBuffer(3*(4*sizeof(float)+sizeof(DWORD)+2*sizeof(float)),
+            D3DUSAGE_WRITEONLY,0,D3DPOOL_MANAGED,&buffer,nullptr));
         if(target&&staging&&texture&&buffer) {
             D3DLOCKED_RECT texLocked{};
             CHECK_HR(texture->LockRect(0,&texLocked,nullptr,0));
