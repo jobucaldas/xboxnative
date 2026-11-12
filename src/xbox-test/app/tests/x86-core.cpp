@@ -681,9 +681,10 @@ static void test_sse2_stage2() {
     }
     // pshuflw/pshufhw (F2/F3 0F 70): one half shuffled, other half kept
     for (unsigned imm : {0x1bu, 0xe4u, 0x27u}) {
+        uint16_t orig[8]; memcpy(orig, V1, 16);
         uint16_t src[8]; memcpy(src, V1, 16);
         uint32_t want[4]; memcpy(want, V1, 16);
-        for (int i = 0; i < 4; ++i) src[i] = src[(imm >> (2 * i)) & 3];  // F2: low half
+        for (int i = 0; i < 4; ++i) src[i] = orig[(imm >> (2 * i)) & 3];  // F2: low half, selects read the original lanes
         memcpy(want, src, 16);
         uint32_t out[4];
         run({0xF2, 0x0F, 0x70, 0xC1, uint8_t(imm)}, V2, V1, out);  // C1: src is xmm1 = V1
@@ -691,7 +692,7 @@ static void test_sse2_stage2() {
         ++alu_cases;
         uint16_t src2[8]; memcpy(src2, V1, 16);
         uint32_t want2[4]; memcpy(want2, V1, 16);
-        for (int i = 0; i < 4; ++i) src2[4 + i] = src2[4 + ((imm >> (2 * i)) & 3)];  // F3: high half
+        for (int i = 0; i < 4; ++i) src2[4 + i] = orig[4 + ((imm >> (2 * i)) & 3)];  // F3: high half
         memcpy(want2, src2, 16);
         run({0xF3, 0x0F, 0x70, 0xC1, uint8_t(imm)}, V2, V1, out);
         EXPECT(memcmp(out, want2, 16) == 0, "pshufhw imm=%02x", imm);
@@ -853,15 +854,24 @@ static void test_sse2_stage2() {
         {
             uint32_t a[4] = {0x0afafa0au, 0x00017fffu, 0x0a0a0a0au, 0x80008000u};
             uint32_t b[4] = {0x0a0a0a0au, 0x00010001u, 0x0a0a0a0au, 0x00010001u};
-            run({0x66, 0x0F, 0xDC, 0xC1}, a, b, out);  // paddusb: bytes 0a+0a=14, fa+0a=104->ff
+            run({0x66, 0x0F, 0xDC, 0xC1}, a, b, out);  // paddusb (DC): bytes 0a+0a=14, fa+0a=104->ff
             EXPECT(out[0] == 0x14ffff14u, "paddusb: %08x", out[0]);
-            EXPECT(out[1] == 0x00027fffu, "paddsw via words: %08x", out[1]);  // 7fff+0001 -> 7fff (saturated), 1+1=2
             ++alu_cases;
-            run({0x66, 0x0F, 0xE8, 0xC1}, a, b, out);  // psubusb: 0a-0a=0, fa-0a=f0
+            run({0x66, 0x0F, 0xED, 0xC1}, a, b, out);  // paddsw (ED): word 7fff+0001 -> 7fff (saturated), 1+1=2
+            EXPECT(out[1] == 0x00027fffu, "paddsw via words: %08x", out[1]);
+            ++alu_cases;
+            run({0x66, 0x0F, 0xD8, 0xC1}, a, b, out);  // psubusb (D8): 0a-0a=0, fa-0a=f0
             EXPECT(out[0] == 0x00f0f000u, "psubusb: %08x", out[0]);
             ++alu_cases;
-            run({0x66, 0x0F, 0xEC, 0xC1}, a, b, out);  // psubsw: word 8000-0001 -> 8000 (saturated)
+            run({0x66, 0x0F, 0xE9, 0xC1}, a, b, out);  // psubsw (E9): word 8000-0001 -> 8000 (saturated)
             EXPECT(out[3] == 0x80008000u, "psubsw: %08x", out[3]);
+            ++alu_cases;
+            run({0x66, 0x0F, 0xEC, 0xC1}, a, b, out);  // paddsb (EC): byte fa(-6)+0a=04, byte 7f+0a saturates to 7f
+            EXPECT(out[0] == 0x14040414u, "paddsb: %08x", out[0]);
+            EXPECT(out[1] == 0x00027f00u, "paddsb dword1: %08x", out[1]);
+            ++alu_cases;
+            run({0x66, 0x0F, 0xD9, 0xC1}, a, b, out);  // psubusw (D9): word 7fff-0001=7ffe, 0001-0001=0
+            EXPECT(out[1] == 0x00007ffeu, "psubusw: %08x", out[1]);
             ++alu_cases;
         }
         // pminub/pmaxub/pminsw/pmaxsw
@@ -924,13 +934,20 @@ static void test_sse2_stage2() {
         EXPECT(m.cpu.reg[EAX] == 0 && m.cpu.reg[EBX] == 0 && m.cpu.reg[ECX] == 0 && m.cpu.reg[EDX] == 0, "cpuid unknown leaf must be zeroed");
         ++alu_cases;
     }
-    // ---- movnti (66 0F C3): dword store ----
+    // ---- movnti: 66 0F C3 (dword store) and 0F C3 (qword store) ----
     {
         m.mem.w32(Machine::DATA, 0);
         m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
         std::vector<uint8_t> code{0x66, 0x0F, 0xC3, 0x05, 0x00, 0x00, 0x02, 0x00};  // movnti [DATA], eax
         exec(m, code, 0xfeedfaceu, 0, 0, false);
         EXPECT(m.mem.r32(Machine::DATA) == 0xfeedfaceu, "movnti store: %08x", m.mem.r32(Machine::DATA));
+        ++alu_cases;
+        // unprefixed 0F C3: dword store (32-bit operand size; only 66 widens to qword)
+        m.mem.w64(Machine::DATA + 8, 0);
+        std::vector<uint8_t> code2{0x0F, 0xC3, 0x05, 0x08, 0x00, 0x02, 0x00};  // movnti [DATA+8], eax
+        exec(m, code2, 0xfeedfaceu, 0x12345678u, 0, false);
+        EXPECT(m.mem.r64(Machine::DATA + 8) == 0xfeedfaceu, "movnti unprefixed dword store: %016llx",
+               (unsigned long long)m.mem.r64(Machine::DATA + 8));
         ++alu_cases;
     }
     // ---- prefetcht0 (0F 18 /0): executes as a hint ----

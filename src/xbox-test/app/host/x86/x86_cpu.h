@@ -306,14 +306,15 @@ struct Cpu {
         do {
             if (repeat && !reg[ECX]) break;
             if (op <= 0xA7) {  // movs copies; cmps compares and sets flags only
-                uint32_t a = mem.r(reg[ESI] + seg, sz), b = mem.r(reg[EDI] + seg, sz);
-                if (op <= 0xA5) mem.w(reg[EDI] + seg, a, sz);
+                // A segment override applies to DS:ESI only; ES:EDI is fixed.
+                uint32_t a = mem.r(reg[ESI] + seg, sz), b = mem.r(reg[EDI], sz);
+                if (op <= 0xA5) mem.w(reg[EDI], a, sz);
                 else alu(7, a, b, sz);  // cmps: sub for flags only
                 reg[ESI] += step; reg[EDI] += step;
             } else if (op <= 0xAB) { mem.w(reg[EDI], getreg(0, sz), sz); reg[EDI] += step; }
             else if (op <= 0xAD) { setreg(0, sz, mem.r(reg[ESI] + seg, sz)); reg[ESI] += step; }
-            else {  // scas: cmp al/ax/eax against [edi]
-                uint32_t b = mem.r(reg[EDI] + seg, sz);
+            else {  // scas: cmp al/ax/eax against [edi] (ES-based, no override)
+                uint32_t b = mem.r(reg[EDI], sz);
                 alu(7, getreg(0, sz), b, sz);
                 reg[EDI] += step;
             }
@@ -428,9 +429,13 @@ struct Cpu {
                 if (r.isreg) unsupported("fxsave reg");
                 uint32_t ea = r.ea + seg;
                 mem.w(ea, fpu.cw, 2); mem.w(ea + 2, fpu.status(), 2);
-                mem.w(ea + 4, 0, 8);  // fop, ip, cs, dp, ds: no real 8087-style tracking
-                for (int i = 0; i < 8; ++i) for (int k = 0; k < 10; ++k) mem.w8(ea + 16 + 10 * i + k, fpu.st[i][k]);
-                mem.w(ea + 96, mxcsr, 4); mem.w(ea + 100, 0xffff0000u, 4);  // mxcsr + its mask field
+                mem.w(ea + 4, 0, 4);  // fop, ip: no real 8087-style tracking
+                mem.w(ea + 8, 0, 4); mem.w(ea + 12, 0, 4);  // dp, cs/ds
+                mem.w(ea + 24, mxcsr, 4); mem.w(ea + 28, 0xffff0000u, 4);  // mxcsr + its mask field
+                for (int i = 0; i < 8; ++i) {  // ST(i) at 32 + 16*i: 10 bytes + 6 reserved
+                    for (int k = 0; k < 10; ++k) mem.w8(ea + 32 + 16 * i + k, fpu.st[i][k]);
+                    mem.w(ea + 32 + 16 * i + 10, 0, 6);
+                }
                 for (int i = 0; i < 8; ++i) mem.w128(ea + 160 + 16 * i, xmm.r[i]);
                 return; }
             case 1: {  // fxrstor
@@ -439,8 +444,8 @@ struct Cpu {
                 fpu.cw = mem.r(ea, 2);
                 fpu.sw = mem.r(ea + 2, 2) & ~uint16_t(0x3800);  // bits 11-13 are TOP, restored below
                 fpu.top = (mem.r(ea + 2, 2) >> 11) & 7;
-                for (int i = 0; i < 8; ++i) { for (int k = 0; k < 10; ++k) fpu.st[i][k] = mem.r8(ea + 16 + 10 * i + k); fpu.empty[i] = false; }
-                mxcsr = mem.r(ea + 96, 4);
+                for (int i = 0; i < 8; ++i) { for (int k = 0; k < 10; ++k) fpu.st[i][k] = mem.r8(ea + 32 + 16 * i + k); fpu.empty[i] = false; }
+                mxcsr = mem.r(ea + 24, 4);
                 for (int i = 0; i < 8; ++i) mem.r128(ea + 160 + 16 * i, xmm.r[i]);
                 return; }
             case 5: case 6: return;  // xsave/xrstor: same treatment as before (not implemented)
@@ -507,7 +512,7 @@ struct Cpu {
         case 0x74: case 0x75: case 0x76: case 0xD7: case 0xE7: case 0xEB: case 0xEF:
         case 0xD1: case 0xD2: case 0xD3: case 0xD4: case 0xD5: case 0xE1: case 0xE2:
         case 0xF1: case 0xF2: case 0xF3: case 0xF4: case 0xF5: case 0xF6:
-        case 0xDA: case 0xDB: case 0xDC: case 0xDD: case 0xDE: case 0xDF: case 0xE0: case 0xE8: case 0xE9: case 0xEA:
+        case 0xD8: case 0xD9: case 0xDA: case 0xDB: case 0xDC: case 0xDD: case 0xDE: case 0xDF: case 0xE0: case 0xE8: case 0xE9: case 0xEA:
         case 0xEC: case 0xED: case 0xEE:
         case 0xF8: case 0xF9: case 0xFA: case 0xFB: case 0xFC: case 0xFD: case 0xFE:
             sse_int(op); return;
@@ -516,9 +521,9 @@ struct Cpu {
             uint32_t out[4];
             if (p66) { for (int i = 0; i < 4; ++i) out[i] = a[(imm >> (2 * i)) & 3]; }
             else if (rep == 0xF2 || rep == 0xF3) {  // shuffle four 16-bit lanes in one half
-                uint16_t src[8]; memcpy(src, a, 16);
+                uint16_t src[8], orig[8]; memcpy(orig, a, 16); memcpy(src, a, 16);
                 unsigned base = rep == 0xF2 ? 0 : 4;
-                for (int i = 0; i < 4; ++i) src[base + i] = src[base + ((imm >> (2 * i)) & 3)];
+                for (int i = 0; i < 4; ++i) src[base + i] = orig[base + ((imm >> (2 * i)) & 3)];  // selects read the ORIGINAL lanes
                 memcpy(out, src, 16);
             } else unsupported("0f 70 (MMX pshufw)");
             sse_write_reg(modrm_reg, out); return; }
@@ -541,9 +546,11 @@ struct Cpu {
                     reg[EDX] = (1u << 0) | (1u << 4) | (1u << 15) | (1u << 19) | (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26); return;
                     // fpu tsc cmov clflush mmx fxsr sse sse2
             default: reg[EAX] = reg[EBX] = reg[ECX] = reg[EDX] = 0; return; } }
-        case 0xC3: {  // movnti (66): a non-temporal dword store
-            if (!p66) unsupported("0f c3 (MMX movntq)");
-            Rm r = modrm(); if (r.isreg) unsupported("movnti reg"); mem.w32(r.ea + seg, getreg(modrm_reg, 4)); return; }
+        case 0xC3: {  // movnti: 0F C3 r/m32 (no prefix) or 66 0F C3 r/m64 (a qword store)
+            Rm r = modrm(); if (r.isreg) unsupported("movnti reg");
+            if (p66) { uint32_t v[4] = {getreg(modrm_reg, 4), 0, 0, 0}; mem.w128(r.ea + seg, v); }
+            else mem.w32(r.ea + seg, getreg(modrm_reg, 4));
+            return; }
         case 0xC6: {  // shufps (no prefix) / shufpd (66)
             Rm r = modrm(); uint8_t imm = fetch(); uint32_t a[4], b[4]; sse_reg(modrm_reg, a); sse_read(r, b);
             uint32_t out[4];
@@ -667,9 +674,9 @@ struct Cpu {
         }
         unsigned gran = op == 0x71 ? 2 : op == 0x72 ? 4 : 8;
         unsigned maxcnt = gran == 2 ? 16 : gran == 4 ? 32 : 64;
-        if (cnt >= maxcnt) {  // counts >= lane width: zero, or sign fill for the arithmetic shifts
-            if (sop == 4 && gran == 2) { uint16_t fill = (ab[1] & 0x80) ? 0xffffu : 0; for (unsigned i = 0; i < 8; ++i) memcpy(ab + 2 * i, &fill, 2); }
-            else if (sop == 4 && gran == 4) { uint32_t fill = (ab[3] & 0x80) ? 0xffffffffu : 0; for (int i = 0; i < 4; ++i) a[i] = fill; }
+        if (cnt >= maxcnt) {  // counts >= lane width: zero, or per-lane sign fill for the arithmetic shifts
+            if (sop == 4 && gran == 2) { for (unsigned i = 0; i < 8; ++i) { uint16_t fill = (ab[2 * i + 1] & 0x80) ? 0xffffu : 0; memcpy(ab + 2 * i, &fill, 2); } }
+            else if (sop == 4 && gran == 4) { for (int i = 0; i < 4; ++i) a[i] = (ab[4 * i + 3] & 0x80) ? 0xffffffffu : 0; }
             else std::memset(ab, 0, 16);
             return;
         }
@@ -884,11 +891,13 @@ struct Cpu {
             const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
             for (int i = 0; i < 16; ++i) o[i] = uint8_t((unsigned(ab[i]) + unsigned(bb[i]) + 1) >> 1);
             sse_write_reg(modrm_reg, out); return; }
-        case 0xD8: case 0xD9: case 0xDC: case 0xDD:  // paddusb/sw
-        case 0xE8: case 0xE9: case 0xEC: case 0xED: {  // psubusb/sw
+        case 0xD8: case 0xD9: case 0xDC: case 0xDD:  // psubusb/psubusw, paddusb/paddusw
+        case 0xE8: case 0xE9: case 0xEC: case 0xED: {  // psubsb/psubsw, paddsb/paddsw
+            // Intel map: D8 psubusb, D9 psubusw, DC paddusb, DD paddusw,
+            //            E8 psubsb,  E9 psubsw,  EC paddsb,  ED paddsw.
             unsigned gran = (op == 0xD8 || op == 0xDC || op == 0xE8 || op == 0xEC) ? 1 : 2;
-            bool add = op < 0xE0;
-            bool sgn = (op == 0xD9 || op == 0xDD || op == 0xE9 || op == 0xED);
+            bool add = (op == 0xDC || op == 0xDD || op == 0xEC || op == 0xED);
+            bool sgn = op >= 0xE0;
             sse_reg(modrm_reg, a); sse_read(r, b);
             uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
             const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
