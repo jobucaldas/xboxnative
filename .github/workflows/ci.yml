@@ -128,6 +128,8 @@ jobs:
         run: bash src/xbox-test/app/tests/game-delete.sh
       - name: Storage move copies, verifies and markers atomically
         run: bash src/xbox-test/app/tests/move-game.sh
+      - name: Install marker requires payload (health check)
+        run: bash src/xbox-test/app/tests/install-health.sh
       - name: Free space figures and launcher leftovers
         run: bash src/xbox-test/app/tests/storage-report.sh
       - name: UI toolkit, launcher screens, guide overlay and unlock logic (native renders and asserts)
@@ -269,6 +271,8 @@ jobs:
         run: bash src/xbox-test/app/tests/x86-core.sh
       - name: "x86 guest surface (mingw CRT program through the interpreter: printf, heap, TLS, VirtualAlloc)"
         run: bash src/xbox-test/app/tests/x86-guest.sh
+      - name: "x86 implicit TLS (PE32 TLS directory, block copy, callbacks; negative control)"
+        run: bash src/xbox-test/app/tests/x86-tls.sh
       - name: "x86 COM thunks (guest proxies, vtable stubs, refcounts, fault-by-name against a mock host object)"
         run: bash src/xbox-test/app/tests/x86-com.sh
   # TODO: on-device sections of src/xbox-test/smoke-all.sh need a console and cannot run in GitHub Actions.
