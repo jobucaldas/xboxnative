@@ -2,12 +2,13 @@
 """Compare real Play's PE32 import list with independent offline Wine CSVs."""
 import csv
 import json
+import os
 from pathlib import Path
 import re
 import sys
 
 root = Path(__file__).resolve().parents[4]
-evidence = Path(sys.argv[1]) if len(sys.argv) == 2 else Path('/workspace/x64-run/runs/pe32')
+evidence = Path(sys.argv[1]) if len(sys.argv) == 2 else Path(os.environ.get('RUNS_DIR', root / 'out/runs')) / 'pe32'
 results = []
 for app, game in [(480, 'spacewar'), (48000, 'limbo')]:
     run = evidence/f'play-{app}'

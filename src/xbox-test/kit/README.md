@@ -7,7 +7,7 @@ private signing keys are never copied into the kit.
 ## Build and verify
 
 Use the toolchains described in `src/xbox-test/uwph/host/README.md` and
-`docs/xbox/REBUILD.md`: Python 3, OpenSSL, MinGW, LLVM, the UWP cross-build
+the repository README's Build section: Python 3, OpenSSL, MinGW, LLVM, the UWP cross-build
 SDK/CRT, `makemsix` and `osslsigncode`. Put tools on `PATH` and set
 `UWP_CROSSBUILD` to the cross-build checkout. Individual builders may need the
 additional setup documented in their directories.
@@ -73,14 +73,14 @@ bash src/xbox-test/kit/sync-readme-versions.sh --check /path/to/kit/manifest.jso
 
 | Package | Identity | LocalState log | Required result |
 | --- | --- | --- | --- |
-| `uwph` | `Joao.XboxSteam.Uwph` | `k32.log` | `K32 RESULT failures=0` and `D3DT RESULT presented=300 hr=0x00000000`; colored clears ending magenta |
-| `wxl` | `Joao.XboxSteam.Wxl` | `k32.log` | After guest upload: `WXL RESULT entry=42 failures=0`; `WXL FAIL open` before upload is not a pass |
-| `hid` | `Joao.XboxSteam.Hid` | `k32.log` | `HID-STUB-OK symbols=20 checks=23` and `HID RESULT failures=0` |
-| `mlp` | `Joao.XboxSteam.Mlp` | `k32.log` | `MLP-PROBE-DONE` after uploading your own Megabonk PEs; mapping/import classification only, no game execution |
-| `tls` | `Joao.XboxSteam.Tls` | `k32.log` | After guest uploads: `WXL TLS RESULT failures=0` and `LIFECYCLE RESULT failures=0` |
-| `swc` | `Joao.XboxSteam.Swc` | `k32.log` | After guest upload: `SWC RESULT entry=42 failures=0`; 300 presents ending green |
-| `w32u` | `Joao.XboxSteam.W32u` | `w32u.log` | `W32U RESULT failures=0`; 180 frames ending green |
-| `vrx` | `Joao.XboxSteam.Vrx` | `vrx.log` | `vrx: all cases done`; inspect each case: A/B deliberately fail or except under AppContainer, C must report `OK value=42` |
+| `uwph` | `Xboxnative.Uwph` | `k32.log` | `K32 RESULT failures=0` and `D3DT RESULT presented=300 hr=0x00000000`; colored clears ending magenta |
+| `wxl` | `Xboxnative.Wxl` | `k32.log` | After guest upload: `WXL RESULT entry=42 failures=0`; `WXL FAIL open` before upload is not a pass |
+| `hid` | `Xboxnative.Hid` | `k32.log` | `HID-STUB-OK symbols=20 checks=23` and `HID RESULT failures=0` |
+| `mlp` | `Xboxnative.Mlp` | `k32.log` | `MLP-PROBE-DONE` after uploading your own Megabonk PEs; mapping/import classification only, no game execution |
+| `tls` | `Xboxnative.Tls` | `k32.log` | After guest uploads: `WXL TLS RESULT failures=0` and `LIFECYCLE RESULT failures=0` |
+| `swc` | `Xboxnative.Swc` | `k32.log` | After guest upload: `SWC RESULT entry=42 failures=0`; 300 presents ending green |
+| `w32u` | `Xboxnative.W32u` | `w32u.log` | `W32U RESULT failures=0`; 180 frames ending green |
+| `vrx` | `Xboxnative.Vrx` | `vrx.log` | `vrx: all cases done`; inspect each case: A/B deliberately fail or except under AppContainer, C must report `OK value=42` |
 | `launcher` | `Xboxnative.Launcher` | `boot.log` | QR/library screen; this alone is not evidence of playable games |
 
 For the default manifests, publisher is `CN=xboxnative-dev`, package-family

@@ -41,8 +41,7 @@ not just the exit code.
 This checks log text only. A successful review does not establish freshness,
 identify the device, or prove a new device or guest execution.
 
-- [Historical lane notes](../../../docs/xbox/lane-notes/vrx.md#final-result--verified-on-real-xbox-series-s-2026-10-25)
-  attribute the capture to an Xbox Series S run on 2026-10-25 using the VRX
+- Historical notes attribute the capture to an Xbox Series S run on 2026-10-25 using the VRX
   0.1.0.0 package. This is a historical repository claim, not independently
   verified device identity.
 - The log was imported in commit `bd208bf` (2026-10-26). Its timestamps are
@@ -56,4 +55,4 @@ identify the device, or prove a new device or guest execution.
 Fresh console execution and device identity remain **unverified**. Synthetic
 unit tests, historical log text, and `smoke-all.sh --offline` are not console
 acceptance evidence. The existing full console smoke and launcher play-test
-gates in [AGENTS.md](../../../AGENTS.md) remain unchanged.
+gates in [CONTRIBUTING.md](../../../CONTRIBUTING.md) remain unchanged.

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Fresh execution of ONLY Reg (Joao.XboxSteam.Reg): install -> launch -> pull log -> check. Holds the console lock.
+# Fresh execution of ONLY Reg (Xboxnative.Reg): install -> launch -> pull log -> check. Holds the console lock.
 # REG_VERSION must match AppxManifest.Reg.xml. REG_INSTALL=0 skips (re)install.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../../.." && pwd)
 cd "$root"
 dp="$root/src/xbox-test/dp"
-runs=${REG_RUNS:-/workspace/x64-run/runs/reg}
-ver=$(sed -n 's/.*Name="Joao.XboxSteam.Reg".*Version="\([0-9.]*\)".*/\1/p' src/xbox-test/uwph/host/AppxManifest.Reg.xml)
-full=Joao.XboxSteam.Reg_${ver}_x64__0bdeywx3x8szp
-rid='Joao.XboxSteam.Reg_0bdeywx3x8szp!App'
+runs=${REG_RUNS:-${RUNS_DIR:-out/runs}/reg}
+ver=$(sed -n 's/.*Name="Xboxnative.Reg".*Version="\([0-9.]*\)".*/\1/p' src/xbox-test/uwph/host/AppxManifest.Reg.xml)
+full=Xboxnative.Reg_${ver}_x64__0bdeywx3x8szp
+rid='Xboxnative.Reg_0bdeywx3x8szp!App'
 mkdir -p "$runs"
-exec 9>/workspace/x64-run/CONSOLE.lock
+exec 9>${TMPDIR:-/tmp}/xboxnative-console.lock
 flock -w 600 9
 export DP_LOCK_FD=9
 if [[ ${REG_INSTALL:-1} == 1 ]]; then

@@ -1,0 +1,87 @@
+name: 'apt install with mirror failover'
+description: >
+  Installs apt packages, surviving ubuntu.com archive DNS outages by
+  falling back to a third-party mirror when the configured mirrors are
+  unreachable. Fails fast when no mirror answers instead of hanging in
+  apt retry loops for an hour.
+inputs:
+  packages:
+    description: 'apt package names to install, space separated'
+    required: true
+runs:
+  using: 'composite'
+  steps:
+    - shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+
+        sources_file=/etc/apt/sources.list.d/ubuntu.sources
+        mirrors_file=/etc/apt/apt-mirrors.txt
+
+        # probe <mirror-root-url>: serves this suite's InRelease?
+        probe() {
+            curl -fsSI --max-time 8 "$1/dists/${SUITE:-resolute}/InRelease" \
+                -o /dev/null
+        }
+
+        # Rewrite apt's mirror+file failover list to keep only the mirrors
+        # that answer right now (order preserved), so apt never spends its
+        # retry budget on a dead URI ahead of a live one. The runner's
+        # default list is the ubuntu.com hosts, whose DNS is what fails
+        # during an outage.
+        prune_mirrors() {
+            while IFS=$'\t' read -r url prio; do
+                case $url in '' | '#'*) continue ;; esac
+                if probe "$url"; then
+                    printf '%s\t%s\n' "$url" "$prio"
+                else
+                    echo "apt-install: dropping unreachable mirror $url" >&2
+                fi
+            done <"$mirrors_file" | sudo tee "${mirrors_file}.tmp" >/dev/null
+            sudo mv "${mirrors_file}.tmp" "$mirrors_file"
+        }
+
+        # Third-party mirrors on DNS domains independent of ubuntu.com,
+        # each serving the standard dists/<suite> layout over https.
+        fallbacks='
+            https://mirror.rackspace.com/ubuntu
+            https://mirrors.kernel.org/ubuntu
+            https://mirror.math.princeton.edu/pub/ubuntu
+            https://ubuntu.mirror.constant.com
+        '
+
+        if [ -f "$mirrors_file" ] && [ -s "$mirrors_file" ] && \
+            ! grep -qE $'\t' "$mirrors_file"; then
+            echo "apt-install: $mirrors_file missing or malformed; leaving as is" >&2
+        elif prune_mirrors && ! [ -s "$mirrors_file" ]; then
+            echo "apt-install: all configured mirrors unreachable; probing fallbacks" >&2
+            picked=''
+            for candidate in $fallbacks; do
+                if probe "$candidate"; then
+                    picked=$candidate
+                    break
+                fi
+            done
+            if [ -z "$picked" ]; then
+                echo "apt-install: no Ubuntu mirror reachable; failing fast" >&2
+                exit 1
+            fi
+            echo "apt-install: using fallback mirror $picked" >&2
+            printf '%s\tpriority:1\n' "$picked" \
+                | sudo tee "$mirrors_file" >/dev/null
+            sudo sed -i "s|^URIs:.*|URIs: $picked|" "$sources_file"
+        fi
+
+        export DEBIAN_FRONTEND=noninteractive
+        # The mirror list is pruned to live URIs above, so the runner's own
+        # retry=1 failover pacing is enough; a high Acquire::Retries here
+        # would spend all attempts on a dead URI before failing over.
+        sudo apt-get update \
+            -o Acquire::https::Timeout=20 \
+            -o Acquire::http::Timeout=20
+        sudo apt-get install -y \
+            -o Acquire::https::Timeout=20 \
+            -o Acquire::http::Timeout=20 \
+            $PACKAGES

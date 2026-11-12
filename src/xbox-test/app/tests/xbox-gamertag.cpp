@@ -72,7 +72,7 @@ int main() {
     assert(clean_gamertag(std::string(257, 'a')).empty());
     assert(clean_gamertag(std::string(256, 'a')).size() == 256);
     assert(clean_gamertag("bad\x01name").empty());
-    assert(clean_gamertag("jobucaldas") == "jobucaldas");
+    assert(clean_gamertag("ExampleGamer") == "ExampleGamer");
 
     // ---- the profile response xodus reads
     std::string tag, pic;
@@ -109,30 +109,30 @@ int main() {
 
     // ---- which Windows.System.User property names the player
     assert(looks_like_email("someone@example.com"));
-    assert(!looks_like_email("jobucaldas"));
+    assert(!looks_like_email("ExampleGamer"));
     assert(!looks_like_email("@example.com"));
     assert(!looks_like_email("someone@"));
     // the console's account name wins over the Microsoft display name
-    assert(choose_name("jobucaldas", "Jobu") == "jobucaldas");
+    assert(choose_name("ExampleGamer", "Player One") == "ExampleGamer");
     // an address is never a name
-    assert(choose_name("someone@example.com", "Jobu") == "Jobu");
+    assert(choose_name("someone@example.com", "Player One") == "Player One");
     // a blank account name falls back, and both blank stays blank
-    assert(choose_name("  ", "Jobu") == "Jobu");
+    assert(choose_name("  ", "Player One") == "Player One");
     assert(choose_name("", "").empty());
     // trimming and control-character rejection still apply
-    assert(choose_name(" jobucaldas\r\n", "Jobu") == "jobucaldas");
-    assert(choose_name("bad\x01name", "Jobu") == "Jobu");
+    assert(choose_name(" ExampleGamer\r\n", "Player One") == "ExampleGamer");
+    assert(choose_name("bad\x01name", "Player One") == "Player One");
 
     // ---- a console that answers more than the documented properties
     std::string from;
-    assert(choose_name_from_properties({{"Gamertag", "jobucaldas"}, {"DisplayName", "Jobu"}}, &from) == "jobucaldas");
+    assert(choose_name_from_properties({{"Gamertag", "ExampleGamer"}, {"DisplayName", "Player One"}}, &from) == "ExampleGamer");
     assert(from == "Gamertag");
     // the documented two are only the fallback
-    assert(choose_name_from_properties({{"DisplayName", "Jobu"}, {"AccountName", "jobucaldas"}}, &from) == "jobucaldas");
+    assert(choose_name_from_properties({{"DisplayName", "Player One"}, {"AccountName", "ExampleGamer"}}, &from) == "ExampleGamer");
     assert(from == "AccountName");
     // a blank or address-valued Xbox property does not win
-    assert(choose_name_from_properties({{"Gamertag", "  "}, {"AccountName", "jobucaldas"}}, &from) == "jobucaldas");
-    assert(choose_name_from_properties({{"Gamertag", "a@b.c"}, {"DisplayName", "Jobu"}}, &from) == "Jobu");
+    assert(choose_name_from_properties({{"Gamertag", "  "}, {"AccountName", "ExampleGamer"}}, &from) == "ExampleGamer");
+    assert(choose_name_from_properties({{"Gamertag", "a@b.c"}, {"DisplayName", "Player One"}}, &from) == "Player One");
     assert(choose_name_from_properties({}, &from).empty() && from.empty());
 
     std::puts("xbox_gamertag: ok");

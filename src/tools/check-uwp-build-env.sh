@@ -21,7 +21,7 @@ check_tool makemsix "${MAKEMSIX_PATH:-}"
 check_tool osslsigncode "${OSSLSIGNCODE_PATH:-}"
 # Resolve the selected wrapper as app/build.sh does; its script is the compiler/linker provider.
 if [[ -z $wrapper ]]; then
-  for candidate in "$root/../uwp-crossbuild" /workspace/ref/uwp-crossbuild; do
+  for candidate in "$root/../uwp-crossbuild" "$root/out/uwp-crossbuild"; do
     if [[ -x $candidate/scripts/build.sh ]]; then wrapper=$candidate; break; fi
   done
 fi

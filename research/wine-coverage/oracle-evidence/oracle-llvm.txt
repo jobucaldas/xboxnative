@@ -1,5 +1,5 @@
 
-File: /workspace/megabonk-from-console/GameAssembly.dll
+File: megabonk-from-console/GameAssembly.dll
 Format: COFF-x86-64
 Arch: x86_64
 AddressSize: 64bit
@@ -333,7 +333,7 @@ Import {
 }
 
 
-File: /workspace/megabonk-from-console/Megabonk.exe
+File: megabonk-from-console/Megabonk.exe
 Format: COFF-x86-64
 Arch: x86_64
 AddressSize: 64bit
@@ -421,7 +421,7 @@ Import {
 }
 
 
-File: /workspace/megabonk-from-console/UnityCrashHandler64.exe
+File: megabonk-from-console/UnityCrashHandler64.exe
 Format: COFF-x86-64
 Arch: x86_64
 AddressSize: 64bit
@@ -684,7 +684,7 @@ Import {
 }
 
 
-File: /workspace/megabonk-from-console/UnityPlayer.dll
+File: megabonk-from-console/UnityPlayer.dll
 Format: COFF-x86-64
 Arch: x86_64
 AddressSize: 64bit
@@ -1341,7 +1341,7 @@ DelayImport {
 }
 
 
-File: /workspace/megabonk-from-console/baselib.dll
+File: megabonk-from-console/baselib.dll
 Format: COFF-x86-64
 Arch: x86_64
 AddressSize: 64bit

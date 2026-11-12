@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Order contract for the GPU drain the ResizeBuffers hook runs
-// (host/resize_drain.h). The Bugbot HIGH finding this pins down: draining
+// (host/resize_drain.h). The upstream review finding this pins down: draining
 // must submit the query (End, then Flush) BEFORE polling GetData — a wait
 // before that Flush spins on a query the driver has not received while real
 // work stays queued, which is exactly the in-flight back-buffer use the drain
@@ -238,7 +238,7 @@ int main() {
         if(seq!=want)printf("  got:      %s\n  expected: %s\n",seq.c_str(),want);
         // The spin kept polling through the S_FALSEs and stopped at S_OK.
         CHECK(q.polls==3);
-        // No ClearState anywhere in the drain (Bugbot medium finding).
+        // No ClearState anywhere in the drain (an upstream review finding).
         CHECK(seq.find("ClearState")==std::string::npos);
     }
     g_log.clear();

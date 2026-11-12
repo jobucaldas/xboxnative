@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 // Steam persona names for owned games served by the Steam API provider
-// (gbe_fork; AGENTS.md rule 3). gbe_fork answers ISteamFriends::GetFriendPersonaName
+// (gbe_fork; the ownership rule). gbe_fork answers ISteamFriends::GetFriendPersonaName
 // from its own friend list, which only ever holds peers on its LAN network
 // (dll/steam_friends.cpp: `find_friend` -> "Unknown User"). With
 // disable_networking=1 that list is empty, so every leaderboard row the game

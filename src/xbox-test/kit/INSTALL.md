@@ -25,7 +25,7 @@ it does not prove that a package works on the console.
    Installing does not launch them.
 4. **Do not uninstall `launcher` (`Xboxnative.Launcher`) to update it:** it holds Steam
    login state. Bump the package version and install over the same identity.
-   Follow `docs/xbox/REBUILD.md` for package setup. In Dev Home, set the app type
+   Follow the repository README's Build section for package setup. In Dev Home, set the app type
    to Game when required for the larger memory limit; the UI sequence varies
    with console software. Do not use `src/xbox-test/dp/uninstall.sh` for this guide.
 5. Read the package's identity/version from `manifest.json`. For the default
@@ -90,6 +90,5 @@ script route, which uploads the matching public certificate with the package.
    `src/xbox-test/tools/play-test.sh <appid>` through the launcher.
 
 For an unsigned/untrusted-package error, re-run both kit verification scripts
-before attempting another install. If an app exits after launch, see
-`docs/xbox/REBUILD.md`; do not loosen test assertions or count a missing guest as
-success. Console access is shared: the Device Portal scripts acquire the lock.
+before attempting another install. If an app exits after launch, its boot log and the launcher's `launch_probe.log`
+names the stop; do not loosen test assertions or count a missing guest as success. Console access is shared: the Device Portal scripts acquire the lock.

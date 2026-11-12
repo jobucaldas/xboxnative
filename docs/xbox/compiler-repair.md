@@ -52,6 +52,6 @@ A working native compiler is only a prerequisite: run the relevant application
 tests themselves. This smoke program does not test the launcher, PE mapper,
 Windows/MSVC ABI, UWP FromApp APIs, MSIX packaging or real controller input.
 Console-affecting changes still require the full `src/xbox-test/smoke-all.sh` run;
-launcher acceptance is `src/xbox-test/tools/play-test.sh <appid>` and the criteria in
-[`docs/PLAYABLE.md`](../PLAYABLE.md). Keep private evidence local and summarize
+launcher acceptance is `src/xbox-test/tools/play-test.sh <appid>`.
+Keep private evidence local and summarize
 actual results, including failures, in the pull request.

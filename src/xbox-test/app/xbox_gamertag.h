@@ -4,8 +4,8 @@
 // Live identity hands back.
 //
 // Windows.System.KnownUserProperties has no gamertag: DisplayName is the
-// Microsoft account name ("Jobu"), which is not the name the console shows for
-// the signed-in player ("jobucaldas"). The gamertag lives in Xbox Live
+// Microsoft account name ("Player One"), which is not the name the console
+// shows for the signed-in player ("ExampleGamer"). The gamertag lives in Xbox Live
 // identity, and a packaged app reaches it through XblIdpAuthManager
 // (um/XblIdpAuthManager.h): GetTokenAndSignatureWithTokenResult returns an XSTS
 // token for the console's own gamer account, and

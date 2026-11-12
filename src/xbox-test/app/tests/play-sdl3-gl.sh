@@ -9,6 +9,7 @@
 # Wine 11's d3d12 does run the driver (it answers ID3D12Device9 but not CreateCommandQueue1, which
 # patches/mesa-src/0002 covers), so the d3d12 pass is expected to present a frame here too.
 set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)   # repo root: defaults below must not depend on the cwd
 cd "$(dirname "$0")/.."
 export WINEPREFIX=${PRUN_WINEPREFIX:-/tmp/prun-wine}
 export WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d
@@ -16,7 +17,7 @@ bash ../../tools/fetch-sdl.sh out/sdl
 bash tests/play-runtime.sh >/dev/null   # builds the Play runner; its own gates must pass
 out=out/play-tests
 mkdir -p "$out/donors"; cp out/layout/donors/*.dll "$out/donors/"
-CB=${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}
+CB=${UWP_CROSSBUILD:-$root/out/uwp-crossbuild}
 crt=${XWIN_ROOT:-$HOME/.cache/uwp-crossbuild/xwin}
 game=out/play-sdl/sdl3gl; rm -rf "$game" "$out/obj/sdl3gl"; mkdir -p "$game"
 UWP_OBJ_DIR="$out/obj/sdl3gl" "$CB/scripts/build.sh" --out "$game/play-sdl3-gl.exe" --link-arg "out/sdl/SDL3/lib/x64/SDL3.lib" tests/play-sdl3-gl.c -- /MT /O2 "/Iout/sdl/SDL3/include" >/dev/null

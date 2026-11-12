@@ -26,7 +26,7 @@ An engine's normal "no Vulkan" path is then the one it takes. **[verified off-de
 
 ## Which owned games use Vulkan?
 
-Surveyed 2026-11-09 over `/home/jobu/steam-owned/games/*` (7 installed titles), by static imports
+Surveyed 2026-11-09 over `<local steam-owned games directory>/*` (7 installed titles), by static imports
 (`llvm-readobj --coff-imports`) and by strings:
 
 | Game | Vulkan evidence | Needs Vulkan today? |
@@ -296,7 +296,7 @@ acceptance; until then nothing here claims a game renders through Vulkan.
 
 Vulkan-Loader and Vulkan-Headers are Apache-2.0; Mesa and DirectX-Headers are MIT; the null ICD is this repository's
 own code (GPL-3.0-or-later). All are listed in `NOTICE`, built from pinned sources, and their outputs are git-ignored
-and never committed (AGENTS.md rules 5 and 9). No game or Valve files are touched: the loader and the ICD are
+and never committed (the contributing rules on binaries and licensing). No game or Valve files are touched: the loader and the ICD are
 substituted in memory like the other Play modules, and a game that ships its own `vulkan-1.dll` keeps it. Nothing here
 weakens a gate: the fixture fails (never passes) when the loader, the instance or the zero-device answer is not
 exactly what Windows without a driver returns, and the dzn fixture prints BLOCKED (never PASS) when the host's D3D12

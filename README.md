@@ -3,35 +3,26 @@
 Run Windows x64 Steam games on an **Xbox Series S** (Dev Mode) inside a UWP "Game" app, using a Wine-style
 loader plus our own POSIX/syscall host layer (`uwph`). Status: **early, experimental**.
 
-## Honest current state
-- Several owned games reach their menus or title screens on the console (Megabonk, Puyo Puyo Tetris 2, Say No! More,
-  Slime Rancher, Going Under, Halo Wars: DE, Haven); none is yet marked **confirmed working**. See
-  [docs/GAMES.md](docs/GAMES.md) for what each has shown and what blocks it. The Play runtime (`src/xbox-test/app/tests/play-game-host.sh`
-  with an owned install) also runs games off-device under Wine for regression testing.
-- Working on the console today (see `docs/xbox/LANES.md`, `src/xbox-test/uwph/*/README.md`): the launcher with Steam QR
-  login, its own downloader (licensed depots only), per-game install location (internal or USB) and Steam Cloud sync;
-  the uwph host (threads, TLS, exceptions, files, loopback TCP, W^X via `VirtualProtectFromApp`); the Play PE loader
-  (64-bit; 32-bit maps as data only); CoreWindow D3D11 swap chain; gamepad input; audio; real system
-  `d3d11`/`dxgi`/`ws2_32`/`bcrypt`. Known gaps: Direct3D 9/10/12, Vulkan and OpenGL for games that need them, and 32-bit
-  execution (an x86 core exists off-device and is not wired in yet).
-- Steam: owned games get an emulated Steam API (gbe_fork, fetched and pinned, never committed) or, for SteamStub
-  titles, Valve's signed client with the owner's ownership ticket; achievements and cloud saves go to the real
-  account. Games' own files are never patched on disk.
-- "Playable" is defined by evidence, not announcement: [docs/PLAYABLE.md](docs/PLAYABLE.md).
-
-## Game status
-
-Which games run on the console, and the evidence for each, is tracked in [docs/GAMES.md](docs/GAMES.md)
-(per-title status, last evidence date, what counts as working). Nothing is marked working until it meets
-[docs/PLAYABLE.md](docs/PLAYABLE.md). Missing Win32 functions, ranked by whether a real run reached them,
-are in [docs/GAPS.md](docs/GAPS.md).
+## Current state
+- Several owned games reach their menus or title screens on the console; none is yet marked **confirmed
+  working**. The Play runtime (`src/xbox-test/app/tests/play-game-host.sh` with an owned install) also
+  runs games off-device under Wine for regression testing.
+- Working on the console today (see `src/xbox-test/uwph/*/README.md`): the launcher with Steam QR login,
+  its own downloader (licensed depots only), per-game install location (internal or USB) and Steam Cloud
+  sync; the uwph host (threads, TLS, exceptions, files, loopback TCP, W^X via `VirtualProtectFromApp`);
+  the Play PE loader (64-bit; 32-bit maps as data only); CoreWindow D3D11 swap chain; gamepad input;
+  audio; real system `d3d11`/`dxgi`/`ws2_32`/`bcrypt`. Known gaps: Direct3D 9/10/12, Vulkan and OpenGL
+  for games that need them, and 32-bit execution (an x86 core exists off-device and is not wired in yet).
+- Steam: owned games get an emulated Steam API (gbe_fork, fetched and pinned, never committed) or, for
+  SteamStub titles, Valve's signed client with the user's ownership ticket; achievements and cloud saves
+  go to the real account. Games' own files are never patched on disk.
+- "Playable" is defined by evidence, not announcement: a recorded run on real hardware with real input.
 
 ## Design
 launcher → Wine-style loader → ELF/PE shim → `uwph` (POSIX/syscall host in UWP, in-process wineserver, no AF_UNIX).
 Rationale and checklists: [research/WINE-BASE-REPORT.md](research/WINE-BASE-REPORT.md) (use Wine's `*.spec` files as the
 checklist; donor PE-only DLLs), [research/D3D-LAYERS-REPORT.md](research/D3D-LAYERS-REPORT.md) (D3D9/D3D11 options),
 [research/X86-32BIT-PLAN.md](research/X86-32BIT-PLAN.md) (staged 32-bit plan; stage 1, an off-device x86 interpreter core with PE32 loader and import thunks, is in `src/xbox-test/app/host/x86/` and tested by `src/xbox-test/app/tests/x86-core.sh`; it is not yet wired into the launcher, so 32-bit games still only map for inspection).
-Backlog: [docs/BACKLOG.md](docs/BACKLOG.md). Rebuild notes and lessons: [docs/xbox/REBUILD.md](docs/xbox/REBUILD.md).
 
 ## Layout
 Application, test, and tool sources live under `src/`, with tests beside the code they exercise.
@@ -47,13 +38,18 @@ Build outputs and fetched third-party sources are ignored at any source-tree dep
 | `src/xbox-test/smoke-all.sh` | Full regression (needs a console for the on-device sections; `--offline` for the rest) |
 | `src/tools/xbox` | Import/gap analysis against Wine's spec files |
 | `src/research` | Research analysis scripts; their reports and data remain in root `research/` |
-| `research`, `docs` | Reports, evidence logs, backlog, lane notes |
+| `research` | Design reports and evidence logs |
 | `deps.pin`, `src/tools/fetch-*.sh`, `patches/` | Pinned external dependencies (not copied here) |
+
+## Build and test in one command
+`./xn --help`: `./xn check` runs the offline checks CI runs, `./xn build` builds the launcher, `./xn local` does both, and
+`./xn console` builds, deploys to the console and runs the automated console tests (credentials from a git-ignored `.env`,
+template in `.env.example`). See [docs/BUILD-AND-TEST.md](docs/BUILD-AND-TEST.md). The sections below are the underlying steps.
 
 ## Build
 Linux host. Needs `clang-cl`/`lld-link` (LLVM 19), the xwin-provided Windows SDK/CRT, `makemsix`, `osslsigncode`, `python3`.
 ```sh
-src/tools/fetch-uwp-crossbuild.sh            # clones the pinned build wrapper (default /workspace/ref/uwp-crossbuild, or $UWP_CROSSBUILD)
+src/tools/fetch-uwp-crossbuild.sh            # clones the pinned build wrapper (default out/uwp-crossbuild, or $UWP_CROSSBUILD)
 bash src/xbox-test/app/build.sh              # launcher -> src/xbox-test/app/out/xbtest.msix (signed with a throwaway local test cert)
 bash src/xbox-test/uwph/host/build.sh        # uwph host test package -> src/xbox-test/uwph/host/out/k32.msix
 ```
@@ -95,21 +91,29 @@ bash src/xbox-test/app/tests/session-restore.sh
 bash src/xbox-test/kit/check-install-guide.sh
 src/xbox-test/smoke-all.sh --offline                                    # off-device sections
 # On a console (Dev Mode, Device Portal enabled; DP_PASS in the environment, never committed):
-src/xbox-test/tools/play-test.sh 3405340                                # "Play Megabonk via the launcher"
+src/xbox-test/tools/play-test.sh <appid>                                # play an owned game via the launcher
 ```
 See `src/xbox-test/dp/README.md` for Device Portal setup and `src/xbox-test/kit/INSTALL.md` for installing on a console.
-The launcher can also run its own packaged fixtures for the Vulkan, D3D9, D3D10 and 32-bit paths on a console, without a
-game: see [docs/SELFTEST.md](docs/SELFTEST.md).
 
-## Rules of the road
-Owned games only, never piracy: your own account via our launcher's login, official depots. An emulated Steam API
-(gbe_fork) may serve an owned game's Steam calls, with achievements and cloud saves synced to your real account. Game
-and Valve files stay unmodified on disk (no Steamless, no cracks), and there is no Xbox security bypass.
-No game files, Valve/Microsoft binaries, or credentials in this repository. See [AGENTS.md](AGENTS.md).
+## Contributing
+- **Pull requests only.** Never push to `main`; open a PR from a feature branch.
+- **Never weaken a test gate.** Do not loosen assertions, skip sections, shorten timeouts, or count a
+  SKIP as PASS to get green. A failing test is evidence.
+- **Owned games only; never enable piracy.** Play runs games the signed-in Steam account owns, installed
+  from official depots. An emulated Steam API (e.g. gbe_fork) may answer an owned game's Steam calls;
+  achievements and cloud saves must reach the player's real Steam account. Substitution happens in memory:
+  never patch or strip game or Valve files on disk. No Xbox security/Dev-Mode restrictions bypass.
+- **No secrets or personal data.** Never commit or print `DP_PASS`, Steam refresh/access tokens,
+  `steam_session.bin`, signing keys/pfx, SteamIDs, or screenshots showing accounts.
+- **No game files, Valve/Microsoft/Unity binaries, or large binaries (>5 MB).** External code is pinned in
+  `deps.pin` and fetched, not copied (see `patches/`). Never commit third-party binaries (e.g. Wine-built
+  DLLs); build them from a pinned source at setup time via `src/tools/fetch-*.sh` / `src/tools/build-*.sh`.
+- Third-party code stays under its own licence and is listed in [NOTICE](NOTICE). Contributions are
+  accepted under GPL-3.0-or-later.
 
 ## Licence
-GPL-3.0-or-later ([LICENSE](LICENSE), [NOTICE](NOTICE) for third-party pieces and the compatibility notes). Originated in the
-fork `jobucaldas/Boxedwine-xbox-64` (a fork of Boxedwine, GPL-2.0-or-later, compatible through "or later"); only our own
+GPL-3.0-or-later ([LICENSE](LICENSE), [NOTICE](NOTICE) for third-party pieces and the compatibility notes). Originated in a
+fork of Boxedwine (GPL-2.0-or-later, compatible through "or later"); only our own
 additions were imported here. No third-party binaries are committed: anything built from other projects' source is built at
 setup time from a pinned source (see `deps.pin`, `src/tools/fetch-*.sh`, `src/tools/build-wine-donors.sh`).
 

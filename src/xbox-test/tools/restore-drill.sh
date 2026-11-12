@@ -8,11 +8,12 @@
 #        restore-drill.sh --backup   (runs x64-run/backup.sh first)
 # env: BACKUP_DIR, LIVE_REPO, WT_DIR override the defaults (used by tests).
 set -uo pipefail
-S=${BACKUP_DIR:-/cursor/stores/store-a55f5844-0c99-40e9-a339-1ccf00723a82/x64-backup}
-LIVE=${LIVE_REPO:-/workspace/Boxedwine-xbox-64}
-WT=${WT_DIR:-/workspace/wt}
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)   # repo root: defaults below must not depend on the cwd
+S=${BACKUP_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/xboxnative/backup}
+LIVE=${LIVE_REPO:-$root}
+WT=${WT_DIR:-$LIVE-wt}
 case "${1:-}" in
-    --backup) bash /workspace/x64-run/backup.sh >/dev/null || { echo "RESTORE-DRILL FAIL: backup.sh failed"; exit 1; } ;;
+    --backup) bash "${BACKUP_SCRIPT:-$root/x64-run/backup.sh}" >/dev/null || { echo "RESTORE-DRILL FAIL: backup.sh failed"; exit 1; } ;;
     '') ;;
     *) echo "usage: $0 [--backup]" >&2; exit 2 ;;
 esac

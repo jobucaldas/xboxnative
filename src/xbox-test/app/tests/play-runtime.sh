@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Off-device Wine proof for the same runtime used by launcher Play. No console claim.
 set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)   # repo root: defaults below must not depend on the cwd
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.local/bin:$PATH"
 export WINEPREFIX=${PRUN_WINEPREFIX:-/tmp/prun-wine}
@@ -181,7 +182,7 @@ lld-link-19 /nodefaultlib /subsystem:windows,6.02 /appcontainer /dynamicbase /nx
 
 cp "$out/play-dependency.dll" "$out/play-pending-target.dll"
 cp "$out/play-reject.dll" "$out/play-pending-reject.dll"
-CB=${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}
+CB=${UWP_CROSSBUILD:-$root/out/uwp-crossbuild}
 UWP_OBJ_DIR="$out/obj/cxx" "$CB/scripts/build.sh" --out "$out/play-cxx.dll" --link-arg /dll tests/play-cxx.cpp -- /MT /O2 /EHsc
 # Relink against the desktop import names used by the owned game. WindowsApp
 # otherwise selects API-set names outside the production import allowlist.

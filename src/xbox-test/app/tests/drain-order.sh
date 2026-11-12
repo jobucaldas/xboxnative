@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Builds and runs the resize-drain order contract test (host/resize_drain.h):
 # the drain must End the query, Flush to submit it, and only then poll
-# GetData — the Bugbot HIGH finding this pins (wait before submit = blind
+# GetData — the upstream review finding this pins (wait before submit = blind
 # sleep). Runs under Wine headless; no D3D device is created.
 set -euo pipefail
 cd "$(dirname "$0")/.."

@@ -5,6 +5,7 @@
 # launcher Play. Each must create a window and a Direct3D 11 renderer, present
 # frames and shut down (exit 42). No console or game claim.
 set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)   # repo root: defaults below must not depend on the cwd
 cd "$(dirname "$0")/.."
 export WINEPREFIX=${PRUN_WINEPREFIX:-/tmp/prun-wine}
 export WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d
@@ -12,7 +13,7 @@ bash ../../tools/fetch-sdl.sh out/sdl
 bash tests/play-runtime.sh >/dev/null   # builds the Play runner; its own gates must pass
 out=out/play-tests
 mkdir -p "$out/donors"; cp out/layout/donors/*.dll "$out/donors/"
-CB=${UWP_CROSSBUILD:-/workspace/ref/uwp-crossbuild}
+CB=${UWP_CROSSBUILD:-$root/out/uwp-crossbuild}
 crt=${XWIN_ROOT:-$HOME/.cache/uwp-crossbuild/xwin}
 status=0
 for v in 3 2;do

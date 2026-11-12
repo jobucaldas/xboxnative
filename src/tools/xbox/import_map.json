@@ -6,7 +6,7 @@
     "GameAssembly.dll",
     "baselib.dll"
   ],
-  "policy_source": "/workspace/x64-run/LANES.md \u00a71 (table takes precedence over contradictory \u00a74 WINHTTP stub list)",
+  "policy_source": "the import-routing policy table (table takes precedence over contradictory \u00a74 WINHTTP stub list)",
   "classification_semantics": {
     "system": "Resolve to the real OS DLL or API-set contract; planned routing does not certify export availability.",
     "uwph": "Resolve through the uwph/Wine loader: host-backed builtins or unchanged game-supplied modules as specified by reason.",
@@ -65,7 +65,7 @@
     },
     "bcrypt.dll": {
       "class": "system",
-      "reason": "Native crypto/COM/version passthrough planned by LANES \u00a71; imported export behavior still needs game-level validation."
+      "reason": "Native crypto/COM/version passthrough planned by the import-routing policy table; imported export behavior still needs game-level validation."
     },
     "bcryptprimitives.dll": {
       "class": "system",
@@ -77,7 +77,7 @@
     },
     "crypt32.dll": {
       "class": "system",
-      "reason": "Native crypto/COM/version passthrough planned by LANES \u00a71; imported export behavior still needs game-level validation."
+      "reason": "Native crypto/COM/version passthrough planned by the import-routing policy table; imported export behavior still needs game-level validation."
     },
     "d3d9.dll": {
       "class": "uwph",
@@ -97,15 +97,15 @@
     },
     "d3d11.dll": {
       "class": "system",
-      "reason": "Native Xbox graphics passthrough per LANES \u00a71; basic devices/swap chain have console evidence, full game use remains unverified."
+      "reason": "Native Xbox graphics passthrough per the import-routing policy table; basic devices/swap chain have console evidence, full game use remains unverified."
     },
     "d3d12.dll": {
       "class": "system",
-      "reason": "Native Xbox graphics passthrough per LANES \u00a71; basic devices/swap chain have console evidence, full game use remains unverified."
+      "reason": "Native Xbox graphics passthrough per the import-routing policy table; basic devices/swap chain have console evidence, full game use remains unverified."
     },
     "dbghelp.dll": {
       "class": "stub",
-      "reason": "GameAssembly directly imports SymInitialize/SymFromAddr despite LANES \u00a71 crash-handler-only claim; planned clean-failure symbolization stubs need validation."
+      "reason": "GameAssembly directly imports SymInitialize/SymFromAddr despite the import-routing policy table crash-handler-only claim; planned clean-failure symbolization stubs need validation."
     },
     "dinput8.dll": {
       "class": "wine-pe",
@@ -113,11 +113,11 @@
     },
     "dwmapi.dll": {
       "class": "system",
-      "reason": "Provisional native WinHTTP/compositor-query route from the LANES \u00a71 table; validate exact exports on console."
+      "reason": "Provisional native WinHTTP/compositor-query route from the import-routing policy table; validate exact exports on console."
     },
     "dxgi.dll": {
       "class": "system",
-      "reason": "Native Xbox graphics passthrough per LANES \u00a71; basic devices/swap chain have console evidence, full game use remains unverified."
+      "reason": "Native Xbox graphics passthrough per the import-routing policy table; basic devices/swap chain have console evidence, full game use remains unverified."
     },
     "gdi32.dll": {
       "class": "stub",
@@ -133,7 +133,7 @@
     },
     "iphlpapi.dll": {
       "class": "system",
-      "reason": "Provisional native network-query route for GetIfEntry/GetAdaptersAddresses/GetNetworkParams; absent from LANES \u00a71 and not console-verified."
+      "reason": "Provisional native network-query route for GetIfEntry/GetAdaptersAddresses/GetNetworkParams; absent from the import-routing policy table and not console-verified."
     },
     "kernel32.dll": {
       "class": "uwph",
@@ -145,11 +145,11 @@
     },
     "ole32.dll": {
       "class": "system",
-      "reason": "Native crypto/COM/version passthrough planned by LANES \u00a71; imported export behavior still needs game-level validation."
+      "reason": "Native crypto/COM/version passthrough planned by the import-routing policy table; imported export behavior still needs game-level validation."
     },
     "oleaut32.dll": {
       "class": "system",
-      "reason": "Native crypto/COM/version passthrough planned by LANES \u00a71; imported export behavior still needs game-level validation."
+      "reason": "Native crypto/COM/version passthrough planned by the import-routing policy table; imported export behavior still needs game-level validation."
     },
     "opengl32.dll": {
       "class": "stub",
@@ -209,7 +209,7 @@
     },
     "winhttp.dll": {
       "class": "system",
-      "reason": "Provisional native WinHTTP/compositor-query route from the LANES \u00a71 table; validate exact exports on console."
+      "reason": "Provisional native WinHTTP/compositor-query route from the import-routing policy table; validate exact exports on console."
     },
     "winmm.dll": {
       "class": "stub",
@@ -218,7 +218,7 @@
     },
     "ws2_32.dll": {
       "class": "system",
-      "reason": "Native Winsock passthrough per LANES \u00a71; console TCP works, while AF_UNIX remains unavailable."
+      "reason": "Native Winsock passthrough per the import-routing policy table; console TCP works, while AF_UNIX remains unavailable."
     }
   }
 }

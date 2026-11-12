@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 // Steam achievements and stats for owned games served by the Steam API provider
-// (gbe_fork; AGENTS.md rule 3), synced with the player's real Steam account over
+// (gbe_fork; the ownership rule), synced with the player's real Steam account over
 // the launcher's session. Portable: network and logging are injected.
 //
 // Before launch: ClientGetUserStats (schema + the player's values) becomes

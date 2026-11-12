@@ -85,7 +85,7 @@ smaller than the volume; `... of 5.0 GB` with no volume figure means the volume 
   or `X: skipped, drive type 1 (unknown)`. The drive type is logged because a fixed `D:` on a Dev Mode console is the
   developer scratch partition, not the USB stick; only a removable drive is named *USB X:*.
 
-If the pool is the developer partition, no launcher change can grow it: the owner resizes it in Dev Home
+If the pool is the developer partition, no launcher change can grow it: the user resizes it in Dev Home
 (*Manage dev storage*) or installs to the USB drive. That is an Xbox setting, not something an app may change.
 
 ## Open questions for the console

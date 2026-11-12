@@ -41,7 +41,7 @@ resolves the 23 observed WINMM symbols directly from System32. Export discovery
 alone does not establish working WinMM playback or endpoint activation.
 
 Reproduce the static audit with:
-`python3 src/xbox-test/audio/audit-imports.py /workspace/steam-owned/games/megabonk`.
+`python3 src/xbox-test/audio/audit-imports.py <local megabonk install>`.
 It compares per-image LLVM and pefile imports, the saved CSV, and the two route
 diagnostic symbol lists. It scans direct and delay imports from all top-level
 game PEs; dynamically selected libraries remain outside this check.

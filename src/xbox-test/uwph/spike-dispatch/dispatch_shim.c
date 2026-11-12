@@ -9,11 +9,10 @@
  * opcode table, the dispatcher trampoline, and two "unix call" handlers
  * (system_time_precise and dbg_write) -- using the exact symbol names and
  * function-pointer signature that Wine 10.0's real dlls/ntdll/unixlib.h
- * defines (see LANE_NOTES.md for the source citations). It does NOT load
+ * defines (source citations in the spike's report). It does NOT load
  * or touch Wine's actual prebuilt ntdll.dll -- that's covered separately
  * by hook_real_ntdll.c/hook_real_ntdll2.c in this same directory, which
- * DO hook the real binary's exported globals successfully (see
- * LANE_NOTES.md item 3 for that result and its two extra caveats:
+ * DO hook the real binary's exported globals successfully, with
  * private per-build opcode ordering, and System-V vs Windows x64 calling
  * convention for the table entries).
  *
@@ -44,7 +43,7 @@ typedef NTSTATUS (*unixlib_entry_t)( void *args );
  * wine_server_handle_to_fd, wine_spawnvp, system_time_precise) -- the four
  * we are NOT reimplementing all need either wineserver IPC (AF_UNIX, a
  * separate process) or ELF .so loading, which is exactly the part this
- * spike found is NOT a bare function-pointer swap. See LANE_NOTES.md.
+ * spike found is NOT a bare function-pointer swap.
  */
 enum shim_unix_funcs
 {
@@ -103,8 +102,7 @@ static NTSTATUS WINAPI shim_unix_call_dispatcher( unixlib_handle_t handle, unsig
      * by ntdll.so's ELF thread-init, not by anything exported from
      * ntdll.dll (PE) -- there is no pure-PE equivalent of it yet. Our
      * handlers below are leaf functions that cannot fault in a way that
-     * needs unwinding, so the trampoline can be this trivial. See
-     * LANE_NOTES.md item 2.
+     * needs unwinding, so the trampoline can be this trivial.
      */
     if (code >= sizeof(shim_unix_call_funcs) / sizeof(shim_unix_call_funcs[0]))
         return STATUS_INVALID_PARAMETER;

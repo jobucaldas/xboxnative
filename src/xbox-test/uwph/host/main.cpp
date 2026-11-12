@@ -103,7 +103,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         logf("Run: entering"); m_window.Activate();
         auto probe_root = std::wstring(Windows::Storage::ApplicationData::Current().LocalFolder().Path().c_str());
         // Only the isolated Mlp package selects this nonexecuting probe mode.
-        if (probe_root.find(L"Joao.XboxSteam.Mlp_") != std::wstring::npos) {
+        if (probe_root.find(L"Xboxnative.Mlp_") != std::wstring::npos) {
             HMODULE display=LoadPackagedLibrary(L"uwph-user32.dll",0);
             using Init=void (*)(IUnknown*,void(*)(),LONG,LONG);
             if(display) if(auto init=(Init)GetProcAddress(display,"uwph_display_init"))
@@ -115,19 +115,19 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             while (!m_closed) m_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessOneAndAllPending);
             return;
         }
-        if (probe_root.find(L"Joao.XboxSteam.Swc_") != std::wstring::npos) {
+        if (probe_root.find(L"Xboxnative.Swc_") != std::wstring::npos) {
             swc::run((IUnknown*)winrt::get_abi(m_window), (probe_root+L"\\swc-test.exe").c_str());
             while (!m_closed) m_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessOneAndAllPending);
             return;
         }
-        if (probe_root.find(L"Joao.XboxSteam.Reg_") != std::wstring::npos) {
+        if (probe_root.find(L"Xboxnative.Reg_") != std::wstring::npos) {
             wchar_t self[MAX_PATH]; GetModuleFileNameW(nullptr,self,MAX_PATH);
             std::wstring dir(self); dir.resize(dir.find_last_of(L'\\'));
             reg::run(dir+L"\\reg-test.exe", probe_root, test_log);
             while (!m_closed) m_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessOneAndAllPending);
             return;
         }
-        if (probe_root.find(L"Joao.XboxSteam.Cs32_") != std::wstring::npos) {
+        if (probe_root.find(L"Xboxnative.Cs32_") != std::wstring::npos) {
             cs32::run();
             while (!m_closed) m_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessOneAndAllPending);
             return;

@@ -4,11 +4,11 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../../../.." && pwd)
 cd "$root"
 dp="$root/src/xbox-test/dp"
-runs=/workspace/x64-run/runs/swc
-full=Joao.XboxSteam.Swc_0.1.0.0_x64__0bdeywx3x8szp
-rid='Joao.XboxSteam.Swc_0bdeywx3x8szp!App'
+runs=${RUNS_DIR:-out/runs}/swc
+full=Xboxnative.Swc_0.1.0.0_x64__0bdeywx3x8szp
+rid='Xboxnative.Swc_0bdeywx3x8szp!App'
 mkdir -p "$runs"
-exec 9>/workspace/x64-run/CONSOLE.lock
+exec 9>${TMPDIR:-/tmp}/xboxnative-console.lock
 flock -w 600 9
 export DP_LOCK_FD=9
 if [[ ${SWC_INSTALL:-0} == 1 ]]; then
