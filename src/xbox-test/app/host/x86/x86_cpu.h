@@ -47,7 +47,7 @@ struct ThunkTable {
 struct Cpu {
     Memory& mem; ThunkTable& thunks;
     uint32_t reg[8] = {}, eip = 0, eflags = 2, fs_base = 0, gs_base = 0;
-    uint64_t executed = 0, limit = 500ull * 1000 * 1000;
+    uint64_t executed = 0, limit = 500ull * 1000 * 1000, tsc = 0;
     bool exited = false; uint32_t exit_code = 0;
     unsigned depth = 0;
     Fpu fpu; Sse xmm; uint32_t mxcsr = 0x1f80;
@@ -270,7 +270,8 @@ struct Cpu {
         case 0x99: if (n == 4) reg[EDX] = int32_t(reg[EAX]) < 0 ? 0xffffffffu : 0; else setreg(2, 2, int16_t(reg[EAX]) < 0 ? 0xffff : 0); return;
         case 0xA0: case 0xA1: { unsigned sz = (op & 1) ? n : 1; setreg(0, sz, mem.r(fetchn(4) + seg, sz)); return; }
         case 0xA2: case 0xA3: { unsigned sz = (op & 1) ? n : 1; mem.w(fetchn(4) + seg, getreg(0, sz), sz); return; }
-        case 0xA4: case 0xA5: case 0xAA: case 0xAB: case 0xAC: case 0xAD: stringop(op, (op & 1) ? n : 1); return;
+        case 0xA4: case 0xA5: case 0xA6: case 0xA7: case 0xAA: case 0xAB: case 0xAC: case 0xAD: case 0xAE: case 0xAF:
+            stringop(op, (op & 1) ? n : 1); return;
         case 0xA8: case 0xA9: { unsigned sz = (op & 1) ? n : 1; alu(4, getreg(0, sz), fetchn(sz), sz); return; }
         case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6: case 0xB7: setreg(op & 7, 1, fetch()); return;
         case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE: case 0xBF: setreg(op & 7, n, fetchn(n)); return;
@@ -300,15 +301,27 @@ struct Cpu {
     }
     void stringop(uint8_t op, unsigned sz) {
         int step = f(DF) ? -int(sz) : int(sz);
-        bool repeat = rep == 0xF3;
-        if (rep == 0xF2) unsupported("repne string op");
+        bool repeat = rep != 0;
+        bool repne = rep == 0xF2;
         do {
             if (repeat && !reg[ECX]) break;
-            if (op <= 0xA5) { mem.w(reg[EDI], mem.r(reg[ESI] + seg, sz), sz); reg[ESI] += step; reg[EDI] += step; }
-            else if (op <= 0xAB) { mem.w(reg[EDI], getreg(0, sz), sz); reg[EDI] += step; }
-            else { setreg(0, sz, mem.r(reg[ESI] + seg, sz)); reg[ESI] += step; }
+            if (op <= 0xA7) {  // movs copies; cmps compares and sets flags only
+                uint32_t a = mem.r(reg[ESI] + seg, sz), b = mem.r(reg[EDI] + seg, sz);
+                if (op <= 0xA5) mem.w(reg[EDI] + seg, a, sz);
+                else alu(7, a, b, sz);  // cmps: sub for flags only
+                reg[ESI] += step; reg[EDI] += step;
+            } else if (op <= 0xAB) { mem.w(reg[EDI], getreg(0, sz), sz); reg[EDI] += step; }
+            else if (op <= 0xAD) { setreg(0, sz, mem.r(reg[ESI] + seg, sz)); reg[ESI] += step; }
+            else {  // scas: cmp al/ax/eax against [edi]
+                uint32_t b = mem.r(reg[EDI] + seg, sz);
+                alu(7, getreg(0, sz), b, sz);
+                reg[EDI] += step;
+            }
             if (repeat) --reg[ECX];
-        } while (repeat && reg[ECX]);
+        } while (repeat && reg[ECX] &&
+                 (((op >= 0xA6 && op <= 0xA7) || (op >= 0xAE && op <= 0xAF)) ? !(repne ? f(ZF) : !f(ZF)) : true));
+        // rep movs/stos/lods run to ECX=0; only cmps/scas set ZF and stop early
+        // (repe on ZF=1, repne on ZF=0). The old code only ran F3 movs-class ops.
     }
     void group3(unsigned sz) {
         Rm r = modrm(); unsigned sop = modrm_reg; uint32_t v = rd(r, sz);
@@ -408,10 +421,29 @@ struct Cpu {
                 return;
             }
             unsupported("0f c7 /n"); }
-        case 0xAE: {  // group 15: fences, fxrstor/xsave, ldmxcsr/stmxcsr
+        case 0xAE: {  // group 15: fences, fxsave/fxrstor, ldmxcsr/stmxcsr
             Rm r = modrm();
             switch (modrm_reg) {
-            case 0: case 1: case 5: case 6: return;  // fxsave/fxrstor/xsave/xrstor: state is host-side only
+            case 0: {  // fxsave: the real 512-byte layout (x87 env, state, xmm) games snapshot
+                if (r.isreg) unsupported("fxsave reg");
+                uint32_t ea = r.ea + seg;
+                mem.w(ea, fpu.cw, 2); mem.w(ea + 2, fpu.status(), 2);
+                mem.w(ea + 4, 0, 8);  // fop, ip, cs, dp, ds: no real 8087-style tracking
+                for (int i = 0; i < 8; ++i) for (int k = 0; k < 10; ++k) mem.w8(ea + 16 + 10 * i + k, fpu.st[i][k]);
+                mem.w(ea + 96, mxcsr, 4); mem.w(ea + 100, 0xffff0000u, 4);  // mxcsr + its mask field
+                for (int i = 0; i < 8; ++i) mem.w128(ea + 160 + 16 * i, xmm.r[i]);
+                return; }
+            case 1: {  // fxrstor
+                if (r.isreg) unsupported("fxrstor reg");
+                uint32_t ea = r.ea + seg;
+                fpu.cw = mem.r(ea, 2);
+                fpu.sw = mem.r(ea + 2, 2) & ~uint16_t(0x3800);  // bits 11-13 are TOP, restored below
+                fpu.top = (mem.r(ea + 2, 2) >> 11) & 7;
+                for (int i = 0; i < 8; ++i) { for (int k = 0; k < 10; ++k) fpu.st[i][k] = mem.r8(ea + 16 + 10 * i + k); fpu.empty[i] = false; }
+                mxcsr = mem.r(ea + 96, 4);
+                for (int i = 0; i < 8; ++i) mem.r128(ea + 160 + 16 * i, xmm.r[i]);
+                return; }
+            case 5: case 6: return;  // xsave/xrstor: same treatment as before (not implemented)
             case 2: mxcsr = rd(r, 4); return;        // ldmxcsr
             case 3: wr(r, 4, mxcsr); return;         // stmxcsr: a save/restore pair must round-trip
             case 7: return;                          // clflush
@@ -473,8 +505,52 @@ struct Cpu {
         case 0x60: case 0x61: case 0x62: case 0x63: case 0x64: case 0x65: case 0x66: case 0x67:
         case 0x68: case 0x69: case 0x6A: case 0x6B: case 0x6C: case 0x6D: case 0x6F: case 0x7F:
         case 0x74: case 0x75: case 0x76: case 0xD7: case 0xE7: case 0xEB: case 0xEF:
+        case 0xD1: case 0xD2: case 0xD3: case 0xD4: case 0xD5: case 0xE1: case 0xE2:
+        case 0xF1: case 0xF2: case 0xF3: case 0xF4: case 0xF5: case 0xF6:
+        case 0xDA: case 0xDB: case 0xDC: case 0xDD: case 0xDE: case 0xDF: case 0xE0: case 0xE8: case 0xE9: case 0xEA:
+        case 0xEC: case 0xED: case 0xEE:
         case 0xF8: case 0xF9: case 0xFA: case 0xFB: case 0xFC: case 0xFD: case 0xFE:
             sse_int(op); return;
+        case 0x70: {  // pshufd (66) / pshuflw (F2) / pshufhw (F3), imm8 selects lanes
+            Rm r = modrm(); uint8_t imm = fetch(); uint32_t a[4]; sse_read(r, a);
+            uint32_t out[4];
+            if (p66) { for (int i = 0; i < 4; ++i) out[i] = a[(imm >> (2 * i)) & 3]; }
+            else if (rep == 0xF2 || rep == 0xF3) {  // shuffle four 16-bit lanes in one half
+                uint16_t src[8]; memcpy(src, a, 16);
+                unsigned base = rep == 0xF2 ? 0 : 4;
+                for (int i = 0; i < 4; ++i) src[base + i] = src[base + ((imm >> (2 * i)) & 3)];
+                memcpy(out, src, 16);
+            } else unsupported("0f 70 (MMX pshufw)");
+            sse_write_reg(modrm_reg, out); return; }
+        case 0x71: case 0x72: case 0x73: {  // packed shifts by imm8: /2 sr, /4 sar, /6 sl, 73 /3 psrldq /7 pslldq
+            if (!p66) unsupported("0f 71/72/73 (MMX)");
+            // Here the reg field is the /n shift selector; the XMM operand is r/m.
+            Rm r = modrm(); if (!r.isreg) unsupported("0f 71/72/73 mem");
+            unsigned sop = modrm_reg; uint8_t cnt = fetch();
+            uint32_t a[4]; sse_reg(r.regno, a);
+            sse_shift(op, sop, cnt, a);
+            sse_write_reg(r.regno, a); return; }
+        case 0x18: { modrm(); if (modrm_reg > 2) unsupported("0f 18 /n"); return; }  // prefetcht0/t1/t2: a hint
+        case 0x31: {  // rdtsc: a synthetic counter that only ever advances (games poll it for timing)
+            uint64_t t = tsc += 1000;
+            reg[EAX] = uint32_t(t); reg[EDX] = uint32_t(t >> 32); return; }
+        case 0xA2: {  // cpuid: deterministic leaves; feature bits only for what we implement
+            switch (reg[EAX]) {
+            case 0: reg[EAX] = 1; reg[EBX] = 0x756e6547u; reg[EDX] = 0x49656e69u; reg[ECX] = 0x6c65746eu; return;  // "GenuineIntel"
+            case 1: reg[EAX] = 0x000006b4u; reg[EBX] = 0; reg[ECX] = 0;
+                    reg[EDX] = (1u << 0) | (1u << 4) | (1u << 15) | (1u << 19) | (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26); return;
+                    // fpu tsc cmov clflush mmx fxsr sse sse2
+            default: reg[EAX] = reg[EBX] = reg[ECX] = reg[EDX] = 0; return; } }
+        case 0xC3: {  // movnti (66): a non-temporal dword store
+            if (!p66) unsupported("0f c3 (MMX movntq)");
+            Rm r = modrm(); if (r.isreg) unsupported("movnti reg"); mem.w32(r.ea + seg, getreg(modrm_reg, 4)); return; }
+        case 0xC6: {  // shufps (no prefix) / shufpd (66)
+            Rm r = modrm(); uint8_t imm = fetch(); uint32_t a[4], b[4]; sse_reg(modrm_reg, a); sse_read(r, b);
+            uint32_t out[4];
+            if (p66) { out[0] = a[(imm & 1) * 2]; out[1] = a[(imm & 1) * 2 + 1];
+                       out[2] = b[((imm >> 1) & 1) * 2]; out[3] = b[((imm >> 1) & 1) * 2 + 1]; }
+            else { out[0] = a[imm & 3]; out[1] = a[(imm >> 2) & 3]; out[2] = b[(imm >> 4) & 3]; out[3] = b[(imm >> 6) & 3]; }
+            sse_write_reg(modrm_reg, out); return; }
         default: unsupported("0f opcode");
         }
     }
@@ -572,6 +648,48 @@ struct Cpu {
             mem.w64(r.ea + seg, uint64_t(hi) << 32 | lo); return;
         }
     }
+    // Integer SIMD group (all 66-prefixed in MSVC code).
+    // Packed shift shared by the imm8 (0F 71/72/73 /n) and register (D1-D3,
+    // E1-E3, F1-F3) forms. `sop` is the /n from the ModRM byte; for the
+    // register forms it comes from the opcode's low three bits.
+    //   71: word lanes   72: dword lanes   73: qword lanes (and byte shifts)
+    //   /2 = right logical, /4 = right arithmetic (words/dwords), /6 = left,
+    //   73 /3 = pslldq, 73 /7 = psrldq (whole-register byte shifts).
+    void sse_shift(uint8_t op, unsigned sop, unsigned cnt, uint32_t a[4]) {
+        uint8_t* ab = reinterpret_cast<uint8_t*>(a);
+        if (op == 0x73 && (sop == 3 || sop == 7)) {  // pslldq/psrldq: shift the whole 128 bits by bytes
+            unsigned k = cnt >= 16 ? 16 : cnt;
+            uint8_t tmp[16];
+            memcpy(tmp, ab, 16);
+            std::memset(ab, 0, 16);
+            if (sop == 7) memcpy(ab + k, tmp, 16 - k); else memcpy(ab, tmp + k, 16 - k);  // /7 pslldq (left), /3 psrldq (right)
+            return;
+        }
+        unsigned gran = op == 0x71 ? 2 : op == 0x72 ? 4 : 8;
+        unsigned maxcnt = gran == 2 ? 16 : gran == 4 ? 32 : 64;
+        if (cnt >= maxcnt) {  // counts >= lane width: zero, or sign fill for the arithmetic shifts
+            if (sop == 4 && gran == 2) { uint16_t fill = (ab[1] & 0x80) ? 0xffffu : 0; for (unsigned i = 0; i < 8; ++i) memcpy(ab + 2 * i, &fill, 2); }
+            else if (sop == 4 && gran == 4) { uint32_t fill = (ab[3] & 0x80) ? 0xffffffffu : 0; for (int i = 0; i < 4; ++i) a[i] = fill; }
+            else std::memset(ab, 0, 16);
+            return;
+        }
+        unsigned lanes = 16 / gran;
+        for (unsigned i = 0; i < lanes; ++i) {
+            if (sop == 6) {  // left
+                if (gran == 8) { uint64_t v; memcpy(&v, ab + 8 * i, 8); v <<= cnt; memcpy(ab + 8 * i, &v, 8); }
+                else if (gran == 4) a[i] <<= cnt;
+                else { uint16_t v; memcpy(&v, ab + 2 * i, 2); v = uint16_t(v << cnt); memcpy(ab + 2 * i, &v, 2); }
+            } else if (sop == 4 && gran == 2) {  // psraw
+                int16_t v; memcpy(&v, ab + 2 * i, 2); v = int16_t(v >> cnt); memcpy(ab + 2 * i, &v, 2);
+            } else if (sop == 4 && gran == 4) {  // psrad
+                int32_t v; memcpy(&v, ab + 4 * i, 4); v >>= cnt; memcpy(ab + 4 * i, &v, 4);
+            } else if (sop == 2) {  // right logical
+                if (gran == 8) { uint64_t v; memcpy(&v, ab + 8 * i, 8); v >>= cnt; memcpy(ab + 8 * i, &v, 8); }
+                else if (gran == 4) a[i] >>= cnt;
+                else { uint16_t v; memcpy(&v, ab + 2 * i, 2); v = uint16_t(v >> cnt); memcpy(ab + 2 * i, &v, 2); }
+            } else unsupported("sse shift /n");
+        }
+    }
     // Arithmetic and compare group (0F 51-5F). `op` is the second opcode byte.
     void sse_arith(uint8_t op) {
         Rm r = modrm();
@@ -642,8 +760,8 @@ struct Cpu {
             const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
             for (unsigned i = 0; i < 8 / gran; ++i) { memcpy(o + i * 2 * gran, ab + i * gran, gran); memcpy(o + i * 2 * gran + gran, bb + i * gran, gran); }
             sse_write_reg(modrm_reg, out); return; }
-        case 0x68: case 0x69: case 0x6A: {  // punpckhbw/wd/dq
-            unsigned gran = op == 0x68 ? 1 : op == 0x69 ? 2 : 4;
+        case 0x68: case 0x69: case 0x6A: case 0x6D: {  // punpckhbw/wd/dq/qdq
+            unsigned gran = op == 0x68 ? 1 : op == 0x69 ? 2 : op == 0x6A ? 4 : 8;
             sse_reg(modrm_reg, a); sse_read(r, b);
             uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
             const uint8_t* ab = reinterpret_cast<const uint8_t*>(a) + 8; const uint8_t* bb = reinterpret_cast<const uint8_t*>(b) + 8;
@@ -713,6 +831,110 @@ struct Cpu {
                 memcpy(o + i * gran, &v, gran);
             }
             sse_write_reg(modrm_reg, out); return; }
+        case 0xD1: case 0xD2: case 0xD3:   // psrlw/d/q  r/m, xmm
+        case 0xE1: case 0xE2: case 0xE3:   // psraw/d/q  r/m, xmm
+        case 0xF1: case 0xF2: case 0xF3: { // psllw/d/q  r/m, xmm
+            if (!p66) unsupported("0f d1..f3 (MMX)");
+            uint32_t a[4], b[4]; sse_reg(modrm_reg, a); sse_read(r, b);
+            uint64_t cnt; memcpy(&cnt, b, 8);  // the count is the low 64 bits of the source
+            unsigned sop = op == 0xD1 ? 2 : op == 0xD2 ? 2 : op == 0xD3 ? 2
+                         : op == 0xE1 ? 4 : op == 0xE2 ? 4
+                         : op == 0xF1 ? 6 : op == 0xF2 ? 6 : 6;
+            unsigned opb = op == 0xD1 || op == 0xE1 || op == 0xF1 ? 0x71
+                         : op == 0xD2 || op == 0xE2 || op == 0xF2 ? 0x72 : 0x73;
+            sse_shift(opb, sop, unsigned(cnt), a);
+            sse_write_reg(modrm_reg, a); return; }
+        case 0xD4: {  // paddq (66 0F D4): both 64-bit lanes
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            const uint64_t* ax = reinterpret_cast<const uint64_t*>(a); const uint64_t* bx = reinterpret_cast<const uint64_t*>(b);
+            uint64_t lo = ax[0] + bx[0], hi = ax[1] + bx[1];
+            uint32_t out[4] = {uint32_t(lo), uint32_t(lo >> 32), uint32_t(hi), uint32_t(hi >> 32)};
+            sse_write_reg(modrm_reg, out); return; }
+        case 0xD5: {  // pmullw: 16x16 -> low 16 bits
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
+            const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
+            for (int i = 0; i < 8; ++i) { int16_t x, y, m; memcpy(&x, ab + 2 * i, 2); memcpy(&y, bb + 2 * i, 2); m = int16_t(x * y); memcpy(o + 2 * i, &m, 2); }
+            sse_write_reg(modrm_reg, out); return; }
+        case 0xF4: {  // pmuludq: unsigned dword 0 -> qword lanes
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            uint64_t lo = uint64_t(a[0]) * b[0], hi = uint64_t(a[2]) * b[2];
+            uint32_t out[4] = {uint32_t(lo), uint32_t(lo >> 32), uint32_t(hi), uint32_t(hi >> 32)};
+            sse_write_reg(modrm_reg, out); return; }
+        case 0xF5: {  // pmaddwd: signed dwords from adjacent word pairs
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
+            const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
+            for (int i = 0; i < 4; ++i) { int32_t x0, x1, y0, y1;
+                int16_t t; memcpy(&t, ab + 4 * i, 2); x0 = t; memcpy(&t, ab + 4 * i + 2, 2); x1 = t;
+                memcpy(&t, bb + 4 * i, 2); y0 = t; memcpy(&t, bb + 4 * i + 2, 2); y1 = t;
+                int32_t s = x0 * y0 + x1 * y1; memcpy(o + 4 * i, &s, 4); }
+            sse_write_reg(modrm_reg, out); return; }
+        case 0xF6: {  // psadbw: |a-b| sums of 8-byte halves
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
+            const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
+            for (int h = 0; h < 2; ++h) { unsigned s = 0;
+                for (int i = 0; i < 8; ++i) s += unsigned(std::abs(int(ab[8 * h + i]) - int(bb[8 * h + i])));
+                uint16_t s16 = uint16_t(s); memcpy(o + 8 * h, &s16, 2); }
+            sse_write_reg(modrm_reg, out); return; }
+        case 0xE0: {  // pavgb (66 0F E0)
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
+            const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
+            for (int i = 0; i < 16; ++i) o[i] = uint8_t((unsigned(ab[i]) + unsigned(bb[i]) + 1) >> 1);
+            sse_write_reg(modrm_reg, out); return; }
+        case 0xD8: case 0xD9: case 0xDC: case 0xDD:  // paddusb/sw
+        case 0xE8: case 0xE9: case 0xEC: case 0xED: {  // psubusb/sw
+            unsigned gran = (op == 0xD8 || op == 0xDC || op == 0xE8 || op == 0xEC) ? 1 : 2;
+            bool add = op < 0xE0;
+            bool sgn = (op == 0xD9 || op == 0xDD || op == 0xE9 || op == 0xED);
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
+            const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
+            if (sgn) {  // signed saturation (paddsw/psubsw)
+                for (unsigned i = 0; i < 16 / gran; ++i) {
+                    int32_t x, y;
+                    if (gran == 1) { x = int8_t(ab[i]); y = int8_t(bb[i]); }
+                    else { int16_t t, u; memcpy(&t, ab + 2 * i, 2); memcpy(&u, bb + 2 * i, 2); x = t; y = u; }
+                    int32_t v = add ? x + y : x - y;
+                    int32_t lo = gran == 1 ? -128 : -32768, hi = gran == 1 ? 127 : 32767;
+                    if (v < lo) v = lo;
+                    if (v > hi) v = hi;
+                    if (gran == 1) o[i] = uint8_t(v); else memcpy(o + 2 * i, &v, 2);
+                }
+            } else {  // unsigned saturation (paddusb/psubusb)
+                for (unsigned i = 0; i < 16 / gran; ++i) {
+                    int32_t x, y;
+                    if (gran == 1) { x = ab[i]; y = bb[i]; }
+                    else { uint16_t t, u; memcpy(&t, ab + 2 * i, 2); memcpy(&u, bb + 2 * i, 2); x = t; y = u; }
+                    int32_t v = add ? x + y : x - y;
+                    int32_t hi = gran == 1 ? 255 : 65535;
+                    if (v < 0) v = 0;
+                    if (v > hi) v = hi;
+                    if (gran == 1) o[i] = uint8_t(v); else memcpy(o + 2 * i, &v, 2);
+                }
+            }
+            sse_write_reg(modrm_reg, out); return; }
+        case 0xDA: case 0xDE:  // pminub/pmaxub
+        case 0xEA: case 0xEE: {  // pminsw/pmaxsw
+            bool ismin = op == 0xDA || op == 0xEA;
+            bool sgn = op >= 0xEA;
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
+            const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
+            unsigned gran = sgn ? 2 : 1;
+            for (unsigned i = 0; i < 16 / gran; ++i) {
+                bool take_a;
+                if (sgn) { int16_t x, y; memcpy(&x, ab + 2 * i, 2); memcpy(&y, bb + 2 * i, 2); take_a = ismin ? x < y : x > y; }
+                else take_a = ismin ? ab[i] < bb[i] : ab[i] > bb[i];
+                if (take_a) memcpy(o + i * gran, ab + i * gran, gran); else memcpy(o + i * gran, bb + i * gran, gran);
+            }
+            sse_write_reg(modrm_reg, out); return; }
+        case 0xDB: case 0xDF: {  // pand / pandn (66 forms)
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            for (int i = 0; i < 4; ++i) a[i] = op == 0xDB ? (a[i] & b[i]) : (~a[i] & b[i]);
+            sse_write_reg(modrm_reg, a); return; }
         default: unsupported("sse integer");
         }
     }

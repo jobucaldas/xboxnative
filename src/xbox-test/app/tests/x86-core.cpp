@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <immintrin.h>
 #include "../host/x86/x86_win32.h"
 #if !defined(__x86_64__) && !defined(__i386__)
 #error "the ALU hardware comparison needs an x86 host"
@@ -611,6 +612,370 @@ static void test_sse_regressions() {
            "fxtract(8.0): st0=%g st1=%g", bf64(m.mem.r64(Machine::DATA + 16)), bf64(m.mem.r64(Machine::DATA + 24)));
 }
 
+// ---------- (2b) stage-2 additions: shuffles, packed shifts, saturating ops,
+// pmul* family, min/max/pavgb/psadbw, cmps/scas rep forms, rdtsc/cpuid,
+// movnti/prefetch, real fxsave/fxrstor ----------
+static void test_sse2_stage2() {
+    Machine m;
+    // load xmm0 <- [DATA], xmm1 <- [DATA+16], <op>, store xmm0 -> [DATA+32]
+    const std::vector<uint8_t> pre{0x66, 0x0F, 0x6F, 0x05, 0x00, 0x00, 0x02, 0x00,
+                                   0x66, 0x0F, 0x6F, 0x0D, 0x10, 0x00, 0x02, 0x00};
+    const std::vector<uint8_t> post{0x66, 0x0F, 0x7F, 0x05, 0x20, 0x00, 0x02, 0x00};
+    auto run = [&](const std::vector<uint8_t>& op_enc, const uint32_t a[4], const uint32_t b[4], uint32_t out[4]) {
+        m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
+        m.mem.w128(Machine::DATA, a); m.mem.w128(Machine::DATA + 16, b);
+        std::vector<uint8_t> code = pre; code.insert(code.end(), op_enc.begin(), op_enc.end());
+        code.insert(code.end(), post.begin(), post.end());
+        exec(m, code, 0, 0, 0, false);
+        m.mem.r128(Machine::DATA + 32, out);
+    };
+    const uint32_t V1[4] = {0x03020100u, 0x07060504u, 0x0b0a0908u, 0x0f0e0d0cu};
+    const uint32_t V2[4] = {0x13121110u, 0x17161514u, 0x1b1a1918u, 0x1f1e1d1cu};
+    // ---- pshufd: every immediate against the software model (dword lanes) ----
+    for (unsigned imm = 0; imm < 256; ++imm) {
+        uint32_t want[4];
+        for (int i = 0; i < 4; ++i) want[i] = V1[(imm >> (2 * i)) & 3];
+        uint32_t out[4];
+        run({0x66, 0x0F, 0x70, 0xC1, uint8_t(imm)}, V2, V1, out);  // C1: src is xmm1 = V1
+        EXPECT(memcmp(out, want, 16) == 0, "pshufd imm=%02x: %08x %08x %08x %08x want %08x %08x %08x %08x",
+               imm, out[0], out[1], out[2], out[3], want[0], want[1], want[2], want[3]);
+        ++alu_cases;
+    }
+    // pshufd against the real CPU for four immediates (pins the model itself).
+    // The immediate must be a literal, so one asm per case.
+    for (unsigned sel = 0; sel < 4; ++sel) {
+        uint32_t out[4];
+        run({0x66, 0x0F, 0x70, 0xC1, uint8_t(sel == 0 ? 0x00 : sel == 1 ? 0x1B : sel == 2 ? 0xE4 : 0x27)}, V2, V1, out);
+        __v4si v = {int(V1[0]), int(V1[1]), int(V1[2]), int(V1[3])};
+        __v4si r;
+        switch (sel) {
+        case 0: asm volatile("pshufd $0x00, %1, %0" : "=x"(r) : "x"(v)); break;
+        case 1: asm volatile("pshufd $0x1B, %1, %0" : "=x"(r) : "x"(v)); break;
+        case 2: asm volatile("pshufd $0xE4, %1, %0" : "=x"(r) : "x"(v)); break;
+        default: asm volatile("pshufd $0x27, %1, %0" : "=x"(r) : "x"(v)); break; }
+        uint32_t hw[4]; memcpy(hw, &r, 16);
+        EXPECT(memcmp(out, hw, 16) == 0, "pshufd hw sel=%u", sel);
+        ++alu_cases;
+    }
+    // shufps: model over representative immediates (no-prefix form: movups loads)
+    for (unsigned imm : {0x00u, 0x1bu, 0xe4u, 0x4eu, 0xb1u, 0xffu}) {
+        uint32_t want[4] = {V1[imm & 3], V1[(imm >> 2) & 3], V2[(imm >> 4) & 3], V2[(imm >> 6) & 3]};
+        m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
+        m.mem.w128(Machine::DATA, V1); m.mem.w128(Machine::DATA + 16, V2);
+        std::vector<uint8_t> code{0x0F, 0x10, 0x05, 0x00, 0x00, 0x02, 0x00,
+                                  0x0F, 0x10, 0x0D, 0x10, 0x00, 0x02, 0x00,
+                                  0x0F, 0xC6, 0xC1, uint8_t(imm),
+                                  0x0F, 0x11, 0x05, 0x20, 0x00, 0x02, 0x00};
+        exec(m, code, 0, 0, 0, false);
+        uint32_t out[4]; m.mem.r128(Machine::DATA + 32, out);
+        EXPECT(memcmp(out, want, 16) == 0, "shufps imm=%02x: %08x %08x %08x %08x", imm, out[0], out[1], out[2], out[3]);
+        ++alu_cases;
+    }
+    // shufpd (66 0F C6): bit0 picks a's qword, bit1 picks b's qword
+    for (unsigned imm = 0; imm < 4; ++imm) {
+        uint32_t want[4] = {V1[(imm & 1) * 2], V1[(imm & 1) * 2 + 1], V2[((imm >> 1) & 1) * 2], V2[((imm >> 1) & 1) * 2 + 1]};
+        uint32_t out[4];
+        run({0x66, 0x0F, 0xC6, 0xC1, uint8_t(imm)}, V1, V2, out);
+        EXPECT(memcmp(out, want, 16) == 0, "shufpd imm=%d", imm);
+        ++alu_cases;
+    }
+    // pshuflw/pshufhw (F2/F3 0F 70): one half shuffled, other half kept
+    for (unsigned imm : {0x1bu, 0xe4u, 0x27u}) {
+        uint16_t src[8]; memcpy(src, V1, 16);
+        uint32_t want[4]; memcpy(want, V1, 16);
+        for (int i = 0; i < 4; ++i) src[i] = src[(imm >> (2 * i)) & 3];  // F2: low half
+        memcpy(want, src, 16);
+        uint32_t out[4];
+        run({0xF2, 0x0F, 0x70, 0xC1, uint8_t(imm)}, V2, V1, out);  // C1: src is xmm1 = V1
+        EXPECT(memcmp(out, want, 16) == 0, "pshuflw imm=%02x", imm);
+        ++alu_cases;
+        uint16_t src2[8]; memcpy(src2, V1, 16);
+        uint32_t want2[4]; memcpy(want2, V1, 16);
+        for (int i = 0; i < 4; ++i) src2[4 + i] = src2[4 + ((imm >> (2 * i)) & 3)];  // F3: high half
+        memcpy(want2, src2, 16);
+        run({0xF3, 0x0F, 0x70, 0xC1, uint8_t(imm)}, V2, V1, out);
+        EXPECT(memcmp(out, want2, 16) == 0, "pshufhw imm=%02x", imm);
+        ++alu_cases;
+    }
+    // ---- packed shifts by imm8: psllw/psrlw/psraw and psrad, pslldq/psrldq ----
+    {
+        auto shift_words = [](const uint32_t a[4], unsigned cnt, char dir, uint32_t out[4]) {
+            uint16_t o[8]; const uint16_t* in = reinterpret_cast<const uint16_t*>(a);
+            for (int i = 0; i < 8; ++i) {
+                if (dir == 'l') o[i] = cnt > 15 ? 0 : uint16_t(in[i] << cnt);
+                else if (dir == 'r') o[i] = cnt > 15 ? 0 : uint16_t(in[i] >> cnt);
+                else o[i] = cnt > 15 ? (in[i] & 0x8000 ? 0xffffu : 0) : uint16_t(int16_t(in[i]) >> cnt);
+            }
+            memcpy(out, o, 16);
+        };
+        for (unsigned cnt : {0u, 1u, 3u, 15u, 16u, 31u}) {
+            for (char dir : {'l', 'r', 'a'}) {
+                uint32_t want[4]; shift_words(V1, cnt, dir, want);
+                uint32_t out[4];
+                uint8_t sop = dir == 'l' ? 6 : dir == 'r' ? 2 : 4;
+                run({0x66, 0x0F, 0x71, uint8_t(0xC0 | (sop << 3)), uint8_t(cnt)}, V1, V2, out);
+                EXPECT(memcmp(out, want, 16) == 0, "psllw/psrlw/psraw cnt=%u dir=%c: %08x %08x", cnt, dir, out[0], out[1]);
+                ++alu_cases;
+            }
+        }
+        for (unsigned cnt : {0u, 1u, 7u, 31u, 32u}) {
+            uint32_t want[4];
+            for (int i = 0; i < 4; ++i) want[i] = cnt >= 32 ? (V1[i] & 0x80000000u ? 0xffffffffu : 0) : uint32_t(int32_t(V1[i]) >> cnt);
+            uint32_t out[4];
+            run({0x66, 0x0F, 0x72, 0xE0, uint8_t(cnt)}, V1, V2, out);
+            EXPECT(memcmp(out, want, 16) == 0, "psrad cnt=%u: %08x %08x", cnt, out[0], out[1]);
+            ++alu_cases;
+        }
+        // pslldq/psrldq: whole-register byte shifts, count saturates at 16
+        const uint8_t* in = reinterpret_cast<const uint8_t*>(V1);
+        for (unsigned cnt : {0u, 1u, 5u, 15u, 16u, 255u}) {
+            unsigned k = cnt >= 16 ? 16 : cnt;
+            uint8_t wantr[16] = {0};
+            for (unsigned i = 0; i + k < 16; ++i) wantr[i] = in[i + k];
+            uint32_t wantr2[4]; memcpy(wantr2, wantr, 16);
+            uint32_t out[4];
+            run({0x66, 0x0F, 0x73, 0xD8, uint8_t(cnt)}, V1, V2, out);
+            EXPECT(memcmp(out, wantr2, 16) == 0, "psrldq cnt=%u", cnt);
+            ++alu_cases;
+            uint8_t wantl[16] = {0};
+            for (unsigned i = 0; i + k < 16; ++i) wantl[i + k] = in[i];
+            uint32_t wantl2[4]; memcpy(wantl2, wantl, 16);
+            run({0x66, 0x0F, 0x73, 0xF8, uint8_t(cnt)}, V1, V2, out);
+            EXPECT(memcmp(out, wantl2, 16) == 0, "pslldq cnt=%u", cnt);
+            ++alu_cases;
+        }
+        // register-form shifts: psrlw xmm0, xmm1 (66 0F D1 C1); count = xmm1[63:0]
+        for (unsigned cnt : {0u, 3u, 16u, 70u}) {
+            uint32_t cntv[4] = {cnt, 0, 0xdeadbeefu, 0xcafebabeu};  // upper 64 bits must be ignored
+            const uint16_t* w = reinterpret_cast<const uint16_t*>(V1);
+            uint16_t o[8]; for (int i = 0; i < 8; ++i) o[i] = cnt < 16 ? uint16_t(w[i] >> cnt) : 0;
+            uint32_t want[4]; memcpy(want, o, 16);
+            uint32_t out[4];
+            run({0x66, 0x0F, 0xD1, 0xC1}, V1, cntv, out);
+            EXPECT(memcmp(out, want, 16) == 0, "psrlw reg cnt=%u", cnt);
+            ++alu_cases;
+        }
+        // pslld reg (66 0F F2 C1)
+        for (unsigned cnt : {0u, 5u, 32u}) {
+            uint32_t cntv[4] = {cnt, 0, 0, 0};
+            uint32_t want[4]; for (int i = 0; i < 4; ++i) want[i] = cnt < 32 ? V1[i] << cnt : 0;
+            uint32_t out[4];
+            run({0x66, 0x0F, 0xF2, 0xC1}, V1, cntv, out);
+            EXPECT(memcmp(out, want, 16) == 0, "pslld reg cnt=%u", cnt);
+            ++alu_cases;
+        }
+        // psrlq reg (66 0F D3 C1): 64-bit lanes
+        for (unsigned cnt : {0u, 7u, 64u}) {
+            uint32_t cntv[4] = {cnt, 0, 0, 0};
+            uint32_t want[4];
+            uint64_t q0 = uint64_t(V1[1]) << 32 | V1[0], q1 = uint64_t(V1[3]) << 32 | V1[2];
+            q0 = cnt < 64 ? q0 >> cnt : 0; q1 = cnt < 64 ? q1 >> cnt : 0;
+            want[0] = uint32_t(q0); want[1] = uint32_t(q0 >> 32); want[2] = uint32_t(q1); want[3] = uint32_t(q1 >> 32);
+            uint32_t out[4];
+            run({0x66, 0x0F, 0xD3, 0xC1}, V1, cntv, out);
+            EXPECT(memcmp(out, want, 16) == 0, "psrlq reg cnt=%u", cnt);
+            ++alu_cases;
+        }
+    }
+    // ---- arithmetic: paddq, pmullw, pmuludq, pmaddwd, psadbw, pavgb, saturating, min/max ----
+    {
+        uint32_t out[4];
+        // paddq: 64-bit lanes
+        {
+            uint32_t a[4] = {1, 0, 0xffffffffu, 0xffffffffu};  // +1 in low qword, -1 in high
+            uint32_t b[4] = {2, 0, 1, 0};
+            run({0x66, 0x0F, 0xD4, 0xC1}, a, b, out);
+            EXPECT(out[0] == 3 && out[1] == 0 && out[2] == 0 && out[3] == 0, "paddq: %08x %08x %08x %08x", out[0], out[1], out[2], out[3]);
+            ++alu_cases;
+        }
+        // pmullw: low 16 bits of the products
+        for (auto pair : {std::pair{V1, V2}, std::pair{V2, V1}}) {
+            uint16_t want[8]; const uint16_t* x = reinterpret_cast<const uint16_t*>(pair.first); const uint16_t* y = reinterpret_cast<const uint16_t*>(pair.second);
+            for (int i = 0; i < 8; ++i) want[i] = uint16_t(int16_t(x[i]) * int16_t(y[i]));
+            uint32_t aa[4], bb[4], out2[4]; memcpy(aa, pair.first, 16); memcpy(bb, pair.second, 16);
+            run({0x66, 0x0F, 0xD5, 0xC1}, aa, bb, out2);
+            EXPECT(memcmp(out2, want, 16) == 0, "pmullw");
+            ++alu_cases;
+        }
+        // pmuludq
+        {
+            uint32_t a[4] = {0xffffffffu, 0x11111111u, 3, 0x80000000u};
+            uint32_t b[4] = {0xffffffffu, 0x22222222u, 5, 7};
+            uint64_t want0 = uint64_t(a[0]) * b[0], want1 = uint64_t(a[2]) * b[2];
+            run({0x66, 0x0F, 0xF4, 0xC1}, a, b, out);
+            EXPECT(out[0] == uint32_t(want0) && out[1] == uint32_t(want0 >> 32) && out[2] == uint32_t(want1) && out[3] == uint32_t(want1 >> 32), "pmuludq");
+            ++alu_cases;
+        }
+        // pmaddwd
+        {
+            int16_t x[8] = {1, 2, -3, 4, 32767, 1, -32768, 1};
+            int16_t y[8] = {3, 4, 5, -6, 2, 3, -1, -1};
+            uint32_t a[4], b[4]; memcpy(a, x, 16); memcpy(b, y, 16);
+            int32_t want[4]; for (int i = 0; i < 4; ++i) want[i] = int32_t(x[2 * i]) * y[2 * i] + int32_t(x[2 * i + 1]) * y[2 * i + 1];
+            run({0x66, 0x0F, 0xF5, 0xC1}, a, b, out);
+            EXPECT(memcmp(out, want, 16) == 0, "pmaddwd: %08x %08x %08x %08x", out[0], out[1], out[2], out[3]);
+            ++alu_cases;
+        }
+        // psadbw
+        {
+            uint8_t x[16] = {1, 2, 3, 4, 5, 6, 7, 8, 200, 200, 0, 0, 0, 0, 0, 0};
+            uint8_t y[16] = {8, 7, 6, 5, 4, 3, 2, 1, 100, 100, 0, 0, 0, 0, 0, 0};
+            uint32_t a[4], b[4]; memcpy(a, x, 16); memcpy(b, y, 16);
+            unsigned want0 = 0, want1 = 0;
+            for (int i = 0; i < 8; ++i) { want0 += unsigned(std::abs(int(x[i]) - int(y[i]))); want1 += unsigned(std::abs(int(x[8 + i]) - int(y[8 + i]))); }
+            run({0x66, 0x0F, 0xF6, 0xC1}, a, b, out);
+            EXPECT(out[0] == want0 && out[1] == 0 && out[2] == want1 && out[3] == 0, "psadbw: %u %u", out[0], out[2]);
+            ++alu_cases;
+        }
+        // pavgb
+        {
+            uint8_t x[16] = {1, 2, 255, 254, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+            uint8_t y[16] = {2, 3, 255, 255, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+            uint32_t a[4], b[4]; memcpy(a, x, 16); memcpy(b, y, 16);
+            uint8_t want[16]; for (int i = 0; i < 16; ++i) want[i] = uint8_t((unsigned(x[i]) + unsigned(y[i]) + 1) >> 1);
+            uint32_t wantv[4]; memcpy(wantv, want, 16);
+            run({0x66, 0x0F, 0xE0, 0xC1}, a, b, out);
+            EXPECT(memcmp(out, wantv, 16) == 0, "pavgb");
+            ++alu_cases;
+        }
+        // saturating add/sub
+        {
+            uint32_t a[4] = {0x0afafa0au, 0x00017fffu, 0x0a0a0a0au, 0x80008000u};
+            uint32_t b[4] = {0x0a0a0a0au, 0x00010001u, 0x0a0a0a0au, 0x00010001u};
+            run({0x66, 0x0F, 0xDC, 0xC1}, a, b, out);  // paddusb: bytes 0a+0a=14, fa+0a=104->ff
+            EXPECT(out[0] == 0x14ffff14u, "paddusb: %08x", out[0]);
+            EXPECT(out[1] == 0x00027fffu, "paddsw via words: %08x", out[1]);  // 7fff+0001 -> 7fff (saturated), 1+1=2
+            ++alu_cases;
+            run({0x66, 0x0F, 0xE8, 0xC1}, a, b, out);  // psubusb: 0a-0a=0, fa-0a=f0
+            EXPECT(out[0] == 0x00f0f000u, "psubusb: %08x", out[0]);
+            ++alu_cases;
+            run({0x66, 0x0F, 0xEC, 0xC1}, a, b, out);  // psubsw: word 8000-0001 -> 8000 (saturated)
+            EXPECT(out[3] == 0x80008000u, "psubsw: %08x", out[3]);
+            ++alu_cases;
+        }
+        // pminub/pmaxub/pminsw/pmaxsw
+        {
+            uint32_t a[4] = {0x01020505u, 0, 0, 0};
+            uint32_t b[4] = {0x020101ffu, 0, 0, 0};
+            run({0x66, 0x0F, 0xDA, 0xC1}, a, b, out);  // pminub per byte
+            EXPECT(out[0] == 0x01010105u, "pminub: %08x", out[0]);
+            ++alu_cases;
+            run({0x66, 0x0F, 0xDE, 0xC1}, a, b, out);  // pmaxub
+            EXPECT(out[0] == 0x020205ffu, "pmaxub: %08x", out[0]);
+            ++alu_cases;
+            uint32_t c[4] = {0x00020001u, 0xfffaffffu, 0, 0};   // words 1, 2, -6, -1
+            uint32_t d[4] = {0x0001ffffu, 0x00010002u, 0, 0};   // words -1, 1, 1, 2
+            run({0x66, 0x0F, 0xEA, 0xC1}, c, d, out);  // pminsw
+            EXPECT(out[0] == 0x0001ffffu && out[1] == 0xfffaffffu, "pminsw: %08x %08x", out[0], out[1]);
+            ++alu_cases;
+            run({0x66, 0x0F, 0xEE, 0xC1}, c, d, out);  // pmaxsw
+            EXPECT(out[0] == 0x00020001u && out[1] == 0x00010002u, "pmaxsw: %08x %08x", out[0], out[1]);
+            ++alu_cases;
+        }
+        // pand / pandn (66)
+        {
+            run({0x66, 0x0F, 0xDB, 0xC1}, V1, V2, out);
+            EXPECT(out[0] == (V1[0] & V2[0]) && out[3] == (V1[3] & V2[3]), "pand");
+            ++alu_cases;
+            run({0x66, 0x0F, 0xDF, 0xC1}, V1, V2, out);
+            EXPECT(out[0] == (~V1[0] & V2[0]), "pandn");
+            ++alu_cases;
+        }
+        // punpckhqdq (66 0F 6D)
+        {
+            run({0x66, 0x0F, 0x6D, 0xC1}, V1, V2, out);
+            EXPECT(out[0] == V1[2] && out[1] == V1[3] && out[2] == V2[2] && out[3] == V2[3], "punpckhqdq");
+            ++alu_cases;
+        }
+    }
+    // ---- rdtsc: strictly increasing ----
+    {
+        std::vector<uint8_t> one{0x0F, 0x31};
+        exec(m, one, 0, 0, 0, false);
+        uint64_t t1 = uint64_t(m.cpu.reg[EDX]) << 32 | m.cpu.reg[EAX];
+        exec(m, one, 0, 0, 0, false);
+        uint64_t t2 = uint64_t(m.cpu.reg[EDX]) << 32 | m.cpu.reg[EAX];
+        EXPECT(t2 > t1, "rdtsc must advance: %llu then %llu", (unsigned long long)t1, (unsigned long long)t2);
+        ++alu_cases;
+    }
+    // ---- cpuid: leaf 0 is GenuineIntel, leaf 1 has SSE2, unknown leaves zero ----
+    {
+        std::vector<uint8_t> code{0xB8, 0, 0, 0, 0, 0x0F, 0xA2};  // mov eax,0; cpuid
+        exec(m, code, 0, 0, 0, false);
+        EXPECT(m.cpu.reg[EBX] == 0x756e6547u && m.cpu.reg[EDX] == 0x49656e69u && m.cpu.reg[ECX] == 0x6c65746eu, "cpuid leaf0 vendor");
+        ++alu_cases;
+        std::vector<uint8_t> one{0xB8, 1, 0, 0, 0, 0x0F, 0xA2};
+        exec(m, one, 0, 0, 0, false);
+        EXPECT(m.cpu.reg[EDX] & (1u << 26), "cpuid leaf1 must advertise SSE2");
+        ++alu_cases;
+        std::vector<uint8_t> unk{0xB8, 0x7fu, 0, 0, 0, 0x0F, 0xA2};
+        exec(m, unk, 0, 0, 0, false);
+        EXPECT(m.cpu.reg[EAX] == 0 && m.cpu.reg[EBX] == 0 && m.cpu.reg[ECX] == 0 && m.cpu.reg[EDX] == 0, "cpuid unknown leaf must be zeroed");
+        ++alu_cases;
+    }
+    // ---- movnti (66 0F C3): dword store ----
+    {
+        m.mem.w32(Machine::DATA, 0);
+        m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
+        std::vector<uint8_t> code{0x66, 0x0F, 0xC3, 0x05, 0x00, 0x00, 0x02, 0x00};  // movnti [DATA], eax
+        exec(m, code, 0xfeedfaceu, 0, 0, false);
+        EXPECT(m.mem.r32(Machine::DATA) == 0xfeedfaceu, "movnti store: %08x", m.mem.r32(Machine::DATA));
+        ++alu_cases;
+    }
+    // ---- prefetcht0 (0F 18 /0): executes as a hint ----
+    {
+        std::vector<uint8_t> code{0x0F, 0x18, 0x05, 0x00, 0x00, 0x02, 0x00};
+        exec(m, code, 0, 0, 0, false);
+        ++alu_cases;
+    }
+    // ---- fxsave/fxrstor: x87 stack, MXCSR and XMM round-trip ----
+    {
+        m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
+        m.mem.w64(Machine::DATA + 0x200, f64b(1.5));
+        std::vector<uint8_t> code{
+            0xDD, 0x05, 0x00, 0x02, 0x02, 0x00,          // fld qword [DATA+0x200]
+            0x66, 0x0F, 0x6F, 0x0D, 0x10, 0x00, 0x02, 0x00,  // movdqa xmm1, [DATA+16]
+            0x0F, 0xAE, 0x05, 0x00, 0x03, 0x02, 0x00,    // fxsave [DATA+0x300]
+            0xDD, 0xD8,                                  // fstp st(0)
+            0x0F, 0x28, 0x0D, 0x00, 0x00, 0x02, 0x00,    // movaps xmm1, [DATA]  (clobber)
+            0x0F, 0xAE, 0x0D, 0x00, 0x03, 0x02, 0x00,    // fxrstor [DATA+0x300]
+            0xDD, 0x1D, 0x08, 0x02, 0x02, 0x00,          // fstp qword [DATA+0x208]
+            0x66, 0x0F, 0x7F, 0x0D, 0x18, 0x00, 0x02, 0x00,  // movdqa [DATA+0x18], xmm1
+        };
+        exec(m, code, 0, 0, 0, false);
+        EXPECT(bf64(m.mem.r64(Machine::DATA + 0x208)) == 1.5, "fxsave/fxrstor x87 round trip: %g", bf64(m.mem.r64(Machine::DATA + 0x208)));
+        uint32_t xr[4]; m.mem.r128(Machine::DATA + 0x18, xr);
+        EXPECT(xr[0] == 0x13121110u && xr[3] == 0x1f1e1d1cu, "fxsave/fxrstor xmm round trip");
+        ++alu_cases;
+    }
+    // ---- repne scasb / repe cmpsb: terminate on the ZF condition ----
+    {
+        m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
+        const char* s = "hello, world";
+        for (size_t i = 0; i <= strlen(s); ++i) m.mem.w8(Machine::DATA + i, uint8_t(s[i]));
+        // mov edi, DATA; mov al, 'w'; repne scasb; eax = edi - DATA - 1 = index of 'w'
+        std::vector<uint8_t> code{0xBF, 0x00, 0x00, 0x02, 0x00, 0xB0, uint8_t('w'),
+                                  0xB9, 32, 0, 0, 0, 0xF2, 0xAE,
+                                  0x89, 0xF8, 0x2D, 0x00, 0x00, 0x02, 0x00, 0x48};
+        exec(m, code, 0, 0, 0, false);
+        EXPECT(m.cpu.reg[EAX] == 7, "repne scasb found 'w' at %u want 7", m.cpu.reg[EAX]);
+        ++alu_cases;
+        // repe cmpsb: equal strings (6 bytes incl NUL) -> ZF set at the end
+        for (int i = 0; i < 6; ++i) { m.mem.w8(Machine::DATA + i, uint8_t("hello"[i] ? "hello"[i] : 0)); }
+        for (int i = 0; i < 6; ++i) { m.mem.w8(Machine::DATA + 16 + i, uint8_t("hello"[i] ? "hello"[i] : 0)); }
+        std::vector<uint8_t> cmp{0xBE, 0x00, 0x00, 0x02, 0x00, 0xBF, 0x10, 0x00, 0x02, 0x00, 0xB9, 6, 0, 0, 0,
+                                 0xF3, 0xA6, 0x0F, 0x94, 0xC0};  // sete al
+        exec(m, cmp, 0, 0, 0, false);
+        EXPECT(m.cpu.reg[EAX] == 1, "repe cmpsb equal: eax=%u", m.cpu.reg[EAX]);
+        ++alu_cases;
+        // a mismatch stops early
+        m.mem.w8(Machine::DATA + 21, 'p');
+        exec(m, cmp, 0, 0, 0, false);
+        EXPECT(m.cpu.reg[EAX] == 0, "repe cmpsb mismatch: eax=%u", m.cpu.reg[EAX]);
+        ++alu_cases;
+    }
+}
+
 // ---------- (3) thunks, callbacks, nesting ----------
 static void test_thunks() {
     Machine m; Host host; Registry reg; register_win32(reg, host);
@@ -687,6 +1052,7 @@ int main(int argc, char** argv) {
         {"fpu", test_fpu, "X86-CORE PASS: x87 f64 arithmetic and fcomip, SSE scalar double/single arithmetic, int<->float conversion and SSE2 packed integer match this machine's CPU bit for bit"},
         {"x87forms", test_x87_forms, "X86-CORE PASS: x87 memory forms, stack discipline, control/status words and 80-bit round trip"},
         {"sse-regressions", test_sse_regressions, "X86-CORE PASS: bt imm, movd/movq, movmskps/pmovmskb, sqrtss, unpck, packuswb, stmxcsr, fptan/fxtract match this machine's CPU"},
+        {"sse2-stage2", test_sse2_stage2, "X86-CORE PASS: pshufd/pshuflw/pshufhw/shufps/shufpd, packed shifts (imm8, xmm, dq), paddq/pmullw/pmuludq/pmaddwd/psadbw/pavgb, saturating add/sub, pmin/pmax, punpckhqdq, rdtsc, cpuid, movnti, prefetch, fxsave/fxrstor and repne scasb/repe cmpsb"},
         {"thunks", test_thunks, "X86-CORE PASS: stdcall/cdecl thunks, nested guest callbacks, callee-saved registers preserved"},
     };
     for (auto& s : suites) { int before = failures; s.fn(); if (failures == before) printf("%s\n", s.pass); else printf("X86-CORE FAIL: %s\n", s.name); }
