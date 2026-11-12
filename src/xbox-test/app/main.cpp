@@ -316,7 +316,6 @@ static bool file_exists(const std::wstring& p) { return GetFileAttributesW(p.c_s
 #include "playable.h"   // item 32: the owner-verified playable set + LocalState\playable.txt
 #include "move_game.h"  // item 33: the storage move job (copy, verify, marker rewrite)
 #include "favorites.h"  // item D10: per-game favorites, LocalState\favorites.txt
-#include "library_added.h"  // item D23: first-seen stamps, LocalState\library_added.txt
 #include "ui_nav.h"
 #include "ui_launcher.h"
 
@@ -558,43 +557,13 @@ static void hero_release(uint32_t appid) { std::lock_guard<std::mutex> l(g_heroM
 static std::atomic<int> g_sortMode{ui_nav::kSortAlphabetical};   // item 25: the launcher opens on Alphabetical
 // item 25: mode order 0 Alphabetical, 1 Most played, 2 Recently played —
 // the same indexes the sort popup shows (ui_nav::kSortAlphabetical...).
-static const char* SORT_NAMES[] = {"Alphabetical", "Most played", "Recently played", "Date added"};   // item D23: Date added replaces the Favorites sort
+static const char* SORT_NAMES[] = {"Alphabetical", "Most played", "Recently played"};
 static std::string lower(std::string s) { for (auto& c : s) c = (char)tolower((unsigned char)c); return s; }
-// Item D23: the Date added key. Steam's owned-games answer has no acquisition
-// date, so each fetch stamps the appids it has never seen (library_added.h) and
-// the file is written back when that changes anything. Its own mutex, never
-// g_gm: sort_games() already runs under g_gm.
-static std::mutex g_addedM;
-static library_added::Seen g_addedSort;   // guarded by g_addedM
-static bool g_addedLoaded = false;
-static void load_library_added() {
-    if (g_addedLoaded) return;
-    g_addedLoaded = true;
-    std::string text;
-    size_t n = 0;
-    if (read_file_s(g_dir + L"\\library_added.txt", text)) { std::lock_guard<std::mutex> l(g_addedM); g_addedSort = library_added::parse(text); n = g_addedSort.size(); }
-    logf("library_added: %zu game(s) loaded", n);
-}
-// Call after g_games is replaced: stamps the new ids and persists the file.
-static void note_library_added() {
-    load_library_added();
-    std::vector<uint32_t> ids;
-    { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) ids.push_back(g->appid); }
-    bool changed = false;
-    { std::lock_guard<std::mutex> l(g_addedM); changed = library_added::update(g_addedSort, ids, (uint64_t)time(nullptr)); }
-    if (!changed) return;
-    std::string text; { std::lock_guard<std::mutex> l(g_addedM); text = library_added::format(g_addedSort); }
-    FILE* f = _wfopen((g_dir + L"\\library_added.txt").c_str(), L"wb");
-    if (f) { fwrite(text.data(), 1, text.size(), f); fclose(f); }
-    logf("library_added: file written (%zu lines)", ids.size());
-}
 static void sort_games(int mode) {   // caller holds g_gm
     logf("grid list resort/reload mode=%d count=%zu (position unchanged)", mode, g_games.size());
-    library_added::Seen added; { std::lock_guard<std::mutex> l(g_addedM); added = g_addedSort; }
-    std::stable_sort(g_games.begin(), g_games.end(), [mode, &added](const std::shared_ptr<Game>& a, const std::shared_ptr<Game>& b) {
+    std::stable_sort(g_games.begin(), g_games.end(), [mode](const std::shared_ptr<Game>& a, const std::shared_ptr<Game>& b) {
         if (mode == ui_nav::kSortMostPlayed) return a->playtime > b->playtime;
         if (mode == ui_nav::kSortRecentlyPlayed) return a->lastPlayed > b->lastPlayed;
-        if (mode == ui_nav::kSortDateAdded) return library_added::newer_first(added, a->appid, b->appid);   // item D23
         return lower(a->name) < lower(b->name); });
 }
 
@@ -632,7 +601,7 @@ static bool fetch_library(const std::string& access, const std::string& steamid)
             g->name = o.HasKey(L"name") ? to_string(o.GetNamedString(L"name")) : "App " + std::to_string(g->appid);
             g->playtime = (uint32_t)o.GetNamedNumber(L"playtime_forever", 0); g->lastPlayed = (uint64_t)o.GetNamedNumber(L"rtime_last_played", 0); v.push_back(std::move(g));
         }
-        g_ownedCount = count; { std::lock_guard<std::mutex> l(g_gm); g_games = std::move(v); } note_library_added(); { std::lock_guard<std::mutex> l(g_gm); sort_games(g_sortMode); }
+        g_ownedCount = count; { std::lock_guard<std::mutex> l(g_gm); g_games = std::move(v); sort_games(g_sortMode); }
         logf("library: owned=%d listed=%zu (all, sorted on screen)", count, g_games.size());
         return true;
     } catch (...) { logf("library: JSON parse failed"); return false; }
@@ -670,7 +639,7 @@ static bool fetch_library_cm(CmSession& cm) {
             g->name = nm.empty() ? "App " + std::to_string(g->appid) : nm; v.push_back(std::move(g));
         }
     }
-    g_ownedCount = (int)count; { std::lock_guard<std::mutex> l(g_gm); g_games = std::move(v); } note_library_added(); { std::lock_guard<std::mutex> l(g_gm); sort_games(g_sortMode); }
+    g_ownedCount = (int)count; { std::lock_guard<std::mutex> l(g_gm); g_games = std::move(v); sort_games(g_sortMode); }
     logf("library(cm): owned=%u listed=%zu (all, sorted on screen)", count, g_games.size());
     { std::string t; { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) t += std::to_string(g->appid) + "\t" + g->name + "\n"; }   // test aid: LocalState\library.txt (appid<TAB>name)
       FILE* f = _wfopen((g_dir + L"\\library.txt").c_str(), L"wb"); if (f) { fwrite(t.data(), 1, t.size(), f); fclose(f); } }

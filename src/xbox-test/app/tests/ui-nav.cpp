@@ -138,16 +138,13 @@ int main() {
     {
         check(ui_nav::kSortAlphabetical == 0 && ui_nav::kSortMostPlayed == 1 && ui_nav::kSortRecentlyPlayed == 2,
               "sort mode indexes: 0 alphabetical, 1 most played, 2 recently played");
-        // item D23: Date added is the fourth option (the owner asked for it in
-        // place of the Favorites sort, which said nothing about the rest)
-        check(ui_nav::kSortDateAdded == 3 && ui_nav::kSortOptionCount == 4,
-              "item D23: the sort popup shows four options, Date added last");
-        check(cycle_sort(2, ui_nav::kSortOptionCount) == ui_nav::kSortDateAdded &&
-              cycle_sort(ui_nav::kSortDateAdded, ui_nav::kSortOptionCount) == 0,
-              "item D23: cycling reaches Date added and wraps back to Alphabetical");
-        check(std::string(ui_launcher::kSortOptions[3]) == "Date added" &&
+        // Favorites is a filter, not a sort: the popup has exactly three rows
+        check(ui_nav::kSortOptionCount == 3, "the sort popup shows three options");
+        check(cycle_sort(2, ui_nav::kSortOptionCount) == 0,
+              "cycling from Recently played wraps back to Alphabetical");
+        check(std::string(ui_launcher::kSortOptions[2]) == "Recently played" &&
               std::string(ui_launcher::kSortOptions[0]) == "Alphabetical",
-              "item D23: the popup labels the fourth option 'Date added'");
+              "the popup labels its rows Alphabetical..Recently played");
     }
 
     // ---- item D10: the game options popup's focus rules ----
