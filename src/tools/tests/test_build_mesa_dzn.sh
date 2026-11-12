@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Offline check of the Mesa dzn recipe (research/VULKAN-PLAN.md, milestone 2): the pin parses with a SHA-256, only the
+# Offline check of the Mesa dzn recipe (issue #177, milestone 2): the pin parses with a SHA-256, only the
 # microsoft-experimental Vulkan driver and its shader compiler are requested, nothing unpinned (Gallium, OpenGL, LLVM,
 # video, CL) is pulled in, the Play patches are applied, and no driver DLL is committed. Never downloads anything.
 set -euo pipefail

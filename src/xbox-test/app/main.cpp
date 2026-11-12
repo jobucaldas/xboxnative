@@ -63,6 +63,7 @@ extern "C" unsigned ZSTD_isError(size_t code);
 #include "playtime.h"
 #include <xinput.h>
 #include "../uwph/display/gamepad.h"
+#include "../uwph/xinput/gpad.h"
 
 using namespace winrt;
 using namespace winrt::Windows::ApplicationModel::Core;
@@ -787,7 +788,7 @@ static void enter_library_cm(CmSession& cm) {
 // Persona name + avatar hash for the sidebar profile row (issue 51 item 24).
 // Root cause of the empty name fixed here: player_name is field 15 of
 // CMsgClientPersonaState's friends[] entry (avatar_hash 31), not field 4 —
-// steam_persona.h's parser and research/STEAMWORKS-MULTIPLAYER.md both carry
+// steam_persona.h's parser and issue #180 both carry
 // 15, and the hand-built protobuf test in tests/steam_presence_test.cpp pins
 // the shape. Runs on the CM reader thread. The keeper in launch.h replaces
 // the push handler when a game launches; the launcher restarts when the game
@@ -1166,6 +1167,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     CoreWindow m_window{nullptr};
     CoreDispatcher m_graphicsDispatcher{nullptr};
     bool m_guestSurface=false;
+    gpad::Runner m_gpad;   // cmd.txt gpad/gpadseq presses; armed only with a guest running
     int m_guestEndGen=0;
     corewindow_input::Shared m_input; // keyboard/mouse to the guest: the record DLL's one feed, shared with guest SendInput
     bool m_inputLogged=false;
@@ -2022,6 +2024,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if(result=="Launch cancelled"){m_guestEndGen=g_launch.gen;logf("launch: cancelled launch ended; staying on the game page");m_dNote=result;return;}
         if(!m_guestSurface && !play_runtime::observed.load(std::memory_order_acquire))return;
         m_guestEndGen=g_launch.gen;
+        m_gpad.clear();   // an armed gpad program never outlives its game
         achievement_poller_stop();   // the guest is exiting; stop watching its achievements.json
         m_achPollStarted=false;      // the next launch starts its own poller
         if(m_leaving)return;   // Force quit is already syncing and restarting
@@ -2261,6 +2264,44 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             logf("cmd.txt: guide tab -> %d (synthetic)", n); return;
         }
         if (c == "stacks") { dump_thread_stacks(); logf("cmd.txt: thread stacks written to launch_probe.log"); return; }
+        // gpad / gpadseq: drive the running game's pad (see uwph/xinput/gpad.h).
+        // Safety: armed only from this cmd.txt channel and only while a guest
+        // is on screen; the game and the network cannot reach this path. The
+        // armed program is cleared when the guest ends (guest_ended).
+        if (c.rfind("gpad ", 0) == 0 || c == "gpad") {
+            if (!m_guestSurface) { logf("cmd.txt: gpad ignored, no game running"); return; }
+            const char* perr = nullptr;
+            std::vector<gpad::Press> prog;
+            if (!gpad::parse_gpad(c.c_str() + 4, c.size() - 4, &prog, &perr) || prog.empty()) {
+                logf("cmd.txt: gpad rejected: %s", perr ? perr : "empty");
+                return;
+            }
+            m_gpad.arm(std::move(prog), GetTickCount64());
+            logf("cmd.txt: gpad armed (%zu step(s))", m_gpad.program.size());
+            return;
+        }
+        if (c.rfind("gpadseq", 0) == 0 && (c.size() == 7 || c[7] == ' ')) {
+            if (!m_guestSurface) { logf("cmd.txt: gpadseq ignored, no game running"); return; }
+            const char* name = c.size() > 8 ? c.c_str() + 8 : "";
+            if (!*name || strchr(name, '/') || strchr(name, '\\') || strchr(name, '.') || strstr(name, "..")) {
+                logf("cmd.txt: gpadseq: bad program name");
+                return;
+            }
+            std::string body;
+            if (!read_file_s(g_dir + L"\\gpadseq\\" + widen(name) + L".txt", body)) {
+                logf("cmd.txt: gpadseq '%s' not found (LocalState\\gpadseq\\%s.txt)", name, name);
+                return;
+            }
+            const char* perr = nullptr;
+            std::vector<gpad::Press> prog;
+            if (!gpad::parse_seq(body.data(), body.size(), &prog, &perr)) {
+                logf("cmd.txt: gpadseq '%s' rejected: %s", name, perr ? perr : "no steps");
+                return;
+            }
+            m_gpad.arm(std::move(prog), GetTickCount64());
+            logf("cmd.txt: gpadseq '%s' armed, %zu step(s)", name, m_gpad.program.size());
+            return;
+        }
         // item 19: named shortcuts for testers — harmless openers only.
         if (c == "sort") { if (g_screen == S_LIBRARY) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 0); m_sortFocus = g_sortMode.load(); logf("cmd.txt: sort dropdown open"); } return; }
         if (c == "filters") { if (g_screen == S_LIBRARY) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 1); m_filtersFocus = 0; logf("cmd.txt: filters panel open"); } return; }
@@ -2361,6 +2402,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void Uninitialize() { logf("Uninitialize"); }
 
     void PollGuestControllers() {
+        // cmd.txt gpad presses ride the same publish as the physical pad: ORed
+        // in, so an injected press can never release a button the player holds.
+        m_gpad.tick(GetTickCount64());
+        uint16_t injButtons; uint8_t injLt, injRt;
+        m_gpad.held(&injButtons, &injLt, &injRt);
         static std::array<Gamepad,4> assigned{nullptr,nullptr,nullptr,nullptr};
         try {
             auto pads=Gamepad::Gamepads();
@@ -2379,8 +2425,16 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 if(!pad){xinput_core::publish(i,nullptr);continue;}
                 try {
                     auto state=convert_pad(pad.GetCurrentReading());
-                    // The launcher menu owns the pad while it is open (XInput games too).
+                    // The launcher menu owns the pad while it is open (XInput
+                    // games too): the guest must see an empty pad, automation
+                    // included (documented precedence: the overlay wins).
                     if(guest_overlay::inputBlocked)state=XINPUT_GAMEPAD{};
+                    else {
+                        // Injected buttons OR over the physical reading (both
+                        // can be held; neither can release the other).
+                        state.wButtons|=injButtons;
+                        state.bLeftTrigger|=injLt;state.bRightTrigger|=injRt;
+                    }
                     xinput_core::publish(i,&state,[pad](WORD left,WORD right)->DWORD {
                         try {
                             GamepadVibration motors{};
@@ -2393,15 +2447,36 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         } catch(winrt::hresult_error const&) {
             for(unsigned i=0;i<assigned.size();++i)xinput_core::publish(i,nullptr);
         }
+        // gpad injection with no physical pad attached: keep slot 0 connected
+        // for the whole program (press, release and gap alike), or the guest
+        // would see the pad disconnect between frames and packet numbers
+        // would reset. m_gpad.armed spans exactly the program (arm() to the
+        // tick that clears a finished program), so the release and gap frames
+        // stay connected and the pad disappears once the program is done.
+        // The overlay's input block wins here too: while the launcher menu is
+        // open the guest must see an empty pad, not automation.
+        if (m_gpad.armed && !assigned[0]) {
+            XINPUT_GAMEPAD injected{};
+            if (!guest_overlay::inputBlocked.load(std::memory_order_relaxed)) {
+                injected.wButtons=injButtons;
+                injected.bLeftTrigger=injLt;
+                injected.bRightTrigger=injRt;
+            }
+            xinput_core::publish(0,&injected);
+        }
         // The record DLL's raw-input enumeration presents one HID device per
         // connected pad (uwph_u32c_pads), which is what a guest's legacy
-        // joystick enumeration looks for; with no pad it reports none.
+        // joystick enumeration looks for; with no pad it reports none. The
+        // enumeration carries connection state only — buttons flow through
+        // XInputGetState above — but while gpad injection holds buttons with
+        // no physical pad connected, slot 0 must still enumerate, or the
+        // guest never finds the IG_ device it would read through XInput.
         static auto reportPads=reinterpret_cast<void (WINAPI*)(unsigned)>(
             user32_core::resolve("user32.dll","uwph_u32c_pads"));
         if(reportPads) {
             unsigned mask=0;
             for(unsigned i=0;i<assigned.size();++i)if(assigned[i])mask|=1u<<i;
-            reportPads(mask);
+            reportPads(gpad::publish_mask(mask,injButtons||injLt||injRt));
         }
     }
 

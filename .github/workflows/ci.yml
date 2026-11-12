@@ -27,6 +27,8 @@ jobs:
         run: bash src/xbox-test/uwph/hid/tests/run-pad-device-test.sh
       - name: synthetic pad handle registry and hid.dll answers
         run: bash src/xbox-test/uwph/hid/tests/run-pad-registry-test.sh
+      - name: "cmd.txt gpad pad-injection: parser, timing and release"
+        run: c++ -std=c++17 -O2 -Wall -Wextra -Werror -Isrc/xbox-test/uwph/xinput src/xbox-test/uwph/xinput/gpad-test.cpp -o /tmp/gpad-test && /tmp/gpad-test
       - name: offline unit tests
         run: |
           set -e
@@ -39,6 +41,8 @@ jobs:
           bash src/xbox-test/app/tests/steam-client-package.sh
           bash src/xbox-test/app/tests/launch-report.sh
           bash src/xbox-test/app/tests/redact.sh
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/x86-route.cpp -o /tmp/x86-route-test
+          /tmp/x86-route-test
           python3 -I src/xbox-test/app/tests/launch-result-test.py
           python3 -I src/xbox-test/tools/tests/test_play_test_transport.py
           python3 -I src/xbox-test/tools/tests/test_xn.py
@@ -273,4 +277,6 @@ jobs:
         run: bash src/xbox-test/app/tests/x86-guest.sh
       - name: "x86 implicit TLS (PE32 TLS directory, block copy, callbacks; negative control)"
         run: bash src/xbox-test/app/tests/x86-tls.sh
+      - name: "x86 launch route (i686 fixture through the launcher's PE32 entry point and result mapping)"
+        run: bash src/xbox-test/app/tests/x86-launch-route.sh
   # TODO: on-device sections of src/xbox-test/smoke-all.sh need a console and cannot run in GitHub Actions.
