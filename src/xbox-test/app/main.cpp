@@ -1405,6 +1405,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     uint32_t m_dlWatch = 0; int m_dlWatchSeq = 0;   // the install this page started: on finish it refreshes, never launches
     game_library::DeleteKind m_delKind = game_library::DeleteKind::folder;   // decided when the confirm dialog opens
     InstallInfo m_dInst; double m_dInstT = -10;
+    bool m_dBroken = false;   // the install marker's payload is missing/empty (draw_detail re-checks; A reinstalls)
     std::vector<storage_roots::Choice> m_roots; size_t m_rootSel = 0;   // install locations of the detail page (X cycles them before Install)
     bool m_rootsProbed = false;   // the sidebar widget probed the roots once on the library
     // Launch-option picker (launch_picker.h): a game with several run options
@@ -1486,7 +1487,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     std::string game_name(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return g->name; return id == 480 ? "Spacewar" : id == 3405340 ? "Megabonk" : id == 1007 ? "Steamworks SDK Redist" : ""; }
     bool owned(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return true; return false; }
     void open_detail(uint32_t id, const std::string& nm, const char* via) {
-        m_dApp = id; m_dName = nm.empty() ? "App " + std::to_string(id) : nm; m_dNote.clear(); m_dScroll = 0; m_dInstT = -10; m_confirmDelete = false; m_delYes = false; m_dlStartT = -1e9; m_dlWatch = 0;
+        m_dApp = id; m_dName = nm.empty() ? "App " + std::to_string(id) : nm; m_dNote.clear(); m_dScroll = 0; m_dInstT = -10; m_dBroken = false; m_confirmDelete = false; m_delYes = false; m_dlStartT = -1e9; m_dlWatch = 0;
         launch_picker::close(m_pick);   // a picker left open belongs to the previous game
         // header popups are closed with the screen (item 15: only one can be open)
         m_sortOpen = false; m_sortFocus = 0; m_hdrFocus = -1; m_filtersOpen = false; m_filtersFocus = 0; m_searchOpen = false;
@@ -1524,7 +1525,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         else if (target == 5) { refresh_roots("storage screen"); m_stSel = m_rootSel < m_roots.size() ? (int)m_rootSel : 0; m_stOpen = false; m_stGameSel = 0; m_focus = ui_nav::Focus::grid; g_screen = S_STORAGE; logf("sidebar: storage management, drive list focused (%s)", source); }
     }
     int m_dInstDel = -1;   // g_del.gen seen by m_dInst: a finished delete refreshes it at once
-    void refresh_install(double t) { if (t - m_dInstT > 0.5 || m_dInstDel != g_del.gen) { m_dInstDel = g_del.gen; m_dInst = read_install(m_dApp); m_dInstT = t; } }
+    void refresh_install(double t) { if (t - m_dInstT > 0.5 || m_dInstDel != g_del.gen) { m_dInstDel = g_del.gen; m_dInst = read_install(m_dApp); m_dInstT = t; m_dBroken = false; } }
     bool dl_is_mine() { return g_dl.appid == m_dApp && g_dl.state == 1; }
     bool deleting_mine() { return g_del.appid == m_dApp && g_del.state == 1; }
     void refresh_roots(const char* via) {   // internal + every usable extra drive; keeps the pick when its drive is still there
@@ -1758,6 +1759,47 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (g_launch.phase == 1 || g_launch.phase == 3) { logf("detail: A ignored, launch attempt running"); return; }
         m_dInst = read_install(m_dApp);
         if (deleting_mine()) { logf("detail: A ignored, delete running"); return; }
+        // a running or queued download is cancelled first, broken install or
+        // not: A never queues a second download over one already going
+        if (dl_is_mine() || is_queued(m_dApp)) {
+            detail_input::State st;
+            st.installed = m_dInst.installed;
+            st.download = dl_is_mine() ? detail_input::Download::running : detail_input::Download::queued;
+            st.sinceStart = now_s() - m_dlStartT;
+            switch (detail_input::press_a(st)) {
+            case detail_input::Action::ignore:   // the press that started the install cannot also cancel it
+                logf("detail: A ignored, %.2f s after the install started (%s)", st.sinceStart, via); return;
+            case detail_input::Action::cancel:   // the same cleanup as any other cancelled download (steamdl.h fail())
+                m_dlWatch = 0;
+                if (st.download == detail_input::Download::running) { g_dl.cancel = true; logf("detail: download cancel requested (A, %s)", via); }
+                else {
+                    bool dropped = cancel_queued(m_dApp);
+                    if (!dropped && g_dl.appid == m_dApp && g_dl.state == 1) g_dl.cancel = true;   // the queue started it meanwhile
+                    logf("detail: queued download cancel (A, %s): %s", via, dropped ? "dropped from the queue" : "already started, cancel requested");
+                }
+                return;
+            default: break;
+            }
+        }
+        // a marker with no payload behind it is not playable: A reinstalls (the
+        // status row says the install is broken), it never starts a launch
+        if (m_dInst.installed && installs::health_of(g_dir, m_dInst) != installs::Health::ok) {
+            m_dNote.clear(); logf("detail: A on a broken install appid=%u (%s) -> reinstall", m_dApp, via);
+            if (g_demo) { m_dNote = "Demo list: installing is disabled."; return; }
+            if (deleting_now()) { m_dNote = "Wait for the delete to finish."; return; }
+            refresh_roots("reinstall");
+            const storage_roots::Choice& where = m_roots[m_rootSel];
+            if (where.freeBytes < (64ull << 20)) { m_dNote = storage_roots::refusal_text(where, m_roots, m_rootSel); return; }
+            set_install_root(m_dApp, where.root);
+            // the stale marker would keep its drive (download_app reads the
+            // marker before the chosen root): remove it, the payload it named
+            // is gone, and the download records itself fresh (begin_partial)
+            if (!installs::clear_marker(g_dir, m_dApp)) { m_dNote = "Cannot clear the broken install record (file in use?)"; return; }
+            m_dInst.installed = false; m_dBroken = false; m_dInstT = -10;
+            m_dlStartT = now_s(); m_dlWatch = m_dApp; m_dlWatchSeq = g_dlSeq;
+            logf("detail: reinstall pressed appid=%u (%s) to %s", m_dApp, via, storage_roots::label(where).c_str()); enqueue_download(m_dApp);
+            return;
+        }
         detail_input::State st;
         st.installed = m_dInst.installed;
         st.download = dl_is_mine() ? detail_input::Download::running : is_queued(m_dApp) ? detail_input::Download::queued : detail_input::Download::none;
@@ -2039,7 +2081,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (deleting) vStatus = "Deleting...";
         else if (down) { char b[48]; snprintf(b, sizeof b, "Downloading %.0f%%", pct * 100); vStatus = b; }
         else if (queued) vStatus = "Queued...";
-        else if (m_dInst.installed) vStatus = "Installed";
+        else if (m_dInst.installed) {
+            // a marker whose payload is gone (deploy wipe, a move that left the
+            // marker, a crash) is not an installed game: say so and offer the
+            // reinstall instead of a Play that cannot find its files.
+            installs::Health h = installs::health_of(g_dir, m_dInst);
+            if (h == installs::Health::ok) { vStatus = "Installed"; m_dBroken = false; }
+            else { vStatus = h == installs::Health::empty ? "Install broken: files missing" : "Install broken: folder missing"; m_dBroken = true; }
+        }
         else vStatus = "Not installed";
         // Item D9: ONE size row. Installed -> the size on disk. Not installed
         // -> the depots' own download size (what the download will fetch), the
@@ -2064,7 +2113,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         vPlayers = "1"; vLang = "English";   // the store schema carries no players/language rows
 
         ui_launcher::PrimaryVM pv;
+        // the marker still claims an install (installed stays true so the
+        // delete/cloud rows behave); broken flips the primary button to
+        // REINSTALL and takes A's reinstall path instead of a launch
         pv.installed = m_dInst.installed;
+        pv.broken = m_dBroken;
         pv.download = down ? detail_input::Download::running : queued ? detail_input::Download::queued : detail_input::Download::none;
         pv.launching = launching; pv.deleting = deleting; pv.restart_required = retained;
         pv.install_pct = float(pct);
@@ -2101,6 +2154,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // transient note: refusals, cloud warnings, launch panel (one line, newlines flattened)
         vNote.clear();
         if (!m_dNote.empty()) { vNote = m_dNote; for (auto& ch : vNote) if (ch == '\n') ch = ' '; }
+        else if (m_dBroken && m_dInst.installed) vNote = "The files behind the install are gone. Press A to reinstall.";
         else if (launching) { if (g_launch.phase == 3) vNote = "Guest running (playability unverified)"; else { char b[64]; snprintf(b, sizeof b, "Launching... (%.0f s)", now_s() - g_launch.started); vNote = b; } }
         else if (retained) vNote = "Launch failed - restarting the launcher to unload it";
         else if (delDone && !m_dInst.installed) vNote = g_del.state == 2 ? "Deleted. Saves were kept." : "Deleted with items left behind; see boot.log";

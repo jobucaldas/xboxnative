@@ -1214,7 +1214,20 @@ static std::string start_launch(uint32_t appid, const std::string& name, const s
             // 2. in-process guest runtime
             std::wstring root = folder; std::string why = target.why; std::vector<std::wstring> names; if (!target.exe.empty()) names.push_back(target.exe);
             logf("launch: runtime root=%s targets=%zu (%s)", game_library::join_root("LocalState", inst.root, dir).c_str(), names.size(), why.c_str());
-            if (dir.empty() || names.empty()) { finish("cannot start: " + (dir.empty() ? std::string("install directory unknown") : !inst.root.empty() && GetFileAttributesW(folder.c_str()) == INVALID_FILE_ATTRIBUTES ? "the drive holding this game (" + inst.root.substr(0, 2) + ") is not connected" : why), false, 0, 0); return; }
+            // A launch that cannot find its files says which of the two it is:
+            // the marker names a drive that is gone, or the drive is there but
+            // the payload folder is missing/empty (see installs::payload_state).
+            if (dir.empty() || names.empty()) {
+                std::string gone;
+                if (!dir.empty() && names.empty()) {
+                    if (!inst.root.empty() && GetFileAttributesW(ascii(inst.root.substr(0, 3)).c_str()) == INVALID_FILE_ATTRIBUTES)
+                        gone = "the drive holding this game (" + inst.root.substr(0, 2) + ") is not connected";
+                    else if (installs::payload_state(folder) != installs::Health::ok)
+                        gone = "the install files are missing from " + game_library::join_root("LocalState", inst.root, dir) + " (reinstall from the game page)";
+                    else gone = "no runnable executable found";
+                } else gone = dir.empty() ? std::string("install directory unknown") : why;
+                finish("cannot start: " + gone, false, 0, 0); return;
+            }
             // Keep the previous attempt's log beside this one (launch_probe.previous.log).
             MoveFileExW((g_dir + L"\\launch_probe.log").c_str(), (g_dir + L"\\launch_probe.previous.log").c_str(), MOVEFILE_REPLACE_EXISTING);
             { std::lock_guard<std::mutex> l(g_lpm); if (g_lpf) fclose(g_lpf); g_lpf = _wfopen((g_dir + L"\\launch_probe.log").c_str(), L"wb"); g_lpMissing = g_lpStubbed = g_lpStubCalls = g_lpLines = 0; g_lpLastFail.clear(); }
