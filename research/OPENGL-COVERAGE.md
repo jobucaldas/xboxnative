@@ -38,8 +38,8 @@ extensions (read in the built DLL): `WGL_ARB_pixel_format`,
 | VBO + VAO + `glVertexAttribPointer` + `glDrawArrays` (core pipeline) | GL 3.0+ | `play-opengl.cpp` stage `core-draw` (added here; verdict is a readback pixel, not a call) | **[off-device]** on 3.0+ hosts; otherwise reported skipped |
 | GLSL shader compile/link (glShaderSource/glCompileShader/glLinkProgram/glUseProgram) | GL 2.0+ | `play-opengl.cpp` stage `core-draw` (a shader draws the triangle; link log reported on failure) | **[off-device]** on 3.0+ hosts |
 | FBO render-to-texture + readback | GL 3.0 (`glGenFramebuffers`) | `play-opengl.cpp` stage `fbo-readback` (added here) | **[off-device]** on 3.0+ hosts |
-| MSAA: multisample-capable pixel format / `WGL_ARB_multisample` | WGL/GL | **[gap]** — no fixture requests a multisample format or resolves an MSAA FBO yet | open |
-| `wglChoosePixelFormatARB` (IAttributes-based, the call SDL3/GLFW actually make) | WGL_ARB_pixel_format | **[gap]** — fixtures only use the GDI PFD path (`wglChoosePixelFormat`) | open |
+| MSAA: multisample pixel format (`WGL_SAMPLE_BUFFERS`/`WGL_SAMPLES`) | WGL/GL | `play-opengl.cpp` stage `choose-pixel-format-arb` (a 4x request's result reported: what it gets, or the base-list fallback) | **[off-device]** (4x format 132 on host Mesa); MSAA **resolve** readback: **[gap]** |
+| `wglChoosePixelFormatARB` (IAttributes-based, the call SDL3/GLFW actually make) | WGL_ARB_pixel_format | `play-opengl.cpp` stages `wgl-extensions` (extension string advertises it), `pixel-format-attribs` (supportGL/doubleBuffer/colorBits/pixelType queried and checked) and `choose-pixel-format-arb` (SDL3's attribute list; 4x MSAA falls back to the base list) | **[off-device]**; console: **[unverified]** |
 | Swap interval (`wglSwapIntervalEXT`/`wglGetSwapIntervalEXT`) vsync | WGL_EXT_swap_control | `play-opengl.cpp` stage `swap-interval` (set 1, read back; skipped when the extension is absent) | **[off-device]** (host Mesa); console: **[unverified]** |
 | Context sharing (`wglShareLists`) | WGL | **[gap]** — exported by Mesa, never exercised | open |
 | Texture compression (S3TC/BCn via `GL_EXT_texture_compression_s3tc`) | GL | **[gap]** — no fixture uploads a BC texture | open |
@@ -70,9 +70,12 @@ extensions (read in the built DLL): `WGL_ARB_pixel_format`,
 1. This matrix (honest gaps stay listed).
 2. `play-opengl.cpp` stages for the biggest off-device-closable gaps: core 3.3 context
    (`wglCreateContextAttribsARB` with a core profile), a VBO/VAO/GLSL draw whose verdict is a
-   readback pixel, an FBO render-to-texture readback, and the swap interval
-   (`wglSwapIntervalEXT` set + `wglGetSwapIntervalEXT` read back). Each stage reports `skipped`
+   readback pixel, an FBO render-to-texture readback, the swap interval
+   (`wglSwapIntervalEXT` set + `wglGetSwapIntervalEXT` read back), and the
+   `WGL_ARB_pixel_format` path SDL3/GLFW use (`wglGetExtensionsStringARB`,
+   `wglGetPixelFormatAttribivARB` attribute checks, `wglChoosePixelFormatARB` with SDL3's
+   attribute list). Each stage reports `skipped`
    when the host driver caps below 3.0 or lacks the extension (never a false pass) and BLOCKED
    on a mismatch.
-3. Remaining gaps (MSAA, `wglChoosePixelFormatARB`, share lists, PBO,
+3. Remaining gaps (MSAA resolve, share lists, PBO,
    texture compression, resize, 4.x) stay listed above until closed in a later slice.

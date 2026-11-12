@@ -55,6 +55,16 @@ static char* appendInt(char* p, int32_t value) {
     while (n) *p++ = digits[--n];
     return p;
 }
+// No CRT: a substring test for the extension string.
+static bool contains(const char* hay, const char* needle) {
+    if (!hay || !needle) return false;
+    for (; *hay; ++hay) {
+        const char* h = hay; const char* nd = needle;
+        while (*h && *nd && *h == *nd) { ++h; ++nd; }
+        if (!*nd) return true;
+    }
+    return false;
+}
 
 extern "C" {
 // WGL and GL types, declared by hand (no GL headers: the fixture is a guest).
@@ -77,6 +87,10 @@ typedef void (WINAPI* PFN_glReadPixels)(int, int, int, int, uint32_t, uint32_t, 
 typedef void (WINAPI* PFN_glFinish)(void);
 typedef BOOL (WINAPI* PFN_wglSwapIntervalEXT)(int);
 typedef int (WINAPI* PFN_wglGetSwapIntervalEXT)(void);
+// WGL_ARB_pixel_format / WGL_ARB_extensions_string.
+typedef const char* (WINAPI* PFN_wglGetExtensionsStringARB)(HDC);
+typedef BOOL (WINAPI* PFN_wglGetPixelFormatAttribivARB)(HDC, int, int, uint32_t, const int*, int*);
+typedef BOOL (WINAPI* PFN_wglChoosePixelFormatARB)(HDC, const int*, const FLOAT*, uint32_t, int*, uint32_t*);
 // Core 3.x pipeline (only reachable through wglGetProcAddress on a 3.0+ context).
 typedef void (WINAPI* PFN_glGenBuffers)(int, uint32_t*);
 typedef void (WINAPI* PFN_glBindBuffer)(uint32_t, uint32_t);
@@ -126,6 +140,17 @@ enum : uint32_t { GL_ARRAY_BUFFER = 0x8892, GL_STATIC_DRAW = 0x88E4,
                   GL_TEXTURE_2D = 0x0DE1, GL_TEXTURE_MIN_FILTER = 0x2801,
                   GL_NEAREST = 0x2600, GL_FRAMEBUFFER_COMPLETE = 0x8CD5,
                   GL_RGBA8 = 0x8058, GL_TEXTURE_WRAP_S = 0x2802, GL_CLAMP = 0x2900 };
+// WGL_ARB_pixel_format attribute codes (WGL_use_* prefixes renamed: these are
+// the values SDL3/GLFW pass in the IAttributes array).
+enum : int { WGL_NUMBER_PIXEL_FORMATS_ARB = 0x2000,
+             WGL_SUPPORT_OPENGL_ARB = 0x2010,
+             WGL_DOUBLE_BUFFER_ARB = 0x2011,
+             WGL_COLOR_BITS_ARB = 0x2014,
+             WGL_PIXEL_TYPE_ARB = 0x2013,
+             WGL_SAMPLE_BUFFERS_ARB = 0x2041,
+             WGL_SAMPLES_ARB = 0x2042 };
+// WGL_TYPE_RGBA_ARB: the pixel type a desktop GL game asks for.
+enum : int { WGL_TYPE_RGBA_ARB = 0x202B };
 
 int opengl_anchor;
 void* opengl_relocation = &opengl_anchor;
@@ -503,6 +528,85 @@ int opengl_entry() {
             }
         } else {
             emit("PLAY-OPENGL STAGE swap-interval skipped (WGL_EXT_swap_control absent)\n");
+        }
+    }
+
+    // WGL_ARB_pixel_format (research/OPENGL-COVERAGE.md): the call SDL3 and
+    // GLFW actually make. The ARB functions come from wglGetProcAddress with
+    // the context current; the fixture asks for the extension string, queries
+    // attribute values for the format the GDI path chose, and then runs
+    // wglChoosePixelFormatARB with SDL3's attribute list (support-GL, RGBA,
+    // double-buffer, 24 colour bits) and verifies the chosen format's
+    // attributes answer the same values. Absent extension: skipped (platform
+    // limit, never a pass). A wrong answer: BLOCKED.
+    {
+        auto extString = (PFN_wglGetExtensionsStringARB)(uintptr_t)
+            wglGetProcAddress("wglGetExtensionsStringARB");
+        auto attribiv = (PFN_wglGetPixelFormatAttribivARB)(uintptr_t)
+            wglGetProcAddress("wglGetPixelFormatAttribivARB");
+        auto chooseARB = (PFN_wglChoosePixelFormatARB)(uintptr_t)
+            wglGetProcAddress("wglChoosePixelFormatARB");
+        if (extString && attribiv && chooseARB) {
+            const char* exts = extString(dc);
+            bool hasPixelFormat = exts && contains(exts, "WGL_ARB_pixel_format");
+            {char line[160]; char* p = append(line, "PLAY-OPENGL STAGE wgl-extensions pixel-format=");
+             p = append(p, hasPixelFormat ? "1" : "0"); p = append(p, "\n"); *p = 0; emit(line);}
+            if (!hasPixelFormat) {
+                emit("PLAY-OPENGL BLOCKED wgl-extensions: WGL_ARB_pixel_format advertised but the entry points resolved\n");
+                blocked = true;
+            } else {
+                // Query the GDI-chosen format's attributes (hdc iLayerPlane 0).
+                int fmt0 = getPixelFormat(dc);
+                int query[] = {WGL_NUMBER_PIXEL_FORMATS_ARB, WGL_SUPPORT_OPENGL_ARB,
+                               WGL_DOUBLE_BUFFER_ARB, WGL_COLOR_BITS_ARB,
+                               WGL_PIXEL_TYPE_ARB, WGL_SAMPLE_BUFFERS_ARB, WGL_SAMPLES_ARB};
+                int vals[7] = {0};
+                if (!attribiv(dc, fmt0, 0, 7, query, vals)) {
+                    emit("PLAY-OPENGL BLOCKED pixel-format-attribiv query\n");
+                    blocked = true;
+                } else {
+                    {char line[224]; char* p = append(line, "PLAY-OPENGL STAGE pixel-format-attribs count=");
+                     p = appendInt(p, vals[0]); p = append(p, " supportGL="); p = appendInt(p, vals[1]);
+                     p = append(p, " doubleBuffer="); p = appendInt(p, vals[2]);
+                     p = append(p, " colorBits="); p = appendInt(p, vals[3]);
+                     p = append(p, " pixelType=0x"); {uint32_t v=(uint32_t)vals[4]; char hex[9]; int i=0; while(v){int d=v&15; hex[i++]=d<10?'0'+d:'a'+d-10; v>>=4;} while(i)*p++=hex[--i];}
+                     p = append(p, " sampleBuffers="); p = appendInt(p, vals[5]);
+                     p = append(p, " samples="); p = appendInt(p, vals[6]);
+                     p = append(p, "\n"); *p = 0; emit(line);}
+                    if (vals[0] < 1 || !vals[1] || !vals[2] || vals[3] < 24 || vals[4] != WGL_TYPE_RGBA_ARB) {
+                        emit("PLAY-OPENGL BLOCKED pixel-format-attribs wrong\n");
+                        blocked = true;
+                    }
+                }
+                // SDL3's attribute list (SDL_windowsgl.c): double buffer,
+                // support GL, RGBA pixel type, 24 colour bits. MSAA attributes
+                // are only added when the game asks; report what a 4x request
+                // gets so the MSAA row of the matrix has evidence.
+                int iattrs[] = {WGL_SUPPORT_OPENGL_ARB, 1, WGL_DOUBLE_BUFFER_ARB, 1,
+                                WGL_PIXEL_TYPE_ARB, WGL_TYPE_RGBA_ARB, WGL_COLOR_BITS_ARB, 24,
+                                WGL_SAMPLE_BUFFERS_ARB, 1, WGL_SAMPLES_ARB, 4, 0};
+                int chosen = 0; uint32_t num = 0;
+                SetLastError(0);
+                if (!chooseARB(dc, iattrs, nullptr, 1, &chosen, &num) || !chosen || !num) {
+                    // A 4x MSAA request may legitimately find nothing; retry
+                    // without the MSAA pair, which every GL game's baseline
+                    // must match.
+                    int base[] = {WGL_SUPPORT_OPENGL_ARB, 1, WGL_DOUBLE_BUFFER_ARB, 1,
+                                  WGL_PIXEL_TYPE_ARB, WGL_TYPE_RGBA_ARB, WGL_COLOR_BITS_ARB, 24, 0};
+                    if (!chooseARB(dc, base, nullptr, 1, &chosen, &num) || !chosen || !num) {
+                        emit("PLAY-OPENGL BLOCKED choose-pixel-format-arb\n");
+                        blocked = true;
+                    } else {
+                        emit("PLAY-OPENGL STAGE choose-pixel-format-arb msaa=unavailable base\n");
+                    }
+                } else {
+                    {char line[160]; char* p = append(line, "PLAY-OPENGL STAGE choose-pixel-format-arb msaa4x format=");
+                     p = appendInt(p, chosen); p = append(p, " count="); p = appendInt(p, (int32_t)num);
+                     p = append(p, "\n"); *p = 0; emit(line);}
+                }
+            }
+        } else {
+            emit("PLAY-OPENGL STAGE wgl-extensions skipped (WGL_ARB_extensions_string/pixel_format absent)\n");
         }
     }
 
