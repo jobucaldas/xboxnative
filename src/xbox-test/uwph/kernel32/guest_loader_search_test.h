@@ -2,6 +2,10 @@
 #ifndef PLAY_DLL
 // Exercise the mapped loader, rather than the shared native-only wrapper.
 static DWORD testLoaderSearch() {
+    // A previous run of this case may have left the root decoy behind (a crash
+    // between its copy and its delete); the plain search case below must see
+    // the application directory's real semantics.
+    DeleteFileW(L"search-dependency.dll");
     static wchar_t executable[32768];
     DWORD length=GetModuleFileNameW(nullptr,executable,32768);
     if(!length||length>=32768)return 92;
@@ -46,16 +50,22 @@ static DWORD testLoaderSearch() {
     // search-consumer.dll statically imports search-dependency.dll, so copying
     // it (not play-dependency.dll, which imports nothing) makes the sub-path
     // load actually resolve a dependency from the loading module's directory.
-    if(!CopyFileW(L"loader-search\\search-consumer.dll",L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll",FALSE))return 113;
+    // A different-answering search-dependency.dll (55, not 77) is placed at the
+    // root for this case only: resolving the dependency from there instead of
+    // the sub-directory fails the value check below. It is removed afterwards
+    // so the plain search case at the top keeps its application-dir semantics.
+    if(!CopyFileW(L"loader-search\\search-dependency-root.dll",L"search-dependency.dll",FALSE))return 113;
+    if(!CopyFileW(L"loader-search\\search-consumer.dll",L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll",FALSE))return 114;
     if(!CopyFileW(L"loader-search\\search-dependency.dll",L"MonoBleedingEdge\\EmbedRuntime\\search-dependency.dll",FALSE))return 114;
     loaded=LoadLibraryExW(L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll",nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);
     if(!loaded)return 115;
     auto mono_check=(DWORD(WINAPI*)())GetProcAddress(loaded,"search_consumer_value");
-    if(!mono_check||mono_check()!=77)return 116;
+    if(!mono_check||mono_check()!=77)return 116;   // 55 would mean the root copy answered
     if(!GetModuleHandleW(L"search-dependency.dll"))return 117;   // dependency from the sub-directory
     if(!FreeLibrary(loaded))return 118;
     if(DeleteFileW(L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll")==0)return 119;
     if(DeleteFileW(L"MonoBleedingEdge\\EmbedRuntime\\search-dependency.dll")==0)return 120;
+    if(DeleteFileW(L"search-dependency.dll")==0)return 121;   // root decoy removed
     RemoveDirectoryW(L"MonoBleedingEdge\\EmbedRuntime");
     RemoveDirectoryW(L"MonoBleedingEdge");
     if(!SetDllDirectoryW(L""))return 98;

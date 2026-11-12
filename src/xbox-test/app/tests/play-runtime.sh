@@ -191,6 +191,13 @@ for role in dependency consumer;do
 done
 lld-link-19 /nodefaultlib /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /dll /entry:search_entry /out:"$out/loader-search/search-dependency.dll" /implib:"$out/obj/search-dependency.lib" "$out/obj/search-dependency.obj"
 lld-link-19 /nodefaultlib /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /dll /entry:search_entry /out:"$out/loader-search/search-consumer.dll" "$out/obj/search-consumer.obj" "$out/obj/search-dependency.lib"
+# A root copy that answers 55 (the EmbedRuntime copy answers 77): the sub-path
+# load's dependency must come from the loading module's directory, so the test
+# fails if the loader resolved it from there. Built beside the loader-search
+# fixtures; the test copies it into the root only for the sub-path case, since
+# the plain search case legitimately picks the application-directory copy.
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -DSEARCH_ROOT_COPY -c ../uwph/kernel32/guest_loader_search_dependency.cpp -o "$out/obj/search-dependency-root.obj"
+lld-link-19 /nodefaultlib /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /dll /entry:search_entry /out:"$out/loader-search/search-dependency-root.dll" "$out/obj/search-dependency-root.obj"
 
 cp "$out/play-dependency.dll" "$out/play-pending-target.dll"
 cp "$out/play-reject.dll" "$out/play-pending-reject.dll"
