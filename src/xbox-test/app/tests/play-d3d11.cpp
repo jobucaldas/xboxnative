@@ -13,6 +13,7 @@
 #include <dxgi1_2.h>
 #include <d3d11.h>
 #include "../../uwph/host/shaders/triangle_bytecode.h"
+#include "../../uwph/host/shaders/depth_bytecode.h"
 
 extern "C" {
 // No CRT: the byte-copy the depth pass's dynamic upload needs (the same
@@ -229,13 +230,17 @@ DWORD d3d_entry() {
     mipDesc.MiscFlags=D3D11_RESOURCE_MISC_GENERATE_MIPS;
     unsigned int green[16*16];
     for(unsigned int& px:green)px=0xFF00D000u;   // ABGR little-endian: green
-    unsigned int greenSmall[8*8];
-    for(unsigned int& px:greenSmall)px=0xFF00D000u;
+    // Level 1 starts red, deliberately NOT the success colour: if GenerateMips
+    // is a no-op the readback stays red and the pass blocks. Only a mip
+    // filter that actually shrank level 0 can make it green.
+    unsigned int redSmall[8*8];
+    for(unsigned int& px:redSmall)px=0xFF0000FFu;   // ABGR: red
     // CreateTexture2D wants MipLevels*ArraySize initial-data entries: level 0
-    // (16x16) and level 1 (8x8), both filled so nothing is read past the array.
+    // (16x16) and level 1 (8x8), so nothing is read past the array. Only
+    // level 0 carries the source colour; level 1 is what GenerateMips fills.
     D3D11_SUBRESOURCE_DATA mipInit[2]={};
     mipInit[0].pSysMem=green;mipInit[0].SysMemPitch=16*4;
-    mipInit[1].pSysMem=greenSmall;mipInit[1].SysMemPitch=8*4;
+    mipInit[1].pSysMem=redSmall;mipInit[1].SysMemPitch=8*4;
     ID3D11Texture2D* mipTexture=nullptr;
     if(FAILED(device->CreateTexture2D(&mipDesc,mipInit,&mipTexture))||!mipTexture)return 55;
     ID3D11ShaderResourceView* mipSrv=nullptr;
@@ -252,7 +257,8 @@ DWORD d3d_entry() {
     D3D11_MAPPED_SUBRESOURCE mipMapped{};
     if(FAILED(context->Map(mipStaging,0,D3D11_MAP_READ,0,&mipMapped))||!mipMapped.pData)return 57;
     const unsigned char* gPixel=static_cast<const unsigned char*>(mipMapped.pData)+4*mipMapped.RowPitch+4*4;
-    const bool mipGreen=gPixel[1]>0x40;   // the filter may darken; green must survive
+    // Level 1 was created red; only a real mip filter can make it green.
+    const bool mipGreen=gPixel[1]>0x40&&gPixel[0]<0x40;   // green must arrive, red must go
     context->Unmap(mipStaging,0);
     mipSrv->Release();mipStaging->Release();mipTexture->Release();
     if(!mipGreen)return 58;   // BLOCKED: level 1 never received the filtered colour
@@ -399,7 +405,10 @@ DWORD d3d_entry() {
     // Exits 76-79 name the step; 79 is BLOCKED. DXGI requires every back
     // buffer reference released before the resize, so the view goes first and
     // the buffer itself right after — the order a game's resize handler uses.
-    backView->Release();backView=nullptr;
+    // backView is null here (nothing created a view on the back buffer yet),
+    // so only the buffer itself is released; a view is created after the
+    // resize. The guard keeps a later edit that adds a view from crashing.
+    if(backView){backView->Release();backView=nullptr;}
     backBuffer->Release();backBuffer=nullptr;
     hr=swapchain->ResizeBuffers(0,32,32,DXGI_FORMAT_UNKNOWN,0);
     if(FAILED(hr))return 76;
@@ -435,11 +444,25 @@ DWORD d3d_entry() {
 
     // ---- Indexed-draw pass: index buffer + DrawIndexed ----
     // Every mesh renderer draws indexed; a layer that binds the IB but reads
-    // vertices in order renders scrambled geometry. Draw the triangle's three
-    // vertices in rotated index order (1,2,0) — same triangle, so the pixel
-    // test is identical, but only a real index fetch can produce it. Exits
+    // vertices in order renders the wrong geometry. Six vertices, two
+    // disjoint triangles: (0,1,2) red on the left, (3,4,5) green on the
+    // right. The index buffer selects {3,4,5}; a layer that ignores it and
+    // draws the first three vertices paints the LEFT red instead. Exits
     // 80-82 name the step; 82 is BLOCKED.
-    const unsigned short indices[]={1,2,0};
+    const float ivertices[][6]={
+        {-0.75f, 0.75f,1,0,0,1},   // 0: decoy triangle (the red one, drawn
+        { 0.75f, 0.75f,1,0,0,1},   // 1: only if the IB is ignored)
+        { 0.0f,-0.75f,1,0,0,1},    // 2
+        {-0.75f, 0.75f,0,1,0,1},   // 3: the same proven-winding triangle,
+        { 0.75f, 0.75f,0,1,0,1},   // 4: green — what the index buffer picks
+        { 0.0f,-0.75f,0,1,0,1}};   // 5
+    const unsigned short indices[]={3,4,5};
+    D3D11_BUFFER_DESC ivbDesc{};
+    ivbDesc.ByteWidth=sizeof ivertices;ivbDesc.Usage=D3D11_USAGE_IMMUTABLE;
+    ivbDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA ivbInit{};ivbInit.pSysMem=ivertices;
+    ID3D11Buffer* indexedVb=nullptr;
+    if(FAILED(device->CreateBuffer(&ivbDesc,&ivbInit,&indexedVb))||!indexedVb)return 80;
     D3D11_BUFFER_DESC ibDesc{};
     ibDesc.ByteWidth=sizeof indices;ibDesc.Usage=D3D11_USAGE_IMMUTABLE;
     ibDesc.BindFlags=D3D11_BIND_INDEX_BUFFER;
@@ -447,7 +470,7 @@ DWORD d3d_entry() {
     ID3D11Buffer* indexBuffer=nullptr;
     if(FAILED(device->CreateBuffer(&ibDesc,&ibInit,&indexBuffer))||!indexBuffer)return 80;
     context->ClearRenderTargetView(rtv,clear);
-    ID3D11Buffer* idxBinds[]={verticesBuffer};
+    ID3D11Buffer* idxBinds[]={indexedVb};
     context->IASetVertexBuffers(0,1,idxBinds,&stride,&offset);
     context->IASetIndexBuffer(indexBuffer,DXGI_FORMAT_R16_UINT,0);
     context->OMSetRenderTargets(1,binds,nullptr);
@@ -457,17 +480,34 @@ DWORD d3d_entry() {
     context->CopyResource(staging,target);
     D3D11_MAPPED_SUBRESOURCE xMapped{};
     if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&xMapped))||!xMapped.pData)return 81;
+    // Indexed pixel: the centre (x=32) is inside both triangles — it must be
+    // green (the indexed triangle's colour). The decoy triangle is the same
+    // shape, so a layer that ignores the IB paints the centre red instead.
     const unsigned char* xPixel=static_cast<const unsigned char*>(xMapped.pData)+32*xMapped.RowPitch+32*4;
-    const bool indexedRed=xPixel[0]>0x80&&xPixel[1]<0x40&&xPixel[2]<0x40;
+    const bool indexedGreen=xPixel[1]>0x80&&xPixel[0]<0x40&&xPixel[2]<0x40;
     context->Unmap(staging,0);
-    indexBuffer->Release();
-    if(!indexedRed)return 82;   // BLOCKED: the indexed draw never reached the target
+    indexedVb->Release();indexBuffer->Release();
+    if(!indexedGreen)return 82;   // BLOCKED: the index fetch never reached the target
 
     // ---- Depth-stencil pass: DSV + depth test ----
     // Every 3D game writes depth; a layer that accepts the DSV but never
-    // tests draws hidden surfaces over near ones (walls over characters). A
-    // far red triangle drawn first, a near green triangle after, depth test
-    // LESS_EQUAL: the centre pixel must stay green. Exits 83-86; 86 BLOCKED.
+    // tests draws hidden surfaces over near ones (walls over characters).
+    // Two overlapping triangles at the same pixels: far green (z=0.8) first,
+    // near red (z=0.2) after. Depth test LESS_EQUAL ON: the centre pixel must
+    // end red. Depth OFF: the later draw wins, so the centre must be green —
+    // both checks together prove the test, not just the draw order. Exits
+    // 83-86; 86 BLOCKED. The committed triangle VS hardcodes clip z to 0, so
+    // this pass uses its own committed shaders (shaders/depth_*.dxbc):
+    // POSITION is float3 and the VS passes z through, which is what makes
+    // the two draws differ.
+    ID3D11VertexShader* dvs=nullptr;ID3D11PixelShader* dps=nullptr;
+    if(FAILED(device->CreateVertexShader(depth_vs,sizeof depth_vs,nullptr,&dvs))||!dvs)return 83;
+    if(FAILED(device->CreatePixelShader(depth_ps,sizeof depth_ps,nullptr,&dps))||!dps)return 83;
+    const D3D11_INPUT_ELEMENT_DESC dElements[]={
+        {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},
+        {"COLOR",0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0}};
+    ID3D11InputLayout* dLayout=nullptr;
+    if(FAILED(device->CreateInputLayout(dElements,2,depth_vs,sizeof depth_vs,&dLayout))||!dLayout)return 83;
     D3D11_TEXTURE2D_DESC dsDesc{};
     dsDesc.Width=64;dsDesc.Height=64;dsDesc.MipLevels=1;dsDesc.ArraySize=1;
     dsDesc.Format=DXGI_FORMAT_D24_UNORM_S8_UINT;dsDesc.SampleDesc.Count=1;
@@ -482,47 +522,86 @@ DWORD d3d_entry() {
     dsDescState.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;
     ID3D11DepthStencilState* dsState=nullptr;
     if(FAILED(device->CreateDepthStencilState(&dsDescState,&dsState))||!dsState)return 84;
-    context->OMSetDepthStencilState(dsState,0);
+    // The control: depth OFF — the later (near red) draw must win on draw
+    // order alone. Both checks together prove the ordering came from the
+    // depth test, not from the draw sequence or a fixed colour.
+    D3D11_DEPTH_STENCIL_DESC dsOffDesc{};
+    dsOffDesc.DepthEnable=FALSE;
+    ID3D11DepthStencilState* dsOff=nullptr;
+    if(FAILED(device->CreateDepthStencilState(&dsOffDesc,&dsOff))||!dsOff)return 84;
+    context->OMSetDepthStencilState(dsOff,0);
     context->ClearRenderTargetView(rtv,clear);
     context->ClearDepthStencilView(dsv,D3D11_CLEAR_DEPTH,1.0f,0);
     ID3D11RenderTargetView* dsBinds[]={rtv};
     context->OMSetRenderTargets(1,dsBinds,dsv);
     context->RSSetViewports(1,&viewport);
-    // Far red triangle (z=0.8), then near green (z=0.2): the shared centre
-    // pixel must end green. The VS passes z through, so the two draws use
-    // different vertex data: one dynamic vertex buffer, rewritten per draw
-    // (the Map WRITE_DISCARD a game's per-frame upload uses — itself a
+    // Far green triangle (z=0.8) first, then near red (z=0.2): the shared
+    // centre pixel must end red with the test off (draw order) AND with the
+    // test on LESS_EQUAL (depth). The VS passes z through, so the two draws
+    // use different vertex data: one dynamic vertex buffer, rewritten per
+    // draw (the Map WRITE_DISCARD a game's per-frame upload uses — itself a
     // covered feature).
     D3D11_BUFFER_DESC dvbDesc{};
     dvbDesc.ByteWidth=sizeof(float)*6*3;dvbDesc.Usage=D3D11_USAGE_DYNAMIC;
     dvbDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;dvbDesc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
     ID3D11Buffer* dynVb=nullptr;
     if(FAILED(device->CreateBuffer(&dvbDesc,nullptr,&dynVb))||!dynVb)return 85;
-    const float triRed[3][6]={
-        {-0.75f,0.75f,0.8f,1,0,0},{0.75f,0.75f,0.8f,1,0,0},{0.0f,-0.75f,0.8f,1,0,0}};
+    const float triFar[3][6]={
+        {-0.75f,0.75f,0.8f,0,1,0},{0.75f,0.75f,0.8f,0,1,0},{0.0f,-0.75f,0.8f,0,1,0}};
     D3D11_MAPPED_SUBRESOURCE mM{};
     if(FAILED(context->Map(dynVb,0,D3D11_MAP_WRITE_DISCARD,0,&mM))||!mM.pData)return 85;
-    memcpy(mM.pData,triRed,sizeof triRed);
+    memcpy(mM.pData,triFar,sizeof triFar);
     context->Unmap(dynVb,0);
+    context->IASetInputLayout(dLayout);
     ID3D11Buffer* rBinds[]={dynVb};
     context->IASetVertexBuffers(0,1,rBinds,&stride,&offset);
+    context->VSSetShader(dvs,nullptr,0);
+    context->PSSetShader(dps,nullptr,0);
     context->Draw(3,0);
-    const float triGreen[3][6]={
-        {-0.75f,0.75f,0.2f,0,1,0},{0.75f,0.75f,0.2f,0,1,0},{0.0f,-0.75f,0.2f,0,1,0}};
+    const float triNear[3][6]={
+        {-0.75f,0.75f,0.2f,1,0,0},{0.75f,0.75f,0.2f,1,0,0},{0.0f,-0.75f,0.2f,1,0,0}};
     if(FAILED(context->Map(dynVb,0,D3D11_MAP_WRITE_DISCARD,0,&mM))||!mM.pData)return 85;
-    memcpy(mM.pData,triGreen,sizeof triGreen);
+    memcpy(mM.pData,triNear,sizeof triNear);
     context->Unmap(dynVb,0);
     context->Draw(3,0);
-    context->OMSetRenderTargets(1,binds,nullptr);
     context->CopyResource(staging,target);
     D3D11_MAPPED_SUBRESOURCE dMapped2{};
     if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&dMapped2))||!dMapped2.pData)return 85;
     const unsigned char* dPix=static_cast<const unsigned char*>(dMapped2.pData)+32*dMapped2.RowPitch+32*4;
-    const bool depthGreen=dPix[1]>0x80&&dPix[0]<0x40&&dPix[2]<0x40;
+    const bool orderRed=dPix[0]>0x80&&dPix[1]<0x40&&dPix[2]<0x40;
     context->Unmap(staging,0);
-    dsState->Release();dynVb->Release();dsv->Release();dsTexture->Release();
+    if(!orderRed)return 86;   // BLOCKED: even draw order did not reach the target
+    // Now the real test: depth ON, LESS_EQUAL, same two draws from a cleared
+    // target. The near red triangle must still win — and a layer that ignores
+    // the depth state paints the same picture either way, so this only
+    // counts after the control above passed with the identical draw list.
+    context->ClearRenderTargetView(rtv,clear);
+    context->ClearDepthStencilView(dsv,D3D11_CLEAR_DEPTH,1.0f,0);
+    context->OMSetDepthStencilState(dsState,0);
+    if(FAILED(context->Map(dynVb,0,D3D11_MAP_WRITE_DISCARD,0,&mM))||!mM.pData)return 85;
+    memcpy(mM.pData,triFar,sizeof triFar);
+    context->Unmap(dynVb,0);
+    context->Draw(3,0);
+    if(FAILED(context->Map(dynVb,0,D3D11_MAP_WRITE_DISCARD,0,&mM))||!mM.pData)return 85;
+    memcpy(mM.pData,triNear,sizeof triNear);
+    context->Unmap(dynVb,0);
+    context->Draw(3,0);
+    context->CopyResource(staging,target);
+    if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&dMapped2))||!dMapped2.pData)return 85;
+    dPix=static_cast<const unsigned char*>(dMapped2.pData)+32*dMapped2.RowPitch+32*4;
+    const bool depthRed=dPix[0]>0x80&&dPix[1]<0x40&&dPix[2]<0x40;
+    context->Unmap(staging,0);
+    dsOff->Release();dsState->Release();dynVb->Release();dsv->Release();dsTexture->Release();
+    dvs->Release();dps->Release();dLayout->Release();
     context->OMSetDepthStencilState(nullptr,0);
-    if(!depthGreen)return 86;   // BLOCKED: the depth test did not order the draws
+    // The depth pass rebound its own layout/shaders; restore the triangle's
+    // so the passes after it draw with the committed pipeline again.
+    context->IASetInputLayout(layout);
+    ID3D11Buffer* tBinds[]={verticesBuffer};
+    context->IASetVertexBuffers(0,1,tBinds,&stride,&offset);
+    context->VSSetShader(vs,nullptr,0);
+    context->PSSetShader(ps,nullptr,0);
+    if(!depthRed)return 86;   // BLOCKED: the depth test did not order the draws
 
     // ---- Texture-array pass: render to slice 0, copy to slice 1, read back ----
     // Terrain atlases, skybox cross-fades and Cascaded Shadow Maps put array
