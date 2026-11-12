@@ -65,9 +65,27 @@ DWORD d3d12_entry() {
     // The adapter argument is optional; a D3D12 game that picks one passes the
     // factory's adapter, which Play wraps. Default (null) exercises the same
     // path a game takes when it lets the runtime choose.
+    // Console 0.5.303 evidence: the null-adapter default path fails there with
+    // DXGI_ERROR_DEVICE_RESET (0x887a0007) while d3d11 on the same stack
+    // succeeds — and that d3d11 layers on a D3D12 device, so one can exist
+    // in-process. Fall back the way a game that picks an adapter would:
+    // enumerate the factory's adapter 0 and hand it over explicitly, at
+    // 11_0 then 12_0. The host route logs each attempt separately
+    // (adapter=default vs adapter=given), so the console log names the
+    // working path.
     ID3D12Device* device=nullptr;
     HRESULT hr=D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,__uuidof(ID3D12Device),(void**)&device);
-    if(FAILED(hr)||!device)return 11;
+    if(FAILED(hr)||!device) {
+        IDXGIFactory4* factory4=nullptr;
+        if(FAILED(CreateDXGIFactory2(0,__uuidof(IDXGIFactory4),(void**)&factory4))||!factory4)return 81;
+        IDXGIAdapter1* chosen=nullptr;
+        if(FAILED(factory4->EnumAdapters1(0,&chosen))||!chosen){factory4->Release();return 82;}
+        hr=D3D12CreateDevice(chosen,D3D_FEATURE_LEVEL_11_0,__uuidof(ID3D12Device),(void**)&device);
+        if(FAILED(hr)||!device)
+            hr=D3D12CreateDevice(chosen,D3D_FEATURE_LEVEL_12_0,__uuidof(ID3D12Device),(void**)&device);
+        chosen->Release();factory4->Release();
+        if(FAILED(hr)||!device)return 83;
+    }
     // Shader model: a D3D12 game reads this before choosing its shader set.
     D3D12_FEATURE_DATA_SHADER_MODEL model{};
     model.HighestShaderModel=D3D_SHADER_MODEL_6_6;
@@ -292,17 +310,22 @@ DWORD d3d12_entry() {
 
     // ---- coverage additions (research/D3D12-COVERAGE.md) ----
     // Root signature 1.1: the versioned serialize entry point every newer
-    // engine calls, with one 32-bit root constant so the signature is not the
-    // empty one the 1.0 path already covered.
+    // engine calls, with the two descriptors the compute pass reads and
+    // writes: the cbuffer Args (b0) as a root CBV and the RWByteAddressBuffer
+    // dst (u0) as a root UAV. A signature that declared only the CBV would
+    // leave u0 unbound and the dispatch would prove nothing.
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC versioned{};
     versioned.Version=D3D_ROOT_SIGNATURE_VERSION_1_1;
     versioned.Desc_1_1.Flags=D3D12_ROOT_SIGNATURE_FLAG_NONE;
-    D3D12_ROOT_PARAMETER1 param{};
-    param.ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;   // the shader's cbuffer Args (b0)
-    param.Descriptor.ShaderRegister=0;param.Descriptor.RegisterSpace=0;
-    param.ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
-    versioned.Desc_1_1.NumParameters=1;
-    versioned.Desc_1_1.pParameters=&param;
+    D3D12_ROOT_PARAMETER1 params[2]{};
+    params[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;   // cbuffer Args (b0)
+    params[0].Descriptor.ShaderRegister=0;params[0].Descriptor.RegisterSpace=0;
+    params[0].ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
+    params[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_UAV;   // RWByteAddressBuffer dst (u0)
+    params[1].Descriptor.ShaderRegister=0;params[1].Descriptor.RegisterSpace=0;
+    params[1].ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
+    versioned.Desc_1_1.NumParameters=2;
+    versioned.Desc_1_1.pParameters=params;
     ID3DBlob* versionedBlob=nullptr;ID3DBlob* versionedErrors=nullptr;
     if(FAILED(D3D12SerializeVersionedRootSignature(&versioned,&versionedBlob,&versionedErrors)))return 57;
     ID3D12RootSignature* rootSignature11=nullptr;
@@ -379,9 +402,10 @@ DWORD d3d12_entry() {
     device->CreateUnorderedAccessView(uavBuffer,nullptr,&uavView,cbvHandle);
     ID3D12DescriptorHeap* visibleHeaps[]={cbvHeap};
     list->SetDescriptorHeaps(1,visibleHeaps);
-    // The UAV as a root descriptor (the GPU virtual address): the shader's
-    // register u0 binds through the root, the heap keeps the view alive.
-    list->SetComputeRootUnorderedAccessView(0,uavBuffer->GetGPUVirtualAddress());
+    // The UAV as the root signature's second parameter (u0): the GPU virtual
+    // address of the storage the dispatch writes through. The heap view above
+    // keeps a debuggable copy; the shader reads the root binding.
+    list->SetComputeRootUnorderedAccessView(1,uavBuffer->GetGPUVirtualAddress());
     // The buffer was created COMMON; a dispatch writes it as a UAV.
     D3D12_RESOURCE_BARRIER toUav{};
     toUav.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -436,18 +460,23 @@ DWORD d3d12_entry() {
         resizedHandle.ptr+=stride;
     }
     // One more presented frame on the resized buffers, so a resize that only
-    // looked right still fails.
+    // looked right still fails. Flip-model buffer indices advance per Present:
+    // the RTV, barrier and clear must all target the buffer
+    // GetCurrentBackBufferIndex names, not a fixed slot.
+    const UINT resizedIndex=static_cast<IDXGISwapChain3*>(chain)->GetCurrentBackBufferIndex();
     if(FAILED(allocator->Reset()))return 72;
     if(FAILED(list->Reset(allocator,nullptr)))return 73;
     D3D12_RESOURCE_BARRIER resizedToTarget{};
     resizedToTarget.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    resizedToTarget.Transition.pResource=targets[0];
+    resizedToTarget.Transition.pResource=targets[resizedIndex];
     resizedToTarget.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     resizedToTarget.Transition.StateBefore=D3D12_RESOURCE_STATE_PRESENT;
     resizedToTarget.Transition.StateAfter=D3D12_RESOURCE_STATE_RENDER_TARGET;
     list->ResourceBarrier(1,&resizedToTarget);
     const FLOAT resizedColour[4]={0.2f,0.7f,0.3f,1.0f};
-    list->ClearRenderTargetView(heap->GetCPUDescriptorHandleForHeapStart(),resizedColour,0,nullptr);
+    D3D12_CPU_DESCRIPTOR_HANDLE resizedRtv=heap->GetCPUDescriptorHandleForHeapStart();
+    resizedRtv.ptr+=resizedIndex*stride;
+    list->ClearRenderTargetView(resizedRtv,resizedColour,0,nullptr);
     D3D12_RESOURCE_BARRIER resizedToPresent=resizedToTarget;
     resizedToPresent.Transition.StateBefore=D3D12_RESOURCE_STATE_RENDER_TARGET;
     resizedToPresent.Transition.StateAfter=D3D12_RESOURCE_STATE_PRESENT;
@@ -486,19 +515,24 @@ DWORD d3d12_entry() {
 
     // Each frame: reset, barrier to RENDER_TARGET, clear, barrier back to
     // PRESENT, close, execute, present, then wait for the GPU to finish.
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv=heap->GetCPUDescriptorHandleForHeapStart();
+    // The RTV and barrier follow GetCurrentBackBufferIndex, so the loop stays
+    // correct no matter how many presents ran before it (the resize pass
+    // above advanced the flip index too).
     for(UINT frame=0;frame<kFrames;++frame) {
+        const UINT backIndex=static_cast<IDXGISwapChain3*>(chain)->GetCurrentBackBufferIndex();
         if(FAILED(allocator->Reset()))return 23;
         if(FAILED(list->Reset(allocator,nullptr)))return 24;
         D3D12_RESOURCE_BARRIER toTarget{};
         toTarget.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        toTarget.Transition.pResource=targets[frame];
+        toTarget.Transition.pResource=targets[backIndex];
         toTarget.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         toTarget.Transition.StateBefore=D3D12_RESOURCE_STATE_PRESENT;
         toTarget.Transition.StateAfter=D3D12_RESOURCE_STATE_RENDER_TARGET;
         list->ResourceBarrier(1,&toTarget);
         const FLOAT colour[4]={0.10f,0.45f,0.85f,1.0f};
-        list->ClearRenderTargetView(rtv,colour,0,nullptr);
+        D3D12_CPU_DESCRIPTOR_HANDLE frameRtv=heap->GetCPUDescriptorHandleForHeapStart();
+        frameRtv.ptr+=backIndex*stride;
+        list->ClearRenderTargetView(frameRtv,colour,0,nullptr);
         D3D12_RESOURCE_BARRIER toPresent=toTarget;
         toPresent.Transition.StateBefore=D3D12_RESOURCE_STATE_RENDER_TARGET;
         toPresent.Transition.StateAfter=D3D12_RESOURCE_STATE_PRESENT;
@@ -511,7 +545,6 @@ DWORD d3d12_entry() {
         if(FAILED(queue->Signal(fence,fenceValue)))return 27;
         if(FAILED(fence->SetEventOnCompletion(fenceValue,event)))return 28;
         if(WaitForSingleObject(event,5000)!=WAIT_OBJECT_0)return 29;
-        rtv.ptr+=stride;
     }
     // A call the device must reject, so Play's diagnostics are exercised too.
     // These run after the error-count check above: they are meant to fail.
