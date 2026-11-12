@@ -43,7 +43,7 @@ extensions (read in the built DLL): `WGL_ARB_pixel_format`,
 | Swap interval (`wglSwapIntervalEXT`/`wglGetSwapIntervalEXT`) vsync | WGL_EXT_swap_control | `play-opengl.cpp` stage `swap-interval` (set 1, read back; skipped when the extension is absent) | **[off-device]** (host Mesa); console: **[unverified]** |
 | Context sharing (`wglShareLists`) | WGL | **[gap]** — exported by Mesa, never exercised | open |
 | Texture compression (S3TC/BCn via `GL_EXT_texture_compression_s3tc`) | GL | **[gap]** — no fixture uploads a BC texture | open |
-| PBO readback (`glReadPixels` from a PIXEL_UNPACK/PIXEL_PACK buffer) | GL 2.1+ | **[gap]** — fixture reads to client memory only | open |
+| PBO readback (`glReadPixels` into a PIXEL_PACK buffer, mapped and checked) | GL 2.1+ | `play-opengl.cpp` stage `pbo-readback` (buffer target, offset readback, `glMapBuffer` verdict) | **[off-device]**; console: **[unverified]** |
 | Context resize (window resize → new client rect → fresh framebuffer) | WGL | patch 0001 polls the client rect at make-current/swap (stw_framebuffer.c); no fixture resizes | **[gap]** off-device; console resize logging exists only for D3D11 (#152) |
 | Core 4.x context (4.1+: the console's d3d12 reports 4.1 per OPENGL-PLAN) | GL 4.x | **[gap]** — no fixture asks for 4.1 | open |
 | GLES profiles (`WGL_EXT_create_context_es2_profile`) | WGL | served by Mesa; no fixture | **[gap]** (low priority: GLES games route differently) |
@@ -74,8 +74,9 @@ extensions (read in the built DLL): `WGL_ARB_pixel_format`,
    (`wglSwapIntervalEXT` set + `wglGetSwapIntervalEXT` read back), and the
    `WGL_ARB_pixel_format` path SDL3/GLFW use (`wglGetExtensionsStringARB`,
    `wglGetPixelFormatAttribivARB` attribute checks, `wglChoosePixelFormatARB` with SDL3's
-   attribute list). Each stage reports `skipped`
+   attribute list), and a PBO readback (PIXEL_PACK buffer, mapped and checked). Each stage
+   reports `skipped`
    when the host driver caps below 3.0 or lacks the extension (never a false pass) and BLOCKED
    on a mismatch.
-3. Remaining gaps (MSAA resolve, share lists, PBO,
+3. Remaining gaps (MSAA resolve, share lists,
    texture compression, resize, 4.x) stay listed above until closed in a later slice.

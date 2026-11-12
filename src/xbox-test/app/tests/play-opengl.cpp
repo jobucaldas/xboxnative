@@ -127,6 +127,8 @@ typedef void (WINAPI* PFN_glDeleteBuffers)(int, const uint32_t*);
 typedef void (WINAPI* PFN_glDeleteVertexArrays)(int, const uint32_t*);
 typedef void (WINAPI* PFN_glDeleteTextures)(int, const uint32_t*);
 typedef void (WINAPI* PFN_glDeleteProgram)(uint32_t);
+typedef void* (WINAPI* PFN_glMapBuffer)(uint32_t, uint32_t);
+typedef BOOL (WINAPI* PFN_glUnmapBuffer)(uint32_t);
 
 enum : uint32_t { GL_VENDOR = 0x1F00, GL_RENDERER = 0x1F01, GL_VERSION = 0x1F02,
                   GL_COLOR_BUFFER_BIT = 0x00004000 };
@@ -151,6 +153,10 @@ enum : int { WGL_NUMBER_PIXEL_FORMATS_ARB = 0x2000,
              WGL_SAMPLES_ARB = 0x2042 };
 // WGL_TYPE_RGBA_ARB: the pixel type a desktop GL game asks for.
 enum : int { WGL_TYPE_RGBA_ARB = 0x202B };
+// PBO readback (GL 2.1+): GL_PIXEL_PACK_BUFFER_BINDING target for glReadPixels.
+enum : uint32_t { GL_PIXEL_PACK_BUFFER = 0x88EB,
+                  GL_READ_ONLY = 0x88B8,
+                  GL_BUFFER_SIZE = 0x8764 };
 
 int opengl_anchor;
 void* opengl_relocation = &opengl_anchor;
@@ -470,6 +476,49 @@ int opengl_entry() {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glDeleteFramebuffers(1, &fbo);
             glDeleteTextures(1, &tex);
+
+            // PBO readback (GL 2.1+, research/OPENGL-COVERAGE.md): games use a
+            // PIXEL_PACK buffer for async readbacks. Clear the default
+            // framebuffer to the same blue, read into a PBO at offset 0, map
+            // it and check the pixel. Proves buffer targets beyond ARRAY_BUFFER
+            // and a mapped readback, not just a call that returned.
+            auto glMapBuffer = (PFN_glMapBuffer)coreLookup("glMapBuffer");
+            auto glUnmapBuffer = (PFN_glUnmapBuffer)coreLookup("glUnmapBuffer");
+            if (!glMapBuffer || !glUnmapBuffer) {
+                emit("PLAY-OPENGL BLOCKED pbo-map entry points\n");
+                blocked = true;
+            } else {
+                uint32_t pbo = 0;
+                glGenBuffers(1, &pbo);
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo);
+                glBufferData(GL_PIXEL_PACK_BUFFER, 4, nullptr, GL_STATIC_DRAW);
+                glViewport(0, 0, 320, 240);
+                glClearColor(0.0f, 0.25f, 0.5f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                glFinish();
+                // (void)0 offset: the last argument of glReadPixels becomes a
+                // byte offset into the bound PIXEL_PACK buffer.
+                glReadPixels(160, 120, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, (void*)0);
+                void* map = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+                if (!map) {
+                    emit("PLAY-OPENGL BLOCKED pbo-map null\n");
+                    blocked = true;
+                } else {
+                    const unsigned char* m = (const unsigned char*)map;
+                    {char line[192]; char* p = append(line, "PLAY-OPENGL STAGE pbo-readback got=");
+                     p = appendInt(p, m[0]); *p++ = ','; p = appendInt(p, m[1]); *p++ = ',';
+                     p = appendInt(p, m[2]); *p++ = ','; p = appendInt(p, m[3]);
+                     p = append(p, " want=0,64,128,255\n"); *p = 0; emit(line);}
+                    if (m[0] != 0 || m[1] != 64 || m[2] != 128 || m[3] != 255) {
+                        emit("PLAY-OPENGL BLOCKED pbo-readback\n");
+                        blocked = true;
+                    }
+                    glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+                }
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+                glDeleteBuffers(1, &pbo);
+            }
+
             glBindBuffer(GL_ARRAY_BUFFER, 0);
             glBindVertexArray(0);
             glDeleteBuffers(1, &vbo);

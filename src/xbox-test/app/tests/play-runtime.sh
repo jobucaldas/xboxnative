@@ -357,8 +357,9 @@ if grep -q 'PLAY-OPENGL STAGE core-context' "$out/opengl.log"; then
   grep -q 'PLAY-OPENGL STAGE core-version "' "$out/opengl.log"
   grep -q 'PLAY-OPENGL STAGE core-draw got=128,0,64,255' "$out/opengl.log"
   grep -q 'PLAY-OPENGL STAGE fbo-readback got=0,128,0,255' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE pbo-readback got=0,64,128,255' "$out/opengl.log"
   grep -q 'PLAY-OPENGL STAGE core-pipeline-done' "$out/opengl.log"
-  echo "PLAY-OPENGL core 3.3 pipeline + FBO readback PASS"
+  echo "PLAY-OPENGL core 3.3 pipeline + FBO/PBO readback PASS"
 else
   echo "PLAY-OPENGL core stages skipped on this host (driver caps below 3.0); not a pass"
 fi
