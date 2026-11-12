@@ -41,13 +41,14 @@ void check(bool ok, const char* what) {
 // (The real client throws hresult_error; the mock reports the same outcome.)
 struct Client {
     std::atomic<bool> inFlight{false};
-    long sends = 0, changed = 0, ok = 0;
+    std::atomic<long> sends{0}, changed{0}, ok{0};
     Client() = default;
-    Client(Client&& o) : inFlight(o.inFlight.load()), sends(o.sends), changed(o.changed), ok(o.ok) {}
+    Client(Client&& o) : inFlight(o.inFlight.load()), sends(o.sends.load()), changed(o.changed.load()), ok(o.ok.load()) {}
     // meet: optional barrier the caller places inside send(), so both threads
     // are provably inside the send at the same time before either result is
     // decided. Both workers call send() unconditionally in a fixed loop, so
-    // the barrier cannot be missed and cannot hang a peer.
+    // the barrier cannot be missed and cannot hang a peer. Every counter is
+    // atomic: two threads may be inside send() at once, by design.
     bool send(std::barrier<>* meet = nullptr) {
         const bool got = !inFlight.exchange(true);   // false here = 0x8000000C
         ++sends;
