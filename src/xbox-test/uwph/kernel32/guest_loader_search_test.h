@@ -35,6 +35,26 @@ static DWORD testLoaderSearch() {
     if(!FreeLibrary(loaded)||GetModuleHandleW(L"caf\u00e9.dll"))return 109;
     loaded=LoadLibraryExA(encoded,nullptr,0);
     if(!loaded||!FreeLibrary(loaded))return 110;
+    // Unity's Mono loads its runtime by relative sub-path the way
+    // MonoBleedingEdge/EmbedRuntime/mono-2.0-bdwgc.dll is loaded: a
+    // multi-directory relative name with LOAD_WITH_ALTERED_SEARCH_PATH, whose
+    // dependency sits in that same sub-directory. The sub-path must resolve
+    // against the game root, and the dependency must resolve against the
+    // loading module's directory, not the root.
+    if(!CreateDirectoryW(L"MonoBleedingEdge",nullptr) && GetLastError()!=ERROR_ALREADY_EXISTS)return 111;
+    if(!CreateDirectoryW(L"MonoBleedingEdge\\EmbedRuntime",nullptr) && GetLastError()!=ERROR_ALREADY_EXISTS)return 112;
+    if(!CopyFileW(L"play-dependency.dll",L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll",FALSE))return 113;
+    if(!CopyFileW(L"loader-search\\search-dependency.dll",L"MonoBleedingEdge\\EmbedRuntime\\search-dependency.dll",FALSE))return 114;
+    loaded=LoadLibraryExW(L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll",nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);
+    if(!loaded)return 115;
+    auto mono_check=(int(*)())GetProcAddress(loaded,"dependency_check");
+    if(!mono_check||!mono_check())return 116;
+    if(!GetModuleHandleW(L"search-dependency.dll"))return 117;   // dependency from the sub-directory
+    if(!FreeLibrary(loaded))return 118;
+    if(DeleteFileW(L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll")==0)return 119;
+    if(DeleteFileW(L"MonoBleedingEdge\\EmbedRuntime\\search-dependency.dll")==0)return 120;
+    RemoveDirectoryW(L"MonoBleedingEdge\\EmbedRuntime");
+    RemoveDirectoryW(L"MonoBleedingEdge");
     if(!SetDllDirectoryW(L""))return 98;
     if(LoadLibraryW(L"play-search.dll"))return 99;
     if(!SetDllDirectoryW(nullptr))return 100;
