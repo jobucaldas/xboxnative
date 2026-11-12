@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Offline tests for dp-lib.sh's CSRF 403 retry (curl_dp_send).
+"""Offline tests for dp-lib.sh's CSRF 403 retry (curl_dp).
 
 Sources the production dp-lib.sh (symlinked, not copied) with a stubbed curl on
 PATH that simulates the Device Portal's CSRF behaviour. The stub is driven by
 FAKE_SCENARIO:
 
-  ok      every request returns 200
-  stale   GET returns 200; POST with the seeded (stale) jar returns 403;
-          a cookie fetch (-c) writes a FRESH token into the jar, after which
-          POST returns 200 — the recoverable staleness case
-  stuck   POST returns 403 no matter what — auth is failing for real
+  ok    every request 200
+  stale GET 200; POST with a non-FRESH jar token 403 (recoverable staleness)
+  stuck POST always 403 (auth failing for real)
 
 No network, no console, no secrets (DP_PASS is a dummy).
 """
@@ -29,17 +27,39 @@ STUB_CURL = r'''#!/bin/bash
 #   ok    every request 200
 #   stale GET 200; POST with a non-FRESH jar token 403 (recoverable staleness)
 #   stuck POST always 403 (auth failing for real)
-# Like real curl, the -w format output is printed after the body.
-mutating=no; jar=""; prev=""
+# Honours -D (header dump) and -w like real curl (-w output goes after the body).
+mutating=no; jar=""; hdr=""; prev=""
 for a in "$@"; do
   case "$prev" in
     -c) jar="$a" ;;
     -b) jar="$a" ;;
-    -w) w="$a" ;;
+    -D) hdr="$a" ;;
   esac
   case "$a" in
     -X|-F) mutating=yes ;;
-    -c|-b|-w) prev="$a" ;;
+    -c|-b|-D) prev="$a" ;;
+    *) prev="" ;;
+  esac
+done
+w=""
+prev=""
+for a in "$@"; do
+  case "$prev" in
+    -w) w="$a" ;;
+  esac
+  case "$a" in
+    -w) prev="$a" ;;
+    *) prev="" ;;
+  esac
+done
+o=""
+prev=""
+for a in "$@"; do
+  case "$prev" in
+    -o) o="$a" ;;
+  esac
+  case "$a" in
+    -o) prev="$a" ;;
     *) prev="" ;;
   esac
 done
@@ -49,16 +69,26 @@ if [ -n "$jar" ] && [ "$mutating" = no ] && [[ "$*" == *"/api/os/info"* ]]; then
   exit 0
 fi
 fresh=$(awk '$6=="CSRF-Token"{print $7}' "$jar" 2>/dev/null | tail -1)
+emit() {
+  # body to -o when given (like real curl), else stdout; then the caller's -w
+  if [ -n "$o" ]; then printf 'HTTP/1.1 %s OK\n' "$code" > "$o"
+  else [ -n "$hdr" ] && printf 'HTTP/1.1 %s Forbidden\n' "$code" > "$hdr"
+       printf 'HTTP/1.1 %s\n' "$code"
+  fi
+  [ -n "$w" ] && printf '%s\n' "$(printf %s "$w" | sed "s/%{http_code}/$code/g")"
+}
 if [ "$sc" = stuck ]; then
-  printf 'HTTP/1.1 403 Forbidden\n'; [ -n "$w" ] && printf '403\n'; exit 0
+  code=403; emit; exit 0
 fi
 if [ "$sc" = ok ] || [ "$fresh" = FRESH ]; then
-  printf 'HTTP/1.1 200 OK\n'; [ -n "$w" ] && printf '200\n'; exit 0
+  code=200; emit; exit 0
 fi
 if [ "$mutating" = yes ]; then
-  printf 'HTTP/1.1 403 Forbidden\n'; [ -n "$w" ] && printf '403\n'; exit 0
+  code=403; emit; exit 0
 fi
-printf 'HTTP/1.1 200 OK\n'; [ -n "$w" ] && printf '200\n'; exit 0
+code=200
+emit
+exit 0
 '''
 
 STALE_JAR = '.xboxlive.com\tTRUE\t/\tTRUE\t0\tCSRF-Token\tSTALE\n'
@@ -91,51 +121,81 @@ class DpLibCsrfRetryTest(unittest.TestCase):
             env=env, capture_output=True, text=True, timeout=60)
         return p.returncode, p.stdout + p.stderr
 
+    # ---- plain curl_dp: GETs never retry, mutating calls do ----
     def test_get_with_stale_jar_succeeds_without_retry(self):
-        rc, out = self.run_lib('curl_dp /api/resourcemanager/processes >/dev/null')[0:2]
+        rc, out = self.run_lib('curl_dp /api/resourcemanager/processes >/dev/null')[:2]
         self.assertEqual(rc, 0, out)
         self.assertNotIn('403', out)
         self.assertNotIn('refetching', out)
 
     def test_stale_csrf_post_recovers_after_one_retry(self):
-        rc, out = self.run_lib('curl_dp_send /api/taskmanager/app -X POST -H "Content-Length: 0" >/dev/null')[:2]
+        rc, out = self.run_lib('curl_dp /api/taskmanager/app -X POST -H "Content-Length: 0" >/dev/null')[:2]
         self.assertEqual(rc, 0, out)
         self.assertIn('refetching cookie and retrying once', out)
         self.assertNotIn('still 403', out)
         # after the refetch the jar holds a FRESH token and the retry succeeded
-        self.assertEqual(awk_fresh(self.jar), 'FRESH')
+        self.assertEqual(self.jar_fresh(), 'FRESH')
+
+    def test_multipart_upload_403_recovers(self):
+        # the -F upload path (put-file.sh) needs the same recovery
+        rc, out = self.run_lib('curl_dp /api/filesystem/apps/file -X POST -F "f=@/etc/hostname" >/dev/null')[:2]
+        self.assertEqual(rc, 0, out)
+        self.assertIn('refetching cookie and retrying once', out)
+        self.assertNotIn('still 403', out)
 
     def test_persistent_403_reports_clearly_and_retries_only_once(self):
         # stuck: POST 403s even with a FRESH token — the wrapper must say so and
         # stop at exactly one retry (two requests total, no loop).
-        rc, out = self.run_lib('curl_dp_send /api/taskmanager/app -X POST >/dev/null', scenario='stuck')[:2]
+        rc, out = self.run_lib('curl_dp /api/taskmanager/app -X POST >/dev/null', scenario='stuck')[:2]
         self.assertEqual(rc, 0, out)
         self.assertIn('still 403', out)
         self.assertIn('CSRF auth is failing for real', out)
         self.assertEqual(out.count('refetching cookie and retrying once'), 1)
 
     def test_ok_scenario_never_retries(self):
-        rc, out = self.run_lib('curl_dp_send /api/taskmanager/app -X POST >/dev/null', scenario='ok')[:2]
+        rc, out = self.run_lib('curl_dp /api/taskmanager/app -X POST >/dev/null', scenario='ok')[:2]
         self.assertEqual(rc, 0, out)
         self.assertNotIn('403', out)
         self.assertNotIn('refetching', out)
 
-    def test_body_and_status_survive_the_wrapper(self):
-        rc, out = self.run_lib('curl_dp_send /api/app/packagemanager/state -X PUT', scenario='ok')[:2]
+    # ---- caller flags survive: -w / -o / -f must keep working ----
+    def test_caller_w_format_is_not_corrupted(self):
+        # a caller's own -w (launch.sh, put-file.sh) must still print its text,
+        # and must not hide the 403 detection from the wrapper
+        rc, out = self.run_lib('curl_dp "/api/taskmanager/app" -X POST -w "launch HTTP %{http_code}\\n"')[:2]
         self.assertEqual(rc, 0, out)
-        self.assertIn('HTTP/1.1 200 OK', out)
+        self.assertIn('launch HTTP 200', out)
+        self.assertIn('refetching cookie and retrying once', out)
+
+    def test_caller_w_with_stuck_403_still_reports(self):
+        # even when the caller's -w would win, the -D-based detection still fires
+        rc, out = self.run_lib('curl_dp /api/taskmanager/app -X POST -w "kill HTTP %{http_code}\\n"',
+                               scenario='stuck')[:2]
+        self.assertIn('still 403', out)
+        self.assertIn('kill HTTP 403', out)
+
+    def test_caller_o_file_gets_body(self):
+        # install.sh writes the body to a file with -o; that must survive
+        rc, out = self.run_lib('curl_dp /api/app/packagemanager/package -X POST -o "%s/body" -w "upload HTTP %%{http_code}\\n"'
+                               % self.root, scenario='ok')[:2]
+        self.assertEqual(rc, 0, out)
+        self.assertIn('upload HTTP 200', out)
+        # the stub writes the body to -o only when it parses -o; assert the
+        # header dump went to the wrapper's own -D, not the caller's -o file
+        body = (self.root / 'body')
+        self.assertTrue(body.exists(), out)
+        self.assertIn('200 OK', body.read_text())
 
     def test_dp_retry_uses_the_send_path(self):
         rc, out = self.run_lib('dp_retry POST /api/taskmanager/app >/dev/null')[:2]
         self.assertEqual(rc, 0, out)
-        # first attempt 403s, curl_dp_send refetches and succeeds -> dp_retry's
+        # first attempt 403s, curl_dp refetches and succeeds -> dp_retry's
         # first iteration returns 0, so only one dp_retry iteration ran.
-        self.assertEqual(awk_fresh(self.jar), 'FRESH')
+        self.assertEqual(self.jar_fresh(), 'FRESH')
 
-
-def awk_fresh(jar):
-    return subprocess.run(['awk', '$6=="CSRF-Token"{print $7}', str(jar)],
-                          capture_output=True, text=True).stdout.strip()
+    def jar_fresh(self):
+        return subprocess.run(['awk', '$6=="CSRF-Token"{print $7}', str(self.jar)],
+                              capture_output=True, text=True).stdout.strip()
 
 
 if __name__ == '__main__':

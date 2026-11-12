@@ -10,11 +10,13 @@ All scripts source `dp-lib.sh` and serialize console access with
 Auth: HTTP Basic (`$DP_USER:$DP_PASS`, `DP_PASS` from env, never printed/logged) plus a
 CSRF token read back from the `CSRF-Token` cookie set by an initial `GET /api/os/info` — every
 subsequent request sends `X-CSRF-Token: <cookie value>`. `dp-lib.sh` handles this automatically
-via a per-process cookie jar. Mutating calls (POST/PUT/DELETE, uploads) should go through
-`curl_dp_send` (or `dp_retry`, which uses it): when the portal rotates the CSRF token, a stale
-cookie makes every POST return 403 while GETs still succeed — `curl_dp_send` detects the 403,
-discards the jar, refetches the cookie and retries once, and prints a clear message if it still
-fails. Plain `curl_dp` remains fine for GETs, which never see this failure.
+via a per-process cookie jar. Mutating calls (POST/PUT/DELETE, uploads) get CSRF 403 recovery
+inside `curl_dp` itself: when the portal rotates the CSRF token, a stale cookie makes every POST
+return 403 while GETs still succeed — `curl_dp` detects the 403 on any mutating call
+(`-X POST/PUT/DELETE/PATCH` or any `-F`/`-d`/`-T`), discards the jar, refetches the cookie and
+retries once, and prints a clear message if it still fails. The status is read from a `-D` header
+dump, so callers' own `-w`/`-o`/`-f` handling is untouched. GETs never see this failure and never
+retry.
 
 Env overrides: `DP_HOST` (required; a bare host or a URL like `https://host[:port]`), `DP_PORT` (default `11443`; wins over a port in `DP_HOST`), `DP_SOCKS` (default
 empty = direct), `DP_LOCK`, `DP_TIMEOUT` (default 120s per request).
@@ -37,7 +39,7 @@ empty = direct), `DP_LOCK`, `DP_TIMEOUT` (default 120s per request).
 | `pull-megabonk.sh [LOCALDIR] [REMOTE_SUBPATH]` | yes | Recursively mirrors `LocalState\megabonk` (default, override via args/`PKG_OLD`) to a local directory with retries + a final `sha256sum` manifest. Used to pull 24 files / ~237 MB off the console (old `Xboxnative.Boxedwine.DevMode_0.1.6.0...` package) into a local directory — this is a **partial** copy (24 of the known 69 files / ~523 MB); a full copy still needs a fresh Steam download, not a console pull. |
 | `logs.sh list\|enable\|disable\|get ...` | yes | See "ETW / crash dump findings" below. |
 | `smoke.sh RID FULL LOGFILE PATTERN [...]` | yes | One-command `install?`→`launch`→`wait-log`→`screenshot`→`kill` pipeline with a PASS/FAIL summary (exit code = failure count). Verified live end-to-end (4/4 pass) against the Boxedwine DevMode probe app: `./smoke.sh 'Xboxnative.Boxedwine.DevMode_8j5c92gwe8f3c!App' Xboxnative.Boxedwine.DevMode_0.1.6.0_x64__8j5c92gwe8f3c ladder-native.log 'corewindow-swapchain PASS'`. Not run against `Xboxnative.Launcher` (the live shared launcher owned by lane `app`/`launcher`) — the `install`+`kill` steps would upgrade/downgrade and then terminate that package in place, which would have clobbered another lane's live session (QR login, `steam_session.bin`) rather than testing anything new. |
-| `dp-lib.sh` CSRF retry | yes (offline test) | `curl_dp_send` wraps `curl_dp` for mutating calls: a 403 (stale CSRF cookie after a portal rotation) discards the cookie jar, refetches and retries once, with a clear stderr message if it still 403s. Tested offline with a stubbed curl in `src/xbox-test/tools/tests/test_dp_lib.py` (fresh-cookie success, one-retry recovery, persistent-403 report). |
+| `dp-lib.sh` CSRF retry | yes (offline test) | `curl_dp` recovers mutating calls (POST/PUT/DELETE/-F/-d/-T) from a 403 caused by a stale CSRF cookie after a portal rotation: discards the cookie jar, refetches and retries once, with a clear stderr message if it still 403s. Status detection uses a `-D` header dump, so callers' `-w`/`-o`/`-f` are untouched. Tested offline with a stubbed curl in `src/xbox-test/tools/tests/test_dp_lib.py` (GET no-retry, stale-POST recovery, multipart upload recovery, persistent-403 report, caller `-w`/`-o` survival, `dp_retry` path). |
 
 ## ETW / crash dump findings (`logs.sh`)
 - `/api/etw/providers`, `/api/etw/customproviders`, `/api/etw/session/realtime` all return
