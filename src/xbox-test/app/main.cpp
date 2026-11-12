@@ -2460,13 +2460,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
         // The record DLL's raw-input enumeration presents one HID device per
         // connected pad (uwph_u32c_pads), which is what a guest's legacy
-        // joystick enumeration looks for; with no pad it reports none.
+        // joystick enumeration looks for; with no pad it reports none. The
+        // enumeration carries connection state only — buttons flow through
+        // XInputGetState above — but while gpad injection holds buttons with
+        // no physical pad connected, slot 0 must still enumerate, or the
+        // guest never finds the IG_ device it would read through XInput.
         static auto reportPads=reinterpret_cast<void (WINAPI*)(unsigned)>(
             user32_core::resolve("user32.dll","uwph_u32c_pads"));
         if(reportPads) {
             unsigned mask=0;
             for(unsigned i=0;i<assigned.size();++i)if(assigned[i])mask|=1u<<i;
-            reportPads(mask);
+            reportPads(gpad::publish_mask(mask,injButtons||injLt||injRt));
         }
     }
 

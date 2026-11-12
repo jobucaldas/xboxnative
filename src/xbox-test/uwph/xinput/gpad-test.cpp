@@ -1,6 +1,9 @@
 // gpad parser and runner regression (host, no Windows): the command text a
 // tester writes must arm exactly the presses a guest's XInputGetState will
-// see, and a program must release what it pressed.
+// see, and a program must release what it pressed. The dual-consumer checks
+// at the end pin the raw-input enumeration mask (uwph_u32c_pads): slot 0
+// appears while injection holds buttons and only then. The XInputGetState
+// assertions live in gpad-xinput-test.cpp (Wine; route.h needs windows.h).
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "gpad.h"
 #include <cstdio>
@@ -95,5 +98,23 @@ int main() {
     r.clear(); r.tick(50); r.held(&buttons, &lt, &rt);
     CHECK(!r.armed && buttons == 0);
 
-    puts("gpad: parse, reject, trigger bytes, hold/release timing, gap, re-arm and clear PASS");
+    // Both consumer classes: the raw-input enumeration (uwph_u32c_pads mask)
+    // must present slot 0 while injection holds buttons so a guest finds the
+    // IG_ device it reads through XInput — and must not add anything when
+    // injection is idle. Button bits themselves flow only through
+    // XInputGetState (pad_registry.h: reads never complete), asserted in
+    // gpad-xinput-test.cpp.
+    CHECK(gpad::publish_mask(0, false) == 0);
+    CHECK(gpad::publish_mask(0, true) == 1u);              // no physical pad: slot 0 appears
+    CHECK(gpad::publish_mask(0x2 | 0x8, true) == (0x2u | 0x8u | 1u));   // physical pads kept
+    CHECK(gpad::publish_mask(0x2 | 0x8, false) == (0x2u | 0x8u));
+    g("DPAD_DOWN 100");
+    r.arm(out, 0); r.tick(0); r.held(&buttons, &lt, &rt);
+    CHECK(buttons == BTN_DPAD_DOWN);
+    CHECK(gpad::publish_mask(0, buttons != 0) == 1u);
+    r.tick(100); r.held(&buttons, &lt, &rt);
+    CHECK(buttons == 0);                                   // release delivered
+    CHECK(gpad::publish_mask(0, buttons != 0) == 0u);      // enumeration back to physical only
+
+    puts("gpad: parse, reject, trigger bytes, hold/release timing, gap, re-arm, clear and dual-consumer mask PASS");
 }

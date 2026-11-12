@@ -123,7 +123,7 @@ inline bool parse_step(const char* s, size_t len, Press* out, const char** err) 
     size_t i = sp;
     while (i < len) {
         while (i < len && (s[i] == ' ' || s[i] == '\t')) ++i;
-        if (i >= len) break;
+        if (i >= len || !s[i]) break;   // i==len or a trailing NUL (a caller may pass sizeof, not strlen)
         if (s[i] < '0' || s[i] > '9') { *err = "expected a number"; return false; }
         char* end = nullptr;
         unsigned long v = strtoul(s + i, &end, 10);
@@ -155,7 +155,7 @@ inline bool parse_seq(const char* s, size_t len, std::vector<Press>* out, const 
         size_t a = pos, b = e;
         while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r')) ++a;
         while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r')) --b;
-        if (b > a && s[a] != '#' && b - a <= 40) {
+        if (b > a && s[a] != '#' && b - a <= 40 && s[a]) {   // s[a]: skip a trailing NUL (len may be sizeof)
             Press p;
             if (!parse_step(s + a, b - a, &p, err)) return false;
             out->push_back(p);
@@ -209,5 +209,17 @@ struct Runner {
         }
     }
 };
+
+// The slot mask the launcher reports to the guest's raw-input enumeration
+// (uwph_u32c_pads): the physical pads, plus slot 0 while an injection program
+// holds buttons. The enumeration carries connection state only — button bits
+// never flow through it (pad_registry.h: reads never complete; a guest whose
+// enumerated device path carries "IG_" reads buttons through XInputGetState,
+// which publish feeds) — but a guest must be able to enumerate the IG_ device
+// to find the XInput pad it reads, so an automated run with no physical pad
+// connected still needs slot 0 present while injection is active.
+inline unsigned publish_mask(unsigned physical_mask, bool injecting) {
+    return injecting ? (physical_mask | 1u) : physical_mask;
+}
 
 } // namespace gpad

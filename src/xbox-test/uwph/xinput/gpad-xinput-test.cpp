@@ -79,5 +79,24 @@ int main() {
     }
     CHECK(sawA && sawGap && sawB && sawEnd);
 
-    puts("gpad+xinput: inject, hold, release, triggers, OR precedence, sequence PASS");
+    // Dual consumer: the same injected press must show in XInputGetState
+    // (buttons) and in the raw-input enumeration mask the launcher reports
+    // through uwph_u32c_pads (connection only; pad_registry.h: HID reads never
+    // complete, an IG_ guest reads XInputGetState). Release clears both.
+    CHECK(parse_gpad("DPAD_DOWN 100", 14, &prog, &err));
+    r.clear(); r.arm(prog, 4000);
+    r.tick(4000); r.held(&buttons, &lt, &rt);
+    CHECK(buttons == BTN_DPAD_DOWN);
+    CHECK(gpad::publish_mask(0, buttons != 0) == 1u);      // enumeration: slot 0 present
+    XINPUT_GAMEPAD dpad{}; dpad.wButtons = buttons;
+    xinput_core::publish(0, &dpad);
+    CHECK(xinput_core::get_state(0, &st) == 0 && st.Gamepad.wButtons == XINPUT_GAMEPAD_DPAD_DOWN);
+    r.tick(4100); r.held(&buttons, &lt, &rt);
+    CHECK(buttons == 0);                                   // release delivered
+    CHECK(gpad::publish_mask(0, buttons != 0) == 0u);      // enumeration: back to physical only
+    XINPUT_GAMEPAD empty{};
+    xinput_core::publish(0, &empty);
+    CHECK(xinput_core::get_state(0, &st) == 0 && st.Gamepad.wButtons == 0);
+
+    puts("gpad+xinput: inject, hold, release, triggers, OR precedence, sequence, enumeration mask PASS");
 }
