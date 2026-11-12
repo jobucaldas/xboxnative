@@ -2,9 +2,9 @@
 
 SPDX-License-Identifier: GPL-3.0-or-later
 
-Companion to [VULKAN-PLAN.md](VULKAN-PLAN.md) (why dzn exists, how the loader is
-packaged) and [D3D-LAYERS-REPORT.md](D3D-LAYERS-REPORT.md) (why DXVK cannot host
-on dzn). This is the feature/API → test → status matrix the coverage brief asks
+Companion to the [vulkan] issue #177 (why dzn exists, how the loader is
+packaged, why DXVK cannot host on dzn) and the [x86] issue #169 (the 32-bit
+plan). This is the feature/API → test → status matrix the coverage brief asks
 for: for each Vulkan feature a game relies on, the fixture that proves it and
 where it stands. Console status is **unverified** until the console test
 service returns a run for the packaged fixtures; off-device status is from the
@@ -42,17 +42,17 @@ pinned Vulkan-Headers.
 | `VK_KHR_win32_surface` on a guest HWND | `vulkan-dzn`: win32-surface-created | PASS | **unverified** |
 | Swapchain on CoreWindow (HWND path, patch 0009) | `vulkan-dzn`: CreateSwapChainForHwnd hr=0 | PASS (Wine) / console PASS at 0.5.270.0 | PASS (0.5.270.0) |
 | Render pass + cleared present | `vulkan-dzn`: two frame-presented | PASS / console PASS at 0.5.270.0 | PASS (0.5.270.0) |
-| Graphics pipeline (VS+FS from SPIR-V) | `vulkan-draw`: graphics-pipeline stage | see below | **unverified** |
-| Vertex buffers + vertex input (R32G32 pos, R32G32B32A32 colour) | `vulkan-draw`: draw-recorded → pixel-readback | see below | **unverified** |
-| Draw + raster + clear-then-draw pixels | `vulkan-draw`: pixel-readback (inside red, outside clear) | see below | **unverified** |
-| Dynamic rendering (no render pass; `VK_KHR_dynamic_rendering` / core 1.3) | `vulkan-draw`: rendering-info chain names the colour format | see below | **unverified** |
-| Compute dispatch + storage buffer descriptor | `vulkan-draw`: compute-readback (64 uints ×3) | see below | **unverified** |
-| Push constants | `vulkan-draw`: the ×3 multiplier travels by push constant | see below | **unverified** |
-| Timeline semaphores (`VK_KHR_timeline_semaphore` / core 1.2) | `vulkan-draw`: signal 1 → host wait → host signal 2 → host wait | see below | **unverified** |
-| Synchronization2 barriers (`VK_KHR_synchronization2` / core 1.3) | `vulkan-draw`: buffer barrier (compute→copy) + image barriers (layout transitions) | see below | **unverified** |
-| Buffer↔image copy (readback/screenshot path) | `vulkan-draw`: vkCmdCopyImageToBuffer + row-pitch check | see below | **unverified** |
-| Host-visible coherent memory, one allocation, aligned offsets | `vulkan-draw`: buffers-mapped stage | see below | **unverified** |
-| Feature gating (`vkGetPhysicalDeviceFeatures2` chain) | `vulkan-draw`: features line names timeline/sync2/dynamicRendering; stages degrade honestly | see below | **unverified** |
+| Graphics pipeline (VS+FS from SPIR-V) | `vulkan-draw`: graphics-pipeline stage | PASS (Wine/lvp; console **unverified**) | **unverified** |
+| Vertex buffers + vertex input (R32G32B32A32 pos+colour) | `vulkan-draw`: draw-recorded → pixel-readback | PASS (Wine/lvp) | **unverified** |
+| Draw + raster + clear-then-draw pixels | `vulkan-draw`: pixel-readback (inside red, outside clear) | PASS (Wine/lvp) | **unverified** |
+| Dynamic rendering (no render pass; `VK_KHR_dynamic_rendering` / core 1.3) | `vulkan-draw`: rendering-info chain names the colour format | PASS (Wine/lvp) | **unverified** |
+| Compute dispatch + storage buffer descriptor | `vulkan-draw`: compute-readback (64 uints ×3) | PASS (Wine/lvp) | **unverified** |
+| Push constants | `vulkan-draw`: the ×3 multiplier travels by push constant | PASS (Wine/lvp) | **unverified** |
+| Timeline semaphores (`VK_KHR_timeline_semaphore` / core 1.2) | `vulkan-draw`: signal 1 → host wait → host signal 2 → host wait | PASS (Wine/lvp) | **unverified** |
+| Synchronization2 barriers (`VK_KHR_synchronization2` / core 1.3) | `vulkan-draw`: buffer barrier (compute→copy) + image barriers (layout transitions) | PASS (Wine/lvp) | **unverified** |
+| Buffer↔image copy (readback/screenshot path) | `vulkan-draw`: vkCmdCopyImageToBuffer + row-pitch check | PASS (Wine/lvp) | **unverified** |
+| Host-visible coherent memory, one allocation, aligned offsets | `vulkan-draw`: buffers-mapped stage | PASS (Wine/lvp) | **unverified** |
+| Feature gating (`vkGetPhysicalDeviceFeatures2` chain) | `vulkan-draw`: features line names timeline/sync2/dynamicRendering; stages degrade honestly | PASS (Wine/lvp) | **unverified** |
 | MSAA (4x/8x resolve) | none | gap | gap |
 | Mip generation / array / cube images | none | gap | gap |
 | Descriptor indexing (bindless; `EXT_descriptor_indexing`) | none — dzn gates it at shader model ≥ 6.6 | gap | gap |
@@ -61,13 +61,13 @@ pinned Vulkan-Headers.
 | Dual-source blend, logic ops | none — **dzn reports false** | gap (dzn limit) | gap (dzn limit) |
 | Tessellation, multi-viewport, large points | none — **dzn reports false** | gap (dzn limit) | gap (dzn limit) |
 | `robustness2`, `transform_feedback`, `maintenance5/6`, `extended_dynamic_state` | none — **absent from dzn** | gap (dzn limit) | gap (dzn limit) |
-| 32-bit Vulkan (x86 guest) | none | gap ([X86-32BIT-PLAN.md](X86-32BIT-PLAN.md)) | gap |
+| 32-bit Vulkan (x86 guest) | none | gap (issue #169) | gap |
 | Vulkan layers (validation, GPU-assist) | none — loader default discovery only | gap | gap |
 
-"see below" rows were run under Wine on this host against Mesa's lavapipe
-(software Vulkan 1.4) where the runner can host a driver; the draw fixture's
-first run on this host is recorded in the PR. The dzn rows above it are the
-same fixture against the packaged dzn build.
+"PASS (Wine/lvp)" rows were run under Wine on this host against Mesa's
+lavapipe (software Vulkan 1.4): every stage line through `compute-readback`
+and `pixel-readback`, verdict `PASS draw-readback` (exit 42). The dzn rows
+above them are the same fixture against the packaged dzn build.
 
 ## The dzn limits that matter to games (static, from mesa-25.3.6 `dzn_device.c`)
 
@@ -79,8 +79,8 @@ Read from the pinned source, not probed: `dzn` advertises Vulkan 1.2 with
 
 * **DXVK cannot host on dzn** — DXVK requires `fullDrawIndexUint32`,
   `dualSrcBlend` and `logicOp` for D3D10+ feature levels. D3D9 games stay on
-  the d3d9 shim; dzn is not a second D3D route. (Full argument in
-  [D3D-LAYERS-REPORT.md](D3D-LAYERS-REPORT.md) §2 #4.)
+  the d3d9 shim; dzn is not a second D3D route. (Full argument in the
+  [vulkan] issue #177 and the [d3d9] issue #172.)
 * A native Vulkan engine that stays inside the covered matrix (triangle
   pipelines, compute, timeline semaphores, dynamic rendering) can run; one
   that needs tessellation, multi-viewport or bindless cannot, and the fixture
@@ -92,6 +92,7 @@ Read from the pinned source, not probed: `dzn` advertises Vulkan 1.2 with
   fixture's console status is **unverified** until the console test service
   returns a run naming it.
 * No game claim: no owned title runs Vulkan today; the acceptance is synthetic
-  by design (VULKAN-PLAN.md §"A Vulkan game to test with").
+  by design (issue #177 §1: no game claim until an owned title asks for
+  Vulkan).
 * BLOCKED is never a pass: both fixtures print BLOCKED with the failing stage
   and the runner counts it separately.
