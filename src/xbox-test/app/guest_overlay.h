@@ -238,6 +238,144 @@ inline bool dim_frame(ID3D11Device* dev,ID3D11DeviceContext* ctx,ID3D11Texture2D
     ctx->CopySubresourceRegion(bb,0,0,0,0,tex.get(),0,nullptr);   // whole frame back
     return true;
 }
+// Dims the frame AND composites the guide card over it in one CPU pass, then
+// uploads the result: the card lands with its rounded corners, anti-aliased
+// against the dimmed game frame. (A texture CopySubresourceRegion cannot
+// blend, so a card blitted straight onto the back buffer covered its corners
+// with an opaque square — the black outline the owner saw.)
+// `rgba` says the back buffer's byte order is RGBA rather than BGRA.
+inline bool dim_and_composite(ID3D11Device* dev,ID3D11DeviceContext* ctx,ID3D11Texture2D* bb,
+                              const D3D11_TEXTURE2D_DESC& d,bool rgba,
+                              const ui::Canvas& card,int cx,int cy) {
+    const int w=int(d.Width),h=int(d.Height);
+    if(w<=0||h<=0)return false;
+    if(!dimStaging||dimW!=w||dimH!=h||dimFmt!=d.Format) {
+        D3D11_TEXTURE2D_DESC s{};s.Width=d.Width;s.Height=d.Height;s.MipLevels=1;s.ArraySize=1;
+        s.Format=d.Format;s.SampleDesc=d.SampleDesc;s.Usage=D3D11_USAGE_STAGING;s.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        dimStaging=nullptr;
+        if(FAILED(dev->CreateTexture2D(&s,nullptr,dimStaging.put())))return false;
+        dimW=w;dimH=h;dimFmt=d.Format;
+    }
+    ctx->CopySubresourceRegion(dimStaging.get(),0,0,0,0,bb,0,nullptr);
+    MappedGuard g;
+    if(!g.enter(ctx,dimStaging.get()))return false;
+    std::vector<uint8_t> frame(size_t(w)*4*size_t(h));
+    const uint8_t* src=static_cast<const uint8_t*>(g.data);
+    const UINT pitch=g.pitch?g.pitch:UINT(w)*4;
+    for(int row=0;row<h;++row)
+        std::memcpy(frame.data()+size_t(row)*size_t(w)*4,src+size_t(row)*pitch,size_t(w)*4);
+    g.release();
+    for(int row=0;row<h;++row)
+        ui_guide::dim_row(frame.data()+size_t(row)*size_t(w)*4,w,45);
+    // Composite the card by its rounded-rect coverage: the card canvas is
+    // opaque, so its own pixels are the source and the card's corner radius
+    // supplies the alpha. Pixels outside the card are left dimmed.
+    const int cw=card.width(),ch=card.height();
+    const float rad=ui_guide::kCardR;
+    for(int y=0;y<ch;++y) {
+        const int fy=cy+y;
+        if(fy<0||fy>=h)continue;
+        uint32_t* dst=reinterpret_cast<uint32_t*>(frame.data()+size_t(fy)*size_t(w)*4);
+        const uint32_t* srow=card.data()+size_t(y)*size_t(cw);
+        const float py=float(y)+0.5f;
+        const float qy=std::fabs(py-ch*0.5f)-(ch*0.5f-rad);
+        for(int x=0;x<cw;++x) {
+            const int fx=cx+x;
+            if(fx<0||fx>=w)continue;
+            unsigned cov=255;
+            const float px=float(x)+0.5f;
+            const float qx=std::fabs(px-cw*0.5f)-(cw*0.5f-rad);
+            if(qx>0||qy>0) {
+                const float ax=qx>0?qx:0.0f,ay=qy>0?qy:0.0f;
+                const float sd=std::sqrt(ax*ax+ay*ay)+std::min(std::max(qx,qy),0.0f)-rad;
+                cov=unsigned(std::min(1.0f,std::max(0.0f,0.5f-sd))*255.0f+0.5f);
+                if(!cov)continue;
+            }
+            const uint32_t s=srow[x];
+            uint32_t& o=dst[fx];
+            // Same byte order as the target: the canvas is 0xAARRGGBB, the
+            // buffer is BGRA (or RGBA), so read/write through the byte order.
+            if(rgba) {
+                const unsigned sr=(s>>16)&0xFF,sg=(s>>8)&0xFF,sb=s&0xFF;
+                const unsigned dr=o&0xFF,dg=(o>>8)&0xFF,db=(o>>16)&0xFF;
+                const unsigned r=(sr*cov+dr*(255-cov))/255u,g=(sg*cov+dg*(255-cov))/255u,b=(sb*cov+db*(255-cov))/255u;
+                o=(o&0xFF000000u)|(b<<16)|(g<<8)|r;
+            } else {
+                const unsigned sb=(s>>16)&0xFF,sg=(s>>8)&0xFF,sr=s&0xFF;
+                const unsigned db=o&0xFF,dg=(o>>8)&0xFF,dr=(o>>16)&0xFF;
+                const unsigned b=(sb*cov+db*(255-cov))/255u,g=(sg*cov+dg*(255-cov))/255u,r=(sr*cov+dr*(255-cov))/255u;
+                o=(o&0xFF000000u)|(r<<16)|(g<<8)|b;
+            }
+        }
+    }
+    D3D11_TEXTURE2D_DESC up{};up.Width=d.Width;up.Height=d.Height;up.MipLevels=1;up.ArraySize=1;
+    up.Format=d.Format;up.SampleDesc.Count=1;up.Usage=D3D11_USAGE_DEFAULT;
+    up.BindFlags=0;up.CPUAccessFlags=0;up.MiscFlags=0;
+    winrt::com_ptr<ID3D11Texture2D> tex;
+    if(FAILED(dev->CreateTexture2D(&up,nullptr,tex.put())))return false;
+    ctx->UpdateSubresource(tex.get(),0,nullptr,frame.data(),UINT(w)*4,0);
+    ctx->CopySubresourceRegion(bb,0,0,0,0,tex.get(),0,nullptr);
+    return true;
+}
+
+// Blends `c` onto the back buffer at (x, y) using each source pixel's own
+// alpha. Panel::blit is a raw CopySubresourceRegion and cannot blend, so a
+// canvas with transparent corners (the achievement toast's pill) landed as an
+// opaque black square around its rounded shape. Only the target region is read
+// back, so this costs one small staging texture per frame.
+inline bool blit_alpha(ID3D11Device* dev,ID3D11DeviceContext* ctx,ID3D11Texture2D* bb,
+                       const D3D11_TEXTURE2D_DESC& d,bool rgba,
+                       const ui::Canvas& c,int x,int y) {
+    const int cw=c.width(),ch=c.height();
+    if(cw<=0||ch<=0||x<0||y<0||x+cw>int(d.Width)||y+ch>int(d.Height))return false;
+    D3D11_TEXTURE2D_DESC s{};
+    s.Width=UINT(cw);s.Height=UINT(ch);s.MipLevels=1;s.ArraySize=1;s.Format=d.Format;
+    s.SampleDesc.Count=1;s.Usage=D3D11_USAGE_STAGING;s.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    winrt::com_ptr<ID3D11Texture2D> staging;
+    if(FAILED(dev->CreateTexture2D(&s,nullptr,staging.put())))return false;
+    D3D11_BOX box{UINT(x),UINT(y),0,UINT(x+cw),UINT(y+ch),1};
+    ctx->CopySubresourceRegion(staging.get(),0,0,0,0,bb,0,&box);
+    std::vector<uint32_t> frame(size_t(cw)*size_t(ch));
+    {
+        MappedGuard g;
+        if(!g.enter(ctx,staging.get()))return false;
+        const uint8_t* src=static_cast<const uint8_t*>(g.data);
+        const UINT pitch=g.pitch?g.pitch:UINT(cw)*4;
+        for(int row=0;row<ch;++row)
+            std::memcpy(reinterpret_cast<uint8_t*>(frame.data())+size_t(row)*size_t(cw)*4,
+                        src+size_t(row)*pitch,size_t(cw)*4);
+    }
+    const uint32_t* sp=c.data();
+    for(int row=0;row<ch;++row) {
+        uint32_t* dst=frame.data()+size_t(row)*size_t(cw);
+        const uint32_t* srow=sp+size_t(row)*size_t(cw);
+        for(int col=0;col<cw;++col) {
+            const uint32_t p=srow[col];
+            const unsigned a=p>>24;
+            if(!a)continue;
+            uint32_t& o=dst[col];
+            if(a>=255){   // opaque: copy through the target's byte order
+                if(rgba)o=(o&0xFF000000u)|((p&0xFF00FF00u)|((p>>16)&0xFF)|((p&0xFF)<<16));
+                else o=(o&0xFF000000u)|(p&0x00FFFFFFu);
+                continue;
+            }
+            unsigned sr,sg,sb,dr,dg,db;
+            if(rgba){sr=(p>>16)&0xFF;sg=(p>>8)&0xFF;sb=p&0xFF;dr=o&0xFF;dg=(o>>8)&0xFF;db=(o>>16)&0xFF;}
+            else    {sb=(p>>16)&0xFF;sg=(p>>8)&0xFF;sr=p&0xFF;db=o&0xFF;dg=(o>>8)&0xFF;dr=(o>>16)&0xFF;}
+            const unsigned ia=255-a;
+            const unsigned r=(sr*a+dr*ia)/255u,g=(sg*a+dg*ia)/255u,b=(sb*a+db*ia)/255u;
+            o=(o&0xFF000000u)|(rgba?((b<<16)|(g<<8)|r):((r<<16)|(g<<8)|b));
+        }
+    }
+    D3D11_TEXTURE2D_DESC up{};
+    up.Width=UINT(cw);up.Height=UINT(ch);up.MipLevels=1;up.ArraySize=1;up.Format=d.Format;
+    up.SampleDesc.Count=1;up.Usage=D3D11_USAGE_DEFAULT;up.BindFlags=0;up.CPUAccessFlags=0;up.MiscFlags=0;
+    winrt::com_ptr<ID3D11Texture2D> tex;
+    if(FAILED(dev->CreateTexture2D(&up,nullptr,tex.put())))return false;
+    ctx->UpdateSubresource(tex.get(),0,nullptr,frame.data(),UINT(cw)*4,0);
+    ctx->CopySubresourceRegion(bb,0,UINT(x),UINT(y),0,tex.get(),0,nullptr);
+    return true;
+}
 
 // Builds the guide view-model from the overlay's atomics and draws the card
 // at 1:1 into a canvas of exactly kCardW x kCardH, in card-local coordinates
@@ -309,9 +447,6 @@ inline void draw(IDXGISwapChain* chain) {
         fpsPanel.blit(dev.get(),ctx.get(),bb.get(),d.Format,rgba,c,8*sc,8*sc,int(d.Width),int(d.Height));
     }
     if(menu) {
-        // 55% dim of the whole game frame behind the card, CPU-side; on any
-        // failure the card draws over the undimmed frame (the old behaviour).
-        dim_frame(dev.get(),ctx.get(),bb.get(),d);
         // The card renders 1:1 in design space (1920x1080); position it with
         // card_rect and nearest-scale only when the frame is not 1080p.
         const ui::Rect cardR=ui_guide::card_rect(int(d.Width),int(d.Height));
@@ -324,8 +459,15 @@ inline void draw(IDXGISwapChain* chain) {
                                            int(cardR.w),int(cardR.h));
             cardView=ui::Canvas(scaled.data(),int(cardR.w),int(cardR.h),int(cardR.w));
         }
-        menuPanel.blit(dev.get(),ctx.get(),bb.get(),d.Format,rgba,cardView,
-                       int(cardR.x),int(cardR.y),int(d.Width),int(d.Height));
+        // One CPU pass dims the whole game frame and composites the card over
+        // it with the card's rounded-corner coverage, so the corners are round
+        // (a straight texture copy could not blend and left a black square).
+        if(!dim_and_composite(dev.get(),ctx.get(),bb.get(),d,rgba,cardView,int(cardR.x),int(cardR.y))) {
+            // Fallback: dim alone, then the card as a hard copy (old behaviour).
+            dim_frame(dev.get(),ctx.get(),bb.get(),d);
+            menuPanel.blit(dev.get(),ctx.get(),bb.get(),d.Format,rgba,cardView,
+                           int(cardR.x),int(cardR.y),int(d.Width),int(d.Height));
+        }
     }
     if(!toast.title.empty()) {
         // Achievement toast: centred bottom pill, alive ~5 s regardless of the
@@ -342,8 +484,11 @@ inline void draw(IDXGISwapChain* chain) {
                                            int(toastR.w),int(toastR.h));
             tView=ui::Canvas(scaled.data(),int(toastR.w),int(toastR.h),int(toastR.w));
         }
-        menuPanel.blit(dev.get(),ctx.get(),bb.get(),d.Format,rgba,tView,
-                       int(toastR.x),int(toastR.y),int(d.Width),int(d.Height));
+        // Item D30/D31: blended, not copied — the pill's rounded corners are
+        // transparent, and a raw copy would paint them black.
+        if(!blit_alpha(dev.get(),ctx.get(),bb.get(),d,rgba,tView,int(toastR.x),int(toastR.y)))
+            menuPanel.blit(dev.get(),ctx.get(),bb.get(),d.Format,rgba,tView,
+                           int(toastR.x),int(toastR.y),int(d.Width),int(d.Height));
     }
 }
 
