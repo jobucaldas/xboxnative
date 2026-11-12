@@ -235,8 +235,8 @@ static std::filesystem::path provider_remote_dir(uint32_t appid) {
 }
 // The known folders the game resolves. There is no separate guest mapping to
 // follow: the guest's SHGetKnownFolderPath / SHGetFolderPathW are routed to the
-// system shell32 in this very process and package container (K32T "system-route=1"
-// in research/k32t-console-evidence.log), so asking that function here yields the
+// system shell32 in this very process and package container (K32T
+// "system-route=1"; see issue #171), so asking that function here yields the
 // guest's LocalLow/Local/Roaming/Documents/Saved Games by construction.
 static steam_cloud::Roots cloud_roots(uint32_t appid,const std::wstring& gameRoot) {
     static const GUID localLow={0xA520A1A4,0x1780,0x4FF6,{0xBD,0x18,0x16,0x73,0x43,0xC5,0xAF,0x16}};

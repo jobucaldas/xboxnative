@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # build-mesa-dzn.sh [outdir] [--dry-run] [--build]
-# Vulkan for launcher Play (research/VULKAN-PLAN.md, milestone 2): Mesa's dzn driver (Vulkan on D3D12) cross-built for
+# Vulkan for launcher Play (issue #177, milestone 2): Mesa's dzn driver (Vulkan on D3D12) cross-built for
 # Windows x64 with mingw-w64 from the pinned source (`mesa-src` in deps.pin, SHA-256 verified; `directx-headers` for the
 # only subproject Mesa needs). Result: vulkan_dzn.dll (a Vulkan ICD) and the ICD manifest that points at it. Mesa is
 # MIT-licensed; the DLL is a build output, git-ignored (out/ and *.dll) and never committed.

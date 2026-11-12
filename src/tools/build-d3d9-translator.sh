@@ -3,7 +3,7 @@
 # build-d3d9-translator.sh [outdir] [--dry-run]
 # Builds d3d9translator.dll: DXUP's dx9asm (zlib) turning D3D9 shader model 1-3
 # bytecode into SM5 DXBC, which is what the own D3D9->D3D11 shim
-# (src/xbox-test/uwph/d3d9) needs before it can draw (research/D3D9-PLAN.md).
+# (src/xbox-test/uwph/d3d9) needs before it can draw (issue #172).
 #
 # The DLL is a build output: it is git-ignored and must never be committed. Its
 # only import is kernel32.dll and its only export is d3d9Translate, because Play

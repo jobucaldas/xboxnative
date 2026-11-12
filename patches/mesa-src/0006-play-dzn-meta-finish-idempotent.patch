@@ -1,4 +1,4 @@
-Play: make dzn's meta cleanup idempotent so a failed device creation does not crash (research/VULKAN-PLAN.md).
+Play: make dzn's meta cleanup idempotent so a failed device creation does not crash (issue #177).
 SPDX-License-Identifier: MIT (same licence as the file patched; Mesa is MIT)
 
 dzn_device_create() calls dzn_meta_init(); when that fails, dzn_meta_init()'s error path calls dzn_meta_finish()
