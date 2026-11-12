@@ -321,6 +321,7 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
          ~AlteredScope(){slot=std::move(outer);}} altered{alteredLoadDir(),
          (flags&LOAD_WITH_ALTERED_SEARCH_PATH)&&requested.find_first_of(L"\\/")!=std::wstring::npos
              ?requested.substr(0,requested.find_last_of(L"\\/")):std::wstring()};
+     m=named(requested);
      if(!m && !apiSetName(requested) && !systemDirectoryPath(requested)) {
          // Flags that only steer where the file is searched (Mono/Unity pass
          // LOAD_WITH_ALTERED_SEARCH_PATH or the SEARCH_* set for plugins) do not
