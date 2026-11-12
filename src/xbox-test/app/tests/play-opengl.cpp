@@ -75,6 +75,8 @@ typedef void (WINAPI* PFN_glClear)(uint32_t);
 typedef void (WINAPI* PFN_glViewport)(int, int, int, int);
 typedef void (WINAPI* PFN_glReadPixels)(int, int, int, int, uint32_t, uint32_t, void*);
 typedef void (WINAPI* PFN_glFinish)(void);
+typedef BOOL (WINAPI* PFN_wglSwapIntervalEXT)(int);
+typedef int (WINAPI* PFN_wglGetSwapIntervalEXT)(void);
 // Core 3.x pipeline (only reachable through wglGetProcAddress on a 3.0+ context).
 typedef void (WINAPI* PFN_glGenBuffers)(int, uint32_t*);
 typedef void (WINAPI* PFN_glBindBuffer)(uint32_t, uint32_t);
@@ -474,6 +476,33 @@ int opengl_entry() {
         p = appendInt(p, pixel[0]); *p++ = ','; p = appendInt(p, pixel[1]); *p++ = ',';
         p = appendInt(p, pixel[2]); *p++ = ','; p = appendInt(p, pixel[3]);
         p = append(p, " want=0,64,128,255\n"); *p = 0; emit(line);
+    }
+
+    // Swap interval (WGL_EXT_swap_control, research/OPENGL-COVERAGE.md): a
+    // game's vsync call. The extension functions come from wglGetProcAddress
+    // with the context current; Mesa's frontend serves them and patch 0001
+    // clamps the Present interval on a CoreWindow chain. The set must succeed
+    // (or the extension is absent, reported as skipped — a host without the
+    // extension is a platform limit, not a pass), and the interval read back
+    // through wglGetSwapIntervalEXT must equal what was set.
+    {
+        auto swapInterval = (PFN_wglSwapIntervalEXT)(uintptr_t)
+            wglGetProcAddress("wglSwapIntervalEXT");
+        auto getSwapInterval = (PFN_wglGetSwapIntervalEXT)(uintptr_t)
+            wglGetProcAddress("wglGetSwapIntervalEXT");
+        if (swapInterval && getSwapInterval) {
+            SetLastError(0);
+            if (!swapInterval(1)) return fail(19, "wglSwapIntervalEXT(1)", GetLastError());
+            int got = getSwapInterval();
+            {char line[160]; char* p = append(line, "PLAY-OPENGL STAGE swap-interval set=1 got=");
+             p = appendInt(p, got); p = append(p, "\n"); *p = 0; emit(line);}
+            if (got != 1) {
+                emit("PLAY-OPENGL BLOCKED swap-interval-readback\n");
+                blocked = true;
+            }
+        } else {
+            emit("PLAY-OPENGL STAGE swap-interval skipped (WGL_EXT_swap_control absent)\n");
+        }
     }
 
     // Three presented frames, as a game's first frames: present is proven by

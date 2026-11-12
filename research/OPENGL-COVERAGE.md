@@ -40,7 +40,7 @@ extensions (read in the built DLL): `WGL_ARB_pixel_format`,
 | FBO render-to-texture + readback | GL 3.0 (`glGenFramebuffers`) | `play-opengl.cpp` stage `fbo-readback` (added here) | **[off-device]** on 3.0+ hosts |
 | MSAA: multisample-capable pixel format / `WGL_ARB_multisample` | WGL/GL | **[gap]** — no fixture requests a multisample format or resolves an MSAA FBO yet | open |
 | `wglChoosePixelFormatARB` (IAttributes-based, the call SDL3/GLFW actually make) | WGL_ARB_pixel_format | **[gap]** — fixtures only use the GDI PFD path (`wglChoosePixelFormat`) | open |
-| Swap interval (`wglSwapIntervalEXT`/`wglGetSwapIntervalEXT`) vsync | WGL_EXT_swap_control | **[gap]** — patch 0001 clamps Present interval and drops the waitable object, but no fixture sets/reads the interval | open |
+| Swap interval (`wglSwapIntervalEXT`/`wglGetSwapIntervalEXT`) vsync | WGL_EXT_swap_control | `play-opengl.cpp` stage `swap-interval` (set 1, read back; skipped when the extension is absent) | **[off-device]** (host Mesa); console: **[unverified]** |
 | Context sharing (`wglShareLists`) | WGL | **[gap]** — exported by Mesa, never exercised | open |
 | Texture compression (S3TC/BCn via `GL_EXT_texture_compression_s3tc`) | GL | **[gap]** — no fixture uploads a BC texture | open |
 | PBO readback (`glReadPixels` from a PIXEL_UNPACK/PIXEL_PACK buffer) | GL 2.1+ | **[gap]** — fixture reads to client memory only | open |
@@ -70,7 +70,9 @@ extensions (read in the built DLL): `WGL_ARB_pixel_format`,
 1. This matrix (honest gaps stay listed).
 2. `play-opengl.cpp` stages for the biggest off-device-closable gaps: core 3.3 context
    (`wglCreateContextAttribsARB` with a core profile), a VBO/VAO/GLSL draw whose verdict is a
-   readback pixel, and an FBO render-to-texture readback. Each stage reports `skipped` when
-   the host driver caps below 3.0 (never a false pass) and BLOCKED on a mismatch.
-3. Remaining gaps (MSAA, `wglChoosePixelFormatARB`, swap interval, share lists, PBO,
+   readback pixel, an FBO render-to-texture readback, and the swap interval
+   (`wglSwapIntervalEXT` set + `wglGetSwapIntervalEXT` read back). Each stage reports `skipped`
+   when the host driver caps below 3.0 or lacks the extension (never a false pass) and BLOCKED
+   on a mismatch.
+3. Remaining gaps (MSAA, `wglChoosePixelFormatARB`, share lists, PBO,
    texture compression, resize, 4.x) stay listed above until closed in a later slice.

@@ -362,6 +362,11 @@ if grep -q 'PLAY-OPENGL STAGE core-context' "$out/opengl.log"; then
 else
   echo "PLAY-OPENGL core stages skipped on this host (driver caps below 3.0); not a pass"
 fi
+# Swap interval (WGL_EXT_swap_control): Mesa's frontend serves it off-device, so
+# the set/read-back must hold (a CSDP CoreWindow chain has no waitable object;
+# patch 0001 clamps Present's interval). A host without the extension reports
+# the skipped line instead — a platform limit, never a pass.
+grep -qE 'PLAY-OPENGL STAGE swap-interval (set=1 got=1|skipped)' "$out/opengl.log"
 if grep -q 'PLAY-OPENGL PASS pixel-readback' "$out/opengl.log"; then
   echo "PLAY-OPENGL PASS pixel-readback"
 elif grep -q 'PLAY-OPENGL BLOCKED pixel-readback' "$out/opengl.log"; then
