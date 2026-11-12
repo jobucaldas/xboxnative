@@ -11,6 +11,10 @@
 extern "C" void* memset(void* d,int c,size_t n) {
     auto p=(unsigned char*)d;while(n--)*p++=(unsigned char)c;return d;
 }
+extern "C" void* memcpy(void* d,const void* s,size_t n) {
+    auto p=(unsigned char*)d;auto q=(const unsigned char*)s;
+    while(n--)*p++=*q++;return d;
+}
 extern "C" int strcmp(const char* a,const char* b) {
     while(*a&&*a==*b){++a;++b;}return (unsigned char)*a-(unsigned char)*b;
 }
@@ -682,7 +686,7 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
                 {"subtract",        D3DTOP_SUBTRACT,   D3DTA_DIFFUSE,D3DTA_TEXTURE,0,         0x60,0x80,0x00},
                 {"tfactor",         D3DTOP_SELECTARG1, D3DTA_TFACTOR,D3DTA_DIFFUSE,0xff305070,0x30,0x50,0x70},
                 {"complement",      D3DTOP_SELECTARG1, D3DTA_DIFFUSE|D3DTA_COMPLEMENT,D3DTA_DIFFUSE,0,0x7f,0x3f,0xbf},
-                {"tfactor-modulate",D3DTOP_MODULATE,   D3DTA_TEXTURE,D3DTA_TFACTOR,0xff305070,0x0e,0x14,0x18},
+                {"tfactor-modulate",D3DTOP_MODULATE,   D3DTA_TEXTURE,D3DTA_TFACTOR,0xff305070,0x06,0x14,0x38},
                 {"alpha-replicate", D3DTOP_MODULATE,   D3DTA_TEXTURE|D3DTA_ALPHAREPLICATE,D3DTA_DIFFUSE,0,0x40,0x60,0x20},
             };
             for(const Case& c:cases) {

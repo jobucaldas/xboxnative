@@ -109,14 +109,16 @@ inline unsigned writeVertexShader(const VertexOptions& options,DWORD* out,unsign
         // D3D9's POSITIONT is already in screen space, but D3D11's SV_Position
         // is clip space: the viewport transform D3D9 would have applied is done
         // here, from c5/c6, or every vertex lands outside the guard band.
-        b.op(OpMul,3);b.push(Bytecode::dst(0,RegOutput,1));
+        // Outputs are write-only in SM3: the fixup goes through a temp
+        // register, never reading oPos back as a source.
+        b.op(OpMul,3);b.push(Bytecode::dst(0,RegTemp,1));
         b.push(Bytecode::src(positionReg,RegInput,0x00));b.push(Bytecode::src(5,RegConst,0x00));
         b.op(OpAdd,3);b.push(Bytecode::dst(0,RegOutput,1));
-        b.push(Bytecode::src(0,RegOutput,0x00));b.push(Bytecode::src(6,RegConst,0x00));
-        b.op(OpMul,3);b.push(Bytecode::dst(0,RegOutput,2));
+        b.push(Bytecode::src(0,RegTemp,0x00));b.push(Bytecode::src(6,RegConst,0x00));
+        b.op(OpMul,3);b.push(Bytecode::dst(0,RegTemp,2));
         b.push(Bytecode::src(positionReg,RegInput,0x55));b.push(Bytecode::src(5,RegConst,0x55));
         b.op(OpAdd,3);b.push(Bytecode::dst(0,RegOutput,2));
-        b.push(Bytecode::src(0,RegOutput,0x55));b.push(Bytecode::src(6,RegConst,0x55));
+        b.push(Bytecode::src(0,RegTemp,0x55));b.push(Bytecode::src(6,RegConst,0x55));
         b.op(OpMov,2);b.push(Bytecode::dst(0,RegOutput,0xC));
         b.push(Bytecode::src(positionReg,RegInput,0xEE));
     } else {
@@ -188,9 +190,11 @@ inline void argument(Bytecode& b,DWORD selector,unsigned reg,unsigned stage) {
         break;
     }
     if(selector&TaComplement) {
-        b.op(OpSub,3);b.push(Bytecode::dst(reg,RegTemp));
+        // 1-x as add with a negated second source, for the same reason as
+        // TopSubtract: the translator's sub path negates both sources.
+        b.op(OpAdd,3);b.push(Bytecode::dst(reg,RegTemp));
         b.push(Bytecode::src(PcOne,RegConst));
-        b.push(Bytecode::src(reg,RegTemp));
+        b.push(Bytecode::src(reg,RegTemp)|0x01000000u);
     }
     if(selector&TaAlphaReplicate) {
         // xxxx: every channel takes the alpha.
@@ -217,8 +221,13 @@ inline void operation(Bytecode& b,DWORD op,DWORD arg1,DWORD arg2,unsigned stage,
         b.push(Bytecode::src(PsArg1,RegTemp));b.push(Bytecode::src(PsArg2,RegTemp));
         break;
     case TopSubtract:
-        b.op(OpSub,3);b.push(Bytecode::dst(PsCurrent,RegTemp,mask));
-        b.push(Bytecode::src(PsArg1,RegTemp));b.push(Bytecode::src(PsArg2,RegTemp));
+        // D3D9's sub is add with a negated second source (D3DSPSM_NEG in
+        // bits 24-27). Emitting the add directly keeps the translator from
+        // touching its own sub path, which negates both sources (the
+        // console rendered every OpSub black).
+        b.op(OpAdd,3);b.push(Bytecode::dst(PsCurrent,RegTemp,mask));
+        b.push(Bytecode::src(PsArg1,RegTemp));
+        b.push(Bytecode::src(PsArg2,RegTemp)|0x01000000u);
         break;
     case TopModulate2x:
     case TopModulate4x:
