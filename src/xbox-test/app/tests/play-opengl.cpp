@@ -311,7 +311,8 @@ int opengl_entry() {
             !glGetUniformLocation || !glUniform4f || !glGenFramebuffers ||
             !glBindFramebuffer || !glFramebufferTexture || !glCheckFramebufferStatus ||
             !glDeleteFramebuffers || !glDeleteBuffers || !glDeleteVertexArrays ||
-            !glDeleteProgram)
+            !glDeleteProgram || !glDrawArrays || !glGenTextures || !glBindTexture ||
+            !glTexImage2D || !glTexParameteri || !glDeleteTextures)
             return fail(18, "core 3.x entry points", 0);
 
         // The version the core context itself reports (a 3.3 request must not
