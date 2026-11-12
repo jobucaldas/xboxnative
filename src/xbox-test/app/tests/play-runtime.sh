@@ -66,6 +66,13 @@ lld-link-19 /nodefaultlib /entry:d3d12_entry /include:d3d12_relocation /subsyste
 # with a swap chain on a guest HWND, clears and presents three frames.
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d10.cpp -o "$out/obj/d3d10.obj"
 lld-link-19 /nodefaultlib /entry:d3d10_entry /include:d3d10_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d10.exe" "$out/obj/d3d10.obj" /usr/x86_64-w64-mingw32/lib/libd3d10.a /usr/x86_64-w64-mingw32/lib/libdxgi.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libuuid.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+# EXE that draws with D3D10 through the shim: input layout, SM4 shaders (the
+# committed vs_4_0/ps_4_0 bytecode), Draw/DrawIndexed, the geometry shader,
+# stream-out, a cubemap with GenerateMips and a MSAA resolve. Every pass reads
+# pixels (or vertices) back and exits 42 only when the draw landed where it
+# should; 43 is BLOCKED, never a pass.
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d10-triangle.cpp -o "$out/obj/d3d10-triangle.obj"
+lld-link-19 /nodefaultlib /entry:d3d10tri_entry /include:d3d10tri_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d10-triangle.exe" "$out/obj/d3d10-triangle.obj" /usr/x86_64-w64-mingw32/lib/libd3d10.a /usr/x86_64-w64-mingw32/lib/libdxgi.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libuuid.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 # EXE that starts a D3D9 game: it statically imports d3d9.dll, which the console
 # lacks, so Play must serve the shim from the runtime directory and the shim's
 # own d3d11/dxgi imports must reach Play's routes. It creates a device with a
@@ -104,8 +111,15 @@ lld-link-19 /nodefaultlib /entry:vk_entry /include:vk_relocation /subsystem:wind
 # presented, 43 when the host's D3D12 refuses dzn's device (BLOCKED, not a pass).
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -fno-builtin -c tests/play-vulkan-dzn.cpp -o "$out/obj/vulkan-dzn.obj"
 lld-link-19 /nodefaultlib /entry:vk_dzn_entry /include:vk_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-vulkan-dzn.exe" "$out/obj/vulkan-dzn.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a /usr/x86_64-w64-mingw32/lib/libuser32.a
-# EXE that runs the OpenGL startup path an SDL3 GL game takes (research/
-# OPENGL-PLAN.md): opengl32.dll from the runtime directory (Mesa's d3d12 WGL
+# EXE that proves the driver renders (research/VULKAN-COVERAGE.md): a graphics
+# pipeline from the checked-in SPIR-V, a vertex buffer, one triangle into an
+# offscreen target with dynamic rendering, a compute dispatch with a push
+# constant through a storage-buffer descriptor, synchronization2 barriers, a
+# timeline semaphore signalled and waited by value, and buffer + pixel
+# readbacks. Exit 42 only when everything read back; 43 is BLOCKED, never a pass.
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -fno-exceptions -fno-rtti -fno-builtin -c tests/play-vulkan-draw.cpp -o "$out/obj/vulkan-draw.obj"
+lld-link-19 /nodefaultlib /entry:vk_draw_entry /include:vk_draw_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-vulkan-draw.exe" "$out/obj/vulkan-draw.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a /usr/x86_64-w64-mingw32/lib/libuser32.a
+# EXE that runs the OpenGL startup path an SDL3 GL game takes (issue #176): opengl32.dll from the runtime directory (Mesa's d3d12 WGL
 # driver), a pixel format through gdi32's forwarded wgl*, a context, a cleared
 # frame presented with SwapBuffers and a glReadPixels readback. Exits 42 when
 # the rendered pixel came back, 43 when it did not (BLOCKED, not a pass).
@@ -234,7 +248,7 @@ tail -1 "$out/leaderboards.log"
 # The root copy was only for this run: later modes prove what happens when a
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn opengl;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn vulkan-draw opengl;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -274,7 +288,7 @@ grep -q "STEAM persona: 3 of 3 leaderboard names resolved" "$out/leaderboards.lo
 grep -q "STEAM leaderboards: 'v2_kills' refreshed 4 rows (id 7, 4 on Steam)" "$out/leaderboards.log"
 # Counts only: no persona name and no SteamID may reach the log.
 if grep -qE "Player (Two|Three|Four)|Fixture Owner|1100001000" "$out/leaderboards.log";then exit 1;fi
-# Vulkan (research/VULKAN-PLAN.md): a guest's LoadLibrary("vulkan-1.dll") is served by the Khronos loader from the
+# Vulkan (issue #177): a guest's LoadLibrary("vulkan-1.dll") is served by the Khronos loader from the
 # runtime directory, and Play must have listed the packaged ICD manifests in the guest registry, which is the route
 # the loader reads (VK_DRIVER_FILES is ignored at the process's integrity level).
 # The launcher build packages dzn and the null ICD, so the milestone-1 fixture's "no devices" answer no longer holds
@@ -307,7 +321,7 @@ grep -q 'PRUN EVENT Vulkan loader mapped from the runtime directory; the guest r
 grep -q 'PRUN EVENT mapping vulkan-null-icd.dll' "$out/vulkan-null-runtime.log"
 # The stale dzn entry from the first run is gone, not merely shadowed.
 ! grep -q 'vulkan-dzn.json' "$out/vulkan-null-runtime.log"
-# dzn (research/VULKAN-PLAN.md, milestone 2): the guest gets a real physical device and a win32 surface from the
+# dzn (issue #177, milestone 2): the guest gets a real physical device and a win32 surface from the
 # packaged ICD, and either presents a frame (PASS) or stops at device creation on a host whose D3D12 refuses dzn's
 # device (BLOCKED, never a pass). The launcher build always packages dzn, so a missing manifest is a failure.
 if [ -f out/layout/runtime/vulkan-dzn.json ]; then
@@ -332,7 +346,34 @@ if [ -f out/layout/runtime/vulkan-dzn.json ]; then
 else
   echo "PLAY-VULKAN-DZN FAIL: the launcher build did not package dzn"; exit 1
 fi
-# OpenGL (research/OPENGL-PLAN.md): the guest's LoadLibrary("opengl32.dll") is
+# The draw fixture (research/VULKAN-COVERAGE.md): the driver must render, not
+# just answer queries. Every stage line must be there, and the verdict is PASS
+# only when both readbacks matched (exit 42); a readback mismatch after the
+# pipeline ran is BLOCKED (the host drew nothing the guest could read), never a
+# pass. A missing stage line means the fixture died before it — a failure.
+if [ -f out/layout/runtime/vulkan-dzn.json ]; then
+  grep -q 'PLAY-VULKAN-DRAW STAGE instance-created' "$out/vulkan-draw.log"
+  grep -q 'PLAY-VULKAN-DRAW STAGE device-created' "$out/vulkan-draw.log"
+  grep -q 'PLAY-VULKAN-DRAW STAGE features timeline=[01] sync2=[01] dynamicRendering=[01]' "$out/vulkan-draw.log"
+  grep -q 'PLAY-VULKAN-DRAW STAGE graphics-pipeline' "$out/vulkan-draw.log"
+  grep -q 'PLAY-VULKAN-DRAW STAGE compute-pipeline' "$out/vulkan-draw.log"
+  grep -q 'PLAY-VULKAN-DRAW STAGE timeline-semaphore' "$out/vulkan-draw.log"
+  grep -q 'PLAY-VULKAN-DRAW STAGE timeline-roundtrip' "$out/vulkan-draw.log"
+  if grep -q 'PLAY-VULKAN-DRAW PASS draw-readback' "$out/vulkan-draw.log"; then
+    grep -q 'PLAY-VULKAN-DRAW STAGE compute-readback' "$out/vulkan-draw.log"
+    grep -q 'PLAY-VULKAN-DRAW STAGE pixel-readback' "$out/vulkan-draw.log"
+    echo "PLAY-VULKAN-DRAW PASS draw-readback"
+  elif grep -q 'PLAY-VULKAN-DRAW BLOCKED compute-readback' "$out/vulkan-draw.log"; then
+    echo "PLAY-VULKAN-DRAW BLOCKED compute-readback on this host; not a pass"
+  elif grep -q 'PLAY-VULKAN-DRAW BLOCKED pixel-readback' "$out/vulkan-draw.log"; then
+    echo "PLAY-VULKAN-DRAW BLOCKED pixel-readback on this host; not a pass"
+  else
+    echo "PLAY-VULKAN-DRAW FAIL (see $out/vulkan-draw.log)"; exit 1
+  fi
+else
+  echo "PLAY-VULKAN-DRAW FAIL: the launcher build did not package dzn"; exit 1
+fi
+# OpenGL (issue #176): the guest's LoadLibrary("opengl32.dll") is
 # served by Mesa's WGL driver from the runtime directory, the pixel format goes
 # through gdi32's forwarded wgl*, and the cleared frame must read back. The
 # readback is from the bound framebuffer after three presented frames, so a
@@ -347,6 +388,27 @@ grep -q 'PLAY-OPENGL STAGE context-current renderer=' "$out/opengl.log"
 # "skipped version=X.Y" when the driver provides 3.0+ (the console's d3d12
 # reports 4.1; nothing to refuse there).
 grep -qE 'PLAY-OPENGL STAGE version-refusal (err=[1-9]|skipped version=[0-9]+\.)' "$out/opengl.log"
+# Core 3.3 pipeline stages (issue #176): on a 3.0+-capable
+# driver the fixture must have created a core context, drawn a triangle through
+# VBO/VAO/GLSL and read the pixels back, and rendered into an FBO. On a host
+# whose driver caps below 3.0 the fixture reports neither core stage (the
+# version-refusal line carries the skip instead), so these greps only hold when
+# the core stages ran — which the core-version line proves.
+if grep -q 'PLAY-OPENGL STAGE core-context' "$out/opengl.log"; then
+  grep -q 'PLAY-OPENGL STAGE core-version "' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE core-draw got=128,0,64,255' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE fbo-readback got=0,128,0,255' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE pbo-readback got=0,64,128,255' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE core-pipeline-done' "$out/opengl.log"
+  echo "PLAY-OPENGL core 3.3 pipeline + FBO/PBO readback PASS"
+else
+  echo "PLAY-OPENGL core stages skipped on this host (driver caps below 3.0); not a pass"
+fi
+# Swap interval (WGL_EXT_swap_control): Mesa's frontend serves it off-device, so
+# the set/read-back must hold (a CSDP CoreWindow chain has no waitable object;
+# patch 0001 clamps Present's interval). A host without the extension reports
+# the skipped line instead — a platform limit, never a pass.
+grep -qE 'PLAY-OPENGL STAGE swap-interval (set=1 got=1|skipped)' "$out/opengl.log"
 if grep -q 'PLAY-OPENGL PASS pixel-readback' "$out/opengl.log"; then
   echo "PLAY-OPENGL PASS pixel-readback"
 elif grep -q 'PLAY-OPENGL BLOCKED pixel-readback' "$out/opengl.log"; then
@@ -382,6 +444,11 @@ grep -q 'PRUN EVENT guest D3D11CreateDevice caller=' "$out/d3d10-diag.log"
 grep -q "guest device's DXGI factory: guest-window swapchains go through the CoreWindow adapter" "$out/d3d10-diag.log"
 grep -q 'guest DXGI CoreWindow swapchain returned hr=0x00000000' "$out/d3d10-diag.log"
 [[ $(grep -c 'guest D3D11CreateDevice returned hr=0x00000000' "$out/d3d10-diag.log") == 1 ]]
+# The D3D10 shim draws: the fixture's six passes (Draw, DrawIndexed, geometry
+# shader, stream-out, GenerateMips on a cubemap, MSAA resolve) each read back
+# and exit 42 only when every one landed where it should; 43 is BLOCKED.
+grep -q 'PRUN EVENT mapping d3d10.dll' "$out/d3d10-triangle.log"
+grep -q 'PLAY-TEST .*code=42' "$out/d3d10-triangle.log"
 # A guest's static d3d9.dll import is served by Play's own D3D9 shim from the
 # runtime directory (the console has no d3d9.dll), and the shim's own
 # d3d11.dll!D3D11CreateDevice import reaches Play's device hook. The fixture

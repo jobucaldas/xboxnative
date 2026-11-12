@@ -11,6 +11,10 @@
 extern "C" void* memset(void* d,int c,size_t n) {
     auto p=(unsigned char*)d;while(n--)*p++=(unsigned char)c;return d;
 }
+extern "C" void* memcpy(void* d,const void* s,size_t n) {
+    auto p=(unsigned char*)d;auto q=(const unsigned char*)s;
+    while(n--)*p++=*q++;return d;
+}
 extern "C" int strcmp(const char* a,const char* b) {
     while(*a&&*a==*b){++a;++b;}return (unsigned char)*a-(unsigned char)*b;
 }
@@ -614,6 +618,109 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
             CHECK_HR(staging->UnlockRect());
             CHECK_HR(device->SetRenderTarget(0,backBuffer));
         }
+        if(staging)staging->Release();
+        if(target)target->Release();
+    }
+
+    // The fixed-function texture-stage operations a 2D game sets, proven by
+    // pixel readback. One texture, one diffuse colour, one triangle per case;
+    // the expected pixel is written next to each case. The texture texel is
+    // 0x80204080 (r=0x20 g=0x40 b=0x80 a=0x80), the diffuse 0xFF80C040
+    // (r=0x80 g=0xC0 b=0x40), so every op lands on a distinct value.
+    {
+        IDirect3DSurface9* target=nullptr;
+        CHECK_HR(device->CreateRenderTarget(64,64,D3DFMT_X8R8G8B8,D3DMULTISAMPLE_NONE,0,FALSE,
+            &target,nullptr));
+        IDirect3DSurface9* staging=nullptr;
+        CHECK_HR(device->CreateOffscreenPlainSurface(64,64,D3DFMT_X8R8G8B8,D3DPOOL_SYSTEMMEM,
+            &staging,nullptr));
+        IDirect3DTexture9* texture=nullptr;
+        CHECK_HR(device->CreateTexture(4,4,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&texture,nullptr));
+        IDirect3DVertexBuffer9* buffer=nullptr;
+        CHECK_HR(device->CreateVertexBuffer(3*(4*sizeof(float)+sizeof(DWORD)+2*sizeof(float)),
+            D3DUSAGE_WRITEONLY,0,D3DPOOL_MANAGED,&buffer,nullptr));
+        if(target&&staging&&texture&&buffer) {
+            D3DLOCKED_RECT texLocked{};
+            CHECK_HR(texture->LockRect(0,&texLocked,nullptr,0));
+            if(texLocked.pBits) {
+                for(unsigned y=0;y<4;++y) {
+                    unsigned* row=reinterpret_cast<unsigned*>(
+                        static_cast<unsigned char*>(texLocked.pBits)+y*texLocked.Pitch);
+                    for(unsigned x=0;x<4;++x)row[x]=0x80204080u;
+                }
+            }
+            CHECK_HR(texture->UnlockRect(0));
+            struct Vertex { float x,y,z,w; DWORD colour; float u,v; };
+            Vertex* vertices=nullptr;
+            CHECK_HR(buffer->Lock(0,0,reinterpret_cast<void**>(&vertices),0));
+            if(vertices) {
+                const Vertex data[3]={
+                    { 8.0f, 8.0f,0.0f,1.0f,0xff80c040,0.5f,0.5f},
+                    {56.0f, 8.0f,0.0f,1.0f,0xff80c040,0.5f,0.5f},
+                    {32.0f,56.0f,0.0f,1.0f,0xff80c040,0.5f,0.5f},
+                };
+                for(unsigned i=0;i<3;++i)vertices[i]=data[i];
+            }
+            CHECK_HR(buffer->Unlock());
+            CHECK_HR(device->SetStreamSource(0,buffer,0,sizeof(Vertex)));
+            CHECK_HR(device->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE|D3DFVF_TEX1));
+            CHECK_HR(device->SetRenderState(D3DRS_LIGHTING,FALSE));
+            CHECK_HR(device->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE));
+            CHECK_HR(device->SetRenderState(D3DRS_ZENABLE,FALSE));
+            CHECK_HR(device->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG1));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_ALPHAARG1,D3DTA_DIFFUSE));
+            CHECK_HR(device->SetTexture(0,texture));
+            struct Case {
+                const char* name; DWORD op,arg1,arg2,tfactor;
+                unsigned char r,g,b;   // expected centre pixel
+            };
+            // Expected values, from the texel (r .125 g .25 b .5 a .5) and the
+            // diffuse (r .5 g .75 b .25): modulate .0625/.1875/.125, add
+            // .625/1/.75, subtract diffuse-texture .375/.5/-0.25, and so on.
+            const Case cases[]={
+                {"modulate",        D3DTOP_MODULATE,   D3DTA_TEXTURE,D3DTA_DIFFUSE,0,         0x10,0x30,0x20},
+                {"modulate2x",      D3DTOP_MODULATE2X, D3DTA_TEXTURE,D3DTA_DIFFUSE,0,         0x20,0x60,0x40},
+                {"modulate4x",      D3DTOP_MODULATE4X, D3DTA_TEXTURE,D3DTA_DIFFUSE,0,         0x40,0xc0,0x80},
+                {"add",             D3DTOP_ADD,        D3DTA_TEXTURE,D3DTA_DIFFUSE,0,         0xa0,0xff,0xc0},
+                {"subtract",        D3DTOP_SUBTRACT,   D3DTA_DIFFUSE,D3DTA_TEXTURE,0,         0x60,0x80,0x00},
+                {"tfactor",         D3DTOP_SELECTARG1, D3DTA_TFACTOR,D3DTA_DIFFUSE,0xff305070,0x30,0x50,0x70},
+                {"complement",      D3DTOP_SELECTARG1, D3DTA_DIFFUSE|D3DTA_COMPLEMENT,D3DTA_DIFFUSE,0,0x7f,0x3f,0xbf},
+                {"tfactor-modulate",D3DTOP_MODULATE,   D3DTA_TEXTURE,D3DTA_TFACTOR,0xff305070,0x06,0x14,0x38},
+                {"alpha-replicate", D3DTOP_MODULATE,   D3DTA_TEXTURE|D3DTA_ALPHAREPLICATE,D3DTA_DIFFUSE,0,0x40,0x60,0x20},
+            };
+            for(const Case& c:cases) {
+                CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLOROP,c.op));
+                CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLORARG1,c.arg1));
+                CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLORARG2,c.arg2));
+                CHECK_HR(device->SetRenderState(D3DRS_TEXTUREFACTOR,c.tfactor));
+                CHECK_HR(device->SetRenderTarget(0,target));
+                CHECK_HR(device->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1.0f,0));
+                D3DVIEWPORT9 full{0,0,64,64,0.0f,1.0f};
+                CHECK_HR(device->SetViewport(&full));
+                CHECK_HR(device->BeginScene());
+                CHECK_HR(device->DrawPrimitive(D3DPT_TRIANGLELIST,0,1));
+                CHECK_HR(device->EndScene());
+                CHECK_HR(device->GetRenderTargetData(target,staging));
+                D3DLOCKED_RECT locked{};
+                CHECK_HR(staging->LockRect(&locked,nullptr,D3DLOCK_READONLY));
+                if(locked.pBits) {
+                    const unsigned char* p=static_cast<const unsigned char*>(locked.pBits)
+                        +32*locked.Pitch+32*4;
+                    // p is BGRA; c.r/g/b are RGB. Two counts of rounding.
+                    out(c.name);out(" bgra=");
+                    outHex("",unsigned(p[0])|unsigned(p[1])<<8|unsigned(p[2])<<16);
+                    CHECK(p[2]>c.r-3&&p[2]<c.r+3);   // red
+                    CHECK(p[1]>c.g-3&&p[1]<c.g+3);   // green
+                    CHECK(p[0]>c.b-3&&p[0]<c.b+3);   // blue
+                }
+                CHECK_HR(staging->UnlockRect());
+            }
+            CHECK_HR(device->SetTexture(0,nullptr));
+            CHECK_HR(device->SetRenderTarget(0,backBuffer));
+        }
+        if(buffer)buffer->Release();
+        if(texture)texture->Release();
         if(staging)staging->Release();
         if(target)target->Release();
     }

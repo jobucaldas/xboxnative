@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # build-diag-fixtures.sh OUTDIR -> OUTDIR/{fixture-crt.exe,play-vulkan-dzn.exe,
 # play-d3d9.exe,play-d3d9-triangle.exe,play-d3d9-triangle-variants.exe,
-# play-d3d9-textured.exe,play-d3d10.exe,play-d3d11.exe,play-d3d12.exe,
-# play-opengl.exe} - the console self-test's fixtures (selftest_plan.h).
+# play-d3d9-textured.exe,play-d3d10.exe,play-d3d10-triangle.exe,
+# play-d3d11.exe,play-d3d12.exe,play-opengl.exe} - the console self-test's
+# fixtures (selftest_plan.h).
 #
 # These are the same guest programs tests/play-runtime.sh builds for the
 # off-device runner, compiled from this repository's sources so the package
@@ -40,6 +41,15 @@ clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -fno-builtin -c "$
 lld "${common[@]}" /entry:vk_dzn_entry /include:vk_relocation /out:"$out/play-vulkan-dzn.exe" \
   "$work/vulkan-dzn.obj" "${libs[@]}"
 
+# The draw fixture (research/VULKAN-COVERAGE.md): pipeline + draw + compute +
+# push constants + timeline semaphore + synchronization2 + dynamic rendering,
+# with pixel and buffer readbacks. The SPIR-V is checked in beside the sources
+# (tests/spirv, regenerated with embed-spirv.py) and embedded through
+# tests/vulkan_spirv.h.
+clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -fno-builtin -c "$here/play-vulkan-draw.cpp" -o "$work/vulkan-draw.obj"
+lld "${common[@]}" /entry:vk_draw_entry /include:vk_draw_relocation /out:"$out/play-vulkan-draw.exe" \
+  "$work/vulkan-draw.obj" "${libs[@]}"
+
 clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d9.cpp" -o "$work/d3d9.obj"
 lld "${common[@]}" /entry:d3d9_entry /include:d3d9_relocation /out:"$out/play-d3d9.exe" \
   "$work/d3d9.obj" "$mingw_lib/libd3d9.a" "${libs[@]}"
@@ -63,8 +73,13 @@ clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d
 lld "${common[@]}" /entry:d3d10_entry /include:d3d10_relocation /out:"$out/play-d3d10.exe" \
   "$work/d3d10.obj" "$mingw_lib/libd3d10.a" "$mingw_lib/libdxgi.a" "$mingw_lib/libuuid.a" "${libs[@]}"
 
-# The OpenGL fixture runs the startup path an SDL3 GL game takes (research/
-# OPENGL-PLAN.md): opengl32.dll from the runtime directory (Mesa's d3d12 WGL
+# The D3D10 drawing fixture draws with the committed SM4 bytecode (the D3D11
+# fixture's SM5 would be refused by a D3D10 device) and reads every pass back.
+clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d10-triangle.cpp" -o "$work/d3d10-triangle.obj"
+lld "${common[@]}" /entry:d3d10tri_entry /include:d3d10tri_relocation /out:"$out/play-d3d10-triangle.exe" \
+  "$work/d3d10-triangle.obj" "$mingw_lib/libd3d10.a" "$mingw_lib/libdxgi.a" "$mingw_lib/libuuid.a" "${libs[@]}"
+
+# The OpenGL fixture runs the startup path an SDL3 GL game takes (issue #176): opengl32.dll from the runtime directory (Mesa's d3d12 WGL
 # driver), a pixel format through gdi32's forwarded wgl*, a context, a cleared
 # frame presented with SwapBuffers and a glReadPixels readback. Exit 42 only
 # when the rendered pixel came back; 43 is BLOCKED (never a pass).

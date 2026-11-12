@@ -12,17 +12,17 @@ gbe-fork-license  https://raw.githubusercontent.com/Detanup01/gbe_fork/release-2
 # Test-only fixtures (official SDL release builds, zlib; fetched by src/tools/fetch-sdl.sh, never packaged or committed).
 sdl3-devel-vc  https://github.com/libsdl-org/SDL/releases/download/release-3.4.20/SDL3-devel-3.4.20-VC.zip  1ec3009655ee37b1f73e52b3b120acc5afd8abaf9532f3303b1bf1dfe91b5969
 sdl2-devel-vc  https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-VC.zip  af347939395a58b365846aaea27391e69f9ec9d4dd650d6ac40802159b418a6e
-# OpenGL-on-D3D12 (research/OPENGL-PLAN.md): Mesa 25.3.6 source tarball (SHA-256 verified; MIT) built by src/tools/build-mesa-d3d12.sh.
+# OpenGL-on-D3D12 (see issue #176): Mesa 25.3.6 source tarball (SHA-256 verified; MIT) built by src/tools/build-mesa-d3d12.sh.
 mesa-src  https://archive.mesa3d.org/mesa-25.3.6.tar.xz  59217efeac3b64e7ced958324b9db7494f1e0741aeb22d780276514cc1b8f206
 # Mesa's own wrap (subprojects/DirectX-Headers.wrap in 25.3.6) uses tag v1.618.1; this is the commit that tag resolves to.
 # Columns: NAME URL COMMIT TAG. The build script checks the wrap still names the tag and the checkout is exactly COMMIT.
 directx-headers  https://github.com/microsoft/DirectX-Headers.git  64c650b0c6642ab0f3cdf674e38401e02ccd2460  v1.618.1
-# D3D9 shader translation (research/D3D9-PLAN.md): DXUP's dx9asm, which turns D3D9 SM1-3
+# D3D9 shader translation (see issue #172): DXUP's dx9asm, which turns D3D9 SM1-3
 # bytecode into SM5 DXBC for the own D3D9->D3D11 shim. zlib licence, Copyright (c) 2018
 # Joshua Ashton. Fetched, SHA-256 verified and built by src/tools/build-d3d9-translator.sh;
 # patches/dxup-src/0001-play-crt-free.patch makes it build CRT-free with mingw-w64.
 dxup-src  https://codeload.github.com/Joshua-Ashton/dxup/tar.gz/7cce9ee7ddecadbf58f12f74547dc1bf1e09c5f7  15aa110ec50b719ddd2d22b563ede3c769724060bd4f857ab79238b9343ab6e2
-# Vulkan (research/VULKAN-PLAN.md): Khronos Vulkan-Loader and Vulkan-Headers 1.4.313 (Apache-2.0), built by
+# Vulkan (see issue #177): Khronos Vulkan-Loader and Vulkan-Headers 1.4.313 (Apache-2.0), built by
 # src/tools/build-vulkan-loader.sh into vulkan-1.dll plus a null ICD that reports zero physical devices.
 vulkan-loader-src  https://codeload.github.com/KhronosGroup/Vulkan-Loader/tar.gz/refs/tags/vulkan-sdk-1.4.313.0  c736fa79d974c3513f5573b74249ed002aab59f1d15d1c13fc1d00644830869a
 vulkan-headers-src  https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/refs/tags/vulkan-sdk-1.4.313.0  20743c99a96c07290f24377360e7a12bdd2c465ba202e0c7ef2ec25d446cf61d
