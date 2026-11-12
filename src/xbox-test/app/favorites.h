@@ -28,8 +28,11 @@ inline std::set<uint32_t> parse(const std::string& text) {
         if (a == b) continue;
         const std::string num = line.substr(a, b - a);
         char* end = nullptr;
-        const unsigned long v = std::strtoul(num.c_str(), &end, 10);
-        if (!end || *end || v == 0 || v > 0xFFFFFFFFul) continue;   // one whole appid per line
+        // strtoull, not strtoul: unsigned long is 32-bit on the console, where
+        // a value past the appid range saturates at ULONG_MAX and would slip
+        // through the range check below as appid 4294967295.
+        const unsigned long long v = std::strtoull(num.c_str(), &end, 10);
+        if (!end || *end || v == 0 || v > 0xFFFFFFFFull) continue;   // one whole appid per line
         out.insert((uint32_t)v);
     }
     return out;

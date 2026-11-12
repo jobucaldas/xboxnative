@@ -217,6 +217,12 @@ int main() {
         assert(parse("10 # trailing note\n") == (std::set<uint32_t>{10}));
         // junk lines are dropped, never turned into a bogus appid
         for (const char* junk : {"abc", "0", "12a", "a12", "99999999999", "-5", "1.5", "#10"}) assert(parse(junk).empty());
+        // an appid past 32 bits is rejected on every platform: on the console
+        // unsigned long is 32-bit, so strtoul would saturate at ULONG_MAX and
+        // the range check would pass it through as 4294967295.
+        assert(parse("4294967295\n") == (std::set<uint32_t>{4294967295u}));   // the last valid appid
+        assert(parse("4294967296\n").empty());                                // one past it
+        assert(parse("18446744073709551616\n").empty());                      // past ULLONG_MAX too
         std::set<uint32_t> ids = {3405340, 480, 459220};
         const std::string text = format(ids);
         assert(text == "480\n459220\n3405340\n");                                     // sorted, one id per line
