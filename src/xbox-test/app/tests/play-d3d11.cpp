@@ -262,13 +262,135 @@ DWORD d3d_entry() {
     list->Release();dView->Release();deferred->Release();
     if(!deferredRed)return 63;   // BLOCKED: the command list did not reach the target
 
-    // The draw reaches the swap chain's back buffer too, as a game's does:
-    // present one frame with the triangle in it.
+    // ---- Stream-out pass: capture VS output, read the SO buffer back ----
+    // Particle systems and GPU-skinned animation capture the vertex stage
+    // into an SO buffer and later draw it back (DrawAuto); a layer that
+    // accepts SOSetTargets but writes nothing leaves the capture empty, which
+    // reads as a vanished particle system. No new shader: the committed VS is
+    // the stream-out stage, its output layout (SV_POSITION+COLOR) is the
+    // entry. Exits 64-67 name the step; 67 is BLOCKED (never a pass).
+    D3D11_SO_DECLARATION_ENTRY soDecl[2]={
+        {0,"SV_POSITION",0,0,4,0},
+        {0,"COLOR",0,0,4,0}};
+    ID3D11GeometryShader* soGs=nullptr;
+    // Stream-out without a GS uses a GS created with the SO declarations and
+    // no shader body: the standard D3D11 route (CreateGeometryShaderWithSO,
+    // pShaderBytecode=nullptr is not valid, so the SO-only route passes the
+    // declarations with a zero-length entry count through a real GS call).
+    if(FAILED(device->CreateGeometryShaderWithStreamOutput(triangle_vs,sizeof triangle_vs,
+        soDecl,2,nullptr,0,D3D11_SO_NO_RASTERIZED_STREAM,nullptr,&soGs))||!soGs)return 64;
+    D3D11_BUFFER_DESC soDesc{};
+    soDesc.ByteWidth=3*sizeof(float)*8;   // 3 vertices, 8 floats each (position+color)
+    soDesc.Usage=D3D11_USAGE_DEFAULT;soDesc.BindFlags=D3D11_BIND_STREAM_OUTPUT;
+    soDesc.CPUAccessFlags=0;soDesc.MiscFlags=0;
+    ID3D11Buffer* soBuffer=nullptr;
+    if(FAILED(device->CreateBuffer(&soDesc,nullptr,&soBuffer))||!soBuffer)return 65;
+    ID3D11Buffer* soBinds[]={soBuffer};
+    UINT soOffsets[]={0};
+    context->GSSetShader(soGs,nullptr,0);
+    context->SOSetTargets(1,soBinds,soOffsets);
+    context->Draw(3,0);
+    ID3D11Buffer* soClear[]={nullptr};
+    context->SOSetTargets(1,soClear,soOffsets);
+    context->GSSetShader(nullptr,nullptr,0);
+    // Read the capture back through a staging buffer.
+    D3D11_BUFFER_DESC soReadDesc=soDesc;
+    soReadDesc.Usage=D3D11_USAGE_STAGING;soReadDesc.BindFlags=0;
+    soReadDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ID3D11Buffer* soStaging=nullptr;
+    if(FAILED(device->CreateBuffer(&soReadDesc,nullptr,&soStaging))||!soStaging)return 66;
+    context->CopyResource(soStaging,soBuffer);
+    D3D11_MAPPED_SUBRESOURCE soMapped{};
+    if(FAILED(context->Map(soStaging,0,D3D11_MAP_READ,0,&soMapped))||!soMapped.pData)return 66;
+    // The VS passes positions straight through: the first captured vertex is
+    // the first drawn vertex (-0.75, 0.75, 0, 1).
+    const float* soData=static_cast<const float*>(soMapped.pData);
+    const bool soCaptured=soData[0]<-0.7f&&soData[0]>-0.8f&&soData[1]>0.7f&&soData[1]<0.8f;
+    context->Unmap(soStaging,0);
+    soStaging->Release();soBuffer->Release();soGs->Release();
+    if(!soCaptured)return 67;   // BLOCKED: the SO buffer stayed empty
+
+    // ---- Indirect-draw pass: DrawInstancedIndirect from a buffer ----
+    // GPU-driven rendering builds argument buffers on the device and draws
+    // through DrawInstancedIndirect; a layer that accepts the call but reads
+    // nothing draws nothing. No new shader: the committed triangle, arguments
+    // filled from CPU data. Exits 68-71 name the step; 71 is BLOCKED.
+    D3D11_BUFFER_DESC argDesc{};
+    argDesc.ByteWidth=sizeof(D3D11_DRAW_INSTANCED_INDIRECT_ARGS);
+    argDesc.Usage=D3D11_USAGE_DEFAULT;argDesc.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
+    argDesc.CPUAccessFlags=0;argDesc.MiscFlags=D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
+    D3D11_DRAW_INSTANCED_INDIRECT_ARGS args{3,1,0,0};
+    D3D11_SUBRESOURCE_DATA argInit{};argInit.pSysMem=&args;
+    ID3D11Buffer* argBuffer=nullptr;
+    if(FAILED(device->CreateBuffer(&argDesc,&argInit,&argBuffer))||!argBuffer)return 68;
+    context->ClearRenderTargetView(rtv,clear);
+    ID3D11Buffer* indBinds[]={verticesBuffer};
+    context->IASetVertexBuffers(0,1,indBinds,&stride,&offset);
+    context->OMSetRenderTargets(1,binds,nullptr);
+    context->RSSetViewports(1,&viewport);
+    context->DrawInstancedIndirect(argBuffer,0);
+    context->CopyResource(staging,target);
+    D3D11_MAPPED_SUBRESOURCE iMapped{};
+    if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&iMapped))||!iMapped.pData)return 69;
+    const unsigned char* iPixel=static_cast<const unsigned char*>(iMapped.pData)+32*iMapped.RowPitch+32*4;
+    const bool indirectRed=iPixel[0]>0x80&&iPixel[1]<0x40&&iPixel[2]<0x40;
+    context->Unmap(staging,0);
+    argBuffer->Release();
+    if(!indirectRed)return 71;   // BLOCKED: the indirect draw never reached the target
+
+    // ---- Query pass: occlusion query + GetData, the readback the GPU gives ----
+    // Fog-of-war, occlusion culling and lens flares branch on occlusion
+    // queries; a layer that never answers GetData with a real count hangs the
+    // game's culling or blinds it. Exits 72-75 name the step; 75 is BLOCKED.
+    D3D11_QUERY_DESC qDesc{};qDesc.Query=D3D11_QUERY_OCCLUSION;
+    ID3D11Query* query=nullptr;
+    if(FAILED(device->CreateQuery(&qDesc,&query))||!query)return 72;
+    context->ClearRenderTargetView(rtv,clear);
+    context->OMSetRenderTargets(1,binds,nullptr);
+    context->Begin(query);
+    context->Draw(3,0);
+    context->End(query);
+    UINT64 passed=0;
+    // Poll without blocking first (the way a frame-paced game reads it); the
+    // answer must arrive within a bounded spin, not never.
+    BOOL gotData=false;
+    for(int spin=0;spin<2000&&!gotData;++spin){
+        HRESULT qhr=context->GetData(query,&passed,sizeof passed,0);
+        if(qhr==S_OK){gotData=TRUE;break;}
+        if(FAILED(qhr))return 74;
+    }
+    if(!gotData)return 75;   // BLOCKED: GetData never answered
+    // The triangle covers ~half the 64x64 target: the count must be nonzero
+    // and cannot exceed the whole target's pixels.
+    if(passed==0||passed>64ull*64ull)return 75;
+    query->Release();
+
+    // ---- ResizeBuffers pass: shrink the chain, redraw, present ----
+    // Windowed games resize on every window change; a layer that keeps stale
+    // buffer associations after ResizeBuffers renders into a dead buffer.
+    // Exits 76-79 name the step; 79 is BLOCKED.
     ID3D11RenderTargetView* backView=nullptr;
     if(FAILED(device->CreateRenderTargetView(backBuffer,nullptr,&backView))||!backView)return 26;
-    context->ClearRenderTargetView(backView,clear);
+    hr=swapchain->ResizeBuffers(0,32,32,DXGI_FORMAT_UNKNOWN,0);
+    if(FAILED(hr))return 76;
+    backBuffer->Release();backBuffer=nullptr;
+    if(FAILED(swapchain->GetBuffer(0,__uuidof(ID3D11Texture2D),(void**)&backBuffer))||!backBuffer)return 77;
+    backView->Release();
+    if(FAILED(device->CreateRenderTargetView(backBuffer,nullptr,&backView))||!backView)return 77;
     ID3D11RenderTargetView* backBinds[]={backView};
     context->OMSetRenderTargets(1,backBinds,nullptr);
+    D3D11_VIEWPORT small{0,0,32,32,0.0f,1.0f};
+    context->RSSetViewports(1,&small);
+    context->ClearRenderTargetView(backView,clear);
+    context->Draw(3,0);
+    hr=swapchain->Present(0,0);
+    if(FAILED(hr))return 78;
+
+    // The draw reaches the swap chain's back buffer too, as a game's does:
+    // present one frame with the triangle in it.
+    context->ClearRenderTargetView(backView,clear);
+    ID3D11RenderTargetView* backBinds2[]={backView};
+    context->OMSetRenderTargets(1,backBinds2,nullptr);
     D3D11_VIEWPORT full{0,0,64,64,0.0f,1.0f};
     context->RSSetViewports(1,&full);
     context->Draw(3,0);
