@@ -130,7 +130,7 @@ static void store_worker(std::shared_ptr<StoreInfo> si) {
     }
     if (!body.empty()) {
         StoreInfo tmp; ok = store_parse(body, id, tmp, why);
-        if (ok) { si->name = tmp.name; si->desc = tmp.desc; si->release = tmp.release; si->dev = tmp.dev; si->genres = tmp.genres; si->price = tmp.price; si->free = tmp.free; si->dxKind = tmp.dxKind; si->dxNote = tmp.dxNote; }
+        if (ok) { si->name = tmp.name; si->desc = tmp.desc; si->release = tmp.release; si->dev = tmp.dev; si->genres = tmp.genres; si->price = tmp.price; si->free = tmp.free; si->dxKind = tmp.dxKind; si->dxNote = tmp.dxNote; si->download_size = tmp.download_size; }
     }
     si->why = why; si->state = ok ? 1 : 2;
     logf("store: appid %u %s (%s) name='%s' desc=%zu chars genres='%s' release='%s' dev='%s' price='%s'%s", id, ok ? "info ready" : "info UNAVAILABLE", ok ? (fromCache ? "cache" : "network") : why.c_str(), si->name.c_str(), si->desc.size(), si->genres.c_str(), si->release.c_str(), si->dev.c_str(), si->price.c_str(), "");
