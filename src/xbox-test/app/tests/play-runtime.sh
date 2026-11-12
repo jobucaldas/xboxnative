@@ -54,7 +54,7 @@ lld-link-19 /nodefaultlib /include:_tls_used /entry:slot0_exe_entry /subsystem:w
 # a guest HWND, the committed DXBC shaders, pixel readback (exit 42 only when the
 # triangle landed where it should; 43 is BLOCKED, never a pass).
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d11.cpp -o "$out/obj/d3d11.obj"
-lld-link-19 /nodefaultlib /entry:d3d_entry /include:d3d_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d11.exe" "$out/obj/d3d11.obj" /usr/x86_64-w64-mingw32/lib/libd3d11.a /usr/x86_64-w64-mingw32/lib/libdxgi.a /usr/x86_64-w64-mingw32/lib/libdxguid.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 /nodefaultlib /entry:d3d_entry /include:d3d_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d11.exe" "$out/obj/d3d11.obj" /usr/x86_64-w64-mingw32/lib/libd3d11.a /usr/x86_64-w64-mingw32/lib/libdxgi.a /usr/x86_64-w64-mingw32/lib/libdxguid.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 # EXE that renders D3D12 frames through Play's routes: device, queue, flip-model
 # swap chain on a guest HWND, RTVs, clear, present, fence wait. Play must log the
 # device it got and the calls the device rejects, once each.
@@ -85,8 +85,10 @@ lld-link-19 /nodefaultlib /entry:d3d9_entry /include:d3d9_relocation /subsystem:
 # variants fixture (the same triangle run several ways). All read their pixels
 # back and exit 42 only when the draw landed where it should.
 for fixture in triangle textured triangle-variants;do
+  # The C symbols use underscores; the fixture name hyphenates (triangle-variants).
+  sym=${fixture//-/_}
   clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c "tests/play-d3d9-$fixture.cpp" -o "$out/obj/d3d9-$fixture.obj"
-  lld-link-19 /nodefaultlib /entry:d3d9_${fixture}_entry /include:d3d9_${fixture}_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d9-$fixture.exe" "$out/obj/d3d9-$fixture.obj" /usr/x86_64-w64-mingw32/lib/libd3d9.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+  lld-link-19 /nodefaultlib /entry:d3d9_${sym}_entry /include:d3d9_${sym}_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d9-$fixture.exe" "$out/obj/d3d9-$fixture.obj" /usr/x86_64-w64-mingw32/lib/libd3d9.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 done
 # A DLL that faults inside itself and the EXE that calls it: Play must record
 # the crash (code, module, offset) rather than the launcher dying silently, and
