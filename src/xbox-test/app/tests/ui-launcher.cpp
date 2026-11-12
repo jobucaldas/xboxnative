@@ -2529,6 +2529,34 @@ int main(int argc, char** argv) {
         snap("launcher-d31-tile-corners");
     }
 
+    // ---- item D9 polish: the game page's capsule box is never a grey slab ----
+    // A game that is not installed has no library entry to read the cover from.
+    // The page used to paint the no-cover grey gradient into the 224x336 box at
+    // the top right, which read as a broken image over the hero. With no art the
+    // box now stays empty; with art it shows the art.
+    {
+        GameVM g;
+        g.title = "Halo Infinite"; g.primary.installed = false;
+        g.has_art = false; g.no_cover = true;
+        c.fill(ui::theme::page);
+        draw_game(c, font, g, false);
+        int grey = 0;
+        for (int y = 80; y < 400; ++y)
+            for (int x = 1640; x < 1848; ++x) {
+                const uint32_t p = px[size_t(y) * W + x];
+                if (p == kNoCoverTop || p == kNoCoverBot) ++grey;
+            }
+        check(grey == 0, "D9: a game with no art leaves the capsule box empty, not grey");
+        snap("launcher-d9-detail-no-art");
+
+        // and the box really is drawn when the art is there (the check is not vacuous)
+        std::vector<uint32_t> art(size_t(64) * 96, 0xFF7A2E1D);
+        g.has_art = true; g.no_cover = false; g.art = ui::Image{art.data(), 64, 96, 64};
+        c.fill(ui::theme::page);
+        draw_game(c, font, g, false);
+        check(px[size_t(200) * W + 1744] == 0xFF7A2E1D, "D9: the capsule box shows the tall art when it has it");
+    }
+
     // item D10: the Filters panel now carries TWO rows (Playable, Favorites),
     // each with its own on state.
     {

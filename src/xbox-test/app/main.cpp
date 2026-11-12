@@ -2068,9 +2068,16 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         g.primary = pv; g.primary_focus = m_dFocus == 0; g.install_pct = float(pct);
         g.favorite = is_favorite(m_dApp);   // item D10: the star beside the title
         // item 13: the tall box on the right is the TALL library capsule (the
-        // same portrait art the tile uses), not the cropped header.
+        // same portrait art the tile uses), not the cropped header. A game that
+        // is not installed has no library entry to read the cover from, so it
+        // is fetched here through the same on-demand path the download rows
+        // use; until it lands the box stays empty rather than showing a slab.
         if (gm && gm->cover == 1 && !gm->pix.empty()) { g.has_art = true; g.no_cover = false; g.art = ui::Image{gm->pix.data(), gm->iw, gm->ih, gm->iw}; }
-        else { g.has_art = false; g.no_cover = true; }   // item 12: grey gradient while the cover loads or is missing
+        else {
+            ui::Image qa = queue_cover(m_dApp);
+            if (qa.px && qa.w > 0 && qa.h > 0) { g.has_art = true; g.no_cover = false; g.art = qa; }
+            else { g.has_art = false; g.no_cover = true; }   // nothing drawn: no grey slab over the hero
+        }
         // item 13: the wide background is Steam's library_hero.jpg (header.jpg
         // fallback), fetched asynchronously on page open, cached per page.
         Hero hm = hero_get(m_dApp);

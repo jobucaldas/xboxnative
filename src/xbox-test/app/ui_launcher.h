@@ -1432,15 +1432,12 @@ inline void draw_game(ui::Canvas& c, const Font& f, const GameVM& g, bool draw_h
     draw_kv(c, f, 1368, 1568, 908, "Language", g.language);
 
     // capsule art right (item 13): the TALL library capsule (library_600x900,
-    // the same portrait art the tile uses) in the right-hand box; the mockup's
-    // blue wash while loading (fixtures), grey (item 12) when no_cover.
+    // the same portrait art the tile uses) in the right-hand box. While it is
+    // still loading, or when the game has no art at all, the box stays empty:
+    // a flat grey slab over the hero read as a broken image, not a placeholder.
     if (g.has_art && g.art.px && g.art.w > 0 && g.art.h > 0) {
         c.draw_image(g.art, rect(1632, 72, 224, 336), ui::Fit::Cover, radiusTile);
-    } else if (g.no_cover) {
-        const Rect box = rect(1632, 72, 224, 336);
-        for (int yy = 0; yy < 336; ++yy)
-            c.fill_round_rect_row(box, radiusTile, 72 + yy, grad3(kNoCoverTop, kNoCoverTop, kNoCoverBot, yy / 335.0f), 255);
-    } else {
+    } else if (!g.no_cover) {
         const Rect box = rect(1632, 72, 224, 336);
         for (int yy = 0; yy < 336; ++yy)
             c.fill_round_rect_row(box, radiusTile, 72 + yy, grad3(g.art_top, g.art_mid, g.art_bottom, yy / 335.0f), 255);
