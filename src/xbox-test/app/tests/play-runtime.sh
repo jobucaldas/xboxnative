@@ -347,6 +347,21 @@ grep -q 'PLAY-OPENGL STAGE context-current renderer=' "$out/opengl.log"
 # "skipped version=X.Y" when the driver provides 3.0+ (the console's d3d12
 # reports 4.1; nothing to refuse there).
 grep -qE 'PLAY-OPENGL STAGE version-refusal (err=[1-9]|skipped version=[0-9]+\.)' "$out/opengl.log"
+# Core 3.3 pipeline stages (research/OPENGL-COVERAGE.md): on a 3.0+-capable
+# driver the fixture must have created a core context, drawn a triangle through
+# VBO/VAO/GLSL and read the pixels back, and rendered into an FBO. On a host
+# whose driver caps below 3.0 the fixture reports neither core stage (the
+# version-refusal line carries the skip instead), so these greps only hold when
+# the core stages ran — which the core-version line proves.
+if grep -q 'PLAY-OPENGL STAGE core-context' "$out/opengl.log"; then
+  grep -q 'PLAY-OPENGL STAGE core-version "' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE core-draw got=128,0,64,255' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE fbo-readback got=0,128,0,255' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE core-pipeline-done' "$out/opengl.log"
+  echo "PLAY-OPENGL core 3.3 pipeline + FBO readback PASS"
+else
+  echo "PLAY-OPENGL core stages skipped on this host (driver caps below 3.0); not a pass"
+fi
 if grep -q 'PLAY-OPENGL PASS pixel-readback' "$out/opengl.log"; then
   echo "PLAY-OPENGL PASS pixel-readback"
 elif grep -q 'PLAY-OPENGL BLOCKED pixel-readback' "$out/opengl.log"; then
