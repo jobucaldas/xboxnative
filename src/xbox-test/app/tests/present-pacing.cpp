@@ -161,7 +161,63 @@ int main() {
         CHECK(k.waits.empty());
     }
 
+    // ---- effectiveFlags: forced sync>0 clears ALLOW_TEARING only ----------
+    {
+        const uint32_t TEAR=PRESENT_ALLOW_TEARING, OTHER=1u|TEAR;
+        Config c=parse("sync=1");
+        // forced non-zero sync: the tearing flag is dropped, the rest survive
+        CHECK(effectiveFlags(c,1,TEAR)==0);
+        CHECK(effectiveFlags(c,1,OTHER)==1u);
+        CHECK(effectiveFlags(c,4,TEAR)==0);
+        // forced sync=0: the flag stays (DXGI allows tearing with interval 0)
+        CHECK(effectiveFlags(c,0,TEAR)==TEAR);
+        CHECK(effectiveFlags(c,0,OTHER)==OTHER);
+        // opposite direction: a game requesting sync 0 with tearing and no
+        // override is forwarded unchanged
+        Config off=parse("");
+        CHECK(effectiveFlags(off,0,TEAR)==TEAR);
+        CHECK(effectiveFlags(off,0,OTHER)==OTHER);
+        // an fpscap-only config never touches flags
+        Config cap=parse("fpscap=60");
+        CHECK(effectiveFlags(cap,1,TEAR)==TEAR);
+        // the game's own non-zero sync with tearing (no override) also passes
+        // through untouched: the flag pairing is the game's own bug then
+        CHECK(effectiveFlags(off,1,TEAR)==TEAR);
+    }
+
+    // ---- interval_stats: present timestamps only, frameMs never mixed in --
+    {
+        // Two populations must stay separate: frame times of 8.4 ms and
+        // present-to-present deltas of 16.7 ms. The known sequence's deltas
+        // are 16.6, 16.7, 16.8, 33.4 (one stall) -> avg=20.875, p50=16.75,
+        // p99=33.4, one interval over 25 ms. A wrong implementation that
+        // seeded with frameMs (8.4 x4) would give a far smaller avg.
+        IntervalStats s=interval_stats({0.0,16.6,33.3,50.1,83.5});
+        CHECK(s.over25==1);
+        CHECK(s.avg>20.0&&s.avg<21.8);
+        CHECK(s.p50>16.5&&s.p50<17.0);
+        CHECK(s.p99>33.0&&s.p99<=33.5);
+        // evenly spaced 60 Hz: all intervals 16.7, none over 25
+        std::vector<double> at;
+        for(int i=0;i<61;++i)at.push_back(i*16.7);
+        s=interval_stats(at);
+        CHECK(s.over25==0);
+        CHECK(s.avg>16.6&&s.avg<16.8);
+        CHECK(s.p50>16.6&&s.p50<16.8);
+        // a 120 fps presenter into a 60 Hz chain: p50 8.35, still no >25
+        at.clear();
+        for(int i=0;i<121;++i)at.push_back(i*8.35);
+        s=interval_stats(at);
+        CHECK(s.over25==0);
+        CHECK(s.p50>8.3&&s.p50<8.4);
+        // fewer than two timestamps: no interval exists, all zeros
+        s=interval_stats({});
+        CHECK(s.avg==0&&s.p50==0&&s.p99==0&&s.over25==0);
+        s=interval_stats({42.0});
+        CHECK(s.avg==0&&s.p50==0&&s.p99==0&&s.over25==0);
+    }
+
     if(failures){printf("present-pacing: %u checks, %u FAIL\n",checks,failures);return 1;}
-    printf("present-pacing: %u checks — parse/off/clamp, effectiveSync, fake-clock limiter slots PASS\n",checks);
+    printf("present-pacing: %u checks — parse/off/clamp, effectiveSync, effectiveFlags, interval_stats, fake-clock limiter PASS\n",checks);
     return 0;
 }

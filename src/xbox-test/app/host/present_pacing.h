@@ -13,8 +13,10 @@
 // parameter, so tests drive it with a fake clock. The real QPC source lives
 // with the wiring (guest_overlay.h).
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace present_pacing {
 
@@ -74,6 +76,38 @@ inline Config parse(const std::string& text) {
 inline uint32_t effectiveSync(const Config& c,uint32_t requested) {
     if(!c.enabled||!c.syncSet)return requested;
     return c.sync>4u?4u:c.sync;
+}
+
+// The Present flags the guest's Present actually gets. DXGI forbids
+// DXGI_PRESENT_ALLOW_TEARING together with a non-zero SyncInterval (the real
+// Present fails with DXGI_ERROR_INVALID_CALL, which would kill the game's
+// frames), so a forced sync>0 clears just that flag and keeps the rest. The
+// opposite direction needs nothing: a game requesting sync 0 with tearing and
+// no override is forwarded unchanged, and a forced sync=0 keeps the flag.
+constexpr uint32_t PRESENT_ALLOW_TEARING=1u<<2;   // DXGI_PRESENT_ALLOW_TEARING's value; kept here so this header stays windows.h-free
+inline uint32_t effectiveFlags(const Config& c,uint32_t sync,uint32_t flags) {
+    if(c.enabled&&c.syncSet&&sync>0)flags&=~PRESENT_ALLOW_TEARING;
+    return flags;
+}
+
+// Present-interval stats over a vector of present timestamps (ms): the
+// delivery cadence the display sees. Consecutive deltas only — frameMs and
+// the intervals are different populations and must never be mixed. With no
+// timestamps (or one) there is no interval; every field stays 0.
+struct IntervalStats { double avg=0,p50=0,p99=0; uint32_t over25=0; };
+inline IntervalStats interval_stats(const std::vector<double>& atMs) {
+    IntervalStats s;
+    if(atMs.size()<2)return s;
+    std::vector<double> d;
+    d.reserve(atMs.size()-1);
+    for(size_t i=1;i<atMs.size();++i)d.push_back(atMs[i]-atMs[i-1]);
+    std::sort(d.begin(),d.end());
+    double sum=0;for(double x:d)sum+=x;
+    s.avg=sum/d.size();
+    s.p50=d[d.size()/2];
+    s.p99=d[std::min(d.size()-1,d.size()*99/100)];
+    for(double x:d)s.over25+=x>25;
+    return s;
 }
 
 // Spaces Presents at least one slot apart. Absolute-slot bookkeeping without

@@ -522,9 +522,7 @@ inline HRESULT STDMETHODCALLTYPE present(IDXGISwapChain* c,UINT sync,UINT flags)
     draw(c);
     if(pacingCfg.enabled) {
         sync=present_pacing::effectiveSync(pacingCfg,sync);
-        // DXGI forbids ALLOW_TEARING with a non-zero interval: a forced sync=1+
-        // must drop the flag or the real Present fails with E_INVALIDARG.
-        if(sync&&(flags&DXGI_PRESENT_ALLOW_TEARING))flags&=~DXGI_PRESENT_ALLOW_TEARING;
+        flags=present_pacing::effectiveFlags(pacingCfg,sync,flags);
         if(pacingLimiter.active())pacingLimiter.acquire();
     }
     LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
@@ -537,7 +535,7 @@ inline HRESULT STDMETHODCALLTYPE present1(IDXGISwapChain1* c,UINT sync,UINT flag
     draw(c);
     if(pacingCfg.enabled) {
         sync=present_pacing::effectiveSync(pacingCfg,sync);
-        if(sync&&(flags&DXGI_PRESENT_ALLOW_TEARING))flags&=~DXGI_PRESENT_ALLOW_TEARING;
+        flags=present_pacing::effectiveFlags(pacingCfg,sync,flags);
         if(pacingLimiter.active())pacingLimiter.acquire();
     }
     LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
