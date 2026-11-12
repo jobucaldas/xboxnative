@@ -22,6 +22,12 @@ struct Image {
     uint32_t base = 0, size = 0, entry = 0;
     unsigned relocations = 0, imports = 0, bound = 0;
     std::vector<std::string> unresolved;
+    // Implicit TLS (IMAGE_DIRECTORY_ENTRY_TLS): the fields are absolute VAs as
+    // they stand after relocation, since they are read from the mapped image.
+    struct Tls {
+        bool present = false;
+        uint32_t start = 0, end = 0, index_ptr = 0, callbacks = 0, zero_fill = 0;
+    } tls;
 };
 // stdcall argument bytes of an unresolved import are unknown; the stub faults before returning.
 inline uint32_t u32(const std::vector<uint8_t>& b, size_t p) { return wxl::Pe32::read(b, p); }
@@ -56,6 +62,24 @@ inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, cons
             mem.w32(img.base + dst + j * 4, stub);
         }
     }
+    // Implicit TLS (data directory 9). Parsed after relocation: the directory's
+    // fields are absolute VAs and the callbacks array is a VA list, so both must
+    // be read from the relocated image. A malformed directory is an error, not a
+    // silent skip (a game that ships one expects its TLS to exist).
+    {
+        uint32_t tls_rva = u32(pe.bytes, nt + 24 + 96 + 9 * 8), tls_sz = u32(pe.bytes, nt + 24 + 96 + 9 * 8 + 4);
+        if (tls_rva || tls_sz) {
+            if (tls_sz < 24) throw std::runtime_error("PE32 TLS directory shorter than IMAGE_TLS_DIRECTORY32");
+            img.tls.present = true;
+            img.tls.start = u32(pe.bytes, tls_rva + 0);
+            img.tls.end = u32(pe.bytes, tls_rva + 4);
+            img.tls.index_ptr = u32(pe.bytes, tls_rva + 8);
+            img.tls.callbacks = u32(pe.bytes, tls_rva + 12);
+            img.tls.zero_fill = u32(pe.bytes, tls_rva + 16);
+            if (img.tls.end < img.tls.start) throw std::runtime_error("PE32 TLS raw data range inverted");
+            if (!img.tls.index_ptr) throw std::runtime_error("PE32 TLS directory lacks AddressOfIndex");
+        }
+    }
     // Section protections (headers stay read-only).
     size_t opt = nt + 24, ns = wxl::Pe32::read(pe.bytes, nt + 6, 2), secs = opt + wxl::Pe32::read(pe.bytes, nt + 20, 2);
     mem.protect(img.base, img.size, PROT_R);  // headers and any gap between sections
@@ -86,8 +110,60 @@ inline void init_process(Memory& mem, Cpu& cpu, const Image& img, uint32_t pid =
     mem.w32(PEB_ADDR + 0xA4, 10); mem.w32(PEB_ADDR + 0xA8, 0);  // OSMajorVersion/OSMinorVersion
     cpu.fs_base = TEB_ADDR; cpu.reg[ESP] = STACK_TOP - 16; cpu.eip = img.entry;
 }
+// Implicit TLS for the main thread: allocates the module's TLS block (raw data
+// copy, then SizeOfZeroFill zero bytes), points TEB32.ThreadLocalStoragePointer
+// (0x2C) at a one-slot array and TEB32.TlsSlots stay for the explicit TlsAlloc
+// surface, writes the block address into the image's index variable, and runs
+// every TLS callback with DLL_PROCESS_ATTACH (the main thread's ReasonCode is
+// also DLL_THREAD_ATTACH-less: Windows calls DLL_THREAD_ATTACH only for threads
+// created after the callback registration). Returns the index (0).
+// Callbacks are called like the loader does: (handle, reason, reserved) with
+// handle = image base, reason = DLL_PROCESS_ATTACH (1), reserved = NULL. Their
+// return value is ignored and a callback that faults propagates: a game's TLS
+// initializer failing must not look like a clean start.
+// Implicit TLS for the main thread, the way the Windows loader sets it up: the
+// per-thread block is a fresh allocation, not the image template — the raw data
+// ([StartAddressOfRawData, EndAddressOfRawData) in the mapped image) is copied
+// there, SizeOfZeroFill bytes are appended zeroed, TEB32.ThreadLocalStoragePointer
+// (fs:[0x2C]) points at a one-slot array holding the block address, and the image's
+// index variable gets slot 0. Then every TLS callback in the 0-terminated
+// AddressOfCallBacks array runs with DLL_PROCESS_ATTACH (the initial thread gets no
+// DLL_THREAD_ATTACH). Callback return values are ignored; a callback that faults
+// propagates, so a game's TLS initializer failing never looks like a clean start.
+// Returns the index (0).
+// The TLS region is anchored to end just below the TEB and grows downward with
+// the template size (the free gap between the harness's iob page at 0x7FFD0000
+// and the TEB is 52 KiB; a template that does not fit is a load error).
+inline uint32_t init_tls(Memory& mem, Cpu& cpu, const Image& img, std::vector<uint32_t>* called = nullptr) {
+    if (!img.tls.present) return 0;
+    uint32_t raw = img.tls.end - img.tls.start;
+    // The template lives in the mapped image; reading it is bounds-checked.
+    for (uint32_t a = img.tls.start; raw && a < img.tls.end; a += Memory::PAGE)
+        if (!mem.mapped(a)) throw std::runtime_error("PE32 TLS raw data outside the mapped image");
+    uint32_t total = raw + img.tls.zero_fill;
+    // Slot array at +0, the block at 16.
+    uint32_t pages = (16 + total + Memory::PAGE - 1) / Memory::PAGE;
+    uint32_t slot_addr = TEB_ADDR - pages * Memory::PAGE;
+    mem.map(slot_addr, pages * Memory::PAGE, PROT_R | PROT_W);
+    uint32_t block = slot_addr + 16;
+    mem.w32(slot_addr, block);              // ThreadLocalStoragePointer[0]
+    mem.w32(TEB_ADDR + 0x2C, slot_addr);
+    for (uint32_t i = 0; i < raw; ++i) mem.w8(block + i, mem.r8(img.tls.start + i));
+    for (uint32_t i = raw; i < total; ++i) mem.w8(block + i, 0);  // SizeOfZeroFill
+    // The index variable: implicit TLS is slot 0 for the first module.
+    mem.w32(img.tls.index_ptr, 0);
+    // TLS callbacks, 0-terminated array of VAs, called (handle, reason, reserved).
+    for (uint32_t p = img.tls.callbacks; p; p += 4) {
+        uint32_t fn = mem.r32(p);
+        if (!fn) break;
+        if (called) called->push_back(fn);
+        cpu.call(fn, {img.base, 1, 0});     // DLL_PROCESS_ATTACH
+    }
+    return 0;
+}
 // Runs the entry point like BaseProcessStart: entry(PEB) and an implicit ExitProcess(eax).
 inline uint32_t run_entry(Cpu& cpu, const Image& img) {
+    init_tls(cpu.mem, cpu, img);  // implicit TLS block + callbacks before the entry point
     uint32_t r = cpu.call(img.entry, {PEB_ADDR});
     if (!cpu.exited) { cpu.exited = true; cpu.exit_code = r; }
     return cpu.exit_code;
