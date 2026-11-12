@@ -1916,18 +1916,20 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
         if(t<m_frameSummary||m_frameWindow.empty())return;
         m_frameSummary=t+10;
-        std::vector<double> v,ats;double sum=0,present=0;unsigned over25=0,over50=0;
-        for(auto& x:m_frameWindow){v.push_back(x.frameMs);ats.push_back(x.atMs);sum+=x.frameMs;present+=x.presentMs;over25+=x.frameMs>25;over50+=x.frameMs>50;}
-        // Present-to-present interval (the delivery cadence the display sees):
-        // consecutive atMs deltas only — frameMs and the intervals are
-        // different populations and stay separate. With a cap or forced sync
-        // this is the number that should sit at the slot (16.7 ms at
+        double present=0;
+        // Both populations go through the pure, total stats helpers (no
+        // hand-rolled percentile indexing anywhere): frameMs as its own
+        // sample set, and the present-to-present interval (consecutive
+        // atMs deltas only) as the other — the delivery cadence the display
+        // sees, the number that should sit at the slot (16.7 ms at
         // fpscap=60 on a 60 Hz chain).
-        std::sort(v.begin(),v.end());
+        std::vector<double> v,ats;
+        for(auto& x:m_frameWindow){v.push_back(x.frameMs);ats.push_back(x.atMs);present+=x.presentMs;}
+        present_pacing::SampleStats fr=present_pacing::sample_stats(std::move(v));
         present_pacing::IntervalStats pi=present_pacing::interval_stats(ats);
-        logf("frames: n=%zu avg=%.1fms p50=%.1f p99=%.1f max=%.1f >25ms=%u >50ms=%u present_avg=%.1fms present_int avg=%.1fms p50=%.1f p99=%.1f >25ms=%u resizes=%u (last %ux%u count=%u hr=0x%08lx)",v.size(),sum/v.size(),
-             v[v.size()/2],v[std::min(v.size()-1,v.size()*99/100)],v.back(),over25,over50,present/v.size(),
-             pi.avg,pi.p50,pi.p99,pi.over25,
+        logf("frames: n=%u avg=%.1fms p50=%.1f p99=%.1f max=%.1f >25ms=%u >50ms=%u present_avg=%.1fms present_int n=%u avg=%.1fms p50=%.1f p99=%.1f >25ms=%u resizes=%u (last %ux%u count=%u hr=0x%08lx)",fr.n,fr.avg,
+             fr.p50,fr.p99,fr.max,fr.over25,fr.over50,present/fr.n,
+             pi.n,pi.avg,pi.p50,pi.p99,pi.over25,
              guest_overlay::resizes.load(),guest_overlay::lastResizeW.load(),guest_overlay::lastResizeH.load(),guest_overlay::lastResizeCount.load(),(unsigned long)guest_overlay::lastResizeHr.load());
         m_frameWindow.clear();
     }

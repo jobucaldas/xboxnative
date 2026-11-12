@@ -214,14 +214,50 @@ int main() {
         s=interval_stats(at);
         CHECK(s.over25==0);
         CHECK(s.p50>8.3&&s.p50<8.4);
-        // fewer than two timestamps: no interval exists, all zeros
+        // fewer than two timestamps: no interval exists, all zeros, no
+        // indexing (0 and 1 samples are the crash cases Bugbot flagged)
         s=interval_stats({});
-        CHECK(s.avg==0&&s.p50==0&&s.p99==0&&s.over25==0);
+        CHECK(s.n==0&&s.avg==0&&s.p50==0&&s.p99==0&&s.over25==0);
         s=interval_stats({42.0});
-        CHECK(s.avg==0&&s.p50==0&&s.p99==0&&s.over25==0);
+        CHECK(s.n==0&&s.avg==0&&s.p50==0&&s.p99==0&&s.over25==0);
+        // exactly two timestamps: one interval, the delta itself
+        s=interval_stats({10.0,26.7});
+        CHECK(s.n==1);
+        CHECK(s.avg>16.6&&s.avg<16.8);
+        CHECK(s.p50>16.6&&s.p50<16.8);
+        CHECK(s.p99>16.6&&s.p99<16.8);
+        CHECK(s.over25==0);
+    }
+
+    // ---- sample_stats (frameMs side): total, own population ---------------
+    {
+        // empty: zeros, nothing indexed
+        SampleStats s=sample_stats({});
+        CHECK(s.n==0&&s.avg==0&&s.p50==0&&s.p99==0&&s.max==0&&s.over25==0&&s.over50==0);
+        // one sample: avg/p50/p99/max all the sample itself
+        s=sample_stats({8.4});
+        CHECK(s.n==1&&s.avg>8.39&&s.avg<8.41&&s.p50>8.39&&s.p50<8.41&&s.p99>8.39&&s.p99<8.41&&s.max>8.39&&s.max<8.41);
+        // two samples, unsorted input: sorted internally. p50 takes the
+        // upper-middle element (size*q/100 = 1), so 30.0, not the mean.
+        s=sample_stats({30.0,10.0});
+        CHECK(s.n==2&&s.avg>19.9&&s.avg<20.1&&s.p50>29.9&&s.p50<30.1&&s.max>29.9&&s.max<30.1);
+        // many samples with known percentiles: 100 values 1..100
+        std::vector<double> xs;
+        for(int i=1;i<=100;++i)xs.push_back(double(i));
+        s=sample_stats(xs);
+        CHECK(s.n==100);
+        CHECK(s.avg>50.4&&s.avg<50.6);
+        CHECK(s.p50>50.9&&s.p50<51.1);         // element 50 -> 51.0 (0-based 50)
+        CHECK(s.p99>99.9&&s.p99<100.1);        // clamped index 99 -> 100.0
+        CHECK(s.max>99.9&&s.max<100.1);
+        CHECK(s.over25==75&&s.over50==50);     // values 26..100, 51..100
+        // the two populations stay separate: frameMs 8.4s vs deltas 16.7s
+        std::vector<double> fr;for(int i=0;i<50;++i)fr.push_back(8.4);
+        s=sample_stats(fr);
+        CHECK(s.p50>8.3&&s.p50<8.5&&s.p99>8.3&&s.p99<8.5);
     }
 
     if(failures){printf("present-pacing: %u checks, %u FAIL\n",checks,failures);return 1;}
-    printf("present-pacing: %u checks — parse/off/clamp, effectiveSync, effectiveFlags, interval_stats, fake-clock limiter PASS\n",checks);
+    printf("present-pacing: %u checks — parse/off/clamp, effectiveSync, effectiveFlags, interval_stats, sample_stats, fake-clock limiter PASS\n",checks);
     return 0;
 }

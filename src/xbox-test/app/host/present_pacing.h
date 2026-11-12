@@ -90,23 +90,46 @@ inline uint32_t effectiveFlags(const Config& c,uint32_t sync,uint32_t flags) {
     return flags;
 }
 
+// Percentile over a sorted vector, total: an empty vector never indexes.
+inline double percentile_sorted(const std::vector<double>& sorted,size_t q) {
+    if(sorted.empty())return 0;
+    return sorted[std::min(sorted.size()-1,sorted.size()*q/100)];
+}
+
+// Stats over a vector of samples as its own population (the frameMs side).
+// Total: empty input returns zeros without indexing anything.
+struct SampleStats {
+    uint32_t n=0; double avg=0,p50=0,p99=0,max=0;
+    uint32_t over25=0,over50=0;
+};
+inline SampleStats sample_stats(std::vector<double> s) {
+    SampleStats st;
+    st.n=uint32_t(s.size());
+    if(s.empty())return st;
+    std::sort(s.begin(),s.end());
+    double sum=0;for(double x:s)sum+=x;
+    st.avg=sum/s.size();
+    st.p50=percentile_sorted(s,50);
+    st.p99=percentile_sorted(s,99);
+    st.max=s.back();
+    for(double x:s){st.over25+=x>25;st.over50+=x>50;}
+    return st;
+}
+
 // Present-interval stats over a vector of present timestamps (ms): the
 // delivery cadence the display sees. Consecutive deltas only — frameMs and
-// the intervals are different populations and must never be mixed. With no
-// timestamps (or one) there is no interval; every field stays 0.
-struct IntervalStats { double avg=0,p50=0,p99=0; uint32_t over25=0; };
+// the intervals are different populations and must never be mixed. Total:
+// fewer than two timestamps means no interval exists; every field stays 0
+// and nothing is indexed.
+struct IntervalStats { uint32_t n=0; double avg=0,p50=0,p99=0; uint32_t over25=0; };
 inline IntervalStats interval_stats(const std::vector<double>& atMs) {
     IntervalStats s;
     if(atMs.size()<2)return s;
     std::vector<double> d;
     d.reserve(atMs.size()-1);
     for(size_t i=1;i<atMs.size();++i)d.push_back(atMs[i]-atMs[i-1]);
-    std::sort(d.begin(),d.end());
-    double sum=0;for(double x:d)sum+=x;
-    s.avg=sum/d.size();
-    s.p50=d[d.size()/2];
-    s.p99=d[std::min(d.size()-1,d.size()*99/100)];
-    for(double x:d)s.over25+=x>25;
+    SampleStats st=sample_stats(std::move(d));
+    s.n=st.n;s.avg=st.avg;s.p50=st.p50;s.p99=st.p99;s.over25=st.over25;
     return s;
 }
 
