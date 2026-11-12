@@ -788,6 +788,59 @@ static void test_sse2_stage2() {
             EXPECT(exec_fault(m, code, 0, 0, 0, false) == FaultKind::Unsupported, "psllw mem dest must #UD");
             ++alu_cases;
         }
+        // imm8 shift /n selectors are #UD on real hardware for anything but
+        // /2,/4,/6 on 71/72 and /2,/3,/6,/7 on 73 (psra has no 73 form) —
+        // including when the count saturates (cnt >= lane width).
+        {
+            for (uint8_t op : {0x71, 0x72, 0x73}) {
+                for (uint8_t n : {0, 1, 2, 3, 4, 5, 6, 7}) {
+                    bool ok = op != 0x73 ? (n == 2 || n == 4 || n == 6) : (n == 2 || n == 3 || n == 6 || n == 7);
+                    std::vector<uint8_t> code{0x66, 0x0F, op, uint8_t(0xC0 | (n << 3)), 0x03};
+                    // hlt stop surfaces as Unsupported at the hlt's eip (CODE+5);
+                    // the selector #UD faults at the shift instruction's own start
+                    setup(m, code, 0, 0, 0, false);
+                    try { m.cpu.run(0); EXPECT(ok, "0f %02x /%u must #UD", op, n); }
+                    catch (const Fault& f) {
+                        if (ok) EXPECT(f.eip == Machine::CODE + 5, "0f %02x /%u reg form must reach hlt, got %s", op, n, f.what());
+                        else EXPECT(f.kind == FaultKind::Unsupported && f.eip == Machine::CODE, "0f %02x /%u must #UD, got %s", op, n, f.what());
+                    }
+                    ++alu_cases;
+                    // saturating count must not bypass the selector check
+                    if (!ok) {
+                        std::vector<uint8_t> code2{0x66, 0x0F, op, uint8_t(0xC0 | (n << 3)), 0xFF};
+                        setup(m, code2, 0, 0, 0, false);
+                        try { m.cpu.run(0); EXPECT(false, "0f %02x /%u cnt=255 must #UD", op, n); }
+                        catch (const Fault& f) { EXPECT(f.kind == FaultKind::Unsupported && f.eip == Machine::CODE, "0f %02x /%u cnt=255 must #UD, got %s", op, n, f.what()); }
+                        ++alu_cases;
+                    }
+                }
+            }
+        }
+        // 73 /2 psrlq and 73 /6 psllq imm8 forms (previously untested): compare
+        // against the equivalent 0F D3/F3 register-count forms on the same data.
+        {
+            for (unsigned cnt : {0u, 3u, 8u, 16u, 200u}) {
+                uint64_t q0 = uint64_t(V1[1]) << 32 | V1[0], q1 = uint64_t(V1[3]) << 32 | V1[2];
+                uint32_t wantr[4], wantl[4];
+                if (cnt >= 64) { wantr[0] = wantr[1] = wantr[2] = wantr[3] = 0; }
+                else { wantr[0] = uint32_t(q0 >> cnt); wantr[1] = uint32_t(q0 >> (cnt + 32)); wantr[2] = uint32_t(q1 >> cnt); wantr[3] = uint32_t(q1 >> (cnt + 32)); }
+                uint32_t out[4];
+                run({0x66, 0x0F, 0x73, 0xD0, uint8_t(cnt)}, V1, V2, out);  // 73 /2 psrlq
+                EXPECT(memcmp(out, wantr, 16) == 0, "psrlq imm cnt=%u", cnt);
+                ++alu_cases;
+                // per-qword lanes: word i belongs to lane i/2; extract its half of the shifted qword
+                for (int i = 0; i < 4; ++i) {
+                    if (cnt == 0) { wantl[i] = V1[i]; continue; }
+                    if (cnt >= 64) { wantl[i] = 0; continue; }
+                    uint64_t q = (uint64_t(V1[2 * (i / 2) + 1]) << 32) | V1[2 * (i / 2)];
+                    q <<= cnt;
+                    wantl[i] = uint32_t((q >> (32 * (i % 2))) & 0xffffffffu);
+                }
+                run({0x66, 0x0F, 0x73, 0xF0, uint8_t(cnt)}, V1, V2, out);  // 73 /6 psllq
+                EXPECT(memcmp(out, wantl, 16) == 0, "psllq imm cnt=%u", cnt);
+                ++alu_cases;
+            }
+        }
     }
     // ---- arithmetic: paddq, pmullw, pmuludq, pmaddwd, psadbw, pavgb, saturating, min/max ----
     {

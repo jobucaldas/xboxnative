@@ -672,6 +672,13 @@ struct Cpu {
     //   73 /3 = pslldq, 73 /7 = psrldq (whole-register byte shifts).
     void sse_shift(uint8_t op, unsigned sop, unsigned cnt, uint32_t a[4]) {
         uint8_t* ab = reinterpret_cast<uint8_t*>(a);
+        // Selector check first, before the count clamp: the imm8 group defines
+        // only /2 (right), /4 (arithmetic) and /6 (left) for 71/72, and /2
+        // psrlq, /3 psrldq, /6 psllq, /7 pslldq for 73 — psra has no 73 form.
+        // Any other /n is #UD even when the count saturates.
+        bool sel = op == 0x71 || op == 0x72 ? (sop == 2 || sop == 4 || sop == 6)
+                                             : (sop == 2 || sop == 3 || sop == 6 || sop == 7);
+        if (!sel) unsupported("invalid opcode form (sse shift /n)");
         if (op == 0x73 && (sop == 3 || sop == 7)) {  // pslldq/psrldq: shift the whole 128 bits by bytes
             unsigned k = cnt >= 16 ? 16 : cnt;
             uint8_t tmp[16];
@@ -702,7 +709,7 @@ struct Cpu {
                 if (gran == 8) { uint64_t v; memcpy(&v, ab + 8 * i, 8); v >>= cnt; memcpy(ab + 8 * i, &v, 8); }
                 else if (gran == 4) a[i] >>= cnt;
                 else { uint16_t v; memcpy(&v, ab + 2 * i, 2); v = uint16_t(v >> cnt); memcpy(ab + 2 * i, &v, 2); }
-            } else unsupported("sse shift /n");
+            } else unsupported("sse shift /n unreachable");  // selectors validated at the top
         }
     }
     // Arithmetic and compare group (0F 51-5F). `op` is the second opcode byte.
