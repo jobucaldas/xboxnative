@@ -65,7 +65,7 @@ int main() {
 
     // A full two-step sequence through the same calls the launcher makes.
     // The launcher keeps slot 0 connected for the whole program (press,
-    // release and gap alike; m_gpadInjecting latches to clear()), so the
+    // release and gap alike; Runner::armed spans exactly the program), so the
     // frames below publish an empty pad while connected instead of letting
     // the slot disconnect between presses.
     CHECK(parse_seq("A 50 20\nB 50\n", 14, &prog, &err) && prog.size() == 2);
