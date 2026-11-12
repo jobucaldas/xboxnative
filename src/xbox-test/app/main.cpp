@@ -2561,6 +2561,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                                 logf("present pacing: %s",desc.c_str());
                             } else
                                 logf("present pacing: off");
+                            // Redundant-resize elision (default ON): resizeelide.txt
+                            // containing "off" forwards every ResizeBuffers to the real
+                            // chain (A/B testing the same-mode elision mitigation).
+                            {std::string o;if(read_file_s(g_dir+L"\\resizeelide.txt",o))
+                                resize_drain::elideEnabled=o.find("off")==std::string::npos;}
                             DeleteFileW((g_dir+L"\\frametimes.csv").c_str());
                             logf("overlay: present hooks %s (View+Menu opens the launcher menu)%s",guest_overlay::install(*chain)?"installed":"unavailable",
                                  guest_overlay::lockFirstMode.load()?" [lockmode: chain locked to its first mode]":"");

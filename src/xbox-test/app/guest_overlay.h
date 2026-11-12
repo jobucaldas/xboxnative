@@ -633,6 +633,22 @@ inline HRESULT STDMETHODCALLTYPE resize(IDXGISwapChain* c,UINT count,UINT w,UINT
         if(auto s=d3d11_diag::sink)s("overlay: resize suppressed (lockmode), chain keeps its first mode");
         return S_OK;
     }
+    // Redundant-resize elision (default ON; LocalState\resizeelide.txt with
+    // "off" forwards everything). Checked after lockmode, which stays the
+    // stronger suppression. A resize that asks for the chain's current mode
+    // returns S_OK without touching the chain: the d3d11on12 flip chain
+    // removed the device on exactly such a call (Slime Rancher run1, resize #4),
+    // and a same-mode resize has nothing to change — GetBuffer(0) keeps
+    // returning the same live buffer.
+    if(elideEnabled.load(std::memory_order_relaxed)) {
+        DXGI_SWAP_CHAIN_DESC1 cur{};
+        if(SUCCEEDED(c->GetDesc1(&cur))&&resize_drain::same_mode(cur,count,w,h,f,resize_flags(flags))) {
+            ++resizes;lastResizeCount=count;lastResizeW=w;lastResizeH=h;lastResizeHr=S_OK;
+            char b[96];snprintf(b,sizeof b,"guest ResizeBuffers #%u resize elided (same mode)",idx);
+            if(auto s=d3d11_diag::sink)s(b);
+            return S_OK;
+        }
+    }
     winrt::com_ptr<ID3D11Device> dev;
     if(SUCCEEDED(c->GetDevice(__uuidof(ID3D11Device),dev.put_void()))&&dev)drain_device(dev.get());
     HRESULT hr=realResize(c,resize_count(count),w,h,f,resize_flags(flags));
