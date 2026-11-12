@@ -90,6 +90,63 @@ int main() {
         CHECK(v.reason == Reason::fault);
     }
 
+    // lastActivityTick NEWER than nowTick (the guest stamped a present
+    // between the host's two atomic reads, or cross-core QPC skew): the
+    // unsigned gap would wrap to ~2^64 and report a live game silent.
+    {
+        Inputs in; in.ticksPerSecond = hz;
+        in.lastActivityTick = hz * 1000;
+        in.nowTick = hz * 1000 - hz / 10;   // now is 100 ms BEHIND the last present
+        auto v = evaluate(in);
+        CHECK(!v.dead);
+        CHECK(v.reason == Reason::none);
+    }
+
+    // Exactly equal ticks: zero elapsed, alive.
+    {
+        Inputs in; in.ticksPerSecond = hz; in.lastActivityTick = hz * 5000; in.nowTick = hz * 5000;
+        auto v = evaluate(in);
+        CHECK(!v.dead);
+        CHECK(v.reason == Reason::none);
+    }
+
+    // Exactly at the threshold: alive (only strictly past it is dead).
+    {
+        Inputs in; in.ticksPerSecond = hz; in.lastActivityTick = hz;
+        in.nowTick = hz + uint64_t(kSilenceSeconds * double(hz));
+        auto v = evaluate(in);
+        CHECK(!v.dead);
+        CHECK(v.reason == Reason::none);
+    }
+
+    // One tick past the threshold: dead.
+    {
+        Inputs in; in.ticksPerSecond = hz; in.lastActivityTick = hz;
+        in.nowTick = hz + uint64_t(kSilenceSeconds * double(hz)) + 1;
+        auto v = evaluate(in);
+        CHECK(v.dead);
+        CHECK(v.reason == Reason::silent);
+    }
+
+    // QPC near UINT64 wrap: the threshold math must not overflow the
+    // multiply and must still judge the real gap. nowTick wraps past 0, so
+    // the gap is (limit - last) + now; the saturating comparison must judge
+    // the true elapsed time, not the wrapped difference.
+    {
+        const uint64_t nearWrap = ~0ull - hz * 3;   // 3 s of ticks before wrap
+        Inputs in; in.ticksPerSecond = hz; in.lastActivityTick = nearWrap;
+        in.nowTick = nearWrap + uint64_t(kSilenceSeconds * double(hz)) + 1;   // wraps past 0
+        auto v = evaluate(in);
+        CHECK(v.dead);
+        CHECK(v.reason == Reason::silent);
+    }
+    {
+        const uint64_t nearWrap = ~0ull - hz * 3;
+        Inputs in; in.ticksPerSecond = hz; in.lastActivityTick = nearWrap;
+        in.nowTick = nearWrap + hz;   // 1 s of presents ago, crossing the wrap
+        CHECK(!evaluate(in).dead);
+    }
+
     printf("%u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
