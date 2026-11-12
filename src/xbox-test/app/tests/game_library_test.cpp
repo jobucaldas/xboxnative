@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Native regression for the Delete-game and Installed-filter rules.
+#include "../favorites.h"
 #include "../game_library.h"
 #include "../storage_roots.h"
+#include "../store_size.h"
 #include <cassert>
 #include <cstdio>
 #include <memory>
@@ -49,6 +51,40 @@ int main() {
     assert(only.size() == 2 && only[0]->appid == 10 && only[1]->appid == 30);
     assert(shown(all, true, {}).empty());
 
+    // Item D7: the live search filter is a case-insensitive substring match
+    // that keeps library order; the header count says how much is showing.
+    {
+        struct N { uint32_t appid; std::string name; };
+        std::vector<std::shared_ptr<N>> lib = {
+            std::make_shared<N>(N{1, "Halo Wars: Definitive Edition"}),
+            std::make_shared<N>(N{2, "Megabonk"}),
+            std::make_shared<N>(N{3, "Halo Infinite"}),
+            std::make_shared<N>(N{4, "HALO 3"}),
+        };
+        assert(search(lib, "").size() == 4);                     // no query: everything
+        auto halo = search(lib, "halo");
+        assert(halo.size() == 3 && halo[0]->appid == 1 && halo[1]->appid == 3 && halo[2]->appid == 4);
+        assert(search(lib, "HALO").size() == 3);                 // the query's case does not matter
+        assert(search(lib, "halo i").size() == 1 && search(lib, "halo i")[0]->appid == 3);
+        assert(search(lib, "zzz").empty());
+        assert(search(lib, " ").size() == 3);                    // every name with a space (Megabonk has none)
+        assert(count_label(3, 772, true) == "3 of 772 games");
+        assert(count_label(772, 772, false) == "772 games");
+        assert(count_label(0, 772, true) == "0 of 772 games");
+    }
+
+    // Item D9: the store's "Storage: N GB" requirement becomes the Game size
+    // row before a download starts.
+    {
+        assert(store_size::from_requirements("OS: Windows 10\nProcessor: x64\nStorage: 30 GB available space") == "30 GB");
+        assert(store_size::from_requirements("Storage: 512 MB available space") == "512 MB");
+        assert(store_size::from_requirements("storage:1.5 gb") == "1.5 GB");
+        assert(store_size::from_requirements("Hard Drive: 20 GB") == "");          // no 'storage' word
+        assert(store_size::from_requirements("Storage: plenty") == "");            // no figure
+        assert(store_size::from_requirements("Storage: 30") == "");                // no unit
+        assert(store_size::from_requirements("") == "");
+    }
+
     // install records with a root: parse, validity, path joining, shared-folder identity
     Marker usb = parse_marker("app 5 build 1 files 2 bytes 77 root E:\\XboxNativeGames installdir hades\n");
     assert(usb.root == "E:\\XboxNativeGames" && usb.installdir == "hades" && usb.bytes == 77);
@@ -93,6 +129,25 @@ int main() {
     assert(space_line("Internal", "Q:\\Local", wr).find("WinRT System.FreeSpace=1.0 GB System.Capacity=5.0 GB") != std::string::npos);
     assert(space_line("USB E:", "E:\\XboxNativeGames", internal, "type=removable").find("type=removable") != std::string::npos);
 
+    // item D1: the sidebar widget's figures come from the SAME volume figures
+    // the Storage screen's drive row shows (freeTotal / total), so the two can
+    // never disagree; an unreadable drive leaves the widget's defaults alone.
+    {
+        int gb10 = -1, pct = -1;
+        Space vol; vol.ok = true; vol.total = 100ull << 30; vol.freeTotal = 66ull << 30;
+        Choice c; c.name = "Internal"; c.space = vol;
+        assert(widget_figures(c, gb10, pct) && gb10 == 660 && pct == 34);   // 66 of 100 GB free = 34% used
+        vol.freeTotal = 0; c.space = vol;
+        assert(widget_figures(c, gb10, pct) && gb10 == 0 && pct == 100);
+        vol.freeTotal = vol.total; c.space = vol;
+        assert(widget_figures(c, gb10, pct) && gb10 == 1000 && pct == 0);   // 100 GB = 1000 tenths
+        Space bad; Choice none2; none2.space = bad;
+        assert(!widget_figures(none2, gb10, pct));
+        Space zero_total; zero_total.ok = true; zero_total.total = 0;
+        Choice zt; zt.space = zero_total;
+        assert(!widget_figures(zt, gb10, pct));   // never divides by zero
+    }
+
     // the size of the pool beside the free figure, so 5 GB of dev storage is not read as 5 GB of disk
     Choice cap; cap.name = "Internal"; cap.freeBytes = 4421ull << 20; cap.space = internal;
     assert(label_capacity(cap) == "Internal (4.3 GB free of 5.0 GB)");
@@ -128,12 +183,60 @@ int main() {
     assert(n1 == "Wait for the delete to finish." && n2.empty());
     note_lines(std::string(60, 'x'), 42, n1, n2);   // one long word: cut at the column, the tail starts line two
     assert(n1.size() == 42 && n2 == std::string(18, 'x'));
-    note_lines(std::string(100, 'x'), 42, n1, n2);   // more than two lines: the second is ellipsized
-    assert(n1.size() == 42 && n2.size() == 42 && n2.substr(40) == "..");
+    note_lines(std::string(100, 'x'), 42, n1, n2);   // more than two lines: the second ends with U+2026 (item D4)
+    assert(n1.size() == 42 && n2.size() == 42 && n2.substr(39) == "\xE2\x80\xA6");
+    // a multi-byte character at the cut point is never split (item D4): the
+    // 'e-acute' straddles byte 39 of the second line, so the cut backs off to
+    // the previous whole glyph instead of emitting half of it
+    note_lines(std::string(42, 'x') + std::string(38, 'x') + "\xC3\xA9" + std::string(30, 'y'), 42, n1, n2);
+    assert(n2.size() >= 3 && n2.substr(n2.size() - 3) == "\xE2\x80\xA6");
+    bool whole = true;
+    for (size_t i = 0; i < n2.size();) {   // every sequence is a complete UTF-8 codepoint
+        const unsigned char ch = (unsigned char)n2[i];
+        const size_t need = ch < 0x80 ? 1 : (ch & 0xE0) == 0xC0 ? 2 : (ch & 0xF0) == 0xE0 ? 3 : 4;
+        if (i + need > n2.size()) { whole = false; break; }
+        for (size_t k = 1; k < need; ++k)
+            if (((unsigned char)n2[i + k] & 0xC0) != 0x80) whole = false;
+        i += need;
+    }
+    assert(whole);
     note_lines("", 42, n1, n2);
     assert(n1.empty() && n2.empty());
 
     assert(clamp_selection(5, 0) == 0 && clamp_selection(5, 3) == 2 && clamp_selection(-1, 3) == 0 && clamp_selection(1, 3) == 1);
+
+    // item D10: favorites round-trip through LocalState\favorites.txt. The
+    // file is the launcher's only record, so a restart must read back exactly
+    // what the previous run wrote.
+    {
+        using namespace favorites;
+        assert(parse("").empty());
+        assert(parse("10\n20\n") == (std::set<uint32_t>{10, 20}));
+        assert(parse("  480  \r\n# a comment\n\n\t3405340\t\n") == (std::set<uint32_t>{480, 3405340}));
+        assert(parse("10\n10\n") == (std::set<uint32_t>{10}));                        // duplicates collapse
+        assert(parse("10 # trailing note\n") == (std::set<uint32_t>{10}));
+        // junk lines are dropped, never turned into a bogus appid
+        for (const char* junk : {"abc", "0", "12a", "a12", "99999999999", "-5", "1.5", "#10"}) assert(parse(junk).empty());
+        // an appid past 32 bits is rejected on every platform: on the console
+        // unsigned long is 32-bit, so strtoul would saturate at ULONG_MAX and
+        // the range check would pass it through as 4294967295.
+        assert(parse("4294967295\n") == (std::set<uint32_t>{4294967295u}));   // the last valid appid
+        assert(parse("4294967296\n").empty());                                // one past it
+        assert(parse("18446744073709551616\n").empty());                      // past ULLONG_MAX too
+        std::set<uint32_t> ids = {3405340, 480, 459220};
+        const std::string text = format(ids);
+        assert(text == "480\n459220\n3405340\n");                                     // sorted, one id per line
+        assert(parse(text) == ids);                                                   // round trip
+        assert(parse(format(parse(text))) == ids);                                    // and again, as on a second restart
+        assert(format({}).empty() && parse(format({})).empty());
+        assert(contains(ids, 480) && !contains(ids, 481));
+        assert(toggle(ids, 481) && contains(ids, 481));                               // added
+        assert(!toggle(ids, 481) && !contains(ids, 481));                             // removed again
+        assert(!toggle(ids, 480) && ids.size() == 2 && !contains(ids, 480));
+        std::set<uint32_t> back = parse(format(ids));                                 // the toggle survives a restart
+        assert(back == ids && !contains(back, 480) && contains(back, 459220));
+    }
+
     std::puts("game_library: all checks passed");
     return 0;
 }

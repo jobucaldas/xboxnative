@@ -45,21 +45,24 @@ int main() {
         for (double since : {0.0, 0.25, cancel_guard - 0.01})
             assert(press_a(st(false, d, since)) == Action::ignore);
 
-    // The button and the hint under it name the action the press will take.
+    // The button and the hint under it name the action the press will take
+    // (mockups 03/03b: one button, INSTALLING n% -> CANCEL on focus, no X/Y hints).
     assert(!std::strcmp(label(st(false, Download::none)), "INSTALL"));
     assert(!std::strcmp(label(st(true, Download::none)), "PLAY"));
     for (Download d : {Download::queued, Download::running}) {
-        assert(!std::strcmp(label(st(false, d)), "INSTALLING... A: cancel"));
-        assert(!std::strcmp(hint(st(false, d)), "B: back, download keeps running"));
-        assert(std::strstr(label(st(false, d)), "B:") == nullptr);   // the button never offers B as a cancel
-        assert(std::strstr(hint(st(false, d)), "again") == nullptr); // no second press is ever asked for
+        assert(!std::strcmp(label(st(false, d), 62), "INSTALLING 62%"));
+        assert(!std::strcmp(hint(st(false, d)), "Cancel install"));
+        assert(std::strstr(label(st(false, d), 62), "B:") == nullptr);   // the button never offers B as a cancel
+        assert(std::strstr(hint(st(false, d)), "again") == nullptr);     // no second press is ever asked for
+        assert(std::strstr(hint(st(false, d)), "X:") == nullptr);        // X/Y shortcut hints are removed
+        assert(std::strstr(hint(st(false, d)), "Y:") == nullptr);
     }
-    assert(!std::strcmp(hint(st(false, Download::none)), "press A"));
+    assert(!std::strcmp(hint(st(false, Download::none)), "Press A to install"));
     assert(!std::strcmp(hint(st(true, Download::none)), "Installed. Press A to play"));
     std::puts("DETAIL-INPUT-OK: B and the d-pad go back/scroll only; one A press cancels, not the start press");
 
     // Every label the detail button can show fits its padding, centered.
-    for (const char* l : {"GUEST RUNNING", "LAUNCHING...", "RESTART REQUIRED", "DELETING...", "INSTALLING... A: cancel", "PLAY", "INSTALL"}) {
+    for (const char* l : {"GUEST RUNNING", "LAUNCHING...", "RESTART REQUIRED", "DELETING...", "INSTALLING 62%", "CANCEL", "PLAY", "INSTALL"}) {
         auto layout = launch_button::label_layout(std::strlen(l));
         int textWidth = static_cast<int>(std::strlen(l)) * 8 * layout.scale;
         assert(layout.x >= launch_button::padding);

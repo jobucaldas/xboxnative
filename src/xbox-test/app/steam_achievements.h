@@ -198,8 +198,50 @@ inline bool prepare(const Schema& s,const UserStats& u,const fs::path& settings,
         std::string bytes(4,'\0');memcpy(&bytes[0],&it->second,4);if(!write(path,bytes))return false;}
     return true;
 }
-struct Upload { unsigned achievements=0, stats=0; bool sent=false, ok=false; };
-// Sends newly earned achievements and changed stats. Never clears a bit.
+// Item D6: the game page's "Achievements" row — "unlocked / total" when the
+// schema and the player's earned set are known, empty when they are not (the
+// page then says "Not tracked yet"). Pure so tests can pin the text.
+inline std::string count_text(const Schema& s, const std::map<std::string,Earned>& earned) {
+    if(s.achievements.empty()) return std::string();
+    unsigned unlocked=0;
+    for(auto& a:s.achievements){auto it=earned.find(a.name);if(it!=earned.end()&&it->second.earned)++unlocked;}
+    return std::to_string(unlocked)+" / "+std::to_string(s.achievements.size());
+}
+// The achievement NAMES of gbe's settings file (prepare() writes a JSON array
+// of {"name":...,"displayName":...} objects), so the page can count without a
+// live CM session. Returns an empty list for a missing/garbled file.
+inline std::vector<std::string> parse_names(const std::string& text) {
+    std::vector<std::string> out;
+    JsonReader r{text};
+    if(!r.eat('[')||r.eat(']')) return out;
+    for(;;) {
+        std::string name;
+        if(!r.eat('{')) return out;
+        if(!r.eat('}')) for(;;) {
+            std::string key,raw;
+            if(!r.string(key)||!r.eat(':')||!r.value(raw)) return out;
+            if(key=="name") name=raw;
+            if(r.eat(',')) continue;
+            if(!r.eat('}')) return out;
+            break;
+        }
+        if(!name.empty()) out.push_back(name);
+        if(!r.eat(',')) return out;
+    }
+}
+// "unlocked / total" from the two files prepare() leaves behind, or empty when
+// the game has no prepared schema yet (never played on this console).
+inline std::string count_from_files(const fs::path& settings_json, const fs::path& earned_json) {
+    auto names=read(settings_json);
+    if(!names) return std::string();
+    auto list=parse_names(*names);
+    if(list.empty()) return std::string();
+    auto earned=parse_earned(read(earned_json).value_or("{}"));
+    unsigned unlocked=0;
+    for(auto& n:list){auto it=earned.find(n);if(it!=earned.end()&&it->second.earned)++unlocked;}
+    return std::to_string(unlocked)+" / "+std::to_string(list.size());
+}
+struct Upload { unsigned achievements=0, stats=0; bool sent=false, ok=false; };// Sends newly earned achievements and changed stats. Never clears a bit.
 inline Upload store(Io& io,uint32_t appid,uint64_t steamid,const Schema& s,const UserStats& u,const fs::path& saves) {
     Upload r;
     auto earned=parse_earned(read(saves/"achievements.json").value_or("{}"));

@@ -95,5 +95,63 @@ int main() {
             subprocess.run([str(exe)], check=True, timeout=30)
 
 
+class StoreWorkerCopyTest(unittest.TestCase):
+    def test_worker_copies_every_parsed_field_onto_the_live_object(self):
+        """store_parse fills a temporary; store_worker must publish all of it.
+
+        The game page's size row falls back to StoreInfo::download_size, so a
+        field the worker forgets to copy reads as empty and the page shows
+        Unknown instead of the store's Storage: figure.
+        """
+        source = (Path(__file__).resolve().parents[1] / 'store.h').read_text()
+        copy = re.search(r'if \(ok\) \{ si->name = tmp\.name;[^}]*\}', source).group()
+        program = r'''
+#include <cassert>
+#include <string>
+struct StoreInfo {
+    std::string name, desc, release, dev, genres, price;
+    std::string download_size;
+    bool free = false;
+    int dxKind = 0;
+    std::string dxNote;
+};
+int main() {
+    const bool ok = true;
+    StoreInfo tmp;
+    tmp.name = "Halo Infinite";
+    tmp.desc = "A description";
+    tmp.release = "Nov 15, 2021";
+    tmp.dev = "343 Industries";
+    tmp.genres = "Action";
+    tmp.price = "Free to play";
+    tmp.free = true;
+    tmp.dxKind = 2;
+    tmp.dxNote = "DirectX 12";
+    tmp.download_size = "30 GB";
+    StoreInfo live;
+    StoreInfo* si = &live;
+    COPY
+    assert(si->name == "Halo Infinite");
+    assert(si->desc == "A description");
+    assert(si->release == "Nov 15, 2021");
+    assert(si->dev == "343 Industries");
+    assert(si->genres == "Action");
+    assert(si->price == "Free to play");
+    assert(si->free);
+    assert(si->dxKind == 2);
+    assert(si->dxNote == "DirectX 12");
+    assert(si->download_size == "30 GB");   // the size row's fallback
+}
+'''.replace('COPY', copy)
+        with tempfile.TemporaryDirectory(prefix='store-copy-') as temp:
+            cpp = Path(temp) / 'test.cpp'
+            exe = Path(temp) / 'test'
+            cpp.write_text(program)
+            subprocess.run(shlex.split(os.environ.get('CXX', 'c++')) + [
+                '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror',
+                str(cpp), '-o', str(exe)], check=True)
+            subprocess.run([str(exe)], check=True, timeout=30)
+
+
 if __name__ == '__main__':
     unittest.main()

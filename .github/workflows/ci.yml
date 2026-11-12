@@ -72,6 +72,8 @@ jobs:
           /tmp/game-library-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/detail-input.cpp -o /tmp/detail-input-test
           /tmp/detail-input-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/playable_test.cpp -o /tmp/playable-test
+          /tmp/playable-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/detail-after-download.cpp -o /tmp/detail-after-download-test
           /tmp/detail-after-download-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/depot_select_test.cpp -o /tmp/depot-select-test
@@ -123,8 +125,17 @@ jobs:
         run: bash src/xbox-test/app/tests/load-config.sh
       - name: Delete game removes only its install folder
         run: bash src/xbox-test/app/tests/game-delete.sh
+      - name: Storage move copies, verifies and markers atomically
+        run: bash src/xbox-test/app/tests/move-game.sh
       - name: Free space figures and launcher leftovers
         run: bash src/xbox-test/app/tests/storage-report.sh
+      - name: UI toolkit, launcher screens, guide overlay and unlock logic (native renders and asserts)
+        run: |
+          bash src/xbox-test/app/tests/ui-render.sh
+          bash src/xbox-test/app/tests/ui-launcher.sh
+          bash src/xbox-test/app/tests/ui-guide.sh
+          bash src/xbox-test/app/tests/ui-nav.sh
+          bash src/xbox-test/app/tests/ui-unlocks.sh
       # The legacy->flip swap-chain conversion both guest routes share (the
       # factory's CreateSwapChain override and D3D11CreateDeviceAndSwapChain):
       # host logic, so Wine runs it headless.

@@ -25,5 +25,11 @@
     <Capability Name="internetClient" />
     <Capability Name="codeGeneration" />
     <uap:Capability Name="removableStorage" />
+    <!-- The library names the signed-in Xbox user and shows their picture.
+         Per the capability reference this is a uap-namespaced restricted
+         capability ("gives apps the ability to access the user's name and
+         picture"); without it the user queries come back empty on the console
+         and the sidebar falls back to the Steam persona. -->
+    <uap:Capability Name="userAccountInformation" />
   </Capabilities>
 </Package>

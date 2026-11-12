@@ -251,6 +251,36 @@ static steam_cloud::Roots cloud_roots(uint32_t appid,const std::wstring& gameRoo
     auto add=[&](const char* name,const GUID& id){PWSTR path=nullptr;if(known&&SUCCEEDED(known(id,0,nullptr,&path))&&path)roots[name]=path;if(path)CoTaskMemFree(path);};
     add("WinAppDataLocalLow",localLow);add("WinAppDataLocal",local);add("WinAppDataRoaming",roaming);
     add("WinMyDocuments",documents);add("WinSavedGames",savedGames);
+    // A packaged app resolves Local/LocalLow to its AppContainer folder (AC),
+    // but the Roaming known folder can fail outright here — and a missing root
+    // makes every %WinAppDataRoaming% cloud file "not under a configured root",
+    // so Stardew Valley's saves were skipped instead of downloaded. Try the
+    // packaged-app locations in the order Windows itself would, and log which
+    // one answered so the next console run says where the saves land.
+    if(!roots.count("WinAppDataRoaming")) {
+        auto try_roaming=[&](const char* what,std::wstring p){
+            if(roots.count("WinAppDataRoaming")||p.empty()) return;
+            roots["WinAppDataRoaming"]=p;
+            lp_sink((std::string("STEAM cloud: WinAppDataRoaming from ")+what+" = "+steam_cloud::path_text(p)).c_str());
+        };
+        // The game itself writes wherever %APPDATA% points, so that is the
+        // first thing to believe: if the guest has one, it is the right root.
+        wchar_t appdata[MAX_PATH]{}; DWORD n=GetEnvironmentVariableW(L"APPDATA",appdata,MAX_PATH);
+        if(n&&n<MAX_PATH) try_roaming("the APPDATA environment variable",std::wstring(appdata));
+        try { try_roaming("RoamingFolder",winrt::Windows::Storage::ApplicationData::Current().RoamingFolder().Path().c_str()); } catch(...) {}
+        try { try_roaming("LocalCache\\Roaming",(winrt::Windows::Storage::ApplicationData::Current().LocalCacheFolder().Path()+L"\\Roaming").c_str()); } catch(...) {}
+        try { try_roaming("LocalFolder\\..\\RoamingState",(winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path()+L"\\..\\RoamingState").c_str()); } catch(...) {}
+        if(!roots.count("WinAppDataRoaming")) lp_sink("STEAM cloud: no WinAppDataRoaming root; %WinAppDataRoaming% files will be skipped");
+    }
+    // Evidence for the next console run: what the guest sees for the two
+    // environment variables a game falls back to when the known-folder call
+    // fails. Paths only, no account names.
+    for(const wchar_t* v:{L"APPDATA",L"USERPROFILE"}) {
+        wchar_t buf[MAX_PATH]{}; DWORD n=GetEnvironmentVariableW(v,buf,MAX_PATH);
+        const std::wstring var(v);
+        lp_sink((std::string("STEAM cloud: env ")+std::string(var.begin(),var.end())+" = "+
+                 (n&&n<MAX_PATH?steam_cloud::path_text(buf):std::string("(unset)"))).c_str());
+    }
     roots["GameInstall"]=gameRoot;
     roots[steam_cloud::kRemoteRoot]=provider_remote_dir(appid);
     return roots;
@@ -544,6 +574,9 @@ static void leaderboard_end() {
 }
 // ---- Steam achievements/stats for the provider-served game (steam_achievements.h)
 #include "steam_achievements.h"
+// The guide's achievements tab (main.cpp): filled once gbe's files are prepared.
+void guide_achievements_prepared(uint32_t appid,const steam_achievements::Schema& schema,
+                                 const std::map<std::string,steam_achievements::Earned>& earned);
 static steam_achievements::Io achievement_io(std::shared_ptr<CmSession> session) {
     steam_achievements::Io io;
     io.call=[session](uint32_t emsg,const std::string& body,std::string& out){
@@ -577,6 +610,9 @@ static void achievements_sync(uint32_t appid,bool store) {
     bool ok=steam_achievements::prepare(*schema,user,dir/"steam_settings",saves);
     char line[160];snprintf(line,sizeof line,"STEAM achievements: %s achievements=%zu stats=%zu unlocked=%u",
         ok?"prepared":"prepare failed",schema->achievements.size(),schema->stats.size(),unlocked);lp_sink(line);
+    // The guide's achievements tab and unlock poller read gbe's saves file
+    // (ui_unlocks.h); the hook receives the schema and the merged earned set.
+    if(ok)guide_achievements_prepared(appid,*schema,steam_achievements::parse_earned(steam_achievements::read(saves/"achievements.json").value_or("{}")));
 }
 // ---- Presence while the guest runs (steam_presence.h).
 // Steam drops "in game" and rich presence when the CM session that sent them
@@ -1110,6 +1146,27 @@ static void lp_watchdog() {
     if(!r && g_launch.pe32Executed.load())return;
     lp_finish(g_launch.gen,g_launch.appid,loader?"watchdog timeout 120 s; last event: "+(r?r->snapshot():std::string("preparing guest loader")):
         std::string("watchdog timeout 600 s preparing Steam before the game started; the game was not started"),false,0,0,"timeout");
+}
+
+// Item D22: B on the launch banner. A launch is cancelled only while it is
+// still preparing (phase 1) and no game code has started: the guard flags are
+// checked under the same lock lp_publish uses, so a cancel can never race a
+// publish that already reported the guest running. The worker notices the
+// abandoned generation at its next checkpoint (before the guest starts, in
+// the watchdog, and in lp_publish) and stops without starting it; the launch
+// is reported as cancelled so the page and launch_result.json agree.
+static bool cancel_launch(const char* via) {
+    std::lock_guard<std::mutex> lock(g_launch.m);
+    if(g_launch.phase!=1) return false;
+    if(g_launch.loaderStarted.load()!=0 || g_launch.pe32Executed.load()) return false;   // game code already started
+    if(play_runtime::observed.load(std::memory_order_acquire)) return false;
+    g_launch.result="Launch cancelled";g_launch.ok=false;g_launch.phase=2;
+    logf("launch: cancelled by the player before the game started (%s) attempt=%s",via,g_launch.attempt.c_str());
+    // lp_publish refuses a stale generation, so the terminal record is written
+    // here, in the same shape the worker writes it.
+    std::string json="{\"appid\":"+std::to_string(g_launch.appid.load())+",\"attemptId\":\""+g_launch.attempt+"\",\"time\":\""+utc_iso()+"\",\"stage\":\"loader\",\"state\":\"cancelled\",\"terminal\":true,\"ok\":false,\"mapped\":0,\"total\":0,\"gameCodeExecuted\":false,\"exitCode\":null,\"lastEvent\":\"launch cancelled\",\"result\":\"Launch cancelled\"}\n";
+    write_text(g_dir+L"\\launch_result.json",json);
+    return true;
 }
 
 // Entry: called on the render thread; returns immediately (work happens on a worker thread).

@@ -71,6 +71,15 @@ External dependencies fetched at build time (never copied here; pinned in deps.p
   Microsoft MSIX Packaging SDK                MIT; its bundled dependencies retain their own licences (see upstream LICENSE and
                                                THIRD PARTY CODE NOTICE). Built by src/tools/build-msix-packaging.sh as a host-only
                                                packaging tool; never linked into our code or committed as a binary.
+  stb_truetype.h (stb-truetype)                Public domain or MIT (dual-licensed, choose either), Sean Barrett / RAD Game Tools.
+                                               Fetched at a pinned commit and SHA-256 verified by src/tools/fetch-ui-assets.sh into
+                                               the git-ignored out/ui-assets/; included (not committed) at compile time by
+                                               src/xbox-test/app/ui_font.h. Its licence text travels with it (LICENSE-stb.txt).
+  Selawik 1.01 (selawik-release)               SIL Open Font License 1.1, Copyright 2015 Microsoft Corporation, Reserved Font Name
+                                               Selawik. Fetched and SHA-256 verified by src/tools/fetch-ui-assets.sh; the launcher
+                                               packages selawk.ttf/selawksb.ttf/selawkb.ttf in layout/fonts/ together with
+                                               LICENSE-Selawik.txt and SOURCE.txt. The TTFs are never committed to this repository.
+                                               OFL 1.1 is GPLv3-compatible for embedding; the fonts are not modified.
   Microsoft Windows SDK/CRT via xwin           Downloaded by the toolchain under Microsoft's own licence terms; never redistributed here.
 
 Licence compatibility with GPL-3.0-or-later (a good-faith reading, NOT legal advice or a legal guarantee)
@@ -84,6 +93,9 @@ Licence compatibility with GPL-3.0-or-later (a good-faith reading, NOT legal adv
   Wine (LGPL-2.1-or-later): fine to build and use alongside GPLv3 code; keep its licence texts with any DLLs you redistribute
   and offer the corresponding source (the pinned tarball). We do not redistribute Wine binaries from this repository.
   Microsoft SDK/CRT (via xwin): downloaded under Microsoft's terms at build time, not distributed here.
+  stb_truetype (public domain / MIT): permissive and GPLv3-compatible; we use the MIT option and keep its notice.
+  Selawik (SIL OFL 1.1): the FSF regards OFL 1.1 as GPLv3-compatible for embedding; the fonts are unmodified and
+  shipped with their licence text. The Reserved Font Name only restricts modified versions, which we do not make.
   If you add third-party code, list it here and check its licence first.
 
 Reference only (no code copied)
