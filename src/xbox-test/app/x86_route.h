@@ -58,8 +58,15 @@ inline Report report(const x86::PlayResult& r, const std::string& exe) {
     // fallback to a generic message.
     std::string why;
     if(r.fault_kind=="UnresolvedImport") {
-        why="called unresolved import "+(first_unresolved(r).empty()?r.fault:first_unresolved(r));
-        if(!first_unresolved(r).empty()&&r.fault.find(first_unresolved(r))==std::string::npos) why+=" ("+r.fault+")";
+        // The fault text itself names the cause ("call to unresolved import
+        // dll!sym" from the IAT stub, "GetProcAddress: ..." from the export
+        // lookup); GetProcAddress raises the same kind without being an IAT
+        // call, so the fault text wins and the first unresolved IAT entry is
+        // only the fallback when the text carries no name.
+        const std::string marker="call to unresolved import ";
+        size_t at=r.fault.find(marker);
+        why=at==std::string::npos?"called unresolved import "+(first_unresolved(r).empty()?r.fault:r.fault)
+                                 :"called "+r.fault.substr(at);
     } else why=r.fault.empty()?"the 32-bit guest did not exit":r.fault;
     snprintf(line,sizeof line,"PRUN EVENT x86 route: %s fault kind=%s eip=0x%08x: %s",exe.c_str(),r.fault_kind.c_str(),r.fault_eip,why.c_str());
     rep.lines.push_back(line);
