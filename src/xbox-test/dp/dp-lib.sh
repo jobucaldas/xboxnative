@@ -28,6 +28,25 @@ curl_dp() {
   local csrf; csrf=$(awk '$6=="CSRF-Token"{print $7}' "$DP_JAR" | tail -1)
   printf 'user = "%s:%s"\n' "${DP_USER:-}" "$DP_PASS" | curl -sk -m "${DP_TIMEOUT:-120}" ${DP_SOCKS:+--socks5-hostname $DP_SOCKS} -K - -b "$DP_JAR" -H "X-CSRF-Token: $csrf" "$@" "https://$DP_HOST:$DP_PORT$p"
 }
+# curl_dp_send PATH [curl args]: like curl_dp but for mutating calls (POST/PUT/DELETE/-F).
+# A stale CSRF cookie makes every POST 403 (GETs still 200): on a 403, discard the
+# cookie jar, refetch the cookie and retry once; if it still 403s, say so clearly.
+curl_dp_send() {
+  local p="$1" out code rc; shift
+  out=$(curl_dp "$p" -w '\n%{http_code}' "$@"); rc=$?
+  code=${out##*$'\n'}
+  if [ "$code" = 403 ]; then
+    echo "dp-lib: 403 on $p (stale CSRF cookie?) — refetching cookie and retrying once" >&2
+    rm -f "$DP_JAR"
+    out=$(curl_dp "$p" -w '\n%{http_code}' "$@"); rc=$?
+    code=${out##*$'\n'}
+    if [ "$code" = 403 ]; then
+      echo "dp-lib: still 403 on $p after cookie refetch — CSRF auth is failing for real, not staleness" >&2
+    fi
+  fi
+  printf '%s\n' "${out%$'\n'*}"
+  return "$rc"
+}
 dp_lock() {
   # A caller may hold the console lock for a whole multi-helper transaction.
   # Reuse its inherited open file description rather than deadlocking on it.
@@ -40,4 +59,4 @@ dp_lock() {
   fi
 }
 # dp_retry METHOD PATH [curl args] -> stdout body, retries 4x
-dp_retry() { local m="$1" p="$2"; shift 2; local a out; for a in 1 2 3 4; do out=$(dp_lock curl_dp "$p" -X "$m" -f "$@") && { printf %s "$out"; return 0; }; sleep 2; done; return 1; }
+dp_retry() { local m="$1" p="$2"; shift 2; local a out; for a in 1 2 3 4; do out=$(dp_lock curl_dp_send "$p" -X "$m" -f "$@") && { printf %s "$out"; return 0; }; sleep 2; done; return 1; }
