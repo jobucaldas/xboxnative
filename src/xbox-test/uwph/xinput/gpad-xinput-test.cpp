@@ -64,14 +64,19 @@ int main() {
     CHECK(xinput_core::get_state(0, &st) == 0 && st.Gamepad.wButtons == 0);
 
     // A full two-step sequence through the same calls the launcher makes.
+    // The launcher keeps slot 0 connected for the whole program (press,
+    // release and gap alike; m_gpadInjecting latches to clear()), so the
+    // frames below publish an empty pad while connected instead of letting
+    // the slot disconnect between presses.
     CHECK(parse_seq("A 50 20\nB 50\n", 14, &prog, &err) && prog.size() == 2);
     r.arm(prog, 3000);
     bool sawA = false, sawGap = false, sawB = false, sawEnd = false;
     for (uint64_t t = 3000; t <= 3300; t += 10) {
         r.tick(t); r.held(&buttons, &lt, &rt);
         XINPUT_GAMEPAD frame{}; frame.wButtons = buttons;
-        xinput_core::publish(0, &frame);
+        xinput_core::publish(0, &frame);   // connected through gap: never publish nullptr mid-program
         xinput_core::get_state(0, &st);
+        CHECK(st.Gamepad.wButtons == frame.wButtons);   // no ERROR_DEVICE_NOT_CONNECTED mid-hold
         if (st.Gamepad.wButtons & XINPUT_GAMEPAD_A) sawA = true;
         else if (sawA && !(st.Gamepad.wButtons & XINPUT_GAMEPAD_B)) sawGap = true;
         if (st.Gamepad.wButtons & XINPUT_GAMEPAD_B) sawB = true;

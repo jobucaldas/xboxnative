@@ -55,7 +55,7 @@ fi
 
 # The launcher consumes cmd.txt on its next frame tick; boot.log carries the
 # ack. Poll the log the way wait-log.sh does (it is re-created on relaunch).
-if "$HERE/../../dp/wait-log.sh" "$full" boot.log "($ack)|($nack)|(gpad ignored, no game running)" "$wait_s" "$tmp/boot.log" >/dev/null 2>&1; then
+if "$DP/wait-log.sh" "$full" boot.log "($ack)|($nack)|(gpad ignored, no game running)" "$wait_s" "$tmp/boot.log" >/dev/null 2>&1; then
   if grep -Eq "$nack" "$tmp/boot.log"; then
     echo "REJECTED: $(grep -E "$nack" "$tmp/boot.log" | tail -1)"; exit 3
   fi
