@@ -26,16 +26,19 @@ work; the console check to run is at the bottom).
 | DllMain(DLL_THREAD_ATTACH/DETACH) on the load-time thread only (no guest threads in this surface yet) | x86-dll.sh asserts the attach reason value | PASS |
 | Import resolution between guest PE32 DLLs (DLL imports another guest DLL) | x86-dll.sh: chain exe -> dll-a -> dll-b, all guest PEs | PASS |
 | From-source i686 VC runtime: ucrtbase, vcruntime140, msvcp140, concrt140 built from pinned Wine 10.0 source | src/tools/build-wine-runtime-i386.sh; deps.pin entry; --dry-run in CI pins check | PASS (built off-device) |
-| An i686 C++ fixture using iostream/std::string/exceptions/threads linked against those DLLs runs in the emulator | x86-cxxrt.sh (Wine-adjacent; see honest gaps) | see gaps |
+| An i686 C++ fixture using iostream/std::string/exceptions/threads runs in the emulator | x86-cxxrt.sh: 141/141 imports bound, exit 42, no unresolved, no fault; identical stdout and exit code under Wine | PASS (off-device) |
 | Proteus.exe (Mega Man Legacy Collection) import gaps | pefile listing only (this file, below); no game files committed | documented |
 
 ## Honest gaps (still open after this slice)
 
-- The i686 C++ fixture runs against **Wine's i386 ucrtbase/msvcp140** built from
-  source. Wine's ucrtbase startup (its own `__scrt`-equivalent path) needs more
-  kernel32 than the stage-1/2 allowlist serves; the fixture proves the loader
-  and the runtime DLLs load and bind, but full C++ stdlib behaviour in the
-  emulator is bounded by the allowlist, not general.
+- The committed C++ fixture links the mingw static C++ runtime (imports only
+  kernel32/msvcrt/ntdll), so the interpreter run exercises the full C++
+  stdlib path through the allowlisted surface. **Wine's i386
+  ucrtbase/msvcp140** built from source were proven to load as guest DLLs
+  (LoadLibraryA + GetProcAddress on `_initterm`, `_errno` and the forwarded
+  `_o__errno` succeed, exit 42; probe not committed as a test) but a fixture
+  linked against them is not committed: Wine's ucrtbase startup needs more
+  kernel32 than the surface serves today.
 - Guest DLL **unloading** (refcount to zero → unmap) is not implemented: the
   loader tracks refcounts and DllMain(DLL_PROCESS_DETACH) runs only at process
   exit, matching what a game's startup path needs.
