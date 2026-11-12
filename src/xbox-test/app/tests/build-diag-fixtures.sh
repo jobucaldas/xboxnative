@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # build-diag-fixtures.sh OUTDIR -> OUTDIR/{fixture-crt.exe,play-vulkan-dzn.exe,
 # play-d3d9.exe,play-d3d9-triangle.exe,play-d3d9-triangle-variants.exe,
-# play-d3d9-textured.exe,play-d3d10.exe,play-d3d11.exe,play-d3d12.exe,
-# play-opengl.exe} - the console self-test's fixtures (selftest_plan.h).
+# play-d3d9-textured.exe,play-d3d10.exe,play-d3d10-triangle.exe,
+# play-d3d11.exe,play-d3d12.exe,play-opengl.exe} - the console self-test's
+# fixtures (selftest_plan.h).
 #
 # These are the same guest programs tests/play-runtime.sh builds for the
 # off-device runner, compiled from this repository's sources so the package
@@ -62,6 +63,12 @@ lld "${common[@]}" /entry:d3d9_textured_entry /include:d3d9_textured_relocation 
 clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d10.cpp" -o "$work/d3d10.obj"
 lld "${common[@]}" /entry:d3d10_entry /include:d3d10_relocation /out:"$out/play-d3d10.exe" \
   "$work/d3d10.obj" "$mingw_lib/libd3d10.a" "$mingw_lib/libdxgi.a" "$mingw_lib/libuuid.a" "${libs[@]}"
+
+# The D3D10 drawing fixture draws with the committed SM4 bytecode (the D3D11
+# fixture's SM5 would be refused by a D3D10 device) and reads every pass back.
+clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d10-triangle.cpp" -o "$work/d3d10-triangle.obj"
+lld "${common[@]}" /entry:d3d10tri_entry /include:d3d10tri_relocation /out:"$out/play-d3d10-triangle.exe" \
+  "$work/d3d10-triangle.obj" "$mingw_lib/libd3d10.a" "$mingw_lib/libdxgi.a" "$mingw_lib/libuuid.a" "${libs[@]}"
 
 # The OpenGL fixture runs the startup path an SDL3 GL game takes (research/
 # OPENGL-PLAN.md): opengl32.dll from the runtime directory (Mesa's d3d12 WGL

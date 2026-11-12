@@ -321,6 +321,20 @@ int main(int argc, char** argv) {
         vm.restart_required = true;
         check(primary_state(vm) == Primary::restart_required &&
               !std::strcmp(primary_label(vm, false), "RESTART REQUIRED"), "restart required label");
+        // a marker whose payload is gone is not an installed game: REINSTALL,
+        // never PLAY (the status row says the files are gone; A reinstalls).
+        // main.cpp keeps installed=true (the marker still claims an install)
+        // and lets broken flip the button.
+        vm.restart_required = false;
+        vm.installed = true; vm.broken = true;
+        check(primary_state(vm) == Primary::reinstall && !std::strcmp(primary_label(vm, false), "REINSTALL"),
+              "broken install: REINSTALL");
+        check(!std::strcmp(primary_hint(vm, false), "Reinstall"), "broken install hint says reinstall");
+        check(!std::strcmp(primary_label(vm, true), "REINSTALL"), "broken install stays REINSTALL when focused");
+        vm.installed = false; vm.broken = true;   // not produced by main.cpp, but the machine must stay sane
+        check(primary_state(vm) == Primary::reinstall, "broken alone is still reinstall");
+        vm.installed = true; vm.broken = false;
+        check(primary_state(vm) == Primary::play, "healthy install still plays");
     }
 
     // ---- pure logic: sidebar view-model ----

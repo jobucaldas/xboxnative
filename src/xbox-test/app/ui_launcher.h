@@ -123,10 +123,11 @@ inline void grid_visible(int tile_count, int top_row, int& lo, int& hi, int cols
 // ---- primary button state machine (pure) ----
 // One button per state; while installing, the same button reads INSTALLING n%
 // and turns into CANCEL when it has focus (A then cancels; never a second button).
-enum class Primary { install, play, installing, cancelling, launching, restart_required, deleting };
+enum class Primary { install, play, reinstall, installing, cancelling, launching, restart_required, deleting };
 
 struct PrimaryVM {
     bool installed = false;
+    bool broken = false;   // a marker claims an install but its payload is missing/empty
     detail_input::Download download = detail_input::Download::none;
     bool launching = false;
     bool deleting = false;
@@ -139,6 +140,7 @@ inline Primary primary_state(const PrimaryVM& vm) {
     if (vm.deleting) return Primary::deleting;
     if (vm.download != detail_input::Download::none) return Primary::installing;
     if (vm.restart_required) return Primary::restart_required;
+    if (vm.broken) return Primary::reinstall;   // before play: a broken install cannot play
     return vm.installed ? Primary::play : Primary::install;
 }
 
@@ -150,6 +152,7 @@ inline const char* primary_label(const PrimaryVM& vm, bool focus) {
     switch (primary_state(vm)) {
         case Primary::play:             return "PLAY";
         case Primary::install:          return "INSTALL";
+        case Primary::reinstall:        return "REINSTALL";
         case Primary::installing:
             if (focus) return "CANCEL";
             { float p = vm.install_pct; p = p < 0.0f ? 0.0f : p > 1.0f ? 1.0f : p;
@@ -168,6 +171,7 @@ inline const char* primary_hint(const PrimaryVM& vm, bool /*focus*/) {
     switch (primary_state(vm)) {
         case Primary::play:             return "Play";
         case Primary::install:          return "Install";
+        case Primary::reinstall:        return "Reinstall";   // the install files are gone (status row says so)
         case Primary::installing:       return "Cancel install";   // mockups 03 and 03b both say it
         default:                        return "Select";
     }
