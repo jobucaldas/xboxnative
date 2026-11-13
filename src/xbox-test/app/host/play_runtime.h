@@ -24,6 +24,7 @@
 #include "../../shared/vulkan_driver_registry.h"
 #include "tls_slot0.h"
 #include "guest_watchdog.h"   // contained_fault: which exceptions are real crashes
+#include "../../uwph/shell32/folder_chain.h" // launch.h uses folder_chain:: at global scope; include before the namespace
 namespace play_runtime {
 constexpr DWORD missingException=0xe0520001, exitException=0xe0520002;
 struct Module {
