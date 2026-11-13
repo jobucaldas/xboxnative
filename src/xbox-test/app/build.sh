@@ -18,7 +18,7 @@ cp "$ui_assets"/{selawk.ttf,selawksb.ttf,selawkb.ttf,LICENSE-Selawik.txt,LICENSE
 bash ../uwph/host/build-sqlite-lib.sh "$out/obj/sqlite3.lib"
 # host/tls_slot0.cpp must stay the FIRST object: it reserves the start of the launcher's static TLS
 # block so guest EXEs that assume TLS slot 0 (MSVC /GA code) get it. See host/tls_slot0.cpp.
-UWP_OBJ_DIR="$out/obj" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/layout/xbtest.exe" --jobs 4 host/tls_slot0.cpp main.cpp qrcodegen.cpp vendor/zlib/inflate.c vendor/zlib/inftrees.c vendor/zlib/inffast.c vendor/zlib/adler32.c vendor/zlib/crc32.c vendor/zlib/zutil.c vendor/lzma/LzmaDec.c vendor/zstd/zstddeclib.c --link-arg bcrypt.lib --link-arg dcomp.lib -- /MT /O2 /DNDEBUG "/I$out/obj" "/I$ui_assets" /I../uwph/host/third_party/sqlite
+UWP_OBJ_DIR="$out/obj" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/layout/xbtest.exe" --jobs 4 host/tls_slot0.cpp main.cpp qrcodegen.cpp vendor/zlib/inflate.c vendor/zlib/inftrees.c vendor/zlib/inffast.c vendor/zlib/adler32.c vendor/zlib/crc32.c vendor/zlib/zutil.c vendor/lzma/LzmaDec.c vendor/zstd/zstddeclib.c --link-arg bcrypt.lib -- /MT /O2 /DNDEBUG "/I$out/obj" "/I$ui_assets" /I../uwph/host/third_party/sqlite
 bash ../audio/build.sh "$out/layout"
 # Separate native TLS slots for mapped guest modules. Windows initializes each
 # carrier's static storage on every native guest thread; never replace GS/TEB.

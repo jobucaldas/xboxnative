@@ -89,5 +89,22 @@ else
     fail "input() has no swallow-all dead gate (guestDead early return missing)"
 fi
 
+# 8. The launcher image must not statically import dcomp.dll (bugbot
+#    r4560022516): a desktop-affinity import the Xbox/UWP loader rejects at
+#    activation. DCompositionCreateDevice2 resolves at RUNTIME (GetProcAddress)
+#    and build.sh links no dcomp.lib; the dead page degrades to the fail-safe
+#    loop (force quit still reachable) when dcomp.dll is absent.
+if grep -qE '(^|[[:space:]])--link-arg[[:space:]]+dcomp\.lib' "$root/app/build.sh"; then
+    fail "build.sh links dcomp.lib (plants a dcomp.dll import in the launcher image)"
+else ok "build.sh links no dcomp.lib"; fi
+if grep -qE '(^|[^"A-Za-z])DCompositionCreateDevice2\(' "$main"; then
+    fail "main.cpp calls DCompositionCreateDevice2 directly (static dcomp.dll import)"
+else ok "DCompositionCreateDevice2 resolves at runtime (no static dcomp import)"; fi
+if grep -q 'GetProcAddress(module,"DCompositionCreateDevice2")' "$main"; then
+    ok "runtime lookup for DCompositionCreateDevice2 present"
+else
+    fail "no GetProcAddress lookup for DCompositionCreateDevice2 (dead page has no dcomp path)"
+fi
+
 echo "dead-path audit: $checks checks, $failures failures"
 [ "$failures" -eq 0 ]

@@ -3726,7 +3726,24 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         logf("dead page: CreateSwapChainForComposition hr=0x%08lx",(unsigned long)hr);
         if(FAILED(hr))return false;
         if(FAILED(m_deadChain->GetBuffer(0,__uuidof(ID3D11Texture2D),m_deadBB.put_void())))return false;
-        hr=DCompositionCreateDevice2(m_dev.get(),__uuidof(IDCompositionDevice),m_deadDcomp.put_void());
+        // DCompositionCreateDevice2 resolves at RUNTIME (GetProcAddress on
+        // dcomp.dll), not through a static import: dcomp.lib in the link
+        // planted a desktop-affinity dcomp.dll import in the launcher image
+        // (bugbot 91173a0 r4560022516 — the same class the Xbox runtime
+        // rejects at activation). With the lookup, an OS that ships no
+        // classic DComp simply fails the call and the dead page keeps the
+        // fail-safe path below (force quit stays reachable without the
+        // surface). The rest of the dead page drives the device through COM
+        // methods (CreateTargetForHwnd/SetContent/Commit), which import
+        // nothing.
+        using DCompCreate=HRESULT(WINAPI*)(IUnknown*,REFIID,void**);
+        static DCompCreate dcompCreate=[]() -> DCompCreate {
+            HMODULE module=LoadPackagedLibrary(L"dcomp.dll",0);
+            if(!module)module=LoadLibraryExW(L"dcomp.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+            return module?reinterpret_cast<DCompCreate>(reinterpret_cast<void*>(GetProcAddress(module,"DCompositionCreateDevice2"))):nullptr;
+        }();
+        if(!dcompCreate){logf("dead page: dcomp.dll unavailable; no launcher surface");return false;}
+        hr=dcompCreate(m_dev.get(),__uuidof(IDCompositionDevice),m_deadDcomp.put_void());
         logf("dead page: DCompositionCreateDevice2 hr=0x%08lx",(unsigned long)hr);
         if(FAILED(hr))return false;
         winrt::com_ptr<IDCompositionTarget> target;
