@@ -19,3 +19,10 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/x86-launch-route.XXXXXX"); trap 'rm -rf "$tmp"'
   -Wl,--no-seh -Wl,--image-base,0x400000 -o "$tmp/fixture.exe" "$here/x86-fixture/fixture.c" -lkernel32 -lmsvcrt
 "${CXX:-c++}" -std=c++17 -O2 -mno-red-zone -Wall -Wextra -Werror "$here/x86-launch-route.cpp" -o "$tmp/x86-launch-route"
 "$tmp/x86-launch-route" "$tmp/fixture.exe"
+# The gap list end to end: a fixture that imports one export the surface does
+# not register (and never calls it) must be named exactly, and still exit 0.
+"$cc32" -O1 -Wall -Wextra -Werror -ffreestanding -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables \
+  -mno-sse -mno-mmx -mno-80387 -nostdlib -Wl,--entry,_gap_start@0 -Wl,--subsystem,console -Wl,--dynamicbase \
+  -Wl,--no-seh -Wl,--image-base,0x400000 -o "$tmp/gap.exe" "$here/x86-fixture/gap.c" -lkernel32
+"${CXX:-c++}" -std=c++17 -O2 -mno-red-zone -Wall -Wextra -Werror "$here/x86-gap.cpp" -o "$tmp/x86-gap"
+"$tmp/x86-gap" "$tmp/gap.exe"

@@ -54,7 +54,7 @@ static void lp_sink(const char* s) {
     else if (!strncmp(s, "MLP STUB-CALL", 13)) ++g_lpStubCalls;
     else if (!strncmp(s, "MLP STUB ", 9)) ++g_lpStubbed;
     if (strstr(s, "FAIL") && !strstr(s, "PROBE-FAILED")) g_lpLastFail = s;
-    bool key = strstr(s, "PRUN EVENT") || strstr(s, "GAP") || strstr(s, "FAIL") || strstr(s, "SUMMARY") || strstr(s, "MLP IMAGE") || strstr(s, "mapped") || strstr(s, "PROBE") || strstr(s, "STUB-CALL");
+    bool key = strstr(s, "PRUN EVENT") || strstr(s, "GAP") || strstr(s, "FAIL") || strstr(s, "SUMMARY") || strstr(s, "MLP IMAGE") || strstr(s, "mapped") || strstr(s, "PROBE") || strstr(s, "STUB-CALL") || strstr(s, "x86 gap:");
     if (key) logf("launch-probe: %.300s", s);
 }
 #include "wine_gap.h"
@@ -933,6 +933,7 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
     // first unresolved import or the unsupported opcode — never a silent fallback.
     auto rep=x86_route::report(r,name);
     for(auto& l:rep.lines)lp_sink(l.c_str());
+    for(auto& l:rep.gap)lp_sink(l.c_str());
     c.ok=rep.ok;
     c.failName=rep.ok?std::string():rep.result;
 }
