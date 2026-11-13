@@ -533,12 +533,12 @@ using Present1Fn=HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain1*,UINT,UINT,const DX
 inline PresentFn realPresent=nullptr;inline Present1Fn realPresent1=nullptr;
 // A failed Present is the one call the guest still makes after a device
 // removal — everything else fails too, but Present keeps returning while the
-// screen is frozen. The first failure asks the device why, once: without it
-// the only trace is the caller's error hiding the removal.
+// screen is frozen. The first failed non-test Present asks the device why,
+// once: without it the only trace is the caller's error hiding the removal.
 inline std::atomic<bool> presentFailureLogged{false};
-inline void presentFailure(IDXGISwapChain* c,HRESULT hr) {
+inline void presentFailure(IDXGISwapChain* c,HRESULT hr,bool testPresent=false) {
     const bool tracing=d3d11_diag::traceOn.load(std::memory_order_acquire);
-    const bool first=!presentFailureLogged.exchange(true);
+    const bool first=d3d11_diag::claimPresentFailureOnce(presentFailureLogged,testPresent);
     if(tracing||first) {
         winrt::com_ptr<ID3D11Device> dev;
         if(SUCCEEDED(c->GetDevice(__uuidof(ID3D11Device),dev.put_void()))&&dev) {
@@ -559,7 +559,7 @@ inline HRESULT STDMETHODCALLTYPE present(IDXGISwapChain* c,UINT sync,UINT flags)
     d3d11_diag::traceCall("Present");
     if(flags&DXGI_PRESENT_TEST) {
         HRESULT hr=realPresent(c,sync,flags);tracePresentResult("Present",sync,flags,hr);
-        if(FAILED(hr))presentFailure(c,hr);
+        if(FAILED(hr))presentFailure(c,hr,true);
         return hr;
     }
     draw(c);
@@ -578,7 +578,7 @@ inline HRESULT STDMETHODCALLTYPE present1(IDXGISwapChain1* c,UINT sync,UINT flag
     d3d11_diag::traceCall("Present1");
     if(flags&DXGI_PRESENT_TEST) {
         HRESULT hr=realPresent1(c,sync,flags,p);tracePresentResult("Present1",sync,flags,hr);
-        if(FAILED(hr))presentFailure(c,hr);
+        if(FAILED(hr))presentFailure(c,hr,true);
         return hr;
     }
     draw(c);

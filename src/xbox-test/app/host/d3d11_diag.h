@@ -84,7 +84,8 @@ inline std::string fmt(const char* f,...);
 
 // Opt-in call ring (LocalState\\d3d11resizetrace.txt, default off). This is
 // deliberately separate from the regular diagnostics kill switch: it records
-// only intercepted D3D11 calls and is flushed when Present first fails.
+// only intercepted D3D11 calls and is flushed on the first failed non-test
+// Present.
 constexpr size_t kTraceRing=64;
 struct TraceEntry { uint64_t seq=0; const char* name=nullptr; };
 inline std::mutex traceMutex;
@@ -99,15 +100,27 @@ inline void traceCall(const char* name) {
     uint64_t seq=traceNextSeq++;
     traceRing[seq%kTraceRing]=TraceEntry{seq,name};
 }
+inline bool claimPresentFailureOnce(std::atomic<bool>& logged,bool testPresent) {
+    if(testPresent)return false;
+    bool expected=false;
+    return logged.compare_exchange_strong(expected,true,std::memory_order_acq_rel);
+}
 inline void flushTrace() {
     if(!traceOn.load(std::memory_order_acquire))return;
-    std::unique_lock<std::mutex> lock(traceMutex,std::try_to_lock);
-    if(!lock.owns_lock()){emit("D3D11 trace busy; not flushed");return;}
-    uint64_t first=traceNextSeq>kTraceRing?traceNextSeq-kTraceRing:1;
-    emit(fmt("D3D11 trace: last %llu hooked calls, oldest first",(unsigned long long)(traceNextSeq-first)));
-    for(uint64_t seq=first;seq<traceNextSeq;++seq) {
-        const TraceEntry& e=traceRing[seq%kTraceRing];
-        if(e.seq==seq)emit(fmt("D3D11 trace #%llu %s",(unsigned long long)seq,e.name?e.name:"?"));
+    TraceEntry snapshot[kTraceRing]{};
+    size_t count=0;
+    {
+        std::lock_guard<std::mutex> lock(traceMutex);
+        uint64_t first=traceNextSeq>kTraceRing?traceNextSeq-kTraceRing:1;
+        for(uint64_t seq=first;seq<traceNextSeq;++seq) {
+            const TraceEntry& e=traceRing[seq%kTraceRing];
+            if(e.seq==seq)snapshot[count++]=e;
+        }
+    }
+    emit(fmt("D3D11 trace: last %zu hooked calls, oldest first",count));
+    for(size_t i=0;i<count;++i) {
+        const TraceEntry& e=snapshot[i];
+        emit(fmt("D3D11 trace #%llu %s",(unsigned long long)e.seq,e.name?e.name:"?"));
     }
 }
 
@@ -1050,7 +1063,8 @@ inline std::string gsBytecodeText(const void* code,SIZE_T length) {
 // and a two-stream variant. Included so the test binary is self-contained.
 #include "gs-blobs.h"
 
-#define D3D11_DIAG_HOOK(Type,slot) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return E_FAIL;traceCall(#slot);
+#define D3D11_DIAG_HOOK_NAMED(Type,slot,name) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return E_FAIL;traceCall(name);
+#define D3D11_DIAG_HOOK(Type,slot) D3D11_DIAG_HOOK_NAMED(Type,slot,#slot)
 // Every failed call also feeds the device-health path: the first failure after
 // a removal reports GetDeviceRemovedReason and the memory state, instead of
 // the caller's error hiding the removal.
@@ -1105,7 +1119,7 @@ static HRESULT STDMETHODCALLTYPE createTexture3D(DevicePtr self,const D3D11_TEXT
 template<int Slot,class Desc,class Out,class Describe>
 static HRESULT viewCall(DevicePtr self,const char* name,ID3D11Resource* resource,const Desc* d,Out** out,Describe describe) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,const Desc*,Out**);
-    D3D11_DIAG_HOOK(Fn,Slot)HRESULT hr=call(self,resource,d,out);
+    D3D11_DIAG_HOOK_NAMED(Fn,Slot,name)HRESULT hr=call(self,resource,d,out);
     if(FAILED(hr)) {
         std::string view,viewKey;describe(d,view,viewKey);
         D3D11_DIAG_FAILED(name,viewKey+"|"+resourceKey(resource),view+" "+resourceText(resource));
@@ -1146,14 +1160,18 @@ static HRESULT STDMETHODCALLTYPE createInputLayout(DevicePtr self,const D3D11_IN
     }
     return hr;
 }
+inline const char* shaderCallName(int slot) {
+    static const struct {int slot;const char* name;} names[]={{CreateVertexShader,"CreateVertexShader"},{CreateGeometryShader,"CreateGeometryShader"},
+        {CreatePixelShader,"CreatePixelShader"},{CreateHullShader,"CreateHullShader"},{CreateDomainShader,"CreateDomainShader"},{CreateComputeShader,"CreateComputeShader"}};
+    for(auto& n:names)if(n.slot==slot)return n.name;
+    return "CreateShader";
+}
 template<int Slot>
 static HRESULT STDMETHODCALLTYPE createShader(DevicePtr self,const void* code,SIZE_T length,ID3D11ClassLinkage* linkage,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const void*,SIZE_T,ID3D11ClassLinkage*,void**);
-    D3D11_DIAG_HOOK(Fn,Slot)HRESULT hr=call(self,code,length,linkage,out);
+    D3D11_DIAG_HOOK_NAMED(Fn,Slot,shaderCallName(Slot))HRESULT hr=call(self,code,length,linkage,out);
     if(FAILED(hr)) {
-        static const struct {int slot;const char* name;} names[]={{CreateVertexShader,"CreateVertexShader"},{CreateGeometryShader,"CreateGeometryShader"},
-            {CreatePixelShader,"CreatePixelShader"},{CreateHullShader,"CreateHullShader"},{CreateDomainShader,"CreateDomainShader"},{CreateComputeShader,"CreateComputeShader"}};
-        const char* name="CreateShader";for(auto& n:names) if(n.slot==Slot)name=n.name;
+        const char* name=shaderCallName(Slot);
         std::string key,text=shaderText(code,length,&key);
         D3D11_DIAG_FAILED(name,key,text+fmt(" linkage=%d",linkage!=nullptr));
     }
