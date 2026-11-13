@@ -143,7 +143,6 @@ inline const UcrtDecl kUcrtDeclared[] = {
 //                  UCRT default is __time64_t (time.h:54-57, _time64 at time.h:186).
 //  fgetpos,fsetpos stdio.h:555 "64bit only, no 32bit version"; fpos_t is __int64
 //                  (stdio.h:112). The surface does not model the position.
-//  _get_osfhandle  io.h:311 returns intptr_t (the return width is a header choice).
 //  _filelengthi64  io.h:249 returns __int64: EDX:EAX. The thunk sets EAX only.
 //  _lseeki64       io.h:256 returns __int64 (EDX:EAX) and takes an __int64 offset.
 //                  The thunk sets EAX only, so a direct msvcrt import would read a
@@ -172,7 +171,7 @@ inline const char* const kWidthSensitive[] = {
     "_findfirst", "_findfirst32", "_findfirst64", "_findfirst64i32",
     "_findnext", "_findnext32", "_findnext64", "_findnext64i32",
     "_utime", "_utime32", "_utime64", "_futime", "_futime32", "_futime64",
-    "_filelengthi64", "_lseeki64", "_get_osfhandle", "fgetpos", "fsetpos",
+    "_filelengthi64", "_lseeki64", "fgetpos", "fsetpos",
     "localeconv", "wcsftime", "clock",
 };
 

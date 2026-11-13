@@ -55,6 +55,9 @@ int main(int argc, char** argv) {
     }
     CHECK(sensitive == sizeof(apiset::kWidthSensitive) / sizeof(apiset::kWidthSensitive[0]) && sensitive >= 50);
     CHECK(apiset::served_by(crt_time, "time") == crt_time);
+    // intptr_t is int on i386 in both the surface and the UCRT (corecrt.h:64), so
+    // _get_osfhandle is not width-sensitive and aliases like any declared name.
+    CHECK(apiset::served_by("api-ms-win-crt-filesystem-l1-1-0.dll", "_get_osfhandle") == "msvcrt.dll");
     CHECK(apiset::served_by(crt_time, "TIME") == crt_time);  // case-insensitive, as the binder
 
     // 2. Registry against the header table.
