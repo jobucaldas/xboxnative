@@ -70,6 +70,65 @@ class DonorProvenanceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source patch"):
             donor_inspect.checksums(self.root, self.url, self.pin, digest)
 
+    def graphics_tree(self):
+        """A donor dir whose graphics/ set is complete and correctly hashed.
+        Returns the 0002 patch digest the tree's SOURCE.txt records."""
+        self.source_patch()
+        graphics = self.root / "graphics"
+        graphics.mkdir()
+        rows = []
+        for name in donor_inspect.GRAPHICS:
+            data = name.encode()
+            (graphics / name).write_bytes(data)
+            rows.append(f"{hashlib.sha256(data).hexdigest()}  {name}")
+        (graphics / "SHA256SUMS").write_text("\n".join(rows) + "\n")
+        return hashlib.sha256((self.root / "0002-d3dcompiler-static-vkd3d.patch").read_bytes()).hexdigest()
+
+    def source_patch(self):
+        patch = self.root / "0002-d3dcompiler-static-vkd3d.patch"
+        patch.write_bytes(b"static vkd3d patch")
+        digest = hashlib.sha256(patch.read_bytes()).hexdigest()
+        source = self.root / "SOURCE.txt"
+        text = source.read_text()
+        if "0002-d3dcompiler" not in text:
+            source.write_text(text + f"Patch: 0002-d3dcompiler-static-vkd3d.patch sha256 {digest}\n")
+
+    def test_graphics_hashes_verified(self):
+        digest = self.graphics_tree()
+        self.assertEqual(
+            set(donor_inspect.checksums(self.root, self.url, self.pin, patch_0002_sha256=digest, graphics=donor_inspect.GRAPHICS)),
+            set(donor_inspect.DONORS))
+
+    def test_graphics_tampered_binary(self):
+        digest = self.graphics_tree()
+        (self.root / "graphics" / "d3dcompiler_47.dll").write_bytes(b"tampered")
+        with self.assertRaisesRegex(ValueError, "SHA256 mismatch"):
+            donor_inspect.checksums(self.root, self.url, self.pin, patch_0002_sha256=digest, graphics=donor_inspect.GRAPHICS)
+
+    def test_graphics_donor_not_listed(self):
+        digest = self.graphics_tree()
+        sums = self.root / "graphics" / "SHA256SUMS"
+        sums.write_text(sums.read_text().replace(donor_inspect.GRAPHICS[0], "other.dll"))
+        with self.assertRaisesRegex(ValueError, "graphics checksum manifest"):
+            donor_inspect.checksums(self.root, self.url, self.pin, patch_0002_sha256=digest, graphics=donor_inspect.GRAPHICS)
+
+    def test_graphics_patch_mismatch(self):
+        self.graphics_tree()
+        (self.root / "0002-d3dcompiler-static-vkd3d.patch").write_bytes(b"changed patch")
+        with self.assertRaisesRegex(ValueError, "static-vkd3d patch"):
+            donor_inspect.checksums(self.root, self.url, self.pin, graphics=donor_inspect.GRAPHICS)
+
+    def test_packaged_manifest_covers_every_donor(self):
+        """The layout's merged manifest must list the base and graphics sets
+        together: build.sh concatenates SHA256SUMS and graphics/SHA256SUMS, and
+        a package missing one set's hashes would ship unverified DLLs."""
+        self.graphics_tree()
+        merged = sorted(
+            (self.root / "SHA256SUMS").read_text().splitlines()
+            + (self.root / "graphics" / "SHA256SUMS").read_text().splitlines())
+        names = {line.split("  ", 1)[1] for line in merged if line}
+        self.assertEqual(names, set(donor_inspect.DONORS) | set(donor_inspect.GRAPHICS))
+
     def test_load_config_build_gate(self):
         data = bytearray((0x140).to_bytes(4, "little") + bytes(316))
         directory = SimpleNamespace(VirtualAddress=0x1000, Size=0x140)

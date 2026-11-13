@@ -38,8 +38,11 @@ cp "$donors"/{SHA256SUMS,SOURCE.txt,0001-pe-rodata.patch,0002-d3dcompiler-static
 # imports D3DCompile/D3DDisassemble/D3DGetBlobPart/D3DReflect and the d3d10
 # shim's Compiler::get() loads the DLL by name. It is a probed Wine donor, so
 # it lives in donors/ beside the others; the loader serves guest loads through
-# donor_pe::exported after the probe gate.
-cp "$donors"/graphics/*.dll "$donors"/graphics/SHA256SUMS "$out/layout/donors/"
+# donor_pe::exported after the probe gate. graphics/SHA256SUMS lists only the
+# graphics donors: merge the two manifests so every donor beside the others
+# verifies against the shipped checksums.
+(cd "$donors" && cat SHA256SUMS graphics/SHA256SUMS) > "$out/layout/donors/SHA256SUMS"
+cp "$donors"/graphics/*.dll "$out/layout/donors/"
 # Wine's C++ runtime (msvcp140 family, concrt140) for games without their own copy.
 mkdir -p "$out/layout/runtime"
 cp "$donors"/runtime/*.dll "$donors"/runtime/SHA256SUMS "$out/layout/runtime/"
