@@ -80,6 +80,53 @@ int main() {
         CHECK(!rep.ok);
         CHECK(rep.result=="32-bit guest game.exe: the 32-bit guest did not exit");
     }
+    // Every unresolved import is named, one "x86 gap:" line each, grouped by
+    // DLL with IAT order kept inside a DLL, then the full total. The lines are
+    // in rep.gap, so the exit-path lines above stay exactly as they were.
+    {
+        x86::PlayResult r; r.loaded=true; r.finished=true; r.exit_code=0;
+        r.unresolved={"steam_api.dll!SteamAPI_Init","kernel32.dll!CreateEventW",
+                      "steam_api.dll!SteamAPI_Shutdown","kernel32.dll!SetEvent"};
+        auto rep=x86_route::report(r,"game.exe");
+        std::vector<std::string> want={"x86 gap: kernel32.dll!CreateEventW","x86 gap: kernel32.dll!SetEvent",
+                                       "x86 gap: steam_api.dll!SteamAPI_Init","x86 gap: steam_api.dll!SteamAPI_Shutdown",
+                                       "x86 gap: total=4"};
+        CHECK(rep.gap==want);
+        // The exit line and the existing "first unresolved import" line; no gap line leaks into lines.
+        CHECK(rep.lines.size()==2 && rep.ok);
+    }
+    // No unresolved import: the total still prints, as zero.
+    {
+        x86::PlayResult r; r.loaded=true; r.finished=true; r.exit_code=0;
+        auto rep=x86_route::report(r,"game.exe");
+        CHECK(rep.gap==std::vector<std::string>{"x86 gap: total=0"});
+    }
+    // A faulted run reports its gap too (the fault line is unchanged).
+    {
+        x86::PlayResult r; r.loaded=true; r.fault_kind="UnresolvedImport"; r.fault_eip=0x00401234;
+        r.fault="call to unresolved import user32.dll!GetMessageA";
+        r.unresolved.push_back("user32.dll!GetMessageA");
+        auto rep=x86_route::report(r,"game.exe");
+        CHECK(rep.gap==(std::vector<std::string>{"x86 gap: user32.dll!GetMessageA","x86 gap: total=1"}));
+        CHECK(rep.lines.size()==1);
+    }
+    // A table larger than the bound: 600 names, a truncation line, the full total.
+    {
+        x86::PlayResult r; r.loaded=true; r.finished=true; r.exit_code=0;
+        for (int i=0;i<601;++i) r.unresolved.push_back("big.dll!f"+std::to_string(i));
+        auto rep=x86_route::report(r,"game.exe");
+        CHECK(rep.gap.size()==602);
+        CHECK(rep.gap.front()=="x86 gap: big.dll!f0");
+        CHECK(rep.gap[599]=="x86 gap: big.dll!f599");
+        CHECK(rep.gap[600]=="x86 gap: truncated after 600 names");
+        CHECK(rep.gap[601]=="x86 gap: total=601");
+    }
+    // An image the loader refused has no gap block.
+    {
+        x86::PlayResult r; r.fault_kind="Loader"; r.fault="cannot open the executable";
+        auto rep=x86_route::report(r,"game.exe");
+        CHECK(rep.gap.empty());
+    }
     printf("x86-route: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

@@ -24,6 +24,7 @@
 #include "../../shared/vulkan_driver_registry.h"
 #include "tls_slot0.h"
 #include "guest_watchdog.h"   // contained_fault: which exceptions are real crashes
+#include "../../uwph/shell32/folder_chain.h" // launch.h uses folder_chain:: at global scope; include before the namespace
 namespace play_runtime {
 constexpr DWORD missingException=0xe0520001, exitException=0xe0520002;
 struct Module {
@@ -120,6 +121,7 @@ static Module* named(const std::wstring& name) {
 }
 #include "../../uwph/kernel32/guest_loader_queries.h"
 #include "../../uwph/kernel32/guest_resource_queries.h"
+#include "../../uwph/shell32/special_folder.h"
 static bool exists(const std::wstring& path) { DWORD a=GetFileAttributesW(path.c_str()); return a!=INVALID_FILE_ATTRIBUTES && !(a&FILE_ATTRIBUTE_DIRECTORY); }
 #include "../../uwph/kernel32/guest_loader_search.h"
 static uintptr_t resolve(const char*,const char*,WORD);
@@ -1864,6 +1866,21 @@ static HRESULT WINAPI d3d12EnableExperimentalFeatures(UINT count,const IID* feat
         state->log(("PRUN EVENT guest D3D12EnableExperimentalFeatures count="+std::to_string(count)+" hr=0x"+hex32(hr)).c_str());
     return hr;
 }
+// Each export hook has the signature of its d3d12.h prototype (WINAPI, the same
+// parameter types in the same order). The types are written as the header
+// declares them, so a hook that drops or swaps an argument is a compile error.
+static_assert(std::is_same<decltype(&createD3D12Device),HRESULT(WINAPI*)(IUnknown*,D3D_FEATURE_LEVEL,REFIID,void**)>::value,
+    "D3D12CreateDevice(pAdapter, MinimumFeatureLevel, riid, ppDevice)");
+static_assert(std::is_same<decltype(&d3d12GetInterfaceHook),HRESULT(WINAPI*)(REFCLSID,REFIID,void**)>::value,
+    "D3D12GetInterface(rclsid, riid, ppvDebug)");
+static_assert(std::is_same<decltype(&d3d12GetDebugInterface),HRESULT(WINAPI*)(REFIID,void**)>::value,
+    "D3D12GetDebugInterface(riid, ppvDebug)");
+static_assert(std::is_same<decltype(&d3d12SerializeRootSignature),HRESULT(WINAPI*)(const D3D12_ROOT_SIGNATURE_DESC*,D3D_ROOT_SIGNATURE_VERSION,ID3DBlob**,ID3DBlob**)>::value,
+    "D3D12SerializeRootSignature(pRootSignature, Version, ppBlob, ppErrorBlob)");
+static_assert(std::is_same<decltype(&d3d12CreateRootSignatureDeserializer),HRESULT(WINAPI*)(LPCVOID,SIZE_T,REFIID,void**)>::value,
+    "D3D12CreateRootSignatureDeserializer(pSrcData, SrcDataSizeInBytes, riid, ppDeserializer)");
+static_assert(std::is_same<decltype(&d3d12EnableExperimentalFeatures),HRESULT(WINAPI*)(UINT,const IID*,void*,UINT*)>::value,
+    "D3D12EnableExperimentalFeatures(NumFeatures, pIIDs, pConfigurationStructs, pConfigurationStructSizes)");
 // Until a real modal UI bridge exists, retain fatal game diagnostics and stop.
 // Never return a fabricated button selection that would advance startup.
 static std::string dialogText(LPCSTR text,size_t limit=2048) {
@@ -1913,6 +1930,8 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // dynamic and mapped-forwarder imports alike (see processCreation).
     if(processCreation(name) && (key=="kernel32.dll" || key.find("api-ms-win-core-")==0)) return processExport(name);
     if(shellLaunch(name) && key=="shell32.dll") return shellExport(name);
+    // Folder CSIDLs answer as the guest's known-folder route does (uwph/shell32).
+    if(name && key=="shell32.dll" && !strcmp(name,"SHGetSpecialFolderPathW")) return (uintptr_t)&shell_folder::getSpecialFolderPathW;
     if(auto graphics=play_graphics::resolve(dll,name,ordinal))return graphics;
     if(name && (key=="kernel32.dll"||key=="kernelbase.dll"||key=="ntdll.dll"||key.find("api-ms-win-core-")==0)) if(auto p=processApi(name)) return p;
     if(name && (key=="ole32.dll"||key=="combase.dll"||key.find("api-ms-win-core-com-l1-")==0)) {

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Source-layout regression; all subprocesses start outside the checkout."""
 from pathlib import Path
+import json
 import re
 import shutil
 import subprocess
@@ -84,6 +85,20 @@ class SourceLayoutTest(unittest.TestCase):
                      'uwph/display/routes.generated.h'):
             self.assertIn('src/tools/xbox/import_map.json',
                           (sandbox / 'src/xbox-test' / name).read_text(), name)
+
+    def test_import_map_overrides_have_routes(self):
+        # Every per-export uwph override the map declares needs a route in source, and the
+        # user32 exports the map relies on must be exported by the record DLL.
+        data = json.loads((ROOT / 'src/tools/xbox/import_map.json').read_text())['dlls']
+        joy = (ROOT / 'src/xbox-test/audio/joystick.h').read_text()
+        routes = set(re.findall(r'\{"(\w+)",uintptr_t\(&', joy))
+        self.assertEqual({n for ov in data['winmm.dll']['overrides'] for n in ov['exports']}, routes)
+        self.assertEqual({n for ov in data['shell32.dll']['overrides'] for n in ov['exports']}, {'SHGetSpecialFolderPathW'})
+        self.assertIn('shell_folder::getSpecialFolderPathW', (ROOT / 'src/xbox-test/app/host/play_runtime.h').read_text())
+        core_def = (ROOT / 'src/xbox-test/uwph/user32/core.def').read_text()
+        for line in ('IsWindowEnabled=c_IsWindowEnabled', 'EnumDisplaySettingsExW=c_EnumDisplaySettingsExW',
+                     'GetWindowTextA=c_GetWindowTextA'):
+            self.assertIn(' ' + line + '\n', core_def, line)
 
     def test_ci_entrypoints(self):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()

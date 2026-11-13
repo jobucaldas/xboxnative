@@ -143,3 +143,12 @@ PostMessageW rejects known pointer messages and non-ASCII character messages
 rather than claiming delivery with corrupted text. No native input is generated
 by the queue test. Run `message-queue-test.sh` against the packaged DLL for the
 off-device filtering, dispatch, destruction and thread-isolation regression.
+
+`EnumDisplaySettingsExW` reports the same single mode as `EnumDisplaySettingsW`.
+`IsWindowEnabled` reads the record's own `WS_DISABLED` bit. `GetWindowTextA`
+converts the title to the ANSI code page and truncates to `size-1` bytes. The
+winmm joystick family (`audio/joystick.h`) answers as a console with no joystick
+driver; `SHGetSpecialFolderPathW` (`uwph/shell32`) answers folder CSIDLs through the
+same system `SHGetKnownFolderPath` the guest's known-folder route uses, then through
+the fallback chain `cloud_roots` uses (`uwph/shell32/folder_chain.h`). Both are
+routed from `audio/routes.h` and `app/host/play_runtime.h`, not from this DLL.

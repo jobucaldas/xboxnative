@@ -751,10 +751,12 @@ static void STDMETHODCALLTYPE listCopyBufferRegion(DevicePtr self,ID3D12Resource
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,UINT64,ID3D12Resource*,UINT64,UINT64);
     D3D12_DIAG_HOOK_VOID(Fn,ListCopyBufferRegion)call(self,dst,dstOffset,src,srcOffset,bytes); traceEndVoid(traceAt);
 }
-static void STDMETHODCALLTYPE listCopyTextureRegion(DevicePtr self,const D3D12_TEXTURE_COPY_LOCATION* dst,UINT dstSub,
+// CopyTextureRegion(pDst, DstX, DstY, DstZ, pSrc, pSrcBox): the destination
+// position is three UINTs. The wrapper took one (a subresource index) before.
+static void STDMETHODCALLTYPE listCopyTextureRegion(DevicePtr self,const D3D12_TEXTURE_COPY_LOCATION* dst,UINT dstX,UINT dstY,UINT dstZ,
         const D3D12_TEXTURE_COPY_LOCATION* src,const D3D12_BOX* box) {
-    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_TEXTURE_COPY_LOCATION*,UINT,const D3D12_TEXTURE_COPY_LOCATION*,const D3D12_BOX*);
-    D3D12_DIAG_HOOK_VOID(Fn,ListCopyTextureRegion)call(self,dst,dstSub,src,box); traceEndVoid(traceAt);
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_TEXTURE_COPY_LOCATION*,UINT,UINT,UINT,const D3D12_TEXTURE_COPY_LOCATION*,const D3D12_BOX*);
+    D3D12_DIAG_HOOK_VOID(Fn,ListCopyTextureRegion)call(self,dst,dstX,dstY,dstZ,src,box); traceEndVoid(traceAt);
 }
 static void STDMETHODCALLTYPE listResolveSubresource(DevicePtr self,ID3D12Resource* dst,UINT dstSub,ID3D12Resource* src,UINT srcSub,DXGI_FORMAT format) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,UINT,ID3D12Resource*,UINT,DXGI_FORMAT);
@@ -812,55 +814,69 @@ template<class M> struct MethodReturn;
 template<class C,class R,class...A> struct MethodReturn<R(C::*)(A...)> { using type=R; };
 template<class F> struct FunctionReturn;
 template<class R,class...A> struct FunctionReturn<R(*)(A...)> { using type=R; };
-#define DIAG_PIN_SLOT(Iface,Method,Hook) static_assert(std::is_same<typename MethodReturn<decltype(&Iface::Method)>::type,\
-    typename FunctionReturn<decltype(&Hook)>::type>::value,#Hook " must return what " #Iface "::" #Method " returns in d3d12.h")
-DIAG_PIN_SLOT(ID3D12Device,CreateCommandQueue,createCommandQueue);
-DIAG_PIN_SLOT(ID3D12Device,CreateCommandAllocator,createCommandAllocator);
-DIAG_PIN_SLOT(ID3D12Device,CreateCommandList,createCommandList);
-DIAG_PIN_SLOT(ID3D12Device,CreateGraphicsPipelineState,createGraphicsPipelineState);
-DIAG_PIN_SLOT(ID3D12Device,CreateComputePipelineState,createComputePipelineState);
-DIAG_PIN_SLOT(ID3D12Device,CheckFeatureSupport,checkFeatureSupport);
-DIAG_PIN_SLOT(ID3D12Device,CreateDescriptorHeap,createDescriptorHeap);
-DIAG_PIN_SLOT(ID3D12Device,CreateRootSignature,createRootSignature);
-DIAG_PIN_SLOT(ID3D12Device,CreateConstantBufferView,createCbv);
-DIAG_PIN_SLOT(ID3D12Device,CreateShaderResourceView,createSrv);
-DIAG_PIN_SLOT(ID3D12Device,CreateUnorderedAccessView,createUav);
-DIAG_PIN_SLOT(ID3D12Device,CreateRenderTargetView,createRtv);
-DIAG_PIN_SLOT(ID3D12Device,CreateDepthStencilView,createDsv);
-DIAG_PIN_SLOT(ID3D12Device,CreateSampler,createSampler);
-DIAG_PIN_SLOT(ID3D12Device,CreateCommittedResource,createCommittedResource);
-DIAG_PIN_SLOT(ID3D12Device,CreateHeap,createHeap);
-DIAG_PIN_SLOT(ID3D12Device,CreatePlacedResource,createPlacedResource);
-DIAG_PIN_SLOT(ID3D12Device,CreateReservedResource,createReservedResource);
-DIAG_PIN_SLOT(ID3D12Device,CreateFence,createFence);
-DIAG_PIN_SLOT(ID3D12Device,CreateQueryHeap,createQueryHeap);
-DIAG_PIN_SLOT(ID3D12Device,CreateCommandSignature,createCommandSignature);
-DIAG_PIN_SLOT(ID3D12Device2,CreatePipelineState,createPipelineStateStream);
-DIAG_PIN_SLOT(ID3D12CommandQueue,ExecuteCommandLists,queueExecuteCommandLists);
-DIAG_PIN_SLOT(ID3D12CommandQueue,Signal,queueSignal);
-DIAG_PIN_SLOT(ID3D12CommandQueue,Wait,queueWait);
-DIAG_PIN_SLOT(ID3D12GraphicsCommandList,Close,listClose);
-DIAG_PIN_SLOT(ID3D12GraphicsCommandList,Reset,listReset);
-DIAG_PIN_SLOT(ID3D12GraphicsCommandList,SetPipelineState,listSetPipelineState);
-DIAG_PIN_SLOT(ID3D12GraphicsCommandList,ResourceBarrier,listResourceBarrier);
-DIAG_PIN_SLOT(ID3D12GraphicsCommandList,SetDescriptorHeaps,listSetDescriptorHeaps);
-DIAG_PIN_SLOT(ID3D12GraphicsCommandList,DrawInstanced,listDrawInstanced);
-DIAG_PIN_SLOT(ID3D12GraphicsCommandList,DrawIndexedInstanced,listDrawIndexedInstanced);
-DIAG_PIN_SLOT(ID3D12GraphicsCommandList,Dispatch,listDispatch);
-DIAG_PIN_SLOT(ID3D12GraphicsCommandList,CopyResource,listCopyResource);
-DIAG_PIN_SLOT(ID3D12GraphicsCommandList,CopyBufferRegion,listCopyBufferRegion);
-DIAG_PIN_SLOT(ID3D12GraphicsCommandList,CopyTextureRegion,listCopyTextureRegion);
-DIAG_PIN_SLOT(ID3D12GraphicsCommandList,ResolveSubresource,listResolveSubresource);
-DIAG_PIN_SLOT(ID3D12GraphicsCommandList,OMSetRenderTargets,listOMSetRenderTargets);
-DIAG_PIN_SLOT(ID3D12GraphicsCommandList,ClearRenderTargetView,listClearRenderTargetView);
-DIAG_PIN_SLOT(ID3D12GraphicsCommandList,ClearDepthStencilView,listClearDepthStencilView);
-DIAG_PIN_SLOT(ID3D12GraphicsCommandList,ExecuteIndirect,listExecuteIndirect);
-DIAG_PIN_SLOT(ID3D12Fence,SetEventOnCompletion,fenceSetEventOnCompletion);
-DIAG_PIN_SLOT(ID3D12Fence,Signal,fenceSignal);
-DIAG_PIN_SLOT(ID3D12CommandAllocator,Reset,allocatorReset);
-DIAG_PIN_SLOT(ID3D12Resource,Map,resourceMap);
 
 // ---- the hooks each interface level gets
+// ---- each hook matches its method in d3d12.h: arguments and return kind ----
+// A hook takes (self, the method's arguments in order). Argument order, count and
+// type are compared as types, so a wrapper that drops or swaps an argument is a
+// compile error. The return type is not checked here.
+template<class M> struct MethodArgs;
+template<class C,class R,class...A> struct MethodArgs<R(C::*)(A...)> { using type=std::tuple<A...>; };
+template<class F> struct HookArgs;
+template<class R,class...A> struct HookArgs<R(*)(A...)> { using type=std::tuple<A...>; };
+template<class T> struct DropSelf;
+template<class H,class...T> struct DropSelf<std::tuple<H,T...>> { using type=std::tuple<T...>; using self=H; };
+#define DIAG_PIN(Iface,Method,Hook) static_assert(\
+    std::is_same<typename DropSelf<typename HookArgs<decltype(&Hook)>::type>::type,typename MethodArgs<decltype(&Iface::Method)>::type>::value&&\
+    std::is_same<typename DropSelf<typename HookArgs<decltype(&Hook)>::type>::self,void*>::value&&\
+    std::is_same<typename MethodReturn<decltype(&Iface::Method)>::type,typename FunctionReturn<decltype(&Hook)>::type>::value,\
+    #Hook " must match " #Iface "::" #Method " in d3d12.h (arguments and return)")
+DIAG_PIN(ID3D12Device,CreateCommandQueue,createCommandQueue);
+DIAG_PIN(ID3D12Device,CreateCommandAllocator,createCommandAllocator);
+DIAG_PIN(ID3D12Device,CreateCommandList,createCommandList);
+DIAG_PIN(ID3D12Device,CreateGraphicsPipelineState,createGraphicsPipelineState);
+DIAG_PIN(ID3D12Device,CreateComputePipelineState,createComputePipelineState);
+DIAG_PIN(ID3D12Device,CheckFeatureSupport,checkFeatureSupport);
+DIAG_PIN(ID3D12Device,CreateDescriptorHeap,createDescriptorHeap);
+DIAG_PIN(ID3D12Device,CreateRootSignature,createRootSignature);
+DIAG_PIN(ID3D12Device,CreateConstantBufferView,createCbv);
+DIAG_PIN(ID3D12Device,CreateShaderResourceView,createSrv);
+DIAG_PIN(ID3D12Device,CreateUnorderedAccessView,createUav);
+DIAG_PIN(ID3D12Device,CreateRenderTargetView,createRtv);
+DIAG_PIN(ID3D12Device,CreateDepthStencilView,createDsv);
+DIAG_PIN(ID3D12Device,CreateSampler,createSampler);
+DIAG_PIN(ID3D12Device,CreateCommittedResource,createCommittedResource);
+DIAG_PIN(ID3D12Device,CreateHeap,createHeap);
+DIAG_PIN(ID3D12Device,CreatePlacedResource,createPlacedResource);
+DIAG_PIN(ID3D12Device,CreateReservedResource,createReservedResource);
+DIAG_PIN(ID3D12Device,CreateFence,createFence);
+DIAG_PIN(ID3D12Device,CreateQueryHeap,createQueryHeap);
+DIAG_PIN(ID3D12Device,CreateCommandSignature,createCommandSignature);
+DIAG_PIN(ID3D12Device2,CreatePipelineState,createPipelineStateStream);
+DIAG_PIN(ID3D12CommandQueue,ExecuteCommandLists,queueExecuteCommandLists);
+DIAG_PIN(ID3D12CommandQueue,Signal,queueSignal);
+DIAG_PIN(ID3D12CommandQueue,Wait,queueWait);
+DIAG_PIN(ID3D12GraphicsCommandList,Close,listClose);
+DIAG_PIN(ID3D12GraphicsCommandList,Reset,listReset);
+DIAG_PIN(ID3D12GraphicsCommandList,SetPipelineState,listSetPipelineState);
+DIAG_PIN(ID3D12GraphicsCommandList,ResourceBarrier,listResourceBarrier);
+DIAG_PIN(ID3D12GraphicsCommandList,SetDescriptorHeaps,listSetDescriptorHeaps);
+DIAG_PIN(ID3D12GraphicsCommandList,DrawInstanced,listDrawInstanced);
+DIAG_PIN(ID3D12GraphicsCommandList,DrawIndexedInstanced,listDrawIndexedInstanced);
+DIAG_PIN(ID3D12GraphicsCommandList,Dispatch,listDispatch);
+DIAG_PIN(ID3D12GraphicsCommandList,CopyResource,listCopyResource);
+DIAG_PIN(ID3D12GraphicsCommandList,CopyBufferRegion,listCopyBufferRegion);
+DIAG_PIN(ID3D12GraphicsCommandList,CopyTextureRegion,listCopyTextureRegion);
+DIAG_PIN(ID3D12GraphicsCommandList,ResolveSubresource,listResolveSubresource);
+DIAG_PIN(ID3D12GraphicsCommandList,OMSetRenderTargets,listOMSetRenderTargets);
+DIAG_PIN(ID3D12GraphicsCommandList,ClearRenderTargetView,listClearRenderTargetView);
+DIAG_PIN(ID3D12GraphicsCommandList,ClearDepthStencilView,listClearDepthStencilView);
+DIAG_PIN(ID3D12GraphicsCommandList,ExecuteIndirect,listExecuteIndirect);
+DIAG_PIN(ID3D12Fence,SetEventOnCompletion,fenceSetEventOnCompletion);
+DIAG_PIN(ID3D12Fence,Signal,fenceSignal);
+DIAG_PIN(ID3D12CommandAllocator,Reset,allocatorReset);
+DIAG_PIN(ID3D12Resource,Map,resourceMap);
+
 inline const Patch* devicePatches(size_t& count){
     static const Patch table[]={
         {CreateCommandQueue,(void*)&createCommandQueue},{CreateCommandAllocator,(void*)&createCommandAllocator},

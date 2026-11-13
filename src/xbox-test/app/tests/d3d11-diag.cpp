@@ -534,12 +534,43 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     printf("OFF-device D3D11 draw summary checks=%u failures=%u lines=%zu; no rendering claim\n",checks,failures,lines.size());
     return failures?1:0;
 }
+// Opt-in deep draw state adopted before any log sink exists (a game run's
+// order is not the only one): the probe must still arm, and its lines must
+// reach the sink once one is installed.
+static int deepWithoutSink(ID3D11Device* device,ID3D11DeviceContext* context) {
+    d3d11_diag::set_deep_draw=[]{return true;};
+    d3d11_diag::adopt(device);
+    CHECK(d3d11_diag::deepDraw());
+    CHECK(lines.empty());
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->Draw(3,0);
+    d3d11_diag::configure(sinkLine);
+    CHECK(count("deep draw state on")==1);
+    CHECK(count("no log sink at adoption")==1);
+    CHECK(count("draw state topology=4(trianglelist)")==1);
+    printf("OFF-DEVICE D3D11 deep-without-sink checks=%u failures=%u lines=%zu; no rendering claim\n",checks,failures,lines.size());
+    return failures?1:0;
+}
+// Default with no sink: adoption stays a no-op, so nothing is logged and no
+// hook runs. Deep off is the default; this pins it.
+static int defaultWithoutSink(ID3D11Device* device,ID3D11DeviceContext* context) {
+    d3d11_diag::adopt(device);
+    CHECK(!d3d11_diag::deepDraw());
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->Draw(3,0);
+    d3d11_diag::configure(sinkLine);
+    CHECK(lines.empty());
+    printf("OFF-DEVICE D3D11 default-without-sink checks=%u failures=%u lines=%zu; no rendering claim\n",checks,failures,lines.size());
+    return failures?1:0;
+}
 int main(int argc,char** argv) {
     bool drawMode=argc>1&&std::string(argv[1])=="draw";
     ID3D11DeviceContext* context=nullptr;
     ID3D11Device* device=make(&context);
     if(!device){printf("OFF-DEVICE no d3d11 device available\n");return 2;}
     if(drawMode)return drawSummary(device,context);
+    if(argc>1&&std::string(argv[1])=="deep-nosink")return deepWithoutSink(device,context);
+    if(argc>1&&std::string(argv[1])=="default-nosink")return defaultWithoutSink(device,context);
     // A bare DXBC container with a pixel shader chunk (ps_5_0): enough for the
     // model/hash parser; the device rejects it as a shader.
     unsigned char dxbc[64]{};memcpy(dxbc,"DXBC",4);

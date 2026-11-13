@@ -6,6 +6,7 @@
 // (tests/x86-route.cpp): a clean exit is success, anything else names the first
 // unresolved import or the unsupported opcode instead of falling back silently.
 #pragma once
+#include <algorithm>
 #include <string>
 #include <vector>
 #include "host/x86/x86_play.h"
@@ -15,7 +16,23 @@ struct Report {
     bool ok = false;               // clean exit code 0, the only success
     std::string result;            // the launch result text (success or failure)
     std::vector<std::string> lines;   // "PRUN EVENT x86 route: ..." log lines in order
+    std::vector<std::string> gap;     // "x86 gap: dll!name" lines, then "x86 gap: total=N"; empty unless mapped
 };
+
+// Every unresolved import of a mapped image, as "x86 gap: dll!name": one line
+// per name, grouped by DLL (IAT order inside a DLL), then "x86 gap: total=N"
+// with the full count. Names stop at kGapMaxLines so a 270-entry import table
+// cannot flood the launch log; the total is never capped.
+constexpr size_t kGapMaxLines = 600;
+inline void add_gap(Report& rep, const x86::PlayResult& r) {
+    auto dll_of = [](const std::string& s) { size_t p = s.find('!'); return p == std::string::npos ? s : s.substr(0, p); };
+    std::vector<std::string> names = r.unresolved;
+    std::stable_sort(names.begin(), names.end(),
+                     [&](const std::string& a, const std::string& b) { return dll_of(a) < dll_of(b); });
+    for (size_t i = 0; i < names.size() && i < kGapMaxLines; ++i) rep.gap.push_back("x86 gap: " + names[i]);
+    if (names.size() > kGapMaxLines) rep.gap.push_back("x86 gap: truncated after " + std::to_string(kGapMaxLines) + " names");
+    rep.gap.push_back("x86 gap: total=" + std::to_string(names.size()));
+}
 
 // The first unresolved import, "dll!symbol", or empty. The launcher's result
 // names it: a guest that calls an missing import must say which one, not just
@@ -35,6 +52,7 @@ inline Report report(const x86::PlayResult& r, const std::string& exe) {
         rep.result="the x86 loader could not map "+exe+": "+r.fault;
         return rep;
     }
+    add_gap(rep,r);
     if(r.finished) {
         // Same rule as the native loader: only a clean exit 0 is success; a
         // nonzero code is reported as the failure it is.

@@ -10,10 +10,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <windows.h>
 
 static int g_fail, g_checks;
 static void check(int ok) { ++g_checks; if (!ok) ++g_fail; }
+
+/* Thread bodies. The exit body calls ExitThread through a volatile pointer, so
+ * the compiler cannot treat the call as noreturn: if the surface lets the call
+ * return, g_after_exit becomes 1. A real ExitThread never returns. */
+static volatile LONG g_after_exit, g_flag;
+static DWORD WINAPI ret_body(LPVOID p) { return (DWORD)(ULONG_PTR)p + 7; }
+static DWORD WINAPI flag_body(LPVOID p) { (void)p; g_flag = 1; return 0; }
+static VOID (WINAPI *volatile exit_thread_fn)(DWORD) = ExitThread;
+static DWORD WINAPI exit_body(LPVOID p) {
+    exit_thread_fn((DWORD)(ULONG_PTR)p + 9);
+    g_after_exit = 1;
+    return 0;
+}
 
 static int cmp_int(const void* a, const void* b) {
     int x = *(const int*)a, y = *(const int*)b;
@@ -164,6 +178,28 @@ int main(void) {
         up[mi] = mod[mi] >= 'a' && mod[mi] <= 'z' ? (char)(mod[mi] - 32) : mod[mi];
     up[mi] = 0;
     check(GetModuleHandleA(up) != NULL && GetModuleHandleA(up) == GetModuleHandleA(NULL));
+    /* GetModuleHandleA (MSDN): the modules a process has from its start answer
+     * without LoadLibrary, case-insensitively, with or without ".dll" (the
+     * extension is appended when omitted); the same name answers the same
+     * handle. An unknown name is NULL with ERROR_MOD_NOT_FOUND (126). */
+    check(GetModuleHandleA("KERNEL32.DLL") != NULL && GetModuleHandleA("kernel32") == GetModuleHandleA("kernel32.dll"));
+    check(GetModuleHandleA("ntdll.dll") != NULL && GetModuleHandleA("NTDLL") == GetModuleHandleA("ntdll.dll"));
+    check(GetModuleHandleA("msvcrt.dll") != NULL && GetModuleHandleA("kernelbase") != NULL);
+    SetLastError(0);
+    check(GetModuleHandleA("no-such-module.dll") == NULL && GetLastError() == ERROR_MOD_NOT_FOUND);
+    SetLastError(0);
+    check(GetModuleHandleW(L"no-such-module") == NULL && GetLastError() == ERROR_MOD_NOT_FOUND);
+    /* GetStartupInfoW (processthreadsapi.h): fills a STARTUPINFOW of cb = 68
+     * bytes on i686, the same size as the ANSI form (the string members differ
+     * only in pointee type). Only cb is compared; the rest is host-defined. */
+    STARTUPINFOW si; memset(&si, 0, sizeof si);
+    GetStartupInfoW(&si);
+    check(sizeof si == 68 && si.cb == 68);
+    /* OpenEventA (synchapi.h) and its export: a probe via GetProcAddress must
+     * find it; no named event exists, so NULL with ERROR_FILE_NOT_FOUND (2). */
+    check(GetProcAddress(GetModuleHandleA("kernel32.dll"), "OpenEventA") != NULL);
+    SetLastError(0);
+    check(OpenEventA(SYNCHRONIZE, FALSE, "xbn-no-such-event") == NULL && GetLastError() == ERROR_FILE_NOT_FOUND);
     puts("x86-crt: kernel32 ok");
 
     /* Interlocked and critical sections on the single guest thread. */
@@ -174,6 +210,94 @@ int main(void) {
     CRITICAL_SECTION cs; InitializeCriticalSection(&cs);
     EnterCriticalSection(&cs); LeaveCriticalSection(&cs); DeleteCriticalSection(&cs);
     puts("x86-crt: sync ok");
+
+    /* CreateThread (MSDN): lpThreadId receives a nonzero identifier, unique per
+     * thread, that GetThreadId reports for the handle. GetExitCodeThread (MSDN)
+     * answers the code the thread returned, or the code ExitThread was given.
+     * ExitThread (MSDN) ends the calling thread and does not return, so
+     * g_after_exit stays 0. Both bodies run at the first wait. */
+    {
+        DWORD tid_a = 0, tid_b = 0, code_a = 0, code_b = 0;
+        HANDLE th_a = CreateThread(NULL, 0, ret_body, (LPVOID)(ULONG_PTR)3, 0, &tid_a);
+        HANDLE th_b = CreateThread(NULL, 0, exit_body, (LPVOID)(ULONG_PTR)5, 0, &tid_b);
+        check(th_a != NULL && th_b != NULL);
+        check(tid_a != 0 && tid_b != 0 && tid_a != tid_b);
+        check(GetThreadId(th_a) == tid_a && GetThreadId(th_b) == tid_b);
+        check(WaitForSingleObject(th_a, INFINITE) == WAIT_OBJECT_0);
+        check(WaitForSingleObject(th_b, INFINITE) == WAIT_OBJECT_0);
+        check(GetExitCodeThread(th_a, &code_a) && code_a == 10);  /* returned 3 + 7 */
+        check(GetExitCodeThread(th_b, &code_b) && code_b == 14);  /* ExitThread(5 + 9) */
+        check(g_after_exit == 0);
+        CloseHandle(th_a); CloseHandle(th_b);
+    }
+    /* Polling is how a game waits for its worker: `while (!flag) Sleep(1)` and
+     * `while (GetExitCodeThread(...) == STILL_ACTIVE) Sleep(1)` (MSDN Sleep
+     * yields; MSDN GetExitCodeThread reports STILL_ACTIVE until the thread
+     * exits). The worker only runs at a yield point here, so each loop is
+     * bounded: a surface that never runs the worker fails the check instead of
+     * hanging the test. */
+    {
+        HANDLE th_f = CreateThread(NULL, 0, flag_body, NULL, 0, NULL);
+        int spins = 0;
+        while (!g_flag && spins < 1000) { Sleep(1); ++spins; }
+        check(g_flag == 1 && spins < 1000);
+        WaitForSingleObject(th_f, INFINITE);
+        CloseHandle(th_f);
+
+        HANDLE th_p = CreateThread(NULL, 0, ret_body, (LPVOID)(ULONG_PTR)1, 0, NULL);
+        DWORD code = STILL_ACTIVE;
+        spins = 0;
+        while (GetExitCodeThread(th_p, &code) && code == STILL_ACTIVE && spins < 1000) { Sleep(1); ++spins; }
+        check(code == 8 && spins < 1000);  /* returned 1 + 7 */
+        CloseHandle(th_p);
+    }
+    puts("x86-crt: threads ok");
+
+    /* strftime with the real CRT prototype: size_t strftime(char *dest,
+     * size_t maxsize, const char *format, const struct tm *tm) — dest first,
+     * format third. The struct tm is filled by hand from a fixed timestamp so
+     * the same check passes under Wine's real strftime: 2026-11-09 is a
+     * Monday, 13:26:40, day 313 of the year. */
+    {
+        struct tm tmv;
+        memset(&tmv, 0, sizeof tmv);
+        tmv.tm_year = 2026 - 1900; tmv.tm_mon = 10; tmv.tm_mday = 9;
+        tmv.tm_hour = 13; tmv.tm_min = 26; tmv.tm_sec = 40;
+        tmv.tm_wday = 1; tmv.tm_yday = 312;
+        char tsb[64];
+        size_t tn2 = strftime(tsb, sizeof tsb, "%Y-%m-%d %H:%M:%S %a", &tmv);
+        check(tn2 == 23 && tn2 < sizeof tsb);
+        printf("x86-crt: strftime %s\n", tsb);
+        /* The formatted fields must land in the buffer in the right places:
+         * year first (dest is arg 0), weekday last (from arg 3's tm_wday).
+         * With the arguments swapped the formatter reads its format from the
+         * uninitialized destination and writes garbage or nothing. */
+        check(tsb[0] == '2' && tsb[1] == '0' && tsb[2] == '2' && tsb[3] == '6');
+        check(tsb[4] == '-' && tsb[5] == '1' && tsb[6] == '1' && tsb[7] == '-' && tsb[8] == '0' && tsb[9] == '9');
+        check(tsb[10] == ' ' && tsb[11] == '1' && tsb[12] == '3');
+        check(tsb[20] == 'M' && tsb[21] == 'o');  /* "Mo" of Monday at the tail */
+    }
+    printf("x86-crt: time ok\n");
+
+    /* __iob_func is a FUNCTION in the real UCRT/stdint headers: FILE*
+     * __iob_func(void) returns the stdio table pointer. A surface that binds
+     * it as data puts the table's bytes in the IAT, and a call through the
+     * IAT jumps at data (ExecuteViolation at the _iob page). Called through
+     * the IAT it must return the table pointer that stdin/stdout/stderr
+     * live in; dereferencing stdin/stdout/stderr proves the table is real. */
+    {
+        FARPROC pfn = GetProcAddress(LoadLibraryA("msvcrt.dll"), "__iob_func");
+        FILE* (__cdecl *iob_func)(void) = (FILE* (*)(void))(void(*)(void))pfn;
+        check(iob_func != NULL);
+        if (iob_func) {
+            FILE* tbl = iob_func();
+            check(tbl != NULL);
+            check((FILE*)stdin >= tbl && (FILE*)stdin < tbl + 3);
+            check((const char*)stdout >= (const char*)tbl && (const char*)stdout - (const char*)tbl < (ptrdiff_t)(3 * sizeof(FILE)));
+            check(ferror(stdin) == 0);  /* the table's FILE structs are usable */
+        }
+    }
+    puts("x86-crt: iob ok");
 
     printf("x86-crt: checks %d failed %d\n", g_checks, g_fail);
     return g_fail ? 100 + g_fail : 42;
