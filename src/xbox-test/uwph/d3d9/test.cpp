@@ -477,6 +477,159 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
         }
     }
 
+    // A level surface's lifetime is its own: it holds its container texture and
+    // the MANAGED staging shadow, so the guest may release the texture first,
+    // lock through a surface that outlives it, forget an UnlockRect, or fetch
+    // the same level twice. The write still has to reach what a draw samples.
+    {
+        IDirect3DTexture9* texture=nullptr;
+        CHECK_HR(device->CreateTexture(4,4,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&texture,nullptr));
+        IDirect3DSurface9* level0=nullptr;
+        CHECK_HR(texture->GetSurfaceLevel(0,&level0));
+        CHECK(level0!=nullptr);
+        // The same level twice: two surfaces, each with its own reference.
+        IDirect3DSurface9* level0b=nullptr;
+        CHECK_HR(texture->GetSurfaceLevel(0,&level0b));
+        CHECK(level0b!=nullptr&&level0b!=level0);
+        if(level0b)level0b->Release();
+        // The container is answerable, as D3D9 documents.
+        IDirect3DTexture9* gotContainer=nullptr;
+        CHECK_HR(level0->GetContainer(__uuidof(IDirect3DTexture9),
+            reinterpret_cast<void**>(&gotContainer)));
+        CHECK(gotContainer==texture);
+        if(gotContainer)gotContainer->Release();
+        // Release the texture first: the surface keeps the texture alive.
+        texture->Release();
+        texture=nullptr;
+        if(level0) {
+            D3DLOCKED_RECT locked{};
+            CHECK_HR(level0->LockRect(&locked,nullptr,0));
+            if(locked.pBits) {
+                for(unsigned y=0;y<4;++y) {
+                    unsigned* row=reinterpret_cast<unsigned*>(
+                        static_cast<unsigned char*>(locked.pBits)+y*locked.Pitch);
+                    for(unsigned x=0;x<4;++x)row[x]=0xff00ff00u;   // green
+                }
+            }
+            CHECK_HR(level0->UnlockRect());
+            // A second lock of the same level reads back what the first wrote.
+            CHECK_HR(level0->LockRect(&locked,nullptr,D3DLOCK_READONLY));
+            if(locked.pBits) {
+                const unsigned* p=static_cast<const unsigned*>(locked.pBits);
+                CHECK(p[0]==0xff00ff00u);
+            }
+            CHECK_HR(level0->UnlockRect());
+            level0->Release();
+            level0=nullptr;
+        }
+        // A write through a level surface reaches what a draw samples: lock,
+        // write a pattern, unlock, draw, read back pixels == pattern.
+        CHECK_HR(device->CreateTexture(4,4,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&texture,nullptr));
+        IDirect3DSurface9* target=nullptr;
+        CHECK_HR(device->CreateRenderTarget(64,64,D3DFMT_X8R8G8B8,D3DMULTISAMPLE_NONE,0,FALSE,
+            &target,nullptr));
+        IDirect3DSurface9* staging=nullptr;
+        CHECK_HR(device->CreateOffscreenPlainSurface(64,64,D3DFMT_X8R8G8B8,D3DPOOL_SYSTEMMEM,
+            &staging,nullptr));
+        if(texture&&target&&staging) {
+            IDirect3DSurface9* level=nullptr;
+            CHECK_HR(texture->GetSurfaceLevel(0,&level));
+            if(level) {
+                D3DLOCKED_RECT locked{};
+                // A sub-rect lock: only the top-left 2x2 texels are written;
+                // the shim maps the whole level, so the write goes at the start.
+                RECT sub{0,0,2,2};
+                CHECK_HR(level->LockRect(&locked,&sub,0));
+                if(locked.pBits) {
+                    unsigned* row=reinterpret_cast<unsigned*>(locked.pBits);
+                    row[0]=0xff0000ffu;row[1]=0xff0000ffu;   // blue
+                }
+                CHECK_HR(level->UnlockRect());
+                CHECK_HR(device->SetTexture(0,texture));
+                CHECK_HR(device->SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1));
+                CHECK_HR(device->SetRenderState(D3DRS_LIGHTING,FALSE));
+                CHECK_HR(device->SetRenderState(D3DRS_ZENABLE,FALSE));
+                CHECK_HR(device->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE));
+                CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_SELECTARG1));
+                CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_TEXTURE));
+                CHECK_HR(device->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG1));
+                CHECK_HR(device->SetTextureStageState(0,D3DTSS_ALPHAARG1,D3DTA_TEXTURE));
+                CHECK_HR(device->SetRenderTarget(0,target));
+                CHECK_HR(device->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1.0f,0));
+                D3DVIEWPORT9 full{0,0,64,64,0.0f,1.0f};
+                CHECK_HR(device->SetViewport(&full));
+                struct Vertex { float x,y,z,w; float u,v; };
+                // One quad covering the target: the top half samples the
+                // written sub-rect, the bottom half the untouched texels.
+                const Vertex quad[6]={
+                    { 0.0f, 0.0f,0.0f,1.0f,0.0f,0.0f},
+                    {64.0f, 0.0f,0.0f,1.0f,0.25f,0.0f},
+                    { 0.0f,64.0f,0.0f,1.0f,0.0f,1.0f},
+                    {64.0f, 0.0f,0.0f,1.0f,0.25f,0.0f},
+                    {64.0f,64.0f,0.0f,1.0f,0.25f,1.0f},
+                    { 0.0f,64.0f,0.0f,1.0f,0.0f,1.0f},
+                };
+                CHECK_HR(device->BeginScene());
+                CHECK_HR(device->DrawPrimitiveUP(D3DPT_TRIANGLELIST,2,quad,sizeof(Vertex)));
+                CHECK_HR(device->EndScene());
+                CHECK_HR(device->GetRenderTargetData(target,staging));
+                CHECK_HR(staging->LockRect(&locked,nullptr,D3DLOCK_READONLY));
+                if(locked.pBits) {
+                    // The quad's u spans one texel (0..0.25) and v the whole
+                    // texture, so target (8,8) samples texel (0,0) — inside the
+                    // written sub-rect — and (32,60) samples texel (2,2), which
+                    // the sub-rect lock never touched.
+                    const unsigned char* inside=static_cast<const unsigned char*>(locked.pBits)
+                        +8*locked.Pitch+8*4;
+                    const unsigned char* outside=static_cast<const unsigned char*>(locked.pBits)
+                        +60*locked.Pitch+32*4;
+                    CHECK(inside[0]>0x80&&inside[1]<0x40&&inside[2]<0x40);   // blue
+                    CHECK(outside[0]<0x20&&outside[1]<0x20&&outside[2]<0x20); // black
+                }
+                CHECK_HR(staging->UnlockRect());
+                CHECK_HR(device->SetTexture(0,nullptr));
+                CHECK_HR(device->SetRenderTarget(0,backBuffer));
+                level->Release();
+            }
+        }
+        // Released while locked: the destructor finishes the lock, so a later
+        // read of the level still sees the write.
+        if(texture) {
+            IDirect3DSurface9* level=nullptr;
+            CHECK_HR(texture->GetSurfaceLevel(0,&level));
+            if(level) {
+                D3DLOCKED_RECT locked{};
+                CHECK_HR(level->LockRect(&locked,nullptr,0));
+                if(locked.pBits) {
+                    unsigned* row=reinterpret_cast<unsigned*>(locked.pBits);
+                    row[0]=0xff0000ffu;   // blue, left locked on purpose
+                }
+                level->Release();   // no UnlockRect: ~Surface unmaps and copies up
+            }
+            IDirect3DSurface9* staging4=nullptr;
+            CHECK_HR(device->CreateOffscreenPlainSurface(4,4,D3DFMT_A8R8G8B8,D3DPOOL_SYSTEMMEM,
+                &staging4,nullptr));
+            IDirect3DSurface9* level0c=nullptr;
+            CHECK_HR(texture->GetSurfaceLevel(0,&level0c));
+            if(staging4&&level0c) {
+                CHECK_HR(device->GetRenderTargetData(level0c,staging4));
+                D3DLOCKED_RECT locked{};
+                CHECK_HR(staging4->LockRect(&locked,nullptr,D3DLOCK_READONLY));
+                if(locked.pBits) {
+                    const unsigned char* p=static_cast<const unsigned char*>(locked.pBits);
+                    CHECK(p[0]>0x80&&p[1]<0x40&&p[2]<0x40);   // blue reached the texture
+                }
+                CHECK_HR(staging4->UnlockRect());
+            }
+            if(level0c)level0c->Release();
+            if(staging4)staging4->Release();
+            texture->Release();
+            texture=nullptr;
+        }
+        if(staging)staging->Release();
+        if(target)target->Release();
+    }
+
     // A shader the guest compiles itself goes through the translator: this is
     // the same vs_1_1 the translator's own regression uses.
     {

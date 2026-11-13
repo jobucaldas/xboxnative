@@ -21,7 +21,78 @@ static ID3D12Device* make() {
     if(SUCCEEDED(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,__uuidof(ID3D12Device),(void**)&device)))return device;
     return nullptr;
 }
+
+// A stream builder matching the real layout: each subobject is a 4-byte type
+// padded to pointer size, then the payload at pointer alignment, and the
+// whole subobject starts at a pointer-aligned offset (the layout
+// CD3DX12_PIPELINE_STATE_STREAM_SUBOBJECT produces: alignas(void*), type
+// first, payload second).
+template<typename T>
+static void appendSubobject(std::vector<unsigned char>& stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type,const T& payload) {
+    size_t at=(stream.size()+sizeof(void*)-1)&~size_t(sizeof(void*)-1);
+    stream.resize(at+sizeof(void*)+sizeof(T));
+    *reinterpret_cast<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE*>(&stream[at])=type;
+    memcpy(&stream[at+sizeof(void*)],&payload,sizeof(T));
+}
+static void appendUnknown(std::vector<unsigned char>& stream,int type) {
+    size_t at=stream.size();
+    stream.resize(at+sizeof(void*)+sizeof(void*));
+    *reinterpret_cast<int*>(&stream[at])=type;
+}
 int main() {
+    // The stream walker on synthetic streams built with the real struct
+    // layout. These need no device: the walker is a pure function.
+    {
+        // A graphics stream like Mesa's: root signature, VS, PS, blend,
+        // rasterizer, DSV format, RTV formats.
+        std::vector<unsigned char> stream;
+        ID3D12RootSignature* rs=nullptr;
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,rs);
+        D3D12_SHADER_BYTECODE vs{nullptr,128};
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS,vs);
+        D3D12_SHADER_BYTECODE ps{nullptr,256};
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS,ps);
+        D3D12_BLEND_DESC blend{};blend.RenderTarget[0].RenderTargetWriteMask=0xf;
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND,blend);
+        D3D12_RASTERIZER_DESC raster{};
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER,raster);
+        DXGI_FORMAT dsv=DXGI_FORMAT_D32_FLOAT;
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT,dsv);
+        D3D12_RT_FORMAT_ARRAY rt{};rt.RTFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;rt.NumRenderTargets=1;
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS,rt);
+        std::string text=d3d12_diag::streamSubobjects(stream.data(),stream.size());
+        CHECK(text.find("ROOT_SIGNATURE ")!=std::string::npos);
+        CHECK(text.find("VS ")!=std::string::npos&&text.find("PS ")!=std::string::npos);
+        CHECK(text.find("BLEND ")!=std::string::npos&&text.find("RASTERIZER ")!=std::string::npos);
+        CHECK(text.find("DSV_FORMAT ")!=std::string::npos&&text.find("RTV_FORMATS ")!=std::string::npos);
+        // The walk consumes the whole stream: no truncation, no unknown.
+        CHECK(text.find("truncated")==std::string::npos&&text.find("unknown(")==std::string::npos);
+        // Compute-style stream: root signature + CS.
+        std::vector<unsigned char> compute;
+        appendSubobject(compute,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,rs);
+        D3D12_SHADER_BYTECODE cs{nullptr,64};
+        appendSubobject(compute,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS,cs);
+        text=d3d12_diag::streamSubobjects(compute.data(),compute.size());
+        CHECK(text.find("CS ")!=std::string::npos&&text.find("PS ")==std::string::npos);
+        CHECK(text.find("truncated")==std::string::npos);
+        // A stream with an unknown subobject type: named with its type and
+        // offset, and the walk stops instead of guessing.
+        std::vector<unsigned char> unknown;
+        appendSubobject(unknown,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,rs);
+        appendUnknown(unknown,99);
+        appendSubobject(unknown,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS,vs);
+        text=d3d12_diag::streamSubobjects(unknown.data(),unknown.size());
+        CHECK(text.find("unknown(type=99@offset=")!=std::string::npos);
+        CHECK(text.find("VS ")==std::string::npos);   // walk stopped at the unknown
+        // A truncated stream: the subobject that does not fit is marked.
+        std::vector<unsigned char> truncated(stream.begin(),stream.begin()+stream.size()-4);
+        text=d3d12_diag::streamSubobjects(truncated.data(),truncated.size());
+        CHECK(text.find("truncated")!=std::string::npos);
+        // A size too small for even one subobject type is reported as-is.
+        text=d3d12_diag::streamSubobjects(stream.data(),3);
+        CHECK(text.find("bytes=3")!=std::string::npos);
+    }
+
     ID3D12Device* device=make();
     if(!device){printf("OFF-DEVICE no d3d12 device available\n");return 2;}
 
