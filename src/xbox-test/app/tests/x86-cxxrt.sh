@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # x86 stage 3: the C++ runtime fixture. Builds an ordinary i686 C++ program
-# (iostream/std::string/std::vector/exceptions/std::thread) with the mingw
-# toolchain and runs it through the interpreter: the real C++ runtime's CRT
-# startup, TLS-callback global initialization (mcfgthread), exception
-# unwinding tables and a std::thread joined through the keyed-event surface.
+# (iostream/std::string/std::vector/exceptions) with the mingw toolchain and
+# runs it through the interpreter: the real C++ runtime's CRT startup,
+# TLS-callback global initialization and exception unwinding tables.
+# std::thread is out on purpose: libstdc++'s thread support imports symbols
+# that differ per toolchain (_M_start_thread, a thread-proc trampoline), so it
+# belongs to a later stage, not to the runtime a normal game links.
 # With --wine the same binary runs under real Windows semantics and stdout and
 # the exit code must be identical. Deterministic and console-free.
 set -euo pipefail
@@ -54,7 +56,7 @@ set -e
 grep -q '^play: cxxrt ran to exit 42, all imports bound$' <<<"$out" || {
   echo "X86-CXXRT FAIL: no clean run"; echo "$out"; exit 1; }
 ! grep -q '^play: unresolved\|^play: fault' <<<"$out" || { echo "X86-CXXRT FAIL: unresolved import or fault"; echo "$out"; exit 1; }
-echo "X86-CXXRT PASS: i686 C++ program (iostream, std::string, exceptions, std::thread) ran in the interpreter to exit 42"
+echo "X86-CXXRT PASS: i686 C++ program (iostream, std::string, exceptions) ran in the interpreter to exit 42"
 if [[ ${1:-} == --wine ]]; then
   wine="${WINE:-wine}"
   if ! command -v "$wine" >/dev/null && ! [[ -x $wine ]]; then

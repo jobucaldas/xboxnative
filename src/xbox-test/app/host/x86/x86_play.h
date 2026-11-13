@@ -66,7 +66,20 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         // Dependencies the registry cannot serve load as guest DLLs, tracked
         // in the process module table; their DllMain runs after init_process.
         std::map<std::string, Dll> dlls; std::vector<std::string> dll_order;
-        Dll top = load_dll(mem, table, reg, file, dll_source, dlls, 0, &dll_order);
+        Dll top = load_dll(mem, table, reg, file, dll_source, dlls, 0, &dll_order,
+                           [&reg, &table](const std::string& dll, const std::string& sym) {
+                               // Forwarded exports that name an OS-served module
+                               // ("ntdll.memcpy"): the same thunk/data answer
+                               // GetProcAddress gives on that pseudo-handle.
+                               std::string l = dll, s = sym;
+                               for (auto& ch : l) ch = char(std::tolower((unsigned char)ch));
+                               for (auto& ch : s) ch = char(std::tolower((unsigned char)ch));
+                               auto it = reg.map.find({l, s});
+                               if (it != reg.map.end()) return table.add(it->second);
+                               auto dt = reg.data.find({l, s});
+                               if (dt != reg.data.end()) return dt->second;
+                               return 0u;
+                           });
         dlls.emplace("__top__", std::move(top));  // not a named module; keeps the top image's exports reachable
         Image img = dlls["__top__"].image;
         guest.dlls = std::move(dlls);
@@ -89,15 +102,11 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
             if (!cpu.exited) throw;
             (void)f;
         }
-        // TLS callbacks of the top image (a static CRT registers its global
-        // initializers there), with DLL_PROCESS_ATTACH, after DllMain — the
-        // order the Windows loader uses.
-        for (uint32_t cb : img.tls_callbacks) {
-            try { cpu.call(cb, {img.base, 1, 0}); } catch (const Fault& f) {
-                if (!cpu.exited) throw;
-                (void)f;
-            }
-        }
+        // TLS callbacks of the top image run exactly once, from run_entry ->
+        // init_tls (which allocates the implicit-TLS block first): the Windows
+        // loader order is DllMain(PROCESS_ATTACH) for all modules, then the
+        // exe's TLS callbacks, then the entry. A separate loop here would run
+        // them twice — a mingw CRT registers its global initializers there.
         if (on_loaded) on_loaded(r);
         try {
             run_entry(cpu, img);

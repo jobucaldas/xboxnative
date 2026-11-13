@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Off-device run of the stage-3 C++ runtime fixture: an ordinary i686 C++
-// program (iostream, std::string, std::vector, exceptions, std::thread) built
-// against the mingw C++ runtime, mapped and run through the interpreter with
-// the full guest OS surface. The static CRT needs the kernel32/msvcrt/ntdll
-// surface plus the stage-3 TLS-callback dispatch (mcfgthread initializes its
-// globals from one). Usage: x86-cxxrt <fixture-cxx.exe> [dir-with-runtime-dlls]
+// program (iostream, std::string, std::vector, exceptions) built against the
+// mingw C++ runtime, mapped and run through the interpreter with the full
+// guest OS surface. The static CRT needs the kernel32/msvcrt/ntdll surface
+// plus the stage-3 TLS-callback dispatch (the runtime initializes its globals
+// from one). Usage: x86-cxxrt <fixture-cxx.exe> [dir-with-runtime-dlls]
 // When the fixture was DLL-linked (a toolchain without static C++ runtime
 // libs), the runtime DLLs sit beside it; a DllSource reads them from disk so
 // the loader can resolve the extra modules (libstdc++-6.dll, libgcc_s_dw2-1.dll,

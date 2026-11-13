@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Runs a real i686 program built against the mingw CRT (PE32) through the
 # interpreter and the guest OS surface (host/x86/x86_guest.h): CRT startup,
-# printf's own FP formatter, malloc/qsort, TLS, the heap, VirtualAlloc and the
-# kernel32 calls a game's startup makes. With --wine the same binary runs under
-# real Windows semantics and stdout and the exit code must be identical.
+# printf's own FP formatter, malloc/qsort, TLS, the heap, VirtualAlloc, the
+# kernel32 calls a game's startup makes and a strftime with the real CRT
+# argument order (dest first, format third). With --wine the same binary runs
+# under real Windows semantics and stdout and the exit code must be identical.
 # Deterministic and console-free.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -41,9 +42,11 @@ x86-crt: strings ok
 x86-crt: varargs 60 4.00
 x86-crt: kernel32 ok
 x86-crt: sync ok
-x86-crt: checks 39 failed 0'
+x86-crt: strftime 2026-11-09 13:26:40 Mon
+x86-crt: time ok
+x86-crt: checks 44 failed 0'
 [[ $body == "$want" ]] || { echo "X86-GUEST FAIL: stdout differs"; diff <(echo "$want") <(echo "$body") || true; exit 1; }
-echo "X86-GUEST PASS: mingw CRT program (printf with doubles, heap, qsort, TLS, VirtualAlloc) ran in the interpreter to exit 42"
+echo "X86-GUEST PASS: mingw CRT program (printf with doubles, heap, qsort, TLS, VirtualAlloc, strftime) ran in the interpreter to exit 42"
 # The launcher's own PE32 entry point (host/x86/x86_play.h): the structured
 # result launch.h logs and launch_result.json is built from, plus the live
 # output tee and the pre-entry progress callback.
@@ -69,7 +72,9 @@ pbody=$(sed '/^play: /d' <<<"$pout")
 [[ $pbody == "$want" ]] || { echo "X86-GUEST FAIL: x86_play tee differs"; diff <(echo "$want") <(echo "$pbody") || true; exit 1; }
 echo "X86-GUEST PASS: the launcher's PE32 entry point reports the same run (loaded, imports bound, exit 42) and streams its output"
 if [[ ${1:-} == --wine ]]; then
-  set +e; wout=$(WINEDEBUG=-all wine "$tmp/fixture-crt.exe" | tr -d '\r'); wrc=$?; set -e
+  wine="${WINE:-wine}"
+  command -v "$wine" >/dev/null || [[ -x $wine ]] || { echo "X86-GUEST SKIP: wine not found (set WINE)"; exit 0; }
+  set +e; wout=$(WINEDEBUG=-all "$wine" "$tmp/fixture-crt.exe" | tr -d '\r'); wrc=$?; set -e
   [[ $wrc -eq 42 ]] || { echo "X86-GUEST FAIL: wine exit $wrc (want 42)"; exit 1; }
   [[ $wout == "$want" ]] || { echo "X86-GUEST FAIL: wine stdout differs"; echo "$wout"; exit 1; }
   echo "X86-GUEST PASS: same binary, stdout and exit code identical under Wine (real kernel32/msvcrt)"

@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <windows.h>
 
 static int g_fail, g_checks;
@@ -174,6 +175,32 @@ int main(void) {
     CRITICAL_SECTION cs; InitializeCriticalSection(&cs);
     EnterCriticalSection(&cs); LeaveCriticalSection(&cs); DeleteCriticalSection(&cs);
     puts("x86-crt: sync ok");
+
+    /* strftime with the real CRT prototype: size_t strftime(char *dest,
+     * size_t maxsize, const char *format, const struct tm *tm) — dest first,
+     * format third. The struct tm is filled by hand from a fixed timestamp so
+     * the same check passes under Wine's real strftime: 2026-11-09 is a
+     * Monday, 13:26:40, day 313 of the year. */
+    {
+        struct tm tmv;
+        memset(&tmv, 0, sizeof tmv);
+        tmv.tm_year = 2026 - 1900; tmv.tm_mon = 10; tmv.tm_mday = 9;
+        tmv.tm_hour = 13; tmv.tm_min = 26; tmv.tm_sec = 40;
+        tmv.tm_wday = 1; tmv.tm_yday = 312;
+        char tsb[64];
+        size_t tn2 = strftime(tsb, sizeof tsb, "%Y-%m-%d %H:%M:%S %a", &tmv);
+        check(tn2 == 23 && tn2 < sizeof tsb);
+        printf("x86-crt: strftime %s\n", tsb);
+        /* The formatted fields must land in the buffer in the right places:
+         * year first (dest is arg 0), weekday last (from arg 3's tm_wday).
+         * With the arguments swapped the formatter reads its format from the
+         * uninitialized destination and writes garbage or nothing. */
+        check(tsb[0] == '2' && tsb[1] == '0' && tsb[2] == '2' && tsb[3] == '6');
+        check(tsb[4] == '-' && tsb[5] == '1' && tsb[6] == '1' && tsb[7] == '-' && tsb[8] == '0' && tsb[9] == '9');
+        check(tsb[10] == ' ' && tsb[11] == '1' && tsb[12] == '3');
+        check(tsb[20] == 'M' && tsb[21] == 'o');  /* "Mo" of Monday at the tail */
+    }
+    printf("x86-crt: time ok\n");
 
     printf("x86-crt: checks %d failed %d\n", g_checks, g_fail);
     return g_fail ? 100 + g_fail : 42;

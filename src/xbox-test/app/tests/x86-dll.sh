@@ -20,7 +20,8 @@ flags="-O1 -Wall -Wextra -Werror -ffreestanding -fno-builtin -fno-stack-protecto
 # GetProcAddress("dllb_value") matches what a game's import list looks like.
 "$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -o "$tmp/dll-b.dll" "$here/x86-dll/dll-b.c"
 "$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -o "$tmp/dll-a.dll" "$here/x86-dll/dll-a.c" -L"$tmp" -ldll-b
-# exe: imports dll_a_sum/dllb_attach_marker, calls the kernel32 DLL APIs.
+# exe: imports dll_a_sum/dllb_attach_marker, calls the kernel32 DLL APIs
+# (LoadLibrary/GetProcAddress/FreeLibrary/GetModuleHandleA/W/ExW).
 "$cc32" $flags -Wl,--entry,_fixture_main -Wl,--subsystem,console -o "$tmp/fixture-dll.exe" \
   "$here/x86-dll/fixture-dll.c" -L"$tmp" -ldll-a -ldll-b -lkernel32
 "${CXX:-c++}" -std=c++17 -O2 -mno-red-zone -Wall -Wextra -Werror "$here/x86-dll.cpp" -o "$tmp/x86-dll"
@@ -31,4 +32,4 @@ set -e
 grep -q '^play: dll-chain loaded, all imports bound, exit 42$' <<<"$out" || {
   echo "X86-DLL FAIL: no clean chain run"; echo "$out"; exit 1; }
 ! grep -q '^play: unresolved\|^play: fault' <<<"$out" || { echo "X86-DLL FAIL: unresolved import or fault"; echo "$out"; exit 1; }
-echo "X86-DLL PASS: guest PE32 DLL chain (exe -> dll-a -> dll-b), DllMain attach, LoadLibraryA/GetProcAddress/FreeLibrary/GetModuleHandle from guest code"
+echo "X86-DLL PASS: guest PE32 DLL chain (exe -> dll-a -> dll-b), DllMain attach, LoadLibraryA/GetProcAddress/FreeLibrary/GetModuleHandleA/W/ExW from guest code"

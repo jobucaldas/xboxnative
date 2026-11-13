@@ -14,8 +14,16 @@ constexpr uint32_t STACK_TOP = 0x00300000, STACK_SIZE = 0x00100000;
 constexpr uint32_t TEB_ADDR = 0x7FFDE000, PEB_ADDR = 0x7FFDF000;
 struct Registry {  // (lowercase dll, symbol) -> thunk definition
     std::map<std::pair<std::string, std::string>, Thunk> map;
+    // Data imports: (lowercase dll, symbol) -> guest address of the variable.
+    // A data import's IAT slot holds the variable's guest address, not a thunk
+    // (msvcrt's __initenv/__mb_cur_max/_iob are imported as data by mingw's
+    // CRT startup; reading them is a plain memory load).
+    std::map<std::pair<std::string, std::string>, uint32_t> data;
     void add(const std::string& dll, const std::string& name, Conv conv, unsigned argc, std::function<uint32_t(Cpu&)> fn) {
         map[{dll, name}] = Thunk{dll, name, conv, argc, std::move(fn)};
+    }
+    void add_data(const std::string& dll, const std::string& name, uint32_t addr) {
+        data[{dll, name}] = addr;
     }
 };
 struct Image {
@@ -99,6 +107,8 @@ inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, cons
             uint32_t t = u32(pe.bytes, src + size_t(j) * 4); if (!t) break;
             std::string sym = (t & 0x80000000u) ? "#" + std::to_string(t & 65535) : pe.string(t + 2);
             ++img.imports;
+            auto dit = reg.data.find({dll, sym});
+            if (dit != reg.data.end()) { mem.w32(img.base + dst + j * 4, dit->second); ++img.bound; continue; }
             auto it = reg.map.find({dll, sym}); uint32_t stub;
             if (it != reg.map.end()) { stub = table.add(it->second); ++img.bound; }
             else {
@@ -173,16 +183,21 @@ struct Dll {
 // Resolves `sym` (already lowercase) in a loaded DLL's export table to a guest
 // address: an RVA in the image, a forwarded export resolved through the module
 // table (one hop, as Windows answers a forward with the target's address), or 0.
-inline uint32_t dll_export_addr(const Dll& dep, const std::string& sym, const std::map<std::string, Dll>& loaded) {
+// `os_resolve` answers a forward whose target is an OS-served module (e.g.
+// "ntdll.memcpy": not in `loaded`); it returns the guest address or 0.
+inline uint32_t dll_export_addr(const Dll& dep, const std::string& sym, const std::map<std::string, Dll>& loaded,
+                                const std::function<uint32_t(const std::string&, const std::string&)>& os_resolve = nullptr) {
     auto it = dep.image.exports.find(sym);
     if (it == dep.image.exports.end()) return 0;
     auto fwd = dep.image.forwarded.find(sym);
     if (fwd != dep.image.forwarded.end()) {  // "dll.symbol": resolve one hop
         size_t dot = fwd->second.find('.');
         if (dot == std::string::npos) return 0;
-        auto m = loaded.find(fwd->second.substr(0, dot));
-        if (m == loaded.end()) return 0;
-        return dll_export_addr(m->second, fwd->second.substr(dot + 1), loaded);
+        std::string target = fwd->second.substr(0, dot), tsym = fwd->second.substr(dot + 1);
+        for (auto& ch : target) if (ch >= 'A' && ch <= 'Z') ch += 32;
+        auto m = loaded.find(target);
+        if (m != loaded.end()) return dll_export_addr(m->second, tsym, loaded, os_resolve);
+        return os_resolve ? os_resolve(target, tsym) : 0;
     }
     return dep.image.base + it->second;  // RVA in the mapped image
 }
@@ -196,7 +211,8 @@ inline uint32_t dll_export_addr(const Dll& dep, const std::string& sym, const st
 // already loaded is reused and its refcount bumped, as Windows' loader does.
 inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const std::vector<uint8_t>& file,
                     const DllSource& source, std::map<std::string, Dll>& loaded, unsigned depth = 0,
-                    std::vector<std::string>* order = nullptr) {
+                    std::vector<std::string>* order = nullptr,
+                    const std::function<uint32_t(const std::string&, const std::string&)>& os_resolve = nullptr) {
     if (depth > 16) throw std::runtime_error("DLL dependencies nested too deep");
     // Load at the ImageBase when it is free; otherwise relocate like Windows'
     // loader does for a DLL whose base is taken. Candidate bases stay in the
@@ -233,7 +249,7 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
         if (known == loaded.end()) {
             std::vector<uint8_t> bytes = source ? source(dll) : std::vector<uint8_t>{};
             if (bytes.empty()) continue;  // stays unresolved; the stub faults by name
-            Dll dep = load_dll(mem, table, reg, bytes, source, loaded, depth + 1, order);
+            Dll dep = load_dll(mem, table, reg, bytes, source, loaded, depth + 1, order, os_resolve);
             known = loaded.emplace(dll, std::move(dep)).first;
             known->second.host_name = dll;
             if (order) order->push_back(dll);  // load order: DllMain runs in reverse at detach
@@ -253,7 +269,7 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
             } else {
                 std::string sym = pe_str(flat, t + 2);
                 for (auto& ch : sym) if (ch >= 'A' && ch <= 'Z') ch += 32;
-                addr = dll_export_addr(known->second, sym, loaded);
+                addr = dll_export_addr(known->second, sym, loaded, os_resolve);
             }
             if (addr) {
                 uint32_t slot = img.base + dst + j * 4;

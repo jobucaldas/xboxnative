@@ -256,6 +256,18 @@ struct Guest {
         add_module(dll, h);  // GetModuleHandleA("ntdll.dll") answers it too
         return h;
     }
+    // Resolves an export of an OS-served module (kernel32/msvcrt/ntdll) that a
+    // guest DLL's forwarding export names ("ntdll.memcpy"): a host thunk, or a
+    // registered data export's address. Returns 0 when the surface has none.
+    uint32_t os_export_addr(ThunkTable& table, const std::string& dll, const std::string& sym) {
+        std::string l = dll; for (auto& ch : l) ch = char(std::tolower((unsigned char)ch));
+        std::string s = sym; for (auto& ch : s) ch = char(std::tolower((unsigned char)ch));
+        auto it = reg.map.find({l, s});
+        if (it != reg.map.end()) return table.add(it->second);
+        auto dt = reg.data.find({l, s});
+        if (dt != reg.data.end()) return dt->second;
+        return 0;
+    }
     uint32_t load_guest_dll(Cpu* cpu, const std::string& requested, ThunkTable& table) {
         std::string lower = requested;
         for (auto& ch : lower) ch = char(std::tolower((unsigned char)ch));
@@ -265,10 +277,14 @@ struct Guest {
         if (!dll_source) { set_last_error(126); return 0; }  // ERROR_MOD_NOT_FOUND
         std::vector<uint8_t> bytes = dll_source(lower);
         if (bytes.empty()) { set_last_error(126); return 0; }
-        Dll d = load_dll(mem, table, reg, bytes, dll_source, dlls, 0, &dll_order);
+        Dll d = load_dll(mem, table, reg, bytes, dll_source, dlls, 0, &dll_order,
+                         [this, &table](const std::string& dll, const std::string& sym) {
+                             return os_export_addr(table, dll, sym);
+                         });
         uint32_t base = d.image.base;
         dll_order.push_back(lower);
         dlls[lower] = std::move(d);
+        add_module(lower, base);  // GetModuleHandleW must find LoadLibrary'd DLLs
         if (d.image.entry) dll_entries[lower] = d.image.entry;  // absolute
         if (cpu && d.image.entry) {
             // Load-time DllMain, as the Windows loader runs it on the loading
@@ -291,19 +307,25 @@ struct Guest {
             } else {
                 std::string sym = str(name_ptr);
                 for (auto& ch : sym) ch = char(std::tolower((unsigned char)ch));
-                a = dll_export_addr(kv.second, sym, dlls);
+                a = dll_export_addr(kv.second, sym, dlls,
+                                    [this, &table](const std::string& dll, const std::string& s) {
+                                        return os_export_addr(table, dll, s);
+                                    });
             }
             if (!a) set_last_error(127);  // ERROR_PROC_NOT_FOUND
             return a;
         }
         // An OS-served module: the export is a host thunk, added on demand —
-        // the same stub the import binder installs for it.
+        // the same stub the import binder installs for it. A data export
+        // (msvcrt's __initenv and friends) answers the variable's address.
         for (auto& kv : os_modules) {
             if (kv.second != module) continue;
             if (name_ptr >= 0x10000u) {
                 std::string sym = str(name_ptr);
                 auto it = reg.map.find({kv.first, sym});
                 if (it != reg.map.end()) return table.add(it->second);
+                auto dt = reg.data.find({kv.first, sym});
+                if (dt != reg.data.end()) return dt->second;
                 // Also answer the undecorated stdcall name for a decorated
                 // registry entry (a game may ask either form).
                 std::string dec = sym + "@";
@@ -495,6 +517,16 @@ inline void Guest::register_all() {
     cmdline_ptr = put_str(cmdline.empty() ? exe_path : cmdline);
     env_ptr = heap.alloc(4); mem.w32(env_ptr, 0);
     module_name_ptr = put_str(exe_path);
+    // Data imports (mingw's win32-threaded CRT startup references msvcrt's
+    // variables directly instead of through the __p__ accessors): the IAT slot
+    // holds the variable's guest address. __initenv starts NULL and the CRT
+    // startup writes it through __getmainargs' env out-param; __mb_cur_max is 1.
+    reg.data.clear();
+    reg.add_data("msvcrt.dll", "__initenv", initenv);
+    reg.add_data("msvcrt.dll", "__winitenv", initenv);
+    reg.add_data("msvcrt.dll", "__mb_cur_max", mb_cur_max);
+    reg.add_data("msvcrt.dll", "_iob", iob_addr);
+    reg.add_data("msvcrt.dll", "__iob_func", iob_addr);  // some CRTs import it as data
     auto C = [](const char* n) { return n; };
     (void)C;
 
@@ -566,12 +598,46 @@ inline void Guest::register_all() {
         return 0x60000000u + ++thread_serial; });
     reg.add("kernel32.dll", "ExitThread", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { do_exit(c, c.arg(0)); return 0; });
     reg.add("kernel32.dll", "SwitchToThread", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
+    // The blocking-wait surface a win32-threaded CRT startup uses (mingw 13's
+    // winpthreads/mcfgthread peers): waits run the pending thread bodies first,
+    // then succeed, as the keyed-event thunks below answer.
+    reg.add("kernel32.dll", "WaitForSingleObject", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        run_pending_threads(c); return 0; });  // WAIT_OBJECT_0
+    reg.add("kernel32.dll", "WaitForSingleObjectEx", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+        run_pending_threads(c); return 0; });
+    reg.add("kernel32.dll", "GetExitCodeThread", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        // Thread bodies run to completion before any wait returns, so the
+        // exit code is the body's own (recorded by ExitThread through do_exit).
+        if (c.arg(1)) mem.w32(c.arg(1), 0);
+        return 1; });
+    reg.add("kernel32.dll", "ResumeThread", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });  // was not suspended
+    reg.add("kernel32.dll", "GetThreadId", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0x1004; });
+    reg.add("kernel32.dll", "DuplicateHandle", Conv::Stdcall, 7, [this](Cpu& c) -> uint32_t {
+        // One process, no real handle table: the duplicate is the source value.
+        if (c.arg(3)) mem.w32(c.arg(3), c.arg(1));
+        return 1; });
+    // Condition variables: single-threaded surface — init zero-fills, wakes are
+    // no-ops, and a sleep runs pending thread bodies then succeeds.
+    reg.add("kernel32.dll", "InitializeConditionVariable", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        if (c.arg(0)) mem.w32(c.arg(0), 0);
+        return 1; });
+    reg.add("kernel32.dll", "WakeConditionVariable", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("kernel32.dll", "WakeAllConditionVariable", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("kernel32.dll", "SleepConditionVariableCS", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+        run_pending_threads(c); return 1; });  // nonzero: woken, not timed out
+    // GetTimeZoneInformation: UTC surface — bias 0, no standard/daylight names,
+    // TIME_ZONE_ID_UNKNOWN (0), as a system set to UTC answers.
+    reg.add("kernel32.dll", "GetTimeZoneInformation", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        uint32_t p = c.arg(0); if (p) mem.write_bytes(p, std::vector<uint8_t>(172, 0).data(), 172);
+        return 0; });
     reg.add("kernel32.dll", "GetCurrentProcessorNumberEx", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t p = c.arg(0); if (p) { mem.w(p, 0, 2); mem.w(p + 2, 0, 2); } return 0; });
     // Thread affinity/priority: one CPU, normal priority, affinity mask 1.
-    reg.add("kernel32.dll", "GetProcessAffinityMask", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
-        if (c.arg(0)) { mem.w32(c.arg(0), 1); }
+    // BOOL GetProcessAffinityMask(HANDLE, PDWORD, PDWORD): process and system
+    // masks are the 2nd/3rd parameters (winbase.h), not the handle.
+    reg.add("kernel32.dll", "GetProcessAffinityMask", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
         if (c.arg(1)) { mem.w32(c.arg(1), 1); }
+        if (c.arg(2)) { mem.w32(c.arg(2), 1); }
         return 1; });
     reg.add("kernel32.dll", "SetThreadAffinityMask", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { return c.arg(1) ? 1u : 0u; });
     reg.add("kernel32.dll", "GetThreadGroupAffinity", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
@@ -590,9 +656,11 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetFileInformationByHandle", Conv::Stdcall, 2, [this](Cpu&) -> uint32_t { set_last_error(6); return 0; });
     reg.add("kernel32.dll", "K32EnumProcessModules", Conv::Stdcall, 4, [this](Cpu&) -> uint32_t { set_last_error(6); return 0; });
     reg.add("kernel32.dll", "GetLogicalProcessorInformationEx", Conv::Stdcall, 3, [this](Cpu&) -> uint32_t { set_last_error(122); return 0; });
-    reg.add("kernel32.dll", "GetModuleHandleExW", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
-        // (flags, name, out): only the "from address" form is unsupported; the
-        // plain name form behaves like GetModuleHandleW.
+    // BOOL GetModuleHandleExW(DWORD dwFlags, LPCWSTR lpModuleName, HMODULE *phModule)
+    // (libsrc/winbase.h): three parameters — flags, name, out handle.
+    reg.add("kernel32.dll", "GetModuleHandleExW", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+        // Only the "from address" form is unsupported; the plain name form
+        // behaves like GetModuleHandleW.
         uint32_t flags = c.arg(0), out = c.arg(2);
         if (flags & 4) { if (out) mem.w32(out, 0); return 0; }
         uint32_t p = c.arg(1); std::string n;
@@ -698,7 +766,14 @@ inline void Guest::register_all() {
         virtual_alloc.erase(it); return 1; });
     reg.add("kernel32.dll", "VirtualProtect", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
         uint32_t a = c.arg(0) & ~0xfffu, n = (c.arg(1) + 0xfffu) & ~0xfffu, prot = c.arg(2), old = c.arg(3);
-        uint8_t p = PROT_R | ((prot & 0x04) ? PROT_W : 0) | ((prot & 0x20) ? PROT_X : 0);
+        // Page-protection flags (winnt.h): 0x02 READONLY, 0x04 READWRITE,
+        // 0x08 WRITECOPY, 0x10 EXECUTE, 0x20 EXECUTE_READ, 0x40
+        // EXECUTE_READWRITE, 0x80 EXECUTE_WRITECOPY. mingw's
+        // _mark_section_writable passes PAGE_EXECUTE_READWRITE (0x40): a
+        // check for only 0x04/0x20 drops X and the return into .text faults.
+        uint8_t p = PROT_R;
+        if (prot & 0x04 || prot & 0x08 || prot & 0x40 || prot & 0x80) p |= PROT_W;
+        if (prot & 0x10 || prot & 0x20 || prot & 0x40 || prot & 0x80) p |= PROT_X;
         if (!n) n = 0x1000;
         try { mem.protect(a, n, p); } catch (...) { set_last_error(487); return 0; }
         if (old) mem.w32(old, 0x04);
@@ -1039,6 +1114,7 @@ inline void Guest::register_all() {
         uint32_t fd = c.arg(0); return fd <= 2 ? file_ptr(int(fd)) : 0u; });
     // File stat/length on a handle we do not serve: fail like the real API.
     reg.add("msvcrt.dll", "_fstati64", Conv::Cdecl, 2, [this](Cpu&) -> uint32_t { set_last_error(9); return 0xFFFFFFFFu; });
+    reg.add("msvcrt.dll", "_fstat64", Conv::Cdecl, 2, [this](Cpu&) -> uint32_t { set_last_error(9); return 0xFFFFFFFFu; });  // mingw 13's name for it
     reg.add("msvcrt.dll", "_filelengthi64", Conv::Cdecl, 1, [this](Cpu&) -> uint32_t { set_last_error(9); return 0xFFFFFFFFu; });
     // wide ctype / collation: the "C" locale answers ASCII-only tables.
     reg.add("msvcrt.dll", "iswctype", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
@@ -1072,12 +1148,56 @@ inline void Guest::register_all() {
             mem.w8(c.arg(0) + put * 2, 0); mem.w8(c.arg(0) + put * 2 + 1, 0); }
         return uint32_t(w.size()); });
     reg.add("msvcrt.dll", "strftime", Conv::Cdecl, 4, [this](Cpu& c) -> uint32_t {
-        // Only the fixed deterministic date the surface's clock reports.
-        std::string fmt = str(c.arg(0)); uint32_t cap = c.arg(2), out = c.arg(1);
-        std::string r = fmt.empty() ? "" : "Wed Nov  9 00:00:00 2026";
-        if (out && cap) { uint32_t put = uint32_t(r.size()) < cap ? uint32_t(r.size()) : cap - 1;
-            mem.write_bytes(out, r.data(), put); mem.w8(out + put, 0); }
-        return uint32_t(r.size()); });
+        // size_t strftime(char *dest, size_t maxsize, const char *format,
+        // const struct tm *tm) — dest/maxsize first (time.h), format third.
+        // A real (deterministic) formatter: reads the guest struct tm
+        // (int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, tm_wday,
+        // tm_yday, tm_isdst — the layout time.h has had since 1989) and
+        // renders the common specifiers. With the old arg order (format read
+        // from the destination) the output was garbage, which the fixture's
+        // exact comparison discriminates.
+        uint32_t out = c.arg(0), cap = c.arg(1);
+        std::string fmt = str(c.arg(2));
+        uint32_t tm_p = c.arg(3);
+        static const char* wday_names[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+        static const char* mon_names[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+        int sec = 0, minute = 0, hour = 0, mday = 1, mon = 0, year = 1970, wday = 4, yday = 0;
+        if (tm_p) {
+            sec = int32_t(mem.r32(tm_p)); minute = int32_t(mem.r32(tm_p + 4));
+            hour = int32_t(mem.r32(tm_p + 8)); mday = int32_t(mem.r32(tm_p + 12));
+            mon = int32_t(mem.r32(tm_p + 16)); year = int32_t(mem.r32(tm_p + 20));
+            wday = int32_t(mem.r32(tm_p + 24)); yday = int32_t(mem.r32(tm_p + 28));
+        }
+        std::string r;
+        char num[12];
+        for (size_t i = 0; i < fmt.size(); ++i) {
+            if (fmt[i] != '%') { r.push_back(fmt[i]); continue; }
+            if (++i >= fmt.size()) break;
+            switch (fmt[i]) {
+            case 'Y': snprintf(num, sizeof num, "%d", year + 1900); r += num; break;
+            case 'm': snprintf(num, sizeof num, "%02d", mon + 1); r += num; break;
+            case 'd': snprintf(num, sizeof num, "%02d", mday); r += num; break;
+            case 'H': snprintf(num, sizeof num, "%02d", hour); r += num; break;
+            case 'M': snprintf(num, sizeof num, "%02d", minute); r += num; break;
+            case 'S': snprintf(num, sizeof num, "%02d", sec); r += num; break;
+            case 'a': if (wday >= 0 && wday < 7) r += wday_names[wday]; break;
+            case 'b': case 'h': if (mon >= 0 && mon < 12) r += mon_names[mon]; break;
+            case 'j': snprintf(num, sizeof num, "%03d", yday + 1); r += num; break;
+            case '%': r.push_back('%'); break;
+            default: r.push_back('%'); r.push_back(fmt[i]); break;  // unknown: keep both, like a failed conversion
+            }
+        }
+        if (out && cap && r.size() < cap) {
+            mem.write_bytes(out, r.data(), uint32_t(r.size()));
+            mem.w8(out + uint32_t(r.size()), 0);
+            return uint32_t(r.size());
+        }
+        if (out && cap) mem.w8(out, 0);  // too big: empty string, as the CRT answers
+        return 0; });
+    // size_t wcsftime(wchar_t *dest, size_t maxsize, const wchar_t *format,
+    // const struct tm *tm) — the wide form; a failed conversion answers 0,
+    // which the CRT treats as "no time string" (a legal answer).
     reg.add("msvcrt.dll", "wcsftime", Conv::Cdecl, 4, [this](Cpu&) -> uint32_t { return 0; });
     reg.add("msvcrt.dll", "strtoul", Conv::Cdecl, 3, [this](Cpu& c) -> uint32_t {
         std::string s = str(c.arg(0)); char* e = nullptr;
@@ -1123,7 +1243,10 @@ inline void Guest::register_all() {
     // surface maps images itself, so an unmapped-section answer keeps callers
     // off that path.)
     // images itself, so an unmapped section answer keeps callers off that path.
-    reg.add("ntdll.dll", "NtCreateSection", Conv::Stdcall, 6, [this](Cpu& c) -> uint32_t {
+    // NtCreateSection(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PLARGE_INTEGER,
+    // ULONG, ULONG, HANDLE) — seven parameters (winnt.h/winternl.h); the size
+    // pointer is the 4th.
+    reg.add("ntdll.dll", "NtCreateSection", Conv::Stdcall, 7, [this](Cpu& c) -> uint32_t {
         uint32_t out = c.arg(0), size_p = c.arg(3);
         uint64_t size = size_p ? (uint64_t(mem.r32(size_p + 4)) << 32) | mem.r32(size_p) : 0x10000u;
         if (!size || size > 0x10000000ull) return 0xC0000043u;  // invalid page protection/size
