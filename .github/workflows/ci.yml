@@ -132,6 +132,8 @@ jobs:
         run: bash src/xbox-test/uwph/host/tests/run-load-config.sh
       - name: Launcher mapped-image load-config rejection
         run: bash src/xbox-test/app/tests/load-config.sh
+      - name: PE32+ unwind registration accepts sorted ranges and rejects corrupt tables
+        run: bash src/xbox-test/app/tests/unwind-registration.sh
       - name: Delete game removes only its install folder
         run: bash src/xbox-test/app/tests/game-delete.sh
       - name: Storage move copies, verifies and markers atomically
