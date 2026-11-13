@@ -201,7 +201,7 @@
       "overrides": [
         {
           "class": "uwph",
-          "reason": "uwph shell folder answer (src/xbox-test/uwph/shell32/special_folder.h): CSIDL to KNOWNFOLDERID, answered by the system SHGetKnownFolderPath the guest's known-folder route already uses (KF_FLAG_CREATE for fCreate). Ids without a file path (CSIDL_DESKTOP) and unknown ids fail with FALSE.",
+          "reason": "uwph shell folder answer (src/xbox-test/uwph/shell32/special_folder.h, shared chain in folder_chain.h): CSIDL to KNOWNFOLDERID, answered first by the system SHGetKnownFolderPath the guest's known-folder route uses (KF_FLAG_CREATE for fCreate), then by the same environment and package-folder fallbacks cloud_roots uses. Ids without a file path (CSIDL_DESKTOP) and unknown ids fail with FALSE.",
           "exports": [
             "SHGetSpecialFolderPathW"
           ]

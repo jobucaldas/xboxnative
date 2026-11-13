@@ -149,5 +149,6 @@ off-device filtering, dispatch, destruction and thread-isolation regression.
 converts the title to the ANSI code page and truncates to `size-1` bytes. The
 winmm joystick family (`audio/joystick.h`) answers as a console with no joystick
 driver; `SHGetSpecialFolderPathW` (`uwph/shell32`) answers folder CSIDLs through the
-same system `SHGetKnownFolderPath` the guest's known-folder route uses. Both are
+same system `SHGetKnownFolderPath` the guest's known-folder route uses, then through
+the fallback chain `cloud_roots` uses (`uwph/shell32/folder_chain.h`). Both are
 routed from `audio/routes.h` and `app/host/play_runtime.h`, not from this DLL.
