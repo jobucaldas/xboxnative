@@ -286,52 +286,109 @@ static HRESULT STDMETHODCALLTYPE createGraphicsPipelineState(DevicePtr self,cons
     } else D3D12_DIAG_FAILED("CreateGraphicsPipelineState","null","desc=null");
     return hr;
 }
+// One line describing a PSO subobject stream: the named subobjects in order
+// (with truncation/unknown markers), bounded to ~400 chars. Exposed for the
+// d3d12-diag test, which feeds synthetic streams built from the real layout.
+// The stream is a sequence of subobjects, each a 4-byte type followed by its
+// payload at pointer alignment, and payload sizes differ per type
+// (CD3DX12_PIPELINE_STATE_STREAM_SUBOBJECT is alignas(void*) with the type
+// first), so walk with a real-size table: a wrong stride would misname the
+// refused subobject or read past the stream — exactly what this diagnostic
+// exists to name. Sizes come from sizeof on the real d3d12.h structs
+// (verified identical under SDK 616 and 618).
+inline std::string streamSubobjects(const void* stream,size_t bytes) {
+    static const struct{int type;size_t size;const char* name;} subobjects[]={
+        {0,sizeof(ID3D12RootSignature*),        "ROOT_SIGNATURE"},
+        {1,sizeof(D3D12_SHADER_BYTECODE),       "VS"},
+        {2,sizeof(D3D12_SHADER_BYTECODE),       "PS"},
+        {3,sizeof(D3D12_SHADER_BYTECODE),       "DS"},
+        {4,sizeof(D3D12_SHADER_BYTECODE),       "HS"},
+        {5,sizeof(D3D12_SHADER_BYTECODE),       "GS"},
+        {6,sizeof(D3D12_SHADER_BYTECODE),       "CS"},
+        {7,sizeof(D3D12_STREAM_OUTPUT_DESC),    "STREAM_OUTPUT"},
+        {8,sizeof(D3D12_BLEND_DESC),            "BLEND"},
+        {9,sizeof(UINT),                        "SAMPLE_MASK"},
+        {10,sizeof(D3D12_RASTERIZER_DESC),      "RASTERIZER"},
+        {11,sizeof(D3D12_DEPTH_STENCIL_DESC),   "DEPTH_STENCIL"},
+        {12,sizeof(D3D12_INPUT_LAYOUT_DESC),    "INPUT_LAYOUT"},
+        {13,sizeof(D3D12_INDEX_BUFFER_STRIP_CUT_VALUE),"IB_STRIP_CUT"},
+        {14,sizeof(D3D12_PRIMITIVE_TOPOLOGY_TYPE),"PRIMITIVE_TOPOLOGY"},
+        {15,sizeof(D3D12_RT_FORMAT_ARRAY),      "RTV_FORMATS"},
+        {16,sizeof(DXGI_FORMAT),                "DSV_FORMAT"},
+        {17,sizeof(DXGI_SAMPLE_DESC),           "SAMPLE_DESC"},
+        {18,sizeof(UINT),                       "NODE_MASK"},
+        {19,sizeof(D3D12_CACHED_PIPELINE_STATE),"CACHED_PSO"},
+        {20,sizeof(D3D12_PIPELINE_STATE_FLAGS), "FLAGS"},
+        {21,sizeof(D3D12_DEPTH_STENCIL_DESC1),  "DEPTH_STENCIL1"},
+        {22,sizeof(D3D12_VIEW_INSTANCING_DESC), "VIEW_INSTANCING"},
+        {24,sizeof(D3D12_SHADER_BYTECODE),      "AS"},
+        {25,sizeof(D3D12_SHADER_BYTECODE),      "MS"},
+#if defined(D3D12_SDK_VERSION) && D3D12_SDK_VERSION >= 610
+        {26,sizeof(D3D12_DEPTH_STENCIL_DESC2),  "DEPTH_STENCIL2"},
+        {27,sizeof(D3D12_RASTERIZER_DESC1),     "RASTERIZER1"},
+        {28,sizeof(D3D12_RASTERIZER_DESC2),     "RASTERIZER2"},
+#else
+        // SDK < 610 headers lack the structs; the sizes below are sizeof of
+        // the real structs under SDK 610+ headers (D3D12_DEPTH_STENCIL_DESC2:
+        // 7 fields ending in BOOL after two D3D12_DEPTH_STENCILOP_DESC1;
+        // RASTERIZER_DESC1/2: the 11/10-field float/int variants), verified
+        // against SDK 616 and 618 headers. The console's Mesa (SDK 618) can
+        // emit all three.
+        {26,60,"DEPTH_STENCIL2"},   // 6*4 + 4 + 2*D3D12_DEPTH_STENCILOP_DESC1(16) + 4 + 4, packed to 60
+        {27,44,"RASTERIZER1"},      // same layout as D3D12_RASTERIZER_DESC with INT DepthBias
+        {28,40,"RASTERIZER2"},      // RASTERIZER_DESC1 with the INT DepthBias dropped
+#endif
+#if defined(D3D12_SDK_VERSION) && D3D12_SDK_VERSION >= 618
+        {29,sizeof(D3D12_SERIALIZED_ROOT_SIGNATURE_DESC),"SERIALIZED_ROOT_SIGNATURE"},
+#else
+        // The struct arrives in SDK 618 (d3d12.h: two pointer members:
+        // pSerializedBlob + SerializedBlobSizeInBytes); older SDKs never see
+        // the subobject, but the console's Mesa (SDK 618 headers) can emit it.
+        {29,2*sizeof(void*),"SERIALIZED_ROOT_SIGNATURE"},
+#endif
+    };
+    auto base=static_cast<const unsigned char*>(stream);
+    const unsigned char* end=base+bytes;
+    std::string subs;
+    bool truncated=false;
+    for(auto p=base;p<end;) {
+        if(size_t(end-p)<sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE)){truncated=true;break;}
+        auto typeStart=p;
+        auto type=*reinterpret_cast<const D3D12_PIPELINE_STATE_SUBOBJECT_TYPE*>(p);
+        // Payloads start at the next pointer-aligned offset after the
+        // 4-byte type.
+        p=reinterpret_cast<const unsigned char*>((reinterpret_cast<uintptr_t>(p)+sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE)+sizeof(void*)-1)&~uintptr_t(sizeof(void*)-1));
+        const auto* e=subobjects;
+        for(;e<subobjects+sizeof(subobjects)/sizeof(subobjects[0])&&e->type!=int(type);++e) {}
+        if(e==subobjects+sizeof(subobjects)/sizeof(subobjects[0])) {
+            subs+=fmt("unknown(type=%d@offset=%zu) ",int(type),size_t(typeStart-base));
+            break;
+        }
+        if(size_t(end-p)<e->size){truncated=true;subs+=fmt("%s(truncated) ",e->name);break;}
+        subs+=fmt("%s ",e->name);
+        // The next subobject starts at the next pointer-aligned offset (each
+        // subobject is an alignas(void*) struct in the real stream).
+        p=reinterpret_cast<const unsigned char*>((reinterpret_cast<uintptr_t>(p)+e->size+sizeof(void*)-1)&~uintptr_t(sizeof(void*)-1));
+        if(subs.size()>400){subs+="...";break;}
+    }
+    return fmt("bytes=%zu%s subobjects=[%s]",bytes,truncated?" truncated":"",subs.c_str());
+}
 static HRESULT STDMETHODCALLTYPE createPipelineStateStream(DevicePtr self,const D3D12_PIPELINE_STATE_STREAM_DESC* d,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**);
     D3D12_DIAG_HOOK(Fn,createPipelineStateStreamSlot)HRESULT hr=call(self,d,id,out);
     // The stream path (ID3D12Device2::CreatePipelineState) is what Mesa's
     // d3d12 driver takes when the device reports
     // opts14.IndependentFrontAndBackStencilRefMaskSupported — the console's
-    // does. The desc is a byte stream of (type, size, value) subobjects, so
-    // walk it and name each one: a refused subobject type or value is what
-    // E_INVALIDARG names here, where the v0desc path's fields would be.
-    if(d&&d->pPipelineStateSubobjectStream&&d->SizeInBytes>=sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE)+8) {
-        auto base=static_cast<const unsigned char*>(d->pPipelineStateSubobjectStream);
-        const unsigned char* end=base+d->SizeInBytes;
-        std::string subs;int depthStencils=0,rasterizers=0,depthStencil2s=0,rasterizer2s=0;
-        for(auto p=base;p+sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE)+sizeof(void*)<=end;) {
-            auto type=*reinterpret_cast<const D3D12_PIPELINE_STATE_SUBOBJECT_TYPE*>(p);p+=sizeof(type);
-            // Alignment: every subobject value is aligned to pointer size.
-            p=reinterpret_cast<const unsigned char*>((reinterpret_cast<uintptr_t>(p)+sizeof(void*)-1)&~uintptr_t(sizeof(void*)-1));
-            if(p+sizeof(void*)>end)break;
-            auto value=p;p+=sizeof(void*);
-            const char* name="?";char extra[96]="";
-            switch(int(type)) {
-            case 0:name="ROOT_SIGNATURE";break;
-            case 1:name="VS";break;
-            case 2:name="PS";break;case 3:name="DS";break;case 4:name="HS";break;
-            case 5:name="GS";break;case 6:name="CS";break;case 7:name="STREAM_OUTPUT";break;
-            case 8:name="BLEND";break;case 9:name="SAMPLE_MASK";break;
-            case 10:name="RASTERIZER";++rasterizers;break;
-            case 11:name="DEPTH_STENCIL";++depthStencils;break;
-            case 12:name="INPUT_LAYOUT";break;case 13:name="IB_STRIP_CUT";break;
-            case 14:name="PRIMITIVE_TOPOLOGY";break;case 15:name="RTV_FORMATS";break;
-            case 16:name="DSV_FORMAT";break;case 17:name="SAMPLE_DESC";break;
-            case 18:name="NODE_MASK";break;case 19:name="CACHED_PSO";break;
-            case 20:name="FLAGS";break;case 21:name="DEPTH_STENCIL1";++depthStencils;break;
-            case 22:name="VIEW_INSTANCING";break;case 24:name="AS";break;case 25:name="MS";break;
-            case 26:name="DEPTH_STENCIL2";++depthStencil2s;break;
-            case 27:name="RASTERIZER1";++rasterizers;break;
-            case 28:name="RASTERIZER2";++rasterizer2s;break;
-            case 29:name="SERIALIZED_ROOT_SIGNATURE";break;
-            default:snprintf(extra,sizeof extra," type=%d",int(type));break;
-            }
-            if(*extra)subs+=fmt("%s%s ",name,extra);
-            else subs+=fmt("%s ",name);
-            if(subs.size()>400){subs+="...";break;}
-        }
-        D3D12_DIAG_FAILED("CreatePipelineState(stream)",fmt("%llu/%d/%d/%d/%d",(unsigned long long)d->SizeInBytes,depthStencils,depthStencil2s,rasterizers,rasterizer2s),
-            fmt("bytes=%llu subobjects=[%s]",(unsigned long long)d->SizeInBytes,subs.c_str()));
+    // does. A refused subobject type or value is what E_INVALIDARG names
+    // here, where the v0desc path's fields would be.
+    if(d&&d->pPipelineStateSubobjectStream) {
+        int depthStencils=0,rasterizers=0,depthStencil2s=0,rasterizer2s=0;
+        const std::string text=streamSubobjects(d->pPipelineStateSubobjectStream,size_t(d->SizeInBytes));
+        for(size_t pos=text.find("DEPTH_STENCIL2 ");pos!=std::string::npos;pos=text.find("DEPTH_STENCIL2 ",pos+1))++depthStencil2s;
+        for(size_t pos=text.find("RASTERIZER2 ");pos!=std::string::npos;pos=text.find("RASTERIZER2 ",pos+1))++rasterizer2s;
+        for(size_t pos=text.find("RASTERIZER ");pos!=std::string::npos;pos=text.find("RASTERIZER ",pos+1))++rasterizers;
+        for(size_t pos=text.find("DEPTH_STENCIL ");pos!=std::string::npos;pos=text.find("DEPTH_STENCIL ",pos+1))++depthStencils;
+        D3D12_DIAG_FAILED("CreatePipelineState(stream)",fmt("%llu/%d/%d/%d/%d",(unsigned long long)d->SizeInBytes,depthStencils,depthStencil2s,rasterizers,rasterizer2s),text);
     } else D3D12_DIAG_FAILED("CreatePipelineState(stream)","null","desc=null or empty stream");
     return hr;
 }
