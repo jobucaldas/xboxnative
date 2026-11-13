@@ -26,7 +26,8 @@ the app's `LocalState` works the same way.
 
 ## In-game commands (launcher overlay)
 
-Accepted only while a game guest is running:
+Accepted only while a game guest is running (or has been declared dead, see
+`gdead`):
 
 | Command | Effect |
 | --- | --- |
@@ -34,6 +35,32 @@ Accepted only while a game guest is running:
 | `gquit` | ask the game's windows to close (WM_CLOSE) |
 | `gforce` | force quit: sync saves and restart the launcher |
 | `gfps` | toggle the overlay FPS counter |
+| `gdead` | synthetic guest death: the launcher enters the same dead state a real one does (dead page, guide opens on Force quit) |
+| `galive` | clear a `gdead`: the guest's own presents decide the next state (a live guest recovers, a truly dead one stays dead) |
+
+`gdead` is the way to exercise the dead page and the guide without a real
+crash. It goes through the same verdict path the guest watchdog uses, is held
+until `galive` (a live guest's presents do not clear it early), and is dropped
+when the guest ends. It is accepted only from this file channel. Logged as
+`overlay: gdead (synthetic)`; `galive` logs `overlay: galive (synthetic)`.
+
+### Guide state lines
+
+The guide logs each state change it makes, so a run can check the focus and the
+action without a screenshot:
+
+| Line | When |
+| --- | --- |
+| `overlay: guide open (dead=0\|1)` | the guide opens (1 when the guest is dead) |
+| `overlay: guide row=<n> <name>` | focus moves to a Home row: `0 Resume`, `1 Quit game`, `2 Force quit` |
+| `overlay: guide tab=<t> row=<n>` | focus moves on the Achievements (1) or Settings (2) tab |
+| `overlay: guide action=<name>` | a pad edge triggers a guide action: `toggle`, `up`, `down`, `forceQuit`, `quitGame`, `resume`, `close` |
+
+A dead run's expected sequence: `gdead`, `gmenu` (open on Force quit: the
+open line with `dead=1`, then `row=2 Force quit`), then a `gpad` press
+(`gpad A` on Force quit logs `action=forceQuit` and the force-quit steps; `gpad
+DPAD_DOWN` logs `action=down` and `row=0 Resume`). The launcher returns to the
+library once the force quit finishes.
 
 ## In-game pad injection: `gpad` and `gpadseq`
 
@@ -47,7 +74,9 @@ XInput/RawInput game sees them exactly like a real controller. Precedence:
   press can never release an injected one. Either source releasing its own
   buttons is visible to the game.
 - The launcher's in-game overlay (guide menu) always wins: while it owns
-  input the game sees an empty pad, automation included.
+  input the game sees an empty pad, automation included. The same presses also
+  drive the guide while it is open or the guest is dead, so a script can
+  navigate it and reach Force quit. Closed and alive, they reach only the game.
 
 Safety: `gpad`/`gpadseq` are accepted **only** from the cmd.txt file channel
 and **only** while a game guest is on screen. The game itself and the network

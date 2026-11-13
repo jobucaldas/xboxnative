@@ -1914,6 +1914,48 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     static bool held(GamepadButtons b,GamepadButtons m){return (b&m)==m;}
     bool m_inputHooks=false;
     bool m_achPollStarted=false;   // the unlock poller runs while the guest does
+    // The guide's pad input. The physical pad comes through Windows.Gaming.Input;
+    // a scripted gpad press (cmd.txt) is an XINPUT mask aimed at the game. While
+    // the guide owns input (open) or the guest is dead, the same scripted press
+    // also drives the guide, so a script reaches Force quit the way a player
+    // does. Closed and alive, scripted presses stay the game's alone (a scripted
+    // View+Menu would otherwise open the guide mid-game).
+    uint16_t m_scriptedButtons=0;   // gpad's held XINPUT mask this tick (PollGuestControllers)
+    static GamepadButtons guide_buttons(uint16_t xinput) {
+        struct Map { uint16_t bit; GamepadButtons button; };
+        static const Map map[]={
+            {gpad::BTN_DPAD_UP,GamepadButtons::DPadUp},{gpad::BTN_DPAD_DOWN,GamepadButtons::DPadDown},
+            {gpad::BTN_DPAD_LEFT,GamepadButtons::DPadLeft},{gpad::BTN_DPAD_RIGHT,GamepadButtons::DPadRight},
+            {gpad::BTN_START,GamepadButtons::Menu},{gpad::BTN_BACK,GamepadButtons::View},
+            {gpad::BTN_LB,GamepadButtons::LeftShoulder},{gpad::BTN_RB,GamepadButtons::RightShoulder},
+            {gpad::BTN_LSTICK,GamepadButtons::LeftThumbstick},{gpad::BTN_RSTICK,GamepadButtons::RightThumbstick},
+            {gpad::BTN_A,GamepadButtons::A},{gpad::BTN_B,GamepadButtons::B},
+            {gpad::BTN_X,GamepadButtons::X},{gpad::BTN_Y,GamepadButtons::Y}};
+        GamepadButtons out=GamepadButtons::None;
+        for(const Map& m:map)if(xinput&m.bit)out=out|m.button;
+        return out;
+    }
+    // What guest_menu reads as the pad: the physical reading, plus scripted
+    // presses only while the guide is open or the guest is dead (see above).
+    GamepadButtons guide_input(GamepadButtons physical) const {
+        const bool dead=guest_overlay::guestDead.load(std::memory_order_acquire);
+        if(!dead && !guest_overlay::menuOpen.load(std::memory_order_acquire))return physical;
+        return physical|guide_buttons(m_scriptedButtons);
+    }
+    // A live guest, or one declared dead that the cmd.txt channel and the guide
+    // still act on (a dead guest has no m_guestSurface).
+    bool guest_session_up() const {
+        return m_guestSurface||guest_overlay::guestDead.load(std::memory_order_acquire);
+    }
+    // Guide state log: one line per open/tab/row change (guest_watchdog::guide_trace_step).
+    guest_watchdog::GuideTrace m_guideTrace;
+    void guide_log() {
+        const bool dead=guest_overlay::guestDead.load(std::memory_order_acquire);
+        const bool open=guest_overlay::menuOpen.load(std::memory_order_acquire);
+        for(const std::string& line:guest_watchdog::guide_trace_step(m_guideTrace,open,dead,
+                guest_overlay::ui_guideTab.load(),guest_overlay::selection.load()))
+            logf("%s",line.c_str());
+    }
     void guest_menu(double t,GamepadButtons b) {
         if(guest_overlay::inputBlocked.load(std::memory_order_relaxed))m_input.release_all(); // nothing stays held behind the menu
         if(!m_achPollStarted) {   // gbe writes achievements.json while the game runs; watch it from a background thread
@@ -1954,6 +1996,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 pressed(combo),
                 pressed(GamepadButtons::DPadUp),pressed(GamepadButtons::DPadDown),
                 pressed(GamepadButtons::A),pressed(GamepadButtons::B));
+            if(s.action!=GuideAction::none)logf("%s",guest_watchdog::guide_action_line(s.action).c_str());
             switch(s.action) {
             case GuideAction::toggle:
                 menu_command("toggle","controller");   // sets menuOpen; focuses Force quit while dead
@@ -1973,6 +2016,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             case GuideAction::none: break;
             }
             m_menuPrev=b;
+            guide_log();
             frame_log(t);
             return;
         }
@@ -1994,6 +2038,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             else if(pressed(GamepadButtons::B))menu_command("toggle","controller");
         }
         m_menuPrev=b;
+        guide_log();
         frame_log(t);
     }
     // Frame times from the game's Present (guest_overlay.h): raw rows to
@@ -2180,6 +2225,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if(!m_guestSurface && !play_runtime::observed.load(std::memory_order_acquire))return;
         m_guestEndGen=g_launch.gen;
         m_gpad.clear();   // an armed gpad program never outlives its game
+        m_synthDead=false;   // nor a synthetic gdead hold
         achievement_poller_stop();   // the guest is exiting; stop watching its achievements.json
         m_achPollStarted=false;      // the next launch starts its own poller
         if(m_leaving)return;   // Force quit is already syncing and restarting
@@ -2409,8 +2455,27 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         logf("cmd.txt SYNTHETIC command: '%s' (screen=%d)", c.c_str(), (int)g_screen.load());
         if (c.rfind("open ", 0) == 0) { uint32_t id = (uint32_t)strtoul(c.c_str() + 5, nullptr, 10); if (id) open_detail(id, game_name(id), "cmd.txt open (synthetic)"); return; }
         if (c.rfind("sleep ", 0) == 0) { holdUntil = t + std::min(600.0, atof(c.c_str() + 6)); return; }
+        // gdead/galive: a synthetic guest death for a console run of the dead page
+        // and guide. gdead runs the same apply_guest_verdict the watchdog runs;
+        // galive drops the hold and the watchdog decides on its next tick (a
+        // guest that presents again recovers, a truly dead one stays dead).
+        if (c == "gdead") {
+            if (guest_overlay::guestDead.load(std::memory_order_acquire)) { logf("cmd.txt: gdead ignored (guest already dead)"); return; }
+            if (!m_guestSurface) { logf("cmd.txt: gdead ignored, no game running"); return; }
+            logf("overlay: gdead (synthetic)");
+            m_synthDead = true;
+            apply_guest_verdict(guest_watchdog::Verdict{true, guest_watchdog::Reason::silent},
+                                guest_overlay::lastPresentTick.load(std::memory_order_acquire), false);
+            return;
+        }
+        if (c == "galive") {
+            if (!m_synthDead) { logf("cmd.txt: galive ignored (no synthetic dead)"); return; }
+            m_synthDead = false;
+            logf("overlay: galive (synthetic)");
+            return;
+        }
         if (c == "gmenu" || c == "gquit" || c == "gforce" || c == "gfps") {   // in-game menu (guest_overlay.h)
-            if (!m_guestSurface) { logf("cmd.txt: no game running"); return; }
+            if (!guest_session_up()) { logf("cmd.txt: no game running"); return; }
             menu_command(c == "gmenu" ? "toggle" : c == "gquit" ? "quit" : c == "gforce" ? "force" : "fps", "cmd.txt (synthetic)"); return;
         }
         // Item D20: the guide's tabs are switched by the pad's shoulders, which a
@@ -2429,7 +2494,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // is on screen; the game and the network cannot reach this path. The
         // armed program is cleared when the guest ends (guest_ended).
         if (c.rfind("gpad ", 0) == 0 || c == "gpad") {
-            if (!m_guestSurface) { logf("cmd.txt: gpad ignored, no game running"); return; }
+            if (!guest_session_up()) { logf("cmd.txt: gpad ignored, no game running"); return; }
             const char* perr = nullptr;
             std::vector<gpad::Press> prog;
             if (!gpad::parse_gpad(c.c_str() + 4, c.size() - 4, &prog, &perr) || prog.empty()) {
@@ -2441,7 +2506,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             return;
         }
         if (c.rfind("gpadseq", 0) == 0 && (c.size() == 7 || c[7] == ' ')) {
-            if (!m_guestSurface) { logf("cmd.txt: gpadseq ignored, no game running"); return; }
+            if (!guest_session_up()) { logf("cmd.txt: gpadseq ignored, no game running"); return; }
             const char* name = c.size() > 8 ? c.c_str() + 8 : "";
             if (!*name || strchr(name, '/') || strchr(name, '\\') || strchr(name, '.') || strstr(name, "..")) {
                 logf("cmd.txt: gpadseq: bad program name");
@@ -2580,6 +2645,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         m_gpad.tick(GetTickCount64());
         uint16_t injButtons; uint8_t injLt, injRt;
         m_gpad.held(&injButtons, &injLt, &injRt);
+        m_scriptedButtons=injButtons;   // the guide reads this too while it owns input (guide_input)
         static std::array<Gamepad,4> assigned{nullptr,nullptr,nullptr,nullptr};
         try {
             auto pads=Gamepad::Gamepads();
@@ -3681,14 +3747,23 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         in.guestFault=guest->faulted.load(std::memory_order_acquire)
                     || guest_overlay::deviceLost.load(std::memory_order_acquire);   // Present failed with a lost device (bugbot r4559178794)
         in.guestFinished=guest->finished.load(std::memory_order_acquire);
-        const auto v=guest_watchdog::evaluate(in);
+        // A cmd.txt gdead holds the dead verdict until galive: a live guest's
+        // presents would otherwise clear it on the next tick.
+        const auto v=m_synthDead?guest_watchdog::Verdict{true,guest_watchdog::Reason::silent}:guest_watchdog::evaluate(in);
         // Recovery needs proof of a NEW present since death: the heartbeat
         // must differ from the one recorded at the dead verdict.
         const bool heartbeatAdvanced=wasDead && in.lastActivityTick!=0 && in.lastActivityTick!=m_deadHeartbeatTick;
+        apply_guest_verdict(v,in.lastActivityTick,heartbeatAdvanced);
+    }
+    // The one place a guest verdict becomes launcher state. The watchdog tick
+    // and the cmd.txt gdead path both call it, so a synthetic death is exactly
+    // the state a real one produces.
+    void apply_guest_verdict(const guest_watchdog::Verdict& v,uint64_t heartbeat,bool heartbeatAdvanced) {
+        const bool wasDead=guest_overlay::guestDead.load(std::memory_order_acquire);
         const auto s=guest_watchdog::step(wasDead,m_guestSurface,v,heartbeatAdvanced);
         if(s.dead&&!wasDead){   // fresh dead verdict: log once, remember the heartbeat to beat
             if(!m_guestDeadLogged){logf("watchdog: guest %s — launcher UI resumes (fps counter -> 0, guide available)",v.reason==guest_watchdog::Reason::fault?"raised a contained exception":"stopped presenting");m_guestDeadLogged=true;}
-            m_deadHeartbeatTick=in.lastActivityTick;
+            m_deadHeartbeatTick=heartbeat;
         } else if(!s.dead) {
             if(wasDead)dead_surface_teardown();   // guest resumed: drop the launcher surface, the guest's chain shows through
             m_guestDeadLogged=false;m_deadHeartbeatTick=0;   // recovered: re-arm the log for a future death
@@ -3696,6 +3771,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         guest_overlay::guestDead=s.dead;
         m_guestSurface=s.guestSurface;
     }
+    bool m_synthDead=false;   // cmd.txt gdead: the synthetic dead verdict, cleared by galive
     bool m_guestDeadLogged=false;
     uint64_t m_deadHeartbeatTick=0;   // lastPresentTick at the moment death was declared (recovery beats it)
     // The dead page's launcher-owned presentation surface (bugbot
@@ -3809,7 +3885,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             autotest(t); cmdhook(t); detail_tick(t); move_tick(t);   // item 33: the move job's completion tick
             if (selftest::tick()) selftest::run_async(m_window.Dispatcher());
             guest_watchdog_tick(t);
-            if(m_guestSurface){guest_menu(t,n?rd.Buttons:GamepadButtons::None);Sleep(1);continue;}
+            if(m_guestSurface){guest_menu(t,guide_input(n?rd.Buttons:GamepadButtons::None));Sleep(1);continue;}
             // The guest died (watchdog). The launcher presents its "Game not
             // responding" screen from its OWN composition surface (bugbot
             // r4559305219 redesign): no guest device, context or swapchain is
@@ -3819,7 +3895,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             // on the exact hang the watchdog exists to outlive. The guide's
             // force quit works from here (menu_command below).
             if(m_guestChain) {
-                guest_menu(t,n?rd.Buttons:GamepadButtons::None);   // guide input: open, navigate, force quit
+                guest_menu(t,guide_input(n?rd.Buttons:GamepadButtons::None));   // guide input: open, navigate, force quit
                 draw(t);   // fills g_fb: the dead page (with the guide card when menuOpen)
                 if(!m_deadSurfaceUp && !dead_surface_setup()) {
                     // The composition surface could not be created: keep the
