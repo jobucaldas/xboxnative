@@ -96,6 +96,71 @@ b += opt
 b += b'\x00' * 0x100
 open(sys.argv[1], 'wb').write(bytes(b))
 PYEOF
+# dll-exp-after: a python-built minimal PE32 whose export function sits right
+# after the export directory — OUTSIDE the directory's real Size (0x40) but
+# INSIDE the 64 KiB window a guessed bound would use. The forwarder test must
+# bound by IMAGE_DATA_DIRECTORY[0].Size exactly, or this DLL's real function
+# RVA reads as a forwarder STRING (Bugbot 4560048276).
+python3 - "$tmp/dll-exp-after.dll" <<'PYEOF'
+import struct, sys
+
+out = sys.argv[1]
+IMG = 0x2000   # two pages: SizeOfImage
+HDRS = 0x1000  # SizeOfHeaders
+EXP = 0x1000   # export directory RVA (the section's own page)
+FN = 0x1080    # the export's code RVA: OUTSIDE the directory Size, INSIDE 64K
+STRS = 0x10a0  # strings + tables
+
+b = bytearray(IMG)
+b[0:2] = b'MZ'
+NT = 0x40
+OPT = NT + 24  # 0x58
+struct.pack_into('<I', b, 0x3c, NT)  # e_lfanew
+b[NT:NT + 4] = b'PE\x00\x00'
+# COFF: machine i386, 1 section, no symbols; opt header size 0xe0
+struct.pack_into('<HHIIIHH', b, NT + 4, 0x14c, 1, 0, 0, 0, 0xe0, 0x10e)
+opt = bytearray(0xe0)
+struct.pack_into('<H', opt, 0, 0x10b)        # PE32
+struct.pack_into('<I', opt, 16, FN)          # AddressOfEntryPoint = the export
+struct.pack_into('<I', opt, 28, 0x64000000)  # ImageBase (the interpreter's section arena)
+struct.pack_into('<I', opt, 32, 4096)        # SectionAlignment
+struct.pack_into('<I', opt, 36, 4096)        # FileAlignment
+struct.pack_into('<H', opt, 40, 4)           # MajorOSVersion (mingw-like)
+struct.pack_into('<I', opt, 56, IMG)         # SizeOfImage
+struct.pack_into('<I', opt, 60, HDRS)        # SizeOfHeaders
+struct.pack_into('<H', opt, 68, 2)           # SubSystem console
+struct.pack_into('<I', opt, 92, 1)           # NumberOfRvaAndSizes
+# data directory 0 (export): RVA 0x1000, Size 0x40 — the directory struct and
+# its three tables ONLY; the function at 0x1080 is OUTSIDE these bounds.
+struct.pack_into('<II', opt, 96, EXP, 0x40)
+b[OPT:OPT + len(opt)] = opt
+# one .flat section covering everything past the headers, R|W|X: the mapper's
+# headers span (0..SizeOfHeaders) must not overlap it, and the section VA must
+# be SectionAlignment-aligned.
+SEC_VA = 0x1000
+sec = struct.pack('<8sIIIIIIHHI', b'.flat\0\0\0', IMG - SEC_VA, SEC_VA, IMG - SEC_VA, SEC_VA, 0, 0, 0, 0, 0xE0000040)
+b[OPT + 0xe0:OPT + 0xe0 + 40] = sec
+
+# Export directory, 4-byte aligned as the Win32 loader reads it: Char u16 @0,
+# pad u16 @2, TimeDateStamp u32 @4, Major u16 @8, Minor u16 @10, Name u32 @12,
+# Base u32 @16, NumberOfFunctions u32 @20, NumberOfNames u32 @24, EAT u32 @28,
+# Names u32 @32, Ords u32 @36 — 0x40 bytes, exactly the declared Size. The EAT
+# is a table at STRS+0x18 (one u32 holding the function RVA FN), the
+# name-pointer table at STRS+0x10 (one u32 -> the name string at STRS+0x20),
+# the ordinal table at STRS+0x14 (one u16, index 0).
+struct.pack_into('<HHIHHIIIIIII', b, EXP,
+                 0, 0, 0, 0, 0, STRS, 1, 1, 1, STRS + 0x18, STRS + 0x10, STRS + 0x14)
+# the export's code at 0x1080: mov eax,0x0DDBA11 ; ret
+b[FN:FN + 6] = b'\xb8\x11\xba\xdd\x00\xc3'
+b[STRS:STRS + 0x10] = b'exp-after.dll\x00\x00'          # dll name @0x10a0
+struct.pack_into('<I', b, STRS + 0x10, STRS + 0x20)     # name ptr table -> 0x10c0
+struct.pack_into('<H', b, STRS + 0x14, 0)               # ordinal table: idx 0
+struct.pack_into('<I', b, STRS + 0x18, FN)              # EAT: function RVA 0x1080
+b[STRS + 0x20:STRS + 0x30] = b'after_fn\x00\x00\x00\x00\x00\x00\x00\x00'  # @0x10c0
+
+b += bytes(IMG - len(b))  # raw section covers the whole image: pad the file
+open(out, 'wb').write(bytes(b))
+PYEOF
 # exe: imports dll_a_sum/dllb_attach_marker and the cyclic pair's exports,
 # calls the kernel32 DLL APIs (LoadLibrary/GetProcAddress/FreeLibrary/
 # GetModuleHandleA/W/ExW, Encode/DecodePointer), and exercises ExitThread's
@@ -110,4 +175,4 @@ set -e
 grep -q '^play: dll-chain loaded, all imports bound, exit 42$' <<<"$out" || {
   echo "X86-DLL FAIL: no clean chain run"; echo "$out"; exit 1; }
 ! grep -q '^play: unresolved\|^play: fault' <<<"$out" || { echo "X86-DLL FAIL: unresolved import or fault"; echo "$out"; exit 1; }
-echo "X86-DLL PASS: guest PE32 DLL chain (exe -> dll-a -> dll-b), the cycle dll-c <-> dll-d (each mapped once), DllMain attach, LoadLibraryA/GetProcAddress/FreeLibrary/GetModuleHandleA/W/ExW (flags, NULL name, FROM_ADDRESS) from guest code, Encode/DecodePointer round trip, entry-RVA-0 DLL with SizeOfImage >> file, second DLL relocated to a disjoint arena, bad-image rejection, per-thread ExitThread"
+echo "X86-DLL PASS: guest PE32 DLL chain (exe -> dll-a -> dll-b), the cycle dll-c <-> dll-d (each mapped once), DllMain attach, LoadLibraryA/GetProcAddress/FreeLibrary/GetModuleHandleA/W/ExW (flags, NULL name, FROM_ADDRESS) from guest code, forwarder bound = the export directory's Size (a real export right after it is code), Encode/DecodePointer round trip, entry-RVA-0 DLL with SizeOfImage >> file, second DLL relocated to a disjoint arena, bad-image rejection, per-thread ExitThread"

@@ -165,6 +165,30 @@ int fixture_main(void) {
         u32 (__stdcall *fwdcase)(void) = (u32 (__stdcall *)(void))GetProcAddress(hfwd, "fwd_ordcase");
         ok(fwdcase != 0);
         if (fwdcase) ok(fwdcase() == 0xB00B5u);
+        /* 20c. A REAL export whose RVA sits right after the export directory
+         * is code, not a forwarder string: the forwarder test is the export
+         * DIRECTORY's bounds ([IMAGE_DATA_DIRECTORY[0].VirtualAddress,
+         * +Size), peformat.ms — IMAGE_DATA_DIRECTORY::Size), never a guessed
+         * 64 KiB window, which would swallow real code in a compact DLL
+         * (Bugbot 4560048276). dll-exp-after.dll is python-built with its
+         * function RVA 0x1080 inside the old guessed window but outside the
+         * declared Size 0x40: (a) the name resolves to code inside the image
+         * (a forwarder would answer 0 here — the registry has no
+         * "exp-after.after_fn"), (b) calling it runs the real bytes. */
+        {
+            u32 hxa = LoadLibraryA("dll-exp-after.dll");
+            ok(hxa != 0);
+            u32 pa = GetProcAddress(hxa, "after_fn");
+            ok(pa != 0);
+            ok(pa > hxa && pa < hxa + 0x2000);  /* inside the image: real code */
+            if (pa) {
+                u32 (__stdcall *fn)(void) = (u32 (__stdcall *)(void))pa;
+                ok(fn() == 0x0DDBA11u);  /* the bytes execute — ASCII would fault */
+            }
+            /* By ordinal: the same export answers the same address (an EAT
+             * entry outside the directory bounds is never rebased ASCII). */
+            ok(GetProcAddress(hxa, (const char *)1) == pa);
+        }
     }
 
     /* 21-22. The cyclic pair dll-c <-> dll-d: each module maps exactly once

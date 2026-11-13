@@ -79,6 +79,16 @@ inline void read_exports(Image& img, const std::vector<uint8_t>& bytes) {
     size_t nt = u32(bytes, 0x3c), opt = nt + 24;
     uint32_t exp_rva = u32(bytes, opt + 96 + 0);  // data directory 0: export table
     if (!exp_rva) return;
+    // The forwarder test's range is the export directory's own Size
+    // (IMAGE_DATA_DIRECTORY[0].Size), not a guessed 64 KiB: a small DLL whose
+    // code sits right after the export table would have a real function RVA
+    // inside [exp_rva, exp_rva+0x10000) and be misread as ASCII (Bugbot
+    // 4560048276). Windows' LdrGetProcedureAddress test is exactly
+    // "RVA within the directory's bounds".
+    uint32_t exp_size = u32(bytes, opt + 96 + 4);
+    auto is_forwarder = [&](uint32_t fn_rva) {
+        return exp_size && fn_rva >= exp_rva && fn_rva - exp_rva < exp_size;
+    };
     img.ordinal_base = u32(bytes, exp_rva + 16);
     uint32_t n_names = u32(bytes, exp_rva + 24), n_funcs = u32(bytes, exp_rva + 20);
     uint32_t names_rva = u32(bytes, exp_rva + 32), funcs_rva = u32(bytes, exp_rva + 28), ords_rva = u32(bytes, exp_rva + 36);
@@ -93,7 +103,7 @@ inline void read_exports(Image& img, const std::vector<uint8_t>& bytes) {
         uint32_t fn_rva = u32(bytes, funcs_rva + idx * 4);
         // A forwarded export (RVA inside the export directory) is recorded as-is:
         // the caller resolves the "dll.symbol" string form, as Windows answers.
-        if (fn_rva >= exp_rva && fn_rva < exp_rva + 0x10000 && n_funcs) {
+        if (is_forwarder(fn_rva)) {
             std::string fwd = pe_str(bytes, fn_rva);
             for (auto& ch : fwd) if (ch >= 'A' && ch <= 'Z') ch += 32;
             img.exports[name] = 0;  // marker: forwarded; the name string is kept below
@@ -105,7 +115,7 @@ inline void read_exports(Image& img, const std::vector<uint8_t>& bytes) {
         // A forwarder RVA (inside the export directory) is kept as its string:
         // ordinal lookups must resolve it like name lookups do, never rebase an
         // RVA that is really ASCII text (Bugbot 4559267308).
-        if (fn_rva >= exp_rva && fn_rva < exp_rva + 0x10000 && n_funcs) {
+        if (is_forwarder(fn_rva)) {
             // Lowercase the string exactly like a named forward: an ordinal
             // lookup and a name lookup of the same export must fold the same
             // way, or a mixed-case forward ("DLL-B.value") resolves by name
