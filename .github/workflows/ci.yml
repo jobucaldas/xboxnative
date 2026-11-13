@@ -172,6 +172,11 @@ jobs:
       # and the resizeelide.txt opt-out parses. Pure functions, host toolchain.
       - name: "Redundant-resize elision decision unit tests"
         run: bash src/xbox-test/app/tests/resize-elision.sh
+      # Every VK_SUCCESS check in the Vulkan fixtures must report the real
+      # VkResult; a literal 0 beside one is exactly what masked the console's
+      # real failure as "vkEndCommandBuffer result=0" (PR #195). Scan-only.
+      - name: Vulkan fixture VkResult passthrough audit
+        run: bash src/xbox-test/app/tests/vk-result-audit.sh
   strict-imports:
     runs-on: ubuntu-latest
     steps:
