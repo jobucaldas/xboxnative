@@ -72,7 +72,13 @@ enum ListSlot {ListClose=9,ListReset,ListClearState,ListDrawInstanced,ListDrawIn
 enum FenceSlot {FenceGetCompletedValue=8,FenceSetEventOnCompletion,FenceSignal};
 enum ResourceSlot {ResourceMap=8,ResourceUnmap,ResourceGetDesc,ResourceGetGPUVirtualAddress};
 enum AllocatorSlot {AllocatorReset=8};
+// The stream-path slot is reached only through a QueryInterface to
+// ID3D12Device2 or higher, so patching it never writes a slot a plain
+// ID3D12Device vtable lacks (adoptObject patches at the interface level the
+// caller asked for).
+constexpr int createPipelineStateStreamSlot=47;
 static_assert(CreateCommandQueue==8&&CheckFeatureSupport==13&&CreateFence==36&&GetAdapterLuid==43,"ID3D12Device slot layout");
+static_assert(createPipelineStateStreamSlot==47,"ID3D12Device2 CreatePipelineState slot");
 static_assert(QueueExecuteCommandLists==10&&QueueSignal==14&&QueueWait==15,"ID3D12CommandQueue slot layout");
 static_assert(ListClose==9&&ListResourceBarrier==26&&ListOMSetRenderTargets==46&&ListExecuteIndirect==56,"ID3D12GraphicsCommandList slot layout");
 static_assert(FenceSetEventOnCompletion==9&&FenceSignal==10,"ID3D12Fence slot layout");
@@ -278,6 +284,55 @@ static HRESULT STDMETHODCALLTYPE createGraphicsPipelineState(DevicePtr self,cons
             fmt("vs[%s] ps[%s] rtvfmt=%s dsvfmt=%s samples=%u nodes=%u",vs.c_str(),ps.c_str(),
                 formatText(d->RTVFormats[0]).c_str(),formatText(d->DSVFormat).c_str(),d->SampleDesc.Count,d->NodeMask));
     } else D3D12_DIAG_FAILED("CreateGraphicsPipelineState","null","desc=null");
+    return hr;
+}
+static HRESULT STDMETHODCALLTYPE createPipelineStateStream(DevicePtr self,const D3D12_PIPELINE_STATE_STREAM_DESC* d,REFIID id,void** out) {
+    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**);
+    D3D12_DIAG_HOOK(Fn,createPipelineStateStreamSlot)HRESULT hr=call(self,d,id,out);
+    // The stream path (ID3D12Device2::CreatePipelineState) is what Mesa's
+    // d3d12 driver takes when the device reports
+    // opts14.IndependentFrontAndBackStencilRefMaskSupported — the console's
+    // does. The desc is a byte stream of (type, size, value) subobjects, so
+    // walk it and name each one: a refused subobject type or value is what
+    // E_INVALIDARG names here, where the v0desc path's fields would be.
+    if(d&&d->pPipelineStateSubobjectStream&&d->SizeInBytes>=sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE)+8) {
+        auto base=static_cast<const unsigned char*>(d->pPipelineStateSubobjectStream);
+        const unsigned char* end=base+d->SizeInBytes;
+        std::string subs;int depthStencils=0,rasterizers=0,depthStencil2s=0,rasterizer2s=0;
+        for(auto p=base;p+sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE)+sizeof(void*)<=end;) {
+            auto type=*reinterpret_cast<const D3D12_PIPELINE_STATE_SUBOBJECT_TYPE*>(p);p+=sizeof(type);
+            // Alignment: every subobject value is aligned to pointer size.
+            p=reinterpret_cast<const unsigned char*>((reinterpret_cast<uintptr_t>(p)+sizeof(void*)-1)&~uintptr_t(sizeof(void*)-1));
+            if(p+sizeof(void*)>end)break;
+            auto value=p;p+=sizeof(void*);
+            const char* name="?";char extra[96]="";
+            switch(int(type)) {
+            case 0:name="ROOT_SIGNATURE";break;
+            case 1:name="VS";break;
+            case 2:name="PS";break;case 3:name="DS";break;case 4:name="HS";break;
+            case 5:name="GS";break;case 6:name="CS";break;case 7:name="STREAM_OUTPUT";break;
+            case 8:name="BLEND";break;case 9:name="SAMPLE_MASK";break;
+            case 10:name="RASTERIZER";++rasterizers;break;
+            case 11:name="DEPTH_STENCIL";++depthStencils;break;
+            case 12:name="INPUT_LAYOUT";break;case 13:name="IB_STRIP_CUT";break;
+            case 14:name="PRIMITIVE_TOPOLOGY";break;case 15:name="RTV_FORMATS";break;
+            case 16:name="DSV_FORMAT";break;case 17:name="SAMPLE_DESC";break;
+            case 18:name="NODE_MASK";break;case 19:name="CACHED_PSO";break;
+            case 20:name="FLAGS";break;case 21:name="DEPTH_STENCIL1";++depthStencils;break;
+            case 22:name="VIEW_INSTANCING";break;case 24:name="AS";break;case 25:name="MS";break;
+            case 26:name="DEPTH_STENCIL2";++depthStencil2s;break;
+            case 27:name="RASTERIZER1";++rasterizers;break;
+            case 28:name="RASTERIZER2";++rasterizer2s;break;
+            case 29:name="SERIALIZED_ROOT_SIGNATURE";break;
+            default:snprintf(extra,sizeof extra," type=%d",int(type));break;
+            }
+            if(*extra)subs+=fmt("%s%s ",name,extra);
+            else subs+=fmt("%s ",name);
+            if(subs.size()>400){subs+="...";break;}
+        }
+        D3D12_DIAG_FAILED("CreatePipelineState(stream)",fmt("%llu/%d/%d/%d/%d",(unsigned long long)d->SizeInBytes,depthStencils,depthStencil2s,rasterizers,rasterizer2s),
+            fmt("bytes=%llu subobjects=[%s]",(unsigned long long)d->SizeInBytes,subs.c_str()));
+    } else D3D12_DIAG_FAILED("CreatePipelineState(stream)","null","desc=null or empty stream");
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createComputePipelineState(DevicePtr self,const D3D12_COMPUTE_PIPELINE_STATE_DESC* d,REFIID id,void** out) {
@@ -602,8 +657,8 @@ static HRESULT STDMETHODCALLTYPE allocatorReset(DevicePtr self) {
 inline const Patch* devicePatches(size_t& count){
     static const Patch table[]={
         {CreateCommandQueue,(void*)&createCommandQueue},{CreateCommandAllocator,(void*)&createCommandAllocator},
-        {CreateGraphicsPipelineState,(void*)&createGraphicsPipelineState},{CreateComputePipelineState,(void*)&createComputePipelineState},
-        {CreateCommandList,(void*)&createCommandList},{CheckFeatureSupport,(void*)&checkFeatureSupport},
+        {CreateGraphicsPipelineState,(void*)&createGraphicsPipelineState},{createPipelineStateStreamSlot,(void*)&createPipelineStateStream},
+        {CreateComputePipelineState,(void*)&createComputePipelineState},{CreateCommandList,(void*)&createCommandList},{CheckFeatureSupport,(void*)&checkFeatureSupport},
         {CreateDescriptorHeap,(void*)&createDescriptorHeap},{CreateRootSignature,(void*)&createRootSignature},
         {CreateConstantBufferView,(void*)&createCbv},{CreateShaderResourceView,(void*)&createSrv},
         {CreateUnorderedAccessView,(void*)&createUav},{CreateRenderTargetView,(void*)&createRtv},

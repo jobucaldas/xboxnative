@@ -1700,6 +1700,79 @@ static HRESULT WINAPI createD3D12Device(IUnknown* adapter,D3D_FEATURE_LEVEL mini
     }
     return hr;
 }
+// D3D12GetInterface is how Mesa's d3d12 driver (the OpenGL stack, issue #176)
+// reaches the device: it loads d3d12.dll by name and asks it for
+// CLSID_D3D12SDKConfiguration, then CLSID_D3D12DeviceFactory, whose
+// CreateDevice makes the device. D3D12CreateDevice is never called on that
+// path, so the diagnostics and the CoreWindow factory adoption in
+// createD3D12Device would never run. Patching the factory's CreateDevice slot
+// (vtable slot 9: IUnknown 0-2 plus the six ID3D12DeviceFactory methods before
+// it) gives devices created through it the same treatment. The original entry
+// is called unchanged; only the returned device is adopted.
+static void* d3d12DeviceFactoryOriginalCreateDevice=nullptr;
+static HRESULT STDMETHODCALLTYPE d3d12DeviceFactoryCreateDevice(IUnknown* self,IUnknown* adapter,D3D_FEATURE_LEVEL featureLevel,REFIID id,void** device) {
+    using Fn=HRESULT(STDMETHODCALLTYPE*)(IUnknown*,IUnknown*,D3D_FEATURE_LEVEL,REFIID,void**);
+    auto fn=(Fn)d3d12DeviceFactoryOriginalCreateDevice;
+    if(!fn)return E_NOINTERFACE;
+    HRESULT hr=fn(self,adapter,featureLevel,id,device);
+    {char b[200];snprintf(b,sizeof b,"guest D3D12DeviceFactory CreateDevice fl=0x%x adapter=%d iid=%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x hr=0x%08lx device=%p",
+        unsigned(featureLevel),adapter!=nullptr,unsigned(id.Data1),unsigned(id.Data2),unsigned(id.Data3),
+        id.Data4[0],id.Data4[1],id.Data4[2],id.Data4[3],id.Data4[4],id.Data4[5],id.Data4[6],id.Data4[7],
+        (unsigned long)hr,SUCCEEDED(hr)&&device?*device:nullptr);state->event(b);}
+    if(SUCCEEDED(hr)&&device&&*device) {
+        // Failed D3D12 calls are logged through the probe sink (not as the
+        // run's "last event"), once per distinct call — same as the hooked
+        // D3D12CreateDevice path.
+        d3d12_diag::configure([](const char* text){if(state&&state->log)state->log((std::string("PRUN D3D12 ")+text).c_str());});
+        ID3D12Device* d3d=nullptr;
+        if(SUCCEEDED(static_cast<IUnknown*>(*device)->QueryInterface(__uuidof(ID3D12Device),(void**)&d3d))&&d3d) {
+            d3d12_diag::adopt(d3d);
+            // The DXGI factory the guest reaches through the device must route
+            // guest windows to the CoreWindow, exactly as it does for D3D11.
+            play_graphics::adopt_factory_of(d3d);
+            d3d->Release();
+        }
+        state->milestone=2;
+    }
+    return hr;
+}
+static HRESULT WINAPI d3d12GetInterfaceHook(REFCLSID clsid,REFIID id,void** out) {
+    using Fn=HRESULT(WINAPI*)(REFCLSID,REFIID,void**);
+    auto fn=(Fn)mlp::resolve("d3d12.dll","D3D12GetInterface",0);
+    // An older d3d12.dll without the export (Wine's) is a normal fallback, not
+    // a missing import: Mesa then calls the hooked D3D12CreateDevice directly,
+    // which reaches the same diagnostics. Never reject the guest for it.
+    if(!fn) {
+        if(state->log&&mlp::first_report("d3d12 get interface absent"))
+            state->log("PRUN EVENT guest D3D12GetInterface absent on this d3d12.dll; guest falls back to D3D12CreateDevice");
+        return E_NOINTERFACE;
+    }
+    HRESULT hr=fn(clsid,id,out);
+    {char b[240];snprintf(b,sizeof b,"guest D3D12GetInterface clsid=%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x iid=%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x hr=0x%08lx out=%p",
+        unsigned(clsid.Data1),unsigned(clsid.Data2),unsigned(clsid.Data3),
+        clsid.Data4[0],clsid.Data4[1],clsid.Data4[2],clsid.Data4[3],clsid.Data4[4],clsid.Data4[5],clsid.Data4[6],clsid.Data4[7],
+        unsigned(id.Data1),unsigned(id.Data2),unsigned(id.Data3),
+        id.Data4[0],id.Data4[1],id.Data4[2],id.Data4[3],id.Data4[4],id.Data4[5],id.Data4[6],id.Data4[7],
+        (unsigned long)hr,out&&SUCCEEDED(hr)?*out:nullptr);state->event(b);}
+    // Only the device factory is patched: its CreateDevice is the call that
+    // makes Mesa's device. The SDK configuration object's CreateDeviceFactory
+    // needs a DLL-parallel D3D12Core.dll the console lacks, so Mesa always
+    // falls through to CLSID_D3D12DeviceFactory here.
+    static const IID deviceFactory={0x61f307d3,0xd34e,0x4e7c,{0x83,0x74,0x3b,0xa4,0xde,0x23,0xcc,0xcb}};
+    if(SUCCEEDED(hr)&&out&&*out&&id==deviceFactory) {
+        void** vtable=*reinterpret_cast<void***>(*out);
+        if(vtable[9]!=(void*)&d3d12DeviceFactoryCreateDevice) {
+            DWORD old=0;
+            if(VirtualProtect(vtable+9,sizeof(void*),PAGE_READWRITE,&old)) {
+                d3d12DeviceFactoryOriginalCreateDevice=vtable[9];
+                vtable[9]=(void*)&d3d12DeviceFactoryCreateDevice;
+                VirtualProtect(vtable+9,sizeof(void*),old,&old);
+                if(state->log)state->log("PRUN EVENT guest D3D12GetInterface device factory CreateDevice patched for diagnostics");
+            }
+        }
+    }
+    return hr;
+}
 // D3D12GetDebugInterface and the root-signature helpers are the other d3d12.dll
 // exports a guest imports. The debug layer's absence is reported by the
 // console/Wine as DXGI_ERROR_SDK_COMPONENT_MISSING; a guest that treats that as
@@ -1809,6 +1882,7 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
         if(!strcmp(name,"D3D12SerializeRootSignature")) return (uintptr_t)&d3d12SerializeRootSignature;
         if(!strcmp(name,"D3D12CreateRootSignatureDeserializer")) return (uintptr_t)&d3d12CreateRootSignatureDeserializer;
         if(!strcmp(name,"D3D12EnableExperimentalFeatures")) return (uintptr_t)&d3d12EnableExperimentalFeatures;
+        if(!strcmp(name,"D3D12GetInterface")) return (uintptr_t)&d3d12GetInterfaceHook;
     }
     // Same client gate as LoadLibrary, for static and forwarded imports. Never
     // a callable Steam placeholder: the import stays unresolved, as on Windows
