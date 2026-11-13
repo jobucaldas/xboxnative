@@ -64,6 +64,7 @@ static void lp_sink(const char* s) {
 #include "donors/probe.h"
 
 #include "host/play_runtime.h"
+#include "../uwph/shell32/folder_chain.h"
 #include "steam_client_package.h"
 
 static void lp_publish(int gen,uint32_t appid,const std::string& result,bool ok,int mapped,int total,const char* status,bool terminal);
@@ -239,6 +240,20 @@ static std::filesystem::path provider_remote_dir(uint32_t appid) {
 // system shell32 in this very process and package container (K32T
 // "system-route=1"; see issue #171), so asking that function here yields the
 // guest's LocalLow/Local/Roaming/Documents/Saved Games by construction.
+// The package folders the shared folder chain reads (winrt is used only here).
+// A throwing lookup reports false, so the chain moves on to its next step.
+static bool appPackageFolder(folder_chain::Package kind,std::wstring& out) {
+    try {
+        auto data=winrt::Windows::Storage::ApplicationData::Current();
+        switch(kind) {
+        case folder_chain::Package::Roaming: out=data.RoamingFolder().Path().c_str(); break;
+        case folder_chain::Package::LocalCache: out=data.LocalCacheFolder().Path().c_str(); break;
+        case folder_chain::Package::Local: out=data.LocalFolder().Path().c_str(); break;
+        }
+        return true;
+    } catch(...) { return false; }
+}
+[[maybe_unused]] static const bool appPackageHookInstalled=(folder_chain::packageHook()=appPackageFolder,true);
 static steam_cloud::Roots cloud_roots(uint32_t appid,const std::wstring& gameRoot) {
     static const GUID localLow={0xA520A1A4,0x1780,0x4FF6,{0xBD,0x18,0x16,0x73,0x43,0xC5,0xAF,0x16}};
     static const GUID local={0xF1B32785,0x6FBA,0x4FCF,{0x9D,0x55,0x7B,0x8E,0x7F,0x15,0x70,0x91}};
@@ -249,30 +264,23 @@ static steam_cloud::Roots cloud_roots(uint32_t appid,const std::wstring& gameRoo
     static HMODULE shell=LoadLibraryExW(L"shell32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
     auto known=shell?(Known)GetProcAddress(shell,"SHGetKnownFolderPath"):nullptr;
     steam_cloud::Roots roots;
+    auto providers=folder_chain::systemProviders(known);
     auto add=[&](const char* name,const GUID& id){PWSTR path=nullptr;if(known&&SUCCEEDED(known(id,0,nullptr,&path))&&path)roots[name]=path;if(path)CoTaskMemFree(path);};
-    add("WinAppDataLocalLow",localLow);add("WinAppDataLocal",local);add("WinAppDataRoaming",roaming);
+    add("WinAppDataLocalLow",localLow);add("WinAppDataLocal",local);
     add("WinMyDocuments",documents);add("WinSavedGames",savedGames);
     // A packaged app resolves Local/LocalLow to its AppContainer folder (AC),
     // but the Roaming known folder can fail outright here — and a missing root
     // makes every %WinAppDataRoaming% cloud file "not under a configured root",
-    // so Stardew Valley's saves were skipped instead of downloaded. Try the
-    // packaged-app locations in the order Windows itself would, and log which
-    // one answered so the next console run says where the saves land.
-    if(!roots.count("WinAppDataRoaming")) {
-        auto try_roaming=[&](const char* what,std::wstring p){
-            if(roots.count("WinAppDataRoaming")||p.empty()) return;
-            roots["WinAppDataRoaming"]=p;
-            lp_sink((std::string("STEAM cloud: WinAppDataRoaming from ")+what+" = "+steam_cloud::path_text(p)).c_str());
-        };
-        // The game itself writes wherever %APPDATA% points, so that is the
-        // first thing to believe: if the guest has one, it is the right root.
-        wchar_t appdata[MAX_PATH]{}; DWORD n=GetEnvironmentVariableW(L"APPDATA",appdata,MAX_PATH);
-        if(n&&n<MAX_PATH) try_roaming("the APPDATA environment variable",std::wstring(appdata));
-        try { try_roaming("RoamingFolder",winrt::Windows::Storage::ApplicationData::Current().RoamingFolder().Path().c_str()); } catch(...) {}
-        try { try_roaming("LocalCache\\Roaming",(winrt::Windows::Storage::ApplicationData::Current().LocalCacheFolder().Path()+L"\\Roaming").c_str()); } catch(...) {}
-        try { try_roaming("LocalFolder\\..\\RoamingState",(winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path()+L"\\..\\RoamingState").c_str()); } catch(...) {}
-        if(!roots.count("WinAppDataRoaming")) lp_sink("STEAM cloud: no WinAppDataRoaming root; %WinAppDataRoaming% files will be skipped");
-    }
+    // so Stardew Valley's saves were skipped instead of downloaded. The shared
+    // folder chain (uwph/shell32/folder_chain.h) tries the known folder, then the
+    // packaged-app locations in the order Windows itself would, and the log says
+    // which one answered so the next console run shows where the saves land.
+    auto roam=folder_chain::resolve(providers,roaming,0,folder_chain::roamingChain());
+    if(roam.known) roots["WinAppDataRoaming"]=roam.path;
+    else if(!roam.path.empty()) {
+        roots["WinAppDataRoaming"]=roam.path;
+        lp_sink((std::string("STEAM cloud: WinAppDataRoaming from ")+roam.what+" = "+steam_cloud::path_text(roam.path)).c_str());
+    } else lp_sink("STEAM cloud: no WinAppDataRoaming root; %WinAppDataRoaming% files will be skipped");
     // Evidence for the next console run: what the guest sees for the two
     // environment variables a game falls back to when the known-folder call
     // fails. Paths only, no account names.

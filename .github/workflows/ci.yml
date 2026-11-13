@@ -311,15 +311,21 @@ jobs:
         timeout-minutes: 15
         uses: ./.github/actions/apt-install
         with:
-          packages: gcc-mingw-w64-i686
+          packages: gcc-mingw-w64-i686 g++-mingw-w64-i686 wine wine64
       - name: x86 execution core (hardware-compared ALU, faults, thunks, owned i686 fixture)
         run: bash src/xbox-test/app/tests/x86-core.sh
       - name: "x86 guest surface (mingw CRT program through the interpreter: printf, heap, TLS, VirtualAlloc)"
         run: bash src/xbox-test/app/tests/x86-guest.sh
+      - name: "x86 guest DLL loading (PE32 chain, DllMain, LoadLibrary/GetProcAddress, OS forwarders, cycles)"
+        run: bash src/xbox-test/app/tests/x86-dll.sh
       - name: "x86 implicit TLS (PE32 TLS directory, block copy, callbacks; negative control)"
         run: bash src/xbox-test/app/tests/x86-tls.sh
       - name: "x86 COM thunks (guest proxies, vtable stubs, refcounts, fault-by-name against a mock host object)"
         run: bash src/xbox-test/app/tests/x86-com.sh
       - name: "x86 launch route (i686 fixture through the launcher's PE32 entry point and result mapping)"
         run: bash src/xbox-test/app/tests/x86-launch-route.sh
+      - name: "x86 C++ runtime fixture (iostream, std::string, exceptions, std::thread)"
+        run: bash src/xbox-test/app/tests/x86-cxxrt.sh
+      - name: "x86 C++ runtime fixture, wine cross-check (skips when wine cannot run PE32)"
+        run: bash src/xbox-test/app/tests/x86-cxxrt.sh --wine
   # TODO: on-device sections of src/xbox-test/smoke-all.sh need a console and cannot run in GitHub Actions.

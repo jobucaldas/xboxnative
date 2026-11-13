@@ -27,7 +27,10 @@ External dependencies fetched at build time (never copied here; pinned in deps.p
                                                git-ignored out/wine-donors/ (avrt, dinput8, hid, setupapi, shcore, version; and runtime/:
                                                msvcp140, msvcp140_1, msvcp140_2, msvcp140_atomic_wait, msvcp140_codecvt_ids,
                                                concrt140, packaged with COPYING.LIB/LICENSE/SOURCE.txt). The built DLLs are
-                                               never committed. patches/wine-src/0001-pe-rodata.patch adjusts PE constant-data section flags;
+                                               never committed. The same tarball is also built at i386 by
+                                               src/tools/build-wine-runtime-i386.sh into out/wine-runtime-i386/
+                                               (ucrtbase, vcruntime140, msvcp140, concrt140 for PE32 guests), same licence and
+                                               never-committed rule. patches/wine-src/0001-pe-rodata.patch adjusts PE constant-data section flags;
                                                its minimal Wine context is LGPL-2.1-or-later (Copyright 2000 Alexandre Julliard).
                                                Retain that patch with the corresponding source. LGPL-2.1-or-later is generally read as combinable with GPLv3 code (LGPLv2.1 s.3 lets a
                                                recipient apply the GPL instead).

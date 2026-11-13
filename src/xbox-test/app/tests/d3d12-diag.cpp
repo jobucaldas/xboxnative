@@ -9,6 +9,9 @@
 #include <cstdio>
 #include <string>
 #include <thread>
+#include <tuple>
+#include <utility>
+#include <type_traits>
 #include <vector>
 #include "../host/d3d12_diag.h"
 static unsigned checks=0,failures=0;
@@ -17,51 +20,6 @@ static std::vector<std::string> lines;
 static void sinkLine(const char* text){lines.push_back(text);}
 static size_t count(const char* needle){size_t n=0;for(auto& l:lines)if(l.find(needle)!=std::string::npos)++n;return n;}
 static HRESULT STDMETHODCALLTYPE alwaysInvalid(void*,void*,void*,void*){return E_INVALIDARG;}
-// A method's signature from the C++ interface declaration in d3d12.h, and a
-// recording original with the same return kind. The argument pack is filled with
-// zeroed values (pointers null), enough to run each hook once.
-template<class M> struct Method;
-template<class C,class R,class...A> struct Method<R(C::*)(A...)> {
-    using ret=R;
-    template<class T> static std::remove_cv_t<std::remove_reference_t<T>>& arg() {
-        static std::remove_cv_t<std::remove_reference_t<T>> value{};return value;
-    }
-    static R STDMETHODCALLTYPE recorder(void*,A...) {
-        if constexpr(std::is_void_v<R>) return; else return R(S_OK);
-    }
-    static void call(void* hook,void* object) {
-        using Fn=R(STDMETHODCALLTYPE*)(void*,A...);
-        (void)reinterpret_cast<Fn>(hook)(object,arg<A>()...);
-    }
-};
-// Runs one hook through the fake class and checks its recorded kind and failure lines.
-template<class M>
-static void runHook(void** vt,void** obj,const char* method,const char* slotName,int slot,void* hook,bool traceMode) {
-    using T=Method<M>;
-    vt[slot]=reinterpret_cast<void*>(&T::recorder);
-    d3d12_diag::Patch patch{slot,hook};
-    d3d12_diag::patchClass(vt,&patch,1);
-    const size_t before=lines.size();
-    T::call(vt[slot],obj);
-    constexpr bool isVoid=std::is_void_v<typename T::ret>;
-    if(traceMode) {
-        // The newest ring entry for this slot must carry the kind the header gives it.
-        int state=-1;bool found=false;
-        const uint64_t newest=d3d12_diag::traceNextSeq-1;
-        for(uint64_t s=newest;s>=1&&s+d3d12_diag::kTraceRing>newest;--s) {
-            const auto& e=d3d12_diag::traceRing[s%d3d12_diag::kTraceRing];
-            if(e.seq==s&&e.name&&strcmp(e.name,slotName)==0){state=e.state;found=true;break;}
-        }
-        CHECK(found&&state==(isVoid?d3d12_diag::TraceVoid:d3d12_diag::TraceHr));
-    }
-    if(isVoid) {
-        // A void method has no status: it may trace, but it never logs "<name> hr=".
-        const std::string needle=std::string(method)+" hr=";
-        size_t n=0;
-        for(size_t i=before;i<lines.size();++i) if(lines[i].find(needle)!=std::string::npos) ++n;
-        CHECK(n==0);
-    }
-}
 // The fake object's IUnknown slots for the stream-hook guard test.
 static HRESULT STDMETHODCALLTYPE noInterface(IUnknown*,REFIID,void** out){if(out)*out=nullptr;return E_NOINTERFACE;}
 static ULONG STDMETHODCALLTYPE refCount(IUnknown*){return 1;}
@@ -91,6 +49,83 @@ static void appendUnknown(std::vector<unsigned char>& stream,int type) {
     stream.resize(at+sizeof(void*)+sizeof(void*));
     *reinterpret_cast<int*>(&stream[at])=type;
 }
+// ---- argument forwarding: every hook passes each argument to the right position ----
+// Each argument gets a distinct sentinel (a distinct buffer for pointers, a distinct
+// value otherwise). A recording original stores what it received; the check compares
+// position by position. Pointer sentinels point at zeroed memory, so a hook that
+// reads through them sees a null-like description and does not fault.
+alignas(16) static unsigned char fwdBytes[16][256];
+template<class T> static T fwdSentinel(int i) {
+    using U=std::remove_cv_t<T>;
+    if constexpr(std::is_pointer_v<U>) return reinterpret_cast<U>(fwdBytes[i]);
+    else if constexpr(std::is_same_v<U,D3D12_CPU_DESCRIPTOR_HANDLE>) return D3D12_CPU_DESCRIPTOR_HANDLE{SIZE_T(0x7000+i)};
+    else if constexpr(std::is_same_v<U,IID>) { IID g{}; g.Data1=UINT(0x1000+i); return g; }
+    else return static_cast<U>(i+1);   // enums and arithmetic types
+}
+template<class T> static bool fwdSame(const T& a,const T& b) {
+    using U=std::remove_cv_t<T>;
+    if constexpr(std::is_same_v<U,D3D12_CPU_DESCRIPTOR_HANDLE>) return a.ptr==b.ptr;
+    else if constexpr(std::is_same_v<U,IID>) return memcmp(&a,&b,sizeof a)==0;
+    else return a==b;
+}
+// A method's arguments, from its C++ declaration in d3d12.h, with a recording original.
+template<class M> struct FwdMethod;
+template<class C,class R,class...A> struct FwdMethod<R(C::*)(A...)> {
+    using ret=R;
+    using Args=std::tuple<std::decay_t<A>...>;
+    static inline Args seen{};
+    static R STDMETHODCALLTYPE recorder(void*,A... a) {
+        seen=Args(std::decay_t<A>(a)...);
+        if constexpr(std::is_void_v<R>) return; else return R(S_OK);
+    }
+    template<size_t...I> static Args sentinels(std::index_sequence<I...>) {
+        return Args(fwdSentinel<std::decay_t<A>>(int(I))...);
+    }
+    template<size_t...I> static bool same(const Args& a,const Args& b,std::index_sequence<I...>) {
+        return (true && ... && fwdSame(std::get<I>(a),std::get<I>(b)));
+    }
+    // Calls the hook with the sentinel arguments, then checks the recorder got them in order.
+    static bool forwards(void* hook,void* object) {
+        using Idx=std::index_sequence_for<A...>;
+        Args want=sentinels(Idx{});
+        seen=Args{};
+        using Fn=R(STDMETHODCALLTYPE*)(void*,A...);
+        std::apply([&](auto&... a){ (void)reinterpret_cast<Fn>(hook)(object,a...); },want);
+        return same(seen,want,Idx{});
+    }
+};
+// One hook, through its fake class: each argument must reach the original in its
+// own position (FwdMethod), the recorded kind must be the one the header gives the
+// method (void or hr, in the trace), and a void method must never log "<name> hr=".
+template<class M>
+static void runHook(void** vt,void** obj,const char* method,const char* slotName,int slot,void* hook,bool traceMode) {
+    using T=FwdMethod<M>;
+    vt[slot]=reinterpret_cast<void*>(&T::recorder);
+    d3d12_diag::Patch patch{slot,hook};
+    d3d12_diag::patchClass(vt,&patch,1);
+    const size_t before=lines.size();
+    const bool forwarded=T::forwards(vt[slot],obj);
+    if(!forwarded) printf("  forwarding mismatch: %s\n",method);
+    CHECK(forwarded);
+    constexpr bool isVoid=std::is_void_v<typename T::ret>;
+    if(traceMode) {
+        // The newest ring entry for this slot must carry the kind the header gives it.
+        int state=-1;bool found=false;
+        const uint64_t newest=d3d12_diag::traceNextSeq-1;
+        for(uint64_t s=newest;s>=1&&s+d3d12_diag::kTraceRing>newest;--s) {
+            const auto& e=d3d12_diag::traceRing[s%d3d12_diag::kTraceRing];
+            if(e.seq==s&&e.name&&strcmp(e.name,slotName)==0){state=e.state;found=true;break;}
+        }
+        CHECK(found&&state==(isVoid?d3d12_diag::TraceVoid:d3d12_diag::TraceHr));
+    }
+    if(isVoid) {
+        const std::string needle=std::string(method)+" hr=";
+        size_t n=0;
+        for(size_t i=before;i<lines.size();++i) if(lines[i].find(needle)!=std::string::npos) ++n;
+        CHECK(n==0);
+    }
+}
+
 int main(int argc,char** argv) {
     // "trace" runs the same contracts with LocalState\d3d12trace.txt present (the
     // probe is read at the first adopt). Default runs must log no trace at all.
@@ -383,6 +418,7 @@ int main(int argc,char** argv) {
         CHECK(count("CreateShaderResourceView hr=")==0&&count("CreateUnorderedAccessView hr=")==0);
         CHECK(count("CreateRenderTargetView hr=")==0&&count("CreateDepthStencilView hr=")==0);
     }
+
 
     // A second device shares the class: no new patch, same dedupe.
     size_t classesBeforeSecond=d3d12_diag::classCount.load();
