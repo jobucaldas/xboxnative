@@ -284,13 +284,21 @@ int main() {
             unsigned refs = 0, releases = 0;
             void addref() { ++refs; }
             void release() { ++releases; if (refs) --refs; }
-        } hostA, hostB;
+        };
+        // Hosts for the exhaustion leg live in unique_ptrs owned by a vector
+        // declared BEFORE the ComSpace members: reverse-declaration order means
+        // com2's teardown (releasing every live proxy's host ref) runs while
+        // every Counting is still alive. The lambdas capture the stable
+        // unique_ptr element, never `hosts.back()` — a vector reallocates as
+        // it grows, which would leave earlier captures dangling.
+        std::vector<std::unique_ptr<Counting>> exhaust_hosts;
         Memory mem2; ThunkTable thunks2; ComSpace com2; Cpu cpu2{mem2, thunks2};
         thunks2.base = 0x7FF90000;
         map_thunk_page(mem2, thunks2);
         com2.interface_("IMock", 8);
         com2.interface_("IChurn", 5);
         com2.method("IChurn", 3, 2, [](Proxy&, Cpu& c) -> uint32_t { return c.arg(1); });
+        Counting hostA, hostB;
         uint32_t liveA = com2.create(cpu2, "IChurn", &hostA, [&] { hostA.addref(); }, [&] { hostA.release(); });
         uint32_t liveB = com2.create(cpu2, "IMock", &hostB, [&] { hostB.addref(); }, [&] { hostB.release(); });
         unsigned live_before = com2.live();
@@ -312,17 +320,20 @@ int main() {
         // reused by the allocator and hit the dedupe path instead.)
         bool exhausted = false;
         try {
-            std::vector<Counting> hosts;
-            hosts.reserve(300000);
             for (unsigned i = 0; i < 300000; ++i) {
-                hosts.emplace_back();
-                com2.create(cpu2, "IChurn", &hosts.back(), [&] { hosts.back().addref(); }, [&] { hosts.back().release(); });
+                exhaust_hosts.push_back(std::make_unique<Counting>());
+                com2.create(cpu2, "IChurn", exhaust_hosts.back().get(),
+                            [h = exhaust_hosts.back().get()] { h->addref(); },
+                            [h = exhaust_hosts.back().get()] { h->release(); });
             }
         } catch (const Fault& f) { exhausted = std::string(f.what()).find("proxy block window exhausted") != std::string::npos; }
         EXPECT(exhausted, "exhausting the block window with live proxies faults by name");
         // The live proxies survived the exhaustion attempt untouched.
         EXPECT(com2.by_guest(liveA).host == &hostA && com2.by_guest(liveB).host == &hostB,
                "live proxies intact after exhaustion fault");
+        // Scope end: com2 is destroyed BEFORE exhaust_hosts (declared after
+        // it), so teardown releases into live Counting objects — under ASan
+        // this whole block is the proof.
     }
 
     // ---- proxy created inside a host->guest callback: the sentinel must hold ----
@@ -466,6 +477,37 @@ int main() {
         uint32_t vt = com2.by_name("IPartial").vtable;
         for (unsigned s = 0; s < 8; ++s)
             EXPECT(cpu2.thunks.at(cpu2.mem.r32(vt + s * 4)) != nullptr, "slot %u stub valid after retry", s);
+        // A failed build must also roll the TABLE back: capacity is fixed, so
+        // leaked partial stubs would shrink the page for every later build.
+        // Rebuild the same scenario with a different interface: several failed
+        // builds in a row, then a successful one — all within the original
+        // capacity (4 + 8 slots, never raised again).
+        {
+            Memory mem3; ThunkTable thunks3; ComSpace com3; Cpu cpu3{mem3, thunks3};
+            thunks3.base = 0x7FF50000;
+            map_thunk_page(mem3, thunks3);
+            thunks3.capacity = 8;    // 4 seeds + only 4 of the 8 slots: every build dies halfway
+            for (unsigned i = 0; i < 4; ++i) thunks3.add(Thunk{"seed", "s", Conv::Cdecl, 0, [](Cpu&) -> uint32_t { return 0; }});
+            com3.interface_("IRoll", 8);
+            struct R {} r; (void)r;
+            unsigned failures = 0;
+            for (unsigned attempt = 0; attempt < 5; ++attempt) {
+                try { com3.create(cpu3, "IRoll", &r, nullptr, nullptr); }
+                catch (const std::exception& e) {
+                    if (std::string(e.what()).find("thunk page full") != std::string::npos) ++failures;
+                    else throw;
+                }
+                // Each failed build left no debris: the table is back to 4.
+                EXPECT(cpu3.thunks.entries.size() == 4, "failed build %u leaves no stubs in the table", attempt);
+            }
+            EXPECT(failures == 5, "all 5 attempts failed with a full page (%u)", failures);
+            // Free the seed slots: the successful build must fit at the ORIGINAL
+            // capacity (8, never raised) — impossible if any failed build had
+            // leaked its partial stubs (5 leaks of 4 slots each would not).
+            thunks3.entries.resize(0);
+            uint32_t p2 = com3.create(cpu3, "IRoll", &r, nullptr, nullptr);
+            EXPECT(p2 != 0, "successful build after 5 failed ones fits original capacity");
+        }
     }
 
     printf(failures ? "X86-COM FAIL: %d failure(s) after teardown checks\n" : "X86-COM PASS: vtable stubs, stdcall pops, struct translator, guest callback, refcounts, fault-by-name, stale-proxy fault, teardown releases host refs once\n", failures);

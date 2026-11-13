@@ -41,6 +41,11 @@ struct ThunkTable {
     // number of stubs the page can hold, so base + capacity*stride is the page's
     // final slot and no stub address can ever equal it.
     uint32_t sentinel() const { return capacity ? base + capacity * stride : base + uint32_t(entries.size()) * stride; }
+    // Roll back stubs added past n: a multi-stub build that dies halfway must
+    // leave no debris in the table (capacity is fixed, so leaked slots would
+    // shrink it for every later build). Only safe to shrink the tail — the
+    // caller rolls back its own failed build, which owns the last slots.
+    void truncate(size_t n) { entries.resize(n); }
     uint32_t span() const { return uint32_t(entries.size() + 1) * stride; }
     const Thunk* at(uint32_t eip) const {
         if (eip < base || eip >= base + uint32_t(entries.size()) * stride || (eip - base) % stride) return nullptr;
@@ -914,10 +919,14 @@ struct Cpu {
     void host_call(const Thunk& t) {
         mem.fault_eip = eip;
         uint32_t ret = mem.r32(reg[ESP]);
+        // The handler may add thunks to the table (a COM proxy created inside
+        // a guest callback builds its vtable right here), which reallocates
+        // `entries` and would leave `t` dangling before conv/argc are read.
+        Conv conv = t.conv; unsigned argc = t.argc;
         uint32_t r = t.fn(*this);
         if (exited) return;
         reg[EAX] = r;
-        reg[ESP] += 4 + (t.conv == Conv::Stdcall ? 4 * t.argc : 0); eip = ret;
+        reg[ESP] += 4 + (conv == Conv::Stdcall ? 4 * argc : 0); eip = ret;
     }
 };
 }

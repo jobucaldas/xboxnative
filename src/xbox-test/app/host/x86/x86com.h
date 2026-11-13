@@ -96,29 +96,37 @@ struct ComSpace {
         // The vtable is shared per interface and immutable once built: every
         // proxy of the interface points at the same stub array. It is built at
         // first create, when the ThunkTable is reachable, and bounds-checked
-        // in the vtable window. The build is atomic: every thunk is added
-        // BEFORE the interface is marked built and the window advanced, so a
-        // ThunkTable::add failure (page full) leaves the interface unbuilt
-        // and the next create retries it from scratch.
+        // in the vtable window. The build is atomic in both directions: every
+        // thunk is added BEFORE the interface is marked built and the window
+        // advanced, and a failure rolls the table back to its size before the
+        // build — capacity is fixed, so a build that dies halfway must not
+        // leak its partial stubs (every retry would leak more until the page
+        // exhausts). The next create then retries the build from scratch.
         if (it->second.vtable == 0) {
             if (vtable_top + it->second.slots * 4 > VTABLE_BASE + VTABLE_REGION) {
                 char b[128]; snprintf(b, sizeof b, "COM: vtable window exhausted registering %s (%u slots)", iface, it->second.slots);
                 throw Fault(FaultKind::AccessViolation, 0, 0, b);
             }
             uint32_t vt = vtable_top;
-            std::vector<uint32_t> stubs;
-            stubs.reserve(it->second.slots);
-            for (unsigned s = 0; s < it->second.slots; ++s) {
-                unsigned argc = 0; Marshaller fn;
-                auto m = it->second.methods.find(s);
-                if (m != it->second.methods.end()) { argc = m->second.argc; fn = m->second.fn; }
-                else if (s == 0) { argc = 3; }
-                else if (s == 1) { argc = 1; fn = default_addref; }
-                else if (s == 2) { argc = 1; fn = default_release; }
-                stubs.push_back(cpu.thunks.add(Thunk{"com", slot_label(iface, s), Conv::Stdcall, argc,
-                    [this, iface, s](Cpu& c) -> uint32_t { return dispatch(iface, s, c); }}));
+            size_t table_before = cpu.thunks.entries.size();
+            try {
+                std::vector<uint32_t> stubs;
+                stubs.reserve(it->second.slots);
+                for (unsigned s = 0; s < it->second.slots; ++s) {
+                    unsigned argc = 0; Marshaller fn;
+                    auto m = it->second.methods.find(s);
+                    if (m != it->second.methods.end()) { argc = m->second.argc; fn = m->second.fn; }
+                    else if (s == 0) { argc = 3; }
+                    else if (s == 1) { argc = 1; fn = default_addref; }
+                    else if (s == 2) { argc = 1; fn = default_release; }
+                    stubs.push_back(cpu.thunks.add(Thunk{"com", slot_label(iface, s), Conv::Stdcall, argc,
+                        [this, iface, s](Cpu& c) -> uint32_t { return dispatch(iface, s, c); }}));
+                }
+                for (unsigned s = 0; s < it->second.slots; ++s) cpu.mem.w32(vt + s * 4, stubs[s]);
+            } catch (...) {
+                cpu.thunks.truncate(table_before);   // free the partial build's slots
+                throw;
             }
-            for (unsigned s = 0; s < it->second.slots; ++s) cpu.mem.w32(vt + s * 4, stubs[s]);
             it->second.vtable = vt;
             vtable_top += it->second.slots * 4;
         }
