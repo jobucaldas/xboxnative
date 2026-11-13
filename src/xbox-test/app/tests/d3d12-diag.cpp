@@ -20,51 +20,6 @@ static std::vector<std::string> lines;
 static void sinkLine(const char* text){lines.push_back(text);}
 static size_t count(const char* needle){size_t n=0;for(auto& l:lines)if(l.find(needle)!=std::string::npos)++n;return n;}
 static HRESULT STDMETHODCALLTYPE alwaysInvalid(void*,void*,void*,void*){return E_INVALIDARG;}
-// A method's signature from the C++ interface declaration in d3d12.h, and a
-// recording original with the same return kind. The argument pack is filled with
-// zeroed values (pointers null), enough to run each hook once.
-template<class M> struct Method;
-template<class C,class R,class...A> struct Method<R(C::*)(A...)> {
-    using ret=R;
-    template<class T> static std::remove_cv_t<std::remove_reference_t<T>>& arg() {
-        static std::remove_cv_t<std::remove_reference_t<T>> value{};return value;
-    }
-    static R STDMETHODCALLTYPE recorder(void*,A...) {
-        if constexpr(std::is_void_v<R>) return; else return R(S_OK);
-    }
-    static void call(void* hook,void* object) {
-        using Fn=R(STDMETHODCALLTYPE*)(void*,A...);
-        (void)reinterpret_cast<Fn>(hook)(object,arg<A>()...);
-    }
-};
-// Runs one hook through the fake class and checks its recorded kind and failure lines.
-template<class M>
-static void runHook(void** vt,void** obj,const char* method,const char* slotName,int slot,void* hook,bool traceMode) {
-    using T=Method<M>;
-    vt[slot]=reinterpret_cast<void*>(&T::recorder);
-    d3d12_diag::Patch patch{slot,hook};
-    d3d12_diag::patchClass(vt,&patch,1);
-    const size_t before=lines.size();
-    T::call(vt[slot],obj);
-    constexpr bool isVoid=std::is_void_v<typename T::ret>;
-    if(traceMode) {
-        // The newest ring entry for this slot must carry the kind the header gives it.
-        int state=-1;bool found=false;
-        const uint64_t newest=d3d12_diag::traceNextSeq-1;
-        for(uint64_t s=newest;s>=1&&s+d3d12_diag::kTraceRing>newest;--s) {
-            const auto& e=d3d12_diag::traceRing[s%d3d12_diag::kTraceRing];
-            if(e.seq==s&&e.name&&strcmp(e.name,slotName)==0){state=e.state;found=true;break;}
-        }
-        CHECK(found&&state==(isVoid?d3d12_diag::TraceVoid:d3d12_diag::TraceHr));
-    }
-    if(isVoid) {
-        // A void method has no status: it may trace, but it never logs "<name> hr=".
-        const std::string needle=std::string(method)+" hr=";
-        size_t n=0;
-        for(size_t i=before;i<lines.size();++i) if(lines[i].find(needle)!=std::string::npos) ++n;
-        CHECK(n==0);
-    }
-}
 // The fake object's IUnknown slots for the stream-hook guard test.
 static HRESULT STDMETHODCALLTYPE noInterface(IUnknown*,REFIID,void** out){if(out)*out=nullptr;return E_NOINTERFACE;}
 static ULONG STDMETHODCALLTYPE refCount(IUnknown*){return 1;}
@@ -72,6 +27,16 @@ static ID3D12Device* make() {
     ID3D12Device* device=nullptr;
     if(SUCCEEDED(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,__uuidof(ID3D12Device),(void**)&device)))return device;
     return nullptr;
+}
+static std::string fakeRootSignatureDescription(const void*,SIZE_T) {
+    return "params=2[32BIT_CONSTANTS SRV]";
+}
+static void makeDxilContainer(unsigned char* bytes,bool signedContainer) {
+    const uint32_t total=52,chunks=1,offset=36,chunkBytes=8;
+    memset(bytes,0,total);memcpy(bytes,"DXBC",4);
+    if(signedContainer)bytes[4]=1;
+    memcpy(bytes+24,&total,4);memcpy(bytes+28,&chunks,4);memcpy(bytes+32,&offset,4);
+    memcpy(bytes+offset,"DXIL",4);memcpy(bytes+offset+4,&chunkBytes,4);
 }
 
 // A stream builder with the layout CD3DX12_PIPELINE_STATE_STREAM_SUBOBJECT has
@@ -539,27 +504,46 @@ int main(int argc,char** argv) {
     {
         struct Rec {
             static HRESULT STDMETHODCALLTYPE v0(void*,const D3D12_GRAPHICS_PIPELINE_STATE_DESC*,REFIID,void**) {return S_OK;}
+            static HRESULT STDMETHODCALLTYPE compute(void*,const D3D12_COMPUTE_PIPELINE_STATE_DESC*,REFIID,void**) {return S_OK;}
             static HRESULT STDMETHODCALLTYPE stream(void*,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**) {return S_OK;}
         };
         void* vt[64]{};
         vt[d3d12_diag::CreateGraphicsPipelineState]=reinterpret_cast<void*>(&Rec::v0);
+        vt[d3d12_diag::CreateComputePipelineState]=reinterpret_cast<void*>(&Rec::compute);
         vt[d3d12_diag::createPipelineStateStreamSlot]=reinterpret_cast<void*>(&Rec::stream);
         size_t patchCount=0;const d3d12_diag::Patch* patches=d3d12_diag::devicePatches(patchCount);
         d3d12_diag::patchClass(vt,patches,patchCount);
         const d3d12_diag::Patch streamPatch{d3d12_diag::createPipelineStateStreamSlot,reinterpret_cast<void*>(&d3d12_diag::createPipelineStateStream)};
         d3d12_diag::patchClass(vt,&streamPatch,1);
         void* object[1]={vt};
-        unsigned char vsBytes[32]{};memcpy(vsBytes,"DXBC",4);vsBytes[4]=1;   // signed: non-null digest
-        unsigned char psBytes[32]{};memcpy(psBytes,"DXBC",4);                 // unsigned: null digest
+        unsigned char vsBytes[52]{};makeDxilContainer(vsBytes,true);   // signed: non-null digest
+        unsigned char psBytes[52]{};makeDxilContainer(psBytes,false);   // unsigned: null digest
+        unsigned char malformed[52]{};makeDxilContainer(malformed,false);
+        const uint32_t badChunkSize=100;memcpy(malformed+40,&badChunkSize,sizeof badChunkSize);
+        CHECK(d3d12_diag::containerText(vsBytes,sizeof vsBytes).find("container=valid")!=std::string::npos);
+        CHECK(d3d12_diag::containerText(malformed,sizeof malformed).find("container=invalid")!=std::string::npos);
         D3D12_INPUT_ELEMENT_DESC element{"POSITION",0,DXGI_FORMAT_R32G32_FLOAT,0,0,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0};
         D3D12_GRAPHICS_PIPELINE_STATE_DESC gd{};
         gd.VS={vsBytes,sizeof vsBytes};gd.PS={psBytes,sizeof psBytes};
         gd.NumRenderTargets=1;gd.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;gd.DSVFormat=DXGI_FORMAT_D32_FLOAT;
         gd.SampleDesc.Count=1;gd.InputLayout={&element,1};
+        D3D12_ROOT_PARAMETER rootParams[2]{};
+        rootParams[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        rootParams[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;
+        D3D12_ROOT_SIGNATURE_DESC rootDesc{};rootDesc.NumParameters=2;rootDesc.pParameters=rootParams;
+        CHECK(d3d12_diag::rootParametersText(&rootDesc)=="params=2[32BIT_CONSTANTS SRV]");
+        d3d12_diag::rootSignatureDescriber=&fakeRootSignatureDescription;
+        ID3D12RootSignature* fakeRoot=reinterpret_cast<ID3D12RootSignature*>(uintptr_t(0x7770));
+        d3d12_diag::rememberRootSignature(fakeRoot,vsBytes,sizeof vsBytes);
+        gd.pRootSignature=fakeRoot;
         void* out=nullptr;
+        d3d12_diag::psoLines.store(0);
         const size_t psoFrom=lines.size();
         reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(void*,const D3D12_GRAPHICS_PIPELINE_STATE_DESC*,REFIID,void**)>(vt[d3d12_diag::CreateGraphicsPipelineState])(object,&gd,__uuidof(ID3D12PipelineState),&out);
+        D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};cd.CS={psBytes,sizeof psBytes};cd.pRootSignature=fakeRoot;
+        reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(void*,const D3D12_COMPUTE_PIPELINE_STATE_DESC*,REFIID,void**)>(vt[d3d12_diag::CreateComputePipelineState])(object,&cd,__uuidof(ID3D12PipelineState),&out);
         std::vector<unsigned char> stream;
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,fakeRoot);
         D3D12_INPUT_LAYOUT_DESC layout{&element,1};
         appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS,D3D12_SHADER_BYTECODE{vsBytes,sizeof vsBytes});
         appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS,D3D12_SHADER_BYTECODE{psBytes,sizeof psBytes});
@@ -568,12 +552,15 @@ int main(int argc,char** argv) {
         appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS,rtv);
         D3D12_PIPELINE_STATE_STREAM_DESC sd{stream.size(),stream.data()};
         reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(void*,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**)>(vt[d3d12_diag::createPipelineStateStreamSlot])(object,&sd,__uuidof(ID3D12PipelineState),&out);
-        // Only the lines from these two calls: earlier calls in this test log pso lines too.
+        // Only the lines from these three calls: earlier calls in this test log pso lines too.
         auto since=[&](size_t from,const char* needle){size_t n=0;for(size_t i=from;i<lines.size();++i)if(lines[i].find(needle)!=std::string::npos)++n;return n;};
         if(traceMode) {
-            CHECK(since(psoFrom,"pso v0 VS:dxbc")==1&&since(psoFrom,"pso stream VS:dxbc")==1);
-            CHECK(since(psoFrom,"PS:dxbc")==2&&since(psoFrom,"digest=null(unsigned)")==2&&since(psoFrom,"digest=set")==2);
+            CHECK(since(psoFrom,"pso v0 VS:dxbc")==1&&since(psoFrom,"pso stream VS:dxbc")==1&&since(psoFrom,"pso compute CS:dxbc")==1);
+            CHECK(since(psoFrom,"PS:dxbc")==2&&since(psoFrom,"digest=null(unsigned)")==3&&since(psoFrom,"digest=set")==2);
+            CHECK(since(psoFrom,"container=valid")==5&&since(psoFrom,"params=2[32BIT_CONSTANTS SRV]")==3);
             CHECK(since(psoFrom,"inputs=1[POSITION:16(R32G32_FLOAT)]")==2&&since(psoFrom,"rtv=1[28(R8G8B8A8_UNORM)]")==2);
+            size_t flushed=lines.size();d3d12_diag::flushTrace();
+            CHECK(since(flushed,"pso v0 VS:dxbc")==1&&since(flushed,"pso stream VS:dxbc")==1&&since(flushed,"pso compute CS:dxbc")==1);
         } else {
             CHECK(since(psoFrom,"pso ")==0);
         }
