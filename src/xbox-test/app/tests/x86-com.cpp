@@ -55,6 +55,25 @@ struct Machine {
 
 static std::vector<uint8_t> imm(uint32_t v) { return {uint8_t(v), uint8_t(v >> 8), uint8_t(v >> 16), uint8_t(v >> 24)}; }
 
+// A tiny machine-code emitter (used by the sentinel-regression scope below).
+struct Asm {
+    std::vector<uint8_t> c;
+    void push_imm(uint32_t v) { c.push_back(0x68); auto i = imm(v); c.insert(c.end(), i.begin(), i.end()); }
+    void mov_eax_imm(uint32_t v) { c.push_back(0xB8); auto i = imm(v); c.insert(c.end(), i.begin(), i.end()); }
+    void mov_ecx_eax() { c.push_back(0x8B); c.push_back(0x08); }
+    void call_slot(unsigned slot) {
+        uint32_t off = slot * 4;
+        if (off < 0x80) { c.push_back(0xFF); c.push_back(0x51); c.push_back(uint8_t(off)); }
+        else { c.push_back(0xFF); c.push_back(0x91); auto i = imm(off); c.insert(c.end(), i.begin(), i.end()); }
+    }
+    void mov_ebx_eax() { c.insert(c.end(), {0x89, 0xC3}); }
+    void hlt() { c.push_back(0xF4); }
+    void com_call(uint32_t proxy, unsigned slot, std::vector<uint32_t> args) {
+        for (auto it = args.rbegin(); it != args.rend(); ++it) push_imm(*it);
+        push_imm(proxy); mov_eax_imm(proxy); mov_ecx_eax(); call_slot(slot);
+    }
+};
+
 int main() {
     // ---- setup: one interface, 5 slots ----
     // slot 3: SetValue(value) - one stack arg beyond this; records and returns 7
@@ -304,6 +323,115 @@ int main() {
         // The live proxies survived the exhaustion attempt untouched.
         EXPECT(com2.by_guest(liveA).host == &hostA && com2.by_guest(liveB).host == &hostB,
                "live proxies intact after exhaustion fault");
+    }
+
+    // ---- proxy created inside a host->guest callback: the sentinel must hold ----
+    // The first create of an interface adds vtable stubs to the thunk table.
+    // If that happens while a host->guest call is in flight (a guest callback
+    // that instantiates an interface and immediately QIs it), the new stubs
+    // land just past the in-flight return address — with a size-derived
+    // sentinel the next stub WOULD sit on that return address and the nested
+    // run would treat the stub as callback completion. Mapping the thunk page
+    // pins the sentinel to the page's last slot, so the dispatch always runs.
+    {
+        static constexpr uint32_t CODE2 = 0x40000, CODE3 = 0x41000, DATA2 = 0x50000, STACK2 = 0x60000;
+        struct H {} late_host;
+        static void* s_late_host = &late_host;
+        Memory mem2; ThunkTable thunks2; ComSpace com2; Cpu cpu2{mem2, thunks2};
+        thunks2.base = 0x7FF80000;
+        map_thunk_page(mem2, thunks2);   // pins the sentinel BEFORE any stub exists
+        mem2.map(CODE2, 4096, PROT_R | PROT_W);
+        mem2.map(CODE3, 4096, PROT_R | PROT_W);
+        mem2.map(DATA2, 4096, PROT_R | PROT_W);
+        mem2.map(STACK2, 4096, PROT_R | PROT_W);
+        com2.interface_("ILate", 4);
+        static ComSpace* s_com = &com2; static Cpu* s_cpu = &cpu2;
+        // ITrigger slot 3: the host marshaller creates the FIRST ILate proxy
+        // (stub-building mid-call), then calls guest code that QIs it through
+        // its brand-new vtable. The QI must dispatch (E_NOINTERFACE, out=0).
+        com2.interface_("ITrigger", 4);
+        com2.method("ITrigger", 3, 2, [](Proxy&, Cpu& c) -> uint32_t {
+            uint32_t late = s_com->create(*s_cpu, "ILate", s_late_host, nullptr, nullptr);
+            std::vector<uint8_t> q{0xA1};                            // mov eax,[disp32] (late)
+            auto la = imm(late); q.insert(q.end(), la.begin(), la.end());
+            q.insert(q.end(), {0x89, 0xC1});                         // mov ecx,eax (the vtable)
+            q.push_back(0x68);                                       // push out
+            auto o = imm(DATA2); q.insert(q.end(), o.begin(), o.end());
+            q.push_back(0x68); q.insert(q.end(), {0, 0, 0, 0});      // push riid (null)
+            q.push_back(0x68); auto pa = imm(late); q.insert(q.end(), pa.begin(), pa.end());
+            q.push_back(0xFF); q.push_back(0x51); q.push_back(0);  // call [ecx+0] (QI)
+            q.push_back(0xC3);                                     // ret
+            s_cpu->mem.protect(CODE3, 4096, PROT_R | PROT_W);      // the page is X-only during the run
+            s_cpu->mem.write_bytes(CODE3, q.data(), uint32_t(q.size()));
+            s_cpu->mem.protect(CODE3, 4096, PROT_R | PROT_X);
+            uint32_t hr = c.call(CODE3, {});
+            s_cpu->mem.protect(CODE3, 4096, PROT_R | PROT_W);
+            return (hr == 0x80004002u && s_cpu->mem.r32(DATA2) == 0) ? 0x1234 : 0xBADu;
+        });
+        uint32_t trigger = com2.create(cpu2, "ITrigger", &late_host, nullptr, nullptr);
+        // Guest program: push 0 arg; push trigger; call [ecx+12] (slot 3); mov ebx,eax; hlt.
+        Asm a4;
+        a4.com_call(trigger, 3, {0});
+        a4.mov_ebx_eax(); a4.hlt();
+        mem2.protect(CODE2, 4096, PROT_R | PROT_W);
+        mem2.write_bytes(CODE2, a4.c.data(), uint32_t(a4.c.size()));
+        std::string late_fault;
+        mem2.protect(CODE2, 4096, PROT_R | PROT_X);
+        cpu2.eip = CODE2; cpu2.reg[ESP] = STACK2 + 4096 - 64; cpu2.exited = false; cpu2.depth = 0;
+        bool late_ran = false;
+        try { cpu2.run(0); late_ran = true; }
+        catch (const Fault& f) {
+            late_fault = f.what();
+            late_ran = f.kind == FaultKind::Unsupported;   // the hlt stop sentinel
+        }
+        mem2.protect(CODE2, 4096, PROT_R | PROT_W);
+        EXPECT(late_ran, "sentinel-regression run faulted: %s", late_fault.c_str());
+
+        if (late_ran)
+            EXPECT(cpu2.reg[EBX] == 0x1234, "QI on a proxy created mid-callback dispatched (got 0x%x)", cpu2.reg[EBX]);
+    }
+
+    // ---- temporary interface name: the table owns the name, not the caller ----
+    // create/interface_ keep pointers into their own storage; a caller passing
+    // a temporary std::string::c_str() that dies right after must still leave
+    // a working proxy (dedupe, dispatch, fault names all use the interned copy).
+    {
+        Memory mem2; ThunkTable thunks2; ComSpace com2; Cpu cpu2{mem2, thunks2};
+        thunks2.base = 0x7FF70000;
+        map_thunk_page(mem2, thunks2);
+        com2.interface_("ITemp", 4);
+        com2.method("ITemp", 3, 2, [](Proxy&, Cpu& c) -> uint32_t { return c.arg(1) + 1; });
+        uint32_t temp_proxy = 0;
+        {
+            std::string temp = "ITemp";      // dies at the end of this block
+            temp_proxy = com2.create(cpu2, temp.c_str(), &temp_proxy, nullptr, nullptr);
+        }
+        EXPECT(temp_proxy != 0, "proxy created with a temporary name");
+        // Dedupe with a DIFFERENT temporary holding the same characters must
+        // find the interned proxy (no second host ref, no second proxy).
+        struct H {} h2; (void)h2;
+        {
+            std::string again = "ITemp";
+            uint32_t p2 = com2.create(cpu2, again.c_str(), &temp_proxy, nullptr, nullptr);
+            EXPECT(p2 == temp_proxy, "dedupe works after the original name string died");
+        }
+        // Dispatch through the proxy still works (the stub lambda's name copy).
+        // slot 3: push 41; push proxy; call [ecx+12] -> returns 42.
+        Asm a5;
+        a5.com_call(temp_proxy, 3, {41});
+        a5.mov_ebx_eax(); a5.hlt();
+        mem2.map(0x40000, 4096, PROT_R | PROT_W);
+        mem2.map(0x50000, 4096, PROT_R | PROT_W);   // the stack for this scope
+        mem2.write_bytes(0x40000, a5.c.data(), uint32_t(a5.c.size()));
+        mem2.protect(0x40000, 4096, PROT_R | PROT_X);
+        cpu2.eip = 0x40000; cpu2.reg[ESP] = 0x50000 + 4096 - 64; cpu2.exited = false; cpu2.depth = 0;
+        std::string name_fault;
+        bool name_ran = false;
+        try { cpu2.run(0); name_ran = true; }
+        catch (const Fault& f) { name_fault = f.what(); name_ran = f.kind == FaultKind::Unsupported; }
+        mem2.protect(0x40000, 4096, PROT_R | PROT_W);
+        EXPECT(name_ran && cpu2.reg[EBX] == 42, "dispatch after the name string died (ran=%d ebx=%u fault=%s)",
+               name_ran, cpu2.reg[EBX], name_fault.c_str());
     }
 
     printf(failures ? "X86-COM FAIL: %d failure(s) after teardown checks\n" : "X86-COM PASS: vtable stubs, stdcall pops, struct translator, guest callback, refcounts, fault-by-name, stale-proxy fault, teardown releases host refs once\n", failures);

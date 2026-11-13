@@ -89,6 +89,10 @@ struct ComSpace {
         if (dk != host_dedupe.end()) { ++proxies.find(dk->second)->second.guest_refs; return dk->second; }
         auto it = ifaces.find(iface);
         if (it == ifaces.end()) throw std::runtime_error(std::string("COM: unregistered interface ") + iface);
+        // Intern the name: everything stored past this call (proxy, dedupe
+        // key, stub lambdas) keeps the pointer that lives in `ifaces`, never
+        // the caller's — which may die right after create returns.
+        iface = it->first.c_str();
         // The vtable is shared per interface and immutable once built: every
         // proxy of the interface points at the same stub array. It is built at
         // first create, when the ThunkTable is reachable, and bounds-checked
