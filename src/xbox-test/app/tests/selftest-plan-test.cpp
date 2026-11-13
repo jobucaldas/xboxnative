@@ -118,6 +118,8 @@ int main() {
     assert(verdict("d3d11", true, true, 86) == "BLOCKED depth-test");
     assert(verdict("d3d11", true, true, 90) == "BLOCKED texture-array-copy");
     assert(verdict("d3d11", true, true, 94) == "BLOCKED bc1-copy");
+    // 95 = a Wine host: the gated passes did not run, so never a pass.
+    assert(verdict("d3d11", true, true, 95) == "BLOCKED wine-host");
     assert(verdict("d3d11", true, true, 50) == "FAIL exit-50");   // a step failure stays a failure
     assert(verdict("d3d12", true, true, 54) == "FAIL exit-54");   // not the d3d12 fixture's code
     // A guest that never ran code, or ran it and never exited, is a failure.

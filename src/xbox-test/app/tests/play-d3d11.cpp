@@ -189,11 +189,32 @@ DWORD d3d_entry() {
     // D3D11-on-12 runs them in full); under Wine they are skipped so the rest
     // of the suite stays reachable and exit 42 remains the off-device verdict.
     // Wine's own ntdll exports wine_get_version; the console's ntdll never
-    // does. LoadLibraryW (not GetModuleHandleW: Play's loader may not list
-    // host modules by name) + GetProcAddress through the host route.
+    // does. Detection must not go through LoadLibraryW/GetProcAddress: Play
+    // hooks both and answers the lookup its own way, which could decide the
+    // answer. Instead the probe reads the export table straight out of the
+    // loaded ntdll image's PE headers in memory — no loader API in the path.
     const bool onWine=[&]{
-        HMODULE ntdll=LoadLibraryW(L"ntdll.dll");
-        return ntdll&&GetProcAddress(ntdll,"wine_get_version")!=nullptr;
+        HMODULE ntdll=GetModuleHandleW(L"ntdll.dll");
+        if(!ntdll)return false;
+        const auto* base=static_cast<const unsigned char*>(static_cast<const void*>(ntdll));
+        const auto* dos=static_cast<const IMAGE_DOS_HEADER*>(static_cast<const void*>(base));
+        if(dos->e_magic!=IMAGE_DOS_SIGNATURE)return false;
+        const auto* nt= reinterpret_cast<const IMAGE_NT_HEADERS64*>(base+dos->e_lfanew);
+        if(nt->Signature!=IMAGE_NT_SIGNATURE)return false;
+        const auto& exportDir=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        if(!exportDir.VirtualAddress)return false;
+        const auto* exports=reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(base+exportDir.VirtualAddress);
+        const DWORD* names=reinterpret_cast<const DWORD*>(base+exports->AddressOfNames);
+        for(DWORD i=0;i<exports->NumberOfNames;++i){
+            const char* name=reinterpret_cast<const char*>(base+names[i]);
+            // Byte-exact match on the export name; no string API that a hook
+            // could intercept.
+            const char* want="wine_get_version";
+            const char* a=name;const char* b=want;
+            while(*a&&*a==*b){++a;++b;}
+            if(*a==*b)return true;   // both ended: exact match
+        }
+        return false;
     }();
     if(!onWine){
     D3D11_TEXTURE2D_DESC msaaDesc{};
@@ -523,10 +544,13 @@ DWORD d3d_entry() {
     // ---- Depth-stencil pass: DSV + depth test ----
     // Every 3D game writes depth; a layer that accepts the DSV but never
     // tests draws hidden surfaces over near ones (walls over characters).
-    // Two overlapping triangles at the same pixels: far green (z=0.8) first,
-    // near red (z=0.2) after. Depth test LESS_EQUAL ON: the centre pixel must
-    // end red. Depth OFF: the later draw wins, so the centre must be green —
-    // both checks together prove the test, not just the draw order. Exits
+    // Both halves draw the SAME list: near red (z=0.2) FIRST, far green
+    // (z=0.8) SECOND. Depth OFF (control): the later draw wins on raster
+    // order — the centre must be GREEN. Depth ON, LESS_EQUAL: the far draw
+    // fails the test against the near red already written — the centre must
+    // be RED. The two halves must disagree, which is exactly what proves the
+    // depth test orders the draws (a never-testing layer paints green in
+    // both; a never-drawing-second-triangle layer paints red in both). Exits
     // 83-86; 86 BLOCKED. The committed triangle VS hardcodes clip z to 0, so
     // this pass uses its own committed shaders (shaders/depth_*.dxbc):
     // POSITION is float3 and the VS passes z through, which is what makes
@@ -553,14 +577,19 @@ DWORD d3d_entry() {
     dsDescState.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;
     ID3D11DepthStencilState* dsState=nullptr;
     if(FAILED(device->CreateDepthStencilState(&dsDescState,&dsState))||!dsState)return 84;
-    // The two draws use the SAME order in both halves — near red first, far
-    // green second — so the control and the test differ only in the depth
-    // state: with DepthEnable=FALSE the later (far green) draw wins on draw
-    // order; with DepthEnable=TRUE + LESS_EQUAL the near red wins on depth.
-    // The two expected colours differ, so a layer that binds the DSV but
-    // never tests fails the depth-ON half. Vertices are float3 POSITION +
-    // float4 COLOR (7 floats, 28 bytes) matching dLayout exactly. The VS
-    // passes z through, so the two draws use different vertex data: one
+    // The two draws use the SAME order in both halves — near red FIRST, far
+    // green SECOND — so the control and the test differ only in the depth
+    // state, and the two expected colours differ:
+    //   depth OFF (control): the later draw wins on raster order, so the
+    //     centre pixel ends GREEN. This proves the pipeline actually draws
+    //     both triangles in this order.
+    //   depth ON (LESS_EQUAL): the far green draw fails the depth test
+    //     against the near red already written, so the centre stays RED.
+    // A layer that binds the DSV but never tests paints green in both halves
+    // and fails the depth-ON check; a layer that never draws the second
+    // triangle paints red in both and fails the depth-OFF control.
+    // Vertices are the DVertex type above (28 bytes, matching dLayout). The
+    // VS passes z through, so the two draws use different vertex data: one
     // dynamic vertex buffer, rewritten per draw (the Map WRITE_DISCARD a
     // game's per-frame upload uses — itself a covered feature).
     D3D11_DEPTH_STENCIL_DESC dsOffDesc{};
@@ -573,16 +602,26 @@ DWORD d3d_entry() {
     ID3D11RenderTargetView* dsBinds[]={rtv};
     context->OMSetRenderTargets(1,dsBinds,dsv);
     context->RSSetViewports(1,&viewport);
+    // One named Vertex type, so the buffer, the stride and the uploads cannot
+    // drift apart: float3 POSITION + float4 COLOR = 28 bytes, matching dLayout
+    // (POSITION at 0, COLOR at 12). The static_assert fails the build if the
+    // layout and the type ever disagree.
+    struct DVertex{float pos[3];float color[4];};
+    static_assert(sizeof(DVertex)==28,"dLayout expects float3 POSITION + float4 COLOR (28 bytes)");
     D3D11_BUFFER_DESC dvbDesc{};
-    dvbDesc.ByteWidth=sizeof(float)*7*3;dvbDesc.Usage=D3D11_USAGE_DYNAMIC;
+    dvbDesc.ByteWidth=sizeof(DVertex)*3;dvbDesc.Usage=D3D11_USAGE_DYNAMIC;
     dvbDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;dvbDesc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
     ID3D11Buffer* dynVb=nullptr;
     if(FAILED(device->CreateBuffer(&dvbDesc,nullptr,&dynVb))||!dynVb)return 85;
-    UINT dStrideUint=28;   // float3 POSITION + float4 COLOR = 28 bytes, matching dLayout
-    const float triNear[3][7]={
-        {-0.75f,0.75f,0.2f,1,0,0,1},{0.75f,0.75f,0.2f,1,0,0,1},{0.0f,-0.75f,0.2f,1,0,0,1}};
-    const float triFar[3][7]={
-        {-0.75f,0.75f,0.8f,0,1,0,1},{0.75f,0.75f,0.8f,0,1,0,1},{0.0f,-0.75f,0.8f,0,1,0,1}};
+    const UINT dStrideUint=sizeof(DVertex);
+    const DVertex triNear[3]={
+        {{-0.75f,0.75f,0.2f},{1,0,0,1}},
+        {{ 0.75f,0.75f,0.2f},{1,0,0,1}},
+        {{ 0.0f,-0.75f,0.2f},{1,0,0,1}}};
+    const DVertex triFar[3]={
+        {{-0.75f,0.75f,0.8f},{0,1,0,1}},
+        {{ 0.75f,0.75f,0.8f},{0,1,0,1}},
+        {{ 0.0f,-0.75f,0.8f},{0,1,0,1}}};
     D3D11_MAPPED_SUBRESOURCE mM{};
     if(FAILED(context->Map(dynVb,0,D3D11_MAP_WRITE_DISCARD,0,&mM))||!mM.pData)return 85;
     memcpy(mM.pData,triNear,sizeof triNear);
@@ -603,7 +642,7 @@ DWORD d3d_entry() {
     const unsigned char* dPix=static_cast<const unsigned char*>(dMapped2.pData)+32*dMapped2.RowPitch+32*4;
     const bool orderGreen=dPix[1]>0x80&&dPix[0]<0x40&&dPix[2]<0x40;
     context->Unmap(staging,0);
-    if(!orderGreen)return 86;   // BLOCKED: even draw order did not reach the target
+    if(!orderGreen)return 86;   // BLOCKED: the depth-OFF control did not paint green
     // Now the real test: depth ON, LESS_EQUAL, the identical draw list from a
     // cleared target. The near red triangle must win — the control above
     // proved the same list paints green without the test, so red here can
@@ -719,6 +758,13 @@ DWORD d3d_entry() {
     if(!FAILED(device->CreateBuffer(&buffer,nullptr,&made)))return 30;
     UINT support=0;
     if(!FAILED(device->CheckFormatSupport(DXGI_FORMAT(0x7fff),&support))&&support)return 31;
+
+    // A Wine host never reaches PASS: the four gated passes (MSAA, stream-out,
+    // indirect, query) did not run, so 42 would claim coverage the run does
+    // not have. 95 is BLOCKED wine-host — the suite ran, the platform (Wine's
+    // GL d3d11) is the limit, and the console's D3D11-on-12 runs those passes
+    // in full.
+    if(onWine)return 95;
 
     backView->Release();backBuffer->Release();
     rtv->Release();pointFullBuffer->Release();gs->Release();

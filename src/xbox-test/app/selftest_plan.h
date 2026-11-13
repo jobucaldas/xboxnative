@@ -157,6 +157,10 @@ inline std::string verdict(const std::string& mode, bool finished, bool executed
         if (code == 86) return "BLOCKED depth-test";
         if (code == 90) return "BLOCKED texture-array-copy";
         if (code == 94) return "BLOCKED bc1-copy";
+        // 95 = a Wine host: the four Wine-gated passes did not run, so the
+        // run must never count as a pass — the console's D3D11-on-12 runs
+        // them in full.
+        if (code == 95) return "BLOCKED wine-host";
     }
     // The D3D10 drawing fixture blocks the same way: every pass ran but the
     // pixels (or streamed vertices) did not read back as drawn.
@@ -166,6 +170,7 @@ inline std::string verdict(const std::string& mode, bool finished, bool executed
     // 82 = EnumAdapters1(0) failed, 83 = every D3D12CreateDevice attempt
     // failed (null and explicit adapter, FL 11_0 and 12_0). Each names the
     // attempt that failed, and each is a FAIL, never a pass or a BLOCKED.
+    if (mode == "d3d12" && code == 81) return "FAIL d3d12-device-factory";
     if (mode == "d3d12" && code == 82) return "FAIL d3d12-device-enum";
     if (mode == "d3d12" && code == 83) return "FAIL d3d12-device-all-attempts";
     if (code == 42) return "PASS";
