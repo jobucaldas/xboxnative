@@ -3,8 +3,8 @@
 # Static contract for the d3d11 fixture (off-device, no Wine): between the
 # deferred pass's ExecuteCommandList(list,FALSE), which resets the immediate
 # context to its defaults, and the stream-out draw, the fixture rebinds the
-# input layout, the vertex buffer and the vertex shader the draw reads. Without
-# them the SO buffer stays empty and the pass reports BLOCKED for a fixture
+# input layout, the vertex buffer, topology and the vertex and pixel shaders the
+# later draws read. Without them the SO buffer stays empty and the pass reports BLOCKED for a fixture
 # reason. This checks source order only; the capture itself is console-only
 # (Wine's d3d11 captures nothing here, so the stream-out pass is gated off).
 set -euo pipefail
@@ -17,7 +17,7 @@ if [[ -z $reset || -z $draw ]]; then
     exit 1
 fi
 window=$(sed -n "${reset},${draw}p" "$f")
-for call in IASetInputLayout IASetVertexBuffers IASetPrimitiveTopology VSSetShader; do
+for call in IASetInputLayout IASetVertexBuffers IASetPrimitiveTopology VSSetShader PSSetShader; do
     if ! grep -q "context->$call(" <<<"$window"; then
         echo "FAIL $call is not rebound between the reset (line $reset) and the stream-out draw (line $draw)"
         exit 1
