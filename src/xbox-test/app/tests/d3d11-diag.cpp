@@ -438,9 +438,10 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         gs->Release();
     }
     // Collision-safe identity: two shaders whose fnv AND length agree must
-    // still get distinct serials, and a draw-state line must never claim the
-    // wrong pair. Forced collision: register the same content hash for two
-    // different shader objects directly through the registry.
+    // still get distinct serials, and BOTH identities must stay resolvable
+    // while both shaders are alive (the table is keyed by the full pointer,
+    // so two live shaders never alias). Forced collision: register the same
+    // content hash for two different shader objects directly.
     {
         unsigned long long fakeHash=0x1234567890abcdefull;
         ID3D11GeometryShader* a=nullptr;ID3D11GeometryShader* b=nullptr;
@@ -453,6 +454,25 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
             CHECK(ia.hash==fakeHash&&ib.hash==fakeHash);
             CHECK(ia.serial!=ib.serial);   // the serial separates them
             CHECK(ia.bytes==sizeof d3d11_diag::kGsViewportBlob);
+            // Re-registering a must not disturb b's identity, and both must
+            // still resolve after the second registration.
+            d3d11_diag::noteShaderHash(a,fakeHash,sizeof d3d11_diag::kGsViewportBlob);
+            d3d11_diag::ShaderId ia2=d3d11_diag::shaderIdOf(a),ib2=d3d11_diag::shaderIdOf(b);
+            CHECK(ia2.serial!=ib2.serial);
+            CHECK(ib2.hash==fakeHash&&ib2.serial==ib.serial);   // b untouched
+            // An unregistered pointer reads as zeros, never as a neighbor's.
+            void* unrelated=&fakeHash;
+            d3d11_diag::ShaderId iz=d3d11_diag::shaderIdOf(unrelated);
+            CHECK(iz.hash==0&&iz.bytes==0&&iz.serial==0);
+            // Recycled address: a COM address a released shader used, handed
+            // to a NEW shader, must carry the NEW shader's identity only —
+            // the old entry is replaced, never served to the new object.
+            d3d11_diag::ShaderId ir=d3d11_diag::shaderIdOf(a);   // a's entry exists
+            CHECK(ir.serial==ia2.serial);
+            d3d11_diag::noteShaderHash(a,fakeHash+1,sizeof d3d11_diag::kGsRtarrayBlob);   // same address, new shader
+            d3d11_diag::ShaderId irep=d3d11_diag::shaderIdOf(a);
+            CHECK(irep.hash==fakeHash+1&&irep.bytes==sizeof d3d11_diag::kGsRtarrayBlob);
+            CHECK(irep.serial!=ir.serial);   // a new creation serial: the old identity is gone
         } else CHECK(true);   // creation refused (junk-free blobs should succeed): identity test vacuous
         if(a)a->Release();
         if(b)b->Release();
@@ -483,11 +503,35 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
             d3d11_diag::deepDrawEnabled.store(false,std::memory_order_release);
         }
     }
+    // Draw-state lines have their OWN budget, not the probe cap: a thousand
+    // gs scan lines at load must not eat the draw-state budget before the
+    // first terrain draw. Flood distinct draw-state signatures (topology
+    // changes) past kMaxDrawStates and check the draw-state cap message fires
+    // while no probe-cap message did.
+    {
+        d3d11_diag::deepDrawEnabled.store(true,std::memory_order_release);
+        for(unsigned t=1;t<=d3d11_diag::kMaxDrawStates+2;++t) {
+            context->IASetPrimitiveTopology(static_cast<D3D11_PRIMITIVE_TOPOLOGY>(t));
+            context->Draw(3,0);
+        }
+        CHECK(count("further draw-state lines suppressed")==1);
+        CHECK(count("further capability answers suppressed")==0);
+        // The independence runs the other way too: a probe logged after the
+        // draw-state flood must still land (the draw-state budget being
+        // exhausted never suppresses capability answers). R16_FLOAT is not
+        // probed earlier in this run, so this is a fresh probe key.
+        UINT fmtBits=0;
+        CHECK(SUCCEEDED(device->CheckFormatSupport(DXGI_FORMAT_R16_FLOAT,&fmtBits))&&fmtBits);
+        CHECK(count("CheckFormatSupport fmt=54(R16_FLOAT)")>=1);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        d3d11_diag::deepDrawEnabled.store(false,std::memory_order_release);
+    }
     d3d11_diag::deepDrawEnabled.store(false,std::memory_order_release);
     if(rtv)rtv->Release();
     if(targetTexture)targetTexture->Release();
+    for(auto& l:lines)if(l.find("draw state")!=std::string::npos||l.find("suppressed")!=std::string::npos)printf("  %s\n",l.c_str());
     if(failures)for(auto& l:lines)printf("  %s\n",l.c_str());
-    printf("OFF-DEVICE D3D11 draw summary checks=%u failures=%u lines=%zu; no rendering claim\n",checks,failures,lines.size());
+    printf("OFF-device D3D11 draw summary checks=%u failures=%u lines=%zu; no rendering claim\n",checks,failures,lines.size());
     return failures?1:0;
 }
 int main(int argc,char** argv) {
