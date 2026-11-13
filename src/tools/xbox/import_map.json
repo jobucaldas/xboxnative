@@ -99,6 +99,10 @@
       "class": "system",
       "reason": "Native Xbox graphics passthrough per the import-routing policy table; basic devices/swap chain have console evidence, full game use remains unverified."
     },
+    "d3dcompiler_47.dll": {
+      "class": "wine-pe",
+      "reason": "Built from pinned Wine 10 source like the other donors, with patches/wine-src/0002 linking Wine's bundled static libvkd3d so the DLL imports only kernel32/ntdll/ucrtbase (no wined3d/opengl32/user32/gdi32). Serves xgameFinal.exe's static imports (D3DCompile, D3DDisassemble, D3DGetBlobPart, D3DReflect) and the d3d10 shim's by-name load. Mapped only after its focused behavior gate (compile a real shader, reflect it); a failure withholds d3dcompiler_47 alone. Console status unverified."
+    },
     "d3d12.dll": {
       "class": "system",
       "reason": "Native Xbox graphics passthrough per the import-routing policy table; basic devices/swap chain have console evidence, full game use remains unverified."

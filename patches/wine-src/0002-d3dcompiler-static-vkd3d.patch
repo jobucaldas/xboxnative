@@ -1,0 +1,27 @@
+From: xboxnative contributors
+Subject: [PATCH] d3dcompiler_47: link bundled vkd3d statically
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+Wine's d3dcompiler_47 imports its seven vkd3d_shader_* symbols through
+wined3d.dll, which drags in opengl32/user32/gdi32/advapi32 — far more host
+surface than a shader compiler needs. Link Wine's bundled static libvkd3d.a
+into the DLL instead (dxguid supplies the IID_ID3D12* constants libvkd3d.a
+references; --allow-multiple-definition resolves the GUID constants it shares
+with reflection.o's initguid definitions — identical read-only constants, no
+behavior change). The donor then imports only kernel32/ntdll/ucrtbase.
+
+--- a/dlls/d3dcompiler_47/Makefile.in
++++ b/dlls/d3dcompiler_47/Makefile.in
+@@ -1,10 +1,10 @@
+ MODULE    = d3dcompiler_47.dll
+ IMPORTLIB = d3dcompiler
+-IMPORTS   = wined3d
++IMPORTS   = vkd3d dxguid
+ EXTRADEFS = -DD3D_COMPILER_VERSION=47
+ PARENTSRC = ../d3dcompiler_43
+ EXTRAINCL = $(VKD3D_PE_CFLAGS)
+
+-EXTRADLLFLAGS = -Wb,--prefer-native
++EXTRADLLFLAGS = -Wb,--prefer-native -Wl,--allow-multiple-definition
+
+ SOURCES = \
