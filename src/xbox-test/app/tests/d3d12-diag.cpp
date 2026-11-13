@@ -8,6 +8,9 @@
 #include <dxgi1_6.h>
 #include <cstdio>
 #include <string>
+#include <tuple>
+#include <utility>
+#include <type_traits>
 #include <vector>
 #include "../host/d3d12_diag.h"
 static unsigned checks=0,failures=0;
@@ -45,6 +48,61 @@ static void appendUnknown(std::vector<unsigned char>& stream,int type) {
     stream.resize(at+sizeof(void*)+sizeof(void*));
     *reinterpret_cast<int*>(&stream[at])=type;
 }
+// ---- argument forwarding: every hook passes each argument to the right position ----
+// Each argument gets a distinct sentinel (a distinct buffer for pointers, a distinct
+// value otherwise). A recording original stores what it received; the check compares
+// position by position. Pointer sentinels point at zeroed memory, so a hook that
+// reads through them sees a null-like description and does not fault.
+alignas(16) static unsigned char fwdBytes[16][256];
+template<class T> static T fwdSentinel(int i) {
+    using U=std::remove_cv_t<T>;
+    if constexpr(std::is_pointer_v<U>) return reinterpret_cast<U>(fwdBytes[i]);
+    else if constexpr(std::is_same_v<U,D3D12_CPU_DESCRIPTOR_HANDLE>) return D3D12_CPU_DESCRIPTOR_HANDLE{SIZE_T(0x7000+i)};
+    else if constexpr(std::is_same_v<U,IID>) { IID g{}; g.Data1=UINT(0x1000+i); return g; }
+    else return static_cast<U>(i+1);   // enums and arithmetic types
+}
+template<class T> static bool fwdSame(const T& a,const T& b) {
+    using U=std::remove_cv_t<T>;
+    if constexpr(std::is_same_v<U,D3D12_CPU_DESCRIPTOR_HANDLE>) return a.ptr==b.ptr;
+    else if constexpr(std::is_same_v<U,IID>) return memcmp(&a,&b,sizeof a)==0;
+    else return a==b;
+}
+// A method's arguments, from its C++ declaration in d3d12.h, with a recording original.
+template<class M> struct FwdMethod;
+template<class C,class R,class...A> struct FwdMethod<R(C::*)(A...)> {
+    using Args=std::tuple<std::decay_t<A>...>;
+    static inline Args seen{};
+    static R STDMETHODCALLTYPE recorder(void*,A... a) {
+        seen=Args(std::decay_t<A>(a)...);
+        if constexpr(std::is_void_v<R>) return; else return R(S_OK);
+    }
+    template<size_t...I> static Args sentinels(std::index_sequence<I...>) {
+        return Args(fwdSentinel<std::decay_t<A>>(int(I))...);
+    }
+    template<size_t...I> static bool same(const Args& a,const Args& b,std::index_sequence<I...>) {
+        return (true && ... && fwdSame(std::get<I>(a),std::get<I>(b)));
+    }
+    // Calls the hook with the sentinel arguments, then checks the recorder got them in order.
+    static bool forwards(void* hook,void* object) {
+        using Idx=std::index_sequence_for<A...>;
+        Args want=sentinels(Idx{});
+        seen=Args{};
+        using Fn=R(STDMETHODCALLTYPE*)(void*,A...);
+        std::apply([&](auto&... a){ (void)reinterpret_cast<Fn>(hook)(object,a...); },want);
+        return same(seen,want,Idx{});
+    }
+};
+template<class M>
+static void forwardCheck(void** vt,void** obj,const char* method,int slot,void* hook) {
+    using T=FwdMethod<M>;
+    vt[slot]=reinterpret_cast<void*>(&T::recorder);
+    d3d12_diag::Patch patch{slot,hook};
+    d3d12_diag::patchClass(vt,&patch,1);
+    const bool ok=T::forwards(vt[slot],obj);
+    if(!ok) printf("  forwarding mismatch: %s\n",method);
+    CHECK(ok);
+}
+
 int main() {
     // The stream walker on synthetic streams built with the real struct
     // layout. These need no device: the walker is a pure function.
@@ -328,6 +386,63 @@ int main() {
         CHECK(call(d3d12_diag::CreateCommandSignature,&csd,(ID3D12RootSignature*)nullptr,__uuidof(ID3D12CommandSignature),&out)==E_INVALIDARG);
         for(size_t i=0;i<sizeof names/sizeof *names;++i)
             CHECK(count(names[i])==beforeNames[i]+1);
+    }
+
+    // Every hooked method: each argument must reach the original in its own position.
+    {
+        static void* vtDev[64]{};static void* objDev[1]{vtDev};
+        static void* vtQueue[64]{};static void* objQueue[1]{vtQueue};
+        static void* vtList[64]{};static void* objList[1]{vtList};
+        static void* vtFence[64]{};static void* objFence[1]{vtFence};
+        static void* vtAlloc[64]{};static void* objAlloc[1]{vtAlloc};
+        static void* vtRes[64]{};static void* objRes[1]{vtRes};
+#define FWD_HOOK(VT,OBJ,Iface,Method,Hook,Slot) forwardCheck<decltype(&Iface::Method)>(VT,OBJ,#Method,int(d3d12_diag::Slot),reinterpret_cast<void*>(&d3d12_diag::Hook))
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateCommandQueue,createCommandQueue,CreateCommandQueue);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateCommandAllocator,createCommandAllocator,CreateCommandAllocator);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateCommandList,createCommandList,CreateCommandList);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateGraphicsPipelineState,createGraphicsPipelineState,CreateGraphicsPipelineState);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateComputePipelineState,createComputePipelineState,CreateComputePipelineState);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CheckFeatureSupport,checkFeatureSupport,CheckFeatureSupport);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateDescriptorHeap,createDescriptorHeap,CreateDescriptorHeap);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateRootSignature,createRootSignature,CreateRootSignature);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateConstantBufferView,createCbv,CreateConstantBufferView);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateShaderResourceView,createSrv,CreateShaderResourceView);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateUnorderedAccessView,createUav,CreateUnorderedAccessView);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateRenderTargetView,createRtv,CreateRenderTargetView);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateDepthStencilView,createDsv,CreateDepthStencilView);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateSampler,createSampler,CreateSampler);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateCommittedResource,createCommittedResource,CreateCommittedResource);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateHeap,createHeap,CreateHeap);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreatePlacedResource,createPlacedResource,CreatePlacedResource);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateReservedResource,createReservedResource,CreateReservedResource);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateFence,createFence,CreateFence);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateQueryHeap,createQueryHeap,CreateQueryHeap);
+        FWD_HOOK(vtDev,objDev,ID3D12Device,CreateCommandSignature,createCommandSignature,CreateCommandSignature);
+        FWD_HOOK(vtDev,objDev,ID3D12Device2,CreatePipelineState,createPipelineStateStream,createPipelineStateStreamSlot);
+        FWD_HOOK(vtQueue,objQueue,ID3D12CommandQueue,ExecuteCommandLists,queueExecuteCommandLists,QueueExecuteCommandLists);
+        FWD_HOOK(vtQueue,objQueue,ID3D12CommandQueue,Signal,queueSignal,QueueSignal);
+        FWD_HOOK(vtQueue,objQueue,ID3D12CommandQueue,Wait,queueWait,QueueWait);
+        FWD_HOOK(vtList,objList,ID3D12GraphicsCommandList,Close,listClose,ListClose);
+        FWD_HOOK(vtList,objList,ID3D12GraphicsCommandList,Reset,listReset,ListReset);
+        FWD_HOOK(vtList,objList,ID3D12GraphicsCommandList,SetPipelineState,listSetPipelineState,ListSetPipelineState);
+        FWD_HOOK(vtList,objList,ID3D12GraphicsCommandList,ResourceBarrier,listResourceBarrier,ListResourceBarrier);
+        FWD_HOOK(vtList,objList,ID3D12GraphicsCommandList,SetDescriptorHeaps,listSetDescriptorHeaps,ListSetDescriptorHeaps);
+        FWD_HOOK(vtList,objList,ID3D12GraphicsCommandList,DrawInstanced,listDrawInstanced,ListDrawInstanced);
+        FWD_HOOK(vtList,objList,ID3D12GraphicsCommandList,DrawIndexedInstanced,listDrawIndexedInstanced,ListDrawIndexedInstanced);
+        FWD_HOOK(vtList,objList,ID3D12GraphicsCommandList,Dispatch,listDispatch,ListDispatch);
+        FWD_HOOK(vtList,objList,ID3D12GraphicsCommandList,CopyResource,listCopyResource,ListCopyResource);
+        FWD_HOOK(vtList,objList,ID3D12GraphicsCommandList,CopyBufferRegion,listCopyBufferRegion,ListCopyBufferRegion);
+        FWD_HOOK(vtList,objList,ID3D12GraphicsCommandList,CopyTextureRegion,listCopyTextureRegion,ListCopyTextureRegion);
+        FWD_HOOK(vtList,objList,ID3D12GraphicsCommandList,ResolveSubresource,listResolveSubresource,ListResolveSubresource);
+        FWD_HOOK(vtList,objList,ID3D12GraphicsCommandList,OMSetRenderTargets,listOMSetRenderTargets,ListOMSetRenderTargets);
+        FWD_HOOK(vtList,objList,ID3D12GraphicsCommandList,ClearRenderTargetView,listClearRenderTargetView,ListClearRenderTargetView);
+        FWD_HOOK(vtList,objList,ID3D12GraphicsCommandList,ClearDepthStencilView,listClearDepthStencilView,ListClearDepthStencilView);
+        FWD_HOOK(vtList,objList,ID3D12GraphicsCommandList,ExecuteIndirect,listExecuteIndirect,ListExecuteIndirect);
+        FWD_HOOK(vtFence,objFence,ID3D12Fence,SetEventOnCompletion,fenceSetEventOnCompletion,FenceSetEventOnCompletion);
+        FWD_HOOK(vtFence,objFence,ID3D12Fence,Signal,fenceSignal,FenceSignal);
+        FWD_HOOK(vtAlloc,objAlloc,ID3D12CommandAllocator,Reset,allocatorReset,AllocatorReset);
+        FWD_HOOK(vtRes,objRes,ID3D12Resource,Map,resourceMap,ResourceMap);
+#undef FWD_HOOK
     }
 
     // A second device shares the class: no new patch, same dedupe.
