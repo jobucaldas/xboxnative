@@ -260,6 +260,18 @@ inline std::vector<std::string> guide_trace_step(GuideTrace& last, bool open, bo
     return out;
 }
 
+// Pad ownership (bugbot r4562634978): while the overlay owns the pad, the guest
+// is sent a neutral pad and the presses drive the guide only. The overlay owns
+// it while the guide is open (guideOwnsInput, the same flag guest_overlay
+// raises on open), and always while the guest is dead: the dead page and guide
+// are then the only thing on screen. `synthetic` (cmd.txt gdead) is the same
+// dead state, so it carries the same ownership; the parameter is taken so the
+// tests can assert that it changes nothing. Pure, so the decision is tested
+// without the pad.
+constexpr bool overlay_owns_pad(bool guideOwnsInput, bool guestDead, bool /*synthetic*/) {
+    return guideOwnsInput || guestDead;
+}
+
 // Force-quit sequencing (bugbot r4559831127): the kill and the save upload
 // must never run in parallel — an upload racing the kill can read a half-
 // written save, or the kill can land mid-upload. One worker walks the steps

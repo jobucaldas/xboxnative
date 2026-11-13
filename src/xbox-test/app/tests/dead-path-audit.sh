@@ -106,5 +106,23 @@ else
     fail "no GetProcAddress lookup for DCompositionCreateDevice2 (dead page has no dcomp path)"
 fi
 
+# 9. Pad ownership (bugbot r4562634978): the guest's pad publish must gate on
+#    the overlay-ownership predicate (dead implies ownership), never on the bare
+#    guide flag, or a dead guest's pad keeps reaching the live game.
+poll=$(awk '/void PollGuestControllers\(\) \{/ {on=1} on {print} on && /^    }$/ {exit}' "$main")
+if echo "$poll" | grep -q 'pad_owned_by_overlay()'; then
+    ok "PollGuestControllers gates the guest pad on pad_owned_by_overlay()"
+else
+    fail "PollGuestControllers does not use pad_owned_by_overlay() for the guest pad"
+fi
+if echo "$poll" | grep -q 'inputBlocked'; then
+    fail "PollGuestControllers reads the bare inputBlocked flag (dead must imply ownership)"
+else ok "PollGuestControllers reads no bare inputBlocked flag"; fi
+if grep -q 'overlay_owns_pad' "$root/app/host/guest_watchdog.h"; then
+    ok "overlay_owns_pad predicate is defined in guest_watchdog.h"
+else
+    fail "overlay_owns_pad predicate missing from guest_watchdog.h"
+fi
+
 echo "dead-path audit: $checks checks, $failures failures"
 [ "$failures" -eq 0 ]

@@ -1942,6 +1942,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if(!dead && !guest_overlay::menuOpen.load(std::memory_order_acquire))return physical;
         return physical|guide_buttons(m_scriptedButtons);
     }
+    // Pad ownership (guest_watchdog::overlay_owns_pad): the guide's own flag,
+    // plus the dead state, which implies it. Read by PollGuestControllers.
+    bool pad_owned_by_overlay() const {
+        return guest_watchdog::overlay_owns_pad(guest_overlay::inputBlocked.load(std::memory_order_acquire),
+                                                guest_overlay::guestDead.load(std::memory_order_acquire),
+                                                m_synthDead);
+    }
     // A live guest, or one declared dead that the cmd.txt channel and the guide
     // still act on (a dead guest has no m_guestSurface).
     bool guest_session_up() const {
@@ -2667,7 +2674,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                     // The launcher menu owns the pad while it is open (XInput
                     // games too): the guest must see an empty pad, automation
                     // included (documented precedence: the overlay wins).
-                    if(guest_overlay::inputBlocked)state=XINPUT_GAMEPAD{};
+                    if(pad_owned_by_overlay())state=XINPUT_GAMEPAD{};   // the overlay owns the pad: the guest sees neutral
                     else {
                         // Injected buttons OR over the physical reading (both
                         // can be held; neither can release the other).
@@ -2696,7 +2703,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // open the guest must see an empty pad, not automation.
         if (m_gpad.armed && !assigned[0]) {
             XINPUT_GAMEPAD injected{};
-            if (!guest_overlay::inputBlocked.load(std::memory_order_relaxed)) {
+            if (!pad_owned_by_overlay()) {
                 injected.wButtons=injButtons;
                 injected.bLeftTrigger=injLt;
                 injected.bRightTrigger=injRt;

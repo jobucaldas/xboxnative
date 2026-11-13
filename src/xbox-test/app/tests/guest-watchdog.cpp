@@ -526,6 +526,23 @@ int main() {
         }
     }
 
+    // Pad ownership (bugbot r4562634978): a dead guest is always owned by the
+    // overlay, whether or not the guide was opened and whether gdead or the
+    // watchdog produced it; a live guest is owned only while the guide is open.
+    {
+        using guest_watchdog::overlay_owns_pad;
+        for (int input = 0; input < 2; ++input)
+            for (int dead = 0; dead < 2; ++dead)
+                for (int syn = 0; syn < 2; ++syn) {
+                    const bool want = input || dead;
+                    CHECK(overlay_owns_pad(!!input, !!dead, !!syn) == want);
+                }
+        CHECK(!overlay_owns_pad(false, false, false));   // live, guide closed: the guest keeps the pad
+        CHECK(overlay_owns_pad(true, false, false));     // guide open on a live guest
+        CHECK(overlay_owns_pad(false, true, false));     // dead without the guide opened
+        CHECK(overlay_owns_pad(false, true, true));      // synthetic gdead: same ownership
+    }
+
     // Force-quit sequencing (bugbot r4559831127): the worker must walk
     // terminate -> wait -> sync -> done IN ORDER — the save upload can
     // never run while the guest is alive or mid-teardown, and the UI's
