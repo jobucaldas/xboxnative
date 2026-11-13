@@ -33,7 +33,13 @@ x86_64-w64-mingw32-gcc -c -Os -fno-stack-protector ../shared/tests/search-dll.c 
 lld-link-19 /dll /noentry /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/layout/k32t/directory-test.dll" "$out/obj/search-dll.obj"
 mkdir -p "$out/layout/donors"
 cp "$donors"/{avrt,dinput8,hid,setupapi,shcore,version}.dll "$out/layout/donors/"
-cp "$donors"/{SHA256SUMS,SOURCE.txt,0001-pe-rodata.patch} "$here/donors/COPYING.LIB" "$here/donors/LICENSE" "$out/layout/donors/"
+cp "$donors"/{SHA256SUMS,SOURCE.txt,0001-pe-rodata.patch,0002-d3dcompiler-static-vkd3d.patch} "$here/donors/COPYING.LIB" "$here/donors/LICENSE" "$out/layout/donors/"
+# Wine's HLSL shader compiler (d3dcompiler_47, static vkd3d): xgameFinal.exe
+# imports D3DCompile/D3DDisassemble/D3DGetBlobPart/D3DReflect and the d3d10
+# shim's Compiler::get() loads the DLL by name. It is a probed Wine donor, so
+# it lives in donors/ beside the others; the loader serves guest loads through
+# donor_pe::exported after the probe gate.
+cp "$donors"/graphics/*.dll "$donors"/graphics/SHA256SUMS "$out/layout/donors/"
 # Wine's C++ runtime (msvcp140 family, concrt140) for games without their own copy.
 mkdir -p "$out/layout/runtime"
 cp "$donors"/runtime/*.dll "$donors"/runtime/SHA256SUMS "$out/layout/runtime/"

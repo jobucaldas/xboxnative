@@ -1,5 +1,13 @@
 #pragma once
 #include <mutex>
+#include <d3dcompiler.h>
+// d3d11shader.h declares the IID with DEFINE_GUID (extern declaration without
+// INITGUID); the console build links no uuid.lib for it, so give the one IID
+// its definition here under a local name (initguid.h would also define every
+// other included GUID, duplicating any TU that did it first).
+#include <initguid.h>
+static const GUID IID_ID3D11ShaderReflectionLocal =
+    {0x8d536ca1,0x0cca,0x4956,{0xa8,0x37,0x78,0x69,0x63,0x75,0x55,0x84}};
 // Strict donor probe: never bind an import to a failure placeholder. Mapping
 // success alone is insufficient: initialize with the runtime mapper, then check
 // donor behavior before exposing its exports. Game entries remain uncalled.
@@ -151,6 +159,45 @@ static bool behavior(const std::string& label,wxl::Image& image,const std::wstri
         if(!call)return false;DWORD index=0;SetLastError(0);
         return !call(nullptr,&index)&&GetLastError()==1550; // ERROR_INVALID_TASK_NAME
     }
+    if(label=="d3dcompiler_47.dll") {
+        // Compile a real vertex shader and reflect it, as xgameFinal.exe does
+        // at load: D3DCompile through the static vkd3d front end, D3DReflect
+        // for the shader-description view. Disassemble is not exercised here.
+        // Wine's d3dcompiler_blob vtable order matches the SDK ID3DBlob, so the
+        // gate reads it through that interface exactly as a game does. GetDesc
+        // writes a full D3D11_SHADER_DESC (Wine's is a partial stub but still
+        // touches the whole struct): the buffer must be the real struct size.
+        using Compile=decltype(&D3DCompile);
+        using Reflect=decltype(&D3DReflect);
+        auto compile=(Compile)image.symbol("D3DCompile");
+        auto reflect=(Reflect)image.symbol("D3DReflect");
+        if(!compile||!reflect)return false;
+        static const char source[]=
+            "float4 main(float4 pos:SV_Position):SV_Position{return pos;}\n";
+        ID3DBlob* code=nullptr;ID3DBlob* errors=nullptr;
+        HRESULT hr=compile(source,sizeof source-1,nullptr,nullptr,nullptr,"main","vs_5_0",0,0,&code,&errors);
+        if(errors) {
+            char text[160];snprintf(text,sizeof text,"DWPE d3dcompiler errors: %.130s",(char*)errors->GetBufferPointer());sink(text);
+            errors->Release();
+        }
+        if(FAILED(hr)||!code)return false;
+        bool ok=false;
+        void* table=nullptr;
+        HRESULT rhr=reflect(code->GetBufferPointer(),code->GetBufferSize(),IID_ID3D11ShaderReflectionLocal,&table);
+        if(SUCCEEDED(rhr)&&table) {
+            auto reflection=(ID3D11ShaderReflection*)table;
+            D3D11_SHADER_DESC desc{};
+            HRESULT dhr=reflection->GetDesc(&desc);
+            ok=SUCCEEDED(dhr)&&desc.InputParameters>=1;
+            if(!ok){char t2[128];snprintf(t2,sizeof t2,"DWPE d3dcompiler GetDesc hr=0x%08lx parameters=%u version=%#x",(unsigned long)dhr,desc.InputParameters,desc.Version);sink(t2);}
+            reflection->Release();
+        } else {
+            char t2[96];snprintf(t2,sizeof t2,"DWPE d3dcompiler reflect hr=0x%08lx table=%p",(unsigned long)rhr,table);sink(t2);
+        }
+        code->Release();
+        char text[96];snprintf(text,sizeof text,"DWPE d3dcompiler D3DCompile hr=0x%08lx reflect=%u",(unsigned long)hr,unsigned(ok));sink(text);
+        return ok;
+    }
     return false;
 }
 inline bool probe(wxl::Log log) {
@@ -167,7 +214,7 @@ inline bool probe(wxl::Log log) {
     };
     unsigned failures=0;
     // dinput8 is last: its hid/setupapi imports resolve to those donors.
-    for(auto name:{L"hid.dll",L"setupapi.dll",L"version.dll",L"shcore.dll",L"avrt.dll",L"dinput8.dll"}) {
+    for(auto name:{L"hid.dll",L"setupapi.dll",L"version.dll",L"shcore.dll",L"avrt.dll",L"d3dcompiler_47.dll",L"dinput8.dll"}) {
         std::wstring path=root+name; std::string label(name,name+wcslen(name));
         missing=0;log(("DWPE BEGIN "+label+" strict imports before initialization").c_str());
         for(auto& i:imports) if(label==i.donor) resolve(i.dll,i.name,i.ordinal);
@@ -186,8 +233,12 @@ inline bool probe(wxl::Log log) {
         char text[256];snprintf(text,sizeof text,"DWPE RUN %s initialized=%u missing=%u behavior=%u",label.c_str(),ok,preflightMissing,tested);log(text);
         // dinput8 serves only games that import it: when its gate fails it is
         // withheld (those games fail on the unresolved import, as before);
-        // the other donors stay a gate for every launch.
-        if(label=="dinput8.dll"&&!tested) {log("DWPE dinput8 withheld; games importing it stop at that import");continue;}
+        // d3dcompiler_47 likewise: only xgameFinal.exe imports it statically and
+        // the d3d10 shim loads it by name. The other donors stay a gate for
+        // every launch.
+        if((label=="dinput8.dll"||label=="d3dcompiler_47.dll")&&!tested) {
+            log(("DWPE "+label+" withheld; games importing it stop at that import").c_str());continue;
+        }
         failures+=!tested;
     }
     ready=failures==0;
