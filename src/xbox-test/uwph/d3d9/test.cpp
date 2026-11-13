@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <d3d11.h>
+#include "texture_desc.h"
 // The shim's own file-scope definitions, for the same reason: no CRT here.
 extern "C" void* memset(void* d,int c,size_t n) {
     auto p=(unsigned char*)d;while(n--)*p++=(unsigned char)c;return d;
@@ -55,6 +56,25 @@ static unsigned checks=0,failures=0;
 using Create9=IDirect3D9*(WINAPI*)(UINT);
 using Create9Ex=HRESULT(WINAPI*)(UINT,IDirect3D9Ex**);
 
+constexpr D3D11_TEXTURE2D_DESC managedTexture2x2Descriptor() {
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width=2;desc.Height=2;desc.MipLevels=1;desc.ArraySize=1;
+    desc.Format=DXGI_FORMAT_B8G8R8A8_UNORM;desc.SampleDesc.Count=1;
+    desc.Usage=D3D11_USAGE_DYNAMIC;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    desc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+    d3d9_detail::applyManagedTextureBacking(desc,D3DPOOL_MANAGED);
+    return desc;
+}
+constexpr D3D11_TEXTURE2D_DESC managedTexture2x2=managedTexture2x2Descriptor();
+static_assert(managedTexture2x2.Width==2&&managedTexture2x2.Height==2&&
+    managedTexture2x2.MipLevels==1&&managedTexture2x2.ArraySize==1&&
+    managedTexture2x2.Format==DXGI_FORMAT_B8G8R8A8_UNORM&&
+    managedTexture2x2.SampleDesc.Count==1&&managedTexture2x2.SampleDesc.Quality==0&&
+    managedTexture2x2.Usage==D3D11_USAGE_DEFAULT&&
+    managedTexture2x2.BindFlags==D3D11_BIND_SHADER_RESOURCE&&
+    managedTexture2x2.CPUAccessFlags==0&&managedTexture2x2.MiscFlags==0,
+    "managed 2x2 D3D9 texture must use the tested DEFAULT SRV descriptor");
+
 static LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM l) { return DefWindowProcW(h,m,w,l); }
 
 // The shim is loaded by full path from this executable's own directory, so the
@@ -83,6 +103,21 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
     CHECK(create9!=nullptr);
     CHECK(create9Ex!=nullptr);
     if(!create9||!create9Ex){outNum("RESULT checks=",checks);outNum("RESULT failures=",failures);return 1;}
+
+    // Regression: a D3D9 A8R8G8B8 managed 2x2 texture must be created as a
+    // one-mip, sampleable DEFAULT texture, with no CPU access. LockRect uses the
+    // shim's separate staging shadow; dynamic textures on the console UMD can
+    // remove the device. This checks the descriptor helper the shim itself uses.
+    D3D11_TEXTURE2D_DESC managed{};
+    managed.Width=2;managed.Height=2;managed.MipLevels=1;managed.ArraySize=1;
+    managed.Format=DXGI_FORMAT_B8G8R8A8_UNORM;managed.SampleDesc.Count=1;
+    managed.Usage=D3D11_USAGE_DYNAMIC;managed.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    managed.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+    d3d9_detail::applyManagedTextureBacking(managed,D3DPOOL_MANAGED);
+    CHECK(managed.Width==2&&managed.Height==2&&managed.MipLevels==1&&managed.ArraySize==1);
+    CHECK(managed.Format==DXGI_FORMAT_B8G8R8A8_UNORM&&managed.SampleDesc.Count==1&&managed.SampleDesc.Quality==0);
+    CHECK(managed.Usage==D3D11_USAGE_DEFAULT&&managed.BindFlags==D3D11_BIND_SHADER_RESOURCE);
+    CHECK(managed.CPUAccessFlags==0&&managed.MiscFlags==0);
 
     // The entry points report the SDK version they were built for.
     CHECK(create9(D3D_SDK_VERSION+1)==nullptr);
