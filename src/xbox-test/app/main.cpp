@@ -63,6 +63,7 @@ extern "C" unsigned ZSTD_isError(size_t code);
 #include "playtime.h"
 #include <xinput.h>
 #include "../uwph/display/gamepad.h"
+#include "../uwph/xinput/gpad.h"
 
 using namespace winrt;
 using namespace winrt::Windows::ApplicationModel::Core;
@@ -1166,6 +1167,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     CoreWindow m_window{nullptr};
     CoreDispatcher m_graphicsDispatcher{nullptr};
     bool m_guestSurface=false;
+    gpad::Runner m_gpad;   // cmd.txt gpad/gpadseq presses; armed only with a guest running
     int m_guestEndGen=0;
     corewindow_input::Shared m_input; // keyboard/mouse to the guest: the record DLL's one feed, shared with guest SendInput
     bool m_inputLogged=false;
@@ -1914,11 +1916,20 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
         if(t<m_frameSummary||m_frameWindow.empty())return;
         m_frameSummary=t+10;
-        std::vector<double> v;double sum=0,present=0;unsigned over25=0,over50=0;
-        for(auto& x:m_frameWindow){v.push_back(x.frameMs);sum+=x.frameMs;present+=x.presentMs;over25+=x.frameMs>25;over50+=x.frameMs>50;}
-        std::sort(v.begin(),v.end());
-        logf("frames: n=%zu avg=%.1fms p50=%.1f p99=%.1f max=%.1f >25ms=%u >50ms=%u present_avg=%.1fms resizes=%u (last %ux%u count=%u hr=0x%08lx)",v.size(),sum/v.size(),
-             v[v.size()/2],v[std::min(v.size()-1,v.size()*99/100)],v.back(),over25,over50,present/v.size(),
+        double present=0;
+        // Both populations go through the pure, total stats helpers (no
+        // hand-rolled percentile indexing anywhere): frameMs as its own
+        // sample set, and the present-to-present interval (consecutive
+        // atMs deltas only) as the other — the delivery cadence the display
+        // sees, the number that should sit at the slot (16.7 ms at
+        // fpscap=60 on a 60 Hz chain).
+        std::vector<double> v,ats;
+        for(auto& x:m_frameWindow){v.push_back(x.frameMs);ats.push_back(x.atMs);present+=x.presentMs;}
+        present_pacing::SampleStats fr=present_pacing::sample_stats(std::move(v));
+        present_pacing::IntervalStats pi=present_pacing::interval_stats(ats);
+        logf("frames: n=%u avg=%.1fms p50=%.1f p99=%.1f max=%.1f >25ms=%u >50ms=%u present_avg=%.1fms present_int n=%u avg=%.1fms p50=%.1f p99=%.1f >25ms=%u resizes=%u (last %ux%u count=%u hr=0x%08lx)",fr.n,fr.avg,
+             fr.p50,fr.p99,fr.max,fr.over25,fr.over50,present/fr.n,
+             pi.n,pi.avg,pi.p50,pi.p99,pi.over25,
              guest_overlay::resizes.load(),guest_overlay::lastResizeW.load(),guest_overlay::lastResizeH.load(),guest_overlay::lastResizeCount.load(),(unsigned long)guest_overlay::lastResizeHr.load());
         m_frameWindow.clear();
     }
@@ -2022,6 +2033,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if(result=="Launch cancelled"){m_guestEndGen=g_launch.gen;logf("launch: cancelled launch ended; staying on the game page");m_dNote=result;return;}
         if(!m_guestSurface && !play_runtime::observed.load(std::memory_order_acquire))return;
         m_guestEndGen=g_launch.gen;
+        m_gpad.clear();   // an armed gpad program never outlives its game
         achievement_poller_stop();   // the guest is exiting; stop watching its achievements.json
         m_achPollStarted=false;      // the next launch starts its own poller
         if(m_leaving)return;   // Force quit is already syncing and restarting
@@ -2261,6 +2273,44 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             logf("cmd.txt: guide tab -> %d (synthetic)", n); return;
         }
         if (c == "stacks") { dump_thread_stacks(); logf("cmd.txt: thread stacks written to launch_probe.log"); return; }
+        // gpad / gpadseq: drive the running game's pad (see uwph/xinput/gpad.h).
+        // Safety: armed only from this cmd.txt channel and only while a guest
+        // is on screen; the game and the network cannot reach this path. The
+        // armed program is cleared when the guest ends (guest_ended).
+        if (c.rfind("gpad ", 0) == 0 || c == "gpad") {
+            if (!m_guestSurface) { logf("cmd.txt: gpad ignored, no game running"); return; }
+            const char* perr = nullptr;
+            std::vector<gpad::Press> prog;
+            if (!gpad::parse_gpad(c.c_str() + 4, c.size() - 4, &prog, &perr) || prog.empty()) {
+                logf("cmd.txt: gpad rejected: %s", perr ? perr : "empty");
+                return;
+            }
+            m_gpad.arm(std::move(prog), GetTickCount64());
+            logf("cmd.txt: gpad armed (%zu step(s))", m_gpad.program.size());
+            return;
+        }
+        if (c.rfind("gpadseq", 0) == 0 && (c.size() == 7 || c[7] == ' ')) {
+            if (!m_guestSurface) { logf("cmd.txt: gpadseq ignored, no game running"); return; }
+            const char* name = c.size() > 8 ? c.c_str() + 8 : "";
+            if (!*name || strchr(name, '/') || strchr(name, '\\') || strchr(name, '.') || strstr(name, "..")) {
+                logf("cmd.txt: gpadseq: bad program name");
+                return;
+            }
+            std::string body;
+            if (!read_file_s(g_dir + L"\\gpadseq\\" + widen(name) + L".txt", body)) {
+                logf("cmd.txt: gpadseq '%s' not found (LocalState\\gpadseq\\%s.txt)", name, name);
+                return;
+            }
+            const char* perr = nullptr;
+            std::vector<gpad::Press> prog;
+            if (!gpad::parse_seq(body.data(), body.size(), &prog, &perr)) {
+                logf("cmd.txt: gpadseq '%s' rejected: %s", name, perr ? perr : "no steps");
+                return;
+            }
+            m_gpad.arm(std::move(prog), GetTickCount64());
+            logf("cmd.txt: gpadseq '%s' armed, %zu step(s)", name, m_gpad.program.size());
+            return;
+        }
         // item 19: named shortcuts for testers — harmless openers only.
         if (c == "sort") { if (g_screen == S_LIBRARY) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 0); m_sortFocus = g_sortMode.load(); logf("cmd.txt: sort dropdown open"); } return; }
         if (c == "filters") { if (g_screen == S_LIBRARY) { ui_nav::popup_exclusive(m_sortOpen, m_filtersOpen, m_searchOpen, 1); m_filtersFocus = 0; logf("cmd.txt: filters panel open"); } return; }
@@ -2311,6 +2361,15 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             DWORD attrs = GetFileAttributesW((g_dir + L"\\d3d11diag.txt").c_str());
             if (attrs != INVALID_FILE_ATTRIBUTES) d3d11_diag::set_enabled(false);
         }
+        // Deep-draw state probe: LocalState\d3d11deep.txt present (contents
+        // ignored) -> draw-time pipeline signatures are logged once each
+        // (topology, GS/PS content hash, target format, PS/GS SRV null and
+        // over-target bits). Read once at boot; the diagnostics header stays
+        // file-system free and asks this probe at adopt time.
+        d3d11_diag::set_deep_draw = [] {
+            DWORD attrs = GetFileAttributesW((g_dir + L"\\d3d11deep.txt").c_str());
+            return attrs != INVALID_FILE_ATTRIBUTES;
+        };
         v.Activated([](auto&&, IActivatedEventArgs const& a) {
             logf("Activated kind=%d (activation args ignored)", (int)a.Kind());
             CoreWindow::GetForCurrentThread().Activate();
@@ -2361,6 +2420,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void Uninitialize() { logf("Uninitialize"); }
 
     void PollGuestControllers() {
+        // cmd.txt gpad presses ride the same publish as the physical pad: ORed
+        // in, so an injected press can never release a button the player holds.
+        m_gpad.tick(GetTickCount64());
+        uint16_t injButtons; uint8_t injLt, injRt;
+        m_gpad.held(&injButtons, &injLt, &injRt);
         static std::array<Gamepad,4> assigned{nullptr,nullptr,nullptr,nullptr};
         try {
             auto pads=Gamepad::Gamepads();
@@ -2379,8 +2443,16 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 if(!pad){xinput_core::publish(i,nullptr);continue;}
                 try {
                     auto state=convert_pad(pad.GetCurrentReading());
-                    // The launcher menu owns the pad while it is open (XInput games too).
+                    // The launcher menu owns the pad while it is open (XInput
+                    // games too): the guest must see an empty pad, automation
+                    // included (documented precedence: the overlay wins).
                     if(guest_overlay::inputBlocked)state=XINPUT_GAMEPAD{};
+                    else {
+                        // Injected buttons OR over the physical reading (both
+                        // can be held; neither can release the other).
+                        state.wButtons|=injButtons;
+                        state.bLeftTrigger|=injLt;state.bRightTrigger|=injRt;
+                    }
                     xinput_core::publish(i,&state,[pad](WORD left,WORD right)->DWORD {
                         try {
                             GamepadVibration motors{};
@@ -2393,15 +2465,36 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         } catch(winrt::hresult_error const&) {
             for(unsigned i=0;i<assigned.size();++i)xinput_core::publish(i,nullptr);
         }
+        // gpad injection with no physical pad attached: keep slot 0 connected
+        // for the whole program (press, release and gap alike), or the guest
+        // would see the pad disconnect between frames and packet numbers
+        // would reset. m_gpad.armed spans exactly the program (arm() to the
+        // tick that clears a finished program), so the release and gap frames
+        // stay connected and the pad disappears once the program is done.
+        // The overlay's input block wins here too: while the launcher menu is
+        // open the guest must see an empty pad, not automation.
+        if (m_gpad.armed && !assigned[0]) {
+            XINPUT_GAMEPAD injected{};
+            if (!guest_overlay::inputBlocked.load(std::memory_order_relaxed)) {
+                injected.wButtons=injButtons;
+                injected.bLeftTrigger=injLt;
+                injected.bRightTrigger=injRt;
+            }
+            xinput_core::publish(0,&injected);
+        }
         // The record DLL's raw-input enumeration presents one HID device per
         // connected pad (uwph_u32c_pads), which is what a guest's legacy
-        // joystick enumeration looks for; with no pad it reports none.
+        // joystick enumeration looks for; with no pad it reports none. The
+        // enumeration carries connection state only — buttons flow through
+        // XInputGetState above — but while gpad injection holds buttons with
+        // no physical pad connected, slot 0 must still enumerate, or the
+        // guest never finds the IG_ device it would read through XInput.
         static auto reportPads=reinterpret_cast<void (WINAPI*)(unsigned)>(
             user32_core::resolve("user32.dll","uwph_u32c_pads"));
         if(reportPads) {
             unsigned mask=0;
             for(unsigned i=0;i<assigned.size();++i)if(assigned[i])mask|=1u<<i;
-            reportPads(mask);
+            reportPads(gpad::publish_mask(mask,injButtons||injLt||injRt));
         }
     }
 
@@ -2464,6 +2557,24 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                             // RCA experiment: lockmode.txt present => the chain keeps its
                             // first mode (later ResizeBuffers suppressed with S_OK).
                             guest_overlay::lockFirstMode=read_file_s(g_dir+L"\\lockmode.txt",saved);
+                            // Opt-in present pacing (LocalState\present.txt): sync=N forces
+                            // the guest's SyncInterval, fpscap=N spaces the guest's Presents.
+                            // Absent or `off` leaves the game's Presents untouched.
+                            std::string pf;
+                            guest_overlay::pacingCfg=read_file_s(g_dir+L"\\present.txt",pf)?present_pacing::parse(pf):present_pacing::Config{};
+                            guest_overlay::pacingLimiter.set_cap(guest_overlay::pacingCfg.fpscap);
+                            if(guest_overlay::pacingCfg.enabled) {
+                                std::string desc;
+                                if(guest_overlay::pacingCfg.syncSet)desc+="sync="+std::to_string(guest_overlay::pacingCfg.sync);
+                                if(guest_overlay::pacingCfg.fpscap){if(!desc.empty())desc+=" ";desc+="fpscap="+std::to_string(guest_overlay::pacingCfg.fpscap);}
+                                logf("present pacing: %s",desc.c_str());
+                            } else
+                                logf("present pacing: off");
+                            // Redundant-resize elision (default ON): resizeelide.txt
+                            // containing "off" forwards every ResizeBuffers to the real
+                            // chain (A/B testing the same-mode elision mitigation).
+                            {std::string o;if(read_file_s(g_dir+L"\\resizeelide.txt",o))
+                                resize_drain::elideEnabled=o.find("off")==std::string::npos;}
                             DeleteFileW((g_dir+L"\\frametimes.csv").c_str());
                             logf("overlay: present hooks %s (View+Menu opens the launcher menu)%s",guest_overlay::install(*chain)?"installed":"unavailable",
                                  guest_overlay::lockFirstMode.load()?" [lockmode: chain locked to its first mode]":"");

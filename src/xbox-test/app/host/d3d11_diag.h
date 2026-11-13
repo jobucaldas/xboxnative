@@ -59,6 +59,8 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace d3d11_diag {
@@ -66,6 +68,7 @@ using Sink=void(*)(const char*);
 inline Sink sink=nullptr;
 constexpr size_t kMaxFailures=200;   // distinct failed calls logged
 constexpr size_t kMaxProbes=160;     // distinct capability answers logged
+constexpr size_t kMaxDrawStates=64;  // distinct draw-state signatures logged (own budget)
 constexpr int kSlots=136;            // ID3D11DeviceContext reaches slot 114; Context1's ClearView is 132
 constexpr size_t kMaxClasses=16;
 // Runtime kill switch: the file d3d11diag.txt in the launcher's LocalState
@@ -99,20 +102,31 @@ static_assert(ContextMap==14&&Unmap==15&&DrawIndexed==12&&DrawIndexedInstanced==
 // ---- reporting: once per key, bounded
 inline std::mutex reportM;
 inline std::set<std::string> seen;
-inline size_t failures=0,probes=0;
-inline bool failuresCapped=false,probesCapped=false;
+inline size_t failures=0,probes=0,drawStates=0;
+inline bool failuresCapped=false,probesCapped=false,drawStatesCapped=false;
 inline void emit(const std::string& text) {if(auto s=sink)s(text.c_str());}
-inline void report(bool probe,const std::string& key,const std::string& text) {
+// probe: capability answers (adapter, feature levels, gs scan) — kMaxProbes.
+// drawState: the deep-draw pipeline signatures — kMaxDrawStates, its own
+// budget: sharing the probe cap let a thousand gs scan lines in loading eat
+// the budget before the first terrain draw ever ran, which would starve the
+// very lines the deep-draw run exists to collect.
+inline void report(int probe,const std::string& key,const std::string& text) {
     std::string line=text,note;
     {
         std::lock_guard<std::mutex> lock(reportM);
-        size_t& used=probe?probes:failures;bool& capped=probe?probesCapped:failuresCapped;
+        size_t used;bool capped=false;const char* noteText=nullptr;
+        if(probe==2){used=drawStates;capped=drawStatesCapped;noteText="further draw-state lines suppressed";}
+        else if(probe==1){used=probes;capped=probesCapped;noteText="further capability answers suppressed";}
+        else {used=failures;capped=failuresCapped;noteText="further failed calls suppressed";}
         if(seen.count(key))return;
-        if(used>=(probe?kMaxProbes:kMaxFailures)) {
-            if(!capped){capped=true;note=probe?"further capability answers suppressed":"further failed calls suppressed";}
+        size_t cap=probe==2?kMaxDrawStates:probe==1?kMaxProbes:kMaxFailures;
+        if(used>=cap) {
+            if(!capped){capped=true;note=noteText;}
             else return;
             line.clear();
         } else {seen.insert(key);++used;}
+        if(probe==2)drawStatesCapped=capped;else if(probe==1)probesCapped=capped;else failuresCapped=capped;
+        if(probe==2)drawStates=used;else if(probe==1)probes=used;else failures=used;
     }
     if(!line.empty())emit(line);
     if(!note.empty())emit(note+" (cap reached)");
@@ -202,6 +216,8 @@ struct ContextState {
     std::atomic<unsigned> shaders{0};    // bit0=HS bit1=DS bit2=GS bit3=PS bound
     std::atomic<unsigned> rtFormat{0};   // format of the first render target bound
     std::atomic<unsigned> deferred{0};   // 1 for a context CreateDeferredContext returned
+    std::atomic<unsigned long long> gsHash{0},psHash{0};   // content hash of the bound GS/PS (0 = none)
+    std::atomic<unsigned> srvState{0};   // last SetShaderResources per stage: bit0=PS null bit1=PS over-target bit2=GS null bit3=GS over-target
     std::atomic<void*> formatView[kFormatCache];   // view the cached format is for
     std::atomic<unsigned> formatValue[kFormatCache];
 };
@@ -226,6 +242,8 @@ inline void resetContext(void* self) {
     ContextState& s=stateOf(self);
     s.topology.store(0,std::memory_order_relaxed);s.shaders.store(0,std::memory_order_relaxed);
     s.rtFormat.store(0,std::memory_order_relaxed);
+    s.gsHash.store(0,std::memory_order_relaxed);s.psHash.store(0,std::memory_order_relaxed);
+    s.srvState.store(0,std::memory_order_relaxed);
     for(size_t i=0;i<kFormatCache;++i)s.formatView[i].store(nullptr,std::memory_order_relaxed);
 }
 // ---- device health
@@ -420,6 +438,70 @@ inline std::atomic<void*> rtvSeen[kRtvSeenSlots];   // views already described: 
 constexpr size_t kRtResourceSlots=512;   // power of two
 inline std::atomic<void*> rtResources[kRtResourceSlots];
 inline std::atomic<uint64_t> srvFeedbackSets{0};   // SRV binds that hit a bound-or-was-target resource
+// ---- deep draw state (opt-in): the pipeline state a draw carries, once per
+// distinct signature. The summary buckets draw by topology/shaders/format but
+// cannot say WHICH geometry-shader container or pixel shader a terrain draw
+// used, nor whether its PS sampled null SRVs or SRVs over its own target.
+// Those four facts together name the layer a black output hides in. Gated by
+// deepDraw() (LocalState\d3d11deep.txt, checked once at adopt); default off;
+// the lines are keyed like report() so a hot loop pays one set lookup per
+// draw at most.
+inline std::atomic<bool> deepDrawEnabled{false};
+inline bool deepDraw() {return deepDrawEnabled.load(std::memory_order_acquire);}
+// Shader container identities, filled at Create*Shader time: GSSetShader
+// hands the hook a shader object, and its bytecode is only readable at
+// creation. The identity is (content fnv hash, byte length, creation serial):
+// a 64-bit fnv alone can collide between two different containers, and a
+// collision that named the wrong shader pair would poison the very answer the
+// deep-draw line exists to give. The serial is unique per creation, so two
+// distinct shaders never share an identity even with identical fnv+length;
+// reporting both lets a line be matched to the gs scan's content hash.
+// Keyed by the FULL object pointer, under reportM: a direct-mapped slot table
+// aliasing two live shaders returned another container's identity (and
+// delete'd its entry while its shader was alive). COM addresses are unique
+// among live objects, so the full pointer is a collision-free key; dead
+// entries only cost sizeof(entry) and are erased on re-registration of the
+// same address.
+struct ShaderId {unsigned long long hash;size_t bytes;unsigned serial;};
+inline std::atomic<unsigned> shaderSerial{0};
+inline std::unordered_map<void*,ShaderId> shaderIds;   // guarded by reportM
+inline void noteShaderHash(void* shader,unsigned long long hash,size_t bytes) {
+    if(!shader)return;
+    ShaderId fresh{hash,bytes,shaderSerial.fetch_add(1,std::memory_order_relaxed)};
+    std::lock_guard<std::mutex> lock(reportM);
+    shaderIds.insert_or_assign(shader,fresh);
+}
+inline ShaderId shaderIdOf(void* shader) {
+    if(!shader)return {};
+    std::lock_guard<std::mutex> lock(reportM);
+    auto it=shaderIds.find(shader);
+    return it!=shaderIds.end()?it->second:ShaderId{};
+}
+// One line per distinct draw-time pipeline signature: topology, GS/PS
+// identity (content hash, byte length, creation serial), target format, and
+// the PS/GS SRV bind flags (n=null entry, f=over-target). Capped by the same
+// seen-set machinery as the failure log.
+inline std::string topologyName(unsigned t);   // defined below; noteDrawState names it
+inline void noteDrawState(void* /*self*/,ContextState& state,unsigned topology,unsigned /*shaders*/) {
+    if(!deepDraw())return;
+    // gsHash/psHash store the shader OBJECT pointer at bind time; resolve the
+    // creation identity through the table. Two distinct shaders never share
+    // one (hash, bytes, serial): the serial disambiguates an fnv collision.
+    ShaderId gs=shaderIdOf(reinterpret_cast<void*>(state.gsHash.load(std::memory_order_relaxed)));
+    ShaderId ps=shaderIdOf(reinterpret_cast<void*>(state.psHash.load(std::memory_order_relaxed)));
+    unsigned srv=state.srvState.load(std::memory_order_relaxed);
+    std::string flags;
+    if(srv&1)flags+=" ps-null";
+    if(srv&2)flags+=" ps-over-target";
+    if(srv&4)flags+=" gs-null";
+    if(srv&8)flags+=" gs-over-target";
+    unsigned fmtNow=state.rtFormat.load(std::memory_order_relaxed);
+    std::string key=fmt("%u/%llx/%zx/%u/%llx/%zx/%u/%u/%x",topology,gs.hash,gs.bytes,gs.serial,ps.hash,ps.bytes,ps.serial,fmtNow,srv);
+    report(2,"draw-state "+key,fmt("draw state topology=%u(%s) gs=%012llx/%zub#%u ps=%012llx/%zub#%u target=%s srv:%s",
+        topology,topologyName(topology).c_str(),gs.hash,gs.bytes,gs.serial,ps.hash,ps.bytes,ps.serial,
+        formatText(DXGI_FORMAT(fmtNow)).c_str(),
+        flags.empty()?" ok":flags.c_str()));
+}
 inline void noteRenderTargetResource(ID3D11RenderTargetView* view) {
     if(!view)return;
     ID3D11Resource* resource=nullptr;view->GetResource(&resource);
@@ -852,7 +934,7 @@ inline std::string gsBytecodeText(const void* code,SIZE_T length) {
 // Every failed call also feeds the device-health path: the first failure after
 // a removal reports GetDeviceRemovedReason and the memory state, instead of
 // the caller's error hiding the removal.
-#define D3D11_DIAG_FAILED(name,key,text) do{if(FAILED(hr)){report(false,std::string(name)+" "+hex(hr)+" "+(key),std::string(name)+" hr="+hex(hr)+" "+(text));noteFailure(hr);}}while(0)
+#define D3D11_DIAG_FAILED(name,key,text) do{if(FAILED(hr)){report(0,std::string(name)+" "+hex(hr)+" "+(key),std::string(name)+" hr="+hex(hr)+" "+(text));noteFailure(hr);}}while(0)
 
 using DevicePtr=void*;
 static HRESULT STDMETHODCALLTYPE createBuffer(DevicePtr self,const D3D11_BUFFER_DESC* d,const D3D11_SUBRESOURCE_DATA* init,ID3D11Buffer** out) {
@@ -869,7 +951,7 @@ static HRESULT STDMETHODCALLTYPE createBuffer(DevicePtr self,const D3D11_BUFFER_
         if(out&&*out)noteIndirectBuffer(*out,d->ByteWidth);
         std::string words="no-initial-data (written by the GPU or later)";
         if(init&&init->pSysMem) words=indirectArgsText(init->pSysMem,d->ByteWidth,"index");
-        report(true,fmt("indirect args buffer %u/%x/%d/%s",d->ByteWidth,d->BindFlags,int(d->Usage),words.c_str()),
+        report(1,fmt("indirect args buffer %u/%x/%d/%s",d->ByteWidth,d->BindFlags,int(d->Usage),words.c_str()),
             fmt("indirect args buffer bytes=%u bind=0x%x usage=%d %s",d->ByteWidth,d->BindFlags,int(d->Usage),words.c_str()));
     }
     return hr;
@@ -973,9 +1055,14 @@ static HRESULT STDMETHODCALLTYPE createShader(DevicePtr self,const void* code,SI
     // shader. One line per distinct container, on creation.
     if(SUCCEEDED(hr)&&Slot==CreateGeometryShader) {
         std::string scan=gsBytecodeText(code,length);
-        if(!scan.empty())report(true,scan,scan+fmt(" bytes=%zu hash=%016llx",size_t(length),
+        if(!scan.empty())report(1,scan,scan+fmt(" bytes=%zu hash=%016llx",size_t(length),
             (unsigned long long)fnv(code,size_t(std::min<SIZE_T>(length,16u<<20)))));
     }
+    // The deep-draw state lines name a draw's GS/PS by its creation identity
+    // (content hash + length + serial); the bind hooks only see the shader
+    // object, so the identity is remembered here.
+    if(SUCCEEDED(hr)&&out&&*out&&deepDraw())
+        noteShaderHash(*out,fnv(code,size_t(std::min<SIZE_T>(length,16u<<20))),size_t(length));
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createGeometryShaderWithStreamOutput(DevicePtr self,const void* code,SIZE_T length,const D3D11_SO_DECLARATION_ENTRY* entries,UINT entryCount,
@@ -985,7 +1072,7 @@ static HRESULT STDMETHODCALLTYPE createGeometryShaderWithStreamOutput(DevicePtr 
     if(FAILED(hr)){std::string key,text=shaderText(code,length,&key);D3D11_DIAG_FAILED("CreateGeometryShaderWithStreamOutput",key,text+fmt(" so-entries=%u strides=%u rasterized=%u",entryCount,strideCount,rasterized));}
     else if(SUCCEEDED(hr)) {
         std::string scan=gsBytecodeText(code,length);
-        if(!scan.empty())report(true,scan+" so",scan+fmt(" so-entries=%u rasterized=%u bytes=%zu hash=%016llx",entryCount,rasterized,size_t(length),
+        if(!scan.empty())report(1,scan+" so",scan+fmt(" so-entries=%u rasterized=%u bytes=%zu hash=%016llx",entryCount,rasterized,size_t(length),
             (unsigned long long)fnv(code,size_t(std::min<SIZE_T>(length,16u<<20)))));
     }
     return hr;
@@ -1091,7 +1178,7 @@ static void STDMETHODCALLTYPE contextUnmap(DevicePtr self,ID3D11Resource* r,UINT
             // Read only what the buffer holds: a 16-byte DrawInstancedIndirect
             // or 12-byte DispatchIndirect upload must not be read as 20.
             std::string text=indirectArgsText(data,indirectBytes[indirect].load(std::memory_order_relaxed));
-            report(true,fmt("indirect args upload %s",text.c_str()),fmt("indirect args upload %s",text.c_str()));
+            report(1,fmt("indirect args upload %s",text.c_str()),fmt("indirect args upload %s",text.c_str()));
         }
     }
     call(self,r,subresource);
@@ -1119,6 +1206,7 @@ inline void countDraw(void* self,int kind,unsigned count,unsigned instances) {
     }
     countDrawFormat(state.rtFormat.load(std::memory_order_relaxed));
     if(!count||(kind>=2&&kind<4&&!instances))zeroCounts[kind].fetch_add(1,std::memory_order_relaxed);
+    noteDrawState(self,state,t,s);
     static std::atomic<bool> named[kDrawKinds];
     if(!named[kind].exchange(true,std::memory_order_relaxed))
         emit(fmt("draw summary: first %s topology=%u(%s) hs/ds/gs/ps=%s/%s/%s/%s",drawKindName(kind),t,topologyName(t).c_str(),
@@ -1146,6 +1234,7 @@ inline void countDrawUnknown(void* self,int kind) {
         gsDrawTopologies[kind][std::min(t,64u)].fetch_add(1,std::memory_order_relaxed);
     }
     countDrawFormat(state.rtFormat.load(std::memory_order_relaxed));
+    noteDrawState(self,state,t,s);
     static std::atomic<bool> named[kDrawKinds];
     if(!named[kind].exchange(true,std::memory_order_relaxed))
         emit(fmt("draw summary: first %s topology=%u(%s) hs/ds/gs/ps=%s/%s/%s/%s",drawKindName(kind),t,topologyName(t).c_str(),
@@ -1222,6 +1311,7 @@ static void STDMETHODCALLTYPE contextGSSetShader(DevicePtr self,ID3D11GeometrySh
     auto call=reinterpret_cast<Fn>(original(self,GSSetShader));if(!call)return;
     auto& s=stateOf(self).shaders;
     if(shader)s.fetch_or(4,std::memory_order_relaxed);else s.fetch_and(~4u,std::memory_order_relaxed);
+    stateOf(self).gsHash.store(reinterpret_cast<unsigned long long>(shader),std::memory_order_relaxed);
     call(self,shader,instances,count);
 }
 static void STDMETHODCALLTYPE contextPSSetShader(DevicePtr self,ID3D11PixelShader* shader,ID3D11ClassInstance* const* instances,UINT count) {
@@ -1229,6 +1319,7 @@ static void STDMETHODCALLTYPE contextPSSetShader(DevicePtr self,ID3D11PixelShade
     auto call=reinterpret_cast<Fn>(original(self,PSSetShader));if(!call)return;
     auto& s=stateOf(self).shaders;
     if(shader)s.fetch_or(8,std::memory_order_relaxed);else s.fetch_and(~8u,std::memory_order_relaxed);
+    stateOf(self).psHash.store(reinterpret_cast<unsigned long long>(shader),std::memory_order_relaxed);
     call(self,shader,instances,count);
 }
 // The geometry stage's resource binds land in the same table as the other
@@ -1246,6 +1337,33 @@ static void STDMETHODCALLTYPE contextSetShaderResources(DevicePtr self,UINT star
     else for(UINT i=0;i<count;++i) if(!views[i]){srvNulls[Stage].fetch_add(1,std::memory_order_relaxed);break;}
     if(views&&count)for(UINT i=0;i<count;++i)
         if(views[i]&&wasRenderTarget(views[i])){srvFeedbackSets.fetch_add(1,std::memory_order_relaxed);break;}
+    // Deep-draw state: the PS/GS null and over-target bits at bind time, so a
+    // draw-state line can say whether the shader that rendered black sampled
+    // an unbound texture or its own target. The bits describe THIS context's
+    // last bind for the stage (a bind with count=0 or all-null views clears
+    // the stage's bits: what is bound after the call is nothing), not a
+    // global: a deferred context's binds never leak into the immediate one's
+    // draw-state line.
+    if(Stage==2||Stage==1) {
+        unsigned bit=0;
+        if(views&&count) {
+            bool hasNull=false,hasFeedback=false;
+            for(UINT i=0;i<count;++i) {
+                if(!views[i])hasNull=true;
+                else if(wasRenderTarget(views[i]))hasFeedback=true;
+            }
+            if(Stage==2){if(hasNull)bit|=1;if(hasFeedback)bit|=2;}
+            else{if(hasNull)bit|=4;if(hasFeedback)bit|=8;}
+        }
+        // A full-range bind replaces every slot of the stage; a partial one
+        // (start>0) only replaces its own slots, so the previous bits stand.
+        if(start==0) {
+            stateOf(self).srvState.fetch_and(Stage==2?~3u:~12u,std::memory_order_relaxed);
+            if(bit)stateOf(self).srvState.fetch_or(bit,std::memory_order_relaxed);
+        } else if(bit) {
+            stateOf(self).srvState.fetch_or(bit,std::memory_order_relaxed);
+        }
+    }
     call(self,start,count,views);
 }
 // A zero-area viewport or an empty scissor rect clips every draw to nothing:
@@ -1441,7 +1559,7 @@ static void STDMETHODCALLTYPE contextUpdateSubresource(DevicePtr self,ID3D11Reso
         size_t bytes=indirectBufferBytes(resource);
         if(box&&box->right>box->left) bytes=std::min<size_t>(bytes,size_t(box->right-box->left));
         std::string text=indirectArgsText(data,bytes);
-        report(true,fmt("indirect args upload %s",text.c_str()),fmt("indirect args upload %s",text.c_str()));
+        report(1,fmt("indirect args upload %s",text.c_str()),fmt("indirect args upload %s",text.c_str()));
     }
     call(self,resource,subresource,box,data,rowPitch,depthPitch);
 }
@@ -1554,7 +1672,7 @@ static HRESULT STDMETHODCALLTYPE checkFormatSupport(DevicePtr self,DXGI_FORMAT f
     D3D11_DIAG_HOOK(Fn,CheckFormatSupport)HRESULT hr=call(self,format,support);
     UINT bits=SUCCEEDED(hr)&&support?*support:0;
     if(FAILED(hr)||!bits)D3D11_DIAG_FAILED("CheckFormatSupport",fmt("%d/%x",int(format),bits),fmt("fmt=%s support=0x%x UNSUPPORTED",formatText(format).c_str(),bits));
-    else report(true,fmt("CheckFormatSupport %d/%x",int(format),bits),fmt("CheckFormatSupport fmt=%s support=0x%x [%s]",formatText(format).c_str(),bits,supportText(bits).c_str()));
+    else report(1,fmt("CheckFormatSupport %d/%x",int(format),bits),fmt("CheckFormatSupport fmt=%s support=0x%x [%s]",formatText(format).c_str(),bits,supportText(bits).c_str()));
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE checkMultisampleQualityLevels(DevicePtr self,DXGI_FORMAT format,UINT samples,UINT* levels) {
@@ -1568,7 +1686,7 @@ static HRESULT STDMETHODCALLTYPE checkFeatureSupport(DevicePtr self,D3D11_FEATUR
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,D3D11_FEATURE,void*,UINT);
     D3D11_DIAG_HOOK(Fn,CheckFeatureSupport)HRESULT hr=call(self,feature,data,size);
     if(FAILED(hr))D3D11_DIAG_FAILED("CheckFeatureSupport",fmt("%d/%u",int(feature),size),fmt("feature=%d size=%u",int(feature),size));
-    else report(true,fmt("CheckFeatureSupport %d/%u/%s",int(feature),size,bytesText(data,size).c_str()),
+    else report(1,fmt("CheckFeatureSupport %d/%u/%s",int(feature),size,bytesText(data,size).c_str()),
         fmt("CheckFeatureSupport feature=%d size=%u data=%s",int(feature),size,bytesText(data,size).c_str()));
     return hr;
 }
@@ -1597,6 +1715,10 @@ inline const Patch* extendedPatches(size_t& count){
 }
 // ---- entry points
 inline void configure(Sink s){sink=s;}
+// The deep-draw gate file lives in the launcher's LocalState; the diagnostics
+// header stays free of file-system knowledge, so the launcher passes a probe
+// (main.cpp checks the file once at boot, like the kill switch). Null = off.
+inline bool (*set_deep_draw)()=nullptr;
 // Called with every device Play gives a guest. Patches the device class and
 // the immediate context; logs the adapter the guest can see and the
 // capability answers that pick engine code paths.
@@ -1609,6 +1731,15 @@ inline void adopt(ID3D11Device* device) {
     if(!is_enabled()) {
         emit("diagnostics off (LocalState\\d3d11diag.txt): no vtable hooks installed");
         return;
+    }
+    // Deep-draw state (LocalState\d3d11deep.txt present): one line per
+    // distinct draw-time pipeline signature (topology, GS/PS content hash,
+    // target format, PS/GS SRV null/over-target bits). Default off: the lines
+    // name the exact shader pair a black layer hides behind but cost a
+    // report() lookup per draw. Never changes a call's result.
+    if(set_deep_draw && set_deep_draw()) {
+        deepDrawEnabled.store(true,std::memory_order_release);
+        emit("deep draw state on (LocalState\\d3d11deep.txt): one line per distinct draw pipeline signature");
     }
     healthDevice.store(device,std::memory_order_relaxed);   // not AddRef'd: the guest owns it
     size_t baseCount=0,extendedCount=0;
@@ -1625,20 +1756,20 @@ inline void adopt(ID3D11Device* device) {
     ID3D11DeviceContext* context=nullptr;device->GetImmediateContext(&context);
     if(context){contextSeen.store(true,std::memory_order_release);patchContext(context);context->Release();}
     if(!ok)return;
-    emit(fmt("diagnostics on: failed Create*/Check*/Map calls are logged once per distinct call (caps %zu/%zu); draws are summarised every %llu s",
-        kMaxFailures,kMaxProbes,(unsigned long long)(kSummaryMs/1000)));
+    emit(fmt("diagnostics on: failed Create*/Check*/Map calls are logged once per distinct call (caps %zu/%zu/%zu draw-state); draws are summarised every %llu s",
+        kMaxFailures,kMaxProbes,kMaxDrawStates,(unsigned long long)(kSummaryMs/1000)));
     IDXGIDevice* dxgi=nullptr;IDXGIAdapter* adapter=nullptr;
     if(SUCCEEDED(device->QueryInterface(__uuidof(IDXGIDevice),reinterpret_cast<void**>(&dxgi)))&&dxgi&&SUCCEEDED(dxgi->GetAdapter(&adapter))&&adapter) {
         DXGI_ADAPTER_DESC d{};
         if(SUCCEEDED(adapter->GetDesc(&d))) {
             char name[128]{};WideCharToMultiByte(CP_UTF8,0,d.Description,-1,name,sizeof name-1,nullptr,nullptr);
-            report(true,fmt("adapter %04x/%04x",d.VendorId,d.DeviceId),fmt("adapter vendor=0x%04x device=0x%04x rev=%u name=\"%s\" vram=%zuMB sysmem=%zuMB shared=%zuMB",
+            report(1,fmt("adapter %04x/%04x",d.VendorId,d.DeviceId),fmt("adapter vendor=0x%04x device=0x%04x rev=%u name=\"%s\" vram=%zuMB sysmem=%zuMB shared=%zuMB",
                 d.VendorId,d.DeviceId,d.Revision,name,size_t(d.DedicatedVideoMemory>>20),size_t(d.DedicatedSystemMemory>>20),size_t(d.SharedSystemMemory>>20)));
         }
     }
     if(adapter)adapter->Release();
     if(dxgi)dxgi->Release();
-    report(true,"device feature level",fmt("device feature level=0x%x creation flags=0x%x",unsigned(device->GetFeatureLevel()),device->GetCreationFlags()));
+    report(1,"device feature level",fmt("device feature level=0x%x creation flags=0x%x",unsigned(device->GetFeatureLevel()),device->GetCreationFlags()));
     // Capability answers games branch on. Unsupported ones log as failures.
     D3D11_FEATURE_DATA_THREADING threading{};device->CheckFeatureSupport(D3D11_FEATURE_THREADING,&threading,sizeof threading);
     D3D11_FEATURE_DATA_DOUBLES doubles{};device->CheckFeatureSupport(D3D11_FEATURE_DOUBLES,&doubles,sizeof doubles);

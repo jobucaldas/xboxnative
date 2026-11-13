@@ -15,17 +15,18 @@ int main() {
     // first because it costs no launcher restart.
     size_t count = 0;
     const Mode* table = modes(count);
-    assert(count == 11);
+    assert(count == 12);
     assert(std::string(table[0].name) == "x86" && table[0].pe32);
     assert(std::string(table[1].name) == "vulkan-dzn" && !table[1].pe32);
-    assert(std::string(table[2].name) == "d3d9" && std::string(table[6].name) == "d3d10");
-    assert(std::string(table[3].name) == "d3d9-triangle" && std::string(table[4].name) == "d3d9-triangle-variants");
-    assert(std::string(table[5].name) == "d3d9-textured");
-    assert(std::string(table[7].name) == "d3d10-triangle" &&
-           std::string(table[7].exe) == "play-d3d10-triangle.exe" && !table[7].pe32);
-    assert(std::string(table[8].name) == "opengl" && std::string(table[8].exe) == "play-opengl.exe" && !table[8].pe32);
-    assert(std::string(table[9].name) == "d3d11" && std::string(table[9].exe) == "play-d3d11.exe" && !table[9].pe32);
-    assert(std::string(table[10].name) == "d3d12" && std::string(table[10].exe) == "play-d3d12.exe" && !table[10].pe32);
+    assert(std::string(table[2].name) == "vulkan-draw" && std::string(table[2].exe) == "play-vulkan-draw.exe" && !table[2].pe32);
+    assert(std::string(table[3].name) == "d3d9" && std::string(table[7].name) == "d3d10");
+    assert(std::string(table[4].name) == "d3d9-triangle" && std::string(table[5].name) == "d3d9-triangle-variants");
+    assert(std::string(table[6].name) == "d3d9-textured");
+    assert(std::string(table[8].name) == "d3d10-triangle" &&
+           std::string(table[8].exe) == "play-d3d10-triangle.exe" && !table[8].pe32);
+    assert(std::string(table[9].name) == "opengl" && std::string(table[9].exe) == "play-opengl.exe" && !table[9].pe32);
+    assert(std::string(table[10].name) == "d3d11" && std::string(table[10].exe) == "play-d3d11.exe" && !table[10].pe32);
+    assert(std::string(table[11].name) == "d3d12" && std::string(table[11].exe) == "play-d3d12.exe" && !table[11].pe32);
     assert(find("d3d9") && find("d3d9")->pe32 == false);
     assert(find("d3d9-triangle") && std::string(find("d3d9-triangle")->exe) == "play-d3d9-triangle.exe");
     assert(find("d3d10-triangle") && std::string(find("d3d10-triangle")->exe) == "play-d3d10-triangle.exe");
@@ -41,7 +42,7 @@ int main() {
     // fixed cap of four did once the table grew past five guests).
     int guests = 0;
     for (size_t i = 0; i < count; ++i) if (!table[i].pe32) ++guests;
-    assert(guests == 10);
+    assert(guests == 11);
     assert(max_restarts() > guests);
     assert(max_restarts() == guests + 1);
 
@@ -56,9 +57,9 @@ int main() {
     assert(unknown.size() == 2 && unknown[0] == "nope");
     // "all" expands to every fixture in canonical order, whatever else is named.
     auto all = parse_request("d3d10\nall\n");
-    assert(all.size() == 11 && all[0] == "x86" && all[6] == "d3d10"
-        && all[7] == "d3d10-triangle" && all[8] == "opengl" && all[9] == "d3d11" && all[10] == "d3d12");
-    assert(all[3] == "d3d9-triangle" && all[4] == "d3d9-triangle-variants");
+    assert(all.size() == 12 && all[0] == "x86" && all[7] == "d3d10"
+        && all[8] == "d3d10-triangle" && all[9] == "opengl" && all[10] == "d3d11" && all[11] == "d3d12");
+    assert(all[4] == "d3d9-triangle" && all[5] == "d3d9-triangle-variants");
 
     // The queue survives a launcher restart: restarts count and pending modes
     // round-trip; a malformed file is refused rather than half-read.
@@ -91,6 +92,11 @@ int main() {
     assert(verdict("vulkan-dzn", true, true, 42) == "PASS frame-presented");
     assert(verdict("vulkan-dzn", true, true, 43) == "BLOCKED device-creation");
     assert(verdict("vulkan-dzn", true, true, 13) == "FAIL exit-13");
+    // The draw fixture has a BLOCKED outcome too: the pipeline ran but the
+    // pixels (or the compute buffer) did not read back as drawn.
+    assert(verdict("vulkan-draw", true, true, 42) == "PASS");
+    assert(verdict("vulkan-draw", true, true, 43) == "BLOCKED pixel-readback");
+    assert(verdict("vulkan-draw", true, true, 13) == "FAIL exit-13");
     // The OpenGL one has a BLOCKED outcome too: everything up to the context
     // worked but the rendered pixels did not match (the host drew nothing).
     assert(verdict("opengl", true, true, 42) == "PASS");
@@ -100,6 +106,22 @@ int main() {
     // did not read back as drawn (never a pass).
     assert(verdict("d3d11", true, true, 43) == "BLOCKED pixel-readback");
     assert(verdict("d3d12", true, true, 43) == "BLOCKED pixel-readback");
+    // The D3D11 fixture's newer passes block per feature: the calls succeeded
+    // but the effect never reached the readback (never a pass either).
+    assert(verdict("d3d11", true, true, 54) == "BLOCKED msaa-resolve");
+    assert(verdict("d3d11", true, true, 58) == "BLOCKED generate-mips");
+    assert(verdict("d3d11", true, true, 63) == "BLOCKED command-list");
+    assert(verdict("d3d11", true, true, 67) == "BLOCKED stream-out");
+    assert(verdict("d3d11", true, true, 71) == "BLOCKED indirect-draw");
+    assert(verdict("d3d11", true, true, 75) == "BLOCKED occlusion-query");
+    assert(verdict("d3d11", true, true, 82) == "BLOCKED indexed-draw");
+    assert(verdict("d3d11", true, true, 86) == "BLOCKED depth-test");
+    assert(verdict("d3d11", true, true, 90) == "BLOCKED texture-array-copy");
+    assert(verdict("d3d11", true, true, 94) == "BLOCKED bc1-copy");
+    // 95 = a Wine host: the gated passes did not run, so never a pass.
+    assert(verdict("d3d11", true, true, 95) == "BLOCKED wine-host");
+    assert(verdict("d3d11", true, true, 50) == "FAIL exit-50");   // a step failure stays a failure
+    assert(verdict("d3d12", true, true, 54) == "FAIL exit-54");   // not the d3d12 fixture's code
     // A guest that never ran code, or ran it and never exited, is a failure.
     assert(verdict("d3d9", true, false, 0) == "FAIL no-guest-code");
     assert(verdict("d3d9", false, true, 0) == "FAIL did-not-exit");

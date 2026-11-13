@@ -103,9 +103,33 @@
       "class": "system",
       "reason": "Native Xbox graphics passthrough per the import-routing policy table; basic devices/swap chain have console evidence, full game use remains unverified."
     },
+    "coreclr.dll": {
+      "class": "stub",
+      "reason": "Managed-runtime hosting gap (research/MONO-DOTNET-COVERAGE.md): no owned game imports it today; a .NET Core game would need hostfxr/hostpolicy/coreclr served by Wine PE donors built from pinned source. Classified so a gap report names it instead of leaving it unclassified."
+    },
     "dbghelp.dll": {
       "class": "stub",
       "reason": "GameAssembly directly imports SymInitialize/SymFromAddr despite the import-routing policy table crash-handler-only claim; planned clean-failure symbolization stubs need validation."
+    },
+    "hostfxr.dll": {
+      "class": "stub",
+      "reason": "Managed-runtime hosting gap (research/MONO-DOTNET-COVERAGE.md): no owned game imports it; a .NET Core apphost game would load it first. Classified so a gap report names it."
+    },
+    "hostpolicy.dll": {
+      "class": "stub",
+      "reason": "Managed-runtime hosting gap (research/MONO-DOTNET-COVERAGE.md): no owned game imports it. Classified so a gap report names it."
+    },
+    "mono-2.0-bdwgc.dll": {
+      "class": "uwph",
+      "reason": "Unity Mono JIT runtime, loaded by UnityPlayer from MonoBleedingEdge/EmbedRuntime by relative path (owned Say No! More ships it; Slime Rancher loads it the same way). Mapped as a guest image like any game DLL; its JIT executable memory goes through Play's RWX emulation and its unwind registration through the OS ntdll exports (uwph/kernel32/exception_route.h)."
+    },
+    "mscoree.dll": {
+      "class": "stub",
+      "reason": "Managed-runtime hosting gap (research/MONO-DOTNET-COVERAGE.md): no owned game imports it natively (Slime Rancher's IL assemblies import it but are metadata containers consumed by Mono, never executed through mscoree). A .NET Framework game (Stardew Valley) would need a CorBindToRuntimeEx route or a Wine donor. Classified so a gap report names it."
+    },
+    "nethost.dll": {
+      "class": "stub",
+      "reason": "Managed-runtime hosting gap (research/MONO-DOTNET-COVERAGE.md): no owned game imports it. Classified so a gap report names it."
     },
     "dinput8.dll": {
       "class": "wine-pe",

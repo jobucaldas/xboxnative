@@ -6,6 +6,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI search_consumer_value() {
 }
 #else
 extern "C" __declspec(dllexport) DWORD WINAPI search_dependency_value() {
+#ifdef SEARCH_ROOT_COPY
+    // The root copy answers differently on purpose: LOAD_WITH_ALTERED_SEARCH_PATH
+    // must resolve a sub-path load's dependency from the loading module's own
+    // directory (MonoBleedingEdge/EmbedRuntime), never from this root copy.
+    return 55;
+#endif
     return 77;
 }
 #endif

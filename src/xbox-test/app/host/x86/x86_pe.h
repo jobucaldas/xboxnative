@@ -297,13 +297,14 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
     return out;
 }
 // Thunk page (read+execute, never fetched through the interpreter), stack, TEB32, PEB32.
-// The page is one 4 KiB page holding kPerPage stubs: capacity is fixed at map
-// time so the process-return sentinel (the page's last slot) never moves under
-// a running guest call — a stub added later by GetProcAddress/os_export_addr
-// must never land on the slot a host->guest call is waiting to return through.
+// Mapping the page fixes the table's capacity: the process-return sentinel is
+// the LAST slot of the mapped page from then on and never moves, so stubs added
+// while a host->guest call is in flight (COM proxy creation inside a callback,
+// GetProcAddress) can never land on the address that call is waiting to return
+// to. Stubs beyond the capacity are refused by ThunkTable::add.
 inline void map_thunk_page(Memory& mem, ThunkTable& table) {
-    table.capacity = ThunkTable::kPerPage;
-    uint32_t len = 4096;
+    uint32_t len = (table.span() + 4095) & ~4095u;
+    if (!table.capacity) table.capacity = len / table.stride - 1;  // last slot: the sentinel
     mem.map(table.base, len, PROT_R | PROT_W);
     std::vector<uint8_t> int3(len, 0xCC); mem.write_bytes(table.base, int3.data(), len);
     mem.protect(table.base, len, PROT_R | PROT_X);

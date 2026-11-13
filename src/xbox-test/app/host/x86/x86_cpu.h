@@ -10,6 +10,7 @@
 // page before fetching, runs the host handler against the guest stack, then
 // performs the callee-side return.
 #pragma once
+#include <deque>
 #include <functional>
 #include <map>
 #include <string>
@@ -25,10 +26,13 @@ struct Thunk {
     std::function<uint32_t(Cpu&)> fn;                 // return value goes to EAX
 };
 struct ThunkTable {
-    static constexpr uint32_t kPerPage = 4096 / 16;  // stubs one 4 KiB page holds
     uint32_t base = 0x7FFE0000, stride = 16;
     uint32_t capacity = 0;  // stubs the mapped page can hold (0 = not mapped yet)
-    std::vector<Thunk> entries;
+    // deque, not vector: a handler that adds thunks while executing (COM proxy
+    // creation inside a guest callback, GetProcAddress) must never invalidate
+    // the storage of the Thunk it is running from — deque never moves existing
+    // elements on push_back, so references stay valid across any add.
+    std::deque<Thunk> entries;
     uint32_t add(Thunk t) {
         if (capacity && entries.size() >= capacity) throw std::runtime_error("x86 thunk page full");
         entries.push_back(std::move(t));
@@ -38,8 +42,17 @@ struct ThunkTable {
     // moves: GetProcAddress can add stubs while a host->guest call is running,
     // and a sentinel derived from entries.size() would then land on the address
     // that call is waiting to return to (a guest call through a freshly
-    // resolved forward would hit it and unwind as a phantom return).
-    uint32_t sentinel() const { return capacity ? base + (capacity - 1) * stride : base + uint32_t(entries.size()) * stride; }
+    // resolved forward would hit it and unwind as a phantom return). With a
+    // capacity (set by map_thunk_page)
+    // the sentinel is the slot AFTER the last usable stub slot: capacity is the
+    // number of stubs the page can hold, so base + capacity*stride is the page's
+    // final slot and no stub address can ever equal it.
+    uint32_t sentinel() const { return capacity ? base + capacity * stride : base + uint32_t(entries.size()) * stride; }
+    // Roll back stubs added past n: a multi-stub build that dies halfway must
+    // leave no debris in the table (capacity is fixed, so leaked slots would
+    // shrink it for every later build). Only safe to shrink the tail — the
+    // caller rolls back its own failed build, which owns the last slots.
+    void truncate(size_t n) { entries.resize(n); }
     uint32_t span() const { return uint32_t(entries.size() + 1) * stride; }
     const Thunk* at(uint32_t eip) const {
         if (eip < base || eip >= base + uint32_t(entries.size()) * stride || (eip - base) % stride) return nullptr;
@@ -49,10 +62,20 @@ struct ThunkTable {
 struct Cpu {
     Memory& mem; ThunkTable& thunks;
     uint32_t reg[8] = {}, eip = 0, eflags = 2, fs_base = 0, gs_base = 0;
-    uint64_t executed = 0, limit = 500ull * 1000 * 1000;
+    uint64_t executed = 0, limit = 500ull * 1000 * 1000, tsc = 0;
     bool exited = false; uint32_t exit_code = 0;
     unsigned depth = 0;
     Fpu fpu; Sse xmm; uint32_t mxcsr = 0x1f80;
+    // MXCSR_MASK (fxsave +28) is CPU-specific silicon state, not an architectural
+    // constant: e.g. this dev machine's CPU reads 0x0000ffff while a Zen runner
+    // reads 0x0002ffff (bit 17 = FIZ-Z, writable). Probe the host's real mask
+    // once with a genuine fxsave so the emulator reports what this CPU reports.
+    uint32_t mxcsr_mask = [] {
+        alignas(16) uint8_t buf[512] = {};
+        asm volatile("fxsave %0" :: "m"(buf) : "memory");
+        uint32_t mask; std::memcpy(&mask, buf + 28, 4);
+        return mask ? mask : 0x0000ffffu;  // pre-SSE2 CPUs may leave it 0
+    }();
     Cpu(Memory& m, ThunkTable& t) : mem(m), thunks(t) {}
 
     // --- host-facing helpers (thunk handlers) ---
@@ -272,7 +295,8 @@ struct Cpu {
         case 0x99: if (n == 4) reg[EDX] = int32_t(reg[EAX]) < 0 ? 0xffffffffu : 0; else setreg(2, 2, int16_t(reg[EAX]) < 0 ? 0xffff : 0); return;
         case 0xA0: case 0xA1: { unsigned sz = (op & 1) ? n : 1; setreg(0, sz, mem.r(fetchn(4) + seg, sz)); return; }
         case 0xA2: case 0xA3: { unsigned sz = (op & 1) ? n : 1; mem.w(fetchn(4) + seg, getreg(0, sz), sz); return; }
-        case 0xA4: case 0xA5: case 0xAA: case 0xAB: case 0xAC: case 0xAD: stringop(op, (op & 1) ? n : 1); return;
+        case 0xA4: case 0xA5: case 0xA6: case 0xA7: case 0xAA: case 0xAB: case 0xAC: case 0xAD: case 0xAE: case 0xAF:
+            stringop(op, (op & 1) ? n : 1); return;
         case 0xA8: case 0xA9: { unsigned sz = (op & 1) ? n : 1; alu(4, getreg(0, sz), fetchn(sz), sz); return; }
         case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6: case 0xB7: setreg(op & 7, 1, fetch()); return;
         case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE: case 0xBF: setreg(op & 7, n, fetchn(n)); return;
@@ -302,15 +326,28 @@ struct Cpu {
     }
     void stringop(uint8_t op, unsigned sz) {
         int step = f(DF) ? -int(sz) : int(sz);
-        bool repeat = rep == 0xF3;
-        if (rep == 0xF2) unsupported("repne string op");
+        bool repeat = rep != 0;
+        bool repne = rep == 0xF2;
         do {
             if (repeat && !reg[ECX]) break;
-            if (op <= 0xA5) { mem.w(reg[EDI], mem.r(reg[ESI] + seg, sz), sz); reg[ESI] += step; reg[EDI] += step; }
-            else if (op <= 0xAB) { mem.w(reg[EDI], getreg(0, sz), sz); reg[EDI] += step; }
-            else { setreg(0, sz, mem.r(reg[ESI] + seg, sz)); reg[ESI] += step; }
+            if (op <= 0xA7) {  // movs copies; cmps compares and sets flags only
+                // A segment override applies to DS:ESI only; ES:EDI is fixed.
+                uint32_t a = mem.r(reg[ESI] + seg, sz), b = mem.r(reg[EDI], sz);
+                if (op <= 0xA5) mem.w(reg[EDI], a, sz);
+                else alu(7, a, b, sz);  // cmps: sub for flags only
+                reg[ESI] += step; reg[EDI] += step;
+            } else if (op <= 0xAB) { mem.w(reg[EDI], getreg(0, sz), sz); reg[EDI] += step; }
+            else if (op <= 0xAD) { setreg(0, sz, mem.r(reg[ESI] + seg, sz)); reg[ESI] += step; }
+            else {  // scas: cmp al/ax/eax against [edi] (ES-based, no override)
+                uint32_t b = mem.r(reg[EDI], sz);
+                alu(7, getreg(0, sz), b, sz);
+                reg[EDI] += step;
+            }
             if (repeat) --reg[ECX];
-        } while (repeat && reg[ECX]);
+        } while (repeat && reg[ECX] &&
+                 (((op >= 0xA6 && op <= 0xA7) || (op >= 0xAE && op <= 0xAF)) ? !(repne ? f(ZF) : !f(ZF)) : true));
+        // rep movs/stos/lods run to ECX=0; only cmps/scas set ZF and stop early
+        // (repe on ZF=1, repne on ZF=0). The old code only ran F3 movs-class ops.
     }
     void group3(unsigned sz) {
         Rm r = modrm(); unsigned sop = modrm_reg; uint32_t v = rd(r, sz);
@@ -410,10 +447,44 @@ struct Cpu {
                 return;
             }
             unsupported("0f c7 /n"); }
-        case 0xAE: {  // group 15: fences, fxrstor/xsave, ldmxcsr/stmxcsr
+        case 0xAE: {  // group 15: fences, fxsave/fxrstor, ldmxcsr/stmxcsr
             Rm r = modrm();
             switch (modrm_reg) {
-            case 0: case 1: case 5: case 6: return;  // fxsave/fxrstor/xsave/xrstor: state is host-side only
+            case 0: {  // fxsave: the real 512-byte layout (x87 env, state, xmm) games snapshot
+                if (r.isreg) unsupported("fxsave reg");
+                uint32_t ea = r.ea + seg;
+                mem.w(ea, fpu.cw, 2); mem.w(ea + 2, fpu.status(), 2);
+                uint8_t ftw = 0;  // abridged tag word: bit i = 1 if PHYSICAL slot i is non-empty
+                for (int i = 0; i < 8; ++i) if (!fpu.empty[i]) ftw |= uint8_t(1u << i);
+                mem.w8(ea + 4, ftw); mem.w8(ea + 5, 0);       // +5..7 reserved
+                mem.w(ea + 6, 0, 2);                          // fop: no real 8087-style tracking
+                mem.w(ea + 8, 0, 8);                          // fip: documented zeros
+                mem.w(ea + 16, 0, 8);                         // fdp (with cs/ds halves): documented zeros
+                mem.w(ea + 24, mxcsr, 4); mem.w(ea + 28, mxcsr_mask, 4);  // mxcsr + the host CPU's real mask (probed with a genuine fxsave; silicon-specific)
+                for (int i = 0; i < 8; ++i) {  // ST(i) at 32 + 16*i: 10 bytes + 6 reserved.
+                    // ST(i) is relative to TOP: physical slot (top+i)&7.
+                    int ph = (fpu.top + i) & 7;
+                    for (int k = 0; k < 10; ++k) mem.w8(ea + 32 + 16 * i + k, fpu.st[ph][k]);
+                    mem.w(ea + 32 + 16 * i + 10, 0, 6);
+                }
+                for (int i = 0; i < 8; ++i) mem.w128(ea + 160 + 16 * i, xmm.r[i]);
+                return; }
+            case 1: {  // fxrstor
+                if (r.isreg) unsupported("fxrstor reg");
+                uint32_t ea = r.ea + seg;
+                fpu.cw = mem.r(ea, 2);
+                fpu.sw = mem.r(ea + 2, 2) & ~uint16_t(0x3800);  // bits 11-13 are TOP, restored below
+                fpu.top = (mem.r(ea + 2, 2) >> 11) & 7;
+                uint8_t ftw = mem.r8(ea + 4);  // abridged: bit i = physical slot i non-empty; 0 -> empty (tag 11)
+                for (int i = 0; i < 8; ++i) {  // STi relative to TOP (see fxsave)
+                    int ph = (fpu.top + i) & 7;
+                    for (int k = 0; k < 10; ++k) fpu.st[ph][k] = mem.r8(ea + 32 + 16 * i + k);
+                    fpu.empty[ph] = (ftw >> ph) & 1 ? false : true;
+                }
+                mxcsr = mem.r(ea + 24, 4);
+                for (int i = 0; i < 8; ++i) mem.r128(ea + 160 + 16 * i, xmm.r[i]);
+                return; }
+            case 5: case 6: return;  // xsave/xrstor: same treatment as before (not implemented)
             case 2: mxcsr = rd(r, 4); return;        // ldmxcsr
             case 3: wr(r, 4, mxcsr); return;         // stmxcsr: a save/restore pair must round-trip
             case 7: return;                          // clflush
@@ -475,8 +546,58 @@ struct Cpu {
         case 0x60: case 0x61: case 0x62: case 0x63: case 0x64: case 0x65: case 0x66: case 0x67:
         case 0x68: case 0x69: case 0x6A: case 0x6B: case 0x6C: case 0x6D: case 0x6F: case 0x7F:
         case 0x74: case 0x75: case 0x76: case 0xD7: case 0xE7: case 0xEB: case 0xEF:
+        case 0xD1: case 0xD2: case 0xD3: case 0xD4: case 0xD5: case 0xE1: case 0xE2:
+        case 0xF1: case 0xF2: case 0xF3: case 0xF4: case 0xF5: case 0xF6:
+        case 0xD8: case 0xD9: case 0xDA: case 0xDB: case 0xDC: case 0xDD: case 0xDE: case 0xDF: case 0xE0: case 0xE8: case 0xE9: case 0xEA:
+        case 0xEC: case 0xED: case 0xEE:
         case 0xF8: case 0xF9: case 0xFA: case 0xFB: case 0xFC: case 0xFD: case 0xFE:
             sse_int(op); return;
+        case 0x70: {  // pshufd (66) / pshuflw (F2) / pshufhw (F3), imm8 selects lanes
+            Rm r = modrm(); uint8_t imm = fetch(); uint32_t a[4]; sse_read(r, a);
+            uint32_t out[4];
+            if (p66) { for (int i = 0; i < 4; ++i) out[i] = a[(imm >> (2 * i)) & 3]; }
+            else if (rep == 0xF2 || rep == 0xF3) {  // shuffle four 16-bit lanes in one half
+                uint16_t src[8], orig[8]; memcpy(orig, a, 16); memcpy(src, a, 16);
+                unsigned base = rep == 0xF2 ? 0 : 4;
+                for (int i = 0; i < 4; ++i) src[base + i] = orig[base + ((imm >> (2 * i)) & 3)];  // selects read the ORIGINAL lanes
+                memcpy(out, src, 16);
+            } else unsupported("0f 70 (MMX pshufw)");
+            sse_write_reg(modrm_reg, out); return; }
+        case 0x71: case 0x72: case 0x73: {  // packed shifts by imm8: /2 sr, /4 sar, /6 sl, 73 /3 psrldq /7 pslldq
+            if (!p66) unsupported("0f 71/72/73 (MMX)");
+            // Here the reg field is the /n shift selector; the XMM operand is r/m
+            // and must be a register (mod=11): the imm8 forms have no memory
+            // destination (verified #UD on real hardware; the memory-count form
+            // is 0F F1/F2/F3/D1-D3 with an xmm destination instead).
+            Rm r = modrm(); unsigned sop = modrm_reg; uint8_t cnt = fetch();
+            if (!r.isreg) unsupported("0f 71/72/73 memory destination");
+            uint32_t a[4]; sse_read(r, a);
+            sse_shift(op, sop, cnt, a);
+            sse_write(r, a); return; }
+        case 0x18: modrm(); return;  // prefetchnta/t0/t1/t2 + reserved /4../7: all no-op hints (verified on real hardware, /0-/7 execute as NOPs in both mem and mod11 forms)
+        case 0x31: {  // rdtsc: a synthetic counter that only ever advances (games poll it for timing)
+            uint64_t t = tsc += 1000;
+            reg[EAX] = uint32_t(t); reg[EDX] = uint32_t(t >> 32); return; }
+        case 0xA2: {  // cpuid: deterministic leaves; feature bits only for what we implement
+            switch (reg[EAX]) {
+            case 0: reg[EAX] = 1; reg[EBX] = 0x756e6547u; reg[EDX] = 0x49656e69u; reg[ECX] = 0x6c65746eu; return;  // "GenuineIntel"
+            case 1: reg[EAX] = 0x000006b4u; reg[EBX] = 0; reg[ECX] = 0;
+                    reg[EDX] = (1u << 0) | (1u << 4) | (1u << 15) | (1u << 19) | (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26); return;
+                    // fpu tsc cmov clflush mmx fxsr sse sse2
+            default: reg[EAX] = reg[EBX] = reg[ECX] = reg[EDX] = 0; return; } }
+        case 0xC3: {  // movnti: 0F C3 r/m32 — a dword store in 32-bit mode; the
+                      // m64 form needs REX.W (unreachable here). The 66 prefix has
+                      // no MOVNTI form: #UD (verified on real hardware).
+            if (p66) unsupported("66 0f c3 (no 66 movnti form)");
+            Rm r = modrm(); if (r.isreg) unsupported("movnti reg");
+            mem.w32(r.ea + seg, getreg(modrm_reg, 4)); return; }
+        case 0xC6: {  // shufps (no prefix) / shufpd (66)
+            Rm r = modrm(); uint8_t imm = fetch(); uint32_t a[4], b[4]; sse_reg(modrm_reg, a); sse_read(r, b);
+            uint32_t out[4];
+            if (p66) { out[0] = a[(imm & 1) * 2]; out[1] = a[(imm & 1) * 2 + 1];
+                       out[2] = b[((imm >> 1) & 1) * 2]; out[3] = b[((imm >> 1) & 1) * 2 + 1]; }
+            else { out[0] = a[imm & 3]; out[1] = a[(imm >> 2) & 3]; out[2] = b[(imm >> 4) & 3]; out[3] = b[(imm >> 6) & 3]; }
+            sse_write_reg(modrm_reg, out); return; }
         default: unsupported("0f opcode");
         }
     }
@@ -574,6 +695,55 @@ struct Cpu {
             mem.w64(r.ea + seg, uint64_t(hi) << 32 | lo); return;
         }
     }
+    // Integer SIMD group (all 66-prefixed in MSVC code).
+    // Packed shift shared by the imm8 (0F 71/72/73 /n) and register (D1-D3,
+    // E1-E3, F1-F3) forms. `sop` is the /n from the ModRM byte; for the
+    // register forms it comes from the opcode's low three bits.
+    //   71: word lanes   72: dword lanes   73: qword lanes (and byte shifts)
+    //   /2 = right logical, /4 = right arithmetic (words/dwords), /6 = left,
+    //   73 /3 = pslldq, 73 /7 = psrldq (whole-register byte shifts).
+    void sse_shift(uint8_t op, unsigned sop, uint64_t cnt, uint32_t a[4]) {
+        uint8_t* ab = reinterpret_cast<uint8_t*>(a);
+        // Selector check first, before the count clamp: the imm8 group defines
+        // only /2 (right), /4 (arithmetic) and /6 (left) for 71/72, and /2
+        // psrlq, /3 psrldq, /6 psllq, /7 pslldq for 73 — psra has no 73 form.
+        // Any other /n is #UD even when the count saturates.
+        bool sel = op == 0x71 || op == 0x72 ? (sop == 2 || sop == 4 || sop == 6)
+                                             : (sop == 2 || sop == 3 || sop == 6 || sop == 7);
+        if (!sel) unsupported("invalid opcode form (sse shift /n)");
+        if (op == 0x73 && (sop == 3 || sop == 7)) {  // pslldq/psrldq: shift the whole 128 bits by bytes
+            unsigned k = cnt >= 16 ? 16 : cnt;
+            uint8_t tmp[16];
+            memcpy(tmp, ab, 16);
+            std::memset(ab, 0, 16);
+            if (sop == 7) memcpy(ab + k, tmp, 16 - k); else memcpy(ab, tmp + k, 16 - k);  // /7 pslldq (left), /3 psrldq (right)
+            return;
+        }
+        unsigned gran = op == 0x71 ? 2 : op == 0x72 ? 4 : 8;
+        unsigned maxcnt = gran == 2 ? 16 : gran == 4 ? 32 : 64;
+        if (cnt >= maxcnt) {  // counts >= lane width: zero, or per-lane sign fill for the arithmetic shifts
+            if (sop == 4 && gran == 2) { for (unsigned i = 0; i < 8; ++i) { uint16_t fill = (ab[2 * i + 1] & 0x80) ? 0xffffu : 0; memcpy(ab + 2 * i, &fill, 2); } }
+            else if (sop == 4 && gran == 4) { for (int i = 0; i < 4; ++i) a[i] = (ab[4 * i + 3] & 0x80) ? 0xffffffffu : 0; }
+            else std::memset(ab, 0, 16);
+            return;
+        }
+        unsigned lanes = 16 / gran;
+        for (unsigned i = 0; i < lanes; ++i) {
+            if (sop == 6) {  // left
+                if (gran == 8) { uint64_t v; memcpy(&v, ab + 8 * i, 8); v <<= cnt; memcpy(ab + 8 * i, &v, 8); }
+                else if (gran == 4) a[i] <<= cnt;
+                else { uint16_t v; memcpy(&v, ab + 2 * i, 2); v = uint16_t(v << cnt); memcpy(ab + 2 * i, &v, 2); }
+            } else if (sop == 4 && gran == 2) {  // psraw
+                int16_t v; memcpy(&v, ab + 2 * i, 2); v = int16_t(v >> cnt); memcpy(ab + 2 * i, &v, 2);
+            } else if (sop == 4 && gran == 4) {  // psrad
+                int32_t v; memcpy(&v, ab + 4 * i, 4); v >>= cnt; memcpy(ab + 4 * i, &v, 4);
+            } else if (sop == 2) {  // right logical
+                if (gran == 8) { uint64_t v; memcpy(&v, ab + 8 * i, 8); v >>= cnt; memcpy(ab + 8 * i, &v, 8); }
+                else if (gran == 4) a[i] >>= cnt;
+                else { uint16_t v; memcpy(&v, ab + 2 * i, 2); v = uint16_t(v >> cnt); memcpy(ab + 2 * i, &v, 2); }
+            } else unsupported("sse shift /n unreachable");  // selectors validated at the top
+        }
+    }
     // Arithmetic and compare group (0F 51-5F). `op` is the second opcode byte.
     void sse_arith(uint8_t op) {
         Rm r = modrm();
@@ -644,8 +814,8 @@ struct Cpu {
             const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
             for (unsigned i = 0; i < 8 / gran; ++i) { memcpy(o + i * 2 * gran, ab + i * gran, gran); memcpy(o + i * 2 * gran + gran, bb + i * gran, gran); }
             sse_write_reg(modrm_reg, out); return; }
-        case 0x68: case 0x69: case 0x6A: {  // punpckhbw/wd/dq
-            unsigned gran = op == 0x68 ? 1 : op == 0x69 ? 2 : 4;
+        case 0x68: case 0x69: case 0x6A: case 0x6D: {  // punpckhbw/wd/dq/qdq
+            unsigned gran = op == 0x68 ? 1 : op == 0x69 ? 2 : op == 0x6A ? 4 : 8;
             sse_reg(modrm_reg, a); sse_read(r, b);
             uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
             const uint8_t* ab = reinterpret_cast<const uint8_t*>(a) + 8; const uint8_t* bb = reinterpret_cast<const uint8_t*>(b) + 8;
@@ -715,6 +885,112 @@ struct Cpu {
                 memcpy(o + i * gran, &v, gran);
             }
             sse_write_reg(modrm_reg, out); return; }
+        case 0xD1: case 0xD2: case 0xD3:   // psrlw/d/q  r/m, xmm
+        case 0xE1: case 0xE2: case 0xE3:   // psraw/d/q  r/m, xmm
+        case 0xF1: case 0xF2: case 0xF3: { // psllw/d/q  r/m, xmm
+            if (!p66) unsupported("0f d1..f3 (MMX)");
+            uint32_t a[4], b[4]; sse_reg(modrm_reg, a); sse_read(r, b);
+            uint64_t cnt; memcpy(&cnt, b, 8);  // the count is the low 64 bits of the source
+            unsigned sop = op == 0xD1 ? 2 : op == 0xD2 ? 2 : op == 0xD3 ? 2
+                         : op == 0xE1 ? 4 : op == 0xE2 ? 4
+                         : op == 0xF1 ? 6 : op == 0xF2 ? 6 : 6;
+            unsigned opb = op == 0xD1 || op == 0xE1 || op == 0xF1 ? 0x71
+                         : op == 0xD2 || op == 0xE2 || op == 0xF2 ? 0x72 : 0x73;
+            sse_shift(opb, sop, cnt, a);
+            sse_write_reg(modrm_reg, a); return; }
+        case 0xD4: {  // paddq (66 0F D4): both 64-bit lanes
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            const uint64_t* ax = reinterpret_cast<const uint64_t*>(a); const uint64_t* bx = reinterpret_cast<const uint64_t*>(b);
+            uint64_t lo = ax[0] + bx[0], hi = ax[1] + bx[1];
+            uint32_t out[4] = {uint32_t(lo), uint32_t(lo >> 32), uint32_t(hi), uint32_t(hi >> 32)};
+            sse_write_reg(modrm_reg, out); return; }
+        case 0xD5: {  // pmullw: 16x16 -> low 16 bits
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
+            const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
+            for (int i = 0; i < 8; ++i) { int16_t x, y, m; memcpy(&x, ab + 2 * i, 2); memcpy(&y, bb + 2 * i, 2); m = int16_t(x * y); memcpy(o + 2 * i, &m, 2); }
+            sse_write_reg(modrm_reg, out); return; }
+        case 0xF4: {  // pmuludq: unsigned dword 0 -> qword lanes
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            uint64_t lo = uint64_t(a[0]) * b[0], hi = uint64_t(a[2]) * b[2];
+            uint32_t out[4] = {uint32_t(lo), uint32_t(lo >> 32), uint32_t(hi), uint32_t(hi >> 32)};
+            sse_write_reg(modrm_reg, out); return; }
+        case 0xF5: {  // pmaddwd: signed dwords from adjacent word pairs
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
+            const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
+            for (int i = 0; i < 4; ++i) { int32_t x0, x1, y0, y1;
+                int16_t t; memcpy(&t, ab + 4 * i, 2); x0 = t; memcpy(&t, ab + 4 * i + 2, 2); x1 = t;
+                memcpy(&t, bb + 4 * i, 2); y0 = t; memcpy(&t, bb + 4 * i + 2, 2); y1 = t;
+                int32_t s = x0 * y0 + x1 * y1; memcpy(o + 4 * i, &s, 4); }
+            sse_write_reg(modrm_reg, out); return; }
+        case 0xF6: {  // psadbw: |a-b| sums of 8-byte halves
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
+            const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
+            for (int h = 0; h < 2; ++h) { unsigned s = 0;
+                for (int i = 0; i < 8; ++i) s += unsigned(std::abs(int(ab[8 * h + i]) - int(bb[8 * h + i])));
+                uint16_t s16 = uint16_t(s); memcpy(o + 8 * h, &s16, 2); }
+            sse_write_reg(modrm_reg, out); return; }
+        case 0xE0: {  // pavgb (66 0F E0)
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
+            const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
+            for (int i = 0; i < 16; ++i) o[i] = uint8_t((unsigned(ab[i]) + unsigned(bb[i]) + 1) >> 1);
+            sse_write_reg(modrm_reg, out); return; }
+        case 0xD8: case 0xD9: case 0xDC: case 0xDD:  // psubusb/psubusw, paddusb/paddusw
+        case 0xE8: case 0xE9: case 0xEC: case 0xED: {  // psubsb/psubsw, paddsb/paddsw
+            // Intel map: D8 psubusb, D9 psubusw, DC paddusb, DD paddusw,
+            //            E8 psubsb,  E9 psubsw,  EC paddsb,  ED paddsw.
+            unsigned gran = (op == 0xD8 || op == 0xDC || op == 0xE8 || op == 0xEC) ? 1 : 2;
+            bool add = (op == 0xDC || op == 0xDD || op == 0xEC || op == 0xED);
+            bool sgn = op >= 0xE0;
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
+            const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
+            if (sgn) {  // signed saturation (paddsw/psubsw)
+                for (unsigned i = 0; i < 16 / gran; ++i) {
+                    int32_t x, y;
+                    if (gran == 1) { x = int8_t(ab[i]); y = int8_t(bb[i]); }
+                    else { int16_t t, u; memcpy(&t, ab + 2 * i, 2); memcpy(&u, bb + 2 * i, 2); x = t; y = u; }
+                    int32_t v = add ? x + y : x - y;
+                    int32_t lo = gran == 1 ? -128 : -32768, hi = gran == 1 ? 127 : 32767;
+                    if (v < lo) v = lo;
+                    if (v > hi) v = hi;
+                    if (gran == 1) o[i] = uint8_t(v); else memcpy(o + 2 * i, &v, 2);
+                }
+            } else {  // unsigned saturation (paddusb/psubusb)
+                for (unsigned i = 0; i < 16 / gran; ++i) {
+                    int32_t x, y;
+                    if (gran == 1) { x = ab[i]; y = bb[i]; }
+                    else { uint16_t t, u; memcpy(&t, ab + 2 * i, 2); memcpy(&u, bb + 2 * i, 2); x = t; y = u; }
+                    int32_t v = add ? x + y : x - y;
+                    int32_t hi = gran == 1 ? 255 : 65535;
+                    if (v < 0) v = 0;
+                    if (v > hi) v = hi;
+                    if (gran == 1) o[i] = uint8_t(v); else memcpy(o + 2 * i, &v, 2);
+                }
+            }
+            sse_write_reg(modrm_reg, out); return; }
+        case 0xDA: case 0xDE:  // pminub/pmaxub
+        case 0xEA: case 0xEE: {  // pminsw/pmaxsw
+            bool ismin = op == 0xDA || op == 0xEA;
+            bool sgn = op >= 0xEA;
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            uint32_t out[4] = {}; uint8_t* o = reinterpret_cast<uint8_t*>(out);
+            const uint8_t* ab = reinterpret_cast<const uint8_t*>(a); const uint8_t* bb = reinterpret_cast<const uint8_t*>(b);
+            unsigned gran = sgn ? 2 : 1;
+            for (unsigned i = 0; i < 16 / gran; ++i) {
+                bool take_a;
+                if (sgn) { int16_t x, y; memcpy(&x, ab + 2 * i, 2); memcpy(&y, bb + 2 * i, 2); take_a = ismin ? x < y : x > y; }
+                else take_a = ismin ? ab[i] < bb[i] : ab[i] > bb[i];
+                if (take_a) memcpy(o + i * gran, ab + i * gran, gran); else memcpy(o + i * gran, bb + i * gran, gran);
+            }
+            sse_write_reg(modrm_reg, out); return; }
+        case 0xDB: case 0xDF: {  // pand / pandn (66 forms)
+            sse_reg(modrm_reg, a); sse_read(r, b);
+            for (int i = 0; i < 4; ++i) a[i] = op == 0xDB ? (a[i] & b[i]) : (~a[i] & b[i]);
+            sse_write_reg(modrm_reg, a); return; }
         default: unsupported("sse integer");
         }
     }
@@ -765,7 +1041,7 @@ struct Cpu {
                 case 0: fpu.push(Wide(m64())); return;
                 case 2: st64(double(st(0))); return;
                 case 3: st64(double(st(0))); fpu.pop(); return;
-                case 6: mem.w(r.ea + seg, fpu.status() & ~uint16_t(0x7f), 2); return;  // fnstsw
+                case 7: mem.w(r.ea + seg, fpu.status() & ~uint16_t(0x7f), 2); return;  // fnstsw m16 (DD /7 — verified on real hardware; fstp m80 is DB /7)
                 default: unsupported("dd /n"); }
             case 0xDB: switch (rno) {
                 case 0: fpu.push(Wide(int32_t(mem.r32(r.ea + seg)))); return;   // fild m32int
@@ -913,10 +1189,18 @@ struct Cpu {
     void host_call(const Thunk& t) {
         mem.fault_eip = eip;
         uint32_t ret = mem.r32(reg[ESP]);
-        uint32_t r = t.fn(*this);
+        // Copy the callable out before invoking: the handler may add thunks to
+        // the table (a COM proxy created inside a guest callback builds its
+        // vtable right here). deque keeps the Thunk's address stable, but a
+        // copied std::function costs nothing and makes the invariant explicit
+        // — the running handler can never execute on storage that a nested
+        // add() could touch.
+        std::function<uint32_t(Cpu&)> fn = t.fn;
+        Conv conv = t.conv; unsigned argc = t.argc;
+        uint32_t r = fn(*this);
         if (exited) return;
         reg[EAX] = r;
-        reg[ESP] += 4 + (t.conv == Conv::Stdcall ? 4 * t.argc : 0); eip = ret;
+        reg[ESP] += 4 + (conv == Conv::Stdcall ? 4 * argc : 0); eip = ret;
     }
 };
 }
