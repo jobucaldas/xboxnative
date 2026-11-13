@@ -269,9 +269,8 @@ jobs:
         uses: ./.github/actions/apt-install
         with:
           packages: g++-mingw-w64-x86-64 llvm lld wine64
-      # Build and inspect only: the shim must import nothing but what Play routes,
-      # have no writable code section, and export the entry points. Driving it
-      # against Wine's d3d11 is src/xbox-test/uwph/d3d9/test.sh, run locally.
+      # Build/inspect the shim and compile its managed texture descriptor
+      # regression; the device-backed Wine contract remains a local test.
       - name: build the D3D9 shim and inspect its PE
         run: bash src/xbox-test/uwph/d3d9/build.sh "$RUNNER_TEMP/d3d9-shim"
       # The shim translates shader model 1-3 bytecode with this DLL, which it
@@ -293,6 +292,10 @@ jobs:
       # shim's own, and it never opens a d3d11 device (headless CI can run it).
       - name: D3D9 fixed-function pixel shader texture-stage regression
         run: bash src/tools/d3d9-translator/test-ffp-no-texture.sh "$RUNNER_TEMP/d3d9-translator"
+      # Compile-time regression: the shim's managed 2x2 texture descriptor
+      # must be DEFAULT + SRV with no CPU access or misc flags.
+      - name: D3D9 managed texture descriptor regression
+        run: x86_64-w64-mingw32-g++ -std=c++17 -fsyntax-only src/xbox-test/uwph/d3d9/test.cpp
   diag-fixtures:
     runs-on: ubuntu-latest
     steps:
