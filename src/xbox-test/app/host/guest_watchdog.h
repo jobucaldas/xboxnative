@@ -113,4 +113,22 @@ constexpr Step step(bool wasDead, bool hadSurface, const Verdict& v, bool heartb
     return {true, false};                        // still silent: stays dead
 }
 
+// Which guest exceptions are CONTAINED crashes (the watchdog's fault signal)
+// versus the pseudo-exceptions play_runtime raises for control flow. A clean
+// exit goes through exitProcess() — no exception — but the SEH filters still
+// see the pseudo-codes when a guest or Play raises them, and none of those is
+// a fault: exitException is Play's own normal-exit unwind (no longer raised —
+// exitProcess ends the thread directly — kept for the filter contract),
+// missingException is a contained missing-import hit, and DBG_PRINTEXCEPTION_C
+// is OutputDebugString's protocol exception, raised by design in a running
+// guest. Everything else reaching the filter is a real crash.
+constexpr DWORD kExitException = 0xe0520002;       // play_runtime's normal-exit unwind
+constexpr DWORD kMissingException = 0xe0520001;    // contained missing-import hit
+constexpr DWORD kDebugPrint = 0x40010006;          // DBG_PRINTEXCEPTION_C (OutputDebugString)
+constexpr DWORD kDebugPrintWide = 0x4001000A;      // DBG_PRINTEXCEPTION_WIDE_C (same protocol)
+constexpr bool containedFault(DWORD code) {
+    return code != kExitException && code != kMissingException
+        && code != kDebugPrint && code != kDebugPrintWide;
+}
+
 } // namespace guest_watchdog

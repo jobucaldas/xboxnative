@@ -23,6 +23,7 @@ using guest_watchdog::Screen;
 using guest_watchdog::Step;
 using guest_watchdog::screen_for;
 using guest_watchdog::step;
+using guest_watchdog::containedFault;
 using guest_watchdog::kSilenceSeconds;
 
 int main() {
@@ -231,6 +232,35 @@ int main() {
         Inputs pre; pre.ticksPerSecond = hz; pre.lastActivityTick = 0;
         pre.nowTick = firstPresentTick + uint64_t((kSilenceSeconds + 1.0) * double(hz));
         CHECK(!evaluate(pre).dead);
+    }
+
+    // Contained-crash decision (bugbot r4559006315): the SEH filters must
+    // flag `faulted` only for real crashes. Play's control-flow pseudo-
+    // exceptions and OutputDebugString's protocol exception are NOT faults —
+    // flagging them showed the dead page for a game that exits cleanly.
+    {
+        // Real crashes: access violation, illegal instruction, stack
+        // overflow, a game's own non-standard code, breakpoint, C++ EH.
+        CHECK(containedFault(EXCEPTION_ACCESS_VIOLATION));
+        CHECK(containedFault(EXCEPTION_ILLEGAL_INSTRUCTION));
+        CHECK(containedFault(STATUS_STACK_OVERFLOW));
+        CHECK(containedFault(EXCEPTION_BREAKPOINT));
+        CHECK(containedFault(0xe0424242));   // the runner fixture's crash code
+        CHECK(containedFault(0xe06d7363));   // MSVC C++ exception (.msh)
+        CHECK(containedFault(0xE0000001));   // arbitrary vendor code
+        // Play's control-flow pseudo-exceptions: not faults.
+        CHECK(!containedFault(0xe0520002));  // exitException: normal-exit unwind
+        CHECK(!containedFault(0xe0520001));  // missingException: contained missing import
+        // OutputDebugString's protocol exception, raised by design in a
+        // running guest (a debugger-less process still sees it in SEH).
+        CHECK(!containedFault(0x40010006));  // DBG_PRINTEXCEPTION_C
+        // Severity is not the discriminator — an informational debug print
+        // has severity 3 (status), not an error; the code alone decides.
+        // Play's own OutputDebugStringA/W replacements log directly and raise
+        // no exception, but a guest that reaches a real OutputDebugString
+        // (donor kernel32) gets the protocol exception in SEH; both protocol
+        // codes are informational, so neither is a fault.
+        CHECK(!containedFault(0x4001000A));  // DBG_PRINTEXCEPTION_WIDE_C
     }
 
     printf("%u checks, %u failures\n", checks, failures);

@@ -23,6 +23,7 @@
 #include "../../shared/rwx_emulation.h"
 #include "../../shared/vulkan_driver_registry.h"
 #include "tls_slot0.h"
+#include "guest_watchdog.h"   // contained_fault: which exceptions are real crashes
 namespace play_runtime {
 constexpr DWORD missingException=0xe0520001, exitException=0xe0520002;
 struct Module {
@@ -1386,7 +1387,13 @@ static LONG WINAPI topLevelFilter(EXCEPTION_POINTERS* ep) {
     }
     if(!guest) return hostTopLevel?hostTopLevel(ep):EXCEPTION_CONTINUE_SEARCH;
     if(auto handler=guestTopLevel) {LONG r=handler(ep);if(r==EXCEPTION_CONTINUE_EXECUTION)return r;}
-    s->faulted.store(true,std::memory_order_release);   // guest watchdog: dead without waiting on presents
+    // Faulted only for a contained CRASH (bugbot r4559006315): the pseudo-
+    // exceptions Play raises for control flow (normal-exit unwind, contained
+    // missing-import hit) and OutputDebugString's protocol exception are not
+    // faults — flagging them here showed the dead page for a game that exits
+    // cleanly. guest_watchdog::contained_fault is the pure decision (tested).
+    if(guest_watchdog::containedFault(ep->ExceptionRecord->ExceptionCode))
+        s->faulted.store(true,std::memory_order_release);   // guest watchdog: dead without waiting on presents
     filter(ep);   // records the exception and its stack, as for Play's threads
     s->result=s->snapshot();
     if(GetCurrentThreadId()==s->thread) guestThread=false;
