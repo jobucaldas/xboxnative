@@ -1328,9 +1328,9 @@ inline void Guest::register_all() {
     // only the v* forms receive a va_list pointer.
     reg.add("msvcrt.dll", "sprintf", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
         return uint32_t(format_stack_to(c, c.arg(1), 2, c.arg(0), -1, true)); });
-    reg.add("msvcrt.dll", "_snprintf", Conv::Cdecl, 4, [this](Cpu& c) -> uint32_t {
+    reg.add("msvcrt.dll", "_snprintf", Conv::Cdecl, 3, [this](Cpu& c) -> uint32_t {
         return uint32_t(format_stack_to(c, c.arg(2), 3, c.arg(0), int(c.arg(1)), true)); });
-    reg.add("msvcrt.dll", "snprintf", Conv::Cdecl, 4, [this](Cpu& c) -> uint32_t {
+    reg.add("msvcrt.dll", "snprintf", Conv::Cdecl, 3, [this](Cpu& c) -> uint32_t {
         return uint32_t(format_stack_to(c, c.arg(2), 3, c.arg(0), int(c.arg(1)), true)); });
     reg.add("msvcrt.dll", "vsprintf", Conv::Cdecl, 3, [this](Cpu& c) -> uint32_t {
         return uint32_t(format_va_to(c.arg(1), c.arg(2), c.arg(0), -1, true)); });
@@ -1379,7 +1379,7 @@ inline void Guest::register_all() {
         // fpos_t on i386 msvcrt is a 64-bit value; a console stream has no position.
         if (c.arg(1)) { mem.w32(c.arg(1), 0); mem.w32(c.arg(1) + 4, 0); } return 0; });
     reg.add("msvcrt.dll", "fsetpos", Conv::Cdecl, 2, [this](Cpu&) -> uint32_t { set_last_error(9); return 0xFFFFFFFFu; });  // EBADF
-    reg.add("msvcrt.dll", "_lseeki64", Conv::Cdecl, 5, [this](Cpu&) -> uint32_t { set_last_error(9); return 0xFFFFFFFFu; });
+    reg.add("msvcrt.dll", "_lseeki64", Conv::Cdecl, 4, [this](Cpu&) -> uint32_t { set_last_error(9); return 0xFFFFFFFFu; });
     reg.add("msvcrt.dll", "_read", Conv::Cdecl, 3, [this](Cpu& c) -> uint32_t { (void)c; return 0xFFFFFFFFu; });
     reg.add("msvcrt.dll", "_write", Conv::Cdecl, 3, [this](Cpu& c) -> uint32_t {
         uint32_t fd = c.arg(0), buf = c.arg(1), n = c.arg(2);

@@ -8,6 +8,7 @@
 #include <map>
 #include "../wxl_pe32.h"
 #include "x86_cpu.h"
+#include "apiset.h"
 namespace x86 {
 // Guest layout (all fixed, outside every ImageBase a normal exe uses).
 constexpr uint32_t STACK_TOP = 0x00300000, STACK_SIZE = 0x00100000;
@@ -149,9 +150,12 @@ inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, cons
             ++img.imports;
             // The registry keys symbols lowercase (Windows matches export
             // names case-insensitively); the label keeps the import's casing.
-            auto dit = reg.data.find({dll, Registry::key_sym(sym)});
+            // An API-set contract name binds to the module that serves it (apiset.h);
+            // the unresolved label below keeps the name the game imported.
+            const std::string served = apiset::served_by(dll, sym);
+            auto dit = reg.data.find({served, Registry::key_sym(sym)});
             if (dit != reg.data.end()) { mem.w32(img.base + dst + j * 4, dit->second); ++img.bound; continue; }
-            auto it = reg.map.find({dll, Registry::key_sym(sym)}); uint32_t stub;
+            auto it = reg.map.find({served, Registry::key_sym(sym)}); uint32_t stub;
             if (it != reg.map.end()) { stub = table.add(it->second); ++img.bound; }
             else {
                 img.unresolved.push_back(dll + "!" + sym);
