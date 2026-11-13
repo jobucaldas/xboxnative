@@ -84,7 +84,8 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
                                auto dt = reg.data.find({l, s});
                                if (dt != reg.data.end()) return dt->second;
                                return 0u;
-                           });
+                           },
+                           {});  // top image: unnamed (never re-entered by a cycle)
         dlls.emplace("__top__", std::move(top));  // not a named module; keeps the top image's exports reachable
         Image img = dlls["__top__"].image;
         guest.dlls = std::move(dlls);

@@ -5,3 +5,4 @@ EXPORTS
     fwd_sleep = kernel32.Sleep
     fwd_ord = "ntdll.#123"
     fwd_ghost = nosuchmod.nosuchsym
+    fwd_guest = dll-b.dllb_value

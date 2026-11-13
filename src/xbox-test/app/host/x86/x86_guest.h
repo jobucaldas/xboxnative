@@ -16,6 +16,7 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <tuple>
 #include <string>
 #include <vector>
 #include "x86_win32.h"
@@ -103,9 +104,19 @@ struct Guest {
     unsigned next_tls = 0, thread_serial = 0;
     std::map<uint32_t, uint32_t> sections;  // handle -> size in bytes
     uint32_t section_serial = 0, section_top = 0x64000000u;
-    // Thread bodies CreateThread recorded; run_pending_threads executes each
-    // at the guest's first blocking wait (see the CreateThread comment).
-    std::vector<std::pair<uint32_t, uint32_t>> pending_threads;
+    // Thread bodies CreateThread recorded (handle, start, param); each body
+    // runs at the guest's first blocking wait (see the CreateThread comment).
+    // The handle rides along so ExitThread's code can be recorded under the
+    // handle GetExitCodeThread is called with.
+    std::vector<std::tuple<uint32_t, uint32_t, uint32_t>> pending_threads;
+    // ExitThread state of the thread body currently running (run_pending_threads
+    // executes bodies synchronously on the one CPU). ExitThread ends only the
+    // calling thread — the body unwinds to its caller (the scheduler), the
+    // process keeps going (Bugbot 4559267305); ExitProcess/do_exit ends the
+    // process. GetExitCodeThread answers the code of the last finished body.
+    bool thread_exited = false;
+    uint32_t thread_exit_code = 0;
+    std::map<uint32_t, uint32_t> thread_exit_codes;  // handle -> exit code
     // Guest DLLs loaded by the process (lowercase module name -> Dll) and the
     // order they were mapped in (DllMain PROCESS_DETACH runs in reverse).
     // `dll_source` supplies DLL bytes by module name; empty = not found.
@@ -212,7 +223,15 @@ struct Guest {
             for (unsigned i = 0; i < 64; ++i) tls[i] = mem.r32(TEB_ADDR + 0xE10 + i * 4);
             mem.w32(TEB_ADDR, 0xFFFFFFFFu);  // empty exception chain
             for (unsigned i = 0; i < 64; ++i) mem.w32(TEB_ADDR + 0xE10 + i * 4, 0);
-            c.call(t.first, {t.second});
+            thread_exited = false; thread_exit_code = 0;
+            c.call(std::get<1>(t), {std::get<2>(t)});
+            // ExitThread ended this body early (the Cpu keeps running: the
+            // body's return unwound through the scheduler's call); record its
+            // code under the HANDLE (what GetExitCodeThread is called with)
+            // for that API to answer. A body that called ExitProcess set
+            // Cpu.exited instead — do_exit ran, the whole run is over.
+            if (thread_exited) thread_exit_codes[std::get<0>(t)] = thread_exit_code;
+            thread_exited = false;
             mem.w32(TEB_ADDR, seh);
             for (unsigned i = 0; i < 64; ++i) mem.w32(TEB_ADDR + 0xE10 + i * 4, tls[i]);
         }
@@ -224,6 +243,8 @@ struct Guest {
     void run_dll_mains(Cpu& c, uint32_t reason) {
         (void)reason;  // only DLL_PROCESS_ATTACH (1) is dispatched today
         for (const auto& name : dll_order) {
+            if (attached[name]) continue;
+            attached[name] = true;
             auto e = dll_entries.find(name);
             if (e == dll_entries.end()) continue;
             uint32_t base = dlls[name].image.base;
@@ -286,22 +307,47 @@ struct Guest {
         if (!dll_source) { set_last_error(126); return 0; }  // ERROR_MOD_NOT_FOUND
         std::vector<uint8_t> bytes = dll_source(lower);
         if (bytes.empty()) { set_last_error(126); return 0; }
-        Dll d = load_dll(mem, table, reg, bytes, dll_source, dlls, 0, &dll_order,
-                         [this, &table](const std::string& dll, const std::string& sym) {
-                             return os_export_addr(table, dll, sym);
-                         });
-        uint32_t base = d.image.base;
-        dll_order.push_back(lower);
-        dlls[lower] = std::move(d);
-        add_module(lower, base);  // GetModuleHandleW must find LoadLibrary'd DLLs
-        if (d.image.entry) dll_entries[lower] = d.image.entry;  // absolute
-        if (cpu && d.image.entry) {
-            // Load-time DllMain, as the Windows loader runs it on the loading
-            // thread: (base, DLL_PROCESS_ATTACH, NULL). LoadLibrary inside
-            // DllMain works: the thunk page is mapped and load_dll recurses.
-            cpu->call(d.image.entry, {base, 1, 0});
+        try {
+            load_dll(mem, table, reg, bytes, dll_source, dlls, 0, &dll_order,
+                     [this, &table](const std::string& dll, const std::string& sym) {
+                         return os_export_addr(table, dll, sym);
+                     },
+                     lower);
+        } catch (const std::exception&) {
+            // A malformed image (garbage file, PE64) is a failed load, not a
+            // crash: LoadLibrary answers 0 with ERROR_BAD_EXE_FORMAT (193),
+            // as LoadLibraryA documents (Bugbot 4559267311).
+            set_last_error(193);
+            return 0;
         }
+        // load_dll reserved and completed the slot in `dlls` itself (cycles
+        // reuse it): read the base from the table instead of copying the Dll.
+        uint32_t base = dlls[lower].image.base;
+        dll_order.push_back(lower);
+        add_module(lower, base);  // GetModuleHandleW must find LoadLibrary'd DLLs
+        if (dlls[lower].image.entry) dll_entries[lower] = dlls[lower].image.entry;  // absolute
+        // DllMain(DLL_PROCESS_ATTACH) for every module this call newly mapped,
+        // dependencies first (load_dll pushed them onto dll_order in that
+        // order), then the requested module — as the Windows loader attaches
+        // each module as it maps it (Bugbot 4559267301).
+        if (cpu) run_new_dll_mains(*cpu);
         return base;
+    }
+    // Runs DllMain(DLL_PROCESS_ATTACH) for every module of `dll_order` that has
+    // an entry and has not been attached yet, in load order (dependencies
+    // first). `attached` marks the dispatch so a later LoadLibrary of a
+    // dependency does not re-attach it (a module attaches exactly once per
+    // process, as the Windows loader guarantees).
+    std::map<std::string, bool> attached;
+    void run_new_dll_mains(Cpu& c) {
+        for (const auto& name : dll_order) {
+            if (attached[name]) continue;
+            attached[name] = true;
+            auto e = dll_entries.find(name);
+            if (e == dll_entries.end()) continue;
+            uint32_t base = dlls[name].image.base;
+            c.call(e->second, {base, static_cast<uint32_t>(1 /*DLL_PROCESS_ATTACH*/), 0});
+        }
     }
     // GetProcAddress core: `name_ptr` is a string pointer or an ordinal in the
     // MAKEINTRESOURCE form (a value below 65536 is an ordinal, as Windows
@@ -311,7 +357,22 @@ struct Guest {
             if (kv.second.image.base != module) continue;
             uint32_t a = 0;
             if (name_ptr < 0x10000u) {  // ordinal form: the export address table by index
-                for (auto& o : kv.second.image.ordinals)
+                // An ordinal's EAT RVA can be a forwarder string (inside the
+                // export directory range): resolve it like a name does, never
+                // rebase ASCII (Bugbot 4559267308).
+                auto fo = kv.second.image.forwarded_by_ord.find(name_ptr);
+                if (fo != kv.second.image.forwarded_by_ord.end()) {
+                    size_t dot = fo->second.find('.');
+                    if (dot != std::string::npos) {
+                        std::string target = forward_module_key(fo->second.substr(0, dot)), tsym = fo->second.substr(dot + 1);
+                        auto m = dlls.find(target);
+                        if (m != dlls.end()) a = dll_export_addr(m->second, tsym, dlls,
+                                                [this, &table](const std::string& dll, const std::string& s) {
+                                                    return os_export_addr(table, dll, s);
+                                                });
+                        else a = os_export_addr(table, target, tsym);
+                    }
+                } else for (auto& o : kv.second.image.ordinals)
                     if (o.first == name_ptr) { a = kv.second.image.base + o.second; break; }
             } else {
                 std::string sym = str(name_ptr);
@@ -606,9 +667,18 @@ inline void Guest::register_all() {
     // TEB TLS slots and SEH chain saved and restored around it: a real thread
     // has its own, and the synchronous model shares one TEB.
     reg.add("kernel32.dll", "CreateThread", Conv::Stdcall, 6, [this](Cpu& c) -> uint32_t {
-        pending_threads.push_back({c.arg(2), c.arg(3)});
-        return 0x60000000u + ++thread_serial; });
-    reg.add("kernel32.dll", "ExitThread", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { do_exit(c, c.arg(0)); return 0; });
+        uint32_t handle = 0x60000000u + ++thread_serial;
+        pending_threads.push_back({handle, c.arg(2), c.arg(3)});
+        return handle; });
+    // ExitThread ends only the calling thread (winbase.h: "Ends the calling
+    // thread"): the body unwinds to the scheduler and the process keeps going
+    // (Bugbot 4559267305) — do_exit here would end the whole process. The
+    // body's code is recorded for GetExitCodeThread; the scheduler (the
+    // synchronous body-runner) sees thread_exited and stops unwinding there.
+    reg.add("kernel32.dll", "ExitThread", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        thread_exit_code = c.arg(0);
+        thread_exited = true;
+        return thread_exit_code; });
     reg.add("kernel32.dll", "SwitchToThread", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
     // The blocking-wait surface a win32-threaded CRT startup uses (mingw 13's
     // winpthreads/mcfgthread peers): waits run the pending thread bodies first,
@@ -618,9 +688,10 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "WaitForSingleObjectEx", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
         run_pending_threads(c); return 0; });
     reg.add("kernel32.dll", "GetExitCodeThread", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
-        // Thread bodies run to completion before any wait returns, so the
-        // exit code is the body's own (recorded by ExitThread through do_exit).
-        if (c.arg(1)) mem.w32(c.arg(1), 0);
+        // Thread bodies run to completion before any wait returns, so the exit
+        // code is the body's own: ExitThread recorded it (STILL_ACTIVE is 259,
+        // the documented answer for a running thread).
+        if (c.arg(1)) mem.w32(c.arg(1), thread_exit_codes.count(c.arg(0)) ? thread_exit_codes[c.arg(0)] : 259u);
         return 1; });
     reg.add("kernel32.dll", "ResumeThread", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });  // was not suspended
     reg.add("kernel32.dll", "GetThreadId", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0x1004; });

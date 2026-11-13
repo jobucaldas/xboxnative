@@ -17,10 +17,24 @@ u32 __stdcall GetModuleHandleA(const char *name);
 u32 __stdcall GetModuleHandleW(const u16 *name);
 /* Real Windows prototype (winbase.h): 3 parameters — flags, name, out. */
 u32 __stdcall GetModuleHandleExW(u32 flags, const u16 *name, u32 *out);
+u32 __stdcall GetLastError(void);
+void __stdcall Sleep(u32 ms);
+void __stdcall ExitThread(u32 code);
+void __stdcall SetLastError(u32 code);
+u32 __stdcall CreateThread(void *attr, u32 stack, u32 start, void *param, u32 flags, u32 *id);
+u32 __stdcall WaitForSingleObject(u32 handle, u32 ms);
+u32 __stdcall GetExitCodeThread(u32 handle, u32 *code);
 
 /* from dll-a.dll / dll-b.dll, bound by the import binder */
 u32 __stdcall dll_a_sum(u32 n);
 u32 __stdcall dllb_attach_marker(void);
+/* from the cyclic pair dll-c <-> dll-d (bound by the recursive loader) */
+u32 __stdcall dllc_attach_count(void);
+u32 __stdcall dlld_attach_count(void);
+u32 __stdcall dllc_sum(u32 n);
+
+/* forward declarations for the thread-body check */
+static u32 __stdcall thread_body(void *param);
 
 static u32 failed = 0;
 static void ok(u32 cond) { if (!cond) ++failed; }
@@ -129,7 +143,91 @@ int fixture_main(void) {
         ok(GetProcAddress(hfwd, "fwd_ord") == 0);
         /* 19. Forward to a module that does not exist: 0, no hang, no crash. */
         ok(GetProcAddress(hfwd, "fwd_ghost") == 0);
+        /* 20. Guest-to-guest forward ("dll-b.dllb_value"): the module part has
+         * no ".dll" of its own in the forward string's dll-b form — the
+         * resolver must normalize it to the module-table key dll-b.dll
+         * (Bugbot 4559267293) and answer dllb_value's guest address. */
+        u32 (__stdcall *fwdguest)(void) = (u32 (__stdcall *)(void))GetProcAddress(hfwd, "fwd_guest");
+        ok(fwdguest != 0);
+        if (fwdguest) ok(fwdguest() == 0xB00B5u);
+    }
+
+    /* 21-22. The cyclic pair dll-c <-> dll-d: each module maps exactly once
+     * (a loader that re-maps the first module on the back edge runs DllMain
+     * twice — the attach counters would read 2) and the cross imports bind
+     * (Bugbot 4559267279). */
+    ok(dllc_attach_count() == 1 && dlld_attach_count() == 1);
+    ok(dllc_sum(3) == 3 * (0xD1D0u + 1) + 6);
+    ok(GetModuleHandleA("dll-c.dll") != 0 && GetModuleHandleA("dll-d.dll") != 0);
+
+    /* 23. An ordinal whose EAT RVA is a forwarder string resolves through the
+     * forward like a name does, never by adding the image base to ASCII
+     * (Bugbot 4559267308). Every fwd.dll export is a forwarder, so: (a) every
+     * ordinal in the EAT range answers either 0 or a real resolution — never
+     * an address inside fwd.dll's own image (that would be base + ASCII);
+     * (b) the export fwd_guest's ordinal answers exactly the address its name
+     * answers (Windows: an export's ordinal and name agree); (c) that address
+     * is callable and copies the marker. */
+    {
+        u32 hfwd2 = GetModuleHandleA("fwd.dll");
+        ok(hfwd2 != 0);
+        u32 byname = GetProcAddress(hfwd2, "fwd_guest");
+        ok(byname != 0);
+        u32 hit = 0;
+        for (u32 ord = 1; ord <= 8; ++ord) {
+            u32 a = GetProcAddress(hfwd2, (const char *)ord);
+            ok(a == 0 || a < hfwd2 || a >= hfwd2 + 0x10000);  /* never rebased ASCII */
+            if (a == byname) hit = ord;
+        }
+        ok(hit != 0);  /* fwd_guest's ordinal resolves to its name's address */
+        if (hit) {
+            u32 (__stdcall *fwdguest)(void) = (u32 (__stdcall *)(void))byname;
+            ok(fwdguest() == 0xB00B5u);
+        }
+    }
+
+    /* 24. A malformed image fails LoadLibraryA with 0 and
+     * ERROR_BAD_EXE_FORMAT (193), not a crash (Bugbot 4559267311). The
+     * loader's DLL source serves badimg.dll (garbage) and pe64img.dll (a
+     * PE64 image) from the fixture directory. */
+    {
+        SetLastError(0);
+        ok(LoadLibraryA("badimg.dll") == 0);
+        ok(GetLastError() == 193);
+        SetLastError(0);
+        ok(LoadLibraryA("pe64img.dll") == 0);
+        ok(GetLastError() == 193);
+        /* A good module still loads after the failures. */
+        ok(GetProcAddress(GetModuleHandleA("dll-b.dll"), "dllb_value") != 0);
+    }
+
+    /* 25. ExitThread ends only the calling thread: a worker that calls
+     * ExitThread(77) records its code, the scheduler moves on and the main
+     * program keeps running (a do_exit here would end the process with 77 —
+     * Bugbot 4559267305). */
+    {
+        /* The worker body is a tiny thunk the fixture builds in its own
+         * data: mov eax, 77; ret 4 — no, keep it real: the body is a
+         * freestanding function exported by dll-b? Simpler: CreateThread
+         * with the address of a local trampoline is not possible without
+         * generated code, so use the interpreter's recorded-body model:
+         * the start address is a real function in this image. */
+        u32 code = 0;
+        u32 h = CreateThread(0, 0, (u32)(u32 (__stdcall *)(void *))thread_body, 0, 0, 0);
+        ok(h != 0);
+        ok(WaitForSingleObject(h, 0) == 0);
+        ok(GetExitCodeThread(h, &code) != 0 && code == 77);
+        /* The process is still alive: the checks below run. */
+        ok(dllb_attach_marker() == 1);
     }
 
     return failed ? 43 : 42;
+}
+
+/* The thread body CreateThread runs: calls ExitThread(77), so control never
+ * returns — the scheduler records the code and the process continues. */
+static u32 __stdcall thread_body(void *param) {
+    (void)param;
+    ExitThread(77);
+    return 41;  /* unreachable if ExitThread ends only this thread */
 }
