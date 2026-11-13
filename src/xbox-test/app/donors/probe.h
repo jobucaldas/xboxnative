@@ -44,6 +44,21 @@ inline uintptr_t exported(const char* dll,const char* name,WORD ordinal) {
     auto target=text.substr(0,dot)+".dll";auto symbol=text.substr(dot+1);
     return resolve(target.c_str(),symbol.c_str(),0);
 }
+// A guest's by-name load (the D3D10 shim's d3dcompiler_47) is served the
+// already-probed image instead of a second mapping: the behavior gate owns
+// publication, so an unprobed or withheld donor answers nothing.
+inline HMODULE module(const wchar_t* name) {
+    if(!ready||!name)return nullptr;
+    std::string key;for(auto p=name;*p;++p)key+=char(towlower(*p));
+    auto it=images.find(key);return it==images.end()?nullptr:(HMODULE)it->second->base;
+}
+// GetProcAddress on a donor image (play_runtime::proc): the image is mapped
+// outside play_runtime's own module list, so the handle is matched against the
+// probed set and the export answered through the same published route.
+inline uintptr_t from_handle(HMODULE handle,const char* name,WORD ordinal) {
+    for(auto& image:images) if(image.second->base==(BYTE*)handle) return exported(image.first.c_str(),name,ordinal);
+    return 0;
+}
 static BOOL WINAPI disable_thread_calls(HMODULE) {
     // These donors have no static TLS or thread-attach work. They are owned by
     // this mapper, so the system loader cannot register their thread policy.

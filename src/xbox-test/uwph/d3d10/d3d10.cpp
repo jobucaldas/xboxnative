@@ -187,7 +187,11 @@ struct Compiler {
     HMODULE get() {
         if(tried)return module;
         tried=true;
-        module=LoadLibraryExW(L"d3dcompiler_47.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+        // No search flags, exactly as the D3D9 shim loads its translator: Play's
+        // loader serves a name it ships — a game copy first, then the probed
+        // Wine d3dcompiler_47 donor (donor_pe) when the game ships none. A
+        // system32 search flag would bypass both and fail on the console.
+        module=LoadLibraryExW(L"d3dcompiler_47.dll",nullptr,0);
         if(!module)d3dshim::noteOnce("D3D10 shim: d3dcompiler_47.dll unavailable; shader compilation/reflection refused");
         return module;
     }

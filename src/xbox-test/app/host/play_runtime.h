@@ -238,6 +238,19 @@ static std::wstring steamClient, steamClientSigned;
 // (never shipped), for games whose Steam DRM wrapper checks the client's
 // signature; see signedClientModule().
 static void set_steam_client(const std::wstring& path,const std::wstring& signedClient={}) { steamClient=path; steamClientSigned=signedClient; }
+// A guest's by-name load of a Wine donor (the D3D10 shim's d3dcompiler_47) is
+// served by the probed donor set, not a second mapping of the file. This
+// header cannot include donors/probe.h (it is included by donors/probe.h), so
+// the launcher wires the bridge after the behavior gate passes; until then the
+// name answers nothing, keeping the gate authoritative.
+using DonorModule=HMODULE(*)(const wchar_t* name);
+using DonorExport=uintptr_t(*)(HMODULE handle,const char* name,WORD ordinal);
+static std::atomic<DonorModule> donorModule{nullptr};
+static std::atomic<DonorExport> donorExport{nullptr};
+static void set_donor_bridge(DonorModule module,DonorExport exported) {
+    donorModule.store(module,std::memory_order_release);
+    donorExport.store(exported,std::memory_order_release);
+}
 static Module* signedClientModule();
 // The environment Steam's client locator reads, as Steam itself (and gbe_fork's
 // loader) publishes it: HKCU\Software\Valve\Steam\ActiveProcess with this
@@ -330,6 +343,14 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
         if(state->log)state->log(("XINPUT LoadLibrary "+narrow(requested)+" -> Play's emulated module").c_str());
         return input;
     }
+    // A probed Wine donor answers by-name loads (the D3D10 shim's
+    // d3dcompiler_47): the bridge returns the gate-published image base, never
+    // a second mapping of the file.
+    if(auto bridge=donorModule.load(std::memory_order_acquire))
+        if(auto donor=bridge(leaf.c_str())) {
+            state->event("mapping "+narrow(leaf)+" (donor)");
+            return donor;
+        }
     // No console opengl32.dll: serve Play's WGL state surface, not a host DLL.
     if(auto gl=opengl32_core::find_module(key.c_str(),true))return gl;
     // Restrict fallback to documented system DLL search, never desktop paths.
@@ -754,6 +775,11 @@ struct ExportLookup {
 static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
     if(auto input=xinput_core::module(h))return xinput_core::module_proc(input,name);
     if(auto gl=opengl32_core::module(h))return opengl32_core::module_proc(gl,name);
+    // A probed Wine donor's handle (the D3D10 shim's compiler): exports come
+    // from the gate-published image, not the native loader.
+    if(auto bridge=donorExport.load(std::memory_order_acquire))
+        if(auto p=bridge(h,IS_INTRESOURCE(name)?nullptr:name,IS_INTRESOURCE(name)?WORD((uintptr_t)name):0))
+            return (FARPROC)p;
     // find() iterates vector storage that map() may reallocate. Native-handle
     // resolution below can also inspect/map guest modules, so retain the lock
     // for the entire lookup, not just the mapped-export branch.
@@ -1870,6 +1896,12 @@ static void reset_launch_config() {
     set_leaderboard_tap({});
     set_leaderboard_provider(nullptr);   // the image may be unloaded with the launch
     clearVulkanDriverFiles();
+    // The donor bridge points at the probed donor set, which the next launch
+    // re-probes and re-wires (launch.h/selftest.h); a stale bridge into a
+    // cleared set answers nothing (donor_pe::module checks ready), so clearing
+    // here keeps the gate authoritative across launches.
+    donorModule.store(nullptr,std::memory_order_release);
+    donorExport.store(nullptr,std::memory_order_release);
 }
 // A launch that ended before any game code ran (no TLS callback, DllMain or
 // entry point: `executed` is set before each) left nothing executing: the

@@ -948,6 +948,10 @@ static void lp_run_impl(LpCtx& c) {
     // Never expose donor exports to executable guests after a failed probe.
     if(!donor_pe::probe(lp_sink)) {c.failName="Wine donor initialization/behavior";lp_sink("DWPE FAIL donor behavior gate; no game code executed");return;}
     mlp::donor_resolve=donor_pe::exported;
+    // By-name loads of probed donors (the D3D10 shim's d3dcompiler_47) are
+    // served the gate-published image; the probe above owns publication.
+    play_runtime::set_donor_bridge([](const wchar_t* name){return donor_pe::module(name);},
+                                   [](HMODULE h,const char* name,WORD ordinal){return donor_pe::from_handle(h,name,ordinal);});
     if(!user32_core::test(lp_sink)) {c.failName="u32c-test.exe";lp_sink("U32C FAIL regression PE; no game code executed");return;}
     const bool steamProvider=stage_steam_provider(c.appid,exeDir+L"\\"+exe);
     if(steamProvider) {

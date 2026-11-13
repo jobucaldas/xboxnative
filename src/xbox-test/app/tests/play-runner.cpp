@@ -326,6 +326,16 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         play_graphics::configure(&host_surface::token,host_surface::present,logline);
         logline("HOST SURFACE native Wine window stands in for the CoreWindow (off-device only)");
     }
+    // The D3D10 fixtures exercise the shim's by-name d3dcompiler_47 load,
+    // which Play serves from the probed donor set exactly as the launcher does
+    // (launch.h): probe before anything maps, and serve the gate-published
+    // image so the behavior gate stays authoritative.
+    if(std::string(args)=="d3d10-diag"||std::string(args)=="d3d10-triangle"||std::string(args)=="d3d10-compile") {
+        if(!donor_pe::probe(logline)) {logline("DWPE FAIL donor behavior gate; no game code executed");return 3;}
+        mlp::donor_resolve=donor_pe::exported;
+        play_runtime::set_donor_bridge([](const wchar_t* name){return donor_pe::module(name);},
+                                       [](HMODULE h,const char* name,WORD ordinal){return donor_pe::from_handle(h,name,ordinal);});
+    }
     // The Khronos loader statically imports setupapi.dll's cfgmgr32 family, and
     // Mesa's opengl32.dll/libgallium_wgl.dll statically import version.dll,
     // which Play serves from the Wine donors (wine-pe). A launch probes the
@@ -476,7 +486,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // Engine options come from the game's files, as in the launcher.
     std::wstring gameExe=L"Megabonk.exe";
     {wchar_t value[260];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_EXE",value,260);if(n&&n<260)gameExe.assign(value,n);}
-    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d10-triangle"?L"play-d3d10-triangle.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="d3d9-triangle"?L"play-d3d9-triangle.exe":std::string(args)=="d3d9-triangle-variants"?L"play-d3d9-triangle-variants.exe":std::string(args)=="d3d9-textured"?L"play-d3d9-textured.exe":std::string(args)=="fault-in-dll"?L"play-fault-guest.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="leaderboards"?L"play-leaderboard.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":std::string(args)=="vulkan-dzn"?L"play-vulkan-dzn.exe":std::string(args)=="vulkan-draw"?L"play-vulkan-draw.exe":std::string(args)=="opengl"?L"play-opengl.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
+    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d10-triangle"?L"play-d3d10-triangle.exe":std::string(args)=="d3d10-compile"?L"play-d3d10-compile.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="d3d9-triangle"?L"play-d3d9-triangle.exe":std::string(args)=="d3d9-triangle-variants"?L"play-d3d9-triangle-variants.exe":std::string(args)=="d3d9-textured"?L"play-d3d9-textured.exe":std::string(args)=="fault-in-dll"?L"play-fault-guest.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="leaderboards"?L"play-leaderboard.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":std::string(args)=="vulkan-dzn"?L"play-vulkan-dzn.exe":std::string(args)=="vulkan-draw"?L"play-vulkan-draw.exe":std::string(args)=="opengl"?L"play-opengl.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
     // guest stop (fatal dialog). Progress must never mask that failure.
@@ -571,6 +581,10 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // matched (Draw, DrawIndexed, the GS expansion, stream-out, GenerateMips,
     // MSAA resolve); 43 is BLOCKED, never a pass.
     else if(mode=="d3d10-triangle")ok=ok&&r->finished&&r->success&&r->code==42;
+    // The compile fixture exits 42 when D3D10CompileShader produced a real
+    // vs_4_0 through the shim's by-name donor load and the device drew with it
+    // (readback matched); 43 is BLOCKED, 44-50 name the compile step.
+    else if(mode=="d3d10-compile")ok=ok&&r->finished&&r->success&&r->code==42;
     // The D3D9 fixture exits 42 only when the shim's factory, device, swap chain,
     // auto depth-stencil surface, clear and three presents all succeeded through
     // Play's routes. play-runtime.sh also checks that the shim came from the

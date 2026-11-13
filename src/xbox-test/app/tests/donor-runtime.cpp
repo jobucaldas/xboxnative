@@ -99,6 +99,53 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int) {
         puts("DONOR-COM PASS: CoCreateInstance(CLSID_DirectInput8) served by the dinput8 donor; keyboard device created");
     }
     puts("DONOR-RUNTIME PASS: behavior gate, cross-thread publication, retained addresses; no game code");
+    // The d3d10 shim's load route (Bugbot r4559176265, host-side): a by-name
+    // LoadLibraryExW("d3dcompiler_47.dll") through play_runtime::loadExW must
+    // return the probed donor's image via the bridge, and GetProcAddress on
+    // that handle must reach donor_pe::from_handle — the exact pair launch.h
+    // wires. The compile itself is proven by the d3d10-compile fixture; here
+    // only the routing is, without a guest.
+    {
+        HMODULE before=GetModuleHandleW(L"d3dcompiler_47.dll");   // not loaded in this process
+        (void)before;
+        play_runtime::set_donor_bridge(donor_pe::module,donor_pe::from_handle);
+        // No state yet: loadExW needs a started runtime. The bridge answers
+        // through the same code path only once state exists, so start a
+        // rejected launch first (the missing-donor guest never runs code) and
+        // route against that live state.
+        wchar_t path[32768];DWORD n=GetModuleFileNameW(nullptr,path,32768);
+        if(!n||n>=32768)ExitProcess(7);
+        std::wstring root=path;root.resize(root.find_last_of(L"\\/"));
+        mlp::donor_resolve=donor_pe::exported;
+        if(!play_runtime::start(root,L"donor-missing.exe",L"",logline))ExitProcess(8);
+        auto r=play_runtime::state;
+        if(WaitForSingleObject(r->worker,30000)!=WAIT_OBJECT_0)ExitProcess(10);
+        HMODULE donor=play_runtime::loadExW(L"d3dcompiler_47.dll",nullptr,0);
+        if(!donor)ExitProcess(20);
+        if(donor!=(HMODULE)donor_pe::module(L"d3dcompiler_47.dll"))ExitProcess(21);
+        auto compile=(uintptr_t(*)(const void*,SIZE_T,void*,void*,void*,const char*,const char*,UINT,void*,void**))
+            play_runtime::proc(donor,"D3DCompile");
+        if(!compile)ExitProcess(22);
+        static const char src[]="float4 main():SV_Target { return float4(1,0,0,1); }";
+        void* blob=nullptr;void* errors=nullptr;
+        HRESULT hr=compile(src,sizeof src-1,nullptr,nullptr,nullptr,"main","ps_4_0",0,&errors,&blob);
+        if(errors)((void(*)(void*))(*(void***)errors)[3])(errors);   // IUnknown::Release
+        if(FAILED(hr)||!blob)ExitProcess(23);
+        const unsigned char* bits=static_cast<const unsigned char*>(((void*(*)())(*(void***)blob)[3])());
+        SIZE_T size=(SIZE_T)((SIZE_T(*)())(*(void***)blob)[4])();
+        if(size<4||bits[0]!='D'||bits[1]!='X'||bits[2]!='B'||bits[3]!='C')ExitProcess(24);
+        ((void(*)(void*))(*(void***)blob)[3])(blob);   // Release
+        // An unbridged name must still answer nothing: the gate stays
+        // authoritative for names the probed set does not hold.
+        if(play_runtime::loadExW(L"deliberately-absent-donor.dll",nullptr,0))ExitProcess(25);
+        puts("DONOR-BRIDGE PASS: loadExW(d3dcompiler_47) returns the probed donor image; proc(D3DCompile) compiles a real DXBC");
+        fflush(stdout);
+        // The remaining guest stages below start their own launches; the
+        // rejected guest ran no code, so discard it (also resets the bridge —
+        // the next launch re-wires it, exactly as launch.h does).
+        if(!play_runtime::discard_unstarted())ExitProcess(26);
+        mlp::donor_resolve=nullptr;
+    }
     std::string mode=args;
     if(mode!="normal"&&mode!="missing"&&mode!="disabled")ExitProcess(6);
     wchar_t path[32768];DWORD n=GetModuleFileNameW(nullptr,path,32768);

@@ -158,6 +158,10 @@ static void run_64(const std::string& mode, const std::wstring& path) {
     const std::wstring exe = path.substr(path.find_last_of(L"\\/") + 1);
     if (!donor_pe::probe(lp_sink)) { result(mode, "FAIL donor-gate", ""); return; }
     mlp::donor_resolve = donor_pe::exported;
+    // By-name loads of probed donors (the D3D10 shim's d3dcompiler_47) are
+    // served the gate-published image; the probe above owns publication.
+    play_runtime::set_donor_bridge([](const wchar_t* name){return donor_pe::module(name);},
+                                   [](HMODULE h,const char* name,WORD ordinal){return donor_pe::from_handle(h,name,ordinal);});
     std::string gate;
     if (!user32_core::test(lp_sink, &gate)) { result(mode, "FAIL u32c-test", gate); return; }
     regb::init(g_dir, lp_sink);
