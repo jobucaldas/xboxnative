@@ -141,16 +141,26 @@ DWORD d3d12_entry() {
     // the rest of the run uses is the one from whichever attempt succeeded
     // (A preferred). Attempt A bypasses Play's D3D12CreateDevice hook (it
     // logs its own result); the host route logs the direct ones.
-    // The debug layer, where the platform has it, is enabled before either
-    // attempt: ID3D12Debug::EnableDebugLayer must precede device creation, and
-    // enabling it on a live device removes that device (DXGI_ERROR_DEVICE_REMOVED
-    // on the next call; console 0.5.310.0 run: create A=0 B=0, then
-    // CreateCommandQueue hr=0x887a0005). Optional: a host without the layer
-    // skips the check, and the recorded errors are counted before success.
+    // The debug layer is opt-in (LocalState\d3d12debug.txt, applied by the
+    // host: absent, the host answers SDK_COMPONENT_MISSING and nothing below
+    // enables anything). When it is on, it is enabled before either creation
+    // attempt, because ID3D12Debug::EnableDebugLayer must precede device
+    // creation. Why the opt-in exists: the console run that enabled the layer
+    // after creation logged create A=0 B=0, then CreateCommandQueue
+    // hr=0x887a0005 (device removed). Whether the late enable was the cause is
+    // a hypothesis for the next console run, not a proven fact.
     bool debugLayer=false;
+    HRESULT hrDebug=0x8000ffff;   // "not run" sentinel
     {ID3D12Debug1* debug=nullptr;
-     if(SUCCEEDED(D3D12GetDebugInterface(__uuidof(ID3D12Debug1),(void**)&debug))&&debug){
+     hrDebug=D3D12GetDebugInterface(__uuidof(ID3D12Debug1),(void**)&debug);
+     if(SUCCEEDED(hrDebug)&&debug){
          debug->EnableDebugLayer();debug->Release();debugLayer=true;}}
+    {char b[96];char* p=b;
+     p=append(p,"PLAY-D3D12 debuglayer=");
+     p=append(p,debugLayer?"on":"off");
+     p=append(p," getdebug=");
+     p=appendHex(p,(unsigned long)hrDebug);
+     *p++='\n';*p=0;OutputDebugStringA(b);}
     ID3D12Device* device=nullptr;
     unsigned long hrA=0x8000ffff;   // "not run" sentinel; replaced below
     unsigned long hrB=0x8000ffff;

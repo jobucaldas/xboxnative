@@ -36,6 +36,10 @@
 namespace d3d12_diag {
 using Sink=void(*)(const char*);
 inline Sink sink=nullptr;
+// Opt-in D3D12 debug layer: set once at boot from LocalState\d3d12debug.txt
+// (launcher main.cpp). Off by default, so the guest's D3D12GetDebugInterface
+// answers DXGI_ERROR_SDK_COMPONENT_MISSING and the layer is never enabled.
+inline std::atomic<bool> debugLayerOptIn{false};
 constexpr size_t kMaxFailures=200;   // distinct failed calls logged
 constexpr size_t kMaxProbes=160;     // distinct capability answers logged
 constexpr int kSlots=64;
