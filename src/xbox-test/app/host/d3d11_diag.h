@@ -434,40 +434,54 @@ inline std::atomic<uint64_t> srvFeedbackSets{0};   // SRV binds that hit a bound
 // draw at most.
 inline std::atomic<bool> deepDrawEnabled{false};
 inline bool deepDraw() {return deepDrawEnabled.load(std::memory_order_acquire);}
-// Shader containers by content hash, filled at Create*Shader time: GSSetShader
+// Shader container identities, filled at Create*Shader time: GSSetShader
 // hands the hook a shader object, and its bytecode is only readable at
-// creation.
-constexpr size_t kShaderHashSlots=4096;   // power of two; collisions overwrite (worst case: one line less)
-inline std::atomic<unsigned long long> shaderHashes[kShaderHashSlots];
-inline void noteShaderHash(void* shader,unsigned long long hash) {
+// creation. The identity is (content fnv hash, byte length, creation serial):
+// a 64-bit fnv alone can collide between two different containers, and a
+// collision that named the wrong shader pair would poison the very answer the
+// deep-draw line exists to give. The serial is unique per creation, so two
+// distinct shaders never share an identity even with identical fnv+length;
+// reporting both lets a line be matched to the gs scan's content hash.
+constexpr size_t kShaderIdSlots=4096;   // power of two; keyed by object pointer
+struct ShaderId {unsigned long long hash;size_t bytes;unsigned serial;};
+inline std::atomic<unsigned> shaderSerial{0};
+inline std::atomic<ShaderId*> shaderIds[kShaderIdSlots];
+inline void noteShaderHash(void* shader,unsigned long long hash,size_t bytes) {
     if(!shader)return;
-    shaderHashes[(reinterpret_cast<uintptr_t>(shader)>>4)&(kShaderHashSlots-1)].store(hash,std::memory_order_relaxed);
+    auto* fresh=new ShaderId{hash,bytes,shaderSerial.fetch_add(1,std::memory_order_relaxed)};
+    auto& slot=shaderIds[(reinterpret_cast<uintptr_t>(shader)>>4)&(kShaderIdSlots-1)];
+    ShaderId* old=slot.exchange(fresh,std::memory_order_acq_rel);
+    delete old;   // COM recycles addresses: the older shader at this pointer is gone
 }
-inline unsigned long long shaderHashOf(void* shader) {
-    if(!shader)return 0;
-    return shaderHashes[(reinterpret_cast<uintptr_t>(shader)>>4)&(kShaderHashSlots-1)].load(std::memory_order_relaxed);
+inline ShaderId shaderIdOf(void* shader) {
+    if(!shader)return {};
+    ShaderId* at=shaderIds[(reinterpret_cast<uintptr_t>(shader)>>4)&(kShaderIdSlots-1)]
+        .load(std::memory_order_acquire);
+    return at?*at:ShaderId{};
 }
-// One line per distinct draw-time pipeline signature: topology, GS/PS hash,
-// target format, and the PS/GS SRV bind flags (n=null entry, f=over-target).
-// Capped by the same seen-set machinery as the failure log.
+// One line per distinct draw-time pipeline signature: topology, GS/PS
+// identity (content hash, byte length, creation serial), target format, and
+// the PS/GS SRV bind flags (n=null entry, f=over-target). Capped by the same
+// seen-set machinery as the failure log.
 inline std::string topologyName(unsigned t);   // defined below; noteDrawState names it
 inline void noteDrawState(void* /*self*/,ContextState& state,unsigned topology,unsigned /*shaders*/) {
     if(!deepDraw())return;
     // gsHash/psHash store the shader OBJECT pointer at bind time; resolve the
-    // content hash through the creation table.
-    void* gsObj=reinterpret_cast<void*>(state.gsHash.load(std::memory_order_relaxed));
-    void* psObj=reinterpret_cast<void*>(state.psHash.load(std::memory_order_relaxed));
-    unsigned long long gsH=shaderHashOf(gsObj),psH=shaderHashOf(psObj);
+    // creation identity through the table. Two distinct shaders never share
+    // one (hash, bytes, serial): the serial disambiguates an fnv collision.
+    ShaderId gs=shaderIdOf(reinterpret_cast<void*>(state.gsHash.load(std::memory_order_relaxed)));
+    ShaderId ps=shaderIdOf(reinterpret_cast<void*>(state.psHash.load(std::memory_order_relaxed)));
     unsigned srv=state.srvState.load(std::memory_order_relaxed);
     std::string flags;
     if(srv&1)flags+=" ps-null";
     if(srv&2)flags+=" ps-over-target";
     if(srv&4)flags+=" gs-null";
     if(srv&8)flags+=" gs-over-target";
-    std::string key=fmt("%u/%llx/%llx/%u/%x",topology,gsH,psH,state.rtFormat.load(std::memory_order_relaxed),srv);
-    report(true,"draw-state "+key,fmt("draw state topology=%u(%s) gs=%012llx ps=%012llx target=%s srv:%s",
-        topology,topologyName(topology).c_str(),gsH,psH,
-        formatText(DXGI_FORMAT(state.rtFormat.load(std::memory_order_relaxed))).c_str(),
+    unsigned fmtNow=state.rtFormat.load(std::memory_order_relaxed);
+    std::string key=fmt("%u/%llx/%zx/%u/%llx/%zx/%u/%u/%x",topology,gs.hash,gs.bytes,gs.serial,ps.hash,ps.bytes,ps.serial,fmtNow,srv);
+    report(true,"draw-state "+key,fmt("draw state topology=%u(%s) gs=%012llx/%zub#%u ps=%012llx/%zub#%u target=%s srv:%s",
+        topology,topologyName(topology).c_str(),gs.hash,gs.bytes,gs.serial,ps.hash,ps.bytes,ps.serial,
+        formatText(DXGI_FORMAT(fmtNow)).c_str(),
         flags.empty()?" ok":flags.c_str()));
 }
 inline void noteRenderTargetResource(ID3D11RenderTargetView* view) {
@@ -1026,10 +1040,11 @@ static HRESULT STDMETHODCALLTYPE createShader(DevicePtr self,const void* code,SI
         if(!scan.empty())report(true,scan,scan+fmt(" bytes=%zu hash=%016llx",size_t(length),
             (unsigned long long)fnv(code,size_t(std::min<SIZE_T>(length,16u<<20)))));
     }
-    // The deep-draw state lines name a draw's GS/PS by content hash; the bind
-    // hooks only see the shader object, so the hash is remembered here.
+    // The deep-draw state lines name a draw's GS/PS by its creation identity
+    // (content hash + length + serial); the bind hooks only see the shader
+    // object, so the identity is remembered here.
     if(SUCCEEDED(hr)&&out&&*out&&deepDraw())
-        noteShaderHash(*out,fnv(code,size_t(std::min<SIZE_T>(length,16u<<20))));
+        noteShaderHash(*out,fnv(code,size_t(std::min<SIZE_T>(length,16u<<20))),size_t(length));
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createGeometryShaderWithStreamOutput(DevicePtr self,const void* code,SIZE_T length,const D3D11_SO_DECLARATION_ENTRY* entries,UINT entryCount,
@@ -1306,7 +1321,11 @@ static void STDMETHODCALLTYPE contextSetShaderResources(DevicePtr self,UINT star
         if(views[i]&&wasRenderTarget(views[i])){srvFeedbackSets.fetch_add(1,std::memory_order_relaxed);break;}
     // Deep-draw state: the PS/GS null and over-target bits at bind time, so a
     // draw-state line can say whether the shader that rendered black sampled
-    // an unbound texture or its own target.
+    // an unbound texture or its own target. The bits describe THIS context's
+    // last bind for the stage (a bind with count=0 or all-null views clears
+    // the stage's bits: what is bound after the call is nothing), not a
+    // global: a deferred context's binds never leak into the immediate one's
+    // draw-state line.
     if(Stage==2||Stage==1) {
         unsigned bit=0;
         if(views&&count) {
@@ -1318,8 +1337,14 @@ static void STDMETHODCALLTYPE contextSetShaderResources(DevicePtr self,UINT star
             if(Stage==2){if(hasNull)bit|=1;if(hasFeedback)bit|=2;}
             else{if(hasNull)bit|=4;if(hasFeedback)bit|=8;}
         }
-        stateOf(self).srvState.fetch_and(Stage==2?~3u:~12u,std::memory_order_relaxed);
-        if(bit)stateOf(self).srvState.fetch_or(bit,std::memory_order_relaxed);
+        // A full-range bind replaces every slot of the stage; a partial one
+        // (start>0) only replaces its own slots, so the previous bits stand.
+        if(start==0) {
+            stateOf(self).srvState.fetch_and(Stage==2?~3u:~12u,std::memory_order_relaxed);
+            if(bit)stateOf(self).srvState.fetch_or(bit,std::memory_order_relaxed);
+        } else if(bit) {
+            stateOf(self).srvState.fetch_or(bit,std::memory_order_relaxed);
+        }
     }
     call(self,start,count,views);
 }

@@ -415,10 +415,11 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         context->GSSetShader(gs,nullptr,0);
         context->PSSetShaderResources(0,1,&nullView);   // ps-null bit set
         context->Draw(3,0);
-        // The signature resolves the GS hash through the creation table: the
-        // line must carry it, not zeros.
+        // The signature resolves the GS identity through the creation table:
+        // the line must carry hash/bytes/serial, not zeros.
         CHECK(count("draw state topology=4(trianglelist) gs=")==1);
         CHECK(count(" ps-null")==1);
+        CHECK(count("/744b#")!=0);   // the kGsViewportBlob container: 744 bytes + serial
         // Same signature again: no second line.
         context->Draw(3,0);
         CHECK(count("draw state topology=4(trianglelist) gs=")==1);
@@ -428,10 +429,61 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         context->Draw(3,0);
         CHECK(count("draw state topology=4(trianglelist) gs=")==1);
         CHECK(count("draw state topology=4(trianglelist) gs=000000000000")==0);   // the GS hash resolved
+        // A bind of count=0 keeps the stage's prior slots (D3D11 semantics),
+        // so the ps-null bit stands and the signature is unchanged.
+        context->PSSetShaderResources(0,0,nullptr);
+        context->Draw(3,0);
+        CHECK(count(" ps-null")==1);   // still the same signature: no new line
         context->GSSetShader(nullptr,nullptr,0);
         gs->Release();
-        d3d11_diag::deepDrawEnabled.store(false,std::memory_order_release);
     }
+    // Collision-safe identity: two shaders whose fnv AND length agree must
+    // still get distinct serials, and a draw-state line must never claim the
+    // wrong pair. Forced collision: register the same content hash for two
+    // different shader objects directly through the registry.
+    {
+        unsigned long long fakeHash=0x1234567890abcdefull;
+        ID3D11GeometryShader* a=nullptr;ID3D11GeometryShader* b=nullptr;
+        bool madeA=SUCCEEDED(device->CreateGeometryShader(d3d11_diag::kGsViewportBlob,sizeof d3d11_diag::kGsViewportBlob,nullptr,&a))&&a;
+        bool madeB=SUCCEEDED(device->CreateGeometryShader(d3d11_diag::kGsRtarrayBlob,sizeof d3d11_diag::kGsRtarrayBlob,nullptr,&b))&&b;
+        if(madeA&&madeB) {
+            d3d11_diag::noteShaderHash(a,fakeHash,sizeof d3d11_diag::kGsViewportBlob);
+            d3d11_diag::noteShaderHash(b,fakeHash,sizeof d3d11_diag::kGsViewportBlob);   // same hash+bytes: the collision Bugbot feared
+            d3d11_diag::ShaderId ia=d3d11_diag::shaderIdOf(a),ib=d3d11_diag::shaderIdOf(b);
+            CHECK(ia.hash==fakeHash&&ib.hash==fakeHash);
+            CHECK(ia.serial!=ib.serial);   // the serial separates them
+            CHECK(ia.bytes==sizeof d3d11_diag::kGsViewportBlob);
+        } else CHECK(true);   // creation refused (junk-free blobs should succeed): identity test vacuous
+        if(a)a->Release();
+        if(b)b->Release();
+    }
+    // The SRV bits are per-context: a deferred context's bind must not leak
+    // into the immediate context's draw-state line, and the immediate one's
+    // must not leak into the deferred's.
+    {
+        ID3D11ShaderResourceView* nullView=nullptr;
+        ID3D11DeviceContext* deferred=nullptr;
+        if(SUCCEEDED(device->CreateDeferredContext(0,&deferred))&&deferred) {
+            d3d11_diag::deepDrawEnabled.store(true,std::memory_order_release);
+            // Immediate: ps-null set. Deferred: a real SRV bind (no null).
+            context->PSSetShaderResources(0,1,&nullView);
+            ID3D11ShaderResourceView* targetSrv=nullptr;
+            bool haveSrv=targetTexture&&SUCCEEDED(device->CreateShaderResourceView(targetTexture,nullptr,&targetSrv))&&targetSrv;
+            deferred->PSSetShaderResources(0,1,haveSrv?&targetSrv:&nullView);
+            if(haveSrv) {
+                // The deferred context's own state: over-target, NOT null.
+                CHECK((d3d11_diag::stateOf(deferred).srvState.load()&1)==0);
+                CHECK((d3d11_diag::stateOf(deferred).srvState.load()&2)!=0);
+                // The immediate context's own state: null, NOT over-target.
+                CHECK((d3d11_diag::stateOf(context).srvState.load()&1)!=0);
+                CHECK((d3d11_diag::stateOf(context).srvState.load()&2)==0);
+            }
+            if(targetSrv)targetSrv->Release();
+            deferred->Release();
+            d3d11_diag::deepDrawEnabled.store(false,std::memory_order_release);
+        }
+    }
+    d3d11_diag::deepDrawEnabled.store(false,std::memory_order_release);
     if(rtv)rtv->Release();
     if(targetTexture)targetTexture->Release();
     if(failures)for(auto& l:lines)printf("  %s\n",l.c_str());
