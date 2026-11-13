@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // The x86 binder's API-set names (host/x86/apiset.h), checked three ways:
-//  1. the mapping: which module serves an import from a contract DLL, and which
-//     names stay unresolved;
+//  1. the mapping: which module serves an import from a contract DLL, which
+//     names stay unresolved, and that every width-sensitive name (kWidthSensitive)
+//     stays on its contract DLL;
 //  2. the registry against the UCRT table: every declared name the surface
-//     serves is cdecl with the header's dword count, the table is served in
-//     full, and every msvcrt registration the headers do not declare is on the
-//     reviewed msvcrt-only list (a new registration cannot reach the alias path
-//     unreviewed);
-//  3. with a fixture (argv[1]), an import through api-ms-win-crt-string-l1-1-0.dll
-//     binds and returns the right value, and an unmapped API-set name stays
-//     unresolved and is named by the launcher's gap list, exactly.
+//     serves is cdecl with the header's dword count (snprintf, _snprintf and
+//     _lseeki64 included), the table is served in full, and every msvcrt
+//     registration the headers do not declare is on the reviewed msvcrt-only list;
+//  3. with a fixture (argv[1]): strlen through api-ms-win-crt-string binds, and
+//     frobnicate (unmapped) and time (width-sensitive) through their contract
+//     names stay unresolved, with the exact "x86 gap:" lines.
 #include <cstdio>
 #include <fstream>
 #include <iterator>
@@ -35,6 +35,7 @@ static const std::set<std::string> kMsvcrtOnly = {
     "_unlock", "__wgetmainargs"};
 
 int main(int argc, char** argv) {
+    const std::string crt_time = "api-ms-win-crt-time-l1-1-0.dll";
     // 1. Mapping.
     CHECK(apiset::served_by("api-ms-win-crt-string-l1-1-0.dll", "strlen") == "msvcrt.dll");
     CHECK(apiset::served_by("api-ms-win-crt-string-l1-1-0.dll", "_lock") == "api-ms-win-crt-string-l1-1-0.dll");
@@ -45,6 +46,16 @@ int main(int argc, char** argv) {
     CHECK(apiset::served_by("api-ms-win-core-com-l1-1-0.dll", "CoCreateInstance") == "ole32.dll");
     CHECK(apiset::served_by("ucrtbase.dll", "strlen") == "ucrtbase.dll");
     CHECK(apiset::served_by("msvcrt.dll", "strlen") == "msvcrt.dll");
+    // Every width-sensitive name stays unresolved from its contract DLL, and the
+    // time family is covered by the same rule, whether or not the surface serves it.
+    size_t sensitive = 0;
+    for (const char* n : apiset::kWidthSensitive) {
+        ++sensitive;
+        if (apiset::served_by(crt_time, n) != crt_time) { ++failures; printf("FAIL width-sensitive name aliased: %s\n", n); }
+    }
+    CHECK(sensitive == sizeof(apiset::kWidthSensitive) / sizeof(apiset::kWidthSensitive[0]) && sensitive >= 50);
+    CHECK(apiset::served_by(crt_time, "time") == crt_time);
+    CHECK(apiset::served_by(crt_time, "TIME") == crt_time);  // case-insensitive, as the binder
 
     // 2. Registry against the header table.
     Memory mem; ThunkTable table; Host host; Registry reg;
@@ -61,6 +72,9 @@ int main(int argc, char** argv) {
     constexpr size_t kTableSize = sizeof(apiset::kUcrtDeclared) / sizeof(apiset::kUcrtDeclared[0]);
     CHECK(served == kTableSize);
     CHECK(kTableSize == 99);
+    // The excluded names that the surface serves are real registrations, so the
+    // exclusion (not a missing export) is what keeps them off the contract path.
+    CHECK(reg.map.count({"msvcrt.dll", "time"}) == 1 && reg.map.count({"msvcrt.dll", "_lseeki64"}) == 1);
     for (const auto& kv : reg.map) {
         if (kv.first.first != "msvcrt.dll") continue;
         const std::string& name = kv.first.second;
@@ -78,12 +92,21 @@ int main(int argc, char** argv) {
         auto r = x86::run_image(file, "apiset.exe", "\"apiset.exe\"",
             [](const std::string&) {}, [](const x86::PlayResult&) {}, x86::kGuestRunCap);
         CHECK(r.loaded && r.finished && r.exit_code == 0);
-        // strlen and ExitProcess bind; frobnicate is the one unresolved import.
-        CHECK(r.imports == 3 && r.bound == 2);
-        CHECK(r.unresolved.size() == 1 && r.unresolved[0] == "api-ms-win-foo-l1-1-0.dll!frobnicate");
-        // The launcher names it, with the API-set name the game imported.
+        // strlen and ExitProcess bind; frobnicate and time stay unresolved.
+        CHECK(r.imports == 4 && r.bound == 2);
+        CHECK(r.unresolved.size() == 2);
+        bool has_frob = false, has_time = false;
+        for (const auto& u : r.unresolved) {
+            if (u == "api-ms-win-foo-l1-1-0.dll!frobnicate") has_frob = true;
+            if (u == crt_time + "!time") has_time = true;
+        }
+        CHECK(has_frob && has_time);
+        // The launcher names both, grouped by DLL, with the total.
         auto rep = x86_route::report(r, "apiset.exe");
-        CHECK(rep.gap.size() == 2 && rep.gap[0] == "x86 gap: api-ms-win-foo-l1-1-0.dll!frobnicate" && rep.gap[1] == "x86 gap: total=1");
+        CHECK(rep.gap.size() == 3);
+        CHECK(rep.gap.size() == 3 && rep.gap[0] == "x86 gap: " + crt_time + "!time");
+        CHECK(rep.gap.size() == 3 && rep.gap[1] == "x86 gap: api-ms-win-foo-l1-1-0.dll!frobnicate");
+        CHECK(rep.gap.size() == 3 && rep.gap[2] == "x86 gap: total=2");
     }
     printf("x86-apiset: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

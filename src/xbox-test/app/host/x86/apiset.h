@@ -1,31 +1,33 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // API-set names for the x86 import binder. An import from an API-set DLL
-// (api-ms-win-*) is a contract name, not a module that holds the code: Windows
-// resolves it through the API-set schema to the module that implements it. The
-// x86 binder maps only the two families below, from documented facts:
+// (api-ms-win-*) is a contract name, not a module that holds the code. Microsoft's
+// API set documentation (Microsoft Learn, "API sets"; "Universal CRT deployment")
+// lists these as documented API set contract names, and says that ucrtbase.dll
+// hosts the Universal CRT implementations. The x86 binder maps only the families
+// below; the mapping rules mirror the x64 side (play_runtime.h resolve() and
+// crtExitApi). Page titles are cited here; the pages were not re-read in this
+// environment, so check them when this table changes.
 //
-//  * api-ms-win-crt-<area>-l1-1-0.dll: Universal CRT contracts. Microsoft's
-//    "Universal CRT" deployment and "Windows API sets" documentation (Microsoft
-//    Learn) state that these contracts are implemented by ucrtbase.dll. The x86
-//    surface serves the UCRT functions under msvcrt.dll, the same policy the
-//    x64 side uses (play_runtime.h crtExitApi), so a contract name binds to
-//    msvcrt.dll. The "private" contract is not a public surface and is not
-//    mapped.
-//  * api-ms-win-core-*: forwarded to kernel32.dll (kernelbase.dll is served by
-//    kernel32 here, the same rule as play_runtime.h resolve()); the
-//    api-ms-win-core-com-l1-* contract goes to ole32.dll, as play_runtime.h does.
+//  * api-ms-win-crt-<area>-l1-1-0.dll (public areas): served by msvcrt.dll for the
+//    symbols kUcrtDeclared lists, except the width-sensitive names in
+//    kWidthSensitive. Those stay unresolved.
+//  * api-ms-win-core-*: kernel32.dll. kernelbase.dll: kernel32.dll.
+//    api-ms-win-core-com-l1-*: ole32.dll.
 //
-// A UCRT contract name binds only when the UCRT headers declare the symbol
-// (kUcrtDeclared). Undeclared names (the msvcrt-only legacy exports) stay
-// unresolved from a contract DLL and show up in the launcher's "x86 gap:" list,
-// so nothing is guessed. Every other API-set name is left as it is.
+// Anything else stays as it is: unresolved, and named by the launcher's "x86 gap:"
+// list. Nothing is guessed.
 //
-// kUcrtDeclared was derived from the mingw-w64 14 UCRT headers, with
-// `gcc -fsyntax-only -aux-info` over the standard CRT headers (stdio, stdlib,
-// string, time, locale, math, ctype, wchar, io, process, sys/stat). Each entry is
-// the function's declared parameter count in 32-bit dwords (a 64-bit integer is
-// two dwords). The static check in tests/x86-apiset.cpp compares the registry
-// against this table, so a convention or arity drift fails there.
+// kUcrtDeclared: the functions the surface serves under msvcrt.dll that the mingw-w64
+// 14 UCRT headers declare, with the declared parameter count in 32-bit dwords (a
+// 64-bit integer is two dwords). Derived with `gcc -fsyntax-only -aux-info` over the
+// standard CRT headers; vsprintf is from its declaration line (stdio.h:459). The
+// static check in tests/x86-apiset.cpp compares the registry to this table.
+//
+// kWidthSensitive: names whose width, struct layout or return register differs between
+// the msvcrt.dll surface and the UCRT, or that the surface does not implement as the
+// UCRT does. A contract name for them is never aliased. Each entry cites the UCRT
+// declaration (mingw-w64 14 headers, sys-include) that makes it width- or
+// layout-dependent. Lowercase, as the binder compares.
 #pragma once
 #include <string>
 namespace x86 {
@@ -134,6 +136,46 @@ inline const UcrtDecl kUcrtDeclared[] = {
     {"wcsxfrm", 3},
 };
 
+// Width-sensitive names. Served by the surface (in kUcrtDeclared), excluded from
+// the contract path until a thunk with the UCRT width exists:
+//  time            time.h:236 time_t time(time_t*) __MINGW_ASM_CALL(_time32): the
+//                  i686 mingw default is a 32-bit time_t (_mingw.h:394-396); the
+//                  UCRT default is __time64_t (time.h:54-57, _time64 at time.h:186).
+//  fgetpos,fsetpos stdio.h:555 "64bit only, no 32bit version"; fpos_t is __int64
+//                  (stdio.h:112). The surface does not model the position.
+//  _get_osfhandle  io.h:311 returns intptr_t (the return width is a header choice).
+//  _filelengthi64  io.h:249 returns __int64: EDX:EAX. The thunk sets EAX only.
+//  _lseeki64       io.h:256 returns __int64 (EDX:EAX) and takes an __int64 offset.
+//                  The thunk sets EAX only, so a direct msvcrt import would read a
+//                  stale EDX. Excluded here; the thunk needs a 64-bit return path.
+//  _fstat64        sys/stat.h:71 takes struct _stat64*, whose _off_t and time fields
+//                  differ by time_t width (_mingw_stat64.h:37 and time fields).
+//  localeconv      locale.h:91 returns struct lconv*. The surface writes its own
+//                  48-byte block; the layout was not checked against the UCRT path.
+//  wcsftime        time.h:198. The surface returns 0 with no output (a stub), so a
+//                  contract import would silently produce nothing.
+//  clock           the surface returns a constant 0 (a stub). A timing loop would
+//                  stop measuring.
+// Declared-not-served family (never aliased if a thunk is added later): the time_t
+// family (time.h:142 asctime, :177 _difftime64, :180 _gmtime64, :182 _localtime64,
+// :184 _mktime64, :186 _time64, :160 _time32, :240 difftime, :241 localtime,
+// :243 gmtime, :245 ctime, :247 mktime), _ftime (sys/timeb.h:78, :88, :91),
+// the stat family (sys/stat.h:71 _fstat64, :74 _stat64, :83 _wstat64;
+// _mingw_stat64.h:13-24 macros), the find family (io.h:85-97 macros, :251 _findfirst64,
+// :254 _findnext64), and utime (sys/utime.h:89-90 _utime64/_futime64, :105-106).
+inline const char* const kWidthSensitive[] = {
+    "time", "_time32", "_time64", "mktime", "_mktime64", "localtime", "_localtime64",
+    "gmtime", "_gmtime64", "difftime", "_difftime64", "ctime", "asctime",
+    "_ftime", "_ftime32", "_ftime64",
+    "_stat", "_stat32", "_stat64", "_stat64i32", "_wstat", "_wstat32", "_wstat64", "_wstat64i32",
+    "_fstat", "_fstat32", "_fstat64", "_fstat64i32", "_fstati64",
+    "_findfirst", "_findfirst32", "_findfirst64", "_findfirst64i32",
+    "_findnext", "_findnext32", "_findnext64", "_findnext64i32",
+    "_utime", "_utime32", "_utime64", "_futime", "_futime32", "_futime64",
+    "_filelengthi64", "_lseeki64", "_get_osfhandle", "fgetpos", "fsetpos",
+    "localeconv", "wcsftime", "clock",
+};
+
 inline std::string lower(std::string s) {
     for (auto& c : s) if (c >= 'A' && c <= 'Z') c = char(c + 32);
     return s;
@@ -151,13 +193,19 @@ inline bool declared(const std::string& sym) {
     for (const auto& d : kUcrtDeclared) if (s == lower(d.name)) return true;
     return false;
 }
+// True for a width-sensitive name (kWidthSensitive).
+inline bool width_sensitive(const std::string& sym) {
+    std::string s = lower(sym);
+    for (const char* n : kWidthSensitive) if (s == n) return true;
+    return false;
+}
 // The module whose surface answers an import of `sym` from `dll` (both lowercase
 // as the binder reads them). Unmapped names return `dll` unchanged.
 inline std::string served_by(const std::string& dll, const std::string& sym) {
     if (dll == "kernelbase.dll") return "kernel32.dll";
     if (dll.rfind("api-ms-win-core-com-l1-", 0) == 0) return "ole32.dll";
     if (dll.rfind("api-ms-win-core-", 0) == 0) return "kernel32.dll";
-    if (ucrt_contract(dll)) return declared(sym) ? "msvcrt.dll" : dll;
+    if (ucrt_contract(dll)) return (declared(sym) && !width_sensitive(sym)) ? "msvcrt.dll" : dll;
     return dll;
 }
 

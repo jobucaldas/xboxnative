@@ -17,11 +17,13 @@ dlltool="$(dirname "$cc32")/i686-w64-mingw32-dlltool"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/x86-apiset.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
 printf 'LIBRARY api-ms-win-crt-string-l1-1-0.dll\nEXPORTS\nstrlen\n' > "$tmp/crt.def"
 printf 'LIBRARY api-ms-win-foo-l1-1-0.dll\nEXPORTS\nfrobnicate\n' > "$tmp/foo.def"
+printf 'LIBRARY api-ms-win-crt-time-l1-1-0.dll\nEXPORTS\ntime\n' > "$tmp/time.def"
 "$dlltool" -d "$tmp/crt.def" -l "$tmp/libapi-ms-win-crt-string-l1-1-0.a" -D api-ms-win-crt-string-l1-1-0.dll
 "$dlltool" -d "$tmp/foo.def" -l "$tmp/libapi-ms-win-foo-l1-1-0.a" -D api-ms-win-foo-l1-1-0.dll
+"$dlltool" -d "$tmp/time.def" -l "$tmp/libapi-ms-win-crt-time-l1-1-0.a" -D api-ms-win-crt-time-l1-1-0.dll
 "$cc32" -O1 -Wall -Wextra -Werror -ffreestanding -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables \
   -mno-sse -mno-mmx -mno-80387 -nostdlib -Wl,--entry,_apiset_start@0 -Wl,--subsystem,console -Wl,--dynamicbase \
   -Wl,--no-seh -Wl,--image-base,0x400000 -o "$tmp/apiset.exe" "$here/x86-fixture/apiset.c" \
-  -L"$tmp" -lapi-ms-win-crt-string-l1-1-0 -lapi-ms-win-foo-l1-1-0 -lkernel32
+  -L"$tmp" -lapi-ms-win-crt-string-l1-1-0 -lapi-ms-win-crt-time-l1-1-0 -lapi-ms-win-foo-l1-1-0 -lkernel32
 "${CXX:-c++}" -std=c++17 -O2 -mno-red-zone -Wall -Wextra -Werror "$here/x86-apiset.cpp" -o "$tmp/x86-apiset"
 "$tmp/x86-apiset" "$tmp/apiset.exe"
