@@ -40,6 +40,7 @@ jobs:
           bash src/xbox-test/app/tests/selftest-plan.sh
           bash src/xbox-test/app/tests/play-d3d11-so-state.sh
           bash src/xbox-test/app/tests/play-d3d12-order.sh
+          bash src/xbox-test/app/tests/d3d10-readback-contract.sh
           bash src/xbox-test/app/tests/steam-app-ticket.sh
           bash src/xbox-test/app/tests/steam-client-package.sh
           bash src/xbox-test/app/tests/launch-report.sh
