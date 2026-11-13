@@ -34,6 +34,7 @@
 #include <d3d11.h>
 #include <d3d11_1.h>
 #include <d3d11shader.h>
+#include <d3dcompiler.h>
 #include <dxgi.h>
 #include "../d3dshim/base.h"
 
@@ -1693,8 +1694,9 @@ __declspec(dllexport) HRESULT WINAPI D3D10CreateBlob(SIZE_T size,ID3D10Blob** ou
 __declspec(dllexport) HRESULT WINAPI D3D10CompileShader(const char* data,SIZE_T size,const char* filename,
         const D3D10_SHADER_MACRO* defines,ID3D10Include* include,const char* entrypoint,const char* profile,
         UINT flags,ID3D10Blob** shader,ID3D10Blob** errors) {
-    using Fn=HRESULT(WINAPI*)(const void*,SIZE_T,const char*,const void*,const void*,const char*,const char*,
-        UINT,UINT,ID3DBlob**,ID3DBlob**);
+    // Typed from d3dcompiler.h's own pD3DCompile typedef (Bugbot r4559946114:
+    // a hand-typed form once dropped Flags2 and shifted the out-params).
+    using Fn=pD3DCompile;
     auto fn=(Fn)compiler.proc("D3DCompile");
     if(!fn)return E_FAIL;
     ID3DBlob* code=nullptr;ID3DBlob* messages=nullptr;
