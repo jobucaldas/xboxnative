@@ -20,7 +20,20 @@ inline uintptr_t resolve_thread_query(const char* dll,const char* name) {
                 !_stricmp(dll,"api-ms-win-core-processthreads-l1-1-1.dll");
     if (!kernel && !thread) return 0;
 #define K32_THREAD_QUERY(symbol) if (!strcmp(name,#symbol)) return reinterpret_cast<uintptr_t>(&::symbol)
-    K32_THREAD_QUERY(OpenThread);
+    // OpenThread resolves through GetProcAddress, not &::OpenThread: taking
+    // the address plants a static KERNEL32!OpenThread import in the launcher
+    // exe (bugbot r4559831132 — a desktop-affinity import the Xbox runtime
+    // rejects), while a GetProcAddress lookup only ever runs inside the
+    // guest's routing table. Same pattern TerminateThread uses below.
+    if (!strcmp(name,"OpenThread")) {
+        using Open=HANDLE (WINAPI*)(DWORD,BOOL,DWORD);
+        static Open open=[]() -> Open {
+            HMODULE module=LoadLibraryExW(L"kernel32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+            auto p=module ? GetProcAddress(module,"OpenThread") : nullptr;
+            return reinterpret_cast<Open>(reinterpret_cast<uintptr_t>(p));
+        }();
+        return reinterpret_cast<uintptr_t>(open);
+    }
     K32_THREAD_QUERY(SuspendThread);
     K32_THREAD_QUERY(ResumeThread);
     if (!strcmp(name,"TerminateThread")) {

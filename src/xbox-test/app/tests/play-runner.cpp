@@ -40,6 +40,7 @@ static FARPROC WINAPI hostProc(HMODULE h,LPCSTR name) {
 #include "../host/mlp_probe.h"
 #include "../donors/probe.h"
 #include "../host/play_runtime.h"
+#include "../host/guest_watchdog.h"
 #include "../steam_leaderboards.h"
 #include "../steam_persona.h"
 #include "../launch_target.h"
@@ -281,12 +282,21 @@ static bool attachPublicationTest() {
 }
 static FILE* hostEvents=nullptr;
 static bool injectLogException=false;
+// Watchdog-mode stand-in clock, split the way the launcher's is: the UI-loop
+// stand-in advances nowTick (the QPC read); the GUEST stamps lastHeartbeat —
+// logline() does it, the way the guest's hooked Present stamps
+// guest_overlay::lastPresentTick. A hung guest stops logging, so its
+// heartbeat stops and the gap ages into the silence verdict; the loop
+// itself never keeps a dead guest's heartbeat alive.
+static std::atomic<uint64_t> nowTick{1},lastHeartbeat{0};
+static std::atomic<bool> watchdogStamp{false};
 static void handledLogException() {
     __try {RaiseException(0x40010006,0,0,nullptr);}
     __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 static void logline(const char* s){
     if(injectLogException)handledLogException();puts(s);fflush(stdout);
+    if(watchdogStamp.load(std::memory_order_acquire))lastHeartbeat.store(nowTick.load(std::memory_order_acquire),std::memory_order_release);
     if(hostEvents){fprintf(hostEvents,"%s\n",s);fflush(hostEvents);}
     if(checkStartupLock&&!strcmp(s,"PRUN EVENT DllMain PROCESS_ATTACH play-dependency.dll"))observeLoaderLock();
     if(attachReached&&!strcmp(s,"PRUN EVENT DllMain rejected PROCESS_ATTACH: play-reject.dll")) {
@@ -524,6 +534,15 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
             if(snap!=INVALID_HANDLE_VALUE)CloseHandle(snap);
         }
     } else if(r->worker)WaitForSingleObject(r->worker,2000);
+    // Watchdog modes: give the guest a moment to reach its entry (the hang
+    // fixture blocks there), so the watchdog loop judges a running guest, not
+    // the mapping phase. The heartbeat stays on: the guest stamps it on every
+    // log line for the whole run, the way the hooked Present stamps the
+    // launcher's lastPresentTick — a hung guest simply stops logging.
+    if(std::string(args)=="watchdog-crash"||std::string(args)=="watchdog-hang") {
+        if(r->worker)WaitForSingleObject(r->worker,1000);
+        watchdogStamp.store(true,std::memory_order_release);
+    }
     auto last=r->snapshot();char summary[8192];snprintf(summary,sizeof summary,"PLAY-TEST executed=%d finished=%d success=%d code=%lu last=%s",int(r->executed),int(r->finished),r->success,r->code,last.c_str());
     logline(summary);
     std::string mode=args;
@@ -691,6 +710,66 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     else if(mode=="crt-exit")ok=ok&&r->finished&&r->success&&r->code==37&&last.find("ExitProcess code=37")!=std::string::npos;
     else if(mode=="crt-abort")ok=ok&&r->finished&&r->success&&r->code==3&&last.find("ExitProcess code=3")!=std::string::npos;
     else if(mode=="hang")ok=ok&&!r->finished&&last.find("EXE entry play-guest.exe")!=std::string::npos;
+    else if(mode=="watchdog-crash"||mode=="watchdog-hang") {
+        // The launcher's watchdog against a real guest, off-device: a UI-loop
+        // stand-in evaluates guest_watchdog::Inputs from play_runtime state
+        // while the guest runs. The crash mode (play-guest.exe crash) faults
+        // through play_runtime's filter: faulted must report dead immediately
+        // (Reason::fault), before any silence could age. The hang mode
+        // (play-guest.exe hang) blocks forever: the UI loop keeps ticking,
+        // and past the shortened silence threshold the verdict flips to dead
+        // (Reason::silent) while the guest thread is still blocked — exactly
+        // the console wedge (frozen frame, stale FPS, unreachable guide)
+        // this pins. The hung guest thread is left blocked; the runner is a
+        // disposable process, like a launcher restart after force quit.
+        // Clock: logline() stamps lastHeartbeat per guest log line (the
+        // guest's hooked Present stamps the launcher's lastPresentTick) and
+        // the loop advances nowTick itself, 20 ms of ticks per 20 ms wall
+        // tick. The decision's real kSilenceSeconds therefore ages in real
+        // time once the guest goes quiet, so the loop runs until the verdict
+        // fires (capped well past it).
+        const bool hang=mode=="watchdog-hang";
+        LARGE_INTEGER freq{};QueryPerformanceFrequency(&freq);
+        const uint64_t hz=uint64_t(freq.QuadPart);
+        bool reported=false,faultReason=false,silentReason=false;
+        unsigned ticks=0;
+        ULONGLONG start=GetTickCount64();
+        while(GetTickCount64()-start<20000&&!reported) {
+            ++ticks;   // the launcher's own heartbeat: the UI loop always runs
+            if(auto guest=play_runtime::observed.load(std::memory_order_acquire)) {
+                guest_watchdog::Inputs in;
+                in.lastActivityTick=lastHeartbeat.load(std::memory_order_acquire);
+                in.nowTick=nowTick.load(std::memory_order_acquire);
+                in.ticksPerSecond=hz;
+                in.guestFault=guest->faulted.load(std::memory_order_acquire);
+                in.guestFinished=guest->finished.load(std::memory_order_acquire);
+                const auto v=guest_watchdog::evaluate(in);
+                if(v.dead&&!reported) {
+                    reported=true;
+                    faultReason=v.reason==guest_watchdog::Reason::fault;
+                    silentReason=v.reason==guest_watchdog::Reason::silent;
+                    printf("WATCHDOG dead at tick %u reason=%s\n",ticks,
+                        v.reason==guest_watchdog::Reason::fault?"fault":
+                        v.reason==guest_watchdog::Reason::silent?"silent":
+                        v.reason==guest_watchdog::Reason::exited?"exited":"none");fflush(stdout);
+                }
+            }
+            nowTick.store(nowTick.load(std::memory_order_acquire)+hz/50,std::memory_order_release);   // 20 ms per UI tick
+            Sleep(20);
+        }
+        // Crash mode: dead fast, by fault, with the guest's crash recorded.
+        // Hang mode: dead by silence while the guest thread never finished.
+        if(!hang) {
+            ok=ok&&reported&&faultReason&&r->finished&&!r->success&&
+                last.find("unhandled exception code=0xe0424242")!=std::string::npos;
+            printf("PLAY-WATCHDOG-CRASH reported=%d faultReason=%d guestFinished=%d\n",
+                reported,faultReason,r->finished.load());fflush(stdout);
+        } else {
+            ok=ok&&reported&&silentReason&&!r->finished.load()&&ticks>=100;
+            printf("PLAY-WATCHDOG-HANG reported=%d silentReason=%d guestStillRunning=%d uiTicks=%u\n",
+                reported,silentReason,!r->finished.load(),ticks);fflush(stdout);
+        }
+    }
     else ok=ok&&r->finished&&r->success&&r->code==42;
     if(mode=="failed-dependency"&&ok) {
         // No game code ran, so the launcher releases this loader and the next

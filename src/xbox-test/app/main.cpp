@@ -700,6 +700,39 @@ static void sort_games(int mode) {   // caller holds g_gm
 }
 
 // ---------------------------------------------------------------- app state + network thread
+// DirectComposition for the dead page (bugbot r4559305219 redesign): the
+// REAL <dcomp.h> (bugbot r4559524004). The earlier hand-declared
+// IDComposition*Local interfaces counted vtable slots by hand and put
+// SetContent at slot 21 after eighteen placeholders; the real header puts it
+// at slot 15 (SetOffsetX x2, SetOffsetY x2, SetTransform x2,
+// SetTransformParent, SetEffect, SetBitmapInterpolationMode, SetBorderMode,
+// SetClip x2, SetContent) — calling through the hand-declared interface
+// forwarded into the middle of the real vtable. Hand-counted slots are a
+// recurring bug class here, so the dead page now compiles against the SDK's
+// own declarations and tests/dcomp-slots.sh asserts the slots from the real
+// header. dcomp.h is Desktop-partitioned, so it is included with the family
+// briefly switched (the same shim msvc-compat.h documents for cstdlib);
+// nothing else in the TU re-opens the desktop partition.
+#pragma push_macro("WINAPI_FAMILY")
+#undef WINAPI_FAMILY
+#define WINAPI_FAMILY WINAPI_FAMILY_DESKTOP_APP
+#include <dcomp.h>
+#pragma pop_macro("WINAPI_FAMILY")
+
+
+// ICoreWindowInterop: gives the CoreWindow's real OS HWND (needed for the
+// DComp target). winrt's CoreWindow.h is not includable here (its MIDL
+// output spells `HRESULT _cdecl CreateControlInput`, which mingw/clang-cl
+// cannot parse — `_cdecl` is an MSVC keyword), so declare the interface
+// locally with the real IID. Slots from the winrt header's MIDL decl:
+// IUnknown's three, then get_WindowHandle (slot 3) and
+// put_MessageHandled (slot 4).
+struct __declspec(uuid("45D64A29-A63E-4CB6-B498-5781D298CB4F")) ICoreWindowInterop : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE get_WindowHandle(HWND*) = 0;        // slot 3
+    virtual HRESULT STDMETHODCALLTYPE put_MessageHandled(HWND) = 0;       // slot 4 (never called)
+};
+static const IID kIID_ICoreWindowInterop = {0x45d64a29,0xa63e,0x4cb6,{0xb4,0x98,0x57,0x81,0xd2,0x98,0xcb,0x4f}};
+
 enum Screen { S_BOOT, S_LOGIN, S_LOADING, S_LIBRARY, S_DETAIL, S_QUEUE, S_STORAGE };
 // Item D16: the library is the first screen. Steam's session is restored in the
 // background and never gates the UI, so no startup splash is shown on launch.
@@ -906,6 +939,7 @@ static void dl_thread() {
 #include "launch_picker.h"
 #include "launch_report.h"
 #include "selftest.h"
+#include "host/guest_watchdog.h"
 #include "guest_overlay.h"
 #include "ui_unlocks.h"
 #include "../uwph/user32/corewindow_feed.h"
@@ -1175,6 +1209,23 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     inline static App* graphicsApp=nullptr;
     bool m_closed = false;
     com_ptr<ID3D11Device> m_dev; com_ptr<ID3D11DeviceContext> m_ctx; com_ptr<IDXGISwapChain1> m_sc; com_ptr<ID3D11Texture2D> m_bb;
+    // The guest's swap chain, kept at hand-off (GuestSurface) for reference
+    // only: the DEAD PAGE never presents through it (bugbot r4559305219 —
+    // the guest may be blocked inside Present, and a second Present on the
+    // chain plus the non-free-threaded immediate context would wedge the UI
+    // thread on the exact hang the watchdog exists to outlive).
+    com_ptr<IDXGISwapChain1> m_guestChain;
+    // Launcher-owned dead-page surface (bugbot r4559305219 redesign): a
+    // composition swapchain on the LAUNCHER's own device, composited over
+    // the CoreWindow through a topmost DirectComposition target. Created
+    // lazily on the death latch; torn down on recovery. No guest object is
+    // touched while dead — no guest Present, no guest context, no Map.
+    com_ptr<IDXGISwapChain1> m_deadChain;
+    com_ptr<ID3D11Texture2D> m_deadBB;
+    winrt::com_ptr<IDCompositionDevice> m_deadDcomp;   // the real dcomp.h types (bugbot r4559524004)
+    winrt::com_ptr<IDCompositionTarget> m_deadTarget;
+    winrt::com_ptr<IDCompositionVisual> m_deadVisual;
+    bool m_deadSurfaceUp = false;
     Pad m_pad; int m_prevPads = -1; uint64_t m_frame = 0;
     int m_sel = 0, m_top = 0; double m_scroll = 0, m_scrollT = 0; bool m_btnFocus = true, m_confirmLogout = false;
     bool m_logoutYes = false;   // item 14: logout sheet focus, false = Cancel (never defaults to the destructive button)
@@ -1873,10 +1924,58 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             auto pads=Gamepad::Gamepads();
             if(pads.Size()){m_inputHooks=true;logf("overlay: input capture hooks %s",guest_overlay::install_input_block(pads.GetAt(0))?"installed":"unavailable");}
         }
-        // Unblock only once the menu is closed and every button is up.
         if(guest_overlay::inputBlocked&&!guest_overlay::menuOpen&&b==GamepadButtons::None){guest_overlay::block_input(false);logf("overlay: game input restored");}
         const auto combo=GamepadButtons::View|GamepadButtons::Menu;
         auto pressed=[&](GamepadButtons m){return held(b,m)&&!held(m_menuPrev,m);};
+        // While dead (bugbot r4559305224, r4559524001) the pad routes through
+        // the pure guide_step decision: combo toggles the guide (opening it
+        // lands the focus on Force quit), D-pad moves the selection, A
+        // activates, B closes, everything else swallowed — no launcher
+        // screen, no guest-side call. A on Resume while dead is a no-op (the
+        // guide stays open: there is nothing to resume); the block/unblock
+        // dance above stays harmless (the game runs no code), so it is left
+        // shared.
+        if(guest_overlay::guestDead.load(std::memory_order_acquire)) {
+            using guest_watchdog::GuideAction;
+            const bool open=guest_overlay::menuOpen.load(std::memory_order_acquire);
+            int row=guest_overlay::selection.load(std::memory_order_acquire);
+            // The guide model below speaks Home rows only (Resume/Quit/Force
+            // quit). If the guest died with the guide open on another tab
+            // (Achievements, Settings), snap it back: a "select" there would
+            // map to the wrong command (a Settings row instead of the kill).
+            if(open&&guest_overlay::ui_guideTab.load()!=0) {
+                guest_overlay::ui_guideTab=0;
+                guest_overlay::achTop=0;
+                row=guest_watchdog::kForceQuitRow;   // the dead-open focus
+                guest_overlay::selection=row;
+            }
+            if(row<0||row>=guest_watchdog::kHomeRows)row=0;   // atomics out of range: re-clamp before the model reads them
+            const auto s=guest_watchdog::guide_step(true,open,row,
+                pressed(combo),
+                pressed(GamepadButtons::DPadUp),pressed(GamepadButtons::DPadDown),
+                pressed(GamepadButtons::A),pressed(GamepadButtons::B));
+            switch(s.action) {
+            case GuideAction::toggle:
+                menu_command("toggle","controller");   // sets menuOpen; focuses Force quit while dead
+                break;
+            case GuideAction::up:
+            case GuideAction::down:
+                guest_overlay::selection=s.row;   // the model already wrapped; no second advance
+                break;
+            case GuideAction::forceQuit:
+            case GuideAction::quitGame:
+                menu_command("select","controller");   // selection already on the row: force_quit()/quit_game()
+                break;
+            case GuideAction::close:
+                if(open)menu_command("toggle","controller");   // B (or A-Resume while alive) closes
+                break;
+            case GuideAction::resume: break;   // dead: nothing to resume; the guide stays open on Force quit
+            case GuideAction::none: break;
+            }
+            m_menuPrev=b;
+            frame_log(t);
+            return;
+        }
         if(held(b,combo)&&!held(m_menuPrev,combo))menu_command("toggle","controller");
         else if(guest_overlay::menuOpen&&!guest_overlay::busy) {
             // Guide navigation (ui_guide.h's state machine, guest_overlay.h's
@@ -1936,10 +2035,19 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void menu_command(const std::string& c,const char* via) {
         using namespace guest_overlay;
         // The menu only opens where it can be drawn: blocking the pad behind an
-        // invisible menu would leave the game with a dead controller.
-        if(c=="toggle"&&!menuOpen&&!guest_overlay::drawable){logf("overlay: menu unavailable (present hooks or back-buffer format unsupported) (%s)",via);return;}
-        if(c=="toggle"){if(busy)return;menuOpen=!menuOpen;guest_overlay::ui_guideTab=0;selection=0;guest_overlay::achTop=0;
-                        if(menuOpen)block_input(true);logf("overlay: menu %s (Home) (%s)",menuOpen?"opened":"closed",via);return;}
+        // invisible menu would leave the game with a dead controller. The
+        // watchdog's dead state lifts this: the card is drawn by the launcher
+        // itself (draw_guest_dead), never by a guest present, so `drawable`
+        // (latched from guest presents) says nothing about the dead state.
+        const bool dead=guestDead.load(std::memory_order_acquire);
+        if(c=="toggle"&&!menuOpen&&!drawable&&!dead){logf("overlay: menu unavailable (present hooks or back-buffer format unsupported) (%s)",via);return;}
+        if(c=="toggle"){if(busy)return;menuOpen=!menuOpen;guest_overlay::ui_guideTab=0;
+                        // Opening while dead focuses Force quit (bugbot
+                        // r4559524001): the player's one-press kill. Alive,
+                        // the old focus (Resume, row 0) is kept.
+                        selection=menuOpen&&dead?(int)guest_overlay::Item::ForceQuit:0;
+                        guest_overlay::achTop=0;
+                        if(menuOpen)block_input(true);logf("overlay: menu %s (Home)%s",menuOpen?"opened":"closed",dead?" (guest dead)":"");return;}
         // Turning the FPS counter off can strand the selection on the graph
         // row (Settings row 1), which disappears; re-clamp into range.
         auto reclamp=[this](bool on){ if(!on&&ui_guideTab.load()==2&&selection.load()>0)selection=0; };
@@ -1989,17 +2097,55 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void force_quit() {
         if(m_leaving)return;
         m_leaving=true;guest_overlay::set_status("Uploading saves...");
+        logf("overlay: force quit — killing the guest thread, then uploading saves");
         auto sync=g_finalSync;
-        // CoreWindow is thread-affine; its CoreDispatcher is agile. Take the
-        // dispatcher here, on the UI thread, for the worker to post back with.
-        auto dispatcher=m_window.Dispatcher();
+        // Kill the guest thread FIRST, then upload (bugbot r4559524001 and
+        // the follow-up race finding): one worker does both in order, so the
+        // save upload can never read a save file while the guest is alive or
+        // mid-teardown. The kill is bounded — the launcher never blocks on a
+        // guest wedged inside the driver. play_runtime::state->thread is the
+        // guest's entry thread. TerminateThread is Desktop-partitioned (not
+        // declared under the app family) and a desktop OpenThread import
+        // would fail the Xbox activation affinity, so BOTH resolve through
+        // kernel_tail::native — the same dump_thread_stacks pattern
+        // (launch.h) uses for OpenThread/SuspendThread. The loader mutex is
+        // never taken: the guest may hold it from inside the very hang
+        // being killed.
+        auto dispatcher=m_window.Dispatcher();   // CoreWindow is thread-affine; its CoreDispatcher is agile
         std::thread([this,sync,dispatcher]{
-            try {
-                init_apartment(apartment_type::multi_threaded);
-                if(sync)sync();
-            } catch(...) {logf("overlay: force quit upload failed");}
-            try {dispatcher.RunAsync(CoreDispatcherPriority::Normal,[this]{back_to_games("force quit");});}
-            catch(hresult_error const& e) {logf("overlay: force quit dispatch failed hr=0x%08x",(unsigned)e.code().value);}
+            using Open=HANDLE(WINAPI*)(DWORD,BOOL,DWORD);
+            using Terminate=BOOL(WINAPI*)(HANDLE,DWORD);
+            auto open=(Open)kernel_tail::native("OpenThread");
+            auto terminate=(Terminate)kernel_tail::native("TerminateThread");
+            const DWORD tid=play_runtime::state?play_runtime::state->thread.load(std::memory_order_acquire):0;
+            // The ordered step runner (guest_watchdog::force_quit_sequence):
+            // terminate -> bounded wait -> sync -> done, never in parallel.
+            guest_watchdog::force_quit_sequence(
+                [&]{
+                    if(!tid)logf("overlay: force quit — no guest thread id recorded");
+                    else if(!open||!terminate)logf("overlay: force quit — thread APIs unavailable; the guest thread stays (restart still unloads it)");
+                    else {
+                        const HANDLE h=open(THREAD_TERMINATE,FALSE,tid);
+                        if(!h)logf("overlay: force quit — OpenThread(%lu) failed err=%lu",(unsigned long)tid,(unsigned long)GetLastError());
+                        else {
+                            terminate(h,1);
+                            WaitForSingleObject(h,3000);   // bounded: the launcher never blocks on a dead guest
+                            CloseHandle(h);
+                            logf("overlay: force quit — guest thread %lu terminated",(unsigned long)tid);
+                        }
+                    }
+                },
+                []{ return true; },   // the terminate step above already waited, bounded
+                [sync]{   // the guest thread is gone (or unkillable): no mid-write read
+                    try {
+                        init_apartment(apartment_type::multi_threaded);
+                        if(sync)sync();
+                    } catch(...) {logf("overlay: force quit upload failed");}
+                },
+                [this,dispatcher]{
+                    try {dispatcher.RunAsync(CoreDispatcherPriority::Normal,[this]{back_to_games("force quit");});}
+                    catch(hresult_error const& e) {logf("overlay: force quit dispatch failed hr=0x%08x",(unsigned)e.code().value);}
+                });
         }).detach();
     }
     // Play does not restart a guest in-process: its modules, threads and
@@ -2553,6 +2699,15 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                         result=factory->CreateSwapChainForCoreWindow(device,window,&desc,output,chain);
                         logf("guest surface handoff native hr=0x%08lx",(unsigned long)result);
                         if(SUCCEEDED(result)&&chain&&*chain) {
+                            // The watchdog keeps this chain: when the guest dies
+                            // (crash or hang) the launcher presents its "Game not
+                            // responding" screen through it — DXGI objects are not
+                            // thread-affine and the dead guest presents nothing, so
+                            // the UI thread may use the chain directly. No new
+                            // swapchain is created for the CoreWindow (the guest's
+                            // is still bound; a second would fail with
+                            // DXGI_ERROR_INVALID_CALL).
+                            app->m_guestChain.copy_from(*chain);
                             std::string saved;guest_overlay::fpsOn=read_file_s(g_dir+L"\\overlay.txt",saved)&&saved.find("fps=1")!=std::string::npos;
                             // RCA experiment: lockmode.txt present => the chain keeps its
                             // first mode (later ResizeBuffers suppressed with S_OK).
@@ -2749,6 +2904,57 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // item D22: the fullscreen launch banner. The wide art is the same
     // library_hero.jpg the game page uses (header.jpg fallback), fetched on
     // demand and cached per appid for the session.
+    // "Game not responding": the game page underneath, dimmed, with the
+    // watchdog's banner. The FPS counter reads 0 — the guest presents
+    // nothing, so the overlay's frozen value would be a lie (owner
+    // requirement: a crash must never leave a stale counter on screen).
+    // Drawn from g_fb alone (pure CPU), so the launcher-owned dead surface
+    // (bugbot r4559305219 redesign) can present it without touching the
+    // guest's device, context or swap chain. The game page underneath is
+    // static while dead (input() routes nothing there), so it renders from
+    // the cached game record, never from a live guest query.
+    void draw_guest_dead(double t) {
+        draw_detail(t);   // the game page (status, playtime) under the banner
+        ui::Canvas c(g_fb.data(), W, H, W);
+        const int bw = 900, bh = 260, bx = (W - bw) / 2, by = (H - bh) / 2;
+        c.fill_rect(float(bx), float(by), float(bw), float(bh), ui::theme::argb(230, 12, 14, 18));
+        c.stroke_round_rect({float(bx), float(by), float(bw), float(bh)}, ui::theme::radiusCard, 3, ui::theme::danger);
+        if (g_fontOk) {
+            ui_launcher::text(c, g_font, ui::Face::Semibold, 56, float(bx + 40), float(by + 40), "Game not responding", ui::theme::text);
+            ui_launcher::text(c, g_font, ui::Face::Regular, 30, float(bx + 40), float(by + 130),
+                "The game stopped or crashed. Open the guide (View+Menu) to force quit it.", ui::theme::textDim);
+            ui_launcher::text(c, g_font, ui::Face::Regular, 26, float(bx + 40), float(by + 190),
+                "FPS 0   \xC2\xB7   guide: View+Menu", ui::theme::textMuted);
+        } else {
+            text8(bx + 40, by + 60, "Game not responding - press View+Menu for the guide", 4, C3(255, 120, 120));
+            text8(bx + 40, by + 130, "FPS 0", 4, C3(255, 120, 120));
+        }
+        // The guide card (bugbot r4558727840): menuOpen must still draw the
+        // guide when the guest is dead, or View+Menu opens nothing and force
+        // quit is unreachable. The card is pure CPU (draw_guide_canvas), so
+        // composite it straight into g_fb — the launcher's own canvas, no
+        // guest device involved. g_fb is always design size (1920x1080), so
+        // the card sits 1:1 at its design position.
+        if (guest_overlay::menuOpen.load(std::memory_order_acquire)) {
+            ui::Canvas cardC(nullptr, 0, 0, 0);
+            auto& card = guest_overlay::draw_guide_canvas(cardC);
+            const int cw = cardC.width(), ch = cardC.height();
+            const int cx0 = int(ui_guide::kCardX), cy0 = int(ui_guide::kCardY);
+            uint32_t* dst = g_fb.data();
+            for (int y = 0; y < ch; ++y) {
+                const int gy = cy0 + y;
+                if (gy < 0 || gy >= H) continue;
+                uint32_t* drow = dst + size_t(gy) * W + cx0;
+                const uint32_t* srow = card.data() + size_t(y) * cw;
+                for (int x = 0; x < cw; ++x) {
+                    const unsigned a = (srow[x] >> 24) & 0xFF;
+                    if (a == 0) continue;
+                    drow[x] = ui_guide::composite_pixel(drow[x], srow[x], a, false);
+                }
+            }
+        }
+    }
+
     void draw_launch_banner(double t) {
         ui::Canvas c(g_fb.data(), W, H, W);
         static std::map<uint32_t, ui::Image> banners;   // pixel memory the VM points into
@@ -3061,6 +3267,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // The 1920x1080 g_fb persists across screens: every frame starts from
         // a clean page so no screen draws over the previous one's remnants.
         fill(0, 0, W, H, ui::theme::page);
+        // Guest watchdog first (bugbot r4558727825): the launch phase is
+        // stale once the guest dies — it stays in its running phase and is
+        // never rewound by the watchdog — so the banner check below would
+        // cover the dead page with the launch splash in exactly the
+        // scenario the watchdog exists for. Dead page beats banner.
+        if (guest_overlay::guestDead.load(std::memory_order_acquire)) { draw_guest_dead(t); return; }
         // item D22: Play covers the screen with the game's wide art and the
         // launch status until the guest's own window is up (or the launch
         // ends). It sits above every screen, since Play can start from the
@@ -3093,7 +3305,15 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // item D22: the launch banner owns the screen while a launch prepares;
         // B cancels it (only before game code starts), A and every other
         // button are ignored so the game page underneath cannot act.
-        if (ui_nav::launch_banner_up(g_launch.phase.load(), m_guestSurface)) {
+        // Guest watchdog first (bugbot r4558727825, same precedence as draw):
+        // while dead, the launcher screens are unreachable — the dead page
+        // covers them and no edge may act on a page the player cannot see
+        // (bugbot r4559305224). The pad is routed to the guide ONLY, by
+        // guest_menu in the Run loop's dead branch, through the pure
+        // guest_watchdog::dead_input (tested in tests/guest-watchdog.cpp);
+        // everything reaching input() while dead is swallowed here.
+        if (guest_overlay::guestDead.load(std::memory_order_acquire)) return;
+        else if (ui_nav::launch_banner_up(g_launch.phase.load(), m_guestSurface)) {
             if (has(edge, GamepadButtons::B)) {
                 if (cancel_launch(source)) logf("launch banner: cancelled (%s)", source);
                 else logf("launch banner: B ignored, the game already started (%s)", source);
@@ -3428,6 +3648,133 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
     }
 
+    // ---- Guest watchdog: a guest that stops presenting (crash, hang) must
+    // not freeze the launcher. Runs every UI-loop iteration; the verdict is
+    // pure logic (host/guest_watchdog.h, test-driven with synthetic clocks).
+    // Once dead, m_guestSurface goes false and the loop presents the
+    // launcher's "Game not responding" screen through the guest's own chain
+    // (kept at hand-off), with the guide (force quit) reachable. A guest that
+    // later presents again (it hung, not died) clears the dead state on the
+    // next watchdog tick that sees a fresh heartbeat — the tick keeps
+    // evaluating while dead (bugbot r4558727845: the early return meant
+    // guestDead could never clear). Recovery is silence-only: faulted and
+    // finished are terminal in play_runtime and never clear.
+    void guest_watchdog_tick(double t) {
+        const bool wasDead=guest_overlay::guestDead.load(std::memory_order_acquire);
+        if(!wasDead && !m_guestSurface)return;   // not in the guest-run phase: the launch watchdog's domain
+        auto guest=play_runtime::observed.load(std::memory_order_acquire);
+        if(!guest)return;
+        LARGE_INTEGER qpc;QueryPerformanceCounter(&qpc);
+        guest_watchdog::Inputs in;
+        in.lastActivityTick=guest_overlay::lastPresentTick.load(std::memory_order_acquire);
+        in.nowTick=uint64_t(qpc.QuadPart);
+        in.ticksPerSecond=uint64_t(g_freq.QuadPart);
+        in.guestFault=guest->faulted.load(std::memory_order_acquire)
+                    || guest_overlay::deviceLost.load(std::memory_order_acquire);   // Present failed with a lost device (bugbot r4559178794)
+        in.guestFinished=guest->finished.load(std::memory_order_acquire);
+        const auto v=guest_watchdog::evaluate(in);
+        // Recovery needs proof of a NEW present since death: the heartbeat
+        // must differ from the one recorded at the dead verdict.
+        const bool heartbeatAdvanced=wasDead && in.lastActivityTick!=0 && in.lastActivityTick!=m_deadHeartbeatTick;
+        const auto s=guest_watchdog::step(wasDead,m_guestSurface,v,heartbeatAdvanced);
+        if(s.dead&&!wasDead){   // fresh dead verdict: log once, remember the heartbeat to beat
+            if(!m_guestDeadLogged){logf("watchdog: guest %s — launcher UI resumes (fps counter -> 0, guide available)",v.reason==guest_watchdog::Reason::fault?"raised a contained exception":"stopped presenting");m_guestDeadLogged=true;}
+            m_deadHeartbeatTick=in.lastActivityTick;
+        } else if(!s.dead) {
+            if(wasDead)dead_surface_teardown();   // guest resumed: drop the launcher surface, the guest's chain shows through
+            m_guestDeadLogged=false;m_deadHeartbeatTick=0;   // recovered: re-arm the log for a future death
+        }
+        guest_overlay::guestDead=s.dead;
+        m_guestSurface=s.guestSurface;
+    }
+    bool m_guestDeadLogged=false;
+    uint64_t m_deadHeartbeatTick=0;   // lastPresentTick at the moment death was declared (recovery beats it)
+    // The dead page's launcher-owned presentation surface (bugbot
+    // r4559305219 redesign): a composition swapchain on the LAUNCHER's own
+    // device, composited over the CoreWindow through a topmost
+    // DirectComposition target. Everything here is launcher-owned — the
+    // guest cannot block any call in this function. Created once per death;
+    // torn down on recovery (dead_surface_teardown) so the guest's own
+    // chain shows through again when a hung guest resumes presenting.
+    bool dead_surface_setup() {
+        m_deadSurfaceUp=false;
+        if(!m_dev||!m_ctx)return false;
+        // The CoreWindow's real OS HWND (guest HWNDs are uwph-user32 record
+        // pointers, so a DComp target here never collides with a guest).
+        HWND hwnd=nullptr;
+        try {
+            // Raw QI with the explicit IID: the local ICoreWindowInterop has
+            // no winrt projection (no __uuidof under this toolchain) — the
+            // same pattern play_graphics::configure uses for the window abi.
+            auto unk=static_cast<::IUnknown*>(winrt::get_abi(m_window));
+            ICoreWindowInterop* raw=nullptr;
+            if(FAILED(unk->QueryInterface(kIID_ICoreWindowInterop,(void**)&raw))||!raw)return false;
+            const HRESULT hrWh=raw->get_WindowHandle(&hwnd);
+            raw->Release();
+            if(FAILED(hrWh)||!hwnd)return false;
+        } catch(...) { return false; }
+        // The launcher's real factory: the routed proxy factory only wraps
+        // GUEST factory lookups (play_graphics), the launcher created this
+        // device's factory itself in InitD3D.
+        auto dxgiDev=m_dev.as<IDXGIDevice>(); com_ptr<IDXGIAdapter> ad;
+        com_ptr<IDXGIFactory2> fac;
+        if(FAILED(dxgiDev->GetAdapter(ad.put()))||FAILED(ad->GetParent(__uuidof(IDXGIFactory2),fac.put_void())))return false;
+        DXGI_SWAP_CHAIN_DESC1 sd{}; sd.Width=W; sd.Height=H; sd.Format=DXGI_FORMAT_B8G8R8A8_UNORM; sd.SampleDesc.Count=1;
+        sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.BufferCount=2; sd.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        sd.Scaling=DXGI_SCALING_STRETCH; sd.AlphaMode=DXGI_ALPHA_MODE_PREMULTIPLIED;
+        HRESULT hr=fac->CreateSwapChainForComposition(m_dev.get(),&sd,nullptr,m_deadChain.put());
+        logf("dead page: CreateSwapChainForComposition hr=0x%08lx",(unsigned long)hr);
+        if(FAILED(hr))return false;
+        if(FAILED(m_deadChain->GetBuffer(0,__uuidof(ID3D11Texture2D),m_deadBB.put_void())))return false;
+        // DCompositionCreateDevice2 resolves at RUNTIME (GetProcAddress on
+        // dcomp.dll), not through a static import: dcomp.lib in the link
+        // planted a desktop-affinity dcomp.dll import in the launcher image
+        // (bugbot 91173a0 r4560022516 — the same class the Xbox runtime
+        // rejects at activation). With the lookup, an OS that ships no
+        // classic DComp simply fails the call and the dead page keeps the
+        // fail-safe path below (force quit stays reachable without the
+        // surface). The rest of the dead page drives the device through COM
+        // methods (CreateTargetForHwnd/SetContent/Commit), which import
+        // nothing.
+        using DCompCreate=HRESULT(WINAPI*)(IUnknown*,REFIID,void**);
+        static DCompCreate dcompCreate=[]() -> DCompCreate {
+            HMODULE module=LoadPackagedLibrary(L"dcomp.dll",0);
+            if(!module)module=LoadLibraryExW(L"dcomp.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+            return module?reinterpret_cast<DCompCreate>(reinterpret_cast<void*>(GetProcAddress(module,"DCompositionCreateDevice2"))):nullptr;
+        }();
+        if(!dcompCreate){logf("dead page: dcomp.dll unavailable; no launcher surface");return false;}
+        hr=dcompCreate(m_dev.get(),__uuidof(IDCompositionDevice),m_deadDcomp.put_void());
+        logf("dead page: DCompositionCreateDevice2 hr=0x%08lx",(unsigned long)hr);
+        if(FAILED(hr))return false;
+        winrt::com_ptr<IDCompositionTarget> target;
+        winrt::com_ptr<IDCompositionVisual> visual;
+        hr=m_deadDcomp->CreateTargetForHwnd(hwnd,TRUE,target.put());
+        logf("dead page: CreateTargetForHwnd hr=0x%08lx topmost",(unsigned long)hr);
+        if(FAILED(hr))return false;
+        hr=m_deadDcomp->CreateVisual(visual.put());
+        if(FAILED(hr))return false;
+        com_ptr<::IUnknown> content;
+        content = m_deadChain.as<::IUnknown>();   // IUnknown's GUID is built into cppwinrt; the locals' are not
+        if(FAILED(visual->SetContent(content.get())))return false;
+        if(FAILED(target->SetRoot(visual.get())))return false;
+        if(FAILED(m_deadDcomp->Commit()))return false;
+        // Keep the target/visual alive for teardown (dead_surface_teardown
+        // releases them through the same IUnknown com_ptrs).
+        m_deadTarget=target;
+        m_deadVisual=visual;
+        m_deadSurfaceUp=true;
+        logf("dead page: launcher-owned composition surface up (fps 0, guide, force quit)");
+        return true;
+    }
+    void dead_surface_teardown() {
+        if(!m_deadSurfaceUp&&!m_deadChain)return;
+        // Release in child-first order; DComp removes the visual from the
+        // target when the device goes, and the guest's own chain (the
+        // window's swapchain) composites under the now-empty topmost layer.
+        m_deadVisual=nullptr;m_deadTarget=nullptr;m_deadDcomp=nullptr;
+        m_deadBB=nullptr;m_deadChain=nullptr;m_deadSurfaceUp=false;
+        logf("dead page: launcher composition surface released (guest resumed)");
+    }
     void Run() {
         logf("Run: entering"); m_window.Activate();
         load_fonts();   // Selawik faces from the package's fonts/ folder; on failure the bitmap fallback stays
@@ -3452,7 +3799,38 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             input(t, rd, n > 0);
             autotest(t); cmdhook(t); detail_tick(t); move_tick(t);   // item 33: the move job's completion tick
             if (selftest::tick()) selftest::run_async(m_window.Dispatcher());
+            guest_watchdog_tick(t);
             if(m_guestSurface){guest_menu(t,n?rd.Buttons:GamepadButtons::None);Sleep(1);continue;}
+            // The guest died (watchdog). The launcher presents its "Game not
+            // responding" screen from its OWN composition surface (bugbot
+            // r4559305219 redesign): no guest device, context or swapchain is
+            // touched while dead — the guest may be blocked inside Present,
+            // and a second Present on its chain (or any use of its
+            // non-free-threaded immediate context) would wedge the UI thread
+            // on the exact hang the watchdog exists to outlive. The guide's
+            // force quit works from here (menu_command below).
+            if(m_guestChain) {
+                guest_menu(t,n?rd.Buttons:GamepadButtons::None);   // guide input: open, navigate, force quit
+                draw(t);   // fills g_fb: the dead page (with the guide card when menuOpen)
+                if(!m_deadSurfaceUp && !dead_surface_setup()) {
+                    // The composition surface could not be created: keep the
+                    // loop alive (the launcher never blocks on a dead guest);
+                    // force quit stays reachable through guest_menu above.
+                    Sleep(100);
+                    continue;
+                }
+                // g_fb is the launcher's BGRA canvas at design size; the dead
+                // chain was created B8G8R8A8 at WxH, so the upload is always
+                // a 1:1 copy (bugbot r4559305228: no per-guest-format path
+                // exists any more — the launcher's surface is known-good).
+                m_ctx->UpdateSubresource(m_deadBB.get(), 0, nullptr, g_fb.data(), W * 4, 0);
+                HRESULT hr = m_deadChain->Present(1, 0);
+                if (FAILED(hr)) { logf("dead-page present hr=0x%08lx", (unsigned long)hr); Sleep(100); }
+                m_frame++;
+                if (m_frame == 1 || t - lastBeat >= 10.0) { logf("frame=%llu fps~%.1f screen=%d (guest dead, launcher surface)", (unsigned long long)m_frame, m_frame / (t > 0 ? t : 1), (int)g_screen); lastBeat = t; }
+                Sleep(1);
+                continue;
+            }
             draw(t);
             m_ctx->UpdateSubresource(m_bb.get(), 0, nullptr, g_fb.data(), W * 4, 0);
             HRESULT hr = m_sc->Present(1, 0);

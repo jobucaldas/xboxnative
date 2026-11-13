@@ -144,9 +144,39 @@ inline std::array<float,240> history{};     // newest at historyPos-1
 inline unsigned historyPos=0;
 inline LARGE_INTEGER lastPresent{},firstPresent{};
 inline double ms(LARGE_INTEGER a,LARGE_INTEGER b){return double(b.QuadPart-a.QuadPart)*1000.0/double(freq.QuadPart);}
-inline void record(LARGE_INTEGER start,LARGE_INTEGER end) {
-    if(!lastPresent.QuadPart){lastPresent=firstPresent=start;return;}
+// ---- Guest watchdog heartbeat: the launcher UI thread reads these to decide
+// the guest is dead. `lastPresentTick` is stamped by record() on every hooked
+// guest present (the same signal the FPS counter and frame log use), so a
+// guest that hangs in the driver (device-removed present blocked) or dies
+// (crash contained by play_runtime) stops stamping and the silence is seen.
+// Pure atomics: no lock is taken on this path, the record() path stays
+// lock-free apart from its framesM section, and the UI thread never blocks on
+// a guest that cannot run.
+inline std::atomic<uint64_t> lastPresentTick{0};   // QPC of the last guest present
+inline std::atomic<bool> guestDead{false};         // UI loop set: overlay shows "not responding"
+// Set by record() when the real Present reported a lost device (bugbot
+// r4559178794): the guest keeps calling Present and getting an error back
+// while the screen is frozen — those failures must not keep the heartbeat
+// fresh, and the loss is itself the dead verdict (no 10 s wait). The UI
+// thread's watchdog feeds this into guest_watchdog::Inputs::guestFault.
+inline std::atomic<bool> deviceLost{false};
+inline void note_present(uint64_t tick){lastPresentTick.store(tick,std::memory_order_release);}
+inline void record(LARGE_INTEGER start,LARGE_INTEGER end,HRESULT hr) {
+    // Heartbeat gate (bugbot r4559178794): only a present the compositor
+    // ACCEPTED proves the guest's screen is alive. S_OK and
+    // DXGI_STATUS_OCCLUDED (a live game temporarily hidden) stamp; a lost
+    // device flags guest_watchdog's fault path immediately; any other
+    // failure (transient) stamps nothing — silence then ages normally.
+    const uint8_t alive=guest_watchdog::present_alive(hr);
+    if(alive==guest_watchdog::PresentAlive::lost){deviceLost.store(true,std::memory_order_release);return;}
+    if(alive!=guest_watchdog::PresentAlive::yes)return;
+    if(!lastPresent.QuadPart){
+        lastPresent=firstPresent=start;
+        note_present(uint64_t(start.QuadPart));   // first present stamps the heartbeat too (bugbot r4558727855): without it lastPresentTick stays 0 and evaluate reads that as pre-first-present forever — a game that presents once then stalls is never declared dead
+        return;
+    }
     Frame f{ms(firstPresent,start),ms(lastPresent,start),ms(start,end)};lastPresent=start;
+    note_present(uint64_t(start.QuadPart));   // watchdog heartbeat: the guest presented
     std::lock_guard<std::mutex> l(framesM);
     if(pending.size()<100000)pending.push_back(f);
     history[historyPos++%history.size()]=float(f.frameMs);
@@ -526,7 +556,7 @@ inline HRESULT STDMETHODCALLTYPE present(IDXGISwapChain* c,UINT sync,UINT flags)
         if(pacingLimiter.active())pacingLimiter.acquire();
     }
     LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
-    HRESULT hr=realPresent(c,sync,flags);QueryPerformanceCounter(&b);record(a,b);
+    HRESULT hr=realPresent(c,sync,flags);QueryPerformanceCounter(&b);record(a,b,hr);
     if(FAILED(hr))presentFailure(c,hr);
     return hr;
 }
@@ -539,10 +569,13 @@ inline HRESULT STDMETHODCALLTYPE present1(IDXGISwapChain1* c,UINT sync,UINT flag
         if(pacingLimiter.active())pacingLimiter.acquire();
     }
     LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
-    HRESULT hr=realPresent1(c,sync,flags,p);QueryPerformanceCounter(&b);record(a,b);
+    HRESULT hr=realPresent1(c,sync,flags,p);QueryPerformanceCounter(&b);record(a,b,hr);
     if(FAILED(hr))presentFailure(c,hr);
     return hr;
 }
+// (bugbot r4559178782's helper is gone with the round-6 redesign: while dead
+// the launcher presents its OWN composition surface, never any guest chain,
+// so no unhooked-present path exists any more.)
 inline bool patch(void** slot,void* hook,void** original) {
     if(*slot==hook)return true;
     DWORD old;if(!VirtualProtect(slot,sizeof(void*),PAGE_READWRITE,&old))return false;
