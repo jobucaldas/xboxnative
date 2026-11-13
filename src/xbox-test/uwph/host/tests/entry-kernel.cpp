@@ -6,6 +6,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <type_traits>
+// Wine harness: desktop substitutes for the AppContainer allocation APIs, as
+// donor-runtime.cpp does. Console execution uses the real UWP paths.
+static BOOL WINAPI hostProtect(void* p,SIZE_T n,DWORD flags,DWORD* old) {
+    using Fn=BOOL(WINAPI*)(void*,SIZE_T,DWORD,DWORD*);
+    return ((Fn)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"VirtualProtect"))(p,n,flags,old);
+}
+#define VirtualAllocFromApp VirtualAlloc
+#define VirtualProtectFromApp hostProtect
 #include "../entry_kernel.h"
 #include "../../../shared/kernel_tail_test.h"
 #define ABI(impl,api) static_assert(std::is_same<decltype(&entry_kernel::impl),decltype(&api)>::value,#api " ABI")

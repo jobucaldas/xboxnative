@@ -40,6 +40,7 @@ static FARPROC WINAPI hostProc(HMODULE h,LPCSTR name) {
 #include "../host/mlp_probe.h"
 #include "../donors/probe.h"
 #include "../host/play_runtime.h"
+#include "../host/guest_watchdog.h"
 #include "../steam_leaderboards.h"
 #include "../steam_persona.h"
 #include "../launch_target.h"
@@ -281,12 +282,21 @@ static bool attachPublicationTest() {
 }
 static FILE* hostEvents=nullptr;
 static bool injectLogException=false;
+// Watchdog-mode stand-in clock, split the way the launcher's is: the UI-loop
+// stand-in advances nowTick (the QPC read); the GUEST stamps lastHeartbeat —
+// logline() does it, the way the guest's hooked Present stamps
+// guest_overlay::lastPresentTick. A hung guest stops logging, so its
+// heartbeat stops and the gap ages into the silence verdict; the loop
+// itself never keeps a dead guest's heartbeat alive.
+static std::atomic<uint64_t> nowTick{1},lastHeartbeat{0};
+static std::atomic<bool> watchdogStamp{false};
 static void handledLogException() {
     __try {RaiseException(0x40010006,0,0,nullptr);}
     __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 static void logline(const char* s){
     if(injectLogException)handledLogException();puts(s);fflush(stdout);
+    if(watchdogStamp.load(std::memory_order_acquire))lastHeartbeat.store(nowTick.load(std::memory_order_acquire),std::memory_order_release);
     if(hostEvents){fprintf(hostEvents,"%s\n",s);fflush(hostEvents);}
     if(checkStartupLock&&!strcmp(s,"PRUN EVENT DllMain PROCESS_ATTACH play-dependency.dll"))observeLoaderLock();
     if(attachReached&&!strcmp(s,"PRUN EVENT DllMain rejected PROCESS_ATTACH: play-reject.dll")) {
@@ -325,6 +335,16 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         if(!host_surface::create()) {logline("HOST SURFACE FAIL native Wine window unavailable");return 3;}
         play_graphics::configure(&host_surface::token,host_surface::present,logline);
         logline("HOST SURFACE native Wine window stands in for the CoreWindow (off-device only)");
+    }
+    // The D3D10 fixtures exercise the shim's by-name d3dcompiler_47 load,
+    // which Play serves from the probed donor set exactly as the launcher does
+    // (launch.h): probe before anything maps, and serve the gate-published
+    // image so the behavior gate stays authoritative.
+    if(std::string(args)=="d3d10-diag"||std::string(args)=="d3d10-triangle"||std::string(args)=="d3d10-compile") {
+        if(!donor_pe::probe(logline)) {logline("DWPE FAIL donor behavior gate; no game code executed");return 3;}
+        mlp::donor_resolve=donor_pe::exported;
+        play_runtime::set_donor_bridge([](const wchar_t* name){return donor_pe::module(name);},
+                                       [](HMODULE h,const char* name,WORD ordinal){return donor_pe::from_handle(h,name,ordinal);});
     }
     // The Khronos loader statically imports setupapi.dll's cfgmgr32 family, and
     // Mesa's opengl32.dll/libgallium_wgl.dll statically import version.dll,
@@ -476,7 +496,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // Engine options come from the game's files, as in the launcher.
     std::wstring gameExe=L"Megabonk.exe";
     {wchar_t value[260];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_EXE",value,260);if(n&&n<260)gameExe.assign(value,n);}
-    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d10-triangle"?L"play-d3d10-triangle.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="d3d9-triangle"?L"play-d3d9-triangle.exe":std::string(args)=="d3d9-triangle-variants"?L"play-d3d9-triangle-variants.exe":std::string(args)=="d3d9-textured"?L"play-d3d9-textured.exe":std::string(args)=="fault-in-dll"?L"play-fault-guest.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="leaderboards"?L"play-leaderboard.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":std::string(args)=="vulkan-dzn"?L"play-vulkan-dzn.exe":std::string(args)=="vulkan-draw"?L"play-vulkan-draw.exe":std::string(args)=="opengl"?L"play-opengl.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
+    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d10-triangle"?L"play-d3d10-triangle.exe":std::string(args)=="d3d10-compile"?L"play-d3d10-compile.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="d3d9-triangle"?L"play-d3d9-triangle.exe":std::string(args)=="d3d9-triangle-variants"?L"play-d3d9-triangle-variants.exe":std::string(args)=="d3d9-textured"?L"play-d3d9-textured.exe":std::string(args)=="fault-in-dll"?L"play-fault-guest.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="leaderboards"?L"play-leaderboard.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":std::string(args)=="vulkan-dzn"?L"play-vulkan-dzn.exe":std::string(args)=="vulkan-draw"?L"play-vulkan-draw.exe":std::string(args)=="opengl"?L"play-opengl.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
     // guest stop (fatal dialog). Progress must never mask that failure.
@@ -524,6 +544,15 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
             if(snap!=INVALID_HANDLE_VALUE)CloseHandle(snap);
         }
     } else if(r->worker)WaitForSingleObject(r->worker,2000);
+    // Watchdog modes: give the guest a moment to reach its entry (the hang
+    // fixture blocks there), so the watchdog loop judges a running guest, not
+    // the mapping phase. The heartbeat stays on: the guest stamps it on every
+    // log line for the whole run, the way the hooked Present stamps the
+    // launcher's lastPresentTick — a hung guest simply stops logging.
+    if(std::string(args)=="watchdog-crash"||std::string(args)=="watchdog-hang") {
+        if(r->worker)WaitForSingleObject(r->worker,1000);
+        watchdogStamp.store(true,std::memory_order_release);
+    }
     auto last=r->snapshot();char summary[8192];snprintf(summary,sizeof summary,"PLAY-TEST executed=%d finished=%d success=%d code=%lu last=%s",int(r->executed),int(r->finished),r->success,r->code,last.c_str());
     logline(summary);
     std::string mode=args;
@@ -571,6 +600,10 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     // matched (Draw, DrawIndexed, the GS expansion, stream-out, GenerateMips,
     // MSAA resolve); 43 is BLOCKED, never a pass.
     else if(mode=="d3d10-triangle")ok=ok&&r->finished&&r->success&&r->code==42;
+    // The compile fixture exits 42 when D3D10CompileShader produced a real
+    // vs_4_0 through the shim's by-name donor load and the device drew with it
+    // (readback matched); 43 is BLOCKED, 44-50 name the compile step.
+    else if(mode=="d3d10-compile")ok=ok&&r->finished&&r->success&&r->code==42;
     // The D3D9 fixture exits 42 only when the shim's factory, device, swap chain,
     // auto depth-stencil surface, clear and three presents all succeeded through
     // Play's routes. play-runtime.sh also checks that the shim came from the
@@ -691,6 +724,66 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     else if(mode=="crt-exit")ok=ok&&r->finished&&r->success&&r->code==37&&last.find("ExitProcess code=37")!=std::string::npos;
     else if(mode=="crt-abort")ok=ok&&r->finished&&r->success&&r->code==3&&last.find("ExitProcess code=3")!=std::string::npos;
     else if(mode=="hang")ok=ok&&!r->finished&&last.find("EXE entry play-guest.exe")!=std::string::npos;
+    else if(mode=="watchdog-crash"||mode=="watchdog-hang") {
+        // The launcher's watchdog against a real guest, off-device: a UI-loop
+        // stand-in evaluates guest_watchdog::Inputs from play_runtime state
+        // while the guest runs. The crash mode (play-guest.exe crash) faults
+        // through play_runtime's filter: faulted must report dead immediately
+        // (Reason::fault), before any silence could age. The hang mode
+        // (play-guest.exe hang) blocks forever: the UI loop keeps ticking,
+        // and past the shortened silence threshold the verdict flips to dead
+        // (Reason::silent) while the guest thread is still blocked — exactly
+        // the console wedge (frozen frame, stale FPS, unreachable guide)
+        // this pins. The hung guest thread is left blocked; the runner is a
+        // disposable process, like a launcher restart after force quit.
+        // Clock: logline() stamps lastHeartbeat per guest log line (the
+        // guest's hooked Present stamps the launcher's lastPresentTick) and
+        // the loop advances nowTick itself, 20 ms of ticks per 20 ms wall
+        // tick. The decision's real kSilenceSeconds therefore ages in real
+        // time once the guest goes quiet, so the loop runs until the verdict
+        // fires (capped well past it).
+        const bool hang=mode=="watchdog-hang";
+        LARGE_INTEGER freq{};QueryPerformanceFrequency(&freq);
+        const uint64_t hz=uint64_t(freq.QuadPart);
+        bool reported=false,faultReason=false,silentReason=false;
+        unsigned ticks=0;
+        ULONGLONG start=GetTickCount64();
+        while(GetTickCount64()-start<20000&&!reported) {
+            ++ticks;   // the launcher's own heartbeat: the UI loop always runs
+            if(auto guest=play_runtime::observed.load(std::memory_order_acquire)) {
+                guest_watchdog::Inputs in;
+                in.lastActivityTick=lastHeartbeat.load(std::memory_order_acquire);
+                in.nowTick=nowTick.load(std::memory_order_acquire);
+                in.ticksPerSecond=hz;
+                in.guestFault=guest->faulted.load(std::memory_order_acquire);
+                in.guestFinished=guest->finished.load(std::memory_order_acquire);
+                const auto v=guest_watchdog::evaluate(in);
+                if(v.dead&&!reported) {
+                    reported=true;
+                    faultReason=v.reason==guest_watchdog::Reason::fault;
+                    silentReason=v.reason==guest_watchdog::Reason::silent;
+                    printf("WATCHDOG dead at tick %u reason=%s\n",ticks,
+                        v.reason==guest_watchdog::Reason::fault?"fault":
+                        v.reason==guest_watchdog::Reason::silent?"silent":
+                        v.reason==guest_watchdog::Reason::exited?"exited":"none");fflush(stdout);
+                }
+            }
+            nowTick.store(nowTick.load(std::memory_order_acquire)+hz/50,std::memory_order_release);   // 20 ms per UI tick
+            Sleep(20);
+        }
+        // Crash mode: dead fast, by fault, with the guest's crash recorded.
+        // Hang mode: dead by silence while the guest thread never finished.
+        if(!hang) {
+            ok=ok&&reported&&faultReason&&r->finished&&!r->success&&
+                last.find("unhandled exception code=0xe0424242")!=std::string::npos;
+            printf("PLAY-WATCHDOG-CRASH reported=%d faultReason=%d guestFinished=%d\n",
+                reported,faultReason,r->finished.load());fflush(stdout);
+        } else {
+            ok=ok&&reported&&silentReason&&!r->finished.load()&&ticks>=100;
+            printf("PLAY-WATCHDOG-HANG reported=%d silentReason=%d guestStillRunning=%d uiTicks=%u\n",
+                reported,silentReason,!r->finished.load(),ticks);fflush(stdout);
+        }
+    }
     else ok=ok&&r->finished&&r->success&&r->code==42;
     if(mode=="failed-dependency"&&ok) {
         // No game code ran, so the launcher releases this loader and the next
