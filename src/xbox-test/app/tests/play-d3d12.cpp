@@ -26,8 +26,8 @@
 // their device through the device factory (D3D12GetInterface
 // CLSID_D3D12DeviceFactory -> SetFlags(ALLOW_RETURNING_*) -> CreateDevice,
 // before any debug-layer enable, FL 1_0_GENERIC first as the GL driver does),
-// not the global export, or the debug-layer enable poisons the create. The
-// fixture runs both shapes and records both result codes in one line so one
+// not the global export.
+// The fixture runs both shapes and records both result codes in one line so one
 // console run discriminates them: attempt A is the factory path (it bypasses
 // Play's D3D12CreateDevice hook — D3D12GetInterface is not hooked, so
 // GetProcAddress reaches the host's d3d12.dll directly), attempt B the
@@ -135,15 +135,32 @@ DWORD d3d12_entry() {
     // D3D12GetInterface for the device factory, set the two ALLOW_RETURNING
     // flags and call CreateDevice, before any debug-layer enable and with
     // D3D_FEATURE_LEVEL_1_0_GENERIC first. HYPOTHESIS (console-unverified):
-    // attempt A's path is what works there, or the debug-layer enable was the
-    // poison. Both attempts always run and both result codes land in one log
-    // line, so a single console run discriminates the hypotheses; the device
+    // attempt A's path is what works there, or the direct export is. Both
+    // attempts always run and both result codes land in one log line, so a
+    // single console run discriminates the hypotheses; the device
     // the rest of the run uses is the one from whichever attempt succeeded
     // (A preferred). Attempt A bypasses Play's D3D12CreateDevice hook (it
     // logs its own result); the host route logs the direct ones.
-    // The debug layer is enabled only after both attempts: enabling it first
-    // is the other difference from the working consumers (the second
-    // hypothesis).
+    // The debug layer is opt-in (LocalState\d3d12debug.txt, applied by the
+    // host: absent, the host answers SDK_COMPONENT_MISSING and nothing below
+    // enables anything). When it is on, it is enabled before either creation
+    // attempt, because ID3D12Debug::EnableDebugLayer must precede device
+    // creation. Why the opt-in exists: the console run that enabled the layer
+    // after creation logged create A=0 B=0, then CreateCommandQueue
+    // hr=0x887a0005 (device removed). Whether the late enable was the cause is
+    // a hypothesis for the next console run, not a proven fact.
+    bool debugLayer=false;
+    HRESULT hrDebug=0x8000ffff;   // "not run" sentinel
+    {ID3D12Debug1* debug=nullptr;
+     hrDebug=D3D12GetDebugInterface(__uuidof(ID3D12Debug1),(void**)&debug);
+     if(SUCCEEDED(hrDebug)&&debug){
+         debug->EnableDebugLayer();debug->Release();debugLayer=true;}}
+    {char b[96];char* p=b;
+     p=append(p,"PLAY-D3D12 debuglayer=");
+     p=append(p,debugLayer?"on":"off");
+     p=append(p," getdebug=");
+     p=appendHex(p,(unsigned long)hrDebug);
+     *p++='\n';*p=0;OutputDebugStringA(b);}
     ID3D12Device* device=nullptr;
     unsigned long hrA=0x8000ffff;   // "not run" sentinel; replaced below
     unsigned long hrB=0x8000ffff;
@@ -207,7 +224,7 @@ DWORD d3d12_entry() {
     }
     // One line with both codes: the console evidence that discriminates the
     // hypotheses (A succeeded -> the factory path is the answer; A failed and
-    // B succeeded -> the debug-layer enable was the poison; both failed ->
+    // B succeeded -> the direct export is the route; both failed ->
     // neither, and the adapter identity is the next probe).
     {char b[160];char* p=b;
      p=append(p,"PLAY-D3D12 create A=");
@@ -219,14 +236,6 @@ DWORD d3d12_entry() {
     if(!device&&deviceB)device=deviceB;
     if(deviceB&&deviceB!=device)deviceB->Release();
     if(!device)return 83;
-    // The debug layer, where the platform has it: enabled after the device so
-    // the attempts above run in the order the working consumers take, and the
-    // recorded errors are counted before the run reports success. Optional —
-    // a host without the debug layer simply skips the check.
-    bool debugLayer=false;
-    {ID3D12Debug1* debug=nullptr;
-     if(SUCCEEDED(D3D12GetDebugInterface(__uuidof(ID3D12Debug1),(void**)&debug))&&debug){
-         debug->EnableDebugLayer();debug->Release();debugLayer=true;}}
     // Shader model: a D3D12 game reads this before choosing its shader set.
     D3D12_FEATURE_DATA_SHADER_MODEL model{};
     model.HighestShaderModel=D3D_SHADER_MODEL_6_6;
