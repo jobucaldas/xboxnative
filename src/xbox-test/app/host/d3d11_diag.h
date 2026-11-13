@@ -519,7 +519,7 @@ inline void noteDrawState(void* /*self*/,ContextState& state,unsigned topology,u
     if(srv&1)flags+=" ps-null";if(srv&2)flags+=" ps-over-target";
     if(srv&4)flags+=" gs-null";if(srv&8)flags+=" gs-over-target";
     const char* countLabel=kind==0||kind==2?"indices":kind==1||kind==3?"vertices":"indirect";
-    std::string key=fmt("%u/%u/%u/%llx/%zx/%u/%llx/%zx/%u/%u/%u/%u/%u/%x",deferred,id,kind,gs.hash,gs.bytes,gs.serial,ps.hash,ps.bytes,ps.serial,fmtNow,state.rtWidth.load(),state.rtHeight.load(),state.dsFormat.load(),srv);
+    std::string key=fmt("%u/%u/%u/%u/%llx/%zx/%u/%llx/%zx/%u/%u/%u/%u/%u/%x",deferred,id,kind,topology,gs.hash,gs.bytes,gs.serial,ps.hash,ps.bytes,ps.serial,fmtNow,state.rtWidth.load(),state.rtHeight.load(),state.dsFormat.load(),srv);
     std::string drawCounts=kind>=kDrawAuto?"counts=gpu":fmt("%s=%u instances=%u",countLabel,count,instances);
     std::string text=fmt("draw state ctx=%s exec=%s draw=%s %s topology=%u(%s) gs=%012llx/%zub#%u ps=%012llx/%zub#%u target=%s %ux%u dsv=%s srv:%s",
         deferred?fmt("def#%u",id).c_str():"imm",deferred?"pending":"immediate",drawKindName(kind),drawCounts.c_str(),

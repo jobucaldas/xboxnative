@@ -434,6 +434,13 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         context->PSSetShaderResources(0,0,nullptr);
         context->Draw(3,0);
         CHECK(count(" ps-null")==1);   // still the same signature: no new line
+        // Topology is part of the signature even when every other pipeline
+        // field is unchanged.
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+        context->Draw(3,0);
+        CHECK(count("draw state ctx=imm exec=immediate draw=Draw vertices=3 instances=1 topology=1(pointlist) gs=")==1);
+        CHECK(count("draw state ctx=imm exec=immediate draw=Draw vertices=3 instances=1 topology=4(trianglelist) gs=")==1);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         context->GSSetShader(nullptr,nullptr,0);
         gs->Release();
     }
@@ -454,6 +461,8 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
             deferred->OMSetRenderTargets(1,&colorView,depthView);
             deferred->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             deferred->Draw(3,0);
+            deferred->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+            deferred->Draw(3,0);
             CHECK(SUCCEEDED(deferred->FinishCommandList(FALSE,&list))&&list);
             if(list) {
                 context->ExecuteCommandList(list,FALSE);
@@ -465,8 +474,14 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
                     line.find("draw=Draw vertices=3 instances=1 topology=4(trianglelist)")!=std::string::npos&&
                     line.find("target=28(R8G8B8A8_UNORM) 128x128 dsv=40(D32_FLOAT)")!=std::string::npos)sawTarget=true;
                 CHECK(sawTarget);
+                bool sawPointList=false;
+                for(const auto& line:lines)if(line.find("draw state ctx=def#")!=std::string::npos&&
+                    line.find("exec=1 list=#")!=std::string::npos&&
+                    line.find("draw=Draw vertices=3 instances=1 topology=1(pointlist)")!=std::string::npos&&
+                    line.find("target=28(R8G8B8A8_UNORM) 128x128 dsv=40(D32_FLOAT)")!=std::string::npos)sawPointList=true;
+                CHECK(sawPointList);
                 context->ExecuteCommandList(list,FALSE);
-                CHECK(count("exec=2 restore=0 signatures=1")>=1);
+                CHECK(count("exec=2 restore=0 signatures=2")>=1);
                 list->Release();
             }
         }
