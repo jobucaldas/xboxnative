@@ -160,6 +160,13 @@ jobs:
       # is safe near a QPC wrap. Pure logic, Wine headless.
       - name: Guest watchdog decision reports dead by fault, exit and silence
         run: bash src/xbox-test/app/tests/guest-watchdog.sh
+      # The round-6 redesign (bugbot r4559305219): while dead the launcher
+      # presents its OWN composition surface and must never touch the guest's
+      # device, context or swap chain (the guest may be blocked inside
+      # Present; the immediate context is not free-threaded). This grep-style
+      # audit fails CI if the dead branch of Run() regains a guest-side call.
+      - name: Dead-path source audit keeps guest objects out of the dead branch
+        run: bash src/xbox-test/app/tests/dead-path-audit.sh
       # The opt-in present pacing (LocalState\present.txt): parse errors fall
       # back to off, sync clamps to 0..4, and the fps-cap limiter spaces
       # presents one slot apart on a fake clock. The header is pure (no

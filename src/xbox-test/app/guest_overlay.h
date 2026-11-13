@@ -573,14 +573,9 @@ inline HRESULT STDMETHODCALLTYPE present1(IDXGISwapChain1* c,UINT sync,UINT flag
     if(FAILED(hr))presentFailure(c,hr);
     return hr;
 }
-// The UI thread's dead-page present (bugbot r4559178782): goes through the
-// ORIGINAL Present saved by the hook, not the chain's (patched) vtable —
-// the hook would run draw()+record() and stamp the guest's heartbeat with
-// the launcher's own frame, making a hung guest look alive again on the
-// next watchdog tick. Also skips draw()/pacing, which are guest concerns.
-inline HRESULT watchdog_present(IDXGISwapChain* c,UINT sync,UINT flags) {
-    return realPresent?realPresent(c,sync,flags):c->Present(sync,flags);
-}
+// (bugbot r4559178782's helper is gone with the round-6 redesign: while dead
+// the launcher presents its OWN composition surface, never any guest chain,
+// so no unhooked-present path exists any more.)
 inline bool patch(void** slot,void* hook,void** original) {
     if(*slot==hook)return true;
     DWORD old;if(!VirtualProtect(slot,sizeof(void*),PAGE_READWRITE,&old))return false;

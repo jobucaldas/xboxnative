@@ -26,8 +26,8 @@ using guest_watchdog::step;
 using guest_watchdog::containedFault;
 using guest_watchdog::present_alive;
 using guest_watchdog::PresentAlive;
-using guest_watchdog::dead_upload;
-using guest_watchdog::DeadUpload;
+using guest_watchdog::dead_input;
+using guest_watchdog::DeadRoute;
 using guest_watchdog::kSilenceSeconds;
 
 int main() {
@@ -289,35 +289,40 @@ int main() {
         CHECK((present_alive(S_OK) == PresentAlive::yes) != (present_alive(0x887a0005) == PresentAlive::yes));
     }
 
-    // Dead-page upload decision (bugbot r4559178790): g_fb is BGRA. The
-    // dead page must appear on EVERY chain the live overlay draws to —
-    // R8G8B8A8 included (channel-swap) — and never a silent skip: an
-    // unsupported format falls back to a clear colour so the force-quit
-    // guide stays reachable.
+    // Dead-pad routing (bugbot r4559305224): while dead, the pad drives ONLY
+    // the guide. View+Menu (combo edge) toggles it; with it open, A selects
+    // and B closes; every other edge — A/B with the guide closed, D-pad,
+    // shoulders — is swallowed, so a hidden launcher screen can never act on
+    // a press the player cannot see. (The launcher's own surface presents
+    // the dead page since the round-6 redesign; this decision is what
+    // guest_menu applies while dead.)
     {
-        CHECK(dead_upload(87) == DeadUpload::copy);   // B8G8R8A8_UNORM: g_fb uploads 1:1
-        CHECK(dead_upload(91) == DeadUpload::copy);   // B8G8R8A8_UNORM_SRGB
-        CHECK(dead_upload(88) == DeadUpload::copy);   // B8G8R8X8_UNORM (X ignored)
-        CHECK(dead_upload(93) == DeadUpload::copy);   // B8G8R8X8_UNORM_SRGB
-        CHECK(dead_upload(28) == DeadUpload::swizzle);   // R8G8B8A8_UNORM: the live overlay supports this format
-        CHECK(dead_upload(29) == DeadUpload::swizzle);   // R8G8B8A8_UNORM_SRGB
-        CHECK(dead_upload(10) == DeadUpload::clear);  // R16G16B16A16_FLOAT: clear + log, never silent
-        CHECK(dead_upload(24) == DeadUpload::clear);  // R10G10B10A2_UNORM
-        CHECK(dead_upload(0) == DeadUpload::clear);   // UNKNOWN
-        CHECK(dead_upload(2) == DeadUpload::clear);   // DXGI_FORMAT_R32G32B32A32 (non-4-byte-per-pixel family guard)
-        // Swizzle contract: R<->B preserves alpha and green (the exact loop
-        // the upload path runs).
-        uint32_t p = 0xAABBCCDDu;   // AA BB CC DD in memory: A R G B
-        uint32_t s = (p & 0xFF00FF00u) | ((p >> 16) & 0xFFu) | ((p & 0xFFu) << 16u);
-        CHECK(s == 0xAADDCCBBu);   // A A DD CC BB: alpha and green kept, R and B swapped
+        CHECK(dead_input(true, false, false, false) == DeadRoute::toggleGuide);   // combo opens
+        CHECK(dead_input(true, true, false, false) == DeadRoute::toggleGuide);    // combo edge wins even when open (closes)
+        CHECK(dead_input(false, true, true, false) == DeadRoute::guideSelect);    // A selects with the guide open
+        CHECK(dead_input(false, true, false, true) == DeadRoute::guideClose);     // B closes
+        CHECK(dead_input(false, true, true, true) == DeadRoute::guideSelect);     // A wins over B on one edge
+        // Swallowed: every edge with the guide closed except the combo.
+        CHECK(dead_input(false, false, true, false) == DeadRoute::none);          // A with the guide closed: nothing
+        CHECK(dead_input(false, false, false, true) == DeadRoute::none);          // B: nothing
+        CHECK(dead_input(false, false, true, true) == DeadRoute::none);           // A+B: nothing
+        CHECK(dead_input(false, false, false, false) == DeadRoute::none);         // held buttons, no edge: nothing
+        // The routing is total: no combination escapes the four outcomes.
+        for (int combo = 0; combo < 2; ++combo)
+            for (int open = 0; open < 2; ++open)
+                for (int a = 0; a < 2; ++a)
+                    for (int b = 0; b < 2; ++b) {
+                        const DeadRoute r = dead_input(!!combo, !!open, !!a, !!b);
+                        CHECK(r == DeadRoute::none || r == DeadRoute::toggleGuide
+                            || r == DeadRoute::guideSelect || r == DeadRoute::guideClose);
+                    }
     }
 
     // Watchdog-present contract (bugbot r4559178782): the launcher's dead
-    // page is presented through the ORIGINAL Present (saved by the hook),
-    // never the chain's patched vtable — the hook would run record() and
-    // stamp the guest's heartbeat with the launcher's own frame, unlatching
-    // guestDead one tick later. Model the contract: a watchdog present
-    // contributes no heartbeat, so the frozen guest's silence keeps aging.
+    // page never refreshes the guest's heartbeat. Since the round-6 redesign
+    // (bugbot r4559305219) the dead page is presented from the LAUNCHER's
+    // own composition surface — no guest chain, no hook, no record() — so
+    // the contract holds structurally; this pins the decision-level trace:
     {
         const uint64_t lastGuest = hz * 100;
         // The launcher presents the dead page every ~16 ms for 11 s.

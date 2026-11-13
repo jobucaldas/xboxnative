@@ -149,22 +149,20 @@ constexpr uint8_t present_alive(HRESULT hr) {
     return SUCCEEDED(hr) ? PresentAlive::yes : PresentAlive::no;
 }
 
-// How the dead page reaches the guest's back buffer (bugbot r4559178790):
-// the launcher's g_fb is BGRA (0xAARRGGBB in memory). Copy for the BGRA
-// family (g_fb uploads 1:1), channel-swap for R8G8B8A8 (the live overlay
-// already draws there, so the dead page must appear on those games too),
-// CLEAR for anything else — never a silent skip: the caller paints a solid
-// colour so the force-quit guide is still reachable and the log says why.
-struct DeadUpload { enum : uint8_t { copy = 0, swizzle, clear }; };
-constexpr uint8_t dead_upload(DWORD fmt) {
-    switch (fmt) {
-    case 87: case 91: case 88: case 93:   // B8G8R8A8/X8 UNORM(+sRGB)
-        return DeadUpload::copy;
-    case 28: case 29:                     // R8G8B8A8 UNORM(+sRGB)
-        return DeadUpload::swizzle;
-    default:                              // FP16, 10:10:10:2, block formats...
-        return DeadUpload::clear;
+// Pad routing while the dead page is up (bugbot r4559305224): the dead
+// guest's pad must drive ONLY the guide — never the launcher screens
+// underneath (a hidden library/game page could act on A/B/D-pad the player
+// cannot see). View+Menu toggles the guide; with the guide open, A selects
+// and B closes; every other edge is swallowed. `deadOpen` is the combo
+// edge, `menuOpen` the guide's state.
+enum class DeadRoute : uint8_t { none = 0, toggleGuide, guideSelect, guideClose };
+constexpr DeadRoute dead_input(bool comboEdge, bool menuOpen, bool aEdge, bool bEdge) {
+    if (comboEdge) return DeadRoute::toggleGuide;
+    if (menuOpen) {
+        if (aEdge) return DeadRoute::guideSelect;
+        if (bEdge) return DeadRoute::guideClose;
     }
+    return DeadRoute::none;
 }
 
 } // namespace guest_watchdog
