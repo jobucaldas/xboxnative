@@ -29,6 +29,11 @@ constexpr DWORD missingException=0xe0520001, exitException=0xe0520002;
 struct Module {
     std::wstring path;
     std::string key;
+    // Directory dependencies resolve from when this module was mapped with
+    // LOAD_WITH_ALTERED_SEARCH_PATH or LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR from
+    // a sub-path (Unity's MonoBleedingEdge/EmbedRuntime). Empty: the standard
+    // guest order (root, SetDllDirectory, runtime directory).
+    std::wstring loadDir;
     wxl::Image image;
     bool mapped=false, mappingFailed=false, prepared=false, initialized=false, initializing=false, initializationFailed=false;
     size_t references=0;
@@ -260,6 +265,12 @@ static bool seed_steam_client_registry(const std::wstring& client,DWORD accountI
     regb::RegCloseKey(key);
     return ok;
 }
+// Windows keeps a per-thread "loading module" notion for
+// LOAD_WITH_ALTERED_SEARCH_PATH: dependencies of the file being mapped
+// resolve from that file's directory first (the loader's LdrpSearchPath
+// is the loading module's directory). loadExW records the directory for
+// the graph being mapped; resolve() reads it. Guarded by loaderMutex.
+static std::wstring& alteredLoadDir() {static std::wstring dir;return dir;}
 static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     if(!name || file) {SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}
     constexpr DWORD knownFlags= DONT_RESOLVE_DLL_REFERENCES|LOAD_LIBRARY_AS_DATAFILE|
@@ -300,8 +311,27 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
         requested=steamClient;flags=0;
         state->event("steamclient64.dll served by the staged emulated Steam client (owned game)");
     }
+    // Windows keeps a per-thread "loading module" notion for
+    // LOAD_WITH_ALTERED_SEARCH_PATH: dependencies of the file being mapped
+    // resolve from that file's directory first (the loader's
+    // LdrpSearchPath is the loading module's directory). Record it so
+    // resolve() can honor the same order for the graph being mapped.
+    // Guarded by loaderMutex; loadExW holds it across mapping.
     Module* m=nullptr;
     {std::lock_guard<LoaderMutex> lock(state->loaderMutex);
+     // While this load maps, its dependencies resolve from the file's own
+     // directory first when the flags say to (LOAD_WITH_ALTERED_SEARCH_PATH
+     // keeps LdrpSearchPath at the loading module's directory on Windows).
+     struct AlteredScope {std::wstring& slot;std::wstring outer;
+         AlteredScope(std::wstring& s,std::wstring v):slot(s),outer(std::move(s)){slot=std::move(v);}
+         ~AlteredScope(){slot=std::move(outer);}} altered{alteredLoadDir(),
+         (flags&LOAD_WITH_ALTERED_SEARCH_PATH)&&requested.find_first_of(L"\\/")!=std::wstring::npos
+             ?[&]{ // The image maps through guestLibraryPath (absolute); the
+                   // dependency directory must be that same absolute directory,
+                   // not the relative prefix the guest passed.
+                 auto p=guestLibraryPath(requested,false);
+                 auto slash=p.find_last_of(L"\\/");
+                 return slash==std::wstring::npos?std::wstring():p.substr(0,slash);}():std::wstring()};
      m=named(requested);
      if(!m && !apiSetName(requested) && !systemDirectoryPath(requested)) {
          // Flags that only steer where the file is searched (Mono/Unity pass
@@ -1071,6 +1101,10 @@ static Module* map(const std::wstring& requested,const std::string& asKey,wxl::R
     publishVulkanDriverFiles(path);
     if(state->modules.size()>=128) {state->event("loader module capacity exceeded");return nullptr;}
     auto own=std::make_unique<Module>();auto m=own.get();m->path=path;m->key=asKey.empty()?basename(path):asKey;state->modules.push_back(std::move(own));state->moduleCount=int(state->modules.size());
+    // Windows resolves a sub-path load's dependencies from the loading
+    // module's own directory first (LOAD_WITH_ALTERED_SEARCH_PATH /
+    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: Unity's MonoBleedingEdge/EmbedRuntime).
+    m->loadDir=alteredLoadDir();
     // Publish before fixing imports; circular imports can use the copied export
     // table, but no initialization runs until the complete graph is mapped.
     mlp::assets[m->key]=&m->image;
@@ -1809,8 +1843,18 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // Windows; neither it nor the probe registry may supply an address.
     if(dependency && dependency->mappingFailed) return missing(dll,name,ordinal);
     if(!dependency && !apiSetName(wide(dll))) {
-        auto path=guestLibraryPath(wide(dll));
-        if(exists(path)) {dependency=map(path);if(!dependency)return missing(dll,name,ordinal);}
+        // A module being mapped under LOAD_WITH_ALTERED_SEARCH_PATH resolves
+        // its dependencies from its own directory first, as Windows does for
+        // Unity's MonoBleedingEdge/EmbedRuntime/mono-2.0-bdwgc.dll: the
+        // EmbedRuntime copy wins over any same-named file at the root.
+        if(owner && !owner->loadDir.empty()) {
+            auto candidate=owner->loadDir+L"\\"+wide(dll);
+            if(exists(candidate)) {dependency=map(candidate);if(!dependency)return missing(dll,name,ordinal);}
+        }
+        if(!dependency) {
+            auto path=guestLibraryPath(wide(dll));
+            if(exists(path)) {dependency=map(path);if(!dependency)return missing(dll,name,ordinal);}
+        }
     }
     if(dependency) {
         if(owner && owner!=dependency) owner->dependencies.push_back(dependency);
