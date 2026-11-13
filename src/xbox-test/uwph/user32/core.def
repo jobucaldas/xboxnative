@@ -167,6 +167,8 @@ EXPORTS
  DialogBoxParamA=c_DialogBoxParamA
  EndDialog=c_EndDialog
  DragDetect=c_DragDetect
+ EnableMouseInPointer=c_EnableMouseInPointer
+ IsMouseInPointerEnabled=c_IsMouseInPointerEnabled
  GetWindowThreadProcessId=c_GetWindowThreadProcessId
  GetDpiForMonitorInternal=c_GetDpiForMonitorInternal
  SetProcessDpiAwarenessInternal=c_SetProcessDpiAwarenessInternal

@@ -57,6 +57,17 @@ extern "C" BOOL WINAPI c_EndDialog(HWND,INT_PTR) {
 }
 // No pointer input or capture exists, so a drag can never start.
 extern "C" BOOL WINAPI c_DragDetect(HWND,POINT) { return FALSE; }
+// Windows 8+: EnableMouseInPointer(TRUE) returns TRUE and routes mouse input as
+// WM_POINTER*; FALSE disables it and returns TRUE. This lane has no mouse source
+// that could feed WM_POINTER*, so enabling deliberately fails with
+// ERROR_NOT_SUPPORTED and the enabled state stays FALSE. The intent is that the
+// caller falls back to legacy WM_MOUSE* input (not verified on console).
+extern "C" BOOL WINAPI c_EnableMouseInPointer(BOOL enable) {
+ if(!enable) return TRUE;
+ SetLastError(ERROR_NOT_SUPPORTED);
+ return FALSE;
+}
+extern "C" BOOL WINAPI c_IsMouseInPointerEnabled(void) { return FALSE; }
 // Records belong to the creating thread of this process (Wine/Windows: 0 and
 // ERROR_INVALID_WINDOW_HANDLE for an unknown window, output left untouched).
 extern "C" DWORD WINAPI c_GetWindowThreadProcessId(HWND hwnd,DWORD* process) {
