@@ -2361,6 +2361,15 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             DWORD attrs = GetFileAttributesW((g_dir + L"\\d3d11diag.txt").c_str());
             if (attrs != INVALID_FILE_ATTRIBUTES) d3d11_diag::set_enabled(false);
         }
+        // Deep-draw state probe: LocalState\d3d11deep.txt present (contents
+        // ignored) -> draw-time pipeline signatures are logged once each
+        // (topology, GS/PS content hash, target format, PS/GS SRV null and
+        // over-target bits). Read once at boot; the diagnostics header stays
+        // file-system free and asks this probe at adopt time.
+        d3d11_diag::set_deep_draw = [] {
+            DWORD attrs = GetFileAttributesW((g_dir + L"\\d3d11deep.txt").c_str());
+            return attrs != INVALID_FILE_ATTRIBUTES;
+        };
         v.Activated([](auto&&, IActivatedEventArgs const& a) {
             logf("Activated kind=%d (activation args ignored)", (int)a.Kind());
             CoreWindow::GetForCurrentThread().Activate();
