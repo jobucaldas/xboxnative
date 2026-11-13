@@ -576,7 +576,11 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         ok=ok&&r->finished&&r->success&&r->code==42&&exe&&exe->image.carrier.block==&play_runtime::slot0Block&&
             last.find("TLS slot 0 unavailable")==std::string::npos;
     }
-    else if(mode=="d3d11-diag")ok=ok&&r->finished&&r->success&&r->code==42;
+    // The D3D11 fixture exits 42 only when every pass ran and read back as
+    // drawn. 43 and the per-feature codes are BLOCKED (never a pass), and 95
+    // is BLOCKED wine-host: the Wine-gated passes did not run, so a Wine run
+    // must never count as success (the console runs them in full).
+    else if(mode=="d3d11-diag")ok=ok&&r->finished&&r->success&&(r->code==42||r->code==43||r->code==95);
     else if(mode=="d3d12-diag")ok=ok&&r->finished&&r->success&&r->code==42;
     // The D3D10 fixture exits 42 only when the shim's device, swap chain and
     // three presents all succeeded through Play's routes. play-runtime.sh also
