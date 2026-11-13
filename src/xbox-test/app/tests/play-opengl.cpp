@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Owned fixture: a guest EXE that runs the OpenGL startup path an SDL3 GL game
-// takes (research/OPENGL-PLAN.md): LoadLibrary("opengl32.dll") — served by Play
+// takes (issue #176): LoadLibrary("opengl32.dll") — served by Play
 // from the runtime directory with Mesa's d3d12 WGL driver — a guest window whose
 // DC gets a pixel format through gdi32's forwarded ChoosePixelFormat/
 // SetPixelFormat, wglCreateContext, wglMakeCurrent, a cleared frame presented
@@ -14,7 +14,7 @@
 //   other    a stage before that failed
 //
 // On a 3.0+-capable driver the fixture also runs the core 3.3 pipeline a modern
-// GL game takes (research/OPENGL-COVERAGE.md): a wglCreateContextAttribsARB
+// GL game takes (issue #176): a wglCreateContextAttribsARB
 // core-profile context, a VBO/VAO triangle through a linked GLSL program and an
 // FBO render-to-texture, each with a readback pixel as the verdict. GL 1.1
 // entry points (glDrawArrays, glGenTextures, glBindTexture, glTexImage2D,
@@ -477,7 +477,7 @@ int opengl_entry() {
             glDeleteFramebuffers(1, &fbo);
             glDeleteTextures(1, &tex);
 
-            // PBO readback (GL 2.1+, research/OPENGL-COVERAGE.md): games use a
+            // PBO readback (GL 2.1+, issue #176): games use a
             // PIXEL_PACK buffer for async readbacks. Clear the default
             // framebuffer to the same blue, read into a PBO at offset 0, map
             // it and check the pixel. Proves buffer targets beyond ARRAY_BUFFER
@@ -553,7 +553,7 @@ int opengl_entry() {
         p = append(p, " want=0,64,128,255\n"); *p = 0; emit(line);
     }
 
-    // Swap interval (WGL_EXT_swap_control, research/OPENGL-COVERAGE.md): a
+    // Swap interval (WGL_EXT_swap_control, issue #176): a
     // game's vsync call. The extension functions come from wglGetProcAddress
     // with the context current; Mesa's frontend serves them and patch 0001
     // clamps the Present interval on a CoreWindow chain. The set must succeed
@@ -580,7 +580,7 @@ int opengl_entry() {
         }
     }
 
-    // WGL_ARB_pixel_format (research/OPENGL-COVERAGE.md): the call SDL3 and
+    // WGL_ARB_pixel_format (issue #176): the call SDL3 and
     // GLFW actually make. Disjoint cases, each with its own verdict:
     //   (a) wglGetExtensionsStringARB does not resolve: skipped (platform
     //       limit) with a log line — SDL3/GLFW fall back to the GDI path;

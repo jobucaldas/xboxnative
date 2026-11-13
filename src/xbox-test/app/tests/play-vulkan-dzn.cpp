@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Owned fixture: a guest EXE that runs the Vulkan startup path a Vulkan game
-// takes (research/VULKAN-PLAN.md, milestone 2). It loads vulkan-1.dll by name,
+// takes (issue #177, milestone 2). It loads vulkan-1.dll by name,
 // which Play serves from the launcher's runtime directory with the Khronos
 // loader built from pinned source, creates an instance with VK_KHR_surface and
 // VK_KHR_win32_surface, enumerates physical devices (Mesa's dzn, Vulkan on

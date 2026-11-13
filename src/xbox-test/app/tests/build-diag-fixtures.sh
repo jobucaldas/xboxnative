@@ -41,6 +41,15 @@ clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -fno-builtin -c "$
 lld "${common[@]}" /entry:vk_dzn_entry /include:vk_relocation /out:"$out/play-vulkan-dzn.exe" \
   "$work/vulkan-dzn.obj" "${libs[@]}"
 
+# The draw fixture (research/VULKAN-COVERAGE.md): pipeline + draw + compute +
+# push constants + timeline semaphore + synchronization2 + dynamic rendering,
+# with pixel and buffer readbacks. The SPIR-V is checked in beside the sources
+# (tests/spirv, regenerated with embed-spirv.py) and embedded through
+# tests/vulkan_spirv.h.
+clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -fno-builtin -c "$here/play-vulkan-draw.cpp" -o "$work/vulkan-draw.obj"
+lld "${common[@]}" /entry:vk_draw_entry /include:vk_draw_relocation /out:"$out/play-vulkan-draw.exe" \
+  "$work/vulkan-draw.obj" "${libs[@]}"
+
 clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d9.cpp" -o "$work/d3d9.obj"
 lld "${common[@]}" /entry:d3d9_entry /include:d3d9_relocation /out:"$out/play-d3d9.exe" \
   "$work/d3d9.obj" "$mingw_lib/libd3d9.a" "${libs[@]}"
@@ -70,8 +79,7 @@ clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d
 lld "${common[@]}" /entry:d3d10tri_entry /include:d3d10tri_relocation /out:"$out/play-d3d10-triangle.exe" \
   "$work/d3d10-triangle.obj" "$mingw_lib/libd3d10.a" "$mingw_lib/libdxgi.a" "$mingw_lib/libuuid.a" "${libs[@]}"
 
-# The OpenGL fixture runs the startup path an SDL3 GL game takes (research/
-# OPENGL-PLAN.md): opengl32.dll from the runtime directory (Mesa's d3d12 WGL
+# The OpenGL fixture runs the startup path an SDL3 GL game takes (issue #176): opengl32.dll from the runtime directory (Mesa's d3d12 WGL
 # driver), a pixel format through gdi32's forwarded wgl*, a context, a cleared
 # frame presented with SwapBuffers and a glReadPixels readback. Exit 42 only
 # when the rendered pixel came back; 43 is BLOCKED (never a pass).

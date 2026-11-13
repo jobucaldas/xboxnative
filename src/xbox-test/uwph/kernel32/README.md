@@ -18,7 +18,7 @@ semaphore overflow, timer expiry/cancellation and alertable APC delivery.
 Every bound API is called through its typed route. Tests do not contact Xbox.
 
 Native export presence alone does not establish Xbox AppContainer support.
-`research/k32x-todo.csv` distinguishes host-tested routes from pending behavior
+Issue #171 tracks which routes are host-tested versus pending behavior
 audits and console verification. The launcher UWP build validates the actual
 SDK imports. Real console acceptance remains a separate gate.
 

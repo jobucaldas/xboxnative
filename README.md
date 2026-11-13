@@ -21,8 +21,8 @@ loader plus our own POSIX/syscall host layer (`uwph`). Status: **early, experime
 ## Design
 launcher → Wine-style loader → ELF/PE shim → `uwph` (POSIX/syscall host in UWP, in-process wineserver, no AF_UNIX).
 Rationale and checklists: [research/WINE-BASE-REPORT.md](research/WINE-BASE-REPORT.md) (use Wine's `*.spec` files as the
-checklist; donor PE-only DLLs), [research/D3D-LAYERS-REPORT.md](research/D3D-LAYERS-REPORT.md) (D3D9/D3D11 options),
-[research/X86-32BIT-PLAN.md](research/X86-32BIT-PLAN.md) (staged 32-bit plan; stage 1, an off-device x86 interpreter core with PE32 loader and import thunks, is in `src/xbox-test/app/host/x86/` and tested by `src/xbox-test/app/tests/x86-core.sh`; it is not yet wired into the launcher, so 32-bit games still only map for inspection).
+checklist; donor PE-only DLLs); D3D9/D3D11 layer options are tracked in issue #174, and the staged 32-bit plan in issue
+#169 (stage 1, an off-device x86 interpreter core with PE32 loader and import thunks, is in `src/xbox-test/app/host/x86/` and tested by `src/xbox-test/app/tests/x86-core.sh`; it is not yet wired into the launcher, so 32-bit games still only map for inspection).
 
 ## Layout
 Application, test, and tool sources live under `src/`, with tests beside the code they exercise.
