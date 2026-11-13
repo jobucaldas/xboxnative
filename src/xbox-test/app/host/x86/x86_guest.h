@@ -1113,8 +1113,11 @@ inline void Guest::register_all() {
     reg.add("msvcrt.dll", "_fdopen", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
         uint32_t fd = c.arg(0); return fd <= 2 ? file_ptr(int(fd)) : 0u; });
     // File stat/length on a handle we do not serve: fail like the real API.
+    // All three names the mingw line imports: _fstati64 (nix), _fstat64
+    // (Debian mingw 13) and _fstat (the 32-bit form CI's runner hit).
     reg.add("msvcrt.dll", "_fstati64", Conv::Cdecl, 2, [this](Cpu&) -> uint32_t { set_last_error(9); return 0xFFFFFFFFu; });
-    reg.add("msvcrt.dll", "_fstat64", Conv::Cdecl, 2, [this](Cpu&) -> uint32_t { set_last_error(9); return 0xFFFFFFFFu; });  // mingw 13's name for it
+    reg.add("msvcrt.dll", "_fstat64", Conv::Cdecl, 2, [this](Cpu&) -> uint32_t { set_last_error(9); return 0xFFFFFFFFu; });
+    reg.add("msvcrt.dll", "_fstat", Conv::Cdecl, 2, [this](Cpu&) -> uint32_t { set_last_error(9); return 0xFFFFFFFFu; });
     reg.add("msvcrt.dll", "_filelengthi64", Conv::Cdecl, 1, [this](Cpu&) -> uint32_t { set_last_error(9); return 0xFFFFFFFFu; });
     // wide ctype / collation: the "C" locale answers ASCII-only tables.
     reg.add("msvcrt.dll", "iswctype", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
