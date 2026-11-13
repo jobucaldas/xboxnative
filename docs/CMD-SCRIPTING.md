@@ -5,7 +5,8 @@ frame tick (up to 64 lines per file, each at most 40 characters). A tester
 writes it over the Device Portal file channel and the launcher deletes it on
 read; every executed line is logged to `LocalState\boot.log` as
 `cmd.txt SYNTHETIC command: '<line>'`. The file is never periodic and never
-present unless a script put it there.
+present unless a script put it there. The alternate name `LocalState\cmd2.txt` is
+accepted too; if both exist, `cmd.txt` is read first and `cmd2.txt` waits for the next tick.
 
 All commands here are infrastructure-agnostic: any file-transfer channel into
 the app's `LocalState` works the same way.

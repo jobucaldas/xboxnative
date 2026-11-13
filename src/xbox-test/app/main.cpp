@@ -2392,12 +2392,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // Item D16: the library is the live screen from the first frame, so
         // cmd.txt is accepted there; the QR screen stays scriptable too.
         if (g_screen == S_LOGIN) return;
-        std::wstring path = g_dir + L"\\cmd.txt"; std::string all;
-        if (read_file_s(path, all)) {
-            if (!DeleteFileW(path.c_str())) { logf("cmd.txt: consume failed; no input"); }
+        // Alternate command file name; some hosts cannot create a file with the canonical
+        // name. The canonical name is tried first, then the alternate. Same parse/consume path.
+        for (const wchar_t* name : { L"\\cmd.txt", L"\\cmd2.txt" }) {
+            std::wstring path = g_dir + name; std::string all;
+            if (!read_file_s(path, all)) continue;
+            char nb[16]; size_t nl = 0; while (nl + 1 < sizeof nb && name[nl + 1]) { nb[nl] = (char)name[nl + 1]; nl++; } nb[nl] = 0;
+            if (!DeleteFileW(path.c_str())) { logf("%s: consume failed; no input", nb); }
             else { unsigned n = 0; size_t pos = 0; while (pos <= all.size() && n < 64) { size_t e = all.find('\n', pos); if (e == std::string::npos) e = all.size(); std::string l = all.substr(pos, e - pos); pos = e + 1;
                     while (!l.empty() && isspace((unsigned char)l.back())) l.pop_back(); while (!l.empty() && isspace((unsigned char)l.front())) l.erase(l.begin()); if (l.empty() || l.size() > 40) continue; q.push_back(l); n++; }
-                logf("cmd.txt: consumed file; queued %u SYNTHETIC command(s)", n); }
+                logf("%s: consumed file; queued %u SYNTHETIC command(s)", nb, n); }
+            break;
         }
         if (q.empty() || t < holdUntil) return;
         std::string c = q.front(); q.pop_front(); holdUntil = t + 0.6;
