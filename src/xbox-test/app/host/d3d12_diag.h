@@ -596,9 +596,18 @@ static HRESULT STDMETHODCALLTYPE createGraphicsPipelineState(DevicePtr self,cons
         std::string vsKey,psKey;
         shaderText(d->VS.pShaderBytecode,d->VS.BytecodeLength,&vsKey);
         shaderText(d->PS.pShaderBytecode,d->PS.BytecodeLength,&psKey);
-        D3D12_DIAG_FAILED("CreateGraphicsPipelineState",vsKey+"/"+psKey,
-            fmt("vs-kind=%s ps-kind=%s nodes=%u %s",shaderKindText(d->VS.pShaderBytecode,d->VS.BytecodeLength).c_str(),
-                shaderKindText(d->PS.pShaderBytecode,d->PS.BytecodeLength).c_str(),d->NodeMask,graphicsStateText(d).c_str()));
+        std::string details=fmt("vs-kind=%s ps-kind=%s nodes=%u %s",shaderKindText(d->VS.pShaderBytecode,d->VS.BytecodeLength).c_str(),
+            shaderKindText(d->PS.pShaderBytecode,d->PS.BytecodeLength).c_str(),d->NodeMask,graphicsStateText(d).c_str());
+        // The opt-in trace already records shader hashes, formats, and samples.
+        // Keep those identifiers in default failure logs without duplicating that trace.
+        if(!traceOn.load(std::memory_order_acquire)) {
+            D3D12_RT_FORMAT_ARRAY rtv{};rtv.NumRenderTargets=d->NumRenderTargets;
+            for(UINT i=0;i<8;++i)rtv.RTFormats[i]=d->RTVFormats[i];
+            details+=fmt(" vs-bytes=%llu vs-hash=%s ps-bytes=%llu ps-hash=%s %s dsv=%s samples=%u",
+                (unsigned long long)d->VS.BytecodeLength,vsKey.c_str(),(unsigned long long)d->PS.BytecodeLength,psKey.c_str(),
+                rtvText(rtv).c_str(),formatText(d->DSVFormat).c_str(),d->SampleDesc.Count);
+        }
+        D3D12_DIAG_FAILED("CreateGraphicsPipelineState",vsKey+"/"+psKey,details);
     } else D3D12_DIAG_FAILED("CreateGraphicsPipelineState","null","desc=null");
     return hr;
 }
@@ -721,8 +730,10 @@ static HRESULT STDMETHODCALLTYPE createComputePipelineState(DevicePtr self,const
     D3D12_DIAG_HOOK(Fn,CreateComputePipelineState)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     if(d) {
         std::string key;shaderText(d->CS.pShaderBytecode,d->CS.BytecodeLength,&key);
-        D3D12_DIAG_FAILED("CreateComputePipelineState",key,
-            fmt("cs-kind=%s",shaderKindText(d->CS.pShaderBytecode,d->CS.BytecodeLength).c_str()));
+        std::string details=fmt("cs-kind=%s",shaderKindText(d->CS.pShaderBytecode,d->CS.BytecodeLength).c_str());
+        if(!traceOn.load(std::memory_order_acquire))
+            details+=fmt(" cs-bytes=%llu cs-hash=%s",(unsigned long long)d->CS.BytecodeLength,key.c_str());
+        D3D12_DIAG_FAILED("CreateComputePipelineState",key,details);
     } else D3D12_DIAG_FAILED("CreateComputePipelineState","null","desc=null");
     return hr;
 }

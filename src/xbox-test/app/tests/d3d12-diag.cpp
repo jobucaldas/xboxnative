@@ -440,9 +440,21 @@ int main(int argc,char** argv) {
         CHECK(count("CreateRenderTargetView hr=")==0&&count("CreateDepthStencilView hr=")==0);
         unsigned char dxilContainer[52]{};makeDxilContainer(dxilContainer,true);
         D3D12_GRAPHICS_PIPELINE_STATE_DESC dxilState{};dxilState.VS={dxilContainer,sizeof dxilContainer};
+        dxilState.NumRenderTargets=1;dxilState.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;
+        dxilState.DSVFormat=DXGI_FORMAT_D24_UNORM_S8_UINT;dxilState.SampleDesc.Count=4;
         CHECK(call(d3d12_diag::CreateGraphicsPipelineState,&dxilState,__uuidof(ID3D12PipelineState),&out)==E_INVALIDARG);
         CHECK(count("CreateGraphicsPipelineState hr=0x80070057 vs-kind=dxbc-container dxil-chunk=yes")==1);
         CHECK(count("CreateGraphicsPipelineState hr=0x80070057 vs-kind=dxbc-container dxil-chunk=yes bytes=")==0);
+        std::string dxilHash;d3d12_diag::shaderText(dxilContainer,sizeof dxilContainer,&dxilHash);
+        if(!traceMode) {
+            CHECK(count(("vs-bytes=52 vs-hash="+dxilHash+" ps-bytes=0 ps-hash=none rtv=1[28(R8G8B8A8_UNORM)] dsv="+
+                d3d12_diag::formatText(dxilState.DSVFormat)+" samples=4").c_str())==1);
+        } else CHECK(count("vs-bytes=52 vs-hash=")==0);
+        D3D12_COMPUTE_PIPELINE_STATE_DESC computeDxil{};computeDxil.CS={dxilContainer,sizeof dxilContainer};
+        CHECK(call(d3d12_diag::CreateComputePipelineState,&computeDxil,__uuidof(ID3D12PipelineState),&out)==E_INVALIDARG);
+        CHECK(count("CreateComputePipelineState hr=0x80070057 cs-kind=dxbc-container dxil-chunk=yes")==1);
+        if(!traceMode) CHECK(count(("cs-bytes=52 cs-hash="+dxilHash).c_str())==1);
+        else CHECK(count("cs-bytes=52 cs-hash=")==0);
         CHECK(count("topology=0 so_entries=0 so_strides=0 sample_mask=0x00000000")>=2);
     }
 
