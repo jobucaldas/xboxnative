@@ -9,6 +9,7 @@
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include "host/d3d11_diag.h"   // the Present-failure path reports through its sink
+#include "host/present_pacing.h"
 #include <winrt/base.h>
 #include <winrt/Windows.Gaming.Input.h>
 #include "host/resize_drain.h" // the GPU drain the resize hook runs (tested directly)
@@ -164,6 +165,28 @@ inline void record(LARGE_INTEGER start,LARGE_INTEGER end) {
 }
 inline std::vector<Frame> take_frames(){std::lock_guard<std::mutex> l(framesM);std::vector<Frame> out;out.swap(pending);return out;}
 inline unsigned framesSince=0;inline double fps=0;
+
+// ---- Present pacing (opt-in, LocalState\present.txt; off/absent = disabled)
+// Configured once by the launcher at swap-chain creation (configure_pacing);
+// the present hooks consult it on every frame. QpcClock adapts the real QPC
+// to the pure header's clock contract: sleep the bulk of the wait, spin the
+// last ~2 ms so the slot boundary is held precisely (Sleep(1) can overshoot
+// by a timer tick; a late present is fine, an early one breaks the cap).
+struct QpcClock {
+    int64_t now() const {LARGE_INTEGER t;QueryPerformanceCounter(&t);return t.QuadPart;}
+    int64_t ticks_per_second() const {LARGE_INTEGER f;QueryPerformanceFrequency(&f);return f.QuadPart;}
+    void wait_until(int64_t until) {
+        int64_t spinTicks=ticks_per_second()/500;   // ~2 ms
+        while(true) {
+            int64_t n=now();
+            if(n>=until)return;
+            if(until-n>spinTicks)Sleep(1);          // else: spin (QPC reads are ~20 ns)
+        }
+    }
+};
+inline present_pacing::Config pacingCfg{};
+inline QpcClock pacingClock{};
+inline present_pacing::Limiter<QpcClock> pacingLimiter{pacingClock};
 
 inline const char* label(int item) {
     switch(item){case Resume:return "Resume";case Quit:return "Quit game";case ForceQuit:return "Force quit";
@@ -508,14 +531,26 @@ inline void presentFailure(IDXGISwapChain* c,HRESULT hr) {
 }
 inline HRESULT STDMETHODCALLTYPE present(IDXGISwapChain* c,UINT sync,UINT flags) {
     if(flags&DXGI_PRESENT_TEST)return realPresent(c,sync,flags);
-    draw(c);LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
+    draw(c);
+    if(pacingCfg.enabled) {
+        sync=present_pacing::effectiveSync(pacingCfg,sync);
+        flags=present_pacing::effectiveFlags(pacingCfg,sync,flags);
+        if(pacingLimiter.active())pacingLimiter.acquire();
+    }
+    LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
     HRESULT hr=realPresent(c,sync,flags);QueryPerformanceCounter(&b);record(a,b);
     if(FAILED(hr))presentFailure(c,hr);
     return hr;
 }
 inline HRESULT STDMETHODCALLTYPE present1(IDXGISwapChain1* c,UINT sync,UINT flags,const DXGI_PRESENT_PARAMETERS* p) {
     if(flags&DXGI_PRESENT_TEST)return realPresent1(c,sync,flags,p);
-    draw(c);LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
+    draw(c);
+    if(pacingCfg.enabled) {
+        sync=present_pacing::effectiveSync(pacingCfg,sync);
+        flags=present_pacing::effectiveFlags(pacingCfg,sync,flags);
+        if(pacingLimiter.active())pacingLimiter.acquire();
+    }
+    LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
     HRESULT hr=realPresent1(c,sync,flags,p);QueryPerformanceCounter(&b);record(a,b);
     if(FAILED(hr))presentFailure(c,hr);
     return hr;

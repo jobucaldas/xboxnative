@@ -27,6 +27,8 @@ jobs:
         run: bash src/xbox-test/uwph/hid/tests/run-pad-device-test.sh
       - name: synthetic pad handle registry and hid.dll answers
         run: bash src/xbox-test/uwph/hid/tests/run-pad-registry-test.sh
+      - name: "cmd.txt gpad pad-injection: parser, timing and release"
+        run: c++ -std=c++17 -O2 -Wall -Wextra -Werror -Isrc/xbox-test/uwph/xinput src/xbox-test/uwph/xinput/gpad-test.cpp -o /tmp/gpad-test && /tmp/gpad-test
       - name: offline unit tests
         run: |
           set -e
@@ -157,6 +159,12 @@ jobs:
       # is safe near a QPC wrap. Pure logic, Wine headless.
       - name: Guest watchdog decision reports dead by fault, exit and silence
         run: bash src/xbox-test/app/tests/guest-watchdog.sh
+      # The opt-in present pacing (LocalState\present.txt): parse errors fall
+      # back to off, sync clamps to 0..4, and the fps-cap limiter spaces
+      # presents one slot apart on a fake clock. The header is pure (no
+      # WinRT/COM), so this compiles with mingw and runs headless.
+      - name: "Present pacing: parse, sync clamp, fake-clock cap"
+        run: bash src/xbox-test/app/tests/present-pacing.sh
       # Every vtable slot the diagnostics and the swap-chain overlay hook by
       # number is checked against the SDK's own vtbl structs with offsetof; a
       # drifted slot fails this build instead of forwarding to the wrong method
