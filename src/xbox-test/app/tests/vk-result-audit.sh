@@ -41,6 +41,22 @@ PY
   [ $? -eq 0 ] || status=1
 done
 
+# VkResetFences returns VkResult too; neither call may silently discard it.
+python3 -I - "$here/play-vulkan-draw.cpp" <<'PY'
+import re, sys
+path = sys.argv[1]
+lines = open(path).read().splitlines()
+calls = [i for i, line in enumerate(lines) if re.search(r'\bresult\s*=\s*ResetFences\(', line)]
+if len(calls) != 2 or any("result != VK_SUCCESS" not in lines[i + 1] for i in calls):
+    print(f"FAIL: {path} must check both vkResetFences results", file=sys.stderr)
+    sys.exit(1)
+allocs = [i for i, line in enumerate(lines) if re.search(r'\bresult\s*=\s*AllocateMemory\(', line)]
+if len(allocs) != 3 or any(not any("logMemoryRequest(" in lines[j] for j in range(i - 2, i)) for i in allocs):
+    print(f"FAIL: {path} must log size and memory flags for every vkAllocateMemory", file=sys.stderr)
+    sys.exit(1)
+PY
+[ $? -eq 0 ] || status=1
+
 if [ "$status" -ne 0 ]; then
   echo "FAIL: vk-result-audit (a VkResult was discarded; pass it to fail())" >&2
   exit 1
