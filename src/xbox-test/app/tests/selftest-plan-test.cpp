@@ -15,7 +15,7 @@ int main() {
     // first because it costs no launcher restart.
     size_t count = 0;
     const Mode* table = modes(count);
-    assert(count == 12);
+    assert(count == 13);
     assert(std::string(table[0].name) == "x86" && table[0].pe32);
     assert(std::string(table[1].name) == "vulkan-dzn" && !table[1].pe32);
     assert(std::string(table[2].name) == "vulkan-draw" && std::string(table[2].exe) == "play-vulkan-draw.exe" && !table[2].pe32);
@@ -24,15 +24,18 @@ int main() {
     assert(std::string(table[6].name) == "d3d9-textured");
     assert(std::string(table[8].name) == "d3d10-triangle" &&
            std::string(table[8].exe) == "play-d3d10-triangle.exe" && !table[8].pe32);
-    assert(std::string(table[9].name) == "opengl" && std::string(table[9].exe) == "play-opengl.exe" && !table[9].pe32);
-    assert(std::string(table[10].name) == "d3d11" && std::string(table[10].exe) == "play-d3d11.exe" && !table[10].pe32);
-    assert(std::string(table[11].name) == "d3d12" && std::string(table[11].exe) == "play-d3d12.exe" && !table[11].pe32);
+    assert(std::string(table[9].name) == "d3d10-compile" &&
+           std::string(table[9].exe) == "play-d3d10-compile.exe" && !table[9].pe32);
+    assert(std::string(table[10].name) == "opengl" && std::string(table[10].exe) == "play-opengl.exe" && !table[10].pe32);
+    assert(std::string(table[11].name) == "d3d11" && std::string(table[11].exe) == "play-d3d11.exe" && !table[11].pe32);
+    assert(std::string(table[12].name) == "d3d12" && std::string(table[12].exe) == "play-d3d12.exe" && !table[12].pe32);
     assert(find("d3d9") && find("d3d9")->pe32 == false);
     assert(find("d3d9-triangle") && std::string(find("d3d9-triangle")->exe) == "play-d3d9-triangle.exe");
     assert(find("d3d10-triangle") && std::string(find("d3d10-triangle")->exe) == "play-d3d10-triangle.exe");
+    assert(find("d3d10-compile") && std::string(find("d3d10-compile")->exe) == "play-d3d10-compile.exe");
     assert(find("d3d11") && std::string(find("d3d11")->exe) == "play-d3d11.exe");
     assert(find("d3d12") && std::string(find("d3d12")->exe) == "play-d3d12.exe");
-    assert(!find("d3d11")->pe32 && !find("d3d12")->pe32 && !find("d3d10-triangle")->pe32);
+    assert(!find("d3d11")->pe32 && !find("d3d12")->pe32 && !find("d3d10-triangle")->pe32 && !find("d3d10-compile")->pe32);
     assert(find("x86") && find("x86")->pe32);
     assert(!find(""));
 
@@ -42,7 +45,7 @@ int main() {
     // fixed cap of four did once the table grew past five guests).
     int guests = 0;
     for (size_t i = 0; i < count; ++i) if (!table[i].pe32) ++guests;
-    assert(guests == 11);
+    assert(guests == 12);
     assert(max_restarts() > guests);
     assert(max_restarts() == guests + 1);
 
@@ -57,8 +60,9 @@ int main() {
     assert(unknown.size() == 2 && unknown[0] == "nope");
     // "all" expands to every fixture in canonical order, whatever else is named.
     auto all = parse_request("d3d10\nall\n");
-    assert(all.size() == 12 && all[0] == "x86" && all[7] == "d3d10"
-        && all[8] == "d3d10-triangle" && all[9] == "opengl" && all[10] == "d3d11" && all[11] == "d3d12");
+    assert(all.size() == 13 && all[0] == "x86" && all[7] == "d3d10"
+        && all[8] == "d3d10-triangle" && all[9] == "d3d10-compile" && all[10] == "opengl"
+        && all[11] == "d3d11" && all[12] == "d3d12");
     assert(all[4] == "d3d9-triangle" && all[5] == "d3d9-triangle-variants");
 
     // The queue survives a launcher restart: restarts count and pending modes
@@ -83,6 +87,9 @@ int main() {
     assert(verdict("d3d10-triangle", true, true, 42) == "PASS");
     assert(verdict("d3d10-triangle", true, true, 43) == "BLOCKED pixel-readback");
     assert(verdict("d3d10-triangle", true, true, 44) == "FAIL exit-44");
+    assert(verdict("d3d10-compile", true, true, 42) == "PASS");
+    assert(verdict("d3d10-compile", true, true, 43) == "BLOCKED pixel-readback");
+    assert(verdict("d3d10-compile", true, true, 44) == "FAIL exit-44");
     assert(verdict("d3d11", true, true, 42) == "PASS");
     assert(verdict("d3d12", true, true, 42) == "PASS");
     assert(verdict("x86", true, true, 42) == "PASS");
