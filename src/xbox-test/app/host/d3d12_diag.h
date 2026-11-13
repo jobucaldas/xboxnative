@@ -32,6 +32,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <type_traits>
 
 namespace d3d12_diag {
 using Sink=void(*)(const char*);
@@ -445,10 +446,27 @@ inline std::string rootParametersText(const D3D12_ROOT_SIGNATURE_DESC1* desc) {
     if(desc->NumParameters>16)text+=" ...";
     return text+"]";
 }
+#if defined(D3D12_SDK_VERSION) && D3D12_SDK_VERSION >= 618
+static_assert(std::is_same_v<decltype(D3D12_ROOT_SIGNATURE_DESC2::pParameters),decltype(D3D12_ROOT_SIGNATURE_DESC1::pParameters)> &&
+    offsetof(D3D12_ROOT_SIGNATURE_DESC2,NumParameters)==offsetof(D3D12_ROOT_SIGNATURE_DESC1,NumParameters) &&
+    offsetof(D3D12_ROOT_SIGNATURE_DESC2,pParameters)==offsetof(D3D12_ROOT_SIGNATURE_DESC1,pParameters) &&
+    sizeof(D3D12_ROOT_SIGNATURE_DESC2)==sizeof(D3D12_ROOT_SIGNATURE_DESC1),"1.2 root parameters must match 1.1 layout");
+inline std::string rootParametersText(const D3D12_ROOT_SIGNATURE_DESC2* desc) {
+    if(!desc)return "params=unavailable";
+    D3D12_ROOT_SIGNATURE_DESC1 parameters{};parameters.NumParameters=desc->NumParameters;parameters.pParameters=desc->pParameters;
+    return rootParametersText(&parameters);
+}
+#endif
 inline std::string rootParametersText(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* desc) {
     if(!desc)return "params=unavailable";
-    return desc->Version==D3D_ROOT_SIGNATURE_VERSION_1_1?rootParametersText(&desc->Desc_1_1):
-        desc->Version==D3D_ROOT_SIGNATURE_VERSION_1_0?rootParametersText(&desc->Desc_1_0):"params=deserialize-failed";
+    switch(desc->Version) {
+    case D3D_ROOT_SIGNATURE_VERSION_1_0:return rootParametersText(&desc->Desc_1_0);
+    case D3D_ROOT_SIGNATURE_VERSION_1_1:return rootParametersText(&desc->Desc_1_1);
+#if defined(D3D12_SDK_VERSION) && D3D12_SDK_VERSION >= 618
+    case D3D_ROOT_SIGNATURE_VERSION_1_2:return rootParametersText(&desc->Desc_1_2);
+#endif
+    default:return fmt("version=%u params=unsupported-version",unsigned(desc->Version));
+    }
 }
 using RootSignatureDescriber=std::string(*)(const void*,SIZE_T);
 inline std::string describeRootSignature(const void* blob,SIZE_T length) {

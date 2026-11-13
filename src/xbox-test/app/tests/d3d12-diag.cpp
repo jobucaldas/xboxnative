@@ -542,6 +542,14 @@ int main(int argc,char** argv) {
         D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc1{};desc1.Version=D3D_ROOT_SIGNATURE_VERSION_1_1;desc1.Desc_1_1.NumParameters=1;desc1.Desc_1_1.pParameters=&param;
         blob=nullptr;CHECK(SUCCEEDED(D3D12SerializeVersionedRootSignature(&desc1,&blob,&errors))&&blob);
         if(blob){CHECK(d3d12_diag::describeRootSignature(blob->GetBufferPointer(),blob->GetBufferSize()).find("params=1[DESCRIPTOR_TABLE(ranges=1[SRV:2 reg=0 space=0 flags=0x0]")!=std::string::npos);blob->Release();}
+        desc1.Version=static_cast<D3D_ROOT_SIGNATURE_VERSION>(99);
+        CHECK(d3d12_diag::rootParametersText(&desc1)=="version=99 params=unsupported-version");
+#if defined(D3D12_SDK_VERSION) && D3D12_SDK_VERSION >= 618
+        D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc12{};desc12.Version=D3D_ROOT_SIGNATURE_VERSION_1_2;
+        desc12.Desc_1_2.NumParameters=1;desc12.Desc_1_2.pParameters=&param;
+        blob=nullptr;CHECK(SUCCEEDED(D3D12SerializeVersionedRootSignature(&desc12,&blob,&errors))&&blob);
+        if(blob){CHECK(d3d12_diag::describeRootSignature(blob->GetBufferPointer(),blob->GetBufferSize()).find("SRV:2 reg=0 space=0")!=std::string::npos);blob->Release();}
+#endif
         if(errors)errors->Release();
         d3d12_diag::rootSignatureDescriber=&fakeRootSignatureDescription;
         ID3D12RootSignature* fakeRoot=reinterpret_cast<ID3D12RootSignature*>(uintptr_t(0x7770));
