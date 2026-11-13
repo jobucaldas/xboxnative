@@ -291,6 +291,7 @@ int main(int argc,char** argv) {
         for(size_t i=0;i<deviceCount;++i)CHECK(vtable[deviceHooks[i].slot]==deviceHooks[i].hook);
         void* self=&fake;
         auto call=[&](int slot,auto... args)->HRESULT{return reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(void*,decltype(args)...)>(vtable[slot])(self,args...);};
+        auto callVoid=[&](int slot,auto... args){reinterpret_cast<void(STDMETHODCALLTYPE*)(void*,decltype(args)...)>(vtable[slot])(self,args...);};
         D3D12_COMMAND_QUEUE_DESC qd{};D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.NumDescriptors=1;
         D3D12_GRAPHICS_PIPELINE_STATE_DESC gd{};D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
         D3D12_HEAP_DESC hpd{};D3D12_QUERY_HEAP_DESC qhd{};D3D12_COMMAND_SIGNATURE_DESC csd{};
@@ -302,8 +303,7 @@ int main(int argc,char** argv) {
         const char* names[]={"CreateCommandQueue hr=","CreateCommandAllocator hr=","CreateGraphicsPipelineState hr=",
             "CreateComputePipelineState hr=","CreateCommandList hr=","CreateDescriptorHeap hr=",
             "CreateRootSignature hr=","CreateConstantBufferView hr=","CreateSampler hr=",
-            "CreateShaderResourceView hr=","CreateUnorderedAccessView hr=","CreateRenderTargetView hr=",
-            "CreateDepthStencilView hr=","CreateCommittedResource hr=","CreateHeap hr=",
+            "CreateCommittedResource hr=","CreateHeap hr=",
             "CreatePlacedResource hr=","CreateReservedResource hr=","CreateFence hr=",
             "CreateQueryHeap hr=","CreateCommandSignature hr="};
         size_t beforeNames[sizeof names/sizeof *names];
@@ -317,10 +317,10 @@ int main(int argc,char** argv) {
         CHECK(call(d3d12_diag::CreateRootSignature,0u,(const void*)"junk",size_t(4),__uuidof(ID3D12RootSignature),&out)==E_INVALIDARG);
         CHECK(call(d3d12_diag::CreateConstantBufferView,&cbv,handle)==E_INVALIDARG);
         CHECK(call(d3d12_diag::CreateSampler,&sd,handle)==E_INVALIDARG);
-        CHECK(call(d3d12_diag::CreateShaderResourceView,(ID3D12Resource*)nullptr,(const D3D12_SHADER_RESOURCE_VIEW_DESC*)nullptr,handle)==E_INVALIDARG);
-        CHECK(call(d3d12_diag::CreateUnorderedAccessView,(ID3D12Resource*)nullptr,(const D3D12_UNORDERED_ACCESS_VIEW_DESC*)nullptr,handle)==E_INVALIDARG);
-        CHECK(call(d3d12_diag::CreateRenderTargetView,(ID3D12Resource*)nullptr,(const D3D12_RENDER_TARGET_VIEW_DESC*)nullptr,handle)==E_INVALIDARG);
-        CHECK(call(d3d12_diag::CreateDepthStencilView,(ID3D12Resource*)nullptr,(const D3D12_DEPTH_STENCIL_VIEW_DESC*)nullptr,handle)==E_INVALIDARG);
+        callVoid(d3d12_diag::CreateShaderResourceView,(ID3D12Resource*)nullptr,(const D3D12_SHADER_RESOURCE_VIEW_DESC*)nullptr,handle);
+        callVoid(d3d12_diag::CreateUnorderedAccessView,(ID3D12Resource*)nullptr,(ID3D12Resource*)nullptr,(const D3D12_UNORDERED_ACCESS_VIEW_DESC*)nullptr,handle);
+        callVoid(d3d12_diag::CreateRenderTargetView,(ID3D12Resource*)nullptr,(const D3D12_RENDER_TARGET_VIEW_DESC*)nullptr,handle);
+        callVoid(d3d12_diag::CreateDepthStencilView,(ID3D12Resource*)nullptr,(const D3D12_DEPTH_STENCIL_VIEW_DESC*)nullptr,handle);
         // A description no earlier call used, so this hook's line is new.
         D3D12_RESOURCE_DESC fakeBad=bad;fakeBad.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE1D;
         CHECK(call(d3d12_diag::CreateCommittedResource,&heap,D3D12_HEAP_FLAG_NONE,&fakeBad,D3D12_RESOURCE_STATE_COMMON,(const D3D12_CLEAR_VALUE*)nullptr,__uuidof(ID3D12Resource),&out)==E_INVALIDARG);
@@ -332,6 +332,9 @@ int main(int argc,char** argv) {
         CHECK(call(d3d12_diag::CreateCommandSignature,&csd,(ID3D12RootSignature*)nullptr,__uuidof(ID3D12CommandSignature),&out)==E_INVALIDARG);
         for(size_t i=0;i<sizeof names/sizeof *names;++i)
             CHECK(count(names[i])==beforeNames[i]+1);
+        // The void view creators never log a failure line, whatever the arguments.
+        CHECK(count("CreateShaderResourceView hr=")==0&&count("CreateUnorderedAccessView hr=")==0);
+        CHECK(count("CreateRenderTargetView hr=")==0&&count("CreateDepthStencilView hr=")==0);
     }
 
     // A second device shares the class: no new patch, same dedupe.
@@ -386,11 +389,11 @@ int main(int argc,char** argv) {
         static const D3D12_UNORDERED_ACCESS_VIEW_DESC* seenDesc=nullptr;
         static ID3D12Resource* seenResource=nullptr;
         struct Recorder {
-            static HRESULT STDMETHODCALLTYPE original(void*,ID3D12Resource* r,ID3D12Resource* c,const D3D12_UNORDERED_ACCESS_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
-                seenResource=r;seenCounter=c;seenDesc=d;seenHandle=h;return S_OK;
+            static void STDMETHODCALLTYPE original(void*,ID3D12Resource* r,ID3D12Resource* c,const D3D12_UNORDERED_ACCESS_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
+                seenResource=r;seenCounter=c;seenDesc=d;seenHandle=h;
             }
         };
-        using UavFn=HRESULT(STDMETHODCALLTYPE*)(void*,ID3D12Resource*,ID3D12Resource*,const D3D12_UNORDERED_ACCESS_VIEW_DESC*,D3D12_CPU_DESCRIPTOR_HANDLE);
+        using UavFn=void(STDMETHODCALLTYPE*)(void*,ID3D12Resource*,ID3D12Resource*,const D3D12_UNORDERED_ACCESS_VIEW_DESC*,D3D12_CPU_DESCRIPTOR_HANDLE);
         void* vtable[64]{};
         vtable[d3d12_diag::CreateUnorderedAccessView]=reinterpret_cast<void*>(&Recorder::original);
         size_t patchCount=0;const d3d12_diag::Patch* patches=d3d12_diag::devicePatches(patchCount);
@@ -426,10 +429,12 @@ int main(int argc,char** argv) {
         d3d12_diag::flushTrace();
         for(auto& l:lines) if(l.rfind("trace #",0)==0) {
             for(const char* n:{" CreateShaderResourceView "," CreateUnorderedAccessView "," CreateRenderTargetView "," CreateDepthStencilView "})
-                if(l.find(n)!=std::string::npos) ++viewLines;
+                if(l.find(n)!=std::string::npos&&l.size()>=5&&l.compare(l.size()-5,5," void")==0) ++viewLines;
         }
+        // Each view entry is "void" (no hr) and no view logged a failure line.
         CHECK(viewLines>=4);
         CHECK(count(" Slot ")==0);
+        CHECK(count("CreateShaderResourceView hr=")==0&&count("CreateRenderTargetView hr=")==0);
         if(rtvHeap) rtvHeap->Release();
         if(dsvHeap) dsvHeap->Release();
         size_t before=lines.size();
@@ -437,7 +442,7 @@ int main(int argc,char** argv) {
         CHECK(lines.size()-before==1+std::min(size_t(d3d12_diag::traceCount.load()),d3d12_diag::kTraceRing));
         // Every completed entry carries its hr (the ring holds the newest calls only).
         size_t traced=0,withHr=0;
-        for(auto& l:lines) if(l.rfind("trace #",0)==0) {++traced;if(l.find(" 0x")!=std::string::npos)++withHr;}
+        for(auto& l:lines) if(l.rfind("trace #",0)==0) {++traced;if(l.find(" 0x")!=std::string::npos||(l.size()>=5&&l.compare(l.size()-5,5," void")==0))++withHr;}
         CHECK(traced>0&&traced==withHr);
         CHECK(count("pending")==0);   // nothing in flight outside a call
         // More calls than the ring holds: the flush keeps only the newest entries.

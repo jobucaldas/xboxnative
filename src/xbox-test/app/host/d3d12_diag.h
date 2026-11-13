@@ -257,7 +257,7 @@ inline std::string shaderText(const void* code,SIZE_T length,std::string* key=nu
 // hr; a call still in flight stays "pending". flushTrace() runs from the fault
 // handler, so the last entry is the call the fault came from.
 constexpr size_t kTraceRing=64;
-struct TraceEntry{std::atomic<const char*> name{nullptr};std::atomic<long> hr{0};std::atomic<bool> done{false};};
+struct TraceEntry{std::atomic<const char*> name{nullptr};std::atomic<long> hr{0};std::atomic<bool> done{false};std::atomic<bool> isVoid{false};};
 inline TraceEntry traceRing[kTraceRing];
 inline std::atomic<size_t> traceCount{0};
 inline std::atomic<bool> traceOn{false};
@@ -267,12 +267,19 @@ inline size_t traceBegin(const char* name) {
     if(!traceOn.load(std::memory_order_acquire)) return size_t(-1);
     size_t at=traceCount.fetch_add(1)%kTraceRing;
     traceRing[at].done.store(false,std::memory_order_release);
+    traceRing[at].isVoid.store(false,std::memory_order_release);
     traceRing[at].name.store(name,std::memory_order_release);
     return at;
 }
 inline void traceEnd(size_t at,HRESULT hr) {
     if(at==size_t(-1)) return;
     traceRing[at].hr.store(long(hr),std::memory_order_release);
+    traceRing[at].done.store(true,std::memory_order_release);
+}
+// A void call has no HRESULT: the entry records "void", not a made-up hr.
+inline void traceEndVoid(size_t at) {
+    if(at==size_t(-1)) return;
+    traceRing[at].isVoid.store(true,std::memory_order_release);
     traceRing[at].done.store(true,std::memory_order_release);
 }
 inline void flushTrace() {
@@ -283,8 +290,8 @@ inline void flushTrace() {
     for(size_t i=n-shown;i<n;++i) {
         const TraceEntry& e=traceRing[i%kTraceRing];
         const char* name=e.name.load();
-        emit(fmt("trace #%zu %s %s",i,name?name:"?",
-            e.done.load()?hex(HRESULT(e.hr.load())).c_str():"pending"));
+        const char* result=!e.done.load()?"pending":e.isVoid.load()?"void":nullptr;
+        emit(fmt("trace #%zu %s %s",i,name?name:"?",result?result:hex(HRESULT(e.hr.load())).c_str()));
     }
 }
 
@@ -292,6 +299,9 @@ inline void flushTrace() {
 // template parameter (that stringifies the parameter's token, e.g. "Slot").
 #define D3D12_DIAG_HOOK_AS(Type,slot,nameStr) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return E_FAIL; const size_t traceAt=traceBegin(nameStr);
 #define D3D12_DIAG_HOOK(Type,slot) D3D12_DIAG_HOOK_AS(Type,slot,#slot)
+// The same for a void call: the hook cannot return E_FAIL from a void function.
+#define D3D12_DIAG_HOOK_VOID_AS(Type,slot,nameStr) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return; const size_t traceAt=traceBegin(nameStr);
+#define D3D12_DIAG_HOOK_VOID(Type,slot) D3D12_DIAG_HOOK_VOID_AS(Type,slot,#slot)
 #define D3D12_DIAG_FAILED(name,key,text) do{if(FAILED(hr))report(false,std::string(name)+" "+hex(hr)+" "+(key),std::string(name)+" hr="+hex(hr)+" "+(text));}while(0)
 
 using DevicePtr=void*;
@@ -518,47 +528,28 @@ static HRESULT STDMETHODCALLTYPE createCommandSignature(DevicePtr self,const D3D
     return hr;
 }
 // Views share one shape: (resource, optional desc, dest handle). Only the
-// description type differs.
-template<int Slot,class Desc,class Describe>
-static HRESULT viewCall(DevicePtr self,const char* name,ID3D12Resource* resource,const Desc* d,D3D12_CPU_DESCRIPTOR_HANDLE handle,Describe describe) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,const Desc*,D3D12_CPU_DESCRIPTOR_HANDLE);
-    D3D12_DIAG_HOOK_AS(Fn,Slot,name)HRESULT hr=call(self,resource,d,handle); traceEnd(traceAt,hr);
-    if(FAILED(hr)) {
-        std::string text,key;describe(d,text,key);
-        D3D12_DIAG_FAILED(name,key+fmt("/%llx",(unsigned long long)handle.ptr),
-            text+fmt(" handle=0x%llx res=%d",(unsigned long long)handle.ptr,resource!=nullptr));
-    }
-    return hr;
+// description type differs. The device's view creators return void, so there is
+// no status to report: the call is traced as "void" and never logs a failure.
+template<int Slot,class Desc>
+static void viewCall(DevicePtr self,const char* name,ID3D12Resource* resource,const Desc* d,D3D12_CPU_DESCRIPTOR_HANDLE handle) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,const Desc*,D3D12_CPU_DESCRIPTOR_HANDLE);
+    D3D12_DIAG_HOOK_VOID_AS(Fn,Slot,name)call(self,resource,d,handle); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE createSrv(DevicePtr self,ID3D12Resource* r,const D3D12_SHADER_RESOURCE_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    return viewCall<CreateShaderResourceView>(self,"CreateShaderResourceView",r,d,h,[](const D3D12_SHADER_RESOURCE_VIEW_DESC* v,std::string& text,std::string& key){
-        if(!v){text="view=default";key="default";return;}
-        text=fmt("viewfmt=%s dim=%d",formatText(v->Format).c_str(),int(v->ViewDimension));key=fmt("%d/%d",int(v->Format),int(v->ViewDimension));});
+static void STDMETHODCALLTYPE createSrv(DevicePtr self,ID3D12Resource* r,const D3D12_SHADER_RESOURCE_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    viewCall<CreateShaderResourceView>(self,"CreateShaderResourceView",r,d,h);
 }
 // CreateUnorderedAccessView takes a counter resource before the description, so
 // it cannot share viewCall's (resource, desc, handle) shape: forwarding that
 // shape dropped the counter and shifted the description into the handle.
-static HRESULT STDMETHODCALLTYPE createUav(DevicePtr self,ID3D12Resource* r,ID3D12Resource* counter,const D3D12_UNORDERED_ACCESS_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,ID3D12Resource*,const D3D12_UNORDERED_ACCESS_VIEW_DESC*,D3D12_CPU_DESCRIPTOR_HANDLE);
-    D3D12_DIAG_HOOK(Fn,CreateUnorderedAccessView)HRESULT hr=call(self,r,counter,d,h); traceEnd(traceAt,hr);
-    if(FAILED(hr)) {
-        std::string text,key;
-        if(!d){text="view=default";key="default";}
-        else {text=fmt("viewfmt=%s dim=%d",formatText(d->Format).c_str(),int(d->ViewDimension));key=fmt("%d/%d",int(d->Format),int(d->ViewDimension));}
-        D3D12_DIAG_FAILED("CreateUnorderedAccessView",key+fmt("/%llx",(unsigned long long)h.ptr),
-            text+fmt(" handle=0x%llx res=%d counter=%d",(unsigned long long)h.ptr,r!=nullptr,counter!=nullptr));
-    }
-    return hr;
+static void STDMETHODCALLTYPE createUav(DevicePtr self,ID3D12Resource* r,ID3D12Resource* counter,const D3D12_UNORDERED_ACCESS_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,ID3D12Resource*,const D3D12_UNORDERED_ACCESS_VIEW_DESC*,D3D12_CPU_DESCRIPTOR_HANDLE);
+    D3D12_DIAG_HOOK_VOID(Fn,CreateUnorderedAccessView)call(self,r,counter,d,h); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE createRtv(DevicePtr self,ID3D12Resource* r,const D3D12_RENDER_TARGET_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    return viewCall<CreateRenderTargetView>(self,"CreateRenderTargetView",r,d,h,[](const D3D12_RENDER_TARGET_VIEW_DESC* v,std::string& text,std::string& key){
-        if(!v){text="view=default";key="default";return;}
-        text=fmt("viewfmt=%s dim=%d",formatText(v->Format).c_str(),int(v->ViewDimension));key=fmt("%d/%d",int(v->Format),int(v->ViewDimension));});
+static void STDMETHODCALLTYPE createRtv(DevicePtr self,ID3D12Resource* r,const D3D12_RENDER_TARGET_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    viewCall<CreateRenderTargetView>(self,"CreateRenderTargetView",r,d,h);
 }
-static HRESULT STDMETHODCALLTYPE createDsv(DevicePtr self,ID3D12Resource* r,const D3D12_DEPTH_STENCIL_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    return viewCall<CreateDepthStencilView>(self,"CreateDepthStencilView",r,d,h,[](const D3D12_DEPTH_STENCIL_VIEW_DESC* v,std::string& text,std::string& key){
-        if(!v){text="view=default";key="default";return;}
-        text=fmt("viewfmt=%s dim=%d flags=0x%x",formatText(v->Format).c_str(),int(v->ViewDimension),v->Flags);key=fmt("%d/%d/%x",int(v->Format),int(v->ViewDimension),v->Flags);});
+static void STDMETHODCALLTYPE createDsv(DevicePtr self,ID3D12Resource* r,const D3D12_DEPTH_STENCIL_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    viewCall<CreateDepthStencilView>(self,"CreateDepthStencilView",r,d,h);
 }
 static HRESULT STDMETHODCALLTYPE createSampler(DevicePtr self,const D3D12_SAMPLER_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_SAMPLER_DESC*,D3D12_CPU_DESCRIPTOR_HANDLE);
