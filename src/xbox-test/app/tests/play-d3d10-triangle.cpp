@@ -336,9 +336,15 @@ DWORD d3d10tri_entry() {
     // The statically imported d3d10.dll is Play's shim; its D3D10CompileShader
     // loads d3dcompiler_47.dll by name through Play's loader, which serves the
     // probed Wine donor (donor_pe). Exit 44 names this pass; 45 is a compile
-    // that returned a blob that is not a vs_4_0 shader.
+    // that returned a blob that is not a vs_4_0 shader. The source matches the
+    // bound pipeline's contract (Bugbot r4559946103): POSITION+COLOR in,
+    // SV_Position+COLOR out — the same signature the committed d3d10_vs has —
+    // so the existing input layout and pixel shader stay valid and the red
+    // pixel proves the compiled shader actually drew.
     static const char compileSource[]=
-        "float4 main(float4 pos:SV_Position):SV_Position{return pos;}\n";
+        "struct Vin { float4 pos:SV_Position; float4 col:COLOR; };\n"
+        "struct Vout { float4 pos:SV_Position; float4 col:COLOR; };\n"
+        "Vout main(Vin i) { Vout o; o.pos=i.pos; o.col=i.col; return o; }\n";
     ID3D10Blob* compiled=nullptr;ID3D10Blob* compileErrors=nullptr;
     HRESULT chr=D3D10CompileShader(compileSource,sizeof compileSource-1,nullptr,
         nullptr,nullptr,"main","vs_4_0",0,&compiled,&compileErrors);
@@ -352,6 +358,9 @@ DWORD d3d10tri_entry() {
     SIZE_T size=compiled->GetBufferSize();
     if(!dxbc){compiled->Release();return 45;}
     // The compiled shader must run: build a vertex shader from it and draw.
+    // The vertex buffer still holds the red triangle, the layout and pixel
+    // shader are unchanged, so the readback must show red again — a compiled
+    // shader that dropped COLOR would leave the clear colour (never a pass).
     ID3D10VertexShader* compiledVs=nullptr;
     if(FAILED(device->CreateVertexShader(bits,size,&compiledVs))||!compiledVs)return 46;
     compiled->Release();   // the shader holds its own copy now
@@ -362,6 +371,8 @@ DWORD d3d10tri_entry() {
     compiledVs->Release();
     if(!readPixel(device,target,staging,32,32,pixel))return 47;
     if(!(pixel[0]>0x80&&pixel[1]<0x40&&pixel[2]<0x40))return 43;   // BLOCKED
+    if(!readPixel(device,target,staging,4,4,pixel))return 47;
+    if(!(pixel[0]<0x20&&pixel[1]<0x20&&pixel[2]<0x20))return 43;   // BLOCKED
 
     // The present path still works after the draw passes, as a game's frame does.
     device->ClearRenderTargetView(view,clear);
