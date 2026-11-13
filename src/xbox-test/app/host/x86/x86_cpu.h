@@ -687,7 +687,7 @@ struct Cpu {
     //   71: word lanes   72: dword lanes   73: qword lanes (and byte shifts)
     //   /2 = right logical, /4 = right arithmetic (words/dwords), /6 = left,
     //   73 /3 = pslldq, 73 /7 = psrldq (whole-register byte shifts).
-    void sse_shift(uint8_t op, unsigned sop, unsigned cnt, uint32_t a[4]) {
+    void sse_shift(uint8_t op, unsigned sop, uint64_t cnt, uint32_t a[4]) {
         uint8_t* ab = reinterpret_cast<uint8_t*>(a);
         // Selector check first, before the count clamp: the imm8 group defines
         // only /2 (right), /4 (arithmetic) and /6 (left) for 71/72, and /2
@@ -881,7 +881,7 @@ struct Cpu {
                          : op == 0xF1 ? 6 : op == 0xF2 ? 6 : 6;
             unsigned opb = op == 0xD1 || op == 0xE1 || op == 0xF1 ? 0x71
                          : op == 0xD2 || op == 0xE2 || op == 0xF2 ? 0x72 : 0x73;
-            sse_shift(opb, sop, unsigned(cnt), a);
+            sse_shift(opb, sop, cnt, a);
             sse_write_reg(modrm_reg, a); return; }
         case 0xD4: {  // paddq (66 0F D4): both 64-bit lanes
             sse_reg(modrm_reg, a); sse_read(r, b);

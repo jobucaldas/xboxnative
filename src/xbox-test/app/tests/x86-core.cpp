@@ -778,6 +778,86 @@ static void test_sse2_stage2() {
             EXPECT(memcmp(out, want, 16) == 0, "psrlq reg cnt=%u", cnt);
             ++alu_cases;
         }
+        // register-form count is the FULL 64-bit source value: counts >= lane
+        // width saturate (logical → 0, arithmetic → per-lane sign fill), and a
+        // count like 0x100000001 or 0xFFFFFFFF00000003 must not truncate to a
+        // small value. Differential against a native oracle over counts
+        // {0, 1, w-1, w, 2^32+1, 0xFFFFFFFF00000003, UINT64_MAX} (all verified
+        // on this host: over-wide counts saturate, 2^32+1 does NOT shift by 1).
+        {
+            const uint64_t cnts[] = {0ull, 1ull, 15ull, 16ull, 0x100000001ull, 0xFFFFFFFF00000003ull, 0xFFFFFFFFFFFFFFFFull};
+            const uint64_t dcnts[] = {0ull, 1ull, 31ull, 32ull, 0x100000001ull, 0xFFFFFFFF00000003ull, 0xFFFFFFFFFFFFFFFFull};
+            const uint64_t qcnts[] = {0ull, 1ull, 63ull, 64ull, 0x100000001ull, 0xFFFFFFFF00000003ull, 0xFFFFFFFFFFFFFFFFull};
+            const uint16_t* w = reinterpret_cast<const uint16_t*>(V1);
+            for (int c = 0; c < 7; ++c) {
+                uint32_t cntv[4] = {uint32_t(cnts[c]), uint32_t(cnts[c] >> 32), 0xdeadbeefu, 0xcafebabeu};
+                uint32_t out[4];
+                // psrlw: logical right, 16-bit lanes; saturate at 16
+                uint64_t cnt = cnts[c];
+                uint32_t want[4];
+                for (int i = 0; i < 8; ++i) { uint16_t v = cnt < 16 ? uint16_t(w[i] >> cnt) : 0; memcpy(reinterpret_cast<uint8_t*>(want) + 2 * i, &v, 2); }
+                run({0x66, 0x0F, 0xD1, 0xC1}, V1, cntv, out);  // psrlw xmm0, xmm1
+                EXPECT(memcmp(out, want, 16) == 0, "psrlw reg cnt=%016llx: %08x want %08x", (unsigned long long)cnt, out[0], want[0]);
+                ++alu_cases;
+                // psraw: arithmetic right, 16-bit lanes
+                for (int i = 0; i < 8; ++i) { uint16_t v = cnt < 16 ? uint16_t(int16_t(w[i]) >> cnt) : uint16_t((w[i] & 0x8000) ? 0xffffu : 0); memcpy(reinterpret_cast<uint8_t*>(want) + 2 * i, &v, 2); }
+                run({0x66, 0x0F, 0xE1, 0xC1}, V1, cntv, out);  // psraw xmm0, xmm1
+                EXPECT(memcmp(out, want, 16) == 0, "psraw reg cnt=%016llx: %08x want %08x", (unsigned long long)cnt, out[0], want[0]);
+                ++alu_cases;
+                // psllw: left, 16-bit lanes
+                for (int i = 0; i < 8; ++i) { uint16_t v = cnt < 16 ? uint16_t(w[i] << cnt) : 0; memcpy(reinterpret_cast<uint8_t*>(want) + 2 * i, &v, 2); }
+                run({0x66, 0x0F, 0xF1, 0xC1}, V1, cntv, out);  // psllw xmm0, xmm1
+                EXPECT(memcmp(out, want, 16) == 0, "psllw reg cnt=%016llx: %08x want %08x", (unsigned long long)cnt, out[0], want[0]);
+                ++alu_cases;
+                // psrld / pslld / psrad: 32-bit lanes (count saturates at 32);
+                // the count register carries the D-granularity count itself
+                uint64_t dcnt = dcnts[c];
+                uint32_t dcntv[4] = {uint32_t(dcnt), uint32_t(dcnt >> 32), 0xdeadbeefu, 0xcafebabeu};
+                for (int i = 0; i < 4; ++i) want[i] = dcnt < 32 ? V1[i] >> dcnt : 0;
+                run({0x66, 0x0F, 0xD2, 0xC1}, V1, dcntv, out);  // psrld
+                EXPECT(memcmp(out, want, 16) == 0, "psrld reg cnt=%016llx", (unsigned long long)dcnt);
+                ++alu_cases;
+                for (int i = 0; i < 4; ++i) want[i] = dcnt < 32 ? V1[i] << dcnt : 0;
+                run({0x66, 0x0F, 0xF2, 0xC1}, V1, dcntv, out);  // pslld
+                EXPECT(memcmp(out, want, 16) == 0, "pslld reg cnt=%016llx", (unsigned long long)dcnt);
+                ++alu_cases;
+                for (int i = 0; i < 4; ++i) { int32_t v = int32_t(V1[i]); want[i] = dcnt < 32 ? uint32_t(v >> dcnt) : (v < 0 ? 0xffffffffu : 0); }
+                run({0x66, 0x0F, 0xE2, 0xC1}, V1, dcntv, out);  // psrad
+                EXPECT(memcmp(out, want, 16) == 0, "psrad reg cnt=%016llx", (unsigned long long)dcnt);
+                ++alu_cases;
+                // psrlq / psllq: 64-bit lanes (count saturates at 64)
+                uint64_t qcnt = qcnts[c];
+                uint32_t qcntv[4] = {uint32_t(qcnt), uint32_t(qcnt >> 32), 0xdeadbeefu, 0xcafebabeu};
+                uint64_t q0 = uint64_t(V1[1]) << 32 | V1[0], q1 = uint64_t(V1[3]) << 32 | V1[2];
+                q0 = qcnt < 64 ? q0 >> qcnt : 0; q1 = qcnt < 64 ? q1 >> qcnt : 0;
+                want[0] = uint32_t(q0); want[1] = uint32_t(q0 >> 32); want[2] = uint32_t(q1); want[3] = uint32_t(q1 >> 32);
+                run({0x66, 0x0F, 0xD3, 0xC1}, V1, qcntv, out);  // psrlq
+                EXPECT(memcmp(out, want, 16) == 0, "psrlq reg cnt=%016llx", (unsigned long long)qcnt);
+                ++alu_cases;
+                q0 = uint64_t(V1[1]) << 32 | V1[0]; q1 = uint64_t(V1[3]) << 32 | V1[2];
+                q0 = qcnt < 64 ? q0 << qcnt : 0; q1 = qcnt < 64 ? q1 << qcnt : 0;
+                want[0] = uint32_t(q0); want[1] = uint32_t(q0 >> 32); want[2] = uint32_t(q1); want[3] = uint32_t(q1 >> 32);
+                run({0x66, 0x0F, 0xF3, 0xC1}, V1, qcntv, out);  // psllq
+                EXPECT(memcmp(out, want, 16) == 0, "psllq reg cnt=%016llx", (unsigned long long)qcnt);
+                ++alu_cases;
+            }
+            // memory-form count (66 0F D1 /r with a memory source): the count is
+            // the low 64 bits AT the operand — a count >= 2^32 in memory must
+            // saturate, not truncate (same native-verified semantics).
+            {
+                m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
+                m.mem.w128(Machine::DATA + 0x40, V1);
+                uint32_t bigv[4] = {0, 1, 0, 0};  // count low64 = 2^32
+                m.mem.w128(Machine::DATA + 0x50, bigv);
+                std::vector<uint8_t> code = pre;
+                code.insert(code.end(), {0x66, 0x0F, 0xD1, 0x05, 0x50, 0x00, 0x02, 0x00});  // psrlw xmm0, [DATA+0x50]
+                code.insert(code.end(), post.begin(), post.end());
+                exec(m, code, 0, 0, 0, false);
+                uint32_t out[4]; m.mem.r128(Machine::DATA + 32, out);
+                EXPECT(out[0] == 0 && out[1] == 0 && out[2] == 0 && out[3] == 0, "psrlw mem cnt=2^32 must zero all lanes: %08x %08x", out[0], out[1]);
+                ++alu_cases;
+            }
+        }
         // memory-destination imm8 shift (66 0F 71 /6 mem) is #UD on real hardware
         // (verified natively); the interpreter must reject it by encoding.
         {
