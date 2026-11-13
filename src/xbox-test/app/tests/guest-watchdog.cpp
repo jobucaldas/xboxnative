@@ -320,6 +320,18 @@ int main() {
         s = guide_step(true, true, 2, false, false, true, false, false);
         CHECK(s.action == GuideAction::down);
         CHECK(s.row == 0);   // wraps 2 -> 0
+        // General wrap contract (bugbot r4559831117): Down from row k lands
+        // on k+1 (wrapping), Up from row k lands on k-1 (wrapping) — in the
+        // dead AND the alive state, from EVERY row. No press may skip a row.
+        for (int dead = 0; dead < 2; ++dead)
+            for (int k = 0; k < kHomeRows; ++k) {
+                s = guide_step(!!dead, true, k, false, false, true, false, false);
+                CHECK(s.action == GuideAction::down);
+                CHECK(s.row == (k + 1) % kHomeRows);
+                s = guide_step(!!dead, true, k, false, true, false, false, false);
+                CHECK(s.action == GuideAction::up);
+                CHECK(s.row == (k + kHomeRows - 1) % kHomeRows);
+            }
         // A on Resume while dead: the resume ACTION is reported but the
         // caller must no-op it (nothing to resume); the model keeps the
         // guide open either way.
@@ -426,6 +438,60 @@ int main() {
         auto v = evaluate(in);
         CHECK(v.dead);   // still dead: the launcher's own presents never refreshed the stamp
         CHECK(v.reason == Reason::silent);
+    }
+
+    // Force-quit sequencing (bugbot r4559831127): the worker must walk
+    // terminate -> wait -> sync -> done IN ORDER — the save upload can
+    // never run while the guest is alive or mid-teardown, and the UI's
+    // "done" fires only after the sync. A hung terminate times out into
+    // the sync (with the timeout noted), it never deadlocks.
+    {
+        using guest_watchdog::force_quit_sequence;
+        using guest_watchdog::ForceQuitLog;
+        // Happy path: the kill lands, the wait reports exit, then sync, then done.
+        {
+            ForceQuitLog log;
+            bool synced=false, done=false;
+            force_quit_sequence([&]{},   // the note("terminate") already records the step
+                                [&]{ return true; },
+                                [&]{ synced=true; },
+                                [&]{ done=true; }, &log);
+            CHECK(log.steps.size() == 4);
+            CHECK(log.steps[0] == "terminate");
+            CHECK(log.steps[1] == "wait");
+            CHECK(log.steps[2] == "sync");
+            CHECK(log.steps[3] == "done");
+            CHECK(synced);   // the upload ran AFTER the kill+wait, never in parallel
+            CHECK(done);
+        }
+        // Order proof: sync must observe "the guest is gone" — the fake
+        // records the kill's completion as seen from the sync step.
+        {
+            ForceQuitLog log;
+            bool guestGone=false;
+            bool killed=false;
+            force_quit_sequence([&]{ killed=true; },
+                                [&]{ return true; },
+                                [&]{ guestGone=killed; },   // sync reads the kill's state
+                                []{}, &log);
+            CHECK(guestGone);   // the kill fully preceded the upload
+        }
+        // Hung kill: the bounded wait times out, the log notes it, and the
+        // sync + done STILL run — no deadlock, the launcher recovers anyway.
+        {
+            ForceQuitLog log;
+            bool synced=false, done=false;
+            force_quit_sequence([]{}, []{ return false; },   // the guest never exits
+                                [&]{ synced=true; }, [&]{ done=true; }, &log);
+            CHECK(log.steps.size() == 5);
+            CHECK(log.steps[0] == "terminate");
+            CHECK(log.steps[1] == "wait");
+            CHECK(log.steps[2] == "terminate-timeout");
+            CHECK(log.steps[3] == "sync");
+            CHECK(log.steps[4] == "done");
+            CHECK(synced);
+            CHECK(done);
+        }
     }
 
     printf("%u checks, %u failures\n", checks, failures);

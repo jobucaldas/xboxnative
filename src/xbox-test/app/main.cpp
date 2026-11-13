@@ -1939,21 +1939,33 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             using guest_watchdog::GuideAction;
             const bool open=guest_overlay::menuOpen.load(std::memory_order_acquire);
             int row=guest_overlay::selection.load(std::memory_order_acquire);
+            // The guide model below speaks Home rows only (Resume/Quit/Force
+            // quit). If the guest died with the guide open on another tab
+            // (Achievements, Settings), snap it back: a "select" there would
+            // map to the wrong command (a Settings row instead of the kill).
+            if(open&&guest_overlay::ui_guideTab.load()!=0) {
+                guest_overlay::ui_guideTab=0;
+                guest_overlay::achTop=0;
+                row=guest_watchdog::kForceQuitRow;   // the dead-open focus
+                guest_overlay::selection=row;
+            }
             if(row<0||row>=guest_watchdog::kHomeRows)row=0;   // atomics out of range: re-clamp before the model reads them
             const auto s=guest_watchdog::guide_step(true,open,row,
                 pressed(combo),
                 pressed(GamepadButtons::DPadUp),pressed(GamepadButtons::DPadDown),
                 pressed(GamepadButtons::A),pressed(GamepadButtons::B));
-            if(s.row!=row)guest_overlay::selection=s.row;   // the model moved the focus (D-pad or open-focus)
             switch(s.action) {
             case GuideAction::toggle:
-                menu_command("toggle","controller");
-                if(guest_overlay::menuOpen)guest_overlay::selection=s.row;   // toggle resets selection; dead-open refocuses Force quit
+                menu_command("toggle","controller");   // sets menuOpen; focuses Force quit while dead
                 break;
-            case GuideAction::up:   guest_overlay::guide_press(ui_guide::Button::Up,false);break;
-            case GuideAction::down: guest_overlay::guide_press(ui_guide::Button::Down,false);break;
-            case GuideAction::forceQuit: menu_command("select","controller");break;   // selection==2: force_quit()
-            case GuideAction::quitGame:  menu_command("select","controller");break;   // selection==1: quit_game()
+            case GuideAction::up:
+            case GuideAction::down:
+                guest_overlay::selection=s.row;   // the model already wrapped; no second advance
+                break;
+            case GuideAction::forceQuit:
+            case GuideAction::quitGame:
+                menu_command("select","controller");   // selection already on the row: force_quit()/quit_game()
+                break;
             case GuideAction::close:
                 if(open)menu_command("toggle","controller");   // B (or A-Resume while alive) closes
                 break;
@@ -2087,39 +2099,53 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         m_leaving=true;guest_overlay::set_status("Uploading saves...");
         logf("overlay: force quit — killing the guest thread, then uploading saves");
         auto sync=g_finalSync;
-        // Kill the guest thread first (bugbot r4559524001): Force quit must
-        // END the game, not wait behind it. The kill runs on a worker with a
-        // bounded wait so the launcher never blocks on a guest that is
-        // wedged inside the driver. play_runtime::state->thread is the
+        // Kill the guest thread FIRST, then upload (bugbot r4559524001 and
+        // the follow-up race finding): one worker does both in order, so the
+        // save upload can never read a save file while the guest is alive or
+        // mid-teardown. The kill is bounded — the launcher never blocks on a
+        // guest wedged inside the driver. play_runtime::state->thread is the
         // guest's entry thread. TerminateThread is Desktop-partitioned (not
-        // declared under the app family), so it resolves through
+        // declared under the app family) and a desktop OpenThread import
+        // would fail the Xbox activation affinity, so BOTH resolve through
         // kernel_tail::native — the same dump_thread_stacks pattern
         // (launch.h) uses for OpenThread/SuspendThread. The loader mutex is
         // never taken: the guest may hold it from inside the very hang
         // being killed.
-        std::thread([]{
+        auto dispatcher=m_window.Dispatcher();   // CoreWindow is thread-affine; its CoreDispatcher is agile
+        std::thread([this,sync,dispatcher]{
+            using Open=HANDLE(WINAPI*)(DWORD,BOOL,DWORD);
             using Terminate=BOOL(WINAPI*)(HANDLE,DWORD);
+            auto open=(Open)kernel_tail::native("OpenThread");
             auto terminate=(Terminate)kernel_tail::native("TerminateThread");
             const DWORD tid=play_runtime::state?play_runtime::state->thread.load(std::memory_order_acquire):0;
-            if(!tid){logf("overlay: force quit — no guest thread id recorded");return;}
-            const HANDLE h=OpenThread(THREAD_TERMINATE,FALSE,tid);
-            if(!h){logf("overlay: force quit — OpenThread(%lu) failed err=%lu",(unsigned long)tid,(unsigned long)GetLastError());return;}
-            if(terminate)terminate(h,1);
-            else logf("overlay: force quit — TerminateThread unavailable; the guest thread stays (restart still unloads it)");
-            WaitForSingleObject(h,3000);   // bounded: the launcher never blocks on a dead guest
-            CloseHandle(h);
-            logf("overlay: force quit — guest thread %lu terminated",(unsigned long)tid);
-        }).detach();
-        // CoreWindow is thread-affine; its CoreDispatcher is agile. Take the
-        // dispatcher here, on the UI thread, for the worker to post back with.
-        auto dispatcher=m_window.Dispatcher();
-        std::thread([this,sync,dispatcher]{
-            try {
-                init_apartment(apartment_type::multi_threaded);
-                if(sync)sync();
-            } catch(...) {logf("overlay: force quit upload failed");}
-            try {dispatcher.RunAsync(CoreDispatcherPriority::Normal,[this]{back_to_games("force quit");});}
-            catch(hresult_error const& e) {logf("overlay: force quit dispatch failed hr=0x%08x",(unsigned)e.code().value);}
+            // The ordered step runner (guest_watchdog::force_quit_sequence):
+            // terminate -> bounded wait -> sync -> done, never in parallel.
+            guest_watchdog::force_quit_sequence(
+                [&]{
+                    if(!tid)logf("overlay: force quit — no guest thread id recorded");
+                    else if(!open||!terminate)logf("overlay: force quit — thread APIs unavailable; the guest thread stays (restart still unloads it)");
+                    else {
+                        const HANDLE h=open(THREAD_TERMINATE,FALSE,tid);
+                        if(!h)logf("overlay: force quit — OpenThread(%lu) failed err=%lu",(unsigned long)tid,(unsigned long)GetLastError());
+                        else {
+                            terminate(h,1);
+                            WaitForSingleObject(h,3000);   // bounded: the launcher never blocks on a dead guest
+                            CloseHandle(h);
+                            logf("overlay: force quit — guest thread %lu terminated",(unsigned long)tid);
+                        }
+                    }
+                },
+                []{ return true; },   // the terminate step above already waited, bounded
+                [sync]{   // the guest thread is gone (or unkillable): no mid-write read
+                    try {
+                        init_apartment(apartment_type::multi_threaded);
+                        if(sync)sync();
+                    } catch(...) {logf("overlay: force quit upload failed");}
+                },
+                [this,dispatcher]{
+                    try {dispatcher.RunAsync(CoreDispatcherPriority::Normal,[this]{back_to_games("force quit");});}
+                    catch(hresult_error const& e) {logf("overlay: force quit dispatch failed hr=0x%08x",(unsigned)e.code().value);}
+                });
         }).detach();
     }
     // Play does not restart a guest in-process: its modules, threads and

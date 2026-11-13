@@ -13,6 +13,8 @@
 // offer force quit.
 #pragma once
 #include <cstdint>
+#include <string>
+#include <vector>
 #include <windows.h>   // HRESULT, DXGI_STATUS/ERROR codes, DWORD (format enums)
 
 namespace guest_watchdog {
@@ -201,6 +203,36 @@ constexpr GuideStep guide_step(bool dead, bool open, int row,
     if (upEdge) return {GuideAction::up, open, (row + kHomeRows - 1) % kHomeRows};
     if (downEdge) return {GuideAction::down, open, (row + 1) % kHomeRows};
     return {GuideAction::none, open, row};
+}
+
+// Force-quit sequencing (bugbot r4559831127): the kill and the save upload
+// must never run in parallel — an upload racing the kill can read a half-
+// written save, or the kill can land mid-upload. One worker walks the steps
+// IN ORDER: terminate the guest thread, wait for it (bounded — the launcher
+// never blocks on a guest wedged inside the driver), run the final sync,
+// then signal the UI. force_quit_sequence is the pure step runner; the
+// launcher's force_quit injects its real terminate/wait/sync/dispatch into
+// it, and tests inject fakes that record the order (and a hung terminate
+// that exercises the timeout path).
+struct ForceQuitLog {
+    // Steps the runner observed, in call order: "terminate", "wait",
+    // "sync", "done" — plus "terminate-timeout" when the bounded wait
+    // expired with the guest thread still alive.
+    std::vector<std::string> steps;
+};
+template <class Terminate, class Wait, class Sync, class Done>
+void force_quit_sequence(Terminate&& terminate, Wait&& wait, Sync&& sync,
+                         Done&& done, ForceQuitLog* log = nullptr) {
+    auto note=[&](const std::string& s){ if(log) log->steps.push_back(s); };
+    note("terminate");
+    terminate();
+    note("wait");
+    const bool exited=wait();
+    if(!exited) note("terminate-timeout");
+    note("sync");
+    sync();
+    note("done");
+    done();
 }
 
 } // namespace guest_watchdog
