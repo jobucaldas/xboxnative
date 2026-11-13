@@ -57,6 +57,14 @@ extern "C" BOOL WINAPI c_EndDialog(HWND,INT_PTR) {
 }
 // No pointer input or capture exists, so a drag can never start.
 extern "C" BOOL WINAPI c_DragDetect(HWND,POINT) { return FALSE; }
+// No mouse-to-pointer source exists (see README), so mouse-in-pointer is never
+// enabled. Disabling is a successful no-op, as on Windows; enabling fails.
+extern "C" BOOL WINAPI c_EnableMouseInPointer(BOOL enable) {
+ if(!enable) return TRUE;
+ SetLastError(ERROR_NOT_SUPPORTED);
+ return FALSE;
+}
+extern "C" BOOL WINAPI c_IsMouseInPointerEnabled(void) { return FALSE; }
 // Records belong to the creating thread of this process (Wine/Windows: 0 and
 // ERROR_INVALID_WINDOW_HANDLE for an unknown window, output left untouched).
 extern "C" DWORD WINAPI c_GetWindowThreadProcessId(HWND hwnd,DWORD* process) {
