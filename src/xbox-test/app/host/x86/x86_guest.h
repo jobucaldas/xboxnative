@@ -11,14 +11,12 @@
 // never mistaken for general Win32 support.
 #pragma once
 #include <cmath>
-#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <functional>
 #include <map>
 #include <tuple>
-#include <thread>
 #include <string>
 #include <vector>
 #include "x86_win32.h"
@@ -194,23 +192,23 @@ struct Guest {
     uint32_t create_sync(SyncKind kind, uint32_t namep, bool manual, bool initial, int32_t count, int32_t maximum, uint32_t owner) {
         std::string name = str(namep); uint32_t id = 0;
         if (!name.empty()) { auto it = sync_names.find(name); if (it != sync_names.end()) { id = it->second; if (sync_objects[id].kind != kind) { set_last_error(6); return 0; } set_last_error(183); } }
-        if (!id) { id = ++sync_serial; SyncObject o{}; o.kind=kind; o.name=name; o.manual=manual; o.signaled=initial; o.owner=owner; o.recursion=owner?1u:0u; o.count=uint32_t(count); o.maximum=uint32_t(maximum); sync_objects[id]=o; if (!name.empty()) sync_names[name]=id; }
+        if (!id) { id = ++sync_serial; SyncObject o{}; o.kind=kind; o.name=name; o.manual=manual; o.signaled=initial; o.owner=owner; o.recursion=owner?1u:0u; o.count=uint32_t(count); o.maximum=uint32_t(maximum); sync_objects[id]=o; if (!name.empty()) sync_names[name]=id; set_last_error(0); }
         return add_sync_handle(id);
     }
     uint32_t open_sync(SyncKind kind, uint32_t namep) { std::string name=str(namep);auto it=sync_names.find(name);if(it==sync_names.end()){set_last_error(2);return 0;}if(sync_objects[it->second].kind!=kind){set_last_error(6);return 0;}return add_sync_handle(it->second); }
     bool close_sync(uint32_t h) { auto it=sync_handles.find(h); if(it==sync_handles.end())return false; uint32_t id=it->second; sync_handles.erase(it); auto& o=sync_objects[id]; if(!--o.refs){if(!o.name.empty())sync_names.erase(o.name);sync_objects.erase(id);} return true; }
-    // Guest threads are cooperative; run_pending_threads is the only runnable
-    // waiter source. Finite waits expire normally, but an unsignaled INFINITE
-    // wait faults explicitly rather than inventing a successful signal.
+    // WaitForSingleObject runs all pending guest bodies before this check. If the
+    // object is still unavailable, no runnable guest thread can signal it without
+    // another yield, so finite waits time out immediately (there is no virtual tick clock).
+    // An unsignaled INFINITE wait faults loudly instead of inventing a signal.
     uint32_t sync_wait(Cpu& c, uint32_t h, uint32_t timeout) {
         auto it=sync_handles.find(h); if(it==sync_handles.end())return 0xffffffffu; auto& o=sync_objects[it->second];
         uint32_t tid=c.fs_base?c.mem.r32(c.fs_base+0x24):1u;
         if(o.kind==SyncKind::Event&&o.signaled){if(!o.manual)o.signaled=false;return 0;}
         if(o.kind==SyncKind::Semaphore&&o.count){--o.count;return 0;}
         if(o.kind==SyncKind::Mutex&&(!o.owner||o.owner==tid)){uint32_t r=o.abandoned?0x80u:0u;o.abandoned=false;o.owner=tid;++o.recursion;return r;}
-        if(timeout==0)return 258u;
         if(timeout==0xffffffffu)throw Fault(FaultKind::Unsupported,c.eip,c.eip,"WaitForSingleObject: unsignaled infinite wait on handle "+std::to_string(h));
-        std::this_thread::sleep_for(std::chrono::milliseconds(timeout));return 258u;
+        return 258u;
     }
     void abandon_mutexes(uint32_t tid) { for(auto& kv:sync_objects)if(kv.second.kind==SyncKind::Mutex&&kv.second.owner==tid){kv.second.owner=kv.second.recursion=0;kv.second.abandoned=true;} }
     // A FILE* is one of our three iob entries; anything else is a bad handle.
