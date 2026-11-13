@@ -19,6 +19,7 @@
 #include "../host/x86/apiset.h"
 #include "../host/x86/x86_guest.h"
 #include "../host/x86/x86_play.h"
+#include "../x86_route.h"
 using namespace x86;
 static int checks, failures;
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #x); } } while (0)
@@ -79,9 +80,10 @@ int main(int argc, char** argv) {
         CHECK(r.loaded && r.finished && r.exit_code == 0);
         // strlen and ExitProcess bind; frobnicate is the one unresolved import.
         CHECK(r.imports == 3 && r.bound == 2);
-        // The list the launcher's "x86 gap:" lines are built from (the lines
-        // themselves are asserted by x86-gap, which lands with its own PR).
         CHECK(r.unresolved.size() == 1 && r.unresolved[0] == "api-ms-win-foo-l1-1-0.dll!frobnicate");
+        // The launcher names it, with the API-set name the game imported.
+        auto rep = x86_route::report(r, "apiset.exe");
+        CHECK(rep.gap.size() == 2 && rep.gap[0] == "x86 gap: api-ms-win-foo-l1-1-0.dll!frobnicate" && rep.gap[1] == "x86 gap: total=1");
     }
     printf("x86-apiset: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
