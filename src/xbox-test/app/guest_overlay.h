@@ -767,7 +767,11 @@ inline bool at_rest(uint32_t nb,const bool* b,uint32_t na,const double* ax) {
     for(uint32_t i=0;i<na;++i){double d=ax[i]-rest_value(ax[i]);if(d<-0.1||d>0.1)return false;}
     return true;
 }
-inline bool blocking(){return inputBlocked.load(std::memory_order_relaxed)&&GetCurrentThreadId()!=uiThread;}
+inline bool pad_owned_by_overlay(){
+    return guest_watchdog::overlay_owns_pad(inputBlocked.load(std::memory_order_acquire),
+                                            guestDead.load(std::memory_order_acquire),false);
+}
+inline bool blocking(){return pad_owned_by_overlay()&&GetCurrentThreadId()!=uiThread;}
 inline int32_t __stdcall gamepad_read(void* self,winrt::Windows::Gaming::Input::GamepadReading* out) {
     int32_t hr=realGamepadRead(self,out);
     if(hr>=0&&out&&blocking()){auto stamp=out->Timestamp;*out={};out->Timestamp=stamp;++blockedReads;}

@@ -205,6 +205,73 @@ constexpr GuideStep guide_step(bool dead, bool open, int row,
     return {GuideAction::none, open, row};
 }
 
+// Guide log lines (console-visible: a run shows which row has focus and which
+// action fired). Names are the menu model's: the Home rows are the labels
+// guest_overlay::label() and menu_command use, and the action names are the
+// GuideAction enumerators. tests/guest-watchdog.cpp asserts the exact strings.
+inline const char* guide_row_name(int row) {
+    switch (row) {
+        case 0: return "Resume";
+        case 1: return "Quit game";
+        case 2: return "Force quit";
+        default: return "?";
+    }
+}
+inline const char* guide_action_name(GuideAction a) {
+    switch (a) {
+        case GuideAction::none:      return "none";
+        case GuideAction::toggle:    return "toggle";
+        case GuideAction::up:        return "up";
+        case GuideAction::down:      return "down";
+        case GuideAction::forceQuit: return "forceQuit";
+        case GuideAction::quitGame:  return "quitGame";
+        case GuideAction::resume:    return "resume";
+        case GuideAction::close:     return "close";
+    }
+    return "?";
+}
+inline std::string guide_open_line(bool dead) {
+    return std::string("overlay: guide open (dead=") + (dead ? "1" : "0") + ")";
+}
+// Home rows get the row name; the other tabs have no names here, so they log
+// the tab and the index.
+inline std::string guide_row_line(int tab, int row) {
+    if (tab == 0) return "overlay: guide row=" + std::to_string(row) + " " + guide_row_name(row);
+    return "overlay: guide tab=" + std::to_string(tab) + " row=" + std::to_string(row);
+}
+inline std::string guide_action_line(GuideAction a) {
+    return std::string("overlay: guide action=") + guide_action_name(a);
+}
+// The guide state as last logged. The caller keeps one per guide instance.
+struct GuideTrace {
+    bool open = false;
+    int tab = 0;
+    int row = 0;
+};
+// Lines for the guide state change since `last` (empty when nothing moved),
+// then `last` becomes the new state. Opening logs the open line and the focused
+// row; a focus move logs the row line; closing logs nothing (the close action
+// line says so).
+inline std::vector<std::string> guide_trace_step(GuideTrace& last, bool open, bool dead, int tab, int row) {
+    std::vector<std::string> out;
+    if (open && !last.open) out.push_back(guide_open_line(dead));
+    if (open && (!last.open || tab != last.tab || row != last.row)) out.push_back(guide_row_line(tab, row));
+    last = GuideTrace{open, tab, row};
+    return out;
+}
+
+// Pad ownership (bugbot r4562634978): while the overlay owns the pad, the guest
+// is sent a neutral pad and the presses drive the guide only. The overlay owns
+// it while the guide is open (guideOwnsInput, the same flag guest_overlay
+// raises on open), and always while the guest is dead: the dead page and guide
+// are then the only thing on screen. `synthetic` (cmd.txt gdead) is the same
+// dead state, so it carries the same ownership; the parameter is taken so the
+// tests can assert that it changes nothing. Pure, so the decision is tested
+// without the pad.
+constexpr bool overlay_owns_pad(bool guideOwnsInput, bool guestDead, bool /*synthetic*/) {
+    return guideOwnsInput || guestDead;
+}
+
 // Force-quit sequencing (bugbot r4559831127): the kill and the save upload
 // must never run in parallel — an upload racing the kill can read a half-
 // written save, or the kill can land mid-upload. One worker walks the steps

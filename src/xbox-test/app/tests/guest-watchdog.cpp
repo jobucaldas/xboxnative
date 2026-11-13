@@ -440,6 +440,111 @@ int main() {
         CHECK(v.reason == Reason::silent);
     }
 
+    // Guide log lines: the exact strings a console run greps for. The dead
+    // sequence below is the contract for a gdead run: open lands on Force quit,
+    // the focus moves are logged, and every A/B/pad edge names its action.
+    {
+        using guest_watchdog::guide_action_line;
+        using guest_watchdog::guide_open_line;
+        using guest_watchdog::guide_row_line;
+        using guest_watchdog::guide_trace_step;
+        using guest_watchdog::GuideTrace;
+        CHECK(guide_open_line(true) == "overlay: guide open (dead=1)");
+        CHECK(guide_open_line(false) == "overlay: guide open (dead=0)");
+        CHECK(guide_row_line(0, 0) == "overlay: guide row=0 Resume");
+        CHECK(guide_row_line(0, 1) == "overlay: guide row=1 Quit game");
+        CHECK(guide_row_line(0, 2) == "overlay: guide row=2 Force quit");
+        CHECK(guide_row_line(1, 2) == "overlay: guide tab=1 row=2");
+        CHECK(guide_action_line(GuideAction::none) == "overlay: guide action=none");
+        CHECK(guide_action_line(GuideAction::toggle) == "overlay: guide action=toggle");
+        CHECK(guide_action_line(GuideAction::up) == "overlay: guide action=up");
+        CHECK(guide_action_line(GuideAction::down) == "overlay: guide action=down");
+        CHECK(guide_action_line(GuideAction::forceQuit) == "overlay: guide action=forceQuit");
+        CHECK(guide_action_line(GuideAction::quitGame) == "overlay: guide action=quitGame");
+        CHECK(guide_action_line(GuideAction::resume) == "overlay: guide action=resume");
+        CHECK(guide_action_line(GuideAction::close) == "overlay: guide action=close");
+
+        // Dead-state press sequence, driven the way guest_menu drives it: one
+        // guide_step per edge, the caller applies (open,row), and the trace
+        // logs what changed. Expected log is the console contract.
+        {
+            std::vector<std::string> log, expect;
+            GuideTrace trace;
+            bool open = false;
+            int row = 0;
+            auto press = [&](bool c, bool u, bool d, bool a, bool b) {
+                const GuideStep s = guide_step(true, open, row, c, u, d, a, b);
+                if (s.action != GuideAction::none) log.push_back(guide_action_line(s.action));
+                open = s.open;
+                row = s.row;
+                for (const std::string& line : guide_trace_step(trace, open, true, 0, row)) log.push_back(line);
+            };
+            press(true, false, false, false, false);   // View+Menu: opens on Force quit
+            press(false, false, true, false, false);   // Down: wraps to Resume
+            press(false, true, false, false, false);   // Up: wraps to Force quit
+            press(false, false, false, true, false);   // A on Force quit
+            press(false, false, true, false, false);   // Down: Resume
+            press(false, false, false, true, false);   // A on Resume while dead: no-op
+            press(false, false, false, false, true);   // B: closes
+            press(true, false, false, false, false);   // View+Menu again: reopens on Force quit
+            press(false, true, false, false, false);   // Up: Quit game
+            press(false, false, false, true, false);   // A on Quit game
+            expect = {
+                "overlay: guide action=toggle", "overlay: guide open (dead=1)", "overlay: guide row=2 Force quit",
+                "overlay: guide action=down", "overlay: guide row=0 Resume",
+                "overlay: guide action=up", "overlay: guide row=2 Force quit",
+                "overlay: guide action=forceQuit",
+                "overlay: guide action=down", "overlay: guide row=0 Resume",
+                "overlay: guide action=resume",
+                "overlay: guide action=close",
+                "overlay: guide action=toggle", "overlay: guide open (dead=1)", "overlay: guide row=2 Force quit",
+                "overlay: guide action=up", "overlay: guide row=1 Quit game",
+                "overlay: guide action=quitGame",
+            };
+            CHECK(log == expect);
+        }
+        // Alive sequence: the old focus (Resume) on open, and A on it closes.
+        {
+            std::vector<std::string> log, expect;
+            GuideTrace trace;
+            bool open = false;
+            int row = 0;
+            auto press = [&](bool c, bool a) {
+                const GuideStep s = guide_step(false, open, row, c, false, false, a, false);
+                if (s.action != GuideAction::none) log.push_back(guide_action_line(s.action));
+                open = s.open;
+                row = s.row;
+                for (const std::string& line : guide_trace_step(trace, open, false, 0, row)) log.push_back(line);
+            };
+            press(true, false);    // View+Menu: opens on Resume
+            press(false, true);    // A on Resume: closes
+            expect = {
+                "overlay: guide action=toggle", "overlay: guide open (dead=0)", "overlay: guide row=0 Resume",
+                "overlay: guide action=close",
+            };
+            CHECK(log == expect);
+        }
+    }
+
+    // Pad ownership (bugbot r4562634978, r4563731919): one decision gates the
+    // XInput publish and the WGI Gamepad/RawGameController hooks. A dead guest
+    // is always owned by the overlay, whether the guide was opened and whether
+    // gdead or the watchdog produced it; a live guest is owned only while open.
+    {
+        using guest_watchdog::overlay_owns_pad;
+        for (int input = 0; input < 2; ++input)
+            for (int dead = 0; dead < 2; ++dead)
+                for (int syn = 0; syn < 2; ++syn) {
+                    const bool want = input || dead;
+                    CHECK(overlay_owns_pad(!!input, !!dead, !!syn) == want);
+                }
+        CHECK(!overlay_owns_pad(false, false, false));   // live, guide closed: the guest keeps the pad
+        CHECK(overlay_owns_pad(true, false, false));     // guide open on a live guest
+        CHECK(overlay_owns_pad(false, true, false));     // dead: XInput, WGI and raw reads are neutral
+        CHECK(overlay_owns_pad(false, true, true));      // synthetic gdead: same ownership
+        CHECK(overlay_owns_pad(false, true, false) == overlay_owns_pad(false, true, true));
+    }
+
     // Force-quit sequencing (bugbot r4559831127): the worker must walk
     // terminate -> wait -> sync -> done IN ORDER — the save upload can
     // never run while the guest is alive or mid-teardown, and the UI's

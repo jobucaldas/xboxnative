@@ -106,5 +106,64 @@ else
     fail "no GetProcAddress lookup for DCompositionCreateDevice2 (dead page has no dcomp path)"
 fi
 
+# 9. Pad ownership (bugbot r4562634978): the guest's pad publish must gate on
+#    the overlay-ownership predicate (dead implies ownership), never on the bare
+#    guide flag, or a dead guest's pad keeps reaching the live game.
+poll=$(awk '/void PollGuestControllers\(\) \{/ {on=1} on {print} on && /^    }$/ {exit}' "$main")
+if echo "$poll" | grep -q 'pad_owned_by_overlay()'; then
+    ok "PollGuestControllers gates the guest pad on pad_owned_by_overlay()"
+else
+    fail "PollGuestControllers does not use pad_owned_by_overlay() for the guest pad"
+fi
+if echo "$poll" | grep -q 'inputBlocked'; then
+    fail "PollGuestControllers reads the bare inputBlocked flag (dead must imply ownership)"
+else ok "PollGuestControllers reads no bare inputBlocked flag"; fi
+if grep -q 'overlay_owns_pad' "$root/app/host/guest_watchdog.h"; then
+    ok "overlay_owns_pad predicate is defined in guest_watchdog.h"
+else
+    fail "overlay_owns_pad predicate missing from guest_watchdog.h"
+fi
+
+# 10. Every guest-facing input hook uses that same ownership decision:
+#     keyboard/mouse through guest_input(), XInput through
+#     PollGuestControllers, and WGI Gamepad/RawGameController through blocking().
+guest_input=$(awk '/bool guest_input\(\) \{/ {on=1} on {print} on && /^    }$/ {exit}' "$main")
+if echo "$guest_input" | grep -q 'pad_owned_by_overlay()'; then
+    ok "guest_input gates keyboard/mouse on pad_owned_by_overlay()"
+else
+    fail "guest_input does not use pad_owned_by_overlay()"
+fi
+if echo "$guest_input" | grep -qE 'inputBlocked|menuOpen|guestDead'; then
+    fail "guest_input reads a bypass flag instead of the ownership predicate"
+else ok "guest_input reads no bypass flag"; fi
+
+overlay="$root/app/guest_overlay.h"
+pad_ownership=$(awk '/inline bool pad_owned_by_overlay\(\)/ {on=1} on {print} on && /^}/ {exit}' "$overlay")
+if echo "$pad_ownership" | grep -q 'guest_watchdog::overlay_owns_pad'; then
+    ok "guest_overlay pad ownership delegates to the pure predicate"
+else
+    fail "guest_overlay pad ownership bypasses the pure predicate"
+fi
+blocking=$(awk '/inline bool blocking\(\)/ {print; exit}' "$overlay")
+if echo "$blocking" | grep -q 'pad_owned_by_overlay()'; then
+    ok "WGI/raw blocking() delegates to pad_owned_by_overlay()"
+else
+    fail "WGI/raw blocking() does not use pad_owned_by_overlay()"
+fi
+if echo "$blocking" | grep -qE 'inputBlocked|menuOpen|guestDead'; then
+    fail "WGI/raw blocking() reads a bypass flag instead of the ownership predicate"
+else ok "WGI/raw blocking() reads no bypass flag"; fi
+for hook in gamepad_read raw_read; do
+    body=$(awk -v marker="inline int32_t __stdcall $hook" 'index($0,marker) {on=1} on {print} on && /^}$/ {exit}' "$overlay")
+    if echo "$body" | grep -q 'blocking()'; then
+        ok "$hook gates its guest reading through blocking()"
+    else
+        fail "$hook does not gate its guest reading through blocking()"
+    fi
+    if echo "$body" | grep -qE 'inputBlocked|menuOpen|guestDead'; then
+        fail "$hook reads an ownership flag directly"
+    else ok "$hook reads no ownership flag directly"; fi
+done
+
 echo "dead-path audit: $checks checks, $failures failures"
 [ "$failures" -eq 0 ]
