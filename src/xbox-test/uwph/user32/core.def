@@ -21,6 +21,7 @@ EXPORTS
  GetParent=c_GetParent
  IsIconic=c_IsIconic
  IsWindowVisible=c_IsWindowVisible
+ IsWindowEnabled=c_IsWindowEnabled
  ShowWindow=c_ShowWindow
  GetClientRect=c_GetClientRect
  ClientToScreen=c_ClientToScreen
@@ -86,6 +87,7 @@ EXPORTS
  EnumDisplayMonitors=c_EnumDisplayMonitors
  EnumDisplaySettingsW=c_EnumDisplaySettingsW
  EnumDisplaySettingsA=c_EnumDisplaySettingsA
+ EnumDisplaySettingsExW=c_EnumDisplaySettingsExW
  EnumDisplayDevicesA=c_EnumDisplayDevicesA
  GetWindowPlacement=c_GetWindowPlacement
  RegisterRawInputDevices=c_RegisterRawInputDevices
@@ -223,6 +225,7 @@ EXPORTS
  SetParent=c_SetParent
  GetWindowTextLengthW=c_GetWindowTextLengthW
  GetWindowTextW=c_GetWindowTextW
+ GetWindowTextA=c_GetWindowTextA
  SetLayeredWindowAttributes=c_SetLayeredWindowAttributes
  SetWindowRgn=c_SetWindowRgn
  FlashWindowEx=c_FlashWindowEx

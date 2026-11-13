@@ -131,6 +131,8 @@ extern "C" BOOL WINAPI c_EnableWindow(HWND h,BOOL enable){
  if(was==!enable)return was;
  w->proc(h,WM_ENABLE,enable,0);return was;
 }
+// The window's own WS_DISABLED state (not its parent's); an invalid handle is FALSE.
+extern "C" BOOL WINAPI c_IsWindowEnabled(HWND h){std::lock_guard<std::recursive_mutex> l(mutex);auto w=window(h);return w&&!(w->style&WS_DISABLED);}
 extern "C" HWND WINAPI c_SetActiveWindow(HWND h){
  std::lock_guard<std::recursive_mutex> l(mutex);
  HWND old=activeWindow&&window(activeWindow)?activeWindow:nullptr;
@@ -151,6 +153,17 @@ extern "C" int WINAPI c_GetWindowTextW(HWND h,LPWSTR out,int size){
  if(!out||size<=0)return 0;
  auto w=window(h);if(!w){out[0]=0;return 0;}
  int n=std::min(size-1,int(w->title.size()));memcpy(out,w->title.data(),size_t(n)*2);out[n]=0;return n;
+}
+// ANSI caller: the title converts to the ANSI code page, then truncates to size-1
+// bytes (the terminator takes one), as Windows does.
+extern "C" int WINAPI c_GetWindowTextA(HWND h,LPSTR out,int size){
+ std::lock_guard<std::recursive_mutex> l(mutex);
+ if(!out||size<=0)return 0;
+ auto w=window(h);if(!w||w->title.empty()){out[0]=0;return 0;}
+ int need=WideCharToMultiByte(CP_ACP,0,w->title.c_str(),int(w->title.size()),nullptr,0,nullptr,nullptr);
+ if(need<=0){out[0]=0;return 0;}
+ std::string text(size_t(need),'\0');WideCharToMultiByte(CP_ACP,0,w->title.c_str(),int(w->title.size()),&text[0],need,nullptr,nullptr);
+ int n=std::min(size-1,need);memcpy(out,text.data(),size_t(n));out[n]=0;return n;
 }
 // No compositor applies per-window alpha/colour keys or shapes here; the
 // calls are accepted for the window kinds Windows accepts them for.

@@ -217,6 +217,12 @@ extern "C" DWORD WINAPI u32c_entry(){
  WCHAR layoutName[KL_NAMELENGTH];check(GetKeyboardLayout(0)==(HKL)(ULONG_PTR)0x04090409);check(GetKeyboardLayoutNameW(layoutName)&&wstreq(layoutName,L"00000409"));
  int monitors=0;check(EnumDisplayMonitors(0,0,[](HMONITOR,HDC,RECT* r,LPARAM p)->BOOL{++*(int*)p;return r->right==1920;},(LPARAM)&monitors)&&monitors==1);
  DEVMODEW dm={};check(EnumDisplaySettingsW(0,0,&dm)&&dm.dmPelsWidth==1920&&dm.dmPelsHeight==1080);
+ // The extended query reports the same mode; index 0 is it, index 1 is past the end.
+ DEVMODEW ext={};check(EnumDisplaySettingsExW(0,ENUM_CURRENT_SETTINGS,&ext,0)&&ext.dmPelsWidth==1920&&ext.dmPelsHeight==1080);
+ check(EnumDisplaySettingsExW(0,0,&ext,0)&&ext.dmPelsWidth==1920&&ext.dmPelsHeight==1080);check(!EnumDisplaySettingsExW(0,1,&ext,0));
+ // Enabled state is the record's own WS_DISABLED bit; ANSI titles truncate to size-1 bytes.
+ check(!IsWindowEnabled(0)&&IsWindowEnabled(h2));check(EnableWindow(h2,FALSE)==FALSE&&!IsWindowEnabled(h2));check(EnableWindow(h2,TRUE)&&IsWindowEnabled(h2));
+ char ansi[16]={};check(GetWindowTextA(h2,ansi,sizeof ansi)==5&&streq(ansi,"focus"));check(GetWindowTextA(h2,ansi,3)==2&&streq(ansi,"fo"));check(GetWindowTextA(h2,ansi,0)==0);
  DISPLAY_DEVICEA dd={};dd.cb=sizeof(dd);check(EnumDisplayDevicesA(0,0,&dd,0)&&streq(dd.DeviceName,"\\\\.\\DISPLAY1"));check(!EnumDisplayDevicesA(0,1,&dd,0));
  WINDOWPLACEMENT wp={sizeof(wp)};check(GetWindowPlacement(h2,&wp)&&wp.showCmd==SW_SHOWNORMAL&&wp.rcNormalPosition.right==10);
  RAWINPUTDEVICE rid={1,6,0,h2};check(RegisterRawInputDevices(&rid,1,sizeof(rid)));UINT rc=0;
