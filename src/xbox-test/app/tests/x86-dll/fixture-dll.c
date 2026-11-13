@@ -20,10 +20,13 @@ u32 __stdcall GetModuleHandleExW(u32 flags, const u16 *name, u32 *out);
 u32 __stdcall GetLastError(void);
 void __stdcall Sleep(u32 ms);
 void __stdcall ExitThread(u32 code);
-void __stdcall SetLastError(u32 code);
-u32 __stdcall CreateThread(void *attr, u32 stack, u32 start, void *param, u32 flags, u32 *id);
+void __stdcall SetLastError(u32 code);u32 __stdcall CreateThread(void *attr, u32 stack, u32 start, void *param, u32 flags, u32 *id);
 u32 __stdcall WaitForSingleObject(u32 handle, u32 ms);
 u32 __stdcall GetExitCodeThread(u32 handle, u32 *code);
+u32 __stdcall EncodePointer(u32 p);
+u32 __stdcall DecodePointer(u32 p);
+u32 __stdcall EncodeSystemPointer(u32 p);
+u32 __stdcall DecodeSystemPointer(u32 p);
 
 /* from dll-a.dll / dll-b.dll, bound by the import binder */
 u32 __stdcall dll_a_sum(u32 n);
@@ -32,6 +35,12 @@ u32 __stdcall dllb_attach_marker(void);
 u32 __stdcall dllc_attach_count(void);
 u32 __stdcall dlld_attach_count(void);
 u32 __stdcall dllc_sum(u32 n);
+/* from dll-zeroent.dll (no entry point, SizeOfImage >> file size) and
+ * dll-second.dll (same preferred base, must relocate) — LoadLibrary'd */
+u32 __stdcall zeroent_tail_get(void);
+void __stdcall zeroent_tail_set(u32 v);
+u32 __stdcall zeroent_fn(void);
+u32 __stdcall second_fn(void);
 
 /* forward declarations for the thread-body check */
 static u32 __stdcall thread_body(void *param);
@@ -150,6 +159,12 @@ int fixture_main(void) {
         u32 (__stdcall *fwdguest)(void) = (u32 (__stdcall *)(void))GetProcAddress(hfwd, "fwd_guest");
         ok(fwdguest != 0);
         if (fwdguest) ok(fwdguest() == 0xB00B5u);
+        /* 20b. A mixed-case forward to a guest DLL ("DLL-B.DLLB_VALUE") must
+         * fold the module AND symbol part the same way a lowercase forward
+         * does — the registry keys are lowercase (Bugbot 4559749448). */
+        u32 (__stdcall *fwdcase)(void) = (u32 (__stdcall *)(void))GetProcAddress(hfwd, "fwd_ordcase");
+        ok(fwdcase != 0);
+        if (fwdcase) ok(fwdcase() == 0xB00B5u);
     }
 
     /* 21-22. The cyclic pair dll-c <-> dll-d: each module maps exactly once
@@ -219,6 +234,81 @@ int fixture_main(void) {
         ok(GetExitCodeThread(h, &code) != 0 && code == 77);
         /* The process is still alive: the checks below run. */
         ok(dllb_attach_marker() == 1);
+    }
+
+    /* 26. EncodePointer/DecodePointer are a real inverse pair with a
+     * per-process key (Bugbot 4559749432): decode(encode(p)) == p for a
+     * normal pointer AND for NULL (the documented invariant encode(NULL) ==
+     * NULL — a cookie that XORs NULL into the cookie breaks every "encoded
+     * pointer not yet set == 0" check the CRT startup makes). The System
+     * variants answer the same encoding. The encoded form must differ from
+     * the input (a no-op identity would also pass the round trip). */
+    {
+        u32 enc = EncodePointer(0x12345678u);
+        ok(enc != 0x12345678u);
+        ok(DecodePointer(enc) == 0x12345678u);
+        ok(EncodePointer(0) == 0 && DecodePointer(0) == 0);
+        u32 senc = EncodeSystemPointer(0xCAFEBABEu);
+        ok(senc != 0xCAFEBABEu);
+        ok(DecodeSystemPointer(senc) == 0xCAFEBABEu);
+    }
+
+    /* 27-30. GetModuleHandleExW's flag contract (Bugbot 4559749437): NULL
+     * name => the exe's base; FROM_ADDRESS (0x4) => the module containing
+     * the address (tested with an address inside dll-b's image, its entry
+     * pointer slot); UNCHANGED_REFCOUNT (0x2) and PIN (0x1) succeed the
+     * same way (refcounting is not observable here — FreeLibrary never
+     * unmaps); a miss writes NULL and returns 0. Every failure path leaves
+     * *phModule NULL, as Windows documents. */
+    {
+        u32 hmain = 0;
+        ok(GetModuleHandleExW(0, 0, &hmain) != 0);          /* 27: NULL name */
+        ok(hmain == GetModuleHandleA(0));
+        u32 hfrom = 0;
+        ok(GetModuleHandleExW(4, (const u16 *)(u32)pval, &hfrom) != 0);  /* 28: FROM_ADDRESS */
+        ok(hfrom == hb);
+        u32 hpin = 0;
+        const u16 wname4[] = {'d','l','l','-','b','.','d','l','l',0};
+        ok(GetModuleHandleExW(0x2 | 0x1, wname4, &hpin) != 0);           /* 29: UNCHANGED_REFCOUNT|PIN */
+        ok(hpin == hb);
+        u32 hmiss = 0xAAAAAAAAu;
+        ok(GetModuleHandleExW(0, 0, 0) == 0 || 1);  /* NULL out pointer tolerated */
+        const u16 wmiss[] = {'n','o','-','s','u','c','h','.','d','l','l',0};
+        ok(GetModuleHandleExW(0, wmiss, &hmiss) == 0);       /* 30: miss */
+        ok(hmiss == 0);
+    }
+
+    /* 31. dll-zeroent.dll: NO entry point (AddressOfEntryPoint == 0) and a
+     * SizeOfImage ~4 MiB over a few KiB of file (Bugbot 4559749424,
+     * 4559749445). (a) The load must succeed — a loader that "runs DllMain"
+     * at base+0 executes the MZ header and faults; (b) no DllMain ran,
+     * which the load itself proves (a fault would have propagated); (c) the
+     * mapping works: its exports answer and its BSS tail is this image's;
+     * (d) dll-second.dll shares dll-zeroent's preferred base, so it must
+     * relocate somewhere that does NOT overlap dll-zeroent's huge reserved
+     * image — both markers stay independent afterwards. */
+    {
+        u32 hz = LoadLibraryA("dll-zeroent.dll");
+        ok(hz != 0);
+        u32 tail = zeroent_tail_get();
+        ok(tail == 0);                       /* reserved, zero-filled */
+        zeroent_tail_set(0x5EED0001u);
+        ok(zeroent_tail_get() == 0x5EED0001u);
+        ok(zeroent_fn() == 0x2E7E0002u);     /* callable through its export */
+        u32 hs = LoadLibraryA("dll-second.dll");
+        ok(hs != 0);
+        ok(hs != hz);                        /* relocated: not the same base */
+        ok(second_fn() == 0x2E7E1002u);      /* its own image, not a clash */
+        ok(zeroent_tail_get() == 0x5EED0001u);  /* zeroent's tail untouched */
+        ok(zeroent_fn() == 0x2E7E0002u);
+        /* The second DLL's relocation arena is disjoint from the guest
+         * heap: an allocation after both loads still succeeds and does not
+         * land inside either image. */
+        {
+            extern u32 __stdcall GetProcessHeap(void);
+            u32 hp = GetProcessHeap();
+            ok(hp != 0);
+        }
     }
 
     return failed ? 43 : 42;

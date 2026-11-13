@@ -36,6 +36,12 @@ struct Registry {  // (lowercase dll, lowercase symbol) -> thunk definition
 };
 struct Image {
     uint32_t base = 0, size = 0, entry = 0;
+    // The entry point as an RVA: `entry` is absolute (base + RVA), so a DLL
+    // whose AddressOfEntryPoint is 0 would still show a nonzero `entry` (the
+    // image base) and look like it has code to run. Everything that decides
+    // "does this module have an entry point" must test the RVA (Bugbot
+    // 4559749424); only the call itself uses the absolute address.
+    uint32_t entry_rva = 0;
     unsigned relocations = 0, imports = 0, bound = 0;
     std::vector<std::string> unresolved;
     // Implicit TLS (IMAGE_DIRECTORY_ENTRY_TLS): the fields are absolute VAs as
@@ -99,8 +105,15 @@ inline void read_exports(Image& img, const std::vector<uint8_t>& bytes) {
         // A forwarder RVA (inside the export directory) is kept as its string:
         // ordinal lookups must resolve it like name lookups do, never rebase an
         // RVA that is really ASCII text (Bugbot 4559267308).
-        if (fn_rva >= exp_rva && fn_rva < exp_rva + 0x10000 && n_funcs)
-            img.forwarded_by_ord[img.ordinal_base + i] = pe_str(bytes, fn_rva);
+        if (fn_rva >= exp_rva && fn_rva < exp_rva + 0x10000 && n_funcs) {
+            // Lowercase the string exactly like a named forward: an ordinal
+            // lookup and a name lookup of the same export must fold the same
+            // way, or a mixed-case forward ("DLL-B.value") resolves by name
+            // and dead-ends by ordinal (Bugbot 4559749448).
+            std::string fwd = pe_str(bytes, fn_rva);
+            for (auto& ch : fwd) if (ch >= 'A' && ch <= 'Z') ch += 32;
+            img.forwarded_by_ord[img.ordinal_base + i] = fwd;
+        }
         img.ordinals.push_back({img.ordinal_base + i, fn_rva});
     }
 }
@@ -109,7 +122,7 @@ inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, cons
     size_t nt = u32(file, 0x3c);
     uint32_t preferred = u32(file, nt + 24 + 28);
     wxl::Pe32 pe; pe.map(file, load_base ? load_base : preferred);
-    Image img; img.base = pe.logical; img.size = uint32_t(pe.bytes.size()); img.entry = pe.logical + pe.entry; img.relocations = pe.relocations;
+    Image img; img.base = pe.logical; img.size = uint32_t(pe.bytes.size()); img.entry_rva = pe.entry; img.entry = pe.logical + pe.entry; img.relocations = pe.relocations;
     // Sections: headers R; each section gets its own page protections.
     mem.map(img.base, img.size, PROT_R | PROT_W);
     mem.write_bytes(img.base, pe.bytes.data(), img.size);
@@ -243,15 +256,26 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
                     const std::string& module_name = {}) {
     if (depth > 16) throw std::runtime_error("DLL dependencies nested too deep");
     // Load at the ImageBase when it is free; otherwise relocate like Windows'
-    // loader does for a DLL whose base is taken. Candidate bases stay in the
-    // 0x10000000 arena a normal exe never uses (wxl::Pe32 relocates there too).
+    // loader does for a DLL whose base is taken. Two sizing rules from the
+    // Windows loader: (a) the reservation covers SizeOfImage, not the file
+    // size — a DLL with large BSS/uninitialised sections maps much more than
+    // its bytes on disk, and reserving only the file size lets the next
+    // mapping overwrite this image's tail (Bugbot 4559749445); (b) the
+    // relocation arena is the dedicated 0x38000000 range, disjoint from the
+    // guest heap (0x08000000, grows up), VirtualAlloc (0x60000000, grows up),
+    // the section arena (0x64000000) and the OS-module handles (0x68000000) —
+    // searching from 0x10000000 handed out the heap's own arena and the load
+    // died on "x86 map: overlap" (Bugbot 4559749442).
+    constexpr uint32_t kDllArenaBase = 0x38000000u, kDllArenaEnd = 0x60000000u;
     size_t nt0 = u32(file, 0x3c);
     uint32_t preferred = u32(file, nt0 + 24 + 28);
+    uint32_t image_size = u32(file, nt0 + 24 + 56);  // SizeOfImage (page-aligned; wxl::Pe32 validates)
+    if (!image_size) throw std::runtime_error("DLL load: SizeOfImage is 0");
     uint32_t load_base = preferred;
-    if (!mem.free_range(preferred, uint32_t(file.size()))) {
-        uint32_t candidate = 0x10000000u;
-        while (candidate < 0xF0000000u && !mem.free_range(candidate, uint32_t(file.size()))) candidate += 0x1000000u;
-        if (candidate >= 0xF0000000u) throw std::runtime_error("DLL load: no free base for relocation");
+    if (!mem.free_range(preferred, image_size)) {
+        uint32_t candidate = kDllArenaBase;
+        while (candidate < kDllArenaEnd && !mem.free_range(candidate, image_size)) candidate += 0x1000000u;
+        if (candidate >= kDllArenaEnd) throw std::runtime_error("DLL load: no free base for relocation");
         load_base = candidate;
     }
     // Windows' loader puts a module in the load table BEFORE walking its

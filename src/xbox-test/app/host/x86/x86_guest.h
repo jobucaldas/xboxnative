@@ -97,10 +97,22 @@ struct Guest {
     uint32_t initenv = 0, commode = 0, fmode = 0, mb_cur_max = 0, errno_ptr = 0;
     uint32_t startupinfo = 0, cmdline_ptr = 0, env_ptr = 0, module_name_ptr = 0;
     uint32_t image_base = 0;
+    // EncodePointer/DecodePointer (and the System variants): the security
+    // cookie; VC/UCRT startup encodes every function pointer it stores and
+    // decodes it on use, so the pair must be a real inverse or a decoded
+    // pointer is garbage. The key is per-process ("random-looking" to the
+    // guest) and the encoding is XOR, so decode(encode(p)) == p and
+    // encode(NULL) == decode(NULL) == NULL hold exactly as the documented
+    // pointer == NULL exactly as the documented invariant requires (a plain
+    // XOR answers the cookie for NULL and breaks every "encoded pointer not
+    // yet set == 0" check the CRT startup makes). A conditional XOR is still
+    // a real inverse pair (Bugbot 4559749432).
+    uint32_t pointer_cookie = 0x3FD2A71Eu ^ uint32_t(reinterpret_cast<uintptr_t>(this));
+    uint32_t encode_ptr(uint32_t p) const { return p ? p ^ pointer_cookie : 0; }
     unsigned heap_serial = 0;
     std::map<uint32_t, uint32_t> heap_handles;  // handle -> arena base
     std::map<uint32_t, uint32_t> virtual_alloc; // guest addr -> size
-    uint32_t virtual_top = 0x20000000;
+    uint32_t virtual_top = 0x60000000u;  // above the DLL relocation arena (0x38000000-0x60000000)
     unsigned next_tls = 0, thread_serial = 0;
     std::map<uint32_t, uint32_t> sections;  // handle -> size in bytes
     uint32_t section_serial = 0, section_top = 0x64000000u;
@@ -127,7 +139,12 @@ struct Guest {
     // the thunk page is mapped; the loader records them, run_dll_mains
     // dispatches. (Image::entry is already absolute: base + entry RVA.)
     std::map<std::string, uint32_t> dll_entries;
-    Guest(Memory& m, Host& h, Registry& r) : mem(m), host(h), reg(r), heap(m, 0x10000000) {}
+    // The heap arena starts at 0x08000000: above the exe (0x400000) and its
+    // stack, below the 0x10000000 base mingw/MSVC give every DLL by default —
+    // a DLL at its preferred base and later heap growth must never fight over
+    // the same pages (mem.map throws on overlap; Bugbot 4559749442). The
+    // 128 MiB headroom is the heap's before it could reach the first DLL.
+    Guest(Memory& m, Host& h, Registry& r) : mem(m), host(h), reg(r), heap(m, 0x08000000u) {}
     void register_all();
     // Module names are case-insensitive on Windows, and GetModuleHandleA
     // lowercases its lookup, so every insert goes through here: a mixed-case
@@ -325,7 +342,10 @@ struct Guest {
         uint32_t base = dlls[lower].image.base;
         dll_order.push_back(lower);
         add_module(lower, base);  // GetModuleHandleW must find LoadLibrary'd DLLs
-        if (dlls[lower].image.entry) dll_entries[lower] = dlls[lower].image.entry;  // absolute
+        // AddressOfEntryPoint == 0 means no entry point (a resource-only or
+        // data DLL): `entry` is absolute (base + RVA) and always nonzero, so
+        // the decision tests the RVA (Bugbot 4559749424).
+        if (dlls[lower].image.entry_rva) dll_entries[lower] = dlls[lower].image.entry;  // absolute
         // DllMain(DLL_PROCESS_ATTACH) for every module this call newly mapped,
         // dependencies first (load_dll pushed them onto dll_order in that
         // order), then the requested module — as the Windows loader attaches
@@ -622,7 +642,10 @@ inline void Guest::register_all() {
         std::string n = str(c.arg(0)); if (n.empty()) return image_base;
         for (auto& ch : n) ch = char(tolower((unsigned char)ch));
         auto it = modules.find(n); if (it != modules.end()) return it->second;
-        auto d = dlls.find(n); return d == dlls.end() ? 0 : d->second.image.base; });
+        auto d = dlls.find(n);
+        if (d != dlls.end()) return d->second.image.base;
+        set_last_error(126);  // ERROR_MOD_NOT_FOUND, as Windows answers a miss
+        return 0; });
     reg.add("kernel32.dll", "GetModuleHandleW", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         if (!c.arg(0)) return image_base;
         return 0; });
@@ -727,9 +750,16 @@ inline void Guest::register_all() {
         uint32_t p = c.arg(1); if (p) { mem.w32(p, 1); mem.w32(p + 4, 0); mem.w(p + 8, 0, 2); } return 1; });
     reg.add("kernel32.dll", "GetThreadPriority", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
     reg.add("kernel32.dll", "SetThreadPriority", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 1; });
-    // EncodePointer/DecodePointer: the security cookie; identity is fine
-    // because no guest-visible secret needs protecting in this surface.
-    reg.add("kernel32.dll", "EncodePointer", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t { return c.arg(0) ^ 0x5A5A5A5Au; });
+    // EncodePointer/DecodePointer (and the System variants): VC/UCRT startup
+    // encodes every function pointer it stores and decodes it on use, so the
+    // pair must be a real inverse or a decoded pointer is garbage. The key is
+    // per-process ("random-looking" to the guest) and the encoding is XOR, so
+    // decode(encode(p)) == p and encode(NULL) == decode(NULL) == NULL hold
+    // exactly as the documented invariants require (Bugbot 4559749432).
+    reg.add("kernel32.dll", "EncodePointer", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { return encode_ptr(c.arg(0)); });
+    reg.add("kernel32.dll", "DecodePointer", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { return encode_ptr(c.arg(0)); });
+    reg.add("kernel32.dll", "EncodeSystemPointer", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { return encode_ptr(c.arg(0)); });
+    reg.add("kernel32.dll", "DecodeSystemPointer", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { return encode_ptr(c.arg(0)); });
     // FormatMessage: no message tables; a caller must handle the failure, as
     // on Windows when no message is found.
     reg.add("kernel32.dll", "FormatMessageA", Conv::Stdcall, 7, [this](Cpu&) -> uint32_t { set_last_error(15100); return 0; });
@@ -740,18 +770,35 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "K32EnumProcessModules", Conv::Stdcall, 4, [this](Cpu&) -> uint32_t { set_last_error(6); return 0; });
     reg.add("kernel32.dll", "GetLogicalProcessorInformationEx", Conv::Stdcall, 3, [this](Cpu&) -> uint32_t { set_last_error(122); return 0; });
     // BOOL GetModuleHandleExW(DWORD dwFlags, LPCWSTR lpModuleName, HMODULE *phModule)
-    // (libsrc/winbase.h): three parameters — flags, name, out handle.
+    // (libsrc/winbase.h): three parameters — flags, name, out handle. The
+    // documented flag contract (Bugbot 4559749437): NULL name means the main
+    // module (the exe's base); GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS (0x4)
+    // treats lpModuleName as an address and answers the module containing it;
+    // UNCHANGED_REFCOUNT (0x2) and PIN (0x1) only affect refcounting, which
+    // this surface's FreeLibrary never unmaps anyway. A lookup that misses
+    // writes NULL and fails, as Windows does.
     reg.add("kernel32.dll", "GetModuleHandleExW", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
-        // Only the "from address" form is unsupported; the plain name form
-        // behaves like GetModuleHandleW.
-        uint32_t flags = c.arg(0), out = c.arg(2);
-        if (flags & 4) { if (out) mem.w32(out, 0); return 0; }
-        uint32_t p = c.arg(1); std::string n;
-        for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(p + i * 2, 2)); if (!w) break; n.push_back(char(w & 0xff)); }
-        for (auto& ch : n) ch = char(std::tolower((unsigned char)ch));
-        auto it = modules.find(n); if (it == modules.end()) { if (out) mem.w32(out, 0); return 0; }
-        if (out) { mem.w32(out, it->second); }
-        return 1; });
+        uint32_t flags = c.arg(0), p = c.arg(1), out = c.arg(2);
+        uint32_t base = 0;
+        if (flags & 4) {  // FROM_ADDRESS: find the module containing the address
+            if (p >= image_base && p < image_base + 0x1000000u) base = image_base;
+            else for (auto& kv : dlls) {
+                if (p >= kv.second.image.base && p < kv.second.image.base + kv.second.image.size) { base = kv.second.image.base; break; }
+            }
+        } else if (!p) {  // NULL name: the main module
+            base = image_base;
+        } else {
+            std::string n;
+            for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(p + i * 2, 2)); if (!w) break; n.push_back(char(w & 0xff)); }
+            for (auto& ch : n) ch = char(std::tolower((unsigned char)ch));
+            auto it = modules.find(n);
+            if (it == modules.end()) { auto d = dlls.find(n); if (d != dlls.end()) it = modules.emplace(n, d->second.image.base).first; }
+            if (it != modules.end()) base = it->second;
+        }
+        if (out) mem.w32(out, base);
+        if (!base) set_last_error(126);  // ERROR_MOD_NOT_FOUND, as Windows answers
+        return base ? 1 : 0;
+    });
     // Time/clock queries the C++ runtime's once-init and this_thread use.
     reg.add("kernel32.dll", "QueryUnbiasedInterruptTime", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t p = c.arg(0); if (p) { mem.w32(p, 0x00200000u); mem.w32(p + 4, 0); } return 1; });
@@ -1000,7 +1047,9 @@ inline void Guest::register_all() {
         std::string n;
         for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(c.arg(0) + i * 2, 2)); if (!w) break; n.push_back(char(w & 0xff)); }
         for (auto& ch : n) ch = char(std::tolower((unsigned char)ch));
-        auto it = modules.find(n); return it == modules.end() ? 0 : it->second; });
+        auto it = modules.find(n);
+        if (it == modules.end()) { set_last_error(126); return 0; }  // ERROR_MOD_NOT_FOUND
+        return it->second; });
     reg.add("msvcrt.dll", "__set_app_type", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 0; });
     reg.add("msvcrt.dll", "__setusermatherr", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 0; });
     reg.add("msvcrt.dll", "_amsg_exit", Conv::Cdecl, 1, [this](Cpu& c) -> uint32_t { do_exit(c, c.arg(0)); return 0; });

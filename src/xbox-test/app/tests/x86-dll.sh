@@ -57,6 +57,29 @@ EOF
 # emits real forwarder export entries (a referenced entry becomes an import
 # stub instead).
 "$cc32" $flags -shared -Wl,--entry,_DllMain@12 -o "$tmp/fwd.dll" "$here/x86-dll/dll-fwd.c" "$here/x86-dll/fwd.def"
+# dll-zeroent: NO entry point (--entry 0 writes AddressOfEntryPoint = 0) and a
+# ~4 MiB BSS over a few KiB of file — SizeOfImage >> file size. dll-second:
+# the same preferred base (mingw's 0x10000000), so the loader must relocate it
+# into the dedicated DLL arena without overlapping zeroent's huge reservation
+# or the guest heap (Bugbot 4559749424/4559749442/4559749445).
+"$cc32" $flags -shared -Wl,--entry,0 -Wl,--kill-at -o "$tmp/dll-zeroent.dll" "$here/x86-dll/dll-zeroent.c"
+"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -o "$tmp/dll-second.dll" "$here/x86-dll/dll-second.c"
+# Import libraries for the two new DLLs (the fixture links their exports
+# before the DLLs are seen by the loader; they are LoadLibrary'd at runtime).
+cat > "$tmp/dll-zeroent.def" <<'EOF'
+LIBRARY dll-zeroent.dll
+EXPORTS
+    zeroent_tail_get@0
+    zeroent_tail_set@4
+    zeroent_fn@0
+EOF
+cat > "$tmp/dll-second.def" <<'EOF'
+LIBRARY dll-second.dll
+EXPORTS
+    second_fn@0
+EOF
+"$dlltool" -m i386 -k -d "$tmp/dll-zeroent.def" -l "$tmp/libzeroent.a"
+"$dlltool" -m i386 -k -d "$tmp/dll-second.def" -l "$tmp/libsecond.a"
 # Malformed images the fixture's LoadLibraryA must reject with
 # ERROR_BAD_EXE_FORMAT (193): garbage bytes, and a real PE64 image (the
 # interpreter is PE32-only, as a 32-bit process cannot map one).
@@ -75,9 +98,10 @@ open(sys.argv[1], 'wb').write(bytes(b))
 PYEOF
 # exe: imports dll_a_sum/dllb_attach_marker and the cyclic pair's exports,
 # calls the kernel32 DLL APIs (LoadLibrary/GetProcAddress/FreeLibrary/
-# GetModuleHandleA/W/ExW), and exercises ExitThread's per-thread semantics.
+# GetModuleHandleA/W/ExW, Encode/DecodePointer), and exercises ExitThread's
+# per-thread semantics.
 "$cc32" $flags -Wl,--entry,_fixture_main -Wl,--subsystem,console -o "$tmp/fixture-dll.exe" \
-  "$here/x86-dll/fixture-dll.c" -L"$tmp" -ldll-a -ldll-b -ldll-c -ldll-d -lkernel32
+  "$here/x86-dll/fixture-dll.c" -L"$tmp" -ldll-a -ldll-b -ldll-c -ldll-d -lzeroent -lsecond -lkernel32
 "${CXX:-c++}" -std=c++17 -O2 -mno-red-zone -Wall -Wextra -Werror "$here/x86-dll.cpp" -o "$tmp/x86-dll"
 set +e
 out=$("$tmp/x86-dll" "$tmp/fixture-dll.exe" "$tmp"); rc=$?
@@ -86,4 +110,4 @@ set -e
 grep -q '^play: dll-chain loaded, all imports bound, exit 42$' <<<"$out" || {
   echo "X86-DLL FAIL: no clean chain run"; echo "$out"; exit 1; }
 ! grep -q '^play: unresolved\|^play: fault' <<<"$out" || { echo "X86-DLL FAIL: unresolved import or fault"; echo "$out"; exit 1; }
-echo "X86-DLL PASS: guest PE32 DLL chain (exe -> dll-a -> dll-b), the cycle dll-c <-> dll-d (each mapped once), DllMain attach, LoadLibraryA/GetProcAddress/FreeLibrary/GetModuleHandleA/W/ExW from guest code, bad-image rejection, per-thread ExitThread"
+echo "X86-DLL PASS: guest PE32 DLL chain (exe -> dll-a -> dll-b), the cycle dll-c <-> dll-d (each mapped once), DllMain attach, LoadLibraryA/GetProcAddress/FreeLibrary/GetModuleHandleA/W/ExW (flags, NULL name, FROM_ADDRESS) from guest code, Encode/DecodePointer round trip, entry-RVA-0 DLL with SizeOfImage >> file, second DLL relocated to a disjoint arena, bad-image rejection, per-thread ExitThread"

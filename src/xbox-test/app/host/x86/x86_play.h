@@ -91,7 +91,9 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         guest.dlls = std::move(dlls);
         guest.dll_order = std::move(dll_order);
         for (const auto& kv : guest.dlls) {
-            if (kv.second.image.entry) guest.dll_entries[kv.first] = kv.second.image.entry;
+            // entry_rva == 0 is "no entry point" (Bugbot 4559749424): `entry`
+            // is base + RVA and never zero for a mapped image.
+            if (kv.second.image.entry_rva) guest.dll_entries[kv.first] = kv.second.image.entry;
             guest.add_module(kv.first, kv.second.image.base);
         }
         r.loaded = true; r.base = img.base; r.entry = img.entry;
