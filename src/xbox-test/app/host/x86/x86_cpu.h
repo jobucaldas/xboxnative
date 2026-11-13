@@ -51,6 +51,16 @@ struct Cpu {
     bool exited = false; uint32_t exit_code = 0;
     unsigned depth = 0;
     Fpu fpu; Sse xmm; uint32_t mxcsr = 0x1f80;
+    // MXCSR_MASK (fxsave +28) is CPU-specific silicon state, not an architectural
+    // constant: e.g. this dev machine's CPU reads 0x0000ffff while a Zen runner
+    // reads 0x0002ffff (bit 17 = FIZ-Z, writable). Probe the host's real mask
+    // once with a genuine fxsave so the emulator reports what this CPU reports.
+    uint32_t mxcsr_mask = [] {
+        alignas(16) uint8_t buf[512] = {};
+        asm volatile("fxsave %0" :: "m"(buf) : "memory");
+        uint32_t mask; std::memcpy(&mask, buf + 28, 4);
+        return mask ? mask : 0x0000ffffu;  // pre-SSE2 CPUs may leave it 0
+    }();
     Cpu(Memory& m, ThunkTable& t) : mem(m), thunks(t) {}
 
     // --- host-facing helpers (thunk handlers) ---
@@ -435,7 +445,7 @@ struct Cpu {
                 mem.w(ea + 6, 0, 2);                          // fop: no real 8087-style tracking
                 mem.w(ea + 8, 0, 8);                          // fip: documented zeros
                 mem.w(ea + 16, 0, 8);                         // fdp (with cs/ds halves): documented zeros
-                mem.w(ea + 24, mxcsr, 4); mem.w(ea + 28, 0x0000ffffu, 4);  // mxcsr + the mask real CPUs of this class report (host fxsave reads 0000ffff)
+                mem.w(ea + 24, mxcsr, 4); mem.w(ea + 28, mxcsr_mask, 4);  // mxcsr + the host CPU's real mask (probed with a genuine fxsave; silicon-specific)
                 for (int i = 0; i < 8; ++i) {  // ST(i) at 32 + 16*i: 10 bytes + 6 reserved.
                     // ST(i) is relative to TOP: physical slot (top+i)&7.
                     int ph = (fpu.top + i) & 7;
