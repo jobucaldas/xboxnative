@@ -32,16 +32,26 @@ fields.update({"_exception": "sizeof type name arg1 retval", "_complex": "sizeof
 keys = [f"{n}.{v}" for n, members in fields.items() for v in members.split()]
 marker = struct.pack("<I", 0x58424c59)
 
+def unpack(data, source):
+    start, count = data.find(marker), len(keys)
+    if start < 0 or len(data) < start + 4 + count * 4:
+        raise SystemExit(f"FAIL layout data table missing/truncated in {source}")
+    values = struct.unpack_from(f"<{count}I", data, start + 4)
+    return dict(zip(keys, (None if v == 0xffffffff else v for v in values)))
+
 def read(path):
     data = bytearray()
     for line in open(path, encoding="ascii"):
         words = line.strip().split("  ", 1)[0].split()[1:]
         data.extend(bytes.fromhex("".join(w for w in words if re.fullmatch(r"[0-9a-fA-F]{8}", w))))
-    start, count = data.find(marker), len(keys) + 1
-    if start < 0 or len(data) < start + count * 4:
-        raise SystemExit(f"FAIL layout data table missing/truncated in {path}")
-    values = struct.unpack_from(f"<{count}I", data, start + 4)
-    return dict(zip(keys, (None if v == 0xffffffff else v for v in values)))
+    start, size = data.find(marker), 4 * (len(keys) + 1)
+    if start < 0 or len(data) < start + size: return unpack(data, path)
+    table = data[start:start + size]
+    try: unpack(table[:-4], path + " (one-word truncation)")
+    except SystemExit as error:
+        if not str(error).startswith("FAIL layout data table missing/truncated"): raise
+    else: raise SystemExit("FAIL truncated layout self-check accepted short data")
+    return unpack(table, path)
 
 old, ucrt = map(read, sys.argv[1:])
 keys = sorted(set(old) | set(ucrt))
