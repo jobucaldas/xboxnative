@@ -21,6 +21,7 @@ int main(int argc, char** argv) {
     guest.register_all();
     Image img = load_pe32(mem, table, reg, file);
     guest.image_base = img.base;
+    guest.exe_tls = img.tls;
     guest.add_module("fixture-crt.exe", img.base);
     map_thunk_page(mem, table);
     Cpu cpu(mem, table);
