@@ -11,12 +11,14 @@
 // never mistaken for general Win32 support.
 #pragma once
 #include <cmath>
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <functional>
 #include <map>
 #include <tuple>
+#include <thread>
 #include <string>
 #include <vector>
 #include "x86_win32.h"
@@ -136,6 +138,12 @@ struct Guest {
     uint32_t thread_exit_code = 0;
     std::map<uint32_t, uint32_t> thread_exit_codes;  // handle -> exit code
     std::map<uint32_t, uint32_t> thread_ids;         // handle -> thread identifier
+    enum class SyncKind { Event, Mutex, Semaphore };
+    struct SyncObject { SyncKind kind; std::string name; uint32_t refs = 0, owner = 0, recursion = 0, count = 0, maximum = 0; bool manual = false, signaled = false, abandoned = false; };
+    std::map<uint32_t, uint32_t> sync_handles;        // guest handle -> object id
+    std::map<uint32_t, SyncObject> sync_objects;
+    std::map<std::string, uint32_t> sync_names;       // names are case-sensitive (Win32)
+    uint32_t sync_serial = 0, sync_handle_serial = 0;
     // Guest DLLs loaded by the process (lowercase module name -> Dll) and the
     // order they were mapped in (DllMain PROCESS_DETACH runs in reverse).
     // `dll_source` supplies DLL bytes by module name; empty = not found.
@@ -182,6 +190,29 @@ struct Guest {
     void copy_in(void* dst, uint32_t src, uint32_t n) { if (src && n) { auto b = mem.read_bytes(src, n); std::memcpy(dst, b.data(), n); } }
     uint32_t last_error() const { return mem.r32(cur_teb + 0x34); }
     void set_last_error(uint32_t v) { mem.w32(cur_teb + 0x34, v); }
+    uint32_t add_sync_handle(uint32_t id) { uint32_t h=0x70000000u+(++sync_handle_serial);sync_handles[h]=id;++sync_objects[id].refs;return h; }
+    uint32_t create_sync(SyncKind kind, uint32_t namep, bool manual, bool initial, int32_t count, int32_t maximum, uint32_t owner) {
+        std::string name = str(namep); uint32_t id = 0;
+        if (!name.empty()) { auto it = sync_names.find(name); if (it != sync_names.end()) { id = it->second; if (sync_objects[id].kind != kind) { set_last_error(6); return 0; } set_last_error(183); } }
+        if (!id) { id = ++sync_serial; SyncObject o{}; o.kind=kind; o.name=name; o.manual=manual; o.signaled=initial; o.owner=owner; o.recursion=owner?1u:0u; o.count=uint32_t(count); o.maximum=uint32_t(maximum); sync_objects[id]=o; if (!name.empty()) sync_names[name]=id; }
+        return add_sync_handle(id);
+    }
+    uint32_t open_sync(SyncKind kind, uint32_t namep) { std::string name=str(namep);auto it=sync_names.find(name);if(it==sync_names.end()){set_last_error(2);return 0;}if(sync_objects[it->second].kind!=kind){set_last_error(6);return 0;}return add_sync_handle(it->second); }
+    bool close_sync(uint32_t h) { auto it=sync_handles.find(h); if(it==sync_handles.end())return false; uint32_t id=it->second; sync_handles.erase(it); auto& o=sync_objects[id]; if(!--o.refs){if(!o.name.empty())sync_names.erase(o.name);sync_objects.erase(id);} return true; }
+    // Guest threads are cooperative; run_pending_threads is the only runnable
+    // waiter source. Finite waits expire normally, but an unsignaled INFINITE
+    // wait faults explicitly rather than inventing a successful signal.
+    uint32_t sync_wait(Cpu& c, uint32_t h, uint32_t timeout) {
+        auto it=sync_handles.find(h); if(it==sync_handles.end())return 0xffffffffu; auto& o=sync_objects[it->second];
+        uint32_t tid=c.fs_base?c.mem.r32(c.fs_base+0x24):1u;
+        if(o.kind==SyncKind::Event&&o.signaled){if(!o.manual)o.signaled=false;return 0;}
+        if(o.kind==SyncKind::Semaphore&&o.count){--o.count;return 0;}
+        if(o.kind==SyncKind::Mutex&&(!o.owner||o.owner==tid)){uint32_t r=o.abandoned?0x80u:0u;o.abandoned=false;o.owner=tid;++o.recursion;return r;}
+        if(timeout==0)return 258u;
+        if(timeout==0xffffffffu)throw Fault(FaultKind::Unsupported,c.eip,c.eip,"WaitForSingleObject: unsignaled infinite wait on handle "+std::to_string(h));
+        std::this_thread::sleep_for(std::chrono::milliseconds(timeout));return 258u;
+    }
+    void abandon_mutexes(uint32_t tid) { for(auto& kv:sync_objects)if(kv.second.kind==SyncKind::Mutex&&kv.second.owner==tid){kv.second.owner=kv.second.recursion=0;kv.second.abandoned=true;} }
     // A FILE* is one of our three iob entries; anything else is a bad handle.
     // The index is the C stream number: 0 stdin, 1 stdout, 2 stderr.
     int file_index(uint32_t f) const {
@@ -342,6 +373,7 @@ struct Guest {
             std::memcpy(saved_regs, c.reg, sizeof saved_regs); saved_eip = c.eip;
             try { tls_callbacks_call(c, 3); }
             catch (const ThreadExit&) { std::memcpy(c.reg, saved_regs, sizeof saved_regs); c.eip = saved_eip; }
+            abandon_mutexes(id != thread_ids.end() ? id->second : 0);
             c.mem.unmap(th.base, th.size);
         }
     }
@@ -751,7 +783,32 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetCurrentThread", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0xFFFFFFFEu; });
     // The thread id lives in the running thread's TEB (ClientId.UniqueThread).
     reg.add("kernel32.dll", "GetCurrentThreadId", Conv::Stdcall, 0, [](Cpu& c) -> uint32_t { return c.mem.r32(c.fs_base + 0x24); });
-    reg.add("kernel32.dll", "GetCommandLineA", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return cmdline_ptr; });
+    // Kernel synchronization contracts: CreateEventA, CreateMutexA, CreateSemaphoreA,
+    // Set/Reset/PulseEvent, ReleaseMutex, ReleaseSemaphore, WaitForSingleObject, CloseHandle.
+    // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventa
+    // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createmutexa
+    // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createsemaphorea
+    // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-openeventa
+    // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-setevent
+    // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-resetevent
+    // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-pulseevent
+    // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-releasemutex
+    // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-releasesemaphore
+    // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject
+    // https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle
+    // Named objects are process-local; session namespaces and ACL enforcement are outside this model.
+    // lpSecurityAttributes is accepted and ignored for this single-user guest process.
+    // PulseEvent is documented as unreliable; with no queued waiters, set-then-reset leaves it nonsignaled.
+    auto sync_current_thread = [](Cpu& c) { uint32_t id=c.fs_base?c.mem.r32(c.fs_base+0x24):0; return id?id:1u; };
+    reg.add("kernel32.dll","CreateEventA",Conv::Stdcall,4,[this](Cpu& c)->uint32_t{return create_sync(SyncKind::Event,c.arg(3),c.arg(1)!=0,c.arg(2)!=0,0,0,0);});
+    reg.add("kernel32.dll","CreateMutexA",Conv::Stdcall,3,[this,sync_current_thread](Cpu& c)->uint32_t{return create_sync(SyncKind::Mutex,c.arg(2),false,false,0,0,c.arg(1)?sync_current_thread(c):0);});
+    reg.add("kernel32.dll","CreateSemaphoreA",Conv::Stdcall,4,[this](Cpu& c)->uint32_t{int32_t initial=int32_t(c.arg(1)),maximum=int32_t(c.arg(2));if(initial<0||maximum<=0||initial>maximum){set_last_error(87);return 0;}return create_sync(SyncKind::Semaphore,c.arg(3),false,false,initial,maximum,0);});
+    reg.add("kernel32.dll","SetEvent",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Event){set_last_error(6);return 0;}sync_objects[h->second].signaled=true;return 1;});
+    reg.add("kernel32.dll","ResetEvent",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Event){set_last_error(6);return 0;}sync_objects[h->second].signaled=false;return 1;});
+    reg.add("kernel32.dll","PulseEvent",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Event){set_last_error(6);return 0;}sync_objects[h->second].signaled=false;return 1;});
+    reg.add("kernel32.dll","ReleaseMutex",Conv::Stdcall,1,[this,sync_current_thread](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Mutex){set_last_error(6);return 0;}auto& o=sync_objects[h->second];if(o.owner!=sync_current_thread(c)||!o.recursion){set_last_error(288);return 0;}if(!--o.recursion)o.owner=0;return 1;});
+    reg.add("kernel32.dll","ReleaseSemaphore",Conv::Stdcall,3,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));int32_t n=int32_t(c.arg(1));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Semaphore){set_last_error(6);return 0;}auto& o=sync_objects[h->second];if(n<=0){set_last_error(87);return 0;}if(uint32_t(n)>o.maximum-o.count){set_last_error(298);return 0;}if(c.arg(2))mem.w32(c.arg(2),o.count);o.count+=uint32_t(n);return 1;});
+    reg.add("kernel32.dll","GetCommandLineA", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return cmdline_ptr; });
     reg.add("kernel32.dll", "GetCommandLineW", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return put_wstr(u"x"); });
     reg.add("kernel32.dll", "GetStartupInfoA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         auto b = mem.read_bytes(startupinfo, 68); copy_out(c.arg(0), b.data(), 68); return 0; });
@@ -836,7 +893,10 @@ inline void Guest::register_all() {
     // winpthreads/mcfgthread peers): waits run the pending thread bodies first,
     // then succeed, as the keyed-event thunks below answer.
     reg.add("kernel32.dll", "WaitForSingleObject", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
-        run_pending_threads(c); return 0; });  // WAIT_OBJECT_0
+        uint32_t h=c.arg(0), timeout=c.arg(1); run_pending_threads(c);
+        if(thread_ids.count(h)||thread_exit_codes.count(h))return 0;
+        if(!sync_handles.count(h)){set_last_error(6);return 0xffffffffu;}
+        uint32_t result=sync_wait(c,h,timeout);if(result==0xffffffffu)set_last_error(6);return result; });
     reg.add("kernel32.dll", "WaitForSingleObjectEx", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
         run_pending_threads(c); return 0; });
     // WaitForMultipleObjects(Ex): the surface's handles are all thread or event
@@ -861,8 +921,11 @@ inline void Guest::register_all() {
         auto it = thread_ids.find(c.arg(0));
         return it != thread_ids.end() ? it->second : c.mem.r32(c.fs_base + 0x24); });
     reg.add("kernel32.dll", "DuplicateHandle", Conv::Stdcall, 7, [this](Cpu& c) -> uint32_t {
-        // One process, no real handle table: the duplicate is the source value.
-        if (c.arg(3)) mem.w32(c.arg(3), c.arg(1));
+        // Preserve legacy identity semantics for other modeled handles. Sync handles
+        // share the process handle namespace and receive an independently closable value.
+        auto it=sync_handles.find(c.arg(1));
+        if(it!=sync_handles.end()) { if(!c.arg(3)){set_last_error(87);return 0;} mem.w32(c.arg(3),add_sync_handle(it->second)); }
+        else if (c.arg(3)) mem.w32(c.arg(3), c.arg(1));
         return 1; });
     // Condition variables: single-threaded surface — init zero-fills, wakes are
     // no-ops, and a sleep runs pending thread bodies then succeeds.
@@ -1077,11 +1140,8 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "InitializeCriticalSectionAndSpinCount", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "TryEnterCriticalSection", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "InitializeCriticalSectionEx", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 1; });
-    // OpenEventA (synchapi.h): this surface creates no named objects, so no name
-    // exists: NULL with ERROR_FILE_NOT_FOUND, as Windows answers for a missing
-    // name. Registered so GetProcAddress finds the export (a guest's probe for
-    // it read the missing export as a failure and took its failure path).
-    reg.add("kernel32.dll", "OpenEventA", Conv::Stdcall, 3, [this](Cpu&) -> uint32_t { set_last_error(2); return 0; });
+    // OpenEventA opens a same-process named event; process/session namespaces and ACLs are outside this guest.
+    reg.add("kernel32.dll", "OpenEventA", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { return open_sync(SyncKind::Event,c.arg(2)); });
     // TLS
     reg.add("kernel32.dll", "TlsAlloc", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t {
         if (next_tls >= 64) return 0xFFFFFFFFu;
@@ -1138,7 +1198,7 @@ inline void Guest::register_all() {
         return (c.arg(0) == Host::H_STDOUT || c.arg(0) == Host::H_STDERR) ? 2u : 0u; });  // FILE_TYPE_CHAR
     reg.add("kernel32.dll", "SetConsoleCtrlHandler", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "FlushFileBuffers", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
-    reg.add("kernel32.dll", "CloseHandle", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
+    reg.add("kernel32.dll", "CloseHandle", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { close_sync(c.arg(0)); return 1; });
     reg.add("kernel32.dll", "SetHandleCount", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t { return c.arg(0); });
 
     // d3dx9_36 math: D3DX uses row-major matrices and row-vector transforms.
