@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # build-mesa-d3d12.sh [outdir] [--dry-run] [--build]
-# OpenGL for launcher Play (research/OPENGL-PLAN.md): Mesa's Gallium d3d12 driver (OpenGL on D3D12) cross-built for
+# OpenGL for launcher Play (issue #176): Mesa's Gallium d3d12 driver (OpenGL on D3D12) cross-built for
 # Windows x64 with mingw-w64 from the pinned source (`mesa-src` in deps.pin, SHA-256 verified; `directx-headers` for the
 # only subproject Mesa needs). Result: opengl32.dll (WGL + GL entry points) and libgallium_wgl.dll (the d3d12 driver it
 # imports). Mesa is MIT-licensed; the DLLs are build outputs, git-ignored (out/ and *.dll) and never committed.

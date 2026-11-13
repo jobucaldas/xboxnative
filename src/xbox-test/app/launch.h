@@ -12,6 +12,7 @@
 #include "../uwph/user32/probe.h"
 #include "launch_status.h"
 #include "launch_target.h"
+#include "x86_route.h"
 #include "installs.h"
 
 struct LaunchState {
@@ -235,8 +236,8 @@ static std::filesystem::path provider_remote_dir(uint32_t appid) {
 }
 // The known folders the game resolves. There is no separate guest mapping to
 // follow: the guest's SHGetKnownFolderPath / SHGetFolderPathW are routed to the
-// system shell32 in this very process and package container (K32T "system-route=1"
-// in research/k32t-console-evidence.log), so asking that function here yields the
+// system shell32 in this very process and package container (K32T
+// "system-route=1"; see issue #171), so asking that function here yields the
 // guest's LocalLow/Local/Roaming/Documents/Saved Games by construction.
 static steam_cloud::Roots cloud_roots(uint32_t appid,const std::wstring& gameRoot) {
     static const GUID localLow={0xA520A1A4,0x1780,0x4FF6,{0xBD,0x18,0x16,0x73,0x43,0xC5,0xAF,0x16}};
@@ -919,18 +920,13 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
     snprintf(line,sizeof line,"PRUN PE32 %s base=0x%08x entry=0x%08x imports=%u bound=%u relocs=%u instructions=%llu",
              r.loaded?"loaded":"NOT-LOADED",r.base,r.entry,r.imports,r.bound,r.relocations,(unsigned long long)r.instructions);lp_sink(line);
     for(auto& u:r.unresolved){snprintf(line,sizeof line,"PE32 UNRESOLVED %s",u.c_str());lp_sink(line);}
-    if(r.finished) {
-        // Same rule as the native loader: only a clean exit is success, and a
-        // nonzero code is reported as the failure it is.
-        c.ok=r.exit_code==0;
-        snprintf(line,sizeof line,"PRUN PE32 exited code=%u",r.exit_code);lp_sink(line);
-        if(!c.ok)c.failName="32-bit guest exited with code "+std::to_string(r.exit_code);
-        return;
-    }
-    c.ok=false;
-    std::string why=r.fault.empty()?"the 32-bit guest did not exit":r.fault;
-    if(!r.fault_kind.empty()) {snprintf(line,sizeof line,"PRUN PE32 fault kind=%s eip=0x%08x",r.fault_kind.c_str(),r.fault_eip);lp_sink(line);}
-    c.failName="32-bit guest: "+why;
+    // The result text and the "PRUN EVENT x86 route:" lines come from one place
+    // (x86_route.h): a clean exit is success, and every other ending names the
+    // first unresolved import or the unsupported opcode — never a silent fallback.
+    auto rep=x86_route::report(r,name);
+    for(auto& l:rep.lines)lp_sink(l.c_str());
+    c.ok=rep.ok;
+    c.failName=rep.ok?std::string():rep.result;
 }
 static void lp_run_impl(LpCtx& c) {
     // A previous launch that never ran game code was released; nothing of its
@@ -1214,7 +1210,20 @@ static std::string start_launch(uint32_t appid, const std::string& name, const s
             // 2. in-process guest runtime
             std::wstring root = folder; std::string why = target.why; std::vector<std::wstring> names; if (!target.exe.empty()) names.push_back(target.exe);
             logf("launch: runtime root=%s targets=%zu (%s)", game_library::join_root("LocalState", inst.root, dir).c_str(), names.size(), why.c_str());
-            if (dir.empty() || names.empty()) { finish("cannot start: " + (dir.empty() ? std::string("install directory unknown") : !inst.root.empty() && GetFileAttributesW(folder.c_str()) == INVALID_FILE_ATTRIBUTES ? "the drive holding this game (" + inst.root.substr(0, 2) + ") is not connected" : why), false, 0, 0); return; }
+            // A launch that cannot find its files says which of the two it is:
+            // the marker names a drive that is gone, or the drive is there but
+            // the payload folder is missing/empty (see installs::payload_state).
+            if (dir.empty() || names.empty()) {
+                std::string gone;
+                if (!dir.empty() && names.empty()) {
+                    if (!inst.root.empty() && GetFileAttributesW(installs::ascii(inst.root.substr(0, 3)).c_str()) == INVALID_FILE_ATTRIBUTES)
+                        gone = "the drive holding this game (" + inst.root.substr(0, 2) + ") is not connected";
+                    else if (installs::payload_state(folder) != installs::Health::ok)
+                        gone = "the install files are missing from " + game_library::join_root("LocalState", inst.root, dir) + " (reinstall from the game page)";
+                    else gone = "no runnable executable found";
+                } else gone = dir.empty() ? std::string("install directory unknown") : why;
+                finish("cannot start: " + gone, false, 0, 0); return;
+            }
             // Keep the previous attempt's log beside this one (launch_probe.previous.log).
             MoveFileExW((g_dir + L"\\launch_probe.log").c_str(), (g_dir + L"\\launch_probe.previous.log").c_str(), MOVEFILE_REPLACE_EXISTING);
             { std::lock_guard<std::mutex> l(g_lpm); if (g_lpf) fclose(g_lpf); g_lpf = _wfopen((g_dir + L"\\launch_probe.log").c_str(), L"wb"); g_lpMissing = g_lpStubbed = g_lpStubCalls = g_lpLines = 0; g_lpLastFail.clear(); }

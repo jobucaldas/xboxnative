@@ -9,6 +9,7 @@
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include "host/d3d11_diag.h"   // the Present-failure path reports through its sink
+#include "host/present_pacing.h"
 #include <winrt/base.h>
 #include <winrt/Windows.Gaming.Input.h>
 #include "host/resize_drain.h" // the GPU drain the resize hook runs (tested directly)
@@ -152,6 +153,28 @@ inline void record(LARGE_INTEGER start,LARGE_INTEGER end) {
 }
 inline std::vector<Frame> take_frames(){std::lock_guard<std::mutex> l(framesM);std::vector<Frame> out;out.swap(pending);return out;}
 inline unsigned framesSince=0;inline double fps=0;
+
+// ---- Present pacing (opt-in, LocalState\present.txt; off/absent = disabled)
+// Configured once by the launcher at swap-chain creation (configure_pacing);
+// the present hooks consult it on every frame. QpcClock adapts the real QPC
+// to the pure header's clock contract: sleep the bulk of the wait, spin the
+// last ~2 ms so the slot boundary is held precisely (Sleep(1) can overshoot
+// by a timer tick; a late present is fine, an early one breaks the cap).
+struct QpcClock {
+    int64_t now() const {LARGE_INTEGER t;QueryPerformanceCounter(&t);return t.QuadPart;}
+    int64_t ticks_per_second() const {LARGE_INTEGER f;QueryPerformanceFrequency(&f);return f.QuadPart;}
+    void wait_until(int64_t until) {
+        int64_t spinTicks=ticks_per_second()/500;   // ~2 ms
+        while(true) {
+            int64_t n=now();
+            if(n>=until)return;
+            if(until-n>spinTicks)Sleep(1);          // else: spin (QPC reads are ~20 ns)
+        }
+    }
+};
+inline present_pacing::Config pacingCfg{};
+inline QpcClock pacingClock{};
+inline present_pacing::Limiter<QpcClock> pacingLimiter{pacingClock};
 
 inline const char* label(int item) {
     switch(item){case Resume:return "Resume";case Quit:return "Quit game";case ForceQuit:return "Force quit";
@@ -496,14 +519,26 @@ inline void presentFailure(IDXGISwapChain* c,HRESULT hr) {
 }
 inline HRESULT STDMETHODCALLTYPE present(IDXGISwapChain* c,UINT sync,UINT flags) {
     if(flags&DXGI_PRESENT_TEST)return realPresent(c,sync,flags);
-    draw(c);LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
+    draw(c);
+    if(pacingCfg.enabled) {
+        sync=present_pacing::effectiveSync(pacingCfg,sync);
+        flags=present_pacing::effectiveFlags(pacingCfg,sync,flags);
+        if(pacingLimiter.active())pacingLimiter.acquire();
+    }
+    LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
     HRESULT hr=realPresent(c,sync,flags);QueryPerformanceCounter(&b);record(a,b);
     if(FAILED(hr))presentFailure(c,hr);
     return hr;
 }
 inline HRESULT STDMETHODCALLTYPE present1(IDXGISwapChain1* c,UINT sync,UINT flags,const DXGI_PRESENT_PARAMETERS* p) {
     if(flags&DXGI_PRESENT_TEST)return realPresent1(c,sync,flags,p);
-    draw(c);LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
+    draw(c);
+    if(pacingCfg.enabled) {
+        sync=present_pacing::effectiveSync(pacingCfg,sync);
+        flags=present_pacing::effectiveFlags(pacingCfg,sync,flags);
+        if(pacingLimiter.active())pacingLimiter.acquire();
+    }
+    LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
     HRESULT hr=realPresent1(c,sync,flags,p);QueryPerformanceCounter(&b);record(a,b);
     if(FAILED(hr))presentFailure(c,hr);
     return hr;
@@ -553,6 +588,16 @@ inline void drain_device(ID3D11Device* dev) {
 // in main.cpp, on the launcher UI thread before any guest resize runs; the
 // flag is only read on the guest thread afterwards, hence the atomic).
 inline std::atomic<bool> lockFirstMode{false};
+// Compile-time reachability check for the elision wiring (used by the CI
+// compile of the headers): the pure decision, the DXGI-typed seam and the
+// opt-out switch must all be reachable from guest_overlay.h.
+inline bool elideCheck() {
+    DXGI_SWAP_CHAIN_DESC1 cur{};
+    cur.Width=1920;cur.Height=1080;cur.Format=DXGI_FORMAT_B8G8R8A8_UNORM;cur.BufferCount=2;cur.Flags=0x802;
+    return resize_drain::elideEnabled.load()&&
+           resize_drain::same_mode(cur,2,1920,1080,DXGI_FORMAT_B8G8R8A8_UNORM,0x842)==
+               resize_elide::same_mode({2,1920,1080,0x1c,0x802},{2,1920,1080,0x1c,0x842});
+}
 inline HRESULT STDMETHODCALLTYPE resize(IDXGISwapChain* c,UINT count,UINT w,UINT h,DXGI_FORMAT f,UINT flags) {
     // Every guest resize is logged with its index in the run (the RCA's
     // removal lands in the 4th-resize window; a summary that only keeps the
@@ -597,6 +642,24 @@ inline HRESULT STDMETHODCALLTYPE resize(IDXGISwapChain* c,UINT count,UINT w,UINT
         ++resizes;lastResizeCount=count;lastResizeW=w;lastResizeH=h;lastResizeHr=S_OK;
         if(auto s=d3d11_diag::sink)s("overlay: resize suppressed (lockmode), chain keeps its first mode");
         return S_OK;
+    }
+    // Redundant-resize elision (default ON; LocalState\resizeelide.txt with
+    // "off" forwards everything). Checked after lockmode, which stays the
+    // stronger suppression. A resize that asks for the chain's current mode
+    // returns S_OK without touching the chain: the d3d11on12 flip chain
+    // removed the device on exactly such a call (Slime Rancher run1, resize #4),
+    // and a same-mode resize has nothing to change — GetBuffer(0) keeps
+    // returning the same live buffer.
+    if(resize_drain::elideEnabled.load(std::memory_order_relaxed)) {
+        DXGI_SWAP_CHAIN_DESC1 cur{};
+        winrt::com_ptr<IDXGISwapChain1> chain1;
+        if(SUCCEEDED(c->QueryInterface(__uuidof(IDXGISwapChain1),chain1.put_void()))&&chain1&&
+           SUCCEEDED(chain1->GetDesc1(&cur))&&resize_drain::same_mode(cur,count,w,h,f,resize_flags(flags))) {
+            ++resizes;lastResizeCount=count;lastResizeW=w;lastResizeH=h;lastResizeHr=S_OK;
+            char b[96];snprintf(b,sizeof b,"guest ResizeBuffers #%u resize elided (same mode)",idx);
+            if(auto s=d3d11_diag::sink)s(b);
+            return S_OK;
+        }
     }
     winrt::com_ptr<ID3D11Device> dev;
     if(SUCCEEDED(c->GetDevice(__uuidof(ID3D11Device),dev.put_void()))&&dev)drain_device(dev.get());

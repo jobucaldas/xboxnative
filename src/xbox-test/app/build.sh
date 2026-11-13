@@ -46,7 +46,7 @@ cp "$donors"/runtime/*.dll "$donors"/runtime/SHA256SUMS "$out/layout/runtime/"
 # Play's D3D10 shim (source in uwph/d3d10): the console has no d3d10.dll or
 # d3d10_1.dll, and one PE answers both names plus d3d10core.dll.
 bash ../uwph/d3d10/build.sh "$out/layout/runtime"
-# Play's D3D9 shim (source in uwph/d3d9, research/D3D9-PLAN.md): the console has
+# Play's D3D9 shim (source in uwph/d3d9, issue #172): the console has
 # no d3d9.dll. It serves the device, buffers, textures, states and drawing over
 # D3D11, and translates shader model 1-3 bytecode with the DLL below.
 bash ../uwph/d3d9/build.sh "$out/layout/runtime"
@@ -55,7 +55,7 @@ bash ../uwph/d3d9/build.sh "$out/layout/runtime"
 # runtime directory beside the shims; Play's loader serves it from there.
 bash ../../tools/build-d3d9-translator.sh "$out/layout/runtime"
 cp "$donors"/SOURCE.txt "$here/donors/COPYING.LIB" "$here/donors/LICENSE" "$out/layout/runtime/"
-# OpenGL for games that load OPENGL32.DLL (research/OPENGL-PLAN.md): Mesa's d3d12 driver, built from the pinned source.
+# OpenGL for games that load OPENGL32.DLL (issue #176): Mesa's d3d12 driver, built from the pinned source.
 # Play maps these from runtime/ after any copy the game ships. PLAY_MESA=0 builds a launcher without them (Play's
 # failing WGL stubs then answer, as before); the Mesa build needs meson, ninja, python mako and pyyaml.
 if [ "${PLAY_MESA:-1}" != 0 ]; then
@@ -65,7 +65,7 @@ if [ "${PLAY_MESA:-1}" != 0 ]; then
   mkdir -p "$out/layout/runtime/mesa-patches"; cp "$mesa"/patches/*.patch "$out/layout/runtime/mesa-patches/"
   cp "$mesa/SHA256SUMS" "$out/layout/runtime/SHA256SUMS-mesa"; cp "$mesa/SOURCE.txt" "$out/layout/runtime/SOURCE-mesa.txt"
 fi
-# Vulkan for games that load vulkan-1.dll (research/VULKAN-PLAN.md): the Khronos loader built from the pinned source,
+# Vulkan for games that load vulkan-1.dll (issue #177): the Khronos loader built from the pinned source,
 # Mesa's dzn driver (Vulkan on D3D12) as the real ICD, and a null ICD that reports zero physical devices as the
 # fallback when dzn cannot initialise. PLAY_VULKAN=0 builds a launcher without them (LoadLibrary("vulkan-1.dll") then
 # fails as it did before). The dzn build needs the same UCRT mingw/meson toolchain as the Mesa OpenGL block.

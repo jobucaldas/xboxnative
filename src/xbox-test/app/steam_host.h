@@ -23,7 +23,7 @@
 //
 // Portable: every client call is injected, so the sequence, the retry policy
 // and the failure reporting are tested natively (app/tests/steam_host_test.cpp).
-// See research/STEAM-REAL-ONLINE.md for the plan and the open gates.
+// See issue #179 for the plan and the open gates.
 #include <cstddef>
 #include <cstdint>
 #include <functional>

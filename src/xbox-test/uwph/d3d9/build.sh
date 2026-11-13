@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds Play's D3D9 shim: one PE DLL mapped by Play's loader under the name
-# d3d9.dll (see d3d9.cpp and research/D3D9-PLAN.md).
+# d3d9.dll (see d3d9.cpp and issue #172).
 #
 # The shim links no CRT and no import library of the D3D DLLs it replaces: its
 # only imports are d3d11.dll and dxgi.dll, which Play's loader routes to the

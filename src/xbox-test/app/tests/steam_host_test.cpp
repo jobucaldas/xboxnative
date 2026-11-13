@@ -4,7 +4,7 @@
 // Steam_ConnectToGlobalUser (which answers 0 until the engine has a session),
 // and the bootstrapper surface the client probes before it will dial a CM.
 // The fake client below reproduces the shape measured off-device under Wine
-// (research/STEAM-REAL-ONLINE.md): CreateGlobalUser and CreateSteamPipe succeed,
+// (issue #179): CreateGlobalUser and CreateSteamPipe succeed,
 // ConnectToGlobalUser answers 0 until a session exists.
 #include "../steam_host.h"
 #include <cassert>

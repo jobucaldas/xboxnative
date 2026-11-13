@@ -81,7 +81,7 @@
     },
     "d3d9.dll": {
       "class": "uwph",
-      "reason": "The console has d3d11.dll and dxgi.dll but no d3d9.dll, so a guest importing it fails to load. Play ships its own D3D9 shim (src/xbox-test/uwph/d3d9, built by mingw and mapped by Play's loader) in the runtime directory; its d3d11.dll!D3D11CreateDevice import reaches Play's device hook and its swapchains go through the validated CoreWindow adapter. Milestone 1 covers the device, the swap chain, clear and present; drawing and shader translation are not implemented (research/D3D9-PLAN.md). A guest copy in the game folder is mapped first and wins."
+      "reason": "The console has d3d11.dll and dxgi.dll but no d3d9.dll, so a guest importing it fails to load. Play ships its own D3D9 shim (src/xbox-test/uwph/d3d9, built by mingw and mapped by Play's loader) in the runtime directory; its d3d11.dll!D3D11CreateDevice import reaches Play's device hook and its swapchains go through the validated CoreWindow adapter. Milestone 1 covers the device, the swap chain, clear and present; drawing and shader translation are not implemented (see issue #172). A guest copy in the game folder is mapped first and wins."
     },
     "d3d10.dll": {
       "class": "uwph",

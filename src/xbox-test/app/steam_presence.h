@@ -7,7 +7,7 @@
 // shapes and the coalescing policy are tested natively.
 //
 // Message shapes follow SteamDatabase/Protobufs (public domain) as vendored in
-// SteamKit2 and steam-user; see research/STEAMWORKS-MULTIPLAYER.md.
+// SteamKit2 and steam-user; see issue #180.
 //
 // Presence is two independent things on Steam:
 //  - "In-Game" comes from CMsgClientGamesPlayed (EMsg 5410) on the launcher's
