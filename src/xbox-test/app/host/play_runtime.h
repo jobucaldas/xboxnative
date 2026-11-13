@@ -927,7 +927,10 @@ static LONG filter(EXCEPTION_POINTERS* ep) {
     char b[256];snprintf(b,sizeof b,"unhandled exception code=0x%08lx address=0x%llx ",e->ExceptionCode,(unsigned long long)(uintptr_t)e->ExceptionAddress);
     std::string text=b; text+=describe((uintptr_t)e->ExceptionAddress);
     if(e->ExceptionCode==EXCEPTION_ACCESS_VIOLATION && e->NumberParameters>=2) {snprintf(b,sizeof b," access=%llu target=0x%llx",(unsigned long long)e->ExceptionInformation[0],(unsigned long long)e->ExceptionInformation[1]);text+=b;}
-    state->event(text);return EXCEPTION_EXECUTE_HANDLER;
+    state->event(text);
+    // The last hooked D3D12 calls, when LocalState\d3d12trace.txt is present (no-op otherwise).
+    d3d12_diag::flushTrace();
+    return EXCEPTION_EXECUTE_HANDLER;
 }
 // The packaged process runs with strict handle checking: closing an invalid
 // handle raises STATUS_INVALID_HANDLE from ntdll instead of returning it (as

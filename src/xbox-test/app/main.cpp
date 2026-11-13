@@ -61,6 +61,7 @@ extern "C" unsigned ZSTD_isError(size_t code);
 #include "launch_button.h"
 #include "detail_input.h"
 #include "playtime.h"
+#include "host/d3d12_diag.h"   // set_trace_requested: the LocalState\d3d12trace.txt probe
 #include <xinput.h>
 #include "../uwph/display/gamepad.h"
 #include "../uwph/xinput/gpad.h"
@@ -2517,6 +2518,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // (topology, GS/PS content hash, target format, PS/GS SRV null and
         // over-target bits). Read once at boot; the diagnostics header stays
         // file-system free and asks this probe at adopt time.
+        // Per-call D3D12 trace probe: LocalState\d3d12trace.txt present (contents ignored).
+        // Read by the D3D12 diagnostics at the first device adoption; default off.
+        d3d12_diag::set_trace_requested = [] {
+            DWORD attrs = GetFileAttributesW((g_dir + L"\\d3d12trace.txt").c_str());
+            return attrs != INVALID_FILE_ATTRIBUTES;
+        };
         d3d11_diag::set_deep_draw = [] {
             DWORD attrs = GetFileAttributesW((g_dir + L"\\d3d11deep.txt").c_str());
             return attrs != INVALID_FILE_ATTRIBUTES;

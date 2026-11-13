@@ -45,7 +45,11 @@ static void appendUnknown(std::vector<unsigned char>& stream,int type) {
     stream.resize(at+sizeof(void*)+sizeof(void*));
     *reinterpret_cast<int*>(&stream[at])=type;
 }
-int main() {
+int main(int argc,char** argv) {
+    // "trace" runs the same contracts with LocalState\d3d12trace.txt present (the
+    // probe is read at the first adopt). Default runs must log no trace at all.
+    const bool traceMode=argc>1&&!strcmp(argv[1],"trace");
+    if(traceMode) d3d12_diag::set_trace_requested=[]{return true;};
     // The stream walker on synthetic streams built with the real struct
     // layout. These need no device: the walker is a pure function.
     {
@@ -352,6 +356,29 @@ int main() {
         device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,D3D12_RESOURCE_STATE_COMMON,nullptr,__uuidof(ID3D12Resource),(void**)&t);}
     CHECK(lines.size()<=d3d12_diag::kMaxFailures+d3d12_diag::kMaxProbes+4);
     CHECK(count("further failed calls suppressed")==1);
+    // The trace: silent unless the probe file was present at the first adopt.
+    if(traceMode) {
+        CHECK(count("trace on (LocalState")==1);
+        size_t before=lines.size();
+        d3d12_diag::flushTrace();
+        CHECK(lines.size()-before==1+std::min(size_t(d3d12_diag::traceCount.load()),d3d12_diag::kTraceRing));
+        // Every completed entry carries its hr (the ring holds the newest calls only).
+        size_t traced=0,withHr=0;
+        for(auto& l:lines) if(l.rfind("trace #",0)==0) {++traced;if(l.find(" 0x")!=std::string::npos)++withHr;}
+        CHECK(traced>0&&traced==withHr);
+        CHECK(count("pending")==0);   // nothing in flight outside a call
+        // More calls than the ring holds: the flush keeps only the newest entries.
+        if(fence) for(UINT64 v=2;v<=100;++v) fence->Signal(v);
+        before=lines.size();
+        d3d12_diag::flushTrace();
+        CHECK(lines.size()-before==1+d3d12_diag::kTraceRing);
+        CHECK(count(" FenceSignal 0x00000000")>0);
+    } else {
+        size_t before=lines.size();
+        d3d12_diag::flushTrace();
+        CHECK(lines.size()==before);
+        CHECK(count("trace on")==0&&count("trace #")==0);
+    }
     if(failures)for(auto& l:lines)printf("  %s\n",l.c_str());
     if(made)made->Release();
     if(fence)fence->Release();
