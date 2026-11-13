@@ -68,7 +68,7 @@ using Sink=void(*)(const char*);
 inline Sink sink=nullptr;
 constexpr size_t kMaxFailures=200;   // distinct failed calls logged
 constexpr size_t kMaxProbes=160;     // distinct capability answers logged
-constexpr size_t kMaxDrawStates=64;  // distinct draw-state signatures logged (own budget)
+constexpr size_t kMaxDrawStates=64;  // distinct signatures per immediate/deferred category
 constexpr int kSlots=136;            // ID3D11DeviceContext reaches slot 114; Context1's ClearView is 132
 constexpr size_t kMaxClasses=16;
 // Runtime kill switch: the file d3d11diag.txt in the launcher's LocalState
@@ -102,8 +102,8 @@ static_assert(ContextMap==14&&Unmap==15&&DrawIndexed==12&&DrawIndexedInstanced==
 // ---- reporting: once per key, bounded
 inline std::mutex reportM;
 inline std::set<std::string> seen;
-inline size_t failures=0,probes=0,drawStates=0;
-inline bool failuresCapped=false,probesCapped=false,drawStatesCapped=false;
+inline size_t failures=0,probes=0,drawStates=0,deferredDrawStates=0;
+inline bool failuresCapped=false,probesCapped=false,drawStatesCapped=false,deferredDrawStatesCapped=false;
 // Lines produced before a log sink is installed are held (bounded) and
 // delivered by configure(), so an opt-in probe armed early is never silent.
 constexpr size_t kMaxPending=64;
@@ -125,8 +125,8 @@ inline void emit(const std::string& text) {
 // probe: capability answers (adapter, feature levels, gs scan) — kMaxProbes.
 // drawState: the deep-draw pipeline signatures — kMaxDrawStates, its own
 // budget: sharing the probe cap let a thousand gs scan lines in loading eat
-// the budget before the first terrain draw ever ran, which would starve the
-// very lines the deep-draw run exists to collect.
+// the budget before the first deep draw signature was observed, which would
+// starve the very lines the opt-in run exists to collect.
 inline void report(int probe,const std::string& key,const std::string& text) {
     std::string line=text,note;
     {
@@ -227,17 +227,28 @@ inline std::atomic<bool> summaryStopped{false};
 // The format cache is direct-mapped: the guest rebinds the same few targets
 // most of the time, and a collision costs one GetDesc, never a re-scan.
 constexpr size_t kFormatCache=8;   // power of two
+struct DeepDrawSignature {std::string key,text;};
 struct ContextState {
     std::atomic<void*> context{nullptr};
     std::atomic<unsigned> topology{0};
     std::atomic<unsigned> shaders{0};    // bit0=HS bit1=DS bit2=GS bit3=PS bound
     std::atomic<unsigned> rtFormat{0};   // format of the first render target bound
+    std::atomic<unsigned> rtWidth{0},rtHeight{0},dsFormat{0};
     std::atomic<unsigned> deferred{0};   // 1 for a context CreateDeferredContext returned
+    std::atomic<unsigned> contextId{0};  // deferred context creation serial; immediate is 0
     std::atomic<unsigned long long> gsHash{0},psHash{0};   // content hash of the bound GS/PS (0 = none)
     std::atomic<unsigned> srvState{0};   // last SetShaderResources per stage: bit0=PS null bit1=PS over-target bit2=GS null bit3=GS over-target
     std::atomic<void*> formatView[kFormatCache];   // view the cached format is for
     std::atomic<unsigned> formatValue[kFormatCache];
+    std::vector<DeepDrawSignature> pendingDeepDraws;  // deferred signatures recorded until FinishCommandList
+    bool pendingDeepDrawsCapped=false;
 };
+struct DeepCommandList {unsigned id=0,executes=0;std::vector<DeepDrawSignature> signatures;};
+constexpr size_t kMaxDeepCommandLists=256;
+inline std::unordered_map<void*,DeepCommandList> deepCommandLists;  // guarded by reportM
+inline size_t deepReplayLines=0;  // guarded by reportM
+inline bool deepReplayCapped=false;
+inline std::atomic<unsigned> deferredContextSerial{0},deepCommandListSerial{0};
 constexpr size_t kMaxContexts=32;
 inline ContextState contextStates[kMaxContexts];
 inline ContextState orphanState;                 // past kMaxContexts: counted, not bucketed by context
@@ -259,8 +270,10 @@ inline void resetContext(void* self) {
     ContextState& s=stateOf(self);
     s.topology.store(0,std::memory_order_relaxed);s.shaders.store(0,std::memory_order_relaxed);
     s.rtFormat.store(0,std::memory_order_relaxed);
+    s.rtWidth.store(0,std::memory_order_relaxed);s.rtHeight.store(0,std::memory_order_relaxed);s.dsFormat.store(0,std::memory_order_relaxed);
+    s.contextId.store(s.deferred.load(std::memory_order_relaxed)?deferredContextSerial.fetch_add(1,std::memory_order_relaxed)+1:0,std::memory_order_relaxed);
     s.gsHash.store(0,std::memory_order_relaxed);s.psHash.store(0,std::memory_order_relaxed);
-    s.srvState.store(0,std::memory_order_relaxed);
+    s.srvState.store(0,std::memory_order_relaxed);s.pendingDeepDraws.clear();s.pendingDeepDrawsCapped=false;
     for(size_t i=0;i<kFormatCache;++i)s.formatView[i].store(nullptr,std::memory_order_relaxed);
 }
 // ---- device health
@@ -316,25 +329,22 @@ inline void noteFailure(HRESULT hr) {
     }
 }
 inline std::atomic<uint64_t> draws[kDrawKinds][2][2];   // [kind][patchlist][hull+domain]
-// The geometry shader's presence on a draw, tracked like hull/domain but for
-// the stage Halo Wars' point-sprite terrain actually uses.
+// The geometry shader's presence on a draw, tracked like hull/domain for
+// stage-level diagnostics; topology alone does not identify the rendered layer.
 inline std::atomic<uint64_t> drawsWithGs[kDrawKinds];
-// A draw with a GS bound is where a mis-converted geometry shader hides: the
+// A draw with a GS bound can expose a mis-converted geometry shader: the
 // runtime converts the guest's DXBC GS to DXIL for the host, and a conversion
 // that drops its output renders nothing while every counter on the CPU side
 // still advances. Per draw kind: how many draws carried a GS, how many of
-// those also carried a PS, and how many drew 0/index/instance-count vertices
-// (a GS-only point-sprite layer is the shape of terrain and of the minimap).
+// those also carried a PS, and how many drew 0/index/instance-count vertices.
 inline std::atomic<uint64_t> drawsWithGsAndPs[kDrawKinds];
-// GS-bound draws per input topology (raw D3D11 value, 0..64): pointlist + GS
-// is the point-sprite shape, and per-topology counts say which layers ride it.
+// GS-bound draws per input topology (raw D3D11 value, 0..64); these counts
+// describe submissions and do not identify which game layer produced them.
 constexpr unsigned kTopologyBuckets=65;
 inline std::atomic<uint64_t> gsDrawTopologies[kDrawKinds][kTopologyBuckets];
-// Draws split by the context that made the call. A deferred context records
-// with its own state, so a layer recorded there and replayed through
-// ExecuteCommandList is invisible to a summary that only knows one context
-// kind; Halo Wars runs 10 deferred contexts, and the terrain pass may be
-// recorded on one of them.
+// Draws split by the context that made the call. Deferred draws are counted
+// when recorded; these totals do not associate a draw with a later command-list
+// replay or identify the game layer that submitted it.
 inline std::atomic<uint64_t> drawsImmediate{0},drawsDeferred{0};
 // Draws per render-target format. A layer that renders into an off-screen
 // target (deferred/HDR) and is then tonemapped into the backbuffer shows up
@@ -494,30 +504,94 @@ inline ShaderId shaderIdOf(void* shader) {
     auto it=shaderIds.find(shader);
     return it!=shaderIds.end()?it->second:ShaderId{};
 }
-// One line per distinct draw-time pipeline signature: topology, GS/PS
-// identity (content hash, byte length, creation serial), target format, and
-// the PS/GS SRV bind flags (n=null entry, f=over-target). Capped by the same
-// seen-set machinery as the failure log.
+// Immediate signatures are emitted on their draw. Deferred signatures are
+// held until FinishCommandList and emitted when that list is first executed.
 inline std::string topologyName(unsigned t);   // defined below; noteDrawState names it
-inline void noteDrawState(void* /*self*/,ContextState& state,unsigned topology,unsigned /*shaders*/) {
+inline const char* drawKindName(int k);
+inline void noteDrawState(void* /*self*/,ContextState& state,unsigned topology,unsigned /*shaders*/,int kind,unsigned count,unsigned instances) {
     if(!deepDraw())return;
-    // gsHash/psHash store the shader OBJECT pointer at bind time; resolve the
-    // creation identity through the table. Two distinct shaders never share
-    // one (hash, bytes, serial): the serial disambiguates an fnv collision.
     ShaderId gs=shaderIdOf(reinterpret_cast<void*>(state.gsHash.load(std::memory_order_relaxed)));
     ShaderId ps=shaderIdOf(reinterpret_cast<void*>(state.psHash.load(std::memory_order_relaxed)));
-    unsigned srv=state.srvState.load(std::memory_order_relaxed);
+    unsigned srv=state.srvState.load(std::memory_order_relaxed),fmtNow=state.rtFormat.load(std::memory_order_relaxed);
+    bool deferred=state.deferred.load(std::memory_order_relaxed)!=0;
+    unsigned id=state.contextId.load(std::memory_order_relaxed);
     std::string flags;
-    if(srv&1)flags+=" ps-null";
-    if(srv&2)flags+=" ps-over-target";
-    if(srv&4)flags+=" gs-null";
-    if(srv&8)flags+=" gs-over-target";
-    unsigned fmtNow=state.rtFormat.load(std::memory_order_relaxed);
-    std::string key=fmt("%u/%llx/%zx/%u/%llx/%zx/%u/%u/%x",topology,gs.hash,gs.bytes,gs.serial,ps.hash,ps.bytes,ps.serial,fmtNow,srv);
-    report(2,"draw-state "+key,fmt("draw state topology=%u(%s) gs=%012llx/%zub#%u ps=%012llx/%zub#%u target=%s srv:%s",
+    if(srv&1)flags+=" ps-null";if(srv&2)flags+=" ps-over-target";
+    if(srv&4)flags+=" gs-null";if(srv&8)flags+=" gs-over-target";
+    const char* countLabel=kind==0||kind==2?"indices":kind==1||kind==3?"vertices":"indirect";
+    std::string key=fmt("%u/%u/%u/%u/%llx/%zx/%u/%llx/%zx/%u/%u/%u/%u/%u/%x",deferred,id,kind,topology,gs.hash,gs.bytes,gs.serial,ps.hash,ps.bytes,ps.serial,fmtNow,state.rtWidth.load(),state.rtHeight.load(),state.dsFormat.load(),srv);
+    std::string drawCounts=kind>=kDrawAuto?"counts=gpu":fmt("%s=%u instances=%u",countLabel,count,instances);
+    std::string text=fmt("draw state ctx=%s exec=%s draw=%s %s topology=%u(%s) gs=%012llx/%zub#%u ps=%012llx/%zub#%u target=%s %ux%u dsv=%s srv:%s",
+        deferred?fmt("def#%u",id).c_str():"imm",deferred?"pending":"immediate",drawKindName(kind),drawCounts.c_str(),
         topology,topologyName(topology).c_str(),gs.hash,gs.bytes,gs.serial,ps.hash,ps.bytes,ps.serial,
-        formatText(DXGI_FORMAT(fmtNow)).c_str(),
-        flags.empty()?" ok":flags.c_str()));
+        formatText(DXGI_FORMAT(fmtNow)).c_str(),state.rtWidth.load(),state.rtHeight.load(),
+        formatText(DXGI_FORMAT(state.dsFormat.load())).c_str(),flags.empty()?" ok":flags.c_str());
+    if(deferred) {
+        for(const auto& old:state.pendingDeepDraws)if(old.key==key)return;
+        if(state.pendingDeepDraws.size()<kMaxDrawStates)state.pendingDeepDraws.push_back({key,text});
+        else state.pendingDeepDrawsCapped=true;
+        return;
+    }
+    std::string reportKey="draw-state-imm/"+key,line;
+    {
+        std::lock_guard<std::mutex> lock(reportM);
+        if(seen.count(reportKey))return;
+        if(drawStates>=kMaxDrawStates) {
+            if(drawStatesCapped)return;
+            drawStatesCapped=true;line="further immediate draw-state lines suppressed (cap reached)";
+        } else {seen.insert(reportKey);++drawStates;line=text;}
+    }
+    emit(line);
+}
+inline void noteFinishedCommandList(void* context,ID3D11CommandList* list) {
+    if(!deepDraw()||!list)return;
+    ContextState& state=stateOf(context);
+    DeepCommandList record;record.id=deepCommandListSerial.fetch_add(1,std::memory_order_relaxed)+1;
+    std::string note;
+    {
+        std::lock_guard<std::mutex> lock(reportM);
+        if(state.pendingDeepDrawsCapped&&!deferredDrawStatesCapped) {
+            deferredDrawStatesCapped=true;note="further deferred draw-state lines suppressed (cap reached)";
+        }
+        for(const auto& sig:state.pendingDeepDraws) {
+            std::string key=fmt("draw-state-def/%u/list=%u/%s",state.contextId.load(std::memory_order_relaxed),record.id,sig.key.c_str());
+            if(deferredDrawStates>=kMaxDrawStates) {
+                if(!deferredDrawStatesCapped){deferredDrawStatesCapped=true;note="further deferred draw-state lines suppressed (cap reached)";}
+                continue;
+            }
+            seen.insert(key);++deferredDrawStates;record.signatures.push_back(sig);
+        }
+        state.pendingDeepDraws.clear();state.pendingDeepDrawsCapped=false;
+        if(!deepCommandLists.count(list)&&deepCommandLists.size()>=kMaxDeepCommandLists)deepCommandLists.erase(deepCommandLists.begin());
+        deepCommandLists.insert_or_assign(list,std::move(record));
+    }
+    if(!note.empty())emit(note);
+}
+inline void noteExecutedCommandList(ID3D11CommandList* list,BOOL restore) {
+    if(!deepDraw()||!list)return;
+    unsigned id=0,executes=0;size_t signatureCount=0;
+    bool found=false,reportReplay=false,reportCap=false;
+    std::vector<DeepDrawSignature> firstReplay;
+    {
+        std::lock_guard<std::mutex> lock(reportM);
+        auto it=deepCommandLists.find(list);
+        if(it!=deepCommandLists.end()) {
+            auto& record=it->second;++record.executes;id=record.id;executes=record.executes;
+            signatureCount=record.signatures.size();found=true;
+            if(executes==1)firstReplay=record.signatures;
+            if(deepReplayLines<kMaxDrawStates){++deepReplayLines;reportReplay=true;}
+            else if(!deepReplayCapped){deepReplayCapped=true;reportCap=true;}
+        }
+    }
+    if(!found)return;
+    if(reportReplay)emit(fmt("draw command-list replay list=#%u exec=%u restore=%u signatures=%zu",id,executes,restore!=0,signatureCount));
+    if(reportCap)emit("further command-list replay lines suppressed (cap reached)");
+    if(executes==1)for(const auto& sig:firstReplay) {
+        std::string line=sig.text;
+        size_t at=line.find("exec=pending");
+        if(at!=std::string::npos)line.replace(at,12,fmt("exec=%u list=#%u",executes,id));
+        emit(line);
+    }
 }
 inline void noteRenderTargetResource(ID3D11RenderTargetView* view) {
     if(!view)return;
@@ -553,8 +627,8 @@ inline std::string topologyName(unsigned t) {
     if(t>=33&&t<=64)return fmt("patchlist-%u",t-32);   // 1..32 control points
     return "?";
 }
-// Patch lists are 1..32 control points (33..64 in D3D11): the game's terrain
-// effect tessellates, so this is the bucket that says whether it ran.
+// Patch lists are 1..32 control points (33..64 in D3D11); this bucket reports
+// tessellated submissions but does not identify their game pass.
 inline bool patchList(unsigned t){return t>=33&&t<=64;}
 inline const char* drawKindName(int k){
     static const char* names[kDrawKinds]={"DrawIndexed","Draw","DrawIndexedInstanced","DrawInstanced",
@@ -656,10 +730,8 @@ inline void printSummary(unsigned window) {
             (unsigned long long)total,(unsigned long long)patched,(unsigned long long)withHull,(unsigned long long)withGs,
             (unsigned long long)withGsPs,(unsigned long long)zero));
     }
-    // GS-bound draws per input topology: pointlist+GS is the point-sprite
-    // expansion shape (Halo Wars' terrain and minimap ride it), and a
-    // topology the runtime's GS conversion cannot represent shows up here as
-    // a count with no visible output.
+    // GS-bound draws per input topology. These counts characterize submitted
+    // work but do not identify a game pass or prove visible output.
     {
         std::string gsTopos;
         for(int k=0;k<kDrawKinds;++k)
@@ -850,7 +922,7 @@ inline std::string shaderText(const void* code,SIZE_T length,std::string* key=nu
 // - dcl_maxOutputVertexCount (opcode 94), the GS's expansion bound
 // - the output topology dcl_gs_output_topology (opcode 92), carried in the
 //   opcode token's bits [16:11] (D3D10_SB_PRIMITIVE_TOPOLOGY: pointlist=1):
-//   pointlist output is what a point-sprite terrain layer expands to
+//   pointlist output can be expanded by a geometry shader into other primitives
 // - stream declarations (dcl_stream m<N>, opcode D3D11_SB_OPCODE_DCL_STREAM,
 //   operand type STREAM=16 in operand-token bits [19:12]): more than one
 //   stream means stream-out expansion, the shape dxilconv is most likely to
@@ -1216,14 +1288,14 @@ inline void countDraw(void* self,int kind,unsigned count,unsigned instances) {
     if(gs) {
         drawsWithGs[kind].fetch_add(1,std::memory_order_relaxed);
         if(ps)drawsWithGsAndPs[kind].fetch_add(1,std::memory_order_relaxed);
-        // Per-topology split of the GS-bound draws: a point-sprite layer is
-        // pointlist + GS, and that is the bucket the black terrain hides in.
+        // Per-topology split of the GS-bound draws. A point-list signature is
+        // not enough to identify a terrain, minimap, or overlay pass.
         unsigned top=std::min(t,64u);
         gsDrawTopologies[kind][top].fetch_add(1,std::memory_order_relaxed);
     }
     countDrawFormat(state.rtFormat.load(std::memory_order_relaxed));
     if(!count||(kind>=2&&kind<4&&!instances))zeroCounts[kind].fetch_add(1,std::memory_order_relaxed);
-    noteDrawState(self,state,t,s);
+    noteDrawState(self,state,t,s,kind,count,instances);
     static std::atomic<bool> named[kDrawKinds];
     if(!named[kind].exchange(true,std::memory_order_relaxed))
         emit(fmt("draw summary: first %s topology=%u(%s) hs/ds/gs/ps=%s/%s/%s/%s",drawKindName(kind),t,topologyName(t).c_str(),
@@ -1251,7 +1323,7 @@ inline void countDrawUnknown(void* self,int kind) {
         gsDrawTopologies[kind][std::min(t,64u)].fetch_add(1,std::memory_order_relaxed);
     }
     countDrawFormat(state.rtFormat.load(std::memory_order_relaxed));
-    noteDrawState(self,state,t,s);
+    noteDrawState(self,state,t,s,kind,0,0);
     static std::atomic<bool> named[kDrawKinds];
     if(!named[kind].exchange(true,std::memory_order_relaxed))
         emit(fmt("draw summary: first %s topology=%u(%s) hs/ds/gs/ps=%s/%s/%s/%s",drawKindName(kind),t,topologyName(t).c_str(),
@@ -1492,11 +1564,35 @@ inline void noteRenderTargetFormat(void* self,UINT count,ID3D11RenderTargetView*
     } else format=state.formatValue[slot].load(std::memory_order_relaxed);
     state.rtFormat.store(format,std::memory_order_relaxed);
 }
+inline void noteDeepTargetInfo(void* self,UINT count,ID3D11RenderTargetView* const* views,ID3D11DepthStencilView* depth) {
+    if(!deepDraw())return;
+    ContextState& state=stateOf(self);
+    unsigned width=0,height=0,depthFormat=0;
+    if(count&&views&&views[0]) {
+        D3D11_RENDER_TARGET_VIEW_DESC viewDesc{};views[0]->GetDesc(&viewDesc);
+        ID3D11Resource* resource=nullptr;views[0]->GetResource(&resource);
+        if(resource) {
+            ID3D11Texture2D* texture=nullptr;
+            if(SUCCEEDED(resource->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&texture)))&&texture) {
+                D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);
+                UINT mip=0;
+                if(viewDesc.ViewDimension==D3D11_RTV_DIMENSION_TEXTURE2D)mip=viewDesc.Texture2D.MipSlice;
+                else if(viewDesc.ViewDimension==D3D11_RTV_DIMENSION_TEXTURE2DARRAY)mip=viewDesc.Texture2DArray.MipSlice;
+                width=std::max(1u,desc.Width>>std::min(mip,31u));height=std::max(1u,desc.Height>>std::min(mip,31u));texture->Release();
+            }
+            resource->Release();
+        }
+    }
+    if(depth) {D3D11_DEPTH_STENCIL_VIEW_DESC desc{};depth->GetDesc(&desc);depthFormat=unsigned(desc.Format);}
+    state.rtWidth.store(width,std::memory_order_relaxed);state.rtHeight.store(height,std::memory_order_relaxed);
+    state.dsFormat.store(depthFormat,std::memory_order_relaxed);
+}
 static void STDMETHODCALLTYPE contextOMSetRenderTargets(DevicePtr self,UINT count,ID3D11RenderTargetView* const* views,ID3D11DepthStencilView* depth) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*);
     auto call=reinterpret_cast<Fn>(original(self,OMSetRenderTargets));if(!call)return;
     noteRenderTargets(count,views);
     noteRenderTargetFormat(self,count,views);
+    noteDeepTargetInfo(self,count,views,depth);
     call(self,count,views,depth);
 }
 // The same bind with UAVs: a layer that writes through UAVs (or renders into a
@@ -1515,6 +1611,7 @@ static void STDMETHODCALLTYPE contextOMSetRenderTargetsAndUnorderedAccessViews(D
     if(count!=D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL) {
         noteRenderTargets(count,views);
         noteRenderTargetFormat(self,count,views);
+        noteDeepTargetInfo(self,count,views,depth);
     }
     call(self,count,views,depth,uavStart,uavCount,uavs,initialCounts);tick();
 }
@@ -1598,7 +1695,7 @@ static void STDMETHODCALLTYPE context1ClearView(DevicePtr self,ID3D11View* view,
 static HRESULT STDMETHODCALLTYPE contextFinishCommandList(DevicePtr self,BOOL restore,ID3D11CommandList** list) {    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,BOOL,ID3D11CommandList**);
     auto call=reinterpret_cast<Fn>(original(self,FinishCommandList));if(!call)return E_FAIL;
     HRESULT hr=call(self,restore,list);
-    if(SUCCEEDED(hr))commandLists.fetch_add(1,std::memory_order_relaxed);
+    if(SUCCEEDED(hr)){commandLists.fetch_add(1,std::memory_order_relaxed);if(list&&*list)noteFinishedCommandList(self,*list);}
     D3D11_DIAG_FAILED("FinishCommandList",fmt("%d",restore!=0),fmt("restore=%d",restore!=0));
     return hr;
 }
@@ -1607,7 +1704,7 @@ static HRESULT STDMETHODCALLTYPE contextFinishCommandList(DevicePtr self,BOOL re
 static void STDMETHODCALLTYPE contextExecuteCommandList(DevicePtr self,ID3D11CommandList* list,BOOL restore) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11CommandList*,BOOL);
     auto call=reinterpret_cast<Fn>(original(self,ExecuteCommandList));if(!call)return;
-    executedLists.fetch_add(1,std::memory_order_relaxed);call(self,list,restore);tick();
+    executedLists.fetch_add(1,std::memory_order_relaxed);call(self,list,restore);noteExecutedCommandList(list,restore);tick();
 }
 static HRESULT STDMETHODCALLTYPE createDeferredContext(DevicePtr self,UINT flags,ID3D11DeviceContext** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11DeviceContext**);

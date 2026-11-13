@@ -132,6 +132,8 @@ jobs:
         run: bash src/xbox-test/uwph/host/tests/run-load-config.sh
       - name: Launcher mapped-image load-config rejection
         run: bash src/xbox-test/app/tests/load-config.sh
+      - name: PE32+ unwind registration accepts sorted ranges and rejects corrupt tables
+        run: bash src/xbox-test/app/tests/unwind-registration.sh
       - name: Delete game removes only its install folder
         run: bash src/xbox-test/app/tests/game-delete.sh
       - name: Storage move copies, verifies and markers atomically
@@ -325,6 +327,10 @@ jobs:
         run: bash src/xbox-test/app/tests/x86-com.sh
       - name: "x86 launch route (i686 fixture through the launcher's PE32 entry point and result mapping)"
         run: bash src/xbox-test/app/tests/x86-launch-route.sh
+      - name: "x86 API-set imports (api-ms-win-crt/core names bind by the documented policy; unmapped names stay unresolved; UCRT arity table)"
+        run: bash src/xbox-test/app/tests/x86-apiset.sh
+      - name: "x86 API-set CRT structure layout comparison"
+        run: bash src/xbox-test/app/tests/x86-apiset-layout.sh
       - name: "x86 C++ runtime fixture (iostream, std::string, exceptions, std::thread)"
         run: bash src/xbox-test/app/tests/x86-cxxrt.sh
       - name: "x86 C++ runtime fixture, wine cross-check (skips when wine cannot run PE32)"
