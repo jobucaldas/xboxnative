@@ -1,26 +1,36 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Static contract for the d3d11 fixture (off-device, no Wine): between the
-# deferred pass's ExecuteCommandList(list,FALSE), which resets the immediate
-# context to its defaults, and the stream-out draw, the fixture rebinds the
-# input layout, the vertex buffer, topology and the vertex and pixel shaders the
-# later draws read. Without them the SO buffer stays empty and the pass reports BLOCKED for a fixture
-# reason. This checks source order only; the capture itself is console-only
-# (Wine's d3d11 captures nothing here, so the stream-out pass is gated off).
+# Static contract for the d3d11 fixture (off-device, no Wine, source only).
+# ExecuteCommandList(list, FALSE) returns the immediate context to its defaults,
+# so every ExecuteCommandList(..., FALSE) in the fixture must be followed by
+# rebind_pipeline_state(...) before the next draw, and that helper must set
+# every state the fixture uses. A Wine run cannot show the capture: the
+# stream-out pass is gated off under Wine, so this checks source order only.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 f="$here/play-d3d11.cpp"
-reset=$(grep -n 'ExecuteCommandList(list,FALSE)' "$f" | head -1 | cut -d: -f1 || true)
-draw=$(grep -n 'SOSetTargets(1,soBinds' "$f" | head -1 | cut -d: -f1 || true)
-if [[ -z $reset || -z $draw ]]; then
-    echo "FAIL play-d3d11.cpp: the context reset or the stream-out draw was not found"
-    exit 1
-fi
-window=$(sed -n "${reset},${draw}p" "$f")
-for call in IASetInputLayout IASetVertexBuffers IASetPrimitiveTopology VSSetShader PSSetShader; do
-    if ! grep -q "context->$call(" <<<"$window"; then
-        echo "FAIL $call is not rebound between the reset (line $reset) and the stream-out draw (line $draw)"
-        exit 1
+fail(){ echo "FAIL $*"; exit 1; }
+
+mapfile -t resets < <(grep -n -- '->ExecuteCommandList(.*FALSE)' "$f" | cut -d: -f1)
+(( ${#resets[@]} > 0 )) || fail "no ExecuteCommandList(..., FALSE) found; the contract has nothing to check"
+
+def=$(grep -n '^static void rebind_pipeline_state(' "$f" | cut -d: -f1 || true)
+[[ -n $def ]] || fail "rebind_pipeline_state helper is not defined"
+end=$(awk -v s="$def" 'NR>s && /^}/ {print NR; exit}' "$f")
+body=$(sed -n "${def},${end}p" "$f")
+for call in IASetInputLayout IASetVertexBuffers IASetIndexBuffer IASetPrimitiveTopology \
+            VSSetShader GSSetShader PSSetShader RSSetViewports RSSetState OMSetRenderTargets \
+            OMSetBlendState OMSetDepthStencilState VSSetShaderResources PSSetShaderResources \
+            VSSetSamplers PSSetSamplers VSSetConstantBuffers PSSetConstantBuffers; do
+    grep -q "ctx->$call(" <<<"$body" || fail "rebind_pipeline_state does not set $call"
+done
+
+for r in "${resets[@]}"; do
+    rebind=$(awk -v s="$r" 'NR>s && /rebind_pipeline_state\(/ && !/^static/ {print NR; exit}' "$f")
+    draw=$(awk -v s="$r" 'NR>s && /(Draw|DrawIndexed|DrawInstanced|DrawInstancedIndirect|DrawIndexedInstanced)\(/ {print NR; exit}' "$f")
+    [[ -n $rebind ]] || fail "ExecuteCommandList(FALSE) at line $r is never followed by rebind_pipeline_state"
+    if [[ -n $draw ]] && (( draw < rebind )); then
+        fail "a draw (line $draw) comes before rebind_pipeline_state (line $rebind) after the reset at line $r"
     fi
 done
-echo "PASS input layout, vertex buffer, topology and VS are rebound between the reset (line $reset) and the stream-out draw (line $draw)"
+echo "PASS ${#resets[@]} ExecuteCommandList(FALSE) call(s) each followed by rebind_pipeline_state before the next draw; the helper sets all states the fixture uses"

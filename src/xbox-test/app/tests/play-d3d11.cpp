@@ -37,6 +37,40 @@ static HWND guestWindow() {
         0,0,640,480,nullptr,nullptr,cls.hInstance,nullptr);
 }
 
+// Re-establishes the pipeline state the later passes depend on. A deferred
+// ExecuteCommandList(list, FALSE) returns the immediate context to its defaults
+// (MS docs: RestoreContextState FALSE), so everything the fixture set before it
+// is gone. Each state is set to what the fixture had (the triangle's IA state,
+// VS/PS, the viewport, the RTV); states no pass sets before the reset (raster,
+// blend, depth-stencil, samplers, SRVs, constant buffers, index buffer) are set
+// to their defaults explicitly, so no pass depends on what the reset left.
+static void rebind_pipeline_state(ID3D11DeviceContext* ctx,ID3D11InputLayout* layout,ID3D11Buffer* vb,
+        UINT stride,UINT offset,ID3D11VertexShader* vs,ID3D11PixelShader* ps,
+        const D3D11_VIEWPORT* viewport,ID3D11RenderTargetView* rtv) {
+    ctx->IASetInputLayout(layout);
+    ID3D11Buffer* vbs[]={vb};
+    ctx->IASetVertexBuffers(0,1,vbs,&stride,&offset);
+    ctx->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(vs,nullptr,0);
+    ctx->GSSetShader(nullptr,nullptr,0);
+    ctx->PSSetShader(ps,nullptr,0);
+    ctx->RSSetViewports(1,viewport);
+    ctx->RSSetState(nullptr);
+    ctx->OMSetRenderTargets(1,&rtv,nullptr);
+    ctx->OMSetBlendState(nullptr,nullptr,0xffffffff);
+    ctx->OMSetDepthStencilState(nullptr,0);
+    ID3D11ShaderResourceView* srvs[]={nullptr};
+    ctx->VSSetShaderResources(0,1,srvs);
+    ctx->PSSetShaderResources(0,1,srvs);
+    ID3D11SamplerState* samplers[]={nullptr};
+    ctx->VSSetSamplers(0,1,samplers);
+    ctx->PSSetSamplers(0,1,samplers);
+    ID3D11Buffer* cbs[]={nullptr};
+    ctx->VSSetConstantBuffers(0,1,cbs);
+    ctx->PSSetConstantBuffers(0,1,cbs);
+}
+
 DWORD d3d_entry() {
     // ---- the draw: device, factory, swap chain, triangle, readback ----
     HWND window=guestWindow();
@@ -307,10 +341,11 @@ DWORD d3d_entry() {
     ID3D11CommandList* list=nullptr;
     if(FAILED(deferred->FinishCommandList(FALSE,&list))||!list)return 62;
     // ExecuteCommandList(FALSE) resets the immediate context to pipeline
-    // defaults, exactly as a game's next recorded frame expects; the passes
-    // after this one rebind everything they use (vertex buffer, RTV,
-    // viewport), so nothing here depends on stale state.
+    // defaults, exactly as a game's next recorded frame expects. The helper
+    // re-establishes the state the later passes read without setting it, so
+    // nothing after this point depends on what the reset left.
     context->ExecuteCommandList(list,FALSE);
+    rebind_pipeline_state(context,layout,verticesBuffer,stride,offset,vs,ps,&viewport,rtv);
     context->CopyResource(staging,target);
     D3D11_MAPPED_SUBRESOURCE dMapped{};
     if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&dMapped))||!dMapped.pData)return 62;
@@ -350,18 +385,8 @@ DWORD d3d_entry() {
     if(FAILED(device->CreateBuffer(&soDesc,nullptr,&soBuffer))||!soBuffer)return 65;
     ID3D11Buffer* soBinds[]={soBuffer};
     UINT soOffsets[]={0};
-    // The deferred pass above ran ExecuteCommandList(FALSE), which returns the
-    // immediate context to its defaults: no input layout, no vertex buffer, no
-    // vertex or pixel shader. This draw rebinds the input state and the
-    // shaders it reads, or the SO buffer stays empty for a reason in the
-    // fixture, not in the layer. The PS is rebound here too: the passes after
-    // this one draw with it and do not set it themselves.
-    context->IASetInputLayout(layout);
-    ID3D11Buffer* soVertexBinds[]={verticesBuffer};
-    context->IASetVertexBuffers(0,1,soVertexBinds,&stride,&offset);
-    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    context->VSSetShader(vs,nullptr,0);
-    context->PSSetShader(ps,nullptr,0);
+    // The input state and shaders this draw reads are set by the helper after
+    // the deferred execute (see rebind_pipeline_state).
     context->GSSetShader(soGs,nullptr,0);
     context->SOSetTargets(1,soBinds,soOffsets);
     context->Draw(3,0);
