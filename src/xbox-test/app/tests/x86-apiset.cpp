@@ -4,11 +4,11 @@
 //  2. the registry against the UCRT table: each declared name the surface serves is
 //     cdecl with the header's dword count, the table is served in full, and every
 //     msvcrt registration the headers do not declare is on the reviewed list;
-//  3. both directions over the whole table: every served name binds to msvcrt.dll
-//     unless it is width-sensitive, and the width-sensitive set is exactly the
-//     reviewed one (time, _filelengthi64, _lseeki64). Width-sensitive names of any
-//     kind stay on their contract DLL. The intptr_t helpers (_get_osfhandle) bind;
-//  4. with a fixture (argv[1]): the bound and unbound imports run end to end, and
+//  3. both directions over the whole table: every compatible served name binds to
+//     msvcrt.dll, while ABI- or behavior-incompatible names stay on their contract DLL;
+//  4. the PE32 header-layout probe lists the reviewed mismatches (lconv, generic
+//     time_t/off_t structs and FILE); _get_osfhandle still binds on matching i386 ABI;
+//  5. with a fixture (argv[1]): the bound and unbound imports run end to end, and
 //     the gap list names each unbound import exactly.
 #include <cstdio>
 #include <fstream>
@@ -34,13 +34,16 @@ static const std::set<std::string> kMsvcrtOnly = {
     "_malloc", "__p__commode", "__p___initenv", "__p__iob", "__p___mb_cur_max", "__set_app_type",
     "_unlock", "__wgetmainargs"};
 
-// The UCRT names that are served and width-sensitive (apiset.h kWidthSensitive),
-// reviewed against their declarations there. Any change here is a deliberate one.
-static const std::set<std::string> kServedWidthSensitive = {"time", "_filelengthi64", "_lseeki64"};
+// Served names that must stay unresolved for ABI/layout reasons, including lconv.
+static const std::set<std::string> kServedAbiSensitive = {"time", "_filelengthi64", "_lseeki64", "localeconv"};
+static const std::set<std::string> kServedBehaviorSensitive = {
+    "_fstat64", "__setusermatherr", "_wfopen", "clock", "feof", "fgetpos",
+    "fopen", "fread", "fsetpos", "getenv", "wcsftime"};
 
 int main(int argc, char** argv) {
     const std::string crt_time = "api-ms-win-crt-time-l1-1-0.dll";
     const std::string crt_fs = "api-ms-win-crt-filesystem-l1-1-0.dll";
+    const std::string crt_locale = "api-ms-win-crt-locale-l1-1-0.dll";
 
     // 1. Mapping of single names.
     CHECK(apiset::served_by("api-ms-win-crt-string-l1-1-0.dll", "strlen") == "msvcrt.dll");
@@ -54,6 +57,7 @@ int main(int argc, char** argv) {
     CHECK(apiset::served_by("msvcrt.dll", "strlen") == "msvcrt.dll");
     CHECK(apiset::served_by(crt_time, "time") == crt_time);
     CHECK(apiset::served_by(crt_time, "TIME") == crt_time);  // case-insensitive, as the binder
+    CHECK(apiset::served_by(crt_locale, "localeconv") == crt_locale);
 
     // 2. Registry against the header table.
     Memory mem; ThunkTable table; Host host; Registry reg;
@@ -80,22 +84,28 @@ int main(int argc, char** argv) {
     for (const auto& n : kMsvcrtOnly) if (reg.map.find({"msvcrt.dll", Registry::key_sym(n)}) == reg.map.end()) { ++failures; printf("FAIL reviewed msvcrt-only name is not served: %s\n", n.c_str()); }
 
     // 3. Both directions over the served table, and the guard list.
-    std::set<std::string> excluded_served;
+    std::set<std::string> excluded_abi, excluded_behavior;
     for (const auto& d : apiset::kUcrtDeclared) {
-        const bool sensitive = apiset::width_sensitive(d.name);
-        const std::string want = sensitive ? crt_time : "msvcrt.dll";
+        const bool compatible = apiset::ucrt_compatible(d.name);
+        const std::string want = compatible ? "msvcrt.dll" : crt_time;
         if (apiset::served_by(crt_time, d.name) != want) { ++failures; printf("FAIL direction: %s should resolve to %s\n", d.name, want.c_str()); }
         ++checks;
-        if (sensitive) excluded_served.insert(apiset::lower(d.name));
+        if (apiset::abi_sensitive(d.name)) excluded_abi.insert(apiset::lower(d.name));
+        if (apiset::behavior_sensitive(d.name)) excluded_behavior.insert(apiset::lower(d.name));
     }
-    CHECK(excluded_served == kServedWidthSensitive);
-    // Declared-not-served width-sensitive names stay on their contract DLL too (a guard).
+    CHECK(excluded_abi == kServedAbiSensitive);
+    CHECK(excluded_behavior == kServedBehaviorSensitive);
+    // ABI- and behavior-incompatible names of any kind stay on their contract DLL.
     for (const char* n : apiset::kWidthSensitive) {
-        if (apiset::served_by(crt_time, n) != crt_time) { ++failures; printf("FAIL width-sensitive name aliased: %s\n", n); }
+        if (apiset::served_by(crt_time, n) != crt_time) { ++failures; printf("FAIL ABI-sensitive name aliased: %s\n", n); }
         ++checks;
     }
-    // The intptr_t helpers bind: _get_osfhandle is declared, served, and aliases to msvcrt.
-    CHECK(apiset::declared("_get_osfhandle") && !apiset::width_sensitive("_get_osfhandle"));
+    for (const char* n : apiset::kBehaviorSensitive) {
+        if (apiset::served_by(crt_time, n) != crt_time) { ++failures; printf("FAIL behavior-sensitive name aliased: %s\n", n); }
+        ++checks;
+    }
+    // The intptr_t helper binds: _get_osfhandle is declared, compatible, and aliases to msvcrt.
+    CHECK(apiset::declared("_get_osfhandle") && apiset::ucrt_compatible("_get_osfhandle"));
     CHECK(apiset::served_by(crt_fs, "_get_osfhandle") == "msvcrt.dll");
     CHECK(reg.map.count({"msvcrt.dll", "_get_osfhandle"}) == 1);
 
@@ -107,22 +117,25 @@ int main(int argc, char** argv) {
         auto r = x86::run_image(file, "apiset.exe", "\"apiset.exe\"",
             [](const std::string&) {}, [](const x86::PlayResult&) {}, x86::kGuestRunCap);
         CHECK(r.loaded && r.finished && r.exit_code == 0);
-        // ExitProcess, strlen and _get_osfhandle bind; _lseeki64, time and frobnicate do not.
-        CHECK(r.imports == 6 && r.bound == 3);
-        CHECK(r.unresolved.size() == 3);
+        // ExitProcess, strlen and _get_osfhandle bind; localeconv, _lseeki64, time and frobnicate do not.
+        CHECK(r.imports == 7 && r.bound == 3);
+        CHECK(r.unresolved.size() == 4);
         std::set<std::string> unresolved(r.unresolved.begin(), r.unresolved.end());
         CHECK(unresolved.count(crt_fs + "!_lseeki64") == 1);
+        CHECK(unresolved.count(crt_locale + "!localeconv") == 1);
         CHECK(unresolved.count(crt_time + "!time") == 1);
         CHECK(unresolved.count("api-ms-win-foo-l1-1-0.dll!frobnicate") == 1);
         // The launcher names all three, grouped by DLL, with the total.
         auto rep = x86_route::report(r, "apiset.exe");
         std::vector<std::string> want_gap = {
             "x86 gap: " + crt_fs + "!_lseeki64",
+            "x86 gap: " + crt_locale + "!localeconv",
             "x86 gap: " + crt_time + "!time",
             "x86 gap: api-ms-win-foo-l1-1-0.dll!frobnicate",
-            "x86 gap: total=3"};
+            "x86 gap: total=4"};
         CHECK(rep.gap.size() == want_gap.size());
-        for (size_t i = 0; i < want_gap.size() && i < rep.gap.size(); ++i) CHECK(rep.gap[i] == want_gap[i]);
+        for (size_t i = 0; i < want_gap.size() && i < rep.gap.size(); ++i)
+            if (rep.gap[i] != want_gap[i]) { ++failures; printf("FAIL gap[%zu]: got %s, want %s\n", i, rep.gap[i].c_str(), want_gap[i].c_str()); }
     }
     printf("x86-apiset: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

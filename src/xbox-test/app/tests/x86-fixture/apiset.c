@@ -3,6 +3,8 @@
  *  - strlen through api-ms-win-crt-string-l1-1-0.dll: binds, returns 5.
  *  - _get_osfhandle through api-ms-win-crt-filesystem-l1-1-0.dll: binds (intptr_t
  *    is 32-bit on i386) and is called on fd 1, which must not be -1.
+ *  - localeconv through api-ms-win-crt-locale-l1-1-0.dll: stays unresolved
+ *    because the UCRT lconv has eight trailing wide-string pointers.
  *  - time through api-ms-win-crt-time-l1-1-0.dll: stays unresolved (time_t is
  *    64-bit in the UCRT; apiset.h kWidthSensitive).
  *  - _lseeki64 through api-ms-win-crt-filesystem-l1-1-0.dll: stays unresolved
@@ -10,7 +12,7 @@
  *  - frobnicate through api-ms-win-foo-l1-1-0.dll: stays unresolved (not mapped).
  * The unresolved imports are never called. Symbol names are the import-library
  * spellings x86-apiset.sh produces (dlltool prefixes one underscore to each def
- * name): _time, __lseeki64, __get_osfhandle. Freestanding apart from the SDK. */
+ * name): _time, __lseeki64, __get_osfhandle, _localeconv. Freestanding apart from the SDK. */
 #include <windows.h>
 #include <string.h>
 
@@ -18,11 +20,14 @@ extern void frobnicate(void);
 extern void time_import(void) __asm__("_time");
 extern void lseek_import(void) __asm__("__lseeki64");
 extern int get_osfhandle_import(int) __asm__("__get_osfhandle");
+extern void* localeconv_import(void) __asm__("_localeconv");
+void* volatile keep_localeconv;
 void* volatile keep_frob;
 void* volatile keep_time;
 void* volatile keep_lseek;
 
 void WINAPI apiset_start(void) {
+    keep_localeconv = (void*)&localeconv_import;
     keep_frob = (void*)&frobnicate;
     keep_time = (void*)&time_import;
     keep_lseek = (void*)&lseek_import;
