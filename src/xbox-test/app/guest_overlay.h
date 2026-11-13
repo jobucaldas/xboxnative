@@ -537,18 +537,31 @@ inline PresentFn realPresent=nullptr;inline Present1Fn realPresent1=nullptr;
 // the only trace is the caller's error hiding the removal.
 inline std::atomic<bool> presentFailureLogged{false};
 inline void presentFailure(IDXGISwapChain* c,HRESULT hr) {
-    if(!presentFailureLogged.exchange(true)) {
+    const bool tracing=d3d11_diag::traceOn.load(std::memory_order_acquire);
+    const bool first=!presentFailureLogged.exchange(true);
+    if(tracing||first) {
         winrt::com_ptr<ID3D11Device> dev;
         if(SUCCEEDED(c->GetDevice(__uuidof(ID3D11Device),dev.put_void()))&&dev) {
             HRESULT reason=dev->GetDeviceRemovedReason();
-            char b[128];snprintf(b,sizeof b,"guest Present failed hr=0x%08lx; device removed reason hr=0x%08lx",
-                (unsigned long)hr,(unsigned long)reason);
+            char b[160];snprintf(b,sizeof b,"guest Present failed hr=0x%08lx; device removed reason hr=0x%08lx%s",
+                (unsigned long)hr,(unsigned long)reason,tracing?" (trace: each failed Present)":"");
             if(auto s=d3d11_diag::sink)s(b);
         }
+        if(tracing&&first)d3d11_diag::flushTrace();
     }
 }
+inline void tracePresentResult(const char* method,UINT sync,UINT flags,HRESULT hr) {
+    if(!d3d11_diag::traceOn.load(std::memory_order_acquire))return;
+    char line[112];snprintf(line,sizeof line,"D3D11 trace %s sync=%u flags=0x%x hr=0x%08lx",method,sync,flags,(unsigned long)hr);
+    if(auto s=d3d11_diag::sink)s(line);
+}
 inline HRESULT STDMETHODCALLTYPE present(IDXGISwapChain* c,UINT sync,UINT flags) {
-    if(flags&DXGI_PRESENT_TEST)return realPresent(c,sync,flags);
+    d3d11_diag::traceCall("Present");
+    if(flags&DXGI_PRESENT_TEST) {
+        HRESULT hr=realPresent(c,sync,flags);tracePresentResult("Present",sync,flags,hr);
+        if(FAILED(hr))presentFailure(c,hr);
+        return hr;
+    }
     draw(c);
     if(pacingCfg.enabled) {
         sync=present_pacing::effectiveSync(pacingCfg,sync);
@@ -557,11 +570,17 @@ inline HRESULT STDMETHODCALLTYPE present(IDXGISwapChain* c,UINT sync,UINT flags)
     }
     LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
     HRESULT hr=realPresent(c,sync,flags);QueryPerformanceCounter(&b);record(a,b,hr);
+    tracePresentResult("Present",sync,flags,hr);
     if(FAILED(hr))presentFailure(c,hr);
     return hr;
 }
 inline HRESULT STDMETHODCALLTYPE present1(IDXGISwapChain1* c,UINT sync,UINT flags,const DXGI_PRESENT_PARAMETERS* p) {
-    if(flags&DXGI_PRESENT_TEST)return realPresent1(c,sync,flags,p);
+    d3d11_diag::traceCall("Present1");
+    if(flags&DXGI_PRESENT_TEST) {
+        HRESULT hr=realPresent1(c,sync,flags,p);tracePresentResult("Present1",sync,flags,hr);
+        if(FAILED(hr))presentFailure(c,hr);
+        return hr;
+    }
     draw(c);
     if(pacingCfg.enabled) {
         sync=present_pacing::effectiveSync(pacingCfg,sync);
@@ -570,6 +589,7 @@ inline HRESULT STDMETHODCALLTYPE present1(IDXGISwapChain1* c,UINT sync,UINT flag
     }
     LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
     HRESULT hr=realPresent1(c,sync,flags,p);QueryPerformanceCounter(&b);record(a,b,hr);
+    tracePresentResult("Present1",sync,flags,hr);
     if(FAILED(hr))presentFailure(c,hr);
     return hr;
 }
@@ -621,6 +641,11 @@ inline void drain_device(ID3D11Device* dev) {
 // in main.cpp, on the launcher UI thread before any guest resize runs; the
 // flag is only read on the guest thread afterwards, hence the atomic).
 inline std::atomic<bool> lockFirstMode{false};
+inline void traceResizeResult(unsigned idx,HRESULT hr) {
+    if(!d3d11_diag::traceOn.load(std::memory_order_acquire))return;
+    char b[96];snprintf(b,sizeof b,"D3D11 trace ResizeBuffers #%u hr=0x%08lx",idx,(unsigned long)hr);
+    if(auto s=d3d11_diag::sink)s(b);
+}
 // Compile-time reachability check for the elision wiring (used by the CI
 // compile of the headers): the pure decision, the DXGI-typed seam and the
 // opt-out switch must all be reachable from guest_overlay.h.
@@ -632,6 +657,7 @@ inline bool elideCheck() {
                resize_elide::same_mode({2,1920,1080,0x1c,0x802},{2,1920,1080,0x1c,0x842});
 }
 inline HRESULT STDMETHODCALLTYPE resize(IDXGISwapChain* c,UINT count,UINT w,UINT h,DXGI_FORMAT f,UINT flags) {
+    d3d11_diag::traceCall("ResizeBuffers");
     // Every guest resize is logged with its index in the run (the RCA's
     // removal lands in the 4th-resize window; a summary that only keeps the
     // last resize cannot say which one triggered it). Goes through the diag
@@ -641,6 +667,13 @@ inline HRESULT STDMETHODCALLTYPE resize(IDXGISwapChain* c,UINT count,UINT w,UINT
     {
         char b[160];snprintf(b,sizeof b,"guest ResizeBuffers #%u count=%u %ux%u fmt=0x%x flags=0x%x",
             idx,count,w,h,(unsigned)f,(unsigned)flags);
+        if(auto s=d3d11_diag::sink)s(b);
+    }
+    if(d3d11_diag::traceOn.load(std::memory_order_acquire)) {
+        DXGI_SWAP_CHAIN_DESC desc{};HRESULT descHr=c->GetDesc(&desc);
+        char b[224];snprintf(b,sizeof b,"D3D11 trace swapchain desc hr=0x%08lx buffers=%u %ux%u fmt=%u sample=%u/%u effect=%u windowed=%u flags=0x%x",
+            (unsigned long)descHr,desc.BufferCount,desc.BufferDesc.Width,desc.BufferDesc.Height,unsigned(desc.BufferDesc.Format),
+            desc.SampleDesc.Count,desc.SampleDesc.Quality,unsigned(desc.SwapEffect),unsigned(desc.Windowed),desc.Flags);
         if(auto s=d3d11_diag::sink)s(b);
     }
     // Outstanding-RTV evidence, read before the drain unbinds anything: how
@@ -674,6 +707,7 @@ inline HRESULT STDMETHODCALLTYPE resize(IDXGISwapChain* c,UINT count,UINT w,UINT
     if(lockFirstMode&&resizes.load()>0) {
         ++resizes;lastResizeCount=count;lastResizeW=w;lastResizeH=h;lastResizeHr=S_OK;
         if(auto s=d3d11_diag::sink)s("overlay: resize suppressed (lockmode), chain keeps its first mode");
+        traceResizeResult(idx,S_OK);
         return S_OK;
     }
     // Redundant-resize elision (default ON; LocalState\resizeelide.txt with
@@ -691,6 +725,7 @@ inline HRESULT STDMETHODCALLTYPE resize(IDXGISwapChain* c,UINT count,UINT w,UINT
             ++resizes;lastResizeCount=count;lastResizeW=w;lastResizeH=h;lastResizeHr=S_OK;
             char b[96];snprintf(b,sizeof b,"guest ResizeBuffers #%u resize elided (same mode)",idx);
             if(auto s=d3d11_diag::sink)s(b);
+            traceResizeResult(idx,S_OK);
             return S_OK;
         }
     }
@@ -698,6 +733,7 @@ inline HRESULT STDMETHODCALLTYPE resize(IDXGISwapChain* c,UINT count,UINT w,UINT
     if(SUCCEEDED(c->GetDevice(__uuidof(ID3D11Device),dev.put_void()))&&dev)drain_device(dev.get());
     HRESULT hr=realResize(c,resize_count(count),w,h,f,resize_flags(flags));
     ++resizes;lastResizeCount=count;lastResizeW=w;lastResizeH=h;lastResizeHr=hr;
+    traceResizeResult(idx,hr);
     {
         char b[80];snprintf(b,sizeof b,"guest ResizeBuffers #%u returned hr=0x%08lx",idx,(unsigned long)hr);
         if(auto s=d3d11_diag::sink)s(b);

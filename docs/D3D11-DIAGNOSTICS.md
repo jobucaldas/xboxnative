@@ -22,6 +22,11 @@ does the guest draw, and why did a device get removed.
   reason; every resize is logged with its index in the run, its parameters,
   and how many render targets were still bound on the immediate context when
   the guest asked for it (outstanding-RTV evidence at resize time).
+* With `d3d11resizetrace.txt` present, each Present result and failure reason,
+  the swap-chain descriptor at each resize, each resize result (including
+  elided/suppressed S_OK results), and a bounded ring of the last 64 intercepted
+  D3D11 calls are logged when a Present fails. The ring covers hooked calls, not
+  every D3D11 interface method.
 
 ## Slot audit (build-time)
 
@@ -51,7 +56,17 @@ so a log always shows which mode it had. The DXGI resize logging above stays
 live with the switch armed — it reports through the same sink but does not
 depend on the vtable patches.
 
-This exists for A/B testing: if a device removal reproduces with the
-diagnostics off, the hooks are exonerated; if it stops reproducing, the hooks
-are the prime suspect. Delete the file (or reinstall without it) to turn the
-diagnostics back on.
+## Resize-removal trace (opt-in)
+
+Create `d3d11resizetrace.txt` in `LocalState` to enable the focused trace for
+one run; absent is the default and leaves the call ring off. The trace includes
+swap-chain descriptor fields, ResizeBuffers arguments and results, Present
+results, a device-removed reason for each failed Present, and the newest 64
+intercepted D3D11 calls when a Present fails. It is a diagnostic trace, not a
+complete API recorder; calls through unhooked D3D11 methods are not represented.
+The trace is independent of `d3d11diag.txt`, but the D3D11 call ring requires the
+regular vtable hooks to be installed.
+
+This trace can support A/B testing of device-removal timing, but a single run
+cannot establish causality; compare repeated runs and treat differences as
+suggestive until reproduced. Delete the file to turn this trace off.

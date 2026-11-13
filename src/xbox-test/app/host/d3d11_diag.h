@@ -79,6 +79,37 @@ constexpr size_t kMaxClasses=16;
 inline std::atomic<bool> enabled{true};
 inline void set_enabled(bool on) { enabled.store(on,std::memory_order_release); }
 inline bool is_enabled() { return enabled.load(std::memory_order_acquire); }
+inline void emit(const std::string& text);
+inline std::string fmt(const char* f,...);
+
+// Opt-in call ring (LocalState\\d3d11resizetrace.txt, default off). This is
+// deliberately separate from the regular diagnostics kill switch: it records
+// only intercepted D3D11 calls and is flushed when Present first fails.
+constexpr size_t kTraceRing=64;
+struct TraceEntry { uint64_t seq=0; const char* name=nullptr; };
+inline std::mutex traceMutex;
+inline uint64_t traceNextSeq=1;
+inline TraceEntry traceRing[kTraceRing];
+inline std::atomic<bool> traceOn{false};
+inline std::atomic<bool> traceChecked{false};
+inline bool (*set_trace_requested)()=nullptr;
+inline void traceCall(const char* name) {
+    if(!traceOn.load(std::memory_order_acquire))return;
+    std::lock_guard<std::mutex> lock(traceMutex);
+    uint64_t seq=traceNextSeq++;
+    traceRing[seq%kTraceRing]=TraceEntry{seq,name};
+}
+inline void flushTrace() {
+    if(!traceOn.load(std::memory_order_acquire))return;
+    std::unique_lock<std::mutex> lock(traceMutex,std::try_to_lock);
+    if(!lock.owns_lock()){emit("D3D11 trace busy; not flushed");return;}
+    uint64_t first=traceNextSeq>kTraceRing?traceNextSeq-kTraceRing:1;
+    emit(fmt("D3D11 trace: last %llu hooked calls, oldest first",(unsigned long long)(traceNextSeq-first)));
+    for(uint64_t seq=first;seq<traceNextSeq;++seq) {
+        const TraceEntry& e=traceRing[seq%kTraceRing];
+        if(e.seq==seq)emit(fmt("D3D11 trace #%llu %s",(unsigned long long)seq,e.name?e.name:"?"));
+    }
+}
 
 // The slot numbers themselves live in d3d11_diag_slots.h, shared with the
 // build-time slot audit so a drifted slot fails that test's build. The DXGI
@@ -1019,7 +1050,7 @@ inline std::string gsBytecodeText(const void* code,SIZE_T length) {
 // and a two-stream variant. Included so the test binary is self-contained.
 #include "gs-blobs.h"
 
-#define D3D11_DIAG_HOOK(Type,slot) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return E_FAIL;
+#define D3D11_DIAG_HOOK(Type,slot) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return E_FAIL;traceCall(#slot);
 // Every failed call also feeds the device-health path: the first failure after
 // a removal reports GetDeviceRemovedReason and the memory state, instead of
 // the caller's error hiding the removal.
@@ -1246,6 +1277,7 @@ inline bool patchContext(ID3D11DeviceContext* context);
 static HRESULT STDMETHODCALLTYPE contextMap(DevicePtr self,ID3D11Resource* r,UINT subresource,D3D11_MAP type,UINT flags,D3D11_MAPPED_SUBRESOURCE* mapped) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT,D3D11_MAP,UINT,D3D11_MAPPED_SUBRESOURCE*);
     auto call=reinterpret_cast<Fn>(original(self,ContextMap));if(!call)return E_FAIL;
+    traceCall("Map");
     // A write-only Map of an indirect-arguments buffer is the guest uploading
     // the counts: remember the pointer and read it back at Unmap.
     int indirect=indirectIndex(r);
@@ -1260,6 +1292,7 @@ static HRESULT STDMETHODCALLTYPE contextMap(DevicePtr self,ID3D11Resource* r,UIN
 static void STDMETHODCALLTYPE contextUnmap(DevicePtr self,ID3D11Resource* r,UINT subresource) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT);
     auto call=reinterpret_cast<Fn>(original(self,Unmap));if(!call)return;
+    traceCall("Unmap");
     int indirect=indirectIndex(r);
     if(indirect>=0) {
         void* data=indirectMapped[indirect].exchange(nullptr,std::memory_order_relaxed);
@@ -1278,6 +1311,7 @@ static void STDMETHODCALLTYPE contextUnmap(DevicePtr self,ID3D11Resource* r,UINT
 // game never reaches is not silently missing. No allocation and no lock on the
 // hot path.
 inline void countDraw(void* self,int kind,unsigned count,unsigned instances) {
+    traceCall(drawKindName(kind));
     ContextState& state=stateOf(self);
     unsigned t=state.topology.load(std::memory_order_relaxed);
     unsigned s=state.shaders.load(std::memory_order_relaxed);
@@ -1306,6 +1340,7 @@ inline void countDraw(void* self,int kind,unsigned count,unsigned instances) {
 // arguments live in a GPU buffer (or in the stream-output state), so the
 // bucket is all that can be said.
 inline void countDrawUnknown(void* self,int kind) {
+    traceCall(drawKindName(kind));
     ContextState& state=stateOf(self);
     unsigned t=state.topology.load(std::memory_order_relaxed);
     unsigned s=state.shaders.load(std::memory_order_relaxed);
@@ -1590,6 +1625,7 @@ inline void noteDeepTargetInfo(void* self,UINT count,ID3D11RenderTargetView* con
 static void STDMETHODCALLTYPE contextOMSetRenderTargets(DevicePtr self,UINT count,ID3D11RenderTargetView* const* views,ID3D11DepthStencilView* depth) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*);
     auto call=reinterpret_cast<Fn>(original(self,OMSetRenderTargets));if(!call)return;
+    traceCall("OMSetRenderTargets");
     noteRenderTargets(count,views);
     noteRenderTargetFormat(self,count,views);
     noteDeepTargetInfo(self,count,views,depth);
@@ -1602,6 +1638,7 @@ static void STDMETHODCALLTYPE contextOMSetRenderTargetsAndUnorderedAccessViews(D
         ID3D11DepthStencilView* depth,UINT uavStart,UINT uavCount,ID3D11UnorderedAccessView* const* uavs,const UINT* initialCounts) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*,UINT,UINT,ID3D11UnorderedAccessView* const*,const UINT*);
     auto call=reinterpret_cast<Fn>(original(self,OMSetRenderTargetsAndUnorderedAccessViews));if(!call)return;
+    traceCall("OMSetRenderTargetsAndUnorderedAccessViews");
     rtvUavSets.fetch_add(1,std::memory_order_relaxed);
     if(uavCount&&uavs&&uavCount!=D3D11_KEEP_UNORDERED_ACCESS_VIEWS)uavSets.fetch_add(1,std::memory_order_relaxed);
     // D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL (0xffffffff) means "leave the
@@ -1694,6 +1731,7 @@ static void STDMETHODCALLTYPE context1ClearView(DevicePtr self,ID3D11View* view,
 }
 static HRESULT STDMETHODCALLTYPE contextFinishCommandList(DevicePtr self,BOOL restore,ID3D11CommandList** list) {    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,BOOL,ID3D11CommandList**);
     auto call=reinterpret_cast<Fn>(original(self,FinishCommandList));if(!call)return E_FAIL;
+    traceCall("FinishCommandList");
     HRESULT hr=call(self,restore,list);
     if(SUCCEEDED(hr)){commandLists.fetch_add(1,std::memory_order_relaxed);if(list&&*list)noteFinishedCommandList(self,*list);}
     D3D11_DIAG_FAILED("FinishCommandList",fmt("%d",restore!=0),fmt("restore=%d",restore!=0));
@@ -1704,6 +1742,7 @@ static HRESULT STDMETHODCALLTYPE contextFinishCommandList(DevicePtr self,BOOL re
 static void STDMETHODCALLTYPE contextExecuteCommandList(DevicePtr self,ID3D11CommandList* list,BOOL restore) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11CommandList*,BOOL);
     auto call=reinterpret_cast<Fn>(original(self,ExecuteCommandList));if(!call)return;
+    traceCall("ExecuteCommandList");
     executedLists.fetch_add(1,std::memory_order_relaxed);call(self,list,restore);noteExecutedCommandList(list,restore);tick();
 }
 static HRESULT STDMETHODCALLTYPE createDeferredContext(DevicePtr self,UINT flags,ID3D11DeviceContext** out) {
@@ -1847,6 +1886,11 @@ inline bool (*set_deep_draw)()=nullptr;
 // capability answers that pick engine code paths.
 inline void adopt(ID3D11Device* device) {
     if(!device)return;
+    if(!traceChecked.exchange(true,std::memory_order_acq_rel)) {
+        traceOn.store(set_trace_requested&&set_trace_requested(),std::memory_order_release);
+        if(traceOn.load(std::memory_order_acquire))
+            emit("D3D11 resize trace on (LocalState\\d3d11resizetrace.txt): last hooked calls flush after a failed Present");
+    }
     // Opt-in flags are read before the sink check: with no sink the default
     // path still returns untouched, but an armed deep probe is not dropped.
     const bool deep=set_deep_draw&&set_deep_draw();
