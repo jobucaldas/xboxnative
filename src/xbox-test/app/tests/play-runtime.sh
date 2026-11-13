@@ -91,6 +91,15 @@ lld-link-19 /nodefaultlib /entry:d3d10_entry /include:d3d10_relocation /subsyste
 # should; 43 is BLOCKED, never a pass.
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d10-triangle.cpp -o "$out/obj/d3d10-triangle.obj"
 lld-link-19 /nodefaultlib /entry:d3d10tri_entry /include:d3d10tri_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d10-triangle.exe" "$out/obj/d3d10-triangle.obj" "$MINGW_SYSROOT"/lib/libd3d10.a "$MINGW_SYSROOT"/lib/libdxgi.a "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libuuid.a "$MINGW_SYSROOT"/lib/libkernel32.a
+# EXE that compiles through the shim the way a game's first shader build does:
+# D3D10CompileShader loads d3dcompiler_47.dll by name, Play serves the probed
+# Wine donor's gate-published image (donor_pe), and the compiled vs_4_0 must
+# draw and read back. Exit 42 only when the compile produced a real DXBC and
+# the draw landed; 43 is BLOCKED, 44-50 name the compile step. Built here with
+# the other fixtures, before the mode loop that runs it (Bugbot r4559946109:
+# built after the loop, the mode inspected a stale or missing executable).
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d10-compile.cpp -o "$out/obj/d3d10-compile.obj"
+lld-link-19 /nodefaultlib /entry:d3d10compile_entry /include:d3d10compile_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d10-compile.exe" "$out/obj/d3d10-compile.obj" "$MINGW_SYSROOT"/lib/libd3d10.a "$MINGW_SYSROOT"/lib/libdxgi.a "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libuuid.a "$MINGW_SYSROOT"/lib/libkernel32.a
 # EXE that starts a D3D9 game: it statically imports d3d9.dll, which the console
 # lacks, so Play must serve the shim from the runtime directory and the shim's
 # own d3d11/dxgi imports must reach Play's routes. It creates a device with a
@@ -478,18 +487,13 @@ grep -q 'guest DXGI CoreWindow swapchain returned hr=0x00000000' "$out/d3d10-dia
 # (pass 5 reads black), so the full seven-pass proof runs on the console; the
 # compile path has its own fixture below for the off-device run.
 grep -q 'PRUN EVENT mapping d3d10.dll' "$out/d3d10-triangle.log"
-# EXE that compiles through the shim the way a game's first shader build does:
-# D3D10CompileShader loads d3dcompiler_47.dll by name, Play serves the probed
-# Wine donor's gate-published image (donor_pe), and the compiled vs_4_0 must
-# draw and read back. Exit 42 only when the compile produced a real DXBC and
-# the draw landed; 43 is BLOCKED, 44-50 name the compile step. This is the
-# off-device proof of the donor bridge the launcher wires (launch.h).
-clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d10-compile.cpp -o "$out/obj/d3d10-compile.obj"
-lld-link-19 /nodefaultlib /entry:d3d10compile_entry /include:d3d10compile_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d10-compile.exe" "$out/obj/d3d10-compile.obj" /usr/x86_64-w64-mingw32/lib/libd3d10.a /usr/x86_64-w64-mingw32/lib/libdxgi.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libuuid.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
 # The compile fixture proves the donor bridge off-device: the shim's by-name
 # d3dcompiler_47 load is not in the runtime directory, so the loader consults
 # the donor bridge and serves the probed Wine donor's gate-published image; the
-# compile produces a real DXBC and the device draws with it.
+# compile produces a real DXBC and the device draws with it. A missing exe or
+# log is a hard failure, never a silent skip (the exe is built above, with the
+# other fixtures, before the mode loop ran it).
+[[ -f "$out/play-d3d10-compile.exe" ]] || { echo "play-d3d10-compile.exe missing: the fixture was never built"; exit 1; }
 grep -q 'PRUN EVENT mapping d3dcompiler_47.dll (donor)' "$out/d3d10-compile.log"
 grep -q 'PLAY-TEST .*code=42' "$out/d3d10-compile.log"
 # A guest's static d3d9.dll import is served by Play's own D3D9 shim from the
