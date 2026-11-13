@@ -45,8 +45,14 @@ u32 __stdcall second_fn(void);
 /* forward declarations for the thread-body check */
 static u32 __stdcall thread_body(void *param);
 
-static u32 failed = 0;
-static void ok(u32 cond) { if (!cond) ++failed; }
+static u32 first_failed_id = 0, first_failed_line = 0;
+static void record_check(u32 id, u32 line, u32 cond) {
+#ifdef X86_DLL_FORCE_FAILURE_ID
+    if (id == X86_DLL_FORCE_FAILURE_ID) cond = 0;
+#endif
+    if (!cond && !first_failed_id) { first_failed_id = id; first_failed_line = line; }
+}
+#define ok(cond) record_check(__COUNTER__ + 1u, __LINE__, (cond))
 
 int fixture_main(void) {
     /* 1. The import binder bound the guest-to-guest imports. */
@@ -359,7 +365,10 @@ int fixture_main(void) {
         if (leaf_fn) ok(leaf_fn() == 1);
     }
 
-    return failed ? 43 : 42;
+    /* Success stays 42; failures encode the first check's line and unique id. */
+    return first_failed_id
+        ? 0x40000000u | (first_failed_line << 16) | first_failed_id
+        : 42;
 }
 
 /* The thread body CreateThread runs: calls ExitThread(77), so control never

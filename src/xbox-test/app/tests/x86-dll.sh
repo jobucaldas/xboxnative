@@ -196,3 +196,14 @@ grep -q '^play: dll-chain loaded, all imports bound, exit 42$' <<<"$out" || {
   echo "X86-DLL FAIL: no clean chain run"; echo "$out"; exit 1; }
 ! grep -q '^play: unresolved\|^play: fault' <<<"$out" || { echo "X86-DLL FAIL: unresolved import or fault"; echo "$out"; exit 1; }
 echo "X86-DLL PASS: guest PE32 DLL chain (exe -> dll-a -> dll-b), the cycle dll-c <-> dll-d (each mapped once), DllMain attach, LoadLibraryA/GetProcAddress/FreeLibrary/GetModuleHandleA/W/ExW (flags, NULL name, FROM_ADDRESS) from guest code, forwarder bound = the export directory's Size (a real export right after it is code), Encode/DecodePointer round trip, entry-RVA-0 DLL with SizeOfImage >> file, second DLL relocated to a disjoint arena, bad-image rejection, per-thread ExitThread"
+
+# A forced failure verifies that the guest return code carries the first check ID.
+"$cc32" $flags -DX86_DLL_FORCE_FAILURE_ID=1 -Wl,--entry,_fixture_main -Wl,--subsystem,console -o "$tmp/fixture-dll-fail-id.exe" \
+  "$here/x86-dll/fixture-dll.c" -L"$tmp" -ldll-a -ldll-b -ldll-c -ldll-d -lzeroent -lsecond -lkernel32
+set +e
+negative_out=$("$tmp/x86-dll" "$tmp/fixture-dll-fail-id.exe" "$tmp"); negative_rc=$?
+set -e
+if [[ $negative_rc -ne 1 ]] || ! grep -q '^x86-dll: FIRST FAIL id=1 line=59$' <<<"$negative_out"; then
+  echo "X86-DLL FAIL: forced assertion diagnostic did not report id 1"; echo "$negative_out"; exit 1
+fi
+echo "X86-DLL DIAGNOSTIC PASS: forced check id=1 line=59 reported"
