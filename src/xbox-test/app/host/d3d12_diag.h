@@ -327,8 +327,80 @@ static HRESULT STDMETHODCALLTYPE createCommandList(DevicePtr self,UINT node,D3D1
         fmt("type=%d node=%u allocator=%d state=%d",int(type),node,allocator!=nullptr,state!=nullptr));
     return hr;
 }
+// ---- opt-in PSO description (same switch as the call trace). Logged BEFORE the
+// call, so a fault inside the driver still leaves the description in the log.
+// Shader containers are described by the digest Mesa's dxil_container_write
+// puts at offset 4 ("DXBC", 16-byte digest, version, size): an all-zero digest is
+// an unsigned, never-validated container.
+constexpr size_t kMaxPsoLines=64;
+inline std::atomic<size_t> psoLines{0};
+inline void tracePso(const std::string& text) {
+    if(!traceOn.load(std::memory_order_acquire)) return;
+    if(psoLines.fetch_add(1)<kMaxPsoLines) emit("pso "+text);
+}
+inline std::string containerText(const void* code,SIZE_T length) {
+    if(!code||!length) return "none";
+    auto bytes=static_cast<const unsigned char*>(code);
+    if(length<20||memcmp(bytes,"DXBC",4)!=0) return fmt("not-dxbc bytes=%llu",(unsigned long long)length);
+    bool nullDigest=true;
+    for(int i=4;i<20;++i) if(bytes[i]) nullDigest=false;
+    return fmt("dxbc bytes=%llu digest=%s hash=%016llx",(unsigned long long)length,nullDigest?"null(unsigned)":"set",
+        (unsigned long long)fnv(code,size_t(std::min<SIZE_T>(length,16u<<20))));
+}
+inline std::string bytecodeText(const D3D12_SHADER_BYTECODE& b) {
+    return containerText(b.pShaderBytecode,b.BytecodeLength);
+}
+inline std::string inputLayoutText(const D3D12_INPUT_LAYOUT_DESC& l) {
+    std::string text=fmt("inputs=%u[",l.NumElements);
+    for(UINT i=0;i<l.NumElements&&i<8;++i) {
+        const auto& e=l.pInputElementDescs[i];
+        text+=fmt("%s%s:%s",i?" ":"",e.SemanticName?e.SemanticName:"?",formatText(e.Format).c_str());
+    }
+    return text+"]";
+}
+inline std::string rtvText(const D3D12_RT_FORMAT_ARRAY& r) {
+    std::string text=fmt("rtv=%u[",r.NumRenderTargets);
+    for(UINT i=0;i<r.NumRenderTargets&&i<8;++i) text+=fmt("%s%s",i?" ":"",formatText(r.RTFormats[i]).c_str());
+    return text+"]";
+}
+// Stream entries that matter for a description: shaders, input layout, formats.
+// Payloads are read with memcpy (the walker hands over unaligned pointers).
+inline void describeStreamEntry(int type,const unsigned char* payload,size_t size,void* ctx) {
+    auto* text=static_cast<std::string*>(ctx);
+    switch(type) {
+    case 1: case 2: case 6: {
+        D3D12_SHADER_BYTECODE b{};memcpy(&b,payload,sizeof b);
+        *text+=fmt(" %s:%s",type==1?"VS":type==2?"PS":"CS",bytecodeText(b).c_str());
+        break;
+    }
+    case 12: {
+        D3D12_INPUT_LAYOUT_DESC l{};memcpy(&l,payload,sizeof l);
+        *text+=" "+inputLayoutText(l);
+        break;
+    }
+    case 15: {
+        D3D12_RT_FORMAT_ARRAY r{};memcpy(&r,payload,sizeof r);
+        *text+=" "+rtvText(r);
+        break;
+    }
+    case 16: {
+        DXGI_FORMAT f{};memcpy(&f,payload,sizeof f);
+        *text+=" dsv="+formatText(f);
+        break;
+    }
+    default: break;
+    }
+    (void)size;
+}
+inline std::string describeGraphicsDesc(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) {
+    return fmt("v0 VS:%s PS:%s %s dsv=%s samples=%u rootsig=%s %s",bytecodeText(d.VS).c_str(),bytecodeText(d.PS).c_str(),
+        rtvText({{d.RTVFormats[0],d.RTVFormats[1],d.RTVFormats[2],d.RTVFormats[3],d.RTVFormats[4],d.RTVFormats[5],d.RTVFormats[6],d.RTVFormats[7]},d.NumRenderTargets}).c_str(),
+        formatText(d.DSVFormat).c_str(),d.SampleDesc.Count,d.pRootSignature?"set":"null",inputLayoutText(d.InputLayout).c_str());
+}
+
 static HRESULT STDMETHODCALLTYPE createGraphicsPipelineState(DevicePtr self,const D3D12_GRAPHICS_PIPELINE_STATE_DESC* d,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_GRAPHICS_PIPELINE_STATE_DESC*,REFIID,void**);
+    if(d&&traceOn.load(std::memory_order_acquire)) tracePso(describeGraphicsDesc(*d));
     D3D12_DIAG_HOOK(Fn,CreateGraphicsPipelineState)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     if(d) {
         std::string vsKey,psKey,vs=shaderText(d->VS.pShaderBytecode,d->VS.BytecodeLength,&vsKey);
@@ -348,7 +420,9 @@ static HRESULT STDMETHODCALLTYPE createGraphicsPipelineState(DevicePtr self,cons
 // refused subobject or read past the stream — exactly what this diagnostic
 // exists to name. Sizes and alignments come from sizeof/alignof on the real
 // d3d12.h structs (checked against DirectX-Headers v1.618.1).
-inline std::string streamSubobjects(const void* stream,size_t bytes) {
+// visit, when given, sees each subobject's type, payload and size in stream order.
+using StreamVisit=void(*)(int type,const unsigned char* payload,size_t size,void* ctx);
+inline std::string streamSubobjects(const void* stream,size_t bytes,StreamVisit visit=nullptr,void* ctx=nullptr) {
     static const struct{int type;size_t size;size_t align;const char* name;} subobjects[]={
         {0,sizeof(ID3D12RootSignature*),alignof(ID3D12RootSignature*),        "ROOT_SIGNATURE"},
         {1,sizeof(D3D12_SHADER_BYTECODE),alignof(D3D12_SHADER_BYTECODE),       "VS"},
@@ -418,6 +492,7 @@ inline std::string streamSubobjects(const void* stream,size_t bytes) {
         const size_t payloadAt=(sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE)+e->align-1)&~(e->align-1);
         if(size_t(end-typeStart)<payloadAt+e->size){truncated=true;subs+=fmt("%s(truncated) ",e->name);break;}
         subs+=fmt("%s ",e->name);
+        if(visit) visit(int(type),typeStart+payloadAt,e->size,ctx);
         // The next subobject starts at the next pointer-aligned offset after
         // the payload: each one is an alignas(void*) struct in the real stream.
         p=typeStart+((payloadAt+e->size+sizeof(void*)-1)&~(sizeof(void*)-1));
@@ -427,6 +502,11 @@ inline std::string streamSubobjects(const void* stream,size_t bytes) {
 }
 static HRESULT STDMETHODCALLTYPE createPipelineStateStream(DevicePtr self,const D3D12_PIPELINE_STATE_STREAM_DESC* d,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**);
+    if(d&&d->pPipelineStateSubobjectStream&&traceOn.load(std::memory_order_acquire)) {
+        std::string text;
+        streamSubobjects(d->pPipelineStateSubobjectStream,size_t(d->SizeInBytes),&describeStreamEntry,&text);
+        tracePso("stream"+text);
+    }
     D3D12_DIAG_HOOK(Fn,createPipelineStateStreamSlot)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     // The stream path (ID3D12Device2::CreatePipelineState) is what Mesa's
     // d3d12 driver takes when the device reports
@@ -445,6 +525,8 @@ static HRESULT STDMETHODCALLTYPE createPipelineStateStream(DevicePtr self,const 
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createComputePipelineState(DevicePtr self,const D3D12_COMPUTE_PIPELINE_STATE_DESC* d,REFIID id,void** out) {
+    if(d&&traceOn.load(std::memory_order_acquire))
+        tracePso(fmt("compute CS:%s rootsig=%s",bytecodeText(d->CS).c_str(),d->pRootSignature?"set":"null"));
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_COMPUTE_PIPELINE_STATE_DESC*,REFIID,void**);
     D3D12_DIAG_HOOK(Fn,CreateComputePipelineState)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     if(d) {

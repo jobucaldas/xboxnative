@@ -405,6 +405,52 @@ int main(int argc,char** argv) {
         reinterpret_cast<UavFn>(vtable[d3d12_diag::CreateUnorderedAccessView])(object,uavRes,sentinelCounter,&uavDesc,sentinelHandle);
         CHECK(seenResource==uavRes&&seenCounter==sentinelCounter&&seenDesc==&uavDesc&&seenHandle.ptr==sentinelHandle.ptr);
     }
+    // PSO descriptions: logged before the call, only when the trace is on. A fake
+    // class with recording originals; one unsigned PS (null digest) and one
+    // signed VS, through the v0 graphics path and the stream path.
+    {
+        struct Rec {
+            static HRESULT STDMETHODCALLTYPE v0(void*,const D3D12_GRAPHICS_PIPELINE_STATE_DESC*,REFIID,void**) {return S_OK;}
+            static HRESULT STDMETHODCALLTYPE stream(void*,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**) {return S_OK;}
+        };
+        void* vt[64]{};
+        vt[d3d12_diag::CreateGraphicsPipelineState]=reinterpret_cast<void*>(&Rec::v0);
+        vt[d3d12_diag::createPipelineStateStreamSlot]=reinterpret_cast<void*>(&Rec::stream);
+        size_t patchCount=0;const d3d12_diag::Patch* patches=d3d12_diag::devicePatches(patchCount);
+        d3d12_diag::patchClass(vt,patches,patchCount);
+        const d3d12_diag::Patch streamPatch{d3d12_diag::createPipelineStateStreamSlot,reinterpret_cast<void*>(&d3d12_diag::createPipelineStateStream)};
+        d3d12_diag::patchClass(vt,&streamPatch,1);
+        void* object[1]={vt};
+        unsigned char vsBytes[32]{};memcpy(vsBytes,"DXBC",4);vsBytes[4]=1;   // signed: non-null digest
+        unsigned char psBytes[32]{};memcpy(psBytes,"DXBC",4);                 // unsigned: null digest
+        D3D12_INPUT_ELEMENT_DESC element{"POSITION",0,DXGI_FORMAT_R32G32_FLOAT,0,0,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0};
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC gd{};
+        gd.VS={vsBytes,sizeof vsBytes};gd.PS={psBytes,sizeof psBytes};
+        gd.NumRenderTargets=1;gd.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;gd.DSVFormat=DXGI_FORMAT_D32_FLOAT;
+        gd.SampleDesc.Count=1;gd.InputLayout={&element,1};
+        void* out=nullptr;
+        const size_t psoFrom=lines.size();
+        reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(void*,const D3D12_GRAPHICS_PIPELINE_STATE_DESC*,REFIID,void**)>(vt[d3d12_diag::CreateGraphicsPipelineState])(object,&gd,__uuidof(ID3D12PipelineState),&out);
+        std::vector<unsigned char> stream;
+        D3D12_INPUT_LAYOUT_DESC layout{&element,1};
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS,D3D12_SHADER_BYTECODE{vsBytes,sizeof vsBytes});
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS,D3D12_SHADER_BYTECODE{psBytes,sizeof psBytes});
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT,layout);
+        D3D12_RT_FORMAT_ARRAY rtv{};rtv.NumRenderTargets=1;rtv.RTFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS,rtv);
+        D3D12_PIPELINE_STATE_STREAM_DESC sd{stream.size(),stream.data()};
+        reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(void*,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**)>(vt[d3d12_diag::createPipelineStateStreamSlot])(object,&sd,__uuidof(ID3D12PipelineState),&out);
+        // Only the lines from these two calls: earlier calls in this test log pso lines too.
+        auto since=[&](size_t from,const char* needle){size_t n=0;for(size_t i=from;i<lines.size();++i)if(lines[i].find(needle)!=std::string::npos)++n;return n;};
+        if(traceMode) {
+            CHECK(since(psoFrom,"pso v0 VS:dxbc")==1&&since(psoFrom,"pso stream VS:dxbc")==1);
+            CHECK(since(psoFrom,"PS:dxbc")==2&&since(psoFrom,"digest=null(unsigned)")==2&&since(psoFrom,"digest=set")==2);
+            CHECK(since(psoFrom,"inputs=1[POSITION:16(R32G32_FLOAT)]")==2&&since(psoFrom,"rtv=1[28(R8G8B8A8_UNORM)]")==2);
+        } else {
+            CHECK(since(psoFrom,"pso ")==0);
+        }
+    }
+
     // The trace: silent unless the probe file was present at the first adopt.
     if(traceMode) {
         CHECK(count("trace on (LocalState")==1);
