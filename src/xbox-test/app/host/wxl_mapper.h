@@ -280,10 +280,13 @@ inline bool prepareUnwind(Image& image, Log log) {
         if (!readableRange(xd.VirtualAddress,xd.Size)) { char name[9]; DWORD protection; sectionAt(xd.VirtualAddress,name,protection); snprintf(msg,sizeof msg,"WXL UNWIND REJECT reason=table-not-readable rva=0x%08lx size=0x%08lx imageSize=0x%zx section=%.8s protection=0x%08lx",xd.VirtualAddress,xd.Size,image.size,name,protection); return fail(msg); }
         auto table=(PRUNTIME_FUNCTION)(image.base+xd.VirtualAddress);
         DWORD previousBegin=0,previousEnd=0;
+        size_t duplicateCount=0;
         for (size_t i=0; i<xd.Size/sizeof(*table); ++i) {
             auto r=table[i];
-            const char* reason=r.BeginAddress>=r.EndAddress?"empty-or-reversed-range":i && r.BeginAddress<previousEnd?"begin-before-previous-end":!image.valid(r.BeginAddress,r.EndAddress-r.BeginAddress)?"function-range-outside-image":r.UnwindData%4?"unwind-not-dword-aligned":!image.valid(r.UnwindData,4)?"unwind-outside-image":!readableRange(r.UnwindData,4)?"unwind-not-readable":nullptr;
-            if(reason) return entryFail(i,r,previousBegin,previousEnd,reason,r.UnwindData%4?r.UnwindData:r.BeginAddress);
+            bool exactDuplicate=i && r.BeginAddress==previousBegin && r.EndAddress==previousEnd;
+            const char* reason=r.BeginAddress>=r.EndAddress?"empty-or-reversed-range":i && r.BeginAddress<previousEnd && !exactDuplicate?"begin-before-previous-end":!image.valid(r.BeginAddress,r.EndAddress-r.BeginAddress)?"function-range-outside-image":r.UnwindData%4?"unwind-not-dword-aligned":!image.valid(r.UnwindData,4)?"unwind-outside-image":!readableRange(r.UnwindData,4)?"unwind-not-readable":nullptr;
+            if(reason) return entryFail(i,r,previousBegin,previousEnd,reason,strncmp(reason,"unwind-",7)==0?r.UnwindData:r.BeginAddress);
+            if(exactDuplicate) ++duplicateCount;
             bool executable=false, readable=false;
             for (unsigned j=0;j<nt->FileHeader.NumberOfSections;++j) {
                 auto section=sections[j];
@@ -302,6 +305,7 @@ inline bool prepareUnwind(Image& image, Log log) {
         if (!ok) { snprintf(msg,sizeof msg,"WXL UNWIND REJECT reason=RtlAddFunctionTable-failed count=%lu imageSize=0x%zx tableRva=0x%08lx",(unsigned long)(xd.Size/sizeof(*table)),image.size,xd.VirtualAddress); return fail(msg); }
         snprintf(msg,sizeof msg,"WXL RtlAddFunctionTable count=%lu ok=1",
                  (unsigned long)(xd.Size/sizeof(*table))); log(msg);
+        if(duplicateCount) { snprintf(msg,sizeof msg,"WXL UNWIND DUPLICATES count=%zu",duplicateCount); log(msg); }
         image.functions=table;
     }
     return true;

@@ -72,6 +72,12 @@ int main() {
     if (!valid.ready() || !prepare(valid) || !valid.image.functions) return 3;
     std::puts("UNWIND-REGISTRATION PASS: valid .pdata registered");
 
+    Fixture duplicate; if (!duplicate.ready()) return 10;
+    ((BYTE*)duplicate.image.base)[0x2040]=1;
+    const RUNTIME_FUNCTION identical[]={{0x1000,0x1080,0x2020},{0x1000,0x1080,0x2040}}; duplicate.setFunctions(identical,2);
+    if (!prepare(duplicate) || !duplicate.image.functions || lastLog.find("WXL UNWIND DUPLICATES count=1")==std::string::npos) return 11;
+    std::puts("UNWIND-REGISTRATION PASS: exact duplicate ranges registered with one bounded warning");
+
     Fixture overlap;
     if (!overlap.ready()) return 4;
     const RUNTIME_FUNCTION overlapping[]={
@@ -94,6 +100,11 @@ int main() {
     if (prepare(unsorted) || unsorted.image.functions || rejectLogs!=1 ||
         lastLog.find("index=1 reason=begin-before-previous-end")==std::string::npos) return 7;
     std::puts("UNWIND-REGISTRATION PASS: unsorted table rejected before registration");
+
+    Fixture badUnwind; if (!badUnwind.ready()) return 12;
+    const RUNTIME_FUNCTION badUnwindEntry={0x1000,0x1080,0x4000}; badUnwind.setFunctions(&badUnwindEntry,1);
+    if (prepare(badUnwind) || badUnwind.image.functions || rejectLogs!=1 || lastLog.find("reason=unwind-outside-image")==std::string::npos || lastLog.find("checkSection=none checkProtection=0x00000000")==std::string::npos) return 13;
+    std::puts("UNWIND-REGISTRATION PASS: unwind bounds diagnostic identifies the failing RVA section");
 
     Fixture outOfBounds;
     if (!outOfBounds.ready()) return 8;
