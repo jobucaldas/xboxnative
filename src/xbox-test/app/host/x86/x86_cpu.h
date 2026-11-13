@@ -429,9 +429,13 @@ struct Cpu {
                 if (r.isreg) unsupported("fxsave reg");
                 uint32_t ea = r.ea + seg;
                 mem.w(ea, fpu.cw, 2); mem.w(ea + 2, fpu.status(), 2);
-                mem.w(ea + 4, 0, 4);  // fop, ip: no real 8087-style tracking
-                mem.w(ea + 8, 0, 4); mem.w(ea + 12, 0, 4);  // dp, cs/ds
-                mem.w(ea + 24, mxcsr, 4); mem.w(ea + 28, 0xffff0000u, 4);  // mxcsr + its mask field
+                uint8_t ftw = 0;  // abridged tag word: bit i = 1 if PHYSICAL slot i is non-empty
+                for (int i = 0; i < 8; ++i) if (!fpu.empty[i]) ftw |= uint8_t(1u << i);
+                mem.w8(ea + 4, ftw); mem.w8(ea + 5, 0);       // +5..7 reserved
+                mem.w(ea + 6, 0, 2);                          // fop: no real 8087-style tracking
+                mem.w(ea + 8, 0, 8);                          // fip: documented zeros
+                mem.w(ea + 16, 0, 8);                         // fdp (with cs/ds halves): documented zeros
+                mem.w(ea + 24, mxcsr, 4); mem.w(ea + 28, 0x0000ffffu, 4);  // mxcsr + the mask real CPUs of this class report (host fxsave reads 0000ffff)
                 for (int i = 0; i < 8; ++i) {  // ST(i) at 32 + 16*i: 10 bytes + 6 reserved.
                     // ST(i) is relative to TOP: physical slot (top+i)&7.
                     int ph = (fpu.top + i) & 7;
@@ -446,10 +450,11 @@ struct Cpu {
                 fpu.cw = mem.r(ea, 2);
                 fpu.sw = mem.r(ea + 2, 2) & ~uint16_t(0x3800);  // bits 11-13 are TOP, restored below
                 fpu.top = (mem.r(ea + 2, 2) >> 11) & 7;
-                for (int i = 0; i < 8; ++i) {  // ST(i) relative to TOP (see fxsave)
+                uint8_t ftw = mem.r8(ea + 4);  // abridged: bit i = physical slot i non-empty; 0 -> empty (tag 11)
+                for (int i = 0; i < 8; ++i) {  // STi relative to TOP (see fxsave)
                     int ph = (fpu.top + i) & 7;
                     for (int k = 0; k < 10; ++k) fpu.st[ph][k] = mem.r8(ea + 32 + 16 * i + k);
-                    fpu.empty[ph] = false;
+                    fpu.empty[ph] = (ftw >> ph) & 1 ? false : true;
                 }
                 mxcsr = mem.r(ea + 24, 4);
                 for (int i = 0; i < 8; ++i) mem.r128(ea + 160 + 16 * i, xmm.r[i]);
@@ -544,7 +549,7 @@ struct Cpu {
             uint32_t a[4]; sse_read(r, a);
             sse_shift(op, sop, cnt, a);
             sse_write(r, a); return; }
-        case 0x18: { modrm(); if (modrm_reg > 2) unsupported("0f 18 /n"); return; }  // prefetcht0/t1/t2: a hint
+        case 0x18: modrm(); return;  // prefetchnta/t0/t1/t2 + reserved /4../7: all no-op hints (verified on real hardware, /0-/7 execute as NOPs in both mem and mod11 forms)
         case 0x31: {  // rdtsc: a synthetic counter that only ever advances (games poll it for timing)
             uint64_t t = tsc += 1000;
             reg[EAX] = uint32_t(t); reg[EDX] = uint32_t(t >> 32); return; }
@@ -556,7 +561,9 @@ struct Cpu {
                     // fpu tsc cmov clflush mmx fxsr sse sse2
             default: reg[EAX] = reg[EBX] = reg[ECX] = reg[EDX] = 0; return; } }
         case 0xC3: {  // movnti: 0F C3 r/m32 — a dword store in 32-bit mode; the
-                      // m64 form needs REX.W (unreachable here), so 66 does not widen it
+                      // m64 form needs REX.W (unreachable here). The 66 prefix has
+                      // no MOVNTI form: #UD (verified on real hardware).
+            if (p66) unsupported("66 0f c3 (no 66 movnti form)");
             Rm r = modrm(); if (r.isreg) unsupported("movnti reg");
             mem.w32(r.ea + seg, getreg(modrm_reg, 4)); return; }
         case 0xC6: {  // shufps (no prefix) / shufpd (66)
@@ -1009,7 +1016,7 @@ struct Cpu {
                 case 0: fpu.push(Wide(m64())); return;
                 case 2: st64(double(st(0))); return;
                 case 3: st64(double(st(0))); fpu.pop(); return;
-                case 6: mem.w(r.ea + seg, fpu.status() & ~uint16_t(0x7f), 2); return;  // fnstsw
+                case 7: mem.w(r.ea + seg, fpu.status() & ~uint16_t(0x7f), 2); return;  // fnstsw m16 (DD /7 — verified on real hardware; fstp m80 is DB /7)
                 default: unsupported("dd /n"); }
             case 0xDB: switch (rno) {
                 case 0: fpu.push(Wide(int32_t(mem.r32(r.ea + seg)))); return;   // fild m32int

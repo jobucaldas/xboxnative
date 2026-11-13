@@ -999,10 +999,12 @@ static void test_sse2_stage2() {
         m.mem.w64(Machine::DATA + 8, 0);
         m.mem.w64(Machine::DATA + 16, 0xdeadbeefcafebabeull);  // adjacent sentinel: 66 form must not touch
         std::vector<uint8_t> code2{0x66, 0x0F, 0xC3, 0x05, 0x08, 0x00, 0x02, 0x00};
-        exec(m, code2, 0xfeedfaceu, 0x12345678u, 0, false);
-        EXPECT(m.mem.r64(Machine::DATA + 8) == 0xfeedfaceu, "movnti 66-form must store a dword: %016llx",
+        // 66 0F C3 has no MOVNTI form in 32-bit mode: #UD (verified on this host), nothing stored
+        EXPECT(exec_fault(m, code2, 0xfeedfaceu, 0x12345678u, 0, false) == FaultKind::Unsupported,
+               "66 movnti must #UD (no 66 form in 32-bit mode)");
+        EXPECT(m.mem.r64(Machine::DATA + 8) == 0, "66 movnti must not store: %016llx",
                (unsigned long long)m.mem.r64(Machine::DATA + 8));
-        EXPECT(m.mem.r64(Machine::DATA + 16) == 0xdeadbeefcafebabeull, "movnti 66-form must not write past 4 bytes: %016llx",
+        EXPECT(m.mem.r64(Machine::DATA + 16) == 0xdeadbeefcafebabeull, "66 movnti must not write past: %016llx",
                (unsigned long long)m.mem.r64(Machine::DATA + 16));
         ++alu_cases;
         // later blocks read [DATA+16] as V2: restore it
@@ -1228,6 +1230,133 @@ static void test_bugbot_regressions() {
         EXPECT(xr[0] == V2[0] && xr[3] == V2[3], "fxrstor xmm round trip");
         ++alu_cases;
     }
+    // (4b) fxsave header fields vs the host: abridged FTW@4 (bit i = physical
+    // slot i non-empty) and MXCSR_MASK@28 (the host's real mask, not a guess).
+    // Native oracle: push 3 values (top=5, slots 5-7 non-empty -> FTW=0xE0),
+    // fxsave, compare the whole 512-byte header region byte for byte where the
+    // interpreter is expected to reproduce it (FCW, FSW, FTW, MXCSR, mask).
+    {
+        m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
+        m.mem.w64(Machine::DATA + 0x200, f64b(1.5));
+        m.mem.w64(Machine::DATA + 0x208, f64b(2.5));
+        m.mem.w64(Machine::DATA + 0x210, f64b(3.5));
+        m.mem.w128(Machine::DATA + 0x218, V2);
+        std::vector<uint8_t> code{
+            0xDB, 0xE3,                                      // fninit (same clean start as the host oracle)
+            0xDD, 0x05, 0x00, 0x02, 0x02, 0x00,              // fld qword [DATA+0x200]
+            0xDD, 0x05, 0x08, 0x02, 0x02, 0x00,              // fld qword [DATA+0x208]
+            0xDD, 0x05, 0x10, 0x02, 0x02, 0x00,              // fld qword [DATA+0x210]
+            0x66, 0x0F, 0x6F, 0x0D, 0x18, 0x02, 0x02, 0x00,  // movdqa xmm1, [DATA+0x218]
+            0x0F, 0xAE, 0x05, 0x00, 0x03, 0x02, 0x00,        // fxsave [DATA+0x300]
+        };
+        exec(m, code, 0, 0, 0, false);
+        alignas(16) uint8_t hwbuf[512] = {};
+        double v1 = 1.5, v2 = 2.5, v3 = 3.5;
+        uint32_t hv[4]; memcpy(hv, V2, 16);
+        uint32_t mxcsr_pin = 0x1f80;
+        asm volatile("fninit\n\t"
+                     "ldmxcsr %4\n\t"
+                     "fldl %1\n\tfldl %2\n\tfldl %3\n\tmovdqa %5, %%xmm1\n\tfxsave %0"
+                     : "+m"(hwbuf) : "m"(v1), "m"(v2), "m"(v3), "m"(mxcsr_pin), "m"(hv)
+                     : "st", "st(1)", "st(2)", "xmm1", "memory");
+        uint32_t base = Machine::DATA + 0x300;
+        EXPECT(m.mem.r(base + 0, 2) == uint32_t(hwbuf[0] | (hwbuf[1] << 8)), "fxsave FCW@0");
+        uint16_t efsw = uint16_t(m.mem.r(base + 2, 2)), hfsw = uint16_t(hwbuf[2] | (hwbuf[3] << 8));
+        EXPECT(efsw == hfsw, "fxsave FSW@2 (incl TOP): %04x want %04x", efsw, hfsw);
+        uint8_t eftw = m.mem.r8(base + 4), hftw = hwbuf[4];
+        EXPECT(eftw == hftw, "fxsave abridged FTW@4: %02x want %02x", eftw, hftw);
+        uint32_t emask = m.mem.r32(base + 28), hmask; memcpy(&hmask, hwbuf + 28, 4);
+        EXPECT(emask == hmask, "fxsave MXCSR_MASK@28: %08x want host %08x", emask, hmask);
+        // FIP@8/FDP@16: the interpreter documents zeros; the host writes real
+        // pointers. Only require the interpreter's documented zeros (the fields
+        // are not observable by games that don't track them).
+        // ST slots: fxsave's ST array is TOP-relative — array slot i holds
+        // PHYSICAL slot (top+i)&7, while the FTW bits index physical slots.
+        // Compare every array slot whose physical slot is non-empty (per the
+        // FTW); empty slots hold host garbage no emulator can reproduce
+        // (probed: 24 nonzero bytes after fninit+fxsave), so the interpreter
+        // documents zeros there and they are not compared.
+        unsigned top = (hfsw >> 11) & 7;
+        bool st_ok = true;
+        for (int i = 0; i < 8 && st_ok; ++i) {
+            if (!((hftw >> ((top + i) & 7)) & 1)) continue;
+            for (int k = 0; k < 10 && st_ok; ++k)
+                if (m.mem.r8(base + 32 + 16 * i + k) != hwbuf[32 + 16 * i + k]) st_ok = false;
+        }
+        EXPECT(st_ok, "fxsave non-empty ST slots vs host");
+        // XMM1 at 160+16: the one register the code sets (other XMMs hold host
+        // garbage; the interpreter zeroes them — documented, not compared).
+        uint32_t ex1[4]; m.mem.r128(base + 160 + 16, ex1);
+        uint32_t hx1[4]; memcpy(hx1, hwbuf + 160 + 16, 16);
+        EXPECT(memcmp(ex1, hx1, 16) == 0, "fxsave XMM1@176 vs host");
+        ++alu_cases;
+    }
+    // (4c) fxrstor must rebuild tags from the abridged FTW: a partial stack
+    // (3 values saved, fninit, fxrstor) leaves st(3+) EMPTY — fxam says so on
+    // the host; the old restore marked every slot non-empty.
+    {
+        m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
+        m.mem.w64(Machine::DATA + 0x200, f64b(1.5));
+        m.mem.w64(Machine::DATA + 0x208, f64b(2.5));
+        m.mem.w64(Machine::DATA + 0x210, f64b(3.5));
+        std::vector<uint8_t> rt{
+            0xDB, 0xE3,                                      // fninit (clean start; host does the same)
+            0xDD, 0x05, 0x00, 0x02, 0x02, 0x00,              // fld 1.5
+            0xDD, 0x05, 0x08, 0x02, 0x02, 0x00,              // fld 2.5
+            0xDD, 0x05, 0x10, 0x02, 0x02, 0x00,              // fld 3.5
+            0x0F, 0xAE, 0x05, 0x00, 0x03, 0x02, 0x00,        // fxsave
+            0xDB, 0xE3,                                      // fninit
+            0x0F, 0xAE, 0x0D, 0x00, 0x03, 0x02, 0x00,        // fxrstor
+            0xD9, 0xE5,                                      // fxam (3.5)
+            0xDD, 0x3D, 0x30, 0x02, 0x02, 0x00,              // fnstsw [DATA+0x230]
+            0xDD, 0x1D, 0x18, 0x02, 0x02, 0x00,              // fstp -> store 3.5
+            0xD9, 0xE5,                                      // fxam (2.5)
+            0xDD, 0x3D, 0x32, 0x02, 0x02, 0x00,              // fnstsw [DATA+0x232]
+            0xDD, 0x1D, 0x20, 0x02, 0x02, 0x00,              // fstp -> store 2.5
+            0xD9, 0xE5,                                      // fxam (1.5)
+            0xDD, 0x3D, 0x34, 0x02, 0x02, 0x00,              // fnstsw [DATA+0x234]
+            0xDD, 0x1D, 0x28, 0x02, 0x02, 0x00,              // fstp -> store 1.5
+            0xD9, 0xE5,                                      // fxam (empty)
+            0xDD, 0x3D, 0x36, 0x02, 0x02, 0x00,              // fnstsw [DATA+0x236]
+        };
+        exec(m, rt, 0, 0, 0, false);
+        EXPECT(bf64(m.mem.r64(Machine::DATA + 0x218)) == 3.5, "fxrstor partial: st0=3.5");
+        EXPECT(bf64(m.mem.r64(Machine::DATA + 0x220)) == 2.5, "fxrstor partial: st1=2.5");
+        EXPECT(bf64(m.mem.r64(Machine::DATA + 0x228)) == 1.5, "fxrstor partial: st2=1.5");
+        // fxam on a VALID value: C3=0, C2=1, C0=0; on an EMPTY slot: C3=1 (0x4000)
+        auto fxam_c3 = [&](int off) { return (m.mem.r(Machine::DATA + off, 2) >> 14) & 1; };
+        EXPECT(fxam_c3(0x230) == 0, "fxrstor partial: fxam st0 valid (C3=0): %04x", m.mem.r(Machine::DATA + 0x230, 2));
+        EXPECT(fxam_c3(0x232) == 0, "fxrstor partial: fxam st1 valid");
+        EXPECT(fxam_c3(0x234) == 0, "fxrstor partial: fxam st2 valid");
+        EXPECT(fxam_c3(0x236) == 1, "fxrstor partial: fxam after 3 pops EMPTY (C3=1): %04x", m.mem.r(Machine::DATA + 0x236, 2));
+        // the same sequence on the host: identical fxam C3 bits (st0..st2 valid,
+        // then EMPTY after the three pops) — probed natively before writing this
+        // test; the emulator asserts the same pattern directly.
+        ++alu_cases;
+    }
+    // (4d) 66 0F C3 is #UD in 32-bit mode (verified on this host): the
+    // interpreter must fault, not store.
+    {
+        m.mem.protect(Machine::DATA, 4096, PROT_R | PROT_W);
+        m.mem.w64(Machine::DATA, 0);
+        std::vector<uint8_t> code{0x66, 0x0F, 0xC3, 0x05, 0x00, 0x00, 0x02, 0x00};
+        EXPECT(exec_fault(m, code, 0xfeedfaceu, 0, 0, false) == FaultKind::Unsupported, "66 0F C3 must #UD (no 66 movnti form)");
+        EXPECT(m.mem.r64(Machine::DATA) == 0, "66 0F C3 must not store: %016llx", (unsigned long long)m.mem.r64(Machine::DATA));
+        ++alu_cases;
+    }
+    // (7) prefetch group 0F 18 /0../7: all eight selectors are no-ops on real
+    // hardware (verified natively: /0-/6 mem forms and /7 mem+mod11 all execute,
+    // none fault). The old code faulted /n > 2.
+    {
+        for (unsigned n = 0; n < 8; ++n) {
+            std::vector<uint8_t> code{0x0F, 0x18, uint8_t(0x05 | (n << 3)), 0x00, 0x00, 0x02, 0x00};  // mem operand disp32
+            exec(m, code, 0, 0, 0, false);
+            ++alu_cases;
+        }
+        // mod11 form /7 also executes (a no-op register hint)
+        exec(m, {0x0F, 0x18, 0xFC}, 0, 0, 0, false);
+        ++alu_cases;
+    }
     // (5) movnti: 0F C3 stores exactly 4 bytes; the 66 form must not write 16.
     // The native oracle writes through both encodings and compares adjacent bytes.
     {
@@ -1241,10 +1370,12 @@ static void test_bugbot_regressions() {
         m.mem.w64(Machine::DATA + 8, 0);
         m.mem.w64(Machine::DATA + 16, 0xdeadbeefcafebabeull);  // adjacent sentinel: 66 form must not touch
         std::vector<uint8_t> code2{0x66, 0x0F, 0xC3, 0x05, 0x08, 0x00, 0x02, 0x00};
-        exec(m, code2, 0xfeedfaceu, 0x12345678u, 0, false);
-        EXPECT(m.mem.r64(Machine::DATA + 8) == 0xfeedfaceu, "movnti 66-form must store a dword: %016llx",
+        // 66 0F C3 has no MOVNTI form in 32-bit mode: #UD (verified on this host), nothing stored
+        EXPECT(exec_fault(m, code2, 0xfeedfaceu, 0x12345678u, 0, false) == FaultKind::Unsupported,
+               "66 movnti must #UD (no 66 form in 32-bit mode)");
+        EXPECT(m.mem.r64(Machine::DATA + 8) == 0, "66 movnti must not store: %016llx",
                (unsigned long long)m.mem.r64(Machine::DATA + 8));
-        EXPECT(m.mem.r64(Machine::DATA + 16) == 0xdeadbeefcafebabeull, "movnti 66-form must not write past 4 bytes: %016llx",
+        EXPECT(m.mem.r64(Machine::DATA + 16) == 0xdeadbeefcafebabeull, "66 movnti must not write past: %016llx",
                (unsigned long long)m.mem.r64(Machine::DATA + 16));
         ++alu_cases;
     }
