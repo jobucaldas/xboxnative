@@ -61,6 +61,12 @@ inline unsigned test(void (*log)(const char*)) {
             char* ansiEnd=(char*)end;
             ansiEnd[-2]='x';ansiEnd[-1]=0;
             check(!badA(ansiEnd-2,64),"badstring-narrow-terminates");
+            // Wine's debugstr_a/wn pass (UINT_PTR)-1 as the count. A scan that
+            // forms end=p+count wraps below p for that count and would report
+            // the pointer good without probing anything.
+            check(!badW(end-2,0)&&!badA(ansiEnd-2,0),"badstring-count-zero-readable");
+            check(!badW(end-2,1)&&!badA(ansiEnd-2,1),"badstring-count-one-readable");
+            check(!badW(end-2,(UINT_PTR)-1)&&!badA(ansiEnd-2,(UINT_PTR)-1),"badstring-count-max-valid-string");
 #ifdef _MSC_VER
             // No terminator: the scan runs off the page and must come back
             // bad through the SEH path. (mingw builds take the unguarded
@@ -69,6 +75,10 @@ inline unsigned test(void (*log)(const char*)) {
             check(badW(end-2,64),"badstring-wide-past-page-is-bad");
             ansiEnd[-2]='y';ansiEnd[-1]='z';
             check(badA(ansiEnd-2,64),"badstring-narrow-past-page-is-bad");
+            // The same unterminated strings with the wrapped count: the scan
+            // must still hit the inaccessible page instead of returning good.
+            check(badW(end-2,(UINT_PTR)-1),"badstring-count-max-wide-past-page-is-bad");
+            check(badA(ansiEnd-2,(UINT_PTR)-1),"badstring-count-max-narrow-past-page-is-bad");
 #endif
             check(VirtualFree(region,0,MEM_RELEASE),"badstring-free");
         }

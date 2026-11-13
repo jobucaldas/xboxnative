@@ -140,6 +140,11 @@ template<class Unit>
 inline BOOL probe_string_reads_units(const void* str,UINT_PTR count) {
     if(!str)return TRUE;
     auto p=(const volatile Unit*)str;
+    // Callers like Wine's debugstr_a/wn pass (UINT_PTR)-1. Forming end=p+count
+    // would wrap below p and skip the probe, reporting a bad pointer good.
+    // Saturate: the address space after p bounds the scan instead.
+    UINT_PTR remaining=UINT_PTR((UINTPTR_MAX-(uintptr_t)p)/sizeof(Unit));
+    if(count>remaining)count=remaining;
     auto end=p+count;
     while(p<end) {
         MEMORY_BASIC_INFORMATION mbi{};
