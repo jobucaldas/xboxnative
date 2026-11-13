@@ -1155,12 +1155,13 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         // resource with one, so the two pools get exactly what they allow.
         if(desc.Usage==D3D11_USAGE_DYNAMIC&&!desc.BindFlags)desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
         if(desc.Usage==D3D11_USAGE_STAGING)desc.BindFlags=0;
-        // A MANAGED texture is CPU-writable and sampled, which D3D11 spells
-        // dynamic + shader resource; a mipmapped one cannot be dynamic, so the
-        // texture itself is default and the wrapper keeps a staging copy that
-        // LockRect maps (see Texture::LockRect), which is how D3D11 spells a
-        // managed resource that is lockable at every level.
-        if(pool==D3DPOOL_MANAGED&&desc.MipLevels>1&&desc.Usage==D3D11_USAGE_DYNAMIC) {
+        // A MANAGED texture is CPU-writable and sampled. It is spelled DEFAULT
+        // + shader resource with a staging shadow the wrapper keeps for
+        // LockRect (see Texture::LockRect), for every mip count: D3D11 has no
+        // dynamic mip chain, and a dynamic single-mip texture is the one
+        // spelling the console's d3d11on12 wrapping path device-removes on
+        // (0x887a0005/0x887a0020 after prior draws, d3d9-triangle-variants v4).
+        if(pool==D3DPOOL_MANAGED&&desc.Usage==D3D11_USAGE_DYNAMIC) {
             desc.Usage=D3D11_USAGE_DEFAULT;
             desc.CPUAccessFlags=0;
             if(!desc.BindFlags)desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
@@ -1185,10 +1186,11 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         wrapper->context=context();
         const UINT mips=levels?levels:mipChain(width,height);
         wrapper->cpuVisible=usageFor(pool,usage)!=D3D11_USAGE_DEFAULT;
-        // A mipmapped MANAGED texture is default (D3D11 has no dynamic mip
-        // chain), but D3D9 lets a managed resource be locked at every level, so
-        // it gets a staging copy to lock through.
-        if(pool==D3DPOOL_MANAGED&&mips>1) {
+        // A MANAGED texture is default (D3D11 has no dynamic mip chain, and a
+        // dynamic single-mip texture device-removes on the console's d3d11on12
+        // wrapping path), but D3D9 lets a managed resource be locked at every
+        // level, so it gets a staging copy to lock through.
+        if(pool==D3DPOOL_MANAGED) {
             D3D11_TEXTURE2D_DESC shadowDesc{};
             texture->GetDesc(&shadowDesc);
             shadowDesc.Usage=D3D11_USAGE_STAGING;
