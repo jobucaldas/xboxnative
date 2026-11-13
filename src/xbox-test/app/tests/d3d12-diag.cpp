@@ -532,6 +532,17 @@ int main(int argc,char** argv) {
         rootParams[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;
         D3D12_ROOT_SIGNATURE_DESC rootDesc{};rootDesc.NumParameters=2;rootDesc.pParameters=rootParams;
         CHECK(d3d12_diag::rootParametersText(&rootDesc)=="params=2[32BIT_CONSTANTS SRV]");
+        rootParams[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;rootDesc.NumParameters=1;
+        ID3DBlob *blob=nullptr,*errors=nullptr;
+        CHECK(SUCCEEDED(D3D12SerializeRootSignature(&rootDesc,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&errors))&&blob);
+        if(blob){CHECK(d3d12_diag::describeRootSignature(blob->GetBufferPointer(),blob->GetBufferSize())=="params=1[SRV]");blob->Release();}
+        if(errors){errors->Release();errors=nullptr;}
+        D3D12_DESCRIPTOR_RANGE1 range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=2;
+        D3D12_ROOT_PARAMETER1 param{};param.ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;param.DescriptorTable={1,&range};
+        D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc1{};desc1.Version=D3D_ROOT_SIGNATURE_VERSION_1_1;desc1.Desc_1_1.NumParameters=1;desc1.Desc_1_1.pParameters=&param;
+        blob=nullptr;CHECK(SUCCEEDED(D3D12SerializeVersionedRootSignature(&desc1,&blob,&errors))&&blob);
+        if(blob){CHECK(d3d12_diag::describeRootSignature(blob->GetBufferPointer(),blob->GetBufferSize()).find("params=1[DESCRIPTOR_TABLE(ranges=1[SRV:2 reg=0 space=0 flags=0x0]")!=std::string::npos);blob->Release();}
+        if(errors)errors->Release();
         d3d12_diag::rootSignatureDescriber=&fakeRootSignatureDescription;
         ID3D12RootSignature* fakeRoot=reinterpret_cast<ID3D12RootSignature*>(uintptr_t(0x7770));
         d3d12_diag::rememberRootSignature(fakeRoot,vsBytes,sizeof vsBytes);

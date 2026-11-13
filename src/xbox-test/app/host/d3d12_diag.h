@@ -424,20 +424,42 @@ inline std::string rootParametersText(const D3D12_ROOT_SIGNATURE_DESC* desc) {
         if(i)text+=" ";
         const D3D12_ROOT_PARAMETER& p=desc->pParameters[i];
         text+=rootParameterName(p.ParameterType);
-        if(p.ParameterType==D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
-            text+=fmt("(ranges=%u)",p.DescriptorTable.NumDescriptorRanges);
+        if(p.ParameterType==D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)text+=fmt("(ranges=%u)",p.DescriptorTable.NumDescriptorRanges);
     }
     if(desc->NumParameters>16)text+=" ...";
     return text+"]";
 }
+inline std::string rootParametersText(const D3D12_ROOT_SIGNATURE_DESC1* desc) {
+    if(!desc)return "params=unavailable";
+    std::string text=fmt("params=%u[",desc->NumParameters);
+    for(UINT i=0;i<desc->NumParameters&&i<16;++i) {
+        const auto& p=desc->pParameters[i];text+=fmt("%s%s",i?" ":"",rootParameterName(p.ParameterType));
+        if(p.ParameterType==D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            text+=fmt("(ranges=%u[",p.DescriptorTable.NumDescriptorRanges);
+            for(UINT j=0;j<p.DescriptorTable.NumDescriptorRanges&&j<8;++j) {const auto& r=p.DescriptorTable.pDescriptorRanges[j];
+                text+=fmt("%s%s:%u reg=%u space=%u flags=0x%x",j?" ":"",r.RangeType==D3D12_DESCRIPTOR_RANGE_TYPE_SRV?"SRV":r.RangeType==D3D12_DESCRIPTOR_RANGE_TYPE_UAV?"UAV":r.RangeType==D3D12_DESCRIPTOR_RANGE_TYPE_CBV?"CBV":"SAMPLER",r.NumDescriptors,r.BaseShaderRegister,r.RegisterSpace,unsigned(r.Flags));}
+            if(p.DescriptorTable.NumDescriptorRanges>8)text+=" ...";
+            text+="])";
+        }
+    }
+    if(desc->NumParameters>16)text+=" ...";
+    return text+"]";
+}
+inline std::string rootParametersText(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* desc) {
+    if(!desc)return "params=unavailable";
+    return desc->Version==D3D_ROOT_SIGNATURE_VERSION_1_1?rootParametersText(&desc->Desc_1_1):
+        desc->Version==D3D_ROOT_SIGNATURE_VERSION_1_0?rootParametersText(&desc->Desc_1_0):"params=deserialize-failed";
+}
 using RootSignatureDescriber=std::string(*)(const void*,SIZE_T);
 inline std::string describeRootSignature(const void* blob,SIZE_T length) {
-    ID3D12RootSignatureDeserializer* deserializer=nullptr;
-    HRESULT hr=D3D12CreateRootSignatureDeserializer(blob,length,__uuidof(ID3D12RootSignatureDeserializer),reinterpret_cast<void**>(&deserializer));
-    if(FAILED(hr)||!deserializer)return "params=deserialize-failed";
-    std::string text=rootParametersText(deserializer->GetRootSignatureDesc());
-    deserializer->Release();
-    return text;
+    using Fn=HRESULT(WINAPI*)(LPCVOID,SIZE_T,REFIID,void**);
+    HMODULE module=GetModuleHandleW(L"d3d12.dll");auto fn=module?reinterpret_cast<Fn>(GetProcAddress(module,"D3D12CreateVersionedRootSignatureDeserializer")):nullptr;
+    if(fn) {ID3D12VersionedRootSignatureDeserializer* d=nullptr;
+        if(SUCCEEDED(fn(blob,length,__uuidof(ID3D12VersionedRootSignatureDeserializer),reinterpret_cast<void**>(&d)))&&d) {
+            std::string text=rootParametersText(d->GetUnconvertedRootSignatureDesc());d->Release();if(text!="params=deserialize-failed")return text;}}
+    ID3D12RootSignatureDeserializer* d=nullptr;
+    if(FAILED(D3D12CreateRootSignatureDeserializer(blob,length,__uuidof(ID3D12RootSignatureDeserializer),reinterpret_cast<void**>(&d)))||!d)return "params=deserialize-failed";
+    std::string text=rootParametersText(d->GetRootSignatureDesc());d->Release();return text;
 }
 inline RootSignatureDescriber rootSignatureDescriber=&describeRootSignature;
 constexpr size_t kMaxRootSignatures=64;
