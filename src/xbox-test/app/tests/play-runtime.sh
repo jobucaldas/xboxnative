@@ -45,11 +45,20 @@ clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-prot
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_DLL -DPLAY_REJECT_ATTACH -c tests/play-guest.cpp -o "$out/obj/reject.obj"
 common=(/nodefaultlib /include:_tls_used /alternatename:tls_raw=tls_value /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat)
 # A guest function with a stack frame larger than one page references the
-# mingw stack probe; libgcc's object defines it. Resolved from the sysroot
-# the same way the import libraries below are.
+# mingw stack probe; libgcc's object defines it. Ask the compiler for the
+# libgcc it would use (works on every layout: Debian, nix, MSYS2), then fall
+# back across the known sysroot layouts. No provider, no link: fail loudly
+# rather than dropping the symbol.
 MINGW_SYSROOT=${MINGW_SYSROOT:-/usr/x86_64-w64-mingw32}
-CHKSTK_OBJ=$(ls "$MINGW_SYSROOT"/lib/gcc/x86_64-w64-mingw32/*/libgcc.a 2>/dev/null | head -1)
-[ -n "$CHKSTK_OBJ" ] || CHKSTK_OBJ=$(find "$MINGW_SYSROOT" -name '_chkstk_ms.o' 2>/dev/null | head -1)
+CHKSTK_OBJ=$(clang++-19 --target=x86_64-w64-windows-gnu --print-file-name=libgcc.a 2>/dev/null || true)
+[ -f "$CHKSTK_OBJ" ] || CHKSTK_OBJ=""
+[ -n "$CHKSTK_OBJ" ] || for sysroot in "$MINGW_SYSROOT" /usr/lib/gcc/x86_64-w64-mingw32; do
+  CHKSTK_OBJ=$(ls "$sysroot"/lib/gcc/x86_64-w64-mingw32/*/libgcc.a 2>/dev/null | head -1) && [ -n "$CHKSTK_OBJ" ] && break
+done
+if [ ! -f "$CHKSTK_OBJ" ];then
+  echo "play-runtime.sh: no libgcc.a found (needed for _chkstk_ms); set MINGW_SYSROOT" >&2
+  exit 1
+fi
 x86_64-w64-mingw32-windres ../uwph/kernel32/resource_fixture.rc -O coff -o "$out/obj/resources.obj"
 lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-dependency.dll" /implib:"$out/obj/dependency.lib" "$out/obj/dll.obj" "$MINGW_SYSROOT"/lib/libkernel32.a
 lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-guest.exe" "$out/obj/exe.obj" "$out/obj/resources.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$out/obj/missing.lib" "$CHKSTK_OBJ" "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libadvapi32.a "$MINGW_SYSROOT"/lib/libkernel32.a

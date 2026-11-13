@@ -56,15 +56,17 @@ static DWORD testLoaderSearch() {
     // relative directory instead of the image's real directory resolves the
     // decoy and fails the value check below. It is removed afterwards so the
     // plain search case at the top keeps its application-dir semantics.
-    wchar_t absolute[32768];
+    // Absolute paths are built in static storage: a 64 KiB stack frame would
+    // make the guest reference the mingw stack probe (_chkstk_ms), which is a
+    // link-time dependency the fixture does not need.
+    static wchar_t absolute[32768];
     if(!GetFullPathNameW(L"MonoBleedingEdge\\EmbedRuntime",32768,absolute,nullptr))return 113;
     if(!CopyFileW(L"loader-search\\search-consumer.dll",L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll",FALSE))return 114;
     if(!CopyFileW(L"loader-search\\search-dependency-root.dll",L"search-dependency.dll",FALSE))return 115;
-    {
-        wchar_t path[32768];
-        if(lstrlenW(absolute)+lstrlenW(L"\\search-dependency.dll")+1>=32768)return 116;wsprintfW(path,L"%s\\search-dependency.dll",absolute);
-        if(!CopyFileW(L"loader-search\\search-dependency.dll",path,FALSE))return 117;
-    }
+    if(lstrlenW(absolute)+lstrlenW(L"\\search-dependency.dll")+1>=32768)return 116;
+    static wchar_t path[32768];
+    wsprintfW(path,L"%s\\search-dependency.dll",absolute);
+    if(!CopyFileW(L"loader-search\\search-dependency.dll",path,FALSE))return 117;
     loaded=LoadLibraryExW(L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll",nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);
     if(!loaded)return 118;
     auto mono_check=(DWORD(WINAPI*)())GetProcAddress(loaded,"search_consumer_value");
@@ -72,11 +74,7 @@ static DWORD testLoaderSearch() {
     if(!GetModuleHandleW(L"search-dependency.dll"))return 120;   // dependency from the sub-directory
     if(!FreeLibrary(loaded))return 121;
     if(DeleteFileW(L"MonoBleedingEdge\\EmbedRuntime\\play-mono.dll")==0)return 122;
-    {
-        wchar_t path[32768];
-        if(lstrlenW(absolute)+lstrlenW(L"\\search-dependency.dll")+1>=32768)return 124;wsprintfW(path,L"%s\\search-dependency.dll",absolute);
-        if(DeleteFileW(path)==0)return 125;   // the dependency is gone
-    }
+    if(DeleteFileW(path)==0)return 125;   // the dependency is gone
     if(DeleteFileW(L"search-dependency.dll")==0)return 126;   // relative decoy removed
     // Negative control: with the sub-directory copy missing, the fallback must
     // pick the root copy — and the value check must see exactly that (55, not
