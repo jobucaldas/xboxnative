@@ -142,7 +142,7 @@ enum { VK_QUEUE_GRAPHICS_BIT = 0x1, VK_QUEUE_COMPUTE_BIT = 0x2 };
 enum { VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT = 0x1, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT = 0x400,
        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT = 0x800, VK_PIPELINE_STAGE_HOST_BIT = 0x2000 };
 enum { VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT = 0x100, VK_ACCESS_SHADER_WRITE_BIT = 0x100000,
-       VK_ACCESS_HOST_READ_BIT = 0x100 };
+       VK_ACCESS_HOST_READ_BIT = 0x2000 };
 // synchronization2 stage/access masks (64-bit).
 enum { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT = 0x00000800ull, VK_PIPELINE_STAGE_2_COPY_BIT = 0x100000000ull,
        VK_PIPELINE_STAGE_2_HOST_BIT = 0x00004000ull };
@@ -680,18 +680,21 @@ int vk_draw_entry() {
     // layout the vertex input below declares and vertices[] above fills.
     VkBufferCreateInfo vbInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0, 3 * 8 * 4,
                               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, nullptr};
-    if (CreateBuffer(device, &vbInfo, nullptr, &vertexBuffer) != VK_SUCCESS || !vertexBuffer)
-        return fail(20, "vkCreateBuffer(vertex)", 0);
+    result = CreateBuffer(device, &vbInfo, nullptr, &vertexBuffer);
+    if (result != VK_SUCCESS || !vertexBuffer)
+        return fail(20, "vkCreateBuffer(vertex)", result);
     // 64 uints in place: compute reads and writes the same buffer.
     VkBufferCreateInfo sbInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0, 64 * 4,
                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                               VK_SHARING_MODE_EXCLUSIVE, 0, nullptr};
-    if (CreateBuffer(device, &sbInfo, nullptr, &storageBuffer) != VK_SUCCESS || !storageBuffer)
-        return fail(20, "vkCreateBuffer(storage)", 0);
+    result = CreateBuffer(device, &sbInfo, nullptr, &storageBuffer);
+    if (result != VK_SUCCESS || !storageBuffer)
+        return fail(20, "vkCreateBuffer(storage)", result);
     VkBufferCreateInfo rbInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0, 64 * 4,
                               VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, nullptr};
-    if (CreateBuffer(device, &rbInfo, nullptr, &readbackBuffer) != VK_SUCCESS || !readbackBuffer)
-        return fail(20, "vkCreateBuffer(readback)", 0);
+    result = CreateBuffer(device, &rbInfo, nullptr, &readbackBuffer);
+    if (result != VK_SUCCESS || !readbackBuffer)
+        return fail(20, "vkCreateBuffer(readback)", result);
     VkMemoryRequirements req{};
     VkDeviceSize used = 0;
     VkDeviceMemory memory = nullptr;
@@ -710,16 +713,20 @@ int vk_draw_entry() {
         total = used;
     }
     VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, nullptr, total, memType};
-    if (AllocateMemory(device, &allocInfo, nullptr, &memory) != VK_SUCCESS || !memory)
-        return fail(20, "vkAllocateMemory", 0);
-    for (int i = 0; i < 3; ++i)
-        if (BindBufferMemory(device, buffers[i], memory, offsets[i]) != VK_SUCCESS)
-            return fail(20, "vkBindBufferMemory", 0);
+    result = AllocateMemory(device, &allocInfo, nullptr, &memory);
+    if (result != VK_SUCCESS || !memory)
+        return fail(20, "vkAllocateMemory", result);
+    for (int i = 0; i < 3; ++i) {
+        result = BindBufferMemory(device, buffers[i], memory, offsets[i]);
+        if (result != VK_SUCCESS)
+            return fail(20, "vkBindBufferMemory", result);
+    }
     // Write the vertex data and the compute input through the mapped
     // allocation: three vertices (a red triangle), 64 uints starting at 1.
     void* mapped = nullptr;
-    if (MapMemory(device, memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS || !mapped)
-        return fail(20, "vkMapMemory", 0);
+    result = MapMemory(device, memory, 0, VK_WHOLE_SIZE, 0, &mapped);
+    if (result != VK_SUCCESS || !mapped)
+        return fail(20, "vkMapMemory", result);
     static const float vertices[3][8] = {
         {-0.75f, -0.75f, 0, 1, 1, 0, 0, 1},
         { 0.75f, -0.75f, 0, 1, 1, 0, 0, 1},
@@ -731,27 +738,33 @@ int vk_draw_entry() {
 
     VkShaderModule vsModule = nullptr, fsModule = nullptr, csModule = nullptr;
     {VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, nullptr, 0, sizeof vulkan_vs_spv, (const uint32_t*)vulkan_vs_spv};
-     if (CreateShaderModule(device, &info, nullptr, &vsModule) != VK_SUCCESS || !vsModule) return fail(21, "vkCreateShaderModule(vs)", 0);}
+     result = CreateShaderModule(device, &info, nullptr, &vsModule);
+     if (result != VK_SUCCESS || !vsModule) return fail(21, "vkCreateShaderModule(vs)", result);}
     {VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, nullptr, 0, sizeof vulkan_fs_spv, (const uint32_t*)vulkan_fs_spv};
-     if (CreateShaderModule(device, &info, nullptr, &fsModule) != VK_SUCCESS || !fsModule) return fail(21, "vkCreateShaderModule(fs)", 0);}
+     result = CreateShaderModule(device, &info, nullptr, &fsModule);
+     if (result != VK_SUCCESS || !fsModule) return fail(21, "vkCreateShaderModule(fs)", result);}
     {VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, nullptr, 0, sizeof vulkan_cs_spv, (const uint32_t*)vulkan_cs_spv};
-     if (CreateShaderModule(device, &info, nullptr, &csModule) != VK_SUCCESS || !csModule) return fail(21, "vkCreateShaderModule(cs)", 0);}
+     result = CreateShaderModule(device, &info, nullptr, &csModule);
+     if (result != VK_SUCCESS || !csModule) return fail(21, "vkCreateShaderModule(cs)", result);}
     emit("PLAY-VULKAN-DRAW STAGE shader-modules\n");
 
     VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &binding};
     VkDescriptorSetLayout setLayout = nullptr;
-    if (CreateDescriptorSetLayout(device, &layoutInfo, nullptr, &setLayout) != VK_SUCCESS || !setLayout)
-        return fail(22, "vkCreateDescriptorSetLayout", 0);
+    result = CreateDescriptorSetLayout(device, &layoutInfo, nullptr, &setLayout);
+    if (result != VK_SUCCESS || !setLayout)
+        return fail(22, "vkCreateDescriptorSetLayout", result);
     VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, 1, 1, &poolSize};
     VkDescriptorPool descPool = nullptr;
-    if (CreateDescriptorPool(device, &poolInfo, nullptr, &descPool) != VK_SUCCESS || !descPool)
-        return fail(22, "vkCreateDescriptorPool", 0);
+    result = CreateDescriptorPool(device, &poolInfo, nullptr, &descPool);
+    if (result != VK_SUCCESS || !descPool)
+        return fail(22, "vkCreateDescriptorPool", result);
     VkDescriptorSetAllocateInfo setAlloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, descPool, 1, &setLayout};
     VkDescriptorSet descSet = nullptr;
-    if (AllocateDescriptorSets(device, &setAlloc, &descSet) != VK_SUCCESS || !descSet)
-        return fail(22, "vkAllocateDescriptorSets", 0);
+    result = AllocateDescriptorSets(device, &setAlloc, &descSet);
+    if (result != VK_SUCCESS || !descSet)
+        return fail(22, "vkAllocateDescriptorSets", result);
     VkDescriptorBufferInfo bufferInfo{storageBuffer, 0, VK_WHOLE_SIZE};
     VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, descSet, 0, 0, 1,
                                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &bufferInfo, nullptr};
@@ -760,8 +773,9 @@ int vk_draw_entry() {
     VkPushConstantRange pcRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, 4};
     VkPipelineLayoutCreateInfo plInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &setLayout, 1, &pcRange};
     VkPipelineLayout pipelineLayout = nullptr;
-    if (CreatePipelineLayout(device, &plInfo, nullptr, &pipelineLayout) != VK_SUCCESS || !pipelineLayout)
-        return fail(22, "vkCreatePipelineLayout", 0);
+    result = CreatePipelineLayout(device, &plInfo, nullptr, &pipelineLayout);
+    if (result != VK_SUCCESS || !pipelineLayout)
+        return fail(22, "vkCreatePipelineLayout", result);
     emit("PLAY-VULKAN-DRAW STAGE pipeline-layout\n");
 
     // The offscreen colour target: a 64x64 image the triangle lands in, copied
@@ -772,8 +786,9 @@ int vk_draw_entry() {
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         VK_SHARING_MODE_EXCLUSIVE, 0, nullptr, VK_IMAGE_LAYOUT_UNDEFINED};
     VkImage colorImage = nullptr;
-    if (CreateImage(device, &imgInfo, nullptr, &colorImage) != VK_SUCCESS || !colorImage)
-        return fail(23, "vkCreateImage", 0);
+    result = CreateImage(device, &imgInfo, nullptr, &colorImage);
+    if (result != VK_SUCCESS || !colorImage)
+        return fail(23, "vkCreateImage", result);
     GetImageMemoryRequirements(device, colorImage, &req);
     VkDeviceSize imgOffset = (used + req.alignment - 1) & ~(req.alignment - 1);
     // The image's memory type comes from its own requirements' memoryTypeBits,
@@ -787,10 +802,12 @@ int vk_draw_entry() {
     if (imgType == UINT32_MAX) return fail(23, "image memory type", 0);
     VkMemoryAllocateInfo imgAlloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, nullptr, imgOffset + req.size, imgType};
     VkDeviceMemory imageMemory = nullptr;
-    if (AllocateMemory(device, &imgAlloc, nullptr, &imageMemory) != VK_SUCCESS || !imageMemory)
-        return fail(23, "vkAllocateMemory(image)", 0);
-    if (BindImageMemory(device, colorImage, imageMemory, imgOffset) != VK_SUCCESS)
-        return fail(23, "vkBindImageMemory", 0);
+    result = AllocateMemory(device, &imgAlloc, nullptr, &imageMemory);
+    if (result != VK_SUCCESS || !imageMemory)
+        return fail(23, "vkAllocateMemory(image)", result);
+    result = BindImageMemory(device, colorImage, imageMemory, imgOffset);
+    if (result != VK_SUCCESS)
+        return fail(23, "vkBindImageMemory", result);
     typedef struct { int32_t sType; const void* pNext; VkFlags flags; VkImage image;
                      int32_t viewType, format; struct { int32_t r, g, b, a; } components;
                      VkImageSubresourceRange subresourceRange; } ImageViewCreateInfo;
@@ -799,8 +816,9 @@ int vk_draw_entry() {
         {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
     VkImageView colorView = nullptr;
     auto createImageViewT = (VkResult (__stdcall*)(VkDevice, const ImageViewCreateInfo*, const VkAllocationCallbacks*, VkImageView*))CreateImageView;
-    if (createImageViewT(device, &viewInfo, nullptr, &colorView) != VK_SUCCESS || !colorView)
-        return fail(23, "vkCreateImageView", 0);
+    result = createImageViewT(device, &viewInfo, nullptr, &colorView);
+    if (result != VK_SUCCESS || !colorView)
+        return fail(23, "vkCreateImageView", result);
     emit("PLAY-VULKAN-DRAW STAGE color-target\n");
 
     // The graphics pipeline: dynamic viewport/scissor, no render pass — the
@@ -851,17 +869,20 @@ int vk_draw_entry() {
 
     VkCommandPoolCreateInfo poolCreateInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, nullptr, 0, family};
     VkCommandPool pool = nullptr;
-    if (CreateCommandPool(device, &poolCreateInfo, nullptr, &pool) != VK_SUCCESS || !pool)
-        return fail(25, "vkCreateCommandPool", 0);
+    result = CreateCommandPool(device, &poolCreateInfo, nullptr, &pool);
+    if (result != VK_SUCCESS || !pool)
+        return fail(25, "vkCreateCommandPool", result);
     VkCommandBufferAllocateInfo cbAlloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, nullptr, pool,
         VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
     VkCommandBuffer cmd = nullptr;
-    if (AllocateCommandBuffers(device, &cbAlloc, &cmd) != VK_SUCCESS || !cmd)
-        return fail(25, "vkAllocateCommandBuffers", 0);
+    result = AllocateCommandBuffers(device, &cbAlloc, &cmd);
+    if (result != VK_SUCCESS || !cmd)
+        return fail(25, "vkAllocateCommandBuffers", result);
 
     VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, nullptr, 0};
     VkFence fence = nullptr;
-    if (CreateFence(device, &fenceInfo, nullptr, &fence) != VK_SUCCESS || !fence) return fail(25, "vkCreateFence", 0);
+    result = CreateFence(device, &fenceInfo, nullptr, &fence);
+    if (result != VK_SUCCESS || !fence) return fail(25, "vkCreateFence", result);
     VkSemaphoreTypeCreateInfo timelineInfo{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO, nullptr, VK_SEMAPHORE_TYPE_TIMELINE, 0};
     VkSemaphoreCreateInfo semInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &timelineInfo, 0};
     VkSemaphore timeline = nullptr;
@@ -872,7 +893,8 @@ int vk_draw_entry() {
     // ---- one command buffer: compute, then the triangle, then the copy ----
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr,
         VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, nullptr};
-    if (BeginCommandBuffer(cmd, &begin) != VK_SUCCESS) return fail(26, "vkBeginCommandBuffer", 0);
+    result = BeginCommandBuffer(cmd, &begin);
+    if (result != VK_SUCCESS) return fail(26, "vkBeginCommandBuffer", result);
 
     // 1. Compute: data[i] *= 3 through the push constant, one workgroup of 64.
     CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
@@ -925,7 +947,8 @@ int vk_draw_entry() {
     CmdEndRendering(cmd);
     emit("PLAY-VULKAN-DRAW STAGE draw-recorded\n");
 
-    if (EndCommandBuffer(cmd) != VK_SUCCESS) return fail(26, "vkEndCommandBuffer", 0);
+    result = EndCommandBuffer(cmd);
+    if (result != VK_SUCCESS) return fail(26, "vkEndCommandBuffer", result);
 
     // Submit twice through the timeline semaphore: submit2 signals value 1
     // when the compute+draw work is done, the host waits on 1, then signals 2
@@ -935,30 +958,38 @@ int vk_draw_entry() {
         VK_PIPELINE_STAGE_2_COPY_BIT, 0};
     VkSubmitInfo2 submit2{VK_STRUCTURE_TYPE_SUBMIT_INFO_2, nullptr, 0, 0, nullptr, 1, &cmdInfo, 1, &signalInfo};
     if (hasSync2) {
-        if (QueueSubmit2(queue, 1, &submit2, fence) != VK_SUCCESS) return fail(27, "vkQueueSubmit2", 0);
+        result = QueueSubmit2(queue, 1, &submit2, fence);
+        if (result != VK_SUCCESS) return fail(27, "vkQueueSubmit2", result);
     } else {
         // No sync2: the legacy submit carries the same work; the timeline
         // signal happens through vkSignalSemaphore after the queue drains.
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &cmd, 0, nullptr};
-        if (QueueSubmit(queue, 1, &submit, fence) != VK_SUCCESS) return fail(27, "vkQueueSubmit", 0);
+        result = QueueSubmit(queue, 1, &submit, fence);
+        if (result != VK_SUCCESS) return fail(27, "vkQueueSubmit", result);
     }
-    if (WaitForFences(device, 1, &fence, 1, 1000000000ull) != VK_SUCCESS) return fail(27, "vkWaitForFences", 0);
+    result = WaitForFences(device, 1, &fence, 1, 1000000000ull);
+    if (result != VK_SUCCESS) return fail(27, "vkWaitForFences", result);
     ResetFences(device, 1, &fence);
     if (!hasSync2) {
         VkSemaphoreSignalInfo sig{VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, nullptr, timeline, 1};
-        if (SignalSemaphore(device, &sig) != VK_SUCCESS) return fail(27, "vkSignalSemaphore", 0);
+        result = SignalSemaphore(device, &sig);
+        if (result != VK_SUCCESS) return fail(27, "vkSignalSemaphore", result);
     }
     uint64_t waited = 0;
     VkSemaphoreWaitInfo waitInfo{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, nullptr, 0, 1, &timeline, &waited};
     waited = 1;
-    if (WaitSemaphores(device, &waitInfo, 1000000000ull) != VK_SUCCESS) return fail(28, "vkWaitSemaphores(1)", 0);
+    result = WaitSemaphores(device, &waitInfo, 1000000000ull);
+    if (result != VK_SUCCESS) return fail(28, "vkWaitSemaphores(1)", result);
     // The host signals 2 and waits for it: the round trip works.
     VkSemaphoreSignalInfo sig{VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, nullptr, timeline, 2};
-    if (SignalSemaphore(device, &sig) != VK_SUCCESS) return fail(28, "vkSignalSemaphore(2)", 0);
+    result = SignalSemaphore(device, &sig);
+    if (result != VK_SUCCESS) return fail(28, "vkSignalSemaphore(2)", result);
     waited = 2;
-    if (WaitSemaphores(device, &waitInfo, 1000000000ull) != VK_SUCCESS) return fail(28, "vkWaitSemaphores(2)", 0);
+    result = WaitSemaphores(device, &waitInfo, 1000000000ull);
+    if (result != VK_SUCCESS) return fail(28, "vkWaitSemaphores(2)", result);
     emit("PLAY-VULKAN-DRAW STAGE timeline-roundtrip\n");
-    if (QueueWaitIdle(queue) != VK_SUCCESS) return fail(27, "vkQueueWaitIdle", 0);
+    result = QueueWaitIdle(queue);
+    if (result != VK_SUCCESS) return fail(27, "vkQueueWaitIdle", result);
 
     // ---- readbacks: compute output, then the triangle ----
     // The compute buffer was copied to readbackBuffer; the host reads it back
@@ -982,23 +1013,29 @@ int vk_draw_entry() {
     VkBufferCreateInfo imgRbInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0, 64 * 64 * 4,
         VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, nullptr};
     VkBuffer imageReadback = nullptr;
-    if (CreateBuffer(device, &imgRbInfo, nullptr, &imageReadback) != VK_SUCCESS || !imageReadback)
-        return fail(30, "vkCreateBuffer(image-readback)", 0);
+    result = CreateBuffer(device, &imgRbInfo, nullptr, &imageReadback);
+    if (result != VK_SUCCESS || !imageReadback)
+        return fail(30, "vkCreateBuffer(image-readback)", result);
     GetBufferMemoryRequirements(device, imageReadback, &req);
     VkDeviceSize imgRbOffset = 0;   // fresh allocation: no alignment neighbours
     VkMemoryAllocateInfo rbAlloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, nullptr, req.size, memType};
     VkDeviceMemory rbMemory = nullptr;
-    if (AllocateMemory(device, &rbAlloc, nullptr, &rbMemory) != VK_SUCCESS || !rbMemory)
-        return fail(30, "vkAllocateMemory(image-readback)", 0);
-    if (BindBufferMemory(device, imageReadback, rbMemory, imgRbOffset) != VK_SUCCESS)
-        return fail(30, "vkBindBufferMemory(image-readback)", 0);
+    result = AllocateMemory(device, &rbAlloc, nullptr, &rbMemory);
+    if (result != VK_SUCCESS || !rbMemory)
+        return fail(30, "vkAllocateMemory(image-readback)", result);
+    result = BindBufferMemory(device, imageReadback, rbMemory, imgRbOffset);
+    if (result != VK_SUCCESS)
+        return fail(30, "vkBindBufferMemory(image-readback)", result);
     void* rbMapped = nullptr;
-    if (MapMemory(device, rbMemory, 0, VK_WHOLE_SIZE, 0, &rbMapped) != VK_SUCCESS || !rbMapped)
-        return fail(30, "vkMapMemory(image-readback)", 0);
+    result = MapMemory(device, rbMemory, 0, VK_WHOLE_SIZE, 0, &rbMapped);
+    if (result != VK_SUCCESS || !rbMapped)
+        return fail(30, "vkMapMemory(image-readback)", result);
 
-    if (AllocateCommandBuffers(device, &cbAlloc, &cmd) != VK_SUCCESS || !cmd)
-        return fail(30, "vkAllocateCommandBuffers(copy)", 0);
-    if (BeginCommandBuffer(cmd, &begin) != VK_SUCCESS) return fail(30, "vkBeginCommandBuffer(copy)", 0);
+    result = AllocateCommandBuffers(device, &cbAlloc, &cmd);
+    if (result != VK_SUCCESS || !cmd)
+        return fail(30, "vkAllocateCommandBuffers(copy)", result);
+    result = BeginCommandBuffer(cmd, &begin);
+    if (result != VK_SUCCESS) return fail(30, "vkBeginCommandBuffer(copy)", result);
     // Colour-attachment -> transfer-source, the sync2 way when it is on.
     VkImageMemoryBarrier2 toSrc{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr,
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -1021,12 +1058,16 @@ int vk_draw_entry() {
                      struct { uint32_t width, height, depth; } imageExtent; } BufferImageCopy;
     BufferImageCopy region{0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {64, 64, 1}};
     cmdCopyImageToBuffer(cmd, colorImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, imageReadback, 1, &region);
-    if (EndCommandBuffer(cmd) != VK_SUCCESS) return fail(30, "vkEndCommandBuffer(copy)", 0);
+    result = EndCommandBuffer(cmd);
+    if (result != VK_SUCCESS) return fail(30, "vkEndCommandBuffer(copy)", result);
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &cmd, 0, nullptr};
-    if (QueueSubmit(queue, 1, &submit, fence) != VK_SUCCESS) return fail(30, "vkQueueSubmit(copy)", 0);
-    if (WaitForFences(device, 1, &fence, 1, 1000000000ull) != VK_SUCCESS) return fail(30, "vkWaitForFences(copy)", 0);
+    result = QueueSubmit(queue, 1, &submit, fence);
+    if (result != VK_SUCCESS) return fail(30, "vkQueueSubmit(copy)", result);
+    result = WaitForFences(device, 1, &fence, 1, 1000000000ull);
+    if (result != VK_SUCCESS) return fail(30, "vkWaitForFences(copy)", result);
     ResetFences(device, 1, &fence);
-    if (QueueWaitIdle(queue) != VK_SUCCESS) return fail(30, "vkQueueWaitIdle(copy)", 0);
+    result = QueueWaitIdle(queue);
+    if (result != VK_SUCCESS) return fail(30, "vkQueueWaitIdle(copy)", result);
 
     // The triangle covers the middle-bottom-ish band; the clear colour is
     // everywhere else. Row pitch is 64*4 (no padding at 64 width).
