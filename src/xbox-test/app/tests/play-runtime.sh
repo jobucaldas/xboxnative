@@ -5,6 +5,9 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)   # repo root: de
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.local/bin:$PATH"
 export WINEPREFIX=${PRUN_WINEPREFIX:-/tmp/prun-wine}
+# Per-mode wall clock. 20s covers CI; slower hosts (Wine-in-a-VM, software GL)
+# raise it: d3d12-diag alone needs ~40s under wine-wow64 11 on one such host.
+export PRUN_MODE_TIMEOUT=${PRUN_MODE_TIMEOUT:-20}
 export WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d
 mkdir -p "$WINEPREFIX"
 if [[ ! -f "$WINEPREFIX/system.reg" ]];then timeout -k 2 60 wineboot -u;fi
@@ -41,45 +44,60 @@ clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-prot
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_DLL -DPLAY_STATIC_MISSING -c tests/play-guest.cpp -o "$out/obj/unresolved.obj"
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_DLL -DPLAY_REJECT_ATTACH -c tests/play-guest.cpp -o "$out/obj/reject.obj"
 common=(/nodefaultlib /include:_tls_used /alternatename:tls_raw=tls_value /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat)
+# A guest function with a stack frame larger than one page references the
+# mingw stack probe; libgcc's object defines it. Ask the compiler for the
+# libgcc it would use (works on every layout: Debian, nix, MSYS2), then fall
+# back across the known sysroot layouts. No provider, no link: fail loudly
+# rather than dropping the symbol.
+MINGW_SYSROOT=${MINGW_SYSROOT:-/usr/x86_64-w64-mingw32}
+CHKSTK_OBJ=$(clang++-19 --target=x86_64-w64-windows-gnu --print-file-name=libgcc.a 2>/dev/null || true)
+[ -f "$CHKSTK_OBJ" ] || CHKSTK_OBJ=""
+[ -n "$CHKSTK_OBJ" ] || for sysroot in "$MINGW_SYSROOT" /usr/lib/gcc/x86_64-w64-mingw32; do
+  CHKSTK_OBJ=$(ls "$sysroot"/lib/gcc/x86_64-w64-mingw32/*/libgcc.a 2>/dev/null | head -1) && [ -n "$CHKSTK_OBJ" ] && break
+done
+if [ ! -f "$CHKSTK_OBJ" ];then
+  echo "play-runtime.sh: no libgcc.a found (needed for _chkstk_ms); set MINGW_SYSROOT" >&2
+  exit 1
+fi
 x86_64-w64-mingw32-windres ../uwph/kernel32/resource_fixture.rc -O coff -o "$out/obj/resources.obj"
-lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-dependency.dll" /implib:"$out/obj/dependency.lib" "$out/obj/dll.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
-lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-guest.exe" "$out/obj/exe.obj" "$out/obj/resources.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$out/obj/missing.lib" /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libadvapi32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
-lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-missing.exe" "$out/obj/missing.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$out/obj/missing.lib" /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libadvapi32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
-lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-steam.exe" "$out/obj/steam.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libadvapi32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
-lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-unresolved.dll" "$out/obj/unresolved.obj" "$out/obj/missing.lib" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-dependency.dll" /implib:"$out/obj/dependency.lib" "$out/obj/dll.obj" "$MINGW_SYSROOT"/lib/libkernel32.a
+lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-guest.exe" "$out/obj/exe.obj" "$out/obj/resources.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$out/obj/missing.lib" "$CHKSTK_OBJ" "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libadvapi32.a "$MINGW_SYSROOT"/lib/libkernel32.a
+lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-missing.exe" "$out/obj/missing.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$out/obj/missing.lib" "$CHKSTK_OBJ" "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libadvapi32.a "$MINGW_SYSROOT"/lib/libkernel32.a
+lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-steam.exe" "$out/obj/steam.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$CHKSTK_OBJ" "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libadvapi32.a "$MINGW_SYSROOT"/lib/libkernel32.a
+lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-unresolved.dll" "$out/obj/unresolved.obj" "$out/obj/missing.lib" "$MINGW_SYSROOT"/lib/libkernel32.a
 # EXE that reads its TLS through TEB slot 0, as MSVC /GA code does (no _tls_index).
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-slot0.cpp -o "$out/obj/slot0.obj"
-lld-link-19 /nodefaultlib /include:_tls_used /entry:slot0_exe_entry /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-slot0.exe" "$out/obj/slot0.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 /nodefaultlib /include:_tls_used /entry:slot0_exe_entry /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-slot0.exe" "$out/obj/slot0.obj" "$MINGW_SYSROOT"/lib/libkernel32.a
 # EXE that draws one D3D11 triangle through Play's routes: device, swap chain on
 # a guest HWND, the committed DXBC shaders, pixel readback (exit 42 only when the
 # triangle landed where it should; 43 is BLOCKED, never a pass).
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d11.cpp -o "$out/obj/d3d11.obj"
-lld-link-19 /nodefaultlib /entry:d3d_entry /include:d3d_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d11.exe" "$out/obj/d3d11.obj" /usr/x86_64-w64-mingw32/lib/libd3d11.a /usr/x86_64-w64-mingw32/lib/libdxgi.a /usr/x86_64-w64-mingw32/lib/libdxguid.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 /nodefaultlib /entry:d3d_entry /include:d3d_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d11.exe" "$out/obj/d3d11.obj" "$MINGW_SYSROOT"/lib/libd3d11.a "$MINGW_SYSROOT"/lib/libdxgi.a "$MINGW_SYSROOT"/lib/libdxguid.a "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libkernel32.a
 # EXE that renders D3D12 frames through Play's routes: device, queue, flip-model
 # swap chain on a guest HWND, RTVs, clear, present, fence wait. Play must log the
 # device it got and the calls the device rejects, once each.
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d12.cpp -o "$out/obj/d3d12.obj"
-lld-link-19 /nodefaultlib /entry:d3d12_entry /include:d3d12_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d12.exe" "$out/obj/d3d12.obj" /usr/x86_64-w64-mingw32/lib/libd3d12.a /usr/x86_64-w64-mingw32/lib/libdxgi.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libdxguid.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 /nodefaultlib /entry:d3d12_entry /include:d3d12_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d12.exe" "$out/obj/d3d12.obj" "$MINGW_SYSROOT"/lib/libd3d12.a "$MINGW_SYSROOT"/lib/libdxgi.a "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libdxguid.a "$MINGW_SYSROOT"/lib/libkernel32.a
 # EXE that starts a D3D10 game: it statically imports d3d10.dll, which the
 # console lacks, so Play must serve the shim from the runtime directory and the
 # shim's own d3d11/dxgi imports must reach Play's routes. It creates a device
 # with a swap chain on a guest HWND, clears and presents three frames.
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d10.cpp -o "$out/obj/d3d10.obj"
-lld-link-19 /nodefaultlib /entry:d3d10_entry /include:d3d10_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d10.exe" "$out/obj/d3d10.obj" /usr/x86_64-w64-mingw32/lib/libd3d10.a /usr/x86_64-w64-mingw32/lib/libdxgi.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libuuid.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 /nodefaultlib /entry:d3d10_entry /include:d3d10_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d10.exe" "$out/obj/d3d10.obj" "$MINGW_SYSROOT"/lib/libd3d10.a "$MINGW_SYSROOT"/lib/libdxgi.a "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libuuid.a "$MINGW_SYSROOT"/lib/libkernel32.a
 # EXE that draws with D3D10 through the shim: input layout, SM4 shaders (the
 # committed vs_4_0/ps_4_0 bytecode), Draw/DrawIndexed, the geometry shader,
 # stream-out, a cubemap with GenerateMips and a MSAA resolve. Every pass reads
 # pixels (or vertices) back and exits 42 only when the draw landed where it
 # should; 43 is BLOCKED, never a pass.
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d10-triangle.cpp -o "$out/obj/d3d10-triangle.obj"
-lld-link-19 /nodefaultlib /entry:d3d10tri_entry /include:d3d10tri_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d10-triangle.exe" "$out/obj/d3d10-triangle.obj" /usr/x86_64-w64-mingw32/lib/libd3d10.a /usr/x86_64-w64-mingw32/lib/libdxgi.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libuuid.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 /nodefaultlib /entry:d3d10tri_entry /include:d3d10tri_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d10-triangle.exe" "$out/obj/d3d10-triangle.obj" "$MINGW_SYSROOT"/lib/libd3d10.a "$MINGW_SYSROOT"/lib/libdxgi.a "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libuuid.a "$MINGW_SYSROOT"/lib/libkernel32.a
 # EXE that starts a D3D9 game: it statically imports d3d9.dll, which the console
 # lacks, so Play must serve the shim from the runtime directory and the shim's
 # own d3d11/dxgi imports must reach Play's routes. It creates a device with a
 # swap chain and an auto depth-stencil surface on a guest HWND, clears and
 # presents three frames.
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d9.cpp -o "$out/obj/d3d9.obj"
-lld-link-19 /nodefaultlib /entry:d3d9_entry /include:d3d9_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d9.exe" "$out/obj/d3d9.obj" /usr/x86_64-w64-mingw32/lib/libd3d9.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 /nodefaultlib /entry:d3d9_entry /include:d3d9_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d9.exe" "$out/obj/d3d9.obj" "$MINGW_SYSROOT"/lib/libd3d9.a "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libkernel32.a
 # EXEs that draw with D3D9 through the shim: one fixed-function triangle, one
 # with a game's own vs_1_1/ps_1_1, a texture and a vertex declaration, and the
 # variants fixture (the same triangle run several ways). All read their pixels
@@ -88,7 +106,7 @@ for fixture in triangle textured triangle-variants;do
   # The C symbols use underscores; the fixture name hyphenates (triangle-variants).
   sym=${fixture//-/_}
   clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c "tests/play-d3d9-$fixture.cpp" -o "$out/obj/d3d9-$fixture.obj"
-  lld-link-19 /nodefaultlib /entry:d3d9_${sym}_entry /include:d3d9_${sym}_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d9-$fixture.exe" "$out/obj/d3d9-$fixture.obj" /usr/x86_64-w64-mingw32/lib/libd3d9.a /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libkernel32.a
+  lld-link-19 /nodefaultlib /entry:d3d9_${sym}_entry /include:d3d9_${sym}_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d9-$fixture.exe" "$out/obj/d3d9-$fixture.obj" "$MINGW_SYSROOT"/lib/libd3d9.a "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libkernel32.a
 done
 # A DLL that faults inside itself and the EXE that calls it: Play must record
 # the crash (code, module, offset) rather than the launcher dying silently, and
@@ -96,23 +114,23 @@ done
 # an image without them cannot be unwound out of, so the fault is never
 # dispatched at all (that is the bug this fixture guards).
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-fault-dll.cpp -o "$out/obj/fault-dll.obj"
-lld-link-19 /dll /noentry /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-fault.dll" "$out/obj/fault-dll.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 /dll /noentry /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-fault.dll" "$out/obj/fault-dll.obj" "$MINGW_SYSROOT"/lib/libkernel32.a
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-fault-guest.cpp -o "$out/obj/fault-guest.obj"
-lld-link-19 /nodefaultlib /entry:fault_guest_entry /include:fault_guest_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-fault-guest.exe" "$out/obj/fault-guest.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 /nodefaultlib /entry:fault_guest_entry /include:fault_guest_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-fault-guest.exe" "$out/obj/fault-guest.obj" "$MINGW_SYSROOT"/lib/libkernel32.a
 # EXE that probes Vulkan the way a Vulkan-optional engine does: it loads
 # vulkan-1.dll by name (Play serves the Khronos loader from the runtime
 # directory), creates an instance and enumerates physical devices. The console
 # has no driver, so the answer must be zero devices with
 # VK_ERROR_INITIALIZATION_FAILED, as on a desktop with no GPU.
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-vulkan.cpp -o "$out/obj/vulkan.obj"
-lld-link-19 /nodefaultlib /entry:vk_entry /include:vk_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-vulkan.exe" "$out/obj/vulkan.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 /nodefaultlib /entry:vk_entry /include:vk_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-vulkan.exe" "$out/obj/vulkan.obj" "$MINGW_SYSROOT"/lib/libkernel32.a
 # EXE that runs the Vulkan startup path a game takes against the packaged dzn
 # ICD (Vulkan on D3D12): instance with VK_KHR_surface/VK_KHR_win32_surface, a
 # real physical device, a win32 surface on a guest HWND, device, swap chain,
 # render pass, framebuffers, clear and present. Exits 42 when a frame is
 # presented, 43 when the host's D3D12 refuses dzn's device (BLOCKED, not a pass).
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -fno-builtin -c tests/play-vulkan-dzn.cpp -o "$out/obj/vulkan-dzn.obj"
-lld-link-19 /nodefaultlib /entry:vk_dzn_entry /include:vk_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-vulkan-dzn.exe" "$out/obj/vulkan-dzn.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a /usr/x86_64-w64-mingw32/lib/libuser32.a
+lld-link-19 /nodefaultlib /entry:vk_dzn_entry /include:vk_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-vulkan-dzn.exe" "$out/obj/vulkan-dzn.obj" "$MINGW_SYSROOT"/lib/libkernel32.a "$MINGW_SYSROOT"/lib/libuser32.a
 # EXE that proves the driver renders (research/VULKAN-COVERAGE.md): a graphics
 # pipeline from the checked-in SPIR-V, a vertex buffer, one triangle into an
 # offscreen target with dynamic rendering, a compute dispatch with a push
@@ -120,20 +138,20 @@ lld-link-19 /nodefaultlib /entry:vk_dzn_entry /include:vk_relocation /subsystem:
 # timeline semaphore signalled and waited by value, and buffer + pixel
 # readbacks. Exit 42 only when everything read back; 43 is BLOCKED, never a pass.
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -fno-exceptions -fno-rtti -fno-builtin -c tests/play-vulkan-draw.cpp -o "$out/obj/vulkan-draw.obj"
-lld-link-19 /nodefaultlib /entry:vk_draw_entry /include:vk_draw_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-vulkan-draw.exe" "$out/obj/vulkan-draw.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a /usr/x86_64-w64-mingw32/lib/libuser32.a
+lld-link-19 /nodefaultlib /entry:vk_draw_entry /include:vk_draw_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-vulkan-draw.exe" "$out/obj/vulkan-draw.obj" "$MINGW_SYSROOT"/lib/libkernel32.a "$MINGW_SYSROOT"/lib/libuser32.a
 # EXE that runs the OpenGL startup path an SDL3 GL game takes (issue #176): opengl32.dll from the runtime directory (Mesa's d3d12 WGL
 # driver), a pixel format through gdi32's forwarded wgl*, a context, a cleared
 # frame presented with SwapBuffers and a glReadPixels readback. Exits 42 when
 # the rendered pixel came back, 43 when it did not (BLOCKED, not a pass).
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -fno-builtin -c tests/play-opengl.cpp -o "$out/obj/opengl.obj"
-lld-link-19 /nodefaultlib /entry:opengl_entry /include:opengl_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-opengl.exe" "$out/obj/opengl.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a /usr/x86_64-w64-mingw32/lib/libuser32.a
+lld-link-19 /nodefaultlib /entry:opengl_entry /include:opengl_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-opengl.exe" "$out/obj/opengl.obj" "$MINGW_SYSROOT"/lib/libkernel32.a "$MINGW_SYSROOT"/lib/libuser32.a
 # A guest that uses a Discord SDK as a game does. The SDK is our own stand-in
 # (never Discord's binary): it connects to \?\pipe\discord-ipc-N exactly as
 # discord-rpc and the Game SDK do, so Play's answer is what a real game sees.
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -c tests/play-discord-sdk.cpp -o "$out/obj/discord-sdk.obj"
-lld-link-19 /nodefaultlib /dll /entry:DllMain /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-discord-sdk.dll" "$out/obj/discord-sdk.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 /nodefaultlib /dll /entry:DllMain /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-discord-sdk.dll" "$out/obj/discord-sdk.obj" "$MINGW_SYSROOT"/lib/libkernel32.a
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -c tests/play-discord.cpp -o "$out/obj/discord.obj"
-lld-link-19 /nodefaultlib /entry:discord_entry /include:discord_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-discord.exe" "$out/obj/discord.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 /nodefaultlib /entry:discord_entry /include:discord_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-discord.exe" "$out/obj/discord.obj" "$MINGW_SYSROOT"/lib/libkernel32.a
 # Steam leaderboards (steam_leaderboards.h). The provider stand-in is our own
 # code reproducing gbe_fork's one relevant behaviour: it reads a board's file on
 # the first Find and answers downloads from it. The guest statically imports
@@ -157,9 +175,9 @@ EXPORTS
 DEF
 llvm-dlltool-19 -m i386:x86-64 -d "$out/obj/steam-api.def" -l "$out/obj/steam-api.lib"
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -c tests/play-leaderboard-provider.cpp -o "$out/obj/leaderboard-provider.obj"
-lld-link-19 /nodefaultlib /include:provider_relocation /dll /entry:DllMain /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-leaderboard-provider.dll" /implib:"$out/obj/provider.lib" "$out/obj/leaderboard-provider.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 /nodefaultlib /include:provider_relocation /dll /entry:DllMain /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-leaderboard-provider.dll" /implib:"$out/obj/provider.lib" "$out/obj/leaderboard-provider.obj" "$MINGW_SYSROOT"/lib/libkernel32.a
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -c tests/play-leaderboard.cpp -o "$out/obj/leaderboard.obj"
-lld-link-19 /nodefaultlib /entry:lb_entry /include:lb_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-leaderboard.exe" "$out/obj/leaderboard.obj" "$out/obj/steam-api.lib" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 /nodefaultlib /entry:lb_entry /include:lb_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-leaderboard.exe" "$out/obj/leaderboard.obj" "$out/obj/steam-api.lib" "$MINGW_SYSROOT"/lib/libkernel32.a
 # A static import from a DLL whose own mapping fails must stay unresolved: the
 # failed image is never published to resolve the importer (never executed).
 # baselib.dll is a game-DLL (uwph-routed) name, the route Megabonk exercised.
@@ -181,7 +199,7 @@ EXPORTS
  dependency_check @1
  RejectedForward=play-dependency.dependency_check @2
 DEF
-lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /def:"$out/obj/reject.def" /out:"$out/play-reject.dll" "$out/obj/reject.obj" /usr/x86_64-w64-mingw32/lib/libkernel32.a
+lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /def:"$out/obj/reject.def" /out:"$out/play-reject.dll" "$out/obj/reject.obj" "$MINGW_SYSROOT"/lib/libkernel32.a
 cp "$out/play-dependency.dll" "$out/play-dynamic.dll"
 cp "$out/play-dependency.dll" "$out/play-detach-target.dll"
 cp "$out/play-dependency.dll" "$out/play-forward-target.dll"
@@ -195,6 +213,13 @@ for role in dependency consumer;do
 done
 lld-link-19 /nodefaultlib /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /dll /entry:search_entry /out:"$out/loader-search/search-dependency.dll" /implib:"$out/obj/search-dependency.lib" "$out/obj/search-dependency.obj"
 lld-link-19 /nodefaultlib /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /dll /entry:search_entry /out:"$out/loader-search/search-consumer.dll" "$out/obj/search-consumer.obj" "$out/obj/search-dependency.lib"
+# A root copy that answers 55 (the EmbedRuntime copy answers 77): the sub-path
+# load's dependency must come from the loading module's directory, so the test
+# fails if the loader resolved it from there. Built beside the loader-search
+# fixtures; the test copies it into the root only for the sub-path case, since
+# the plain search case legitimately picks the application-directory copy.
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -DSEARCH_ROOT_COPY -c ../uwph/kernel32/guest_loader_search_dependency.cpp -o "$out/obj/search-dependency-root.obj"
+lld-link-19 /nodefaultlib /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /dll /entry:search_entry /out:"$out/loader-search/search-dependency-root.dll" "$out/obj/search-dependency-root.obj"
 
 cp "$out/play-dependency.dll" "$out/play-pending-target.dll"
 cp "$out/play-reject.dll" "$out/play-pending-reject.dll"
@@ -245,13 +270,13 @@ cp "$out/play-leaderboard-provider.dll" "$lb/steam_api64.dll"
 cp "$out/play-leaderboard-provider.dll" "$out/steam_api64.dll"
 PLAY_LB_SAVE_PATH=$(winepath -w "$lb/saves") PLAY_LB_APPID=3405340 \
 PRUN_STEAM_PROVIDER=$(winepath -w "$lb/steam_api64.dll") PRUN_LB_SAVES=$(winepath -w "$lb/saves") PRUN_LB_APPID=3405340 \
- WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" leaderboards > "$out/leaderboards.log" 2>&1
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" leaderboards > "$out/leaderboards.log" 2>&1
 tail -1 "$out/leaderboards.log"
 # The root copy was only for this run: later modes prove what happens when a
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
 for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d10-compile d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn vulkan-draw opengl;do
- WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
 # Every vcruntime import took the ucrtbase route; none was left unresolved.
@@ -317,7 +342,7 @@ rm -f "$out/runtime-null/vulkan_dzn.dll" "$out/runtime-null/vulkan-dzn.json"
 # entry would shadow this run's manifest and the loader would report no driver. Play prunes its own manifests that
 # point anywhere but the current runtime directory, which is what makes this second run work.
 PRUN_RUNTIME_DIR=$(winepath -w "$out/runtime-null") WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d \
- timeout -k 2 20 wine "$out/play-runner.exe" vulkan > "$out/vulkan-null-runtime.log" 2>&1
+ timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" vulkan > "$out/vulkan-null-runtime.log" 2>&1
 tail -1 "$out/vulkan-null-runtime.log"
 grep -q 'PRUN EVENT Vulkan loader mapped from the runtime directory; the guest registry lists the packaged null ICD' "$out/vulkan-null-runtime.log"
 grep -q 'PRUN EVENT mapping vulkan-null-icd.dll' "$out/vulkan-null-runtime.log"
@@ -497,7 +522,7 @@ grep -q 'RWX emulation: guest requested RWX' "$out/rwx-jit.log"
 # Guest registry (PlayerPrefs) persists in the uwph SQLite registry across runs.
 rm -f "$out"/registry.sqlite*
 for mode in registry-write registry-read;do
- WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
 test -s "$out/registry.sqlite"
@@ -517,7 +542,7 @@ for flags in 0x100 0x500;do
  grep -Eq 'VolatileMetadataPointer: 0x[0-9A-F]*[1-9A-F]' <<<"$config"
  log=$out/native-cxx-instrumented-$flags.log
  status=0
- WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" native-cxx > "$log" 2>&1 || status=$?
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" native-cxx > "$log" 2>&1 || status=$?
  tail -1 "$log"
  if [[ $flags == 0x100 ]];then
   [[ $status == 0 ]] && grep -q 'WXL Play MSVC load config GuardFlags=0x100 volatileMetadata=present' "$log"
@@ -528,14 +553,14 @@ done
 cp "$out/obj/play-cxx-cookie.dll" "$cxx"
 # Owned stand-in under a game-DLL name, present only for this run.
 cp "$out/play-unresolved.dll" "$out/baselib.dll"
-WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" failed-dependency > "$out/failed-dependency.log" 2>&1
+WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" failed-dependency > "$out/failed-dependency.log" 2>&1
 tail -1 "$out/failed-dependency.log"
 grep -q "PLAY-RELEASE released=1 restarted=1 ran=1 retained=1" "$out/failed-dependency.log"
 for mode in crt-exit crt-abort;do
- WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
-WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" top-level > "$out/top-level.log" 2>&1
+WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" top-level > "$out/top-level.log" 2>&1
 grep -q "PLAY-TOP-LEVEL survived=1 exit=1" "$out/top-level.log"
 rm -f "$out/baselib.dll"
 # Steam without a genuine client. A steamclient64.dll in the game root must be
@@ -543,7 +568,7 @@ rm -f "$out/baselib.dll"
 # an ordinary game DLL. Owned stand-ins only, removed afterwards.
 rm -f "$out/steamclient64.dll" "$out/steam_api64.dll"
 cp "$out/play-dependency.dll" "$out/steam_api64.dll"
-WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 20 wine "$out/play-runner.exe" root-steam > "$out/root-steam.log" 2>&1
+WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" root-steam > "$out/root-steam.log" 2>&1
 tail -1 "$out/root-steam.log"
 grep -q "steam_api64.dll is the game's original file, mapped unmodified" "$out/root-steam.log"
 # A configured Steam API provider serves steam_api64.dll for the owned game. The
@@ -551,7 +576,7 @@ grep -q "steam_api64.dll is the game's original file, mapped unmodified" "$out/r
 cp "$out/play-reject.dll" "$out/steam_api64.dll"
 mkdir -p "$out/provider"; cp "$out/play-dependency.dll" "$out/provider/steam_api64.dll"
 PRUN_STEAM_PROVIDER=$(winepath -w "$out/provider/steam_api64.dll") WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d \
- timeout -k 2 20 wine "$out/play-runner.exe" root-steam-provider > "$out/root-steam-provider.log" 2>&1
+ timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" root-steam-provider > "$out/root-steam-provider.log" 2>&1
 tail -1 "$out/root-steam-provider.log"
 grep -q "steam_api64.dll served by the configured Steam API provider" "$out/root-steam-provider.log"
 rm -rf "$out/steam_api64.dll" "$out/provider"

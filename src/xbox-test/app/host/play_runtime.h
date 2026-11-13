@@ -28,6 +28,11 @@ constexpr DWORD missingException=0xe0520001, exitException=0xe0520002;
 struct Module {
     std::wstring path;
     std::string key;
+    // Directory dependencies resolve from when this module was mapped with
+    // LOAD_WITH_ALTERED_SEARCH_PATH or LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR from
+    // a sub-path (Unity's MonoBleedingEdge/EmbedRuntime). Empty: the standard
+    // guest order (root, SetDllDirectory, runtime directory).
+    std::wstring loadDir;
     wxl::Image image;
     bool mapped=false, mappingFailed=false, prepared=false, initialized=false, initializing=false, initializationFailed=false;
     size_t references=0;
@@ -267,6 +272,12 @@ static bool seed_steam_client_registry(const std::wstring& client,DWORD accountI
     regb::RegCloseKey(key);
     return ok;
 }
+// Windows keeps a per-thread "loading module" notion for
+// LOAD_WITH_ALTERED_SEARCH_PATH: dependencies of the file being mapped
+// resolve from that file's directory first (the loader's LdrpSearchPath
+// is the loading module's directory). loadExW records the directory for
+// the graph being mapped; resolve() reads it. Guarded by loaderMutex.
+static std::wstring& alteredLoadDir() {static std::wstring dir;return dir;}
 static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     if(!name || file) {SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}
     constexpr DWORD knownFlags= DONT_RESOLVE_DLL_REFERENCES|LOAD_LIBRARY_AS_DATAFILE|
@@ -307,8 +318,27 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
         requested=steamClient;flags=0;
         state->event("steamclient64.dll served by the staged emulated Steam client (owned game)");
     }
+    // Windows keeps a per-thread "loading module" notion for
+    // LOAD_WITH_ALTERED_SEARCH_PATH: dependencies of the file being mapped
+    // resolve from that file's directory first (the loader's
+    // LdrpSearchPath is the loading module's directory). Record it so
+    // resolve() can honor the same order for the graph being mapped.
+    // Guarded by loaderMutex; loadExW holds it across mapping.
     Module* m=nullptr;
     {std::lock_guard<LoaderMutex> lock(state->loaderMutex);
+     // While this load maps, its dependencies resolve from the file's own
+     // directory first when the flags say to (LOAD_WITH_ALTERED_SEARCH_PATH
+     // keeps LdrpSearchPath at the loading module's directory on Windows).
+     struct AlteredScope {std::wstring& slot;std::wstring outer;
+         AlteredScope(std::wstring& s,std::wstring v):slot(s),outer(std::move(s)){slot=std::move(v);}
+         ~AlteredScope(){slot=std::move(outer);}} altered{alteredLoadDir(),
+         (flags&LOAD_WITH_ALTERED_SEARCH_PATH)&&requested.find_first_of(L"\\/")!=std::wstring::npos
+             ?[&]{ // The image maps through guestLibraryPath (absolute); the
+                   // dependency directory must be that same absolute directory,
+                   // not the relative prefix the guest passed.
+                 auto p=guestLibraryPath(requested,false);
+                 auto slash=p.find_last_of(L"\\/");
+                 return slash==std::wstring::npos?std::wstring():p.substr(0,slash);}():std::wstring()};
      m=named(requested);
      if(!m && !apiSetName(requested) && !systemDirectoryPath(requested)) {
          // Flags that only steer where the file is searched (Mono/Unity pass
@@ -1090,6 +1120,10 @@ static Module* map(const std::wstring& requested,const std::string& asKey,wxl::R
     publishVulkanDriverFiles(path);
     if(state->modules.size()>=128) {state->event("loader module capacity exceeded");return nullptr;}
     auto own=std::make_unique<Module>();auto m=own.get();m->path=path;m->key=asKey.empty()?basename(path):asKey;state->modules.push_back(std::move(own));state->moduleCount=int(state->modules.size());
+    // Windows resolves a sub-path load's dependencies from the loading
+    // module's own directory first (LOAD_WITH_ALTERED_SEARCH_PATH /
+    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: Unity's MonoBleedingEdge/EmbedRuntime).
+    m->loadDir=alteredLoadDir();
     // Publish before fixing imports; circular imports can use the copied export
     // table, but no initialization runs until the complete graph is mapped.
     mlp::assets[m->key]=&m->image;
@@ -1692,6 +1726,79 @@ static HRESULT WINAPI createD3D12Device(IUnknown* adapter,D3D_FEATURE_LEVEL mini
     }
     return hr;
 }
+// D3D12GetInterface is how Mesa's d3d12 driver (the OpenGL stack, issue #176)
+// reaches the device: it loads d3d12.dll by name and asks it for
+// CLSID_D3D12SDKConfiguration, then CLSID_D3D12DeviceFactory, whose
+// CreateDevice makes the device. D3D12CreateDevice is never called on that
+// path, so the diagnostics and the CoreWindow factory adoption in
+// createD3D12Device would never run. Patching the factory's CreateDevice slot
+// (vtable slot 9: IUnknown 0-2 plus the six ID3D12DeviceFactory methods before
+// it) gives devices created through it the same treatment. The original entry
+// is called unchanged; only the returned device is adopted.
+static void* d3d12DeviceFactoryOriginalCreateDevice=nullptr;
+static HRESULT STDMETHODCALLTYPE d3d12DeviceFactoryCreateDevice(IUnknown* self,IUnknown* adapter,D3D_FEATURE_LEVEL featureLevel,REFIID id,void** device) {
+    using Fn=HRESULT(STDMETHODCALLTYPE*)(IUnknown*,IUnknown*,D3D_FEATURE_LEVEL,REFIID,void**);
+    auto fn=(Fn)d3d12DeviceFactoryOriginalCreateDevice;
+    if(!fn)return E_NOINTERFACE;
+    HRESULT hr=fn(self,adapter,featureLevel,id,device);
+    {char b[200];snprintf(b,sizeof b,"guest D3D12DeviceFactory CreateDevice fl=0x%x adapter=%d iid=%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x hr=0x%08lx device=%p",
+        unsigned(featureLevel),adapter!=nullptr,unsigned(id.Data1),unsigned(id.Data2),unsigned(id.Data3),
+        id.Data4[0],id.Data4[1],id.Data4[2],id.Data4[3],id.Data4[4],id.Data4[5],id.Data4[6],id.Data4[7],
+        (unsigned long)hr,SUCCEEDED(hr)&&device?*device:nullptr);state->event(b);}
+    if(SUCCEEDED(hr)&&device&&*device) {
+        // Failed D3D12 calls are logged through the probe sink (not as the
+        // run's "last event"), once per distinct call — same as the hooked
+        // D3D12CreateDevice path.
+        d3d12_diag::configure([](const char* text){if(state&&state->log)state->log((std::string("PRUN D3D12 ")+text).c_str());});
+        ID3D12Device* d3d=nullptr;
+        if(SUCCEEDED(static_cast<IUnknown*>(*device)->QueryInterface(__uuidof(ID3D12Device),(void**)&d3d))&&d3d) {
+            d3d12_diag::adopt(d3d);
+            // The DXGI factory the guest reaches through the device must route
+            // guest windows to the CoreWindow, exactly as it does for D3D11.
+            play_graphics::adopt_factory_of(d3d);
+            d3d->Release();
+        }
+        state->milestone=2;
+    }
+    return hr;
+}
+static HRESULT WINAPI d3d12GetInterfaceHook(REFCLSID clsid,REFIID id,void** out) {
+    using Fn=HRESULT(WINAPI*)(REFCLSID,REFIID,void**);
+    auto fn=(Fn)mlp::resolve("d3d12.dll","D3D12GetInterface",0);
+    // An older d3d12.dll without the export (Wine's) is a normal fallback, not
+    // a missing import: Mesa then calls the hooked D3D12CreateDevice directly,
+    // which reaches the same diagnostics. Never reject the guest for it.
+    if(!fn) {
+        if(state->log&&mlp::first_report("d3d12 get interface absent"))
+            state->log("PRUN EVENT guest D3D12GetInterface absent on this d3d12.dll; guest falls back to D3D12CreateDevice");
+        return E_NOINTERFACE;
+    }
+    HRESULT hr=fn(clsid,id,out);
+    {char b[240];snprintf(b,sizeof b,"guest D3D12GetInterface clsid=%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x iid=%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x hr=0x%08lx out=%p",
+        unsigned(clsid.Data1),unsigned(clsid.Data2),unsigned(clsid.Data3),
+        clsid.Data4[0],clsid.Data4[1],clsid.Data4[2],clsid.Data4[3],clsid.Data4[4],clsid.Data4[5],clsid.Data4[6],clsid.Data4[7],
+        unsigned(id.Data1),unsigned(id.Data2),unsigned(id.Data3),
+        id.Data4[0],id.Data4[1],id.Data4[2],id.Data4[3],id.Data4[4],id.Data4[5],id.Data4[6],id.Data4[7],
+        (unsigned long)hr,out&&SUCCEEDED(hr)?*out:nullptr);state->event(b);}
+    // Only the device factory is patched: its CreateDevice is the call that
+    // makes Mesa's device. The SDK configuration object's CreateDeviceFactory
+    // needs a DLL-parallel D3D12Core.dll the console lacks, so Mesa always
+    // falls through to CLSID_D3D12DeviceFactory here.
+    static const IID deviceFactory={0x61f307d3,0xd34e,0x4e7c,{0x83,0x74,0x3b,0xa4,0xde,0x23,0xcc,0xcb}};
+    if(SUCCEEDED(hr)&&out&&*out&&id==deviceFactory) {
+        void** vtable=*reinterpret_cast<void***>(*out);
+        if(vtable[9]!=(void*)&d3d12DeviceFactoryCreateDevice) {
+            DWORD old=0;
+            if(VirtualProtect(vtable+9,sizeof(void*),PAGE_READWRITE,&old)) {
+                d3d12DeviceFactoryOriginalCreateDevice=vtable[9];
+                vtable[9]=(void*)&d3d12DeviceFactoryCreateDevice;
+                VirtualProtect(vtable+9,sizeof(void*),old,&old);
+                if(state->log)state->log("PRUN EVENT guest D3D12GetInterface device factory CreateDevice patched for diagnostics");
+            }
+        }
+    }
+    return hr;
+}
 // D3D12GetDebugInterface and the root-signature helpers are the other d3d12.dll
 // exports a guest imports. The debug layer's absence is reported by the
 // console/Wine as DXGI_ERROR_SDK_COMPONENT_MISSING; a guest that treats that as
@@ -1801,6 +1908,7 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
         if(!strcmp(name,"D3D12SerializeRootSignature")) return (uintptr_t)&d3d12SerializeRootSignature;
         if(!strcmp(name,"D3D12CreateRootSignatureDeserializer")) return (uintptr_t)&d3d12CreateRootSignatureDeserializer;
         if(!strcmp(name,"D3D12EnableExperimentalFeatures")) return (uintptr_t)&d3d12EnableExperimentalFeatures;
+        if(!strcmp(name,"D3D12GetInterface")) return (uintptr_t)&d3d12GetInterfaceHook;
     }
     // Same client gate as LoadLibrary, for static and forwarded imports. Never
     // a callable Steam placeholder: the import stays unresolved, as on Windows
@@ -1821,8 +1929,18 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // Windows; neither it nor the probe registry may supply an address.
     if(dependency && dependency->mappingFailed) return missing(dll,name,ordinal);
     if(!dependency && !apiSetName(wide(dll))) {
-        auto path=guestLibraryPath(wide(dll));
-        if(exists(path)) {dependency=map(path);if(!dependency)return missing(dll,name,ordinal);}
+        // A module being mapped under LOAD_WITH_ALTERED_SEARCH_PATH resolves
+        // its dependencies from its own directory first, as Windows does for
+        // Unity's MonoBleedingEdge/EmbedRuntime/mono-2.0-bdwgc.dll: the
+        // EmbedRuntime copy wins over any same-named file at the root.
+        if(owner && !owner->loadDir.empty()) {
+            auto candidate=owner->loadDir+L"\\"+wide(dll);
+            if(exists(candidate)) {dependency=map(candidate);if(!dependency)return missing(dll,name,ordinal);}
+        }
+        if(!dependency) {
+            auto path=guestLibraryPath(wide(dll));
+            if(exists(path)) {dependency=map(path);if(!dependency)return missing(dll,name,ordinal);}
+        }
     }
     if(dependency) {
         if(owner && owner!=dependency) owner->dependencies.push_back(dependency);

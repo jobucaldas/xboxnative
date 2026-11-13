@@ -385,7 +385,9 @@ int opengl_entry() {
             return sh;
         };
         uint32_t vs = compileStage(GL_VERTEX_SHADER, vsSrc, "vertex");
+        emit("PLAY-OPENGL STAGE core-vs-created\n");
         uint32_t fs = vs ? compileStage(GL_FRAGMENT_SHADER, fsSrc, "fragment") : 0;
+        emit("PLAY-OPENGL STAGE core-fs-created\n");
         uint32_t prog = 0;
         int linked = 0;
         if (vs && fs) {
@@ -393,6 +395,7 @@ int opengl_entry() {
             glAttachShader(prog, vs); glAttachShader(prog, fs);
             glLinkProgram(prog);
             glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+            emit("PLAY-OPENGL STAGE core-link-called\n");
             if (!linked) {
                 char log[256] = {0}; glGetProgramInfoLog(prog, 255, nullptr, log);
                 char line[320]; char* p = append(line, "PLAY-OPENGL BLOCKED program-link: ");
@@ -418,6 +421,7 @@ int opengl_entry() {
             glVertexAttribPointer(0, 2, GL_FLOAT, 0, 2 * sizeof(float), nullptr);
             glEnableVertexAttribArray(0);
             glUseProgram(prog);
+            emit("PLAY-OPENGL STAGE core-useprogram\n");
             int tintLoc = glGetUniformLocation(prog, "tint");
             if (tintLoc < 0) {
                 emit("PLAY-OPENGL BLOCKED uniform-location tint\n");
@@ -428,7 +432,9 @@ int opengl_entry() {
             glViewport(0, 0, 320, 240);
             glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
+            emit("PLAY-OPENGL STAGE core-clear-done\n");
             glDrawArrays(GL_TRIANGLES, 0, 3);
+            emit("PLAY-OPENGL STAGE core-draw-issued\n");
             glFinish();
             unsigned char tri[4] = {0, 0, 0, 0};
             glReadPixels(160, 120, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, tri);

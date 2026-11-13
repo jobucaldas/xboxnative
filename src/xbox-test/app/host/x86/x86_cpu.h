@@ -10,6 +10,7 @@
 // page before fetching, runs the host handler against the guest stack, then
 // performs the callee-side return.
 #pragma once
+#include <deque>
 #include <functional>
 #include <map>
 #include <string>
@@ -27,7 +28,11 @@ struct Thunk {
 struct ThunkTable {
     uint32_t base = 0x7FFE0000, stride = 16;
     uint32_t capacity = 0;  // stubs the mapped page can hold (0 = not mapped yet)
-    std::vector<Thunk> entries;
+    // deque, not vector: a handler that adds thunks while executing (COM proxy
+    // creation inside a guest callback, GetProcAddress) must never invalidate
+    // the storage of the Thunk it is running from — deque never moves existing
+    // elements on push_back, so references stay valid across any add.
+    std::deque<Thunk> entries;
     uint32_t add(Thunk t) {
         if (capacity && entries.size() >= capacity) throw std::runtime_error("x86 thunk page full");
         entries.push_back(std::move(t));
@@ -36,8 +41,16 @@ struct ThunkTable {
     // The process-return sentinel is the last slot of the mapped page and never
     // moves: GetProcAddress can add stubs while a host->guest call is running,
     // and a sentinel derived from entries.size() would then land on the address
-    // that call is waiting to return to.
-    uint32_t sentinel() const { return capacity ? base + (capacity - 1) * stride : base + uint32_t(entries.size()) * stride; }
+    // that call is waiting to return to. With a capacity (set by map_thunk_page)
+    // the sentinel is the slot AFTER the last usable stub slot: capacity is the
+    // number of stubs the page can hold, so base + capacity*stride is the page's
+    // final slot and no stub address can ever equal it.
+    uint32_t sentinel() const { return capacity ? base + capacity * stride : base + uint32_t(entries.size()) * stride; }
+    // Roll back stubs added past n: a multi-stub build that dies halfway must
+    // leave no debris in the table (capacity is fixed, so leaked slots would
+    // shrink it for every later build). Only safe to shrink the tail — the
+    // caller rolls back its own failed build, which owns the last slots.
+    void truncate(size_t n) { entries.resize(n); }
     uint32_t span() const { return uint32_t(entries.size() + 1) * stride; }
     const Thunk* at(uint32_t eip) const {
         if (eip < base || eip >= base + uint32_t(entries.size()) * stride || (eip - base) % stride) return nullptr;
@@ -1174,10 +1187,18 @@ struct Cpu {
     void host_call(const Thunk& t) {
         mem.fault_eip = eip;
         uint32_t ret = mem.r32(reg[ESP]);
-        uint32_t r = t.fn(*this);
+        // Copy the callable out before invoking: the handler may add thunks to
+        // the table (a COM proxy created inside a guest callback builds its
+        // vtable right here). deque keeps the Thunk's address stable, but a
+        // copied std::function costs nothing and makes the invariant explicit
+        // — the running handler can never execute on storage that a nested
+        // add() could touch.
+        std::function<uint32_t(Cpu&)> fn = t.fn;
+        Conv conv = t.conv; unsigned argc = t.argc;
+        uint32_t r = fn(*this);
         if (exited) return;
         reg[EAX] = r;
-        reg[ESP] += 4 + (t.conv == Conv::Stdcall ? 4 * t.argc : 0); eip = ret;
+        reg[ESP] += 4 + (conv == Conv::Stdcall ? 4 * argc : 0); eip = ret;
     }
 };
 }
