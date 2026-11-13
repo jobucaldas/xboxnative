@@ -49,6 +49,7 @@ for mode in normal missing disabled;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 90 wine "$out/runner.exe" "$mode" | tr -d '\r' | tee "$out/$mode.log"
  grep -Fx 'DONOR-RUNTIME PASS: behavior gate, cross-thread publication, retained addresses; no game code' "$out/$mode.log"
  grep -Fx 'DONOR-DELAY PASS: shcore delay-loaded user32 DPI internals resolve to the record core' "$out/$mode.log"
+ grep -Fx 'DONOR-BRIDGE PASS: loadExW(d3dcompiler_47) returns the probed donor image; proc(D3DCompile) compiles a real DXBC' "$out/$mode.log"
  grep -Fx 'DWPE RUN dinput8.dll initialized=1 missing=0 behavior=1' "$out/$mode.log"
  grep -Fx 'DONOR-COM PASS: CoCreateInstance(CLSID_DirectInput8) served by the dinput8 donor; keyboard device created' "$out/$mode.log"
  if [[ $mode == normal ]];then
