@@ -495,10 +495,21 @@ static HRESULT STDMETHODCALLTYPE createSrv(DevicePtr self,ID3D12Resource* r,cons
         if(!v){text="view=default";key="default";return;}
         text=fmt("viewfmt=%s dim=%d",formatText(v->Format).c_str(),int(v->ViewDimension));key=fmt("%d/%d",int(v->Format),int(v->ViewDimension));});
 }
-static HRESULT STDMETHODCALLTYPE createUav(DevicePtr self,ID3D12Resource* r,const D3D12_UNORDERED_ACCESS_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    return viewCall<CreateUnorderedAccessView>(self,"CreateUnorderedAccessView",r,d,h,[](const D3D12_UNORDERED_ACCESS_VIEW_DESC* v,std::string& text,std::string& key){
-        if(!v){text="view=default";key="default";return;}
-        text=fmt("viewfmt=%s dim=%d",formatText(v->Format).c_str(),int(v->ViewDimension));key=fmt("%d/%d",int(v->Format),int(v->ViewDimension));});
+// CreateUnorderedAccessView(pResource, pCounterResource, pDesc, DestDescriptor):
+// the counter resource sits before the description, so this cannot share
+// viewCall's (resource, desc, handle) shape. Before this fix the wrapper dropped
+// the counter and passed the description where the handle belongs.
+static HRESULT STDMETHODCALLTYPE createUav(DevicePtr self,ID3D12Resource* r,ID3D12Resource* counter,const D3D12_UNORDERED_ACCESS_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,ID3D12Resource*,const D3D12_UNORDERED_ACCESS_VIEW_DESC*,D3D12_CPU_DESCRIPTOR_HANDLE);
+    D3D12_DIAG_HOOK(Fn,CreateUnorderedAccessView)HRESULT hr=call(self,r,counter,d,h);
+    if(FAILED(hr)) {
+        std::string text,key;
+        if(!d){text="view=default";key="default";}
+        else {text=fmt("viewfmt=%s dim=%d",formatText(d->Format).c_str(),int(d->ViewDimension));key=fmt("%d/%d",int(d->Format),int(d->ViewDimension));}
+        D3D12_DIAG_FAILED("CreateUnorderedAccessView",key+fmt("/%llx",(unsigned long long)h.ptr),
+            text+fmt(" handle=0x%llx res=%d counter=%d",(unsigned long long)h.ptr,r!=nullptr,counter!=nullptr));
+    }
+    return hr;
 }
 static HRESULT STDMETHODCALLTYPE createRtv(DevicePtr self,ID3D12Resource* r,const D3D12_RENDER_TARGET_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
     return viewCall<CreateRenderTargetView>(self,"CreateRenderTargetView",r,d,h,[](const D3D12_RENDER_TARGET_VIEW_DESC* v,std::string& text,std::string& key){
@@ -645,12 +656,14 @@ static HRESULT STDMETHODCALLTYPE listCopyBufferRegion(DevicePtr self,ID3D12Resou
         fmt("dst=%d@%llu src=%d@%llu bytes=%llu",dst!=nullptr,(unsigned long long)dstOffset,src!=nullptr,(unsigned long long)srcOffset,(unsigned long long)bytes));
     return hr;
 }
-static HRESULT STDMETHODCALLTYPE listCopyTextureRegion(DevicePtr self,const D3D12_TEXTURE_COPY_LOCATION* dst,UINT dstSub,
+// CopyTextureRegion(pDst, DstX, DstY, DstZ, pSrc, pSrcBox): the destination
+// position is three UINTs. The wrapper took one (a subresource index) before.
+static HRESULT STDMETHODCALLTYPE listCopyTextureRegion(DevicePtr self,const D3D12_TEXTURE_COPY_LOCATION* dst,UINT dstX,UINT dstY,UINT dstZ,
         const D3D12_TEXTURE_COPY_LOCATION* src,const D3D12_BOX* box) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_TEXTURE_COPY_LOCATION*,UINT,const D3D12_TEXTURE_COPY_LOCATION*,const D3D12_BOX*);
-    D3D12_DIAG_HOOK(Fn,ListCopyTextureRegion)HRESULT hr=call(self,dst,dstSub,src,box);
-    D3D12_DIAG_FAILED("CopyTextureRegion",fmt("%d/%d/%u",dst!=nullptr,src!=nullptr,dstSub),
-        fmt("dst=%d sub=%u src=%d box=%d",dst!=nullptr,dstSub,src!=nullptr,box!=nullptr));
+    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_TEXTURE_COPY_LOCATION*,UINT,UINT,UINT,const D3D12_TEXTURE_COPY_LOCATION*,const D3D12_BOX*);
+    D3D12_DIAG_HOOK(Fn,ListCopyTextureRegion)HRESULT hr=call(self,dst,dstX,dstY,dstZ,src,box);
+    D3D12_DIAG_FAILED("CopyTextureRegion",fmt("%d/%d/%u,%u,%u",dst!=nullptr,src!=nullptr,dstX,dstY,dstZ),
+        fmt("dst=%d at=%u,%u,%u src=%d box=%d",dst!=nullptr,dstX,dstY,dstZ,src!=nullptr,box!=nullptr));
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE listResolveSubresource(DevicePtr self,ID3D12Resource* dst,UINT dstSub,ID3D12Resource* src,UINT srcSub,DXGI_FORMAT format) {
@@ -713,6 +726,66 @@ static HRESULT STDMETHODCALLTYPE allocatorReset(DevicePtr self) {
 }
 
 // ---- the hooks each interface level gets
+// ---- each hook's arguments are checked against the method in d3d12.h ----
+// A hook takes (self, the method's arguments in order). Argument order, count and
+// type are compared as types, so a wrapper that drops or swaps an argument is a
+// compile error. The return type is not checked here.
+template<class M> struct MethodArgs;
+template<class C,class R,class...A> struct MethodArgs<R(C::*)(A...)> { using type=std::tuple<A...>; };
+template<class F> struct HookArgs;
+template<class R,class...A> struct HookArgs<R(*)(A...)> { using type=std::tuple<A...>; };
+template<class T> struct DropSelf;
+template<class H,class...T> struct DropSelf<std::tuple<H,T...>> { using type=std::tuple<T...>; using self=H; };
+#define DIAG_PIN_ARGS(Iface,Method,Hook) static_assert(\
+    std::is_same<typename DropSelf<typename HookArgs<decltype(&Hook)>::type>::type,typename MethodArgs<decltype(&Iface::Method)>::type>::value&&\
+    std::is_same<typename DropSelf<typename HookArgs<decltype(&Hook)>::type>::self,void*>::value,\
+    #Hook " must take the arguments of " #Iface "::" #Method " in d3d12.h")
+DIAG_PIN_ARGS(ID3D12Device,CreateCommandQueue,createCommandQueue);
+DIAG_PIN_ARGS(ID3D12Device,CreateCommandAllocator,createCommandAllocator);
+DIAG_PIN_ARGS(ID3D12Device,CreateCommandList,createCommandList);
+DIAG_PIN_ARGS(ID3D12Device,CreateGraphicsPipelineState,createGraphicsPipelineState);
+DIAG_PIN_ARGS(ID3D12Device,CreateComputePipelineState,createComputePipelineState);
+DIAG_PIN_ARGS(ID3D12Device,CheckFeatureSupport,checkFeatureSupport);
+DIAG_PIN_ARGS(ID3D12Device,CreateDescriptorHeap,createDescriptorHeap);
+DIAG_PIN_ARGS(ID3D12Device,CreateRootSignature,createRootSignature);
+DIAG_PIN_ARGS(ID3D12Device,CreateConstantBufferView,createCbv);
+DIAG_PIN_ARGS(ID3D12Device,CreateShaderResourceView,createSrv);
+DIAG_PIN_ARGS(ID3D12Device,CreateUnorderedAccessView,createUav);
+DIAG_PIN_ARGS(ID3D12Device,CreateRenderTargetView,createRtv);
+DIAG_PIN_ARGS(ID3D12Device,CreateDepthStencilView,createDsv);
+DIAG_PIN_ARGS(ID3D12Device,CreateSampler,createSampler);
+DIAG_PIN_ARGS(ID3D12Device,CreateCommittedResource,createCommittedResource);
+DIAG_PIN_ARGS(ID3D12Device,CreateHeap,createHeap);
+DIAG_PIN_ARGS(ID3D12Device,CreatePlacedResource,createPlacedResource);
+DIAG_PIN_ARGS(ID3D12Device,CreateReservedResource,createReservedResource);
+DIAG_PIN_ARGS(ID3D12Device,CreateFence,createFence);
+DIAG_PIN_ARGS(ID3D12Device,CreateQueryHeap,createQueryHeap);
+DIAG_PIN_ARGS(ID3D12Device,CreateCommandSignature,createCommandSignature);
+DIAG_PIN_ARGS(ID3D12Device2,CreatePipelineState,createPipelineStateStream);
+DIAG_PIN_ARGS(ID3D12CommandQueue,ExecuteCommandLists,queueExecuteCommandLists);
+DIAG_PIN_ARGS(ID3D12CommandQueue,Signal,queueSignal);
+DIAG_PIN_ARGS(ID3D12CommandQueue,Wait,queueWait);
+DIAG_PIN_ARGS(ID3D12GraphicsCommandList,Close,listClose);
+DIAG_PIN_ARGS(ID3D12GraphicsCommandList,Reset,listReset);
+DIAG_PIN_ARGS(ID3D12GraphicsCommandList,SetPipelineState,listSetPipelineState);
+DIAG_PIN_ARGS(ID3D12GraphicsCommandList,ResourceBarrier,listResourceBarrier);
+DIAG_PIN_ARGS(ID3D12GraphicsCommandList,SetDescriptorHeaps,listSetDescriptorHeaps);
+DIAG_PIN_ARGS(ID3D12GraphicsCommandList,DrawInstanced,listDrawInstanced);
+DIAG_PIN_ARGS(ID3D12GraphicsCommandList,DrawIndexedInstanced,listDrawIndexedInstanced);
+DIAG_PIN_ARGS(ID3D12GraphicsCommandList,Dispatch,listDispatch);
+DIAG_PIN_ARGS(ID3D12GraphicsCommandList,CopyResource,listCopyResource);
+DIAG_PIN_ARGS(ID3D12GraphicsCommandList,CopyBufferRegion,listCopyBufferRegion);
+DIAG_PIN_ARGS(ID3D12GraphicsCommandList,CopyTextureRegion,listCopyTextureRegion);
+DIAG_PIN_ARGS(ID3D12GraphicsCommandList,ResolveSubresource,listResolveSubresource);
+DIAG_PIN_ARGS(ID3D12GraphicsCommandList,OMSetRenderTargets,listOMSetRenderTargets);
+DIAG_PIN_ARGS(ID3D12GraphicsCommandList,ClearRenderTargetView,listClearRenderTargetView);
+DIAG_PIN_ARGS(ID3D12GraphicsCommandList,ClearDepthStencilView,listClearDepthStencilView);
+DIAG_PIN_ARGS(ID3D12GraphicsCommandList,ExecuteIndirect,listExecuteIndirect);
+DIAG_PIN_ARGS(ID3D12Fence,SetEventOnCompletion,fenceSetEventOnCompletion);
+DIAG_PIN_ARGS(ID3D12Fence,Signal,fenceSignal);
+DIAG_PIN_ARGS(ID3D12CommandAllocator,Reset,allocatorReset);
+DIAG_PIN_ARGS(ID3D12Resource,Map,resourceMap);
+
 inline const Patch* devicePatches(size_t& count){
     static const Patch table[]={
         {CreateCommandQueue,(void*)&createCommandQueue},{CreateCommandAllocator,(void*)&createCommandAllocator},
