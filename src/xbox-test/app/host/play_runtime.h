@@ -320,7 +320,12 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
          AlteredScope(std::wstring& s,std::wstring v):slot(s),outer(std::move(s)){slot=std::move(v);}
          ~AlteredScope(){slot=std::move(outer);}} altered{alteredLoadDir(),
          (flags&LOAD_WITH_ALTERED_SEARCH_PATH)&&requested.find_first_of(L"\\/")!=std::wstring::npos
-             ?requested.substr(0,requested.find_last_of(L"\\/")):std::wstring()};
+             ?[&]{ // The image maps through guestLibraryPath (absolute); the
+                   // dependency directory must be that same absolute directory,
+                   // not the relative prefix the guest passed.
+                 auto p=guestLibraryPath(requested,false);
+                 auto slash=p.find_last_of(L"\\/");
+                 return slash==std::wstring::npos?std::wstring():p.substr(0,slash);}():std::wstring()};
      m=named(requested);
      if(!m && !apiSetName(requested) && !systemDirectoryPath(requested)) {
          // Flags that only steer where the file is searched (Mono/Unity pass
