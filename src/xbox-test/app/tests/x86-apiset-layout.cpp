@@ -2,7 +2,6 @@
 // Print PE32 CRT structure sizes and offsets from the real mingw-w64 headers.
 #include <stddef.h>
 #include <stdio.h>
-#include <windows.h>
 #include <locale.h>
 #include <time.h>
 #include <sys/stat.h>
@@ -11,76 +10,58 @@
 #include <stdlib.h>
 #include <math.h>
 
-static void emit(const char* label, const char* field, unsigned value) {
-    char line[256], digits[10]; unsigned at = 0, n = 0;
-    while (*label) line[at++] = *label++;
-    line[at++] = '.';
-    while (*field) line[at++] = *field++;
-    line[at++] = '=';
-    do { digits[n++] = (char)('0' + value % 10); value /= 10; } while (value);
-    while (n) line[at++] = digits[--n];
-    line[at++] = '\n';
-    DWORD written = 0;
-    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), line, at, &written, NULL);
-}
-#define SIZE(label, T) emit(label, "size", (unsigned)sizeof(T))
-#define FIELD(label, T, member) emit(label, #member, (unsigned)offsetof(T, member))
-#define TIMES(label, T) do { SIZE(label, T); FIELD(label, T, tm_sec); FIELD(label, T, tm_isdst); } while (0)
-#define STAT(label, T) do { SIZE(label, T); FIELD(label, T, st_ino); FIELD(label, T, st_size); FIELD(label, T, st_atime); FIELD(label, T, st_mtime); FIELD(label, T, st_ctime); } while (0)
-#define FIND(label, T) do { SIZE(label, T); FIELD(label, T, time_create); FIELD(label, T, size); FIELD(label, T, name); } while (0)
-#define TIMEB(label, T) do { SIZE(label, T); FIELD(label, T, time); FIELD(label, T, millitm); FIELD(label, T, timezone); FIELD(label, T, dstflag); } while (0)
-#define DIV(label, T) do { SIZE(label, T); FIELD(label, T, quot); FIELD(label, T, rem); } while (0)
+#define SIZE(label, T) (unsigned)sizeof(T)
+#define FIELD(label, T, member) (unsigned)offsetof(T, member)
+#define TIMES(label, T) SIZE(label, T), FIELD(label, T, tm_sec), FIELD(label, T, tm_isdst)
+#define STAT(label, T) SIZE(label, T), FIELD(label, T, st_ino), FIELD(label, T, st_size), FIELD(label, T, st_atime), FIELD(label, T, st_mtime), FIELD(label, T, st_ctime)
+#define FIND(label, T) SIZE(label, T), FIELD(label, T, time_create), FIELD(label, T, size), FIELD(label, T, name)
+#define TIMEB(label, T) SIZE(label, T), FIELD(label, T, time), FIELD(label, T, millitm), FIELD(label, T, timezone), FIELD(label, T, dstflag)
+#define DIV(label, T) SIZE(label, T), FIELD(label, T, quot), FIELD(label, T, rem)
 
-void WINAPI layout_start(void) {
-    SIZE("lconv", struct lconv);
-    FIELD("lconv", struct lconv, decimal_point);
-    FIELD("lconv", struct lconv, int_frac_digits);
+const unsigned int layout_data[] __attribute__((section(".rdata"))) = {
+    0x58424c59,
+    SIZE("lconv", struct lconv),
+    FIELD("lconv", struct lconv, decimal_point),
+    FIELD("lconv", struct lconv, int_frac_digits),
 #if defined(_UCRT)
-    FIELD("lconv", struct lconv, _W_decimal_point);
-    FIELD("lconv", struct lconv, _W_negative_sign);
-#endif
-    TIMES("tm", struct tm);
-    STAT("_stat64", struct _stat64);
-    STAT("_stat64i32", struct _stat64i32);
-    STAT("_stat32", struct _stat32);
-    STAT("stat", struct stat);
-    FIND("_finddata_t", struct _finddata_t);
-    FIND("_finddatai64_t", struct _finddatai64_t);
-    FIND("_finddata32_t", struct _finddata32_t);
-    FIND("_finddata32i64_t", struct _finddata32i64_t);
-    FIND("_finddata64i32_t", struct _finddata64i32_t);
-    FIND("__finddata64_t", struct __finddata64_t);
-    FIND("_wfinddata_t", struct _wfinddata_t);
-    FIND("_wfinddatai64_t", struct _wfinddatai64_t);
-    FIND("_wfinddata32_t", struct _wfinddata32_t);
-    FIND("_wfinddata32i64_t", struct _wfinddata32i64_t);
-    FIND("_wfinddata64i32_t", struct _wfinddata64i32_t);
-    FIND("_wfinddata64_t", struct _wfinddata64_t);
-    TIMEB("_timeb", struct _timeb);
-    TIMEB("__timeb64", struct __timeb64);
-    DIV("div_t", div_t);
-    DIV("ldiv_t", ldiv_t);
-    DIV("lldiv_t", lldiv_t);
-    SIZE("_exception", struct _exception);
-    FIELD("_exception", struct _exception, type);
-    FIELD("_exception", struct _exception, name);
-    FIELD("_exception", struct _exception, arg1);
-    FIELD("_exception", struct _exception, retval);
-    SIZE("_complex", struct _complex);
-    FIELD("_complex", struct _complex, x);
-    FIELD("_complex", struct _complex, y);
-    SIZE("FILE", FILE);
-#ifdef _UCRT
-    FIELD("FILE", struct _iobuf, _Placeholder);
+    FIELD("lconv", struct lconv, _W_decimal_point),
+    FIELD("lconv", struct lconv, _W_negative_sign),
 #else
-    FIELD("FILE", struct _iobuf, _ptr);
-    FIELD("FILE", struct _iobuf, _cnt);
-    FIELD("FILE", struct _iobuf, _base);
-    FIELD("FILE", struct _iobuf, _flag);
-    FIELD("FILE", struct _iobuf, _file);
-    FIELD("FILE", struct _iobuf, _charbuf);
-    FIELD("FILE", struct _iobuf, _bufsiz);
-    FIELD("FILE", struct _iobuf, _tmpfname);
+    0xffffffff, 0xffffffff,
 #endif
-    ExitProcess(0);
-}
+    TIMES("tm", struct tm),
+    STAT("_stat64", struct _stat64), STAT("_stat64i32", struct _stat64i32),
+    STAT("_stat32", struct _stat32), STAT("stat", struct stat),
+    FIND("_finddata_t", struct _finddata_t), FIND("_finddatai64_t", struct _finddatai64_t),
+    FIND("_finddata32_t", struct _finddata32_t), FIND("_finddata32i64_t", struct _finddata32i64_t),
+    FIND("_finddata64i32_t", struct _finddata64i32_t), FIND("__finddata64_t", struct __finddata64_t),
+    FIND("_wfinddata_t", struct _wfinddata_t), FIND("_wfinddatai64_t", struct _wfinddatai64_t),
+    FIND("_wfinddata32_t", struct _wfinddata32_t), FIND("_wfinddata32i64_t", struct _wfinddata32i64_t),
+    FIND("_wfinddata64i32_t", struct _wfinddata64i32_t), FIND("_wfinddata64_t", struct _wfinddata64_t),
+    TIMEB("_timeb", struct _timeb), TIMEB("__timeb64", struct __timeb64),
+    DIV("div_t", div_t), DIV("ldiv_t", ldiv_t), DIV("lldiv_t", lldiv_t),
+    SIZE("_exception", struct _exception),
+    FIELD("_exception", struct _exception, type),
+    FIELD("_exception", struct _exception, name),
+    FIELD("_exception", struct _exception, arg1),
+    FIELD("_exception", struct _exception, retval),
+    SIZE("_complex", struct _complex),
+    FIELD("_complex", struct _complex, x),
+    FIELD("_complex", struct _complex, y),
+    SIZE("FILE", FILE),
+#ifdef _UCRT
+    0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff,
+    0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff,
+    FIELD("FILE", struct _iobuf, _Placeholder),
+#else
+    FIELD("FILE", struct _iobuf, _ptr),
+    FIELD("FILE", struct _iobuf, _cnt),
+    FIELD("FILE", struct _iobuf, _base),
+    FIELD("FILE", struct _iobuf, _flag),
+    FIELD("FILE", struct _iobuf, _file),
+    FIELD("FILE", struct _iobuf, _charbuf),
+    FIELD("FILE", struct _iobuf, _bufsiz),
+    FIELD("FILE", struct _iobuf, _tmpfname),
+    0xffffffff,
+#endif
+};
