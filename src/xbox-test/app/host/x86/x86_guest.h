@@ -234,6 +234,7 @@ struct Guest {
     // empty SEH chain and zeroed TEB TLS slots (fs:[0] and fs:[0xE10..]) —
     // a real thread starts with its own — and both are restored afterwards,
     // because the synchronous model shares one TEB between all threads.
+    static constexpr uint64_t kThreadBudget = 100ull * 1000 * 1000;  // instructions per thread body run
     void run_pending_threads(Cpu& c) {
         while (!pending_threads.empty()) {
             auto t = pending_threads.front(); pending_threads.erase(pending_threads.begin());
@@ -252,6 +253,11 @@ struct Guest {
             uint32_t saved_regs[8]; std::memcpy(saved_regs, c.reg, sizeof saved_regs);
             uint32_t saved_eip = c.eip, code = 0;
             bool outer = in_thread_body; in_thread_body = true;
+            // Each body gets kThreadBudget instructions per run. The interpreter is
+            // single-threaded, so a body that never returns (a worker that waits on
+            // the main thread) must fail the run by name instead of hanging the host.
+            uint64_t outer_limit = c.limit;
+            if (c.executed + kThreadBudget < outer_limit) c.limit = c.executed + kThreadBudget;
             try { code = c.call(std::get<1>(t), {std::get<2>(t)}); }
             catch (const ThreadExit&) {
                 // Drop the body's frames: restore the scheduler's registers so
@@ -259,6 +265,16 @@ struct Guest {
                 std::memcpy(c.reg, saved_regs, sizeof saved_regs); c.eip = saved_eip;
                 code = thread_exit_code;
             }
+            catch (...) {
+                bool budget = c.limit < outer_limit && c.executed > c.limit;
+                c.limit = outer_limit; in_thread_body = outer;
+                if (budget) {
+                    emit(2, "x86: thread body did not return within its instruction budget\n");
+                    throw Fault(FaultKind::InstructionLimit, c.eip, std::get<1>(t), "thread body exceeded its instruction budget");
+                }
+                throw;
+            }
+            c.limit = outer_limit;
             in_thread_body = outer;
             thread_exit_codes[std::get<0>(t)] = code;
             mem.w32(TEB_ADDR, seh);
@@ -316,10 +332,17 @@ struct Guest {
     // an OS-served module (kernel32/ntdll/msvcrt/kernelbase are in the process
     // from its start, so they answer without LoadLibrary, with the same stable
     // handle LoadLibrary returns). A miss is NULL with ERROR_MOD_NOT_FOUND.
-    uint32_t module_by_name(std::string n) {
+    // The one name rule GetModuleHandle and LoadLibrary share (module_key).
+    static std::string module_key(std::string n) {
+        size_t sep = n.find_last_of("\\/");  // a path names its file (host and guest modules alike)
+        if (sep != std::string::npos) n = n.substr(sep + 1);
         for (auto& ch : n) ch = char(std::tolower((unsigned char)ch));
         if (!n.empty() && n.back() == '.') n.pop_back();
         else if (n.find('.') == std::string::npos) n += ".dll";
+        return n;
+    }
+    uint32_t module_by_name(const std::string& name) {
+        std::string n = module_key(name);
         auto it = modules.find(n);
         if (it != modules.end()) return it->second;
         auto d = dlls.find(n);
@@ -350,8 +373,7 @@ struct Guest {
         return 0;
     }
     uint32_t load_guest_dll(Cpu* cpu, const std::string& requested, ThunkTable& table) {
-        std::string lower = requested;
-        for (auto& ch : lower) ch = char(std::tolower((unsigned char)ch));
+        std::string lower = module_key(requested);
         auto it = dlls.find(lower);
         if (it != dlls.end()) { it->second.refs++; return it->second.image.base; }
         if (os_served(lower)) return os_module_handle(lower);
@@ -706,8 +728,13 @@ inline void Guest::register_all() {
         mem.w8(buf + put * 2, 0); mem.w8(buf + put * 2 + 1, 0); return put; });
     reg.add("kernel32.dll", "ExitProcess", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { do_exit(c, c.arg(0)); return 0; });
     reg.add("kernel32.dll", "TerminateProcess", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { do_exit(c, c.arg(1)); return 1; });
-    reg.add("kernel32.dll", "Sleep", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
-    reg.add("kernel32.dll", "SleepEx", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 0; });
+    // Yield points of the cooperative scheduler: a game that polls with Sleep
+    // (`while (!flag) Sleep(1)`) waits on a worker that only runs here, so each
+    // of these runs the pending bodies before it returns (Bugbot 4561794148).
+    reg.add("kernel32.dll", "Sleep", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        run_pending_threads(c); return 0; });
+    reg.add("kernel32.dll", "SleepEx", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        run_pending_threads(c); return 0; });  // 0: not an alertable wakeup
     // Threads: the surface runs one guest thread per CPU, so a thread body
     // cannot run inside CreateThread — mcfgthread's creator->thread handshake
     // (__MCF_event_await_change on the new thread's `ready` flag) spins forever
@@ -733,7 +760,9 @@ inline void Guest::register_all() {
         thread_exit_code = c.arg(0);
         if (in_thread_body) throw ThreadExit{};
         return thread_exit_code; });
-    reg.add("kernel32.dll", "SwitchToThread", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
+    // SwitchToThread: nonzero when another thread ran (MSDN), i.e. bodies were pending.
+    reg.add("kernel32.dll", "SwitchToThread", Conv::Stdcall, 0, [this](Cpu& c) -> uint32_t {
+        bool ran = !pending_threads.empty(); run_pending_threads(c); return ran ? 1u : 0u; });
     // The blocking-wait surface a win32-threaded CRT startup uses (mingw 13's
     // winpthreads/mcfgthread peers): waits run the pending thread bodies first,
     // then succeed, as the keyed-event thunks below answer.
@@ -741,7 +770,15 @@ inline void Guest::register_all() {
         run_pending_threads(c); return 0; });  // WAIT_OBJECT_0
     reg.add("kernel32.dll", "WaitForSingleObjectEx", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
         run_pending_threads(c); return 0; });
+    // WaitForMultipleObjects(Ex): the surface's handles are all thread or event
+    // stand-ins, so the wait succeeds with the first object (WAIT_OBJECT_0).
+    reg.add("kernel32.dll", "WaitForMultipleObjects", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
+        run_pending_threads(c); return 0; });
+    reg.add("kernel32.dll", "WaitForMultipleObjectsEx", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
+        run_pending_threads(c); return 0; });
     reg.add("kernel32.dll", "GetExitCodeThread", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        // A poll is a yield point: pending bodies run before the code is read.
+        run_pending_threads(c);
         // Thread bodies run to completion before any wait returns, so the exit
         // code is the body's own: its return value or its ExitThread code, both
         // recorded by run_pending_threads (STILL_ACTIVE is 259, the documented
@@ -1414,7 +1451,8 @@ inline void Guest::register_all() {
         run_pending_threads(c); return 0; });
     reg.add("ntdll.dll", "NtWaitForSingleObject", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
         run_pending_threads(c); return 0; });  // STATUS_WAIT_0
-    reg.add("ntdll.dll", "NtDelayExecution", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("ntdll.dll", "NtDelayExecution", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        run_pending_threads(c); return 0; });  // STATUS_SUCCESS: a delay is a yield point
     reg.add("ntdll.dll", "NtClose", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
     reg.add("ntdll.dll", "NtDuplicateObject", Conv::Stdcall, 7, [](Cpu&) -> uint32_t { return 0; });
     // Section objects: NtCreateSection/NtMapViewOfSection back a shared

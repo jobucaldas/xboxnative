@@ -19,8 +19,9 @@ static void check(int ok) { ++g_checks; if (!ok) ++g_fail; }
 /* Thread bodies. The exit body calls ExitThread through a volatile pointer, so
  * the compiler cannot treat the call as noreturn: if the surface lets the call
  * return, g_after_exit becomes 1. A real ExitThread never returns. */
-static volatile LONG g_after_exit;
+static volatile LONG g_after_exit, g_flag;
 static DWORD WINAPI ret_body(LPVOID p) { return (DWORD)(ULONG_PTR)p + 7; }
+static DWORD WINAPI flag_body(LPVOID p) { (void)p; g_flag = 1; return 0; }
 static VOID (WINAPI *volatile exit_thread_fn)(DWORD) = ExitThread;
 static DWORD WINAPI exit_body(LPVOID p) {
     exit_thread_fn((DWORD)(ULONG_PTR)p + 9);
@@ -217,6 +218,27 @@ int main(void) {
         check(GetExitCodeThread(th_b, &code_b) && code_b == 14);  /* ExitThread(5 + 9) */
         check(g_after_exit == 0);
         CloseHandle(th_a); CloseHandle(th_b);
+    }
+    /* Polling is how a game waits for its worker: `while (!flag) Sleep(1)` and
+     * `while (GetExitCodeThread(...) == STILL_ACTIVE) Sleep(1)` (MSDN Sleep
+     * yields; MSDN GetExitCodeThread reports STILL_ACTIVE until the thread
+     * exits). The worker only runs at a yield point here, so each loop is
+     * bounded: a surface that never runs the worker fails the check instead of
+     * hanging the test. */
+    {
+        HANDLE th_f = CreateThread(NULL, 0, flag_body, NULL, 0, NULL);
+        int spins = 0;
+        while (!g_flag && spins < 1000) { Sleep(1); ++spins; }
+        check(g_flag == 1 && spins < 1000);
+        WaitForSingleObject(th_f, INFINITE);
+        CloseHandle(th_f);
+
+        HANDLE th_p = CreateThread(NULL, 0, ret_body, (LPVOID)(ULONG_PTR)1, 0, NULL);
+        DWORD code = STILL_ACTIVE;
+        spins = 0;
+        while (GetExitCodeThread(th_p, &code) && code == STILL_ACTIVE && spins < 1000) { Sleep(1); ++spins; }
+        check(code == 8 && spins < 1000);  /* returned 1 + 7 */
+        CloseHandle(th_p);
     }
     puts("x86-crt: threads ok");
 

@@ -161,6 +161,26 @@ b[STRS + 0x20:STRS + 0x30] = b'after_fn\x00\x00\x00\x00\x00\x00\x00\x00'  # @0x1
 b += bytes(IMG - len(b))  # raw section covers the whole image: pad the file
 open(out, 'wb').write(bytes(b))
 PYEOF
+# dll-leaf: mapped and attached only by a later LoadLibrary. dll-fail imports it
+# first, then dll-corrupt, whose file is replaced below with non-PE bytes: its
+# load throws after dll-leaf is mapped (the rollback case). The import libraries
+# come from dlltool; the corrupt DLL is never built, only its import entry.
+cat > "$tmp/dll-leaf.def" <<'EOF'
+LIBRARY dll-leaf.dll
+EXPORTS
+leaf_marker
+EOF
+cat > "$tmp/dll-corrupt.def" <<'EOF'
+LIBRARY dll-corrupt.dll
+EXPORTS
+corrupt_fn
+EOF
+"$dlltool" -m i386 -k -d "$tmp/dll-leaf.def" -l "$tmp/libdll-leaf.a"
+"$dlltool" -m i386 -k -d "$tmp/dll-corrupt.def" -l "$tmp/libdll-corrupt.a"
+"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -o "$tmp/dll-leaf.dll" "$here/x86-dll/dll-leaf.c"
+"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -o "$tmp/dll-fail.dll" "$here/x86-dll/dll-fail.c" -L"$tmp" -ldll-leaf -ldll-corrupt
+printf 'not a PE image' > "$tmp/dll-corrupt.dll"
+
 # exe: imports dll_a_sum/dllb_attach_marker and the cyclic pair's exports,
 # calls the kernel32 DLL APIs (LoadLibrary/GetProcAddress/FreeLibrary/
 # GetModuleHandleA/W/ExW, Encode/DecodePointer), and exercises ExitThread's

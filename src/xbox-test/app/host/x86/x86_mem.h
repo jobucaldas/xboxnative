@@ -49,6 +49,13 @@ struct Memory {
         for (size_t i = 0; i < n; ++i) { page[(addr >> 12) + i] = block.get() + i * PAGE; prot[(addr >> 12) + i] = p; }
         blocks.push_back(std::move(block));  // blocks live as long as the Memory
     }
+    // Drops a mapping made by map(): its pages become unmapped again, so a later
+    // load may use the range. The backing block stays in `blocks` (it is not
+    // freed while the Memory lives), which keeps any stale pointer harmless.
+    void unmap(uint32_t addr, uint32_t size) {
+        uint64_t end = (uint64_t(addr) + size + PAGE - 1) & ~uint64_t(PAGE - 1);
+        for (uint64_t a = addr; a < end; a += PAGE) { page[a >> 12] = nullptr; prot[a >> 12] = 0; }
+    }
     void protect(uint32_t addr, uint32_t size, uint8_t p) {
         if (addr % PAGE) throw std::runtime_error("x86 protect: unaligned");
         uint64_t end = (uint64_t(addr) + size + PAGE - 1) & ~uint64_t(PAGE - 1);

@@ -265,6 +265,13 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
                     const std::function<uint32_t(const std::string&, const std::string&)>& os_resolve = nullptr,
                     const std::string& module_name = {}) {
     if (depth > 16) throw std::runtime_error("DLL dependencies nested too deep");
+    // A failed load leaves nothing behind (Windows unloads what a failed
+    // LoadLibrary mapped). The top-level call remembers the modules and the
+    // load order that existed before it, so the rollback can drop the
+    // dependencies that an import mapped before the throw.
+    std::vector<std::string> loaded_before;
+    size_t order_before = order ? order->size() : 0;
+    if (depth == 0) for (const auto& kv : loaded) loaded_before.push_back(kv.first);
     // Load at the ImageBase when it is free; otherwise relocate like Windows'
     // loader does for a DLL whose base is taken. Two sizing rules from the
     // Windows loader: (a) the reservation covers SizeOfImage, not the file
@@ -389,9 +396,20 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
     Dll out; out.image = std::move(img);
     return out;
     } catch (...) {
-        // The reservation dies with the load: a failed load must not leave a
-        // half-mapped module in the table (a later load would reuse its base).
-        if (self) loaded.erase(module_name);
+        // Nothing a failed load mapped stays mapped or in the tables: this
+        // level's reservation, and at the top level every module mapped since
+        // the call began (dependencies included, mapped before the throw). A
+        // module attaches (DllMain) only after a successful LoadLibrary, so none
+        // of them ran DllMain and there is nothing to detach.
+        mem.unmap(load_base, image_size);
+        if (depth == 0) {
+            for (auto it = loaded.begin(); it != loaded.end();) {
+                if (std::find(loaded_before.begin(), loaded_before.end(), it->first) != loaded_before.end()) { ++it; continue; }
+                if (it->second.image.size) mem.unmap(it->second.image.base, it->second.image.size);
+                it = loaded.erase(it);
+            }
+            if (order) order->resize(order_before);
+        } else if (self) loaded.erase(module_name);
         throw;
     }
 }

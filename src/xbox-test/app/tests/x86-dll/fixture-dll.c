@@ -335,6 +335,30 @@ int fixture_main(void) {
         }
     }
 
+    /* LoadLibrary takes GetModuleHandle's name rules (MSDN LoadLibraryA: a name
+     * without an extension gets ".dll", case is ignored). A module the surface
+     * serves answers the handle GetModuleHandle gives; a module that exists
+     * nowhere is NULL with ERROR_MOD_NOT_FOUND (126). */
+    ok(LoadLibraryA("kernel32") != 0);
+    ok(LoadLibraryA("KERNEL32.DLL") == GetModuleHandleA("kernel32.dll"));
+    SetLastError(0);
+    ok(LoadLibraryA("msvcp140") == 0 && GetLastError() == 126);
+
+    /* A failed LoadLibrary leaves nothing loaded (MSDN LoadLibraryA: on failure
+     * no module is mapped). dll-fail maps dll-leaf, then its corrupt dependency
+     * throws: ERROR_BAD_EXE_FORMAT (193). A later LoadLibrary of dll-leaf maps
+     * it again and DllMain(DLL_PROCESS_ATTACH) runs exactly once, so the marker
+     * reads 1: 0 means the stale module was reused unattached, 2 an attach twice. */
+    SetLastError(0);
+    ok(LoadLibraryA("dll-fail.dll") == 0 && GetLastError() == 193);
+    u32 hleaf = LoadLibraryA("dll-leaf.dll");
+    ok(hleaf != 0);
+    if (hleaf) {
+        u32 (__stdcall *leaf_fn)(void) = (u32 (__stdcall *)(void))GetProcAddress(hleaf, "leaf_marker");
+        ok(leaf_fn != 0);
+        if (leaf_fn) ok(leaf_fn() == 1);
+    }
+
     return failed ? 43 : 42;
 }
 
