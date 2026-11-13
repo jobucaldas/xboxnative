@@ -1820,8 +1820,16 @@ static HRESULT WINAPI d3d12GetInterfaceHook(REFCLSID clsid,REFIID id,void** out)
 // exports a guest imports. The debug layer's absence is reported by the
 // console/Wine as DXGI_ERROR_SDK_COMPONENT_MISSING; a guest that treats that as
 // fatal would otherwise fail with no trace, so the answer is logged once.
+// The layer is opt-in (LocalState\d3d12debug.txt): without it the host answers
+// SDK_COMPONENT_MISSING itself and never reaches the console's debug layer.
 static HRESULT WINAPI d3d12GetDebugInterface(REFIID id,void** debug) {
     using Fn=HRESULT(WINAPI*)(REFIID,void**);
+    if(!d3d12_diag::debugLayerOptIn.load(std::memory_order_acquire)) {
+        if(debug)*debug=nullptr;
+        if(state->log&&mlp::first_report("d3d12 debug interface"))
+            state->log("PRUN D3D12 debuglayer=off getdebug=0x887a002d (LocalState\\d3d12debug.txt absent)");
+        return (HRESULT)0x887a002d;   // DXGI_ERROR_SDK_COMPONENT_MISSING
+    }
     auto fn=(Fn)mlp::resolve("d3d12.dll","D3D12GetDebugInterface",0);
     if(!fn)return E_NOINTERFACE;
     HRESULT hr=fn(id,debug);

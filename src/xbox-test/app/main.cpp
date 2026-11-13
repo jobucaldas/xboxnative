@@ -2513,6 +2513,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             DWORD attrs = GetFileAttributesW((g_dir + L"\\d3d11diag.txt").c_str());
             if (attrs != INVALID_FILE_ATTRIBUTES) d3d11_diag::set_enabled(false);
         }
+        // Opt-in D3D12 debug layer: LocalState\d3d12debug.txt present (contents
+        // ignored) -> the guest may enable the layer. Read once at boot; absent
+        // (the default) -> the layer is never enabled on the console.
+        d3d12_diag::debugLayerOptIn.store(GetFileAttributesW((g_dir + L"\\d3d12debug.txt").c_str()) != INVALID_FILE_ATTRIBUTES);
         // Deep-draw state probe: LocalState\d3d11deep.txt present (contents
         // ignored) -> draw-time pipeline signatures are logged once each
         // (topology, GS/PS content hash, target format, PS/GS SRV null and
