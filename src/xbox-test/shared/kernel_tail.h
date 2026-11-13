@@ -119,6 +119,25 @@ inline BOOL WINAPI version(LPOSVERSIONINFOEXW wanted,DWORD types,DWORDLONG condi
     }
     if(!matched)SetLastError(ERROR_OLD_WIN_VERSION);return matched;
 }
+// Wine's debugstr_an/wn (donor diagnostics) import IsBadStringPtrA/W. The Xbox
+// kernel's export surface for the IsBad* family is unverified, so own the
+// documented semantics: a byte-by-byte scan that stops at the first NUL within
+// count bytes (Windows IsBadStringPtrA(str, max) with max==-1 verifies only up
+// to the terminator, and Wine's debugstr_an passes -1 exactly so), faulting
+// reads caught and reported as bad. Only the probed page range is touched.
+inline BOOL probe_string_reads(const void* str,UINT_PTR count) {
+    if(!str)return TRUE;
+#ifdef _MSC_VER
+    __try {volatile char sum=0;auto p=(const volatile char*)str;
+        for(UINT_PTR i=0;i<count;++i) {sum+=p[i];if(!p[i])break;}(void)sum;return FALSE;}
+    __except(EXCEPTION_EXECUTE_HANDLER){return TRUE;}
+#else
+    volatile char sum=0;auto p=(const volatile char*)str;
+    for(UINT_PTR i=0;i<count;++i) {sum+=p[i];if(!p[i])break;}(void)sum;return FALSE;
+#endif
+}
+inline BOOL WINAPI is_bad_string_a(LPCSTR str,UINT_PTR count) {return probe_string_reads(str,count);}
+inline BOOL WINAPI is_bad_string_w(LPCWSTR str,UINT_PTR count) {return probe_string_reads(str,count*sizeof(WCHAR));}
 inline uintptr_t resolve(const char* name) {
     if(!strcmp(name,"VirtualAlloc"))return (uintptr_t)&alloc;
     if(!strcmp(name,"VirtualProtect"))return (uintptr_t)&protect;
@@ -131,6 +150,8 @@ inline uintptr_t resolve(const char* name) {
     if(!strcmp(name,"LoadLibraryExA"))return (uintptr_t)&load_ex_a;
     if(!strcmp(name,"LoadLibraryA"))return (uintptr_t)&load_a;
     if(!strcmp(name,"VerifyVersionInfoW"))return (uintptr_t)&version;
+    if(!strcmp(name,"IsBadStringPtrA"))return (uintptr_t)&is_bad_string_a;
+    if(!strcmp(name,"IsBadStringPtrW"))return (uintptr_t)&is_bad_string_w;
     return native(name);
 }
 }
