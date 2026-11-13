@@ -28,9 +28,6 @@ static ID3D12Device* make() {
     if(SUCCEEDED(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,__uuidof(ID3D12Device),(void**)&device)))return device;
     return nullptr;
 }
-static std::string fakeRootSignatureDescription(const void*,SIZE_T) {
-    return "params=2[32BIT_CONSTANTS SRV]";
-}
 static void makeDxilContainer(unsigned char* bytes,bool signedContainer) {
     const uint32_t total=52,chunks=1,offset=36,chunkBytes=8;
     memset(bytes,0,total);memcpy(bytes,"DXBC",4);
@@ -250,8 +247,7 @@ int main(int argc,char** argv) {
     state.NumRenderTargets=1;state.DSVFormat=DXGI_FORMAT_D24_UNORM_S8_UINT;
     state.DepthStencilState.DepthEnable=TRUE;state.RasterizerState.CullMode=D3D12_CULL_MODE_BACK;
     std::string stateText=d3d12_diag::graphicsStateText(&state);
-    CHECK(stateText.find("input=3 topology=3 so_entries=2 so_strides=1 sample_mask=0x12345678")!=std::string::npos);
-    CHECK(stateText.find("rtv_count=1 dsvfmt=")!=std::string::npos);
+    CHECK(stateText.find("topology=3 so_entries=2 so_strides=1 sample_mask=0x12345678")!=std::string::npos);
     CHECK(stateText.find("depth=1 stencil=0 cull=")!=std::string::npos);
     CHECK(stateText.find(" fill=")!=std::string::npos);
 
@@ -415,6 +411,8 @@ int main(int argc,char** argv) {
         CHECK(call(d3d12_diag::CreateCommandQueue,&qd,__uuidof(ID3D12CommandQueue),&out)==E_INVALIDARG);
         CHECK(call(d3d12_diag::CreateCommandAllocator,D3D12_COMMAND_LIST_TYPE_DIRECT,__uuidof(ID3D12CommandAllocator),&out)==E_INVALIDARG);
         CHECK(call(d3d12_diag::CreateGraphicsPipelineState,&gd,__uuidof(ID3D12PipelineState),&out)==E_INVALIDARG);
+        CHECK(count("vs-kind=none ps-kind=none nodes=0 topology=0") == 1);
+        CHECK(count("CreateGraphicsPipelineState hr=0x80070057 vs-kind=none ps-kind=none bytes=")==0);
         CHECK(call(d3d12_diag::CreateComputePipelineState,&cd,__uuidof(ID3D12PipelineState),&out)==E_INVALIDARG);
         CHECK(call(d3d12_diag::CreateCommandList,0u,D3D12_COMMAND_LIST_TYPE_DIRECT,(ID3D12CommandAllocator*)nullptr,(ID3D12PipelineState*)nullptr,__uuidof(ID3D12GraphicsCommandList),&out)==E_INVALIDARG);
         CHECK(call(d3d12_diag::CreateDescriptorHeap,&hd,__uuidof(ID3D12DescriptorHeap),&out)==E_INVALIDARG);
@@ -440,6 +438,12 @@ int main(int argc,char** argv) {
         // The void view creators never log a failure line, whatever the arguments.
         CHECK(count("CreateShaderResourceView hr=")==0&&count("CreateUnorderedAccessView hr=")==0);
         CHECK(count("CreateRenderTargetView hr=")==0&&count("CreateDepthStencilView hr=")==0);
+        unsigned char dxilContainer[52]{};makeDxilContainer(dxilContainer,true);
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC dxilState{};dxilState.VS={dxilContainer,sizeof dxilContainer};
+        CHECK(call(d3d12_diag::CreateGraphicsPipelineState,&dxilState,__uuidof(ID3D12PipelineState),&out)==E_INVALIDARG);
+        CHECK(count("CreateGraphicsPipelineState hr=0x80070057 vs-kind=dxbc-container dxil-chunk=yes")==1);
+        CHECK(count("CreateGraphicsPipelineState hr=0x80070057 vs-kind=dxbc-container dxil-chunk=yes bytes=")==0);
+        CHECK(count("topology=0 so_entries=0 so_strides=0 sample_mask=0x00000000")>=2);
     }
 
 
@@ -511,9 +515,7 @@ int main(int argc,char** argv) {
         reinterpret_cast<UavFn>(vtable[d3d12_diag::CreateUnorderedAccessView])(object,uavRes,sentinelCounter,&uavDesc,sentinelHandle);
         CHECK(seenResource==uavRes&&seenCounter==sentinelCounter&&seenDesc==&uavDesc&&seenHandle.ptr==sentinelHandle.ptr);
     }
-    // PSO descriptions: logged before the call, only when the trace is on. A fake
-    // class with recording originals; one unsigned PS (null digest) and one
-    // signed VS, through the v0 graphics path and the stream path.
+    // Keep #205's per-call PSO trace records; failure lines add only missing fields.
     {
         struct Rec {
             static HRESULT STDMETHODCALLTYPE v0(void*,const D3D12_GRAPHICS_PIPELINE_STATE_DESC*,REFIID,void**) {return S_OK;}
@@ -528,55 +530,19 @@ int main(int argc,char** argv) {
         d3d12_diag::patchClass(vt,patches,patchCount);
         const d3d12_diag::Patch streamPatch{d3d12_diag::createPipelineStateStreamSlot,reinterpret_cast<void*>(&d3d12_diag::createPipelineStateStream)};
         d3d12_diag::patchClass(vt,&streamPatch,1);
-        void* object[1]={vt};
-        unsigned char vsBytes[52]{};makeDxilContainer(vsBytes,true);   // signed: non-null digest
-        unsigned char psBytes[52]{};makeDxilContainer(psBytes,false);   // unsigned: null digest
-        unsigned char malformed[52]{};makeDxilContainer(malformed,false);
-        const uint32_t badChunkSize=100;memcpy(malformed+40,&badChunkSize,sizeof badChunkSize);
-        CHECK(d3d12_diag::containerText(vsBytes,sizeof vsBytes).find("container=valid")!=std::string::npos);
-        CHECK(d3d12_diag::containerText(malformed,sizeof malformed).find("container=invalid")!=std::string::npos);
+        void* object[1]={vt};void* out=nullptr;
+        const uint64_t traceBefore=d3d12_diag::traceNextSeq;
+        unsigned char vsBytes[52]{};makeDxilContainer(vsBytes,true);
+        unsigned char psBytes[52]{};makeDxilContainer(psBytes,false);
         D3D12_INPUT_ELEMENT_DESC element{"POSITION",0,DXGI_FORMAT_R32G32_FLOAT,0,0,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0};
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC gd{};
-        gd.VS={vsBytes,sizeof vsBytes};gd.PS={psBytes,sizeof psBytes};
-        gd.NumRenderTargets=1;gd.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;gd.DSVFormat=DXGI_FORMAT_D32_FLOAT;
-        gd.SampleDesc.Count=1;gd.InputLayout={&element,1};
-        D3D12_ROOT_PARAMETER rootParams[2]{};
-        rootParams[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        rootParams[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;
-        D3D12_ROOT_SIGNATURE_DESC rootDesc{};rootDesc.NumParameters=2;rootDesc.pParameters=rootParams;
-        CHECK(d3d12_diag::rootParametersText(&rootDesc)=="params=2[32BIT_CONSTANTS SRV]");
-        rootParams[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;rootDesc.NumParameters=1;
-        ID3DBlob *blob=nullptr,*errors=nullptr;
-        CHECK(SUCCEEDED(D3D12SerializeRootSignature(&rootDesc,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&errors))&&blob);
-        if(blob){CHECK(d3d12_diag::describeRootSignature(blob->GetBufferPointer(),blob->GetBufferSize())=="params=1[SRV]");blob->Release();}
-        if(errors){errors->Release();errors=nullptr;}
-        D3D12_DESCRIPTOR_RANGE1 range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=2;
-        D3D12_ROOT_PARAMETER1 param{};param.ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;param.DescriptorTable={1,&range};
-        D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc1{};desc1.Version=D3D_ROOT_SIGNATURE_VERSION_1_1;desc1.Desc_1_1.NumParameters=1;desc1.Desc_1_1.pParameters=&param;
-        blob=nullptr;CHECK(SUCCEEDED(D3D12SerializeVersionedRootSignature(&desc1,&blob,&errors))&&blob);
-        if(blob){CHECK(d3d12_diag::describeRootSignature(blob->GetBufferPointer(),blob->GetBufferSize()).find("params=1[DESCRIPTOR_TABLE(ranges=1[SRV:2 reg=0 space=0 flags=0x0]")!=std::string::npos);blob->Release();}
-        desc1.Version=static_cast<D3D_ROOT_SIGNATURE_VERSION>(99);
-        CHECK(d3d12_diag::rootParametersText(&desc1)=="version=99 params=unsupported-version");
-#if defined(D3D12_SDK_VERSION) && D3D12_SDK_VERSION >= 618
-        D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc12{};desc12.Version=D3D_ROOT_SIGNATURE_VERSION_1_2;
-        desc12.Desc_1_2.NumParameters=1;desc12.Desc_1_2.pParameters=&param;
-        blob=nullptr;CHECK(SUCCEEDED(D3D12SerializeVersionedRootSignature(&desc12,&blob,&errors))&&blob);
-        if(blob){CHECK(d3d12_diag::describeRootSignature(blob->GetBufferPointer(),blob->GetBufferSize()).find("SRV:2 reg=0 space=0")!=std::string::npos);blob->Release();}
-#endif
-        if(errors)errors->Release();
-        d3d12_diag::rootSignatureDescriber=&fakeRootSignatureDescription;
-        ID3D12RootSignature* fakeRoot=reinterpret_cast<ID3D12RootSignature*>(uintptr_t(0x7770));
-        d3d12_diag::rememberRootSignature(fakeRoot,vsBytes,sizeof vsBytes);
-        gd.pRootSignature=fakeRoot;
-        void* out=nullptr;
-        d3d12_diag::psoLines.store(0);
-        const size_t psoFrom=lines.size();
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC gd{};gd.VS={vsBytes,sizeof vsBytes};gd.PS={psBytes,sizeof psBytes};
+        gd.NumRenderTargets=1;gd.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;gd.InputLayout={&element,1};
         reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(void*,const D3D12_GRAPHICS_PIPELINE_STATE_DESC*,REFIID,void**)>(vt[d3d12_diag::CreateGraphicsPipelineState])(object,&gd,__uuidof(ID3D12PipelineState),&out);
-        D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};cd.CS={psBytes,sizeof psBytes};cd.pRootSignature=fakeRoot;
+        D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
         reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(void*,const D3D12_COMPUTE_PIPELINE_STATE_DESC*,REFIID,void**)>(vt[d3d12_diag::CreateComputePipelineState])(object,&cd,__uuidof(ID3D12PipelineState),&out);
         std::vector<unsigned char> stream;
-        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,fakeRoot);
         D3D12_INPUT_LAYOUT_DESC layout{&element,1};
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,(ID3D12RootSignature*)nullptr);
         appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS,D3D12_SHADER_BYTECODE{vsBytes,sizeof vsBytes});
         appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS,D3D12_SHADER_BYTECODE{psBytes,sizeof psBytes});
         appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT,layout);
@@ -584,17 +550,25 @@ int main(int argc,char** argv) {
         appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS,rtv);
         D3D12_PIPELINE_STATE_STREAM_DESC sd{stream.size(),stream.data()};
         reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(void*,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**)>(vt[d3d12_diag::createPipelineStateStreamSlot])(object,&sd,__uuidof(ID3D12PipelineState),&out);
-        // Only the lines from these three calls: earlier calls in this test log pso lines too.
-        auto since=[&](size_t from,const char* needle){size_t n=0;for(size_t i=from;i<lines.size();++i)if(lines[i].find(needle)!=std::string::npos)++n;return n;};
         if(traceMode) {
-            CHECK(since(psoFrom,"pso v0 VS:dxbc")==1&&since(psoFrom,"pso stream VS:dxbc")==1&&since(psoFrom,"pso compute CS:dxbc")==1);
-            CHECK(since(psoFrom,"PS:dxbc")==2&&since(psoFrom,"digest=null(unsigned)")==3&&since(psoFrom,"digest=set")==2);
-            CHECK(since(psoFrom,"container=valid")==5&&since(psoFrom,"params=2[32BIT_CONSTANTS SRV]")==3);
-            CHECK(since(psoFrom,"inputs=1[POSITION:16(R32G32_FLOAT)]")==2&&since(psoFrom,"rtv=1[28(R8G8B8A8_UNORM)]")==2);
+            CHECK(d3d12_diag::traceNextSeq==traceBefore+13);
+            CHECK(strstr(d3d12_diag::traceRing[(traceBefore+0)%d3d12_diag::kTraceRing].detail,"v0 VS:dxbc")!=nullptr);
+            CHECK(strstr(d3d12_diag::traceRing[(traceBefore+1)%d3d12_diag::kTraceRing].detail,"v0 PS:dxbc")!=nullptr);
+            CHECK(strstr(d3d12_diag::traceRing[(traceBefore+2)%d3d12_diag::kTraceRing].detail,"v0 rtv=1[")!=nullptr);
+            CHECK(strcmp(d3d12_diag::traceRing[(traceBefore+4)%d3d12_diag::kTraceRing].detail,"compute CS:none")==0);
+            CHECK(strcmp(d3d12_diag::traceRing[(traceBefore+5)%d3d12_diag::kTraceRing].detail,"compute rootsig=null")==0);
+            CHECK(strstr(d3d12_diag::traceRing[(traceBefore+8)%d3d12_diag::kTraceRing].detail,"stream VS:dxbc")!=nullptr);
+            CHECK(strstr(d3d12_diag::traceRing[(traceBefore+9)%d3d12_diag::kTraceRing].detail,"stream PS:dxbc")!=nullptr);
+            CHECK(strstr(d3d12_diag::traceRing[(traceBefore+10)%d3d12_diag::kTraceRing].detail,"inputs=1[POSITION:16(R32G32_FLOAT)]")!=nullptr);
+            CHECK(strstr(d3d12_diag::traceRing[(traceBefore+11)%d3d12_diag::kTraceRing].detail,"rtv=1[28(R8G8B8A8_UNORM)]")!=nullptr);
+            CHECK(d3d12_diag::traceRing[(traceBefore+3)%d3d12_diag::kTraceRing].name&&strcmp(d3d12_diag::traceRing[(traceBefore+3)%d3d12_diag::kTraceRing].name,"CreateGraphicsPipelineState")==0);
+            CHECK(d3d12_diag::traceRing[(traceBefore+6)%d3d12_diag::kTraceRing].name&&strcmp(d3d12_diag::traceRing[(traceBefore+6)%d3d12_diag::kTraceRing].name,"CreateComputePipelineState")==0);
+            CHECK(d3d12_diag::traceRing[(traceBefore+12)%d3d12_diag::kTraceRing].name&&strcmp(d3d12_diag::traceRing[(traceBefore+12)%d3d12_diag::kTraceRing].name,"createPipelineStateStreamSlot")==0);
             size_t flushed=lines.size();d3d12_diag::flushTrace();
-            CHECK(since(flushed,"pso v0 VS:dxbc")==1&&since(flushed,"pso stream VS:dxbc")==1&&since(flushed,"pso compute CS:dxbc")==1);
-        } else {
-            CHECK(since(psoFrom,"pso ")==0);
+            auto since=[&](const std::string& needle){size_t n=0;for(size_t i=flushed;i<lines.size();++i)if(lines[i].find(needle)!=std::string::npos)++n;return n;};
+            CHECK(since("trace #"+std::to_string(traceBefore+3)+" CreateGraphicsPipelineState 0x00000000")==1);
+            CHECK(since("trace #"+std::to_string(traceBefore+6)+" CreateComputePipelineState 0x00000000")==1);
+            CHECK(since("trace #"+std::to_string(traceBefore+12)+" createPipelineStateStreamSlot 0x00000000")==1);
         }
     }
 

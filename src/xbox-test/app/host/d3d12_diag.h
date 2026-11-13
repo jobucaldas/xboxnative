@@ -270,12 +270,18 @@ inline std::string shaderText(const void* code,SIZE_T length,std::string* key=nu
     if(key)*key=fmt("%016llx",(unsigned long long)hash);
     return fmt("%s bytes=%llu hash=%016llx",kind.c_str(),(unsigned long long)size_t(length),(unsigned long long)hash);
 }
+inline std::string shaderKindText(const void* code,SIZE_T length) {
+    if(!code||!length)return "none";
+    auto bytes=static_cast<const unsigned char*>(code);
+    if(length>=8&&!memcmp(bytes,"DXIL",4))return fmt("dxil version=%u.%u",bytes[4],bytes[5]);
+    if(length>=4&&!memcmp(bytes,"DXBC",4))return dxbcHasDxilChunk(code,length)?"dxbc-container dxil-chunk=yes":"dxbc-container dxil-chunk=no";
+    return "not-dxil";
+}
 inline std::string graphicsStateText(const D3D12_GRAPHICS_PIPELINE_STATE_DESC* d) {
     if(!d)return "desc=null";
-    return fmt("root=%d input=%u topology=%d so_entries=%u so_strides=%u sample_mask=0x%08x rtv_count=%u dsvfmt=%s depth=%d stencil=%d cull=%d fill=%d",
-        d->pRootSignature!=nullptr,d->InputLayout.NumElements,int(d->PrimitiveTopologyType),
-        d->StreamOutput.NumEntries,d->StreamOutput.NumStrides,d->SampleMask,d->NumRenderTargets,
-        formatText(d->DSVFormat).c_str(),d->DepthStencilState.DepthEnable,d->DepthStencilState.StencilEnable,
+    return fmt("topology=%d so_entries=%u so_strides=%u sample_mask=0x%08x depth=%d stencil=%d cull=%d fill=%d",
+        int(d->PrimitiveTopologyType),d->StreamOutput.NumEntries,d->StreamOutput.NumStrides,d->SampleMask,
+        d->DepthStencilState.DepthEnable,d->DepthStencilState.StencilEnable,
         int(d->RasterizerState.CullMode),int(d->RasterizerState.FillMode));
 }
 
@@ -587,11 +593,12 @@ static HRESULT STDMETHODCALLTYPE createGraphicsPipelineState(DevicePtr self,cons
     if(d&&traceOn.load(std::memory_order_acquire)) traceGraphicsDesc(*d);
     D3D12_DIAG_HOOK(Fn,CreateGraphicsPipelineState)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     if(d) {
-        std::string vsKey,psKey,vs=shaderText(d->VS.pShaderBytecode,d->VS.BytecodeLength,&vsKey);
-        std::string ps=shaderText(d->PS.pShaderBytecode,d->PS.BytecodeLength,&psKey);
+        std::string vsKey,psKey;
+        shaderText(d->VS.pShaderBytecode,d->VS.BytecodeLength,&vsKey);
+        shaderText(d->PS.pShaderBytecode,d->PS.BytecodeLength,&psKey);
         D3D12_DIAG_FAILED("CreateGraphicsPipelineState",vsKey+"/"+psKey,
-            fmt("vs[%s] ps[%s] rtvfmt=%s samples=%u nodes=%u %s",vs.c_str(),ps.c_str(),
-                formatText(d->RTVFormats[0]).c_str(),d->SampleDesc.Count,d->NodeMask,graphicsStateText(d).c_str()));
+            fmt("vs-kind=%s ps-kind=%s nodes=%u %s",shaderKindText(d->VS.pShaderBytecode,d->VS.BytecodeLength).c_str(),
+                shaderKindText(d->PS.pShaderBytecode,d->PS.BytecodeLength).c_str(),d->NodeMask,graphicsStateText(d).c_str()));
     } else D3D12_DIAG_FAILED("CreateGraphicsPipelineState","null","desc=null");
     return hr;
 }
@@ -713,8 +720,9 @@ static HRESULT STDMETHODCALLTYPE createComputePipelineState(DevicePtr self,const
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_COMPUTE_PIPELINE_STATE_DESC*,REFIID,void**);
     D3D12_DIAG_HOOK(Fn,CreateComputePipelineState)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     if(d) {
-        std::string key,cs=shaderText(d->CS.pShaderBytecode,d->CS.BytecodeLength,&key);
-        D3D12_DIAG_FAILED("CreateComputePipelineState",key,fmt("cs[%s]",cs.c_str()));
+        std::string key;shaderText(d->CS.pShaderBytecode,d->CS.BytecodeLength,&key);
+        D3D12_DIAG_FAILED("CreateComputePipelineState",key,
+            fmt("cs-kind=%s",shaderKindText(d->CS.pShaderBytecode,d->CS.BytecodeLength).c_str()));
     } else D3D12_DIAG_FAILED("CreateComputePipelineState","null","desc=null");
     return hr;
 }
