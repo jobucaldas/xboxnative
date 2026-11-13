@@ -72,10 +72,9 @@ enum ListSlot {ListClose=9,ListReset,ListClearState,ListDrawInstanced,ListDrawIn
 enum FenceSlot {FenceGetCompletedValue=8,FenceSetEventOnCompletion,FenceSignal};
 enum ResourceSlot {ResourceMap=8,ResourceUnmap,ResourceGetDesc,ResourceGetGPUVirtualAddress};
 enum AllocatorSlot {AllocatorReset=8};
-// The stream-path slot is reached only through a QueryInterface to
-// ID3D12Device2 or higher, so patching it never writes a slot a plain
-// ID3D12Device vtable lacks (adoptObject patches at the interface level the
-// caller asked for).
+// CreatePipelineState (the stream path) is ID3D12Device2's method. Its slot is
+// checked against the generated ID3D12Device2Vtbl by tests/d3d12-vtbl-layout.cpp,
+// and that hook is only written through a pointer that implements ID3D12Device2.
 constexpr int createPipelineStateStreamSlot=47;
 static_assert(CreateCommandQueue==8&&CheckFeatureSupport==13&&CreateFence==36&&GetAdapterLuid==43,"ID3D12Device slot layout");
 static_assert(createPipelineStateStreamSlot==47,"ID3D12Device2 CreatePipelineState slot");
@@ -713,7 +712,7 @@ static HRESULT STDMETHODCALLTYPE allocatorReset(DevicePtr self) {
 inline const Patch* devicePatches(size_t& count){
     static const Patch table[]={
         {CreateCommandQueue,(void*)&createCommandQueue},{CreateCommandAllocator,(void*)&createCommandAllocator},
-        {CreateGraphicsPipelineState,(void*)&createGraphicsPipelineState},{createPipelineStateStreamSlot,(void*)&createPipelineStateStream},
+        {CreateGraphicsPipelineState,(void*)&createGraphicsPipelineState},
         {CreateComputePipelineState,(void*)&createComputePipelineState},{CreateCommandList,(void*)&createCommandList},{CheckFeatureSupport,(void*)&checkFeatureSupport},
         {CreateDescriptorHeap,(void*)&createDescriptorHeap},{CreateRootSignature,(void*)&createRootSignature},
         {CreateConstantBufferView,(void*)&createCbv},{CreateShaderResourceView,(void*)&createSrv},
@@ -783,6 +782,19 @@ inline void adoptResource(ID3D12Resource* resource) {
 }
 // ---- entry points
 inline void configure(Sink s){sink=s;}
+// The stream-path hook goes only through the vtable of a pointer that really
+// implements ID3D12Device2. ID3D12Device has 44 methods (slots 0-43), so slot 47
+// is not a slot of its table; a device without ID3D12Device2 is skipped, logged.
+inline void adoptStreamPath(IUnknown* device) {
+    ID3D12Device2* device2=nullptr;
+    if(FAILED(device->QueryInterface(__uuidof(ID3D12Device2),reinterpret_cast<void**>(&device2)))||!device2) {
+        emit("diagnostics: device has no ID3D12Device2; CreatePipelineState stream hook not installed");
+        return;
+    }
+    const Patch stream{createPipelineStateStreamSlot,(void*)&createPipelineStateStream};
+    patchClass(*reinterpret_cast<void***>(device2),&stream,1);
+    device2->Release();
+}
 // Called with every device Play gives a guest. Logs the answers that pick a
 // game's renderer path: shader model (SM6 availability), UMA/tile-based
 // architecture, feature levels, and the adapter LUID.
@@ -790,6 +802,7 @@ inline void adopt(ID3D12Device* device) {
     if(!device||!sink)return;
     size_t count=0;const Patch* patches=devicePatches(count);
     if(!patchClass(*reinterpret_cast<void***>(device),patches,count))return;
+    adoptStreamPath(device);
     emit(fmt("diagnostics on: failed D3D12 create/query/submit calls are logged once per distinct call (caps %llu/%llu)",
         (unsigned long long)kMaxFailures,(unsigned long long)kMaxProbes));
     report(true,"device node count",fmt("device nodes=%u",device->GetNodeCount()));

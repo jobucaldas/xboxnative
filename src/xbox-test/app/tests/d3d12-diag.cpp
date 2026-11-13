@@ -16,6 +16,9 @@ static std::vector<std::string> lines;
 static void sinkLine(const char* text){lines.push_back(text);}
 static size_t count(const char* needle){size_t n=0;for(auto& l:lines)if(l.find(needle)!=std::string::npos)++n;return n;}
 static HRESULT STDMETHODCALLTYPE alwaysInvalid(void*,void*,void*,void*){return E_INVALIDARG;}
+// The fake object's IUnknown slots for the stream-hook guard test.
+static HRESULT STDMETHODCALLTYPE noInterface(IUnknown*,REFIID,void** out){if(out)*out=nullptr;return E_NOINTERFACE;}
+static ULONG STDMETHODCALLTYPE refCount(IUnknown*){return 1;}
 static ID3D12Device* make() {
     ID3D12Device* device=nullptr;
     if(SUCCEEDED(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,__uuidof(ID3D12Device),(void**)&device)))return device;
@@ -151,6 +154,30 @@ int main() {
     d3d12_diag::adopt(device);
     size_t classesAfterFirst=d3d12_diag::classCount.load();
     CHECK(classesAfterFirst==1);
+    // The stream hook sits in the table of the ID3D12Device2 pointer the device
+    // answers (on this Wine runtime that table is shared with ID3D12Device).
+    {
+        ID3D12Device2* device2=nullptr;
+        CHECK(SUCCEEDED(device->QueryInterface(__uuidof(ID3D12Device2),(void**)&device2))&&device2);
+        if(device2) {
+            CHECK((*reinterpret_cast<void***>(device2))[47]==reinterpret_cast<void*>(&d3d12_diag::createPipelineStateStream));
+            device2->Release();
+        }
+    }
+    // The stream hook is written only through a pointer that implements
+    // ID3D12Device2. A fake with a 44-slot table and no ID3D12Device2 must keep
+    // the words after its table (where slot 47 would land) untouched.
+    {
+        void* table[48]{};
+        table[0]=reinterpret_cast<void*>(&noInterface);table[1]=reinterpret_cast<void*>(&refCount);table[2]=reinterpret_cast<void*>(&refCount);
+        for(int i=44;i<48;++i) table[i]=reinterpret_cast<void*>(uintptr_t(0x1000+i));
+        void** object[1]={table};
+        d3d12_diag::adoptStreamPath(reinterpret_cast<IUnknown*>(object));
+        bool untouched=true;
+        for(int i=44;i<48;++i) untouched=untouched&&table[i]==reinterpret_cast<void*>(uintptr_t(0x1000+i));
+        CHECK(untouched);
+        CHECK(count("has no ID3D12Device2")==1);
+    }
     CHECK(count("diagnostics on")==1&&count("device nodes=")==1);
     // The capability answers a game branches on are logged once each.
     CHECK(count("CheckFeatureSupport feature=")>=4);
