@@ -435,7 +435,27 @@ struct Surface : d3dshim::Base, IDirect3DSurface9 {
     // buffer and standalone surfaces are level 0.
     UINT level=0;
     bool cpuVisible=false;                   // SYSTEMMEM, SCRATCH or DYNAMIC
+    // A level of a MANAGED texture locks through the texture's staging shadow
+    // (the GPU texture itself has no CPU access); null for other surfaces.
+    // Both references are owned: the shadow keeps the staging copy alive, the
+    // container keeps the texture wrapper alive, as a D3D9 level surface does.
+    ID3D11Texture2D* shadow=nullptr;
+    IDirect3DTexture9* container=nullptr;   // the texture wrapper this level is of, AddRef'd
+    // The resource an outstanding lock mapped: the shadow for a MANAGED level,
+    // the texture itself otherwise. The unlock and the destructor unmap it.
+    ID3D11Texture2D* mappedRes=nullptr;
     bool locked=false;
+    DWORD lockedFlags=0;
+    // The one place a lock ends, from UnlockRect or from the destructor of a
+    // surface the guest released while still locked: unmap what was mapped,
+    // then copy a written shadow level up to the texture the sampler reads.
+    void finishLock() {
+        if(!locked)return;
+        if(context&&mappedRes)context->Unmap(mappedRes,level);
+        if(context&&shadow&&texture&&!(lockedFlags&D3DLOCK_READONLY))
+            context->CopySubresourceRegion(texture,level,0,0,0,shadow,level,nullptr);
+        locked=false;
+    }
     // D3D9's surfaces and swap chains hold their device weakly: the device owns
     // them, not the other way round. Base::owner would be a strong reference, so
     // the device's own implicit back buffer would keep the device alive forever.
@@ -443,7 +463,9 @@ struct Surface : d3dshim::Base, IDirect3DSurface9 {
     // defined below this wrapper.
     IDirect3DDevice9* device=nullptr;
     ~Surface() {
-        if(locked&&context)context->Unmap(texture,level);
+        finishLock();
+        if(shadow)shadow->Release();
+        if(container)container->Release();
         if(rtv)rtv->Release();
         if(dsv)dsv->Release();
     }
@@ -469,9 +491,12 @@ struct Surface : d3dshim::Base, IDirect3DSurface9 {
     DWORD STDMETHODCALLTYPE GetPriority() override { return 0; }
     void STDMETHODCALLTYPE PreLoad() override {}
     D3DRESOURCETYPE STDMETHODCALLTYPE GetType() override { return D3DRTYPE_SURFACE; }
-    HRESULT STDMETHODCALLTYPE GetContainer(REFIID,void** container) override {
-        if(container)*container=nullptr;
-        return D3DERR_INVALIDCALL;   // surfaces made here have no parent texture
+    HRESULT STDMETHODCALLTYPE GetContainer(REFIID id,void** out) override {
+        if(!out)return D3DERR_INVALIDCALL;
+        *out=nullptr;
+        // A level surface holds its texture; a standalone surface has none.
+        if(!container)return D3DERR_INVALIDCALL;
+        return container->QueryInterface(id,out);
     }
     HRESULT STDMETHODCALLTYPE GetDesc(D3DSURFACE_DESC* out) override {
         if(!out)return D3DERR_INVALIDCALL;
@@ -489,18 +514,23 @@ struct Surface : d3dshim::Base, IDirect3DSurface9 {
             return D3DERR_INVALIDCALL;
         }
         if(locked)return D3DERR_INVALIDCALL;   // D3D9 allows one lock at a time
+        // A shadow (a MANAGED texture level) is staging, so a plain lock is
+        // read-write and only D3DLOCK_READONLY takes the write away, as for a
+        // SYSTEMMEM texture.
+        mappedRes=shadow?shadow:texture;
         D3D11_MAPPED_SUBRESOURCE mapped{};
-        HRESULT hr=context->Map(texture,level,textureMapMode(stagingPool(desc.Pool),flags),0,&mapped);
-        if(FAILED(hr))return D3DERR_INVALIDCALL;
+        HRESULT hr=context->Map(mappedRes,level,
+            shadow?textureMapMode(true,flags):textureMapMode(stagingPool(desc.Pool),flags),0,&mapped);
+        if(FAILED(hr)){mappedRes=nullptr;return D3DERR_INVALIDCALL;}
         locked=true;
+        lockedFlags=flags;
         out->pBits=mapped.pData;
         out->Pitch=INT(mapped.RowPitch);
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE UnlockRect() override {
         if(!locked)return D3DERR_INVALIDCALL;
-        context->Unmap(texture,level);
-        locked=false;
+        finishLock();
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE GetDC(HDC* dc) override { if(dc)*dc=nullptr;return D3DERR_INVALIDCALL; }
@@ -691,12 +721,22 @@ struct Texture : Resource<IDirect3DTexture9> {
         if(!surface)return E_OUTOFMEMORY;
         // The level surface shares the texture object and takes its own
         // reference, so it outlives the texture wrapper exactly as D3D9 allows.
+        // It also holds its container: releasing the texture wrapper first must
+        // not free the D3D11 texture a held surface still locks, and the
+        // shadow reference keeps the staging copy alive with it.
         texture->AddRef();
         surface->texture=texture;
         surface->inner=texture;
         surface->device=device;
         surface->context=context;
         surface->cpuVisible=cpuVisible;
+        // A MANAGED texture level locks through the texture's staging shadow:
+        // the GPU texture has no CPU access now that MANAGED is spelled
+        // default + shadow at every mip count.
+        if(shadow)shadow->AddRef();
+        surface->shadow=shadow;
+        surface->container=this;
+        surface->container->AddRef();
         surface->level=level;
         GetLevelDesc(level,&surface->desc);
         // A level of a texture that can be rendered to answers a render target
@@ -707,7 +747,7 @@ struct Texture : Resource<IDirect3DTexture9> {
             view.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
             view.Texture2D.MipSlice=level;
             if(FAILED(device11->CreateRenderTargetView(texture,&view,&surface->rtv))) {
-                d3dshim::destroy(surface);
+                d3dshim::destroy(surface);   // ~Surface drops texture, shadow, container
                 return D3DERR_INVALIDCALL;
             }
         }
@@ -1155,12 +1195,13 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         // resource with one, so the two pools get exactly what they allow.
         if(desc.Usage==D3D11_USAGE_DYNAMIC&&!desc.BindFlags)desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
         if(desc.Usage==D3D11_USAGE_STAGING)desc.BindFlags=0;
-        // A MANAGED texture is CPU-writable and sampled, which D3D11 spells
-        // dynamic + shader resource; a mipmapped one cannot be dynamic, so the
-        // texture itself is default and the wrapper keeps a staging copy that
-        // LockRect maps (see Texture::LockRect), which is how D3D11 spells a
-        // managed resource that is lockable at every level.
-        if(pool==D3DPOOL_MANAGED&&desc.MipLevels>1&&desc.Usage==D3D11_USAGE_DYNAMIC) {
+        // A MANAGED texture is CPU-writable and sampled. It is spelled DEFAULT
+        // + shader resource with a staging shadow the wrapper keeps for
+        // LockRect (see Texture::LockRect), for every mip count: D3D11 has no
+        // dynamic mip chain, and a dynamic single-mip texture is the one
+        // spelling the console's d3d11on12 wrapping path device-removes on
+        // (0x887a0005/0x887a0020 after prior draws, d3d9-triangle-variants v4).
+        if(pool==D3DPOOL_MANAGED&&desc.Usage==D3D11_USAGE_DYNAMIC) {
             desc.Usage=D3D11_USAGE_DEFAULT;
             desc.CPUAccessFlags=0;
             if(!desc.BindFlags)desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
@@ -1185,10 +1226,11 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         wrapper->context=context();
         const UINT mips=levels?levels:mipChain(width,height);
         wrapper->cpuVisible=usageFor(pool,usage)!=D3D11_USAGE_DEFAULT;
-        // A mipmapped MANAGED texture is default (D3D11 has no dynamic mip
-        // chain), but D3D9 lets a managed resource be locked at every level, so
-        // it gets a staging copy to lock through.
-        if(pool==D3DPOOL_MANAGED&&mips>1) {
+        // A MANAGED texture is default (D3D11 has no dynamic mip chain, and a
+        // dynamic single-mip texture device-removes on the console's d3d11on12
+        // wrapping path), but D3D9 lets a managed resource be locked at every
+        // level, so it gets a staging copy to lock through.
+        if(pool==D3DPOOL_MANAGED) {
             D3D11_TEXTURE2D_DESC shadowDesc{};
             texture->GetDesc(&shadowDesc);
             shadowDesc.Usage=D3D11_USAGE_STAGING;
