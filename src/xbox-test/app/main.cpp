@@ -3527,7 +3527,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         in.lastActivityTick=guest_overlay::lastPresentTick.load(std::memory_order_acquire);
         in.nowTick=uint64_t(qpc.QuadPart);
         in.ticksPerSecond=uint64_t(g_freq.QuadPart);
-        in.guestFault=guest->faulted.load(std::memory_order_acquire);
+        in.guestFault=guest->faulted.load(std::memory_order_acquire)
+                    || guest_overlay::deviceLost.load(std::memory_order_acquire);   // Present failed with a lost device (bugbot r4559178794)
         in.guestFinished=guest->finished.load(std::memory_order_acquire);
         const auto v=guest_watchdog::evaluate(in);
         // Recovery needs proof of a NEW present since death: the heartbeat
@@ -3599,26 +3600,57 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                     }
                     if(gctx) {
                         m_guestChainBB->GetDesc(&bd);
-                        const bool bgra = bd.Format==DXGI_FORMAT_B8G8R8A8_UNORM
-                                       || bd.Format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
-                        if(!bgra) {
-                            // Unsupported format: skip the copy, present the
-                            // chain's existing content untouched.
-                            logf("watchdog present: unsupported BB format %u %ux%u; skipping copy",
-                                 (unsigned)bd.Format,(unsigned)bd.Width,(unsigned)bd.Height);
-                        } else if(bd.Width==W && bd.Height==H) {
-                            gctx->UpdateSubresource(m_guestChainBB.get(), 0, nullptr, g_fb.data(), W * 4, 0);
+                        // Format decision (bugbot r4559178790): g_fb is BGRA.
+                        // copy for the BGRA family, channel-swap for R8G8B8A8
+                        // (the live overlay supports it, so the dead page must
+                        // appear there too), and for anything else CLEAR the
+                        // back buffer to a solid colour — never a silent skip:
+                        // the force-quit guide must stay reachable on every
+                        // chain, and the log says why the page is a plain fill.
+                        const uint8_t up=guest_watchdog::dead_upload((DWORD)bd.Format);
+                        if(up==guest_watchdog::DeadUpload::copy) {
+                            if(bd.Width==W && bd.Height==H) {
+                                gctx->UpdateSubresource(m_guestChainBB.get(), 0, nullptr, g_fb.data(), W * 4, 0);
+                            } else {
+                                // Guest resized its chain: scale g_fb into a
+                                // BB-sized canvas (nearest) so neither the copy
+                                // reads past g_fb nor the upload past the BB.
+                                std::vector<uint32_t> scaled=ui_guide::scale_nearest(
+                                    g_fb.data(), int(W), int(H), int(bd.Width), int(bd.Height));
+                                gctx->UpdateSubresource(m_guestChainBB.get(), 0, nullptr,
+                                                        scaled.data(), size_t(bd.Width)*4, 0);
+                            }
+                        } else if(up==guest_watchdog::DeadUpload::swizzle) {
+                            // R8G8B8A8 back buffer: swap R<->B on upload.
+                            const size_t n=size_t(W)*H;
+                            std::vector<uint32_t> rgba(n);
+                            for(size_t i=0;i<n;++i){uint32_t p=g_fb.data()[i];
+                                rgba[i]=(p&0xFF00FF00u)|((p>>16)&0xFFu)|((p&0xFFu)<<16);}
+                            if(bd.Width==W && bd.Height==H) {
+                                gctx->UpdateSubresource(m_guestChainBB.get(), 0, nullptr, rgba.data(), W * 4, 0);
+                            } else {
+                                std::vector<uint32_t> scaled=ui_guide::scale_nearest(
+                                    rgba.data(), int(W), int(H), int(bd.Width), int(bd.Height));
+                                gctx->UpdateSubresource(m_guestChainBB.get(), 0, nullptr,
+                                                        scaled.data(), size_t(bd.Width)*4, 0);
+                            }
                         } else {
-                            // Guest resized its chain: scale g_fb into a
-                            // BB-sized canvas (nearest) so neither the copy
-                            // reads past g_fb nor the upload past the BB.
-                            std::vector<uint32_t> scaled=ui_guide::scale_nearest(
-                                g_fb.data(), int(W), int(H), int(bd.Width), int(bd.Height));
-                            gctx->UpdateSubresource(m_guestChainBB.get(), 0, nullptr,
-                                                    scaled.data(), size_t(bd.Width)*4, 0);
+                            // Unsupported format (FP16, 10:10:10:2, ...): clear
+                            // to dark grey so the guide's card still reads.
+                            static_assert(sizeof(UINT)==4,"clear path assumes 32-bit");
+                            logf("watchdog present: BB format %u %ux%u not uploadable; clearing to solid colour",
+                                 (unsigned)bd.Format,(unsigned)bd.Width,(unsigned)bd.Height);
+                            const UINT grey=0xff202020u;
+                            if(bd.Width==W && bd.Height==H) {
+                                std::vector<UINT> fill(size_t(W)*H,grey);
+                                gctx->UpdateSubresource(m_guestChainBB.get(), 0, nullptr, fill.data(), W * 4, 0);
+                            } else {
+                                std::vector<UINT> fill(size_t(bd.Width)*bd.Height,grey);
+                                gctx->UpdateSubresource(m_guestChainBB.get(), 0, nullptr, fill.data(), size_t(bd.Width)*4, 0);
+                            }
                         }
                     }
-                    HRESULT hr = m_guestChain->Present(1, 0);
+                    HRESULT hr = guest_overlay::watchdog_present(m_guestChain.get(), 1, 0);   // original (unhooked) Present: the hook would re-stamp the guest heartbeat (bugbot r4559178782)
                     if (FAILED(hr)) { logf("watchdog present hr=0x%08lx", (unsigned long)hr); Sleep(100); }
                 }
                 m_frame++;

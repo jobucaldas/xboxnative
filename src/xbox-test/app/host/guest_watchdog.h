@@ -13,6 +13,7 @@
 // offer force quit.
 #pragma once
 #include <cstdint>
+#include <windows.h>   // HRESULT, DXGI_STATUS/ERROR codes, DWORD (format enums)
 
 namespace guest_watchdog {
 
@@ -129,6 +130,41 @@ constexpr DWORD kDebugPrintWide = 0x4001000A;      // DBG_PRINTEXCEPTION_WIDE_C 
 constexpr bool containedFault(DWORD code) {
     return code != kExitException && code != kMissingException
         && code != kDebugPrint && code != kDebugPrintWide;
+}
+
+// The heartbeat decision for one guest Present result (bugbot
+// r4559178794): a hooked present that FAILS must not stamp the heartbeat,
+// or a guest that keeps calling Present into a removed device — getting
+// DXGI_ERROR_DEVICE_REMOVED back every frame while the screen is frozen —
+// stays "alive" forever. S_OK and DXGI_STATUS_OCCLUDED (a live game the
+// compositor temporarily hides) keep the heartbeat; a lost device is
+// reported immediately (no 10 s wait: the screen is already dead); any
+// other failure stamps nothing but does not kill (transient — e.g.
+// DXGI_ERROR_INVALID_CALL while the guest rebinds targets).
+struct PresentAlive { enum : uint8_t { yes = 0, no, lost }; };
+constexpr uint8_t present_alive(HRESULT hr) {
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG
+        || hr == DXGI_ERROR_DEVICE_RESET)
+        return PresentAlive::lost;
+    return SUCCEEDED(hr) ? PresentAlive::yes : PresentAlive::no;
+}
+
+// How the dead page reaches the guest's back buffer (bugbot r4559178790):
+// the launcher's g_fb is BGRA (0xAARRGGBB in memory). Copy for the BGRA
+// family (g_fb uploads 1:1), channel-swap for R8G8B8A8 (the live overlay
+// already draws there, so the dead page must appear on those games too),
+// CLEAR for anything else — never a silent skip: the caller paints a solid
+// colour so the force-quit guide is still reachable and the log says why.
+struct DeadUpload { enum : uint8_t { copy = 0, swizzle, clear }; };
+constexpr uint8_t dead_upload(DWORD fmt) {
+    switch (fmt) {
+    case 87: case 91: case 88: case 93:   // B8G8R8A8/X8 UNORM(+sRGB)
+        return DeadUpload::copy;
+    case 28: case 29:                     // R8G8B8A8 UNORM(+sRGB)
+        return DeadUpload::swizzle;
+    default:                              // FP16, 10:10:10:2, block formats...
+        return DeadUpload::clear;
+    }
 }
 
 } // namespace guest_watchdog

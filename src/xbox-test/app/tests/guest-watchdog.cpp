@@ -24,6 +24,10 @@ using guest_watchdog::Step;
 using guest_watchdog::screen_for;
 using guest_watchdog::step;
 using guest_watchdog::containedFault;
+using guest_watchdog::present_alive;
+using guest_watchdog::PresentAlive;
+using guest_watchdog::dead_upload;
+using guest_watchdog::DeadUpload;
 using guest_watchdog::kSilenceSeconds;
 
 int main() {
@@ -261,6 +265,67 @@ int main() {
         // (donor kernel32) gets the protocol exception in SEH; both protocol
         // codes are informational, so neither is a fault.
         CHECK(!containedFault(0x4001000A));  // DBG_PRINTEXCEPTION_WIDE_C
+    }
+
+    // Heartbeat gate for a Present result (bugbot r4559178794): only an
+    // ACCEPTED present proves the guest's screen is alive. After a device
+    // removal the guest keeps calling Present and gets an error back every
+    // frame; stamping those kept the heartbeat fresh and the guest was
+    // never declared dead.
+    {
+        CHECK(present_alive(S_OK) == PresentAlive::yes);
+        CHECK(present_alive(0x087a0001) == PresentAlive::yes);   // DXGI_STATUS_OCCLUDED: a live game the compositor hides — still presents fine
+        CHECK(present_alive(0x887a0005) == PresentAlive::lost);  // DXGI_ERROR_DEVICE_REMOVED: dead now, no 10 s wait
+        CHECK(present_alive(0x887a0006) == PresentAlive::lost);  // DXGI_ERROR_DEVICE_HUNG
+        CHECK(present_alive(0x887a0007) == PresentAlive::lost);  // DXGI_ERROR_DEVICE_RESET
+        // Other failures stamp nothing but do not kill (transient; silence
+        // then ages normally through evaluate).
+        CHECK(present_alive(E_FAIL) == PresentAlive::no);
+        CHECK(present_alive(0x887a0004) == PresentAlive::no);   // DXGI_ERROR_INVALID_CALL while the guest rebinds targets
+        // The wire contract: record() stamps the heartbeat exactly when
+        // present_alive says yes, and flags deviceLost exactly when it says
+        // lost (asserted here on the decision, not the atomics — the
+        // overlay's record() is the only caller and is one if per branch).
+        CHECK((present_alive(S_OK) == PresentAlive::yes) != (present_alive(0x887a0005) == PresentAlive::yes));
+    }
+
+    // Dead-page upload decision (bugbot r4559178790): g_fb is BGRA. The
+    // dead page must appear on EVERY chain the live overlay draws to —
+    // R8G8B8A8 included (channel-swap) — and never a silent skip: an
+    // unsupported format falls back to a clear colour so the force-quit
+    // guide stays reachable.
+    {
+        CHECK(dead_upload(87) == DeadUpload::copy);   // B8G8R8A8_UNORM: g_fb uploads 1:1
+        CHECK(dead_upload(91) == DeadUpload::copy);   // B8G8R8A8_UNORM_SRGB
+        CHECK(dead_upload(88) == DeadUpload::copy);   // B8G8R8X8_UNORM (X ignored)
+        CHECK(dead_upload(93) == DeadUpload::copy);   // B8G8R8X8_UNORM_SRGB
+        CHECK(dead_upload(28) == DeadUpload::swizzle);   // R8G8B8A8_UNORM: the live overlay supports this format
+        CHECK(dead_upload(29) == DeadUpload::swizzle);   // R8G8B8A8_UNORM_SRGB
+        CHECK(dead_upload(10) == DeadUpload::clear);  // R16G16B16A16_FLOAT: clear + log, never silent
+        CHECK(dead_upload(24) == DeadUpload::clear);  // R10G10B10A2_UNORM
+        CHECK(dead_upload(0) == DeadUpload::clear);   // UNKNOWN
+        CHECK(dead_upload(2) == DeadUpload::clear);   // DXGI_FORMAT_R32G32B32A32 (non-4-byte-per-pixel family guard)
+        // Swizzle contract: R<->B preserves alpha and green (the exact loop
+        // the upload path runs).
+        uint32_t p = 0xAABBCCDDu;   // AA BB CC DD in memory: A R G B
+        uint32_t s = (p & 0xFF00FF00u) | ((p >> 16) & 0xFFu) | ((p & 0xFFu) << 16u);
+        CHECK(s == 0xAADDCCBBu);   // A A DD CC BB: alpha and green kept, R and B swapped
+    }
+
+    // Watchdog-present contract (bugbot r4559178782): the launcher's dead
+    // page is presented through the ORIGINAL Present (saved by the hook),
+    // never the chain's patched vtable — the hook would run record() and
+    // stamp the guest's heartbeat with the launcher's own frame, unlatching
+    // guestDead one tick later. Model the contract: a watchdog present
+    // contributes no heartbeat, so the frozen guest's silence keeps aging.
+    {
+        const uint64_t lastGuest = hz * 100;
+        // The launcher presents the dead page every ~16 ms for 11 s.
+        const uint64_t after = lastGuest + uint64_t((kSilenceSeconds + 1.0) * double(hz));
+        Inputs in; in.ticksPerSecond = hz; in.lastActivityTick = lastGuest; in.nowTick = after;
+        auto v = evaluate(in);
+        CHECK(v.dead);   // still dead: the launcher's own presents never refreshed the stamp
+        CHECK(v.reason == Reason::silent);
     }
 
     printf("%u checks, %u failures\n", checks, failures);

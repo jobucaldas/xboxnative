@@ -154,8 +154,22 @@ inline double ms(LARGE_INTEGER a,LARGE_INTEGER b){return double(b.QuadPart-a.Qua
 // a guest that cannot run.
 inline std::atomic<uint64_t> lastPresentTick{0};   // QPC of the last guest present
 inline std::atomic<bool> guestDead{false};         // UI loop set: overlay shows "not responding"
+// Set by record() when the real Present reported a lost device (bugbot
+// r4559178794): the guest keeps calling Present and getting an error back
+// while the screen is frozen — those failures must not keep the heartbeat
+// fresh, and the loss is itself the dead verdict (no 10 s wait). The UI
+// thread's watchdog feeds this into guest_watchdog::Inputs::guestFault.
+inline std::atomic<bool> deviceLost{false};
 inline void note_present(uint64_t tick){lastPresentTick.store(tick,std::memory_order_release);}
-inline void record(LARGE_INTEGER start,LARGE_INTEGER end) {
+inline void record(LARGE_INTEGER start,LARGE_INTEGER end,HRESULT hr) {
+    // Heartbeat gate (bugbot r4559178794): only a present the compositor
+    // ACCEPTED proves the guest's screen is alive. S_OK and
+    // DXGI_STATUS_OCCLUDED (a live game temporarily hidden) stamp; a lost
+    // device flags guest_watchdog's fault path immediately; any other
+    // failure (transient) stamps nothing — silence then ages normally.
+    const uint8_t alive=guest_watchdog::present_alive(hr);
+    if(alive==guest_watchdog::PresentAlive::lost){deviceLost.store(true,std::memory_order_release);return;}
+    if(alive!=guest_watchdog::PresentAlive::yes)return;
     if(!lastPresent.QuadPart){
         lastPresent=firstPresent=start;
         note_present(uint64_t(start.QuadPart));   // first present stamps the heartbeat too (bugbot r4558727855): without it lastPresentTick stays 0 and evaluate reads that as pre-first-present forever — a game that presents once then stalls is never declared dead
@@ -542,7 +556,7 @@ inline HRESULT STDMETHODCALLTYPE present(IDXGISwapChain* c,UINT sync,UINT flags)
         if(pacingLimiter.active())pacingLimiter.acquire();
     }
     LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
-    HRESULT hr=realPresent(c,sync,flags);QueryPerformanceCounter(&b);record(a,b);
+    HRESULT hr=realPresent(c,sync,flags);QueryPerformanceCounter(&b);record(a,b,hr);
     if(FAILED(hr))presentFailure(c,hr);
     return hr;
 }
@@ -555,9 +569,17 @@ inline HRESULT STDMETHODCALLTYPE present1(IDXGISwapChain1* c,UINT sync,UINT flag
         if(pacingLimiter.active())pacingLimiter.acquire();
     }
     LARGE_INTEGER a,b;QueryPerformanceCounter(&a);
-    HRESULT hr=realPresent1(c,sync,flags,p);QueryPerformanceCounter(&b);record(a,b);
+    HRESULT hr=realPresent1(c,sync,flags,p);QueryPerformanceCounter(&b);record(a,b,hr);
     if(FAILED(hr))presentFailure(c,hr);
     return hr;
+}
+// The UI thread's dead-page present (bugbot r4559178782): goes through the
+// ORIGINAL Present saved by the hook, not the chain's (patched) vtable —
+// the hook would run draw()+record() and stamp the guest's heartbeat with
+// the launcher's own frame, making a hung guest look alive again on the
+// next watchdog tick. Also skips draw()/pacing, which are guest concerns.
+inline HRESULT watchdog_present(IDXGISwapChain* c,UINT sync,UINT flags) {
+    return realPresent?realPresent(c,sync,flags):c->Present(sync,flags);
 }
 inline bool patch(void** slot,void* hook,void** original) {
     if(*slot==hook)return true;
