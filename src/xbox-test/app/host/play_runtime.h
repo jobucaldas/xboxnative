@@ -1903,7 +1903,7 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // dynamic and mapped-forwarder imports alike (see processCreation).
     if(processCreation(name) && (key=="kernel32.dll" || key.find("api-ms-win-core-")==0)) return processExport(name);
     if(shellLaunch(name) && key=="shell32.dll") return shellExport(name);
-    // No guest folder provider: an honest FALSE with an empty path (uwph/shell32).
+    // Folder CSIDLs answer as the guest's known-folder route does (uwph/shell32).
     if(name && key=="shell32.dll" && !strcmp(name,"SHGetSpecialFolderPathW")) return (uintptr_t)&shell_folder::getSpecialFolderPathW;
     if(auto graphics=play_graphics::resolve(dll,name,ordinal))return graphics;
     if(name && (key=="kernel32.dll"||key=="kernelbase.dll"||key=="ntdll.dll"||key.find("api-ms-win-core-")==0)) if(auto p=processApi(name)) return p;

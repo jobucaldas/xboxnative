@@ -147,7 +147,7 @@ off-device filtering, dispatch, destruction and thread-isolation regression.
 `EnumDisplaySettingsExW` reports the same single mode as `EnumDisplaySettingsW`.
 `IsWindowEnabled` reads the record's own `WS_DISABLED` bit. `GetWindowTextA`
 converts the title to the ANSI code page and truncates to `size-1` bytes. The
-winmm joystick family (`audio/joystick.h`) and `SHGetSpecialFolderPathW`
-(`uwph/shell32`) are fail-safe answers for a console with no joystick driver and
-no guest folder provider; they are routed from `audio/routes.h` and
-`app/host/play_runtime.h`, not from this DLL.
+winmm joystick family (`audio/joystick.h`) answers as a console with no joystick
+driver; `SHGetSpecialFolderPathW` (`uwph/shell32`) answers folder CSIDLs through the
+same system `SHGetKnownFolderPath` the guest's known-folder route uses. Both are
+routed from `audio/routes.h` and `app/host/play_runtime.h`, not from this DLL.

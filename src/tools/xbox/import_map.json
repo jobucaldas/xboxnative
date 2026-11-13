@@ -201,7 +201,7 @@
       "overrides": [
         {
           "class": "uwph",
-          "reason": "uwph shell folder refusal (src/xbox-test/uwph/shell32/special_folder.h): no guest folder provider, so FALSE with an empty path. No folder is claimed; saves need a real redirect.",
+          "reason": "uwph shell folder answer (src/xbox-test/uwph/shell32/special_folder.h): CSIDL to KNOWNFOLDERID, answered by the system SHGetKnownFolderPath the guest's known-folder route already uses (KF_FLAG_CREATE for fCreate). Ids without a file path (CSIDL_DESKTOP) and unknown ids fail with FALSE.",
           "exports": [
             "SHGetSpecialFolderPathW"
           ]
