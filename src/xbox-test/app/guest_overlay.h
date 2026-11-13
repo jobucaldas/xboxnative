@@ -156,7 +156,11 @@ inline std::atomic<uint64_t> lastPresentTick{0};   // QPC of the last guest pres
 inline std::atomic<bool> guestDead{false};         // UI loop set: overlay shows "not responding"
 inline void note_present(uint64_t tick){lastPresentTick.store(tick,std::memory_order_release);}
 inline void record(LARGE_INTEGER start,LARGE_INTEGER end) {
-    if(!lastPresent.QuadPart){lastPresent=firstPresent=start;return;}
+    if(!lastPresent.QuadPart){
+        lastPresent=firstPresent=start;
+        note_present(uint64_t(start.QuadPart));   // first present stamps the heartbeat too (bugbot r4558727855): without it lastPresentTick stays 0 and evaluate reads that as pre-first-present forever — a game that presents once then stalls is never declared dead
+        return;
+    }
     Frame f{ms(firstPresent,start),ms(lastPresent,start),ms(start,end)};lastPresent=start;
     note_present(uint64_t(start.QuadPart));   // watchdog heartbeat: the guest presented
     std::lock_guard<std::mutex> l(framesM);

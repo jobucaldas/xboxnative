@@ -80,4 +80,37 @@ constexpr Verdict evaluate(const Inputs& in) {
     return {false, Reason::none};
 }
 
+// Which screen the launcher loop draws, in precedence order. The dead page
+// must beat the launch banner: the launch phase number is stale once the
+// guest is declared dead (it stays in its "running" phase while the guest
+// ran and is never rewound by the watchdog), so without this ordering the
+// launch splash would cover the "Game not responding" page exactly in the
+// scenario the watchdog exists for. Mirrors ui_nav::launch_banner_up's
+// banner condition with dead-first precedence.
+enum class Screen : uint8_t { game = 0, banner, dead };
+constexpr Screen screen_for(bool guestDead, int launchPhase, bool guestSurface) {
+    if (guestDead) return Screen::dead;
+    if ((launchPhase == 1 || launchPhase == 3) && !guestSurface) return Screen::banner;
+    return Screen::game;
+}
+
+// One watchdog step of the dead/recovery state. A dead verdict latches
+// guestDead; while latched the tick keeps evaluating, and only a heartbeat
+// that advanced past the tick recorded at death clears it (the guest is
+// presenting again — possible only after a silence verdict, because
+// faulted/finished are never cleared). Returns the post-step state.
+struct Step {
+    bool dead = false;         // guestDead after this step
+    bool guestSurface = false; // m_guestSurface after this step
+};
+constexpr Step step(bool wasDead, bool hadSurface, const Verdict& v, bool heartbeatAdvanced) {
+    if (!wasDead) {
+        if (v.dead) return {true, false};   // latch: take the surface away
+        return {false, hadSurface};         // alive, unchanged
+    }
+    if (v.dead) return {true, false};            // still (or newly) dead
+    if (heartbeatAdvanced) return {false, true}; // fresh present: recover
+    return {true, false};                        // still silent: stays dead
+}
+
 } // namespace guest_watchdog

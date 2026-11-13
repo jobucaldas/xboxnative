@@ -19,6 +19,10 @@ static unsigned checks = 0, failures = 0;
 using guest_watchdog::Inputs;
 using guest_watchdog::evaluate;
 using guest_watchdog::Reason;
+using guest_watchdog::Screen;
+using guest_watchdog::Step;
+using guest_watchdog::screen_for;
+using guest_watchdog::step;
 using guest_watchdog::kSilenceSeconds;
 
 int main() {
@@ -145,6 +149,88 @@ int main() {
         Inputs in; in.ticksPerSecond = hz; in.lastActivityTick = nearWrap;
         in.nowTick = nearWrap + hz;   // 1 s of presents ago, crossing the wrap
         CHECK(!evaluate(in).dead);
+    }
+
+    // Dead-screen precedence (bugbot r4558727825): the launch phase is stale
+    // once the guest dies — it stays in its running phase and the watchdog
+    // never rewinds it, so the dead page must be checked BEFORE the banner
+    // or the launch splash covers the "Game not responding" page.
+    {
+        // Dead guest while the launch phase still says "running" (3): dead
+        // page wins, not the banner.
+        CHECK(screen_for(true, 3, false) == Screen::dead);
+        // Same with the surface still up (dead was just latched).
+        CHECK(screen_for(true, 3, true) == Screen::dead);
+        // Dead during an in-flight launch (phase 1): still the dead page.
+        CHECK(screen_for(true, 1, false) == Screen::dead);
+        // Not dead, launch in progress with no surface yet: banner.
+        CHECK(screen_for(false, 1, false) == Screen::banner);
+        CHECK(screen_for(false, 3, false) == Screen::banner);
+        // Not dead, surface up: game.
+        CHECK(screen_for(false, 3, true) == Screen::game);
+        CHECK(screen_for(false, 0, true) == Screen::game);
+        // Not dead, no launch running, no surface: game (idle launcher).
+        CHECK(screen_for(false, 0, false) == Screen::game);
+    }
+
+    // Recovery state machine (bugbot r4558727845): alive -> dead -> alive.
+    // While dead the tick keeps evaluating; only a heartbeat that advanced
+    // past the death tick clears the latch (silence recovery — faulted and
+    // finished are terminal and never clear).
+    {
+        // Alive, no verdict: unchanged.
+        Step s = step(false, true, {false, Reason::none}, false);
+        CHECK(!s.dead);
+        CHECK(s.guestSurface);
+        // Alive, dead verdict: latch dead and take the surface away.
+        s = step(false, true, {true, Reason::silent}, false);
+        CHECK(s.dead);
+        CHECK(!s.guestSurface);
+        // Dead, verdict still dead, no heartbeat advance: stays dead.
+        s = step(true, false, {true, Reason::silent}, false);
+        CHECK(s.dead);
+        CHECK(!s.guestSurface);
+        // Dead, silence cleared (fresh present beat the death tick): recover.
+        s = step(true, false, {false, Reason::none}, true);
+        CHECK(!s.dead);
+        CHECK(s.guestSurface);
+        // Dead, heartbeat advanced but a fault is now reported: stays dead.
+        s = step(true, false, {true, Reason::fault}, true);
+        CHECK(s.dead);
+        CHECK(!s.guestSurface);
+        // Full cycle: alive -> dead -> (still silent) -> recovered.
+        s = step(false, true, {true, Reason::silent}, false);
+        CHECK(s.dead && !s.guestSurface);
+        s = step(s.dead, s.guestSurface, {true, Reason::silent}, false);
+        CHECK(s.dead && !s.guestSurface);
+        s = step(s.dead, s.guestSurface, {false, Reason::none}, true);
+        CHECK(!s.dead && s.guestSurface);
+    }
+
+    // One present then stall (bugbot r4558727855): the first hooked present
+    // must stamp the heartbeat too, so lastActivityTick != 0 and the silence
+    // clock runs. Before, the first-present path returned without stamping,
+    // leaving lastActivityTick == 0 forever — which evaluate treats as
+    // pre-first-present — and a game that presented once then hung was never
+    // declared dead. Model the overlay's stamp-then-evaluate contract: every
+    // present (including the first) sets lastActivityTick.
+    {
+        // The contract the overlay must uphold: a single present produces a
+        // nonzero stamp, so evaluate can age it.
+        const uint64_t firstPresentTick = hz * 100;
+        CHECK(firstPresentTick != 0);   // a real QPC tick is never 0
+        // The stall: 11 s after that one present, with the stamp in place
+        // (as note_present on the first-present path now guarantees).
+        Inputs in; in.ticksPerSecond = hz; in.lastActivityTick = firstPresentTick;
+        in.nowTick = firstPresentTick + uint64_t((kSilenceSeconds + 1.0) * double(hz));
+        auto v = evaluate(in);
+        CHECK(v.dead);
+        CHECK(v.reason == Reason::silent);
+        // And the same trace WITHOUT the first-present stamp stays alive —
+        // the pre-fix behavior, pinned so the stamp's absence is visible.
+        Inputs pre; pre.ticksPerSecond = hz; pre.lastActivityTick = 0;
+        pre.nowTick = firstPresentTick + uint64_t((kSilenceSeconds + 1.0) * double(hz));
+        CHECK(!evaluate(pre).dead);
     }
 
     printf("%u checks, %u failures\n", checks, failures);

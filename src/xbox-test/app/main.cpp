@@ -2779,6 +2779,30 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             text8(bx + 40, by + 60, "Game not responding - press View+Menu for the guide", 4, C3(255, 120, 120));
             text8(bx + 40, by + 130, "FPS 0", 4, C3(255, 120, 120));
         }
+        // The guide card (bugbot r4558727840): menuOpen must still draw the
+        // guide when the guest is dead, or View+Menu opens nothing and force
+        // quit is unreachable. The card is pure CPU (draw_guide_canvas), so
+        // composite it straight into g_fb — the launcher's own canvas, no
+        // guest device involved. g_fb is always design size (1920x1080), so
+        // the card sits 1:1 at its design position.
+        if (guest_overlay::menuOpen.load(std::memory_order_acquire)) {
+            ui::Canvas cardC(nullptr, 0, 0, 0);
+            auto& card = guest_overlay::draw_guide_canvas(cardC);
+            const int cw = cardC.width(), ch = cardC.height();
+            const int cx0 = int(ui_guide::kCardX), cy0 = int(ui_guide::kCardY);
+            uint32_t* dst = g_fb.data();
+            for (int y = 0; y < ch; ++y) {
+                const int gy = cy0 + y;
+                if (gy < 0 || gy >= H) continue;
+                uint32_t* drow = dst + size_t(gy) * W + cx0;
+                const uint32_t* srow = card.data() + size_t(y) * cw;
+                for (int x = 0; x < cw; ++x) {
+                    const unsigned a = (srow[x] >> 24) & 0xFF;
+                    if (a == 0) continue;
+                    drow[x] = ui_guide::composite_pixel(drow[x], srow[x], a, false);
+                }
+            }
+        }
     }
 
     void draw_launch_banner(double t) {
@@ -3093,17 +3117,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // The 1920x1080 g_fb persists across screens: every frame starts from
         // a clean page so no screen draws over the previous one's remnants.
         fill(0, 0, W, H, ui::theme::page);
+        // Guest watchdog first (bugbot r4558727825): the launch phase is
+        // stale once the guest dies — it stays in its running phase and is
+        // never rewound by the watchdog — so the banner check below would
+        // cover the dead page with the launch splash in exactly the
+        // scenario the watchdog exists for. Dead page beats banner.
+        if (guest_overlay::guestDead.load(std::memory_order_acquire)) { draw_guest_dead(t); return; }
         // item D22: Play covers the screen with the game's wide art and the
         // launch status until the guest's own window is up (or the launch
         // ends). It sits above every screen, since Play can start from the
         // library or the game page.
         if (ui_nav::launch_banner_up(g_launch.phase.load(), m_guestSurface)) { draw_launch_banner(t); return; }
-        // Guest watchdog: the game stopped presenting (crash or hang). The
-        // game's last frame stays on the guest's chain but the launcher draws
-        // over it here: the game page dimmed, with a "Game not responding"
-        // banner. The FPS counter the overlay froze at is replaced by 0 —
-        // the truth for a guest that presents nothing.
-        if (guest_overlay::guestDead.load(std::memory_order_acquire)) { draw_guest_dead(t); return; }
         if (s == S_LOGIN) draw_login();
         else if (s == S_BOOT || s == S_LOADING) draw_startup(t);   // item D15: the launch/loading screens
         else if (s == S_LIBRARY) draw_library(t);
@@ -3131,7 +3155,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // item D22: the launch banner owns the screen while a launch prepares;
         // B cancels it (only before game code starts), A and every other
         // button are ignored so the game page underneath cannot act.
-        if (ui_nav::launch_banner_up(g_launch.phase.load(), m_guestSurface)) {
+        // Guest watchdog first (bugbot r4558727825, same precedence as draw):
+        // a dead guest's pad drives the guide, not the launch banner, whose
+        // phase is stale. B must not cancel a launch for a guest that died.
+        if (guest_overlay::guestDead.load(std::memory_order_acquire)) {
+            // fall through to the normal UI path: menu_command handles the
+            // guide (the dead gate in it lifts the drawable requirement).
+        }
+        else if (ui_nav::launch_banner_up(g_launch.phase.load(), m_guestSurface)) {
             if (has(edge, GamepadButtons::B)) {
                 if (cancel_launch(source)) logf("launch banner: cancelled (%s)", source);
                 else logf("launch banner: B ignored, the game already started (%s)", source);
@@ -3473,9 +3504,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // launcher's "Game not responding" screen through the guest's own chain
     // (kept at hand-off), with the guide (force quit) reachable. A guest that
     // later presents again (it hung, not died) clears the dead state on the
-    // next watchdog tick that sees a fresh heartbeat.
+    // next watchdog tick that sees a fresh heartbeat — the tick keeps
+    // evaluating while dead (bugbot r4558727845: the early return meant
+    // guestDead could never clear). Recovery is silence-only: faulted and
+    // finished are terminal in play_runtime and never clear.
     void guest_watchdog_tick(double t) {
-        if(!m_guestSurface)return;
+        const bool wasDead=guest_overlay::guestDead.load(std::memory_order_acquire);
+        if(!wasDead && !m_guestSurface)return;   // not in the guest-run phase: the launch watchdog's domain
         auto guest=play_runtime::observed.load(std::memory_order_acquire);
         if(!guest)return;
         LARGE_INTEGER qpc;QueryPerformanceCounter(&qpc);
@@ -3486,12 +3521,21 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         in.guestFault=guest->faulted.load(std::memory_order_acquire);
         in.guestFinished=guest->finished.load(std::memory_order_acquire);
         const auto v=guest_watchdog::evaluate(in);
-        if(!v.dead){m_guestDeadLogged=false;return;}
-        if(!m_guestDeadLogged){logf("watchdog: guest %s — launcher UI resumes (fps counter -> 0, guide available)",v.reason==guest_watchdog::Reason::fault?"raised a contained exception":"stopped presenting");m_guestDeadLogged=true;}
-        guest_overlay::guestDead=true;
-        m_guestSurface=false;   // the loop draws the launcher again below; the guide works from here
+        // Recovery needs proof of a NEW present since death: the heartbeat
+        // must differ from the one recorded at the dead verdict.
+        const bool heartbeatAdvanced=wasDead && in.lastActivityTick!=0 && in.lastActivityTick!=m_deadHeartbeatTick;
+        const auto s=guest_watchdog::step(wasDead,m_guestSurface,v,heartbeatAdvanced);
+        if(s.dead&&!wasDead){   // fresh dead verdict: log once, remember the heartbeat to beat
+            if(!m_guestDeadLogged){logf("watchdog: guest %s — launcher UI resumes (fps counter -> 0, guide available)",v.reason==guest_watchdog::Reason::fault?"raised a contained exception":"stopped presenting");m_guestDeadLogged=true;}
+            m_deadHeartbeatTick=in.lastActivityTick;
+        } else if(!s.dead) {
+            m_guestDeadLogged=false;m_deadHeartbeatTick=0;   // recovered: re-arm the log for a future death
+        }
+        guest_overlay::guestDead=s.dead;
+        m_guestSurface=s.guestSurface;
     }
     bool m_guestDeadLogged=false;
+    uint64_t m_deadHeartbeatTick=0;   // lastPresentTick at the moment death was declared (recovery beats it)
     void Run() {
         logf("Run: entering"); m_window.Activate();
         load_fonts();   // Selawik faces from the package's fonts/ folder; on failure the bitmap fallback stays
@@ -3534,7 +3578,37 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 m_guestChainBB=nullptr;
                 if(FAILED(m_guestChain->GetBuffer(0,__uuidof(ID3D11Texture2D),m_guestChainBB.put_void())))m_guestChainBB=nullptr;
                 if(m_guestChainBB) {
-                    m_ctx->UpdateSubresource(m_guestChainBB.get(), 0, nullptr, g_fb.data(), W * 4, 0);
+                    // The guest chain belongs to the GUEST's native device
+                    // (bugbot r4558727834): the launcher's m_ctx is a
+                    // different device, and UpdateSubresource across devices
+                    // is invalid. Get the chain's own immediate context.
+                    winrt::com_ptr<ID3D11Device> gdev;
+                    winrt::com_ptr<ID3D11DeviceContext> gctx;
+                    D3D11_TEXTURE2D_DESC bd{};
+                    if(SUCCEEDED(m_guestChain->GetDevice(__uuidof(ID3D11Device),gdev.put_void()))) {
+                        gdev->GetImmediateContext(gctx.put());
+                    }
+                    if(gctx) {
+                        m_guestChainBB->GetDesc(&bd);
+                        const bool bgra = bd.Format==DXGI_FORMAT_B8G8R8A8_UNORM
+                                       || bd.Format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+                        if(!bgra) {
+                            // Unsupported format: skip the copy, present the
+                            // chain's existing content untouched.
+                            logf("watchdog present: unsupported BB format %u %ux%u; skipping copy",
+                                 (unsigned)bd.Format,(unsigned)bd.Width,(unsigned)bd.Height);
+                        } else if(bd.Width==W && bd.Height==H) {
+                            gctx->UpdateSubresource(m_guestChainBB.get(), 0, nullptr, g_fb.data(), W * 4, 0);
+                        } else {
+                            // Guest resized its chain: scale g_fb into a
+                            // BB-sized canvas (nearest) so neither the copy
+                            // reads past g_fb nor the upload past the BB.
+                            std::vector<uint32_t> scaled=ui_guide::scale_nearest(
+                                g_fb.data(), int(W), int(H), int(bd.Width), int(bd.Height));
+                            gctx->UpdateSubresource(m_guestChainBB.get(), 0, nullptr,
+                                                    scaled.data(), size_t(bd.Width)*4, 0);
+                        }
+                    }
                     HRESULT hr = m_guestChain->Present(1, 0);
                     if (FAILED(hr)) { logf("watchdog present hr=0x%08lx", (unsigned long)hr); Sleep(100); }
                 }
