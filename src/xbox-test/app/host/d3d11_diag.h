@@ -105,6 +105,11 @@ inline bool claimPresentFailureOnce(std::atomic<bool>& logged,bool testPresent) 
     bool expected=false;
     return logged.compare_exchange_strong(expected,true,std::memory_order_acq_rel);
 }
+inline bool claimTraceFlushOnce(std::atomic<bool>& flushed,bool tracing) {
+    if(!tracing)return false;
+    bool expected=false;
+    return flushed.compare_exchange_strong(expected,true,std::memory_order_acq_rel);
+}
 inline void flushTrace() {
     if(!traceOn.load(std::memory_order_acquire))return;
     TraceEntry snapshot[kTraceRing]{};

@@ -536,9 +536,11 @@ inline PresentFn realPresent=nullptr;inline Present1Fn realPresent1=nullptr;
 // screen is frozen. The first failed non-test Present asks the device why,
 // once: without it the only trace is the caller's error hiding the removal.
 inline std::atomic<bool> presentFailureLogged{false};
+inline std::atomic<bool> traceFlushLogged{false};
 inline void presentFailure(IDXGISwapChain* c,HRESULT hr,bool testPresent=false) {
     const bool tracing=d3d11_diag::traceOn.load(std::memory_order_acquire);
     const bool first=d3d11_diag::claimPresentFailureOnce(presentFailureLogged,testPresent);
+    const bool flushRing=d3d11_diag::claimTraceFlushOnce(traceFlushLogged,tracing);
     if(tracing||first) {
         winrt::com_ptr<ID3D11Device> dev;
         if(SUCCEEDED(c->GetDevice(__uuidof(ID3D11Device),dev.put_void()))&&dev) {
@@ -547,8 +549,8 @@ inline void presentFailure(IDXGISwapChain* c,HRESULT hr,bool testPresent=false) 
                 (unsigned long)hr,(unsigned long)reason,tracing?" (trace: each failed Present)":"");
             if(auto s=d3d11_diag::sink)s(b);
         }
-        if(tracing&&first)d3d11_diag::flushTrace();
     }
+    if(flushRing)d3d11_diag::flushTrace();
 }
 inline void tracePresentResult(const char* method,UINT sync,UINT flags,HRESULT hr) {
     if(!d3d11_diag::traceOn.load(std::memory_order_acquire))return;

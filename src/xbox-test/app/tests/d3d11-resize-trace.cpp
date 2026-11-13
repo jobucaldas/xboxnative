@@ -16,10 +16,13 @@ static unsigned checks=0,failures=0;
 
 int main() {
     d3d11_diag::sink=collect;
-    std::atomic<bool> failureLogged{false};
+    std::atomic<bool> failureLogged{false},traceFlushed{false};
     CHECK(!d3d11_diag::claimPresentFailureOnce(failureLogged,true));
     CHECK(!failureLogged.load());
+    CHECK(!d3d11_diag::claimTraceFlushOnce(traceFlushed,false));
+    CHECK(d3d11_diag::claimTraceFlushOnce(traceFlushed,true));
     CHECK(d3d11_diag::claimPresentFailureOnce(failureLogged,false));
+    CHECK(!d3d11_diag::claimTraceFlushOnce(traceFlushed,true));
     CHECK(!d3d11_diag::claimPresentFailureOnce(failureLogged,false));
     d3d11_diag::traceOn.store(true);
     d3d11_diag::traceNextSeq=1;
