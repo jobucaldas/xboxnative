@@ -22,19 +22,22 @@
 // Device-creation attempts (console evidence, PR #160 and issue #175: every
 // D3D12CreateDevice shape fails there with DXGI_ERROR_DEVICE_RESET while
 // d3d11 — which layers on a D3D12 device — passes, and so do Mesa's GL d3d12
-// driver and dzn): the fixture tries, in order, the device-factory path the
-// two working consumers take (D3D12GetInterface CLSID_D3D12DeviceFactory ->
-// SetFlags(ALLOW_RETURNING_EXISTING_DEVICE|ALLOW_RETURNING_INCOMPATIBLE_) ->
-// CreateDevice, before any debug-layer enable, FL 1_0_GENERIC first as the GL
-// driver does), then the previous chain: null adapter at FL 11_0, the
-// factory's adapter 0 (Play wraps it; the host route unwraps it) at FL 11_0,
-// then that adapter at FL 12_0. The factory attempts bypass Play's
-// D3D12CreateDevice hook (D3D12GetInterface is not hooked, so GetProcAddress
-// reaches the host's d3d12.dll directly) and log their own results; the host
-// route logs the direct ones. Exit codes: 10 window, 11 no device at all
-// (null adapter and the fallback factory/enum steps failed with their own
-// codes 81/82 first), 81 factory create failed, 82 EnumAdapters1 failed, 83
-// every device-creation attempt failed. 12 CheckFeatureSupport, 13 queue,
+// driver and dzn). HYPOTHESIS, console-unverified: the working consumers get
+// their device through the device factory (D3D12GetInterface
+// CLSID_D3D12DeviceFactory -> SetFlags(ALLOW_RETURNING_*) -> CreateDevice,
+// before any debug-layer enable, FL 1_0_GENERIC first as the GL driver does),
+// not the global export, or the debug-layer enable poisons the create. The
+// fixture runs both shapes and records both result codes in one line so one
+// console run discriminates them: attempt A is the factory path (it bypasses
+// Play's D3D12CreateDevice hook — D3D12GetInterface is not hooked, so
+// GetProcAddress reaches the host's d3d12.dll directly), attempt B the
+// previous chain (null adapter at FL 11_0, the factory's adapter 0 — Play
+// wraps it; the host route unwraps it — at FL 11_0, then that adapter at
+// FL 12_0; the host route logs each direct attempt separately). Whichever
+// attempt yields a device is the one the rest of the run uses; the other
+// still runs so its result lands in the same log line. Exit codes: 10
+// window, 83 no device from either attempt (81 factory create failed, 82
+// EnumAdapters1 failed, before that), 12 CheckFeatureSupport, 13 queue,
 // 14 factory, 15 swap chain, 16 RTV heap, 17 GetBuffer, 18-22
 // allocator/list/fence/event, 40-55 the triangle pipeline, 56 debug-layer
 // errors, 57/58 root signature 1.1, 59-69/79/80 the compute pass (43 =
@@ -45,6 +48,36 @@
 #include <dxgi1_6.h>
 #include "../../uwph/host/shaders/triangle_bytecode.h"
 #include "compute_bytecode.h"
+
+// The device factory interface, hand-declared under fixture-local names: the
+// CI header set (Ubuntu's mingw-w64 13.0.0) predates ID3D12DeviceFactory while
+// newer mingw-w64 (14.0.0) has it, and the fixture must build on both. The
+// vtable order below is copied from the real SDK header (GUIDs and slot order
+// identical: InitializeFromGlobalState, ApplyToGlobalState, SetFlags,
+// GetFlags, GetConfigurationInterface, EnableExperimentalFeatures,
+// CreateDevice); the fixture only ever calls SetFlags and CreateDevice.
+// Declared unconditionally so the two header generations cannot disagree.
+struct FixtureD3D12DeviceFactory : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE InitializeFromGlobalState() = 0;
+    virtual HRESULT STDMETHODCALLTYPE ApplyToGlobalState() = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetFlags(unsigned flags) = 0;
+    virtual unsigned STDMETHODCALLTYPE GetFlags() = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetConfigurationInterface(REFCLSID clsid,REFIID iid,void** ppv) = 0;
+    virtual HRESULT STDMETHODCALLTYPE EnableExperimentalFeatures(UINT count,const IID* iids,void* configurations,UINT* configuration_sizes) = 0;
+    virtual HRESULT STDMETHODCALLTYPE CreateDevice(IUnknown* adapter,D3D_FEATURE_LEVEL feature_level,REFIID riid,void** ppv_device) = 0;
+};
+namespace fixture_d3d12 {
+// The two ALLOW_RETURNING flags (D3D12_DEVICE_FACTORY_FLAG_* in newer
+// headers; named here so the build does not depend on the header generation).
+static const unsigned factoryFlagExisting=0x1;
+static const unsigned factoryFlagIncompatible=0x2;
+// CLSID_D3D12DeviceFactory and IID_ID3D12DeviceFactory (the real SDK's
+// values; newer headers carry them, older ones do not).
+static const GUID deviceFactoryClsid=
+    {0x114863bf,0xc386,0x4aee,{0xb3,0x9d,0x8f,0x0b,0xbb,0x06,0x29,0x55}};
+static const GUID deviceFactoryIid=
+    {0x61f307d3,0xd34e,0x4e7c,{0x83,0x74,0x3b,0xa4,0xde,0x23,0xcc,0xcb}};
+}
 
 extern "C" {
 int d3d12_anchor;
@@ -99,67 +132,93 @@ DWORD d3d12_entry() {
     // stack succeeds — and that d3d11 layers on a D3D12 device, so one can
     // exist in-process. The two consumers that DO get a device there (Mesa's
     // GL d3d12 driver and dzn) never call the global export: they ask
-    // D3D12GetInterface for the ID3D12DeviceFactory, set the two
-    // ALLOW_RETURNING flags and call CreateDevice, before any debug-layer
-    // enable and with D3D_FEATURE_LEVEL_1_0_GENERIC first. Attempt A below is
-    // exactly that path (it bypasses Play's D3D12CreateDevice hook, logging
-    // its own result); the previous chain follows as attempt B so one console
-    // run discriminates all of it. The host route logs each direct attempt
-    // separately (adapter=default vs adapter=given), so the log names the
-    // working path. The debug layer is enabled only after device creation:
-    // enabling it first is the other difference from the working consumers
-    // (HYPOTHESIS: it may poison the create on the console's stack).
+    // D3D12GetInterface for the device factory, set the two ALLOW_RETURNING
+    // flags and call CreateDevice, before any debug-layer enable and with
+    // D3D_FEATURE_LEVEL_1_0_GENERIC first. HYPOTHESIS (console-unverified):
+    // attempt A's path is what works there, or the debug-layer enable was the
+    // poison. Both attempts always run and both result codes land in one log
+    // line, so a single console run discriminates the hypotheses; the device
+    // the rest of the run uses is the one from whichever attempt succeeded
+    // (A preferred). Attempt A bypasses Play's D3D12CreateDevice hook (it
+    // logs its own result); the host route logs the direct ones.
+    // The debug layer is enabled only after both attempts: enabling it first
+    // is the other difference from the working consumers (the second
+    // hypothesis).
     ID3D12Device* device=nullptr;
+    unsigned long hrA=0x8000ffff;   // "not run" sentinel; replaced below
+    unsigned long hrB=0x8000ffff;
     // ---- attempt A: the device factory the working consumers use ----
     // D3D12GetInterface is not in the mingw import library and not hooked by
     // Play, so GetProcAddress reaches the host's d3d12.dll directly — the
     // same bypass the working consumers get by loading d3d12.dll themselves.
     typedef HRESULT (WINAPI* PFN_D3D12GetInterface)(REFCLSID,REFIID,void**);
-    static const GUID deviceFactoryClsid=
-        {0x114863bf,0xc386,0x4aee,{0xb3,0x9d,0x8f,0x0b,0xbb,0x06,0x29,0x55}};
     HMODULE d3d12Module=GetModuleHandleW(L"d3d12.dll");
     auto getInterface=d3d12Module
         ?(PFN_D3D12GetInterface)GetProcAddress(d3d12Module,"D3D12GetInterface"):nullptr;
-    ID3D12DeviceFactory* deviceFactory=nullptr;
     if(getInterface) {
-        HRESULT fhr=getInterface(deviceFactoryClsid,__uuidof(ID3D12DeviceFactory),(void**)&deviceFactory);
+        FixtureD3D12DeviceFactory* deviceFactory=nullptr;
+        HRESULT fhr=getInterface(fixture_d3d12::deviceFactoryClsid,
+            fixture_d3d12::deviceFactoryIid,(void**)&deviceFactory);
         OutputDebugStringA("PLAY-D3D12 attempt A GetInterface(CLSID_D3D12DeviceFactory)\n");
         if(SUCCEEDED(fhr)&&deviceFactory) {
-            deviceFactory->SetFlags(D3D12_DEVICE_FACTORY_FLAG_ALLOW_RETURNING_EXISTING_DEVICE|
-                D3D12_DEVICE_FACTORY_FLAG_ALLOW_RETURNING_INCOMPATIBLE_EXISTING_DEVICE);
+            deviceFactory->SetFlags(fixture_d3d12::factoryFlagExisting|
+                fixture_d3d12::factoryFlagIncompatible);
             static const D3D_FEATURE_LEVEL generic=(D3D_FEATURE_LEVEL)0x100;   // 1_0_GENERIC
-            fhr=deviceFactory->CreateDevice(nullptr,generic,__uuidof(ID3D12Device),(void**)&device);
+            fhr=deviceFactory->CreateDevice(nullptr,generic,
+                __uuidof(ID3D12Device),(void**)&device);
             if(FAILED(fhr)||!device)
                 fhr=deviceFactory->CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,
                     __uuidof(ID3D12Device),(void**)&device);
-            {char b[128];char* p=b;
-             p=append(p,"PLAY-D3D12 attempt A factory CreateDevice hr=");
-             p=appendHex(p,(unsigned long)fhr);
-             p=append(p," device=");p=appendPtr(p,device);
-             *p++='\n';*p=0;OutputDebugStringA(b);}
             deviceFactory->Release();
-        } else {
-            char b[128];char* p=b;
-            p=append(p,"PLAY-D3D12 attempt A GetInterface hr=");
-            p=appendHex(p,(unsigned long)fhr);
-            *p++='\n';*p=0;OutputDebugStringA(b);
         }
+        hrA=(unsigned long)fhr;
     } else {
         OutputDebugStringA("PLAY-D3D12 attempt A skipped: no D3D12GetInterface\n");
+        hrA=0x8007007f;   // ERROR_PROC_NOTFOUND as an HRESULT-style marker
     }
     // ---- attempt B: the direct D3D12CreateDevice chain (Play's hook) ----
-    HRESULT hr=D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,__uuidof(ID3D12Device),(void**)&device);
-    if(FAILED(hr)||!device) {
+    // Always run into a separate pointer: when A produced the device, B's
+    // result is evidence only (the console run must still log whether the
+    // direct shape fails there) and must not overwrite or fail the run.
+    ID3D12Device* deviceB=nullptr;
+    HRESULT hrBhr=D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,
+        __uuidof(ID3D12Device),(void**)&deviceB);
+    if(FAILED(hrBhr)||!deviceB) {
         IDXGIFactory4* factory4=nullptr;
-        if(FAILED(CreateDXGIFactory2(0,__uuidof(IDXGIFactory4),(void**)&factory4))||!factory4)return 81;
-        IDXGIAdapter1* chosen=nullptr;
-        if(FAILED(factory4->EnumAdapters1(0,&chosen))||!chosen){factory4->Release();return 82;}
-        hr=D3D12CreateDevice(chosen,D3D_FEATURE_LEVEL_11_0,__uuidof(ID3D12Device),(void**)&device);
-        if(FAILED(hr)||!device)
-            hr=D3D12CreateDevice(chosen,D3D_FEATURE_LEVEL_12_0,__uuidof(ID3D12Device),(void**)&device);
-        chosen->Release();factory4->Release();
-        if(FAILED(hr)||!device)return 83;
+        if(FAILED(CreateDXGIFactory2(0,__uuidof(IDXGIFactory4),(void**)&factory4))||!factory4){
+            hrB=(unsigned long)hrBhr;
+        } else {
+            IDXGIAdapter1* chosen=nullptr;
+            if(FAILED(factory4->EnumAdapters1(0,&chosen))||!chosen){
+                factory4->Release();
+                hrB=(unsigned long)hrBhr;
+            } else {
+                hrBhr=D3D12CreateDevice(chosen,D3D_FEATURE_LEVEL_11_0,
+                    __uuidof(ID3D12Device),(void**)&deviceB);
+                if(FAILED(hrBhr)||!deviceB)
+                    hrBhr=D3D12CreateDevice(chosen,D3D_FEATURE_LEVEL_12_0,
+                        __uuidof(ID3D12Device),(void**)&deviceB);
+                chosen->Release();factory4->Release();
+                hrB=(unsigned long)hrBhr;
+            }
+        }
+    } else {
+        hrB=(unsigned long)hrBhr;
     }
+    // One line with both codes: the console evidence that discriminates the
+    // hypotheses (A succeeded -> the factory path is the answer; A failed and
+    // B succeeded -> the debug-layer enable was the poison; both failed ->
+    // neither, and the adapter identity is the next probe).
+    {char b[160];char* p=b;
+     p=append(p,"PLAY-D3D12 create A=");
+     p=appendHex(p,hrA);
+     p=append(p," B=");
+     p=appendHex(p,hrB);
+     p=append(p," device=");p=appendPtr(p,device?device:deviceB);
+     *p++='\n';*p=0;OutputDebugStringA(b);}
+    if(!device&&deviceB)device=deviceB;
+    if(deviceB&&deviceB!=device)deviceB->Release();
+    if(!device)return 83;
     // The debug layer, where the platform has it: enabled after the device so
     // the attempts above run in the order the working consumers take, and the
     // recorded errors are counted before the run reports success. Optional —
@@ -188,7 +247,7 @@ DWORD d3d12_entry() {
     desc.BufferCount=3;desc.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;
     desc.Scaling=DXGI_SCALING_STRETCH;desc.AlphaMode=DXGI_ALPHA_MODE_IGNORE;
     IDXGISwapChain1* chain=nullptr;
-    hr=factory->CreateSwapChainForHwnd(queue,window,&desc,nullptr,nullptr,&chain);
+    HRESULT hr=factory->CreateSwapChainForHwnd(queue,window,&desc,nullptr,nullptr,&chain);
     factory->Release();
     if(FAILED(hr)||!chain)return 15;
 
