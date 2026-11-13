@@ -197,7 +197,16 @@
     },
     "shell32.dll": {
       "class": "stub",
-      "reason": "Named x64 ABI failure/empty adapters in entry-stubs.dll for the three-image probe; runtime tolerance remains unverified."
+      "reason": "Named x64 ABI failure/empty adapters in entry-stubs.dll for the three-image probe; runtime tolerance remains unverified.",
+      "overrides": [
+        {
+          "class": "uwph",
+          "reason": "uwph shell folder refusal (src/xbox-test/uwph/shell32/special_folder.h): no guest folder provider, so FALSE with an empty path. No folder is claimed; saves need a real redirect.",
+          "exports": [
+            "SHGetSpecialFolderPathW"
+          ]
+        }
+      ]
     },
     "shlwapi.dll": {
       "class": "stub",
@@ -242,7 +251,25 @@
     "winmm.dll": {
       "class": "stub",
       "reason": "Historical stub policy is retained for the frozen Wine research oracle. The launcher audio provider resolves the 23 real Unity WINMM imports from System32 with per-export console diagnostics; export availability and output playback are verified separately. No successful-return shim replaces a missing native export.",
-      "runtime_provider": "src/xbox-test/audio/routes.h"
+      "runtime_provider": "src/xbox-test/audio/routes.h",
+      "overrides": [
+        {
+          "class": "uwph",
+          "reason": "uwph joystick family (src/xbox-test/audio/joystick.h) for the driver-less console: zero supported devices, JOYERR_PARMS for every device id, MMSYSERR_NODRIVER for caps and config, no buffer written, no fabricated input. Pads reach games through XInput and HID.",
+          "exports": [
+            "joyConfigChanged",
+            "joyGetDevCapsA",
+            "joyGetDevCapsW",
+            "joyGetNumDevs",
+            "joyGetPos",
+            "joyGetPosEx",
+            "joyGetThreshold",
+            "joyReleaseCapture",
+            "joySetCapture",
+            "joySetThreshold"
+          ]
+        }
+      ]
     },
     "ws2_32.dll": {
       "class": "system",
