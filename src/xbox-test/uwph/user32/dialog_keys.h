@@ -57,8 +57,11 @@ extern "C" BOOL WINAPI c_EndDialog(HWND,INT_PTR) {
 }
 // No pointer input or capture exists, so a drag can never start.
 extern "C" BOOL WINAPI c_DragDetect(HWND,POINT) { return FALSE; }
-// No mouse-to-pointer source exists (see README), so mouse-in-pointer is never
-// enabled. Disabling is a successful no-op, as on Windows; enabling fails.
+// Windows 8+: EnableMouseInPointer(TRUE) returns TRUE and routes mouse input as
+// WM_POINTER*; FALSE disables it and returns TRUE. This lane has no mouse source
+// that could feed WM_POINTER*, so enabling deliberately fails with
+// ERROR_NOT_SUPPORTED and the enabled state stays FALSE. The intent is that the
+// caller falls back to legacy WM_MOUSE* input (not verified on console).
 extern "C" BOOL WINAPI c_EnableMouseInPointer(BOOL enable) {
  if(!enable) return TRUE;
  SetLastError(ERROR_NOT_SUPPORTED);
