@@ -23,11 +23,12 @@
 // standard CRT headers; vsprintf is from its declaration line (stdio.h:459). The
 // static check in tests/x86-apiset.cpp compares the registry to this table.
 //
-// kWidthSensitive: names whose width, struct layout or return register differs between
-// the msvcrt.dll surface and the UCRT, or that the surface does not implement as the
-// UCRT does. A contract name for them is never aliased. Each entry cites the UCRT
-// declaration (mingw-w64 14 headers, sys-include) that makes it width- or
-// layout-dependent. Lowercase, as the binder compares.
+// kWidthSensitive: names whose ABI differs on i386 between the msvcrt.dll surface and
+// the UCRT. A name is listed only for a real difference: a 64-bit time_t (__time64_t),
+// an __int64 argument or return (EDX:EAX), or a struct with time_t or _off_t fields.
+// A 32-bit intptr_t, HANDLE, size_t, long or int is the same on i386 and binds. Each
+// listed name cites its UCRT declaration in the comment at kWidthSensitive. Lowercase,
+// as the binder compares.
 #pragma once
 #include <string>
 namespace x86 {
@@ -136,43 +137,53 @@ inline const UcrtDecl kUcrtDeclared[] = {
     {"wcsxfrm", 3},
 };
 
-// Width-sensitive names. Served by the surface (in kUcrtDeclared), excluded from
-// the contract path until a thunk with the UCRT width exists:
-//  time            time.h:236 time_t time(time_t*) __MINGW_ASM_CALL(_time32): the
-//                  i686 mingw default is a 32-bit time_t (_mingw.h:394-396); the
-//                  UCRT default is __time64_t (time.h:54-57, _time64 at time.h:186).
-//  fgetpos,fsetpos stdio.h:555 "64bit only, no 32bit version"; fpos_t is __int64
-//                  (stdio.h:112). The surface does not model the position.
-//  _filelengthi64  io.h:249 returns __int64: EDX:EAX. The thunk sets EAX only.
-//  _lseeki64       io.h:256 returns __int64 (EDX:EAX) and takes an __int64 offset.
-//                  The thunk sets EAX only, so a direct msvcrt import would read a
-//                  stale EDX. Excluded here; the thunk needs a 64-bit return path.
-//  _fstat64        sys/stat.h:71 takes struct _stat64*, whose _off_t and time fields
-//                  differ by time_t width (_mingw_stat64.h:37 and time fields).
-//  localeconv      locale.h:91 returns struct lconv*. The surface writes its own
-//                  48-byte block; the layout was not checked against the UCRT path.
-//  wcsftime        time.h:198. The surface returns 0 with no output (a stub), so a
-//                  contract import would silently produce nothing.
-//  clock           the surface returns a constant 0 (a stub). A timing loop would
-//                  stop measuring.
-// Declared-not-served family (never aliased if a thunk is added later): the time_t
-// family (time.h:142 asctime, :177 _difftime64, :180 _gmtime64, :182 _localtime64,
-// :184 _mktime64, :186 _time64, :160 _time32, :240 difftime, :241 localtime,
-// :243 gmtime, :245 ctime, :247 mktime), _ftime (sys/timeb.h:78, :88, :91),
-// the stat family (sys/stat.h:71 _fstat64, :74 _stat64, :83 _wstat64;
-// _mingw_stat64.h:13-24 macros), the find family (io.h:85-97 macros, :251 _findfirst64,
-// :254 _findnext64), and utime (sys/utime.h:89-90 _utime64/_futime64, :105-106).
+// Width-sensitive names, each with its UCRT declaration (mingw-w64 14, sys-include),
+// listed only where the i386 ABI differs from the msvcrt.dll surface.
+//
+// Served by the surface (in kUcrtDeclared) and excluded:
+//  time            time.h:236 "time_t time(time_t*) __MINGW_ASM_CALL(_time32)". The UCRT
+//                  default makes time_t __time64_t, an __int64 (time.h:54-57; _time64 at
+//                  time.h:186). The surface returns a 32-bit value in EAX.
+//  _filelengthi64  io.h:249 "__int64 _filelengthi64(int)": a 64-bit return in EDX:EAX.
+//                  The thunk sets EAX only.
+//  _lseeki64       io.h:256 "__int64 _lseeki64(int, __int64, int)": a 64-bit offset and
+//                  a 64-bit return in EDX:EAX. The thunk sets EAX only.
+//
+// Declared, not served: a guard for a later thunk; they bind to nothing today.
+//  time_t parameter or return (32 vs 64-bit time_t, time.h:54-57): _time32 time.h:160,
+//    _time64 time.h:186, mktime time.h:247, _mktime64 time.h:184, localtime time.h:241,
+//    _localtime64 time.h:182, gmtime time.h:243, _gmtime64 time.h:180, difftime
+//    time.h:240, _difftime64 time.h:177, ctime time.h:245.
+//  struct with time_t or _off_t fields: _ftime (sys/timeb.h:88, macro over
+//    _ftime32/_ftime64; struct __timeb64 at sys/timeb.h:78 holds __time64_t); _stat
+//    (_mingw_stat64.h:15,22, macro over _stat32/_stat64i32); _stat64 sys/stat.h:74;
+//    _wstat (_mingw_stat64.h:17,24) and _wstat64 sys/stat.h:83; _fstat (_mingw_stat64.h:
+//    13,20, macro over _fstat32/_fstat64i32); _findfirst and _findnext (io.h:85-97,
+//    macros over the 32- and 64-bit finddata structs), _findfirst64 io.h:251,
+//    _findnext64 io.h:254; _utime and _futime (sys/utime.h:105-106, macros over
+//    _utime32/_utime64), _utime64 sys/utime.h:89 (struct __utimbuf64), _futime64
+//    sys/utime.h:90.
+//
+// Not listed, by the same rule: _get_osfhandle (io.h:311, intptr_t is int on i386,
+// corecrt.h:64), _open_osfhandle (io.h:312, intptr_t argument), fgetpos and fsetpos
+// (stdio.h:555, 579; fpos_t is 64-bit in both the UCRT and msvcrt, stdio.h:112),
+// _fstat64 (sys/stat.h:71; struct _stat64 is the same layout on both), localeconv
+// (locale.h:91; struct lconv is pointers and chars), wcsftime (time.h:198; struct tm
+// is int-only), clock (time.h:146; clock_t is long, time.h:63), asctime (time.h:142;
+// it takes a struct tm, not a time_t).
 inline const char* const kWidthSensitive[] = {
-    "time", "_time32", "_time64", "mktime", "_mktime64", "localtime", "_localtime64",
-    "gmtime", "_gmtime64", "difftime", "_difftime64", "ctime", "asctime",
+    // served and excluded
+    "time", "_filelengthi64", "_lseeki64",
+    // declared, not served: time_t parameter or return
+    "_time32", "_time64", "mktime", "_mktime64", "localtime", "_localtime64", "gmtime",
+    "_gmtime64", "difftime", "_difftime64", "ctime",
+    // declared, not served: struct with time_t or _off_t fields
     "_ftime", "_ftime32", "_ftime64",
     "_stat", "_stat32", "_stat64", "_stat64i32", "_wstat", "_wstat32", "_wstat64", "_wstat64i32",
-    "_fstat", "_fstat32", "_fstat64", "_fstat64i32", "_fstati64",
+    "_fstat", "_fstat32", "_fstat64i32",
     "_findfirst", "_findfirst32", "_findfirst64", "_findfirst64i32",
     "_findnext", "_findnext32", "_findnext64", "_findnext64i32",
     "_utime", "_utime32", "_utime64", "_futime", "_futime32", "_futime64",
-    "_filelengthi64", "_lseeki64", "fgetpos", "fsetpos",
-    "localeconv", "wcsftime", "clock",
 };
 
 inline std::string lower(std::string s) {
