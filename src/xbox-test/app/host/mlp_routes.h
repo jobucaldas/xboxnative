@@ -18,6 +18,7 @@
 {"d3d11.dll", "system"},
 {"d3d12.dll", "system"},
 {"d3d9.dll", "uwph"},
+{"d3dcompiler_47.dll", "wine-pe"},
 {"dbghelp.dll", "stub"},
 {"dinput8.dll", "wine-pe"},
 {"dwmapi.dll", "system"},

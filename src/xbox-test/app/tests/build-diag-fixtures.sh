@@ -3,7 +3,7 @@
 # build-diag-fixtures.sh OUTDIR -> OUTDIR/{fixture-crt.exe,play-vulkan-dzn.exe,
 # play-d3d9.exe,play-d3d9-triangle.exe,play-d3d9-triangle-variants.exe,
 # play-d3d9-textured.exe,play-d3d10.exe,play-d3d10-triangle.exe,
-# play-d3d11.exe,play-d3d12.exe,play-opengl.exe} - the console self-test's
+# play-d3d10-compile.exe,play-d3d11.exe,play-d3d12.exe,play-opengl.exe} - the console self-test's
 # fixtures (selftest_plan.h).
 #
 # These are the same guest programs tests/play-runtime.sh builds for the
@@ -78,6 +78,14 @@ lld "${common[@]}" /entry:d3d10_entry /include:d3d10_relocation /out:"$out/play-
 clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d10-triangle.cpp" -o "$work/d3d10-triangle.obj"
 lld "${common[@]}" /entry:d3d10tri_entry /include:d3d10tri_relocation /out:"$out/play-d3d10-triangle.exe" \
   "$work/d3d10-triangle.obj" "$mingw_lib/libd3d10.a" "$mingw_lib/libdxgi.a" "$mingw_lib/libuuid.a" "${libs[@]}"
+
+# The compile fixture proves the donor bridge: D3D10CompileShader through the
+# shim's by-name d3dcompiler_47 load (Play serves the probed Wine donor), the
+# compiled vs_4_0 drawn and read back. Exit 42 only when the compile produced a
+# real DXBC and the draw landed.
+clangxx --target=x86_64-w64-windows-gnu "${fixture_flags[@]}" -c "$here/play-d3d10-compile.cpp" -o "$work/d3d10-compile.obj"
+lld "${common[@]}" /entry:d3d10compile_entry /include:d3d10compile_relocation /out:"$out/play-d3d10-compile.exe" \
+  "$work/d3d10-compile.obj" "$mingw_lib/libd3d10.a" "$mingw_lib/libdxgi.a" "$mingw_lib/libuuid.a" "${libs[@]}"
 
 # The OpenGL fixture runs the startup path an SDL3 GL game takes (issue #176): opengl32.dll from the runtime directory (Mesa's d3d12 WGL
 # driver), a pixel format through gdi32's forwarded wgl*, a context, a cleared

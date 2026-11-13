@@ -29,6 +29,7 @@ inline const Mode* modes(size_t& count) {
         {"d3d9-textured", "play-d3d9-textured.exe", false},
         {"d3d10", "play-d3d10.exe", false},
         {"d3d10-triangle", "play-d3d10-triangle.exe", false},
+        {"d3d10-compile", "play-d3d10-compile.exe", false},
         {"opengl", "play-opengl.exe", false},
         {"d3d11", "play-d3d11.exe", false},
         {"d3d12", "play-d3d12.exe", false},
@@ -165,6 +166,10 @@ inline std::string verdict(const std::string& mode, bool finished, bool executed
     // The D3D10 drawing fixture blocks the same way: every pass ran but the
     // pixels (or streamed vertices) did not read back as drawn.
     if (mode == "d3d10-triangle" && code == 43) return "BLOCKED pixel-readback";
+    // The compile fixture: the compile step's own codes name where it stopped
+    // (44 compile failed, 45 not DXBC, 46-48 create layout/buffer/shader,
+    // 47/49/50 readback), 43 is the same BLOCKED readback.
+    if (mode == "d3d10-compile" && code == 43) return "BLOCKED pixel-readback";
     // The D3D12 fixture's device-creation failure (play-d3d12.cpp): 83 = no
     // attempt yielded a device. The two creation shapes (the device factory
     // and the direct D3D12CreateDevice chain) always both run and their

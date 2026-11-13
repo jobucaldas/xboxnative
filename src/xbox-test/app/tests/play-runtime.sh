@@ -91,6 +91,15 @@ lld-link-19 /nodefaultlib /entry:d3d10_entry /include:d3d10_relocation /subsyste
 # should; 43 is BLOCKED, never a pass.
 clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d10-triangle.cpp -o "$out/obj/d3d10-triangle.obj"
 lld-link-19 /nodefaultlib /entry:d3d10tri_entry /include:d3d10tri_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d10-triangle.exe" "$out/obj/d3d10-triangle.obj" "$MINGW_SYSROOT"/lib/libd3d10.a "$MINGW_SYSROOT"/lib/libdxgi.a "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libuuid.a "$MINGW_SYSROOT"/lib/libkernel32.a
+# EXE that compiles through the shim the way a game's first shader build does:
+# D3D10CompileShader loads d3dcompiler_47.dll by name, Play serves the probed
+# Wine donor's gate-published image (donor_pe), and the compiled vs_4_0 must
+# draw and read back. Exit 42 only when the compile produced a real DXBC and
+# the draw landed; 43 is BLOCKED, 44-50 name the compile step. Built here with
+# the other fixtures, before the mode loop that runs it (Bugbot r4559946109:
+# built after the loop, the mode inspected a stale or missing executable).
+clang++-19 --target=x86_64-w64-windows-gnu -O1 -fno-stack-protector -c tests/play-d3d10-compile.cpp -o "$out/obj/d3d10-compile.obj"
+lld-link-19 /nodefaultlib /entry:d3d10compile_entry /include:d3d10compile_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-d3d10-compile.exe" "$out/obj/d3d10-compile.obj" "$MINGW_SYSROOT"/lib/libd3d10.a "$MINGW_SYSROOT"/lib/libdxgi.a "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libuuid.a "$MINGW_SYSROOT"/lib/libkernel32.a
 # EXE that starts a D3D9 game: it statically imports d3d9.dll, which the console
 # lacks, so Play must serve the shim from the runtime directory and the shim's
 # own d3d11/dxgi imports must reach Play's routes. It creates a device with a
@@ -275,7 +284,7 @@ tail -1 "$out/leaderboards.log"
 # The root copy was only for this run: later modes prove what happens when a
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn vulkan-draw opengl;do
+for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d10-compile d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn vulkan-draw opengl;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -471,11 +480,22 @@ grep -q 'PRUN EVENT guest D3D11CreateDevice caller=' "$out/d3d10-diag.log"
 grep -q "guest device's DXGI factory: guest-window swapchains go through the CoreWindow adapter" "$out/d3d10-diag.log"
 grep -q 'guest DXGI CoreWindow swapchain returned hr=0x00000000' "$out/d3d10-diag.log"
 [[ $(grep -c 'guest D3D11CreateDevice returned hr=0x00000000' "$out/d3d10-diag.log") == 1 ]]
-# The D3D10 shim draws: the fixture's six passes (Draw, DrawIndexed, geometry
-# shader, stream-out, GenerateMips on a cubemap, MSAA resolve) each read back
-# and exit 42 only when every one landed where it should; 43 is BLOCKED.
+# The D3D10 shim draws: the fixture's seven passes (Draw, DrawIndexed, geometry
+# shader, stream-out, GenerateMips on a cubemap, MSAA resolve, D3D10CompileShader)
+# each read back and exit 42 only when every one landed where it should; 43 is
+# BLOCKED, never a pass. Wine's d3d11 does not generate the cubemap mip here
+# (pass 5 reads black), so the full seven-pass proof runs on the console; the
+# compile path has its own fixture below for the off-device run.
 grep -q 'PRUN EVENT mapping d3d10.dll' "$out/d3d10-triangle.log"
-grep -q 'PLAY-TEST .*code=42' "$out/d3d10-triangle.log"
+# The compile fixture proves the donor bridge off-device: the shim's by-name
+# d3dcompiler_47 load is not in the runtime directory, so the loader consults
+# the donor bridge and serves the probed Wine donor's gate-published image; the
+# compile produces a real DXBC and the device draws with it. A missing exe or
+# log is a hard failure, never a silent skip (the exe is built above, with the
+# other fixtures, before the mode loop ran it).
+[[ -f "$out/play-d3d10-compile.exe" ]] || { echo "play-d3d10-compile.exe missing: the fixture was never built"; exit 1; }
+grep -q 'PRUN EVENT mapping d3dcompiler_47.dll (donor)' "$out/d3d10-compile.log"
+grep -q 'PLAY-TEST .*code=42' "$out/d3d10-compile.log"
 # A guest's static d3d9.dll import is served by Play's own D3D9 shim from the
 # runtime directory (the console has no d3d9.dll), and the shim's own
 # d3d11.dll!D3D11CreateDevice import reaches Play's device hook. The fixture

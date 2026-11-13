@@ -119,6 +119,54 @@ inline BOOL WINAPI version(LPOSVERSIONINFOEXW wanted,DWORD types,DWORDLONG condi
     }
     if(!matched)SetLastError(ERROR_OLD_WIN_VERSION);return matched;
 }
+// Wine's debugstr_an/wn (donor diagnostics) import IsBadStringPtrA/W. The Xbox
+// kernel's export surface for the IsBad* family is unverified, so own the
+// documented semantics: a scan that stops at the first terminator within
+// count, faulting reads reported as bad. Only the probed page range is touched.
+// The Wine host builds with clang-cl, which defines _MSC_VER but emits __try
+// without an SEH handler on x64 (the scope is silently dropped), so it must
+// take the VirtualQuery-bounded path; only real MSVC (the console build) gets
+// the guarded scan.
+#if defined(_MSC_VER) && !defined(__clang__)
+template<class Unit>
+inline BOOL probe_string_reads_units(const void* str,UINT_PTR count) {
+    if(!str)return TRUE;
+    __try {volatile Unit sum=0;auto p=(const volatile Unit*)str;
+        for(UINT_PTR i=0;i<count;++i) {sum+=p[i];if(!p[i])break;}(void)sum;return FALSE;}
+    __except(EXCEPTION_EXECUTE_HANDLER){return TRUE;}
+}
+#else
+template<class Unit>
+inline BOOL probe_string_reads_units(const void* str,UINT_PTR count) {
+    if(!str)return TRUE;
+    auto p=(const volatile Unit*)str;
+    // Callers like Wine's debugstr_a/wn pass (UINT_PTR)-1. Forming end=p+count
+    // would wrap below p and skip the probe, reporting a bad pointer good.
+    // Saturate: the address space after p bounds the scan instead.
+    UINT_PTR remaining=UINT_PTR((UINTPTR_MAX-(uintptr_t)p)/sizeof(Unit));
+    if(count>remaining)count=remaining;
+    auto end=p+count;
+    while(p<end) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        auto page=(const Unit*)((uintptr_t)p&~(UINT_PTR)0xfff);
+        if(!VirtualQuery((LPCVOID)page,&mbi,sizeof mbi)||mbi.State!=MEM_COMMIT
+           ||(mbi.Protect&(PAGE_NOACCESS|PAGE_GUARD)))return TRUE;
+        auto regionEnd=(const Unit*)((BYTE*)mbi.BaseAddress+mbi.RegionSize);
+        auto stop=end<regionEnd?end:regionEnd;
+        volatile Unit sum=0;
+        for(;p<stop;++p) {sum+=*p;if(!*p)break;}(void)sum;
+        if(p<end&&p<stop)break; // terminator found
+    }
+    return FALSE;
+}
+#endif
+inline BOOL probe_string_reads(const void* str,UINT_PTR count) {return probe_string_reads_units<char>(str,count);}
+inline BOOL WINAPI is_bad_string_a(LPCSTR str,UINT_PTR count) {return probe_string_reads(str,count);}
+// Wide strings terminate on a zero WCHAR, not a zero byte: scanning bytes
+// stops at the high half of the first BMP character (L"A" is bytes 41 00), so
+// a pointer valid for one character would pass while debugstr_wn keeps
+// reading. Walk WCHAR units against the character count.
+inline BOOL WINAPI is_bad_string_w(LPCWSTR str,UINT_PTR count) {return probe_string_reads_units<WCHAR>(str,count);}
 inline uintptr_t resolve(const char* name) {
     if(!strcmp(name,"VirtualAlloc"))return (uintptr_t)&alloc;
     if(!strcmp(name,"VirtualProtect"))return (uintptr_t)&protect;
@@ -131,6 +179,8 @@ inline uintptr_t resolve(const char* name) {
     if(!strcmp(name,"LoadLibraryExA"))return (uintptr_t)&load_ex_a;
     if(!strcmp(name,"LoadLibraryA"))return (uintptr_t)&load_a;
     if(!strcmp(name,"VerifyVersionInfoW"))return (uintptr_t)&version;
+    if(!strcmp(name,"IsBadStringPtrA"))return (uintptr_t)&is_bad_string_a;
+    if(!strcmp(name,"IsBadStringPtrW"))return (uintptr_t)&is_bad_string_w;
     return native(name);
 }
 }
