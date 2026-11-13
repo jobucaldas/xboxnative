@@ -97,6 +97,11 @@ struct Guest {
     uint32_t initenv = 0, commode = 0, fmode = 0, mb_cur_max = 0, errno_ptr = 0;
     uint32_t startupinfo = 0, cmdline_ptr = 0, env_ptr = 0, module_name_ptr = 0;
     uint32_t image_base = 0;
+    // The exe's implicit TLS directory (the runner copies it from its Image, so
+    // each new thread gets its own block) and the TEB of the running thread,
+    // mirroring Cpu.fs_base for host helpers that have no Cpu.
+    Image::Tls exe_tls;
+    uint32_t cur_teb = TEB_ADDR;
     // EncodePointer/DecodePointer (and the System variants): the security
     // cookie; VC/UCRT startup encodes every function pointer it stores and
     // decodes it on use, so the pair must be a real inverse or a decoded
@@ -175,8 +180,8 @@ struct Guest {
     }
     void copy_out(uint32_t dst, const void* src, uint32_t n) { if (dst && n) mem.write_bytes(dst, src, n); }
     void copy_in(void* dst, uint32_t src, uint32_t n) { if (src && n) { auto b = mem.read_bytes(src, n); std::memcpy(dst, b.data(), n); } }
-    uint32_t last_error() const { return mem.r32(TEB_ADDR + 0x34); }
-    void set_last_error(uint32_t v) { mem.w32(TEB_ADDR + 0x34, v); }
+    uint32_t last_error() const { return mem.r32(cur_teb + 0x34); }
+    void set_last_error(uint32_t v) { mem.w32(cur_teb + 0x34, v); }
     // A FILE* is one of our three iob entries; anything else is a bad handle.
     // The index is the C stream number: 0 stdin, 1 stdout, 2 stderr.
     int file_index(uint32_t f) const {
@@ -230,19 +235,63 @@ struct Guest {
     void run_atexit(Cpu& c);
     void do_exit(Cpu& c, uint32_t code);
     // Runs every thread body CreateThread recorded, in creation order, before
-    // the blocking wait that triggered it proceeds. Each body runs with an
-    // empty SEH chain and zeroed TEB TLS slots (fs:[0] and fs:[0xE10..]) —
-    // a real thread starts with its own — and both are restored afterwards,
-    // because the synchronous model shares one TEB between all threads.
+    // the blocking wait (or yield) that triggered it proceeds. Each body runs on
+    // its own TEB (a page of its own, fs_base pointing at it), so the SEH chain,
+    // stack bounds, thread id, LastError and TlsSlots are that thread's, as
+    // Windows gives every thread its own TEB. The exe's implicit TLS is per
+    // thread too: the TEB's ThreadLocalStoragePointer (fs:[0x2C]) addresses a
+    // block copied from the image's TLS template, so __declspec(thread) data is
+    // separate per thread (MSDN "Using Thread Local Storage"). TLS callbacks run
+    // with DLL_THREAD_ATTACH before the body and DLL_THREAD_DETACH after it, on
+    // the thread's own TEB; the TEB and block are freed when the thread ends.
+    // The main thread's TEB is restored afterwards.
     static constexpr uint64_t kThreadBudget = 100ull * 1000 * 1000;  // instructions per thread body run
+    static constexpr uint32_t kThreadRegionBase = 0x7E000000u;      // thread TEBs: above the DLL and section arenas
+    struct ThreadTeb { uint32_t base, size; };
+    ThreadTeb map_thread_teb(Cpu& c, uint32_t tid) {
+        uint32_t tls_bytes = exe_tls.present ? 16 + (exe_tls.end - exe_tls.start) + exe_tls.zero_fill : 0;
+        uint32_t size = Memory::PAGE + (tls_bytes + Memory::PAGE - 1) / Memory::PAGE * Memory::PAGE;
+        uint32_t base = kThreadRegionBase;
+        while (!c.mem.free_range(base, size)) {
+            base += 0x10000u;
+            if (base >= 0x7FF00000u) throw std::runtime_error("no address space for a thread TEB");
+        }
+        c.mem.map(base, size, PROT_R | PROT_W);
+        uint32_t main = cur_teb;
+        c.mem.w32(base + 0x00, 0xFFFFFFFFu);                    // ExceptionList: empty chain
+        c.mem.w32(base + 0x04, c.mem.r32(main + 0x04));         // StackBase: the process stack
+        c.mem.w32(base + 0x08, c.mem.r32(main + 0x08));         // StackLimit
+        c.mem.w32(base + 0x18, base);                           // Self
+        c.mem.w32(base + 0x20, c.mem.r32(main + 0x20));         // ClientId.UniqueProcess
+        c.mem.w32(base + 0x24, tid);                            // ClientId.UniqueThread
+        c.mem.w32(base + 0x30, c.mem.r32(main + 0x30));         // ProcessEnvironmentBlock
+        // LastError (0x34) and TlsSlots (0xE10..) start zeroed: this thread's own.
+        if (exe_tls.present) {
+            uint32_t slot = base + Memory::PAGE, block = slot + 16;
+            uint32_t raw = exe_tls.end - exe_tls.start;
+            c.mem.w32(slot, block);                             // ThreadLocalStoragePointer[index 0]
+            c.mem.w32(base + 0x2C, slot);
+            for (uint32_t i = 0; i < raw; ++i) c.mem.w8(block + i, c.mem.r8(exe_tls.start + i));  // template copy; the rest is zero
+        }
+        return ThreadTeb{base, size};
+    }
+    // The exe's TLS callbacks for `reason` (DLL_THREAD_ATTACH 2 / DLL_THREAD_DETACH 3),
+    // called as (image base, reason, NULL) like the loader does.
+    void tls_callbacks_call(Cpu& c, uint32_t reason) {
+        if (!exe_tls.present) return;
+        for (uint32_t p = exe_tls.callbacks; p; p += 4) {
+            uint32_t fn = c.mem.r32(p);
+            if (!fn) break;
+            c.call(fn, {image_base, reason, 0});
+        }
+    }
     void run_pending_threads(Cpu& c) {
         while (!pending_threads.empty()) {
             auto t = pending_threads.front(); pending_threads.erase(pending_threads.begin());
-            uint32_t seh = mem.r32(TEB_ADDR);
-            std::vector<uint32_t> tls(64);
-            for (unsigned i = 0; i < 64; ++i) tls[i] = mem.r32(TEB_ADDR + 0xE10 + i * 4);
-            mem.w32(TEB_ADDR, 0xFFFFFFFFu);  // empty exception chain
-            for (unsigned i = 0; i < 64; ++i) mem.w32(TEB_ADDR + 0xE10 + i * 4, 0);
+            auto id = thread_ids.find(std::get<0>(t));
+            ThreadTeb th = map_thread_teb(c, id != thread_ids.end() ? id->second : 0);
+            uint32_t main_teb = cur_teb, main_fs = c.fs_base;
+            cur_teb = th.base; c.fs_base = th.base;
             // The body's exit code is its return value (EAX), or the code its
             // ExitThread call passed. A returned body is finished too, so
             // GetExitCodeThread must answer this code, not STILL_ACTIVE (MSDN
@@ -258,7 +307,10 @@ struct Guest {
             // the main thread) must fail the run by name instead of hanging the host.
             uint64_t outer_limit = c.limit;
             if (c.executed + kThreadBudget < outer_limit) c.limit = c.executed + kThreadBudget;
-            try { code = c.call(std::get<1>(t), {std::get<2>(t)}); }
+            try {
+                tls_callbacks_call(c, 2);  // DLL_THREAD_ATTACH, on the new thread's TEB
+                code = c.call(std::get<1>(t), {std::get<2>(t)});
+            }
             catch (const ThreadExit&) {
                 // Drop the body's frames: restore the scheduler's registers so
                 // the wait that started the body returns to its caller.
@@ -268,6 +320,7 @@ struct Guest {
             catch (...) {
                 bool budget = c.limit < outer_limit && c.executed > c.limit;
                 c.limit = outer_limit; in_thread_body = outer;
+                cur_teb = main_teb; c.fs_base = main_fs;
                 if (budget) {
                     emit(2, "x86: thread body did not return within its instruction budget\n");
                     throw Fault(FaultKind::InstructionLimit, c.eip, std::get<1>(t), "thread body exceeded its instruction budget");
@@ -275,10 +328,11 @@ struct Guest {
                 throw;
             }
             c.limit = outer_limit;
-            in_thread_body = outer;
             thread_exit_codes[std::get<0>(t)] = code;
-            mem.w32(TEB_ADDR, seh);
-            for (unsigned i = 0; i < 64; ++i) mem.w32(TEB_ADDR + 0xE10 + i * 4, tls[i]);
+            tls_callbacks_call(c, 3);  // DLL_THREAD_DETACH, still on the thread's TEB
+            in_thread_body = outer;
+            cur_teb = main_teb; c.fs_base = main_fs;
+            c.mem.unmap(th.base, th.size);
         }
     }
     // Guest DLL loading (stage 3). `run_dll_mains` runs each loaded DLL's
@@ -685,7 +739,8 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetCurrentProcess", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0xFFFFFFFFu; });
     reg.add("kernel32.dll", "GetCurrentProcessId", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0x1000; });
     reg.add("kernel32.dll", "GetCurrentThread", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0xFFFFFFFEu; });
-    reg.add("kernel32.dll", "GetCurrentThreadId", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0x1004; });
+    // The thread id lives in the running thread's TEB (ClientId.UniqueThread).
+    reg.add("kernel32.dll", "GetCurrentThreadId", Conv::Stdcall, 0, [](Cpu& c) -> uint32_t { return c.mem.r32(c.fs_base + 0x24); });
     reg.add("kernel32.dll", "GetCommandLineA", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return cmdline_ptr; });
     reg.add("kernel32.dll", "GetCommandLineW", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return put_wstr(u"x"); });
     reg.add("kernel32.dll", "GetStartupInfoA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
@@ -786,11 +841,11 @@ inline void Guest::register_all() {
         if (c.arg(1)) mem.w32(c.arg(1), thread_exit_codes.count(c.arg(0)) ? thread_exit_codes[c.arg(0)] : 259u);
         return 1; });
     reg.add("kernel32.dll", "ResumeThread", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });  // was not suspended
-    // The identifier of a thread this surface created; the main thread's (and
-    // its pseudo handle's) is the fixed 0x1004 the surface reports everywhere.
+    // The identifier of a thread this surface created. Any other handle (the
+    // GetCurrentThread pseudo handle) answers the running thread's own id.
     reg.add("kernel32.dll", "GetThreadId", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         auto it = thread_ids.find(c.arg(0));
-        return it != thread_ids.end() ? it->second : 0x1004u; });
+        return it != thread_ids.end() ? it->second : c.mem.r32(c.fs_base + 0x24); });
     reg.add("kernel32.dll", "DuplicateHandle", Conv::Stdcall, 7, [this](Cpu& c) -> uint32_t {
         // One process, no real handle table: the duplicate is the source value.
         if (c.arg(3)) mem.w32(c.arg(3), c.arg(1));
@@ -1015,10 +1070,10 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "TlsFree", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "TlsGetValue", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t i = c.arg(0); if (i >= 64) { set_last_error(87); return 0; }
-        return mem.r32(TEB_ADDR + 0xE10 + i * 4); });
+        return mem.r32(c.fs_base + 0xE10 + i * 4); });
     reg.add("kernel32.dll", "TlsSetValue", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         uint32_t i = c.arg(0); if (i >= 64) { set_last_error(87); return 0; }
-        mem.w32(TEB_ADDR + 0xE10 + i * 4, c.arg(1)); return 1; });
+        mem.w32(c.fs_base + 0xE10 + i * 4, c.arg(1)); return 1; });
     // Interlocked
     reg.add("kernel32.dll", "InterlockedIncrement", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t v = mem.r32(c.arg(0)) + 1; mem.w32(c.arg(0), v); return v; });

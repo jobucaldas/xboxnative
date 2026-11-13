@@ -54,6 +54,35 @@ want=$'x86-tls: start\nx86-tls: block ok\nx86-tls: callback ok\nchecks=11\nfaile
 [[ $out == "$want" ]] || { echo "X86-TLS FAIL: interpreter stdout differs"; echo "$raw"; diff <(echo "$want") <(echo "$out"); exit 1; }
 echo "X86-TLS PASS: implicit TLS block, index, and callback verified in the interpreter (exit 42)"
 
+# Per-thread TLS: the main thread and a CreateThread worker each increment a TLS
+# variable (their own copies, from the template), TLS callbacks get
+# DLL_THREAD_ATTACH/DETACH on the worker, and LastError and the thread id are
+# the worker's own (fixture-tls-threads.c cites the MSDN behaviour).
+"$cc32" -O1 -Wall -Wextra -Werror -ffreestanding -fno-builtin -fno-stack-protector \
+  -fno-asynchronous-unwind-tables -mno-sse -mno-mmx -mno-80387 -nostdlib \
+  -Wl,--entry,_fixture_tls_start@0 -Wl,--subsystem,console -Wl,--dynamicbase \
+  -Wl,--no-seh -Wl,--image-base,0x400000 \
+  -o "$tmp/fixture-tls-threads.exe" "$here/x86-tls/fixture-tls-threads.c" -lkernel32 -lmsvcrt
+python3 - "$tmp/fixture-tls-threads.exe" "$("$nm32" "$tmp/fixture-tls-threads.exe" | awk '$3=="_tls_dir"{print "0x"$1}')" <<'EOF'
+import struct, sys
+path, sym = sys.argv[1], int(sys.argv[2], 0)
+b = bytearray(open(path, 'rb').read())
+pe = struct.unpack_from('<I', b, 0x3c)[0]
+base = struct.unpack_from('<I', b, pe + 24 + 28)[0]
+rva = sym - base
+off = pe + 24 + 96 + 9 * 8
+old = struct.unpack_from('<II', b, off)
+assert old == (0, 0), f'directory 9 not empty: {old}'
+struct.pack_into('<II', b, off, rva, 24)
+open(path, 'wb').write(b)
+EOF
+set +e; traw=$("$tmp/x86-guest" "$tmp/fixture-tls-threads.exe" 2>&1); trc=$?; set -e
+tout=$(echo "$traw" | grep -E '^(x86-tls-threads|checks|failed)' | tr -d '\r')
+twant=$'x86-tls-threads: start\nx86-tls-threads: per-thread ok\nchecks=9\nfailed=0'
+[[ $trc -eq 42 ]] || { echo "X86-TLS FAIL: per-thread interpreter exit $trc (want 42)"; echo "$traw"; exit 1; }
+[[ $tout == "$twant" ]] || { echo "X86-TLS FAIL: per-thread stdout differs"; echo "$traw"; diff <(echo "$twant") <(echo "$tout"); exit 1; }
+echo "X86-TLS PASS: per-thread implicit TLS (main and worker each own a copy, template untouched), TLS callbacks DLL_THREAD_ATTACH/DETACH once on the worker, worker's LastError 0 and thread id, main's LastError kept (exit 42)"
+
 if [[ ${1:-} == --wine ]]; then
   # Wine's loader does the whole implicit-TLS setup itself on the patched
   # binary: same stdout (its block is a fresh allocation, so the copy/alias

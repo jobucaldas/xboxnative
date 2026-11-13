@@ -99,6 +99,7 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         r.loaded = true; r.base = img.base; r.entry = img.entry;
         r.imports = img.imports; r.bound = img.bound; r.relocations = img.relocations; r.unresolved = img.unresolved;
         guest.image_base = img.base;
+        guest.exe_tls = img.tls;  // each thread's TLS block comes from the exe's directory
         guest.add_module(name, img.base);
         map_thunk_page(mem, table);
         Cpu cpu(mem, table);
