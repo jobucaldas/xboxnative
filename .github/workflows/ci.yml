@@ -127,6 +127,8 @@ jobs:
           packages: gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 wine64 wine lld
       - name: Registry persistence and write-failure regression
         run: bash src/xbox-test/uwph/host/run-reg-selftest.sh
+      - name: "Audio ABI contract: XAudio2 and WASAPI SDK signatures"
+        run: bash src/xbox-test/audio/tests/xaudio2-contract.sh
       - name: Registry crash consistency (eight cycles)
         run: bash src/xbox-test/uwph/host/run-reg-killtest.sh
       - name: Inert Wine config opt-in and active-config rejection
