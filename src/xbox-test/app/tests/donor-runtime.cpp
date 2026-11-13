@@ -1,11 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Off-device donor lifetime regression; does not load or execute a game.
+// msvc_load_config.h's std::min({...}) breaks under minwindef.h's min macro,
+// so NOMINMAX must be set before windows.h is included.
+#define NOMINMAX
 #include <windows.h>
+#include <d3dcompiler.h>
+// hidsdi.h and shellscalingapi.h declare their exports only for the desktop
+// family; the runner is built --uwp (WINAPI_FAMILY=APP). Widen the family for
+// these two headers so decltype derives the real SDK declarations, then
+// restore the app family the rest of the translation unit compiles under.
+#undef WINAPI_FAMILY
+#define WINAPI_FAMILY WINAPI_FAMILY_DESKTOP_APP
+#include <shellscalingapi.h>
+#include <hidsdi.h>
+#undef WINAPI_FAMILY
+#define WINAPI_FAMILY WINAPI_FAMILY_APP
 #include <cstdio>
 #include <cstdint>
 #include <memory>
 #include <map>
 #include <string>
+#include <type_traits>
 #include <vector>
 static BOOL WINAPI hostProtect(void* p,SIZE_T n,DWORD flags,DWORD* old) {
     using Fn=BOOL(WINAPI*)(void*,SIZE_T,DWORD,DWORD*);
@@ -58,23 +73,27 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int) {
     auto address=donor_pe::exported("hid.dll","HidD_GetHidGuid",0);
     if(!address)ExitProcess(3);
     GUID guid{};
-    ((void(WINAPI*)(GUID*))address)(&guid);
+    // Typed from the real hidsdi.h declaration, not a hand-written form.
+    using GetHidGuid=decltype(&HidD_GetHidGuid);
+    ((GetHidGuid)address)(&guid);
     const GUID expected={0x4d1e55b2,0xf16f,0x11cf,{0x88,0xcb,0,0x11,0x11,0,0,0x30}};
     if(memcmp(&guid,&expected,sizeof guid))ExitProcess(4);
     // A later probe must not unload code still held by a retained guest.
     if(!donor_pe::probe(logline) || address!=donor_pe::exported("hid.dll","HidD_GetHidGuid",0))ExitProcess(5);
     // Delay imports resolve through the donor router: shcore's user32 DPI
     // internals reach the record core, never host user32. Awareness set via
-    // shcore must be visible in the record core's own state.
-    using Dpi=HRESULT(WINAPI*)(HMONITOR,int,UINT*,UINT*);using SetAware=HRESULT(WINAPI*)(int);
+    // shcore must be visible in the record core's own state. Typed from the
+    // real SDK headers (shellscalingapi.h; GetProcessDpiAwarenessInternal is
+    // undocumented, so its own host declaration stands).
+    using Dpi=decltype(&GetDpiForMonitor);using SetAware=decltype(&SetProcessDpiAwareness);
     using CoreAware=BOOL(WINAPI*)(HANDLE,int*);
     auto dpi=(Dpi)donor_pe::exported("shcore.dll","GetDpiForMonitor",0);
     auto setAware=(SetAware)donor_pe::exported("shcore.dll","SetProcessDpiAwareness",0);
     auto coreAware=(CoreAware)user32_core::resolve("user32.dll","GetProcessDpiAwarenessInternal");
     UINT dx=0,dy=0;int aware=-1;
-    if(!dpi||!setAware||!coreAware||dpi(nullptr,0,&dx,&dy)!=S_OK||dx!=96||dy!=96)ExitProcess(13);
-    if(dpi(nullptr,3,&dx,&dy)!=HRESULT_FROM_WIN32(ERROR_BAD_ARGUMENTS))ExitProcess(14);
-    if(setAware(2)!=S_OK||!coreAware(nullptr,&aware)||aware!=2)ExitProcess(15);
+    if(!dpi||!setAware||!coreAware||dpi(nullptr,MDT_EFFECTIVE_DPI,&dx,&dy)!=S_OK||dx!=96||dy!=96)ExitProcess(13);
+    if(dpi(nullptr,MONITOR_DPI_TYPE(3),&dx,&dy)!=HRESULT_FROM_WIN32(ERROR_BAD_ARGUMENTS))ExitProcess(14);
+    if(setAware(PROCESS_PER_MONITOR_DPI_AWARE)!=S_OK||!coreAware(nullptr,&aware)||aware!=2)ExitProcess(15);
     puts("DONOR-DELAY PASS: shcore delay-loaded user32 DPI internals resolve to the record core");
     // A guest's COM creation of DirectInput (CLSID_DirectInput8, as Puyo Puyo
     // Tetris 2 does) reaches the gated dinput8 donor: create, Initialize, then
@@ -84,9 +103,14 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int) {
         const GUID input8={0x25e609e4,0xb259,0x11cf,{0xbf,0xc7,0x44,0x45,0x53,0x54,0,0}};
         const GUID input8W={0xbf798031,0x483a,0x4da2,{0xaa,0x99,0x5d,0x64,0xed,0x36,0x97,0x00}};
         const GUID keyboard={0x6f1d2b61,0xd5a0,0x11cf,{0xbf,0xc7,0x44,0x45,0x53,0x54,0,0}};
+        // Vtable layout from the real dinput.h IDirectInput8W (IUnknown's
+        // three, then CreateDevice, EnumDevices, GetDeviceStatus,
+        // RunControlPanel, Initialize): the struct keeps the unused slots
+        // between the methods it calls.
         struct Table {void* query;void* addRef;ULONG(WINAPI*release)(void*);
                       HRESULT(WINAPI*createDevice)(void*,const GUID&,void**,IUnknown*);
-                      void* enumDevices;void* status;void* panel;HRESULT(WINAPI*initialize)(void*,HINSTANCE,DWORD);};
+                      void* enumDevices;void* status;void* panel;
+                      HRESULT(WINAPI*initialize)(void*,HINSTANCE,DWORD);};
         void* input=nullptr;
         if(play_runtime::coCreateInstance(input8,nullptr,CLSCTX_INPROC_SERVER,input8W,&input)!=S_OK||!input)ExitProcess(16);
         auto table=*(Table**)input;void* device=nullptr;
@@ -119,22 +143,34 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int) {
         mlp::donor_resolve=donor_pe::exported;
         if(!play_runtime::start(root,L"donor-missing.exe",L"",logline))ExitProcess(8);
         auto r=play_runtime::state;
-        if(WaitForSingleObject(r->worker,30000)!=WAIT_OBJECT_0)ExitProcess(10);
+        // A launch rejected at map() never creates a worker: start() mapped the
+        // exe on the calling thread, logged "mapping failed" and finished there.
+        // Only a launch that got as far as CreateThread has a handle to wait on.
+        if(r->worker&&WaitForSingleObject(r->worker,30000)!=WAIT_OBJECT_0)ExitProcess(10);
+        if(!r->finished.load()||r->executed.load())ExitProcess(11);
         HMODULE donor=play_runtime::loadExW(L"d3dcompiler_47.dll",nullptr,0);
         if(!donor)ExitProcess(20);
         if(donor!=(HMODULE)donor_pe::module(L"d3dcompiler_47.dll"))ExitProcess(21);
-        auto compile=(uintptr_t(*)(const void*,SIZE_T,void*,void*,void*,const char*,const char*,UINT,void*,void**))
-            play_runtime::proc(donor,"D3DCompile");
+        // Typed from the real d3dcompiler.h pD3DCompile (Bugbot r4559946114:
+        // a hand-typed 10-argument form dropped Flags2 and shifted the two
+        // out-params). static_assert keeps the arity honest if the SDK header
+        // ever changes under it.
+        using Compile=decltype(&D3DCompile);
+        using Sig=HRESULT(WINAPI*)(LPCVOID,SIZE_T,LPCSTR,const D3D_SHADER_MACRO*,
+            ID3DInclude*,LPCSTR,LPCSTR,UINT,UINT,ID3DBlob**,ID3DBlob**);
+        static_assert(std::is_same_v<Compile,Sig>,
+            "D3DCompile signature drifted from d3dcompiler.h");
+        auto compile=(Sig)play_runtime::proc(donor,"D3DCompile");
         if(!compile)ExitProcess(22);
         static const char src[]="float4 main():SV_Target { return float4(1,0,0,1); }";
-        void* blob=nullptr;void* errors=nullptr;
-        HRESULT hr=compile(src,sizeof src-1,nullptr,nullptr,nullptr,"main","ps_4_0",0,&errors,&blob);
-        if(errors)((void(*)(void*))(*(void***)errors)[3])(errors);   // IUnknown::Release
+        ID3DBlob* blob=nullptr;ID3DBlob* errors=nullptr;
+        HRESULT hr=compile(src,sizeof src-1,nullptr,nullptr,nullptr,"main","ps_4_0",0,0,&blob,&errors);
+        if(errors)errors->Release();
         if(FAILED(hr)||!blob)ExitProcess(23);
-        const unsigned char* bits=static_cast<const unsigned char*>(((void*(*)())(*(void***)blob)[3])());
-        SIZE_T size=(SIZE_T)((SIZE_T(*)())(*(void***)blob)[4])();
+        const unsigned char* bits=static_cast<const unsigned char*>(blob->GetBufferPointer());
+        SIZE_T size=blob->GetBufferSize();
         if(size<4||bits[0]!='D'||bits[1]!='X'||bits[2]!='B'||bits[3]!='C')ExitProcess(24);
-        ((void(*)(void*))(*(void***)blob)[3])(blob);   // Release
+        blob->Release();
         // An unbridged name must still answer nothing: the gate stays
         // authoritative for names the probed set does not hold.
         if(play_runtime::loadExW(L"deliberately-absent-donor.dll",nullptr,0))ExitProcess(25);
