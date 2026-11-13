@@ -1946,9 +1946,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // Pad ownership (guest_watchdog::overlay_owns_pad): the guide's own flag,
     // plus the dead state, which implies it. Read by PollGuestControllers.
     bool pad_owned_by_overlay() const {
-        return guest_watchdog::overlay_owns_pad(guest_overlay::inputBlocked.load(std::memory_order_acquire),
-                                                guest_overlay::guestDead.load(std::memory_order_acquire),
-                                                m_synthDead);
+        return guest_overlay::pad_owned_by_overlay();
     }
     // A live guest, or one declared dead that the cmd.txt channel and the guide
     // still act on (a dead guest has no m_guestSurface).
@@ -1965,7 +1963,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             logf("%s",line.c_str());
     }
     void guest_menu(double t,GamepadButtons b) {
-        if(guest_overlay::inputBlocked.load(std::memory_order_relaxed))m_input.release_all(); // nothing stays held behind the menu
+        if(guest_overlay::pad_owned_by_overlay())m_input.release_all(); // nothing stays held behind the menu or dead page
         if(!m_achPollStarted) {   // gbe writes achievements.json while the game runs; watch it from a background thread
             m_achPollStarted=true;
             std::thread(achievement_poller,m_dApp).detach();
@@ -1974,7 +1972,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             auto pads=Gamepad::Gamepads();
             if(pads.Size()){m_inputHooks=true;logf("overlay: input capture hooks %s",guest_overlay::install_input_block(pads.GetAt(0))?"installed":"unavailable");}
         }
-        if(guest_overlay::inputBlocked&&!guest_overlay::menuOpen&&b==GamepadButtons::None){guest_overlay::block_input(false);logf("overlay: game input restored");}
+        if(guest_overlay::pad_owned_by_overlay()&&!guest_overlay::guestDead.load(std::memory_order_acquire)&&!guest_overlay::menuOpen&&b==GamepadButtons::None){guest_overlay::block_input(false);logf("overlay: game input restored");}
         const auto combo=GamepadButtons::View|GamepadButtons::Menu;
         auto pressed=[&](GamepadButtons m){return held(b,m)&&!held(m_menuPrev,m);};
         // While dead (bugbot r4559305224, r4559524001) the pad routes through
@@ -2612,7 +2610,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // Keyboard and mouse reach the guest only while its swap chain is on screen,
     // the window is active and the launcher menu is closed.
     bool guest_input() {
-        if(!m_guestSurface||guest_overlay::inputBlocked.load(std::memory_order_relaxed)){m_input.release_all();return false;}
+        if(!m_guestSurface||pad_owned_by_overlay()){m_input.release_all();return false;}
         if(!m_input.complete()) {
             bool ready=m_input.bind([](const char* name){return user32_core::resolve("user32.dll",name);});
             if(!m_inputLogged){m_inputLogged=true;logf("keyboard/mouse feed %s",ready?"ready":"unavailable (user32 records missing)");}

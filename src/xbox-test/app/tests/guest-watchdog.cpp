@@ -526,9 +526,10 @@ int main() {
         }
     }
 
-    // Pad ownership (bugbot r4562634978): a dead guest is always owned by the
-    // overlay, whether or not the guide was opened and whether gdead or the
-    // watchdog produced it; a live guest is owned only while the guide is open.
+    // Pad ownership (bugbot r4562634978, r4563731919): one decision gates the
+    // XInput publish and the WGI Gamepad/RawGameController hooks. A dead guest
+    // is always owned by the overlay, whether the guide was opened and whether
+    // gdead or the watchdog produced it; a live guest is owned only while open.
     {
         using guest_watchdog::overlay_owns_pad;
         for (int input = 0; input < 2; ++input)
@@ -539,8 +540,9 @@ int main() {
                 }
         CHECK(!overlay_owns_pad(false, false, false));   // live, guide closed: the guest keeps the pad
         CHECK(overlay_owns_pad(true, false, false));     // guide open on a live guest
-        CHECK(overlay_owns_pad(false, true, false));     // dead without the guide opened
+        CHECK(overlay_owns_pad(false, true, false));     // dead: XInput, WGI and raw reads are neutral
         CHECK(overlay_owns_pad(false, true, true));      // synthetic gdead: same ownership
+        CHECK(overlay_owns_pad(false, true, false) == overlay_owns_pad(false, true, true));
     }
 
     // Force-quit sequencing (bugbot r4559831127): the worker must walk
