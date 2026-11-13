@@ -3,7 +3,13 @@
 // the back buffers. Pure D3D11 (no winrt), so tests can drive it with fake
 // COM objects and assert the exact call order.
 #pragma once
+#include "d3d11_diag.h"   // the diag sink the resize hook logs through
+#include "resize_elide.h" // the pure elision decision (tested directly)
 #include <d3d11.h>
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <iterator>
 
 namespace resize_drain {
 
@@ -49,6 +55,22 @@ inline void drain(ID3D11Device* dev) {
         q->Release();
     }
     ctx->Release();
+}
+
+// ---- Redundant-resize elision (RCA mitigation, Slime Rancher 0.5.303.0)
+// The decision itself is the dependency-free host/resize_elide.h (unit-tested
+// in tests/resize-elision.cpp); this is the DXGI-typed seam the swap-chain
+// hook calls, converting GetDesc and the request into the pure Mode form.
+inline std::atomic<bool> elideEnabled{true};   // opt-out: LocalState\resizeelide.txt containing "off"
+
+// True when a normalised ResizeBuffers request would leave the chain unchanged.
+// `requested` is the post-normalisation target (resize_count/resize_flags
+// applied, UNKNOWN resolved); `cur` is the chain's GetDesc. A test seam reads
+// this directly with hand-built descs.
+inline bool same_mode(const DXGI_SWAP_CHAIN_DESC1& cur,UINT count,UINT w,UINT h,DXGI_FORMAT f,UINT flags) {
+    return resize_elide::same_mode(
+        {cur.BufferCount,cur.Width,cur.Height,unsigned(cur.Format),cur.Flags},
+        {count,w,h,unsigned(f),flags});
 }
 
 }
