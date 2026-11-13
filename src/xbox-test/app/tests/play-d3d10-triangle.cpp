@@ -35,6 +35,39 @@ static HWND guestWindow() {
         0,0,64,64,nullptr,nullptr,cls.hInstance,nullptr);
 }
 
+static char* text(char* p,const char* s) {while(*s)*p++=*s++;return p;}
+static char* number(char* p,unsigned v) {
+    char d[10];unsigned n=0;do{d[n++]=char('0'+v%10);v/=10;}while(v);while(n)*p++=d[--n];return p;
+}
+static char* hex(char* p,unsigned v) {
+    static const char h[]="0123456789abcdef";for(int i=28;i>=0;i-=4)*p++=h[(v>>i)&15];return p;
+}
+static void emit(char* p,char* line) {*p++='\r';*p++='\n';*p=0;OutputDebugStringA(line);}
+static void logTextureDesc(const char* stage,const char* role,const D3D10_TEXTURE2D_DESC& d) {
+    char line[320],*p=line;p=text(p,"PLAY-D3D10 readback ");p=text(p,stage);*p++=' ';p=text(p,role);
+    p=text(p," desc=");p=number(p,d.Width);*p++='x';p=number(p,d.Height);p=text(p," mips=");p=number(p,d.MipLevels);
+    p=text(p," array=");p=number(p,d.ArraySize);p=text(p," format=");p=number(p,unsigned(d.Format));
+    p=text(p," sample=");p=number(p,d.SampleDesc.Count);*p++='/';p=number(p,d.SampleDesc.Quality);
+    p=text(p," usage=");p=number(p,unsigned(d.Usage));p=text(p," bind=0x");p=hex(p,d.BindFlags);
+    p=text(p," cpu=0x");p=hex(p,d.CPUAccessFlags);p=text(p," misc=0x");emit(hex(p,d.MiscFlags),line);
+}
+static void logReadbackHr(const char* stage,const char* call,HRESULT hr) {
+    char line[192],*p=line;p=text(p,"PLAY-D3D10 readback ");p=text(p,stage);*p++=' ';
+    p=text(p,call);p=text(p," hr=0x");emit(hex(p,unsigned(hr)),line);
+}
+static void logMap(const char* stage,const D3D10_MAPPED_TEXTURE2D& m) {
+    char line[192],*p=line;p=text(p,"PLAY-D3D10 readback ");p=text(p,stage);
+    p=text(p," Map rowpitch=");p=number(p,m.RowPitch);emit(text(p,m.pData?" data=present":" data=null"),line);
+}
+static void logPixel(const char* stage,unsigned x,unsigned y,const unsigned char pixel[4]) {
+    char line[192],*p=line;p=text(p,"PLAY-D3D10 readback ");p=text(p,stage);p=text(p," pixel=(");
+    p=number(p,x);*p++=',';p=number(p,y);p=text(p,") rgba=");
+    for(unsigned i=0;i<4;++i){p=hex(p,pixel[i]);if(i<3)*p++=',';}emit(p,line);
+}
+static void logCopy(const char* stage,const char* event) {
+    char line[128],*p=line;p=text(p,"PLAY-D3D10 readback ");p=text(p,stage);
+    p=text(p," CopyResource ");emit(text(p,event),line);
+}
 // A 64x64 R8G8B8A8 target plus its staging copy: the pair every pass reads
 // through. Created once, cleared between passes.
 static bool makeTarget(ID3D10Device* device,ID3D10Texture2D** target,
@@ -43,30 +76,54 @@ static bool makeTarget(ID3D10Device* device,ID3D10Texture2D** target,
     desc.Width=64;desc.Height=64;desc.MipLevels=1;desc.ArraySize=1;
     desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;
     desc.Usage=D3D10_USAGE_DEFAULT;desc.BindFlags=D3D10_BIND_RENDER_TARGET;
-    if(FAILED(device->CreateTexture2D(&desc,nullptr,target))||!*target)return false;
+    logTextureDesc("target-create","target-request",desc);
+    HRESULT hr=device->CreateTexture2D(&desc,nullptr,target);
+    logReadbackHr("target-create","CreateTexture2D",hr);
+    if(FAILED(hr)||!*target)return false;
     desc.BindFlags=0;desc.Usage=D3D10_USAGE_STAGING;desc.CPUAccessFlags=D3D10_CPU_ACCESS_READ;
-    if(FAILED(device->CreateTexture2D(&desc,nullptr,staging))||!*staging)return false;
-    if(FAILED(device->CreateRenderTargetView(*target,nullptr,view))||!*view)return false;
+    logTextureDesc("target-create","staging-request",desc);
+    hr=device->CreateTexture2D(&desc,nullptr,staging);
+    logReadbackHr("target-create","CreateTexture2D-staging",hr);
+    if(FAILED(hr)||!*staging)return false;
+    hr=device->CreateRenderTargetView(*target,nullptr,view);
+    logReadbackHr("target-create","CreateRenderTargetView",hr);
+    if(FAILED(hr)||!*view)return false;
     return true;
 }
 // Map a staging texture that already holds the data and answer the pixel at
 // (x,y). The caller does the copy, so any staging texture works (the render
 // target's 64x64 one, a cubemap mip's 8x8 one, a resolve's copy).
-static bool readStaged(ID3D10Texture2D* staging,unsigned x,unsigned y,unsigned char out[4]) {
+static bool readStaged(const char* stage,ID3D10Texture2D* staging,
+                       unsigned x,unsigned y,unsigned char out[4]) {
+    D3D10_TEXTURE2D_DESC desc{};
+    staging->GetDesc(&desc);
+    logTextureDesc(stage,"staging",desc);
     D3D10_MAPPED_TEXTURE2D mapped{};
-    if(FAILED(staging->Map(0,D3D10_MAP_READ,0,&mapped))||!mapped.pData)return false;
+    HRESULT hr=staging->Map(0,D3D10_MAP_READ,0,&mapped);
+    logReadbackHr(stage,"Map",hr);
+    logMap(stage,mapped);
+    if(FAILED(hr)||!mapped.pData)return false;
     const unsigned char* pixel=static_cast<const unsigned char*>(mapped.pData)
         +y*mapped.RowPitch+x*4;
     out[0]=pixel[0];out[1]=pixel[1];out[2]=pixel[2];out[3]=pixel[3];
     staging->Unmap(0);
+    logPixel(stage,x,y,out);
     return true;
 }
 // Copy the target into the staging copy and answer the pixel at (x,y).
-static bool readPixel(ID3D10Device* device,ID3D10Texture2D* target,
+static bool readPixel(const char* stage,ID3D10Device* device,ID3D10Texture2D* target,
                       ID3D10Texture2D* staging,unsigned x,unsigned y,
                       unsigned char out[4]) {
+    D3D10_TEXTURE2D_DESC targetDesc{},stagingDesc{};
+    target->GetDesc(&targetDesc);staging->GetDesc(&stagingDesc);
+    logTextureDesc(stage,"copy-source",targetDesc);
+    logTextureDesc(stage,"copy-destination",stagingDesc);
+    // D3D10 ID3D10Device::CopyResource returns void, so the following Map and
+    // pixel diagnostics are the available evidence for whether the copy landed.
+    logCopy(stage,"begin");
     device->CopyResource(staging,target);
-    return readStaged(staging,x,y,out);
+    logCopy(stage,"returned");
+    return readStaged(stage,staging,x,y,out);
 }
 // The triangle pass's shared state: pipeline, vertex buffer, viewport.
 static const float vertices[][6]={
@@ -117,9 +174,9 @@ DWORD d3d10tri_entry() {
     device->ClearRenderTargetView(view,clear);
     device->Draw(3,0);
     unsigned char pixel[4];
-    if(!readPixel(device,target,staging,32,32,pixel))return 17;
+    if(!readPixel("draw-center",device,target,staging,32,32,pixel))return 17;
     if(!(pixel[0]>0x80&&pixel[1]<0x40&&pixel[2]<0x40))return 43;   // BLOCKED
-    if(!readPixel(device,target,staging,4,4,pixel))return 18;
+    if(!readPixel("draw-outside",device,target,staging,4,4,pixel))return 18;
     if(!(pixel[0]<0x20&&pixel[1]<0x20&&pixel[2]<0x20))return 43;   // BLOCKED
 
     // ---- pass 2: DrawIndexed over an index buffer, green triangle ----
@@ -142,7 +199,7 @@ DWORD d3d10tri_entry() {
     device->IASetIndexBuffer(indexBuffer,DXGI_FORMAT_R32_UINT,0);
     device->IASetVertexBuffers(0,1,&greenBuffer,&stride,&offset);
     device->DrawIndexed(3,0,0);
-    if(!readPixel(device,target,staging,32,32,pixel))return 21;
+    if(!readPixel("indexed-center",device,target,staging,32,32,pixel))return 21;
     if(!(pixel[1]>0x80&&pixel[0]<0x40&&pixel[2]<0x40))return 43;   // BLOCKED
     device->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);
     device->IASetVertexBuffers(0,1,&vertexBuffer,&stride,&offset);
@@ -164,7 +221,7 @@ DWORD d3d10tri_entry() {
     device->GSSetShader(nullptr);
     device->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     device->IASetVertexBuffers(0,1,&vertexBuffer,&stride,&offset);
-    if(!readPixel(device,target,staging,32,32,pixel))return 24;
+    if(!readPixel("geometry-center",device,target,staging,32,32,pixel))return 24;
     if(!(pixel[1]>0x80&&pixel[0]<0x40&&pixel[2]<0x40))return 43;   // BLOCKED
 
     // ---- pass 4: stream-out writes the GS's vertices a Map reads back ----
@@ -288,7 +345,7 @@ DWORD d3d10tri_entry() {
     ID3D10Texture2D* mipStaging=nullptr;
     if(FAILED(device->CreateTexture2D(&mipDesc,nullptr,&mipStaging))||!mipStaging)return 38;
     device->CopySubresourceRegion(mipStaging,0,0,0,0,cube,D3D10CalcSubresource(1,0,2),nullptr);
-    if(!readStaged(mipStaging,0,0,pixel))return 30;
+    if(!readStaged("mip-generated",mipStaging,0,0,pixel))return 30;
     if(!(pixel[2]>0xc0&&pixel[0]<0x40))return 43;   // BLOCKED
     mipStaging->Release();
     cubeView->Release();cube->Release();
@@ -323,7 +380,7 @@ DWORD d3d10tri_entry() {
     if(FAILED(device->CreateTexture2D(&resolveDefault,nullptr,&resolveTarget))||!resolveTarget)return 41;
     device->ResolveSubresource(resolveTarget,0,msTarget,0,DXGI_FORMAT_R8G8B8A8_UNORM);
     device->CopyResource(resolved,resolveTarget);
-    if(!readStaged(resolved,32,32,pixel))return 32;
+    if(!readStaged("msaa-resolve",resolved,32,32,pixel))return 32;
     // The MSAA target's clear colour must have crossed the resolve untouched.
     const bool resolvedColour=pixel[0]>0xb0&&pixel[0]<=0xc0&&pixel[1]>0x30&&pixel[1]<0x50
         &&pixel[2]>0x70&&pixel[2]<0x90&&pixel[3]==0xff;
@@ -369,9 +426,9 @@ DWORD d3d10tri_entry() {
     device->Draw(3,0);
     device->VSSetShader(vs);
     compiledVs->Release();
-    if(!readPixel(device,target,staging,32,32,pixel))return 47;
+    if(!readPixel("compiled-center",device,target,staging,32,32,pixel))return 47;
     if(!(pixel[0]>0x80&&pixel[1]<0x40&&pixel[2]<0x40))return 43;   // BLOCKED
-    if(!readPixel(device,target,staging,4,4,pixel))return 47;
+    if(!readPixel("compiled-outside",device,target,staging,4,4,pixel))return 47;
     if(!(pixel[0]<0x20&&pixel[1]<0x20&&pixel[2]<0x20))return 43;   // BLOCKED
 
     // The present path still works after the draw passes, as a game's frame does.
