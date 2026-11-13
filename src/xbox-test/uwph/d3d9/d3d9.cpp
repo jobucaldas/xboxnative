@@ -435,7 +435,11 @@ struct Surface : d3dshim::Base, IDirect3DSurface9 {
     // buffer and standalone surfaces are level 0.
     UINT level=0;
     bool cpuVisible=false;                   // SYSTEMMEM, SCRATCH or DYNAMIC
+    // A level of a MANAGED texture locks through the texture's staging shadow
+    // (the GPU texture itself has no CPU access); null for other surfaces.
+    ID3D11Texture2D* shadow=nullptr;
     bool locked=false;
+    DWORD lockedFlags=0;
     // D3D9's surfaces and swap chains hold their device weakly: the device owns
     // them, not the other way round. Base::owner would be a strong reference, so
     // the device's own implicit back buffer would keep the device alive forever.
@@ -489,17 +493,28 @@ struct Surface : d3dshim::Base, IDirect3DSurface9 {
             return D3DERR_INVALIDCALL;
         }
         if(locked)return D3DERR_INVALIDCALL;   // D3D9 allows one lock at a time
+        // A shadow (a MANAGED texture level) is staging, so a plain lock is
+        // read-write and only D3DLOCK_READONLY takes the write away, as for a
+        // SYSTEMMEM texture.
+        ID3D11Texture2D* target=shadow?shadow:texture;
         D3D11_MAPPED_SUBRESOURCE mapped{};
-        HRESULT hr=context->Map(texture,level,textureMapMode(stagingPool(desc.Pool),flags),0,&mapped);
+        HRESULT hr=context->Map(target,level,
+            shadow?textureMapMode(true,flags):textureMapMode(stagingPool(desc.Pool),flags),0,&mapped);
         if(FAILED(hr))return D3DERR_INVALIDCALL;
         locked=true;
+        lockedFlags=flags;
         out->pBits=mapped.pData;
         out->Pitch=INT(mapped.RowPitch);
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE UnlockRect() override {
         if(!locked)return D3DERR_INVALIDCALL;
-        context->Unmap(texture,level);
+        ID3D11Texture2D* target=shadow?shadow:texture;
+        context->Unmap(target,level);
+        // A write through the shadow has to reach the texture the sampler
+        // reads; a read-only lock changed nothing.
+        if(shadow&&!(lockedFlags&D3DLOCK_READONLY))
+            context->CopySubresourceRegion(texture,level,0,0,0,shadow,level,nullptr);
         locked=false;
         return D3D_OK;
     }
@@ -697,6 +712,10 @@ struct Texture : Resource<IDirect3DTexture9> {
         surface->device=device;
         surface->context=context;
         surface->cpuVisible=cpuVisible;
+        // A MANAGED texture level locks through the texture's staging shadow:
+        // the GPU texture has no CPU access now that MANAGED is spelled
+        // default + shadow at every mip count.
+        surface->shadow=shadow;
         surface->level=level;
         GetLevelDesc(level,&surface->desc);
         // A level of a texture that can be rendered to answers a render target
