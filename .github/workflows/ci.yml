@@ -165,6 +165,12 @@ jobs:
       # on the console. Compile-only, no device or Wine needed.
       - name: D3D11 diagnostics slot audit against the SDK vtable order
         run: bash src/xbox-test/app/tests/d3d11-diag-slots.sh
+      # The redundant-resize elision decision (host/resize_elide.h): same-mode
+      # requests elide, real differences forward, BufferCount 0 and
+      # DXGI_FORMAT_UNKNOWN normalise to keep, the waitable flag bit strips,
+      # and the resizeelide.txt opt-out parses. Pure functions, host toolchain.
+      - name: "Redundant-resize elision decision unit tests"
+        run: bash src/xbox-test/app/tests/resize-elision.sh
   strict-imports:
     runs-on: ubuntu-latest
     steps:
