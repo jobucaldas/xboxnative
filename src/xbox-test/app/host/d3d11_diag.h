@@ -79,6 +79,55 @@ constexpr size_t kMaxClasses=16;
 inline std::atomic<bool> enabled{true};
 inline void set_enabled(bool on) { enabled.store(on,std::memory_order_release); }
 inline bool is_enabled() { return enabled.load(std::memory_order_acquire); }
+inline void emit(const std::string& text);
+inline std::string fmt(const char* f,...);
+
+// Opt-in call ring (LocalState\\d3d11resizetrace.txt, default off). This is
+// deliberately separate from the regular diagnostics kill switch: it records
+// only intercepted D3D11 calls and is flushed on the first failed non-test
+// Present.
+constexpr size_t kTraceRing=64;
+struct TraceEntry { uint64_t seq=0; const char* name=nullptr; };
+inline std::mutex traceMutex;
+inline uint64_t traceNextSeq=1;
+inline TraceEntry traceRing[kTraceRing];
+inline std::atomic<bool> traceOn{false};
+inline std::atomic<bool> traceChecked{false};
+inline bool (*set_trace_requested)()=nullptr;
+inline void traceCall(const char* name) {
+    if(!traceOn.load(std::memory_order_acquire))return;
+    std::lock_guard<std::mutex> lock(traceMutex);
+    uint64_t seq=traceNextSeq++;
+    traceRing[seq%kTraceRing]=TraceEntry{seq,name};
+}
+inline bool claimPresentFailureOnce(std::atomic<bool>& logged,bool testPresent) {
+    if(testPresent)return false;
+    bool expected=false;
+    return logged.compare_exchange_strong(expected,true,std::memory_order_acq_rel);
+}
+inline bool claimTraceFlushOnce(std::atomic<bool>& flushed,bool tracing) {
+    if(!tracing)return false;
+    bool expected=false;
+    return flushed.compare_exchange_strong(expected,true,std::memory_order_acq_rel);
+}
+inline void flushTrace() {
+    if(!traceOn.load(std::memory_order_acquire))return;
+    TraceEntry snapshot[kTraceRing]{};
+    size_t count=0;
+    {
+        std::lock_guard<std::mutex> lock(traceMutex);
+        uint64_t first=traceNextSeq>kTraceRing?traceNextSeq-kTraceRing:1;
+        for(uint64_t seq=first;seq<traceNextSeq;++seq) {
+            const TraceEntry& e=traceRing[seq%kTraceRing];
+            if(e.seq==seq)snapshot[count++]=e;
+        }
+    }
+    emit(fmt("D3D11 trace: last %zu hooked calls, oldest first",count));
+    for(size_t i=0;i<count;++i) {
+        const TraceEntry& e=snapshot[i];
+        emit(fmt("D3D11 trace #%llu %s",(unsigned long long)e.seq,e.name?e.name:"?"));
+    }
+}
 
 // The slot numbers themselves live in d3d11_diag_slots.h, shared with the
 // build-time slot audit so a drifted slot fails that test's build. The DXGI
@@ -1019,7 +1068,8 @@ inline std::string gsBytecodeText(const void* code,SIZE_T length) {
 // and a two-stream variant. Included so the test binary is self-contained.
 #include "gs-blobs.h"
 
-#define D3D11_DIAG_HOOK(Type,slot) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return E_FAIL;
+#define D3D11_DIAG_HOOK_NAMED(Type,slot,name) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return E_FAIL;traceCall(name);
+#define D3D11_DIAG_HOOK(Type,slot) D3D11_DIAG_HOOK_NAMED(Type,slot,#slot)
 // Every failed call also feeds the device-health path: the first failure after
 // a removal reports GetDeviceRemovedReason and the memory state, instead of
 // the caller's error hiding the removal.
@@ -1074,7 +1124,7 @@ static HRESULT STDMETHODCALLTYPE createTexture3D(DevicePtr self,const D3D11_TEXT
 template<int Slot,class Desc,class Out,class Describe>
 static HRESULT viewCall(DevicePtr self,const char* name,ID3D11Resource* resource,const Desc* d,Out** out,Describe describe) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,const Desc*,Out**);
-    D3D11_DIAG_HOOK(Fn,Slot)HRESULT hr=call(self,resource,d,out);
+    D3D11_DIAG_HOOK_NAMED(Fn,Slot,name)HRESULT hr=call(self,resource,d,out);
     if(FAILED(hr)) {
         std::string view,viewKey;describe(d,view,viewKey);
         D3D11_DIAG_FAILED(name,viewKey+"|"+resourceKey(resource),view+" "+resourceText(resource));
@@ -1115,14 +1165,18 @@ static HRESULT STDMETHODCALLTYPE createInputLayout(DevicePtr self,const D3D11_IN
     }
     return hr;
 }
+inline const char* shaderCallName(int slot) {
+    static const struct {int slot;const char* name;} names[]={{CreateVertexShader,"CreateVertexShader"},{CreateGeometryShader,"CreateGeometryShader"},
+        {CreatePixelShader,"CreatePixelShader"},{CreateHullShader,"CreateHullShader"},{CreateDomainShader,"CreateDomainShader"},{CreateComputeShader,"CreateComputeShader"}};
+    for(auto& n:names)if(n.slot==slot)return n.name;
+    return "CreateShader";
+}
 template<int Slot>
 static HRESULT STDMETHODCALLTYPE createShader(DevicePtr self,const void* code,SIZE_T length,ID3D11ClassLinkage* linkage,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const void*,SIZE_T,ID3D11ClassLinkage*,void**);
-    D3D11_DIAG_HOOK(Fn,Slot)HRESULT hr=call(self,code,length,linkage,out);
+    D3D11_DIAG_HOOK_NAMED(Fn,Slot,shaderCallName(Slot))HRESULT hr=call(self,code,length,linkage,out);
     if(FAILED(hr)) {
-        static const struct {int slot;const char* name;} names[]={{CreateVertexShader,"CreateVertexShader"},{CreateGeometryShader,"CreateGeometryShader"},
-            {CreatePixelShader,"CreatePixelShader"},{CreateHullShader,"CreateHullShader"},{CreateDomainShader,"CreateDomainShader"},{CreateComputeShader,"CreateComputeShader"}};
-        const char* name="CreateShader";for(auto& n:names) if(n.slot==Slot)name=n.name;
+        const char* name=shaderCallName(Slot);
         std::string key,text=shaderText(code,length,&key);
         D3D11_DIAG_FAILED(name,key,text+fmt(" linkage=%d",linkage!=nullptr));
     }
@@ -1246,6 +1300,7 @@ inline bool patchContext(ID3D11DeviceContext* context);
 static HRESULT STDMETHODCALLTYPE contextMap(DevicePtr self,ID3D11Resource* r,UINT subresource,D3D11_MAP type,UINT flags,D3D11_MAPPED_SUBRESOURCE* mapped) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT,D3D11_MAP,UINT,D3D11_MAPPED_SUBRESOURCE*);
     auto call=reinterpret_cast<Fn>(original(self,ContextMap));if(!call)return E_FAIL;
+    traceCall("Map");
     // A write-only Map of an indirect-arguments buffer is the guest uploading
     // the counts: remember the pointer and read it back at Unmap.
     int indirect=indirectIndex(r);
@@ -1260,6 +1315,7 @@ static HRESULT STDMETHODCALLTYPE contextMap(DevicePtr self,ID3D11Resource* r,UIN
 static void STDMETHODCALLTYPE contextUnmap(DevicePtr self,ID3D11Resource* r,UINT subresource) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT);
     auto call=reinterpret_cast<Fn>(original(self,Unmap));if(!call)return;
+    traceCall("Unmap");
     int indirect=indirectIndex(r);
     if(indirect>=0) {
         void* data=indirectMapped[indirect].exchange(nullptr,std::memory_order_relaxed);
@@ -1278,6 +1334,7 @@ static void STDMETHODCALLTYPE contextUnmap(DevicePtr self,ID3D11Resource* r,UINT
 // game never reaches is not silently missing. No allocation and no lock on the
 // hot path.
 inline void countDraw(void* self,int kind,unsigned count,unsigned instances) {
+    traceCall(drawKindName(kind));
     ContextState& state=stateOf(self);
     unsigned t=state.topology.load(std::memory_order_relaxed);
     unsigned s=state.shaders.load(std::memory_order_relaxed);
@@ -1306,6 +1363,7 @@ inline void countDraw(void* self,int kind,unsigned count,unsigned instances) {
 // arguments live in a GPU buffer (or in the stream-output state), so the
 // bucket is all that can be said.
 inline void countDrawUnknown(void* self,int kind) {
+    traceCall(drawKindName(kind));
     ContextState& state=stateOf(self);
     unsigned t=state.topology.load(std::memory_order_relaxed);
     unsigned s=state.shaders.load(std::memory_order_relaxed);
@@ -1590,6 +1648,7 @@ inline void noteDeepTargetInfo(void* self,UINT count,ID3D11RenderTargetView* con
 static void STDMETHODCALLTYPE contextOMSetRenderTargets(DevicePtr self,UINT count,ID3D11RenderTargetView* const* views,ID3D11DepthStencilView* depth) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*);
     auto call=reinterpret_cast<Fn>(original(self,OMSetRenderTargets));if(!call)return;
+    traceCall("OMSetRenderTargets");
     noteRenderTargets(count,views);
     noteRenderTargetFormat(self,count,views);
     noteDeepTargetInfo(self,count,views,depth);
@@ -1602,6 +1661,7 @@ static void STDMETHODCALLTYPE contextOMSetRenderTargetsAndUnorderedAccessViews(D
         ID3D11DepthStencilView* depth,UINT uavStart,UINT uavCount,ID3D11UnorderedAccessView* const* uavs,const UINT* initialCounts) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*,UINT,UINT,ID3D11UnorderedAccessView* const*,const UINT*);
     auto call=reinterpret_cast<Fn>(original(self,OMSetRenderTargetsAndUnorderedAccessViews));if(!call)return;
+    traceCall("OMSetRenderTargetsAndUnorderedAccessViews");
     rtvUavSets.fetch_add(1,std::memory_order_relaxed);
     if(uavCount&&uavs&&uavCount!=D3D11_KEEP_UNORDERED_ACCESS_VIEWS)uavSets.fetch_add(1,std::memory_order_relaxed);
     // D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL (0xffffffff) means "leave the
@@ -1694,6 +1754,7 @@ static void STDMETHODCALLTYPE context1ClearView(DevicePtr self,ID3D11View* view,
 }
 static HRESULT STDMETHODCALLTYPE contextFinishCommandList(DevicePtr self,BOOL restore,ID3D11CommandList** list) {    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,BOOL,ID3D11CommandList**);
     auto call=reinterpret_cast<Fn>(original(self,FinishCommandList));if(!call)return E_FAIL;
+    traceCall("FinishCommandList");
     HRESULT hr=call(self,restore,list);
     if(SUCCEEDED(hr)){commandLists.fetch_add(1,std::memory_order_relaxed);if(list&&*list)noteFinishedCommandList(self,*list);}
     D3D11_DIAG_FAILED("FinishCommandList",fmt("%d",restore!=0),fmt("restore=%d",restore!=0));
@@ -1704,6 +1765,7 @@ static HRESULT STDMETHODCALLTYPE contextFinishCommandList(DevicePtr self,BOOL re
 static void STDMETHODCALLTYPE contextExecuteCommandList(DevicePtr self,ID3D11CommandList* list,BOOL restore) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11CommandList*,BOOL);
     auto call=reinterpret_cast<Fn>(original(self,ExecuteCommandList));if(!call)return;
+    traceCall("ExecuteCommandList");
     executedLists.fetch_add(1,std::memory_order_relaxed);call(self,list,restore);noteExecutedCommandList(list,restore);tick();
 }
 static HRESULT STDMETHODCALLTYPE createDeferredContext(DevicePtr self,UINT flags,ID3D11DeviceContext** out) {
@@ -1847,6 +1909,11 @@ inline bool (*set_deep_draw)()=nullptr;
 // capability answers that pick engine code paths.
 inline void adopt(ID3D11Device* device) {
     if(!device)return;
+    if(!traceChecked.exchange(true,std::memory_order_acq_rel)) {
+        traceOn.store(set_trace_requested&&set_trace_requested(),std::memory_order_release);
+        if(traceOn.load(std::memory_order_acquire))
+            emit("D3D11 resize trace on (LocalState\\d3d11resizetrace.txt): last hooked calls flush after a failed Present");
+    }
     // Opt-in flags are read before the sink check: with no sink the default
     // path still returns untouched, but an armed deep probe is not dropped.
     const bool deep=set_deep_draw&&set_deep_draw();
