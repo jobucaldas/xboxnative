@@ -350,6 +350,15 @@ DWORD d3d_entry() {
     if(FAILED(device->CreateBuffer(&soDesc,nullptr,&soBuffer))||!soBuffer)return 65;
     ID3D11Buffer* soBinds[]={soBuffer};
     UINT soOffsets[]={0};
+    // The deferred pass above ran ExecuteCommandList(FALSE), which returns the
+    // immediate context to its defaults: no input layout, no vertex buffer, no
+    // vertex shader. This draw rebinds what the VS reads, or the SO buffer
+    // stays empty for a reason in the fixture, not in the layer.
+    context->IASetInputLayout(layout);
+    ID3D11Buffer* soVertexBinds[]={verticesBuffer};
+    context->IASetVertexBuffers(0,1,soVertexBinds,&stride,&offset);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->VSSetShader(vs,nullptr,0);
     context->GSSetShader(soGs,nullptr,0);
     context->SOSetTargets(1,soBinds,soOffsets);
     context->Draw(3,0);
