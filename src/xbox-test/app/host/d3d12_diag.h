@@ -238,17 +238,44 @@ inline std::string resourceKey(const D3D12_RESOURCE_DESC* d) {
     return fmt("%d/%d/%u/%u/%u/%llx/%d",int(d->Dimension),int(d->Format),d->SampleDesc.Count,d->MipLevels,d->DepthOrArraySize,
         (unsigned long long)(d->Flags&~(D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET|D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)),int(d->Layout));
 }
-// A DXIL container: "DXIL" magic, a fourcc hash naming the program type and a
-// content hash, so a rejected pipeline state can be matched to the game's file.
+// DXBC is the outer container magic for DXIL too. Inspect its bounded chunk
+// table so a failure line can distinguish DXBC-only bytecode from a DXIL chunk.
+inline bool dxbcHasDxilChunk(const void* code,SIZE_T length) {
+    if(!code||length<32)return false;
+    auto bytes=static_cast<const unsigned char*>(code);
+    if(memcmp(bytes,"DXBC",4))return false;
+    auto u32=[&](size_t at)->uint32_t {
+        return uint32_t(bytes[at])|(uint32_t(bytes[at+1])<<8)|(uint32_t(bytes[at+2])<<16)|(uint32_t(bytes[at+3])<<24);
+    };
+    uint32_t total=u32(24),count=u32(28);
+    if(total<32||total>length||count>(total-32)/4)return false;
+    for(uint32_t i=0;i<count;++i) {
+        uint32_t offset=u32(32+size_t(i)*4);
+        if(offset<32||offset>total-8)continue;
+        uint32_t size=u32(size_t(offset)+4);
+        if(size<=total-offset-8&&!memcmp(bytes+offset,"DXIL",4))return true;
+    }
+    return false;
+}
+// The container key is a content hash, so a rejected pipeline state can be
+// matched to the game's file without assuming the container magic is a shader type.
 inline std::string shaderText(const void* code,SIZE_T length,std::string* key=nullptr) {
     if(!code||!length){if(key)*key="none";return "bytecode=none";}
     auto bytes=static_cast<const unsigned char*>(code);
     uint64_t hash=fnv(code,size_t(std::min<SIZE_T>(length,16u<<20)));
     std::string kind="not-dxil";
     if(length>=8&&!memcmp(bytes,"DXIL",4)) kind=fmt("dxil version=%u.%u",bytes[4],bytes[5]);
-    else if(length>=4&&!memcmp(bytes,"DXBC",4)) kind="dxbc";
+    else if(length>=4&&!memcmp(bytes,"DXBC",4)) kind=dxbcHasDxilChunk(code,length)?"dxbc-container dxil-chunk=yes":"dxbc-container dxil-chunk=no";
     if(key)*key=fmt("%016llx",(unsigned long long)hash);
     return fmt("%s bytes=%llu hash=%016llx",kind.c_str(),(unsigned long long)size_t(length),(unsigned long long)hash);
+}
+inline std::string graphicsStateText(const D3D12_GRAPHICS_PIPELINE_STATE_DESC* d) {
+    if(!d)return "desc=null";
+    return fmt("root=%d input=%u topology=%d so_entries=%u so_strides=%u sample_mask=0x%08x rtv_count=%u dsvfmt=%s depth=%d stencil=%d cull=%d fill=%d",
+        d->pRootSignature!=nullptr,d->InputLayout.NumElements,int(d->PrimitiveTopologyType),
+        d->StreamOutput.NumEntries,d->StreamOutput.NumStrides,d->SampleMask,d->NumRenderTargets,
+        formatText(d->DSVFormat).c_str(),d->DepthStencilState.DepthEnable,d->DepthStencilState.StencilEnable,
+        int(d->RasterizerState.CullMode),int(d->RasterizerState.FillMode));
 }
 
 // ---- opt-in call trace (LocalState\d3d12trace.txt, read once at the first
@@ -349,8 +376,8 @@ static HRESULT STDMETHODCALLTYPE createGraphicsPipelineState(DevicePtr self,cons
         std::string vsKey,psKey,vs=shaderText(d->VS.pShaderBytecode,d->VS.BytecodeLength,&vsKey);
         std::string ps=shaderText(d->PS.pShaderBytecode,d->PS.BytecodeLength,&psKey);
         D3D12_DIAG_FAILED("CreateGraphicsPipelineState",vsKey+"/"+psKey,
-            fmt("vs[%s] ps[%s] rtvfmt=%s dsvfmt=%s samples=%u nodes=%u",vs.c_str(),ps.c_str(),
-                formatText(d->RTVFormats[0]).c_str(),formatText(d->DSVFormat).c_str(),d->SampleDesc.Count,d->NodeMask));
+            fmt("vs[%s] ps[%s] rtvfmt=%s samples=%u nodes=%u %s",vs.c_str(),ps.c_str(),
+                formatText(d->RTVFormats[0]).c_str(),d->SampleDesc.Count,d->NodeMask,graphicsStateText(d).c_str()));
     } else D3D12_DIAG_FAILED("CreateGraphicsPipelineState","null","desc=null");
     return hr;
 }

@@ -229,8 +229,21 @@ int main(int argc,char** argv) {
     CHECK(text.find("dxil version=1.6")!=std::string::npos&&key.size()==16);
     CHECK(d3d12_diag::shaderText("junk",4).find("not-dxil")!=std::string::npos);
     CHECK(d3d12_diag::shaderText(nullptr,0)=="bytecode=none");
-    unsigned char dxbc[8]{};memcpy(dxbc,"DXBC",4);
-    CHECK(d3d12_diag::shaderText(dxbc,sizeof dxbc).find("dxbc")!=std::string::npos);
+    unsigned char dxbc[48]{};memcpy(dxbc,"DXBC",4);dxbc[24]=48;dxbc[28]=1;dxbc[32]=36;memcpy(dxbc+36,"DXIL",4);dxbc[40]=4;
+    CHECK(d3d12_diag::dxbcHasDxilChunk(dxbc,sizeof dxbc));
+    CHECK(d3d12_diag::shaderText(dxbc,sizeof dxbc).find("dxbc-container dxil-chunk=yes")!=std::string::npos);
+    dxbc[32]=47;
+    CHECK(!d3d12_diag::dxbcHasDxilChunk(dxbc,sizeof dxbc));
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC state{};
+    state.InputLayout.NumElements=3;state.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    state.StreamOutput.NumEntries=2;state.StreamOutput.NumStrides=1;state.SampleMask=0x12345678;
+    state.NumRenderTargets=1;state.DSVFormat=DXGI_FORMAT_D24_UNORM_S8_UINT;
+    state.DepthStencilState.DepthEnable=TRUE;state.RasterizerState.CullMode=D3D12_CULL_MODE_BACK;
+    std::string stateText=d3d12_diag::graphicsStateText(&state);
+    CHECK(stateText.find("input=3 topology=3 so_entries=2 so_strides=1 sample_mask=0x12345678")!=std::string::npos);
+    CHECK(stateText.find("rtv_count=1 dsvfmt=")!=std::string::npos);
+    CHECK(stateText.find("depth=1 stencil=0 cull=")!=std::string::npos);
+    CHECK(stateText.find(" fill=")!=std::string::npos);
 
     // Nothing is logged, and nothing is patched, before the sink is set.
     d3d12_diag::adopt(device);
