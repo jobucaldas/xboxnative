@@ -92,9 +92,8 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     CHECK(d3d11_diag::draws[0][1][0].load()==beforePatch+1);
     // The "first" line names the kind once: this DrawIndexed already emitted
     // it above, now under a patch list with no shaders bound.
-    // A point-list draw with a geometry shader bound: Halo Wars' terrain shape
-    // (51683 DrawInstanced on point lists, 1021 GS created). The gs= counter
-    // must follow GSSetShader, and the first-draw line must name it.
+    // A point-list draw with a geometry shader bound exercises the GS draw
+    // counter and confirms that the first-draw line names the bound stage.
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
     uint64_t beforeGsDraw=d3d11_diag::draws[1][0][0].load(),beforeGsBound=d3d11_diag::drawsWithGs[1].load();
     context->Draw(1,0);   // no GS bound: not counted in the gs bucket
@@ -408,6 +407,7 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     // emitted once per distinct signature.
     CHECK(count("draw state")==0);
     d3d11_diag::deepDrawEnabled.store(true,std::memory_order_release);
+    context->OMSetRenderTargets(1,&rtv,nullptr);   // refresh the opt-in target dimensions
     {
         ID3D11ShaderResourceView* nullView=nullptr;
         ID3D11GeometryShader* gs=nullptr;
@@ -417,18 +417,18 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         context->Draw(3,0);
         // The signature resolves the GS identity through the creation table:
         // the line must carry hash/bytes/serial, not zeros.
-        CHECK(count("draw state topology=4(trianglelist) gs=")==1);
+        CHECK(count("draw state ctx=imm exec=immediate draw=Draw vertices=3 instances=1 topology=4(trianglelist) gs=")==1);
         CHECK(count(" ps-null")==1);
         CHECK(count("/744b#")!=0);   // the kGsViewportBlob container: 744 bytes + serial
         // Same signature again: no second line.
         context->Draw(3,0);
-        CHECK(count("draw state topology=4(trianglelist) gs=")==1);
+        CHECK(count("draw state ctx=imm exec=immediate draw=Draw vertices=3 instances=1 topology=4(trianglelist) gs=")==1);
         // Unbinding a PS that was never bound does not change the signature:
         // still one line, and the unbound PS reads as zeros.
         context->PSSetShader(nullptr,nullptr,0);
         context->Draw(3,0);
-        CHECK(count("draw state topology=4(trianglelist) gs=")==1);
-        CHECK(count("draw state topology=4(trianglelist) gs=000000000000")==0);   // the GS hash resolved
+        CHECK(count("draw state ctx=imm exec=immediate draw=Draw vertices=3 instances=1 topology=4(trianglelist) gs=")==1);
+        CHECK(count("draw state ctx=imm exec=immediate draw=Draw vertices=3 instances=1 topology=4(trianglelist) gs=000000000000")==0);   // the GS hash resolved
         // A bind of count=0 keeps the stage's prior slots (D3D11 semantics),
         // so the ps-null bit stands and the signature is unchanged.
         context->PSSetShaderResources(0,0,nullptr);
@@ -436,6 +436,42 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         CHECK(count(" ps-null")==1);   // still the same signature: no new line
         context->GSSetShader(nullptr,nullptr,0);
         gs->Release();
+    }
+    // Deferred signature capture is emitted on replay with the list's execute
+    // count, and records the actual target and depth-view dimensions/formats.
+    {
+        D3D11_TEXTURE2D_DESC colorDesc=target;colorDesc.Width=128;colorDesc.Height=128;colorDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
+        ID3D11Texture2D* color=nullptr;ID3D11RenderTargetView* colorView=nullptr;
+        D3D11_TEXTURE2D_DESC depthDesc=colorDesc;depthDesc.Format=DXGI_FORMAT_D32_FLOAT;depthDesc.BindFlags=D3D11_BIND_DEPTH_STENCIL;
+        ID3D11Texture2D* depth=nullptr;ID3D11DepthStencilView* depthView=nullptr;
+        ID3D11DeviceContext* deferred=nullptr;ID3D11CommandList* list=nullptr;
+        CHECK(SUCCEEDED(device->CreateTexture2D(&colorDesc,nullptr,&color))&&color);
+        CHECK(SUCCEEDED(device->CreateRenderTargetView(color,nullptr,&colorView))&&colorView);
+        CHECK(SUCCEEDED(device->CreateTexture2D(&depthDesc,nullptr,&depth))&&depth);
+        CHECK(SUCCEEDED(device->CreateDepthStencilView(depth,nullptr,&depthView))&&depthView);
+        CHECK(SUCCEEDED(device->CreateDeferredContext(0,&deferred))&&deferred);
+        if(colorView&&depthView&&deferred) {
+            deferred->OMSetRenderTargets(1,&colorView,depthView);
+            deferred->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            deferred->Draw(3,0);
+            CHECK(SUCCEEDED(deferred->FinishCommandList(FALSE,&list))&&list);
+            if(list) {
+                context->ExecuteCommandList(list,FALSE);
+                CHECK(count("draw command-list replay list=#")>=1);
+                CHECK(count("draw state ctx=def#")>=1);
+                bool sawTarget=false;
+                for(const auto& line:lines)if(line.find("draw state ctx=def#")!=std::string::npos&&
+                    line.find("exec=1 list=#")!=std::string::npos&&
+                    line.find("draw=Draw vertices=3 instances=1 topology=4(trianglelist)")!=std::string::npos&&
+                    line.find("target=28(R8G8B8A8_UNORM) 128x128 dsv=40(D32_FLOAT)")!=std::string::npos)sawTarget=true;
+                CHECK(sawTarget);
+                context->ExecuteCommandList(list,FALSE);
+                CHECK(count("exec=2 restore=0 signatures=1")>=1);
+                list->Release();
+            }
+        }
+        if(deferred)deferred->Release();if(depthView)depthView->Release();if(depth)depth->Release();
+        if(colorView)colorView->Release();if(color)color->Release();
     }
     // Collision-safe identity: two shaders whose fnv AND length agree must
     // still get distinct serials, and BOTH identities must stay resolvable
@@ -505,7 +541,7 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     }
     // Draw-state lines have their OWN budget, not the probe cap: a thousand
     // gs scan lines at load must not eat the draw-state budget before the
-    // first terrain draw. Flood distinct draw-state signatures (topology
+    // first draw signature. Flood distinct draw-state signatures (topology
     // changes) past kMaxDrawStates and check the draw-state cap message fires
     // while no probe-cap message did.
     {
@@ -514,8 +550,17 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
             context->IASetPrimitiveTopology(static_cast<D3D11_PRIMITIVE_TOPOLOGY>(t));
             context->Draw(3,0);
         }
-        CHECK(count("further draw-state lines suppressed")==1);
+        CHECK(count("further immediate draw-state lines suppressed (cap reached)")==1);
         CHECK(count("further capability answers suppressed")==0);
+        ID3D11DeviceContext* deferred=nullptr;ID3D11CommandList* list=nullptr;
+        CHECK(SUCCEEDED(device->CreateDeferredContext(0,&deferred))&&deferred);
+        if(deferred) {
+            deferred->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+            deferred->Draw(2,0);
+            CHECK(SUCCEEDED(deferred->FinishCommandList(FALSE,&list))&&list);
+            if(list){context->ExecuteCommandList(list,FALSE);CHECK(count("topology=2(linelist)")>=1);list->Release();}
+            deferred->Release();
+        }
         // The independence runs the other way too: a probe logged after the
         // draw-state flood must still land (the draw-state budget being
         // exhausted never suppresses capability answers). R16_FLOAT is not
@@ -547,7 +592,7 @@ static int deepWithoutSink(ID3D11Device* device,ID3D11DeviceContext* context) {
     d3d11_diag::configure(sinkLine);
     CHECK(count("deep draw state on")==1);
     CHECK(count("no log sink at adoption")==1);
-    CHECK(count("draw state topology=4(trianglelist)")==1);
+    CHECK(count("draw state ctx=imm exec=immediate draw=Draw vertices=3 instances=1 topology=4(trianglelist)")==1);
     printf("OFF-DEVICE D3D11 deep-without-sink checks=%u failures=%u lines=%zu; no rendering claim\n",checks,failures,lines.size());
     return failures?1:0;
 }
