@@ -63,8 +63,18 @@ int main(){
  CHECK(call("d3dxmatrixmultiply",{0x7700,0x3000,0x6000})==0x7700);CHECK(near(value(mem,0x7700),1)&&near(value(mem,0x7730),6)&&near(value(mem,0x7734),8)&&near(value(mem,0x7738),10));
  const char* pathApis[]={"pathfindfilenamea","pathremoveextensiona","pathremovefilespeca"};const unsigned pathArity[]={1,1,1};for(unsigned i=0;i<3;++i){auto it=reg.map.find({"shlwapi.dll",pathApis[i]});CHECK(it!=reg.map.end());if(it!=reg.map.end()){CHECK(it->second.conv==Conv::Stdcall);CHECK(it->second.argc==pathArity[i]);}}
  auto pathCall=[&](const char* n,uint32_t p){mem.w32(cpu.reg[ESP]+4,p);return reg.map.at({"shlwapi.dll",n}).fn(cpu);};
- uint32_t path=g.put_str("C:\\games\\melty.exe");CHECK(pathCall(pathApis[0],path)==path+9);pathCall(pathApis[1],path);CHECK(mem.read_cstr(path)=="C:\\games\\melty");uint32_t spaced=g.put_str("C:\\game dir\\mel.ty.exe");pathCall(pathApis[1],spaced);CHECK(mem.read_cstr(spaced)=="C:\\game dir\\mel.ty");CHECK(pathCall(pathApis[2],path)==1);CHECK(mem.read_cstr(path)=="C:\\games");
- uint32_t root=g.put_str("C:\\");CHECK(pathCall(pathApis[2],root)==0);uint32_t trailing=g.put_str("C:\\games\\");CHECK(pathCall(pathApis[2],trailing)==1);CHECK(mem.read_cstr(trailing)=="C:\\games");
+ // Microsoft Learn contracts are cited beside the registrations in x86_guest.h.
+ // Keep only cases directly specified by those contracts; they do not define roots,
+ // trailing separators, dotfiles/multiple dots, UNC roots, or drive-relative filenames.
+ struct FindCase{const char* in;unsigned offset;};
+ const FindCase findCases[]={{"C:\\games\\melty.exe",9},{"melty.exe",0}};
+ for(const auto& t:findCases){uint32_t p=g.put_str(t.in);CHECK(pathCall(pathApis[0],p)==p+t.offset);}
+ struct ExtensionCase{const char* in;const char* out;};
+ const ExtensionCase extensionCases[]={{"C:\\games\\melty.exe","C:\\games\\melty"},{"C:\\games\\melty","C:\\games\\melty"},{"C:\\a.b\\c","C:\\a.b\\c"}};
+ for(const auto& t:extensionCases){uint32_t p=g.put_str(t.in);pathCall(pathApis[1],p);CHECK(mem.read_cstr(p)==t.out);}
+ struct FileSpecCase{const char* in;const char* out;uint32_t result;};
+ const FileSpecCase fileSpecCases[]={{"C:\\games\\melty.exe","C:\\games",1},{"C:\\foo","C:\\",1},{"foo\\bar","foo",1},{"C:","C:",0},{"","",0}};
+ for(const auto& t:fileSpecCases){uint32_t p=g.put_str(t.in);CHECK(pathCall(pathApis[2],p)==t.result);CHECK(mem.read_cstr(p)==t.out);}
  std::printf("x86-d3dx: %d checks, %d failures\n",checks,failures);return failures?1:0;
 }
 #endif
