@@ -77,8 +77,8 @@ struct.pack_into('<II', b, off, rva, 24)
 open(path, 'wb').write(b)
 EOF
 set +e; traw=$("$tmp/x86-guest" "$tmp/fixture-tls-threads.exe" 2>&1); trc=$?; set -e
-tout=$(echo "$traw" | grep -E '^(x86-tls-threads|checks|failed)' | tr -d '\r')
-twant=$'x86-tls-threads: start\nx86-tls-threads: per-thread ok\nchecks=9\nfailed=0'
+tout=$(echo "$traw" | grep -E '^(x86-tls-threads|checks|failed)' | tr -d '\r' || true)
+twant=$'x86-tls-threads: start\nx86-tls-threads: per-thread ok\nchecks=16\nfailed=0'
 [[ $trc -eq 42 ]] || { echo "X86-TLS FAIL: per-thread interpreter exit $trc (want 42)"; echo "$traw"; exit 1; }
 [[ $tout == "$twant" ]] || { echo "X86-TLS FAIL: per-thread stdout differs"; echo "$traw"; diff <(echo "$twant") <(echo "$tout"); exit 1; }
 echo "X86-TLS PASS: per-thread implicit TLS (main and worker each own a copy, template untouched), TLS callbacks DLL_THREAD_ATTACH/DETACH once on the worker, worker's LastError 0 and thread id, main's LastError kept (exit 42)"

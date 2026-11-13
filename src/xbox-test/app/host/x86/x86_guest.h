@@ -285,53 +285,63 @@ struct Guest {
             c.call(fn, {image_base, reason, 0});
         }
     }
+    // The worker's context lives exactly as long as this object: the worker's TEB
+    // is the current thread, its in-body flag holds and its instruction budget
+    // applies. The destructor restores the main thread's state, so every exit
+    // path (normal return, ExitThread unwind, host exception) restores it once and
+    // no worker TEB is ever left active.
+    struct ThreadScope {
+        Guest& g; Cpu& c;
+        uint32_t main_teb, main_fs; uint64_t main_limit; bool main_in_body;
+        ThreadScope(Guest& gg, Cpu& cc, uint32_t teb, uint64_t budget)
+            : g(gg), c(cc), main_teb(gg.cur_teb), main_fs(cc.fs_base), main_limit(cc.limit), main_in_body(gg.in_thread_body) {
+            g.cur_teb = teb; c.fs_base = teb; g.in_thread_body = true;
+            // Each body gets `budget` instructions per run. The interpreter is
+            // single-threaded, so a body that never returns (a worker that waits on
+            // the main thread) must fail the run by name instead of hanging the host.
+            if (c.executed + budget < c.limit) c.limit = c.executed + budget;
+        }
+        ~ThreadScope() { g.cur_teb = main_teb; c.fs_base = main_fs; c.limit = main_limit; g.in_thread_body = main_in_body; }
+    };
+    // Order per thread: DLL_THREAD_ATTACH callbacks, the body, DLL_THREAD_DETACH
+    // callbacks (all on the thread's own TEB), then the TEB and TLS block are
+    // unmapped, and the scope restores the main thread. ExitThread in the body
+    // ends the thread; ExitThread in a detach callback ends only that callback:
+    // the thread is already exiting and keeps its body's exit code.
     void run_pending_threads(Cpu& c) {
         while (!pending_threads.empty()) {
             auto t = pending_threads.front(); pending_threads.erase(pending_threads.begin());
             auto id = thread_ids.find(std::get<0>(t));
             ThreadTeb th = map_thread_teb(c, id != thread_ids.end() ? id->second : 0);
-            uint32_t main_teb = cur_teb, main_fs = c.fs_base;
-            cur_teb = th.base; c.fs_base = th.base;
-            // The body's exit code is its return value (EAX), or the code its
-            // ExitThread call passed. A returned body is finished too, so
-            // GetExitCodeThread must answer this code, not STILL_ACTIVE (MSDN
-            // GetExitCodeThread: the thread's return value, or the code given
-            // to ExitThread). Recorded under the HANDLE, which is what
-            // GetExitCodeThread is called with. A body that called ExitProcess
-            // set Cpu.exited instead: do_exit ran, the whole run is over.
+            ThreadScope scope(*this, c, th.base, kThreadBudget);
             uint32_t saved_regs[8]; std::memcpy(saved_regs, c.reg, sizeof saved_regs);
             uint32_t saved_eip = c.eip, code = 0;
-            bool outer = in_thread_body; in_thread_body = true;
-            // Each body gets kThreadBudget instructions per run. The interpreter is
-            // single-threaded, so a body that never returns (a worker that waits on
-            // the main thread) must fail the run by name instead of hanging the host.
-            uint64_t outer_limit = c.limit;
-            if (c.executed + kThreadBudget < outer_limit) c.limit = c.executed + kThreadBudget;
             try {
-                tls_callbacks_call(c, 2);  // DLL_THREAD_ATTACH, on the new thread's TEB
+                tls_callbacks_call(c, 2);  // DLL_THREAD_ATTACH
                 code = c.call(std::get<1>(t), {std::get<2>(t)});
             }
             catch (const ThreadExit&) {
                 // Drop the body's frames: restore the scheduler's registers so
-                // the wait that started the body returns to its caller.
+                // the wait that started the body returns to its caller. The
+                // body's exit code is what ExitThread was given (MSDN ExitThread).
                 std::memcpy(c.reg, saved_regs, sizeof saved_regs); c.eip = saved_eip;
                 code = thread_exit_code;
             }
             catch (...) {
-                bool budget = c.limit < outer_limit && c.executed > c.limit;
-                c.limit = outer_limit; in_thread_body = outer;
-                cur_teb = main_teb; c.fs_base = main_fs;
-                if (budget) {
+                if (scope.main_limit > c.limit && c.executed > c.limit) {
                     emit(2, "x86: thread body did not return within its instruction budget\n");
                     throw Fault(FaultKind::InstructionLimit, c.eip, std::get<1>(t), "thread body exceeded its instruction budget");
                 }
                 throw;
             }
-            c.limit = outer_limit;
+            // The exit code is the body's return value (EAX) or the ExitThread code:
+            // a returned body is finished too, so GetExitCodeThread answers it, not
+            // STILL_ACTIVE (MSDN GetExitCodeThread). Recorded under the HANDLE.
             thread_exit_codes[std::get<0>(t)] = code;
-            tls_callbacks_call(c, 3);  // DLL_THREAD_DETACH, still on the thread's TEB
-            in_thread_body = outer;
-            cur_teb = main_teb; c.fs_base = main_fs;
+            // DLL_THREAD_DETACH on the thread's own TEB, before its memory goes.
+            std::memcpy(saved_regs, c.reg, sizeof saved_regs); saved_eip = c.eip;
+            try { tls_callbacks_call(c, 3); }
+            catch (const ThreadExit&) { std::memcpy(c.reg, saved_regs, sizeof saved_regs); c.eip = saved_eip; }
             c.mem.unmap(th.base, th.size);
         }
     }
