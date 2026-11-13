@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# x86 stage 3: guest DLL loading. Builds three freestanding i686 PE32 images
-# (exe -> dll-a.dll -> dll-b.dll) and runs the exe through the interpreter:
-# recursive import binding between guest PEs, DllMain(DLL_PROCESS_ATTACH),
-# LoadLibraryA/GetProcAddress (name and ordinal)/FreeLibrary/GetModuleHandle
-# called from guest code. Deterministic and console-free.
+# x86 stage 3: guest DLL loading. Builds four freestanding i686 PE32 images
+# (exe -> dll-a.dll -> dll-b.dll, plus fwd.dll with pure OS-forwarder exports)
+# and runs the exe through the interpreter: recursive import binding between
+# guest PEs, DllMain(DLL_PROCESS_ATTACH), LoadLibraryA/GetProcAddress (name
+# and ordinal)/FreeLibrary/GetModuleHandle, and one-hop forward resolution to
+# OS-served modules. Deterministic and console-free.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 cc32="${I686_CC:-$(command -v i686-w64-mingw32-gcc || true)}"
@@ -20,6 +21,11 @@ flags="-O1 -Wall -Wextra -Werror -ffreestanding -fno-builtin -fno-stack-protecto
 # GetProcAddress("dllb_value") matches what a game's import list looks like.
 "$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -o "$tmp/dll-b.dll" "$here/x86-dll/dll-b.c"
 "$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -o "$tmp/dll-a.dll" "$here/x86-dll/dll-a.c" -L"$tmp" -ldll-b
+# fwd.dll: pure forwarder exports (msvcrt.memcpy, NTDLL.memcpy, kernel32.Sleep,
+# the ordinal form "ntdll.#123", nosuchmod.nosuchsym). The .def goes to ld
+# directly and its entries are referenced by nothing, so ld emits real
+# forwarder export entries (a referenced entry becomes an import stub instead).
+"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -o "$tmp/fwd.dll" "$here/x86-dll/dll-fwd.c" "$here/x86-dll/fwd.def"
 # exe: imports dll_a_sum/dllb_attach_marker, calls the kernel32 DLL APIs
 # (LoadLibrary/GetProcAddress/FreeLibrary/GetModuleHandleA/W/ExW).
 "$cc32" $flags -Wl,--entry,_fixture_main -Wl,--subsystem,console -o "$tmp/fixture-dll.exe" \

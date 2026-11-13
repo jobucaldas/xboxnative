@@ -202,6 +202,26 @@ int main(void) {
     }
     printf("x86-crt: time ok\n");
 
+    /* __iob_func is a FUNCTION in the real UCRT/stdint headers: FILE*
+     * __iob_func(void) returns the stdio table pointer. A surface that binds
+     * it as data puts the table's bytes in the IAT, and a call through the
+     * IAT jumps at data (ExecuteViolation at the _iob page). Called through
+     * the IAT it must return the table pointer that stdin/stdout/stderr
+     * live in; dereferencing stdin/stdout/stderr proves the table is real. */
+    {
+        FARPROC pfn = GetProcAddress(LoadLibraryA("msvcrt.dll"), "__iob_func");
+        FILE* (__cdecl *iob_func)(void) = (FILE* (*)(void))(void(*)(void))pfn;
+        check(iob_func != NULL);
+        if (iob_func) {
+            FILE* tbl = iob_func();
+            check(tbl != NULL);
+            check((FILE*)stdin >= tbl && (FILE*)stdin < tbl + 3);
+            check((const char*)stdout >= (const char*)tbl && (const char*)stdout - (const char*)tbl < (ptrdiff_t)(3 * sizeof(FILE)));
+            check(ferror(stdin) == 0);  /* the table's FILE structs are usable */
+        }
+    }
+    puts("x86-crt: iob ok");
+
     printf("x86-crt: checks %d failed %d\n", g_checks, g_fail);
     return g_fail ? 100 + g_fail : 42;
 }

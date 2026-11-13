@@ -70,10 +70,15 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
                            [&reg, &table](const std::string& dll, const std::string& sym) {
                                // Forwarded exports that name an OS-served module
                                // ("ntdll.memcpy"): the same thunk/data answer
-                               // GetProcAddress gives on that pseudo-handle.
+                               // GetProcAddress gives on that pseudo-handle. The
+                               // module part has no ".dll" — lowercase and suffix
+                               // it for the registry; an ordinal forward ("dll.#n")
+                               // answers 0 (no ordinal surface to guess against).
                                std::string l = dll, s = sym;
                                for (auto& ch : l) ch = char(std::tolower((unsigned char)ch));
                                for (auto& ch : s) ch = char(std::tolower((unsigned char)ch));
+                               if (l.rfind(".dll") != l.size() - 4) l += ".dll";
+                               if (s.rfind("#", 0) == 0) return 0u;
                                auto it = reg.map.find({l, s});
                                if (it != reg.map.end()) return table.add(it->second);
                                auto dt = reg.data.find({l, s});

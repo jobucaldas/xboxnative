@@ -12,18 +12,26 @@ namespace x86 {
 // Guest layout (all fixed, outside every ImageBase a normal exe uses).
 constexpr uint32_t STACK_TOP = 0x00300000, STACK_SIZE = 0x00100000;
 constexpr uint32_t TEB_ADDR = 0x7FFDE000, PEB_ADDR = 0x7FFDF000;
-struct Registry {  // (lowercase dll, symbol) -> thunk definition
+struct Registry {  // (lowercase dll, lowercase symbol) -> thunk definition
+    // Symbol keys are stored lowercase: Windows' loader matches export names
+    // case-insensitively, and a guest forward string ("kernel32.Sleep") is
+    // lowercased by read_exports before the lookup. The thunk keeps the
+    // canonical SDK casing for fault labels ("kernel32!Sleep").
     std::map<std::pair<std::string, std::string>, Thunk> map;
-    // Data imports: (lowercase dll, symbol) -> guest address of the variable.
+    // Data imports: (lowercase dll, lowercase symbol) -> guest address of the variable.
     // A data import's IAT slot holds the variable's guest address, not a thunk
     // (msvcrt's __initenv/__mb_cur_max/_iob are imported as data by mingw's
     // CRT startup; reading them is a plain memory load).
     std::map<std::pair<std::string, std::string>, uint32_t> data;
+    static std::string key_sym(const std::string& name) {
+        std::string l = name; for (auto& ch : l) ch = char(std::tolower((unsigned char)ch));
+        return l;
+    }
     void add(const std::string& dll, const std::string& name, Conv conv, unsigned argc, std::function<uint32_t(Cpu&)> fn) {
-        map[{dll, name}] = Thunk{dll, name, conv, argc, std::move(fn)};
+        map[{dll, key_sym(name)}] = Thunk{dll, name, conv, argc, std::move(fn)};
     }
     void add_data(const std::string& dll, const std::string& name, uint32_t addr) {
-        data[{dll, name}] = addr;
+        data[{dll, key_sym(name)}] = addr;
     }
 };
 struct Image {
@@ -107,9 +115,11 @@ inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, cons
             uint32_t t = u32(pe.bytes, src + size_t(j) * 4); if (!t) break;
             std::string sym = (t & 0x80000000u) ? "#" + std::to_string(t & 65535) : pe.string(t + 2);
             ++img.imports;
-            auto dit = reg.data.find({dll, sym});
+            // The registry keys symbols lowercase (Windows matches export
+            // names case-insensitively); the label keeps the import's casing.
+            auto dit = reg.data.find({dll, Registry::key_sym(sym)});
             if (dit != reg.data.end()) { mem.w32(img.base + dst + j * 4, dit->second); ++img.bound; continue; }
-            auto it = reg.map.find({dll, sym}); uint32_t stub;
+            auto it = reg.map.find({dll, Registry::key_sym(sym)}); uint32_t stub;
             if (it != reg.map.end()) { stub = table.add(it->second); ++img.bound; }
             else {
                 img.unresolved.push_back(dll + "!" + sym);
@@ -287,8 +297,13 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
     return out;
 }
 // Thunk page (read+execute, never fetched through the interpreter), stack, TEB32, PEB32.
-inline void map_thunk_page(Memory& mem, const ThunkTable& table) {
-    uint32_t len = (table.span() + 4095) & ~4095u;
+// The page is one 4 KiB page holding kPerPage stubs: capacity is fixed at map
+// time so the process-return sentinel (the page's last slot) never moves under
+// a running guest call — a stub added later by GetProcAddress/os_export_addr
+// must never land on the slot a host->guest call is waiting to return through.
+inline void map_thunk_page(Memory& mem, ThunkTable& table) {
+    table.capacity = ThunkTable::kPerPage;
+    uint32_t len = 4096;
     mem.map(table.base, len, PROT_R | PROT_W);
     std::vector<uint8_t> int3(len, 0xCC); mem.write_bytes(table.base, int3.data(), len);
     mem.protect(table.base, len, PROT_R | PROT_X);

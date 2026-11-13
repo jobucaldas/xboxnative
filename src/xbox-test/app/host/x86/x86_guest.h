@@ -258,10 +258,19 @@ struct Guest {
     }
     // Resolves an export of an OS-served module (kernel32/msvcrt/ntdll) that a
     // guest DLL's forwarding export names ("ntdll.memcpy"): a host thunk, or a
-    // registered data export's address. Returns 0 when the surface has none.
+    // registered data export's address. The forwarder's module part carries no
+    // ".dll" (Windows forward strings are "ntdll.memcpy", "NTDLL.memcpy"), so
+    // the name is lowercased and suffixed before the registry lookup — the
+    // registry's keys are lowercase full module names. An ordinal forward
+    // ("ntdll.#123") is answered 0: the surface registers no ordinals, and
+    // guessing one would bind a different function silently. Returns 0 when
+    // the surface has none (the IAT slot stays an unresolved stub that faults
+    // by name); resolution stays one hop, so no chain can recurse here.
     uint32_t os_export_addr(ThunkTable& table, const std::string& dll, const std::string& sym) {
         std::string l = dll; for (auto& ch : l) ch = char(std::tolower((unsigned char)ch));
         std::string s = sym; for (auto& ch : s) ch = char(std::tolower((unsigned char)ch));
+        if (l.rfind(".dll") != l.size() - 4) l += ".dll";
+        if (s.rfind("#", 0) == 0) return 0;  // ordinal forward: no ordinal surface
         auto it = reg.map.find({l, s});
         if (it != reg.map.end()) return table.add(it->second);
         auto dt = reg.data.find({l, s});
@@ -321,7 +330,7 @@ struct Guest {
         for (auto& kv : os_modules) {
             if (kv.second != module) continue;
             if (name_ptr >= 0x10000u) {
-                std::string sym = str(name_ptr);
+                std::string sym = Registry::key_sym(str(name_ptr));
                 auto it = reg.map.find({kv.first, sym});
                 if (it != reg.map.end()) return table.add(it->second);
                 auto dt = reg.data.find({kv.first, sym});
@@ -526,7 +535,10 @@ inline void Guest::register_all() {
     reg.add_data("msvcrt.dll", "__winitenv", initenv);
     reg.add_data("msvcrt.dll", "__mb_cur_max", mb_cur_max);
     reg.add_data("msvcrt.dll", "_iob", iob_addr);
-    reg.add_data("msvcrt.dll", "__iob_func", iob_addr);  // some CRTs import it as data
+    // __iob_func is a FUNCTION (FILE* __iob_func(void), stdio.h): its IAT slot
+    // must hold a callable thunk, not the table address — a data binding makes
+    // a call through it jump into the iob bytes. It returns the table pointer.
+    reg.add("msvcrt.dll", "__iob_func", Conv::Cdecl, 0, [this](Cpu&) -> uint32_t { return iob_addr; });
     auto C = [](const char* n) { return n; };
     (void)C;
 
@@ -1230,6 +1242,19 @@ inline void Guest::register_all() {
     // releases without contention, so both waits answer "woke" and both
     // releases succeed. Everything here matches what mcfgthread's static
     // build and the CRT's once-init call at startup and exit.
+    // The mem family: real ntdll.dll exports memcpy/memmove/memset/memchr
+    // (msvcrt forwards to it there), so a guest forwarder naming
+    // "ntdll.memcpy" resolves to the same behaviour as msvcrt's.
+    reg.add("ntdll.dll", "memcpy", Conv::Cdecl, 3, [this](Cpu& c) -> uint32_t {
+        uint32_t d = c.arg(0), s = c.arg(1), n = c.arg(2);
+        if (n) mem.write_bytes(d, mem.read_bytes(s, n).data(), n);
+        return d; });
+    reg.add("ntdll.dll", "memmove", Conv::Cdecl, 3, [this](Cpu& c) -> uint32_t {
+        uint32_t d = c.arg(0), s = c.arg(1), n = c.arg(2);
+        if (n) { auto b = mem.read_bytes(s, n); mem.write_bytes(d, b.data(), n); } return d; });
+    reg.add("ntdll.dll", "memset", Conv::Cdecl, 3, [this](Cpu& c) -> uint32_t {
+        uint32_t d = c.arg(0), n = c.arg(2); uint8_t v = uint8_t(c.arg(1));
+        std::vector<uint8_t> b(n, v); if (n) mem.write_bytes(d, b.data(), n); return d; });
     reg.add("ntdll.dll", "NtWaitForKeyedEvent", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
         run_pending_threads(c); return 0; });
     reg.add("ntdll.dll", "NtReleaseKeyedEvent", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {

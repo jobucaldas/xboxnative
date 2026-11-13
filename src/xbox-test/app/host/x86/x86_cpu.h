@@ -25,6 +25,7 @@ struct Thunk {
     std::function<uint32_t(Cpu&)> fn;                 // return value goes to EAX
 };
 struct ThunkTable {
+    static constexpr uint32_t kPerPage = 4096 / 16;  // stubs one 4 KiB page holds
     uint32_t base = 0x7FFE0000, stride = 16;
     uint32_t capacity = 0;  // stubs the mapped page can hold (0 = not mapped yet)
     std::vector<Thunk> entries;
@@ -36,7 +37,8 @@ struct ThunkTable {
     // The process-return sentinel is the last slot of the mapped page and never
     // moves: GetProcAddress can add stubs while a host->guest call is running,
     // and a sentinel derived from entries.size() would then land on the address
-    // that call is waiting to return to.
+    // that call is waiting to return to (a guest call through a freshly
+    // resolved forward would hit it and unwind as a phantom return).
     uint32_t sentinel() const { return capacity ? base + (capacity - 1) * stride : base + uint32_t(entries.size()) * stride; }
     uint32_t span() const { return uint32_t(entries.size() + 1) * stride; }
     const Thunk* at(uint32_t eip) const {

@@ -2,7 +2,9 @@
 /* x86 stage 3 fixture: a freestanding i686 PE32 exe exercising guest DLL
  * loading in the interpreter. Chain: exe -> dll-a.dll -> dll-b.dll (guest PEs
  * all the way down), plus LoadLibraryA, GetProcAddress (name and ordinal),
- * FreeLibrary, GetModuleHandleA/W/ExW and the DllMain attach marker.
+ * FreeLibrary, GetModuleHandleA/W/ExW, forwarded exports to OS modules
+ * (msvcrt.memcpy, NTDLL.memcpy, kernel32.Sleep, an ordinal forward and a
+ * missing module) and the DllMain attach marker.
  * Freestanding: the only host imports are the kernel32 APIs under test, so
  * the fixture bounds exactly the surface it proves. Exit 42 on success. */
 typedef unsigned int u32;
@@ -77,6 +79,56 @@ int fixture_main(void) {
         ok(hfresh != 0);
         const u16 wname3[] = {'d','l','l','-','a','.','d','l','l',0};
         ok(GetModuleHandleW(wname3) == hfresh);
+    }
+
+    /* 15-19. Forwarded exports to OS modules. fwd.dll's exports are pure
+     * forward strings (msvcrt.memcpy, NTDLL.memcpy, kernel32.Sleep,
+     * "ntdll.#123", nosuchmod.nosuchsym) built by the real linker. GetProcAddress
+     * must resolve them one hop through the registry — the same path the
+     * import binder uses — and the resolved addresses must be callable.
+     * With the pre-fix resolver (no ".dll" suffix, no case fold) every one of
+     * these answered 0. */
+    {
+        u32 hfwd = LoadLibraryA("fwd.dll");
+        ok(hfwd != 0);
+        /* 15. msvcrt.memcpy: call through the forward and check the bytes. */
+        void *(*fwmemcpy)(void *, const void *, u32) =
+            (void *(*)(void *, const void *, u32))GetProcAddress(hfwd, "fwd_memcpy");
+        ok(fwmemcpy != 0);
+        if (fwmemcpy) {
+            char dst[8];
+            static const char src[8] = {'f','w','d','!','m','e','m','1'};
+            fwmemcpy(dst, src, sizeof dst);
+            ok(dst[0]=='f' && dst[1]=='w' && dst[2]=='d' && dst[3]=='!' &&
+               dst[4]=='m' && dst[5]=='e' && dst[6]=='m' && dst[7]=='1');
+        }
+        /* 16. NTDLL.memcpy: upper-case module part must match case-insensitively
+         * (the same thunk the lowercase forward got — one stub per registry
+         * entry? No: add() appends, so the two GetProcAddress calls each add;
+         * equality of the resolved addresses is what Windows answers too, but
+         * the surface hands out distinct stubs, so compare behaviour instead:
+         * call it and check the same copy works). */
+        void *(*fwmix)(void *, const void *, u32) =
+            (void *(*)(void *, const void *, u32))GetProcAddress(hfwd, "fwd_mixed");
+        ok(fwmix != 0);
+        if (fwmix) {
+            char dst[8];
+            static const char src[8] = {'N','T','D','L','L','!','m','m'};
+            fwmix(dst, src, sizeof dst);
+            ok(dst[0]=='N' && dst[1]=='T' && dst[2]=='D' && dst[3]=='L' &&
+               dst[4]=='L' && dst[5]=='!' && dst[6]=='m' && dst[7]=='m');
+        }
+        /* 17. kernel32.Sleep: resolves to the Sleep thunk and is callable.
+         * The pointer is stdcall (the thunk pops its 1 argument); a cdecl
+         * pointer here leaves ESP off by 4 and derails the entry. */
+        void (__stdcall *fwsleep)(u32) = (void (__stdcall *)(u32))GetProcAddress(hfwd, "fwd_sleep");
+        ok(fwsleep != 0);
+        if (fwsleep) fwsleep(0);
+        /* 18. Ordinal forward ("ntdll.#123"): the surface registers no
+         * ordinals, so resolution answers 0 cleanly — not a guessed thunk. */
+        ok(GetProcAddress(hfwd, "fwd_ord") == 0);
+        /* 19. Forward to a module that does not exist: 0, no hang, no crash. */
+        ok(GetProcAddress(hfwd, "fwd_ghost") == 0);
     }
 
     return failed ? 43 : 42;

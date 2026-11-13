@@ -1,0 +1,7 @@
+LIBRARY fwd.dll
+EXPORTS
+    fwd_memcpy = msvcrt.memcpy
+    fwd_mixed = NTDLL.memcpy
+    fwd_sleep = kernel32.Sleep
+    fwd_ord = "ntdll.#123"
+    fwd_ghost = nosuchmod.nosuchsym
