@@ -189,6 +189,17 @@ int main(void) {
     check(GetModuleHandleA("no-such-module.dll") == NULL && GetLastError() == ERROR_MOD_NOT_FOUND);
     SetLastError(0);
     check(GetModuleHandleW(L"no-such-module") == NULL && GetLastError() == ERROR_MOD_NOT_FOUND);
+    /* GetStartupInfoW (processthreadsapi.h): fills a STARTUPINFOW of cb = 68
+     * bytes on i686, the same size as the ANSI form (the string members differ
+     * only in pointee type). Only cb is compared; the rest is host-defined. */
+    STARTUPINFOW si; memset(&si, 0, sizeof si);
+    GetStartupInfoW(&si);
+    check(sizeof si == 68 && si.cb == 68);
+    /* OpenEventA (synchapi.h) and its export: a probe via GetProcAddress must
+     * find it; no named event exists, so NULL with ERROR_FILE_NOT_FOUND (2). */
+    check(GetProcAddress(GetModuleHandleA("kernel32.dll"), "OpenEventA") != NULL);
+    SetLastError(0);
+    check(OpenEventA(SYNCHRONIZE, FALSE, "xbn-no-such-event") == NULL && GetLastError() == ERROR_FILE_NOT_FOUND);
     puts("x86-crt: kernel32 ok");
 
     /* Interlocked and critical sections on the single guest thread. */

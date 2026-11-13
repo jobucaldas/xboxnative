@@ -755,6 +755,10 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetCommandLineW", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return put_wstr(u"x"); });
     reg.add("kernel32.dll", "GetStartupInfoA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         auto b = mem.read_bytes(startupinfo, 68); copy_out(c.arg(0), b.data(), 68); return 0; });
+    // GetStartupInfoW (processthreadsapi.h): the same 68-byte block. Its string
+    // members are NULL here, so the ANSI and wide layouts agree byte for byte.
+    reg.add("kernel32.dll", "GetStartupInfoW", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        auto b = mem.read_bytes(startupinfo, 68); copy_out(c.arg(0), b.data(), 68); return 0; });
     reg.add("kernel32.dll", "GetEnvironmentStrings", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return env_ptr; });
     reg.add("kernel32.dll", "GetEnvironmentStringsW", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return put_wstr(u"\0"); });
     reg.add("kernel32.dll", "FreeEnvironmentStringsA", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
@@ -1073,6 +1077,11 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "InitializeCriticalSectionAndSpinCount", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "TryEnterCriticalSection", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "InitializeCriticalSectionEx", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 1; });
+    // OpenEventA (synchapi.h): this surface creates no named objects, so no name
+    // exists: NULL with ERROR_FILE_NOT_FOUND, as Windows answers for a missing
+    // name. Registered so GetProcAddress finds the export (a guest's probe for
+    // it read the missing export as a failure and took its failure path).
+    reg.add("kernel32.dll", "OpenEventA", Conv::Stdcall, 3, [this](Cpu&) -> uint32_t { set_last_error(2); return 0; });
     // TLS
     reg.add("kernel32.dll", "TlsAlloc", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t {
         if (next_tls >= 64) return 0xFFFFFFFFu;
