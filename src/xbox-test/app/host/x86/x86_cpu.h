@@ -10,6 +10,7 @@
 // page before fetching, runs the host handler against the guest stack, then
 // performs the callee-side return.
 #pragma once
+#include <deque>
 #include <functional>
 #include <map>
 #include <string>
@@ -27,7 +28,11 @@ struct Thunk {
 struct ThunkTable {
     uint32_t base = 0x7FFE0000, stride = 16;
     uint32_t capacity = 0;  // stubs the mapped page can hold (0 = not mapped yet)
-    std::vector<Thunk> entries;
+    // deque, not vector: a handler that adds thunks while executing (COM proxy
+    // creation inside a guest callback, GetProcAddress) must never invalidate
+    // the storage of the Thunk it is running from — deque never moves existing
+    // elements on push_back, so references stay valid across any add.
+    std::deque<Thunk> entries;
     uint32_t add(Thunk t) {
         if (capacity && entries.size() >= capacity) throw std::runtime_error("x86 thunk page full");
         entries.push_back(std::move(t));
@@ -1182,11 +1187,15 @@ struct Cpu {
     void host_call(const Thunk& t) {
         mem.fault_eip = eip;
         uint32_t ret = mem.r32(reg[ESP]);
-        // The handler may add thunks to the table (a COM proxy created inside
-        // a guest callback builds its vtable right here), which reallocates
-        // `entries` and would leave `t` dangling before conv/argc are read.
+        // Copy the callable out before invoking: the handler may add thunks to
+        // the table (a COM proxy created inside a guest callback builds its
+        // vtable right here). deque keeps the Thunk's address stable, but a
+        // copied std::function costs nothing and makes the invariant explicit
+        // — the running handler can never execute on storage that a nested
+        // add() could touch.
+        std::function<uint32_t(Cpu&)> fn = t.fn;
         Conv conv = t.conv; unsigned argc = t.argc;
-        uint32_t r = t.fn(*this);
+        uint32_t r = fn(*this);
         if (exited) return;
         reg[EAX] = r;
         reg[ESP] += 4 + (conv == Conv::Stdcall ? 4 * argc : 0); eip = ret;

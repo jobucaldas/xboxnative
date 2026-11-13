@@ -1578,6 +1578,53 @@ static void test_thunk_capacity() {
     EXPECT(mem.r32(sent) != 0, "sentinel slot is inside the mapped page");
 }
 
+// ---------- a handler that adds thunks while it is running stays valid ----------
+// A thunk's own storage must survive the handler: deque never moves existing
+// elements on push_back, and host_call copies the callable out before invoking,
+// so a handler that adds many thunks (forcing deque block growth) mid-call and
+// keeps using its captured state is safe. Run under ASan in CI-adjacent runs.
+static void test_thunk_selfadd() {
+    Memory mem; ThunkTable t; t.base = 0x7FFC0000;
+    map_thunk_page(mem, t);
+    // The first thunk's handler: on every call, add 60 more thunks (three
+    // rounds of 60 = 180, within the page's 255-slot capacity, but enough
+    // repeated block allocation that a vector would have reallocated and moved
+    // the running Thunk), then keep using its captured state and return it —
+    // reading captured state after the adds is exactly what a dangling
+    // Thunk/function storage would corrupt.
+    struct State { unsigned calls = 0; std::vector<uint32_t> added; };
+    State st;
+    t.add(Thunk{"s.dll", "selfadd", Conv::Stdcall, 1, [&t, &st](Cpu&) -> uint32_t {
+        ++st.calls;
+        for (unsigned i = 0; i < 60; ++i)
+            st.added.push_back(t.add(Thunk{"s.dll", "grown", Conv::Cdecl, 0, [](Cpu&) -> uint32_t { return 0xEE; }}));
+        return st.calls * 100 + unsigned(st.added.size());
+    }});
+    // Drive it from the host side through host_call: eip on the stub, one
+    // stdcall arg pushed on a separate stack page (the thunk page itself is
+    // mapped R|X — writing to it is exactly the fault the page exists to raise).
+    const uint32_t STACK3 = 0x7FFB0000;
+    mem.map(STACK3, 4096, PROT_R | PROT_W);
+    for (unsigned round = 1; round <= 3; ++round) {
+        uint32_t stub0 = t.base;                 // first stub's address
+        uint32_t arg_at = STACK3 + 4096 - 64;    // [esp+4] inside the handler
+        mem.w32(arg_at, round);
+        Cpu cpu{mem, t};
+        cpu.reg[ESP] = arg_at - 4;               // push: [esp] = return slot, [esp+4] = arg0
+        mem.w32(cpu.reg[ESP], t.sentinel());     // "return address" = sentinel stops the run
+        cpu.eip = stub0;
+        uint32_t r = 0;
+        try { cpu.run(t.sentinel()); r = cpu.reg[EAX]; }
+        catch (const Fault& f) { EXPECT(false, "selfadd round %u faulted: %s", round, f.what()); }
+        EXPECT(r == round * 100 + 60u * round, "selfadd round %u returned %u (captured state intact)", round, r);
+        // The thunk that is running is still exactly itself after all the adds.
+        EXPECT(t.entries[0].name == "selfadd" && t.entries[0].argc == 1, "running thunk's storage intact after %u rounds of adds", round);
+        // Every previously added stub still resolves to a valid Thunk.
+        for (uint32_t a : st.added) EXPECT(t.at(a) != nullptr && t.at(a)->name == "grown", "added stub 0x%x still valid", a);
+    }
+    EXPECT(st.calls == 3, "handler ran 3 times");
+}
+
 // ---------- (4) owned fixture PE ----------
 static std::vector<uint8_t> slurp(const char* path) {
     std::ifstream f(path, std::ios::binary); if (!f) { printf("FAIL cannot open fixture %s\n", path); exit(2); }
@@ -1623,6 +1670,7 @@ int main(int argc, char** argv) {
         {"bugbot-regressions", test_bugbot_regressions, "X86-CORE PASS: Bugbot regression classes (pshuf original-lane selects, per-lane shift sign fill, saturating map vs hardware with edge values, fxsave layout vs real fxsave, movnti store width, fs: string-op override direction) match this machine's CPU"},
         {"thunks", test_thunks, "X86-CORE PASS: stdcall/cdecl thunks, nested guest callbacks, callee-saved registers preserved"},
         {"thunk-capacity", test_thunk_capacity, "X86-CORE PASS: thunk page capacity pinned, sentinel is the last slot, fill to capacity never collides"},
+        {"thunk-selfadd", test_thunk_selfadd, "X86-CORE PASS: a handler that adds thunks mid-call keeps its own storage and captured state"},
     };
     for (auto& s : suites) { int before = failures; s.fn(); if (failures == before) printf("%s\n", s.pass); else printf("X86-CORE FAIL: %s\n", s.name); }
     printf("(%llu hardware-compared cases)\n", (unsigned long long)alu_cases);

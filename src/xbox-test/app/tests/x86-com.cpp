@@ -234,7 +234,11 @@ int main() {
             unsigned refs = 0, releases = 0;
             void addref() { ++refs; }
             void release() { ++releases; if (refs) --refs; }
-        } c;
+        };
+        // Both hosts declared BEFORE the ComSpace members: reverse-declaration
+        // order keeps them alive through com2's destructor, whether teardown
+        // runs explicitly (destroy_all below) or in the destructor itself.
+        Counting c, c2;
         // A fresh engine per scope: its destructor is the teardown under test.
         Memory mem2; ThunkTable thunks2; ComSpace com2; Cpu cpu2{mem2, thunks2};
         thunks2.base = 0x7FFA0000;
@@ -246,7 +250,6 @@ int main() {
         // dedupe path: same proxy, one more guest ref, no second host addref.
         uint32_t p2 = com2.create(cpu2, "IMock", &c, [&] { c.addref(); }, [&] { c.release(); });
         // A distinct host object gets its own proxy even on the same interface.
-        Counting c2;
         uint32_t p3 = com2.create(cpu2, "IMock", &c2, [&] { c2.addref(); }, [&] { c2.release(); });
         EXPECT(p1 && p2 && p3 && p1 == p2 && p2 != p3, "dedupe: same host+iface returns the same proxy, a new host gets a new one");
         EXPECT(c.refs == 1 && c2.refs == 1, "one host ref per proxy (c=%u c2=%u)", c.refs, c2.refs);
@@ -292,13 +295,14 @@ int main() {
         // unique_ptr element, never `hosts.back()` — a vector reallocates as
         // it grows, which would leave earlier captures dangling.
         std::vector<std::unique_ptr<Counting>> exhaust_hosts;
+        // hostA/hostB also outlive com2: same reverse-declaration rule.
+        Counting hostA, hostB;
         Memory mem2; ThunkTable thunks2; ComSpace com2; Cpu cpu2{mem2, thunks2};
         thunks2.base = 0x7FF90000;
         map_thunk_page(mem2, thunks2);
         com2.interface_("IMock", 8);
         com2.interface_("IChurn", 5);
         com2.method("IChurn", 3, 2, [](Proxy&, Cpu& c) -> uint32_t { return c.arg(1); });
-        Counting hostA, hostB;
         uint32_t liveA = com2.create(cpu2, "IChurn", &hostA, [&] { hostA.addref(); }, [&] { hostA.release(); });
         uint32_t liveB = com2.create(cpu2, "IMock", &hostB, [&] { hostB.addref(); }, [&] { hostB.release(); });
         unsigned live_before = com2.live();
@@ -331,9 +335,9 @@ int main() {
         // The live proxies survived the exhaustion attempt untouched.
         EXPECT(com2.by_guest(liveA).host == &hostA && com2.by_guest(liveB).host == &hostB,
                "live proxies intact after exhaustion fault");
-        // Scope end: com2 is destroyed BEFORE exhaust_hosts (declared after
-        // it), so teardown releases into live Counting objects — under ASan
-        // this whole block is the proof.
+        // Scope end: com2 is destroyed BEFORE exhaust_hosts and hostA/hostB
+        // (all declared before it), so teardown releases into live objects —
+        // under ASan this whole block is the proof.
     }
 
     // ---- proxy created inside a host->guest callback: the sentinel must hold ----
@@ -346,6 +350,8 @@ int main() {
     // pins the sentinel to the page's last slot, so the dispatch always runs.
     {
         static constexpr uint32_t CODE2 = 0x40000, CODE3 = 0x41000, DATA2 = 0x50000, STACK2 = 0x60000;
+        // Host declared before the ComSpace members (reverse-declaration rule);
+        // its proxies carry no host_release, but the ordering must hold anyway.
         struct H {} late_host;
         static void* s_late_host = &late_host;
         Memory mem2; ThunkTable thunks2; ComSpace com2; Cpu cpu2{mem2, thunks2};
