@@ -289,44 +289,43 @@ static HRESULT STDMETHODCALLTYPE createGraphicsPipelineState(DevicePtr self,cons
 // One line describing a PSO subobject stream: the named subobjects in order
 // (with truncation/unknown markers), bounded to ~400 chars. Exposed for the
 // d3d12-diag test, which feeds synthetic streams built from the real layout.
-// The stream is a sequence of subobjects, each a 4-byte type followed by its
-// payload at pointer alignment, and payload sizes differ per type
-// (CD3DX12_PIPELINE_STATE_STREAM_SUBOBJECT is alignas(void*) with the type
-// first), so walk with a real-size table: a wrong stride would misname the
+// The stream is a sequence of CD3DX12_PIPELINE_STATE_STREAM_SUBOBJECT entries
+// (alignas(void*), a 4-byte type, then the payload at its own alignment), so
+// walk with a real size and alignment table: a wrong stride would misname the
 // refused subobject or read past the stream — exactly what this diagnostic
-// exists to name. Sizes come from sizeof on the real d3d12.h structs
-// (verified identical under SDK 616 and 618).
+// exists to name. Sizes and alignments come from sizeof/alignof on the real
+// d3d12.h structs (checked against DirectX-Headers v1.618.1).
 inline std::string streamSubobjects(const void* stream,size_t bytes) {
-    static const struct{int type;size_t size;const char* name;} subobjects[]={
-        {0,sizeof(ID3D12RootSignature*),        "ROOT_SIGNATURE"},
-        {1,sizeof(D3D12_SHADER_BYTECODE),       "VS"},
-        {2,sizeof(D3D12_SHADER_BYTECODE),       "PS"},
-        {3,sizeof(D3D12_SHADER_BYTECODE),       "DS"},
-        {4,sizeof(D3D12_SHADER_BYTECODE),       "HS"},
-        {5,sizeof(D3D12_SHADER_BYTECODE),       "GS"},
-        {6,sizeof(D3D12_SHADER_BYTECODE),       "CS"},
-        {7,sizeof(D3D12_STREAM_OUTPUT_DESC),    "STREAM_OUTPUT"},
-        {8,sizeof(D3D12_BLEND_DESC),            "BLEND"},
-        {9,sizeof(UINT),                        "SAMPLE_MASK"},
-        {10,sizeof(D3D12_RASTERIZER_DESC),      "RASTERIZER"},
-        {11,sizeof(D3D12_DEPTH_STENCIL_DESC),   "DEPTH_STENCIL"},
-        {12,sizeof(D3D12_INPUT_LAYOUT_DESC),    "INPUT_LAYOUT"},
-        {13,sizeof(D3D12_INDEX_BUFFER_STRIP_CUT_VALUE),"IB_STRIP_CUT"},
-        {14,sizeof(D3D12_PRIMITIVE_TOPOLOGY_TYPE),"PRIMITIVE_TOPOLOGY"},
-        {15,sizeof(D3D12_RT_FORMAT_ARRAY),      "RTV_FORMATS"},
-        {16,sizeof(DXGI_FORMAT),                "DSV_FORMAT"},
-        {17,sizeof(DXGI_SAMPLE_DESC),           "SAMPLE_DESC"},
-        {18,sizeof(UINT),                       "NODE_MASK"},
-        {19,sizeof(D3D12_CACHED_PIPELINE_STATE),"CACHED_PSO"},
-        {20,sizeof(D3D12_PIPELINE_STATE_FLAGS), "FLAGS"},
-        {21,sizeof(D3D12_DEPTH_STENCIL_DESC1),  "DEPTH_STENCIL1"},
-        {22,sizeof(D3D12_VIEW_INSTANCING_DESC), "VIEW_INSTANCING"},
-        {24,sizeof(D3D12_SHADER_BYTECODE),      "AS"},
-        {25,sizeof(D3D12_SHADER_BYTECODE),      "MS"},
+    static const struct{int type;size_t size;size_t align;const char* name;} subobjects[]={
+        {0,sizeof(ID3D12RootSignature*),alignof(ID3D12RootSignature*),        "ROOT_SIGNATURE"},
+        {1,sizeof(D3D12_SHADER_BYTECODE),alignof(D3D12_SHADER_BYTECODE),       "VS"},
+        {2,sizeof(D3D12_SHADER_BYTECODE),alignof(D3D12_SHADER_BYTECODE),       "PS"},
+        {3,sizeof(D3D12_SHADER_BYTECODE),alignof(D3D12_SHADER_BYTECODE),       "DS"},
+        {4,sizeof(D3D12_SHADER_BYTECODE),alignof(D3D12_SHADER_BYTECODE),       "HS"},
+        {5,sizeof(D3D12_SHADER_BYTECODE),alignof(D3D12_SHADER_BYTECODE),       "GS"},
+        {6,sizeof(D3D12_SHADER_BYTECODE),alignof(D3D12_SHADER_BYTECODE),       "CS"},
+        {7,sizeof(D3D12_STREAM_OUTPUT_DESC),alignof(D3D12_STREAM_OUTPUT_DESC),    "STREAM_OUTPUT"},
+        {8,sizeof(D3D12_BLEND_DESC),alignof(D3D12_BLEND_DESC),            "BLEND"},
+        {9,sizeof(UINT),alignof(UINT),                        "SAMPLE_MASK"},
+        {10,sizeof(D3D12_RASTERIZER_DESC),alignof(D3D12_RASTERIZER_DESC),      "RASTERIZER"},
+        {11,sizeof(D3D12_DEPTH_STENCIL_DESC),alignof(D3D12_DEPTH_STENCIL_DESC),   "DEPTH_STENCIL"},
+        {12,sizeof(D3D12_INPUT_LAYOUT_DESC),alignof(D3D12_INPUT_LAYOUT_DESC),    "INPUT_LAYOUT"},
+        {13,sizeof(D3D12_INDEX_BUFFER_STRIP_CUT_VALUE),alignof(D3D12_INDEX_BUFFER_STRIP_CUT_VALUE),"IB_STRIP_CUT"},
+        {14,sizeof(D3D12_PRIMITIVE_TOPOLOGY_TYPE),alignof(D3D12_PRIMITIVE_TOPOLOGY_TYPE),"PRIMITIVE_TOPOLOGY"},
+        {15,sizeof(D3D12_RT_FORMAT_ARRAY),alignof(D3D12_RT_FORMAT_ARRAY),      "RTV_FORMATS"},
+        {16,sizeof(DXGI_FORMAT),alignof(DXGI_FORMAT),                "DSV_FORMAT"},
+        {17,sizeof(DXGI_SAMPLE_DESC),alignof(DXGI_SAMPLE_DESC),           "SAMPLE_DESC"},
+        {18,sizeof(UINT),alignof(UINT),                       "NODE_MASK"},
+        {19,sizeof(D3D12_CACHED_PIPELINE_STATE),alignof(D3D12_CACHED_PIPELINE_STATE),"CACHED_PSO"},
+        {20,sizeof(D3D12_PIPELINE_STATE_FLAGS),alignof(D3D12_PIPELINE_STATE_FLAGS), "FLAGS"},
+        {21,sizeof(D3D12_DEPTH_STENCIL_DESC1),alignof(D3D12_DEPTH_STENCIL_DESC1),  "DEPTH_STENCIL1"},
+        {22,sizeof(D3D12_VIEW_INSTANCING_DESC),alignof(D3D12_VIEW_INSTANCING_DESC), "VIEW_INSTANCING"},
+        {24,sizeof(D3D12_SHADER_BYTECODE),alignof(D3D12_SHADER_BYTECODE),      "AS"},
+        {25,sizeof(D3D12_SHADER_BYTECODE),alignof(D3D12_SHADER_BYTECODE),      "MS"},
 #if defined(D3D12_SDK_VERSION) && D3D12_SDK_VERSION >= 610
-        {26,sizeof(D3D12_DEPTH_STENCIL_DESC2),  "DEPTH_STENCIL2"},
-        {27,sizeof(D3D12_RASTERIZER_DESC1),     "RASTERIZER1"},
-        {28,sizeof(D3D12_RASTERIZER_DESC2),     "RASTERIZER2"},
+        {26,sizeof(D3D12_DEPTH_STENCIL_DESC2),alignof(D3D12_DEPTH_STENCIL_DESC2),  "DEPTH_STENCIL2"},
+        {27,sizeof(D3D12_RASTERIZER_DESC1),alignof(D3D12_RASTERIZER_DESC1),     "RASTERIZER1"},
+        {28,sizeof(D3D12_RASTERIZER_DESC2),alignof(D3D12_RASTERIZER_DESC2),     "RASTERIZER2"},
 #else
         // SDK < 610 headers lack the structs; the sizes below are sizeof of
         // the real structs under SDK 610+ headers (D3D12_DEPTH_STENCIL_DESC2:
@@ -334,17 +333,17 @@ inline std::string streamSubobjects(const void* stream,size_t bytes) {
         // RASTERIZER_DESC1/2: the 11/10-field float/int variants), verified
         // against SDK 616 and 618 headers. The console's Mesa (SDK 618) can
         // emit all three.
-        {26,60,"DEPTH_STENCIL2"},   // 6*4 + 4 + 2*D3D12_DEPTH_STENCILOP_DESC1(16) + 4 + 4, packed to 60
-        {27,44,"RASTERIZER1"},      // same layout as D3D12_RASTERIZER_DESC with INT DepthBias
-        {28,40,"RASTERIZER2"},      // RASTERIZER_DESC1 with the INT DepthBias dropped
+        {26,60,4,"DEPTH_STENCIL2"},   // 6*4 + 4 + 2*D3D12_DEPTH_STENCILOP_DESC1(16) + 4 + 4, packed to 60
+        {27,44,4,"RASTERIZER1"},      // same layout as D3D12_RASTERIZER_DESC with INT DepthBias
+        {28,40,4,"RASTERIZER2"},      // RASTERIZER_DESC1 with the INT DepthBias dropped
 #endif
 #if defined(D3D12_SDK_VERSION) && D3D12_SDK_VERSION >= 618
-        {29,sizeof(D3D12_SERIALIZED_ROOT_SIGNATURE_DESC),"SERIALIZED_ROOT_SIGNATURE"},
+        {29,sizeof(D3D12_SERIALIZED_ROOT_SIGNATURE_DESC),alignof(D3D12_SERIALIZED_ROOT_SIGNATURE_DESC),"SERIALIZED_ROOT_SIGNATURE"},
 #else
         // The struct arrives in SDK 618 (d3d12.h: two pointer members:
         // pSerializedBlob + SerializedBlobSizeInBytes); older SDKs never see
         // the subobject, but the console's Mesa (SDK 618 headers) can emit it.
-        {29,2*sizeof(void*),"SERIALIZED_ROOT_SIGNATURE"},
+        {29,2*sizeof(void*),alignof(void*),"SERIALIZED_ROOT_SIGNATURE"},
 #endif
     };
     auto base=static_cast<const unsigned char*>(stream);
@@ -355,20 +354,20 @@ inline std::string streamSubobjects(const void* stream,size_t bytes) {
         if(size_t(end-p)<sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE)){truncated=true;break;}
         auto typeStart=p;
         auto type=*reinterpret_cast<const D3D12_PIPELINE_STATE_SUBOBJECT_TYPE*>(p);
-        // Payloads start at the next pointer-aligned offset after the
-        // 4-byte type.
-        p=reinterpret_cast<const unsigned char*>((reinterpret_cast<uintptr_t>(p)+sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE)+sizeof(void*)-1)&~uintptr_t(sizeof(void*)-1));
         const auto* e=subobjects;
         for(;e<subobjects+sizeof(subobjects)/sizeof(subobjects[0])&&e->type!=int(type);++e) {}
         if(e==subobjects+sizeof(subobjects)/sizeof(subobjects[0])) {
             subs+=fmt("unknown(type=%d@offset=%zu) ",int(type),size_t(typeStart-base));
             break;
         }
-        if(size_t(end-p)<e->size){truncated=true;subs+=fmt("%s(truncated) ",e->name);break;}
+        // The payload sits at its own alignment after the 4-byte type (offset 4
+        // for UINT, enums and 4-aligned structs, 8 for pointer-holding ones).
+        const size_t payloadAt=(sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE)+e->align-1)&~(e->align-1);
+        if(size_t(end-typeStart)<payloadAt+e->size){truncated=true;subs+=fmt("%s(truncated) ",e->name);break;}
         subs+=fmt("%s ",e->name);
-        // The next subobject starts at the next pointer-aligned offset (each
-        // subobject is an alignas(void*) struct in the real stream).
-        p=reinterpret_cast<const unsigned char*>((reinterpret_cast<uintptr_t>(p)+e->size+sizeof(void*)-1)&~uintptr_t(sizeof(void*)-1));
+        // The next subobject starts at the next pointer-aligned offset after
+        // the payload: each one is an alignas(void*) struct in the real stream.
+        p=typeStart+((payloadAt+e->size+sizeof(void*)-1)&~(sizeof(void*)-1));
         if(subs.size()>400){subs+="...";break;}
     }
     return fmt("bytes=%zu%s subobjects=[%s]",bytes,truncated?" truncated":"",subs.c_str());

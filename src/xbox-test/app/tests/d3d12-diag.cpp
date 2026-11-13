@@ -22,17 +22,20 @@ static ID3D12Device* make() {
     return nullptr;
 }
 
-// A stream builder matching the real layout: each subobject is a 4-byte type
-// padded to pointer size, then the payload at pointer alignment, and the
-// whole subobject starts at a pointer-aligned offset (the layout
-// CD3DX12_PIPELINE_STATE_STREAM_SUBOBJECT produces: alignas(void*), type
-// first, payload second).
+// A stream builder with the layout CD3DX12_PIPELINE_STATE_STREAM_SUBOBJECT has
+// (DirectX-Headers v1.618.1, d3dx12_pipeline_state_stream.h): an alignas(void*)
+// entry holding the 4-byte type, then the payload at its own alignment. Each
+// entry starts at a pointer-aligned offset; the payload of a UINT or enum sits
+// at offset 4, not 8, which is what the walker has to get right.
+template<typename T> struct alignas(void*) StreamEntry { D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type; T payload; };
 template<typename T>
 static void appendSubobject(std::vector<unsigned char>& stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type,const T& payload) {
     size_t at=(stream.size()+sizeof(void*)-1)&~size_t(sizeof(void*)-1);
-    stream.resize(at+sizeof(void*)+sizeof(T));
-    *reinterpret_cast<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE*>(&stream[at])=type;
-    memcpy(&stream[at+sizeof(void*)],&payload,sizeof(T));
+    stream.resize(at+sizeof(StreamEntry<T>));
+    StreamEntry<T> entry{};
+    entry.type=type;
+    entry.payload=payload;
+    memcpy(&stream[at],&entry,sizeof entry);
 }
 static void appendUnknown(std::vector<unsigned char>& stream,int type) {
     size_t at=stream.size();
@@ -67,6 +70,41 @@ int main() {
         CHECK(text.find("DSV_FORMAT ")!=std::string::npos&&text.find("RTV_FORMATS ")!=std::string::npos);
         // The walk consumes the whole stream: no truncation, no unknown.
         CHECK(text.find("truncated")==std::string::npos&&text.find("unknown(")==std::string::npos);
+        // The order Mesa's CD3DX12_PIPELINE_STATE_STREAM3 emits for a graphics
+        // PSO (member order of the template). FLAGS and NODE_MASK are the 4-byte
+        // entries that a pointer-aligned walk misreads: the walk must name all
+        // sixteen in order and consume the stream exactly.
+        {
+            std::vector<unsigned char> mesa;
+            appendSubobject(mesa,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS,D3D12_PIPELINE_STATE_FLAG_NONE);
+            appendSubobject(mesa,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_NODE_MASK,UINT(0));
+            ID3D12RootSignature* root=nullptr;
+            appendSubobject(mesa,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,root);
+            D3D12_INPUT_LAYOUT_DESC layout{};
+            appendSubobject(mesa,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT,layout);
+            appendSubobject(mesa,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE,D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED);
+            appendSubobject(mesa,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY,D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE);
+            D3D12_SHADER_BYTECODE vs{nullptr,128};
+            appendSubobject(mesa,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS,vs);
+            D3D12_STREAM_OUTPUT_DESC so{};
+            appendSubobject(mesa,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT,so);
+            D3D12_BLEND_DESC blend{};
+            appendSubobject(mesa,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND,blend);
+            appendSubobject(mesa,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK,UINT(0xffffffff));
+            D3D12_RASTERIZER_DESC raster{};
+            appendSubobject(mesa,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER,raster);
+            D3D12_DEPTH_STENCIL_DESC depth{};
+            appendSubobject(mesa,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL,depth);
+            appendSubobject(mesa,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT,DXGI_FORMAT_UNKNOWN);
+            D3D12_RT_FORMAT_ARRAY rtv{};rtv.NumRenderTargets=1;rtv.RTFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;
+            appendSubobject(mesa,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS,rtv);
+            appendSubobject(mesa,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC,DXGI_SAMPLE_DESC{1,0});
+            D3D12_CACHED_PIPELINE_STATE cached{};
+            appendSubobject(mesa,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO,cached);
+            std::string text=d3d12_diag::streamSubobjects(mesa.data(),mesa.size());
+            CHECK(text.find("subobjects=[FLAGS NODE_MASK ROOT_SIGNATURE INPUT_LAYOUT IB_STRIP_CUT PRIMITIVE_TOPOLOGY VS "
+                "STREAM_OUTPUT BLEND SAMPLE_MASK RASTERIZER DEPTH_STENCIL DSV_FORMAT RTV_FORMATS SAMPLE_DESC CACHED_PSO ]")!=std::string::npos);
+        }
         // Compute-style stream: root signature + CS.
         std::vector<unsigned char> compute;
         appendSubobject(compute,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,rs);
