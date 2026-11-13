@@ -8,6 +8,7 @@
 #include <dxgi1_6.h>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 #include "../host/d3d12_diag.h"
 static unsigned checks=0,failures=0;
@@ -16,6 +17,51 @@ static std::vector<std::string> lines;
 static void sinkLine(const char* text){lines.push_back(text);}
 static size_t count(const char* needle){size_t n=0;for(auto& l:lines)if(l.find(needle)!=std::string::npos)++n;return n;}
 static HRESULT STDMETHODCALLTYPE alwaysInvalid(void*,void*,void*,void*){return E_INVALIDARG;}
+// A method's signature from the C++ interface declaration in d3d12.h, and a
+// recording original with the same return kind. The argument pack is filled with
+// zeroed values (pointers null), enough to run each hook once.
+template<class M> struct Method;
+template<class C,class R,class...A> struct Method<R(C::*)(A...)> {
+    using ret=R;
+    template<class T> static std::remove_cv_t<std::remove_reference_t<T>>& arg() {
+        static std::remove_cv_t<std::remove_reference_t<T>> value{};return value;
+    }
+    static R STDMETHODCALLTYPE recorder(void*,A...) {
+        if constexpr(std::is_void_v<R>) return; else return R(S_OK);
+    }
+    static void call(void* hook,void* object) {
+        using Fn=R(STDMETHODCALLTYPE*)(void*,A...);
+        (void)reinterpret_cast<Fn>(hook)(object,arg<A>()...);
+    }
+};
+// Runs one hook through the fake class and checks its recorded kind and failure lines.
+template<class M>
+static void runHook(void** vt,void** obj,const char* method,const char* slotName,int slot,void* hook,bool traceMode) {
+    using T=Method<M>;
+    vt[slot]=reinterpret_cast<void*>(&T::recorder);
+    d3d12_diag::Patch patch{slot,hook};
+    d3d12_diag::patchClass(vt,&patch,1);
+    const size_t before=lines.size();
+    T::call(vt[slot],obj);
+    constexpr bool isVoid=std::is_void_v<typename T::ret>;
+    if(traceMode) {
+        // The newest ring entry for this slot must carry the kind the header gives it.
+        int state=-1;bool found=false;
+        const uint64_t newest=d3d12_diag::traceNextSeq-1;
+        for(uint64_t s=newest;s>=1&&s+d3d12_diag::kTraceRing>newest;--s) {
+            const auto& e=d3d12_diag::traceRing[s%d3d12_diag::kTraceRing];
+            if(e.seq==s&&e.name&&strcmp(e.name,slotName)==0){state=e.state;found=true;break;}
+        }
+        CHECK(found&&state==(isVoid?d3d12_diag::TraceVoid:d3d12_diag::TraceHr));
+    }
+    if(isVoid) {
+        // A void method has no status: it may trace, but it never logs "<name> hr=".
+        const std::string needle=std::string(method)+" hr=";
+        size_t n=0;
+        for(size_t i=before;i<lines.size();++i) if(lines[i].find(needle)!=std::string::npos) ++n;
+        CHECK(n==0);
+    }
+}
 // The fake object's IUnknown slots for the stream-hook guard test.
 static HRESULT STDMETHODCALLTYPE noInterface(IUnknown*,REFIID,void** out){if(out)*out=nullptr;return E_NOINTERFACE;}
 static ULONG STDMETHODCALLTYPE refCount(IUnknown*){return 1;}
@@ -302,7 +348,7 @@ int main(int argc,char** argv) {
         // lines already present, since some names ran earlier in this test.
         const char* names[]={"CreateCommandQueue hr=","CreateCommandAllocator hr=","CreateGraphicsPipelineState hr=",
             "CreateComputePipelineState hr=","CreateCommandList hr=","CreateDescriptorHeap hr=",
-            "CreateRootSignature hr=","CreateConstantBufferView hr=","CreateSampler hr=",
+            "CreateRootSignature hr=",
             "CreateCommittedResource hr=","CreateHeap hr=",
             "CreatePlacedResource hr=","CreateReservedResource hr=","CreateFence hr=",
             "CreateQueryHeap hr=","CreateCommandSignature hr="};
@@ -315,8 +361,9 @@ int main(int argc,char** argv) {
         CHECK(call(d3d12_diag::CreateCommandList,0u,D3D12_COMMAND_LIST_TYPE_DIRECT,(ID3D12CommandAllocator*)nullptr,(ID3D12PipelineState*)nullptr,__uuidof(ID3D12GraphicsCommandList),&out)==E_INVALIDARG);
         CHECK(call(d3d12_diag::CreateDescriptorHeap,&hd,__uuidof(ID3D12DescriptorHeap),&out)==E_INVALIDARG);
         CHECK(call(d3d12_diag::CreateRootSignature,0u,(const void*)"junk",size_t(4),__uuidof(ID3D12RootSignature),&out)==E_INVALIDARG);
-        CHECK(call(d3d12_diag::CreateConstantBufferView,&cbv,handle)==E_INVALIDARG);
-        CHECK(call(d3d12_diag::CreateSampler,&sd,handle)==E_INVALIDARG);
+        callVoid(d3d12_diag::CreateConstantBufferView,&cbv,handle);
+        callVoid(d3d12_diag::CreateSampler,&sd,handle);
+        CHECK(count("CreateConstantBufferView hr=")==0&&count("CreateSampler hr=")==0);   // void: never a failure line
         callVoid(d3d12_diag::CreateShaderResourceView,(ID3D12Resource*)nullptr,(const D3D12_SHADER_RESOURCE_VIEW_DESC*)nullptr,handle);
         callVoid(d3d12_diag::CreateUnorderedAccessView,(ID3D12Resource*)nullptr,(ID3D12Resource*)nullptr,(const D3D12_UNORDERED_ACCESS_VIEW_DESC*)nullptr,handle);
         callVoid(d3d12_diag::CreateRenderTargetView,(ID3D12Resource*)nullptr,(const D3D12_RENDER_TARGET_VIEW_DESC*)nullptr,handle);
@@ -405,9 +452,123 @@ int main(int argc,char** argv) {
         reinterpret_cast<UavFn>(vtable[d3d12_diag::CreateUnorderedAccessView])(object,uavRes,sentinelCounter,&uavDesc,sentinelHandle);
         CHECK(seenResource==uavRes&&seenCounter==sentinelCounter&&seenDesc==&uavDesc&&seenHandle.ptr==sentinelHandle.ptr);
     }
+    // Every hooked method: the recorded kind (void or hr) must be the one the
+    // header gives it, and a void method must never log a failure line. The
+    // header side is compile-time (DIAG_PIN_SLOT); this runs each hook once.
+    // Patched through one fake class per interface, so each check is independent.
+    {
+        static void* vtDev[64]{};static void* objDev[1]{vtDev};
+        static void* vtQueue[64]{};static void* objQueue[1]{vtQueue};
+        static void* vtList[64]{};static void* objList[1]{vtList};
+        static void* vtFence[64]{};static void* objFence[1]{vtFence};
+        static void* vtAlloc[64]{};static void* objAlloc[1]{vtAlloc};
+        static void* vtRes[64]{};static void* objRes[1]{vtRes};
+#define CHECK_HOOK(VT,OBJ,Iface,Method,Hook,Slot) runHook<decltype(&Iface::Method)>(VT,OBJ,#Method,#Slot,int(d3d12_diag::Slot),reinterpret_cast<void*>(&d3d12_diag::Hook),traceMode)
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateCommandQueue,createCommandQueue,CreateCommandQueue);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateCommandAllocator,createCommandAllocator,CreateCommandAllocator);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateCommandList,createCommandList,CreateCommandList);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateGraphicsPipelineState,createGraphicsPipelineState,CreateGraphicsPipelineState);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateComputePipelineState,createComputePipelineState,CreateComputePipelineState);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CheckFeatureSupport,checkFeatureSupport,CheckFeatureSupport);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateDescriptorHeap,createDescriptorHeap,CreateDescriptorHeap);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateRootSignature,createRootSignature,CreateRootSignature);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateConstantBufferView,createCbv,CreateConstantBufferView);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateShaderResourceView,createSrv,CreateShaderResourceView);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateUnorderedAccessView,createUav,CreateUnorderedAccessView);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateRenderTargetView,createRtv,CreateRenderTargetView);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateDepthStencilView,createDsv,CreateDepthStencilView);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateSampler,createSampler,CreateSampler);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateCommittedResource,createCommittedResource,CreateCommittedResource);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateHeap,createHeap,CreateHeap);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreatePlacedResource,createPlacedResource,CreatePlacedResource);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateReservedResource,createReservedResource,CreateReservedResource);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateFence,createFence,CreateFence);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateQueryHeap,createQueryHeap,CreateQueryHeap);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device,CreateCommandSignature,createCommandSignature,CreateCommandSignature);
+        CHECK_HOOK(vtDev,objDev,ID3D12Device2,CreatePipelineState,createPipelineStateStream,createPipelineStateStreamSlot);
+        CHECK_HOOK(vtQueue,objQueue,ID3D12CommandQueue,ExecuteCommandLists,queueExecuteCommandLists,QueueExecuteCommandLists);
+        CHECK_HOOK(vtQueue,objQueue,ID3D12CommandQueue,Signal,queueSignal,QueueSignal);
+        CHECK_HOOK(vtQueue,objQueue,ID3D12CommandQueue,Wait,queueWait,QueueWait);
+        CHECK_HOOK(vtList,objList,ID3D12GraphicsCommandList,Close,listClose,ListClose);
+        CHECK_HOOK(vtList,objList,ID3D12GraphicsCommandList,Reset,listReset,ListReset);
+        CHECK_HOOK(vtList,objList,ID3D12GraphicsCommandList,SetPipelineState,listSetPipelineState,ListSetPipelineState);
+        CHECK_HOOK(vtList,objList,ID3D12GraphicsCommandList,ResourceBarrier,listResourceBarrier,ListResourceBarrier);
+        CHECK_HOOK(vtList,objList,ID3D12GraphicsCommandList,SetDescriptorHeaps,listSetDescriptorHeaps,ListSetDescriptorHeaps);
+        CHECK_HOOK(vtList,objList,ID3D12GraphicsCommandList,DrawInstanced,listDrawInstanced,ListDrawInstanced);
+        CHECK_HOOK(vtList,objList,ID3D12GraphicsCommandList,DrawIndexedInstanced,listDrawIndexedInstanced,ListDrawIndexedInstanced);
+        CHECK_HOOK(vtList,objList,ID3D12GraphicsCommandList,Dispatch,listDispatch,ListDispatch);
+        CHECK_HOOK(vtList,objList,ID3D12GraphicsCommandList,CopyResource,listCopyResource,ListCopyResource);
+        CHECK_HOOK(vtList,objList,ID3D12GraphicsCommandList,CopyBufferRegion,listCopyBufferRegion,ListCopyBufferRegion);
+        CHECK_HOOK(vtList,objList,ID3D12GraphicsCommandList,CopyTextureRegion,listCopyTextureRegion,ListCopyTextureRegion);
+        CHECK_HOOK(vtList,objList,ID3D12GraphicsCommandList,ResolveSubresource,listResolveSubresource,ListResolveSubresource);
+        CHECK_HOOK(vtList,objList,ID3D12GraphicsCommandList,OMSetRenderTargets,listOMSetRenderTargets,ListOMSetRenderTargets);
+        CHECK_HOOK(vtList,objList,ID3D12GraphicsCommandList,ClearRenderTargetView,listClearRenderTargetView,ListClearRenderTargetView);
+        CHECK_HOOK(vtList,objList,ID3D12GraphicsCommandList,ClearDepthStencilView,listClearDepthStencilView,ListClearDepthStencilView);
+        CHECK_HOOK(vtList,objList,ID3D12GraphicsCommandList,ExecuteIndirect,listExecuteIndirect,ListExecuteIndirect);
+        CHECK_HOOK(vtFence,objFence,ID3D12Fence,SetEventOnCompletion,fenceSetEventOnCompletion,FenceSetEventOnCompletion);
+        CHECK_HOOK(vtFence,objFence,ID3D12Fence,Signal,fenceSignal,FenceSignal);
+        CHECK_HOOK(vtAlloc,objAlloc,ID3D12CommandAllocator,Reset,allocatorReset,AllocatorReset);
+        CHECK_HOOK(vtRes,objRes,ID3D12Resource,Map,resourceMap,ResourceMap);
+#undef CHECK_HOOK
+    }
+
     // The trace: silent unless the probe file was present at the first adopt.
     if(traceMode) {
         CHECK(count("trace on (LocalState")==1);
+        // A call that never returns stays in flight, is named as pending, and is
+        // not overwritten by 70 newer calls. When it finally ends, the entries of
+        // the newer calls keep their own results (no clobbering).
+        {
+            const uint64_t hung=d3d12_diag::traceBegin("HungCall");
+            size_t b=lines.size();
+            d3d12_diag::flushTrace();
+            size_t inFlight=0;
+            for(size_t i=b;i<lines.size();++i) if(lines[i].find("trace in-flight")!=std::string::npos&&lines[i].find("HungCall pending")!=std::string::npos) ++inFlight;
+            CHECK(inFlight==1);
+            for(int i=0;i<70;++i) {const uint64_t t=d3d12_diag::traceBegin("Filler");d3d12_diag::traceEnd(t,S_OK);}
+            b=lines.size();
+            d3d12_diag::flushTrace();
+            inFlight=0;
+            for(size_t i=b;i<lines.size();++i) if(lines[i].find("HungCall pending")!=std::string::npos) ++inFlight;
+            CHECK(inFlight==1);
+            d3d12_diag::traceEnd(hung,S_OK);   // the hung call ends now, 70 calls late
+            bool clobbered=false;size_t fillers=0;
+            const uint64_t newest=d3d12_diag::traceNextSeq-1;
+            for(uint64_t s=newest;s+d3d12_diag::kTraceRing>newest&&s>=1;--s) {
+                const auto& e=d3d12_diag::traceRing[s%d3d12_diag::kTraceRing];
+                if(e.seq!=s) continue;
+                if(strcmp(e.name,"HungCall")==0) clobbered=true;
+                if(strcmp(e.name,"Filler")==0&&e.state==d3d12_diag::TraceHr&&e.hr==S_OK) ++fillers;
+            }
+            CHECK(!clobbered);
+            CHECK(fillers==d3d12_diag::kTraceRing);   // the ring is the last 64 calls, all fillers
+            bool stillInFlight=false;
+            for(const auto& f:d3d12_diag::traceInFlight) if(f.seq==hung) stillInFlight=true;
+            CHECK(!stillInFlight);
+        }
+        // Concurrent begin/end from four guest threads: every ring entry that
+        // holds a result must carry the result of its own call (hr = its seq).
+        {
+            std::vector<std::thread> threads;
+            for(int t=0;t<4;++t) threads.emplace_back([]{
+                for(int i=0;i<2000;++i) {
+                    const uint64_t s=d3d12_diag::traceBegin("Stress");
+                    d3d12_diag::traceEnd(s,HRESULT(s));
+                }
+            });
+            for(auto& th:threads) th.join();
+            bool consistent=true;size_t settled=0;
+            const uint64_t newest=d3d12_diag::traceNextSeq-1;
+            for(uint64_t s=newest;s+d3d12_diag::kTraceRing>newest&&s>=1;--s) {
+                const auto& e=d3d12_diag::traceRing[s%d3d12_diag::kTraceRing];
+                if(e.seq!=s) continue;
+                if(e.state==d3d12_diag::TraceHr) {++settled;if(e.hr!=long(HRESULT(s)))consistent=false;}
+            }
+            CHECK(consistent&&settled>0);
+            bool anyInFlight=false;
+            for(const auto& f:d3d12_diag::traceInFlight) if(f.seq) anyInFlight=true;
+            CHECK(!anyInFlight);
+        }
         // One view of each kind through its hook: each must trace under its own name.
         UINT inc=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         D3D12_CPU_DESCRIPTOR_HANDLE srvAt=start;srvAt.ptr+=SIZE_T(inc);
@@ -439,12 +600,17 @@ int main(int argc,char** argv) {
         if(dsvHeap) dsvHeap->Release();
         size_t before=lines.size();
         d3d12_diag::flushTrace();
-        CHECK(lines.size()-before==1+std::min(size_t(d3d12_diag::traceCount.load()),d3d12_diag::kTraceRing));
+        CHECK(lines.size()-before==1+std::min(size_t(d3d12_diag::traceNextSeq-1),d3d12_diag::kTraceRing));
         // Every completed entry carries its hr (the ring holds the newest calls only).
         size_t traced=0,withHr=0;
-        for(auto& l:lines) if(l.rfind("trace #",0)==0) {++traced;if(l.find(" 0x")!=std::string::npos||(l.size()>=5&&l.compare(l.size()-5,5," void")==0))++withHr;}
+        size_t pendingNow=0;
+        for(size_t i=before;i<lines.size();++i) {
+            const std::string& l=lines[i];
+            if(l.rfind("trace #",0)==0) {++traced;if(l.find(" 0x")!=std::string::npos||(l.size()>=5&&l.compare(l.size()-5,5," void")==0))++withHr;}
+            if(l.find(" pending")!=std::string::npos) ++pendingNow;
+        }
         CHECK(traced>0&&traced==withHr);
-        CHECK(count("pending")==0);   // nothing in flight outside a call
+        CHECK(pendingNow==0);   // nothing in flight outside a call
         // More calls than the ring holds: the flush keeps only the newest entries.
         if(fence) for(UINT64 v=2;v<=100;++v) fence->Signal(v);
         before=lines.size();
