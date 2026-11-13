@@ -104,7 +104,24 @@ inline std::mutex reportM;
 inline std::set<std::string> seen;
 inline size_t failures=0,probes=0,drawStates=0;
 inline bool failuresCapped=false,probesCapped=false,drawStatesCapped=false;
-inline void emit(const std::string& text) {if(auto s=sink)s(text.c_str());}
+// Lines produced before a log sink is installed are held (bounded) and
+// delivered by configure(), so an opt-in probe armed early is never silent.
+constexpr size_t kMaxPending=64;
+inline std::vector<std::string> pending;   // guarded by reportM
+inline size_t pendingDropped=0;            // guarded by reportM
+inline void emit(const std::string& text) {
+    Sink s=nullptr;
+    {
+        std::lock_guard<std::mutex> lock(reportM);
+        s=sink;
+        if(!s) {
+            if(pending.size()<kMaxPending)pending.push_back(text);
+            else ++pendingDropped;
+            return;
+        }
+    }
+    s(text.c_str());
+}
 // probe: capability answers (adapter, feature levels, gs scan) — kMaxProbes.
 // drawState: the deep-draw pipeline signatures — kMaxDrawStates, its own
 // budget: sharing the probe cap let a thousand gs scan lines in loading eat
@@ -1714,7 +1731,16 @@ inline const Patch* extendedPatches(size_t& count){
     count=sizeof table/sizeof *table;return table;
 }
 // ---- entry points
-inline void configure(Sink s){sink=s;}
+inline void configure(Sink s){
+    std::vector<std::string> queued;size_t dropped=0;
+    {
+        std::lock_guard<std::mutex> lock(reportM);
+        sink=s;
+        if(s) {queued.swap(pending);dropped=pendingDropped;pendingDropped=0;}
+    }
+    for(auto& line:queued)s(line.c_str());
+    if(dropped)s(fmt("%zu diagnostic lines were dropped: no log sink was installed when they were produced",dropped).c_str());
+}
 // The deep-draw gate file lives in the launcher's LocalState; the diagnostics
 // header stays free of file-system knowledge, so the launcher passes a probe
 // (main.cpp checks the file once at boot, like the kill switch). Null = off.
@@ -1723,7 +1749,11 @@ inline bool (*set_deep_draw)()=nullptr;
 // the immediate context; logs the adapter the guest can see and the
 // capability answers that pick engine code paths.
 inline void adopt(ID3D11Device* device) {
-    if(!device||!sink)return;
+    if(!device)return;
+    // Opt-in flags are read before the sink check: with no sink the default
+    // path still returns untouched, but an armed deep probe is not dropped.
+    const bool deep=set_deep_draw&&set_deep_draw();
+    if(!sink&&!deep)return;
     // Kill switch (LocalState\d3d11diag.txt present): skip every vtable
     // patch. The device-health and draw-summary counters stay off with it;
     // one line says the diagnostics were disabled, so a run's log always
@@ -1737,9 +1767,11 @@ inline void adopt(ID3D11Device* device) {
     // target format, PS/GS SRV null/over-target bits). Default off: the lines
     // name the exact shader pair a black layer hides behind but cost a
     // report() lookup per draw. Never changes a call's result.
-    if(set_deep_draw && set_deep_draw()) {
+    if(deep) {
         deepDrawEnabled.store(true,std::memory_order_release);
-        emit("deep draw state on (LocalState\\d3d11deep.txt): one line per distinct draw pipeline signature");
+        emit(sink
+            ?"deep draw state on (LocalState\\d3d11deep.txt): one line per distinct draw pipeline signature"
+            :"deep draw state on (LocalState\\d3d11deep.txt): no log sink at adoption; lines are held until one is installed");
     }
     healthDevice.store(device,std::memory_order_relaxed);   // not AddRef'd: the guest owns it
     size_t baseCount=0,extendedCount=0;

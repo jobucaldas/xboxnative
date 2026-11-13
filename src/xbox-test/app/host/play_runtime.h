@@ -24,6 +24,7 @@
 #include "../../shared/vulkan_driver_registry.h"
 #include "tls_slot0.h"
 #include "guest_watchdog.h"   // contained_fault: which exceptions are real crashes
+#include "../../uwph/shell32/folder_chain.h" // launch.h uses folder_chain:: at global scope; include before the namespace
 namespace play_runtime {
 constexpr DWORD missingException=0xe0520001, exitException=0xe0520002;
 struct Module {
@@ -928,7 +929,10 @@ static LONG filter(EXCEPTION_POINTERS* ep) {
     char b[256];snprintf(b,sizeof b,"unhandled exception code=0x%08lx address=0x%llx ",e->ExceptionCode,(unsigned long long)(uintptr_t)e->ExceptionAddress);
     std::string text=b; text+=describe((uintptr_t)e->ExceptionAddress);
     if(e->ExceptionCode==EXCEPTION_ACCESS_VIOLATION && e->NumberParameters>=2) {snprintf(b,sizeof b," access=%llu target=0x%llx",(unsigned long long)e->ExceptionInformation[0],(unsigned long long)e->ExceptionInformation[1]);text+=b;}
-    state->event(text);return EXCEPTION_EXECUTE_HANDLER;
+    state->event(text);
+    // The last hooked D3D12 calls, when LocalState\d3d12trace.txt is present (no-op otherwise).
+    d3d12_diag::flushTrace();
+    return EXCEPTION_EXECUTE_HANDLER;
 }
 // The packaged process runs with strict handle checking: closing an invalid
 // handle raises STATUS_INVALID_HANDLE from ntdll instead of returning it (as

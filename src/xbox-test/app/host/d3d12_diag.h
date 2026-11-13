@@ -251,13 +251,78 @@ inline std::string shaderText(const void* code,SIZE_T length,std::string* key=nu
     return fmt("%s bytes=%llu hash=%016llx",kind.c_str(),(unsigned long long)size_t(length),(unsigned long long)hash);
 }
 
-#define D3D12_DIAG_HOOK(Type,slot) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return E_FAIL;
+// ---- opt-in call trace (LocalState\d3d12trace.txt, read once at the first
+// adopt; default off, so a run without the file logs exactly what it did
+// before). The ring keeps the last kTraceRing hooked calls by slot name and
+// hr; a call still in flight stays "pending". flushTrace() runs from the fault
+// handler, so the last entry is the call the fault came from.
+constexpr size_t kTraceRing=64;      // the newest calls, by sequence number
+constexpr size_t kTraceInFlight=32;  // calls begun and not yet returned (kept until they end)
+// Result states of a traced call.
+enum TraceState : int { TracePending=0, TraceHr=1, TraceVoid=2 };
+struct TraceEntry { uint64_t seq=0; const char* name=nullptr; long hr=0; int state=TracePending; };
+// Memory ordering: every access to the ring, the in-flight list and the sequence
+// counter holds traceMutex, so an entry is always read and written whole. A
+// ticket is the call's sequence number; an end is applied only to the ring entry
+// that still carries that number, so a newer call that reused the slot is never
+// overwritten. Pending calls stay in the in-flight list until they end.
+inline std::mutex traceMutex;
+inline uint64_t traceNextSeq=1;
+inline TraceEntry traceRing[kTraceRing];
+inline TraceEntry traceInFlight[kTraceInFlight];
+inline std::atomic<bool> traceOn{false};
+inline std::atomic<bool> traceChecked{false};
+inline bool (*set_trace_requested)()=nullptr;
+// Returns the ticket (0 when the trace is off).
+inline uint64_t traceBegin(const char* name) {
+    if(!traceOn.load(std::memory_order_acquire)) return 0;
+    std::lock_guard<std::mutex> lock(traceMutex);
+    uint64_t seq=traceNextSeq++;
+    traceRing[seq%kTraceRing]=TraceEntry{seq,name,0,TracePending};
+    for(auto& f:traceInFlight) if(f.seq==0) {f=TraceEntry{seq,name,0,TracePending};break;}
+    return seq;
+}
+inline void traceFinish(uint64_t ticket,int state,long hr) {
+    if(!ticket) return;
+    std::lock_guard<std::mutex> lock(traceMutex);
+    TraceEntry& e=traceRing[ticket%kTraceRing];
+    if(e.seq==ticket) {e.state=state;e.hr=hr;}   // overwritten by a newer call: drop the update
+    for(auto& f:traceInFlight) if(f.seq==ticket) {f.seq=0;break;}
+}
+inline void traceEnd(uint64_t ticket,HRESULT hr) { traceFinish(ticket,TraceHr,long(hr)); }
+// A void call has no HRESULT: the entry records "void", not a made-up hr.
+inline void traceEndVoid(uint64_t ticket) { traceFinish(ticket,TraceVoid,0); }
+// Runs from the fault handler. The faulting call is not inside traceMutex, so a
+// try-lock only fails if another guest thread is mid-update; then it says so.
+inline void flushTrace() {
+    if(!traceOn.load(std::memory_order_acquire)) return;
+    std::unique_lock<std::mutex> lock(traceMutex,std::try_to_lock);
+    if(!lock.owns_lock()) {emit("trace: busy, not flushed");return;}
+    for(const auto& f:traceInFlight)
+        if(f.seq) emit(fmt("trace in-flight #%llu %s pending",(unsigned long long)f.seq,f.name?f.name:"?"));
+    uint64_t first=traceNextSeq>kTraceRing?traceNextSeq-kTraceRing:1;
+    emit(fmt("trace: last %llu hooked calls, oldest first",(unsigned long long)(traceNextSeq-first)));
+    for(uint64_t s=first;s<traceNextSeq;++s) {
+        const TraceEntry& e=traceRing[s%kTraceRing];
+        if(e.seq!=s) continue;
+        const char* result=e.state==TracePending?"pending":e.state==TraceVoid?"void":nullptr;
+        emit(fmt("trace #%llu %s %s",(unsigned long long)s,e.name?e.name:"?",result?result:hex(HRESULT(e.hr)).c_str()));
+    }
+}
+
+// nameStr is the name the trace records: a string literal, never a stringified
+// template parameter (that stringifies the parameter's token, e.g. "Slot").
+#define D3D12_DIAG_HOOK_AS(Type,slot,nameStr) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return E_FAIL; const uint64_t traceAt=traceBegin(nameStr);
+#define D3D12_DIAG_HOOK(Type,slot) D3D12_DIAG_HOOK_AS(Type,slot,#slot)
+// The same for a void call: the hook cannot return E_FAIL from a void function.
+#define D3D12_DIAG_HOOK_VOID_AS(Type,slot,nameStr) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return; const uint64_t traceAt=traceBegin(nameStr);
+#define D3D12_DIAG_HOOK_VOID(Type,slot) D3D12_DIAG_HOOK_VOID_AS(Type,slot,#slot)
 #define D3D12_DIAG_FAILED(name,key,text) do{if(FAILED(hr))report(false,std::string(name)+" "+hex(hr)+" "+(key),std::string(name)+" hr="+hex(hr)+" "+(text));}while(0)
 
 using DevicePtr=void*;
 static HRESULT STDMETHODCALLTYPE createCommandQueue(DevicePtr self,const D3D12_COMMAND_QUEUE_DESC* d,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_COMMAND_QUEUE_DESC*,REFIID,void**);
-    D3D12_DIAG_HOOK(Fn,CreateCommandQueue)HRESULT hr=call(self,d,id,out);
+    D3D12_DIAG_HOOK(Fn,CreateCommandQueue)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     if(d)D3D12_DIAG_FAILED("CreateCommandQueue",fmt("%d/%d/%d/%d",int(d->Type),int(d->Priority),int(d->Flags),int(d->NodeMask)),
         fmt("type=%d priority=%d flags=0x%x node=%u",int(d->Type),d->Priority,d->Flags,d->NodeMask));
     else D3D12_DIAG_FAILED("CreateCommandQueue","null","desc=null");
@@ -265,21 +330,21 @@ static HRESULT STDMETHODCALLTYPE createCommandQueue(DevicePtr self,const D3D12_C
 }
 static HRESULT STDMETHODCALLTYPE createCommandAllocator(DevicePtr self,D3D12_COMMAND_LIST_TYPE type,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,D3D12_COMMAND_LIST_TYPE,REFIID,void**);
-    D3D12_DIAG_HOOK(Fn,CreateCommandAllocator)HRESULT hr=call(self,type,id,out);
+    D3D12_DIAG_HOOK(Fn,CreateCommandAllocator)HRESULT hr=call(self,type,id,out); traceEnd(traceAt,hr);
     D3D12_DIAG_FAILED("CreateCommandAllocator",fmt("%d",int(type)),fmt("type=%d",int(type)));
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createCommandList(DevicePtr self,UINT node,D3D12_COMMAND_LIST_TYPE type,ID3D12CommandAllocator* allocator,
         ID3D12PipelineState* state,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,D3D12_COMMAND_LIST_TYPE,ID3D12CommandAllocator*,ID3D12PipelineState*,REFIID,void**);
-    D3D12_DIAG_HOOK(Fn,CreateCommandList)HRESULT hr=call(self,node,type,allocator,state,id,out);
+    D3D12_DIAG_HOOK(Fn,CreateCommandList)HRESULT hr=call(self,node,type,allocator,state,id,out); traceEnd(traceAt,hr);
     D3D12_DIAG_FAILED("CreateCommandList",fmt("%d/%d/%d/%d",int(type),node,allocator!=nullptr,state!=nullptr),
         fmt("type=%d node=%u allocator=%d state=%d",int(type),node,allocator!=nullptr,state!=nullptr));
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createGraphicsPipelineState(DevicePtr self,const D3D12_GRAPHICS_PIPELINE_STATE_DESC* d,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_GRAPHICS_PIPELINE_STATE_DESC*,REFIID,void**);
-    D3D12_DIAG_HOOK(Fn,CreateGraphicsPipelineState)HRESULT hr=call(self,d,id,out);
+    D3D12_DIAG_HOOK(Fn,CreateGraphicsPipelineState)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     if(d) {
         std::string vsKey,psKey,vs=shaderText(d->VS.pShaderBytecode,d->VS.BytecodeLength,&vsKey);
         std::string ps=shaderText(d->PS.pShaderBytecode,d->PS.BytecodeLength,&psKey);
@@ -377,7 +442,7 @@ inline std::string streamSubobjects(const void* stream,size_t bytes) {
 }
 static HRESULT STDMETHODCALLTYPE createPipelineStateStream(DevicePtr self,const D3D12_PIPELINE_STATE_STREAM_DESC* d,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**);
-    D3D12_DIAG_HOOK(Fn,createPipelineStateStreamSlot)HRESULT hr=call(self,d,id,out);
+    D3D12_DIAG_HOOK(Fn,createPipelineStateStreamSlot)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     // The stream path (ID3D12Device2::CreatePipelineState) is what Mesa's
     // d3d12 driver takes when the device reports
     // opts14.IndependentFrontAndBackStencilRefMaskSupported — the console's
@@ -396,7 +461,7 @@ static HRESULT STDMETHODCALLTYPE createPipelineStateStream(DevicePtr self,const 
 }
 static HRESULT STDMETHODCALLTYPE createComputePipelineState(DevicePtr self,const D3D12_COMPUTE_PIPELINE_STATE_DESC* d,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_COMPUTE_PIPELINE_STATE_DESC*,REFIID,void**);
-    D3D12_DIAG_HOOK(Fn,CreateComputePipelineState)HRESULT hr=call(self,d,id,out);
+    D3D12_DIAG_HOOK(Fn,CreateComputePipelineState)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     if(d) {
         std::string key,cs=shaderText(d->CS.pShaderBytecode,d->CS.BytecodeLength,&key);
         D3D12_DIAG_FAILED("CreateComputePipelineState",key,fmt("cs[%s]",cs.c_str()));
@@ -405,7 +470,7 @@ static HRESULT STDMETHODCALLTYPE createComputePipelineState(DevicePtr self,const
 }
 static HRESULT STDMETHODCALLTYPE createDescriptorHeap(DevicePtr self,const D3D12_DESCRIPTOR_HEAP_DESC* d,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_DESCRIPTOR_HEAP_DESC*,REFIID,void**);
-    D3D12_DIAG_HOOK(Fn,CreateDescriptorHeap)HRESULT hr=call(self,d,id,out);
+    D3D12_DIAG_HOOK(Fn,CreateDescriptorHeap)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     if(d)D3D12_DIAG_FAILED("CreateDescriptorHeap",fmt("%d/%u/%x",int(d->Type),d->NumDescriptors,d->Flags),
         fmt("type=%d descriptors=%u flags=0x%x node=%u",int(d->Type),d->NumDescriptors,d->Flags,d->NodeMask));
     else D3D12_DIAG_FAILED("CreateDescriptorHeap","null","desc=null");
@@ -413,7 +478,7 @@ static HRESULT STDMETHODCALLTYPE createDescriptorHeap(DevicePtr self,const D3D12
 }
 static HRESULT STDMETHODCALLTYPE createRootSignature(DevicePtr self,UINT node,const void* blob,SIZE_T length,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,const void*,SIZE_T,REFIID,void**);
-    D3D12_DIAG_HOOK(Fn,CreateRootSignature)HRESULT hr=call(self,node,blob,length,id,out);
+    D3D12_DIAG_HOOK(Fn,CreateRootSignature)HRESULT hr=call(self,node,blob,length,id,out); traceEnd(traceAt,hr);
     if(FAILED(hr)) {
         std::string key;std::string text=shaderText(blob,length,&key);
         D3D12_DIAG_FAILED("CreateRootSignature",key,fmt("node=%u %s",node,text.c_str()));
@@ -423,7 +488,7 @@ static HRESULT STDMETHODCALLTYPE createRootSignature(DevicePtr self,UINT node,co
 static HRESULT STDMETHODCALLTYPE createCommittedResource(DevicePtr self,const D3D12_HEAP_PROPERTIES* heap,D3D12_HEAP_FLAGS heapFlags,
         const D3D12_RESOURCE_DESC* d,D3D12_RESOURCE_STATES state,const D3D12_CLEAR_VALUE* clear,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_HEAP_PROPERTIES*,D3D12_HEAP_FLAGS,const D3D12_RESOURCE_DESC*,D3D12_RESOURCE_STATES,const D3D12_CLEAR_VALUE*,REFIID,void**);
-    D3D12_DIAG_HOOK(Fn,CreateCommittedResource)HRESULT hr=call(self,heap,heapFlags,d,state,clear,id,out);
+    D3D12_DIAG_HOOK(Fn,CreateCommittedResource)HRESULT hr=call(self,heap,heapFlags,d,state,clear,id,out); traceEnd(traceAt,hr);
     if(FAILED(hr)) {
         D3D12_DIAG_FAILED("CreateCommittedResource",resourceKey(d)+fmt("/%d/%x",int(state),heapFlags),
             fmt("heap=%s heapflags=0x%x state=%s(%d) %s",heap?heapText(heap->Type).c_str():"null",heapFlags,
@@ -433,7 +498,7 @@ static HRESULT STDMETHODCALLTYPE createCommittedResource(DevicePtr self,const D3
 }
 static HRESULT STDMETHODCALLTYPE createHeap(DevicePtr self,const D3D12_HEAP_DESC* d,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_HEAP_DESC*,REFIID,void**);
-    D3D12_DIAG_HOOK(Fn,CreateHeap)HRESULT hr=call(self,d,id,out);
+    D3D12_DIAG_HOOK(Fn,CreateHeap)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     if(d)D3D12_DIAG_FAILED("CreateHeap",fmt("%llu/%x/%d",(unsigned long long)d->SizeInBytes,d->Flags,int(d->Properties.Type)),
         fmt("bytes=%llu flags=0x%x heap=%s align=%llu",(unsigned long long)d->SizeInBytes,d->Flags,
             heapText(d->Properties.Type).c_str(),(unsigned long long)d->Alignment));
@@ -443,7 +508,7 @@ static HRESULT STDMETHODCALLTYPE createHeap(DevicePtr self,const D3D12_HEAP_DESC
 static HRESULT STDMETHODCALLTYPE createPlacedResource(DevicePtr self,ID3D12Heap* heap,UINT64 offset,const D3D12_RESOURCE_DESC* d,
         D3D12_RESOURCE_STATES state,const D3D12_CLEAR_VALUE* clear,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Heap*,UINT64,const D3D12_RESOURCE_DESC*,D3D12_RESOURCE_STATES,const D3D12_CLEAR_VALUE*,REFIID,void**);
-    D3D12_DIAG_HOOK(Fn,CreatePlacedResource)HRESULT hr=call(self,heap,offset,d,state,clear,id,out);
+    D3D12_DIAG_HOOK(Fn,CreatePlacedResource)HRESULT hr=call(self,heap,offset,d,state,clear,id,out); traceEnd(traceAt,hr);
     if(FAILED(hr))D3D12_DIAG_FAILED("CreatePlacedResource",resourceKey(d)+fmt("/%d",int(state)),
         fmt("heap=%d offset=%llu state=%s(%d) %s",heap!=nullptr,(unsigned long long)offset,resourceStateName(state),int(state),resourceDescText(d).c_str()));
     return hr;
@@ -451,97 +516,69 @@ static HRESULT STDMETHODCALLTYPE createPlacedResource(DevicePtr self,ID3D12Heap*
 static HRESULT STDMETHODCALLTYPE createReservedResource(DevicePtr self,const D3D12_RESOURCE_DESC* d,D3D12_RESOURCE_STATES state,
         const D3D12_CLEAR_VALUE* clear,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_RESOURCE_DESC*,D3D12_RESOURCE_STATES,const D3D12_CLEAR_VALUE*,REFIID,void**);
-    D3D12_DIAG_HOOK(Fn,CreateReservedResource)HRESULT hr=call(self,d,state,clear,id,out);
+    D3D12_DIAG_HOOK(Fn,CreateReservedResource)HRESULT hr=call(self,d,state,clear,id,out); traceEnd(traceAt,hr);
     if(FAILED(hr))D3D12_DIAG_FAILED("CreateReservedResource",resourceKey(d)+fmt("/%d",int(state)),
         fmt("state=%s(%d) %s",resourceStateName(state),int(state),resourceDescText(d).c_str()));
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createFence(DevicePtr self,UINT64 value,D3D12_FENCE_FLAGS flags,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT64,D3D12_FENCE_FLAGS,REFIID,void**);
-    D3D12_DIAG_HOOK(Fn,CreateFence)HRESULT hr=call(self,value,flags,id,out);
+    D3D12_DIAG_HOOK(Fn,CreateFence)HRESULT hr=call(self,value,flags,id,out); traceEnd(traceAt,hr);
     D3D12_DIAG_FAILED("CreateFence",fmt("%x",flags),fmt("value=%llu flags=0x%x",(unsigned long long)value,flags));
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createQueryHeap(DevicePtr self,const D3D12_QUERY_HEAP_DESC* d,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_QUERY_HEAP_DESC*,REFIID,void**);
-    D3D12_DIAG_HOOK(Fn,CreateQueryHeap)HRESULT hr=call(self,d,id,out);
+    D3D12_DIAG_HOOK(Fn,CreateQueryHeap)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     if(d)D3D12_DIAG_FAILED("CreateQueryHeap",fmt("%d/%u",int(d->Type),d->Count),fmt("type=%d count=%u node=%u",int(d->Type),d->Count,d->NodeMask));
     else D3D12_DIAG_FAILED("CreateQueryHeap","null","desc=null");
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createCommandSignature(DevicePtr self,const D3D12_COMMAND_SIGNATURE_DESC* d,ID3D12RootSignature* root,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_COMMAND_SIGNATURE_DESC*,ID3D12RootSignature*,REFIID,void**);
-    D3D12_DIAG_HOOK(Fn,CreateCommandSignature)HRESULT hr=call(self,d,root,id,out);
+    D3D12_DIAG_HOOK(Fn,CreateCommandSignature)HRESULT hr=call(self,d,root,id,out); traceEnd(traceAt,hr);
     if(d)D3D12_DIAG_FAILED("CreateCommandSignature",fmt("%u/%u",d->ByteStride,d->NumArgumentDescs),
         fmt("stride=%u args=%u root=%d",d->ByteStride,d->NumArgumentDescs,root!=nullptr));
     else D3D12_DIAG_FAILED("CreateCommandSignature","null","desc=null");
     return hr;
 }
 // Views share one shape: (resource, optional desc, dest handle). Only the
-// description type differs.
-template<int Slot,class Desc,class Describe>
-static HRESULT viewCall(DevicePtr self,const char* name,ID3D12Resource* resource,const Desc* d,D3D12_CPU_DESCRIPTOR_HANDLE handle,Describe describe) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,const Desc*,D3D12_CPU_DESCRIPTOR_HANDLE);
-    D3D12_DIAG_HOOK(Fn,Slot)HRESULT hr=call(self,resource,d,handle);
-    if(FAILED(hr)) {
-        std::string text,key;describe(d,text,key);
-        D3D12_DIAG_FAILED(name,key+fmt("/%llx",(unsigned long long)handle.ptr),
-            text+fmt(" handle=0x%llx res=%d",(unsigned long long)handle.ptr,resource!=nullptr));
-    }
-    return hr;
+// description type differs. The device's view creators return void, so there is
+// no status to report: the call is traced as "void" and never logs a failure.
+template<int Slot,class Desc>
+static void viewCall(DevicePtr self,const char* name,ID3D12Resource* resource,const Desc* d,D3D12_CPU_DESCRIPTOR_HANDLE handle) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,const Desc*,D3D12_CPU_DESCRIPTOR_HANDLE);
+    D3D12_DIAG_HOOK_VOID_AS(Fn,Slot,name)call(self,resource,d,handle); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE createSrv(DevicePtr self,ID3D12Resource* r,const D3D12_SHADER_RESOURCE_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    return viewCall<CreateShaderResourceView>(self,"CreateShaderResourceView",r,d,h,[](const D3D12_SHADER_RESOURCE_VIEW_DESC* v,std::string& text,std::string& key){
-        if(!v){text="view=default";key="default";return;}
-        text=fmt("viewfmt=%s dim=%d",formatText(v->Format).c_str(),int(v->ViewDimension));key=fmt("%d/%d",int(v->Format),int(v->ViewDimension));});
+static void STDMETHODCALLTYPE createSrv(DevicePtr self,ID3D12Resource* r,const D3D12_SHADER_RESOURCE_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    viewCall<CreateShaderResourceView>(self,"CreateShaderResourceView",r,d,h);
 }
-// CreateUnorderedAccessView(pResource, pCounterResource, pDesc, DestDescriptor):
-// the counter resource sits before the description, so this cannot share
-// viewCall's (resource, desc, handle) shape. Before this fix the wrapper dropped
-// the counter and passed the description where the handle belongs.
-static HRESULT STDMETHODCALLTYPE createUav(DevicePtr self,ID3D12Resource* r,ID3D12Resource* counter,const D3D12_UNORDERED_ACCESS_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,ID3D12Resource*,const D3D12_UNORDERED_ACCESS_VIEW_DESC*,D3D12_CPU_DESCRIPTOR_HANDLE);
-    D3D12_DIAG_HOOK(Fn,CreateUnorderedAccessView)HRESULT hr=call(self,r,counter,d,h);
-    if(FAILED(hr)) {
-        std::string text,key;
-        if(!d){text="view=default";key="default";}
-        else {text=fmt("viewfmt=%s dim=%d",formatText(d->Format).c_str(),int(d->ViewDimension));key=fmt("%d/%d",int(d->Format),int(d->ViewDimension));}
-        D3D12_DIAG_FAILED("CreateUnorderedAccessView",key+fmt("/%llx",(unsigned long long)h.ptr),
-            text+fmt(" handle=0x%llx res=%d counter=%d",(unsigned long long)h.ptr,r!=nullptr,counter!=nullptr));
-    }
-    return hr;
+// CreateUnorderedAccessView takes a counter resource before the description, so
+// it cannot share viewCall's (resource, desc, handle) shape: forwarding that
+// shape dropped the counter and shifted the description into the handle.
+static void STDMETHODCALLTYPE createUav(DevicePtr self,ID3D12Resource* r,ID3D12Resource* counter,const D3D12_UNORDERED_ACCESS_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,ID3D12Resource*,const D3D12_UNORDERED_ACCESS_VIEW_DESC*,D3D12_CPU_DESCRIPTOR_HANDLE);
+    D3D12_DIAG_HOOK_VOID(Fn,CreateUnorderedAccessView)call(self,r,counter,d,h); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE createRtv(DevicePtr self,ID3D12Resource* r,const D3D12_RENDER_TARGET_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    return viewCall<CreateRenderTargetView>(self,"CreateRenderTargetView",r,d,h,[](const D3D12_RENDER_TARGET_VIEW_DESC* v,std::string& text,std::string& key){
-        if(!v){text="view=default";key="default";return;}
-        text=fmt("viewfmt=%s dim=%d",formatText(v->Format).c_str(),int(v->ViewDimension));key=fmt("%d/%d",int(v->Format),int(v->ViewDimension));});
+static void STDMETHODCALLTYPE createRtv(DevicePtr self,ID3D12Resource* r,const D3D12_RENDER_TARGET_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    viewCall<CreateRenderTargetView>(self,"CreateRenderTargetView",r,d,h);
 }
-static HRESULT STDMETHODCALLTYPE createDsv(DevicePtr self,ID3D12Resource* r,const D3D12_DEPTH_STENCIL_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    return viewCall<CreateDepthStencilView>(self,"CreateDepthStencilView",r,d,h,[](const D3D12_DEPTH_STENCIL_VIEW_DESC* v,std::string& text,std::string& key){
-        if(!v){text="view=default";key="default";return;}
-        text=fmt("viewfmt=%s dim=%d flags=0x%x",formatText(v->Format).c_str(),int(v->ViewDimension),v->Flags);key=fmt("%d/%d/%x",int(v->Format),int(v->ViewDimension),v->Flags);});
+static void STDMETHODCALLTYPE createDsv(DevicePtr self,ID3D12Resource* r,const D3D12_DEPTH_STENCIL_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    viewCall<CreateDepthStencilView>(self,"CreateDepthStencilView",r,d,h);
 }
-static HRESULT STDMETHODCALLTYPE createSampler(DevicePtr self,const D3D12_SAMPLER_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_SAMPLER_DESC*,D3D12_CPU_DESCRIPTOR_HANDLE);
-    D3D12_DIAG_HOOK(Fn,CreateSampler)HRESULT hr=call(self,d,h);
-    if(d)D3D12_DIAG_FAILED("CreateSampler",fmt("%x/%d/%d/%d/%u",unsigned(d->Filter),int(d->AddressU),int(d->AddressV),int(d->AddressW),d->MaxAnisotropy),
-        fmt("filter=0x%x address=%d/%d/%d aniso=%u cmp=%d lod=%g..%g",unsigned(d->Filter),int(d->AddressU),int(d->AddressV),int(d->AddressW),d->MaxAnisotropy,int(d->ComparisonFunc),double(d->MinLOD),double(d->MaxLOD)));
-    else D3D12_DIAG_FAILED("CreateSampler","null","desc=null");
-    return hr;
+static void STDMETHODCALLTYPE createSampler(DevicePtr self,const D3D12_SAMPLER_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_SAMPLER_DESC*,D3D12_CPU_DESCRIPTOR_HANDLE);
+    D3D12_DIAG_HOOK_VOID(Fn,CreateSampler)call(self,d,h); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE createCbv(DevicePtr self,const D3D12_CONSTANT_BUFFER_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_CONSTANT_BUFFER_VIEW_DESC*,D3D12_CPU_DESCRIPTOR_HANDLE);
-    D3D12_DIAG_HOOK(Fn,CreateConstantBufferView)HRESULT hr=call(self,d,h);
-    if(d)D3D12_DIAG_FAILED("CreateConstantBufferView",fmt("%llu/%u",(unsigned long long)d->BufferLocation,d->SizeInBytes),
-        fmt("gpuva=0x%llx bytes=%u",(unsigned long long)d->BufferLocation,d->SizeInBytes));
-    else D3D12_DIAG_FAILED("CreateConstantBufferView","null","desc=null");
-    return hr;
+static void STDMETHODCALLTYPE createCbv(DevicePtr self,const D3D12_CONSTANT_BUFFER_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_CONSTANT_BUFFER_VIEW_DESC*,D3D12_CPU_DESCRIPTOR_HANDLE);
+    D3D12_DIAG_HOOK_VOID(Fn,CreateConstantBufferView)call(self,d,h); traceEndVoid(traceAt);
 }
 
 // ---- capability queries: the answers that pick a game's renderer path
 static HRESULT STDMETHODCALLTYPE checkFeatureSupport(DevicePtr self,D3D12_FEATURE feature,void* data,UINT size) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,D3D12_FEATURE,void*,UINT);
-    D3D12_DIAG_HOOK(Fn,CheckFeatureSupport)HRESULT hr=call(self,feature,data,size);
+    D3D12_DIAG_HOOK(Fn,CheckFeatureSupport)HRESULT hr=call(self,feature,data,size); traceEnd(traceAt,hr);
     std::string detail=fmt("size=%u",size);
     // The answers a D3D12 game branches on before anything else: the shader
     // model it may use, whether the adapter is UMA, and the highest feature
@@ -570,21 +607,19 @@ static HRESULT STDMETHODCALLTYPE checkFeatureSupport(DevicePtr self,D3D12_FEATUR
 }
 
 // ---- command queue: the calls whose failure leaves a frame never submitted
-static HRESULT STDMETHODCALLTYPE queueExecuteCommandLists(DevicePtr self,UINT count,ID3D12CommandList* const* lists) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D12CommandList* const*);
-    D3D12_DIAG_HOOK(Fn,QueueExecuteCommandLists)HRESULT hr=call(self,count,lists);
-    D3D12_DIAG_FAILED("ExecuteCommandLists",fmt("%u",count),fmt("lists=%u",count));
-    return hr;
+static void STDMETHODCALLTYPE queueExecuteCommandLists(DevicePtr self,UINT count,ID3D12CommandList* const* lists) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D12CommandList* const*);
+    D3D12_DIAG_HOOK_VOID(Fn,QueueExecuteCommandLists)call(self,count,lists); traceEndVoid(traceAt);
 }
 static HRESULT STDMETHODCALLTYPE queueSignal(DevicePtr self,ID3D12Fence* fence,UINT64 value) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Fence*,UINT64);
-    D3D12_DIAG_HOOK(Fn,QueueSignal)HRESULT hr=call(self,fence,value);
+    D3D12_DIAG_HOOK(Fn,QueueSignal)HRESULT hr=call(self,fence,value); traceEnd(traceAt,hr);
     D3D12_DIAG_FAILED("CommandQueue::Signal",fmt("%d",fence!=nullptr),fmt("fence=%d value=%llu",fence!=nullptr,(unsigned long long)value));
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE queueWait(DevicePtr self,ID3D12Fence* fence,UINT64 value) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Fence*,UINT64);
-    D3D12_DIAG_HOOK(Fn,QueueWait)HRESULT hr=call(self,fence,value);
+    D3D12_DIAG_HOOK(Fn,QueueWait)HRESULT hr=call(self,fence,value); traceEnd(traceAt,hr);
     D3D12_DIAG_FAILED("CommandQueue::Wait",fmt("%d",fence!=nullptr),fmt("fence=%d value=%llu",fence!=nullptr,(unsigned long long)value));
     return hr;
 }
@@ -592,141 +627,114 @@ static HRESULT STDMETHODCALLTYPE queueWait(DevicePtr self,ID3D12Fence* fence,UIN
 // ---- command list: Close/Reset decide whether a frame is ever submitted
 static HRESULT STDMETHODCALLTYPE listClose(DevicePtr self) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr);
-    D3D12_DIAG_HOOK(Fn,ListClose)HRESULT hr=call(self);
+    D3D12_DIAG_HOOK(Fn,ListClose)HRESULT hr=call(self); traceEnd(traceAt,hr);
     D3D12_DIAG_FAILED("CommandList::Close","","");
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE listReset(DevicePtr self,ID3D12CommandAllocator* allocator,ID3D12PipelineState* state) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12CommandAllocator*,ID3D12PipelineState*);
-    D3D12_DIAG_HOOK(Fn,ListReset)HRESULT hr=call(self,allocator,state);
+    D3D12_DIAG_HOOK(Fn,ListReset)HRESULT hr=call(self,allocator,state); traceEnd(traceAt,hr);
     D3D12_DIAG_FAILED("CommandList::Reset",fmt("%d/%d",allocator!=nullptr,state!=nullptr),fmt("allocator=%d state=%d",allocator!=nullptr,state!=nullptr));
     return hr;
 }
-static HRESULT STDMETHODCALLTYPE listSetPipelineState(DevicePtr self,ID3D12PipelineState* state) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12PipelineState*);
-    D3D12_DIAG_HOOK(Fn,ListSetPipelineState)HRESULT hr=call(self,state);
-    D3D12_DIAG_FAILED("SetPipelineState",fmt("%d",state!=nullptr),fmt("state=%d",state!=nullptr));
-    return hr;
+static void STDMETHODCALLTYPE listSetPipelineState(DevicePtr self,ID3D12PipelineState* state) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D12PipelineState*);
+    D3D12_DIAG_HOOK_VOID(Fn,ListSetPipelineState)call(self,state); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE listResourceBarrier(DevicePtr self,UINT count,const D3D12_RESOURCE_BARRIER* barriers) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,const D3D12_RESOURCE_BARRIER*);
-    D3D12_DIAG_HOOK(Fn,ListResourceBarrier)HRESULT hr=call(self,count,barriers);
-    if(FAILED(hr)) {
-        std::string text="barriers="+u64(count);
-        if(barriers&&count)text+=fmt(" first=%d %s->%s",int(barriers[0].Type),
-            resourceStateName(barriers[0].Transition.StateBefore),resourceStateName(barriers[0].Transition.StateAfter));
-        D3D12_DIAG_FAILED("ResourceBarrier",fmt("%u",count),text);
-    }
-    return hr;
+static void STDMETHODCALLTYPE listResourceBarrier(DevicePtr self,UINT count,const D3D12_RESOURCE_BARRIER* barriers) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,const D3D12_RESOURCE_BARRIER*);
+    D3D12_DIAG_HOOK_VOID(Fn,ListResourceBarrier)call(self,count,barriers); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE listSetDescriptorHeaps(DevicePtr self,UINT count,ID3D12DescriptorHeap* const* heaps) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D12DescriptorHeap* const*);
-    D3D12_DIAG_HOOK(Fn,ListSetDescriptorHeaps)HRESULT hr=call(self,count,heaps);
-    D3D12_DIAG_FAILED("SetDescriptorHeaps",fmt("%u",count),fmt("heaps=%u",count));
-    return hr;
+static void STDMETHODCALLTYPE listSetDescriptorHeaps(DevicePtr self,UINT count,ID3D12DescriptorHeap* const* heaps) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D12DescriptorHeap* const*);
+    D3D12_DIAG_HOOK_VOID(Fn,ListSetDescriptorHeaps)call(self,count,heaps); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE listDrawInstanced(DevicePtr self,UINT vertices,UINT instances,UINT startVertex,UINT startInstance) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,UINT,UINT);
-    D3D12_DIAG_HOOK(Fn,ListDrawInstanced)HRESULT hr=call(self,vertices,instances,startVertex,startInstance);
-    D3D12_DIAG_FAILED("DrawInstanced",fmt("%u/%u",vertices,instances),fmt("vertices=%u instances=%u start=%u/%u",vertices,instances,startVertex,startInstance));
-    return hr;
+static void STDMETHODCALLTYPE listDrawInstanced(DevicePtr self,UINT vertices,UINT instances,UINT startVertex,UINT startInstance) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,UINT,UINT);
+    D3D12_DIAG_HOOK_VOID(Fn,ListDrawInstanced)call(self,vertices,instances,startVertex,startInstance); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE listDrawIndexedInstanced(DevicePtr self,UINT indices,UINT instances,UINT startIndex,INT baseVertex,UINT startInstance) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,UINT,INT,UINT);
-    D3D12_DIAG_HOOK(Fn,ListDrawIndexedInstanced)HRESULT hr=call(self,indices,instances,startIndex,baseVertex,startInstance);
-    D3D12_DIAG_FAILED("DrawIndexedInstanced",fmt("%u/%u",indices,instances),fmt("indices=%u instances=%u start=%u base=%d",indices,instances,startIndex,baseVertex));
-    return hr;
+static void STDMETHODCALLTYPE listDrawIndexedInstanced(DevicePtr self,UINT indices,UINT instances,UINT startIndex,INT baseVertex,UINT startInstance) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,UINT,INT,UINT);
+    D3D12_DIAG_HOOK_VOID(Fn,ListDrawIndexedInstanced)call(self,indices,instances,startIndex,baseVertex,startInstance); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE listDispatch(DevicePtr self,UINT x,UINT y,UINT z) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,UINT);
-    D3D12_DIAG_HOOK(Fn,ListDispatch)HRESULT hr=call(self,x,y,z);
-    D3D12_DIAG_FAILED("Dispatch",fmt("%u/%u/%u",x,y,z),fmt("groups=%u/%u/%u",x,y,z));
-    return hr;
+static void STDMETHODCALLTYPE listDispatch(DevicePtr self,UINT x,UINT y,UINT z) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,UINT);
+    D3D12_DIAG_HOOK_VOID(Fn,ListDispatch)call(self,x,y,z); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE listCopyResource(DevicePtr self,ID3D12Resource* dst,ID3D12Resource* src) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,ID3D12Resource*);
-    D3D12_DIAG_HOOK(Fn,ListCopyResource)HRESULT hr=call(self,dst,src);
-    D3D12_DIAG_FAILED("CopyResource",fmt("%d/%d",dst!=nullptr,src!=nullptr),fmt("dst=%d src=%d",dst!=nullptr,src!=nullptr));
-    return hr;
+static void STDMETHODCALLTYPE listCopyResource(DevicePtr self,ID3D12Resource* dst,ID3D12Resource* src) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,ID3D12Resource*);
+    D3D12_DIAG_HOOK_VOID(Fn,ListCopyResource)call(self,dst,src); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE listCopyBufferRegion(DevicePtr self,ID3D12Resource* dst,UINT64 dstOffset,ID3D12Resource* src,UINT64 srcOffset,UINT64 bytes) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,UINT64,ID3D12Resource*,UINT64,UINT64);
-    D3D12_DIAG_HOOK(Fn,ListCopyBufferRegion)HRESULT hr=call(self,dst,dstOffset,src,srcOffset,bytes);
-    D3D12_DIAG_FAILED("CopyBufferRegion",fmt("%d/%d",dst!=nullptr,src!=nullptr),
-        fmt("dst=%d@%llu src=%d@%llu bytes=%llu",dst!=nullptr,(unsigned long long)dstOffset,src!=nullptr,(unsigned long long)srcOffset,(unsigned long long)bytes));
-    return hr;
+static void STDMETHODCALLTYPE listCopyBufferRegion(DevicePtr self,ID3D12Resource* dst,UINT64 dstOffset,ID3D12Resource* src,UINT64 srcOffset,UINT64 bytes) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,UINT64,ID3D12Resource*,UINT64,UINT64);
+    D3D12_DIAG_HOOK_VOID(Fn,ListCopyBufferRegion)call(self,dst,dstOffset,src,srcOffset,bytes); traceEndVoid(traceAt);
 }
 // CopyTextureRegion(pDst, DstX, DstY, DstZ, pSrc, pSrcBox): the destination
 // position is three UINTs. The wrapper took one (a subresource index) before.
-static HRESULT STDMETHODCALLTYPE listCopyTextureRegion(DevicePtr self,const D3D12_TEXTURE_COPY_LOCATION* dst,UINT dstX,UINT dstY,UINT dstZ,
+static void STDMETHODCALLTYPE listCopyTextureRegion(DevicePtr self,const D3D12_TEXTURE_COPY_LOCATION* dst,UINT dstX,UINT dstY,UINT dstZ,
         const D3D12_TEXTURE_COPY_LOCATION* src,const D3D12_BOX* box) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_TEXTURE_COPY_LOCATION*,UINT,UINT,UINT,const D3D12_TEXTURE_COPY_LOCATION*,const D3D12_BOX*);
-    D3D12_DIAG_HOOK(Fn,ListCopyTextureRegion)HRESULT hr=call(self,dst,dstX,dstY,dstZ,src,box);
-    D3D12_DIAG_FAILED("CopyTextureRegion",fmt("%d/%d/%u,%u,%u",dst!=nullptr,src!=nullptr,dstX,dstY,dstZ),
-        fmt("dst=%d at=%u,%u,%u src=%d box=%d",dst!=nullptr,dstX,dstY,dstZ,src!=nullptr,box!=nullptr));
-    return hr;
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_TEXTURE_COPY_LOCATION*,UINT,UINT,UINT,const D3D12_TEXTURE_COPY_LOCATION*,const D3D12_BOX*);
+    D3D12_DIAG_HOOK_VOID(Fn,ListCopyTextureRegion)call(self,dst,dstX,dstY,dstZ,src,box); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE listResolveSubresource(DevicePtr self,ID3D12Resource* dst,UINT dstSub,ID3D12Resource* src,UINT srcSub,DXGI_FORMAT format) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,UINT,ID3D12Resource*,UINT,DXGI_FORMAT);
-    D3D12_DIAG_HOOK(Fn,ListResolveSubresource)HRESULT hr=call(self,dst,dstSub,src,srcSub,format);
-    D3D12_DIAG_FAILED("ResolveSubresource",fmt("%d/%d/%u",dst!=nullptr,src!=nullptr,srcSub),
-        fmt("dst=%d sub=%u src=%d sub=%u fmt=%s",dst!=nullptr,dstSub,src!=nullptr,srcSub,formatText(format).c_str()));
-    return hr;
+static void STDMETHODCALLTYPE listResolveSubresource(DevicePtr self,ID3D12Resource* dst,UINT dstSub,ID3D12Resource* src,UINT srcSub,DXGI_FORMAT format) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,UINT,ID3D12Resource*,UINT,DXGI_FORMAT);
+    D3D12_DIAG_HOOK_VOID(Fn,ListResolveSubresource)call(self,dst,dstSub,src,srcSub,format); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE listOMSetRenderTargets(DevicePtr self,UINT count,const D3D12_CPU_DESCRIPTOR_HANDLE* rtvs,BOOL single,const D3D12_CPU_DESCRIPTOR_HANDLE* dsv) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,const D3D12_CPU_DESCRIPTOR_HANDLE*,BOOL,const D3D12_CPU_DESCRIPTOR_HANDLE*);
-    D3D12_DIAG_HOOK(Fn,ListOMSetRenderTargets)HRESULT hr=call(self,count,rtvs,single,dsv);
-    D3D12_DIAG_FAILED("OMSetRenderTargets",fmt("%u/%d",count,single),fmt("rtvs=%u contiguous=%d dsv=%d",count,single,dsv!=nullptr));
-    return hr;
+static void STDMETHODCALLTYPE listOMSetRenderTargets(DevicePtr self,UINT count,const D3D12_CPU_DESCRIPTOR_HANDLE* rtvs,BOOL single,const D3D12_CPU_DESCRIPTOR_HANDLE* dsv) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,const D3D12_CPU_DESCRIPTOR_HANDLE*,BOOL,const D3D12_CPU_DESCRIPTOR_HANDLE*);
+    D3D12_DIAG_HOOK_VOID(Fn,ListOMSetRenderTargets)call(self,count,rtvs,single,dsv); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE listClearRenderTargetView(DevicePtr self,D3D12_CPU_DESCRIPTOR_HANDLE rtv,const FLOAT colour[4],UINT rects,const D3D12_RECT* r) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,D3D12_CPU_DESCRIPTOR_HANDLE,const FLOAT*,UINT,const D3D12_RECT*);
-    D3D12_DIAG_HOOK(Fn,ListClearRenderTargetView)HRESULT hr=call(self,rtv,colour,rects,r);
-    if(FAILED(hr))D3D12_DIAG_FAILED("ClearRenderTargetView",fmt("%llx",(unsigned long long)rtv.ptr),fmt("rtv=0x%llx rects=%u",(unsigned long long)rtv.ptr,rects));
-    return hr;
+static void STDMETHODCALLTYPE listClearRenderTargetView(DevicePtr self,D3D12_CPU_DESCRIPTOR_HANDLE rtv,const FLOAT colour[4],UINT rects,const D3D12_RECT* r) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,D3D12_CPU_DESCRIPTOR_HANDLE,const FLOAT*,UINT,const D3D12_RECT*);
+    D3D12_DIAG_HOOK_VOID(Fn,ListClearRenderTargetView)call(self,rtv,colour,rects,r); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE listClearDepthStencilView(DevicePtr self,D3D12_CPU_DESCRIPTOR_HANDLE dsv,D3D12_CLEAR_FLAGS flags,FLOAT depth,UINT8 stencil,UINT rects,const D3D12_RECT* r) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,D3D12_CPU_DESCRIPTOR_HANDLE,D3D12_CLEAR_FLAGS,FLOAT,UINT8,UINT,const D3D12_RECT*);
-    D3D12_DIAG_HOOK(Fn,ListClearDepthStencilView)HRESULT hr=call(self,dsv,flags,depth,stencil,rects,r);
-    if(FAILED(hr))D3D12_DIAG_FAILED("ClearDepthStencilView",fmt("%llx/%x",(unsigned long long)dsv.ptr,flags),fmt("dsv=0x%llx flags=0x%x rects=%u",(unsigned long long)dsv.ptr,flags,rects));
-    return hr;
+static void STDMETHODCALLTYPE listClearDepthStencilView(DevicePtr self,D3D12_CPU_DESCRIPTOR_HANDLE dsv,D3D12_CLEAR_FLAGS flags,FLOAT depth,UINT8 stencil,UINT rects,const D3D12_RECT* r) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,D3D12_CPU_DESCRIPTOR_HANDLE,D3D12_CLEAR_FLAGS,FLOAT,UINT8,UINT,const D3D12_RECT*);
+    D3D12_DIAG_HOOK_VOID(Fn,ListClearDepthStencilView)call(self,dsv,flags,depth,stencil,rects,r); traceEndVoid(traceAt);
 }
-static HRESULT STDMETHODCALLTYPE listExecuteIndirect(DevicePtr self,ID3D12CommandSignature* signature,UINT maxCount,ID3D12Resource* args,UINT64 argsOffset,ID3D12Resource* count,UINT64 countOffset) {
-    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12CommandSignature*,UINT,ID3D12Resource*,UINT64,ID3D12Resource*,UINT64);
-    D3D12_DIAG_HOOK(Fn,ListExecuteIndirect)HRESULT hr=call(self,signature,maxCount,args,argsOffset,count,countOffset);
-    D3D12_DIAG_FAILED("ExecuteIndirect",fmt("%u",maxCount),fmt("signature=%d max=%u args=%d count=%d",signature!=nullptr,maxCount,args!=nullptr,count!=nullptr));
-    return hr;
+static void STDMETHODCALLTYPE listExecuteIndirect(DevicePtr self,ID3D12CommandSignature* signature,UINT maxCount,ID3D12Resource* args,UINT64 argsOffset,ID3D12Resource* count,UINT64 countOffset) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D12CommandSignature*,UINT,ID3D12Resource*,UINT64,ID3D12Resource*,UINT64);
+    D3D12_DIAG_HOOK_VOID(Fn,ListExecuteIndirect)call(self,signature,maxCount,args,argsOffset,count,countOffset); traceEndVoid(traceAt);
 }
 
 // ---- fences and resources: the calls a frame's pacing and uploads go through
 static HRESULT STDMETHODCALLTYPE fenceSetEventOnCompletion(DevicePtr self,UINT64 value,HANDLE event) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT64,HANDLE);
-    D3D12_DIAG_HOOK(Fn,FenceSetEventOnCompletion)HRESULT hr=call(self,value,event);
+    D3D12_DIAG_HOOK(Fn,FenceSetEventOnCompletion)HRESULT hr=call(self,value,event); traceEnd(traceAt,hr);
     D3D12_DIAG_FAILED("Fence::SetEventOnCompletion",fmt("%llu/%d",(unsigned long long)value,event!=nullptr),
         fmt("value=%llu event=%d",(unsigned long long)value,event!=nullptr));
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE fenceSignal(DevicePtr self,UINT64 value) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT64);
-    D3D12_DIAG_HOOK(Fn,FenceSignal)HRESULT hr=call(self,value);
+    D3D12_DIAG_HOOK(Fn,FenceSignal)HRESULT hr=call(self,value); traceEnd(traceAt,hr);
     D3D12_DIAG_FAILED("Fence::Signal",fmt("%llu",(unsigned long long)value),fmt("value=%llu",(unsigned long long)value));
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE resourceMap(DevicePtr self,UINT sub,const D3D12_RANGE* read,void** data) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,const D3D12_RANGE*,void**);
-    D3D12_DIAG_HOOK(Fn,ResourceMap)HRESULT hr=call(self,sub,read,data);
+    D3D12_DIAG_HOOK(Fn,ResourceMap)HRESULT hr=call(self,sub,read,data); traceEnd(traceAt,hr);
     D3D12_DIAG_FAILED("Resource::Map",fmt("%u",sub),fmt("subresource=%u range=%d",sub,read!=nullptr));
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE allocatorReset(DevicePtr self) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr);
-    D3D12_DIAG_HOOK(Fn,AllocatorReset)HRESULT hr=call(self);
+    D3D12_DIAG_HOOK(Fn,AllocatorReset)HRESULT hr=call(self); traceEnd(traceAt,hr);
     D3D12_DIAG_FAILED("CommandAllocator::Reset","","");
     return hr;
 }
 
+// ---- the header decides each hooked slot's return kind ----
+// Every hook's declared return type must equal the return type of the interface
+// method it replaces in d3d12.h (C++ member declarations). A mismatch is a compile
+// error, so a void method cannot be traced as HRESULT, and the reverse.
+template<class M> struct MethodReturn;
+template<class C,class R,class...A> struct MethodReturn<R(C::*)(A...)> { using type=R; };
+template<class F> struct FunctionReturn;
+template<class R,class...A> struct FunctionReturn<R(*)(A...)> { using type=R; };
+
 // ---- the hooks each interface level gets
-// ---- each hook's arguments are checked against the method in d3d12.h ----
+// ---- each hook matches its method in d3d12.h: arguments and return kind ----
 // A hook takes (self, the method's arguments in order). Argument order, count and
 // type are compared as types, so a wrapper that drops or swaps an argument is a
 // compile error. The return type is not checked here.
@@ -736,55 +744,56 @@ template<class F> struct HookArgs;
 template<class R,class...A> struct HookArgs<R(*)(A...)> { using type=std::tuple<A...>; };
 template<class T> struct DropSelf;
 template<class H,class...T> struct DropSelf<std::tuple<H,T...>> { using type=std::tuple<T...>; using self=H; };
-#define DIAG_PIN_ARGS(Iface,Method,Hook) static_assert(\
+#define DIAG_PIN(Iface,Method,Hook) static_assert(\
     std::is_same<typename DropSelf<typename HookArgs<decltype(&Hook)>::type>::type,typename MethodArgs<decltype(&Iface::Method)>::type>::value&&\
-    std::is_same<typename DropSelf<typename HookArgs<decltype(&Hook)>::type>::self,void*>::value,\
-    #Hook " must take the arguments of " #Iface "::" #Method " in d3d12.h")
-DIAG_PIN_ARGS(ID3D12Device,CreateCommandQueue,createCommandQueue);
-DIAG_PIN_ARGS(ID3D12Device,CreateCommandAllocator,createCommandAllocator);
-DIAG_PIN_ARGS(ID3D12Device,CreateCommandList,createCommandList);
-DIAG_PIN_ARGS(ID3D12Device,CreateGraphicsPipelineState,createGraphicsPipelineState);
-DIAG_PIN_ARGS(ID3D12Device,CreateComputePipelineState,createComputePipelineState);
-DIAG_PIN_ARGS(ID3D12Device,CheckFeatureSupport,checkFeatureSupport);
-DIAG_PIN_ARGS(ID3D12Device,CreateDescriptorHeap,createDescriptorHeap);
-DIAG_PIN_ARGS(ID3D12Device,CreateRootSignature,createRootSignature);
-DIAG_PIN_ARGS(ID3D12Device,CreateConstantBufferView,createCbv);
-DIAG_PIN_ARGS(ID3D12Device,CreateShaderResourceView,createSrv);
-DIAG_PIN_ARGS(ID3D12Device,CreateUnorderedAccessView,createUav);
-DIAG_PIN_ARGS(ID3D12Device,CreateRenderTargetView,createRtv);
-DIAG_PIN_ARGS(ID3D12Device,CreateDepthStencilView,createDsv);
-DIAG_PIN_ARGS(ID3D12Device,CreateSampler,createSampler);
-DIAG_PIN_ARGS(ID3D12Device,CreateCommittedResource,createCommittedResource);
-DIAG_PIN_ARGS(ID3D12Device,CreateHeap,createHeap);
-DIAG_PIN_ARGS(ID3D12Device,CreatePlacedResource,createPlacedResource);
-DIAG_PIN_ARGS(ID3D12Device,CreateReservedResource,createReservedResource);
-DIAG_PIN_ARGS(ID3D12Device,CreateFence,createFence);
-DIAG_PIN_ARGS(ID3D12Device,CreateQueryHeap,createQueryHeap);
-DIAG_PIN_ARGS(ID3D12Device,CreateCommandSignature,createCommandSignature);
-DIAG_PIN_ARGS(ID3D12Device2,CreatePipelineState,createPipelineStateStream);
-DIAG_PIN_ARGS(ID3D12CommandQueue,ExecuteCommandLists,queueExecuteCommandLists);
-DIAG_PIN_ARGS(ID3D12CommandQueue,Signal,queueSignal);
-DIAG_PIN_ARGS(ID3D12CommandQueue,Wait,queueWait);
-DIAG_PIN_ARGS(ID3D12GraphicsCommandList,Close,listClose);
-DIAG_PIN_ARGS(ID3D12GraphicsCommandList,Reset,listReset);
-DIAG_PIN_ARGS(ID3D12GraphicsCommandList,SetPipelineState,listSetPipelineState);
-DIAG_PIN_ARGS(ID3D12GraphicsCommandList,ResourceBarrier,listResourceBarrier);
-DIAG_PIN_ARGS(ID3D12GraphicsCommandList,SetDescriptorHeaps,listSetDescriptorHeaps);
-DIAG_PIN_ARGS(ID3D12GraphicsCommandList,DrawInstanced,listDrawInstanced);
-DIAG_PIN_ARGS(ID3D12GraphicsCommandList,DrawIndexedInstanced,listDrawIndexedInstanced);
-DIAG_PIN_ARGS(ID3D12GraphicsCommandList,Dispatch,listDispatch);
-DIAG_PIN_ARGS(ID3D12GraphicsCommandList,CopyResource,listCopyResource);
-DIAG_PIN_ARGS(ID3D12GraphicsCommandList,CopyBufferRegion,listCopyBufferRegion);
-DIAG_PIN_ARGS(ID3D12GraphicsCommandList,CopyTextureRegion,listCopyTextureRegion);
-DIAG_PIN_ARGS(ID3D12GraphicsCommandList,ResolveSubresource,listResolveSubresource);
-DIAG_PIN_ARGS(ID3D12GraphicsCommandList,OMSetRenderTargets,listOMSetRenderTargets);
-DIAG_PIN_ARGS(ID3D12GraphicsCommandList,ClearRenderTargetView,listClearRenderTargetView);
-DIAG_PIN_ARGS(ID3D12GraphicsCommandList,ClearDepthStencilView,listClearDepthStencilView);
-DIAG_PIN_ARGS(ID3D12GraphicsCommandList,ExecuteIndirect,listExecuteIndirect);
-DIAG_PIN_ARGS(ID3D12Fence,SetEventOnCompletion,fenceSetEventOnCompletion);
-DIAG_PIN_ARGS(ID3D12Fence,Signal,fenceSignal);
-DIAG_PIN_ARGS(ID3D12CommandAllocator,Reset,allocatorReset);
-DIAG_PIN_ARGS(ID3D12Resource,Map,resourceMap);
+    std::is_same<typename DropSelf<typename HookArgs<decltype(&Hook)>::type>::self,void*>::value&&\
+    std::is_same<typename MethodReturn<decltype(&Iface::Method)>::type,typename FunctionReturn<decltype(&Hook)>::type>::value,\
+    #Hook " must match " #Iface "::" #Method " in d3d12.h (arguments and return)")
+DIAG_PIN(ID3D12Device,CreateCommandQueue,createCommandQueue);
+DIAG_PIN(ID3D12Device,CreateCommandAllocator,createCommandAllocator);
+DIAG_PIN(ID3D12Device,CreateCommandList,createCommandList);
+DIAG_PIN(ID3D12Device,CreateGraphicsPipelineState,createGraphicsPipelineState);
+DIAG_PIN(ID3D12Device,CreateComputePipelineState,createComputePipelineState);
+DIAG_PIN(ID3D12Device,CheckFeatureSupport,checkFeatureSupport);
+DIAG_PIN(ID3D12Device,CreateDescriptorHeap,createDescriptorHeap);
+DIAG_PIN(ID3D12Device,CreateRootSignature,createRootSignature);
+DIAG_PIN(ID3D12Device,CreateConstantBufferView,createCbv);
+DIAG_PIN(ID3D12Device,CreateShaderResourceView,createSrv);
+DIAG_PIN(ID3D12Device,CreateUnorderedAccessView,createUav);
+DIAG_PIN(ID3D12Device,CreateRenderTargetView,createRtv);
+DIAG_PIN(ID3D12Device,CreateDepthStencilView,createDsv);
+DIAG_PIN(ID3D12Device,CreateSampler,createSampler);
+DIAG_PIN(ID3D12Device,CreateCommittedResource,createCommittedResource);
+DIAG_PIN(ID3D12Device,CreateHeap,createHeap);
+DIAG_PIN(ID3D12Device,CreatePlacedResource,createPlacedResource);
+DIAG_PIN(ID3D12Device,CreateReservedResource,createReservedResource);
+DIAG_PIN(ID3D12Device,CreateFence,createFence);
+DIAG_PIN(ID3D12Device,CreateQueryHeap,createQueryHeap);
+DIAG_PIN(ID3D12Device,CreateCommandSignature,createCommandSignature);
+DIAG_PIN(ID3D12Device2,CreatePipelineState,createPipelineStateStream);
+DIAG_PIN(ID3D12CommandQueue,ExecuteCommandLists,queueExecuteCommandLists);
+DIAG_PIN(ID3D12CommandQueue,Signal,queueSignal);
+DIAG_PIN(ID3D12CommandQueue,Wait,queueWait);
+DIAG_PIN(ID3D12GraphicsCommandList,Close,listClose);
+DIAG_PIN(ID3D12GraphicsCommandList,Reset,listReset);
+DIAG_PIN(ID3D12GraphicsCommandList,SetPipelineState,listSetPipelineState);
+DIAG_PIN(ID3D12GraphicsCommandList,ResourceBarrier,listResourceBarrier);
+DIAG_PIN(ID3D12GraphicsCommandList,SetDescriptorHeaps,listSetDescriptorHeaps);
+DIAG_PIN(ID3D12GraphicsCommandList,DrawInstanced,listDrawInstanced);
+DIAG_PIN(ID3D12GraphicsCommandList,DrawIndexedInstanced,listDrawIndexedInstanced);
+DIAG_PIN(ID3D12GraphicsCommandList,Dispatch,listDispatch);
+DIAG_PIN(ID3D12GraphicsCommandList,CopyResource,listCopyResource);
+DIAG_PIN(ID3D12GraphicsCommandList,CopyBufferRegion,listCopyBufferRegion);
+DIAG_PIN(ID3D12GraphicsCommandList,CopyTextureRegion,listCopyTextureRegion);
+DIAG_PIN(ID3D12GraphicsCommandList,ResolveSubresource,listResolveSubresource);
+DIAG_PIN(ID3D12GraphicsCommandList,OMSetRenderTargets,listOMSetRenderTargets);
+DIAG_PIN(ID3D12GraphicsCommandList,ClearRenderTargetView,listClearRenderTargetView);
+DIAG_PIN(ID3D12GraphicsCommandList,ClearDepthStencilView,listClearDepthStencilView);
+DIAG_PIN(ID3D12GraphicsCommandList,ExecuteIndirect,listExecuteIndirect);
+DIAG_PIN(ID3D12Fence,SetEventOnCompletion,fenceSetEventOnCompletion);
+DIAG_PIN(ID3D12Fence,Signal,fenceSignal);
+DIAG_PIN(ID3D12CommandAllocator,Reset,allocatorReset);
+DIAG_PIN(ID3D12Resource,Map,resourceMap);
 
 inline const Patch* devicePatches(size_t& count){
     static const Patch table[]={
@@ -877,6 +886,11 @@ inline void adoptStreamPath(IUnknown* device) {
 // architecture, feature levels, and the adapter LUID.
 inline void adopt(ID3D12Device* device) {
     if(!device||!sink)return;
+    if(!traceChecked.exchange(true,std::memory_order_acq_rel)) {
+        traceOn.store(set_trace_requested&&set_trace_requested(),std::memory_order_release);
+        if(traceOn.load(std::memory_order_acquire))
+            emit("trace on (LocalState\\d3d12trace.txt): the last hooked calls are kept and flushed after a fault");
+    }
     size_t count=0;const Patch* patches=devicePatches(count);
     if(!patchClass(*reinterpret_cast<void***>(device),patches,count))return;
     adoptStreamPath(device);
