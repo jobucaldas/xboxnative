@@ -1141,6 +1141,35 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "CloseHandle", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "SetHandleCount", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t { return c.arg(0); });
 
+    // d3dx9_36 math: D3DX uses row-major matrices and row-vector transforms.
+    auto fp = [](uint32_t v) { float f; std::memcpy(&f, &v, 4); return f; };
+    auto fb = [](float f) { uint32_t v; std::memcpy(&v, &f, 4); return v; };
+    auto rd = [this, fp](uint32_t p, unsigned n) { std::vector<float> v(n); for (unsigned i = 0; i < n; ++i) v[i] = fp(mem.r32(p + 4 * i)); return v; };
+    auto wr = [this, fb](uint32_t p, const float* v, unsigned n) { for (unsigned i = 0; i < n; ++i) mem.w32(p + 4 * i, fb(v[i])); };
+    auto matmul = [](const float* a, const float* b, float* o) { for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) { o[i*4+j] = 0; for (int k = 0; k < 4; ++k) o[i*4+j] += a[i*4+k] * b[k*4+j]; } };
+    auto mat = [this, fp, fb, rd, wr, matmul](const char* name, unsigned argc, auto build) {
+        reg.add("d3dx9_36.dll", name, Conv::Stdcall, argc, [this, fp, fb, rd, wr, matmul, build](Cpu& c) -> uint32_t {
+            uint32_t out = c.arg(0); float m[16]; build(c, m, rd, fp, matmul); wr(out, m, 16); return out;
+        });
+    };
+    auto ident = [](float* m) { std::fill(m, m + 16, 0.0f); m[0] = m[5] = m[10] = m[15] = 1; };
+    mat("D3DXMatrixLookAtLH", 4, [ident](Cpu& c, float* m, auto rd, auto fp, auto) { auto e=rd(c.arg(1),3), a=rd(c.arg(2),3), u=rd(c.arg(3),3); float z[3],x[3],y[3]; auto norm=[](float* v){float n=std::sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);for(int i=0;i<3;++i)v[i]/=n;}; for(int i=0;i<3;++i)z[i]=a[i]-e[i]; norm(z); x[0]=u[1]*z[2]-u[2]*z[1];x[1]=u[2]*z[0]-u[0]*z[2];x[2]=u[0]*z[1]-u[1]*z[0];norm(x); y[0]=z[1]*x[2]-z[2]*x[1];y[1]=z[2]*x[0]-z[0]*x[2];y[2]=z[0]*x[1]-z[1]*x[0]; ident(m); for(int i=0;i<3;++i){m[4*i]=x[i];m[4*i+1]=y[i];m[4*i+2]=z[i];} m[12]=-(x[0]*e[0]+x[1]*e[1]+x[2]*e[2]);m[13]=-(y[0]*e[0]+y[1]*e[1]+y[2]*e[2]);m[14]=-(z[0]*e[0]+z[1]*e[1]+z[2]*e[2]); (void)fp; });
+    mat("D3DXMatrixMultiply", 3, [](Cpu& c,float* o,auto rd,auto,auto mul){auto a=rd(c.arg(1),16),b=rd(c.arg(2),16);mul(a.data(),b.data(),o);});
+    mat("D3DXMatrixPerspectiveFovLH", 5, [ident](Cpu& c,float* m,auto,auto fp,auto){float y=1/std::tan(fp(c.arg(1))/2),a=fp(c.arg(2)),n=fp(c.arg(3)),f=fp(c.arg(4));std::fill(m,m+16,0.0f);m[0]=y/a;m[5]=y;m[10]=f/(f-n);m[11]=1;m[14]=-n*f/(f-n);(void)ident;});
+    auto rotation = [mat](const char* name, unsigned argc, int axis) { mat(name, argc, [axis](Cpu& c,float* m,auto,auto fp,auto){float a=fp(c.arg(1)),s=std::sin(a),v=std::cos(a);std::fill(m,m+16,0.0f);m[15]=1;if(axis==0){m[0]=1;m[5]=m[10]=v;m[6]=s;m[9]=-s;}else if(axis==1){m[5]=1;m[0]=m[10]=v;m[2]=-s;m[8]=s;}else{m[10]=1;m[0]=m[5]=v;m[1]=s;m[4]=-s;}}); };
+    rotation("D3DXMatrixRotationX",2,0); rotation("D3DXMatrixRotationY",2,1); rotation("D3DXMatrixRotationZ",2,2);
+    mat("D3DXMatrixRotationYawPitchRoll", 4, [](Cpu& c,float* m,auto,auto fp,auto){float y=fp(c.arg(1)),p=fp(c.arg(2)),r=fp(c.arg(3)),sy=sin(y),cy=cos(y),sp=sin(p),cp=cos(p),sr=sin(r),cr=cos(r);float v[16]={cy*cr+sy*sp*sr,sr*cp,-sy*cr+cy*sp*sr,0,-cy*sr+sy*sp*cr,cr*cp,sr*sy+cy*sp*cr,0,sy*cp,-sp,cy*cp,0,0,0,0,1};std::copy(v,v+16,m);});
+    mat("D3DXMatrixScaling", 4, [ident](Cpu& c,float* m,auto,auto fp,auto){ident(m);m[0]=fp(c.arg(1));m[5]=fp(c.arg(2));m[10]=fp(c.arg(3));});
+    mat("D3DXMatrixTranslation", 4, [ident](Cpu& c,float* m,auto,auto fp,auto){ident(m);m[12]=fp(c.arg(1));m[13]=fp(c.arg(2));m[14]=fp(c.arg(3));});
+    auto vec = [this, fp, fb, rd, wr](const char* name,unsigned argc,auto fn){reg.add("d3dx9_36.dll",name,Conv::Stdcall,argc,[this,fp,fb,rd,wr,fn](Cpu& c)->uint32_t{uint32_t out=c.arg(0);fn(c,out,rd,fp,wr);return out;});};
+    vec("D3DXVec3Normalize",2,[](Cpu& c,uint32_t o,auto rd,auto,auto wr){auto v=rd(c.arg(1),3);float n=std::sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);for(float& x:v)x=n?x/n:0;wr(o,v.data(),3);});
+    auto transform = [vec](const char* name,unsigned argc,bool coord,bool array){vec(name,argc,[coord,array](Cpu& c,uint32_t o,auto rd,auto fp,auto wr){uint32_t in=c.arg(array?2:1),mp=c.arg(array?4:2),count=array?c.arg(5):1,os=array?c.arg(1):12,is=array?c.arg(3):12;auto m=rd(mp,16);for(uint32_t n=0;n<count;++n){auto v=rd(in+n*is,3);float q[4]={0,0,0,0};for(int j=0;j<4;++j)q[j]=v[0]*m[j]+v[1]*m[4+j]+v[2]*m[8+j]+m[12+j];if(coord){float d=q[3];for(int j=0;j<3;++j)q[j]/=d;wr(o+n*os,q,3);}else wr(o+n*os,q,4);(void)fp;}});};
+    transform("D3DXVec3Transform",3,false,false); transform("D3DXVec3TransformArray",6,false,true);
+    transform("D3DXVec3TransformCoord",3,true,false); transform("D3DXVec3TransformCoordArray",6,true,true);
+    reg.add("shlwapi.dll","PathFindFileNameA",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{uint32_t p=c.arg(0);if(!p)return 0;std::string s=str(p);size_t i=s.find_last_of("\\\\/:");return p+(i==std::string::npos?0:uint32_t(i+1));});
+    reg.add("shlwapi.dll","PathRemoveExtensionA",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{uint32_t p=c.arg(0);if(!p)return 0;std::string s=str(p);size_t start=s.find_last_of("\\\\/:"),dot=s.find_last_of('.');if(dot!=std::string::npos&&(start==std::string::npos||dot>start))mem.w8(p+uint32_t(dot),0);return 0;});
+    reg.add("shlwapi.dll","PathRemoveFileSpecA",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{uint32_t p=c.arg(0);if(!p)return 0;std::string s=str(p);auto sep=[](char x){return x=='\\'||x=='/';};size_t n=s.size();bool root=n==1&&sep(s[0]);root|=n==3&&s[1]==':'&&sep(s[2]);if(n>=2&&sep(s[0])&&sep(s[1])){size_t a=s.find_first_not_of("\\\\/",2),b=a==std::string::npos?a:s.find_first_of("\\\\/",a),d=b==std::string::npos?b:s.find_first_not_of("\\\\/",b),e=d==std::string::npos?d:s.find_first_of("\\\\/",d);root|=a!=std::string::npos&&b!=std::string::npos&&d!=std::string::npos&&(e==std::string::npos||e==n-1);}if(root)return 0;if(n&&sep(s[n-1])){mem.w8(p+uint32_t(n-1),0);return 1;}size_t i=s.find_last_of("\\\\/");if(i==std::string::npos){size_t colon=s.find(':');if(colon==1){mem.w8(p+2,0);return 1;}return 0;}if(i==0)mem.w8(p+1,0);else if(i==2&&s[1]==':')mem.w8(p+3,0);else mem.w8(p+uint32_t(i),0);return 1;});
+
     // msvcrt: CRT startup, heap, strings, stdio
     reg.add("msvcrt.dll", "_lock", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 0; });
     reg.add("msvcrt.dll", "_unlock", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 0; });
