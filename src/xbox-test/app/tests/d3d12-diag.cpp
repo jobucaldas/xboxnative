@@ -28,6 +28,16 @@ static ID3D12Device* make() {
     if(SUCCEEDED(D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,__uuidof(ID3D12Device),(void**)&device)))return device;
     return nullptr;
 }
+static std::string fakeRootSignatureDescription(const void*,SIZE_T) {
+    return "params=2[32BIT_CONSTANTS SRV]";
+}
+static void makeDxilContainer(unsigned char* bytes,bool signedContainer) {
+    const uint32_t total=52,chunks=1,offset=36,chunkBytes=8;
+    memset(bytes,0,total);memcpy(bytes,"DXBC",4);
+    if(signedContainer)bytes[4]=1;
+    memcpy(bytes+24,&total,4);memcpy(bytes+28,&chunks,4);memcpy(bytes+32,&offset,4);
+    memcpy(bytes+offset,"DXIL",4);memcpy(bytes+offset+4,&chunkBytes,4);
+}
 
 // A stream builder with the layout CD3DX12_PIPELINE_STATE_STREAM_SUBOBJECT has
 // (DirectX-Headers v1.618.1, d3dx12_pipeline_state_stream.h): an alignas(void*)
@@ -488,6 +498,93 @@ int main(int argc,char** argv) {
         reinterpret_cast<UavFn>(vtable[d3d12_diag::CreateUnorderedAccessView])(object,uavRes,sentinelCounter,&uavDesc,sentinelHandle);
         CHECK(seenResource==uavRes&&seenCounter==sentinelCounter&&seenDesc==&uavDesc&&seenHandle.ptr==sentinelHandle.ptr);
     }
+    // PSO descriptions: logged before the call, only when the trace is on. A fake
+    // class with recording originals; one unsigned PS (null digest) and one
+    // signed VS, through the v0 graphics path and the stream path.
+    {
+        struct Rec {
+            static HRESULT STDMETHODCALLTYPE v0(void*,const D3D12_GRAPHICS_PIPELINE_STATE_DESC*,REFIID,void**) {return S_OK;}
+            static HRESULT STDMETHODCALLTYPE compute(void*,const D3D12_COMPUTE_PIPELINE_STATE_DESC*,REFIID,void**) {return S_OK;}
+            static HRESULT STDMETHODCALLTYPE stream(void*,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**) {return S_OK;}
+        };
+        void* vt[64]{};
+        vt[d3d12_diag::CreateGraphicsPipelineState]=reinterpret_cast<void*>(&Rec::v0);
+        vt[d3d12_diag::CreateComputePipelineState]=reinterpret_cast<void*>(&Rec::compute);
+        vt[d3d12_diag::createPipelineStateStreamSlot]=reinterpret_cast<void*>(&Rec::stream);
+        size_t patchCount=0;const d3d12_diag::Patch* patches=d3d12_diag::devicePatches(patchCount);
+        d3d12_diag::patchClass(vt,patches,patchCount);
+        const d3d12_diag::Patch streamPatch{d3d12_diag::createPipelineStateStreamSlot,reinterpret_cast<void*>(&d3d12_diag::createPipelineStateStream)};
+        d3d12_diag::patchClass(vt,&streamPatch,1);
+        void* object[1]={vt};
+        unsigned char vsBytes[52]{};makeDxilContainer(vsBytes,true);   // signed: non-null digest
+        unsigned char psBytes[52]{};makeDxilContainer(psBytes,false);   // unsigned: null digest
+        unsigned char malformed[52]{};makeDxilContainer(malformed,false);
+        const uint32_t badChunkSize=100;memcpy(malformed+40,&badChunkSize,sizeof badChunkSize);
+        CHECK(d3d12_diag::containerText(vsBytes,sizeof vsBytes).find("container=valid")!=std::string::npos);
+        CHECK(d3d12_diag::containerText(malformed,sizeof malformed).find("container=invalid")!=std::string::npos);
+        D3D12_INPUT_ELEMENT_DESC element{"POSITION",0,DXGI_FORMAT_R32G32_FLOAT,0,0,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0};
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC gd{};
+        gd.VS={vsBytes,sizeof vsBytes};gd.PS={psBytes,sizeof psBytes};
+        gd.NumRenderTargets=1;gd.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;gd.DSVFormat=DXGI_FORMAT_D32_FLOAT;
+        gd.SampleDesc.Count=1;gd.InputLayout={&element,1};
+        D3D12_ROOT_PARAMETER rootParams[2]{};
+        rootParams[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        rootParams[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;
+        D3D12_ROOT_SIGNATURE_DESC rootDesc{};rootDesc.NumParameters=2;rootDesc.pParameters=rootParams;
+        CHECK(d3d12_diag::rootParametersText(&rootDesc)=="params=2[32BIT_CONSTANTS SRV]");
+        rootParams[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;rootDesc.NumParameters=1;
+        ID3DBlob *blob=nullptr,*errors=nullptr;
+        CHECK(SUCCEEDED(D3D12SerializeRootSignature(&rootDesc,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&errors))&&blob);
+        if(blob){CHECK(d3d12_diag::describeRootSignature(blob->GetBufferPointer(),blob->GetBufferSize())=="params=1[SRV]");blob->Release();}
+        if(errors){errors->Release();errors=nullptr;}
+        D3D12_DESCRIPTOR_RANGE1 range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=2;
+        D3D12_ROOT_PARAMETER1 param{};param.ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;param.DescriptorTable={1,&range};
+        D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc1{};desc1.Version=D3D_ROOT_SIGNATURE_VERSION_1_1;desc1.Desc_1_1.NumParameters=1;desc1.Desc_1_1.pParameters=&param;
+        blob=nullptr;CHECK(SUCCEEDED(D3D12SerializeVersionedRootSignature(&desc1,&blob,&errors))&&blob);
+        if(blob){CHECK(d3d12_diag::describeRootSignature(blob->GetBufferPointer(),blob->GetBufferSize()).find("params=1[DESCRIPTOR_TABLE(ranges=1[SRV:2 reg=0 space=0 flags=0x0]")!=std::string::npos);blob->Release();}
+        desc1.Version=static_cast<D3D_ROOT_SIGNATURE_VERSION>(99);
+        CHECK(d3d12_diag::rootParametersText(&desc1)=="version=99 params=unsupported-version");
+#if defined(D3D12_SDK_VERSION) && D3D12_SDK_VERSION >= 618
+        D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc12{};desc12.Version=D3D_ROOT_SIGNATURE_VERSION_1_2;
+        desc12.Desc_1_2.NumParameters=1;desc12.Desc_1_2.pParameters=&param;
+        blob=nullptr;CHECK(SUCCEEDED(D3D12SerializeVersionedRootSignature(&desc12,&blob,&errors))&&blob);
+        if(blob){CHECK(d3d12_diag::describeRootSignature(blob->GetBufferPointer(),blob->GetBufferSize()).find("SRV:2 reg=0 space=0")!=std::string::npos);blob->Release();}
+#endif
+        if(errors)errors->Release();
+        d3d12_diag::rootSignatureDescriber=&fakeRootSignatureDescription;
+        ID3D12RootSignature* fakeRoot=reinterpret_cast<ID3D12RootSignature*>(uintptr_t(0x7770));
+        d3d12_diag::rememberRootSignature(fakeRoot,vsBytes,sizeof vsBytes);
+        gd.pRootSignature=fakeRoot;
+        void* out=nullptr;
+        d3d12_diag::psoLines.store(0);
+        const size_t psoFrom=lines.size();
+        reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(void*,const D3D12_GRAPHICS_PIPELINE_STATE_DESC*,REFIID,void**)>(vt[d3d12_diag::CreateGraphicsPipelineState])(object,&gd,__uuidof(ID3D12PipelineState),&out);
+        D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};cd.CS={psBytes,sizeof psBytes};cd.pRootSignature=fakeRoot;
+        reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(void*,const D3D12_COMPUTE_PIPELINE_STATE_DESC*,REFIID,void**)>(vt[d3d12_diag::CreateComputePipelineState])(object,&cd,__uuidof(ID3D12PipelineState),&out);
+        std::vector<unsigned char> stream;
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,fakeRoot);
+        D3D12_INPUT_LAYOUT_DESC layout{&element,1};
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS,D3D12_SHADER_BYTECODE{vsBytes,sizeof vsBytes});
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS,D3D12_SHADER_BYTECODE{psBytes,sizeof psBytes});
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT,layout);
+        D3D12_RT_FORMAT_ARRAY rtv{};rtv.NumRenderTargets=1;rtv.RTFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS,rtv);
+        D3D12_PIPELINE_STATE_STREAM_DESC sd{stream.size(),stream.data()};
+        reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(void*,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**)>(vt[d3d12_diag::createPipelineStateStreamSlot])(object,&sd,__uuidof(ID3D12PipelineState),&out);
+        // Only the lines from these three calls: earlier calls in this test log pso lines too.
+        auto since=[&](size_t from,const char* needle){size_t n=0;for(size_t i=from;i<lines.size();++i)if(lines[i].find(needle)!=std::string::npos)++n;return n;};
+        if(traceMode) {
+            CHECK(since(psoFrom,"pso v0 VS:dxbc")==1&&since(psoFrom,"pso stream VS:dxbc")==1&&since(psoFrom,"pso compute CS:dxbc")==1);
+            CHECK(since(psoFrom,"PS:dxbc")==2&&since(psoFrom,"digest=null(unsigned)")==3&&since(psoFrom,"digest=set")==2);
+            CHECK(since(psoFrom,"container=valid")==5&&since(psoFrom,"params=2[32BIT_CONSTANTS SRV]")==3);
+            CHECK(since(psoFrom,"inputs=1[POSITION:16(R32G32_FLOAT)]")==2&&since(psoFrom,"rtv=1[28(R8G8B8A8_UNORM)]")==2);
+            size_t flushed=lines.size();d3d12_diag::flushTrace();
+            CHECK(since(flushed,"pso v0 VS:dxbc")==1&&since(flushed,"pso stream VS:dxbc")==1&&since(flushed,"pso compute CS:dxbc")==1);
+        } else {
+            CHECK(since(psoFrom,"pso ")==0);
+        }
+    }
+
     // Every hooked method: the recorded kind (void or hr) must be the one the
     // header gives it, and a void method must never log a failure line. The
     // header side is compile-time (DIAG_PIN_SLOT); this runs each hook once.

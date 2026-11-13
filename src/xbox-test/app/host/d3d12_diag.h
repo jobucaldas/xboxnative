@@ -32,6 +32,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <type_traits>
 
 namespace d3d12_diag {
 using Sink=void(*)(const char*);
@@ -260,7 +261,7 @@ constexpr size_t kTraceRing=64;      // the newest calls, by sequence number
 constexpr size_t kTraceInFlight=32;  // calls begun and not yet returned (kept until they end)
 // Result states of a traced call.
 enum TraceState : int { TracePending=0, TraceHr=1, TraceVoid=2 };
-struct TraceEntry { uint64_t seq=0; const char* name=nullptr; long hr=0; int state=TracePending; };
+struct TraceEntry { uint64_t seq=0; const char* name=nullptr; long hr=0; int state=TracePending; char detail[512]{}; };
 // Memory ordering: every access to the ring, the in-flight list and the sequence
 // counter holds traceMutex, so an entry is always read and written whole. A
 // ticket is the call's sequence number; an end is applied only to the ring entry
@@ -305,8 +306,11 @@ inline void flushTrace() {
     for(uint64_t s=first;s<traceNextSeq;++s) {
         const TraceEntry& e=traceRing[s%kTraceRing];
         if(e.seq!=s) continue;
-        const char* result=e.state==TracePending?"pending":e.state==TraceVoid?"void":nullptr;
-        emit(fmt("trace #%llu %s %s",(unsigned long long)s,e.name?e.name:"?",result?result:hex(HRESULT(e.hr)).c_str()));
+        if(e.detail[0]) emit(fmt("trace #%llu pso %s",(unsigned long long)s,e.detail));
+        else {
+            const char* result=e.state==TracePending?"pending":e.state==TraceVoid?"void":nullptr;
+            emit(fmt("trace #%llu %s %s",(unsigned long long)s,e.name?e.name:"?",result?result:hex(HRESULT(e.hr)).c_str()));
+        }
     }
 }
 
@@ -342,8 +346,218 @@ static HRESULT STDMETHODCALLTYPE createCommandList(DevicePtr self,UINT node,D3D1
         fmt("type=%d node=%u allocator=%d state=%d",int(type),node,allocator!=nullptr,state!=nullptr));
     return hr;
 }
+// ---- opt-in PSO description (same switch as the call trace). Logged BEFORE the
+// call, so a fault inside the driver still leaves the description in the log.
+// The digest field is reported as set/null; container=valid means the DXBC
+// header, chunk table and DXIL chunk are structurally in bounds (not checksum validation).
+constexpr size_t kMaxPsoLines=64;
+inline std::atomic<size_t> psoLines{0};
+inline void tracePso(const std::string& text) {
+    if(!traceOn.load(std::memory_order_acquire)||psoLines.fetch_add(1)>=kMaxPsoLines) return;
+    {
+        std::lock_guard<std::mutex> lock(traceMutex);
+        uint64_t seq=traceNextSeq++;
+        TraceEntry& e=traceRing[seq%kTraceRing];
+        e=TraceEntry{seq,"PSO",0,TraceVoid};
+        std::snprintf(e.detail,sizeof e.detail,"%s",text.c_str());
+    }
+    emit("pso "+text);
+}
+inline const char* dxilContainerState(const unsigned char* bytes,size_t length) {
+    if(length<4||memcmp(bytes,"DXBC",4)!=0) return "not-dxbc";
+    if(length<32) return "invalid";
+    uint32_t total=0,chunks=0;
+    memcpy(&total,bytes+24,sizeof total);memcpy(&chunks,bytes+28,sizeof chunks);
+    if(total<32||total>length||chunks>(total-32)/4) return "invalid";
+    bool hasDxil=false;
+    for(uint32_t i=0;i<chunks;++i) {
+        uint32_t offset=0;memcpy(&offset,bytes+32+size_t(i)*4,sizeof offset);
+        if(offset<32+size_t(chunks)*4||offset>total||total-offset<8) return "invalid";
+        uint32_t chunkBytes=0;memcpy(&chunkBytes,bytes+offset+4,sizeof chunkBytes);
+        if(chunkBytes>total-offset-8) return "invalid";
+        if(memcmp(bytes+offset,"DXIL",4)==0) {
+            if(chunkBytes<8) return "invalid";
+            hasDxil=true;
+        }
+    }
+    return hasDxil?"valid":"not-dxil";
+}
+inline std::string containerText(const void* code,SIZE_T length) {
+    if(!code||!length) return "none";
+    auto bytes=static_cast<const unsigned char*>(code);
+    if(length<4||memcmp(bytes,"DXBC",4)!=0) return fmt("not-dxbc bytes=%llu",(unsigned long long)length);
+    bool nullDigest=true;
+    if(length>=20) for(int i=4;i<20;++i) if(bytes[i]) nullDigest=false;
+    return fmt("dxbc bytes=%llu digest=%s container=%s hash=%016llx",(unsigned long long)length,
+        length<20?"unavailable":nullDigest?"null(unsigned)":"set",dxilContainerState(bytes,size_t(length)),
+        (unsigned long long)fnv(code,size_t(std::min<SIZE_T>(length,16u<<20))));
+}
+inline std::string bytecodeText(const D3D12_SHADER_BYTECODE& b) {
+    return containerText(b.pShaderBytecode,b.BytecodeLength);
+}
+inline std::string inputLayoutText(const D3D12_INPUT_LAYOUT_DESC& l) {
+    std::string text=fmt("inputs=%u[",l.NumElements);
+    for(UINT i=0;i<l.NumElements&&i<8;++i) {
+        const auto& e=l.pInputElementDescs[i];
+        text+=fmt("%s%s:%s",i?" ":"",e.SemanticName?e.SemanticName:"?",formatText(e.Format).c_str());
+    }
+    return text+"]";
+}
+inline std::string rtvText(const D3D12_RT_FORMAT_ARRAY& r) {
+    std::string text=fmt("rtv=%u[",r.NumRenderTargets);
+    for(UINT i=0;i<r.NumRenderTargets&&i<8;++i) text+=fmt("%s%s",i?" ":"",formatText(r.RTFormats[i]).c_str());
+    return text+"]";
+}
+inline const char* rootParameterName(D3D12_ROOT_PARAMETER_TYPE type) {
+    switch(type) {
+    case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE:return "DESCRIPTOR_TABLE";
+    case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS:return "32BIT_CONSTANTS";
+    case D3D12_ROOT_PARAMETER_TYPE_CBV:return "CBV";
+    case D3D12_ROOT_PARAMETER_TYPE_SRV:return "SRV";
+    case D3D12_ROOT_PARAMETER_TYPE_UAV:return "UAV";
+    default:return "UNKNOWN";
+    }
+}
+inline std::string rootParametersText(const D3D12_ROOT_SIGNATURE_DESC* desc) {
+    if(!desc)return "params=unavailable";
+    std::string text=fmt("params=%u[",desc->NumParameters);
+    for(UINT i=0;i<desc->NumParameters&&i<16;++i) {
+        if(i)text+=" ";
+        const D3D12_ROOT_PARAMETER& p=desc->pParameters[i];
+        text+=rootParameterName(p.ParameterType);
+        if(p.ParameterType==D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)text+=fmt("(ranges=%u)",p.DescriptorTable.NumDescriptorRanges);
+    }
+    if(desc->NumParameters>16)text+=" ...";
+    return text+"]";
+}
+inline std::string rootParametersText(const D3D12_ROOT_SIGNATURE_DESC1* desc) {
+    if(!desc)return "params=unavailable";
+    std::string text=fmt("params=%u[",desc->NumParameters);
+    for(UINT i=0;i<desc->NumParameters&&i<16;++i) {
+        const auto& p=desc->pParameters[i];text+=fmt("%s%s",i?" ":"",rootParameterName(p.ParameterType));
+        if(p.ParameterType==D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            text+=fmt("(ranges=%u[",p.DescriptorTable.NumDescriptorRanges);
+            for(UINT j=0;j<p.DescriptorTable.NumDescriptorRanges&&j<8;++j) {const auto& r=p.DescriptorTable.pDescriptorRanges[j];
+                text+=fmt("%s%s:%u reg=%u space=%u flags=0x%x",j?" ":"",r.RangeType==D3D12_DESCRIPTOR_RANGE_TYPE_SRV?"SRV":r.RangeType==D3D12_DESCRIPTOR_RANGE_TYPE_UAV?"UAV":r.RangeType==D3D12_DESCRIPTOR_RANGE_TYPE_CBV?"CBV":"SAMPLER",r.NumDescriptors,r.BaseShaderRegister,r.RegisterSpace,unsigned(r.Flags));}
+            if(p.DescriptorTable.NumDescriptorRanges>8)text+=" ...";
+            text+="])";
+        }
+    }
+    if(desc->NumParameters>16)text+=" ...";
+    return text+"]";
+}
+#if defined(D3D12_SDK_VERSION) && D3D12_SDK_VERSION >= 618
+static_assert(std::is_same_v<decltype(D3D12_ROOT_SIGNATURE_DESC2::pParameters),decltype(D3D12_ROOT_SIGNATURE_DESC1::pParameters)> &&
+    offsetof(D3D12_ROOT_SIGNATURE_DESC2,NumParameters)==offsetof(D3D12_ROOT_SIGNATURE_DESC1,NumParameters) &&
+    offsetof(D3D12_ROOT_SIGNATURE_DESC2,pParameters)==offsetof(D3D12_ROOT_SIGNATURE_DESC1,pParameters) &&
+    sizeof(D3D12_ROOT_SIGNATURE_DESC2)==sizeof(D3D12_ROOT_SIGNATURE_DESC1),"1.2 root parameters must match 1.1 layout");
+inline std::string rootParametersText(const D3D12_ROOT_SIGNATURE_DESC2* desc) {
+    if(!desc)return "params=unavailable";
+    D3D12_ROOT_SIGNATURE_DESC1 parameters{};parameters.NumParameters=desc->NumParameters;parameters.pParameters=desc->pParameters;
+    return rootParametersText(&parameters);
+}
+#endif
+inline std::string rootParametersText(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* desc) {
+    if(!desc)return "params=unavailable";
+    switch(desc->Version) {
+    case D3D_ROOT_SIGNATURE_VERSION_1_0:return rootParametersText(&desc->Desc_1_0);
+    case D3D_ROOT_SIGNATURE_VERSION_1_1:return rootParametersText(&desc->Desc_1_1);
+#if defined(D3D12_SDK_VERSION) && D3D12_SDK_VERSION >= 618
+    case D3D_ROOT_SIGNATURE_VERSION_1_2:return rootParametersText(&desc->Desc_1_2);
+#endif
+    default:return fmt("version=%u params=unsupported-version",unsigned(desc->Version));
+    }
+}
+using RootSignatureDescriber=std::string(*)(const void*,SIZE_T);
+inline std::string describeRootSignature(const void* blob,SIZE_T length) {
+    using Fn=HRESULT(WINAPI*)(LPCVOID,SIZE_T,REFIID,void**);
+    HMODULE module=GetModuleHandleW(L"d3d12.dll");auto fn=module?reinterpret_cast<Fn>(GetProcAddress(module,"D3D12CreateVersionedRootSignatureDeserializer")):nullptr;
+    if(fn) {ID3D12VersionedRootSignatureDeserializer* d=nullptr;
+        if(SUCCEEDED(fn(blob,length,__uuidof(ID3D12VersionedRootSignatureDeserializer),reinterpret_cast<void**>(&d)))&&d) {
+            std::string text=rootParametersText(d->GetUnconvertedRootSignatureDesc());d->Release();if(text!="params=deserialize-failed")return text;}}
+    ID3D12RootSignatureDeserializer* d=nullptr;
+    if(FAILED(D3D12CreateRootSignatureDeserializer(blob,length,__uuidof(ID3D12RootSignatureDeserializer),reinterpret_cast<void**>(&d)))||!d)return "params=deserialize-failed";
+    std::string text=rootParametersText(d->GetRootSignatureDesc());d->Release();return text;
+}
+inline RootSignatureDescriber rootSignatureDescriber=&describeRootSignature;
+constexpr size_t kMaxRootSignatures=64;
+struct RootSignatureEntry {const void* signature=nullptr;std::string parameters;};
+inline RootSignatureEntry rootSignatures[kMaxRootSignatures];
+inline size_t rootSignatureNext=0;
+inline std::mutex rootSignatureMutex;
+inline void rememberRootSignature(const void* signature,const void* blob,SIZE_T length) {
+    if(!signature||!traceOn.load(std::memory_order_acquire)||!rootSignatureDescriber)return;
+    std::string parameters=rootSignatureDescriber(blob,length);
+    std::lock_guard<std::mutex> lock(rootSignatureMutex);
+    for(auto& entry:rootSignatures)if(entry.signature==signature){entry.parameters=std::move(parameters);return;}
+    RootSignatureEntry& entry=rootSignatures[rootSignatureNext++%kMaxRootSignatures];
+    entry.signature=signature;entry.parameters=std::move(parameters);
+}
+inline std::string rootSignatureText(const void* signature) {
+    if(!signature)return "null";
+    std::lock_guard<std::mutex> lock(rootSignatureMutex);
+    for(const auto& entry:rootSignatures)if(entry.signature==signature)return "set "+entry.parameters;
+    return "set params=unavailable";
+}
+// Stream entries that matter for a description: shaders, input layout, formats.
+// Payloads are read with memcpy (the walker hands over unaligned pointers).
+inline void describeStreamEntry(int type,const unsigned char* payload,size_t size,void* ctx) {
+    auto* text=static_cast<std::string*>(ctx);
+    switch(type) {
+    case 0: {
+        ID3D12RootSignature* root=nullptr;memcpy(&root,payload,sizeof root);
+        *text+=" rootsig="+rootSignatureText(root);
+        break;
+    }
+    case 1: case 2: case 6: {
+        D3D12_SHADER_BYTECODE b{};memcpy(&b,payload,sizeof b);
+        *text+=fmt(" %s:%s",type==1?"VS":type==2?"PS":"CS",bytecodeText(b).c_str());
+        break;
+    }
+    case 12: {
+        D3D12_INPUT_LAYOUT_DESC l{};memcpy(&l,payload,sizeof l);
+        *text+=" "+inputLayoutText(l);
+        break;
+    }
+    case 15: {
+        D3D12_RT_FORMAT_ARRAY r{};memcpy(&r,payload,sizeof r);
+        *text+=" "+rtvText(r);
+        break;
+    }
+    case 16: {
+        DXGI_FORMAT f{};memcpy(&f,payload,sizeof f);
+        *text+=" dsv="+formatText(f);
+        break;
+    }
+    case 29: {
+#if defined(D3D12_SDK_VERSION) && D3D12_SDK_VERSION >= 618
+        D3D12_SERIALIZED_ROOT_SIGNATURE_DESC d{};memcpy(&d,payload,sizeof d);
+        *text+=" rootsig="+(rootSignatureDescriber?rootSignatureDescriber(d.pSerializedBlob,d.SerializedBlobSizeInBytes):"params=unavailable");
+#else
+        *text+=" rootsig=serialized params=unavailable";
+#endif
+        break;
+    }
+    default: break;
+    }
+    (void)size;
+}
+inline void traceStreamEntry(int type,const unsigned char* payload,size_t size,void*) {
+    std::string text;
+    describeStreamEntry(type,payload,size,&text);
+    if(!text.empty()) tracePso("stream"+text);
+}
+inline void traceGraphicsDesc(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) {
+    tracePso("v0 VS:"+bytecodeText(d.VS));
+    tracePso("v0 PS:"+bytecodeText(d.PS));
+    tracePso(fmt("v0 %s dsv=%s samples=%u rootsig=%s %s",
+        rtvText({{d.RTVFormats[0],d.RTVFormats[1],d.RTVFormats[2],d.RTVFormats[3],d.RTVFormats[4],d.RTVFormats[5],d.RTVFormats[6],d.RTVFormats[7]},d.NumRenderTargets}).c_str(),
+        formatText(d.DSVFormat).c_str(),d.SampleDesc.Count,rootSignatureText(d.pRootSignature).c_str(),inputLayoutText(d.InputLayout).c_str()));
+}
+
 static HRESULT STDMETHODCALLTYPE createGraphicsPipelineState(DevicePtr self,const D3D12_GRAPHICS_PIPELINE_STATE_DESC* d,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_GRAPHICS_PIPELINE_STATE_DESC*,REFIID,void**);
+    if(d&&traceOn.load(std::memory_order_acquire)) traceGraphicsDesc(*d);
     D3D12_DIAG_HOOK(Fn,CreateGraphicsPipelineState)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     if(d) {
         std::string vsKey,psKey,vs=shaderText(d->VS.pShaderBytecode,d->VS.BytecodeLength,&vsKey);
@@ -363,7 +577,9 @@ static HRESULT STDMETHODCALLTYPE createGraphicsPipelineState(DevicePtr self,cons
 // refused subobject or read past the stream — exactly what this diagnostic
 // exists to name. Sizes and alignments come from sizeof/alignof on the real
 // d3d12.h structs (checked against DirectX-Headers v1.618.1).
-inline std::string streamSubobjects(const void* stream,size_t bytes) {
+// visit, when given, sees each subobject's type, payload and size in stream order.
+using StreamVisit=void(*)(int type,const unsigned char* payload,size_t size,void* ctx);
+inline std::string streamSubobjects(const void* stream,size_t bytes,StreamVisit visit=nullptr,void* ctx=nullptr) {
     static const struct{int type;size_t size;size_t align;const char* name;} subobjects[]={
         {0,sizeof(ID3D12RootSignature*),alignof(ID3D12RootSignature*),        "ROOT_SIGNATURE"},
         {1,sizeof(D3D12_SHADER_BYTECODE),alignof(D3D12_SHADER_BYTECODE),       "VS"},
@@ -433,6 +649,7 @@ inline std::string streamSubobjects(const void* stream,size_t bytes) {
         const size_t payloadAt=(sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE)+e->align-1)&~(e->align-1);
         if(size_t(end-typeStart)<payloadAt+e->size){truncated=true;subs+=fmt("%s(truncated) ",e->name);break;}
         subs+=fmt("%s ",e->name);
+        if(visit) visit(int(type),typeStart+payloadAt,e->size,ctx);
         // The next subobject starts at the next pointer-aligned offset after
         // the payload: each one is an alignas(void*) struct in the real stream.
         p=typeStart+((payloadAt+e->size+sizeof(void*)-1)&~(sizeof(void*)-1));
@@ -442,6 +659,8 @@ inline std::string streamSubobjects(const void* stream,size_t bytes) {
 }
 static HRESULT STDMETHODCALLTYPE createPipelineStateStream(DevicePtr self,const D3D12_PIPELINE_STATE_STREAM_DESC* d,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**);
+    if(d&&d->pPipelineStateSubobjectStream&&traceOn.load(std::memory_order_acquire))
+        streamSubobjects(d->pPipelineStateSubobjectStream,size_t(d->SizeInBytes),&traceStreamEntry,nullptr);
     D3D12_DIAG_HOOK(Fn,createPipelineStateStreamSlot)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     // The stream path (ID3D12Device2::CreatePipelineState) is what Mesa's
     // d3d12 driver takes when the device reports
@@ -460,6 +679,10 @@ static HRESULT STDMETHODCALLTYPE createPipelineStateStream(DevicePtr self,const 
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createComputePipelineState(DevicePtr self,const D3D12_COMPUTE_PIPELINE_STATE_DESC* d,REFIID id,void** out) {
+    if(d&&traceOn.load(std::memory_order_acquire)) {
+        tracePso("compute CS:"+bytecodeText(d->CS));
+        tracePso("compute rootsig="+rootSignatureText(d->pRootSignature));
+    }
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_COMPUTE_PIPELINE_STATE_DESC*,REFIID,void**);
     D3D12_DIAG_HOOK(Fn,CreateComputePipelineState)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     if(d) {
@@ -479,6 +702,7 @@ static HRESULT STDMETHODCALLTYPE createDescriptorHeap(DevicePtr self,const D3D12
 static HRESULT STDMETHODCALLTYPE createRootSignature(DevicePtr self,UINT node,const void* blob,SIZE_T length,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,const void*,SIZE_T,REFIID,void**);
     D3D12_DIAG_HOOK(Fn,CreateRootSignature)HRESULT hr=call(self,node,blob,length,id,out); traceEnd(traceAt,hr);
+    if(SUCCEEDED(hr)&&out&&*out)rememberRootSignature(*out,blob,length);
     if(FAILED(hr)) {
         std::string key;std::string text=shaderText(blob,length,&key);
         D3D12_DIAG_FAILED("CreateRootSignature",key,fmt("node=%u %s",node,text.c_str()));
