@@ -10,6 +10,7 @@
 // locks: synthetic QPC ticks. Runs under Wine headless.
 #include <windows.h>
 #include <cstdio>
+#include <vector>
 
 #include "../host/guest_watchdog.h"
 
@@ -26,8 +27,11 @@ using guest_watchdog::step;
 using guest_watchdog::containedFault;
 using guest_watchdog::present_alive;
 using guest_watchdog::PresentAlive;
-using guest_watchdog::dead_input;
-using guest_watchdog::DeadRoute;
+using guest_watchdog::guide_step;
+using guest_watchdog::GuideAction;
+using guest_watchdog::GuideStep;
+using guest_watchdog::kHomeRows;
+using guest_watchdog::kForceQuitRow;
 using guest_watchdog::kSilenceSeconds;
 
 int main() {
@@ -289,33 +293,124 @@ int main() {
         CHECK((present_alive(S_OK) == PresentAlive::yes) != (present_alive(0x887a0005) == PresentAlive::yes));
     }
 
-    // Dead-pad routing (bugbot r4559305224): while dead, the pad drives ONLY
-    // the guide. View+Menu (combo edge) toggles it; with it open, A selects
-    // and B closes; every other edge — A/B with the guide closed, D-pad,
-    // shoulders — is swallowed, so a hidden launcher screen can never act on
-    // a press the player cannot see. (The launcher's own surface presents
-    // the dead page since the round-6 redesign; this decision is what
-    // guest_menu applies while dead.)
+    // Dead-pad routing (bugbot r4559305224, extended by r4559524001): while
+    // dead, the pad drives ONLY the guide. View+Menu (combo edge) toggles
+    // it; with it open, D-pad moves the selection, A activates, B closes;
+    // every other edge is swallowed, so a hidden launcher screen can never
+    // act on a press the player cannot see. The r4559524001 contract: the
+    // guide OPENS with the focus on Force quit (row 2) — the one-press kill
+    // the owner's requirement needs — and A on Force quit emits forceQuit.
     {
-        CHECK(dead_input(true, false, false, false) == DeadRoute::toggleGuide);   // combo opens
-        CHECK(dead_input(true, true, false, false) == DeadRoute::toggleGuide);    // combo edge wins even when open (closes)
-        CHECK(dead_input(false, true, true, false) == DeadRoute::guideSelect);    // A selects with the guide open
-        CHECK(dead_input(false, true, false, true) == DeadRoute::guideClose);     // B closes
-        CHECK(dead_input(false, true, true, true) == DeadRoute::guideSelect);     // A wins over B on one edge
-        // Swallowed: every edge with the guide closed except the combo.
-        CHECK(dead_input(false, false, true, false) == DeadRoute::none);          // A with the guide closed: nothing
-        CHECK(dead_input(false, false, false, true) == DeadRoute::none);          // B: nothing
-        CHECK(dead_input(false, false, true, true) == DeadRoute::none);           // A+B: nothing
-        CHECK(dead_input(false, false, false, false) == DeadRoute::none);         // held buttons, no edge: nothing
-        // The routing is total: no combination escapes the four outcomes.
+        // Open: focus lands on Force quit while dead.
+        auto s = guide_step(true, false, 0, true, false, false, false, false);
+        CHECK(s.action == GuideAction::toggle);
+        CHECK(s.open);
+        CHECK(s.row == kForceQuitRow);
+        // A on that focused row emits forceQuit (the kill).
+        s = guide_step(true, true, kForceQuitRow, false, false, false, true, false);
+        CHECK(s.action == GuideAction::forceQuit);
+        // B closes.
+        s = guide_step(true, true, 0, false, false, false, false, true);
+        CHECK(s.action == GuideAction::close);
+        CHECK(!s.open);
+        // D-pad moves the focus with wrapping over the 3 Home rows.
+        s = guide_step(true, true, kForceQuitRow, false, true, false, false, false);
+        CHECK(s.action == GuideAction::up);
+        CHECK(s.row == 1);   // wraps 2 -> 1
+        s = guide_step(true, true, 2, false, false, true, false, false);
+        CHECK(s.action == GuideAction::down);
+        CHECK(s.row == 0);   // wraps 2 -> 0
+        // A on Resume while dead: the resume ACTION is reported but the
+        // caller must no-op it (nothing to resume); the model keeps the
+        // guide open either way.
+        s = guide_step(true, true, 0, false, false, false, true, false);
+        CHECK(s.action == GuideAction::resume);
+        CHECK(s.open);
+        // A on Quit game emits quitGame.
+        s = guide_step(true, true, 1, false, false, false, true, false);
+        CHECK(s.action == GuideAction::quitGame);
+        // Guide closed: every non-combo edge is swallowed.
+        CHECK(guide_step(true, false, 0, false, true, false, false, false).action == GuideAction::none);
+        CHECK(guide_step(true, false, 0, false, false, true, false, false).action == GuideAction::none);
+        CHECK(guide_step(true, false, 0, false, false, false, true, false).action == GuideAction::none);
+        CHECK(guide_step(true, false, 0, false, false, false, false, true).action == GuideAction::none);
+        // Held buttons (no edges): nothing.
+        CHECK(guide_step(true, true, 0, false, false, false, false, false).action == GuideAction::none);
+        // Combo edge wins over every other edge on the same frame.
+        s = guide_step(true, true, 0, true, false, false, true, false);
+        CHECK(s.action == GuideAction::toggle);   // closes (was open)
+        CHECK(!s.open);
+        // The routing is total: every input combination maps to a defined action.
         for (int combo = 0; combo < 2; ++combo)
             for (int open = 0; open < 2; ++open)
-                for (int a = 0; a < 2; ++a)
-                    for (int b = 0; b < 2; ++b) {
-                        const DeadRoute r = dead_input(!!combo, !!open, !!a, !!b);
-                        CHECK(r == DeadRoute::none || r == DeadRoute::toggleGuide
-                            || r == DeadRoute::guideSelect || r == DeadRoute::guideClose);
+                for (int row = 0; row < kHomeRows; ++row)
+                    for (int up = 0; up < 2; ++up)
+                        for (int down = 0; down < 2; ++down)
+                            for (int a = 0; a < 2; ++a)
+                                for (int b = 0; b < 2; ++b) {
+                                    const GuideStep st = guide_step(true, !!open, row, !!combo, !!up, !!down, !!a, !!b);
+                                    CHECK(st.action >= GuideAction::none && st.action <= GuideAction::close);
+                                    CHECK(st.row >= 0 && st.row < kHomeRows);
+                                }
+    }
+
+    // Alive-state guide keeps the OLD rows (r4559524001's compat clause):
+    // combo opens with the focus on Resume (row 0), A on it closes (the old
+    // "select" behaviour), D-pad still moves, B closes.
+    {
+        auto s = guide_step(false, false, 0, true, false, false, false, false);
+        CHECK(s.action == GuideAction::toggle);
+        CHECK(s.open);
+        CHECK(s.row == 0);   // Resume, as before
+        s = guide_step(false, true, 0, false, false, false, true, false);
+        CHECK(s.action == GuideAction::close);   // alive A-Resume closes the guide
+        s = guide_step(false, true, 2, false, false, false, true, false);
+        CHECK(s.action == GuideAction::forceQuit);   // alive Force quit still offered
+    }
+
+    // Reachability (r4559524001): from EVERY reachable dead state, Force
+    // quit must be reachable within 3 presses. Exhaustive walk over the
+    // state space (open x row) x every button edge, breadth-first; the
+    // caller-applied contract is the model's (open, row) outputs and the
+    // action mapping guest_menu applies.
+    {
+        // The caller-side transition: apply a GuideStep to (open, row) the
+        // way guest_menu does — toggle sets visibility and the model's row,
+        // up/down move through guide_press's wrap, A-close closes, A-resume
+        // is a no-op while dead, A-forceQuit/A-quitGame end the walk (found).
+        struct St { bool open; int row; };
+        auto apply = [](St cur, const GuideStep& s) -> St {
+            switch (s.action) {
+            case GuideAction::toggle:  return {s.open, s.row};
+            case GuideAction::up:
+            case GuideAction::down:    return {cur.open, s.row};
+            case GuideAction::close:   return {false, cur.row};
+            case GuideAction::resume:  return {cur.open, cur.row};   // dead: guide stays open
+            default:                   return cur;                   // none, forceQuit, quitGame
+            }
+        };
+        const int kButtons = 5;   // combo, up, down, A, B — one edge per press, all subsets of on/off
+        // Every reachable state must reach forceQuit within 3 presses.
+        for (int open = 0; open < 2; ++open)
+            for (int row = 0; row < kHomeRows; ++row) {
+                // BFS over press sequences of length 0..3.
+                bool found = (open && row == kForceQuitRow);   // already on it: 0 presses
+                std::vector<St> frontier{{!!open, row}};
+                for (int depth = 1; depth <= 3 && !found; ++depth) {
+                    std::vector<St> next;
+                    for (const St& cur : frontier) {
+                        for (int btn = 0; btn < kButtons && !found; ++btn) {
+                            const bool c = btn == 0, u = btn == 1, d = btn == 2, a = btn == 3, b = btn == 4;
+                            const GuideStep s = guide_step(true, cur.open, cur.row, c, u, d, a, b);
+                            if (s.action == GuideAction::forceQuit) { found = true; break; }
+                            next.push_back(apply(cur, s));
+                        }
+                        if (found) break;
                     }
+                    frontier = next;
+                }
+                CHECK(found);   // dead state (open,row): ForceQuit within 3 presses
+            }
     }
 
     // Watchdog-present contract (bugbot r4559178782): the launcher's dead

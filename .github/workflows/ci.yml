@@ -179,6 +179,14 @@ jobs:
       # on the console. Compile-only, no device or Wine needed.
       - name: D3D11 diagnostics slot audit against the SDK vtable order
         run: bash src/xbox-test/app/tests/d3d11-diag-slots.sh
+      # The dead page's DirectComposition slots (bugbot r4559524004): the
+      # real <dcomp.h> declares SetContent at vtable slot 15; the slots
+      # main.cpp relies on are derived from that header with a
+      # pointer-to-member walker and asserted, so a hand-counted or drifted
+      # slot fails CI instead of forwarding to the wrong method. mingw g++
+      # (the crossbuild's family), Wine headless.
+      - name: DComp dead-page slot audit against the real dcomp.h
+        run: bash src/xbox-test/app/tests/dcomp-slots.sh
       # The redundant-resize elision decision (host/resize_elide.h): same-mode
       # requests elide, real differences forward, BufferCount 0 and
       # DXGI_FORMAT_UNKNOWN normalise to keep, the waitable flag bit strips,

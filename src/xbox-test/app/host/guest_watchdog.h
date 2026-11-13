@@ -35,6 +35,11 @@ enum class Reason : uint8_t {
     fault          // play_runtime reported a contained guest exception
 };
 
+// Home-tab rows (the guide's only tab the dead state can reach): the same
+// indexes guest_overlay::Item and menu_command's select map on.
+constexpr int kHomeRows = 3;          // Resume, Quit game, Force quit
+constexpr int kForceQuitRow = 2;      // focus lands here when the guide opens while dead
+
 // The single piece of guest state the decision reads: the QPC tick of the
 // last guest activity (a present, or a pad poll the guest drove). 0 = no
 // activity ever observed.
@@ -149,20 +154,53 @@ constexpr uint8_t present_alive(HRESULT hr) {
     return SUCCEEDED(hr) ? PresentAlive::yes : PresentAlive::no;
 }
 
-// Pad routing while the dead page is up (bugbot r4559305224): the dead
-// guest's pad must drive ONLY the guide — never the launcher screens
-// underneath (a hidden library/game page could act on A/B/D-pad the player
-// cannot see). View+Menu toggles the guide; with the guide open, A selects
-// and B closes; every other edge is swallowed. `deadOpen` is the combo
-// edge, `menuOpen` the guide's state.
-enum class DeadRoute : uint8_t { none = 0, toggleGuide, guideSelect, guideClose };
-constexpr DeadRoute dead_input(bool comboEdge, bool menuOpen, bool aEdge, bool bEdge) {
-    if (comboEdge) return DeadRoute::toggleGuide;
-    if (menuOpen) {
-        if (aEdge) return DeadRoute::guideSelect;
-        if (bEdge) return DeadRoute::guideClose;
+// Pad routing while the dead page is up (bugbot r4559305224, extended by
+// r4559524001): the dead guest's pad must drive ONLY the guide — never the
+// launcher screens underneath (a hidden library/game page could act on
+// A/B/D-pad the player cannot see). View+Menu toggles the guide; with it
+// open, D-pad moves the selection, A activates and B closes; every other
+// edge is swallowed.
+//
+// The r4559524001 bug: opening the guide reset the focus to Home row 0
+// (Resume), and A on a dead guest "resumed" nothing — it just closed the
+// guide (or worse, acted on a hidden screen). Force quit was unreachable.
+// While dead the guide therefore OPENS with the focus on Force quit (row 2):
+// a single A press kills the guest, the worst-case walk is one D-pad Down
+// to reach Resume/Quit. While alive the old behaviour is kept exactly
+// (focus row 0 on open).
+//
+// Pure and total over its inputs so tests walk every dead-state sequence
+// (tests/guest-watchdog.cpp asserts ForceQuit is reachable within 3 presses
+// from every reachable state). The caller applies `open`/`row` to the
+// overlay atomics and maps `action`: forceQuit/quitGame to the menu
+// commands, resume to closing the guide only while alive (a dead guest has
+// nothing to resume — the guide stays open).
+enum class GuideAction : uint8_t { none = 0, toggle, up, down, forceQuit, quitGame, resume, close };
+struct GuideStep {
+    GuideAction action = GuideAction::none;   // what the caller must do
+    bool open = false;                        // guide visibility after the step
+    int row = 0;                              // focused Home row after the step (0 Resume, 1 Quit, 2 Force quit)
+};
+constexpr GuideStep guide_step(bool dead, bool open, int row,
+                               bool comboEdge, bool upEdge, bool downEdge,
+                               bool aEdge, bool bEdge) {
+    if (comboEdge) {                          // toggle wins over every other edge
+        const bool nowOpen = !open;
+        return {GuideAction::toggle, nowOpen, nowOpen && dead ? kForceQuitRow : 0};
     }
-    return DeadRoute::none;
+    if (!open) return {GuideAction::none, false, row};   // guide closed: everything swallowed
+    if (bEdge) return {GuideAction::close, false, row};
+    if (aEdge) {
+        // A activates the focused row. While dead, `resume` must not act
+        // (there is no resuming a dead guest): the caller keeps the guide
+        // open, so the player can still move to Force quit.
+        if (row == kForceQuitRow) return {GuideAction::forceQuit, open, row};
+        if (row == 1) return {GuideAction::quitGame, open, row};
+        return {dead ? GuideAction::resume : GuideAction::close, open, row};
+    }
+    if (upEdge) return {GuideAction::up, open, (row + kHomeRows - 1) % kHomeRows};
+    if (downEdge) return {GuideAction::down, open, (row + 1) % kHomeRows};
+    return {GuideAction::none, open, row};
 }
 
 } // namespace guest_watchdog

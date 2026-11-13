@@ -700,59 +700,36 @@ static void sort_games(int mode) {   // caller holds g_gm
 }
 
 // ---------------------------------------------------------------- app state + network thread
-// DirectComposition for the dead page (bugbot r4559305219 redesign):
-// dcomp.h is Desktop-partitioned and hidden under the app family, so the
-// device/target/visual are held as IUnknown and driven through these local
-// definitions — same IIDs and vtable ORDER as the SDK's dcomp.h (slots
-// counted from the SDK header, IUnknown's three first). Only the slots the
-// dead page calls are declared; the rest are pure-virtual placeholders the
-// objects never reach through this interface. The import
-// (DCompositionCreateDevice2) lives in dcomp.dll, linked with
-// --link-arg dcomp.lib in app/build.sh.
-struct IDCompositionDeviceLocal;
-struct IDCompositionTargetLocal;
-struct IDCompositionVisualLocal;
-struct IDCompositionDeviceLocal : IUnknown {
-    virtual HRESULT STDMETHODCALLTYPE Commit() = 0;                                            // slot 3
-    virtual HRESULT STDMETHODCALLTYPE WaitForCommitCompletion() = 0;                          // slot 4
-    virtual HRESULT STDMETHODCALLTYPE GetFrameStatistics(void*) = 0;                          // slot 5
-    virtual HRESULT STDMETHODCALLTYPE CreateTargetForHWND(HWND,BOOL,IDCompositionTargetLocal**) = 0;   // slot 6
-    virtual HRESULT STDMETHODCALLTYPE CreateVisual(IDCompositionVisualLocal**) = 0;           // slot 7
-};
-struct IDCompositionTargetLocal : IUnknown {
-    virtual HRESULT STDMETHODCALLTYPE SetRoot(IDCompositionVisualLocal*) = 0;                 // slot 3
-};
-struct IDCompositionVisualLocal : IUnknown {
-    // slots 3..20: SetOffsetX/Y (2 each), SetTransform x2, SetTransformParent,
-    // SetEffect, SetBitmapInterpolationMode, SetBorderMode, SetClip x2 — all
-    // placeholders; SetContent is slot 21.
-    virtual HRESULT STDMETHODCALLTYPE s3() = 0;virtual HRESULT STDMETHODCALLTYPE s4() = 0;
-    virtual HRESULT STDMETHODCALLTYPE s5() = 0;virtual HRESULT STDMETHODCALLTYPE s6() = 0;
-    virtual HRESULT STDMETHODCALLTYPE s7() = 0;virtual HRESULT STDMETHODCALLTYPE s8() = 0;
-    virtual HRESULT STDMETHODCALLTYPE s9() = 0;virtual HRESULT STDMETHODCALLTYPE s10() = 0;
-    virtual HRESULT STDMETHODCALLTYPE s11() = 0;virtual HRESULT STDMETHODCALLTYPE s12() = 0;
-    virtual HRESULT STDMETHODCALLTYPE s13() = 0;virtual HRESULT STDMETHODCALLTYPE s14() = 0;
-    virtual HRESULT STDMETHODCALLTYPE s15() = 0;virtual HRESULT STDMETHODCALLTYPE s16() = 0;
-    virtual HRESULT STDMETHODCALLTYPE s17() = 0;virtual HRESULT STDMETHODCALLTYPE s18() = 0;
-    virtual HRESULT STDMETHODCALLTYPE s19() = 0;virtual HRESULT STDMETHODCALLTYPE s20() = 0;
-    virtual HRESULT STDMETHODCALLTYPE SetContent(IUnknown*) = 0;                              // slot 21
-};
-// IID constant (dcomp.h is not includable under the app family). Only the
-// device's IID is needed: DCompositionCreateDevice2 returns the device QI'd
-// to it, and the target/visual come from its methods typed by the locals.
-static const IID kIID_IDCompositionDevice = {0xc37ea93a,0xe7aa,0x450d,{0xb1,0x6f,0x97,0x46,0xcb,0x04,0x07,0xf3}};
-// dcomp.dll's only import the dead page needs (declared here: dcomp.h is
-// hidden under the app family). Linked with --link-arg dcomp.lib in
-// app/build.sh (probe-verified: the import resolves from dcomp.dll).
-extern "C" HRESULT __stdcall DCompositionCreateDevice2(IUnknown* renderingDevice, const IID& iid, void** dcompositionDevice);
+// DirectComposition for the dead page (bugbot r4559305219 redesign): the
+// REAL <dcomp.h> (bugbot r4559524004). The earlier hand-declared
+// IDComposition*Local interfaces counted vtable slots by hand and put
+// SetContent at slot 21 after eighteen placeholders; the real header puts it
+// at slot 15 (SetOffsetX x2, SetOffsetY x2, SetTransform x2,
+// SetTransformParent, SetEffect, SetBitmapInterpolationMode, SetBorderMode,
+// SetClip x2, SetContent) — calling through the hand-declared interface
+// forwarded into the middle of the real vtable. Hand-counted slots are a
+// recurring bug class here, so the dead page now compiles against the SDK's
+// own declarations and tests/dcomp-slots.sh asserts the slots from the real
+// header. dcomp.h is Desktop-partitioned, so it is included with the family
+// briefly switched (the same shim msvc-compat.h documents for cstdlib);
+// nothing else in the TU re-opens the desktop partition.
+#pragma push_macro("WINAPI_FAMILY")
+#undef WINAPI_FAMILY
+#define WINAPI_FAMILY WINAPI_FAMILY_DESKTOP_APP
+#include <dcomp.h>
+#pragma pop_macro("WINAPI_FAMILY")
 
 
 // ICoreWindowInterop: gives the CoreWindow's real OS HWND (needed for the
-// DComp target). winrt's CoreWindow.h is not includable here, so declare the
-// one getter locally — slot 3 after IUnknown — and QI with the real IID.
+// DComp target). winrt's CoreWindow.h is not includable here (its MIDL
+// output spells `HRESULT _cdecl CreateControlInput`, which mingw/clang-cl
+// cannot parse — `_cdecl` is an MSVC keyword), so declare the interface
+// locally with the real IID. Slots from the winrt header's MIDL decl:
+// IUnknown's three, then get_WindowHandle (slot 3) and
+// put_MessageHandled (slot 4).
 struct __declspec(uuid("45D64A29-A63E-4CB6-B498-5781D298CB4F")) ICoreWindowInterop : IUnknown {
-    virtual HRESULT STDMETHODCALLTYPE get_WindowHandle(HWND*) = 0;   // slot 3
-    virtual HRESULT STDMETHODCALLTYPE put_WindowHandle(HWND) = 0;    // slot 4
+    virtual HRESULT STDMETHODCALLTYPE get_WindowHandle(HWND*) = 0;        // slot 3
+    virtual HRESULT STDMETHODCALLTYPE put_MessageHandled(HWND) = 0;       // slot 4 (never called)
 };
 static const IID kIID_ICoreWindowInterop = {0x45d64a29,0xa63e,0x4cb6,{0xb4,0x98,0x57,0x81,0xd2,0x98,0xcb,0x4f}};
 
@@ -1245,9 +1222,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // touched while dead — no guest Present, no guest context, no Map.
     com_ptr<IDXGISwapChain1> m_deadChain;
     com_ptr<ID3D11Texture2D> m_deadBB;
-    winrt::com_ptr<IUnknown> m_deadDcomp;      // IDCompositionDevice
-    winrt::com_ptr<IUnknown> m_deadTarget;     // IDCompositionTarget
-    winrt::com_ptr<IUnknown> m_deadVisual;     // IDCompositionVisual
+    winrt::com_ptr<IDCompositionDevice> m_deadDcomp;   // the real dcomp.h types (bugbot r4559524004)
+    winrt::com_ptr<IDCompositionTarget> m_deadTarget;
+    winrt::com_ptr<IDCompositionVisual> m_deadVisual;
     bool m_deadSurfaceUp = false;
     Pad m_pad; int m_prevPads = -1; uint64_t m_frame = 0;
     int m_sel = 0, m_top = 0; double m_scroll = 0, m_scrollT = 0; bool m_btnFocus = true, m_confirmLogout = false;
@@ -1950,21 +1927,38 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if(guest_overlay::inputBlocked&&!guest_overlay::menuOpen&&b==GamepadButtons::None){guest_overlay::block_input(false);logf("overlay: game input restored");}
         const auto combo=GamepadButtons::View|GamepadButtons::Menu;
         auto pressed=[&](GamepadButtons m){return held(b,m)&&!held(m_menuPrev,m);};
-        // While dead (bugbot r4559305224) the pad routes through the pure
-        // dead_input decision: combo toggles the guide, A selects and B
-        // closes with it open, everything else swallowed — no launcher
-        // screen, no guest-side call. The block/unblock dance above stays
-        // harmless (the game runs no code), so it is left shared.
+        // While dead (bugbot r4559305224, r4559524001) the pad routes through
+        // the pure guide_step decision: combo toggles the guide (opening it
+        // lands the focus on Force quit), D-pad moves the selection, A
+        // activates, B closes, everything else swallowed — no launcher
+        // screen, no guest-side call. A on Resume while dead is a no-op (the
+        // guide stays open: there is nothing to resume); the block/unblock
+        // dance above stays harmless (the game runs no code), so it is left
+        // shared.
         if(guest_overlay::guestDead.load(std::memory_order_acquire)) {
-            using guest_watchdog::DeadRoute;
-            const DeadRoute r=guest_watchdog::dead_input(pressed(combo),
-                guest_overlay::menuOpen.load(std::memory_order_acquire),
+            using guest_watchdog::GuideAction;
+            const bool open=guest_overlay::menuOpen.load(std::memory_order_acquire);
+            int row=guest_overlay::selection.load(std::memory_order_acquire);
+            if(row<0||row>=guest_watchdog::kHomeRows)row=0;   // atomics out of range: re-clamp before the model reads them
+            const auto s=guest_watchdog::guide_step(true,open,row,
+                pressed(combo),
+                pressed(GamepadButtons::DPadUp),pressed(GamepadButtons::DPadDown),
                 pressed(GamepadButtons::A),pressed(GamepadButtons::B));
-            switch(r) {
-            case DeadRoute::toggleGuide: menu_command("toggle","controller"); break;
-            case DeadRoute::guideSelect: menu_command("select","controller"); break;
-            case DeadRoute::guideClose:  menu_command("toggle","controller"); break;
-            case DeadRoute::none: break;
+            if(s.row!=row)guest_overlay::selection=s.row;   // the model moved the focus (D-pad or open-focus)
+            switch(s.action) {
+            case GuideAction::toggle:
+                menu_command("toggle","controller");
+                if(guest_overlay::menuOpen)guest_overlay::selection=s.row;   // toggle resets selection; dead-open refocuses Force quit
+                break;
+            case GuideAction::up:   guest_overlay::guide_press(ui_guide::Button::Up,false);break;
+            case GuideAction::down: guest_overlay::guide_press(ui_guide::Button::Down,false);break;
+            case GuideAction::forceQuit: menu_command("select","controller");break;   // selection==2: force_quit()
+            case GuideAction::quitGame:  menu_command("select","controller");break;   // selection==1: quit_game()
+            case GuideAction::close:
+                if(open)menu_command("toggle","controller");   // B (or A-Resume while alive) closes
+                break;
+            case GuideAction::resume: break;   // dead: nothing to resume; the guide stays open on Force quit
+            case GuideAction::none: break;
             }
             m_menuPrev=b;
             frame_log(t);
@@ -2035,7 +2029,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // (latched from guest presents) says nothing about the dead state.
         const bool dead=guestDead.load(std::memory_order_acquire);
         if(c=="toggle"&&!menuOpen&&!drawable&&!dead){logf("overlay: menu unavailable (present hooks or back-buffer format unsupported) (%s)",via);return;}
-        if(c=="toggle"){if(busy)return;menuOpen=!menuOpen;guest_overlay::ui_guideTab=0;selection=0;guest_overlay::achTop=0;
+        if(c=="toggle"){if(busy)return;menuOpen=!menuOpen;guest_overlay::ui_guideTab=0;
+                        // Opening while dead focuses Force quit (bugbot
+                        // r4559524001): the player's one-press kill. Alive,
+                        // the old focus (Resume, row 0) is kept.
+                        selection=menuOpen&&dead?(int)guest_overlay::Item::ForceQuit:0;
+                        guest_overlay::achTop=0;
                         if(menuOpen)block_input(true);logf("overlay: menu %s (Home)%s",menuOpen?"opened":"closed",dead?" (guest dead)":"");return;}
         // Turning the FPS counter off can strand the selection on the graph
         // row (Settings row 1), which disappears; re-clamp into range.
@@ -2086,8 +2085,31 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void force_quit() {
         if(m_leaving)return;
         m_leaving=true;guest_overlay::set_status("Uploading saves...");
-        logf("overlay: force quit — guest threads stay contained (play_runtime), launcher keeps running");
+        logf("overlay: force quit — killing the guest thread, then uploading saves");
         auto sync=g_finalSync;
+        // Kill the guest thread first (bugbot r4559524001): Force quit must
+        // END the game, not wait behind it. The kill runs on a worker with a
+        // bounded wait so the launcher never blocks on a guest that is
+        // wedged inside the driver. play_runtime::state->thread is the
+        // guest's entry thread. TerminateThread is Desktop-partitioned (not
+        // declared under the app family), so it resolves through
+        // kernel_tail::native — the same dump_thread_stacks pattern
+        // (launch.h) uses for OpenThread/SuspendThread. The loader mutex is
+        // never taken: the guest may hold it from inside the very hang
+        // being killed.
+        std::thread([]{
+            using Terminate=BOOL(WINAPI*)(HANDLE,DWORD);
+            auto terminate=(Terminate)kernel_tail::native("TerminateThread");
+            const DWORD tid=play_runtime::state?play_runtime::state->thread.load(std::memory_order_acquire):0;
+            if(!tid){logf("overlay: force quit — no guest thread id recorded");return;}
+            const HANDLE h=OpenThread(THREAD_TERMINATE,FALSE,tid);
+            if(!h){logf("overlay: force quit — OpenThread(%lu) failed err=%lu",(unsigned long)tid,(unsigned long)GetLastError());return;}
+            if(terminate)terminate(h,1);
+            else logf("overlay: force quit — TerminateThread unavailable; the guest thread stays (restart still unloads it)");
+            WaitForSingleObject(h,3000);   // bounded: the launcher never blocks on a dead guest
+            CloseHandle(h);
+            logf("overlay: force quit — guest thread %lu terminated",(unsigned long)tid);
+        }).detach();
         // CoreWindow is thread-affine; its CoreDispatcher is agile. Take the
         // dispatcher here, on the UI thread, for the worker to post back with.
         auto dispatcher=m_window.Dispatcher();
@@ -3678,25 +3700,21 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         logf("dead page: CreateSwapChainForComposition hr=0x%08lx",(unsigned long)hr);
         if(FAILED(hr))return false;
         if(FAILED(m_deadChain->GetBuffer(0,__uuidof(ID3D11Texture2D),m_deadBB.put_void())))return false;
-        hr=DCompositionCreateDevice2(m_dev.get(),kIID_IDCompositionDevice,m_deadDcomp.put_void());
+        hr=DCompositionCreateDevice2(m_dev.get(),__uuidof(IDCompositionDevice),m_deadDcomp.put_void());
         logf("dead page: DCompositionCreateDevice2 hr=0x%08lx",(unsigned long)hr);
         if(FAILED(hr))return false;
-        // The object came back QI'd to IID_IDCompositionDevice already (the
-        // iid argument), so the local interface is a plain reinterpret — no
-        // further QueryInterface (and no __uuidof: the locals are GUID-less).
-        auto dcomp=static_cast<IDCompositionDeviceLocal*>(m_deadDcomp.get());
-        winrt::com_ptr<IDCompositionTargetLocal> target;
-        winrt::com_ptr<IDCompositionVisualLocal> visual;
-        hr=dcomp->CreateTargetForHWND(hwnd,TRUE,target.put());
-        logf("dead page: CreateTargetForHWND hr=0x%08lx topmost",(unsigned long)hr);
+        winrt::com_ptr<IDCompositionTarget> target;
+        winrt::com_ptr<IDCompositionVisual> visual;
+        hr=m_deadDcomp->CreateTargetForHwnd(hwnd,TRUE,target.put());
+        logf("dead page: CreateTargetForHwnd hr=0x%08lx topmost",(unsigned long)hr);
         if(FAILED(hr))return false;
-        hr=dcomp->CreateVisual(visual.put());
+        hr=m_deadDcomp->CreateVisual(visual.put());
         if(FAILED(hr))return false;
         com_ptr<::IUnknown> content;
         content = m_deadChain.as<::IUnknown>();   // IUnknown's GUID is built into cppwinrt; the locals' are not
         if(FAILED(visual->SetContent(content.get())))return false;
         if(FAILED(target->SetRoot(visual.get())))return false;
-        if(FAILED(dcomp->Commit()))return false;
+        if(FAILED(m_deadDcomp->Commit()))return false;
         // Keep the target/visual alive for teardown (dead_surface_teardown
         // releases them through the same IUnknown com_ptrs).
         m_deadTarget=target;
