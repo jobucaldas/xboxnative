@@ -1,8 +1,10 @@
 #pragma once
 #include <string>
 #include "mm_timer.h"
+#include "joystick.h"
 // Native x64 audio exports, plus PlaySoundA as the ANSI conversion to a native
-// PlaySoundW. No success stubs or fabricated device counters.
+// PlaySoundW. No success stubs or fabricated device counters. The joystick family
+// (joystick.h) answers for the driver-less console; it is not a native export.
 namespace audio_routes {
 static const char* const wave_symbols[]={
     "timeBeginPeriod","timeEndPeriod","timeGetTime",
@@ -56,7 +58,7 @@ inline uintptr_t resolve(const char* dll,const char* name) {
         if(!p&&!strcmp(name,"timeKillEvent"))p=reinterpret_cast<uintptr_t>(&mm_timer::kill_event);
         return p;
     }
-    return 0;
+    return joy_routes::resolve(name);
 }
 inline void discover(void (*log)(const char*)) {
     unsigned missing=0;

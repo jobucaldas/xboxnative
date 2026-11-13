@@ -10,6 +10,7 @@
 #include <mutex>
 #include <atomic>
 #include <algorithm>
+#include <type_traits>
 #include "keymap.h"
 #include "corewindow_feed.h"
 #include "../hid/pad_device.h"
@@ -273,6 +274,13 @@ extern "C" BOOL WINAPI c_EnumDisplaySettingsA(LPCSTR,DWORD mode,DEVMODEA* dm){
  fillMode(dm->dmFields,dm->dmPelsWidth,dm->dmPelsHeight,dm->dmBitsPerPel,dm->dmDisplayFrequency,dm->dmPosition);
  return TRUE;
 }
+// The extended query reports the same single mode as EnumDisplaySettingsW (the
+// mode the launcher presents). EDS_RAWMODE/EDS_ROTATEDMODE describe no other
+// mode here, so the flags are accepted and ignored.
+extern "C" BOOL WINAPI c_EnumDisplaySettingsExW(LPCWSTR name,DWORD mode,DEVMODEW* dm,DWORD flags){(void)flags;return c_EnumDisplaySettingsW(name,mode,dm);}
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
+static_assert(std::is_same<decltype(&c_EnumDisplaySettingsExW),decltype(&EnumDisplaySettingsExW)>::value,"EnumDisplaySettingsExW signature");
+#endif
 extern "C" BOOL WINAPI c_EnumDisplayDevicesA(LPCSTR device,DWORD num,DISPLAY_DEVICEA* dd,DWORD){
  if(!dd)return FALSE;
  if(!device){ if(num!=0)return FALSE;
@@ -793,5 +801,9 @@ extern "C" int WINAPI c_LookupIconIdFromDirectoryEx(BYTE* xdir,BOOL isIcon,int w
 #include "device_notifications.h"
 #include "input_feed.h"
 #include "window_extras.h"
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
+static_assert(std::is_same<decltype(&c_IsWindowEnabled),decltype(&IsWindowEnabled)>::value,"IsWindowEnabled signature");
+static_assert(std::is_same<decltype(&c_GetWindowTextA),decltype(&GetWindowTextA)>::value,"GetWindowTextA signature");
+#endif
 #include "window_tree.h"
 } // namespace u32c

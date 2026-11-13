@@ -120,6 +120,7 @@ static Module* named(const std::wstring& name) {
 }
 #include "../../uwph/kernel32/guest_loader_queries.h"
 #include "../../uwph/kernel32/guest_resource_queries.h"
+#include "../../uwph/shell32/special_folder.h"
 static bool exists(const std::wstring& path) { DWORD a=GetFileAttributesW(path.c_str()); return a!=INVALID_FILE_ATTRIBUTES && !(a&FILE_ATTRIBUTE_DIRECTORY); }
 #include "../../uwph/kernel32/guest_loader_search.h"
 static uintptr_t resolve(const char*,const char*,WORD);
@@ -1910,6 +1911,8 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // dynamic and mapped-forwarder imports alike (see processCreation).
     if(processCreation(name) && (key=="kernel32.dll" || key.find("api-ms-win-core-")==0)) return processExport(name);
     if(shellLaunch(name) && key=="shell32.dll") return shellExport(name);
+    // Folder CSIDLs answer as the guest's known-folder route does (uwph/shell32).
+    if(name && key=="shell32.dll" && !strcmp(name,"SHGetSpecialFolderPathW")) return (uintptr_t)&shell_folder::getSpecialFolderPathW;
     if(auto graphics=play_graphics::resolve(dll,name,ordinal))return graphics;
     if(name && (key=="kernel32.dll"||key=="kernelbase.dll"||key=="ntdll.dll"||key.find("api-ms-win-core-")==0)) if(auto p=processApi(name)) return p;
     if(name && (key=="ole32.dll"||key=="combase.dll"||key.find("api-ms-win-core-com-l1-")==0)) {

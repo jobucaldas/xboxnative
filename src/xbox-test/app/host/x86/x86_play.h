@@ -46,7 +46,8 @@ inline constexpr uint64_t kGuestRunCap = 1000ull * 1000 * 1000 * 1000;
 inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string& name, const std::string& cmdline,
                             const std::function<void(const std::string&)>& tee = nullptr,
                             const std::function<void(const PlayResult&)>& on_loaded = nullptr,
-                            uint64_t instruction_limit = 500ull * 1000 * 1000) {
+                            uint64_t instruction_limit = 500ull * 1000 * 1000,
+                            const DllSource& dll_source = nullptr) {
     PlayResult r;
     try {
         Memory mem; ThunkTable table; Host host; Registry reg;
@@ -54,16 +55,67 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         Guest guest(mem, host, reg);
         guest.exe_path = name;
         guest.cmdline = cmdline.empty() ? name : cmdline;
+        guest.dll_source = dll_source;
         guest.register_all();
-        Image img = load_pe32(mem, table, reg, file);
+        // The top image loads ONCE, through load_dll: it maps at the preferred
+        // ImageBase when free (an exe's normal case) and only relocates when
+        // something already holds that range. Loading it here as well would
+        // take the preferred base with a throwaway copy and force the real
+        // load to relocate — wrong for mingw CRTs that hard-code the preferred
+        // base (e.g. __mingw_GetSectionForAddress reads headers at 0x400000).
+        // Dependencies the registry cannot serve load as guest DLLs, tracked
+        // in the process module table; their DllMain runs after init_process.
+        std::map<std::string, Dll> dlls; std::vector<std::string> dll_order;
+        Dll top = load_dll(mem, table, reg, file, dll_source, dlls, 0, &dll_order,
+                           [&reg, &table](const std::string& dll, const std::string& sym) {
+                               // Forwarded exports that name an OS-served module
+                               // ("ntdll.memcpy"): the same thunk/data answer
+                               // GetProcAddress gives on that pseudo-handle. The
+                               // module part has no ".dll" — lowercase and suffix
+                               // it for the registry; an ordinal forward ("dll.#n")
+                               // answers 0 (no ordinal surface to guess against).
+                               std::string l = dll, s = sym;
+                               for (auto& ch : l) ch = char(std::tolower((unsigned char)ch));
+                               for (auto& ch : s) ch = char(std::tolower((unsigned char)ch));
+                               if (l.rfind(".dll") != l.size() - 4) l += ".dll";
+                               if (s.rfind("#", 0) == 0) return 0u;
+                               auto it = reg.map.find({l, s});
+                               if (it != reg.map.end()) return table.add(it->second);
+                               auto dt = reg.data.find({l, s});
+                               if (dt != reg.data.end()) return dt->second;
+                               return 0u;
+                           },
+                           {});  // top image: unnamed (never re-entered by a cycle)
+        dlls.emplace("__top__", std::move(top));  // not a named module; keeps the top image's exports reachable
+        Image img = dlls["__top__"].image;
+        guest.dlls = std::move(dlls);
+        guest.dll_order = std::move(dll_order);
+        for (const auto& kv : guest.dlls) {
+            // entry_rva == 0 is "no entry point" (Bugbot 4559749424): `entry`
+            // is base + RVA and never zero for a mapped image.
+            if (kv.second.image.entry_rva) guest.dll_entries[kv.first] = kv.second.image.entry;
+            guest.add_module(kv.first, kv.second.image.base);
+        }
         r.loaded = true; r.base = img.base; r.entry = img.entry;
         r.imports = img.imports; r.bound = img.bound; r.relocations = img.relocations; r.unresolved = img.unresolved;
         guest.image_base = img.base;
+        guest.exe_tls = img.tls;  // each thread's TLS block comes from the exe's directory
         guest.add_module(name, img.base);
         map_thunk_page(mem, table);
         Cpu cpu(mem, table);
         cpu.limit = instruction_limit;
         init_process(mem, cpu, img);
+        // DllMain(DLL_PROCESS_ATTACH) for every loaded guest DLL, in load
+        // order — after the thunk page and TEB/PEB exist, before the entry.
+        try { guest.run_dll_mains(cpu, 1); } catch (const Fault& f) {
+            if (!cpu.exited) throw;
+            (void)f;
+        }
+        // TLS callbacks of the top image run exactly once, from run_entry ->
+        // init_tls (which allocates the implicit-TLS block first): the Windows
+        // loader order is DllMain(PROCESS_ATTACH) for all modules, then the
+        // exe's TLS callbacks, then the entry. A separate loop here would run
+        // them twice — a mingw CRT registers its global initializers there.
         if (on_loaded) on_loaded(r);
         try {
             run_entry(cpu, img);
@@ -98,7 +150,8 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
 inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const std::string& cmdline,
                       const std::function<void(const std::string&)>& tee = nullptr,
                       const std::function<void(const PlayResult&)>& on_loaded = nullptr,
-                      uint64_t instruction_limit = 500ull * 1000 * 1000) {
+                      uint64_t instruction_limit = 500ull * 1000 * 1000,
+                      const DllSource& dll_source = nullptr) {
     PlayResult r;
     FILE* f = _wfopen(exe.c_str(), L"rb");
     if (!f) { r.fault = "cannot open the executable"; r.fault_kind = "Loader"; return r; }
@@ -113,7 +166,7 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
     std::string name;
     for (size_t i = exe.find_last_of(L"\\/") + 1; i < exe.size(); ++i) name += char(exe[i]);
     (void)dir;
-    return run_image(file, name, cmdline, tee, on_loaded, instruction_limit);
+    return run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source);
 }
 #endif
 }
