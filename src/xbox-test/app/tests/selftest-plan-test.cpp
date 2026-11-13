@@ -106,6 +106,22 @@ int main() {
     // did not read back as drawn (never a pass).
     assert(verdict("d3d11", true, true, 43) == "BLOCKED pixel-readback");
     assert(verdict("d3d12", true, true, 43) == "BLOCKED pixel-readback");
+    // The D3D11 fixture's newer passes block per feature: the calls succeeded
+    // but the effect never reached the readback (never a pass either).
+    assert(verdict("d3d11", true, true, 54) == "BLOCKED msaa-resolve");
+    assert(verdict("d3d11", true, true, 58) == "BLOCKED generate-mips");
+    assert(verdict("d3d11", true, true, 63) == "BLOCKED command-list");
+    assert(verdict("d3d11", true, true, 67) == "BLOCKED stream-out");
+    assert(verdict("d3d11", true, true, 71) == "BLOCKED indirect-draw");
+    assert(verdict("d3d11", true, true, 75) == "BLOCKED occlusion-query");
+    assert(verdict("d3d11", true, true, 82) == "BLOCKED indexed-draw");
+    assert(verdict("d3d11", true, true, 86) == "BLOCKED depth-test");
+    assert(verdict("d3d11", true, true, 90) == "BLOCKED texture-array-copy");
+    assert(verdict("d3d11", true, true, 94) == "BLOCKED bc1-copy");
+    // 95 = a Wine host: the gated passes did not run, so never a pass.
+    assert(verdict("d3d11", true, true, 95) == "BLOCKED wine-host");
+    assert(verdict("d3d11", true, true, 50) == "FAIL exit-50");   // a step failure stays a failure
+    assert(verdict("d3d12", true, true, 54) == "FAIL exit-54");   // not the d3d12 fixture's code
     // A guest that never ran code, or ran it and never exited, is a failure.
     assert(verdict("d3d9", true, false, 0) == "FAIL no-guest-code");
     assert(verdict("d3d9", false, true, 0) == "FAIL did-not-exit");
