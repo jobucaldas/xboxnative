@@ -16,6 +16,18 @@
 static int g_fail, g_checks;
 static void check(int ok) { ++g_checks; if (!ok) ++g_fail; }
 
+/* Thread bodies. The exit body calls ExitThread through a volatile pointer, so
+ * the compiler cannot treat the call as noreturn: if the surface lets the call
+ * return, g_after_exit becomes 1. A real ExitThread never returns. */
+static volatile LONG g_after_exit;
+static DWORD WINAPI ret_body(LPVOID p) { return (DWORD)(ULONG_PTR)p + 7; }
+static VOID (WINAPI *volatile exit_thread_fn)(DWORD) = ExitThread;
+static DWORD WINAPI exit_body(LPVOID p) {
+    exit_thread_fn((DWORD)(ULONG_PTR)p + 9);
+    g_after_exit = 1;
+    return 0;
+}
+
 static int cmp_int(const void* a, const void* b) {
     int x = *(const int*)a, y = *(const int*)b;
     return x < y ? -1 : x > y;
@@ -165,6 +177,17 @@ int main(void) {
         up[mi] = mod[mi] >= 'a' && mod[mi] <= 'z' ? (char)(mod[mi] - 32) : mod[mi];
     up[mi] = 0;
     check(GetModuleHandleA(up) != NULL && GetModuleHandleA(up) == GetModuleHandleA(NULL));
+    /* GetModuleHandleA (MSDN): the modules a process has from its start answer
+     * without LoadLibrary, case-insensitively, with or without ".dll" (the
+     * extension is appended when omitted); the same name answers the same
+     * handle. An unknown name is NULL with ERROR_MOD_NOT_FOUND (126). */
+    check(GetModuleHandleA("KERNEL32.DLL") != NULL && GetModuleHandleA("kernel32") == GetModuleHandleA("kernel32.dll"));
+    check(GetModuleHandleA("ntdll.dll") != NULL && GetModuleHandleA("NTDLL") == GetModuleHandleA("ntdll.dll"));
+    check(GetModuleHandleA("msvcrt.dll") != NULL && GetModuleHandleA("kernelbase") != NULL);
+    SetLastError(0);
+    check(GetModuleHandleA("no-such-module.dll") == NULL && GetLastError() == ERROR_MOD_NOT_FOUND);
+    SetLastError(0);
+    check(GetModuleHandleW(L"no-such-module") == NULL && GetLastError() == ERROR_MOD_NOT_FOUND);
     puts("x86-crt: kernel32 ok");
 
     /* Interlocked and critical sections on the single guest thread. */
@@ -175,6 +198,27 @@ int main(void) {
     CRITICAL_SECTION cs; InitializeCriticalSection(&cs);
     EnterCriticalSection(&cs); LeaveCriticalSection(&cs); DeleteCriticalSection(&cs);
     puts("x86-crt: sync ok");
+
+    /* CreateThread (MSDN): lpThreadId receives a nonzero identifier, unique per
+     * thread, that GetThreadId reports for the handle. GetExitCodeThread (MSDN)
+     * answers the code the thread returned, or the code ExitThread was given.
+     * ExitThread (MSDN) ends the calling thread and does not return, so
+     * g_after_exit stays 0. Both bodies run at the first wait. */
+    {
+        DWORD tid_a = 0, tid_b = 0, code_a = 0, code_b = 0;
+        HANDLE th_a = CreateThread(NULL, 0, ret_body, (LPVOID)(ULONG_PTR)3, 0, &tid_a);
+        HANDLE th_b = CreateThread(NULL, 0, exit_body, (LPVOID)(ULONG_PTR)5, 0, &tid_b);
+        check(th_a != NULL && th_b != NULL);
+        check(tid_a != 0 && tid_b != 0 && tid_a != tid_b);
+        check(GetThreadId(th_a) == tid_a && GetThreadId(th_b) == tid_b);
+        check(WaitForSingleObject(th_a, INFINITE) == WAIT_OBJECT_0);
+        check(WaitForSingleObject(th_b, INFINITE) == WAIT_OBJECT_0);
+        check(GetExitCodeThread(th_a, &code_a) && code_a == 10);  /* returned 3 + 7 */
+        check(GetExitCodeThread(th_b, &code_b) && code_b == 14);  /* ExitThread(5 + 9) */
+        check(g_after_exit == 0);
+        CloseHandle(th_a); CloseHandle(th_b);
+    }
+    puts("x86-crt: threads ok");
 
     /* strftime with the real CRT prototype: size_t strftime(char *dest,
      * size_t maxsize, const char *format, const struct tm *tm) — dest first,
