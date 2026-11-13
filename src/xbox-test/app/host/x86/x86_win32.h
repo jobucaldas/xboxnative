@@ -9,8 +9,16 @@
 #include "x86_pe.h"
 namespace x86 {
 struct Host {
+    struct FileCall {
+        enum class Kind { CreateA, CreateW, Close, Read, Size, Time, AttributesA, Seek, End, TimeConvert, TimeLocal } kind;
+        std::string path_a; std::u16string path_w;
+        uint64_t handle = 0, template_handle = 0, value = 0; uint32_t args[5]{}, error = 0; bool succeeded = false;
+        std::vector<uint8_t> data;
+        explicit FileCall(Kind k) : kind(k) {}
+    };
     std::string out, err;                         // captured stdout/stderr bytes
     std::function<void(const std::string&)> tee;  // optional live sink
+    std::function<void(FileCall&)> file_call;     // Play's native kernel32 file layer
     std::map<std::string, unsigned> calls;        // import -> call count
     static constexpr uint32_t H_STDIN = 3, H_STDOUT = 7, H_STDERR = 11;
 };

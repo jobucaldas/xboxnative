@@ -141,7 +141,8 @@ struct Guest {
     std::map<uint32_t, uint32_t> sync_handles;        // guest handle -> object id
     std::map<uint32_t, SyncObject> sync_objects;
     std::map<std::string, uint32_t> sync_names;       // names are case-sensitive (Win32)
-    uint32_t sync_serial = 0, sync_handle_serial = 0;
+    std::map<uint32_t, uint64_t> file_handles;         // guest handle -> Play host HANDLE
+    uint32_t file_serial = 0, sync_serial = 0, sync_handle_serial = 0;
     // Guest DLLs loaded by the process (lowercase module name -> Dll) and the
     // order they were mapped in (DllMain PROCESS_DETACH runs in reverse).
     // `dll_source` supplies DLL bytes by module name; empty = not found.
@@ -197,6 +198,8 @@ struct Guest {
     }
     uint32_t open_sync(SyncKind kind, uint32_t namep) { std::string name=str(namep);auto it=sync_names.find(name);if(it==sync_names.end()){set_last_error(2);return 0;}if(sync_objects[it->second].kind!=kind){set_last_error(6);return 0;}return add_sync_handle(it->second); }
     bool close_sync(uint32_t h) { auto it=sync_handles.find(h); if(it==sync_handles.end())return false; uint32_t id=it->second; sync_handles.erase(it); auto& o=sync_objects[id]; if(!--o.refs){if(!o.name.empty())sync_names.erase(o.name);sync_objects.erase(id);} return true; }
+    uint32_t add_file_handle(uint64_t native) { uint32_t h=0x50000000u+(++file_serial); file_handles[h]=native; return h; }
+    bool call_file(Host::FileCall& call) { if(!host.file_call){call.error=120;return false;} host.file_call(call); return call.succeeded; }
     // WaitForSingleObject runs all pending guest bodies before this check. If the
     // object is still unavailable, no runnable guest thread can signal it without
     // another yield, so finite waits time out immediately (there is no virtual tick clock).
@@ -1184,6 +1187,48 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetStdHandle", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
         switch (int32_t(c.arg(0))) { case -10: return Host::H_STDIN; case -11: return Host::H_STDOUT; case -12: return Host::H_STDERR; }
         return 0xFFFFFFFFu; });
+    auto native_file = [this](uint32_t h, Host::FileCall& call) {
+        auto it=file_handles.find(h); if(it==file_handles.end()){set_last_error(6);return false;}
+        call.handle=it->second; return true;
+    };
+    // File operations cross into Play's native kernel32_core layer through host HANDLEs;
+    // guest pointers are decoded here, and no synthetic success is returned off-Play.
+    reg.add("kernel32.dll", "CreateFileA", Conv::Stdcall, 7, [this](Cpu& c) -> uint32_t {
+        if(!c.arg(0)){set_last_error(87);return 0xffffffffu;}Host::FileCall q{Host::FileCall::Kind::CreateA}; q.path_a=str(c.arg(0));
+        q.args[0]=c.arg(1);q.args[1]=c.arg(2);q.args[2]=c.arg(4);q.args[3]=c.arg(5);
+        if(c.arg(6)){auto it=file_handles.find(c.arg(6));if(it==file_handles.end()){set_last_error(6);return 0xffffffffu;}q.template_handle=it->second;}
+        if(!call_file(q)||q.value==UINT64_MAX){set_last_error(q.error?q.error:120);return 0xffffffffu;}return add_file_handle(q.value); });
+    reg.add("kernel32.dll", "CreateFileW", Conv::Stdcall, 7, [this](Cpu& c) -> uint32_t {
+        if(!c.arg(0)){set_last_error(87);return 0xffffffffu;}Host::FileCall q{Host::FileCall::Kind::CreateW}; q.path_w=wstr(c.arg(0));
+        q.args[0]=c.arg(1);q.args[1]=c.arg(2);q.args[2]=c.arg(4);q.args[3]=c.arg(5);
+        if(c.arg(6)){auto it=file_handles.find(c.arg(6));if(it==file_handles.end()){set_last_error(6);return 0xffffffffu;}q.template_handle=it->second;}
+        if(!call_file(q)||q.value==UINT64_MAX){set_last_error(q.error?q.error:120);return 0xffffffffu;}return add_file_handle(q.value); });
+    reg.add("kernel32.dll", "ReadFile", Conv::Stdcall, 5, [this,native_file](Cpu& c) -> uint32_t {
+        uint32_t n=c.arg(2),out=c.arg(3); if(n>(1u<<24)||!out||c.arg(4)){set_last_error(87);return 0;}
+        Host::FileCall q{Host::FileCall::Kind::Read};if(!native_file(c.arg(0),q))return 0;q.args[0]=n;
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}
+        if(q.args[1]>n||q.data.size()<q.args[1]){set_last_error(87);return 0;}if(q.args[1])mem.write_bytes(c.arg(1),q.data.data(),q.args[1]);if(out)mem.w32(out,q.args[1]);return 1; });
+    reg.add("kernel32.dll", "GetFileSize", Conv::Stdcall, 2, [this,native_file](Cpu& c) -> uint32_t {
+        Host::FileCall q{Host::FileCall::Kind::Size};if(!native_file(c.arg(0),q))return 0xffffffffu;q.args[0]=c.arg(1)!=0;
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0xffffffffu;}if(c.arg(1))mem.w32(c.arg(1),q.args[1]);return uint32_t(q.value); });
+    reg.add("kernel32.dll", "GetFileTime", Conv::Stdcall, 4, [this,native_file](Cpu& c) -> uint32_t {
+        Host::FileCall q{Host::FileCall::Kind::Time};if(!native_file(c.arg(0),q))return 0;
+        for(unsigned i=0;i<3;++i) q.args[i]=c.arg(i+1)!=0;
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}
+        for(unsigned i=0;i<3;++i) { uint32_t dst=c.arg(i+1); if(dst) mem.write_bytes(dst,q.data.data()+8*i,8); }
+        return 1; });
+    reg.add("kernel32.dll", "GetFileAttributesA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        Host::FileCall q{Host::FileCall::Kind::AttributesA};q.path_a=str(c.arg(0));if(!call_file(q)){set_last_error(q.error?q.error:120);return 0xffffffffu;}return uint32_t(q.value); });
+    reg.add("kernel32.dll", "SetFilePointer", Conv::Stdcall, 4, [this,native_file](Cpu& c) -> uint32_t {
+        Host::FileCall q{Host::FileCall::Kind::Seek};if(!native_file(c.arg(0),q))return 0xffffffffu;
+        q.args[0]=c.arg(1);q.args[1]=c.arg(2)?mem.r32(c.arg(2)):0;q.args[2]=c.arg(3);q.args[3]=c.arg(2)!=0;
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0xffffffffu;}if(c.arg(2))mem.w32(c.arg(2),q.args[1]);return uint32_t(q.value); });
+    reg.add("kernel32.dll", "SetEndOfFile", Conv::Stdcall, 1, [this,native_file](Cpu& c) -> uint32_t {
+        Host::FileCall q{Host::FileCall::Kind::End};if(!native_file(c.arg(0),q))return 0;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    reg.add("kernel32.dll", "FileTimeToSystemTime", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        Host::FileCall q{Host::FileCall::Kind::TimeConvert};q.data=mem.read_bytes(c.arg(0),8);if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}mem.write_bytes(c.arg(1),q.data.data(),16);return 1; });
+    reg.add("kernel32.dll", "FileTimeToLocalFileTime", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        Host::FileCall q{Host::FileCall::Kind::TimeLocal};q.data=mem.read_bytes(c.arg(0),8);if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}mem.write_bytes(c.arg(1),q.data.data(),8);return 1; });
     reg.add("kernel32.dll", "WriteFile", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
         uint32_t handle = c.arg(0), buf = c.arg(1), n = c.arg(2), written = c.arg(3);
         if (handle != Host::H_STDOUT && handle != Host::H_STDERR) { set_last_error(6); return 0; }  // ERROR_INVALID_HANDLE
@@ -1196,7 +1241,9 @@ inline void Guest::register_all() {
         return (c.arg(0) == Host::H_STDOUT || c.arg(0) == Host::H_STDERR) ? 2u : 0u; });  // FILE_TYPE_CHAR
     reg.add("kernel32.dll", "SetConsoleCtrlHandler", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "FlushFileBuffers", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
-    reg.add("kernel32.dll", "CloseHandle", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { close_sync(c.arg(0)); return 1; });
+    reg.add("kernel32.dll", "CloseHandle", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        auto it=file_handles.find(c.arg(0));if(it!=file_handles.end()){Host::FileCall q{Host::FileCall::Kind::Close};q.handle=it->second;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}file_handles.erase(it);return 1;}
+        close_sync(c.arg(0));return 1; });
     reg.add("kernel32.dll", "SetHandleCount", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t { return c.arg(0); });
 
     // d3dx9_36 math: D3DX uses row-major matrices and row-vector transforms.

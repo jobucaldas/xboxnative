@@ -330,6 +330,8 @@ jobs:
         run: bash src/xbox-test/app/tests/x86-d3dx.sh
       - name: "x86 kernel32 synchronization handle semantics"
         run: bash src/xbox-test/app/tests/x86-sync.sh
+      - name: "x86 kernel32 file, attribute, size and time APIs"
+        run: bash src/xbox-test/app/tests/x86-file.sh
       - name: "x86 guest DLL loading (PE32 chain, DllMain, LoadLibrary/GetProcAddress, OS forwarders, cycles)"
         run: bash src/xbox-test/app/tests/x86-dll.sh
       - name: "x86 implicit TLS (PE32 TLS directory, block copy, callbacks; negative control)"
