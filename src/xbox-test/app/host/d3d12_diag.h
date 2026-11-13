@@ -239,17 +239,50 @@ inline std::string resourceKey(const D3D12_RESOURCE_DESC* d) {
     return fmt("%d/%d/%u/%u/%u/%llx/%d",int(d->Dimension),int(d->Format),d->SampleDesc.Count,d->MipLevels,d->DepthOrArraySize,
         (unsigned long long)(d->Flags&~(D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET|D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)),int(d->Layout));
 }
-// A DXIL container: "DXIL" magic, a fourcc hash naming the program type and a
-// content hash, so a rejected pipeline state can be matched to the game's file.
+// DXBC is the outer container magic for DXIL too. Inspect its bounded chunk
+// table so a failure line can distinguish DXBC-only bytecode from a DXIL chunk.
+inline bool dxbcHasDxilChunk(const void* code,SIZE_T length) {
+    if(!code||length<32)return false;
+    auto bytes=static_cast<const unsigned char*>(code);
+    if(memcmp(bytes,"DXBC",4))return false;
+    auto u32=[&](size_t at)->uint32_t {
+        return uint32_t(bytes[at])|(uint32_t(bytes[at+1])<<8)|(uint32_t(bytes[at+2])<<16)|(uint32_t(bytes[at+3])<<24);
+    };
+    uint32_t total=u32(24),count=u32(28);
+    if(total<32||total>length||count>(total-32)/4)return false;
+    for(uint32_t i=0;i<count;++i) {
+        uint32_t offset=u32(32+size_t(i)*4);
+        if(offset<32||offset>total-8)continue;
+        uint32_t size=u32(size_t(offset)+4);
+        if(size<=total-offset-8&&!memcmp(bytes+offset,"DXIL",4))return true;
+    }
+    return false;
+}
+// The container key is a content hash, so a rejected pipeline state can be
+// matched to the game's file without assuming the container magic is a shader type.
 inline std::string shaderText(const void* code,SIZE_T length,std::string* key=nullptr) {
     if(!code||!length){if(key)*key="none";return "bytecode=none";}
     auto bytes=static_cast<const unsigned char*>(code);
     uint64_t hash=fnv(code,size_t(std::min<SIZE_T>(length,16u<<20)));
     std::string kind="not-dxil";
     if(length>=8&&!memcmp(bytes,"DXIL",4)) kind=fmt("dxil version=%u.%u",bytes[4],bytes[5]);
-    else if(length>=4&&!memcmp(bytes,"DXBC",4)) kind="dxbc";
+    else if(length>=4&&!memcmp(bytes,"DXBC",4)) kind=dxbcHasDxilChunk(code,length)?"dxbc-container dxil-chunk=yes":"dxbc-container dxil-chunk=no";
     if(key)*key=fmt("%016llx",(unsigned long long)hash);
     return fmt("%s bytes=%llu hash=%016llx",kind.c_str(),(unsigned long long)size_t(length),(unsigned long long)hash);
+}
+inline std::string shaderKindText(const void* code,SIZE_T length) {
+    if(!code||!length)return "none";
+    auto bytes=static_cast<const unsigned char*>(code);
+    if(length>=8&&!memcmp(bytes,"DXIL",4))return fmt("dxil version=%u.%u",bytes[4],bytes[5]);
+    if(length>=4&&!memcmp(bytes,"DXBC",4))return dxbcHasDxilChunk(code,length)?"dxbc-container dxil-chunk=yes":"dxbc-container dxil-chunk=no";
+    return "not-dxil";
+}
+inline std::string graphicsStateText(const D3D12_GRAPHICS_PIPELINE_STATE_DESC* d) {
+    if(!d)return "desc=null";
+    return fmt("topology=%d so_entries=%u so_strides=%u sample_mask=0x%08x depth=%d stencil=%d cull=%d fill=%d",
+        int(d->PrimitiveTopologyType),d->StreamOutput.NumEntries,d->StreamOutput.NumStrides,d->SampleMask,
+        d->DepthStencilState.DepthEnable,d->DepthStencilState.StencilEnable,
+        int(d->RasterizerState.CullMode),int(d->RasterizerState.FillMode));
 }
 
 // ---- opt-in call trace (LocalState\d3d12trace.txt, read once at the first
@@ -560,11 +593,21 @@ static HRESULT STDMETHODCALLTYPE createGraphicsPipelineState(DevicePtr self,cons
     if(d&&traceOn.load(std::memory_order_acquire)) traceGraphicsDesc(*d);
     D3D12_DIAG_HOOK(Fn,CreateGraphicsPipelineState)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     if(d) {
-        std::string vsKey,psKey,vs=shaderText(d->VS.pShaderBytecode,d->VS.BytecodeLength,&vsKey);
-        std::string ps=shaderText(d->PS.pShaderBytecode,d->PS.BytecodeLength,&psKey);
-        D3D12_DIAG_FAILED("CreateGraphicsPipelineState",vsKey+"/"+psKey,
-            fmt("vs[%s] ps[%s] rtvfmt=%s dsvfmt=%s samples=%u nodes=%u",vs.c_str(),ps.c_str(),
-                formatText(d->RTVFormats[0]).c_str(),formatText(d->DSVFormat).c_str(),d->SampleDesc.Count,d->NodeMask));
+        std::string vsKey,psKey;
+        shaderText(d->VS.pShaderBytecode,d->VS.BytecodeLength,&vsKey);
+        shaderText(d->PS.pShaderBytecode,d->PS.BytecodeLength,&psKey);
+        std::string details=fmt("vs-kind=%s ps-kind=%s nodes=%u %s",shaderKindText(d->VS.pShaderBytecode,d->VS.BytecodeLength).c_str(),
+            shaderKindText(d->PS.pShaderBytecode,d->PS.BytecodeLength).c_str(),d->NodeMask,graphicsStateText(d).c_str());
+        // The opt-in trace already records shader hashes, formats, and samples.
+        // Keep those identifiers in default failure logs without duplicating that trace.
+        if(!traceOn.load(std::memory_order_acquire)) {
+            D3D12_RT_FORMAT_ARRAY rtv{};rtv.NumRenderTargets=d->NumRenderTargets;
+            for(UINT i=0;i<8;++i)rtv.RTFormats[i]=d->RTVFormats[i];
+            details+=fmt(" vs-bytes=%llu vs-hash=%s ps-bytes=%llu ps-hash=%s %s dsv=%s samples=%u",
+                (unsigned long long)d->VS.BytecodeLength,vsKey.c_str(),(unsigned long long)d->PS.BytecodeLength,psKey.c_str(),
+                rtvText(rtv).c_str(),formatText(d->DSVFormat).c_str(),d->SampleDesc.Count);
+        }
+        D3D12_DIAG_FAILED("CreateGraphicsPipelineState",vsKey+"/"+psKey,details);
     } else D3D12_DIAG_FAILED("CreateGraphicsPipelineState","null","desc=null");
     return hr;
 }
@@ -686,8 +729,11 @@ static HRESULT STDMETHODCALLTYPE createComputePipelineState(DevicePtr self,const
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_COMPUTE_PIPELINE_STATE_DESC*,REFIID,void**);
     D3D12_DIAG_HOOK(Fn,CreateComputePipelineState)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
     if(d) {
-        std::string key,cs=shaderText(d->CS.pShaderBytecode,d->CS.BytecodeLength,&key);
-        D3D12_DIAG_FAILED("CreateComputePipelineState",key,fmt("cs[%s]",cs.c_str()));
+        std::string key;shaderText(d->CS.pShaderBytecode,d->CS.BytecodeLength,&key);
+        std::string details=fmt("cs-kind=%s",shaderKindText(d->CS.pShaderBytecode,d->CS.BytecodeLength).c_str());
+        if(!traceOn.load(std::memory_order_acquire))
+            details+=fmt(" cs-bytes=%llu cs-hash=%s",(unsigned long long)d->CS.BytecodeLength,key.c_str());
+        D3D12_DIAG_FAILED("CreateComputePipelineState",key,details);
     } else D3D12_DIAG_FAILED("CreateComputePipelineState","null","desc=null");
     return hr;
 }
