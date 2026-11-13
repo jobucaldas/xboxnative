@@ -356,9 +356,82 @@ int main(int argc,char** argv) {
         device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,D3D12_RESOURCE_STATE_COMMON,nullptr,__uuidof(ID3D12Resource),(void**)&t);}
     CHECK(lines.size()<=d3d12_diag::kMaxFailures+d3d12_diag::kMaxProbes+4);
     CHECK(count("further failed calls suppressed")==1);
+    // The UAV hook forwards the counter and the description: a UAV on a
+    // default-heap buffer with a valid description must succeed through the hook.
+    // (Before the fix the counter was dropped and the description landed in the
+    // handle argument, so the create failed.)
+    D3D12_HEAP_PROPERTIES defaultHeap{};defaultHeap.Type=D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC uavBuffer{};
+    uavBuffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;uavBuffer.Width=1024;uavBuffer.Height=1;
+    uavBuffer.DepthOrArraySize=1;uavBuffer.MipLevels=1;uavBuffer.SampleDesc.Count=1;
+    uavBuffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;uavBuffer.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    ID3D12Resource* uavRes=nullptr;
+    CHECK(SUCCEEDED(device->CreateCommittedResource(&defaultHeap,D3D12_HEAP_FLAG_NONE,&uavBuffer,
+        D3D12_RESOURCE_STATE_COMMON,nullptr,__uuidof(ID3D12Resource),(void**)&uavRes))&&uavRes);
+    D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
+    heapDesc.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;heapDesc.NumDescriptors=4;
+    ID3D12DescriptorHeap* uavHeap=nullptr;
+    CHECK(SUCCEEDED(device->CreateDescriptorHeap(&heapDesc,__uuidof(ID3D12DescriptorHeap),(void**)&uavHeap))&&uavHeap);
+    D3D12_CPU_DESCRIPTOR_HANDLE start=uavHeap?uavHeap->GetCPUDescriptorHandleForHeapStart():D3D12_CPU_DESCRIPTOR_HANDLE{};
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+    uavDesc.Format=DXGI_FORMAT_UNKNOWN;uavDesc.ViewDimension=D3D12_UAV_DIMENSION_BUFFER;
+    uavDesc.Buffer.NumElements=16;uavDesc.Buffer.StructureByteStride=16;
+    // CreateUnorderedAccessView returns void on the device, so the forwarding is
+    // checked on a fake class: the patched UAV slot must hand its original the
+    // same counter, description and handle it was called with. The sentinel
+    // counter is never dereferenced; the old hook shifted every argument.
+    {
+        static D3D12_CPU_DESCRIPTOR_HANDLE seenHandle{};
+        static ID3D12Resource* seenCounter=nullptr;
+        static const D3D12_UNORDERED_ACCESS_VIEW_DESC* seenDesc=nullptr;
+        static ID3D12Resource* seenResource=nullptr;
+        struct Recorder {
+            static HRESULT STDMETHODCALLTYPE original(void*,ID3D12Resource* r,ID3D12Resource* c,const D3D12_UNORDERED_ACCESS_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
+                seenResource=r;seenCounter=c;seenDesc=d;seenHandle=h;return S_OK;
+            }
+        };
+        using UavFn=HRESULT(STDMETHODCALLTYPE*)(void*,ID3D12Resource*,ID3D12Resource*,const D3D12_UNORDERED_ACCESS_VIEW_DESC*,D3D12_CPU_DESCRIPTOR_HANDLE);
+        void* vtable[64]{};
+        vtable[d3d12_diag::CreateUnorderedAccessView]=reinterpret_cast<void*>(&Recorder::original);
+        size_t patchCount=0;const d3d12_diag::Patch* patches=d3d12_diag::devicePatches(patchCount);
+        void* object[1]={vtable};
+        d3d12_diag::patchClass(vtable,patches,patchCount);
+        ID3D12Resource* sentinelCounter=reinterpret_cast<ID3D12Resource*>(uintptr_t(0x1234));
+        D3D12_CPU_DESCRIPTOR_HANDLE sentinelHandle{uintptr_t(0x5678)};
+        // The real slot is reached through the patched table: the hook runs, then calls the recorder.
+        reinterpret_cast<UavFn>(vtable[d3d12_diag::CreateUnorderedAccessView])(object,uavRes,sentinelCounter,&uavDesc,sentinelHandle);
+        CHECK(seenResource==uavRes&&seenCounter==sentinelCounter&&seenDesc==&uavDesc&&seenHandle.ptr==sentinelHandle.ptr);
+    }
     // The trace: silent unless the probe file was present at the first adopt.
     if(traceMode) {
         CHECK(count("trace on (LocalState")==1);
+        // One view of each kind through its hook: each must trace under its own name.
+        UINT inc=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        D3D12_CPU_DESCRIPTOR_HANDLE srvAt=start;srvAt.ptr+=SIZE_T(inc);
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format=DXGI_FORMAT_UNKNOWN;srvDesc.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
+        srvDesc.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Buffer.NumElements=16;srvDesc.Buffer.StructureByteStride=16;
+        device->CreateShaderResourceView(uavRes,&srvDesc,srvAt);
+        D3D12_DESCRIPTOR_HEAP_DESC rtvDesc{};rtvDesc.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;rtvDesc.NumDescriptors=1;
+        D3D12_DESCRIPTOR_HEAP_DESC dsvDesc{};dsvDesc.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;dsvDesc.NumDescriptors=1;
+        ID3D12DescriptorHeap* rtvHeap=nullptr;ID3D12DescriptorHeap* dsvHeap=nullptr;
+        device->CreateDescriptorHeap(&rtvDesc,__uuidof(ID3D12DescriptorHeap),(void**)&rtvHeap);
+        device->CreateDescriptorHeap(&dsvDesc,__uuidof(ID3D12DescriptorHeap),(void**)&dsvHeap);
+        // A buffer is not a render target or depth target, so these two fail;
+        // the trace still names them, which is what this checks.
+        if(rtvHeap) device->CreateRenderTargetView(uavRes,nullptr,rtvHeap->GetCPUDescriptorHandleForHeapStart());
+        if(dsvHeap) device->CreateDepthStencilView(uavRes,nullptr,dsvHeap->GetCPUDescriptorHandleForHeapStart());
+        size_t viewLines=0;
+        d3d12_diag::flushTrace();
+        for(auto& l:lines) if(l.rfind("trace #",0)==0) {
+            for(const char* n:{" CreateShaderResourceView "," CreateUnorderedAccessView "," CreateRenderTargetView "," CreateDepthStencilView "})
+                if(l.find(n)!=std::string::npos) ++viewLines;
+        }
+        CHECK(viewLines>=4);
+        CHECK(count(" Slot ")==0);
+        if(rtvHeap) rtvHeap->Release();
+        if(dsvHeap) dsvHeap->Release();
         size_t before=lines.size();
         d3d12_diag::flushTrace();
         CHECK(lines.size()-before==1+std::min(size_t(d3d12_diag::traceCount.load()),d3d12_diag::kTraceRing));
@@ -381,6 +454,8 @@ int main(int argc,char** argv) {
     }
     if(failures)for(auto& l:lines)printf("  %s\n",l.c_str());
     if(made)made->Release();
+    if(uavRes)uavRes->Release();
+    if(uavHeap)uavHeap->Release();
     if(fence)fence->Release();
     if(list)list->Release();
     if(allocator)allocator->Release();

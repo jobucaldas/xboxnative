@@ -284,7 +284,10 @@ inline void flushTrace() {
     }
 }
 
-#define D3D12_DIAG_HOOK(Type,slot) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return E_FAIL; const size_t traceAt=traceBegin(#slot);
+// nameStr is the name the trace records: a string literal, never a stringified
+// template parameter (that stringifies the parameter's token, e.g. "Slot").
+#define D3D12_DIAG_HOOK_AS(Type,slot,nameStr) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return E_FAIL; const size_t traceAt=traceBegin(nameStr);
+#define D3D12_DIAG_HOOK(Type,slot) D3D12_DIAG_HOOK_AS(Type,slot,#slot)
 #define D3D12_DIAG_FAILED(name,key,text) do{if(FAILED(hr))report(false,std::string(name)+" "+hex(hr)+" "+(key),std::string(name)+" hr="+hex(hr)+" "+(text));}while(0)
 
 using DevicePtr=void*;
@@ -515,7 +518,7 @@ static HRESULT STDMETHODCALLTYPE createCommandSignature(DevicePtr self,const D3D
 template<int Slot,class Desc,class Describe>
 static HRESULT viewCall(DevicePtr self,const char* name,ID3D12Resource* resource,const Desc* d,D3D12_CPU_DESCRIPTOR_HANDLE handle,Describe describe) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,const Desc*,D3D12_CPU_DESCRIPTOR_HANDLE);
-    D3D12_DIAG_HOOK(Fn,Slot)HRESULT hr=call(self,resource,d,handle); traceEnd(traceAt,hr);
+    D3D12_DIAG_HOOK_AS(Fn,Slot,name)HRESULT hr=call(self,resource,d,handle); traceEnd(traceAt,hr);
     if(FAILED(hr)) {
         std::string text,key;describe(d,text,key);
         D3D12_DIAG_FAILED(name,key+fmt("/%llx",(unsigned long long)handle.ptr),
@@ -528,10 +531,20 @@ static HRESULT STDMETHODCALLTYPE createSrv(DevicePtr self,ID3D12Resource* r,cons
         if(!v){text="view=default";key="default";return;}
         text=fmt("viewfmt=%s dim=%d",formatText(v->Format).c_str(),int(v->ViewDimension));key=fmt("%d/%d",int(v->Format),int(v->ViewDimension));});
 }
-static HRESULT STDMETHODCALLTYPE createUav(DevicePtr self,ID3D12Resource* r,const D3D12_UNORDERED_ACCESS_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
-    return viewCall<CreateUnorderedAccessView>(self,"CreateUnorderedAccessView",r,d,h,[](const D3D12_UNORDERED_ACCESS_VIEW_DESC* v,std::string& text,std::string& key){
-        if(!v){text="view=default";key="default";return;}
-        text=fmt("viewfmt=%s dim=%d",formatText(v->Format).c_str(),int(v->ViewDimension));key=fmt("%d/%d",int(v->Format),int(v->ViewDimension));});
+// CreateUnorderedAccessView takes a counter resource before the description, so
+// it cannot share viewCall's (resource, desc, handle) shape: forwarding that
+// shape dropped the counter and shifted the description into the handle.
+static HRESULT STDMETHODCALLTYPE createUav(DevicePtr self,ID3D12Resource* r,ID3D12Resource* counter,const D3D12_UNORDERED_ACCESS_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
+    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Resource*,ID3D12Resource*,const D3D12_UNORDERED_ACCESS_VIEW_DESC*,D3D12_CPU_DESCRIPTOR_HANDLE);
+    D3D12_DIAG_HOOK(Fn,CreateUnorderedAccessView)HRESULT hr=call(self,r,counter,d,h); traceEnd(traceAt,hr);
+    if(FAILED(hr)) {
+        std::string text,key;
+        if(!d){text="view=default";key="default";}
+        else {text=fmt("viewfmt=%s dim=%d",formatText(d->Format).c_str(),int(d->ViewDimension));key=fmt("%d/%d",int(d->Format),int(d->ViewDimension));}
+        D3D12_DIAG_FAILED("CreateUnorderedAccessView",key+fmt("/%llx",(unsigned long long)h.ptr),
+            text+fmt(" handle=0x%llx res=%d counter=%d",(unsigned long long)h.ptr,r!=nullptr,counter!=nullptr));
+    }
+    return hr;
 }
 static HRESULT STDMETHODCALLTYPE createRtv(DevicePtr self,ID3D12Resource* r,const D3D12_RENDER_TARGET_VIEW_DESC* d,D3D12_CPU_DESCRIPTOR_HANDLE h) {
     return viewCall<CreateRenderTargetView>(self,"CreateRenderTargetView",r,d,h,[](const D3D12_RENDER_TARGET_VIEW_DESC* v,std::string& text,std::string& key){
