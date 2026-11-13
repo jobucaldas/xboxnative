@@ -19,18 +19,27 @@
 // only when the GPU wrote the expected values), a UAV barrier, and ResizeBuffers
 // on the live flip-model chain. Same exit-code conventions.
 //
-// Device-creation attempts (console evidence, PR #160: the null-adapter path
-// fails there with DXGI_ERROR_DEVICE_RESET while d3d11 passes): the fixture
-// tries, in order, null adapter at FL 11_0, then the factory's adapter 0
-// (Play wraps it; the host route unwraps it) at FL 11_0, then that adapter at
-// FL 12_0. Exit codes: 10 window, 11 no device at all (null adapter and the
-// fallback factory/enum steps failed with their own codes 81/82 first), 81
-// factory create failed, 82 EnumAdapters1 failed, 83 every D3D12CreateDevice
-// attempt failed. 12 CheckFeatureSupport, 13 queue, 14 factory, 15 swap chain,
-// 16 RTV heap, 17 GetBuffer, 18-22 allocator/list/fence/event, 40-55 the
-// triangle pipeline, 56 debug-layer errors, 57/58 root signature 1.1,
-// 59-69/79/80 the compute pass (43 = readback mismatch, BLOCKED, never a
-// pass), 70-78 ResizeBuffers. The log is the evidence.
+// Device-creation attempts (console evidence, PR #160 and issue #175: every
+// D3D12CreateDevice shape fails there with DXGI_ERROR_DEVICE_RESET while
+// d3d11 — which layers on a D3D12 device — passes, and so do Mesa's GL d3d12
+// driver and dzn): the fixture tries, in order, the device-factory path the
+// two working consumers take (D3D12GetInterface CLSID_D3D12DeviceFactory ->
+// SetFlags(ALLOW_RETURNING_EXISTING_DEVICE|ALLOW_RETURNING_INCOMPATIBLE_) ->
+// CreateDevice, before any debug-layer enable, FL 1_0_GENERIC first as the GL
+// driver does), then the previous chain: null adapter at FL 11_0, the
+// factory's adapter 0 (Play wraps it; the host route unwraps it) at FL 11_0,
+// then that adapter at FL 12_0. The factory attempts bypass Play's
+// D3D12CreateDevice hook (D3D12GetInterface is not hooked, so GetProcAddress
+// reaches the host's d3d12.dll directly) and log their own results; the host
+// route logs the direct ones. Exit codes: 10 window, 11 no device at all
+// (null adapter and the fallback factory/enum steps failed with their own
+// codes 81/82 first), 81 factory create failed, 82 EnumAdapters1 failed, 83
+// every device-creation attempt failed. 12 CheckFeatureSupport, 13 queue,
+// 14 factory, 15 swap chain, 16 RTV heap, 17 GetBuffer, 18-22
+// allocator/list/fence/event, 40-55 the triangle pipeline, 56 debug-layer
+// errors, 57/58 root signature 1.1, 59-69/79/80 the compute pass (43 =
+// readback mismatch, BLOCKED, never a pass), 70-78 ResizeBuffers. The log is
+// the evidence.
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -65,28 +74,80 @@ static HWND guestWindow() {
 }
 
 DWORD d3d12_entry() {
-    // The debug layer, where the platform has it: enabled before the device
-    // so API misuse is recorded, and the recorded errors are counted before
-    // the run reports success. Optional — a host without the debug layer
-    // simply skips the check.
-    bool debugLayer=false;
-    {ID3D12Debug1* debug=nullptr;
-     if(SUCCEEDED(D3D12GetDebugInterface(__uuidof(ID3D12Debug1),(void**)&debug))&&debug){
-         debug->EnableDebugLayer();debug->Release();debugLayer=true;}}
+    // No CRT: the log lines are assembled by hand the way the Vulkan fixtures
+    // do (OutputDebugStringA; Play routes it to the launch log).
+    auto append=[](char* p,const char* text){
+        while(*text)*p++=*text++;
+        return p;};
+    auto appendHex=[](char* p,unsigned long v){
+        static const char hex[]="0123456789abcdef";
+        *p++='0';*p++='x';
+        for(int shift=28;shift>=0;shift-=4)*p++=hex[(v>>shift)&0xfu];
+        return p;};
+    auto appendPtr=[](char* p,const void* pointer){
+        static const char hex[]="0123456789abcdef";
+        *p++='0';*p++='x';
+        for(int shift=(int)sizeof(void*)*8-4;shift>=0;shift-=4)*p++=hex[((uintptr_t)pointer>>shift)&0xfu];
+        return p;};
     HWND window=guestWindow();
     if(!window)return 10;
     // The adapter argument is optional; a D3D12 game that picks one passes the
     // factory's adapter, which Play wraps. Default (null) exercises the same
     // path a game takes when it lets the runtime choose.
-    // Console 0.5.303 evidence: the null-adapter default path fails there with
-    // DXGI_ERROR_DEVICE_RESET (0x887a0007) while d3d11 on the same stack
-    // succeeds — and that d3d11 layers on a D3D12 device, so one can exist
-    // in-process. Fall back the way a game that picks an adapter would:
-    // enumerate the factory's adapter 0 and hand it over explicitly, at
-    // 11_0 then 12_0. The host route logs each attempt separately
-    // (adapter=default vs adapter=given), so the console log names the
-    // working path.
+    // Console evidence (issue #175): every direct D3D12CreateDevice call fails
+    // there with DXGI_ERROR_DEVICE_RESET (0x887a0007) while d3d11 on the same
+    // stack succeeds — and that d3d11 layers on a D3D12 device, so one can
+    // exist in-process. The two consumers that DO get a device there (Mesa's
+    // GL d3d12 driver and dzn) never call the global export: they ask
+    // D3D12GetInterface for the ID3D12DeviceFactory, set the two
+    // ALLOW_RETURNING flags and call CreateDevice, before any debug-layer
+    // enable and with D3D_FEATURE_LEVEL_1_0_GENERIC first. Attempt A below is
+    // exactly that path (it bypasses Play's D3D12CreateDevice hook, logging
+    // its own result); the previous chain follows as attempt B so one console
+    // run discriminates all of it. The host route logs each direct attempt
+    // separately (adapter=default vs adapter=given), so the log names the
+    // working path. The debug layer is enabled only after device creation:
+    // enabling it first is the other difference from the working consumers
+    // (HYPOTHESIS: it may poison the create on the console's stack).
     ID3D12Device* device=nullptr;
+    // ---- attempt A: the device factory the working consumers use ----
+    // D3D12GetInterface is not in the mingw import library and not hooked by
+    // Play, so GetProcAddress reaches the host's d3d12.dll directly — the
+    // same bypass the working consumers get by loading d3d12.dll themselves.
+    typedef HRESULT (WINAPI* PFN_D3D12GetInterface)(REFCLSID,REFIID,void**);
+    static const GUID deviceFactoryClsid=
+        {0x114863bf,0xc386,0x4aee,{0xb3,0x9d,0x8f,0x0b,0xbb,0x06,0x29,0x55}};
+    HMODULE d3d12Module=GetModuleHandleW(L"d3d12.dll");
+    auto getInterface=d3d12Module
+        ?(PFN_D3D12GetInterface)GetProcAddress(d3d12Module,"D3D12GetInterface"):nullptr;
+    ID3D12DeviceFactory* deviceFactory=nullptr;
+    if(getInterface) {
+        HRESULT fhr=getInterface(deviceFactoryClsid,__uuidof(ID3D12DeviceFactory),(void**)&deviceFactory);
+        OutputDebugStringA("PLAY-D3D12 attempt A GetInterface(CLSID_D3D12DeviceFactory)\n");
+        if(SUCCEEDED(fhr)&&deviceFactory) {
+            deviceFactory->SetFlags(D3D12_DEVICE_FACTORY_FLAG_ALLOW_RETURNING_EXISTING_DEVICE|
+                D3D12_DEVICE_FACTORY_FLAG_ALLOW_RETURNING_INCOMPATIBLE_EXISTING_DEVICE);
+            static const D3D_FEATURE_LEVEL generic=(D3D_FEATURE_LEVEL)0x100;   // 1_0_GENERIC
+            fhr=deviceFactory->CreateDevice(nullptr,generic,__uuidof(ID3D12Device),(void**)&device);
+            if(FAILED(fhr)||!device)
+                fhr=deviceFactory->CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,
+                    __uuidof(ID3D12Device),(void**)&device);
+            {char b[128];char* p=b;
+             p=append(p,"PLAY-D3D12 attempt A factory CreateDevice hr=");
+             p=appendHex(p,(unsigned long)fhr);
+             p=append(p," device=");p=appendPtr(p,device);
+             *p++='\n';*p=0;OutputDebugStringA(b);}
+            deviceFactory->Release();
+        } else {
+            char b[128];char* p=b;
+            p=append(p,"PLAY-D3D12 attempt A GetInterface hr=");
+            p=appendHex(p,(unsigned long)fhr);
+            *p++='\n';*p=0;OutputDebugStringA(b);
+        }
+    } else {
+        OutputDebugStringA("PLAY-D3D12 attempt A skipped: no D3D12GetInterface\n");
+    }
+    // ---- attempt B: the direct D3D12CreateDevice chain (Play's hook) ----
     HRESULT hr=D3D12CreateDevice(nullptr,D3D_FEATURE_LEVEL_11_0,__uuidof(ID3D12Device),(void**)&device);
     if(FAILED(hr)||!device) {
         IDXGIFactory4* factory4=nullptr;
@@ -99,6 +160,14 @@ DWORD d3d12_entry() {
         chosen->Release();factory4->Release();
         if(FAILED(hr)||!device)return 83;
     }
+    // The debug layer, where the platform has it: enabled after the device so
+    // the attempts above run in the order the working consumers take, and the
+    // recorded errors are counted before the run reports success. Optional —
+    // a host without the debug layer simply skips the check.
+    bool debugLayer=false;
+    {ID3D12Debug1* debug=nullptr;
+     if(SUCCEEDED(D3D12GetDebugInterface(__uuidof(ID3D12Debug1),(void**)&debug))&&debug){
+         debug->EnableDebugLayer();debug->Release();debugLayer=true;}}
     // Shader model: a D3D12 game reads this before choosing its shader set.
     D3D12_FEATURE_DATA_SHADER_MODEL model{};
     model.HighestShaderModel=D3D_SHADER_MODEL_6_6;
