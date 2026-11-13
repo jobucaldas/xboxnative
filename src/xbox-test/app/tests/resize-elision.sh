@@ -7,5 +7,6 @@
 # the host toolchain runs it directly (like the other offline unit tests).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+mkdir -p out
 c++ -std=c++17 -O2 -Wall -Wextra -Werror tests/resize-elision.cpp -o out/resize-elision-test
 out/resize-elision-test
