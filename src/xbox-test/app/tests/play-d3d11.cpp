@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <dxgi1_2.h>
 #include <d3d11.h>
+#include "wine_probe.h"
 #include "../../uwph/host/shaders/triangle_bytecode.h"
 #include "../../uwph/host/shaders/depth_bytecode.h"
 
@@ -189,33 +190,22 @@ DWORD d3d_entry() {
     // D3D11-on-12 runs them in full); under Wine they are skipped so the rest
     // of the suite stays reachable and exit 42 remains the off-device verdict.
     // Wine's own ntdll exports wine_get_version; the console's ntdll never
-    // does. Detection must not go through LoadLibraryW/GetProcAddress: Play
-    // hooks both and answers the lookup its own way, which could decide the
-    // answer. Instead the probe reads the export table straight out of the
-    // loaded ntdll image's PE headers in memory — no loader API in the path.
-    const bool onWine=[&]{
-        HMODULE ntdll=GetModuleHandleW(L"ntdll.dll");
-        if(!ntdll)return false;
-        const auto* base=static_cast<const unsigned char*>(static_cast<const void*>(ntdll));
-        const auto* dos=static_cast<const IMAGE_DOS_HEADER*>(static_cast<const void*>(base));
-        if(dos->e_magic!=IMAGE_DOS_SIGNATURE)return false;
-        const auto* nt= reinterpret_cast<const IMAGE_NT_HEADERS64*>(base+dos->e_lfanew);
-        if(nt->Signature!=IMAGE_NT_SIGNATURE)return false;
-        const auto& exportDir=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-        if(!exportDir.VirtualAddress)return false;
-        const auto* exports=reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(base+exportDir.VirtualAddress);
-        const DWORD* names=reinterpret_cast<const DWORD*>(base+exports->AddressOfNames);
-        for(DWORD i=0;i<exports->NumberOfNames;++i){
-            const char* name=reinterpret_cast<const char*>(base+names[i]);
-            // Byte-exact match on the export name; no string API that a hook
-            // could intercept.
-            const char* want="wine_get_version";
-            const char* a=name;const char* b=want;
-            while(*a&&*a==*b){++a;++b;}
-            if(*a==*b)return true;   // both ended: exact match
-        }
-        return false;
-    }();
+    // does. The probe (tests/wine_probe.h) reads the export table straight
+    // out of the loaded ntdll image's PE headers in memory — no loader API
+    // in the path, so nothing Play hooks can decide the answer.
+    const bool onWine=wine_probe::on_wine();
+    // A skipped pass must say so in the log the way the OpenGL fixture's
+    // stages do (OutputDebugStringA; Play routes it to the launch log), so a
+    // Wine run's log shows exactly which stages did not run and why — the
+    // run can never be mistaken for full coverage. On the console the probe
+    // answers false (ntdll has no wine_get_version export) and no skip line
+    // is ever emitted.
+    if(onWine){
+        OutputDebugStringA("PLAY-D3D11 STAGE msaa-resolve skipped (wine: GL d3d11 faults on a 4x MSAA clear/resolve)\n");
+        OutputDebugStringA("PLAY-D3D11 STAGE stream-out skipped (wine: GL d3d11 faults on the SO staging readback)\n");
+        OutputDebugStringA("PLAY-D3D11 STAGE indirect-draw skipped (wine: GL d3d11 faults on staging readback after an indirect draw)\n");
+        OutputDebugStringA("PLAY-D3D11 STAGE occlusion-query skipped (wine: GL d3d11 faults inside its occlusion-query path)\n");
+    }
     if(!onWine){
     D3D11_TEXTURE2D_DESC msaaDesc{};
     msaaDesc.Width=64;msaaDesc.Height=64;msaaDesc.MipLevels=1;msaaDesc.ArraySize=1;
@@ -761,9 +751,11 @@ DWORD d3d_entry() {
 
     // A Wine host never reaches PASS: the four gated passes (MSAA, stream-out,
     // indirect, query) did not run, so 42 would claim coverage the run does
-    // not have. 95 is BLOCKED wine-host — the suite ran, the platform (Wine's
-    // GL d3d11) is the limit, and the console's D3D11-on-12 runs those passes
-    // in full.
+    // not have. The verdict is BLOCKED, never a pass — 95 maps to
+    // "BLOCKED wine-host" in selftest_plan (the owner's spec asked for exit
+    // 43, but 43 already means BLOCKED pixel-readback for this fixture's
+    // first pass; a distinct code keeps the two causes distinguishable in
+    // the verdict line). The console's D3D11-on-12 runs those passes in full.
     if(onWine)return 95;
 
     backView->Release();backBuffer->Release();
