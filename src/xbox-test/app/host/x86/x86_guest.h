@@ -655,6 +655,9 @@ inline void Guest::register_all() {
     reg.add("msvcrt.dll", "realloc", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t { return heap.realloc(c.arg(0), c.arg(1)); });
     reg.add("msvcrt.dll", "_malloc", Conv::Cdecl, 1, [this](Cpu& c) -> uint32_t { return heap.alloc(c.arg(0)); });
     reg.add("msvcrt.dll", "_free", Conv::Cdecl, 1, [this](Cpu& c) -> uint32_t { heap.release(c.arg(0)); return 0; });
+    // rotate intrinsics the MSVC CRT exports (games call them via _lrotl)
+    reg.add("msvcrt.dll", "_lrotl", Conv::Cdecl, 2, [](Cpu& c) -> uint32_t { uint32_t v = c.arg(0), n = c.arg(1) & 31; return n ? (v << n) | (v >> (32 - n)) : v; });
+    reg.add("msvcrt.dll", "_lrotr", Conv::Cdecl, 2, [](Cpu& c) -> uint32_t { uint32_t v = c.arg(0), n = c.arg(1) & 31; return n ? (v >> n) | (v << (32 - n)) : v; });
     // strings/memory
     reg.add("msvcrt.dll", "strlen", Conv::Cdecl, 1, [this](Cpu& c) -> uint32_t { return uint32_t(str(c.arg(0)).size()); });
     reg.add("msvcrt.dll", "strnlen", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
