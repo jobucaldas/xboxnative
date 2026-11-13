@@ -646,6 +646,34 @@ static void test_thunks() {
     EXPECT(fault_of([&] { m2.cpu.run(0); }) == FaultKind::BadThunk, "mid-stub execution must fault");
 }
 
+// ---------- thunk page capacity: the sentinel never collides with a stub ----------
+static void test_thunk_capacity() {
+    // map_thunk_page pins capacity and the sentinel to the page's LAST slot;
+    // filling the table to capacity must leave every stub address strictly
+    // below the sentinel, and one more add must be refused.
+    Memory mem; ThunkTable t; t.base = 0x7FFD0000;
+    map_thunk_page(mem, t);
+    EXPECT(t.capacity != 0, "map_thunk_page pins a capacity");
+    uint32_t sent = t.sentinel();
+    EXPECT(sent == t.base + t.capacity * t.stride, "sentinel is the slot after the last usable stub");
+    EXPECT(sent >= t.base + 4096 - t.stride, "sentinel sits in the page's final slot");
+    std::vector<uint32_t> addrs;
+    bool full = false;
+    try {
+        for (;;) {
+            Thunk tk{"x.dll", "fill", Conv::Cdecl, 0, [](Cpu&) -> uint32_t { return 0; }};
+            uint32_t a = t.add(tk);
+            EXPECT(a != sent, "stub address equals the sentinel (0x%x)", a);
+            addrs.push_back(a);
+        }
+    } catch (const std::exception&) { full = true; }   // ThunkTable::add refuses past capacity
+    EXPECT(full, "filling past capacity is refused");
+    EXPECT(addrs.size() == t.capacity, "capacity stubs fit (%zu of %u)", addrs.size(), t.capacity);
+    for (uint32_t a : addrs) EXPECT(a < sent, "stub 0x%x at or above the sentinel 0x%x", a, sent);
+    // The mapped page covers the sentinel slot.
+    EXPECT(mem.r32(sent) != 0, "sentinel slot is inside the mapped page");
+}
+
 // ---------- (4) owned fixture PE ----------
 static std::vector<uint8_t> slurp(const char* path) {
     std::ifstream f(path, std::ios::binary); if (!f) { printf("FAIL cannot open fixture %s\n", path); exit(2); }
@@ -688,6 +716,7 @@ int main(int argc, char** argv) {
         {"x87forms", test_x87_forms, "X86-CORE PASS: x87 memory forms, stack discipline, control/status words and 80-bit round trip"},
         {"sse-regressions", test_sse_regressions, "X86-CORE PASS: bt imm, movd/movq, movmskps/pmovmskb, sqrtss, unpck, packuswb, stmxcsr, fptan/fxtract match this machine's CPU"},
         {"thunks", test_thunks, "X86-CORE PASS: stdcall/cdecl thunks, nested guest callbacks, callee-saved registers preserved"},
+        {"thunk-capacity", test_thunk_capacity, "X86-CORE PASS: thunk page capacity pinned, sentinel is the last slot, fill to capacity never collides"},
     };
     for (auto& s : suites) { int before = failures; s.fn(); if (failures == before) printf("%s\n", s.pass); else printf("X86-CORE FAIL: %s\n", s.name); }
     printf("(%llu hardware-compared cases)\n", (unsigned long long)alu_cases);

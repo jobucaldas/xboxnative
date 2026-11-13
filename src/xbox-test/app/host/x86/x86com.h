@@ -96,14 +96,18 @@ struct ComSpace {
         // The vtable is shared per interface and immutable once built: every
         // proxy of the interface points at the same stub array. It is built at
         // first create, when the ThunkTable is reachable, and bounds-checked
-        // in the vtable window.
+        // in the vtable window. The build is atomic: every thunk is added
+        // BEFORE the interface is marked built and the window advanced, so a
+        // ThunkTable::add failure (page full) leaves the interface unbuilt
+        // and the next create retries it from scratch.
         if (it->second.vtable == 0) {
             if (vtable_top + it->second.slots * 4 > VTABLE_BASE + VTABLE_REGION) {
                 char b[128]; snprintf(b, sizeof b, "COM: vtable window exhausted registering %s (%u slots)", iface, it->second.slots);
                 throw Fault(FaultKind::AccessViolation, 0, 0, b);
             }
-            it->second.vtable = vtable_top;
-            vtable_top += it->second.slots * 4;
+            uint32_t vt = vtable_top;
+            std::vector<uint32_t> stubs;
+            stubs.reserve(it->second.slots);
             for (unsigned s = 0; s < it->second.slots; ++s) {
                 unsigned argc = 0; Marshaller fn;
                 auto m = it->second.methods.find(s);
@@ -111,9 +115,12 @@ struct ComSpace {
                 else if (s == 0) { argc = 3; }
                 else if (s == 1) { argc = 1; fn = default_addref; }
                 else if (s == 2) { argc = 1; fn = default_release; }
-                cpu.mem.w32(it->second.vtable + s * 4, cpu.thunks.add(Thunk{"com", slot_label(iface, s), Conv::Stdcall, argc,
+                stubs.push_back(cpu.thunks.add(Thunk{"com", slot_label(iface, s), Conv::Stdcall, argc,
                     [this, iface, s](Cpu& c) -> uint32_t { return dispatch(iface, s, c); }}));
             }
+            for (unsigned s = 0; s < it->second.slots; ++s) cpu.mem.w32(vt + s * 4, stubs[s]);
+            it->second.vtable = vt;
+            vtable_top += it->second.slots * 4;
         }
         // Proxy blocks are 4 bytes (one vtable pointer); freed blocks are
         // recycled through a free list, so create/destroy churn never grows
@@ -164,6 +171,8 @@ struct ComSpace {
     }
 
     unsigned live() const { return unsigned(proxies.size()); }
+    // Observability for tests: the interface record (vtable address, slots).
+    const Iface& by_name(const char* iface) const { return ifaces.at(iface); }
     unsigned long created = 0;   // observability for tests and the launch log
 
     // Engine teardown: the space holds one host reference per live proxy (taken

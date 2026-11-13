@@ -36,8 +36,11 @@ struct ThunkTable {
     // The process-return sentinel is the last slot of the mapped page and never
     // moves: GetProcAddress can add stubs while a host->guest call is running,
     // and a sentinel derived from entries.size() would then land on the address
-    // that call is waiting to return to.
-    uint32_t sentinel() const { return capacity ? base + (capacity - 1) * stride : base + uint32_t(entries.size()) * stride; }
+    // that call is waiting to return to. With a capacity (set by map_thunk_page)
+    // the sentinel is the slot AFTER the last usable stub slot: capacity is the
+    // number of stubs the page can hold, so base + capacity*stride is the page's
+    // final slot and no stub address can ever equal it.
+    uint32_t sentinel() const { return capacity ? base + capacity * stride : base + uint32_t(entries.size()) * stride; }
     uint32_t span() const { return uint32_t(entries.size() + 1) * stride; }
     const Thunk* at(uint32_t eip) const {
         if (eip < base || eip >= base + uint32_t(entries.size()) * stride || (eip - base) % stride) return nullptr;

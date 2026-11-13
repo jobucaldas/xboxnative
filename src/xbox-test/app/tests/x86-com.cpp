@@ -434,6 +434,40 @@ int main() {
                name_ran, cpu2.reg[EBX], name_fault.c_str());
     }
 
+    // ---- a ThunkTable::add failure mid-build leaves the interface retryable ----
+    // The vtable build adds every slot's thunk BEFORE marking the interface
+    // built; if add() throws partway (page full), the interface must look
+    // unbuilt (vtable==0) so the next create retries from scratch instead of
+    // handing out a vtable with missing slots.
+    {
+        Memory mem2; ThunkTable thunks2; ComSpace com2; Cpu cpu2{mem2, thunks2};
+        thunks2.base = 0x7FF60000;
+        map_thunk_page(mem2, thunks2);
+        // Shrink the visible capacity so the build runs out of slots mid-way:
+        // an 8-slot interface needs 8 entries; set capacity to a value the
+        // pre-existing entries + a few of ours can overflow.
+        thunks2.capacity = 4;   // 4 stub slots before "x86 thunk page full"
+        com2.interface_("IPartial", 8);
+        struct H {} h; (void)h;
+        bool threw = false;
+        try { com2.create(cpu2, "IPartial", &h, nullptr, nullptr); }
+        catch (const std::exception& e) { threw = std::string(e.what()).find("thunk page full") != std::string::npos; }
+        EXPECT(threw, "vtable build that overflows the thunk page throws");
+        // The interface must NOT be marked built: no vtable reserved, and the
+        // window did not advance past the failed attempt.
+        EXPECT(com2.by_name("IPartial").vtable == 0, "failed build leaves the interface unbuilt");
+        // Retry with room: same space, capacity raised — the build succeeds
+        // from scratch and the proxy works.
+        thunks2.capacity = 64;
+        uint32_t p = com2.create(cpu2, "IPartial", &h, nullptr, nullptr);
+        EXPECT(p != 0, "retry after a failed build succeeds");
+        EXPECT(com2.by_name("IPartial").vtable != 0, "retry builds the vtable");
+        // Every slot of the built vtable is a distinct valid stub address.
+        uint32_t vt = com2.by_name("IPartial").vtable;
+        for (unsigned s = 0; s < 8; ++s)
+            EXPECT(cpu2.thunks.at(cpu2.mem.r32(vt + s * 4)) != nullptr, "slot %u stub valid after retry", s);
+    }
+
     printf(failures ? "X86-COM FAIL: %d failure(s) after teardown checks\n" : "X86-COM PASS: vtable stubs, stdcall pops, struct translator, guest callback, refcounts, fault-by-name, stale-proxy fault, teardown releases host refs once\n", failures);
     return failures ? 1 : 0;
 }
