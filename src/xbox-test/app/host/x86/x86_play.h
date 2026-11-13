@@ -14,7 +14,28 @@
 #include <string>
 #include <vector>
 #include "x86_guest.h"
+#if defined(_WIN32)
+#include "../../../uwph/kernel32/route.h"
+#endif
 namespace x86 {
+#if defined(_WIN32)
+inline void play_file_call(Host::FileCall& q) {
+    auto failed=[&](){q.error=GetLastError();};
+    switch(q.kind) {
+    case Host::FileCall::Kind::CreateA: { HANDLE h=kernel32_core::create_file_a(q.path_a.c_str(),q.args[0],q.args[1],nullptr,q.args[2],q.args[3],(HANDLE)(uintptr_t)q.template_handle);q.value=(uintptr_t)h;q.succeeded=h!=INVALID_HANDLE_VALUE;if(!q.succeeded)failed();break; }
+    case Host::FileCall::Kind::CreateW: { std::wstring p(q.path_w.begin(),q.path_w.end());HANDLE h=kernel32_core::create_file_w(p.c_str(),q.args[0],q.args[1],nullptr,q.args[2],q.args[3],(HANDLE)(uintptr_t)q.template_handle);q.value=(uintptr_t)h;q.succeeded=h!=INVALID_HANDLE_VALUE;if(!q.succeeded)failed();break; }
+    case Host::FileCall::Kind::Close:q.succeeded=kernel32_core::close_handle((HANDLE)(uintptr_t)q.handle)!=FALSE;if(!q.succeeded)failed();break;
+    case Host::FileCall::Kind::Read:{q.data.resize(q.args[0]);DWORD n=0;q.succeeded=kernel32_core::read_file((HANDLE)(uintptr_t)q.handle,q.data.data(),q.args[0],&n,nullptr)!=FALSE;q.args[1]=n;q.data.resize(n);if(!q.succeeded)failed();break;}
+    case Host::FileCall::Kind::Size:{DWORD high=0,low=kernel32_core::file_size((HANDLE)(uintptr_t)q.handle,q.args[0]?&high:nullptr);q.value=low;q.args[1]=high;q.error=GetLastError();q.succeeded=low!=INVALID_FILE_SIZE||q.error==ERROR_SUCCESS;break;}
+    case Host::FileCall::Kind::Time:{FILETIME t[3]{};using Fn=BOOL(WINAPI*)(HANDLE,LPFILETIME,LPFILETIME,LPFILETIME);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","GetFileTime");q.succeeded=fn&&(fn((HANDLE)(uintptr_t)q.handle,q.args[0]?&t[0]:nullptr,q.args[1]?&t[1]:nullptr,q.args[2]?&t[2]:nullptr)!=FALSE);q.data.resize(sizeof(t));memcpy(q.data.data(),t,sizeof(t));if(!q.succeeded)failed();break;}
+    case Host::FileCall::Kind::AttributesA:{using Fn=DWORD(WINAPI*)(LPCSTR);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","GetFileAttributesA");SetLastError(ERROR_SUCCESS);q.value=fn?fn(q.path_a.c_str()):INVALID_FILE_ATTRIBUTES;q.succeeded=q.value!=INVALID_FILE_ATTRIBUTES;if(!q.succeeded)failed();break;}
+    case Host::FileCall::Kind::Seek:{using Fn=DWORD(WINAPI*)(HANDLE,LONG,PLONG,DWORD);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","SetFilePointer");LONG high=LONG(q.args[1]);SetLastError(ERROR_SUCCESS);DWORD low=fn?fn((HANDLE)(uintptr_t)q.handle,LONG(q.args[0]),q.args[3]?&high:nullptr,q.args[2]):INVALID_SET_FILE_POINTER;q.value=low;q.args[1]=DWORD(high);q.error=GetLastError();q.succeeded=low!=INVALID_SET_FILE_POINTER||q.error==ERROR_SUCCESS;break;}
+    case Host::FileCall::Kind::End:q.succeeded=SetEndOfFile((HANDLE)(uintptr_t)q.handle)!=FALSE;if(!q.succeeded)failed();break;
+    case Host::FileCall::Kind::TimeConvert:{FILETIME in{};SYSTEMTIME out{};memcpy(&in,q.data.data(),8);q.succeeded=FileTimeToSystemTime(&in,&out)!=FALSE;q.data.resize(sizeof(out));memcpy(q.data.data(),&out,sizeof(out));if(!q.succeeded)failed();break;}
+    case Host::FileCall::Kind::TimeLocal:{FILETIME in{},out{};memcpy(&in,q.data.data(),8);q.succeeded=FileTimeToLocalFileTime(&in,&out)!=FALSE;q.data.resize(sizeof(out));memcpy(q.data.data(),&out,8);if(!q.succeeded)failed();break;}
+    }
+}
+#endif
 struct PlayResult {
     bool loaded = false;        // the PE32 image mapped and its imports were bound
     bool finished = false;      // the guest called ExitProcess (or its entry returned)
@@ -51,6 +72,9 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
     PlayResult r;
     try {
         Memory mem; ThunkTable table; Host host; Registry reg;
+#if defined(_WIN32)
+        host.file_call = play_file_call;
+#endif
         host.tee = tee;
         Guest guest(mem, host, reg);
         guest.exe_path = name;
