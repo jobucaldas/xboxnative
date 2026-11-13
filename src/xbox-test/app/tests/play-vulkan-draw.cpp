@@ -67,6 +67,12 @@ static char* appendUInt(char* p, uint32_t value) {
     while (n) *p++ = digits[--n];
     return p;
 }
+static char* appendSize(char* p, uint64_t value) {
+    char digits[24]; int n = 0;
+    do { digits[n++] = char('0' + value % 10u); value /= 10u; } while (value);
+    while (n) *p++ = digits[--n];
+    return p;
+}
 
 typedef int32_t VkResult;
 typedef uint32_t VkFlags;
@@ -478,6 +484,14 @@ static int fail(int code, const char* stage, VkResult result) {
     emit(line);
     return code;
 }
+static void logMemoryRequest(const char* label, VkDeviceSize size, uint32_t memoryType, VkFlags flags) {
+    char line[192]; char* p = append(line, "PLAY-VULKAN-DRAW ALLOC ");
+    p = append(p, label); p = append(p, " size="); p = appendSize(p, size);
+    p = append(p, " memoryType="); p = appendUInt(p, memoryType);
+    p = append(p, " propertyFlags="); p = appendUInt(p, flags);
+    p = append(p, "\n"); *p = 0;
+    emit(line);
+}
 
 // Host-visible + host-coherent memory type, or UINT32_MAX when the driver
 // splits them (the fixture then takes visible without coherent and flushes
@@ -713,6 +727,7 @@ int vk_draw_entry() {
         total = used;
     }
     VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, nullptr, total, memType};
+    logMemoryRequest("buffers", total, memType, mem.memoryTypes[memType].propertyFlags);
     result = AllocateMemory(device, &allocInfo, nullptr, &memory);
     if (result != VK_SUCCESS || !memory)
         return fail(20, "vkAllocateMemory", result);
@@ -802,6 +817,7 @@ int vk_draw_entry() {
     if (imgType == UINT32_MAX) return fail(23, "image memory type", 0);
     VkMemoryAllocateInfo imgAlloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, nullptr, imgOffset + req.size, imgType};
     VkDeviceMemory imageMemory = nullptr;
+    logMemoryRequest("image", imgAlloc.allocationSize, imgType, mem.memoryTypes[imgType].propertyFlags);
     result = AllocateMemory(device, &imgAlloc, nullptr, &imageMemory);
     if (result != VK_SUCCESS || !imageMemory)
         return fail(23, "vkAllocateMemory(image)", result);
@@ -969,7 +985,8 @@ int vk_draw_entry() {
     }
     result = WaitForFences(device, 1, &fence, 1, 1000000000ull);
     if (result != VK_SUCCESS) return fail(27, "vkWaitForFences", result);
-    ResetFences(device, 1, &fence);
+    result = ResetFences(device, 1, &fence);
+    if (result != VK_SUCCESS) return fail(27, "vkResetFences", result);
     if (!hasSync2) {
         VkSemaphoreSignalInfo sig{VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, nullptr, timeline, 1};
         result = SignalSemaphore(device, &sig);
@@ -1020,6 +1037,7 @@ int vk_draw_entry() {
     VkDeviceSize imgRbOffset = 0;   // fresh allocation: no alignment neighbours
     VkMemoryAllocateInfo rbAlloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, nullptr, req.size, memType};
     VkDeviceMemory rbMemory = nullptr;
+    logMemoryRequest("image-readback", rbAlloc.allocationSize, memType, mem.memoryTypes[memType].propertyFlags);
     result = AllocateMemory(device, &rbAlloc, nullptr, &rbMemory);
     if (result != VK_SUCCESS || !rbMemory)
         return fail(30, "vkAllocateMemory(image-readback)", result);
@@ -1065,7 +1083,8 @@ int vk_draw_entry() {
     if (result != VK_SUCCESS) return fail(30, "vkQueueSubmit(copy)", result);
     result = WaitForFences(device, 1, &fence, 1, 1000000000ull);
     if (result != VK_SUCCESS) return fail(30, "vkWaitForFences(copy)", result);
-    ResetFences(device, 1, &fence);
+    result = ResetFences(device, 1, &fence);
+    if (result != VK_SUCCESS) return fail(30, "vkResetFences(copy)", result);
     result = QueueWaitIdle(queue);
     if (result != VK_SUCCESS) return fail(30, "vkQueueWaitIdle(copy)", result);
 
