@@ -6,6 +6,8 @@
 // allowlist are bound to stubs that Fault when *called* (never silently stubbed).
 #pragma once
 #include <map>
+#include <tuple>
+#include "../../gap_summary.h"
 #include "../wxl_pe32.h"
 #include "x86_cpu.h"
 #include "apiset.h"
@@ -45,6 +47,7 @@ struct Image {
     uint32_t entry_rva = 0;
     unsigned relocations = 0, imports = 0, bound = 0;
     std::vector<std::string> unresolved;
+    std::vector<std::tuple<std::string, std::string, gap_summary::Outcome>> gap_imports;
     // Implicit TLS (IMAGE_DIRECTORY_ENTRY_TLS): the fields are absolute VAs as
     // they stand after relocation, since they are read from the mapped image.
     struct Tls {
@@ -154,11 +157,12 @@ inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, cons
             // the unresolved label below keeps the name the game imported.
             const std::string served = apiset::served_by(dll, sym);
             auto dit = reg.data.find({served, Registry::key_sym(sym)});
-            if (dit != reg.data.end()) { mem.w32(img.base + dst + j * 4, dit->second); ++img.bound; continue; }
+            if (dit != reg.data.end()) { mem.w32(img.base + dst + j * 4, dit->second); ++img.bound; img.gap_imports.emplace_back(dll,sym,gap_summary::Outcome::routed); continue; }
             auto it = reg.map.find({served, Registry::key_sym(sym)}); uint32_t stub;
-            if (it != reg.map.end()) { stub = table.add(it->second); ++img.bound; }
+            if (it != reg.map.end()) { stub = table.add(it->second); ++img.bound; img.gap_imports.emplace_back(dll,sym,gap_summary::Outcome::routed); }
             else {
                 img.unresolved.push_back(dll + "!" + sym);
+                img.gap_imports.emplace_back(dll,sym,gap_summary::Outcome::missing);
                 std::string label = dll + "!" + sym;
                 stub = table.add(Thunk{dll, sym, Conv::Stdcall, 0, [label](Cpu& c) -> uint32_t {
                     throw Fault(FaultKind::UnresolvedImport, c.eip, 0, "call to unresolved import " + label); }});
@@ -389,6 +393,8 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
                 // from the unresolved list so the runner reports only real gaps.
                 auto u = std::find(img.unresolved.begin(), img.unresolved.end(), label);
                 if (u != img.unresolved.end()) img.unresolved.erase(u);
+                for(auto& gap:img.gap_imports) if(std::get<0>(gap)+"!"+std::get<1>(gap)==label)
+                    std::get<2>(gap)=gap_summary::Outcome::routed;
             }
         }
     }

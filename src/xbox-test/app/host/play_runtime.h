@@ -137,8 +137,15 @@ static void stopMissing(const std::string& name,uintptr_t caller=0) {
     state->event(text);
     RaiseException(missingException,EXCEPTION_NONCONTINUABLE,0,nullptr);
 }
+static void record_gap(const char* dll,const char* name,WORD ordinal,gap_summary::Outcome outcome,bool onlyIfAbsent=false) {
+    if(!mappingImports)return;
+    std::string key=lower(dll),symbol=name?name:"#"+std::to_string(ordinal);
+    if(onlyIfAbsent) mlp::launch_gap.record_if_absent(key,symbol,outcome);
+    else mlp::launch_gap.record(key,symbol,outcome);
+}
 static uintptr_t missing(const char* dll,const char* name,WORD ordinal) {
     std::string full=lower(dll)+"!"+(name?name:"#"+std::to_string(ordinal));
+    record_gap(dll,name,ordinal,gap_summary::Outcome::missing,true);
     if(mappingImports && wxl::resolvingDelay) {
         if(state->log && mlp::first_report("delay "+full)) state->log(("PRUN delay import not found yet, bound on first call: "+full).c_str());
         return 0;
@@ -1229,7 +1236,7 @@ static Module* map(const std::wstring& requested,const std::string& asKey,wxl::R
     else if(m->key=="steam_api64.dll") state->event(steamClient.empty()?
         "steam_api64.dll is the game's original file, mapped unmodified; no Steam client, so SteamAPI_Init is expected to fail (item 36)":
         "steam_api64.dll is the game's original file, mapped unmodified; it reaches the staged Steam client");
-    struct ImportScope {ImportScope(){++mappingImports;} ~ImportScope(){--mappingImports;}} imports;
+    struct ImportScope {bool outer=gap_summary::collecting;ImportScope(){++mappingImports;gap_summary::collecting=true;} ~ImportScope(){--mappingImports;gap_summary::collecting=outer;}} imports;
     if(!wxl::run(path.c_str(),state->log,&m->image,resolver?resolver:resolve,wxl::LoadConfig::msvc_x64)) {
         // Withdraw the early publication: a failed image's export table must
         // never satisfy another import (it is never protected or initialized).
@@ -2013,42 +2020,43 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     if(key=="kernelbase.dll") key="kernel32.dll";
     // Process creation binds Play's refusal before any native lookup, for static,
     // dynamic and mapped-forwarder imports alike (see processCreation).
-    if(processCreation(name) && (key=="kernel32.dll" || key.find("api-ms-win-core-")==0)) return processExport(name);
-    if(shellLaunch(name) && key=="shell32.dll") return shellExport(name);
+    if(processCreation(name) && (key=="kernel32.dll" || key.find("api-ms-win-core-")==0)) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return processExport(name);}
+    if(shellLaunch(name) && key=="shell32.dll") {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return shellExport(name);}
     // Folder CSIDLs answer as the guest's known-folder route does (uwph/shell32).
-    if(name && key=="shell32.dll" && !strcmp(name,"SHGetSpecialFolderPathW")) return (uintptr_t)&shell_folder::getSpecialFolderPathW;
-    if(auto graphics=play_graphics::resolve(dll,name,ordinal))return graphics;
-    if(name && (key=="kernel32.dll"||key=="kernelbase.dll"||key=="ntdll.dll"||key.find("api-ms-win-core-")==0)) if(auto p=processApi(name)) return p;
+    if(name && key=="shell32.dll" && !strcmp(name,"SHGetSpecialFolderPathW")) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&shell_folder::getSpecialFolderPathW;}
+    if(auto graphics=play_graphics::resolve(dll,name,ordinal)){record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return graphics;}
+    if(name && (key=="kernel32.dll"||key=="kernelbase.dll"||key=="ntdll.dll"||key.find("api-ms-win-core-")==0)) if(auto p=processApi(name)) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return p;}
     if(name && (key=="ole32.dll"||key=="combase.dll"||key.find("api-ms-win-core-com-l1-")==0)) {
-        if(!strcmp(name,"CoCreateInstance")) return (uintptr_t)&coCreateInstance;
-        if(!strcmp(name,"CoGetClassObject")) return (uintptr_t)&coGetClassObject;
+        if(!strcmp(name,"CoCreateInstance")) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&coCreateInstance;}
+        if(!strcmp(name,"CoGetClassObject")) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&coGetClassObject;}
     }
-    if(key=="user32.dll" && name && !strcmp(name,"MessageBoxA")) return (uintptr_t)&messageBoxA;
-    if(key=="user32.dll" && name && !strcmp(name,"MessageBoxW")) return (uintptr_t)&messageBoxW;
-    if(key=="user32.dll" && name && !strcmp(name,"CreateWindowExW")) return (uintptr_t)&createWindow;
-    if(key=="d3d11.dll" && name && !strcmp(name,"D3D11CreateDevice")) return (uintptr_t)&createDevice;
-    if(key=="d3d11.dll" && name && !strcmp(name,"D3D11CreateDeviceAndSwapChain")) return (uintptr_t)&createDeviceAndSwapChain;
+    if(key=="user32.dll" && name && !strcmp(name,"MessageBoxA")) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&messageBoxA;}
+    if(key=="user32.dll" && name && !strcmp(name,"MessageBoxW")) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&messageBoxW;}
+    if(key=="user32.dll" && name && !strcmp(name,"CreateWindowExW")) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&createWindow;}
+    if(key=="d3d11.dll" && name && !strcmp(name,"D3D11CreateDevice")) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&createDevice;}
+    if(key=="d3d11.dll" && name && !strcmp(name,"D3D11CreateDeviceAndSwapChain")) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&createDeviceAndSwapChain;}
     // D3D12: the device entry point and the helpers a D3D12 guest imports. Every
     // other d3d12.dll export (layered device, GetBehaviorValue) falls through to
     // the system route in mlp, which loads the console's own d3d12.dll.
     if(key=="d3d12.dll" && name) {
-        if(!strcmp(name,"D3D12CreateDevice")) return (uintptr_t)&createD3D12Device;
-        if(!strcmp(name,"D3D12GetDebugInterface")) return (uintptr_t)&d3d12GetDebugInterface;
-        if(!strcmp(name,"D3D12SerializeRootSignature")) return (uintptr_t)&d3d12SerializeRootSignature;
-        if(!strcmp(name,"D3D12CreateRootSignatureDeserializer")) return (uintptr_t)&d3d12CreateRootSignatureDeserializer;
-        if(!strcmp(name,"D3D12EnableExperimentalFeatures")) return (uintptr_t)&d3d12EnableExperimentalFeatures;
-        if(!strcmp(name,"D3D12GetInterface")) return (uintptr_t)&d3d12GetInterfaceHook;
+        if(!strcmp(name,"D3D12CreateDevice")) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&createD3D12Device;}
+        if(!strcmp(name,"D3D12GetDebugInterface")) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&d3d12GetDebugInterface;}
+        if(!strcmp(name,"D3D12SerializeRootSignature")) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&d3d12SerializeRootSignature;}
+        if(!strcmp(name,"D3D12CreateRootSignatureDeserializer")) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&d3d12CreateRootSignatureDeserializer;}
+        if(!strcmp(name,"D3D12EnableExperimentalFeatures")) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&d3d12EnableExperimentalFeatures;}
+        if(!strcmp(name,"D3D12GetInterface")) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&d3d12GetInterfaceHook;}
     }
     // Same client gate as LoadLibrary, for static and forwarded imports. Never
     // a callable Steam placeholder: the import stays unresolved, as on Windows
     // without the DLL. steam_api64.dll resolves from the game's own file below.
-    if(auto p=crtExitApi(key,name)) return p;
+    if(auto p=crtExitApi(key,name)) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return p;}
     if(key=="steamclient64.dll") {
         if(steamClient.empty()) return missing(dll,name,ordinal);
         auto client=steamClientSigned.empty()?named(steamClient):signedClientModule();
         if(!client) client=map(steamClient);
         if(!client||client->mappingFailed) return missing(dll,name,ordinal);
-        auto p=exported(*client,name,ordinal);return p?p:missing(dll,name,ordinal);
+        auto p=exported(*client,name,ordinal);if(!p)return missing(dll,name,ordinal);
+        record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return p;
     }
     Module* owner=nullptr;
     // Current mapper is the last incomplete module; capture it before recursion.
@@ -2073,7 +2081,10 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     }
     if(dependency) {
         if(owner && owner!=dependency) owner->dependencies.push_back(dependency);
-        auto p=exported(*dependency,name,ordinal);return p?steamApiExport(*dependency,name,p):missing(dll,name,ordinal);
+        auto p=exported(*dependency,name,ordinal);
+        if(!p)return missing(dll,name,ordinal);
+        record_gap(dll,name,ordinal,gap_summary::Outcome::routed);
+        return steamApiExport(*dependency,name,p);
     }
     // VC++ runtime DLLs the console lacks (no game copy was found above):
     // forwarded to the console's ucrtbase, as Wine's vcruntime140 does.
@@ -2081,7 +2092,9 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
         auto p=name?vcruntime_core::resolve(key.c_str(),name,&vcruntimeLookup):0;
         std::string full=key+"!"+(name?name:"#"+std::to_string(ordinal));
         if(state->log && mlp::first_report("vcrt "+full)) state->log(("VCRT ROUTE "+full+" found="+std::to_string(!!p)).c_str());
-        return p?p:missing(dll,name,ordinal);
+        if(!p)return missing(dll,name,ordinal);
+        record_gap(dll,name,ordinal,gap_summary::Outcome::routed);
+        return p;
     }
     return mlp::resolve(key.c_str(),name,ordinal);
 }
@@ -2090,6 +2103,7 @@ static void runImpl() {
     using SetDir=BOOL(WINAPI*)(LPCWSTR);auto setDir=(SetDir)kernel_tail::native("SetCurrentDirectoryW");
     state->event("SetCurrentDirectoryW guest root");
     if(!setDir || !setDir(state->cwd.c_str())) {state->event("SetCurrentDirectoryW failed error="+std::to_string(GetLastError()));return;}
+    if(state->log) for(const auto& line:mlp::launch_gap.report(state->exe->key,"x64").lines) state->log(line.c_str());
     if(!initializePending()) return;
     char entry[128];snprintf(entry,sizeof entry,"EXE entry %s+0x%lx",state->exe->key.c_str(),state->exe->image.entry);state->event(entry);state->executed=true;
     state->code=((DWORD(WINAPI*)())(state->exe->image.base+state->exe->image.entry))();
@@ -2120,9 +2134,12 @@ static bool start(const std::wstring& root,const std::wstring& exe,const std::ws
     clearVulkanDriverFiles();
     state=new State();state->root=root;state->cwd=cwd.empty()?root:cwd;state->log=log;state->crashContextOptIn=crashContextOptIn;observed.store(state,std::memory_order_release);state->command=L"\""+root+L"\\"+exe+L"\" "+args;state->commandA=narrow(state->command);
     mlp::log=log;wxl::logger=log;
-    xinput_core::note=[](const char* text){if(mlp::log)mlp::log(text);};mlp::missingResolver=missing;mlp::assets.clear();mlp::summaries.clear();
+    xinput_core::note=[](const char* text){if(mlp::log)mlp::log(text);};mlp::missingResolver=missing;mlp::assets.clear();mlp::summaries.clear();mlp::launch_gap=gap_summary::Binder{};
     gdi32_core::gl_lookup.store(&openglExport);
-    state->exe=map(root+L"\\"+exe);if(!state->exe) {state->result=state->snapshot();state->finished=true;return true;}
+    state->exe=map(root+L"\\"+exe);if(!state->exe) {
+        auto name=basename(exe);if(state->log) for(const auto& line:mlp::launch_gap.report(name,"x64").lines) state->log(line.c_str());
+        state->result=state->snapshot();state->finished=true;return true;
+    }
     find_ntdll();
     {static bool installed=false;if(!installed){installed=true;hostTopLevel=SetUnhandledExceptionFilter(topLevelFilter);}}
     rwx_emulation::state().notify=[](const char* text){if(state)state->event(text);};

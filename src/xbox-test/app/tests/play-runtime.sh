@@ -14,7 +14,9 @@ if [[ ! -f "$WINEPREFIX/system.reg" ]];then timeout -k 2 60 wineboot -u;fi
 out=out/play-tests
 mkdir -p "$out/obj"
 printf 'LIBRARY play-missing.dll\nEXPORTS\nDeliberatelyMissingPlayImport\n' > "$out/obj/missing.def"
+printf 'LIBRARY dbghelp.dll\nEXPORTS\nSymInitialize\n' > "$out/obj/stub.def"
 llvm-dlltool-19 -m i386:x86-64 -d "$out/obj/missing.def" -l "$out/obj/missing.lib"
+llvm-dlltool-19 -m i386:x86-64 -d "$out/obj/stub.def" -l "$out/obj/stub.lib"
 cat > "$out/obj/forward.def" <<'DEF'
 LIBRARY play-forward.dll
 EXPORTS
@@ -40,6 +42,7 @@ for kind in dll exe;do
  clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector "${flags[@]}" -c tests/play-guest.cpp -o "$out/obj/$kind.obj"
 done
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_STATIC_MISSING -c tests/play-guest.cpp -o "$out/obj/missing.obj"
+clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_STATIC_MISSING -DPLAY_STATIC_STUB -c tests/play-guest.cpp -o "$out/obj/gap.obj"
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_STATIC_STEAM -c tests/play-guest.cpp -o "$out/obj/steam.obj"
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_DLL -DPLAY_STATIC_MISSING -c tests/play-guest.cpp -o "$out/obj/unresolved.obj"
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_DLL -DPLAY_REJECT_ATTACH -c tests/play-guest.cpp -o "$out/obj/reject.obj"
@@ -63,6 +66,7 @@ x86_64-w64-mingw32-windres ../uwph/kernel32/resource_fixture.rc -O coff -o "$out
 lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-dependency.dll" /implib:"$out/obj/dependency.lib" "$out/obj/dll.obj" "$MINGW_SYSROOT"/lib/libkernel32.a
 lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-guest.exe" "$out/obj/exe.obj" "$out/obj/resources.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$out/obj/missing.lib" "$CHKSTK_OBJ" "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libadvapi32.a "$MINGW_SYSROOT"/lib/libkernel32.a
 lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-missing.exe" "$out/obj/missing.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$out/obj/missing.lib" "$CHKSTK_OBJ" "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libadvapi32.a "$MINGW_SYSROOT"/lib/libkernel32.a
+lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-gap.exe" "$out/obj/gap.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$out/obj/missing.lib" "$out/obj/stub.lib" "$CHKSTK_OBJ" "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libadvapi32.a "$MINGW_SYSROOT"/lib/libkernel32.a
 lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-steam.exe" "$out/obj/steam.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$CHKSTK_OBJ" "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libadvapi32.a "$MINGW_SYSROOT"/lib/libkernel32.a
 lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-unresolved.dll" "$out/obj/unresolved.obj" "$out/obj/missing.lib" "$MINGW_SYSROOT"/lib/libkernel32.a
 # EXE that reads its TLS through TEB slot 0, as MSVC /GA code does (no _tls_index).
@@ -284,10 +288,13 @@ tail -1 "$out/leaderboards.log"
 # The root copy was only for this run: later modes prove what happens when a
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d10-compile d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn vulkan-draw opengl;do
+for mode in observer-log reject-attach reject-mapping normal missing gap static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d10-compile d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn vulkan-draw opengl;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
+grep -q 'GAP: summary exe=play-gap.exe arch=x64 .*stub=1 missing=1' "$out/gap.log"
+grep -q 'GAP: dll=dbghelp.dll resolved=0 routed=0 donor=0 stub=1 missing=0' "$out/gap.log"
+grep -q 'GAP: missing play-missing.dll!DeliberatelyMissingPlayImport' "$out/gap.log"
 # Every vcruntime import took the ucrtbase route; none was left unresolved.
 grep -q 'VCRT ROUTE vcruntime140.dll!__CxxFrameHandler3 found=1' "$out/native-vcrt.log"
 grep -q 'VCRT ROUTE vcruntime140_1.dll!__CxxFrameHandler4 found=1' "$out/native-vcrt.log"
