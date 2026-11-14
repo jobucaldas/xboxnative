@@ -186,7 +186,29 @@ static void test_programs() {
         try { m.cpu.run(0); EXPECT(false, "unsupported instruction must fault"); } catch (const Fault& f) { EXPECT(f.kind == FaultKind::Unsupported && std::string(f.what()).find("0f 0a") != std::string::npos, "unsupported fault text: %s", f.what()); } }
     { Machine m; m.load({0xEB, 0xFE}); m.cpu.limit = 1000;   // jmp $
         EXPECT(fault_of([&] { m.cpu.run(0); }) == FaultKind::InstructionLimit, "runaway loop must hit the instruction limit"); }
-    { Machine m; m.load({0xCC}); EXPECT(fault_of([&] { m.cpu.run(0); }) == FaultKind::Breakpoint, "int3"); }
+    { Machine m; m.load({0xE8, 0, 0, 0, 0, 0xCC}); m.cpu.trace_fault_context = true;
+      m.cpu.format_eip = [](uint32_t eip) {
+          if (eip >= Machine::CODE && eip < Machine::CODE + 16) {
+              char b[64]; snprintf(b, sizeof b, "fixture.exe+0x%08x", eip - Machine::CODE); return std::string(b);
+          }
+          return std::string();
+      };
+      bool traced = false;
+      try { m.cpu.run(0); } catch (const Fault& f) {
+          std::string text = m.cpu.fault_text(f);
+          traced = f.kind == FaultKind::Breakpoint && text.find("recent x86: fixture.exe+0x00000000 fixture.exe+0x00000005") != std::string::npos;
+          EXPECT(traced, "int3 context must include module-relative preceding EIPs: %s", text.c_str());
+          for (FaultKind kind : {FaultKind::AccessViolation, FaultKind::Unsupported, FaultKind::Breakpoint, FaultKind::InvalidOpcode}) {
+              Fault other(kind, Machine::CODE, 0, "guest fault");
+              EXPECT(m.cpu.fault_text(other).find("recent x86: fixture.exe+0x00000000") != std::string::npos,
+                     "fault context must be appended to kind %d", int(kind));
+          }
+      }
+      EXPECT(traced, "int3 must report its fault context"); }
+    { Machine m; m.load({0xCC});
+      try { m.cpu.run(0); } catch (const Fault& f) {
+          EXPECT(std::string(m.cpu.fault_text(f)) == "int3 breakpoint", "disabled fault context must not change text: %s", f.what());
+      } }
     { Machine m; m.load({0x0F, 0x0B}); EXPECT(fault_of([&] { m.cpu.run(0); }) == FaultKind::InvalidOpcode, "ud2"); }
 }
 
