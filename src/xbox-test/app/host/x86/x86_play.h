@@ -14,7 +14,28 @@
 #include <string>
 #include <vector>
 #include "x86_guest.h"
+#if defined(_WIN32)
+#include "../../../uwph/kernel32/route.h"
+#endif
 namespace x86 {
+#if defined(_WIN32)
+inline void play_file_call(Host::FileCall& q) {
+    auto failed=[&](){q.error=GetLastError();};
+    switch(q.kind) {
+    case Host::FileCall::Kind::CreateA: { HANDLE h=kernel32_core::create_file_a(q.path_a.c_str(),q.args[0],q.args[1],nullptr,q.args[2],q.args[3],(HANDLE)(uintptr_t)q.template_handle);q.value=(uintptr_t)h;q.succeeded=h!=INVALID_HANDLE_VALUE;failed();break; }
+    case Host::FileCall::Kind::CreateW: { std::wstring p(q.path_w.begin(),q.path_w.end());HANDLE h=kernel32_core::create_file_w(p.c_str(),q.args[0],q.args[1],nullptr,q.args[2],q.args[3],(HANDLE)(uintptr_t)q.template_handle);q.value=(uintptr_t)h;q.succeeded=h!=INVALID_HANDLE_VALUE;failed();break; }
+    case Host::FileCall::Kind::Close:q.succeeded=kernel32_core::close_handle((HANDLE)(uintptr_t)q.handle)!=FALSE;if(!q.succeeded)failed();break;
+    case Host::FileCall::Kind::Read:{q.data.resize(q.args[0]);DWORD n=0;q.succeeded=kernel32_core::read_file((HANDLE)(uintptr_t)q.handle,q.data.data(),q.args[0],&n,nullptr)!=FALSE;q.args[1]=n;q.data.resize(n);if(!q.succeeded)failed();break;}
+    case Host::FileCall::Kind::Size:{DWORD high=0,low=kernel32_core::file_size((HANDLE)(uintptr_t)q.handle,q.args[0]?&high:nullptr);q.value=low;q.args[1]=high;q.error=GetLastError();q.succeeded=low!=INVALID_FILE_SIZE||q.error==ERROR_SUCCESS;break;}
+    case Host::FileCall::Kind::Time:{FILETIME t[3]{};using Fn=BOOL(WINAPI*)(HANDLE,LPFILETIME,LPFILETIME,LPFILETIME);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","GetFileTime");q.succeeded=fn&&(fn((HANDLE)(uintptr_t)q.handle,q.args[0]?&t[0]:nullptr,q.args[1]?&t[1]:nullptr,q.args[2]?&t[2]:nullptr)!=FALSE);q.data.resize(sizeof(t));memcpy(q.data.data(),t,sizeof(t));if(!q.succeeded)failed();break;}
+    case Host::FileCall::Kind::AttributesA:{using Fn=DWORD(WINAPI*)(LPCSTR);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","GetFileAttributesA");SetLastError(ERROR_SUCCESS);q.value=fn?fn(q.path_a.c_str()):INVALID_FILE_ATTRIBUTES;q.succeeded=q.value!=INVALID_FILE_ATTRIBUTES;if(!q.succeeded)failed();break;}
+    case Host::FileCall::Kind::Seek:{using Fn=DWORD(WINAPI*)(HANDLE,LONG,PLONG,DWORD);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","SetFilePointer");LONG high=LONG(q.args[1]);SetLastError(ERROR_SUCCESS);DWORD low=fn?fn((HANDLE)(uintptr_t)q.handle,LONG(q.args[0]),q.args[3]?&high:nullptr,q.args[2]):INVALID_SET_FILE_POINTER;q.value=low;q.args[1]=DWORD(high);q.error=GetLastError();q.succeeded=low!=INVALID_SET_FILE_POINTER||q.error==ERROR_SUCCESS;break;}
+    case Host::FileCall::Kind::End:q.succeeded=SetEndOfFile((HANDLE)(uintptr_t)q.handle)!=FALSE;if(!q.succeeded)failed();break;
+    case Host::FileCall::Kind::TimeConvert:{FILETIME in{};SYSTEMTIME out{};memcpy(&in,q.data.data(),8);q.succeeded=FileTimeToSystemTime(&in,&out)!=FALSE;q.data.resize(sizeof(out));memcpy(q.data.data(),&out,sizeof(out));if(!q.succeeded)failed();break;}
+    case Host::FileCall::Kind::TimeLocal:{FILETIME in{},out{};memcpy(&in,q.data.data(),8);q.succeeded=FileTimeToLocalFileTime(&in,&out)!=FALSE;q.data.resize(sizeof(out));memcpy(q.data.data(),&out,8);if(!q.succeeded)failed();break;}
+    }
+}
+#endif
 struct PlayResult {
     bool loaded = false;        // the PE32 image mapped and its imports were bound
     bool finished = false;      // the guest called ExitProcess (or its entry returned)
@@ -47,10 +68,14 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
                             const std::function<void(const std::string&)>& tee = nullptr,
                             const std::function<void(const PlayResult&)>& on_loaded = nullptr,
                             uint64_t instruction_limit = 500ull * 1000 * 1000,
-                            const DllSource& dll_source = nullptr) {
+                            const DllSource& dll_source = nullptr,
+                            bool trace_fault_context = false) {
     PlayResult r;
     try {
         Memory mem; ThunkTable table; Host host; Registry reg;
+#if defined(_WIN32)
+        host.file_call = play_file_call;
+#endif
         host.tee = tee;
         Guest guest(mem, host, reg);
         guest.exe_path = name;
@@ -104,12 +129,40 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         map_thunk_page(mem, table);
         Cpu cpu(mem, table);
         cpu.limit = instruction_limit;
+        cpu.trace_fault_context = trace_fault_context;
+        cpu.format_eip = [&guest, &img](uint32_t eip) {
+            for (const auto& module : guest.modules) {
+                if (module.first == "__top__") continue;  // loader sentinel; the exe is also registered under its own name
+                uint32_t size = module.second == img.base ? img.size : 0;
+                auto dll = guest.dlls.find(module.first);
+                if (dll != guest.dlls.end()) size = dll->second.image.size;
+                if (size && eip >= module.second && eip - module.second < size) {
+                    char label[128];
+                    snprintf(label, sizeof label, "%s+0x%08x", module.first.c_str(), eip - module.second);
+                    return std::string(label);
+                }
+            }
+            return std::string();
+        };
+        auto record_fault = [&](const Fault& fault) {
+            r.fault = cpu.fault_text(fault); r.fault_eip = fault.eip;
+            switch (fault.kind) {
+            case FaultKind::AccessViolation: r.fault_kind = "AccessViolation"; break;
+            case FaultKind::ExecuteViolation: r.fault_kind = "ExecuteViolation"; break;
+            case FaultKind::DivideError: r.fault_kind = "DivideError"; break;
+            case FaultKind::InvalidOpcode: r.fault_kind = "InvalidOpcode"; break;
+            case FaultKind::Unsupported: r.fault_kind = "Unsupported"; break;
+            case FaultKind::Breakpoint: r.fault_kind = "Breakpoint"; break;
+            case FaultKind::InstructionLimit: r.fault_kind = "InstructionLimit"; break;
+            case FaultKind::BadThunk: r.fault_kind = "BadThunk"; break;
+            case FaultKind::UnresolvedImport: r.fault_kind = "UnresolvedImport"; break;
+            }
+        };
         init_process(mem, cpu, img);
         // DllMain(DLL_PROCESS_ATTACH) for every loaded guest DLL, in load
         // order — after the thunk page and TEB/PEB exist, before the entry.
         try { guest.run_dll_mains(cpu, 1); } catch (const Fault& f) {
-            if (!cpu.exited) throw;
-            (void)f;
+            if (!cpu.exited) { record_fault(f); r.instructions = cpu.executed; return r; }
         }
         // TLS callbacks of the top image run exactly once, from run_entry ->
         // init_tls (which allocates the implicit-TLS block first): the Windows
@@ -122,18 +175,7 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
             r.finished = cpu.exited;
             r.exit_code = cpu.exit_code;
         } catch (const Fault& fault) {
-            r.fault = fault.what(); r.fault_eip = fault.eip;
-            switch (fault.kind) {
-            case FaultKind::AccessViolation: r.fault_kind = "AccessViolation"; break;
-            case FaultKind::ExecuteViolation: r.fault_kind = "ExecuteViolation"; break;
-            case FaultKind::DivideError: r.fault_kind = "DivideError"; break;
-            case FaultKind::InvalidOpcode: r.fault_kind = "InvalidOpcode"; break;
-            case FaultKind::Unsupported: r.fault_kind = "Unsupported"; break;
-            case FaultKind::Breakpoint: r.fault_kind = "Breakpoint"; break;
-            case FaultKind::InstructionLimit: r.fault_kind = "InstructionLimit"; break;
-            case FaultKind::BadThunk: r.fault_kind = "BadThunk"; break;
-            case FaultKind::UnresolvedImport: r.fault_kind = "UnresolvedImport"; break;
-            }
+            record_fault(fault);
         }
         r.instructions = cpu.executed;
     } catch (const std::exception& e) {
@@ -151,7 +193,8 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
                       const std::function<void(const std::string&)>& tee = nullptr,
                       const std::function<void(const PlayResult&)>& on_loaded = nullptr,
                       uint64_t instruction_limit = 500ull * 1000 * 1000,
-                      const DllSource& dll_source = nullptr) {
+                      const DllSource& dll_source = nullptr,
+                      bool trace_fault_context = false) {
     PlayResult r;
     FILE* f = _wfopen(exe.c_str(), L"rb");
     if (!f) { r.fault = "cannot open the executable"; r.fault_kind = "Loader"; return r; }
@@ -166,7 +209,7 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
     std::string name;
     for (size_t i = exe.find_last_of(L"\\/") + 1; i < exe.size(); ++i) name += char(exe[i]);
     (void)dir;
-    return run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source);
+    return run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source, trace_fault_context);
 }
 #endif
 }

@@ -394,6 +394,8 @@ if [ -f out/layout/runtime/vulkan-dzn.json ]; then
   grep -q 'PLAY-VULKAN-DRAW STAGE graphics-pipeline' "$out/vulkan-draw.log"
   grep -q 'PLAY-VULKAN-DRAW STAGE compute-pipeline' "$out/vulkan-draw.log"
   grep -q 'PLAY-VULKAN-DRAW STAGE timeline-semaphore' "$out/vulkan-draw.log"
+  grep -q 'PLAY-VULKAN-DRAW STAGE compute-command-buffer-ended' "$out/vulkan-draw.log"
+  grep -q 'PLAY-VULKAN-DRAW STAGE draw-command-buffer-ended' "$out/vulkan-draw.log"
   grep -q 'PLAY-VULKAN-DRAW STAGE timeline-roundtrip' "$out/vulkan-draw.log"
   if grep -q 'PLAY-VULKAN-DRAW PASS draw-readback' "$out/vulkan-draw.log"; then
     grep -q 'PLAY-VULKAN-DRAW STAGE compute-readback' "$out/vulkan-draw.log"
@@ -566,6 +568,15 @@ for mode in crt-exit crt-abort;do
 done
 WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" top-level > "$out/top-level.log" 2>&1
 grep -q "PLAY-TOP-LEVEL survived=1 exit=1" "$out/top-level.log"
+for mode in crashctx-on crashctx-off;do
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
+done
+grep -Eq 'CRASHCTX fault play-guest\.exe\+0x[0-9a-f]+ access=read target=0x24' "$out/crashctx-on.log"
+grep -Eq 'CRASHCTX registers .*RAX=0x[0-9a-f]+.*R15=0x[0-9a-f]+.*RSP=0x[0-9a-f]+.*RBP=0x[0-9a-f]+.*RIP=0x[0-9a-f]+.*EFLAGS=0x[0-9a-f]+' "$out/crashctx-on.log"
+grep -Eq 'CRASHCTX chain\[0\] play-guest\.exe\+0x[0-9a-f]+ timestamp=0x[0-9a-f]{8} image=0x[0-9a-f]+ file=[0-9]+' "$out/crashctx-on.log"
+! grep -q 'CRASHCTX ' "$out/crashctx-off.log"
+grep -Eq 'unhandled exception code=0xc0000005 address=0x[0-9a-f]+ play-guest\.exe\+0x[0-9a-f]+ .*access=0 target=0x24' "$out/crashctx-off.log"
+echo 'PASS crashctx opt-in reports AV registers, module identity and caller chain; disabled adds no lines and keeps the original crash line'
 rm -f "$out/baselib.dll"
 # Steam without a genuine client. A steamclient64.dll in the game root must be
 # refused (steam-client runs above with it present); a root steam_api64.dll is

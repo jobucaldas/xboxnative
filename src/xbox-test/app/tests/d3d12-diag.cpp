@@ -20,6 +20,20 @@ static std::vector<std::string> lines;
 static void sinkLine(const char* text){lines.push_back(text);}
 static size_t count(const char* needle){size_t n=0;for(auto& l:lines)if(l.find(needle)!=std::string::npos)++n;return n;}
 static HRESULT STDMETHODCALLTYPE alwaysInvalid(void*,void*,void*,void*){return E_INVALIDARG;}
+static unsigned psoProbeDirectCalls=0,psoProbeStreamCalls=0;
+static HRESULT STDMETHODCALLTYPE psoProbeDirect(void*,const D3D12_GRAPHICS_PIPELINE_STATE_DESC* d,REFIID,void**) {
+    ++psoProbeDirectCalls;return d&&d->InputLayout.NumElements==0?S_OK:E_INVALIDARG;
+}
+static void psoProbeStreamVisit(int type,const unsigned char* payload,size_t size,void* ctx) {
+    if(type==12&&size>=sizeof(D3D12_INPUT_LAYOUT_DESC)) {
+        D3D12_INPUT_LAYOUT_DESC layout{};memcpy(&layout,payload,sizeof layout);*static_cast<bool*>(ctx)=layout.NumElements==0;
+    }
+}
+static HRESULT STDMETHODCALLTYPE psoProbeStream(void*,const D3D12_PIPELINE_STATE_STREAM_DESC* d,REFIID,void**) {
+    ++psoProbeStreamCalls;bool empty=false;
+    if(d&&d->pPipelineStateSubobjectStream)d3d12_diag::streamSubobjects(d->pPipelineStateSubobjectStream,size_t(d->SizeInBytes),&psoProbeStreamVisit,&empty);
+    return empty?S_OK:E_INVALIDARG;
+}
 // The fake object's IUnknown slots for the stream-hook guard test.
 static HRESULT STDMETHODCALLTYPE noInterface(IUnknown*,REFIID,void** out){if(out)*out=nullptr;return E_NOINTERFACE;}
 static ULONG STDMETHODCALLTYPE refCount(IUnknown*){return 1;}
@@ -257,6 +271,9 @@ int main(int argc,char** argv) {
     unsigned char dxbc[48]{};memcpy(dxbc,"DXBC",4);dxbc[24]=48;dxbc[28]=1;dxbc[32]=36;memcpy(dxbc+36,"DXIL",4);dxbc[40]=4;
     CHECK(d3d12_diag::dxbcHasDxilChunk(dxbc,sizeof dxbc));
     CHECK(d3d12_diag::shaderText(dxbc,sizeof dxbc).find("dxbc-container dxil-chunk=yes")!=std::string::npos);
+    unsigned char signedDxil[52]{};makeDxilContainer(signedDxil,true);std::vector<unsigned char> unsignedStorage;D3D12_SHADER_BYTECODE unsignedBytecode{};
+    CHECK(d3d12_diag::copyDxbcWithZeroedDigest({signedDxil,sizeof signedDxil},unsignedStorage,unsignedBytecode));
+    CHECK(signedDxil[4]==1&&unsignedStorage[4]==0&&unsignedBytecode.pShaderBytecode==unsignedStorage.data());
     dxbc[32]=47;
     CHECK(!d3d12_diag::dxbcHasDxilChunk(dxbc,sizeof dxbc));
     const std::vector<unsigned char> rich=makeRichDxilContainer(false);
@@ -615,6 +632,51 @@ int main(int argc,char** argv) {
             CHECK(since("trace #"+std::to_string(traceBefore+6)+" CreateComputePipelineState 0x00000000")==1);
             CHECK(since("trace #"+std::to_string(traceBefore+12)+" createPipelineStateStreamSlot 0x00000000")==1);
         }
+    }
+
+    // An opted-in E_INVALIDARG gets bounded one-field retries. The original
+    // result is still returned, and the same hook is silent when tracing is off.
+    {
+        static void* vt[64]{};static void* object[1]={vt};
+        vt[d3d12_diag::CreateGraphicsPipelineState]=reinterpret_cast<void*>(&psoProbeDirect);
+        const d3d12_diag::Patch patch{d3d12_diag::CreateGraphicsPipelineState,reinterpret_cast<void*>(&d3d12_diag::createGraphicsPipelineState)};
+        d3d12_diag::patchClass(vt,&patch,1);
+        D3D12_INPUT_ELEMENT_DESC element{"POSITION",0,DXGI_FORMAT_R32G32_FLOAT,0,0,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0};
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC state{};state.InputLayout={&element,1};state.NumRenderTargets=1;state.SampleDesc={1,1};
+        const bool oldTrace=d3d12_diag::traceOn.load();d3d12_diag::traceOn.store(true);psoProbeDirectCalls=0;
+        auto hook=reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(void*,const D3D12_GRAPHICS_PIPELINE_STATE_DESC*,REFIID,void**)>(vt[d3d12_diag::CreateGraphicsPipelineState]);
+        void* out=nullptr;CHECK(hook(object,&state,__uuidof(ID3D12PipelineState),&out)==E_INVALIDARG);
+        CHECK(psoProbeDirectCalls>1&&count("pso-probe by-struct input-layout-empty hr=0x00000000")>=1);
+        CHECK(count("pso-probe by-struct sample-count-1 ")>=1);  // Count 1 with Quality 1 must still be reset to {1,0}
+        const size_t before=lines.size();psoProbeDirectCalls=0;d3d12_diag::traceOn.store(false);
+        CHECK(hook(object,&state,__uuidof(ID3D12PipelineState),&out)==E_INVALIDARG&&psoProbeDirectCalls==1&&lines.size()==before);
+        d3d12_diag::traceOn.store(oldTrace);
+    }
+    {
+        static void* vt[64]{};static void* object[1]={vt};
+        vt[d3d12_diag::createPipelineStateStreamSlot]=reinterpret_cast<void*>(&psoProbeStream);
+        const d3d12_diag::Patch patch{d3d12_diag::createPipelineStateStreamSlot,reinterpret_cast<void*>(&d3d12_diag::createPipelineStateStream)};
+        d3d12_diag::patchClass(vt,&patch,1);
+        std::vector<unsigned char> stream;ID3D12RootSignature* root=nullptr;
+        D3D12_INPUT_ELEMENT_DESC element{"POSITION",0,DXGI_FORMAT_R32G32_FLOAT,0,0,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0};
+        D3D12_INPUT_LAYOUT_DESC layout{&element,1};
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,root);
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT,layout);
+        // DEPTH_STENCIL2 (type 26) as console Mesa emits it: 60 bytes, DepthEnable first.
+        struct DepthStencil2 {BOOL depthEnable;unsigned char rest[56];} depth2{TRUE,{}};
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE(26),depth2);
+        DXGI_SAMPLE_DESC samples{1,1};appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC,samples);
+        D3D12_SO_DECLARATION_ENTRY so{0,"POSITION",0,0,2,0};UINT soStride=8;D3D12_STREAM_OUTPUT_DESC streamOut{&so,1,&soStride,1,0};
+        appendSubobject(stream,D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT,streamOut);
+        D3D12_PIPELINE_STATE_STREAM_DESC desc{stream.size(),stream.data()};
+        const bool oldTrace=d3d12_diag::traceOn.load();d3d12_diag::traceOn.store(true);psoProbeStreamCalls=0;
+        auto hook=reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(void*,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**)>(vt[d3d12_diag::createPipelineStateStreamSlot]);
+        void* out=nullptr;CHECK(hook(object,&desc,__uuidof(ID3D12PipelineState),&out)==E_INVALIDARG);
+        CHECK(psoProbeStreamCalls>1&&count("pso-probe stream input-layout-empty hr=0x00000000")>=1);
+        CHECK(count("pso-probe stream depth2-disabled ")>=1&&count("pso-probe stream sample-count-1 ")>=1&&count("pso-probe stream stream-output-empty ")>=1);
+        const size_t before=lines.size();psoProbeStreamCalls=0;d3d12_diag::traceOn.store(false);
+        CHECK(hook(object,&desc,__uuidof(ID3D12PipelineState),&out)==E_INVALIDARG&&psoProbeStreamCalls==1&&lines.size()==before);
+        d3d12_diag::traceOn.store(oldTrace);
     }
 
     // Every hooked method: the recorded kind (void or hr) must be the one the

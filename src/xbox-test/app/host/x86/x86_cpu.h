@@ -65,6 +65,24 @@ struct Cpu {
     uint64_t executed = 0, limit = 500ull * 1000 * 1000, tsc = 0;
     bool exited = false; uint32_t exit_code = 0;
     unsigned depth = 0;
+    bool trace_fault_context = false;
+    std::function<std::string(uint32_t)> format_eip;
+    std::array<uint32_t, 12> recent_eip{};
+    unsigned recent_next = 0, recent_count = 0;
+    std::string fault_context() const {
+        std::string s;
+        for (unsigned i = 0; i < recent_count; ++i) {
+            uint32_t at = recent_eip[(recent_next + recent_eip.size() - recent_count + i) % recent_eip.size()];
+            std::string label = format_eip ? format_eip(at) : std::string();
+            s += i ? " " : "recent x86: ";
+            if (label.empty()) { char b[16]; snprintf(b, sizeof b, "0x%08x", at); s += b; }
+            else s += label;
+        }
+        return s;
+    }
+    std::string fault_text(const Fault& fault) const {
+        return trace_fault_context && recent_count ? std::string(fault.what()) + "; " + fault_context() : fault.what();
+    }
     Fpu fpu; Sse xmm; uint32_t mxcsr = 0x1f80;
     // MXCSR_MASK (fxsave +28) is CPU-specific silicon state, not an architectural
     // constant: e.g. this dev machine's CPU reads 0x0000ffff while a Zen runner
@@ -188,6 +206,11 @@ struct Cpu {
 
     void step() {
         if (++executed > limit) throw Fault(FaultKind::InstructionLimit, eip, 0, "instruction limit exceeded");
+        if (trace_fault_context) {
+            recent_eip[recent_next] = eip;
+            recent_next = (recent_next + 1) % recent_eip.size();
+            recent_count = std::min<unsigned>(recent_count + 1, recent_eip.size());
+        }
         if (const Thunk* t = thunks.at(eip)) { host_call(*t); return; }
         if (eip >= thunks.base && eip < thunks.base + thunks.span()) { mem.fault_eip = eip; throw Fault(FaultKind::BadThunk, eip, eip, "execution inside thunk page off a stub boundary"); }
         start = eip; seg = 0; osz = 4; rep = 0; lock = false; p66 = false; mem.fault_eip = eip;
