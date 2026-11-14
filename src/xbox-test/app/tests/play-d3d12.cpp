@@ -122,6 +122,10 @@ DWORD d3d12_entry() {
         *p++='0';*p++='x';
         for(int shift=(int)sizeof(void*)*8-4;shift>=0;shift-=4)*p++=hex[((uintptr_t)pointer>>shift)&0xfu];
         return p;};
+    auto logHr=[&](const char* stage,HRESULT result){
+        char b[160];char* p=b;
+        p=append(p,"PLAY-D3D12 readback ");p=append(p,stage);p=append(p," hr=");
+        p=appendHex(p,(unsigned long)result);*p++='\n';*p=0;OutputDebugStringA(b);};
     HWND window=guestWindow();
     if(!window)return 10;
     // The adapter argument is optional; a D3D12 game that picks one passes the
@@ -301,14 +305,24 @@ DWORD d3d12_entry() {
     D3D12_HEAP_PROPERTIES defaultHeap{};
     defaultHeap.Type=D3D12_HEAP_TYPE_DEFAULT;
     ID3D12Resource* target=nullptr;
-    if(FAILED(device->CreateCommittedResource(&defaultHeap,D3D12_HEAP_FLAG_NONE,&targetDesc,
-            D3D12_RESOURCE_STATE_COMMON,&clearValue,__uuidof(ID3D12Resource),(void**)&target))||!target)return 40;
+    HRESULT targetHr=device->CreateCommittedResource(&defaultHeap,D3D12_HEAP_FLAG_NONE,&targetDesc,
+            D3D12_RESOURCE_STATE_COMMON,&clearValue,__uuidof(ID3D12Resource),(void**)&target);
+    logHr("CreateCommittedResource target",targetHr);
+    if(FAILED(targetHr)||!target)return 40;
     // The readback side is a BUFFER on a READBACK heap: only buffers may live
     // there, and the copy must follow the layout GetCopyableFootprints reports
     // (its row pitch is 256-aligned, wider than the 64 pixels a row carries).
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT readbackFootprint{};
     UINT64 readbackSize=0;
     device->GetCopyableFootprints(&targetDesc,0,1,0,&readbackFootprint,nullptr,nullptr,&readbackSize);
+    {char b[192];char* p=b;
+     p=append(p,"PLAY-D3D12 readback footprint fmt=R8G8B8A8_UNORM width=");p=appendHex(p,(unsigned long)targetDesc.Width);
+     p=append(p," height=");p=appendHex(p,(unsigned long)targetDesc.Height);
+     p=append(p," offset=");p=appendHex(p,(unsigned long)readbackFootprint.Offset);
+     p=append(p," rowpitch=");p=appendHex(p,readbackFootprint.Footprint.RowPitch);
+     p=append(p," rows=");p=appendHex(p,readbackFootprint.Footprint.Height);
+     p=append(p," depth=");p=appendHex(p,readbackFootprint.Footprint.Depth);
+     p=append(p," total=");p=appendHex(p,(unsigned long)readbackSize);*p++='\n';*p=0;OutputDebugStringA(b);}
     D3D12_HEAP_PROPERTIES readbackHeap{};
     readbackHeap.Type=D3D12_HEAP_TYPE_READBACK;
     D3D12_RESOURCE_DESC readbackDesc{};
@@ -317,8 +331,10 @@ DWORD d3d12_entry() {
     readbackDesc.DepthOrArraySize=1;readbackDesc.MipLevels=1;
     readbackDesc.SampleDesc.Count=1;readbackDesc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     ID3D12Resource* readback=nullptr;
-    if(FAILED(device->CreateCommittedResource(&readbackHeap,D3D12_HEAP_FLAG_NONE,&readbackDesc,
-            D3D12_RESOURCE_STATE_COPY_DEST,nullptr,__uuidof(ID3D12Resource),(void**)&readback))||!readback)return 41;
+    HRESULT readbackHr=device->CreateCommittedResource(&readbackHeap,D3D12_HEAP_FLAG_NONE,&readbackDesc,
+            D3D12_RESOURCE_STATE_COPY_DEST,nullptr,__uuidof(ID3D12Resource),(void**)&readback);
+    logHr("CreateCommittedResource readback",readbackHr);
+    if(FAILED(readbackHr)||!readback)return 41;
 
     // The committed SM 5.0 DXBC: a D3D12 PSO takes shader model 5.0 bytecode
     // (it is the same DXBC container 6.x compiles into).
@@ -396,6 +412,7 @@ DWORD d3d12_entry() {
     toDraw.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     toDraw.Transition.StateBefore=D3D12_RESOURCE_STATE_COMMON;
     toDraw.Transition.StateAfter=D3D12_RESOURCE_STATE_RENDER_TARGET;
+    OutputDebugStringA("PLAY-D3D12 readback barrier target COMMON->RENDER_TARGET\n");
     list->ResourceBarrier(1,&toDraw);
     D3D12_CPU_DESCRIPTOR_HANDLE targetHandles[]={targetRtv};
     list->OMSetRenderTargets(1,targetHandles,FALSE,nullptr);
@@ -413,6 +430,7 @@ DWORD d3d12_entry() {
     D3D12_RESOURCE_BARRIER toCopy=toDraw;
     toCopy.Transition.StateBefore=D3D12_RESOURCE_STATE_RENDER_TARGET;
     toCopy.Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_SOURCE;
+    OutputDebugStringA("PLAY-D3D12 readback barrier target RENDER_TARGET->COPY_SOURCE\n");
     list->ResourceBarrier(1,&toCopy);
     // Texture-to-buffer copy at the placed footprint the device reported.
     D3D12_TEXTURE_COPY_LOCATION src{};
@@ -421,6 +439,8 @@ DWORD d3d12_entry() {
     dst.pResource=readback;dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     dst.PlacedFootprint=readbackFootprint;
     D3D12_BOX copyBox{0,0,0,64,64,1};
+    {char b[144];char* p=b;p=append(p,"PLAY-D3D12 readback CopyTextureRegion source=target state=COPY_SOURCE destination=readback state=COPY_DEST box=64x64 pitch=");
+     p=appendHex(p,readbackFootprint.Footprint.RowPitch);*p++='\n';*p=0;OutputDebugStringA(b);}
     list->CopyTextureRegion(&dst,0,0,0,&src,&copyBox);
     D3D12_RESOURCE_BARRIER backToCommon=toCopy;
     backToCommon.Transition.StateBefore=D3D12_RESOURCE_STATE_COPY_SOURCE;
@@ -433,9 +453,14 @@ DWORD d3d12_entry() {
     // pass on a value the queue already signalled past.
     UINT64 fenceValue=0;
     ++fenceValue;
-    if(FAILED(queue->Signal(fence,fenceValue)))return 50;
-    if(FAILED(fence->SetEventOnCompletion(fenceValue,event)))return 51;
-    if(WaitForSingleObject(event,5000)!=WAIT_OBJECT_0)return 52;
+    HRESULT signalHr=queue->Signal(fence,fenceValue);logHr("Signal",signalHr);
+    if(FAILED(signalHr))return 50;
+    HRESULT eventHr=fence->SetEventOnCompletion(fenceValue,event);logHr("SetEventOnCompletion",eventHr);
+    if(FAILED(eventHr))return 51;
+    DWORD waitResult=WaitForSingleObject(event,5000);
+    {char b[128];char* p=b;p=append(p,"PLAY-D3D12 readback fence wait result=");p=appendHex(p,waitResult);
+     p=append(p," completed=");p=appendHex(p,(unsigned long)fence->GetCompletedValue());*p++='\n';*p=0;OutputDebugStringA(b);}
+    if(waitResult!=WAIT_OBJECT_0)return 52;
 
     // Check the pixels: the triangle covers the middle-left, the rest is the
     // clear colour. Rows sit at the 256-aligned pitch GetCopyableFootprints
@@ -443,13 +468,20 @@ DWORD d3d12_entry() {
     {
         void* mappedRead=nullptr;
         D3D12_RANGE readWhole{0,(SIZE_T)readbackSize};
-        if(FAILED(readback->Map(0,&readWhole,&mappedRead))||!mappedRead)return 53;
+        HRESULT mapHr=readback->Map(0,&readWhole,&mappedRead);
+        logHr("Map readback",mapHr);
+        if(FAILED(mapHr)||!mappedRead)return 53;
         const unsigned char* base=static_cast<const unsigned char*>(mappedRead);
         const UINT pitch=(UINT)readbackFootprint.Footprint.RowPitch;
         const unsigned char* inside=base+32*pitch+32*4;   // 32nd row, 32nd pixel
         const unsigned char* outside=base+4*pitch+4*4;    // 4th row, 4th pixel
         const bool insideRed=inside[0]>0x80&&inside[1]<0x40&&inside[2]<0x40;
         const bool outsideBlack=outside[0]<0x20&&outside[1]<0x20&&outside[2]<0x20;
+        {char b[192];char* p=b;
+         p=append(p,"PLAY-D3D12 readback pixels inside=");p=appendHex(p,inside[0]);*p++=',';p=appendHex(p,inside[1]);*p++=',';p=appendHex(p,inside[2]);*p++=',';p=appendHex(p,inside[3]);
+         p=append(p," outside=");p=appendHex(p,outside[0]);*p++=',';p=appendHex(p,outside[1]);*p++=',';p=appendHex(p,outside[2]);*p++=',';p=appendHex(p,outside[3]);
+         p=append(p," pitch=");p=appendHex(p,pitch);p=append(p," insideRed=");p=append(p,insideRed?"1":"0");
+         p=append(p," outsideBlack=");p=append(p,outsideBlack?"1":"0");*p++='\n';*p=0;OutputDebugStringA(b);}
         D3D12_RANGE writtenNone{0,0};
         readback->Unmap(0,&writtenNone);
         // 43 is BLOCKED (never a pass): the pipeline ran but the pixels did

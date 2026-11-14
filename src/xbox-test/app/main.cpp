@@ -2602,6 +2602,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             DWORD attrs = GetFileAttributesW((g_dir + L"\\d3d11deep.txt").c_str());
             return attrs != INVALID_FILE_ATTRIBUTES;
         };
+        d3d11_diag::set_trace_requested = [] {
+            DWORD attrs = GetFileAttributesW((g_dir + L"\\d3d11resizetrace.txt").c_str());
+            return attrs != INVALID_FILE_ATTRIBUTES;
+        };
         v.Activated([](auto&&, IActivatedEventArgs const& a) {
             logf("Activated kind=%d (activation args ignored)", (int)a.Kind());
             CoreWindow::GetForCurrentThread().Activate();

@@ -559,7 +559,7 @@ int main(int argc, char** argv) {
         s.qr = make_qr(n);
         s.qr_count = n;
         s.avatar_letter = "J";
-        s.timer = "The code refreshes automatically in 4:12";
+        s.timer = "The code refreshes in 4:15";
         s.clock = "04:55 pm";
         c.fill(ui::theme::page);
         draw_signin(c, font, s);
@@ -845,6 +845,47 @@ int main(int argc, char** argv) {
         check(lines.size() >= 2, "the long default status wraps to 2 lines (item 18)");
     }
 
+    // The QR refresh timer is centred in the status card and remains clear of
+    // the wrapped status above and the refresh button below it.
+    {
+        const char* timers[] = {"The code refreshes in 4:15", "The code refreshes in 0:05"};
+        check(font.measure(Face::Regular, 22, "The code refreshes in 4:30") <= 584.0f,
+              "sign-in timer 4:30 fits within the card inner width");
+        for (int i = 0; i < 2; ++i) {
+            SignVM s;
+            s.status = "Scan with the Steam mobile app, then approve";
+            s.timer = timers[i];
+            c.fill(ui::theme::page);
+            draw_signin(c, font, s);
+
+            int timer_x0 = W, timer_y0 = H, timer_x1 = -1, timer_y1 = -1;
+            for (int y = 510; y < 541; ++y)
+                for (int x = 840; x < 1488; ++x)
+                    if (px[size_t(y) * W + x] != ui::theme::panel) {
+                        if (x < timer_x0) timer_x0 = x;
+                        if (x > timer_x1) timer_x1 = x;
+                        if (y < timer_y0) timer_y0 = y;
+                        if (y > timer_y1) timer_y1 = y;
+                    }
+            int status_y1 = -1;
+            for (int y = 400; y < 510; ++y)
+                for (int x = 840; x < 1488; ++x)
+                    if (px[size_t(y) * W + x] != ui::theme::panel && y > status_y1) status_y1 = y;
+            const std::string tag = std::string("sign-in timer ") + timers[i];
+            check(status_y1 >= 0, (tag + ": wrapped status ink found above the timer").c_str());
+            check(timer_x1 >= timer_x0, (tag + ": ink found").c_str());
+            if (timer_x1 >= timer_x0) {
+                const float ink_cx = (float(timer_x0) + float(timer_x1)) * 0.5f;
+                check(std::fabs(ink_cx - 1164.0f) <= 1.0f, (tag + ": ink is centred on the status card").c_str());
+                check(timer_x0 >= 872 && timer_x1 < 1456 && font.measure(Face::Regular, 22, timers[i]) <= 584.0f,
+                      (tag + ": ink fits within the card inner width").c_str());
+                check(timer_y0 > status_y1 && timer_y1 < 576,
+                      (tag + ": ink clears the wrapped status and button").c_str());
+            }
+            if (i == 0) snap("launcher-04-signin-centered");
+        }
+    }
+
     // item D3: the confirmation sheet wraps its body inside the sheet and the
     // buttons sit directly under the wrapped text (no fixed gap, no overflow).
     {
@@ -924,6 +965,7 @@ int main(int argc, char** argv) {
         // REFRESH QR: green accent button on sign-in
         {
             SignVM s;
+            s.timer = "The code refreshes in 4:15";
             c.fill(ui::theme::page);
             draw_signin(c, font, s);
             label_centred("REFRESH QR", 981, 576, 366, 80, true);

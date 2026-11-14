@@ -34,7 +34,13 @@ int main(int argc, char** argv) {
     for (const auto& u : r.unresolved) printf("play: unresolved %s\n", u.c_str());
     if (!r.fault.empty()) printf("play: fault kind=%s eip=0x%08x %s\n", r.fault_kind.c_str(), r.fault_eip, r.fault.c_str());
     printf("play: instructions=%llu\n", (unsigned long long)r.instructions);
-    if (!r.finished || r.exit_code != 42 || !r.fault.empty() || !r.unresolved.empty()) return 1;
+    if (!r.finished || r.exit_code != 42 || !r.fault.empty() || !r.unresolved.empty()) {
+        if (r.finished && (r.exit_code & 0xC0000000u) == 0x40000000u)
+            printf("x86-dll: FIRST FAIL id=%u line=%u\n", r.exit_code & 0xFFFFu, (r.exit_code >> 16) & 0x3FFFu);
+        else
+            printf("x86-dll: FIRST FAIL id=unavailable (fixture did not return an encoded check failure)\n");
+        return 1;
+    }
     printf("play: dll-chain loaded, all imports bound, exit 42\n");
     return 0;
 }

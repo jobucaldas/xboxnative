@@ -1495,7 +1495,7 @@ inline void draw_signin(ui::Canvas& c, const Font& f, const SignVM& s) {
             ty += lh;
         }
     }
-    text(c, f, Face::Regular, 22, 953, 510, s.timer, ui::theme::textDim);
+    text_c(c, f, Face::Regular, 22, 1164, 510, s.timer, ui::theme::textDim);
     c.fill_round_rect(rect(981, 576, 366, 80), radiusControl, ui::theme::accent);
     // item 20: centre the label by its whole-string ink box (both axes) —
     // the first-glyph ink_box left the label ~67px right of centre.

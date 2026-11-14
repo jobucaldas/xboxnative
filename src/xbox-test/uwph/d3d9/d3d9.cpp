@@ -27,6 +27,7 @@
 #include <dxgi.h>
 #include "../d3dshim/base.h"
 #include "ffp.h"
+#include "texture_desc.h"
 
 namespace {
 // ------------------------------------------------------------------ formats
@@ -1195,18 +1196,18 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         // resource with one, so the two pools get exactly what they allow.
         if(desc.Usage==D3D11_USAGE_DYNAMIC&&!desc.BindFlags)desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
         if(desc.Usage==D3D11_USAGE_STAGING)desc.BindFlags=0;
-        // A MANAGED texture is CPU-writable and sampled. It is spelled DEFAULT
-        // + shader resource with a staging shadow the wrapper keeps for
-        // LockRect (see Texture::LockRect), for every mip count: D3D11 has no
-        // dynamic mip chain, and a dynamic single-mip texture is the one
-        // spelling the console's d3d11on12 wrapping path device-removes on
-        // (0x887a0005/0x887a0020 after prior draws, d3d9-triangle-variants v4).
-        if(pool==D3DPOOL_MANAGED&&desc.Usage==D3D11_USAGE_DYNAMIC) {
-            desc.Usage=D3D11_USAGE_DEFAULT;
-            desc.CPUAccessFlags=0;
-            if(!desc.BindFlags)desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        // A MANAGED texture is CPU-writable and sampled. Use DEFAULT + shader
+        // resource with a staging shadow for LockRect; this is also the safe
+        // spelling for a managed texture on the console's D3D11-on-12 path.
+        d3d9_detail::applyManagedTextureBacking(desc,pool);
+        const HRESULT removedBefore=pool==D3DPOOL_MANAGED?device()->GetDeviceRemovedReason():S_OK;
+        const HRESULT hr=device()->CreateTexture2D(&desc,nullptr,out);
+        if(pool==D3DPOOL_MANAGED&&FAILED(hr)) {
+            OutputDebugStringA(FAILED(removedBefore)
+                ?"D3D9 managed texture: pre-call GetDeviceRemovedReason failed\n"
+                :"D3D9 managed texture: pre-call GetDeviceRemovedReason succeeded\n");
         }
-        return device()->CreateTexture2D(&desc,nullptr,out);
+        return hr;
     }
     HRESULT STDMETHODCALLTYPE CreateTexture(UINT width,UINT height,UINT levels,DWORD usage,
                                             D3DFORMAT format,D3DPOOL pool,
