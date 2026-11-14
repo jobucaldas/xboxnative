@@ -796,7 +796,13 @@ DWORD d3d_entry() {
     ID3D11Buffer* made=nullptr;
     if(!FAILED(device->CreateBuffer(&buffer,nullptr,&made)))return 30;
     UINT support=0;
-    if(!FAILED(device->CheckFormatSupport(DXGI_FORMAT(0x7fff),&support))&&support)return 31;
+    if(onWine){
+        OutputDebugStringA("PLAY-D3D11 STAGE invalid-format-check SKIP (wine: Wine's partial CheckFormatSupport stub hangs on an unknown DXGI format)\n");
+    }else{
+        OutputDebugStringA("PLAY-D3D11 STAGE invalid-format-check begin\n");
+        if(!FAILED(device->CheckFormatSupport(DXGI_FORMAT(0x7fff),&support))&&support)return 31;
+        OutputDebugStringA("PLAY-D3D11 STAGE invalid-format-check PASS\n");
+    }
 
     // A Wine host never reaches PASS: the four gated passes (MSAA, stream-out,
     // indirect, query) did not run, so 42 would claim coverage the run does
@@ -805,7 +811,10 @@ DWORD d3d_entry() {
     // 43, but 43 already means BLOCKED pixel-readback for this fixture's
     // first pass; a distinct code keeps the two causes distinguishable in
     // the verdict line). The console's D3D11-on-12 runs those passes in full.
-    if(onWine)return 95;
+    if(onWine){
+        OutputDebugStringA("PLAY-D3D11 BLOCKED wine-host (Wine-only stages skipped; console stages unchanged)\n");
+        return 95;
+    }
 
     backView->Release();backBuffer->Release();
     rtv->Release();pointFullBuffer->Release();gs->Release();
