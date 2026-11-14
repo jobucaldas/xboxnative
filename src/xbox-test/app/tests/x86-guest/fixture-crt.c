@@ -120,6 +120,14 @@ int main(void) {
     void* hp = HeapAlloc(h, HEAP_ZERO_MEMORY, 256);
     check(hp != NULL);
     check(((unsigned char*)hp)[255] == 0);
+    ULONG compatibility = 2, queried = 0, returned = 0;
+    check(HeapSetInformation(h, HeapCompatibilityInformation, &compatibility, sizeof compatibility));
+    check(HeapQueryInformation(h, HeapCompatibilityInformation, &queried, sizeof queried, &returned));
+    check(queried == 2 && returned == sizeof queried);
+    check(HeapSetInformation(h, HeapEnableTerminationOnCorruption, NULL, 0));
+    SetLastError(0);
+    check(!HeapSetInformation((HANDLE)0xDEAD0000, HeapCompatibilityInformation, &compatibility, sizeof compatibility) && GetLastError() == ERROR_INVALID_PARAMETER);
+    check(!HeapSetInformation(h, HeapCompatibilityInformation, &compatibility, 2) && GetLastError() == ERROR_INVALID_PARAMETER);
     HeapFree(h, 0, hp); HeapDestroy(h);
     DWORD slot = TlsAlloc();
     check(slot != TLS_OUT_OF_INDEXES);

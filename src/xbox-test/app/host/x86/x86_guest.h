@@ -1135,6 +1135,26 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "HeapFree", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { heap.release(c.arg(2)); return 1; });
     reg.add("kernel32.dll", "HeapReAlloc", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t { return heap.realloc(c.arg(2), c.arg(3)); });
     reg.add("kernel32.dll", "HeapSize", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { return heap.size_of(c.arg(2)); });
+    reg.add("kernel32.dll", "HeapSetInformation", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
+        uint32_t h = c.arg(0), info = c.arg(1), buffer = c.arg(2), size = c.arg(3);
+        if ((h != 0x50000000u && !heap_handles.count(h)) ||
+            (info == 0 && (!buffer || size != 4)) ||
+            (info == 1 && (buffer || size != 0)) || info > 1) { set_last_error(87); return 0; }
+        if (info == 0) {
+            uint32_t compatibility = mem.r32(buffer);
+            if (compatibility != 0 && compatibility != 2) { set_last_error(87); return 0; }
+        }
+        set_last_error(0); return 1;
+    });
+    reg.add("kernel32.dll", "HeapQueryInformation", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
+        uint32_t h = c.arg(0), info = c.arg(1), buffer = c.arg(2), size = c.arg(3), returned = c.arg(4);
+        if ((h != 0x50000000u && !heap_handles.count(h)) || info != 0 || !buffer || size < 4) {
+            set_last_error(87); return 0;
+        }
+        mem.w32(buffer, 2);  // HEAP_COMPATIBILITY_INFORMATION: LFH enabled
+        if (returned) mem.w32(returned, 4);
+        set_last_error(0); return 1;
+    });
     reg.add("kernel32.dll", "LocalAlloc", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { return heap.alloc(c.arg(1)); });
     reg.add("kernel32.dll", "LocalFree", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { heap.release(c.arg(0)); return 0; });
     reg.add("kernel32.dll", "GlobalAlloc", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { return heap.alloc(c.arg(1)); });
