@@ -224,6 +224,40 @@ DWORD d3d_entry() {
     }
     OutputDebugStringA("PLAY-D3D11 GS PASS\n");
 
+    // Halo's flagged scan adds a four-vertex triangle strip and
+    // SV_RenderTargetArrayIndex to the basic point-expansion shape. Exercise
+    // one instance too; the scan doesn't identify CB/SRV reads, so this shader
+    // intentionally adds no unverified resource dependency.
+    ID3D11GeometryShader* haloGs=nullptr;
+    if(FAILED(device->CreateGeometryShader(halo_gs,sizeof halo_gs,nullptr,&haloGs))||!haloGs){
+        OutputDebugStringA("PLAY-D3D11 GS-HALO FAIL create\n");
+        return 48;
+    }
+    context->ClearRenderTargetView(rtv,clear);
+    ID3D11Buffer* haloPointBinds[]={pointFullBuffer};
+    context->IASetVertexBuffers(0,1,haloPointBinds,&stride,&offset);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+    context->GSSetShader(haloGs,nullptr,0);
+    OutputDebugStringA("PLAY-D3D11 GS-HALO draw-instanced\n");
+    context->DrawInstanced(1,1,0,0);
+    context->GSSetShader(nullptr,nullptr,0);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->IASetVertexBuffers(0,1,triBinds,&stride,&offset);
+    context->CopyResource(staging,target);
+    D3D11_MAPPED_SUBRESOURCE haloMapped{};
+    if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&haloMapped))||!haloMapped.pData){
+        OutputDebugStringA("PLAY-D3D11 GS-HALO FAIL readback-map\n");
+        return 49;
+    }
+    const unsigned char* haloInside=static_cast<const unsigned char*>(haloMapped.pData)+32*haloMapped.RowPitch+32*4;
+    const bool haloInsideGreen=haloInside[1]>0x80&&haloInside[0]<0x40&&haloInside[2]<0x40;
+    context->Unmap(staging,0);
+    if(!haloInsideGreen){
+        OutputDebugStringA("PLAY-D3D11 GS-HALO FAIL black-readback\n");
+        return 50;
+    }
+    OutputDebugStringA("PLAY-D3D11 GS-HALO PASS\n");
+
     // ---- MSAA pass: 4x render target, clear, resolve, readback ----
     // Games pick MSAA through CheckMultisampleQualityLevels and resolve with
     // ResolveSubresource; if the layer answers the quality probe but drops the
