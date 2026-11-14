@@ -421,6 +421,8 @@ DWORD d3d12_entry() {
     list->ClearRenderTargetView(targetRtv,clearBlack,0,nullptr);
     D3D12_VIEWPORT drawViewport{0,0,64,64,0.0f,1.0f};
     list->RSSetViewports(1,&drawViewport);
+    D3D12_RECT drawScissor{0,0,64,64};
+    list->RSSetScissorRects(1,&drawScissor);
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     list->SetGraphicsRootSignature(rootSignature);
     list->IASetVertexBuffers(0,1,&vertexView);

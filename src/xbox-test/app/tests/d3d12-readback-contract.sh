@@ -23,6 +23,8 @@ for token in \
     'D3D12_RESOURCE_STATE_COMMON' \
     'D3D12_RESOURCE_STATE_RENDER_TARGET' \
     'D3D12_RESOURCE_STATE_COPY_SOURCE' \
+    'D3D12_RECT drawScissor{0,0,64,64}' \
+    'list->RSSetScissorRects(1,&drawScissor)' \
     'list->CopyTextureRegion(&dst,0,0,0,&src,&copyBox)' \
     'readbackFootprint.Footprint.RowPitch' \
     'base+32*pitch+32*4' \
@@ -43,12 +45,14 @@ copy=$(grep -n 'list->CopyTextureRegion(&dst' "$f" | cut -d: -f1)
 signal=$(grep -n 'queue->Signal(fence,fenceValue)' "$f" | head -1 | cut -d: -f1)
 wait=$(grep -n 'WaitForSingleObject(event,5000)' "$f" | head -1 | cut -d: -f1)
 map=$(grep -n 'readback->Map(0,&readWhole,&mappedRead)' "$f" | cut -d: -f1)
+scissor=$(grep -n 'list->RSSetScissorRects(1,&drawScissor)' "$f" | cut -d: -f1)
+draw=$(grep -n 'list->DrawInstanced(3,1,0,0)' "$f" | cut -d: -f1)
 compare=$(grep -n 'if(!insideRed||!outsideBlack)return 43' "$f" | cut -d: -f1)
-[[ -n $to_draw_before && -n $to_draw_after && -n $to_draw_call && -n $to_copy_before && -n $to_copy_after && -n $to_copy_call && -n $pitch && -n $copy && -n $signal && -n $wait && -n $map && -n $compare ]] \
+[[ -n $to_draw_before && -n $to_draw_after && -n $to_draw_call && -n $to_copy_before && -n $to_copy_after && -n $to_copy_call && -n $pitch && -n $copy && -n $signal && -n $wait && -n $map && -n $scissor && -n $draw && -n $compare ]] \
     || fail "incomplete readback sequence"
 (( to_draw_before < to_draw_after && to_draw_after < to_draw_call \
     && to_copy_before < to_copy_after && to_copy_after < to_copy_call \
-    && to_draw_call < to_copy_before && to_copy_call < copy \
+    && to_draw_call < scissor && scissor < draw && draw < to_copy_before && to_copy_call < copy \
     && pitch < copy && copy < signal && signal < wait && wait < map && map < compare )) \
     || fail "barrier, footprint, copy, queue wait, Map, and pixel comparison are out of order"
 
