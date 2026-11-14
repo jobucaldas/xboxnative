@@ -557,7 +557,52 @@ inline ShaderId shaderIdOf(void* shader) {
 // held until FinishCommandList and emitted when that list is first executed.
 inline std::string topologyName(unsigned t);   // defined below; noteDrawState names it
 inline const char* drawKindName(int k);
-inline void noteDrawState(void* /*self*/,ContextState& state,unsigned topology,unsigned /*shaders*/,int kind,unsigned count,unsigned instances) {
+inline std::string boundSrvText(ID3D11ShaderResourceView* view) {
+    D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};view->GetDesc(&viewDesc);
+    ID3D11Resource* resource=nullptr;view->GetResource(&resource);
+    if(!resource)return fmt("view=%s resource=unknown",formatText(viewDesc.Format).c_str());
+    D3D11_RESOURCE_DIMENSION dimension=D3D11_RESOURCE_DIMENSION_UNKNOWN;resource->GetType(&dimension);
+    std::string text=fmt("view=%s resource-dim=%u",formatText(viewDesc.Format).c_str(),unsigned(dimension));
+    if(dimension==D3D11_RESOURCE_DIMENSION_TEXTURE1D) {
+        D3D11_TEXTURE1D_DESC desc{};static_cast<ID3D11Texture1D*>(resource)->GetDesc(&desc);
+        text+=fmt(" resource=%s %u mips=%u",formatText(desc.Format).c_str(),desc.Width,desc.MipLevels);
+    } else if(dimension==D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        D3D11_TEXTURE2D_DESC desc{};static_cast<ID3D11Texture2D*>(resource)->GetDesc(&desc);
+        text+=fmt(" resource=%s %ux%u mips=%u",formatText(desc.Format).c_str(),desc.Width,desc.Height,desc.MipLevels);
+    } else if(dimension==D3D11_RESOURCE_DIMENSION_TEXTURE3D) {
+        D3D11_TEXTURE3D_DESC desc{};static_cast<ID3D11Texture3D*>(resource)->GetDesc(&desc);
+        text+=fmt(" resource=%s %ux%ux%u mips=%u",formatText(desc.Format).c_str(),desc.Width,desc.Height,desc.Depth,desc.MipLevels);
+    } else if(dimension==D3D11_RESOURCE_DIMENSION_BUFFER) {
+        D3D11_BUFFER_DESC desc{};static_cast<ID3D11Buffer*>(resource)->GetDesc(&desc);
+        text+=fmt(" bytes=%u bind=0x%x stride=%u",desc.ByteWidth,desc.BindFlags,desc.StructureByteStride);
+    }
+    resource->Release();return text;
+}
+inline std::string boundDrawResources(void* self) {
+    auto* context=static_cast<ID3D11DeviceContext*>(self);
+    ID3D11ShaderResourceView* ps[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT]{};
+    ID3D11ShaderResourceView* gs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT]{};
+    context->PSGetShaderResources(0,D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT,ps);
+    context->GSGetShaderResources(0,D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT,gs);
+    std::string psText="ps-srv={",gsText="gs-srv={";
+    for(unsigned i=0;i<D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;++i) {
+        if(ps[i])psText+=fmt("%st%u:%s",psText.back()=='{'?"":" ",i,boundSrvText(ps[i]).c_str());
+        if(gs[i])gsText+=fmt("%st%u:%s",gsText.back()=='{'?"":" ",i,boundSrvText(gs[i]).c_str());
+        if(ps[i])ps[i]->Release();if(gs[i])gs[i]->Release();
+    }
+    if(psText.back()=='{')psText+="none";if(gsText.back()=='{')gsText+="none";
+    psText+="}";gsText+="}";
+    ID3D11Buffer* so[4]{};context->SOGetTargets(4,so);
+    std::string soText="so={";bool anySo=false;
+    for(unsigned i=0;i<4;++i)if(so[i]) {
+        D3D11_BUFFER_DESC desc{};so[i]->GetDesc(&desc);
+        soText+=fmt("%s%u:bytes=%u bind=0x%x stride=%u",anySo?" ":"",i,desc.ByteWidth,desc.BindFlags,desc.StructureByteStride);
+        anySo=true;so[i]->Release();
+    }
+    if(!anySo)soText+="none";soText+="}";
+    return psText+" "+gsText+" "+soText;
+}
+inline void noteDrawState(void* self,ContextState& state,unsigned topology,unsigned /*shaders*/,int kind,unsigned count,unsigned instances) {
     if(!deepDraw())return;
     ShaderId gs=shaderIdOf(reinterpret_cast<void*>(state.gsHash.load(std::memory_order_relaxed)));
     ShaderId ps=shaderIdOf(reinterpret_cast<void*>(state.psHash.load(std::memory_order_relaxed)));
@@ -575,9 +620,13 @@ inline void noteDrawState(void* /*self*/,ContextState& state,unsigned topology,u
         topology,topologyName(topology).c_str(),gs.hash,gs.bytes,gs.serial,ps.hash,ps.bytes,ps.serial,
         formatText(DXGI_FORMAT(fmtNow)).c_str(),state.rtWidth.load(),state.rtHeight.load(),
         formatText(DXGI_FORMAT(state.dsFormat.load())).c_str(),flags.empty()?" ok":flags.c_str());
+    // The binding snapshot (128 SRV slots + SO targets) is taken only for a
+    // draw that will actually be recorded, and stays out of the uniqueness key
+    // so texture churn cannot use up the cap: the first draw of each state
+    // records the bindings it ran with.
     if(deferred) {
         for(const auto& old:state.pendingDeepDraws)if(old.key==key)return;
-        if(state.pendingDeepDraws.size()<kMaxDrawStates)state.pendingDeepDraws.push_back({key,text});
+        if(state.pendingDeepDraws.size()<kMaxDrawStates)state.pendingDeepDraws.push_back({key,text+" "+boundDrawResources(self)});
         else state.pendingDeepDrawsCapped=true;
         return;
     }
@@ -590,6 +639,7 @@ inline void noteDrawState(void* /*self*/,ContextState& state,unsigned topology,u
             drawStatesCapped=true;line="further immediate draw-state lines suppressed (cap reached)";
         } else {seen.insert(reportKey);++drawStates;line=text;}
     }
+    if(line==text)line+=" "+boundDrawResources(self);
     emit(line);
 }
 inline void noteFinishedCommandList(void* context,ID3D11CommandList* list) {
