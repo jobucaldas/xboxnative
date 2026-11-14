@@ -935,10 +935,9 @@ static void crashContextDiagnostics(EXCEPTION_POINTERS* ep) {
         uintptr_t base=0;std::string name;
         if(crashModule((uintptr_t)context.Rip,base,name))chain[count++]=(uintptr_t)context.Rip;
         previousRip=(uintptr_t)context.Rip;previousRsp=(uintptr_t)context.Rsp;
-        DWORD64 imageBase=0;auto function=RtlLookupFunctionEntry(context.Rip,&imageBase,nullptr);
-        if(!function)break;
-        PVOID handler=nullptr;DWORD64 frame=0;
-        RtlVirtualUnwind(UNW_FLAG_NHANDLER,imageBase,context.Rip,function,&context,&handler,&frame,nullptr);
+        // diagnosticUnwind guards the unwind with SEH: a corrupt stack or
+        // unwind table must not fault inside the crash filter.
+        if(!diagnosticUnwind(&context))break;
         if(context.Rip==previousRip&&context.Rsp==previousRsp)break;
     }
     if(count<=1) {
