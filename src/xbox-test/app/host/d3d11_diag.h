@@ -1537,10 +1537,9 @@ static void STDMETHODCALLTYPE contextSetShaderResources(DevicePtr self,UINT star
     // Deep-draw state: the PS/GS null and over-target bits at bind time, so a
     // draw-state line can say whether the shader that rendered black sampled
     // an unbound texture or its own target. The bits describe THIS context's
-    // last bind for the stage (a bind with count=0 or all-null views clears
-    // the stage's bits: what is bound after the call is nothing), not a
-    // global: a deferred context's binds never leak into the immediate one's
-    // draw-state line.
+    // last bind for the stage (count=0 leaves the stage unchanged; an all-null
+    // non-empty bind clears the stage's bits), not a global: a deferred
+    // context's binds never leak into the immediate one's draw-state line.
     if(Stage==2||Stage==1) {
         unsigned bit=0;
         if(views&&count) {
@@ -1554,11 +1553,13 @@ static void STDMETHODCALLTYPE contextSetShaderResources(DevicePtr self,UINT star
         }
         // A full-range bind replaces every slot of the stage; a partial one
         // (start>0) only replaces its own slots, so the previous bits stand.
-        if(start==0) {
-            stateOf(self).srvState.fetch_and(Stage==2?~3u:~12u,std::memory_order_relaxed);
-            if(bit)stateOf(self).srvState.fetch_or(bit,std::memory_order_relaxed);
-        } else if(bit) {
-            stateOf(self).srvState.fetch_or(bit,std::memory_order_relaxed);
+        if(count) {
+            if(start==0) {
+                stateOf(self).srvState.fetch_and(Stage==2?~3u:~12u,std::memory_order_relaxed);
+                if(bit)stateOf(self).srvState.fetch_or(bit,std::memory_order_relaxed);
+            } else if(bit) {
+                stateOf(self).srvState.fetch_or(bit,std::memory_order_relaxed);
+            }
         }
     }
     call(self,start,count,views);
