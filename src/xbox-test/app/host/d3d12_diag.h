@@ -633,7 +633,7 @@ inline void probeGraphicsPipelineState(DevicePtr self,GraphicsPipelineCall call,
     const D3D12_BLEND_DESC blendDefault=defaultBlendDesc();
     if(memcmp(&d->BlendState,&blendDefault,sizeof blendDefault)!=0) {variant=*d;variant.BlendState=blendDefault;run("blend-default",variant);}
     if(d->DepthStencilState.DepthEnable) {variant=*d;variant.DepthStencilState.DepthEnable=FALSE;run("depth-disabled",variant);}
-    if(d->SampleDesc.Count!=1) {variant=*d;variant.SampleDesc.Count=1;run("sample-count-1",variant);}
+    if(d->SampleDesc.Count!=1||d->SampleDesc.Quality!=0) {variant=*d;variant.SampleDesc.Count=1;variant.SampleDesc.Quality=0;run("sample-count-1",variant);}
     if(d->pRootSignature) {variant=*d;variant.pRootSignature=nullptr;run("root-signature-null",variant);}
     if(d->StreamOutput.NumEntries||d->StreamOutput.NumStrides) {variant=*d;variant.StreamOutput={};run("stream-output-empty",variant);}
     if(d->NodeMask) {variant=*d;variant.NodeMask=0;run("node-mask-zero",variant);}
@@ -754,7 +754,7 @@ inline std::string streamSubobjects(const void* stream,size_t bytes,StreamVisit 
     return fmt("bytes=%zu%s subobjects=[%s]",bytes,truncated?" truncated":"",subs.c_str());
 }
 enum StreamProbeMutation {StreamProbeDigest,StreamProbeInputLayout,StreamProbeDsvFormat,StreamProbeRtvFormat,
-    StreamProbeBlend,StreamProbeDepth,StreamProbeSampleCount,StreamProbeRootSignature,StreamProbeNodeMask,StreamProbeFlags};
+    StreamProbeBlend,StreamProbeDepth,StreamProbeSampleCount,StreamProbeStreamOutput,StreamProbeRootSignature,StreamProbeNodeMask,StreamProbeFlags};
 struct StreamProbeContext {
     const unsigned char* base;std::vector<unsigned char>* clone;std::vector<unsigned char>* shaderStorage;
     int target;StreamProbeMutation mutation;bool mutated=false;
@@ -773,8 +773,10 @@ inline void mutateStreamProbe(int type,const unsigned char* payload,size_t size,
     case StreamProbeDsvFormat: {if(size<sizeof(DXGI_FORMAT))return;DXGI_FORMAT input{};memcpy(&input,payload,sizeof input);if(input==DXGI_FORMAT_D32_FLOAT)return;DXGI_FORMAT replacement=DXGI_FORMAT_D32_FLOAT;memcpy(dest,&replacement,sizeof replacement);break;}
     case StreamProbeRtvFormat: {if(size<sizeof(D3D12_RT_FORMAT_ARRAY))return;auto replacement=*static_cast<const D3D12_RT_FORMAT_ARRAY*>(static_cast<const void*>(payload));if(!replacement.NumRenderTargets||replacement.RTFormats[0]==DXGI_FORMAT_R8G8B8A8_UNORM)return;replacement.RTFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;memcpy(dest,&replacement,sizeof replacement);break;}
     case StreamProbeBlend: {if(size<sizeof(D3D12_BLEND_DESC))return;auto replacement=*static_cast<const D3D12_BLEND_DESC*>(static_cast<const void*>(payload));const D3D12_BLEND_DESC defaultBlend=defaultBlendDesc();if(memcmp(&replacement,&defaultBlend,sizeof defaultBlend)==0)return;memcpy(dest,&defaultBlend,sizeof defaultBlend);break;}
-    case StreamProbeDepth: {if(size<sizeof(D3D12_DEPTH_STENCIL_DESC))return;auto replacement=*static_cast<const D3D12_DEPTH_STENCIL_DESC*>(static_cast<const void*>(payload));if(!replacement.DepthEnable)return;replacement.DepthEnable=FALSE;memcpy(dest,&replacement,sizeof replacement);break;}
-    case StreamProbeSampleCount: {if(size<sizeof(DXGI_SAMPLE_DESC))return;auto replacement=*static_cast<const DXGI_SAMPLE_DESC*>(static_cast<const void*>(payload));if(replacement.Count==1)return;replacement.Count=1;memcpy(dest,&replacement,sizeof replacement);break;}
+    // DepthEnable is the leading BOOL of DEPTH_STENCIL, DEPTH_STENCIL1 and DEPTH_STENCIL2 alike.
+    case StreamProbeDepth: {if(size<sizeof(BOOL))return;BOOL input=FALSE;memcpy(&input,payload,sizeof input);if(!input)return;BOOL replacement=FALSE;memcpy(dest,&replacement,sizeof replacement);break;}
+    case StreamProbeSampleCount: {if(size<sizeof(DXGI_SAMPLE_DESC))return;auto replacement=*static_cast<const DXGI_SAMPLE_DESC*>(static_cast<const void*>(payload));if(replacement.Count==1&&replacement.Quality==0)return;replacement.Count=1;replacement.Quality=0;memcpy(dest,&replacement,sizeof replacement);break;}
+    case StreamProbeStreamOutput: {if(size<sizeof(D3D12_STREAM_OUTPUT_DESC))return;D3D12_STREAM_OUTPUT_DESC input{};memcpy(&input,payload,sizeof input);if(!input.NumEntries&&!input.NumStrides)return;D3D12_STREAM_OUTPUT_DESC replacement{};memcpy(dest,&replacement,sizeof replacement);break;}
     case StreamProbeRootSignature: {if(size<sizeof(ID3D12RootSignature*))return;ID3D12RootSignature* input=nullptr;memcpy(&input,payload,sizeof input);if(!input)return;ID3D12RootSignature* replacement=nullptr;memcpy(dest,&replacement,sizeof replacement);break;}
     case StreamProbeNodeMask: {if(size<sizeof(UINT))return;UINT input=0;memcpy(&input,payload,sizeof input);if(!input)return;UINT replacement=0;memcpy(dest,&replacement,sizeof replacement);break;}
     case StreamProbeFlags: {if(size<sizeof(D3D12_PIPELINE_STATE_FLAGS))return;auto input=*static_cast<const D3D12_PIPELINE_STATE_FLAGS*>(static_cast<const void*>(payload));if(input==D3D12_PIPELINE_STATE_FLAG_NONE)return;auto replacement=D3D12_PIPELINE_STATE_FLAG_NONE;memcpy(dest,&replacement,sizeof replacement);break;}
@@ -796,7 +798,8 @@ inline void probePipelineStateStream(DevicePtr self,PipelineStreamCall call,cons
     run("vs-dxbc-digest-zero",1,StreamProbeDigest);run("ps-dxbc-digest-zero",2,StreamProbeDigest);
     run("input-layout-empty",12,StreamProbeInputLayout);run("dsv-format-d32",16,StreamProbeDsvFormat);
     run("rtv-format-r8g8b8a8",15,StreamProbeRtvFormat);run("blend-default",8,StreamProbeBlend);
-    run("depth-disabled",11,StreamProbeDepth);run("sample-count-1",17,StreamProbeSampleCount);
+    run("depth-disabled",11,StreamProbeDepth);run("depth1-disabled",21,StreamProbeDepth);run("depth2-disabled",26,StreamProbeDepth);
+    run("sample-count-1",17,StreamProbeSampleCount);run("stream-output-empty",7,StreamProbeStreamOutput);
     run("root-signature-null",0,StreamProbeRootSignature);run("node-mask-zero",18,StreamProbeNodeMask);
     run("flags-none",20,StreamProbeFlags);
 }
