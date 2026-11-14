@@ -69,6 +69,9 @@ grep -q '^play: on_loaded calls=1 before-entry=1 ' <<<"$pout" || { echo "X86-GUE
 # default 500 million would stop a running 32-bit game after a few seconds.
 grep -q '^play: limit-default=500000000 limit-game=1000000000000$' <<<"$pout" || {
   echo "X86-GUEST FAIL: x86_play instruction limit"; echo "$pout"; exit 1; }
+tline=$(grep '^play: traced ' <<<"$pout" || true)
+[[ $tline == "play: traced kind=InstructionLimit "*"recent x86: "*"fixture-crt.exe+0x"* && $tline != *__top__* ]] || {
+  echo "X86-GUEST FAIL: x86_play fault context labels"; echo "$tline"; exit 1; }
 ! grep -q '^play: unresolved\|^play: fault' <<<"$pout" || { echo "X86-GUEST FAIL: x86_play reported a fault or unresolved import"; echo "$pout"; exit 1; }
 pbody=$(sed '/^play: /d' <<<"$pout")
 [[ $pbody == "$want" ]] || { echo "X86-GUEST FAIL: x86_play tee differs"; diff <(echo "$want") <(echo "$pbody") || true; exit 1; }

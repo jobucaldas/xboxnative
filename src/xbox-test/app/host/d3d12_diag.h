@@ -33,6 +33,7 @@
 #include <set>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 namespace d3d12_diag {
 using Sink=void(*)(const char*);
@@ -415,6 +416,15 @@ inline const char* dxilContainerState(const unsigned char* bytes,size_t length) 
     }
     return hasDxil?"valid":"not-dxil";
 }
+inline bool copyDxbcWithZeroedDigest(const D3D12_SHADER_BYTECODE& input,std::vector<unsigned char>& storage,D3D12_SHADER_BYTECODE& output) {
+    if(!input.pShaderBytecode||input.BytecodeLength<20||input.BytecodeLength>(16u<<20))return false;
+    const auto* bytes=static_cast<const unsigned char*>(input.pShaderBytecode);
+    if(memcmp(bytes,"DXBC",4)!=0||strcmp(dxilContainerState(bytes,size_t(input.BytecodeLength)),"valid")!=0)return false;
+    bool set=false;for(size_t i=4;i<20;++i)if(bytes[i]){set=true;break;}
+    if(!set)return false;
+    storage.assign(bytes,bytes+size_t(input.BytecodeLength));memset(storage.data()+4,0,16);
+    output={storage.data(),input.BytecodeLength};return true;
+}
 inline std::string containerText(const void* code,SIZE_T length) {
     if(!code||!length) return "none";
     auto bytes=static_cast<const unsigned char*>(code);
@@ -587,11 +597,54 @@ inline void traceGraphicsDesc(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) {
         rtvText({{d.RTVFormats[0],d.RTVFormats[1],d.RTVFormats[2],d.RTVFormats[3],d.RTVFormats[4],d.RTVFormats[5],d.RTVFormats[6],d.RTVFormats[7]},d.NumRenderTargets}).c_str(),
         formatText(d.DSVFormat).c_str(),d.SampleDesc.Count,rootSignatureText(d.pRootSignature).c_str(),inputLayoutText(d.InputLayout).c_str()));
 }
+inline D3D12_BLEND_DESC defaultBlendDesc() {
+    D3D12_BLEND_DESC d{};d.AlphaToCoverageEnable=FALSE;d.IndependentBlendEnable=FALSE;
+    for(auto& r:d.RenderTarget) {r.BlendEnable=FALSE;r.LogicOpEnable=FALSE;r.SrcBlend=D3D12_BLEND_ONE;r.DestBlend=D3D12_BLEND_ZERO;
+        r.BlendOp=D3D12_BLEND_OP_ADD;r.SrcBlendAlpha=D3D12_BLEND_ONE;r.DestBlendAlpha=D3D12_BLEND_ZERO;
+        r.BlendOpAlpha=D3D12_BLEND_OP_ADD;r.LogicOp=D3D12_LOGIC_OP_NOOP;r.RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;}
+    return d;
+}
+constexpr size_t kMaxPsoProbeCalls=128;
+inline std::atomic<size_t> psoProbeCalls{0};
+inline std::atomic<bool> psoProbeCapped{false};
+inline bool beginPsoProbeCall() {
+    const size_t n=psoProbeCalls.fetch_add(1);
+    if(n<kMaxPsoProbeCalls)return true;
+    if(!psoProbeCapped.exchange(true))emit("pso-probe further retries suppressed (cap reached)");
+    return false;
+}
+inline void releasePsoProbeOutput(void* output) {
+    if(output)reinterpret_cast<IUnknown*>(output)->Release();
+}
+using GraphicsPipelineCall=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_GRAPHICS_PIPELINE_STATE_DESC*,REFIID,void**);
+inline void probeGraphicsPipelineState(DevicePtr self,GraphicsPipelineCall call,const D3D12_GRAPHICS_PIPELINE_STATE_DESC* d,REFIID id) {
+    if(!traceOn.load(std::memory_order_acquire)||!d)return;
+    auto run=[&](const char* name,const D3D12_GRAPHICS_PIPELINE_STATE_DESC& variant) {
+        if(!beginPsoProbeCall())return;
+        void* probeOut=nullptr;HRESULT retry=call(self,&variant,id,&probeOut);if(SUCCEEDED(retry))releasePsoProbeOutput(probeOut);
+        emit(fmt("pso-probe by-struct %s hr=%s",name,hex(retry).c_str()));
+    };
+    std::vector<unsigned char> vsStorage,psStorage;D3D12_SHADER_BYTECODE shader{};D3D12_GRAPHICS_PIPELINE_STATE_DESC variant=*d;
+    if(copyDxbcWithZeroedDigest(d->VS,vsStorage,shader)){variant.VS=shader;run("vs-dxbc-digest-zero",variant);}
+    if(copyDxbcWithZeroedDigest(d->PS,psStorage,shader)){variant=*d;variant.PS=shader;run("ps-dxbc-digest-zero",variant);}
+    if(d->InputLayout.NumElements) {variant=*d;variant.InputLayout={nullptr,0};run("input-layout-empty",variant);}
+    if(d->DSVFormat!=DXGI_FORMAT_UNKNOWN&&d->DSVFormat!=DXGI_FORMAT_D32_FLOAT) {variant=*d;variant.DSVFormat=DXGI_FORMAT_D32_FLOAT;run("dsv-format-d32",variant);}
+    if(d->NumRenderTargets&&d->RTVFormats[0]!=DXGI_FORMAT_R8G8B8A8_UNORM) {variant=*d;variant.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;run("rtv-format-r8g8b8a8",variant);}
+    const D3D12_BLEND_DESC blendDefault=defaultBlendDesc();
+    if(memcmp(&d->BlendState,&blendDefault,sizeof blendDefault)!=0) {variant=*d;variant.BlendState=blendDefault;run("blend-default",variant);}
+    if(d->DepthStencilState.DepthEnable) {variant=*d;variant.DepthStencilState.DepthEnable=FALSE;run("depth-disabled",variant);}
+    if(d->SampleDesc.Count!=1||d->SampleDesc.Quality!=0) {variant=*d;variant.SampleDesc.Count=1;variant.SampleDesc.Quality=0;run("sample-count-1",variant);}
+    if(d->pRootSignature) {variant=*d;variant.pRootSignature=nullptr;run("root-signature-null",variant);}
+    if(d->StreamOutput.NumEntries||d->StreamOutput.NumStrides) {variant=*d;variant.StreamOutput={};run("stream-output-empty",variant);}
+    if(d->NodeMask) {variant=*d;variant.NodeMask=0;run("node-mask-zero",variant);}
+    if(d->Flags!=D3D12_PIPELINE_STATE_FLAG_NONE) {variant=*d;variant.Flags=D3D12_PIPELINE_STATE_FLAG_NONE;run("flags-none",variant);}
+}
 
 static HRESULT STDMETHODCALLTYPE createGraphicsPipelineState(DevicePtr self,const D3D12_GRAPHICS_PIPELINE_STATE_DESC* d,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_GRAPHICS_PIPELINE_STATE_DESC*,REFIID,void**);
     if(d&&traceOn.load(std::memory_order_acquire)) traceGraphicsDesc(*d);
     D3D12_DIAG_HOOK(Fn,CreateGraphicsPipelineState)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
+    if(hr==E_INVALIDARG)probeGraphicsPipelineState(self,call,d,id);
     if(d) {
         std::string vsKey,psKey;
         shaderText(d->VS.pShaderBytecode,d->VS.BytecodeLength,&vsKey);
@@ -700,11 +753,62 @@ inline std::string streamSubobjects(const void* stream,size_t bytes,StreamVisit 
     }
     return fmt("bytes=%zu%s subobjects=[%s]",bytes,truncated?" truncated":"",subs.c_str());
 }
+enum StreamProbeMutation {StreamProbeDigest,StreamProbeInputLayout,StreamProbeDsvFormat,StreamProbeRtvFormat,
+    StreamProbeBlend,StreamProbeDepth,StreamProbeSampleCount,StreamProbeStreamOutput,StreamProbeRootSignature,StreamProbeNodeMask,StreamProbeFlags};
+struct StreamProbeContext {
+    const unsigned char* base;std::vector<unsigned char>* clone;std::vector<unsigned char>* shaderStorage;
+    int target;StreamProbeMutation mutation;bool mutated=false;
+};
+inline void mutateStreamProbe(int type,const unsigned char* payload,size_t size,void* raw) {
+    auto& c=*static_cast<StreamProbeContext*>(raw);if(c.mutated||type!=c.target)return;
+    auto* dest=c.clone->data()+size_t(payload-c.base);
+    switch(c.mutation) {
+    case StreamProbeDigest: {
+        if(size<sizeof(D3D12_SHADER_BYTECODE))return;
+        D3D12_SHADER_BYTECODE input{};memcpy(&input,payload,sizeof input);
+        D3D12_SHADER_BYTECODE replacement{};if(!copyDxbcWithZeroedDigest(input,*c.shaderStorage,replacement))return;
+        memcpy(dest,&replacement,sizeof replacement);break;
+    }
+    case StreamProbeInputLayout: {if(size<sizeof(D3D12_INPUT_LAYOUT_DESC))return;D3D12_INPUT_LAYOUT_DESC input{};memcpy(&input,payload,sizeof input);if(!input.NumElements)return;D3D12_INPUT_LAYOUT_DESC replacement{};memcpy(dest,&replacement,sizeof replacement);break;}
+    case StreamProbeDsvFormat: {if(size<sizeof(DXGI_FORMAT))return;DXGI_FORMAT input{};memcpy(&input,payload,sizeof input);if(input==DXGI_FORMAT_D32_FLOAT)return;DXGI_FORMAT replacement=DXGI_FORMAT_D32_FLOAT;memcpy(dest,&replacement,sizeof replacement);break;}
+    case StreamProbeRtvFormat: {if(size<sizeof(D3D12_RT_FORMAT_ARRAY))return;auto replacement=*static_cast<const D3D12_RT_FORMAT_ARRAY*>(static_cast<const void*>(payload));if(!replacement.NumRenderTargets||replacement.RTFormats[0]==DXGI_FORMAT_R8G8B8A8_UNORM)return;replacement.RTFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;memcpy(dest,&replacement,sizeof replacement);break;}
+    case StreamProbeBlend: {if(size<sizeof(D3D12_BLEND_DESC))return;auto replacement=*static_cast<const D3D12_BLEND_DESC*>(static_cast<const void*>(payload));const D3D12_BLEND_DESC defaultBlend=defaultBlendDesc();if(memcmp(&replacement,&defaultBlend,sizeof defaultBlend)==0)return;memcpy(dest,&defaultBlend,sizeof defaultBlend);break;}
+    // DepthEnable is the leading BOOL of DEPTH_STENCIL, DEPTH_STENCIL1 and DEPTH_STENCIL2 alike.
+    case StreamProbeDepth: {if(size<sizeof(BOOL))return;BOOL input=FALSE;memcpy(&input,payload,sizeof input);if(!input)return;BOOL replacement=FALSE;memcpy(dest,&replacement,sizeof replacement);break;}
+    case StreamProbeSampleCount: {if(size<sizeof(DXGI_SAMPLE_DESC))return;auto replacement=*static_cast<const DXGI_SAMPLE_DESC*>(static_cast<const void*>(payload));if(replacement.Count==1&&replacement.Quality==0)return;replacement.Count=1;replacement.Quality=0;memcpy(dest,&replacement,sizeof replacement);break;}
+    case StreamProbeStreamOutput: {if(size<sizeof(D3D12_STREAM_OUTPUT_DESC))return;D3D12_STREAM_OUTPUT_DESC input{};memcpy(&input,payload,sizeof input);if(!input.NumEntries&&!input.NumStrides)return;D3D12_STREAM_OUTPUT_DESC replacement{};memcpy(dest,&replacement,sizeof replacement);break;}
+    case StreamProbeRootSignature: {if(size<sizeof(ID3D12RootSignature*))return;ID3D12RootSignature* input=nullptr;memcpy(&input,payload,sizeof input);if(!input)return;ID3D12RootSignature* replacement=nullptr;memcpy(dest,&replacement,sizeof replacement);break;}
+    case StreamProbeNodeMask: {if(size<sizeof(UINT))return;UINT input=0;memcpy(&input,payload,sizeof input);if(!input)return;UINT replacement=0;memcpy(dest,&replacement,sizeof replacement);break;}
+    case StreamProbeFlags: {if(size<sizeof(D3D12_PIPELINE_STATE_FLAGS))return;auto input=*static_cast<const D3D12_PIPELINE_STATE_FLAGS*>(static_cast<const void*>(payload));if(input==D3D12_PIPELINE_STATE_FLAG_NONE)return;auto replacement=D3D12_PIPELINE_STATE_FLAG_NONE;memcpy(dest,&replacement,sizeof replacement);break;}
+    }
+    c.mutated=true;
+}
+using PipelineStreamCall=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**);
+inline void probePipelineStateStream(DevicePtr self,PipelineStreamCall call,const D3D12_PIPELINE_STATE_STREAM_DESC* d,REFIID id) {
+    if(!traceOn.load(std::memory_order_acquire)||!d||!d->pPipelineStateSubobjectStream||!d->SizeInBytes||d->SizeInBytes>(1u<<20))return;
+    const auto* base=static_cast<const unsigned char*>(d->pPipelineStateSubobjectStream);const size_t bytes=size_t(d->SizeInBytes);
+    auto run=[&](const char* name,int target,StreamProbeMutation mutation) {
+        std::vector<unsigned char> clone(base,base+bytes),shaderStorage;StreamProbeContext context{base,&clone,&shaderStorage,target,mutation};
+        streamSubobjects(base,bytes,&mutateStreamProbe,&context);if(!context.mutated)return;
+        if(!beginPsoProbeCall())return;
+        D3D12_PIPELINE_STATE_STREAM_DESC variant{clone.size(),clone.data()};void* probeOut=nullptr;
+        HRESULT retry=call(self,&variant,id,&probeOut);if(SUCCEEDED(retry))releasePsoProbeOutput(probeOut);
+        emit(fmt("pso-probe stream %s hr=%s",name,hex(retry).c_str()));
+    };
+    run("vs-dxbc-digest-zero",1,StreamProbeDigest);run("ps-dxbc-digest-zero",2,StreamProbeDigest);
+    run("input-layout-empty",12,StreamProbeInputLayout);run("dsv-format-d32",16,StreamProbeDsvFormat);
+    run("rtv-format-r8g8b8a8",15,StreamProbeRtvFormat);run("blend-default",8,StreamProbeBlend);
+    run("depth-disabled",11,StreamProbeDepth);run("depth1-disabled",21,StreamProbeDepth);run("depth2-disabled",26,StreamProbeDepth);
+    run("sample-count-1",17,StreamProbeSampleCount);run("stream-output-empty",7,StreamProbeStreamOutput);
+    run("root-signature-null",0,StreamProbeRootSignature);run("node-mask-zero",18,StreamProbeNodeMask);
+    run("flags-none",20,StreamProbeFlags);
+}
 static HRESULT STDMETHODCALLTYPE createPipelineStateStream(DevicePtr self,const D3D12_PIPELINE_STATE_STREAM_DESC* d,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**);
     if(d&&d->pPipelineStateSubobjectStream&&traceOn.load(std::memory_order_acquire))
         streamSubobjects(d->pPipelineStateSubobjectStream,size_t(d->SizeInBytes),&traceStreamEntry,nullptr);
     D3D12_DIAG_HOOK(Fn,createPipelineStateStreamSlot)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
+    if(hr==E_INVALIDARG)probePipelineStateStream(self,call,d,id);
     // The stream path (ID3D12Device2::CreatePipelineState) is what Mesa's
     // d3d12 driver takes when the device reports
     // opts14.IndependentFrontAndBackStencilRefMaskSupported — the console's

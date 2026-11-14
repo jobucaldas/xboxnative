@@ -180,8 +180,12 @@ DWORD d3d_entry() {
     // that appends vertices): if the host's GS route drops the expansion the
     // pixels stay black exactly as the game's terrain does. Same target, a
     // fresh clear, one point at the center expanded to a green triangle.
+    OutputDebugStringA("PLAY-D3D11 GS begin\n");
     ID3D11GeometryShader* gs=nullptr;
-    if(FAILED(device->CreateGeometryShader(triangle_gs,sizeof triangle_gs,nullptr,&gs))||!gs)return 44;
+    if(FAILED(device->CreateGeometryShader(triangle_gs,sizeof triangle_gs,nullptr,&gs))||!gs){
+        OutputDebugStringA("PLAY-D3D11 GS FAIL create\n");
+        return 44;
+    }
     // The GS's input is the VS output: one vertex carrying POSITION (the VS
     // passes it through) plus COLOR for the PS. Feed the same stride the
     // triangle pass uses so the input layout applies unchanged.
@@ -196,6 +200,7 @@ DWORD d3d_entry() {
     context->IASetVertexBuffers(0,1,pointBinds,&stride,&offset);
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
     context->GSSetShader(gs,nullptr,0);
+    OutputDebugStringA("PLAY-D3D11 GS draw\n");
     context->Draw(1,0);
     context->GSSetShader(nullptr,nullptr,0);
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -204,13 +209,20 @@ DWORD d3d_entry() {
 
     context->CopyResource(staging,target);
     D3D11_MAPPED_SUBRESOURCE gMapped{};
-    if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&gMapped))||!gMapped.pData)return 46;
+    if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&gMapped))||!gMapped.pData){
+        OutputDebugStringA("PLAY-D3D11 GS FAIL readback-map\n");
+        return 46;
+    }
     // The GS expands the center point to a triangle spanning y+0.4, y-0.4,
     // x±0.4: pixel (32,32) lands inside it, green through the PS.
     const unsigned char* gInside=static_cast<const unsigned char*>(gMapped.pData)+32*gMapped.RowPitch+32*4;
     const bool insideGreen=gInside[1]>0x80&&gInside[0]<0x40&&gInside[2]<0x40;
     context->Unmap(staging,0);
-    if(!insideGreen)return 47;   // BLOCKED: the GS expansion did not reach the target
+    if(!insideGreen){
+        OutputDebugStringA("PLAY-D3D11 GS FAIL black-readback\n");
+        return 47;   // BLOCKED: the GS expansion did not reach the target
+    }
+    OutputDebugStringA("PLAY-D3D11 GS PASS\n");
 
     // ---- MSAA pass: 4x render target, clear, resolve, readback ----
     // Games pick MSAA through CheckMultisampleQualityLevels and resolve with

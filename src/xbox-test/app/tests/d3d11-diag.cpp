@@ -444,6 +444,31 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         context->GSSetShader(nullptr,nullptr,0);
         gs->Release();
     }
+    // The recorded line carries the bindings the draw ran with (effective
+    // PS/GS SRV slots with formats, SO targets), and texture churn under the
+    // same pipeline state neither adds a line nor uses up the cap.
+    {
+        D3D11_TEXTURE2D_DESC td{};td.Width=4;td.Height=4;td.MipLevels=1;td.ArraySize=1;td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.SampleDesc.Count=1;td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        ID3D11Texture2D* tex[2]{};ID3D11ShaderResourceView* view[2]{};
+        for(int i=0;i<2;++i){td.Width=4u<<i;CHECK(SUCCEEDED(device->CreateTexture2D(&td,nullptr,&tex[i]))&&tex[i]);
+            if(tex[i])CHECK(SUCCEEDED(device->CreateShaderResourceView(tex[i],nullptr,&view[i]))&&view[i]);}
+        if(view[0]&&view[1]) {
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+            context->PSSetShaderResources(3,1,&view[0]);
+            context->Draw(2,0);
+            CHECK(count("draw=Draw vertices=2 instances=1 topology=2(linelist)")==1);
+            CHECK(count("t3:view=")==1&&count("resource-dim=3 resource=")==1&&count(" 4x4 mips=1")==1);
+            CHECK(count(" gs-srv={none} so={none}")>=1);
+            context->PSSetShaderResources(3,1,&view[1]);
+            context->Draw(2,0);
+            CHECK(count("draw=Draw vertices=2 instances=1 topology=2(linelist)")==1);   // churn: no new line
+            CHECK(count(" 8x4 mips=1")==0);
+            ID3D11ShaderResourceView* none=nullptr;context->PSSetShaderResources(3,1,&none);
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        }
+        for(int i=0;i<2;++i){if(view[i])view[i]->Release();if(tex[i])tex[i]->Release();}
+    }
     // Deferred signature capture is emitted on replay with the list's execute
     // count, and records the actual target and depth-view dimensions/formats.
     {

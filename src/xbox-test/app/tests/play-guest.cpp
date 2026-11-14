@@ -365,6 +365,7 @@ DWORD guest_exe_entry(){
 #ifdef PLAY_STATIC_MISSING
     DeliberatelyMissingPlayImport(); // Must be rejected before TLS/DllMain/entry.
 #endif
+    if(contains(GetCommandLineW(),L"crashctx")){volatile int* nearNull=(volatile int*)0x24;return *nearNull;}
     if(contains(GetCommandLineW(),L"crash"))RaiseException(0xe0424242,EXCEPTION_NONCONTINUABLE,0,nullptr);
     if(contains(GetCommandLineW(),L"exit"))ExitProcess(37);
     if(contains(GetCommandLineW(),L"hang"))for(;;)Sleep(100);

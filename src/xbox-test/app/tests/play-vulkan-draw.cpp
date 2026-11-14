@@ -889,10 +889,10 @@ int vk_draw_entry() {
     if (result != VK_SUCCESS || !pool)
         return fail(25, "vkCreateCommandPool", result);
     VkCommandBufferAllocateInfo cbAlloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, nullptr, pool,
-        VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
-    VkCommandBuffer cmd = nullptr;
-    result = AllocateCommandBuffers(device, &cbAlloc, &cmd);
-    if (result != VK_SUCCESS || !cmd)
+        VK_COMMAND_BUFFER_LEVEL_PRIMARY, 2};
+    VkCommandBuffer cmds[2]{};
+    result = AllocateCommandBuffers(device, &cbAlloc, cmds);
+    if (result != VK_SUCCESS || !cmds[0] || !cmds[1])
         return fail(25, "vkAllocateCommandBuffers", result);
 
     VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, nullptr, 0};
@@ -906,31 +906,39 @@ int vk_draw_entry() {
     if (result != VK_SUCCESS || !timeline) return fail(25, "vkCreateSemaphore(timeline)", result);
     emit("PLAY-VULKAN-DRAW STAGE timeline-semaphore\n");
 
-    // ---- one command buffer: compute, then the triangle, then the copy ----
+    // End compute and draw separately so a deferred dzn recording error is
+    // attributed to the batch that raised it, not merely the final draw batch.
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr,
         VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, nullptr};
-    result = BeginCommandBuffer(cmd, &begin);
-    if (result != VK_SUCCESS) return fail(26, "vkBeginCommandBuffer", result);
+    VkCommandBuffer computeCmd = cmds[0];
+    result = BeginCommandBuffer(computeCmd, &begin);
+    if (result != VK_SUCCESS) return fail(26, "vkBeginCommandBuffer(compute)", result);
 
     // 1. Compute: data[i] *= 3 through the push constant, one workgroup of 64.
-    CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
-    CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descSet, 0, nullptr);
+    CmdBindPipeline(computeCmd, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
+    CmdBindDescriptorSets(computeCmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descSet, 0, nullptr);
     uint32_t multiplier = 3;
-    CmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &multiplier);
-    CmdDispatch(cmd, 1, 1, 1);
+    CmdPushConstants(computeCmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &multiplier);
+    CmdDispatch(computeCmd, 1, 1, 1);
     // sync2: compute writes finish before the copy reads them.
     VkBufferMemoryBarrier2 bufBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2, nullptr,
         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
         0, 0, storageBuffer, 0, VK_WHOLE_SIZE};
     VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO, nullptr, 0, 0, nullptr, 1, &bufBarrier, 0, nullptr};
-    CmdPipelineBarrier2(cmd, &dep);
+    CmdPipelineBarrier2(computeCmd, &dep);
     // Offsets are relative to each buffer, not to the shared allocation:
     // both buffers were filled/bound at their own start.
     VkBufferCopy copy{0, 0, 64 * 4};
-    CmdCopyBuffer(cmd, storageBuffer, readbackBuffer, 1, &copy);
+    CmdCopyBuffer(computeCmd, storageBuffer, readbackBuffer, 1, &copy);
     emit("PLAY-VULKAN-DRAW STAGE compute-recorded\n");
+    result = EndCommandBuffer(computeCmd);
+    if (result != VK_SUCCESS) return fail(26, "vkEndCommandBuffer(compute)", result);
+    emit("PLAY-VULKAN-DRAW STAGE compute-command-buffer-ended\n");
 
+    VkCommandBuffer drawCmd = cmds[1];
+    result = BeginCommandBuffer(drawCmd, &begin);
+    if (result != VK_SUCCESS) return fail(26, "vkBeginCommandBuffer(draw)", result);
     // 2. Graphics: the triangle into the offscreen target through dynamic
     //    rendering (no render pass object), then the image is left transfer-
     //    source for the host-side copy below.
@@ -952,34 +960,37 @@ int vk_draw_entry() {
     VkDependencyInfo imgDep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO, nullptr, 0, 0, nullptr, 0, nullptr, 0, nullptr};
     imgDep.imageMemoryBarrierCount = 1;
     imgDep.pImageMemoryBarriers = &imgBarrier;
-    CmdPipelineBarrier2(cmd, &imgDep);
-    CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
-    CmdSetViewport(cmd, 0, 1, &viewport);
-    CmdSetScissor(cmd, 0, 1, &scissor);
+    CmdPipelineBarrier2(drawCmd, &imgDep);
+    CmdBindPipeline(drawCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+    CmdSetViewport(drawCmd, 0, 1, &viewport);
+    CmdSetScissor(drawCmd, 0, 1, &scissor);
     VkDeviceSize vbOffset = offsets[0];
-    CmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, &vbOffset);
-    CmdBeginRendering(cmd, &rendering);
-    CmdDraw(cmd, 3, 1, 0, 0);
-    CmdEndRendering(cmd);
+    CmdBindVertexBuffers(drawCmd, 0, 1, &vertexBuffer, &vbOffset);
+    CmdBeginRendering(drawCmd, &rendering);
+    CmdDraw(drawCmd, 3, 1, 0, 0);
+    CmdEndRendering(drawCmd);
     emit("PLAY-VULKAN-DRAW STAGE draw-recorded\n");
 
-    result = EndCommandBuffer(cmd);
-    if (result != VK_SUCCESS) return fail(26, "vkEndCommandBuffer", result);
+    result = EndCommandBuffer(drawCmd);
+    if (result != VK_SUCCESS) return fail(26, "vkEndCommandBuffer(draw)", result);
+    emit("PLAY-VULKAN-DRAW STAGE draw-command-buffer-ended\n");
 
     // Submit twice through the timeline semaphore: submit2 signals value 1
     // when the compute+draw work is done, the host waits on 1, then signals 2
     // and waits again — the timeline round-trip a frame-throttling game does.
-    VkCommandBufferSubmitInfo cmdInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, nullptr, cmd, 0};
+    VkCommandBufferSubmitInfo cmdInfos[2]{
+        {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, nullptr, computeCmd, 0},
+        {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, nullptr, drawCmd, 0}};
     VkSemaphoreSubmitInfo signalInfo{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, nullptr, timeline, 1,
         VK_PIPELINE_STAGE_2_COPY_BIT, 0};
-    VkSubmitInfo2 submit2{VK_STRUCTURE_TYPE_SUBMIT_INFO_2, nullptr, 0, 0, nullptr, 1, &cmdInfo, 1, &signalInfo};
+    VkSubmitInfo2 submit2{VK_STRUCTURE_TYPE_SUBMIT_INFO_2, nullptr, 0, 0, nullptr, 2, cmdInfos, 1, &signalInfo};
     if (hasSync2) {
         result = QueueSubmit2(queue, 1, &submit2, fence);
         if (result != VK_SUCCESS) return fail(27, "vkQueueSubmit2", result);
     } else {
         // No sync2: the legacy submit carries the same work; the timeline
         // signal happens through vkSignalSemaphore after the queue drains.
-        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &cmd, 0, nullptr};
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 2, cmds, 0, nullptr};
         result = QueueSubmit(queue, 1, &submit, fence);
         if (result != VK_SUCCESS) return fail(27, "vkQueueSubmit", result);
     }
@@ -1026,7 +1037,7 @@ int vk_draw_entry() {
 
     // The triangle: copy the colour target into a host-visible buffer and
     // check the pixels. The copy needs the image as TRANSFER_SRC; the layout
-    // change happens in a second command buffer (the first is done).
+    // change happens in a separate command buffer after compute and draw finish.
     VkBufferCreateInfo imgRbInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0, 64 * 64 * 4,
         VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, nullptr};
     VkBuffer imageReadback = nullptr;
@@ -1049,10 +1060,12 @@ int vk_draw_entry() {
     if (result != VK_SUCCESS || !rbMapped)
         return fail(30, "vkMapMemory(image-readback)", result);
 
-    result = AllocateCommandBuffers(device, &cbAlloc, &cmd);
-    if (result != VK_SUCCESS || !cmd)
+    cbAlloc.commandBufferCount = 1;
+    VkCommandBuffer copyCmd = nullptr;
+    result = AllocateCommandBuffers(device, &cbAlloc, &copyCmd);
+    if (result != VK_SUCCESS || !copyCmd)
         return fail(30, "vkAllocateCommandBuffers(copy)", result);
-    result = BeginCommandBuffer(cmd, &begin);
+    result = BeginCommandBuffer(copyCmd, &begin);
     if (result != VK_SUCCESS) return fail(30, "vkBeginCommandBuffer(copy)", result);
     // Colour-attachment -> transfer-source, the sync2 way when it is on.
     VkImageMemoryBarrier2 toSrc{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr,
@@ -1063,7 +1076,7 @@ int vk_draw_entry() {
     VkDependencyInfo srcDep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO, nullptr, 0, 0, nullptr, 0, nullptr, 0, nullptr};
     srcDep.imageMemoryBarrierCount = 1;
     srcDep.pImageMemoryBarriers = &toSrc;
-    CmdPipelineBarrier2(cmd, &srcDep);
+    CmdPipelineBarrier2(copyCmd, &srcDep);
     // Buffer-image copy: the one command both the readback and a screenshot
     // go through. Fetched by name because the fixture uses it only for this.
     auto cmdCopyImageToBuffer = (void (__stdcall*)(VkCommandBuffer, VkImage, int32_t, VkBuffer, uint32_t, const void*))dpa(device, "vkCmdCopyImageToBuffer");
@@ -1075,10 +1088,10 @@ int vk_draw_entry() {
                      struct { int32_t x, y, z; } imageOffset;
                      struct { uint32_t width, height, depth; } imageExtent; } BufferImageCopy;
     BufferImageCopy region{0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {64, 64, 1}};
-    cmdCopyImageToBuffer(cmd, colorImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, imageReadback, 1, &region);
-    result = EndCommandBuffer(cmd);
+    cmdCopyImageToBuffer(copyCmd, colorImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, imageReadback, 1, &region);
+    result = EndCommandBuffer(copyCmd);
     if (result != VK_SUCCESS) return fail(30, "vkEndCommandBuffer(copy)", result);
-    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &cmd, 0, nullptr};
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &copyCmd, 0, nullptr};
     result = QueueSubmit(queue, 1, &submit, fence);
     if (result != VK_SUCCESS) return fail(30, "vkQueueSubmit(copy)", result);
     result = WaitForFences(device, 1, &fence, 1, 1000000000ull);
