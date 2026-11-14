@@ -34,12 +34,12 @@ for r in "${resets[@]}"; do
     fi
 done
 
-# The stream-out fixture must create an actual GS from GS bytecode and give
-# D3D11 an explicit output stride. The statistics query distinguishes a
-# successful SO write from a merely successful Draw/Map call.
-grep -q 'CreateGeometryShaderWithStreamOutput(d3d10_gs,sizeof d3d10_gs' "$f" || fail "stream-out GS creation does not use geometry-shader bytecode"
-grep -q 'soDecl,2,&soStride,1,D3D11_SO_NO_RASTERIZED_STREAM' "$f" || fail "stream-out GS creation does not provide its output stride"
+grep -q 'CreateGeometryShaderWithStreamOutput(bytecode,bytecodeSize' "$f" || fail "stream-out routes do not use the SO shader creation API"
+grep -q 'soDecl,2,&soStride,1,D3D11_SO_NO_RASTERIZED_STREAM' "$f" || fail "stream-out routes do not provide an explicit output stride"
+grep -q 'runSoRoute("vs-route",d3d10_vs,sizeof d3d10_vs,false' "$f" && grep -q 'runSoRoute("gs-route",d3d10_gs,sizeof d3d10_gs,true' "$f" || fail "stream-out VS-bytecode or real-GS route is missing"
 grep -q 'D3D11_QUERY_SO_STATISTICS' "$f" || fail "stream-out fixture does not verify written primitives"
-grep -q 'NumPrimitivesWritten!=1||soStats.PrimitivesStorageNeeded!=1' "$f" || fail "stream-out fixture does not require the GS output to be captured"
-grep -q 'context->DrawAuto();' "$f" || fail "stream-out fixture does not consume the captured vertex count with DrawAuto"
-echo "PASS ${#resets[@]} ExecuteCommandList(FALSE) call(s) each followed by rebind_pipeline_state before the next draw; stream-out uses a real GS, explicit stride, and SO statistics"
+grep -q 'soStats.NumPrimitivesWritten!=1||soStats.PrimitivesStorageNeeded!=1' "$f" || fail "stream-out fixture does not require each route's output statistics"
+grep -q 'written=%I64u needed=%I64u' "$f" || fail "stream-out diagnostics omit query counts"
+grep -q 'context->DrawAuto();' "$f" || fail "stream-out fixture does not consume each captured vertex count with DrawAuto"
+grep -q 'PLAY-D3D11 SO %s create PASS' "$f" && grep -q 'PLAY-D3D11 SO %s stats PASS' "$f" && grep -q 'PLAY-D3D11 SO %s capture ' "$f" || fail "stream-out stage PASS lines are missing"
+echo "PASS ${#resets[@]} ExecuteCommandList(FALSE) call(s) each followed by rebind_pipeline_state before the next draw; both stream-out routes use explicit stride, SO statistics and capture checks"
