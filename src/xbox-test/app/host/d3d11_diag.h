@@ -82,23 +82,36 @@ inline bool is_enabled() { return enabled.load(std::memory_order_acquire); }
 inline void emit(const std::string& text);
 inline std::string fmt(const char* f,...);
 
-// Opt-in call ring (LocalState\\d3d11resizetrace.txt, default off). This is
-// deliberately separate from the regular diagnostics kill switch: it records
-// only intercepted D3D11 calls and is flushed on the first failed non-test
-// Present.
+// Opt-in command ring (LocalState\\d3d11resizetrace.txt, default off). Fixed
+// storage keeps the disabled path to one relaxed load and records no heap data.
 constexpr size_t kTraceRing=64;
-struct TraceEntry { uint64_t seq=0; const char* name=nullptr; };
+struct TraceEntry { uint64_t seq=0,frame=0; char name[56]{},args[96]{}; };
 inline std::mutex traceMutex;
 inline uint64_t traceNextSeq=1;
 inline TraceEntry traceRing[kTraceRing];
+inline std::atomic<uint64_t> traceFrame{0};
 inline std::atomic<bool> traceOn{false};
 inline std::atomic<bool> traceChecked{false};
+inline std::atomic<bool> traceFlushLogged{false};
 inline bool (*set_trace_requested)()=nullptr;
-inline void traceCall(const char* name) {
-    if(!traceOn.load(std::memory_order_acquire))return;
+inline bool traceCommand(const char* name,const char* argsFormat="",...) {
+    if(!traceOn.load(std::memory_order_relaxed))return false;
+    char args[96]{};
+    if(argsFormat&&*argsFormat) {
+        va_list a;va_start(a,argsFormat);vsnprintf(args,sizeof args,argsFormat,a);va_end(a);
+    }
     std::lock_guard<std::mutex> lock(traceMutex);
     uint64_t seq=traceNextSeq++;
-    traceRing[seq%kTraceRing]=TraceEntry{seq,name};
+    TraceEntry& entry=traceRing[seq%kTraceRing];entry={};entry.seq=seq;
+    entry.frame=traceFrame.load(std::memory_order_relaxed);
+    snprintf(entry.name,sizeof entry.name,"%s",name?name:"?");
+    snprintf(entry.args,sizeof entry.args,"%s",args);
+    return true;
+}
+inline void traceCall(const char* name) {traceCommand(name);}
+inline void tracePresentSuccess(const char* name,UINT sync,UINT flags) {
+    if(traceCommand(name,"sync=%u flags=0x%x",sync,flags))
+        traceFrame.fetch_add(1,std::memory_order_relaxed);
 }
 inline bool claimPresentFailureOnce(std::atomic<bool>& logged,bool testPresent) {
     if(testPresent)return false;
@@ -110,23 +123,27 @@ inline bool claimTraceFlushOnce(std::atomic<bool>& flushed,bool tracing) {
     bool expected=false;
     return flushed.compare_exchange_strong(expected,true,std::memory_order_acq_rel);
 }
-inline void flushTrace() {
-    if(!traceOn.load(std::memory_order_acquire))return;
+inline bool flushTrace(std::atomic<bool>* gate=nullptr) {
+    if(!traceOn.load(std::memory_order_relaxed))return false;
     TraceEntry snapshot[kTraceRing]{};
     size_t count=0;
     {
-        std::lock_guard<std::mutex> lock(traceMutex);
+        std::unique_lock<std::mutex> lock(traceMutex,std::try_to_lock);
+        if(!lock.owns_lock())return false;
+        if(gate&&!claimTraceFlushOnce(*gate,true))return false;
         uint64_t first=traceNextSeq>kTraceRing?traceNextSeq-kTraceRing:1;
         for(uint64_t seq=first;seq<traceNextSeq;++seq) {
             const TraceEntry& e=traceRing[seq%kTraceRing];
             if(e.seq==seq)snapshot[count++]=e;
         }
     }
-    emit(fmt("D3D11 trace: last %zu hooked calls, oldest first",count));
+    emit(fmt("D3D11 trace: last %zu successful GPU commands, oldest first",count));
     for(size_t i=0;i<count;++i) {
         const TraceEntry& e=snapshot[i];
-        emit(fmt("D3D11 trace #%llu %s",(unsigned long long)e.seq,e.name?e.name:"?"));
+        emit(fmt("D3D11 trace #%llu %s frame=%llu%s%s",(unsigned long long)e.seq,e.name,
+            (unsigned long long)e.frame,e.args[0]?" ":"",e.args));
     }
+    return true;
 }
 
 // The slot numbers themselves live in d3d11_diag_slots.h, shared with the
@@ -344,12 +361,14 @@ inline void noteFailure(HRESULT hr) {
     if(!device)return;
     static constexpr HRESULT lost[]={DXGI_ERROR_DEVICE_REMOVED,DXGI_ERROR_DEVICE_HUNG,
         DXGI_ERROR_DEVICE_RESET,DXGI_ERROR_DRIVER_INTERNAL_ERROR};
-    for(HRESULT e:lost) if(hr==e&&!deviceRemoved.exchange(true,std::memory_order_acq_rel))
-        deviceLostReports.fetch_add(1,std::memory_order_relaxed);   // the transition itself
+    HRESULT reason=device->GetDeviceRemovedReason();
+    bool isLost=reason!=S_OK;
+    for(HRESULT e:lost)if(hr==e){isLost=true;break;}
+    if(isLost&&!deviceRemoved.exchange(true,std::memory_order_acq_rel))
+        deviceLostReports.fetch_add(1,std::memory_order_relaxed);
     if(!deviceRemoved.load(std::memory_order_acquire))return;
     static std::atomic<bool> reported{false};
-    if(reported.exchange(true))return;   // one reason line per removal
-    HRESULT reason=device->GetDeviceRemovedReason();
+    if(reported.exchange(true)) {flushTrace(&traceFlushLogged);return;}   // one reason line; retry a contended ring flush
     emit(fmt("device removed: reason hr=0x%08lx (%s)",(unsigned long)reason,
         reason==DXGI_ERROR_DEVICE_REMOVED?"driver/GPU reset or budget eviction":
         reason==DXGI_ERROR_DEVICE_HUNG?"device hung (TDR or infinite loop)":
@@ -376,6 +395,7 @@ inline void noteFailure(HRESULT hr) {
         }
         dxgi->Release();
     }
+    flushTrace(&traceFlushLogged);
 }
 inline std::atomic<uint64_t> draws[kDrawKinds][2][2];   // [kind][patchlist][hull+domain]
 // The geometry shader's presence on a draw, tracked like hull/domain for
@@ -1118,7 +1138,7 @@ inline std::string gsBytecodeText(const void* code,SIZE_T length) {
 // and a two-stream variant. Included so the test binary is self-contained.
 #include "gs-blobs.h"
 
-#define D3D11_DIAG_HOOK_NAMED(Type,slot,name) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return E_FAIL;traceCall(name);
+#define D3D11_DIAG_HOOK_NAMED(Type,slot,name) auto call=reinterpret_cast<Type>(original(self,slot));if(!call)return E_FAIL;
 #define D3D11_DIAG_HOOK(Type,slot) D3D11_DIAG_HOOK_NAMED(Type,slot,#slot)
 // Every failed call also feeds the device-health path: the first failure after
 // a removal reports GetDeviceRemovedReason and the memory state, instead of
@@ -1350,11 +1370,11 @@ inline bool patchContext(ID3D11DeviceContext* context);
 static HRESULT STDMETHODCALLTYPE contextMap(DevicePtr self,ID3D11Resource* r,UINT subresource,D3D11_MAP type,UINT flags,D3D11_MAPPED_SUBRESOURCE* mapped) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT,D3D11_MAP,UINT,D3D11_MAPPED_SUBRESOURCE*);
     auto call=reinterpret_cast<Fn>(original(self,ContextMap));if(!call)return E_FAIL;
-    traceCall("Map");
     // A write-only Map of an indirect-arguments buffer is the guest uploading
     // the counts: remember the pointer and read it back at Unmap.
     int indirect=indirectIndex(r);
     HRESULT hr=call(self,r,subresource,type,flags,mapped);
+    if(SUCCEEDED(hr))traceCommand("Map","subresource=%u type=%d flags=0x%x",subresource,int(type),flags);
     if(SUCCEEDED(hr)&&indirect>=0&&mapped&&mapped->pData&&
             (type==D3D11_MAP_WRITE||type==D3D11_MAP_WRITE_DISCARD||type==D3D11_MAP_WRITE_NO_OVERWRITE))
         indirectMapped[indirect].store(mapped->pData,std::memory_order_relaxed);
@@ -1365,7 +1385,6 @@ static HRESULT STDMETHODCALLTYPE contextMap(DevicePtr self,ID3D11Resource* r,UIN
 static void STDMETHODCALLTYPE contextUnmap(DevicePtr self,ID3D11Resource* r,UINT subresource) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT);
     auto call=reinterpret_cast<Fn>(original(self,Unmap));if(!call)return;
-    traceCall("Unmap");
     int indirect=indirectIndex(r);
     if(indirect>=0) {
         void* data=indirectMapped[indirect].exchange(nullptr,std::memory_order_relaxed);
@@ -1377,6 +1396,7 @@ static void STDMETHODCALLTYPE contextUnmap(DevicePtr self,ID3D11Resource* r,UINT
         }
     }
     call(self,r,subresource);
+    traceCommand("Unmap","subresource=%u",subresource);
 }
 // One counter per draw, bucketed by the topology last set on this context and
 // by whether a hull, a domain and a geometry shader are bound there. A bucket
@@ -1384,7 +1404,6 @@ static void STDMETHODCALLTYPE contextUnmap(DevicePtr self,ID3D11Resource* r,UINT
 // game never reaches is not silently missing. No allocation and no lock on the
 // hot path.
 inline void countDraw(void* self,int kind,unsigned count,unsigned instances) {
-    traceCall(drawKindName(kind));
     ContextState& state=stateOf(self);
     unsigned t=state.topology.load(std::memory_order_relaxed);
     unsigned s=state.shaders.load(std::memory_order_relaxed);
@@ -1413,7 +1432,6 @@ inline void countDraw(void* self,int kind,unsigned count,unsigned instances) {
 // arguments live in a GPU buffer (or in the stream-output state), so the
 // bucket is all that can be said.
 inline void countDrawUnknown(void* self,int kind) {
-    traceCall(drawKindName(kind));
     ContextState& state=stateOf(self);
     unsigned t=state.topology.load(std::memory_order_relaxed);
     unsigned s=state.shaders.load(std::memory_order_relaxed);
@@ -1442,21 +1460,25 @@ static void STDMETHODCALLTYPE contextDrawIndexed(DevicePtr self,UINT indexCount,
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,INT);
     auto call=reinterpret_cast<Fn>(original(self,DrawIndexed));if(!call)return;
     countDraw(self,0,indexCount,1);call(self,indexCount,startIndex,baseVertex);
+    traceCommand("DrawIndexed","indices=%u start=%u base=%d",indexCount,startIndex,baseVertex);
 }
 static void STDMETHODCALLTYPE contextDraw(DevicePtr self,UINT vertexCount,UINT startVertex) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT);
     auto call=reinterpret_cast<Fn>(original(self,Draw));if(!call)return;
     countDraw(self,1,vertexCount,1);call(self,vertexCount,startVertex);
+    traceCommand("Draw","vertices=%u start=%u",vertexCount,startVertex);
 }
 static void STDMETHODCALLTYPE contextDrawIndexedInstanced(DevicePtr self,UINT indexCount,UINT instances,UINT startIndex,INT baseVertex,UINT startInstance) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,UINT,INT,UINT);
     auto call=reinterpret_cast<Fn>(original(self,DrawIndexedInstanced));if(!call)return;
     countDraw(self,2,indexCount,instances);call(self,indexCount,instances,startIndex,baseVertex,startInstance);
+    traceCommand("DrawIndexedInstanced","indices=%u instances=%u start=%u base=%d start-instance=%u",indexCount,instances,startIndex,baseVertex,startInstance);
 }
 static void STDMETHODCALLTYPE contextDrawInstanced(DevicePtr self,UINT vertexCount,UINT instances,UINT startVertex,UINT startInstance) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,UINT,UINT,UINT);
     auto call=reinterpret_cast<Fn>(original(self,DrawInstanced));if(!call)return;
     countDraw(self,3,vertexCount,instances);call(self,vertexCount,instances,startVertex,startInstance);
+    traceCommand("DrawInstanced","vertices=%u instances=%u start=%u start-instance=%u",vertexCount,instances,startVertex,startInstance);
 }
 // Draws whose counts the guest keeps on the GPU. They are the paths a
 // tessellated or GPU-generated layer uses, and the direct-draw counters above
@@ -1464,23 +1486,23 @@ static void STDMETHODCALLTYPE contextDrawInstanced(DevicePtr self,UINT vertexCou
 static void STDMETHODCALLTYPE contextDrawAuto(DevicePtr self) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr);
     auto call=reinterpret_cast<Fn>(original(self,DrawAuto));if(!call)return;
-    countDrawUnknown(self,kDrawAuto);call(self);
+    countDrawUnknown(self,kDrawAuto);call(self);traceCommand("DrawAuto");
 }
 static void STDMETHODCALLTYPE contextDrawIndexedInstancedIndirect(DevicePtr self,ID3D11Buffer* buffer,UINT offset) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Buffer*,UINT);
     auto call=reinterpret_cast<Fn>(original(self,DrawIndexedInstancedIndirect));if(!call)return;
-    countDrawUnknown(self,kDrawIndexedIndirect);call(self,buffer,offset);
+    countDrawUnknown(self,kDrawIndexedIndirect);call(self,buffer,offset);traceCommand("DrawIndexedInstancedIndirect","offset=%u",offset);
 }
 static void STDMETHODCALLTYPE contextDrawInstancedIndirect(DevicePtr self,ID3D11Buffer* buffer,UINT offset) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Buffer*,UINT);
     auto call=reinterpret_cast<Fn>(original(self,DrawInstancedIndirect));if(!call)return;
-    countDrawUnknown(self,kDrawInstancedIndirect);call(self,buffer,offset);
+    countDrawUnknown(self,kDrawInstancedIndirect);call(self,buffer,offset);traceCommand("DrawInstancedIndirect","offset=%u",offset);
 }
 static void STDMETHODCALLTYPE contextDispatchIndirect(DevicePtr self,ID3D11Buffer* buffer,UINT offset) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Buffer*,UINT);
     auto call=reinterpret_cast<Fn>(original(self,DispatchIndirect));if(!call)return;
     dispatchIndirects.fetch_add(1,std::memory_order_relaxed);
-    call(self,buffer,offset);tick();
+    call(self,buffer,offset);traceCommand("DispatchIndirect","offset=%u",offset);tick();
 }
 static void STDMETHODCALLTYPE contextIASetPrimitiveTopology(DevicePtr self,D3D11_PRIMITIVE_TOPOLOGY t) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,D3D11_PRIMITIVE_TOPOLOGY);
@@ -1581,6 +1603,7 @@ static void STDMETHODCALLTYPE contextRSSetViewports(DevicePtr self,UINT count,co
         }
     }
     call(self,count,viewports);
+    traceCommand("RSSetViewports","count=%u first=%.0fx%.0f",count,count&&viewports?viewports[0].Width:0.0f,count&&viewports?viewports[0].Height:0.0f);
 }
 static void STDMETHODCALLTYPE contextRSSetScissorRects(DevicePtr self,UINT count,const D3D11_RECT* rects) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,const D3D11_RECT*);
@@ -1698,11 +1721,11 @@ inline void noteDeepTargetInfo(void* self,UINT count,ID3D11RenderTargetView* con
 static void STDMETHODCALLTYPE contextOMSetRenderTargets(DevicePtr self,UINT count,ID3D11RenderTargetView* const* views,ID3D11DepthStencilView* depth) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*);
     auto call=reinterpret_cast<Fn>(original(self,OMSetRenderTargets));if(!call)return;
-    traceCall("OMSetRenderTargets");
     noteRenderTargets(count,views);
     noteRenderTargetFormat(self,count,views);
     noteDeepTargetInfo(self,count,views,depth);
     call(self,count,views,depth);
+    traceCommand("OMSetRenderTargets","count=%u depth=%u",count,depth!=nullptr);
 }
 // The same bind with UAVs: a layer that writes through UAVs (or renders into a
 // target it later reads back) binds its targets this way, not through
@@ -1711,7 +1734,6 @@ static void STDMETHODCALLTYPE contextOMSetRenderTargetsAndUnorderedAccessViews(D
         ID3D11DepthStencilView* depth,UINT uavStart,UINT uavCount,ID3D11UnorderedAccessView* const* uavs,const UINT* initialCounts) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11RenderTargetView* const*,ID3D11DepthStencilView*,UINT,UINT,ID3D11UnorderedAccessView* const*,const UINT*);
     auto call=reinterpret_cast<Fn>(original(self,OMSetRenderTargetsAndUnorderedAccessViews));if(!call)return;
-    traceCall("OMSetRenderTargetsAndUnorderedAccessViews");
     rtvUavSets.fetch_add(1,std::memory_order_relaxed);
     if(uavCount&&uavs&&uavCount!=D3D11_KEEP_UNORDERED_ACCESS_VIEWS)uavSets.fetch_add(1,std::memory_order_relaxed);
     // D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL (0xffffffff) means "leave the
@@ -1723,7 +1745,8 @@ static void STDMETHODCALLTYPE contextOMSetRenderTargetsAndUnorderedAccessViews(D
         noteRenderTargetFormat(self,count,views);
         noteDeepTargetInfo(self,count,views,depth);
     }
-    call(self,count,views,depth,uavStart,uavCount,uavs,initialCounts);tick();
+    call(self,count,views,depth,uavStart,uavCount,uavs,initialCounts);
+    traceCommand("OMSetRenderTargetsAndUnorderedAccessViews","count=%u uavs=%u",count,uavCount);tick();
 }
 // Null entries in a shader-resource bind are textures the guest never set: a
 // layer that samples one renders black without any call failing. The template
@@ -1734,17 +1757,17 @@ static void STDMETHODCALLTYPE contextDispatch(DevicePtr self,UINT x,UINT y,UINT 
     auto call=reinterpret_cast<Fn>(original(self,Dispatch));if(!call)return;
     dispatches.fetch_add(1,std::memory_order_relaxed);
     if(!x||!y||!z)dispatchZero.fetch_add(1,std::memory_order_relaxed);
-    call(self,x,y,z);tick();
+    call(self,x,y,z);traceCommand("Dispatch","groups=%u,%u,%u",x,y,z);tick();
 }
 static void STDMETHODCALLTYPE contextClearRenderTargetView(DevicePtr self,ID3D11RenderTargetView* view,const FLOAT color[4]) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11RenderTargetView*,const FLOAT*);
     auto call=reinterpret_cast<Fn>(original(self,ClearRenderTargetView));if(!call)return;
-    clears[0].fetch_add(1,std::memory_order_relaxed);call(self,view,color);
+    clears[0].fetch_add(1,std::memory_order_relaxed);call(self,view,color);traceCommand("ClearRenderTargetView");
 }
 static void STDMETHODCALLTYPE contextClearDepthStencilView(DevicePtr self,ID3D11DepthStencilView* view,UINT flags,FLOAT depth,UINT8 stencil) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11DepthStencilView*,UINT,FLOAT,UINT8);
     auto call=reinterpret_cast<Fn>(original(self,ClearDepthStencilView));if(!call)return;
-    clears[1].fetch_add(1,std::memory_order_relaxed);call(self,view,flags,depth,stencil);
+    clears[1].fetch_add(1,std::memory_order_relaxed);call(self,view,flags,depth,stencil);traceCommand("ClearDepthStencilView","flags=0x%x stencil=%u",flags,unsigned(stencil));
 }
 // A layer rendered at one size and resolved/copied into the frame is the other
 // way a target's content reaches the screen without a direct draw into it.
@@ -1752,16 +1775,18 @@ static void STDMETHODCALLTYPE contextResolveSubresource(DevicePtr self,ID3D11Res
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT,ID3D11Resource*,UINT,DXGI_FORMAT);
     auto call=reinterpret_cast<Fn>(original(self,ResolveSubresource));if(!call)return;
     resolves.fetch_add(1,std::memory_order_relaxed);call(self,dst,dstSub,src,srcSub,format);
+    traceCommand("ResolveSubresource","dst-sub=%u src-sub=%u format=%s",dstSub,srcSub,formatName(format));
 }
 static void STDMETHODCALLTYPE contextCopyResource(DevicePtr self,ID3D11Resource* dst,ID3D11Resource* src) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,ID3D11Resource*);
     auto call=reinterpret_cast<Fn>(original(self,CopyResource));if(!call)return;
-    copies.fetch_add(1,std::memory_order_relaxed);call(self,dst,src);
+    copies.fetch_add(1,std::memory_order_relaxed);call(self,dst,src);traceCommand("CopyResource");
 }
 static void STDMETHODCALLTYPE contextCopySubresourceRegion(DevicePtr self,ID3D11Resource* dst,UINT dstSub,UINT x,UINT y,UINT z,ID3D11Resource* src,UINT srcSub,const D3D11_BOX* box) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT,UINT,UINT,UINT,ID3D11Resource*,UINT,const D3D11_BOX*);
     auto call=reinterpret_cast<Fn>(original(self,CopySubresourceRegion));if(!call)return;
     copies.fetch_add(1,std::memory_order_relaxed);call(self,dst,dstSub,x,y,z,src,srcSub,box);
+    traceCommand("CopySubresourceRegion","dst-sub=%u src-sub=%u xyz=%u,%u,%u",dstSub,srcSub,x,y,z);
 }
 // A draw under a predicate object is skipped when the predicate is false: a
 // layer that is culled this way submits no work at all.
@@ -1786,6 +1811,7 @@ static void STDMETHODCALLTYPE contextUpdateSubresource(DevicePtr self,ID3D11Reso
         report(1,fmt("indirect args upload %s",text.c_str()),fmt("indirect args upload %s",text.c_str()));
     }
     call(self,resource,subresource,box,data,rowPitch,depthPitch);
+    traceCommand("UpdateSubresource","subresource=%u row=%u depth=%u",subresource,rowPitch,depthPitch);
 }
 // ID3D11DeviceContext1's clear: the game clears its targets through this, not
 // through ID3D11DeviceContext::Clear*, so a summary that only counted the
@@ -1800,13 +1826,15 @@ static void STDMETHODCALLTYPE context1ClearView(DevicePtr self,ID3D11View* view,
     } else if(view&&SUCCEEDED(view->QueryInterface(__uuidof(ID3D11DepthStencilView),reinterpret_cast<void**>(&dsv)))&&dsv) {
         clears[1].fetch_add(1,std::memory_order_relaxed);dsv->Release();
     } else clearViews[0].fetch_add(1,std::memory_order_relaxed);
-    call(self,view,color,rects,count);
+    call(self,view,color,rects,count);traceCommand("ClearView","rects=%u",count);
 }
 static HRESULT STDMETHODCALLTYPE contextFinishCommandList(DevicePtr self,BOOL restore,ID3D11CommandList** list) {    using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,BOOL,ID3D11CommandList**);
     auto call=reinterpret_cast<Fn>(original(self,FinishCommandList));if(!call)return E_FAIL;
-    traceCall("FinishCommandList");
     HRESULT hr=call(self,restore,list);
-    if(SUCCEEDED(hr)){commandLists.fetch_add(1,std::memory_order_relaxed);if(list&&*list)noteFinishedCommandList(self,*list);}
+    if(SUCCEEDED(hr)){
+        traceCommand("FinishCommandList","restore=%u",restore!=0);
+        commandLists.fetch_add(1,std::memory_order_relaxed);if(list&&*list)noteFinishedCommandList(self,*list);
+    }
     D3D11_DIAG_FAILED("FinishCommandList",fmt("%d",restore!=0),fmt("restore=%d",restore!=0));
     return hr;
 }
@@ -1815,8 +1843,8 @@ static HRESULT STDMETHODCALLTYPE contextFinishCommandList(DevicePtr self,BOOL re
 static void STDMETHODCALLTYPE contextExecuteCommandList(DevicePtr self,ID3D11CommandList* list,BOOL restore) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11CommandList*,BOOL);
     auto call=reinterpret_cast<Fn>(original(self,ExecuteCommandList));if(!call)return;
-    traceCall("ExecuteCommandList");
-    executedLists.fetch_add(1,std::memory_order_relaxed);call(self,list,restore);noteExecutedCommandList(list,restore);tick();
+    executedLists.fetch_add(1,std::memory_order_relaxed);call(self,list,restore);
+    traceCommand("ExecuteCommandList","restore=%u",restore!=0);noteExecutedCommandList(list,restore);tick();
 }
 static HRESULT STDMETHODCALLTYPE createDeferredContext(DevicePtr self,UINT flags,ID3D11DeviceContext** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11DeviceContext**);
