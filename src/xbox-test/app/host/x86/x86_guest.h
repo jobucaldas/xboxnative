@@ -1197,12 +1197,12 @@ inline void Guest::register_all() {
         if(!c.arg(0)){set_last_error(87);return 0xffffffffu;}Host::FileCall q{Host::FileCall::Kind::CreateA}; q.path_a=str(c.arg(0));
         q.args[0]=c.arg(1);q.args[1]=c.arg(2);q.args[2]=c.arg(4);q.args[3]=c.arg(5);
         if(c.arg(6)){auto it=file_handles.find(c.arg(6));if(it==file_handles.end()){set_last_error(6);return 0xffffffffu;}q.template_handle=it->second;}
-        if(!call_file(q)||q.value==UINT64_MAX){set_last_error(q.error?q.error:120);return 0xffffffffu;}return add_file_handle(q.value); });
+        if(!call_file(q)||q.value==UINT64_MAX){set_last_error(q.error?q.error:120);return 0xffffffffu;}set_last_error(q.error);return add_file_handle(q.value); });
     reg.add("kernel32.dll", "CreateFileW", Conv::Stdcall, 7, [this](Cpu& c) -> uint32_t {
         if(!c.arg(0)){set_last_error(87);return 0xffffffffu;}Host::FileCall q{Host::FileCall::Kind::CreateW}; q.path_w=wstr(c.arg(0));
         q.args[0]=c.arg(1);q.args[1]=c.arg(2);q.args[2]=c.arg(4);q.args[3]=c.arg(5);
         if(c.arg(6)){auto it=file_handles.find(c.arg(6));if(it==file_handles.end()){set_last_error(6);return 0xffffffffu;}q.template_handle=it->second;}
-        if(!call_file(q)||q.value==UINT64_MAX){set_last_error(q.error?q.error:120);return 0xffffffffu;}return add_file_handle(q.value); });
+        if(!call_file(q)||q.value==UINT64_MAX){set_last_error(q.error?q.error:120);return 0xffffffffu;}set_last_error(q.error);return add_file_handle(q.value); });
     reg.add("kernel32.dll", "ReadFile", Conv::Stdcall, 5, [this,native_file](Cpu& c) -> uint32_t {
         uint32_t n=c.arg(2),out=c.arg(3); if(n>(1u<<24)||!out||c.arg(4)){set_last_error(87);return 0;}
         Host::FileCall q{Host::FileCall::Kind::Read};if(!native_file(c.arg(0),q))return 0;q.args[0]=n;
@@ -1239,7 +1239,7 @@ inline void Guest::register_all() {
         return 1; });
     reg.add("kernel32.dll", "GetFileType", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t h = c.arg(0);
-        if (h == Host::H_STDOUT || h == Host::H_STDERR) return 2u;  // FILE_TYPE_CHAR
+        if (h == Host::H_STDIN || h == Host::H_STDOUT || h == Host::H_STDERR) return 2u;  // FILE_TYPE_CHAR
         if (file_handles.count(h)) return 1u;  // FILE_TYPE_DISK
         set_last_error(6);  // ERROR_INVALID_HANDLE
         return 0u;  // FILE_TYPE_UNKNOWN

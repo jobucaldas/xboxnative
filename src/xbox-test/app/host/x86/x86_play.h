@@ -22,8 +22,8 @@ namespace x86 {
 inline void play_file_call(Host::FileCall& q) {
     auto failed=[&](){q.error=GetLastError();};
     switch(q.kind) {
-    case Host::FileCall::Kind::CreateA: { HANDLE h=kernel32_core::create_file_a(q.path_a.c_str(),q.args[0],q.args[1],nullptr,q.args[2],q.args[3],(HANDLE)(uintptr_t)q.template_handle);q.value=(uintptr_t)h;q.succeeded=h!=INVALID_HANDLE_VALUE;if(!q.succeeded)failed();break; }
-    case Host::FileCall::Kind::CreateW: { std::wstring p(q.path_w.begin(),q.path_w.end());HANDLE h=kernel32_core::create_file_w(p.c_str(),q.args[0],q.args[1],nullptr,q.args[2],q.args[3],(HANDLE)(uintptr_t)q.template_handle);q.value=(uintptr_t)h;q.succeeded=h!=INVALID_HANDLE_VALUE;if(!q.succeeded)failed();break; }
+    case Host::FileCall::Kind::CreateA: { HANDLE h=kernel32_core::create_file_a(q.path_a.c_str(),q.args[0],q.args[1],nullptr,q.args[2],q.args[3],(HANDLE)(uintptr_t)q.template_handle);q.value=(uintptr_t)h;q.succeeded=h!=INVALID_HANDLE_VALUE;failed();break; }
+    case Host::FileCall::Kind::CreateW: { std::wstring p(q.path_w.begin(),q.path_w.end());HANDLE h=kernel32_core::create_file_w(p.c_str(),q.args[0],q.args[1],nullptr,q.args[2],q.args[3],(HANDLE)(uintptr_t)q.template_handle);q.value=(uintptr_t)h;q.succeeded=h!=INVALID_HANDLE_VALUE;failed();break; }
     case Host::FileCall::Kind::Close:q.succeeded=kernel32_core::close_handle((HANDLE)(uintptr_t)q.handle)!=FALSE;if(!q.succeeded)failed();break;
     case Host::FileCall::Kind::Read:{q.data.resize(q.args[0]);DWORD n=0;q.succeeded=kernel32_core::read_file((HANDLE)(uintptr_t)q.handle,q.data.data(),q.args[0],&n,nullptr)!=FALSE;q.args[1]=n;q.data.resize(n);if(!q.succeeded)failed();break;}
     case Host::FileCall::Kind::Size:{DWORD high=0,low=kernel32_core::file_size((HANDLE)(uintptr_t)q.handle,q.args[0]?&high:nullptr);q.value=low;q.args[1]=high;q.error=GetLastError();q.succeeded=low!=INVALID_FILE_SIZE||q.error==ERROR_SUCCESS;break;}

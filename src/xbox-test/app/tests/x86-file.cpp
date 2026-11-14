@@ -47,11 +47,11 @@ int main() {
     case Host::FileCall::Kind::TimeConvert:q.data.assign(16,0x36);q.succeeded=true;break;
     case Host::FileCall::Kind::TimeLocal:q.data.assign(8,0x47);q.succeeded=true;break;
     case Host::FileCall::Kind::Close:CHECK(q.handle==native_handle);q.succeeded=true;break;
-    case Host::FileCall::Kind::CreateA:CHECK(q.path_a=="save.dat");q.value=native_handle+1;q.succeeded=true;break;
+    case Host::FileCall::Kind::CreateA:CHECK(q.path_a=="save.dat");q.value=native_handle+1;q.error=183;q.succeeded=true;break;
     }};
     auto call=[&](const char* n,std::initializer_list<uint32_t> a){unsigned i=0;for(uint32_t v:a)mem.w32(cpu.reg[ESP]+4+4*i++,v);return reg.map.at({"kernel32.dll",n}).fn(cpu);};
     uint32_t pathw=g.put_wstr(u"save.dat"),patha=g.put_str("save.dat");
-    uint32_t h=call("createfilew",{pathw,0x80000000u,3,0,3,0,0});CHECK(h!=0xffffffffu&&g.file_handles[h]==native_handle);
+    g.set_last_error(5);uint32_t h=call("createfilew",{pathw,0x80000000u,3,0,3,0,0});CHECK(h!=0xffffffffu&&g.file_handles[h]==native_handle);CHECK(call("getlasterror",{})==0);
     CHECK(call("getfilesize",{0xdeadbeefu,0})==0xffffffffu&&call("getlasterror",{})==6);
     CHECK(call("getfileattributesa",{patha})==0x20);
     CHECK(call("getfilesize",{h,0x3000})==0xfffffff0u&&mem.r32(0x3000)==3&&call("getlasterror",{})==0);
@@ -64,8 +64,9 @@ int main() {
     CHECK(call("filetimetolocalfiletime",{0x3150,0x3170})==1&&mem.r8(0x3170)==0x47);
     CHECK(call("closehandle",{h})==1&&g.file_handles.count(h)==0);
     CHECK(call("getfilesize",{h,0})==0xffffffffu&&g.last_error()==6);
-    uint32_t ha=call("createfilea",{patha,0x80000000u,3,0,3,0,0});CHECK(ha!=0xffffffffu);
+    uint32_t ha=call("createfilea",{patha,0x80000000u,3,0,3,0,0});CHECK(ha!=0xffffffffu&&call("getlasterror",{})==183);
     CHECK(call("getfiletype",{ha})==1);
+    CHECK(call("getfiletype",{call("getstdhandle",{uint32_t(-10)})})==2);
     CHECK(call("getfiletype",{call("getstdhandle",{uint32_t(-11)})})==2);
     CHECK(call("getfiletype",{call("getstdhandle",{uint32_t(-12)})})==2);
     CHECK(call("getfiletype",{0xdeadbeefu})==0&&call("getlasterror",{})==6);
