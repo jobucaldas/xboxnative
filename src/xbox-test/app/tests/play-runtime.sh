@@ -394,6 +394,8 @@ if [ -f out/layout/runtime/vulkan-dzn.json ]; then
   grep -q 'PLAY-VULKAN-DRAW STAGE graphics-pipeline' "$out/vulkan-draw.log"
   grep -q 'PLAY-VULKAN-DRAW STAGE compute-pipeline' "$out/vulkan-draw.log"
   grep -q 'PLAY-VULKAN-DRAW STAGE timeline-semaphore' "$out/vulkan-draw.log"
+  grep -q 'PLAY-VULKAN-DRAW STAGE compute-command-buffer-ended' "$out/vulkan-draw.log"
+  grep -q 'PLAY-VULKAN-DRAW STAGE draw-command-buffer-ended' "$out/vulkan-draw.log"
   grep -q 'PLAY-VULKAN-DRAW STAGE timeline-roundtrip' "$out/vulkan-draw.log"
   if grep -q 'PLAY-VULKAN-DRAW PASS draw-readback' "$out/vulkan-draw.log"; then
     grep -q 'PLAY-VULKAN-DRAW STAGE compute-readback' "$out/vulkan-draw.log"
