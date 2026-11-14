@@ -613,19 +613,20 @@ inline void noteDrawState(void* self,ContextState& state,unsigned topology,unsig
     if(srv&1)flags+=" ps-null";if(srv&2)flags+=" ps-over-target";
     if(srv&4)flags+=" gs-null";if(srv&8)flags+=" gs-over-target";
     const char* countLabel=kind==0||kind==2?"indices":kind==1||kind==3?"vertices":"indirect";
-    std::string bindings=boundDrawResources(self);
     std::string key=fmt("%u/%u/%u/%u/%llx/%zx/%u/%llx/%zx/%u/%u/%u/%u/%u/%x",deferred,id,kind,topology,gs.hash,gs.bytes,gs.serial,ps.hash,ps.bytes,ps.serial,fmtNow,state.rtWidth.load(),state.rtHeight.load(),state.dsFormat.load(),srv);
-    key+="/"+bindings;
     std::string drawCounts=kind>=kDrawAuto?"counts=gpu":fmt("%s=%u instances=%u",countLabel,count,instances);
     std::string text=fmt("draw state ctx=%s exec=%s draw=%s %s topology=%u(%s) gs=%012llx/%zub#%u ps=%012llx/%zub#%u target=%s %ux%u dsv=%s srv:%s",
         deferred?fmt("def#%u",id).c_str():"imm",deferred?"pending":"immediate",drawKindName(kind),drawCounts.c_str(),
         topology,topologyName(topology).c_str(),gs.hash,gs.bytes,gs.serial,ps.hash,ps.bytes,ps.serial,
         formatText(DXGI_FORMAT(fmtNow)).c_str(),state.rtWidth.load(),state.rtHeight.load(),
         formatText(DXGI_FORMAT(state.dsFormat.load())).c_str(),flags.empty()?" ok":flags.c_str());
-    text+=" "+bindings;
+    // The binding snapshot (128 SRV slots + SO targets) is taken only for a
+    // draw that will actually be recorded, and stays out of the uniqueness key
+    // so texture churn cannot use up the cap: the first draw of each state
+    // records the bindings it ran with.
     if(deferred) {
         for(const auto& old:state.pendingDeepDraws)if(old.key==key)return;
-        if(state.pendingDeepDraws.size()<kMaxDrawStates)state.pendingDeepDraws.push_back({key,text});
+        if(state.pendingDeepDraws.size()<kMaxDrawStates)state.pendingDeepDraws.push_back({key,text+" "+boundDrawResources(self)});
         else state.pendingDeepDrawsCapped=true;
         return;
     }
@@ -638,6 +639,7 @@ inline void noteDrawState(void* self,ContextState& state,unsigned topology,unsig
             drawStatesCapped=true;line="further immediate draw-state lines suppressed (cap reached)";
         } else {seen.insert(reportKey);++drawStates;line=text;}
     }
+    if(line==text)line+=" "+boundDrawResources(self);
     emit(line);
 }
 inline void noteFinishedCommandList(void* context,ID3D11CommandList* list) {
