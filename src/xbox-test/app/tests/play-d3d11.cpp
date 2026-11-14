@@ -15,6 +15,7 @@
 #include "wine_probe.h"
 #include "../../uwph/host/shaders/triangle_bytecode.h"
 #include "../../uwph/host/shaders/depth_bytecode.h"
+#include "d3d10_bytecode.h"
 
 extern "C" {
 // No CRT: the byte-copy the depth pass's dynamic upload needs (the same
@@ -371,44 +372,67 @@ DWORD d3d_entry() {
         {0,"SV_POSITION",0,0,4,0},
         {0,"COLOR",0,0,4,0}};
     ID3D11GeometryShader* soGs=nullptr;
-    // Stream-out without a GS uses a GS created with the SO declarations and
-    // no shader body: the standard D3D11 route (CreateGeometryShaderWithSO,
-    // pShaderBytecode=nullptr is not valid, so the SO-only route passes the
-    // declarations with a zero-length entry count through a real GS call).
-    if(FAILED(device->CreateGeometryShaderWithStreamOutput(triangle_vs,sizeof triangle_vs,
-        soDecl,2,nullptr,0,D3D11_SO_NO_RASTERIZED_STREAM,nullptr,&soGs))||!soGs)return 64;
+    const UINT soStride=8*sizeof(float);   // POSITION + COLOR
+    if(FAILED(device->CreateGeometryShaderWithStreamOutput(d3d10_gs,sizeof d3d10_gs,
+        soDecl,2,&soStride,1,D3D11_SO_NO_RASTERIZED_STREAM,nullptr,&soGs))||!soGs)return 64;
     D3D11_BUFFER_DESC soDesc{};
-    soDesc.ByteWidth=3*sizeof(float)*8;   // 3 vertices, 8 floats each (position+color)
+    soDesc.ByteWidth=3*soStride;   // the GS emits three vertices
     soDesc.Usage=D3D11_USAGE_DEFAULT;soDesc.BindFlags=D3D11_BIND_STREAM_OUTPUT;
     soDesc.CPUAccessFlags=0;soDesc.MiscFlags=0;
     ID3D11Buffer* soBuffer=nullptr;
     if(FAILED(device->CreateBuffer(&soDesc,nullptr,&soBuffer))||!soBuffer)return 65;
-    ID3D11Buffer* soBinds[]={soBuffer};
-    UINT soOffsets[]={0};
-    // The input state and shaders this draw reads are set by the helper after
-    // the deferred execute (see rebind_pipeline_state).
-    context->GSSetShader(soGs,nullptr,0);
-    context->SOSetTargets(1,soBinds,soOffsets);
-    context->Draw(3,0);
-    ID3D11Buffer* soClear[]={nullptr};
-    context->SOSetTargets(1,soClear,soOffsets);
-    context->GSSetShader(nullptr,nullptr,0);
-    // Read the capture back through a staging buffer.
     D3D11_BUFFER_DESC soReadDesc=soDesc;
     soReadDesc.Usage=D3D11_USAGE_STAGING;soReadDesc.BindFlags=0;
     soReadDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
     ID3D11Buffer* soStaging=nullptr;
     if(FAILED(device->CreateBuffer(&soReadDesc,nullptr,&soStaging))||!soStaging)return 66;
+    D3D11_QUERY_DESC soQueryDesc{D3D11_QUERY_SO_STATISTICS,0};
+    ID3D11Query* soQuery=nullptr;
+    if(FAILED(device->CreateQuery(&soQueryDesc,&soQuery))||!soQuery)return 66;
+    ID3D11Buffer* soBinds[]={soBuffer};
+    UINT soOffsets[]={0};
+    // Feed one VS output point to the real GS. The GS emits a triangle with
+    // POSITION+COLOR, the same layout the later DrawAuto consumes.
+    const float point[8]={-0.75f,0.75f,0.0f,1.0f, 0.0f,1.0f,0.0f,1.0f};
+    D3D11_BUFFER_DESC pointDesc{};
+    pointDesc.ByteWidth=sizeof point;pointDesc.Usage=D3D11_USAGE_DEFAULT;
+    pointDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA pointInit{};pointInit.pSysMem=point;
+    ID3D11Buffer* pointBuffer=nullptr;
+    if(FAILED(device->CreateBuffer(&pointDesc,&pointInit,&pointBuffer))||!pointBuffer)return 65;
+    ID3D11Buffer* soClear[]={nullptr};
+    UINT pointStride=sizeof point,pointOffset=0;
+    context->IASetVertexBuffers(0,1,&pointBuffer,&pointStride,&pointOffset);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+    context->GSSetShader(soGs,nullptr,0);
+    context->SOSetTargets(1,soBinds,soOffsets);
+    context->Begin(soQuery);
+    context->Draw(1,0);
+    context->End(soQuery);
+    context->SOSetTargets(1,soClear,soOffsets);
+    context->GSSetShader(nullptr,nullptr,0);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    D3D11_QUERY_DATA_SO_STATISTICS soStats{};
+    bool soAnswered=false;
+    for(unsigned poll=0;poll<1000;++poll) {
+        HRESULT qhr=context->GetData(soQuery,&soStats,sizeof soStats,0);
+        if(qhr==S_OK){soAnswered=true;break;}
+        if(FAILED(qhr))return 66;
+        Sleep(1);
+    }
+    if(!soAnswered||soStats.NumPrimitivesWritten!=1||soStats.PrimitivesStorageNeeded!=1)return 67;
+    // DrawAuto consumes the vertex count written by the stream-output stage.
+    context->IASetVertexBuffers(0,1,soBinds,&soStride,&pointOffset);
+    context->DrawAuto();
     context->CopyResource(soStaging,soBuffer);
     D3D11_MAPPED_SUBRESOURCE soMapped{};
     if(FAILED(context->Map(soStaging,0,D3D11_MAP_READ,0,&soMapped))||!soMapped.pData)return 66;
-    // The VS passes positions straight through: the first captured vertex is
-    // the first drawn vertex (-0.75, 0.75, 0, 1).
     const float* soData=static_cast<const float*>(soMapped.pData);
-    const bool soCaptured=soData[0]<-0.7f&&soData[0]>-0.8f&&soData[1]>0.7f&&soData[1]<0.8f;
+    const bool soCaptured=soData[0]<-0.7f&&soData[0]>-0.8f&&soData[1]>0.7f&&soData[1]<0.8f&&
+        soData[5]>0.9f&&soData[4]<0.1f;
     context->Unmap(soStaging,0);
-    soStaging->Release();soBuffer->Release();soGs->Release();
-    if(!soCaptured)return 67;   // BLOCKED: the SO buffer stayed empty
+    soStaging->Release();soBuffer->Release();soGs->Release();soQuery->Release();pointBuffer->Release();
+    if(!soCaptured)return 67;   // BLOCKED: the GS did not capture the expected vertex data
     }   // end non-Wine stream-out gate
 
     // ---- Indirect-draw pass: DrawInstancedIndirect from a buffer ----

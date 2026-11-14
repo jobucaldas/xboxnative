@@ -33,4 +33,13 @@ for r in "${resets[@]}"; do
         fail "a draw (line $draw) comes before rebind_pipeline_state (line $rebind) after the reset at line $r"
     fi
 done
-echo "PASS ${#resets[@]} ExecuteCommandList(FALSE) call(s) each followed by rebind_pipeline_state before the next draw; the helper sets all states the fixture uses"
+
+# The stream-out fixture must create an actual GS from GS bytecode and give
+# D3D11 an explicit output stride. The statistics query distinguishes a
+# successful SO write from a merely successful Draw/Map call.
+grep -q 'CreateGeometryShaderWithStreamOutput(d3d10_gs,sizeof d3d10_gs' "$f" || fail "stream-out GS creation does not use geometry-shader bytecode"
+grep -q 'soDecl,2,&soStride,1,D3D11_SO_NO_RASTERIZED_STREAM' "$f" || fail "stream-out GS creation does not provide its output stride"
+grep -q 'D3D11_QUERY_SO_STATISTICS' "$f" || fail "stream-out fixture does not verify written primitives"
+grep -q 'NumPrimitivesWritten!=1||soStats.PrimitivesStorageNeeded!=1' "$f" || fail "stream-out fixture does not require the GS output to be captured"
+grep -q 'context->DrawAuto();' "$f" || fail "stream-out fixture does not consume the captured vertex count with DrawAuto"
+echo "PASS ${#resets[@]} ExecuteCommandList(FALSE) call(s) each followed by rebind_pipeline_state before the next draw; stream-out uses a real GS, explicit stride, and SO statistics"
