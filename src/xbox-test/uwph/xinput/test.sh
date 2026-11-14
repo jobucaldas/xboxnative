@@ -6,3 +6,5 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 x86_64-w64-mingw32-g++ -std=c++17 -O2 -static test.cpp -o "$work/xinput-test.exe"
 WINEDEBUG=-all wine "$work/xinput-test.exe"
+x86_64-w64-mingw32-g++ -std=c++17 -O2 -static gpad-xinput-test.cpp -o "$work/gpad-xinput-test.exe"
+WINEDEBUG=-all wine "$work/gpad-xinput-test.exe"
