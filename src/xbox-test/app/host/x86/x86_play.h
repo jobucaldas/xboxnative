@@ -108,6 +108,7 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         cpu.trace_fault_context = trace_fault_context;
         cpu.format_eip = [&guest, &img](uint32_t eip) {
             for (const auto& module : guest.modules) {
+                if (module.first == "__top__") continue;  // loader sentinel; the exe is also registered under its own name
                 uint32_t size = module.second == img.base ? img.size : 0;
                 auto dll = guest.dlls.find(module.first);
                 if (dll != guest.dlls.end()) size = dll->second.image.size;

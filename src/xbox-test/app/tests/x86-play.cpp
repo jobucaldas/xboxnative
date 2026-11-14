@@ -39,6 +39,11 @@ int main(int argc, char** argv) {
     // above the default 500 million so a real session never reaches it.
     printf("play: limit-default=%llu limit-game=%llu\n",
            (unsigned long long)(500ull * 1000 * 1000), (unsigned long long)x86::kGuestRunCap);
+    // Fault context (LocalState\x86trace.txt): a run stopped early by the
+    // instruction limit must name the executable's own frames, never the
+    // loader's internal "__top__" entry.
+    auto t = x86::run_image(file, "Fixture-Crt.EXE", "\"Fixture-Crt.EXE\"", nullptr, nullptr, 2000, nullptr, true);
+    printf("play: traced kind=%s %s\n", t.fault_kind.c_str(), t.fault.c_str());
     fwrite(seen.data(), 1, seen.size(), stdout);
     return r.finished && r.exit_code == 42 && loaded_calls == 1 && loaded_first ? 0 : 1;
 }
