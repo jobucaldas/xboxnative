@@ -885,6 +885,24 @@ static bool diagnosticUnwind(CONTEXT* context) {
 static bool crashReadStackWord(uintptr_t slot,uintptr_t& value) {
     __try {value=*(uintptr_t*)slot;return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
 }
+static bool crashReadable(uintptr_t address,size_t size) {
+    MEMORY_BASIC_INFORMATION mbi{};
+    if(!VirtualQuery((void*)address,&mbi,sizeof mbi)||mbi.State!=MEM_COMMIT||
+       (mbi.Protect&(PAGE_GUARD|PAGE_NOACCESS)))return false;
+    DWORD protection=mbi.Protect&0xff;
+    if(protection!=PAGE_READONLY&&protection!=PAGE_READWRITE&&protection!=PAGE_WRITECOPY&&
+       protection!=PAGE_EXECUTE_READ&&protection!=PAGE_EXECUTE_READWRITE&&protection!=PAGE_EXECUTE_WRITECOPY)return false;
+    uintptr_t region=(uintptr_t)mbi.BaseAddress;
+    return address>=region&&address-region<=mbi.RegionSize&&size<=mbi.RegionSize-(address-region);
+}
+static bool crashReadBytes(uintptr_t address,BYTE* bytes,size_t size) {
+    __try {memcpy(bytes,(const void*)address,size);return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+}
+static void crashHexLine(const char* prefix,uintptr_t address,const BYTE* bytes,size_t size) {
+    char line[320];size_t used=(size_t)snprintf(line,sizeof line,"%s=0x%llx ",prefix,(unsigned long long)address);
+    for(size_t i=0;i<size&&used+2<sizeof line;++i)used+=(size_t)snprintf(line+used,sizeof line-used,"%02x",bytes[i]);
+    state->event(line);
+}
 static void crashReadPeIdentity(uintptr_t base,DWORD& timestamp,DWORD& imageSize) {
     __try {
         auto dos=(IMAGE_DOS_HEADER*)base;auto nt=(IMAGE_NT_HEADERS64*)(base+dos->e_lfanew);
@@ -929,6 +947,23 @@ static void crashContextDiagnostics(EXCEPTION_POINTERS* ep) {
         (unsigned long long)original.R14,(unsigned long long)original.R15,(unsigned long long)original.Rsp,(unsigned long long)original.Rbp,
         (unsigned long long)original.Rip,(unsigned long)original.EFlags);
     state->event(regs);
+    BYTE bytes[0x40];
+    if(crashReadable((uintptr_t)original.Rip,32)&&crashReadBytes((uintptr_t)original.Rip,bytes,32))
+        crashHexLine("CRASHCTX code RIP",(uintptr_t)original.Rip,bytes,32);
+    else state->event("CRASHCTX code unreadable");
+    struct Register {const char* name;uintptr_t value;};
+    const Register registers[]={{"RCX",(uintptr_t)original.Rcx},{"RDX",(uintptr_t)original.Rdx},
+        {"R8",(uintptr_t)original.R8},{"R9",(uintptr_t)original.R9},{"RDI",(uintptr_t)original.Rdi},
+        {"RSI",(uintptr_t)original.Rsi},{"RBX",(uintptr_t)original.Rbx}};
+    for(const auto& reg:registers) {
+        if(crashReadable(reg.value,0x40)&&crashReadBytes(reg.value,bytes,0x40)) {
+            char prefix[48];snprintf(prefix,sizeof prefix,"CRASHCTX mem %s",reg.name);
+            crashHexLine(prefix,reg.value,bytes,0x40);
+        } else {
+            char line[96];snprintf(line,sizeof line,"CRASHCTX mem %s=0x%llx unreadable",reg.name,(unsigned long long)reg.value);
+            state->event(line);
+        }
+    }
     std::array<uintptr_t,17> chain{};size_t count=0;
     CONTEXT context=original;uintptr_t previousRip=0,previousRsp=0;
     while(count<chain.size()&&context.Rip) {
@@ -959,8 +994,8 @@ static void crashContextDiagnostics(EXCEPTION_POINTERS* ep) {
         if(path.empty()) {wchar_t buffer[32768]{};DWORD n=GetModuleFileNameW((HMODULE)base,buffer,(DWORD)std::size(buffer));if(n&&n<std::size(buffer))path.assign(buffer,n);}
         if(!path.empty()) {FILE* file=_wfopen(path.c_str(),L"rb");
             if(file){if(_fseeki64(file,0,SEEK_END)==0){auto size=_ftelli64(file);if(size>=0)fileSize=(uint64_t)size;}fclose(file);}}
-        char line[256];snprintf(line,sizeof line,"CRASHCTX chain[%u] %s+0x%llx timestamp=0x%08lx image=0x%lx file=%llu",
-            (unsigned)i,name.c_str(),(unsigned long long)(chain[i]-base),(unsigned long)timestamp,(unsigned long)imageSize,(unsigned long long)fileSize);
+        char line[256];snprintf(line,sizeof line,"CRASHCTX chain[%u] %s+0x%llx base=0x%llx timestamp=0x%08lx image=0x%lx file=%llu",
+            (unsigned)i,name.c_str(),(unsigned long long)(chain[i]-base),(unsigned long long)base,(unsigned long)timestamp,(unsigned long)imageSize,(unsigned long long)fileSize);
         state->event(line);
     }
 }

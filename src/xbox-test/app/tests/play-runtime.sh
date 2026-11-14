@@ -573,7 +573,9 @@ for mode in crashctx-on crashctx-off;do
 done
 grep -Eq 'CRASHCTX fault play-guest\.exe\+0x[0-9a-f]+ access=read target=0x24' "$out/crashctx-on.log"
 grep -Eq 'CRASHCTX registers .*RAX=0x[0-9a-f]+.*R15=0x[0-9a-f]+.*RSP=0x[0-9a-f]+.*RBP=0x[0-9a-f]+.*RIP=0x[0-9a-f]+.*EFLAGS=0x[0-9a-f]+' "$out/crashctx-on.log"
-grep -Eq 'CRASHCTX chain\[0\] play-guest\.exe\+0x[0-9a-f]+ timestamp=0x[0-9a-f]{8} image=0x[0-9a-f]+ file=[0-9]+' "$out/crashctx-on.log"
+grep -Eq 'CRASHCTX code RIP=0x[0-9a-f]+ [0-9a-f]{64}' "$out/crashctx-on.log"
+grep -Eq 'CRASHCTX mem RCX=0x[0-9a-f]+ a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff' "$out/crashctx-on.log"
+grep -Eq 'CRASHCTX chain\[0\] play-guest\.exe\+0x[0-9a-f]+ base=0x[0-9a-f]+ timestamp=0x[0-9a-f]{8} image=0x[0-9a-f]+ file=[0-9]+' "$out/crashctx-on.log"
 ! grep -q 'CRASHCTX ' "$out/crashctx-off.log"
 grep -Eq 'unhandled exception code=0xc0000005 address=0x[0-9a-f]+ play-guest\.exe\+0x[0-9a-f]+ .*access=0 target=0x24' "$out/crashctx-off.log"
 echo 'PASS crashctx opt-in reports AV registers, module identity and caller chain; disabled adds no lines and keeps the original crash line'

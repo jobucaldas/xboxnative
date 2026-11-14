@@ -365,7 +365,13 @@ DWORD guest_exe_entry(){
 #ifdef PLAY_STATIC_MISSING
     DeliberatelyMissingPlayImport(); // Must be rejected before TLS/DllMain/entry.
 #endif
-    if(contains(GetCommandLineW(),L"crashctx")){volatile int* nearNull=(volatile int*)0x24;return *nearNull;}
+    if(contains(GetCommandLineW(),L"crashctx")){
+        static volatile unsigned char pattern[0x40];
+        for(unsigned i=0;i<0x40;++i)pattern[i]=(unsigned char)(0xa0+i);
+        __asm__ __volatile__("movq %0, %%rcx\n\tmovq $0x24, %%rax\n\tmovl (%%rax), %%eax"
+            : : "r"(pattern) : "rax","rcx","memory");
+        return 0;
+    }
     if(contains(GetCommandLineW(),L"crash"))RaiseException(0xe0424242,EXCEPTION_NONCONTINUABLE,0,nullptr);
     if(contains(GetCommandLineW(),L"exit"))ExitProcess(37);
     if(contains(GetCommandLineW(),L"hang"))for(;;)Sleep(100);

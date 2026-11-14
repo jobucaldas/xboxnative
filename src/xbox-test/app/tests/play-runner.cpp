@@ -282,6 +282,7 @@ static bool attachPublicationTest() {
 }
 static FILE* hostEvents=nullptr;
 static bool injectLogException=false;
+static std::string crashContextLog;
 // Watchdog-mode stand-in clock, split the way the launcher's is: the UI-loop
 // stand-in advances nowTick (the QPC read); the GUEST stamps lastHeartbeat —
 // logline() does it, the way the guest's hooked Present stamps
@@ -295,6 +296,7 @@ static void handledLogException() {
     __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 static void logline(const char* s){
+    if(strstr(s,"CRASHCTX "))crashContextLog+=s,crashContextLog+='\n';
     if(injectLogException)handledLogException();puts(s);fflush(stdout);
     if(watchdogStamp.load(std::memory_order_acquire))lastHeartbeat.store(nowTick.load(std::memory_order_acquire),std::memory_order_release);
     if(hostEvents){fprintf(hostEvents,"%s\n",s);fflush(hostEvents);}
@@ -704,7 +706,18 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     else if(mode=="wide-dialog")ok=ok&&r->finished&&!r->success&&last.find("user32.dll!MessageBoxW caption=\"Erro \xc3\xa7\"")!=std::string::npos&&last.find("Falha IL2CPP \xc3\xa7\\nprobe \\\"quoted\\\"")!=std::string::npos&&last.find("caller=0x")!=std::string::npos;
     else if(mode=="dialog")ok=ok&&r->finished&&!r->success&&last.find("user32.dll!MessageBoxA caption=\"Fatal error\"")!=std::string::npos&&last.find("Failed to initialize IL2CPP\\nprobe \\\"quoted\\\"")!=std::string::npos&&last.find("caller=0x")!=std::string::npos;
     else if(mode=="crash")ok=ok&&r->finished&&!r->success&&last.find("unhandled exception code=0xe0424242")!=std::string::npos;
-    else if(mode=="crashctx-on"||mode=="crashctx-off")ok=ok&&r->finished&&!r->success&&last.find("unhandled exception code=0xc0000005")!=std::string::npos&&last.find("play-guest.exe+0x")!=std::string::npos;
+    else if(mode=="crashctx-on"||mode=="crashctx-off") {
+        ok=ok&&r->finished&&!r->success&&last.find("unhandled exception code=0xc0000005")!=std::string::npos&&last.find("play-guest.exe+0x")!=std::string::npos;
+        if(mode=="crashctx-on") {
+            std::string pattern;char byte[3];for(unsigned i=0;i<0x40;++i){snprintf(byte,sizeof byte,"%02x",0xa0+i);pattern+=byte;}
+            auto memory=crashContextLog.find("CRASHCTX mem RCX=0x");
+            auto addressEnd=memory==std::string::npos?memory:crashContextLog.find(' ',memory);
+            ok=ok&&memory!=std::string::npos&&addressEnd!=std::string::npos&&
+                crashContextLog.compare(addressEnd+1,pattern.size(),pattern)==0&&
+                crashContextLog.find("CRASHCTX code RIP=0x")!=std::string::npos&&
+                crashContextLog.find("CRASHCTX chain[0] play-guest.exe+")!=std::string::npos;
+        } else ok=ok&&crashContextLog.empty();
+    }
     else if(mode=="fault-in-dll") {
         // The fault happened inside a mapped DLL, three frames down, so the OS
         // had to unwind out of that image to reach Play's handler. The crash
