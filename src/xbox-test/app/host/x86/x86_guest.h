@@ -1223,10 +1223,12 @@ inline void Guest::register_all() {
         Host::FileCall q{Host::FileCall::Kind::Seek};if(!native_file(c.arg(0),q))return 0xffffffffu;
         q.args[0]=c.arg(1);q.args[1]=c.arg(2)?mem.r32(c.arg(2)):0;q.args[2]=c.arg(3);q.args[3]=c.arg(2)!=0;
         if(!call_file(q)){set_last_error(q.error?q.error:120);return 0xffffffffu;}if(c.arg(2))mem.w32(c.arg(2),q.args[1]);set_last_error(0);return uint32_t(q.value); });
-    reg.add("kernel32.dll", "SetFilePointerEx", Conv::Stdcall, 4, [this,native_file](Cpu& c) -> uint32_t {
+    // x86 stdcall passes LARGE_INTEGER liDistanceToMove by value in two stack slots:
+    // (hFile, distLow, distHigh, lpNewFilePointer, dwMoveMethod) = 20 bytes popped.
+    reg.add("kernel32.dll", "SetFilePointerEx", Conv::Stdcall, 5, [this,native_file](Cpu& c) -> uint32_t {
         Host::FileCall q{Host::FileCall::Kind::SeekEx};if(!native_file(c.arg(0),q))return 0;
-        q.distance=int64_t(mem.r64(c.arg(1)));q.method=c.arg(3);q.args[0]=c.arg(2)!=0;
-        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}if(c.arg(2)){mem.w32(c.arg(2),uint32_t(q.position));mem.w32(c.arg(2)+4,uint32_t(uint64_t(q.position)>>32));}return 1; });
+        q.distance=int64_t(uint64_t(c.arg(1))|(uint64_t(c.arg(2))<<32));q.method=c.arg(4);q.args[0]=c.arg(3)!=0;
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}if(c.arg(3)){mem.w32(c.arg(3),uint32_t(q.position));mem.w32(c.arg(3)+4,uint32_t(uint64_t(q.position)>>32));}return 1; });
     reg.add("kernel32.dll", "SetEndOfFile", Conv::Stdcall, 1, [this,native_file](Cpu& c) -> uint32_t {
         Host::FileCall q{Host::FileCall::Kind::End};if(!native_file(c.arg(0),q))return 0;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
     reg.add("kernel32.dll", "FileTimeToSystemTime", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {

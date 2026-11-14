@@ -37,7 +37,7 @@ static int checks, failures;
 int main() {
     Memory mem;mem.map(0x1000,0x30000,PROT_R|PROT_W);ThunkTable th;Host host;Registry reg;Guest g(mem,host,reg);g.cur_teb=0x1000;g.register_all();Cpu cpu(mem,th);cpu.reg[ESP]=0x2f000;
     const char* names[]={"createfilea","createfilew","readfile","getfilesize","getfiletime","getfileattributesa","setfilepointer","setfilepointerex","setendoffile","filetimetosystemtime","filetimetolocalfiletime","getfiletype","closehandle"};
-    const unsigned arity[]={7,7,5,2,4,1,4,4,1,2,2,1,1};
+    const unsigned arity[]={7,7,5,2,4,1,4,5,1,2,2,1,1};   // SetFilePointerEx: LARGE_INTEGER by value = 2 slots
     for(unsigned i=0;i<13;++i){auto it=reg.map.find({"kernel32.dll",names[i]});CHECK(it!=reg.map.end());if(it!=reg.map.end()){CHECK(it->second.conv==Conv::Stdcall);CHECK(it->second.argc==arity[i]);}}
     uint64_t native_handle=0x123456789ull;unsigned calls=0;
     host.file_call=[&](Host::FileCall& q){++calls;switch(q.kind){
@@ -64,10 +64,10 @@ int main() {
     CHECK(call("getfiletime",{h,0x3120,0,0x3130})==1&&mem.r8(0x3120)==0x5a&&mem.r8(0x3130)==0x5a);
     CHECK(call("setfilepointer",{0xdeadbeefu,4,0x3140,0})==0xffffffffu&&call("getlasterror",{})==6);
     CHECK(call("setfilepointer",{h,4,0x3140,0})==8&&mem.r32(0x3140)==1&&call("getlasterror",{})==0);
-    CHECK(call("setfilepointerex",{0xdeadbeefu,0x3180,0x3190,2})==0&&call("getlasterror",{})==6);
-    mem.w32(0x3180,0x44332211u);mem.w32(0x3184,0x88776655u);g.set_last_error(9);
-    CHECK(call("setfilepointerex",{h,0x3180,0x3190,2})==1&&mem.r32(0x3190)==0x9abcdef0u&&mem.r32(0x3194)==0x12345678u&&g.last_error()==9);
-    CHECK(call("setfilepointerex",{h,0x3180,0x3190,99})==0&&g.last_error()==87);
+    CHECK(call("setfilepointerex",{0xdeadbeefu,0x44332211u,0x88776655u,0x3190,2})==0&&call("getlasterror",{})==6);
+    g.set_last_error(9);
+    CHECK(call("setfilepointerex",{h,0x44332211u,0x88776655u,0x3190,2})==1&&mem.r32(0x3190)==0x9abcdef0u&&mem.r32(0x3194)==0x12345678u&&g.last_error()==9);
+    CHECK(call("setfilepointerex",{h,0x44332211u,0x88776655u,0x3190,99})==0&&g.last_error()==87);
     CHECK(call("setendoffile",{h})==1);
     mem.write_bytes(0x3150,"12345678",8);CHECK(call("filetimetosystemtime",{0x3150,0x3160})==1&&mem.r8(0x3160)==0x36);
     CHECK(call("filetimetolocalfiletime",{0x3150,0x3170})==1&&mem.r8(0x3170)==0x47);
