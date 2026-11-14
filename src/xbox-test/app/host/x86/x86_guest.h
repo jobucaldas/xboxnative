@@ -1042,6 +1042,21 @@ inline void Guest::register_all() {
         return 1; });
     reg.add("kernel32.dll", "IsProcessorFeaturePresent", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
         return c.arg(0) == 10 ? 1u : 0u; });  // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
+    // IsValidCodePage reports only the code pages exposed by this guest surface;
+    // do not claim support for every numeric identifier.
+    reg.add("kernel32.dll", "IsValidCodePage", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
+        uint32_t cp = c.arg(0);
+        switch (cp) {
+        case 437: case 850: case 932: case 936: case 949: case 950:
+        case 1200: case 1201:
+        case 1250: case 1251: case 1252: case 1253: case 1254:
+        case 1255: case 1256: case 1257: case 1258:
+        case 20127: case 28591: case 65000: case 65001:
+            return 1;
+        default:
+            return 0;
+        }
+    });
     reg.add("kernel32.dll", "GetACP", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 1252; });
     reg.add("kernel32.dll", "GetOEMCP", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 437; });
     reg.add("kernel32.dll", "GetCPInfo", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {

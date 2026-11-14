@@ -330,6 +330,8 @@ jobs:
         run: bash src/xbox-test/app/tests/x86-guest.sh
       - name: "x86 D3DX9 math registrations and semantics"
         run: bash src/xbox-test/app/tests/x86-d3dx.sh
+      - name: "x86 kernel32 code-page validation"
+        run: g++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/x86-nls.cpp -o "$RUNNER_TEMP/x86-nls" && "$RUNNER_TEMP/x86-nls"
       - name: "x86 kernel32 synchronization handle semantics"
         run: bash src/xbox-test/app/tests/x86-sync.sh
       - name: "x86 guest DLL loading (PE32 chain, DllMain, LoadLibrary/GetProcAddress, OS forwarders, cycles)"
