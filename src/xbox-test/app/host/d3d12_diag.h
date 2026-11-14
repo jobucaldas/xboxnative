@@ -33,6 +33,7 @@
 #include <set>
 #include <string>
 #include <type_traits>
+#include <utility>
 
 namespace d3d12_diag {
 using Sink=void(*)(const char*);
@@ -260,6 +261,60 @@ inline bool dxbcHasDxilChunk(const void* code,SIZE_T length) {
 }
 // The container key is a content hash, so a rejected pipeline state can be
 // matched to the game's file without assuming the container magic is a shader type.
+struct ShaderContainerInfo {
+    const char* kind="unknown";bool malformed=false,digestKnown=false,digestZero=false,hasModel=false,hasValidator=false,hasPsv=false;
+    uint32_t modelKind=0,modelMajor=0,modelMinor=0,validatorMajor=0,validatorMinor=0,psvRuntimeBytes=0;
+};
+inline uint16_t read16(const unsigned char* p){return uint16_t(p[0])|uint16_t(p[1])<<8;}
+inline uint32_t read32(const unsigned char* p){return uint32_t(p[0])|(uint32_t(p[1])<<8)|(uint32_t(p[2])<<16)|(uint32_t(p[3])<<24);}
+inline const char* shaderKindName(uint32_t kind){
+    switch(kind){case 0:return "ps";case 1:return "vs";case 2:return "gs";case 3:return "hs";case 4:return "ds";case 5:return "cs";case 6:return "lib";case 13:return "ms";case 14:return "as";default:return "?";}
+}
+inline ShaderContainerInfo inspectShaderContainer(const void* code,SIZE_T length) {
+    ShaderContainerInfo result;if(!code||!length){result.kind="none";return result;}
+    const auto* bytes=static_cast<const unsigned char*>(code);
+    if(length<4||memcmp(bytes,"DXBC",4)!=0){result.kind="unknown";return result;}
+    result.digestKnown=length>=20;result.digestZero=result.digestKnown;
+    if(result.digestKnown)for(size_t i=4;i<20;++i)if(bytes[i]){result.digestZero=false;break;}
+    if(length<32){result.kind="malformed";result.malformed=true;return result;}
+    const uint32_t total=read32(bytes+24),count=read32(bytes+28);
+    if(total<32||total>length||count>(total-32)/4){result.kind="malformed";result.malformed=true;return result;}
+    const size_t tableEnd=32+size_t(count)*4;
+    bool hasDxil=false,bad=false;
+    for(uint32_t i=0;i<count;++i) {
+        const uint32_t offset=read32(bytes+32+size_t(i)*4);
+        if(offset<tableEnd||offset>total-8){bad=true;continue;}
+        const uint32_t size=read32(bytes+offset+4);
+        if(size>total-offset-8){bad=true;continue;}
+        const auto* payload=bytes+offset+8;
+        if(!memcmp(bytes+offset,"DXIL",4)) {
+            hasDxil=true;
+            if(size<24){bad=true;continue;}
+            const uint32_t words=read32(payload+4);
+            const uint64_t programBytes=uint64_t(words)*4;
+            const uint32_t bitcodeOffset=read32(payload+16),bitcodeSize=read32(payload+20);
+            if(programBytes<24||programBytes>size||bitcodeOffset>size-8||bitcodeSize>size-8-bitcodeOffset){bad=true;continue;}
+            const uint32_t version=read32(payload);result.modelKind=(version>>16)&0xffff;
+            result.modelMajor=(version>>4)&0xf;result.modelMinor=version&0xf;result.hasModel=true;
+        } else if(!memcmp(bytes+offset,"VERS",4)) {
+            if(size<4){bad=true;continue;} result.validatorMajor=read16(payload);result.validatorMinor=read16(payload+2);result.hasValidator=true;
+        } else if(!memcmp(bytes+offset,"PSV0",4)) {
+            if(size<4){bad=true;continue;} result.psvRuntimeBytes=read32(payload);result.hasPsv=true;
+        }
+    }
+    result.malformed=bad;result.kind=bad?"malformed":hasDxil?"dxil":"dxbc";return result;
+}
+inline std::string shaderStageText(const char* stage,const void* code,SIZE_T length) {
+    if(!code||!length)return "";
+    const ShaderContainerInfo info=inspectShaderContainer(code,length);
+    std::string text=fmt("%s:%s",stage?stage:"?",info.kind);
+    if(info.malformed)return text+" digest="+(info.digestKnown?(info.digestZero?"zero":"set"):"unknown");
+    if(info.hasModel)text+=fmt(" sm%u.%u kind=%s",info.modelMajor,info.modelMinor,shaderKindName(info.modelKind));
+    if(info.digestKnown)text+=std::string(" digest=")+(info.digestZero?"zero":"set");
+    if(info.hasValidator)text+=fmt(" validator=%u.%u",info.validatorMajor,info.validatorMinor);
+    else if(info.hasPsv)text+=fmt(" validator=psv%u",info.psvRuntimeBytes);
+    return text;
+}
 inline std::string shaderText(const void* code,SIZE_T length,std::string* key=nullptr) {
     if(!code||!length){if(key)*key="none";return "bytecode=none";}
     auto bytes=static_cast<const unsigned char*>(code);
@@ -395,6 +450,15 @@ inline void tracePso(const std::string& text) {
         std::snprintf(e.detail,sizeof e.detail,"%s",text.c_str());
     }
     emit("pso "+text);
+}
+inline void tracePsoShaders(const std::string& text) {
+    if(!traceOn.load(std::memory_order_acquire)||psoLines.fetch_add(1)>=kMaxPsoLines) return;
+    {
+        std::lock_guard<std::mutex> lock(traceMutex);
+        uint64_t seq=traceNextSeq++;TraceEntry& e=traceRing[seq%kTraceRing];
+        e=TraceEntry{seq,"PSO",0,TraceVoid};std::snprintf(e.detail,sizeof e.detail,"%s",text.c_str());
+    }
+    emit(text);
 }
 inline const char* dxilContainerState(const unsigned char* bytes,size_t length) {
     if(length<4||memcmp(bytes,"DXBC",4)!=0) return "not-dxbc";
@@ -592,6 +656,14 @@ static HRESULT STDMETHODCALLTYPE createGraphicsPipelineState(DevicePtr self,cons
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_GRAPHICS_PIPELINE_STATE_DESC*,REFIID,void**);
     if(d&&traceOn.load(std::memory_order_acquire)) traceGraphicsDesc(*d);
     D3D12_DIAG_HOOK(Fn,CreateGraphicsPipelineState)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
+    if(FAILED(hr)&&d&&traceOn.load(std::memory_order_acquire)) {
+        std::string shaders;
+        for(const auto& stage: {std::pair<const char*,D3D12_SHADER_BYTECODE>{"VS",d->VS}, {"PS",d->PS}, {"DS",d->DS}, {"HS",d->HS}, {"GS",d->GS}}) {
+            std::string item=shaderStageText(stage.first,stage.second.pShaderBytecode,stage.second.BytecodeLength);
+            if(!item.empty()){if(!shaders.empty())shaders+=" ";shaders+=item;}
+        }
+        if(!shaders.empty())tracePsoShaders("pso-shaders "+shaders);
+    }
     if(d) {
         std::string vsKey,psKey;
         shaderText(d->VS.pShaderBytecode,d->VS.BytecodeLength,&vsKey);
@@ -700,11 +772,26 @@ inline std::string streamSubobjects(const void* stream,size_t bytes,StreamVisit 
     }
     return fmt("bytes=%zu%s subobjects=[%s]",bytes,truncated?" truncated":"",subs.c_str());
 }
+inline void collectStreamShader(int type,const unsigned char* payload,size_t size,void* ctx) {
+    if(size<sizeof(D3D12_SHADER_BYTECODE))return;
+    const char* stage=type==1?"VS":type==2?"PS":type==3?"DS":type==4?"HS":type==5?"GS":type==6?"CS":type==24?"AS":type==25?"MS":nullptr;
+    if(!stage)return;
+    D3D12_SHADER_BYTECODE bytecode{};memcpy(&bytecode,payload,sizeof bytecode);
+    std::string item=shaderStageText(stage,bytecode.pShaderBytecode,bytecode.BytecodeLength);
+    if(!item.empty()){auto* text=static_cast<std::string*>(ctx);if(!text->empty())*text+=" ";*text+=item;}
+}
+inline std::string streamShaderText(const void* stream,size_t bytes) {
+    std::string text;streamSubobjects(stream,bytes,&collectStreamShader,&text);return text;
+}
 static HRESULT STDMETHODCALLTYPE createPipelineStateStream(DevicePtr self,const D3D12_PIPELINE_STATE_STREAM_DESC* d,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_PIPELINE_STATE_STREAM_DESC*,REFIID,void**);
     if(d&&d->pPipelineStateSubobjectStream&&traceOn.load(std::memory_order_acquire))
         streamSubobjects(d->pPipelineStateSubobjectStream,size_t(d->SizeInBytes),&traceStreamEntry,nullptr);
     D3D12_DIAG_HOOK(Fn,createPipelineStateStreamSlot)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
+    if(FAILED(hr)&&d&&d->pPipelineStateSubobjectStream&&traceOn.load(std::memory_order_acquire)) {
+        const std::string shaders=streamShaderText(d->pPipelineStateSubobjectStream,size_t(d->SizeInBytes));
+        if(!shaders.empty())tracePsoShaders("pso-shaders "+shaders);
+    }
     // The stream path (ID3D12Device2::CreatePipelineState) is what Mesa's
     // d3d12 driver takes when the device reports
     // opts14.IndependentFrontAndBackStencilRefMaskSupported — the console's
@@ -728,6 +815,10 @@ static HRESULT STDMETHODCALLTYPE createComputePipelineState(DevicePtr self,const
     }
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_COMPUTE_PIPELINE_STATE_DESC*,REFIID,void**);
     D3D12_DIAG_HOOK(Fn,CreateComputePipelineState)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
+    if(FAILED(hr)&&d&&traceOn.load(std::memory_order_acquire)) {
+        const std::string shader=shaderStageText("CS",d->CS.pShaderBytecode,d->CS.BytecodeLength);
+        if(!shader.empty())tracePsoShaders("pso-shaders "+shader);
+    }
     if(d) {
         std::string key;shaderText(d->CS.pShaderBytecode,d->CS.BytecodeLength,&key);
         std::string details=fmt("cs-kind=%s",shaderKindText(d->CS.pShaderBytecode,d->CS.BytecodeLength).c_str());
@@ -1138,6 +1229,15 @@ inline void adoptResource(ID3D12Resource* resource) {
 }
 // ---- entry points
 inline void configure(Sink s){sink=s;}
+inline void traceDxilProbe() {
+    HMODULE module=GetModuleHandleW(L"dxil.dll");
+    if(module){emit("trace dxil.dll probe=GetModuleHandleW success");return;}
+    SetLastError(ERROR_MOD_NOT_FOUND);
+    HMODULE probe=LoadLibraryExW(L"dxil.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    DWORD error=probe?ERROR_SUCCESS:GetLastError();
+    emit(fmt("trace dxil.dll probe=LoadLibraryExW %s error=%lu",probe?"success":"missing",(unsigned long)error));
+    if(probe)FreeLibrary(probe);
+}
 // The stream-path hook goes only through the vtable of a pointer that really
 // implements ID3D12Device2. ID3D12Device has 44 methods (slots 0-43), so slot 47
 // is not a slot of its table; a device without ID3D12Device2 is skipped, logged.
@@ -1158,8 +1258,10 @@ inline void adopt(ID3D12Device* device) {
     if(!device||!sink)return;
     if(!traceChecked.exchange(true,std::memory_order_acq_rel)) {
         traceOn.store(set_trace_requested&&set_trace_requested(),std::memory_order_release);
-        if(traceOn.load(std::memory_order_acquire))
+        if(traceOn.load(std::memory_order_acquire)) {
             emit("trace on (LocalState\\d3d12trace.txt): the last hooked calls are kept and flushed after a fault");
+            traceDxilProbe();
+        }
     }
     size_t count=0;const Patch* patches=devicePatches(count);
     if(!patchClass(*reinterpret_cast<void***>(device),patches,count))return;
