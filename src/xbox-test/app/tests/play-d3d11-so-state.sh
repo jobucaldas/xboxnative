@@ -41,5 +41,6 @@ grep -q 'D3D11_QUERY_SO_STATISTICS' "$f" || fail "stream-out fixture does not ve
 grep -q 'soStats.NumPrimitivesWritten!=1||soStats.PrimitivesStorageNeeded!=1' "$f" || fail "stream-out fixture does not require each route's output statistics"
 grep -q 'written=%I64u needed=%I64u' "$f" || fail "stream-out diagnostics omit query counts"
 grep -q 'context->DrawAuto();' "$f" || fail "stream-out fixture does not consume each captured vertex count with DrawAuto"
+grep -q 'soDesc.BindFlags=D3D11_BIND_STREAM_OUTPUT|D3D11_BIND_VERTEX_BUFFER' "$f" || fail "stream-out buffer read back by DrawAuto lacks D3D11_BIND_VERTEX_BUFFER"
 grep -q 'PLAY-D3D11 SO %s create PASS' "$f" && grep -q 'PLAY-D3D11 SO %s stats PASS' "$f" && grep -q 'PLAY-D3D11 SO %s capture ' "$f" || fail "stream-out stage PASS lines are missing"
 echo "PASS ${#resets[@]} ExecuteCommandList(FALSE) call(s) each followed by rebind_pipeline_state before the next draw; both stream-out routes use explicit stride, SO statistics and capture checks"

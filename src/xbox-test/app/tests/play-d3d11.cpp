@@ -389,7 +389,7 @@ DWORD d3d_entry() {
         }
         D3D11_BUFFER_DESC soDesc{};
         soDesc.ByteWidth=3*soStride;
-        soDesc.Usage=D3D11_USAGE_DEFAULT;soDesc.BindFlags=D3D11_BIND_STREAM_OUTPUT;
+        soDesc.Usage=D3D11_USAGE_DEFAULT;soDesc.BindFlags=D3D11_BIND_STREAM_OUTPUT|D3D11_BIND_VERTEX_BUFFER;   // DrawAuto reads it back through the IA
         ID3D11Buffer* soBuffer=nullptr;
         D3D11_BUFFER_DESC soReadDesc=soDesc;
         soReadDesc.Usage=D3D11_USAGE_STAGING;soReadDesc.BindFlags=0;
