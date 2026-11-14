@@ -9,8 +9,22 @@
 #include "x86_pe.h"
 namespace x86 {
 struct Host {
+    enum class NlsOperation { IsValidCodePage, GetCPInfo, MultiByteToWideChar, WideCharToMultiByte };
+    struct NlsRequest {
+        NlsOperation operation;
+        uint32_t code_page = 0, flags = 0, output_capacity = 0;
+        int32_t input_length = 0;
+        bool input_null = false, output_null = true, wants_used_default = false;
+        std::vector<uint8_t> input, default_char;
+    };
+    struct NlsResponse {
+        uint32_t result = 0, last_error = 0;
+        bool used_default = false;
+        std::vector<uint8_t> output;
+    };
     std::string out, err;                         // captured stdout/stderr bytes
     std::function<void(const std::string&)> tee;  // optional live sink
+    std::function<NlsResponse(const NlsRequest&)> nls_call;
     std::map<std::string, unsigned> calls;        // import -> call count
     static constexpr uint32_t H_STDIN = 3, H_STDOUT = 7, H_STDERR = 11;
 };

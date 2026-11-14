@@ -13,6 +13,12 @@
 #include <functional>
 #include <string>
 #include <vector>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include "x86_guest.h"
 namespace x86 {
 struct PlayResult {
@@ -43,6 +49,58 @@ struct PlayResult {
 // launch thread with no way out. A trillion instructions is hours of
 // interpreted work, so no real session reaches it.
 inline constexpr uint64_t kGuestRunCap = 1000ull * 1000 * 1000 * 1000;
+#if defined(_WIN32)
+inline void install_nls_host(Host& host) {
+    host.nls_call = [](const Host::NlsRequest& request) -> Host::NlsResponse {
+        Host::NlsResponse response{};
+        if (request.output_capacity > 0x7fffffffu) { response.last_error = ERROR_INVALID_PARAMETER; return response; }
+        switch (request.operation) {
+        case Host::NlsOperation::IsValidCodePage:
+            response.result = ::IsValidCodePage(request.code_page);
+            break;
+        case Host::NlsOperation::GetCPInfo: {
+            CPINFO info{};
+            response.result = ::GetCPInfo(request.code_page, &info);
+            if (response.result) {
+                const auto* bytes = reinterpret_cast<const uint8_t*>(&info);
+                response.output.assign(bytes, bytes + sizeof(info));
+            }
+            break;
+        }
+        case Host::NlsOperation::MultiByteToWideChar: {
+            std::vector<wchar_t> output(request.output_null ? 0 : request.output_capacity);
+            const char* input = request.input_null ? nullptr : reinterpret_cast<const char*>(request.input.data());
+            response.result = uint32_t(::MultiByteToWideChar(request.code_page, request.flags, input, request.input_length,
+                output.empty() ? nullptr : output.data(), int(request.output_capacity)));
+            if (response.result && !request.output_null && request.output_capacity) {
+                const auto* bytes = reinterpret_cast<const uint8_t*>(output.data());
+                response.output.assign(bytes, bytes + size_t(response.result) * sizeof(wchar_t));
+            }
+            break;
+        }
+        case Host::NlsOperation::WideCharToMultiByte: {
+            static_assert(sizeof(wchar_t) == 2, "Windows wide characters are UTF-16 units");
+            std::vector<char> output(request.output_null ? 0 : request.output_capacity);
+            std::vector<wchar_t> input_storage(request.input.size() / 2);
+            for (size_t i = 0; i < input_storage.size(); ++i)
+                input_storage[i] = wchar_t(uint16_t(request.input[i * 2]) | uint16_t(request.input[i * 2 + 1]) << 8);
+            const wchar_t* input = request.input_null ? nullptr : input_storage.data();
+            const char* default_char = request.default_char.empty() ? nullptr : reinterpret_cast<const char*>(request.default_char.data());
+            BOOL used_default = FALSE;
+            response.result = uint32_t(::WideCharToMultiByte(request.code_page, request.flags, input, request.input_length,
+                output.empty() ? nullptr : output.data(), int(request.output_capacity), default_char,
+                request.wants_used_default ? &used_default : nullptr));
+            response.used_default = used_default != FALSE;
+            if (response.result && !request.output_null && request.output_capacity)
+                response.output.assign(output.begin(), output.begin() + response.result);
+            break;
+        }
+        }
+        response.last_error = ::GetLastError();
+        return response;
+    };
+}
+#endif
 inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string& name, const std::string& cmdline,
                             const std::function<void(const std::string&)>& tee = nullptr,
                             const std::function<void(const PlayResult&)>& on_loaded = nullptr,
@@ -52,6 +110,9 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
     try {
         Memory mem; ThunkTable table; Host host; Registry reg;
         host.tee = tee;
+#if defined(_WIN32)
+        install_nls_host(host);
+#endif
         Guest guest(mem, host, reg);
         guest.exe_path = name;
         guest.cmdline = cmdline.empty() ? name : cmdline;
