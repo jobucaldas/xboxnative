@@ -43,6 +43,9 @@ static char* hex(char* p,unsigned v) {
     static const char h[]="0123456789abcdef";for(int i=28;i>=0;i-=4)*p++=h[(v>>i)&15];return p;
 }
 static void emit(char* p,char* line) {*p++='\r';*p++='\n';*p=0;OutputDebugStringA(line);}
+// Every BLOCKED check keeps exit 43 (the mode result is unchanged) and names its stage,
+// so a console run says which pixel/readback check failed.
+static int blocked(const char* stage) {char line[128],*p=line;p=text(p,"PLAY-D3D10 BLOCKED ");p=text(p,stage);emit(p,line);return 43;}
 static void logTextureDesc(const char* stage,const char* role,const D3D10_TEXTURE2D_DESC& d) {
     char line[320],*p=line;p=text(p,"PLAY-D3D10 readback ");p=text(p,stage);*p++=' ';p=text(p,role);
     p=text(p," desc=");p=number(p,d.Width);*p++='x';p=number(p,d.Height);p=text(p," mips=");p=number(p,d.MipLevels);
@@ -192,9 +195,9 @@ DWORD d3d10tri_entry() {
     device->Draw(3,0);
     unsigned char pixel[4];
     if(!readPixel("draw-center",device,target,staging,32,32,pixel))return 17;
-    if(!(pixel[0]>0x80&&pixel[1]<0x40&&pixel[2]<0x40))return 43;   // BLOCKED
+    if(!(pixel[0]>0x80&&pixel[1]<0x40&&pixel[2]<0x40))return blocked("draw-center");   // BLOCKED
     if(!readPixel("draw-outside",device,target,staging,4,4,pixel))return 18;
-    if(!(pixel[0]<0x20&&pixel[1]<0x20&&pixel[2]<0x20))return 43;   // BLOCKED
+    if(!(pixel[0]<0x20&&pixel[1]<0x20&&pixel[2]<0x20))return blocked("draw-outside");   // BLOCKED
 
     // ---- pass 2: DrawIndexed over an index buffer, green triangle ----
     const UINT indices[]={0,1,2};
@@ -217,7 +220,7 @@ DWORD d3d10tri_entry() {
     device->IASetVertexBuffers(0,1,&greenBuffer,&stride,&offset);
     device->DrawIndexed(3,0,0);
     if(!readPixel("indexed-center",device,target,staging,32,32,pixel))return 21;
-    if(!(pixel[1]>0x80&&pixel[0]<0x40&&pixel[2]<0x40))return 43;   // BLOCKED
+    if(!(pixel[1]>0x80&&pixel[0]<0x40&&pixel[2]<0x40))return blocked("indexed-center");   // BLOCKED
     device->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);
     device->IASetVertexBuffers(0,1,&vertexBuffer,&stride,&offset);
 
@@ -239,7 +242,7 @@ DWORD d3d10tri_entry() {
     device->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     device->IASetVertexBuffers(0,1,&vertexBuffer,&stride,&offset);
     if(!readPixel("geometry-center",device,target,staging,32,32,pixel))return 24;
-    if(!(pixel[1]>0x80&&pixel[0]<0x40&&pixel[2]<0x40))return 43;   // BLOCKED
+    if(!(pixel[1]>0x80&&pixel[0]<0x40&&pixel[2]<0x40))return blocked("geometry-center");   // BLOCKED
 
     // ---- pass 4: stream-out writes the GS's vertices a Map reads back ----
     // The GS's own output declaration, as CreateGeometryShaderWithStreamOutput
@@ -368,7 +371,7 @@ DWORD d3d10tri_entry() {
     if(FAILED(device->CreateTexture2D(&mipDesc,nullptr,&mipStaging))||!mipStaging)return 38;
     device->CopySubresourceRegion(mipStaging,0,0,0,0,cube,D3D10CalcSubresource(1,0,2),nullptr);
     if(!readStaged("mip-generated",mipStaging,0,0,pixel))return 30;
-    if(!(pixel[2]>0xc0&&pixel[0]<0x40))return 43;   // BLOCKED
+    if(!(pixel[2]>0xc0&&pixel[0]<0x40))return blocked("mip-generated");   // BLOCKED
     mipStaging->Release();
     cubeView->Release();cube->Release();
 
@@ -406,7 +409,7 @@ DWORD d3d10tri_entry() {
     // The MSAA target's clear colour must have crossed the resolve untouched.
     const bool resolvedColour=pixel[0]>0xb0&&pixel[0]<=0xc0&&pixel[1]>0x30&&pixel[1]<0x50
         &&pixel[2]>0x70&&pixel[2]<0x90&&pixel[3]==0xff;
-    if(!resolvedColour)return 43;   // BLOCKED
+    if(!resolvedColour)return blocked("msaa-resolve");   // BLOCKED
     resolveTarget->Release();
     resolved->Release();
     msTarget->Release();
@@ -449,9 +452,9 @@ DWORD d3d10tri_entry() {
     device->VSSetShader(vs);
     compiledVs->Release();
     if(!readPixel("compiled-center",device,target,staging,32,32,pixel))return 47;
-    if(!(pixel[0]>0x80&&pixel[1]<0x40&&pixel[2]<0x40))return 43;   // BLOCKED
+    if(!(pixel[0]>0x80&&pixel[1]<0x40&&pixel[2]<0x40))return blocked("compiled-center");   // BLOCKED
     if(!readPixel("compiled-outside",device,target,staging,4,4,pixel))return 47;
-    if(!(pixel[0]<0x20&&pixel[1]<0x20&&pixel[2]<0x20))return 43;   // BLOCKED
+    if(!(pixel[0]<0x20&&pixel[1]<0x20&&pixel[2]<0x20))return blocked("compiled-outside");   // BLOCKED
 
     // The present path still works after the draw passes, as a game's frame does.
     device->ClearRenderTargetView(view,clear);
