@@ -80,6 +80,8 @@ struct State {
     std::atomic<uintptr_t> firstChanceAddress{0};
     std::atomic<unsigned> firstChanceCount{0};
     std::atomic<unsigned> invalidHandles{0};   // strict-handle-check raises continued (see vectored)
+    bool crashContextOptIn=false;
+    std::atomic<bool> crashContextReported{false};
     std::mutex eventMutex;
     LoaderMutex loaderMutex;
     std::string last="loader not entered", result;
@@ -880,6 +882,89 @@ static bool diagnosticUnwind(CONTEXT* context) {
         return context->Rip!=0;
     } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
 }
+static bool crashReadStackWord(uintptr_t slot,uintptr_t& value) {
+    __try {value=*(uintptr_t*)slot;return true;} __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+}
+static void crashReadPeIdentity(uintptr_t base,DWORD& timestamp,DWORD& imageSize) {
+    __try {
+        auto dos=(IMAGE_DOS_HEADER*)base;auto nt=(IMAGE_NT_HEADERS64*)(base+dos->e_lfanew);
+        if(dos->e_magic==IMAGE_DOS_SIGNATURE&&nt->Signature==IMAGE_NT_SIGNATURE) {
+            timestamp=nt->FileHeader.TimeDateStamp;imageSize=nt->OptionalHeader.SizeOfImage;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+static bool crashModule(uintptr_t address,uintptr_t& base,std::string& name) {
+    for(auto& module:state->modules) {
+        auto imageBase=(uintptr_t)module->image.base;
+        if(imageBase&&address>=imageBase&&address-imageBase<module->image.size) {
+            base=imageBase;name=module->key;return true;
+        }
+    }
+    PVOID imageBase=nullptr;
+    if(!RtlPcToFileHeader((PVOID)address,&imageBase)||!imageBase)return false;
+    base=(uintptr_t)imageBase;
+    wchar_t path[32768]{};DWORD n=GetModuleFileNameW((HMODULE)base,path,(DWORD)std::size(path));
+    name=n&&n<std::size(path)?basename(std::wstring(path,n)):"unknown";
+    return true;
+}
+static void crashContextDiagnostics(EXCEPTION_POINTERS* ep) {
+    if(!state->crashContextOptIn||state->crashContextReported.exchange(true))return;
+    auto record=ep->ExceptionRecord;auto& original=*ep->ContextRecord;
+    uintptr_t faultBase=0;std::string faultModule;
+    if(crashModule((uintptr_t)original.Rip,faultBase,faultModule)) {
+        char line[256];
+        const char* access="unknown";
+        if(record->ExceptionCode==EXCEPTION_ACCESS_VIOLATION&&record->NumberParameters>=2)
+            access=record->ExceptionInformation[0]==0?"read":record->ExceptionInformation[0]==1?"write":record->ExceptionInformation[0]==8?"execute":"unknown";
+        snprintf(line,sizeof line,"CRASHCTX fault %s+0x%llx access=%s target=0x%llx",faultModule.c_str(),
+            (unsigned long long)((uintptr_t)original.Rip-faultBase),access,
+            (unsigned long long)(record->NumberParameters>=2?record->ExceptionInformation[1]:0));
+        state->event(line);
+    }
+    char regs[512];
+    snprintf(regs,sizeof regs,"CRASHCTX registers RAX=0x%llx RBX=0x%llx RCX=0x%llx RDX=0x%llx RSI=0x%llx RDI=0x%llx R8=0x%llx R9=0x%llx R10=0x%llx R11=0x%llx R12=0x%llx R13=0x%llx R14=0x%llx R15=0x%llx RSP=0x%llx RBP=0x%llx RIP=0x%llx EFLAGS=0x%lx",
+        (unsigned long long)original.Rax,(unsigned long long)original.Rbx,(unsigned long long)original.Rcx,(unsigned long long)original.Rdx,
+        (unsigned long long)original.Rsi,(unsigned long long)original.Rdi,(unsigned long long)original.R8,(unsigned long long)original.R9,
+        (unsigned long long)original.R10,(unsigned long long)original.R11,(unsigned long long)original.R12,(unsigned long long)original.R13,
+        (unsigned long long)original.R14,(unsigned long long)original.R15,(unsigned long long)original.Rsp,(unsigned long long)original.Rbp,
+        (unsigned long long)original.Rip,(unsigned long)original.EFlags);
+    state->event(regs);
+    std::array<uintptr_t,17> chain{};size_t count=0;
+    CONTEXT context=original;uintptr_t previousRip=0,previousRsp=0;
+    while(count<chain.size()&&context.Rip) {
+        uintptr_t base=0;std::string name;
+        if(crashModule((uintptr_t)context.Rip,base,name))chain[count++]=(uintptr_t)context.Rip;
+        previousRip=(uintptr_t)context.Rip;previousRsp=(uintptr_t)context.Rsp;
+        DWORD64 imageBase=0;auto function=RtlLookupFunctionEntry(context.Rip,&imageBase,nullptr);
+        if(!function)break;
+        PVOID handler=nullptr;DWORD64 frame=0;
+        RtlVirtualUnwind(UNW_FLAG_NHANDLER,imageBase,context.Rip,function,&context,&handler,&frame,nullptr);
+        if(context.Rip==previousRip&&context.Rsp==previousRsp)break;
+    }
+    if(count<=1) {
+        count=1;chain[0]=(uintptr_t)original.Rip;
+        for(unsigned i=0;i<16&&count<chain.size();++i) {
+            uintptr_t slot=(uintptr_t)original.Rsp+i*sizeof(uintptr_t);
+            MEMORY_BASIC_INFORMATION mbi{};
+            if(!VirtualQuery((void*)slot,&mbi,sizeof mbi)||mbi.State!=MEM_COMMIT||!(mbi.Protect&(PAGE_READONLY|PAGE_READWRITE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_WRITECOPY|PAGE_EXECUTE_WRITECOPY)))continue;
+            uintptr_t candidate=0;if(!crashReadStackWord(slot,candidate))continue;
+            uintptr_t base=0;std::string name;
+            if(crashModule(candidate,base,name))chain[count++]=candidate;
+        }
+    }
+    for(size_t i=0;i<count;++i) {
+        uintptr_t base=0;std::string name;if(!crashModule(chain[i],base,name))continue;
+        DWORD timestamp=0,imageSize=0;uint64_t fileSize=0;crashReadPeIdentity(base,timestamp,imageSize);
+        std::wstring path;
+        for(auto& module:state->modules)if((uintptr_t)module->image.base==base){path=module->path;break;}
+        if(path.empty()) {wchar_t buffer[32768]{};DWORD n=GetModuleFileNameW((HMODULE)base,buffer,(DWORD)std::size(buffer));if(n&&n<std::size(buffer))path.assign(buffer,n);}
+        if(!path.empty()) {FILE* file=_wfopen(path.c_str(),L"rb");
+            if(file){if(_fseeki64(file,0,SEEK_END)==0){auto size=_ftelli64(file);if(size>=0)fileSize=(uint64_t)size;}fclose(file);}}
+        char line[256];snprintf(line,sizeof line,"CRASHCTX chain[%u] %s+0x%llx timestamp=0x%08lx image=0x%lx file=%llu",
+            (unsigned)i,name.c_str(),(unsigned long long)(chain[i]-base),(unsigned long)timestamp,(unsigned long)imageSize,(unsigned long long)fileSize);
+        state->event(line);
+    }
+}
 static void exceptionDiagnostics(EXCEPTION_POINTERS* ep) {
     auto record=ep->ExceptionRecord;
     if(record->ExceptionCode==0xe06d7363 && record->NumberParameters>=4) {
@@ -925,6 +1010,7 @@ static LONG filter(EXCEPTION_POINTERS* ep) {
     if(e->ExceptionCode==exitException) {state->success=true;return EXCEPTION_EXECUTE_HANDLER;}
     if(e->ExceptionCode==missingException) return EXCEPTION_EXECUTE_HANDLER;
     state->faulted.store(true,std::memory_order_release);   // guest watchdog: dead without waiting on presents
+    crashContextDiagnostics(ep);
     exceptionDiagnostics(ep);
     char b[256];snprintf(b,sizeof b,"unhandled exception code=0x%08lx address=0x%llx ",e->ExceptionCode,(unsigned long long)(uintptr_t)e->ExceptionAddress);
     std::string text=b; text+=describe((uintptr_t)e->ExceptionAddress);
@@ -2027,13 +2113,13 @@ static uintptr_t openglExport(const char* name) {
 }
 // cwd (optional) is the guest's working directory, as a Steam launch option's
 // workingdir names it; empty means the executable's own directory.
-static bool start(const std::wstring& root,const std::wstring& exe,const std::wstring& args,wxl::Log log,const std::wstring& cwd=std::wstring()) {
+static bool start(const std::wstring& root,const std::wstring& exe,const std::wstring& args,wxl::Log log,const std::wstring& cwd=std::wstring(),bool crashContextOptIn=false) {
     if(state) return false;
     // A previous launch may have left its packaged ICD listed (a game that ran
     // game code keeps its process state); this launch publishes its own only if
     // it maps the runtime loader, so start from a clean registry.
     clearVulkanDriverFiles();
-    state=new State();state->root=root;state->cwd=cwd.empty()?root:cwd;state->log=log;observed.store(state,std::memory_order_release);state->command=L"\""+root+L"\\"+exe+L"\" "+args;state->commandA=narrow(state->command);
+    state=new State();state->root=root;state->cwd=cwd.empty()?root:cwd;state->log=log;state->crashContextOptIn=crashContextOptIn;observed.store(state,std::memory_order_release);state->command=L"\""+root+L"\\"+exe+L"\" "+args;state->commandA=narrow(state->command);
     mlp::log=log;wxl::logger=log;
     xinput_core::note=[](const char* text){if(mlp::log)mlp::log(text);};mlp::missingResolver=missing;mlp::assets.clear();mlp::summaries.clear();
     gdi32_core::gl_lookup.store(&openglExport);
