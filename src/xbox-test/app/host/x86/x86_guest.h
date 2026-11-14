@@ -1210,7 +1210,7 @@ inline void Guest::register_all() {
         if(q.args[1]>n||q.data.size()<q.args[1]){set_last_error(87);return 0;}if(q.args[1])mem.write_bytes(c.arg(1),q.data.data(),q.args[1]);if(out)mem.w32(out,q.args[1]);return 1; });
     reg.add("kernel32.dll", "GetFileSize", Conv::Stdcall, 2, [this,native_file](Cpu& c) -> uint32_t {
         Host::FileCall q{Host::FileCall::Kind::Size};if(!native_file(c.arg(0),q))return 0xffffffffu;q.args[0]=c.arg(1)!=0;
-        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0xffffffffu;}if(c.arg(1))mem.w32(c.arg(1),q.args[1]);return uint32_t(q.value); });
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0xffffffffu;}if(c.arg(1))mem.w32(c.arg(1),q.args[1]);set_last_error(0);return uint32_t(q.value); });
     reg.add("kernel32.dll", "GetFileTime", Conv::Stdcall, 4, [this,native_file](Cpu& c) -> uint32_t {
         Host::FileCall q{Host::FileCall::Kind::Time};if(!native_file(c.arg(0),q))return 0;
         for(unsigned i=0;i<3;++i) q.args[i]=c.arg(i+1)!=0;
@@ -1222,7 +1222,7 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "SetFilePointer", Conv::Stdcall, 4, [this,native_file](Cpu& c) -> uint32_t {
         Host::FileCall q{Host::FileCall::Kind::Seek};if(!native_file(c.arg(0),q))return 0xffffffffu;
         q.args[0]=c.arg(1);q.args[1]=c.arg(2)?mem.r32(c.arg(2)):0;q.args[2]=c.arg(3);q.args[3]=c.arg(2)!=0;
-        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0xffffffffu;}if(c.arg(2))mem.w32(c.arg(2),q.args[1]);return uint32_t(q.value); });
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0xffffffffu;}if(c.arg(2))mem.w32(c.arg(2),q.args[1]);set_last_error(0);return uint32_t(q.value); });
     reg.add("kernel32.dll", "SetEndOfFile", Conv::Stdcall, 1, [this,native_file](Cpu& c) -> uint32_t {
         Host::FileCall q{Host::FileCall::Kind::End};if(!native_file(c.arg(0),q))return 0;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
     reg.add("kernel32.dll", "FileTimeToSystemTime", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
@@ -1237,8 +1237,13 @@ inline void Guest::register_all() {
         emit(handle == Host::H_STDOUT ? 1 : 2, std::string(bytes.begin(), bytes.end()));
         if (written) mem.w32(written, n);
         return 1; });
-    reg.add("kernel32.dll", "GetFileType", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
-        return (c.arg(0) == Host::H_STDOUT || c.arg(0) == Host::H_STDERR) ? 2u : 0u; });  // FILE_TYPE_CHAR
+    reg.add("kernel32.dll", "GetFileType", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        uint32_t h = c.arg(0);
+        if (h == Host::H_STDOUT || h == Host::H_STDERR) return 2u;  // FILE_TYPE_CHAR
+        if (file_handles.count(h)) return 1u;  // FILE_TYPE_DISK
+        set_last_error(6);  // ERROR_INVALID_HANDLE
+        return 0u;  // FILE_TYPE_UNKNOWN
+    });
     reg.add("kernel32.dll", "SetConsoleCtrlHandler", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "FlushFileBuffers", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "CloseHandle", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
