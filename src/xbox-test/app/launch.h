@@ -983,7 +983,8 @@ static void lp_run_impl(LpCtx& c) {
     {std::lock_guard<std::mutex> lock(g_launch.m);
      if(g_launch.gen!=c.gen||g_launch.phase!=1){c.failName="launch abandoned by the watchdog before the game started";return;}
      g_launch.loaderStarted=now_s();}
-    if(!play_runtime::start(exeDir,exe,c.args,lp_sink,c.cwd)) {c.failName="guest already started; restart launcher before next Play";return;}
+    const bool crashContextOptIn=GetFileAttributesW((g_dir+L"\\crashctx.txt").c_str())!=INVALID_FILE_ATTRIBUTES;
+    if(!play_runtime::start(exeDir,exe,c.args,lp_sink,c.cwd,crashContextOptIn)) {c.failName="guest already started; restart launcher before next Play";return;}
     auto r=play_runtime::state;
     ULONGLONG end=GetTickCount64()+110000; bool reportedRunning=false;
     for(;;) {
