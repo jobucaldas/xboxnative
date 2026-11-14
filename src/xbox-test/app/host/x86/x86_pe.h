@@ -424,7 +424,10 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
 // GetProcAddress) can never land on the address that call is waiting to return
 // to. Stubs beyond the capacity are refused by ThunkTable::add.
 inline void map_thunk_page(Memory& mem, ThunkTable& table) {
-    uint32_t len = (table.span() + 4095) & ~4095u;
+    // Imports added by GetProcAddress and guest-created COM objects arrive after
+    // startup, so sizing this mapping only from the current table can exhaust it
+    // during ordinary execution. Reserve 1 MiB (65,535 stubs plus the sentinel).
+    uint32_t len = 1u << 20;
     if (!table.capacity) table.capacity = len / table.stride - 1;  // last slot: the sentinel
     mem.map(table.base, len, PROT_R | PROT_W);
     std::vector<uint8_t> int3(len, 0xCC); mem.write_bytes(table.base, int3.data(), len);

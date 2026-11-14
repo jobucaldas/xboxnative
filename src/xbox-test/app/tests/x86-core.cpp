@@ -1574,15 +1574,15 @@ static void test_thunks() {
 
 // ---------- thunk page capacity: the sentinel never collides with a stub ----------
 static void test_thunk_capacity() {
-    // map_thunk_page pins capacity and the sentinel to the page's LAST slot;
-    // filling the table to capacity must leave every stub address strictly
-    // below the sentinel, and one more add must be refused.
+    // map_thunk_page reserves room for dynamic imports beyond the original
+    // single-page limit; the sentinel stays after every usable stub.
     Memory mem; ThunkTable t; t.base = 0x7FFD0000;
     map_thunk_page(mem, t);
     EXPECT(t.capacity != 0, "map_thunk_page pins a capacity");
     uint32_t sent = t.sentinel();
     EXPECT(sent == t.base + t.capacity * t.stride, "sentinel is the slot after the last usable stub");
-    EXPECT(sent >= t.base + 4096 - t.stride, "sentinel sits in the page's final slot");
+    EXPECT(t.capacity > 255, "reserved thunk mapping exceeds the old single-page limit");
+    EXPECT(sent == t.base + (1u << 20) - t.stride, "sentinel sits in the reserved mapping's final slot");
     std::vector<uint32_t> addrs;
     bool full = false;
     try {
@@ -1596,7 +1596,7 @@ static void test_thunk_capacity() {
     EXPECT(full, "filling past capacity is refused");
     EXPECT(addrs.size() == t.capacity, "capacity stubs fit (%zu of %u)", addrs.size(), t.capacity);
     for (uint32_t a : addrs) EXPECT(a < sent, "stub 0x%x at or above the sentinel 0x%x", a, sent);
-    // The mapped page covers the sentinel slot.
+    // The mapped thunk range covers the sentinel slot.
     EXPECT(mem.r32(sent) != 0, "sentinel slot is inside the mapped page");
 }
 
