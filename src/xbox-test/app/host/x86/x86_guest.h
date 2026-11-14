@@ -1043,6 +1043,19 @@ inline void Guest::register_all() {
             mem.w8(p + 155, 0);    // wReserved
         }
         return 1; });
+    auto format_locale = [this](bool date, Cpu& c) -> uint32_t {
+        Host::LocaleCall q; q.date=date; q.locale=c.arg(0); q.flags=c.arg(1);
+        q.has_system_time=c.arg(2)!=0; q.has_format=c.arg(3)!=0; q.has_output_buffer=c.arg(4)!=0; q.buffer_chars=int32_t(c.arg(5));
+        if(q.has_system_time) for(unsigned i=0;i<8;++i) q.system_time[i]=uint16_t(mem.r(c.arg(2)+i*2,2));
+        if(q.has_format) q.format=wstr(c.arg(3));
+        if(!host.locale_call){set_last_error(120);return 0;}
+        host.locale_call(q);
+        if(!q.succeeded){set_last_error(q.error?q.error:87);return 0;}
+        if(q.result>0&&c.arg(4)){if(q.data.size()!=size_t(q.result)*2){set_last_error(87);return 0;}mem.write_bytes(c.arg(4),q.data.data(),uint32_t(q.data.size()));}
+        return uint32_t(q.result);
+    };
+    reg.add("kernel32.dll", "GetTimeFormatW", Conv::Stdcall, 6, [format_locale](Cpu& c) -> uint32_t { return format_locale(false,c); });
+    reg.add("kernel32.dll", "GetDateFormatW", Conv::Stdcall, 6, [format_locale](Cpu& c) -> uint32_t { return format_locale(true,c); });
     reg.add("kernel32.dll", "IsProcessorFeaturePresent", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
         return c.arg(0) == 10 ? 1u : 0u; });  // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
     reg.add("kernel32.dll", "GetACP", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 1252; });

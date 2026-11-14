@@ -16,9 +16,20 @@ struct Host {
         std::vector<uint8_t> data;
         explicit FileCall(Kind k) : kind(k) {}
     };
+    struct LocaleCall {
+        bool date = false, has_system_time = false, has_format = false, has_output_buffer = false;
+        uint32_t locale = 0, flags = 0;
+        uint16_t system_time[8]{};
+        std::u16string format;
+        int32_t buffer_chars = 0, result = 0;
+        uint32_t error = 0;
+        std::vector<uint8_t> data;
+        bool succeeded = false;
+    };
     std::string out, err;                         // captured stdout/stderr bytes
     std::function<void(const std::string&)> tee;  // optional live sink
     std::function<void(FileCall&)> file_call;     // Play's native kernel32 file layer
+    std::function<void(LocaleCall&)> locale_call; // Play's native kernel32 locale formatter
     std::map<std::string, unsigned> calls;        // import -> call count
     static constexpr uint32_t H_STDIN = 3, H_STDOUT = 7, H_STDERR = 11;
 };
