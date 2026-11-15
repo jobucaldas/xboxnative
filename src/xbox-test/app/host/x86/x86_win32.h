@@ -75,6 +75,7 @@ struct Host {
     std::function<void(LocaleCall&)> locale_call; // Play's native kernel32 locale formatter
     std::function<void(GlCall&)> gl_call;
     std::function<bool(const std::u16string&)> register_window_class;
+    std::function<bool(int, int&)> system_metrics;
     std::function<uintptr_t(const WindowCreate&)> create_window;
     std::function<bool(uintptr_t)> destroy_window;
     std::function<uintptr_t(uintptr_t)> get_dc;
@@ -104,6 +105,19 @@ inline void register_win32(Registry& r, Host& h) {
     r.add("kernel32.dll", "SetLastError", Conv::Stdcall, 1, [count](Cpu& c) -> uint32_t { count("SetLastError"); c.mem.w32(c.fs_base + 0x34, c.arg(0)); return 0; });
     r.add("kernel32.dll", "GetLastError", Conv::Stdcall, 0, [count](Cpu& c) -> uint32_t { count("GetLastError"); return c.mem.r32(c.fs_base + 0x34); });
     r.add("kernel32.dll", "ExitProcess", Conv::Stdcall, 1, [count](Cpu& c) -> uint32_t { count("ExitProcess"); c.exited = true; c.exit_code = c.arg(0); return 0; });
+    r.add("user32.dll", "GetSystemMetrics", Conv::Stdcall, 1, [&h, count](Cpu& c) -> uint32_t {
+        count("GetSystemMetrics");
+        int value = 0;
+        if (h.system_metrics && h.system_metrics(int32_t(c.arg(0)), value)) return uint32_t(value);
+#if defined(_WIN32)
+        using Fn = int (WINAPI*)(int);
+        static HMODULE user = LoadLibraryExW(L"user32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        auto fn = user ? reinterpret_cast<Fn>(GetProcAddress(user, "GetSystemMetrics")) : nullptr;
+        if (fn) return uint32_t(fn(int(c.arg(0))));
+#endif
+        c.mem.w32(c.fs_base + 0x34, 120);  // ERROR_CALL_NOT_IMPLEMENTED on this partition
+        return 0;
+    });
     r.add("msvcrt.dll", "strlen", Conv::Cdecl, 1, [count](Cpu& c) -> uint32_t { count("strlen"); return uint32_t(c.mem.read_cstr(c.arg(0)).size()); });
     r.add("msvcrt.dll", "qsort", Conv::Cdecl, 4, [count](Cpu& c) -> uint32_t {
         count("qsort"); uint32_t base = c.arg(0), n = c.arg(1), size = c.arg(2), cmp = c.arg(3);

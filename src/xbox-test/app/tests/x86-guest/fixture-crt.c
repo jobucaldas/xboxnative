@@ -173,6 +173,8 @@ int main(void) {
     WCHAR user_locale[LOCALE_NAME_MAX_LENGTH] = {0};
     check(GetUserDefaultLocaleName(user_locale, LOCALE_NAME_MAX_LENGTH) && user_locale[0] != 0);
     puts("x86-crt: locale name ok");
+    check(GetSystemMetrics(SM_CXSCREEN) == 1280 && GetSystemMetrics(SM_CYSCREEN) == 720);
+    puts("x86-crt: user32 metrics ok");
 
     /* A 1.5 MiB frame exceeds the old fixed 1 MiB stack. Touching each page
      * exercises the PE reserve size and Windows-style guard-page growth. */
