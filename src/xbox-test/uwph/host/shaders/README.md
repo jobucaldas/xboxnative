@@ -10,4 +10,6 @@ python3 embed.py
 ```
 
 Original generation used Wine 10's d3dcompiler_47. Both raw DXBC and embedded
-arrays are checked in, alongside their HLSL and compiler utility source.
+arrays are checked in, alongside their HLSL and compiler utility source. The
+geometry-shader utility also builds `halo_gs.dxbc` from `gs_halo.hlsl`; run
+`python3 embed.py` after compiling to refresh the fixture's embedded shader.

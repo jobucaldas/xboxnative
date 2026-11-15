@@ -922,7 +922,12 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
     // reaches, and stays finite so a runaway guest still ends in a reported
     // fault instead of spinning on the launch thread forever.
     bool traceFaultContext=GetFileAttributesW((g_dir+L"\\x86trace.txt").c_str())!=INVALID_FILE_ATTRIBUTES;
-    auto r=x86::run(path,c.cwd,cmdline,tee,loaded,x86::kGuestRunCap,nullptr,traceFaultContext);
+    auto r=x86::run(path,c.cwd,cmdline,tee,loaded,x86::kGuestRunCap,nullptr,traceFaultContext,[&](const x86::PlayResult& mapped) {
+        gap_summary::Binder imports;
+        for(const auto& item:mapped.gap_imports)
+            imports.record(std::get<0>(item),std::get<1>(item),std::get<2>(item));
+        for(const auto& line:imports.report(std::string(exe.begin(),exe.end()),"x86").lines) lp_sink(line.c_str());
+    });
     c.mapped=r.loaded?1:0;
     g_launch.pe32Finished=r.finished;
     g_launch.pe32ExitCode=r.exit_code;

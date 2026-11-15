@@ -133,8 +133,26 @@ static bool behavior(const std::string& label,wxl::Image& image,const std::wstri
     if(label=="setupapi.dll") {
         auto create=(HANDLE(WINAPI*)(const GUID*,HWND))image.symbol("SetupDiCreateDeviceInfoList");
         auto destroy=(BOOL(WINAPI*)(HANDLE))image.symbol("SetupDiDestroyDeviceInfoList");
-        if(!create||!destroy)return false;HANDLE set=create(nullptr,nullptr);
-        if(set==INVALID_HANDLE_VALUE)return false;return !!destroy(set);
+        struct DeviceInfoData {DWORD cbSize;GUID ClassGuid;DWORD DevInst;ULONG_PTR Reserved;};
+        struct DeviceInterfaceData {DWORD cbSize;GUID InterfaceClassGuid;DWORD Flags;ULONG_PTR Reserved;};
+        using EnumInfo=BOOL(WINAPI*)(HANDLE,DWORD,DeviceInfoData*);
+        using EnumInterface=BOOL(WINAPI*)(HANDLE,DeviceInfoData*,const GUID*,DWORD,DeviceInterfaceData*);
+        auto enumInfo=(EnumInfo)image.symbol("SetupDiEnumDeviceInfo");
+        auto enumInterface=(EnumInterface)image.symbol("SetupDiEnumDeviceInterfaces");
+        if(!create||!destroy||!enumInfo||!enumInterface)return false;HANDLE set=create(nullptr,nullptr);
+        if(set==INVALID_HANDLE_VALUE)return false;
+        DeviceInfoData device{};device.cbSize=sizeof device;SetLastError(0);
+        bool emptyInfo=!enumInfo(set,0,&device)&&GetLastError()==ERROR_NO_MORE_ITEMS;
+        const GUID cls={0x12345678,0x1234,0x1234,{1,2,3,4,5,6,7,8}};
+        DeviceInterfaceData iface{};iface.cbSize=sizeof iface;SetLastError(0);
+        bool emptyIface=!enumInterface(set,nullptr,&cls,0,&iface)&&GetLastError()==ERROR_NO_MORE_ITEMS;
+        return emptyInfo&&emptyIface&&!!destroy(set);
+    }
+    if(label=="psapi.dll") {
+        using GetModuleFileNameEx=DWORD(WINAPI*)(HANDLE,HMODULE,LPWSTR,DWORD);
+        auto get=(GetModuleFileNameEx)resolve("kernelbase.dll","K32GetModuleFileNameExW",0);
+        WCHAR value[2048]{};
+        return get&&get(GetCurrentProcess(),GetModuleHandleW(nullptr),value,2048)>0&&value[0];
     }
     if(label=="version.dll") {
         auto size=(DWORD(WINAPI*)(LPCWSTR,LPDWORD))image.symbol("GetFileVersionInfoSizeW");
@@ -229,7 +247,7 @@ inline bool probe(wxl::Log log) {
     };
     unsigned failures=0;
     // dinput8 is last: its hid/setupapi imports resolve to those donors.
-    for(auto name:{L"hid.dll",L"setupapi.dll",L"version.dll",L"shcore.dll",L"avrt.dll",L"d3dcompiler_47.dll",L"dinput8.dll"}) {
+    for(auto name:{L"hid.dll",L"psapi.dll",L"setupapi.dll",L"version.dll",L"shcore.dll",L"avrt.dll",L"d3dcompiler_47.dll",L"dinput8.dll"}) {
         std::wstring path=root+name; std::string label(name,name+wcslen(name));
         missing=0;log(("DWPE BEGIN "+label+" strict imports before initialization").c_str());
         for(auto& i:imports) if(label==i.donor) resolve(i.dll,i.name,i.ordinal);

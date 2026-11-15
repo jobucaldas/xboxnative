@@ -1574,15 +1574,15 @@ static void test_thunks() {
 
 // ---------- thunk page capacity: the sentinel never collides with a stub ----------
 static void test_thunk_capacity() {
-    // map_thunk_page pins capacity and the sentinel to the page's LAST slot;
-    // filling the table to capacity must leave every stub address strictly
-    // below the sentinel, and one more add must be refused.
+    // map_thunk_page reserves room for dynamic imports beyond the original
+    // single-page limit; the sentinel stays after every usable stub.
     Memory mem; ThunkTable t; t.base = 0x7FFD0000;
     map_thunk_page(mem, t);
     EXPECT(t.capacity != 0, "map_thunk_page pins a capacity");
     uint32_t sent = t.sentinel();
     EXPECT(sent == t.base + t.capacity * t.stride, "sentinel is the slot after the last usable stub");
-    EXPECT(sent >= t.base + 4096 - t.stride, "sentinel sits in the page's final slot");
+    EXPECT(t.capacity > 255, "reserved thunk mapping exceeds the old single-page limit");
+    EXPECT(sent == t.base + (1u << 20) - t.stride, "sentinel sits in the reserved mapping's final slot");
     std::vector<uint32_t> addrs;
     bool full = false;
     try {
@@ -1596,7 +1596,7 @@ static void test_thunk_capacity() {
     EXPECT(full, "filling past capacity is refused");
     EXPECT(addrs.size() == t.capacity, "capacity stubs fit (%zu of %u)", addrs.size(), t.capacity);
     for (uint32_t a : addrs) EXPECT(a < sent, "stub 0x%x at or above the sentinel 0x%x", a, sent);
-    // The mapped page covers the sentinel slot.
+    // The mapped thunk range covers the sentinel slot.
     EXPECT(mem.r32(sent) != 0, "sentinel slot is inside the mapped page");
 }
 
@@ -1652,6 +1652,79 @@ static std::vector<uint8_t> slurp(const char* path) {
     std::ifstream f(path, std::ios::binary); if (!f) { printf("FAIL cannot open fixture %s\n", path); exit(2); }
     return std::vector<uint8_t>{std::istreambuf_iterator<char>(f), {}};
 }
+static void put16(std::vector<uint8_t>& b, size_t p, uint16_t v) {
+    b[p] = uint8_t(v); b[p + 1] = uint8_t(v >> 8);
+}
+static void put32(std::vector<uint8_t>& b, size_t p, uint32_t v) {
+    for (unsigned i = 0; i < 4; ++i) b[p + i] = uint8_t(v >> (8 * i));
+}
+static std::vector<uint8_t> pe_layout_fixture(uint32_t section_alignment, uint32_t file_alignment,
+                                               uint32_t size_image, bool clr = false, bool raw_past_eof = false) {
+    bool game_layout = section_alignment == 0x2000;
+    std::vector<uint8_t> b(game_layout ? (size_image == 0x11a000 ? 0x113800 : 0xdca00) : 0x800, 0);
+    constexpr size_t nt = 0x80, opt = nt + 24, sections = opt + 224;
+    put16(b, 0, 0x5a4d); put32(b, 0x3c, uint32_t(nt)); put32(b, nt, 0x4550);
+    put16(b, nt + 4, 0x14c); put16(b, nt + 6, 3); put16(b, nt + 20, 224);
+    uint32_t low_va[3] = {size_image == 0x3200 ? 0x1000u : 0x200u,
+                          size_image == 0x3200 ? 0x2000u : 0x400u,
+                          size_image == 0x3200 ? 0x3000u : 0x600u};
+    uint32_t va[3] = {game_layout ? 0x2000u : low_va[0],
+                      game_layout ? (size_image == 0x11a000 ? 0x112000u : 0xdc000u) : low_va[1],
+                      game_layout ? size_image - 0x2000u : low_va[2]};
+    uint32_t vsize[3] = {game_layout ? (size_image == 0x11a000 ? 0x10f0acu : 0xd8004u) : 0u,
+                         game_layout ? (size_image == 0x11a000 ? 0x4094u : 0x4270u) : 0x200u,
+                         game_layout ? 0xcu : 0x200u};
+    uint32_t raw_size[3] = {game_layout ? (size_image == 0x11a000 ? 0x10f200u : 0xd8200u) : 0x200u,
+                            game_layout ? (size_image == 0x11a000 ? 0x4200u : 0x4400u) : 0x200u,
+                            game_layout ? 0x200u : 0x200u};
+    uint32_t raw_offset[3] = {0x200u,
+                              game_layout ? (size_image == 0x11a000 ? 0x10f400u : 0xd8400u) : 0x400u,
+                              game_layout ? (size_image == 0x11a000 ? 0x113600u : 0xdc800u) : 0x600u};
+    put16(b, opt, 0x10b); put32(b, opt + 16, game_layout ? (size_image == 0x11a000 ? 0x10ffaeu : 0xd9ffeu) : low_va[0]);
+    put32(b, opt + 28, 0x400000); put32(b, opt + 32, section_alignment); put32(b, opt + 36, file_alignment);
+    put32(b, opt + 56, size_image); put32(b, opt + 60, 0x200); put16(b, opt + 68, 3); put32(b, opt + 92, 16);
+    if (clr) { put32(b, opt + 96 + 14 * 8, 0x2008); put32(b, opt + 96 + 14 * 8 + 4, 0x48); }
+    for (unsigned i = 0; i < 3; ++i) {
+        size_t s = sections + i * 40;
+        const char* names[3] = {".text", ".rsrc", ".reloc"};
+        memcpy(b.data() + s, names[i], strlen(names[i]));
+        put32(b, s + 8, vsize[i]); put32(b, s + 12, va[i]); put32(b, s + 16, raw_size[i]); put32(b, s + 20, raw_offset[i]);
+        put32(b, s + 36, i == 0 ? 0x60000020 : 0x40000040);
+        std::fill(b.begin() + raw_offset[i], b.begin() + raw_offset[i] + raw_size[i], uint8_t(0x30 + i));
+    }
+    if (raw_past_eof) { put32(b, sections + 2 * 40 + 16, 0x400); }
+    return b;
+}
+static void test_pe_layouts() {
+    for (uint32_t size : {0x11a000u, 0xe4000u}) {
+        auto file = pe_layout_fixture(0x2000, 0x200, size);
+        try {
+            wxl::Pe32 pe; pe.map(file);
+            uint32_t rsrc_rva = size == 0x11a000 ? 0x112000 : 0xdc000;
+            EXPECT(pe.bytes.size() == size && pe.bytes[0x2000] == 0x30 && pe.bytes[rsrc_rva] == 0x31,
+                   "PE32 SectionAlignment=0x2000 SizeOfImage=0x%x mapped wrong", size);
+        } catch (const std::exception& e) { EXPECT(false, "PE32 SectionAlignment=0x2000 SizeOfImage=0x%x rejected: %s", size, e.what()); }
+    }
+    auto low = pe_layout_fixture(0x200, 0x200, 0x1200, false, true);
+    try {
+        wxl::Pe32 low_pe; low_pe.map(low);
+        EXPECT(low_pe.bytes.size() == 0x2000 && low_pe.bytes[0x200] == 0x30 && low_pe.bytes[0x7ff] == 0x32 && low_pe.bytes[0x800] == 0,
+               "file-aligned image must round mapping and zero-fill raw bytes beyond EOF");
+    } catch (const std::exception& e) { EXPECT(false, "file-aligned image rejected: %s", e.what()); }
+    auto low_loader = pe_layout_fixture(0x200, 0x200, 0x3200);
+    Memory low_mem; ThunkTable low_table; Registry low_reg; Host low_host; register_win32(low_reg, low_host);
+    std::map<std::string, Dll> loaded;
+    try {
+        Dll low_dll = load_dll(low_mem, low_table, low_reg, low_loader, [](const std::string&) { return std::vector<uint8_t>{}; }, loaded);
+        EXPECT(low_dll.image.size == 0x4000 && !low_mem.free_range(0x400000, 0x4000),
+               "DLL reservation must cover the rounded SizeOfImage");
+    } catch (const std::exception& e) { EXPECT(false, "page-rounded DLL image rejected: %s", e.what()); }
+    auto managed = pe_layout_fixture(0x2000, 0x200, 0x11a000, true);
+    Memory mem; ThunkTable table; Registry reg; Host host; register_win32(reg, host);
+    std::string reason;
+    try { (void)load_pe32(mem, table, reg, managed); } catch (const std::exception& e) { reason = e.what(); }
+    EXPECT(reason == "managed (CLR) image: needs a .NET runtime host", "CLR image rejection reason: '%s'", reason.c_str());
+}
 struct RunResult { bool completed = false; uint32_t exit_code = 0xdead; std::string out; std::map<std::string, unsigned> calls; Image img; std::string fault; uint64_t executed = 0; };
 static RunResult run_fixture(const std::vector<uint8_t>& file, uint32_t base, bool omit_strlen = false) {
     RunResult r; Memory mem; ThunkTable table; Host host; Registry reg; register_win32(reg, host);
@@ -1696,6 +1769,9 @@ int main(int argc, char** argv) {
     };
     for (auto& s : suites) { int before = failures; s.fn(); if (failures == before) printf("%s\n", s.pass); else printf("X86-CORE FAIL: %s\n", s.name); }
     printf("(%llu hardware-compared cases)\n", (unsigned long long)alu_cases);
+    int pe_before = failures; test_pe_layouts();
+    if (failures == pe_before) printf("X86-CORE PASS: PE32 section alignment, page-rounded mapping, EOF zero-fill, DLL reservation, CLR rejection\n");
+    else printf("X86-CORE FAIL: PE32 layouts\n");
     int before = failures; test_fixture(argv[1]);
     if (failures == before) printf("X86-CORE PASS: owned i686 fixture PE ran to exit=42 at its ImageBase and relocated; unresolved import faults by name\n");
     else printf("X86-CORE FAIL: fixture\n");

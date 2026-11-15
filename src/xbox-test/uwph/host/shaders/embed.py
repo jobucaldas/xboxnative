@@ -9,4 +9,9 @@ for stage in ('vs', 'ps', 'gs'):
     s += ''.join(' ' + ','.join(f'0x{x:02x}' for x in b[i:i+16]) + ',\n'
                  for i in range(0, len(b), 16))
     s += '};\n'
+b = (p / 'halo_gs.dxbc').read_bytes()
+s += 'static const unsigned char halo_gs[] = {\n'
+s += ''.join(' ' + ','.join(f'0x{x:02x}' for x in b[i:i+16]) + ',\n'
+             for i in range(0, len(b), 16))
+s += '};\n'
 (p / 'triangle_bytecode.h').write_text(s)

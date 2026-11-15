@@ -37,7 +37,7 @@
 {"ole32.dll", "system"},
 {"oleaut32.dll", "system"},
 {"opengl32.dll", "stub"},
-{"psapi.dll", "system"},
+{"psapi.dll", "wine-pe"},
 {"setupapi.dll", "wine-pe"},
 {"shcore.dll", "wine-pe"},
 {"shell32.dll", "stub"},

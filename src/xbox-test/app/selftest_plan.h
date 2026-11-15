@@ -17,6 +17,7 @@ struct Mode {
     const char* name;
     const char* exe;
     bool pe32;
+    bool in_process = false;
 };
 inline const Mode* modes(size_t& count) {
     static const Mode table[] = {
@@ -33,20 +34,21 @@ inline const Mode* modes(size_t& count) {
         {"opengl", "play-opengl.exe", false},
         {"d3d11", "play-d3d11.exe", false},
         {"d3d12", "play-d3d12.exe", false},
+        {"audio", nullptr, false, true},
     };
     count = sizeof(table) / sizeof(*table);
     return table;
 }
 // How many launcher restarts a run may take. Play keeps one 64-bit guest per
-// process, so every non-pe32 fixture costs a restart; the extra one lets a
-// fixture that faults before game code be retried. Derived from the table so
-// "all" can never outgrow a fixed cap: a limit below the guest count marks the
-// last fixtures FAIL restart-limit without ever running them.
+// process, so every 64-bit guest costs a restart; the extra one lets a
+// fixture that faults before game code be retried. In-process diagnostics do not.
+// Derived from the table so "all" can never outgrow a fixed cap: a limit below
+// the guest count marks the last fixtures FAIL restart-limit without ever running them.
 inline int max_restarts() {
     size_t count = 0;
     const Mode* table = modes(count);
     int guests = 0;
-    for (size_t i = 0; i < count; ++i) if (!table[i].pe32) ++guests;
+    for (size_t i = 0; i < count; ++i) if (!table[i].pe32 && !table[i].in_process) ++guests;
     return guests + 1;
 }
 inline const Mode* find(const std::string& name) {

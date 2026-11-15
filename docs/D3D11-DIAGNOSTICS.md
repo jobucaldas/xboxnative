@@ -24,8 +24,8 @@ does the guest draw, and why did a device get removed.
   the guest asked for it (outstanding-RTV evidence at resize time).
 * With `d3d11resizetrace.txt` present, each Present result and failure reason,
   the swap-chain descriptor at each resize, each resize result (including
-  elided/suppressed S_OK results), and a bounded ring of the last 64 intercepted
-  D3D11 calls are logged when a Present fails. The ring covers hooked calls, not
+  elided/suppressed S_OK results), and a bounded ring of successful GPU commands
+  are available when the trace flushes. The ring covers hooked commands, not
   every D3D11 interface method.
 
 ## Slot audit (build-time)
@@ -59,13 +59,17 @@ depend on the vtable patches.
 ## Resize-removal trace (opt-in)
 
 Create `d3d11resizetrace.txt` in `LocalState` to enable the focused trace for
-one run; absent is the default and leaves the call ring off. The trace includes
+one run; absent is the default and leaves the command ring off. The trace includes
 swap-chain descriptor fields, ResizeBuffers arguments and results, Present
-results, a device-removed reason for each failed Present, and the newest 64
-intercepted D3D11 calls when a Present fails. It is a diagnostic trace, not a
-complete API recorder; calls through unhooked D3D11 methods are not represented.
-The trace is independent of `d3d11diag.txt`, but the D3D11 call ring requires the
-regular vtable hooks to be installed.
+results, and a device-removed reason. Its fixed 64-entry ring records successful
+immediate- and deferred-context GPU commands (draw/dispatch, copy/update/map,
+clear/bind, viewport, command-list operations, resize and present), with compact
+arguments and the current frame index. The ring flushes oldest-first once when
+`GetDeviceRemovedReason` returns non-`S_OK` or a call returns device
+removed/reset/hung. An ordinary failed Present does not flush it. Calls through
+unhooked D3D11 methods are not represented. The trace is independent of
+`d3d11diag.txt`, but the D3D11 command ring requires the regular vtable hooks to
+be installed.
 
 This trace can support A/B testing of device-removal timing, but a single run
 cannot establish causality; compare repeated runs and treat differences as

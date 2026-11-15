@@ -403,6 +403,7 @@ struct Guest {
     // binds the same host thunk the import binder would have, as Windows
     // answers for its own modules.
     std::map<std::string, uint32_t> os_modules;  // lowercase dll -> pseudo base
+    std::map<std::pair<std::string, std::string>, uint32_t> os_export_addrs;
     static constexpr uint32_t kOsModuleBase = 0x68000000u, kOsModuleStride = 0x10000u;
     // kernelbase exports nothing here (the CRT probes it and falls back when
     // the lookup misses), but LoadLibrary must succeed, as on Windows.
@@ -411,14 +412,58 @@ struct Guest {
         for (auto& kv : reg.map) if (kv.first.first == dll) return true;
         return false;
     }
+    // Map a read-only PE32 image at each OS pseudo-handle. Its exports mirror
+    // the route registry, so guest export walkers and GetProcAddress agree.
+    void map_os_module_image(const std::string& dll, uint32_t base, ThunkTable& table) {
+        struct Export { std::string name; uint32_t address; };
+        std::vector<Export> exports;
+        for (const auto& kv : reg.map) if (kv.first.first == dll)
+            exports.push_back({kv.second.name, os_export_addr(table, dll, kv.first.second)});
+        for (const auto& kv : reg.data) if (kv.first.first == dll)
+            exports.push_back({kv.first.second, kv.second});
+        std::sort(exports.begin(), exports.end(), [](const Export& a, const Export& b) { return a.name < b.name; });
+        constexpr uint32_t image_size = kOsModuleStride, nt = 0x80, opt = nt + 24;
+        constexpr uint32_t exp = 0x200, funcs = 0x240;
+        uint32_t names = funcs + uint32_t(exports.size()) * 4;
+        uint32_t ords = names + uint32_t(exports.size()) * 4;
+        uint32_t strings = ords + uint32_t(exports.size()) * 2;
+        mem.map(base, image_size, PROT_R | PROT_W);
+        mem.w(base, 0x5A4D, 2); mem.w32(base + 0x3c, nt);
+        mem.w32(base + nt, 0x00004550);
+        mem.w(base + nt + 4, 0x014c, 2); mem.w(base + nt + 6, 0, 2);
+        mem.w(base + nt + 20, 0x00e0, 2); mem.w(base + nt + 22, 0x2102, 2);
+        mem.w(base + opt, 0x010b, 2); mem.w32(base + opt + 28, base);
+        mem.w32(base + opt + 32, 0x1000); mem.w32(base + opt + 36, 0x200);
+        mem.w32(base + opt + 56, image_size); mem.w32(base + opt + 60, 0x200);
+        mem.w32(base + opt + 92, 16); mem.w32(base + opt + 96, exp);
+        // IMAGE_EXPORT_DIRECTORY; arrays contain all route names in sorted order.
+        mem.w32(base + exp + 12, strings);
+        mem.w32(base + exp + 16, 1);
+        mem.w32(base + exp + 20, uint32_t(exports.size()));
+        mem.w32(base + exp + 24, uint32_t(exports.size()));
+        mem.w32(base + exp + 28, funcs); mem.w32(base + exp + 32, names); mem.w32(base + exp + 36, ords);
+        uint32_t cursor = strings;
+        mem.write_bytes(base + cursor, dll.c_str(), uint32_t(dll.size() + 1));
+        cursor += uint32_t(dll.size() + 1);
+        for (uint32_t i = 0; i < exports.size(); ++i) {
+            mem.w32(base + funcs + i * 4, exports[i].address - base);
+            mem.w32(base + names + i * 4, cursor);
+            mem.w(base + ords + i * 2, i, 2);
+            mem.write_bytes(base + cursor, exports[i].name.c_str(), uint32_t(exports[i].name.size() + 1));
+            cursor += uint32_t(exports[i].name.size() + 1);
+        }
+        mem.w32(base + opt + 100, cursor - exp);
+        mem.protect(base, image_size, PROT_R);
+    }
     // Modules every process has from its start, served without an image.
     bool os_served(const std::string& dll) const {
         return dll == "kernel32.dll" || dll == "ntdll.dll" || dll == "msvcrt.dll" || registry_serves(dll);
     }
-    uint32_t os_module_handle(const std::string& dll) {
+    uint32_t os_module_handle(const std::string& dll, ThunkTable& table) {
         auto it = os_modules.find(dll);
         if (it != os_modules.end()) return it->second;
         uint32_t h = kOsModuleBase + uint32_t(os_modules.size()) * kOsModuleStride;
+        map_os_module_image(dll, h, table);
         os_modules[dll] = h;
         add_module(dll, h);  // GetModuleHandleA("ntdll.dll") answers it too
         return h;
@@ -438,13 +483,13 @@ struct Guest {
         else if (n.find('.') == std::string::npos) n += ".dll";
         return n;
     }
-    uint32_t module_by_name(const std::string& name) {
+    uint32_t module_by_name(const std::string& name, ThunkTable& table) {
         std::string n = module_key(name);
         auto it = modules.find(n);
         if (it != modules.end()) return it->second;
         auto d = dlls.find(n);
         if (d != dlls.end()) return d->second.image.base;
-        if (os_served(n)) return os_module_handle(n);
+        if (os_served(n)) return os_module_handle(n, table);
         set_last_error(126);  // ERROR_MOD_NOT_FOUND
         return 0;
     }
@@ -464,7 +509,14 @@ struct Guest {
         if (l.rfind(".dll") != l.size() - 4) l += ".dll";
         if (s.rfind("#", 0) == 0) return 0;  // ordinal forward: no ordinal surface
         auto it = reg.map.find({l, s});
-        if (it != reg.map.end()) return table.add(it->second);
+        if (it != reg.map.end()) {
+            auto key = std::make_pair(l, s);
+            auto cached = os_export_addrs.find(key);
+            if (cached != os_export_addrs.end()) return cached->second;
+            uint32_t address = table.add(it->second);
+            os_export_addrs[key] = address;
+            return address;
+        }
         auto dt = reg.data.find({l, s});
         if (dt != reg.data.end()) return dt->second;
         return 0;
@@ -473,7 +525,7 @@ struct Guest {
         std::string lower = module_key(requested);
         auto it = dlls.find(lower);
         if (it != dlls.end()) { it->second.refs++; return it->second.image.base; }
-        if (os_served(lower)) return os_module_handle(lower);
+        if (os_served(lower)) return os_module_handle(lower, table);
         if (!dll_source) { set_last_error(126); return 0; }  // ERROR_MOD_NOT_FOUND
         std::vector<uint8_t> bytes = dll_source(lower);
         if (bytes.empty()) { set_last_error(126); return 0; }
@@ -566,7 +618,7 @@ struct Guest {
             if (name_ptr >= 0x10000u) {
                 std::string sym = Registry::key_sym(str(name_ptr));
                 auto it = reg.map.find({kv.first, sym});
-                if (it != reg.map.end()) return table.add(it->second);
+                if (it != reg.map.end()) return os_export_addr(table, kv.first, sym);
                 auto dt = reg.data.find({kv.first, sym});
                 if (dt != reg.data.end()) return dt->second;
                 // Also answer the undecorated stdcall name for a decorated
@@ -574,7 +626,7 @@ struct Guest {
                 std::string dec = sym + "@";
                 for (auto& e : reg.map)
                     if (e.first.first == kv.first && e.first.second.rfind(dec, 0) == 0)
-                        return table.add(e.second);
+                        return os_export_addr(table, kv.first, e.first.second);
             }
             set_last_error(127);  // ERROR_PROC_NOT_FOUND
             return 0;
@@ -773,6 +825,12 @@ inline void Guest::register_all() {
     // must hold a callable thunk, not the table address — a data binding makes
     // a call through it jump into the iob bytes. It returns the table pointer.
     reg.add("msvcrt.dll", "__iob_func", Conv::Cdecl, 0, [this](Cpu&) -> uint32_t { return iob_addr; });
+    // MSVC 11's CRT uses this startup helper from its own DLL name. Honor the
+    // STARTUPINFO flag and value rather than treating the zeroed block as a
+    // request to hide the window.
+    reg.add("msvcr110.dll", "__crtGetShowWindowMode", Conv::Cdecl, 0, [this](Cpu&) -> uint32_t {
+        return (mem.r32(startupinfo + 44) & 1u) ? uint16_t(mem.r(startupinfo + 48, 2)) : 10u;
+    });
     auto C = [](const char* n) { return n; };
     (void)C;
 
@@ -823,7 +881,7 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "FreeEnvironmentStringsW", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "GetModuleHandleA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         std::string n = str(c.arg(0)); if (n.empty()) return image_base;
-        return module_by_name(n); });
+        return module_by_name(n, c.thunks); });
     // FreeLibrary: decrements the refcount of a module this surface loaded or
     // tracks, and never unmaps: a real unload (refcount to zero -> unmap +
     // DLL_PROCESS_DETACH) is not implemented, and the coverage matrix says so.
@@ -996,7 +1054,7 @@ inline void Guest::register_all() {
         } else {
             std::string n;
             for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(p + i * 2, 2)); if (!w) break; n.push_back(char(w & 0xff)); }
-            base = module_by_name(n);
+            base = module_by_name(n, c.thunks);
         }
         if (out) mem.w32(out, base);
         if (!base) set_last_error(126);  // ERROR_MOD_NOT_FOUND, as Windows answers
@@ -1043,6 +1101,19 @@ inline void Guest::register_all() {
             mem.w8(p + 155, 0);    // wReserved
         }
         return 1; });
+    auto format_locale = [this](bool date, Cpu& c) -> uint32_t {
+        Host::LocaleCall q; q.date=date; q.locale=c.arg(0); q.flags=c.arg(1);
+        q.has_system_time=c.arg(2)!=0; q.has_format=c.arg(3)!=0; q.has_output_buffer=c.arg(4)!=0; q.buffer_chars=int32_t(c.arg(5));
+        if(q.has_system_time) for(unsigned i=0;i<8;++i) q.system_time[i]=uint16_t(mem.r(c.arg(2)+i*2,2));
+        if(q.has_format) q.format=wstr(c.arg(3));
+        if(!host.locale_call){set_last_error(120);return 0;}
+        host.locale_call(q);
+        if(!q.succeeded){set_last_error(q.error?q.error:87);return 0;}
+        if(q.result>0&&c.arg(4)){if(q.data.size()!=size_t(q.result)*2){set_last_error(87);return 0;}mem.write_bytes(c.arg(4),q.data.data(),uint32_t(q.data.size()));}
+        return uint32_t(q.result);
+    };
+    reg.add("kernel32.dll", "GetTimeFormatW", Conv::Stdcall, 6, [format_locale](Cpu& c) -> uint32_t { return format_locale(false,c); });
+    reg.add("kernel32.dll", "GetDateFormatW", Conv::Stdcall, 6, [format_locale](Cpu& c) -> uint32_t { return format_locale(true,c); });
     reg.add("kernel32.dll", "IsProcessorFeaturePresent", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
         return c.arg(0) == 10 ? 1u : 0u; });  // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
     auto nls_input = [this](uint32_t src, int32_t length, uint32_t unit_size, Host::NlsRequest& request) {
@@ -1200,6 +1271,26 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "HeapFree", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { heap.release(c.arg(2)); return 1; });
     reg.add("kernel32.dll", "HeapReAlloc", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t { return heap.realloc(c.arg(2), c.arg(3)); });
     reg.add("kernel32.dll", "HeapSize", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { return heap.size_of(c.arg(2)); });
+    reg.add("kernel32.dll", "HeapSetInformation", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
+        uint32_t h = c.arg(0), info = c.arg(1), buffer = c.arg(2), size = c.arg(3);
+        if ((h != 0x50000000u && !heap_handles.count(h)) ||
+            (info == 0 && (!buffer || size != 4)) ||
+            (info == 1 && (buffer || size != 0)) || info > 1) { set_last_error(87); return 0; }
+        if (info == 0) {
+            uint32_t compatibility = mem.r32(buffer);
+            if (compatibility != 0 && compatibility != 2) { set_last_error(87); return 0; }
+        }
+        set_last_error(0); return 1;
+    });
+    reg.add("kernel32.dll", "HeapQueryInformation", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
+        uint32_t h = c.arg(0), info = c.arg(1), buffer = c.arg(2), size = c.arg(3), returned = c.arg(4);
+        if ((h != 0x50000000u && !heap_handles.count(h)) || info != 0 || !buffer || size < 4) {
+            set_last_error(87); return 0;
+        }
+        mem.w32(buffer, 2);  // HEAP_COMPATIBILITY_INFORMATION: LFH enabled
+        if (returned) mem.w32(returned, 4);
+        set_last_error(0); return 1;
+    });
     reg.add("kernel32.dll", "LocalAlloc", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { return heap.alloc(c.arg(1)); });
     reg.add("kernel32.dll", "LocalFree", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { heap.release(c.arg(0)); return 0; });
     reg.add("kernel32.dll", "GlobalAlloc", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { return heap.alloc(c.arg(1)); });
@@ -1340,6 +1431,12 @@ inline void Guest::register_all() {
         Host::FileCall q{Host::FileCall::Kind::Seek};if(!native_file(c.arg(0),q))return 0xffffffffu;
         q.args[0]=c.arg(1);q.args[1]=c.arg(2)?mem.r32(c.arg(2)):0;q.args[2]=c.arg(3);q.args[3]=c.arg(2)!=0;
         if(!call_file(q)){set_last_error(q.error?q.error:120);return 0xffffffffu;}if(c.arg(2))mem.w32(c.arg(2),q.args[1]);set_last_error(0);return uint32_t(q.value); });
+    // x86 stdcall passes LARGE_INTEGER liDistanceToMove by value in two stack slots:
+    // (hFile, distLow, distHigh, lpNewFilePointer, dwMoveMethod) = 20 bytes popped.
+    reg.add("kernel32.dll", "SetFilePointerEx", Conv::Stdcall, 5, [this,native_file](Cpu& c) -> uint32_t {
+        Host::FileCall q{Host::FileCall::Kind::SeekEx};if(!native_file(c.arg(0),q))return 0;
+        q.distance=int64_t(uint64_t(c.arg(1))|(uint64_t(c.arg(2))<<32));q.method=c.arg(4);q.args[0]=c.arg(3)!=0;
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}if(c.arg(3)){mem.w32(c.arg(3),uint32_t(q.position));mem.w32(c.arg(3)+4,uint32_t(uint64_t(q.position)>>32));}return 1; });
     reg.add("kernel32.dll", "SetEndOfFile", Conv::Stdcall, 1, [this,native_file](Cpu& c) -> uint32_t {
         Host::FileCall q{Host::FileCall::Kind::End};if(!native_file(c.arg(0),q))return 0;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
     reg.add("kernel32.dll", "FileTimeToSystemTime", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
@@ -1447,7 +1544,7 @@ inline void Guest::register_all() {
         if (!c.arg(0)) return image_base;
         std::string n;
         for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(c.arg(0) + i * 2, 2)); if (!w) break; n.push_back(char(w & 0xff)); }
-        return module_by_name(n); });
+        return module_by_name(n, c.thunks); });
     reg.add("msvcrt.dll", "__set_app_type", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 0; });
     reg.add("msvcrt.dll", "__setusermatherr", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 0; });
     reg.add("msvcrt.dll", "_amsg_exit", Conv::Cdecl, 1, [this](Cpu& c) -> uint32_t { do_exit(c, c.arg(0)); return 0; });

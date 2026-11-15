@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 #include "selftest_plan.h"
+#include "../audio/probe.h"
 
 namespace selftest {
 // A launcher restart that makes no progress must not loop: each fixture gets a
@@ -208,6 +209,12 @@ static bool step() {
         // The first pending mode is this process's fixture; the rest wait.
         std::string mode = q.pending.front();
         const selftest_plan::Mode* m = selftest_plan::find(mode);
+        if (m && m->in_process) {
+            q.pending.erase(q.pending.begin());
+            int code = audio_probe::run(lp_sink);
+            result(mode, code == 0 ? "PASS" : "FAIL audio-diagnostic", "diagnostic exit=" + std::to_string(code));
+            continue;
+        }
         std::wstring path = m ? fixture(*m) : std::wstring();
         if (m && !path.empty() && !m->pe32) {
             logf("selftest: %s running; the launcher restarts to unload it", mode.c_str());
