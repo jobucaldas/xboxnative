@@ -3,6 +3,7 @@
 #pragma once
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <set>
 #include <stdexcept>
@@ -42,9 +43,16 @@ struct Pe32 {
         if(os<96 || nd>16 || 96+nd*8>os || !ns || ns>96 || !range(sections,ns*40,file.size()))
             throw std::runtime_error("PE32 header bounds");
         uint32_t size=read(file,opt+56), headers=read(file,opt+60), alignment=read(file,opt+32);
-        if(!size || size>512u*1024*1024 || headers>size || headers>file.size() ||
-           headers<sections+ns*40 || alignment!=4096 || size%4096)
-            throw std::runtime_error("PE32 image layout");
+        char layout[192];
+        if(!size) snprintf(layout,sizeof layout,"PE32 image layout: SizeOfImage 0x%x is zero",size);
+        else if(size>512u*1024*1024) snprintf(layout,sizeof layout,"PE32 image layout: SizeOfImage 0x%x exceeds 0x20000000",size);
+        else if(headers>size) snprintf(layout,sizeof layout,"PE32 image layout: SizeOfHeaders 0x%x > SizeOfImage 0x%x",headers,size);
+        else if(headers>file.size()) snprintf(layout,sizeof layout,"PE32 image layout: SizeOfHeaders 0x%x > file size 0x%zx",headers,file.size());
+        else if(headers<sections+ns*40) snprintf(layout,sizeof layout,"PE32 image layout: SizeOfHeaders 0x%x < section table end 0x%zx",headers,sections+ns*40);
+        else if(alignment!=4096) snprintf(layout,sizeof layout,"PE32 image layout: SectionAlignment 0x%x != 0x1000",alignment);
+        else if(size%4096) snprintf(layout,sizeof layout,"PE32 image layout: SizeOfImage 0x%x not 0x1000-aligned",size);
+        else layout[0]=0;
+        if(layout[0]) throw std::runtime_error(layout);
         preferred=read(file,opt+28);
         // A stripped/fixed PE must stay at its preferred logical address.
         if(!base) base=(nd>5 && read(file,opt+96+5*8+4))?0x10000000:preferred;
@@ -55,8 +63,15 @@ struct Pe32 {
         for(unsigned i=0;i<ns;++i) {
             size_t s=sections+40*i; uint32_t va=read(file,s+12), raw=read(file,s+16), off=read(file,s+20);
             size_t length=std::max(read(file,s+8),raw);
-            if(va%alignment || !length || !range(va,length,size) || !range(off,raw,file.size()))
-                throw std::runtime_error("PE32 section bounds");
+            char sectionError[192];
+            if(va%alignment) snprintf(sectionError,sizeof sectionError,"PE32 image layout: section %u VA 0x%x not aligned to 0x%x",i,va,alignment);
+            else if(!length) snprintf(sectionError,sizeof sectionError,"PE32 image layout: section %u has zero virtual/raw length",i);
+            else if(!range(va,length,size)) snprintf(sectionError,sizeof sectionError,"PE32 image layout: section %u VA 0x%x length 0x%zx past SizeOfImage 0x%x",i,va,length,size);
+            else if(!range(off,raw,file.size())) {
+                char name[9]{}; memcpy(name,file.data()+s,8);
+                snprintf(sectionError,sizeof sectionError,"PE32 image layout: section %u '%.8s' raw 0x%x+0x%x past EOF 0x%zx",i,name,off,raw,file.size());
+            } else sectionError[0]=0;
+            if(sectionError[0]) throw std::runtime_error(sectionError);
             for(auto span:spans) if(va<span.second && span.first<size_t(va)+length)
                 throw std::runtime_error("PE32 section overlap");
             spans.emplace_back(va,size_t(va)+length);

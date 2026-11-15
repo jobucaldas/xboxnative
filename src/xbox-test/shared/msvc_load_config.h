@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -141,13 +142,24 @@ struct Plan {
 // section's zero-filled tail (common in MSVC DLLs); it needs mapped, writable,
 // non-executable extent, not file bytes. The fixture contract stays 0x140 and
 // file-backed.
-inline bool validate(const File& f,Plan& result,bool play=false) {
+inline bool validate(const File& f,Plan& result,bool play=false,std::string* failure=nullptr) {
     Plan p;
     const size_t recordSize=f.config.size;
-    if(!f.bytes || (!play && (f.dllCharacteristics&0x4000)) || f.config.rva%8 ||
-        (play ? !(recordSize==0x70 || (recordSize>=0x94 && recordSize<=0x140)) : recordSize!=0x140) ||
-        !f.preferred || f.preferred>UINT64_MAX-f.imageSize ||
-        f.sections.empty() || f.sections.size()>96) return false;
+    auto reject=[&](const char* detail) { if(failure) *failure=detail; return false; };
+    char detail[192];
+    if(!f.bytes) return reject("file bytes are null");
+    if(!play && (f.dllCharacteristics&0x4000)) { snprintf(detail,sizeof detail,"GUARD_CF DLL characteristic 0x%x unsupported in cookie-only mode",f.dllCharacteristics); return reject(detail); }
+    if(f.config.rva%8) { snprintf(detail,sizeof detail,"load config RVA 0x%x is not 8-byte aligned",f.config.rva); return reject(detail); }
+    if(play && recordSize!=0x70 && (recordSize<0x94 || recordSize>0x140)) {
+        snprintf(detail,sizeof detail,"load config Size 0x%zx must be 0x70 or in 0x94..0x140",recordSize); return reject(detail);
+    }
+    if(!play && recordSize!=0x140) {
+        snprintf(detail,sizeof detail,"load config Size 0x%zx != required 0x140",recordSize); return reject(detail);
+    }
+    if(!f.preferred) return reject("preferred ImageBase is zero");
+    if(f.preferred>UINT64_MAX-f.imageSize) { snprintf(detail,sizeof detail,"ImageBase 0x%llx + SizeOfImage 0x%zx overflows",(unsigned long long)f.preferred,f.imageSize); return reject(detail); }
+    if(f.sections.empty()) return reject("section count is zero");
+    if(f.sections.size()>96) { snprintf(detail,sizeof detail,"section count %zu exceeds 96",f.sections.size()); return reject(detail); }
     // The caller validates PE headers/alignment/W^X; also reject raw aliases,
     // raw header aliases and zero-filled tails, not just mapped-size bounds.
     for(size_t i=0;i<f.sections.size();++i) {
