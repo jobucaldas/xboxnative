@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 #if defined(_WIN32)
+#include <winsock2.h>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -40,6 +41,18 @@ inline void play_locale_call(Host::LocaleCall& q) {
     q.result=n; q.succeeded=n!=0; q.error=q.succeeded?0:GetLastError();
     if(q.succeeded&&!out.empty()){q.data.resize(size_t(n)*sizeof(wchar_t));memcpy(q.data.data(),out.data(),q.data.size());}
 }
+inline void play_socket_call(Host::SocketCall& q) {
+    using StartupFn=int (WSAAPI*)(WORD,LPWSADATA);using CleanupFn=int (WSAAPI*)();using LastErrorFn=int (WSAAPI*)();
+    static HMODULE module=LoadLibraryExW(L"ws2_32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    auto startup=module?reinterpret_cast<StartupFn>(GetProcAddress(module,"WSAStartup")):nullptr;
+    auto cleanup=module?reinterpret_cast<CleanupFn>(GetProcAddress(module,"WSACleanup")):nullptr;
+    auto last=module?reinterpret_cast<LastErrorFn>(GetProcAddress(module,"WSAGetLastError")):nullptr;
+    if(q.kind==Host::SocketCall::Kind::Startup){if(!startup){q.result=10091;return;}WSADATA native{};q.result=startup(q.version,&native);if(q.result)return;
+        q.data.assign(400,0);memcpy(q.data.data(),&native.wVersion,2);memcpy(q.data.data()+2,&native.wHighVersion,2);
+        memcpy(q.data.data()+4,native.szDescription,std::min<size_t>(257,sizeof(native.szDescription)));memcpy(q.data.data()+261,native.szSystemStatus,std::min<size_t>(129,sizeof(native.szSystemStatus)));
+        memcpy(q.data.data()+390,&native.iMaxSockets,2);memcpy(q.data.data()+392,&native.iMaxUdpDg,2);return;}
+    if(q.kind==Host::SocketCall::Kind::Cleanup){q.result=cleanup?cleanup():-1;return;}q.result=last?last():10093;
+}
 inline void play_file_call(Host::FileCall& q) {
     auto failed=[&](){q.error=GetLastError();};
     auto native=[&](const char* name)->uintptr_t { static HMODULE module=LoadLibraryExW(L"kernel32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);return module?reinterpret_cast<uintptr_t>(GetProcAddress(module,name)):0; };
@@ -48,6 +61,7 @@ inline void play_file_call(Host::FileCall& q) {
     case Host::FileCall::Kind::CreateW: { std::wstring p(q.path_w.begin(),q.path_w.end());HANDLE h=kernel32_core::create_file_w(p.c_str(),q.args[0],q.args[1],nullptr,q.args[2],q.args[3],(HANDLE)(uintptr_t)q.template_handle);q.value=(uintptr_t)h;q.succeeded=h!=INVALID_HANDLE_VALUE;failed();break; }
     case Host::FileCall::Kind::Close:q.succeeded=kernel32_core::close_handle((HANDLE)(uintptr_t)q.handle)!=FALSE;if(!q.succeeded)failed();break;
     case Host::FileCall::Kind::Read:{q.data.resize(q.args[0]);DWORD n=0;q.succeeded=kernel32_core::read_file((HANDLE)(uintptr_t)q.handle,q.data.data(),q.args[0],&n,nullptr)!=FALSE;q.args[1]=n;q.data.resize(n);if(!q.succeeded)failed();break;}
+    case Host::FileCall::Kind::Write:{using Fn=BOOL(WINAPI*)(HANDLE,LPCVOID,DWORD,LPDWORD,LPOVERLAPPED);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","WriteFile");DWORD n=0;q.succeeded=fn&&fn((HANDLE)(uintptr_t)q.handle,q.data.data(),DWORD(q.data.size()),&n,nullptr)!=FALSE;q.args[0]=n;if(!q.succeeded)failed();break;}
     case Host::FileCall::Kind::Size:{DWORD high=0,low=kernel32_core::file_size((HANDLE)(uintptr_t)q.handle,q.args[0]?&high:nullptr);q.value=low;q.args[1]=high;q.error=GetLastError();q.succeeded=low!=INVALID_FILE_SIZE||q.error==ERROR_SUCCESS;break;}
     case Host::FileCall::Kind::Time:{FILETIME t[3]{};using Fn=BOOL(WINAPI*)(HANDLE,LPFILETIME,LPFILETIME,LPFILETIME);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","GetFileTime");q.succeeded=fn&&(fn((HANDLE)(uintptr_t)q.handle,q.args[0]?&t[0]:nullptr,q.args[1]?&t[1]:nullptr,q.args[2]?&t[2]:nullptr)!=FALSE);q.data.resize(sizeof(t));memcpy(q.data.data(),t,sizeof(t));if(!q.succeeded)failed();break;}
     case Host::FileCall::Kind::AttributesA:{
@@ -285,6 +299,7 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         Memory mem; ThunkTable table; Host host; Registry reg;
 #if defined(_WIN32)
         host.file_call = play_file_call;
+        host.socket_call = play_socket_call;
         host.tick_count = []() { return uint64_t(::GetTickCount64()); };
         host.locale_call = play_locale_call;
 #endif
