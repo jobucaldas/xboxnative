@@ -372,6 +372,187 @@ static void test_fpu() {
     EXPECT(m.cpu.reg[EAX] == 0, "pcmpeqd/pmovmskb: %x", m.cpu.reg[EAX]);
     ++alu_cases;
 }
+// SSE2 conversions and packed-double operations, differentially checked against this CPU.
+static void test_sse2_conversions_pd() {
+    Machine m;
+    auto set = [&](int reg, const uint32_t v[4]) { memcpy(m.cpu.xmm.r[reg], v, 16); };
+    auto got = [&]() { uint32_t v[4]; memcpy(v, m.cpu.xmm.r[0], 16); return std::array<uint32_t, 4>{v[0], v[1], v[2], v[3]}; };
+    auto run = [&](std::vector<uint8_t> enc, const uint32_t a[4], const uint32_t b[4]) {
+        set(0, a); set(1, b); exec(m, enc, 0, 0, 0, false); return got();
+    };
+    auto eq = [&](const char* name, const std::array<uint32_t, 4>& a, const void* b) {
+        uint32_t want[4]; memcpy(want,b,16);
+        EXPECT(memcmp(a.data(), b, 16) == 0, "%s got %08x %08x %08x %08x want %08x %08x %08x %08x", name,a[0],a[1],a[2],a[3],want[0],want[1],want[2],want[3]); ++alu_cases;
+    };
+    const uint32_t ints[4] = {0x7fffffff, 0x80000000u, 16777217, 0xffffffffu};
+    const uint32_t fbits[4] = {f32b(1.5f), f32b(-1.5f), f32b(2.5f), 0x7fc12345u};
+    const uint32_t dbits[4] = {uint32_t(f64b(1.5)), uint32_t(f64b(1.5) >> 32), uint32_t(f64b(-2.5)), uint32_t(f64b(-2.5) >> 32)};
+    for (unsigned rc = 0; rc < 4; ++rc) {
+        uint32_t saved = _mm_getcsr(); uint32_t mode = 0x1f80u | (rc << 13); m.cpu.mxcsr = mode; _mm_setcsr(mode);
+        __m128i ii = _mm_loadu_si128(reinterpret_cast<const __m128i*>(ints)); __m128 ff = _mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(fbits)));
+        __m128d dd = _mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(dbits)));
+        __m128i want_i = _mm_cvtps_epi32(ff); uint32_t hw[4]; _mm_storeu_si128(reinterpret_cast<__m128i*>(hw), want_i);
+        auto out = run({0x66, 0x0F, 0x5B, 0xC1}, ints, fbits); eq("cvtps2dq", out, hw);
+        want_i = _mm_cvtpd_epi32(dd); _mm_storeu_si128(reinterpret_cast<__m128i*>(hw), want_i);
+        out = run({0xF2, 0x0F, 0xE6, 0xC1}, ints, dbits); eq("cvtpd2dq", out, hw);
+        __m128d cvtd = _mm_cvtepi32_pd(ii); _mm_storeu_si128(reinterpret_cast<__m128i*>(hw), _mm_castpd_si128(cvtd));
+        out = run({0xF3, 0x0F, 0xE6, 0xC1}, fbits, ints); eq("cvtdq2pd", out, hw);
+        __m128 cvtps; asm volatile("ldmxcsr %1\n\tcvtdq2ps %2,%0\n\tldmxcsr %3" : "=&x"(cvtps) : "m"(mode), "x"(ii), "m"(saved) : "memory");
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(hw),_mm_castps_si128(cvtps));
+        out = run({0x0F,0x5B,0xC1},fbits,ints); eq("cvtdq2ps rounding",out,hw);
+        _mm_setcsr(saved);
+    }
+    uint32_t saved = _mm_getcsr(); _mm_setcsr(0x1f80u); m.cpu.mxcsr = 0x1f80u;
+    uint32_t hw[4]; std::array<uint32_t,4> out;
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(hw), _mm_cvttps_epi32(_mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(fbits)))));
+    out = run({0xF3, 0x0F, 0x5B, 0xC1}, ints, fbits); eq("cvttps2dq", out, hw);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(hw), _mm_castps_si128(_mm_cvtepi32_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(ints)))));
+    out = run({0x0F, 0x5B, 0xC1}, fbits, ints); eq("cvtdq2ps", out, hw);
+    uint32_t want[4]; _mm_storeu_si128(reinterpret_cast<__m128i*>(want), _mm_castpd_si128(_mm_cvtps_pd(_mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(fbits))))));
+    out = run({0x0F, 0x5A, 0xC1}, ints, fbits); eq("cvtps2pd", out, want);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(want), _mm_castps_si128(_mm_cvtpd_ps(_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(dbits))))));
+    out = run({0x66, 0x0F, 0x5A, 0xC1}, ints, dbits); eq("cvtpd2ps", out, want);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(want), _mm_cvttpd_epi32(_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(dbits)))));
+    out = run({0x66, 0x0F, 0xE6, 0xC1}, ints, dbits); eq("cvttpd2dq", out, want);
+    uint64_t qi=f64b(std::numeric_limits<double>::infinity()), qn=f64b(std::numeric_limits<double>::quiet_NaN());
+    uint32_t invalid_pd[4]={uint32_t(qi),uint32_t(qi>>32),uint32_t(qn),uint32_t(qn>>32)};
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(want),_mm_cvtpd_epi32(_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(invalid_pd)))));
+    out=run({0xF2,0x0F,0xE6,0xC1},ints,invalid_pd); eq("cvtpd2dq invalid",out,want);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(want),_mm_cvttpd_epi32(_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(invalid_pd)))));
+    out=run({0x66,0x0F,0xE6,0xC1},ints,invalid_pd); eq("cvttpd2dq invalid",out,want);
+    uint32_t scalar[4] = {fbits[0], 0x12345678, 0x87654321, 0xabcdef01};
+    __m128 sf = _mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(scalar)));
+    __m128d sd = _mm_cvtss_sd(_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(ints))), sf);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(want), _mm_castpd_si128(sd));
+    out = run({0xF3, 0x0F, 0x5A, 0xC1}, ints, scalar); eq("cvtss2sd", out, want);
+    uint32_t dscalar[4] = {dbits[0], dbits[1], 0x87654321, 0xabcdef01};
+    __m128d ds = _mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(dscalar)));
+    __m128 fs = _mm_cvtsd_ss(_mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(scalar))), ds);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(want), _mm_castps_si128(fs));
+    out = run({0xF2, 0x0F, 0x5A, 0xC1}, scalar, dscalar); eq("cvtsd2ss", out, want);
+    uint32_t a[4] = {uint32_t(f64b(1.25)), uint32_t(f64b(1.25) >> 32), uint32_t(f64b(-3.5)), uint32_t(f64b(-3.5) >> 32)};
+    uint32_t b[4] = {uint32_t(f64b(2.0)), uint32_t(f64b(2.0) >> 32), 0, 0};
+    uint64_t qnan = f64b(std::numeric_limits<double>::quiet_NaN());
+    struct P { uint8_t op; const char* name; } ops[] = {{0x58,"addpd"},{0x5C,"subpd"},{0x59,"mulpd"},{0x5E,"divpd"},{0x51,"sqrtpd"},{0x5D,"minpd"},{0x5F,"maxpd"},{0x54,"andpd"},{0x55,"andnpd"},{0x56,"orpd"},{0x57,"xorpd"}};
+    for (auto op : ops) {
+        __m128d x = _mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(a)));
+        __m128d y = _mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(b)));
+        __m128d z = op.op == 0x58 ? _mm_add_pd(x,y) : op.op == 0x5C ? _mm_sub_pd(x,y) : op.op == 0x59 ? _mm_mul_pd(x,y) :
+                    op.op == 0x5E ? _mm_div_pd(x,y) : op.op == 0x51 ? _mm_sqrt_pd(y) : op.op == 0x5D ? _mm_min_pd(x,y) : op.op == 0x5F ? _mm_max_pd(x,y) :
+                    _mm_castsi128_pd(op.op == 0x54 ? _mm_and_si128(_mm_castpd_si128(x),_mm_castpd_si128(y)) : op.op == 0x55 ? _mm_andnot_si128(_mm_castpd_si128(x),_mm_castpd_si128(y)) :
+                                     op.op == 0x56 ? _mm_or_si128(_mm_castpd_si128(x),_mm_castpd_si128(y)) : _mm_xor_si128(_mm_castpd_si128(x),_mm_castpd_si128(y)));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(hw), _mm_castpd_si128(z));
+        std::vector<uint8_t> enc{0x66,0x0F,op.op,0xC1}; out = run(enc,a,b); eq(op.name,out,hw);
+    }
+    uint64_t half_ulp=f64b(std::ldexp(1.0,-53));
+    uint32_t round_a[4]={uint32_t(f64b(1.0)),uint32_t(f64b(1.0)>>32),uint32_t(f64b(-1.0)),uint32_t(f64b(-1.0)>>32)};
+    uint32_t round_b[4]={uint32_t(half_ulp),uint32_t(half_ulp>>32),uint32_t(half_ulp),uint32_t(half_ulp>>32)};
+    for(unsigned rc=0;rc<4;++rc) {
+        uint32_t mode=0x1f80u|(rc<<13); m.cpu.mxcsr=mode; _mm_setcsr(mode);
+        __m128d x=_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(round_a)));
+        __m128d y=_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(round_b))), z;
+        asm volatile("ldmxcsr %2\n\taddpd %1,%0\n\tldmxcsr %3" : "=x"(z) : "x"(y), "m"(mode), "m"(saved), "0"(x) : "memory");
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(hw),_mm_castpd_si128(z));
+        out=run({0x66,0x0F,0x58,0xC1},round_a,round_b); eq("addpd rounding",out,hw);
+    }
+    m.cpu.mxcsr=0x1f80u; _mm_setcsr(0x1f80u);
+    uint64_t inf=f64b(std::numeric_limits<double>::infinity()), negzero=f64b(-0.0);
+    uint32_t edge_a[4]={uint32_t(qnan),uint32_t(qnan>>32),uint32_t(inf),uint32_t(inf>>32)};
+    uint32_t edge_b[4]={uint32_t(f64b(2.0)),uint32_t(f64b(2.0)>>32),uint32_t(negzero),uint32_t(negzero>>32)};
+    for (uint8_t op : {uint8_t(0x58),uint8_t(0x5D),uint8_t(0x5F),uint8_t(0x5E),uint8_t(0x51)}) {
+        __m128d x=_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(edge_a)));
+        __m128d y=_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(edge_b)));
+        __m128d z=op==0x58?_mm_add_pd(x,y):op==0x5D?_mm_min_pd(x,y):op==0x5F?_mm_max_pd(x,y):op==0x5E?_mm_div_pd(x,y):_mm_sqrt_pd(y);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(hw),_mm_castpd_si128(z));
+        out=run({0x66,0x0F,op,0xC1},edge_a,edge_b); eq("packed-double edge",out,hw);
+    }
+    uint32_t pred_a[4] = {uint32_t(f64b(1.0)),uint32_t(f64b(1.0)>>32),uint32_t(qnan),uint32_t(qnan>>32)};
+    uint64_t two = f64b(2.0);
+    uint32_t pred_b[4] = {uint32_t(f64b(1.0)),uint32_t(f64b(1.0)>>32),uint32_t(two),uint32_t(two>>32)};
+    for (int pred = 0; pred < 8; ++pred) {
+        __m128d x = _mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(pred_a)));
+        __m128d y = _mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(pred_b)));
+        __m128d z=x; switch (pred) {
+        case 0: asm volatile("cmppd $0, %1, %0" : "+x"(z) : "x"(y)); break;
+        case 1: asm volatile("cmppd $1, %1, %0" : "+x"(z) : "x"(y)); break;
+        case 2: asm volatile("cmppd $2, %1, %0" : "+x"(z) : "x"(y)); break;
+        case 3: asm volatile("cmppd $3, %1, %0" : "+x"(z) : "x"(y)); break;
+        case 4: asm volatile("cmppd $4, %1, %0" : "+x"(z) : "x"(y)); break;
+        case 5: asm volatile("cmppd $5, %1, %0" : "+x"(z) : "x"(y)); break;
+        case 6: asm volatile("cmppd $6, %1, %0" : "+x"(z) : "x"(y)); break;
+        default: asm volatile("cmppd $7, %1, %0" : "+x"(z) : "x"(y)); break; }
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(hw),_mm_castpd_si128(z));
+        out=run({0x66,0x0F,0xC2,0xC1,uint8_t(pred)},pred_a,pred_b);eq("cmppd",out,hw);
+        z=x; switch (pred) {
+        case 0: asm volatile("cmpsd $0, %1, %0" : "+x"(z) : "x"(y)); break;
+        case 1: asm volatile("cmpsd $1, %1, %0" : "+x"(z) : "x"(y)); break;
+        case 2: asm volatile("cmpsd $2, %1, %0" : "+x"(z) : "x"(y)); break;
+        case 3: asm volatile("cmpsd $3, %1, %0" : "+x"(z) : "x"(y)); break;
+        case 4: asm volatile("cmpsd $4, %1, %0" : "+x"(z) : "x"(y)); break;
+        case 5: asm volatile("cmpsd $5, %1, %0" : "+x"(z) : "x"(y)); break;
+        case 6: asm volatile("cmpsd $6, %1, %0" : "+x"(z) : "x"(y)); break;
+        default: asm volatile("cmpsd $7, %1, %0" : "+x"(z) : "x"(y)); break; }
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(hw),_mm_castpd_si128(z));
+        out=run({0xF2,0x0F,0xC2,0xC1,uint8_t(pred)},pred_a,pred_b);eq("cmpsd",out,hw);
+    }
+    // CVTDQ2PD's m64 and XMM forms read only two signed dwords.
+    m.mem.w64(Machine::DATA, uint64_t(uint32_t(int32_t(-17))) << 32 | uint32_t(1234567));
+    exec(m,{0xF3,0x0F,0xE6,0x05,0x00,0x00,0x02,0x00},0,0,0,false);
+    __m128d cvtmem=_mm_cvtepi32_pd(_mm_cvtsi64_si128(int64_t(m.mem.r64(Machine::DATA))));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(hw),_mm_castpd_si128(cvtmem));
+    EXPECT(memcmp(m.cpu.xmm.r[0],hw,16)==0,"cvtdq2pd memory source"); ++alu_cases;
+    // Scalar integer conversions, including invalid results and MXCSR rounding.
+    for (int32_t v : {0,1,-1,16777217,INT32_MIN,INT32_MAX}) {
+        uint32_t initial[4]={0x12345678,0x9abcdef0,0x87654321,0xfedcba98}; set(0,initial);
+        exec(m,{0xF2,0x0F,0x2A,0xC0},uint32_t(v),0,0,false);
+        __m128d d=_mm_cvtsi32_sd(_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(initial))),v);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(hw),_mm_castpd_si128(d)); eq("cvtsi2sd",got(),hw);
+        set(0,initial); exec(m,{0xF3,0x0F,0x2A,0xC0},uint32_t(v),0,0,false);
+        __m128 f=_mm_cvtsi32_ss(_mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(initial))),v);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(hw),_mm_castps_si128(f)); eq("cvtsi2ss",got(),hw);
+    }
+    for (double v : {1.5,-1.5,2.5,-2.5,2147483648.0,-2147483649.0,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()}) {
+        uint64_t q=f64b(v); uint32_t src[4]={uint32_t(q),uint32_t(q>>32),0x55aa55aa,0xa55aa55a}; set(1,src);
+        m.cpu.mxcsr=0x1f80u; _mm_setcsr(0x1f80u);
+        exec(m,{0xF2,0x0F,0x2D,0xC1},0,0,0,false); int32_t rounded=_mm_cvtsd_si32(_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src))));
+        EXPECT(m.cpu.reg[EAX]==uint32_t(rounded),"cvtsd2si %.17g got %x want %x",v,m.cpu.reg[EAX],uint32_t(rounded)); ++alu_cases;
+        exec(m,{0xF2,0x0F,0x2C,0xC1},0,0,0,false); int32_t trunc=_mm_cvttsd_si32(_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src))));
+        EXPECT(m.cpu.reg[EAX]==uint32_t(trunc),"cvttsd2si %.17g got %x want %x",v,m.cpu.reg[EAX],uint32_t(trunc)); ++alu_cases;
+    }
+    // Unpack/shuffle and MOVAPD/MOVUPD move all 128 bits exactly.
+    uint32_t aa[4]={1,2,3,4},bb[4]={5,6,7,8};
+    for (bool hi : {false,true}) {
+        __m128d x=_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(aa)));
+        __m128d y=_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(bb)));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(hw),_mm_castpd_si128(hi?_mm_unpackhi_pd(x,y):_mm_unpacklo_pd(x,y)));
+        out=run({0x66,0x0F,uint8_t(hi?0x15:0x14),0xC1},aa,bb); eq(hi?"unpckhpd":"unpcklpd",out,hw);
+    }
+    for (unsigned imm=0;imm<4;++imm) {
+        __m128d x=_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(aa)));
+        __m128d y=_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(bb)));
+        __m128d z=x; switch(imm) { case 0:asm volatile("shufpd $0,%1,%0":"+x"(z):"x"(y));break; case 1:asm volatile("shufpd $1,%1,%0":"+x"(z):"x"(y));break; case 2:asm volatile("shufpd $2,%1,%0":"+x"(z):"x"(y));break; default:asm volatile("shufpd $3,%1,%0":"+x"(z):"x"(y));break; }
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(hw),_mm_castpd_si128(z)); out=run({0x66,0x0F,0xC6,0xC1,uint8_t(imm)},aa,bb); eq("shufpd",out,hw);
+    }
+    for (uint8_t op : {uint8_t(0x10),uint8_t(0x28)}) {
+        out=run({0x66,0x0F,op,0xC1},aa,bb); eq(op==0x10?"movupd":"movapd",out,bb);
+        m.mem.w128(Machine::DATA,bb); exec(m,{0x66,0x0F,op,0x05,0x00,0x00,0x02,0x00},0,0,0,false);
+        EXPECT(memcmp(m.cpu.xmm.r[0],bb,16)==0,"%s memory load",op==0x10?"movupd":"movapd"); ++alu_cases;
+        set(0,aa); exec(m,{0x66,0x0F,uint8_t(op==0x10?0x11:0x29),0x05,0x00,0x00,0x02,0x00},0,0,0,false);
+        uint32_t stored[4]; m.mem.r128(Machine::DATA,stored); EXPECT(memcmp(stored,aa,16)==0,"%s memory store",op==0x10?"movupd":"movapd"); ++alu_cases;
+    }
+    // COMISD and UCOMISD define CF/PF/ZF for less/equal/greater/unordered.
+    for (double lhs : {-1.0,0.0,1.0,std::numeric_limits<double>::quiet_NaN()}) for (double rhs : {-1.0,0.0,1.0}) {
+        uint64_t lx=f64b(lhs),ry=f64b(rhs); uint32_t l[4]={uint32_t(lx),uint32_t(lx>>32),0,0},r[4]={uint32_t(ry),uint32_t(ry>>32),0,0};
+        __m128d x=_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(l))), y=_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(r)));
+        for (uint8_t op : {uint8_t(0x2E),uint8_t(0x2F)}) {
+            uint64_t flags; if(op==0x2E) asm volatile("ucomisd %2,%1\n\tpushfq\n\tpopq %0":"=r"(flags):"x"(x),"x"(y):"cc");
+            else asm volatile("comisd %2,%1\n\tpushfq\n\tpopq %0":"=r"(flags):"x"(x),"x"(y):"cc");
+            set(0,l); set(1,r); exec(m,{0x66,0x0F,op,0xC1},0,0,0,false);
+            EXPECT(!((m.cpu.eflags^uint32_t(flags))&(CF|PF|ZF)),"%s %.17g %.17g flags",op==0x2E?"ucomisd":"comisd",lhs,rhs); ++alu_cases;
+        }
+    }
+    _mm_setcsr(saved);
+}
 // x87 memory forms and the stack discipline the CRT depends on.
 static void test_x87_forms() {
     Machine m;
@@ -1793,6 +1974,7 @@ int main(int argc, char** argv) {
         {"unary", test_unary_muldiv, "X86-CORE PASS: inc/dec/neg/not, imul, mul/imul/div/idiv (incl. #DE) match this machine's CPU"},
         {"programs", test_programs, "X86-CORE PASS: control flow, addressing, string ops, FS base, W^X and explicit faults"},
         {"fpu", test_fpu, "X86-CORE PASS: x87 f64 arithmetic and fcomip, SSE scalar double/single arithmetic, int<->float conversion and SSE2 packed integer match this machine's CPU bit for bit"},
+        {"sse2-conversions-pd", test_sse2_conversions_pd, "X86-CORE PASS: SSE2 float/double/integer conversions, packed-double arithmetic, logic and compare match this machine's CPU bit for bit across MXCSR rounding modes"},
         {"x87forms", test_x87_forms, "X86-CORE PASS: x87 memory forms, stack discipline, control/status words and 80-bit round trip"},
         {"sse-regressions", test_sse_regressions, "X86-CORE PASS: bt imm, movd/movq, movmskps/pmovmskb, sqrtss, unpck, packuswb, stmxcsr, fptan/fxtract match this machine's CPU"},
         {"sse2-stage2", test_sse2_stage2, "X86-CORE PASS: pshufd/pshuflw/pshufhw/shufps/shufpd, packed shifts (imm8, xmm, dq), paddq/pmullw/pmuludq/pmaddwd/psadbw/pavgb, saturating add/sub, pmin/pmax, punpckhqdq, rdtsc, cpuid, movnti, prefetch, fxsave/fxrstor and repne scasb/repe cmpsb"},
