@@ -24,6 +24,7 @@
 #include <windows.h>
 #endif
 #include "x86_win32.h"
+#include "x86_d3d9.h"
 namespace x86 {
 // Loaded guest DLLs, shared between the loader and the Guest surface. Kept in
 // x86_pe.h's Dll form so GetProcAddress reads the same export tables the
@@ -859,6 +860,7 @@ inline void Guest::register_all() {
     reg.map.clear();
     register_win32(reg, host);  // the stage-1 allowlist stays the base surface
     register_gl(reg, host);
+    register_d3d9(reg, host);
     register_ws2(reg, host);
     // Fixed guest structures: three FILE structs for stdin/stdout/stderr.
     mem.map(iob_addr, 4096, PROT_R | PROT_W);

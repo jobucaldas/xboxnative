@@ -8,6 +8,7 @@
 #include <functional>
 #include "x86_pe.h"
 #include "x86_gl_generated.h"
+#include "x86com.h"
 namespace x86 {
 struct Host {
     enum class NlsOperation { IsValidCodePage, GetCPInfo, MultiByteToWideChar, WideCharToMultiByte,
@@ -84,6 +85,11 @@ struct Host {
     std::map<uint32_t, GlMap> gl_maps;
     uint32_t gl_handle_serial = 0xE0000000u, window_handle_serial = 0xD0000000u, gl_map_next = 0x70000000u;
     uint32_t vertex_array = 0, gl_array_buffer = 0, gl_element_array_buffer = 0;
+    std::function<uintptr_t(bool, uint32_t, uintptr_t*)> d3d9_factory;
+    std::function<uintptr_t(uint32_t)> d3d9_window;
+    ComSpace com;
+    uint32_t d3d9_guest_top = 0x7D000000u;
+    std::map<uint32_t, std::tuple<void*, uint32_t, uint32_t>> d3d9_locks;
     int32_t vertex_size = 0, vertex_stride = 0;
     uint32_t vertex_type = 0;
     bool vertex_buffer_backed = false;
