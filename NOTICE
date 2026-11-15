@@ -87,6 +87,7 @@ External dependencies fetched at build time (never copied here; pinned in deps.p
                                                packages selawk.ttf/selawksb.ttf/selawkb.ttf in layout/fonts/ together with
                                                LICENSE-Selawik.txt and SOURCE.txt. The TTFs are never committed to this repository.
                                                OFL 1.1 is GPLv3-compatible for embedding; the fonts are not modified.
+  Mono 6.12.0.206 Windows x64 runtime           MIT. Pinned MSI fetched and SHA-256 verified by src/tools/fetch-mono.sh; the launcher packages the SGen runtime, MonoPosixHelper, BTLS helper, .NET 4.5 BCL and licence under runtime/mono/. Files are never committed.
   Microsoft Windows SDK/CRT via xwin           Downloaded by the toolchain under Microsoft's own licence terms; never redistributed here.
 
 Licence compatibility with GPL-3.0-or-later (a good-faith reading, NOT legal advice or a legal guarantee)

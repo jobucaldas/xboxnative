@@ -66,6 +66,7 @@ static void lp_sink(const char* s) {
 
 #include "dxil_runtime.h"
 #include "host/play_runtime.h"
+#include "host/mono_host.h"
 #include "../uwph/shell32/folder_chain.h"
 #include "steam_client_package.h"
 #include "steam_token_store.h"
@@ -1350,6 +1351,30 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
     c.ok=rep.ok;
     c.failName=rep.ok?std::string():rep.result;
 }
+static void lp_run_managed(LpCtx& c,const std::wstring& path,const std::wstring& exe) {
+    char line[512];
+    g_launch.pe32Executed=false;g_launch.pe32Finished=false;g_launch.pe32ExitCode=0;
+    wchar_t self[2048];DWORD n=GetModuleFileNameW(nullptr,self,2048);
+    std::wstring package=n&&n<2048?std::wstring(self,n):std::wstring();
+    auto slash=package.find_last_of(L"\\/");
+    if(slash==std::wstring::npos){c.failName="Mono runtime: launcher path unavailable";return;}
+    package.resize(slash);
+    std::string runtime=play_runtime::narrow(package+L"\\runtime\\mono");
+    std::string assembly=play_runtime::narrow(path);
+    std::vector<std::string> args;
+    if(!c.args.empty())args.push_back(play_runtime::narrow(c.args));
+    snprintf(line,sizeof line,"PRUN CLR engine=Mono-x64 exe=%s",play_runtime::narrow(exe).c_str());lp_sink(line);
+    auto r=mono_host::run(runtime,assembly,args,[&]{
+        g_launch.loaderStarted=now_s();g_launch.pe32Executed=true;
+        lp_publish(c.gen,c.appid,"Mono loaded managed assembly",false,1,1,"running",false);
+    });
+    c.mapped=r.loaded?1:0;
+    if(r.executed){g_launch.pe32Finished=true;g_launch.pe32ExitCode=uint32_t(r.exit_code);}
+    c.ok=r.executed&&r.exit_code==0;
+    if(!r.error.empty())c.failName="Mono: "+r.error;
+    else if(r.executed)c.failName="Mono managed entry exited with code "+std::to_string(r.exit_code);
+    snprintf(line,sizeof line,"PRUN CLR loaded=%d executed=%d exit=%d",r.loaded?1:0,r.executed?1:0,r.exit_code);lp_sink(line);
+}
 static void lp_run_impl(LpCtx& c) {
     // Release a genuine client retained by the previous completed game.
     genuine_steam_shutdown();
@@ -1365,7 +1390,11 @@ static void lp_run_impl(LpCtx& c) {
     auto rel=c.names.back();auto slash=rel.find_last_of(L'\\');
     std::wstring exe=slash==std::wstring::npos?rel:rel.substr(slash+1);
     std::wstring exeDir=slash==std::wstring::npos?c.root:c.root+L"\\"+rel.substr(0,slash);
-    if(pe_machine(exeDir+L"\\"+exe)==IMAGE_FILE_MACHINE_I386) {
+    std::wstring exePath=exeDir+L"\\"+exe;
+    if(mono_host::managed_pe_file(play_runtime::narrow(exePath))) {
+        lp_run_managed(c,exePath,exe);return;
+    }
+    if(pe_machine(exePath)==IMAGE_FILE_MACHINE_I386) {
         lp_run_pe32(c,exeDir+L"\\"+exe,exe);return;
     }
     // These are behavior/ABI prerequisites, not optional progress diagnostics.
