@@ -1739,22 +1739,22 @@ inline void Guest::register_all() {
             return copied?copied-1:0;
         });
     }
-    auto resource_key = [this](uint32_t root,uint32_t value,bool wide)->uint32_t {
+    auto resource_key = [this](uint32_t directory,uint32_t root,uint32_t value,bool wide)->uint32_t {
         bool numeric=value<0x10000u;uint32_t id=value;
         if(!numeric){std::string wanted;if(wide){auto w=wstr(value);wanted.assign(w.begin(),w.end());}else wanted=str(value);
             if(wanted.size()>1&&wanted[0]=='#'){char* end=nullptr;unsigned long parsed=std::strtoul(wanted.c_str()+1,&end,10);if(end==wanted.c_str()+wanted.size()&&parsed<0x10000){numeric=true;id=uint32_t(parsed);}}
         }
-        uint16_t named=uint16_t(mem.r(root+12,2));
+        uint16_t named=uint16_t(mem.r(directory+12,2));
         if(!numeric){std::string wanted;if(wide){auto w=wstr(value);wanted.assign(w.begin(),w.end());}else wanted=str(value);
-            for(uint32_t i=0;i<named;++i){uint32_t e=root+16+i*8,name=mem.r32(e);if(!(name&0x80000000u))continue;uint32_t p=root+(name&0x7fffffffu);uint16_t n=uint16_t(mem.r(p,2));std::u16string found;for(uint32_t j=0;j<n;++j)found.push_back(char16_t(mem.r(p+2+j*2,2)));if(std::string(found.begin(),found.end())==wanted)return e;}
+            for(uint32_t i=0;i<named;++i){uint32_t e=directory+16+i*8,name=mem.r32(e);if(!(name&0x80000000u))continue;uint32_t p=root+(name&0x7fffffffu);uint16_t n=uint16_t(mem.r(p,2));std::u16string found;for(uint32_t j=0;j<n;++j)found.push_back(char16_t(mem.r(p+2+j*2,2)));if(std::string(found.begin(),found.end())==wanted)return e;}
         }
-        uint16_t ids=uint16_t(mem.r(root+14,2));for(uint32_t i=0;i<ids;++i){uint32_t e=root+16+(named+i)*8;if(mem.r32(e)==id)return e;}return 0;
+        uint16_t ids=uint16_t(mem.r(directory+14,2));for(uint32_t i=0;i<ids;++i){uint32_t e=directory+16+(named+i)*8;if(mem.r32(e)==id)return e;}return 0;
     };
     auto resource_data = [this,resource_key](uint32_t base,uint32_t type,uint32_t name,bool wide,uint16_t requested,bool exact,uint32_t& data,uint32_t& size,uint32_t& error)->bool {
         uint32_t nt=base+mem.r32(base+0x3c);if(mem.r32(nt)!=0x00004550){error=1813;return false;}
         uint32_t opt=nt+24,rva=mem.r32(opt+96+16);if(!rva){error=1813;return false;}uint32_t root=base+rva;
-        uint32_t te=resource_key(root,type,wide);if(!te){error=1813;return false;}uint32_t td=mem.r32(te+4);if(!(td&0x80000000u)){error=1813;return false;}uint32_t names=root+(td&0x7fffffffu);
-        uint32_t ne=resource_key(names,name,wide);if(!ne){error=1814;return false;}uint32_t nd=mem.r32(ne+4);if(!(nd&0x80000000u)){error=1814;return false;}uint32_t langs=root+(nd&0x7fffffffu),count=uint32_t(mem.r(langs+12,2))+uint32_t(mem.r(langs+14,2)),chosen=0,neutral=0,user=0,first=0;
+        uint32_t te=resource_key(root,root,type,wide);if(!te){error=1813;return false;}uint32_t td=mem.r32(te+4);if(!(td&0x80000000u)){error=1813;return false;}uint32_t names=root+(td&0x7fffffffu);
+        uint32_t ne=resource_key(names,root,name,wide);if(!ne){error=1814;return false;}uint32_t nd=mem.r32(ne+4);if(!(nd&0x80000000u)){error=1814;return false;}uint32_t langs=root+(nd&0x7fffffffu),count=uint32_t(mem.r(langs+12,2))+uint32_t(mem.r(langs+14,2)),chosen=0,neutral=0,user=0,first=0;
         uint16_t user_lang=0x0409;
 #if defined(_WIN32)
         user_lang=uint16_t(::GetUserDefaultLangID());
@@ -1771,6 +1771,26 @@ inline void Guest::register_all() {
         for(const auto& resource:resource_handles)if(resource.second.module==base&&resource.second.data==data&&resource.second.size==size){set_last_error(0);return resource.first;}
         uint32_t handle=0x74000000u+(++resource_serial);resource_handles[handle]={base,data,size};set_last_error(0);return handle;
     };
+    auto enum_resource_names = [this,resource_key](Cpu& c,bool wide)->uint32_t {
+        uint32_t module=c.arg(0),typep=c.arg(1),callback=c.arg(2),param=c.arg(3);
+        uint32_t base=module?module:image_base;bool known=base==image_base;for(const auto& dll:dlls)if(dll.second.image.base==base)known=true;
+        if(!known){set_last_error(1813);return 0;}if(!callback){set_last_error(87);return 0;}
+        uint32_t nt=base+mem.r32(base+0x3c);if(mem.r32(nt)!=0x00004550){set_last_error(1813);return 0;}
+        uint32_t opt=nt+24,rva=mem.r32(opt+96+16);if(!rva){set_last_error(1813);return 0;}uint32_t root=base+rva;
+        uint32_t te=resource_key(root,root,typep,wide);if(!te){set_last_error(1813);return 0;}uint32_t td=mem.r32(te+4);if(!(td&0x80000000u)){set_last_error(1813);return 0;}
+        uint32_t names=root+(td&0x7fffffffu),count=uint32_t(mem.r(names+12,2))+uint32_t(mem.r(names+14,2));if(!count){set_last_error(1813);return 0;}
+        for(uint32_t i=0;i<count;++i){uint32_t e=names+16+i*8,n=mem.r32(e),name=0;
+            if(n&0x80000000u){uint32_t p=root+(n&0x7fffffffu);uint16_t length=uint16_t(mem.r(p,2));std::u16string value;for(uint32_t j=0;j<length;++j)value.push_back(char16_t(mem.r(p+2+j*2,2)));
+                if(wide)name=put_wstr(value);else{std::string narrow;narrow.reserve(value.size());for(char16_t ch:value)narrow.push_back(ch<=0xff?char(ch):'?');name=put_str(narrow);}
+            }else name=n;
+            if(!c.call(callback,{base,typep,name,param})){set_last_error(15106);return 0;}
+        }
+        return 1;
+    };
+    for(bool wide:{false,true}){
+        std::string name="EnumResourceNames";name+=wide?"W":"A";
+        reg.add("kernel32.dll",name,Conv::Stdcall,4,[enum_resource_names,wide](Cpu& c)->uint32_t{return enum_resource_names(c,wide);});
+    }
     for(bool wide:{false,true})for(bool extended:{false,true}){std::string name=extended?"FindResourceEx":"FindResource";name+=wide?"W":"A";reg.add("kernel32.dll",name,Conv::Stdcall,extended?4:3,[find_resource,wide,extended](Cpu& c)->uint32_t{return find_resource(c,wide,extended);});}
     reg.add("kernel32.dll","LoadResource",Conv::Stdcall,2,[this](Cpu& c)->uint32_t{auto it=resource_handles.find(c.arg(1));if(it==resource_handles.end()||it->second.module!=(c.arg(0)?c.arg(0):image_base)){set_last_error(1814);return 0;}return c.arg(1);});
     reg.add("kernel32.dll","LockResource",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto it=resource_handles.find(c.arg(0));return it==resource_handles.end()?0:it->second.data;});

@@ -37,6 +37,34 @@ static int cmp_str(const void* a, const void* b) {
     return strcmp(*(const char* const*)a, *(const char* const*)b);
 }
 
+struct enum_state { int count, valid, stop_after; };
+static BOOL CALLBACK enum_resource_a(HMODULE module, LPCSTR type, LPSTR name, LONG_PTR opaque) {
+    struct enum_state* state = (struct enum_state*)opaque;
+    int index = state->count++;
+    if (module != GetModuleHandle(NULL) || type != RT_RCDATA) state->valid = 0;
+    HRSRC resource = FindResourceA(module, name, type);
+    if (!resource || !SizeofResource(module, resource) || !LockResource(LoadResource(module, resource))) state->valid = 0;
+    if (index == 0) state->valid &= !IS_INTRESOURCE(name) && strcmp(name, "ALPHA") == 0;
+    else if (index == 1) state->valid &= !IS_INTRESOURCE(name) && strcmp(name, "BETA") == 0;
+    else if (index == 2) state->valid &= IS_INTRESOURCE(name) && (ULONG_PTR)name == 101;
+    else if (index == 3) state->valid &= IS_INTRESOURCE(name) && (ULONG_PTR)name == 202;
+    else state->valid = 0;
+    return !state->stop_after || state->count < state->stop_after;
+}
+static BOOL CALLBACK enum_resource_w(HMODULE module, LPCWSTR type, LPWSTR name, LONG_PTR opaque) {
+    struct enum_state* state = (struct enum_state*)opaque;
+    int index = state->count++;
+    if (module != GetModuleHandle(NULL) || (ULONG_PTR)type != (ULONG_PTR)RT_RCDATA) state->valid = 0;
+    HRSRC resource = FindResourceW(module, name, type);
+    if (!resource || !SizeofResource(module, resource) || !LockResource(LoadResource(module, resource))) state->valid = 0;
+    if (index == 0) state->valid &= !IS_INTRESOURCE(name) && name[0] == L'A' && name[1] == L'L' && name[2] == L'P' && name[3] == L'H' && name[4] == L'A' && name[5] == 0;
+    else if (index == 1) state->valid &= !IS_INTRESOURCE(name) && name[0] == L'B' && name[1] == L'E' && name[2] == L'T' && name[3] == L'A' && name[4] == 0;
+    else if (index == 2) state->valid &= IS_INTRESOURCE(name) && (ULONG_PTR)name == 101;
+    else if (index == 3) state->valid &= IS_INTRESOURCE(name) && (ULONG_PTR)name == 202;
+    else state->valid = 0;
+    return !state->stop_after || state->count < state->stop_after;
+}
+
 static void test_resources(void) {
     HRSRC resource = FindResourceA(NULL, MAKEINTRESOURCEA(101), RT_RCDATA);
     check(resource != NULL && SizeofResource(NULL, resource) == 4);
@@ -50,6 +78,19 @@ static void test_resources(void) {
     int wide_length = LoadStringW(NULL, 7, wide, 32), wide_equal = wide_length == 12 && wide[12] == 0;
     for (int i = 0; i < 12 && wide_equal; ++i) wide_equal = wide[i] == L"Pug resource"[i];
     check(wide_equal);
+    struct enum_state state = {0, 1, 0};
+    int enum_a_result = EnumResourceNamesA(NULL, RT_RCDATA, enum_resource_a, (LONG_PTR)&state);
+    check(enum_a_result && state.count == 4 && state.valid);
+    state = (struct enum_state){0, 1, 1};
+    SetLastError(0);
+    int enum_stop_result = EnumResourceNamesA(NULL, RT_RCDATA, enum_resource_a, (LONG_PTR)&state);
+    DWORD enum_stop_error = GetLastError();
+    int enum_stop_ok = !enum_stop_result && state.count == 1 && enum_stop_error == ERROR_RESOURCE_ENUM_USER_STOP;
+    check(enum_stop_ok);
+    state = (struct enum_state){0, 1, 0};
+    check(EnumResourceNamesW(NULL, MAKEINTRESOURCEW(10), enum_resource_w, (LONG_PTR)&state) && state.count == 4 && state.valid);
+    SetLastError(0);
+    check(!EnumResourceNamesA(NULL, MAKEINTRESOURCEA(11), enum_resource_a, 0) && GetLastError() == ERROR_RESOURCE_TYPE_NOT_FOUND);
     SetLastError(0);
     check(FindResourceA(NULL, MAKEINTRESOURCEA(102), RT_RCDATA) == NULL && GetLastError() == ERROR_RESOURCE_NAME_NOT_FOUND);
     SetLastError(0);

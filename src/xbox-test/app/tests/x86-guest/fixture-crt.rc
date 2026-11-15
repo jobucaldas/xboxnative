@@ -4,6 +4,9 @@
 // Wine), matching what the console reports and what the interpreter answers.
 1 24 "fixture-crt.manifest"
 101 RCDATA { 0x12345678L }
+202 RCDATA { 0x87654321L }
+"Alpha" RCDATA { 0x11111111L }
+"Beta" RCDATA { 0x22222222L }
 STRINGTABLE
 BEGIN
     7 "Pug resource"
