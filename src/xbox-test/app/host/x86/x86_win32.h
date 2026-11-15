@@ -9,16 +9,44 @@
 #include "x86_pe.h"
 namespace x86 {
 struct Host {
+    enum class NlsOperation { IsValidCodePage, GetCPInfo, MultiByteToWideChar, WideCharToMultiByte,
+        GetStringTypeA, GetStringTypeW, GetStringTypeExW, LCMapStringW, LCMapStringEx,
+        CompareStringW, CompareStringEx, FoldStringW };
+    struct NlsRequest {
+        NlsOperation operation;
+        uint32_t code_page = 0, flags = 0, output_capacity = 0, locale = 0, type = 0;
+        int32_t input_length = 0, input2_length = 0;
+        bool input_null = false, input2_null = false, locale_name_null = false, output_null = true, wants_used_default = false;
+        std::u16string locale_name;
+        std::vector<uint8_t> input, input2, default_char;
+    };
+    struct NlsResponse {
+        uint32_t result = 0, last_error = 0;
+        bool used_default = false;
+        std::vector<uint8_t> output;
+    };
     struct FileCall {
-        enum class Kind { CreateA, CreateW, Close, Read, Size, Time, AttributesA, Seek, End, TimeConvert, TimeLocal } kind;
+        enum class Kind { CreateA, CreateW, Close, Read, Size, Time, AttributesA, Seek, SeekEx, End, TimeConvert, TimeLocal } kind;
         std::string path_a; std::u16string path_w;
-        uint64_t handle = 0, template_handle = 0, value = 0; uint32_t args[5]{}, error = 0; bool succeeded = false;
+        uint64_t handle = 0, template_handle = 0, value = 0; int64_t distance = 0, position = 0; uint32_t method = 0, args[5]{}, error = 0; bool succeeded = false;
         std::vector<uint8_t> data;
         explicit FileCall(Kind k) : kind(k) {}
     };
+    struct LocaleCall {
+        bool date = false, has_system_time = false, has_format = false, has_output_buffer = false;
+        uint32_t locale = 0, flags = 0;
+        uint16_t system_time[8]{};
+        std::u16string format;
+        int32_t buffer_chars = 0, result = 0;
+        uint32_t error = 0;
+        std::vector<uint8_t> data;
+        bool succeeded = false;
+    };
     std::string out, err;                         // captured stdout/stderr bytes
     std::function<void(const std::string&)> tee;  // optional live sink
+    std::function<NlsResponse(const NlsRequest&)> nls_call;
     std::function<void(FileCall&)> file_call;     // Play's native kernel32 file layer
+    std::function<void(LocaleCall&)> locale_call; // Play's native kernel32 locale formatter
     std::map<std::string, unsigned> calls;        // import -> call count
     static constexpr uint32_t H_STDIN = 3, H_STDOUT = 7, H_STDERR = 11;
 };

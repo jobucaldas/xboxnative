@@ -403,6 +403,7 @@ struct Guest {
     // binds the same host thunk the import binder would have, as Windows
     // answers for its own modules.
     std::map<std::string, uint32_t> os_modules;  // lowercase dll -> pseudo base
+    std::map<std::pair<std::string, std::string>, uint32_t> os_export_addrs;
     static constexpr uint32_t kOsModuleBase = 0x68000000u, kOsModuleStride = 0x10000u;
     // kernelbase exports nothing here (the CRT probes it and falls back when
     // the lookup misses), but LoadLibrary must succeed, as on Windows.
@@ -411,14 +412,58 @@ struct Guest {
         for (auto& kv : reg.map) if (kv.first.first == dll) return true;
         return false;
     }
+    // Map a read-only PE32 image at each OS pseudo-handle. Its exports mirror
+    // the route registry, so guest export walkers and GetProcAddress agree.
+    void map_os_module_image(const std::string& dll, uint32_t base, ThunkTable& table) {
+        struct Export { std::string name; uint32_t address; };
+        std::vector<Export> exports;
+        for (const auto& kv : reg.map) if (kv.first.first == dll)
+            exports.push_back({kv.second.name, os_export_addr(table, dll, kv.first.second)});
+        for (const auto& kv : reg.data) if (kv.first.first == dll)
+            exports.push_back({kv.first.second, kv.second});
+        std::sort(exports.begin(), exports.end(), [](const Export& a, const Export& b) { return a.name < b.name; });
+        constexpr uint32_t image_size = kOsModuleStride, nt = 0x80, opt = nt + 24;
+        constexpr uint32_t exp = 0x200, funcs = 0x240;
+        uint32_t names = funcs + uint32_t(exports.size()) * 4;
+        uint32_t ords = names + uint32_t(exports.size()) * 4;
+        uint32_t strings = ords + uint32_t(exports.size()) * 2;
+        mem.map(base, image_size, PROT_R | PROT_W);
+        mem.w(base, 0x5A4D, 2); mem.w32(base + 0x3c, nt);
+        mem.w32(base + nt, 0x00004550);
+        mem.w(base + nt + 4, 0x014c, 2); mem.w(base + nt + 6, 0, 2);
+        mem.w(base + nt + 20, 0x00e0, 2); mem.w(base + nt + 22, 0x2102, 2);
+        mem.w(base + opt, 0x010b, 2); mem.w32(base + opt + 28, base);
+        mem.w32(base + opt + 32, 0x1000); mem.w32(base + opt + 36, 0x200);
+        mem.w32(base + opt + 56, image_size); mem.w32(base + opt + 60, 0x200);
+        mem.w32(base + opt + 92, 16); mem.w32(base + opt + 96, exp);
+        // IMAGE_EXPORT_DIRECTORY; arrays contain all route names in sorted order.
+        mem.w32(base + exp + 12, strings);
+        mem.w32(base + exp + 16, 1);
+        mem.w32(base + exp + 20, uint32_t(exports.size()));
+        mem.w32(base + exp + 24, uint32_t(exports.size()));
+        mem.w32(base + exp + 28, funcs); mem.w32(base + exp + 32, names); mem.w32(base + exp + 36, ords);
+        uint32_t cursor = strings;
+        mem.write_bytes(base + cursor, dll.c_str(), uint32_t(dll.size() + 1));
+        cursor += uint32_t(dll.size() + 1);
+        for (uint32_t i = 0; i < exports.size(); ++i) {
+            mem.w32(base + funcs + i * 4, exports[i].address - base);
+            mem.w32(base + names + i * 4, cursor);
+            mem.w(base + ords + i * 2, i, 2);
+            mem.write_bytes(base + cursor, exports[i].name.c_str(), uint32_t(exports[i].name.size() + 1));
+            cursor += uint32_t(exports[i].name.size() + 1);
+        }
+        mem.w32(base + opt + 100, cursor - exp);
+        mem.protect(base, image_size, PROT_R);
+    }
     // Modules every process has from its start, served without an image.
     bool os_served(const std::string& dll) const {
         return dll == "kernel32.dll" || dll == "ntdll.dll" || dll == "msvcrt.dll" || registry_serves(dll);
     }
-    uint32_t os_module_handle(const std::string& dll) {
+    uint32_t os_module_handle(const std::string& dll, ThunkTable& table) {
         auto it = os_modules.find(dll);
         if (it != os_modules.end()) return it->second;
         uint32_t h = kOsModuleBase + uint32_t(os_modules.size()) * kOsModuleStride;
+        map_os_module_image(dll, h, table);
         os_modules[dll] = h;
         add_module(dll, h);  // GetModuleHandleA("ntdll.dll") answers it too
         return h;
@@ -438,13 +483,13 @@ struct Guest {
         else if (n.find('.') == std::string::npos) n += ".dll";
         return n;
     }
-    uint32_t module_by_name(const std::string& name) {
+    uint32_t module_by_name(const std::string& name, ThunkTable& table) {
         std::string n = module_key(name);
         auto it = modules.find(n);
         if (it != modules.end()) return it->second;
         auto d = dlls.find(n);
         if (d != dlls.end()) return d->second.image.base;
-        if (os_served(n)) return os_module_handle(n);
+        if (os_served(n)) return os_module_handle(n, table);
         set_last_error(126);  // ERROR_MOD_NOT_FOUND
         return 0;
     }
@@ -464,7 +509,14 @@ struct Guest {
         if (l.rfind(".dll") != l.size() - 4) l += ".dll";
         if (s.rfind("#", 0) == 0) return 0;  // ordinal forward: no ordinal surface
         auto it = reg.map.find({l, s});
-        if (it != reg.map.end()) return table.add(it->second);
+        if (it != reg.map.end()) {
+            auto key = std::make_pair(l, s);
+            auto cached = os_export_addrs.find(key);
+            if (cached != os_export_addrs.end()) return cached->second;
+            uint32_t address = table.add(it->second);
+            os_export_addrs[key] = address;
+            return address;
+        }
         auto dt = reg.data.find({l, s});
         if (dt != reg.data.end()) return dt->second;
         return 0;
@@ -473,7 +525,7 @@ struct Guest {
         std::string lower = module_key(requested);
         auto it = dlls.find(lower);
         if (it != dlls.end()) { it->second.refs++; return it->second.image.base; }
-        if (os_served(lower)) return os_module_handle(lower);
+        if (os_served(lower)) return os_module_handle(lower, table);
         if (!dll_source) { set_last_error(126); return 0; }  // ERROR_MOD_NOT_FOUND
         std::vector<uint8_t> bytes = dll_source(lower);
         if (bytes.empty()) { set_last_error(126); return 0; }
@@ -566,7 +618,7 @@ struct Guest {
             if (name_ptr >= 0x10000u) {
                 std::string sym = Registry::key_sym(str(name_ptr));
                 auto it = reg.map.find({kv.first, sym});
-                if (it != reg.map.end()) return table.add(it->second);
+                if (it != reg.map.end()) return os_export_addr(table, kv.first, sym);
                 auto dt = reg.data.find({kv.first, sym});
                 if (dt != reg.data.end()) return dt->second;
                 // Also answer the undecorated stdcall name for a decorated
@@ -574,7 +626,7 @@ struct Guest {
                 std::string dec = sym + "@";
                 for (auto& e : reg.map)
                     if (e.first.first == kv.first && e.first.second.rfind(dec, 0) == 0)
-                        return table.add(e.second);
+                        return os_export_addr(table, kv.first, e.first.second);
             }
             set_last_error(127);  // ERROR_PROC_NOT_FOUND
             return 0;
@@ -773,6 +825,12 @@ inline void Guest::register_all() {
     // must hold a callable thunk, not the table address — a data binding makes
     // a call through it jump into the iob bytes. It returns the table pointer.
     reg.add("msvcrt.dll", "__iob_func", Conv::Cdecl, 0, [this](Cpu&) -> uint32_t { return iob_addr; });
+    // MSVC 11's CRT uses this startup helper from its own DLL name. Honor the
+    // STARTUPINFO flag and value rather than treating the zeroed block as a
+    // request to hide the window.
+    reg.add("msvcr110.dll", "__crtGetShowWindowMode", Conv::Cdecl, 0, [this](Cpu&) -> uint32_t {
+        return (mem.r32(startupinfo + 44) & 1u) ? uint16_t(mem.r(startupinfo + 48, 2)) : 10u;
+    });
     auto C = [](const char* n) { return n; };
     (void)C;
 
@@ -823,7 +881,7 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "FreeEnvironmentStringsW", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "GetModuleHandleA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         std::string n = str(c.arg(0)); if (n.empty()) return image_base;
-        return module_by_name(n); });
+        return module_by_name(n, c.thunks); });
     // FreeLibrary: decrements the refcount of a module this surface loaded or
     // tracks, and never unmaps: a real unload (refcount to zero -> unmap +
     // DLL_PROCESS_DETACH) is not implemented, and the coverage matrix says so.
@@ -996,7 +1054,7 @@ inline void Guest::register_all() {
         } else {
             std::string n;
             for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(p + i * 2, 2)); if (!w) break; n.push_back(char(w & 0xff)); }
-            base = module_by_name(n);
+            base = module_by_name(n, c.thunks);
         }
         if (out) mem.w32(out, base);
         if (!base) set_last_error(126);  // ERROR_MOD_NOT_FOUND, as Windows answers
@@ -1043,29 +1101,159 @@ inline void Guest::register_all() {
             mem.w8(p + 155, 0);    // wReserved
         }
         return 1; });
+    auto format_locale = [this](bool date, Cpu& c) -> uint32_t {
+        Host::LocaleCall q; q.date=date; q.locale=c.arg(0); q.flags=c.arg(1);
+        q.has_system_time=c.arg(2)!=0; q.has_format=c.arg(3)!=0; q.has_output_buffer=c.arg(4)!=0; q.buffer_chars=int32_t(c.arg(5));
+        if(q.has_system_time) for(unsigned i=0;i<8;++i) q.system_time[i]=uint16_t(mem.r(c.arg(2)+i*2,2));
+        if(q.has_format) q.format=wstr(c.arg(3));
+        if(!host.locale_call){set_last_error(120);return 0;}
+        host.locale_call(q);
+        if(!q.succeeded){set_last_error(q.error?q.error:87);return 0;}
+        if(q.result>0&&c.arg(4)){if(q.data.size()!=size_t(q.result)*2){set_last_error(87);return 0;}mem.write_bytes(c.arg(4),q.data.data(),uint32_t(q.data.size()));}
+        return uint32_t(q.result);
+    };
+    reg.add("kernel32.dll", "GetTimeFormatW", Conv::Stdcall, 6, [format_locale](Cpu& c) -> uint32_t { return format_locale(false,c); });
+    reg.add("kernel32.dll", "GetDateFormatW", Conv::Stdcall, 6, [format_locale](Cpu& c) -> uint32_t { return format_locale(true,c); });
     reg.add("kernel32.dll", "IsProcessorFeaturePresent", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
         return c.arg(0) == 10 ? 1u : 0u; });  // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
+    auto nls_input = [this](uint32_t src, int32_t length, uint32_t unit_size, Host::NlsRequest& request) {
+        request.input_null = src == 0;
+        request.input_length = length;
+        if (!src || length < -1) return;
+        if (length == -1) {
+            if (unit_size == 1) {
+                std::string value = str(src);
+                request.input.assign(value.begin(), value.end()); request.input.push_back(0);
+            } else {
+                std::u16string value = wstr(src);
+                request.input.resize((value.size() + 1) * 2);
+                for (size_t i = 0; i < value.size(); ++i) { request.input[i * 2] = uint8_t(value[i]); request.input[i * 2 + 1] = uint8_t(value[i] >> 8); }
+            }
+        } else if (uint64_t(uint32_t(length)) * unit_size <= (1u << 24)) {
+            request.input = mem.read_bytes(src, uint32_t(length) * unit_size);
+        } else throw Fault(FaultKind::AccessViolation, 0, src, "NLS input exceeds copy limit");
+    };
+    reg.add("kernel32.dll", "IsValidCodePage", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        uint32_t cp = c.arg(0);
+        if (host.nls_call) {
+            Host::NlsRequest request{}; request.operation = Host::NlsOperation::IsValidCodePage; request.code_page = cp;
+            Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error); return response.result;
+        }
+        return cp == 20127 || cp == 28591 ? 1u : 0u;
+    });
     reg.add("kernel32.dll", "GetACP", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 1252; });
     reg.add("kernel32.dll", "GetOEMCP", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 437; });
     reg.add("kernel32.dll", "GetCPInfo", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
-        uint32_t cp = c.arg(0), p = c.arg(1); if (!p) return 0;
+        uint32_t cp = c.arg(0), p = c.arg(1); if (!p) { set_last_error(87); return 0; }
+        if (host.nls_call) {
+            Host::NlsRequest request{}; request.operation = Host::NlsOperation::GetCPInfo; request.code_page = cp;
+            Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error);
+            if (response.result && response.output.size() == 20) copy_out(p, response.output.data(), 20);
+            return response.result;
+        }
         mem.w32(p, cp == 65001 ? 65001u : 0u); mem.w32(p + 4, 1); mem.w8(p + 8, '?'); mem.w8(p + 9, 0);
         for (int i = 10; i < 20; ++i) mem.w8(p + uint32_t(i), 0);
         return 1; });
-    reg.add("kernel32.dll", "MultiByteToWideChar", Conv::Stdcall, 6, [this](Cpu& c) -> uint32_t {
-        uint32_t cp = c.arg(0), src = c.arg(2), n = c.arg(3), dst = c.arg(4), cap = c.arg(5);
-        (void)cp; std::string s = n == 0xFFFFFFFFu ? str(src) : std::string();
-        if (n != 0xFFFFFFFFu) { auto b = mem.read_bytes(src, n); s.assign(b.begin(), b.end()); }
+    reg.add("kernel32.dll", "MultiByteToWideChar", Conv::Stdcall, 6, [this, nls_input](Cpu& c) -> uint32_t {
+        uint32_t cp = c.arg(0), flags = c.arg(1), src = c.arg(2), dst = c.arg(4), cap = c.arg(5);
+        int32_t n = int32_t(c.arg(3));
+        if (host.nls_call) {
+            Host::NlsRequest request{}; request.operation = Host::NlsOperation::MultiByteToWideChar;
+            request.code_page = cp; request.flags = flags; request.output_null = dst == 0; request.output_capacity = cap;
+            nls_input(src, n, 1, request);
+            Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error);
+            if (response.result && dst && cap && response.output.size() == size_t(response.result) * 2) copy_out(dst, response.output.data(), uint32_t(response.output.size()));
+            return response.result;
+        }
+        (void)cp; std::string s = uint32_t(n) == 0xFFFFFFFFu ? str(src) : std::string();
+        if (uint32_t(n) != 0xFFFFFFFFu) { auto b = mem.read_bytes(src, uint32_t(n)); s.assign(b.begin(), b.end()); }
         if (!dst || !cap) return uint32_t(s.size() + 1);
         uint32_t put = uint32_t(s.size()) < cap ? uint32_t(s.size()) : cap - 1;
         for (uint32_t i = 0; i < put; ++i) { mem.w8(dst + i * 2, uint8_t(s[i])); mem.w8(dst + i * 2 + 1, 0); }
         if (put < cap) { mem.w8(dst + put * 2, 0); mem.w8(dst + put * 2 + 1, 0); }
         return put; });
-    reg.add("kernel32.dll", "WideCharToMultiByte", Conv::Stdcall, 8, [this](Cpu& c) -> uint32_t {
-        uint32_t src = c.arg(2), n = c.arg(3), dst = c.arg(4), cap = c.arg(5);
+    auto nls_output = [this](Host::NlsRequest& request, uint32_t output_ptr, uint32_t expected_bytes) {
+        if (!host.nls_call) { set_last_error(87); return 0u; }
+        Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error);
+        const uint32_t bytes = expected_bytes == 0xFFFFFFFFu ? response.result * 2 : expected_bytes;
+        if (response.result && output_ptr && response.output.size() == bytes)
+            copy_out(output_ptr, response.output.data(), bytes);
+        return response.result;
+    };
+    reg.add("kernel32.dll", "GetStringTypeA", Conv::Stdcall, 5, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::GetStringTypeA;
+        request.locale = c.arg(0); request.type = c.arg(1); request.output_null = c.arg(4) == 0;
+        nls_input(c.arg(2), int32_t(c.arg(3)), 1, request);
+        const uint32_t chars = request.input_length == -1 ? uint32_t(request.input.size()) : uint32_t(request.input_length);
+        request.output_capacity = chars;
+        return nls_output(request, c.arg(4), chars * 2);
+    });
+    reg.add("kernel32.dll", "GetStringTypeW", Conv::Stdcall, 4, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::GetStringTypeW;
+        request.type = c.arg(0); request.output_null = c.arg(3) == 0; nls_input(c.arg(1), int32_t(c.arg(2)), 2, request);
+        const uint32_t chars = request.input_length == -1 ? uint32_t(request.input.size() / 2) : uint32_t(request.input_length);
+        request.output_capacity = chars;
+        return nls_output(request, c.arg(3), chars * 2);
+    });
+    reg.add("kernel32.dll", "GetStringTypeExW", Conv::Stdcall, 5, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::GetStringTypeExW;
+        request.locale = c.arg(0); request.type = c.arg(1); request.output_null = c.arg(4) == 0;
+        nls_input(c.arg(2), int32_t(c.arg(3)), 2, request);
+        const uint32_t chars = request.input_length == -1 ? uint32_t(request.input.size() / 2) : uint32_t(request.input_length);
+        request.output_capacity = chars;
+        return nls_output(request, c.arg(4), chars * 2);
+    });
+    reg.add("kernel32.dll", "LCMapStringW", Conv::Stdcall, 6, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::LCMapStringW;
+        request.locale = c.arg(0); request.flags = c.arg(1); request.output_capacity = c.arg(5); request.output_null = c.arg(4) == 0;
+        nls_input(c.arg(2), int32_t(c.arg(3)), 2, request);
+        return nls_output(request, c.arg(4), 0xFFFFFFFFu);
+    });
+    reg.add("kernel32.dll", "LCMapStringEx", Conv::Stdcall, 9, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::LCMapStringEx;
+        request.flags = c.arg(1); request.output_capacity = c.arg(5); request.output_null = c.arg(4) == 0;
+        request.locale_name_null = c.arg(0) == 0; if (!request.locale_name_null) request.locale_name = wstr(c.arg(0));
+        nls_input(c.arg(2), int32_t(c.arg(3)), 2, request);
+        return nls_output(request, c.arg(4), 0xFFFFFFFFu);
+    });
+    reg.add("kernel32.dll", "CompareStringW", Conv::Stdcall, 6, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::CompareStringW;
+        request.locale = c.arg(0); request.flags = c.arg(1); nls_input(c.arg(2), int32_t(c.arg(3)), 2, request);
+        Host::NlsRequest second{}; nls_input(c.arg(4), int32_t(c.arg(5)), 2, second);
+        request.input2 = std::move(second.input); request.input2_null = second.input_null; request.input2_length = second.input_length;
+        return nls_output(request, 0, 0);
+    });
+    reg.add("kernel32.dll", "CompareStringEx", Conv::Stdcall, 9, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::CompareStringEx;
+        request.flags = c.arg(1); request.locale_name_null = c.arg(0) == 0;
+        if (!request.locale_name_null) request.locale_name = wstr(c.arg(0));
+        nls_input(c.arg(2), int32_t(c.arg(3)), 2, request);
+        Host::NlsRequest second{}; nls_input(c.arg(4), int32_t(c.arg(5)), 2, second);
+        request.input2 = std::move(second.input); request.input2_null = second.input_null; request.input2_length = second.input_length;
+        return nls_output(request, 0, 0);
+    });
+    reg.add("kernel32.dll", "FoldStringW", Conv::Stdcall, 5, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::FoldStringW;
+        request.flags = c.arg(0); request.output_capacity = c.arg(4); request.output_null = c.arg(3) == 0;
+        nls_input(c.arg(1), int32_t(c.arg(2)), 2, request);
+        return nls_output(request, c.arg(3), 0xFFFFFFFFu);
+    });
+    reg.add("kernel32.dll", "WideCharToMultiByte", Conv::Stdcall, 8, [this, nls_input](Cpu& c) -> uint32_t {
+        uint32_t cp = c.arg(0), flags = c.arg(1), src = c.arg(2), dst = c.arg(4), cap = c.arg(5), def = c.arg(6), used = c.arg(7);
+        int32_t n = int32_t(c.arg(3));
+        if (host.nls_call) {
+            Host::NlsRequest request{}; request.operation = Host::NlsOperation::WideCharToMultiByte;
+            request.code_page = cp; request.flags = flags; request.output_null = dst == 0; request.output_capacity = cap; request.wants_used_default = used != 0;
+            nls_input(src, n, 2, request);
+            if (def) request.default_char = mem.read_bytes(def, 1);
+            Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error);
+            if (response.result && dst && cap && response.output.size() == response.result) copy_out(dst, response.output.data(), response.result);
+            if (used) mem.w32(used, response.used_default ? 1u : 0u);
+            return response.result;
+        }
         std::string s;
-        if (n == 0xFFFFFFFFu) { for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(i * 2 + src, 2)); if (!w) break; s.push_back(char(w & 0xff)); } }
-        else for (uint32_t i = 0; i < n; ++i) s.push_back(char(mem.r(src + i * 2, 2) & 0xff));
+        if (uint32_t(n) == 0xFFFFFFFFu) { for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(i * 2 + src, 2)); if (!w) break; s.push_back(char(w & 0xff)); } }
+        else for (uint32_t i = 0; i < uint32_t(n); ++i) s.push_back(char(mem.r(src + i * 2, 2) & 0xff));
         if (!dst || !cap) return uint32_t(s.size() + 1);
         uint32_t put = uint32_t(s.size()) < cap ? uint32_t(s.size()) : cap - 1;
         mem.write_bytes(dst, s.data(), put); if (put < cap) mem.w8(dst + put, 0);
@@ -1083,6 +1271,26 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "HeapFree", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { heap.release(c.arg(2)); return 1; });
     reg.add("kernel32.dll", "HeapReAlloc", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t { return heap.realloc(c.arg(2), c.arg(3)); });
     reg.add("kernel32.dll", "HeapSize", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { return heap.size_of(c.arg(2)); });
+    reg.add("kernel32.dll", "HeapSetInformation", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
+        uint32_t h = c.arg(0), info = c.arg(1), buffer = c.arg(2), size = c.arg(3);
+        if ((h != 0x50000000u && !heap_handles.count(h)) ||
+            (info == 0 && (!buffer || size != 4)) ||
+            (info == 1 && (buffer || size != 0)) || info > 1) { set_last_error(87); return 0; }
+        if (info == 0) {
+            uint32_t compatibility = mem.r32(buffer);
+            if (compatibility != 0 && compatibility != 2) { set_last_error(87); return 0; }
+        }
+        set_last_error(0); return 1;
+    });
+    reg.add("kernel32.dll", "HeapQueryInformation", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
+        uint32_t h = c.arg(0), info = c.arg(1), buffer = c.arg(2), size = c.arg(3), returned = c.arg(4);
+        if ((h != 0x50000000u && !heap_handles.count(h)) || info != 0 || !buffer || size < 4) {
+            set_last_error(87); return 0;
+        }
+        mem.w32(buffer, 2);  // HEAP_COMPATIBILITY_INFORMATION: LFH enabled
+        if (returned) mem.w32(returned, 4);
+        set_last_error(0); return 1;
+    });
     reg.add("kernel32.dll", "LocalAlloc", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { return heap.alloc(c.arg(1)); });
     reg.add("kernel32.dll", "LocalFree", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { heap.release(c.arg(0)); return 0; });
     reg.add("kernel32.dll", "GlobalAlloc", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { return heap.alloc(c.arg(1)); });
@@ -1226,6 +1434,12 @@ inline void Guest::register_all() {
         Host::FileCall q{Host::FileCall::Kind::Seek};if(!native_file(c.arg(0),q))return 0xffffffffu;
         q.args[0]=c.arg(1);q.args[1]=c.arg(2)?mem.r32(c.arg(2)):0;q.args[2]=c.arg(3);q.args[3]=c.arg(2)!=0;
         if(!call_file(q)){set_last_error(q.error?q.error:120);return 0xffffffffu;}if(c.arg(2))mem.w32(c.arg(2),q.args[1]);set_last_error(0);return uint32_t(q.value); });
+    // x86 stdcall passes LARGE_INTEGER liDistanceToMove by value in two stack slots:
+    // (hFile, distLow, distHigh, lpNewFilePointer, dwMoveMethod) = 20 bytes popped.
+    reg.add("kernel32.dll", "SetFilePointerEx", Conv::Stdcall, 5, [this,native_file](Cpu& c) -> uint32_t {
+        Host::FileCall q{Host::FileCall::Kind::SeekEx};if(!native_file(c.arg(0),q))return 0;
+        q.distance=int64_t(uint64_t(c.arg(1))|(uint64_t(c.arg(2))<<32));q.method=c.arg(4);q.args[0]=c.arg(3)!=0;
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}if(c.arg(3)){mem.w32(c.arg(3),uint32_t(q.position));mem.w32(c.arg(3)+4,uint32_t(uint64_t(q.position)>>32));}return 1; });
     reg.add("kernel32.dll", "SetEndOfFile", Conv::Stdcall, 1, [this,native_file](Cpu& c) -> uint32_t {
         Host::FileCall q{Host::FileCall::Kind::End};if(!native_file(c.arg(0),q))return 0;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
     reg.add("kernel32.dll", "FileTimeToSystemTime", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
@@ -1333,7 +1547,7 @@ inline void Guest::register_all() {
         if (!c.arg(0)) return image_base;
         std::string n;
         for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(c.arg(0) + i * 2, 2)); if (!w) break; n.push_back(char(w & 0xff)); }
-        return module_by_name(n); });
+        return module_by_name(n, c.thunks); });
     reg.add("msvcrt.dll", "__set_app_type", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 0; });
     reg.add("msvcrt.dll", "__setusermatherr", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 0; });
     reg.add("msvcrt.dll", "_amsg_exit", Conv::Cdecl, 1, [this](Cpu& c) -> uint32_t { do_exit(c, c.arg(0)); return 0; });

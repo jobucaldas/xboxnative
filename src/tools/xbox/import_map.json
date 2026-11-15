@@ -184,8 +184,8 @@
       "reason": "Named x64 ABI failure/empty adapters in entry-stubs.dll for the three-image probe; runtime tolerance remains unverified."
     },
     "psapi.dll": {
-      "class": "system",
-      "reason": "Native process-status API (forwards to kernelbase K32*); Rust backtraces and module queries."
+      "class": "wine-pe",
+      "reason": "Wine PE forwarders for the process-status APIs; GetModuleFileNameExW is behavior-tested through the donor and forwards to kernelbase K32GetModuleFileNameExW."
     },
     "setupapi.dll": {
       "class": "wine-pe",
