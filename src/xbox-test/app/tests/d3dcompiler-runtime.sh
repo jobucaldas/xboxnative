@@ -36,7 +36,7 @@ mkdir -p "$out/donors"
 cp "$donors"/graphics/*.dll "$donors"/graphics/SHA256SUMS "$out/donors/" 2>/dev/null || { echo "donors missing: run tools/build-wine-donors.sh first" >&2; exit 2; }
 # The probe maps every donor beside the executable: copy the rest from the
 # same source build so d3dcompiler_47's gate runs with a complete set.
-cp "$donors"/{avrt,dinput8,hid,setupapi,shcore,version}.dll "$out/donors/"
+cp "$donors"/{avrt,dinput8,hid,psapi,setupapi,shcore,version}.dll "$out/donors/"
 WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 120 wine "$out/guest.exe" | tr -d '\r' | tee "$out/run.log"
 grep -Fx 'D3DCOMPILER DONOR PASS: probe, static imports, compile and reflect; no game code' "$out/run.log"
 echo "d3dcompiler donor Wine host test: ok"
