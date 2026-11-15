@@ -44,8 +44,8 @@ int main(int argc, char** argv) {
     auto file = read_file(argv[1]);
     if (file.empty()) { std::printf("FAIL cannot read fixture\n"); return 2; }
     auto absent = run_image(file, "VC110-Fixture.EXE", "VC110-Fixture.EXE");
-    if (absent.fault.find("unresolved import msvcr110.dll!strlen") == std::string::npos) {
-        std::printf("FAIL null DllSource did not fault at msvcr110.dll!strlen: %s\n", absent.fault.c_str());
+    if (absent.fault.find("unresolved import msvcr110.dll!malloc") == std::string::npos) {
+        std::printf("FAIL null DllSource did not fault at msvcr110.dll!malloc: %s\n", absent.fault.c_str());
         return 1;
     }
     std::printf("X86-VC-CRT NULL-SOURCE FAILS: %s\n", absent.fault.c_str());
@@ -76,9 +76,9 @@ int main(int argc, char** argv) {
         if (name == "msvcr110.dll") gaps = unresolved;
     };
     auto result = run_image(file, "VC110-Fixture.EXE", "VC110-Fixture.EXE", nullptr, nullptr,
-                            100ull * 1000 * 1000, source, false, nullptr, observe);
+                            100ull * 1000 * 1000, source, true, nullptr, observe);
     if (result.finished && result.exit_code == 42 && result.fault.empty()) {
-        std::printf("X86-VC-CRT PASS: msvcr110.dll strlen ran to exit 42\n");
+        std::printf("X86-VC-CRT PASS: msvcr110.dll heap and strlen imports ran to exit 42\n");
     } else if (result.fault.find("ntdll.dll!__wine_dbg_header") != std::string::npos && !gaps.empty()) {
         std::printf("X86-VC-CRT LIMIT: donor DllMain faults on unrouted ntdll.dll!__wine_dbg_header\n");
     } else {
