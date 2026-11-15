@@ -167,9 +167,19 @@ inline void install_nls_host(Host& host) {
             std::vector<wchar_t> locale(request.locale_name.begin(), request.locale_name.end()); locale.push_back(0);
             const wchar_t* input_ptr = request.input_null ? nullptr : input.data();
             const wchar_t* locale_ptr = request.locale_name_null ? nullptr : locale.data();
-            if (request.operation == Host::NlsOperation::LCMapStringW)
-                response.result = uint32_t(::LCMapStringW(request.locale, request.flags, input_ptr, request.input_length,
+            if (request.operation == Host::NlsOperation::LCMapStringW) {
+                // LCMapStringW sits outside the UWP SDK header partition (the console
+                // build fails on ::LCMapStringW); resolve it from the system DLL at run
+                // time and report ERROR_CALL_NOT_IMPLEMENTED if the export is absent.
+                using MapW=int(WINAPI*)(LCID,DWORD,LPCWSTR,int,LPWSTR,int);
+                static HMODULE base = LoadLibraryExW(L"kernelbase.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+                static HMODULE k32 = LoadLibraryExW(L"kernel32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+                FARPROC proc = base ? GetProcAddress(base, "LCMapStringW") : nullptr;
+                if (!proc && k32) proc = GetProcAddress(k32, "LCMapStringW");
+                if (!proc) { response.last_error = ERROR_CALL_NOT_IMPLEMENTED; return response; }
+                response.result = uint32_t(reinterpret_cast<MapW>(proc)(request.locale, request.flags, input_ptr, request.input_length,
                     output.empty() ? nullptr : output.data(), int(request.output_capacity)));
+            }
             else if (request.operation == Host::NlsOperation::LCMapStringEx)
                 response.result = uint32_t(::LCMapStringEx(locale_ptr, request.flags, input_ptr, request.input_length,
                     output.empty() ? nullptr : output.data(), int(request.output_capacity), nullptr, nullptr, 0));
