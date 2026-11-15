@@ -965,6 +965,10 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
             imports.record(std::get<0>(item),std::get<1>(item),std::get<2>(item));
         for(const auto& line:imports.report(std::string(exe.begin(),exe.end()),"x86").lines) lp_sink(line.c_str());
     },donorGaps);
+    if(traceFaultContext&&steamstub_wrapped(path)) {
+        snprintf(line,sizeof line,"PE32 SteamStub probe: .bind=1 x86SteamBridge=not-staged ActiveProcess=not-seeded PEB.BeingDebugged=%u PEB.NtGlobalFlag=0x%08x",
+                 unsigned(r.peb_being_debugged),r.peb_nt_global_flag);lp_sink(line);
+    }
     c.mapped=r.loaded?1:0;
     g_launch.pe32Finished=r.finished;
     g_launch.pe32ExitCode=r.exit_code;
