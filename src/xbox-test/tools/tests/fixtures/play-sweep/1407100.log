@@ -1,0 +1,5 @@
+request-json: {"appid":"1407100","name":"[TDA00] Muv-Luv Unlimited: THE DAY AFTER - Episode 00 REMASTERED","exe":"tda00-win64vc14-release.exe","attemptId":"3552:1"}
+[  18.447] launch: request written LocalState\\launch_request.json appid=1407100 attempt=3552:1 dir=muv-luv_unlimited_tda00 via=cmd.txt (synthetic)
+[  18.526] launch-probe: GAP: total=904 missing=645 win32u=52
+[  20.199] frame=1103 fps~54.7 screen=4 pads=0
+[  25.416] launch: RESULT attempt=3552:1 ok=0 mapped=10/10 gameCodeExecuted=true: unhandled exception code=0xc0000005 ntdll.dll+0x2f553 access=1 target=0x24
