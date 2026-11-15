@@ -134,6 +134,7 @@ struct Guest {
     uint32_t encode_ptr(uint32_t p) const { return p ? p ^ pointer_cookie : 0; }
     unsigned heap_serial = 0;
     std::map<uint32_t, uint32_t> heap_handles;  // handle -> arena base
+    std::map<uint32_t, uint32_t> critical_section_debug;  // RTL_CRITICAL_SECTION -> debug record
     std::map<uint32_t, uint32_t> virtual_alloc; // guest addr -> size
     uint32_t virtual_top = 0x60000000u;  // above the DLL relocation arena (0x38000000-0x60000000)
     unsigned next_tls = 0, thread_serial = 0;
@@ -163,6 +164,7 @@ struct Guest {
     std::map<uint32_t, SyncObject> sync_objects;
     std::map<std::string, uint32_t> sync_names;       // names are case-sensitive (Win32)
     std::map<uint32_t, uint64_t> file_handles;         // guest handle -> Play host HANDLE
+    std::map<int32_t, uint32_t> std_handles{{-10, Host::H_STDIN}, {-11, Host::H_STDOUT}, {-12, Host::H_STDERR}};
     std::map<uint32_t, uint64_t> find_handles;         // guest search handle -> native find HANDLE
     std::map<uint32_t, std::pair<uint32_t, uint32_t>> com_apartments; // guest thread id -> model, init count
     uint32_t file_serial = 0, find_serial = 0, sync_serial = 0, sync_handle_serial = 0;
@@ -1283,6 +1285,19 @@ inline void Guest::register_all() {
             mem.w8(p + 155, 0);    // wReserved
         }
         return 1; });
+    reg.add("kernel32.dll", "GetVersionExW", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        uint32_t p = c.arg(0); if (!p) return 0;
+        uint32_t cb = mem.r32(p); if (cb < 276) { set_last_error(122); return 0; }
+        mem.w32(p + 4, 10); mem.w32(p + 8, 0); mem.w32(p + 12, 19045); mem.w32(p + 16, 2);
+        const char* cs = "Service Pack 0";
+        for (uint32_t i = 0; cs[i]; ++i) mem.w(p + 20 + i * 2, uint8_t(cs[i]), 2);
+        mem.w(p + 20 + uint32_t(std::strlen(cs)) * 2, 0, 2);
+        if (cb >= 284) {
+            mem.w(p + 276, 0, 2); mem.w(p + 278, 0, 2); mem.w(p + 280, 0, 2);
+            mem.w8(p + 282, 1); mem.w8(p + 283, 0);
+        }
+        return 1;
+    });
     auto format_locale = [this](bool date, Cpu& c) -> uint32_t {
         Host::LocaleCall q; q.date=date; q.locale=c.arg(0); q.flags=c.arg(1);
         q.has_system_time=c.arg(2)!=0; q.has_format=c.arg(3)!=0; q.has_output_buffer=c.arg(4)!=0; q.buffer_chars=int32_t(c.arg(5));
@@ -1385,6 +1400,19 @@ inline void Guest::register_all() {
     auto slist_flush=[this](Cpu& c)->uint32_t {uint32_t h=c.arg(0),old=mem.r32(h),seq=uint32_t(mem.r(h+6,2));mem.w32(h,0);mem.w(h+4,0,2);mem.w(h+6,(seq+1)&0xffff,2);return old;};
     auto add_slist=[&](const char* dll){reg.add(dll,"InitializeSListHead",Conv::Stdcall,1,slist_init);reg.add(dll,"RtlInitializeSListHead",Conv::Stdcall,1,slist_init);reg.add(dll,"InterlockedPushEntrySList",Conv::Stdcall,2,slist_push);reg.add(dll,"RtlInterlockedPushEntrySList",Conv::Stdcall,2,slist_push);reg.add(dll,"InterlockedPopEntrySList",Conv::Stdcall,1,slist_pop);reg.add(dll,"RtlInterlockedPopEntrySList",Conv::Stdcall,1,slist_pop);reg.add(dll,"InterlockedFlushSList",Conv::Stdcall,1,slist_flush);reg.add(dll,"RtlInterlockedFlushSList",Conv::Stdcall,1,slist_flush);reg.add(dll,"QueryDepthSList",Conv::Stdcall,1,[this](Cpu& c){return uint32_t(mem.r(c.arg(0)+4,2));});reg.add(dll,"RtlQueryDepthSList",Conv::Stdcall,1,[this](Cpu& c){return uint32_t(mem.r(c.arg(0)+4,2));});};
     add_slist("kernel32.dll");add_slist("ntdll.dll");
+    auto is_bad_string_ptr = [this](Cpu& c, bool wide) -> uint32_t {
+        uint32_t p = c.arg(0), limit = c.arg(1);
+        if (!p) return 1;
+        if (!limit) return 0;
+        limit = std::min(limit, 1u << 20); // same bound as guest string reads
+        try {
+            for (uint32_t i = 0; i < limit; ++i)
+                if (!(wide ? mem.r(p + i * 2, 2) : mem.r8(p + i))) return 0;
+        } catch (const Fault&) { return 1; }
+        return 1;
+    };
+    reg.add("kernel32.dll", "IsBadStringPtrA", Conv::Stdcall, 2, [is_bad_string_ptr](Cpu& c) { return is_bad_string_ptr(c, false); });
+    reg.add("kernel32.dll", "IsBadStringPtrW", Conv::Stdcall, 2, [is_bad_string_ptr](Cpu& c) { return is_bad_string_ptr(c, true); });
     reg.add("kernel32.dll", "GetStringTypeA", Conv::Stdcall, 5, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
         Host::NlsRequest request{}; request.operation = Host::NlsOperation::GetStringTypeA;
         request.locale = c.arg(0); request.type = c.arg(1); request.output_null = c.arg(4) == 0;
@@ -1548,12 +1576,38 @@ inline void Guest::register_all() {
         mem.w32(p + 20, win);                                  // Protect: the real protection
         mem.w32(p + 24, 0x20000);                              // Type: MEM_PRIVATE
         return 28; });
-    // Critical sections: one guest thread per CPU, so they are no-ops.
-    for (const char* n : {"InitializeCriticalSection", "EnterCriticalSection", "LeaveCriticalSection", "DeleteCriticalSection"})
-        reg.add("kernel32.dll", n, Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
-    reg.add("kernel32.dll", "InitializeCriticalSectionAndSpinCount", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 1; });
+    // Critical sections have no contention in the single-thread interpreter, but CRTs inspect their initialized fields.
+    auto initialize_critical_section = [this](Cpu& c, uint32_t spin_count, uint32_t flags) -> uint32_t {
+        uint32_t p = c.arg(0), debug = 0;
+        if (!p) return 0;
+        auto old = critical_section_debug.find(p);
+        if (old != critical_section_debug.end()) { heap.release(old->second); critical_section_debug.erase(old); }
+        if (!(flags & 0x01000000u) || (flags & 0x10000000u)) {
+            debug = heap.alloc(0x20);
+            for (uint32_t offset = 0; offset < 0x20; offset += 4) mem.w32(debug + offset, 0);
+            mem.w32(debug + 4, p);
+            mem.w32(debug + 8, debug + 8); mem.w32(debug + 12, debug + 8);
+            critical_section_debug[p] = debug;
+        }
+        mem.w32(p, debug); mem.w32(p + 4, 0xffffffffu); mem.w32(p + 8, 0);
+        mem.w32(p + 12, 0); mem.w32(p + 16, 0); mem.w32(p + 20, spin_count);
+        return 1;
+    };
+    reg.add("kernel32.dll", "InitializeCriticalSection", Conv::Stdcall, 1,
+            [initialize_critical_section](Cpu& c) { initialize_critical_section(c, 0, 0); return 0; });
+    reg.add("kernel32.dll", "EnterCriticalSection", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("kernel32.dll", "LeaveCriticalSection", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("kernel32.dll", "DeleteCriticalSection", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        uint32_t p = c.arg(0); auto it = critical_section_debug.find(p);
+        if (it != critical_section_debug.end()) { heap.release(it->second); critical_section_debug.erase(it); }
+        if (p) mem.w32(p, 0);
+        return 0;
+    });
+    reg.add("kernel32.dll", "InitializeCriticalSectionAndSpinCount", Conv::Stdcall, 2,
+            [initialize_critical_section](Cpu& c) { return initialize_critical_section(c, c.arg(1), 0); });
     reg.add("kernel32.dll", "TryEnterCriticalSection", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
-    reg.add("kernel32.dll", "InitializeCriticalSectionEx", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 1; });
+    reg.add("kernel32.dll", "InitializeCriticalSectionEx", Conv::Stdcall, 3,
+            [initialize_critical_section](Cpu& c) { return initialize_critical_section(c, c.arg(1), c.arg(2)); });
     auto acquire_srw = [this](Cpu& c, bool shared, bool attempt) -> uint32_t {
         uint32_t p = c.arg(0), tid = mem.r32(c.fs_base + 0x24), raw = mem.r32(p);
         auto it = srw_locks.find(p);
@@ -1816,9 +1870,15 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "FreeConsole", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { set_last_error(87); return 0; });
     reg.add("kernel32.dll", "AttachConsole", Conv::Stdcall, 1, [this](Cpu&) -> uint32_t { set_last_error(6); return 0; });
     // Console output handles: stdout/stderr are the Host sinks.
-    reg.add("kernel32.dll", "GetStdHandle", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
-        switch (int32_t(c.arg(0))) { case -10: return Host::H_STDIN; case -11: return Host::H_STDOUT; case -12: return Host::H_STDERR; }
-        return 0xFFFFFFFFu; });
+    reg.add("kernel32.dll", "GetStdHandle", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        auto it = std_handles.find(int32_t(c.arg(0)));
+        return it != std_handles.end() ? it->second : 0xFFFFFFFFu;
+    });
+    reg.add("kernel32.dll", "SetStdHandle", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        auto it = std_handles.find(int32_t(c.arg(0)));
+        if (it == std_handles.end()) { set_last_error(87); return 0; }
+        it->second = c.arg(1); set_last_error(0); return 1;
+    });
     // The guest has no attached debugger. Windows reports FALSE and discards
     // OutputDebugString calls when no debugger is present.
     reg.add("kernel32.dll", "IsDebuggerPresent", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });

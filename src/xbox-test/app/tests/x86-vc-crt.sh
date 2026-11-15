@@ -11,7 +11,7 @@ if [[ -z $cc32 ]]; then cc32=$(ls -d /nix/store/*-i686-w64-mingw32-gcc-wrapper-*
 for tool in llvm-dlltool c++; do command -v "$tool" >/dev/null || { echo "x86-vc-crt: missing $tool" >&2; exit 1; }; done
 [[ -f $donors/msvcr110.dll ]] || { echo "x86-vc-crt: missing $donors/msvcr110.dll; run src/tools/build-wine-donors.sh" >&2; exit 2; }
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/x86-vc-crt.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
-printf 'LIBRARY msvcr110.dll\nEXPORTS\n strlen\n' >"$tmp/msvcr110.def"
+printf 'LIBRARY msvcr110.dll\nEXPORTS\n strlen\n malloc\n free\n' >"$tmp/msvcr110.def"
 llvm-dlltool -m i386 -d "$tmp/msvcr110.def" -l "$tmp/msvcr110.a"
 "$cc32" -O1 -ffreestanding -fno-stack-protector -fno-builtin -nostdlib \
   -Wl,--entry,_entry -Wl,--subsystem,console -o "$tmp/fixture.exe" \

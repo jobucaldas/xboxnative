@@ -11,6 +11,28 @@
 #include "../host/x86/x86_guest.h"
 #include "../host/x86/x86_file_guard.h"
 using namespace x86;
+static bool verify_critical_section_routes() {
+    Memory mem; mem.map(0x1000, 0x20000, PROT_R | PROT_W); mem.map(TEB_ADDR, 0x1000, PROT_R | PROT_W);
+    ThunkTable table; Host host; Registry reg; Guest guest(mem, host, reg); guest.register_all();
+    Cpu cpu(mem, table); cpu.reg[ESP] = 0x1f000;
+    auto init = reg.map.find({"kernel32.dll", "initializecriticalsectionex"});
+    if (init == reg.map.end() || init->second.argc != 3) return false;
+    try {
+        for (uint32_t i = 0; i < 64; ++i) {
+            const uint32_t section = 0x2000 + i * 24;
+            mem.w32(cpu.reg[ESP] + 4, section); mem.w32(cpu.reg[ESP] + 8, 0);
+            mem.w32(cpu.reg[ESP] + 12, 0x10000000u); // RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO
+            if (!init->second.fn(cpu) || mem.r32(section + 4) != 0xffffffffu || mem.r32(section + 8) != 0) return false;
+            const uint32_t debug = mem.r32(section);
+            if (!debug || mem.r32(debug + 4) != section || mem.r32(debug + 8) != debug + 8 ||
+                mem.r32(debug + 12) != debug + 8) return false;
+            mem.w32(debug + 24, 0x12345678u); // msvcr110!_msvcrt_init_mt_locks writes Spare[0]
+            if (mem.r32(debug + 24) != 0x12345678u) return false;
+        }
+    } catch (const Fault&) { return false; }
+    std::fprintf(stderr, "X86-CRITICAL-SECTION PASS: VC110 forced debug records support all 64 CRT locks\n");
+    return true;
+}
 static bool verify_file_guard() {
     namespace fs = std::filesystem;
     const fs::path temp = fs::temp_directory_path() / ("x86-file-guard-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -63,6 +85,7 @@ static std::vector<uint8_t> slurp(const char* path) {
     return std::vector<uint8_t>{std::istreambuf_iterator<char>(f), {}};
 }
 int main(int argc, char** argv) {
+    if (!verify_critical_section_routes()) { std::puts("X86-CRITICAL-SECTION FAIL: CRT forced debug-info initialization"); return 1; }
     if (!verify_file_guard()) return 1;
     if (argc < 2) { printf("usage: x86-guest <fixture-crt.exe>\n"); return 2; }
     auto file = slurp(argv[1]);
@@ -89,6 +112,9 @@ int main(int argc, char** argv) {
     map_thunk_page(mem, table);
     Cpu cpu(mem, table);
     init_process(mem, cpu, img);
+    if (mem.r32(PEB_ADDR + 0x18) != 0x50000000u) {
+        std::fprintf(stderr, "X86-PEB-HEAP FAIL: ProcessHeap does not match GetProcessHeap\n"); return 1;
+    }
     std::string fault;
     try { run_entry(cpu, img); } catch (const Fault& f) { fault = f.what(); }
     printf("guest: base=0x%08x entry=0x%08x imports=%u bound=%u relocs=%u\n", img.base, img.entry, img.imports, img.bound, img.relocations);

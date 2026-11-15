@@ -501,6 +501,7 @@ inline void init_process(Memory& mem, Cpu& cpu, const Image& img, uint32_t pid =
     mem.w32(TEB_ADDR + 0x20, pid); mem.w32(TEB_ADDR + 0x24, tid);
     mem.w32(TEB_ADDR + 0x30, PEB_ADDR);           // ProcessEnvironmentBlock
     mem.w32(PEB_ADDR + 0x08, img.base);           // ImageBaseAddress
+    mem.w32(PEB_ADDR + 0x18, 0x50000000u);        // ProcessHeap (GetProcessHeap pseudo-handle)
     mem.w32(PEB_ADDR + 0xA4, 10); mem.w32(PEB_ADDR + 0xA8, 0);  // OSMajorVersion/OSMinorVersion
     cpu.fs_base = TEB_ADDR; cpu.reg[ESP] = STACK_TOP - 16; cpu.eip = img.entry;
 }
