@@ -447,7 +447,26 @@ fi
 # patch 0001 clamps Present's interval). A host without the extension reports
 # the skipped line instead — a platform limit, never a pass.
 grep -qE 'PLAY-OPENGL STAGE swap-interval (set=1 got=1|skipped)' "$out/opengl.log"
-if grep -q 'PLAY-OPENGL PASS pixel-readback' "$out/opengl.log"; then
+# New fixture stages follow every legacy stage above. A capability limitation on
+# Wine is reported explicitly as SKIP (wine), never as a pass; unexpected stage
+# failures remain failures.
+grep '^PLAY-OPENGL STAGE ' "$out/opengl.log"
+opengl_wine_skip=0
+if grep -qE 'PLAY-OPENGL STAGE (core41-draw|bc1-sampled-readback|msaa-resolve-readback) exit=43 stage-code=[0-9]+ SKIP \(wine\):' "$out/opengl.log"; then
+  grep -E 'PLAY-OPENGL STAGE (core41-draw|bc1-sampled-readback|msaa-resolve-readback) exit=43 stage-code=[0-9]+ SKIP \(wine\):' "$out/opengl.log"
+  echo "PLAY-OPENGL new stages SKIP (wine); not a pass"
+  opengl_wine_skip=1
+else
+  grep -q 'PLAY-OPENGL STAGE share-lists-draw exit=0 shared-buffer-and-texture readback=64,128,192,255' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE bc1-sampled-readback exit=0 format=BC1 got=255,0,0,255' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE resize-framebuffer exit=0 client-size-and-readback=0,128,64,255' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE core41-draw exit=0 requested=4.1 version="4\.[1-9]' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE core41-draw exit=0 requested=4.1 version=".*" got=64,128,192,255' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE msaa-resolve-readback exit=0 samples=4 got=64,128,191,255' "$out/opengl.log"
+fi
+if [ "$opengl_wine_skip" = 1 ]; then
+  :
+elif grep -q 'PLAY-OPENGL PASS pixel-readback' "$out/opengl.log"; then
   echo "PLAY-OPENGL PASS pixel-readback"
 elif grep -q 'PLAY-OPENGL BLOCKED pixel-readback' "$out/opengl.log"; then
   echo "PLAY-OPENGL BLOCKED pixel-readback on this host; not a pass"
