@@ -773,6 +773,12 @@ inline void Guest::register_all() {
     // must hold a callable thunk, not the table address — a data binding makes
     // a call through it jump into the iob bytes. It returns the table pointer.
     reg.add("msvcrt.dll", "__iob_func", Conv::Cdecl, 0, [this](Cpu&) -> uint32_t { return iob_addr; });
+    // MSVC 11's CRT uses this startup helper from its own DLL name. Honor the
+    // STARTUPINFO flag and value rather than treating the zeroed block as a
+    // request to hide the window.
+    reg.add("msvcr110.dll", "__crtGetShowWindowMode", Conv::Cdecl, 0, [this](Cpu&) -> uint32_t {
+        return (mem.r32(startupinfo + 44) & 1u) ? uint16_t(mem.r(startupinfo + 48, 2)) : 10u;
+    });
     auto C = [](const char* n) { return n; };
     (void)C;
 
