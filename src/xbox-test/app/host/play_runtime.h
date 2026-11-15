@@ -288,6 +288,12 @@ static bool seed_steam_client_registry(const std::wstring& client,DWORD accountI
 // is the loading module's directory). loadExW records the directory for
 // the graph being mapped; resolve() reads it. Guarded by loaderMutex.
 static std::wstring& alteredLoadDir() {static std::wstring dir;return dir;}
+static void audioBackendLoaded(const std::string& key) {
+    bool audio=key.rfind("xaudio2_",0)==0||key=="dsound.dll"||key=="winmm.dll"||
+        key=="mmdevapi.dll"||key=="audioses.dll"||key.rfind("fmod",0)==0||
+        key.rfind("wwise",0)==0||key.rfind("ak",0)==0;
+    if(audio&&state)state->event("audio backend loaded: "+key);
+}
 static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     if(!name || file) {SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}
     constexpr DWORD knownFlags= DONT_RESOLVE_DLL_REFERENCES|LOAD_LIBRARY_AS_DATAFILE|
@@ -377,6 +383,7 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
         // it). Windows and Wine return that handle; the recursive loader lock
         // means no other thread can be inside this branch meanwhile.
         if(!initializePending() || !(m->initialized || m->initializing)) {--m->references;SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
+        audioBackendLoaded(key);
         return (HMODULE)m->image.base;
     }
     if(auto input=xinput_core::find_module(key.c_str(),true)) {
@@ -389,6 +396,7 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     if(auto bridge=donorModule.load(std::memory_order_acquire))
         if(auto donor=bridge(leaf.c_str())) {
             state->event("mapping "+narrow(leaf)+" (donor)");
+            audioBackendLoaded(key);
             return donor;
         }
     // No console opengl32.dll: serve Play's WGL state surface, not a host DLL.
@@ -399,6 +407,7 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     }
     auto result=LoadLibraryExW(requested.c_str(),nullptr,flags|LOAD_LIBRARY_SEARCH_SYSTEM32);
     if(!result) {DWORD error=GetLastError();state->event("LoadLibrary failed name="+narrow(requested)+" error="+std::to_string(error));SetLastError(error);}
+    else audioBackendLoaded(key);
     return result;
 }
 static HMODULE WINAPI loadW(LPCWSTR name) { return loadExW(name,nullptr,0); }
