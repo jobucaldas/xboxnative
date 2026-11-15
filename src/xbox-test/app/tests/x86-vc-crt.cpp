@@ -1,0 +1,91 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Runs the VC110 fixture through the x86 interpreter both without and with its donor.
+#include <cstdio>
+#include <fstream>
+#include <iterator>
+#include "../host/x86/x86_guest.h"
+#include "../host/x86/x86_play.h"
+using namespace x86;
+
+static std::vector<uint8_t> read_file(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return {};
+    return std::vector<uint8_t>{std::istreambuf_iterator<char>(f), {}};
+}
+
+int main(int argc, char** argv) {
+    if (argc != 3) { std::printf("usage: x86-vc-crt <fixture.exe> <runtime/x86>\n"); return 2; }
+    auto file = read_file(argv[1]);
+    if (file.empty()) { std::printf("FAIL cannot read fixture\n"); return 2; }
+    auto absent = run_image(file, "VC110-Fixture.EXE", "VC110-Fixture.EXE");
+    if (absent.fault.find("unresolved import msvcr110.dll!strlen") == std::string::npos) {
+        std::printf("FAIL null DllSource did not fault at msvcr110.dll!strlen: %s\n", absent.fault.c_str());
+        return 1;
+    }
+    std::printf("X86-VC-CRT NULL-SOURCE FAILS: %s\n", absent.fault.c_str());
+
+    const std::string dir = argv[2];
+    auto runtimeReader = [dir](const std::string& name) { return read_file(dir + "/" + name); };
+    std::string origin;
+    DllSource source = make_vc110_vc120_source(
+        [](const std::string&) { return std::vector<uint8_t>{}; }, runtimeReader,
+        [&origin](const std::string&, const char* from) { origin = from; });
+    auto donor = source("msvcr110.dll");
+    if (donor.empty() || origin != "runtime" || source("unrelated.dll").size()) {
+        std::printf("FAIL runtime donor selection or unrelated-DLL rejection\n"); return 1;
+    }
+    unsigned runtimeReads = 0;
+    std::string gameOrigin;
+    DllSource gameWins = make_vc110_vc120_source(
+        [](const std::string&) { return std::vector<uint8_t>{0x42}; },
+        [&runtimeReads,&donor](const std::string&) { ++runtimeReads; return donor; },
+        [&gameOrigin](const std::string&, const char* from) { gameOrigin = from; });
+    auto gameCopy = gameWins("msvcr110.dll");
+    if (gameCopy != std::vector<uint8_t>{0x42} || runtimeReads || gameOrigin != "game dir") {
+        std::printf("FAIL game-local CRT did not take precedence\n"); return 1;
+    }
+
+    std::vector<std::string> gaps;
+    DllLoadObserver observe = [&gaps](const std::string& name, const std::vector<std::string>& unresolved) {
+        if (name == "msvcr110.dll") gaps = unresolved;
+    };
+    auto result = run_image(file, "VC110-Fixture.EXE", "VC110-Fixture.EXE", nullptr, nullptr,
+                            100ull * 1000 * 1000, source, false, observe);
+    if (result.finished && result.exit_code == 42 && result.fault.empty()) {
+        std::printf("X86-VC-CRT PASS: msvcr110.dll strlen ran to exit 42\n");
+    } else if (result.fault.find("ntdll.dll!__wine_dbg_header") != std::string::npos && !gaps.empty()) {
+        std::printf("X86-VC-CRT LIMIT: donor DllMain faults on unrouted ntdll.dll!__wine_dbg_header\n");
+    } else {
+        std::printf("FAIL donor run finished=%d exit=%u fault=%s gaps=%zu\n", result.finished ? 1 : 0,
+                    result.exit_code, result.fault.c_str(), gaps.size());
+        return 1;
+    }
+
+    for (const char* dll : {"msvcr110.dll", "msvcp110.dll", "msvcr120.dll", "msvcp120.dll"}) {
+        auto bytes = source(dll);
+        if (bytes.empty()) { std::printf("FAIL missing selected donor %s\n", dll); return 1; }
+        Memory mem; ThunkTable table; Host host; Registry reg; Guest guest(mem, host, reg); guest.register_all();
+        std::map<std::string, Dll> loaded;
+        std::map<std::string, std::vector<std::string>> imports;
+        DllLoadObserver record = [&imports](const std::string& name, const std::vector<std::string>& unresolved) {
+            imports[name] = unresolved;
+        };
+        try { load_dll(mem, table, reg, bytes, source, loaded, 0, nullptr, nullptr, dll, record); }
+        catch (const std::exception& e) { std::printf("FAIL mapping %s: %s\n", dll, e.what()); return 1; }
+        for (const auto& module : imports) {
+            if (module.first != dll) continue;
+            std::printf("X86-VC-CRT UNROUTED %s kernel32=[", module.first.c_str());
+            bool first = true;
+            for (const auto& name : module.second) if (name.rfind("kernel32.dll!", 0) == 0) {
+                std::printf("%s%s", first ? "" : ",", name.c_str()); first = false;
+            }
+            std::printf("] other=["); first = true;
+            for (const auto& name : module.second) if (name.rfind("kernel32.dll!", 0) != 0) {
+                std::printf("%s%s", first ? "" : ",", name.c_str()); first = false;
+            }
+            std::printf("]\n");
+        }
+    }
+    std::printf("X86-VC-CRT PASS: DllSource selected runtime donor and preferred game-local copy\n");
+    return 0;
+}

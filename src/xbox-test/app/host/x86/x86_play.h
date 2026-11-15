@@ -69,7 +69,8 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
                             const std::function<void(const PlayResult&)>& on_loaded = nullptr,
                             uint64_t instruction_limit = 500ull * 1000 * 1000,
                             const DllSource& dll_source = nullptr,
-                            bool trace_fault_context = false) {
+                            bool trace_fault_context = false,
+                            const DllLoadObserver& observe_dll = nullptr) {
     PlayResult r;
     try {
         Memory mem; ThunkTable table; Host host; Registry reg;
@@ -110,7 +111,7 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
                                if (dt != reg.data.end()) return dt->second;
                                return 0u;
                            },
-                           {});  // top image: unnamed (never re-entered by a cycle)
+                           {}, observe_dll);  // top image: unnamed (never re-entered by a cycle)
         dlls.emplace("__top__", std::move(top));  // not a named module; keeps the top image's exports reachable
         Image img = dlls["__top__"].image;
         guest.dlls = std::move(dlls);
@@ -194,7 +195,8 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
                       const std::function<void(const PlayResult&)>& on_loaded = nullptr,
                       uint64_t instruction_limit = 500ull * 1000 * 1000,
                       const DllSource& dll_source = nullptr,
-                      bool trace_fault_context = false) {
+                      bool trace_fault_context = false,
+                      const DllLoadObserver& observe_dll = nullptr) {
     PlayResult r;
     FILE* f = _wfopen(exe.c_str(), L"rb");
     if (!f) { r.fault = "cannot open the executable"; r.fault_kind = "Loader"; return r; }
@@ -209,7 +211,7 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
     std::string name;
     for (size_t i = exe.find_last_of(L"\\/") + 1; i < exe.size(); ++i) name += char(exe[i]);
     (void)dir;
-    return run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source, trace_fault_context);
+    return run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source, trace_fault_context, observe_dll);
 }
 #endif
 }

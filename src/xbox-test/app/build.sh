@@ -46,6 +46,10 @@ cp "$donors"/graphics/*.dll "$out/layout/donors/"
 # Wine's C++ runtime (msvcp140 family, concrt140) for games without their own copy.
 mkdir -p "$out/layout/runtime"
 cp "$donors"/runtime/*.dll "$donors"/runtime/SHA256SUMS "$out/layout/runtime/"
+# PE32 games use the pinned i686 VC110/VC120 CRT donors only when they do not
+# ship their own copies beside the executable.
+mkdir -p "$out/layout/runtime/x86"
+cp "$donors"/runtime/x86/*.dll "$donors"/runtime/x86/SHA256SUMS "$out/layout/runtime/x86/"
 # Play's D3D10 shim (source in uwph/d3d10): the console has no d3d10.dll or
 # d3d10_1.dll, and one PE answers both names plus d3d10core.dll.
 bash ../uwph/d3d10/build.sh "$out/layout/runtime"

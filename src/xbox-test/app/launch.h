@@ -884,15 +884,12 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
     char line[512];
     std::string name=play_runtime::narrow(exe);
     g_launch.pe32Executed=false;g_launch.pe32Finished=false;g_launch.pe32ExitCode=0;
-    {   // The import classification beside the interpreter's own unresolved list.
-        // The DLLs a game ships beside its executable are what Windows' search
-        // finds first, so the probe looks in the executable's own directory (a
-        // launch option's exe may sit in a subdirectory of the install root).
-        std::string summary;
-        auto slash=path.find_last_of(L"\\/");
-        std::wstring exeDir=slash==std::wstring::npos?std::wstring():path.substr(0,slash);
-        if(pe32_probe::map(path,exeDir,summary)){snprintf(line,sizeof line,"PE32 %s",summary.c_str());lp_sink(line);}
-    }
+    // The DLLs a game ships beside its executable are what Windows' search
+    // finds first, so probe and donor loading use the executable's own directory.
+    auto slash=path.find_last_of(L"\\/");
+    std::wstring exeDir=slash==std::wstring::npos?std::wstring():path.substr(0,slash);
+    { std::string summary;
+      if(pe32_probe::map(path,exeDir,summary)){snprintf(line,sizeof line,"PE32 %s",summary.c_str());lp_sink(line);} }
     snprintf(line,sizeof line,"PRUN PE32 engine=x86-interpreter exe=%s",name.c_str());lp_sink(line);
     auto tee=[&name](const std::string& s) {
         // Guest output goes to the probe log line by line, bounded per line.
@@ -921,8 +918,47 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
     // with InstructionLimit. The cap is raised to a value no real session
     // reaches, and stays finite so a runaway guest still ends in a reported
     // fault instead of spinning on the launch thread forever.
+    auto readPe32Dll=[](const std::wstring& p) {
+        std::vector<uint8_t> bytes;
+        FILE* f=_wfopen(p.c_str(),L"rb"); if(!f)return bytes;
+        _fseeki64(f,0,SEEK_END); long long n=_ftelli64(f); rewind(f);
+        if(n>0&&n<=128ll*1024*1024) { bytes.resize(size_t(n)); if(fread(bytes.data(),1,bytes.size(),f)!=bytes.size())bytes.clear(); }
+        fclose(f); return bytes;
+    };
+    wchar_t self[2048]; DWORD selfLen=GetModuleFileNameW(nullptr,self,2048);
+    std::wstring packageDir=selfLen&&selfLen<2048?std::wstring(self,selfLen):std::wstring();
+    auto packageSlash=packageDir.find_last_of(L"\\/");
+    if(packageSlash!=std::wstring::npos)packageDir.resize(packageSlash);else packageDir.clear();
+    auto gameDlls=[&](const std::string& name) {
+        std::wstring leaf(name.begin(),name.end()); return readPe32Dll(exeDir+L"\\"+leaf);
+    };
+    auto runtimeDlls=[&](const std::string& name) {
+        if(packageDir.empty())return std::vector<uint8_t>{};
+        std::wstring leaf(name.begin(),name.end()); return readPe32Dll(packageDir+L"\\runtime\\x86\\"+leaf);
+    };
+    x86::DllSource dllSource=x86::make_vc110_vc120_source(gameDlls,runtimeDlls,[&](const std::string& name,const char* origin) {
+        snprintf(line,sizeof line,"x86 donor: %s from %s",name.c_str(),origin); lp_sink(line);
+    });
+    x86::DllLoadObserver donorGaps=[&](const std::string& dll,const std::vector<std::string>& unresolved) {
+        if(!x86::is_vc110_vc120_dll(dll))return;
+        std::string kernel,other; unsigned kernelCount=0,otherCount=0,kernelMore=0,otherMore=0;
+        for(const auto& item:unresolved) {
+            bool isKernel=item.rfind("kernel32.dll!",0)==0;
+            std::string& group=isKernel?kernel:other;
+            unsigned& count=isKernel?kernelCount:otherCount;
+            unsigned& more=isKernel?kernelMore:otherMore;
+            if(count>=8) { ++more; continue; }
+            if(!group.empty())group+=",";
+            group+=item; ++count;
+        }
+        std::string summary="x86 donor gaps: "+dll;
+        if(!kernel.empty())summary+=" kernel32=["+kernel+(kernelMore?",+"+std::to_string(kernelMore):"")+ "]";
+        if(!other.empty())summary+=" other=["+other+(otherMore?",+"+std::to_string(otherMore):"")+ "]";
+        if(summary.size()>480)summary.resize(480);
+        lp_sink(summary.c_str());
+    };
     bool traceFaultContext=GetFileAttributesW((g_dir+L"\\x86trace.txt").c_str())!=INVALID_FILE_ATTRIBUTES;
-    auto r=x86::run(path,c.cwd,cmdline,tee,loaded,x86::kGuestRunCap,nullptr,traceFaultContext);
+    auto r=x86::run(path,c.cwd,cmdline,tee,loaded,x86::kGuestRunCap,dllSource,traceFaultContext,donorGaps);
     c.mapped=r.loaded?1:0;
     g_launch.pe32Finished=r.finished;
     g_launch.pe32ExitCode=r.exit_code;
