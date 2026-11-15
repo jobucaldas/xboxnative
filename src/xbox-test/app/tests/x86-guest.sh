@@ -31,7 +31,9 @@ set +e
 out=$("$tmp/x86-guest" "$tmp/fixture-crt.exe"); rc=$?
 set -e
 grep -q '^guest: base=0x00400000 ' <<<"$out" || { echo "X86-GUEST FAIL: no PE32 image loaded"; echo "$out"; exit 1; }
-body=$(sed '/^guest: /d' <<<"$out")
+grep -q '^X86-GUARD PASS: in-game delete allowed; LocalState sibling, traversal and outside paths refused$' <<<"$out" || { echo "X86-GUEST FAIL: destructive file guard"; echo "$out"; exit 1; }
+echo "X86-GUARD PASS: in-game delete allowed; LocalState sibling, traversal and outside paths refused"
+body=$(sed '/^guest: /d;/^X86-GUARD /d' <<<"$out")
 [[ $rc -eq 42 ]] || { echo "X86-GUEST FAIL: exit $rc (want 42)"; echo "$out"; exit 1; }
 want='x86-crt: start
 x86-crt: stdio ok

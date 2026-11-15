@@ -6,13 +6,46 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <filesystem>
+#include <chrono>
 #include "../host/x86/x86_guest.h"
+#include "../host/x86/x86_file_guard.h"
 using namespace x86;
+static bool verify_file_guard() {
+    namespace fs = std::filesystem;
+    const fs::path temp = fs::temp_directory_path() / ("x86-file-guard-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::error_code ec;
+    fs::create_directories(temp / "game", ec); fs::create_directories(temp / "LocalState", ec);
+    fs::create_directories(temp / "otherGame", ec); fs::create_directories(temp / "outside", ec);
+    const auto inside = temp / "game" / "owned.dat";
+    const auto sibling = temp / "LocalState" / "steam_session.bin";
+    const auto other = temp / "otherGame" / "file.dat";
+    const auto outside = temp / "outside" / "file.dat";
+    for (const auto& p : {inside, sibling, other, outside}) { std::ofstream f(p, std::ios::binary); f << "keep"; }
+    unsigned refusals = 0;
+    x86_file_guard::Policy guard({u"C:\\Data\\XboxNativeGames\\Game"}, u"C:\\Data\\XboxNativeGames\\Game",
+        [&](const std::string& message) { if (message.find("x86 file guard: refused ") == 0) ++refusals; });
+    if (!guard.allow("DeleteFileA", u"\\\\?\\c:\\data\\xboxnativegames\\game\\sub/../owned.dat")) {
+        fs::remove_all(temp, ec); std::fprintf(stderr, "X86-GUARD FAIL: normalized in-game path refused\\n"); return false;
+    }
+    if (guard.allow("DeleteFileA", u"owned.dat")) fs::remove(inside, ec);
+    if (fs::exists(inside) || guard.allow("DeleteFileA", u"C:\\Data\\LocalState\\steam_session.bin") ||
+        guard.allow("DeleteFileA", u"c:/data/localstate/STEAM_SESSION.bin") ||
+        guard.allow("DeleteFileA", u"..\\otherGame\\file.dat") ||
+        guard.allow("DeleteFileA", u"\\\\?\\D:\\XboxNativeGames\\outside\\file.dat") ||
+        !fs::exists(sibling) || !fs::exists(other) || !fs::exists(outside) || refusals != 3) {
+        fs::remove_all(temp, ec); std::fprintf(stderr, "X86-GUARD FAIL: containment or refusal logging\n"); return false;
+    }
+    fs::remove_all(temp, ec);
+    std::puts("X86-GUARD PASS: in-game delete allowed; LocalState sibling, traversal and outside paths refused");
+    return true;
+}
 static std::vector<uint8_t> slurp(const char* path) {
     std::ifstream f(path, std::ios::binary); if (!f) { printf("FAIL cannot open %s\n", path); exit(2); }
     return std::vector<uint8_t>{std::istreambuf_iterator<char>(f), {}};
 }
 int main(int argc, char** argv) {
+    if (!verify_file_guard()) return 1;
     if (argc < 2) { printf("usage: x86-guest <fixture-crt.exe>\n"); return 2; }
     auto file = slurp(argv[1]);
     Memory mem; ThunkTable table; Host host; Registry reg;

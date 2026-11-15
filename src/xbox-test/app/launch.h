@@ -1007,12 +1007,19 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         lp_sink(summary.c_str());
     };
     bool traceFaultContext=GetFileAttributesW((g_dir+L"\\x86trace.txt").c_str())!=INVALID_FILE_ATTRIBUTES;
+    auto toU16=[](const std::wstring& s){return std::u16string(s.begin(),s.end());};
+    std::vector<std::u16string> destructiveRoots{toU16(c.root),toU16(exeDir),toU16(provider_dir(c.appid))};
+    x86_file_guard::Policy fileGuard(std::move(destructiveRoots),toU16(c.cwd.empty()?exeDir:c.cwd),[](const std::string& message){lp_sink(message.c_str());});
     auto r=x86::run(path,c.cwd,cmdline,tee,loaded,x86::kGuestRunCap,dllSource,traceFaultContext,[&](const x86::PlayResult& mapped) {
         gap_summary::Binder imports;
         for(const auto& item:mapped.gap_imports)
             imports.record(std::get<0>(item),std::get<1>(item),std::get<2>(item));
         for(const auto& line:imports.report(std::string(exe.begin(),exe.end()),"x86").lines) lp_sink(line.c_str());
-    },donorGaps);
+    },donorGaps,[&fileGuard,toU16](const char* operation,const std::u16string& guestPath){
+        wchar_t current[32768]{};DWORD n=GetCurrentDirectoryW(32768,current);
+        if(!n||n>=32768)return fileGuard.allow(operation,u"\\__x86_guard_cwd_unavailable__");
+        return fileGuard.allow(operation,guestPath,toU16(std::wstring(current,n)));
+    });
     if(traceFaultContext&&steamstub_wrapped(path)) {
         snprintf(line,sizeof line,"PE32 SteamStub probe: .bind=1 x86SteamBridge=%s ActiveProcess=%s PEB.BeingDebugged=%u PEB.NtGlobalFlag=0x%08x",
                  steamProvider?"staged":"not-staged",steamProvider?"seeded":"not-seeded",unsigned(r.peb_being_debugged),r.peb_nt_global_flag);lp_sink(line);

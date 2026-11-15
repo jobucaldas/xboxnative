@@ -1771,6 +1771,11 @@ inline void Guest::register_all() {
     // The guest's file APIs use the Windows ANSI code-page path surface; no
     // SetFileApisToOEM route is exposed, so the process remains in ANSI mode.
     reg.add("kernel32.dll", "AreFileApisANSI", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 1; });
+    auto guard_file = [this](const char* operation, const std::u16string& path) {
+        if (host.destructive_file_guard && host.destructive_file_guard(operation, path)) return true;
+        set_last_error(5); return false;  // ERROR_ACCESS_DENIED; missing policy fails closed
+    };
+    auto narrow_path = [](const std::string& path) { std::u16string out; out.reserve(path.size()); for (unsigned char c : path) out.push_back(char16_t(c)); return out; };
     auto native_file = [this](uint32_t h, Host::FileCall& call) {
         auto it=file_handles.find(h); if(it==file_handles.end()){set_last_error(6);return false;}
         call.handle=it->second; return true;
@@ -1781,10 +1786,10 @@ inline void Guest::register_all() {
         if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
     reg.add("kernel32.dll", "CreateDirectoryW", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         if(!c.arg(0)||c.arg(1)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::CreateDirectoryW};q.path_w=wstr(c.arg(0));if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
-    reg.add("kernel32.dll", "RemoveDirectoryA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
-        if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::RemoveDirectoryA};q.path_a=str(c.arg(0));if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
-    reg.add("kernel32.dll", "RemoveDirectoryW", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
-        if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::RemoveDirectoryW};q.path_w=wstr(c.arg(0));if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    reg.add("kernel32.dll", "RemoveDirectoryA", Conv::Stdcall, 1, [this,guard_file,narrow_path](Cpu& c) -> uint32_t {
+        if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::RemoveDirectoryA};q.path_a=str(c.arg(0));if(!guard_file("RemoveDirectoryA",narrow_path(q.path_a)))return 0;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    reg.add("kernel32.dll", "RemoveDirectoryW", Conv::Stdcall, 1, [this,guard_file](Cpu& c) -> uint32_t {
+        if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::RemoveDirectoryW};q.path_w=wstr(c.arg(0));if(!guard_file("RemoveDirectoryW",q.path_w))return 0;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
     reg.add("kernel32.dll", "GetCurrentDirectoryA", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         Host::FileCall q{Host::FileCall::Kind::GetCurrentDirectoryA};q.args[0]=c.arg(0);if(c.arg(0)>(1u<<20)){set_last_error(87);return 0;}if(c.arg(0)&&!c.arg(1)){set_last_error(87);return 0;}if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}if(q.value<c.arg(0)&&q.value&&c.arg(1)){if(q.data.size()<q.value+1){set_last_error(87);return 0;}mem.write_bytes(c.arg(1),q.data.data(),uint32_t(q.value+1));}return uint32_t(q.value); });
     reg.add("kernel32.dll", "GetCurrentDirectoryW", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
@@ -1838,22 +1843,28 @@ inline void Guest::register_all() {
         if(it!=com_apartments.end()&&!--it->second.second)com_apartments.erase(it);
         return 0;
     });
-    reg.add("kernel32.dll", "DeleteFileA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+    reg.add("kernel32.dll", "DeleteFileA", Conv::Stdcall, 1, [this,guard_file,narrow_path](Cpu& c) -> uint32_t {
         if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::AttributesA};q.operation=Host::FileCall::Operation::DeleteA;q.path_a=str(c.arg(0));
+        if(!guard_file("DeleteFileA",narrow_path(q.path_a)))return 0;
         if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
-    reg.add("kernel32.dll", "DeleteFileW", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+    reg.add("kernel32.dll", "DeleteFileW", Conv::Stdcall, 1, [this,guard_file](Cpu& c) -> uint32_t {
         if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::AttributesA};q.operation=Host::FileCall::Operation::DeleteW;q.path_w=wstr(c.arg(0));
+        if(!guard_file("DeleteFileW",q.path_w))return 0;
         if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
     // File operations cross into Play's native kernel32_core layer through host HANDLEs;
     // guest pointers are decoded here, and no synthetic success is returned off-Play.
-    reg.add("kernel32.dll", "CreateFileA", Conv::Stdcall, 7, [this](Cpu& c) -> uint32_t {
+    reg.add("kernel32.dll", "CreateFileA", Conv::Stdcall, 7, [this,guard_file,narrow_path](Cpu& c) -> uint32_t {
         if(!c.arg(0)){set_last_error(87);return 0xffffffffu;}Host::FileCall q{Host::FileCall::Kind::CreateA}; q.path_a=str(c.arg(0));
         q.args[0]=c.arg(1);q.args[1]=c.arg(2);q.args[2]=c.arg(4);q.args[3]=c.arg(5);
+        const uint32_t writes=0x40000000u|0x10000000u|0x02000000u|0x00000002u|0x00000004u|0x00000010u|0x00000100u|0x00010000u;
+        if(((q.args[0]&writes)||q.args[2]==2||q.args[2]==5||(q.args[3]&0x04000000u))&&!guard_file("CreateFileA",narrow_path(q.path_a)))return 0xffffffffu;
         if(c.arg(6)){auto it=file_handles.find(c.arg(6));if(it==file_handles.end()){set_last_error(6);return 0xffffffffu;}q.template_handle=it->second;}
         if(!call_file(q)||q.value==UINT64_MAX){set_last_error(q.error?q.error:120);return 0xffffffffu;}set_last_error(q.error);return add_file_handle(q.value); });
-    reg.add("kernel32.dll", "CreateFileW", Conv::Stdcall, 7, [this](Cpu& c) -> uint32_t {
+    reg.add("kernel32.dll", "CreateFileW", Conv::Stdcall, 7, [this,guard_file](Cpu& c) -> uint32_t {
         if(!c.arg(0)){set_last_error(87);return 0xffffffffu;}Host::FileCall q{Host::FileCall::Kind::CreateW}; q.path_w=wstr(c.arg(0));
         q.args[0]=c.arg(1);q.args[1]=c.arg(2);q.args[2]=c.arg(4);q.args[3]=c.arg(5);
+        const uint32_t writes=0x40000000u|0x10000000u|0x02000000u|0x00000002u|0x00000004u|0x00000010u|0x00000100u|0x00010000u;
+        if(((q.args[0]&writes)||q.args[2]==2||q.args[2]==5||(q.args[3]&0x04000000u))&&!guard_file("CreateFileW",q.path_w))return 0xffffffffu;
         if(c.arg(6)){auto it=file_handles.find(c.arg(6));if(it==file_handles.end()){set_last_error(6);return 0xffffffffu;}q.template_handle=it->second;}
         if(!call_file(q)||q.value==UINT64_MAX){set_last_error(q.error?q.error:120);return 0xffffffffu;}set_last_error(q.error);return add_file_handle(q.value); });
     reg.add("kernel32.dll", "ReadFile", Conv::Stdcall, 5, [this,native_file](Cpu& c) -> uint32_t {

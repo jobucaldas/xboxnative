@@ -22,6 +22,7 @@
 #include <windows.h>
 #endif
 #include "x86_guest.h"
+#include "x86_file_guard.h"
 #if defined(_WIN32)
 #include "../../../uwph/kernel32/route.h"
 #endif
@@ -297,10 +298,12 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
                             bool trace_fault_context = false,
                             const std::function<void(const PlayResult&)>& on_imports = nullptr,
                             const DllLoadObserver& observe_dll = nullptr,
-                            const std::function<void(Host&)>& configure_host = nullptr) {
+                            const std::function<void(Host&)>& configure_host = nullptr,
+                            const std::function<bool(const char*, const std::u16string&)>& destructive_file_guard = nullptr) {
     PlayResult r;
     try {
         Memory mem; ThunkTable table; Host host; Registry reg;
+        host.destructive_file_guard = destructive_file_guard;
 #if defined(_WIN32)
         host.file_call = play_file_call;
         host.socket_call = play_socket_call;
@@ -464,7 +467,8 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
                       const DllSource& dll_source = nullptr,
                       bool trace_fault_context = false,
                       const std::function<void(const PlayResult&)>& on_imports = nullptr,
-                      const DllLoadObserver& observe_dll = nullptr) {
+                      const DllLoadObserver& observe_dll = nullptr,
+                      const std::function<bool(const char*, const std::u16string&)>& destructive_file_guard = nullptr) {
     PlayResult r;
     FILE* f = _wfopen(exe.c_str(), L"rb");
     if (!f) { r.fault = "cannot open the executable"; r.fault_kind = "Loader"; return r; }
@@ -478,8 +482,18 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
     if (got != file.size()) { r.fault = "short read of the executable"; r.fault_kind = "Loader"; return r; }
     std::string name;
     for (size_t i = exe.find_last_of(L"\\/") + 1; i < exe.size(); ++i) name += char(exe[i]);
-    (void)dir;
-    return run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source, trace_fault_context, on_imports, observe_dll);
+    std::wstring workingDirectory=dir;
+    if(workingDirectory.empty()) { const auto slash=exe.find_last_of(L"\\/"); if(slash!=std::wstring::npos)workingDirectory=exe.substr(0,slash); }
+    std::wstring previousDirectory;
+    bool restoreDirectory = false;
+    if (!workingDirectory.empty()) {
+        DWORD needed = GetCurrentDirectoryW(0, nullptr);
+        if (needed) { std::vector<wchar_t> previous(needed); DWORD n = GetCurrentDirectoryW(needed, previous.data());
+            if (n && n < needed) { previousDirectory.assign(previous.data(), n); restoreDirectory = SetCurrentDirectoryW(workingDirectory.c_str()) != FALSE; } }
+    }
+    auto result = run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source, trace_fault_context, on_imports, observe_dll, nullptr, destructive_file_guard);
+    if (restoreDirectory) SetCurrentDirectoryW(previousDirectory.c_str());
+    return result;
 }
 #endif
 }

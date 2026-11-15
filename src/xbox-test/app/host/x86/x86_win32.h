@@ -53,6 +53,7 @@ struct Host {
     std::function<void(const std::string&)> tee;  // optional live sink
     std::function<NlsResponse(const NlsRequest&)> nls_call;
     std::function<void(FileCall&)> file_call;     // Play's native kernel32 file layer
+    std::function<bool(const char*, const std::u16string&)> destructive_file_guard;
     std::function<void(SocketCall&)> socket_call;
     std::function<uint64_t()> tick_count;          // same monotonic millisecond source for the guest tick APIs
     std::function<void(LocaleCall&)> locale_call; // Play's native kernel32 locale formatter
