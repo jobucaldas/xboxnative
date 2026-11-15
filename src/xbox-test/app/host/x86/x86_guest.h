@@ -1374,8 +1374,14 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "InterlockedExchangeAdd", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         uint32_t old = mem.r32(c.arg(0)); mem.w32(c.arg(0), old + c.arg(1)); return old; });
     // Time
-    reg.add("kernel32.dll", "GetTickCount", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 12345; });
-    reg.add("kernel32.dll", "GetTickCount64", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 12345; });
+    auto tick_count = [this]() -> uint64_t { return host.tick_count ? host.tick_count() : 12345u; };
+    reg.add("kernel32.dll", "GetTickCount", Conv::Stdcall, 0, [tick_count](Cpu&) -> uint32_t { return uint32_t(tick_count()); });
+    reg.add("kernel32.dll", "GetTickCount64", Conv::Stdcall, 0, [tick_count](Cpu& c) -> uint32_t { uint64_t t=tick_count();c.reg[EDX]=uint32_t(t>>32);return uint32_t(t); });
+    reg.add("winmm.dll", "timeBeginPeriod", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t { uint32_t period=c.arg(0);return period>=1&&period<=1000000?0u:97u; });
+    reg.add("winmm.dll", "timeEndPeriod", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t { uint32_t period=c.arg(0);return period>=1&&period<=1000000?0u:97u; });
+    reg.add("winmm.dll", "timeGetTime", Conv::Stdcall, 0, [tick_count](Cpu&) -> uint32_t { return tick_count(); });
+    reg.add("winmm.dll", "timeGetDevCaps", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        uint32_t p=c.arg(0);if(!p||c.arg(1)!=8)return 129;mem.w32(p,1);mem.w32(p+4,1000000);return 0; });
     reg.add("kernel32.dll", "QueryPerformanceCounter", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t p = c.arg(0); if (p) { mem.w32(p, 1000); mem.w32(p + 4, 0); } return 1; });
     reg.add("kernel32.dll", "QueryPerformanceFrequency", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
@@ -1407,6 +1413,16 @@ inline void Guest::register_all() {
         auto it=file_handles.find(h); if(it==file_handles.end()){set_last_error(6);return false;}
         call.handle=it->second; return true;
     };
+    // Simple file operations preserve the native kernel32 result and last error.
+    reg.add("kernel32.dll", "CreateDirectoryA", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        if(!c.arg(0)||c.arg(1)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::AttributesA};q.operation=Host::FileCall::Operation::CreateDirectoryA;q.path_a=str(c.arg(0));
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    reg.add("kernel32.dll", "DeleteFileA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::AttributesA};q.operation=Host::FileCall::Operation::DeleteA;q.path_a=str(c.arg(0));
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    reg.add("kernel32.dll", "DeleteFileW", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::AttributesA};q.operation=Host::FileCall::Operation::DeleteW;q.path_w=wstr(c.arg(0));
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
     // File operations cross into Play's native kernel32_core layer through host HANDLEs;
     // guest pointers are decoded here, and no synthetic success is returned off-Play.
     reg.add("kernel32.dll", "CreateFileA", Conv::Stdcall, 7, [this](Cpu& c) -> uint32_t {
@@ -1451,6 +1467,13 @@ inline void Guest::register_all() {
         Host::FileCall q{Host::FileCall::Kind::TimeConvert};q.data=mem.read_bytes(c.arg(0),8);if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}mem.write_bytes(c.arg(1),q.data.data(),16);return 1; });
     reg.add("kernel32.dll", "FileTimeToLocalFileTime", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         Host::FileCall q{Host::FileCall::Kind::TimeLocal};q.data=mem.read_bytes(c.arg(0),8);if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}mem.write_bytes(c.arg(1),q.data.data(),8);return 1; });
+    reg.add("kernel32.dll", "SystemTimeToFileTime", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        if(!c.arg(0)||!c.arg(1)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::TimeConvert};q.operation=Host::FileCall::Operation::SystemToFileTime;q.data=mem.read_bytes(c.arg(0),16);
+        if(!call_file(q)){set_last_error(q.error?q.error:87);return 0;}mem.write_bytes(c.arg(1),q.data.data(),8);return 1; });
+    reg.add("kernel32.dll", "SystemTimeToTzSpecificLocalTime", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+        if(!c.arg(1)||!c.arg(2)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::TimeLocal};q.operation=Host::FileCall::Operation::SystemToTzLocal;q.data=mem.read_bytes(c.arg(1),16);q.args[0]=c.arg(0)!=0;
+        if(c.arg(0)){auto tz=mem.read_bytes(c.arg(0),172);q.data.insert(q.data.end(),tz.begin(),tz.end());}
+        if(!call_file(q)){set_last_error(q.error?q.error:87);return 0;}mem.write_bytes(c.arg(2),q.data.data(),16);return 1; });
     reg.add("kernel32.dll", "WriteFile", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
         uint32_t handle = c.arg(0), buf = c.arg(1), n = c.arg(2), written = c.arg(3);
         if (handle != Host::H_STDOUT && handle != Host::H_STDERR) { set_last_error(6); return 0; }  // ERROR_INVALID_HANDLE

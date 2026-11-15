@@ -382,6 +382,8 @@ jobs:
         run: bash src/xbox-test/app/tests/x86-sync.sh
       - name: "x86 kernel32 file, attribute, size and time APIs"
         run: bash src/xbox-test/app/tests/x86-file.sh
+      - name: "x86 winmm timer and system time APIs"
+        run: i686-w64-mingw32-g++ -std=c++17 -Wall -Wextra -Werror -DX86_TIME_DECLARATIONS_ONLY -fsyntax-only src/xbox-test/app/tests/x86-time.cpp && g++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/x86-time.cpp -o "$RUNNER_TEMP/x86-time" && "$RUNNER_TEMP/x86-time"
       - name: "x86 kernel32 locale format APIs"
         run: bash src/xbox-test/app/tests/x86-locale.sh
       - name: "x86 guest DLL loading (PE32 chain, DllMain, LoadLibrary/GetProcAddress, OS forwarders, cycles)"

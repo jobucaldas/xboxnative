@@ -49,12 +49,22 @@ inline void play_file_call(Host::FileCall& q) {
     case Host::FileCall::Kind::Read:{q.data.resize(q.args[0]);DWORD n=0;q.succeeded=kernel32_core::read_file((HANDLE)(uintptr_t)q.handle,q.data.data(),q.args[0],&n,nullptr)!=FALSE;q.args[1]=n;q.data.resize(n);if(!q.succeeded)failed();break;}
     case Host::FileCall::Kind::Size:{DWORD high=0,low=kernel32_core::file_size((HANDLE)(uintptr_t)q.handle,q.args[0]?&high:nullptr);q.value=low;q.args[1]=high;q.error=GetLastError();q.succeeded=low!=INVALID_FILE_SIZE||q.error==ERROR_SUCCESS;break;}
     case Host::FileCall::Kind::Time:{FILETIME t[3]{};using Fn=BOOL(WINAPI*)(HANDLE,LPFILETIME,LPFILETIME,LPFILETIME);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","GetFileTime");q.succeeded=fn&&(fn((HANDLE)(uintptr_t)q.handle,q.args[0]?&t[0]:nullptr,q.args[1]?&t[1]:nullptr,q.args[2]?&t[2]:nullptr)!=FALSE);q.data.resize(sizeof(t));memcpy(q.data.data(),t,sizeof(t));if(!q.succeeded)failed();break;}
-    case Host::FileCall::Kind::AttributesA:{using Fn=DWORD(WINAPI*)(LPCSTR);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","GetFileAttributesA");SetLastError(ERROR_SUCCESS);q.value=fn?fn(q.path_a.c_str()):INVALID_FILE_ATTRIBUTES;q.succeeded=q.value!=INVALID_FILE_ATTRIBUTES;if(!q.succeeded)failed();break;}
+    case Host::FileCall::Kind::AttributesA:{
+        if(q.operation==Host::FileCall::Operation::CreateDirectoryA){SetLastError(ERROR_SUCCESS);q.succeeded=CreateDirectoryA(q.path_a.c_str(),nullptr)!=FALSE;if(!q.succeeded)failed();}
+        else if(q.operation==Host::FileCall::Operation::DeleteA){SetLastError(ERROR_SUCCESS);q.succeeded=DeleteFileA(q.path_a.c_str())!=FALSE;if(!q.succeeded)failed();}
+        else if(q.operation==Host::FileCall::Operation::DeleteW){std::wstring p(q.path_w.begin(),q.path_w.end());SetLastError(ERROR_SUCCESS);q.succeeded=DeleteFileW(p.c_str())!=FALSE;if(!q.succeeded)failed();}
+        else {using Fn=DWORD(WINAPI*)(LPCSTR);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","GetFileAttributesA");SetLastError(ERROR_SUCCESS);q.value=fn?fn(q.path_a.c_str()):INVALID_FILE_ATTRIBUTES;q.succeeded=q.value!=INVALID_FILE_ATTRIBUTES;if(!q.succeeded)failed();}break;}
     case Host::FileCall::Kind::Seek:{using Fn=DWORD(WINAPI*)(HANDLE,LONG,PLONG,DWORD);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","SetFilePointer");LONG high=LONG(q.args[1]);SetLastError(ERROR_SUCCESS);DWORD low=fn?fn((HANDLE)(uintptr_t)q.handle,LONG(q.args[0]),q.args[3]?&high:nullptr,q.args[2]):INVALID_SET_FILE_POINTER;q.value=low;q.args[1]=DWORD(high);q.error=GetLastError();q.succeeded=low!=INVALID_SET_FILE_POINTER||q.error==ERROR_SUCCESS;break;}
     case Host::FileCall::Kind::SeekEx:{using Fn=BOOL(WINAPI*)(HANDLE,LARGE_INTEGER,PLARGE_INTEGER,DWORD);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","SetFilePointerEx");LARGE_INTEGER distance{},position{};distance.QuadPart=q.distance;SetLastError(ERROR_SUCCESS);q.succeeded=fn&&fn((HANDLE)(uintptr_t)q.handle,distance,q.args[0]?&position:nullptr,q.method)!=FALSE;q.error=fn?GetLastError():ERROR_PROC_NOT_FOUND;if(q.succeeded)q.position=position.QuadPart;break;}
     case Host::FileCall::Kind::End:q.succeeded=SetEndOfFile((HANDLE)(uintptr_t)q.handle)!=FALSE;if(!q.succeeded)failed();break;
-    case Host::FileCall::Kind::TimeConvert:{FILETIME in{};SYSTEMTIME out{};memcpy(&in,q.data.data(),8);q.succeeded=FileTimeToSystemTime(&in,&out)!=FALSE;q.data.resize(sizeof(out));memcpy(q.data.data(),&out,sizeof(out));if(!q.succeeded)failed();break;}
-    case Host::FileCall::Kind::TimeLocal:{FILETIME in{},out{};memcpy(&in,q.data.data(),8);q.succeeded=FileTimeToLocalFileTime(&in,&out)!=FALSE;q.data.resize(sizeof(out));memcpy(q.data.data(),&out,8);if(!q.succeeded)failed();break;}
+    case Host::FileCall::Kind::TimeConvert:{
+        if(q.operation==Host::FileCall::Operation::SystemToFileTime){SYSTEMTIME in{};FILETIME out{};memcpy(&in,q.data.data(),sizeof(in));SetLastError(ERROR_SUCCESS);q.succeeded=SystemTimeToFileTime(&in,&out)!=FALSE;if(q.succeeded){q.data.resize(sizeof(out));memcpy(q.data.data(),&out,sizeof(out));}}
+        else {FILETIME in{};SYSTEMTIME out{};memcpy(&in,q.data.data(),8);q.succeeded=FileTimeToSystemTime(&in,&out)!=FALSE;q.data.resize(sizeof(out));memcpy(q.data.data(),&out,sizeof(out));}
+        if(!q.succeeded)failed();break;}
+    case Host::FileCall::Kind::TimeLocal:{
+        if(q.operation==Host::FileCall::Operation::SystemToTzLocal){SYSTEMTIME in{},out{};TIME_ZONE_INFORMATION tz{};memcpy(&in,q.data.data(),sizeof(in));if(q.args[0])memcpy(&tz,q.data.data()+sizeof(in),sizeof(tz));SetLastError(ERROR_SUCCESS);q.succeeded=SystemTimeToTzSpecificLocalTime(q.args[0]?&tz:nullptr,&in,&out)!=FALSE;if(q.succeeded){q.data.resize(sizeof(out));memcpy(q.data.data(),&out,sizeof(out));}}
+        else {FILETIME in{},out{};memcpy(&in,q.data.data(),8);q.succeeded=FileTimeToLocalFileTime(&in,&out)!=FALSE;q.data.resize(sizeof(out));memcpy(q.data.data(),&out,8);}
+        if(!q.succeeded)failed();break;}
     }
 }
 #endif
@@ -226,6 +236,7 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         Memory mem; ThunkTable table; Host host; Registry reg;
 #if defined(_WIN32)
         host.file_call = play_file_call;
+        host.tick_count = []() { return uint64_t(::GetTickCount64()); };
         host.locale_call = play_locale_call;
 #endif
         host.tee = tee;
