@@ -106,6 +106,8 @@ struct PlayResult {
     std::string fault_kind;     // AccessViolation, Unsupported, UnresolvedImport, ...
     uint32_t fault_eip = 0;
     uint32_t base = 0, entry = 0;
+    uint8_t peb_being_debugged = 0;
+    uint32_t peb_nt_global_flag = 0;
     unsigned imports = 0, bound = 0, relocations = 0;
     std::vector<std::string> unresolved;   // "dll!symbol", in IAT order
     std::vector<std::tuple<std::string,std::string,gap_summary::Outcome>> gap_imports;
@@ -394,7 +396,8 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         // DllMain(DLL_PROCESS_ATTACH) for every loaded guest DLL, in load
         // order — after the thunk page and TEB/PEB exist, before the entry.
         try { guest.run_dll_mains(cpu, 1); } catch (const Fault& f) {
-            if (!cpu.exited) { record_fault(f); r.instructions = cpu.executed; return r; }
+            if (!cpu.exited) { record_fault(f); r.instructions = cpu.executed;
+                r.peb_being_debugged=mem.r8(PEB_ADDR+2);r.peb_nt_global_flag=mem.r32(PEB_ADDR+0x68);return r; }
         }
         // TLS callbacks of the top image run exactly once, from run_entry ->
         // init_tls (which allocates the implicit-TLS block first): the Windows
@@ -410,6 +413,7 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
             record_fault(fault);
         }
         r.instructions = cpu.executed;
+        r.peb_being_debugged=mem.r8(PEB_ADDR+2);r.peb_nt_global_flag=mem.r32(PEB_ADDR+0x68);
     } catch (const std::exception& e) {
         r.fault = std::string("loader: ") + e.what();
         r.fault_kind = "Loader";

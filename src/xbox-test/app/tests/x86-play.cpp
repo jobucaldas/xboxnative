@@ -31,6 +31,8 @@ int main(int argc, char** argv) {
     printf("play: loaded=%d finished=%d exit=%u instructions=%llu base=0x%08x entry=0x%08x imports=%u bound=%u relocs=%u\n",
            r.loaded ? 1 : 0, r.finished ? 1 : 0, r.exit_code, (unsigned long long)r.instructions,
            r.base, r.entry, r.imports, r.bound, r.relocations);
+    printf("play: peb-being-debugged=%u peb-nt-global-flag=0x%08x\n",
+           unsigned(r.peb_being_debugged), r.peb_nt_global_flag);
     if (!r.fault.empty()) printf("play: fault kind=%s eip=0x%08x %s\n", r.fault_kind.c_str(), r.fault_eip, r.fault.c_str());
     for (auto& u : r.unresolved) printf("play: unresolved %s\n", u.c_str());
     printf("play: on_loaded calls=%u before-entry=%d tee-bytes=%zu\n", loaded_calls, loaded_first ? 1 : 0, seen.size());
