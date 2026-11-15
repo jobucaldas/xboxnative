@@ -480,6 +480,9 @@ elif grep -q 'PLAY-OPENGL BLOCKED pixel-readback' "$out/opengl.log"; then
 else
   echo "PLAY-OPENGL FAIL (see $out/opengl.log)"; exit 1
 fi
+# The fixture's wsprintfA static import must bind before its D3D11 stages run.
+grep -Eq 'PLAY-TEST executed=1 finished=1 success=1 code=(42|43|95) ' "$out/d3d11-diag.log"
+if grep -q 'PRUN EVENT unresolved static import: user32.dll!wsprintfA' "$out/d3d11-diag.log"; then exit 1; fi
 # A guest's rejected D3D11 calls are logged by Play, once per distinct call, with
 # the feature levels it asked for and got. (Results pass through: exit code 42.)
 grep -q 'PRUN EVENT guest D3D11CreateDevice request type=1 flags=0x0 adapter=default levels=\[0xb100,0xb000\]' "$out/d3d11-diag.log"
