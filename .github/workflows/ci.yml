@@ -252,6 +252,8 @@ jobs:
       # retried, and a self-test step can follow a PE32 fixture).
       - name: mapped user32 regression PE with pads published, and twice in one process
         run: bash src/xbox-test/uwph/user32/tests/run-u32c-gate-test.sh
+      - name: wsprintf formatter matches documented user32 contract
+        run: bash src/xbox-test/app/tests/wsprintf.sh
   d3d10-shim:
     runs-on: ubuntu-latest
     steps:
