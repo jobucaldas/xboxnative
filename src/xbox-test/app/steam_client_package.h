@@ -16,11 +16,22 @@ namespace steam_client_package {
 constexpr const char* host = "media.steampowered.com";
 constexpr const char* manifest_path = "/client/steam_client_win64";
 constexpr const char* package = "bins_win64";
+constexpr const char* codec_package = "bins_codecs_win64";
+constexpr const char* misc_package = "bins_misc_win64";
 constexpr const char* member = "steamclient64.dll";
 constexpr const char* runtime_files[] = {
     "steamclient64.dll", "tier0_s64.dll", "vstdlib_s64.dll", "SDL3.dll", "video64.dll"
 };
+constexpr const char* codec_runtime_files[] = {
+    "libavcodec-62.dll", "libavfilter-11.dll", "libavformat-62.dll",
+    "libavutil-60.dll", "libswresample-6.dll", "libswscale-9.dll"
+};
+constexpr const char* misc_runtime_files[] = {
+    "bin/gldriverquery64.exe"
+};
 constexpr size_t runtime_file_count = sizeof(runtime_files) / sizeof(runtime_files[0]);
+constexpr size_t codec_runtime_file_count = sizeof(codec_runtime_files) / sizeof(codec_runtime_files[0]);
+constexpr size_t misc_runtime_file_count = sizeof(misc_runtime_files) / sizeof(misc_runtime_files[0]);
 
 struct Entry { std::string file, sha256; };
 inline bool hex64(const std::string& s) {
@@ -30,18 +41,22 @@ inline bool hex64(const std::string& s) {
 }
 // The package's zip name and the SHA-256 of that zip ("sha2"; "sha2vz" is the
 // LZMA variant, not used). The name must be a plain file beside the manifest.
-inline bool manifest_entry(const std::string& text, Entry& out) {
+inline bool manifest_entry(const std::string& text, const char* package_name, Entry& out) {
     out = {};
+    if (!package_name || !*package_name) return false;
     Vdf root;
     if (!vdf_parse(text, root)) return false;
     // The platform block ("win64"), beside Valve's manifest signature blocks.
     const Vdf* top = nullptr;
-    for (auto& kid : root.kids) if (kid.obj && kid.get(package)) { top = &kid; break; }
+    for (auto& kid : root.kids) if (kid.obj && kid.get(package_name)) { top = &kid; break; }
     if (!top) return false;
-    out.file = top->str({package, "file"});
-    out.sha256 = top->str({package, "sha2"});
+    out.file = top->str({package_name, "file"});
+    out.sha256 = top->str({package_name, "sha2"});
     if (out.file.empty() || out.file.find_first_of("/\\:") != std::string::npos || out.file[0] == '.') return false;
     return hex64(out.sha256);
+}
+inline bool manifest_entry(const std::string& text, Entry& out) {
+    return manifest_entry(text, package, out);
 }
 inline uint32_t le32(const std::string& z, size_t at) { uint32_t v; memcpy(&v, z.data() + at, 4); return v; }
 inline uint16_t le16(const std::string& z, size_t at) { uint16_t v; memcpy(&v, z.data() + at, 2); return v; }
