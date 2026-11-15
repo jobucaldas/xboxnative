@@ -45,6 +45,10 @@ External dependencies fetched at build time (never copied here; pinned in deps.p
                                                microsoft-experimental Vulkan driver, issue #177) into the git-ignored
                                                out/mesa-dzn/ with patches/mesa-src/0003..0007 (MIT); vulkan_dzn.dll and its ICD manifest
                                                ship in runtime/ with the same licence texts, the patches and SOURCE-dzn.txt. Never committed.
+  DirectX Shader Compiler v1.8.2505.1 (dxc-dxil) Microsoft DXIL validator dxil.dll. Fetched from the official
+                                               release and SHA-256 verified by src/tools/fetch-dxil.sh; only x64 dxil.dll is
+                                               packaged in runtime/ with LICENSE-MS.txt and SOURCE.txt. Microsoft's license terms
+                                               apply; the binary is never committed.
   gbe_fork release (gbe-fork-win)              LGPL-3.0 (Detanup01/gbe_fork). Pinned prebuilt release fetched and SHA-256 verified by
                                                src/tools/fetch-gbe-fork.sh into git-ignored out/gbe-fork/; only the regular x64
                                                steam_api64.dll and the x64 emulated steamclient64.dll are packaged (steam-provider/gbe/,
