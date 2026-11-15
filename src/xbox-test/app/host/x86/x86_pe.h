@@ -133,8 +133,12 @@ inline void read_exports(Image& img, const std::vector<uint8_t>& bytes) {
 }
 inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, const std::vector<uint8_t>& file, uint32_t load_base = 0) {
     if (file.size() < 0x40) throw std::runtime_error("PE32 truncated");
-    size_t nt = u32(file, 0x3c);
-    uint32_t preferred = u32(file, nt + 24 + 28);
+    size_t nt = u32(file, 0x3c), opt = nt + 24;
+    uint32_t optional_size = u32(file, nt + 20, 2);
+    if (optional_size >= 96 + 15 * 8 && u32(file, opt + 92) > 14 &&
+        (u32(file, opt + 96 + 14 * 8) || u32(file, opt + 96 + 14 * 8 + 4)))
+        throw std::runtime_error("managed (CLR) image: needs a .NET runtime host");
+    uint32_t preferred = u32(file, opt + 28);
     wxl::Pe32 pe; pe.map(file, load_base ? load_base : preferred);
     Image img; img.base = pe.logical; img.size = uint32_t(pe.bytes.size()); img.entry_rva = pe.entry; img.entry = pe.logical + pe.entry; img.relocations = pe.relocations;
     // Sections: headers R; each section gets its own page protections.
@@ -193,7 +197,7 @@ inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, cons
     // runtime pseudo-relocator memcpy into .text (and .rdata) promotes the
     // page instead of faulting. PROT_COW gates the promotion; the
     // interpreter's own W^X code pages never carry it.
-    size_t opt = nt + 24, ns = wxl::Pe32::read(pe.bytes, nt + 6, 2), secs = opt + wxl::Pe32::read(pe.bytes, nt + 20, 2);
+    size_t ns = wxl::Pe32::read(pe.bytes, nt + 6, 2), secs = opt + wxl::Pe32::read(pe.bytes, nt + 20, 2);
     mem.protect(img.base, img.size, PROT_R | PROT_COW);  // headers and any gap between sections
     for (size_t i = 0; i < ns; ++i) {
         size_t s = secs + 40 * i; uint32_t va = u32(pe.bytes, s + 12), vs = std::max(u32(pe.bytes, s + 8), u32(pe.bytes, s + 16)), ch = u32(pe.bytes, s + 36);
@@ -294,8 +298,10 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
     constexpr uint32_t kDllArenaBase = 0x38000000u, kDllArenaEnd = 0x60000000u;
     size_t nt0 = u32(file, 0x3c);
     uint32_t preferred = u32(file, nt0 + 24 + 28);
-    uint32_t image_size = u32(file, nt0 + 24 + 56);  // SizeOfImage (page-aligned; wxl::Pe32 validates)
+    uint32_t image_size = u32(file, nt0 + 24 + 56);  // SizeOfImage from PE; reserve the page-rounded mapping.
     if (!image_size) throw std::runtime_error("DLL load: SizeOfImage is 0");
+    if (image_size > UINT32_MAX - (Memory::PAGE - 1)) throw std::runtime_error("DLL load: SizeOfImage rounding overflow");
+    image_size = (image_size + Memory::PAGE - 1) & ~(Memory::PAGE - 1);
     uint32_t load_base = preferred;
     if (!mem.free_range(preferred, image_size)) {
         uint32_t candidate = kDllArenaBase;
