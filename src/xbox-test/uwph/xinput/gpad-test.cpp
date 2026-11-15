@@ -98,23 +98,18 @@ int main() {
     r.clear(); r.tick(50); r.held(&buttons, &lt, &rt);
     CHECK(!r.armed && buttons == 0);
 
-    // Both consumer classes: the raw-input enumeration (uwph_u32c_pads mask)
-    // must present slot 0 while injection holds buttons so a guest finds the
-    // IG_ device it reads through XInput — and must not add anything when
-    // injection is idle. Button bits themselves flow only through
-    // XInputGetState (pad_registry.h: reads never complete), asserted in
-    // gpad-xinput-test.cpp.
-    CHECK(gpad::publish_mask(0, false) == 0);
-    CHECK(gpad::publish_mask(0, true) == 1u);              // no physical pad: slot 0 appears
-    CHECK(gpad::publish_mask(0x2 | 0x8, true) == (0x2u | 0x8u | 1u));   // physical pads kept
-    CHECK(gpad::publish_mask(0x2 | 0x8, false) == (0x2u | 0x8u));
+    // Raw-input enumeration keeps slot 0 visible throughout a gpad session,
+    // including startup after a short press ends; buttons flow through XInput.
+    CHECK(gpad::publish_mask(0, false, false) == 0 && gpad::publish_mask(0, true, false) == 1u);
+    CHECK(gpad::publish_mask(0, false, true) == 1u);       // remains visible after release
+    CHECK(gpad::publish_mask(0x2 | 0x8, false, true) == (0x2u | 0x8u | 1u) &&
+          gpad::publish_mask(0x2 | 0x8, false, false) == (0x2u | 0x8u));
     g("DPAD_DOWN 100");
     r.arm(out, 0); r.tick(0); r.held(&buttons, &lt, &rt);
     CHECK(buttons == BTN_DPAD_DOWN);
-    CHECK(gpad::publish_mask(0, buttons != 0) == 1u);
     r.tick(100); r.held(&buttons, &lt, &rt);
     CHECK(buttons == 0);                                   // release delivered
-    CHECK(gpad::publish_mask(0, buttons != 0) == 0u);      // enumeration back to physical only
+    CHECK(gpad::publish_mask(0, false, true) == 1u);        // remains discoverable while idle
 
     puts("gpad: parse, reject, trigger bytes, hold/release timing, gap, re-arm, clear and dual-consumer mask PASS");
 }
