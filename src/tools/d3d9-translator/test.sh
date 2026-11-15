@@ -144,7 +144,7 @@ def dst(regnum, regtype, mask=0xF):
 def src(regnum, regtype, swizzle=0xE4):
     return (regnum & 0x7FF) | ((regtype & 0x7) << 28) | ((swizzle & 0xFF) << 16)
 D3DSPR_INPUT, D3DSPR_CONST, D3DSPR_RASTOUT = 1, 2, 4
-D3DSPR_ATTROUT, D3DSPR_TEXTURE = 5, 3
+D3DSPR_ATTROUT, D3DSPR_TEXCRDOUT = 5, 6
 D3DSIO_DCL, D3DSIO_M4x4, D3DSIO_MOV, D3DSIO_END = 0x1F, 20, 1, 0xFFFF
 tokens = [0xFFFE0101]
 tokens += op(D3DSIO_DCL, 0, dst(0, D3DSPR_INPUT))
@@ -152,7 +152,7 @@ tokens += op(D3DSIO_DCL, 10, dst(1, D3DSPR_INPUT))
 tokens += op(D3DSIO_DCL, 5, dst(2, D3DSPR_INPUT))
 tokens += op(D3DSIO_M4x4, dst(0, D3DSPR_RASTOUT), src(0, D3DSPR_INPUT), src(0, D3DSPR_CONST))
 tokens += op(D3DSIO_MOV, dst(0, D3DSPR_ATTROUT), src(1, D3DSPR_INPUT))
-tokens += op(D3DSIO_MOV, dst(0, D3DSPR_TEXTURE), src(2, D3DSPR_INPUT))
+tokens += op(D3DSIO_MOV, dst(0, D3DSPR_TEXCRDOUT), src(2, D3DSPR_INPUT))
 tokens += [D3DSIO_END]
 open(sys.argv[1], "wb").write(struct.pack("<%dI" % len(tokens), *tokens))
 EOF
@@ -219,15 +219,15 @@ def signature(name):
         elements.append((data[start:end].decode("ascii"), semantic, system, register, mask))
     return elements
 inputs, outputs = signature("ISGN"), signature("OSGN")
-expected = [("SV_Position", 0, 1, 0), ("TEXCOORD", 8, 0, 9)]
+expected = [("SV_Position", 0, 1, 0), ("TEXCOORD", 0, 0, 1), ("TEXCOORD", 8, 0, 9)]
 actual = [(name, semantic, system, register) for name, semantic, system, register, mask in outputs]
 if len(inputs) != 3:
     sys.exit("ISGN has %d entries, expected position, color, texcoord" % len(inputs))
 if actual != expected:
-    sys.exit("OSGN entries %s, expected only the declared position and diffuse-color outputs %s" % (actual, expected))
+    sys.exit("OSGN entries %s, expected the declared position, diffuse-color, and texture-coordinate outputs %s" % (actual, expected))
 if any(mask & 0xF != 0xF for _, _, _, _, mask in outputs):
     sys.exit("OSGN contains an output without its declared component mask")
-print("v4 signatures ok: 3 inputs, 2 declared outputs")
+print("v4 signatures ok: 3 inputs, 3 declared outputs")
 EOF
 python3 -I check-v4-signature.py out-v4.dxbc || { echo "FAIL translated textured variant has stray or malformed outputs" >&2; exit 1; }
 # And a pixel shader's translation is the same on its first and second call in

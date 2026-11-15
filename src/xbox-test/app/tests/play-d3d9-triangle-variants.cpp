@@ -115,7 +115,7 @@ static DWORD tokDst(unsigned reg,DWORD type,DWORD mask=0xF) {
 static DWORD tokSrc(unsigned reg,DWORD type,DWORD swizzle=0xE4) {
     return (reg&0x7FF)|((type&7)<<28)|((swizzle&0xFF)<<16);
 }
-enum { TokTemp=0,TokInput=1,TokConst=2,TokTexture=3,TokRastOut=4,TokAttrOut=5 };
+enum { TokTemp=0,TokInput=1,TokConst=2,TokTexture=3,TokRastOut=4,TokAttrOut=5,TokTexcrdOut=6 };
 enum { TokMov=1,TokMul=5,TokM4x4=20,TokDcl=0x1F,TokTex=0x42,TokEnd=0xFFFF };
 
 // Variant 4's draw: the textured fixture's own vs_1_1/ps_1_1, a 2x2 green
@@ -131,7 +131,7 @@ static unsigned texturedVariant(IDirect3DDevice9Ex* device,IDirect3DSurface9* ta
         tokOp(TokDcl,2),0x00000005,tokDst(2,TokInput),
         tokOp(TokM4x4,3),tokDst(0,TokRastOut),tokSrc(0,TokInput),tokSrc(0,TokConst),
         tokOp(TokMov,2),tokDst(0,TokAttrOut),tokSrc(1,TokInput),
-        tokOp(TokMov,2),tokDst(0,TokTexture),tokSrc(2,TokInput),
+        tokOp(TokMov,2),tokDst(0,TokTexcrdOut),tokSrc(2,TokInput),
         TokEnd,
     };
     IDirect3DVertexShader9* vertexShader=nullptr;
