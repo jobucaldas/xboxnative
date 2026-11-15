@@ -17,7 +17,22 @@
 static unsigned checks=0,failures=0;
 #define CHECK(x) do { ++checks; if(!(x)){++failures;printf("FAIL line %d: %s\n",__LINE__,#x);} } while(0)
 static std::vector<std::string> lines;
+static std::vector<std::string> dumpedStages;
 static void sinkLine(const char* text){lines.push_back(text);}
+static bool captureShaderDump(const char* stage,unsigned long long,const void* code,size_t bytes) {
+    if(!stage||!code||!bytes)return false;
+    dumpedStages.push_back(stage);return true;
+}
+static void shaderBindingScan() {
+    unsigned char code[124]{};memcpy(code,"DXBC",4);uint32_t total=124,chunks=1,offset=36,size=80,count=2,bindings=16;
+    memcpy(code+24,&total,4);memcpy(code+28,&chunks,4);memcpy(code+32,&offset,4);
+    memcpy(code+36,"RDEF",4);memcpy(code+40,&size,4);memcpy(code+52,&count,4);memcpy(code+56,&bindings,4);
+    uint32_t texture=2,cbuffer=0,textureSlot=3,cbSlot=7,one=1;
+    memcpy(code+64,&texture,4);memcpy(code+80,&textureSlot,4);memcpy(code+84,&one,4);
+    memcpy(code+96,&cbuffer,4);memcpy(code+112,&cbSlot,4);memcpy(code+116,&one,4);
+    unsigned srv[4]{},cb[4]{};d3d11_diag::shaderBindings(code,sizeof code,srv,cb);
+    CHECK((srv[0]&(1u<<3))&&(cb[0]&(1u<<7)));
+}
 static size_t count(const char* needle){size_t n=0;for(auto& l:lines)if(l.find(needle)!=std::string::npos)++n;return n;}
 static HRESULT STDMETHODCALLTYPE alwaysInvalid(void*,void*,void*,void*){return E_INVALIDARG;}
 static ID3D11Device* make(ID3D11DeviceContext** context=nullptr) {
@@ -33,6 +48,7 @@ static ID3D11Device* make(ID3D11DeviceContext** context=nullptr) {
 // described once by format and size. Results are untouched (draws with no
 // shaders bound are legal; they just produce nothing).
 static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
+    shaderBindingScan();
     d3d11_diag::configure(sinkLine);
     d3d11_diag::adopt(device);
     CHECK(count("diagnostics on")==1);
@@ -445,6 +461,35 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         context->GSSetShader(nullptr,nullptr,0);
         gs->Release();
     }
+    // The terrain follow-up probes run only for pointlist+GS draws: declared
+    // PS inputs, observed constant-buffer writes, bounded shader dumps, and
+    // whether the bound target is sampled later.
+    {
+        ID3D11GeometryShader* gs=nullptr;ID3D11PixelShader* ps=nullptr;
+        ID3D11Buffer* cb=nullptr;ID3D11ShaderResourceView* targetSrv=nullptr;
+        ID3D11ShaderResourceView* nullView=nullptr;ID3D11Buffer* nullCb=nullptr;
+        d3d11_diag::shaderDumpLimit.store(2);d3d11_diag::shaderDumped.store(0);d3d11_diag::writeShaderDump=captureShaderDump;dumpedStages.clear();
+        CHECK(SUCCEEDED(device->CreateGeometryShader(d3d11_diag::kGsViewportBlob,sizeof d3d11_diag::kGsViewportBlob,nullptr,&gs))&&gs);
+        CHECK(SUCCEEDED(device->CreatePixelShader(triangle_ps,sizeof triangle_ps,nullptr,&ps))&&ps);
+        D3D11_BUFFER_DESC cbDesc{};cbDesc.ByteWidth=16;cbDesc.Usage=D3D11_USAGE_DEFAULT;cbDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        CHECK(SUCCEEDED(device->CreateBuffer(&cbDesc,nullptr,&cb))&&cb);
+        if(gs&&ps&&cb) {
+            {std::lock_guard<std::mutex> lock(d3d11_diag::reportM);d3d11_diag::shaderDetails[ps].srv[0]|=1;d3d11_diag::shaderDetails[ps].cb[0]|=1u<<2;d3d11_diag::bufferCpuWritten[cb]=false;}
+            context->GSSetShader(gs,nullptr,0);context->PSSetShader(ps,nullptr,0);
+            context->PSSetConstantBuffers(2,1,&cb);context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+            context->Draw(1,0);
+            CHECK(count("D3D11-SHDUMP stage=")==2&&dumpedStages.size()==2&&dumpedStages[0]=="gs"&&dumpedStages[1]=="ps");
+            CHECK(count("D3D11-GSTARGET resource=")==1&&count("fmt=28(R8G8B8A8_UNORM) size=64x64 later-srv=no")==1);
+            CHECK(count("ps-declared-srv={t0} ps-unbound-srv={t0} ps-cbuffers={b2:16B:no-cpu-write}")>=1);
+            CHECK(SUCCEEDED(device->CreateShaderResourceView(targetTexture,nullptr,&targetSrv))&&targetSrv);
+            context->OMSetRenderTargets(0,nullptr,nullptr);context->PSSetShaderResources(5,1,&targetSrv);
+            CHECK(count("D3D11-GSTARGET resource=")==2&&count("later-srv=yes stage=2 slot=5")==1);
+            context->PSSetShaderResources(5,1,&nullView);
+            context->PSSetConstantBuffers(2,1,&nullCb);context->GSSetShader(nullptr,nullptr,0);context->PSSetShader(nullptr,nullptr,0);
+        }
+        d3d11_diag::shaderDumpLimit.store(0);d3d11_diag::writeShaderDump=nullptr;
+        if(targetSrv)targetSrv->Release();if(cb)cb->Release();if(ps)ps->Release();if(gs)gs->Release();
+    }
     // The recorded line carries the bindings the draw ran with (effective
     // PS/GS SRV slots with formats, SO targets), and texture churn under the
     // same pipeline state neither adds a line nor uses up the cap.
@@ -643,6 +688,7 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     if(traceList)traceList->Release();
     if(traceDeferred)traceDeferred->Release();
     d3d11_diag::traceOn.store(false,std::memory_order_release);
+    context->ClearState();
     if(rtv)rtv->Release();
     if(targetTexture)targetTexture->Release();
     for(auto& l:lines)if(l.find("draw state")!=std::string::npos||l.find("suppressed")!=std::string::npos)printf("  %s\n",l.c_str());
