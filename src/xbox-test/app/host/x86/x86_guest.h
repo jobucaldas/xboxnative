@@ -1739,28 +1739,49 @@ inline void Guest::register_all() {
         });
     }
     auto resource_key = [this](uint32_t root,uint32_t value,bool wide)->uint32_t {
+        bool numeric=value<0x10000u;uint32_t id=value;
+        if(!numeric){std::string wanted;if(wide){auto w=wstr(value);wanted.assign(w.begin(),w.end());}else wanted=str(value);
+            if(wanted.size()>1&&wanted[0]=='#'){char* end=nullptr;unsigned long parsed=std::strtoul(wanted.c_str()+1,&end,10);if(end==wanted.c_str()+wanted.size()&&parsed<0x10000){numeric=true;id=uint32_t(parsed);}}
+        }
         uint16_t named=uint16_t(mem.r(root+12,2));
-        if(value>=0x10000u){
-            std::string wanted;if(wide){auto w=wstr(value);wanted.assign(w.begin(),w.end());}else wanted=str(value);
+        if(!numeric){std::string wanted;if(wide){auto w=wstr(value);wanted.assign(w.begin(),w.end());}else wanted=str(value);
             for(uint32_t i=0;i<named;++i){uint32_t e=root+16+i*8,name=mem.r32(e);if(!(name&0x80000000u))continue;uint32_t p=root+(name&0x7fffffffu);uint16_t n=uint16_t(mem.r(p,2));std::u16string found;for(uint32_t j=0;j<n;++j)found.push_back(char16_t(mem.r(p+2+j*2,2)));if(std::string(found.begin(),found.end())==wanted)return e;}
         }
-        uint16_t ids=uint16_t(mem.r(root+14,2));for(uint32_t i=0;i<ids;++i){uint32_t e=root+16+(named+i)*8;if(mem.r32(e)==value)return e;}return 0;
+        uint16_t ids=uint16_t(mem.r(root+14,2));for(uint32_t i=0;i<ids;++i){uint32_t e=root+16+(named+i)*8;if(mem.r32(e)==id)return e;}return 0;
     };
-    auto find_resource = [this,resource_key](Cpu& c,bool wide,bool extended)->uint32_t {
-        uint32_t module=extended?c.arg(0):c.arg(0),typep=extended?c.arg(1):c.arg(2),namep=extended?c.arg(2):c.arg(1),lang=extended?c.arg(3):0;
-        uint32_t base=module?module:image_base;if(!base){set_last_error(1813);return 0;}
-        uint32_t nt=base+mem.r32(base+0x3c);if(mem.r32(nt)!=0x00004550){set_last_error(1813);return 0;}
-        uint32_t opt=nt+24,rva=mem.r32(opt+96+16);if(!rva){set_last_error(1813);return 0;}uint32_t root=base+rva;
-        uint32_t te=resource_key(root,typep,wide);if(!te){set_last_error(1813);return 0;}uint32_t td=mem.r32(te+4);if(!(td&0x80000000u)){set_last_error(1813);return 0;}uint32_t names=root+(td&0x7fffffffu);
-        uint32_t ne=resource_key(names,namep,wide);if(!ne){set_last_error(1814);return 0;}uint32_t nd=mem.r32(ne+4);if(!(nd&0x80000000u)){set_last_error(1814);return 0;}uint32_t langs=root+(nd&0x7fffffffu),count=uint32_t(mem.r(langs+12,2))+uint32_t(mem.r(langs+14,2)),chosen=0;
-        for(uint32_t i=0;i<count;++i){uint32_t e=langs+16+i*8,id=mem.r32(e);if(!(id&0x80000000u)&&uint16_t(id)==lang){chosen=e;break;}if(!chosen)chosen=e;}
-        if(!chosen){set_last_error(1814);return 0;}uint32_t dd=root+(mem.r32(chosen+4)&0x7fffffffu),data=base+mem.r32(dd),size=mem.r32(dd+4),handle=0x74000000u+(++resource_serial);resource_handles[handle]={base,data,size};set_last_error(0);return handle;
+    auto resource_data = [this,resource_key](uint32_t base,uint32_t type,uint32_t name,bool wide,uint16_t requested,bool exact,uint32_t& data,uint32_t& size,uint32_t& error)->bool {
+        uint32_t nt=base+mem.r32(base+0x3c);if(mem.r32(nt)!=0x00004550){error=1813;return false;}
+        uint32_t opt=nt+24,rva=mem.r32(opt+96+16);if(!rva){error=1813;return false;}uint32_t root=base+rva;
+        uint32_t te=resource_key(root,type,wide);if(!te){error=1813;return false;}uint32_t td=mem.r32(te+4);if(!(td&0x80000000u)){error=1813;return false;}uint32_t names=root+(td&0x7fffffffu);
+        uint32_t ne=resource_key(names,name,wide);if(!ne){error=1814;return false;}uint32_t nd=mem.r32(ne+4);if(!(nd&0x80000000u)){error=1814;return false;}uint32_t langs=root+(nd&0x7fffffffu),count=uint32_t(mem.r(langs+12,2))+uint32_t(mem.r(langs+14,2)),chosen=0,neutral=0,user=0,first=0;
+        uint16_t user_lang=0x0409;
+#if defined(_WIN32)
+        user_lang=uint16_t(::GetUserDefaultLangID());
+#endif
+        for(uint32_t i=0;i<count;++i){uint32_t e=langs+16+i*8,id=mem.r32(e);if(id&0x80000000u)continue;uint16_t lang=uint16_t(id);if(!first)first=e;if(lang==0)neutral=e;if(lang==user_lang)user=e;if(exact&&lang==requested){chosen=e;break;}}
+        if(!chosen)chosen=neutral?neutral:(user?user:first);
+        if(!chosen){error=1814;return false;}uint32_t dd=root+(mem.r32(chosen+4)&0x7fffffffu);data=base+mem.r32(dd);size=mem.r32(dd+4);error=0;return true;
     };
-    for(bool wide:{false,true})for(bool extended:{false,true}){std::string name=extended?"FindResourceEx":"FindResource";name+=wide?"W":"A";reg.add("kernel32.dll",name,Conv::Stdcall,extended?5:3,[find_resource,wide,extended](Cpu& c)->uint32_t{return find_resource(c,wide,extended);});}
+    auto find_resource = [this,resource_data](Cpu& c,bool wide,bool extended)->uint32_t {
+        uint32_t module=c.arg(0),typep=extended?c.arg(1):c.arg(2),namep=extended?c.arg(2):c.arg(1),lang=extended?c.arg(3):0;
+        uint32_t base=module?module:image_base;bool known=base==image_base;for(const auto& dll:dlls)if(dll.second.image.base==base)known=true;
+        if(!base||!known){set_last_error(1813);return 0;}uint32_t data=0,size=0,error=0;
+        if(!resource_data(base,typep,namep,wide,uint16_t(lang),extended,data,size,error)){set_last_error(error);return 0;}
+        for(const auto& resource:resource_handles)if(resource.second.module==base&&resource.second.data==data&&resource.second.size==size){set_last_error(0);return resource.first;}
+        uint32_t handle=0x74000000u+(++resource_serial);resource_handles[handle]={base,data,size};set_last_error(0);return handle;
+    };
+    for(bool wide:{false,true})for(bool extended:{false,true}){std::string name=extended?"FindResourceEx":"FindResource";name+=wide?"W":"A";reg.add("kernel32.dll",name,Conv::Stdcall,extended?4:3,[find_resource,wide,extended](Cpu& c)->uint32_t{return find_resource(c,wide,extended);});}
     reg.add("kernel32.dll","LoadResource",Conv::Stdcall,2,[this](Cpu& c)->uint32_t{auto it=resource_handles.find(c.arg(1));if(it==resource_handles.end()||it->second.module!=(c.arg(0)?c.arg(0):image_base)){set_last_error(1814);return 0;}return c.arg(1);});
     reg.add("kernel32.dll","LockResource",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto it=resource_handles.find(c.arg(0));return it==resource_handles.end()?0:it->second.data;});
     reg.add("kernel32.dll","SizeofResource",Conv::Stdcall,2,[this](Cpu& c)->uint32_t{auto it=resource_handles.find(c.arg(1));if(it==resource_handles.end()||it->second.module!=(c.arg(0)?c.arg(0):image_base)){set_last_error(1814);return 0;}return it->second.size;});
-    reg.add("kernel32.dll","FreeResource",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{return resource_handles.erase(c.arg(0))?1u:0u;});
+    reg.add("kernel32.dll","FreeResource",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{return resource_handles.erase(c.arg(0))?0u:1u;});
+    for(bool wide:{false,true}){std::string name=wide?"LoadStringW":"LoadStringA";reg.add("user32.dll",name,Conv::Stdcall,4,[this,resource_data,wide](Cpu& c)->uint32_t{
+        uint32_t module=c.arg(0)?c.arg(0):image_base,id=c.arg(1),buffer=c.arg(2),capacity=c.arg(3);bool known=module==image_base;for(const auto& dll:dlls)if(dll.second.image.base==module)known=true;
+        if(!known||!id||id>0xffff||!buffer||!capacity){set_last_error(87);return 0;}
+        uint32_t data=0,size=0,error=0,block=id/16+1;if(!resource_data(module,6,block,false,0,false,data,size,error)){set_last_error(error);return 0;}
+        uint32_t offset=0;for(uint32_t i=0;i<16;++i){if(offset>=size){set_last_error(1814);return 0;}uint32_t length=uint32_t(mem.r(data+offset,2));offset+=2;if(i==id%16){uint32_t copied=std::min<uint32_t>(length,capacity-1);for(uint32_t j=0;j<copied;++j){uint16_t ch=uint16_t(mem.r(data+offset+j*2,2));if(wide)mem.w(buffer+j*2,ch,2);else mem.w8(buffer+j,uint8_t(ch<=0xff?ch:'?'));}if(wide)mem.w(buffer+copied*2,0,2);else mem.w8(buffer+copied,0);set_last_error(0);return copied;}offset+=length*2;}
+        return 0;
+    });}
     // GUI launcher guests have no attached console. Console-title APIs therefore
     // fail with ERROR_INVALID_HANDLE, as they do for a Windows process without one.
     auto no_console = [this](Cpu&) -> uint32_t { set_last_error(6); return 0; };

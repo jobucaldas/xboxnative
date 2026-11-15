@@ -46,8 +46,8 @@ int main() {
     uint32_t rs=call("kernel32.dll","findresourcea",{0,101,10});CHECK(rs!=0);
     CHECK(call("kernel32.dll","sizeofresource",{0,rs})==4);
     CHECK(call("kernel32.dll","lockresource",{call("kernel32.dll","loadresource",{0,rs})})==base+0x2000);
-    CHECK(call("kernel32.dll","findresourceexa",{0,10,101,0x409,0})!=0);
-    CHECK(call("kernel32.dll","freeresource",{rs})==1);
+    CHECK(call("kernel32.dll","findresourceexa",{0,10,101,0x409})!=0);
+    CHECK(call("kernel32.dll","freeresource",{rs})==0);
 
     host.socket_call=[](Host::SocketCall& q){if(q.kind==Host::SocketCall::Kind::Startup){q.result=0;q.data.assign(400,0);q.data[0]=2;q.data[1]=2;}else q.result=0;};
     uint32_t wsadata=0x3200;CHECK(call("ws2_32.dll","#115",{0x202,wsadata})==0&&mem.r(wsadata,2)==0x202);

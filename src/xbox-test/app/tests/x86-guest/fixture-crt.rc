@@ -3,3 +3,8 @@
 // supportedOS entry makes GetVersionEx report 10.0 under real Windows (and
 // Wine), matching what the console reports and what the interpreter answers.
 1 24 "fixture-crt.manifest"
+101 RCDATA { 0x12345678L }
+STRINGTABLE
+BEGIN
+    7 "Pug resource"
+END
