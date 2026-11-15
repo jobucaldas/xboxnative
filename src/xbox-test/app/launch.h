@@ -156,7 +156,13 @@ static std::wstring valve_client() {
     namespace pkg=steam_client_package;
     const std::wstring dir=g_dir+L"\\steam\\client", dll=dir+L"\\steamclient64.dll", stamp=dir+L"\\package.sha256";
     for(auto d:{g_dir+L"\\steam",dir})CreateDirectoryW(d.c_str(),nullptr);
-    auto cached=[&]{return pkg::valve_signature_block(read_bytes(dll));};
+    auto cached=[&]{
+        for(size_t i=0;i<pkg::runtime_file_count;++i) {
+            std::wstring path=dir+L"\\"+std::wstring(pkg::runtime_files[i],pkg::runtime_files[i]+strlen(pkg::runtime_files[i]));
+            if(read_bytes(path).empty()) return false;
+        }
+        return pkg::valve_signature_block(read_bytes(dll));
+    };
     std::string text; pkg::Entry e;
     if(cloud_http(false,true,pkg::host,pkg::manifest_path,{},{},text)!=200||!pkg::manifest_entry(text,e)) {
         if(cached()){lp_sink("STEAM client: Valve's client manifest unreachable; using the cached signed client");return dll;}
@@ -171,13 +177,22 @@ static std::wstring valve_client() {
         out.resize(expected); z_stream z{}; if(inflateInit2(&z,-15)!=Z_OK) return false;
         z.next_in=(Bytef*)data; z.avail_in=(uInt)size; z.next_out=(Bytef*)&out[0]; z.avail_out=(uInt)expected;
         int rc=inflate(&z,Z_FINISH); bool ok=rc==Z_STREAM_END&&z.total_out==expected; inflateEnd(&z); return ok;};
-    std::string client;
-    if(!pkg::zip_member(zip,pkg::member,inflater,client)||!pkg::valve_signature_block(client)){lp_sink("STEAM client: package has no signed steamclient64.dll; discarded");return {};}
-    const std::wstring part=dll+L".part";
-    write_text(part,client);
-    if(read_bytes(part)!=client||!MoveFileExW(part.c_str(),dll.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)){DeleteFileW(part.c_str());lp_sink("STEAM client: could not store the signed client");return {};}
+    for(size_t i=0;i<pkg::runtime_file_count;++i) {
+        const char* member=pkg::runtime_files[i];
+        std::string contents;
+        if(!pkg::zip_member(zip,member,inflater,contents)||contents.empty()||
+           (strcmp(member,pkg::member)==0&&!pkg::valve_signature_block(contents))) {
+            lp_sink("STEAM client: package is missing a required signed-client runtime DLL; discarded");return {};
+        }
+        std::wstring target=dir+L"\\"+std::wstring(member,member+strlen(member));
+        std::wstring part=target+L".part";
+        write_text(part,contents);
+        if(read_bytes(part)!=contents||!MoveFileExW(part.c_str(),target.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)){
+            DeleteFileW(part.c_str());lp_sink("STEAM client: could not store a required runtime DLL");return {};
+        }
+    }
     write_text(stamp,e.sha256);
-    lp_sink("STEAM client: Valve's signed client stored (SHA-256 matched Valve's manifest)");
+    lp_sink("STEAM client: Valve's signed client and runtime DLLs stored (SHA-256 matched Valve's manifest)");
     return dll;
 }
 // Emulated Steam for the signed-in account's game (the ownership rule), only
