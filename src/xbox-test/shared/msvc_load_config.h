@@ -279,8 +279,11 @@ inline bool validate(const File& f,Plan& result,bool play=false,std::string* fai
         // 16 bytes (blocks are heap-allocated); real images may still declare
         // one (e.g. 32). Play accepts any IMAGE_SCN_ALIGN_* code, like them.
         if(end<start) { snprintf(detail,sizeof detail,"TLS raw-data range inverted: start VA 0x%llx > end VA 0x%llx",(unsigned long long)start,(unsigned long long)end); return reject(detail); }
-        if(end-start>65536) { snprintf(detail,sizeof detail,"TLS raw-data size 0x%llx exceeds 0x10000",(unsigned long long)(end-start)); return reject(detail); }
-        if(zero>65536-(end-start)) { snprintf(detail,sizeof detail,"TLS zero-fill 0x%x + raw size 0x%llx exceeds 0x10000",zero,(unsigned long long)(end-start)); return reject(detail); }
+        if(end-start>f.imageSize || zero>f.imageSize-(end-start)) {
+            snprintf(detail,sizeof detail,"TLS template size 0x%llx + zero-fill 0x%x exceeds SizeOfImage 0x%zx",
+                     (unsigned long long)(end-start),zero,f.imageSize);
+            return reject(detail);
+        }
         if(((characteristics>>20)&15)>(play?14u:5u)) { snprintf(detail,sizeof detail,"TLS alignment code %u exceeds policy maximum %u",(characteristics>>20)&15,play?14u:5u); return reject(detail); }
         auto& tls=p.tls; tls.present=true; tls.directory=f.tls.rva;
         tls.raw=size_t(end-start); tls.zero=zero;
