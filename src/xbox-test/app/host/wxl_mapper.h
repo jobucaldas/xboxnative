@@ -2,6 +2,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
+#include <intrin.h>
 #include "../../shared/wine_load_config.h"
 #include "../../shared/msvc_load_config.h"
 #include <bcrypt.h>
@@ -10,7 +11,7 @@
 #endif
 // Minimal trusted-image loader: Wine virtual.c map_image_into_view's sequence
 // (copy, DIR64 relocation, protections) and loader.c import thunk fixup model.
-// No Wine code copied. Native static TLS uses a bounded packaged carrier slot.
+// No Wine code copied. Native static TLS uses packaged carrier slots, expanded per thread when needed.
 namespace wxl {
 using Log = void (*)(const char*);
 static Log logger;
@@ -30,6 +31,67 @@ struct Carrier {
     BYTE* (*block)() = nullptr;
     size_t capacity = 65536;
 };
+struct ThreadTlsBlock {
+    DWORD index;
+    BYTE* original;
+    BYTE* allocation;
+    size_t capacity;
+    ThreadTlsBlock* next;
+};
+static DWORD threadTlsFls=FLS_OUT_OF_INDEXES;
+static INIT_ONCE threadTlsOnce=INIT_ONCE_STATIC_INIT;
+static VOID CALLBACK releaseThreadTlsBlocks(PVOID value) {
+    auto slots=(BYTE**)__readgsqword(0x58);
+    auto block=(ThreadTlsBlock*)value;
+    while(block) {
+        auto next=block->next;
+        if(slots && slots[block->index]==block->allocation) slots[block->index]=block->original;
+        HeapFree(GetProcessHeap(),0,block->allocation);
+        HeapFree(GetProcessHeap(),0,block);
+        block=next;
+    }
+}
+static BOOL CALLBACK createThreadTlsFls(PINIT_ONCE, PVOID, PVOID*) {
+    threadTlsFls=FlsAlloc(releaseThreadTlsBlocks);
+    return threadTlsFls!=FLS_OUT_OF_INDEXES;
+}
+static ThreadTlsBlock* threadTlsBlocks() {
+    if(!InitOnceExecuteOnce(&threadTlsOnce,createThreadTlsFls,nullptr,nullptr) || threadTlsFls==FLS_OUT_OF_INDEXES) return nullptr;
+    return (ThreadTlsBlock*)FlsGetValue(threadTlsFls);
+}
+static BYTE* threadTlsBlock(const Carrier& carrier,DWORD index,size_t required) {
+    if(!carrier.index || !carrier.block || index==TLS_OUT_OF_INDEXES || required>512u*1024*1024) return nullptr;
+    if(required<=carrier.capacity) return carrier.block();
+    auto list=threadTlsBlocks();
+    if(threadTlsFls==FLS_OUT_OF_INDEXES) return nullptr;
+    for(auto block=list;block;block=block->next)
+        if(block->index==index) return required<=block->capacity?block->allocation:nullptr;
+    auto slots=(BYTE**)__readgsqword(0x58);
+    BYTE* original=carrier.block();
+    if(!slots || !original || slots[index]!=original) return nullptr;
+    auto allocation=(BYTE*)HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,required);
+    if(!allocation) return nullptr;
+    auto block=(ThreadTlsBlock*)HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(ThreadTlsBlock));
+    if(!block) { HeapFree(GetProcessHeap(),0,allocation); return nullptr; }
+    *block={index,original,allocation,required,list};
+    if(!FlsSetValue(threadTlsFls,block)) {
+        HeapFree(GetProcessHeap(),0,allocation); HeapFree(GetProcessHeap(),0,block); return nullptr;
+    }
+    slots[index]=allocation;
+    return allocation;
+}
+static void releaseThreadTlsBlock(DWORD index) {
+    if(threadTlsFls==FLS_OUT_OF_INDEXES) return;
+    auto list=(ThreadTlsBlock*)FlsGetValue(threadTlsFls);
+    ThreadTlsBlock** link=&list;
+    while(*link && (*link)->index!=index) link=&(*link)->next;
+    if(!*link) return;
+    auto block=*link; *link=block->next;
+    auto slots=(BYTE**)__readgsqword(0x58);
+    if(slots && slots[index]==block->allocation) slots[index]=block->original;
+    HeapFree(GetProcessHeap(),0,block->allocation); HeapFree(GetProcessHeap(),0,block);
+    FlsSetValue(threadTlsFls,list);
+}
 using Resolver = uintptr_t (*)(const char*,const char*, WORD);
 struct Image {
     BYTE* base = nullptr; size_t size = 0;
@@ -53,13 +115,14 @@ struct Image {
     DWORD entry = 0;
     bool dll = false;
     Carrier carrier;
+    DWORD carrierNativeIndex = TLS_OUT_OF_INDEXES;
     DWORD tlsKey = TLS_OUT_OF_INDEXES;
     std::vector<BYTE> tlsTemplate;
     std::vector<PIMAGE_TLS_CALLBACK> tlsCallbacks;
     bool tlsAttached = false;
     bool initThreadStorage() {
         if (tlsKey != TLS_OUT_OF_INDEXES) {
-            BYTE* block=carrier.block();
+            BYTE* block=threadTlsBlock(carrier,carrierNativeIndex,std::max<size_t>(1,tlsTemplate.size()));
             if (!block || TlsGetValue(tlsKey)) return false;
             if (tlsTemplate.size()) memcpy(block,tlsTemplate.data(),tlsTemplate.size());
             if (!TlsSetValue(tlsKey,block)) return false;
@@ -82,6 +145,7 @@ struct Image {
         if (tlsKey!=TLS_OUT_OF_INDEXES && TlsGetValue(tlsKey)) {
             for (auto cb:tlsCallbacks) cb(base,reason,nullptr);
             TlsSetValue(tlsKey,nullptr);
+            releaseThreadTlsBlock(carrierNativeIndex);
         }
     }
     uintptr_t symbol(const char* name) const {
@@ -113,6 +177,7 @@ struct Image {
             log("WXL DllMain DLL_PROCESS_DETACH");
         }
         if (tlsAttached) detachThread(DLL_PROCESS_DETACH);
+        releaseThreadTlsBlock(carrierNativeIndex);
         if (tlsKey!=TLS_OUT_OF_INDEXES) TlsFree(tlsKey);
         if (functions) {
             BOOL ok = RtlDeleteFunctionTable(functions);
@@ -156,8 +221,8 @@ inline bool prepareMsvcTls(Image& image, Log log, Carrier carrier) {
     auto& t=image.msvc.tls;
     if(!t.present) return true;
     if(memcmp(image.base+t.directory,t.expected.data(),t.expected.size()) ||
-        !carrier.index || !carrier.block || carrier.capacity>65536 ||
-        t.raw+t.zero>carrier.capacity || image.tlsKey!=TLS_OUT_OF_INDEXES) return fail();
+        !carrier.index || !carrier.block || t.raw+t.zero>image.size ||
+        image.tlsKey!=TLS_OUT_OF_INDEXES) return fail();
     // Retained callback RVAs are execution authority, but the mapped array must
     // still match the file plan, including its zero terminator, before ANY effect.
     if(t.callbackArray) for(size_t i=0;i<=t.callbacks.size();++i) {
@@ -174,6 +239,7 @@ inline bool prepareMsvcTls(Image& image, Log log, Carrier carrier) {
     if(image.tlsKey==TLS_OUT_OF_INDEXES) return fail();
     DWORD nativeIndex=carrier.index();
     if(nativeIndex==TLS_OUT_OF_INDEXES) return fail();
+    image.carrierNativeIndex=nativeIndex;
     memcpy(image.base+t.index,&nativeIndex,4);
     for(auto rva:t.callbacks) image.tlsCallbacks.push_back((PIMAGE_TLS_CALLBACK)(image.base+rva));
     return true;
@@ -191,14 +257,14 @@ inline bool prepareTls(Image& image, Log log, Carrier carrier) {
     auto td=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
     if (td.Size || td.VirtualAddress) {
         if (td.Size<sizeof(IMAGE_TLS_DIRECTORY64) || !image.valid(td.VirtualAddress,td.Size) ||
-            !carrier.index || !carrier.block || carrier.capacity>65536) return fail("WXL FAIL TLS directory/provider");
+            !carrier.index || !carrier.block) return fail("WXL FAIL TLS directory/provider");
         auto t=(IMAGE_TLS_DIRECTORY64*)(image.base+td.VirtualAddress);
         auto vaRange=[&](ULONGLONG va,size_t n) {
             return va>=(uintptr_t)image.base && image.valid(size_t(va-(uintptr_t)image.base),n);
         };
         if (t->EndAddressOfRawData<t->StartAddressOfRawData) return fail("WXL FAIL TLS template order");
         ULONGLONG raw=t->EndAddressOfRawData-t->StartAddressOfRawData;
-        if (raw>carrier.capacity || t->SizeOfZeroFill>carrier.capacity-raw ||
+        if (raw>image.size || t->SizeOfZeroFill>image.size-size_t(raw) ||
             !vaRange(t->StartAddressOfRawData,size_t(raw)) || !vaRange(t->AddressOfIndex,4))
             return fail("WXL FAIL TLS template/index bounds");
         size_t indexRva=size_t(t->AddressOfIndex-(uintptr_t)image.base);
@@ -214,6 +280,7 @@ inline bool prepareTls(Image& image, Log log, Carrier carrier) {
         image.tlsTemplate.resize(size_t(raw)+t->SizeOfZeroFill);
         if (raw) memcpy(image.tlsTemplate.data(),(void*)t->StartAddressOfRawData,size_t(raw));
         DWORD nativeIndex=carrier.index();
+        image.carrierNativeIndex=nativeIndex;
         memcpy((void*)t->AddressOfIndex,&nativeIndex,4);
         image.tlsKey=TlsAlloc();
         if (image.tlsKey==TLS_OUT_OF_INDEXES) return fail("WXL FAIL TlsAlloc");
