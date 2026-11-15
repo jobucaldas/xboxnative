@@ -51,10 +51,15 @@ struct Host {
         bool succeeded = false;
     };
     struct GlCall {
+        struct PointerBuffer { uint32_t guest_address = 0; unsigned arg_slot = 0; bool output = false; std::vector<uint8_t> bytes; };
         std::string name;
         std::vector<uintptr_t> args;
         std::vector<GlArgKind> arg_kinds;
         std::vector<unsigned> arg_slots;
+        unsigned short signature = 65535;
+        std::vector<PointerBuffer> pointers;
+        std::vector<std::vector<uint8_t>> shader_sources;
+        std::vector<int32_t> shader_lengths;
         std::vector<uint8_t> input, output;
         uintptr_t result = 0;
         bool gap = false;
@@ -86,6 +91,7 @@ struct Host {
     uint32_t vertex_array = 0, gl_array_buffer = 0, gl_element_array_buffer = 0;
     int32_t vertex_size = 0, vertex_stride = 0;
     uint32_t vertex_type = 0;
+    uint32_t unpack_alignment = 4, unpack_row_length = 0, unpack_skip_rows = 0, unpack_skip_pixels = 0;
     bool vertex_buffer_backed = false;
     std::map<std::string, unsigned> calls;        // import -> call count
     static constexpr uint32_t H_STDIN = 3, H_STDOUT = 7, H_STDERR = 11;
@@ -285,13 +291,15 @@ inline void register_gl(Registry& r, Host& h) {
         if (it == r.map.end()) return 0;
         return c.thunks.add(it->second);
     });
-    for (const auto& exported : kGlExports) {
+    for (unsigned export_index = 0; export_index < sizeof(kGlExports) / sizeof(kGlExports[0]); ++export_index) {
+        const auto& exported = kGlExports[export_index];
+        const unsigned short signature = kGlSignatureIds[export_index];
         const std::string name = exported.name;
         const unsigned argc = exported.argc;
         const unsigned first_arg = exported.first_arg;
         const unsigned arg_count = exported.arg_count;
-        r.add("opengl32.dll", name, Conv::Stdcall, argc, [&h, call, count, name, argc, first_arg, arg_count](Cpu& c) -> uint32_t {
-            count(name); Host::GlCall q{}; q.name = name;
+        r.add("opengl32.dll", name, Conv::Stdcall, argc, [&h, call, count, name, argc, first_arg, arg_count, signature](Cpu& c) -> uint32_t {
+            count(name); Host::GlCall q{}; q.name = name; q.signature = signature;
             for (unsigned i = 0; i < argc; ++i) q.args.push_back(c.arg(i));
             for (unsigned i = 0; i < arg_count; ++i) {
                 q.arg_kinds.push_back(kGlArgs[first_arg + i].kind);
@@ -384,17 +392,170 @@ inline void register_gl(Registry& r, Host& h) {
                 q.args[1] = 0; q.args.push_back(uint32_t(h.vertex_size)); q.args.push_back(h.vertex_type);
                 q.args.push_back(stride);
             }
-            uint32_t read_pixels_dst = 0;
+            uint32_t output_dst = 0;
             if (name == "glReadPixels") {
-                read_pixels_dst = q.args[6];
+                output_dst = uint32_t(q.args[6]);
                 if (q.args[2] > 16384 || q.args[3] > 16384 || q.args[4] != 0x1908u || q.args[5] != 0x1401u)
-                    throw Fault(FaultKind::Unsupported, c.eip, read_pixels_dst, "x86 GL readback format is unsupported");
+                    throw Fault(FaultKind::Unsupported, c.eip, output_dst, "x86 GL readback format is unsupported");
                 uint64_t bytes = uint64_t(q.args[2]) * q.args[3] * 4u;
-                if (bytes > (1u << 26)) throw Fault(FaultKind::AccessViolation, c.eip, read_pixels_dst, "x86 GL readback is too large");
+                if (bytes > (1u << 26)) throw Fault(FaultKind::AccessViolation, c.eip, output_dst, "x86 GL readback is too large");
                 q.output.resize(size_t(bytes)); q.args[6] = 0;
             }
+            if (name == "glGetIntegerv" || name == "glGetFloatv") {
+                const uint32_t pname = uint32_t(q.args[0]);
+                uint32_t count = pname == 0x0BA2u || pname == 0x0C10u || pname == 0x0C23u || pname == 0x0C22u ? 4u :
+                    pname == 0x0D3Au ? 2u : pname == 0x0BA6u || pname == 0x0BA7u || pname == 0x0BA8u ? 16u :
+                    pname == 0x0D33u || pname == 0x0D36u || pname == 0x0D38u || pname == 0x0D3Bu ? 1u : 0u;
+                if (!count || !q.args[1]) { q.gap = true; call(c, q); return 0; }
+                output_dst = uint32_t(q.args[1]); q.output.resize(size_t(count) * sizeof(uint32_t)); q.args[1] = 0;
+            }
+            if (name == "glTexImage2D") {
+                const uint32_t dst = uint32_t(q.args[8]);
+                const uint32_t width = uint32_t(q.args[3]), height = uint32_t(q.args[4]);
+                const uint32_t format = uint32_t(q.args[6]), type = uint32_t(q.args[7]);
+                uint32_t components = format == 0x1903u || format == 0x1906u || format == 0x1902u || format == 0x1909u ? 1u :
+                    format == 0x8227u || format == 0x190Au ? 2u : format == 0x1907u || format == 0x80E0u ? 3u :
+                    format == 0x1908u || format == 0x80E1u ? 4u : 0u;
+                uint32_t component_size = type == 0x1400u || type == 0x1401u ? 1u : type == 0x1402u || type == 0x1403u || type == 0x140Bu ? 2u :
+                    type == 0x1404u || type == 0x1405u || type == 0x1406u ? 4u : 0u;
+                uint32_t packed_size = type == 0x8032u || type == 0x8362u ? 1u :
+                    type == 0x8363u || type == 0x8364u || type == 0x8033u || type == 0x8034u || type == 0x8035u || type == 0x8366u ? 2u :
+                    type == 0x8036u || type == 0x8037u || type == 0x8038u || type == 0x8368u ? 4u : 0u;
+                const uint64_t pixel_bytes = packed_size ? packed_size : uint64_t(components) * component_size;
+                const uint32_t row_pixels = h.unpack_row_length ? h.unpack_row_length : width;
+                const uint64_t raw_row = uint64_t(row_pixels) * pixel_bytes;
+                const uint32_t alignment = h.unpack_alignment;
+                if (width > 16384 || height > 16384 || !components || !component_size || row_pixels < width ||
+                    (alignment != 1 && alignment != 2 && alignment != 4 && alignment != 8)) {
+                    q.gap = true; call(c, q); return 0;
+                }
+                const uint64_t row_stride = (raw_row + alignment - 1) & ~(uint64_t(alignment) - 1);
+                const uint64_t bytes = height ? uint64_t(h.unpack_skip_rows) * row_stride + uint64_t(h.unpack_skip_pixels) * pixel_bytes + uint64_t(height - 1) * row_stride + uint64_t(width) * pixel_bytes : 0;
+                if (bytes > (1u << 26)) { q.gap = true; call(c, q); return 0; }
+                if (dst) q.input = c.mem.read_bytes(dst, uint32_t(bytes));
+                q.args[8] = 0;
+            }
+            if (name.size() >= 10 && name.compare(0, 9, "glUniform") == 0 && name.find("Matrix") == std::string::npos && name.back() == 'v') {
+                const size_t suffix = name.size() - 3;
+                const uint32_t components = suffix < name.size() && name[suffix] >= '1' && name[suffix] <= '4' ? uint32_t(name[suffix] - '0') : 0u;
+                const uint32_t count = uint32_t(q.args[1]), source = uint32_t(q.args[2]);
+                const uint32_t scalar_size = name.find("dv") != std::string::npos || name.find("i64") != std::string::npos ? 8u : 4u;
+                uint64_t bytes = uint64_t(count) * components * scalar_size;
+                if (!components || (count && !source) || count > (1u << 20) || bytes > (1u << 26)) { q.gap = true; call(c, q); return 0; }
+                if (bytes) q.input = c.mem.read_bytes(source, uint32_t(bytes));
+                q.args[2] = 0;
+            }
+            if (name.size() >= 16 && name.compare(0, 9, "glUniform") == 0 && name.find("Matrix") != std::string::npos && name.back() == 'v') {
+                const size_t matrix = name.find("Matrix") + 6;
+                const uint32_t dimension = matrix < name.size() && name[matrix] >= '2' && name[matrix] <= '4' ? uint32_t(name[matrix] - '0') : 0u;
+                const uint32_t count = uint32_t(q.args[1]), source = uint32_t(q.args[3]);
+                const uint32_t scalar_size = name.find("dv") != std::string::npos ? 8u : 4u;
+                uint64_t bytes = uint64_t(count) * dimension * dimension * scalar_size;
+                if (!dimension || (count && !source) || count > (1u << 20) || bytes > (1u << 26)) { q.gap = true; call(c, q); return 0; }
+                if (bytes) q.input = c.mem.read_bytes(source, uint32_t(bytes));
+                q.args[3] = 0;
+            }
+            if (name == "glShaderSource") {
+                const uint32_t count = uint32_t(q.args[1]), strings = uint32_t(q.args[2]), lengths = uint32_t(q.args[3]);
+                if (!count || count > 1024 || !strings || uint64_t(strings) + uint64_t(count) * 4 > UINT32_MAX + uint64_t(1) ||
+                    (lengths && uint64_t(lengths) + uint64_t(count) * 4 > UINT32_MAX + uint64_t(1))) { q.gap = true; call(c, q); return 0; }
+                uint64_t total = 0; q.shader_sources.reserve(count); if (lengths) q.shader_lengths.reserve(count);
+                for (uint32_t i = 0; i < count; ++i) {
+                    const uint32_t source = c.mem.r32(strings + i * 4);
+                    if (!source) { q.gap = true; call(c, q); return 0; }
+                    std::vector<uint8_t> bytes;
+                    if (lengths) {
+                        const int32_t length = int32_t(c.mem.r32(lengths + i * 4));
+                        if (length < 0 || length > (1 << 20)) { q.gap = true; call(c, q); return 0; }
+                        bytes = c.mem.read_bytes(source, uint32_t(length)); q.shader_lengths.push_back(length);
+                        total += uint32_t(length);
+                    } else {
+                        const std::string text = c.mem.read_cstr(source, 1u << 20);
+                        bytes.assign(text.begin(), text.end()); bytes.push_back(0); total += text.size();
+                    }
+                    if (total > (1u << 20)) { q.gap = true; call(c, q); return 0; }
+                    if (bytes.empty()) bytes.push_back(0);
+                    q.shader_sources.push_back(std::move(bytes));
+                }
+                q.args[2] = q.args[3] = 0;
+            }
+            const bool custom_pointer = name == "glReadPixels" || name == "glTexImage2D" || name == "glShaderSource" ||
+                name == "glGetIntegerv" || name == "glGetFloatv" || name.compare(0, 9, "glUniform") == 0;
+            if (!custom_pointer) {
+                q.pointers.reserve(arg_count);
+                unsigned arg_slot = 0;
+                for (unsigned i = 0; i < arg_count; ++i) {
+                    const GlArg& metadata = kGlArgs[first_arg + i];
+                    if (metadata.kind == GlArgKind::Pointer || metadata.kind == GlArgKind::OutputPointer) {
+                        const uint32_t guest_address = uint32_t(q.args[arg_slot]);
+                        if (guest_address) {
+                            std::string expression = metadata.length;
+                            uint64_t elements = 1; size_t position = 0; bool valid = !expression.empty(), first = true; char operation = '*';
+                            auto parse_factor = [&](uint64_t& factor) {
+                                while (position < expression.size() && expression[position] == ' ') ++position;
+                                if (position >= expression.size()) return false;
+                                if (expression[position] >= '0' && expression[position] <= '9') {
+                                    factor = 0;
+                                    while (position < expression.size() && expression[position] >= '0' && expression[position] <= '9') {
+                                        unsigned digit = unsigned(expression[position++] - '0');
+                                        if (factor > (UINT64_MAX - digit) / 10) return false;
+                                        factor = factor * 10 + digit;
+                                    }
+                                    return true;
+                                }
+                                size_t start = position;
+                                while (position < expression.size() && ((expression[position] >= 'a' && expression[position] <= 'z') ||
+                                    (expression[position] >= 'A' && expression[position] <= 'Z') || expression[position] == '_')) ++position;
+                                if (start == position) return false;
+                                std::string identifier = expression.substr(start, position - start); unsigned length_slot = 0;
+                                for (unsigned j = 0; j < arg_count; ++j) {
+                                    if (identifier == kGlArgs[first_arg + j].name) { factor = uint32_t(q.args[length_slot]); return true; }
+                                    length_slot += kGlArgs[first_arg + j].slots;
+                                }
+                                return false;
+                            };
+                            while (valid && position < expression.size()) {
+                                uint64_t factor = 0;
+                                if (!parse_factor(factor)) { valid = false; break; }
+                                if (first) { elements = factor; first = false; }
+                                else if (operation == '*') { if (factor && elements > UINT64_MAX / factor) valid = false; else elements *= factor; }
+                                else if (!factor || elements % factor) valid = false;
+                                else elements /= factor;
+                                while (position < expression.size() && expression[position] == ' ') ++position;
+                                if (position < expression.size()) {
+                                    if (expression[position] != '*' && expression[position] != '/') { valid = false; break; }
+                                    operation = expression[position++];
+                                }
+                            }
+                            const uint64_t element_size = kGlArgSizes[first_arg + i];
+                            if (element_size && elements > UINT64_MAX / element_size) valid = false;
+                            uint64_t bytes = valid ? elements * element_size : 0;
+                            if (!valid || bytes > (1u << 26) || bytes > UINT32_MAX) { q.gap = true; call(c, q); return 0; }
+                            Host::GlCall::PointerBuffer buffer{}; buffer.guest_address = guest_address; buffer.arg_slot = arg_slot;
+                            buffer.output = metadata.kind == GlArgKind::OutputPointer; buffer.bytes.resize(size_t(bytes));
+                            if (!buffer.output && bytes) buffer.bytes = c.mem.read_bytes(guest_address, uint32_t(bytes));
+                            q.pointers.push_back(std::move(buffer));
+                            q.args[arg_slot] = q.pointers.back().bytes.empty() ? 0 : reinterpret_cast<uintptr_t>(q.pointers.back().bytes.data());
+                        } else if (metadata.kind == GlArgKind::OutputPointer && !metadata.length[0]) {
+                            q.gap = true; call(c, q); return 0;
+                        }
+                    }
+                    arg_slot += metadata.slots;
+                }
+            }
+            if (name == "glPixelStorei") {
+                if (!call(c, q) || q.gap) return 0;
+                const uint32_t pname = uint32_t(q.args[0]), value = uint32_t(q.args[1]);
+                if (pname == 0x0CF5u && (value == 1 || value == 2 || value == 4 || value == 8)) h.unpack_alignment = value;
+                else if (pname == 0x0CF2u && value <= (1u << 20)) h.unpack_row_length = value;
+                else if (pname == 0x0CF3u && value <= (1u << 20)) h.unpack_skip_rows = value;
+                else if (pname == 0x0CF4u && value <= (1u << 20)) h.unpack_skip_pixels = value;
+                return uint32_t(q.result);
+            }
             if (!call(c, q)) return 0;
-            if (!q.output.empty()) c.mem.write_bytes(read_pixels_dst, q.output.data(), uint32_t(q.output.size()));
+            if (!q.gap && !q.output.empty() && output_dst) c.mem.write_bytes(output_dst, q.output.data(), uint32_t(q.output.size()));
+            if (!q.gap) for (const auto& pointer_buffer : q.pointers) if (pointer_buffer.output && !pointer_buffer.bytes.empty())
+                c.mem.write_bytes(pointer_buffer.guest_address, pointer_buffer.bytes.data(), uint32_t(pointer_buffer.bytes.size()));
             return uint32_t(q.result);
         });
     }
