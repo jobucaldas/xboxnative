@@ -2484,8 +2484,26 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // lb/rb keep their conflict-pick role. 'view' is accepted as a no-op alias (the old filter
     // chip is gone; the sidebar's Installed entry switches the view).
     // Never periodic, never present unless a tester/script writes it; every executed line is logged as SYNTHETIC.
+    static UINT fallback_scan(unsigned vk) {
+        static const char row1[]="1234567890",qwerty[]="QWERTYUIOPASDFGHJKLZXCVBNM";
+        static const unsigned char qscan[]={0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x19,0x1E,0x1F,0x20,0x21,0x22,0x23,0x24,0x25,0x26,0x2C,0x2D,0x2E,0x2F,0x30,0x31,0x32};
+        for(unsigned i=0;i<10;++i) if(vk==unsigned(row1[i])) return 0x02+i;
+        for(unsigned i=0;i<26;++i) if(vk==unsigned(qwerty[i])) return qscan[i];
+        switch(vk) {
+        case VK_ESCAPE: return 0x01; case VK_BACK: return 0x0E; case VK_TAB: return 0x0F; case VK_RETURN: return 0x1C;
+        case VK_CONTROL: return 0x1D; case VK_SHIFT: return 0x2A; case VK_MENU: return 0x38; case VK_SPACE: return 0x39;
+        case VK_UP: return 0xE048; case VK_DOWN: return 0xE050; case VK_LEFT: return 0xE04B; case VK_RIGHT: return 0xE04D;
+        default: return (vk>=VK_F1&&vk<=VK_F10)?0x3B+(vk-VK_F1):0;
+        }
+    }
     bool scripted_key_event(unsigned vk,bool pressed) {
-        UINT mapped=MapVirtualKeyW(vk,MAPVK_VK_TO_VSC_EX);
+        // user32 is not linked into the UWP launcher (and may be absent on the console), so
+        // MapVirtualKeyW is resolved at runtime; without it, a set-1 table covers the keys
+        // scripts send.
+        using MapW=UINT(WINAPI*)(UINT,UINT);
+        static HMODULE user=LoadLibraryExW(L"user32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+        static MapW map=user?(MapW)GetProcAddress(user,"MapVirtualKeyW"):nullptr;
+        UINT mapped=map?map(vk,MAPVK_VK_TO_VSC_EX):fallback_scan(vk);
         UINT scan=mapped&0xff;
         bool extended=(mapped&0xff00)==0xe000||(mapped&0xff00)==0xe100;
         return scan&&m_input.key(vk,scan,extended,pressed);
