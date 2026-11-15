@@ -324,9 +324,22 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
     auto h = nt->OptionalHeader;
     size_t secOff = size_t(dos->e_lfanew)+offsetof(IMAGE_NT_HEADERS64,OptionalHeader)+nt->FileHeader.SizeOfOptionalHeader;
     if (nt->Signature!=IMAGE_NT_SIGNATURE || nt->FileHeader.Machine!=IMAGE_FILE_MACHINE_AMD64 || h.Magic!=IMAGE_NT_OPTIONAL_HDR64_MAGIC || nt->FileHeader.SizeOfOptionalHeader!=sizeof h || h.NumberOfRvaAndSizes!=IMAGE_NUMBEROF_DIRECTORY_ENTRIES || !nt->FileHeader.NumberOfSections || !range(secOff,nt->FileHeader.NumberOfSections*sizeof(IMAGE_SECTION_HEADER),file.size())) return fail("WXL FAIL NT header");
-    if (h.SectionAlignment!=4096 || !h.SizeOfImage || h.SizeOfImage> (mapped ? 512u : 32u)*1024*1024 || h.SizeOfImage%4096 || h.SizeOfHeaders<secOff+nt->FileHeader.NumberOfSections*sizeof(IMAGE_SECTION_HEADER) || h.SizeOfHeaders>file.size() || pages(h.SizeOfHeaders)>h.SizeOfImage) return fail("WXL FAIL image layout");
+    char layout[192];
+    if(h.SectionAlignment!=4096) snprintf(layout,sizeof layout,"WXL FAIL image layout: SectionAlignment 0x%lx != 0x1000",h.SectionAlignment);
+    else if(!h.SizeOfImage) snprintf(layout,sizeof layout,"WXL FAIL image layout: SizeOfImage is zero");
+    else if(h.SizeOfImage>(mapped?512u:32u)*1024*1024) snprintf(layout,sizeof layout,"WXL FAIL image layout: SizeOfImage 0x%lx exceeds limit 0x%x",h.SizeOfImage,(mapped?512u:32u)*1024*1024);
+    else if(h.SizeOfImage%4096) snprintf(layout,sizeof layout,"WXL FAIL image layout: SizeOfImage 0x%lx not 0x1000-aligned",h.SizeOfImage);
+    else if(h.SizeOfHeaders<secOff+nt->FileHeader.NumberOfSections*sizeof(IMAGE_SECTION_HEADER)) snprintf(layout,sizeof layout,"WXL FAIL image layout: SizeOfHeaders 0x%lx < section table end 0x%zx",h.SizeOfHeaders,secOff+nt->FileHeader.NumberOfSections*sizeof(IMAGE_SECTION_HEADER));
+    else if(h.SizeOfHeaders>file.size()) snprintf(layout,sizeof layout,"WXL FAIL image layout: SizeOfHeaders 0x%lx > file size 0x%zx",h.SizeOfHeaders,file.size());
+    else if(pages(h.SizeOfHeaders)>h.SizeOfImage) snprintf(layout,sizeof layout,"WXL FAIL image layout: headers pages 0x%zx > SizeOfImage 0x%lx",pages(h.SizeOfHeaders),h.SizeOfImage);
+    else layout[0]=0;
+    if(layout[0]) return fail(layout);
     for (unsigned d : {IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR})
-        if (!mapped && h.DataDirectory[d].Size) return fail("WXL FAIL unsupported runtime directory");
+        if(!mapped && h.DataDirectory[d].Size) {
+            auto directory=h.DataDirectory[d];
+            const char* name=d==IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT?"delay import":"COM descriptor";
+            char why[160]; snprintf(why,sizeof why,"WXL FAIL unsupported runtime directory: %s RVA 0x%08lx Size 0x%08lx in executable mode",name,directory.VirtualAddress,directory.Size); return fail(why);
+        }
     auto configDir=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG];
     auto sections=(const IMAGE_SECTION_HEADER*)(file.data()+secOff);
     const bool hasConfig=configDir.VirtualAddress || configDir.Size;
@@ -348,24 +361,36 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
     const bool playMsvc=config==LoadConfig::msvc_x64;
     const bool playInert=playMsvc && hasConfig && inertConfig();
     const bool explicitMsvc=config==LoadConfig::msvc_x64_cookie || (playMsvc && hasConfig && !playInert);
-    if (hasConfig && config!=LoadConfig::inert_wine && !playInert && !explicitMsvc)
-        return fail("WXL FAIL unsupported runtime directory");
-    if (explicitMsvc && (image.base || !configDir.VirtualAddress || !configDir.Size ||
+    if(hasConfig && config!=LoadConfig::inert_wine && !playInert && !explicitMsvc) {
+        char why[160]; snprintf(why,sizeof why,"WXL FAIL unsupported runtime directory: load config RVA 0x%08lx Size 0x%08lx policy %u",configDir.VirtualAddress,configDir.Size,unsigned(config)); return fail(why);
+    }
+    if(explicitMsvc && (image.base || !configDir.VirtualAddress || !configDir.Size ||
         h.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].VirtualAddress ||
-        h.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].Size))
-        return fail("WXL FAIL explicit MSVC runtime directory/state");
+        h.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].Size)) {
+        const char* reason=image.base?"Image already allocated":!configDir.VirtualAddress?"load config RVA is zero":!configDir.Size?"load config Size is zero":"COM descriptor is unsupported";
+        char why[160]; snprintf(why,sizeof why,"WXL FAIL explicit MSVC runtime directory/state: %s (config RVA 0x%08lx Size 0x%08lx)",reason,configDir.VirtualAddress,configDir.Size); return fail(why);
+    }
     // Preflight belongs to this attempt, not to Image until allocation succeeds.
     // A failed explicit allocation may be retried with a different policy.
     msvc_config::Plan msvcPlan;
     size_t configStart=0, configEnd=0;
     size_t end=pages(h.SizeOfHeaders); bool entryCode=false;
     for (unsigned i=0;i<nt->FileHeader.NumberOfSections;i++) {
-        auto s=sections[i]; size_t n=std::max(s.Misc.VirtualSize,s.SizeOfRawData);
-        if (!n || s.VirtualAddress%4096 || s.VirtualAddress<end || !range(s.VirtualAddress,pages(n),h.SizeOfImage) || (s.SizeOfRawData && !range(s.PointerToRawData,s.SizeOfRawData,file.size())) || ((s.Characteristics&IMAGE_SCN_MEM_EXECUTE)&&(s.Characteristics&IMAGE_SCN_MEM_WRITE))) return fail("WXL FAIL section layout/permissions");
+        auto s=sections[i]; size_t n=std::max(s.Misc.VirtualSize,s.SizeOfRawData); char sectionError[208];
+        if(!n) snprintf(sectionError,sizeof sectionError,"WXL FAIL section layout/permissions: section %u '%.8s' has zero virtual/raw size",i,s.Name);
+        else if(s.VirtualAddress%4096) snprintf(sectionError,sizeof sectionError,"WXL FAIL section layout/permissions: section %u '%.8s' RVA 0x%lx not 0x1000-aligned",i,s.Name,s.VirtualAddress);
+        else if(s.VirtualAddress<end) snprintf(sectionError,sizeof sectionError,"WXL FAIL section layout/permissions: section %u '%.8s' RVA 0x%lx < prior end 0x%zx",i,s.Name,s.VirtualAddress,end);
+        else if(!range(s.VirtualAddress,pages(n),h.SizeOfImage)) snprintf(sectionError,sizeof sectionError,"WXL FAIL section layout/permissions: section %u '%.8s' RVA 0x%lx span 0x%zx past SizeOfImage 0x%lx",i,s.Name,s.VirtualAddress,pages(n),h.SizeOfImage);
+        else if(s.SizeOfRawData && !range(s.PointerToRawData,s.SizeOfRawData,file.size())) snprintf(sectionError,sizeof sectionError,"WXL FAIL section layout/permissions: section %u '%.8s' raw 0x%lx+0x%lx past EOF 0x%zx",i,s.Name,s.PointerToRawData,s.SizeOfRawData,file.size());
+        else if((s.Characteristics&IMAGE_SCN_MEM_EXECUTE)&&(s.Characteristics&IMAGE_SCN_MEM_WRITE)) snprintf(sectionError,sizeof sectionError,"WXL FAIL section layout/permissions: section %u '%.8s' is writable and executable (characteristics 0x%lx)",i,s.Name,s.Characteristics);
+        else sectionError[0]=0;
+        if(sectionError[0]) return fail(sectionError);
         end=s.VirtualAddress+pages(n);
         if ((s.Characteristics&IMAGE_SCN_MEM_EXECUTE) && h.AddressOfEntryPoint>=s.VirtualAddress && h.AddressOfEntryPoint-s.VirtualAddress<n) entryCode=true;
     }
-    if (!entryCode && !(mapped && (nt->FileHeader.Characteristics&IMAGE_FILE_DLL) && !h.AddressOfEntryPoint)) return fail("WXL FAIL entry outside code");
+    if(!entryCode && !(mapped && (nt->FileHeader.Characteristics&IMAGE_FILE_DLL) && !h.AddressOfEntryPoint)) {
+        char why[160]; snprintf(why,sizeof why,"WXL FAIL entry outside code: AddressOfEntryPoint 0x%08lx is not inside an executable section",h.AddressOfEntryPoint); return fail(why);
+    }
     if (explicitMsvc) {
         msvc_config::File view;
         view.bytes=file.data(); view.size=file.size(); view.headers=h.SizeOfHeaders;
@@ -381,8 +406,14 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
             auto s=sections[i];
             view.sections.push_back({s.VirtualAddress,s.Misc.VirtualSize,s.PointerToRawData,s.SizeOfRawData,s.Characteristics});
         }
-        if((h.AddressOfEntryPoint && !view.at(h.AddressOfEntryPoint,1,msvc_config::read|msvc_config::execute,msvc_config::write)) ||
-            !msvc_config::validate(view,msvcPlan,playMsvc)) return fail("WXL FAIL explicit MSVC file preflight");
+        if(h.AddressOfEntryPoint && !view.at(h.AddressOfEntryPoint,1,msvc_config::read|msvc_config::execute,msvc_config::write)) {
+            char why[160]; snprintf(why,sizeof why,"WXL FAIL explicit MSVC file preflight: entry RVA 0x%08lx is not file-backed readable executable",h.AddressOfEntryPoint); return fail(why);
+        }
+        std::string preflightError;
+        if(!msvc_config::validate(view,msvcPlan,playMsvc,&preflightError)) {
+            if(preflightError.empty()) snprintf(layout,sizeof layout,"load-config validation rejected (RVA 0x%08lx Size 0x%08lx ImageBase 0x%llx SizeOfImage 0x%lx)",configDir.VirtualAddress,configDir.Size,(unsigned long long)h.ImageBase,h.SizeOfImage);
+            char why[256]; snprintf(why,sizeof why,"WXL FAIL explicit MSVC file preflight: %s",preflightError.empty()?layout:preflightError.c_str()); return fail(why);
+        }
         log("WXL explicit MSVC file/write plan validated");
         if (playMsvc) {
             char msg[160];

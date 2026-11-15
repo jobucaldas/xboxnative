@@ -1652,6 +1652,39 @@ static std::vector<uint8_t> slurp(const char* path) {
     std::ifstream f(path, std::ios::binary); if (!f) { printf("FAIL cannot open fixture %s\n", path); exit(2); }
     return std::vector<uint8_t>{std::istreambuf_iterator<char>(f), {}};
 }
+static std::vector<uint8_t> pe32_layout_fixture() {
+    std::vector<uint8_t> file(0x400);
+    auto w16=[&](size_t p,uint16_t v){memcpy(file.data()+p,&v,2);};
+    auto w32=[&](size_t p,uint32_t v){memcpy(file.data()+p,&v,4);};
+    constexpr size_t nt=0x80,opt=nt+24,sec=opt+224;
+    w16(0,0x5a4d); w32(0x3c,nt); w32(nt,0x4550); w16(nt+4,0x14c);
+    w16(nt+6,1); w16(nt+20,224); w16(opt,0x10b); w32(opt+16,0x1000);
+    w32(opt+28,0x400000); w32(opt+32,0x1000); w32(opt+36,0x200); w32(opt+56,0x2000); w32(opt+60,0x200);
+    w32(opt+92,16); memcpy(file.data()+sec,".rsrc",5); w32(sec+8,0x200); w32(sec+12,0x1000);
+    w32(sec+16,0x200); w32(sec+20,0x200);
+    return file;
+}
+static void test_pe32_layout_rejections() {
+    auto expect=[&](std::vector<uint8_t> file,const char* detail) {
+        std::string got;
+        try { wxl::Pe32 pe; pe.map(file); }
+        catch(const std::runtime_error& e) { got=e.what(); }
+        EXPECT(got.find(detail)!=std::string::npos,"PE32 rejection detail '%s' did not contain '%s'",got.c_str(),detail);
+    };
+    auto valid=pe32_layout_fixture(); wxl::Pe32 accepted; accepted.map(valid);
+    EXPECT(accepted.bytes.size()==0x2000,"valid malformed-fixture baseline must still map");
+    constexpr size_t opt=0x98,sec=opt+224;
+    auto f=valid; auto put=[&](std::vector<uint8_t>& b,size_t p,uint32_t v){memcpy(b.data()+p,&v,4);};
+    put(f,opt+56,0); expect(f,"PE32 image layout: SizeOfImage 0x0 is zero");
+    f=valid; put(f,opt+56,0x20001000); expect(f,"PE32 image layout: SizeOfImage 0x20001000 exceeds 0x20000000");
+    f=valid; put(f,opt+60,0x3000); expect(f,"SizeOfHeaders 0x3000 > SizeOfImage 0x2000");
+    f=valid; put(f,opt+60,0x500); expect(f,"SizeOfHeaders 0x500 > file size 0x400");
+    f=valid; put(f,opt+60,0x100); expect(f,"SizeOfHeaders 0x100 < section table end 0x1a0");
+    f=valid; put(f,opt+32,0x300); expect(f,"SectionAlignment 0x300 is not a power of two");
+    f=valid; put(f,opt+56,0x2001); expect(f,"SizeOfImage 0x2001 not 0x1000-aligned");
+    f=valid; put(f,sec+12,0x1001); expect(f,"section 0 VA 0x1001 not aligned");
+    f=valid; put(f,sec+8,0x2000); expect(f,"section 0 VA 0x1000 length 0x2000 past SizeOfImage 0x2000");
+}
 static void put16(std::vector<uint8_t>& b, size_t p, uint16_t v) {
     b[p] = uint8_t(v); b[p + 1] = uint8_t(v >> 8);
 }
@@ -1754,6 +1787,7 @@ static void test_fixture(const char* path) {
 int main(int argc, char** argv) {
     if (argc != 2) { printf("usage: x86-core <fixture.exe>\n"); return 2; }
     struct { const char* name; void (*fn)(); const char* pass; } suites[] = {
+        {"pe32-layout", test_pe32_layout_rejections, "X86-CORE PASS: PE32 layout rejections name the failed predicate and values without accepting malformed fixtures"},
         {"alu", test_alu, "X86-CORE PASS: add/or/adc/sbb/and/sub/xor/cmp 8/16/32-bit results and flags match this machine's CPU"},
         {"shift", test_shift, "X86-CORE PASS: rol/ror/shl/shr/sar 8/16/32-bit count 0..33 results and defined flags match this machine's CPU"},
         {"unary", test_unary_muldiv, "X86-CORE PASS: inc/dec/neg/not, imul, mul/imul/div/idiv (incl. #DE) match this machine's CPU"},

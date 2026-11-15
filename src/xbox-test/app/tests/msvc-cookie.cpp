@@ -43,7 +43,8 @@ static NTSTATUS WINAPI random_bytes(BCRYPT_ALG_HANDLE h,PUCHAR out,ULONG size,UL
 static wxl::Carrier carrier;
 static DWORD (*nativeIndex)();
 static DWORD counted_index() { ++indexCalls; return nativeIndex(); }
-static void log_line(const char* message) { puts(message); }
+static std::string lastLog;
+static void log_line(const char* message) { lastLog=message; puts(message); }
 static uint64_t current_cookie() {
     assert(allocated && cookieRva+8<=allocatedSize);
     uint64_t value; memcpy(&value,allocated+cookieRva,8);
@@ -184,6 +185,31 @@ int main(int argc,char** argv) {
     std::ifstream input(argv[1],std::ios::binary);
     original.bytes.assign(std::istreambuf_iterator<char>(input),{}); assert(!original.bytes.empty());
     cookieRva=original.cookie();
+    {
+        wxl::msvc_config::File view;
+        auto& nt=original.nt();
+        view.bytes=original.bytes.data(); view.size=original.bytes.size(); view.headers=nt.OptionalHeader.SizeOfHeaders;
+        view.imageSize=nt.OptionalHeader.SizeOfImage; view.preferred=nt.OptionalHeader.ImageBase;
+        view.dllCharacteristics=nt.OptionalHeader.DllCharacteristics;
+        auto config=original.dir(IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG);
+        view.config={config.VirtualAddress,config.Size};
+        auto reloc=original.dir(IMAGE_DIRECTORY_ENTRY_BASERELOC); view.reloc={reloc.VirtualAddress,reloc.Size};
+        auto imports=original.dir(IMAGE_DIRECTORY_ENTRY_IMPORT); view.imports={imports.VirtualAddress,imports.Size};
+        auto delay=original.dir(IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT); view.delay={delay.VirtualAddress,delay.Size};
+        auto tls=original.dir(IMAGE_DIRECTORY_ENTRY_TLS); view.tls={tls.VirtualAddress,tls.Size};
+        for(unsigned i=0;i<nt.FileHeader.NumberOfSections;++i) {
+            auto s=original.sections()[i];
+            view.sections.push_back({s.VirtualAddress,s.Misc.VirtualSize,s.PointerToRawData,s.SizeOfRawData,s.Characteristics});
+        }
+        wxl::msvc_config::Plan plan; std::string detail;
+        auto tooShort=view; tooShort.config.size=0x93;
+        assert(!wxl::msvc_config::validate(tooShort,plan,true,&detail));
+        assert(detail=="load config Size 0x93 must be 0x70 or in 0x94..0x140");
+        auto wrongCookieOnly=view; wrongCookieOnly.config.size=0x13f; detail.clear();
+        assert(!wxl::msvc_config::validate(wrongCookieOnly,plan,false,&detail));
+        assert(detail=="load config Size 0x13f != required 0x140");
+        puts("MSVC-COOKIE PASS: preflight reports distinct load-config size predicates without changing rejection");
+    }
     reset();
     for(auto mode:{wxl::LoadConfig::reject,wxl::LoadConfig::inert_wine}) for(bool mapped:{false,true})
         assert(!load_file(argv[1],mode,mapped));
@@ -236,12 +262,31 @@ int main(int argc,char** argv) {
     assert(rngCalls>=1 && rngCalls<=8 && resolutions>1 && observations==3);
     puts("MSVC-COOKIE owned static CRT complement, TLS-before-entry and exception/unwind passed");
     const auto explicitMode=wxl::LoadConfig::msvc_x64_cookie;
+    { auto f=original; f.sections()[0].PointerToRawData=DWORD(f.bytes.size());
+      auto path=f.save(argv[2],9999); wchar_t wide[4096];
+      assert(MultiByteToWideChar(CP_UTF8,0,path.c_str(),-1,wide,4096)); reset(); wxl::Image image;
+      assert(!wxl::load(image,wide,log_line,carrier,resolve,false,explicitMode));
+      assert(lastLog.find("WXL FAIL section layout/permissions: section 0 '")!=std::string::npos &&
+             lastLog.find("raw ")!=std::string::npos && lastLog.find("past EOF ")!=std::string::npos);
+      assert(!allocations && !rngCalls && !resolutions && !observations && !indexCalls);
+      puts("MSVC-COOKIE PASS: section raw EOF rejection reports section and byte range without allocating");
+    }
+    { auto f=original; f.dir(IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG).Size=0x13f;
+      auto path=f.save(argv[2],9998); reset(); assert(!load_file(path,explicitMode));
+      assert(lastLog.find("WXL FAIL explicit MSVC file preflight: load config Size 0x13f != required 0x140")==0);
+      assert(!allocations && !rngCalls && !resolutions && !observations && !indexCalls);
+      puts("MSVC-COOKIE PASS: WXL preflight preserves its prefix and reports the exact rejected load-config size");
+    }
     unsigned mutation=0;
     auto reject=[&](Fixture f) {
         auto path=f.save(argv[2],mutation++);
         reset(); assert(!load_file(path,explicitMode));
+        assert(lastLog.find("WXL FAIL ")==0 && lastLog.size()>strlen("WXL FAIL "));
+        assert(lastLog.find("load-config validation rejected")==std::string::npos);
         assert(!allocations && !rngCalls && !resolutions && !observations && !indexCalls);
         reset(); assert(!load_file(path,explicitMode,true));
+        assert(lastLog.find("WXL FAIL ")==0 && lastLog.size()>strlen("WXL FAIL "));
+        assert(lastLog.find("load-config validation rejected")==std::string::npos);
         assert(!allocations && !rngCalls && !resolutions && !observations && !indexCalls);
     };
     // Every unsupported byte is independently rejected, including real-game
