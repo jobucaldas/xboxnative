@@ -248,10 +248,10 @@ static bool stage_steam_provider_x86(uint32_t appid,const std::wstring& exePath)
         COPYFILE2_EXTENDED_PARAMETERS copy{};copy.dwSize=sizeof copy;
         HRESULT hr=CopyFile2(source.c_str(),target.c_str(),&copy);
         if(FAILED(hr)){char b[96];snprintf(b,sizeof b,"STEAM provider: copy failed hr=0x%08lx; not staged",(unsigned long)hr);lp_sink(b);return false;}
-        write_text(dir+L"\\steam_settings\\steam_appid.txt",std::to_string(appid)+"\\n");
-        write_text(dir+L"\\steam_settings\\configs.user.ini","[user::general]\\naccount_name=Player\\naccount_steamid="+
-            std::to_string(session->steamid)+"\\nlanguage=english\\n[user::saves]\\nlocal_save_path=./saves\\n");
-        write_text(dir+L"\\steam_settings\\configs.main.ini","[main::connectivity]\\ndisable_networking=1\\n");
+        write_text(dir+L"\\steam_settings\\steam_appid.txt",std::to_string(appid)+"\n");
+        write_text(dir+L"\\steam_settings\\configs.user.ini","[user::general]\naccount_name=Player\naccount_steamid="+
+            std::to_string(session->steamid)+"\nlanguage=english\n[user::saves]\nlocal_save_path=./saves\n");
+        write_text(dir+L"\\steam_settings\\configs.main.ini","[main::connectivity]\ndisable_networking=1\n");
         if(wrapped)x86::set_steam_client_registry(uint32_t(session->steamid),play_runtime::narrow(target));
         staged=true;
         return true;
