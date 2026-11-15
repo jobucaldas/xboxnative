@@ -376,7 +376,9 @@ jobs:
         timeout-minutes: 15
         uses: ./.github/actions/apt-install
         with:
-          packages: gcc-mingw-w64-i686 g++-mingw-w64-i686 wine wine64
+          packages: gcc-mingw-w64-i686 g++-mingw-w64-i686 wine wine64 mono-devel
+      - name: embedded Mono AnyCPU host and exit code
+        run: bash src/xbox-test/app/tests/mono-host.sh
       - name: x86 execution core (hardware-compared ALU, faults, thunks, owned i686 fixture)
         run: bash src/xbox-test/app/tests/x86-core.sh
       - name: "Play import gap summary fixture (x64 and x86)"
