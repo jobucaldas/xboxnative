@@ -217,9 +217,9 @@ struct Runner {
 // enumerated device path carries "IG_" reads buttons through XInputGetState,
 // which publish feeds) — but a guest must be able to enumerate the IG_ device
 // to find the XInput pad it reads, so an automated run with no physical pad
-// connected still needs slot 0 present while injection is active.
-inline unsigned publish_mask(unsigned physical_mask, bool injecting) {
-    return injecting ? (physical_mask | 1u) : physical_mask;
+// connected still needs slot 0 present throughout the gpad session.
+inline unsigned publish_mask(unsigned physical_mask, bool injecting, bool gpad_session) {
+    return injecting || gpad_session ? (physical_mask | 1u) : physical_mask;
 }
 
 } // namespace gpad
