@@ -1220,6 +1220,22 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
     auto configureX86Gl=[](x86::Host& host) {
         static HMODULE records=LoadPackagedLibrary(L"uwph-u32c.dll",0);
         static HMODULE mesa=LoadPackagedLibrary(L"runtime\\opengl32.dll",0);
+        static HMODULE d3d9=LoadPackagedLibrary(L"runtime\\d3d9.dll",0);
+        using Create9=void* (WINAPI*)(UINT);
+        using Create9Ex=HRESULT (WINAPI*)(UINT,void**);
+        auto create9=d3d9?reinterpret_cast<Create9>(GetProcAddress(d3d9,"Direct3DCreate9")):nullptr;
+        auto create9ex=d3d9?reinterpret_cast<Create9Ex>(GetProcAddress(d3d9,"Direct3DCreate9Ex")):nullptr;
+        host.d3d9_factory=[create9,create9ex](bool ex,uint32_t version,uintptr_t* result)->uintptr_t {
+            if(!result)return E_POINTER;
+            *result=0;
+            if(ex){if(!create9ex)return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);void* object=nullptr;HRESULT hr=create9ex(version,&object);*result=reinterpret_cast<uintptr_t>(object);return uint32_t(hr);}
+            if(!create9)return 0;*result=reinterpret_cast<uintptr_t>(create9(version));return 0;
+        };
+        // Guest windows created through the x86 user32 routes are tokens in
+        // window_handles; map them to the host record window. Anything else is
+        // passed through: Play's validated DXGI factory maps user32 record
+        // windows onto the CoreWindow when the shim creates its chain.
+        host.d3d9_window=[&host](uint32_t hwnd)->uintptr_t{auto it=host.window_handles.find(hwnd);return it!=host.window_handles.end()?it->second:uintptr_t(hwnd);};
         using GetDc=HDC(WINAPI*)(HWND);using ReleaseDc=int(WINAPI*)(HWND,HDC);
         struct GlWndClassExW { UINT cbSize, style; LRESULT(CALLBACK* lpfnWndProc)(HWND,UINT,WPARAM,LPARAM); int cbClsExtra, cbWndExtra; HINSTANCE hInstance; HICON hIcon; HCURSOR hCursor; HBRUSH hbrBackground; LPCWSTR lpszMenuName, lpszClassName; HICON hIconSm; };
         using RegisterClass=ATOM(WINAPI*)(const GlWndClassExW*);using CreateWindow=HWND(WINAPI*)(DWORD,LPCWSTR,LPCWSTR,DWORD,int,int,int,int,HWND,HMENU,HINSTANCE,LPVOID);
