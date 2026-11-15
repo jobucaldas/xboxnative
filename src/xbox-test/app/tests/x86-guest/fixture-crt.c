@@ -37,6 +37,26 @@ static int cmp_str(const void* a, const void* b) {
     return strcmp(*(const char* const*)a, *(const char* const*)b);
 }
 
+static void test_resources(void) {
+    HRSRC resource = FindResourceA(NULL, MAKEINTRESOURCEA(101), RT_RCDATA);
+    check(resource != NULL && SizeofResource(NULL, resource) == 4);
+    HGLOBAL loaded = LoadResource(NULL, resource);
+    const unsigned char* bytes = (const unsigned char*)LockResource(loaded);
+    check(bytes && bytes[0] == 0x78 && bytes[1] == 0x56 && bytes[2] == 0x34 && bytes[3] == 0x12);
+    check(resource == FindResourceA(NULL, "#101", "#10"));
+    check(resource == FindResourceExA(NULL, RT_RCDATA, MAKEINTRESOURCEA(101), MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL)));
+    char text[32]; wchar_t wide[32];
+    check(LoadStringA(NULL, 7, text, sizeof text) == 12 && strcmp(text, "Pug resource") == 0);
+    int wide_length = LoadStringW(NULL, 7, wide, 32), wide_equal = wide_length == 12 && wide[12] == 0;
+    for (int i = 0; i < 12 && wide_equal; ++i) wide_equal = wide[i] == L"Pug resource"[i];
+    check(wide_equal);
+    SetLastError(0);
+    check(FindResourceA(NULL, MAKEINTRESOURCEA(102), RT_RCDATA) == NULL && GetLastError() == ERROR_RESOURCE_NAME_NOT_FOUND);
+    SetLastError(0);
+    check(FindResourceA(NULL, MAKEINTRESOURCEA(101), MAKEINTRESOURCEA(11)) == NULL && GetLastError() == ERROR_RESOURCE_TYPE_NOT_FOUND);
+    check(FreeResource(loaded) == 0);
+}
+
 static int sum_varargs(int n, ...) {
     va_list ap; va_start(ap, n); int s = 0;
     for (int i = 0; i < n; ++i) s += va_arg(ap, int);
@@ -55,6 +75,8 @@ int main(void) {
     /* CRT startup already ran: argc/argv/_environ exist and stdout works. */
     check(printf("%s", "") == 0);
     puts("x86-crt: stdio ok");
+    test_resources();
+    puts("x86-crt: resources ok");
 
     /* Integer formatting, including the 64-bit and pointer forms. */
     char buf[128];

@@ -37,6 +37,7 @@ body=$(sed '/^guest: /d;/^X86-GUARD /d' <<<"$out")
 [[ $rc -eq 42 ]] || { echo "X86-GUEST FAIL: exit $rc (want 42)"; echo "$out"; exit 1; }
 want='x86-crt: start
 x86-crt: stdio ok
+x86-crt: resources ok
 x86-crt: printf -42|42|beef|BEEF|10|Z|str| 3.14|-1234567|78187493530
 x86-crt: sprintf 7/hi/1.5 abcde
 x86-crt: heap ok
@@ -50,7 +51,7 @@ x86-crt: threads ok
 x86-crt: strftime 2026-11-09 13:26:40 Mon
 x86-crt: time ok
 x86-crt: iob ok
-x86-crt: checks 80 failed 0'
+x86-crt: checks 89 failed 0'
 [[ $body == "$want" ]] || { echo "X86-GUEST FAIL: stdout differs"; diff <(echo "$want") <(echo "$body") || true; exit 1; }
 echo "X86-GUEST PASS: mingw CRT program (printf with doubles, heap, qsort, TLS, VirtualAlloc, strftime) ran in the interpreter to exit 42"
 # The launcher's own PE32 entry point (host/x86/x86_play.h): the structured
