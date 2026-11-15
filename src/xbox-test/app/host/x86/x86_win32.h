@@ -10,8 +10,8 @@
 namespace x86 {
 struct Host {
     enum class NlsOperation { IsValidCodePage, GetCPInfo, MultiByteToWideChar, WideCharToMultiByte,
-        GetStringTypeA, GetStringTypeW, GetStringTypeExW, LCMapStringW, LCMapStringEx,
-        CompareStringW, CompareStringEx, FoldStringW };
+        GetStringTypeA, GetStringTypeW, GetStringTypeExW, GetLocaleInfoA, GetLocaleInfoW, GetLocaleInfoEx,
+        LCMapStringW, LCMapStringEx, CompareStringW, CompareStringEx, FoldStringW };
     struct NlsRequest {
         NlsOperation operation;
         uint32_t code_page = 0, flags = 0, output_capacity = 0, locale = 0, type = 0;
