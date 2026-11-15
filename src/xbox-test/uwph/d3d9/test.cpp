@@ -166,7 +166,8 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
     CHECK(caps.PixelShaderVersion==D3DPS_VERSION(3,0));
     CHECK_HR_IS(ex->GetDeviceCaps(0,D3DDEVTYPE_REF,&caps),D3DERR_INVALIDCALL);
     CHECK_HR(ex->CheckDeviceType(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DFMT_X8R8G8B8,TRUE));
-    CHECK_HR_IS(ex->CheckDeviceType(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DFMT_UNKNOWN,TRUE),D3DERR_NOTAVAILABLE);
+    CHECK_HR(ex->CheckDeviceType(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DFMT_UNKNOWN,TRUE));
+    CHECK_HR_IS(ex->CheckDeviceType(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DFMT_UNKNOWN,FALSE),D3DERR_NOTAVAILABLE);
     CHECK_HR(ex->CheckDeviceFormat(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,0,D3DRTYPE_TEXTURE,D3DFMT_A8R8G8B8));
     CHECK_HR(ex->CheckDeviceFormat(0,D3DDEVTYPE_HAL,D3DFMT_X8R8G8B8,D3DUSAGE_RENDERTARGET,
         D3DRTYPE_TEXTURE,D3DFMT_A8R8G8B8));
@@ -190,7 +191,7 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
 
     D3DPRESENT_PARAMETERS present{};
     present.BackBufferWidth=320;present.BackBufferHeight=240;
-    present.BackBufferFormat=D3DFMT_X8R8G8B8;present.BackBufferCount=1;
+    present.BackBufferFormat=D3DFMT_UNKNOWN;present.BackBufferCount=1;
     present.MultiSampleType=D3DMULTISAMPLE_NONE;
     present.SwapEffect=D3DSWAPEFFECT_DISCARD;present.hDeviceWindow=window;present.Windowed=TRUE;
     present.EnableAutoDepthStencil=TRUE;present.AutoDepthStencilFormat=D3DFMT_D24S8;
@@ -204,6 +205,7 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
             &present,nullptr,&device));
     }
     CHECK(device!=nullptr);
+    CHECK(present.BackBufferFormat==D3DFMT_X8R8G8B8);
     if(!device){outNum("RESULT checks=",checks);outNum("RESULT failures=",failures);return 1;}
 
     // Device identity and caps.
