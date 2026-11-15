@@ -70,6 +70,17 @@ class DonorProvenanceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source patch"):
             donor_inspect.checksums(self.root, self.url, self.pin, digest)
 
+    def test_critical_section_patch_digest(self):
+        patch = self.root / "0003-donor-critical-section-flags.patch"
+        patch.write_bytes(b"critical-section patch")
+        digest = hashlib.sha256(patch.read_bytes()).hexdigest()
+        source = self.root / "SOURCE.txt"
+        source.write_text(source.read_text() + f"Patch: 0003-donor-critical-section-flags.patch sha256 {digest}\\n")
+        self.assertEqual(set(donor_inspect.checksums(self.root, self.url, self.pin, patch_0003_sha256=digest)), set(donor_inspect.DONORS))
+        patch.write_bytes(b"changed patch")
+        with self.assertRaisesRegex(ValueError, "critical-section patch"):
+            donor_inspect.checksums(self.root, self.url, self.pin, patch_0003_sha256=digest)
+
     def graphics_tree(self):
         """A donor dir whose graphics/ set is complete and correctly hashed.
         Returns the 0002 patch digest the tree's SOURCE.txt records."""

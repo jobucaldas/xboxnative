@@ -1,0 +1,199 @@
+From: xboxnative contributors
+Subject: [PATCH] donor DLLs: use public critical-section flags
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+Initialize donor critical sections with the documented flags value. Wine's
+FORCE_DEBUG_INFO flag is ntdll-internal and may be rejected by the console's
+InitializeCriticalSectionEx implementation. DebugInfo may also be NULL or
+(PVOID)-1, so donor-only annotations must tolerate both values.
+
+--- a/dlls/msvcp90/misc.c
++++ b/dlls/msvcp90/misc.c
+@@ -264,8 +264,8 @@
+ mutex* __thiscall mutex_ctor(mutex *this)
+ {
+     CRITICAL_SECTION *cs = operator_new(sizeof(*cs));
+-    InitializeCriticalSectionEx(cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
+-    cs->DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": _Mutex critical section");
++    InitializeCriticalSectionEx(cs, 0, 0);
++    if (cs->DebugInfo && cs->DebugInfo != (void *)-1) cs->DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": _Mutex critical section");
+     this->mutex = cs;
+     return this;
+ }
+@@ -275,7 +275,7 @@
+ DEFINE_THISCALL_WRAPPER(mutex_dtor, 4)
+ void __thiscall mutex_dtor(mutex *this)
+ {
+-    ((CRITICAL_SECTION*)this->mutex)->DebugInfo->Spare[0] = 0;
++    if (((CRITICAL_SECTION*)this->mutex)->DebugInfo && ((CRITICAL_SECTION*)this->mutex)->DebugInfo != (void *)-1) ((CRITICAL_SECTION*)this->mutex)->DebugInfo->Spare[0] = 0;
+     DeleteCriticalSection(this->mutex);
+     operator_delete(this->mutex);
+ }
+@@ -347,8 +347,8 @@
+     {
+         for(i=0; i<_MAX_LOCK; i++)
+         {
+-            InitializeCriticalSectionEx(&lockit_cs[i], 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
+-            lockit_cs[i].DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": _Lockit critical section");
++            InitializeCriticalSectionEx(&lockit_cs[i], 0, 0);
++            if (lockit_cs[i].DebugInfo && lockit_cs[i].DebugInfo != (void *)-1) lockit_cs[i].DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": _Lockit critical section");
+         }
+     }
+     init_locks++;
+@@ -376,7 +376,7 @@
+     {
+         for(i=0; i<_MAX_LOCK; i++)
+         {
+-            lockit_cs[i].DebugInfo->Spare[0] = 0;
++            if (lockit_cs[i].DebugInfo && lockit_cs[i].DebugInfo != (void *)-1) lockit_cs[i].DebugInfo->Spare[0] = 0;
+             DeleteCriticalSection(&lockit_cs[i]);
+         }
+     }
+--- a/dlls/msvcrt/concurrency.c
++++ b/dlls/msvcrt/concurrency.c
+@@ -1410,7 +1410,7 @@
+         SetEvent(this->shutdown_events[i]);
+     operator_delete(this->shutdown_events);
+
+-    this->cs.DebugInfo->Spare[0] = 0;
++    if (this->cs.DebugInfo && this->cs.DebugInfo != (void *)-1) this->cs.DebugInfo->Spare[0] = 0;
+     DeleteCriticalSection(&this->cs);
+
+     if (!list_empty(&this->scheduled_chores))
+@@ -1645,8 +1645,8 @@
+     this->shutdown_count = this->shutdown_size = 0;
+     this->shutdown_events = NULL;
+
+-    InitializeCriticalSectionEx(&this->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
+-    this->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": ThreadScheduler");
++    InitializeCriticalSectionEx(&this->cs, 0, 0);
++    if (this->cs.DebugInfo && this->cs.DebugInfo != (void *)-1) this->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": ThreadScheduler");
+
+     list_init(&this->scheduled_chores);
+     return this;
+@@ -3534,8 +3534,8 @@
+ {
+     TRACE("(%p)\n", this);
+
+-    InitializeCriticalSectionEx(&this->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
+-    this->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": _ReentrantBlockingLock");
++    InitializeCriticalSectionEx(&this->cs, 0, 0);
++    if (this->cs.DebugInfo && this->cs.DebugInfo != (void *)-1) this->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": _ReentrantBlockingLock");
+     return this;
+ }
+
+@@ -3546,7 +3546,7 @@
+ {
+     TRACE("(%p)\n", this);
+
+-    this->cs.DebugInfo->Spare[0] = 0;
++    if (this->cs.DebugInfo && this->cs.DebugInfo != (void *)-1) this->cs.DebugInfo->Spare[0] = 0;
+     DeleteCriticalSection(&this->cs);
+ }
+
+--- a/dlls/msvcrt/file.c
++++ b/dlls/msvcrt/file.c
+@@ -633,8 +633,8 @@
+           CRITICAL_SECTION *cs = file_get_cs(file);
+           if (cs)
+           {
+-              InitializeCriticalSectionEx(cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
+-              cs->DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": file_crit.crit");
++              InitializeCriticalSectionEx(cs, 0, 0);
++              if (cs->DebugInfo && cs->DebugInfo != (void *)-1) cs->DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": file_crit.crit");
+           }
+           MSVCRT_stream_idx++;
+       }
+@@ -824,8 +824,8 @@
+
+     if (cs)
+     {
+-      InitializeCriticalSectionEx(cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
+-      cs->DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": file_crit.crit");
++      InitializeCriticalSectionEx(cs, 0, 0);
++      if (cs->DebugInfo && cs->DebugInfo != (void *)-1) cs->DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": file_crit.crit");
+     }
+   }
+   MSVCRT_stream_idx = 3;
+@@ -1417,7 +1417,7 @@
+
+         if(cs)
+         {
+-            cs->DebugInfo->Spare[0] = 0;
++            if (cs->DebugInfo && cs->DebugInfo != (void *)-1) cs->DebugInfo->Spare[0] = 0;
+             DeleteCriticalSection(cs);
+         }
+     }
+--- a/dlls/msvcrt/lock.c
++++ b/dlls/msvcrt/lock.c
+@@ -44,14 +44,14 @@
+
+ static inline void msvcrt_initialize_mlock( int locknum )
+ {
+-  InitializeCriticalSectionEx( &(lock_table[ locknum ].crit), 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO );
+-  lock_table[ locknum ].crit.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": LOCKTABLEENTRY.crit");
++  InitializeCriticalSectionEx( &(lock_table[ locknum ].crit), 0, 0 );
++  if (lock_table[ locknum ].crit.DebugInfo && lock_table[ locknum ].crit.DebugInfo != (void *)-1) lock_table[ locknum ].crit.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": LOCKTABLEENTRY.crit");
+   msvcrt_mlock_set_entry_initialized( locknum, TRUE );
+ }
+
+ static inline void msvcrt_uninitialize_mlock( int locknum )
+ {
+-  lock_table[ locknum ].crit.DebugInfo->Spare[0] = 0;
++  if (lock_table[ locknum ].crit.DebugInfo && lock_table[ locknum ].crit.DebugInfo != (void *)-1) lock_table[ locknum ].crit.DebugInfo->Spare[0] = 0;
+   DeleteCriticalSection( &(lock_table[ locknum ].crit) );
+   msvcrt_mlock_set_entry_initialized( locknum, FALSE );
+ }
+--- a/dlls/dinput/device.c
++++ b/dlls/dinput/device.c
+@@ -642,7 +642,7 @@
+         dinput_device_release_user_format( impl );
+
+         dinput_internal_release( impl->dinput );
+-        impl->crit.DebugInfo->Spare[0] = 0;
++        if (impl->crit.DebugInfo && impl->crit.DebugInfo != (void *)-1) impl->crit.DebugInfo->Spare[0] = 0;
+         DeleteCriticalSection( &impl->crit );
+
+         free( impl );
+@@ -2148,7 +2148,7 @@
+     device->device_gain = 10000;
+     device->autocenter = DIPROPAUTOCENTER_ON;
+     device->force_feedback_state = DIGFFS_STOPPED | DIGFFS_EMPTY;
+-    InitializeCriticalSectionEx( &device->crit, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO );
++    InitializeCriticalSectionEx( &device->crit, 0, 0 );
+     dinput_internal_addref( (device->dinput = dinput) );
+     device->vtbl = vtbl;
+
+--- a/dlls/dinput/joystick_hid.c
++++ b/dlls/dinput/joystick_hid.c
+@@ -2013,7 +2013,7 @@
+
+     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+     dinput_device_init( &impl->base, &hid_joystick_vtbl, guid, dinput );
+-    impl->base.crit.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": hid_joystick.base.crit");
++    if (impl->base.crit.DebugInfo && impl->base.crit.DebugInfo != (void *)-1) impl->base.crit.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": hid_joystick.base.crit");
+     impl->base.dwCoopLevel = DISCL_NONEXCLUSIVE | DISCL_BACKGROUND;
+     impl->base.read_event = CreateEventW( NULL, TRUE, FALSE, NULL );
+
+--- a/dlls/dinput/keyboard.c
++++ b/dlls/dinput/keyboard.c
+@@ -200,7 +200,7 @@
+
+     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+     dinput_device_init( &impl->base, &keyboard_vtbl, guid, dinput );
+-    impl->base.crit.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": struct keyboard*->base.crit");
++    if (impl->base.crit.DebugInfo && impl->base.crit.DebugInfo != (void *)-1) impl->base.crit.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": struct keyboard*->base.crit");
+
+     keyboard_enum_device( 0, 0, &impl->base.instance, dinput->dwVersion );
+     impl->base.caps.dwDevType = impl->base.instance.dwDevType;
+--- a/dlls/dinput/mouse.c
++++ b/dlls/dinput/mouse.c
+@@ -523,7 +523,7 @@
+
+     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+     dinput_device_init( &impl->base, &mouse_vtbl, guid, dinput );
+-    impl->base.crit.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": struct mouse*->base.crit");
++    if (impl->base.crit.DebugInfo && impl->base.crit.DebugInfo != (void *)-1) impl->base.crit.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": struct mouse*->base.crit");
+
+     mouse_enum_device( 0, 0, &impl->base.instance, dinput->dwVersion );
+     impl->base.caps.dwDevType = impl->base.instance.dwDevType;

@@ -11,7 +11,7 @@ DONORS = ("hid.dll", "psapi.dll", "setupapi.dll", "version.dll", "shcore.dll", "
 GRAPHICS = ("d3dcompiler_47.dll",)
 
 
-def checksums(directory: Path, source_url: str, source_sha256: str, patch_sha256=None, patch_0002_sha256=None, graphics=None) -> dict:
+def checksums(directory: Path, source_url: str, source_sha256: str, patch_sha256=None, patch_0002_sha256=None, patch_0003_sha256=None, graphics=None) -> dict:
     source = (directory / "SOURCE.txt").read_text()
     if f"sha256 {source_sha256}" not in source or source_url not in source:
         raise ValueError("donors were not built from the selected Wine source pin")
@@ -21,6 +21,12 @@ def checksums(directory: Path, source_url: str, source_sha256: str, patch_sha256
                 or not patch.is_file()
                 or hashlib.sha256(patch.read_bytes()).hexdigest() != patch_sha256):
             raise ValueError("donor source patch does not match the selected recipe")
+    if patch_0003_sha256 is not None:
+        patch_0003 = directory / "0003-donor-critical-section-flags.patch"
+        if (f"Patch: 0003-donor-critical-section-flags.patch sha256 {patch_0003_sha256}" not in source
+                or not patch_0003.is_file()
+                or hashlib.sha256(patch_0003.read_bytes()).hexdigest() != patch_0003_sha256):
+            raise ValueError("donor critical-section patch missing or does not match the selected recipe")
     if graphics is not None:
         graphics_dir = directory / "graphics"
         patch_0002 = directory / "0002-d3dcompiler-static-vkd3d.patch"
@@ -110,7 +116,8 @@ def main():
     _, url, sha = pins[0]
     patch_sha = hashlib.sha256((root / "patches/wine-src/0001-pe-rodata.patch").read_bytes()).hexdigest()
     patch_0002_sha = hashlib.sha256((root / "patches/wine-src/0002-d3dcompiler-static-vkd3d.patch").read_bytes()).hexdigest()
-    checksums(args.donor_dir, url, sha, patch_sha, patch_0002_sha, graphics=GRAPHICS)
+    patch_0003_sha = hashlib.sha256((root / "patches/wine-src/0003-donor-critical-section-flags.patch").read_bytes()).hexdigest()
+    checksums(args.donor_dir, url, sha, patch_sha, patch_0002_sha, patch_0003_sha, graphics=GRAPHICS)
     text = imports(args.donor_dir)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(text)
