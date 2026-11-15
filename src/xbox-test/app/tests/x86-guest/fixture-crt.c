@@ -107,6 +107,16 @@ int main(void) {
     const char* loc_bad = setlocale(LC_ALL, "xx_YY.UTF-8");
     check(loc_q && strcmp(loc_q, "C") == 0 && loc_c && strcmp(loc_c, "C") == 0 && loc_bad == NULL);
     puts("x86-crt: strings ok");
+    WCHAR user_locale[LOCALE_NAME_MAX_LENGTH] = {0};
+    check(GetUserDefaultLocaleName(user_locale, LOCALE_NAME_MAX_LENGTH) && user_locale[0] != 0);
+    puts("x86-crt: locale name ok");
+
+    /* A 1.5 MiB frame exceeds the old fixed 1 MiB stack. Touching each page
+     * exercises the PE reserve size and Windows-style guard-page growth. */
+    volatile unsigned char stack_probe[1536 * 1024];
+    for (unsigned i = 0; i < sizeof stack_probe; i += 4096) stack_probe[i] = (unsigned char)(i / 4096 + 1);
+    check(stack_probe[0] == 1 && stack_probe[1024 * 1024] == 1 && stack_probe[1536 * 1024 - 4096] == 128);
+    puts("x86-crt: stack probe ok");
 
     /* Variadic guest code calling variadic host code. */
     check(sum_varargs(4, 1, 2, 3, 4) == 10);

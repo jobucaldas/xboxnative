@@ -27,6 +27,15 @@ int main(int argc, char** argv) {
             // run yet.
             loaded_first = at_load.loaded && at_load.imports && at_load.bound == at_load.imports &&
                            at_load.entry >= at_load.base && at_load.fault.empty();
+        }, 500ull * 1000 * 1000, nullptr, false, nullptr, nullptr,
+        [](x86::Host& host) {
+            host.nls_call=[](const x86::Host::NlsRequest& request) {
+                x86::Host::NlsResponse response{};
+                if(request.operation==x86::Host::NlsOperation::GetUserDefaultLocaleName&&request.output_capacity==85u&&!request.output_null) {
+                    response.result=1;response.output={'e',0,'n',0,'-',0,'U',0,'S',0,0,0};
+                }
+                return response;
+            };
         });
     printf("play: loaded=%d finished=%d exit=%u instructions=%llu base=0x%08x entry=0x%08x imports=%u bound=%u relocs=%u\n",
            r.loaded ? 1 : 0, r.finished ? 1 : 0, r.exit_code, (unsigned long long)r.instructions,

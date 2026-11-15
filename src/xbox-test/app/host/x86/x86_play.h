@@ -200,6 +200,26 @@ inline void install_nls_host(Host& host) {
             }
             break;
         }
+        case Host::NlsOperation::GetUserDefaultLocaleName: {
+            using LocaleNameFn=BOOL(WINAPI*)(LPWSTR,int);
+            static HMODULE base=LoadLibraryExW(L"kernelbase.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+            static HMODULE k32=LoadLibraryExW(L"kernel32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+            FARPROC proc=base?GetProcAddress(base,"GetUserDefaultLocaleName"):nullptr;
+            if(!proc&&k32)proc=GetProcAddress(k32,"GetUserDefaultLocaleName");
+            if(!proc){response.last_error=ERROR_CALL_NOT_IMPLEMENTED;return response;}
+            const uint32_t capacity=std::min(request.output_capacity,85u);
+            std::vector<wchar_t> output(request.output_null?0:capacity);
+            SetLastError(ERROR_SUCCESS);
+            response.result=reinterpret_cast<LocaleNameFn>(proc)(output.empty()?nullptr:output.data(),int(capacity))?1u:0u;
+            if(response.result&&!output.empty()) {
+                size_t length=0;while(length<output.size()&&output[length])++length;
+                if(length<output.size()) {
+                    const auto* bytes=reinterpret_cast<const uint8_t*>(output.data());
+                    response.output.assign(bytes,bytes+(length+1)*sizeof(wchar_t));
+                } else response.result=0;
+            }
+            break;
+        }
         case Host::NlsOperation::GetLocaleInfoA:
         case Host::NlsOperation::GetLocaleInfoW:
         case Host::NlsOperation::GetLocaleInfoEx: {
