@@ -13,8 +13,34 @@ static std::vector<uint8_t> read_file(const std::string& path) {
     return std::vector<uint8_t>{std::istreambuf_iterator<char>(f), {}};
 }
 
+static bool wine_debug_routes() {
+    Memory mem; ThunkTable table; Host host; Registry reg; Guest guest(mem, host, reg); guest.register_all();
+    mem.map(0x2000, 0x1000, PROT_R | PROT_W);
+    Cpu cpu(mem, table); cpu.reg[ESP] = 0x2800;
+    auto call = [&](const char* name, std::initializer_list<uint32_t> args, uint32_t& result) {
+        auto it = reg.map.find({"ntdll.dll", name});
+        if (it == reg.map.end() || it->second.conv != Conv::Cdecl || it->second.argc != args.size()) return false;
+        unsigned i = 0; for (uint32_t arg : args) mem.w32(cpu.reg[ESP] + 4 + 4 * i++, arg);
+        result = it->second.fn(cpu);
+        return true;
+    };
+    uint32_t flags = 99, header = 0, output = 99, first = 0, second = 0;
+    if (!call("__wine_dbg_get_channel_flags", {0xffffffffu}, flags) || flags != 0 ||
+        !call("__wine_dbg_header", {3, 0xffffffffu, 0xffffffffu}, header) || header != 0xffffffffu ||
+        !call("__wine_dbg_output", {0xffffffffu}, output) || output != 0 ||
+        !call("__wine_dbg_strdup", {0xffffffffu}, first) ||
+        !call("__wine_dbg_strdup", {0}, second) || first != second || !first || !mem.read_cstr(first).empty() ||
+        !host.out.empty() || !host.err.empty()) {
+        std::printf("FAIL Wine ntdll debug imports must be cdecl, disabled and terminated\n");
+        return false;
+    }
+    return true;
+}
+
 int main(int argc, char** argv) {
     if (argc != 3) { std::printf("usage: x86-vc-crt <fixture.exe> <runtime/x86>\n"); return 2; }
+    if (!wine_debug_routes()) return 1;
+    std::printf("X86-VC-CRT PASS: Wine ntdll debug imports are disabled with cdecl semantics\n");
     auto file = read_file(argv[1]);
     if (file.empty()) { std::printf("FAIL cannot read fixture\n"); return 2; }
     auto absent = run_image(file, "VC110-Fixture.EXE", "VC110-Fixture.EXE");
