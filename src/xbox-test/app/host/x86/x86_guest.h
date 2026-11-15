@@ -1395,6 +1395,9 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetStdHandle", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
         switch (int32_t(c.arg(0))) { case -10: return Host::H_STDIN; case -11: return Host::H_STDOUT; case -12: return Host::H_STDERR; }
         return 0xFFFFFFFFu; });
+    // The guest's file APIs use the Windows ANSI code-page path surface; no
+    // SetFileApisToOEM route is exposed, so the process remains in ANSI mode.
+    reg.add("kernel32.dll", "AreFileApisANSI", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 1; });
     auto native_file = [this](uint32_t h, Host::FileCall& call) {
         auto it=file_handles.find(h); if(it==file_handles.end()){set_last_error(6);return false;}
         call.handle=it->second; return true;
