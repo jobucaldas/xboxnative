@@ -13,6 +13,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "src/tools/x86-gl-manifest.json"
 DEFAULT_OUTPUT = ROOT / "src/xbox-test/app/host/x86/x86_gl_generated.h"
 WIDE_TYPES = {"GLdouble", "GLclampd", "GLint64", "GLuint64", "GLint64EXT", "GLuint64EXT"}
+FLOAT_TYPES = {"GLfloat", "GLclampf"}
+SCALAR_ALIASES = {"GLhandleARB"}
 
 
 def registry_bytes(manifest, path):
@@ -31,35 +33,80 @@ def registry_bytes(manifest, path):
 def generate(data, manifest):
     root = ET.fromstring(data)
     commands = {}
+    type_declarations = {}
+    for type_node in root.findall("./types/type"):
+        type_name = type_node.find("name")
+        if type_name is not None and type_name.text:
+            type_declarations[type_name.text] = "".join(type_node.itertext())
     for command in root.findall("./commands/command"):
-        proto = command.find("proto/name")
-        if proto is None or not proto.text:
+        name_node = command.find("proto/name")
+        if name_node is not None and name_node.text:
+            commands[name_node.text] = command
+    selected = set()
+    for feature in root.findall("./feature"):
+        if feature.get("api") != "gl" or tuple(map(int, feature.get("number", "0.0").split("."))) > (4, 6):
             continue
-        name = proto.text
-        # stdcall arity in 32-bit stack slots: 64-bit by-value types take two.
-        slots = 0
+        for command in feature.findall("./require/command"):
+            if command.get("name"):
+                selected.add(command.get("name"))
+    for extension in root.findall("./extensions/extension"):
+        name = extension.get("name", "")
+        supported = set(extension.get("supported", "").split("|"))
+        if (name.startswith("GL_ARB_") or name.startswith("GL_EXT_")) and supported.intersection({"gl", "glcore"}):
+            selected.update(command.get("name") for command in extension.findall("./require/command") if command.get("name"))
+    for item in manifest.get("functions", []):
+        selected.add(item["name"])
+
+    def command_for(name):
+        command = commands.get(name)
+        if command is not None and command.find("proto") is not None:
+            return command
+        alias = command.get("alias") if command is not None else None
+        return commands.get(alias) if alias else command
+
+    expected = {item["name"]: item["argc"] for item in manifest.get("functions", [])}
+    rows, parameters = [], []
+    actual_slots = {}
+    for name in sorted(selected):
+        command = command_for(name)
+        if command is None or command.find("proto") is None:
+            continue
+        offset, slots = len(parameters), 0
         for param in command.findall("param"):
-            ptype = param.find("ptype")
-            pointer = "*" in "".join(param.itertext())
-            wide = ptype is not None and ptype.text in WIDE_TYPES and not pointer
-            slots += 2 if wide else 1
-        commands[name] = slots
-    rows = []
-    for item in manifest["functions"]:
-        name, argc = item["name"], item["argc"]
-        actual = commands.get(name)
+            ptype_node, name_node = param.find("ptype"), param.find("name")
+            ptype = ptype_node.text if ptype_node is not None and ptype_node.text else ""
+            pname = name_node.text if name_node is not None and name_node.text else ""
+            text = "".join(param.itertext())
+            explicit_pointer = "*" in text
+            pointer = explicit_pointer or "*" in type_declarations.get(ptype, "")
+            const = "const" in text.split("*")[0]
+            wide = ptype in WIDE_TYPES and not pointer
+            kind = "Pointer" if pointer else "Float" if ptype in FLOAT_TYPES else "Double" if ptype in WIDE_TYPES and ptype in {"GLdouble", "GLclampd"} else "Int64" if wide else "Scalar" if ptype in type_declarations or ptype in SCALAR_ALIASES else "Unsupported"
+            if explicit_pointer and not const:
+                kind = "OutputPointer"
+            arg_slots = 2 if wide else 1
+            slots += arg_slots
+            length = param.get("len", "")
+            parameters.append(f'    {{"{pname}", GlArgKind::{kind}, {arg_slots}, {json.dumps(length)}}}')
+        actual_slots[name] = slots
+        rows.append(f'    {{"{name}", {slots}, {offset}, {len(command.findall("param"))}}}')
+    for name, expected_slots in expected.items():
+        actual = actual_slots.get(name)
         if actual is None:
-            raise ValueError(f"{name} is absent from pinned gl.xml")
-        if actual != argc:
-            raise ValueError(f"{name}: manifest arity {argc} does not match registry stack slots {actual}")
-        rows.append(f'    {{"{name}", {argc}}}')
+            raise ValueError(f"{name} is absent from selected pinned GL registry commands")
+        if actual != expected_slots:
+            raise ValueError(f"{name}: manifest arity {expected_slots} does not match registry stack slots {actual}")
+    if not rows:
+        raise ValueError("pinned gl.xml yielded no GL commands")
     return """// SPDX-License-Identifier: GPL-3.0-or-later
 // Generated by src/tools/gen-x86-gl.py from the pinned Khronos OpenGL registry.
 #pragma once
 namespace x86 {
-struct GlExport { const char* name; unsigned argc; };
-inline constexpr GlExport kGlExports[] = {
-""" + ",\n".join(rows) + "\n};\n}\n"
+enum class GlArgKind : unsigned char { Scalar, Float, Double, Int64, Pointer, OutputPointer, Unsupported };
+struct GlArg { const char* name; GlArgKind kind; unsigned slots; const char* length; };
+struct GlExport { const char* name; unsigned argc; unsigned first_arg; unsigned arg_count; };
+inline constexpr GlArg kGlArgs[] = {
+""" + ",\n".join(parameters) + "\n};\ninline constexpr GlExport kGlExports[] = {\n" + ",\n".join(rows) + "\n};\n}\n"
 
 
 def main():
