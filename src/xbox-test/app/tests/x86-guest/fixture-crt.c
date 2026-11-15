@@ -120,6 +120,14 @@ int main(void) {
     void* hp = HeapAlloc(h, HEAP_ZERO_MEMORY, 256);
     check(hp != NULL);
     check(((unsigned char*)hp)[255] == 0);
+    ULONG compatibility = 2, queried = 0, returned = 0;
+    check(HeapSetInformation(h, HeapCompatibilityInformation, &compatibility, sizeof compatibility));
+    check(HeapQueryInformation(h, HeapCompatibilityInformation, &queried, sizeof queried, &returned));
+    check(queried == 2 && returned == sizeof queried);
+    check(HeapSetInformation(h, HeapEnableTerminationOnCorruption, NULL, 0));
+    SetLastError(0);
+    check(!HeapSetInformation((HANDLE)0xDEAD0000, HeapCompatibilityInformation, &compatibility, sizeof compatibility) && GetLastError() == ERROR_INVALID_PARAMETER);
+    check(!HeapSetInformation(h, HeapCompatibilityInformation, &compatibility, 2) && GetLastError() == ERROR_INVALID_PARAMETER);
     HeapFree(h, 0, hp); HeapDestroy(h);
     DWORD slot = TlsAlloc();
     check(slot != TLS_OUT_OF_INDEXES);
@@ -197,7 +205,23 @@ int main(void) {
     check(sizeof si == 68 && si.cb == 68);
     /* OpenEventA (synchapi.h) and its export: a probe via GetProcAddress must
      * find it; no named event exists, so NULL with ERROR_FILE_NOT_FOUND (2). */
-    check(GetProcAddress(GetModuleHandleA("kernel32.dll"), "OpenEventA") != NULL);
+    HMODULE kernel = GetModuleHandleA("kernel32.dll");
+    FARPROC open_event = GetProcAddress(kernel, "OpenEventA");
+    check(open_event != NULL);
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)kernel;
+    IMAGE_NT_HEADERS32* nt = (IMAGE_NT_HEADERS32*)((BYTE*)kernel + dos->e_lfanew);
+    check(dos->e_magic == IMAGE_DOS_SIGNATURE && nt->Signature == IMAGE_NT_SIGNATURE &&
+          nt->FileHeader.Machine == IMAGE_FILE_MACHINE_I386 && nt->FileHeader.NumberOfSections == 0);
+    IMAGE_DATA_DIRECTORY* export_dir = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    IMAGE_EXPORT_DIRECTORY* exports = (IMAGE_EXPORT_DIRECTORY*)((BYTE*)kernel + export_dir->VirtualAddress);
+    DWORD* functions = (DWORD*)((BYTE*)kernel + exports->AddressOfFunctions);
+    DWORD* name_rvas = (DWORD*)((BYTE*)kernel + exports->AddressOfNames);
+    WORD* ordinals = (WORD*)((BYTE*)kernel + exports->AddressOfNameOrdinals);
+    FARPROC walked = NULL;
+    for (DWORD i = 0; i < exports->NumberOfNames; ++i)
+        if (strcmp((char*)kernel + name_rvas[i], "OpenEventA") == 0)
+            walked = (FARPROC)((BYTE*)kernel + functions[ordinals[i]]);
+    check(walked == open_event);
     SetLastError(0);
     check(OpenEventA(SYNCHRONIZE, FALSE, "xbn-no-such-event") == NULL && GetLastError() == ERROR_FILE_NOT_FOUND);
     puts("x86-crt: kernel32 ok");
