@@ -21,6 +21,8 @@ LC_OFFSET(GuardMemcpyFunctionPointer,0x138);
 extern "C" uintptr_t __security_cookie, __security_cookie_complement;
 extern "C" __declspec(dllimport) void observe_cookie(unsigned,uintptr_t,uintptr_t);
 extern "C" BOOL WINAPI _DllMainCRTStartup(HINSTANCE,DWORD,LPVOID);
+__declspec(thread) unsigned char fixture_tls[0x40190]={0xa5};
+__declspec(thread) unsigned char fixture_tls_zero[4096];
 static void NTAPI tls_observer(void*,DWORD reason,void*) {
     if(reason==DLL_PROCESS_ATTACH) observe_cookie(1,__security_cookie,0);
 }
@@ -42,7 +44,8 @@ __declspec(noinline) static void raise_value() { Guard guard; throw 73; }
 extern "C" __declspec(dllexport) int fixture_check() {
     // These are actual linker symbols, not an assumed adjacency contract.
     if(!__security_cookie || __security_cookie==0x2b992ddfa232ULL ||
-       (__security_cookie>>48) || __security_cookie_complement!=~__security_cookie) return 1;
+       (__security_cookie>>48) || __security_cookie_complement!=~__security_cookie ||
+       fixture_tls[0]!=0xa5 || fixture_tls_zero[0]!=0) return 1;
     destructors=0;
     try { raise_value(); } catch(int value) { return value==73 && destructors==1 ? 42 : 2; }
     return 3;

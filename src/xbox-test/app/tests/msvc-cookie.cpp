@@ -45,6 +45,18 @@ static DWORD (*nativeIndex)();
 static DWORD counted_index() { ++indexCalls; return nativeIndex(); }
 static std::string lastLog;
 static void log_line(const char* message) { lastLog=message; puts(message); }
+struct TlsThreadTest { wxl::Image* image; int (*check)(); BYTE* mainTls; };
+static DWORD WINAPI tls_thread(void* data) {
+    auto& test=*(TlsThreadTest*)data;
+    assert(test.image->attachThread(DLL_THREAD_ATTACH));
+    BYTE* threadTls=(BYTE*)TlsGetValue(test.image->tlsKey);
+    assert(threadTls && threadTls!=test.mainTls);
+    assert(!memcmp(threadTls,test.image->tlsTemplate.data(),test.image->msvc.tls.raw));
+    assert(threadTls[test.image->msvc.tls.raw]==0);
+    assert(test.check()==42);
+    test.image->detachThread(DLL_THREAD_DETACH);
+    return 0;
+}
 static uint64_t current_cookie() {
     assert(allocated && cookieRva+8<=allocatedSize);
     uint64_t value; memcpy(&value,allocated+cookieRva,8);
@@ -143,7 +155,7 @@ static void check_retained_plan(const wxl::Image& image) {
     assert(image.msvc.slots.size()==7 && image.msvc.pointers.size()==15);
     assert(image.trustedHeaders.size() && image.trustedConfig.size()==0x140);
     const auto& t=image.msvc.tls;
-    assert(t.present && t.directory && t.start && t.raw && t.index && t.callbackArray && !t.callbacks.empty());
+    assert(t.present && t.directory && t.start && t.raw>=0x40190 && t.zero>=4096 && t.index && t.callbackArray && !t.callbacks.empty());
     assert(wxl::msvcPointers(image));
 }
 static void check_protections(const wxl::Image& image) {
@@ -169,7 +181,14 @@ static bool load_file(const std::string& path,wxl::LoadConfig mode,bool mapped=f
           assert(image.cookieInitialized && wxl::msvcPointers(image));
           check_protections(image);
           assert(image.functions && image.tlsAttached && observations==3 && indexCalls==1);
+          assert(image.tlsTemplate.size()==image.msvc.tls.raw+image.msvc.tls.zero);
           auto fn=(int(*)())image.symbol("fixture_check"); assert(fn && fn()==42);
+          BYTE* mainTls=(BYTE*)TlsGetValue(image.tlsKey); assert(mainTls);
+          assert(!memcmp(mainTls,image.tlsTemplate.data(),image.msvc.tls.raw));
+          assert(mainTls[image.msvc.tls.raw]==0);
+          TlsThreadTest test{&image,fn,mainTls};
+          HANDLE thread=CreateThread(nullptr,0,tls_thread,&test,0,nullptr); assert(thread);
+          assert(WaitForSingleObject(thread,INFINITE)==WAIT_OBJECT_0); CloseHandle(thread);
       }
     }
     assert(allocations==releases);
@@ -184,6 +203,9 @@ int main(int argc,char** argv) {
     Fixture original;
     std::ifstream input(argv[1],std::ios::binary);
     original.bytes.assign(std::istreambuf_iterator<char>(input),{}); assert(!original.bytes.empty());
+    auto tlsDirectory=original.dir(IMAGE_DIRECTORY_ENTRY_TLS).VirtualAddress;
+    original.put<uint32_t>(tlsDirectory+32,4096);
+    auto largeTlsPath=original.save(argv[2],9997);
     cookieRva=original.cookie();
     {
         wxl::msvc_config::File view;
@@ -212,7 +234,7 @@ int main(int argc,char** argv) {
     }
     reset();
     for(auto mode:{wxl::LoadConfig::reject,wxl::LoadConfig::inert_wine}) for(bool mapped:{false,true})
-        assert(!load_file(argv[1],mode,mapped));
+        assert(!load_file(largeTlsPath.c_str(),mode,mapped));
     assert(!allocations && !observations && !rngCalls && !resolutions);
     // A failed explicit allocation must not leak policy into a different load on
     // the SAME Image. Both legacy policies have supported TLS metadata here;
@@ -234,7 +256,7 @@ int main(int argc,char** argv) {
         f.dir(IMAGE_DIRECTORY_ENTRY_IMPORT)={};
         auto path=f.save(argv[2],11000+kind);
         wchar_t originalWide[4096],retryWide[4096];
-        assert(MultiByteToWideChar(CP_UTF8,0,argv[1],-1,originalWide,4096));
+        assert(MultiByteToWideChar(CP_UTF8,0,largeTlsPath.c_str(),-1,originalWide,4096));
         assert(MultiByteToWideChar(CP_UTF8,0,path.c_str(),-1,retryWide,4096));
         reset();
         { wxl::Image image;
@@ -258,7 +280,7 @@ int main(int argc,char** argv) {
     assert(retriesPassed);
     puts("MSVC-COOKIE SAME-Image allocation failure retries passed: default spans, default TLS, inert TLS");
     reset();
-    assert(load_file(argv[1],wxl::LoadConfig::msvc_x64_cookie,false,true));
+    assert(load_file(largeTlsPath.c_str(),wxl::LoadConfig::msvc_x64_cookie,false,true));
     assert(rngCalls>=1 && rngCalls<=8 && resolutions>1 && observations==3);
     puts("MSVC-COOKIE owned static CRT complement, TLS-before-entry and exception/unwind passed");
     const auto explicitMode=wxl::LoadConfig::msvc_x64_cookie;
@@ -366,6 +388,12 @@ int main(int argc,char** argv) {
         if(kind==3) { f.put<uint64_t>(td,f.nt().OptionalHeader.ImageBase+f.cookie()); f.put<uint64_t>(td+8,f.nt().OptionalHeader.ImageBase+f.cookie()); }
         reject(std::move(f));
     }
+    { auto f=original; auto td=f.dir(IMAGE_DIRECTORY_ENTRY_TLS).VirtualAddress;
+      uint64_t start=f.nt().OptionalHeader.ImageBase+f.nt().OptionalHeader.SizeOfImage-0x1000;
+      f.put<uint64_t>(td,start); f.put<uint64_t>(td+8,start+0x40190);
+      reject(std::move(f));
+      assert(lastLog.find("WXL FAIL explicit MSVC file preflight: TLS template start VA")==0);
+    }
     printf("MSVC-COOKIE preallocation negatives=%u (each executable and mapped-only)\n",mutation);
     // Positive control for the distinct eager RVA-based delay binding path.
     { auto f=original;
@@ -393,15 +421,15 @@ int main(int argc,char** argv) {
     // Distinguish RNG error, zero/default exhaustion and successful finite retry.
     for(unsigned mode=1;mode<=3;++mode) for(bool mapped:{false,true}) {
         reset(); rngMode=mode;
-        assert(!load_file(argv[1],explicitMode,mapped));
+        assert(!load_file(largeTlsPath.c_str(),explicitMode,mapped));
         assert(allocations==1 && releases==1 && rngCalls==(mode==1?1:8));
         assert(!resolutions && !observations && !indexCalls);
     }
     reset(); rngMode=4;
-    assert(load_file(argv[1],explicitMode,false,true)); assert(rngCalls==3);
+    assert(load_file(largeTlsPath.c_str(),explicitMode,false,true)); assert(rngCalls==3);
     for(bool mapped:{false,true}) {
         reset(); missingImport=true;
-        assert(!load_file(argv[1],explicitMode,mapped));
+        assert(!load_file(largeTlsPath.c_str(),explicitMode,mapped));
         assert(allocations==1 && releases==1 && rngCalls && resolutions && !observations && !indexCalls);
     }
     // Later preparation must reject directory, callback ENTRY and TERMINATOR
@@ -410,7 +438,7 @@ int main(int argc,char** argv) {
     for(unsigned kind=0;kind<7;++kind) {
         reset();
         { wxl::Image image;
-          wchar_t wide[4096]; assert(MultiByteToWideChar(CP_UTF8,0,argv[1],-1,wide,4096));
+          wchar_t wide[4096]; assert(MultiByteToWideChar(CP_UTF8,0,largeTlsPath.c_str(),-1,wide,4096));
           assert(wxl::load(image,wide,log_line,carrier,resolve,true,explicitMode));
           assert(!observations && !indexCalls);
           assert(image.protect(0,image.size,PAGE_READWRITE,log_line));
@@ -429,7 +457,7 @@ int main(int argc,char** argv) {
           }
           auto value=current_cookie();
           DWORD indexBefore; memcpy(&indexBefore,image.base+image.msvc.tls.index,4);
-          auto rejectedCarrier=carrier; --rejectedCarrier.capacity;
+          auto rejectedCarrier=carrier; rejectedCarrier.block=nullptr;
           bool prepared=wxl::prepareTls(image,log_line,rejectedCarrier);
           DWORD indexAfter; memcpy(&indexAfter,image.base+image.msvc.tls.index,4);
           bool unchanged=current_cookie()==value && !indexCalls && !observations &&
@@ -447,7 +475,7 @@ int main(int argc,char** argv) {
     // mutable header permissions or repeating cookie/guard initialization.
     reset();
     { wxl::Image image;
-      wchar_t wide[4096]; assert(MultiByteToWideChar(CP_UTF8,0,argv[1],-1,wide,4096));
+      wchar_t wide[4096]; assert(MultiByteToWideChar(CP_UTF8,0,largeTlsPath.c_str(),-1,wide,4096));
       assert(wxl::load(image,wide,log_line,carrier,resolve,true,explicitMode));
       check_protections(image); assert(!observations && !indexCalls);
       assert(wxl::prepareTls(image,log_line,carrier));
@@ -459,7 +487,7 @@ int main(int argc,char** argv) {
       auto check=(int(*)())image.symbol("fixture_check"); assert(check && check()==42);
     }
     assert(allocations==releases);
-    reset(); assert(load_file(argv[1],explicitMode,false,true));
+    reset(); assert(load_file(largeTlsPath.c_str(),explicitMode,false,true));
     FreeLibrary(nativeCarrier);
     puts("MSVC-COOKIE PASS: real app mapper, owned CRT/TLS/entry/complement/unwind, bounded RNG and negative mutations");
 }
