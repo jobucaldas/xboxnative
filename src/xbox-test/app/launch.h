@@ -68,6 +68,8 @@ static void lp_sink(const char* s) {
 #include "host/play_runtime.h"
 #include "../uwph/shell32/folder_chain.h"
 #include "steam_client_package.h"
+#include "steam_token_store.h"
+#include "steam_genuine.h"
 
 static void lp_publish(int gen,uint32_t appid,const std::string& result,bool ok,int mapped,int total,const char* status,bool terminal);
 struct LpCtx { std::wstring root, installRoot, args, cwd; std::vector<std::wstring> names; int gen = 0; uint32_t appid = 0; int mapped = 0; unsigned resolved = 0, stubbed = 0; std::string firstMissing, failName, fault; bool ok = false, timedOut = false; };
@@ -263,6 +265,112 @@ static std::wstring valve_client() {
 // is staged and the game's Steam calls fail naturally.
 static std::wstring g_signedClient;   // set when the client route is staged; registry seeded after regb::init
 static uint32_t g_clientAccount=0;
+struct GenuineSteamApi {
+    using CreatePipe=int(*)(); using CreateUser=int(*)(int*);
+    using LoggedOn=bool(*)(int,int); using LogOn=void(*)(int,int,uint64_t); using LogOff=void(*)(int,int);
+    using ReleasePipe=bool(*)(int); using ReleaseUser=void(*)(int,int);
+    CreatePipe createPipe=nullptr; CreateUser createUser=nullptr; LoggedOn loggedOn=nullptr;
+    LogOn logOn=nullptr; LogOff logOff=nullptr; ReleasePipe releasePipe=nullptr; ReleaseUser releaseUser=nullptr;
+};
+struct GenuineSteamCall { HMODULE module=nullptr; GenuineSteamApi api{}; int pipe=0,user=0,logged=0; uint64_t steamid=0; };
+static HMODULE g_genuineSteamModule=nullptr;
+static GenuineSteamApi g_genuineSteamLiveApi{};
+static int g_genuineSteamUser=0,g_genuineSteamPipe=0;
+// This leaf frame intentionally contains no C++ objects: Valve faults are contained by SEH.
+static bool genuine_steam_invoke(GenuineSteamCall* c) {
+    ULONGLONG started=GetTickCount64(); bool ok=false;
+    __try {
+        c->pipe=c->api.createPipe(); ok=c->pipe!=0; lp_sink(ok?"STEAM genuine: step=create-pipe ok=1":"STEAM genuine: step=create-pipe ok=0");
+        if(ok) { c->user=c->api.createUser(&c->pipe); ok=c->user!=0; lp_sink(ok?"STEAM genuine: step=create-global-user ok=1":"STEAM genuine: step=create-global-user ok=0"); }
+        if(ok) {
+            c->api.logOn(c->user,c->pipe,c->steamid); lp_sink("STEAM genuine: step=log-on ok=1");
+            ULONGLONG deadline=GetTickCount64()+30000;
+            while(GetTickCount64()<deadline){if(c->api.loggedOn(c->user,c->pipe)){c->logged=1;break;}Sleep(100);}
+            char line[96];snprintf(line,sizeof line,"STEAM genuine: logged-on=%d after=%llu",c->logged,(unsigned long long)(GetTickCount64()-started));lp_sink(line);
+            ok=c->logged!=0;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { lp_sink("STEAM genuine: step=valve-exception ok=0"); ok=false; }
+    return ok;
+}
+static void genuine_steam_cleanup(GenuineSteamCall* c) {
+    __try {if(c->user&&c->api.logOff)c->api.logOff(c->user,c->pipe);if(c->user&&c->api.releaseUser)c->api.releaseUser(c->pipe,c->user);if(c->pipe&&c->api.releasePipe)c->api.releasePipe(c->pipe);}
+    __except(EXCEPTION_EXECUTE_HANDLER) {lp_sink("STEAM genuine: step=cleanup-exception ok=0");}
+}
+static bool genuine_steam_load(GenuineSteamCall* c,const wchar_t* dll) {
+    bool ok=false;
+    __try {
+        c->module=LoadLibraryExW(dll,nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);
+        c->api.createPipe=reinterpret_cast<GenuineSteamApi::CreatePipe>(c->module?GetProcAddress(c->module,"Steam_CreateSteamPipe"):nullptr);
+        c->api.createUser=reinterpret_cast<GenuineSteamApi::CreateUser>(c->module?GetProcAddress(c->module,"Steam_CreateGlobalUser"):nullptr);
+        c->api.loggedOn=reinterpret_cast<GenuineSteamApi::LoggedOn>(c->module?GetProcAddress(c->module,"Steam_BLoggedOn"):nullptr);
+        c->api.logOn=reinterpret_cast<GenuineSteamApi::LogOn>(c->module?GetProcAddress(c->module,"Steam_LogOn"):nullptr);
+        c->api.logOff=reinterpret_cast<GenuineSteamApi::LogOff>(c->module?GetProcAddress(c->module,"Steam_LogOff"):nullptr);
+        c->api.releasePipe=reinterpret_cast<GenuineSteamApi::ReleasePipe>(c->module?GetProcAddress(c->module,"Steam_BReleaseSteamPipe"):nullptr);
+        c->api.releaseUser=reinterpret_cast<GenuineSteamApi::ReleaseUser>(c->module?GetProcAddress(c->module,"Steam_ReleaseUser"):nullptr);
+        ok=c->module&&c->api.createPipe&&c->api.createUser&&c->api.loggedOn&&c->api.logOn&&c->api.logOff&&c->api.releasePipe&&c->api.releaseUser;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {lp_sink("STEAM genuine: step=load-exception ok=0");}
+    return ok;
+}
+static void genuine_steam_free(HMODULE module) {
+    __try {if(module)FreeLibrary(module);}
+    __except(EXCEPTION_EXECUTE_HANDLER) {lp_sink("STEAM genuine: step=unload-exception ok=0");}
+}
+static void genuine_steam_shutdown() {
+    if(!g_genuineSteamModule)return;
+    GenuineSteamCall c{};c.module=g_genuineSteamModule;c.api=g_genuineSteamLiveApi;c.user=g_genuineSteamUser;c.pipe=g_genuineSteamPipe;
+    genuine_steam_cleanup(&c);genuine_steam_free(c.module);
+    g_genuineSteamModule=nullptr;g_genuineSteamLiveApi={};g_genuineSteamUser=0;g_genuineSteamPipe=0;
+}
+// SetDllDirectoryW is outside the UWP header partition; resolve it at runtime.
+static BOOL genuine_set_dll_directory(LPCWSTR dir) {
+    using Fn=BOOL(WINAPI*)(LPCWSTR);
+    static HMODULE base=LoadLibraryExW(L"kernelbase.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    static HMODULE k32=LoadLibraryExW(L"kernel32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    static Fn fn=[]{FARPROC p=base?GetProcAddress(base,"SetDllDirectoryW"):nullptr;if(!p&&k32)p=GetProcAddress(k32,"SetDllDirectoryW");return (Fn)p;}();
+    if(!fn){SetLastError(ERROR_CALL_NOT_IMPLEMENTED);return FALSE;}
+    return fn(dir);
+}
+static bool genuine_steam_call(const std::wstring& dll,const std::string& token,uint64_t steamid) {
+    GenuineSteamCall c{};c.steamid=steamid;
+    // Flat export prototypes: https://github.com/SteamRE/open-steamworks/blob/master/Open%20Steamworks/Steamclient.h
+    // Steam_CreateSteamPipe(), Steam_CreateGlobalUser(HSteamPipe*), Steam_LogOn(HSteamUser,HSteamPipe,uint64).
+    // These are not private vtable slots. No pinned DLL copy is available off-device for disassembly.
+    const std::wstring root=g_dir+L"\\steam\\client";
+    for(const auto& d:{g_dir+L"\\steam",root,root+L"\\config"})CreateDirectoryW(d.c_str(),nullptr);
+    char config[32768],users[2048],autoUser[64],sid[32];
+    snprintf(sid,sizeof sid,"%llu",(unsigned long long)steamid);
+    bool layout=steam_token_store_config_vdf(token.c_str(),sid,sid,1500000000ULL,config,sizeof config)>0&&
+        steam_genuine::loginusers_vdf(sid,users,sizeof users)&&steam_genuine::autologin_user(sid,autoUser,sizeof autoUser);
+    std::wstring cv=root+L"\\config\\config.vdf",lv=root+L"\\config\\loginusers.vdf";
+    if(layout){write_text(cv,std::string(config));write_text(lv,std::string(users));layout=read_bytes(cv)==config&&read_bytes(lv)==users;}
+    lp_sink(layout?"STEAM genuine: step=layout ok=1":"STEAM genuine: step=layout ok=0");
+    HKEY key=nullptr; DWORD disp=0,remember=1;
+    bool regok=layout&&regb::RegCreateKeyExW(HKEY_CURRENT_USER,L"Software\\Valve\\Steam",0,nullptr,0,KEY_SET_VALUE,nullptr,&key,&disp)==ERROR_SUCCESS;
+    if(regok){std::wstring user(autoUser,autoUser+strlen(autoUser));
+        auto set=[&](const wchar_t* name,const std::wstring& value){return regb::RegSetValueExW(key,name,0,REG_SZ,(const BYTE*)value.c_str(),DWORD((value.size()+1)*sizeof(wchar_t)))==ERROR_SUCCESS;};
+        regok=set(L"SteamPath",root)&&set(L"InstallPath",root)&&set(L"AutoLoginUser",user)&&
+            regb::RegSetValueExW(key,L"RememberPassword",0,REG_DWORD,(const BYTE*)&remember,sizeof remember)==ERROR_SUCCESS;
+        regb::RegCloseKey(key);}
+    lp_sink(regok?"STEAM genuine: step=registry ok=1":"STEAM genuine: step=registry ok=0");
+    wchar_t oldDir[2048]{};DWORD oldDirSize=GetCurrentDirectoryW(2048,oldDir);bool ok=false;
+    if(regok){
+        bool environment=SetEnvironmentVariableW(L"SteamPath",root.c_str())&&genuine_set_dll_directory(root.c_str())&&SetCurrentDirectoryW(root.c_str());
+        lp_sink(environment?"STEAM genuine: step=environment ok=1":"STEAM genuine: step=environment ok=0");
+        if(environment){
+            bool exports=genuine_steam_load(&c,dll.c_str());
+            lp_sink(exports?"STEAM genuine: step=exports ok=1":"STEAM genuine: step=exports ok=0");
+            if(exports)ok=genuine_steam_invoke(&c);
+        }
+    }
+
+    if(oldDirSize&&oldDirSize<2048)SetCurrentDirectoryW(oldDir);
+    genuine_set_dll_directory(nullptr);
+    if(ok){g_genuineSteamModule=c.module;g_genuineSteamLiveApi=c.api;g_genuineSteamUser=c.user;g_genuineSteamPipe=c.pipe;return true;}
+    genuine_steam_cleanup(&c);genuine_steam_free(c.module);return false;
+}
+static bool genuine_steam_opt_in() {
+    std::string text;return read_file_s(g_dir+L"\\genuinesteam.txt",text)&&steam_genuine::opt_in(text);
+}
 static bool stage_steam_provider(uint32_t appid,const std::wstring& exePath) {
     wchar_t exe[2048];DWORD n=GetModuleFileNameW(nullptr,exe,2048);
     if(!n||n>=2048)return false;
@@ -278,6 +386,17 @@ static bool stage_steam_provider(uint32_t appid,const std::wstring& exePath) {
     for(auto d:{g_dir+L"\\steam",dir,dir+L"\\steam_settings",dir+L"\\saves"})CreateDirectoryW(d.c_str(),nullptr);
     std::wstring valve;
     if(wrapped&&(valve=valve_client()).empty()){lp_sink("STEAM provider: SteamStub game, but Valve's signed client is unavailable; nothing staged");return false;}
+    if(wrapped&&genuine_steam_opt_in()) {
+        std::string refresh,access;
+        if(load_token2(refresh,access)) {
+            if(genuine_steam_call(valve,refresh,session->steamid)) {
+                play_runtime::set_steam_client(valve);play_runtime::set_app_ticket(ticket);
+                g_signedClient=valve;g_clientAccount=uint32_t(session->steamid);
+                lp_sink("STEAM provider: genuine Valve client logged on for the owner");
+                return true;
+            }
+        } else lp_sink("STEAM genuine: step=token ok=0");
+    }
     const std::wstring target=dir+(wrapped?L"\\steamclient64.dll":L"\\steam_api64.dll");
     COPYFILE2_EXTENDED_PARAMETERS copy{};copy.dwSize=sizeof copy;
     HRESULT hr=CopyFile2(source.c_str(),target.c_str(),&copy);
@@ -1209,6 +1328,8 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
     c.failName=rep.ok?std::string():rep.result;
 }
 static void lp_run_impl(LpCtx& c) {
+    // Release a genuine client retained by the previous completed game.
+    genuine_steam_shutdown();
     // A previous launch that never ran game code was released; nothing of its
     // Steam routing or final upload carries over to this one.
     play_runtime::reset_launch_config();g_signedClient.clear();g_clientAccount=0;
@@ -1233,6 +1354,7 @@ static void lp_run_impl(LpCtx& c) {
     play_runtime::set_donor_bridge([](const wchar_t* name){return donor_pe::module(name);},
                                    [](HMODULE h,const char* name,WORD ordinal){return donor_pe::from_handle(h,name,ordinal);});
     if(!user32_core::test(lp_sink)) {c.failName="u32c-test.exe";lp_sink("U32C FAIL regression PE; no game code executed");return;}
+    regb::init(g_dir,lp_sink); // guest registry (PlayerPrefs): LocalState\registry.sqlite
     const bool steamProvider=stage_steam_provider(c.appid,exeDir+L"\\"+exe);
     if(steamProvider) {
         try{cloud_sync(c.appid,c.root,false,0);}catch(...){lp_sink("STEAM cloud download: exception");}
@@ -1241,7 +1363,6 @@ static void lp_run_impl(LpCtx& c) {
         try{leaderboard_start(c.appid);}catch(...){lp_sink("STEAM leaderboards: bridge did not start");}
     }
     if(steamProvider){uint32_t appid=c.appid;std::wstring root=c.root;g_finalSync=[appid,root]{final_sync(appid,root);};}
-    regb::init(g_dir,lp_sink); // guest registry (PlayerPrefs): LocalState\registry.sqlite
     if(!g_signedClient.empty()&&!play_runtime::seed_steam_client_registry(g_signedClient,g_clientAccount))
         lp_sink("STEAM client: guest registry not seeded; the game's Steam client lookup will fail");
     {   // Wine's C++ runtime packaged beside the launcher (build.sh: layout\runtime).
