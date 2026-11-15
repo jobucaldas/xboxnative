@@ -1260,7 +1260,7 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         host.release_dc=[release_dc](uintptr_t hwnd,uintptr_t hdc){return release_dc&&release_dc(reinterpret_cast<HWND>(hwnd),reinterpret_cast<HDC>(hdc))!=0;};
         auto proc=[](const char* name)->uintptr_t {
             uintptr_t p=play_runtime::openglExport(name);
-            if(!p&&mesa)p=reinterpret_cast<uintptr_t>(GetProcAddress(mesa,name));
+            if(!p&&mesa){p=reinterpret_cast<uintptr_t>(GetProcAddress(mesa,name));if(!p){using GetProc=PROC(WINAPI*)(LPCSTR);auto get=reinterpret_cast<GetProc>(GetProcAddress(mesa,"wglGetProcAddress"));if(get)p=reinterpret_cast<uintptr_t>(get(name));}}
             return p;
         };
         host.gl_call=[proc](x86::Host::GlCall& q) {
@@ -1306,6 +1306,13 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
                 q.result=reinterpret_cast<Unmap>(unmap)(unsigned(q.args[0]));return;
             }
             if(q.name=="glGetError"){using Fn=unsigned(APIENTRY*)();auto p=pointer(q.name.c_str());q.result=p?reinterpret_cast<Fn>(p)():0;return;}
+            if(q.name=="glTexImage2D"){using Fn=void(APIENTRY*)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*);auto p=pointer(q.name.c_str());if(!p){missing();return;}reinterpret_cast<Fn>(p)(unsigned(q.args[0]),int(q.args[1]),int(q.args[2]),int(q.args[3]),int(q.args[4]),int(q.args[5]),unsigned(q.args[6]),unsigned(q.args[7]),q.input.empty()?nullptr:q.input.data());return;}
+            if(q.name=="glCreateShader"){using Fn=unsigned(APIENTRY*)(unsigned);auto p=pointer(q.name.c_str());if(p)q.result=reinterpret_cast<Fn>(p)(unsigned(q.args[0]));else missing();return;}
+            if(q.name=="glShaderSource"){using Fn=void(APIENTRY*)(unsigned,int,const char*const*,const int*);auto p=pointer(q.name.c_str());if(!p||q.shader_sources.empty()){missing();return;}std::vector<const char*> sources; sources.reserve(q.shader_sources.size());for(const auto& source:q.shader_sources)sources.push_back(reinterpret_cast<const char*>(source.data()));const int* lengths=q.shader_lengths.empty()?nullptr:q.shader_lengths.data();reinterpret_cast<Fn>(p)(unsigned(q.args[0]),int(sources.size()),sources.data(),lengths);return;}
+            if(q.name=="glCompileShader"){using Fn=void(APIENTRY*)(unsigned);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(unsigned(q.args[0]));else missing();return;}
+            if(q.name=="glGetIntegerv"||q.name=="glGetFloatv"){auto p=pointer(q.name.c_str());if(!p||q.output.empty()){missing();return;}q.args[1]=reinterpret_cast<uintptr_t>(q.output.data());q.result=x86::gl_call_generated(q.signature,p,q.args.data());return;}
+            if(q.name.compare(0,9,"glUniform")==0&&!q.input.empty()){auto p=pointer(q.name.c_str());if(!p){missing();return;}size_t pointer_arg=q.name.find("Matrix")!=std::string::npos?3u:2u;q.args[pointer_arg]=reinterpret_cast<uintptr_t>(q.input.data());q.result=x86::gl_call_generated(q.signature,p,q.args.data());return;}
+            if(q.signature!=65535){auto p=pointer(q.name.c_str());if(!p){missing();return;}q.result=x86::gl_call_generated(q.signature,p,q.args.empty()?nullptr:q.args.data());return;}
             missing();
         };
     };
