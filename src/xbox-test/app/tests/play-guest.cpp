@@ -59,6 +59,22 @@ __declspec(dllimport) int dependency_check();
 __declspec(dllimport) int ForwardName();
 static DWORD WINAPI child(void*){return tls_value==74&&tls_count==1&&dependency_check()?42:1;}
 static bool contains(const wchar_t* s,const wchar_t* p){for(;*s;++s){auto a=s,b=p;while(*b&&*a==*b){++a;++b;}if(!*b)return true;}return false;}
+static int testSystemDllLoads(){
+    HMODULE user=LoadLibraryW(L"User32.dll");if(!user)return 101;
+    if(!GetProcAddress(user,"uwph_u32c_input_key")||!GetProcAddress(user,"CreateWindowExW"))return 102;
+    HMODULE gdi=LoadLibraryExW(L"gdi32",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);if(!gdi)return 103;
+    if(!GetProcAddress(gdi,"uwph_u32c_input_key")||!GetProcAddress(gdi,"CreateCompatibleDC"))return 104;
+    HMODULE kernel=LoadLibraryW(L"kernel32.dll");if(!kernel||!GetProcAddress(kernel,"GetTickCount"))return 105;
+    wchar_t path[MAX_PATH];
+    DWORD length=GetModuleFileNameW(nullptr,path,MAX_PATH);
+    if(!length||length>=MAX_PATH)return 106;
+    wchar_t* slash=path;for(wchar_t* p=path;*p;++p)if(*p==L'\\')slash=p+1;
+    if(slash==path)return 107;
+    const wchar_t missing[]=L"play-definitely-missing.dll";
+    for(unsigned i=0;missing[i];++i)slash[i]=missing[i];SetLastError(0);
+    if(LoadLibraryW(path)||GetLastError()!=ERROR_MOD_NOT_FOUND)return 108;
+    return 42;
+}
 static BOOL CALLBACK resourceName(HMODULE module,LPCSTR type,LPSTR name,LONG_PTR opaque) {
     auto count=(unsigned*)opaque;
     if(module!=GetModuleHandleW(nullptr)||type!=MAKEINTRESOURCEA(10)||name!=MAKEINTRESOURCEA(101))return FALSE;
@@ -221,6 +237,7 @@ DWORD guest_exe_entry(){
         SetLastError(73); if(header((void*)&guest_exe_entry,&base)!=main||GetLastError()!=73)return 27;
         return 42;
     }
+    if(contains(GetCommandLineW(),L"loader-system-dlls"))return testSystemDllLoads();
     if(contains(GetCommandLineW(),L"native-cxx")) {
         auto library=LoadLibraryW(L"play-cxx.dll");if(!library)return 31;
         auto test=(int(*)())GetProcAddress(library,"native_cxx_test");

@@ -288,6 +288,10 @@ static bool seed_steam_client_registry(const std::wstring& client,DWORD accountI
 // is the loading module's directory). loadExW records the directory for
 // the graph being mapped; resolve() reads it. Guarded by loaderMutex.
 static std::wstring& alteredLoadDir() {static std::wstring dir;return dir;}
+static HMODULE routedRecordModule() {
+    static HMODULE module=LoadPackagedLibrary(L"uwph-u32c.dll",0);
+    return module;
+}
 static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     if(!name || file) {SetLastError(ERROR_INVALID_PARAMETER);return nullptr;}
     constexpr DWORD knownFlags= DONT_RESOLVE_DLL_REFERENCES|LOAD_LIBRARY_AS_DATAFILE|
@@ -378,6 +382,16 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
         // means no other thread can be inside this branch meanwhile.
         if(!initializePending() || !(m->initialized || m->initializing)) {--m->references;SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
         return (HMODULE)m->image.base;
+    }
+    if(requested.find_first_of(L"\\/:")==std::wstring::npos &&
+       (key=="user32.dll" || key=="gdi32.dll")) {
+        constexpr DWORD recordFlags=LOAD_WITH_ALTERED_SEARCH_PATH|LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|
+            LOAD_LIBRARY_SEARCH_APPLICATION_DIR|LOAD_LIBRARY_SEARCH_USER_DIRS|LOAD_LIBRARY_SEARCH_SYSTEM32|
+            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
+        if(flags&~recordFlags) {SetLastError(ERROR_NOT_SUPPORTED);return nullptr;}
+        auto module=routedRecordModule();
+        if(!module)SetLastError(ERROR_MOD_NOT_FOUND);
+        return module;
     }
     if(auto input=xinput_core::find_module(key.c_str(),true)) {
         if(state->log)state->log(("XINPUT LoadLibrary "+narrow(requested)+" -> Play's emulated module").c_str());
@@ -825,6 +839,14 @@ static FARPROC WINAPI proc(HMODULE h,LPCSTR name) {
     // for the entire lookup, not just the mapped-export branch.
     std::lock_guard<LoaderMutex> lock(state->loaderMutex);
     ExportLookup lookup;
+    if(h&&h==routedRecordModule()) {
+        WORD ordinal=IS_INTRESOURCE(name)?WORD((uintptr_t)name):0;
+        const char* symbol=IS_INTRESOURCE(name)?nullptr:name;
+        auto address=resolve("user32.dll",symbol,ordinal);
+        if(!address)address=resolve("gdi32.dll",symbol,ordinal);
+        if(!address&&!IS_INTRESOURCE(name))address=(uintptr_t)GetProcAddress(h,name);
+        return lookup.finish(address);
+    }
     if(auto m=find(h)) {
         WORD ordinal=IS_INTRESOURCE(name)?WORD((uintptr_t)name):0;
         return lookup.finish(steamApiExport(*m,IS_INTRESOURCE(name)?nullptr:name,exported(*m,IS_INTRESOURCE(name)?nullptr:name,ordinal)));
