@@ -69,7 +69,7 @@ static void lp_sink(const char* s) {
 #include "steam_client_package.h"
 
 static void lp_publish(int gen,uint32_t appid,const std::string& result,bool ok,int mapped,int total,const char* status,bool terminal);
-struct LpCtx { std::wstring root, args, cwd; std::vector<std::wstring> names; int gen = 0; uint32_t appid = 0; int mapped = 0; unsigned resolved = 0, stubbed = 0; std::string firstMissing, failName, fault; bool ok = false, timedOut = false; };
+struct LpCtx { std::wstring root, installRoot, args, cwd; std::vector<std::wstring> names; int gen = 0; uint32_t appid = 0; int mapped = 0; unsigned resolved = 0, stubbed = 0; std::string firstMissing, failName, fault; bool ok = false, timedOut = false; };
 static int pe_machine(const std::wstring& p) {   // 0 = unreadable/not PE, else IMAGE_FILE_MACHINE_*
     FILE* f = _wfopen(p.c_str(), L"rb"); if (!f) return 0; unsigned char h[1024]; size_t n = fread(h, 1, sizeof h, f); fclose(f);
     if (n < 0x40 || h[0] != 'M' || h[1] != 'Z') return 0; uint32_t o = *(uint32_t*)(h + 0x3c); if (o + 6 > n || memcmp(h + o, "PE\0\0", 4)) return 0; return *(uint16_t*)(h + o + 4);
@@ -1007,12 +1007,37 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         lp_sink(summary.c_str());
     };
     bool traceFaultContext=GetFileAttributesW((g_dir+L"\\x86trace.txt").c_str())!=INVALID_FILE_ATTRIBUTES;
+    auto toU16=[](const std::wstring& s){return std::u16string(s.begin(),s.end());};
+    static const GUID localLow={0xA520A1A4,0x1780,0x4FF6,{0xBD,0x18,0x16,0x73,0x43,0xC5,0xAF,0x16}};
+    static const GUID local={0xF1B32785,0x6FBA,0x4FCF,{0x9D,0x55,0x7B,0x8E,0x7F,0x15,0x70,0x91}};
+    using Known=HRESULT(WINAPI*)(const GUID&,DWORD,HANDLE,PWSTR*);
+    static HMODULE shell=LoadLibraryExW(L"shell32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    auto known=shell?(Known)GetProcAddress(shell,"SHGetKnownFolderPath"):nullptr;
+    const auto stateRoot=x86_file_guard::normalize(toU16(g_dir),{});
+    std::vector<std::u16string> protectedRoots{toU16(g_dir),toU16(c.installRoot),toU16(packageDir)};
+    std::vector<std::u16string> allowedRoots{toU16(provider_dir(c.appid))};
+    auto gameRoot=x86_file_guard::normalize(toU16(c.root),{});
+    if(gameRoot!=stateRoot)allowedRoots.push_back(std::move(gameRoot));
+    for(const auto& folder:{std::pair<const char*,const GUID*>{"Local",&local},{"LocalLow",&localLow}}) {
+        PWSTR path=nullptr;const bool found=known&&SUCCEEDED(known(*folder.second,0,nullptr,&path))&&path;
+        if(found) {
+            std::wstring resolved(path);CoTaskMemFree(path);
+            lp_sink((std::string("x86 file guard: known folder ")+folder.first+"="+play_runtime::narrow(resolved)).c_str());
+            auto normalized=x86_file_guard::normalize(toU16(resolved),{});
+            if(normalized!=stateRoot&&x86_file_guard::inside(normalized,stateRoot))allowedRoots.push_back(std::move(normalized));
+        } else lp_sink((std::string("x86 file guard: known folder ")+folder.first+" unavailable").c_str());
+    }
+    x86_file_guard::Policy fileGuard(protectedRoots,allowedRoots,toU16(c.cwd.empty()?exeDir:c.cwd),[](const std::string& message){lp_sink(message.c_str());});
     auto r=x86::run(path,c.cwd,cmdline,tee,loaded,x86::kGuestRunCap,dllSource,traceFaultContext,[&](const x86::PlayResult& mapped) {
         gap_summary::Binder imports;
         for(const auto& item:mapped.gap_imports)
             imports.record(std::get<0>(item),std::get<1>(item),std::get<2>(item));
         for(const auto& line:imports.report(std::string(exe.begin(),exe.end()),"x86").lines) lp_sink(line.c_str());
-    },donorGaps);
+    },donorGaps,[&fileGuard,toU16](const char* operation,const std::u16string& guestPath){
+        wchar_t current[32768]{};DWORD n=GetCurrentDirectoryW(32768,current);
+        if(!n||n>=32768)return fileGuard.allow(operation,u"\\__x86_guard_cwd_unavailable__");
+        return fileGuard.allow(operation,guestPath,toU16(std::wstring(current,n)));
+    });
     if(traceFaultContext&&steamstub_wrapped(path)) {
         snprintf(line,sizeof line,"PE32 SteamStub probe: .bind=1 x86SteamBridge=%s ActiveProcess=%s PEB.BeingDebugged=%u PEB.NtGlobalFlag=0x%08x",
                  steamProvider?"staged":"not-staged",steamProvider?"seeded":"not-seeded",unsigned(r.peb_being_debugged),r.peb_nt_global_flag);lp_sink(line);
@@ -1348,7 +1373,7 @@ static std::string start_launch(uint32_t appid, const std::string& name, const s
             // Keep the previous attempt's log beside this one (launch_probe.previous.log).
             MoveFileExW((g_dir + L"\\launch_probe.log").c_str(), (g_dir + L"\\launch_probe.previous.log").c_str(), MOVEFILE_REPLACE_EXISTING);
             { std::lock_guard<std::mutex> l(g_lpm); if (g_lpf) fclose(g_lpf); g_lpf = _wfopen((g_dir + L"\\launch_probe.log").c_str(), L"wb"); g_lpMissing = g_lpStubbed = g_lpStubCalls = g_lpLines = 0; g_lpLastFail.clear(); }
-            LpCtx c; c.root = root; c.args = widen(args); c.cwd = target.workdir.empty() ? std::wstring() : root + L"\\" + widen(target.workdir); c.names = names;c.gen=gen;c.appid=appid; bool noFault = lp_run_seh(&c);
+            LpCtx c; c.root = root; c.installRoot = inst.root.empty() ? std::wstring() : installs::ascii(inst.root); c.args = widen(args); c.cwd = target.workdir.empty() ? std::wstring() : root + L"\\" + widen(target.workdir); c.names = names;c.gen=gen;c.appid=appid; bool noFault = lp_run_seh(&c);
             { std::lock_guard<std::mutex> l(g_lpm); if (g_lpf) { fclose(g_lpf); g_lpf = nullptr; } }
             int total=play_runtime::state?int(play_runtime::state->moduleCount):int(names.size());
             const std::string fault=noFault?(c.fault.empty()?c.failName:c.fault):

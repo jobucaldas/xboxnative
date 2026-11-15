@@ -62,6 +62,8 @@ int main() {
     const unsigned arity[]={7,7,5,2,4,1,4,5,1,2,2,1,1,2,2,1,1,2,2,1,1,2,2,6,6,2,2,1,1,2,0};   // SetFilePointerEx: LARGE_INTEGER by value = 2 slots
     for(unsigned i=0;i<31;++i){auto it=reg.map.find({i>=28?"ole32.dll":"kernel32.dll",names[i]});CHECK(it!=reg.map.end());if(it!=reg.map.end()){CHECK(it->second.conv==Conv::Stdcall);CHECK(it->second.argc==arity[i]);}}
     uint64_t native_handle=0x123456789ull;unsigned calls=0;
+    // Launches always install a destructive-file policy; a missing one fails closed (checked below).
+    bool refuse=false;host.destructive_file_guard=[&](const char*,const std::u16string&){return !refuse;};
     host.file_call=[&](Host::FileCall& q){++calls;switch(q.kind){
     case Host::FileCall::Kind::CreateW:CHECK(q.path_w==u"save.dat");CHECK(q.args[0]==0x80000000u);q.value=native_handle;q.succeeded=true;break;
     case Host::FileCall::Kind::Read:q.data={'o','k'};q.args[1]=2;q.succeeded=true;break;
@@ -118,6 +120,7 @@ int main() {
     CHECK(call("createdirectorya",{foldera,0})==1);
     CHECK(call("createdirectoryw",{folderw,0})==1);
     CHECK(call("removedirectorya",{foldera})==1&&call("removedirectoryw",{folderw})==1);
+    refuse=true;CHECK(call("removedirectoryw",{folderw})==0&&g.last_error()==5);refuse=false;
     CHECK(call("setcurrentdirectorya",{foldera})==1&&call("setcurrentdirectoryw",{folderw})==1);
     CHECK(call("getcurrentdirectorya",{16,0x3200})==4&&mem.r8(0x3200)=='r'&&mem.r8(0x3204)==0);
     CHECK(call("getcurrentdirectoryw",{16,0x3220})==4&&mem.r8(0x3220)=='r'&&mem.r8(0x3222)=='o'&&mem.r8(0x3228)==0);
