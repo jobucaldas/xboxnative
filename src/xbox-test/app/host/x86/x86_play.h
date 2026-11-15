@@ -488,6 +488,7 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
                       bool trace_fault_context = false,
                       const std::function<void(const PlayResult&)>& on_imports = nullptr,
                       const DllLoadObserver& observe_dll = nullptr,
+                      const std::function<void(Host&)>& configure_host = nullptr,
                       const std::function<bool(const char*, const std::u16string&)>& destructive_file_guard = nullptr) {
     PlayResult r;
     FILE* f = _wfopen(exe.c_str(), L"rb");
@@ -511,7 +512,7 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
         if (needed) { std::vector<wchar_t> previous(needed); DWORD n = GetCurrentDirectoryW(needed, previous.data());
             if (n && n < needed) { previousDirectory.assign(previous.data(), n); restoreDirectory = SetCurrentDirectoryW(workingDirectory.c_str()) != FALSE; } }
     }
-    auto result = run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source, trace_fault_context, on_imports, observe_dll, nullptr, destructive_file_guard);
+    auto result = run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source, trace_fault_context, on_imports, observe_dll, configure_host, destructive_file_guard);
     if (restoreDirectory) SetCurrentDirectoryW(previousDirectory.c_str());
     return result;
 }

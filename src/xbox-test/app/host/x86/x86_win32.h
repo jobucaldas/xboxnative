@@ -7,6 +7,7 @@
 #pragma once
 #include <functional>
 #include "x86_pe.h"
+#include "x86_gl_generated.h"
 namespace x86 {
 struct Host {
     enum class NlsOperation { IsValidCodePage, GetCPInfo, MultiByteToWideChar, WideCharToMultiByte,
@@ -49,6 +50,12 @@ struct Host {
         std::vector<uint8_t> data;
         bool succeeded = false;
     };
+    struct GlCall {
+        std::string name;
+        std::vector<uintptr_t> args;
+        std::vector<uint8_t> input, output;
+        uintptr_t result = 0;
+    };
     std::string out, err;                         // captured stdout/stderr bytes
     std::function<void(const std::string&)> tee;  // optional live sink
     std::function<NlsResponse(const NlsRequest&)> nls_call;
@@ -57,6 +64,14 @@ struct Host {
     std::function<void(SocketCall&)> socket_call;
     std::function<uint64_t()> tick_count;          // same monotonic millisecond source for the guest tick APIs
     std::function<void(LocaleCall&)> locale_call; // Play's native kernel32 locale formatter
+    std::function<void(GlCall&)> gl_call;
+    std::function<uintptr_t(uint32_t)> get_dc;
+    std::function<bool(uint32_t, uintptr_t)> release_dc;
+    std::map<uint32_t, uintptr_t> dc_handles, gl_contexts;
+    uint32_t gl_handle_serial = 0xE0000000u;
+    uint32_t vertex_array = 0;
+    int32_t vertex_size = 0, vertex_stride = 0;
+    uint32_t vertex_type = 0;
     std::map<std::string, unsigned> calls;        // import -> call count
     static constexpr uint32_t H_STDIN = 3, H_STDOUT = 7, H_STDERR = 11;
 };
@@ -90,6 +105,142 @@ inline void register_win32(Registry& r, Host& h) {
                 swap(root, child); root = child; } };
         if (n > 1) { for (uint32_t i = n / 2; i-- > 0;) sift(i, n); for (uint32_t e = n - 1; e > 0; --e) { swap(0, e); sift(0, e); } }
         return 0; });
+}
+inline void register_gl(Registry& r, Host& h) {
+    auto count = [&h](const std::string& name) { ++h.calls[name]; };
+    auto alloc_handle = [&h](std::map<uint32_t, uintptr_t>& handles, uintptr_t native) {
+        if (!native) return uint32_t(0);
+        if (++h.gl_handle_serial < 0xE0000000u) h.gl_handle_serial = 0xE0000000u;
+        handles[h.gl_handle_serial] = native;
+        return h.gl_handle_serial;
+    };
+    auto call = [&h](Cpu& c, Host::GlCall& q) {
+        if (!h.gl_call) { c.mem.w32(c.fs_base + 0x34, 120); return false; }
+        h.gl_call(q); return true;
+    };
+    auto dc = [&h](uint32_t token) -> uintptr_t {
+        auto it = h.dc_handles.find(token); return it == h.dc_handles.end() ? 0 : it->second;
+    };
+    auto context = [&h](uint32_t token) -> uintptr_t {
+        auto it = h.gl_contexts.find(token); return it == h.gl_contexts.end() ? 0 : it->second;
+    };
+    r.add("user32.dll", "GetDC", Conv::Stdcall, 1, [&h, alloc_handle, count](Cpu& c) -> uint32_t {
+        count("GetDC"); uint32_t hwnd = c.arg(0);
+        if (hwnd || !h.get_dc) { c.mem.w32(c.fs_base + 0x34, hwnd ? 6 : 120); return 0; }
+        return alloc_handle(h.dc_handles, h.get_dc(hwnd));
+    });
+    r.add("user32.dll", "ReleaseDC", Conv::Stdcall, 2, [&h, count](Cpu& c) -> uint32_t {
+        count("ReleaseDC"); uint32_t hwnd = c.arg(0), token = c.arg(1); auto it = h.dc_handles.find(token);
+        if (hwnd || it == h.dc_handles.end() || !h.release_dc) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
+        bool ok = h.release_dc(hwnd, it->second); if (ok) h.dc_handles.erase(it); return ok ? 1u : 0u;
+    });
+    r.add("gdi32.dll", "ChoosePixelFormat", Conv::Stdcall, 2, [dc, call, count](Cpu& c) -> uint32_t {
+        count("ChoosePixelFormat"); Host::GlCall q{}; q.name = "ChoosePixelFormat"; q.args = {c.arg(0), c.arg(1)};
+        if (!dc(q.args[0])) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
+        q.args[0] = dc(uint32_t(q.args[0])); q.input = c.mem.read_bytes(q.args[1], 40); q.args.resize(1);
+        return call(c, q) ? uint32_t(q.result) : 0;
+    });
+    r.add("gdi32.dll", "SetPixelFormat", Conv::Stdcall, 3, [dc, call, count](Cpu& c) -> uint32_t {
+        count("SetPixelFormat"); Host::GlCall q{}; q.name = "SetPixelFormat"; q.args = {c.arg(0), c.arg(1), c.arg(2)};
+        if (!dc(q.args[0])) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
+        q.args[0] = dc(uint32_t(q.args[0])); q.input = c.mem.read_bytes(q.args[2], 40); q.args.resize(2);
+        return call(c, q) ? uint32_t(q.result) : 0;
+    });
+    r.add("gdi32.dll", "DescribePixelFormat", Conv::Stdcall, 4, [dc, call, count](Cpu& c) -> uint32_t {
+        count("DescribePixelFormat"); Host::GlCall q{}; q.name = "DescribePixelFormat"; q.args = {c.arg(0), c.arg(1), c.arg(2), c.arg(3)};
+        if (!dc(q.args[0])) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
+        q.args[0] = dc(uint32_t(q.args[0])); q.output.resize(std::min<size_t>(size_t(q.args[2]), 40)); q.args.resize(3);
+        if (!call(c, q)) return 0;
+        if (c.arg(3) && !q.output.empty()) c.mem.write_bytes(c.arg(3), q.output.data(), uint32_t(q.output.size()));
+        return uint32_t(q.result);
+    });
+    r.add("gdi32.dll", "SwapBuffers", Conv::Stdcall, 1, [dc, call, count](Cpu& c) -> uint32_t {
+        count("SwapBuffers"); Host::GlCall q{}; q.name = "SwapBuffers"; q.args = {c.arg(0)};
+        if (!dc(q.args[0])) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
+        q.args[0] = dc(uint32_t(q.args[0])); return call(c, q) ? uint32_t(q.result) : 0;
+    });
+    r.add("opengl32.dll", "wglCreateContext", Conv::Stdcall, 1, [&h, dc, alloc_handle, call, count](Cpu& c) -> uint32_t {
+        count("wglCreateContext"); Host::GlCall q{}; q.name = "wglCreateContext"; q.args = {c.arg(0)};
+        if (!dc(q.args[0])) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
+        q.args[0] = dc(uint32_t(q.args[0])); return call(c, q) ? alloc_handle(h.gl_contexts, q.result) : 0;
+    });
+    r.add("opengl32.dll", "wglDeleteContext", Conv::Stdcall, 1, [&h, context, call, count](Cpu& c) -> uint32_t {
+        count("wglDeleteContext"); Host::GlCall q{}; q.name = "wglDeleteContext"; q.args = {c.arg(0)};
+        if (!context(q.args[0])) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
+        q.args[0] = context(uint32_t(q.args[0])); if (!call(c, q)) return 0;
+        if (q.result) h.gl_contexts.erase(c.arg(0));
+        return uint32_t(q.result);
+    });
+    r.add("opengl32.dll", "wglMakeCurrent", Conv::Stdcall, 2, [dc, context, call, count](Cpu& c) -> uint32_t {
+        count("wglMakeCurrent"); Host::GlCall q{}; q.name = "wglMakeCurrent"; q.args = {c.arg(0), c.arg(1)};
+        if (q.args[0] && !dc(q.args[0])) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
+        if (q.args[1] && !context(q.args[1])) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
+        q.args[0] = dc(uint32_t(q.args[0])); q.args[1] = context(uint32_t(q.args[1]));
+        return call(c, q) ? uint32_t(q.result) : 0;
+    });
+    r.add("opengl32.dll", "wglGetCurrentContext", Conv::Stdcall, 0, [&h, count](Cpu&) -> uint32_t {
+        count("wglGetCurrentContext"); if (!h.gl_call) return 0;
+        Host::GlCall q{}; q.name = "wglGetCurrentContext"; h.gl_call(q);
+        for (const auto& item : h.gl_contexts) if (item.second == q.result) return item.first;
+        return 0;
+    });
+    // The dynamic proc-address thunk returns only routes explicitly registered here.
+    r.add("opengl32.dll", "wglGetProcAddress", Conv::Stdcall, 1, [&r, count](Cpu& c) -> uint32_t {
+        count("wglGetProcAddress"); std::string name = c.mem.read_cstr(c.arg(0));
+        auto it = r.map.find({"opengl32.dll", Registry::key_sym(name)});
+        if (it == r.map.end()) return 0;
+        return c.thunks.add(it->second);
+    });
+    for (const auto& exported : kGlExports) {
+        const std::string name = exported.name;
+        const unsigned argc = exported.argc;
+        r.add("opengl32.dll", name, Conv::Stdcall, argc, [&h, call, count, name, argc](Cpu& c) -> uint32_t {
+            count(name); Host::GlCall q{}; q.name = name;
+            for (unsigned i = 0; i < argc; ++i) q.args.push_back(c.arg(i));
+            if (name == "glVertexPointer") {
+                h.vertex_size = int32_t(q.args[0]); h.vertex_type = q.args[1]; h.vertex_stride = int32_t(q.args[2]); h.vertex_array = q.args[3];
+                return 0;
+            }
+            if (name == "glDrawArrays") {
+                if (!h.vertex_array) throw Fault(FaultKind::Unsupported, c.eip, 0, "x86 GL buffer-backed arrays are unsupported");
+                if (h.vertex_type != 0x1406u || h.vertex_size < 2 || h.vertex_size > 4 || h.vertex_stride < 0 || q.args[2] > (1u << 20)) {
+                    throw Fault(FaultKind::Unsupported, c.eip, h.vertex_array, "x86 GL client array format is unsupported");
+                }
+                const uint32_t width = uint32_t(h.vertex_size) * 4u;
+                const uint32_t stride = h.vertex_stride ? uint32_t(h.vertex_stride) : width;
+                const uint64_t first = q.args[1], count = q.args[2];
+                const uint64_t last = uint64_t(h.vertex_array) + (count ? (first + count - 1) * stride + width : first * stride);
+                if (stride < width || last > UINT32_MAX || q.args[2] * width > (1u << 26))
+                    throw Fault(FaultKind::AccessViolation, c.eip, h.vertex_array, "x86 GL client array range overflow");
+                q.input.reserve(size_t(q.args[2]) * width);
+                for (uint32_t i = 0; i < q.args[2]; ++i) {
+                    uint32_t address = uint32_t(uint64_t(h.vertex_array) + (first + i) * stride);
+                    auto bytes = c.mem.read_bytes(address, width);
+                    q.input.insert(q.input.end(), bytes.begin(), bytes.end());
+                }
+                q.args[1] = 0; q.args.push_back(uint32_t(h.vertex_size)); q.args.push_back(h.vertex_type);
+                q.args.push_back(stride);
+            }
+            uint32_t read_pixels_dst = 0;
+            if (name == "glReadPixels") {
+                read_pixels_dst = q.args[6];
+                if (q.args[2] > 16384 || q.args[3] > 16384 || q.args[4] != 0x1908u || q.args[5] != 0x1401u)
+                    throw Fault(FaultKind::Unsupported, c.eip, read_pixels_dst, "x86 GL readback format is unsupported");
+                uint64_t bytes = uint64_t(q.args[2]) * q.args[3] * 4u;
+                if (bytes > (1u << 26)) throw Fault(FaultKind::AccessViolation, c.eip, read_pixels_dst, "x86 GL readback is too large");
+                q.output.resize(size_t(bytes)); q.args[6] = 0;
+            }
+            if (!call(c, q)) return 0;
+            if (!q.output.empty()) c.mem.write_bytes(read_pixels_dst, q.output.data(), uint32_t(q.output.size()));
+            return uint32_t(q.result);
+        });
+    }
+    // WGL entry points also participate in GetProcAddress dispatch.
+    r.add("opengl32.dll", "wglGetCurrentDC", Conv::Stdcall, 0, [&h, count](Cpu&) -> uint32_t {
+        count("wglGetCurrentDC"); if (!h.gl_call) return 0; Host::GlCall q{}; q.name = "wglGetCurrentDC"; h.gl_call(q);
+        for (const auto& item : h.dc_handles) if (item.second == q.result) return item.first;
+        return 0;
+    });
 }
 inline void register_ws2(Registry& r, Host& h) {
     auto startup=[&h](Cpu& c)->uint32_t {

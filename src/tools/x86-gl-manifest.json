@@ -1,0 +1,17 @@
+{
+  "registry": {
+    "url": "https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/6af574a14089ccfee87efe230ebcdd8742859813/xml/gl.xml",
+    "revision": "6af574a14089ccfee87efe230ebcdd8742859813",
+    "sha256": "b9ca2cfa5c676e901c20d34af3407f1687cde0f1336a5ff7a8974d04c7494ad3"
+  },
+  "functions": [
+    {"name": "glClearColor", "argc": 4},
+    {"name": "glClear", "argc": 1},
+    {"name": "glVertexPointer", "argc": 4},
+    {"name": "glEnableClientState", "argc": 1},
+    {"name": "glDrawArrays", "argc": 3},
+    {"name": "glReadPixels", "argc": 7},
+    {"name": "glViewport", "argc": 4},
+    {"name": "glGetError", "argc": 0}
+  ]
+}
