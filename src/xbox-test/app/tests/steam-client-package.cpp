@@ -43,10 +43,21 @@ int main() {
     std::string badSha = manifest; badSha.replace(badSha.find(sha), 64, std::string(64, 'Z'));
     CHECK(!steam_client_package::manifest_entry(badSha, e));
     auto dll = signedDll(0x400, 0x300);
-    auto z = zip({{"steamclient.dll", "x86"}, {"steamclient64.dll", dll}, {"tier0_s64.dll", "t"}});
+    auto z = zip({{"steamclient.dll", "x86"}, {"steamclient64.dll", dll}, {"tier0_s64.dll", "t"},
+                  {"vstdlib_s64.dll", "v"}, {"SDL3.dll", "s"}, {"video64.dll", "d"}});
     auto noInflate = [](const char*, size_t, size_t, std::string&) { return false; };
+    CHECK(steam_client_package::runtime_file_count == 5);
+    CHECK(std::string(steam_client_package::runtime_files[0]) == "steamclient64.dll");
+    CHECK(std::string(steam_client_package::runtime_files[1]) == "tier0_s64.dll");
+    CHECK(std::string(steam_client_package::runtime_files[2]) == "vstdlib_s64.dll");
+    CHECK(std::string(steam_client_package::runtime_files[3]) == "SDL3.dll");
+    CHECK(std::string(steam_client_package::runtime_files[4]) == "video64.dll");
     std::string out;
     CHECK(steam_client_package::zip_member(z, "steamclient64.dll", noInflate, out) && out == dll);
+    CHECK(steam_client_package::zip_member(z, "tier0_s64.dll", noInflate, out) && out == "t");
+    CHECK(steam_client_package::zip_member(z, "vstdlib_s64.dll", noInflate, out) && out == "v");
+    CHECK(steam_client_package::zip_member(z, "SDL3.dll", noInflate, out) && out == "s");
+    CHECK(steam_client_package::zip_member(z, "video64.dll", noInflate, out) && out == "d");
     CHECK(!steam_client_package::zip_member(z, "steamclient64", noInflate, out));
     CHECK(!steam_client_package::zip_member(z.substr(0, z.size() / 2), "steamclient64.dll", noInflate, out));
     CHECK(steam_client_package::valve_signature_block(dll));

@@ -17,6 +17,10 @@ constexpr const char* host = "media.steampowered.com";
 constexpr const char* manifest_path = "/client/steam_client_win64";
 constexpr const char* package = "bins_win64";
 constexpr const char* member = "steamclient64.dll";
+constexpr const char* runtime_files[] = {
+    "steamclient64.dll", "tier0_s64.dll", "vstdlib_s64.dll", "SDL3.dll", "video64.dll"
+};
+constexpr size_t runtime_file_count = sizeof(runtime_files) / sizeof(runtime_files[0]);
 
 struct Entry { std::string file, sha256; };
 inline bool hex64(const std::string& s) {
