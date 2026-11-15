@@ -62,6 +62,7 @@ extern "C" unsigned ZSTD_isError(size_t code);
 #include "detail_input.h"
 #include "playtime.h"
 #include "host/d3d12_diag.h"   // set_trace_requested: the LocalState\d3d12trace.txt probe
+#include "host/d3d12_sm_cap.h"
 #include <xinput.h>
 #include "../uwph/display/gamepad.h"
 #include "../uwph/xinput/gpad.h"
@@ -77,6 +78,7 @@ namespace Http = winrt::Windows::Web::Http;
 static FILE* g_log = nullptr;
 static std::mutex g_logm;
 static std::wstring g_dir;
+static char g_d3d12_sm_cap[4]{};
 static LARGE_INTEGER g_t0, g_freq;
 static double now_s() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return double(t.QuadPart - g_t0.QuadPart) / double(g_freq.QuadPart); }
 static void logf(const char* fmt, ...) {
@@ -92,6 +94,19 @@ static void open_log() {
           MoveFileExW((g_dir + L"\\boot.log").c_str(), (g_dir + L"\\boot.prev.log").c_str(), MOVEFILE_REPLACE_EXISTING); // keep the session before a restart
           g_log = _wfopen((g_dir + L"\\boot.log").c_str(), L"wb"); } catch (...) {}
 }
+static void configure_d3d12_sm_cap() {
+    FILE* file = _wfopen((g_dir + L"\\d3d12sm.txt").c_str(), L"rb");
+    if (!file) return;
+    char text[32]{}; size_t bytes = fread(text, 1, sizeof(text), file); fclose(file);
+    int minor = d3d12_sm_cap::parse(text, bytes);
+    if (minor < 0) { logf("d3d12 sm-cap invalid in LocalState\\d3d12sm.txt"); return; }
+    snprintf(g_d3d12_sm_cap, sizeof(g_d3d12_sm_cap), "6.%d", minor);
+    if (!SetEnvironmentVariableA("MESA_D3D12_SHADER_MODEL_MAX", g_d3d12_sm_cap)) {
+        g_d3d12_sm_cap[0] = '\0';
+        logf("d3d12 sm-cap environment setup failed");
+    }
+}
+static const char* d3d12_sm_cap_for_trace() { return g_d3d12_sm_cap[0] ? g_d3d12_sm_cap : "off"; }
 
 // ---------------------------------------------------------------- framebuffer + bitmap text
 static const int W = 1920, H = 1080;
@@ -2646,6 +2661,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     IFrameworkView CreateView() { return *this; }
     void Initialize(CoreApplicationView const& v) {
         open_log(); logf("boot: Initialize (pid=%lu) launcher build", GetCurrentProcessId());
+        configure_d3d12_sm_cap();
         // Kill switch: LocalState\d3d11diag.txt present (contents ignored) ->
         // the D3D11 vtable diagnostics stay off for this whole run (A/B
         // testing a device-removal repro without them). Read once at boot;
@@ -2667,7 +2683,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // Read by the D3D12 diagnostics at the first device adoption; default off.
         d3d12_diag::set_trace_requested = [] {
             DWORD attrs = GetFileAttributesW((g_dir + L"\\d3d12trace.txt").c_str());
-            return attrs != INVALID_FILE_ATTRIBUTES;
+            bool enabled = attrs != INVALID_FILE_ATTRIBUTES;
+            if (enabled) {
+                const std::string cap = std::string("d3d12 sm-cap=") + d3d12_sm_cap_for_trace();
+                logf("%s", cap.c_str());
+                d3d12_diag::emit(cap);
+            }
+            return enabled;
         };
         d3d11_diag::set_deep_draw = [] {
             DWORD attrs = GetFileAttributesW((g_dir + L"\\d3d11deep.txt").c_str());

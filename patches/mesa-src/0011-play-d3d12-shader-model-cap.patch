@@ -1,0 +1,31 @@
+--- a/src/gallium/drivers/d3d12/d3d12_screen.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_screen.cpp
+@@ -1606,6 +1606,13 @@
+ #endif
+             screen->max_shader_model = static_cast<dxil_shader_model>(((shader_model.HighestShaderModel & 0xf0) << 12) |
+                                                                      (shader_model.HighestShaderModel & 0xf));
++            char cap[8] = {};
++            DWORD cap_size = GetEnvironmentVariableA("MESA_D3D12_SHADER_MODEL_MAX", cap, sizeof(cap));
++            if (cap_size == 3 && cap[0] == '6' && cap[1] == '.' && cap[2] >= '0' && cap[2] <= '8') {
++               const auto cap_model = static_cast<dxil_shader_model>(SHADER_MODEL_6_0 + (cap[2] - '0'));
++               if (cap_model < screen->max_shader_model)
++                  screen->max_shader_model = cap_model;
++            }
+             break;
+          }
+       }
+--- a/src/gallium/drivers/d3d12/d3d12_compiler.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_compiler.cpp
+@@ -133,7 +133,11 @@
+    opts.shader_model_max = screen->max_shader_model;
+    opts.advanced_texture_ops = screen->opts14.AdvancedTextureOpsSupported;
+ #ifdef _WIN32
+-   opts.validator_version_max = dxil_get_validator_version(ctx->dxil_validator);
++   enum dxil_validator_version validator_max = dxil_get_validator_version(ctx->dxil_validator);
++   enum dxil_validator_version model_validator_max = static_cast<dxil_validator_version>(
++      DXIL_VALIDATOR_1_0 + screen->max_shader_model - SHADER_MODEL_6_0);
++   opts.validator_version_max = validator_max < model_validator_max ?
++      validator_max : model_validator_max;
+ #endif
+
+    struct blob tmp;
