@@ -138,6 +138,7 @@ struct Guest {
     std::map<uint32_t, uint32_t> virtual_alloc; // guest addr -> size
     uint32_t virtual_top = 0x60000000u;  // above the DLL relocation arena (0x38000000-0x60000000)
     unsigned next_tls = 0, thread_serial = 0;
+    uint64_t tls_used = 1;  // TlsAlloc/FlsAlloc slot bitmap; slot 0 reserved (see TlsAlloc)
     std::map<uint32_t, uint32_t> fls_callbacks;  // FLS index -> guest cleanup callback
     struct SrwObject { uint32_t writer = 0; std::map<uint32_t, uint32_t> readers; };
     std::map<uint32_t, SrwObject> srw_locks;  // guest lock address -> current owner(s)
@@ -1648,21 +1649,32 @@ inline void Guest::register_all() {
     // OpenEventA opens a same-process named event; process/session namespaces and ACLs are outside this guest.
     reg.add("kernel32.dll", "OpenEventA", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { return open_sync(SyncKind::Event,c.arg(2)); });
     // TLS
-    reg.add("kernel32.dll", "TlsAlloc", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t {
-        if (next_tls >= 64) return 0xFFFFFFFFu;
-        return next_tls++; });
-    reg.add("kernel32.dll", "TlsFree", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
+    // Windows semantics: TlsAlloc hands out the lowest free slot and zeroes it,
+    // TlsFree releases it, TlsGetValue clears LastError on success (callers tell
+    // a NULL value from failure that way). Slot 0 stays taken, as it is in any
+    // real process by the time application code runs, because code that treats
+    // index 0 as "not allocated yet" otherwise never stores its value.
+    reg.add("kernel32.dll", "TlsAlloc", Conv::Stdcall, 0, [this](Cpu& c) -> uint32_t {
+        for (uint32_t i = 1; i < 64; ++i) if (!(tls_used >> i & 1)) {
+            tls_used |= uint64_t(1) << i; if (next_tls <= i) next_tls = i + 1;
+            mem.w32(c.fs_base + 0xE10 + i * 4, 0); return i; }
+        set_last_error(8); return 0xFFFFFFFFu; });
+    reg.add("kernel32.dll", "TlsFree", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        uint32_t i = c.arg(0); if (i == 0 || i >= 64 || !(tls_used >> i & 1)) { set_last_error(87); return 0; }
+        tls_used &= ~(uint64_t(1) << i); mem.w32(c.fs_base + 0xE10 + i * 4, 0); return 1; });
     reg.add("kernel32.dll", "TlsGetValue", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t i = c.arg(0); if (i >= 64) { set_last_error(87); return 0; }
-        return mem.r32(c.fs_base + 0xE10 + i * 4); });
+        set_last_error(0); return mem.r32(c.fs_base + 0xE10 + i * 4); });
     reg.add("kernel32.dll", "TlsSetValue", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         uint32_t i = c.arg(0); if (i >= 64) { set_last_error(87); return 0; }
         mem.w32(c.fs_base + 0xE10 + i * 4, c.arg(1)); return 1; });
     // Fiber-local storage shares the TEB value slots with TLS on this single
     // interpreter thread; FlsFree invokes its registered guest callback.
     reg.add("kernel32.dll", "FlsAlloc", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
-        if (next_tls >= 64) { set_last_error(8); return 0xFFFFFFFFu; }
-        uint32_t i = next_tls++; fls_callbacks[i] = c.arg(0); return i; });
+        for (uint32_t i = 1; i < 64; ++i) if (!(tls_used >> i & 1)) {
+            tls_used |= uint64_t(1) << i; if (next_tls <= i) next_tls = i + 1;
+            mem.w32(c.fs_base + 0xE10 + i * 4, 0); fls_callbacks[i] = c.arg(0); return i; }
+        set_last_error(8); return 0xFFFFFFFFu; });
     reg.add("kernel32.dll", "FlsGetValue", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t i = c.arg(0); if (!fls_callbacks.count(i)) { set_last_error(87); return 0; }
         set_last_error(0); return mem.r32(c.fs_base + 0xE10 + i * 4); });
@@ -1674,7 +1686,7 @@ inline void Guest::register_all() {
         if (it == fls_callbacks.end()) { set_last_error(87); return 0; }
         uint32_t value = mem.r32(c.fs_base + 0xE10 + i * 4);
         if (value && it->second) c.call(it->second, {value});
-        mem.w32(c.fs_base + 0xE10 + i * 4, 0); fls_callbacks.erase(it); return 1; });
+        mem.w32(c.fs_base + 0xE10 + i * 4, 0); fls_callbacks.erase(it); tls_used &= ~(uint64_t(1) << i); return 1; });
     // Interlocked
     reg.add("kernel32.dll", "InterlockedIncrement", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t v = mem.r32(c.arg(0)) + 1; mem.w32(c.arg(0), v); return v; });
