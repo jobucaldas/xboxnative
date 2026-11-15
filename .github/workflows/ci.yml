@@ -330,6 +330,8 @@ jobs:
         run: bash src/xbox-test/app/tests/gap-summary.sh
       - name: "x86 guest surface (mingw CRT program through the interpreter: printf, heap, TLS, VirtualAlloc)"
         run: bash src/xbox-test/app/tests/x86-guest.sh
+      - name: "x86 MSVC CRT startup window mode"
+        run: g++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/x86-crt-startup.cpp -o "$RUNNER_TEMP/x86-crt-startup" && "$RUNNER_TEMP/x86-crt-startup"
       - name: "x86 D3DX9 math registrations and semantics"
         run: bash src/xbox-test/app/tests/x86-d3dx.sh
       - name: "x86 kernel32 code-page validation"
