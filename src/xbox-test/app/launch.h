@@ -21,6 +21,7 @@ struct LaunchState {
     std::atomic<int> gen{0};
     double started = 0;                 // render-thread read only (set before phase=1)
     std::atomic<double> loaderStarted{0}; // when the guest loader began (0: still preparing Steam/client)
+    std::atomic<bool> quitRequested{false}; // gquit requested a graceful guest exit
     // The 32-bit path (host/x86) has no play_runtime::State: the interpreter runs
     // the guest synchronously and reports these itself, so launch_result.json
     // says whether game code ran and how it ended for both engines.
@@ -1181,6 +1182,12 @@ static void lp_publish(int gen,uint32_t appid,const std::string& result,bool ok,
     g_launch.phase=terminal?2:3;
 }
 static void lp_finish(int gen,uint32_t appid,const std::string& result,bool ok,int mapped,int total,const char* status=nullptr) {
+    auto runtime=play_runtime::observed.load(std::memory_order_acquire);
+    const bool guestExited=(runtime&&runtime->finished.load(std::memory_order_acquire))||g_launch.pe32Finished.load(std::memory_order_acquire);
+    if(!status&&guestExited&&g_launch.quitRequested.load(std::memory_order_acquire)) {
+        lp_publish(gen,appid,"guest exited after quit request: "+result,ok,mapped,total,"quit",true);
+        return;
+    }
     lp_publish(gen,appid,result,ok,mapped,total,status?status:ok?"completed":"failed",true);
 }
 // 120 s from the guest loader's start to a first frame or result. Preparing
@@ -1242,6 +1249,7 @@ static std::string start_launch(uint32_t appid, const std::string& name, const s
     // clear it here, not only in lp_run_pe32, or a later 64-bit launch would
     // publish a previous PE32 run as this one's progress.
     g_launch.pe32Executed = false; g_launch.pe32Finished = false; g_launch.pe32ExitCode = 0;
+    g_launch.quitRequested.store(false,std::memory_order_release);
     { std::lock_guard<std::mutex> l(g_launch.m); g_launch.result.clear();g_launch.ok=false;g_launch.attempt=std::to_string(GetCurrentProcessId())+":"+std::to_string(gen); } g_launch.phase = 1;
     const InstallInfo inst = read_install(appid);   // the game folder may be on another drive (marker root)
     const std::wstring folder = !dir.empty() && inst.installed && inst.dir == dir ? inst.folder : g_dir + L"\\" + widen(dir);
