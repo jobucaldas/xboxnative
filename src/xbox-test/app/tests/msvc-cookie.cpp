@@ -282,9 +282,11 @@ int main(int argc,char** argv) {
         auto path=f.save(argv[2],mutation++);
         reset(); assert(!load_file(path,explicitMode));
         assert(lastLog.find("WXL FAIL ")==0 && lastLog.size()>strlen("WXL FAIL "));
+        assert(lastLog.find("load-config validation rejected")==std::string::npos);
         assert(!allocations && !rngCalls && !resolutions && !observations && !indexCalls);
         reset(); assert(!load_file(path,explicitMode,true));
         assert(lastLog.find("WXL FAIL ")==0 && lastLog.size()>strlen("WXL FAIL "));
+        assert(lastLog.find("load-config validation rejected")==std::string::npos);
         assert(!allocations && !rngCalls && !resolutions && !observations && !indexCalls);
     };
     // Every unsupported byte is independently rejected, including real-game
