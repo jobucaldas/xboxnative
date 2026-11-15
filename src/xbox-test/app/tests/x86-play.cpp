@@ -36,6 +36,11 @@ int main(int argc, char** argv) {
                 }
                 return response;
             };
+            host.system_metrics=[](int index,int& value) {
+                if(index==0){value=1280;return true;}
+                if(index==1){value=720;return true;}
+                return false;
+            };
         });
     printf("play: loaded=%d finished=%d exit=%u instructions=%llu base=0x%08x entry=0x%08x imports=%u bound=%u relocs=%u\n",
            r.loaded ? 1 : 0, r.finished ? 1 : 0, r.exit_code, (unsigned long long)r.instructions,

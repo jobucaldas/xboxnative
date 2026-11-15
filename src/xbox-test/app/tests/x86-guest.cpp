@@ -74,6 +74,11 @@ int main(int argc, char** argv) {
         }
         return response;
     };
+    host.system_metrics=[](int index,int& value) {
+        if(index==0){value=1280;return true;}
+        if(index==1){value=720;return true;}
+        return false;
+    };
     Guest guest(mem, host, reg);
     guest.exe_path = "fixture-crt.exe"; guest.cmdline = guest.exe_path;
     guest.register_all();
