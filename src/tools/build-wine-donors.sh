@@ -20,7 +20,7 @@ for a in "$@"; do case "$a" in --dry-run) dry=1 ;; *) out=$a ;; esac; done
 out=${out:-$root/out/wine-donors}
 DLLS=(avrt dinput8 hid psapi setupapi shcore version)
 GRAPHICS=(d3dcompiler_47)
-RUNTIME=(msvcp140 msvcp140_1 msvcp140_2 msvcp140_atomic_wait msvcp140_codecvt_ids concrt140)
+RUNTIME=(vcruntime140 msvcp140 msvcp140_1 msvcp140_2 msvcp140_atomic_wait msvcp140_codecvt_ids concrt140)
 RUNTIME_X86=(msvcr110 msvcp110 msvcr120 msvcp120)
 read -r _ url sha < <(grep -E '^wine-src[[:space:]]' "$root/deps.pin") || { echo "wine-src missing from deps.pin" >&2; exit 2; }
 patchfile=$root/patches/wine-src/0001-pe-rodata.patch

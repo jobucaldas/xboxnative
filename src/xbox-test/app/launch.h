@@ -1364,10 +1364,13 @@ static void lp_run_managed(LpCtx& c,const std::wstring& path,const std::wstring&
     std::vector<std::string> args;
     if(!c.args.empty())args.push_back(play_runtime::narrow(c.args));
     snprintf(line,sizeof line,"PRUN CLR engine=Mono-x64 exe=%s",play_runtime::narrow(exe).c_str());lp_sink(line);
+    const std::wstring monoPath=package+L"\\runtime\\mono\\mono-2.0-sgen.dll";
+    auto mono=play_runtime::map_managed_runtime(package,monoPath,lp_sink);
+    if(!mono){c.failName="Mono: Play loader could not map mono-2.0-sgen.dll";return;}
     auto r=mono_host::run(runtime,assembly,args,[&]{
         g_launch.loaderStarted=now_s();g_launch.pe32Executed=true;
         lp_publish(c.gen,c.appid,"Mono loaded managed assembly",false,1,1,"running",false);
-    });
+    },[mono](const char* name){return (void*)play_runtime::managed_export(mono,name);});
     c.mapped=r.loaded?1:0;
     if(r.executed){g_launch.pe32Finished=true;g_launch.pe32ExitCode=uint32_t(r.exit_code);}
     c.ok=r.executed&&r.exit_code==0;

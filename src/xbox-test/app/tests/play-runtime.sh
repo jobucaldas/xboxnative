@@ -264,6 +264,12 @@ lld-link-19 "$out"/obj/msvcp/tests_play-msvcp.*.obj /dll /nodefaultlib /out:"$ou
 llvm-readobj --coff-imports "$out/play-msvcp.dll" | grep -q 'Name: MSVCP140.dll'
 rm -f "$out/msvcp140.dll"
 rm -rf "$out/runtime";mkdir -p "$out/runtime";cp out/layout/runtime/*.dll out/layout/runtime/*.json "$out/runtime/"
+cp -R out/layout/runtime/mono "$out/runtime/mono"
+test ! -e "$out/runtime/mono/VCRUNTIME140.dll"
+test -f "$out/runtime/vcruntime140.dll"
+mkdir -p "$out/managed"
+printf '%s\n' 'using System;' 'class Hello { static int Main() { Console.WriteLine("HELLO FROM EMBEDDED MONO"); return 23; } }' > "$out/managed/Hello.cs"
+mcs -nologo -platform:anycpu -out:"$out/managed/Hello.exe" "$out/managed/Hello.cs"
 # Source-built donors from the launcher layout, as packaged: the Vulkan loader
 # imports setupapi's cfgmgr32 family, which Play serves from the setupapi donor.
 mkdir -p "$out/donors";cp out/layout/donors/*.dll "$out/donors/"
@@ -278,7 +284,7 @@ lld-link-19 /nodefaultlib /include:play_init_relocation /subsystem:windows,6.02 
 lld-link-19 /nodefaultlib /include:play_init_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /dll /noentry /out:"$out/play-init-child.dll" "$out/obj/init-child.obj"
 lld-link-19 "${common[@]}" /include:play_init_relocation /dll /entry:peer_entry /implib:"$out/obj/play-init-peer.lib" /out:"$out/play-init-peer.dll" "$out/obj/init-peer.obj" "$out/obj/play-init-parent.lib" "$MINGW_SYSROOT"/lib/libkernel32.a
 lld-link-19 /nodefaultlib /include:play_init_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /entry:loader_init_entry /out:"$out/play-init-order.exe" "$out/obj/init-exe.obj" "$out/obj/play-init-parent.lib" "$out/obj/play-init-peer.lib" "$MINGW_SYSROOT"/lib/libkernel32.a
-UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/play-runner.exe" host/tls_slot0.cpp tests/play-runner.cpp -- /MT /O2 /Iout/obj /I../uwph/host/third_party/sqlite
+UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/play-runner.exe" host/tls_slot0.cpp tests/play-runner.cpp vendor/zlib/adler32.c vendor/zlib/crc32.c vendor/zlib/inffast.c vendor/zlib/inflate.c vendor/zlib/inftrees.c vendor/zlib/zutil.c -- /MT /O2 /Iout/obj /I../uwph/host/third_party/sqlite
 # Use the exact packaged carriers from the launcher build.
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
 # Owned stand-in so steam-client proves refusal of a present root client DLL.
@@ -298,10 +304,13 @@ tail -1 "$out/leaderboards.log"
 # The root copy was only for this run: later modes prove what happens when a
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing gap static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock loader-reentrant reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d10-compile d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn vulkan-draw opengl;do
+for mode in mono observer-log reject-attach reject-mapping normal missing gap static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock loader-reentrant reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d10-compile d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn vulkan-draw opengl;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
+grep -q 'MONO PLAY-LOADER PASS: embedded AnyCPU hello returned exit code 23' "$out/mono.log"
+grep -q 'GAP: summary exe=mono-2.0-sgen.dll arch=x64 ' "$out/mono.log"
+grep -q 'GAP: dll=vcruntime140.dll resolved=' "$out/mono.log"
 grep -q 'GAP: summary exe=play-gap.exe arch=x64 .*stub=1 missing=1' "$out/gap.log"
 grep -q 'GAP: dll=dbghelp.dll resolved=0 routed=0 donor=0 stub=1 missing=0' "$out/gap.log"
 grep -q 'GAP: missing play-missing.dll!DeliberatelyMissingPlayImport' "$out/gap.log"

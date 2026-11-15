@@ -39,7 +39,15 @@ static FARPROC WINAPI hostProc(HMODULE h,LPCSTR name) {
 #include "../host/wxl_mapper.h"
 #include "../host/mlp_probe.h"
 #include "../donors/probe.h"
+#include <winrt/base.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Storage.Streams.h>
+#include <winrt/Windows.Web.Http.h>
+#include "../dxil_runtime.h"
+static std::wstring g_dir;
 #include "../host/play_runtime.h"
+#include "../host/mono_host.h"
 #include "../host/guest_watchdog.h"
 #include "../steam_leaderboards.h"
 #include "../steam_persona.h"
@@ -308,7 +316,31 @@ static void logline(const char* s){
 }
 int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     wchar_t path[32768];GetModuleFileNameW(nullptr,path,32768);std::wstring root=path;root.resize(root.find_last_of(L"\\/"));
+    g_dir=root;
     regb::init(root,logline); // guest registry: <runner dir>\registry.sqlite
+    if(std::string(args)=="mono") {
+        const auto versionPath=root+L"\\donors\\version.dll";
+        auto version=std::make_unique<wxl::Image>();
+        donor_pe::sink=logline;donor_pe::missing=0;
+        bool versionLoaded=wxl::load(*version,versionPath.c_str(),logline,{},donor_pe::resolve,false,wxl::LoadConfig::inert_wine);
+        if(!versionLoaded||donor_pe::missing||!donor_pe::behavior("version.dll",*version,versionPath)) {
+            logline("DWPE FAIL version donor behavior gate; no Mono code executed");return 3;
+        }
+        donor_pe::images.emplace("version.dll",std::move(version));
+        mlp::donor_resolve=donor_pe::exported;
+        const auto assembly=root+L"\\managed\\Hello.exe";
+        const auto runtime=root+L"\\runtime\\mono";
+        const auto module=play_runtime::map_managed_runtime(root,runtime+L"\\mono-2.0-sgen.dll",logline);
+        if(!module){logline("MONO PLAY-LOADER FAIL: Mono image mapping failed");return 1;}
+        auto result=mono_host::run(play_runtime::narrow(runtime),play_runtime::narrow(assembly),{}, {},
+            [module](const char* name){return (void*)play_runtime::managed_export(module,name);});
+        if(!result.loaded||!result.executed||result.exit_code!=23) {
+            logline(("MONO PLAY-LOADER FAIL: loaded="+std::to_string(result.loaded)+" executed="+
+                std::to_string(result.executed)+" exit="+std::to_string(result.exit_code)+" error="+result.error).c_str());
+            return 1;
+        }
+        logline("MONO PLAY-LOADER PASS: embedded AnyCPU hello returned exit code 23");return 0;
+    }
     bool game=std::string(args)=="game";
     injectLogException=std::string(args)=="observer-log";
     checkStartupLock=std::string(args)=="startup-lock";

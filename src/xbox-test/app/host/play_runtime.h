@@ -252,7 +252,11 @@ static LPSTR WINAPI commandA() { return state->commandA.data(); }
 static HMODULE WINAPI moduleW(LPCWSTR name) {
     if(name)if(auto input=xinput_core::find_module(basename(name).c_str(),false))return input;
     if(name)if(auto gl=opengl32_core::find_module(basename(name).c_str(),false))return gl;
-    if(!name) return (HMODULE)state->exe->image.base;
+    if(!name) {
+        if(state->exe)return (HMODULE)state->exe->image.base;
+        using Fn=HMODULE(WINAPI*)(LPCWSTR); auto fn=(Fn)kernel_tail::native("GetModuleHandleW");
+        return fn?fn(nullptr):nullptr;
+    }
     if(auto m=named(name)) return (HMODULE)m->image.base;
     using Fn=HMODULE(WINAPI*)(LPCWSTR); auto fn=(Fn)kernel_tail::native("GetModuleHandleW");
     return fn?fn(name):nullptr;
@@ -2139,6 +2143,12 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // Current mapper is the last incomplete module; capture it before recursion.
     for(auto& m:state->modules) if(!m->mapped) owner=m.get();
     Module* dependency=named(wide(dll));
+    // Mono's Windows runtime imports the Visual C++ runtime, which is built
+    // from the pinned Wine source and staged beside the other runtime donors.
+    if(!dependency && key=="vcruntime140.dll" && !runtimeDirectory.empty()) {
+        auto path=runtimeDirectory+L"\\vcruntime140.dll";
+        if(exists(path)) dependency=map(path);
+    }
     // A dependency whose mapping failed leaves its imports unresolved, as on
     // Windows; neither it nor the probe registry may supply an address.
     if(dependency && dependency->mappingFailed) return missing(dll,name,ordinal);
@@ -2203,6 +2213,39 @@ static uintptr_t openglExport(const char* name) {
 }
 // cwd (optional) is the guest's working directory, as a Steam launch option's
 // workingdir names it; empty means the executable's own directory.
+// Managed runtimes are host dependencies, not game executables, but they still
+// use the same PE mapper and import resolver as game DLLs. Keep their mapped
+// state alive for the process because Mono may retain native callbacks.
+static HMODULE map_managed_runtime(const std::wstring& packageRoot,const std::wstring& runtimePath,wxl::Log log) {
+    if(state) return nullptr;
+    clearVulkanDriverFiles();
+    state=new State();state->root=packageRoot;state->cwd=packageRoot;state->log=log;
+    observed.store(state,std::memory_order_release);mlp::log=log;wxl::logger=log;
+    xinput_core::note=[](const char* text){if(mlp::log)mlp::log(text);};
+    mlp::missingResolver=missing;mlp::assets.clear();mlp::summaries.clear();mlp::launch_gap=gap_summary::Binder{};
+    find_ntdll();
+    {static bool installed=false;if(!installed){installed=true;hostTopLevel=SetUnhandledExceptionFilter(topLevelFilter);}}
+    rwx_emulation::state().notify=[](const char* text){if(state)state->event(text);};
+    state->event("registering guest exception observer");
+    using AddVeh=PVOID(WINAPI*)(ULONG,LONG(CALLBACK*)(EXCEPTION_POINTERS*));
+    auto addVeh=(AddVeh)kernel_tail::native("AddVectoredExceptionHandler");
+    if(addVeh)state->veh=addVeh(1,vectored);
+    set_runtime_directory(packageRoot+L"\\runtime");
+    auto slash=runtimePath.find_last_of(L"\\/");
+    if(slash!=std::wstring::npos) alteredLoadDir()=runtimePath.substr(0,slash);
+    auto module=map(runtimePath,"mono-2.0-sgen.dll");
+    alteredLoadDir().clear();
+    if(!module || !initializePending()) return nullptr;
+    for(const auto& line:mlp::launch_gap.report(module->key,"x64").lines) if(log) log(line.c_str());
+    module->pinned=true;
+    return (HMODULE)module->image.base;
+}
+static FARPROC managed_export(HMODULE module,const char* name) {
+    if(!state||!module||!name)return nullptr;
+    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
+    auto image=find(module);
+    return image?(FARPROC)exported(*image,name,0):nullptr;
+}
 static bool start(const std::wstring& root,const std::wstring& exe,const std::wstring& args,wxl::Log log,const std::wstring& cwd=std::wstring(),bool crashContextOptIn=false) {
     if(state) return false;
     // A previous launch may have left its packaged ICD listed (a game that ran

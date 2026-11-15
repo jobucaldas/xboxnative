@@ -91,15 +91,15 @@ inline bool redirect_virtual_protect(HMODULE module) {
 #endif
 
 inline Result run(const std::string& runtime_dir, const std::string& assembly,
-                  const std::vector<std::string>& args, const std::function<void()>& on_started = {}) {
+                  const std::vector<std::string>& args, const std::function<void()>& on_started = {},
+                  const std::function<void*(const char*)>& mapped_symbol = {}) {
     Result r;
     std::string library = runtime_dir + "/mono-2.0-sgen.dll";
 #ifdef _WIN32
-    auto module = LoadLibraryW(wide(library).c_str());
-    if (!module) { r.error = "Mono runtime DLL load failed"; return r; }
-    if (!redirect_virtual_protect(module)) { r.error = "Mono runtime VirtualProtect redirect failed"; FreeLibrary(module); return r; }
-    auto symbol = [module](const char* name) { return reinterpret_cast<void*>(GetProcAddress(module, name)); };
+    if (!mapped_symbol) { r.error = "Mono runtime must be mapped by Play"; return r; }
+    auto symbol = mapped_symbol;
 #else
+    (void)mapped_symbol;
     library = runtime_dir + "/lib/libmonosgen-2.0.so";
     void* module = dlopen(library.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!module) { r.error = std::string("Mono runtime load failed: ") + dlerror(); return r; }
@@ -121,16 +121,15 @@ inline Result run(const std::string& runtime_dir, const std::string& assembly,
     auto jit_cleanup = reinterpret_cast<JitCleanup>(symbol("mono_jit_cleanup"));
     if (!set_dirs || !config_parse || !set_assemblies_path || !jit_init || !assembly_open || !jit_exec || !jit_cleanup) {
         r.error = "Mono embedding API is incomplete";
-#ifdef _WIN32
-        FreeLibrary(module);
-#else
+#ifndef _WIN32
         dlclose(module);
 #endif
         return r;
     }
     const std::string library_dir = runtime_dir + "/lib";
     const std::string config_dir = runtime_dir + "/etc";
-    const std::string assembly_dir = std::filesystem::u8path(assembly).parent_path().u8string();
+    const auto assembly_path = std::filesystem::u8path(assembly).parent_path().u8string();
+    const std::string assembly_dir(reinterpret_cast<const char*>(assembly_path.data()), assembly_path.size());
 #ifdef _WIN32
     const std::string assembly_paths = assembly_dir + ";" + library_dir + "/mono/4.5";
 #else
@@ -156,9 +155,7 @@ inline Result run(const std::string& runtime_dir, const std::string& assembly,
         }
         jit_cleanup(domain);
     }
-#ifdef _WIN32
-    FreeLibrary(module);
-#else
+#ifndef _WIN32
     dlclose(module);
 #endif
     return r;
