@@ -20,7 +20,7 @@ int main() {
     CHECK(call("kernel32.dll","attachconsole",{0xffffffffu})==0&&g.last_error()==6);
 
     std::string profile="; comment\r\n[Video]\r\nWidth = 1280\r\nTitle=\"A test\"\r\n[Other]\r\nWidth=1\r\n";
-    host.profile_call=[&](Host::ProfileCall& q){if(q.path=="missing.ini"){q.error=2;return;}q.succeeded=true;if(q.write)profile=q.contents;else q.contents=profile;};
+    bool saw_wide_path=false;host.file_call=[&](Host::FileCall& q){if(q.kind==Host::FileCall::Kind::CreateW){std::string path(q.path_w.begin(),q.path_w.end());saw_wide_path|=path=="settings.ini";if(path=="missing.ini"){q.error=2;return;}q.value=42;if(q.args[2]==2)profile.clear();q.succeeded=true;}else if(q.kind==Host::FileCall::Kind::Size){q.value=profile.size();q.succeeded=q.handle==42;}else if(q.kind==Host::FileCall::Kind::Read){q.data.assign(profile.begin(),profile.end());q.args[1]=profile.size();q.succeeded=q.handle==42;}else if(q.kind==Host::FileCall::Kind::Write){profile.assign(q.data.begin(),q.data.end());q.args[0]=q.data.size();q.succeeded=q.handle==42;}else if(q.kind==Host::FileCall::Kind::Close)q.succeeded=q.handle==42;};
     CHECK(Guest::profile_value("; c\n[One]\n;key\nName = \"hello\"\n[Two]\nname=bad\n","one","name","fallback")=="hello");
     uint32_t section=g.put_str("video"),key=g.put_str("width"),def=g.put_str("640"),file=g.put_str("settings.ini"),missing=g.put_str("missing.ini");
     CHECK(call("kernel32.dll","getprivateprofileinta",{section,key,640,missing})==640);
@@ -34,7 +34,7 @@ int main() {
     CHECK(call("kernel32.dll","getprivateprofileinta",{section,new_key,0,file})==720);
     uint32_t wsec=g.put_wstr(u"Video"),wkey=g.put_wstr(u"Title"),wdef=g.put_wstr(u"none"),wfile=g.put_wstr(u"settings.ini");
     CHECK(call("kernel32.dll","getprivateprofilestringw",{wsec,wkey,wdef,0x3100,5,wfile})==4);
-    CHECK(mem.r(0x3100,2)=='A'&&mem.r(0x3108,2)==0);
+    CHECK(mem.r(0x3100,2)=='A'&&mem.r(0x3108,2)==0&&saw_wide_path);
 
     // Minimal mapped PE32 resource tree: type 10 / name 101 / LANGID 0x0409.
     uint32_t base=g.image_base,nt=base+0x80,opt=nt+24,root=base+0x1000;

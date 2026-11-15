@@ -65,6 +65,7 @@ int main() {
     host.file_call=[&](Host::FileCall& q){++calls;switch(q.kind){
     case Host::FileCall::Kind::CreateW:CHECK(q.path_w==u"save.dat");CHECK(q.args[0]==0x80000000u);q.value=native_handle;q.succeeded=true;break;
     case Host::FileCall::Kind::Read:q.data={'o','k'};q.args[1]=2;q.succeeded=true;break;
+    case Host::FileCall::Kind::Write:q.error=120;break;
     case Host::FileCall::Kind::Size:q.value=0xfffffff0u;q.args[1]=3;q.succeeded=true;break;
     case Host::FileCall::Kind::Time:q.data.assign(24,0x5a);q.succeeded=true;break;
     case Host::FileCall::Kind::AttributesA:if(q.operation==Host::FileCall::Operation::CreateDirectoryA){CHECK(q.path_a=="folder");q.succeeded=true;}else{q.value=0x20;q.succeeded=true;}break;

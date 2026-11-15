@@ -25,11 +25,6 @@ struct Host {
         bool used_default = false;
         std::vector<uint8_t> output;
     };
-    struct ProfileCall {
-        std::string path, contents;
-        bool write = false, succeeded = false;
-        uint32_t error = 0;
-    };
     struct SocketCall {
         enum class Kind { Startup, Cleanup, LastError } kind;
         uint16_t version = 0;
@@ -37,7 +32,7 @@ struct Host {
         int result = 0;
     };
     struct FileCall {
-        enum class Kind { CreateA, CreateW, Close, Read, Size, Time, AttributesA, Seek, SeekEx, End, TimeConvert, TimeLocal, CreateDirectoryW, RemoveDirectoryA, RemoveDirectoryW, GetCurrentDirectoryA, GetCurrentDirectoryW, SetCurrentDirectoryA, SetCurrentDirectoryW, FindFirstA, FindFirstW, FindFirstExA, FindFirstExW, FindNextA, FindNextW, FindClose } kind;
+        enum class Kind { CreateA, CreateW, Close, Read, Write, Size, Time, AttributesA, Seek, SeekEx, End, TimeConvert, TimeLocal, CreateDirectoryW, RemoveDirectoryA, RemoveDirectoryW, GetCurrentDirectoryA, GetCurrentDirectoryW, SetCurrentDirectoryA, SetCurrentDirectoryW, FindFirstA, FindFirstW, FindFirstExA, FindFirstExW, FindNextA, FindNextW, FindClose } kind;
         enum class Operation { None, CreateDirectoryA, DeleteA, DeleteW, SystemToFileTime, SystemToTzLocal } operation = Operation::None;
         std::string path_a; std::u16string path_w;
         uint64_t handle = 0, template_handle = 0, value = 0; int64_t distance = 0, position = 0; uint32_t method = 0, args[5]{}, error = 0; bool succeeded = false;
@@ -58,7 +53,6 @@ struct Host {
     std::function<void(const std::string&)> tee;  // optional live sink
     std::function<NlsResponse(const NlsRequest&)> nls_call;
     std::function<void(FileCall&)> file_call;     // Play's native kernel32 file layer
-    std::function<void(ProfileCall&)> profile_call;
     std::function<void(SocketCall&)> socket_call;
     std::function<uint64_t()> tick_count;          // same monotonic millisecond source for the guest tick APIs
     std::function<void(LocaleCall&)> locale_call; // Play's native kernel32 locale formatter

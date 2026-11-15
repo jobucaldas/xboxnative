@@ -233,9 +233,16 @@ struct Guest {
             return v;
         } return fallback;
     }
-    bool profile_call(uint32_t pathp, Host::ProfileCall& q) {
-        if(!pathp){q.error=87;return false;}q.path=str(pathp);
-        if(!host.profile_call){q.error=120;return false;}host.profile_call(q);return q.succeeded;
+    bool profile_file(uint32_t pathp, bool wide, std::string& contents, bool write, uint32_t& error) {
+        if(!pathp){error=87;return false;}
+        Host::FileCall open{Host::FileCall::Kind::CreateW};if(wide)open.path_w=wstr(pathp);else{std::string path=str(pathp);open.path_w.assign(path.begin(),path.end());}
+        open.args[0]=write?0x40000000u:0x80000000u;open.args[1]=3;open.args[2]=write?2u:3u;open.args[3]=0x80;
+        if(!call_file(open)){error=open.error?open.error:120;return false;}
+        uint64_t handle=open.value;bool ok=false;
+        if(write){Host::FileCall q{Host::FileCall::Kind::Write};q.handle=handle;q.data.assign(contents.begin(),contents.end());ok=call_file(q)&&q.args[0]==q.data.size();if(!ok)error=q.error?q.error:5;}
+        else {Host::FileCall size{Host::FileCall::Kind::Size};size.handle=handle;if(call_file(size)&&size.value<=16u*1024u*1024u){Host::FileCall read{Host::FileCall::Kind::Read};read.handle=handle;read.args[0]=uint32_t(size.value);ok=call_file(read)&&read.args[1]==size.value;if(ok)contents.assign(read.data.begin(),read.data.end());else error=read.error?read.error:5;}else error=size.error?size.error:223;}
+        Host::FileCall close{Host::FileCall::Kind::Close};close.handle=handle;if(!call_file(close)&&ok){ok=false;error=close.error?close.error:5;}
+        return ok;
     }
     // WaitForSingleObject runs all pending guest bodies before this check. If the
     // object is still unavailable, no runnable guest thread can signal it without
@@ -1453,7 +1460,7 @@ inline void Guest::register_all() {
         mem.w32(p + 0, 0); mem.w32(p + 4, 4096); mem.w32(p + 8, 0x10000); mem.w32(p + 12, 0x7FFE0000u);
         mem.w32(p + 16, 1); mem.w32(p + 20, 1); mem.w32(p + 24, 0); mem.w32(p + 28, 0); mem.w32(p + 32, 9);
         return 0; });
-    auto profile_text = [this](uint32_t file, std::string& text) { Host::ProfileCall q{};if(!profile_call(file,q)){set_last_error(q.error?q.error:2);return false;}text=q.contents;set_last_error(0);return true; };
+    auto profile_text = [this](uint32_t file, bool wide, std::string& text) { uint32_t error=0;if(!profile_file(file,wide,text,false,error)){set_last_error(error?error:2);return false;}set_last_error(0);return true; };
     auto narrow = [this](uint32_t p){auto w=wstr(p);return std::string(w.begin(),w.end());};
     auto profile_string = [this,profile_text,narrow](Cpu& c,bool wide)->uint32_t {
         uint32_t sectionp=c.arg(0),keyp=c.arg(1),defaultp=c.arg(2),buffer=c.arg(3),capacity=c.arg(4),file=c.arg(5);
@@ -1461,7 +1468,7 @@ inline void Guest::register_all() {
         std::string key=wide?narrow(keyp):str(keyp);
         std::string fallback=wide?narrow(defaultp):str(defaultp), contents;
         if(!capacity||!buffer){set_last_error(87);return 0;}
-        if(!profile_text(file,contents)) contents.clear();
+        if(!profile_text(file,wide,contents)) contents.clear();
         std::string value=profile_value(contents,section,key,fallback);
         uint32_t n=0;
         if(wide){uint32_t max=capacity-1; n=uint32_t(std::min<size_t>(value.size(),max));for(uint32_t i=0;i<n;++i)mem.w(buffer+i*2,uint8_t(value[i]),2);mem.w(buffer+n*2,0,2);}
@@ -1471,7 +1478,7 @@ inline void Guest::register_all() {
     auto profile_write=[this,profile_text,narrow](Cpu& c,bool wide)->uint32_t {
         uint32_t sp=c.arg(0),kp=c.arg(1),vp=c.arg(2),fp=c.arg(3);if(!fp){set_last_error(87);return 0;}
         std::string section=sp?(wide?narrow(sp):str(sp)):std::string(),key=kp?(wide?narrow(kp):str(kp)):std::string(),value=vp?(wide?narrow(vp):str(vp)):std::string(),contents;
-        profile_text(fp,contents);
+        profile_text(fp,wide,contents);
         auto fold=[](std::string s){for(char& ch:s)ch=char(std::tolower((unsigned char)ch));return s;};
         std::vector<std::string> lines;for(size_t p=0;p<contents.size();){size_t e=contents.find_first_of("\r\n",p);if(e==std::string::npos)e=contents.size();if(e>p)lines.push_back(contents.substr(p,e-p));p=e+1;}
         if(!sp)lines.clear();
@@ -1487,8 +1494,7 @@ inline void Guest::register_all() {
             }
         }
         contents.clear();for(const auto& line:lines){contents+=line;contents+="\r\n";}
-        Host::ProfileCall q{};q.path=wide?narrow(fp):str(fp);q.contents=contents;q.write=true;
-        if(!host.profile_call){set_last_error(120);return 0;}host.profile_call(q);if(!q.succeeded){set_last_error(q.error?q.error:5);return 0;}set_last_error(0);return 1;
+        uint32_t error=0;if(!profile_file(fp,wide,contents,true,error)){set_last_error(error?error:5);return 0;}set_last_error(0);return 1;
     };
     for(bool wide:{false,true}) {
         const char* suffix=wide?"W":"A";std::string get="GetPrivateProfileString";get+=suffix;
@@ -1496,7 +1502,7 @@ inline void Guest::register_all() {
         std::string integer="GetPrivateProfileInt";integer+=suffix;
         reg.add("kernel32.dll",integer,Conv::Stdcall,4,[this,profile_text,narrow,wide](Cpu& c)->uint32_t{
             uint32_t secp=c.arg(0),keyp=c.arg(1),fallback=c.arg(2),file=c.arg(3);std::string sec=wide?narrow(secp):str(secp),key=wide?narrow(keyp):str(keyp),contents;
-            if(!profile_text(file,contents))return fallback;
+            if(!profile_text(file,wide,contents))return fallback;
             std::string v=profile_value(contents,sec,key,"");if(v.empty())return fallback;
             char* end=nullptr;unsigned long n=std::strtoul(v.c_str(),&end,0);
             return end==v.c_str()?fallback:uint32_t(n);
@@ -1506,7 +1512,7 @@ inline void Guest::register_all() {
         std::string section_name="GetPrivateProfileSection";section_name+=wide?"W":"A";
         reg.add("kernel32.dll",section_name,Conv::Stdcall,4,[this,profile_text,narrow,wide](Cpu& c)->uint32_t{
             uint32_t sp=c.arg(0),buffer=c.arg(1),capacity=c.arg(2),file=c.arg(3);if(!sp||!buffer||!capacity){set_last_error(87);return 0;}if(capacity==1){if(wide)mem.w(buffer,0,2);else mem.w8(buffer,0);return 0;}
-            std::string section=wide?narrow(sp):str(sp),contents;profile_text(file,contents);std::string fold_section=section;for(char& ch:fold_section)ch=char(std::tolower((unsigned char)ch));
+            std::string section=wide?narrow(sp):str(sp),contents;profile_text(file,wide,contents);std::string fold_section=section;for(char& ch:fold_section)ch=char(std::tolower((unsigned char)ch));
             std::vector<std::string> items;std::string current;for(size_t p=0;p<contents.size();){size_t e=contents.find_first_of("\r\n",p);if(e==std::string::npos)e=contents.size();std::string line=trim_profile(contents.substr(p,e-p));p=e+1;if(line.size()>=2&&line.front()=='['&&line.back()==']'){current=trim_profile(line.substr(1,line.size()-2));for(char& ch:current)ch=char(std::tolower((unsigned char)ch));continue;}if(current!=fold_section||line.empty()||line[0]==';'||line[0]=='#')continue;if(line.find('=')!=std::string::npos)items.push_back(line);}
             std::string packed;for(auto& item:items){packed+=item;packed.push_back(char(0));}packed.push_back(char(0));
             bool truncated=packed.size()>capacity;uint32_t copied=truncated?capacity-2:uint32_t(packed.size());
