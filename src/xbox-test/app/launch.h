@@ -64,6 +64,7 @@ static void lp_sink(const char* s) {
 #include "pe32_probe.h"
 #include "donors/probe.h"
 
+#include "dxil_runtime.h"
 #include "host/play_runtime.h"
 #include "../uwph/shell32/folder_chain.h"
 #include "steam_client_package.h"

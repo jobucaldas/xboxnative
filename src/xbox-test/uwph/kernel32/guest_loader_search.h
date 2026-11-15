@@ -4,12 +4,13 @@
 // VC++ redistributable DLLs the console lacks; Play ships Wine's builds in its
 // runtime directory and maps them, after the game's own copies, the way an
 // installed redistributable serves them from System32 on Windows.
-static std::wstring runtimeDirectory;
+static std::wstring runtimeDirectory, dxilDirectory;
 static void set_runtime_directory(const std::wstring& path) { runtimeDirectory=path; }
-// The OpenGL stack (Mesa's d3d12 driver, issue #176) is served from the same directory: opengl32.dll
-// and its driver library libgallium_wgl.dll, as the OS opengl32.dll serves a game on Windows. The console has none,
-// so a game that ships no GL DLL of its own gets these (when the package carries them; otherwise Play's WGL stubs
-// answer). dxil.dll is the optional DXIL signer Mesa loads by name (DXIL.dll) for shader validation.
+static void set_dxil_directory(const std::wstring& path) { dxilDirectory=path; }
+// The OpenGL stack (Mesa's d3d12 driver, issue #176) is served from runtime/: opengl32.dll
+// and libgallium_wgl.dll. The console has none, so a game without its own GL DLL gets these
+// when Mesa is enabled; otherwise Play's WGL stubs answer. Mesa loads DXIL.dll by name, so its
+// pinned validator is downloaded on demand and served from LocalState\\dxil (not the MSIX).
 // Vulkan (issue #177) is the same contract: vulkan-1.dll is the Khronos loader built from pinned source,
 // vulkan_dzn.dll is Mesa's dzn driver (Vulkan on D3D12) and vulkan-null-icd.dll is the fallback driver that reports
 // zero physical devices. Both manifests name a bare DLL, so a Vulkan-optional engine's LoadLibrary succeeds and the
@@ -18,7 +19,7 @@ static void set_runtime_directory(const std::wstring& path) { runtimeDirectory=p
 // the D3D9 shim loads it by name, so it is served from the runtime directory like the donors.
 static bool redistributable(const std::wstring& name) {
     std::wstring key=name;for(auto& c:key)c=towlower(c);
-    for(auto dll:{L"opengl32.dll",L"libgallium_wgl.dll",L"dxil.dll",L"vulkan-1.dll",L"vulkan_dzn.dll",L"vulkan-null-icd.dll",L"msvcp140.dll",L"msvcp140_1.dll",L"msvcp140_2.dll",L"msvcp140_atomic_wait.dll",
+    for(auto dll:{L"opengl32.dll",L"libgallium_wgl.dll",L"vulkan-1.dll",L"vulkan_dzn.dll",L"vulkan-null-icd.dll",L"msvcp140.dll",L"msvcp140_1.dll",L"msvcp140_2.dll",L"msvcp140_atomic_wait.dll",
                   L"msvcp140_codecvt_ids.dll",L"concrt140.dll",L"d3d9translator.dll"}) if(key==dll) return true;
     return false;
 }
@@ -70,6 +71,10 @@ static std::wstring guestLibraryPath(const std::wstring& requested,bool useDirec
     }
     if(!runtimeDirectory.empty() && (redistributable(requested) || graphics_shim(requested))) {
         auto candidate=runtimeDirectory+L"\\"+requested;
+        if(exists(candidate))return candidate;
+    }
+    if(!dxilDirectory.empty() && !_wcsicmp(requested.c_str(),L"dxil.dll")) {
+        auto candidate=dxilDirectory+L"\\dxil.dll";
         if(exists(candidate))return candidate;
     }
     return path;
