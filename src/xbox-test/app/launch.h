@@ -1044,12 +1044,52 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         } else lp_sink((std::string("x86 file guard: known folder ")+folder.first+" unavailable").c_str());
     }
     x86_file_guard::Policy fileGuard(protectedRoots,allowedRoots,toU16(c.cwd.empty()?exeDir:c.cwd),[](const std::string& message){lp_sink(message.c_str());});
+    auto configureX86Gl=[](x86::Host& host) {
+        static HMODULE records=LoadPackagedLibrary(L"uwph-u32c.dll",0);
+        static HMODULE mesa=LoadPackagedLibrary(L"runtime\\opengl32.dll",0);
+        using GetDc=HDC(WINAPI*)(HWND);using ReleaseDc=int(WINAPI*)(HWND,HDC);
+        auto get_dc=records?reinterpret_cast<GetDc>(GetProcAddress(records,"GetDC")):nullptr;
+        auto release_dc=records?reinterpret_cast<ReleaseDc>(GetProcAddress(records,"ReleaseDC")):nullptr;
+        host.get_dc=[get_dc](uint32_t hwnd)->uintptr_t{return get_dc?reinterpret_cast<uintptr_t>(get_dc(reinterpret_cast<HWND>(uintptr_t(hwnd)))):0;};
+        host.release_dc=[release_dc](uint32_t hwnd,uintptr_t hdc){return release_dc&&release_dc(reinterpret_cast<HWND>(uintptr_t(hwnd)),reinterpret_cast<HDC>(hdc))!=0;};
+        auto proc=[](const char* name)->uintptr_t {
+            uintptr_t p=play_runtime::openglExport(name);
+            if(!p&&mesa)p=reinterpret_cast<uintptr_t>(GetProcAddress(mesa,name));
+            return p;
+        };
+        host.gl_call=[proc](x86::Host::GlCall& q) {
+            auto missing=[&](){SetLastError(ERROR_PROC_NOT_FOUND);q.result=0;};
+            auto pointer=[&](const char* name){return proc(name);};
+            auto float_arg=[&](size_t index){uint32_t bits=uint32_t(q.args[index]);float value=0;memcpy(&value,&bits,sizeof(value));return value;};
+            if(q.name=="ChoosePixelFormat"||q.name=="SetPixelFormat"||q.name=="DescribePixelFormat"||q.name=="SwapBuffers") {
+                const char* name=q.name=="ChoosePixelFormat"?"wglChoosePixelFormat":q.name=="SetPixelFormat"?"wglSetPixelFormat":q.name=="DescribePixelFormat"?"wglDescribePixelFormat":"wglSwapBuffers";
+                auto p=pointer(name);if(!p){missing();return;}
+                if(q.name=="ChoosePixelFormat"){using Fn=int(WINAPI*)(HDC,const PIXELFORMATDESCRIPTOR*);PIXELFORMATDESCRIPTOR d{};if(q.input.size()!=sizeof(d)){missing();return;}memcpy(&d,q.input.data(),sizeof(d));q.result=reinterpret_cast<Fn>(p)(reinterpret_cast<HDC>(q.args[0]),&d);}
+                else if(q.name=="SetPixelFormat"){using Fn=BOOL(WINAPI*)(HDC,int,const PIXELFORMATDESCRIPTOR*);PIXELFORMATDESCRIPTOR d{};if(q.input.size()!=sizeof(d)){missing();return;}memcpy(&d,q.input.data(),sizeof(d));q.result=reinterpret_cast<Fn>(p)(reinterpret_cast<HDC>(q.args[0]),int(q.args[1]),&d);}
+                else if(q.name=="DescribePixelFormat"){using Fn=int(WINAPI*)(HDC,int,UINT,PIXELFORMATDESCRIPTOR*);PIXELFORMATDESCRIPTOR d{};q.result=reinterpret_cast<Fn>(p)(reinterpret_cast<HDC>(q.args[0]),int(q.args[1]),UINT(q.output.size()),q.output.empty()?nullptr:&d);if(q.result&&!q.output.empty())memcpy(q.output.data(),&d,q.output.size());}
+                else {using Fn=BOOL(WINAPI*)(HDC);q.result=reinterpret_cast<Fn>(p)(reinterpret_cast<HDC>(q.args[0]));}return;
+            }
+            if(q.name=="wglCreateContext"){using Fn=HGLRC(WINAPI*)(HDC);auto p=pointer(q.name.c_str());q.result=p?reinterpret_cast<uintptr_t>(reinterpret_cast<Fn>(p)(reinterpret_cast<HDC>(q.args[0]))):0;return;}
+            if(q.name=="wglDeleteContext"){using Fn=BOOL(WINAPI*)(HGLRC);auto p=pointer(q.name.c_str());q.result=p&&reinterpret_cast<Fn>(p)(reinterpret_cast<HGLRC>(q.args[0]));return;}
+            if(q.name=="wglMakeCurrent"){using Fn=BOOL(WINAPI*)(HDC,HGLRC);auto p=pointer(q.name.c_str());q.result=p&&reinterpret_cast<Fn>(p)(reinterpret_cast<HDC>(q.args[0]),reinterpret_cast<HGLRC>(q.args[1]));return;}
+            if(q.name=="wglGetCurrentContext"){using Fn=HGLRC(WINAPI*)();auto p=pointer(q.name.c_str());q.result=p?reinterpret_cast<uintptr_t>(reinterpret_cast<Fn>(p)()):0;return;}
+            if(q.name=="wglGetCurrentDC"){using Fn=HDC(WINAPI*)();auto p=pointer(q.name.c_str());q.result=p?reinterpret_cast<uintptr_t>(reinterpret_cast<Fn>(p)()):0;return;}
+            if(q.name=="glClearColor"){using Fn=void(APIENTRY*)(float,float,float,float);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(float_arg(0),float_arg(1),float_arg(2),float_arg(3));else missing();return;}
+            if(q.name=="glClear"){using Fn=void(APIENTRY*)(unsigned);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(unsigned(q.args[0]));else missing();return;}
+            if(q.name=="glViewport"){using Fn=void(APIENTRY*)(int,int,int,int);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(int(q.args[0]),int(q.args[1]),int(q.args[2]),int(q.args[3]));else missing();return;}
+            if(q.name=="glEnableClientState"){using Fn=void(APIENTRY*)(unsigned);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(unsigned(q.args[0]));else missing();return;}
+            if(q.name=="glDrawArrays"){using Vertex=void(APIENTRY*)(int,int,unsigned,const void*);using Draw=void(APIENTRY*)(unsigned,int,int);auto vp=pointer("glVertexPointer"),dp=pointer(q.name.c_str());if(!vp||!dp){missing();return;}if(!q.input.empty()){reinterpret_cast<Vertex>(vp)(int(q.args[3]),unsigned(q.args[4]),0,q.input.data());}reinterpret_cast<Draw>(dp)(unsigned(q.args[0]),int(q.args[1]),int(q.args[2]));return;}
+            if(q.name=="glReadPixels"){using Fn=void(APIENTRY*)(int,int,int,int,unsigned,unsigned,void*);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(int(q.args[0]),int(q.args[1]),int(q.args[2]),int(q.args[3]),unsigned(q.args[4]),unsigned(q.args[5]),q.output.empty()?nullptr:q.output.data());else missing();return;}
+            if(q.name=="glGetError"){using Fn=unsigned(APIENTRY*)();auto p=pointer(q.name.c_str());q.result=p?reinterpret_cast<Fn>(p)():0;return;}
+            missing();
+        };
+    };
     auto r=x86::run(path,c.cwd,cmdline,tee,loaded,x86::kGuestRunCap,dllSource,traceFaultContext,[&](const x86::PlayResult& mapped) {
         gap_summary::Binder imports;
         for(const auto& item:mapped.gap_imports)
             imports.record(std::get<0>(item),std::get<1>(item),std::get<2>(item));
         for(const auto& line:imports.report(std::string(exe.begin(),exe.end()),"x86").lines) lp_sink(line.c_str());
-    },donorGaps,[&fileGuard,toU16](const char* operation,const std::u16string& guestPath){
+    },donorGaps,configureX86Gl,[&fileGuard,toU16](const char* operation,const std::u16string& guestPath){
         wchar_t current[32768]{};DWORD n=GetCurrentDirectoryW(32768,current);
         if(!n||n>=32768)return fileGuard.allow(operation,u"\\__x86_guard_cwd_unavailable__");
         return fileGuard.allow(operation,guestPath,toU16(std::wstring(current,n)));
