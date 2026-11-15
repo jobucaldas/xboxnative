@@ -352,6 +352,19 @@ struct Cpu {
         int step = f(DF) ? -int(sz) : int(sz);
         bool repeat = rep != 0;
         bool repne = rep == 0xF2;
+        if (repeat && reg[ECX] && !f(DF) && (op <= 0xA5 || op == 0xAA || op == 0xAB)) {
+            uint64_t bytes = uint64_t(reg[ECX]) * sz;
+            if (bytes <= UINT32_MAX) {
+                if (op <= 0xA5) {
+                    uint64_t source = uint64_t(reg[ESI]) + seg;
+                    if (source <= UINT32_MAX && mem.copy_forward(uint32_t(source), reg[EDI], uint32_t(bytes))) {
+                        reg[ESI] += uint32_t(bytes); reg[EDI] += uint32_t(bytes); reg[ECX] = 0; return;
+                    }
+                } else if (mem.fill_forward(reg[EDI], getreg(0, sz), sz, uint32_t(bytes))) {
+                    reg[EDI] += uint32_t(bytes); reg[ECX] = 0; return;
+                }
+            }
+        }
         do {
             if (repeat && !reg[ECX]) break;
             if (op <= 0xA7) {  // movs copies; cmps compares and sets flags only

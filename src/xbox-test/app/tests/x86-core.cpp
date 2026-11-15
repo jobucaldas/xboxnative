@@ -170,9 +170,32 @@ static void test_programs() {
         m.load({0xBF, 0x00, 0x00, 0x02, 0x00, 0xB8, 0xEF, 0xBE, 0xAD, 0xDE, 0xB9, 4, 0, 0, 0, 0xF3, 0xAB,
                 0xBE, 0x00, 0x00, 0x02, 0x00, 0xBF, 0x40, 0x00, 0x02, 0x00, 0xB9, 16, 0, 0, 0, 0xF3, 0xA4});
         EXPECT(m.run_to_end(17 + 17) && m.mem.r32(0x20000) == 0xdeadbeefu && m.mem.r32(0x2000c) == 0xdeadbeefu && m.mem.r32(0x20040) == 0xdeadbeefu && m.mem.r32(0x2004c) == 0xdeadbeefu && m.cpu.reg[ECX] == 0, "rep string ops"); }
+    { Machine m;  // REP block copies across mapped pages, including DWORD STOS patterns
+        m.mem.map(Machine::DATA + Memory::PAGE, Memory::PAGE, PROT_R | PROT_W);
+        m.mem.map(Machine::DATA + 2 * Memory::PAGE, Memory::PAGE, PROT_R | PROT_W);
+        const uint32_t src = Machine::DATA + Memory::PAGE - 16, dst = Machine::DATA + 2 * Memory::PAGE - 16;
+        for (unsigned i = 0; i < 32; ++i) m.mem.w8(src + i, uint8_t(i + 1));
+        m.load({0xBE, 0xF0, 0x0F, 0x02, 0x00, 0xBF, 0xF0, 0x1F, 0x02, 0x00, 0xB9, 32, 0, 0, 0, 0xF3, 0xA4});
+        EXPECT(m.run_to_end(17) && m.cpu.reg[ESI] == src + 32 && m.cpu.reg[EDI] == dst + 32 && !m.cpu.reg[ECX], "REP MOVSB multi-page registers");
+        for (unsigned i = 0; i < 32; ++i) EXPECT(m.mem.r8(dst + i) == i + 1, "REP MOVSB multi-page byte %u", i);
+        const uint32_t fill = Machine::DATA + Memory::PAGE - 8;
+        m.load({0xBF, 0xF8, 0x0F, 0x02, 0x00, 0xB8, 0x44, 0x33, 0x22, 0x11, 0xB9, 4, 0, 0, 0, 0xF3, 0xAB});
+        EXPECT(m.run_to_end(17) && m.cpu.reg[EDI] == fill + 16 && !m.cpu.reg[ECX], "REP STOSD multi-page registers");
+        for (unsigned i = 0; i < 4; ++i) EXPECT(m.mem.r32(fill + i * 4) == 0x11223344u, "REP STOSD dword %u", i);
+    }
     { Machine m;  // fs: override reads through fs_base
         m.mem.w32(0x20100, 0xCAFEF00Du); m.cpu.fs_base = 0x20100;
         m.load({0x64, 0xA1, 0, 0, 0, 0}); EXPECT(m.run_to_end(6) && m.cpu.reg[EAX] == 0xCAFEF00Du, "fs:[0] must read fs_base"); }
+    { Machine m;  // scalar accesses crossing a page retain bytewise permission semantics
+        m.mem.map(Machine::DATA + Memory::PAGE, Memory::PAGE, PROT_R | PROT_W);
+        const uint32_t cross = Machine::DATA + Memory::PAGE - 2;
+        m.mem.w32(cross, 0x11223344);
+        EXPECT(m.mem.r32(cross) == 0x11223344, "cross-page dword round-trip");
+        m.mem.protect(Machine::DATA + Memory::PAGE, Memory::PAGE, PROT_R);
+        m.mem.w(cross, 0xaabb, 2);
+        try { m.mem.w32(cross, 0x55667788); EXPECT(false, "cross-page write must fault atomically"); }
+        catch (const Fault& f) { EXPECT(f.kind == FaultKind::AccessViolation && m.mem.r(cross, 2) == 0xaabb, "cross-page store partially changed first page"); }
+    }
     { Machine m;  // faults are explicit and carry the address/kind
         m.load({0xC7, 0x05, 0, 0, 0, 0, 1, 0, 0, 0});   // mov [0], 1
         try { m.cpu.run(0); EXPECT(false, "null write must fault"); } catch (const Fault& f) { EXPECT(f.kind == FaultKind::AccessViolation && f.addr == 0 && f.eip == Machine::CODE, "null write fault: %s", f.what()); } }

@@ -5,6 +5,7 @@
 // so the guest sees ordinary W^X-style protections without any host RWX memory:
 // the interpreter never executes guest bytes natively, it only reads them.
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -92,12 +93,71 @@ struct Memory {
     void w8(uint32_t a, uint8_t v) { *at(a, PROT_W, FaultKind::AccessViolation) = v; }
     uint8_t fetch8(uint32_t a) { return *at(a, PROT_X, FaultKind::ExecuteViolation); }
     uint32_t r(uint32_t a, unsigned n) {
+        if (n > 1 && (a & (PAGE - 1)) + n <= PAGE) {
+            const uint8_t* p = at(a, PROT_R, FaultKind::AccessViolation);
+            uint32_t v = 0; for (unsigned i = 0; i < n; ++i) v |= uint32_t(p[i]) << (8 * i); return v;
+        }
         uint32_t v = 0; for (unsigned i = 0; i < n; ++i) v |= uint32_t(r8(a + i)) << (8 * i); return v;
     }
     void w(uint32_t a, uint32_t v, unsigned n) {
         // Check the whole access first so a faulting store has no partial effect.
+        if (n > 1 && (a & (PAGE - 1)) + n <= PAGE) {
+            uint8_t* p = at(a, PROT_W, FaultKind::AccessViolation);
+            for (unsigned i = 0; i < n; ++i) p[i] = uint8_t(v >> (8 * i));
+            return;
+        }
         for (unsigned i = 0; i < n; ++i) at(a + i, PROT_W, FaultKind::AccessViolation);
         for (unsigned i = 0; i < n; ++i) w8(a + i, uint8_t(v >> (8 * i)));
+    }
+    bool range_accessible(uint32_t addr, uint32_t size, uint8_t need) const {
+        uint64_t end = uint64_t(addr) + size;
+        if (!size || end > 0x100000000ull) return size == 0;
+        uint32_t first = addr >> 12, last = uint32_t((end - 1) >> 12);
+        for (uint32_t i = first;; ++i) {
+            if (!page[i] || (!(prot[i] & need) && !(need == PROT_W && (prot[i] & PROT_COW)))) return false;
+            if (i == last) break;
+        }
+        return true;
+    }
+    // REP MOVS/STOS may use a host block operation only when the entire range
+    // is already mapped and permitted. Otherwise the CPU keeps the element-wise
+    // path, which preserves partial progress, guard-page growth and fault state.
+    bool copy_forward(uint32_t src, uint32_t dst, uint32_t size) {
+        if (!size || uint64_t(src) + size > 0x100000000ull || uint64_t(dst) + size > 0x100000000ull ||
+            (uint64_t(src) < uint64_t(dst) + size && uint64_t(dst) < uint64_t(src) + size) ||
+            !range_accessible(src, size, PROT_R) || !range_accessible(dst, size, PROT_W)) return false;
+        uint32_t first = dst >> 12, last = uint32_t((uint64_t(dst) + size - 1) >> 12);
+        for (uint32_t i = first;; ++i) {
+            if (prot[i] & PROT_COW) prot[i] |= PROT_W;
+            if (i == last) break;
+        }
+        uint32_t done = 0;
+        while (done < size) {
+            uint32_t sa = src + done, da = dst + done;
+            uint32_t chunk = std::min<uint32_t>(size - done, std::min(PAGE - (sa & (PAGE - 1)), PAGE - (da & (PAGE - 1))));
+            std::memcpy(page[da >> 12] + (da & (PAGE - 1)), page[sa >> 12] + (sa & (PAGE - 1)), chunk);
+            done += chunk;
+        }
+        return true;
+    }
+    bool fill_forward(uint32_t dst, uint32_t value, unsigned element_size, uint32_t size) {
+        if (!size || uint64_t(dst) + size > 0x100000000ull || !range_accessible(dst, size, PROT_W)) return false;
+        uint32_t first = dst >> 12, last = uint32_t((uint64_t(dst) + size - 1) >> 12);
+        for (uint32_t i = first;; ++i) {
+            if (prot[i] & PROT_COW) prot[i] |= PROT_W;
+            if (i == last) break;
+        }
+        uint32_t done = 0;
+        while (done < size) {
+            uint32_t a = dst + done;
+            uint32_t chunk = std::min<uint32_t>(size - done, PAGE - (a & (PAGE - 1)));
+            uint8_t* p = page[a >> 12] + (a & (PAGE - 1));
+            if (element_size == 1) std::memset(p, uint8_t(value), chunk);
+            else for (uint32_t i = 0; i < chunk; ++i)
+                p[i] = uint8_t(value >> (8 * ((done + i) % element_size)));
+            done += chunk;
+        }
+        return true;
     }
     uint32_t r32(uint32_t a) { return r(a, 4); }
     void w32(uint32_t a, uint32_t v) { w(a, v, 4); }
