@@ -23,9 +23,9 @@ struct Host {
         std::vector<uint8_t> output;
     };
     struct FileCall {
-        enum class Kind { CreateA, CreateW, Close, Read, Size, Time, AttributesA, Seek, End, TimeConvert, TimeLocal } kind;
+        enum class Kind { CreateA, CreateW, Close, Read, Size, Time, AttributesA, Seek, SeekEx, End, TimeConvert, TimeLocal } kind;
         std::string path_a; std::u16string path_w;
-        uint64_t handle = 0, template_handle = 0, value = 0; uint32_t args[5]{}, error = 0; bool succeeded = false;
+        uint64_t handle = 0, template_handle = 0, value = 0; int64_t distance = 0, position = 0; uint32_t method = 0, args[5]{}, error = 0; bool succeeded = false;
         std::vector<uint8_t> data;
         explicit FileCall(Kind k) : kind(k) {}
     };
