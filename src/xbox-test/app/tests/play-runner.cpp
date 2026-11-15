@@ -282,6 +282,7 @@ static bool attachPublicationTest() {
 }
 static FILE* hostEvents=nullptr;
 static bool injectLogException=false;
+static std::string crashContextLog;
 // Watchdog-mode stand-in clock, split the way the launcher's is: the UI-loop
 // stand-in advances nowTick (the QPC read); the GUEST stamps lastHeartbeat —
 // logline() does it, the way the guest's hooked Present stamps
@@ -295,6 +296,7 @@ static void handledLogException() {
     __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 static void logline(const char* s){
+    if(strstr(s,"CRASHCTX "))crashContextLog+=s,crashContextLog+='\n';
     if(injectLogException)handledLogException();puts(s);fflush(stdout);
     if(watchdogStamp.load(std::memory_order_acquire))lastHeartbeat.store(nowTick.load(std::memory_order_acquire),std::memory_order_release);
     if(hostEvents){fprintf(hostEvents,"%s\n",s);fflush(hostEvents);}
@@ -497,7 +499,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     std::wstring gameExe=L"Megabonk.exe";
     {wchar_t value[260];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_EXE",value,260);if(n&&n<260)gameExe.assign(value,n);}
     const bool crashContextOptIn=std::string(args)=="crashctx-on";
-    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d10-triangle"?L"play-d3d10-triangle.exe":std::string(args)=="d3d10-compile"?L"play-d3d10-compile.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="d3d9-triangle"?L"play-d3d9-triangle.exe":std::string(args)=="d3d9-triangle-variants"?L"play-d3d9-triangle-variants.exe":std::string(args)=="d3d9-textured"?L"play-d3d9-textured.exe":std::string(args)=="fault-in-dll"?L"play-fault-guest.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="leaderboards"?L"play-leaderboard.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":std::string(args)=="vulkan-dzn"?L"play-vulkan-dzn.exe":std::string(args)=="vulkan-draw"?L"play-vulkan-draw.exe":std::string(args)=="opengl"?L"play-opengl.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline,std::wstring(),crashContextOptIn))return 1;
+    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="gap"?L"play-gap.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d10-triangle"?L"play-d3d10-triangle.exe":std::string(args)=="d3d10-compile"?L"play-d3d10-compile.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="d3d9-triangle"?L"play-d3d9-triangle.exe":std::string(args)=="d3d9-triangle-variants"?L"play-d3d9-triangle-variants.exe":std::string(args)=="d3d9-textured"?L"play-d3d9-textured.exe":std::string(args)=="fault-in-dll"?L"play-fault-guest.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="leaderboards"?L"play-leaderboard.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":std::string(args)=="vulkan-dzn"?L"play-vulkan-dzn.exe":std::string(args)=="vulkan-draw"?L"play-vulkan-draw.exe":std::string(args)=="opengl"?L"play-opengl.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline,std::wstring(),crashContextOptIn))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
     // guest stop (fatal dialog). Progress must never mask that failure.
@@ -576,6 +578,11 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     else if(mode=="dialog-milestone")ok=ok&&r->finished&&!r->success&&last.find("user32.dll!MessageBoxA caption=\"Fatal error\"")!=std::string::npos&&
         r->milestone==1&&launch_status::observe(r->finished,r->success,r->milestone,true)==launch_status::Outcome::failed;
     else if(mode=="missing")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&mlp::stub_names.empty()&&last.find("mapping failed: play-missing.exe; guest initialization blocked")!=std::string::npos&&last.find("play-missing.dll!DeliberatelyMissingPlayImport")!=std::string::npos;
+    else if(mode=="gap")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&mlp::stub_names.empty()&&
+        last.find("mapping failed: play-gap.exe; guest initialization blocked")!=std::string::npos&&
+        last.find("MLP STUB dbghelp.dll!SymInitialize")!=std::string::npos&&
+        last.find("GAP: summary exe=play-gap.exe arch=x64")!=std::string::npos&&
+        last.find("stub=1 missing=1")!=std::string::npos;
     else if(mode=="failed-dependency")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&
         last.find("mapping failed: play-failed-dependency.exe; guest initialization blocked")!=std::string::npos&&
         last.find("unresolved static import: baselib.dll!dependency_check")!=std::string::npos;
@@ -704,7 +711,18 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     else if(mode=="wide-dialog")ok=ok&&r->finished&&!r->success&&last.find("user32.dll!MessageBoxW caption=\"Erro \xc3\xa7\"")!=std::string::npos&&last.find("Falha IL2CPP \xc3\xa7\\nprobe \\\"quoted\\\"")!=std::string::npos&&last.find("caller=0x")!=std::string::npos;
     else if(mode=="dialog")ok=ok&&r->finished&&!r->success&&last.find("user32.dll!MessageBoxA caption=\"Fatal error\"")!=std::string::npos&&last.find("Failed to initialize IL2CPP\\nprobe \\\"quoted\\\"")!=std::string::npos&&last.find("caller=0x")!=std::string::npos;
     else if(mode=="crash")ok=ok&&r->finished&&!r->success&&last.find("unhandled exception code=0xe0424242")!=std::string::npos;
-    else if(mode=="crashctx-on"||mode=="crashctx-off")ok=ok&&r->finished&&!r->success&&last.find("unhandled exception code=0xc0000005")!=std::string::npos&&last.find("play-guest.exe+0x")!=std::string::npos;
+    else if(mode=="crashctx-on"||mode=="crashctx-off") {
+        ok=ok&&r->finished&&!r->success&&last.find("unhandled exception code=0xc0000005")!=std::string::npos&&last.find("play-guest.exe+0x")!=std::string::npos;
+        if(mode=="crashctx-on") {
+            std::string pattern;char byte[3];for(unsigned i=0;i<0x40;++i){snprintf(byte,sizeof byte,"%02x",0xa0+i);pattern+=byte;}
+            auto memory=crashContextLog.find("CRASHCTX mem RCX=0x");
+            auto addressEnd=memory==std::string::npos?memory:crashContextLog.find(' ',memory);
+            ok=ok&&memory!=std::string::npos&&addressEnd!=std::string::npos&&
+                crashContextLog.compare(addressEnd+1,pattern.size(),pattern)==0&&
+                crashContextLog.find("CRASHCTX code RIP=0x")!=std::string::npos&&
+                crashContextLog.find("CRASHCTX chain[0] play-guest.exe+")!=std::string::npos;
+        } else ok=ok&&crashContextLog.empty();
+    }
     else if(mode=="fault-in-dll") {
         // The fault happened inside a mapped DLL, three frames down, so the OS
         // had to unwind out of that image to reach Play's handler. The crash

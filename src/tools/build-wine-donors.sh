@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # build-wine-donors.sh [outdir] [--dry-run]
-# Builds the Wine "donor" PE DLLs (avrt, dinput8, hid, setupapi, shcore, version) from the pinned Wine source tarball
+# Builds the Wine "donor" PE DLLs (avrt, dinput8, hid, psapi, setupapi, shcore, version) from the pinned Wine source tarball
 # (`wine-src` in deps.pin, SHA-256 verified) with mingw-w64. Only those DLLs and the import libraries they need are built.
 # Also builds VC110/VC120 CRT donors for PE32 games into <outdir>/runtime/x86/ and Wine's C++ runtime DLLs
 # (msvcp140 family, concrt140) into <outdir>/runtime/: launcher Play maps them for
@@ -18,7 +18,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 out=; dry=0
 for a in "$@"; do case "$a" in --dry-run) dry=1 ;; *) out=$a ;; esac; done
 out=${out:-$root/out/wine-donors}
-DLLS=(avrt dinput8 hid setupapi shcore version)
+DLLS=(avrt dinput8 hid psapi setupapi shcore version)
 GRAPHICS=(d3dcompiler_47)
 RUNTIME=(msvcp140 msvcp140_1 msvcp140_2 msvcp140_atomic_wait msvcp140_codecvt_ids concrt140)
 RUNTIME_X86=(msvcr110 msvcp110 msvcr120 msvcp120)

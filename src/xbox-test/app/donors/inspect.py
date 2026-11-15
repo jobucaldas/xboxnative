@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import re
 
-DONORS = ("hid.dll", "setupapi.dll", "version.dll", "shcore.dll", "avrt.dll", "dinput8.dll")
+DONORS = ("hid.dll", "psapi.dll", "setupapi.dll", "version.dll", "shcore.dll", "avrt.dll", "dinput8.dll")
 GRAPHICS = ("d3dcompiler_47.dll",)
 
 

@@ -12,6 +12,17 @@ using namespace gpad;
 int main() {
     const char* err = nullptr;
     std::vector<Press> prog;
+    XINPUT_STATE st{};
+    CHECK(xinput_core::get_state(0, &st) == ERROR_DEVICE_NOT_CONNECTED); // no gpad command
+
+    // Exercise the same routed exports the guest imports.
+    auto get = reinterpret_cast<DWORD(WINAPI*)(DWORD,XINPUT_STATE*)>(
+        xinput_core::resolve("xinput1_4.dll", "XInputGetState"));
+    auto caps = reinterpret_cast<DWORD(WINAPI*)(DWORD,DWORD,XINPUT_CAPABILITIES*)>(
+        xinput_core::resolve("xinput1_4.dll", "XInputGetCapabilities"));
+    auto set = reinterpret_cast<DWORD(WINAPI*)(DWORD,XINPUT_VIBRATION*)>(
+        xinput_core::resolve("xinput1_4.dll", "XInputSetState"));
+    CHECK(get && caps && set);
 
     // A press with no physical pad: the launcher publishes slot 0 itself.
     CHECK(parse_gpad("A 100", 6, &prog, &err));
@@ -20,23 +31,28 @@ int main() {
     r.tick(1000); r.held(&buttons, &lt, &rt);
     CHECK(buttons == BTN_A);
     XINPUT_GAMEPAD injected{}; injected.wButtons = buttons;
-    xinput_core::publish(0, &injected);
-    XINPUT_STATE st{};
-    CHECK(xinput_core::get_state(0, &st) == 0 && st.Gamepad.wButtons == XINPUT_GAMEPAD_A);
+    xinput_core::publish_synthetic(0, &injected);
+    CHECK(get(0, &st) == ERROR_SUCCESS && st.Gamepad.wButtons == XINPUT_GAMEPAD_A);
+    DWORD pressedPacket = st.dwPacketNumber;
+    XINPUT_CAPABILITIES capabilities{};
+    CHECK(caps(0, 0, &capabilities) == ERROR_SUCCESS && capabilities.Type == XINPUT_DEVTYPE_GAMEPAD);
+    XINPUT_VIBRATION vibration{123,456};
+    CHECK(set(0, &vibration) == ERROR_SUCCESS); // synthetic rumble is a no-op
 
     // Still held inside the window, packet number stable while unchanged.
     r.tick(1050); r.held(&buttons, &lt, &rt); CHECK(buttons == BTN_A);
-    CHECK(xinput_core::get_state(0, &st) == 0 && st.Gamepad.wButtons == XINPUT_GAMEPAD_A);
+    CHECK(get(0, &st) == ERROR_SUCCESS && st.Gamepad.wButtons == XINPUT_GAMEPAD_A);
     DWORD packet = st.dwPacketNumber;
-    xinput_core::publish(0, &injected);
-    CHECK(xinput_core::get_state(0, &st) == 0 && st.dwPacketNumber == packet);
+    CHECK(packet == pressedPacket);
+    xinput_core::publish_synthetic(0, &injected);
+    CHECK(get(0, &st) == ERROR_SUCCESS && st.dwPacketNumber == packet);
 
     // Release delivered: after hold_ms the mask drops and the packet advances.
     r.tick(1101); r.held(&buttons, &lt, &rt);
     CHECK(buttons == 0);
-    XINPUT_GAMEPAD released{};   // the launcher publishes the physical reading (empty here)
-    xinput_core::publish(0, &released);
-    CHECK(xinput_core::get_state(0, &st) == 0 && st.Gamepad.wButtons == 0 && st.dwPacketNumber == packet + 1);
+    XINPUT_GAMEPAD released{};   // synthetic slot stays connected and reports released
+    xinput_core::publish_synthetic(0, &released);
+    CHECK(get(0, &st) == ERROR_SUCCESS && st.Gamepad.wButtons == 0 && st.dwPacketNumber == packet + 1);
 
     // Triggers ride the analog bytes.
     CHECK(parse_gpad("LT 100", 6, &prog, &err));

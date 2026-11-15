@@ -1,0 +1,7 @@
+request-json: {"appid":"363440","name":"Mega Man Legacy Collection","exe":"Proteus.exe","attemptId":"3700:1"}
+[  18.146] launch: request written LocalState\\launch_request.json appid=363440 attempt=3700:1 dir=suzy via=cmd.txt (synthetic)
+[  18.180] launch-probe: GAP: total=230 missing=211 win32u=16
+[  18.180] launch: RUNNING attempt=3700:1 ok=0 mapped=1/1 gameCodeExecuted=true: PE32 guest entry 0x00a1b310
+[  18.180] PRUN EVENT x86 route: Proteus.exe fault kind=Breakpoint eip=0x00a1d3e2: int3 breakpoint
+[  18.249] launch: RESULT attempt=3700:1 ok=0 mapped=1/1 gameCodeExecuted=true: 32-bit guest Proteus.exe: int3 breakpoint
+[  20.244] frame=1156 fps~57.2 screen=4 pads=0

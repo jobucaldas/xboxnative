@@ -13,6 +13,7 @@
 #include <map>
 #include <set>
 #include <mutex>
+#include "../gap_summary.h"
 #include <array>
 #include <utility>
 #include "../../shared/kernel_tail.h"
@@ -30,6 +31,7 @@ static const Route routes[] = {
 };
 struct Summary { unsigned resolved=0, stubbed=0; std::string first="none"; };
 static std::map<std::string, Summary> summaries;
+static gap_summary::Binder launch_gap;
 static std::map<std::string, wxl::Image*> assets;
 static std::map<std::string, HMODULE> systems;
 static std::vector<std::string> stub_names;
@@ -107,23 +109,27 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     // new game needs no per-title table (default_system_dll).
     if(!strcmp(kind,"unclassified") && default_system_dll(key)) kind="system";
     uintptr_t address=kernel32_core::resolve(dll,name);
+    gap_summary::Outcome outcome=address?gap_summary::Outcome::routed:gap_summary::Outcome::missing;
     // XInput is Play's WGI emulation. Take it before the system route below, which
     // would otherwise load the console's own xinput1_4 (blind to pads on UWP) as a
     // side effect of any static import, e.g. the Steam API provider's.
     if(!address) address=xinput_core::resolve(dll,name,ordinal);
+    if(address) outcome=gap_summary::Outcome::routed;
     // The console refuses HKCU writes (ERROR_ACCESS_DENIED): Unity PlayerPrefs and
     // other guests use the uwph registry (LocalState\registry.sqlite) instead.
     if(!address && name && key=="advapi32.dll") address=regb::lookup(name);
+    if(address) outcome=gap_summary::Outcome::routed;
     // The synthetic pad's hid.dll answers (hid/route.h) come before the Wine
     // donor: they own the HidD_/HidP_ names for the device Play presents and
     // forward every other handle to that same donor.
     if(!address && name && key=="hid.dll") {
         hid_core::fallback=donor_resolve;
         address=hid_core::resolve(dll,name);
+        if(address) outcome=gap_summary::Outcome::routed;
     }
     if(!address && !strcmp(kind,"wine-pe")) {
         if(donor_resolve)address=donor_resolve(key.c_str(),name,ordinal);
-        if(address)log(("DWPE ROUTE "+key+"!"+symbol).c_str());
+        if(address) { outcome=gap_summary::Outcome::donor; log(("DWPE ROUTE "+key+"!"+symbol).c_str()); }
     } else if(!address && !strcmp(kind,"system")) {
         auto it=systems.find(key);
         if(it==systems.end()) {
@@ -134,23 +140,29 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
             char msg[512]; snprintf(msg,sizeof msg,"MLP SYSTEM %s loaded=%d error=%lu",key.c_str(),!!module,module?0:GetLastError()); log(msg);
         }
         if(it->second) address=(uintptr_t)GetProcAddress(it->second,name ? name : MAKEINTRESOURCEA(ordinal));
+        if(address) outcome=gap_summary::Outcome::resolved;
     } else if(!address && !strcmp(kind,"uwph")) {
         auto it=assets.find(key);
         if(it!=assets.end()) address=asset_export(*it->second,name,ordinal);
         else if(name) for(auto& b:wxl::builtins) if(!_stricmp(dll,b.dll)&&!strcmp(name,b.name)) address=b.address;
+        if(address) outcome=gap_summary::Outcome::routed;
     }
-    if(auto audio=audio_routes::resolve(dll,name)) address=audio;
-    if(auto core=user32_core::resolve(dll,name)) address=core;
+    if(auto audio=audio_routes::resolve(dll,name)) { address=audio; outcome=gap_summary::Outcome::routed; }
+    if(auto core=user32_core::resolve(dll,name)) { address=core; outcome=gap_summary::Outcome::routed; }
     if(!address) address=imm32_core::resolve(dll,name, reinterpret_cast<imm32_core::IsWindow>(
         user32_core::resolve("user32.dll","IsWindow")));
+    if(address && outcome==gap_summary::Outcome::missing) outcome=gap_summary::Outcome::routed;
     // Override system DWM before a guest record HWND can reach desktop DWM.
-    if(key=="dwmapi.dll" && name && !dwmapi_core::native_safe(name)) address=dwmapi_core::resolve(dll,name,
-        reinterpret_cast<dwmapi_core::IsWindow>(user32_core::resolve("user32.dll","IsWindow")),
-        reinterpret_cast<dwmapi_core::WindowRect>(user32_core::resolve("user32.dll","GetWindowRect")),
-        reinterpret_cast<dwmapi_core::WindowLong>(user32_core::resolve("user32.dll","GetWindowLongPtrW")));
+    if(key=="dwmapi.dll" && name && !dwmapi_core::native_safe(name)) {
+        address=dwmapi_core::resolve(dll,name,
+            reinterpret_cast<dwmapi_core::IsWindow>(user32_core::resolve("user32.dll","IsWindow")),
+            reinterpret_cast<dwmapi_core::WindowRect>(user32_core::resolve("user32.dll","GetWindowRect")),
+            reinterpret_cast<dwmapi_core::WindowLong>(user32_core::resolve("user32.dll","GetWindowLongPtrW")));
+        if(address) outcome=gap_summary::Outcome::routed;
+    }
     // Desktop process policies and services (AppPolicy*, ktmw32): before the
     // system loader, whose answers describe the UWP host package.
-    if(auto policy=desktop_policy::resolve(key.c_str(),name)) address=policy;
+    if(auto policy=desktop_policy::resolve(key.c_str(),name)) { address=policy; outcome=gap_summary::Outcome::routed; }
     if(!address) address=sysx_native::resolve(dll,name);
     // Closed list: the ntdll natives mingw-w64 GCC's threading runtime (Mesa's d3d12 driver) imports; see mcf_ntdll.h.
     if(!address) address=mcf_ntdll::resolve(dll,name);
@@ -189,10 +201,14 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     }
     if(!address&&name&&key!="kernel32.dll"&&strcmp(kind,"wine-pe")) {
         address=pe_tail::resolve(key.c_str(),name);
-        if(address)log(("K32T SYSTEM "+key+"!"+symbol).c_str());
+        if(address) { outcome=gap_summary::Outcome::resolved; log(("K32T SYSTEM "+key+"!"+symbol).c_str()); }
     }
     static bool tested=false;
     if(!tested) { tested=true; audio_routes::discover(log); audio_probe::run(log); kernel_tail::test(log); kernel_tail::test_search(log); pe_tail::discover(log); pe_tail::test(log); sysx_native::discover(log); }
+    if(address && outcome==gap_summary::Outcome::missing)
+        outcome=!strcmp(kind,"system")?gap_summary::Outcome::resolved:gap_summary::Outcome::routed;
+    if(!address && !strcmp(kind,"stub")) outcome=gap_summary::Outcome::stub;
+    if(gap_summary::collecting) launch_gap.record(key,symbol,outcome);
     auto& sum=summaries[key];
     if(address) { ++sum.resolved; return address; }
     ++sum.stubbed;

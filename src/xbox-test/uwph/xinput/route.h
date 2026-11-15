@@ -21,6 +21,7 @@ inline DWORD error_to_win32(HRESULT error) {
 }
 struct Slot {
     bool connected=false;
+    bool synthetic=false;
     XINPUT_STATE state{};
     XINPUT_GAMEPAD hardware{};
     XINPUT_VIBRATION vibration{};
@@ -53,11 +54,22 @@ inline void publish(unsigned index,const XINPUT_GAMEPAD* pad,Rumble rumble={}) {
     std::lock_guard<std::mutex> lock(mutex);
     auto& slot=slots[index];
     if(!pad){slot=Slot{};return;}
+    slot.synthetic=false;
     slot.hardware=*pad;
     XINPUT_GAMEPAD visible=enabled && active?*pad:XINPUT_GAMEPAD{};
     if(!slot.connected){slot.connected=true;slot.state.dwPacketNumber=1;}
     else if(!equal(slot.state.Gamepad,visible))++slot.state.dwPacketNumber;
     slot.state.Gamepad=visible;slot.rumble=std::move(rumble);
+}
+inline void publish_synthetic(unsigned index,const XINPUT_GAMEPAD* pad) {
+    if(index>=slots.size() || !pad)return;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& slot=slots[index];
+    slot.synthetic=true;slot.hardware=*pad;slot.rumble={};
+    XINPUT_GAMEPAD visible=enabled && active?*pad:XINPUT_GAMEPAD{};
+    if(!slot.connected){slot.connected=true;slot.state.dwPacketNumber=1;}
+    else if(!equal(slot.state.Gamepad,visible))++slot.state.dwPacketNumber;
+    slot.state.Gamepad=visible;
 }
 inline DWORD get_state_locked(DWORD index,XINPUT_STATE* state) {
     if(index>=slots.size() || !state)return ERROR_BAD_ARGUMENTS;
@@ -77,6 +89,7 @@ inline DWORD set_state_locked(DWORD index,XINPUT_VIBRATION* vibration) {
     std::lock_guard<std::mutex> lock(mutex);
     auto& slot=slots[index];
     if(!slot.connected)return ERROR_DEVICE_NOT_CONNECTED;
+    if(slot.synthetic)return ERROR_SUCCESS;
     if(!slot.rumble)return ERROR_NOT_SUPPORTED;
     if(!enabled || !active){slot.vibration=*vibration;return ERROR_SUCCESS;}
     DWORD result=slot.rumble(vibration->wLeftMotorSpeed,vibration->wRightMotorSpeed);

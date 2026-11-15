@@ -3,6 +3,9 @@ extern "C" {
 #ifdef PLAY_STATIC_MISSING
 __declspec(dllimport) void DeliberatelyMissingPlayImport();
 #endif
+#ifdef PLAY_STATIC_STUB
+__declspec(dllimport) BOOL WINAPI SymInitialize(HANDLE, LPCSTR, BOOL);
+#endif
 #ifdef PLAY_STATIC_STEAM
 __declspec(dllimport) void ForwardSteam();
 #endif
@@ -362,10 +365,19 @@ DWORD guest_exe_entry(){
     }
     if(contains(GetCommandLineW(),L"wide-dialog"))MessageBoxW(nullptr,L"Falha IL2CPP \u00e7\nprobe \"quoted\"",L"Erro \u00e7",MB_OK|MB_ICONERROR);
     if(contains(GetCommandLineW(),L"dialog"))MessageBoxA(nullptr,"Failed to initialize IL2CPP\nprobe \"quoted\"", "Fatal error",MB_OK|MB_ICONERROR);
+#ifdef PLAY_STATIC_STUB
+    SymInitialize(GetCurrentProcess(),nullptr,FALSE); // Import is classified, but the fixture must never execute.
+#endif
 #ifdef PLAY_STATIC_MISSING
     DeliberatelyMissingPlayImport(); // Must be rejected before TLS/DllMain/entry.
 #endif
-    if(contains(GetCommandLineW(),L"crashctx")){volatile int* nearNull=(volatile int*)0x24;return *nearNull;}
+    if(contains(GetCommandLineW(),L"crashctx")){
+        static volatile unsigned char pattern[0x40];
+        for(unsigned i=0;i<0x40;++i)pattern[i]=(unsigned char)(0xa0+i);
+        __asm__ __volatile__("movq %0, %%rcx\n\tmovq $0x24, %%rax\n\tmovl (%%rax), %%eax"
+            : : "r"(pattern) : "rax","rcx","memory");
+        return 0;
+    }
     if(contains(GetCommandLineW(),L"crash"))RaiseException(0xe0424242,EXCEPTION_NONCONTINUABLE,0,nullptr);
     if(contains(GetCommandLineW(),L"exit"))ExitProcess(37);
     if(contains(GetCommandLineW(),L"hang"))for(;;)Sleep(100);

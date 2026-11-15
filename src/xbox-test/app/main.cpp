@@ -1203,6 +1203,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     CoreDispatcher m_graphicsDispatcher{nullptr};
     bool m_guestSurface=false;
     gpad::Runner m_gpad;   // cmd.txt gpad/gpadseq presses; armed only with a guest running
+    bool m_gpadSession=false; // keeps synthetic XInput slot 0 connected after the first script
     int m_guestEndGen=0;
     corewindow_input::Shared m_input; // keyboard/mouse to the guest: the record DLL's one feed, shared with guest SendInput
     bool m_inputLogged=false;
@@ -2231,6 +2232,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if(!m_guestSurface && !play_runtime::observed.load(std::memory_order_acquire))return;
         m_guestEndGen=g_launch.gen;
         m_gpad.clear();   // an armed gpad program never outlives its game
+        m_gpadSession=false;
         m_synthDead=false;   // nor a synthetic gdead hold
         achievement_poller_stop();   // the guest is exiting; stop watching its achievements.json
         m_achPollStarted=false;      // the next launch starts its own poller
@@ -2431,7 +2433,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         v.note = m_pick.note.c_str();
         ui_launcher::draw_picker_sheet(c, g_font, v);
     }
-    // One-shot synthetic command file LocalState\cmd.txt (consumed on read). Lines: open <appid> | press (=A) | back (=B) | view | up | down | left | right | lb | rb | l3 | x | y | sort | filters | search | type <text> | profile | sleep <s>.
+    // One-shot synthetic command file LocalState\cmd.txt (consumed on read). Lines: open <appid> | press (=A) | pick <index> | back (=B) | view | up | down | left | right | lb | rb | l3 | x | y | sort | filters | search | type <text> | profile | sleep <s>.
     // Semantics follow the new screens: B does nothing on the library root (item 14 — logout is
     // the sidebar PROFILE row's A, with a Cancel-default confirm sheet); on the detail page X/Y
     // are no longer shortcuts (focus the trash/cloud/cog buttons with left/right, then A).
@@ -2508,6 +2510,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 return;
             }
             m_gpad.arm(std::move(prog), GetTickCount64());
+            m_gpadSession=true;
             logf("cmd.txt: gpad armed (%zu step(s))", m_gpad.program.size());
             return;
         }
@@ -2530,6 +2533,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 return;
             }
             m_gpad.arm(std::move(prog), GetTickCount64());
+            m_gpadSession=true;
             logf("cmd.txt: gpadseq '%s' armed, %zu step(s)", name, m_gpad.program.size());
             return;
         }
@@ -2560,6 +2564,15 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 else logf("cmd.txt: menu ignored (no focused tile)");
             } else if (g_screen == S_DETAIL) open_options(m_dApp, "cmd.txt menu");
             else logf("cmd.txt: menu ignored on this screen");
+            return;
+        }
+        if (c.rfind("pick ", 0) == 0) {
+            size_t index = 0;
+            if (!launch_picker::parse_pick(c, index)) { logf("picker: invalid command '%s'", c.c_str()); return; }
+            if (!launch_picker::select(m_pick, index)) { logf("picker: index %zu out of range", index); return; }
+            const launch_target::Choice* choice = launch_picker::current(m_pick);
+            logf("picker: options=%zu chose=%zu label=\"%s\"", m_pick.rows.size(), index, choice->label.c_str());
+            detail_picker_a("cmd.txt pick");
             return;
         }
         GamepadButtons m = GamepadButtons::None;
@@ -2677,7 +2690,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
             for(unsigned i=0;i<assigned.size();++i) {
                 auto pad=assigned[i];
-                if(!pad){xinput_core::publish(i,nullptr);continue;}
+                if(!pad){if(i!=0 || !m_gpadSession)xinput_core::publish(i,nullptr);continue;}
                 try {
                     auto state=convert_pad(pad.GetCurrentReading());
                     // The launcher menu owns the pad while it is open (XInput
@@ -2702,22 +2715,18 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         } catch(winrt::hresult_error const&) {
             for(unsigned i=0;i<assigned.size();++i)xinput_core::publish(i,nullptr);
         }
-        // gpad injection with no physical pad attached: keep slot 0 connected
-        // for the whole program (press, release and gap alike), or the guest
-        // would see the pad disconnect between frames and packet numbers
-        // would reset. m_gpad.armed spans exactly the program (arm() to the
-        // tick that clears a finished program), so the release and gap frames
-        // stay connected and the pad disappears once the program is done.
-        // The overlay's input block wins here too: while the launcher menu is
-        // open the guest must see an empty pad, not automation.
-        if (m_gpad.armed && !assigned[0]) {
+        // Once cmd.txt has armed gpad, keep slot 0 connected until the guest
+        // ends; publish() above deliberately preserves it between polls. A
+        // physical controller remains authoritative whenever one owns slot 0.
+        // The overlay still wins by publishing a neutral virtual pad.
+        if (m_gpadSession && !assigned[0]) {
             XINPUT_GAMEPAD injected{};
             if (!pad_owned_by_overlay()) {
                 injected.wButtons=injButtons;
                 injected.bLeftTrigger=injLt;
                 injected.bRightTrigger=injRt;
             }
-            xinput_core::publish(0,&injected);
+            xinput_core::publish_synthetic(0,&injected);
         }
         // The record DLL's raw-input enumeration presents one HID device per
         // connected pad (uwph_u32c_pads), which is what a guest's legacy

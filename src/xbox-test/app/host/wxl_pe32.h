@@ -41,31 +41,42 @@ struct Pe32 {
         uint32_t nd=read(file,opt+92);
         if(os<96 || nd>16 || 96+nd*8>os || !ns || ns>96 || !range(sections,ns*40,file.size()))
             throw std::runtime_error("PE32 header bounds");
-        uint32_t size=read(file,opt+56), headers=read(file,opt+60), alignment=read(file,opt+32);
-        if(!size || size>512u*1024*1024 || headers>size || headers>file.size() ||
-           headers<sections+ns*40 || alignment!=4096 || size%4096)
-            throw std::runtime_error("PE32 image layout");
+        uint32_t size=read(file,opt+56), headers=read(file,opt+60), alignment=read(file,opt+32), file_alignment=read(file,opt+36);
+        if(!size) throw std::runtime_error("PE32 image layout: zero SizeOfImage");
+        if(size>512u*1024*1024) throw std::runtime_error("PE32 image layout: SizeOfImage exceeds 512 MiB");
+        if(headers>size) throw std::runtime_error("PE32 image layout: SizeOfHeaders exceeds SizeOfImage");
+        if(headers>file.size()) throw std::runtime_error("PE32 image layout: headers past EOF");
+        if(headers<sections+ns*40) throw std::runtime_error("PE32 image layout: headers do not cover section table");
+        if(!alignment || (alignment&(alignment-1))) throw std::runtime_error("PE32 image layout: invalid SectionAlignment");
+        if(!file_alignment || (file_alignment&(file_alignment-1)) || file_alignment>65536 ||
+           (alignment<4096 ? file_alignment!=alignment : file_alignment<512 || file_alignment>alignment))
+            throw std::runtime_error("PE32 image layout: invalid FileAlignment");
+        if(size%alignment) throw std::runtime_error("PE32 image layout: SizeOfImage not SectionAlignment-aligned");
+        uint32_t mapped_size=(size+4095u)&~4095u;
+        if(mapped_size<size) throw std::runtime_error("PE32 image layout: rounded SizeOfImage overflow");
         preferred=read(file,opt+28);
         // A stripped/fixed PE must stay at its preferred logical address.
         if(!base) base=(nd>5 && read(file,opt+96+5*8+4))?0x10000000:preferred;
         logical=base; entry=read(file,opt+16);
-        if(uint64_t(base)+size>0x100000000ull || entry>=size) throw std::runtime_error("PE32 address bounds");
-        bytes.resize(size); memcpy(bytes.data(),file.data(),headers);
+        if(uint64_t(base)+mapped_size>0x100000000ull || entry>=size) throw std::runtime_error("PE32 address bounds");
+        bytes.resize(mapped_size); memcpy(bytes.data(),file.data(),headers);
         std::vector<std::pair<size_t,size_t>> spans{{0,headers}};
         for(unsigned i=0;i<ns;++i) {
             size_t s=sections+40*i; uint32_t va=read(file,s+12), raw=read(file,s+16), off=read(file,s+20);
             size_t length=std::max(read(file,s+8),raw);
-            if(va%alignment || !length || !range(va,length,size) || !range(off,raw,file.size()))
-                throw std::runtime_error("PE32 section bounds");
-            for(auto span:spans) if(va<span.second && span.first<size_t(va)+length)
-                throw std::runtime_error("PE32 section overlap");
-            spans.emplace_back(va,size_t(va)+length);
-            if(raw) memcpy(bytes.data()+va,file.data()+off,raw);
+            if(va%alignment) throw std::runtime_error("PE32 image layout: section "+std::to_string(i)+" VirtualAddress misaligned");
+            if(!range(va,length,size)) throw std::runtime_error("PE32 image layout: section "+std::to_string(i)+" exceeds SizeOfImage");
+            if(off>file.size()) throw std::runtime_error("PE32 image layout: section "+std::to_string(i)+" raw offset past EOF");
+            for(auto span:spans) if(length && va<span.second && span.first<size_t(va)+length)
+                throw std::runtime_error("PE32 image layout: section "+std::to_string(i)+" overlaps another section");
+            if(length) spans.emplace_back(va,size_t(va)+length);
+            size_t available=std::min<size_t>(raw,file.size()-off);
+            if(available) memcpy(bytes.data()+va,file.data()+off,available);
         }
         auto directory=[&](unsigned index) {
             if(index>=nd) return std::make_pair(0u,0u);
             uint32_t r=read(file,opt+96+index*8), n=read(file,opt+100+index*8);
-            if((!r)!=(!n) || !range(r,n,bytes.size())) throw std::runtime_error("PE32 directory bounds");
+            if((!r)!=(!n) || !range(r,n,size)) throw std::runtime_error("PE32 directory bounds");
             return std::make_pair(r,n);
         };
         auto rd=directory(5); uint32_t delta=base-preferred;
