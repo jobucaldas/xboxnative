@@ -169,6 +169,7 @@ static_assert(ContextMap==14&&Unmap==15&&DrawIndexed==12&&DrawIndexedInstanced==
 inline std::mutex reportM;
 inline std::set<std::string> seen;
 inline size_t failures=0,probes=0,drawStates=0,deferredDrawStates=0;
+inline std::unordered_map<void*,bool> bufferCpuWritten;
 inline bool failuresCapped=false,probesCapped=false,drawStatesCapped=false,deferredDrawStatesCapped=false;
 // Lines produced before a log sink is installed are held (bounded) and
 // delivered by configure(), so an opt-in probe armed early is never silent.
@@ -496,6 +497,7 @@ inline int indirectIndex(void* buffer) {
     return -1;
 }
 inline bool isIndirectBuffer(void* buffer) {return indirectIndex(buffer)>=0;}
+inline void noteBufferWrite(void* buffer) {if(!buffer)return;std::lock_guard<std::mutex> lock(reportM);bufferCpuWritten[buffer]=true;}
 inline unsigned indirectBufferBytes(void* buffer) {
     int i=indirectIndex(buffer);
     return i<0?0:indirectBytes[i].load(std::memory_order_relaxed);
@@ -558,14 +560,48 @@ inline bool deepDraw() {return deepDrawEnabled.load(std::memory_order_acquire);}
 // among live objects, so the full pointer is a collision-free key; dead
 // entries only cost sizeof(entry) and are erased on re-registration of the
 // same address.
+inline void shaderBindings(const void* code,size_t length,unsigned srv[4],unsigned cb[4]) {
+    if(!code||length<40)return;
+    auto bytes=static_cast<const unsigned char*>(code);
+    auto word=[&](size_t at)->uint32_t{uint32_t v=0;if(at+4<=length)memcpy(&v,bytes+at,4);return v;};
+    if(memcmp(bytes,"DXBC",4))return;
+    unsigned chunks=word(28);
+    for(unsigned i=0;i<chunks&&i<64;++i) {
+        size_t at=word(32+4*i);if(at+8>length||memcmp(bytes+at,"RDEF",4))continue;
+        size_t end=std::min<size_t>(length,at+8+word(at+4));size_t payload=at+8;
+        if(payload+16>end)return;
+        unsigned count=word(payload+8),offset=word(payload+12);
+        for(unsigned n=0;n<count&&n<256;++n) {
+            size_t desc=payload+offset+size_t(n)*32;if(desc+32>end)break;
+            unsigned type=word(desc+4),slot=word(desc+20),slots=word(desc+24);
+            if(slot>=128||!slots)continue;
+            unsigned* mask=(type==0)?cb:(type==1||type==2||type==5||type==7)?srv:nullptr;
+            if(mask)for(unsigned s=slot;s<std::min(128u,slot+slots);++s)mask[s/32]|=1u<<(s%32);
+        }
+        return;
+    }
+}
 struct ShaderId {unsigned long long hash;size_t bytes;unsigned serial;};
+struct ShaderDetails {unsigned srv[4]{};unsigned cb[4]{};int stage=-1;std::vector<unsigned char> bytecode;};
 inline std::atomic<unsigned> shaderSerial{0};
 inline std::unordered_map<void*,ShaderId> shaderIds;   // guarded by reportM
-inline void noteShaderHash(void* shader,unsigned long long hash,size_t bytes) {
+inline std::unordered_map<void*,ShaderDetails> shaderDetails;   // guarded by reportM
+inline size_t shaderCodeBytes=0;   // guarded by reportM; retained only for the opt-in dump
+inline std::atomic<unsigned> shaderDumpLimit{0},shaderDumped{0};
+inline bool (*writeShaderDump)(const char*,unsigned long long,const void*,size_t)=nullptr;
+inline void noteShaderHash(void* shader,unsigned long long hash,size_t bytes,const void* code=nullptr,int stage=-1) {
     if(!shader)return;
     ShaderId fresh{hash,bytes,shaderSerial.fetch_add(1,std::memory_order_relaxed)};
     std::lock_guard<std::mutex> lock(reportM);
     shaderIds.insert_or_assign(shader,fresh);
+    ShaderDetails details;details.stage=stage;
+    if(code)shaderBindings(code,bytes,details.srv,details.cb);
+    unsigned limit=shaderDumpLimit.load(std::memory_order_relaxed);
+    if(code&&limit&&bytes&&bytes<=16u<<20&&shaderCodeBytes+bytes<=16u<<20) {
+        details.bytecode.assign(static_cast<const unsigned char*>(code),static_cast<const unsigned char*>(code)+bytes);
+        shaderCodeBytes+=bytes;
+    }
+    shaderDetails.insert_or_assign(shader,std::move(details));
 }
 inline ShaderId shaderIdOf(void* shader) {
     if(!shader)return {};
@@ -597,6 +633,69 @@ inline std::string boundSrvText(ID3D11ShaderResourceView* view) {
         text+=fmt(" bytes=%u bind=0x%x stride=%u",desc.ByteWidth,desc.BindFlags,desc.StructureByteStride);
     }
     resource->Release();return text;
+}
+inline std::mutex terrainProbeM;
+inline std::set<std::string> terrainProbeSeen,shaderDumpSeen;
+inline std::unordered_map<void*,std::string> terrainTargets;
+inline std::set<std::string> terrainTargetSeen;
+inline std::string shaderDeclaredBindings(void* self,void* shader) {
+    ShaderDetails details;
+    {std::lock_guard<std::mutex> lock(reportM);auto it=shaderDetails.find(shader);if(it==shaderDetails.end())return "ps-declared-srv=unknown";details=it->second;}
+    auto* context=static_cast<ID3D11DeviceContext*>(self);
+    ID3D11ShaderResourceView* views[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT]{};
+    context->PSGetShaderResources(0,D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT,views);
+    std::string missing="ps-unbound-srv={",bound="ps-declared-srv={";bool first=true,hasMissing=false;
+    for(unsigned slot=0;slot<128;++slot)if(details.srv[slot/32]&(1u<<(slot%32))) {
+        bound+=fmt("%st%u",first?"":" ",slot);first=false;
+        if(!views[slot]){missing+=fmt("%st%u",hasMissing?" ":"",slot);hasMissing=true;}
+    }
+    for(auto* view:views)if(view)view->Release();
+    if(first)bound+="none";
+    bound+="}";
+    if(!hasMissing)missing+="none";
+    missing+="}";
+    ID3D11Buffer* buffers[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT]{};
+    context->PSGetConstantBuffers(0,D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT,buffers);
+    std::string cb="ps-cbuffers={";bool firstCb=true;
+    for(unsigned slot=0;slot<D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT;++slot)if(details.cb[slot/32]&(1u<<(slot%32))) {
+        if(buffers[slot]) {D3D11_BUFFER_DESC desc{};buffers[slot]->GetDesc(&desc);bool written=false;
+            {std::lock_guard<std::mutex> lock(reportM);auto it=bufferCpuWritten.find(buffers[slot]);written=it!=bufferCpuWritten.end()&&it->second;}
+            cb+=fmt("%sb%u:%uB:%s",firstCb?"":" ",slot,desc.ByteWidth,written?"cpu-write":"no-cpu-write");
+        } else cb+=fmt("%sb%u:unbound",firstCb?"":" ",slot);
+        firstCb=false;
+    }
+    for(auto* buffer:buffers)if(buffer)buffer->Release();
+    if(firstCb)cb+="none";
+    cb+="}";
+    return bound+" "+missing+" "+cb;
+}
+inline void noteShaderDump(void* shader) {
+    unsigned limit=shaderDumpLimit.load(std::memory_order_relaxed);
+    if(!limit||!writeShaderDump||shaderDumped.load(std::memory_order_relaxed)>=limit)return;
+    ShaderId id{};ShaderDetails details;
+    {std::lock_guard<std::mutex> lock(reportM);auto it=shaderIds.find(shader);auto dt=shaderDetails.find(shader);
+        if(it==shaderIds.end()||dt==shaderDetails.end()||dt->second.bytecode.empty()||dt->second.stage<0)return;
+        id=it->second;details=dt->second;}
+    const char* stages[]={"vs","gs","ps","hs","ds","cs"};if(details.stage>=6)return;
+    std::string key=fmt("%s/%llx/%zu",stages[details.stage],id.hash,id.bytes);
+    {std::lock_guard<std::mutex> lock(terrainProbeM);if(!shaderDumpSeen.insert(key).second||shaderDumped.load()>=limit)return;
+        shaderDumped.fetch_add(1);}
+    if(writeShaderDump(stages[details.stage],id.hash,details.bytecode.data(),details.bytecode.size()))
+        emit(fmt("D3D11-SHDUMP stage=%s hash=%016llx bytes=%zu serial=%u",stages[details.stage],id.hash,id.bytes,id.serial));
+    else emit(fmt("D3D11-SHDUMP stage=%s hash=%016llx bytes=%zu write=failed",stages[details.stage],id.hash,id.bytes));
+}
+inline void notePointGsTarget(void* self,ContextState& state,unsigned topology,unsigned shaderBits) {
+    if(topology!=D3D11_PRIMITIVE_TOPOLOGY_POINTLIST||!(shaderBits&4))return;
+    auto* context=static_cast<ID3D11DeviceContext*>(self);ID3D11RenderTargetView* rtv=nullptr;
+    context->OMGetRenderTargets(1,&rtv,nullptr);if(!rtv)return;
+    ID3D11Resource* resource=nullptr;rtv->GetResource(&resource);D3D11_RENDER_TARGET_VIEW_DESC vd{};rtv->GetDesc(&vd);rtv->Release();if(!resource)return;
+    std::string text=fmt("fmt=%s size=%ux%u",formatText(vd.Format).c_str(),state.rtWidth.load(),state.rtHeight.load());
+    void* key=resource;
+    {std::lock_guard<std::mutex> lock(terrainProbeM);terrainTargets.insert_or_assign(key,text);}
+    std::string once=fmt("%p/%s",key,text.c_str());
+    bool fresh=false;{std::lock_guard<std::mutex> lock(terrainProbeM);fresh=terrainTargetSeen.insert(once).second;}
+    if(fresh)emit(fmt("D3D11-GSTARGET resource=%p %s later-srv=no",key,text.c_str()));
+    resource->Release();
 }
 inline std::string boundDrawResources(void* self) {
     auto* context=static_cast<ID3D11DeviceContext*>(self);
@@ -632,6 +731,13 @@ inline void noteDrawState(void* self,ContextState& state,unsigned topology,unsig
     std::string flags;
     if(srv&1)flags+=" ps-null";if(srv&2)flags+=" ps-over-target";
     if(srv&4)flags+=" gs-null";if(srv&8)flags+=" gs-over-target";
+    if(topology==D3D11_PRIMITIVE_TOPOLOGY_POINTLIST&&(state.shaders.load(std::memory_order_relaxed)&4)) {
+        notePointGsTarget(self,state,topology,state.shaders.load(std::memory_order_relaxed));
+        noteShaderDump(reinterpret_cast<void*>(state.gsHash.load(std::memory_order_relaxed)));
+        noteShaderDump(reinterpret_cast<void*>(state.psHash.load(std::memory_order_relaxed)));
+        ID3D11VertexShader* vs=nullptr;static_cast<ID3D11DeviceContext*>(self)->VSGetShader(&vs,nullptr,nullptr);
+        if(vs){noteShaderDump(vs);vs->Release();}
+    }
     const char* countLabel=kind==0||kind==2?"indices":kind==1||kind==3?"vertices":"indirect";
     std::string key=fmt("%u/%u/%u/%u/%llx/%zx/%u/%llx/%zx/%u/%u/%u/%u/%u/%x",deferred,id,kind,topology,gs.hash,gs.bytes,gs.serial,ps.hash,ps.bytes,ps.serial,fmtNow,state.rtWidth.load(),state.rtHeight.load(),state.dsFormat.load(),srv);
     std::string drawCounts=kind>=kDrawAuto?"counts=gpu":fmt("%s=%u instances=%u",countLabel,count,instances);
@@ -646,7 +752,7 @@ inline void noteDrawState(void* self,ContextState& state,unsigned topology,unsig
     // records the bindings it ran with.
     if(deferred) {
         for(const auto& old:state.pendingDeepDraws)if(old.key==key)return;
-        if(state.pendingDeepDraws.size()<kMaxDrawStates)state.pendingDeepDraws.push_back({key,text+" "+boundDrawResources(self)});
+        if(state.pendingDeepDraws.size()<kMaxDrawStates)state.pendingDeepDraws.push_back({key,text+" "+boundDrawResources(self)+" "+shaderDeclaredBindings(self,reinterpret_cast<void*>(state.psHash.load(std::memory_order_relaxed)))});
         else state.pendingDeepDrawsCapped=true;
         return;
     }
@@ -659,7 +765,7 @@ inline void noteDrawState(void* self,ContextState& state,unsigned topology,unsig
             drawStatesCapped=true;line="further immediate draw-state lines suppressed (cap reached)";
         } else {seen.insert(reportKey);++drawStates;line=text;}
     }
-    if(line==text)line+=" "+boundDrawResources(self);
+    if(line==text)line+=" "+boundDrawResources(self)+" "+shaderDeclaredBindings(self,reinterpret_cast<void*>(state.psHash.load(std::memory_order_relaxed)));
     emit(line);
 }
 inline void noteFinishedCommandList(void* context,ID3D11CommandList* list) {
@@ -1156,6 +1262,9 @@ static HRESULT STDMETHODCALLTYPE createBuffer(DevicePtr self,const D3D11_BUFFER_
     // them at creation the counts are visible here; a zero index/vertex count
     // is a draw that submits no work, which is what a silently missing layer
     // looks like when the submission is indirect.
+    if(SUCCEEDED(hr)&&d&&out&&*out) {
+        std::lock_guard<std::mutex> lock(reportM);bufferCpuWritten[*out]=init&&init->pSysMem;
+    }
     if(SUCCEEDED(hr)&&d&&(d->MiscFlags&D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS)) {
         if(out&&*out)noteIndirectBuffer(*out,d->ByteWidth);
         std::string words="no-initial-data (written by the GPU or later)";
@@ -1274,8 +1383,10 @@ static HRESULT STDMETHODCALLTYPE createShader(DevicePtr self,const void* code,SI
     // The deep-draw state lines name a draw's GS/PS by its creation identity
     // (content hash + length + serial); the bind hooks only see the shader
     // object, so the identity is remembered here.
-    if(SUCCEEDED(hr)&&out&&*out&&deepDraw())
-        noteShaderHash(*out,fnv(code,size_t(std::min<SIZE_T>(length,16u<<20))),size_t(length));
+    if(SUCCEEDED(hr)&&out&&*out&&deepDraw()) {
+        int stage=Slot==CreateVertexShader?0:Slot==CreateGeometryShader?1:Slot==CreatePixelShader?2:Slot==CreateHullShader?3:Slot==CreateDomainShader?4:5;
+        noteShaderHash(*out,fnv(code,size_t(std::min<SIZE_T>(length,16u<<20))),size_t(length),code,stage);
+    }
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createGeometryShaderWithStreamOutput(DevicePtr self,const void* code,SIZE_T length,const D3D11_SO_DECLARATION_ENTRY* entries,UINT entryCount,
@@ -1284,6 +1395,7 @@ static HRESULT STDMETHODCALLTYPE createGeometryShaderWithStreamOutput(DevicePtr 
     D3D11_DIAG_HOOK(Fn,CreateGeometryShaderWithStreamOutput)HRESULT hr=call(self,code,length,entries,entryCount,strides,strideCount,rasterized,linkage,out);
     if(FAILED(hr)){std::string key,text=shaderText(code,length,&key);D3D11_DIAG_FAILED("CreateGeometryShaderWithStreamOutput",key,text+fmt(" so-entries=%u strides=%u rasterized=%u",entryCount,strideCount,rasterized));}
     else if(SUCCEEDED(hr)) {
+        if(out&&*out&&deepDraw())noteShaderHash(*out,fnv(code,size_t(std::min<SIZE_T>(length,16u<<20))),size_t(length),code,1);
         std::string scan=gsBytecodeText(code,length);
         if(!scan.empty())report(1,scan+" so",scan+fmt(" so-entries=%u rasterized=%u bytes=%zu hash=%016llx",entryCount,rasterized,size_t(length),
             (unsigned long long)fnv(code,size_t(std::min<SIZE_T>(length,16u<<20)))));
@@ -1375,6 +1487,7 @@ static HRESULT STDMETHODCALLTYPE contextMap(DevicePtr self,ID3D11Resource* r,UIN
     int indirect=indirectIndex(r);
     HRESULT hr=call(self,r,subresource,type,flags,mapped);
     if(SUCCEEDED(hr))traceCommand("Map","subresource=%u type=%d flags=0x%x",subresource,int(type),flags);
+    if(SUCCEEDED(hr)&&type!=D3D11_MAP_READ&&type!=D3D11_MAP_READ_WRITE)noteBufferWrite(r);
     if(SUCCEEDED(hr)&&indirect>=0&&mapped&&mapped->pData&&
             (type==D3D11_MAP_WRITE||type==D3D11_MAP_WRITE_DISCARD||type==D3D11_MAP_WRITE_NO_OVERWRITE))
         indirectMapped[indirect].store(mapped->pData,std::memory_order_relaxed);
@@ -1554,8 +1667,22 @@ static void STDMETHODCALLTYPE contextSetShaderResources(DevicePtr self,UINT star
     srvSets[Stage].fetch_add(1,std::memory_order_relaxed);
     if(!views||!count)srvNulls[Stage].fetch_add(1,std::memory_order_relaxed);
     else for(UINT i=0;i<count;++i) if(!views[i]){srvNulls[Stage].fetch_add(1,std::memory_order_relaxed);break;}
-    if(views&&count)for(UINT i=0;i<count;++i)
-        if(views[i]&&wasRenderTarget(views[i])){srvFeedbackSets.fetch_add(1,std::memory_order_relaxed);break;}
+    if(views&&count)for(UINT i=0;i<count;++i)if(views[i]) {
+        if(wasRenderTarget(views[i]))srvFeedbackSets.fetch_add(1,std::memory_order_relaxed);
+        if(deepDraw()) {
+            ID3D11Resource* resource=nullptr;views[i]->GetResource(&resource);
+            if(resource) {
+                std::string target;bool found=false;
+                {std::lock_guard<std::mutex> lock(terrainProbeM);auto it=terrainTargets.find(resource);if(it!=terrainTargets.end()){target=it->second;found=true;}}
+                if(found) {
+                    std::string key=fmt("sampled/%p",resource);bool fresh=false;
+                    {std::lock_guard<std::mutex> lock(terrainProbeM);fresh=terrainProbeSeen.insert(key).second;}
+                    if(fresh)emit(fmt("D3D11-GSTARGET resource=%p %s later-srv=yes stage=%d slot=%u",resource,target.c_str(),Stage,start+i));
+                }
+                resource->Release();
+            }
+        }
+    }
     // Deep-draw state: the PS/GS null and over-target bits at bind time, so a
     // draw-state line can say whether the shader that rendered black sampled
     // an unbound texture or its own target. The bits describe THIS context's
@@ -1803,6 +1930,7 @@ static void STDMETHODCALLTYPE contextSetPredication(DevicePtr self,ID3D11Predica
 static void STDMETHODCALLTYPE contextUpdateSubresource(DevicePtr self,ID3D11Resource* resource,UINT subresource,const D3D11_BOX* box,const void* data,UINT rowPitch,UINT depthPitch) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT,const D3D11_BOX*,const void*,UINT,UINT);
     auto call=reinterpret_cast<Fn>(original(self,UpdateSubresource));if(!call)return;
+    if(data)noteBufferWrite(resource);
     if(data&&isIndirectBuffer(resource)) {
         // The source is only as large as the buffer it fills (or the box it
         // fills), so read no more than that.

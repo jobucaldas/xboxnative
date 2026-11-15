@@ -107,6 +107,14 @@ static void configure_d3d12_sm_cap() {
     }
 }
 static const char* d3d12_sm_cap_for_trace() { return g_d3d12_sm_cap[0] ? g_d3d12_sm_cap : "off"; }
+static bool write_d3d11_shader_dump(const char* stage,unsigned long long hash,const void* data,size_t bytes) {
+    if(!stage||!data||!bytes)return false;
+    std::wstring dir=g_dir+L"\\shaderdump";CreateDirectoryW(dir.c_str(),nullptr);
+    std::wstring wstage;for(const char* c=stage;*c;++c)wstage.push_back(static_cast<wchar_t>(*c));
+    wchar_t path[320]{};swprintf(path,sizeof(path)/sizeof(path[0]),L"%ls\\%ls_%016llx.dxbc",dir.c_str(),wstage.c_str(),hash);
+    FILE* file=_wfopen(path,L"wb");if(!file)return false;
+    bool ok=fwrite(data,1,bytes,file)==bytes;ok=fclose(file)==0&&ok;return ok;
+}
 
 // ---------------------------------------------------------------- framebuffer + bitmap text
 static const int W = 1920, H = 1080;
@@ -2692,11 +2700,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         // ignored) -> the guest may enable the layer. Read once at boot; absent
         // (the default) -> the layer is never enabled on the console.
         d3d12_diag::debugLayerOptIn.store(GetFileAttributesW((g_dir + L"\\d3d12debug.txt").c_str()) != INVALID_FILE_ATTRIBUTES);
-        // Deep-draw state probe: LocalState\d3d11deep.txt present (contents
-        // ignored) -> draw-time pipeline signatures are logged once each
-        // (topology, GS/PS content hash, target format, PS/GS SRV null and
-        // over-target bits). Read once at boot; the diagnostics header stays
-        // file-system free and asks this probe at adopt time.
+        // Deep-draw state probe: LocalState\d3d11deep.txt present -> draw-time
+        // pipeline signatures are logged once each. Optional shaderdump=N writes
+        // up to N distinct VS/GS/PS blobs used by pointlist+GS draws to
+        // LocalState\shaderdump. Read once at boot; the diagnostics header
+        // stays file-system free and asks this probe at adopt time.
         // Per-call D3D12 trace probe: LocalState\d3d12trace.txt present (contents ignored).
         // Read by the D3D12 diagnostics at the first device adoption; default off.
         d3d12_diag::set_trace_requested = [] {
@@ -2710,8 +2718,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             return enabled;
         };
         d3d11_diag::set_deep_draw = [] {
-            DWORD attrs = GetFileAttributesW((g_dir + L"\\d3d11deep.txt").c_str());
-            return attrs != INVALID_FILE_ATTRIBUTES;
+            FILE* file=_wfopen((g_dir+L"\\d3d11deep.txt").c_str(),L"rb");
+            if(!file)return false;
+            char text[256]{};size_t bytes=fread(text,1,sizeof(text)-1,file);fclose(file);text[bytes]='\\0';
+            unsigned limit=0;const char* option=strstr(text,"shaderdump=");
+            if(option){char* end=nullptr;unsigned long parsed=strtoul(option+11,&end,10);if(end!=option+11)limit=static_cast<unsigned>(std::min<unsigned long>(parsed,32));}
+            d3d11_diag::shaderDumpLimit.store(limit,std::memory_order_release);
+            d3d11_diag::writeShaderDump=write_d3d11_shader_dump;
+            return true;
         };
         d3d11_diag::set_trace_requested = [] {
             DWORD attrs = GetFileAttributesW((g_dir + L"\\d3d11resizetrace.txt").c_str());
