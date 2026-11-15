@@ -2433,7 +2433,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         v.note = m_pick.note.c_str();
         ui_launcher::draw_picker_sheet(c, g_font, v);
     }
-    // One-shot synthetic command file LocalState\cmd.txt (consumed on read). Lines: open <appid> | press (=A) | back (=B) | view | up | down | left | right | lb | rb | l3 | x | y | sort | filters | search | type <text> | profile | sleep <s>.
+    // One-shot synthetic command file LocalState\cmd.txt (consumed on read). Lines: open <appid> | press (=A) | pick <index> | back (=B) | view | up | down | left | right | lb | rb | l3 | x | y | sort | filters | search | type <text> | profile | sleep <s>.
     // Semantics follow the new screens: B does nothing on the library root (item 14 — logout is
     // the sidebar PROFILE row's A, with a Cancel-default confirm sheet); on the detail page X/Y
     // are no longer shortcuts (focus the trash/cloud/cog buttons with left/right, then A).
@@ -2564,6 +2564,15 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 else logf("cmd.txt: menu ignored (no focused tile)");
             } else if (g_screen == S_DETAIL) open_options(m_dApp, "cmd.txt menu");
             else logf("cmd.txt: menu ignored on this screen");
+            return;
+        }
+        if (c.rfind("pick ", 0) == 0) {
+            size_t index = 0;
+            if (!launch_picker::parse_pick(c, index)) { logf("picker: invalid command '%s'", c.c_str()); return; }
+            if (!launch_picker::select(m_pick, index)) { logf("picker: index %zu out of range", index); return; }
+            const launch_target::Choice* choice = launch_picker::current(m_pick);
+            logf("picker: options=%zu chose=%zu label=\"%s\"", m_pick.rows.size(), index, choice->label.c_str());
+            detail_picker_a("cmd.txt pick");
             return;
         }
         GamepadButtons m = GamepadButtons::None;
