@@ -227,6 +227,24 @@ inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, cons
 // file name. Returning an empty vector reports "module not found" to the
 // guest (ERROR_MOD_NOT_FOUND), matching Windows' loader.
 using DllSource = std::function<std::vector<uint8_t>(const std::string&)>;
+using DllReader = std::function<std::vector<uint8_t>(const std::string&)>;
+using DllOriginLogger = std::function<void(const std::string&, const char*)>;
+using DllLoadObserver = std::function<void(const std::string&, const std::vector<std::string>&)>;
+inline bool is_vc110_vc120_dll(const std::string& name) {
+    std::string lower=name; for(auto& c:lower)if(c>='A'&&c<='Z')c+=32;
+    return lower=="msvcr110.dll"||lower=="msvcp110.dll"||lower=="msvcr120.dll"||lower=="msvcp120.dll";
+}
+inline DllSource make_vc110_vc120_source(const DllReader& game, const DllReader& runtime,
+                                         const DllOriginLogger& log = nullptr) {
+    return [game,runtime,log](const std::string& name) {
+        if(!is_vc110_vc120_dll(name))return std::vector<uint8_t>{};
+        auto bytes=game?game(name):std::vector<uint8_t>{};
+        const char* origin="game dir";
+        if(bytes.empty()) { bytes=runtime?runtime(name):std::vector<uint8_t>{}; origin="runtime"; }
+        if(!bytes.empty()&&log)log(name,origin);
+        return bytes;
+    };
+}
 // One loaded DLL: the mapped image plus the LoadLibrary refcount. A real
 // unload (refcount to zero -> unmap) is not implemented; FreeLibrary says so.
 struct Dll {
@@ -275,7 +293,7 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
                     const DllSource& source, std::map<std::string, Dll>& loaded, unsigned depth = 0,
                     std::vector<std::string>* order = nullptr,
                     const std::function<uint32_t(const std::string&, const std::string&)>& os_resolve = nullptr,
-                    const std::string& module_name = {}) {
+                    const std::string& module_name = {}, const DllLoadObserver& observe = nullptr) {
     if (depth > 16) throw std::runtime_error("DLL dependencies nested too deep");
     // A failed load leaves nothing behind (Windows unloads what a failed
     // LoadLibrary mapped). The top-level call remembers the modules and the
@@ -356,7 +374,7 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
         if (known == loaded.end()) {
             std::vector<uint8_t> bytes = source ? source(dll) : std::vector<uint8_t>{};
             if (bytes.empty()) continue;  // stays unresolved; the stub faults by name
-            Dll dep = load_dll(mem, table, reg, bytes, source, loaded, depth + 1, order, os_resolve, dll);
+            Dll dep = load_dll(mem, table, reg, bytes, source, loaded, depth + 1, order, os_resolve, dll, observe);
             known = loaded.find(dll);  // load_dll reserved the slot (cycles reuse it)
             known->second.host_name = dll;
             if (order) order->push_back(dll);  // load order: DllMain runs in reverse at detach
@@ -404,6 +422,7 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
             }
         }
     }
+    if (observe && !module_name.empty()) observe(module_name, img.unresolved);
     if (self) {  // the reserved slot is completed in place: cycles keep the base
         self->image = std::move(img);
         self->host_name = module_name;
