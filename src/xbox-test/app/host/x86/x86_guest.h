@@ -1172,6 +1172,72 @@ inline void Guest::register_all() {
         for (uint32_t i = 0; i < put; ++i) { mem.w8(dst + i * 2, uint8_t(s[i])); mem.w8(dst + i * 2 + 1, 0); }
         if (put < cap) { mem.w8(dst + put * 2, 0); mem.w8(dst + put * 2 + 1, 0); }
         return put; });
+    auto nls_output = [this](Host::NlsRequest& request, uint32_t output_ptr, uint32_t expected_bytes) {
+        if (!host.nls_call) { set_last_error(87); return 0u; }
+        Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error);
+        const uint32_t bytes = expected_bytes == 0xFFFFFFFFu ? response.result * 2 : expected_bytes;
+        if (response.result && output_ptr && response.output.size() == bytes)
+            copy_out(output_ptr, response.output.data(), bytes);
+        return response.result;
+    };
+    reg.add("kernel32.dll", "GetStringTypeA", Conv::Stdcall, 5, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::GetStringTypeA;
+        request.locale = c.arg(0); request.type = c.arg(1); request.output_null = c.arg(4) == 0;
+        nls_input(c.arg(2), int32_t(c.arg(3)), 1, request);
+        const uint32_t chars = request.input_length == -1 ? uint32_t(request.input.size()) : uint32_t(request.input_length);
+        request.output_capacity = chars;
+        return nls_output(request, c.arg(4), chars * 2);
+    });
+    reg.add("kernel32.dll", "GetStringTypeW", Conv::Stdcall, 4, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::GetStringTypeW;
+        request.type = c.arg(0); request.output_null = c.arg(3) == 0; nls_input(c.arg(1), int32_t(c.arg(2)), 2, request);
+        const uint32_t chars = request.input_length == -1 ? uint32_t(request.input.size() / 2) : uint32_t(request.input_length);
+        request.output_capacity = chars;
+        return nls_output(request, c.arg(3), chars * 2);
+    });
+    reg.add("kernel32.dll", "GetStringTypeExW", Conv::Stdcall, 5, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::GetStringTypeExW;
+        request.locale = c.arg(0); request.type = c.arg(1); request.output_null = c.arg(4) == 0;
+        nls_input(c.arg(2), int32_t(c.arg(3)), 2, request);
+        const uint32_t chars = request.input_length == -1 ? uint32_t(request.input.size() / 2) : uint32_t(request.input_length);
+        request.output_capacity = chars;
+        return nls_output(request, c.arg(4), chars * 2);
+    });
+    reg.add("kernel32.dll", "LCMapStringW", Conv::Stdcall, 6, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::LCMapStringW;
+        request.locale = c.arg(0); request.flags = c.arg(1); request.output_capacity = c.arg(5); request.output_null = c.arg(4) == 0;
+        nls_input(c.arg(2), int32_t(c.arg(3)), 2, request);
+        return nls_output(request, c.arg(4), 0xFFFFFFFFu);
+    });
+    reg.add("kernel32.dll", "LCMapStringEx", Conv::Stdcall, 9, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::LCMapStringEx;
+        request.flags = c.arg(1); request.output_capacity = c.arg(5); request.output_null = c.arg(4) == 0;
+        request.locale_name_null = c.arg(0) == 0; if (!request.locale_name_null) request.locale_name = wstr(c.arg(0));
+        nls_input(c.arg(2), int32_t(c.arg(3)), 2, request);
+        return nls_output(request, c.arg(4), 0xFFFFFFFFu);
+    });
+    reg.add("kernel32.dll", "CompareStringW", Conv::Stdcall, 6, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::CompareStringW;
+        request.locale = c.arg(0); request.flags = c.arg(1); nls_input(c.arg(2), int32_t(c.arg(3)), 2, request);
+        Host::NlsRequest second{}; nls_input(c.arg(4), int32_t(c.arg(5)), 2, second);
+        request.input2 = std::move(second.input); request.input2_null = second.input_null; request.input2_length = second.input_length;
+        return nls_output(request, 0, 0);
+    });
+    reg.add("kernel32.dll", "CompareStringEx", Conv::Stdcall, 9, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::CompareStringEx;
+        request.flags = c.arg(1); request.locale_name_null = c.arg(0) == 0;
+        if (!request.locale_name_null) request.locale_name = wstr(c.arg(0));
+        nls_input(c.arg(2), int32_t(c.arg(3)), 2, request);
+        Host::NlsRequest second{}; nls_input(c.arg(4), int32_t(c.arg(5)), 2, second);
+        request.input2 = std::move(second.input); request.input2_null = second.input_null; request.input2_length = second.input_length;
+        return nls_output(request, 0, 0);
+    });
+    reg.add("kernel32.dll", "FoldStringW", Conv::Stdcall, 5, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::FoldStringW;
+        request.flags = c.arg(0); request.output_capacity = c.arg(4); request.output_null = c.arg(3) == 0;
+        nls_input(c.arg(1), int32_t(c.arg(2)), 2, request);
+        return nls_output(request, c.arg(3), 0xFFFFFFFFu);
+    });
     reg.add("kernel32.dll", "WideCharToMultiByte", Conv::Stdcall, 8, [this, nls_input](Cpu& c) -> uint32_t {
         uint32_t cp = c.arg(0), flags = c.arg(1), src = c.arg(2), dst = c.arg(4), cap = c.arg(5), def = c.arg(6), used = c.arg(7);
         int32_t n = int32_t(c.arg(3));

@@ -8,6 +8,16 @@ int main() {
     Memory mem; mem.map(0x1000, 0x20000, PROT_R | PROT_W); mem.map(TEB_ADDR, 0x1000, PROT_R | PROT_W);
     ThunkTable th; Host host; Registry reg; Guest guest(mem, host, reg);
     guest.register_all(); Cpu cpu(mem, th); cpu.reg[ESP] = 0x1f000;
+    const std::pair<const char*, uint8_t> expected_nls[] = {
+        {"getstringtypew", 4}, {"getstringtypea", 5}, {"getstringtypeexw", 5},
+        {"lcmapstringw", 6}, {"lcmapstringex", 9}, {"comparestringw", 6},
+        {"comparestringex", 9}, {"foldstringw", 5}
+    };
+    for (const auto& expected : expected_nls) {
+        auto found = reg.map.find({"kernel32.dll", expected.first});
+        CHECK(found != reg.map.end());
+        if (found != reg.map.end()) CHECK(found->second.argc == expected.second);
+    }
     auto it = reg.map.find({"kernel32.dll", "isvalidcodepage"});
     CHECK(it != reg.map.end());
     if (it != reg.map.end()) {
@@ -35,6 +45,7 @@ int main() {
     mem.w8(bytes, 0x82); mem.w8(bytes + 1, 0xA0); mem.w8(default_char, '?');
     uint32_t seen_mb_flags = 0, seen_wc_flags = 0;
     bool saw_default_char = false, saw_used_default = false;
+    bool saw_string_type_input = false, saw_map_locale = false, saw_compare_inputs = false;
     host.nls_call = [&](const Host::NlsRequest& request) {
         if (request.operation == Host::NlsOperation::MultiByteToWideChar) seen_mb_flags = request.flags;
         if (request.operation == Host::NlsOperation::WideCharToMultiByte) {
@@ -81,9 +92,48 @@ int main() {
             if (count == 3) response.output.push_back(0);
             return response;
         }
+        if (request.operation == Host::NlsOperation::GetStringTypeA ||
+            request.operation == Host::NlsOperation::GetStringTypeW ||
+            request.operation == Host::NlsOperation::GetStringTypeExW) {
+            if (request.operation == Host::NlsOperation::GetStringTypeW)
+                saw_string_type_input = request.type == 1 && request.input_length == 2 && request.input.size() == 4 && request.input[0] == 'A' && request.input[2] == 'B';
+            response.result = 1; response.last_error = 1234;
+            response.output = {0x11, 0x22, 0x33, 0x44};
+            return response;
+        }
+        if (request.operation == Host::NlsOperation::LCMapStringW || request.operation == Host::NlsOperation::LCMapStringEx ||
+            request.operation == Host::NlsOperation::FoldStringW) {
+            if (request.operation == Host::NlsOperation::LCMapStringEx)
+                saw_map_locale = request.locale_name == u"en-US" && request.flags == 0x100 && request.input_length == 2;
+            response.result = 2; response.output = {0x42, 0, 0x43, 0};
+            return response;
+        }
+        if (request.operation == Host::NlsOperation::CompareStringW || request.operation == Host::NlsOperation::CompareStringEx) {
+            if (request.operation == Host::NlsOperation::CompareStringEx)
+                saw_compare_inputs = request.input_length == 2 && request.input2_length == 2 && request.input2.size() == 4 && request.input2[0] == 'C';
+            response.result = 3;
+            return response;
+        }
         response.last_error = 87;
         return response;
     };
+    mem.w32(wide, uint32_t('A') | (uint32_t('B') << 16)); mem.w32(wide + 4, 0);
+    const uint32_t locale_name = 0x1600, wide2 = 0x1700;
+    const char16_t locale_text[] = u"en-US";
+    for (uint32_t i = 0; i < 6; ++i) { mem.w8(locale_name + i * 2, uint8_t(locale_text[i])); mem.w8(locale_name + i * 2 + 1, uint8_t(locale_text[i] >> 8)); }
+    mem.w32(wide2, uint32_t('C') | (uint32_t('D') << 16)); mem.w32(wide2 + 4, 0);
+    CHECK(invoke("getstringtypea", {0x409, 1, bytes, 2, out}) == 1);
+    CHECK(mem.r8(out) == 0x11 && guest.last_error() == 1234);
+    CHECK(invoke("getstringtypew", {1, wide, 2, out}) == 1);
+    CHECK(mem.r8(out + 2) == 0x33);
+    CHECK(invoke("getstringtypeexw", {0x409, 1, wide, 2, out}) == 1);
+    CHECK(invoke("lcmapstringw", {0x409, 0x100, wide, 2, out, 4}) == 2);
+    CHECK(mem.r32(out) == 0x00430042);
+    CHECK(invoke("lcmapstringex", {locale_name, 0x100, wide, 2, out, 4, 0, 0, 0}) == 2);
+    CHECK(invoke("comparestringw", {0x409, 0, wide, 2, wide2, 2}) == 3);
+    CHECK(invoke("comparestringex", {locale_name, 0, wide, 2, wide2, 2, 0, 0, 0}) == 3);
+    CHECK(invoke("foldstringw", {0, wide, 2, out, 4}) == 2);
+    CHECK(saw_string_type_input && saw_map_locale && saw_compare_inputs);
     CHECK(invoke("isvalidcodepage", {932}) == 1);
     CHECK(invoke("getcpinfo", {932, out}) == 1);
     CHECK(mem.r32(out) == 2 && mem.r8(out + 6) == 0x81 && mem.r8(out + 9) == 0xFC);
