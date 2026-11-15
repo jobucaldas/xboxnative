@@ -1706,6 +1706,14 @@ inline void Guest::register_all() {
     reg.add("ntdll.dll", "NtQueryInformationFile", Conv::Stdcall, 5, [](Cpu&) -> uint32_t { return 0xC0000008u; });  // invalid handle
     reg.add("ntdll.dll", "NtRaiseHardError", Conv::Stdcall, 6, [this](Cpu& c) -> uint32_t { do_exit(c, 3); return 0; });
     reg.add("ntdll.dll", "RtlDllShutdownInProgress", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
+    // Wine-built CRT donors use Wine's private debug ABI, not a Windows ntdll
+    // API. Keep every channel disabled: no host logging is fabricated, and the
+    // header's -1 tells Wine's debug macros not to format a line.
+    const uint32_t wine_debug_empty = put_str("");
+    reg.add("ntdll.dll", "__wine_dbg_get_channel_flags", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("ntdll.dll", "__wine_dbg_header", Conv::Cdecl, 3, [](Cpu&) -> uint32_t { return uint32_t(-1); });
+    reg.add("ntdll.dll", "__wine_dbg_output", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("ntdll.dll", "__wine_dbg_strdup", Conv::Cdecl, 1, [wine_debug_empty](Cpu&) -> uint32_t { return wine_debug_empty; });
 
     // kernel32/ntdll bridge: the CRT startup asks for the named-object
     // directory handle; a fake handle keeps the caller off the real path.
