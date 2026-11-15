@@ -133,18 +133,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ${{ runner.temp }}/cargo-target
-          key: xwin-cargo-${{ runner.os }}-0.9.0-rust-1.90.0
+          key: xwin-cargo-${{ runner.os }}-0.10.0-rust-1.90.0
       - name: Cache pinned xwin SDK and CRT
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/uwp-crossbuild/xwin
             ~/.cache/uwp-crossbuild/xwin-download
-          key: xwin-${{ runner.os }}-0.9.0-sdk-10.0.26100-crt-14.44.17.14
+          key: xwin-${{ runner.os }}-0.10.0-sdk-10.0.26100-crt-14.44.17.14
       - name: Install pinned xwin
-        env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
-        run: cargo install xwin --version 0.9.0 --locked --root "$RUNNER_TEMP/xwin"
+        run: CARGO_TARGET_DIR="$RUNNER_TEMP/cargo-target" cargo install xwin --version 0.10.0 --locked --root "$RUNNER_TEMP/xwin"
       - name: Fetch pinned UWP crossbuild wrapper
         run: bash src/tools/fetch-uwp-crossbuild.sh
       - name: Restore hash-verified Windows SDK headers
@@ -158,9 +156,7 @@ jobs:
               splat --output "$xwin"
           fi
       - name: Compile launcher with the UWP header partition
-        env:
-          CLANG_CL: clang-cl-19
-        run: bash src/xbox-test/app/tests/uwp-launcher-compile.sh
+        run: CLANG_CL=clang-cl-19 bash src/xbox-test/app/tests/uwp-launcher-compile.sh
   registry-persistence:
     runs-on: ubuntu-latest
     steps:
