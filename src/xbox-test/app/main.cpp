@@ -2161,12 +2161,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             const uint64_t last=guest_overlay::lastPresentTick.load(std::memory_order_acquire);
             presentSilence=last&&uint64_t(now.QuadPart)>=last?
                 double(uint64_t(now.QuadPart)-last)/double(freq.QuadPart):
-                guest_watchdog::kSilenceSeconds+1;
+                guest_watchdog::kForceQuitSilenceSeconds+1;
         }
         if(!guest_watchdog::should_force_quit(finished,now_s()-m_quitRequestedAt,presentSilence))return;
         if(runtime->finished.load(std::memory_order_acquire))return;
         m_quitEscalated=true;
-        const std::string reason="quit requested; guest stopped presenting and was force-quit after 10 seconds";
+        const std::string reason="quit requested; guest was silent for 60 seconds and was force-quit";
         logf("overlay: %s",reason.c_str());
         lp_finish(g_launch.gen.load(),g_launch.appid.load(),reason,false,
                   runtime->mappedCount.load(),runtime->moduleCount.load(),"quit-forced");

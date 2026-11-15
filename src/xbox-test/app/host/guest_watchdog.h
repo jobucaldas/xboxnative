@@ -19,11 +19,12 @@
 
 namespace guest_watchdog {
 
-// Seconds without a guest present (or other heartbeat) before the guest is
-// declared dead. A 2000 ms present stall was logged on the console before a
-// device removal; 10 s clears every transient stall seen in captures while
-// still recovering the screen within a player's patience.
+// Seconds without a guest present (or other heartbeat) before the launcher
+// marks the guest unresponsive. This is recoverable if a later present arrives.
 constexpr double kSilenceSeconds = 10.0;
+// A close request may arrive during a Unity scene load that blocks presents for
+// tens of seconds. Wait longer before treating that silence as a hung guest.
+constexpr double kForceQuitSilenceSeconds = 60.0;
 constexpr double kQuitGraceSeconds = 10.0;
 
 // A close request is escalated only when the guest is still alive, the grace
@@ -31,7 +32,7 @@ constexpr double kQuitGraceSeconds = 10.0;
 constexpr bool should_force_quit(bool guestFinished, double sinceQuitSeconds,
                                  double presentSilenceSeconds) {
     return !guestFinished && sinceQuitSeconds > kQuitGraceSeconds &&
-           presentSilenceSeconds > kSilenceSeconds;
+           presentSilenceSeconds > kForceQuitSilenceSeconds;
 }
 
 // A gap above this many ticks cannot be real silence — it is out-of-order

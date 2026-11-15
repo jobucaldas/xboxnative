@@ -33,6 +33,7 @@ using guest_watchdog::GuideStep;
 using guest_watchdog::kHomeRows;
 using guest_watchdog::kForceQuitRow;
 using guest_watchdog::kSilenceSeconds;
+using guest_watchdog::kForceQuitSilenceSeconds;
 using guest_watchdog::should_force_quit;
 using guest_watchdog::kQuitGraceSeconds;
 
@@ -45,11 +46,12 @@ int main() {
         struct IgnoresCloseGuest { bool closePosted=false, finished=false; } guest;
         guest.closePosted=true;   // WM_CLOSE is posted, but this fixture ignores it
         CHECK(guest.closePosted&&!guest.finished);
-        CHECK(!should_force_quit(guest.finished,kQuitGraceSeconds,kSilenceSeconds+1));
-        CHECK(!should_force_quit(guest.finished,kQuitGraceSeconds+1,kSilenceSeconds));
-        CHECK(should_force_quit(guest.finished,kQuitGraceSeconds+1,kSilenceSeconds+1));
+        CHECK(!should_force_quit(guest.finished,kQuitGraceSeconds,kForceQuitSilenceSeconds+1));
+        CHECK(!should_force_quit(guest.finished,kQuitGraceSeconds+1,30));
+        CHECK(!should_force_quit(guest.finished,kQuitGraceSeconds+1,kForceQuitSilenceSeconds));
+        CHECK(should_force_quit(guest.finished,kQuitGraceSeconds+1,kForceQuitSilenceSeconds+1));
         guest.finished=true;      // natural exit wins even after the deadline
-        CHECK(!should_force_quit(guest.finished,kQuitGraceSeconds+1,kSilenceSeconds+1));
+        CHECK(!should_force_quit(guest.finished,kQuitGraceSeconds+1,kForceQuitSilenceSeconds+1));
     }
 
     // A live guest: presents 8 ms apart, never dead.
@@ -74,15 +76,14 @@ int main() {
         CHECK(v.reason == Reason::none);
     }
 
-    // Silence just under the threshold: still alive (a 2 s stall was seen on
-    // the console before a device removal).
+    // Silence just under the threshold: still alive (a later present recovers).
     {
         Inputs in; in.ticksPerSecond = hz; in.lastActivityTick = hz;
         in.nowTick = hz + uint64_t((kSilenceSeconds - 0.5) * double(hz));
         CHECK(!evaluate(in).dead);
     }
 
-    // Silence past the threshold: dead by silence (the device-removal hang).
+    // Silence past the threshold: dead by silence (a genuinely hung guest).
     {
         Inputs in; in.ticksPerSecond = hz; in.lastActivityTick = hz;
         in.nowTick = hz + uint64_t((kSilenceSeconds + 0.5) * double(hz));
