@@ -47,6 +47,7 @@ struct PlayResult {
     uint32_t base = 0, entry = 0;
     unsigned imports = 0, bound = 0, relocations = 0;
     std::vector<std::string> unresolved;   // "dll!symbol", in IAT order
+    std::vector<std::tuple<std::string,std::string,gap_summary::Outcome>> gap_imports;
 };
 // `name` is the executable's file name as the guest sees it (GetModuleFileName,
 // argv[0]); `cmdline` is the command line (quoted exe plus the option's
@@ -69,7 +70,8 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
                             const std::function<void(const PlayResult&)>& on_loaded = nullptr,
                             uint64_t instruction_limit = 500ull * 1000 * 1000,
                             const DllSource& dll_source = nullptr,
-                            bool trace_fault_context = false) {
+                            bool trace_fault_context = false,
+                            const std::function<void(const PlayResult&)>& on_imports = nullptr) {
     PlayResult r;
     try {
         Memory mem; ThunkTable table; Host host; Registry reg;
@@ -123,6 +125,8 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         }
         r.loaded = true; r.base = img.base; r.entry = img.entry;
         r.imports = img.imports; r.bound = img.bound; r.relocations = img.relocations; r.unresolved = img.unresolved;
+        for(const auto& module:guest.dlls) for(const auto& item:module.second.image.gap_imports) r.gap_imports.push_back(item);
+        if(on_imports) on_imports(r);
         guest.image_base = img.base;
         guest.exe_tls = img.tls;  // each thread's TLS block comes from the exe's directory
         guest.add_module(name, img.base);
@@ -194,7 +198,8 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
                       const std::function<void(const PlayResult&)>& on_loaded = nullptr,
                       uint64_t instruction_limit = 500ull * 1000 * 1000,
                       const DllSource& dll_source = nullptr,
-                      bool trace_fault_context = false) {
+                      bool trace_fault_context = false,
+                      const std::function<void(const PlayResult&)>& on_imports = nullptr) {
     PlayResult r;
     FILE* f = _wfopen(exe.c_str(), L"rb");
     if (!f) { r.fault = "cannot open the executable"; r.fault_kind = "Loader"; return r; }
@@ -209,7 +214,7 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
     std::string name;
     for (size_t i = exe.find_last_of(L"\\/") + 1; i < exe.size(); ++i) name += char(exe[i]);
     (void)dir;
-    return run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source, trace_fault_context);
+    return run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source, trace_fault_context, on_imports);
 }
 #endif
 }
