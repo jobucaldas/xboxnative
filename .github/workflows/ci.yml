@@ -37,6 +37,7 @@ jobs:
           python3 -I src/tools/tests/test_source_layout.py
           python3 -I src/xbox-test/app/tests/include-scope-test.py
           bash src/xbox-test/app/tests/session-restore.sh
+          bash src/xbox-test/app/tests/d3d12-sm-cap.sh
           bash src/xbox-test/app/tests/launch-status.sh
           bash src/xbox-test/app/tests/launch-target.sh
           bash src/xbox-test/app/tests/selftest-plan.sh
