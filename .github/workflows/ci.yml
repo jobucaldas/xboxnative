@@ -49,6 +49,7 @@ jobs:
           bash src/xbox-test/app/tests/steam-app-ticket.sh
           bash src/xbox-test/app/tests/steam-client-package.sh
           bash src/xbox-test/app/tests/steam-token-store.sh
+          bash src/xbox-test/app/tests/steam-genuine.sh
           bash src/xbox-test/app/tests/launch-report.sh
           bash src/xbox-test/app/tests/redact.sh
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/x86-route.cpp -o /tmp/x86-route-test
