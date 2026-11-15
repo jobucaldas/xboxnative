@@ -137,7 +137,10 @@ inline Result run(const std::string& runtime_dir, const std::string& assembly,
 #endif
     std::string assembly_paths = assembly_dir;
     const auto fna_path = std::filesystem::u8path(runtime_dir) / ".." / "fna";
-    if (std::filesystem::is_directory(fna_path)) assembly_paths += path_separator + fna_path.u8string();
+    const auto fna_path_u8 = fna_path.u8string();
+    if (std::filesystem::is_directory(fna_path)) {
+        assembly_paths += path_separator + std::string(reinterpret_cast<const char*>(fna_path_u8.data()), fna_path_u8.size());
+    }
     assembly_paths += path_separator + library_dir + "/mono/4.5";
     set_dirs(library_dir.c_str(), config_dir.c_str());
     set_assemblies_path(assembly_paths.c_str());

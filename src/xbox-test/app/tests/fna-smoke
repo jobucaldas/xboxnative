@@ -16,7 +16,7 @@ sealed class XnaSmoke : Game
 {
     readonly GraphicsDeviceManager graphics;
     int frames;
-    public XnaSmoke() { graphics = new GraphicsDeviceManager(this); }
+    public XnaSmoke() { graphics = new GraphicsDeviceManager(this); graphics.PreferredBackBufferWidth = 320; }
     protected override void Update(GameTime time)
     {
         if (++frames == 3) Exit();

@@ -42,8 +42,33 @@ ln -s "$netstub" "$fna/../FNA.NetStub"
 xbuild "$netstub/FNA.NetStub.csproj" /p:Configuration=Release /p:Platform=AnyCPU /verbosity:minimal
 xbuild "$fna/FNA.csproj" /p:Configuration=Release /p:Platform=AnyCPU /verbosity:minimal
 mkdir -p "$out"
-cp "$fna/bin/Release/FNA.dll" "$out/"
+cp "$fna/bin/Release/FNA.dll" "$fna/bin/Release/FNA.dll.config" "$out/"
 cp "$netstub/bin/Release/FNA.NetStub.dll" "$out/"
+# Mono resolves native imports by the managed assembly name; keep the target names compatible with Play's runtime DLL search.
+mono_config="$out/../mono/etc/mono/config"
+if [[ -f $mono_config ]]; then
+  python3 -I - "$mono_config" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+entries = (
+    '<dllmap dll="FNA3D" os="windows" target="FNA3D.dll"/>',
+    '<dllmap dll="FAudio" os="windows" target="FAudio.dll"/>',
+    '<dllmap dll="SDL2" os="windows" target="SDL2.dll"/>',
+    '<dllmap dll="SDL3" os="windows" target="SDL3.dll"/>',
+    '<dllmap dll="libtheorafile" os="windows" target="libtheorafile.dll"/>',
+    '<dllmap dll="dav1dfile" os="windows" target="dav1dfile.dll"/>',
+)
+close = text.rfind("</configuration>")
+if close < 0:
+    raise SystemExit("Mono config has no closing </configuration>")
+missing = [entry for entry in entries if entry not in text]
+if missing:
+    text = text[:close] + "\n" + "\n".join("  " + entry for entry in missing) + "\n" + text[close:]
+    path.write_text(text, encoding="utf-8")
+PY
+fi
 # Build all official XNA 4 name forwarders against FNA and the pinned network stubs.
 for name in Microsoft.Xna.Framework Microsoft.Xna.Framework.Avatar Microsoft.Xna.Framework.Game Microsoft.Xna.Framework.GamerServices Microsoft.Xna.Framework.Graphics Microsoft.Xna.Framework.Input.Touch Microsoft.Xna.Framework.Net Microsoft.Xna.Framework.Storage Microsoft.Xna.Framework.Video Microsoft.Xna.Framework.Xact; do
   mcs -nologo -target:library -r:"$out/FNA.dll" -r:"$out/FNA.NetStub.dll" \
