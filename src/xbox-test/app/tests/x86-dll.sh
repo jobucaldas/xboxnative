@@ -18,11 +18,13 @@ fi
 [[ -n $cc32 ]] || { echo "x86-dll: no i686-w64-mingw32-gcc (set I686_CC)" >&2; exit 1; }
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/x86-dll.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
 flags="-O1 -Wall -Wextra -Werror -ffreestanding -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -nostdlib"
+# Pin linker auto-image-base choices: their temp-path-derived values can collide
+# with each other or the interpreter's fixed guest arenas across test runs.
 # dll-b: leaf. dll-a: imports dllb_value from dll-b.dll (guest-to-guest import).
 # --kill-at: undecorated export names (a .def-file build), so the fixture's
 # GetProcAddress("dllb_value") matches what a game's import list looks like.
-"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -o "$tmp/dll-b.dll" "$here/x86-dll/dll-b.c"
-"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -o "$tmp/dll-a.dll" "$here/x86-dll/dll-a.c" -L"$tmp" -ldll-b
+"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -Wl,--image-base,0x20000000 -o "$tmp/dll-b.dll" "$here/x86-dll/dll-b.c"
+"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -Wl,--image-base,0x21000000 -o "$tmp/dll-a.dll" "$here/x86-dll/dll-a.c" -L"$tmp" -ldll-b
 # dll-c <-> dll-d: a load cycle. Each imports the other, so the loader must
 # map each exactly once and resolve the back edge against the in-progress
 # mapping (Windows puts a module in the load table before walking imports).
@@ -49,21 +51,21 @@ EXPORTS
 EOF
 "$dlltool" -m i386 -k -d "$tmp/dll-c.def" -l "$tmp/libdll-c.a"
 "$dlltool" -m i386 -k -d "$tmp/dll-d.def" -l "$tmp/libdll-d.a"
-"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -o "$tmp/dll-c.dll" "$here/x86-dll/dll-c.c" -L"$tmp" -ldll-d
-"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -o "$tmp/dll-d.dll" "$here/x86-dll/dll-d.c" -L"$tmp" -ldll-c
+"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -Wl,--image-base,0x22000000 -o "$tmp/dll-c.dll" "$here/x86-dll/dll-c.c" -L"$tmp" -ldll-d
+"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -Wl,--image-base,0x23000000 -o "$tmp/dll-d.dll" "$here/x86-dll/dll-d.c" -L"$tmp" -ldll-c
 # fwd.dll: pure forwarder exports (msvcrt.memcpy, NTDLL.memcpy, kernel32.Sleep,
 # the ordinal form "ntdll.#123", nosuchmod.nosuchsym, dll-b.dllb_value). The
 # .def goes to ld directly and its entries are referenced by nothing, so ld
 # emits real forwarder export entries (a referenced entry becomes an import
 # stub instead).
-"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -o "$tmp/fwd.dll" "$here/x86-dll/dll-fwd.c" "$here/x86-dll/fwd.def"
+"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--image-base,0x24000000 -o "$tmp/fwd.dll" "$here/x86-dll/dll-fwd.c" "$here/x86-dll/fwd.def"
 # dll-zeroent: NO entry point (--entry 0 writes AddressOfEntryPoint = 0) and a
 # ~4 MiB BSS over a few KiB of file — SizeOfImage >> file size. dll-second:
 # the same preferred base (mingw's 0x10000000), so the loader must relocate it
 # into the dedicated DLL arena without overlapping zeroent's huge reservation
 # or the guest heap (Bugbot 4559749424/4559749442/4559749445).
-"$cc32" $flags -shared -Wl,--entry,0 -Wl,--kill-at -o "$tmp/dll-zeroent.dll" "$here/x86-dll/dll-zeroent.c"
-"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -o "$tmp/dll-second.dll" "$here/x86-dll/dll-second.c"
+"$cc32" $flags -shared -Wl,--entry,0 -Wl,--kill-at -Wl,--image-base,0x10000000 -o "$tmp/dll-zeroent.dll" "$here/x86-dll/dll-zeroent.c"
+"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -Wl,--image-base,0x10000000 -o "$tmp/dll-second.dll" "$here/x86-dll/dll-second.c"
 # Import libraries for the two new DLLs (the fixture links their exports
 # before the DLLs are seen by the loader; they are LoadLibrary'd at runtime).
 cat > "$tmp/dll-zeroent.def" <<'EOF'
@@ -122,7 +124,7 @@ struct.pack_into('<HHIIIHH', b, NT + 4, 0x14c, 1, 0, 0, 0, 0xe0, 0x10e)
 opt = bytearray(0xe0)
 struct.pack_into('<H', opt, 0, 0x10b)        # PE32
 struct.pack_into('<I', opt, 16, FN)          # AddressOfEntryPoint = the export
-struct.pack_into('<I', opt, 28, 0x64000000)  # ImageBase (the interpreter's section arena)
+struct.pack_into('<I', opt, 28, 0x30000000)  # isolated test image base, outside the guest allocation arenas
 struct.pack_into('<I', opt, 32, 4096)        # SectionAlignment
 struct.pack_into('<I', opt, 36, 4096)        # FileAlignment
 struct.pack_into('<H', opt, 40, 4)           # MajorOSVersion (mingw-like)
@@ -177,8 +179,8 @@ corrupt_fn
 EOF
 "$dlltool" -m i386 -k -d "$tmp/dll-leaf.def" -l "$tmp/libdll-leaf.a"
 "$dlltool" -m i386 -k -d "$tmp/dll-corrupt.def" -l "$tmp/libdll-corrupt.a"
-"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -o "$tmp/dll-leaf.dll" "$here/x86-dll/dll-leaf.c"
-"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -o "$tmp/dll-fail.dll" "$here/x86-dll/dll-fail.c" -L"$tmp" -ldll-leaf -ldll-corrupt
+"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -Wl,--image-base,0x25000000 -o "$tmp/dll-leaf.dll" "$here/x86-dll/dll-leaf.c"
+"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -Wl,--image-base,0x26000000 -o "$tmp/dll-fail.dll" "$here/x86-dll/dll-fail.c" -L"$tmp" -ldll-leaf -ldll-corrupt
 printf 'not a PE image' > "$tmp/dll-corrupt.dll"
 
 # exe: imports dll_a_sum/dllb_attach_marker and the cyclic pair's exports,
