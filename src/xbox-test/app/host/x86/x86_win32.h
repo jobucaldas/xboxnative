@@ -25,6 +25,17 @@ struct Host {
         bool used_default = false;
         std::vector<uint8_t> output;
     };
+    struct ProfileCall {
+        std::string path, contents;
+        bool write = false, succeeded = false;
+        uint32_t error = 0;
+    };
+    struct SocketCall {
+        enum class Kind { Startup, Cleanup, LastError } kind;
+        uint16_t version = 0;
+        std::vector<uint8_t> data;
+        int result = 0;
+    };
     struct FileCall {
         enum class Kind { CreateA, CreateW, Close, Read, Size, Time, AttributesA, Seek, SeekEx, End, TimeConvert, TimeLocal } kind;
         enum class Operation { None, CreateDirectoryA, DeleteA, DeleteW, SystemToFileTime, SystemToTzLocal } operation = Operation::None;
@@ -47,6 +58,8 @@ struct Host {
     std::function<void(const std::string&)> tee;  // optional live sink
     std::function<NlsResponse(const NlsRequest&)> nls_call;
     std::function<void(FileCall&)> file_call;     // Play's native kernel32 file layer
+    std::function<void(ProfileCall&)> profile_call;
+    std::function<void(SocketCall&)> socket_call;
     std::function<uint64_t()> tick_count;          // same monotonic millisecond source for the guest tick APIs
     std::function<void(LocaleCall&)> locale_call; // Play's native kernel32 locale formatter
     std::map<std::string, unsigned> calls;        // import -> call count
@@ -82,5 +95,18 @@ inline void register_win32(Registry& r, Host& h) {
                 swap(root, child); root = child; } };
         if (n > 1) { for (uint32_t i = n / 2; i-- > 0;) sift(i, n); for (uint32_t e = n - 1; e > 0; --e) { swap(0, e); sift(0, e); } }
         return 0; });
+}
+inline void register_ws2(Registry& r, Host& h) {
+    auto startup=[&h](Cpu& c)->uint32_t {
+        Host::SocketCall q{};q.kind=Host::SocketCall::Kind::Startup;q.version=uint16_t(c.arg(0));
+        if(!h.socket_call){c.mem.w32(c.fs_base+0x34,10093);return 10093;}h.socket_call(q);
+        if(q.result==0){if(q.data.size()!=400)throw Fault(FaultKind::AccessViolation,c.eip,c.arg(1),"WSAStartup host returned malformed WSADATA");c.mem.write_bytes(c.arg(1),q.data.data(),400);}
+        return uint32_t(q.result);
+    };
+    auto cleanup=[&h](Cpu&)->uint32_t{Host::SocketCall q{};q.kind=Host::SocketCall::Kind::Cleanup;if(h.socket_call)h.socket_call(q);return uint32_t(q.result);};
+    auto last_error=[&h](Cpu&)->uint32_t{Host::SocketCall q{};q.kind=Host::SocketCall::Kind::LastError;if(h.socket_call)h.socket_call(q);return uint32_t(q.result);};
+    r.add("ws2_32.dll","WSAStartup",Conv::Stdcall,2,startup);r.add("ws2_32.dll","#115",Conv::Stdcall,2,startup);
+    r.add("ws2_32.dll","WSACleanup",Conv::Stdcall,0,cleanup);r.add("ws2_32.dll","#116",Conv::Stdcall,0,cleanup);
+    r.add("ws2_32.dll","WSAGetLastError",Conv::Stdcall,0,last_error);r.add("ws2_32.dll","#111",Conv::Stdcall,0,last_error);
 }
 }

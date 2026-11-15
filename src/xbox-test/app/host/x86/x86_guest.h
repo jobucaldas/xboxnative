@@ -99,6 +99,9 @@ struct Guest {
     uint32_t image_base = 0;
     std::map<std::string, std::string> guest_environment;
     std::map<std::string, std::string> guest_environment_names;
+    struct ResourceRef { uint32_t module=0, data=0, size=0; };
+    std::map<uint32_t,ResourceRef> resource_handles;
+    uint32_t resource_serial=0;
     // The exe's implicit TLS directory (the runner copies it from its Image, so
     // each new thread gets its own block) and the TEB of the running thread,
     // mirroring Cpu.fs_base for host helpers that have no Cpu.
@@ -210,6 +213,28 @@ struct Guest {
     bool close_sync(uint32_t h) { auto it=sync_handles.find(h); if(it==sync_handles.end())return false; uint32_t id=it->second; sync_handles.erase(it); auto& o=sync_objects[id]; if(!--o.refs){if(!o.name.empty())sync_names.erase(o.name);sync_objects.erase(id);} return true; }
     uint32_t add_file_handle(uint64_t native) { uint32_t h=0x50000000u+(++file_serial); file_handles[h]=native; return h; }
     bool call_file(Host::FileCall& call) { if(!host.file_call){call.error=120;return false;} host.file_call(call); return call.succeeded; }
+    static std::string trim_profile(std::string s) {
+        size_t a=s.find_first_not_of(" \t\r\n"), b=s.find_last_not_of(" \t\r\n");
+        return a==std::string::npos?std::string():s.substr(a,b-a+1);
+    }
+    static std::string profile_value(const std::string& text,const std::string& section,const std::string& key,const std::string& fallback) {
+        auto fold=[](std::string s){for(char& c:s)c=char(std::tolower((unsigned char)c));return s;};
+        std::string current, want_section=fold(section), want_key=fold(key); size_t p=0;
+        while(p<=text.size()) { size_t e=text.find_first_of("\r\n",p);if(e==std::string::npos)e=text.size();std::string line=trim_profile(text.substr(p,e-p));p=e+1;
+            if(line.empty()||line[0]==';'||line[0]=='#')continue;
+            if(line.front()=='['&&line.back()==']'){current=fold(trim_profile(line.substr(1,line.size()-2)));continue;}
+            if(current!=want_section)continue;
+            size_t eq=line.find('=');
+            if(eq==std::string::npos||fold(trim_profile(line.substr(0,eq)))!=want_key)continue;
+            std::string v=trim_profile(line.substr(eq+1));
+            if(v.size()>=2&&((v.front()==char(34)&&v.back()==char(34))||(v.front()==char(39)&&v.back()==char(39))))v=v.substr(1,v.size()-2);
+            return v;
+        } return fallback;
+    }
+    bool profile_call(uint32_t pathp, Host::ProfileCall& q) {
+        if(!pathp){q.error=87;return false;}q.path=str(pathp);
+        if(!host.profile_call){q.error=120;return false;}host.profile_call(q);return q.succeeded;
+    }
     // WaitForSingleObject runs all pending guest bodies before this check. If the
     // object is still unavailable, no runnable guest thread can signal it without
     // another yield, so finite waits time out immediately (there is no virtual tick clock).
@@ -809,6 +834,7 @@ inline void Guest::do_exit(Cpu& c, uint32_t code) {
 inline void Guest::register_all() {
     reg.map.clear();
     register_win32(reg, host);  // the stage-1 allowlist stays the base surface
+    register_ws2(reg, host);
     // Fixed guest structures: three FILE structs for stdin/stdout/stderr.
     mem.map(iob_addr, 4096, PROT_R | PROT_W);
     iob.assign(3 * 32, 0);
@@ -1425,6 +1451,101 @@ inline void Guest::register_all() {
         mem.w32(p + 0, 0); mem.w32(p + 4, 4096); mem.w32(p + 8, 0x10000); mem.w32(p + 12, 0x7FFE0000u);
         mem.w32(p + 16, 1); mem.w32(p + 20, 1); mem.w32(p + 24, 0); mem.w32(p + 28, 0); mem.w32(p + 32, 9);
         return 0; });
+    auto profile_text = [this](uint32_t file, std::string& text) { Host::ProfileCall q{};if(!profile_call(file,q)){set_last_error(q.error?q.error:2);return false;}text=q.contents;set_last_error(0);return true; };
+    auto narrow = [this](uint32_t p){auto w=wstr(p);return std::string(w.begin(),w.end());};
+    auto profile_string = [this,profile_text,narrow](Cpu& c,bool wide)->uint32_t {
+        uint32_t sectionp=c.arg(0),keyp=c.arg(1),defaultp=c.arg(2),buffer=c.arg(3),capacity=c.arg(4),file=c.arg(5);
+        std::string section=wide?narrow(sectionp):str(sectionp);
+        std::string key=wide?narrow(keyp):str(keyp);
+        std::string fallback=wide?narrow(defaultp):str(defaultp), contents;
+        if(!capacity||!buffer){set_last_error(87);return 0;}
+        if(!profile_text(file,contents)) contents.clear();
+        std::string value=profile_value(contents,section,key,fallback);
+        uint32_t n=0;
+        if(wide){uint32_t max=capacity-1; n=uint32_t(std::min<size_t>(value.size(),max));for(uint32_t i=0;i<n;++i)mem.w(buffer+i*2,uint8_t(value[i]),2);mem.w(buffer+n*2,0,2);}
+        else{n=uint32_t(std::min<size_t>(value.size(),capacity-1));if(n)mem.write_bytes(buffer,value.data(),n);mem.w8(buffer+n,0);}
+        return n;
+    };
+    auto profile_write=[this,profile_text,narrow](Cpu& c,bool wide)->uint32_t {
+        uint32_t sp=c.arg(0),kp=c.arg(1),vp=c.arg(2),fp=c.arg(3);if(!fp){set_last_error(87);return 0;}
+        std::string section=sp?(wide?narrow(sp):str(sp)):std::string(),key=kp?(wide?narrow(kp):str(kp)):std::string(),value=vp?(wide?narrow(vp):str(vp)):std::string(),contents;
+        profile_text(fp,contents);
+        auto fold=[](std::string s){for(char& ch:s)ch=char(std::tolower((unsigned char)ch));return s;};
+        std::vector<std::string> lines;for(size_t p=0;p<contents.size();){size_t e=contents.find_first_of("\r\n",p);if(e==std::string::npos)e=contents.size();if(e>p)lines.push_back(contents.substr(p,e-p));p=e+1;}
+        if(!sp)lines.clear();
+        else {
+            size_t begin=lines.size(),end=lines.size();
+            for(size_t i=0;i<lines.size();++i){std::string line=trim_profile(lines[i]);if(line.size()>=2&&line.front()=='['&&line.back()==']'){if(begin!=lines.size()){end=i;break;}if(fold(trim_profile(line.substr(1,line.size()-2)))==fold(section))begin=i;}}
+            if(begin!=lines.size()&&end==lines.size())end=lines.size();
+            if(!kp){if(begin!=lines.size())lines.erase(lines.begin()+long(begin),lines.begin()+long(end));}
+            else if(begin==lines.size()){lines.push_back("["+section+"]");if(vp)lines.push_back(key+"="+value);}
+            else {size_t match=end;for(size_t i=begin+1;i<end;++i){size_t eq=lines[i].find('=');if(eq!=std::string::npos&&fold(trim_profile(lines[i].substr(0,eq)))==fold(key)){match=i;break;}}
+                if(!vp){if(match<end)lines.erase(lines.begin()+long(match));}
+                else if(match<end)lines[match]=key+"="+value;else lines.insert(lines.begin()+long(end),key+"="+value);
+            }
+        }
+        contents.clear();for(const auto& line:lines){contents+=line;contents+="\r\n";}
+        Host::ProfileCall q{};q.path=wide?narrow(fp):str(fp);q.contents=contents;q.write=true;
+        if(!host.profile_call){set_last_error(120);return 0;}host.profile_call(q);if(!q.succeeded){set_last_error(q.error?q.error:5);return 0;}set_last_error(0);return 1;
+    };
+    for(bool wide:{false,true}) {
+        const char* suffix=wide?"W":"A";std::string get="GetPrivateProfileString";get+=suffix;
+        reg.add("kernel32.dll",get,Conv::Stdcall,6,[profile_string,wide](Cpu& c)->uint32_t{return profile_string(c,wide);});
+        std::string integer="GetPrivateProfileInt";integer+=suffix;
+        reg.add("kernel32.dll",integer,Conv::Stdcall,4,[this,profile_text,narrow,wide](Cpu& c)->uint32_t{
+            uint32_t secp=c.arg(0),keyp=c.arg(1),fallback=c.arg(2),file=c.arg(3);std::string sec=wide?narrow(secp):str(secp),key=wide?narrow(keyp):str(keyp),contents;
+            if(!profile_text(file,contents))return fallback;
+            std::string v=profile_value(contents,sec,key,"");if(v.empty())return fallback;
+            char* end=nullptr;unsigned long n=std::strtoul(v.c_str(),&end,0);
+            return end==v.c_str()?fallback:uint32_t(n);
+        });
+        std::string write="WritePrivateProfileString";write+=wide?"W":"A";
+        reg.add("kernel32.dll",write,Conv::Stdcall,4,[profile_write,wide](Cpu& c)->uint32_t{return profile_write(c,wide);});
+        std::string section_name="GetPrivateProfileSection";section_name+=wide?"W":"A";
+        reg.add("kernel32.dll",section_name,Conv::Stdcall,4,[this,profile_text,narrow,wide](Cpu& c)->uint32_t{
+            uint32_t sp=c.arg(0),buffer=c.arg(1),capacity=c.arg(2),file=c.arg(3);if(!sp||!buffer||!capacity){set_last_error(87);return 0;}if(capacity==1){if(wide)mem.w(buffer,0,2);else mem.w8(buffer,0);return 0;}
+            std::string section=wide?narrow(sp):str(sp),contents;profile_text(file,contents);std::string fold_section=section;for(char& ch:fold_section)ch=char(std::tolower((unsigned char)ch));
+            std::vector<std::string> items;std::string current;for(size_t p=0;p<contents.size();){size_t e=contents.find_first_of("\r\n",p);if(e==std::string::npos)e=contents.size();std::string line=trim_profile(contents.substr(p,e-p));p=e+1;if(line.size()>=2&&line.front()=='['&&line.back()==']'){current=trim_profile(line.substr(1,line.size()-2));for(char& ch:current)ch=char(std::tolower((unsigned char)ch));continue;}if(current!=fold_section||line.empty()||line[0]==';'||line[0]=='#')continue;if(line.find('=')!=std::string::npos)items.push_back(line);}
+            std::string packed;for(auto& item:items){packed+=item;packed.push_back(char(0));}packed.push_back(char(0));
+            bool truncated=packed.size()>capacity;uint32_t copied=truncated?capacity-2:uint32_t(packed.size());
+            for(uint32_t i=0;i<copied;++i){if(wide)mem.w(buffer+i*2,uint8_t(packed[i]),2);else mem.w8(buffer+i,uint8_t(packed[i]));}
+            if(truncated){if(wide){mem.w(buffer+(capacity-2)*2,0,2);mem.w(buffer+(capacity-1)*2,0,2);}else{mem.w8(buffer+capacity-2,0);mem.w8(buffer+capacity-1,0);}return capacity-2;}
+            return copied?copied-1:0;
+        });
+    }
+    auto resource_key = [this](uint32_t root,uint32_t value,bool wide)->uint32_t {
+        uint16_t named=uint16_t(mem.r(root+12,2));
+        if(value>=0x10000u){
+            std::string wanted;if(wide){auto w=wstr(value);wanted.assign(w.begin(),w.end());}else wanted=str(value);
+            for(uint32_t i=0;i<named;++i){uint32_t e=root+16+i*8,name=mem.r32(e);if(!(name&0x80000000u))continue;uint32_t p=root+(name&0x7fffffffu);uint16_t n=uint16_t(mem.r(p,2));std::u16string found;for(uint32_t j=0;j<n;++j)found.push_back(char16_t(mem.r(p+2+j*2,2)));if(std::string(found.begin(),found.end())==wanted)return e;}
+        }
+        uint16_t ids=uint16_t(mem.r(root+14,2));for(uint32_t i=0;i<ids;++i){uint32_t e=root+16+(named+i)*8;if(mem.r32(e)==value)return e;}return 0;
+    };
+    auto find_resource = [this,resource_key](Cpu& c,bool wide,bool extended)->uint32_t {
+        uint32_t module=extended?c.arg(0):c.arg(0),typep=extended?c.arg(1):c.arg(2),namep=extended?c.arg(2):c.arg(1),lang=extended?c.arg(3):0;
+        uint32_t base=module?module:image_base;if(!base){set_last_error(1813);return 0;}
+        uint32_t nt=base+mem.r32(base+0x3c);if(mem.r32(nt)!=0x00004550){set_last_error(1813);return 0;}
+        uint32_t opt=nt+24,rva=mem.r32(opt+96+16);if(!rva){set_last_error(1813);return 0;}uint32_t root=base+rva;
+        uint32_t te=resource_key(root,typep,wide);if(!te){set_last_error(1813);return 0;}uint32_t td=mem.r32(te+4);if(!(td&0x80000000u)){set_last_error(1813);return 0;}uint32_t names=root+(td&0x7fffffffu);
+        uint32_t ne=resource_key(names,namep,wide);if(!ne){set_last_error(1814);return 0;}uint32_t nd=mem.r32(ne+4);if(!(nd&0x80000000u)){set_last_error(1814);return 0;}uint32_t langs=root+(nd&0x7fffffffu),count=uint32_t(mem.r(langs+12,2))+uint32_t(mem.r(langs+14,2)),chosen=0;
+        for(uint32_t i=0;i<count;++i){uint32_t e=langs+16+i*8,id=mem.r32(e);if(!(id&0x80000000u)&&uint16_t(id)==lang){chosen=e;break;}if(!chosen)chosen=e;}
+        if(!chosen){set_last_error(1814);return 0;}uint32_t dd=root+(mem.r32(chosen+4)&0x7fffffffu),data=base+mem.r32(dd),size=mem.r32(dd+4),handle=0x74000000u+(++resource_serial);resource_handles[handle]={base,data,size};set_last_error(0);return handle;
+    };
+    for(bool wide:{false,true})for(bool extended:{false,true}){std::string name=extended?"FindResourceEx":"FindResource";name+=wide?"W":"A";reg.add("kernel32.dll",name,Conv::Stdcall,extended?5:3,[find_resource,wide,extended](Cpu& c)->uint32_t{return find_resource(c,wide,extended);});}
+    reg.add("kernel32.dll","LoadResource",Conv::Stdcall,2,[this](Cpu& c)->uint32_t{auto it=resource_handles.find(c.arg(1));if(it==resource_handles.end()||it->second.module!=(c.arg(0)?c.arg(0):image_base)){set_last_error(1814);return 0;}return c.arg(1);});
+    reg.add("kernel32.dll","LockResource",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto it=resource_handles.find(c.arg(0));return it==resource_handles.end()?0:it->second.data;});
+    reg.add("kernel32.dll","SizeofResource",Conv::Stdcall,2,[this](Cpu& c)->uint32_t{auto it=resource_handles.find(c.arg(1));if(it==resource_handles.end()||it->second.module!=(c.arg(0)?c.arg(0):image_base)){set_last_error(1814);return 0;}return it->second.size;});
+    reg.add("kernel32.dll","FreeResource",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{return resource_handles.erase(c.arg(0))?1u:0u;});
+    // GUI launcher guests have no attached console. Console-title APIs therefore
+    // fail with ERROR_INVALID_HANDLE, as they do for a Windows process without one.
+    auto no_console = [this](Cpu&) -> uint32_t { set_last_error(6); return 0; };
+    reg.add("kernel32.dll", "SetConsoleTitleA", Conv::Stdcall, 1, no_console);
+    reg.add("kernel32.dll", "SetConsoleTitleW", Conv::Stdcall, 1, no_console);
+    reg.add("kernel32.dll", "GetConsoleTitleA", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { (void)c; set_last_error(6); return 0; });
+    reg.add("kernel32.dll", "GetConsoleTitleW", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { (void)c; set_last_error(6); return 0; });
+    reg.add("kernel32.dll", "AllocConsole", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { set_last_error(5); return 0; });
+    reg.add("kernel32.dll", "FreeConsole", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { set_last_error(87); return 0; });
+    reg.add("kernel32.dll", "AttachConsole", Conv::Stdcall, 1, [this](Cpu&) -> uint32_t { set_last_error(6); return 0; });
     // Console output handles: stdout/stderr are the Host sinks.
     reg.add("kernel32.dll", "GetStdHandle", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
         switch (int32_t(c.arg(0))) { case -10: return Host::H_STDIN; case -11: return Host::H_STDOUT; case -12: return Host::H_STDERR; }

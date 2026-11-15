@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 #if defined(_WIN32)
+#include <winsock2.h>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -39,6 +40,28 @@ inline void play_locale_call(Host::LocaleCall& q) {
                 :GetTimeFormatEx(locale_name,q.flags,q.has_system_time?&st:nullptr,q.has_format?fmt.c_str():nullptr,output,q.buffer_chars);
     q.result=n; q.succeeded=n!=0; q.error=q.succeeded?0:GetLastError();
     if(q.succeeded&&!out.empty()){q.data.resize(size_t(n)*sizeof(wchar_t));memcpy(q.data.data(),out.data(),q.data.size());}
+}
+inline void play_socket_call(Host::SocketCall& q) {
+    using StartupFn=int (WSAAPI*)(WORD,LPWSADATA);using CleanupFn=int (WSAAPI*)();using LastErrorFn=int (WSAAPI*)();
+    static HMODULE module=LoadLibraryExW(L"ws2_32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    auto startup=module?reinterpret_cast<StartupFn>(GetProcAddress(module,"WSAStartup")):nullptr;
+    auto cleanup=module?reinterpret_cast<CleanupFn>(GetProcAddress(module,"WSACleanup")):nullptr;
+    auto last=module?reinterpret_cast<LastErrorFn>(GetProcAddress(module,"WSAGetLastError")):nullptr;
+    if(q.kind==Host::SocketCall::Kind::Startup){if(!startup){q.result=10091;return;}WSADATA native{};q.result=startup(q.version,&native);if(q.result)return;
+        q.data.assign(400,0);memcpy(q.data.data(),&native.wVersion,2);memcpy(q.data.data()+2,&native.wHighVersion,2);
+        memcpy(q.data.data()+4,native.szDescription,std::min<size_t>(257,sizeof(native.szDescription)));memcpy(q.data.data()+261,native.szSystemStatus,std::min<size_t>(129,sizeof(native.szSystemStatus)));
+        memcpy(q.data.data()+390,&native.iMaxSockets,2);memcpy(q.data.data()+392,&native.iMaxUdpDg,2);return;}
+    if(q.kind==Host::SocketCall::Kind::Cleanup){q.result=cleanup?cleanup():-1;return;}q.result=last?last():10093;
+}
+inline void play_profile_call(Host::ProfileCall& q) {
+    std::wstring path(q.path.begin(),q.path.end());
+    auto close=(BOOL(WINAPI*)(HANDLE))kernel32_core::resolve_file("kernel32.dll","CloseHandle");
+    auto write=(BOOL(WINAPI*)(HANDLE,LPCVOID,DWORD,LPDWORD,LPOVERLAPPED))kernel32_core::resolve_file("kernel32.dll","WriteFile");
+    HANDLE h=kernel32_core::create_file_w(path.c_str(),q.write?GENERIC_WRITE:GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,q.write?CREATE_ALWAYS:OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(h==INVALID_HANDLE_VALUE){q.error=GetLastError();return;}
+    if(q.write){DWORD n=0;q.succeeded=write&&write(h,q.contents.data(),DWORD(q.contents.size()),&n,nullptr)&&n==q.contents.size();}
+    else {DWORD size=kernel32_core::file_size(h,nullptr);if(size!=INVALID_FILE_SIZE&&size<=16*1024*1024){q.contents.resize(size);DWORD n=0;q.succeeded=kernel32_core::read_file(h,q.contents.data(),size,&n,nullptr)&&n==size;}}
+    if(!q.succeeded)q.error=GetLastError();if(close)close(h);
 }
 inline void play_file_call(Host::FileCall& q) {
     auto failed=[&](){q.error=GetLastError();};
@@ -270,6 +293,8 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         Memory mem; ThunkTable table; Host host; Registry reg;
 #if defined(_WIN32)
         host.file_call = play_file_call;
+        host.profile_call = play_profile_call;
+        host.socket_call = play_socket_call;
         host.tick_count = []() { return uint64_t(::GetTickCount64()); };
         host.locale_call = play_locale_call;
 #endif
