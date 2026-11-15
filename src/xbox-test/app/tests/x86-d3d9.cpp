@@ -14,6 +14,29 @@ static std::vector<uint8_t> read_file(const char* path) {
     if(!ok||read!=bytes.size())return {};
     return bytes;
 }
+static bool audit_d3d9_device_slots() {
+    // Expected DWORD stack slots (including this) in IDirect3DDevice9's d3d9.h order.
+    static constexpr unsigned d3d9_h_arities[]={3,1,1,1,1,1,2,2,3,2,4,4,2,3,3,1,2,5,5,3,2,4,3,9,10,8,7,7,9,9,5,3,3,3,6,4,7,3,3,2,2,1,1,7,3,3,3,2,2,2,2,3,3,3,3,3,3,3,3,3,1,2,2,2,3,3,4,4,4,4,2,3,3,2,2,2,2,2,1,2,1,4,7,5,9,7,3,2,2,2,2,3,2,2,4,4,4,4,4,4,5,5,3,3,2,2,3,2,2,4,4,4,4,4,4,4,4,2,3};
+    x86::Host host;
+    x86::register_d3d9_com(host.com,host);
+    for(const auto& [name,iface]:host.com.ifaces)if(iface.methods.size()!=iface.slots-3) {
+        std::fprintf(stderr,"D3D9 slot audit: %s has %zu methods for %u slots\\n",name.c_str(),iface.methods.size(),iface.slots);
+        return false;
+    }
+    const auto& device=host.com.by_name("IDirect3DDevice9");
+    if(device.slots!=sizeof(d3d9_h_arities)/sizeof(d3d9_h_arities[0])||device.methods.size()!=device.slots-3) {
+        std::fprintf(stderr,"D3D9 slot audit: slots=%u arities=%zu methods=%zu\n",device.slots,sizeof(d3d9_h_arities)/sizeof(d3d9_h_arities[0]),device.methods.size());
+        return false;
+    }
+    for(unsigned slot=3;slot<device.slots;++slot) {
+        auto method=device.methods.find(slot);
+        if(method==device.methods.end()||method->second.argc!=d3d9_h_arities[slot]) {
+            std::fprintf(stderr,"D3D9 slot audit: slot=%u expected argc=%u actual=%u\n",slot,d3d9_h_arities[slot],method==device.methods.end()?0:method->second.argc);
+            return false;
+        }
+    }
+    return true;
+}
 static std::wstring wide(const char* value) {
     int count=MultiByteToWideChar(CP_UTF8,0,value,-1,nullptr,0);
     std::wstring result(count?size_t(count):0,L'\0');
@@ -25,6 +48,13 @@ static LRESULT CALLBACK d3d9_test_window_proc(HWND window,UINT message,WPARAM wp
     return DefWindowProcW(window,message,wparam,lparam);
 }
 int main(int argc,char** argv) {
+    static_assert(x86::d3d9_up_index_count(D3DPT_POINTLIST,3)==3);
+    static_assert(x86::d3d9_up_index_count(D3DPT_LINELIST,2)==4);
+    static_assert(x86::d3d9_up_index_count(D3DPT_LINESTRIP,2)==3);
+    static_assert(x86::d3d9_up_index_count(D3DPT_TRIANGLELIST,2)==6);
+    static_assert(x86::d3d9_up_index_count(D3DPT_TRIANGLESTRIP,2)==4);
+    static_assert(x86::d3d9_up_index_count(D3DPT_TRIANGLEFAN,2)==4);
+    if(!audit_d3d9_device_slots()){std::fprintf(stderr,"X86-D3D9 FAIL: IDirect3DDevice9 slot/arity audit against d3d9.h\n");return 1;}
     if(argc!=3){std::fprintf(stderr,"usage: x86-d3d9 <guest.exe> <real-d3d9.dll>\n");return 2;}
     auto file=read_file(argv[1]);
     if(file.empty()){std::fprintf(stderr,"X86-D3D9 FAIL: guest image empty\n");return 1;}
@@ -58,10 +88,10 @@ int main(int argc,char** argv) {
         std::fprintf(stderr,"X86-D3D9 FAIL: loaded=%d finished=%d exit=0x%08x fault=%s\n",result.loaded,result.finished,result.exit_code,result.fault.c_str());
         return 1;
     }
-    if(d3d9_gap_log.find("x86 D3D9 gap: IDirect3DDevice9::slot 4")==std::string::npos){
+    if(d3d9_gap_log.find("x86 D3D9 gap: IDirect3DDevice9::slot 6")==std::string::npos){
         std::fprintf(stderr,"X86-D3D9 FAIL: unbridged COM method did not report a gap\n");
         return 1;
     }
-    std::puts("X86-D3D9 PASS: real x64 shim created, cleared, drew, presented and read back the target pixel; unbridged COM call logged a gap");
+    std::puts("X86-D3D9 PASS: real x64 shim created, rendered indexed textured quad with alpha blending, presented, read back two pixels; unbridged COM call logged a gap");
     return 0;
 }

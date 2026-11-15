@@ -14,13 +14,51 @@ void WINAPI entry(void) {
     IDirect3DDevice9 *device=0;
     HRESULT device_hr=IDirect3D9_CreateDevice(d3d,0,D3DDEVTYPE_HAL,(HWND)1,D3DCREATE_HARDWARE_VERTEXPROCESSING,&pp,&device);
     if(FAILED(device_hr)||!device)ExitProcess((UINT)device_hr);
-    (void)IDirect3DDevice9_GetAvailableTextureMem(device);
+    void *unbridged=0;
+    (void)IDirect3DDevice9_GetDirect3D(device,(IDirect3D9**)&unbridged);
     if(FAILED(IDirect3DDevice9_Clear(device,0,0,D3DCLEAR_TARGET,0xFF123456,1.0f,0)))ExitProcess(13);
-    struct Vertex { float x,y,z,rhw; DWORD color; } vertices[3]={
-        {16,16,0.5f,1.0f,0xFFFF0000},{48,16,0.5f,1.0f,0xFFFF0000},{32,48,0.5f,1.0f,0xFFFF0000}};
-    if(FAILED(IDirect3DDevice9_SetFVF(device,D3DFVF_XYZRHW|D3DFVF_DIFFUSE)))ExitProcess(14);
+    IDirect3DTexture9 *texture=0;
+    if(FAILED(IDirect3DDevice9_CreateTexture(device,2,2,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&texture,0))||!texture)ExitProcess(24);
+    D3DLOCKED_RECT texel={0};
+    if(FAILED(IDirect3DTexture9_LockRect(texture,0,&texel,0,0))||!texel.pBits)ExitProcess(25);
+    for(UINT y=0;y<2;++y)for(UINT x=0;x<2;++x)*(DWORD*)((BYTE*)texel.pBits+y*texel.Pitch+x*4)=0x80FF0000;
+    if(FAILED(IDirect3DTexture9_UnlockRect(texture,0)))ExitProcess(26);
+    if(FAILED(IDirect3DTexture9_LockRect(texture,0,&texel,0,D3DLOCK_READONLY))||!texel.pBits)ExitProcess(37);
+    DWORD uploaded=*(const DWORD*)texel.pBits;
+    if(FAILED(IDirect3DTexture9_UnlockRect(texture,0)))ExitProcess(38);
+    if(uploaded!=0x80FF0000)ExitProcess(39);
+    if(FAILED(IDirect3DDevice9_SetTexture(device,0,(IDirect3DBaseTexture9*)texture)))ExitProcess(27);
+    if(FAILED(IDirect3DDevice9_SetSamplerState(device,0,D3DSAMP_MINFILTER,D3DTEXF_POINT))||
+       FAILED(IDirect3DDevice9_SetSamplerState(device,0,D3DSAMP_MAGFILTER,D3DTEXF_POINT)))ExitProcess(28);
+    if(FAILED(IDirect3DDevice9_SetRenderState(device,D3DRS_ZENABLE,FALSE))||
+       FAILED(IDirect3DDevice9_SetRenderState(device,D3DRS_LIGHTING,FALSE))||
+       FAILED(IDirect3DDevice9_SetRenderState(device,D3DRS_ALPHABLENDENABLE,TRUE))||
+       FAILED(IDirect3DDevice9_SetRenderState(device,D3DRS_SRCBLEND,D3DBLEND_SRCALPHA))||
+       FAILED(IDirect3DDevice9_SetRenderState(device,D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA)))ExitProcess(29);
+    struct Vertex { float x,y,z,rhw; DWORD color; float u,v; } vertices[4]={
+        {8,8,0.5f,1.0f,0xFFFFFFFF,0,0},{56,8,0.5f,1.0f,0xFFFFFFFF,1,0},
+        {56,56,0.5f,1.0f,0xFFFFFFFF,1,1},{8,56,0.5f,1.0f,0xFFFFFFFF,0,1}};
+    WORD indices[6]={0,1,2,0,2,3};
+    IDirect3DIndexBuffer9 *index_buffer=0;
+    if(FAILED(IDirect3DDevice9_CreateIndexBuffer(device,sizeof(indices),0,D3DFMT_INDEX16,D3DPOOL_MANAGED,&index_buffer,0))||!index_buffer)ExitProcess(30);
+    void *index_data=0;
+    if(FAILED(IDirect3DIndexBuffer9_Lock(index_buffer,0,sizeof(indices),&index_data,0))||!index_data)ExitProcess(31);
+    for(UINT i=0;i<6;++i)((WORD*)index_data)[i]=indices[i];
+    if(FAILED(IDirect3DIndexBuffer9_Unlock(index_buffer)))ExitProcess(32);
+    IDirect3DVertexBuffer9 *vertex_buffer=0;
+    if(FAILED(IDirect3DDevice9_CreateVertexBuffer(device,sizeof(vertices),0,0,D3DPOOL_MANAGED,&vertex_buffer,0))||!vertex_buffer)ExitProcess(34);
+    void *vertex_data=0;
+    if(FAILED(IDirect3DVertexBuffer9_Lock(vertex_buffer,0,sizeof(vertices),&vertex_data,0))||!vertex_data)ExitProcess(35);
+    for(UINT i=0;i<sizeof(vertices);++i)((BYTE*)vertex_data)[i]=((const BYTE*)vertices)[i];
+    if(FAILED(IDirect3DVertexBuffer9_Unlock(vertex_buffer)))ExitProcess(36);
+    D3DVIEWPORT9 viewport={0,0,64,64,0.0f,1.0f};
+    if(FAILED(IDirect3DDevice9_SetIndices(device,index_buffer))||
+       FAILED(IDirect3DDevice9_SetStreamSource(device,0,vertex_buffer,0,sizeof(vertices[0])))||
+       FAILED(IDirect3DDevice9_SetFVF(device,D3DFVF_XYZRHW|D3DFVF_DIFFUSE|D3DFVF_TEX1))||
+       FAILED(IDirect3DDevice9_SetViewport(device,&viewport))||
+       FAILED(IDirect3DDevice9_SetNPatchMode(device,0.0f)))ExitProcess(33);
     if(FAILED(IDirect3DDevice9_BeginScene(device)))ExitProcess(15);
-    HRESULT draw_hr=IDirect3DDevice9_DrawPrimitiveUP(device,D3DPT_TRIANGLELIST,1,vertices,sizeof(vertices[0]));
+    HRESULT draw_hr=IDirect3DDevice9_DrawIndexedPrimitive(device,D3DPT_TRIANGLELIST,0,0,4,0,2);
     if(FAILED(draw_hr))ExitProcess((UINT)draw_hr);
     if(FAILED(IDirect3DDevice9_EndScene(device)))ExitProcess(17);
     // The shim uses a DISCARD swap effect, so read back before Present invalidates the target.
@@ -31,11 +69,14 @@ void WINAPI entry(void) {
     if(FAILED(readback_hr))ExitProcess((UINT)readback_hr);
     D3DLOCKED_RECT locked={0};
     if(FAILED(IDirect3DSurface9_LockRect(readback,&locked,0,D3DLOCK_READONLY))||!locked.pBits)ExitProcess(22);
-    DWORD pixel=*(const DWORD*)((const BYTE*)locked.pBits+locked.Pitch+4);
+    DWORD textured=*(const DWORD*)((const BYTE*)locked.pBits+20*locked.Pitch+40*4);
+    DWORD clear=*(const DWORD*)((const BYTE*)locked.pBits+2*locked.Pitch+2*4);
     IDirect3DSurface9_UnlockRect(readback);
-    if(pixel!=0xFF123456)ExitProcess(23);
+    if(clear!=0xFF123456)ExitProcess(40);
+    if((textured&0x00FFFFFF)!=0x00891A2B)ExitProcess(23);
     if(FAILED(IDirect3DDevice9_Present(device,0,0,0,0)))ExitProcess(18);
     IDirect3DSurface9_Release(readback);IDirect3DSurface9_Release(back);
+    IDirect3DVertexBuffer9_Release(vertex_buffer);IDirect3DIndexBuffer9_Release(index_buffer);IDirect3DTexture9_Release(texture);
     IDirect3DDevice9_Release(device);IDirect3D9_Release(d3d);
     ExitProcess(0);
 }

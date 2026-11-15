@@ -23,7 +23,11 @@ inline void d3d9_gap(Host& h, Proxy& p, Cpu&, const char* method) {
 }
 template<size_t N> inline void d3d9_register_gaps(ComSpace& s, Host& h, const char* iface, const unsigned (&arities)[N]) {
     for (unsigned slot = 3; slot < N; ++slot) {
-        if (s.ifaces.at(iface).methods.count(slot)) continue;
+        auto registered = s.ifaces.at(iface).methods.find(slot);
+        if (registered != s.ifaces.at(iface).methods.end()) {
+            if (registered->second.argc != arities[slot]) throw std::logic_error("D3D9 COM slot arity mismatch");
+            continue;
+        }
         s.method(iface, slot, arities[slot], [&h, slot](Proxy& p, Cpu& c) -> uint32_t {
             char name[24]; snprintf(name, sizeof name, "slot %u", slot);
             d3d9_gap(h, p, c, name);
@@ -80,15 +84,37 @@ inline uint32_t d3d9_shader_bytes(Cpu& c,uint32_t address) {
     for(uint32_t i=0;i<(1u<<18);++i)if(c.mem.r32(address+i*4)==0x0000FFFFu)return (i+1)*4;
     throw Fault(FaultKind::Unsupported,c.eip,address,"D3D9 shader bytecode has no END token");
 }
+inline float d3d9_float_slot(Cpu& c,unsigned slot) {
+    uint32_t bits=c.arg(slot);float value;memcpy(&value,&bits,sizeof(value));return value;
+}
+inline constexpr uint64_t d3d9_up_index_count(D3DPRIMITIVETYPE type,uint32_t primitives) {
+    switch(type) {
+    case D3DPT_POINTLIST: return primitives;
+    case D3DPT_LINELIST: return uint64_t(primitives)*2;
+    case D3DPT_LINESTRIP: return primitives?uint64_t(primitives)+1:0;
+    case D3DPT_TRIANGLELIST: return uint64_t(primitives)*3;
+    case D3DPT_TRIANGLESTRIP:
+    case D3DPT_TRIANGLEFAN: return primitives?uint64_t(primitives)+2:0;
+    default: return 0;
+    }
+}
 inline void register_d3d9_com(ComSpace& s, Host& h) {
     s.interface_("IDirect3D9",17);
     s.interface_("IDirect3D9Ex",22);
     s.interface_("IDirect3DDevice9",119);
     s.interface_("IDirect3DSurface9",17);
     s.interface_("IDirect3DVertexBuffer9",14);
+    s.interface_("IDirect3DIndexBuffer9",14);
+    s.interface_("IDirect3DTexture9",22);
+    s.interface_("IDirect3DSwapChain9",10);
+    s.interface_("IDirect3DStateBlock9",7);
+    s.interface_("IDirect3DVertexDeclaration9",6);
     s.interface_("IDirect3DVertexShader9",5);
     s.interface_("IDirect3DPixelShader9",5);
-    auto method=[&](const char* iface,unsigned slot,unsigned argc,Marshaller fn){s.method(iface,slot,argc,std::move(fn));};
+    auto method=[&](const char* iface,unsigned slot,unsigned argc,Marshaller fn){
+        if(s.ifaces.at(iface).methods.count(slot))throw std::logic_error("duplicate D3D9 COM slot registration");
+        s.method(iface,slot,argc,std::move(fn));
+    };
     auto d3d9=[&](Proxy& p)->IDirect3D9* { return static_cast<IDirect3D9*>(p.host); };
     auto dev=[&](Proxy& p)->IDirect3DDevice9* { return static_cast<IDirect3DDevice9*>(p.host); };
     // IDirect3D9 and the shared IDirect3D9Ex prefix. Pointer-bearing output
@@ -107,6 +133,8 @@ inline void register_d3d9_com(ComSpace& s, Host& h) {
     method("IDirect3D9Ex",9,6,[d3d9](Proxy& p,Cpu& c){return uint32_t(d3d9(p)->CheckDeviceType(c.arg(1),D3DDEVTYPE(c.arg(2)),D3DFORMAT(c.arg(3)),D3DFORMAT(c.arg(4)),c.arg(5)));});
     method("IDirect3D9",10,7,[d3d9](Proxy& p,Cpu& c){return uint32_t(d3d9(p)->CheckDeviceFormat(c.arg(1),D3DDEVTYPE(c.arg(2)),D3DFORMAT(c.arg(3)),c.arg(4),D3DRESOURCETYPE(c.arg(5)),D3DFORMAT(c.arg(6))));});
     method("IDirect3D9Ex",10,7,[d3d9](Proxy& p,Cpu& c){return uint32_t(d3d9(p)->CheckDeviceFormat(c.arg(1),D3DDEVTYPE(c.arg(2)),D3DFORMAT(c.arg(3)),c.arg(4),D3DRESOURCETYPE(c.arg(5)),D3DFORMAT(c.arg(6))));});
+    auto check_multisample=[&](const char* iface){method(iface,11,7,[d3d9](Proxy& p,Cpu& c)->uint32_t {DWORD quality=0;HRESULT hr=d3d9(p)->CheckDeviceMultiSampleType(c.arg(1),D3DDEVTYPE(c.arg(2)),D3DFORMAT(c.arg(3)),c.arg(4),D3DMULTISAMPLE_TYPE(c.arg(5)),c.arg(6)?&quality:nullptr);if(SUCCEEDED(hr)&&c.arg(6))c.mem.w32(c.arg(6),quality);return uint32_t(hr);});method(iface,12,6,[d3d9](Proxy& p,Cpu& c){return uint32_t(d3d9(p)->CheckDepthStencilMatch(c.arg(1),D3DDEVTYPE(c.arg(2)),D3DFORMAT(c.arg(3)),D3DFORMAT(c.arg(4)),D3DFORMAT(c.arg(5))));});};
+    check_multisample("IDirect3D9");check_multisample("IDirect3D9Ex");
     method("IDirect3D9",14,4,[d3d9](Proxy& p,Cpu& c)->uint32_t {D3DCAPS9 x{};HRESULT hr=d3d9(p)->GetDeviceCaps(c.arg(1),D3DDEVTYPE(c.arg(2)),&x);if(SUCCEEDED(hr))c.mem.write_bytes(c.arg(3),&x,sizeof(x));return uint32_t(hr);});
     method("IDirect3D9Ex",14,4,[d3d9](Proxy& p,Cpu& c)->uint32_t {D3DCAPS9 x{};HRESULT hr=d3d9(p)->GetDeviceCaps(c.arg(1),D3DDEVTYPE(c.arg(2)),&x);if(SUCCEEDED(hr))c.mem.write_bytes(c.arg(3),&x,sizeof(x));return uint32_t(hr);});
     auto create_device=[&](const char* iface) { method(iface,16,7,[d3d9,&s,&h](Proxy& p,Cpu& c)->uint32_t {
@@ -119,7 +147,59 @@ inline void register_d3d9_com(ComSpace& s, Host& h) {
     });};
     create_device("IDirect3D9");create_device("IDirect3D9Ex");
 
-    // IDirect3DDevice9 methods. Slot counts are x86 stdcall stack DWORDs.
+    // IDirect3DDevice9 methods. Slots follow the order in d3d9.h; argc counts
+    // x86 stdcall DWORD slots, including both halves of any 64-bit by-value arg.
+    method("IDirect3DDevice9",4,1,[dev](Proxy& p,Cpu&){return dev(p)->GetAvailableTextureMem();});
+    method("IDirect3DDevice9",5,1,[dev](Proxy& p,Cpu&){return uint32_t(dev(p)->EvictManagedResources());});
+    method("IDirect3DDevice9",7,2,[dev](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1))return E_POINTER;D3DCAPS9 x{};HRESULT hr=dev(p)->GetDeviceCaps(&x);if(SUCCEEDED(hr))c.mem.write_bytes(c.arg(1),&x,sizeof(x));return uint32_t(hr);});
+    method("IDirect3DDevice9",8,3,[dev](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;D3DDISPLAYMODE x{};HRESULT hr=dev(p)->GetDisplayMode(c.arg(1),&x);if(SUCCEEDED(hr))c.mem.write_bytes(c.arg(2),&x,sizeof(x));return uint32_t(hr);});
+    method("IDirect3DDevice9",10,4,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(3))return E_POINTER;auto* bitmap=static_cast<IDirect3DSurface9*>(s.by_guest(c.arg(3)).host);return uint32_t(dev(p)->SetCursorProperties(c.arg(1),c.arg(2),bitmap));});
+    method("IDirect3DDevice9",11,4,[dev](Proxy& p,Cpu& c)->uint32_t {dev(p)->SetCursorPosition(int32_t(c.arg(1)),int32_t(c.arg(2)),c.arg(3));return 0;});
+    method("IDirect3DDevice9",12,2,[dev](Proxy& p,Cpu& c){return uint32_t(dev(p)->ShowCursor(c.arg(1)!=0));});
+    method("IDirect3DDevice9",14,3,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;IDirect3DSwapChain9* x=nullptr;HRESULT hr=dev(p)->GetSwapChain(c.arg(1),&x);if(SUCCEEDED(hr))c.mem.w32(c.arg(2),d3d9_wrap(s,c,"IDirect3DSwapChain9",x));else c.mem.w32(c.arg(2),0);return uint32_t(hr);});
+    method("IDirect3DDevice9",21,4,[dev](Proxy& p,Cpu& c){D3DGAMMARAMP ramp{};if(c.arg(3)){auto b=c.mem.read_bytes(c.arg(3),sizeof(ramp));memcpy(&ramp,b.data(),sizeof(ramp));}dev(p)->SetGammaRamp(c.arg(1),c.arg(2),c.arg(3)?&ramp:nullptr);return 0u;});
+    method("IDirect3DDevice9",22,3,[dev](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;D3DGAMMARAMP ramp{};dev(p)->GetGammaRamp(c.arg(1),&ramp);c.mem.write_bytes(c.arg(2),&ramp,sizeof(ramp));return 0;});
+    method("IDirect3DDevice9",23,9,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(7))return E_POINTER;IDirect3DTexture9* x=nullptr;HRESULT hr=dev(p)->CreateTexture(c.arg(1),c.arg(2),c.arg(3),c.arg(4),D3DFORMAT(c.arg(5)),D3DPOOL(c.arg(6)),&x,nullptr);if(SUCCEEDED(hr))c.mem.w32(c.arg(7),d3d9_wrap(s,c,"IDirect3DTexture9",x));else c.mem.w32(c.arg(7),0);return uint32_t(hr);});
+    method("IDirect3DDevice9",27,7,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(5))return E_POINTER;IDirect3DIndexBuffer9* x=nullptr;HRESULT hr=dev(p)->CreateIndexBuffer(c.arg(1),c.arg(2),D3DFORMAT(c.arg(3)),D3DPOOL(c.arg(4)),&x,nullptr);if(SUCCEEDED(hr))c.mem.w32(c.arg(5),d3d9_wrap(s,c,"IDirect3DIndexBuffer9",x));else c.mem.w32(c.arg(5),0);return uint32_t(hr);});
+    method("IDirect3DDevice9",28,9,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(7))return E_POINTER;IDirect3DSurface9* x=nullptr;HRESULT hr=dev(p)->CreateRenderTarget(c.arg(1),c.arg(2),D3DFORMAT(c.arg(3)),D3DMULTISAMPLE_TYPE(c.arg(4)),c.arg(5),c.arg(6),&x,nullptr);if(SUCCEEDED(hr))c.mem.w32(c.arg(7),d3d9_wrap(s,c,"IDirect3DSurface9",x));else c.mem.w32(c.arg(7),0);return uint32_t(hr);});
+    method("IDirect3DDevice9",29,9,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(7))return E_POINTER;IDirect3DSurface9* x=nullptr;HRESULT hr=dev(p)->CreateDepthStencilSurface(c.arg(1),c.arg(2),D3DFORMAT(c.arg(3)),D3DMULTISAMPLE_TYPE(c.arg(4)),c.arg(5),c.arg(6),&x,nullptr);if(SUCCEEDED(hr))c.mem.w32(c.arg(7),d3d9_wrap(s,c,"IDirect3DSurface9",x));else c.mem.w32(c.arg(7),0);return uint32_t(hr);});
+    method("IDirect3DDevice9",30,5,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1)||!c.arg(3))return E_POINTER;auto* src=static_cast<IDirect3DSurface9*>(s.by_guest(c.arg(1)).host);auto* dst=static_cast<IDirect3DSurface9*>(s.by_guest(c.arg(3)).host);RECT rect{};RECT* rp=nullptr;POINT point{};POINT* pp=nullptr;if(c.arg(2)){rect=d3d9_read_struct<RECT>(c,c.arg(2));rp=&rect;}if(c.arg(4)){point=d3d9_read_struct<POINT>(c,c.arg(4));pp=&point;}return uint32_t(dev(p)->UpdateSurface(src,rp,dst,pp));});
+    method("IDirect3DDevice9",31,3,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1)||!c.arg(2))return E_POINTER;return uint32_t(dev(p)->UpdateTexture(static_cast<IDirect3DBaseTexture9*>(s.by_guest(c.arg(1)).host),static_cast<IDirect3DBaseTexture9*>(s.by_guest(c.arg(2)).host)));});
+    method("IDirect3DDevice9",34,6,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1)||!c.arg(3))return E_POINTER;RECT a{},b{};RECT* ap=nullptr;RECT* bp=nullptr;if(c.arg(2)){a=d3d9_read_struct<RECT>(c,c.arg(2));ap=&a;}if(c.arg(4)){b=d3d9_read_struct<RECT>(c,c.arg(4));bp=&b;}return uint32_t(dev(p)->StretchRect(static_cast<IDirect3DSurface9*>(s.by_guest(c.arg(1)).host),ap,static_cast<IDirect3DSurface9*>(s.by_guest(c.arg(3)).host),bp,D3DTEXTUREFILTERTYPE(c.arg(5))));});
+    method("IDirect3DDevice9",35,4,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1))return E_POINTER;RECT r{},*rp=nullptr;if(c.arg(2)){r=d3d9_read_struct<RECT>(c,c.arg(2));rp=&r;}return uint32_t(dev(p)->ColorFill(static_cast<IDirect3DSurface9*>(s.by_guest(c.arg(1)).host),rp,D3DCOLOR(c.arg(3))));});
+    method("IDirect3DDevice9",37,3,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(c.arg(2)==0)return uint32_t(dev(p)->SetRenderTarget(c.arg(1),nullptr));return uint32_t(dev(p)->SetRenderTarget(c.arg(1),static_cast<IDirect3DSurface9*>(s.by_guest(c.arg(2)).host)));});
+    method("IDirect3DDevice9",38,3,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;IDirect3DSurface9* x=nullptr;HRESULT hr=dev(p)->GetRenderTarget(c.arg(1),&x);if(SUCCEEDED(hr))c.mem.w32(c.arg(2),d3d9_wrap(s,c,"IDirect3DSurface9",x));else c.mem.w32(c.arg(2),0);return uint32_t(hr);});
+    method("IDirect3DDevice9",39,2,[dev,&s](Proxy& p,Cpu& c)->uint32_t {auto* x=c.arg(1)?static_cast<IDirect3DSurface9*>(s.by_guest(c.arg(1)).host):nullptr;return uint32_t(dev(p)->SetDepthStencilSurface(x));});
+    method("IDirect3DDevice9",45,3,[dev](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;D3DMATRIX x{};HRESULT hr=dev(p)->GetTransform(D3DTRANSFORMSTATETYPE(c.arg(1)),&x);if(SUCCEEDED(hr))c.mem.write_bytes(c.arg(2),&x,sizeof(x));return uint32_t(hr);});
+    method("IDirect3DDevice9",46,3,[dev](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;D3DMATRIX x=d3d9_read_struct<D3DMATRIX>(c,c.arg(2));return uint32_t(dev(p)->MultiplyTransform(D3DTRANSFORMSTATETYPE(c.arg(1)),&x));});
+    method("IDirect3DDevice9",49,2,[dev](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1))return E_POINTER;D3DMATERIAL9 x=d3d9_read_struct<D3DMATERIAL9>(c,c.arg(1));return uint32_t(dev(p)->SetMaterial(&x));});
+    method("IDirect3DDevice9",50,2,[dev](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1))return E_POINTER;D3DMATERIAL9 x{};HRESULT hr=dev(p)->GetMaterial(&x);if(SUCCEEDED(hr))c.mem.write_bytes(c.arg(1),&x,sizeof(x));return uint32_t(hr);});
+    method("IDirect3DDevice9",51,3,[dev](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;D3DLIGHT9 x=d3d9_read_struct<D3DLIGHT9>(c,c.arg(2));return uint32_t(dev(p)->SetLight(c.arg(1),&x));});
+    method("IDirect3DDevice9",52,3,[dev](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;D3DLIGHT9 x{};HRESULT hr=dev(p)->GetLight(c.arg(1),&x);if(SUCCEEDED(hr))c.mem.write_bytes(c.arg(2),&x,sizeof(x));return uint32_t(hr);});
+    method("IDirect3DDevice9",53,3,[dev](Proxy& p,Cpu& c){return uint32_t(dev(p)->LightEnable(c.arg(1),c.arg(2)));});
+    method("IDirect3DDevice9",54,3,[dev](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;BOOL x=FALSE;HRESULT hr=dev(p)->GetLightEnable(c.arg(1),&x);if(SUCCEEDED(hr))c.mem.w32(c.arg(2),x);return uint32_t(hr);});
+    method("IDirect3DDevice9",59,3,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;IDirect3DStateBlock9* x=nullptr;HRESULT hr=dev(p)->CreateStateBlock(D3DSTATEBLOCKTYPE(c.arg(1)),&x);if(SUCCEEDED(hr))c.mem.w32(c.arg(2),d3d9_wrap(s,c,"IDirect3DStateBlock9",x));else c.mem.w32(c.arg(2),0);return uint32_t(hr);});
+    method("IDirect3DDevice9",60,1,[dev](Proxy& p,Cpu&){return uint32_t(dev(p)->BeginStateBlock());});
+    method("IDirect3DDevice9",61,2,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1))return E_POINTER;IDirect3DStateBlock9* x=nullptr;HRESULT hr=dev(p)->EndStateBlock(&x);if(SUCCEEDED(hr))c.mem.w32(c.arg(1),d3d9_wrap(s,c,"IDirect3DStateBlock9",x));else c.mem.w32(c.arg(1),0);return uint32_t(hr);});
+    method("IDirect3DDevice9",64,3,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;IDirect3DBaseTexture9* x=nullptr;HRESULT hr=dev(p)->GetTexture(c.arg(1),&x);if(SUCCEEDED(hr))c.mem.w32(c.arg(2),d3d9_wrap(s,c,"IDirect3DTexture9",x));else c.mem.w32(c.arg(2),0);return uint32_t(hr);});
+    method("IDirect3DDevice9",65,3,[dev,&s](Proxy& p,Cpu& c)->uint32_t {auto* x=c.arg(2)?static_cast<IDirect3DBaseTexture9*>(s.by_guest(c.arg(2)).host):nullptr;return uint32_t(dev(p)->SetTexture(c.arg(1),x));});
+    method("IDirect3DDevice9",66,4,[dev](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(3))return E_POINTER;DWORD x=0;HRESULT hr=dev(p)->GetTextureStageState(c.arg(1),D3DTEXTURESTAGESTATETYPE(c.arg(2)),&x);if(SUCCEEDED(hr))c.mem.w32(c.arg(3),x);return uint32_t(hr);});
+    method("IDirect3DDevice9",67,4,[dev](Proxy& p,Cpu& c){return uint32_t(dev(p)->SetTextureStageState(c.arg(1),D3DTEXTURESTAGESTATETYPE(c.arg(2)),c.arg(3)));});
+    method("IDirect3DDevice9",68,4,[dev](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(3))return E_POINTER;DWORD x=0;HRESULT hr=dev(p)->GetSamplerState(c.arg(1),D3DSAMPLERSTATETYPE(c.arg(2)),&x);if(SUCCEEDED(hr))c.mem.w32(c.arg(3),x);return uint32_t(hr);});
+    method("IDirect3DDevice9",69,4,[dev](Proxy& p,Cpu& c){return uint32_t(dev(p)->SetSamplerState(c.arg(1),D3DSAMPLERSTATETYPE(c.arg(2)),c.arg(3)));});
+    method("IDirect3DDevice9",75,2,[dev](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1))return E_POINTER;RECT x=d3d9_read_struct<RECT>(c,c.arg(1));return uint32_t(dev(p)->SetScissorRect(&x));});
+    method("IDirect3DDevice9",76,2,[dev](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1))return E_POINTER;RECT x{};HRESULT hr=dev(p)->GetScissorRect(&x);if(SUCCEEDED(hr))c.mem.write_bytes(c.arg(1),&x,sizeof(x));return uint32_t(hr);});
+    method("IDirect3DDevice9",79,2,[dev](Proxy& p,Cpu& c){return uint32_t(dev(p)->SetNPatchMode(d3d9_float_slot(c,1)));});
+    method("IDirect3DDevice9",82,7,[dev](Proxy& p,Cpu& c){return uint32_t(dev(p)->DrawIndexedPrimitive(D3DPRIMITIVETYPE(c.arg(1)),int32_t(c.arg(2)),c.arg(3),c.arg(4),c.arg(5),c.arg(6)));});
+    method("IDirect3DDevice9",84,9,[dev](Proxy& p,Cpu& c)->uint32_t {uint32_t pc=c.arg(4),format=c.arg(6),stride=c.arg(8);uint64_t indices=d3d9_up_index_count(D3DPRIMITIVETYPE(c.arg(1)),pc);uint64_t index_bytes=indices*(format==D3DFMT_INDEX16?2:format==D3DFMT_INDEX32?4:0),vertex_bytes=uint64_t(c.arg(3))*stride;if(!stride||!index_bytes||index_bytes>D3D9_GUEST_SIZE||vertex_bytes>D3D9_GUEST_SIZE)return D3DERR_INVALIDCALL;auto ib=c.mem.read_bytes(c.arg(5),uint32_t(index_bytes));auto vb=c.mem.read_bytes(c.arg(7),uint32_t(vertex_bytes));return uint32_t(dev(p)->DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE(c.arg(1)),c.arg(2),c.arg(3),pc,ib.data(),D3DFORMAT(format),vb.data(),stride));});
+    method("IDirect3DDevice9",86,3,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1)||!c.arg(2))return E_POINTER;std::vector<D3DVERTEXELEMENT9> elements;for(unsigned i=0;i<65;++i){auto x=d3d9_read_struct<D3DVERTEXELEMENT9>(c,c.arg(1)+i*sizeof(D3DVERTEXELEMENT9));elements.push_back(x);if(x.Stream==0xFF)break;}if(elements.empty()||elements.back().Stream!=0xFF)return D3DERR_INVALIDCALL;IDirect3DVertexDeclaration9* x=nullptr;HRESULT hr=dev(p)->CreateVertexDeclaration(elements.data(),&x);if(SUCCEEDED(hr))c.mem.w32(c.arg(2),d3d9_wrap(s,c,"IDirect3DVertexDeclaration9",x));else c.mem.w32(c.arg(2),0);return uint32_t(hr);});
+    method("IDirect3DDevice9",87,2,[dev,&s](Proxy& p,Cpu& c)->uint32_t {auto* x=c.arg(1)?static_cast<IDirect3DVertexDeclaration9*>(s.by_guest(c.arg(1)).host):nullptr;return uint32_t(dev(p)->SetVertexDeclaration(x));});
+    method("IDirect3DDevice9",96,4,[dev](Proxy& p,Cpu& c)->uint32_t {uint32_t n=c.arg(3);if(n>256)return D3DERR_INVALIDCALL;auto b=c.mem.read_bytes(c.arg(2),n*16);return uint32_t(dev(p)->SetVertexShaderConstantI(c.arg(1),reinterpret_cast<const int*>(b.data()),n));});
+    method("IDirect3DDevice9",98,4,[dev](Proxy& p,Cpu& c)->uint32_t {uint32_t n=c.arg(3);if(n>256)return D3DERR_INVALIDCALL;auto b=c.mem.read_bytes(c.arg(2),n*4);return uint32_t(dev(p)->SetVertexShaderConstantB(c.arg(1),reinterpret_cast<const BOOL*>(b.data()),n));});
+    method("IDirect3DDevice9",104,2,[dev,&s](Proxy& p,Cpu& c)->uint32_t {auto* x=c.arg(1)?static_cast<IDirect3DIndexBuffer9*>(s.by_guest(c.arg(1)).host):nullptr;return uint32_t(dev(p)->SetIndices(x));});
+    method("IDirect3DDevice9",109,4,[dev](Proxy& p,Cpu& c)->uint32_t {uint32_t n=c.arg(3);if(n>256)return D3DERR_INVALIDCALL;auto b=c.mem.read_bytes(c.arg(2),n*16);return uint32_t(dev(p)->SetPixelShaderConstantF(c.arg(1),reinterpret_cast<const float*>(b.data()),n));});
+    method("IDirect3DDevice9",111,4,[dev](Proxy& p,Cpu& c)->uint32_t {uint32_t n=c.arg(3);if(n>256)return D3DERR_INVALIDCALL;auto b=c.mem.read_bytes(c.arg(2),n*16);return uint32_t(dev(p)->SetPixelShaderConstantI(c.arg(1),reinterpret_cast<const int*>(b.data()),n));});
+    method("IDirect3DDevice9",113,4,[dev](Proxy& p,Cpu& c)->uint32_t {uint32_t n=c.arg(3);if(n>256)return D3DERR_INVALIDCALL;auto b=c.mem.read_bytes(c.arg(2),n*4);return uint32_t(dev(p)->SetPixelShaderConstantB(c.arg(1),reinterpret_cast<const BOOL*>(b.data()),n));});
     method("IDirect3DDevice9",3,1,[dev](Proxy& p,Cpu&){return uint32_t(dev(p)->TestCooperativeLevel());});
     method("IDirect3DDevice9",16,2,[dev,&h](Proxy& p,Cpu& c)->uint32_t {D3DPRESENT_PARAMETERS pp{};if(FAILED(d3d9_present_parameters(h,c,c.arg(1),pp)))return E_POINTER;HRESULT hr=dev(p)->Reset(&pp);d3d9_write_present_parameters(c,c.arg(1),pp);return uint32_t(hr);});
     method("IDirect3DDevice9",17,5,[dev,&h](Proxy& p,Cpu& c)->uint32_t {if(c.arg(4)){d3d9_gap(h,p,c,"Present dirty-region");return D3D9_E_NOTIMPL;}RECT src{},dst{};RECT* src_ptr=nullptr;RECT* dst_ptr=nullptr;if(c.arg(1)){src=d3d9_read_struct<RECT>(c,c.arg(1));src_ptr=&src;}if(c.arg(2)){dst=d3d9_read_struct<RECT>(c,c.arg(2));dst_ptr=&dst;}HWND window=reinterpret_cast<HWND>(h.d3d9_window?h.d3d9_window(c.arg(3)):(c.arg(3)?0:0));return uint32_t(dev(p)->Present(src_ptr,dst_ptr,window,nullptr));});
@@ -142,8 +222,24 @@ inline void register_d3d9_com(ComSpace& s, Host& h) {
     method("IDirect3DDevice9",100,5,[dev,&s](Proxy& p,Cpu& c)->uint32_t {auto* x=c.arg(2)?static_cast<IDirect3DVertexBuffer9*>(s.by_guest(c.arg(2)).host):nullptr;return uint32_t(dev(p)->SetStreamSource(c.arg(1),x,c.arg(3),c.arg(4)));});
     method("IDirect3DDevice9",106,3,[dev,&s](Proxy& p,Cpu& c)->uint32_t {IDirect3DPixelShader9* x=nullptr;uint32_t n=d3d9_shader_bytes(c,c.arg(1));auto b=c.mem.read_bytes(c.arg(1),n);HRESULT hr=dev(p)->CreatePixelShader(reinterpret_cast<const DWORD*>(b.data()),&x);if(SUCCEEDED(hr)&&c.arg(2))c.mem.w32(c.arg(2),d3d9_wrap(s,c,"IDirect3DPixelShader9",x));return uint32_t(hr);});
     method("IDirect3DDevice9",107,2,[dev,&s](Proxy& p,Cpu& c)->uint32_t {auto* x=c.arg(1)?static_cast<IDirect3DPixelShader9*>(s.by_guest(c.arg(1)).host):nullptr;return uint32_t(dev(p)->SetPixelShader(x));});
+    method("IDirect3DSurface9",12,2,[](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1))return E_POINTER;D3DSURFACE_DESC x{};HRESULT hr=static_cast<IDirect3DSurface9*>(p.host)->GetDesc(&x);if(SUCCEEDED(hr))c.mem.write_bytes(c.arg(1),&x,sizeof(x));return uint32_t(hr);});
     method("IDirect3DSurface9",13,4,[&h](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1))return E_POINTER;RECT rect{};RECT* region=nullptr;if(c.arg(2)){rect=d3d9_read_struct<RECT>(c,c.arg(2));region=&rect;}D3DLOCKED_RECT x{};HRESULT hr=static_cast<IDirect3DSurface9*>(p.host)->LockRect(&x,region,c.arg(3));if(SUCCEEDED(hr)){D3DSURFACE_DESC desc{};static_cast<IDirect3DSurface9*>(p.host)->GetDesc(&desc);uint32_t rows=region?uint32_t(std::max<LONG>(0,rect.bottom-rect.top)):desc.Height;uint32_t pitch=uint32_t(std::abs(x.Pitch));uint64_t bytes=uint64_t(pitch)*rows;if(!x.pBits||!bytes||bytes>D3D9_GUEST_SIZE){static_cast<IDirect3DSurface9*>(p.host)->UnlockRect();return D3DERR_INVALIDCALL;}uint32_t size=uint32_t(bytes);uint32_t at=d3d9_guest_buffer(h,c,size);c.mem.write_bytes(at,x.pBits,size);h.d3d9_locks[p.guest]={x.pBits,size,at};c.mem.w32(c.arg(1),uint32_t(x.Pitch));c.mem.w32(c.arg(1)+4,at);}return uint32_t(hr);});
     method("IDirect3DSurface9",14,1,[&h](Proxy& p,Cpu& c)->uint32_t {auto it=h.d3d9_locks.find(p.guest);if(it!=h.d3d9_locks.end()&&std::get<0>(it->second)&&std::get<1>(it->second)){auto bytes=c.mem.read_bytes(std::get<2>(it->second),std::get<1>(it->second));memcpy(std::get<0>(it->second),bytes.data(),bytes.size());}HRESULT hr=static_cast<IDirect3DSurface9*>(p.host)->UnlockRect();h.d3d9_locks.erase(p.guest);return uint32_t(hr);});
+    method("IDirect3DSurface9",15,2,[&h](Proxy& p,Cpu& c)->uint32_t {d3d9_gap(h,p,c,"GetDC unsupported");return D3D9_E_NOTIMPL;});
+    method("IDirect3DSurface9",16,2,[&h](Proxy& p,Cpu& c)->uint32_t {d3d9_gap(h,p,c,"ReleaseDC unsupported");return D3D9_E_NOTIMPL;});
+    method("IDirect3DTexture9",13,1,[](Proxy& p,Cpu&){return static_cast<IDirect3DTexture9*>(p.host)->GetLevelCount();});
+    method("IDirect3DTexture9",17,3,[](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;D3DSURFACE_DESC x{};HRESULT hr=static_cast<IDirect3DTexture9*>(p.host)->GetLevelDesc(c.arg(1),&x);if(SUCCEEDED(hr))c.mem.write_bytes(c.arg(2),&x,sizeof(x));return uint32_t(hr);});
+    method("IDirect3DTexture9",18,3,[&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;IDirect3DSurface9* x=nullptr;HRESULT hr=static_cast<IDirect3DTexture9*>(p.host)->GetSurfaceLevel(c.arg(1),&x);if(SUCCEEDED(hr))c.mem.w32(c.arg(2),d3d9_wrap(s,c,"IDirect3DSurface9",x));else c.mem.w32(c.arg(2),0);return uint32_t(hr);});
+    method("IDirect3DTexture9",19,5,[&h](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;RECT rect{};RECT* region=nullptr;if(c.arg(3)){rect=d3d9_read_struct<RECT>(c,c.arg(3));region=&rect;}D3DLOCKED_RECT x{};auto* texture=static_cast<IDirect3DTexture9*>(p.host);HRESULT hr=texture->LockRect(c.arg(1),&x,region,c.arg(4));if(SUCCEEDED(hr)){D3DSURFACE_DESC desc{};if(FAILED(texture->GetLevelDesc(c.arg(1),&desc))){texture->UnlockRect(c.arg(1));return D3DERR_INVALIDCALL;}uint32_t rows=region?uint32_t(std::max<LONG>(0,rect.bottom-rect.top)):desc.Height;uint32_t pitch=uint32_t(std::abs(x.Pitch));uint64_t bytes=uint64_t(pitch)*rows;if(!x.pBits||!bytes||bytes>D3D9_GUEST_SIZE){texture->UnlockRect(c.arg(1));return D3DERR_INVALIDCALL;}uint32_t size=uint32_t(bytes),at=d3d9_guest_buffer(h,c,size);c.mem.write_bytes(at,x.pBits,size);h.d3d9_locks[p.guest]={x.pBits,size,at};c.mem.w32(c.arg(2),uint32_t(x.Pitch));c.mem.w32(c.arg(2)+4,at);}return uint32_t(hr);});
+    method("IDirect3DTexture9",20,2,[&h](Proxy& p,Cpu& c)->uint32_t {auto it=h.d3d9_locks.find(p.guest);if(it!=h.d3d9_locks.end()&&std::get<0>(it->second)&&std::get<1>(it->second)){auto b=c.mem.read_bytes(std::get<2>(it->second),std::get<1>(it->second));memcpy(std::get<0>(it->second),b.data(),b.size());}HRESULT hr=static_cast<IDirect3DTexture9*>(p.host)->UnlockRect(c.arg(1));h.d3d9_locks.erase(p.guest);return uint32_t(hr);});
+    method("IDirect3DTexture9",21,2,[](Proxy& p,Cpu& c)->uint32_t {RECT x{},*r=nullptr;if(c.arg(1)){x=d3d9_read_struct<RECT>(c,c.arg(1));r=&x;}return uint32_t(static_cast<IDirect3DTexture9*>(p.host)->AddDirtyRect(r));});
+    method("IDirect3DIndexBuffer9",11,5,[&h](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(3))return E_POINTER;auto* buffer=static_cast<IDirect3DIndexBuffer9*>(p.host);D3DINDEXBUFFER_DESC desc{};if(FAILED(buffer->GetDesc(&desc))||c.arg(1)>desc.Size||(c.arg(2)&&c.arg(2)>desc.Size-c.arg(1)))return D3DERR_INVALIDCALL;void* x=nullptr;HRESULT hr=buffer->Lock(c.arg(1),c.arg(2),&x,c.arg(4));if(SUCCEEDED(hr)){uint32_t size=c.arg(2)?c.arg(2):desc.Size-c.arg(1);if(!x||!size){buffer->Unlock();return D3DERR_INVALIDCALL;}uint32_t at=d3d9_guest_buffer(h,c,size);c.mem.write_bytes(at,x,size);h.d3d9_locks[p.guest]={x,size,at};c.mem.w32(c.arg(3),at);}return uint32_t(hr);});
+    method("IDirect3DIndexBuffer9",12,1,[&h](Proxy& p,Cpu& c)->uint32_t {auto it=h.d3d9_locks.find(p.guest);if(it!=h.d3d9_locks.end()&&std::get<0>(it->second)&&std::get<1>(it->second)){auto b=c.mem.read_bytes(std::get<2>(it->second),std::get<1>(it->second));memcpy(std::get<0>(it->second),b.data(),b.size());}HRESULT hr=static_cast<IDirect3DIndexBuffer9*>(p.host)->Unlock();h.d3d9_locks.erase(p.guest);return uint32_t(hr);});
+    method("IDirect3DIndexBuffer9",13,2,[](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1))return E_POINTER;D3DINDEXBUFFER_DESC x{};HRESULT hr=static_cast<IDirect3DIndexBuffer9*>(p.host)->GetDesc(&x);if(SUCCEEDED(hr))c.mem.write_bytes(c.arg(1),&x,sizeof(x));return uint32_t(hr);});
+    method("IDirect3DSwapChain9",3,6,[&h](Proxy& p,Cpu& c)->uint32_t {if(c.arg(4)){d3d9_gap(h,p,c,"Present dirty-region");return D3D9_E_NOTIMPL;}RECT a{},b{};RECT* ap=nullptr;RECT* bp=nullptr;if(c.arg(1)){a=d3d9_read_struct<RECT>(c,c.arg(1));ap=&a;}if(c.arg(2)){b=d3d9_read_struct<RECT>(c,c.arg(2));bp=&b;}HWND window=reinterpret_cast<HWND>(h.d3d9_window?h.d3d9_window(c.arg(3)):(c.arg(3)?0:0));return uint32_t(static_cast<IDirect3DSwapChain9*>(p.host)->Present(ap,bp,window,nullptr,c.arg(5)));});
+    method("IDirect3DSwapChain9",5,4,[&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(3))return E_POINTER;IDirect3DSurface9* x=nullptr;HRESULT hr=static_cast<IDirect3DSwapChain9*>(p.host)->GetBackBuffer(c.arg(1),D3DBACKBUFFER_TYPE(c.arg(2)),&x);if(SUCCEEDED(hr))c.mem.w32(c.arg(3),d3d9_wrap(s,c,"IDirect3DSurface9",x));else c.mem.w32(c.arg(3),0);return uint32_t(hr);});
+    method("IDirect3DStateBlock9",4,1,[](Proxy& p,Cpu&){return uint32_t(static_cast<IDirect3DStateBlock9*>(p.host)->Capture());});
+    method("IDirect3DStateBlock9",5,1,[](Proxy& p,Cpu&){return uint32_t(static_cast<IDirect3DStateBlock9*>(p.host)->Apply());});
     method("IDirect3DVertexBuffer9",11,5,[&h](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(3))return E_POINTER;auto* buffer=static_cast<IDirect3DVertexBuffer9*>(p.host);D3DVERTEXBUFFER_DESC desc{};if(FAILED(buffer->GetDesc(&desc))||c.arg(1)>desc.Size||(c.arg(2)&&c.arg(2)>desc.Size-c.arg(1)))return D3DERR_INVALIDCALL;void* x=nullptr;HRESULT hr=buffer->Lock(c.arg(1),c.arg(2),&x,c.arg(4));if(SUCCEEDED(hr)){uint32_t size=c.arg(2)?c.arg(2):desc.Size-c.arg(1);if(!x||!size){buffer->Unlock();return D3DERR_INVALIDCALL;}uint32_t at=d3d9_guest_buffer(h,c,size);c.mem.write_bytes(at,x,size);h.d3d9_locks[p.guest]={x,size,at};c.mem.w32(c.arg(3),at);}return uint32_t(hr);});
     method("IDirect3DVertexBuffer9",12,1,[&h](Proxy& p,Cpu& c)->uint32_t {auto it=h.d3d9_locks.find(p.guest);if(it!=h.d3d9_locks.end()&&std::get<0>(it->second)&&std::get<1>(it->second)){auto bytes=c.mem.read_bytes(std::get<2>(it->second),std::get<1>(it->second));memcpy(std::get<0>(it->second),bytes.data(),bytes.size());}HRESULT hr=static_cast<IDirect3DVertexBuffer9*>(p.host)->Unlock();h.d3d9_locks.erase(p.guest);return uint32_t(hr);});
     static constexpr unsigned d3d9_arities[]={3,1,1,2,1,4,3,5,3,6,7,7,6,5,4,2,7};
@@ -152,11 +248,20 @@ inline void register_d3d9_com(ComSpace& s, Host& h) {
     static constexpr unsigned surface_arities[]={3,1,1,2,5,4,2,2,1,1,1,3,2,4,1,2,2};
     static constexpr unsigned buffer_arities[]={3,1,1,2,5,4,2,2,1,1,1,5,1,2};
     static constexpr unsigned shader_arities[]={3,1,1,2,3};
+    static constexpr unsigned texture_arities[]={3,1,1,2,5,4,2,2,1,1,1,2,1,1,2,2,1,3,3,5,2,2};
+    static constexpr unsigned swapchain_arities[]={3,1,1,6,2,4,3,3,2,2};
+    static constexpr unsigned stateblock_arities[]={3,1,1,2,1,1,1};
+    static constexpr unsigned declaration_arities[]={3,1,1,2,2,2};
     d3d9_register_gaps(s,h,"IDirect3D9",d3d9_arities);
     d3d9_register_gaps(s,h,"IDirect3D9Ex",d3d9ex_arities);
     d3d9_register_gaps(s,h,"IDirect3DDevice9",device_arities);
     d3d9_register_gaps(s,h,"IDirect3DSurface9",surface_arities);
     d3d9_register_gaps(s,h,"IDirect3DVertexBuffer9",buffer_arities);
+    d3d9_register_gaps(s,h,"IDirect3DIndexBuffer9",buffer_arities);
+    d3d9_register_gaps(s,h,"IDirect3DTexture9",texture_arities);
+    d3d9_register_gaps(s,h,"IDirect3DSwapChain9",swapchain_arities);
+    d3d9_register_gaps(s,h,"IDirect3DStateBlock9",stateblock_arities);
+    d3d9_register_gaps(s,h,"IDirect3DVertexDeclaration9",declaration_arities);
     d3d9_register_gaps(s,h,"IDirect3DVertexShader9",shader_arities);
     d3d9_register_gaps(s,h,"IDirect3DPixelShader9",shader_arities);
 }
