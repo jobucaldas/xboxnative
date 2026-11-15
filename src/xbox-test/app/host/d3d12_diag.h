@@ -1342,6 +1342,42 @@ inline void traceDxilProbe() {
     emit(fmt("trace dxil.dll probe=LoadLibraryExW %s error=%lu",probe?"success":"missing",(unsigned long)error));
     if(probe)FreeLibrary(probe);
 }
+inline std::atomic<bool> traceCapsLogged{false};
+inline void traceCapabilities(ID3D12Device* device) {
+    if(!traceOn.load(std::memory_order_acquire)||traceCapsLogged.exchange(true,std::memory_order_acq_rel))return;
+    using CheckFn=HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*,D3D12_FEATURE,void*,UINT);
+    auto check=reinterpret_cast<CheckFn>(original(device,CheckFeatureSupport));
+    if(!check){emit("trace caps CheckFeatureSupport unavailable");return;}
+    const D3D_SHADER_MODEL models[]={static_cast<D3D_SHADER_MODEL>(0x68),D3D_SHADER_MODEL_6_7,
+        D3D_SHADER_MODEL_6_6,D3D_SHADER_MODEL_6_5,D3D_SHADER_MODEL_6_4,D3D_SHADER_MODEL_6_3,
+        D3D_SHADER_MODEL_6_2,D3D_SHADER_MODEL_6_1,D3D_SHADER_MODEL_6_0,D3D_SHADER_MODEL_5_1};
+    D3D12_FEATURE_DATA_SHADER_MODEL shaderModel{};
+    HRESULT shaderHr=E_FAIL;
+    for(D3D_SHADER_MODEL model:models) {
+        shaderModel.HighestShaderModel=model;
+        shaderHr=check(device,D3D12_FEATURE_SHADER_MODEL,&shaderModel,sizeof shaderModel);
+        if(SUCCEEDED(shaderHr))break;
+    }
+    D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
+    HRESULT optionsHr=check(device,D3D12_FEATURE_D3D12_OPTIONS,&options,sizeof options);
+    D3D12_FEATURE_DATA_D3D12_OPTIONS1 options1{};
+    HRESULT options1Hr=check(device,D3D12_FEATURE_D3D12_OPTIONS1,&options1,sizeof options1);
+    D3D12_FEATURE_DATA_D3D12_OPTIONS4 options4{};
+    HRESULT options4Hr=check(device,D3D12_FEATURE_D3D12_OPTIONS4,&options4,sizeof options4);
+    const D3D_ROOT_SIGNATURE_VERSION rootVersions[]={static_cast<D3D_ROOT_SIGNATURE_VERSION>(0x3),
+        D3D_ROOT_SIGNATURE_VERSION_1_1,D3D_ROOT_SIGNATURE_VERSION_1_0};
+    D3D12_FEATURE_DATA_ROOT_SIGNATURE root{};
+    HRESULT rootHr=E_FAIL;
+    for(D3D_ROOT_SIGNATURE_VERSION version:rootVersions) {
+        root.HighestVersion=version;
+        rootHr=check(device,D3D12_FEATURE_ROOT_SIGNATURE,&root,sizeof root);
+        if(SUCCEEDED(rootHr))break;
+    }
+    const unsigned sm=SUCCEEDED(shaderHr)?unsigned(shaderModel.HighestShaderModel):0;
+    emit(fmt("trace caps shader-model=0x%x hr=%s binding-tier=%d options-hr=%s wave-ops=%d int64=%d options1-hr=%s native16=%d options4-hr=%s root-signature=0x%x root-hr=%s",
+        sm,hex(shaderHr).c_str(),int(options.ResourceBindingTier),hex(optionsHr).c_str(),int(options1.WaveOps),int(options1.Int64ShaderOps),
+        hex(options1Hr).c_str(),int(options4.Native16BitShaderOpsSupported),hex(options4Hr).c_str(),unsigned(root.HighestVersion),hex(rootHr).c_str()));
+}
 // The stream-path hook goes only through the vtable of a pointer that really
 // implements ID3D12Device2. ID3D12Device has 44 methods (slots 0-43), so slot 47
 // is not a slot of its table; a device without ID3D12Device2 is skipped, logged.
@@ -1370,6 +1406,7 @@ inline void adopt(ID3D12Device* device) {
     size_t count=0;const Patch* patches=devicePatches(count);
     if(!patchClass(*reinterpret_cast<void***>(device),patches,count))return;
     adoptStreamPath(device);
+    traceCapabilities(device);
     emit(fmt("diagnostics on: failed D3D12 create/query/submit calls are logged once per distinct call (caps %llu/%llu)",
         (unsigned long long)kMaxFailures,(unsigned long long)kMaxProbes));
     report(true,"device node count",fmt("device nodes=%u",device->GetNodeCount()));

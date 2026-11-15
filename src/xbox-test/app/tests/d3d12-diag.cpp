@@ -326,6 +326,11 @@ int main(int argc,char** argv) {
         CHECK(count("has no ID3D12Device2")==1);
     }
     CHECK(count("diagnostics on")==1&&count("device nodes=")==1);
+    CHECK(count("trace caps shader-model=")==(traceMode?1:0));
+    if(traceMode) {
+        CHECK(count("binding-tier=")==1&&count("wave-ops=")==1&&count("int64=")==1);
+        CHECK(count("native16=")==1&&count("root-signature=")==1);
+    }
     // The capability answers a game branches on are logged once each.
     CHECK(count("CheckFeatureSupport feature=")>=4);
     CHECK(count("SHADER_MODEL")==1&&count("ARCHITECTURE")==1);
