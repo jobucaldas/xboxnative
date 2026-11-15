@@ -1045,27 +1045,78 @@ inline void Guest::register_all() {
         return 1; });
     reg.add("kernel32.dll", "IsProcessorFeaturePresent", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
         return c.arg(0) == 10 ? 1u : 0u; });  // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
+    auto nls_input = [this](uint32_t src, int32_t length, uint32_t unit_size, Host::NlsRequest& request) {
+        request.input_null = src == 0;
+        request.input_length = length;
+        if (!src || length < -1) return;
+        if (length == -1) {
+            if (unit_size == 1) {
+                std::string value = str(src);
+                request.input.assign(value.begin(), value.end()); request.input.push_back(0);
+            } else {
+                std::u16string value = wstr(src);
+                request.input.resize((value.size() + 1) * 2);
+                for (size_t i = 0; i < value.size(); ++i) { request.input[i * 2] = uint8_t(value[i]); request.input[i * 2 + 1] = uint8_t(value[i] >> 8); }
+            }
+        } else if (uint64_t(uint32_t(length)) * unit_size <= (1u << 24)) {
+            request.input = mem.read_bytes(src, uint32_t(length) * unit_size);
+        } else throw Fault(FaultKind::AccessViolation, 0, src, "NLS input exceeds copy limit");
+    };
+    reg.add("kernel32.dll", "IsValidCodePage", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        uint32_t cp = c.arg(0);
+        if (host.nls_call) {
+            Host::NlsRequest request{}; request.operation = Host::NlsOperation::IsValidCodePage; request.code_page = cp;
+            Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error); return response.result;
+        }
+        return cp == 20127 || cp == 28591 ? 1u : 0u;
+    });
     reg.add("kernel32.dll", "GetACP", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 1252; });
     reg.add("kernel32.dll", "GetOEMCP", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 437; });
     reg.add("kernel32.dll", "GetCPInfo", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
-        uint32_t cp = c.arg(0), p = c.arg(1); if (!p) return 0;
+        uint32_t cp = c.arg(0), p = c.arg(1); if (!p) { set_last_error(87); return 0; }
+        if (host.nls_call) {
+            Host::NlsRequest request{}; request.operation = Host::NlsOperation::GetCPInfo; request.code_page = cp;
+            Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error);
+            if (response.result && response.output.size() == 20) copy_out(p, response.output.data(), 20);
+            return response.result;
+        }
         mem.w32(p, cp == 65001 ? 65001u : 0u); mem.w32(p + 4, 1); mem.w8(p + 8, '?'); mem.w8(p + 9, 0);
         for (int i = 10; i < 20; ++i) mem.w8(p + uint32_t(i), 0);
         return 1; });
-    reg.add("kernel32.dll", "MultiByteToWideChar", Conv::Stdcall, 6, [this](Cpu& c) -> uint32_t {
-        uint32_t cp = c.arg(0), src = c.arg(2), n = c.arg(3), dst = c.arg(4), cap = c.arg(5);
-        (void)cp; std::string s = n == 0xFFFFFFFFu ? str(src) : std::string();
-        if (n != 0xFFFFFFFFu) { auto b = mem.read_bytes(src, n); s.assign(b.begin(), b.end()); }
+    reg.add("kernel32.dll", "MultiByteToWideChar", Conv::Stdcall, 6, [this, nls_input](Cpu& c) -> uint32_t {
+        uint32_t cp = c.arg(0), flags = c.arg(1), src = c.arg(2), dst = c.arg(4), cap = c.arg(5);
+        int32_t n = int32_t(c.arg(3));
+        if (host.nls_call) {
+            Host::NlsRequest request{}; request.operation = Host::NlsOperation::MultiByteToWideChar;
+            request.code_page = cp; request.flags = flags; request.output_null = dst == 0; request.output_capacity = cap;
+            nls_input(src, n, 1, request);
+            Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error);
+            if (response.result && dst && cap && response.output.size() == size_t(response.result) * 2) copy_out(dst, response.output.data(), uint32_t(response.output.size()));
+            return response.result;
+        }
+        (void)cp; std::string s = uint32_t(n) == 0xFFFFFFFFu ? str(src) : std::string();
+        if (uint32_t(n) != 0xFFFFFFFFu) { auto b = mem.read_bytes(src, uint32_t(n)); s.assign(b.begin(), b.end()); }
         if (!dst || !cap) return uint32_t(s.size() + 1);
         uint32_t put = uint32_t(s.size()) < cap ? uint32_t(s.size()) : cap - 1;
         for (uint32_t i = 0; i < put; ++i) { mem.w8(dst + i * 2, uint8_t(s[i])); mem.w8(dst + i * 2 + 1, 0); }
         if (put < cap) { mem.w8(dst + put * 2, 0); mem.w8(dst + put * 2 + 1, 0); }
         return put; });
-    reg.add("kernel32.dll", "WideCharToMultiByte", Conv::Stdcall, 8, [this](Cpu& c) -> uint32_t {
-        uint32_t src = c.arg(2), n = c.arg(3), dst = c.arg(4), cap = c.arg(5);
+    reg.add("kernel32.dll", "WideCharToMultiByte", Conv::Stdcall, 8, [this, nls_input](Cpu& c) -> uint32_t {
+        uint32_t cp = c.arg(0), flags = c.arg(1), src = c.arg(2), dst = c.arg(4), cap = c.arg(5), def = c.arg(6), used = c.arg(7);
+        int32_t n = int32_t(c.arg(3));
+        if (host.nls_call) {
+            Host::NlsRequest request{}; request.operation = Host::NlsOperation::WideCharToMultiByte;
+            request.code_page = cp; request.flags = flags; request.output_null = dst == 0; request.output_capacity = cap; request.wants_used_default = used != 0;
+            nls_input(src, n, 2, request);
+            if (def) request.default_char = mem.read_bytes(def, 1);
+            Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error);
+            if (response.result && dst && cap && response.output.size() == response.result) copy_out(dst, response.output.data(), response.result);
+            if (used) mem.w32(used, response.used_default ? 1u : 0u);
+            return response.result;
+        }
         std::string s;
-        if (n == 0xFFFFFFFFu) { for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(i * 2 + src, 2)); if (!w) break; s.push_back(char(w & 0xff)); } }
-        else for (uint32_t i = 0; i < n; ++i) s.push_back(char(mem.r(src + i * 2, 2) & 0xff));
+        if (uint32_t(n) == 0xFFFFFFFFu) { for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(i * 2 + src, 2)); if (!w) break; s.push_back(char(w & 0xff)); } }
+        else for (uint32_t i = 0; i < uint32_t(n); ++i) s.push_back(char(mem.r(src + i * 2, 2) & 0xff));
         if (!dst || !cap) return uint32_t(s.size() + 1);
         uint32_t put = uint32_t(s.size()) < cap ? uint32_t(s.size()) : cap - 1;
         mem.write_bytes(dst, s.data(), put); if (put < cap) mem.w8(dst + put, 0);
