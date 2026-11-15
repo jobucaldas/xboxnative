@@ -198,6 +198,7 @@ int main(void) {
     OutputDebugStringA("x86 diagnostic A");
     OutputDebugStringW(L"x86 diagnostic W");
     check(GetLastError() == 123);
+    check(AreFileApisANSI() == TRUE);
     SetLastError(0);
     check(GetModuleHandleA("no-such-module.dll") == NULL && GetLastError() == ERROR_MOD_NOT_FOUND);
     SetLastError(0);
