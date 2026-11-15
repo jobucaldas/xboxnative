@@ -644,6 +644,7 @@
 {"shell32.dll", "DragFinish", 0},
 {"shell32.dll", "DragQueryFileA", 0},
 {"shell32.dll", "DragQueryPoint", 0},
+{"shell32.dll", "ExtractIconExW", 0},
 {"shell32.dll", "SHBrowseForFolderA", 1},
 {"shell32.dll", "SHCreateDirectoryExW", 1},
 {"shell32.dll", "SHFileOperationW", 1},

@@ -69,6 +69,7 @@ static const Symbol symbols[]={
     // ShellExecute* never reaches native shell32 in Play (play_runtime shellLaunch).
     {"shell32.dll","SHFileOperationA"},
     {"shell32.dll","SHGetFolderPathA"},
+    {"shell32.dll","ExtractIconExW"},
     {"opengl32.dll","wglGetProcAddress"},
     {"opengl32.dll","wglDeleteContext"},
     {"opengl32.dll","wglMakeCurrent"},

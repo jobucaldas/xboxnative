@@ -187,6 +187,13 @@ static bool shellLaunch(const char* name) {
     return name && (!strcmp(name,"ShellExecuteA") || !strcmp(name,"ShellExecuteW") ||
                     !strcmp(name,"ShellExecuteExA") || !strcmp(name,"ShellExecuteExW"));
 }
+// No guest icon resource is exposed through the window record layer. Match the
+// documented no-icon result and clear requested output slots instead of
+// blocking guest initialization on an unsupported shell32 export.
+static UINT WINAPI extractIconExW(LPCWSTR, int, HICON* large, HICON* smallOut, UINT count) {
+    for(UINT i=0;i<count;++i) {if(large)large[i]=nullptr;if(smallOut)smallOut[i]=nullptr;}
+    return 0;
+}
 struct ShellExecuteInfo { DWORD size,mask; HWND window; const void* verb,*file,*parameters,*directory; int show; HINSTANCE instance; void* idList; const void* className; HKEY classKey; DWORD hotKey; HANDLE icon,process; };
 static_assert(sizeof(ShellExecuteInfo)==112,"SHELLEXECUTEINFO x64 layout");
 static void refusedShell(const char* name) {
@@ -2066,6 +2073,10 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // dynamic and mapped-forwarder imports alike (see processCreation).
     if(processCreation(name) && (key=="kernel32.dll" || key.find("api-ms-win-core-")==0)) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return processExport(name);}
     if(shellLaunch(name) && key=="shell32.dll") {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return shellExport(name);}
+    if(name && key=="shell32.dll" && !strcmp(name,"ExtractIconExW")) {
+        if(auto p=pe_tail::resolve(dll,name)) {record_gap(dll,name,ordinal,gap_summary::Outcome::resolved);return p;}
+        record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&extractIconExW;
+    }
     // Folder CSIDLs answer as the guest's known-folder route does (uwph/shell32).
     if(name && key=="shell32.dll" && !strcmp(name,"SHGetSpecialFolderPathW")) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&shell_folder::getSpecialFolderPathW;}
     if(auto graphics=play_graphics::resolve(dll,name,ordinal)){record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return graphics;}
