@@ -1805,7 +1805,7 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetSystemInfo", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t p = c.arg(0); if (!p) return 0;
         mem.w32(p + 0, 0); mem.w32(p + 4, 4096); mem.w32(p + 8, 0x10000); mem.w32(p + 12, 0x7FFE0000u);
-        mem.w32(p + 16, 1); mem.w32(p + 20, 1); mem.w32(p + 24, 0); mem.w32(p + 28, 0); mem.w32(p + 32, 9);
+        mem.w32(p + 16, 1); mem.w32(p + 20, 1); mem.w32(p + 24, 0); mem.w32(p + 28, 0x10000); mem.w32(p + 32, 9);
         return 0; });
     auto profile_text = [this](uint32_t file, bool wide, std::string& text) { uint32_t error=0;if(!profile_file(file,wide,text,false,error)){set_last_error(error?error:2);return false;}set_last_error(0);return true; };
     auto narrow = [this](uint32_t p){auto w=wstr(p);return std::string(w.begin(),w.end());};
