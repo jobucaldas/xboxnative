@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# fetch-gbe-fork.sh [outdir] -> <outdir>/steam_api64.dll, steamclient64.dll, LICENSE, SOURCE.txt (default: out/gbe-fork)
+# fetch-gbe-fork.sh [outdir] -> <outdir>/steam_api*.dll, steamclient*.dll, LICENSE, SOURCE.txt (default: out/gbe-fork)
 # Fetches the pinned gbe_fork release (`gbe-fork-win`, `gbe-fork-license` in deps.pin, SHA-256 verified) and
-# extracts only the regular x64 steam_api64.dll (the Steam API provider Play maps for games the signed-in
-# account owns, the ownership rule) and the x64 emulated steamclient64.dll (the client behind Valve's signed
-# one, for SteamStub-wrapped games). gbe_fork is LGPL-3.0. Outputs are git-ignored and must never be committed.
+# extracts the regular x64/x86 Steam API providers and the emulated x64/x86 Steam clients (for SteamStub games).
+# gbe_fork is LGPL-3.0. Outputs are git-ignored and must never be committed.
 # Needs: curl, 7z, sha256sum. Cache: third_party/gbe-fork/<sha prefix>/ (git-ignored).
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -20,8 +19,11 @@ fetch() { # url sha file
 fetch "$url" "$sha" "$work/$(basename "$url")"
 fetch "$lurl" "$lsha" "$work/LICENSE"
 rm -rf "$work/x"; 7z x -y -o"$work/x" "$work/$(basename "$url")" 'release/regular/x64/steam_api64.dll' \
-  'release/steamclient_experimental/steamclient64.dll' >/dev/null
-cp "$work/x/release/regular/x64/steam_api64.dll" "$work/x/release/steamclient_experimental/steamclient64.dll" "$work/LICENSE" "$out/"
+  'release/regular/x86/steam_api.dll' 'release/steamclient_experimental/steamclient64.dll' \
+  'release/steamclient_experimental/steamclient.dll' >/dev/null
+cp "$work/x/release/regular/x64/steam_api64.dll" "$work/x/release/regular/x86/steam_api.dll" \
+  "$work/x/release/steamclient_experimental/steamclient64.dll" "$work/x/release/steamclient_experimental/steamclient.dll" \
+  "$work/LICENSE" "$out/"
 printf 'gbe_fork %s\nsha256 %s\nlicense LGPL-3.0 (LICENSE)\nsource https://github.com/Detanup01/gbe_fork/tree/%s\n' \
   "$url" "$sha" "$(basename "$(dirname "$url")")" > "$out/SOURCE.txt"
-echo "gbe_fork steam_api64.dll, steamclient64.dll -> $out"
+echo "gbe_fork steam_api64.dll, steam_api.dll, steamclient64.dll, steamclient.dll -> $out"

@@ -229,6 +229,42 @@ static bool stage_steam_provider(uint32_t appid,const std::wstring& exePath) {
     lp_sink(line);
     return true;
 }
+static std::wstring provider_dir(uint32_t appid);
+static bool stage_steam_provider_x86(uint32_t appid,const std::wstring& exePath) {
+    auto session=user_session();
+    const bool signedIn=session&&!session->anon&&session->steamid;
+    std::string ticket; bool ownershipPassed=false;
+    bool staged=false;
+    const bool wrapped=steamstub_wrapped(exePath);
+    bool owned=x86::stage_owned(signedIn,[&]{ownershipPassed=owner_ticket(appid,ticket);return ownershipPassed;},[&]{
+        wchar_t exe[2048];DWORD n=GetModuleFileNameW(nullptr,exe,2048);
+        if(!n||n>=2048)return false;
+        std::wstring package(exe,n);package.resize(package.find_last_of(L"\\/")+1);
+        const std::wstring source=package+(wrapped?L"steam-provider\\gbe\\steamclient.dll":L"steam-provider\\gbe\\steam_api.dll");
+        if(GetFileAttributesW(source.c_str())==INVALID_FILE_ATTRIBUTES){lp_sink("STEAM provider: none packaged; game Steam calls fail naturally");return false;}
+        const std::wstring dir=provider_dir(appid);
+        for(auto d:{g_dir+L"\\steam",dir,dir+L"\\steam_settings",dir+L"\\saves"})CreateDirectoryW(d.c_str(),nullptr);
+        const std::wstring target=dir+(wrapped?L"\\steamclient.dll":L"\\steam_api.dll");
+        COPYFILE2_EXTENDED_PARAMETERS copy{};copy.dwSize=sizeof copy;
+        HRESULT hr=CopyFile2(source.c_str(),target.c_str(),&copy);
+        if(FAILED(hr)){char b[96];snprintf(b,sizeof b,"STEAM provider: copy failed hr=0x%08lx; not staged",(unsigned long)hr);lp_sink(b);return false;}
+        write_text(dir+L"\\steam_settings\\steam_appid.txt",std::to_string(appid)+"\\n");
+        write_text(dir+L"\\steam_settings\\configs.user.ini","[user::general]\\naccount_name=Player\\naccount_steamid="+
+            std::to_string(session->steamid)+"\\nlanguage=english\\n[user::saves]\\nlocal_save_path=./saves\\n");
+        write_text(dir+L"\\steam_settings\\configs.main.ini","[main::connectivity]\\ndisable_networking=1\\n");
+        if(wrapped)x86::set_steam_client_registry(uint32_t(session->steamid),play_runtime::narrow(target));
+        staged=true;
+        return true;
+    });
+    if(!signedIn){lp_sink("STEAM provider: no signed-in account; not staged");return false;}
+    if(!ownershipPassed){char line[160];snprintf(line,sizeof line,"STEAM provider: Steam issued no ownership ticket for app %u to this account (not owned or offline); nothing staged",appid);lp_sink(line);return false;}
+    if(!owned)return false;
+    char line[200];
+    if(wrapped)snprintf(line,sizeof line,"STEAM provider: SteamStub game; gbe_fork x86 client staged in LocalState\\steam\\%u for the owner",appid);
+    else snprintf(line,sizeof line,"STEAM provider: gbe_fork x86 staged in LocalState\\steam\\%u for the owner",appid);
+    lp_sink(line);
+    return staged;
+}
 static std::wstring provider_dir(uint32_t appid) { return g_dir+L"\\steam\\"+widen(std::to_string(appid)); }
 // Where gbe_fork keeps the files a game saves through ISteamRemoteStorage:
 // <local_save_path>\<appid>\remote, with local_save_path=./saves staged in
@@ -879,10 +915,17 @@ static void dump_thread_stacks() {
 // path from the 64-bit loader on purpose: the guest never shares the launcher's
 // address space (guest addresses are indices into the interpreter's own page
 // table), so nothing here can be mistaken for the native route, and the log
-// says which engine ran which PE. Steam, cloud and presence staging are not
-// part of this path yet, so a game that needs them reports exactly that.
+// says which engine ran which PE. Steam/provider and cloud staging are explicit
+// and remain behind the launch-time ownership gate.
 static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& exe) {
     char line[512];
+    x86::set_steam_client_registry(0,"");
+    const bool steamstub=steamstub_wrapped(path);
+    const bool steamProvider=stage_steam_provider_x86(c.appid,path);
+    if(steamProvider) {
+        try{cloud_sync(c.appid,c.root,false,0);}catch(...){lp_sink("STEAM cloud download: exception");}
+        try{achievements_sync(c.appid,false);}catch(...){lp_sink("STEAM achievements: exception");}
+    }
     std::string name=play_runtime::narrow(exe);
     g_launch.pe32Executed=false;g_launch.pe32Finished=false;g_launch.pe32ExitCode=0;
     // The DLLs a game ships beside its executable are what Windows' search
@@ -937,9 +980,14 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         if(packageDir.empty())return std::vector<uint8_t>{};
         std::wstring leaf(name.begin(),name.end()); return readPe32Dll(packageDir+L"\\runtime\\x86\\"+leaf);
     };
-    x86::DllSource dllSource=x86::make_vc110_vc120_source(gameDlls,runtimeDlls,[&](const std::string& name,const char* origin) {
+    x86::DllSource vcSource=x86::make_vc110_vc120_source(gameDlls,runtimeDlls,[&](const std::string& name,const char* origin) {
         snprintf(line,sizeof line,"x86 donor: %s from %s",name.c_str(),origin); lp_sink(line);
     });
+    auto stagedSteam=[&](const std::string& name) {
+        const std::wstring p=provider_dir(c.appid)+L"\\"+std::wstring(name.begin(),name.end());
+        return readPe32Dll(p);
+    };
+    x86::DllSource dllSource=x86::make_steam_dll_source(gameDlls,stagedSteam,vcSource,steamProvider,steamstub);
     x86::DllLoadObserver donorGaps=[&](const std::string& dll,const std::vector<std::string>& unresolved) {
         if(!x86::is_vc110_vc120_dll(dll))return;
         std::string kernel,other; unsigned kernelCount=0,otherCount=0,kernelMore=0,otherMore=0;
@@ -966,9 +1014,14 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         for(const auto& line:imports.report(std::string(exe.begin(),exe.end()),"x86").lines) lp_sink(line.c_str());
     },donorGaps);
     if(traceFaultContext&&steamstub_wrapped(path)) {
-        snprintf(line,sizeof line,"PE32 SteamStub probe: .bind=1 x86SteamBridge=not-staged ActiveProcess=not-seeded PEB.BeingDebugged=%u PEB.NtGlobalFlag=0x%08x",
-                 unsigned(r.peb_being_debugged),r.peb_nt_global_flag);lp_sink(line);
+        snprintf(line,sizeof line,"PE32 SteamStub probe: .bind=1 x86SteamBridge=%s ActiveProcess=%s PEB.BeingDebugged=%u PEB.NtGlobalFlag=0x%08x",
+                 steamProvider?"staged":"not-staged",steamProvider?"seeded":"not-seeded",unsigned(r.peb_being_debugged),r.peb_nt_global_flag);lp_sink(line);
     }
+    if(steamProvider) {
+        try{cloud_sync(c.appid,c.root,true,0);}catch(...){lp_sink("STEAM cloud upload: exception");}
+        try{achievements_sync(c.appid,true);}catch(...){lp_sink("STEAM achievements: upload exception");}
+    }
+    x86::set_steam_client_registry(0,"");
     c.mapped=r.loaded?1:0;
     g_launch.pe32Finished=r.finished;
     g_launch.pe32ExitCode=r.exit_code;

@@ -230,6 +230,24 @@ using DllSource = std::function<std::vector<uint8_t>(const std::string&)>;
 using DllReader = std::function<std::vector<uint8_t>(const std::string&)>;
 using DllOriginLogger = std::function<void(const std::string&, const char*)>;
 using DllLoadObserver = std::function<void(const std::string&, const std::vector<std::string>&)>;
+template<class OwnershipCheck, class Stage>
+inline bool stage_owned(bool signed_in, OwnershipCheck ownership_check, Stage stage) {
+    return signed_in && ownership_check() && stage();
+}
+inline DllSource make_steam_dll_source(const DllReader& game, const DllReader& staged,
+                                      const DllSource& fallback, bool owned, bool steamstub) {
+    return [game,staged,fallback,owned,steamstub](const std::string& name) {
+        if(name=="steam_api.dll") {
+            if(owned&&!steamstub) { auto bytes=staged?staged(name):std::vector<uint8_t>{}; if(!bytes.empty())return bytes; }
+            return game?game(name):std::vector<uint8_t>{};
+        }
+        if(name=="steamclient.dll") {
+            if(owned&&steamstub)return staged?staged(name):std::vector<uint8_t>{};
+            return std::vector<uint8_t>{};
+        }
+        return fallback?fallback(name):std::vector<uint8_t>{};
+    };
+}
 inline bool is_vc110_vc120_dll(const std::string& name) {
     std::string lower=name; for(auto& c:lower)if(c>='A'&&c<='Z')c+=32;
     return lower=="msvcr110.dll"||lower=="msvcp110.dll"||lower=="msvcr120.dll"||lower=="msvcp120.dll";
