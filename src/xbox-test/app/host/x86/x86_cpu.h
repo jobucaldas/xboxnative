@@ -12,6 +12,7 @@
 #pragma once
 #include <deque>
 #include <functional>
+#include <immintrin.h>
 #include <map>
 #include <string>
 #include "x86_fpu.h"
@@ -519,29 +520,41 @@ struct Cpu {
         case 0x14: case 0x15: {  // unpcklps/unpckhps: dest and src interleaved (dest first)
             Rm r = modrm(); uint32_t a[4], b[4]; sse_read(r, a); sse_reg(modrm_reg, b);
             bool hi = op == 0x15; uint32_t out[4];
-            for (int i = 0; i < 2; ++i) { out[i * 2] = b[i + (hi ? 2 : 0)]; out[i * 2 + 1] = a[i + (hi ? 2 : 0)]; }
+            if (p66) { unsigned off = hi ? 2 : 0; out[0] = b[off]; out[1] = b[off + 1]; out[2] = a[off]; out[3] = a[off + 1]; }
+            else for (int i = 0; i < 2; ++i) { out[i * 2] = b[i + (hi ? 2 : 0)]; out[i * 2 + 1] = a[i + (hi ? 2 : 0)]; }
             sse_write_reg(modrm_reg, out); return; }
         case 0x2B: { Rm r = modrm(); if (r.isreg) unsupported("movntps reg"); uint32_t v[4]; sse_reg(modrm_reg, v); mem.w128(r.ea + seg, v); return; }
-        case 0x2E: case 0x2F: {  // ucomiss/comiss
-            Rm r = modrm(); float a = xf32(modrm_reg), b = sse_f32(r);
-            eflags = (eflags & ~(ZF | PF | CF | OF | SF | AF)) | 2u;
-            if (std::isnan(a) || std::isnan(b)) { eflags |= ZF | PF | CF; return; }
-            if (a > b) return;
-            if (a < b) { eflags |= CF; return; }
-            eflags |= ZF; return; }
-        case 0x2A: {  // cvtsi2ss/cvtsi2sd
-            Rm r = modrm();
-            if (rep == 0xF3) { float v = n == 2 ? float(int16_t(rd(r, 2))) : float(int32_t(rd(r, 4))); xmm.setfs(modrm_reg, v); }
-            else if (rep == 0xF2) { double v = n == 2 ? double(int16_t(rd(r, 2))) : double(int32_t(rd(r, 4))); xmm.setfd(modrm_reg, v); }
-            else unsupported("cvtpi2ps (MMX)");
+        case 0x2E: case 0x2F: {  // ucomiss/comiss or ucomisd/comisd (same flags; NaNs unordered)
+            Rm r = modrm(); bool un;
+            if (p66) {
+                double a = xmm.fd(modrm_reg), b = sse_f64(r); un = std::isnan(a) || std::isnan(b);
+                eflags = (eflags & ~(ZF | PF | CF | OF | SF | AF)) | 2u;
+                if (un) eflags |= ZF | PF | CF; else if (a < b) eflags |= CF; else if (a == b) eflags |= ZF;
+            } else {
+                float a = xf32(modrm_reg), b = sse_f32(r); un = std::isnan(a) || std::isnan(b);
+                eflags = (eflags & ~(ZF | PF | CF | OF | SF | AF)) | 2u;
+                if (un) eflags |= ZF | PF | CF; else if (a < b) eflags |= CF; else if (a == b) eflags |= ZF;
+            }
             return; }
+        case 0x2A: {  // cvtsi2ss/cvtsi2sd
+            Rm r = modrm(); int32_t iv = n == 2 ? int16_t(rd(r, 2)) : int32_t(rd(r, 4));
+            uint32_t old = sse_host_begin();
+            if (rep == 0xF3) {
+                __m128 v = _mm_cvtsi32_ss(_mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(xmm.r[modrm_reg]))), iv);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(xmm.r[modrm_reg]), _mm_castps_si128(v));
+            } else if (rep == 0xF2) {
+                __m128d v = _mm_cvtsi32_sd(_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(xmm.r[modrm_reg]))), iv);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(xmm.r[modrm_reg]), _mm_castpd_si128(v));
+            } else { sse_host_end(old); unsupported("cvtpi2ps (MMX)"); }
+            sse_host_end(old); return; }
         case 0x2C: case 0x2D: {  // cvttss2si/cvtss2si and the sd forms
-            Rm r = modrm(); bool trunc = op == 0x2C;
-            double v = rep == 0xF2 ? sse_f64(r) : double(sse_f32(r));
-            double c = trunc ? std::trunc(v) : std::nearbyint(v);
-            int64_t iv = int64_t(c);
-            if (n == 2) setreg(modrm_reg, 2, uint32_t(uint16_t(int16_t(iv))));
-            else setreg(modrm_reg, 4, uint32_t(int32_t(iv)));
+            Rm r = modrm(); bool trunc = op == 0x2C; uint32_t old = sse_host_begin();
+            int32_t iv;
+            if (rep == 0xF2) { __m128d d = _mm_castsi128_pd(_mm_cvtsi64_si128(int64_t(sse_rd64(r)))); iv = trunc ? _mm_cvttsd_si32(d) : _mm_cvtsd_si32(d); }
+            else { __m128 f = _mm_castsi128_ps(_mm_cvtsi32_si128(int32_t(sse_rd32(r)))); iv = trunc ? _mm_cvttss_si32(f) : _mm_cvtss_si32(f); }
+            sse_host_end(old);
+            if (n == 2) setreg(modrm_reg, 2, uint32_t(uint16_t(iv)));
+            else setreg(modrm_reg, 4, uint32_t(iv));
             return; }
         case 0x6E: {  // movd/movq xmm, r/m (66 prefix; F3 0F 7E is the movq load)
             if (!p66) unsupported("movd (MMX)");
@@ -563,7 +576,37 @@ struct Cpu {
             uint32_t m = 0; if (p66) for (int i = 0; i < 2; ++i) m |= (xmm.r[r.regno][i * 2 + 1] >> 31) << i;
             else for (int i = 0; i < 4; ++i) m |= (xmm.r[r.regno][i] >> 31) << i;
             setreg(modrm_reg, 4, m); return; }
-        case 0x5A: case 0x5B: case 0x5C: case 0x5D: case 0x5E: case 0x5F: sse_arith(op); return;
+        case 0x5A: case 0x5B: sse_convert(op); return;
+        case 0x5C: case 0x5D: case 0x5E: case 0x5F: sse_arith(op); return;
+        case 0xE6: sse_convert(op); return;
+        case 0xC2: {  // cmpps/cmppd/cmpss/cmpsd, imm8 predicate
+            Rm r = modrm(); uint8_t pred = fetch() & 7; uint32_t a[4], b[4] = {}, out[4];
+            sse_reg(modrm_reg, a);
+            if (rep == 0xF2) { uint64_t q = sse_rd64(r); memcpy(b, &q, 8); }
+            else if (rep == 0xF3) b[0] = sse_rd32(r);
+            else sse_read(r, b);
+            if (p66 || rep == 0xF2) {
+                int lanes = rep == 0xF2 ? 1 : 2;
+                for (int i = 0; i < lanes; ++i) {
+                    double x = bf64(uint64_t(a[i * 2 + 1]) << 32 | a[i * 2]);
+                    double y = bf64(uint64_t(b[i * 2 + 1]) << 32 | b[i * 2]);
+                    bool un = std::isnan(x) || std::isnan(y);
+                    bool yes = pred == 0 ? !un && x == y : pred == 1 ? !un && x < y : pred == 2 ? !un && x <= y :
+                               pred == 3 ? un : pred == 4 ? un || x != y : pred == 5 ? un || x >= y : pred == 6 ? un || x > y : !un;
+                    uint64_t q = yes ? ~uint64_t(0) : 0; out[i * 2] = uint32_t(q); out[i * 2 + 1] = uint32_t(q >> 32);
+                }
+                if (rep == 0xF2) { out[2] = a[2]; out[3] = a[3]; }
+            } else {
+                int lanes = rep == 0xF3 ? 1 : 4;
+                for (int i = 0; i < lanes; ++i) {
+                    float x = bf32(a[i]), y = bf32(b[i]); bool un = std::isnan(x) || std::isnan(y);
+                    bool yes = pred == 0 ? !un && x == y : pred == 1 ? !un && x < y : pred == 2 ? !un && x <= y :
+                               pred == 3 ? un : pred == 4 ? un || x != y : pred == 5 ? un || x >= y : pred == 6 ? un || x > y : !un;
+                    out[i] = yes ? 0xffffffffu : 0;
+                }
+                if (rep == 0xF3) { out[1] = a[1]; out[2] = a[2]; out[3] = a[3]; }
+            }
+            sse_write_reg(modrm_reg, out); return; }
         case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57: sse_arith(op); return;
         case 0x58: case 0x59: sse_arith(op); return;
         case 0x60: case 0x61: case 0x62: case 0x63: case 0x64: case 0x65: case 0x66: case 0x67:
@@ -676,6 +719,15 @@ struct Cpu {
     static uint32_t f32b(float f) { uint32_t v; memcpy(&v, &f, 4); return v; }
     static float bf32(uint32_t v) { float f; memcpy(&f, &v, 4); return f; }
     static uint64_t f64b(double d) { uint64_t v; memcpy(&v, &d, 8); return v; }
+    uint32_t sse_host_begin() const {
+        uint32_t old = _mm_getcsr();
+        _mm_setcsr((mxcsr & 0xe07fu) | 0x1f80u);  // guest controls/status, but mask host traps
+        return old;
+    }
+    void sse_host_end(uint32_t old) {
+        mxcsr = (mxcsr & ~0x3fu) | (_mm_getcsr() & 0x3fu);
+        _mm_setcsr(old);
+    }
     static double bf64(uint64_t v) { double d; memcpy(&d, &v, 8); return d; }
     void sse_move(uint8_t op) {
         Rm r = modrm();
@@ -777,7 +829,9 @@ struct Cpu {
             sse_reg(modrm_reg, a);
             if (ss) a[0] = f32b(std::sqrt(sse_f32(r)));
             else if (sd) { double x = std::sqrt(sse_f64(r)); uint64_t q = f64b(x); a[0] = uint32_t(q); a[1] = uint32_t(q >> 32); }
-            else if (pd) { for (int i = 0; i < 2; ++i) { double x = std::sqrt(sse_f64(r, i * 8)); uint64_t q = f64b(x); a[i * 2] = uint32_t(q); a[i * 2 + 1] = uint32_t(q >> 32); } }
+            else if (pd) { uint32_t b[4]; sse_read(r, b); uint32_t old = sse_host_begin();
+                __m128d x = _mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(b)));
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(a), _mm_castpd_si128(_mm_sqrt_pd(x))); sse_host_end(old); }
             else { for (int i = 0; i < 4; ++i) a[i] = f32b(std::sqrt(sse_f32(r, i * 4))); }
             sse_write_reg(modrm_reg, a); return; }
         case 0x52: case 0x53: {  // rsqrtps/rcpps, and the F3 scalar rsqrtss/rcpss
@@ -809,11 +863,62 @@ struct Cpu {
             sse_reg(modrm_reg, a); sse_read(r, b);
             if (ss) a[0] = f32b(fold(op, bf32(a[0]), bf32(b[0])));
             else if (sd) { double x = fold(op, bf64(uint64_t(a[1]) << 32 | a[0]), bf64(uint64_t(b[1]) << 32 | b[0])); uint64_t q = f64b(x); a[0] = uint32_t(q); a[1] = uint32_t(q >> 32); }
-            else if (pd) { for (int i = 0; i < 2; ++i) { double x = fold(op, bf64(uint64_t(a[i * 2 + 1]) << 32 | a[i * 2]), bf64(uint64_t(b[i * 2 + 1]) << 32 | b[i * 2])); uint64_t q = f64b(x); a[i * 2] = uint32_t(q); a[i * 2 + 1] = uint32_t(q >> 32); } }
+            else if (pd) { uint32_t old = sse_host_begin();
+                __m128d x = _mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(a)));
+                __m128d y = _mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(b)));
+                __m128d z = op == 0x58 ? _mm_add_pd(x, y) : op == 0x5C ? _mm_sub_pd(x, y) :
+                            op == 0x59 ? _mm_mul_pd(x, y) : op == 0x5E ? _mm_div_pd(x, y) :
+                            op == 0x5D ? _mm_min_pd(x, y) : _mm_max_pd(x, y);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(a), _mm_castpd_si128(z)); sse_host_end(old); }
             else { for (int i = 0; i < 4; ++i) a[i] = f32b(fold(op, bf32(a[i]), bf32(b[i]))); }
             sse_write_reg(modrm_reg, a); return; }
         default: unsupported("sse arith");
         }
+    }
+    void sse_convert(uint8_t op) {
+        if ((op == 0xE6 && !((p66 && !rep) || (!p66 && (rep == 0xF2 || rep == 0xF3)))) ||
+            (op == 0x5B && rep == 0xF2)) unsupported("invalid sse conversion prefix");
+        Rm r = modrm(); uint32_t src[4] = {}, out[4] = {};
+        uint32_t old = sse_host_begin();
+        if (op == 0x5A) {
+            sse_reg(modrm_reg, out);
+            if (rep == 0xF2) {  // cvtsd2ss, preserve destination bits 127:32
+                uint64_t q = sse_rd64(r); memcpy(src, &q, 8);
+                __m128d d = _mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src)));
+                __m128 f = _mm_cvtsd_ss(_mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(out))), d);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(out), _mm_castps_si128(f));
+            } else if (rep == 0xF3) {  // cvtss2sd, preserve destination bits 127:64
+                src[0] = sse_rd32(r);
+                __m128 f = _mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src)));
+                __m128d d = _mm_cvtss_sd(_mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(out))), f);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(out), _mm_castpd_si128(d));
+            } else if (p66) {  // cvtpd2ps: upper 64 result bits are zero
+                uint64_t lo = sse_rd64(r), hi = sse_rd64(r, 8);
+                memcpy(src, &lo, 8); memcpy(src + 2, &hi, 8);
+                __m128d d = _mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src)));
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(out), _mm_castps_si128(_mm_cvtpd_ps(d)));
+            } else {  // cvtps2pd reads only the low two source floats
+                src[0] = sse_rd32(r); src[1] = sse_rd32(r, 4);
+                __m128 f = _mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src)));
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(out), _mm_castpd_si128(_mm_cvtps_pd(f)));
+            }
+        } else if (op == 0x5B) {
+            sse_read(r, src);
+            __m128i i = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src));
+            if (rep == 0xF3) _mm_storeu_si128(reinterpret_cast<__m128i*>(out), _mm_cvttps_epi32(_mm_castsi128_ps(i)));
+            else if (p66) _mm_storeu_si128(reinterpret_cast<__m128i*>(out), _mm_cvtps_epi32(_mm_castsi128_ps(i)));
+            else _mm_storeu_si128(reinterpret_cast<__m128i*>(out), _mm_castps_si128(_mm_cvtepi32_ps(i)));
+        } else if (op == 0xE6 && rep == 0xF3) {  // cvtdq2pd reads two packed int32 values
+            uint64_t q = sse_rd64(r); memcpy(src, &q, 8);
+            __m128i i = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(out), _mm_castpd_si128(_mm_cvtepi32_pd(i)));
+        } else {  // cvtpd2dq (F2) / cvttpd2dq (66)
+            sse_read(r, src); __m128d d = _mm_castsi128_pd(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src)));
+            __m128i q = rep == 0xF2 ? _mm_cvtpd_epi32(d) : _mm_cvttpd_epi32(d);
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(out), q);
+        }
+        sse_host_end(old);
+        sse_write_reg(modrm_reg, out);
     }
     static double fold(uint8_t op, double x, double y) {
         switch (op) {
