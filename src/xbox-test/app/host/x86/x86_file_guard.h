@@ -58,13 +58,18 @@ inline bool inside(const std::u16string& path, const std::u16string& root) {
 class Policy {
 public:
     using Log = std::function<void(const std::string&)>;
-    Policy(std::vector<std::u16string> roots, std::u16string cwd, Log log = {})
+    Policy(const std::vector<std::u16string>& protectedRoots, const std::vector<std::u16string>& allowedRoots,
+           std::u16string cwd, Log log = {})
         : cwd_(normalize(std::move(cwd), {})), log_(std::move(log)) {
-        for (const auto& root : roots) roots_.push_back(normalize(root, cwd_));
+        for (const auto& root : protectedRoots) protectedRoots_.push_back(normalize(root, cwd_));
+        for (const auto& root : allowedRoots) allowedRoots_.push_back(normalize(root, cwd_));
     }
     bool allow(const char* operation, const std::u16string& path, const std::u16string& current = {}) {
         const auto full = normalize(path, current.empty() ? cwd_ : current);
-        for (const auto& root : roots_) if (inside(full, root)) return true;
+        bool protectedPath = false;
+        for (const auto& root : protectedRoots_) protectedPath = protectedPath || inside(full, root);
+        if (!protectedPath) return true;
+        for (const auto& root : allowedRoots_) if (inside(full, root)) return true;
         if (logged_.insert(full).second && log_) {
             std::string op = operation ? operation : "file operation";
             log_("x86 file guard: refused " + op + " <redacted path>");
@@ -73,7 +78,8 @@ public:
     }
 private:
     std::u16string cwd_;
-    std::vector<std::u16string> roots_;
+    std::vector<std::u16string> protectedRoots_;
+    std::vector<std::u16string> allowedRoots_;
     std::set<std::u16string> logged_;
     Log log_;
 };
