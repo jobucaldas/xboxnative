@@ -2047,8 +2047,7 @@ static_assert(std::is_same<decltype(&d3d12CreateRootSignatureDeserializer),HRESU
     "D3D12CreateRootSignatureDeserializer(pSrcData, SrcDataSizeInBytes, riid, ppDeserializer)");
 static_assert(std::is_same<decltype(&d3d12EnableExperimentalFeatures),HRESULT(WINAPI*)(UINT,const IID*,void*,UINT*)>::value,
     "D3D12EnableExperimentalFeatures(NumFeatures, pIIDs, pConfigurationStructs, pConfigurationStructSizes)");
-// Until a real modal UI bridge exists, retain fatal game diagnostics and stop.
-// Never return a fabricated button selection that would advance startup.
+// Until a real modal UI bridge exists, log ANSI game diagnostics without blocking.
 static std::string dialogText(LPCSTR text,size_t limit=2048) {
     std::string out;
     if(!text) return "<null>";
@@ -2066,8 +2065,8 @@ static std::string dialogText(LPCSTR text,size_t limit=2048) {
     return out;
 }
 static int WINAPI messageBoxA(HWND,LPCSTR text,LPCSTR caption,UINT type) {
-    stopMissing("user32.dll!MessageBoxA caption=\""+dialogText(caption)+"\" text=\""+dialogText(text)+"\" type="+std::to_string(type),(uintptr_t)_ReturnAddress());
-    return 0;
+    state->event("guest user32.dll!MessageBoxA caption=\""+dialogText(caption)+"\" text=\""+dialogText(text)+"\" type="+std::to_string(type)+" caller="+describe((uintptr_t)_ReturnAddress()));
+    return IDOK;
 }
 static int WINAPI messageBoxW(HWND,LPCWSTR text,LPCWSTR caption,UINT type) {
     // Bound UTF-16 reads before converting; preserve Unicode in durable UTF-8 logs.

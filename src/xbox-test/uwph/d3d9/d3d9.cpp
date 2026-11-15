@@ -2771,6 +2771,12 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         return D3D_OK;
     }
     HRESULT createSwapChain(D3DPRESENT_PARAMETERS* parameters) {
+        if(parameters->BackBufferFormat==D3DFMT_UNKNOWN) {
+            if(!parameters->Windowed)return D3DERR_INVALIDCALL;
+            // D3D9 specifies the adapter's display format for a windowed device.
+            // This adapter reports X8R8G8B8 (GetAdapterDisplayMode).
+            parameters->BackBufferFormat=D3DFMT_X8R8G8B8;
+        }
         DXGI_SWAP_CHAIN_DESC desc{};
         desc.BufferDesc.Width=parameters->BackBufferWidth;
         desc.BufferDesc.Height=parameters->BackBufferHeight;
@@ -2913,9 +2919,13 @@ struct Factory : d3dshim::Base, IDirect3D9Ex {
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE CheckDeviceType(UINT adapter,D3DDEVTYPE type,D3DFORMAT displayFormat,
-                                              D3DFORMAT backBufferFormat,WINBOOL) override {
+                                              D3DFORMAT backBufferFormat,WINBOOL windowed) override {
         if(adapter!=0||type!=D3DDEVTYPE_HAL)return D3DERR_INVALIDCALL;
         if(dxgiFormat(displayFormat)==DXGI_FORMAT_UNKNOWN)return D3DERR_NOTAVAILABLE;
+        if(backBufferFormat==D3DFMT_UNKNOWN) {
+            if(windowed)return D3D_OK;
+            return D3DERR_NOTAVAILABLE;
+        }
         if(dxgiFormat(backBufferFormat)==DXGI_FORMAT_UNKNOWN)return D3DERR_NOTAVAILABLE;
         return D3D_OK;
     }
