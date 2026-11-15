@@ -30,6 +30,7 @@ int main() {
     for(unsigned i=0;i<9;++i){auto it=reg.map.find({i<4?"winmm.dll":"kernel32.dll",names[i]});CHECK(it!=reg.map.end());if(it!=reg.map.end()){CHECK(it->second.conv==Conv::Stdcall);CHECK(it->second.argc==arity[i]);}}
     uint64_t now=0x1234567887654321ull;host.tick_count=[&](){return now;};
     unsigned calls=0;
+    host.destructive_file_guard=[](const char*,const std::u16string&){return true;};
     host.file_call=[&](Host::FileCall& q){++calls;switch(q.kind){
     case Host::FileCall::Kind::TimeConvert:CHECK(q.operation==Host::FileCall::Operation::SystemToFileTime);CHECK(q.data.size()==16);CHECK(q.data[0]==0xe8);if(q.data[2]==13){q.error=87;break;}CHECK(q.data[2]==3);q.data.assign(8,0x5a);q.succeeded=true;break;
     case Host::FileCall::Kind::TimeLocal:CHECK(q.operation==Host::FileCall::Operation::SystemToTzLocal);CHECK(q.data.size()==(q.args[0]?188u:16u));if(q.args[0])CHECK(q.args[0]==1);if(q.data[2]==13){q.error=87;break;}q.data.assign(16,0x36);q.succeeded=true;break;
