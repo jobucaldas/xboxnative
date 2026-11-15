@@ -1,20 +1,36 @@
 #!/bin/bash
-# play-test.sh <appid> [TIMEOUT_S=600] [OUTDIR]
+# play-test.sh <appid> [timeout_s] [outdir] [--pick index]
 # THE ACCEPTANCE TEST: "Play <game> via the launcher". Runs the real launcher path on the console:
 # open detail -> press main button (Install when needed, then Play after the install finishes) -> wait for 'launch: RESULT'
 # -> collect screenshots + boot.log + launch_probe.log + launch_request/result.json into OUTDIR.
 # The launcher never launches by itself after an install: when that first press starts a download this
 # script waits for it to finish and presses the button again, exactly as the player does.
 # Input is SYNTHETIC: one-shot LocalState\cmd.txt lines (consumed by the app, logged as "cmd.txt SYNTHETIC command").
+# Upload verification: do not GET cmd.txt/selftest.txt after upload; the launcher consumes and deletes them.
+# cmd.txt is verified by its boot.log consumption + command echo; selftest.txt by SELFTEST log naming the requested mode.
+# --pick index selects a launch-picker row (zero-based; default 0) after boot.log reports the picker opened.
 # Env: PKG=<PackageFullName> (default: auto-detect Xboxnative.Launcher), PT_MAXMB=<n> (size guard via dlmax.txt: refuse download if
 #      bigger than n MB; 0 = dry run that only prints the manifest size), PT_NOKILL=1 (don't restart the app first).
 # Exit: 0 = fresh, clean guest completion plus GAP summary (visual/playable sign-off still required);
 #       1 = runtime/install failure, nonterminal progress, stale evidence, timeout, missing GAP or a Device Portal
 #       transport error (any helper that cannot report its HTTP status fails the run; it never counts as "not yet").
 # Never touches steam_session.bin. DP_PASS comes from the env and is never printed. Needs PATH with $HOME/.local/bin.
-HERE="$(cd "$(dirname "$0")" && pwd)"; root=$(cd "$HERE/../../.." && pwd); DP="$HERE/../dp"; . "$DP/dp-lib.sh"
-app="$1"; to="${2:-600}"; out="${3:-$root/out/runs/play-$1-$(date +%Y%m%d-%H%M%S)}"
-[[ "$app" =~ ^[0-9]+$ ]] || { echo "usage: $0 <appid> [timeout_s] [outdir]"; exit 2; }
+HERE="$(cd "$(dirname "$0")" && pwd)"; root=$(cd "$HERE/../../.." && pwd); DP="$HERE/../dp"
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then
+  printf 'usage: %s <appid> [timeout_s] [outdir] [--pick index]\n' "$0"
+  printf 'cmd.txt/selftest.txt are consumed after upload: verify boot.log command consumption/echo or SELFTEST mode logs, never by GET.\n'
+  exit 0
+fi
+. "$DP/dp-lib.sh"
+app="${1:-}"; shift || true; to=600; out=""; pick=0; pos=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --pick) [ $# -ge 2 ] || { echo "--pick requires an index"; exit 2; }; pick="$2"; shift 2 ;;
+    *) if [ $pos -eq 0 ]; then to="$1"; elif [ $pos -eq 1 ]; then out="$1"; else echo "unexpected argument: $1"; exit 2; fi; pos=$((pos+1)); shift ;;
+  esac
+done
+[[ "$app" =~ ^[0-9]+$ && "$pick" =~ ^[0-9]+$ ]] || { echo "usage: $0 <appid> [timeout_s] [outdir] [--pick index]"; exit 2; }
+out="${out:-$root/out/runs/play-$app-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$out"; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 full="${PKG:-}"
 if [ -z "$full" ]; then
@@ -30,7 +46,20 @@ dp_step() {
   r=${r##*$'\n'}; [[ $r =~ \ HTTP\ 2[0-9][0-9]($|[[:space:]]) ]] || tfail "$label (${r:-no response})"
   echo "$r"
 }
-cmd() { printf '%s\n' "$@" > "$tmp/cmd.txt"; dp_step "upload cmd.txt '$*'" "$DP/put-file.sh" "$full" '\LocalState' "$tmp/cmd.txt"; }
+cmd() {
+  local command="$*" mark deadline
+  need boot.log "$tmp/cmd-before.log"; mark=$(wc -l < "$tmp/cmd-before.log")
+  printf '%s\n' "$command" > "$tmp/cmd.txt"
+  dp_step "upload cmd.txt '$command'" "$DP/put-file.sh" "$full" '\LocalState' "$tmp/cmd.txt"
+  deadline=$((SECONDS+20))
+  while [ $SECONDS -lt $deadline ]; do
+    need boot.log "$tmp/cmd-ack.log"
+    if tail -n +$((mark+1)) "$tmp/cmd-ack.log" | grep -Fq 'cmd.txt: consumed file; queued 1 SYNTHETIC command(s)' &&
+       tail -n +$((mark+1)) "$tmp/cmd-ack.log" | grep -Fq "cmd.txt SYNTHETIC command: '$command'"; then return 0; fi
+    sleep 1
+  done
+  tfail "cmd.txt was not consumed and echoed: $command"
+}
 pull() {
   # Logs can be truncated or rewritten by a new app session. Resuming an old
   # local snapshot preserves stale bytes, including a previous launch result.
@@ -67,7 +96,7 @@ ok=1; for k in $(seq 1 40); do evidence boot.log "$tmp/b.log"; tail -n +$((n0+1)
 [ $ok -eq 0 ] || { echo "library never loaded"; cp "$tmp/b.log" "$out/boot.log" 2>/dev/null; exit 1; }
 sleep 5
 cmd "open $app"; sleep 8; shot 1-detail
-end=$((SECONDS+to)); i=0; res=1; attempt=""; pressed=0; press_mark=0
+end=$((SECONDS+to)); i=0; res=1; attempt=""; pressed=0; press_mark=0; pick_sent=0
 while [ $SECONDS -lt $end ]; do
   need boot.log "$tmp/b.log"
   session=$(tail -n +$((n0+1)) "$tmp/b.log")
@@ -95,6 +124,10 @@ while [ $SECONDS -lt $end ]; do
   elif [ "$pressed" -eq 1 ] && printf '%s\n' "$after" | grep -q "dl: ===== DONE appid $app "; then
     press_mark=$(printf '%s\n' "$session" | wc -l); sleep 2; cmd "press"; pressed=2; sleep 1; shot 3-installed-press
   fi
+  if [ "$pressed" -ge 1 ] && [ "$pick_sent" -eq 0 ] &&
+     printf '%s\n' "$session" | grep -Eq "detail: Play opens the launch-option picker appid=$app options=[0-9]+ selected="; then
+    cmd "pick $pick"; pick_sent=1
+  fi
   i=$((i+1)); { [ $((i%6)) -eq 0 ] || [ $i -le 12 ]; } && shot "3-wait-$(printf %03d $i)"; sleep 1
 done
 sleep 4; shot 4-final
@@ -105,7 +138,7 @@ fi
 evidence launch_request.json "$out/launch_request.json"; evidence launch_result.json "$out/launch_result.json"
 tail -n +$((n0+1)) "$out/boot.log" > "$out/boot.session.log"
 echo "---- synthetic commands / store / launch lines ----"
-grep -E 'SYNTHETIC|store:|dl:|launch|GAP:' "$out/boot.session.log" | tail -30
+grep -E 'SYNTHETIC|store:|dl:|launch|picker:|GAP:' "$out/boot.session.log" | tail -30
 gap_ok=0
 grep -E '^GAP: total=[0-9]+ missing=[0-9]+ win32u=[0-9]+$' "$out/launch_probe.log" && gap_ok=1
 if [[ "$app" == 480 || "$app" == 48000 ]]; then

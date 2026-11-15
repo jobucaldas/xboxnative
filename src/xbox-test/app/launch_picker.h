@@ -42,6 +42,25 @@ inline void move(State& s, int delta) {
 inline const launch_target::Choice* current(const State& s) {
     return s.sel >= 0 && s.sel < (int)s.rows.size() ? &s.rows[s.sel] : nullptr;
 }
+inline bool parse_pick(const std::string& command, size_t& index) {
+    if (command.rfind("pick ", 0) != 0 || command.size() <= 5) return false;
+    size_t value = 0;
+    for (size_t i = 5; i < command.size(); ++i) {
+        unsigned char c = (unsigned char)command[i];
+        if (c < '0' || c > '9') return false;
+        size_t digit = c - '0';
+        if (value > (SIZE_MAX - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    index = value;
+    return true;
+}
+inline bool select(State& s, size_t index) {
+    if (!s.open || index >= s.rows.size()) return false;
+    s.sel = (int)index;
+    s.note.clear();
+    return true;
+}
 
 enum class Press { none, start, refused };
 // A: start the highlighted option, or explain why it cannot run.
