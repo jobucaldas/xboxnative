@@ -172,6 +172,11 @@ int main() {
     State s;
     open(s, rows, "");
     assert(s.open && s.sel == 0 && current(s) && current(s)->label == "DirectX");
+    size_t pick = 99;
+    assert(parse_pick("pick 1", pick) && pick == 1);
+    assert(!parse_pick("pick", pick) && !parse_pick("pick -1", pick) && !parse_pick("pick 1x", pick));
+    assert(!select(s, 2) && select(s, 1) && s.sel == 1);
+    assert(select(s, 0) && s.sel == 0);
     move(s, 1);   // the 32-bit row is reachable and starts in the interpreter
     assert(s.sel == 1 && current(s)->label == "32-bit");
     assert(press_a(s) == Press::start && started(s) == "x86\\Hades.exe");

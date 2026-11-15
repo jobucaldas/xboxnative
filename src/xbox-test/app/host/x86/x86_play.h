@@ -13,12 +13,32 @@
 #include <functional>
 #include <string>
 #include <vector>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include "x86_guest.h"
 #if defined(_WIN32)
 #include "../../../uwph/kernel32/route.h"
 #endif
 namespace x86 {
 #if defined(_WIN32)
+inline void play_locale_call(Host::LocaleCall& q) {
+    SYSTEMTIME st{}; if(q.has_system_time) memcpy(&st,q.system_time,sizeof(st));
+    std::wstring fmt; if(q.has_format) fmt.assign(q.format.begin(),q.format.end());
+    std::vector<wchar_t> out(q.buffer_chars>0?size_t(q.buffer_chars):(q.has_output_buffer?1u:0u));
+    wchar_t locale_name[LOCALE_NAME_MAX_LENGTH]{};
+    SetLastError(ERROR_SUCCESS);
+    if(!LCIDToLocaleName(q.locale,locale_name,LOCALE_NAME_MAX_LENGTH,0)){q.error=GetLastError();q.succeeded=false;q.result=0;return;}
+    SetLastError(ERROR_SUCCESS);
+    wchar_t* output=q.has_output_buffer&&!out.empty()?out.data():nullptr;
+    int n=q.date?GetDateFormatEx(locale_name,q.flags,q.has_system_time?&st:nullptr,q.has_format?fmt.c_str():nullptr,output,q.buffer_chars,nullptr)
+                :GetTimeFormatEx(locale_name,q.flags,q.has_system_time?&st:nullptr,q.has_format?fmt.c_str():nullptr,output,q.buffer_chars);
+    q.result=n; q.succeeded=n!=0; q.error=q.succeeded?0:GetLastError();
+    if(q.succeeded&&!out.empty()){q.data.resize(size_t(n)*sizeof(wchar_t));memcpy(q.data.data(),out.data(),q.data.size());}
+}
 inline void play_file_call(Host::FileCall& q) {
     auto failed=[&](){q.error=GetLastError();};
     switch(q.kind) {
@@ -30,6 +50,7 @@ inline void play_file_call(Host::FileCall& q) {
     case Host::FileCall::Kind::Time:{FILETIME t[3]{};using Fn=BOOL(WINAPI*)(HANDLE,LPFILETIME,LPFILETIME,LPFILETIME);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","GetFileTime");q.succeeded=fn&&(fn((HANDLE)(uintptr_t)q.handle,q.args[0]?&t[0]:nullptr,q.args[1]?&t[1]:nullptr,q.args[2]?&t[2]:nullptr)!=FALSE);q.data.resize(sizeof(t));memcpy(q.data.data(),t,sizeof(t));if(!q.succeeded)failed();break;}
     case Host::FileCall::Kind::AttributesA:{using Fn=DWORD(WINAPI*)(LPCSTR);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","GetFileAttributesA");SetLastError(ERROR_SUCCESS);q.value=fn?fn(q.path_a.c_str()):INVALID_FILE_ATTRIBUTES;q.succeeded=q.value!=INVALID_FILE_ATTRIBUTES;if(!q.succeeded)failed();break;}
     case Host::FileCall::Kind::Seek:{using Fn=DWORD(WINAPI*)(HANDLE,LONG,PLONG,DWORD);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","SetFilePointer");LONG high=LONG(q.args[1]);SetLastError(ERROR_SUCCESS);DWORD low=fn?fn((HANDLE)(uintptr_t)q.handle,LONG(q.args[0]),q.args[3]?&high:nullptr,q.args[2]):INVALID_SET_FILE_POINTER;q.value=low;q.args[1]=DWORD(high);q.error=GetLastError();q.succeeded=low!=INVALID_SET_FILE_POINTER||q.error==ERROR_SUCCESS;break;}
+    case Host::FileCall::Kind::SeekEx:{using Fn=BOOL(WINAPI*)(HANDLE,LARGE_INTEGER,PLARGE_INTEGER,DWORD);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","SetFilePointerEx");LARGE_INTEGER distance{},position{};distance.QuadPart=q.distance;SetLastError(ERROR_SUCCESS);q.succeeded=fn&&fn((HANDLE)(uintptr_t)q.handle,distance,q.args[0]?&position:nullptr,q.method)!=FALSE;q.error=fn?GetLastError():ERROR_PROC_NOT_FOUND;if(q.succeeded)q.position=position.QuadPart;break;}
     case Host::FileCall::Kind::End:q.succeeded=SetEndOfFile((HANDLE)(uintptr_t)q.handle)!=FALSE;if(!q.succeeded)failed();break;
     case Host::FileCall::Kind::TimeConvert:{FILETIME in{};SYSTEMTIME out{};memcpy(&in,q.data.data(),8);q.succeeded=FileTimeToSystemTime(&in,&out)!=FALSE;q.data.resize(sizeof(out));memcpy(q.data.data(),&out,sizeof(out));if(!q.succeeded)failed();break;}
     case Host::FileCall::Kind::TimeLocal:{FILETIME in{},out{};memcpy(&in,q.data.data(),8);q.succeeded=FileTimeToLocalFileTime(&in,&out)!=FALSE;q.data.resize(sizeof(out));memcpy(q.data.data(),&out,8);if(!q.succeeded)failed();break;}
@@ -47,6 +68,7 @@ struct PlayResult {
     uint32_t base = 0, entry = 0;
     unsigned imports = 0, bound = 0, relocations = 0;
     std::vector<std::string> unresolved;   // "dll!symbol", in IAT order
+    std::vector<std::tuple<std::string,std::string,gap_summary::Outcome>> gap_imports;
 };
 // `name` is the executable's file name as the guest sees it (GetModuleFileName,
 // argv[0]); `cmdline` is the command line (quoted exe plus the option's
@@ -64,20 +86,77 @@ struct PlayResult {
 // launch thread with no way out. A trillion instructions is hours of
 // interpreted work, so no real session reaches it.
 inline constexpr uint64_t kGuestRunCap = 1000ull * 1000 * 1000 * 1000;
+#if defined(_WIN32)
+inline void install_nls_host(Host& host) {
+    host.nls_call = [](const Host::NlsRequest& request) -> Host::NlsResponse {
+        Host::NlsResponse response{};
+        if (request.output_capacity > 0x7fffffffu) { response.last_error = ERROR_INVALID_PARAMETER; return response; }
+        switch (request.operation) {
+        case Host::NlsOperation::IsValidCodePage:
+            response.result = ::IsValidCodePage(request.code_page);
+            break;
+        case Host::NlsOperation::GetCPInfo: {
+            CPINFO info{};
+            response.result = ::GetCPInfo(request.code_page, &info);
+            if (response.result) {
+                const auto* bytes = reinterpret_cast<const uint8_t*>(&info);
+                response.output.assign(bytes, bytes + sizeof(info));
+            }
+            break;
+        }
+        case Host::NlsOperation::MultiByteToWideChar: {
+            std::vector<wchar_t> output(request.output_null ? 0 : request.output_capacity);
+            const char* input = request.input_null ? nullptr : reinterpret_cast<const char*>(request.input.data());
+            response.result = uint32_t(::MultiByteToWideChar(request.code_page, request.flags, input, request.input_length,
+                output.empty() ? nullptr : output.data(), int(request.output_capacity)));
+            if (response.result && !request.output_null && request.output_capacity) {
+                const auto* bytes = reinterpret_cast<const uint8_t*>(output.data());
+                response.output.assign(bytes, bytes + size_t(response.result) * sizeof(wchar_t));
+            }
+            break;
+        }
+        case Host::NlsOperation::WideCharToMultiByte: {
+            static_assert(sizeof(wchar_t) == 2, "Windows wide characters are UTF-16 units");
+            std::vector<char> output(request.output_null ? 0 : request.output_capacity);
+            std::vector<wchar_t> input_storage(request.input.size() / 2);
+            for (size_t i = 0; i < input_storage.size(); ++i)
+                input_storage[i] = wchar_t(uint16_t(request.input[i * 2]) | uint16_t(request.input[i * 2 + 1]) << 8);
+            const wchar_t* input = request.input_null ? nullptr : input_storage.data();
+            const char* default_char = request.default_char.empty() ? nullptr : reinterpret_cast<const char*>(request.default_char.data());
+            BOOL used_default = FALSE;
+            response.result = uint32_t(::WideCharToMultiByte(request.code_page, request.flags, input, request.input_length,
+                output.empty() ? nullptr : output.data(), int(request.output_capacity), default_char,
+                request.wants_used_default ? &used_default : nullptr));
+            response.used_default = used_default != FALSE;
+            if (response.result && !request.output_null && request.output_capacity)
+                response.output.assign(output.begin(), output.begin() + response.result);
+            break;
+        }
+        }
+        response.last_error = ::GetLastError();
+        return response;
+    };
+}
+#endif
 inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string& name, const std::string& cmdline,
                             const std::function<void(const std::string&)>& tee = nullptr,
                             const std::function<void(const PlayResult&)>& on_loaded = nullptr,
                             uint64_t instruction_limit = 500ull * 1000 * 1000,
                             const DllSource& dll_source = nullptr,
                             bool trace_fault_context = false,
-                            const DllLoadObserver& observe_dll = nullptr) {
+                            const DllLoadObserver& observe_dll = nullptr,
+                            const std::function<void(const PlayResult&)>& on_imports = nullptr) {
     PlayResult r;
     try {
         Memory mem; ThunkTable table; Host host; Registry reg;
 #if defined(_WIN32)
         host.file_call = play_file_call;
+        host.locale_call = play_locale_call;
 #endif
         host.tee = tee;
+#if defined(_WIN32)
+        install_nls_host(host);
+#endif
         Guest guest(mem, host, reg);
         guest.exe_path = name;
         guest.cmdline = cmdline.empty() ? name : cmdline;
@@ -124,6 +203,8 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         }
         r.loaded = true; r.base = img.base; r.entry = img.entry;
         r.imports = img.imports; r.bound = img.bound; r.relocations = img.relocations; r.unresolved = img.unresolved;
+        for(const auto& module:guest.dlls) for(const auto& item:module.second.image.gap_imports) r.gap_imports.push_back(item);
+        if(on_imports) on_imports(r);
         guest.image_base = img.base;
         guest.exe_tls = img.tls;  // each thread's TLS block comes from the exe's directory
         guest.add_module(name, img.base);
@@ -196,7 +277,8 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
                       uint64_t instruction_limit = 500ull * 1000 * 1000,
                       const DllSource& dll_source = nullptr,
                       bool trace_fault_context = false,
-                      const DllLoadObserver& observe_dll = nullptr) {
+                      const DllLoadObserver& observe_dll = nullptr,
+                      const std::function<void(const PlayResult&)>& on_imports = nullptr) {
     PlayResult r;
     FILE* f = _wfopen(exe.c_str(), L"rb");
     if (!f) { r.fault = "cannot open the executable"; r.fault_kind = "Loader"; return r; }
@@ -211,7 +293,7 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
     std::string name;
     for (size_t i = exe.find_last_of(L"\\/") + 1; i < exe.size(); ++i) name += char(exe[i]);
     (void)dir;
-    return run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source, trace_fault_context, observe_dll);
+    return run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source, trace_fault_context, observe_dll, on_imports);
 }
 #endif
 }

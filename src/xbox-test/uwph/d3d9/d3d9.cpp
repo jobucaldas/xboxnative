@@ -30,6 +30,11 @@
 #include "texture_desc.h"
 
 namespace {
+void logDeviceReason(const char* stage,HRESULT before,HRESULT after) {
+    d3dshim::Line line("D3D9 shim: device reason stage=");
+    line.add(stage);line.add(" before=");line.hex((unsigned long)before);
+    line.add(" after=");line.hex((unsigned long)after);line.emit();
+}
 // ------------------------------------------------------------------ formats
 // D3D9 formats that map one-to-one onto DXGI. D3D9's numeric values are not
 // DXGI's, so this is a switch rather than a cast; anything absent from the
@@ -1298,7 +1303,9 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
             desc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
         }
         ID3D11Buffer* buffer=nullptr;
+        const HRESULT removedBefore=device()->GetDeviceRemovedReason();
         HRESULT hr=device()->CreateBuffer(&desc,nullptr,&buffer);
+        logDeviceReason("CreateBuffer",removedBefore,device()->GetDeviceRemovedReason());
         if(FAILED(hr))return D3DERR_INVALIDCALL;
         auto wrapper=d3dshim::create<VertexBuffer>();
         if(!wrapper){buffer->Release();return E_OUTOFMEMORY;}
@@ -1691,6 +1698,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
             line.dec(unsigned(rc));line.emit();
             return D3DERR_INVALIDCALL;
         }
+        const HRESULT removedBefore=device()->GetDeviceRemovedReason();
         HRESULT hr;
         if(vertex) {
             hr=device()->CreateVertexShader(buffer,bytes,nullptr,
@@ -1699,6 +1707,8 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
             hr=device()->CreatePixelShader(buffer,bytes,nullptr,
                 reinterpret_cast<ID3D11PixelShader**>(out));
         }
+        logDeviceReason(vertex?"CreateVertexShader":"CreatePixelShader",removedBefore,
+            device()->GetDeviceRemovedReason());
         d3dshim::release(buffer);
         if(FAILED(hr)) {
             d3dshim::Line line("D3D9 shim: D3D11 refused the translated shader hr=");
@@ -1732,6 +1742,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
             line.dec(unsigned(rc));line.emit();
             return D3DERR_INVALIDCALL;
         }
+        const HRESULT removedBefore=device()->GetDeviceRemovedReason();
         HRESULT hr;
         if(vertex) {
             hr=device()->CreateVertexShader(buffer,bytes,nullptr,
@@ -1740,6 +1751,8 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
             hr=device()->CreatePixelShader(buffer,bytes,nullptr,
                 reinterpret_cast<ID3D11PixelShader**>(shader));
         }
+        logDeviceReason(vertex?"CreateVertexShader":"CreatePixelShader",removedBefore,
+            device()->GetDeviceRemovedReason());
         if(FAILED(hr)) {
             d3dshim::release(buffer);
             d3dshim::Line line("D3D9 shim: D3D11 refused the translated shader hr=");

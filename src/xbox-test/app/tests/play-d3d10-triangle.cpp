@@ -43,6 +43,9 @@ static char* hex(char* p,unsigned v) {
     static const char h[]="0123456789abcdef";for(int i=28;i>=0;i-=4)*p++=h[(v>>i)&15];return p;
 }
 static void emit(char* p,char* line) {*p++='\r';*p++='\n';*p=0;OutputDebugStringA(line);}
+// Every BLOCKED check keeps exit 43 (the mode result is unchanged) and names its stage,
+// so a console run says which pixel/readback check failed.
+static int blocked(const char* stage) {char line[128],*p=line;p=text(p,"PLAY-D3D10 BLOCKED ");p=text(p,stage);emit(p,line);return 43;}
 static void logTextureDesc(const char* stage,const char* role,const D3D10_TEXTURE2D_DESC& d) {
     char line[320],*p=line;p=text(p,"PLAY-D3D10 readback ");p=text(p,stage);*p++=' ';p=text(p,role);
     p=text(p," desc=");p=number(p,d.Width);*p++='x';p=number(p,d.Height);p=text(p," mips=");p=number(p,d.MipLevels);
@@ -67,6 +70,23 @@ static void logPixel(const char* stage,unsigned x,unsigned y,const unsigned char
 static void logCopy(const char* stage,const char* event) {
     char line[128],*p=line;p=text(p,"PLAY-D3D10 readback ");p=text(p,stage);
     p=text(p," CopyResource ");emit(text(p,event),line);
+}
+static void logSoStage(const char* stage,bool passed) {
+    char line[128],*p=line;p=text(p,"PLAY-D3D10 SO ");p=text(p,stage);
+    emit(text(p,passed?" PASS":" FAIL"),line);
+}
+static void logSoStats(const D3D10_QUERY_DATA_SO_STATISTICS& stats) {
+    char line[192],*p=line;p=text(p,"PLAY-D3D10 SO stats NumPrimitivesWritten=");
+    p=number(p,unsigned(stats.NumPrimitivesWritten));p=text(p," PrimitivesStorageNeeded=");
+    emit(number(p,unsigned(stats.PrimitivesStorageNeeded)),line);
+}
+static void logSoFloats(const float* values) {
+    char line[256],*p=line;p=text(p,"PLAY-D3D10 SO capture first-float-bits=");
+    for(unsigned i=0;i<8;++i) {
+        union {float value;unsigned bits;} encoded{};
+        encoded.value=values[i];if(i)*p++=',';p=text(p,"0x");p=hex(p,encoded.bits);
+    }
+    emit(p,line);
 }
 // A 64x64 R8G8B8A8 target plus its staging copy: the pair every pass reads
 // through. Created once, cleared between passes.
@@ -175,9 +195,9 @@ DWORD d3d10tri_entry() {
     device->Draw(3,0);
     unsigned char pixel[4];
     if(!readPixel("draw-center",device,target,staging,32,32,pixel))return 17;
-    if(!(pixel[0]>0x80&&pixel[1]<0x40&&pixel[2]<0x40))return 43;   // BLOCKED
+    if(!(pixel[0]>0x80&&pixel[1]<0x40&&pixel[2]<0x40))return blocked("draw-center");   // BLOCKED
     if(!readPixel("draw-outside",device,target,staging,4,4,pixel))return 18;
-    if(!(pixel[0]<0x20&&pixel[1]<0x20&&pixel[2]<0x20))return 43;   // BLOCKED
+    if(!(pixel[0]<0x20&&pixel[1]<0x20&&pixel[2]<0x20))return blocked("draw-outside");   // BLOCKED
 
     // ---- pass 2: DrawIndexed over an index buffer, green triangle ----
     const UINT indices[]={0,1,2};
@@ -200,7 +220,7 @@ DWORD d3d10tri_entry() {
     device->IASetVertexBuffers(0,1,&greenBuffer,&stride,&offset);
     device->DrawIndexed(3,0,0);
     if(!readPixel("indexed-center",device,target,staging,32,32,pixel))return 21;
-    if(!(pixel[1]>0x80&&pixel[0]<0x40&&pixel[2]<0x40))return 43;   // BLOCKED
+    if(!(pixel[1]>0x80&&pixel[0]<0x40&&pixel[2]<0x40))return blocked("indexed-center");   // BLOCKED
     device->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);
     device->IASetVertexBuffers(0,1,&vertexBuffer,&stride,&offset);
 
@@ -222,7 +242,7 @@ DWORD d3d10tri_entry() {
     device->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     device->IASetVertexBuffers(0,1,&vertexBuffer,&stride,&offset);
     if(!readPixel("geometry-center",device,target,staging,32,32,pixel))return 24;
-    if(!(pixel[1]>0x80&&pixel[0]<0x40&&pixel[2]<0x40))return 43;   // BLOCKED
+    if(!(pixel[1]>0x80&&pixel[0]<0x40&&pixel[2]<0x40))return blocked("geometry-center");   // BLOCKED
 
     // ---- pass 4: stream-out writes the GS's vertices a Map reads back ----
     // The GS's own output declaration, as CreateGeometryShaderWithStreamOutput
@@ -236,25 +256,26 @@ DWORD d3d10tri_entry() {
     // signature: the same DXBC the pass above ran.
     ID3D10GeometryShader* soShader=nullptr;
     if(FAILED(device->CreateGeometryShaderWithStreamOutput(d3d10_gs,sizeof d3d10_gs,
-        soDecl,2,32,&soShader))||!soShader)return 25;
+        soDecl,2,32,&soShader))||!soShader){logSoStage("create",false);return 51;}
     D3D10_BUFFER_DESC soBuffer{};
     soBuffer.ByteWidth=3*32;soBuffer.Usage=D3D10_USAGE_DEFAULT;
     soBuffer.BindFlags=D3D10_BIND_STREAM_OUTPUT;
     ID3D10Buffer* soTarget=nullptr;
-    if(FAILED(device->CreateBuffer(&soBuffer,nullptr,&soTarget))||!soTarget)return 26;
+    if(FAILED(device->CreateBuffer(&soBuffer,nullptr,&soTarget))||!soTarget){logSoStage("create",false);return 51;}
     // A STREAM_OUTPUT buffer cannot be mapped: the readback goes through a
     // staging copy, as a game's GPU-vertex capture does.
     D3D10_BUFFER_DESC soStageDesc{};
     soStageDesc.ByteWidth=3*32;soStageDesc.Usage=D3D10_USAGE_STAGING;
     soStageDesc.CPUAccessFlags=D3D10_CPU_ACCESS_READ;
     ID3D10Buffer* soStaging=nullptr;
-    if(FAILED(device->CreateBuffer(&soStageDesc,nullptr,&soStaging))||!soStaging)return 35;
+    if(FAILED(device->CreateBuffer(&soStageDesc,nullptr,&soStaging))||!soStaging){logSoStage("create",false);return 51;}
     const UINT soOffset=0;
     // The primitive count comes from an SO_STATISTICS query issued around the
     // draw, as a game's vertex-capture path reads it.
     D3D10_QUERY_DESC soStatsDesc{D3D10_QUERY_SO_STATISTICS,D3D10_QUERY_MISC_FLAG(0)};
     ID3D10Query* soStats=nullptr;
-    if(FAILED(device->CreateQuery(&soStatsDesc,&soStats))||!soStats)return 36;
+    if(FAILED(device->CreateQuery(&soStatsDesc,&soStats))||!soStats){logSoStage("create",false);return 51;}
+    logSoStage("create",true);
     device->SOSetTargets(1,&soTarget,&soOffset);
     device->IASetVertexBuffers(0,1,&pointBuffer,&stride,&offset);
     device->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_POINTLIST);
@@ -274,17 +295,19 @@ DWORD d3d10tri_entry() {
     for(unsigned poll=0;poll<1000;++poll) {
         HRESULT qr=soStats->GetData(&stats,sizeof stats,0);
         if(qr==S_OK) {soAnswered=true;break;}
-        if(FAILED(qr))return 37;
+        if(FAILED(qr)){logSoStats(stats);logSoStage("stats",false);soStats->Release();return 52;}
         Sleep(1);
     }
-    if(!soAnswered)return 37;
+    if(!soAnswered){logSoStats(stats);logSoStage("stats",false);soStats->Release();return 52;}
     soStats->Release();
+    logSoStats(stats);
     // The GS expands one point to one triangle: one primitive written, one
     // needed. Zero written means the SO path silently dropped the draw.
-    if(stats.NumPrimitivesWritten!=1||stats.PrimitivesStorageNeeded!=1)return 43;   // BLOCKED
+    if(stats.NumPrimitivesWritten!=1||stats.PrimitivesStorageNeeded!=1){logSoStage("stats",false);return 52;}   // BLOCKED
+    logSoStage("stats",true);
     device->CopyResource(soStaging,soTarget);
     void* mappedSo=nullptr;
-    if(FAILED(soStaging->Map(D3D10_MAP_READ,0,&mappedSo))||!mappedSo)return 27;
+    if(FAILED(soStaging->Map(D3D10_MAP_READ,0,&mappedSo))||!mappedSo){logSoStage("capture",false);return 53;}
     // The GS wrote the three expanded vertices, each POSITION then COLOR: top
     // (0,+0.4), bottom-right (+0.4,-0.4), bottom-left (-0.4,-0.4), all green.
     static const float expected[3][8]={
@@ -296,8 +319,10 @@ DWORD d3d10tri_entry() {
     for(unsigned v=0;v<3;++v)
         for(unsigned c=0;c<8;++c)
             if(written[v*8+c]!=expected[v][c])soVertices=false;
+    if(!soVertices)logSoFloats(written);
     soStaging->Unmap();
-    if(!soVertices)return 43;   // BLOCKED: the stream-out wrote the wrong vertices
+    if(!soVertices){logSoStage("capture",false);return 53;}   // BLOCKED: the stream-out wrote the wrong vertices
+    logSoStage("capture",true);
 
     // ---- pass 5: a cubemap, GenerateMips, and the generated mip read back ----
     D3D10_TEXTURE2D_DESC cubeDesc{};
@@ -346,7 +371,7 @@ DWORD d3d10tri_entry() {
     if(FAILED(device->CreateTexture2D(&mipDesc,nullptr,&mipStaging))||!mipStaging)return 38;
     device->CopySubresourceRegion(mipStaging,0,0,0,0,cube,D3D10CalcSubresource(1,0,2),nullptr);
     if(!readStaged("mip-generated",mipStaging,0,0,pixel))return 30;
-    if(!(pixel[2]>0xc0&&pixel[0]<0x40))return 43;   // BLOCKED
+    if(!(pixel[2]>0xc0&&pixel[0]<0x40))return blocked("mip-generated");   // BLOCKED
     mipStaging->Release();
     cubeView->Release();cube->Release();
 
@@ -384,7 +409,7 @@ DWORD d3d10tri_entry() {
     // The MSAA target's clear colour must have crossed the resolve untouched.
     const bool resolvedColour=pixel[0]>0xb0&&pixel[0]<=0xc0&&pixel[1]>0x30&&pixel[1]<0x50
         &&pixel[2]>0x70&&pixel[2]<0x90&&pixel[3]==0xff;
-    if(!resolvedColour)return 43;   // BLOCKED
+    if(!resolvedColour)return blocked("msaa-resolve");   // BLOCKED
     resolveTarget->Release();
     resolved->Release();
     msTarget->Release();
@@ -427,9 +452,9 @@ DWORD d3d10tri_entry() {
     device->VSSetShader(vs);
     compiledVs->Release();
     if(!readPixel("compiled-center",device,target,staging,32,32,pixel))return 47;
-    if(!(pixel[0]>0x80&&pixel[1]<0x40&&pixel[2]<0x40))return 43;   // BLOCKED
+    if(!(pixel[0]>0x80&&pixel[1]<0x40&&pixel[2]<0x40))return blocked("compiled-center");   // BLOCKED
     if(!readPixel("compiled-outside",device,target,staging,4,4,pixel))return 47;
-    if(!(pixel[0]<0x20&&pixel[1]<0x20&&pixel[2]<0x20))return 43;   // BLOCKED
+    if(!(pixel[0]<0x20&&pixel[1]<0x20&&pixel[2]<0x20))return blocked("compiled-outside");   // BLOCKED
 
     // The present path still works after the draw passes, as a game's frame does.
     device->ClearRenderTargetView(view,clear);

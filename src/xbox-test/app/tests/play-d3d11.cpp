@@ -15,6 +15,7 @@
 #include "wine_probe.h"
 #include "../../uwph/host/shaders/triangle_bytecode.h"
 #include "../../uwph/host/shaders/depth_bytecode.h"
+#include "d3d10_bytecode.h"
 
 extern "C" {
 // No CRT: the byte-copy the depth pass's dynamic upload needs (the same
@@ -224,6 +225,40 @@ DWORD d3d_entry() {
     }
     OutputDebugStringA("PLAY-D3D11 GS PASS\n");
 
+    // Halo's flagged scan adds a four-vertex triangle strip and
+    // SV_RenderTargetArrayIndex to the basic point-expansion shape. Exercise
+    // one instance too; the scan doesn't identify CB/SRV reads, so this shader
+    // intentionally adds no unverified resource dependency.
+    ID3D11GeometryShader* haloGs=nullptr;
+    if(FAILED(device->CreateGeometryShader(halo_gs,sizeof halo_gs,nullptr,&haloGs))||!haloGs){
+        OutputDebugStringA("PLAY-D3D11 GS-HALO FAIL create\n");
+        return 48;
+    }
+    context->ClearRenderTargetView(rtv,clear);
+    ID3D11Buffer* haloPointBinds[]={pointFullBuffer};
+    context->IASetVertexBuffers(0,1,haloPointBinds,&stride,&offset);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+    context->GSSetShader(haloGs,nullptr,0);
+    OutputDebugStringA("PLAY-D3D11 GS-HALO draw-instanced\n");
+    context->DrawInstanced(1,1,0,0);
+    context->GSSetShader(nullptr,nullptr,0);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->IASetVertexBuffers(0,1,triBinds,&stride,&offset);
+    context->CopyResource(staging,target);
+    D3D11_MAPPED_SUBRESOURCE haloMapped{};
+    if(FAILED(context->Map(staging,0,D3D11_MAP_READ,0,&haloMapped))||!haloMapped.pData){
+        OutputDebugStringA("PLAY-D3D11 GS-HALO FAIL readback-map\n");
+        return 49;
+    }
+    const unsigned char* haloInside=static_cast<const unsigned char*>(haloMapped.pData)+32*haloMapped.RowPitch+32*4;
+    const bool haloInsideGreen=haloInside[1]>0x80&&haloInside[0]<0x40&&haloInside[2]<0x40;
+    context->Unmap(staging,0);
+    if(!haloInsideGreen){
+        OutputDebugStringA("PLAY-D3D11 GS-HALO FAIL black-readback\n");
+        return 50;
+    }
+    OutputDebugStringA("PLAY-D3D11 GS-HALO PASS\n");
+
     // ---- MSAA pass: 4x render target, clear, resolve, readback ----
     // Games pick MSAA through CheckMultisampleQualityLevels and resolve with
     // ResolveSubresource; if the layer answers the quality probe but drops the
@@ -368,59 +403,114 @@ DWORD d3d_entry() {
     list->Release();dView->Release();deferred->Release();
     if(!deferredRed)return 63;   // BLOCKED: the command list did not reach the target
 
-    // ---- Stream-out pass: capture VS output, read the SO buffer back ----
-    // Particle systems and GPU-skinned animation capture the vertex stage
-    // into an SO buffer and later draw it back (DrawAuto); a layer that
-    // accepts SOSetTargets but writes nothing leaves the capture empty, which
-    // reads as a vanished particle system. No new shader: the committed VS is
-    // the stream-out stage, its output layout (SV_POSITION+COLOR) is the
-    // entry. Exits 64-67 name the step; 67 is BLOCKED (never a pass).
-    // Wine's GL d3d11 faults on the SO staging readback (the same class of
-    // page fault as the MSAA clear), so this pass is inside the same gate:
-    // skipped under Wine, run in full on the console's D3D11-on-12.
+    // Test both VS-output and geometry-shader stream-output routes; Wine faults on SO readback.
     if(!onWine){
     D3D11_SO_DECLARATION_ENTRY soDecl[2]={
         {0,"SV_POSITION",0,0,4,0},
         {0,"COLOR",0,0,4,0}};
-    ID3D11GeometryShader* soGs=nullptr;
-    // Stream-out without a GS uses a GS created with the SO declarations and
-    // no shader body: the standard D3D11 route (CreateGeometryShaderWithSO,
-    // pShaderBytecode=nullptr is not valid, so the SO-only route passes the
-    // declarations with a zero-length entry count through a real GS call).
-    if(FAILED(device->CreateGeometryShaderWithStreamOutput(triangle_vs,sizeof triangle_vs,
-        soDecl,2,nullptr,0,D3D11_SO_NO_RASTERIZED_STREAM,nullptr,&soGs))||!soGs)return 64;
-    D3D11_BUFFER_DESC soDesc{};
-    soDesc.ByteWidth=3*sizeof(float)*8;   // 3 vertices, 8 floats each (position+color)
-    soDesc.Usage=D3D11_USAGE_DEFAULT;soDesc.BindFlags=D3D11_BIND_STREAM_OUTPUT;
-    soDesc.CPUAccessFlags=0;soDesc.MiscFlags=0;
-    ID3D11Buffer* soBuffer=nullptr;
-    if(FAILED(device->CreateBuffer(&soDesc,nullptr,&soBuffer))||!soBuffer)return 65;
-    ID3D11Buffer* soBinds[]={soBuffer};
-    UINT soOffsets[]={0};
-    // The input state and shaders this draw reads are set by the helper after
-    // the deferred execute (see rebind_pipeline_state).
-    context->GSSetShader(soGs,nullptr,0);
-    context->SOSetTargets(1,soBinds,soOffsets);
-    context->Draw(3,0);
-    ID3D11Buffer* soClear[]={nullptr};
-    context->SOSetTargets(1,soClear,soOffsets);
-    context->GSSetShader(nullptr,nullptr,0);
-    // Read the capture back through a staging buffer.
-    D3D11_BUFFER_DESC soReadDesc=soDesc;
-    soReadDesc.Usage=D3D11_USAGE_STAGING;soReadDesc.BindFlags=0;
-    soReadDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
-    ID3D11Buffer* soStaging=nullptr;
-    if(FAILED(device->CreateBuffer(&soReadDesc,nullptr,&soStaging))||!soStaging)return 66;
-    context->CopyResource(soStaging,soBuffer);
-    D3D11_MAPPED_SUBRESOURCE soMapped{};
-    if(FAILED(context->Map(soStaging,0,D3D11_MAP_READ,0,&soMapped))||!soMapped.pData)return 66;
-    // The VS passes positions straight through: the first captured vertex is
-    // the first drawn vertex (-0.75, 0.75, 0, 1).
-    const float* soData=static_cast<const float*>(soMapped.pData);
-    const bool soCaptured=soData[0]<-0.7f&&soData[0]>-0.8f&&soData[1]>0.7f&&soData[1]<0.8f;
-    context->Unmap(soStaging,0);
-    soStaging->Release();soBuffer->Release();soGs->Release();
-    if(!soCaptured)return 67;   // BLOCKED: the SO buffer stayed empty
+    const UINT soStride=8*sizeof(float);
+    const float point[6]={-0.75f,0.75f,0.0f,1.0f,0.0f,1.0f};
+    D3D11_BUFFER_DESC pointDesc{};
+    pointDesc.ByteWidth=sizeof point;pointDesc.Usage=D3D11_USAGE_DEFAULT;
+    pointDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA pointInit{};pointInit.pSysMem=point;
+    ID3D11Buffer* pointBuffer=nullptr;
+    if(FAILED(device->CreateBuffer(&pointDesc,&pointInit,&pointBuffer))||!pointBuffer)return 65;
+    const D3D11_INPUT_ELEMENT_DESC soElements[]={
+        {"POSITION",0,DXGI_FORMAT_R32G32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},
+        {"COLOR",0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,8,D3D11_INPUT_PER_VERTEX_DATA,0}};
+    ID3D11InputLayout* soLayout=nullptr;
+    if(FAILED(device->CreateInputLayout(soElements,2,d3d10_vs,sizeof d3d10_vs,&soLayout))||!soLayout)return 65;
+    ID3D11VertexShader* soVs=nullptr;
+    if(FAILED(device->CreateVertexShader(d3d10_vs,sizeof d3d10_vs,nullptr,&soVs))||!soVs)return 65;
+    auto runSoRoute=[&](const char* route,const void* bytecode,SIZE_T bytecodeSize,bool gsRoute,
+                        float expectedY,DWORD createExit,DWORD statsExit,DWORD captureExit)->DWORD {
+        char line[160];
+        ID3D11GeometryShader* soGs=nullptr;
+        HRESULT soHr=device->CreateGeometryShaderWithStreamOutput(bytecode,bytecodeSize,
+            soDecl,2,&soStride,1,D3D11_SO_NO_RASTERIZED_STREAM,nullptr,&soGs);
+        if(FAILED(soHr)||!soGs){
+            wsprintfA(line,"PLAY-D3D11 SO %s create FAIL hr=0x%08lx\n",route,soHr);
+            OutputDebugStringA(line);return createExit;
+        }
+        D3D11_BUFFER_DESC soDesc{};
+        soDesc.ByteWidth=3*soStride;
+        soDesc.Usage=D3D11_USAGE_DEFAULT;soDesc.BindFlags=D3D11_BIND_STREAM_OUTPUT|D3D11_BIND_VERTEX_BUFFER;   // DrawAuto reads it back through the IA
+        ID3D11Buffer* soBuffer=nullptr;
+        D3D11_BUFFER_DESC soReadDesc=soDesc;
+        soReadDesc.Usage=D3D11_USAGE_STAGING;soReadDesc.BindFlags=0;
+        soReadDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        ID3D11Buffer* soStaging=nullptr;
+        D3D11_QUERY_DESC soQueryDesc{D3D11_QUERY_SO_STATISTICS,0};
+        ID3D11Query* soQuery=nullptr;
+        if(FAILED(device->CreateBuffer(&soDesc,nullptr,&soBuffer))||!soBuffer||
+           FAILED(device->CreateBuffer(&soReadDesc,nullptr,&soStaging))||!soStaging||
+           FAILED(device->CreateQuery(&soQueryDesc,&soQuery))||!soQuery){
+            OutputDebugStringA(gsRoute?"PLAY-D3D11 SO gs-route create FAIL resource\n":"PLAY-D3D11 SO vs-route create FAIL resource\n");
+            if(soQuery)soQuery->Release();if(soStaging)soStaging->Release();
+            if(soBuffer)soBuffer->Release();soGs->Release();return createExit;
+        }
+        wsprintfA(line,"PLAY-D3D11 SO %s create PASS\n",route);
+        OutputDebugStringA(line);
+        ID3D11Buffer* soBinds[]={soBuffer};
+        ID3D11Buffer* soClear[]={nullptr};
+        UINT soOffsets[]={0},pointStride=sizeof point,pointOffset=0;
+        context->IASetInputLayout(soLayout);
+        context->IASetVertexBuffers(0,1,&pointBuffer,&pointStride,&pointOffset);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+        context->VSSetShader(soVs,nullptr,0);
+        context->GSSetShader(soGs,nullptr,0);
+        context->SOSetTargets(1,soBinds,soOffsets);
+        context->Begin(soQuery);
+        context->Draw(1,0);
+        context->End(soQuery);
+        context->SOSetTargets(1,soClear,soOffsets);
+        context->GSSetShader(nullptr,nullptr,0);
+        context->VSSetShader(vs,nullptr,0);
+        context->IASetInputLayout(layout);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        D3D11_QUERY_DATA_SO_STATISTICS soStats{};
+        bool soAnswered=false,soQueryFailed=false;
+        for(unsigned poll=0;poll<1000;++poll) {
+            HRESULT qhr=context->GetData(soQuery,&soStats,sizeof soStats,0);
+            if(qhr==S_OK){soAnswered=true;break;}
+            if(FAILED(qhr)){soQueryFailed=true;break;}
+            Sleep(1);
+        }
+        if(soQueryFailed||!soAnswered||soStats.NumPrimitivesWritten!=1||soStats.PrimitivesStorageNeeded!=1){
+            wsprintfA(line,"PLAY-D3D11 SO %s stats FAIL written=%I64u needed=%I64u\n",route,
+                soStats.NumPrimitivesWritten,soStats.PrimitivesStorageNeeded);
+            OutputDebugStringA(line);
+            soQuery->Release();soStaging->Release();soBuffer->Release();soGs->Release();return statsExit;
+        }
+        wsprintfA(line,"PLAY-D3D11 SO %s stats PASS written=%I64u needed=%I64u\n",route,
+            soStats.NumPrimitivesWritten,soStats.PrimitivesStorageNeeded);
+        OutputDebugStringA(line);
+        context->IASetVertexBuffers(0,1,soBinds,&soStride,&pointOffset);
+        context->DrawAuto();
+        context->CopyResource(soStaging,soBuffer);
+        D3D11_MAPPED_SUBRESOURCE soMapped{};
+        if(FAILED(context->Map(soStaging,0,D3D11_MAP_READ,0,&soMapped))||!soMapped.pData){
+            wsprintfA(line,"PLAY-D3D11 SO %s capture FAIL map written=%I64u needed=%I64u\n",route,
+                soStats.NumPrimitivesWritten,soStats.PrimitivesStorageNeeded);
+            OutputDebugStringA(line);
+            soQuery->Release();soStaging->Release();soBuffer->Release();soGs->Release();return captureExit;
+        }
+        const float* soData=static_cast<const float*>(soMapped.pData);
+        const bool soCaptured=soData[0]<-0.7f&&soData[0]>-0.8f&&
+            soData[1]>expectedY-0.05f&&soData[1]<expectedY+0.05f&&soData[5]>0.9f&&soData[4]<0.1f;
+        context->Unmap(soStaging,0);
+        wsprintfA(line,"PLAY-D3D11 SO %s capture %s written=%I64u needed=%I64u\n",route,
+            soCaptured?"PASS":"FAIL",soStats.NumPrimitivesWritten,soStats.PrimitivesStorageNeeded);
+        OutputDebugStringA(line);
+        soQuery->Release();soStaging->Release();soBuffer->Release();soGs->Release();
+        return soCaptured?0:captureExit;
+    };
+    DWORD soResult=runSoRoute("vs-route",d3d10_vs,sizeof d3d10_vs,false,0.75f,96,97,98);
+    if(soResult)return soResult;
+    soResult=runSoRoute("gs-route",d3d10_gs,sizeof d3d10_gs,true,1.15f,64,66,67);
+    if(soResult)return soResult;
+    soVs->Release();soLayout->Release();pointBuffer->Release();
     }   // end non-Wine stream-out gate
 
     // ---- Indirect-draw pass: DrawInstancedIndirect from a buffer ----
@@ -796,7 +886,13 @@ DWORD d3d_entry() {
     ID3D11Buffer* made=nullptr;
     if(!FAILED(device->CreateBuffer(&buffer,nullptr,&made)))return 30;
     UINT support=0;
-    if(!FAILED(device->CheckFormatSupport(DXGI_FORMAT(0x7fff),&support))&&support)return 31;
+    if(onWine){
+        OutputDebugStringA("PLAY-D3D11 STAGE invalid-format-check SKIP (wine: Wine's partial CheckFormatSupport stub hangs on an unknown DXGI format)\n");
+    }else{
+        OutputDebugStringA("PLAY-D3D11 STAGE invalid-format-check begin\n");
+        if(!FAILED(device->CheckFormatSupport(DXGI_FORMAT(0x7fff),&support))&&support)return 31;
+        OutputDebugStringA("PLAY-D3D11 STAGE invalid-format-check PASS\n");
+    }
 
     // A Wine host never reaches PASS: the four gated passes (MSAA, stream-out,
     // indirect, query) did not run, so 42 would claim coverage the run does
@@ -805,7 +901,10 @@ DWORD d3d_entry() {
     // 43, but 43 already means BLOCKED pixel-readback for this fixture's
     // first pass; a distinct code keeps the two causes distinguishable in
     // the verdict line). The console's D3D11-on-12 runs those passes in full.
-    if(onWine)return 95;
+    if(onWine){
+        OutputDebugStringA("PLAY-D3D11 BLOCKED wine-host (Wine-only stages skipped; console stages unchanged)\n");
+        return 95;
+    }
 
     backView->Release();backBuffer->Release();
     rtv->Release();pointFullBuffer->Release();gs->Release();
