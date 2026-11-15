@@ -53,9 +53,18 @@ struct Host {
     struct GlCall {
         std::string name;
         std::vector<uintptr_t> args;
+        std::vector<GlArgKind> arg_kinds;
+        std::vector<unsigned> arg_slots;
         std::vector<uint8_t> input, output;
         uintptr_t result = 0;
+        bool gap = false;
     };
+    struct WindowCreate {
+        std::u16string class_name, title;
+        uint32_t ex_style = 0, style = 0, x = 0, y = 0, width = 0, height = 0;
+        uintptr_t parent = 0, menu = 0, instance = 0;
+    };
+    struct GlMap { uint32_t address = 0, size = 0, target = 0; uintptr_t offset = 0; bool writable = false; };
     std::string out, err;                         // captured stdout/stderr bytes
     std::function<void(const std::string&)> tee;  // optional live sink
     std::function<NlsResponse(const NlsRequest&)> nls_call;
@@ -65,13 +74,18 @@ struct Host {
     std::function<uint64_t()> tick_count;          // same monotonic millisecond source for the guest tick APIs
     std::function<void(LocaleCall&)> locale_call; // Play's native kernel32 locale formatter
     std::function<void(GlCall&)> gl_call;
-    std::function<uintptr_t(uint32_t)> get_dc;
-    std::function<bool(uint32_t, uintptr_t)> release_dc;
-    std::map<uint32_t, uintptr_t> dc_handles, gl_contexts;
-    uint32_t gl_handle_serial = 0xE0000000u;
-    uint32_t vertex_array = 0;
+    std::function<bool(const std::u16string&)> register_window_class;
+    std::function<uintptr_t(const WindowCreate&)> create_window;
+    std::function<bool(uintptr_t)> destroy_window;
+    std::function<uintptr_t(uintptr_t)> get_dc;
+    std::function<bool(uintptr_t, uintptr_t)> release_dc;
+    std::map<uint32_t, uintptr_t> window_handles, dc_handles, gl_contexts;
+    std::map<uint32_t, GlMap> gl_maps;
+    uint32_t gl_handle_serial = 0xE0000000u, window_handle_serial = 0xD0000000u, gl_map_next = 0x70000000u;
+    uint32_t vertex_array = 0, gl_array_buffer = 0, gl_element_array_buffer = 0;
     int32_t vertex_size = 0, vertex_stride = 0;
     uint32_t vertex_type = 0;
+    bool vertex_buffer_backed = false;
     std::map<std::string, unsigned> calls;        // import -> call count
     static constexpr uint32_t H_STDIN = 3, H_STDOUT = 7, H_STDERR = 11;
 };
@@ -115,8 +129,16 @@ inline void register_gl(Registry& r, Host& h) {
         return h.gl_handle_serial;
     };
     auto call = [&h](Cpu& c, Host::GlCall& q) {
-        if (!h.gl_call) { c.mem.w32(c.fs_base + 0x34, 120); return false; }
-        h.gl_call(q); return true;
+        bool unsupported = false;
+        for (GlArgKind kind : q.arg_kinds) unsupported = unsupported || kind == GlArgKind::Unsupported;
+        if (!h.gl_call || unsupported || q.gap) { c.mem.w32(c.fs_base + 0x34, 120); q.gap = true; }
+        else h.gl_call(q);
+        if (q.gap) {
+            const std::string line = "x86 GL gap: " + q.name + " (unsupported host dispatch or marshalling)\n";
+            h.err += line;
+            if (h.tee) h.tee(line);
+        }
+        return true;
     };
     auto dc = [&h](uint32_t token) -> uintptr_t {
         auto it = h.dc_handles.find(token); return it == h.dc_handles.end() ? 0 : it->second;
@@ -124,15 +146,73 @@ inline void register_gl(Registry& r, Host& h) {
     auto context = [&h](uint32_t token) -> uintptr_t {
         auto it = h.gl_contexts.find(token); return it == h.gl_contexts.end() ? 0 : it->second;
     };
-    r.add("user32.dll", "GetDC", Conv::Stdcall, 1, [&h, alloc_handle, count](Cpu& c) -> uint32_t {
-        count("GetDC"); uint32_t hwnd = c.arg(0);
-        if (hwnd || !h.get_dc) { c.mem.w32(c.fs_base + 0x34, hwnd ? 6 : 120); return 0; }
-        return alloc_handle(h.dc_handles, h.get_dc(hwnd));
+    auto window = [&h](uint32_t token) -> uintptr_t {
+        auto it = h.window_handles.find(token); return it == h.window_handles.end() ? 0 : it->second;
+    };
+    auto read_wstr = [](Cpu& c, uint32_t address) {
+        std::u16string value;
+        for (uint32_t i = 0; i < 32768; ++i) { uint16_t ch = uint16_t(c.mem.r(address + i * 2, 2)); if (!ch) return value; value.push_back(char16_t(ch)); }
+        throw Fault(FaultKind::AccessViolation, c.eip, address, "unterminated guest UTF-16 string");
+    };
+    auto read_astr = [](Cpu& c, uint32_t address) {
+        const std::string bytes = c.mem.read_cstr(address, 32768);
+        return std::u16string(bytes.begin(), bytes.end());
+    };
+    auto map_window = [&h](uintptr_t native) {
+        if (!native) return uint32_t(0);
+        if (++h.window_handle_serial < 0xD0000000u) h.window_handle_serial = 0xD0000000u;
+        h.window_handles[h.window_handle_serial] = native;
+        return h.window_handle_serial;
+    };
+    r.add("user32.dll", "RegisterClassExA", Conv::Stdcall, 1, [&h, count, read_astr](Cpu& c) -> uint32_t {
+        count("RegisterClassExA"); uint32_t wc = c.arg(0);
+        if (c.mem.r32(wc) < 48 || !h.register_window_class) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
+        const uint32_t name = c.mem.r32(wc + 40);
+        if (!name) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
+        return h.register_window_class(read_astr(c, name)) ? 1u : 0u;
     });
-    r.add("user32.dll", "ReleaseDC", Conv::Stdcall, 2, [&h, count](Cpu& c) -> uint32_t {
-        count("ReleaseDC"); uint32_t hwnd = c.arg(0), token = c.arg(1); auto it = h.dc_handles.find(token);
-        if (hwnd || it == h.dc_handles.end() || !h.release_dc) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
-        bool ok = h.release_dc(hwnd, it->second); if (ok) h.dc_handles.erase(it); return ok ? 1u : 0u;
+    r.add("user32.dll", "CreateWindowExA", Conv::Stdcall, 12, [&h, count, read_astr, map_window, window](Cpu& c) -> uint32_t {
+        count("CreateWindowExA");
+        if (!h.create_window) { c.mem.w32(c.fs_base + 0x34, 120); return 0; }
+        Host::WindowCreate q{};
+        q.ex_style = c.arg(0); q.class_name = read_astr(c, c.arg(1)); if (c.arg(2)) q.title = read_astr(c, c.arg(2));
+        q.style = c.arg(3); q.x = c.arg(4); q.y = c.arg(5); q.width = c.arg(6); q.height = c.arg(7);
+        q.parent = c.arg(8) ? window(c.arg(8)) : 0; q.menu = c.arg(9); q.instance = c.arg(10);
+        if ((c.arg(8) && !q.parent) || !q.class_name.size()) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
+        return map_window(h.create_window(q));
+    });
+    r.add("user32.dll", "RegisterClassExW", Conv::Stdcall, 1, [&h, count, read_wstr](Cpu& c) -> uint32_t {
+        count("RegisterClassExW"); uint32_t wc = c.arg(0);
+        if (c.mem.r32(wc) < 48 || !h.register_window_class) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
+        const uint32_t name = c.mem.r32(wc + 40);
+        if (!name) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
+        return h.register_window_class(read_wstr(c, name)) ? 1u : 0u;
+    });
+    r.add("user32.dll", "CreateWindowExW", Conv::Stdcall, 12, [&h, count, read_wstr, map_window, window](Cpu& c) -> uint32_t {
+        count("CreateWindowExW");
+        if (!h.create_window) { c.mem.w32(c.fs_base + 0x34, 120); return 0; }
+        Host::WindowCreate q{};
+        q.ex_style = c.arg(0); q.class_name = read_wstr(c, c.arg(1)); if (c.arg(2)) q.title = read_wstr(c, c.arg(2));
+        q.style = c.arg(3); q.x = c.arg(4); q.y = c.arg(5); q.width = c.arg(6); q.height = c.arg(7);
+        q.parent = c.arg(8) ? window(c.arg(8)) : 0; q.menu = c.arg(9); q.instance = c.arg(10);
+        if ((c.arg(8) && !q.parent) || !q.class_name.size()) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
+        return map_window(h.create_window(q));
+    });
+    r.add("user32.dll", "DestroyWindow", Conv::Stdcall, 1, [&h, count, window](Cpu& c) -> uint32_t {
+        count("DestroyWindow"); uint32_t token = c.arg(0); auto it = h.window_handles.find(token);
+        if (it == h.window_handles.end() || !h.destroy_window || !h.destroy_window(it->second)) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
+        h.window_handles.erase(it); return 1;
+    });
+    r.add("user32.dll", "GetDC", Conv::Stdcall, 1, [&h, alloc_handle, count, window](Cpu& c) -> uint32_t {
+        count("GetDC"); uint32_t token = c.arg(0); uintptr_t native = token ? window(token) : 0;
+        if ((token && !native) || !h.get_dc) { c.mem.w32(c.fs_base + 0x34, token ? 6 : 120); return 0; }
+        return alloc_handle(h.dc_handles, h.get_dc(native));
+    });
+    r.add("user32.dll", "ReleaseDC", Conv::Stdcall, 2, [&h, count, window](Cpu& c) -> uint32_t {
+        count("ReleaseDC"); uint32_t token = c.arg(0), dc_token = c.arg(1); auto it = h.dc_handles.find(dc_token);
+        uintptr_t native = token ? window(token) : 0;
+        if ((token && !native) || it == h.dc_handles.end() || !h.release_dc) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
+        bool ok = h.release_dc(native, it->second); if (ok) h.dc_handles.erase(it); return ok ? 1u : 0u;
     });
     r.add("gdi32.dll", "ChoosePixelFormat", Conv::Stdcall, 2, [dc, call, count](Cpu& c) -> uint32_t {
         count("ChoosePixelFormat"); Host::GlCall q{}; q.name = "ChoosePixelFormat"; q.args = {c.arg(0), c.arg(1)};
@@ -194,15 +274,84 @@ inline void register_gl(Registry& r, Host& h) {
     for (const auto& exported : kGlExports) {
         const std::string name = exported.name;
         const unsigned argc = exported.argc;
-        r.add("opengl32.dll", name, Conv::Stdcall, argc, [&h, call, count, name, argc](Cpu& c) -> uint32_t {
+        const unsigned first_arg = exported.first_arg;
+        const unsigned arg_count = exported.arg_count;
+        r.add("opengl32.dll", name, Conv::Stdcall, argc, [&h, call, count, name, argc, first_arg, arg_count](Cpu& c) -> uint32_t {
             count(name); Host::GlCall q{}; q.name = name;
             for (unsigned i = 0; i < argc; ++i) q.args.push_back(c.arg(i));
+            for (unsigned i = 0; i < arg_count; ++i) {
+                q.arg_kinds.push_back(kGlArgs[first_arg + i].kind);
+                q.arg_slots.push_back(kGlArgs[first_arg + i].slots);
+            }
+            if (name == "glMapBufferRange" || name == "glMapBuffer") {
+                const uint32_t target = uint32_t(q.args[0]);
+                const uint32_t size = name == "glMapBufferRange" ? uint32_t(q.args[2]) : 0;
+                const uint32_t access = uint32_t(q.args[name == "glMapBufferRange" ? 3 : 1]);
+                if (h.gl_maps.count(target) || (name == "glMapBufferRange" && (!size || size > (1u << 26)))) {
+                    c.mem.w32(c.fs_base + 0x34, 87); return 0;
+                }
+                if (!call(c, q) || q.gap || q.output.empty() || (size && q.output.size() != size) || q.output.size() > (1u << 26)) return 0;
+                uint32_t address = (h.gl_map_next + Memory::PAGE - 1) & ~(Memory::PAGE - 1);
+                bool found = false;
+                for (unsigned attempt = 0; attempt < 4096; ++attempt) {
+                    if (c.mem.free_range(address, uint32_t(q.output.size()))) { found = true; break; }
+                    address += uint32_t((q.output.size() + Memory::PAGE - 1) & ~(size_t(Memory::PAGE - 1)));
+                    if (address < 0x70000000u || address >= 0xF0000000u) address = 0x70000000u;
+                }
+                if (!found) return 0;
+                const uint32_t map_size = uint32_t(q.output.size());
+                c.mem.map(address, map_size, PROT_R | PROT_W);
+                c.mem.write_bytes(address, q.output.data(), map_size);
+                const uintptr_t offset = name == "glMapBufferRange" ? uintptr_t(q.args[1]) : 0;
+                h.gl_maps[target] = {address, map_size, target, offset, name == "glMapBufferRange" ? (access & 0x2u) != 0 : access != 0x88B8u};
+                h.gl_map_next = address + uint32_t((map_size + Memory::PAGE - 1) & ~(size_t(Memory::PAGE - 1)));
+                return address;
+            }
+            if (name == "glUnmapBuffer") {
+                const uint32_t target = uint32_t(q.args[0]); auto it = h.gl_maps.find(target);
+                if (it == h.gl_maps.end()) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
+                Host::GlCall unmap{}; unmap.name = "x86GlUnmapBuffer"; unmap.args = {target, it->second.offset};
+                if (it->second.writable) unmap.input = c.mem.read_bytes(it->second.address, it->second.size);
+                bool ok = call(c, unmap) && !unmap.gap && unmap.result != 0;
+                c.mem.unmap(it->second.address, it->second.size); h.gl_maps.erase(it);
+                return ok ? 1u : 0u;
+            }
+            if (name == "glBindBuffer" && q.args.size() == 2 && (q.args[0] == 0x8892u || q.args[0] == 0x8893u)) {
+                if (!call(c, q) || q.gap) return 0;
+                if (q.args[0] == 0x8892u) h.gl_array_buffer = uint32_t(q.args[1]);
+                else h.gl_element_array_buffer = uint32_t(q.args[1]);
+                return uint32_t(q.result);
+            }
             if (name == "glVertexPointer") {
                 h.vertex_size = int32_t(q.args[0]); h.vertex_type = q.args[1]; h.vertex_stride = int32_t(q.args[2]); h.vertex_array = q.args[3];
+                h.vertex_buffer_backed = h.gl_array_buffer != 0;
+                if (h.vertex_buffer_backed) call(c, q);
                 return 0;
             }
+            if (name == "glDrawElements") {
+                const uint32_t count = uint32_t(q.args[1]), type = uint32_t(q.args[2]);
+                if (h.vertex_buffer_backed && h.gl_element_array_buffer) return call(c, q) ? uint32_t(q.result) : 0;
+                if (h.vertex_buffer_backed || h.gl_element_array_buffer) { q.gap = true; call(c, q); return 0; }
+                if (!h.vertex_array || h.vertex_type != 0x1406u || h.vertex_size < 2 || h.vertex_size > 4 || h.vertex_stride < 0 || count > (1u << 20))
+                    throw Fault(FaultKind::Unsupported, c.eip, uint32_t(q.args[3]), "x86 GL client indexed-array format is unsupported");
+                const uint32_t index_width = type == 0x1401u ? 1u : type == 0x1403u ? 2u : type == 0x1405u ? 4u : 0u;
+                if (!index_width) throw Fault(FaultKind::Unsupported, c.eip, uint32_t(q.args[3]), "x86 GL index type is unsupported");
+                const uint32_t width = uint32_t(h.vertex_size) * 4u, stride = h.vertex_stride ? uint32_t(h.vertex_stride) : width;
+                if (stride < width || uint64_t(count) * width > (1u << 26)) throw Fault(FaultKind::AccessViolation, c.eip, uint32_t(q.args[3]), "x86 GL indexed-array range overflow");
+                auto indices = c.mem.read_bytes(uint32_t(q.args[3]), count * index_width);
+                q.input.reserve(size_t(count) * width);
+                for (uint32_t i = 0; i < count; ++i) {
+                    uint32_t index = 0; for (uint32_t b = 0; b < index_width; ++b) index |= uint32_t(indices[size_t(i) * index_width + b]) << (8 * b);
+                    uint64_t address = uint64_t(h.vertex_array) + uint64_t(index) * stride;
+                    if (address + width > UINT32_MAX + uint64_t(1)) throw Fault(FaultKind::AccessViolation, c.eip, h.vertex_array, "x86 GL indexed-array address overflow");
+                    auto bytes = c.mem.read_bytes(uint32_t(address), width); q.input.insert(q.input.end(), bytes.begin(), bytes.end());
+                }
+                q.name = "x86GlDrawElementsClient"; q.args = {q.args[0], count, uint32_t(h.vertex_size), h.vertex_type, stride};
+                return call(c, q) ? uint32_t(q.result) : 0;
+            }
+            if (name == "glDrawArrays" && h.vertex_buffer_backed) return call(c, q) ? uint32_t(q.result) : 0;
             if (name == "glDrawArrays") {
-                if (!h.vertex_array) throw Fault(FaultKind::Unsupported, c.eip, 0, "x86 GL buffer-backed arrays are unsupported");
+                if (!h.vertex_array) throw Fault(FaultKind::Unsupported, c.eip, 0, "x86 GL client array pointer is null");
                 if (h.vertex_type != 0x1406u || h.vertex_size < 2 || h.vertex_size > 4 || h.vertex_stride < 0 || q.args[2] > (1u << 20)) {
                     throw Fault(FaultKind::Unsupported, c.eip, h.vertex_array, "x86 GL client array format is unsupported");
                 }

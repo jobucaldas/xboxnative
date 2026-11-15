@@ -1102,17 +1102,34 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         static HMODULE records=LoadPackagedLibrary(L"uwph-u32c.dll",0);
         static HMODULE mesa=LoadPackagedLibrary(L"runtime\\opengl32.dll",0);
         using GetDc=HDC(WINAPI*)(HWND);using ReleaseDc=int(WINAPI*)(HWND,HDC);
+        struct GlWndClassExW { UINT cbSize, style; LRESULT(CALLBACK* lpfnWndProc)(HWND,UINT,WPARAM,LPARAM); int cbClsExtra, cbWndExtra; HINSTANCE hInstance; HICON hIcon; HCURSOR hCursor; HBRUSH hbrBackground; LPCWSTR lpszMenuName, lpszClassName; HICON hIconSm; };
+        using RegisterClass=ATOM(WINAPI*)(const GlWndClassExW*);using CreateWindow=HWND(WINAPI*)(DWORD,LPCWSTR,LPCWSTR,DWORD,int,int,int,int,HWND,HMENU,HINSTANCE,LPVOID);
+        using DestroyWindow=int(WINAPI*)(HWND);
         auto get_dc=records?reinterpret_cast<GetDc>(GetProcAddress(records,"GetDC")):nullptr;
         auto release_dc=records?reinterpret_cast<ReleaseDc>(GetProcAddress(records,"ReleaseDC")):nullptr;
-        host.get_dc=[get_dc](uint32_t hwnd)->uintptr_t{return get_dc?reinterpret_cast<uintptr_t>(get_dc(reinterpret_cast<HWND>(uintptr_t(hwnd)))):0;};
-        host.release_dc=[release_dc](uint32_t hwnd,uintptr_t hdc){return release_dc&&release_dc(reinterpret_cast<HWND>(uintptr_t(hwnd)),reinterpret_cast<HDC>(hdc))!=0;};
+        auto register_class=records?reinterpret_cast<RegisterClass>(GetProcAddress(records,"RegisterClassExW")):nullptr;
+        auto create_window=records?reinterpret_cast<CreateWindow>(GetProcAddress(records,"CreateWindowExW")):nullptr;
+        auto destroy_window=records?reinterpret_cast<DestroyWindow>(GetProcAddress(records,"DestroyWindow")):nullptr;
+        host.register_window_class=[register_class](const std::u16string& name){
+            if(!register_class||name.empty())return false;std::wstring wide(name.begin(),name.end());GlWndClassExW wc{};wc.cbSize=sizeof(wc);
+            wc.lpfnWndProc=[](HWND,UINT,WPARAM,LPARAM)->LRESULT{return 0;};wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=wide.c_str();
+            return register_class(&wc)!=0||GetLastError()==ERROR_CLASS_ALREADY_EXISTS;
+        };
+        host.create_window=[create_window](const x86::Host::WindowCreate& q)->uintptr_t{
+            if(!create_window)return 0;std::wstring cls(q.class_name.begin(),q.class_name.end()),title(q.title.begin(),q.title.end());
+            return reinterpret_cast<uintptr_t>(create_window(q.ex_style,cls.c_str(),title.c_str(),q.style,int(q.x),int(q.y),int(q.width),int(q.height),
+                reinterpret_cast<HWND>(q.parent),nullptr,GetModuleHandleW(nullptr),nullptr));
+        };
+        host.destroy_window=[destroy_window](uintptr_t hwnd){return destroy_window&&destroy_window(reinterpret_cast<HWND>(hwnd))!=0;};
+        host.get_dc=[get_dc](uintptr_t hwnd)->uintptr_t{return get_dc?reinterpret_cast<uintptr_t>(get_dc(reinterpret_cast<HWND>(hwnd))):0;};
+        host.release_dc=[release_dc](uintptr_t hwnd,uintptr_t hdc){return release_dc&&release_dc(reinterpret_cast<HWND>(hwnd),reinterpret_cast<HDC>(hdc))!=0;};
         auto proc=[](const char* name)->uintptr_t {
             uintptr_t p=play_runtime::openglExport(name);
             if(!p&&mesa)p=reinterpret_cast<uintptr_t>(GetProcAddress(mesa,name));
             return p;
         };
         host.gl_call=[proc](x86::Host::GlCall& q) {
-            auto missing=[&](){SetLastError(ERROR_PROC_NOT_FOUND);q.result=0;};
+            auto missing=[&](){SetLastError(ERROR_PROC_NOT_FOUND);q.result=0;q.gap=true;};
             auto pointer=[&](const char* name){return proc(name);};
             auto float_arg=[&](size_t index){uint32_t bits=uint32_t(q.args[index]);float value=0;memcpy(&value,&bits,sizeof(value));return value;};
             if(q.name=="ChoosePixelFormat"||q.name=="SetPixelFormat"||q.name=="DescribePixelFormat"||q.name=="SwapBuffers") {
@@ -1132,8 +1149,27 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
             if(q.name=="glClear"){using Fn=void(APIENTRY*)(unsigned);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(unsigned(q.args[0]));else missing();return;}
             if(q.name=="glViewport"){using Fn=void(APIENTRY*)(int,int,int,int);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(int(q.args[0]),int(q.args[1]),int(q.args[2]),int(q.args[3]));else missing();return;}
             if(q.name=="glEnableClientState"){using Fn=void(APIENTRY*)(unsigned);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(unsigned(q.args[0]));else missing();return;}
-            if(q.name=="glDrawArrays"){using Vertex=void(APIENTRY*)(int,int,unsigned,const void*);using Draw=void(APIENTRY*)(unsigned,int,int);auto vp=pointer("glVertexPointer"),dp=pointer(q.name.c_str());if(!vp||!dp){missing();return;}if(!q.input.empty()){reinterpret_cast<Vertex>(vp)(int(q.args[3]),unsigned(q.args[4]),0,q.input.data());}reinterpret_cast<Draw>(dp)(unsigned(q.args[0]),int(q.args[1]),int(q.args[2]));return;}
+            if(q.name=="glBindBuffer"){using Fn=void(APIENTRY*)(unsigned,unsigned);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(unsigned(q.args[0]),unsigned(q.args[1]));else missing();return;}
+            if(q.name=="glVertexPointer"){using Fn=void(APIENTRY*)(int,unsigned,int,const void*);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(int(q.args[0]),unsigned(q.args[1]),int(q.args[2]),reinterpret_cast<const void*>(uintptr_t(q.args[3])));else missing();return;}
+            if(q.name=="glDrawArrays"){using Vertex=void(APIENTRY*)(int,unsigned,int,const void*);using Draw=void(APIENTRY*)(unsigned,int,int);auto vp=pointer("glVertexPointer"),dp=pointer(q.name.c_str());if(!dp){missing();return;}if(!q.input.empty()){if(!vp){missing();return;}reinterpret_cast<Vertex>(vp)(int(q.args[3]),unsigned(q.args[4]),0,q.input.data());}reinterpret_cast<Draw>(dp)(unsigned(q.args[0]),int(q.args[1]),int(q.args[2]));return;}
+            if(q.name=="x86GlDrawElementsClient"){using Vertex=void(APIENTRY*)(int,unsigned,int,const void*);using Draw=void(APIENTRY*)(unsigned,int,int);auto vp=pointer("glVertexPointer"),dp=pointer("glDrawArrays");if(!vp||!dp){missing();return;}reinterpret_cast<Vertex>(vp)(int(q.args[2]),unsigned(q.args[3]),0,q.input.data());reinterpret_cast<Draw>(dp)(unsigned(q.args[0]),0,int(q.args[1]));return;}
+            if(q.name=="glDrawElements"){using Fn=void(APIENTRY*)(unsigned,int,unsigned,const void*);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(unsigned(q.args[0]),int(q.args[1]),unsigned(q.args[2]),reinterpret_cast<const void*>(uintptr_t(q.args[3])));else missing();return;}
             if(q.name=="glReadPixels"){using Fn=void(APIENTRY*)(int,int,int,int,unsigned,unsigned,void*);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(int(q.args[0]),int(q.args[1]),int(q.args[2]),int(q.args[3]),unsigned(q.args[4]),unsigned(q.args[5]),q.output.empty()?nullptr:q.output.data());else missing();return;}
+            if(q.name=="glMapBufferRange"||q.name=="glMapBuffer") {
+                using GetSize=void(APIENTRY*)(unsigned,unsigned,int*);using GetData=void(APIENTRY*)(unsigned,intptr_t,intptr_t,void*);
+                auto get_size=pointer("glGetBufferParameteriv"),get_data=pointer("glGetBufferSubData");if(!get_size||!get_data){missing();return;}
+                int size=q.name=="glMapBufferRange"?int(q.args[2]):0;
+                if(q.name=="glMapBuffer"){reinterpret_cast<GetSize>(get_size)(unsigned(q.args[0]),0x8764,&size);if(size<=0||size>(1<<26)){missing();return;}}
+                if(size<=0||size>(1<<26)){missing();return;}q.output.resize(size);
+                intptr_t offset=q.name=="glMapBufferRange"?intptr_t(int32_t(q.args[1])):0;
+                reinterpret_cast<GetData>(get_data)(unsigned(q.args[0]),offset,size,q.output.data());return;
+            }
+            if(q.name=="x86GlUnmapBuffer") {
+                using PutData=void(APIENTRY*)(unsigned,intptr_t,intptr_t,const void*);using Unmap=unsigned(APIENTRY*)(unsigned);
+                auto put=pointer("glBufferSubData"),unmap=pointer("glUnmapBuffer");if(!put||!unmap){missing();return;}
+                if(!q.input.empty())reinterpret_cast<PutData>(put)(unsigned(q.args[0]),intptr_t(q.args[1]),intptr_t(q.input.size()),q.input.data());
+                q.result=reinterpret_cast<Unmap>(unmap)(unsigned(q.args[0]));return;
+            }
             if(q.name=="glGetError"){using Fn=unsigned(APIENTRY*)();auto p=pointer(q.name.c_str());q.result=p?reinterpret_cast<Fn>(p)():0;return;}
             missing();
         };
