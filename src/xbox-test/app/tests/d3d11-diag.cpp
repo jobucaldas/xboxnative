@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 #include "../host/d3d11_diag.h"
+#include "../../uwph/host/shaders/triangle_bytecode.h"
 static unsigned checks=0,failures=0;
 #define CHECK(x) do { ++checks; if(!(x)){++failures;printf("FAIL line %d: %s\n",__LINE__,#x);} } while(0)
 static std::vector<std::string> lines;
@@ -678,6 +679,10 @@ int main(int argc,char** argv) {
         // maxvertexcount(3), TriangleStream, SV_RenderTargetArrayIndex.
         scan=d3d11_diag::gsBytecodeText(d3d11_diag::kGsRtarrayBlob,sizeof d3d11_diag::kGsRtarrayBlob);
         CHECK(scan=="gs scan model=gs_5_0 maxVerts=3 outTopo=trianglestrip streams=1 viewportIndex=0 rtArrayIndex=1");
+        // Halo's flagged scan: pointlist input is configured by the draw,
+        // maxvertexcount(4), TriangleStream, one stream, and RT-array index.
+        scan=d3d11_diag::gsBytecodeText(halo_gs,sizeof halo_gs);
+        CHECK(scan=="gs scan model=gs_5_0 maxVerts=4 outTopo=trianglestrip streams=1 viewportIndex=0 rtArrayIndex=1");
         // maxvertexcount(4), two PointStreams: two dcl_stream declarations.
         scan=d3d11_diag::gsBytecodeText(d3d11_diag::kGsMultistreamBlob,sizeof d3d11_diag::kGsMultistreamBlob);
         CHECK(scan=="gs scan model=gs_5_0 maxVerts=4 outTopo=pointlist streams=2 viewportIndex=0 rtArrayIndex=0");
