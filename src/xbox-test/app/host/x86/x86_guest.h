@@ -16,9 +16,13 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <random>
 #include <tuple>
 #include <string>
 #include <vector>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 #include "x86_win32.h"
 namespace x86 {
 // Loaded guest DLLs, shared between the loader and the Guest surface. Kept in
@@ -132,6 +136,9 @@ struct Guest {
     std::map<uint32_t, uint32_t> virtual_alloc; // guest addr -> size
     uint32_t virtual_top = 0x60000000u;  // above the DLL relocation arena (0x38000000-0x60000000)
     unsigned next_tls = 0, thread_serial = 0;
+    std::map<uint32_t, uint32_t> fls_callbacks;  // FLS index -> guest cleanup callback
+    struct SrwObject { uint32_t writer = 0; std::map<uint32_t, uint32_t> readers; };
+    std::map<uint32_t, SrwObject> srw_locks;  // guest lock address -> current owner(s)
     std::map<uint32_t, uint32_t> sections;  // handle -> size in bytes
     uint32_t section_serial = 0, section_top = 0x64000000u;
     // Thread bodies CreateThread recorded (handle, start, param); each body
@@ -922,6 +929,24 @@ inline void Guest::register_all() {
     reg.add("advapi32.dll","RegQueryValueExA",Conv::Stdcall,6,[reg_query](Cpu& c){return reg_query(c,false);});
     reg.add("advapi32.dll","RegQueryValueExW",Conv::Stdcall,6,[reg_query](Cpu& c){return reg_query(c,true);});
     reg.add("advapi32.dll","RegCloseKey",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{return steam_registry_keys.erase(c.arg(0))?0:6;});
+    reg.add("shell32.dll", "SHGetFolderPathW", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
+#if defined(_WIN32)
+        using Fn = HRESULT (WINAPI*)(HWND, int, HANDLE, DWORD, LPWSTR);
+        static HMODULE shell = LoadLibraryExW(L"shell32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        auto fn = shell ? reinterpret_cast<Fn>(GetProcAddress(shell, "SHGetFolderPathW")) : nullptr;
+        if (!fn || c.arg(2)) return 0x80004001u;  // E_NOTIMPL: unavailable on this partition/token
+        std::vector<wchar_t> path(260);
+        HRESULT hr = fn(nullptr, int(c.arg(1)), nullptr, c.arg(3), path.data());
+        if (SUCCEEDED(hr)) {
+            for (size_t i = 0; i < path.size() && path[i]; ++i) mem.w(c.arg(4) + uint32_t(i * 2), uint16_t(path[i]), 2);
+            mem.w(c.arg(4) + uint32_t(path.size() * 2 - 2), 0, 2);
+        }
+        return uint32_t(hr);
+#else
+        (void)c;
+        return 0x80004001u;  // E_NOTIMPL: no native Shell API on the off-device host
+#endif
+    });
 
     // kernel32: process, error, memory, sync, TLS
     reg.add("kernel32.dll", "GetLastError", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return last_error(); });
@@ -1007,6 +1032,64 @@ inline void Guest::register_all() {
         uint32_t put = uint32_t(w.size()) < n ? uint32_t(w.size()) : n - 1;
         for (uint32_t i = 0; i < put; ++i) { mem.w8(buf + i * 2, uint8_t(w[i])); mem.w8(buf + i * 2 + 1, uint8_t(w[i] >> 8)); }
         mem.w8(buf + put * 2, 0); mem.w8(buf + put * 2 + 1, 0); return put; });
+    reg.add("kernel32.dll", "GetFullPathNameW", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
+#if defined(_WIN32)
+        using Fn = DWORD (WINAPI*)(LPCWSTR, DWORD, LPWSTR, LPWSTR*);
+        static HMODULE base = LoadLibraryExW(L"kernelbase.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        static HMODULE k32 = LoadLibraryExW(L"kernel32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        FARPROC proc = base ? GetProcAddress(base, "GetFullPathNameW") : nullptr;
+        if (!proc && k32) proc = GetProcAddress(k32, "GetFullPathNameW");
+        if (!proc) { set_last_error(ERROR_CALL_NOT_IMPLEMENTED); return 0; }
+        std::u16string input = wstr(c.arg(0)); input.push_back(0);
+        uint32_t cap = c.arg(1), out = c.arg(2);
+        std::vector<wchar_t> path(cap);
+        wchar_t* part = nullptr;
+        DWORD result = reinterpret_cast<Fn>(proc)(reinterpret_cast<LPCWSTR>(input.data()), cap,
+            path.empty() ? nullptr : path.data(), c.arg(3) ? &part : nullptr);
+        if (result && result < cap && out) {
+            for (uint32_t i = 0; i <= result; ++i) mem.w(out + i * 2, uint16_t(path[i]), 2);
+            if (c.arg(3)) mem.w32(c.arg(3), out + uint32_t(part - path.data()) * 2);
+        }
+        return result;
+#else
+        Host::FileCall q{Host::FileCall::Kind::GetCurrentDirectoryW}; q.args[0] = 32768;
+        if (!call_file(q) || q.data.size() < 2) { set_last_error(q.error ? q.error : 120); return 0; }
+        std::u16string cwd;
+        for (size_t i = 0; i + 1 < q.data.size(); i += 2) {
+            uint16_t ch = uint16_t(q.data[i]) | uint16_t(q.data[i + 1]) << 8;
+            if (!ch) break;
+            cwd.push_back(char16_t(ch));
+        }
+        std::u16string input = wstr(c.arg(0));
+        bool absolute = input.size() >= 3 && ((input[0] >= u'A' && input[0] <= u'Z') || (input[0] >= u'a' && input[0] <= u'z')) && input[1] == u':' && (input[2] == u'\\' || input[2] == u'/');
+        std::u16string full = absolute ? input : cwd + u"\\" + input;
+        for (char16_t& ch : full) if (ch == u'/') ch = u'\\';
+        std::vector<std::u16string> parts;
+        size_t start = full.find(u':'); start = start == std::u16string::npos ? 0 : start + 2;
+        for (size_t i = start; i <= full.size();) {
+            size_t end = full.find(u'\\', i);
+            if (end == std::u16string::npos) end = full.size();
+            std::u16string part = full.substr(i, end - i);
+            if (part == u"..") { if (!parts.empty()) parts.pop_back(); }
+            else if (!part.empty() && part != u".") parts.push_back(part);
+            if (end == full.size()) break;
+            i = end + 1;
+        }
+        std::u16string normalized;
+        if (full.size() >= 2 && full[1] == u':') normalized = full.substr(0, 2) + u"\\";
+        else normalized = u"\\";
+        for (size_t i = 0; i < parts.size(); ++i) { if (i) normalized.push_back(u'\\'); normalized += parts[i]; }
+        uint32_t cap = c.arg(1), out = c.arg(2), need = uint32_t(normalized.size() + 1);
+        if (!cap || cap <= normalized.size() || !out) return need;
+        for (size_t i = 0; i < normalized.size(); ++i) mem.w(out + uint32_t(i * 2), normalized[i], 2);
+        mem.w(out + uint32_t(normalized.size() * 2), 0, 2);
+        if (c.arg(3)) {
+            size_t slash = normalized.find_last_of(u'\\');
+            mem.w32(c.arg(3), out + uint32_t((slash == std::u16string::npos ? 0 : slash + 1) * 2));
+        }
+        set_last_error(0); return uint32_t(normalized.size());
+#endif
+    });
     reg.add("kernel32.dll", "ExitProcess", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { do_exit(c, c.arg(0)); return 0; });
     reg.add("kernel32.dll", "TerminateProcess", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { do_exit(c, c.arg(1)); return 1; });
     // Yield points of the cooperative scheduler: a game that polls with Sleep
@@ -1456,6 +1539,43 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "InitializeCriticalSectionAndSpinCount", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "TryEnterCriticalSection", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "InitializeCriticalSectionEx", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 1; });
+    auto acquire_srw = [this](Cpu& c, bool shared, bool attempt) -> uint32_t {
+        uint32_t p = c.arg(0), tid = mem.r32(c.fs_base + 0x24), raw = mem.r32(p);
+        auto it = srw_locks.find(p);
+        if (it == srw_locks.end() && raw) throw Fault(FaultKind::Unsupported, c.eip, p, "SRW lock has an unsupported preinitialized state");
+        SrwObject& lock = srw_locks[p];
+        bool free = !lock.writer && (shared || lock.readers.empty());
+        if (!free) {
+            if (attempt) return 0;
+            throw Fault(FaultKind::Unsupported, c.eip, p, "SRW lock contention would block in the single-thread interpreter");
+        }
+        if (shared) ++lock.readers[tid]; else lock.writer = tid;
+        mem.w32(p, 1);
+        return 1;
+    };
+    auto release_srw = [this](Cpu& c, bool shared) -> uint32_t {
+        uint32_t p = c.arg(0), tid = mem.r32(c.fs_base + 0x24);
+        auto it = srw_locks.find(p);
+        if (it == srw_locks.end()) throw Fault(FaultKind::Unsupported, c.eip, p, "release of an unowned SRW lock");
+        if (shared) {
+            auto reader = it->second.readers.find(tid);
+            if (reader == it->second.readers.end()) throw Fault(FaultKind::Unsupported, c.eip, p, "release of an unowned shared SRW lock");
+            if (!--reader->second) it->second.readers.erase(reader);
+        } else {
+            if (it->second.writer != tid) throw Fault(FaultKind::Unsupported, c.eip, p, "release of an unowned exclusive SRW lock");
+            it->second.writer = 0;
+        }
+        if (!it->second.writer && it->second.readers.empty()) { mem.w32(p, 0); srw_locks.erase(it); }
+        return 0;
+    };
+    reg.add("kernel32.dll", "InitializeSRWLock", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        srw_locks.erase(c.arg(0)); mem.w32(c.arg(0), 0); return 0; });
+    reg.add("kernel32.dll", "AcquireSRWLockExclusive", Conv::Stdcall, 1, [acquire_srw](Cpu& c) -> uint32_t { acquire_srw(c, false, false); return 0; });
+    reg.add("kernel32.dll", "AcquireSRWLockShared", Conv::Stdcall, 1, [acquire_srw](Cpu& c) -> uint32_t { acquire_srw(c, true, false); return 0; });
+    reg.add("kernel32.dll", "TryAcquireSRWLockExclusive", Conv::Stdcall, 1, [acquire_srw](Cpu& c) -> uint32_t { return acquire_srw(c, false, true); });
+    reg.add("kernel32.dll", "TryAcquireSRWLockShared", Conv::Stdcall, 1, [acquire_srw](Cpu& c) -> uint32_t { return acquire_srw(c, true, true); });
+    reg.add("kernel32.dll", "ReleaseSRWLockExclusive", Conv::Stdcall, 1, [release_srw](Cpu& c) -> uint32_t { return release_srw(c, false); });
+    reg.add("kernel32.dll", "ReleaseSRWLockShared", Conv::Stdcall, 1, [release_srw](Cpu& c) -> uint32_t { return release_srw(c, true); });
     // OpenEventA opens a same-process named event; process/session namespaces and ACLs are outside this guest.
     reg.add("kernel32.dll", "OpenEventA", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { return open_sync(SyncKind::Event,c.arg(2)); });
     // TLS
@@ -1469,6 +1589,23 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "TlsSetValue", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         uint32_t i = c.arg(0); if (i >= 64) { set_last_error(87); return 0; }
         mem.w32(c.fs_base + 0xE10 + i * 4, c.arg(1)); return 1; });
+    // Fiber-local storage shares the TEB value slots with TLS on this single
+    // interpreter thread; FlsFree invokes its registered guest callback.
+    reg.add("kernel32.dll", "FlsAlloc", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        if (next_tls >= 64) { set_last_error(8); return 0xFFFFFFFFu; }
+        uint32_t i = next_tls++; fls_callbacks[i] = c.arg(0); return i; });
+    reg.add("kernel32.dll", "FlsGetValue", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        uint32_t i = c.arg(0); if (!fls_callbacks.count(i)) { set_last_error(87); return 0; }
+        set_last_error(0); return mem.r32(c.fs_base + 0xE10 + i * 4); });
+    reg.add("kernel32.dll", "FlsSetValue", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        uint32_t i = c.arg(0); if (!fls_callbacks.count(i)) { set_last_error(87); return 0; }
+        mem.w32(c.fs_base + 0xE10 + i * 4, c.arg(1)); return 1; });
+    reg.add("kernel32.dll", "FlsFree", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        uint32_t i = c.arg(0); auto it = fls_callbacks.find(i);
+        if (it == fls_callbacks.end()) { set_last_error(87); return 0; }
+        uint32_t value = mem.r32(c.fs_base + 0xE10 + i * 4);
+        if (value && it->second) c.call(it->second, {value});
+        mem.w32(c.fs_base + 0xE10 + i * 4, 0); fls_callbacks.erase(it); return 1; });
     // Interlocked
     reg.add("kernel32.dll", "InterlockedIncrement", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t v = mem.r32(c.arg(0)) + 1; mem.w32(c.arg(0), v); return v; });
@@ -1495,6 +1632,30 @@ inline void Guest::register_all() {
         uint32_t p = c.arg(0); if (p) { mem.w32(p, 1000000); mem.w32(p + 4, 0); } return 1; });
     reg.add("kernel32.dll", "GetSystemTimeAsFileTime", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t p = c.arg(0); if (p) { mem.w32(p, 0x80000000u); mem.w32(p + 4, 0x01D00000u); } return 0; });
+    reg.add("bcrypt.dll", "BCryptGenRandom", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
+        uint32_t out = c.arg(1), size = c.arg(2);
+        if (c.arg(0) || c.arg(3) != 2 || size > (1u << 20) || (!out && size)) return 0xC000000Du; // STATUS_INVALID_PARAMETER
+        std::vector<uint8_t> bytes(size);
+#if defined(_WIN32)
+        using Fn = LONG (WINAPI*)(void*, unsigned char*, unsigned long, unsigned long);
+        static HMODULE module = LoadLibraryExW(L"bcrypt.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        auto fn = module ? reinterpret_cast<Fn>(GetProcAddress(module, "BCryptGenRandom")) : nullptr;
+        if (!fn) return 0xC0000001u; // STATUS_UNSUCCESSFUL
+        LONG status = fn(nullptr, bytes.empty() ? nullptr : bytes.data(), size, 2);
+        if (status < 0) return uint32_t(status);
+#else
+        try {
+            std::random_device random;
+            for (size_t i = 0; i < bytes.size();) {
+                unsigned value = random();
+                for (size_t n = 0; n < sizeof(value) && i < bytes.size(); ++n, ++i)
+                    bytes[i] = uint8_t(value >> (n * 8));
+            }
+        } catch (...) { return 0xC0000001u; } // STATUS_UNSUCCESSFUL
+#endif
+        if (size) mem.write_bytes(out, bytes.data(), size);
+        return 0;
+    });
     reg.add("kernel32.dll", "GetSystemTime", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         fill_system_time(c.arg(0)); return 0; });
     reg.add("kernel32.dll", "GetLocalTime", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
@@ -1711,6 +1872,58 @@ inline void Guest::register_all() {
         return 1; });
     reg.add("kernel32.dll", "GetFileAttributesA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         Host::FileCall q{Host::FileCall::Kind::AttributesA};q.path_a=str(c.arg(0));if(!call_file(q)){set_last_error(q.error?q.error:120);return 0xffffffffu;}return uint32_t(q.value); });
+    reg.add("kernel32.dll", "GetFileAttributesW", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        std::u16string wide = wstr(c.arg(0));
+        std::string narrow_path; bool ascii = true;
+        for (char16_t ch : wide) { if (ch > 0x7f) { ascii = false; break; } narrow_path.push_back(char(ch)); }
+        if (host.file_call && ascii) {
+            Host::FileCall q{Host::FileCall::Kind::AttributesA}; q.path_a = narrow_path;
+            if (call_file(q)) return uint32_t(q.value);
+            set_last_error(q.error ? q.error : 120); return 0xFFFFFFFFu;
+        }
+#if defined(_WIN32)
+        using Fn = DWORD (WINAPI*)(LPCWSTR);
+        static HMODULE k32 = LoadLibraryExW(L"kernel32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        auto fn = k32 ? reinterpret_cast<Fn>(GetProcAddress(k32, "GetFileAttributesW")) : nullptr;
+        if (!fn) { set_last_error(ERROR_CALL_NOT_IMPLEMENTED); return 0xFFFFFFFFu; }
+        std::u16string input = wstr(c.arg(0)); input.push_back(0);
+        DWORD attributes = fn(reinterpret_cast<LPCWSTR>(input.data()));
+        set_last_error(GetLastError());
+        return attributes;
+#else
+        (void)c;
+        set_last_error(120);  // ERROR_CALL_NOT_IMPLEMENTED on the off-device host
+        return 0xFFFFFFFFu;
+#endif
+    });
+    reg.add("kernel32.dll", "GetFileAttributesExW", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+        std::u16string wide = wstr(c.arg(0));
+        std::string narrow_path; bool ascii = true;
+        for (char16_t ch : wide) { if (ch > 0x7f) { ascii = false; break; } narrow_path.push_back(char(ch)); }
+        if (host.file_call && ascii) {
+            Host::FileCall q{Host::FileCall::Kind::AttributesA}; q.path_a = narrow_path;
+            q.args[0] = c.arg(1); q.args[1] = 1;
+            if (!call_file(q)) { set_last_error(q.error ? q.error : 120); return 0; }
+            if (c.arg(2) && !q.data.empty()) mem.write_bytes(c.arg(2), q.data.data(), uint32_t(q.data.size()));
+            return 1;
+        }
+#if defined(_WIN32)
+        using Fn = BOOL (WINAPI*)(LPCWSTR, GET_FILEEX_INFO_LEVELS, LPVOID);
+        static HMODULE k32 = LoadLibraryExW(L"kernel32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        auto fn = k32 ? reinterpret_cast<Fn>(GetProcAddress(k32, "GetFileAttributesExW")) : nullptr;
+        if (!fn) { set_last_error(ERROR_CALL_NOT_IMPLEMENTED); return 0; }
+        std::u16string input = wstr(c.arg(0)); input.push_back(0);
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        BOOL ok = fn(reinterpret_cast<LPCWSTR>(input.data()), GET_FILEEX_INFO_LEVELS(c.arg(1)), &data);
+        set_last_error(GetLastError());
+        if (ok) mem.write_bytes(c.arg(2), &data, sizeof(data));
+        return ok != FALSE;
+#else
+        (void)c;
+        set_last_error(120);  // ERROR_CALL_NOT_IMPLEMENTED on the off-device host
+        return 0;
+#endif
+    });
     reg.add("kernel32.dll", "SetFilePointer", Conv::Stdcall, 4, [this,native_file](Cpu& c) -> uint32_t {
         Host::FileCall q{Host::FileCall::Kind::Seek};if(!native_file(c.arg(0),q))return 0xffffffffu;
         q.args[0]=c.arg(1);q.args[1]=c.arg(2)?mem.r32(c.arg(2)):0;q.args[2]=c.arg(3);q.args[3]=c.arg(2)!=0;
