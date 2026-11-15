@@ -17,6 +17,23 @@ assets="$out/ui-assets"
 bash "$root/src/tools/fetch-ui-assets.sh" "$assets"
 bash "$root/src/xbox-test/uwph/host/fetch-sqlite.sh"
 mkdir -p "$out/obj"
+# Windows headers are case-insensitive, but xwin's C++/WinRT projection has
+# lowercase filenames for some headers. Add temporary aliases for this host's
+# case-sensitive filesystem; the symlinks point to the verified SDK files.
+cppwinrt="$xwin/sdk/include/cppwinrt/winrt"
+[[ -d "$cppwinrt" ]] || { echo "missing C++/WinRT headers at $cppwinrt" >&2; exit 1; }
+while IFS= read -r line; do
+  case "$line" in
+    '#include <winrt/'*'>')
+      header=${line#'#include <winrt/'}
+      header=${header%>}
+      if [[ ! -e "$cppwinrt/$header" && -f "$cppwinrt/${header,,}" ]]; then
+        mkdir -p "$out/obj/winrt"
+        ln -s "$cppwinrt/${header,,}" "$out/obj/winrt/$header"
+      fi
+      ;;
+  esac
+done < "$here/main.cpp"
 # probe.h includes a build-generated table. One inert row keeps this compile-only
 # check independent of the separately built Wine donor DLLs.
 printf '{"compile-only", "", "", 0},\n' > "$out/obj/donor_imports.generated.h"
