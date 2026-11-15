@@ -14,10 +14,11 @@ CB=${UWP_CROSSBUILD:-$root/out/uwp-crossbuild}
 sdk=${UWP_XWIN_ROOT:-$HOME/.cache/uwp-crossbuild/xwin}
 # Import libraries describe only this owned fixture's donor calls. They do not
 # replace a donor DLL or alter the production router or game acceptance oracle.
-for donor in hid setupapi version shcore avrt;do
+for donor in hid psapi setupapi version shcore avrt;do
  case "$donor" in
   hid) symbols=(HidD_GetHidGuid DeliberatelyAbsentDonorExport);;
-  setupapi) symbols=(SetupDiCreateDeviceInfoList SetupDiDestroyDeviceInfoList);;
+  psapi) symbols=(GetModuleFileNameExW);;
+  setupapi) symbols=(SetupDiCreateDeviceInfoList SetupDiDestroyDeviceInfoList SetupDiEnumDeviceInfo SetupDiEnumDeviceInterfaces);;
   version) symbols=(GetFileVersionInfoSizeW GetFileVersionInfoW VerQueryValueW);;
   shcore) symbols=(CommandLineToArgvW);;
   avrt) symbols=(AvSetMmThreadCharacteristicsW);;
@@ -36,11 +37,12 @@ for kind in guest missing;do
   /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat \
   /include:donor_relocation /include:donor_relocation_anchor \
   /out:"$out/donor-$kind.exe" "$out/obj/$kind.obj" \
-  "$out/obj/"{hid,setupapi,version,shcore,avrt}.lib \
+  "$out/obj/"{hid,psapi,setupapi,version,shcore,avrt}.lib \
   /libpath:"$sdk/sdk/lib/um/x86_64" kernel32.lib
  done
+python3 -I donors/inspect.py --donor-dir "$root/out/wine-donors" --output "$out/obj/donor_imports.generated.h"
 bash ../uwph/host/build-sqlite-lib.sh "$out/obj/sqlite3.lib"
-UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/runner.exe" tests/donor-runtime.cpp -- /MT /O2 /Iout/obj /I../uwph/host/third_party/sqlite
+UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/runner.exe" tests/donor-runtime.cpp -- /MT /O2 "/I$out/obj" /I../uwph/host/third_party/sqlite
 cp out/layout/donors/*.dll "$out/donors/"
 cp out/layout/uwph-u32c.dll "$out/"
 # Probe and guest each have a 30-second wait. Keep both gates intact and
@@ -51,9 +53,10 @@ for mode in normal missing disabled;do
  grep -Fx 'DONOR-DELAY PASS: shcore delay-loaded user32 DPI internals resolve to the record core' "$out/$mode.log"
  grep -Fx 'DONOR-BRIDGE PASS: loadExW(d3dcompiler_47) returns the probed donor image; proc(D3DCompile) compiles a real DXBC' "$out/$mode.log"
  grep -Fx 'DWPE RUN dinput8.dll initialized=1 missing=0 behavior=1' "$out/$mode.log"
+ grep -Fx 'DWPE RUN psapi.dll initialized=1 missing=0 behavior=1' "$out/$mode.log"
  grep -Fx 'DONOR-COM PASS: CoCreateInstance(CLSID_DirectInput8) served by the dinput8 donor; keyboard device created' "$out/$mode.log"
  if [[ $mode == normal ]];then
-  grep -Fx 'DONOR-GUEST PASS: actual Play runtime; 8 verified donor IAT slots; behavior exit=42; owned fixture only' "$out/$mode.log"
+  grep -Fx 'DONOR-GUEST PASS: actual Play runtime; 11 verified donor IAT slots; behavior exit=42; owned fixture only' "$out/$mode.log"
  else
   grep -Fx "DONOR-GUEST PASS mode=$mode: rejected before guest initialization; no placeholders" "$out/$mode.log"
  fi

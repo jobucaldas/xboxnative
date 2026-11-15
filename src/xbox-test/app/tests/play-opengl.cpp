@@ -77,6 +77,7 @@ typedef BOOL (WINAPI* PFN_SwapBuffers)(HDC);
 typedef HANDLE_GL (WINAPI* PFN_wglCreateContext)(HDC);
 typedef BOOL (WINAPI* PFN_wglDeleteContext)(HANDLE_GL);
 typedef BOOL (WINAPI* PFN_wglMakeCurrent)(HDC, HANDLE_GL);
+typedef BOOL (WINAPI* PFN_wglShareLists)(HANDLE_GL, HANDLE_GL);
 typedef PROC (WINAPI* PFN_wglGetProcAddress)(LPCSTR);
 typedef HANDLE_GL (WINAPI* PFN_wglCreateContextAttribsARB)(HDC, HANDLE_GL, const int*);
 typedef const char* (WINAPI* PFN_glGetString)(uint32_t);
@@ -129,6 +130,14 @@ typedef void (WINAPI* PFN_glDeleteTextures)(int, const uint32_t*);
 typedef void (WINAPI* PFN_glDeleteProgram)(uint32_t);
 typedef void* (WINAPI* PFN_glMapBuffer)(uint32_t, uint32_t);
 typedef BOOL (WINAPI* PFN_glUnmapBuffer)(uint32_t);
+typedef void (WINAPI* PFN_glCompressedTexImage2D)(uint32_t, int, uint32_t, int, int, int, int, const void*);
+typedef void (WINAPI* PFN_glUniform1i)(int, int);
+typedef void (WINAPI* PFN_glGenRenderbuffers)(int, uint32_t*);
+typedef void (WINAPI* PFN_glBindRenderbuffer)(uint32_t, uint32_t);
+typedef void (WINAPI* PFN_glRenderbufferStorageMultisample)(uint32_t, int, uint32_t, int, int);
+typedef void (WINAPI* PFN_glFramebufferRenderbuffer)(uint32_t, uint32_t, uint32_t, uint32_t);
+typedef void (WINAPI* PFN_glBlitFramebuffer)(int, int, int, int, int, int, int, int, uint32_t, uint32_t);
+typedef void (WINAPI* PFN_glDeleteRenderbuffers)(int, const uint32_t*);
 
 enum : uint32_t { GL_VENDOR = 0x1F00, GL_RENDERER = 0x1F01, GL_VERSION = 0x1F02,
                   GL_COLOR_BUFFER_BIT = 0x00004000 };
@@ -157,6 +166,8 @@ enum : int { WGL_TYPE_RGBA_ARB = 0x202B };
 enum : uint32_t { GL_PIXEL_PACK_BUFFER = 0x88EB,
                   GL_READ_ONLY = 0x88B8,
                   GL_BUFFER_SIZE = 0x8764 };
+enum : uint32_t { GL_COMPRESSED_RGBA_S3TC_DXT1_EXT = 0x83F1,
+                  GL_RENDERBUFFER = 0x8D41 };
 
 int opengl_anchor;
 void* opengl_relocation = &opengl_anchor;
@@ -687,6 +698,194 @@ int opengl_entry() {
     }
     glFinish();
     emit("PLAY-OPENGL STAGE frame-presented\n");
+
+    // Extended issue #176 fixture stages intentionally follow every legacy
+    // stage above. Each failure has a distinct guest exit code and never reaches
+    // the existing pixel-readback PASS verdict.
+    auto stageFailure = [&](const char* name, int code, const char* reason) -> int {
+        char line[224]; char* p = append(line, "PLAY-OPENGL STAGE ");
+        p = append(p, name); p = append(p, " exit=43 stage-code="); p = appendInt(p, code);
+        p = append(p, " ");
+        if (reason[0] == 'w' && reason[1] == 'i' && reason[2] == 'n' && reason[3] == 'e' && reason[4] == '-') {
+            p = append(p, "SKIP (wine): "); p = append(p, reason + 5);
+        } else {
+            p = append(p, "BLOCKED "); p = append(p, reason);
+        }
+        p = append(p, "\n"); *p = 0;
+        emit(line);
+        return 43;
+    };
+    auto stagePass = [&](const char* name, const char* result) {
+        char line[256]; char* p = append(line, "PLAY-OPENGL STAGE ");
+        p = append(p, name); p = append(p, " exit=0 "); p = append(p, result);
+        p = append(p, "\n"); *p = 0; emit(line);
+    };
+    const char* compatExtensions = glGetString(0x1F03);
+    bool hasS3tc = contains(compatExtensions, "GL_EXT_texture_compression_s3tc") ||
+                   contains(compatExtensions, "GL_EXT_texture_compression_dxt1");
+    auto createAttribs41 = (PFN_wglCreateContextAttribsARB)(uintptr_t)
+        wglGetProcAddress("wglCreateContextAttribsARB");
+    if (!createAttribs41) return stageFailure("core41-draw", 23, "wine-unavailable:missing-create-context-attribs");
+    int attrs41[] = {0x2091, 4, 0x2092, 1, 0x9126, 1, 0};
+    HANDLE_GL core41 = createAttribs41(dc, nullptr, attrs41);
+    if (!core41) return stageFailure("core41-draw", 23, "wine-unavailable:request-4.1-core-failed");
+    HANDLE_GL shared = wglCreateContext(dc);
+    auto shareLists = (PFN_wglShareLists)(uintptr_t)GetProcAddress(gl, "wglShareLists");
+    if (!shared || !shareLists || !shareLists(core41, shared))
+        return stageFailure("share-lists-draw", 20, "context-share-failed");
+    if (!wglMakeCurrent(dc, core41)) return stageFailure("share-lists-draw", 20, "make-core41-current-failed");
+    const char* version41 = glGetString(GL_VERSION);
+    if (!version41 || version41[0] < '4' || (version41[0] == '4' && version41[2] < '1'))
+        return stageFailure("core41-draw", 23, "requested-4.1-core-version-not-reported");
+
+    auto lookup = [&](const char* name) -> uintptr_t { return (uintptr_t)(void*)wglGetProcAddress(name); };
+    auto genBuffers = (PFN_glGenBuffers)lookup("glGenBuffers");
+    auto bindBuffer = (PFN_glBindBuffer)lookup("glBindBuffer");
+    auto bufferData = (PFN_glBufferData)lookup("glBufferData");
+    auto genVAOs = (PFN_glGenVertexArrays)lookup("glGenVertexArrays");
+    auto bindVAO = (PFN_glBindVertexArray)lookup("glBindVertexArray");
+    auto attribPointer = (PFN_glVertexAttribPointer)lookup("glVertexAttribPointer");
+    auto enableAttrib = (PFN_glEnableVertexAttribArray)lookup("glEnableVertexAttribArray");
+    auto createShader = (PFN_glCreateShader)lookup("glCreateShader");
+    auto shaderSource = (PFN_glShaderSource)lookup("glShaderSource");
+    auto compileShader = (PFN_glCompileShader)lookup("glCompileShader");
+    auto getShaderiv = (PFN_glGetShaderiv)lookup("glGetShaderiv");
+    auto createProgram = (PFN_glCreateProgram)lookup("glCreateProgram");
+    auto attachShader = (PFN_glAttachShader)lookup("glAttachShader");
+    auto linkProgram = (PFN_glLinkProgram)lookup("glLinkProgram");
+    auto getProgramiv = (PFN_glGetProgramiv)lookup("glGetProgramiv");
+    auto deleteShader = (PFN_glDeleteShader)lookup("glDeleteShader");
+    auto useProgram = (PFN_glUseProgram)lookup("glUseProgram");
+    auto getUniform = (PFN_glGetUniformLocation)lookup("glGetUniformLocation");
+    auto uniform1i = (PFN_glUniform1i)lookup("glUniform1i");
+    auto drawArrays = (PFN_glDrawArrays)(uintptr_t)GetProcAddress(gl, "glDrawArrays");
+    auto genTextures = (PFN_glGenTextures)(uintptr_t)GetProcAddress(gl, "glGenTextures");
+    auto bindTexture = (PFN_glBindTexture)(uintptr_t)GetProcAddress(gl, "glBindTexture");
+    auto texImage = (PFN_glTexImage2D)(uintptr_t)GetProcAddress(gl, "glTexImage2D");
+    auto compressedTexImage = (PFN_glCompressedTexImage2D)lookup("glCompressedTexImage2D");
+    auto texParameteri = (PFN_glTexParameteri)(uintptr_t)GetProcAddress(gl, "glTexParameteri");
+    auto genFbos = (PFN_glGenFramebuffers)lookup("glGenFramebuffers");
+    auto bindFbo = (PFN_glBindFramebuffer)lookup("glBindFramebuffer");
+    auto checkFbo = (PFN_glCheckFramebufferStatus)lookup("glCheckFramebufferStatus");
+    auto genRbos = (PFN_glGenRenderbuffers)lookup("glGenRenderbuffers");
+    auto bindRbo = (PFN_glBindRenderbuffer)lookup("glBindRenderbuffer");
+    auto msaaStorage = (PFN_glRenderbufferStorageMultisample)lookup("glRenderbufferStorageMultisample");
+    auto attachRbo = (PFN_glFramebufferRenderbuffer)lookup("glFramebufferRenderbuffer");
+    auto blitFbo = (PFN_glBlitFramebuffer)lookup("glBlitFramebuffer");
+    auto deleteRbos = (PFN_glDeleteRenderbuffers)lookup("glDeleteRenderbuffers");
+    if (!genBuffers || !bindBuffer || !bufferData || !genVAOs || !bindVAO || !attribPointer ||
+        !enableAttrib || !createShader || !shaderSource || !compileShader || !getShaderiv ||
+        !createProgram || !attachShader || !linkProgram || !getProgramiv || !deleteShader ||
+        !useProgram || !getUniform || !uniform1i || !drawArrays || !genTextures || !bindTexture ||
+        !texImage || !compressedTexImage || !texParameteri || !genFbos || !bindFbo || !checkFbo ||
+        !genRbos || !bindRbo || !msaaStorage || !attachRbo || !blitFbo || !deleteRbos)
+        return stageFailure("core41-draw", 23, "required-core-entry-point-missing");
+
+    // wglShareLists is called before either context creates objects. The buffer
+    // and texture are then created in the first context and consumed by a draw
+    // in the second; the VAO remains local to that second context.
+    float sharedVerts[] = {-1.0f,-1.0f, 3.0f,-1.0f, -1.0f,3.0f};
+    uint32_t sharedVbo = 0, sharedTex = 0;
+    genBuffers(1, &sharedVbo); bindBuffer(GL_ARRAY_BUFFER, sharedVbo);
+    bufferData(GL_ARRAY_BUFFER, (intptr_t)sizeof sharedVerts, sharedVerts, GL_STATIC_DRAW);
+    genTextures(1, &sharedTex); bindTexture(GL_TEXTURE_2D, sharedTex);
+    unsigned char sharedPixel[4] = {64,128,192,255};
+    texImage(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, sharedPixel);
+    texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    if (!wglMakeCurrent(dc, shared)) return stageFailure("share-lists-draw", 20, "make-shared-current-failed");
+    const char* sharedVs = "#version 410 core\nlayout(location=0) in vec2 pos; out vec2 uv; void main(){uv=pos*0.5+0.5; gl_Position=vec4(pos,0,1);}";
+    const char* sampleFs = "#version 410 core\nin vec2 uv; uniform sampler2D image; out vec4 frag; void main(){frag=texture(image,uv);} ";
+    auto makeProgram = [&](const char* vsText, const char* fsText) -> uint32_t {
+        uint32_t vs = createShader(GL_VERTEX_SHADER), fs = createShader(GL_FRAGMENT_SHADER);
+        shaderSource(vs, 1, &vsText, nullptr); compileShader(vs);
+        shaderSource(fs, 1, &fsText, nullptr); compileShader(fs);
+        int vok = 0, fok = 0; getShaderiv(vs, GL_COMPILE_STATUS, &vok); getShaderiv(fs, GL_COMPILE_STATUS, &fok);
+        if (!vok || !fok) { deleteShader(vs); deleteShader(fs); return 0; }
+        uint32_t program = createProgram(); attachShader(program, vs); attachShader(program, fs); linkProgram(program);
+        int linkedNow = 0; getProgramiv(program, GL_LINK_STATUS, &linkedNow);
+        deleteShader(vs); deleteShader(fs); return linkedNow ? program : 0;
+    };
+    auto drawSample = [&](uint32_t program, uint32_t vbo, uint32_t texture, unsigned char* pixel) -> bool {
+        uint32_t vao = 0; genVAOs(1, &vao); bindVAO(vao);
+        bindBuffer(GL_ARRAY_BUFFER, vbo); attribPointer(0, 2, GL_FLOAT, 0, 2 * (int)sizeof(float), nullptr);
+        enableAttrib(0); bindTexture(GL_TEXTURE_2D, texture); useProgram(program);
+        int sampler = getUniform(program, "image"); if (sampler < 0) return false; uniform1i(sampler, 0);
+        glViewport(0, 0, 320, 240); drawArrays(GL_TRIANGLES, 0, 3); glFinish();
+        glReadPixels(160, 120, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+        return true;
+    };
+    uint32_t sampleProgram = makeProgram(sharedVs, sampleFs);
+    unsigned char sharedGot[4] = {0,0,0,0};
+    if (!sampleProgram || !drawSample(sampleProgram, sharedVbo, sharedTex, sharedGot) ||
+        sharedGot[0] != 64 || sharedGot[1] != 128 || sharedGot[2] != 192 || sharedGot[3] != 255)
+        return stageFailure("share-lists-draw", 20, "shared-buffer-texture-readback-mismatch");
+    stagePass("share-lists-draw", "shared-buffer-and-texture readback=64,128,192,255");
+
+    // BC1/DXT1 block: solid red (RGB565 endpoint 0xf800, all selectors 0).
+    if (!hasS3tc) return stageFailure("bc1-sampled-readback", 21, "wine-unavailable:S3TC-extension-absent");
+    uint32_t bc1 = 0; genTextures(1, &bc1); bindTexture(GL_TEXTURE_2D, bc1);
+    const unsigned char redBc1[8] = {0x00,0xf8,0x00,0x00,0,0,0,0};
+    compressedTexImage(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, 4, 4, 0, 8, redBc1);
+    texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    unsigned char bc1Got[4] = {0,0,0,0};
+    if (!drawSample(sampleProgram, sharedVbo, bc1, bc1Got) || bc1Got[0] < 250 || bc1Got[1] > 2 || bc1Got[2] > 2 || bc1Got[3] != 255)
+        return stageFailure("bc1-sampled-readback", 21, "compressed-texture-sample-mismatch");
+    stagePass("bc1-sampled-readback", "format=BC1 got=255,0,0,255");
+
+    // Resize the guest window before a fresh default framebuffer clear/readback.
+    if (!SetWindowPos(window, nullptr, 0, 0, 400, 300, SWP_NOZORDER | SWP_NOACTIVATE))
+        return stageFailure("resize-framebuffer", 22, "SetWindowPos-failed");
+    RECT resized{};
+    if (!GetClientRect(window, &resized) || resized.right <= 0 || resized.bottom <= 0)
+        return stageFailure("resize-framebuffer", 22, "empty-client-rect");
+    glViewport(0, 0, resized.right, resized.bottom);
+    glClearColor(0.0f, 0.5f, 0.25f, 1.0f); glClear(GL_COLOR_BUFFER_BIT); glFinish();
+    unsigned char resizedGot[4] = {0,0,0,0};
+    glReadPixels(resized.right/2, resized.bottom/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, resizedGot);
+    if (resizedGot[0] != 0 || resizedGot[1] != 128 || resizedGot[2] != 64 || resizedGot[3] != 255)
+        return stageFailure("resize-framebuffer", 22, "fresh-framebuffer-readback-mismatch");
+    stagePass("resize-framebuffer", "client-size-and-readback=0,128,64,255");
+
+    // The 4.1 core context was requested above; prove it with a shader draw and
+    // sampled readback rather than treating context creation alone as coverage.
+    if (!wglMakeCurrent(dc, core41)) return stageFailure("core41-draw", 23, "make-current-failed");
+    unsigned char core41Got[4] = {0,0,0,0};
+    if (!drawSample(sampleProgram, sharedVbo, sharedTex, core41Got) ||
+        core41Got[0] != 64 || core41Got[1] != 128 || core41Got[2] != 192 || core41Got[3] != 255)
+        return stageFailure("core41-draw", 23, "4.1-core-draw-readback-mismatch");
+    {char line[192]; char* p = append(line, "PLAY-OPENGL STAGE core41-draw exit=0 requested=4.1 version=\"");
+     p = append(p, version41); p = append(p, "\" got=64,128,192,255\n"); *p = 0; emit(line);}
+
+    // Render to a 4x multisample renderbuffer, resolve into a single-sample
+    // texture-backed FBO, then verify the resolved pixel.
+    uint32_t msaaFbo = 0, resolveFbo = 0, msaaRbo = 0, resolveTex = 0;
+    genFbos(1, &msaaFbo); genFbos(1, &resolveFbo); genRbos(1, &msaaRbo);
+    bindFbo(GL_FRAMEBUFFER, msaaFbo); bindRbo(GL_RENDERBUFFER, msaaRbo);
+    msaaStorage(GL_RENDERBUFFER, 4, GL_RGBA8, 32, 32);
+    attachRbo(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, msaaRbo);
+    if (checkFbo(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        return stageFailure("msaa-resolve-readback", 24, "wine-unavailable:4x-framebuffer-incomplete");
+    genTextures(1, &resolveTex); bindTexture(GL_TEXTURE_2D, resolveTex);
+    texImage(GL_TEXTURE_2D, 0, GL_RGBA8, 32, 32, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    bindFbo(GL_FRAMEBUFFER, resolveFbo);
+    auto attachTexture = (PFN_glFramebufferTexture)(uintptr_t)lookup("glFramebufferTexture");
+    if (!attachTexture) return stageFailure("msaa-resolve-readback", 24, "framebuffer-texture-entry-point-missing");
+    attachTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, resolveTex, 0);
+    if (checkFbo(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        return stageFailure("msaa-resolve-readback", 24, "resolve-framebuffer-incomplete");
+    bindFbo(0x8CA8, msaaFbo); bindFbo(0x8CA9, resolveFbo);
+    glViewport(0, 0, 32, 32); glClearColor(0.25f, 0.5f, 0.75f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);
+    blitFbo(0, 0, 32, 32, 0, 0, 32, 32, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    bindFbo(GL_FRAMEBUFFER, resolveFbo); glFinish();
+    unsigned char resolved[4] = {0,0,0,0}; glReadPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, resolved);
+    if (resolved[0] != 64 || resolved[1] != 128 || resolved[2] != 191 || resolved[3] != 255)
+        return stageFailure("msaa-resolve-readback", 24, "resolved-pixel-mismatch");
+    stagePass("msaa-resolve-readback", "samples=4 got=64,128,191,255");
+    wglMakeCurrent(nullptr, nullptr);
+    wglDeleteContext(shared); wglDeleteContext(core41);
+    if (!wglMakeCurrent(dc, context)) return fail(18, "restore compat context", GetLastError());
+
     wglMakeCurrent(nullptr, nullptr);
     wglDeleteContext(context);
     ReleaseDC(window, dc);

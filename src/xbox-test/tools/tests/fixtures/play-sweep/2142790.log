@@ -1,0 +1,6 @@
+request-json: {"appid":"2142790","name":"Fields of Mistria","exe":"FieldsOfMistria.exe","attemptId":"2280:1"}
+[  18.296] launch: request written LocalState\\launch_request.json appid=2142790 attempt=2280:1 dir=fields_of_mistria via=cmd.txt (synthetic)
+[  18.355] launch-probe: GAP: total=776 missing=466 win32u=93
+[  20.272] frame=1100 fps~54.3 screen=4 pads=0
+[  20.654] launch-probe: PRUN EVENT LoadLibrary failed name=DXIL.dll error=126
+[  39.731] launch: RESULT attempt=2280:1 ok=0 mapped=7/7 gameCodeExecuted=true: ExitProcess code=2147942487

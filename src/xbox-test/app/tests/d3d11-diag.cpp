@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 #include "../host/d3d11_diag.h"
+#include "../../uwph/host/shaders/triangle_bytecode.h"
 static unsigned checks=0,failures=0;
 #define CHECK(x) do { ++checks; if(!(x)){++failures;printf("FAIL line %d: %s\n",__LINE__,#x);} } while(0)
 static std::vector<std::string> lines;
@@ -612,6 +613,36 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         d3d11_diag::deepDrawEnabled.store(false,std::memory_order_release);
     }
     d3d11_diag::deepDrawEnabled.store(false,std::memory_order_release);
+    // The same fixed ring is fed by real successful immediate and deferred
+    // context hooks, not only by the trace helper used in the removal test.
+    d3d11_diag::traceOn.store(true,std::memory_order_release);
+    d3d11_diag::traceNextSeq=1;d3d11_diag::traceFrame.store(0);
+    for(auto& e:d3d11_diag::traceRing)e={};
+    context->Draw(7,0);
+    ID3D11DeviceContext* traceDeferred=nullptr;ID3D11CommandList* traceList=nullptr;
+    if(SUCCEEDED(device->CreateDeferredContext(0,&traceDeferred))&&traceDeferred) {
+        traceDeferred->Draw(5,0);
+        CHECK(SUCCEEDED(traceDeferred->FinishCommandList(FALSE,&traceList))&&traceList);
+        if(traceList)context->ExecuteCommandList(traceList,FALSE);
+    }
+    bool sawImmediate=false,sawDeferred=false,sawFinish=false,sawExecute=false;
+    for(const auto& e:d3d11_diag::traceRing)if(e.seq) {
+        if(!strcmp(e.name,"Draw")&&strstr(e.args,"vertices=7"))sawImmediate=true;
+        if(!strcmp(e.name,"Draw")&&strstr(e.args,"vertices=5"))sawDeferred=true;
+        if(!strcmp(e.name,"FinishCommandList"))sawFinish=true;
+        if(!strcmp(e.name,"ExecuteCommandList"))sawExecute=true;
+        CHECK(e.frame==0);
+    }
+    CHECK(sawImmediate&&sawDeferred&&sawFinish&&sawExecute);
+    d3d11_diag::tracePresentSuccess("Present",1,0);
+    bool sawPresent=false;
+    for(const auto& e:d3d11_diag::traceRing)if(e.seq&& !strcmp(e.name,"Present")) {
+        sawPresent=e.frame==0&&strstr(e.args,"sync=1 flags=0x0");
+    }
+    CHECK(sawPresent&&d3d11_diag::traceFrame.load()==1);
+    if(traceList)traceList->Release();
+    if(traceDeferred)traceDeferred->Release();
+    d3d11_diag::traceOn.store(false,std::memory_order_release);
     if(rtv)rtv->Release();
     if(targetTexture)targetTexture->Release();
     for(auto& l:lines)if(l.find("draw state")!=std::string::npos||l.find("suppressed")!=std::string::npos)printf("  %s\n",l.c_str());
@@ -678,6 +709,10 @@ int main(int argc,char** argv) {
         // maxvertexcount(3), TriangleStream, SV_RenderTargetArrayIndex.
         scan=d3d11_diag::gsBytecodeText(d3d11_diag::kGsRtarrayBlob,sizeof d3d11_diag::kGsRtarrayBlob);
         CHECK(scan=="gs scan model=gs_5_0 maxVerts=3 outTopo=trianglestrip streams=1 viewportIndex=0 rtArrayIndex=1");
+        // Halo's flagged scan: pointlist input is configured by the draw,
+        // maxvertexcount(4), TriangleStream, one stream, and RT-array index.
+        scan=d3d11_diag::gsBytecodeText(halo_gs,sizeof halo_gs);
+        CHECK(scan=="gs scan model=gs_5_0 maxVerts=4 outTopo=trianglestrip streams=1 viewportIndex=0 rtArrayIndex=1");
         // maxvertexcount(4), two PointStreams: two dcl_stream declarations.
         scan=d3d11_diag::gsBytecodeText(d3d11_diag::kGsMultistreamBlob,sizeof d3d11_diag::kGsMultistreamBlob);
         CHECK(scan=="gs scan model=gs_5_0 maxVerts=4 outTopo=pointlist streams=2 viewportIndex=0 rtArrayIndex=0");
@@ -759,9 +794,19 @@ int main(int argc,char** argv) {
     CHECK(FAILED(context->Map(buffer,0,D3D11_MAP_WRITE_DISCARD,0,&mapped))&&count("Map hr=")==1&&count("res=buffer bytes=64")==1);
     CHECK(FAILED(context->Map(buffer,0,D3D11_MAP_WRITE_DISCARD,0,&mapped))&&count("Map hr=")==1);
 
-    // Device-lost tracking: an ordinary failure does not mark the device lost;
-    // a removed-code failure does, once, and the summary carries the state.
+    // Device-lost tracking: the opt-in command ring retains only the newest
+    // entries, flushes once on removal, and is completely quiet when disabled.
     {
+        d3d11_diag::traceOn.store(false,std::memory_order_release);
+        uint64_t offSeq=d3d11_diag::traceNextSeq;
+        d3d11_diag::traceCommand("Draw","vertices=%u",1u);
+        CHECK(d3d11_diag::traceNextSeq==offSeq);
+        d3d11_diag::traceOn.store(true,std::memory_order_release);
+        d3d11_diag::traceFlushLogged.store(false,std::memory_order_release);
+        d3d11_diag::traceNextSeq=1;
+        for(auto& e:d3d11_diag::traceRing)e={};
+        for(unsigned i=0;i<d3d11_diag::kTraceRing+3;++i)
+            d3d11_diag::traceCommand("Draw","vertices=%u",i);
         size_t before=lines.size();
         d3d11_diag::noteFailure(E_FAIL);   // an ordinary failure: no transition
         CHECK(!d3d11_diag::deviceRemoved.load()&&d3d11_diag::deviceLostReports.load()==0);
@@ -769,8 +814,16 @@ int main(int argc,char** argv) {
         CHECK(d3d11_diag::deviceRemoved.load()&&d3d11_diag::deviceLostReports.load()==1);
         bool marked=false;for(size_t i=before;i<lines.size();++i)if(lines[i].find("device removed: reason")!=std::string::npos)marked=true;
         CHECK(marked);   // the transition is logged with the removal reason
-        d3d11_diag::noteFailure(DXGI_ERROR_DEVICE_REMOVED);   // sticky: no second transition
-        CHECK(d3d11_diag::deviceLostReports.load()==1);
+        size_t ringLines=0;uint64_t expected=3;
+        for(size_t i=before;i<lines.size();++i)if(lines[i].find("D3D11 trace #")!=std::string::npos) {
+            CHECK(lines[i].find("vertices="+std::to_string(expected))!=std::string::npos);
+            ++expected;++ringLines;
+        }
+        CHECK(ringLines==d3d11_diag::kTraceRing);
+        d3d11_diag::noteFailure(DXGI_ERROR_DEVICE_REMOVED);   // sticky: no second transition or flush
+        size_t ringLinesAfter=0;for(size_t i=before;i<lines.size();++i)
+            if(lines[i].find("D3D11 trace #")!=std::string::npos)++ringLinesAfter;
+        CHECK(ringLinesAfter==d3d11_diag::kTraceRing);
         // The summary line carries the state: force a window by rewinding the
         // schedule so the next tick fires immediately.
         d3d11_diag::summaryNext.store(GetTickCount64()-1);
@@ -778,6 +831,7 @@ int main(int argc,char** argv) {
         bool inSummary=false;
         for(auto& l:lines)if(l.find("device lost=1 transitions=1")!=std::string::npos)inSummary=true;
         CHECK(inSummary);
+        d3d11_diag::traceOn.store(false,std::memory_order_release);
     }
 
     // A second device and the d3d11.1 interface share the class: no new patch, same dedupe.

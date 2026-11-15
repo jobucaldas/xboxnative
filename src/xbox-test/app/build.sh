@@ -32,7 +32,7 @@ mkdir -p "$out/layout/k32t"
 x86_64-w64-mingw32-gcc -c -Os -fno-stack-protector ../shared/tests/search-dll.c -o "$out/obj/search-dll.obj"
 lld-link-19 /dll /noentry /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/layout/k32t/directory-test.dll" "$out/obj/search-dll.obj"
 mkdir -p "$out/layout/donors"
-cp "$donors"/{avrt,dinput8,hid,setupapi,shcore,version}.dll "$out/layout/donors/"
+cp "$donors"/{avrt,dinput8,hid,psapi,setupapi,shcore,version}.dll "$out/layout/donors/"
 cp "$donors"/{SHA256SUMS,SOURCE.txt,0001-pe-rodata.patch,0002-d3dcompiler-static-vkd3d.patch} "$here/donors/COPYING.LIB" "$here/donors/LICENSE" "$out/layout/donors/"
 # Wine's HLSL shader compiler (d3dcompiler_47, static vkd3d): xgameFinal.exe
 # imports D3DCompile/D3DDisassemble/D3DGetBlobPart/D3DReflect and the d3d10
@@ -46,6 +46,10 @@ cp "$donors"/graphics/*.dll "$out/layout/donors/"
 # Wine's C++ runtime (msvcp140 family, concrt140) for games without their own copy.
 mkdir -p "$out/layout/runtime"
 cp "$donors"/runtime/*.dll "$donors"/runtime/SHA256SUMS "$out/layout/runtime/"
+# PE32 games use the pinned i686 VC110/VC120 CRT donors only when they do not
+# ship their own copies beside the executable.
+mkdir -p "$out/layout/runtime/x86"
+cp "$donors"/runtime/x86/*.dll "$donors"/runtime/x86/SHA256SUMS "$out/layout/runtime/x86/"
 # Play's D3D10 shim (source in uwph/d3d10): the console has no d3d10.dll or
 # d3d10_1.dll, and one PE answers both names plus d3d10core.dll.
 bash ../uwph/d3d10/build.sh "$out/layout/runtime"

@@ -1,0 +1,8 @@
+request-json: {"appid":"411370","name":"MELTY BLOOD Actress Again Current Code","exe":"MBAA.exe","attemptId":"444:1"}
+[  18.133] launch: request written LocalState\\launch_request.json appid=411370 attempt=444:1 dir=melty_blood_actress_again_current_code via=cmd.txt (synthetic)
+[  18.169] launch-probe: GAP: total=277 missing=224 win32u=43
+[  18.169] launch: RUNNING attempt=444:1 ok=0 mapped=1/1 gameCodeExecuted=true: PE32 guest entry 0x00530982
+[  18.169] PRUN EVENT x86 route: MBAA.exe fault kind=UnresolvedImport eip=0x7ffe05c0: called call to unresolved import kernel32.dll!IsValidCodePage
+[  18.169] 32-bit guest MBAA.exe: called call to unresolved import kernel32.dll!IsValidCodePage
+[  18.307] launch: RESULT attempt=444:1 ok=0 mapped=1/1 gameCodeExecuted=true: 32-bit guest MBAA.exe: called call to unresolved import kernel32.dll!IsValidCodePage
+[  20.281] frame=1141 fps~56.3 screen=4 pads=0

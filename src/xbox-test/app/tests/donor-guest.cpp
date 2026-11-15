@@ -5,6 +5,7 @@
 #include <shellapi.h>
 #include <avrt.h>
 extern "C" __declspec(dllimport) void WINAPI HidD_GetHidGuid(GUID*);
+extern "C" __declspec(dllimport) DWORD WINAPI GetModuleFileNameExW(HANDLE,HMODULE,LPWSTR,DWORD);
 #ifdef DONOR_MISSING
 extern "C" __declspec(dllimport) void WINAPI DeliberatelyAbsentDonorExport();
 #endif
@@ -23,7 +24,13 @@ extern "C" DWORD donor_guest_entry() {
     const GUID expected={0x4d1e55b2,0xf16f,0x11cf,{0x88,0xcb,0,0x11,0x11,0,0,0x30}};
     for(unsigned i=0;i<sizeof guid;++i)if(((BYTE*)&guid)[i]!=((const BYTE*)&expected)[i])return 1;
     HANDLE set=SetupDiCreateDeviceInfoList(nullptr,nullptr);
-    if(set==INVALID_HANDLE_VALUE||!SetupDiDestroyDeviceInfoList(set))return 2;
+    if(set==INVALID_HANDLE_VALUE)return 2;
+    SP_DEVINFO_DATA device{};device.cbSize=sizeof device;SetLastError(0);
+    if(SetupDiEnumDeviceInfo(set,0,&device)||GetLastError()!=ERROR_NO_MORE_ITEMS)return 2;
+    const GUID interfaceClass={0x12345678,0x1234,0x1234,{1,2,3,4,5,6,7,8}};
+    SP_DEVICE_INTERFACE_DATA interfaceData{};interfaceData.cbSize=sizeof interfaceData;SetLastError(0);
+    if(SetupDiEnumDeviceInterfaces(set,nullptr,&interfaceClass,0,&interfaceData)||GetLastError()!=ERROR_NO_MORE_ITEMS)return 2;
+    if(!SetupDiDestroyDeviceInfoList(set))return 2;
     int count=0;auto argv=CommandLineToArgvW(L"\"alpha beta\" tail",&count);
     if(!argv)return 3;
     bool parsed=count==2;
@@ -46,5 +53,7 @@ extern "C" DWORD donor_guest_entry() {
     DWORD* fixed=nullptr;UINT length=0;
     if(!VerQueryValueW(versionBytes,L"\\",(void**)&fixed,&length)||!fixed||
        length<13*sizeof(DWORD)||fixed[0]!=0xfeef04bd)return 7;
+    static wchar_t modulePath[2048];
+    if(!GetModuleFileNameExW(GetCurrentProcess(),nullptr,modulePath,2048))return 8;
     return 42;
 }

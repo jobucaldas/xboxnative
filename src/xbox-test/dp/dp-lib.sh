@@ -1,9 +1,12 @@
+#!/bin/bash
 # shared helpers; DP_PASS from env, never printed. Override: DP_HOST, DP_PORT, DP_USER, DP_SOCKS, DP_LOCK.
 # An optional environment file (git-ignored) is sourced first if present: $DP_ENV_FILE, or .env in the repo root.
 # DP_HOST may be a bare host or a URL ("https://host[:port][/]"); DP_PORT wins over a port in the URL (default 11443).
 _dp_env="${DP_ENV_FILE:-}"
 if [ -z "$_dp_env" ]; then
-  _dp_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [ -n "${BASH_VERSION:-}" ]; then _dp_source="${BASH_SOURCE[0]:-$0}"; else _dp_source="$0"; fi
+  _dp_here="$(cd "$(dirname "$_dp_source")" && pwd)"
+  unset _dp_source
   _dp_root="$(git -C "$_dp_here" rev-parse --show-toplevel 2>/dev/null)" || _dp_root="$(cd "$_dp_here/../../.." && pwd)"
   _dp_env="$_dp_root/.env"
   unset _dp_here _dp_root
