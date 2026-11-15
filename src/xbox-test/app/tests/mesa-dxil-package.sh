@@ -20,8 +20,12 @@ for name, value in constants.items():
 build_text = (root / "src/xbox-test/app/build.sh").read_text()
 if "fetch-dxil.sh" in build_text or re.search(r"cp[^\n]*(dxil\.dll|LICENSE-MS\.txt)", build_text):
     raise SystemExit("FAIL launcher layout still packages Microsoft's DXIL files")
+runtime = (root / "src/xbox-test/app/host/play_runtime.h").read_text()
+if not re.search(r'if\s*\(\(key=="opengl32\.dll"\s*\|\|\s*key=="vulkan_dzn\.dll"\).*?dxil_runtime::ensure\(g_dir', runtime, re.S):
+    raise SystemExit("FAIL Vulkan dzn does not share the DXIL download/cache trigger")
 print("PASS DXIL URL and archive/DLL hashes match deps.pin")
 print("PASS launcher packaging contract excludes dxil.dll and LICENSE-MS.txt")
+print("PASS Mesa OpenGL and Vulkan dzn share the DXIL download/cache trigger")
 PY
 
 tmp="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/mesa-dxil-runtime-test-$$"
