@@ -66,6 +66,23 @@ EOF
 # or the guest heap (Bugbot 4559749424/4559749442/4559749445).
 "$cc32" $flags -shared -Wl,--entry,0 -Wl,--kill-at -Wl,--image-base,0x10000000 -o "$tmp/dll-zeroent.dll" "$here/x86-dll/dll-zeroent.c"
 "$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -Wl,--image-base,0x10000000 -o "$tmp/dll-second.dll" "$here/x86-dll/dll-second.c"
+# Both fixtures prefer the occupied OS pseudo-module base. The first retains
+# its HIGHLOW relocation table; the second is linked fixed and must be rejected.
+"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -Wl,--image-base,0x68000000 -Wl,--enable-reloc-section -o "$tmp/dll-collision-reloc.dll" "$here/x86-dll/dll-collision.c"
+"$cc32" $flags -shared -Wl,--entry,_DllMain@12 -Wl,--kill-at -Wl,--image-base,0x68000000 -Wl,--disable-reloc-section -o "$tmp/dll-collision-stripped.dll" "$here/x86-dll/dll-collision.c"
+# GNU ld retains .reloc for this DLL even with --disable-reloc-section; mark the
+# generated fixture fixed by stripping the PE relocation directory explicitly.
+python3 -I - "$tmp/dll-collision-stripped.dll" <<'PYEOF'
+import struct, sys
+path = sys.argv[1]
+b = bytearray(open(path, 'rb').read())
+nt = struct.unpack_from('<I', b, 0x3c)[0]
+opt = nt + 24
+characteristics = struct.unpack_from('<H', b, nt + 22)[0]
+struct.pack_into('<H', b, nt + 22, characteristics | 1)  # IMAGE_FILE_RELOCS_STRIPPED
+struct.pack_into('<II', b, opt + 96 + 5 * 8, 0, 0)       # base relocation directory
+open(path, 'wb').write(b)
+PYEOF
 # Import libraries for the two new DLLs (the fixture links their exports
 # before the DLLs are seen by the loader; they are LoadLibrary'd at runtime).
 cat > "$tmp/dll-zeroent.def" <<'EOF'
@@ -197,6 +214,12 @@ set -e
 grep -q '^play: dll-chain loaded, all imports bound, exit 42$' <<<"$out" || {
   echo "X86-DLL FAIL: no clean chain run"; echo "$out"; exit 1; }
 ! grep -q '^play: unresolved\|^play: fault' <<<"$out" || { echo "X86-DLL FAIL: unresolved import or fault"; echo "$out"; exit 1; }
+grep -Eq '^x86-dll: collision relocated base=0x[0-9a-f]{8} relocs=[1-9][0-9]* export=42$' <<<"$out" &&
+  grep -q '^x86-dll: stripped collision rejected: PE32 relocation directory absent$' <<<"$out" || {
+  echo "X86-DLL FAIL: image-base collision behavior"; echo "$out"; exit 1; }
+grep '^x86-dll: collision relocated' <<<"$out"
+grep '^x86-dll: stripped collision rejected' <<<"$out"
+echo "X86-DLL COLLISION PASS: occupied 0x68000000 relocates and executes; stripped image is rejected without header changes"
 echo "X86-DLL PASS: guest PE32 DLL chain (exe -> dll-a -> dll-b), the cycle dll-c <-> dll-d (each mapped once), DllMain attach, LoadLibraryA/GetProcAddress/FreeLibrary/GetModuleHandleA/W/ExW (flags, NULL name, FROM_ADDRESS) from guest code, forwarder bound = the export directory's Size (a real export right after it is code), Encode/DecodePointer round trip, entry-RVA-0 DLL with SizeOfImage >> file, second DLL relocated to a disjoint arena, bad-image rejection, per-thread ExitThread"
 
 # A forced failure verifies that the guest return code carries the first check ID.
