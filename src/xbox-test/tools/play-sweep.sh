@@ -14,6 +14,9 @@ Run owned installed games sequentially through play-test.sh and write a CSV.
   --file FILE       Read appids, one per line (# comments allowed)
   --timeout SECS    Bound each play-test run (default: 600)
   --outdir DIR      Store the CSV and redacted per-game excerpts there
+  --allow-install MB  Let play-test download a missing game up to MB megabytes
+                    (default: no downloads; a game that is not installed is
+                    reported as blocked at its install prompt)
   --dry-run         Print the plan without contacting the console
   -h, --help        Show this help
 
@@ -21,13 +24,14 @@ The runner refuses to start over an active guest, uses the existing Device
 Portal helpers/lock, sends gquit after each attempt, and never uninstalls games.
 EOF
 }
-source_kind=""; source_file=""; timeout_s=600; outdir=""; dry=0; declare -a apps=()
+source_kind=""; source_file=""; timeout_s=600; maxmb=0; outdir=""; dry=0; declare -a apps=()
 while (($#)); do
   case "$1" in
     --installed) [[ -z "$source_kind" ]] || { echo "choose one input source" >&2; exit 2; }; source_kind=installed; shift ;;
     --file) [[ -z "$source_kind" && $# -ge 2 ]] || { echo "choose one input source and provide a file" >&2; exit 2; }; source_kind=file; source_file=$2; shift 2 ;;
     --timeout) [[ $# -ge 2 && "$2" =~ ^[0-9]+$ && $2 -ge 1 && $2 -le 3600 ]] || { echo "--timeout must be 1..3600 seconds" >&2; exit 2; }; timeout_s=$2; shift 2 ;;
     --outdir) [[ $# -ge 2 && -n "$2" ]] || { echo "--outdir needs a directory" >&2; exit 2; }; outdir=$2; shift 2 ;;
+    --allow-install) [[ $# -ge 2 && "$2" =~ ^[0-9]+$ && $2 -ge 1 ]] || { echo "--allow-install needs a size in MB (>= 1)" >&2; exit 2; }; maxmb=$2; shift 2 ;;
     --dry-run) dry=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -66,7 +70,8 @@ if [[ "$source_kind" == installed && $dry -eq 1 ]]; then
   printf 'Installed marker discovery: launcher LocalState dl_<appid>.done files (deferred; dry-run made no console requests)\n'
 fi
 if [[ $dry -eq 1 ]]; then
-  for app in "${unique[@]}"; do printf 'would run appid %s with timeout %ss, then write gquit; no uninstall\n' "$app" "$timeout_s"; done
+  if [[ $maxmb -eq 0 ]]; then install="no downloads"; else install="downloads up to ${maxmb} MB"; fi
+  for app in "${unique[@]}"; do printf 'would run appid %s with timeout %ss (%s), then write gquit; no uninstall\n' "$app" "$timeout_s" "$install"; done
   exit 0
 fi
 command -v timeout >/dev/null || { echo "timeout command is required" >&2; exit 2; }
@@ -109,7 +114,9 @@ for app in "${unique[@]}"; do
   raw="$tmp/$app"; mkdir -p "$raw"
   start=$SECONDS
   set +e
-  timeout --signal=TERM --kill-after=15s "${timeout_s}s" bash "$HERE/play-test.sh" "$app" "$timeout_s" "$raw" >"$tmp/play-test.out" 2>&1
+  # PT_MAXMB=0 makes play-test refuse any download, so a sweep never installs a game
+  # unless --allow-install asked for it.
+  PT_MAXMB=$maxmb timeout --signal=TERM --kill-after=15s "${timeout_s}s" bash "$HERE/play-test.sh" "$app" "$timeout_s" "$raw" >"$tmp/play-test.out" 2>&1
   test_rc=$?
   set -e
   elapsed=$((SECONDS-start))

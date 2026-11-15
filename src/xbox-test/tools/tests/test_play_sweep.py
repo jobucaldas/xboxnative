@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -35,6 +36,24 @@ class PlaySweepParserTest(unittest.TestCase):
         self.assertNotIn(fake_id, text)
         self.assertNotIn("private", text)
         self.assertTrue("<steamid>" in text or "<redacted>" in text)
+
+
+class PlaySweepInstallGuardTest(unittest.TestCase):
+    SWEEP = HERE.parent / "play-sweep.sh"
+
+    def plan(self, *args):
+        return subprocess.run(["bash", str(self.SWEEP), "--dry-run", *args, "123"],
+                              capture_output=True, text=True)
+
+    def test_sweep_never_downloads_by_default(self):
+        out = self.plan()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("(no downloads)", out.stdout)
+        self.assertIn('PT_MAXMB=$maxmb timeout', self.SWEEP.read_text())
+
+    def test_downloads_need_an_explicit_size(self):
+        self.assertIn("(downloads up to 500 MB)", self.plan("--allow-install", "500").stdout)
+        self.assertEqual(self.plan("--allow-install", "0").returncode, 2)
 
 
 if __name__ == "__main__":
