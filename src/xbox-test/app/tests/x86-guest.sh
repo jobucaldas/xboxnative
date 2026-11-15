@@ -84,6 +84,24 @@ tline=$(grep '^play: traced ' <<<"$pout" || true)
 pbody=$(sed '/^play: /d' <<<"$pout")
 [[ $pbody == "$want" ]] || { echo "X86-GUEST FAIL: x86_play tee differs"; diff <(echo "$want") <(echo "$pbody") || true; exit 1; }
 echo "X86-GUEST PASS: the launcher's PE32 entry point reports the same run (loaded, imports bound, exit 42) and streams its output"
+# This second PE32 fixture installs an FS:[0] chain and checks that RtlUnwind
+# invokes every handler with unwind flags before its non-returning target transfer.
+"$cc32" -O1 -Wall -Wextra -Werror "${extra[@]}" -Wl,--stack,0x300000 -o "$tmp/fixture-seh.exe" "$here/x86-guest/fixture-seh.c" -lntdll
+set +e
+sout=$("$tmp/x86-guest" "$tmp/fixture-seh.exe"); src=$?
+set -e
+[[ $src -eq 42 ]] || { echo "X86-GUEST FAIL: SEH fixture exit $src (want 42)"; echo "$sout"; exit 1; }
+grep -Eq '^guest: .*imports=[1-9][0-9]* bound=[1-9][0-9]* ' <<<"$sout" || { echo "X86-GUEST FAIL: SEH imports were not bound"; echo "$sout"; exit 1; }
+grep -q '^seh: handlers=3 order=1,2,3 flags=2,2,34 transfer=87654321 fallback=0 api=1$' <<<"$sout" || {
+  echo "X86-GUEST FAIL: RtlUnwind or kernel32 route family did not meet its guest contract"; echo "$sout"; exit 1; }
+echo "X86-GUEST PASS: RtlUnwind called each guest SEH handler with unwind flags, resumed at target, and kernel32 routes worked"
+"$cc32" -O1 -Wall -Wextra -Werror -Wno-unused-function -DX86_DEBUGBREAK_FIXTURE "${extra[@]}" -Wl,--stack,0x300000 -o "$tmp/fixture-debugbreak.exe" "$here/x86-guest/fixture-seh.c" -lntdll
+set +e
+dbout=$("$tmp/x86-guest" "$tmp/fixture-debugbreak.exe"); dbrc=$?
+set -e
+[[ $dbrc -ne 42 && "$dbout" == *"DebugBreak: guest debugger/breakpoint delivery is unavailable"* ]] || {
+  echo "X86-GUEST FAIL: DebugBreak did not fail truthfully"; echo "$dbout"; exit 1; }
+echo "X86-GUEST PASS: DebugBreak reports unavailable guest debugger delivery"
 if [[ ${1:-} == --wine ]]; then
   wine="${WINE:-wine}"
   command -v "$wine" >/dev/null || [[ -x $wine ]] || { echo "X86-GUEST SKIP: wine not found (set WINE)"; exit 0; }

@@ -63,6 +63,8 @@ struct ThunkTable {
 struct Cpu {
     Memory& mem; ThunkTable& thunks;
     uint32_t reg[8] = {}, eip = 0, eflags = 2, fs_base = 0, gs_base = 0;
+    bool host_transfer_requested = false;
+    void resume_at(uint32_t target_eip, uint32_t target_esp) { eip=target_eip;reg[ESP]=target_esp;host_transfer_requested=true; }
     uint64_t executed = 0, limit = 500ull * 1000 * 1000, tsc = 0;
     bool exited = false; uint32_t exit_code = 0;
     unsigned depth = 0;
@@ -1325,8 +1327,10 @@ struct Cpu {
         // add() could touch.
         std::function<uint32_t(Cpu&)> fn = t.fn;
         Conv conv = t.conv; unsigned argc = t.argc;
+        host_transfer_requested=false;
         uint32_t r = fn(*this);
         if (exited) return;
+        if (host_transfer_requested) { host_transfer_requested=false; return; }
         reg[EAX] = r;
         reg[ESP] += 4 + (conv == Conv::Stdcall ? 4 * argc : 0); eip = ret;
     }

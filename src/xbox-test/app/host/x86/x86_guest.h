@@ -159,10 +159,10 @@ struct Guest {
     std::map<uint32_t, uint32_t> thread_exit_codes;  // handle -> exit code
     std::map<uint32_t, uint32_t> thread_ids;         // handle -> thread identifier
     enum class SyncKind { Event, Mutex, Semaphore };
-    struct SyncObject { SyncKind kind; std::string name; uint32_t refs = 0, owner = 0, recursion = 0, count = 0, maximum = 0; bool manual = false, signaled = false, abandoned = false; };
+    struct SyncObject { SyncKind kind; std::u16string name; uint32_t refs = 0, owner = 0, recursion = 0, count = 0, maximum = 0; bool manual = false, signaled = false, abandoned = false; };
     std::map<uint32_t, uint32_t> sync_handles;        // guest handle -> object id
     std::map<uint32_t, SyncObject> sync_objects;
-    std::map<std::string, uint32_t> sync_names;       // names are case-sensitive (Win32)
+    std::map<std::u16string, uint32_t> sync_names;    // names are case-sensitive (Win32)
     std::map<uint32_t, uint64_t> file_handles;         // guest handle -> Play host HANDLE
     std::map<int32_t, uint32_t> std_handles{{-10, Host::H_STDIN}, {-11, Host::H_STDOUT}, {-12, Host::H_STDERR}};
     std::map<uint32_t, uint64_t> find_handles;         // guest search handle -> native find HANDLE
@@ -223,13 +223,19 @@ struct Guest {
         env_w_ptr=heap.alloc(uint32_t(w.size()*2));for(size_t i=0;i<w.size();++i)mem.w(env_w_ptr+uint32_t(i*2),w[i],2);
     }
     uint32_t add_sync_handle(uint32_t id) { uint32_t h=0x70000000u+(++sync_handle_serial);sync_handles[h]=id;++sync_objects[id].refs;return h; }
-    uint32_t create_sync(SyncKind kind, uint32_t namep, bool manual, bool initial, int32_t count, int32_t maximum, uint32_t owner) {
-        std::string name = str(namep); uint32_t id = 0;
+    std::u16string sync_name(uint32_t namep, bool wide) const {
+        if (wide) return wstr(namep);
+        std::string narrow = str(namep); std::u16string name;
+        for (unsigned char ch : narrow) name.push_back(char16_t(ch));
+        return name;
+    }
+    uint32_t create_sync(SyncKind kind, uint32_t namep, bool wide, bool manual, bool initial, int32_t count, int32_t maximum, uint32_t owner) {
+        std::u16string name = sync_name(namep, wide); uint32_t id = 0;
         if (!name.empty()) { auto it = sync_names.find(name); if (it != sync_names.end()) { id = it->second; if (sync_objects[id].kind != kind) { set_last_error(6); return 0; } set_last_error(183); } }
         if (!id) { id = ++sync_serial; SyncObject o{}; o.kind=kind; o.name=name; o.manual=manual; o.signaled=initial; o.owner=owner; o.recursion=owner?1u:0u; o.count=uint32_t(count); o.maximum=uint32_t(maximum); sync_objects[id]=o; if (!name.empty()) sync_names[name]=id; set_last_error(0); }
         return add_sync_handle(id);
     }
-    uint32_t open_sync(SyncKind kind, uint32_t namep) { std::string name=str(namep);auto it=sync_names.find(name);if(it==sync_names.end()){set_last_error(2);return 0;}if(sync_objects[it->second].kind!=kind){set_last_error(6);return 0;}return add_sync_handle(it->second); }
+    uint32_t open_sync(SyncKind kind, uint32_t namep, bool wide) { std::u16string name=sync_name(namep,wide);auto it=sync_names.find(name);if(it==sync_names.end()){set_last_error(2);return 0;}if(sync_objects[it->second].kind!=kind){set_last_error(6);return 0;}return add_sync_handle(it->second); }
     bool close_sync(uint32_t h) { auto it=sync_handles.find(h); if(it==sync_handles.end())return false; uint32_t id=it->second; sync_handles.erase(it); auto& o=sync_objects[id]; if(!--o.refs){if(!o.name.empty())sync_names.erase(o.name);sync_objects.erase(id);} return true; }
     uint32_t add_file_handle(uint64_t native) { uint32_t h=0x50000000u+(++file_serial); file_handles[h]=native; return h; }
     bool call_file(Host::FileCall& call) { if(!host.file_call){call.error=120;return false;} host.file_call(call); return call.succeeded; }
@@ -978,9 +984,10 @@ inline void Guest::register_all() {
     // lpSecurityAttributes is accepted and ignored for this single-user guest process.
     // PulseEvent is documented as unreliable; with no queued waiters, set-then-reset leaves it nonsignaled.
     auto sync_current_thread = [](Cpu& c) { uint32_t id=c.fs_base?c.mem.r32(c.fs_base+0x24):0; return id?id:1u; };
-    reg.add("kernel32.dll","CreateEventA",Conv::Stdcall,4,[this](Cpu& c)->uint32_t{return create_sync(SyncKind::Event,c.arg(3),c.arg(1)!=0,c.arg(2)!=0,0,0,0);});
-    reg.add("kernel32.dll","CreateMutexA",Conv::Stdcall,3,[this,sync_current_thread](Cpu& c)->uint32_t{return create_sync(SyncKind::Mutex,c.arg(2),false,false,0,0,c.arg(1)?sync_current_thread(c):0);});
-    reg.add("kernel32.dll","CreateSemaphoreA",Conv::Stdcall,4,[this](Cpu& c)->uint32_t{int32_t initial=int32_t(c.arg(1)),maximum=int32_t(c.arg(2));if(initial<0||maximum<=0||initial>maximum){set_last_error(87);return 0;}return create_sync(SyncKind::Semaphore,c.arg(3),false,false,initial,maximum,0);});
+    reg.add("kernel32.dll","CreateEventA",Conv::Stdcall,4,[this](Cpu& c)->uint32_t{return create_sync(SyncKind::Event,c.arg(3),false,c.arg(1)!=0,c.arg(2)!=0,0,0,0);});
+    reg.add("kernel32.dll","CreateEventW",Conv::Stdcall,4,[this](Cpu& c)->uint32_t{return create_sync(SyncKind::Event,c.arg(3),true,c.arg(1)!=0,c.arg(2)!=0,0,0,0);});
+    reg.add("kernel32.dll","CreateMutexA",Conv::Stdcall,3,[this,sync_current_thread](Cpu& c)->uint32_t{return create_sync(SyncKind::Mutex,c.arg(2),false,false,false,0,0,c.arg(1)?sync_current_thread(c):0);});
+    reg.add("kernel32.dll","CreateSemaphoreA",Conv::Stdcall,4,[this](Cpu& c)->uint32_t{int32_t initial=int32_t(c.arg(1)),maximum=int32_t(c.arg(2));if(initial<0||maximum<=0||initial>maximum){set_last_error(87);return 0;}return create_sync(SyncKind::Semaphore,c.arg(3),false,false,false,initial,maximum,0);});
     reg.add("kernel32.dll","SetEvent",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Event){set_last_error(6);return 0;}sync_objects[h->second].signaled=true;return 1;});
     reg.add("kernel32.dll","ResetEvent",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Event){set_last_error(6);return 0;}sync_objects[h->second].signaled=false;return 1;});
     reg.add("kernel32.dll","PulseEvent",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Event){set_last_error(6);return 0;}sync_objects[h->second].signaled=false;return 1;});
@@ -1008,6 +1015,11 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetModuleHandleA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         std::string n = str(c.arg(0)); if (n.empty()) return image_base;
         return module_by_name(n, c.thunks); });
+    reg.add("kernel32.dll", "DisableThreadLibraryCalls", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        uint32_t module=c.arg(0); if(module==image_base||modules.end()!=std::find_if(modules.begin(),modules.end(),[module](const auto& entry){return entry.second==module;})) return 1;
+        for(const auto& dll:dlls) if(dll.second.image.base==module) return 1;
+        set_last_error(6); return 0;
+    });
     // FreeLibrary: decrements the refcount of a module this surface loaded or
     // tracks, and never unmaps: a real unload (refcount to zero -> unmap +
     // DLL_PROCESS_DETACH) is not implemented, and the coverage matrix says so.
@@ -1022,6 +1034,17 @@ inline void Guest::register_all() {
         for (const auto& m : modules) if (m.second == h) return 1;
         set_last_error(126);  // ERROR_MOD_NOT_FOUND
         return 0; });
+    reg.add("kernel32.dll", "FreeLibraryAndExitThread", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        if(!in_thread_body)throw Fault(FaultKind::Unsupported,c.eip,c.arg(0),"FreeLibraryAndExitThread: only guest worker-thread exit is modeled");
+        uint32_t h=c.arg(0);bool freed=h==image_base;
+        for(auto& kv:dlls)if(kv.second.image.base==h){if(kv.second.refs>1)--kv.second.refs;freed=true;break;}
+        if(!freed)for(const auto& m:modules)if(m.second==h){freed=true;break;}
+        if(!freed)set_last_error(126);
+        thread_exit_code=c.arg(1);throw ThreadExit{};
+    });
+    reg.add("kernel32.dll", "DebugBreak", Conv::Stdcall, 0, [](Cpu& c) -> uint32_t {
+        throw Fault(FaultKind::Unsupported,c.eip,c.eip,"DebugBreak: guest debugger/breakpoint delivery is unavailable");
+    });
     // IsDBCSLeadByteEx: the code pages this surface answers (1252, 437, 65001)
     // are all single-byte or UTF-8, so no byte is a lead byte.
     reg.add("kernel32.dll", "IsDBCSLeadByteEx", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 0; });
@@ -1142,10 +1165,28 @@ inline void Guest::register_all() {
         uint32_t result=sync_wait(c,h,timeout);if(result==0xffffffffu)set_last_error(6);return result; });
     reg.add("kernel32.dll", "WaitForSingleObjectEx", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
         run_pending_threads(c); return 0; });
-    // WaitForMultipleObjects(Ex): the surface's handles are all thread or event
-    // stand-ins, so the wait succeeds with the first object (WAIT_OBJECT_0).
+    // WaitForMultipleObjects: evaluate the virtual thread/sync handles instead
+    // of reporting success for an unsignaled event. Timeouts are immediate because
+    // the cooperative guest has no virtual clock; infinite blocked waits fault clearly.
     reg.add("kernel32.dll", "WaitForMultipleObjects", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
-        run_pending_threads(c); return 0; });
+        uint32_t count=c.arg(0), handles=c.arg(1), timeout=c.arg(3); bool wait_all=c.arg(2)!=0;
+        if(!count||count>64||!handles){set_last_error(87);return 0xffffffffu;}
+        run_pending_threads(c); std::vector<uint32_t> values(count); uint32_t ready_count=0, ready_index=0;
+        for(uint32_t i=0;i<count;++i){uint32_t h=mem.r32(handles+i*4);values[i]=h;
+            if(thread_ids.count(h)||thread_exit_codes.count(h)){if(!ready_count)ready_index=i;++ready_count;continue;}
+            auto it=sync_handles.find(h);if(it==sync_handles.end()){set_last_error(6);return 0xffffffffu;}
+            const auto& o=sync_objects[it->second];uint32_t tid=c.fs_base?mem.r32(c.fs_base+0x24):1u;
+            bool ready=(o.kind==SyncKind::Event&&o.signaled)||(o.kind==SyncKind::Semaphore&&o.count)||(o.kind==SyncKind::Mutex&&(!o.owner||o.owner==tid));
+            if(ready){if(!ready_count)ready_index=i;++ready_count;}
+        }
+        if(wait_all?ready_count==count:ready_count!=0){
+            if(wait_all){for(uint32_t h:values)if(sync_handles.count(h)){uint32_t r=sync_wait(c,h,0);if(r==0xffffffffu)return r;}return 0;}
+            uint32_t h=values[ready_index];if(sync_handles.count(h)){uint32_t r=sync_wait(c,h,0);if(r==0xffffffffu)return r;}
+            return ready_index;
+        }
+        if(timeout==0xffffffffu)throw Fault(FaultKind::Unsupported,c.eip,c.eip,"WaitForMultipleObjects: unsignaled infinite wait");
+        return 258u;
+    });
     reg.add("kernel32.dll", "WaitForMultipleObjectsEx", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
         run_pending_threads(c); return 0; });
     reg.add("kernel32.dll", "GetExitCodeThread", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
@@ -1244,9 +1285,57 @@ inline void Guest::register_all() {
         if (!base) set_last_error(126);  // ERROR_MOD_NOT_FOUND, as Windows answers
         return base ? 1 : 0;
     });
+    reg.add("kernel32.dll", "GetModuleHandleExA", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+        uint32_t flags=c.arg(0), p=c.arg(1), out=c.arg(2), base=0;
+        if(flags&4){
+            if(p>=image_base&&p<image_base+0x1000000u)base=image_base;
+            else for(const auto& kv:dlls)if(p>=kv.second.image.base&&p<kv.second.image.base+kv.second.image.size){base=kv.second.image.base;break;}
+        }else if(!p)base=image_base;
+        else base=module_by_name(str(p),c.thunks);
+        if(out)mem.w32(out,base);
+        if(!base)set_last_error(126);
+        return base?1u:0u;
+    });
     // Time/clock queries the C++ runtime's once-init and this_thread use.
     reg.add("kernel32.dll", "QueryUnbiasedInterruptTime", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t p = c.arg(0); if (p) { mem.w32(p, 0x00200000u); mem.w32(p + 4, 0); } return 1; });
+    // RtlUnwind walks the live FS:[0] registration chain and invokes each
+    // language handler with unwind flags before transferring to the target IP.
+    // The x86 record/CONTEXT/dispatcher blocks live in checked guest memory, and
+    // unsupported handler dispositions fail loudly rather than skipping frames.
+    auto rtl_unwind = [this](Cpu& c) -> uint32_t {
+        uint32_t target=c.arg(0), target_ip=c.arg(1), record=c.arg(2), return_value=c.arg(3);
+        if(!c.fs_base||!target_ip||!target||target==0xffffffffu)
+            throw Fault(FaultKind::Unsupported,c.eip,target,"RtlUnwind: requires a non-null target frame and instruction pointer");
+        std::vector<std::pair<uint32_t,uint32_t>> frames; uint32_t frame=mem.r32(c.fs_base);
+        bool found=false;
+        for(unsigned count=0;count<1024&&frame!=0xffffffffu;++count){
+            for(const auto& seen:frames)if(seen.first==frame)throw Fault(FaultKind::Unsupported,c.eip,frame,"RtlUnwind: cyclic SEH registration chain");
+            uint32_t next=mem.r32(frame),handler=mem.r32(frame+4);if(!handler)throw Fault(FaultKind::Unsupported,c.eip,frame,"RtlUnwind: null SEH handler");
+            frames.push_back({frame,handler});if(frame==target){found=true;break;}frame=next;
+        }
+        if(!found)throw Fault(FaultKind::Unsupported,c.eip,target,"RtlUnwind: target frame is not on the guest SEH chain");
+        if(!record){record=heap.alloc(80);std::vector<uint8_t> zero_record(80);mem.write_bytes(record,zero_record.data(),80);mem.w32(record,0xC0000027u);}
+        uint32_t context=heap.alloc(716),dispatcher=heap.alloc(36);
+        std::vector<uint8_t> zero_context(716),zero_dispatcher(36);mem.write_bytes(context,zero_context.data(),716);mem.write_bytes(dispatcher,zero_dispatcher.data(),36);
+        mem.w32(context,0x00010007u);mem.w32(context+156,c.reg[EDI]);mem.w32(context+160,c.reg[ESI]);mem.w32(context+164,c.reg[EBX]);
+        mem.w32(context+168,c.reg[EDX]);mem.w32(context+172,c.reg[ECX]);mem.w32(context+176,c.reg[EAX]);mem.w32(context+180,c.reg[EBP]);
+        mem.w32(context+184,c.eip);mem.w32(context+192,c.eflags);mem.w32(context+196,c.reg[ESP]);
+        uint32_t prior_flags=mem.r32(record+4);
+        for(const auto& entry:frames){
+            uint32_t current=entry.first,handler=entry.second,next=mem.r32(current);
+            if(mem.r32(c.fs_base)!=current)throw Fault(FaultKind::Unsupported,c.eip,current,"RtlUnwind: handler changed the SEH chain (collided unwind unsupported)");
+            mem.w32(record+4,prior_flags|2u|(current==target?0x20u:0u));
+            mem.w32(dispatcher,c.eip);mem.w32(dispatcher+4,image_base);mem.w32(dispatcher+8,0);mem.w32(dispatcher+12,current);
+            mem.w32(dispatcher+16,target_ip);mem.w32(dispatcher+20,context);mem.w32(dispatcher+24,handler);mem.w32(dispatcher+28,0);mem.w32(dispatcher+32,0);
+            uint32_t disposition=c.call(handler,{record,current,context,dispatcher});
+            if(disposition!=1u)throw Fault(FaultKind::Unsupported,c.eip,current,"RtlUnwind: handler disposition is not CONTINUE_SEARCH");
+            if(current!=target)mem.w32(c.fs_base,next);
+        }
+        mem.w32(c.fs_base,target);c.reg[EAX]=return_value;c.resume_at(target_ip,target);return 0;
+    };
+    reg.add("kernel32.dll","RtlUnwind",Conv::Stdcall,4,rtl_unwind);
+    reg.add("ntdll.dll","RtlUnwind",Conv::Stdcall,4,rtl_unwind);
     // RaiseFailFastException: a fatal runtime error (fail-fast); end the run
     // with the crash exit code instead of continuing with broken state.
     reg.add("kernel32.dll", "RaiseFailFastException", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { do_exit(c, 0x0DEAD10Cu); return 0; });
@@ -1298,6 +1387,9 @@ inline void Guest::register_all() {
         }
         return 1;
     });
+    // Physical host memory is not a truthful proxy for the guest's virtual
+    // address-space limits; expose the documented unsupported error instead.
+    reg.add("kernel32.dll", "GlobalMemoryStatusEx", Conv::Stdcall, 1, [this](Cpu&) -> uint32_t { set_last_error(120); return 0; });
     auto format_locale = [this](bool date, Cpu& c) -> uint32_t {
         Host::LocaleCall q; q.date=date; q.locale=c.arg(0); q.flags=c.arg(1);
         q.has_system_time=c.arg(2)!=0; q.has_format=c.arg(3)!=0; q.has_output_buffer=c.arg(4)!=0; q.buffer_chars=int32_t(c.arg(5));
@@ -1381,6 +1473,20 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll","GetLocaleInfoA",Conv::Stdcall,4,[get_locale_info](Cpu& c){return get_locale_info(c,Host::NlsOperation::GetLocaleInfoA);});
     reg.add("kernel32.dll","GetLocaleInfoW",Conv::Stdcall,4,[get_locale_info](Cpu& c){return get_locale_info(c,Host::NlsOperation::GetLocaleInfoW);});
     reg.add("kernel32.dll","GetLocaleInfoEx",Conv::Stdcall,4,[get_locale_info](Cpu& c){return get_locale_info(c,Host::NlsOperation::GetLocaleInfoEx);});
+    auto get_lcid = [this](Cpu&, const char* api) -> uint32_t {
+#if defined(_WIN32)
+        using Fn = LCID (WINAPI*)();
+        static HMODULE k32 = LoadLibraryExW(L"kernel32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        FARPROC proc = k32 ? GetProcAddress(k32, api) : nullptr;
+        if (!proc) { set_last_error(ERROR_CALL_NOT_IMPLEMENTED); return 0; }
+        set_last_error(0); return reinterpret_cast<Fn>(proc)();
+#else
+        (void)api; set_last_error(120); return 0;
+#endif
+    };
+    reg.add("kernel32.dll","GetUserDefaultLCID",Conv::Stdcall,0,[get_lcid](Cpu& c)->uint32_t{return get_lcid(c,"GetUserDefaultLCID");});
+    reg.add("kernel32.dll","GetSystemDefaultLCID",Conv::Stdcall,0,[get_lcid](Cpu& c)->uint32_t{return get_lcid(c,"GetSystemDefaultLCID");});
+    reg.add("kernel32.dll","GetThreadLocale",Conv::Stdcall,0,[get_lcid](Cpu& c)->uint32_t{return get_lcid(c,"GetThreadLocale");});
     reg.add("kernel32.dll","GetUserDefaultLocaleName",Conv::Stdcall,2,[this](Cpu& c)->uint32_t {
         const uint32_t output=c.arg(0),capacity=c.arg(1);
         if(!output||!capacity){set_last_error(87);return 0;}
@@ -1646,7 +1752,8 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "ReleaseSRWLockExclusive", Conv::Stdcall, 1, [release_srw](Cpu& c) -> uint32_t { return release_srw(c, false); });
     reg.add("kernel32.dll", "ReleaseSRWLockShared", Conv::Stdcall, 1, [release_srw](Cpu& c) -> uint32_t { return release_srw(c, true); });
     // OpenEventA opens a same-process named event; process/session namespaces and ACLs are outside this guest.
-    reg.add("kernel32.dll", "OpenEventA", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { return open_sync(SyncKind::Event,c.arg(2)); });
+    reg.add("kernel32.dll", "OpenEventA", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { return open_sync(SyncKind::Event,c.arg(2),false); });
+    reg.add("kernel32.dll", "OpenEventW", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { return open_sync(SyncKind::Event,c.arg(2),true); });
     // TLS
     reg.add("kernel32.dll", "TlsAlloc", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t {
         if (next_tls >= 64) return 0xFFFFFFFFu;
@@ -1869,16 +1976,23 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "AllocConsole", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { set_last_error(5); return 0; });
     reg.add("kernel32.dll", "FreeConsole", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { set_last_error(87); return 0; });
     reg.add("kernel32.dll", "AttachConsole", Conv::Stdcall, 1, [this](Cpu&) -> uint32_t { set_last_error(6); return 0; });
-    // Console output handles: stdout/stderr are the Host sinks.
+    // Standard handles are process state; the initial values address the Play sinks.
     reg.add("kernel32.dll", "GetStdHandle", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         auto it = std_handles.find(int32_t(c.arg(0)));
-        return it != std_handles.end() ? it->second : 0xFFFFFFFFu;
+        if (it == std_handles.end()) { set_last_error(87); return 0xFFFFFFFFu; }
+        return it->second;
     });
     reg.add("kernel32.dll", "SetStdHandle", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         auto it = std_handles.find(int32_t(c.arg(0)));
         if (it == std_handles.end()) { set_last_error(87); return 0; }
-        it->second = c.arg(1); set_last_error(0); return 1;
+        it->second = c.arg(1); return 1;
     });
+    // The UWP guest has no attached console: these APIs fail with ERROR_INVALID_HANDLE,
+    // rather than claiming that the host's redirected streams are console buffers.
+    reg.add("kernel32.dll", "GetConsoleCP", Conv::Stdcall, 0, no_console);
+    reg.add("kernel32.dll", "GetConsoleOutputCP", Conv::Stdcall, 0, no_console);
+    reg.add("kernel32.dll", "GetConsoleMode", Conv::Stdcall, 2, no_console);
+    reg.add("kernel32.dll", "SetConsoleMode", Conv::Stdcall, 2, no_console);
     // The guest has no attached debugger. Windows reports FALSE and discards
     // OutputDebugString calls when no debugger is present.
     reg.add("kernel32.dll", "IsDebuggerPresent", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
