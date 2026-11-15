@@ -27,6 +27,7 @@ struct Host {
     };
     struct FileCall {
         enum class Kind { CreateA, CreateW, Close, Read, Size, Time, AttributesA, Seek, SeekEx, End, TimeConvert, TimeLocal } kind;
+        enum class Operation { None, CreateDirectoryA, DeleteA, DeleteW, SystemToFileTime, SystemToTzLocal } operation = Operation::None;
         std::string path_a; std::u16string path_w;
         uint64_t handle = 0, template_handle = 0, value = 0; int64_t distance = 0, position = 0; uint32_t method = 0, args[5]{}, error = 0; bool succeeded = false;
         std::vector<uint8_t> data;
@@ -46,6 +47,7 @@ struct Host {
     std::function<void(const std::string&)> tee;  // optional live sink
     std::function<NlsResponse(const NlsRequest&)> nls_call;
     std::function<void(FileCall&)> file_call;     // Play's native kernel32 file layer
+    std::function<uint64_t()> tick_count;          // same monotonic millisecond source for the guest tick APIs
     std::function<void(LocaleCall&)> locale_call; // Play's native kernel32 locale formatter
     std::map<std::string, unsigned> calls;        // import -> call count
     static constexpr uint32_t H_STDIN = 3, H_STDOUT = 7, H_STDERR = 11;
