@@ -1,0 +1,42 @@
+diff -ruN a/src/dx9asm/dxbc_chunks.cpp b/src/dx9asm/dxbc_chunks.cpp
+--- a/src/dx9asm/dxbc_chunks.cpp
++++ b/src/dx9asm/dxbc_chunks.cpp
+@@ -518,7 +518,19 @@
+         IOSGNElement* elementStart = (IOSGNElement*)nextPtr(obj);
+
+         if (shdrCode.isTransient(isInput(ChunkType))) {
++          std::vector<const TransientRegisterMapping*> activeMappings;
+           for (auto& transMapping : RegisterMap::getTransientMappings()) {
++            uint32_t activeMask = 0;
++            forEachValidElement<isInput(ChunkType)>(bytecode, shdrCode, [&](const RegisterMapping& mapping, uint32_t i) {
++              if (mapping.dclInfo.usage == transMapping.d3d9Usage && mapping.dclInfo.usageIndex == transMapping.d3d9UsageIndex)
++                activeMask |= isInput(ChunkType) ? mapping.readMask : mapping.writeMask;
++            });
++
++            activeMask = DECODE_D3D10_SB_OPERAND_4_COMPONENT_MASK(activeMask);
++            if (!activeMask)
++              continue;
++            activeMappings.push_back(&transMapping);
++
+             IOSGNElement element;
+
+             element.nameOffset = 0; // <-- Must be set later!
+@@ -550,14 +562,12 @@
+             pushObject(obj, element);
+           }
+
+-          uint32_t count = 0;
+-          for (auto& transMapping : RegisterMap::getTransientMappings()) {
+-            elementStart[count].nameOffset = this->getChunkSize(bytecode);
+-            pushAlignedString(obj, transMapping.dxbcSemanticName);
+-            count++;
++          for (size_t i = 0; i < activeMappings.size(); i++) {
++            elementStart[i].nameOffset = this->getChunkSize(bytecode);
++            pushAlignedString(obj, activeMappings[i]->dxbcSemanticName);
+           }
+
+-          elementCount = count;
++          elementCount = activeMappings.size();
+         }
+         else {
+           forEachValidElement<isInput(ChunkType)>(bytecode, shdrCode, [&](const RegisterMapping& mapping, uint32_t i) {
