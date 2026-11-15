@@ -13,6 +13,11 @@ LOG = str(Path(os.environ.get('RUNS_DIR', ROOT / 'out/runs')) / 'stubs/native-di
 # ---------- 1. imports to classify ----------
 imps = collections.OrderedDict()   # (dll,sym) -> route
 for ln in open(LOG, errors='replace'):
+    donor = re.search(r'DWPE ROUTE (\S+?)!(\S+)', ln)
+    if donor:
+        dll, sym = donor.groups()
+        imps.setdefault((dll.lower(), sym), 'donor')
+        continue
     m = re.search(r'MLP (ROUTE|MISSING|STUB) (\S+?)!(\S+)\s+(.*)', ln)
     if not m: continue
     kind, dll, sym, rest = m.groups()

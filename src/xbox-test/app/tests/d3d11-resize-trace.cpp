@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Contract test for the opt-in D3D11 call ring: it keeps the newest hooked
-// calls, preserves their order, and emits them when a failed Present flushes it.
+// Contract test for the opt-in D3D11 command ring: it keeps the newest entries,
+// preserves their order, and skips a flush rather than blocking on contention.
 #include "../host/d3d11_diag.h"
 #include <chrono>
 #include <cstdio>
@@ -67,10 +67,12 @@ int main() {
     });
     held.wait();
     auto flush=std::async(std::launch::async,[]{d3d11_diag::flushTrace();});
-    CHECK(flush.wait_for(std::chrono::milliseconds(20))==std::future_status::timeout);
+    CHECK(flush.wait_for(std::chrono::milliseconds(20))==std::future_status::ready);
+    flush.get();
+    CHECK(lines.empty());   // contention skips this best-effort flush without blocking
     releaseLock.set_value();
     holder.join();
-    flush.get();
+    d3d11_diag::flushTrace();
     CHECK(lines.size()==6);
     CHECK(lines.size()>1&&lines[1].find("#1 CreateRenderTargetView")!=std::string::npos);
 

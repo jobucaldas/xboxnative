@@ -54,8 +54,19 @@ if op == 'put':
     if cfg.get('put_fail') and cfg['put_fail'] in data:
         print('put HTTP 000'); save(); sys.exit(7)
     shutil.copy(a[2], st / Path(a[2]).name); print('put HTTP 200')
-    if cfg.get('running') and 'press' in data:
-        if cfg.get('install') and not cfg.get('installed'):
+    if cfg.get('running') and data.strip():
+        command = data.strip()
+        boot_append('cmd.txt: consumed file; queued 1 SYNTHETIC command(s)')
+        boot_append("cmd.txt SYNTHETIC command: '%s' (screen=2)" % command)
+        if command == 'press' and cfg.get('picker'):
+            boot_append('detail: Play opens the launch-option picker appid=%d options=2 selected=0 (cmd.txt)' % cfg['appid'])
+            save(); sys.exit(0)
+        if command.startswith('pick '):
+            index = int(command.split()[1])
+            boot_append('picker: options=2 chose=%d label="Option %d"' % (index, index))
+        if command != 'press' and not command.startswith('pick '):
+            save(); sys.exit(0)
+        if command == 'press' and cfg.get('install') and not cfg.get('installed'):
             # The first press installs; the launcher never launches by itself, so
             # no launch request appears until the script presses again.
             cfg['installed'] = True
@@ -128,15 +139,16 @@ class PlayRunnerTransportTest(unittest.TestCase):
             'terminal': True, 'ok': True, 'gameCodeExecuted': True, 'exitCode': 0}))
         (self.state / 'launch_probe.log').write_text('GAP: total=10 missing=0 win32u=0\n')
 
-    def run_play(self, timeout_s=3, **cfg):
+    def run_play(self, timeout_s=3, pick=None, **cfg):
         cfg.setdefault('app', 'ok'); cfg['appid'] = APP
         (self.root / 'fake.json').write_text(json.dumps(cfg))
         env = {k: v for k, v in os.environ.items() if not k.startswith(('DP_', 'PT_'))}
         env.update(FAKE_ROOT=str(self.root), PKG='Xboxnative.Launcher_0.0.0.0_x64__fake',
                    DP_HOST='invalid.invalid', DP_LOCK=str(self.root / 'lock'),
                    PATH=str(self.root / 'bin') + os.pathsep + env.get('PATH', ''))
-        p = subprocess.run(['bash', str(self.root / 'tools/play-test.sh'), str(APP), str(timeout_s),
-                            str(self.root / 'out')], env=env, capture_output=True, text=True, timeout=120)
+        argv = ['bash', str(self.root / 'tools/play-test.sh'), str(APP), str(timeout_s), str(self.root / 'out')]
+        if pick is not None: argv += ['--pick', str(pick)]
+        p = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=120)
         self.assertFalse((self.root / 'network').exists(), 'fake transport fell through to curl')
         return p.returncode, p.stdout + p.stderr
 
@@ -207,6 +219,22 @@ class PlayRunnerTransportTest(unittest.TestCase):
         self.assertEqual(rc, 0, log)
         self.assertIn('GUEST COMPLETED: launch: RESULT attempt=2000:1 ok=1', log)
         self.assertIn('dl: ===== DONE appid %d ' % APP, log)
+
+    def test_redacted_boot_excerpt_verifies_consumed_upload_and_picker(self):
+        rc, log = self.run_play(timeout_s=600, picker=True)
+        self.assertEqual(rc, 0, log)
+        excerpt = (self.root / 'out' / 'boot.session.log').read_text()
+        self.assertIn('cmd.txt: consumed file; queued 1 SYNTHETIC command(s)', excerpt)
+        self.assertIn("cmd.txt SYNTHETIC command: 'pick 0'", excerpt)
+        self.assertIn('picker: options=2 chose=0 label="Option 0"', excerpt)
+        for sensitive in ('/home/', '7656119', '192.168.', 'account name'):
+            self.assertNotIn(sensitive, excerpt)
+
+    def test_picker_accepts_explicit_option(self):
+        rc, log = self.run_play(timeout_s=600, picker=True, pick=1)
+        self.assertEqual(rc, 0, log)
+        self.assertIn('picker: options=2 chose=1 label="Option 1"', log)
+        self.assertIn("cmd.txt SYNTHETIC command: 'pick 1'", log)
 
     def test_auto_launch_after_install_is_rejected(self):
         # A launch request that follows the install without a second press is the

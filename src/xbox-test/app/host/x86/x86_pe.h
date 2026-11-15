@@ -6,6 +6,8 @@
 // allowlist are bound to stubs that Fault when *called* (never silently stubbed).
 #pragma once
 #include <map>
+#include <tuple>
+#include "../../gap_summary.h"
 #include "../wxl_pe32.h"
 #include "x86_cpu.h"
 #include "apiset.h"
@@ -45,6 +47,7 @@ struct Image {
     uint32_t entry_rva = 0;
     unsigned relocations = 0, imports = 0, bound = 0;
     std::vector<std::string> unresolved;
+    std::vector<std::tuple<std::string, std::string, gap_summary::Outcome>> gap_imports;
     // Implicit TLS (IMAGE_DIRECTORY_ENTRY_TLS): the fields are absolute VAs as
     // they stand after relocation, since they are read from the mapped image.
     struct Tls {
@@ -130,8 +133,12 @@ inline void read_exports(Image& img, const std::vector<uint8_t>& bytes) {
 }
 inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, const std::vector<uint8_t>& file, uint32_t load_base = 0) {
     if (file.size() < 0x40) throw std::runtime_error("PE32 truncated");
-    size_t nt = u32(file, 0x3c);
-    uint32_t preferred = u32(file, nt + 24 + 28);
+    size_t nt = u32(file, 0x3c), opt = nt + 24;
+    uint32_t optional_size = u32(file, nt + 20, 2);
+    if (optional_size >= 96 + 15 * 8 && u32(file, opt + 92) > 14 &&
+        (u32(file, opt + 96 + 14 * 8) || u32(file, opt + 96 + 14 * 8 + 4)))
+        throw std::runtime_error("managed (CLR) image: needs a .NET runtime host");
+    uint32_t preferred = u32(file, opt + 28);
     wxl::Pe32 pe; pe.map(file, load_base ? load_base : preferred);
     Image img; img.base = pe.logical; img.size = uint32_t(pe.bytes.size()); img.entry_rva = pe.entry; img.entry = pe.logical + pe.entry; img.relocations = pe.relocations;
     // Sections: headers R; each section gets its own page protections.
@@ -154,11 +161,12 @@ inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, cons
             // the unresolved label below keeps the name the game imported.
             const std::string served = apiset::served_by(dll, sym);
             auto dit = reg.data.find({served, Registry::key_sym(sym)});
-            if (dit != reg.data.end()) { mem.w32(img.base + dst + j * 4, dit->second); ++img.bound; continue; }
+            if (dit != reg.data.end()) { mem.w32(img.base + dst + j * 4, dit->second); ++img.bound; img.gap_imports.emplace_back(dll,sym,gap_summary::Outcome::routed); continue; }
             auto it = reg.map.find({served, Registry::key_sym(sym)}); uint32_t stub;
-            if (it != reg.map.end()) { stub = table.add(it->second); ++img.bound; }
+            if (it != reg.map.end()) { stub = table.add(it->second); ++img.bound; img.gap_imports.emplace_back(dll,sym,gap_summary::Outcome::routed); }
             else {
                 img.unresolved.push_back(dll + "!" + sym);
+                img.gap_imports.emplace_back(dll,sym,gap_summary::Outcome::missing);
                 std::string label = dll + "!" + sym;
                 stub = table.add(Thunk{dll, sym, Conv::Stdcall, 0, [label](Cpu& c) -> uint32_t {
                     throw Fault(FaultKind::UnresolvedImport, c.eip, 0, "call to unresolved import " + label); }});
@@ -189,7 +197,7 @@ inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, cons
     // runtime pseudo-relocator memcpy into .text (and .rdata) promotes the
     // page instead of faulting. PROT_COW gates the promotion; the
     // interpreter's own W^X code pages never carry it.
-    size_t opt = nt + 24, ns = wxl::Pe32::read(pe.bytes, nt + 6, 2), secs = opt + wxl::Pe32::read(pe.bytes, nt + 20, 2);
+    size_t ns = wxl::Pe32::read(pe.bytes, nt + 6, 2), secs = opt + wxl::Pe32::read(pe.bytes, nt + 20, 2);
     mem.protect(img.base, img.size, PROT_R | PROT_COW);  // headers and any gap between sections
     for (size_t i = 0; i < ns; ++i) {
         size_t s = secs + 40 * i; uint32_t va = u32(pe.bytes, s + 12), vs = std::max(u32(pe.bytes, s + 8), u32(pe.bytes, s + 16)), ch = u32(pe.bytes, s + 36);
@@ -290,8 +298,10 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
     constexpr uint32_t kDllArenaBase = 0x38000000u, kDllArenaEnd = 0x60000000u;
     size_t nt0 = u32(file, 0x3c);
     uint32_t preferred = u32(file, nt0 + 24 + 28);
-    uint32_t image_size = u32(file, nt0 + 24 + 56);  // SizeOfImage (page-aligned; wxl::Pe32 validates)
+    uint32_t image_size = u32(file, nt0 + 24 + 56);  // SizeOfImage from PE; reserve the page-rounded mapping.
     if (!image_size) throw std::runtime_error("DLL load: SizeOfImage is 0");
+    if (image_size > UINT32_MAX - (Memory::PAGE - 1)) throw std::runtime_error("DLL load: SizeOfImage rounding overflow");
+    image_size = (image_size + Memory::PAGE - 1) & ~(Memory::PAGE - 1);
     uint32_t load_base = preferred;
     if (!mem.free_range(preferred, image_size)) {
         uint32_t candidate = kDllArenaBase;
@@ -389,6 +399,8 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
                 // from the unresolved list so the runner reports only real gaps.
                 auto u = std::find(img.unresolved.begin(), img.unresolved.end(), label);
                 if (u != img.unresolved.end()) img.unresolved.erase(u);
+                for(auto& gap:img.gap_imports) if(std::get<0>(gap)+"!"+std::get<1>(gap)==label)
+                    std::get<2>(gap)=gap_summary::Outcome::routed;
             }
         }
     }
@@ -424,7 +436,10 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
 // GetProcAddress) can never land on the address that call is waiting to return
 // to. Stubs beyond the capacity are refused by ThunkTable::add.
 inline void map_thunk_page(Memory& mem, ThunkTable& table) {
-    uint32_t len = (table.span() + 4095) & ~4095u;
+    // Imports added by GetProcAddress and guest-created COM objects arrive after
+    // startup, so sizing this mapping only from the current table can exhaust it
+    // during ordinary execution. Reserve 1 MiB (65,535 stubs plus the sentinel).
+    uint32_t len = 1u << 20;
     if (!table.capacity) table.capacity = len / table.stride - 1;  // last slot: the sentinel
     mem.map(table.base, len, PROT_R | PROT_W);
     std::vector<uint8_t> int3(len, 0xCC); mem.write_bytes(table.base, int3.data(), len);

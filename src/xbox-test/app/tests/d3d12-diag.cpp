@@ -49,6 +49,24 @@ static void makeDxilContainer(unsigned char* bytes,bool signedContainer) {
     memcpy(bytes+24,&total,4);memcpy(bytes+28,&chunks,4);memcpy(bytes+32,&offset,4);
     memcpy(bytes+offset,"DXIL",4);memcpy(bytes+offset+4,&chunkBytes,4);
 }
+static std::vector<unsigned char> makeRichDxilContainer(bool signedContainer) {
+    const uint32_t dxilOffset=48,versOffset=80,psvOffset=104;
+    const uint32_t total=116, chunks=3, dxilBytes=24, versBytes=16, psvBytes=4;
+    std::vector<unsigned char> bytes(total);
+    memcpy(bytes.data(),"DXBC",4); if(signedContainer)bytes[4]=1;
+    memcpy(bytes.data()+24,&total,4);memcpy(bytes.data()+28,&chunks,4);
+    memcpy(bytes.data()+32,&dxilOffset,4);memcpy(bytes.data()+36,&versOffset,4);memcpy(bytes.data()+40,&psvOffset,4);
+    memcpy(bytes.data()+dxilOffset,"DXIL",4);memcpy(bytes.data()+dxilOffset+4,&dxilBytes,4);
+    uint32_t programVersion=(1u<<16)|(6u<<4);uint32_t headerWords=6;
+    memcpy(bytes.data()+dxilOffset+8,&programVersion,4);memcpy(bytes.data()+dxilOffset+12,&headerWords,4);
+    memcpy(bytes.data()+dxilOffset+16,"DXIL",4);uint32_t dxilVersion=0x108;
+    memcpy(bytes.data()+dxilOffset+20,&dxilVersion,4);
+    memcpy(bytes.data()+versOffset,"VERS",4);memcpy(bytes.data()+versOffset+4,&versBytes,4);
+    uint16_t major=1,minor=8;memcpy(bytes.data()+versOffset+8,&major,2);memcpy(bytes.data()+versOffset+10,&minor,2);
+    memcpy(bytes.data()+psvOffset,"PSV0",4);memcpy(bytes.data()+psvOffset+4,&psvBytes,4);
+    uint32_t runtimeInfoSize=32;memcpy(bytes.data()+psvOffset+8,&runtimeInfoSize,4);
+    return bytes;
+}
 
 // A stream builder with the layout CD3DX12_PIPELINE_STATE_STREAM_SUBOBJECT has
 // (DirectX-Headers v1.618.1, d3dx12_pipeline_state_stream.h): an alignas(void*)
@@ -258,6 +276,14 @@ int main(int argc,char** argv) {
     CHECK(signedDxil[4]==1&&unsignedStorage[4]==0&&unsignedBytecode.pShaderBytecode==unsignedStorage.data());
     dxbc[32]=47;
     CHECK(!d3d12_diag::dxbcHasDxilChunk(dxbc,sizeof dxbc));
+    const std::vector<unsigned char> rich=makeRichDxilContainer(false);
+    std::string richText=d3d12_diag::shaderStageText("VS",rich.data(),rich.size());
+    CHECK(richText.find("VS:dxil sm6.0")!=std::string::npos&&richText.find("digest=zero")!=std::string::npos&&
+        richText.find("validator=1.8")!=std::string::npos);
+    const std::vector<unsigned char> signedRich=makeRichDxilContainer(true);
+    CHECK(d3d12_diag::shaderStageText("PS",signedRich.data(),signedRich.size()).find("digest=set")!=std::string::npos);
+    std::vector<unsigned char> truncatedRich=rich;truncatedRich.resize(60);
+    CHECK(d3d12_diag::shaderStageText("VS",truncatedRich.data(),truncatedRich.size()).find("malformed")!=std::string::npos);
     D3D12_GRAPHICS_PIPELINE_STATE_DESC state{};
     state.InputLayout.NumElements=3;state.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     state.StreamOutput.NumEntries=2;state.StreamOutput.NumStrides=1;state.SampleMask=0x12345678;
@@ -462,6 +488,13 @@ int main(int argc,char** argv) {
         CHECK(call(d3d12_diag::CreateGraphicsPipelineState,&dxilState,__uuidof(ID3D12PipelineState),&out)==E_INVALIDARG);
         CHECK(count("CreateGraphicsPipelineState hr=0x80070057 vs-kind=dxbc-container dxil-chunk=yes")==1);
         CHECK(count("CreateGraphicsPipelineState hr=0x80070057 vs-kind=dxbc-container dxil-chunk=yes bytes=")==0);
+        const std::vector<unsigned char> richTrace=makeRichDxilContainer(false);
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC richState{};richState.VS={richTrace.data(),richTrace.size()};
+        CHECK(call(d3d12_diag::CreateGraphicsPipelineState,&richState,__uuidof(ID3D12PipelineState),&out)==E_INVALIDARG);
+        if(traceMode)CHECK(count("pso-shaders VS:dxil sm6.0 kind=vs digest=zero validator=1.8")==1);
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC truncatedState=richState;truncatedState.VS={truncatedRich.data(),truncatedRich.size()};
+        CHECK(call(d3d12_diag::CreateGraphicsPipelineState,&truncatedState,__uuidof(ID3D12PipelineState),&out)==E_INVALIDARG);
+        if(traceMode)CHECK(count("pso-shaders VS:malformed digest=zero")==1);
         std::string dxilHash;d3d12_diag::shaderText(dxilContainer,sizeof dxilContainer,&dxilHash);
         if(!traceMode) {
             CHECK(count(("vs-bytes=52 vs-hash="+dxilHash+" ps-bytes=0 ps-hash=none rtv=1[28(R8G8B8A8_UNORM)] dsv="+
@@ -709,6 +742,7 @@ int main(int argc,char** argv) {
     // The trace: silent unless the probe file was present at the first adopt.
     if(traceMode) {
         CHECK(count("trace on (LocalState")==1);
+        CHECK(count("trace dxil.dll probe=")==1);
         // A call that never returns stays in flight, is named as pending, and is
         // not overwritten by 70 newer calls. When it finally ends, the entries of
         // the newer calls keep their own results (no clobbering).

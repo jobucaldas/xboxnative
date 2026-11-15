@@ -14,7 +14,9 @@ if [[ ! -f "$WINEPREFIX/system.reg" ]];then timeout -k 2 60 wineboot -u;fi
 out=out/play-tests
 mkdir -p "$out/obj"
 printf 'LIBRARY play-missing.dll\nEXPORTS\nDeliberatelyMissingPlayImport\n' > "$out/obj/missing.def"
+printf 'LIBRARY dbghelp.dll\nEXPORTS\nSymInitialize\n' > "$out/obj/stub.def"
 llvm-dlltool-19 -m i386:x86-64 -d "$out/obj/missing.def" -l "$out/obj/missing.lib"
+llvm-dlltool-19 -m i386:x86-64 -d "$out/obj/stub.def" -l "$out/obj/stub.lib"
 cat > "$out/obj/forward.def" <<'DEF'
 LIBRARY play-forward.dll
 EXPORTS
@@ -40,6 +42,7 @@ for kind in dll exe;do
  clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector "${flags[@]}" -c tests/play-guest.cpp -o "$out/obj/$kind.obj"
 done
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_STATIC_MISSING -c tests/play-guest.cpp -o "$out/obj/missing.obj"
+clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_STATIC_MISSING -DPLAY_STATIC_STUB -c tests/play-guest.cpp -o "$out/obj/gap.obj"
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_STATIC_STEAM -c tests/play-guest.cpp -o "$out/obj/steam.obj"
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_DLL -DPLAY_STATIC_MISSING -c tests/play-guest.cpp -o "$out/obj/unresolved.obj"
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_DLL -DPLAY_REJECT_ATTACH -c tests/play-guest.cpp -o "$out/obj/reject.obj"
@@ -63,6 +66,7 @@ x86_64-w64-mingw32-windres ../uwph/kernel32/resource_fixture.rc -O coff -o "$out
 lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-dependency.dll" /implib:"$out/obj/dependency.lib" "$out/obj/dll.obj" "$MINGW_SYSROOT"/lib/libkernel32.a
 lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-guest.exe" "$out/obj/exe.obj" "$out/obj/resources.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$out/obj/missing.lib" "$CHKSTK_OBJ" "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libadvapi32.a "$MINGW_SYSROOT"/lib/libkernel32.a
 lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-missing.exe" "$out/obj/missing.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$out/obj/missing.lib" "$CHKSTK_OBJ" "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libadvapi32.a "$MINGW_SYSROOT"/lib/libkernel32.a
+lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-gap.exe" "$out/obj/gap.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$out/obj/missing.lib" "$out/obj/stub.lib" "$CHKSTK_OBJ" "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libadvapi32.a "$MINGW_SYSROOT"/lib/libkernel32.a
 lld-link-19 "${common[@]}" /entry:guest_exe_entry /out:"$out/play-steam.exe" "$out/obj/steam.obj" "$out/obj/dependency.lib" "$out/obj/forward.lib" "$CHKSTK_OBJ" "$MINGW_SYSROOT"/lib/libuser32.a "$MINGW_SYSROOT"/lib/libadvapi32.a "$MINGW_SYSROOT"/lib/libkernel32.a
 lld-link-19 "${common[@]}" /dll /entry:guest_dll_entry /out:"$out/play-unresolved.dll" "$out/obj/unresolved.obj" "$out/obj/missing.lib" "$MINGW_SYSROOT"/lib/libkernel32.a
 # EXE that reads its TLS through TEB slot 0, as MSVC /GA code does (no _tls_index).
@@ -284,10 +288,13 @@ tail -1 "$out/leaderboards.log"
 # The root copy was only for this run: later modes prove what happens when a
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d10-compile d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn vulkan-draw opengl;do
+for mode in observer-log reject-attach reject-mapping normal missing gap static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d10-compile d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn vulkan-draw opengl;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
+grep -q 'GAP: summary exe=play-gap.exe arch=x64 .*stub=1 missing=1' "$out/gap.log"
+grep -q 'GAP: dll=dbghelp.dll resolved=0 routed=0 donor=0 stub=1 missing=0' "$out/gap.log"
+grep -q 'GAP: missing play-missing.dll!DeliberatelyMissingPlayImport' "$out/gap.log"
 # Every vcruntime import took the ucrtbase route; none was left unresolved.
 grep -q 'VCRT ROUTE vcruntime140.dll!__CxxFrameHandler3 found=1' "$out/native-vcrt.log"
 grep -q 'VCRT ROUTE vcruntime140_1.dll!__CxxFrameHandler4 found=1' "$out/native-vcrt.log"
@@ -447,7 +454,26 @@ fi
 # patch 0001 clamps Present's interval). A host without the extension reports
 # the skipped line instead — a platform limit, never a pass.
 grep -qE 'PLAY-OPENGL STAGE swap-interval (set=1 got=1|skipped)' "$out/opengl.log"
-if grep -q 'PLAY-OPENGL PASS pixel-readback' "$out/opengl.log"; then
+# New fixture stages follow every legacy stage above. A capability limitation on
+# Wine is reported explicitly as SKIP (wine), never as a pass; unexpected stage
+# failures remain failures.
+grep '^PLAY-OPENGL STAGE ' "$out/opengl.log"
+opengl_wine_skip=0
+if grep -qE 'PLAY-OPENGL STAGE (core41-draw|bc1-sampled-readback|msaa-resolve-readback) exit=43 stage-code=[0-9]+ SKIP \(wine\):' "$out/opengl.log"; then
+  grep -E 'PLAY-OPENGL STAGE (core41-draw|bc1-sampled-readback|msaa-resolve-readback) exit=43 stage-code=[0-9]+ SKIP \(wine\):' "$out/opengl.log"
+  echo "PLAY-OPENGL new stages SKIP (wine); not a pass"
+  opengl_wine_skip=1
+else
+  grep -q 'PLAY-OPENGL STAGE share-lists-draw exit=0 shared-buffer-and-texture readback=64,128,192,255' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE bc1-sampled-readback exit=0 format=BC1 got=255,0,0,255' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE resize-framebuffer exit=0 client-size-and-readback=0,128,64,255' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE core41-draw exit=0 requested=4.1 version="4\.[1-9]' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE core41-draw exit=0 requested=4.1 version=".*" got=64,128,192,255' "$out/opengl.log"
+  grep -q 'PLAY-OPENGL STAGE msaa-resolve-readback exit=0 samples=4 got=64,128,191,255' "$out/opengl.log"
+fi
+if [ "$opengl_wine_skip" = 1 ]; then
+  :
+elif grep -q 'PLAY-OPENGL PASS pixel-readback' "$out/opengl.log"; then
   echo "PLAY-OPENGL PASS pixel-readback"
 elif grep -q 'PLAY-OPENGL BLOCKED pixel-readback' "$out/opengl.log"; then
   echo "PLAY-OPENGL BLOCKED pixel-readback on this host; not a pass"
@@ -573,7 +599,9 @@ for mode in crashctx-on crashctx-off;do
 done
 grep -Eq 'CRASHCTX fault play-guest\.exe\+0x[0-9a-f]+ access=read target=0x24' "$out/crashctx-on.log"
 grep -Eq 'CRASHCTX registers .*RAX=0x[0-9a-f]+.*R15=0x[0-9a-f]+.*RSP=0x[0-9a-f]+.*RBP=0x[0-9a-f]+.*RIP=0x[0-9a-f]+.*EFLAGS=0x[0-9a-f]+' "$out/crashctx-on.log"
-grep -Eq 'CRASHCTX chain\[0\] play-guest\.exe\+0x[0-9a-f]+ timestamp=0x[0-9a-f]{8} image=0x[0-9a-f]+ file=[0-9]+' "$out/crashctx-on.log"
+grep -Eq 'CRASHCTX code RIP=0x[0-9a-f]+ [0-9a-f]{64}' "$out/crashctx-on.log"
+grep -Eq 'CRASHCTX mem RCX=0x[0-9a-f]+ a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff' "$out/crashctx-on.log"
+grep -Eq 'CRASHCTX chain\[0\] play-guest\.exe\+0x[0-9a-f]+ base=0x[0-9a-f]+ timestamp=0x[0-9a-f]{8} image=0x[0-9a-f]+ file=[0-9]+' "$out/crashctx-on.log"
 ! grep -q 'CRASHCTX ' "$out/crashctx-off.log"
 grep -Eq 'unhandled exception code=0xc0000005 address=0x[0-9a-f]+ play-guest\.exe\+0x[0-9a-f]+ .*access=0 target=0x24' "$out/crashctx-off.log"
 echo 'PASS crashctx opt-in reports AV registers, module identity and caller chain; disabled adds no lines and keeps the original crash line'
