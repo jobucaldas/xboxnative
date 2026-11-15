@@ -944,6 +944,7 @@ static void dl_thread() {
 #include "guest_overlay.h"
 #include "ui_unlocks.h"
 #include "../uwph/user32/corewindow_feed.h"
+#include "key_script.h"
 #include "game_delete.h"
 #include "apibadge.h"
 
@@ -1204,6 +1205,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     bool m_guestSurface=false;
     gpad::Runner m_gpad;   // cmd.txt gpad/gpadseq presses; armed only with a guest running
     bool m_gpadSession=false; // keeps synthetic XInput slot 0 connected after the first script
+    key_script::Runner m_keyScript; // cmd.txt key <vk> [hold_ms], delivered through user32 records
     int m_guestEndGen=0;
     corewindow_input::Shared m_input; // keyboard/mouse to the guest: the record DLL's one feed, shared with guest SendInput
     bool m_inputLogged=false;
@@ -2259,6 +2261,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         m_guestEndGen=g_launch.gen;
         m_gpad.clear();   // an armed gpad program never outlives its game
         m_gpadSession=false;
+        m_input.release_all();m_keyScript.clear(); // never leave a scripted key held after the guest ends
         m_synthDead=false;   // nor a synthetic gdead hold
         achievement_poller_stop();   // the guest is exiting; stop watching its achievements.json
         m_achPollStarted=false;      // the next launch starts its own poller
@@ -2466,6 +2469,24 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     // lb/rb keep their conflict-pick role. 'view' is accepted as a no-op alias (the old filter
     // chip is gone; the sidebar's Installed entry switches the view).
     // Never periodic, never present unless a tester/script writes it; every executed line is logged as SYNTHETIC.
+    bool scripted_key_event(unsigned vk,bool pressed) {
+        UINT mapped=MapVirtualKeyW(vk,MAPVK_VK_TO_VSC_EX);
+        UINT scan=mapped&0xff;
+        bool extended=(mapped&0xff00)==0xe000||(mapped&0xff00)==0xe100;
+        return scan&&m_input.key(vk,scan,extended,pressed);
+    }
+    void scripted_key_tick() {
+        if(!m_keyScript.armed)return;
+        if(!guest_input()){m_keyScript.clear();return;}
+        const unsigned vk=m_keyScript.key.vk;
+        const auto edge=m_keyScript.tick(GetTickCount64());
+        if(edge==key_script::Edge::none)return;
+        if(!scripted_key_event(vk,edge==key_script::Edge::down)) {
+            logf("cmd.txt: key injection unavailable vk=%u",vk);
+            m_keyScript.clear();return;
+        }
+        logf("cmd.txt: key vk=%u %s",vk,edge==key_script::Edge::down?"down":"up");
+    }
     void cmdhook(double t) {
         static double next = 0, holdUntil = 0; static std::deque<std::string> q;
         if (t < next) return; next = t + 0.25;
@@ -2523,6 +2544,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             logf("cmd.txt: guide tab -> %d (synthetic)", n); return;
         }
         if (c == "stacks") { dump_thread_stacks(); logf("cmd.txt: thread stacks written to launch_probe.log"); return; }
+        // `key <vk> [hold_ms]` reaches game keyboard consumers through the same
+        // record feed as CoreWindow input: WM_KEY*, GetAsyncKeyState and GetKeyState.
+        if (c.rfind("key ",0)==0) {
+            key_script::Key key{};
+            if (!m_guestSurface || !guest_input()) { logf("cmd.txt: key ignored, no active game input"); return; }
+            if (!key_script::parse(c.c_str()+4,&key)) { logf("cmd.txt: key rejected (use key <decimal-vk> [hold_ms])"); return; }
+            if (m_keyScript.armed && m_keyScript.down && !scripted_key_event(m_keyScript.key.vk,false)) m_input.release_all();
+            m_keyScript.arm(key,GetTickCount64());
+            logf("cmd.txt: key armed vk=%u hold_ms=%u",key.vk,key.hold_ms);
+            return;
+        }
         // gpad / gpadseq: drive the running game's pad (see uwph/xinput/gpad.h).
         // Safety: armed only from this cmd.txt channel and only while a guest
         // is on screen; the game and the network cannot reach this path. The
@@ -2674,7 +2706,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             (p.IsXButton2Pressed()?corewindow_input::X2:0));
         if(fed)e.Handled(true);
     }
-    void SetWindow(CoreWindow const& w) { m_window = w; w.Activated([this](auto&&, WindowActivatedEventArgs const& e) { bool active=e.WindowActivationState()!=CoreWindowActivationState::Deactivated; xinput_core::set_active(active); if(!active)m_input.release_all(); }); w.Closed([this](auto&&, auto&&) { m_closed = true; g_quit = true; logf("window closed"); });
+    void SetWindow(CoreWindow const& w) { m_window = w; w.Activated([this](auto&&, WindowActivatedEventArgs const& e) { bool active=e.WindowActivationState()!=CoreWindowActivationState::Deactivated; xinput_core::set_active(active); if(!active){m_input.release_all();m_keyScript.clear();} }); w.Closed([this](auto&&, auto&&) { m_closed = true; g_quit = true; logf("window closed"); });
         // Every key, including Alt and F10 (which never raise KeyDown), arrives here.
         w.Dispatcher().AcceleratorKeyActivated([this](auto&&, AcceleratorKeyEventArgs const& e) {
             auto type=e.EventType();
@@ -2695,6 +2727,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void Uninitialize() { logf("Uninitialize"); }
 
     void PollGuestControllers() {
+        scripted_key_tick();
         // cmd.txt gpad presses ride the same publish as the physical pad: ORed
         // in, so an injected press can never release a button the player holds.
         m_gpad.tick(GetTickCount64());
