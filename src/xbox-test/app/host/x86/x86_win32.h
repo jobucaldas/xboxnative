@@ -9,13 +9,16 @@
 #include "x86_pe.h"
 namespace x86 {
 struct Host {
-    enum class NlsOperation { IsValidCodePage, GetCPInfo, MultiByteToWideChar, WideCharToMultiByte };
+    enum class NlsOperation { IsValidCodePage, GetCPInfo, MultiByteToWideChar, WideCharToMultiByte,
+        GetStringTypeA, GetStringTypeW, GetStringTypeExW, LCMapStringW, LCMapStringEx,
+        CompareStringW, CompareStringEx, FoldStringW };
     struct NlsRequest {
         NlsOperation operation;
-        uint32_t code_page = 0, flags = 0, output_capacity = 0;
-        int32_t input_length = 0;
-        bool input_null = false, output_null = true, wants_used_default = false;
-        std::vector<uint8_t> input, default_char;
+        uint32_t code_page = 0, flags = 0, output_capacity = 0, locale = 0, type = 0;
+        int32_t input_length = 0, input2_length = 0;
+        bool input_null = false, input2_null = false, locale_name_null = false, output_null = true, wants_used_default = false;
+        std::u16string locale_name;
+        std::vector<uint8_t> input, input2, default_char;
     };
     struct NlsResponse {
         uint32_t result = 0, last_error = 0;

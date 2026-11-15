@@ -10,6 +10,7 @@
 // address space is the interpreter's own page table (x86_mem.h).
 #pragma once
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -130,6 +131,70 @@ inline void install_nls_host(Host& host) {
             response.used_default = used_default != FALSE;
             if (response.result && !request.output_null && request.output_capacity)
                 response.output.assign(output.begin(), output.begin() + response.result);
+            break;
+        }
+        case Host::NlsOperation::GetStringTypeA:
+        case Host::NlsOperation::GetStringTypeW:
+        case Host::NlsOperation::GetStringTypeExW: {
+            static_assert(sizeof(wchar_t) == 2, "Windows wide characters are UTF-16 units");
+            const bool ansi = request.operation == Host::NlsOperation::GetStringTypeA;
+            std::vector<wchar_t> input(request.input.size() / 2);
+            if (!ansi) for (size_t i = 0; i < input.size(); ++i)
+                input[i] = wchar_t(uint16_t(request.input[i * 2]) | uint16_t(request.input[i * 2 + 1]) << 8);
+            const int count = request.input_length == -1 ? int(ansi ? request.input.size() : input.size()) : request.input_length;
+            if (count <= 0) { response.last_error = ERROR_INVALID_PARAMETER; return response; }
+            std::vector<WORD> output(static_cast<size_t>(count));
+            const char* input_a = request.input_null ? nullptr : reinterpret_cast<const char*>(request.input.data());
+            const wchar_t* input_w = request.input_null ? nullptr : input.data();
+            if (request.operation == Host::NlsOperation::GetStringTypeA)
+                response.result = ::GetStringTypeA(request.locale, request.type, input_a, request.input_length, output.data());
+            else if (request.operation == Host::NlsOperation::GetStringTypeW)
+                response.result = ::GetStringTypeW(request.type, input_w, request.input_length, output.data());
+            else response.result = ::GetStringTypeExW(request.locale, request.type, input_w, request.input_length, output.data());
+            if (response.result) {
+                const auto* bytes = reinterpret_cast<const uint8_t*>(output.data());
+                response.output.assign(bytes, bytes + output.size() * sizeof(WORD));
+            }
+            break;
+        }
+        case Host::NlsOperation::LCMapStringW:
+        case Host::NlsOperation::LCMapStringEx:
+        case Host::NlsOperation::FoldStringW: {
+            static_assert(sizeof(wchar_t) == 2, "Windows wide characters are UTF-16 units");
+            std::vector<wchar_t> input(request.input.size() / 2), output(request.output_null ? 0 : request.output_capacity);
+            for (size_t i = 0; i < input.size(); ++i)
+                input[i] = wchar_t(uint16_t(request.input[i * 2]) | uint16_t(request.input[i * 2 + 1]) << 8);
+            std::vector<wchar_t> locale(request.locale_name.begin(), request.locale_name.end()); locale.push_back(0);
+            const wchar_t* input_ptr = request.input_null ? nullptr : input.data();
+            const wchar_t* locale_ptr = request.locale_name_null ? nullptr : locale.data();
+            if (request.operation == Host::NlsOperation::LCMapStringW)
+                response.result = uint32_t(::LCMapStringW(request.locale, request.flags, input_ptr, request.input_length,
+                    output.empty() ? nullptr : output.data(), int(request.output_capacity)));
+            else if (request.operation == Host::NlsOperation::LCMapStringEx)
+                response.result = uint32_t(::LCMapStringEx(locale_ptr, request.flags, input_ptr, request.input_length,
+                    output.empty() ? nullptr : output.data(), int(request.output_capacity), nullptr, nullptr, 0));
+            else response.result = uint32_t(::FoldStringW(request.flags, input_ptr, request.input_length,
+                    output.empty() ? nullptr : output.data(), int(request.output_capacity)));
+            if (response.result && !request.output_null && request.output_capacity) {
+                const auto* bytes = reinterpret_cast<const uint8_t*>(output.data());
+                response.output.assign(bytes, bytes + size_t(response.result) * sizeof(wchar_t));
+            }
+            break;
+        }
+        case Host::NlsOperation::CompareStringW:
+        case Host::NlsOperation::CompareStringEx: {
+            static_assert(sizeof(wchar_t) == 2, "Windows wide characters are UTF-16 units");
+            std::vector<wchar_t> input(request.input.size() / 2), input2(request.input2.size() / 2);
+            for (size_t i = 0; i < input.size(); ++i) input[i] = wchar_t(uint16_t(request.input[i * 2]) | uint16_t(request.input[i * 2 + 1]) << 8);
+            for (size_t i = 0; i < input2.size(); ++i) input2[i] = wchar_t(uint16_t(request.input2[i * 2]) | uint16_t(request.input2[i * 2 + 1]) << 8);
+            std::vector<wchar_t> locale(request.locale_name.begin(), request.locale_name.end()); locale.push_back(0);
+            const wchar_t* input_ptr = request.input_null ? nullptr : input.data();
+            const wchar_t* input2_ptr = request.input2_null ? nullptr : input2.data();
+            const wchar_t* locale_ptr = request.locale_name_null ? nullptr : locale.data();
+            int result = request.operation == Host::NlsOperation::CompareStringW
+                ? ::CompareStringW(request.locale, request.flags, input_ptr, request.input_length, input2_ptr, request.input2_length)
+                : ::CompareStringEx(locale_ptr, request.flags, input_ptr, request.input_length, input2_ptr, request.input2_length, nullptr, nullptr, 0);
+            response.result = uint32_t(result);
             break;
         }
         }
