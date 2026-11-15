@@ -147,7 +147,9 @@ struct Guest {
     std::map<uint32_t, SyncObject> sync_objects;
     std::map<std::string, uint32_t> sync_names;       // names are case-sensitive (Win32)
     std::map<uint32_t, uint64_t> file_handles;         // guest handle -> Play host HANDLE
-    uint32_t file_serial = 0, sync_serial = 0, sync_handle_serial = 0;
+    std::map<uint32_t, uint64_t> find_handles;         // guest search handle -> native find HANDLE
+    std::map<uint32_t, std::pair<uint32_t, uint32_t>> com_apartments; // guest thread id -> model, init count
+    uint32_t file_serial = 0, find_serial = 0, sync_serial = 0, sync_handle_serial = 0;
     // Guest DLLs loaded by the process (lowercase module name -> Dll) and the
     // order they were mapped in (DllMain PROCESS_DETACH runs in reverse).
     // `dll_source` supplies DLL bytes by module name; empty = not found.
@@ -1566,6 +1568,65 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "CreateDirectoryA", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         if(!c.arg(0)||c.arg(1)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::AttributesA};q.operation=Host::FileCall::Operation::CreateDirectoryA;q.path_a=str(c.arg(0));
         if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    reg.add("kernel32.dll", "CreateDirectoryW", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        if(!c.arg(0)||c.arg(1)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::CreateDirectoryW};q.path_w=wstr(c.arg(0));if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    reg.add("kernel32.dll", "RemoveDirectoryA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::RemoveDirectoryA};q.path_a=str(c.arg(0));if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    reg.add("kernel32.dll", "RemoveDirectoryW", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::RemoveDirectoryW};q.path_w=wstr(c.arg(0));if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    reg.add("kernel32.dll", "GetCurrentDirectoryA", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        Host::FileCall q{Host::FileCall::Kind::GetCurrentDirectoryA};q.args[0]=c.arg(0);if(c.arg(0)>(1u<<20)){set_last_error(87);return 0;}if(c.arg(0)&&!c.arg(1)){set_last_error(87);return 0;}if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}if(q.value<c.arg(0)&&q.value&&c.arg(1)){if(q.data.size()<q.value+1){set_last_error(87);return 0;}mem.write_bytes(c.arg(1),q.data.data(),uint32_t(q.value+1));}return uint32_t(q.value); });
+    reg.add("kernel32.dll", "GetCurrentDirectoryW", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        Host::FileCall q{Host::FileCall::Kind::GetCurrentDirectoryW};q.args[0]=c.arg(0);if(c.arg(0)>(1u<<20)){set_last_error(87);return 0;}if(c.arg(0)&&!c.arg(1)){set_last_error(87);return 0;}if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}if(q.value<c.arg(0)&&q.value&&c.arg(1)){if(q.data.size()<(q.value+1)*2){set_last_error(87);return 0;}mem.write_bytes(c.arg(1),q.data.data(),uint32_t((q.value+1)*2));}return uint32_t(q.value); });
+    reg.add("kernel32.dll", "SetCurrentDirectoryA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::SetCurrentDirectoryA};q.path_a=str(c.arg(0));if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    reg.add("kernel32.dll", "SetCurrentDirectoryW", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::SetCurrentDirectoryW};q.path_w=wstr(c.arg(0));if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    auto find_first = [this](const char* name, Host::FileCall::Kind kind, bool wide, bool extended) {
+        reg.add("kernel32.dll",name,Conv::Stdcall,extended?6:2,[this,kind,wide,extended](Cpu& c)->uint32_t {
+            uint32_t path=c.arg(0),out=c.arg(extended?2:1);if(!path||!out||(extended&&c.arg(4))){set_last_error(87);return 0xffffffffu;}
+            Host::FileCall q{kind};if(wide)q.path_w=wstr(path);else q.path_a=str(path);
+            if(extended){q.args[0]=c.arg(1);q.args[1]=c.arg(3);q.args[2]=c.arg(5);}
+            if(!call_file(q)){set_last_error(q.error?q.error:120);return 0xffffffffu;}
+            const uint32_t size=wide?592u:320u;if(q.data.size()!=size){set_last_error(87);return 0xffffffffu;}
+            mem.write_bytes(out,q.data.data(),size);set_last_error(q.error);uint32_t h=0x51000000u+(++find_serial);find_handles[h]=q.value;return h;
+        });
+    };
+    find_first("FindFirstFileA",Host::FileCall::Kind::FindFirstA,false,false);
+    find_first("FindFirstFileW",Host::FileCall::Kind::FindFirstW,true,false);
+    find_first("FindFirstFileExA",Host::FileCall::Kind::FindFirstExA,false,true);
+    find_first("FindFirstFileExW",Host::FileCall::Kind::FindFirstExW,true,true);
+    auto find_next = [this](const char* name, Host::FileCall::Kind kind, bool wide) {
+        reg.add("kernel32.dll",name,Conv::Stdcall,2,[this,kind,wide](Cpu& c)->uint32_t {
+            auto it=find_handles.find(c.arg(0));if(it==find_handles.end()){set_last_error(6);return 0;}if(!c.arg(1)){set_last_error(87);return 0;}
+            Host::FileCall q{kind};q.handle=it->second;if(!call_file(q)){set_last_error(q.error?q.error:18);return 0;}
+            uint32_t size=wide?592u:320u;if(q.data.size()!=size){set_last_error(87);return 0;}mem.write_bytes(c.arg(1),q.data.data(),size);return 1;
+        });
+    };
+    find_next("FindNextFileA",Host::FileCall::Kind::FindNextA,false);
+    find_next("FindNextFileW",Host::FileCall::Kind::FindNextW,true);
+    reg.add("kernel32.dll","FindClose",Conv::Stdcall,1,[this](Cpu& c)->uint32_t {
+        auto it=find_handles.find(c.arg(0));if(it==find_handles.end()){set_last_error(6);return 0;}Host::FileCall q{Host::FileCall::Kind::FindClose};q.handle=it->second;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}find_handles.erase(it);return 1; });
+    reg.add("ole32.dll","CoInitialize",Conv::Stdcall,1,[this](Cpu& c)->uint32_t {
+        if(c.arg(0)) return 0x80070057u;
+        uint32_t tid=mem.r32(cur_teb+0x24);if(!tid)tid=1;
+        auto it=com_apartments.find(tid);
+        if(it!=com_apartments.end()){if(it->second.first!=2)return 0x80010106u;++it->second.second;return 1;}
+        com_apartments[tid]={2,1};return 0;
+    });
+    reg.add("ole32.dll","CoInitializeEx",Conv::Stdcall,2,[this](Cpu& c)->uint32_t {
+        if(c.arg(0)) return 0x80070057u;
+        uint32_t flags=c.arg(1);if(flags&~0xEu)return 0x80070057u;
+        uint32_t model=flags&2u,tid=mem.r32(cur_teb+0x24);if(!tid)tid=1;
+        auto it=com_apartments.find(tid);
+        if(it!=com_apartments.end()){if(it->second.first!=model)return 0x80010106u;++it->second.second;return 1;}
+        com_apartments[tid]={model,1};return 0;
+    });
+    reg.add("ole32.dll","CoUninitialize",Conv::Stdcall,0,[this](Cpu&)->uint32_t {
+        uint32_t tid=mem.r32(cur_teb+0x24);if(!tid)tid=1;auto it=com_apartments.find(tid);
+        if(it!=com_apartments.end()&&!--it->second.second)com_apartments.erase(it);
+        return 0;
+    });
     reg.add("kernel32.dll", "DeleteFileA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::AttributesA};q.operation=Host::FileCall::Operation::DeleteA;q.path_a=str(c.arg(0));
         if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });

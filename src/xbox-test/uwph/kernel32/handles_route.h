@@ -2,6 +2,8 @@
 #include <windows.h>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
+#include <atomic>
 #include "../hid/pad_registry.h"
 namespace kernel32_core {
 // A handle the synthetic pad registry issued closes through it, so the device
@@ -9,6 +11,18 @@ namespace kernel32_core {
 // native object it already is.
 inline BOOL WINAPI close_handle(HANDLE handle) {
     return pad_hid::close(handle) ? TRUE : ::CloseHandle(handle);
+}
+using CriticalSectionInitLogger = void (*)(const char*);
+inline std::atomic<CriticalSectionInitLogger> critical_section_init_logger{nullptr};
+inline BOOL WINAPI initialize_critical_section_ex(CRITICAL_SECTION* section, DWORD spin, DWORD flags) {
+    BOOL initialized = ::InitializeCriticalSectionEx(section, spin, flags);
+    if (!initialized) {
+        char message[128];
+        std::snprintf(message, sizeof(message), "PRUN CRITSEC init failed flags=0x%08lx spin=%lu",
+                      static_cast<unsigned long>(flags), static_cast<unsigned long>(spin));
+        if (auto logger = critical_section_init_logger.load()) logger(message);
+    }
+    return initialized;
 }
 // All handles created here are native handles; use the native wait/close
 // family as a unit. In particular, do not return guest records as HANDLEs.
@@ -44,7 +58,7 @@ inline uintptr_t resolve_handles(const char* dll, const char* name) {
     if (kernel || synch) { K32_HANDLE(SwitchToThread); }
     if (kernel || synch) { K32_HANDLE(InitializeCriticalSection); }
     if (kernel || synch) { K32_HANDLE(InitializeCriticalSectionAndSpinCount); }
-    if (kernel || synch) { K32_HANDLE(InitializeCriticalSectionEx); }
+    if (kernel || synch) { if (!strcmp(name, "InitializeCriticalSectionEx")) return reinterpret_cast<uintptr_t>(&initialize_critical_section_ex); }
     if (kernel || synch) { K32_HANDLE(EnterCriticalSection); }
     if (kernel || synch) { K32_HANDLE(LeaveCriticalSection); }
     if (kernel || synch) { K32_HANDLE(DeleteCriticalSection); }
