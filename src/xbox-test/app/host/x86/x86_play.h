@@ -144,8 +144,8 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
                             uint64_t instruction_limit = 500ull * 1000 * 1000,
                             const DllSource& dll_source = nullptr,
                             bool trace_fault_context = false,
-                            const DllLoadObserver& observe_dll = nullptr,
-                            const std::function<void(const PlayResult&)>& on_imports = nullptr) {
+                            const std::function<void(const PlayResult&)>& on_imports = nullptr,
+                            const DllLoadObserver& observe_dll = nullptr) {
     PlayResult r;
     try {
         Memory mem; ThunkTable table; Host host; Registry reg;
@@ -277,8 +277,8 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
                       uint64_t instruction_limit = 500ull * 1000 * 1000,
                       const DllSource& dll_source = nullptr,
                       bool trace_fault_context = false,
-                      const DllLoadObserver& observe_dll = nullptr,
-                      const std::function<void(const PlayResult&)>& on_imports = nullptr) {
+                      const std::function<void(const PlayResult&)>& on_imports = nullptr,
+                      const DllLoadObserver& observe_dll = nullptr) {
     PlayResult r;
     FILE* f = _wfopen(exe.c_str(), L"rb");
     if (!f) { r.fault = "cannot open the executable"; r.fault_kind = "Loader"; return r; }
@@ -293,7 +293,7 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
     std::string name;
     for (size_t i = exe.find_last_of(L"\\/") + 1; i < exe.size(); ++i) name += char(exe[i]);
     (void)dir;
-    return run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source, trace_fault_context, observe_dll, on_imports);
+    return run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source, trace_fault_context, on_imports, observe_dll);
 }
 #endif
 }

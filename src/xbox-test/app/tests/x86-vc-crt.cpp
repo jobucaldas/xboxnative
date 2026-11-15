@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
         if (name == "msvcr110.dll") gaps = unresolved;
     };
     auto result = run_image(file, "VC110-Fixture.EXE", "VC110-Fixture.EXE", nullptr, nullptr,
-                            100ull * 1000 * 1000, source, false, observe);
+                            100ull * 1000 * 1000, source, false, nullptr, observe);
     if (result.finished && result.exit_code == 42 && result.fault.empty()) {
         std::printf("X86-VC-CRT PASS: msvcr110.dll strlen ran to exit 42\n");
     } else if (result.fault.find("ntdll.dll!__wine_dbg_header") != std::string::npos && !gaps.empty()) {
