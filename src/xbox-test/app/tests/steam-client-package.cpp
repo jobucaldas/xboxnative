@@ -38,13 +38,24 @@ int main() {
         "\"\n\t\t\"sha2vz\" \"" + std::string(64, 'b') + "\"\n\t}\n}\n\"kvsignatures\"\n{\n\t\"win64\" \"x\"\n}\n";
     steam_client_package::Entry e;
     CHECK(steam_client_package::manifest_entry(manifest, e) && e.file == "bins_win64.zip.0123" && e.sha256 == sha);
+    std::string multiPackage = manifest;
+    const std::string codecEntry = "\t\"bins_codecs_win64\"\n\t{\n\t\t\"file\" \"codecs.zip.1234\"\n\t\t\"sha2\" \"" + sha + "\"\n\t}\n";
+    multiPackage.insert(multiPackage.find("}\n\"kvsignatures\""), codecEntry);
+    CHECK(steam_client_package::manifest_entry(multiPackage, steam_client_package::codec_package, e) && e.file == "codecs.zip.1234" && e.sha256 == sha);
+    CHECK(steam_client_package::codec_runtime_file_count == 6);
+    CHECK(std::string(steam_client_package::codec_runtime_files[0]) == "libavcodec-62.dll");
+    CHECK(std::string(steam_client_package::codec_runtime_files[5]) == "libswscale-9.dll");
+    CHECK(steam_client_package::runtime_file_count == 5);
+    CHECK(steam_client_package::misc_runtime_file_count == 1);
+    CHECK(std::string(steam_client_package::misc_runtime_files[0]) == "bin/gldriverquery64.exe");
     std::string traversal = manifest; traversal.replace(traversal.find("bins_win64.zip.0123"), 19, "../bins_win64.zip.0123");
     CHECK(!steam_client_package::manifest_entry(traversal, e));
     std::string badSha = manifest; badSha.replace(badSha.find(sha), 64, std::string(64, 'Z'));
     CHECK(!steam_client_package::manifest_entry(badSha, e));
     auto dll = signedDll(0x400, 0x300);
     auto z = zip({{"steamclient.dll", "x86"}, {"steamclient64.dll", dll}, {"tier0_s64.dll", "t"},
-                  {"vstdlib_s64.dll", "v"}, {"SDL3.dll", "s"}, {"video64.dll", "d"}});
+                  {"vstdlib_s64.dll", "v"}, {"SDL3.dll", "s"}, {"video64.dll", "d"},
+                  {"libavcodec-62.dll", "codec"}, {"bin/gldriverquery64.exe", "helper"}});
     auto noInflate = [](const char*, size_t, size_t, std::string&) { return false; };
     CHECK(steam_client_package::runtime_file_count == 5);
     CHECK(std::string(steam_client_package::runtime_files[0]) == "steamclient64.dll");
@@ -58,6 +69,8 @@ int main() {
     CHECK(steam_client_package::zip_member(z, "vstdlib_s64.dll", noInflate, out) && out == "v");
     CHECK(steam_client_package::zip_member(z, "SDL3.dll", noInflate, out) && out == "s");
     CHECK(steam_client_package::zip_member(z, "video64.dll", noInflate, out) && out == "d");
+    CHECK(steam_client_package::zip_member(z, "libavcodec-62.dll", noInflate, out) && out == "codec");
+    CHECK(steam_client_package::zip_member(z, "bin/gldriverquery64.exe", noInflate, out) && out == "helper");
     CHECK(!steam_client_package::zip_member(z, "steamclient64", noInflate, out));
     CHECK(!steam_client_package::zip_member(z.substr(0, z.size() / 2), "steamclient64.dll", noInflate, out));
     CHECK(steam_client_package::valve_signature_block(dll));

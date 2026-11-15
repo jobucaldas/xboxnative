@@ -149,6 +149,43 @@ static std::string sha256_hex(const std::string& data) {
     for(UCHAR b:d){out+=x[b>>4];out+=x[b&15];}
     return out;
 }
+static bool stage_valve_runtime_package(const std::string& manifest, const char* package,
+                                       const char* stamp_name, const char* const* files, size_t count) {
+    namespace pkg=steam_client_package;
+    pkg::Entry entry;
+    if(!pkg::manifest_entry(manifest,package,entry)) return false;
+    const std::wstring dir=g_dir+L"\\steam\\client";
+    const std::wstring stamp=dir+L"\\"+widen(stamp_name);
+    bool present=read_bytes(stamp)==entry.sha256;
+    for(size_t i=0;i<count&&present;++i) {
+        std::string rel=files[i];
+        std::replace(rel.begin(),rel.end(),'/','\\');
+        const std::wstring path=dir+L"\\"+widen(rel);
+        present=!read_bytes(path).empty();
+    }
+    if(present) return true;
+    std::string zip;
+    if(cloud_http(false,true,pkg::host,std::string("/client/")+entry.file,{},{},zip)!=200||sha256_hex(zip)!=entry.sha256) return false;
+    auto inflater=[](const char* data,size_t size,size_t expected,std::string& out){
+        out.resize(expected); z_stream z{}; if(inflateInit2(&z,-15)!=Z_OK) return false;
+        z.next_in=(Bytef*)data; z.avail_in=(uInt)size; z.next_out=(Bytef*)&out[0]; z.avail_out=(uInt)expected;
+        int rc=inflate(&z,Z_FINISH); bool ok=rc==Z_STREAM_END&&z.total_out==expected; inflateEnd(&z); return ok;};
+    for(size_t i=0;i<count;++i) {
+        std::string contents;
+        if(!pkg::zip_member(zip,files[i],inflater,contents)||contents.empty()) return false;
+        std::string rel=files[i];
+        const size_t slash=rel.find_last_of('/');
+        if(slash!=std::string::npos) CreateDirectoryW((dir+L"\\"+widen(rel.substr(0,slash))).c_str(),nullptr);
+        std::replace(rel.begin(),rel.end(),'/','\\');
+        const std::wstring target=dir+L"\\"+widen(rel), part=target+L".part";
+        write_text(part,contents);
+        if(read_bytes(part)!=contents||!MoveFileExW(part.c_str(),target.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
+            DeleteFileW(part.c_str()); return false;
+        }
+    }
+    write_text(stamp,entry.sha256);
+    return read_bytes(stamp)==entry.sha256;
+}
 // Valve's signed steamclient64.dll in LocalState\steam\client, fetched from
 // Valve (steam_client_package.h) once per Steam client update. With Valve's
 // manifest unreachable, a cached copy that still carries Valve's signature
@@ -159,17 +196,26 @@ static std::wstring valve_client() {
     for(auto d:{g_dir+L"\\steam",dir})CreateDirectoryW(d.c_str(),nullptr);
     auto cached=[&]{
         for(size_t i=0;i<pkg::runtime_file_count;++i) {
-            std::wstring path=dir+L"\\"+std::wstring(pkg::runtime_files[i],pkg::runtime_files[i]+strlen(pkg::runtime_files[i]));
-            if(read_bytes(path).empty()) return false;
+            std::string rel=pkg::runtime_files[i];std::replace(rel.begin(),rel.end(),'/','\\');
+            if(read_bytes(dir+L"\\"+widen(rel)).empty()) return false;
         }
-        return pkg::valve_signature_block(read_bytes(dll));
+        for(size_t i=0;i<pkg::codec_runtime_file_count;++i) if(read_bytes(dir+L"\\"+widen(pkg::codec_runtime_files[i])).empty()) return false;
+        for(size_t i=0;i<pkg::misc_runtime_file_count;++i) {
+            std::string rel=pkg::misc_runtime_files[i];std::replace(rel.begin(),rel.end(),'/','\\');
+            if(read_bytes(dir+L"\\"+widen(rel)).empty()) return false;
+        }
+        return read_bytes(dir+L"\\codecs.sha256").size()==64&&read_bytes(dir+L"\\misc.sha256").size()==64&&pkg::valve_signature_block(read_bytes(dll));
     };
     std::string text; pkg::Entry e;
     if(cloud_http(false,true,pkg::host,pkg::manifest_path,{},{},text)!=200||!pkg::manifest_entry(text,e)) {
-        if(cached()){lp_sink("STEAM client: Valve's client manifest unreachable; using the cached signed client");return dll;}
+        if(cached()){lp_sink("STEAM client: Valve's client manifest unreachable; using the cached signed client and runtime dependencies");return dll;}
         lp_sink("STEAM client: Valve's client manifest unreachable and nothing cached");return {};
     }
-    if(read_bytes(stamp)==e.sha256&&cached()) return dll;
+    if(read_bytes(stamp)==e.sha256&&cached()) {
+        if(stage_valve_runtime_package(text,pkg::codec_package,"codecs.sha256",pkg::codec_runtime_files,pkg::codec_runtime_file_count)&&
+           stage_valve_runtime_package(text,pkg::misc_package,"misc.sha256",pkg::misc_runtime_files,pkg::misc_runtime_file_count)) return dll;
+        lp_sink("STEAM client: required Valve codec/helper package could not be verified or staged");return {};
+    }
     lp_sink("STEAM client: fetching Valve's signed client from Valve (once per Steam client update)");
     std::string zip;
     if(cloud_http(false,true,pkg::host,std::string("/client/")+e.file,{},{},zip)!=200){lp_sink("STEAM client: package download failed");return {};}
@@ -185,7 +231,11 @@ static std::wstring valve_client() {
            (strcmp(member,pkg::member)==0&&!pkg::valve_signature_block(contents))) {
             lp_sink("STEAM client: package is missing a required signed-client runtime DLL; discarded");return {};
         }
-        std::wstring target=dir+L"\\"+std::wstring(member,member+strlen(member));
+        std::string rel=member;
+        const size_t slash=rel.find_last_of('/');
+        if(slash!=std::string::npos) CreateDirectoryW((dir+L"\\"+widen(rel.substr(0,slash))).c_str(),nullptr);
+        std::replace(rel.begin(),rel.end(),'/','\\');
+        std::wstring target=dir+L"\\"+widen(rel);
         std::wstring part=target+L".part";
         write_text(part,contents);
         if(read_bytes(part)!=contents||!MoveFileExW(part.c_str(),target.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)){
@@ -193,7 +243,11 @@ static std::wstring valve_client() {
         }
     }
     write_text(stamp,e.sha256);
-    lp_sink("STEAM client: Valve's signed client and runtime DLLs stored (SHA-256 matched Valve's manifest)");
+    if(!stage_valve_runtime_package(text,pkg::codec_package,"codecs.sha256",pkg::codec_runtime_files,pkg::codec_runtime_file_count)||
+       !stage_valve_runtime_package(text,pkg::misc_package,"misc.sha256",pkg::misc_runtime_files,pkg::misc_runtime_file_count)) {
+        lp_sink("STEAM client: required Valve codec/helper package could not be verified or staged");return {};
+    }
+    lp_sink("STEAM client: Valve's signed client, codec DLLs and driver-query helpers stored (manifest SHA-256 matched)");
     return dll;
 }
 // Emulated Steam for the signed-in account's game (the ownership rule), only
