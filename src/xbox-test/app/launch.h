@@ -321,6 +321,15 @@ static void genuine_steam_shutdown() {
     genuine_steam_cleanup(&c);genuine_steam_free(c.module);
     g_genuineSteamModule=nullptr;g_genuineSteamLiveApi={};g_genuineSteamUser=0;g_genuineSteamPipe=0;
 }
+// SetDllDirectoryW is outside the UWP header partition; resolve it at runtime.
+static BOOL genuine_set_dll_directory(LPCWSTR dir) {
+    using Fn=BOOL(WINAPI*)(LPCWSTR);
+    static HMODULE base=LoadLibraryExW(L"kernelbase.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    static HMODULE k32=LoadLibraryExW(L"kernel32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    static Fn fn=[]{FARPROC p=base?GetProcAddress(base,"SetDllDirectoryW"):nullptr;if(!p&&k32)p=GetProcAddress(k32,"SetDllDirectoryW");return (Fn)p;}();
+    if(!fn){SetLastError(ERROR_CALL_NOT_IMPLEMENTED);return FALSE;}
+    return fn(dir);
+}
 static bool genuine_steam_call(const std::wstring& dll,const std::string& token,uint64_t steamid) {
     GenuineSteamCall c{};c.steamid=steamid;
     // Flat export prototypes: https://github.com/SteamRE/open-steamworks/blob/master/Open%20Steamworks/Steamclient.h
@@ -345,7 +354,7 @@ static bool genuine_steam_call(const std::wstring& dll,const std::string& token,
     lp_sink(regok?"STEAM genuine: step=registry ok=1":"STEAM genuine: step=registry ok=0");
     wchar_t oldDir[2048]{};DWORD oldDirSize=GetCurrentDirectoryW(2048,oldDir);bool ok=false;
     if(regok){
-        bool environment=SetEnvironmentVariableW(L"SteamPath",root.c_str())&&SetDllDirectoryW(root.c_str())&&SetCurrentDirectoryW(root.c_str());
+        bool environment=SetEnvironmentVariableW(L"SteamPath",root.c_str())&&genuine_set_dll_directory(root.c_str())&&SetCurrentDirectoryW(root.c_str());
         lp_sink(environment?"STEAM genuine: step=environment ok=1":"STEAM genuine: step=environment ok=0");
         if(environment){
             bool exports=genuine_steam_load(&c,dll.c_str());
@@ -355,7 +364,7 @@ static bool genuine_steam_call(const std::wstring& dll,const std::string& token,
     }
 
     if(oldDirSize&&oldDirSize<2048)SetCurrentDirectoryW(oldDir);
-    SetDllDirectoryW(nullptr);
+    genuine_set_dll_directory(nullptr);
     if(ok){g_genuineSteamModule=c.module;g_genuineSteamLiveApi=c.api;g_genuineSteamUser=c.user;g_genuineSteamPipe=c.pipe;return true;}
     genuine_steam_cleanup(&c);genuine_steam_free(c.module);return false;
 }
