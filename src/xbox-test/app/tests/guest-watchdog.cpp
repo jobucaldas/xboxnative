@@ -33,9 +33,24 @@ using guest_watchdog::GuideStep;
 using guest_watchdog::kHomeRows;
 using guest_watchdog::kForceQuitRow;
 using guest_watchdog::kSilenceSeconds;
+using guest_watchdog::should_force_quit;
+using guest_watchdog::kQuitGraceSeconds;
 
 int main() {
     const uint64_t hz = 10000000;   // 10 MHz, QPC-like
+
+    // gquit's fixture guest ignores WM_CLOSE: only a stale presentation after
+    // the bounded close grace triggers the guest-specific force-quit path.
+    {
+        struct IgnoresCloseGuest { bool closePosted=false, finished=false; } guest;
+        guest.closePosted=true;   // WM_CLOSE is posted, but this fixture ignores it
+        CHECK(guest.closePosted&&!guest.finished);
+        CHECK(!should_force_quit(guest.finished,kQuitGraceSeconds,kSilenceSeconds+1));
+        CHECK(!should_force_quit(guest.finished,kQuitGraceSeconds+1,kSilenceSeconds));
+        CHECK(should_force_quit(guest.finished,kQuitGraceSeconds+1,kSilenceSeconds+1));
+        guest.finished=true;      // natural exit wins even after the deadline
+        CHECK(!should_force_quit(guest.finished,kQuitGraceSeconds+1,kSilenceSeconds+1));
+    }
 
     // A live guest: presents 8 ms apart, never dead.
     {

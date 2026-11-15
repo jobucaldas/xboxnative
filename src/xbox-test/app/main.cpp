@@ -1908,11 +1908,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
         }
         lp_watchdog();
+        quit_watchdog_tick();
         guest_ended();
     }
     // ---- In-game launcher menu (guest_overlay.h): View+Menu toggles it.
     GamepadButtons m_menuPrev=GamepadButtons::None; bool m_leaving=false;
     std::atomic<bool> m_quitClosing{false};   // a graceful close is in flight
+    double m_quitRequestedAt=0; bool m_quitEscalated=false;
     static bool held(GamepadButtons b,GamepadButtons m){return (b&m)==m;}
     bool m_inputHooks=false;
     bool m_achPollStarted=false;   // the unlock poller runs while the guest does
@@ -2131,12 +2133,36 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
         // tab 1 (Achievements): the rows are not commands.
     }
+    void quit_watchdog_tick() {
+        if(!m_quitRequestedAt||m_quitEscalated)return;
+        auto runtime=play_runtime::observed.load(std::memory_order_acquire);
+        if(!runtime)return;
+        const bool finished=runtime->finished.load(std::memory_order_acquire);
+        LARGE_INTEGER now{},freq{};
+        double presentSilence=0;
+        if(QueryPerformanceCounter(&now)&&QueryPerformanceFrequency(&freq)&&freq.QuadPart>0) {
+            const uint64_t last=guest_overlay::lastPresentTick.load(std::memory_order_acquire);
+            presentSilence=last&&uint64_t(now.QuadPart)>=last?
+                double(uint64_t(now.QuadPart)-last)/double(freq.QuadPart):
+                guest_watchdog::kSilenceSeconds+1;
+        }
+        if(!guest_watchdog::should_force_quit(finished,now_s()-m_quitRequestedAt,presentSilence))return;
+        if(runtime->finished.load(std::memory_order_acquire))return;
+        m_quitEscalated=true;
+        const std::string reason="quit requested; guest stopped presenting and was force-quit after 10 seconds";
+        logf("overlay: %s",reason.c_str());
+        lp_finish(g_launch.gen.load(),g_launch.appid.load(),reason,false,
+                  runtime->mappedCount.load(),runtime->moduleCount.load(),"quit-forced");
+        force_quit();
+    }
     // Quit game: ask the guest's windows to close on a worker thread and return
     // at once. The menu stays usable (no busy latch), so the player can pick
     // Force quit if the game does not go away; guest_ended() restarts the
     // launcher when the game does exit (the save upload runs there).
     void quit_game(const char* via) {
         if(m_leaving || m_quitClosing.exchange(true)) return;
+        m_quitRequestedAt=now_s();m_quitEscalated=false;
+        g_launch.quitRequested.store(true,std::memory_order_release);
         guest_overlay::set_status("Closing the game...");
         logf("overlay: quit game -> WM_CLOSE on a worker (%s)", via);
         std::thread([this] {
