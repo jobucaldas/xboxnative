@@ -20,7 +20,9 @@ out=${out:-$root/out/wine-runtime-i386}
 DLLS=(ucrtbase vcruntime140 msvcp140 concrt140)
 read -r _ url sha < <(grep -E '^wine-src[[:space:]]' "$root/deps.pin") || { echo "wine-src missing from deps.pin" >&2; exit 2; }
 read -r patchsha _ < <(sha256sum "$root/patches/wine-src/0001-pe-rodata.patch")
-read -r recipe _ < <(sha256sum "$root/patches/wine-src/0001-pe-rodata.patch" "${BASH_SOURCE[0]}" | sha256sum)
+patch3file=$root/patches/wine-src/0003-donor-critical-section-flags.patch
+read -r patch3sha _ < <(sha256sum "$patch3file")
+read -r recipe _ < <(sha256sum "$root/patches/wine-src/0001-pe-rodata.patch" "$patch3file" "${BASH_SOURCE[0]}" | sha256sum)
 base=$root/third_party/wine-runtime-i386-build; work=$base/${sha:0:16}-${recipe:0:16}
 tar=$work/$(basename "$url")
 echo "wine-src url=$url sha256=$sha out=$out dlls=${DLLS[*]}"
@@ -36,6 +38,7 @@ src=$work/$(basename "$tar" .tar.xz)
 if [[ ! -f $work/.extracted ]]; then   # marker written only after a complete extract; an interrupted one is redone
   rm -rf "$src" "$work/build"; tar -C "$work" -xf "$tar"
   patch --batch --fuzz=0 -d "$src" -p1 < "$root/patches/wine-src/0001-pe-rodata.patch"
+  patch --batch --fuzz=0 -d "$src" -p1 < "$patch3file"
   touch "$work/.extracted"
 fi
 bld=$work/build; mkdir -p "$bld"; cd "$bld"
@@ -51,10 +54,12 @@ for d in "${DLLS[@]}"; do cp "dlls/$d/i386-windows/$d.dll" "$out/$d.dll"; done
 ( cd "$out" && sha256sum -- *.dll >SHA256SUMS )
 cat >"$out/SOURCE.txt" <<S
 Built from Wine source $(basename "$url") (sha256 $sha), LGPL-2.1-or-later, source: $url
-Build: $(i686-w64-mingw32-gcc --version | head -1); configure flags in $bld/configure.log. Modified: yes, PE constant-data section flags.
+Build: $(i686-w64-mingw32-gcc --version | head -1); configure flags in $bld/configure.log. Modified: yes, PE constant-data section flags and donor critical-section initialization.
 Patch: 0001-pe-rodata.patch sha256 $patchsha
+Patch: 0003-donor-critical-section-flags.patch sha256 $patch3sha
 Recipe sha256 $recipe
 These DLLs are not part of the xboxnative repository; rebuild them with src/tools/build-wine-runtime-i386.sh.
 S
 cp "$root/patches/wine-src/0001-pe-rodata.patch" "$out/0001-pe-rodata.patch"
+cp "$patch3file" "$out/0003-donor-critical-section-flags.patch"
 echo "ok: $out"; cat "$out/SHA256SUMS"

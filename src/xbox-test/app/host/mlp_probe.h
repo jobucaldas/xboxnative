@@ -108,6 +108,7 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     // Any other DLL resolves from System32, as the Windows loader does, so a
     // new game needs no per-title table (default_system_dll).
     if(!strcmp(kind,"unclassified") && default_system_dll(key)) kind="system";
+    kernel32_core::critical_section_init_logger.store(log);
     uintptr_t address=kernel32_core::resolve(dll,name);
     gap_summary::Outcome outcome=address?gap_summary::Outcome::routed:gap_summary::Outcome::missing;
     // XInput is Play's WGI emulation. Take it before the system route below, which
