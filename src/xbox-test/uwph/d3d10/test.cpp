@@ -300,7 +300,7 @@ extern "C" DWORD WINAPI d3d10_test_entry() {
         samplerState->Release();
     }
 
-    // An occlusion query: Begin/End/GetData go through the D3D11 context.
+    // Query enums and Begin/End/GetData translate directly to D3D11.
     D3D10_QUERY_DESC queryDesc{D3D10_QUERY_OCCLUSION,D3D10_QUERY_MISC_FLAG(0)};
     ID3D10Query* query=nullptr;
     CHECK_HR(device->CreateQuery(&queryDesc,&query));
@@ -314,6 +314,22 @@ extern "C" DWORD WINAPI d3d10_test_entry() {
         // Not a FLAG_NONE query: a blocking read is legal and must answer.
         CHECK_HR(query->GetData(&samples,sizeof samples,0));
         query->Release();
+    }
+    D3D10_QUERY_DESC soQueryDesc{D3D10_QUERY_SO_STATISTICS,D3D10_QUERY_MISC_FLAG(0)};
+    ID3D10Query* soQuery=nullptr;
+    CHECK_HR(device->CreateQuery(&soQueryDesc,&soQuery));
+    if(soQuery) {
+        ID3D11Query* nativeQuery=nullptr;
+        CHECK_HR(soQuery->QueryInterface(__uuidof(ID3D11Query),(void**)&nativeQuery));
+        if(nativeQuery) {
+            D3D11_QUERY_DESC nativeDesc{};nativeQuery->GetDesc(&nativeDesc);
+            CHECK(nativeDesc.Query==D3D11_QUERY_SO_STATISTICS);
+            nativeQuery->Release();
+        }
+        D3D10_QUERY_DATA_SO_STATISTICS stats{};
+        soQuery->Begin();soQuery->End();
+        CHECK_HR(soQuery->GetData(&stats,sizeof stats,0));
+        soQuery->Release();
     }
     CHECK(device->GetExceptionMode()==0);
     CHECK_HR_IS(device->SetExceptionMode(0),E_NOTIMPL);

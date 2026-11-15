@@ -19,6 +19,7 @@
 #include <windows.h>
 #include <d3d10.h>
 #include <d3d10_1.h>
+#include <d3d11.h>
 #include <dxgi.h>
 #include "d3d10_bytecode.h"
 
@@ -276,10 +277,32 @@ DWORD d3d10tri_entry() {
     ID3D10Query* soStats=nullptr;
     if(FAILED(device->CreateQuery(&soStatsDesc,&soStats))||!soStats){logSoStage("create",false);return 51;}
     logSoStage("create",true);
+    ID3D11Device* d3d11Device=nullptr;
+    ID3D11DeviceContext* d3d11Context=nullptr;
+    ID3D11Query* d3d11Stats=nullptr;
+    if(SUCCEEDED(device->QueryInterface(__uuidof(ID3D11Device),(void**)&d3d11Device))&&d3d11Device)
+        d3d11Device->GetImmediateContext(&d3d11Context);
+    if(d3d11Context)soStats->QueryInterface(__uuidof(ID3D11Query),(void**)&d3d11Stats);
     device->SOSetTargets(1,&soTarget,&soOffset);
     device->IASetVertexBuffers(0,1,&pointBuffer,&stride,&offset);
     device->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_POINTLIST);
     device->GSSetShader(soShader);
+    if(d3d11Context&&d3d11Stats) {
+        D3D11_QUERY_DESC nativeDesc{};d3d11Stats->GetDesc(&nativeDesc);
+        ID3D11Buffer* nativeTarget=nullptr;ID3D11GeometryShader* nativeGs=nullptr;ID3D11Buffer* expectedTarget=nullptr;
+        ID3D11GeometryShader* expectedGs=nullptr;
+        soTarget->QueryInterface(__uuidof(ID3D11Buffer),(void**)&expectedTarget);
+        soShader->QueryInterface(__uuidof(ID3D11GeometryShader),(void**)&expectedGs);
+        d3d11Context->SOGetTargets(1,&nativeTarget);
+        d3d11Context->GSGetShader(&nativeGs,nullptr,nullptr);
+        bool targetBound=nativeTarget&&nativeTarget==expectedTarget;
+        bool gsBound=nativeGs&&nativeGs==expectedGs;
+        char line[192],*p=line;p=text(p,"PLAY-D3D10 SO d3d11 query=");p=number(p,unsigned(nativeDesc.Query));
+        p=text(p," target=");p=text(p,targetBound?"bound":"missing");
+        p=text(p," gs=");emit(text(p,gsBound?"bound":"missing"),line);
+        if(nativeTarget)nativeTarget->Release();if(expectedTarget)expectedTarget->Release();
+        if(nativeGs)nativeGs->Release();if(expectedGs)expectedGs->Release();
+    }
     soStats->Begin();
     device->Draw(1,0);
     soStats->End();
@@ -291,14 +314,22 @@ DWORD d3d10tri_entry() {
     // flags 0 GetData returns S_FALSE (neither FAILED nor S_OK) until the GPU
     // catches up, so poll until it answers or the budget runs out; giving up
     // is a failure (37), never a pass.
-    bool soAnswered=false;
+    bool soAnswered=false,soQueryFailed=false;
     for(unsigned poll=0;poll<1000;++poll) {
         HRESULT qr=soStats->GetData(&stats,sizeof stats,0);
         if(qr==S_OK) {soAnswered=true;break;}
-        if(FAILED(qr)){logSoStats(stats);logSoStage("stats",false);soStats->Release();return 52;}
+        if(FAILED(qr)){soQueryFailed=true;break;}
         Sleep(1);
     }
-    if(!soAnswered){logSoStats(stats);logSoStage("stats",false);soStats->Release();return 52;}
+    if(d3d11Context&&d3d11Stats) {
+        D3D11_QUERY_DATA_SO_STATISTICS nativeStats{};
+        HRESULT nativeHr=d3d11Context->GetData(d3d11Stats,&nativeStats,sizeof nativeStats,0);
+        char line[224],*p=line;p=text(p,"PLAY-D3D10 SO d3d11 GetData hr=0x");p=hex(p,unsigned(nativeHr));
+        p=text(p," written=");p=number(p,unsigned(nativeStats.NumPrimitivesWritten));
+        p=text(p," needed=");emit(number(p,unsigned(nativeStats.PrimitivesStorageNeeded)),line);
+    }
+    if(d3d11Stats)d3d11Stats->Release();if(d3d11Context)d3d11Context->Release();if(d3d11Device)d3d11Device->Release();
+    if(!soAnswered||soQueryFailed){logSoStats(stats);logSoStage("stats",false);soStats->Release();return 52;}
     soStats->Release();
     logSoStats(stats);
     // The GS expands one point to one triangle: one primitive written, one
