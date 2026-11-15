@@ -133,6 +133,30 @@ if masks != [0x1, 0x2, 0x4, 0x8]:
 print("matrix rows ok: %s" % masks)
 EOF
 python3 -I "$work/make-fixture.py" "$work/vs11.bin"
+# The textured triangle variant's SM1 vertex shader: position, diffuse colour,
+# and one texture coordinate, matching play-d3d9-triangle-variants.cpp.
+cat >"$work/make-v4.py" <<'EOF'
+import struct, sys
+def op(code, *operands):
+    return [code | (len(operands) << 24)] + list(operands)
+def dst(regnum, regtype, mask=0xF):
+    return (regnum & 0x7FF) | ((regtype & 0x7) << 28) | ((mask & 0xF) << 16)
+def src(regnum, regtype, swizzle=0xE4):
+    return (regnum & 0x7FF) | ((regtype & 0x7) << 28) | ((swizzle & 0xFF) << 16)
+D3DSPR_INPUT, D3DSPR_CONST, D3DSPR_RASTOUT = 1, 2, 4
+D3DSPR_ATTROUT, D3DSPR_TEXTURE = 5, 3
+D3DSIO_DCL, D3DSIO_M4x4, D3DSIO_MOV, D3DSIO_END = 0x1F, 20, 1, 0xFFFF
+tokens = [0xFFFE0101]
+tokens += op(D3DSIO_DCL, 0, dst(0, D3DSPR_INPUT))
+tokens += op(D3DSIO_DCL, 10, dst(1, D3DSPR_INPUT))
+tokens += op(D3DSIO_DCL, 5, dst(2, D3DSPR_INPUT))
+tokens += op(D3DSIO_M4x4, dst(0, D3DSPR_RASTOUT), src(0, D3DSPR_INPUT), src(0, D3DSPR_CONST))
+tokens += op(D3DSIO_MOV, dst(0, D3DSPR_ATTROUT), src(1, D3DSPR_INPUT))
+tokens += op(D3DSIO_MOV, dst(0, D3DSPR_TEXTURE), src(2, D3DSPR_INPUT))
+tokens += [D3DSIO_END]
+open(sys.argv[1], "wb").write(struct.pack("<%dI" % len(tokens), *tokens))
+EOF
+python3 -I "$work/make-v4.py" "$work/vs11-textured.bin"
 # A ps_1_1 with no dcl at all, exactly as a game's SM1 pixel shader looks:
 # `tex t0` with a destination operand the donor's table gives no tokens for.
 # That operand's token word was uninitialised, so isIndirect() read whatever the
@@ -171,6 +195,41 @@ WINEDEBUG=-all WINEDLLOVERRIDES='winedbg.exe=d' timeout -k 2 120 wine ./driver.e
 grep -q 'translate ok bytes=' run.log || { echo "FAIL translator produced no DXBC" >&2; exit 1; }
 grep -q 'CreateVertexShader hr=0x0' run.log || { echo "FAIL Wine's D3D11 rejected the translated DXBC" >&2; exit 1; }
 python3 -I check-matrix.py out.dxbc || { echo "FAIL the translated matrix does not write every row" >&2; exit 1; }
+WINEDEBUG=-all WINEDLLOVERRIDES='winedbg.exe=d' timeout -k 2 120 wine ./driver.exe \
+    "$out/d3d9translator.dll" vs11-textured.bin out-v4.dxbc | tee v4.log
+grep -q 'CreateVertexShader hr=0x0' v4.log || { echo "FAIL Wine's D3D11 rejected the textured variant vertex shader" >&2; exit 1; }
+cat >check-v4-signature.py <<'EOF'
+import struct, sys
+data = open(sys.argv[1], "rb").read()
+chunks = {}
+for i in range(struct.unpack_from("<I", data, 28)[0]):
+    off = struct.unpack_from("<I", data, 32 + 4 * i)[0]
+    chunks[data[off:off + 4].decode("ascii")] = off
+if "ISGN" not in chunks or "OSGN" not in chunks:
+    sys.exit("missing input or output signature")
+def signature(name):
+    off = chunks[name]
+    count = struct.unpack_from("<I", data, off + 8)[0]
+    elements = []
+    for i in range(count):
+        pos = off + 16 + i * 24
+        name_offset, semantic, system, component, register, mask = struct.unpack_from("<6I", data, pos)
+        start = off + 8 + name_offset
+        end = data.index(b"\0", start)
+        elements.append((data[start:end].decode("ascii"), semantic, system, register, mask))
+    return elements
+inputs, outputs = signature("ISGN"), signature("OSGN")
+expected = [("SV_Position", 0, 1, 0), ("TEXCOORD", 8, 0, 9)]
+actual = [(name, semantic, system, register) for name, semantic, system, register, mask in outputs]
+if len(inputs) != 3:
+    sys.exit("ISGN has %d entries, expected position, color, texcoord" % len(inputs))
+if actual != expected:
+    sys.exit("OSGN entries %s, expected only the declared position and diffuse-color outputs %s" % (actual, expected))
+if any(mask & 0xF != 0xF for _, _, _, _, mask in outputs):
+    sys.exit("OSGN contains an output without its declared component mask")
+print("v4 signatures ok: 3 inputs, 2 declared outputs")
+EOF
+python3 -I check-v4-signature.py out-v4.dxbc || { echo "FAIL translated textured variant has stray or malformed outputs" >&2; exit 1; }
 # And a pixel shader's translation is the same on its first and second call in
 # one process (the driver checks that itself; this run gives it a shader whose
 # operand table entry has no tokens).
