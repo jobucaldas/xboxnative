@@ -378,7 +378,9 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
              LOAD_LIBRARY_SEARCH_APPLICATION_DIR|LOAD_LIBRARY_SEARCH_USER_DIRS|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
          auto p=guestLibraryPath(requested,!(flags&~searchOnly));
          if(exists(p)) {
-             if(key=="opengl32.dll" && !runtimeDirectory.empty() && _wcsicmp(p.c_str(),(runtimeDirectory+L"\\opengl32.dll").c_str())==0) {
+             const wchar_t* dxilDriver=key=="opengl32.dll"?L"\\opengl32.dll":L"\\vulkan_dzn.dll";
+             if((key=="opengl32.dll"||key=="vulkan_dzn.dll") && !runtimeDirectory.empty() &&
+                _wcsicmp(p.c_str(),(runtimeDirectory+dxilDriver).c_str())==0) {
                  dxil_runtime::ensure(g_dir,[](const char* line){state->event(line);});
                  set_dxil_directory(g_dir+L"\\dxil");
              }

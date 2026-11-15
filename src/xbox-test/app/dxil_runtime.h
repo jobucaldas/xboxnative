@@ -119,7 +119,7 @@ inline bool ensure(const std::wstring& localState, const std::function<void(cons
     const std::wstring dir = localState + L"\\dxil", dll = dir + L"\\dxil.dll", license = dir + L"\\LICENSE-MS.txt";
     std::vector<uint8_t> cached;
     if (readFile(dll, cached) && sha256(cached.data(), cached.size()) == kDllSha256 && GetFileAttributesW(license.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        if (!exposeDirectory(dir)) { log("dxil: download failed DLL search path; OpenGL games will fail PSO creation"); return false; }
+        if (!exposeDirectory(dir)) { log("dxil: download failed DLL search path; Mesa pipelines may fail PSO creation"); return false; }
         log("dxil: cached"); return true;
     }
     CreateDirectoryFromAppW(dir.c_str(), nullptr);
@@ -127,28 +127,28 @@ inline bool ensure(const std::wstring& localState, const std::function<void(cons
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
         winrt::Windows::Web::Http::HttpClient http;
         auto response = http.GetAsync(winrt::Windows::Foundation::Uri(winrt::to_hstring(kUrl))).get();
-        if (response.StatusCode() != winrt::Windows::Web::Http::HttpStatusCode::Ok) { log("dxil: download failed HTTP status; OpenGL games will fail PSO creation"); return false; }
+        if (response.StatusCode() != winrt::Windows::Web::Http::HttpStatusCode::Ok) { log("dxil: download failed HTTP status; Mesa pipelines may fail PSO creation"); return false; }
         auto buffer = response.Content().ReadAsBufferAsync().get();
-        if (!buffer.Length() || buffer.Length() > kMaxArchive) { log("dxil: download failed archive size; OpenGL games will fail PSO creation"); return false; }
+        if (!buffer.Length() || buffer.Length() > kMaxArchive) { log("dxil: download failed archive size; Mesa pipelines may fail PSO creation"); return false; }
         winrt::Windows::Storage::Streams::DataReader reader = winrt::Windows::Storage::Streams::DataReader::FromBuffer(buffer);
         std::vector<uint8_t> zip(buffer.Length()); reader.ReadBytes(winrt::array_view<uint8_t>(zip));
-        if (sha256(zip.data(), zip.size()) != kArchiveSha256) { log("dxil: download failed archive hash mismatch; OpenGL games will fail PSO creation"); return false; }
+        if (sha256(zip.data(), zip.size()) != kArchiveSha256) { log("dxil: download failed archive hash mismatch; Mesa pipelines may fail PSO creation"); return false; }
         auto digest = [](const void* p, size_t n) { return sha256(p, n); };
         std::vector<uint8_t> dllBytes, licenseBytes; std::string reason;
         if (!extract(zip, "bin/x64/dxil.dll", kDllSha256, dllBytes, digest, reason) ||
             !extract(zip, "LICENSE-MS.txt", "", licenseBytes, digest, reason)) {
-            const std::string message = "dxil: download failed " + reason + "; OpenGL games will fail PSO creation";
+            const std::string message = "dxil: download failed " + reason + "; Mesa pipelines may fail PSO creation";
             log(message.c_str()); return false;
         }
         const std::wstring dllTmp = dll + L".tmp", licenseTmp = license + L".tmp";
         if (!writeTemp(dllTmp, dllBytes) || !writeTemp(licenseTmp, licenseBytes) ||
             !moveReplace(dllTmp, dll) || !moveReplace(licenseTmp, license)) {
-            DeleteFileW(dllTmp.c_str()); DeleteFileW(licenseTmp.c_str()); log("dxil: download failed cache write; OpenGL games will fail PSO creation"); return false;
+            DeleteFileW(dllTmp.c_str()); DeleteFileW(licenseTmp.c_str()); log("dxil: download failed cache write; Mesa pipelines may fail PSO creation"); return false;
         }
-        if (!exposeDirectory(dir)) { log("dxil: download failed DLL search path; OpenGL games will fail PSO creation"); return false; }
+        if (!exposeDirectory(dir)) { log("dxil: download failed DLL search path; Mesa pipelines may fail PSO creation"); return false; }
         const std::string digest8 = sha256(dllBytes.data(), dllBytes.size()).substr(0, 8);
         std::string message = "dxil: download ok sha8=" + digest8; log(message.c_str()); return true;
-    } catch (...) { log("dxil: download failed HTTP exception; OpenGL games will fail PSO creation"); return false; }
+    } catch (...) { log("dxil: download failed HTTP exception; Mesa pipelines may fail PSO creation"); return false; }
 }
 #endif
 } // namespace dxil_runtime
