@@ -68,6 +68,7 @@ inline void play_file_call(Host::FileCall& q) {
         if(q.operation==Host::FileCall::Operation::CreateDirectoryA){SetLastError(ERROR_SUCCESS);q.succeeded=CreateDirectoryA(q.path_a.c_str(),nullptr)!=FALSE;if(!q.succeeded)failed();}
         else if(q.operation==Host::FileCall::Operation::DeleteA){SetLastError(ERROR_SUCCESS);q.succeeded=DeleteFileA(q.path_a.c_str())!=FALSE;if(!q.succeeded)failed();}
         else if(q.operation==Host::FileCall::Operation::DeleteW){std::wstring p(q.path_w.begin(),q.path_w.end());SetLastError(ERROR_SUCCESS);q.succeeded=DeleteFileW(p.c_str())!=FALSE;if(!q.succeeded)failed();}
+        else if(q.args[1]){using Fn=BOOL(WINAPI*)(LPCSTR,GET_FILEEX_INFO_LEVELS,LPVOID);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","GetFileAttributesExA");WIN32_FILE_ATTRIBUTE_DATA d{};SetLastError(ERROR_SUCCESS);q.succeeded=fn&&fn(q.path_a.c_str(),GET_FILEEX_INFO_LEVELS(q.args[0]),&d);q.data.resize(sizeof(d));memcpy(q.data.data(),&d,sizeof(d));if(!q.succeeded)failed();}
         else {using Fn=DWORD(WINAPI*)(LPCSTR);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","GetFileAttributesA");SetLastError(ERROR_SUCCESS);q.value=fn?fn(q.path_a.c_str()):INVALID_FILE_ATTRIBUTES;q.succeeded=q.value!=INVALID_FILE_ATTRIBUTES;if(!q.succeeded)failed();}break;}
     case Host::FileCall::Kind::Seek:{using Fn=DWORD(WINAPI*)(HANDLE,LONG,PLONG,DWORD);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","SetFilePointer");LONG high=LONG(q.args[1]);SetLastError(ERROR_SUCCESS);DWORD low=fn?fn((HANDLE)(uintptr_t)q.handle,LONG(q.args[0]),q.args[3]?&high:nullptr,q.args[2]):INVALID_SET_FILE_POINTER;q.value=low;q.args[1]=DWORD(high);q.error=GetLastError();q.succeeded=low!=INVALID_SET_FILE_POINTER||q.error==ERROR_SUCCESS;break;}
     case Host::FileCall::Kind::SeekEx:{using Fn=BOOL(WINAPI*)(HANDLE,LARGE_INTEGER,PLARGE_INTEGER,DWORD);auto fn=(Fn)kernel32_core::resolve_file("kernel32.dll","SetFilePointerEx");LARGE_INTEGER distance{},position{};distance.QuadPart=q.distance;SetLastError(ERROR_SUCCESS);q.succeeded=fn&&fn((HANDLE)(uintptr_t)q.handle,distance,q.args[0]?&position:nullptr,q.method)!=FALSE;q.error=fn?GetLastError():ERROR_PROC_NOT_FOUND;if(q.succeeded)q.position=position.QuadPart;break;}
@@ -295,7 +296,8 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
                             const DllSource& dll_source = nullptr,
                             bool trace_fault_context = false,
                             const std::function<void(const PlayResult&)>& on_imports = nullptr,
-                            const DllLoadObserver& observe_dll = nullptr) {
+                            const DllLoadObserver& observe_dll = nullptr,
+                            const std::function<void(Host&)>& configure_host = nullptr) {
     PlayResult r;
     try {
         Memory mem; ThunkTable table; Host host; Registry reg;
@@ -306,6 +308,7 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         host.locale_call = play_locale_call;
 #endif
         host.tee = tee;
+        if (configure_host) configure_host(host);
 #if defined(_WIN32)
         install_nls_host(host);
 #endif
@@ -393,20 +396,49 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
             }
         };
         init_process(mem, cpu, img);
+        std::vector<Image*> tls_images;
+        for (const auto& module : guest.dll_order) {
+            auto it = guest.dlls.find(module);
+            if (it != guest.dlls.end() && it->second.image.tls.present)
+                tls_images.push_back(&it->second.image);
+        }
+        if (img.tls.present) tls_images.push_back(&img);
+        if (!tls_images.empty()) {
+            uint32_t slots = guest.heap.alloc(uint32_t(tls_images.size() * sizeof(uint32_t)));
+            for (size_t i = 0; i < tls_images.size(); ++i) {
+                Image& tls_image = *tls_images[i];
+                uint32_t raw = tls_image.tls.end - tls_image.tls.start;
+                uint64_t total = uint64_t(raw) + tls_image.tls.zero_fill;
+                if (total > 16u * 1024u * 1024u) throw std::runtime_error("PE32 TLS template exceeds 16 MiB");
+                uint32_t block = guest.heap.alloc(uint32_t(total ? total : 1));
+                for (uint32_t n = 0; n < raw; ++n) mem.w8(block + n, mem.r8(tls_image.tls.start + n));
+                for (uint32_t n = raw; n < total; ++n) mem.w8(block + n, 0);
+                mem.w32(slots + uint32_t(i * sizeof(uint32_t)), block);
+                mem.w32(tls_image.tls.index_ptr, uint32_t(i));
+            }
+            mem.w32(TEB_ADDR + 0x2C, slots);
+        }
         // DllMain(DLL_PROCESS_ATTACH) for every loaded guest DLL, in load
         // order — after the thunk page and TEB/PEB exist, before the entry.
         try { guest.run_dll_mains(cpu, 1); } catch (const Fault& f) {
             if (!cpu.exited) { record_fault(f); r.instructions = cpu.executed;
                 r.peb_being_debugged=mem.r8(PEB_ADDR+2);r.peb_nt_global_flag=mem.r32(PEB_ADDR+0x68);return r; }
         }
-        // TLS callbacks of the top image run exactly once, from run_entry ->
-        // init_tls (which allocates the implicit-TLS block first): the Windows
-        // loader order is DllMain(PROCESS_ATTACH) for all modules, then the
-        // exe's TLS callbacks, then the entry. A separate loop here would run
-        // them twice — a mingw CRT registers its global initializers there.
+        // TLS blocks are per loaded image. DLL_PROCESS_ATTACH runs first, then
+        // each image's TLS callbacks, then the executable entry point.
         if (on_loaded) on_loaded(r);
         try {
-            run_entry(cpu, img);
+            if (tls_images.empty()) run_entry(cpu, img);
+            else {
+                for (Image* tls_image : tls_images)
+                    for (uint32_t p = tls_image->tls.callbacks; p; p += 4) {
+                        uint32_t fn = mem.r32(p);
+                        if (!fn) break;
+                        cpu.call(fn, {tls_image->base, 1, 0});
+                    }
+                uint32_t result = cpu.call(img.entry, {PEB_ADDR});
+                if (!cpu.exited) { cpu.exited = true; cpu.exit_code = result; }
+            }
             r.finished = cpu.exited;
             r.exit_code = cpu.exit_code;
         } catch (const Fault& fault) {
