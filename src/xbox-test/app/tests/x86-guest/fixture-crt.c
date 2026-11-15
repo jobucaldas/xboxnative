@@ -185,6 +185,7 @@ int main(void) {
     check(GetModuleHandleA("KERNEL32.DLL") != NULL && GetModuleHandleA("kernel32") == GetModuleHandleA("kernel32.dll"));
     check(GetModuleHandleA("ntdll.dll") != NULL && GetModuleHandleA("NTDLL") == GetModuleHandleA("ntdll.dll"));
     check(GetModuleHandleA("msvcrt.dll") != NULL && GetModuleHandleA("kernelbase") != NULL);
+    check(AreFileApisANSI() == TRUE);
     SetLastError(0);
     check(GetModuleHandleA("no-such-module.dll") == NULL && GetLastError() == ERROR_MOD_NOT_FOUND);
     SetLastError(0);
