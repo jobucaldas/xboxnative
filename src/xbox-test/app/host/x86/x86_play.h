@@ -167,6 +167,40 @@ inline void install_nls_host(Host& host) {
             }
             break;
         }
+        case Host::NlsOperation::GetLocaleInfoA:
+        case Host::NlsOperation::GetLocaleInfoW:
+        case Host::NlsOperation::GetLocaleInfoEx: {
+            static_assert(sizeof(wchar_t) == 2, "Windows wide characters are UTF-16 units");
+            const bool ansi = request.operation == Host::NlsOperation::GetLocaleInfoA;
+            std::vector<char> output_a(request.output_null ? 0 : request.output_capacity);
+            std::vector<wchar_t> output_w(request.output_null ? 0 : request.output_capacity);
+            std::vector<wchar_t> locale(request.locale_name.begin(), request.locale_name.end()); locale.push_back(0);
+            if (request.operation == Host::NlsOperation::GetLocaleInfoEx) {
+                using InfoExW=int(WINAPI*)(LPCWSTR,LCTYPE,LPWSTR,int);
+                static HMODULE base=LoadLibraryExW(L"kernelbase.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+                static HMODULE k32=LoadLibraryExW(L"kernel32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+                FARPROC proc=base?GetProcAddress(base,"GetLocaleInfoEx"):nullptr;
+                if(!proc&&k32)proc=GetProcAddress(k32,"GetLocaleInfoEx");
+                if(!proc){response.last_error=ERROR_CALL_NOT_IMPLEMENTED;return response;}
+                response.result=uint32_t(reinterpret_cast<InfoExW>(proc)(request.locale_name_null?nullptr:locale.data(),request.type,
+                    output_w.empty()?nullptr:output_w.data(),int(request.output_capacity)));
+            } else {
+                using InfoA=int(WINAPI*)(LCID,LCTYPE,LPSTR,int);
+                using InfoW=int(WINAPI*)(LCID,LCTYPE,LPWSTR,int);
+                static HMODULE base=LoadLibraryExW(L"kernelbase.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+                static HMODULE k32=LoadLibraryExW(L"kernel32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+                FARPROC proc=base?GetProcAddress(base,ansi?"GetLocaleInfoA":"GetLocaleInfoW"):nullptr;
+                if(!proc&&k32)proc=GetProcAddress(k32,ansi?"GetLocaleInfoA":"GetLocaleInfoW");
+                if(!proc){response.last_error=ERROR_CALL_NOT_IMPLEMENTED;return response;}
+                response.result=uint32_t(ansi?reinterpret_cast<InfoA>(proc)(request.locale,request.type,output_a.empty()?nullptr:output_a.data(),int(request.output_capacity)):
+                    reinterpret_cast<InfoW>(proc)(request.locale,request.type,output_w.empty()?nullptr:output_w.data(),int(request.output_capacity)));
+            }
+            if(response.result&&!request.output_null) {
+                if(ansi)response.output.assign(output_a.begin(),output_a.begin()+response.result);
+                else {const auto* bytes=reinterpret_cast<const uint8_t*>(output_w.data());response.output.assign(bytes,bytes+size_t(response.result)*sizeof(wchar_t));}
+            }
+            break;
+        }
         case Host::NlsOperation::LCMapStringW:
         case Host::NlsOperation::LCMapStringEx:
         case Host::NlsOperation::FoldStringW: {

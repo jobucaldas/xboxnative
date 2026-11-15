@@ -95,8 +95,10 @@ struct Guest {
     std::vector<uint8_t> iob;                  // 3 FILE structs, guest-visible
     uint32_t iob_addr = 0x7FFD0000;
     uint32_t initenv = 0, commode = 0, fmode = 0, mb_cur_max = 0, errno_ptr = 0;
-    uint32_t startupinfo = 0, cmdline_ptr = 0, env_ptr = 0, module_name_ptr = 0;
+    uint32_t startupinfo = 0, cmdline_ptr = 0, env_ptr = 0, env_w_ptr = 0, module_name_ptr = 0;
     uint32_t image_base = 0;
+    std::map<std::string, std::string> guest_environment;
+    std::map<std::string, std::string> guest_environment_names;
     // The exe's implicit TLS directory (the runner copies it from its Image, so
     // each new thread gets its own block) and the TEB of the running thread,
     // mirroring Cpu.fs_base for host helpers that have no Cpu.
@@ -189,6 +191,14 @@ struct Guest {
     void copy_in(void* dst, uint32_t src, uint32_t n) { if (src && n) { auto b = mem.read_bytes(src, n); std::memcpy(dst, b.data(), n); } }
     uint32_t last_error() const { return mem.r32(cur_teb + 0x34); }
     void set_last_error(uint32_t v) { mem.w32(cur_teb + 0x34, v); }
+    std::string env_key(std::string s) const { for(char& ch:s) ch=char(std::tolower((unsigned char)ch)); return s; }
+    void rebuild_environment() {
+        std::string a; std::u16string w;
+        for(const auto& item:guest_environment) { const auto& name=guest_environment_names[item.first];a+=name+"="+item.second; a.push_back(0); for(unsigned char ch:name)w.push_back(ch);w.push_back(u'=');for(unsigned char ch:item.second)w.push_back(ch);w.push_back(0); }
+        if(guest_environment.empty()){a.push_back(0);w.push_back(0);}a.push_back(0);w.push_back(0);
+        env_ptr=heap.alloc(uint32_t(a.size()));mem.write_bytes(env_ptr,a.data(),uint32_t(a.size()));
+        env_w_ptr=heap.alloc(uint32_t(w.size()*2));for(size_t i=0;i<w.size();++i)mem.w(env_w_ptr+uint32_t(i*2),w[i],2);
+    }
     uint32_t add_sync_handle(uint32_t id) { uint32_t h=0x70000000u+(++sync_handle_serial);sync_handles[h]=id;++sync_objects[id].refs;return h; }
     uint32_t create_sync(SyncKind kind, uint32_t namep, bool manual, bool initial, int32_t count, int32_t maximum, uint32_t owner) {
         std::string name = str(namep); uint32_t id = 0;
@@ -810,7 +820,7 @@ inline void Guest::register_all() {
     startupinfo = heap.alloc(68); mem.write_bytes(startupinfo, std::vector<uint8_t>(68, 0).data(), 68);
     mem.w32(startupinfo, 68);  // cb
     cmdline_ptr = put_str(cmdline.empty() ? exe_path : cmdline);
-    env_ptr = heap.alloc(4); mem.w32(env_ptr, 0);
+    rebuild_environment();
     module_name_ptr = put_str(exe_path);
     // Data imports (mingw's win32-threaded CRT startup references msvcrt's
     // variables directly instead of through the __p__ accessors): the IAT slot
@@ -875,10 +885,17 @@ inline void Guest::register_all() {
     // members are NULL here, so the ANSI and wide layouts agree byte for byte.
     reg.add("kernel32.dll", "GetStartupInfoW", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         auto b = mem.read_bytes(startupinfo, 68); copy_out(c.arg(0), b.data(), 68); return 0; });
+    reg.add("kernel32.dll", "GetEnvironmentStringsA", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return env_ptr; });
     reg.add("kernel32.dll", "GetEnvironmentStrings", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return env_ptr; });
-    reg.add("kernel32.dll", "GetEnvironmentStringsW", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return put_wstr(u"\0"); });
+    reg.add("kernel32.dll", "GetEnvironmentStringsW", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return env_w_ptr; });
     reg.add("kernel32.dll", "FreeEnvironmentStringsA", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "FreeEnvironmentStringsW", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
+    auto get_env=[this](Cpu& c,bool wide)->uint32_t { std::string name;if(wide){auto w=wstr(c.arg(0));for(char16_t ch:w)name.push_back(char(ch));}else name=str(c.arg(0));auto it=guest_environment.find(env_key(name));if(it==guest_environment.end()){set_last_error(203);return 0;}uint32_t cap=c.arg(2),dst=c.arg(1);if(wide){std::u16string value(it->second.begin(),it->second.end());if(!dst||!cap)return uint32_t(value.size()+1);if(cap<=value.size()){set_last_error(122);return uint32_t(value.size()+1);}for(size_t i=0;i<value.size();++i)mem.w(dst+uint32_t(i*2),value[i],2);mem.w(dst+uint32_t(value.size()*2),0,2);set_last_error(0);return uint32_t(value.size());}const auto& value=it->second;if(!dst||!cap)return uint32_t(value.size()+1);if(cap<=value.size()){set_last_error(122);return uint32_t(value.size()+1);}mem.write_bytes(dst,value.c_str(),uint32_t(value.size()+1));set_last_error(0);return uint32_t(value.size());};
+    reg.add("kernel32.dll","GetEnvironmentVariableA",Conv::Stdcall,3,[get_env](Cpu& c){return get_env(c,false);});
+    reg.add("kernel32.dll","GetEnvironmentVariableW",Conv::Stdcall,3,[get_env](Cpu& c){return get_env(c,true);});
+    auto set_env=[this](Cpu& c,bool wide)->uint32_t {std::string name,value;if(wide){auto wn=wstr(c.arg(0));for(char16_t ch:wn)name.push_back(char(ch));}else name=str(c.arg(0));if(name.empty()||name.find('=')!=std::string::npos){set_last_error(87);return 0;}std::string key=env_key(name);if(!c.arg(1)){guest_environment.erase(key);guest_environment_names.erase(key);}else {if(wide){auto wv=wstr(c.arg(1));for(char16_t ch:wv)value.push_back(char(ch));}else value=str(c.arg(1));if(!guest_environment.count(key))guest_environment_names[key]=name;guest_environment[key]=value;}rebuild_environment();set_last_error(0);return 1;};
+    reg.add("kernel32.dll","SetEnvironmentVariableA",Conv::Stdcall,2,[set_env](Cpu& c){return set_env(c,false);});
+    reg.add("kernel32.dll","SetEnvironmentVariableW",Conv::Stdcall,2,[set_env](Cpu& c){return set_env(c,true);});
     reg.add("kernel32.dll", "GetModuleHandleA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         std::string n = str(c.arg(0)); if (n.empty()) return image_base;
         return module_by_name(n, c.thunks); });
@@ -1180,6 +1197,17 @@ inline void Guest::register_all() {
             copy_out(output_ptr, response.output.data(), bytes);
         return response.result;
     };
+    auto get_locale_info=[this](Cpu& c,Host::NlsOperation op)->uint32_t { Host::NlsRequest request{};request.operation=op;request.locale=c.arg(0);request.type=c.arg(1);request.output_capacity=c.arg(3);request.output_null=c.arg(2)==0;if(op==Host::NlsOperation::GetLocaleInfoEx){request.locale_name_null=c.arg(0)==0;if(!request.locale_name_null)request.locale_name=wstr(c.arg(0));}if(!host.nls_call){set_last_error(120);return 0;}Host::NlsResponse response=host.nls_call(request);set_last_error(response.last_error);uint32_t unit=op==Host::NlsOperation::GetLocaleInfoA?1u:2u;if(response.result&&c.arg(2)&&response.output.size()==size_t(response.result)*unit)copy_out(c.arg(2),response.output.data(),uint32_t(response.output.size()));return response.result;};
+    reg.add("kernel32.dll","GetLocaleInfoA",Conv::Stdcall,4,[get_locale_info](Cpu& c){return get_locale_info(c,Host::NlsOperation::GetLocaleInfoA);});
+    reg.add("kernel32.dll","GetLocaleInfoW",Conv::Stdcall,4,[get_locale_info](Cpu& c){return get_locale_info(c,Host::NlsOperation::GetLocaleInfoW);});
+    reg.add("kernel32.dll","GetLocaleInfoEx",Conv::Stdcall,4,[get_locale_info](Cpu& c){return get_locale_info(c,Host::NlsOperation::GetLocaleInfoEx);});
+    // Guest calls are serialized by the interpreter, matching the existing Interlocked* routes.
+    auto slist_init=[this](Cpu& c)->uint32_t {uint32_t h=c.arg(0);mem.w32(h,0);mem.w32(h+4,0);return 0;};
+    auto slist_push=[this](Cpu& c)->uint32_t {uint32_t h=c.arg(0),entry=c.arg(1),old=mem.r32(h);mem.w32(entry,old);uint32_t depth=uint32_t(mem.r(h+4,2)),seq=uint32_t(mem.r(h+6,2));mem.w32(h,entry);mem.w(h+4,depth==0xffff?depth:depth+1,2);mem.w(h+6,(seq+1)&0xffff,2);return old;};
+    auto slist_pop=[this](Cpu& c)->uint32_t {uint32_t h=c.arg(0),old=mem.r32(h);if(!old)return 0;uint32_t next=mem.r32(old),depth=uint32_t(mem.r(h+4,2)),seq=uint32_t(mem.r(h+6,2));mem.w32(h,next);mem.w(h+4,depth?depth-1:0,2);mem.w(h+6,(seq+1)&0xffff,2);return old;};
+    auto slist_flush=[this](Cpu& c)->uint32_t {uint32_t h=c.arg(0),old=mem.r32(h),seq=uint32_t(mem.r(h+6,2));mem.w32(h,0);mem.w(h+4,0,2);mem.w(h+6,(seq+1)&0xffff,2);return old;};
+    auto add_slist=[&](const char* dll){reg.add(dll,"InitializeSListHead",Conv::Stdcall,1,slist_init);reg.add(dll,"RtlInitializeSListHead",Conv::Stdcall,1,slist_init);reg.add(dll,"InterlockedPushEntrySList",Conv::Stdcall,2,slist_push);reg.add(dll,"RtlInterlockedPushEntrySList",Conv::Stdcall,2,slist_push);reg.add(dll,"InterlockedPopEntrySList",Conv::Stdcall,1,slist_pop);reg.add(dll,"RtlInterlockedPopEntrySList",Conv::Stdcall,1,slist_pop);reg.add(dll,"InterlockedFlushSList",Conv::Stdcall,1,slist_flush);reg.add(dll,"RtlInterlockedFlushSList",Conv::Stdcall,1,slist_flush);reg.add(dll,"QueryDepthSList",Conv::Stdcall,1,[this](Cpu& c){return uint32_t(mem.r(c.arg(0)+4,2));});reg.add(dll,"RtlQueryDepthSList",Conv::Stdcall,1,[this](Cpu& c){return uint32_t(mem.r(c.arg(0)+4,2));});};
+    add_slist("kernel32.dll");add_slist("ntdll.dll");
     reg.add("kernel32.dll", "GetStringTypeA", Conv::Stdcall, 5, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
         Host::NlsRequest request{}; request.operation = Host::NlsOperation::GetStringTypeA;
         request.locale = c.arg(0); request.type = c.arg(1); request.output_null = c.arg(4) == 0;
