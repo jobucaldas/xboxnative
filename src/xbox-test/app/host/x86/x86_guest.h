@@ -25,6 +25,11 @@ namespace x86 {
 // x86_pe.h's Dll form so GetProcAddress reads the same export tables the
 // import binder filled.
 struct Dll;
+struct SteamClientRegistry { uint32_t account=0; std::string client; };
+inline SteamClientRegistry& steam_client_registry_config() { static SteamClientRegistry config; return config; }
+inline void set_steam_client_registry(uint32_t account,const std::string& client) {
+    steam_client_registry_config()={account,client};
+}
 
 // ---- guest heap: first-fit free list over a lazily mapped guest arena ----
 struct GuestHeap {
@@ -90,6 +95,9 @@ struct Guest {
     Memory& mem; Host& host; Registry& reg;
     GuestHeap heap;
     std::string exe_path, cmdline;
+    SteamClientRegistry steam_registry=steam_client_registry_config();
+    std::map<uint32_t,bool> steam_registry_keys;
+    uint32_t steam_registry_serial=0;
     std::map<std::string, uint32_t> modules;   // lowercase module name -> guest base
     std::vector<uint32_t> atexit_fns;
     std::vector<uint8_t> iob;                  // 3 FILE structs, guest-visible
@@ -878,6 +886,42 @@ inline void Guest::register_all() {
     });
     auto C = [](const char* n) { return n; };
     (void)C;
+    auto steam_reg_value=[this](std::string name,bool wide,uint32_t& type,std::vector<uint8_t>& bytes) {
+        for(char& ch:name){if(wide&&ch>='A'&&ch<='Z')ch=char(ch+32);else if(!wide&&ch>='A'&&ch<='Z')ch=char(ch+32);}
+        auto dword=[&](uint32_t value){type=4;bytes.resize(4);memcpy(bytes.data(),&value,4);};
+        auto text=[&](const std::string& value){type=1;if(wide){bytes.resize((value.size()+1)*2);for(size_t i=0;i<value.size();++i){bytes[i*2]=uint8_t(value[i]);bytes[i*2+1]=0;}}else bytes.assign(value.begin(),value.end());bytes.resize(bytes.size()+(wide?2:1),0);};
+        if(name=="pid")dword(0x1000);
+        else if(name=="activeuser")dword(steam_registry.account);
+        else if(name=="steamclientdll")text(steam_registry.client);
+        else if(name=="universe")text("Public");
+        else return false;
+        return true;
+    };
+    auto reg_open=[this](Cpu& c,bool wide)->uint32_t {
+        std::string path;
+        if(wide){for(char16_t ch:wstr(c.arg(1)))path.push_back(char(ch));}else path=str(c.arg(1));
+        for(char& ch:path)if(ch>='A'&&ch<='Z')ch=char(ch+32);
+        if(c.arg(0)!=0x80000001u||path!="software\\valve\\steam\\activeprocess"||steam_registry.client.empty())return 2;
+        uint32_t key=0x71000000u+(++steam_registry_serial);steam_registry_keys[key]=true;mem.w32(c.arg(4),key);return 0;
+    };
+    auto reg_query=[this,steam_reg_value](Cpu& c,bool wide)->uint32_t {
+        if(!steam_registry_keys.count(c.arg(0)))return 6;
+        std::string name;
+        if(wide){for(char16_t ch:wstr(c.arg(1)))name.push_back(char(ch));}else name=str(c.arg(1));
+        uint32_t type=0;std::vector<uint8_t> bytes;
+        if(!steam_reg_value(name,wide,type,bytes))return 2;
+        if(c.arg(3))mem.w32(c.arg(3),type);
+        if(!c.arg(5))return 87;
+        uint32_t cap=mem.r32(c.arg(5));mem.w32(c.arg(5),uint32_t(bytes.size()));
+        if(!c.arg(4))return 0;
+        if(cap<bytes.size())return 234;
+        mem.write_bytes(c.arg(4),bytes.data(),uint32_t(bytes.size()));return 0;
+    };
+    reg.add("advapi32.dll","RegOpenKeyExA",Conv::Stdcall,5,[reg_open](Cpu& c){return reg_open(c,false);});
+    reg.add("advapi32.dll","RegOpenKeyExW",Conv::Stdcall,5,[reg_open](Cpu& c){return reg_open(c,true);});
+    reg.add("advapi32.dll","RegQueryValueExA",Conv::Stdcall,6,[reg_query](Cpu& c){return reg_query(c,false);});
+    reg.add("advapi32.dll","RegQueryValueExW",Conv::Stdcall,6,[reg_query](Cpu& c){return reg_query(c,true);});
+    reg.add("advapi32.dll","RegCloseKey",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{return steam_registry_keys.erase(c.arg(0))?0:6;});
 
     // kernel32: process, error, memory, sync, TLS
     reg.add("kernel32.dll", "GetLastError", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return last_error(); });

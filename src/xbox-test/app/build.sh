@@ -96,7 +96,7 @@ fi
 gbe="$here/../../../out/gbe-fork"
 bash "$here/../../tools/fetch-gbe-fork.sh" "$gbe"
 mkdir -p "$out/layout/steam-provider/gbe"
-cp "$gbe"/{steam_api64.dll,steamclient64.dll,LICENSE,SOURCE.txt} "$out/layout/steam-provider/gbe/"
+cp "$gbe"/{steam_api64.dll,steam_api.dll,steamclient64.dll,steamclient.dll,LICENSE,SOURCE.txt} "$out/layout/steam-provider/gbe/"
 # Console self-test fixtures (selftest.h): the same guest programs the off-device
 # runner builds (tests/play-runtime.sh), packed into layout\diag so the installed
 # package can exercise the Vulkan, D3D9, D3D10 and 32-bit paths on the console.
