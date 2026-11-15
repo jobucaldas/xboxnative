@@ -130,6 +130,7 @@ static uintptr_t resolve(const char*,const char*,WORD);
 static Module* map(const std::wstring& path,const std::string& asKey={},wxl::Resolver resolver=nullptr);
 static bool initialize(Module&);
 static bool initializePending();
+static bool initializeReentrant(Module&);
 static std::string describe(uintptr_t);
 static void stopMissing(const std::string& name,uintptr_t caller=0) {
     std::string text="missing import hit: "+name;
@@ -402,7 +403,13 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
         // this thread (Wine's concrt140 loads msvcp140 while msvcp140 attaches
         // it). Windows and Wine return that handle; the recursive loader lock
         // means no other thread can be inside this branch meanwhile.
-        if(!initializePending() || !(m->initialized || m->initializing)) {--m->references;SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
+        // A DllMain can load a dependency before it finishes its own setup
+        // (msvcp140 loads concrt140 before initializing its _Lockit locks).
+        // Initialize that requested module and its dependencies, but don't run
+        // unrelated pending callbacks until the current attachment completes.
+        bool attaching=false;
+        for(auto pending:state->order)if(pending->initializing){attaching=true;break;}
+        if(!(attaching?initializeReentrant(*m):initializePending()) || !(m->initialized || m->initializing)) {--m->references;SetLastError(ERROR_DLL_INIT_FAILED);return nullptr;}
         audioBackendLoaded(key);
         return (HMODULE)m->image.base;
     }
@@ -1472,17 +1479,27 @@ static bool initialize(Module& m) {
     }
     m.initialized=true;m.initializing=false;return true;
 }
+static bool preparePending() {
+    // Register every unwind table and TLS index before any guest callback.
+    for(auto m:state->order) if(!prepare(*m)) return false;
+    // Every template must exist before the first callback can call a sibling.
+    for(auto m:state->order) if(m->image.tlsKey!=TLS_OUT_OF_INDEXES && !TlsGetValue(m->image.tlsKey) && !m->image.initThreadStorage()) {state->event("TLS storage failed: "+m->key);return false;}
+    return true;
+}
 static bool initializePending() {
     // All entry paths, including initial runImpl(), publish initialization and
     // failure while owning proc/loadExW's recursive loader lock. Other threads
     // cannot observe initializing=true as permission to use pending exports.
     std::lock_guard<LoaderMutex> lock(state->loaderMutex);
-    // Register every unwind table and TLS index before any guest callback.
-    for(auto m:state->order) if(!prepare(*m)) return false;
-    // Every template must exist before the first callback can call a sibling.
-    for(auto m:state->order) if(m->image.tlsKey!=TLS_OUT_OF_INDEXES && !TlsGetValue(m->image.tlsKey) && !m->image.initThreadStorage()) {state->event("TLS storage failed: "+m->key);return false;}
+    if(!preparePending()) return false;
     // Dependencies added by LoadLibrary can extend order while DllMain runs.
     for(size_t i=0;i<state->order.size();++i) if(!initialize(*state->order[i])) return false;return true;
+}
+static bool initializeReentrant(Module& module) {
+    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
+    // New images still need TLS and unwind preparation, but unrelated callbacks
+    // must wait until the current DllMain/TLS callback has returned.
+    return preparePending() && initialize(module);
 }
 #include "../../uwph/kernel32/guest_thread_exit.h"
 struct ThreadStart { LPTHREAD_START_ROUTINE function;void* arg; };

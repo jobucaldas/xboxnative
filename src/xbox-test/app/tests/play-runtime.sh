@@ -268,6 +268,16 @@ rm -rf "$out/runtime";mkdir -p "$out/runtime";cp out/layout/runtime/*.dll out/la
 # imports setupapi's cfgmgr32 family, which Play serves from the setupapi donor.
 mkdir -p "$out/donors";cp out/layout/donors/*.dll "$out/donors/"
 bash ../uwph/host/build-sqlite-lib.sh "$out/obj/sqlite3.lib"
+# A nested LoadLibrary from a DLL's DllMain must initialize that dependency,
+# not unrelated pending modules whose TLS callbacks can use the DLL mid-attach.
+clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_INIT_PARENT -c tests/play-init-order.cpp -o "$out/obj/init-parent.obj"
+clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_INIT_PEER -c tests/play-init-order.cpp -o "$out/obj/init-peer.obj"
+clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_INIT_CHILD -c tests/play-init-order.cpp -o "$out/obj/init-child.obj"
+clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -c tests/play-init-order.cpp -o "$out/obj/init-exe.obj"
+lld-link-19 /nodefaultlib /include:play_init_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /dll /entry:parent_entry /implib:"$out/obj/play-init-parent.lib" /out:"$out/play-init-parent.dll" "$out/obj/init-parent.obj" "$MINGW_SYSROOT"/lib/libkernel32.a
+lld-link-19 /nodefaultlib /include:play_init_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /dll /noentry /out:"$out/play-init-child.dll" "$out/obj/init-child.obj"
+lld-link-19 "${common[@]}" /include:play_init_relocation /dll /entry:peer_entry /implib:"$out/obj/play-init-peer.lib" /out:"$out/play-init-peer.dll" "$out/obj/init-peer.obj" "$out/obj/play-init-parent.lib" "$MINGW_SYSROOT"/lib/libkernel32.a
+lld-link-19 /nodefaultlib /include:play_init_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /entry:loader_init_entry /out:"$out/play-init-order.exe" "$out/obj/init-exe.obj" "$out/obj/play-init-parent.lib" "$out/obj/play-init-peer.lib" "$MINGW_SYSROOT"/lib/libkernel32.a
 UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/play-runner.exe" host/tls_slot0.cpp tests/play-runner.cpp -- /MT /O2 /Iout/obj /I../uwph/host/third_party/sqlite
 # Use the exact packaged carriers from the launcher build.
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
@@ -288,7 +298,7 @@ tail -1 "$out/leaderboards.log"
 # The root copy was only for this run: later modes prove what happens when a
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
-for mode in observer-log reject-attach reject-mapping normal missing gap static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d10-compile d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn vulkan-draw opengl;do
+for mode in observer-log reject-attach reject-mapping normal missing gap static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock loader-reentrant reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d10-compile d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn vulkan-draw opengl;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
@@ -300,6 +310,7 @@ grep -q 'VCRT ROUTE vcruntime140.dll!__CxxFrameHandler3 found=1' "$out/native-vc
 grep -q 'VCRT ROUTE vcruntime140_1.dll!__CxxFrameHandler4 found=1' "$out/native-vcrt.log"
 if grep -q 'VCRT ROUTE .* found=0' "$out/native-vcrt.log";then exit 1;fi
 grep -q 'PRUN EVENT mapping msvcp140.dll' "$out/native-msvcp.log"
+grep -q 'PLAY-TEST executed=1 finished=1 success=1 code=42' "$out/loader-reentrant.log"
 # The /GA-style fixture got the launcher's slot 0, not a packaged carrier.
 grep -q 'PRUN EVENT TLS slot 0 for play-slot0.exe' "$out/slot0.log"
 if grep -q 'TLS slot 0 unavailable' "$out/slot0.log";then exit 1;fi
