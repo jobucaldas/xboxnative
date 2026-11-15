@@ -29,6 +29,8 @@ jobs:
         run: bash src/xbox-test/uwph/hid/tests/run-pad-registry-test.sh
       - name: "cmd.txt gpad pad-injection: parser, timing and release"
         run: c++ -std=c++17 -O2 -Wall -Wextra -Werror -Isrc/xbox-test/uwph/xinput src/xbox-test/uwph/xinput/gpad-test.cpp -o /tmp/gpad-test && /tmp/gpad-test
+      - name: "cmd.txt key injection: parser and timing"
+        run: c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/key-script.cpp -o /tmp/key-script-test && /tmp/key-script-test
       - name: offline unit tests
         run: |
           set -e
