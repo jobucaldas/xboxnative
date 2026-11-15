@@ -1,20 +1,40 @@
 #!/usr/bin/env bash
-# Offline contract: Mesa's d3d12 driver must have its pinned DXIL validator beside it.
+# Offline DXIL contract: pinned runtime download, verified ZIP extraction, no MSIX redistribution.
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
-fetch="$root/src/tools/fetch-dxil.sh"
-build="$root/src/xbox-test/app/build.sh"
-pin=$(grep -E '^dxc-dxil[[:space:]]' "$root/deps.pin")
-[[ $pin == *'dxc_2025_07_14.zip'*'9ad895a6b039e3a8f8c22a1009f866800b840a74b50db9218d13319e215ea8a4'* ]] || {
-  echo "FAIL DXC archive is not pinned to the reviewed release" >&2; exit 1;
+app="$root/src/xbox-test/app"
+build="$app/build.sh"
+python3 -I - "$root" <<'PY'
+import pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+pin = next(line.split() for line in (root / "deps.pin").read_text().splitlines() if line.startswith("dxc-dxil "))
+header = (root / "src/xbox-test/app/dxil_runtime.h").read_text()
+constants = {
+    "kUrl": pin[1],
+    "kArchiveSha256": pin[2],
+    "kDllSha256": pin[3],
 }
-grep -Fq 'bin/x64/dxil.dll' "$fetch" || { echo "FAIL fetch does not select x64 dxil.dll" >&2; exit 1; }
-grep -Fq 'LICENSE-MS.txt' "$fetch" || { echo "FAIL fetch does not retain the Microsoft license" >&2; exit 1; }
-grep -Fq 'sha256sum -c -' "$fetch" || { echo "FAIL fetch does not verify the archive hash" >&2; exit 1; }
-grep -Fq 'bash "$here/../../tools/fetch-dxil.sh" "$dxil"' "$build" || {
-  echo "FAIL launcher build does not fetch the DXIL validator" >&2; exit 1;
-}
-grep -Fq 'cp "$dxil"/{dxil.dll,LICENSE-MS.txt,SOURCE.txt,SHA256SUMS-dxil} "$out/layout/runtime/"' "$build" || {
-  echo "FAIL launcher does not package the validator with its license and provenance" >&2; exit 1;
-}
-echo "PASS Mesa DXIL validator is pinned, verified, licensed, and packaged"
+for name, value in constants.items():
+    if not re.search(rf'{name}\[\] = "{re.escape(value)}"', header):
+        raise SystemExit(f"FAIL deps.pin mismatch for {name}")
+build_text = (root / "src/xbox-test/app/build.sh").read_text()
+if "fetch-dxil.sh" in build_text or re.search(r"cp[^\n]*(dxil\.dll|LICENSE-MS\.txt)", build_text):
+    raise SystemExit("FAIL launcher layout still packages Microsoft's DXIL files")
+print("PASS DXIL URL and archive/DLL hashes match deps.pin")
+print("PASS launcher packaging contract excludes dxil.dll and LICENSE-MS.txt")
+PY
+
+tmp="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/mesa-dxil-runtime-test-$$"
+mkdir -p "$tmp"
+trap 'rm -rf "$tmp"' EXIT
+python3 -I - "$tmp/fixture.zip" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "w", compression=zipfile.ZIP_DEFLATED) as z:
+    z.writestr("bin/x64/dxil.dll", b"fixture DXIL bytes")
+    z.writestr("LICENSE-MS.txt", b"fixture Microsoft license")
+PY
+for source in inflate inftrees inffast adler32 crc32 zutil; do
+  cc -std=c11 -I"$app/vendor/zlib" -c "$app/vendor/zlib/$source.c" -o "$tmp/$source.o"
+done
+c++ -std=c++17 -O2 -Wall -Wextra -Werror "$app/tests/mesa-dxil-zip.cpp" "$tmp"/*.o -o "$tmp/mesa-dxil-zip"
+"$tmp/mesa-dxil-zip" "$tmp/fixture.zip"

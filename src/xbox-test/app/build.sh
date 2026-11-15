@@ -66,9 +66,6 @@ cp "$donors"/SOURCE.txt "$here/donors/COPYING.LIB" "$here/donors/LICENSE" "$out/
 # Play maps these from runtime/ after any copy the game ships. PLAY_MESA=0 builds a launcher without them (Play's
 # failing WGL stubs then answer, as before); the Mesa build needs meson, ninja, python mako and pyyaml.
 if [ "${PLAY_MESA:-1}" != 0 ]; then
-  dxil="$here/../../../out/dxil"
-  bash "$here/../../tools/fetch-dxil.sh" "$dxil"
-  cp "$dxil"/{dxil.dll,LICENSE-MS.txt,SOURCE.txt,SHA256SUMS-dxil} "$out/layout/runtime/"
   mesa="$here/../../../out/mesa-d3d12"
   bash "$here/../../tools/build-mesa-d3d12.sh" "$mesa" --build
   cp "$mesa"/{opengl32.dll,libgallium_wgl.dll,LICENSE-Mesa.rst,LICENSE-DirectX-Headers} "$out/layout/runtime/"

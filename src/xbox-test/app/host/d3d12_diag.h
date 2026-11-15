@@ -1337,9 +1337,9 @@ inline void traceDxilProbe() {
     HMODULE module=GetModuleHandleW(L"dxil.dll");
     if(module){emit("trace dxil.dll probe=GetModuleHandleW success");return;}
     SetLastError(ERROR_MOD_NOT_FOUND);
-    HMODULE probe=LoadLibraryExW(L"dxil.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    HMODULE probe=LoadLibraryW(L"dxil.dll");
     DWORD error=probe?ERROR_SUCCESS:GetLastError();
-    emit(fmt("trace dxil.dll probe=LoadLibraryExW %s error=%lu",probe?"success":"missing",(unsigned long)error));
+    emit(fmt("trace dxil.dll probe=LoadLibraryW %s error=%lu",probe?"success":"missing",(unsigned long)error));
     if(probe)FreeLibrary(probe);
 }
 inline std::atomic<bool> traceCapsLogged{false};
