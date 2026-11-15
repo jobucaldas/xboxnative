@@ -31,6 +31,15 @@ vulkan-headers-src  https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.
 # Mono 6.12.0.206 Windows x64 runtime (MIT), fetched and SHA-256 verified; never committed.
 mono-win-x64  https://download.mono-project.com/archive/6.12.0/windows-installer/mono-6.12.0.206-x64-0.msi  4125f57d97cfa88257915edc969e913de198cd8e22396a29849037479a0ac368
 mono-license  https://raw.githubusercontent.com/mono/mono/mono-6.12.0.206/LICENSE  923c7053ad0d430cd9b0b69a0ccf3abb7170a1ce50ecbf01915b565a35823d10
+# XNA4 compatibility layer (Ms-PL): build FNA and its ABI forwarders from pinned source; never commit binaries.
+fna  https://github.com/FNA-XNA/FNA.git  6f9735ad5b495b36581b1387824fa57f371937a2  26.11
+fna-netstub  https://github.com/FNA-XNA/FNA.NetStub.git  8ccb6c8f0fd34e4369e366d1153e5247f9e72fe7
+fna-faudio  https://github.com/FNA-XNA/FAudio.git  0c423758079863fc3044ba26dd00fc89c41f469e
+fna-fna3d  https://github.com/FNA-XNA/FNA3D.git  2806acf739f9250cc67be6e3078cb5b01767844e
+fna-sdl2-cs  https://github.com/flibitijibibo/SDL2-CS.git  1eb20e5c690aee9a5188ba9cf06207295c51d935
+fna-sdl3-cs  https://github.com/flibitijibibo/SDL3-CS.git  9bdcf5de2af86bf764a9ca3c42821c1a099ef150
+fna-theorafile  https://github.com/FNA-XNA/Theorafile.git  3497e1a3cda1fa1ce79256f20e210fd08aec546f
+fna-dav1dfile  https://github.com/MoonsideGames/dav1dfile.git  a1377b49d6b69097357618bde87b0294e32dc313
 # UI toolkit (issue #51): stb_truetype.h (public domain / MIT) at a pinned commit, and Microsoft Selawik 1.01
 # (SIL OFL 1.1, the metric-compatible Segoe UI substitute the mockups use) plus its licence text. Fetched and
 # SHA-256 verified by src/tools/fetch-ui-assets.sh into git-ignored out/ui-assets/; the launcher packages the

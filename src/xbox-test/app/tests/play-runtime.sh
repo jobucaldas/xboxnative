@@ -265,6 +265,8 @@ llvm-readobj --coff-imports "$out/play-msvcp.dll" | grep -q 'Name: MSVCP140.dll'
 rm -f "$out/msvcp140.dll"
 rm -rf "$out/runtime";mkdir -p "$out/runtime";cp out/layout/runtime/*.dll out/layout/runtime/*.json "$out/runtime/"
 cp -R out/layout/runtime/mono "$out/runtime/mono"
+cp -R out/layout/runtime/fna "$out/runtime/fna"
+bash tests/fna-smoke "$out/runtime/fna"
 test ! -e "$out/runtime/mono/VCRUNTIME140.dll"
 test -f "$out/runtime/vcruntime140.dll"
 mkdir -p "$out/managed"
