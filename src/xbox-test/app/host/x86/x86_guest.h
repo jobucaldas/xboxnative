@@ -1363,6 +1363,18 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll","GetLocaleInfoA",Conv::Stdcall,4,[get_locale_info](Cpu& c){return get_locale_info(c,Host::NlsOperation::GetLocaleInfoA);});
     reg.add("kernel32.dll","GetLocaleInfoW",Conv::Stdcall,4,[get_locale_info](Cpu& c){return get_locale_info(c,Host::NlsOperation::GetLocaleInfoW);});
     reg.add("kernel32.dll","GetLocaleInfoEx",Conv::Stdcall,4,[get_locale_info](Cpu& c){return get_locale_info(c,Host::NlsOperation::GetLocaleInfoEx);});
+    reg.add("kernel32.dll","GetUserDefaultLocaleName",Conv::Stdcall,2,[this](Cpu& c)->uint32_t {
+        const uint32_t output=c.arg(0),capacity=c.arg(1);
+        if(!output||!capacity){set_last_error(87);return 0;}
+        if(!host.nls_call){set_last_error(120);return 0;}
+        Host::NlsRequest request{};request.operation=Host::NlsOperation::GetUserDefaultLocaleName;
+        request.output_capacity=capacity;request.output_null=false;
+        Host::NlsResponse response=host.nls_call(request);set_last_error(response.last_error);
+        if(response.result&&!response.output.empty()&&response.output.size()<=size_t(capacity)*2)
+            copy_out(output,response.output.data(),uint32_t(response.output.size()));
+        else if(response.result){set_last_error(87);return 0;}
+        return response.result;
+    });
     // Guest calls are serialized by the interpreter, matching the existing Interlocked* routes.
     auto slist_init=[this](Cpu& c)->uint32_t {uint32_t h=c.arg(0);mem.w32(h,0);mem.w32(h+4,0);return 0;};
     auto slist_push=[this](Cpu& c)->uint32_t {uint32_t h=c.arg(0),entry=c.arg(1),old=mem.r32(h);mem.w32(entry,old);uint32_t depth=uint32_t(mem.r(h+4,2)),seq=uint32_t(mem.r(h+6,2));mem.w32(h,entry);mem.w(h+4,depth==0xffff?depth:depth+1,2);mem.w(h+6,(seq+1)&0xffff,2);return old;};

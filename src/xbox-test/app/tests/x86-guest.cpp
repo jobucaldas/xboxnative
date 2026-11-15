@@ -67,6 +67,13 @@ int main(int argc, char** argv) {
     if (argc < 2) { printf("usage: x86-guest <fixture-crt.exe>\n"); return 2; }
     auto file = slurp(argv[1]);
     Memory mem; ThunkTable table; Host host; Registry reg;
+    host.nls_call=[](const Host::NlsRequest& request) {
+        Host::NlsResponse response{};
+        if(request.operation==Host::NlsOperation::GetUserDefaultLocaleName&&request.output_capacity==85u&&!request.output_null) {
+            response.result=1;response.output={'e',0,'n',0,'-',0,'U',0,'S',0,0,0};
+        }
+        return response;
+    };
     Guest guest(mem, host, reg);
     guest.exe_path = "fixture-crt.exe"; guest.cmdline = guest.exe_path;
     guest.register_all();

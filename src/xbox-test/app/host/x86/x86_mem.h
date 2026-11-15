@@ -25,6 +25,11 @@ struct Memory {
     std::vector<uint8_t> prot = std::vector<uint8_t>(1u << 20, 0);
     std::vector<std::unique_ptr<uint8_t[]>> blocks;
     uint32_t fault_eip = 0;  // maintained by the CPU so faults name the instruction
+    uint32_t stack_reserve_base = 0, stack_limit = 0, stack_guard = 0, stack_teb_limit = 0;
+    void configure_stack(uint32_t reserve_base, uint32_t committed_limit, uint32_t teb_limit) {
+        stack_reserve_base=reserve_base;stack_limit=committed_limit;stack_teb_limit=teb_limit;
+        stack_guard=committed_limit>reserve_base?committed_limit-PAGE:0;
+    }
     [[noreturn]] void fail(FaultKind k, uint32_t a, const char* what) const {
         char b[96]; snprintf(b, sizeof b, "%s at 0x%08x (eip 0x%08x)", what, a, fault_eip);
         throw Fault(k, fault_eip, a, b);
@@ -67,6 +72,12 @@ struct Memory {
     uint8_t protect_of(uint32_t a) const { return prot[a >> 12]; }
     uint8_t* at(uint32_t a, uint8_t need, FaultKind k) {
         uint32_t i = a >> 12;
+        if (!page[i] && stack_guard && (a & ~(PAGE - 1)) == stack_guard && need != PROT_X) {
+            map(stack_guard,PAGE,PROT_R|PROT_W);
+            stack_limit=stack_guard;
+            w32(stack_teb_limit,stack_limit);
+            stack_guard=stack_limit>stack_reserve_base?stack_limit-PAGE:0;
+        }
         if (!page[i]) fail(k, a, k == FaultKind::ExecuteViolation ? "execute violation" : (need & PROT_W) ? "write access violation" : "read access violation");
         // Copy-on-write for image pages: Windows maps image sections
         // copy-on-write, so a guest write to a read-only image page (mingw's

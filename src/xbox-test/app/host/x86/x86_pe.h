@@ -13,7 +13,7 @@
 #include "apiset.h"
 namespace x86 {
 // Guest layout (all fixed, outside every ImageBase a normal exe uses).
-constexpr uint32_t STACK_TOP = 0x00300000, STACK_SIZE = 0x00100000;
+constexpr uint32_t STACK_TOP = 0x00300000, STACK_SIZE = 0x00100000, STACK_RESERVE_CAP = 0x00200000;
 constexpr uint32_t TEB_ADDR = 0x7FFDE000, PEB_ADDR = 0x7FFDF000;
 struct Registry {  // (lowercase dll, lowercase symbol) -> thunk definition
     // Symbol keys are stored lowercase: Windows' loader matches export names
@@ -38,7 +38,7 @@ struct Registry {  // (lowercase dll, lowercase symbol) -> thunk definition
     }
 };
 struct Image {
-    uint32_t base = 0, size = 0, entry = 0;
+    uint32_t base = 0, size = 0, entry = 0, stack_reserve = 0, stack_commit = 0;
     // The entry point as an RVA: `entry` is absolute (base + RVA), so a DLL
     // whose AddressOfEntryPoint is 0 would still show a nonzero `entry` (the
     // image base) and look like it has code to run. Everything that decides
@@ -141,6 +141,7 @@ inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, cons
     uint32_t preferred = u32(file, opt + 28);
     wxl::Pe32 pe; pe.map(file, load_base ? load_base : preferred);
     Image img; img.base = pe.logical; img.size = uint32_t(pe.bytes.size()); img.entry_rva = pe.entry; img.entry = pe.logical + pe.entry; img.relocations = pe.relocations;
+    if(optional_size>=80){img.stack_reserve=u32(file,opt+72);img.stack_commit=u32(file,opt+76);}
     // Sections: headers R; each section gets its own page protections.
     mem.map(img.base, img.size, PROT_R | PROT_W);
     mem.write_bytes(img.base, pe.bytes.data(), img.size);
@@ -483,11 +484,19 @@ inline void map_thunk_page(Memory& mem, ThunkTable& table) {
     mem.protect(table.base, len, PROT_R | PROT_X);
 }
 inline void init_process(Memory& mem, Cpu& cpu, const Image& img, uint32_t pid = 0x1000, uint32_t tid = 0x1004) {
-    mem.map(STACK_TOP - STACK_SIZE, STACK_SIZE, PROT_R | PROT_W);
+    uint32_t reserve=img.stack_reserve?img.stack_reserve:STACK_SIZE;
+    reserve=std::max(Memory::PAGE,std::min(reserve,STACK_RESERVE_CAP));
+    reserve=(reserve+Memory::PAGE-1)&~(Memory::PAGE-1);
+    uint32_t commit=img.stack_commit?img.stack_commit:Memory::PAGE;
+    commit=std::max(Memory::PAGE,std::min(commit,reserve));
+    commit=(commit+Memory::PAGE-1)&~(Memory::PAGE-1);
+    const uint32_t stack_limit=STACK_TOP-commit,stack_reserve_base=STACK_TOP-reserve;
+    mem.map(stack_limit,commit,PROT_R|PROT_W);
     mem.map(TEB_ADDR, 4096, PROT_R | PROT_W); mem.map(PEB_ADDR, 4096, PROT_R | PROT_W);
+    mem.configure_stack(stack_reserve_base,stack_limit,TEB_ADDR+0x08);
     mem.w32(TEB_ADDR + 0x00, 0xFFFFFFFFu);        // ExceptionList (empty chain)
     mem.w32(TEB_ADDR + 0x04, STACK_TOP);          // StackBase
-    mem.w32(TEB_ADDR + 0x08, STACK_TOP - STACK_SIZE);  // StackLimit
+    mem.w32(TEB_ADDR + 0x08, stack_limit);       // StackLimit (lowest committed stack page)
     mem.w32(TEB_ADDR + 0x18, TEB_ADDR);           // Self
     mem.w32(TEB_ADDR + 0x20, pid); mem.w32(TEB_ADDR + 0x24, tid);
     mem.w32(TEB_ADDR + 0x30, PEB_ADDR);           // ProcessEnvironmentBlock
