@@ -1187,6 +1187,11 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetStdHandle", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t {
         switch (int32_t(c.arg(0))) { case -10: return Host::H_STDIN; case -11: return Host::H_STDOUT; case -12: return Host::H_STDERR; }
         return 0xFFFFFFFFu; });
+    // The guest has no attached debugger. Windows reports FALSE and discards
+    // OutputDebugString calls when no debugger is present.
+    reg.add("kernel32.dll", "IsDebuggerPresent", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("kernel32.dll", "OutputDebugStringA", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("kernel32.dll", "OutputDebugStringW", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
     auto native_file = [this](uint32_t h, Host::FileCall& call) {
         auto it=file_handles.find(h); if(it==file_handles.end()){set_last_error(6);return false;}
         call.handle=it->second; return true;
