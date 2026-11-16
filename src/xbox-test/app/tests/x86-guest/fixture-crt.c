@@ -306,6 +306,8 @@ int main(void) {
     check_w.dwMajorVersion = 10;
     check(VerifyVersionInfoW(&check_w, VER_MAJORVERSION,
         VerSetConditionMask(0, VER_MAJORVERSION, VER_EQUAL)) != 0);
+    check(MulDiv(3, 2, 4) == 2 && MulDiv(-3, 2, 4) == -2);
+    check(MulDiv(1, 1, 0) == -1);
     /* SYSTEMTIME is eight WORDs: a 4-byte store per field would smash the next
      * one (month would read back as the year). Ranges, not exact values, so the
      * same check holds under Wine's real clock. Nothing past the 16-byte struct

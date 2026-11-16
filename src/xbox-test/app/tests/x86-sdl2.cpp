@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <string>
 #include <vector>
 #include "../host/x86/x86_play.h"
@@ -23,7 +24,8 @@ int main(int argc, char** argv) {
     }
     const auto guest = read_file(argv[1]);
     const auto sdl2 = read_file(argv[2]);
-    if (guest.empty() || sdl2.empty()) {
+    const auto d3d9 = read_file(argv[3]);
+    if (guest.empty() || sdl2.empty() || d3d9.empty()) {
         std::fprintf(stderr, "SDL2TEST DRIVER FAIL: guest or SDL2.dll is empty\n");
         return 1;
     }
@@ -55,15 +57,34 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const x86::DllSource source = [sdl2](const std::string& name) {
-        return name == "sdl2.dll" ? sdl2 : std::vector<uint8_t>{};
+    const x86::DllSource source = [sdl2, d3d9](const std::string& name) {
+        if (name == "sdl2.dll") return sdl2;
+        if (name == "d3d9.dll") return d3d9;
+        return std::vector<uint8_t>{};
     };
     std::string output;
+    std::map<std::pair<uintptr_t, int>, intptr_t> window_longs;
     auto result = x86::run_image(guest, "x86-sdl2.exe", "x86-sdl2.exe",
         [&](const std::string& text) { output += text; }, nullptr,
         2'000'000'000ull, source, true, nullptr, nullptr,
         [&](x86::Host& host) {
             host.tee = [&](const std::string& text) { output += text; };
+            host.register_window_class = [](const std::u16string&) { return true; };
+            host.unregister_window_class = [](const std::u16string&) { return true; };
+            host.create_window = [](const x86::Host::WindowCreate&) -> uintptr_t { return 1; };
+            host.get_window_long = [&](uintptr_t hwnd, int index, bool) -> intptr_t {
+                auto it = window_longs.find({hwnd, index}); return it == window_longs.end() ? 0 : it->second;
+            };
+            host.set_window_long = [&](uintptr_t hwnd, int index, intptr_t value, bool) -> intptr_t {
+                auto key = std::make_pair(hwnd, index); intptr_t old = window_longs[key]; window_longs[key] = value; return old;
+            };
+            host.get_client_rect = [](uintptr_t, x86::Host::WindowRect& q) { q = {0, 0, 96, 64}; return true; };
+            host.map_window_point = [](uintptr_t, int32_t&, int32_t&, bool) { return true; };
+            host.adjust_window_rect = [](x86::Host::WindowRect& q, uint32_t style, bool menu, uint32_t ex) {
+                RECT rect{q.left, q.top, q.right, q.bottom};
+                if (!::AdjustWindowRectEx(&rect, style, menu, ex)) return false;
+                q = {rect.left, rect.top, rect.right, rect.bottom}; return true;
+            };
             host.d3d9_factory = [=](bool ex, uint32_t version, uintptr_t* out) -> uintptr_t {
                 if (!out) return uint32_t(E_POINTER);
                 *out = 0;

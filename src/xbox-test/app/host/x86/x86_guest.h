@@ -1507,6 +1507,15 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "UnhandledExceptionFilter", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "RaiseException", Conv::Stdcall, 4, [](Cpu& c) -> uint32_t {
         throw Fault(FaultKind::Unsupported, c.eip, c.arg(0), "RaiseException (guest SEH not implemented)"); });
+    reg.add("kernel32.dll", "MulDiv", Conv::Stdcall, 3, [](Cpu& c) -> uint32_t {
+        int64_t product=int64_t(int32_t(c.arg(0)))*int32_t(c.arg(1)); int32_t divisor=int32_t(c.arg(2));
+        if(!divisor)return 0xffffffffu;
+        bool negative=(product<0)!=(divisor<0);uint64_t numerator=uint64_t(product<0?-product:product);
+        uint64_t denominator=uint64_t(divisor<0?-int64_t(divisor):divisor);
+        uint64_t rounded=(numerator+denominator/2)/denominator;
+        if(rounded>(negative?0x80000000ull:0x7fffffffull))return 0xffffffffu;
+        return uint32_t(negative?-int64_t(rounded):int64_t(rounded));
+    });
     // GetVersion packs major in the low byte and minor in the next: 10.0.19045.
     reg.add("kernel32.dll", "GetVersion", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0x4A65000Au; });
     reg.add("kernel32.dll", "GetVersionExA", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
@@ -1961,6 +1970,7 @@ inline void Guest::register_all() {
     auto tick_count = [this]() -> uint64_t { return host.tick_count ? host.tick_count() : 12345u; };
     reg.add("kernel32.dll", "GetTickCount", Conv::Stdcall, 0, [tick_count](Cpu&) -> uint32_t { return uint32_t(tick_count()); });
     reg.add("kernel32.dll", "GetTickCount64", Conv::Stdcall, 0, [tick_count](Cpu& c) -> uint32_t { uint64_t t=tick_count();c.reg[EDX]=uint32_t(t>>32);return uint32_t(t); });
+    reg.add("winmm.dll", "waveInGetNumDevs", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
     reg.add("winmm.dll", "timeBeginPeriod", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t { uint32_t period=c.arg(0);return period>=1&&period<=1000000?0u:97u; });
     reg.add("winmm.dll", "timeEndPeriod", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t { uint32_t period=c.arg(0);return period>=1&&period<=1000000?0u:97u; });
     reg.add("winmm.dll", "timeGetTime", Conv::Stdcall, 0, [tick_count](Cpu&) -> uint32_t { return tick_count(); });
@@ -2236,6 +2246,7 @@ inline void Guest::register_all() {
     find_next("FindNextFileW",Host::FileCall::Kind::FindNextW,true);
     reg.add("kernel32.dll","FindClose",Conv::Stdcall,1,[this](Cpu& c)->uint32_t {
         auto it=find_handles.find(c.arg(0));if(it==find_handles.end()){set_last_error(6);return 0;}Host::FileCall q{Host::FileCall::Kind::FindClose};q.handle=it->second;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}find_handles.erase(it);return 1; });
+    reg.add("shell32.dll", "DragAcceptFiles", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 0; });
     reg.add("ole32.dll","CoCreateInstance",Conv::Stdcall,5,[this](Cpu& c)->uint32_t {
         if(!c.arg(0)||!c.arg(3)||!c.arg(4)){set_last_error(87);return 0x80004003u;}
         if(c.arg(1))return 0x80040110u;
