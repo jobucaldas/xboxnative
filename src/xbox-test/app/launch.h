@@ -1237,10 +1237,22 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         // passed through: Play's validated DXGI factory maps user32 record
         // windows onto the CoreWindow when the shim creates its chain.
         host.d3d9_window=[&host](uint32_t hwnd)->uintptr_t{auto it=host.window_handles.find(hwnd);return it!=host.window_handles.end()?it->second:uintptr_t(hwnd);};
-        using GetDc=HDC(WINAPI*)(HWND);using ReleaseDc=int(WINAPI*)(HWND,HDC);
+        using GetDc=HDC(WINAPI*)(HWND);using ReleaseDc=int(WINAPI*)(HWND,HDC);using GetClientRect=BOOL(WINAPI*)(HWND,RECT*);using MapWindowPoint=BOOL(WINAPI*)(HWND,POINT*);
+        auto client_to_screen=records?reinterpret_cast<MapWindowPoint>(GetProcAddress(records,"ClientToScreen")):nullptr;
+        auto screen_to_client=records?reinterpret_cast<MapWindowPoint>(GetProcAddress(records,"ScreenToClient")):nullptr;
+        auto get_client_rect=records?reinterpret_cast<GetClientRect>(GetProcAddress(records,"GetClientRect")):nullptr;
         struct GlWndClassExW { UINT cbSize, style; LRESULT(CALLBACK* lpfnWndProc)(HWND,UINT,WPARAM,LPARAM); int cbClsExtra, cbWndExtra; HINSTANCE hInstance; HICON hIcon; HCURSOR hCursor; HBRUSH hbrBackground; LPCWSTR lpszMenuName, lpszClassName; HICON hIconSm; };
         using RegisterClass=ATOM(WINAPI*)(const GlWndClassExW*);using CreateWindow=HWND(WINAPI*)(DWORD,LPCWSTR,LPCWSTR,DWORD,int,int,int,int,HWND,HMENU,HINSTANCE,LPVOID);
-        using DestroyWindow=int(WINAPI*)(HWND);
+        using DestroyWindow=int(WINAPI*)(HWND);using UnregisterClass=int(WINAPI*)(LPCWSTR,HINSTANCE);
+        using AdjustWindowRect=BOOL(WINAPI*)(RECT*,DWORD,BOOL,DWORD);
+        using GetWindowLong=LONG(WINAPI*)(HWND,int);using GetWindowLongPtr=LONG_PTR(WINAPI*)(HWND,int);
+        using SetWindowLong=LONG(WINAPI*)(HWND,int,LONG);using SetWindowLongPtr=LONG_PTR(WINAPI*)(HWND,int,LONG_PTR);
+        auto set_window_long=records?reinterpret_cast<SetWindowLong>(GetProcAddress(records,"SetWindowLongW")):nullptr;
+        auto set_window_long_ptr=records?reinterpret_cast<SetWindowLongPtr>(GetProcAddress(records,"SetWindowLongPtrW")):nullptr;
+        auto get_window_long=records?reinterpret_cast<GetWindowLong>(GetProcAddress(records,"GetWindowLongW")):nullptr;
+        auto get_window_long_ptr=records?reinterpret_cast<GetWindowLongPtr>(GetProcAddress(records,"GetWindowLongPtrW")):nullptr;
+        auto adjust_window_rect=records?reinterpret_cast<AdjustWindowRect>(GetProcAddress(records,"AdjustWindowRectEx")):nullptr;
+        auto unregister_class=records?reinterpret_cast<UnregisterClass>(GetProcAddress(records,"UnregisterClassW")):nullptr;
         auto get_dc=records?reinterpret_cast<GetDc>(GetProcAddress(records,"GetDC")):nullptr;
         auto release_dc=records?reinterpret_cast<ReleaseDc>(GetProcAddress(records,"ReleaseDC")):nullptr;
         auto register_class=records?reinterpret_cast<RegisterClass>(GetProcAddress(records,"RegisterClassExW")):nullptr;
@@ -1250,6 +1262,30 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
             if(!register_class||name.empty())return false;std::wstring wide(name.begin(),name.end());GlWndClassExW wc{};wc.cbSize=sizeof(wc);
             wc.lpfnWndProc=[](HWND,UINT,WPARAM,LPARAM)->LRESULT{return 0;};wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=wide.c_str();
             return register_class(&wc)!=0||GetLastError()==ERROR_CLASS_ALREADY_EXISTS;
+        };
+        host.unregister_window_class=[unregister_class](const std::u16string& name){
+            if(!unregister_class||name.empty())return false;std::wstring wide(name.begin(),name.end());
+            return unregister_class(wide.c_str(),GetModuleHandleW(nullptr))!=0;
+        };
+        host.map_window_point=[client_to_screen,screen_to_client](uintptr_t hwnd,int32_t& x,int32_t& y,bool to_screen){
+            auto fn=to_screen?client_to_screen:screen_to_client;if(!fn)return false;POINT p{x,y};if(!fn(reinterpret_cast<HWND>(hwnd),&p))return false;x=p.x;y=p.y;return true;
+        };
+        host.get_client_rect=[get_client_rect](uintptr_t hwnd,x86::Host::WindowRect& q){
+            if(!get_client_rect)return false;RECT r{};if(!get_client_rect(reinterpret_cast<HWND>(hwnd),&r))return false;
+            q={r.left,r.top,r.right,r.bottom};return true;
+        };
+        host.adjust_window_rect=[adjust_window_rect](x86::Host::WindowRect& q,uint32_t style,bool menu,uint32_t ex){
+            if(!adjust_window_rect)return false;RECT r{q.left,q.top,q.right,q.bottom};
+            if(!adjust_window_rect(&r,style,menu,ex))return false;
+            q={r.left,r.top,r.right,r.bottom};return true;
+        };
+        host.set_window_long=[set_window_long,set_window_long_ptr](uintptr_t hwnd,int index,intptr_t value,bool pointer)->intptr_t{
+            if(pointer)return set_window_long_ptr?set_window_long_ptr(reinterpret_cast<HWND>(hwnd),index,value):0;
+            return set_window_long?set_window_long(reinterpret_cast<HWND>(hwnd),index,LONG(value)):0;
+        };
+        host.get_window_long=[get_window_long,get_window_long_ptr](uintptr_t hwnd,int index,bool pointer)->intptr_t{
+            if(pointer)return get_window_long_ptr?get_window_long_ptr(reinterpret_cast<HWND>(hwnd),index):0;
+            return get_window_long?get_window_long(reinterpret_cast<HWND>(hwnd),index):0;
         };
         host.create_window=[create_window](const x86::Host::WindowCreate& q)->uintptr_t{
             if(!create_window)return 0;std::wstring cls(q.class_name.begin(),q.class_name.end()),title(q.title.begin(),q.title.end());
