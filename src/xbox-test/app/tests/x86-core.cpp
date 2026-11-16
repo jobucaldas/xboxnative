@@ -22,10 +22,11 @@ static int failures = 0;
 #define EXPECT(c, ...) do { if (!(c)) { ++failures; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
 // ---------- harness: tiny flat machine for byte programs ----------
+// Keep the existing semantic suite as the interpreter oracle; the DBT smoke opts in explicitly.
 struct Machine {
     Memory mem; ThunkTable thunks; Cpu cpu{mem, thunks};
     static constexpr uint32_t CODE = 0x10000, DATA = 0x20000, STACK = 0x30000;
-    Machine() { thunks.base = 0x7FFE0000; map_thunk_page(mem, thunks); mem.map(CODE, 4096, PROT_R | PROT_X); mem.map(DATA, 4096, PROT_R | PROT_W); mem.map(STACK, 4096, PROT_R | PROT_W); }
+    Machine() { cpu.dbt_enabled = false; thunks.base = 0x7FFE0000; map_thunk_page(mem, thunks); mem.map(CODE, 4096, PROT_R | PROT_X); mem.map(DATA, 4096, PROT_R | PROT_W); mem.map(STACK, 4096, PROT_R | PROT_W); }
     void load(std::initializer_list<uint8_t> code) {
         mem.protect(CODE, 4096, PROT_R | PROT_W); std::vector<uint8_t> c(code); c.push_back(0xF4);  // hlt = explicit stop
         mem.write_bytes(CODE, c.data(), uint32_t(c.size())); mem.protect(CODE, 4096, PROT_R | PROT_X);
@@ -1985,12 +1986,33 @@ static void test_pe_layouts() {
     try { (void)load_pe32(mem, table, reg, managed); } catch (const std::exception& e) { reason = e.what(); }
     EXPECT(reason == "managed (CLR) image: needs a .NET runtime host", "CLR image rejection reason: '%s'", reason.c_str());
 }
+static void test_dbt_counter() {
+    const char* enabled = std::getenv("X86_DBT");
+    if (!enabled || std::strcmp(enabled, "1") != 0) return;
+    Machine translated;
+    translated.load({0xB8, 7, 0, 0, 0, 0x01, 0xC8, 0x6B, 0xC0, 3, 0x83, 0xC0, 1});
+    translated.cpu.dbt_enabled = translated.mem.base() != nullptr;
+    translated.cpu.reg[ECX] = 5;
+    EXPECT(translated.run_to_end(13), "DBT integer kernel did not reach hlt");
+    Machine interpreted;
+    interpreted.load({0xB8, 7, 0, 0, 0, 0x01, 0xC8, 0x6B, 0xC0, 3, 0x83, 0xC0, 1});
+    interpreted.cpu.dbt_enabled = false; interpreted.cpu.reg[ECX] = 5;
+    EXPECT(interpreted.run_to_end(13), "interpreter integer kernel did not reach hlt");
+    EXPECT(translated.cpu.reg[EAX] == interpreted.cpu.reg[EAX] && translated.cpu.eflags == interpreted.cpu.eflags,
+           "DBT result differs: translated=%08x/%08x interpreted=%08x/%08x", translated.cpu.reg[EAX], translated.cpu.eflags,
+           interpreted.cpu.reg[EAX], interpreted.cpu.eflags);
+    EXPECT(translated.cpu.translated_blocks > 0, "DBT integer kernel executed no translated blocks");
+    std::printf("X86-DBT PASS: integer kernel translated=%llu interpreted=%llu result=%08x\n",
+                (unsigned long long)translated.cpu.translated_blocks, (unsigned long long)translated.cpu.interpreted_blocks,
+                translated.cpu.reg[EAX]);
+}
+
 struct RunResult { bool completed = false; uint32_t exit_code = 0xdead; std::string out; std::map<std::string, unsigned> calls; Image img; std::string fault; uint64_t executed = 0; };
 static RunResult run_fixture(const std::vector<uint8_t>& file, uint32_t base, bool omit_strlen = false) {
     RunResult r; Memory mem; ThunkTable table; Host host; Registry reg; register_win32(reg, host);
     if (omit_strlen) reg.map.erase({"msvcrt.dll", "strlen"});
     Image img = load_pe32(mem, table, reg, file, base); map_thunk_page(mem, table);
-    Cpu cpu(mem, table); init_process(mem, cpu, img);
+    Cpu cpu(mem, table); cpu.dbt_enabled = false; init_process(mem, cpu, img);
     try { r.exit_code = run_entry(cpu, img); r.completed = true; } catch (const Fault& f) { r.fault = f.what(); }
     r.out = host.out; r.calls = host.calls; r.img = img; r.executed = cpu.executed; return r;
 }
@@ -2031,6 +2053,8 @@ int main(int argc, char** argv) {
         {"thunk-selfadd", test_thunk_selfadd, "X86-CORE PASS: a handler that adds thunks mid-call keeps its own storage and captured state"},
     };
     for (auto& s : suites) { int before = failures; s.fn(); if (failures == before) printf("%s\n", s.pass); else printf("X86-CORE FAIL: %s\n", s.name); }
+    int dbt_before = failures; test_dbt_counter();
+    if (failures != dbt_before) printf("X86-CORE FAIL: dbt-counter\n");
     printf("(%llu hardware-compared cases)\n", (unsigned long long)alu_cases);
     int pe_before = failures; test_pe_layouts();
     if (failures == pe_before) printf("X86-CORE PASS: PE32 section alignment, page-rounded mapping, EOF zero-fill, DLL reservation, CLR rejection\n");
