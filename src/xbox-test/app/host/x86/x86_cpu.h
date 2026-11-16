@@ -201,13 +201,14 @@ struct Cpu {
                         size_t pc = 0; uint8_t last_opcode = 0; bool interpreter_boundary = false;
                         while (pc < 64) {
                             while (bytes.size() <= pc + 5) bytes.push_back(mem.fetch8(eip + uint32_t(bytes.size())));
-                            uint32_t ea = 0; bool memory = false; uint8_t opcode = bytes[pc]; last_opcode = opcode;
+                            uint32_t ea = 0; bool memory = false, absolute_memory = false; uint8_t opcode = bytes[pc]; last_opcode = opcode;
                             if (!pc && (opcode == 0x74 || opcode == 0x75)) throw std::runtime_error("dispatch standalone conditional branch in interpreter");
                             size_t len;
-                            try { len = dbt::runtime_instruction(bytes, pc, ea, memory); }
+                            try { len = dbt::runtime_instruction(bytes, pc, ea, memory, absolute_memory); }
                             catch (const std::runtime_error&) { if (!pc) throw; interpreter_boundary = true; break; }
-                            if (memory && (!mem.range_accessible(ea, 4, PROT_R) || !mem.range_accessible(ea, 4, PROT_W)))
-                                throw std::runtime_error("DBT memory page is not RW");
+                            if (memory && absolute_memory &&
+                                (!mem.range_accessible(ea, 4, PROT_R) || !mem.range_accessible(ea, 4, PROT_W)))
+                                throw std::runtime_error("DBT absolute memory page is not RW");
                             pc += len;
                             if (opcode == 0x74 || opcode == 0x75 || opcode == 0xC2 || opcode == 0xC3 || opcode == 0xE8) break;
                         }
@@ -224,9 +225,11 @@ struct Cpu {
                 }
                 if (executed + block_ptr->guest_length > limit) { ++interpreted_blocks; step(); continue; }
                 dbt::RuntimeState state;
-                std::memcpy(state.reg, reg, sizeof reg); state.eip = eip; state.eflags = eflags; state.memory = mem.base();
+                std::memcpy(state.reg, reg, sizeof reg); std::memcpy(state.xmm, xmm.r, sizeof state.xmm);
+                state.eip = eip; state.eflags = eflags; state.memory = mem.base();
                 uint32_t next = block_ptr->code->operator()(state);
-                std::memcpy(reg, state.reg, sizeof reg); eip = next; eflags = state.eflags;
+                std::memcpy(reg, state.reg, sizeof reg); std::memcpy(xmm.r, state.xmm, sizeof xmm.r);
+                eip = next; eflags = state.eflags;
                 executed += block_ptr->guest_length; ++translated_blocks;
                 if (!block_ptr->interpreter_boundary) {
                     bool indirect = block_ptr->exit_opcode == 0xC2 || block_ptr->exit_opcode == 0xC3 || block_ptr->exit_opcode == 0xFF || block_ptr->exit_opcode == 0x8F;
