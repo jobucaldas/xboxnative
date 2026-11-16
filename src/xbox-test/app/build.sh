@@ -48,7 +48,7 @@ mkdir -p "$out/layout/runtime"
 cp "$donors"/runtime/*.dll "$donors"/runtime/SHA256SUMS "$out/layout/runtime/"
 bash "$here/../../tools/fetch-mono.sh" "$out/layout/runtime/mono"
 bash "$here/../../tools/build-fna.sh" "$out/layout/runtime/fna"
-bash "$here/../../tools/build-fna-native.sh" "$out/layout/runtime"
+"${PLAY_MESA_RUNNER:-bash}" "$here/../../tools/build-fna-native.sh" "$out/layout/runtime"
 # PE32 games use the pinned i686 VC110/VC120 CRT donors only when they do not
 # ship their own copies beside the executable.
 mkdir -p "$out/layout/runtime/x86"
@@ -70,7 +70,7 @@ cp "$donors"/SOURCE.txt "$here/donors/COPYING.LIB" "$here/donors/LICENSE" "$out/
 # failing WGL stubs then answer, as before); the Mesa build needs meson, ninja, python mako and pyyaml.
 if [ "${PLAY_MESA:-1}" != 0 ]; then
   mesa="$here/../../../out/mesa-d3d12"
-  bash "$here/../../tools/build-mesa-d3d12.sh" "$mesa" --build
+  "${PLAY_MESA_RUNNER:-bash}" "$here/../../tools/build-mesa-d3d12.sh" "$mesa" --build
   cp "$mesa"/{opengl32.dll,libgallium_wgl.dll,LICENSE-Mesa.rst,LICENSE-DirectX-Headers} "$out/layout/runtime/"
   mkdir -p "$out/layout/runtime/mesa-patches"; cp "$mesa"/patches/*.patch "$out/layout/runtime/mesa-patches/"
   cp "$mesa/SHA256SUMS" "$out/layout/runtime/SHA256SUMS-mesa"; cp "$mesa/SOURCE.txt" "$out/layout/runtime/SOURCE-mesa.txt"
@@ -89,7 +89,7 @@ if [ "${PLAY_VULKAN:-1}" != 0 ]; then
   # ICD alone. PLAY_DZN=0 is the explicit way to package without it (the loader then lists only the null ICD).
   if [ "${PLAY_DZN:-1}" != 0 ]; then
     dzn="$here/../../../out/mesa-dzn"
-    bash "$here/../../tools/build-mesa-dzn.sh" "$dzn" --build
+    "${PLAY_MESA_RUNNER:-bash}" "$here/../../tools/build-mesa-dzn.sh" "$dzn" --build
     cp "$dzn"/{vulkan_dzn.dll,vulkan-dzn.json,LICENSE-Mesa.rst,LICENSE-DirectX-Headers} "$out/layout/runtime/"
     mkdir -p "$out/layout/runtime/dzn-patches"; cp "$dzn"/patches/*.patch "$out/layout/runtime/dzn-patches/"
     cp "$dzn/SHA256SUMS" "$out/layout/runtime/SHA256SUMS-dzn"; cp "$dzn/SOURCE.txt" "$out/layout/runtime/SOURCE-dzn.txt"
@@ -108,6 +108,11 @@ if [ "${PLAY_SELFTEST:-1}" != 0 ]; then
   bash "$here/tests/build-diag-fixtures.sh" "$out/layout/diag"
 fi
 cp -r "$here/Assets" "$here/AppxManifest.xml" "$out/layout/"
+# Runtime tests consume this layout directly and do not need an MSIX or signing tools.
+if [ "${PLAY_LAYOUT_ONLY:-0}" = 1 ]; then
+  echo "Play runtime layout ready: $out/layout"
+  exit 0
+fi
 # PACKAGE_VERSION=a.b.c.d (set by `xn console`) stamps only the packaged copy; the tracked manifest is untouched.
 if [ -n "${PACKAGE_VERSION:-}" ]; then
   [[ $PACKAGE_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "PACKAGE_VERSION must be a.b.c.d" >&2; exit 2; }
