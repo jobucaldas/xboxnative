@@ -38,7 +38,7 @@ for candidate in /nix/store/*-mcfgthread-x86_64-w64-mingw32-*/lib/libmcfgthread.
 done
 x86_64-w64-mingw32-g++ -std=c++17 -D_GLIBCXX_HAS_GTHREADS=0 "${thread_flags[@]}" \
   -O1 -mno-red-zone -Wall -Wextra -Wno-cast-function-type -Wno-misleading-indentation -static \
-  "$here/x86-sdl2.cpp" -o "$tmp/x86-sdl2.exe" -lws2_32 -luser32 \
+  "$here/x86-sdl2.cpp" -o "$tmp/x86-sdl2.exe" -lws2_32 -luser32 -luuid -ldxguid \
   "${thread_lib_flags[@]}" -lkernel32
 
 prefix=${PRUN_WINEPREFIX:-${WINEPREFIX:-/tmp/xbn-x86-sdl2-wine}}
