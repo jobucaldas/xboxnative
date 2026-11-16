@@ -88,7 +88,7 @@ public:
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) override {
         if (!out) return E_POINTER; *out=nullptr;
         if (IsEqualIID(iid,IID_IUnknown)||IsEqualIID(iid,IID_IDirectSoundBuffer)||IsEqualIID(iid,IID_IDirectSoundBuffer8)) *out=static_cast<IDirectSoundBuffer8*>(this);
-        else if (IsEqualIID(iid,IID_IDirectSoundNotify)) *out=static_cast<IDirectSoundNotify*>(this);
+        else if (IsEqualIID(iid,IID_IDirectSoundNotify)&&(flags_&DSBCAPS_CTRLPOSITIONNOTIFY)) *out=static_cast<IDirectSoundNotify*>(this);
         else return E_NOINTERFACE;
         AddRef(); return S_OK;
     }
