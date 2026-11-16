@@ -318,7 +318,8 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     wchar_t path[32768];GetModuleFileNameW(nullptr,path,32768);std::wstring root=path;root.resize(root.find_last_of(L"\\/"));
     g_dir=root;
     regb::init(root,logline); // guest registry: <runner dir>\registry.sqlite
-    if(std::string(args)=="mono") {
+    if(std::string(args)=="mono"||std::string(args)=="fna") {
+        const bool fna=std::string(args)=="fna";
         const auto versionPath=root+L"\\donors\\version.dll";
         auto version=std::make_unique<wxl::Image>();
         donor_pe::sink=logline;donor_pe::missing=0;
@@ -328,17 +329,24 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         }
         donor_pe::images.emplace("version.dll",std::move(version));
         mlp::donor_resolve=donor_pe::exported;
-        const auto assembly=root+L"\\managed\\Hello.exe";
+        if(fna) {
+            if(!host_surface::create()) {logline("FNA HOST SURFACE FAIL native Wine window unavailable");return 3;}
+            play_graphics::configure(&host_surface::token,host_surface::present,logline);
+            logline("HOST SURFACE native Wine window stands in for the CoreWindow (off-device only)");
+        }
+        const auto assembly=root+(fna?L"\\managed\\FnaSmoke.exe":L"\\managed\\Hello.exe");
         const auto runtime=root+L"\\runtime\\mono";
         const auto module=play_runtime::map_managed_runtime(root,runtime+L"\\mono-2.0-sgen.dll",logline);
         if(!module){logline("MONO PLAY-LOADER FAIL: Mono image mapping failed");return 1;}
         auto result=mono_host::run(play_runtime::narrow(runtime),play_runtime::narrow(assembly),{}, {},
             [module](const char* name){return (void*)play_runtime::managed_export(module,name);});
-        if(!result.loaded||!result.executed||result.exit_code!=23) {
-            logline(("MONO PLAY-LOADER FAIL: loaded="+std::to_string(result.loaded)+" executed="+
+        const int expected=fna?42:23;
+        if(!result.loaded||!result.executed||result.exit_code!=expected) {
+            logline(((fna?"FNA":"MONO")+std::string(" PLAY-LOADER FAIL: loaded=")+std::to_string(result.loaded)+" executed="+
                 std::to_string(result.executed)+" exit="+std::to_string(result.exit_code)+" error="+result.error).c_str());
             return 1;
         }
+        if(fna) { logline("FNA PLAY-LOADER PASS: FNA3D cleared/presented 3 frames and returned exit code 42");return 0; }
         logline("MONO PLAY-LOADER PASS: embedded AnyCPU hello returned exit code 23");return 0;
     }
     bool game=std::string(args)=="game";
