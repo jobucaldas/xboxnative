@@ -1,6 +1,8 @@
 // Runtime DXIL validator download for Mesa's OpenGL-on-D3D12 path.
 #pragma once
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -20,6 +22,15 @@ static constexpr char kArchiveSha256[] = "9ad895a6b039e3a8f8c22a1009f866800b840a
 static constexpr char kDllSha256[] = "0cf5fa4b90f74550166108b3870c883f4a85243976b246b1da3ea90ad5b92015";
 static constexpr size_t kMaxArchive = 64u * 1024u * 1024u;
 static constexpr size_t kMaxMember = 16u * 1024u * 1024u;
+static constexpr int kDownloadTimeoutMs = 30000;
+
+enum class wait_state { completed, pending, failed };
+template <typename Wait, typename Cancel>
+inline wait_state bounded_wait(Wait&& wait, Cancel&& cancel, std::chrono::milliseconds timeout) {
+    const wait_state result = wait(timeout);
+    if (result == wait_state::pending) cancel();
+    return result;
+}
 
 inline uint16_t u16(const uint8_t* p) { return uint16_t(p[0]) | uint16_t(p[1]) << 8; }
 inline uint32_t u32(const uint8_t* p) { return uint32_t(u16(p)) | uint32_t(u16(p + 2)) << 16; }
@@ -120,7 +131,19 @@ inline bool moveReplace(const std::wstring& from, const std::wstring& to) {
         return ReplaceFileW(to.c_str(), from.c_str(), nullptr, REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr) != FALSE;
     return MoveFileExW(from.c_str(), to.c_str(), 0) != FALSE;
 }
+template <typename Async>
+inline wait_state wait_for_download(Async const& operation, std::chrono::steady_clock::time_point deadline) {
+    const auto remaining = deadline - std::chrono::steady_clock::now();
+    if (remaining <= std::chrono::steady_clock::duration::zero()) { operation.Cancel(); return wait_state::pending; }
+    return bounded_wait([&](std::chrono::milliseconds timeout) {
+        const auto status = operation.wait_for(std::chrono::duration_cast<winrt::Windows::Foundation::TimeSpan>(timeout));
+        if (status == winrt::Windows::Foundation::AsyncStatus::Completed) return wait_state::completed;
+        return status == winrt::Windows::Foundation::AsyncStatus::Started ? wait_state::pending : wait_state::failed;
+    }, [&] { operation.Cancel(); }, std::chrono::duration_cast<std::chrono::milliseconds>(remaining));
+}
 inline bool ensure(const std::wstring& localState, const std::function<void(const char*)>& log) {
+    static std::atomic<bool> downloadFailed{false};
+    if (downloadFailed.load(std::memory_order_acquire)) return false;
     const std::wstring dir = localState + L"\\dxil", dll = dir + L"\\dxil.dll", license = dir + L"\\LICENSE-MS.txt";
     std::vector<uint8_t> cached;
     if (readFile(dll, cached) && sha256(cached.data(), cached.size()) == kDllSha256 && GetFileAttributesW(license.c_str()) != INVALID_FILE_ATTRIBUTES) {
@@ -128,32 +151,41 @@ inline bool ensure(const std::wstring& localState, const std::function<void(cons
         log("dxil: cached"); return true;
     }
     CreateDirectoryW(dir.c_str(), nullptr);
+    auto fail = [&](const std::string& reason) {
+        downloadFailed.store(true, std::memory_order_release);
+        const std::string message = "dxil: download failed " + reason + "; Mesa pipelines may fail PSO creation";
+        log(message.c_str()); return false;
+    };
     try {
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
         winrt::Windows::Web::Http::HttpClient http;
-        auto response = http.GetAsync(winrt::Windows::Foundation::Uri(winrt::to_hstring(kUrl))).get();
-        if (response.StatusCode() != winrt::Windows::Web::Http::HttpStatusCode::Ok) { log("dxil: download failed HTTP status; Mesa pipelines may fail PSO creation"); return false; }
-        auto buffer = response.Content().ReadAsBufferAsync().get();
-        if (!buffer.Length() || buffer.Length() > kMaxArchive) { log("dxil: download failed archive size; Mesa pipelines may fail PSO creation"); return false; }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kDownloadTimeoutMs);
+        auto request = http.GetAsync(winrt::Windows::Foundation::Uri(winrt::to_hstring(kUrl)));
+        const auto requestWait = wait_for_download(request, deadline);
+        if (requestWait == wait_state::pending) return fail("timeout after " + std::to_string(kDownloadTimeoutMs) + "ms");
+        auto response = request.GetResults();
+        if (response.StatusCode() != winrt::Windows::Web::Http::HttpStatusCode::Ok) return fail("HTTP status");
+        auto body = response.Content().ReadAsBufferAsync();
+        const auto bodyWait = wait_for_download(body, deadline);
+        if (bodyWait == wait_state::pending) return fail("timeout after " + std::to_string(kDownloadTimeoutMs) + "ms");
+        auto buffer = body.GetResults();
+        if (!buffer.Length() || buffer.Length() > kMaxArchive) return fail("archive size");
         winrt::Windows::Storage::Streams::DataReader reader = winrt::Windows::Storage::Streams::DataReader::FromBuffer(buffer);
         std::vector<uint8_t> zip(buffer.Length()); reader.ReadBytes(winrt::array_view<uint8_t>(zip));
-        if (sha256(zip.data(), zip.size()) != kArchiveSha256) { log("dxil: download failed archive hash mismatch; Mesa pipelines may fail PSO creation"); return false; }
+        if (sha256(zip.data(), zip.size()) != kArchiveSha256) return fail("archive hash mismatch");
         auto digest = [](const void* p, size_t n) { return sha256(p, n); };
         std::vector<uint8_t> dllBytes, licenseBytes; std::string reason;
         if (!extract(zip, "bin/x64/dxil.dll", kDllSha256, dllBytes, digest, reason) ||
-            !extract(zip, "LICENSE-MS.txt", "", licenseBytes, digest, reason)) {
-            const std::string message = "dxil: download failed " + reason + "; Mesa pipelines may fail PSO creation";
-            log(message.c_str()); return false;
-        }
+            !extract(zip, "LICENSE-MS.txt", "", licenseBytes, digest, reason)) return fail(reason);
         const std::wstring dllTmp = dll + L".tmp", licenseTmp = license + L".tmp";
         if (!writeTemp(dllTmp, dllBytes) || !writeTemp(licenseTmp, licenseBytes) ||
             !moveReplace(dllTmp, dll) || !moveReplace(licenseTmp, license)) {
-            DeleteFileW(dllTmp.c_str()); DeleteFileW(licenseTmp.c_str()); log("dxil: download failed cache write; Mesa pipelines may fail PSO creation"); return false;
+            DeleteFileW(dllTmp.c_str()); DeleteFileW(licenseTmp.c_str()); return fail("cache write");
         }
-        if (!exposeDirectory(dir)) { log("dxil: download failed DLL search path; Mesa pipelines may fail PSO creation"); return false; }
+        if (!exposeDirectory(dir)) return fail("DLL search path");
         const std::string digest8 = sha256(dllBytes.data(), dllBytes.size()).substr(0, 8);
         std::string message = "dxil: download ok sha8=" + digest8; log(message.c_str()); return true;
-    } catch (...) { log("dxil: download failed HTTP exception; Mesa pipelines may fail PSO creation"); return false; }
+    } catch (...) { return fail("HTTP exception"); }
 }
 #endif
 } // namespace dxil_runtime
