@@ -92,6 +92,7 @@ struct RuntimeBlock {
     uint32_t guest_pc = 0;
     uint8_t exit_opcode = 0;
     bool interpreter_boundary = false;
+    bool uses_xmm = false;
     RuntimeBlock* linked_target = nullptr;
 };
 
@@ -310,15 +311,35 @@ inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
     throw std::runtime_error("unsupported DBT opcode");
 }
 
+inline bool runtime_uses_xmm(const std::vector<uint8_t>& guest) {
+    size_t p = 0;
+    while (p < guest.size()) {
+        size_t start = p; bool prefixed = guest[p] == 0x66;
+        if (prefixed) ++p;
+        if (p + 1 < guest.size() && guest[p] == 0x0F) {
+            uint8_t op2 = guest[p + 1];
+            if (prefixed || op2 == 0x28 || op2 == 0x29 || op2 == 0x58 || op2 == 0x59)
+                return true;
+        }
+        uint32_t memory_ea = 0; bool memory_operand = false, absolute_memory = false;
+        p = start + runtime_instruction(guest, start, memory_ea, memory_operand, absolute_memory);
+    }
+    return false;
+}
+
 inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest, uint32_t guest_pc) {
     Emitter out;
+    bool uses_xmm = runtime_uses_xmm(guest);
     out.b(0x57); out.b(0x41); out.b(0x54); out.b(0x41); out.b(0x55); out.b(0x41); out.b(0x56); // save state*, preserve R12-R14
-    out.b(0x48); out.b(0x83); out.b(0xEC); out.b(40);
-    runtime_store_xmm_mem(out, 4, 0, 6); runtime_store_xmm_mem(out, 4, 16, 7);
+    out.b(0x48); out.b(0x83); out.b(0xEC); out.b(uses_xmm ? 40 : 8);
+    if (uses_xmm) {
+        runtime_store_xmm_mem(out, 4, 0, 6); runtime_store_xmm_mem(out, 4, 16, 7);
+    }
     runtime_mov_reg_mem(out, 11, 7, 36);
     out.b(0x41); out.b(0x53); out.b(0x9D);
     out.rex(12, 0, 7, true); out.b(0x8B); out.modrm(1, 12, 7); out.b(40);
-    for (unsigned i = 0; i != 8; ++i) runtime_load_xmm_mem(out, uint8_t(i), 7, 48 + i * 16);
+    if (uses_xmm)
+        for (unsigned i = 0; i != 8; ++i) runtime_load_xmm_mem(out, uint8_t(i), 7, 48 + i * 16);
     for (unsigned i : {0u, 1u, 2u, 3u, 5u, 6u, 7u, 4u}) runtime_mov_reg_mem(out, runtime_reg(i), 7, uint8_t(i * 4));
     size_t p = 0;
     bool branch_terminated = false;
@@ -459,14 +480,18 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
         if (p <= begin) throw std::runtime_error("DBT decoder made no progress");
     }
     if (!branch_terminated) runtime_mov_imm(out, 11, guest_pc + uint32_t(p));
-    out.b(0x44); out.b(0x89); out.b(0x5C); out.b(0x24); out.b(32);
-    out.b(0x4C); out.b(0x8B); out.b(0x5C); out.b(0x24); out.b(64);
+    uint8_t eip_slot = uses_xmm ? 32 : 0, state_slot = uses_xmm ? 64 : 32;
+    out.b(0x44); out.b(0x89); out.b(0x5C); out.b(0x24); out.b(eip_slot);
+    out.b(0x4C); out.b(0x8B); out.b(0x5C); out.b(0x24); out.b(state_slot);
     for (unsigned i = 0; i != 8; ++i) runtime_store_reg_mem(out, 11, i * 4, runtime_reg(i));
-    for (unsigned i = 0; i != 8; ++i) runtime_store_xmm_mem(out, 11, 48 + i * 16, uint8_t(i));
+    if (uses_xmm)
+        for (unsigned i = 0; i != 8; ++i) runtime_store_xmm_mem(out, 11, 48 + i * 16, uint8_t(i));
     out.b(0x9C); out.b(0x58); out.b(0x25); out.d(0x00000CD7); runtime_store_reg_mem(out, 11, 36, 0);
-    out.b(0xFC); out.b(0x8B); out.b(0x44); out.b(0x24); out.b(32); runtime_store_reg_mem(out, 11, 32, 0);
-    runtime_load_xmm_mem(out, 6, 4, 0); runtime_load_xmm_mem(out, 7, 4, 16);
-    out.b(0x48); out.b(0x83); out.b(0xC4); out.b(40); out.b(0x41); out.b(0x5E); out.b(0x41); out.b(0x5D); out.b(0x41); out.b(0x5C); out.b(0x5F);
+    out.b(0xFC); out.b(0x8B); out.b(0x44); out.b(0x24); out.b(eip_slot); runtime_store_reg_mem(out, 11, 32, 0);
+    if (uses_xmm) {
+        runtime_load_xmm_mem(out, 6, 4, 0); runtime_load_xmm_mem(out, 7, 4, 16);
+    }
+    out.b(0x48); out.b(0x83); out.b(0xC4); out.b(uses_xmm ? 40 : 8); out.b(0x41); out.b(0x5E); out.b(0x41); out.b(0x5D); out.b(0x41); out.b(0x5C); out.b(0x5F);
     out.b(0x8B); out.b(0x47); out.b(32); out.b(0xC3);
     return out.bytes;
 }

@@ -215,7 +215,7 @@ struct Cpu {
                         if (!pc) throw std::runtime_error("DBT block has no supported instruction");
                         bytes.resize(pc); dbt::RuntimeBlock block;
                         block.guest_pc = eip; block.guest_length = uint32_t(pc); block.exit_opcode = last_opcode;
-                        block.interpreter_boundary = interpreter_boundary; block.guest_bytes = bytes;
+                        block.interpreter_boundary = interpreter_boundary; block.uses_xmm = dbt::runtime_uses_xmm(bytes); block.guest_bytes = bytes;
                         block.code = std::make_unique<dbt::Executable>(dbt::runtime_translate(bytes, eip));
                         block_ptr = &dbt_cache.emplace(eip, std::move(block)).first->second;
                     } catch (const std::exception& ex) {
@@ -225,10 +225,12 @@ struct Cpu {
                 }
                 if (executed + block_ptr->guest_length > limit) { ++interpreted_blocks; step(); continue; }
                 dbt::RuntimeState state;
-                std::memcpy(state.reg, reg, sizeof reg); std::memcpy(state.xmm, xmm.r, sizeof state.xmm);
+                std::memcpy(state.reg, reg, sizeof reg);
+                if (block_ptr->uses_xmm) std::memcpy(state.xmm, xmm.r, sizeof state.xmm);
                 state.eip = eip; state.eflags = eflags; state.memory = mem.base();
                 uint32_t next = block_ptr->code->operator()(state);
-                std::memcpy(reg, state.reg, sizeof reg); std::memcpy(xmm.r, state.xmm, sizeof xmm.r);
+                std::memcpy(reg, state.reg, sizeof reg);
+                if (block_ptr->uses_xmm) std::memcpy(xmm.r, state.xmm, sizeof xmm.r);
                 eip = next; eflags = state.eflags;
                 executed += block_ptr->guest_length; ++translated_blocks;
                 if (!block_ptr->interpreter_boundary) {
