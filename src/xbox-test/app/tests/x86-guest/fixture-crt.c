@@ -23,8 +23,12 @@ static void check(int ok) { ++g_checks; if (!ok) ++g_fail; }
  * the compiler cannot treat the call as noreturn: if the surface lets the call
  * return, g_after_exit becomes 1. A real ExitThread never returns. */
 static volatile LONG g_after_exit, g_flag;
+static HANDLE g_delay_event;
 static DWORD WINAPI ret_body(LPVOID p) { return (DWORD)(ULONG_PTR)p + 7; }
 static DWORD WINAPI flag_body(LPVOID p) { (void)p; g_flag = 1; return 0; }
+static DWORD WINAPI delayed_event_body(LPVOID p) {
+    (void)p; Sleep(20); g_flag = 1; SetEvent(g_delay_event); return 0;
+}
 static VOID (WINAPI *volatile exit_thread_fn)(DWORD) = ExitThread;
 static DWORD WINAPI exit_body(LPVOID p) {
     exit_thread_fn((DWORD)(ULONG_PTR)p + 9);
@@ -442,6 +446,42 @@ int main(void) {
         while (GetExitCodeThread(th_p, &code) && code == STILL_ACTIVE && spins < 1000) { Sleep(1); ++spins; }
         check(code == 8 && spins < 1000);  /* returned 1 + 7 */
         CloseHandle(th_p);
+    }
+    /* Timed yields and waits use real elapsed time. The QPC and tick deltas must
+     * agree with the same Sleep interval, and a worker's Sleep must delay the
+     * event wait rather than being treated as an immediate cooperative yield. */
+    {
+        LARGE_INTEGER frequency, before, after;
+        check(QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0);
+        DWORD tick_before = GetTickCount();
+        QueryPerformanceCounter(&before);
+        Sleep(50);
+        QueryPerformanceCounter(&after);
+        DWORD tick_elapsed = GetTickCount() - tick_before;
+        LONGLONG qpc_elapsed = (after.QuadPart - before.QuadPart) * 1000 / frequency.QuadPart;
+        check(tick_elapsed >= 45 && tick_elapsed < 500 && qpc_elapsed >= 45 && qpc_elapsed < 500);
+
+        g_flag = 0;
+        g_delay_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+        HANDLE delayed = CreateThread(NULL, 0, delayed_event_body, NULL, 0, NULL);
+        DWORD wait_start = GetTickCount();
+        DWORD wait_result = WaitForSingleObject(g_delay_event, 200);
+        DWORD wait_elapsed = GetTickCount() - wait_start;
+        check(g_delay_event != NULL && delayed != NULL && wait_result == WAIT_OBJECT_0 &&
+              g_flag == 1 && wait_elapsed >= 15 && wait_elapsed < 500);
+        WaitForSingleObject(delayed, INFINITE);
+        CloseHandle(delayed); CloseHandle(g_delay_event);
+
+        HANDLE timeout_event = CreateEventA(NULL, FALSE, FALSE, NULL);
+        DWORD multiple_start = GetTickCount();
+        DWORD multiple_result = WaitForMultipleObjects(1, &timeout_event, FALSE, 30);
+        DWORD multiple_elapsed = GetTickCount() - multiple_start;
+        check(multiple_result == WAIT_TIMEOUT && multiple_elapsed >= 25 && multiple_elapsed < 500);
+        CloseHandle(timeout_event);
+        DWORD message_start = GetTickCount();
+        DWORD message_result = MsgWaitForMultipleObjects(0, NULL, FALSE, 20, 0);
+        DWORD message_elapsed = GetTickCount() - message_start;
+        check(message_result == WAIT_TIMEOUT && message_elapsed >= 15 && message_elapsed < 500);
     }
     puts("x86-crt: threads ok");
 
