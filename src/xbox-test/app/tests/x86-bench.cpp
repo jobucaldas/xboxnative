@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 #include "../host/x86/x86_pe.h"
 using namespace x86;
@@ -25,6 +27,21 @@ static std::vector<uint8_t> slurp(const char* path) {
     if (!f) throw std::runtime_error("cannot open benchmark DLL");
     return {std::istreambuf_iterator<char>(f), {}};
 }
+static void print_fallbacks(const char* kernel, const std::unordered_map<std::string, uint64_t>& before,
+                            const std::unordered_map<std::string, uint64_t>& after) {
+    std::vector<std::pair<uint64_t, std::string>> entries;
+    for (const auto& item : after) {
+        auto old = before.find(item.first);
+        uint64_t count = item.second - (old == before.end() ? 0 : old->second);
+        if (count) entries.emplace_back(count, item.first);
+    }
+    std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+        return a.first != b.first ? a.first > b.first : a.second < b.second;
+    });
+    for (size_t i = 0; i < entries.size() && i < 20; ++i)
+        std::printf("X86-BENCH FALLBACK kernel=%s count=%llu %s\n", kernel,
+                    static_cast<unsigned long long>(entries[i].first), entries[i].second.c_str());
+}
 int main(int argc, char** argv) {
     if (argc != 2) { std::fprintf(stderr, "usage: x86-bench <benchmark.dll>\n"); return 2; }
     try {
@@ -33,8 +50,10 @@ int main(int argc, char** argv) {
         Dll image = load_dll(mem, table, reg, slurp(argv[1]), {}, loaded, 0, nullptr, nullptr, "x86-bench.dll");
         mem.map(0x20000000, 0x20000, PROT_R | PROT_W);
         Cpu cpu(mem, table); cpu.reg[ESP] = 0x2001fff0;
-        std::printf("kernel,guest_instructions,guest_instructions_per_second,guest_ms,native_ms,interpreter_over_native\n");
+        std::printf("kernel,guest_instructions,translated_blocks,interpreted_blocks,guest_instructions_per_second,guest_ms,native_ms,interpreter_over_native\n");
         for (const auto& k : kernels) {
+            uint64_t translated_before = cpu.translated_blocks, interpreted_before = cpu.interpreted_blocks;
+            auto fallback_before = cpu.dbt_fallbacks;
             auto it = image.image.exports.find(k.symbol);
             if (it == image.image.exports.end()) throw std::runtime_error(std::string("missing export: ") + k.symbol);
             uint32_t fn = image.image.base + it->second;
@@ -62,8 +81,12 @@ int main(int argc, char** argv) {
             double guest_median = guest_ms[guest_ms.size() / 2], native_median = native_ms[native_ms.size() / 2];
             double ips = guest_median > 0 ? double(instructions) / (guest_median / 1000.0) : 0;
             double ratio = native_median > 0 ? guest_median / native_median : 0;
-            std::printf("%s,%llu,%.0f,%.3f,%.3f,%.1fx\n", k.name,
-                static_cast<unsigned long long>(instructions), ips, guest_median, native_median, ratio);
+            std::printf("%s,%llu,%llu,%llu,%.0f,%.3f,%.3f,%.1fx\n", k.name,
+                static_cast<unsigned long long>(instructions),
+                static_cast<unsigned long long>(cpu.translated_blocks - translated_before),
+                static_cast<unsigned long long>(cpu.interpreted_blocks - interpreted_before),
+                ips, guest_median, native_median, ratio);
+            print_fallbacks(k.name, fallback_before, cpu.dbt_fallbacks);
         }
     } catch (const std::exception& e) { std::fprintf(stderr, "x86-bench: FAIL: %s\n", e.what()); return 1; }
     return 0;

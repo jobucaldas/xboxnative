@@ -17,6 +17,7 @@ tmp=$(mktemp -d /tmp/x86-core.XXXXXX); trap 'rm -rf "$tmp"' EXIT
   -Wl,--no-seh -Wl,--image-base,0x400000 -o "$tmp/fixture.exe" "$here/x86-fixture/fixture.c" -lkernel32 -lmsvcrt
 "${CXX:-c++}" -std=c++17 -O2 -mno-red-zone -Wall -Wextra -Werror "$here/x86-core.cpp" -o "$tmp/x86-core"
 "$tmp/x86-core" "$tmp/fixture.exe"
+X86_DBT=1 "$tmp/x86-core" "$tmp/fixture.exe"
 if [[ ${1:-} == --wine ]]; then
   set +e; out=$(WINEDEBUG=-all wine "$tmp/fixture.exe" | tr -d '\r'); rc=$?; set -e
   [[ $rc -eq 42 ]] || { echo "X86-CORE FAIL: wine exit $rc (want 42)"; exit 1; }

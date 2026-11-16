@@ -10,8 +10,8 @@
 #include <random>
 #include <stdexcept>
 #include <string>
-#include <sys/mman.h>
 #include <vector>
+#include "../host/x86/x86_dbt.h"
 #include "../host/x86/x86_win32.h"
 
 #if !defined(__linux__) || !defined(__x86_64__)
@@ -39,20 +39,8 @@ static_assert(offsetof(State, eip) == EIP_OFFSET, "generated-code state layout")
 static_assert(offsetof(State, eflags) == FLAGS_OFFSET, "generated-code state layout");
 static_assert(offsetof(State, memory) == MEMORY_OFFSET, "generated-code state layout");
 
-struct Emitter {
-    std::vector<uint8_t> bytes;
-    void b(uint8_t v) { bytes.push_back(v); }
-    void d(uint32_t v) { for (unsigned i = 0; i != 4; ++i) b(uint8_t(v >> (i * 8))); }
-    void patch32(size_t at, int32_t v) {
-        uint32_t bits; std::memcpy(&bits, &v, sizeof bits);
-        for (unsigned i = 0; i != 4; ++i) bytes.at(at + i) = uint8_t(bits >> (i * 8));
-    }
-    void rex(uint8_t r = 0, uint8_t x = 0, uint8_t base = 0, bool w = false) {
-        uint8_t value = uint8_t(0x40 | (w ? 8 : 0) | ((r >> 3) << 2) | ((x >> 3) << 1) | (base >> 3));
-        if (value != 0x40) b(value);
-    }
-    void modrm(uint8_t mod, uint8_t reg, uint8_t rm) { b(uint8_t((mod << 6) | ((reg & 7) << 3) | (rm & 7))); }
-};
+using dbt::Emitter;
+using dbt::Executable;
 
 static void mov_reg_mem(Emitter& out, uint8_t dst, uint8_t base, uint8_t disp) {
     out.rex(dst, 0, base); out.b(0x8B); out.modrm(1, dst, base);
@@ -199,24 +187,6 @@ static std::vector<uint8_t> translate(const std::vector<uint8_t>& guest, uint32_
     return out.bytes;
 }
 
-struct Executable {
-    void* address = MAP_FAILED;
-    size_t size = PAGE;
-    explicit Executable(const std::vector<uint8_t>& code) {
-        address = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (address == MAP_FAILED) throw std::runtime_error("mmap RW failed");
-        if (code.size() > size) throw std::runtime_error("translated block exceeds one page");
-        std::memcpy(address, code.data(), code.size());
-        if (mprotect(address, size, PROT_READ | PROT_EXEC) != 0) {
-            munmap(address, size); address = MAP_FAILED; throw std::runtime_error("mprotect RX failed");
-        }
-        __builtin___clear_cache(static_cast<char*>(address), static_cast<char*>(address) + code.size());
-    }
-    ~Executable() { if (address != MAP_FAILED) munmap(address, size); }
-    Executable(const Executable&) = delete;
-    Executable& operator=(const Executable&) = delete;
-    uint32_t operator()(State& state) const { return reinterpret_cast<uint32_t (*)(State*)>(address)(&state); }
-};
 
 struct Machine {
     Memory memory;
@@ -306,6 +276,360 @@ static int differential_test(const Executable& executable) {
     return 0;
 }
 
+struct RuntimeMachine {
+    Memory memory;
+    ThunkTable thunks;
+    Cpu cpu{memory, thunks};
+    RuntimeMachine() {
+        if (!memory.base()) throw std::runtime_error("DBT randomized tests require reserved-base memory");
+        memory.map(CODE, PAGE, PROT_R | PROT_W);
+        memory.map(DATA, 3 * PAGE, PROT_R | PROT_W);
+    }
+    void load(const std::vector<uint8_t>& code) {
+        memory.protect(CODE, PAGE, PROT_R | PROT_W);
+        memory.write_bytes(CODE, code.data(), uint32_t(code.size()));
+        memory.protect(CODE, PAGE, PROT_R | PROT_X);
+        cpu.eip = CODE; cpu.executed = 0; cpu.eflags = 2;
+    }
+};
+static void runtime_compare(const std::vector<uint8_t>& code, unsigned instructions, std::mt19937& rng,
+                            const uint32_t initial[8], uint32_t flags, const uint8_t data[3 * PAGE],
+                            uint64_t& translated_cases, uint32_t compared_flags = FLAG_MASK,
+                            const uint32_t initial_xmm[8][4] = nullptr,
+                            const Fpu* initial_fpu = nullptr) {
+    static RuntimeMachine translated, interpreted;
+    translated.load(code); interpreted.load(code);
+    translated.memory.write_bytes(DATA, data, 3 * PAGE); interpreted.memory.write_bytes(DATA, data, 3 * PAGE);
+    std::memcpy(translated.cpu.reg, initial, sizeof translated.cpu.reg);
+    std::memcpy(interpreted.cpu.reg, initial, sizeof interpreted.cpu.reg);
+    if (initial_xmm) {
+        std::memcpy(translated.cpu.xmm.r, initial_xmm, sizeof translated.cpu.xmm.r);
+        std::memcpy(interpreted.cpu.xmm.r, initial_xmm, sizeof interpreted.cpu.xmm.r);
+    }
+    if (initial_fpu) {
+        translated.cpu.fpu = *initial_fpu;
+        interpreted.cpu.fpu = *initial_fpu;
+    }
+    translated.cpu.eflags = interpreted.cpu.eflags = flags;
+    dbt::RuntimeState state;
+    std::memcpy(state.reg, initial, sizeof state.reg);
+    if (initial_xmm) std::memcpy(state.xmm, initial_xmm, sizeof state.xmm);
+    if (initial_fpu) state.fpu = *initial_fpu;
+    state.eip = CODE; state.eflags = flags; state.memory = translated.memory.base();
+    std::vector<uint8_t> translated_code = dbt::runtime_translate(code, CODE);
+    dbt::Executable executable(translated_code);
+    uint32_t next = executable(state);
+    if (next != state.eip) throw std::runtime_error("runtime DBT returned a different EIP");
+    for (unsigned i = 0; i < instructions; ++i) interpreted.cpu.step();
+    const bool fpu_mismatch = initial_fpu && (std::memcmp(state.fpu.st, interpreted.cpu.fpu.st, sizeof state.fpu.st) ||
+        std::memcmp(state.fpu.empty, interpreted.cpu.fpu.empty, sizeof state.fpu.empty) ||
+        state.fpu.top != interpreted.cpu.fpu.top || state.fpu.cw != interpreted.cpu.fpu.cw ||
+        state.fpu.sw != interpreted.cpu.fpu.sw);
+    if (std::memcmp(state.reg, interpreted.cpu.reg, sizeof state.reg) ||
+        (initial_xmm && std::memcmp(state.xmm, interpreted.cpu.xmm.r, sizeof state.xmm)) ||
+        fpu_mismatch || ((state.eflags ^ interpreted.cpu.eflags) & compared_flags) || state.eip != interpreted.cpu.eip ||
+        std::memcmp(translated.memory.base() + DATA, interpreted.memory.base() + DATA, 3 * PAGE)) {
+        std::fprintf(stderr,"mismatch case=%llu code:",static_cast<unsigned long long>(translated_cases));
+        for(uint8_t b:code) std::fprintf(stderr," %02x",b);
+        std::fprintf(stderr,"\nflags=%08x/%08x eip=%08x/%08x\n",state.eflags,interpreted.cpu.eflags,state.eip,interpreted.cpu.eip);
+        for(unsigned i=0;i<8;++i) if(state.reg[i]!=interpreted.cpu.reg[i]) std::fprintf(stderr,"reg%u=%08x/%08x\n",i,state.reg[i],interpreted.cpu.reg[i]);
+        (void)rng;
+        throw std::runtime_error("randomized runtime DBT state differs from interpreter");
+    }
+    ++translated_cases;
+}
+static void randomized_sse_differential() {
+    std::mt19937 rng(0x53534532u); uint8_t data[3 * PAGE]; uint64_t cases = 0;
+    auto one = [&](const std::vector<uint8_t>& code, bool memory = false) {
+        uint32_t regs[8] = {}; uint32_t xmm[8][4];
+        for (uint32_t& r : regs) r = rng();
+        for (auto& row : xmm) for (uint32_t& r : row) r = rng();
+        for (uint8_t& b : data) b = uint8_t(rng());
+        if (memory) { regs[EAX] = DATA + 0x200; regs[ECX] = 0; }
+        runtime_compare(code, 1, rng, regs, 2u | (rng() & FLAG_MASK), data, cases, FLAG_MASK, xmm);
+    };
+    for (unsigned n = 0; n != 5000; ++n) {
+        unsigned dst = rng() & 7, src = rng() & 7;
+        one({0x66, 0x0F, 0x6E, uint8_t(0xC0 | (dst << 3) | src)});
+    }
+    for (unsigned n = 0; n != 5000; ++n) {
+        unsigned dst = rng() & 7, src = rng() & 7;
+        one({0x66, 0x0F, 0x70, uint8_t(0xC0 | (dst << 3) | src), uint8_t(rng())});
+    }
+    for (unsigned n = 0; n != 5000; ++n) {
+        unsigned dst = rng() & 7, src = rng() & 7;
+        one({0x0F, uint8_t(0x58 + (rng() & 1)), uint8_t(0xC0 | (dst << 3) | src)});
+        one({0x0F, uint8_t(0x58 + (rng() & 1)), uint8_t((dst << 3) | 4), 0x20}, true);
+    }
+    for (unsigned n = 0; n != 5000; ++n) {
+        unsigned group = n & 1, dst = rng() & 7;
+        one({0x66, 0x0F, 0x72, uint8_t(0xC0 | (group ? 6 : 2) << 3 | dst), uint8_t(rng())});
+    }
+    for (unsigned n = 0; n != 5000; ++n) {
+        unsigned dst = rng() & 7;
+        one({0x66, 0x0F, 0x73, uint8_t(0xC0 | (2 << 3) | dst), uint8_t(rng())});
+    }
+    for (unsigned n = 0; n != 5000; ++n) {
+        unsigned dst = rng() & 7, src = rng() & 7;
+        one({0x66, 0x0F, 0x6F, uint8_t(0xC0 | (dst << 3) | src)});
+        one({0x66, 0x0F, 0x7F, uint8_t(0xC0 | (dst << 3) | src)});
+    }
+    for (unsigned n = 0; n != 5000; ++n) {
+        unsigned dst = rng() & 7, src = rng() & 7;
+        one({0x66, 0x0F, 0x6F, uint8_t((dst << 3) | 4), 0x20}, true);
+        one({0x66, 0x0F, 0x7F, uint8_t((src << 3) | 4), 0x20}, true);
+    }
+    for (uint8_t op : {uint8_t(0x62), uint8_t(0x76), uint8_t(0xDB), uint8_t(0xEB), uint8_t(0xF4), uint8_t(0xFA), uint8_t(0xFE)}) {
+        for (unsigned n = 0; n != 5000; ++n) {
+            unsigned dst = rng() & 7, src = rng() & 7;
+            one({0x66, 0x0F, op, uint8_t(0xC0 | (dst << 3) | src)});
+        }
+    }
+    std::printf("X86-DBT PASS: SSE2 DBT differential families matched interpreter (5000 cases per family)\n");
+}
+
+static void partial_block_differential() {
+    static RuntimeMachine translated, interpreted;
+    std::mt19937 rng(0x50415254u);
+    for (unsigned n = 0; n != 5000; ++n) {
+        std::vector<uint8_t> code = {0xB8, uint8_t(rng()), uint8_t(rng()), uint8_t(rng()), uint8_t(rng()),
+                                     0x90, 0x83, 0xC0, 0x02, 0xF4};
+        translated.load(code); interpreted.load(code);
+        translated.cpu.clear_dbt_cache(); interpreted.cpu.clear_dbt_cache();
+        translated.cpu.translated_blocks = translated.cpu.interpreted_blocks = 0;
+        interpreted.cpu.translated_blocks = interpreted.cpu.interpreted_blocks = 0;
+        translated.cpu.dbt_enabled = true; interpreted.cpu.dbt_enabled = false;
+        translated.cpu.run(CODE + uint32_t(code.size() - 1));
+        interpreted.cpu.run(CODE + uint32_t(code.size() - 1));
+        if (translated.cpu.reg[EAX] != interpreted.cpu.reg[EAX] ||
+            translated.cpu.eip != interpreted.cpu.eip || translated.cpu.eflags != interpreted.cpu.eflags ||
+            translated.cpu.interpreted_blocks != 1 || translated.cpu.translated_blocks != 2) {
+            throw std::runtime_error("partial DBT block did not resume after one interpreted instruction");
+        }
+    }
+    std::printf("X86-DBT PASS: partial blocks resumed after one interpreter instruction (5000 cases)\n");
+}
+
+static void randomized_runtime_differential() {
+    std::mt19937 rng(0x58424454u); uint64_t address_cases = 0, alu_cases = 0;
+    uint8_t data[3 * PAGE];
+    for (unsigned n = 0; n != 5000; ++n) {
+        uint32_t regs[8]; for (uint32_t& r : regs) r = rng();
+        for (uint8_t& b : data) b = uint8_t(rng());
+        uint32_t flags = 2u | (rng() & FLAG_MASK);
+        std::vector<uint8_t> code; unsigned count = 1;
+        unsigned which = n % 6, address_mode = (n / 6) % 8;
+        auto emit_mapped_address=[&](uint8_t opcode,uint8_t field,unsigned mode) {
+            uint8_t mod=0,rm=0; uint32_t disp=0; bool has_sib=false;
+            static const uint8_t bases[]={0,1,2,3,6,7};
+            uint8_t base=bases[rng()%6], index=uint8_t(rng()%3);
+            uint8_t scale=uint8_t(rng()&3);
+            switch(mode) {
+            case 0: disp=DATA+(rng()%(3*PAGE-4)); rm=5; break;
+            case 1: base=bases[rng()%6]; regs[base]=DATA+0x400; rm=base; break;
+            case 2: mod=1; regs[base]=DATA+0x400; disp=uint32_t(rng()%128); rm=base; break;
+            case 3: mod=2; regs[base]=DATA+0x400; disp=uint32_t(rng()%512); rm=base; break;
+            case 4: mod=1; has_sib=true; base=4; index=uint8_t(rng()%3); regs[base]=DATA+0x400; regs[index]=3; disp=8; break;
+            case 5: has_sib=true; base=5; index=uint8_t(rng()%3); regs[index]=3; disp=DATA+0x300; break;
+            case 6: mod=2; has_sib=true; base=uint8_t(3+ rng()%5); if(base==4 || base==5) base=6; index=uint8_t(rng()%3); regs[base]=DATA+0x400; regs[index]=3; disp=32; break;
+            default: has_sib=true; base=4; index=4; regs[base]=DATA+0x400; break;
+            }
+            rm=has_sib?4:rm; code={opcode,uint8_t((mod<<6)|(field<<3)|rm)};
+            if(has_sib) code.push_back(uint8_t((scale<<6)|(index<<3)|base));
+            if(mod==1) code.push_back(uint8_t(disp));
+            else if(mod==2 || (mod==0 && (rm==5 || (has_sib && base==5))))
+                for(unsigned k=0;k<4;++k) code.push_back(uint8_t(disp>>(8*k)));
+        };
+        if (which == 0) { // mov r32,r/m32 across mapped base/SIB forms
+            unsigned dst=rng()&7; emit_mapped_address(0x8B,uint8_t(dst),address_mode);
+        } else if (which == 1) { // mov r/m32,r32 across mapped base/SIB forms
+            unsigned src=rng()&7; emit_mapped_address(0x89,uint8_t(src),address_mode);
+        } else if (which == 2) { // movzx/movsx register or mapped memory source
+            uint8_t op2[] = {0xB6,0xB7,0xBE,0xBF}; uint8_t x = op2[rng() & 3]; unsigned dst=rng()&7;
+            if ((n/6)&1) emit_mapped_address(0x0F,uint8_t(dst),address_mode), code.insert(code.begin()+1,x);
+            else code={0x0F,x,uint8_t(0xC0 | (dst<<3) | (rng()&7))};
+        } else if (which == 3) { // LEA exercises every ModRM/SIB displacement shape
+            unsigned dst=rng()&7, mode=rng()%5, base=rng()&7, index=rng()&7, scale=rng()&3;
+            int32_t disp=int32_t(rng());
+            if (mode==0) { code={0x8D,uint8_t((dst<<3)|5)}; for(unsigned k=0;k<4;++k) code.push_back(uint8_t(uint32_t(disp)>>(8*k))); }
+            else if (mode==1) { regs[base]=DATA+0x300; code={0x8D,uint8_t(0x40|(dst<<3)|(base==4?4:base))}; if(base==4) code.push_back(0x24); code.push_back(uint8_t(disp)); }
+            else if (mode==2) { regs[base]=DATA+0x300; code={0x8D,uint8_t(0x80|(dst<<3)|(base==4?4:base))}; if(base==4) code.push_back(0x24); for(unsigned k=0;k<4;++k) code.push_back(uint8_t(uint32_t(disp)>>(8*k))); }
+            else if (mode==3) { regs[base]=DATA+0x300; regs[index]=3; code={0x8D,uint8_t(0x40|(dst<<3)|4),uint8_t((scale<<6)|(index<<3)|base),uint8_t(disp)}; }
+            else { regs[index]=3; code={0x8D,uint8_t((dst<<3)|4),uint8_t((scale<<6)|(index<<3)|5)}; for(unsigned k=0;k<4;++k) code.push_back(uint8_t(uint32_t(disp)>>(8*k))); }
+        } else { // LEA also covers register-indirect and base+disp8/disp32
+            unsigned dst=rng()&7, base=rng()&7; regs[base]=DATA+0x300; int32_t disp=int32_t(rng());
+            bool wide=which==5; code={0x8D,uint8_t((wide?0x80:0x40)|(dst<<3)|(base==4?4:base))}; if(base==4) code.push_back(0x24);
+            if(wide) for(unsigned k=0;k<4;++k) code.push_back(uint8_t(uint32_t(disp)>>(8*k))); else code.push_back(uint8_t(disp));
+        }
+        runtime_compare(code,count,rng,regs,flags,data,address_cases);
+    }
+    for (unsigned n = 0; n != 5000; ++n) {
+        uint32_t regs[8]; for (uint32_t& r : regs) r = rng();
+        for (uint8_t& b : data) b = uint8_t(rng());
+        uint32_t flags = 2u | (rng() & FLAG_MASK); std::vector<uint8_t> code;
+        unsigned kind=n%4, op=rng()%8, dst=rng()&7, src=rng()&7; bool memory=(rng()%4)==0;
+        static const uint8_t rmreg[8]={0x01,0x11,0x19,0x21,0x09,0x29,0x31,0x39};
+        auto emit_memory_operand=[&](uint8_t opcode,uint8_t field) {
+            uint32_t ea=DATA+(rng()%(3*PAGE-4)); code={opcode,uint8_t((field<<3)|5)};
+            for(unsigned k=0;k<4;++k) code.push_back(uint8_t(ea>>(8*k)));
+        };
+        if (kind==0) { // add/adc/sub/sbb/and/or/xor/cmp r/m32,r32
+            uint8_t opcode=rmreg[op];
+            if(memory) emit_memory_operand(opcode,src);
+            else code={opcode,uint8_t(0xC0|(src<<3)|dst)};
+        } else if (kind==1) { // immediate arithmetic/logical groups, including cmp
+            unsigned group=rng()&7; bool short_imm=rng()&1; uint8_t opcode=uint8_t(short_imm?0x83:0x81);
+            if(memory) emit_memory_operand(opcode,uint8_t(group));
+            else code={opcode,uint8_t(0xC0|(group<<3)|dst)};
+            if(short_imm) code.push_back(uint8_t(rng()));
+            else { uint32_t imm=rng(); for(unsigned k=0;k<4;++k) code.push_back(uint8_t(imm>>(8*k))); }
+        } else if (kind==2) { // test r/m32,r32 and test r/m32,imm32
+            if(rng()&1) {
+                if(memory) emit_memory_operand(0x85,uint8_t(src));
+                else code={0x85,uint8_t(0xC0|(src<<3)|dst)};
+            } else {
+                uint8_t opcode=0xF7;
+                if(memory) emit_memory_operand(opcode,0);
+                else code={opcode,uint8_t(0xC0|dst)};
+                uint32_t imm=rng(); for(unsigned k=0;k<4;++k) code.push_back(uint8_t(imm>>(8*k)));
+            }
+        } else { // not/neg/inc/dec r/m32
+            bool arithmetic=(rng()&1)!=0; unsigned group=arithmetic?(rng()&1):2+(rng()&1);
+            uint8_t opcode=arithmetic?0xFF:0xF7;
+            if(memory) emit_memory_operand(opcode,uint8_t(group));
+            else code={opcode,uint8_t(0xC0|(group<<3)|dst)};
+        }
+        runtime_compare(code,1,rng,regs,flags,data,alu_cases);
+    }
+    uint64_t shift_cases = 0;
+    for (unsigned n = 0; n != 5000; ++n) {
+        uint32_t regs[8]; for (uint32_t& r : regs) r = rng();
+        for (uint8_t& b : data) b = uint8_t(rng());
+        uint32_t flags = 2u | (rng() & FLAG_MASK); std::vector<uint8_t> code;
+        unsigned group = n % 8, target = rng() & 7, form = n % 3;
+        unsigned count = form == 0 ? 1 : unsigned(rng() & 0xff);
+        if (form == 0) code = {0xD1, uint8_t(0xC0 | (group << 3) | target)};
+        else if (form == 1) code = {0xC1, uint8_t(0xC0 | (group << 3) | target), uint8_t(count)};
+        else { code = {0xD3, uint8_t(0xC0 | (group << 3) | target)}; regs[ECX] = count; }
+        unsigned effective = (form == 2 ? regs[ECX] : count) & 31;
+        uint32_t compared = FLAG_MASK;
+        if (effective) {
+            if (group <= 3) { if (effective != 1) compared &= ~uint32_t(OF); }
+            else {
+                compared = DF | CF | PF | ZF | SF;
+                if (effective == 1) compared |= OF;
+            }
+        }
+        runtime_compare(code,1,rng,regs,flags,data,shift_cases,compared);
+    }
+    uint64_t stack_cases = 0;
+    for (unsigned n = 0; n != 5000; ++n) {
+        uint32_t regs[8]; for (uint32_t& r : regs) r = rng();
+        for (uint8_t& b : data) b = uint8_t(rng());
+        regs[ESP] = DATA + 0x1800; regs[EBP] = DATA + 0x1c00;
+        std::vector<uint8_t> code; unsigned kind = n % 9;
+        switch (kind) {
+        case 0: code = {uint8_t(0x50 | (rng() & 7))}; break;
+        case 1: code = {uint8_t(0x58 | (rng() & 7))}; break;
+        case 2: code = {0x68, uint8_t(rng()), uint8_t(rng()), uint8_t(rng()), uint8_t(rng())}; break;
+        case 3: code = {0x6A, uint8_t(rng())}; break;
+        case 4: { uint32_t ea = DATA + 0x200 + (rng() & 0x3fc); code = {0xFF, 0x35, uint8_t(ea), uint8_t(ea >> 8), uint8_t(ea >> 16), uint8_t(ea >> 24)}; break; }
+        case 5: { uint32_t ea = DATA + 0x200 + (rng() & 0x3fc); code = {0x8F, 0x05, uint8_t(ea), uint8_t(ea >> 8), uint8_t(ea >> 16), uint8_t(ea >> 24)}; break; }
+        case 6: code = {0xE8, 0x05, 0x00, 0x00, 0x00}; break;
+        case 7: code = (rng() & 1) ? std::vector<uint8_t>{0xC3} : std::vector<uint8_t>{0xC2, 0x08, 0x00}; break;
+        default: code = {0xC9}; break;
+        }
+        if (kind == 1 || kind == 5 || kind == 7) {
+            uint32_t target = CODE + 0x400 + (rng() & 0x3fc); uint32_t at = regs[ESP];
+            data[at - DATA] = uint8_t(target); data[at - DATA + 1] = uint8_t(target >> 8);
+            data[at - DATA + 2] = uint8_t(target >> 16); data[at - DATA + 3] = uint8_t(target >> 24);
+        } else if (kind == 8) {
+            uint32_t target = CODE + 0x400 + (rng() & 0x3fc); uint32_t at = regs[EBP];
+            data[at - DATA] = uint8_t(target); data[at - DATA + 1] = uint8_t(target >> 8);
+            data[at - DATA + 2] = uint8_t(target >> 16); data[at - DATA + 3] = uint8_t(target >> 24);
+        }
+        runtime_compare(code, 1, rng, regs, 2u | (rng() & FLAG_MASK), data, stack_cases);
+    }
+    std::printf("X86-DBT PASS: randomized runtime differential blocks address=%llu alu=%llu shifts=%llu stack=%llu (5000 each)\n",
+                (unsigned long long)address_cases, (unsigned long long)alu_cases,
+                (unsigned long long)shift_cases, (unsigned long long)stack_cases);
+}
+
+static void x87_differential() {
+    std::mt19937 rng(0x58383744u);
+    uint8_t data[3 * PAGE];
+    uint64_t cases = 0;
+    auto append_address = [](std::vector<uint8_t>& code, uint32_t address) {
+        for (unsigned i = 0; i != 4; ++i) code.push_back(uint8_t(address >> (i * 8)));
+    };
+    auto set32 = [](uint8_t* p, uint32_t value) {
+        for (unsigned i = 0; i != 4; ++i) p[i] = uint8_t(value >> (i * 8));
+    };
+    auto set64 = [](uint8_t* p, uint64_t value) {
+        for (unsigned i = 0; i != 8; ++i) p[i] = uint8_t(value >> (i * 8));
+    };
+    for (unsigned n = 0; n != 5000; ++n) {
+        uint32_t regs[8] = {};
+        for (uint32_t& r : regs) r = rng();
+        for (uint8_t& b : data) b = uint8_t(rng());
+        Fpu fpu;
+        fpu.cw = uint16_t(0x037f | ((rng() & 3u) << 10));
+        fpu.sw = uint16_t(rng() & 0x4700u);
+        for (unsigned i = 0; i != 3; ++i) {
+            int value = int(rng() % 199) - 99;
+            if (!value) value = 1;
+            fpu.push(Wide(value));
+        }
+        std::vector<uint8_t> code;
+        const uint32_t address = DATA + 0x100;
+        const unsigned family = n % 10;
+        if (family == 0) {
+            int value = int(rng() % 199) - 99; if (!value) value = 1;
+            float input = float(value); uint32_t bits; std::memcpy(&bits, &input, 4); set32(data + 0x100, bits);
+            unsigned group = n % 8;
+            code = {0xD8, uint8_t((group << 3) | 5)}; append_address(code, address);
+        } else if (family == 1) {
+            int value = int(rng() % 199) - 99; if (!value) value = 1;
+            double input = double(value) + 0.25; uint64_t bits; std::memcpy(&bits, &input, 8); set64(data + 0x100, bits);
+            unsigned group = n % 8;
+            code = {0xDC, uint8_t((group << 3) | 5)}; append_address(code, address);
+        } else if (family == 2) {
+            unsigned group = n % 8;
+            code = {0xD8, uint8_t(0xC0 | (group << 3) | 1)};
+        } else if (family == 3) {
+            code = {0xD9, uint8_t(0xC0 | ((n & 1) ? 8 : 0) | 1)};
+        } else if (family == 4) {
+            unsigned group = 1 + (n % 5);
+            code = {0xDD, uint8_t(0xC0 | (group << 3) | 1)};
+        } else if (family == 5) {
+            int value = int(rng() % 200000) - 100000; if (!value) value = 7;
+            set32(data + 0x100, uint32_t(value));
+            uint8_t op = (n & 1) ? 0xDF : 0xDB;
+            unsigned group = (n & 2) ? 3 : 0;
+            code = {op, uint8_t((group << 3) | 5)}; append_address(code, address);
+        } else if (family == 6) {
+            int value = int(rng() % 199) - 99; if (!value) value = 1;
+            float input = float(value); uint32_t bits; std::memcpy(&bits, &input, 4); set32(data + 0x100, bits);
+            unsigned group = n % 4 == 0 ? 0 : (n % 4 == 1 ? 2 : 3);
+            code = {0xD9, uint8_t((group << 3) | 5)}; append_address(code, address);
+        } else if (family == 7) {
+            int value = int(rng() % 199) - 99; if (!value) value = 1;
+            double input = double(value) + 0.5; uint64_t bits; std::memcpy(&bits, &input, 8); set64(data + 0x100, bits);
+            unsigned group = n % 4 == 0 ? 0 : (n % 4 == 1 ? 2 : (n % 4 == 2 ? 3 : 7));
+            code = {0xDD, uint8_t((group << 3) | 5)}; append_address(code, address);
+        } else if (family == 8) {
+            uint8_t op = (n & 1) ? 0xDF : 0xDB;
+            unsigned group = (n & 2) ? 6 : 5;
+            code = {op, uint8_t(0xC0 | (group << 3) | 1)};
+        } else {
+            code = {0xD9, (n & 1) ? uint8_t(0xEE) : uint8_t(0xE8)};
+        }
+        runtime_compare(code, 1, rng, regs, 2u | (rng() & FLAG_MASK), data, cases, FLAG_MASK, nullptr, &fpu);
+    }
+    std::printf("X86-DBT PASS: x87 differential matched interpreter on %llu randomized cases\n",
+                (unsigned long long)cases);
+}
+
 static uint32_t native_integer() {
     uint32_t x = 0x12345678u;
     for (uint32_t i = 0; i < 200000; ++i) x = (x ^ (i + 0x9e3779b9u)) * 33u + (x >> 7);
@@ -351,7 +675,13 @@ int main(int argc, char** argv) {
         if (argc != 1) { std::fprintf(stderr, "usage: x86-dbt [--bench]\n"); return 2; }
         auto program = compare_program();
         Executable executable(translate(program, CODE, DATA));
-        return differential_test(executable);
+        int rc = differential_test(executable);
+        if (rc) return rc;
+        randomized_sse_differential();
+        x87_differential();
+        partial_block_differential();
+        randomized_runtime_differential();
+        return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "X86-DBT FAIL: %s\n", e.what()); return 1;
     }

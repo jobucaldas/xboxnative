@@ -183,7 +183,7 @@ int main(int argc, char** argv) {
     guest.exe_tls = img.tls;
     guest.add_module("fixture-crt.exe", img.base);
     map_thunk_page(mem, table);
-    Cpu cpu(mem, table);
+    Cpu cpu(mem, table); cpu.dbt_enabled = false; // Preserve the CRT interpreter oracle; DBT runs in the integer smoke test.
     init_process(mem, cpu, img);
     if (mem.r32(PEB_ADDR + 0x18) != 0x50000000u) {
         std::fprintf(stderr, "X86-PEB-HEAP FAIL: ProcessHeap does not match GetProcessHeap\n"); return 1;

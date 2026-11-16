@@ -10,11 +10,15 @@
 // page before fetching, runs the host handler against the guest stack, then
 // performs the callee-side return.
 #pragma once
+#include <cstdlib>
 #include <deque>
 #include <functional>
 #include <immintrin.h>
 #include <map>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include "x86_dbt.h"
 #include "x86_fpu.h"
 #include "x86_mem.h"
 namespace x86 {
@@ -67,6 +71,12 @@ struct Cpu {
     void resume_at(uint32_t target_eip, uint32_t target_esp) { eip=target_eip;reg[ESP]=target_esp;host_transfer_requested=true; }
     uint64_t executed = 0, limit = 500ull * 1000 * 1000, tsc = 0;
     bool exited = false; uint32_t exit_code = 0;
+    bool dbt_enabled = false;
+    uint64_t translated_blocks = 0, interpreted_blocks = 0;
+    std::unordered_map<uint32_t, dbt::RuntimeBlock> dbt_cache;
+    std::array<dbt::RuntimeBlock*, 4> dbt_inline_cache{};
+    std::unordered_map<uint32_t, std::string> dbt_unsupported;
+    std::unordered_map<std::string, uint64_t> dbt_fallbacks;
     unsigned depth = 0;
     bool trace_fault_context = false;
     std::function<std::string(uint32_t)> format_eip;
@@ -97,7 +107,37 @@ struct Cpu {
         uint32_t mask; std::memcpy(&mask, buf + 28, 4);
         return mask ? mask : 0x0000ffffu;  // pre-SSE2 CPUs may leave it 0
     }();
-    Cpu(Memory& m, ThunkTable& t) : mem(m), thunks(t) {}
+    Cpu(Memory& m, ThunkTable& t, bool requested = false) : mem(m), thunks(t) {
+        const char* value = std::getenv("X86_DBT");
+        const bool env_requested = value && value[0] == '1' && value[1] == '\0';
+        dbt_enabled = (requested || env_requested) && mem.base() != nullptr;
+    }
+    void clear_dbt_cache() { dbt_cache.clear(); dbt_inline_cache.fill(nullptr); dbt_unsupported.clear(); }
+    std::string dbt_fallback_key(uint32_t pc, const char* reason) const {
+        uint8_t bytes[4] = {};
+        unsigned available = 0;
+        try {
+            for (; available != sizeof bytes; ++available) bytes[available] = mem.fetch8(pc + available);
+        } catch (...) {}
+        unsigned prefix = 0;
+        while (prefix < available && (bytes[prefix] == 0x66 || bytes[prefix] == 0xf2 || bytes[prefix] == 0xf3 ||
+                                      bytes[prefix] == 0x64 || bytes[prefix] == 0x65 || bytes[prefix] == 0xf0)) ++prefix;
+        unsigned opcode = prefix < available ? bytes[prefix] : 0;
+        unsigned opcode_bytes = 1;
+        if (opcode == 0x0f && prefix + 1 < available) { opcode = (opcode << 8) | bytes[prefix + 1]; opcode_bytes = 2; }
+        bool modrm = (opcode_bytes == 2) ||
+            (opcode <= 0x3b && (opcode & 7) != 4 && (opcode & 7) != 5) ||
+            opcode == 0x62 || opcode == 0x63 || opcode == 0x69 || opcode == 0x6b ||
+            (opcode >= 0x80 && opcode <= 0x8f) || opcode == 0xc0 || opcode == 0xc1 ||
+            (opcode >= 0xd0 && opcode <= 0xd3) || opcode == 0xf6 || opcode == 0xf7 ||
+            opcode == 0xfe || opcode == 0xff;
+        char key[128];
+        int n = snprintf(key, sizeof key, "opcode=%04x", opcode);
+        if (modrm && prefix + opcode_bytes < available)
+            n += snprintf(key + n, sizeof key - size_t(n), " /%u", (bytes[prefix + opcode_bytes] >> 3) & 7);
+        snprintf(key + n, sizeof key - size_t(n), " reason=%s", reason);
+        return key;
+    }
 
     // --- host-facing helpers (thunk handlers) ---
     uint32_t arg(unsigned i) const { return mem.r32(reg[ESP] + 4 + 4 * i); }  // valid inside a thunk handler
@@ -118,7 +158,96 @@ struct Cpu {
         return r;
     }
     void run(uint32_t stop) {
-        while (!exited && eip != stop) step();
+        dbt::RuntimeBlock* chained = nullptr;
+        while (!exited && eip != stop) {
+            if (dbt_enabled && eip != thunks.sentinel() && !thunks.at(eip)) {
+                auto unsupported_it = dbt_unsupported.find(eip);
+                if (unsupported_it != dbt_unsupported.end()) {
+                    ++dbt_fallbacks[unsupported_it->second]; ++interpreted_blocks; step(); continue;
+                }
+                dbt::RuntimeBlock* block_ptr = chained && chained->guest_pc == eip ? chained : nullptr;
+                chained = nullptr;
+                auto it = dbt_cache.end();
+                if (!block_ptr) {
+                    for (dbt::RuntimeBlock* cached : dbt_inline_cache)
+                        if (cached && cached->guest_pc == eip) { block_ptr = cached; break; }
+                }
+                if (!block_ptr) it = dbt_cache.find(eip);
+                auto valid = [&](dbt::RuntimeBlock* block) {
+                    if (!block) return false;
+                    for (uint32_t i = 0; i < block->guest_length; ++i)
+                        if (mem.fetch8(eip + i) != block->guest_bytes[i]) return false;
+                    return true;
+                };
+                if (block_ptr && !valid(block_ptr)) {
+                    for (auto& candidate : dbt_cache) {
+                        if (candidate.second.linked_target == block_ptr) candidate.second.linked_target = nullptr;
+                    }
+                    for (auto& cached : dbt_inline_cache) if (cached == block_ptr) cached = nullptr;
+                    dbt_cache.erase(eip); block_ptr = nullptr;
+                }
+                if (!block_ptr && it != dbt_cache.end()) {
+                    block_ptr = &it->second;
+                    if (!valid(block_ptr)) {
+                        for (auto& candidate : dbt_cache) {
+                            if (candidate.second.linked_target == block_ptr) candidate.second.linked_target = nullptr;
+                        }
+                        for (auto& cached : dbt_inline_cache) if (cached == block_ptr) cached = nullptr;
+                        dbt_cache.erase(it); block_ptr = nullptr;
+                    }
+                }
+                if (!block_ptr) {
+                    try {
+                        std::vector<uint8_t> bytes;
+                        size_t pc = 0; uint8_t last_opcode = 0; bool interpreter_boundary = false;
+                        while (pc < 64) {
+                            while (bytes.size() <= pc + 5) bytes.push_back(mem.fetch8(eip + uint32_t(bytes.size())));
+                            uint32_t ea = 0; bool memory = false, absolute_memory = false; uint8_t opcode = bytes[pc]; last_opcode = opcode;
+                            if (!pc && (opcode == 0x74 || opcode == 0x75)) throw std::runtime_error("dispatch standalone conditional branch in interpreter");
+                            size_t len;
+                            try { len = dbt::runtime_instruction(bytes, pc, ea, memory, absolute_memory); }
+                            catch (const std::runtime_error&) { if (!pc) throw; interpreter_boundary = true; break; }
+                            if (memory && absolute_memory &&
+                                (!mem.range_accessible(ea, 4, PROT_R) || !mem.range_accessible(ea, 4, PROT_W)))
+                                throw std::runtime_error("DBT absolute memory page is not RW");
+                            pc += len;
+                            if (opcode == 0x74 || opcode == 0x75 || opcode == 0xC2 || opcode == 0xC3 || opcode == 0xE8) break;
+                        }
+                        if (!pc) throw std::runtime_error("DBT block has no supported instruction");
+                        bytes.resize(pc); dbt::RuntimeBlock block;
+                        block.guest_pc = eip; block.guest_length = uint32_t(pc); block.exit_opcode = last_opcode;
+                        block.interpreter_boundary = interpreter_boundary; block.uses_xmm = dbt::runtime_uses_xmm(bytes); block.guest_bytes = bytes;
+                        block.code = std::make_unique<dbt::Executable>(dbt::runtime_translate(bytes, eip));
+                        block_ptr = &dbt_cache.emplace(eip, std::move(block)).first->second;
+                    } catch (const std::exception& ex) {
+                        std::string key = dbt_fallback_key(eip, ex.what());
+                        dbt_unsupported.emplace(eip, key); ++dbt_fallbacks[key]; ++interpreted_blocks; step(); continue;
+                    }
+                }
+                if (executed + block_ptr->guest_length > limit) { ++interpreted_blocks; step(); continue; }
+                dbt::RuntimeState state;
+                std::memcpy(state.reg, reg, sizeof reg);
+                if (block_ptr->uses_xmm) std::memcpy(state.xmm, xmm.r, sizeof state.xmm);
+                state.eip = eip; state.eflags = eflags; state.memory = mem.base(); state.fpu = fpu;
+                uint32_t next = block_ptr->code->operator()(state);
+                std::memcpy(reg, state.reg, sizeof reg);
+                if (block_ptr->uses_xmm) std::memcpy(xmm.r, state.xmm, sizeof xmm.r);
+                fpu = state.fpu;
+                eip = next; eflags = state.eflags;
+                executed += block_ptr->guest_length; ++translated_blocks;
+                if (!block_ptr->interpreter_boundary) {
+                    bool indirect = block_ptr->exit_opcode == 0xC2 || block_ptr->exit_opcode == 0xC3 || block_ptr->exit_opcode == 0xFF || block_ptr->exit_opcode == 0x8F;
+                    auto successor = dbt_cache.find(next);
+                    if (successor != dbt_cache.end()) {
+                        if (indirect) dbt_inline_cache[next & 3] = &successor->second;
+                        else block_ptr->linked_target = &successor->second;
+                    }
+                    if (block_ptr->linked_target && block_ptr->linked_target->guest_pc == next && valid(block_ptr->linked_target)) chained = block_ptr->linked_target;
+                }
+                continue;
+            }
+            ++interpreted_blocks; step();
+        }
     }
 
     // --- interpreter ---
@@ -160,14 +289,24 @@ struct Cpu {
         cnt &= 31; if (!cnt) return a & mask(n);
         unsigned bits = 8 * n; uint32_t m = mask(n); a &= m; uint32_t r; bool cf;
         switch (op) {
-        case 0: { unsigned k = cnt % bits; r = k ? ((a << k) | (a >> (bits - k))) & m : a; cf = r & 1; setf(CF, cf); if (cnt == 1) setf(OF, bool(r & msb(n)) != cf); return r; }
-        case 1: { unsigned k = cnt % bits; r = k ? ((a >> k) | (a << (bits - k))) & m : a; cf = r & msb(n); setf(CF, cf); if (cnt == 1) setf(OF, bool(r & msb(n)) != bool(r & (msb(n) >> 1))); return r; }
-        case 4: case 6: { uint64_t t = uint64_t(a) << cnt; r = uint32_t(t) & m; setf(CF, t >> bits & 1); setf(OF, bool(r & msb(n)) != bool(t >> bits & 1)); break; }
-        case 5: r = a >> cnt; setf(CF, (a >> (cnt - 1)) & 1); setf(OF, a & msb(n)); break;
-        case 7: { int32_t s = int32_t(sx(a, n)); r = uint32_t(s >> cnt) & m; setf(CF, (uint32_t(s) >> (cnt - 1)) & 1); setf(OF, 0); break; }
-        default: unsupported("rcl/rcr");
+        case 0: { unsigned k = cnt % bits; if (!k) { setf(CF, a & 1); return a; } r = ((a << k) | (a >> (bits - k))) & m; cf = r & 1; setf(CF, cf); if (cnt == 1) setf(OF, bool(r & msb(n)) != cf); return r; }
+        case 1: { unsigned k = cnt % bits; if (!k) { setf(CF, a & msb(n)); return a; } r = ((a >> k) | (a << (bits - k))) & m; cf = r & msb(n); setf(CF, cf); if (cnt == 1) setf(OF, bool(r & msb(n)) != bool(r & (msb(n) >> 1))); return r; }
+        case 2: case 3: {
+            cf = f(CF);
+            for (unsigned i = 0; i < cnt; ++i) {
+                if (op == 2) { bool next = (a & msb(n)) != 0; a = ((a << 1) | uint32_t(cf)) & m; cf = next; }
+                else { bool next = (a & 1) != 0; a = (a >> 1) | (uint32_t(cf) << (bits - 1)); cf = next; }
+            }
+            r = a; setf(CF, cf);
+            if (cnt == 1) setf(OF, op == 2 ? bool(r & msb(n)) != cf : bool(r & msb(n)) != bool(r & (msb(n) >> 1)));
+            return r;
         }
-        szp(r, n); setf(AF, 0); return r;
+        case 4: case 6: { uint64_t t = uint64_t(a) << cnt; r = uint32_t(t) & m; cf = (t >> bits) & 1; setf(CF, cf); if (cnt == 1) setf(OF, bool(r & msb(n)) != cf); break; }
+        case 5: r = a >> cnt; setf(CF, (a >> (cnt - 1)) & 1); if (cnt == 1) setf(OF, a & msb(n)); break;
+        case 7: { int32_t s = int32_t(sx(a, n)); r = uint32_t(s >> cnt) & m; setf(CF, (uint32_t(s) >> (cnt - 1)) & 1); if (cnt == 1) setf(OF, 0); break; }
+        default: unsupported("shift group");
+        }
+        szp(r, n); return r;
     }
     bool cond(unsigned c) const {
         bool r;

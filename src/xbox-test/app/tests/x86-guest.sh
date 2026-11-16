@@ -55,6 +55,13 @@ x86-crt: iob ok
 x86-crt: checks 113 failed 0'
 [[ $body == "$want" ]] || { echo "X86-GUEST FAIL: stdout differs"; diff <(echo "$want") <(echo "$body") || true; exit 1; }
 echo "X86-GUEST PASS: mingw CRT program (printf with doubles, heap, qsort, TLS, VirtualAlloc, strftime) ran in the interpreter to exit 42"
+set +e
+xdbtout=$(X86_DBT=1 "$tmp/x86-guest" "$tmp/fixture-crt.exe"); xdbtrc=$?
+set -e
+[[ $xdbtrc -eq 42 ]] || { echo "X86-GUEST FAIL: DBT fixture exit $xdbtrc (want 42)"; echo "$xdbtout"; exit 1; }
+xdbtbody=$(sed '/^guest: /d;/^X86-GUARD /d' <<<"$xdbtout")
+[[ $xdbtbody == "$want" ]] || { echo "X86-GUEST FAIL: DBT stdout differs"; diff <(echo "$want") <(echo "$xdbtbody") || true; exit 1; }
+echo "X86-GUEST PASS: X86_DBT=1 CRT run preserved interpreter-oracle stdout/exit; translator coverage is in x86-core's integer-kernel counter test"
 # The launcher's own PE32 entry point (host/x86/x86_play.h): the structured
 # result launch.h logs and launch_result.json is built from, plus the live
 # output tee and the pre-entry progress callback.

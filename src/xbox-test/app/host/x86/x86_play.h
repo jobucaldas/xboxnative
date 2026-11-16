@@ -104,6 +104,9 @@ struct PlayResult {
     bool finished = false;      // the guest called ExitProcess (or its entry returned)
     uint32_t exit_code = 0;
     uint64_t instructions = 0;
+    bool dbt_enabled = false;
+    std::string dbt_reason;
+    uint64_t translated_blocks = 0, interpreted_blocks = 0;
     std::string fault;          // empty when finished; else the Fault text
     std::string fault_kind;     // AccessViolation, Unsupported, UnresolvedImport, ...
     uint32_t fault_eip = 0;
@@ -319,7 +322,8 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
                             const std::function<void(const PlayResult&)>& on_imports = nullptr,
                             const DllLoadObserver& observe_dll = nullptr,
                             const std::function<void(Host&)>& configure_host = nullptr,
-                            const std::function<bool(const char*, const std::u16string&)>& destructive_file_guard = nullptr) {
+                            const std::function<bool(const char*, const std::u16string&)>& destructive_file_guard = nullptr,
+                            bool dbt_requested = false) {
     PlayResult r;
     try {
         Memory mem; ThunkTable table; Host host; Registry reg;
@@ -387,7 +391,11 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         guest.exe_tls = img.tls;  // each thread's TLS block comes from the exe's directory
         guest.add_module(name, img.base);
         map_thunk_page(mem, table);
-        Cpu cpu(mem, table);
+        Cpu cpu(mem, table, dbt_requested);
+        const char* dbt_env = std::getenv("X86_DBT");
+        const bool dbt_env_requested = dbt_env && dbt_env[0] == '1' && dbt_env[1] == '\0';
+        r.dbt_enabled = cpu.dbt_enabled;
+        r.dbt_reason = !mem.base() ? "Memory::base()==nullptr" : dbt_requested ? "LocalState\\x86dbt.txt" : dbt_env_requested ? "X86_DBT=1" : "not-requested";
         cpu.limit = instruction_limit;
         cpu.trace_fault_context = trace_fault_context;
         cpu.format_eip = [&guest, &img](uint32_t eip) {
@@ -445,6 +453,7 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         // order — after the thunk page and TEB/PEB exist, before the entry.
         try { guest.run_dll_mains(cpu, 1); } catch (const Fault& f) {
             if (!cpu.exited) { record_fault(f); r.instructions = cpu.executed;
+                r.translated_blocks = cpu.translated_blocks; r.interpreted_blocks = cpu.interpreted_blocks;
                 r.peb_being_debugged=mem.r8(PEB_ADDR+2);r.peb_nt_global_flag=mem.r32(PEB_ADDR+0x68);return r; }
         }
         // TLS blocks are per loaded image. DLL_PROCESS_ATTACH runs first, then
@@ -468,6 +477,7 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
             record_fault(fault);
         }
         r.instructions = cpu.executed;
+        r.translated_blocks = cpu.translated_blocks; r.interpreted_blocks = cpu.interpreted_blocks;
         r.peb_being_debugged=mem.r8(PEB_ADDR+2);r.peb_nt_global_flag=mem.r32(PEB_ADDR+0x68);
     } catch (const std::exception& e) {
         r.fault = std::string("loader: ") + e.what();
@@ -489,7 +499,8 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
                       const std::function<void(const PlayResult&)>& on_imports = nullptr,
                       const DllLoadObserver& observe_dll = nullptr,
                       const std::function<void(Host&)>& configure_host = nullptr,
-                      const std::function<bool(const char*, const std::u16string&)>& destructive_file_guard = nullptr) {
+                      const std::function<bool(const char*, const std::u16string&)>& destructive_file_guard = nullptr,
+                      bool dbt_requested = false) {
     PlayResult r;
     FILE* f = _wfopen(exe.c_str(), L"rb");
     if (!f) { r.fault = "cannot open the executable"; r.fault_kind = "Loader"; return r; }
@@ -512,7 +523,7 @@ inline PlayResult run(const std::wstring& exe, const std::wstring& dir, const st
         if (needed) { std::vector<wchar_t> previous(needed); DWORD n = GetCurrentDirectoryW(needed, previous.data());
             if (n && n < needed) { previousDirectory.assign(previous.data(), n); restoreDirectory = SetCurrentDirectoryW(workingDirectory.c_str()) != FALSE; } }
     }
-    auto result = run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source, trace_fault_context, on_imports, observe_dll, configure_host, destructive_file_guard);
+    auto result = run_image(file, name, cmdline, tee, on_loaded, instruction_limit, dll_source, trace_fault_context, on_imports, observe_dll, configure_host, destructive_file_guard, dbt_requested);
     if (restoreDirectory) SetCurrentDirectoryW(previousDirectory.c_str());
     return result;
 }
