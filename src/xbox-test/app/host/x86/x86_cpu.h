@@ -75,7 +75,8 @@ struct Cpu {
     uint64_t translated_blocks = 0, interpreted_blocks = 0;
     std::unordered_map<uint32_t, dbt::RuntimeBlock> dbt_cache;
     std::array<dbt::RuntimeBlock*, 4> dbt_inline_cache{};
-    std::unordered_set<uint32_t> dbt_unsupported;
+    std::unordered_map<uint32_t, std::string> dbt_unsupported;
+    std::unordered_map<std::string, uint64_t> dbt_fallbacks;
     unsigned depth = 0;
     bool trace_fault_context = false;
     std::function<std::string(uint32_t)> format_eip;
@@ -111,6 +112,31 @@ struct Cpu {
         dbt_enabled = value && value[0] == '1' && value[1] == '\0' && mem.base() != nullptr;
     }
     void clear_dbt_cache() { dbt_cache.clear(); dbt_inline_cache.fill(nullptr); dbt_unsupported.clear(); }
+    std::string dbt_fallback_key(uint32_t pc, const char* reason) const {
+        uint8_t bytes[4] = {};
+        unsigned available = 0;
+        try {
+            for (; available != sizeof bytes; ++available) bytes[available] = mem.fetch8(pc + available);
+        } catch (...) {}
+        unsigned prefix = 0;
+        while (prefix < available && (bytes[prefix] == 0x66 || bytes[prefix] == 0xf2 || bytes[prefix] == 0xf3 ||
+                                      bytes[prefix] == 0x64 || bytes[prefix] == 0x65 || bytes[prefix] == 0xf0)) ++prefix;
+        unsigned opcode = prefix < available ? bytes[prefix] : 0;
+        unsigned opcode_bytes = 1;
+        if (opcode == 0x0f && prefix + 1 < available) { opcode = (opcode << 8) | bytes[prefix + 1]; opcode_bytes = 2; }
+        bool modrm = (opcode_bytes == 2) ||
+            (opcode <= 0x3b && (opcode & 7) != 4 && (opcode & 7) != 5) ||
+            opcode == 0x62 || opcode == 0x63 || opcode == 0x69 || opcode == 0x6b ||
+            (opcode >= 0x80 && opcode <= 0x8f) || opcode == 0xc0 || opcode == 0xc1 ||
+            (opcode >= 0xd0 && opcode <= 0xd3) || opcode == 0xf6 || opcode == 0xf7 ||
+            opcode == 0xfe || opcode == 0xff;
+        char key[128];
+        int n = snprintf(key, sizeof key, "opcode=%04x", opcode);
+        if (modrm && prefix + opcode_bytes < available)
+            n += snprintf(key + n, sizeof key - size_t(n), " /%u", (bytes[prefix + opcode_bytes] >> 3) & 7);
+        snprintf(key + n, sizeof key - size_t(n), " reason=%s", reason);
+        return key;
+    }
 
     // --- host-facing helpers (thunk handlers) ---
     uint32_t arg(unsigned i) const { return mem.r32(reg[ESP] + 4 + 4 * i); }  // valid inside a thunk handler
@@ -133,7 +159,11 @@ struct Cpu {
     void run(uint32_t stop) {
         dbt::RuntimeBlock* chained = nullptr;
         while (!exited && eip != stop) {
-            if (dbt_enabled && eip != thunks.sentinel() && !thunks.at(eip) && !dbt_unsupported.count(eip)) {
+            if (dbt_enabled && eip != thunks.sentinel() && !thunks.at(eip)) {
+                auto unsupported_it = dbt_unsupported.find(eip);
+                if (unsupported_it != dbt_unsupported.end()) {
+                    ++dbt_fallbacks[unsupported_it->second]; ++interpreted_blocks; step(); continue;
+                }
                 dbt::RuntimeBlock* block_ptr = chained && chained->guest_pc == eip ? chained : nullptr;
                 chained = nullptr;
                 auto it = dbt_cache.end();
@@ -186,8 +216,9 @@ struct Cpu {
                         block.guest_pc = eip; block.guest_length = uint32_t(pc); block.exit_opcode = last_opcode; block.guest_bytes = bytes;
                         block.code = std::make_unique<dbt::Executable>(dbt::runtime_translate(bytes, eip));
                         block_ptr = &dbt_cache.emplace(eip, std::move(block)).first->second;
-                    } catch (const std::exception&) {
-                        dbt_unsupported.insert(eip); ++interpreted_blocks; step(); continue;
+                    } catch (const std::exception& ex) {
+                        std::string key = dbt_fallback_key(eip, ex.what());
+                        dbt_unsupported.emplace(eip, key); ++dbt_fallbacks[key]; ++interpreted_blocks; step(); continue;
                     }
                 }
                 if (executed + block_ptr->guest_length > limit) { ++interpreted_blocks; step(); continue; }
