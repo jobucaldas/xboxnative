@@ -33,8 +33,9 @@ int main(int argc, char** argv) {
         Dll image = load_dll(mem, table, reg, slurp(argv[1]), {}, loaded, 0, nullptr, nullptr, "x86-bench.dll");
         mem.map(0x20000000, 0x20000, PROT_R | PROT_W);
         Cpu cpu(mem, table); cpu.reg[ESP] = 0x2001fff0;
-        std::printf("kernel,guest_instructions,guest_instructions_per_second,guest_ms,native_ms,interpreter_over_native\n");
+        std::printf("kernel,guest_instructions,translated_blocks,interpreted_blocks,guest_instructions_per_second,guest_ms,native_ms,interpreter_over_native\n");
         for (const auto& k : kernels) {
+            uint64_t translated_before = cpu.translated_blocks, interpreted_before = cpu.interpreted_blocks;
             auto it = image.image.exports.find(k.symbol);
             if (it == image.image.exports.end()) throw std::runtime_error(std::string("missing export: ") + k.symbol);
             uint32_t fn = image.image.base + it->second;
@@ -62,8 +63,11 @@ int main(int argc, char** argv) {
             double guest_median = guest_ms[guest_ms.size() / 2], native_median = native_ms[native_ms.size() / 2];
             double ips = guest_median > 0 ? double(instructions) / (guest_median / 1000.0) : 0;
             double ratio = native_median > 0 ? guest_median / native_median : 0;
-            std::printf("%s,%llu,%.0f,%.3f,%.3f,%.1fx\n", k.name,
-                static_cast<unsigned long long>(instructions), ips, guest_median, native_median, ratio);
+            std::printf("%s,%llu,%llu,%llu,%.0f,%.3f,%.3f,%.1fx\n", k.name,
+                static_cast<unsigned long long>(instructions),
+                static_cast<unsigned long long>(cpu.translated_blocks - translated_before),
+                static_cast<unsigned long long>(cpu.interpreted_blocks - interpreted_before),
+                ips, guest_median, native_median, ratio);
         }
     } catch (const std::exception& e) { std::fprintf(stderr, "x86-bench: FAIL: %s\n", e.what()); return 1; }
     return 0;

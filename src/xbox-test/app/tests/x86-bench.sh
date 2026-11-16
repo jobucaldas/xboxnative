@@ -10,4 +10,7 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/x86-bench.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
 "$cc32" -O2 -Wall -Wextra -Werror -msse2 -shared -nostdlib -Wl,--entry,0 -Wl,--image-base,0x25000000 -o "$tmp/x86-bench.dll" "$here/x86-bench-kernels.c"
 "${CC:-cc}" -O2 -Wall -Wextra -Werror -msse2 -c "$here/x86-bench-kernels.c" -o "$tmp/kernels.o"
 "${CXX:-c++}" -std=c++17 -O2 -mno-red-zone -Wall -Wextra -Werror "$here/x86-bench.cpp" "$tmp/kernels.o" -o "$tmp/x86-bench"
+echo "X86-BENCH mode=interpreter"
 "$tmp/x86-bench" "$tmp/x86-bench.dll"
+echo "X86-BENCH mode=dbt"
+X86_DBT=1 "$tmp/x86-bench" "$tmp/x86-bench.dll"

@@ -276,6 +276,145 @@ static int differential_test(const Executable& executable) {
     return 0;
 }
 
+struct RuntimeMachine {
+    Memory memory;
+    ThunkTable thunks;
+    Cpu cpu{memory, thunks};
+    RuntimeMachine() {
+        if (!memory.base()) throw std::runtime_error("DBT randomized tests require reserved-base memory");
+        memory.map(CODE, PAGE, PROT_R | PROT_W);
+        memory.map(DATA, 3 * PAGE, PROT_R | PROT_W);
+    }
+    void load(const std::vector<uint8_t>& code) {
+        memory.protect(CODE, PAGE, PROT_R | PROT_W);
+        memory.write_bytes(CODE, code.data(), uint32_t(code.size()));
+        memory.protect(CODE, PAGE, PROT_R | PROT_X);
+        cpu.eip = CODE; cpu.executed = 0; cpu.eflags = 2;
+    }
+};
+static void runtime_compare(const std::vector<uint8_t>& code, unsigned instructions, std::mt19937& rng,
+                            const uint32_t initial[8], uint32_t flags, const uint8_t data[3 * PAGE],
+                            uint64_t& translated_cases) {
+    static RuntimeMachine translated, interpreted;
+    translated.load(code); interpreted.load(code);
+    translated.memory.write_bytes(DATA, data, 3 * PAGE); interpreted.memory.write_bytes(DATA, data, 3 * PAGE);
+    std::memcpy(translated.cpu.reg, initial, sizeof translated.cpu.reg);
+    std::memcpy(interpreted.cpu.reg, initial, sizeof interpreted.cpu.reg);
+    translated.cpu.eflags = interpreted.cpu.eflags = flags;
+    dbt::RuntimeState state;
+    std::memcpy(state.reg, initial, sizeof state.reg); state.eip = CODE; state.eflags = flags; state.memory = translated.memory.base();
+    std::vector<uint8_t> translated_code = dbt::runtime_translate(code, CODE);
+    dbt::Executable executable(translated_code);
+    uint32_t next = executable(state);
+    if (next != state.eip) throw std::runtime_error("runtime DBT returned a different EIP");
+    for (unsigned i = 0; i < instructions; ++i) interpreted.cpu.step();
+    if (std::memcmp(state.reg, interpreted.cpu.reg, sizeof state.reg) ||
+        ((state.eflags ^ interpreted.cpu.eflags) & FLAG_MASK) || state.eip != interpreted.cpu.eip ||
+        std::memcmp(translated.memory.base() + DATA, interpreted.memory.base() + DATA, 3 * PAGE)) {
+        std::fprintf(stderr,"mismatch case=%llu code:",static_cast<unsigned long long>(translated_cases));
+        for(uint8_t b:code) std::fprintf(stderr," %02x",b);
+        std::fprintf(stderr,"\nflags=%08x/%08x eip=%08x/%08x\n",state.eflags,interpreted.cpu.eflags,state.eip,interpreted.cpu.eip);
+        for(unsigned i=0;i<8;++i) if(state.reg[i]!=interpreted.cpu.reg[i]) std::fprintf(stderr,"reg%u=%08x/%08x\n",i,state.reg[i],interpreted.cpu.reg[i]);
+        (void)rng;
+        throw std::runtime_error("randomized runtime DBT state differs from interpreter");
+    }
+    ++translated_cases;
+}
+static void randomized_runtime_differential() {
+    std::mt19937 rng(0x58424454u); uint64_t address_cases = 0, alu_cases = 0;
+    uint8_t data[3 * PAGE];
+    for (unsigned n = 0; n != 5000; ++n) {
+        uint32_t regs[8]; for (uint32_t& r : regs) r = rng();
+        for (uint8_t& b : data) b = uint8_t(rng());
+        uint32_t flags = 2u | (rng() & FLAG_MASK);
+        std::vector<uint8_t> code; unsigned count = 1;
+        unsigned which = n % 6, address_mode = (n / 6) % 8;
+        auto emit_mapped_address=[&](uint8_t opcode,uint8_t field,unsigned mode) {
+            uint8_t mod=0,rm=0; uint32_t disp=0; bool has_sib=false;
+            static const uint8_t bases[]={0,1,2,3,6,7};
+            uint8_t base=bases[rng()%6], index=uint8_t(rng()%3);
+            uint8_t scale=uint8_t(rng()&3);
+            switch(mode) {
+            case 0: disp=DATA+(rng()%(3*PAGE-4)); rm=5; break;
+            case 1: base=bases[rng()%6]; regs[base]=DATA+0x400; rm=base; break;
+            case 2: mod=1; regs[base]=DATA+0x400; disp=uint32_t(rng()%128); rm=base; break;
+            case 3: mod=2; regs[base]=DATA+0x400; disp=uint32_t(rng()%512); rm=base; break;
+            case 4: mod=1; has_sib=true; base=4; index=uint8_t(rng()%3); regs[base]=DATA+0x400; regs[index]=3; disp=8; break;
+            case 5: has_sib=true; base=5; index=uint8_t(rng()%3); regs[index]=3; disp=DATA+0x300; break;
+            case 6: mod=2; has_sib=true; base=uint8_t(3+ rng()%5); if(base==4 || base==5) base=6; index=uint8_t(rng()%3); regs[base]=DATA+0x400; regs[index]=3; disp=32; break;
+            default: has_sib=true; base=4; index=4; regs[base]=DATA+0x400; break;
+            }
+            rm=has_sib?4:rm; code={opcode,uint8_t((mod<<6)|(field<<3)|rm)};
+            if(has_sib) code.push_back(uint8_t((scale<<6)|(index<<3)|base));
+            if(mod==1) code.push_back(uint8_t(disp));
+            else if(mod==2 || (mod==0 && (rm==5 || (has_sib && base==5))))
+                for(unsigned k=0;k<4;++k) code.push_back(uint8_t(disp>>(8*k)));
+        };
+        if (which == 0) { // mov r32,r/m32 across mapped base/SIB forms
+            unsigned dst=rng()&7; emit_mapped_address(0x8B,uint8_t(dst),address_mode);
+        } else if (which == 1) { // mov r/m32,r32 across mapped base/SIB forms
+            unsigned src=rng()&7; emit_mapped_address(0x89,uint8_t(src),address_mode);
+        } else if (which == 2) { // movzx/movsx register or mapped memory source
+            uint8_t op2[] = {0xB6,0xB7,0xBE,0xBF}; uint8_t x = op2[rng() & 3]; unsigned dst=rng()&7;
+            if ((n/6)&1) emit_mapped_address(0x0F,uint8_t(dst),address_mode), code.insert(code.begin()+1,x);
+            else code={0x0F,x,uint8_t(0xC0 | (dst<<3) | (rng()&7))};
+        } else if (which == 3) { // LEA exercises every ModRM/SIB displacement shape
+            unsigned dst=rng()&7, mode=rng()%5, base=rng()&7, index=rng()&7, scale=rng()&3;
+            int32_t disp=int32_t(rng());
+            if (mode==0) { code={0x8D,uint8_t((dst<<3)|5)}; for(unsigned k=0;k<4;++k) code.push_back(uint8_t(uint32_t(disp)>>(8*k))); }
+            else if (mode==1) { regs[base]=DATA+0x300; code={0x8D,uint8_t(0x40|(dst<<3)|(base==4?4:base))}; if(base==4) code.push_back(0x24); code.push_back(uint8_t(disp)); }
+            else if (mode==2) { regs[base]=DATA+0x300; code={0x8D,uint8_t(0x80|(dst<<3)|(base==4?4:base))}; if(base==4) code.push_back(0x24); for(unsigned k=0;k<4;++k) code.push_back(uint8_t(uint32_t(disp)>>(8*k))); }
+            else if (mode==3) { regs[base]=DATA+0x300; regs[index]=3; code={0x8D,uint8_t(0x40|(dst<<3)|4),uint8_t((scale<<6)|(index<<3)|base),uint8_t(disp)}; }
+            else { regs[index]=3; code={0x8D,uint8_t((dst<<3)|4),uint8_t((scale<<6)|(index<<3)|5)}; for(unsigned k=0;k<4;++k) code.push_back(uint8_t(uint32_t(disp)>>(8*k))); }
+        } else { // LEA also covers register-indirect and base+disp8/disp32
+            unsigned dst=rng()&7, base=rng()&7; regs[base]=DATA+0x300; int32_t disp=int32_t(rng());
+            bool wide=which==5; code={0x8D,uint8_t((wide?0x80:0x40)|(dst<<3)|(base==4?4:base))}; if(base==4) code.push_back(0x24);
+            if(wide) for(unsigned k=0;k<4;++k) code.push_back(uint8_t(uint32_t(disp)>>(8*k))); else code.push_back(uint8_t(disp));
+        }
+        runtime_compare(code,count,rng,regs,flags,data,address_cases);
+    }
+    for (unsigned n = 0; n != 5000; ++n) {
+        uint32_t regs[8]; for (uint32_t& r : regs) r = rng();
+        for (uint8_t& b : data) b = uint8_t(rng());
+        uint32_t flags = 2u | (rng() & FLAG_MASK); std::vector<uint8_t> code;
+        unsigned kind=n%4, op=rng()%8, dst=rng()&7, src=rng()&7; bool memory=(rng()%4)==0;
+        static const uint8_t rmreg[8]={0x01,0x11,0x19,0x21,0x09,0x29,0x31,0x39};
+        auto emit_memory_operand=[&](uint8_t opcode,uint8_t field) {
+            uint32_t ea=DATA+(rng()%(3*PAGE-4)); code={opcode,uint8_t((field<<3)|5)};
+            for(unsigned k=0;k<4;++k) code.push_back(uint8_t(ea>>(8*k)));
+        };
+        if (kind==0) { // add/adc/sub/sbb/and/or/xor/cmp r/m32,r32
+            uint8_t opcode=rmreg[op];
+            if(memory) emit_memory_operand(opcode,src);
+            else code={opcode,uint8_t(0xC0|(src<<3)|dst)};
+        } else if (kind==1) { // immediate arithmetic/logical groups, including cmp
+            unsigned group=rng()&7; bool short_imm=rng()&1; uint8_t opcode=uint8_t(short_imm?0x83:0x81);
+            if(memory) emit_memory_operand(opcode,uint8_t(group));
+            else code={opcode,uint8_t(0xC0|(group<<3)|dst)};
+            if(short_imm) code.push_back(uint8_t(rng()));
+            else { uint32_t imm=rng(); for(unsigned k=0;k<4;++k) code.push_back(uint8_t(imm>>(8*k))); }
+        } else if (kind==2) { // test r/m32,r32 and test r/m32,imm32
+            if(rng()&1) {
+                if(memory) emit_memory_operand(0x85,uint8_t(src));
+                else code={0x85,uint8_t(0xC0|(src<<3)|dst)};
+            } else {
+                uint8_t opcode=0xF7;
+                if(memory) emit_memory_operand(opcode,0);
+                else code={opcode,uint8_t(0xC0|dst)};
+                uint32_t imm=rng(); for(unsigned k=0;k<4;++k) code.push_back(uint8_t(imm>>(8*k)));
+            }
+        } else { // not/neg/inc/dec r/m32
+            bool arithmetic=(rng()&1)!=0; unsigned group=arithmetic?(rng()&1):2+(rng()&1);
+            uint8_t opcode=arithmetic?0xFF:0xF7;
+            if(memory) emit_memory_operand(opcode,uint8_t(group));
+            else code={opcode,uint8_t(0xC0|(group<<3)|dst)};
+        }
+        runtime_compare(code,1,rng,regs,flags,data,alu_cases);
+    }
+    std::printf("X86-DBT PASS: randomized runtime differential blocks address=%llu alu=%llu (5000 each)\n",
+                (unsigned long long)address_cases, (unsigned long long)alu_cases);
+}
+
 static uint32_t native_integer() {
     uint32_t x = 0x12345678u;
     for (uint32_t i = 0; i < 200000; ++i) x = (x ^ (i + 0x9e3779b9u)) * 33u + (x >> 7);
@@ -321,7 +460,10 @@ int main(int argc, char** argv) {
         if (argc != 1) { std::fprintf(stderr, "usage: x86-dbt [--bench]\n"); return 2; }
         auto program = compare_program();
         Executable executable(translate(program, CODE, DATA));
-        return differential_test(executable);
+        int rc = differential_test(executable);
+        if (rc) return rc;
+        randomized_runtime_differential();
+        return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "X86-DBT FAIL: %s\n", e.what()); return 1;
     }
