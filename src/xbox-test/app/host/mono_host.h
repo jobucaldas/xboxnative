@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -90,14 +91,47 @@ inline bool redirect_virtual_protect(HMODULE module) {
 }
 #endif
 
+#ifdef _WIN32
+struct PInvokeHandle { std::string library; };
+struct PInvokeContext {
+    const std::function<void*(const char*, const char*)>* resolve = nullptr;
+    std::vector<std::unique_ptr<PInvokeHandle>> handles;
+};
+using MonoDlFallbackLoad = void* (*)(const char*, int, char**, void*);
+using MonoDlFallbackSymbol = void* (*)(void*, const char*, char**, void*);
+using MonoDlFallbackClose = void* (*)(void*, void*);
+using MonoDlFallbackRegister = void* (*)(MonoDlFallbackLoad, MonoDlFallbackSymbol, MonoDlFallbackClose, void*);
+using MonoDlFallbackUnregister = void (*)(void*);
+inline void* pinvoke_load(const char* name, int, char**, void* data) {
+    auto* context = static_cast<PInvokeContext*>(data);
+    if (!context || !context->resolve || !name || !(*context->resolve)(name, nullptr)) return nullptr;
+    auto handle = std::make_unique<PInvokeHandle>();
+    handle->library = name;
+    auto result = handle.get();
+    context->handles.push_back(std::move(handle));
+    return result;
+}
+inline void* pinvoke_symbol(void* raw, const char* name, char**, void* data) {
+    auto* context = static_cast<PInvokeContext*>(data);
+    auto* handle = static_cast<PInvokeHandle*>(raw);
+    return context && context->resolve && handle && name ? (*context->resolve)(handle->library.c_str(), name) : nullptr;
+}
+inline void* pinvoke_close(void*, void*) { return nullptr; }
+#endif
+
 inline Result run(const std::string& runtime_dir, const std::string& assembly,
                   const std::vector<std::string>& args, const std::function<void()>& on_started = {},
-                  const std::function<void*(const char*)>& mapped_symbol = {}) {
+                  const std::function<void*(const char*)>& mapped_symbol = {},
+                  const std::function<void*(const char*, const char*)>& pinvoke_resolver = {}) {
     Result r;
     std::string library = runtime_dir + "/mono-2.0-sgen.dll";
 #ifdef _WIN32
     if (!mapped_symbol) { r.error = "Mono runtime must be mapped by Play"; return r; }
     auto symbol = mapped_symbol;
+    std::function<void*(const char*, const char*)> resolver = pinvoke_resolver;
+    if (!resolver) resolver = [](const char* library_name, const char* symbol_name) {
+        return play_runtime::managed_pinvoke(library_name, symbol_name);
+    };
 #else
     (void)mapped_symbol;
     library = runtime_dir + "/lib/libmonosgen-2.0.so";
@@ -119,13 +153,35 @@ inline Result run(const std::string& runtime_dir, const std::string& assembly,
     auto assembly_open = reinterpret_cast<AssemblyOpen>(symbol("mono_domain_assembly_open"));
     auto jit_exec = reinterpret_cast<JitExec>(symbol("mono_jit_exec"));
     auto jit_cleanup = reinterpret_cast<JitCleanup>(symbol("mono_jit_cleanup"));
-    if (!set_dirs || !config_parse || !set_assemblies_path || !jit_init || !assembly_open || !jit_exec || !jit_cleanup) {
+#ifdef _WIN32
+    auto fallback_register = reinterpret_cast<MonoDlFallbackRegister>(symbol("mono_dl_fallback_register"));
+    auto fallback_unregister = reinterpret_cast<MonoDlFallbackUnregister>(symbol("mono_dl_fallback_unregister"));
+#else
+    (void)pinvoke_resolver;
+#endif
+    if (!set_dirs || !config_parse || !set_assemblies_path || !jit_init || !assembly_open || !jit_exec || !jit_cleanup
+#ifdef _WIN32
+        || (!fallback_register || !fallback_unregister)
+#endif
+    ) {
         r.error = "Mono embedding API is incomplete";
 #ifndef _WIN32
         dlclose(module);
 #endif
         return r;
     }
+#ifdef _WIN32
+    PInvokeContext pinvoke_context;
+    void* fallback = nullptr;
+    if (resolver) {
+        pinvoke_context.resolve = &resolver;
+        fallback = fallback_register(&pinvoke_load, &pinvoke_symbol, &pinvoke_close, &pinvoke_context);
+        if (!fallback) {
+            r.error = "Mono P/Invoke fallback registration failed";
+            return r;
+        }
+    }
+#endif
     const std::string library_dir = runtime_dir + "/lib";
     const std::string config_dir = runtime_dir + "/etc";
     const auto assembly_path = std::filesystem::u8path(assembly).parent_path().u8string();
@@ -162,6 +218,9 @@ inline Result run(const std::string& runtime_dir, const std::string& assembly,
         }
         jit_cleanup(domain);
     }
+#ifdef _WIN32
+    if (fallback) fallback_unregister(fallback);
+#endif
 #ifndef _WIN32
     dlclose(module);
 #endif

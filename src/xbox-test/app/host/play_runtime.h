@@ -1784,6 +1784,7 @@ static uintptr_t processApi(const char* name) {
     PLAY_API("VirtualAlloc",rwx_emulation::alloc);PLAY_API("VirtualProtect",rwx_emulation::protect);PLAY_API("VirtualFree",rwx_emulation::release);PLAY_API("VirtualQuery",rwx_emulation::query);
     PLAY_API("AddVectoredExceptionHandler",guestAddVeh);
     PLAY_API("CreateFileW",guestCreateFileW);PLAY_API("CreateFileA",guestCreateFileA);
+    PLAY_API("CreateFileFromAppW",guestCreateFileW);PLAY_API("CreateFileFromAppA",guestCreateFileA);
     PLAY_API("K32GetModuleBaseNameW",kernelModuleBaseName);
     PLAY_API("FindResourceA",kernelFindResourceA);PLAY_API("FindResourceW",kernelFindResourceW);
     PLAY_API("EnumResourceNamesA",kernelEnumResourceNamesA);PLAY_API("LoadResource",kernelLoadResource);
@@ -2245,6 +2246,26 @@ static FARPROC managed_export(HMODULE module,const char* name) {
     std::lock_guard<LoaderMutex> lock(state->loaderMutex);
     auto image=find(module);
     return image?(FARPROC)exported(*image,name,0):nullptr;
+}
+// Mono's Windows P/Invoke loader does not know about Play's in-process images.
+// Resolve only the FNA native set through the same mapper and export table; all
+// other libraries retain Mono's normal OS-loader fallback behavior.
+static void* managed_pinvoke(const char* library,const char* symbol) {
+    if(!state||!library)return nullptr;
+    auto key=basename(wide(library));
+    if(key.find('.')==std::string::npos)key+=".dll";
+    if(key!="sdl3.dll"&&key!="fna3d.dll"&&key!="faudio.dll"&&key!="libtheorafile.dll")return nullptr;
+    auto module=named(wide(key.c_str()));
+    if(!module) {
+        auto path=runtimeDirectory+L"\\"+wide(key.c_str());
+        if(!exists(path))return nullptr;
+        module=map(path,key);
+    }
+    if(!module||module->mappingFailed||!module->mapped||!initializePending())return nullptr;
+    if(!symbol)return module;
+    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
+    if(state->log)state->log((std::string("mono pinvoke: ")+key+"!"+symbol+" -> runtime/"+module->key).c_str());
+    return (void*)exported(*module,symbol,0);
 }
 static bool start(const std::wstring& root,const std::wstring& exe,const std::wstring& args,wxl::Log log,const std::wstring& cwd=std::wstring(),bool crashContextOptIn=false) {
     if(state) return false;

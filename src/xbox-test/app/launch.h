@@ -1440,7 +1440,8 @@ static void lp_run_managed(LpCtx& c,const std::wstring& path,const std::wstring&
     auto r=mono_host::run(runtime,assembly,args,[&]{
         g_launch.loaderStarted=now_s();g_launch.pe32Executed=true;
         lp_publish(c.gen,c.appid,"Mono loaded managed assembly",false,1,1,"running",false);
-    },[mono](const char* name){return (void*)play_runtime::managed_export(mono,name);});
+    },[mono](const char* name){return (void*)play_runtime::managed_export(mono,name);},
+        [](const char* library,const char* symbol){return play_runtime::managed_pinvoke(library,symbol);});
     c.mapped=r.loaded?1:0;
     if(r.executed){g_launch.pe32Finished=true;g_launch.pe32ExitCode=uint32_t(r.exit_code);}
     c.ok=r.executed&&r.exit_code==0;

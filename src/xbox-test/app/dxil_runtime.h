@@ -9,7 +9,6 @@
 #include "vendor/zlib/zlib.h"
 #ifdef _WIN32
 #include <windows.h>
-#include <fileapifromapp.h>
 #include <bcrypt.h>
 #include <winrt/Windows.Web.Http.h>
 #include <winrt/Windows.Storage.Streams.h>
@@ -88,15 +87,21 @@ inline std::string sha256(const void* data, size_t size) {
     static const char hex[] = "0123456789abcdef"; std::string out; out.reserve(64);
     for (UCHAR b : bytes) { out.push_back(hex[b >> 4]); out.push_back(hex[b & 15]); } return out;
 }
+inline HANDLE createFile(const std::wstring& path, DWORD access, DWORD share, DWORD disposition) {
+    CREATEFILE2_EXTENDED_PARAMETERS parameters{};
+    parameters.dwSize = sizeof(parameters);
+    parameters.dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+    return CreateFile2(path.c_str(), access, share, disposition, &parameters);
+}
 inline bool readFile(const std::wstring& path, std::vector<uint8_t>& bytes) {
-    HANDLE h = CreateFileFromAppW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE h = createFile(path, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING);
     if (h == INVALID_HANDLE_VALUE) return false;
     LARGE_INTEGER size{}; bool ok = GetFileSizeEx(h, &size) && size.QuadPart > 0 && size.QuadPart <= kMaxMember;
     if (ok) { bytes.resize(static_cast<size_t>(size.QuadPart)); DWORD got = 0; ok = ReadFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &got, nullptr) && got == bytes.size(); }
     CloseHandle(h); if (!ok) bytes.clear(); return ok;
 }
 inline bool writeTemp(const std::wstring& path, const std::vector<uint8_t>& bytes) {
-    HANDLE h = CreateFileFromAppW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE h = createFile(path, GENERIC_WRITE, 0, CREATE_ALWAYS);
     if (h == INVALID_HANDLE_VALUE) return false;
     DWORD wrote = 0; bool ok = WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &wrote, nullptr) && wrote == bytes.size();
     if (ok) ok = FlushFileBuffers(h) != FALSE; CloseHandle(h); return ok;
@@ -112,8 +117,8 @@ inline bool moveReplace(const std::wstring& from, const std::wstring& to) {
     static MoveEx moveEx = reinterpret_cast<MoveEx>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "MoveFileExW"));
     if (moveEx) return moveEx(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
     if (GetFileAttributesW(to.c_str()) != INVALID_FILE_ATTRIBUTES)
-        return ReplaceFileFromAppW(to.c_str(), from.c_str(), nullptr, REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr) != FALSE;
-    return MoveFileFromAppW(from.c_str(), to.c_str()) != FALSE;
+        return ReplaceFileW(to.c_str(), from.c_str(), nullptr, REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr) != FALSE;
+    return MoveFileExW(from.c_str(), to.c_str(), 0) != FALSE;
 }
 inline bool ensure(const std::wstring& localState, const std::function<void(const char*)>& log) {
     const std::wstring dir = localState + L"\\dxil", dll = dir + L"\\dxil.dll", license = dir + L"\\LICENSE-MS.txt";
@@ -122,7 +127,7 @@ inline bool ensure(const std::wstring& localState, const std::function<void(cons
         if (!exposeDirectory(dir)) { log("dxil: download failed DLL search path; Mesa pipelines may fail PSO creation"); return false; }
         log("dxil: cached"); return true;
     }
-    CreateDirectoryFromAppW(dir.c_str(), nullptr);
+    CreateDirectoryW(dir.c_str(), nullptr);
     try {
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
         winrt::Windows::Web::Http::HttpClient http;

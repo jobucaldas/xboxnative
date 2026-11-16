@@ -21,6 +21,9 @@ inline HANDLE WINAPI create_file_w(LPCWSTR path, DWORD access, DWORD share,
     std::wstring local = local_pipe(path);   // a pipe client finds a guest pipe where its creator put it
     return CreateFile2(local.empty() ? path : local.c_str(), access, share, disposition, &parameters);
 }
+inline BOOL WINAPI move_file_from_app_w(LPCWSTR existing, LPCWSTR replacement) {
+    return MoveFileExW(existing, replacement, 0);
+}
 inline HANDLE WINAPI create_file_a(LPCSTR path, DWORD access, DWORD share,
         LPSECURITY_ATTRIBUTES security, DWORD disposition, DWORD flags, HANDLE template_file) {
     if (!path) return create_file_w(nullptr, access, share, security, disposition, flags, template_file);
@@ -195,12 +198,16 @@ inline uintptr_t resolve_file(const char* dll, const char* name) {
     if (!dll || !name) return 0;
     bool kernel = !_stricmp(dll, "kernel32.dll") || !_stricmp(dll, "kernelbase.dll");
     bool file = !_stricmp(dll, "api-ms-win-core-file-l1-1-0.dll") ||
-                !_stricmp(dll, "api-ms-win-core-file-l1-2-0.dll");
+                !_stricmp(dll, "api-ms-win-core-file-l1-2-0.dll") ||
+                !_stricmp(dll, "api-ms-win-core-file-fromapp-l1-1-0.dll");
     bool io = !_stricmp(dll, "api-ms-win-core-io-l1-1-0.dll");
     if (!kernel && !file && !io) return 0;
 #define K32_FILE(symbol) if (!strcmp(name, #symbol)) return reinterpret_cast<uintptr_t>(&::symbol)
-    if (kernel || file) { if (!strcmp(name, "CreateFileA")) return reinterpret_cast<uintptr_t>(&create_file_a); }
-    if (kernel || file) { if (!strcmp(name, "CreateFileW")) return reinterpret_cast<uintptr_t>(&create_file_w); }
+    if (kernel || file) { if (!strcmp(name, "CreateFileA") || !strcmp(name, "CreateFileFromAppA")) return reinterpret_cast<uintptr_t>(&create_file_a); }
+    if (kernel || file) { if (!strcmp(name, "CreateFileW") || !strcmp(name, "CreateFileFromAppW")) return reinterpret_cast<uintptr_t>(&create_file_w); }
+    if (kernel || file) { if (!strcmp(name, "CreateDirectoryFromAppW")) return reinterpret_cast<uintptr_t>(&::CreateDirectoryW); }
+    if (kernel || file) { if (!strcmp(name, "MoveFileFromAppW")) return reinterpret_cast<uintptr_t>(&move_file_from_app_w); }
+    if (kernel || file) { if (!strcmp(name, "ReplaceFileFromAppW")) return reinterpret_cast<uintptr_t>(&::ReplaceFileW); }
     if (kernel || file) { if (!strcmp(name, "ReadFile")) return reinterpret_cast<uintptr_t>(&read_file); }
     if (kernel || file) { if (!strcmp(name, "WriteFile")) return reinterpret_cast<uintptr_t>(&write_file); }
     if (kernel || file) { K32_FILE(FlushFileBuffers); }
