@@ -3,7 +3,8 @@
 #include <windows.h>
 
 static void fail(unsigned code) { ExitProcess(code); }
-static LRESULT CALLBACK gdi_window_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) { (void)window; (void)message; (void)wp; (void)lp; return 0; }
+static unsigned custom_messages;
+static LRESULT CALLBACK gdi_window_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) { (void)window; (void)wp; (void)lp; if(message==WM_APP+7){++custom_messages;PostQuitMessage(0);}return 0; }
 void WINAPI entry(void) {
     WNDCLASSEXA wc = {0}; wc.cbSize=sizeof(wc); wc.lpfnWndProc=gdi_window_proc; wc.lpszClassName="X86GDIWindow";
     if (!RegisterClassExA(&wc)) fail(1);
@@ -67,11 +68,53 @@ void WINAPI entry(void) {
     if (StretchDIBits(dst,0,0,2,2,0,0,2,2,src_bits,&info,DIB_RGB_COLORS,SRCCOPY) != (int)GDI_ERROR ||
         SetDIBitsToDevice(dst,0,0,2,2,0,0,0,2,src_bits,&info,DIB_RGB_COLORS) != (int)GDI_ERROR) fail(10);
     if (GetObjectW(db, sizeof(bm), &bm) != sizeof(bm)) fail(11);
-    if (!SelectObject(dst, old_brush) || !SelectObject(dst, old_pen) || !SelectObject(src, old_src) || !SelectObject(dst, old_dst) || !DeleteObject(sb) || !DeleteObject(db) || !DeleteObject(bitfield) || !DeleteObject(brush) || !DeleteObject(pen) || !DeleteDC(src) || !DeleteDC(dst) || !ReleaseDC(window,window_dc) || !DestroyWindow(window)) fail(12);
+    if (!SelectObject(dst, old_brush) || !SelectObject(dst, old_pen) || !SelectObject(src, old_src) || !SelectObject(dst, old_dst) || !DeleteObject(sb) || !DeleteObject(db) || !DeleteObject(bitfield) || !DeleteObject(brush) || !DeleteObject(pen) || !DeleteDC(src) || !DeleteDC(dst) || !ReleaseDC(window,window_dc)) fail(12);
     if (CreateFontIndirectW(NULL) != NULL || CreateFontIndirectA(NULL) != NULL ||
         CreateFontW(0,0,0,0,0,0,0,0,0,0,0,0,0,0) != NULL ||
         CreateFontA(0,0,0,0,0,0,0,0,0,0,0,0,0,0) != NULL || GetTextMetricsW(NULL, NULL) ||
         GetTextMetricsA(NULL, NULL) || GetTextExtentPoint32W(NULL, L"x", 1, NULL) ||
         GetTextExtentPoint32A(NULL, "x", 1, NULL) || TextOutW(NULL,0,0,L"x",1) || TextOutA(NULL,0,0,"x",1)) fail(13);
+    RECT rect = {0,0,10,10}; POINT point = {1,2}; MSG msg = {0}; DWORD process_id = 0;
+    if (ShowWindow(window, SW_SHOW)) fail(141);
+    if (!UpdateWindow(window)) fail(142);
+    if (!SetWindowPos(window,NULL,0,0,10,10,0)) fail(143);
+    if (!MoveWindow(window,0,0,10,10,FALSE)) fail(144);
+    if (!GetClientRect(window,&rect) || rect.right<=0 || rect.bottom<=0 || !GetWindowRect(window,&rect)) fail(142);
+    if (!AdjustWindowRect(&rect,WS_OVERLAPPEDWINDOW,FALSE) || !AdjustWindowRectEx(&rect,WS_OVERLAPPEDWINDOW,FALSE,0) || !ClientToScreen(window,&point) || !ScreenToClient(window,&point)) fail(143);
+    if (!SetWindowTextA(window,"title") || !SetWindowTextW(window,L"title") || GetWindowLongA(window,GWL_STYLE)!=WS_OVERLAPPEDWINDOW || GetWindowLongW(window,GWL_STYLE)!=WS_OVERLAPPEDWINDOW ||
+        SetWindowLongA(window,GWL_STYLE,WS_VISIBLE)!=WS_OVERLAPPEDWINDOW || GetWindowLongA(window,GWL_STYLE)!=WS_VISIBLE || SetWindowLongW(window,GWL_STYLE,WS_OVERLAPPEDWINDOW)!=WS_VISIBLE) fail(144);
+    if (!LoadCursorA(NULL,MAKEINTRESOURCEA(32512)) || !LoadCursorW(NULL,MAKEINTRESOURCEW(32512)) || SetCursor(NULL) || ShowCursor(TRUE) != -1 || !ClipCursor(NULL) || !GetCursorPos(&point) || !LoadIconA(NULL,MAKEINTRESOURCEA(32512)) || !LoadIconW(NULL,MAKEINTRESOURCEW(32512))) fail(145);
+    if (GetForegroundWindow()) fail(146);
+    if (!SetForegroundWindow(window)) fail(147);
+    if (SetFocus(window)) fail(148);
+    if (GetFocus()!=window) fail(149);
+    if (GetActiveWindow()!=window) fail(150);
+    if (!IsWindowVisible(window)) fail(151);
+    if (IsIconic(window)) fail(152);
+    if (PeekMessageA(&msg,window,0,0,PM_REMOVE) || PeekMessageW(&msg,window,0,0,PM_REMOVE) || !PostMessageA(window,WM_APP+7,0,0)) fail(147);
+    while(GetMessageA(&msg,window,0,0)>0) DispatchMessageA(&msg);
+    if(custom_messages!=1 || msg.message!=WM_QUIT || GetMessageA(&msg,window,0,0)!=0 ||
+        TranslateMessage(&msg) || DispatchMessageA(&msg) ||
+        !PostMessageW(window,WM_APP,0,0) || (SendMessageA(window,WM_APP,0,0),0) || (SendMessageW(window,WM_APP,0,0),0) ||
+        DefWindowProcA(window,WM_APP,0,0) || DefWindowProcW(window,WM_APP,0,0) ||
+        GetWindowTextA(window,(LPSTR)&rect,sizeof(rect)) || GetWindowTextW(window,(LPWSTR)&rect,sizeof(rect)) ||
+        GetWindowTextLengthA(window) || GetWindowTextLengthW(window) || GetKeyState(VK_RETURN) ||
+        GetAsyncKeyState(VK_RETURN) || GetKeyNameTextA(0,(LPSTR)&rect,sizeof(rect)) ||
+        GetKeyNameTextW(0,(LPWSTR)&rect,sizeof(rect)) || GetKeyboardType(0) || MapVirtualKeyA(0,MAPVK_VK_TO_VSC) ||
+        MapVirtualKeyW(0,MAPVK_VK_TO_VSC) || GetWindowThreadProcessId(window,&process_id) || GetParent(window) ||
+        GetDesktopWindow() || GetDlgItem(window,1) || IsWindow(window)) fail(14);
+    if (AllowSetForegroundWindow(0) || CallNextHookEx(NULL,0,0,0)) fail(17);
+    if (DialogBoxParamW(NULL,NULL,window,NULL,0) != -1 || EndDialog(window,0)) fail(18);
+    if (GetMonitorInfoA(NULL,NULL) || GetMonitorInfoW(NULL,NULL)) fail(19);
+    if (GetRawInputData(NULL,0,NULL,NULL,0) != (UINT)-1) fail(201);
+    if (GetWindowLongPtrW(window,GWL_STYLE)!=WS_OVERLAPPEDWINDOW) fail(202);
+    if (LoadStringW(NULL,1,(LPWSTR)&rect,sizeof(rect))) fail(203);
+    if (MapWindowPoints(window,NULL,&point,1)) fail(21);  /* MonitorFrom* are real display routes (#319) */
+    if (MsgWaitForMultipleObjectsEx(0,NULL,0,0,0) != WAIT_FAILED || OffsetRect(&rect,0,0)) fail(22);
+    PostQuitMessage(0);
+    if (GetLastError() != ERROR_CALL_NOT_IMPLEMENTED) fail(15);
+    if (MessageBoxA(window,"route test","title",MB_OK) != IDOK ||
+        MessageBoxW(window,L"route test",L"title",MB_OK) != IDOK) fail(16);
+    if(!DestroyWindow(window))fail(23);
     ExitProcess(0);
 }

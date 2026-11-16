@@ -70,6 +70,13 @@ struct Host {
         uint32_t ex_style = 0, style = 0, x = 0, y = 0, width = 0, height = 0;
         uintptr_t parent = 0, menu = 0, instance = 0;
     };
+    struct WindowCall {
+        std::string name;
+        uintptr_t args[8]{};
+        std::vector<uint8_t> input, output;
+        uintptr_t result = 0;
+        bool supported = false;
+    };
     struct GlMap { uint32_t address = 0, size = 0, target = 0; uintptr_t offset = 0; bool writable = false; };
     std::string out, err;                         // captured stdout/stderr bytes
     std::function<void(const std::string&)> tee;  // optional live sink
@@ -86,9 +93,13 @@ struct Host {
     std::function<bool(uintptr_t)> destroy_window;
     std::function<uintptr_t(uintptr_t)> get_dc;
     std::function<bool(uintptr_t, uintptr_t)> release_dc;
-    std::map<uint32_t, uintptr_t> window_handles, dc_handles, gl_contexts;
+    std::function<void(WindowCall&)> window_call;
+    std::map<uint32_t, uintptr_t> window_handles, dc_handles, gl_contexts, user_handles;
+    std::map<std::u16string, uint32_t> window_class_procs;
+    std::map<uint32_t, uint32_t> window_procs;
+    std::map<uint32_t, std::map<int32_t, uint32_t>> window_longs;
     std::map<uint32_t, GlMap> gl_maps;
-    uint32_t gl_handle_serial = 0xE0000000u, window_handle_serial = 0xD0000000u, gl_map_next = 0x70000000u;
+    uint32_t gl_handle_serial = 0xE0000000u, window_handle_serial = 0xD0000000u, user_handle_serial = 0xC0000000u, gl_map_next = 0x70000000u;
     uint32_t vertex_array = 0, gl_array_buffer = 0, gl_element_array_buffer = 0;
     std::function<uintptr_t(bool, uint32_t, uintptr_t*)> d3d9_factory;
     std::function<uintptr_t(uint32_t)> d3d9_window;
@@ -271,6 +282,189 @@ inline void register_win32(Registry& r, Host& h) {
         c.mem.w32(c.fs_base + 0x34, 120);  // ERROR_CALL_NOT_IMPLEMENTED on this partition
         return 0;
     });
+    // Routes registered earlier with a real implementation (display, keyboard and
+    // monitor routes) win over this batch's fail-closed stubs.
+    auto registered = [&r](const char* name) {
+        std::string key(name); for (auto& ch : key) ch = char(tolower((unsigned char)ch));
+        return r.map.count({"user32.dll", key}) != 0;
+    };
+    auto unavailable = [&r, &h, count, registered](const char* name, unsigned argc, uint32_t result = 0) {
+        if (registered(name)) return;
+        r.add("user32.dll", name, Conv::Stdcall, argc, [&h, count, name, result](Cpu& c) -> uint32_t {
+            count(name);
+            c.mem.w32(c.fs_base + 0x34, 120);  // ERROR_CALL_NOT_IMPLEMENTED: no host record operation
+            auto& logged=h.calls[std::string("unsupported:")+name];if(!logged++){const std::string line=std::string("x86 user32 unsupported: ")+name+"\n";h.err+=line;if(h.tee)h.tee(line);}
+            return result;
+        });
+    };
+    auto native_window = [&h](uint32_t token) -> uintptr_t {
+        if (!token) return 0;
+        auto it = h.window_handles.find(token); return it == h.window_handles.end() ? 0 : it->second;
+    };
+    auto guest_window = [&h](uintptr_t native) -> uint32_t { if(!native)return 0;for(const auto& item:h.window_handles)if(item.second==native)return item.first;return 0; };
+    auto user_handle = [&h](uintptr_t native) -> uint32_t { if(!native)return 0;for(const auto& item:h.user_handles)if(item.second==native)return item.first;if(++h.user_handle_serial<0xC0000000u)h.user_handle_serial=0xC0000000u;h.user_handles[h.user_handle_serial]=native;return h.user_handle_serial; };
+    auto call_window = [&h](Cpu& c, const char* name, std::initializer_list<uintptr_t> args,
+                                   const std::vector<uint8_t>& input = {}, size_t output_size = 0) {
+        Host::WindowCall q{}; q.name = name; size_t i = 0; for (auto a : args) q.args[i++] = a;
+        q.input = input; q.output.resize(output_size); if (h.window_call) h.window_call(q);
+        if (!q.supported) {
+            c.mem.w32(c.fs_base + 0x34, 120);
+            auto& logged = h.calls[std::string("unsupported:") + name];
+            if (!logged++) { const std::string line = std::string("x86 user32 unsupported: ") + name + "\n"; h.err += line; if (h.tee) h.tee(line); }
+        }
+        return q;
+    };
+    auto guest_rect = [](Cpu& c, uint32_t address) { return c.mem.read_bytes(address, 16); };
+    auto guest_point = [](Cpu& c, uint32_t address) { return c.mem.read_bytes(address, 8); };
+    auto read_window_wstr = [](Cpu& c, uint32_t address) { std::u16string s; for(uint32_t i=0;i<32768;++i){uint16_t ch=uint16_t(c.mem.r(address+i*2,2));if(!ch)return s;s.push_back(char16_t(ch));}throw Fault(FaultKind::AccessViolation,c.eip,address,"unterminated guest UTF-16 string"); };
+    auto call_wndproc = [&h](Cpu& c, uint32_t token, uint32_t message, uint32_t wp, uint32_t lp) -> uint32_t {
+        auto p = h.window_procs.find(token); return p == h.window_procs.end() || !p->second ? 0 : c.call(p->second, {token, message, wp, lp});
+    };
+    auto window_route = [&](const char* name, unsigned argc, const char* native_name = nullptr) {
+        if (registered(name)) return;
+        r.add("user32.dll", name, Conv::Stdcall, argc, [&h, count, native_window, guest_window, user_handle, call_window, guest_rect, guest_point, call_wndproc, read_window_wstr, name, native_name, argc](Cpu& c) -> uint32_t {
+            count(name);
+            const bool first_hwnd = !strcmp(name,"ShowWindow")||!strcmp(name,"UpdateWindow")||!strcmp(name,"SetWindowPos")||!strcmp(name,"MoveWindow")||!strcmp(name,"GetClientRect")||!strcmp(name,"GetWindowRect")||!strcmp(name,"ClientToScreen")||!strcmp(name,"ScreenToClient")||!strcmp(name,"SetWindowTextA")||!strcmp(name,"SetWindowTextW")||!strcmp(name,"GetWindowLongA")||!strcmp(name,"GetWindowLongW")||!strcmp(name,"SetWindowLongA")||!strcmp(name,"SetWindowLongW")||!strcmp(name,"IsWindowVisible")||!strcmp(name,"IsIconic")||!strcmp(name,"SetFocus")||!strcmp(name,"SetForegroundWindow")||!strcmp(name,"PostMessageA")||!strcmp(name,"PostMessageW")||!strcmp(name,"SendMessageA")||!strcmp(name,"SendMessageW")||!strcmp(name,"DefWindowProcA")||!strcmp(name,"DefWindowProcW");
+            const uint32_t token = argc&&first_hwnd ? c.arg(0) : 0; uintptr_t hwnd = native_window(token);
+            auto bad_window = [&]() { c.mem.w32(c.fs_base + 0x34, 6); return uint32_t(0); };
+            if (token && !hwnd) return bad_window();
+            if (!strcmp(name,"GetWindowLongA") || !strcmp(name,"GetWindowLongW")) {
+                int32_t index=int32_t(c.arg(1));auto& values=h.window_longs[token];if(index==-4||index==-21){auto it=values.find(index);return it==values.end()?0u:it->second;}
+                auto q=call_window(c,name,{hwnd,uintptr_t(index)});return uint32_t(q.result);
+            }
+            if (!strcmp(name,"SetWindowLongA") || !strcmp(name,"SetWindowLongW")) {
+                int32_t index=int32_t(c.arg(1));auto& values=h.window_longs[token];if(index==-4||index==-21){uint32_t old=values[index];values[index]=c.arg(2);if(index==-4)h.window_procs[token]=c.arg(2);return old;}
+                auto q=call_window(c,name,{hwnd,uintptr_t(index),c.arg(2)});values[index]=c.arg(2);return uint32_t(q.result);
+            }
+            if (!strcmp(name,"GetForegroundWindow") || !strcmp(name,"GetFocus") || !strcmp(name,"GetActiveWindow")) {
+                auto q=call_window(c,name,{});return q.supported?guest_window(q.result):0;
+            }
+            if (!strcmp(name,"SetFocus")) { auto q=call_window(c,name,{hwnd});return guest_window(q.result); }
+            if (!strcmp(name,"SetForegroundWindow")) { auto q=call_window(c,name,{hwnd});return uint32_t(q.result); }
+            if (!strcmp(name,"LoadCursorA") || !strcmp(name,"LoadCursorW") || !strcmp(name,"LoadIconA") || !strcmp(name,"LoadIconW")) {
+                const bool wide=name[strlen(name)-1]=='W';uint32_t resource=c.arg(1);std::vector<uint8_t> input;
+                if(resource>0xffffu){if(wide){auto s=read_window_wstr(c,resource);input.resize((s.size()+1)*2);memcpy(input.data(),s.data(),s.size()*2);}else{auto s=c.mem.read_cstr(resource,32768);input.assign(s.begin(),s.end());input.push_back(0);}}
+                const char* op=native_name?native_name:name;auto q=call_window(c,op,{c.arg(0),resource>0xffffu?0u:resource},input);return q.supported?user_handle(q.result):0;
+            }
+            if (!strcmp(name,"SetCursor")) { uint32_t t=c.arg(0);uintptr_t native=0;if(t){auto it=h.user_handles.find(t);if(it==h.user_handles.end()){c.mem.w32(c.fs_base+0x34,6);return 0;}native=it->second;}auto q=call_window(c,name,{native});return q.supported?user_handle(q.result):0; }
+            if (!strcmp(name,"PostQuitMessage")) { auto q = call_window(c,name,{c.arg(0)}); return uint32_t(q.result); }
+            if (!strcmp(name,"SendMessageA") || !strcmp(name,"SendMessageW")) return call_wndproc(c,token,c.arg(1),c.arg(2),c.arg(3));
+            if (!strcmp(name,"DefWindowProcA") || !strcmp(name,"DefWindowProcW")) {
+                auto q=call_window(c,name,{hwnd,c.arg(1),c.arg(2),c.arg(3)}); return uint32_t(q.result);
+            }
+            if (!strcmp(name,"PeekMessageA") || !strcmp(name,"PeekMessageW") || !strcmp(name,"GetMessageA") || !strcmp(name,"GetMessageW")) {
+                const bool get = name[0]=='G'; const uint32_t out=c.arg(0), filter=c.arg(1); uintptr_t native_filter=native_window(filter);
+                if(filter&&!native_filter)return uint32_t(-1);
+                const size_t size=32; auto q=call_window(c,name,{uintptr_t(out),native_filter,c.arg(2),c.arg(3),get?0u:c.arg(4)}, {},size);
+                if(q.supported && q.result && q.output.size()>=size) {
+                    uintptr_t native_hwnd=0;uint32_t guest_hwnd=0;memcpy(&native_hwnd,q.output.data(),sizeof(native_hwnd));
+                    for(const auto& item:h.window_handles)if(item.second==native_hwnd){guest_hwnd=item.first;break;}
+                    std::vector<uint8_t> guest(28);memcpy(guest.data(),&guest_hwnd,4);memcpy(guest.data()+4,q.output.data()+8,24);c.mem.write_bytes(out,guest.data(),uint32_t(guest.size()));
+                }
+                return uint32_t(q.result);
+            }
+            if (!strcmp(name,"DispatchMessageA") || !strcmp(name,"DispatchMessageW")) {
+                const uint32_t address=c.arg(0), w=c.mem.r32(address), msg=c.mem.r32(address+4), wp=c.mem.r32(address+8), lp=c.mem.r32(address+12);
+                if(msg==0x0012u)return 0;
+                return call_wndproc(c,w,msg,wp,lp);
+            }
+            if (!strcmp(name,"TranslateMessage")) {
+                const uint32_t a=c.arg(0); auto q=call_window(c,name,{native_window(c.mem.r32(a)),c.mem.r32(a+4),c.mem.r32(a+8),c.mem.r32(a+12)}); return uint32_t(q.result);
+            }
+            uintptr_t a[8]{}; for(unsigned i=0;i<argc;++i) a[i]=c.arg(i);
+            if(first_hwnd) a[0]=hwnd;
+            if(!strcmp(name,"SetWindowPos")&&a[1]){uintptr_t after=native_window(uint32_t(a[1]));if(!after)return bad_window();a[1]=after;}
+            std::vector<uint8_t> bytes; size_t out_size=0; uint32_t output_address=0;
+            if(!strcmp(name,"GetClientRect")||!strcmp(name,"GetWindowRect")){out_size=16;output_address=uint32_t(a[1]);}
+            else if(!strcmp(name,"ClientToScreen")||!strcmp(name,"ScreenToClient")){out_size=8;output_address=uint32_t(a[1]);bytes=guest_point(c,output_address);}
+            else if(!strcmp(name,"AdjustWindowRect")||!strcmp(name,"AdjustWindowRectEx")){out_size=16;output_address=uint32_t(a[0]);bytes=guest_rect(c,output_address);a[0]=0;}
+            else if(!strcmp(name,"GetCursorPos")){out_size=8;output_address=uint32_t(a[0]);a[0]=0;}
+            else if(!strcmp(name,"ClipCursor")){if(a[0])bytes=guest_rect(c,uint32_t(a[0]));a[0]=0;}
+            else if(!strcmp(name,"SetWindowTextA")||!strcmp(name,"SetWindowTextW")) {
+                if(a[1]) { if(!strcmp(name,"SetWindowTextW")){auto s=read_window_wstr(c,uint32_t(a[1]));bytes.resize((s.size()+1)*2);memcpy(bytes.data(),s.data(),s.size()*2);}else{auto s=c.mem.read_cstr(uint32_t(a[1]),32768);bytes.assign(s.begin(),s.end());bytes.push_back(0);} }
+                a[1]=0;
+            }
+            const char* operation=native_name?native_name:name;
+            if(!strcmp(name,"GetClientRect")||!strcmp(name,"GetWindowRect")||!strcmp(name,"ClientToScreen")||!strcmp(name,"ScreenToClient")) a[1]=0;
+            auto q=call_window(c,operation,{a[0],a[1],a[2],a[3],a[4],a[5],a[6]},bytes,out_size);
+            if(q.supported && out_size && q.output.size()>=out_size) c.mem.write_bytes(output_address,q.output.data(),uint32_t(out_size));
+            return uint32_t(q.result);
+        });
+    };
+    window_route("ShowWindow",2); window_route("UpdateWindow",1); window_route("SetWindowPos",7); window_route("MoveWindow",6);
+    window_route("GetClientRect",2); window_route("GetWindowRect",2); window_route("AdjustWindowRect",3); window_route("AdjustWindowRectEx",4);
+    window_route("ClientToScreen",2); window_route("ScreenToClient",2); window_route("SetWindowTextA",2); window_route("SetWindowTextW",2);
+    window_route("GetWindowLongA",2); window_route("GetWindowLongW",2); window_route("SetWindowLongA",3); window_route("SetWindowLongW",3);
+    window_route("LoadCursorA",2); window_route("LoadCursorW",2); window_route("SetCursor",1); window_route("ShowCursor",1); window_route("ClipCursor",1); window_route("GetCursorPos",1);
+    window_route("LoadIconA",2); window_route("LoadIconW",2); window_route("GetForegroundWindow",0); window_route("SetForegroundWindow",1);
+    window_route("SetFocus",1); window_route("GetFocus",0); window_route("GetActiveWindow",0); window_route("IsWindowVisible",1); window_route("IsIconic",1);
+    window_route("PeekMessageA",5); window_route("PeekMessageW",5); window_route("GetMessageA",4); window_route("GetMessageW",4);
+    window_route("TranslateMessage",1); window_route("DispatchMessageA",1); window_route("DispatchMessageW",1); window_route("PostQuitMessage",1);
+    window_route("PostMessageA",4); window_route("PostMessageW",4); window_route("SendMessageA",4); window_route("SendMessageW",4); window_route("DefWindowProcA",4); window_route("DefWindowProcW",4);
+    // Other frequent user32 imports in the ranked gap reports. These remain
+    // explicit unsupported results until their input/output contracts can be
+    // backed by the UWP record layer.
+    unavailable("GetWindowTextA", 3);
+    unavailable("GetWindowTextW", 3);
+    unavailable("GetWindowTextLengthA", 1);
+    unavailable("GetWindowTextLengthW", 1);
+    unavailable("GetKeyState", 1);
+    unavailable("GetAsyncKeyState", 1);
+    unavailable("GetKeyboardState", 1);
+    unavailable("GetKeyNameTextA", 3);
+    unavailable("GetKeyNameTextW", 3);
+    unavailable("GetKeyboardType", 1);
+    unavailable("MapVirtualKeyA", 2);
+    unavailable("MapVirtualKeyW", 2);
+    unavailable("GetWindowThreadProcessId", 2);
+    unavailable("GetParent", 1);
+    unavailable("GetDesktopWindow", 0);
+    unavailable("GetDlgItem", 2);
+    unavailable("IsWindow", 1);
+    unavailable("AllowSetForegroundWindow", 1);
+    unavailable("CallNextHookEx", 4);
+    unavailable("DialogBoxParamW", 5, uint32_t(-1));
+    unavailable("EndDialog", 2);
+    unavailable("GetMonitorInfoA", 2);
+    unavailable("GetMonitorInfoW", 2);
+    unavailable("GetRawInputData", 5, uint32_t(-1));
+    unavailable("GetWindowLongPtrW", 2);
+    unavailable("LoadStringW", 4);
+    unavailable("MapWindowPoints", 4);
+    unavailable("MonitorFromRect", 2);
+    unavailable("MonitorFromWindow", 2);
+    unavailable("MsgWaitForMultipleObjectsEx", 5, uint32_t(-1));
+    unavailable("OffsetRect", 3);
+    auto message_box = [&r, &h, count](const char* name, bool wide) {
+        r.add("user32.dll", name, Conv::Stdcall, 4, [&h, count, name, wide](Cpu& c) -> uint32_t {
+            count(name);
+            auto read_wide = [&c](uint32_t address) {
+                std::u16string text;
+                if (!address) return text;
+                for (uint32_t i = 0; i < 32768; ++i) {
+                    uint16_t ch = uint16_t(c.mem.r(address + i * 2, 2));
+                    if (!ch) return text;
+                    text.push_back(char16_t(ch));
+                }
+                throw Fault(FaultKind::AccessViolation, c.eip, address, "unterminated guest UTF-16 string");
+            };
+            const uint32_t text_address = c.arg(1), title_address = c.arg(2);
+            std::u16string text, title;
+            if (wide) { text = read_wide(text_address); title = read_wide(title_address); }
+            else {
+                const std::string a = text_address ? c.mem.read_cstr(text_address, 32768) : std::string();
+                const std::string b = title_address ? c.mem.read_cstr(title_address, 32768) : std::string();
+                text.assign(a.begin(), a.end()); title.assign(b.begin(), b.end());
+            }
+            std::string line = "x86 MessageBox" + std::string(wide ? "W: " : "A: ");
+            line.append(title.begin(), title.end()); line += ": "; line.append(text.begin(), text.end()); line += "\n";
+            h.out += line;
+            if (h.tee) h.tee(line);
+            return 1;  // IDOK: Play logs rather than opening a desktop dialog.
+        });
+    };
+    message_box("MessageBoxA", false);
+    message_box("MessageBoxW", true);
     r.add("user32.dll", "GetDoubleClickTime", Conv::Stdcall, 0, [count](Cpu&) -> uint32_t {
         count("GetDoubleClickTime");
 #if defined(_WIN32)
@@ -346,7 +540,8 @@ inline void register_gl(Registry& r, Host& h) {
         if (c.mem.r32(wc) < 48 || !h.register_window_class) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
         const uint32_t name = c.mem.r32(wc + 40);
         if (!name) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
-        return h.register_window_class(read_astr(c, name)) ? 1u : 0u;
+        auto cls=read_astr(c,name); uint32_t proc=c.mem.r32(wc+8); h.window_class_procs[cls]=proc;
+        return h.register_window_class(cls) ? 1u : 0u;
     });
     r.add("user32.dll", "CreateWindowExA", Conv::Stdcall, 12, [&h, count, read_astr, map_window, window](Cpu& c) -> uint32_t {
         count("CreateWindowExA");
@@ -356,14 +551,15 @@ inline void register_gl(Registry& r, Host& h) {
         q.style = c.arg(3); q.x = c.arg(4); q.y = c.arg(5); q.width = c.arg(6); q.height = c.arg(7);
         q.parent = c.arg(8) ? window(c.arg(8)) : 0; q.menu = c.arg(9); q.instance = c.arg(10);
         if ((c.arg(8) && !q.parent) || !q.class_name.size()) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
-        return map_window(h.create_window(q));
+        uint32_t token=map_window(h.create_window(q)); if(token){h.window_procs[token]=h.window_class_procs[q.class_name];h.window_longs[token][ -4 ]=h.window_procs[token];} return token;
     });
     r.add("user32.dll", "RegisterClassExW", Conv::Stdcall, 1, [&h, count, read_wstr](Cpu& c) -> uint32_t {
         count("RegisterClassExW"); uint32_t wc = c.arg(0);
         if (c.mem.r32(wc) < 48 || !h.register_window_class) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
         const uint32_t name = c.mem.r32(wc + 40);
         if (!name) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
-        return h.register_window_class(read_wstr(c, name)) ? 1u : 0u;
+        auto cls=read_wstr(c,name); uint32_t proc=c.mem.r32(wc+8); h.window_class_procs[cls]=proc;
+        return h.register_window_class(cls) ? 1u : 0u;
     });
     r.add("user32.dll", "CreateWindowExW", Conv::Stdcall, 12, [&h, count, read_wstr, map_window, window](Cpu& c) -> uint32_t {
         count("CreateWindowExW");
@@ -373,12 +569,12 @@ inline void register_gl(Registry& r, Host& h) {
         q.style = c.arg(3); q.x = c.arg(4); q.y = c.arg(5); q.width = c.arg(6); q.height = c.arg(7);
         q.parent = c.arg(8) ? window(c.arg(8)) : 0; q.menu = c.arg(9); q.instance = c.arg(10);
         if ((c.arg(8) && !q.parent) || !q.class_name.size()) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
-        return map_window(h.create_window(q));
+        uint32_t token=map_window(h.create_window(q)); if(token){h.window_procs[token]=h.window_class_procs[q.class_name];h.window_longs[token][ -4 ]=h.window_procs[token];} return token;
     });
-    r.add("user32.dll", "DestroyWindow", Conv::Stdcall, 1, [&h, count, window](Cpu& c) -> uint32_t {
+    r.add("user32.dll", "DestroyWindow", Conv::Stdcall, 1, [&h, count](Cpu& c) -> uint32_t {
         count("DestroyWindow"); uint32_t token = c.arg(0); auto it = h.window_handles.find(token);
         if (it == h.window_handles.end() || !h.destroy_window || !h.destroy_window(it->second)) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
-        h.window_handles.erase(it); return 1;
+        h.window_handles.erase(it);h.window_procs.erase(token);h.window_longs.erase(token);return 1;
     });
     r.add("user32.dll", "GetDC", Conv::Stdcall, 1, [&h, alloc_handle, count, window](Cpu& c) -> uint32_t {
         count("GetDC"); uint32_t token = c.arg(0); uintptr_t native = token ? window(token) : 0;

@@ -1259,6 +1259,33 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         host.destroy_window=[destroy_window](uintptr_t hwnd){return destroy_window&&destroy_window(reinterpret_cast<HWND>(hwnd))!=0;};
         host.get_dc=[get_dc](uintptr_t hwnd)->uintptr_t{return get_dc?reinterpret_cast<uintptr_t>(get_dc(reinterpret_cast<HWND>(hwnd))):0;};
         host.release_dc=[release_dc](uintptr_t hwnd,uintptr_t hdc){return release_dc&&release_dc(reinterpret_cast<HWND>(hwnd),reinterpret_cast<HDC>(hdc))!=0;};
+        host.window_call=[](x86::Host::WindowCall& q) {
+            auto p=records?GetProcAddress(records,q.name.c_str()):nullptr;
+            auto result=[&](auto value){q.result=uintptr_t(value);q.supported=true;};
+            auto bytes=[&](const void* source,size_t size){q.output.resize(size);memcpy(q.output.data(),source,size);};
+            if(q.name=="ShowWindow"){using Fn=BOOL(WINAPI*)(HWND,int);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0],int(q.args[1])));}
+            else if(q.name=="UpdateWindow"){using Fn=BOOL(WINAPI*)(HWND);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0]));}
+            else if(q.name=="SetWindowPos"){using Fn=BOOL(WINAPI*)(HWND,HWND,int,int,int,int,UINT);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0],(HWND)q.args[1],int(q.args[2]),int(q.args[3]),int(q.args[4]),int(q.args[5]),UINT(q.args[6])));}
+            else if(q.name=="MoveWindow"){using Fn=BOOL(WINAPI*)(HWND,int,int,int,int,BOOL);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0],int(q.args[1]),int(q.args[2]),int(q.args[3]),int(q.args[4]),BOOL(q.args[5])));}
+            else if(q.name=="GetClientRect"||q.name=="GetWindowRect"){using Fn=BOOL(WINAPI*)(HWND,RECT*);RECT r{};if(p){BOOL ok=reinterpret_cast<Fn>(p)((HWND)q.args[0],&r);bytes(&r,sizeof(r));q.result=ok;q.supported=true;}}
+            else if(q.name=="AdjustWindowRect"||q.name=="AdjustWindowRectEx"){RECT r{};if(q.input.size()==sizeof(r)){memcpy(&r,q.input.data(),sizeof(r));if(q.name=="AdjustWindowRect"){using Fn=BOOL(WINAPI*)(RECT*,DWORD,BOOL);if(p){BOOL ok=reinterpret_cast<Fn>(p)(&r,DWORD(q.args[1]),BOOL(q.args[2]));bytes(&r,sizeof(r));q.result=ok;q.supported=true;}}else{using Fn=BOOL(WINAPI*)(RECT*,DWORD,BOOL,DWORD);if(p){BOOL ok=reinterpret_cast<Fn>(p)(&r,DWORD(q.args[1]),BOOL(q.args[2]),DWORD(q.args[3]));bytes(&r,sizeof(r));q.result=ok;q.supported=true;}}}}
+            else if(q.name=="ClientToScreen"||q.name=="ScreenToClient"){POINT v{};if(q.input.size()==sizeof(v)){memcpy(&v,q.input.data(),sizeof(v));using Fn=BOOL(WINAPI*)(HWND,POINT*);if(p){BOOL ok=reinterpret_cast<Fn>(p)((HWND)q.args[0],&v);bytes(&v,sizeof(v));q.result=ok;q.supported=true;}}}
+            else if(q.name=="SetWindowTextA"||q.name=="SetWindowTextW"){if(q.name.back()=='W'){std::wstring s(q.input.size()/2,L'\0');if(!q.input.empty())memcpy(s.data(),q.input.data(),q.input.size());using Fn=BOOL(WINAPI*)(HWND,LPCWSTR);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0],s.c_str()));}else{std::string s(q.input.begin(),q.input.end());using Fn=BOOL(WINAPI*)(HWND,LPCSTR);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0],s.c_str()));}}
+            else if(q.name=="LoadCursorA"||q.name=="LoadIconA"){using Fn=HANDLE(WINAPI*)(HINSTANCE,LPCSTR);if(p)result(reinterpret_cast<Fn>(p)((HINSTANCE)q.args[0],q.input.empty()?(LPCSTR)q.args[1]:reinterpret_cast<LPCSTR>(q.input.data())));}
+            else if(q.name=="LoadCursorW"||q.name=="LoadIconW"){using Fn=HANDLE(WINAPI*)(HINSTANCE,LPCWSTR);if(p)result(reinterpret_cast<Fn>(p)((HINSTANCE)q.args[0],q.input.empty()?(LPCWSTR)q.args[1]:reinterpret_cast<LPCWSTR>(q.input.data())));}
+            else if(q.name=="SetCursor"){using Fn=HCURSOR(WINAPI*)(HCURSOR);if(p)result(reinterpret_cast<Fn>(p)((HCURSOR)q.args[0]));}
+            else if(q.name=="ShowCursor"){using Fn=int(WINAPI*)(BOOL);if(p)result(reinterpret_cast<Fn>(p)(BOOL(q.args[0])));}
+            else if(q.name=="ClipCursor"){using Fn=BOOL(WINAPI*)(const RECT*);RECT r{};if(q.input.size()==sizeof(r))memcpy(&r,q.input.data(),sizeof(r));if(p)result(reinterpret_cast<Fn>(p)(q.input.empty()?nullptr:&r));}
+            else if(q.name=="GetCursorPos"){using Fn=BOOL(WINAPI*)(POINT*);POINT v{};if(p){BOOL ok=reinterpret_cast<Fn>(p)(&v);bytes(&v,sizeof(v));q.result=ok;q.supported=true;}}
+            else if(q.name=="IsWindowVisible"||q.name=="IsIconic"||q.name=="SetForegroundWindow"){using Fn=BOOL(WINAPI*)(HWND);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0]));}
+            else if(q.name=="GetForegroundWindow"||q.name=="GetFocus"||q.name=="GetActiveWindow"){using Fn=HWND(WINAPI*)();if(p)result(reinterpret_cast<Fn>(p)());}
+            else if(q.name=="SetFocus"){using Fn=HWND(WINAPI*)(HWND);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0]));}
+            else if(q.name=="PostMessageA"||q.name=="PostMessageW"){using Fn=BOOL(WINAPI*)(HWND,UINT,WPARAM,LPARAM);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0],UINT(q.args[1]),WPARAM(q.args[2]),LPARAM(q.args[3])));}
+            else if(q.name=="PostQuitMessage"){using Fn=void(WINAPI*)(int);if(p){reinterpret_cast<Fn>(p)(int(q.args[0]));q.result=0;q.supported=true;}}
+            else if(q.name=="PeekMessageA"||q.name=="PeekMessageW"||q.name=="GetMessageA"||q.name=="GetMessageW"){MSG m{};BOOL ok=FALSE;if(q.name.find("Peek")==0){using Fn=BOOL(WINAPI*)(MSG*,HWND,UINT,UINT,UINT);if(p)ok=reinterpret_cast<Fn>(p)(&m,(HWND)q.args[1],UINT(q.args[2]),UINT(q.args[3]),UINT(q.args[4]));}else{using Fn=BOOL(WINAPI*)(MSG*,HWND,UINT,UINT);if(p)ok=reinterpret_cast<Fn>(p)(&m,(HWND)q.args[1],UINT(q.args[2]),UINT(q.args[3]));}if(p){struct GuestMsg{uintptr_t hwnd;uint32_t message,wp,lp,time;int32_t x,y;} gm{uintptr_t(m.hwnd),m.message,uint32_t(m.wParam),uint32_t(m.lParam),m.time,m.pt.x,m.pt.y};bytes(&gm,sizeof(gm));q.result=ok;q.supported=true;}}
+            else if(q.name=="TranslateMessage"){using Fn=BOOL(WINAPI*)(const MSG*);MSG m{};if(p){m.hwnd=(HWND)q.args[0];m.message=UINT(q.args[1]);m.wParam=WPARAM(q.args[2]);m.lParam=LPARAM(q.args[3]);result(reinterpret_cast<Fn>(p)(&m));}}
+            else if(q.name=="DefWindowProcA"||q.name=="DefWindowProcW"){using Fn=LRESULT(WINAPI*)(HWND,UINT,WPARAM,LPARAM);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0],UINT(q.args[1]),WPARAM(q.args[2]),LPARAM(q.args[3])));}
+        };
         auto proc=[](const char* name)->uintptr_t {
             uintptr_t p=play_runtime::openglExport(name);
             if(!p&&mesa){p=reinterpret_cast<uintptr_t>(GetProcAddress(mesa,name));if(!p){using GetProc=PROC(WINAPI*)(LPCSTR);auto get=reinterpret_cast<GetProc>(GetProcAddress(mesa,"wglGetProcAddress"));if(get)p=reinterpret_cast<uintptr_t>(get(name));}}
