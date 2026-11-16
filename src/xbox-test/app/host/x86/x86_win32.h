@@ -130,6 +130,16 @@ inline void register_win32(Registry& r, Host& h) {
         c.mem.w32(c.fs_base + 0x34, 120);  // ERROR_CALL_NOT_IMPLEMENTED on this partition
         return 0;
     });
+    r.add("user32.dll", "GetDoubleClickTime", Conv::Stdcall, 0, [count](Cpu&) -> uint32_t {
+        count("GetDoubleClickTime");
+#if defined(_WIN32)
+        using Fn = UINT (WINAPI*)();
+        static HMODULE user = LoadLibraryExW(L"user32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        auto fn = user ? reinterpret_cast<Fn>(GetProcAddress(user, "GetDoubleClickTime")) : nullptr;
+        if (fn) return fn();
+#endif
+        return 500;  // Windows default double-click interval.
+    });
     r.add("msvcrt.dll", "strlen", Conv::Cdecl, 1, [count](Cpu& c) -> uint32_t { count("strlen"); return uint32_t(c.mem.read_cstr(c.arg(0)).size()); });
     r.add("msvcrt.dll", "qsort", Conv::Cdecl, 4, [count](Cpu& c) -> uint32_t {
         count("qsort"); uint32_t base = c.arg(0), n = c.arg(1), size = c.arg(2), cmp = c.arg(3);
