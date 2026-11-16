@@ -381,6 +381,8 @@ jobs:
         run: bash src/xbox-test/app/tests/mono-host.sh
       - name: x86 execution core (hardware-compared ALU, faults, thunks, owned i686 fixture)
         run: bash src/xbox-test/app/tests/x86-core.sh
+      - name: x86 dynamic binary translation spike (randomized interpreter comparison)
+        run: bash src/xbox-test/app/tests/x86-dbt.sh
       - name: "Play import gap summary fixture (x64 and x86)"
         run: bash src/xbox-test/app/tests/gap-summary.sh
       - name: "x86 guest surface (mingw CRT program through the interpreter: printf, heap, TLS, VirtualAlloc)"
