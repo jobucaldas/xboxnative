@@ -961,9 +961,44 @@ inline void Guest::register_all() {
     reg.add("user32.dll", "ToUnicode", Conv::Stdcall, 6, [](Cpu&) -> uint32_t { return 0; });
     reg.add("kernel32.dll", "VerSetConditionMask", Conv::Stdcall, 4, [](Cpu& c) -> uint32_t {
         uint64_t mask=uint64_t(c.arg(0))|(uint64_t(c.arg(1))<<32); uint32_t types=c.arg(2); uint8_t condition=uint8_t(c.arg(3))&7;
-        for (unsigned bit=0;bit<22;++bit) if (types&(1u<<bit)) mask|=uint64_t(condition)<<(bit*3);
+        for (unsigned bit=0;bit<22;++bit) if (types&(1u<<bit)) {
+            uint64_t field=uint64_t(7)<<(bit*3);
+            mask=(mask&~field)|(uint64_t(condition)<<(bit*3));
+        }
         c.reg[EDX]=uint32_t(mask>>32); return uint32_t(mask);
     });
+    auto verify_version_info=[this](Cpu& c)->uint32_t {
+        uint32_t p=c.arg(0),types=c.arg(1);
+        uint64_t conditions=uint64_t(c.arg(2))|(uint64_t(c.arg(3))<<32);
+        if(!p || !types){set_last_error(87);return 0;}
+        uint32_t size=mem.r32(p);
+        bool wide=size>=284;
+        if(!wide && size<156){set_last_error(87);return 0;}
+        auto check=[&](unsigned bit,uint32_t actual,uint32_t requested,bool flags=false)->bool {
+            if(!(types&(1u<<bit)))return true;
+            uint32_t condition=uint32_t((conditions>>(bit*3))&7);
+            switch(condition){
+            case 1:return actual==requested;
+            case 2:return actual>requested;
+            case 3:return actual>=requested;
+            case 4:return actual<requested;
+            case 5:return actual<=requested;
+            case 6:return flags?(actual&requested)==requested:false;
+            case 7:return flags?(actual&requested)!=0:false;
+            default:return false;
+            }
+        };
+        uint32_t major=mem.r32(p+4),minor=mem.r32(p+8),build=mem.r32(p+12),platform=mem.r32(p+16);
+        uint32_t spminor=mem.r(p+(wide?278:150),2),spmajor=mem.r(p+(wide?276:148),2);
+        uint32_t suite=mem.r(p+(wide?280:152),2),product=mem.r8(p+(wide?282:154));
+        bool matches=check(0,0,minor)&&check(1,10,major)&&check(2,19045,build)&&check(3,2,platform)&&
+            check(4,0,spminor)&&check(5,0,spmajor)&&check(6,0,suite,true)&&
+            check(7,1,product)&&check(8,0,mem.r8(p+(wide?283:155)));
+        if(!matches){set_last_error(1150);return 0;}
+        return 1;
+    };
+    reg.add("kernel32.dll", "VerifyVersionInfoA", Conv::Stdcall, 4, verify_version_info);
+    reg.add("kernel32.dll", "VerifyVersionInfoW", Conv::Stdcall, 4, verify_version_info);
     reg.add("gdi32.dll", "GetStockObject", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { int32_t n=int32_t(c.arg(0));if(!(n>=0&&n<=8)&&!(n>=10&&n<=14)&&n!=16&&n!=17)return 0;uint32_t h=0x73001000u+uint32_t(n);if(!gdi_objects.count(h)){uint32_t kind=n<=5?2u:n<=8?4u:3u,color=n==0?0x00ffffffu:n==4||n==7?0u:0u;gdi_objects[h]=GdiObject{kind,0,0,0,0,color,true,true};}return h; });
     reg.add("gdi32.dll", "CreateSolidBrush", Conv::Stdcall, 1, [this,gdi_handle](Cpu& c) -> uint32_t { uint32_t h=gdi_handle();gdi_objects[h]=GdiObject{2,0,0,0,0,c.arg(0),true};return h; });
     reg.add("gdi32.dll", "CreatePen", Conv::Stdcall, 3, [this,gdi_handle](Cpu& c) -> uint32_t { uint32_t h=gdi_handle();gdi_objects[h]=GdiObject{4,0,0,0,0,c.arg(2),true};return h; });
@@ -2201,6 +2236,12 @@ inline void Guest::register_all() {
     find_next("FindNextFileW",Host::FileCall::Kind::FindNextW,true);
     reg.add("kernel32.dll","FindClose",Conv::Stdcall,1,[this](Cpu& c)->uint32_t {
         auto it=find_handles.find(c.arg(0));if(it==find_handles.end()){set_last_error(6);return 0;}Host::FileCall q{Host::FileCall::Kind::FindClose};q.handle=it->second;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}find_handles.erase(it);return 1; });
+    reg.add("ole32.dll","CoCreateInstance",Conv::Stdcall,5,[this](Cpu& c)->uint32_t {
+        if(!c.arg(0)||!c.arg(3)||!c.arg(4)){set_last_error(87);return 0x80004003u;}
+        if(c.arg(1))return 0x80040110u;
+        mem.w32(c.arg(4),0);
+        return 0x80040154u;
+    });
     reg.add("ole32.dll","CoInitialize",Conv::Stdcall,1,[this](Cpu& c)->uint32_t {
         if(c.arg(0)) return 0x80070057u;
         uint32_t tid=mem.r32(cur_teb+0x24);if(!tid)tid=1;

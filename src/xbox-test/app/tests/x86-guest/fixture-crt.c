@@ -288,6 +288,24 @@ int main(void) {
     memset(vbuf, 0xEE, sizeof vbuf);
     *(DWORD*)vbuf = sizeof(OSVERSIONINFOA);
     check(GetVersionExA((OSVERSIONINFOA*)vbuf) != 0 && vbuf[148] == 0xEE && vbuf[159] == 0xEE);
+    DWORD version_types = VER_MAJORVERSION | VER_MINORVERSION | VER_BUILDNUMBER;
+    ULONGLONG condition_mask = VerSetConditionMask(0x8000000000000000ULL,
+        version_types, VER_GREATER_EQUAL);
+    check((condition_mask & 0x8000000000000000ULL) != 0);
+    OSVERSIONINFOEXA check_a; memset(&check_a, 0, sizeof check_a);
+    check_a.dwOSVersionInfoSize = sizeof check_a;
+    check_a.dwMajorVersion = 10; check_a.dwMinorVersion = 0; check_a.dwBuildNumber = 19045;
+    check(VerifyVersionInfoA(&check_a, version_types, condition_mask) != 0);
+    check_a.dwMajorVersion = 11;
+    SetLastError(0);
+    check(VerifyVersionInfoA(&check_a, VER_MAJORVERSION,
+        VerSetConditionMask(0, VER_MAJORVERSION, VER_EQUAL)) == 0 &&
+        GetLastError() == ERROR_OLD_WIN_VERSION);
+    OSVERSIONINFOEXW check_w; memset(&check_w, 0, sizeof check_w);
+    check_w.dwOSVersionInfoSize = sizeof check_w;
+    check_w.dwMajorVersion = 10;
+    check(VerifyVersionInfoW(&check_w, VER_MAJORVERSION,
+        VerSetConditionMask(0, VER_MAJORVERSION, VER_EQUAL)) != 0);
     /* SYSTEMTIME is eight WORDs: a 4-byte store per field would smash the next
      * one (month would read back as the year). Ranges, not exact values, so the
      * same check holds under Wine's real clock. Nothing past the 16-byte struct
