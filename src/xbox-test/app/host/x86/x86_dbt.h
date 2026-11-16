@@ -88,6 +88,8 @@ struct RuntimeBlock {
     std::vector<uint8_t> guest_bytes;
     uint32_t guest_length = 0;
     uint32_t guest_pc = 0;
+    uint8_t exit_opcode = 0;
+    RuntimeBlock* linked_target = nullptr;
 };
 
 inline uint8_t runtime_reg(unsigned guest) {

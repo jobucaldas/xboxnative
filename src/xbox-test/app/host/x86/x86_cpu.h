@@ -74,6 +74,7 @@ struct Cpu {
     bool dbt_enabled = false;
     uint64_t translated_blocks = 0, interpreted_blocks = 0;
     std::unordered_map<uint32_t, dbt::RuntimeBlock> dbt_cache;
+    std::array<dbt::RuntimeBlock*, 4> dbt_inline_cache{};
     std::unordered_set<uint32_t> dbt_unsupported;
     unsigned depth = 0;
     bool trace_fault_context = false;
@@ -109,7 +110,7 @@ struct Cpu {
         const char* value = std::getenv("X86_DBT");
         dbt_enabled = value && value[0] == '1' && value[1] == '\0' && mem.base() != nullptr;
     }
-    void clear_dbt_cache() { dbt_cache.clear(); dbt_unsupported.clear(); }
+    void clear_dbt_cache() { dbt_cache.clear(); dbt_inline_cache.fill(nullptr); dbt_unsupported.clear(); }
 
     // --- host-facing helpers (thunk handlers) ---
     uint32_t arg(unsigned i) const { return mem.r32(reg[ESP] + 4 + 4 * i); }  // valid inside a thunk handler
@@ -130,50 +131,78 @@ struct Cpu {
         return r;
     }
     void run(uint32_t stop) {
+        dbt::RuntimeBlock* chained = nullptr;
         while (!exited && eip != stop) {
             if (dbt_enabled && eip != thunks.sentinel() && !thunks.at(eip) && !dbt_unsupported.count(eip)) {
-                auto it = dbt_cache.find(eip);
-                if (it != dbt_cache.end()) {
-                    bool valid = true;
-                    for (uint32_t i = 0; i < it->second.guest_length; ++i)
-                        if (mem.fetch8(eip + i) != it->second.guest_bytes[i]) { valid = false; break; }
-                    if (!valid) { dbt_cache.erase(it); it = dbt_cache.end(); }
+                dbt::RuntimeBlock* block_ptr = chained && chained->guest_pc == eip ? chained : nullptr;
+                chained = nullptr;
+                auto it = dbt_cache.end();
+                if (!block_ptr) {
+                    for (dbt::RuntimeBlock* cached : dbt_inline_cache)
+                        if (cached && cached->guest_pc == eip) { block_ptr = cached; break; }
                 }
-                if (it == dbt_cache.end()) {
+                if (!block_ptr) it = dbt_cache.find(eip);
+                auto valid = [&](dbt::RuntimeBlock* block) {
+                    if (!block) return false;
+                    for (uint32_t i = 0; i < block->guest_length; ++i)
+                        if (mem.fetch8(eip + i) != block->guest_bytes[i]) return false;
+                    return true;
+                };
+                if (block_ptr && !valid(block_ptr)) {
+                    for (auto& candidate : dbt_cache) {
+                        if (candidate.second.linked_target == block_ptr) candidate.second.linked_target = nullptr;
+                    }
+                    for (auto& cached : dbt_inline_cache) if (cached == block_ptr) cached = nullptr;
+                    dbt_cache.erase(eip); block_ptr = nullptr;
+                }
+                if (!block_ptr && it != dbt_cache.end()) {
+                    block_ptr = &it->second;
+                    if (!valid(block_ptr)) {
+                        for (auto& candidate : dbt_cache) {
+                            if (candidate.second.linked_target == block_ptr) candidate.second.linked_target = nullptr;
+                        }
+                        for (auto& cached : dbt_inline_cache) if (cached == block_ptr) cached = nullptr;
+                        dbt_cache.erase(it); block_ptr = nullptr;
+                    }
+                }
+                if (!block_ptr) {
                     try {
                         std::vector<uint8_t> bytes;
-                        size_t pc = 0;
+                        size_t pc = 0; uint8_t last_opcode = 0;
                         while (pc < 64) {
                             while (bytes.size() <= pc + 5) bytes.push_back(mem.fetch8(eip + uint32_t(bytes.size())));
-                            uint32_t ea = 0; bool memory = false; uint8_t opcode = bytes[pc];
+                            uint32_t ea = 0; bool memory = false; uint8_t opcode = bytes[pc]; last_opcode = opcode;
                             if (!pc && (opcode == 0x74 || opcode == 0x75)) throw std::runtime_error("dispatch standalone conditional branch in interpreter");
                             size_t len;
                             try { len = dbt::runtime_instruction(bytes, pc, ea, memory); }
-                            catch (const std::runtime_error&) {
-                                if (!pc) throw;
-                                break;
-                            }
-                            if (memory && (!mem.range_accessible(ea, 4, PROT_R) ||
-                                           !mem.range_accessible(ea, 4, PROT_W))) throw std::runtime_error("DBT memory page is not RW");
+                            catch (const std::runtime_error&) { if (!pc) throw; break; }
+                            if (memory && (!mem.range_accessible(ea, 4, PROT_R) || !mem.range_accessible(ea, 4, PROT_W)))
+                                throw std::runtime_error("DBT memory page is not RW");
                             pc += len;
-                            if (opcode == 0x74 || opcode == 0x75) break;
+                            if (opcode == 0x74 || opcode == 0x75 || opcode == 0xC2 || opcode == 0xC3 || opcode == 0xE8) break;
                         }
                         if (!pc) throw std::runtime_error("DBT block has no supported instruction");
-                        bytes.resize(pc);
-                        dbt::RuntimeBlock block;
-                        block.guest_pc = eip; block.guest_length = uint32_t(pc); block.guest_bytes = bytes;
+                        bytes.resize(pc); dbt::RuntimeBlock block;
+                        block.guest_pc = eip; block.guest_length = uint32_t(pc); block.exit_opcode = last_opcode; block.guest_bytes = bytes;
                         block.code = std::make_unique<dbt::Executable>(dbt::runtime_translate(bytes, eip));
-                        it = dbt_cache.emplace(eip, std::move(block)).first;
+                        block_ptr = &dbt_cache.emplace(eip, std::move(block)).first->second;
                     } catch (const std::exception&) {
                         dbt_unsupported.insert(eip); ++interpreted_blocks; step(); continue;
                     }
                 }
-                if (executed + (*it).second.guest_length > limit) { ++interpreted_blocks; step(); continue; }
+                if (executed + block_ptr->guest_length > limit) { ++interpreted_blocks; step(); continue; }
                 dbt::RuntimeState state;
                 std::memcpy(state.reg, reg, sizeof reg); state.eip = eip; state.eflags = eflags; state.memory = mem.base();
-                uint32_t next = (*it).second.code->operator()(state);
+                uint32_t next = block_ptr->code->operator()(state);
                 std::memcpy(reg, state.reg, sizeof reg); eip = next; eflags = state.eflags;
-                executed += (*it).second.guest_length; ++translated_blocks;
+                executed += block_ptr->guest_length; ++translated_blocks;
+                bool indirect = block_ptr->exit_opcode == 0xC2 || block_ptr->exit_opcode == 0xC3 || block_ptr->exit_opcode == 0xFF || block_ptr->exit_opcode == 0x8F;
+                auto successor = dbt_cache.find(next);
+                if (successor != dbt_cache.end()) {
+                    if (indirect) dbt_inline_cache[next & 3] = &successor->second;
+                    else block_ptr->linked_target = &successor->second;
+                }
+                if (block_ptr->linked_target && block_ptr->linked_target->guest_pc == next && valid(block_ptr->linked_target)) chained = block_ptr->linked_target;
                 continue;
             }
             ++interpreted_blocks; step();
