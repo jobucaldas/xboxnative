@@ -202,6 +202,39 @@ struct Compiler {
     }
 };
 Compiler compiler;
+// Some D3D11-on-D3D12 drivers accept GenerateMips but leave the lower
+// subresources untouched. Keep the native path for every other format and
+// dimension, but make the common 32-bit 2D path deterministic for D3D10 games.
+bool generateMipsRgba8(ID3D11Device* device,ID3D11DeviceContext* context,ID3D11Resource* resource) {
+    if(!device||!context||!resource)return false;
+    D3D11_RESOURCE_DIMENSION type{};resource->GetType(&type);
+    if(type!=D3D11_RESOURCE_DIMENSION_TEXTURE2D)return false;
+    auto texture=static_cast<ID3D11Texture2D*>(resource);D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);
+    if(desc.MipLevels<2||desc.Format!=DXGI_FORMAT_R8G8B8A8_UNORM)return false;
+    D3D11_TEXTURE2D_DESC staging=desc;staging.MipLevels=1;staging.ArraySize=1;staging.Usage=D3D11_USAGE_STAGING;
+    staging.BindFlags=0;staging.CPUAccessFlags=D3D11_CPU_ACCESS_READ;staging.MiscFlags=0;
+    ID3D11Texture2D* readback=nullptr;if(FAILED(device->CreateTexture2D(&staging,nullptr,&readback)))return false;
+    unsigned char* pixels=(unsigned char*)HeapAlloc(GetProcessHeap(),0,desc.Width*desc.Height*4);bool ok=pixels!=nullptr;
+    for(UINT array=0;ok&&array<desc.ArraySize;++array) for(UINT mip=1;ok&&mip<desc.MipLevels;++mip) {
+        UINT srcW=desc.Width>>(mip-1),srcH=desc.Height>>(mip-1);
+        UINT dstW=desc.Width>>mip,dstH=desc.Height>>mip;
+        if(!srcW)srcW=1;if(!srcH)srcH=1;if(!dstW)dstW=1;if(!dstH)dstH=1;
+        D3D11_BOX box{0,0,0,srcW,srcH,1};
+        context->CopySubresourceRegion(readback,0,0,0,0,resource,D3D11CalcSubresource(mip-1,array,desc.MipLevels),&box);
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if(FAILED(context->Map(readback,0,D3D11_MAP_READ,0,&mapped))){ok=false;break;}
+        for(UINT y=0;y<dstH;++y) for(UINT x=0;x<dstW;++x) {
+            const unsigned char* a=(const unsigned char*)mapped.pData+(y*2)*mapped.RowPitch+(x*2)*4;
+            const unsigned char* b=a+4;const unsigned char* c=a+mapped.RowPitch;const unsigned char* d=c+4;
+            for(UINT channel=0;channel<4;++channel)pixels[(y*dstW+x)*4+channel]=(unsigned char)((a[channel]+b[channel]+c[channel]+d[channel]+2)/4);
+        }
+        context->Unmap(readback,0);
+        context->UpdateSubresource(resource,D3D11CalcSubresource(mip,array,desc.MipLevels),nullptr,pixels,dstW*4,0);
+    }
+    if(pixels)HeapFree(GetProcessHeap(),0,pixels);
+    readback->Release();
+    return ok;
+}
 }
 
 namespace {
@@ -721,7 +754,13 @@ struct Device : d3dshim::Base, ID3D10Device1 {
         context()->ClearDepthStencilView(behind<ID3D11DepthStencilView>(view),flags,depth,stencil);
     }
     void STDMETHODCALLTYPE GenerateMips(ID3D10ShaderResourceView* view) override {
-        context()->GenerateMips(behind<ID3D11ShaderResourceView>(view));
+        auto inner=behind<ID3D11ShaderResourceView>(view);
+        context()->GenerateMips(inner);
+        if(inner) {
+            ID3D11Resource* resource=nullptr;inner->GetResource(&resource);
+            generateMipsRgba8(device(),context(),resource);
+            if(resource)resource->Release();
+        }
     }
     void STDMETHODCALLTYPE ResolveSubresource(ID3D10Resource* dst,UINT dstSubresource,
             ID3D10Resource* src,UINT srcSubresource,DXGI_FORMAT format) override {
