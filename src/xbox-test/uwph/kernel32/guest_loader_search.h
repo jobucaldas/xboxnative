@@ -20,7 +20,8 @@ static void set_dxil_directory(const std::wstring& path) { dxilDirectory=path; }
 static bool redistributable(const std::wstring& name) {
     std::wstring key=name;for(auto& c:key)c=towlower(c);
     for(auto dll:{L"opengl32.dll",L"libgallium_wgl.dll",L"vulkan-1.dll",L"vulkan_dzn.dll",L"vulkan-null-icd.dll",L"msvcp140.dll",L"msvcp140_1.dll",L"msvcp140_2.dll",L"msvcp140_atomic_wait.dll",
-                  L"msvcp140_codecvt_ids.dll",L"concrt140.dll",L"d3d9translator.dll"}) if(key==dll) return true;
+                  L"msvcp140_codecvt_ids.dll",L"concrt140.dll",L"d3d9translator.dll",L"fna3d.dll",L"faudio.dll",
+                  L"sdl3.dll",L"libtheorafile.dll"}) if(key==dll) return true;
     return false;
 }
 // The console ships d3d11.dll and dxgi.dll but no d3d9.dll, d3d10.dll,

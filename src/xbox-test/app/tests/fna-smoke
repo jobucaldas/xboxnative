@@ -1,37 +1,50 @@
 #!/usr/bin/env bash
-# Compile an XNA 4 Game subclass against the pinned FNA ABI outputs.
+# Compile the off-device XNA Game fixture against the pinned FNA runtime.
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 fna=${1:-$root/out/fna}
+output=${2:-}
 command -v mcs >/dev/null || { echo 'missing tool: mcs (use nix shell nixpkgs#mono)' >&2; exit 2; }
 for assembly in FNA.dll Microsoft.Xna.Framework.dll Microsoft.Xna.Framework.Game.dll Microsoft.Xna.Framework.Graphics.dll; do
   [[ -f "$fna/$assembly" ]] || { echo "missing FNA output: $fna/$assembly; run src/tools/build-fna.sh" >&2; exit 2; }
 done
+for library in FNA3D.dll FAudio.dll SDL3.dll libtheorafile.dll; do
+  [[ -f "$fna/../$library" ]] || { echo "missing FNA native output: $fna/../$library; run src/tools/build-fna-native.sh" >&2; exit 2; }
+done
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fna-smoke.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 cat > "$tmp/XnaSmoke.cs" <<'CS'
+using System;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 sealed class XnaSmoke : Game
 {
     readonly GraphicsDeviceManager graphics;
     int frames;
+    public int Frames { get { return frames; } }
     public XnaSmoke() { graphics = new GraphicsDeviceManager(this); graphics.PreferredBackBufferWidth = 320; }
-    protected override void Update(GameTime time)
-    {
-        if (++frames == 3) Exit();
-        base.Update(time);
-    }
+    protected override void Update(GameTime time) { base.Update(time); }
     protected override void Draw(GameTime time)
     {
         GraphicsDevice.Clear(Color.CornflowerBlue);
         base.Draw(time);
+        if (++frames == 3) Exit();
     }
-    static void Main() { using (var game = new XnaSmoke()) game.Run(); }
+    static int Main()
+    {
+        using (var game = new XnaSmoke())
+        {
+            game.Run();
+            Console.WriteLine("FNA SMOKE draws=" + game.Frames + " clear=CornflowerBlue");
+            return game.Frames == 3 ? 42 : 43;
+        }
+    }
 }
 CS
-mcs -nologo -platform:anycpu -out:"$tmp/XnaSmoke.exe" \
+exe=${output:-$tmp/XnaSmoke.exe}
+mkdir -p "$(dirname "$exe")"
+mcs -nologo -platform:anycpu -out:"$exe" \
   -r:"$fna/FNA.dll" -r:"$fna/Microsoft.Xna.Framework.dll" \
   -r:"$fna/Microsoft.Xna.Framework.Game.dll" -r:"$fna/Microsoft.Xna.Framework.Graphics.dll" \
   "$tmp/XnaSmoke.cs"
-printf 'FNA ABI compile PASS: XNA Game subclass clears CornflowerBlue and exits after 3 frames\n'
+printf 'FNA smoke fixture compile PASS: %s\n' "$exe"

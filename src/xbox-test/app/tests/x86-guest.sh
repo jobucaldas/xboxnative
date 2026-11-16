@@ -25,7 +25,7 @@ rc32="$(dirname "$cc32")/i686-w64-mingw32-windres"
 [[ -x $rc32 ]] || { echo "x86-guest: no i686-w64-mingw32-windres" >&2; exit 1; }
 # The .rc is preprocessed, and the wrapper's preprocessor is the cross gcc.
 PATH="$(dirname "$cc32"):$PATH" "$rc32" -O coff -I "$here/x86-guest" -i "$here/x86-guest/fixture-crt.rc" -o "$tmp/fixture-crt.res"
-"$cc32" -O1 -Wall -Wextra -Werror "${extra[@]}" -Wl,--stack,0x300000 -o "$tmp/fixture-crt.exe" "$here/x86-guest/fixture-crt.c" "$tmp/fixture-crt.res" -luser32
+"$cc32" -O1 -Wall -Wextra -Werror "${extra[@]}" -Wl,--stack,0x300000 -o "$tmp/fixture-crt.exe" "$here/x86-guest/fixture-crt.c" "$tmp/fixture-crt.res" -luser32 -lwinmm -lshlwapi
 "${CXX:-c++}" -std=c++17 -O2 -mno-red-zone -Wall -Wextra -Werror "$here/x86-guest.cpp" -o "$tmp/x86-guest"
 set +e
 out=$("$tmp/x86-guest" "$tmp/fixture-crt.exe"); rc=$?
@@ -43,7 +43,7 @@ x86-crt: sprintf 7/hi/1.5 abcde
 x86-crt: heap ok
 x86-crt: strings ok
 x86-crt: locale name ok
-x86-crt: user32 metrics ok
+x86-crt: user32/winmm/shlwapi ok
 x86-crt: stack probe ok
 x86-crt: varargs 60 4.00
 x86-crt: kernel32 ok
@@ -52,7 +52,7 @@ x86-crt: threads ok
 x86-crt: strftime 2026-11-09 13:26:40 Mon
 x86-crt: time ok
 x86-crt: iob ok
-x86-crt: checks 94 failed 0'
+x86-crt: checks 104 failed 0'
 [[ $body == "$want" ]] || { echo "X86-GUEST FAIL: stdout differs"; diff <(echo "$want") <(echo "$body") || true; exit 1; }
 echo "X86-GUEST PASS: mingw CRT program (printf with doubles, heap, qsort, TLS, VirtualAlloc, strftime) ran in the interpreter to exit 42"
 # The launcher's own PE32 entry point (host/x86/x86_play.h): the structured

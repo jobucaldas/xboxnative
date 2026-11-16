@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# fetch-sdl.sh [outdir] -> <outdir>/SDL3/{include,lib/x64}, <outdir>/SDL2/{include,lib/x64} (default: out/sdl)
+# fetch-sdl.sh [outdir] -> <outdir>/SDL3/{include,lib/x64,lib/x86}, <outdir>/SDL2/{include,lib/x64,lib/x86} (default: out/sdl)
 # Fetches the pinned official SDL3 and SDL2 Visual C++ development packages (`sdl3-devel-vc`, `sdl2-devel-vc`
 # in deps.pin, SHA-256 verified): the same MSVC-built SDL3.dll/SDL2.dll games ship, plus headers and import
 # libraries. Used only by off-device Play tests (app/tests/play-sdl.sh); SDL is zlib-licensed. Outputs are
@@ -31,6 +31,7 @@ with zipfile.ZipFile(sys.argv[1]) as z:
   mkdir -p "$out/$major/lib"
   cp -r "$top/include" "$out/$major/"
   cp -r "$top/lib/x64" "$out/$major/lib/"
+  cp -r "$top/lib/x86" "$out/$major/lib/"
   cp "$top/LICENSE.txt" "$out/$major/" 2>/dev/null || true
   printf '%s %s\nsha256 %s\nlicense zlib\n' "$major" "$url" "$sha" > "$out/$major/SOURCE.txt"
   echo "$major -> $out/$major"

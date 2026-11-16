@@ -91,9 +91,13 @@ External dependencies fetched at build time (never copied here; pinned in deps.p
   FNA 26.11 and FNA.NetStub                       Microsoft Public License (Ms-PL) and project notices; source is pinned in deps.pin and
                                                compiled with Mono by src/tools/build-fna.sh. The generated FNA.dll and XNA ABI
                                                forwarders are build outputs staged under runtime/fna/; never committed.
-  FNA native bindings (FAudio, FNA3D, SDL2-CS,   Zlib license and source notices; exact source commits are pinned in deps.pin as FNA
-  SDL3-CS, Theorafile, dav1dfile)                  26.11 submodules. Their licenses are copied beside the generated managed outputs;
-                                               native runtimes are not included by this managed-only build step.
+  FNA native runtime (FNA3D, FAudio, SDL3,      Zlib licenses and bundled codec notices. FNA3D, FAudio, SDL3, MojoShader and
+  MojoShader, Theorafile)                       Theorafile sources are pinned in deps.pin and built by
+                                               src/tools/build-fna-native.sh; their DLLs, licenses and source manifest are
+                                               staged under runtime/. FAudio uses SDL3 audio, not XAudio2. DLLs are never committed.
+  FNA native bindings (SDL2-CS, SDL3-CS,         Zlib licenses and source notices; exact source commits are pinned in deps.pin as FNA
+  dav1dfile)                                    26.11 submodules. The managed assembly build preserves their notices; additional
+                                               native dav1dfile support remains unbuilt.
   Microsoft Windows SDK/CRT via xwin           Downloaded by the toolchain under Microsoft's own licence terms; never redistributed here.
 
 Licence compatibility with GPL-3.0-or-later (a good-faith reading, NOT legal advice or a legal guarantee)
