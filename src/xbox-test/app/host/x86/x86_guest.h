@@ -1875,6 +1875,25 @@ inline void Guest::register_all() {
     reg.add("winmm.dll", "timeGetTime", Conv::Stdcall, 0, [tick_count](Cpu&) -> uint32_t { return tick_count(); });
     reg.add("winmm.dll", "timeGetDevCaps", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         uint32_t p=c.arg(0);if(!p||c.arg(1)!=8)return 129;mem.w32(p,1);mem.w32(p+4,1000000);return 0; });
+    // No joystick or wave-output device is exposed by this host. Keep device
+    // enumeration empty and return the documented no-driver/unplugged errors.
+    reg.add("winmm.dll", "joyGetNumDevs", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("winmm.dll", "joyGetPos", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 167; });
+    reg.add("winmm.dll", "joyGetPosEx", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 167; });
+    reg.add("winmm.dll", "joyGetDevCapsA", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 167; });
+    reg.add("winmm.dll", "joyGetDevCapsW", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 167; });
+    reg.add("winmm.dll", "waveOutGetNumDevs", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("winmm.dll", "waveOutOpen", Conv::Stdcall, 6, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveOutClose", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveOutPrepareHeader", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveOutUnprepareHeader", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveOutWrite", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveOutPause", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveOutRestart", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveOutReset", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveOutGetPosition", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveOutGetDevCapsA", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveOutGetDevCapsW", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
     reg.add("kernel32.dll", "QueryPerformanceCounter", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t p = c.arg(0); if (p) { mem.w32(p, 1000); mem.w32(p + 4, 0); } return 1; });
     reg.add("kernel32.dll", "QueryPerformanceFrequency", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
@@ -2312,6 +2331,73 @@ inline void Guest::register_all() {
     reg.add("shlwapi.dll","PathFindFileNameA",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{uint32_t p=c.arg(0);if(!p)return 0;std::string s=str(p);size_t i=s.find_last_of("\\\\/:");return p+(i==std::string::npos?0:uint32_t(i+1));});
     reg.add("shlwapi.dll","PathRemoveExtensionA",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{uint32_t p=c.arg(0);if(!p)return 0;std::string s=str(p);size_t start=s.find_last_of("\\\\/:"),dot=s.find_last_of('.');if(dot!=std::string::npos&&(start==std::string::npos||dot>start))mem.w8(p+uint32_t(dot),0);return 0;});
     reg.add("shlwapi.dll","PathRemoveFileSpecA",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{uint32_t p=c.arg(0);if(!p)return 0;std::string s=str(p);auto sep=[](char x){return x=='\\'||x=='/';};size_t n=s.size();bool root=n==1&&sep(s[0]);root|=n==3&&s[1]==':'&&sep(s[2]);if(n>=2&&sep(s[0])&&sep(s[1])){size_t a=s.find_first_not_of("\\\\/",2),b=a==std::string::npos?a:s.find_first_of("\\\\/",a),d=b==std::string::npos?b:s.find_first_not_of("\\\\/",b),e=d==std::string::npos?d:s.find_first_of("\\\\/",d);root|=a!=std::string::npos&&b!=std::string::npos&&d!=std::string::npos&&(e==std::string::npos||e==n-1);}if(root)return 0;if(n&&sep(s[n-1])){mem.w8(p+uint32_t(n-1),0);return 1;}size_t i=s.find_last_of("\\\\/");if(i==std::string::npos)return 0;if(i==0)mem.w8(p+1,0);else if(i==2&&s[1]==':')mem.w8(p+3,0);else mem.w8(p+uint32_t(i),0);return 1;});
+    reg.add("shlwapi.dll","PathRemoveFileSpecW",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{uint32_t p=c.arg(0);if(!p)return 0;std::u16string s=wstr(p);auto sep=[](char16_t x){return x==u'\\'||x==u'/';};size_t n=s.size();bool root=n==1&&sep(s[0]);root|=n==3&&s[1]==u':'&&sep(s[2]);if(n>=2&&sep(s[0])&&sep(s[1])){size_t a=s.find_first_not_of(u"\\\\/",2),b=a==std::u16string::npos?a:s.find_first_of(u"\\\\/",a),d=b==std::u16string::npos?b:s.find_first_not_of(u"\\\\/",b),e=d==std::u16string::npos?d:s.find_first_of(u"\\\\/",d);root|=a!=std::u16string::npos&&b!=std::u16string::npos&&d!=std::u16string::npos&&(e==std::u16string::npos||e==n-1);}if(root)return 0;if(n&&sep(s[n-1])){mem.w(p+uint32_t((n-1)*2),0,2);return 1;}size_t i=s.find_last_of(u"\\\\/");if(i==std::u16string::npos)return 0;if(i==0)mem.w(p+2,0,2);else if(i==2&&s[1]==u':')mem.w(p+6,0,2);else mem.w(p+uint32_t(i*2),0,2);return 1;});
+    auto write_a = [this](uint32_t dst, const std::string& text) { for (size_t i=0;i<=text.size();++i) mem.w8(dst+uint32_t(i),i<text.size()?uint8_t(text[i]):0); };
+    auto write_w = [this](uint32_t dst, const std::u16string& text) { for (size_t i=0;i<=text.size();++i) mem.w(dst+uint32_t(i*2),i<text.size()?uint16_t(text[i]):0,2); };
+    auto path_file_exists_a = [this](Cpu& c)->uint32_t {
+#if defined(_WIN32)
+        std::string path=str(c.arg(0)); return !path.empty()&&::GetFileAttributesA(path.c_str())!=INVALID_FILE_ATTRIBUTES;
+#else
+        (void)c; return 0;
+#endif
+    };
+    auto path_file_exists_w = [this](Cpu& c)->uint32_t {
+#if defined(_WIN32)
+        std::u16string path=wstr(c.arg(0)); std::wstring native(path.begin(),path.end());
+        return !native.empty()&&::GetFileAttributesW(native.c_str())!=INVALID_FILE_ATTRIBUTES;
+#else
+        (void)c; return 0;
+#endif
+    };
+    reg.add("shlwapi.dll","PathFileExistsA",Conv::Stdcall,1,path_file_exists_a);
+    reg.add("shlwapi.dll","PathFileExistsW",Conv::Stdcall,1,path_file_exists_w);
+    for(bool wide : {false,true}) {
+        const std::string suffix=wide?"W":"A";
+        reg.add("shlwapi.dll","PathCombine"+suffix,Conv::Stdcall,3,[this,wide,write_a,write_w](Cpu& c)->uint32_t {
+            uint32_t dst=c.arg(0);if(!dst)return 0;
+            if(wide) {
+                std::u16string base=wstr(c.arg(1)),leaf=wstr(c.arg(2)),joined;
+                const bool absolute=(!leaf.empty()&&(leaf[0]==u'\\'||leaf[0]==u'/'))||(leaf.size()>1&&leaf[1]==u':');
+                if(absolute)joined=leaf;else {joined=base;if(!joined.empty()&&!leaf.empty()&&joined.back()!=u'\\'&&joined.back()!=u'/')joined.push_back(u'\\');joined+=leaf;}
+                write_w(dst,joined);
+            } else {
+                std::string base=str(c.arg(1)),leaf=str(c.arg(2)),joined;
+                const bool absolute=(!leaf.empty()&&(leaf[0]=='\\'||leaf[0]=='/'))||(leaf.size()>1&&leaf[1]==':');
+                if(absolute)joined=leaf;else {joined=base;if(!joined.empty()&&!leaf.empty()&&joined.back()!='\\'&&joined.back()!='/')joined.push_back('\\');joined+=leaf;}
+                write_a(dst,joined);
+            }
+            return dst;
+        });
+        reg.add("shlwapi.dll","PathAppend"+suffix,Conv::Stdcall,2,[this,wide,write_a,write_w](Cpu& c)->uint32_t {
+            uint32_t dst=c.arg(0);if(!dst)return 0;
+            if(wide) {std::u16string base=wstr(dst),leaf=wstr(c.arg(1));if(!base.empty()&&!leaf.empty()&&base.back()!=u'\\'&&base.back()!=u'/')base.push_back(u'\\');base+=leaf;write_w(dst,base);}
+            else {std::string base=str(dst),leaf=str(c.arg(1));if(!base.empty()&&!leaf.empty()&&base.back()!='\\'&&base.back()!='/')base.push_back('\\');base+=leaf;write_a(dst,base);}
+            return 1;
+        });
+        reg.add("shlwapi.dll","PathFindFileName"+suffix,Conv::Stdcall,1,[this,wide](Cpu& c)->uint32_t {
+            uint32_t p=c.arg(0);if(!p)return 0;
+            if(wide){auto s=wstr(p);size_t i=s.find_last_of(u"\\\\/:");return p+uint32_t((i==std::u16string::npos?0:i+1)*2);}
+            auto s=str(p);size_t i=s.find_last_of("\\\\/:");return p+uint32_t(i==std::string::npos?0:i+1);
+        });
+        reg.add("shlwapi.dll","PathFindExtension"+suffix,Conv::Stdcall,1,[this,wide](Cpu& c)->uint32_t {
+            uint32_t p=c.arg(0);if(!p)return 0;
+            if(wide){auto s=wstr(p);size_t slash=s.find_last_of(u"\\\\/"),dot=s.find_last_of(u'.');return p+uint32_t((dot!=std::u16string::npos&&(slash==std::u16string::npos||dot>slash)?dot:s.size())*2);}
+            auto s=str(p);size_t slash=s.find_last_of("\\\\/"),dot=s.find_last_of('.');return p+uint32_t(dot!=std::string::npos&&(slash==std::string::npos||dot>slash)?dot:s.size());
+        });
+        reg.add("shlwapi.dll","PathIsRelative"+suffix,Conv::Stdcall,1,[this,wide](Cpu& c)->uint32_t {
+            if(wide){auto s=wstr(c.arg(0));return s.empty()||((s[0]!=u'\\'&&s[0]!=u'/')&&!(s.size()>2&&s[1]==u':'&&(s[2]==u'\\'||s[2]==u'/')));}
+            auto s=str(c.arg(0));return s.empty()||((s[0]!='\\'&&s[0]!='/')&&!(s.size()>2&&s[1]==':'&&(s[2]=='\\'||s[2]=='/')));
+        });
+        reg.add("shlwapi.dll","StrCmpI"+suffix,Conv::Stdcall,2,[this,wide](Cpu& c)->uint32_t {
+            if(wide){auto a=wstr(c.arg(0)),b=wstr(c.arg(1));for(auto& ch:a)if(ch>=u'A'&&ch<=u'Z')ch+=u'a'-u'A';for(auto& ch:b)if(ch>=u'A'&&ch<=u'Z')ch+=u'a'-u'A';return a<b?uint32_t(-1):a>b?1u:0u;}
+            auto a=str(c.arg(0)),b=str(c.arg(1));for(char& ch:a)if(ch>='A'&&ch<='Z')ch=char(ch+'a'-'A');for(char& ch:b)if(ch>='A'&&ch<='Z')ch=char(ch+'a'-'A');return a<b?uint32_t(-1):a>b?1u:0u;
+        });
+        reg.add("shlwapi.dll","StrStrI"+suffix,Conv::Stdcall,2,[this,wide](Cpu& c)->uint32_t {
+            uint32_t p=c.arg(0),q=c.arg(1);if(!p||!q)return 0;
+            if(wide){auto hay=wstr(p),needle=wstr(q);auto lower=[](char16_t x){return x>=u'A'&&x<=u'Z'?char16_t(x+u'a'-u'A'):x;};for(size_t i=0;i+needle.size()<=hay.size();++i){size_t j=0;for(;j<needle.size()&&lower(hay[i+j])==lower(needle[j]);++j){}if(j==needle.size())return p+uint32_t(i*2);}return 0;}
+            auto hay=str(p),needle=str(q);auto lower=[](unsigned char x){return x>='A'&&x<='Z'?static_cast<unsigned char>(x+'a'-'A'):x;};for(size_t i=0;i+needle.size()<=hay.size();++i){size_t j=0;for(;j<needle.size()&&lower(uint8_t(hay[i+j]))==lower(uint8_t(needle[j]));++j){}if(j==needle.size())return p+uint32_t(i);}return 0;
+        });
+    }
 
     // msvcrt: CRT startup, heap, strings, stdio
     reg.add("msvcrt.dll", "_lock", Conv::Cdecl, 1, [](Cpu&) -> uint32_t { return 0; });
