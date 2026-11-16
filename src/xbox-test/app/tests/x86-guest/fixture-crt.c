@@ -151,7 +151,7 @@ static void test_winmm_shlwapi(void) {
           timeGetSystemTime(&system_time, sizeof system_time) == TIMERR_NOERROR && system_time.wType == TIME_MS &&
           system_time.u.ms == timeGetTime());
     UINT timer = timeSetEvent(1, 1, NULL, 0, TIME_ONESHOT);
-    check(timer != 0 && timeKillEvent(timer) == TIMERR_NOERROR);
+    check(timer == 0 && timeKillEvent(1) == TIMERR_NOCANDO);
     char out[128] = {0}, path[64] = "dir", a[] = "Dir/File.TXT", trim_a[] = "dir\\file";
     wchar_t wout[128] = {0}, wpath[64] = L"dir", wa[] = L"Dir\\File.TXT", trim_w[] = L"dir\\file", root_w[] = L"\\\\server\\share\\";
     check(PathCombineA(out, "dir", "file.txt") == out && strcmp(out, "dir\\file.txt") == 0 &&

@@ -1984,8 +1984,10 @@ inline void Guest::register_all() {
     // The interpreter has no asynchronous callback scheduler, so timer IDs are
     // deterministic bookkeeping handles; callbacks are never fabricated.
     reg.add("winmm.dll", "timeSetEvent", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
-        if(!c.arg(0)||c.arg(0)>0x7fffffffu)return 0;
-        uint32_t id=++mm_timer_serial; if(!id)id=++mm_timer_serial; mm_timers[id]=true; return id; });
+        // Multimedia timer callbacks run on a winmm thread; the guest has no such
+        // thread here, so creating a timer that would never fire must fail (NULL),
+        // never hand back an ID the game then waits on.
+        (void)c; return 0; });
     reg.add("winmm.dll", "timeKillEvent", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         return mm_timers.erase(c.arg(0)) ? 0u : 97u; });
     // No joystick or wave device is exposed by this host. Keep enumeration empty
