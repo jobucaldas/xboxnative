@@ -6,6 +6,7 @@
 // the interpreter never executes guest bytes natively, it only reads them.
 #pragma once
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -44,14 +45,20 @@ struct Memory {
     std::unique_ptr<uint8_t, ReservationDeleter> storage;
     std::vector<uint8_t*> page = std::vector<uint8_t*>(1u << 20, nullptr);
     std::vector<uint8_t> prot = std::vector<uint8_t>(1u << 20, 0);
+    std::vector<std::unique_ptr<uint8_t[]>> blocks;
     uint32_t fault_eip = 0;  // maintained by the CPU so faults name the instruction
-    Memory() : storage(reserve()) {}
+    explicit Memory(bool force_sparse = false) : storage(reserve(force_sparse)) {}
     Memory(Memory&&) = default;
     Memory& operator=(Memory&&) = default;
     Memory(const Memory&) = delete;
     Memory& operator=(const Memory&) = delete;
     uint8_t* base() const { return storage.get(); }
-    static uint8_t* reserve() {
+    static void log_sparse_fallback() {
+        static std::atomic_flag logged = ATOMIC_FLAG_INIT;
+        if (!logged.test_and_set()) std::fprintf(stderr, "x86 memory: 4-GiB reservation unavailable; using sparse pages (DBT disabled)\n");
+    }
+    static uint8_t* reserve(bool force_failure = false) {
+        if (force_failure) { log_sparse_fallback(); return nullptr; }
 #if defined(_WIN32) && defined(WINAPI_FAMILY_APP) && WINAPI_FAMILY == WINAPI_FAMILY_APP
         // UWP's app allocation APIs can reserve this low 4-GiB window, but the
         // runtime's existing VA mappings may prevent a contiguous reservation.
@@ -62,10 +69,11 @@ struct Memory {
         void* p = mmap(nullptr, size_t(ADDRESS_SPACE_SIZE), PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
         if (p == MAP_FAILED) p = nullptr;
 #endif
-        if (!p) throw std::runtime_error("x86 memory: unable to reserve 4 GiB guest address space");
+        if (!p) { log_sparse_fallback(); return nullptr; }
         return static_cast<uint8_t*>(p);
     }
     void commit(uint32_t addr, size_t size) {
+        if (!storage) return;
 #if defined(_WIN32) && defined(WINAPI_FAMILY_APP) && WINAPI_FAMILY == WINAPI_FAMILY_APP
         if (!VirtualAllocFromApp(base() + addr, size, MEM_COMMIT, PAGE_READWRITE))
             throw std::runtime_error("x86 memory: unable to commit guest pages");
@@ -78,6 +86,7 @@ struct Memory {
 #endif
     }
     void decommit(uint32_t addr, size_t size) {
+        if (!storage) return;
 #if defined(_WIN32)
         if (size && !VirtualFree(base() + addr, size, MEM_DECOMMIT))
             throw std::runtime_error("x86 memory: unable to decommit guest pages");
@@ -111,8 +120,10 @@ struct Memory {
         if (end > 0x100000000ull) throw std::runtime_error("x86 map: beyond 4 GiB");
         for (uint64_t a = addr; a < end; a += PAGE) if (page[a >> 12]) throw std::runtime_error("x86 map: overlap");
         size_t n = size_t((end - addr) / PAGE);
-        commit(addr, n * PAGE);
-        for (size_t i = 0; i < n; ++i) { page[(addr >> 12) + i] = base() + addr + i * PAGE; prot[(addr >> 12) + i] = p; }
+        uint8_t* block = nullptr;
+        if (storage) commit(addr, n * PAGE);
+        else { blocks.emplace_back(new uint8_t[n * PAGE]()); block = blocks.back().get(); }
+        for (size_t i = 0; i < n; ++i) { page[(addr >> 12) + i] = storage ? base() + addr + i * PAGE : block + i * PAGE; prot[(addr >> 12) + i] = p; }
     }
     // Drops a mapping made by map(): its pages become unmapped and decommitted,
     // so a later load may reuse the range as zero-filled memory.

@@ -42,14 +42,24 @@ template <class F> static FaultKind fault_of(F f) { try { f(); } catch (const Fa
 static void test_flat_memory() {
     Memory mem;
     const uint32_t addr = 0xfffff000u;
-    EXPECT(mem.base() && reinterpret_cast<uintptr_t>(mem.base()) % Memory::PAGE == 0, "4-GiB reservation base must be page aligned");
-    mem.map(addr, Memory::PAGE, PROT_R | PROT_W);
-    EXPECT(mem.at(addr, PROT_R, FaultKind::AccessViolation) == mem.base() + addr, "guest page pointer must equal base plus guest address");
-    mem.w8(addr, 0xa5);
-    mem.unmap(addr, Memory::PAGE);
-    EXPECT(!mem.mapped(addr), "unmap must clear the software page table");
-    mem.map(addr, Memory::PAGE, PROT_R | PROT_W);
-    EXPECT(mem.r8(addr) == 0, "remapped decommitted memory must be zero-filled");
+    if (mem.base()) {
+        EXPECT(reinterpret_cast<uintptr_t>(mem.base()) % Memory::PAGE == 0, "4-GiB reservation base must be page aligned");
+        mem.map(addr, Memory::PAGE, PROT_R | PROT_W);
+        EXPECT(mem.at(addr, PROT_R, FaultKind::AccessViolation) == mem.base() + addr, "guest page pointer must equal base plus guest address");
+        mem.w8(addr, 0xa5);
+        mem.unmap(addr, Memory::PAGE);
+        EXPECT(!mem.mapped(addr), "unmap must clear the software page table");
+        mem.map(addr, Memory::PAGE, PROT_R | PROT_W);
+        EXPECT(mem.r8(addr) == 0, "remapped decommitted memory must be zero-filled");
+    }
+    Memory sparse(true);
+    EXPECT(sparse.base() == nullptr, "forced reservation failure must disable the flat base");
+    sparse.map(addr, Memory::PAGE, PROT_R | PROT_W);
+    EXPECT(sparse.at(addr, PROT_R, FaultKind::AccessViolation) != nullptr, "sparse fallback must back mapped pages");
+    sparse.w8(addr, 0xa5);
+    sparse.unmap(addr, Memory::PAGE);
+    sparse.map(addr, Memory::PAGE, PROT_R | PROT_W);
+    EXPECT(sparse.r8(addr) == 0, "sparse fallback remaps must be zero-filled");
 }
 
 // ---------- (1) hardware comparison ----------
@@ -2004,7 +2014,7 @@ static void test_fixture(const char* path) {
 int main(int argc, char** argv) {
     if (argc != 2) { printf("usage: x86-core <fixture.exe>\n"); return 2; }
     struct { const char* name; void (*fn)(); const char* pass; } suites[] = {
-        {"flat-memory", test_flat_memory, "X86-CORE PASS: contiguous 4-GiB memory base, direct guest offsets, decommit and zero-filled recommit"},
+        {"flat-memory", test_flat_memory, "X86-CORE PASS: reserved-base memory and forced sparse fallback mapping, decommit and zero-filled recommit"},
         {"pe32-layout", test_pe32_layout_rejections, "X86-CORE PASS: PE32 layout rejections name the failed predicate and values without accepting malformed fixtures"},
         {"alu", test_alu, "X86-CORE PASS: add/or/adc/sbb/and/sub/xor/cmp 8/16/32-bit results and flags match this machine's CPU"},
         {"shift", test_shift, "X86-CORE PASS: rol/ror/shl/shr/sar 8/16/32-bit count 0..33 results and defined flags match this machine's CPU"},
