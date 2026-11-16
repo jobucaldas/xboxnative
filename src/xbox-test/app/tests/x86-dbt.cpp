@@ -320,6 +320,28 @@ static void runtime_compare(const std::vector<uint8_t>& code, unsigned instructi
     }
     ++translated_cases;
 }
+static void partial_block_differential() {
+    static RuntimeMachine translated, interpreted;
+    std::mt19937 rng(0x50415254u);
+    for (unsigned n = 0; n != 5000; ++n) {
+        std::vector<uint8_t> code = {0xB8, uint8_t(rng()), uint8_t(rng()), uint8_t(rng()), uint8_t(rng()),
+                                     0x90, 0x83, 0xC0, 0x02, 0xF4};
+        translated.load(code); interpreted.load(code);
+        translated.cpu.clear_dbt_cache(); interpreted.cpu.clear_dbt_cache();
+        translated.cpu.translated_blocks = translated.cpu.interpreted_blocks = 0;
+        interpreted.cpu.translated_blocks = interpreted.cpu.interpreted_blocks = 0;
+        translated.cpu.dbt_enabled = true; interpreted.cpu.dbt_enabled = false;
+        translated.cpu.run(CODE + uint32_t(code.size() - 1));
+        interpreted.cpu.run(CODE + uint32_t(code.size() - 1));
+        if (translated.cpu.reg[EAX] != interpreted.cpu.reg[EAX] ||
+            translated.cpu.eip != interpreted.cpu.eip || translated.cpu.eflags != interpreted.cpu.eflags ||
+            translated.cpu.interpreted_blocks != 1 || translated.cpu.translated_blocks != 2) {
+            throw std::runtime_error("partial DBT block did not resume after one interpreted instruction");
+        }
+    }
+    std::printf("X86-DBT PASS: partial blocks resumed after one interpreter instruction (5000 cases)\n");
+}
+
 static void randomized_runtime_differential() {
     std::mt19937 rng(0x58424454u); uint64_t address_cases = 0, alu_cases = 0;
     uint8_t data[3 * PAGE];
@@ -512,6 +534,7 @@ int main(int argc, char** argv) {
         Executable executable(translate(program, CODE, DATA));
         int rc = differential_test(executable);
         if (rc) return rc;
+        partial_block_differential();
         randomized_runtime_differential();
         return 0;
     } catch (const std::exception& e) {

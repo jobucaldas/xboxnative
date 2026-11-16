@@ -89,6 +89,7 @@ struct RuntimeBlock {
     uint32_t guest_length = 0;
     uint32_t guest_pc = 0;
     uint8_t exit_opcode = 0;
+    bool interpreter_boundary = false;
     RuntimeBlock* linked_target = nullptr;
 };
 

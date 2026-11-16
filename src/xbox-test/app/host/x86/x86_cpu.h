@@ -198,14 +198,14 @@ struct Cpu {
                 if (!block_ptr) {
                     try {
                         std::vector<uint8_t> bytes;
-                        size_t pc = 0; uint8_t last_opcode = 0;
+                        size_t pc = 0; uint8_t last_opcode = 0; bool interpreter_boundary = false;
                         while (pc < 64) {
                             while (bytes.size() <= pc + 5) bytes.push_back(mem.fetch8(eip + uint32_t(bytes.size())));
                             uint32_t ea = 0; bool memory = false; uint8_t opcode = bytes[pc]; last_opcode = opcode;
                             if (!pc && (opcode == 0x74 || opcode == 0x75)) throw std::runtime_error("dispatch standalone conditional branch in interpreter");
                             size_t len;
                             try { len = dbt::runtime_instruction(bytes, pc, ea, memory); }
-                            catch (const std::runtime_error&) { if (!pc) throw; break; }
+                            catch (const std::runtime_error&) { if (!pc) throw; interpreter_boundary = true; break; }
                             if (memory && (!mem.range_accessible(ea, 4, PROT_R) || !mem.range_accessible(ea, 4, PROT_W)))
                                 throw std::runtime_error("DBT memory page is not RW");
                             pc += len;
@@ -213,7 +213,8 @@ struct Cpu {
                         }
                         if (!pc) throw std::runtime_error("DBT block has no supported instruction");
                         bytes.resize(pc); dbt::RuntimeBlock block;
-                        block.guest_pc = eip; block.guest_length = uint32_t(pc); block.exit_opcode = last_opcode; block.guest_bytes = bytes;
+                        block.guest_pc = eip; block.guest_length = uint32_t(pc); block.exit_opcode = last_opcode;
+                        block.interpreter_boundary = interpreter_boundary; block.guest_bytes = bytes;
                         block.code = std::make_unique<dbt::Executable>(dbt::runtime_translate(bytes, eip));
                         block_ptr = &dbt_cache.emplace(eip, std::move(block)).first->second;
                     } catch (const std::exception& ex) {
@@ -227,13 +228,15 @@ struct Cpu {
                 uint32_t next = block_ptr->code->operator()(state);
                 std::memcpy(reg, state.reg, sizeof reg); eip = next; eflags = state.eflags;
                 executed += block_ptr->guest_length; ++translated_blocks;
-                bool indirect = block_ptr->exit_opcode == 0xC2 || block_ptr->exit_opcode == 0xC3 || block_ptr->exit_opcode == 0xFF || block_ptr->exit_opcode == 0x8F;
-                auto successor = dbt_cache.find(next);
-                if (successor != dbt_cache.end()) {
-                    if (indirect) dbt_inline_cache[next & 3] = &successor->second;
-                    else block_ptr->linked_target = &successor->second;
+                if (!block_ptr->interpreter_boundary) {
+                    bool indirect = block_ptr->exit_opcode == 0xC2 || block_ptr->exit_opcode == 0xC3 || block_ptr->exit_opcode == 0xFF || block_ptr->exit_opcode == 0x8F;
+                    auto successor = dbt_cache.find(next);
+                    if (successor != dbt_cache.end()) {
+                        if (indirect) dbt_inline_cache[next & 3] = &successor->second;
+                        else block_ptr->linked_target = &successor->second;
+                    }
+                    if (block_ptr->linked_target && block_ptr->linked_target->guest_pc == next && valid(block_ptr->linked_target)) chained = block_ptr->linked_target;
                 }
-                if (block_ptr->linked_target && block_ptr->linked_target->guest_pc == next && valid(block_ptr->linked_target)) chained = block_ptr->linked_target;
                 continue;
             }
             ++interpreted_blocks; step();
