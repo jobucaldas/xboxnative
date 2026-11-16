@@ -15,6 +15,7 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/fna-smoke.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 cat > "$tmp/XnaSmoke.cs" <<'CS'
 using System;
+using System.Runtime.InteropServices;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 sealed class XnaSmoke : Game
@@ -30,8 +31,13 @@ sealed class XnaSmoke : Game
         base.Draw(time);
         if (++frames == 3) Exit();
     }
+    [DllImport("SDL3", CallingConvention = CallingConvention.Cdecl)]
+    static extern int SDL_GetVersion();
     static int Main()
     {
+        int sdlVersion = SDL_GetVersion();
+        Console.WriteLine("FNA PINVOKE SDL3 version=" + sdlVersion);
+        if (sdlVersion <= 0) return 43;
         using (var game = new XnaSmoke())
         {
             game.Run();

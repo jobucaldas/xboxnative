@@ -343,15 +343,14 @@ for mode in mono fna observer-log reject-attach reject-mapping normal missing ga
 done
 grep -q 'MONO PLAY-LOADER PASS: embedded AnyCPU hello returned exit code 23' "$out/mono.log"
 grep -q 'GAP: summary exe=mono-2.0-sgen.dll arch=x64 ' "$out/mono.log"
-if grep -Fq 'System.DllNotFoundException: SDL3.dll' "$out/fna.log"; then
- :
-else
- grep -q 'FNA SMOKE draws=3 clear=CornflowerBlue' "$out/fna.log"
- grep -q 'FNA PLAY-LOADER PASS: FNA3D cleared/presented 3 frames and returned exit code 42' "$out/fna.log"
- grep -q 'PRUN EVENT mapping fna3d.dll' "$out/fna.log"
- grep -q 'PRUN EVENT mapping sdl3.dll' "$out/fna.log"
- grep -q 'guest DXGI CoreWindow swapchain returned hr=0x00000000' "$out/fna.log"
-fi
+grep -q 'FNA PINVOKE SDL3 version=' "$out/fna.log"
+grep -q 'FNA SMOKE draws=3 clear=CornflowerBlue' "$out/fna.log"
+grep -q 'FNA PLAY-LOADER PASS: FNA3D cleared/presented 3 frames and returned exit code 42' "$out/fna.log"
+grep -q 'PRUN EVENT mapping fna3d.dll' "$out/fna.log"
+grep -q 'PRUN EVENT mapping sdl3.dll' "$out/fna.log"
+grep -q 'mono pinvoke: SDL3' "$out/fna.log"
+grep -q 'mono pinvoke: FNA3D' "$out/fna.log"
+grep -q 'guest DXGI CoreWindow swapchain returned hr=0x00000000' "$out/fna.log"
 grep -q 'GAP: dll=vcruntime140.dll resolved=' "$out/mono.log"
 grep -q 'GAP: summary exe=play-gap.exe arch=x64 .*missing=1' "$out/gap.log"
 if ! grep -q 'GAP: summary exe=play-gap.exe arch=x64 .*stub=1' "$out/gap.log"; then

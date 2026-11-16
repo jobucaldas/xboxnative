@@ -320,14 +320,9 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     regb::init(root,logline); // guest registry: <runner dir>\registry.sqlite
     if(std::string(args)=="mono"||std::string(args)=="fna") {
         const bool fna=std::string(args)=="fna";
-        const auto versionPath=root+L"\\donors\\version.dll";
-        auto version=std::make_unique<wxl::Image>();
-        donor_pe::sink=logline;donor_pe::missing=0;
-        bool versionLoaded=wxl::load(*version,versionPath.c_str(),logline,{},donor_pe::resolve,false,wxl::LoadConfig::inert_wine);
-        if(!versionLoaded||donor_pe::missing||!donor_pe::behavior("version.dll",*version,versionPath)) {
-            logline("DWPE FAIL version donor behavior gate; no Mono code executed");return 3;
+        if(!donor_pe::probe(logline)) {
+            logline("DWPE FAIL donor behavior gate; no Mono code executed");return 3;
         }
-        donor_pe::images.emplace("version.dll",std::move(version));
         mlp::donor_resolve=donor_pe::exported;
         if(fna) {
             if(!host_surface::create()) {logline("FNA HOST SURFACE FAIL native Wine window unavailable");return 3;}
@@ -339,7 +334,8 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         const auto module=play_runtime::map_managed_runtime(root,runtime+L"\\mono-2.0-sgen.dll",logline);
         if(!module){logline("MONO PLAY-LOADER FAIL: Mono image mapping failed");return 1;}
         auto result=mono_host::run(play_runtime::narrow(runtime),play_runtime::narrow(assembly),{}, {},
-            [module](const char* name){return (void*)play_runtime::managed_export(module,name);});
+            [module](const char* name){return (void*)play_runtime::managed_export(module,name);},
+            [](const char* library,const char* symbol){return play_runtime::managed_pinvoke(library,symbol);});
         const int expected=fna?42:23;
         if(!result.loaded||!result.executed||result.exit_code!=expected) {
             logline(((fna?"FNA":"MONO")+std::string(" PLAY-LOADER FAIL: loaded=")+std::to_string(result.loaded)+" executed="+
