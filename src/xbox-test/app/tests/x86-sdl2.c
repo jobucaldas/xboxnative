@@ -72,10 +72,10 @@ int main(void) {
         return fail(30, "SDL_SetRenderDrawColor");
     if (SDL_RenderClear(renderer) != 0) return fail(31, "SDL_RenderClear");
     puts("SDL2TEST STEP SDL_RenderClear ok"); fflush(stdout);
-    Uint32 pixel = 0;
-    if (SDL_RenderReadPixels(renderer, NULL, SDL_PIXELFORMAT_ARGB8888, &pixel, sizeof(pixel)) != 0)
+    Uint32 pixels[96 * 64] = {};
+    if (SDL_RenderReadPixels(renderer, NULL, SDL_PIXELFORMAT_ARGB8888, pixels, 96 * sizeof(*pixels)) != 0)
         return fail(32, "SDL_RenderReadPixels");
-    printf("SDL2TEST STEP SDL_RenderReadPixels=0x%08lx\n", (unsigned long)pixel); fflush(stdout);
+    printf("SDL2TEST STEP SDL_RenderReadPixels=0x%08lx\n", (unsigned long)pixels[0]); fflush(stdout);
     SDL_RenderPresent(renderer);
 
     SDL_Event event;
@@ -87,7 +87,7 @@ int main(void) {
     SDL_DestroyWindow(window);
     SDL_Quit();
     printf("SDL2TEST PASS renderer=%s pixel=0x%08lx joysticks=%d controllers=%d\n",
-        info.name, (unsigned long)pixel, joysticks, controllers);
+        info.name, (unsigned long)pixels[0], joysticks, controllers);
     fflush(stdout);
     return 42;
 }

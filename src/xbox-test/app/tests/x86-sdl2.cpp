@@ -2,6 +2,7 @@
 // Run the official i686 SDL2 DLL in the x86 interpreter under Wine. SDL's
 // Direct3D 9 renderer is connected to the real x64 D3D9 shim for frame readback.
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -85,6 +86,42 @@ int main(int argc, char** argv) {
                 if (!::AdjustWindowRectEx(&rect, style, menu, ex)) return false;
                 q = {rect.left, rect.top, rect.right, rect.bottom}; return true;
             };
+            host.window_call = [&](x86::Host::WindowCall& q) {
+                q.supported = true;
+                if (q.name == "AdjustWindowRectEx" && q.input.size() == 16) {
+                    x86::Host::WindowRect rect{};
+                    std::memcpy(&rect, q.input.data(), sizeof(rect));
+                    if (!host.adjust_window_rect(rect, uint32_t(q.args[1]), q.args[2] != 0, uint32_t(q.args[3]))) {
+                        q.result = 0;
+                        return;
+                    }
+                    q.output.resize(16);
+                    std::memcpy(q.output.data(), &rect, sizeof(rect));
+                    q.result = 1;
+                } else if (q.name == "GetClientRect") {
+                    x86::Host::WindowRect rect{0, 0, 96, 64};
+                    q.output.resize(16);
+                    std::memcpy(q.output.data(), &rect, sizeof(rect));
+                    q.result = 1;
+                } else if (q.name == "ClientToScreen" || q.name == "ScreenToClient") {
+                    q.result = 1;
+                } else if (q.name == "GetWindowLongW" || q.name == "GetWindowLongPtrW") {
+                    auto it = window_longs.find({q.args[0], int(q.args[1])});
+                    q.result = it == window_longs.end() ? 0 : uintptr_t(it->second);
+                } else if (q.name == "SetWindowLongW" || q.name == "SetWindowLongPtrW") {
+                    auto key = std::make_pair(q.args[0], int(q.args[1]));
+                    q.result = uintptr_t(window_longs[key]);
+                    window_longs[key] = intptr_t(q.args[2]);
+                } else if (q.name == "PeekMessageW") {
+                    q.result = 0;
+                } else if (q.name == "GetFocus" || q.name == "GetActiveWindow" || q.name == "GetForegroundWindow") {
+                    q.result = 0;
+                } else if (q.name == "SetWindowPos" || q.name == "SetWindowTextW") {
+                    q.result = 1;
+                } else {
+                    q.supported = false;
+                }
+            };
             host.d3d9_factory = [=](bool ex, uint32_t version, uintptr_t* out) -> uintptr_t {
                 if (!out) return uint32_t(E_POINTER);
                 *out = 0;
@@ -94,7 +131,8 @@ int main(int argc, char** argv) {
                     *out = reinterpret_cast<uintptr_t>(object);
                     return uint32_t(hr);
                 }
-                *out = reinterpret_cast<uintptr_t>(create9(version));
+                void* object = create9(version);
+                *out = reinterpret_cast<uintptr_t>(object);
                 return 0;
             };
             host.d3d9_window = [=](uint32_t guest_window) -> uintptr_t {

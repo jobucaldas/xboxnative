@@ -606,7 +606,7 @@ inline void register_gl(Registry& r, Host& h) {
             if (it->second == name) it = h.window_class_atoms.erase(it); else ++it;
         return 1;
     });
-    r.add("user32.dll", "RegisterClassExW", Conv::Stdcall, 1, [count, read_wstr, register_class](Cpu& c) -> uint32_t {
+    r.add("user32.dll", "RegisterClassExW", Conv::Stdcall, 1, [&h, count, read_wstr, register_class](Cpu& c) -> uint32_t {
         count("RegisterClassExW"); uint32_t wc = c.arg(0);
         if (c.mem.r32(wc) < 48) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
         const uint32_t name = c.mem.r32(wc + 40);
