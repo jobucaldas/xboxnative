@@ -48,9 +48,9 @@ inline void register_dsound_com(ComSpace& s,Host& h) {
     for(const char* iface:{"IDirectSound8","IDirectSoundBuffer8","IDirectSoundNotify"})method(iface,0,3,[](Proxy& p,Cpu& c){return uint32_t(dsound_qi(p,c));});
     auto device=[](Proxy& p){return static_cast<IDirectSound8*>(p.host);};
     auto buffer=[](Proxy& p){return static_cast<IDirectSoundBuffer8*>(p.host);};
-    method("IDirectSound8",3,4,[&s](Proxy& p,Cpu& c)->uint32_t {
+    method("IDirectSound8",3,4,[&s,device](Proxy& p,Cpu& c)->uint32_t {
         if(!c.arg(2))return E_POINTER;uint32_t out=c.arg(2);c.mem.w32(out,0);if(c.arg(3))return DSERR_NOAGGREGATION;DSBUFFERDESC desc{};desc.dwSize=sizeof(desc);
-        uint32_t addr=c.arg(1);if(!addr)return E_POINTER;if(c.mem.r32(addr)<sizeof(DSBUFFERDESC))return DSERR_INVALIDPARAM;
+        uint32_t addr=c.arg(1);if(!addr)return E_POINTER;if(c.mem.r32(addr)<36u)return DSERR_INVALIDPARAM;
         desc.dwFlags=c.mem.r32(addr+4);desc.dwBufferBytes=c.mem.r32(addr+8);desc.dwReserved=c.mem.r32(addr+12);
         uint32_t fmt_addr=c.mem.r32(addr+16);WAVEFORMATEX fmt{};if(fmt_addr){auto bytes=c.mem.read_bytes(fmt_addr,sizeof(fmt));memcpy(&fmt,bytes.data(),sizeof(fmt));desc.lpwfxFormat=&fmt;}
         IDirectSoundBuffer* object=nullptr;HRESULT hr=device(p)->CreateSoundBuffer(&desc,&object,reinterpret_cast<IUnknown*>(uintptr_t(c.arg(3))));
