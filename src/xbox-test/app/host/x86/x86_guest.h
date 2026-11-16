@@ -25,6 +25,7 @@
 #endif
 #include "x86_win32.h"
 #include "x86_d3d9.h"
+#include "x86_dsound.h"
 namespace x86 {
 // Loaded guest DLLs, shared between the loader and the Guest surface. Kept in
 // x86_pe.h's Dll form so GetProcAddress reads the same export tables the
@@ -160,7 +161,7 @@ struct Guest {
     std::map<uint32_t, uint32_t> thread_exit_codes;  // handle -> exit code
     std::map<uint32_t, uint32_t> thread_ids;         // handle -> thread identifier
     enum class SyncKind { Event, Mutex, Semaphore };
-    struct SyncObject { SyncKind kind; std::u16string name; uint32_t refs = 0, owner = 0, recursion = 0, count = 0, maximum = 0; bool manual = false, signaled = false, abandoned = false; };
+    struct SyncObject { SyncKind kind; std::u16string name; uint32_t refs = 0, owner = 0, recursion = 0, count = 0, maximum = 0; uintptr_t native_event = 0; bool manual = false, signaled = false, abandoned = false; };
     std::map<uint32_t, uint32_t> sync_handles;        // guest handle -> object id
     std::map<uint32_t, SyncObject> sync_objects;
     std::map<std::u16string, uint32_t> sync_names;    // names are case-sensitive (Win32)
@@ -238,11 +239,19 @@ struct Guest {
     uint32_t create_sync(SyncKind kind, uint32_t namep, bool wide, bool manual, bool initial, int32_t count, int32_t maximum, uint32_t owner) {
         std::u16string name = sync_name(namep, wide); uint32_t id = 0;
         if (!name.empty()) { auto it = sync_names.find(name); if (it != sync_names.end()) { id = it->second; if (sync_objects[id].kind != kind) { set_last_error(6); return 0; } set_last_error(183); } }
-        if (!id) { id = ++sync_serial; SyncObject o{}; o.kind=kind; o.name=name; o.manual=manual; o.signaled=initial; o.owner=owner; o.recursion=owner?1u:0u; o.count=uint32_t(count); o.maximum=uint32_t(maximum); sync_objects[id]=o; if (!name.empty()) sync_names[name]=id; set_last_error(0); }
+        if (!id) { id = ++sync_serial; SyncObject o{}; o.kind=kind; o.name=name; o.manual=manual; o.signaled=initial; o.owner=owner; o.recursion=owner?1u:0u; o.count=uint32_t(count); o.maximum=uint32_t(maximum);
+#if defined(_WIN32)
+            if(kind==SyncKind::Event){HANDLE event=CreateEventExW(nullptr,nullptr,(manual?CREATE_EVENT_MANUAL_RESET:0)|(initial?CREATE_EVENT_INITIAL_SET:0),EVENT_ALL_ACCESS);if(!event){set_last_error(GetLastError());return 0;}o.native_event=reinterpret_cast<uintptr_t>(event);}
+#endif
+            sync_objects[id]=o; if (!name.empty()) sync_names[name]=id; set_last_error(0); }
         return add_sync_handle(id);
     }
     uint32_t open_sync(SyncKind kind, uint32_t namep, bool wide) { std::u16string name=sync_name(namep,wide);auto it=sync_names.find(name);if(it==sync_names.end()){set_last_error(2);return 0;}if(sync_objects[it->second].kind!=kind){set_last_error(6);return 0;}return add_sync_handle(it->second); }
-    bool close_sync(uint32_t h) { auto it=sync_handles.find(h); if(it==sync_handles.end())return false; uint32_t id=it->second; sync_handles.erase(it); auto& o=sync_objects[id]; if(!--o.refs){if(!o.name.empty())sync_names.erase(o.name);sync_objects.erase(id);} return true; }
+    bool close_sync(uint32_t h) { auto it=sync_handles.find(h); if(it==sync_handles.end())return false; uint32_t id=it->second; sync_handles.erase(it); auto& o=sync_objects[id]; if(!--o.refs){if(!o.name.empty())sync_names.erase(o.name);
+#if defined(_WIN32)
+        if(o.native_event)CloseHandle(reinterpret_cast<HANDLE>(o.native_event));
+#endif
+        sync_objects.erase(id);} return true; }
     uint32_t add_file_handle(uint64_t native) { uint32_t h=0x50000000u+(++file_serial); file_handles[h]=native; return h; }
     bool call_file(Host::FileCall& call) { if(!host.file_call){call.error=120;return false;} host.file_call(call); return call.succeeded; }
     static std::string trim_profile(std::string s) {
@@ -274,13 +283,15 @@ struct Guest {
         Host::FileCall close{Host::FileCall::Kind::Close};close.handle=handle;if(!call_file(close)&&ok){ok=false;error=close.error?close.error:5;}
         return ok;
     }
-    // WaitForSingleObject runs all pending guest bodies before this check. If the
-    // object is still unavailable, no runnable guest thread can signal it without
-    // another yield, so finite waits time out immediately (there is no virtual tick clock).
-    // An unsignaled INFINITE wait faults loudly instead of inventing a signal.
+    // WaitForSingleObject runs pending guest bodies first. Windows event objects
+    // also have a native handle so asynchronous XAudio callbacks can signal a wait;
+    // mutexes and semaphores remain synchronous guest-state checks.
     uint32_t sync_wait(Cpu& c, uint32_t h, uint32_t timeout) {
         auto it=sync_handles.find(h); if(it==sync_handles.end())return 0xffffffffu; auto& o=sync_objects[it->second];
         uint32_t tid=c.fs_base?c.mem.r32(c.fs_base+0x24):1u;
+#if defined(_WIN32)
+        if(o.kind==SyncKind::Event&&o.native_event){DWORD waited=WaitForSingleObject(reinterpret_cast<HANDLE>(o.native_event),timeout);if(waited==WAIT_OBJECT_0){o.signaled=o.manual;return 0;}if(waited==WAIT_TIMEOUT)return 258u;return 0xffffffffu;}
+#endif
         if(o.kind==SyncKind::Event&&o.signaled){if(!o.manual)o.signaled=false;return 0;}
         if(o.kind==SyncKind::Semaphore&&o.count){--o.count;return 0;}
         if(o.kind==SyncKind::Mutex&&(!o.owner||o.owner==tid)){uint32_t r=o.abandoned?0x80u:0u;o.abandoned=false;o.owner=tid;++o.recursion;return r;}
@@ -875,6 +886,12 @@ inline void Guest::register_all() {
     register_win32(reg, host);  // the stage-1 allowlist stays the base surface
     register_gl(reg, host);
     register_d3d9(reg, host);
+    host.dsound_event=[this](uint32_t token)->uintptr_t {
+        auto handle=sync_handles.find(token);if(handle==sync_handles.end())return 0;
+        auto object=sync_objects.find(handle->second);if(object==sync_objects.end()||object->second.kind!=SyncKind::Event)return 0;
+        return object->second.native_event;
+    };
+    register_dsound(reg, host);
     register_ws2(reg, host);
     // GDI handles are guest tokens, never native pointers. DIB pixels live in
     // interpreter memory; only memory-DC SRCCOPY is implemented. Window DC
@@ -1141,9 +1158,26 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll","CreateEventW",Conv::Stdcall,4,[this](Cpu& c)->uint32_t{return create_sync(SyncKind::Event,c.arg(3),true,c.arg(1)!=0,c.arg(2)!=0,0,0,0);});
     reg.add("kernel32.dll","CreateMutexA",Conv::Stdcall,3,[this,sync_current_thread](Cpu& c)->uint32_t{return create_sync(SyncKind::Mutex,c.arg(2),false,false,false,0,0,c.arg(1)?sync_current_thread(c):0);});
     reg.add("kernel32.dll","CreateSemaphoreA",Conv::Stdcall,4,[this](Cpu& c)->uint32_t{int32_t initial=int32_t(c.arg(1)),maximum=int32_t(c.arg(2));if(initial<0||maximum<=0||initial>maximum){set_last_error(87);return 0;}return create_sync(SyncKind::Semaphore,c.arg(3),false,false,false,initial,maximum,0);});
-    reg.add("kernel32.dll","SetEvent",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Event){set_last_error(6);return 0;}sync_objects[h->second].signaled=true;return 1;});
-    reg.add("kernel32.dll","ResetEvent",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Event){set_last_error(6);return 0;}sync_objects[h->second].signaled=false;return 1;});
-    reg.add("kernel32.dll","PulseEvent",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Event){set_last_error(6);return 0;}sync_objects[h->second].signaled=false;return 1;});
+    reg.add("kernel32.dll","SetEvent",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Event){set_last_error(6);return 0;}auto& o=sync_objects[h->second];o.signaled=true;
+#if defined(_WIN32)
+        if(o.native_event)SetEvent(reinterpret_cast<HANDLE>(o.native_event));
+#endif
+        return 1;});
+    reg.add("kernel32.dll","ResetEvent",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Event){set_last_error(6);return 0;}auto& o=sync_objects[h->second];o.signaled=false;
+#if defined(_WIN32)
+        if(o.native_event)ResetEvent(reinterpret_cast<HANDLE>(o.native_event));
+#endif
+        return 1;});
+    reg.add("kernel32.dll","PulseEvent",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Event){set_last_error(6);return 0;}auto& o=sync_objects[h->second];o.signaled=false;
+#if defined(_WIN32)
+        using PulseEventFn=BOOL(WINAPI*)(HANDLE);
+        static HMODULE base=LoadLibraryExW(L"kernelbase.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+        static HMODULE k32=LoadLibraryExW(L"kernel32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+        auto pulse=base?reinterpret_cast<PulseEventFn>(GetProcAddress(base,"PulseEvent")):nullptr;
+        if(!pulse&&k32)pulse=reinterpret_cast<PulseEventFn>(GetProcAddress(k32,"PulseEvent"));
+        if(o.native_event&&pulse)pulse(reinterpret_cast<HANDLE>(o.native_event));
+#endif
+        return 1;});
     reg.add("kernel32.dll","ReleaseMutex",Conv::Stdcall,1,[this,sync_current_thread](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Mutex){set_last_error(6);return 0;}auto& o=sync_objects[h->second];if(o.owner!=sync_current_thread(c)||!o.recursion){set_last_error(288);return 0;}if(!--o.recursion)o.owner=0;return 1;});
     reg.add("kernel32.dll","ReleaseSemaphore",Conv::Stdcall,3,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));int32_t n=int32_t(c.arg(1));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Semaphore){set_last_error(6);return 0;}auto& o=sync_objects[h->second];if(n<=0){set_last_error(87);return 0;}if(uint32_t(n)>o.maximum-o.count){set_last_error(298);return 0;}if(c.arg(2))mem.w32(c.arg(2),o.count);o.count+=uint32_t(n);return 1;});
     reg.add("kernel32.dll","GetCommandLineA", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return cmdline_ptr; });
