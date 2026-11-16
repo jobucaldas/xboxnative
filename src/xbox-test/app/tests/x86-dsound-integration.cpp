@@ -65,7 +65,7 @@ int main() {
     DWORD before = 0, after = 0;
     if (FAILED(buffer->GetCurrentPosition(&before, nullptr))) return 25;
     for (unsigned i = 0; i < 100; ++i) {
-        Sleep(10);
+        WaitForSingleObject(event, 10);
         if (FAILED(buffer->GetCurrentPosition(&after, nullptr))) return 26;
         if (after != before) break;
     }
@@ -99,7 +99,42 @@ int main() {
 #include <initguid.h>
 #include "../host/x86/x86_play.h"
 
+static bool audit_dsound_slots() {
+    // Expected DWORD stack slots (including this) in the MinGW dsound.h order.
+    static constexpr unsigned device_arities[] = {3,1,1,4,2,3,3,1,2,2,2,2};
+    static constexpr unsigned buffer_arities[] = {3,1,1,2,3,4,2,2,2,2,3,8,4,2,2,2,2,2,1,5,1,4,4,5};
+    static constexpr unsigned notify_arities[] = {3,1,1,3};
+    struct Expected { const char *name; const unsigned *arities; unsigned slots; };
+    static constexpr Expected expected[] = {
+        {"IDirectSound8", device_arities, sizeof(device_arities) / sizeof(device_arities[0])},
+        {"IDirectSoundBuffer8", buffer_arities, sizeof(buffer_arities) / sizeof(buffer_arities[0])},
+        {"IDirectSoundNotify", notify_arities, sizeof(notify_arities) / sizeof(notify_arities[0])},
+    };
+    x86::Host host;
+    x86::register_dsound_com(host.com, host);
+    for (const auto &item : expected) {
+        const auto &iface = host.com.by_name(item.name);
+        if (iface.slots != item.slots) {
+            std::fprintf(stderr, "DirectSound slot audit: %s has %u slots, expected %u\\n", item.name, iface.slots, item.slots);
+            return false;
+        }
+        for (unsigned slot = 3; slot < iface.slots; ++slot) {
+            auto method = iface.methods.find(slot);
+            if (method == iface.methods.end() || method->second.argc != item.arities[slot]) {
+                std::fprintf(stderr, "DirectSound slot audit: %s slot=%u expected argc=%u actual=%u\\n", item.name, slot,
+                             item.arities[slot], method == iface.methods.end() ? 0 : method->second.argc);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 int main(int argc, char **argv) {
+    if (!audit_dsound_slots()) {
+        std::fprintf(stderr, "X86-DSOUND FAIL: DirectSound slot/arity audit against dsound.h\\n");
+        return 1;
+    }
     if (argc != 3) { std::fprintf(stderr, "usage: x86-dsound-integration <dsound.dll> <guest.exe>\n"); return 2; }
     HMODULE shim = LoadLibraryA(argv[1]);
     if (!shim) { std::fprintf(stderr, "FAIL: LoadLibrary dsound shim: %lu\n", GetLastError()); return 2; }
