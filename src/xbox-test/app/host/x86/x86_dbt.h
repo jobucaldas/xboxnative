@@ -220,11 +220,11 @@ inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
         if ((runtime_u8(b, p) >> 6) != 3) throw std::runtime_error("unsupported imul form");
         runtime_u8(b, p); return p - start;
     }
-    if (op == 0xC1) {
-        uint8_t m = runtime_u8(b, p); unsigned group = (m >> 3) & 7;
-        if ((m >> 6) != 3 || (group != 0 && group != 1 && group != 4 && group != 5 && group != 7))
-            throw std::runtime_error("unsupported shift form");
-        runtime_u8(b, p); return p - start;
+    if (op == 0xC1 || op == 0xD1 || op == 0xD3) {
+        uint8_t m = runtime_u8(b, p);
+        if ((m >> 6) != 3) throw std::runtime_error("unsupported shift form");
+        if (op == 0xC1) runtime_u8(b, p);
+        return p - start;
     }
     throw std::runtime_error("unsupported DBT opcode");
 }
@@ -304,9 +304,10 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
         } else if (op == 0x6B) {
             uint8_t m = runtime_u8(guest, p), dst = runtime_reg((m >> 3) & 7), src = runtime_reg(m & 7);
             out.rex(dst, 0, src); out.b(op); out.modrm(3, dst, src); out.b(runtime_u8(guest, p));
-        } else if (op == 0xC1) {
+        } else if (op == 0xC1 || op == 0xD1 || op == 0xD3) {
             uint8_t m = runtime_u8(guest, p), group = (m >> 3) & 7, r = runtime_reg(m & 7);
-            out.rex(0, 0, r); out.b(op); out.modrm(3, group, r); out.b(runtime_u8(guest, p));
+            out.rex(0, 0, r); out.b(op); out.modrm(3, group, r);
+            if (op == 0xC1) out.b(runtime_u8(guest, p));
         } else if (op == 0x74 || op == 0x75) {
             int8_t rel = int8_t(runtime_u8(guest, p));
             uint32_t target = guest_pc + uint32_t(p) + uint32_t(int32_t(rel));

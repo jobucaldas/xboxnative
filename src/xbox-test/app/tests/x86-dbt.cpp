@@ -294,7 +294,7 @@ struct RuntimeMachine {
 };
 static void runtime_compare(const std::vector<uint8_t>& code, unsigned instructions, std::mt19937& rng,
                             const uint32_t initial[8], uint32_t flags, const uint8_t data[3 * PAGE],
-                            uint64_t& translated_cases) {
+                            uint64_t& translated_cases, uint32_t compared_flags = FLAG_MASK) {
     static RuntimeMachine translated, interpreted;
     translated.load(code); interpreted.load(code);
     translated.memory.write_bytes(DATA, data, 3 * PAGE); interpreted.memory.write_bytes(DATA, data, 3 * PAGE);
@@ -309,7 +309,7 @@ static void runtime_compare(const std::vector<uint8_t>& code, unsigned instructi
     if (next != state.eip) throw std::runtime_error("runtime DBT returned a different EIP");
     for (unsigned i = 0; i < instructions; ++i) interpreted.cpu.step();
     if (std::memcmp(state.reg, interpreted.cpu.reg, sizeof state.reg) ||
-        ((state.eflags ^ interpreted.cpu.eflags) & FLAG_MASK) || state.eip != interpreted.cpu.eip ||
+        ((state.eflags ^ interpreted.cpu.eflags) & compared_flags) || state.eip != interpreted.cpu.eip ||
         std::memcmp(translated.memory.base() + DATA, interpreted.memory.base() + DATA, 3 * PAGE)) {
         std::fprintf(stderr,"mismatch case=%llu code:",static_cast<unsigned long long>(translated_cases));
         for(uint8_t b:code) std::fprintf(stderr," %02x",b);
@@ -411,8 +411,29 @@ static void randomized_runtime_differential() {
         }
         runtime_compare(code,1,rng,regs,flags,data,alu_cases);
     }
-    std::printf("X86-DBT PASS: randomized runtime differential blocks address=%llu alu=%llu (5000 each)\n",
-                (unsigned long long)address_cases, (unsigned long long)alu_cases);
+    uint64_t shift_cases = 0;
+    for (unsigned n = 0; n != 5000; ++n) {
+        uint32_t regs[8]; for (uint32_t& r : regs) r = rng();
+        for (uint8_t& b : data) b = uint8_t(rng());
+        uint32_t flags = 2u | (rng() & FLAG_MASK); std::vector<uint8_t> code;
+        unsigned group = n % 8, target = rng() & 7, form = n % 3;
+        unsigned count = form == 0 ? 1 : unsigned(rng() & 0xff);
+        if (form == 0) code = {0xD1, uint8_t(0xC0 | (group << 3) | target)};
+        else if (form == 1) code = {0xC1, uint8_t(0xC0 | (group << 3) | target), uint8_t(count)};
+        else { code = {0xD3, uint8_t(0xC0 | (group << 3) | target)}; regs[ECX] = count; }
+        unsigned effective = (form == 2 ? regs[ECX] : count) & 31;
+        uint32_t compared = FLAG_MASK;
+        if (effective) {
+            if (group <= 3) { if (effective != 1) compared &= ~uint32_t(OF); }
+            else {
+                compared = DF | CF | PF | ZF | SF;
+                if (effective == 1) compared |= OF;
+            }
+        }
+        runtime_compare(code,1,rng,regs,flags,data,shift_cases,compared);
+    }
+    std::printf("X86-DBT PASS: randomized runtime differential blocks address=%llu alu=%llu shifts=%llu (5000 each)\n",
+                (unsigned long long)address_cases, (unsigned long long)alu_cases, (unsigned long long)shift_cases);
 }
 
 static uint32_t native_integer() {

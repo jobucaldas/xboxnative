@@ -219,14 +219,24 @@ struct Cpu {
         cnt &= 31; if (!cnt) return a & mask(n);
         unsigned bits = 8 * n; uint32_t m = mask(n); a &= m; uint32_t r; bool cf;
         switch (op) {
-        case 0: { unsigned k = cnt % bits; r = k ? ((a << k) | (a >> (bits - k))) & m : a; cf = r & 1; setf(CF, cf); if (cnt == 1) setf(OF, bool(r & msb(n)) != cf); return r; }
-        case 1: { unsigned k = cnt % bits; r = k ? ((a >> k) | (a << (bits - k))) & m : a; cf = r & msb(n); setf(CF, cf); if (cnt == 1) setf(OF, bool(r & msb(n)) != bool(r & (msb(n) >> 1))); return r; }
-        case 4: case 6: { uint64_t t = uint64_t(a) << cnt; r = uint32_t(t) & m; setf(CF, t >> bits & 1); setf(OF, bool(r & msb(n)) != bool(t >> bits & 1)); break; }
-        case 5: r = a >> cnt; setf(CF, (a >> (cnt - 1)) & 1); setf(OF, a & msb(n)); break;
-        case 7: { int32_t s = int32_t(sx(a, n)); r = uint32_t(s >> cnt) & m; setf(CF, (uint32_t(s) >> (cnt - 1)) & 1); setf(OF, 0); break; }
-        default: unsupported("rcl/rcr");
+        case 0: { unsigned k = cnt % bits; if (!k) { setf(CF, a & 1); return a; } r = ((a << k) | (a >> (bits - k))) & m; cf = r & 1; setf(CF, cf); if (cnt == 1) setf(OF, bool(r & msb(n)) != cf); return r; }
+        case 1: { unsigned k = cnt % bits; if (!k) { setf(CF, a & msb(n)); return a; } r = ((a >> k) | (a << (bits - k))) & m; cf = r & msb(n); setf(CF, cf); if (cnt == 1) setf(OF, bool(r & msb(n)) != bool(r & (msb(n) >> 1))); return r; }
+        case 2: case 3: {
+            cf = f(CF);
+            for (unsigned i = 0; i < cnt; ++i) {
+                if (op == 2) { bool next = (a & msb(n)) != 0; a = ((a << 1) | uint32_t(cf)) & m; cf = next; }
+                else { bool next = (a & 1) != 0; a = (a >> 1) | (uint32_t(cf) << (bits - 1)); cf = next; }
+            }
+            r = a; setf(CF, cf);
+            if (cnt == 1) setf(OF, op == 2 ? bool(r & msb(n)) != cf : bool(r & msb(n)) != bool(r & (msb(n) >> 1)));
+            return r;
         }
-        szp(r, n); setf(AF, 0); return r;
+        case 4: case 6: { uint64_t t = uint64_t(a) << cnt; r = uint32_t(t) & m; cf = (t >> bits) & 1; setf(CF, cf); if (cnt == 1) setf(OF, bool(r & msb(n)) != cf); break; }
+        case 5: r = a >> cnt; setf(CF, (a >> (cnt - 1)) & 1); if (cnt == 1) setf(OF, a & msb(n)); break;
+        case 7: { int32_t s = int32_t(sx(a, n)); r = uint32_t(s >> cnt) & m; setf(CF, (uint32_t(s) >> (cnt - 1)) & 1); if (cnt == 1) setf(OF, 0); break; }
+        default: unsupported("shift group");
+        }
+        szp(r, n); return r;
     }
     bool cond(unsigned c) const {
         bool r;
