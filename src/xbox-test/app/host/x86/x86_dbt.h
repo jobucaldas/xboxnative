@@ -174,6 +174,28 @@ inline void runtime_emit_memory_ea(Emitter& out, uint8_t op, uint8_t guest_reg, 
     uint8_t r = runtime_reg(guest_reg);
     out.rex(r, 0, 11); out.b(op); out.modrm(0, r, 3);
 }
+inline void runtime_emit_guest_stack_address(Emitter& out) {
+    out.rex(11, runtime_reg(4), 12, true); out.b(0x8D); out.modrm(0, 11, 4); out.b(uint8_t(((runtime_reg(4) & 7) << 3) | (12 & 7)));
+}
+inline void runtime_emit_guest_stack_adjust(Emitter& out, bool push, uint32_t amount = 4) {
+    uint8_t sp = runtime_reg(4); out.rex(sp, 0, sp); out.b(0x8D); out.modrm(2, sp, sp); out.d(push ? uint32_t(0u - amount) : amount);
+}
+inline void runtime_emit_guest_push_reg(Emitter& out, uint8_t guest_reg) {
+    uint8_t r = runtime_reg(guest_reg); out.rex(13, 0, r); out.b(0x8B); out.modrm(3, 13, r);
+    runtime_emit_guest_stack_adjust(out, true); runtime_emit_guest_stack_address(out);
+    out.rex(13, 0, 11); out.b(0x89); out.modrm(0, 13, 3);
+}
+inline void runtime_emit_guest_pop_reg(Emitter& out, uint8_t guest_reg) {
+    runtime_emit_guest_stack_address(out); uint8_t r = runtime_reg(guest_reg);
+    if (guest_reg == 4) {
+        out.rex(13, 0, 11); out.b(0x8B); out.modrm(0, 13, 3);
+        runtime_emit_guest_stack_adjust(out, false);
+        out.rex(r, 0, 13); out.b(0x8B); out.modrm(3, r, 13);
+    } else {
+        out.rex(r, 0, 11); out.b(0x8B); out.modrm(0, r, 3);
+        runtime_emit_guest_stack_adjust(out, false);
+    }
+}
 
 // Decode one encoding from the emitter's explicit subset. Memory accesses are
 // intentionally restricted to absolute dwords; the dispatcher validates both
@@ -182,6 +204,18 @@ inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
                                   uint32_t& memory_ea, bool& memory_operand) {
     size_t p = start; uint8_t op = runtime_u8(b, p);
     memory_operand = false;
+    if (op >= 0x50 && op <= 0x5F) return p - start;
+    if (op == 0x68) { runtime_u32(b, p); return p - start; }
+    if (op == 0x6A) { runtime_u8(b, p); return p - start; }
+    if (op == 0xC2) { runtime_u8(b, p); runtime_u8(b, p); return p - start; }
+    if (op == 0xC3 || op == 0xC9) return p - start;
+    if (op == 0xE8) { runtime_u32(b, p); return p - start; }
+    if (op == 0x8F) {
+        uint8_t m = runtime_u8(b, p);
+        if (((m >> 3) & 7) != 0) throw std::runtime_error("unsupported pop group");
+        if ((m >> 6) != 3) runtime_address(b, p, m);
+        return p - start;
+    }
     if (op >= 0xB8 && op <= 0xBF) { runtime_u32(b, p); return p - start; }
     if (op == 0x0F) {
         uint8_t op2 = runtime_u8(b, p);
@@ -212,7 +246,7 @@ inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
         }
         if (op == 0x81 || (op == 0xF7 && group == 0)) runtime_u32(b, p);
         else if (op == 0x83 || (op == 0xF6 && group == 0)) runtime_u8(b, p);
-        if (unary && group > 3) throw std::runtime_error("unsupported unary DBT group");
+        if (unary && group > 3 && !(op == 0xFF && (group == 4 || group == 6))) throw std::runtime_error("unsupported unary DBT group");
         if (op == 0xFE && group > 1) throw std::runtime_error("unsupported byte unary DBT group");
         return p - start;
     }
@@ -231,7 +265,7 @@ inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
 
 inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest, uint32_t guest_pc) {
     Emitter out;
-    out.b(0x57); out.b(0x41); out.b(0x54); // save state* and preserve R12
+    out.b(0x57); out.b(0x41); out.b(0x54); out.b(0x41); out.b(0x55); out.b(0x41); out.b(0x56); // save state*, preserve R12-R14
     out.b(0x48); out.b(0x83); out.b(0xEC); out.b(8);
     runtime_mov_reg_mem(out, 11, 7, 36);
     out.b(0x41); out.b(0x53); out.b(0x9D);
@@ -241,7 +275,32 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
     bool branch_terminated = false;
     while (p < guest.size()) {
         size_t begin = p; uint8_t op = runtime_u8(guest, p);
-        if (op >= 0xB8 && op <= 0xBF) runtime_mov_imm(out, runtime_reg(op - 0xB8), runtime_u32(guest, p));
+        if (op >= 0x50 && op <= 0x57) {
+            runtime_emit_guest_push_reg(out, op & 7);
+        } else if (op >= 0x58 && op <= 0x5F) {
+            runtime_emit_guest_pop_reg(out, op & 7);
+        } else if (op == 0x68 || op == 0x6A) {
+            uint32_t value = op == 0x68 ? runtime_u32(guest, p) : uint32_t(int32_t(int8_t(runtime_u8(guest, p))));
+            runtime_mov_imm(out, 13, value); runtime_emit_guest_stack_adjust(out, true); runtime_emit_guest_stack_address(out);
+            out.rex(13, 0, 11); out.b(0x89); out.modrm(0, 13, 3);
+        } else if (op == 0x8F) {
+            uint8_t m = runtime_u8(guest, p); RuntimeAddress a;
+            if ((m >> 3) & 7) throw std::runtime_error("unsupported pop group");
+            if ((m >> 6) != 3) { a = runtime_address(guest, p, m); runtime_emit_guest_stack_address(out); out.rex(14, 0, 11); out.b(0x8B); out.modrm(0, 14, 3); runtime_emit_guest_stack_adjust(out, false); if (!a.absolute) throw std::runtime_error("unsupported translated pop memory form"); out.rex(14, 0, 12); out.b(0x89); out.modrm(2, 14, 4); out.b(0x24); out.d(a.displacement); }
+            else { runtime_emit_guest_pop_reg(out, m & 7); }
+        } else if (op == 0xC2 || op == 0xC3) {
+            uint32_t cleanup = op == 0xC2 ? runtime_u8(guest, p) | (uint32_t(runtime_u8(guest, p)) << 8) : 0;
+            runtime_emit_guest_stack_address(out); out.rex(11, 0, 11); out.b(0x8B); out.modrm(0, 11, 3); runtime_emit_guest_stack_adjust(out, false, 4 + cleanup);
+            branch_terminated = true; break;
+        } else if (op == 0xC9) {
+            out.rex(runtime_reg(5), 0, runtime_reg(4)); out.b(0x89); out.modrm(3, runtime_reg(5), runtime_reg(4));
+            runtime_emit_guest_pop_reg(out, 5);
+        } else if (op == 0xE8) {
+            uint32_t return_eip = guest_pc + uint32_t(p + 4); int32_t rel = int32_t(runtime_u32(guest, p));
+            runtime_mov_imm(out, 13, return_eip); runtime_emit_guest_stack_adjust(out, true); runtime_emit_guest_stack_address(out);
+            out.rex(13, 0, 11); out.b(0x89); out.modrm(0, 13, 3); runtime_mov_imm(out, 11, return_eip + uint32_t(rel));
+            branch_terminated = true; break;
+        } else if (op >= 0xB8 && op <= 0xBF) runtime_mov_imm(out, runtime_reg(op - 0xB8), runtime_u32(guest, p));
         else if (op == 0x0F) {
             uint8_t op2 = runtime_u8(guest, p), m = runtime_u8(guest, p);
             RuntimeAddress a; bool memory = (m >> 6) != 3;
@@ -291,9 +350,17 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
         } else if (op == 0x81 || op == 0x83 || op == 0xF6 || op == 0xF7 || op == 0xFE || op == 0xFF) {
             uint8_t m = runtime_u8(guest, p), group = uint8_t((m >> 3) & 7); bool memory = (m >> 6) != 3;
             RuntimeAddress a; if (memory) a = runtime_address(guest, p, m);
+            if (op == 0xFF && (group == 2 || group == 4 || group == 6)) {
+                if (memory) { runtime_emit_ea(out, a); out.rex(13, 0, 11); out.b(0x8B); out.modrm(0, 13, 3); }
+                else { uint8_t src = runtime_reg(m & 7); out.rex(13, 0, src); out.b(0x8B); out.modrm(3, 13, src); }
+                if (group == 6) { runtime_emit_guest_stack_adjust(out, true); runtime_emit_guest_stack_address(out); out.rex(13, 0, 11); out.b(0x89); out.modrm(0, 13, 3); }
+                else if (group == 4) { out.rex(11, 0, 13); out.b(0x8B); out.modrm(3, 11, 13); branch_terminated = true; break; }
+                else { uint32_t return_eip = guest_pc + uint32_t(p); runtime_emit_guest_stack_adjust(out, true); runtime_emit_guest_stack_address(out); out.rex(0, 0, 11); out.b(0xC7); out.modrm(0, 0, 3); out.d(return_eip); out.rex(11, 0, 13); out.b(0x8B); out.modrm(3, 11, 13); branch_terminated = true; break; }
+            } else {
             uint8_t rm = memory ? 11 : runtime_reg(m & 7);
             if (memory) runtime_emit_ea(out, a);
             out.rex(0, 0, rm); out.b(op); out.modrm(memory ? 0 : 3, group, rm);
+            }
             if (op == 0x81 || (op == 0xF7 && group == 0)) out.d(runtime_u32(guest, p));
             else if (op == 0x83 || (op == 0xF6 && group == 0)) out.b(runtime_u8(guest, p));
             if (op == 0x81 || op == 0x83) {
@@ -323,11 +390,11 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
     }
     if (!branch_terminated) runtime_mov_imm(out, 11, guest_pc + uint32_t(p));
     out.b(0x44); out.b(0x89); out.b(0x1C); out.b(0x24);
-    out.b(0x4C); out.b(0x8B); out.b(0x5C); out.b(0x24); out.b(16);
+    out.b(0x4C); out.b(0x8B); out.b(0x5C); out.b(0x24); out.b(32);
     for (unsigned i = 0; i != 8; ++i) runtime_store_reg_mem(out, 11, i * 4, runtime_reg(i));
     out.b(0x9C); out.b(0x58); out.b(0x25); out.d(0x00000CD7); runtime_store_reg_mem(out, 11, 36, 0);
     out.b(0xFC); out.b(0x8B); out.b(0x04); out.b(0x24); runtime_store_reg_mem(out, 11, 32, 0);
-    out.b(0x48); out.b(0x83); out.b(0xC4); out.b(8); out.b(0x41); out.b(0x5C); out.b(0x5F);
+    out.b(0x48); out.b(0x83); out.b(0xC4); out.b(8); out.b(0x41); out.b(0x5E); out.b(0x41); out.b(0x5D); out.b(0x41); out.b(0x5C); out.b(0x5F);
     out.b(0x8B); out.b(0x47); out.b(32); out.b(0xC3);
     return out.bytes;
 }

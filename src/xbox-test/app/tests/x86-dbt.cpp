@@ -432,8 +432,37 @@ static void randomized_runtime_differential() {
         }
         runtime_compare(code,1,rng,regs,flags,data,shift_cases,compared);
     }
-    std::printf("X86-DBT PASS: randomized runtime differential blocks address=%llu alu=%llu shifts=%llu (5000 each)\n",
-                (unsigned long long)address_cases, (unsigned long long)alu_cases, (unsigned long long)shift_cases);
+    uint64_t stack_cases = 0;
+    for (unsigned n = 0; n != 5000; ++n) {
+        uint32_t regs[8]; for (uint32_t& r : regs) r = rng();
+        for (uint8_t& b : data) b = uint8_t(rng());
+        regs[ESP] = DATA + 0x1800; regs[EBP] = DATA + 0x1c00;
+        std::vector<uint8_t> code; unsigned kind = n % 9;
+        switch (kind) {
+        case 0: code = {uint8_t(0x50 | (rng() & 7))}; break;
+        case 1: code = {uint8_t(0x58 | (rng() & 7))}; break;
+        case 2: code = {0x68, uint8_t(rng()), uint8_t(rng()), uint8_t(rng()), uint8_t(rng())}; break;
+        case 3: code = {0x6A, uint8_t(rng())}; break;
+        case 4: { uint32_t ea = DATA + 0x200 + (rng() & 0x3fc); code = {0xFF, 0x35, uint8_t(ea), uint8_t(ea >> 8), uint8_t(ea >> 16), uint8_t(ea >> 24)}; break; }
+        case 5: { uint32_t ea = DATA + 0x200 + (rng() & 0x3fc); code = {0x8F, 0x05, uint8_t(ea), uint8_t(ea >> 8), uint8_t(ea >> 16), uint8_t(ea >> 24)}; break; }
+        case 6: code = {0xE8, 0x05, 0x00, 0x00, 0x00}; break;
+        case 7: code = (rng() & 1) ? std::vector<uint8_t>{0xC3} : std::vector<uint8_t>{0xC2, 0x08, 0x00}; break;
+        default: code = {0xC9}; break;
+        }
+        if (kind == 1 || kind == 5 || kind == 7) {
+            uint32_t target = CODE + 0x400 + (rng() & 0x3fc); uint32_t at = regs[ESP];
+            data[at - DATA] = uint8_t(target); data[at - DATA + 1] = uint8_t(target >> 8);
+            data[at - DATA + 2] = uint8_t(target >> 16); data[at - DATA + 3] = uint8_t(target >> 24);
+        } else if (kind == 8) {
+            uint32_t target = CODE + 0x400 + (rng() & 0x3fc); uint32_t at = regs[EBP];
+            data[at - DATA] = uint8_t(target); data[at - DATA + 1] = uint8_t(target >> 8);
+            data[at - DATA + 2] = uint8_t(target >> 16); data[at - DATA + 3] = uint8_t(target >> 24);
+        }
+        runtime_compare(code, 1, rng, regs, 2u | (rng() & FLAG_MASK), data, stack_cases);
+    }
+    std::printf("X86-DBT PASS: randomized runtime differential blocks address=%llu alu=%llu shifts=%llu stack=%llu (5000 each)\n",
+                (unsigned long long)address_cases, (unsigned long long)alu_cases,
+                (unsigned long long)shift_cases, (unsigned long long)stack_cases);
 }
 
 static uint32_t native_integer() {
