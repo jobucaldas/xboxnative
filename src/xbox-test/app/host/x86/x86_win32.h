@@ -130,6 +130,122 @@ inline void register_win32(Registry& r, Host& h) {
         c.mem.w32(c.fs_base + 0x34, 120);  // ERROR_CALL_NOT_IMPLEMENTED on this partition
         return 0;
     });
+    auto unavailable = [&r, count](const char* name, unsigned argc, uint32_t result = 0) {
+        r.add("user32.dll", name, Conv::Stdcall, argc, [count, name, result](Cpu& c) -> uint32_t {
+            count(name);
+            c.mem.w32(c.fs_base + 0x34, 120);  // ERROR_CALL_NOT_IMPLEMENTED: no host record operation
+            return result;
+        });
+    };
+    unavailable("ShowWindow", 2);
+    unavailable("UpdateWindow", 1);
+    unavailable("SetWindowPos", 7);
+    unavailable("MoveWindow", 6);
+    unavailable("GetClientRect", 2);
+    unavailable("GetWindowRect", 2);
+    unavailable("AdjustWindowRect", 3);
+    unavailable("AdjustWindowRectEx", 4);
+    unavailable("ClientToScreen", 2);
+    unavailable("ScreenToClient", 2);
+    unavailable("SetWindowTextA", 2);
+    unavailable("SetWindowTextW", 2);
+    unavailable("GetWindowLongA", 2);
+    unavailable("GetWindowLongW", 2);
+    unavailable("SetWindowLongA", 3);
+    unavailable("SetWindowLongW", 3);
+    unavailable("LoadCursorA", 2);
+    unavailable("LoadCursorW", 2);
+    unavailable("SetCursor", 1);
+    unavailable("ShowCursor", 1, uint32_t(-1));
+    unavailable("ClipCursor", 1);
+    unavailable("GetCursorPos", 1);
+    unavailable("LoadIconA", 2);
+    unavailable("LoadIconW", 2);
+    unavailable("GetForegroundWindow", 0);
+    unavailable("SetForegroundWindow", 1);
+    unavailable("SetFocus", 1);
+    unavailable("GetFocus", 0);
+    unavailable("GetActiveWindow", 0);
+    unavailable("IsWindowVisible", 1);
+    unavailable("IsIconic", 1);
+    unavailable("PeekMessageA", 5);
+    unavailable("PeekMessageW", 5);
+    unavailable("GetMessageA", 4, uint32_t(-1));
+    unavailable("GetMessageW", 4, uint32_t(-1));
+    unavailable("TranslateMessage", 1);
+    unavailable("DispatchMessageA", 1);
+    unavailable("DispatchMessageW", 1);
+    unavailable("PostQuitMessage", 1);
+    unavailable("PostMessageA", 4);
+    unavailable("PostMessageW", 4);
+    unavailable("SendMessageA", 4);
+    unavailable("SendMessageW", 4);
+    unavailable("DefWindowProcA", 4);
+    unavailable("DefWindowProcW", 4);
+    // Other frequent user32 imports in the ranked gap reports. These remain
+    // explicit unsupported results until their input/output contracts can be
+    // backed by the UWP record layer.
+    unavailable("GetWindowTextA", 3);
+    unavailable("GetWindowTextW", 3);
+    unavailable("GetWindowTextLengthA", 1);
+    unavailable("GetWindowTextLengthW", 1);
+    unavailable("GetKeyState", 1);
+    unavailable("GetAsyncKeyState", 1);
+    unavailable("GetKeyboardState", 1);
+    unavailable("GetKeyNameTextA", 3);
+    unavailable("GetKeyNameTextW", 3);
+    unavailable("GetKeyboardType", 1);
+    unavailable("MapVirtualKeyA", 2);
+    unavailable("MapVirtualKeyW", 2);
+    unavailable("GetWindowThreadProcessId", 2);
+    unavailable("GetParent", 1);
+    unavailable("GetDesktopWindow", 0);
+    unavailable("GetDlgItem", 2);
+    unavailable("IsWindow", 1);
+    unavailable("AllowSetForegroundWindow", 1);
+    unavailable("CallNextHookEx", 4);
+    unavailable("DialogBoxParamW", 5, uint32_t(-1));
+    unavailable("EndDialog", 2);
+    unavailable("GetMonitorInfoA", 2);
+    unavailable("GetMonitorInfoW", 2);
+    unavailable("GetRawInputData", 5, uint32_t(-1));
+    unavailable("GetWindowLongPtrW", 2);
+    unavailable("LoadStringW", 4);
+    unavailable("MapWindowPoints", 4);
+    unavailable("MonitorFromRect", 2);
+    unavailable("MonitorFromWindow", 2);
+    unavailable("MsgWaitForMultipleObjectsEx", 5, uint32_t(-1));
+    unavailable("OffsetRect", 3);
+    auto message_box = [&r, &h, count](const char* name, bool wide) {
+        r.add("user32.dll", name, Conv::Stdcall, 4, [&h, count, name, wide](Cpu& c) -> uint32_t {
+            count(name);
+            auto read_wide = [&c](uint32_t address) {
+                std::u16string text;
+                if (!address) return text;
+                for (uint32_t i = 0; i < 32768; ++i) {
+                    uint16_t ch = uint16_t(c.mem.r(address + i * 2, 2));
+                    if (!ch) return text;
+                    text.push_back(char16_t(ch));
+                }
+                throw Fault(FaultKind::AccessViolation, c.eip, address, "unterminated guest UTF-16 string");
+            };
+            const uint32_t text_address = c.arg(1), title_address = c.arg(2);
+            std::u16string text, title;
+            if (wide) { text = read_wide(text_address); title = read_wide(title_address); }
+            else {
+                const std::string a = text_address ? c.mem.read_cstr(text_address, 32768) : std::string();
+                const std::string b = title_address ? c.mem.read_cstr(title_address, 32768) : std::string();
+                text.assign(a.begin(), a.end()); title.assign(b.begin(), b.end());
+            }
+            std::string line = "x86 MessageBox" + std::string(wide ? "W: " : "A: ");
+            line.append(title.begin(), title.end()); line += ": "; line.append(text.begin(), text.end()); line += "\n";
+            h.out += line;
+            if (h.tee) h.tee(line);
+            return 1;  // IDOK: Play logs rather than opening a desktop dialog.
+        });
+    };
+    message_box("MessageBoxA", false);
+    message_box("MessageBoxW", true);
     r.add("msvcrt.dll", "strlen", Conv::Cdecl, 1, [count](Cpu& c) -> uint32_t { count("strlen"); return uint32_t(c.mem.read_cstr(c.arg(0)).size()); });
     r.add("msvcrt.dll", "qsort", Conv::Cdecl, 4, [count](Cpu& c) -> uint32_t {
         count("qsort"); uint32_t base = c.arg(0), n = c.arg(1), size = c.arg(2), cmp = c.arg(3);

@@ -47,5 +47,41 @@ void WINAPI entry(void) {
         CreateFontA(0,0,0,0,0,0,0,0,0,0,0,0,0,0) != NULL || GetTextMetricsW(NULL, NULL) ||
         GetTextMetricsA(NULL, NULL) || GetTextExtentPoint32W(NULL, L"x", 1, NULL) ||
         GetTextExtentPoint32A(NULL, "x", 1, NULL) || TextOutW(NULL,0,0,L"x",1) || TextOutA(NULL,0,0,"x",1)) fail(13);
+    RECT rect = {0,0,10,10}; POINT point = {1,2}; MSG msg = {0}; DWORD process_id = 0;
+    if (ShowWindow(window, SW_SHOW) || UpdateWindow(window) || SetWindowPos(window,NULL,0,0,10,10,0) ||
+        MoveWindow(window,0,0,10,10,FALSE) || GetClientRect(window,&rect) || GetWindowRect(window,&rect) ||
+        AdjustWindowRect(&rect,WS_OVERLAPPEDWINDOW,FALSE) || AdjustWindowRectEx(&rect,WS_OVERLAPPEDWINDOW,FALSE,0) ||
+        ClientToScreen(window,&point) || ScreenToClient(window,&point) ||
+        SetWindowTextA(window,"title") || SetWindowTextW(window,L"title") ||
+        GetWindowLongA(window,GWL_STYLE) || GetWindowLongW(window,GWL_STYLE) ||
+        SetWindowLongA(window,GWL_STYLE,WS_VISIBLE) || SetWindowLongW(window,GWL_STYLE,WS_VISIBLE) ||
+        LoadCursorA(NULL,MAKEINTRESOURCEA(32512)) || LoadCursorW(NULL,MAKEINTRESOURCEW(32512)) || SetCursor(NULL) ||
+        ShowCursor(TRUE) != -1 || ClipCursor(NULL) || GetCursorPos(&point) ||
+        LoadIconA(NULL,MAKEINTRESOURCEA(32512)) || LoadIconW(NULL,MAKEINTRESOURCEW(32512)) ||
+        GetForegroundWindow() || SetForegroundWindow(window) || SetFocus(window) || GetFocus() || GetActiveWindow() ||
+        IsWindowVisible(window) || IsIconic(window) ||
+        PeekMessageA(&msg,window,0,0,PM_REMOVE) || PeekMessageW(&msg,window,0,0,PM_REMOVE) ||
+        GetMessageA(&msg,window,0,0) != -1 || GetMessageW(&msg,window,0,0) != -1 ||
+        TranslateMessage(&msg) || DispatchMessageA(&msg) || DispatchMessageW(&msg) ||
+        PostMessageA(window,WM_APP,0,0) || PostMessageW(window,WM_APP,0,0) ||
+        SendMessageA(window,WM_APP,0,0) || SendMessageW(window,WM_APP,0,0) ||
+        DefWindowProcA(window,WM_APP,0,0) || DefWindowProcW(window,WM_APP,0,0) ||
+        GetWindowTextA(window,(LPSTR)&rect,sizeof(rect)) || GetWindowTextW(window,(LPWSTR)&rect,sizeof(rect)) ||
+        GetWindowTextLengthA(window) || GetWindowTextLengthW(window) || GetKeyState(VK_RETURN) ||
+        GetAsyncKeyState(VK_RETURN) || GetKeyboardState((PBYTE)&rect) || GetKeyNameTextA(0,(LPSTR)&rect,sizeof(rect)) ||
+        GetKeyNameTextW(0,(LPWSTR)&rect,sizeof(rect)) || GetKeyboardType(0) || MapVirtualKeyA(0,MAPVK_VK_TO_VSC) ||
+        MapVirtualKeyW(0,MAPVK_VK_TO_VSC) || GetWindowThreadProcessId(window,&process_id) || GetParent(window) ||
+        GetDesktopWindow() || GetDlgItem(window,1) || IsWindow(window)) fail(14);
+    if (AllowSetForegroundWindow(0) || CallNextHookEx(NULL,0,0,0)) fail(17);
+    if (DialogBoxParamW(NULL,NULL,window,NULL,0) != -1 || EndDialog(window,0)) fail(18);
+    if (GetMonitorInfoA(NULL,NULL) || GetMonitorInfoW(NULL,NULL)) fail(19);
+    if (GetRawInputData(NULL,0,NULL,NULL,0) != (UINT)-1 || GetWindowLongPtrW(window,GWL_STYLE) ||
+        LoadStringW(NULL,1,(LPWSTR)&rect,sizeof(rect))) fail(20);
+    if (MapWindowPoints(window,NULL,&point,1) || MonitorFromRect(&rect,0) || MonitorFromWindow(window,0)) fail(21);
+    if (MsgWaitForMultipleObjectsEx(0,NULL,0,0,0) != WAIT_FAILED || OffsetRect(&rect,0,0)) fail(22);
+    PostQuitMessage(0);
+    if (GetLastError() != ERROR_CALL_NOT_IMPLEMENTED) fail(15);
+    if (MessageBoxA(window,"route test","title",MB_OK) != IDOK ||
+        MessageBoxW(window,L"route test",L"title",MB_OK) != IDOK) fail(16);
     ExitProcess(0);
 }
