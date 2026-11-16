@@ -117,6 +117,147 @@ inline void register_win32(Registry& r, Host& h) {
     r.add("kernel32.dll", "SetLastError", Conv::Stdcall, 1, [count](Cpu& c) -> uint32_t { count("SetLastError"); c.mem.w32(c.fs_base + 0x34, c.arg(0)); return 0; });
     r.add("kernel32.dll", "GetLastError", Conv::Stdcall, 0, [count](Cpu& c) -> uint32_t { count("GetLastError"); return c.mem.r32(c.fs_base + 0x34); });
     r.add("kernel32.dll", "ExitProcess", Conv::Stdcall, 1, [count](Cpu& c) -> uint32_t { count("ExitProcess"); c.exited = true; c.exit_code = c.arg(0); return 0; });
+    r.add("user32.dll", "EnumDisplayMonitors", Conv::Stdcall, 4, [&h, count](Cpu& c) -> uint32_t {
+        count("EnumDisplayMonitors");
+        constexpr uint32_t monitor = 0xCE000001u;
+        int width = 1280, height = 720;
+        if (h.system_metrics) { h.system_metrics(0, width); h.system_metrics(1, height); }
+#if defined(_WIN32)
+        else {
+            using Fn = int (WINAPI*)(int);
+            static HMODULE user = LoadLibraryExW(L"user32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+            auto fn = user ? reinterpret_cast<Fn>(GetProcAddress(user, "GetSystemMetrics")) : nullptr;
+            if (fn) { width = fn(0); height = fn(1); }
+        }
+#endif
+        uint32_t rect = c.reg[ESP] - 64, clip = c.arg(1), callback = c.arg(2);
+        if (clip && (int32_t(c.mem.r32(clip + 8)) <= 0 || int32_t(c.mem.r32(clip + 12)) <= 0)) return 1;
+        c.mem.w32(rect, 0); c.mem.w32(rect + 4, 0);
+        c.mem.w32(rect + 8, uint32_t(width)); c.mem.w32(rect + 12, uint32_t(height));
+        if (callback && !c.call(callback, {monitor, 0, rect, c.arg(3)})) return 0;
+        return 1;
+    });
+    auto enum_display_settings = [&h](Cpu& c) -> uint32_t {
+        if (c.arg(0)) {
+            const char16_t name[] = u"\\\\.\\DISPLAY1";
+            for (size_t i = 0; i < sizeof(name) / sizeof(name[0]); ++i)
+                if (c.mem.r(c.arg(0) + uint32_t(i * 2), 2) != name[i]) return 0;
+        }
+        if (c.arg(1) != 0xFFFFFFFFu || !c.arg(2) || c.mem.r(c.arg(2) + 68, 2) < 220) return 0;
+        int width = 1280, height = 720;
+        if (h.system_metrics) { h.system_metrics(0, width); h.system_metrics(1, height); }
+#if defined(_WIN32)
+        else {
+            using Fn = int (WINAPI*)(int);
+            static HMODULE user = LoadLibraryExW(L"user32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+            auto fn = user ? reinterpret_cast<Fn>(GetProcAddress(user, "GetSystemMetrics")) : nullptr;
+            if (fn) { width = fn(0); height = fn(1); }
+        }
+#endif
+        uint8_t mode[220]{};
+        c.mem.write_bytes(c.arg(2), mode, sizeof(mode));
+        c.mem.w(c.arg(2) + 68, 220, 2); c.mem.w32(c.arg(2) + 72, 0x005c0000u);
+        c.mem.w32(c.arg(2) + 168, 32); c.mem.w32(c.arg(2) + 172, uint32_t(width));
+        c.mem.w32(c.arg(2) + 176, uint32_t(height)); c.mem.w32(c.arg(2) + 184, 60); return 1;
+    };
+    r.add("user32.dll", "EnumDisplaySettingsW", Conv::Stdcall, 3, [count, enum_display_settings](Cpu& c) -> uint32_t {
+        count("EnumDisplaySettingsW"); return enum_display_settings(c);
+    });
+    r.add("user32.dll", "EnumDisplaySettingsExW", Conv::Stdcall, 4, [count, enum_display_settings](Cpu& c) -> uint32_t {
+        count("EnumDisplaySettingsExW"); return enum_display_settings(c);
+    });
+    r.add("gdi32.dll", "CreateDCW", Conv::Stdcall, 4, [count](Cpu& c) -> uint32_t {
+        count("CreateDCW"); c.mem.w32(c.fs_base + 0x34, 120); return 0;
+    });
+    r.add("user32.dll", "EnumDisplayDevicesW", Conv::Stdcall, 4, [count](Cpu& c) -> uint32_t {
+        count("EnumDisplayDevicesW");
+        const char16_t device[] = u"\\\\.\\DISPLAY1";
+        if (c.arg(0)) for (size_t i = 0; i < sizeof(device) / sizeof(device[0]); ++i)
+            if (c.mem.r(c.arg(0) + uint32_t(i * 2), 2) != device[i]) return 0;
+        uint32_t out = c.arg(2);
+        if (c.arg(1) || !out || c.mem.r32(out) < 840) return 0;
+        const char16_t name[] = u"\\\\.\\DISPLAY1", description[] = u"xboxnative virtual display";
+        for (size_t i = 0; i < sizeof(name) / sizeof(name[0]); ++i) c.mem.w(out + 4 + uint32_t(i * 2), name[i], 2);
+        for (size_t i = 0; i < sizeof(description) / sizeof(description[0]); ++i) c.mem.w(out + 68 + uint32_t(i * 2), description[i], 2);
+        c.mem.w32(out + 324, 1); return 1;
+    });
+    r.add("user32.dll", "GetMonitorInfoW", Conv::Stdcall, 2, [&h, count](Cpu& c) -> uint32_t {
+        count("GetMonitorInfoW");
+        uint32_t monitor = c.arg(0), info = c.arg(1);
+        if (monitor != 0xCE000001u || !info || c.mem.r32(info) < 40) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
+        uint32_t info_size = c.mem.r32(info);
+        int width = 1280, height = 720;
+        if (h.system_metrics) { h.system_metrics(0, width); h.system_metrics(1, height); }
+#if defined(_WIN32)
+        else {
+            using Fn = int (WINAPI*)(int);
+            static HMODULE user = LoadLibraryExW(L"user32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+            auto fn = user ? reinterpret_cast<Fn>(GetProcAddress(user, "GetSystemMetrics")) : nullptr;
+            if (fn) { width = fn(0); height = fn(1); }
+        }
+#endif
+        c.mem.w32(info + 4, 0); c.mem.w32(info + 8, 0);
+        c.mem.w32(info + 12, uint32_t(width)); c.mem.w32(info + 16, uint32_t(height));
+        c.mem.w32(info + 20, 0); c.mem.w32(info + 24, 0);
+        c.mem.w32(info + 28, uint32_t(width)); c.mem.w32(info + 32, uint32_t(height));
+        c.mem.w32(info + 36, 1);
+        if (info_size >= 104) {
+            const char16_t name[] = u"\\\\.\\DISPLAY1";
+            for (size_t i = 0; i < sizeof(name) / sizeof(name[0]); ++i) c.mem.w(info + 40 + uint32_t(i * 2), name[i], 2);
+        }
+        return 1;
+    });
+    r.add("user32.dll", "MonitorFromWindow", Conv::Stdcall, 2, [count](Cpu&) -> uint32_t {
+        count("MonitorFromWindow"); return 0xCE000001u;
+    });
+    r.add("user32.dll", "MonitorFromPoint", Conv::Stdcall, 3, [count](Cpu&) -> uint32_t {
+        count("MonitorFromPoint"); return 0xCE000001u;
+    });
+    r.add("user32.dll", "MonitorFromRect", Conv::Stdcall, 2, [count](Cpu&) -> uint32_t {
+        count("MonitorFromRect"); return 0xCE000001u;
+    });
+    r.add("user32.dll", "MapVirtualKeyW", Conv::Stdcall, 2, [count](Cpu& c) -> uint32_t {
+        count("MapVirtualKeyW"); uint32_t code = c.arg(0), type = c.arg(1);
+#if defined(_WIN32)
+        using Fn = UINT (WINAPI*)(UINT, UINT);
+        static HMODULE user = LoadLibraryExW(L"user32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        auto fn = user ? reinterpret_cast<Fn>(GetProcAddress(user, "MapVirtualKeyW")) : nullptr;
+        if (fn) return fn(code, type);
+#endif
+        if (type == 0 || type == 4) {
+            static const uint8_t letters[] = {0x1e,0x30,0x2e,0x20,0x12,0x21,0x22,0x23,0x17,0x24,0x25,0x26,0x32,0x31,0x18,0x19,0x10,0x13,0x1f,0x14,0x16,0x2f,0x11,0x2d,0x15,0x2c};
+            if (code >= 'A' && code <= 'Z') return letters[code - 'A'];
+            if (code >= '1' && code <= '9') return code - '1' + 2;
+            if (code == '0') return 0x0b;
+            switch (code) { case 0x08: return 0x0e; case 0x09: return 0x0f; case 0x0d: return 0x1c; case 0x1b: return 0x01; case 0x20: return 0x39; default: return 0; }
+        }
+        if (type == 2) {
+            if (code >= 'A' && code <= 'Z') return code;
+            if (code >= '0' && code <= '9') return code;
+            if (code == 0x20) return code;
+        }
+        return 0;
+    });
+    r.add("user32.dll", "LoadCursorW", Conv::Stdcall, 2, [count](Cpu& c) -> uint32_t {
+        count("LoadCursorW"); (void)c;
+#if defined(_WIN32)
+        using Fn = HCURSOR (WINAPI*)(HINSTANCE, LPCWSTR);
+        static HMODULE user = LoadLibraryExW(L"user32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        auto fn = user ? reinterpret_cast<Fn>(GetProcAddress(user, "LoadCursorW")) : nullptr;
+        if (fn) return uint32_t(reinterpret_cast<uintptr_t>(fn(reinterpret_cast<HINSTANCE>(uintptr_t(c.arg(0))), reinterpret_cast<LPCWSTR>(uintptr_t(c.arg(1))))));
+#endif
+        return 0xCE000002u;
+    });
+    r.add("user32.dll", "GetKeyState", Conv::Stdcall, 1, [count](Cpu& c) -> uint32_t {
+        count("GetKeyState"); (void)c;
+#if defined(_WIN32)
+        using Fn = SHORT (WINAPI*)(int);
+        static HMODULE user = LoadLibraryExW(L"user32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        auto fn = user ? reinterpret_cast<Fn>(GetProcAddress(user, "GetKeyState")) : nullptr;
+        if (fn) return uint32_t(int32_t(fn(int(c.arg(0)))));
+#endif
+        return 0;
+    });
     r.add("user32.dll", "GetSystemMetrics", Conv::Stdcall, 1, [&h, count](Cpu& c) -> uint32_t {
         count("GetSystemMetrics");
         int value = 0;

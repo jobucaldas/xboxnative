@@ -33,6 +33,78 @@ static bool verify_critical_section_routes() {
     std::fprintf(stderr, "X86-CRITICAL-SECTION PASS: VC110 forced debug records support all 64 CRT locks\n");
     return true;
 }
+static bool verify_display_routes() {
+    Memory mem; mem.map(0x1000, 0x20000, PROT_R | PROT_W | PROT_X); mem.map(TEB_ADDR, 0x1000, PROT_R | PROT_W);
+    ThunkTable table; Host host; Registry reg; register_win32(reg, host);
+    host.system_metrics=[](int index,int& value) {
+        if(index==0){value=1280;return true;}
+        if(index==1){value=720;return true;}
+        return false;
+    };
+    Cpu cpu(mem, table); cpu.reg[ESP]=0x1f000; cpu.fs_base=TEB_ADDR;
+    auto route = [&](const char* name, unsigned argc, const char* dll="user32.dll") -> Thunk* {
+        auto it=reg.map.find({dll,Registry::key_sym(name)});
+        if(it==reg.map.end()||it->second.conv!=Conv::Stdcall||it->second.argc!=argc) return nullptr;
+        return &it->second;
+    };
+    auto args = [&](std::initializer_list<uint32_t> values) {
+        unsigned i=0; for(uint32_t value:values) mem.w32(cpu.reg[ESP]+4+4*i++,value);
+    };
+    auto check = [](bool condition,const char* message) {
+        if(!condition) std::fprintf(stderr,"X86-DISPLAY FAIL: %s\n",message);
+        return condition;
+    };
+    Thunk* devices=route("EnumDisplayDevicesW",4);
+    if(!check(devices!=nullptr,"EnumDisplayDevicesW stdcall argc=4")) return false;
+    mem.w32(0x4000,840); args({0,0,0x4000,0});
+    if(!check(devices->fn(cpu)==1&&mem.r32(0x4000+324)==1,"DISPLAY_DEVICEW cb=840, StateFlags, and return")) return false;
+    if(!check(mem.r(0x4004,2)==92&&mem.r(0x4006,2)==92&&mem.r(0x4004+64,2)=='x',"DISPLAY_DEVICEW name and description fields")) return false;
+
+    Thunk* settings=route("EnumDisplaySettingsW",3);
+    Thunk* settings_ex=route("EnumDisplaySettingsExW",4);
+    if(!check(settings&&settings_ex,"EnumDisplaySettingsW argc=3 and EnumDisplaySettingsExW argc=4")) return false;
+    mem.w32(0x5000+68,220); args({0,0xffffffffu,0x5000});
+    if(!check(settings->fn(cpu)==1&&mem.r(0x5000+68,2)==220&&mem.r32(0x5000+72)==0x005c0000u&&
+        mem.r32(0x5000+168)==32&&mem.r32(0x5000+172)==1280&&mem.r32(0x5000+176)==720&&mem.r32(0x5000+184)==60,
+        "DEVMODEW dmSize=220 and display fields")) return false;
+    mem.w32(0x5000+68,219); args({0,0xffffffffu,0x5000,0x40});
+    if(!check(settings_ex->fn(cpu)==0,"EnumDisplaySettingsExW rejects undersized DEVMODEW")) return false;
+    mem.w32(0x5000+68,220); args({0,0xffffffffu,0x5000,0x40});
+    if(!check(settings_ex->fn(cpu)==1,"EnumDisplaySettingsExW four-slot call")) return false;
+
+    Thunk* monitors=route("EnumDisplayMonitors",4);
+    Thunk* info=route("GetMonitorInfoW",2);
+    if(!check(monitors&&info,"EnumDisplayMonitors argc=4 and GetMonitorInfoW argc=2")) return false;
+    const uint8_t callback[]={0x8b,0x44,0x24,0x10,0x3d,0xbe,0xba,0xfe,0xca,0x0f,0x94,0xc0,0x0f,0xb6,0xc0,0xc2,0x10,0x00};
+    for(unsigned i=0;i<sizeof(callback);++i) mem.w(0x6000+i,callback[i],1);
+    args({0,0,0x6000,0xcafebabeu});
+    if(!check(monitors->fn(cpu)==1,"EnumDisplayMonitors passes four callback slots")) return false;
+    mem.w32(0x7000,40); mem.w32(0x7028,0xfeedbeefu); args({0xce000001u,0x7000});
+    if(!check(info->fn(cpu)==1&&mem.r32(0x700c)==1280&&mem.r32(0x7010)==720&&mem.r32(0x7024)==1&&
+        mem.r32(0x7028)==0xfeedbeefu,"MONITORINFO cbSize=40 writes only 40 bytes")) return false;
+    mem.w32(0x7000,104); args({0xce000001u,0x7000});
+    if(!check(info->fn(cpu)==1&&mem.r(0x7028,2)==92&&mem.r(0x702a,2)==92&&mem.r(0x704c,2)==0,
+        "MONITORINFOEXW cbSize=104 writes the 64-WCHAR device field")) return false;
+
+    Thunk* from_window=route("MonitorFromWindow",2);
+    Thunk* from_point=route("MonitorFromPoint",3);
+    Thunk* from_rect=route("MonitorFromRect",2);
+    if(!check(from_window&&from_point&&from_rect,"MonitorFromWindow/Point/Rect stdcall slot counts")) return false;
+    args({0x1234,2}); if(!check(from_window->fn(cpu)==0xce000001u,"MonitorFromWindow arguments")) return false;
+    args({640,360,2}); if(!check(from_point->fn(cpu)==0xce000001u,"MonitorFromPoint POINT-by-value uses two slots")) return false;
+    args({0x7000,2}); if(!check(from_rect->fn(cpu)==0xce000001u,"MonitorFromRect arguments")) return false;
+    Thunk* map_key=route("MapVirtualKeyW",2);
+    if(!check(map_key!=nullptr,"MapVirtualKeyW argc=2")) return false;
+    args({'A',0}); if(!check(map_key->fn(cpu)==0x1e,"MapVirtualKeyW virtual-key to scan-code mapping")) return false;
+    Thunk* key_state=route("GetKeyState",1);
+    if(!check(key_state!=nullptr,"GetKeyState argc=1")) return false;
+    args({0x41}); if(!check(key_state->fn(cpu)==0,"GetKeyState neutral key state")) return false;
+    Thunk* load_cursor=route("LoadCursorW",2);
+    if(!check(load_cursor!=nullptr,"LoadCursorW argc=2")) return false;
+    args({0,0x7f00}); if(!check(load_cursor->fn(cpu)==0xce000002u,"LoadCursorW standard cursor resource")) return false;
+    std::fprintf(stderr,"X86-DISPLAY PASS: Win32 display route arity and 840/220/40/104-byte structures\n");
+    return true;
+}
 static bool verify_file_guard() {
     namespace fs = std::filesystem;
     const fs::path temp = fs::temp_directory_path() / ("x86-file-guard-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -86,6 +158,7 @@ static std::vector<uint8_t> slurp(const char* path) {
 }
 int main(int argc, char** argv) {
     if (!verify_critical_section_routes()) { std::puts("X86-CRITICAL-SECTION FAIL: CRT forced debug-info initialization"); return 1; }
+    if (!verify_display_routes()) return 1;
     if (!verify_file_guard()) return 1;
     if (argc < 2) { printf("usage: x86-guest <fixture-crt.exe>\n"); return 2; }
     auto file = slurp(argv[1]);
