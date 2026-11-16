@@ -10,8 +10,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 #include <time.h>
 #include <windows.h>
+#include <mmsystem.h>
+#include <shlwapi.h>
 
 static int g_fail, g_checks;
 static void check(int ok) { ++g_checks; if (!ok) ++g_fail; }
@@ -35,6 +38,10 @@ static int cmp_int(const void* a, const void* b) {
 }
 static int cmp_str(const void* a, const void* b) {
     return strcmp(*(const char* const*)a, *(const char* const*)b);
+}
+static int same_w(const wchar_t* a, const wchar_t* b) {
+    while (*a && *a == *b) { ++a; ++b; }
+    return *a == *b;
 }
 
 struct enum_state { int count, valid, stop_after; };
@@ -111,6 +118,46 @@ static double total_weight(const struct Rec* r, int n) {
     double t = 0; for (int i = 0; i < n; ++i) t += r[i].weight; return t;
 }
 
+static void test_winmm_shlwapi(void) {
+    JOYINFO joy = {0}; JOYINFOEX joyex = {0}; JOYCAPSA joya = {0}; JOYCAPSW joyw = {0};
+    WAVEOUTCAPSA wavea = {0}; WAVEOUTCAPSW wavew = {0}; MMTIME position = {0}; TIMECAPS caps = {0};
+    check(joyGetNumDevs() == 0 && joyGetPos(0, &joy) == JOYERR_UNPLUGGED &&
+          joyGetPosEx(0, &joyex) == JOYERR_UNPLUGGED &&
+          joyGetDevCapsA(0, &joya, sizeof joya) == JOYERR_UNPLUGGED &&
+          joyGetDevCapsW(0, &joyw, sizeof joyw) == JOYERR_UNPLUGGED);
+    check(waveOutGetNumDevs() == 0 && waveOutOpen(NULL, WAVE_MAPPER, NULL, 0, 0, CALLBACK_NULL) == MMSYSERR_NODRIVER &&
+          waveOutClose(NULL) == MMSYSERR_NODRIVER && waveOutPrepareHeader(NULL, NULL, 0) == MMSYSERR_NODRIVER &&
+          waveOutUnprepareHeader(NULL, NULL, 0) == MMSYSERR_NODRIVER && waveOutWrite(NULL, NULL, 0) == MMSYSERR_NODRIVER &&
+          waveOutPause(NULL) == MMSYSERR_NODRIVER && waveOutRestart(NULL) == MMSYSERR_NODRIVER &&
+          waveOutReset(NULL) == MMSYSERR_NODRIVER && waveOutGetPosition(NULL, &position, sizeof position) == MMSYSERR_NODRIVER &&
+          waveOutGetDevCapsA(0, &wavea, sizeof wavea) == MMSYSERR_NODRIVER &&
+          waveOutGetDevCapsW(0, &wavew, sizeof wavew) == MMSYSERR_NODRIVER);
+    check(timeGetDevCaps(&caps, sizeof caps) == TIMERR_NOERROR && caps.wPeriodMin == 1 && caps.wPeriodMax == 1000000);
+    char out[128] = {0}, path[64] = "dir", a[] = "Dir/File.TXT", trim_a[] = "dir\\file";
+    wchar_t wout[128] = {0}, wpath[64] = L"dir", wa[] = L"Dir\\File.TXT", trim_w[] = L"dir\\file", root_w[] = L"\\\\server\\share\\";
+    check(PathCombineA(out, "dir", "file.txt") == out && strcmp(out, "dir\\file.txt") == 0 &&
+          PathCombineW(wout, L"dir", L"file.txt") == wout && same_w(wout, L"dir\\file.txt"));
+    check(PathAppendA(path, "file.txt") && strcmp(path, "dir\\file.txt") == 0 &&
+          PathAppendW(wpath, L"file.txt") && same_w(wpath, L"dir\\file.txt"));
+    check(PathFindFileNameA(a) == a + 4 && PathFindFileNameW(wa) == wa + 4 &&
+          PathFindExtensionA(a) == a + 8 && PathFindExtensionW(wa) == wa + 8);
+    check(PathIsRelativeA("dir\\file") && PathIsRelativeW(L"dir\\file") &&
+          !PathIsRelativeA("C:\\file") && !PathIsRelativeW(L"C:\\file"));
+    typedef int (WINAPI *str_cmp_a_fn)(LPCSTR, LPCSTR);
+    FARPROC str_cmp_a_proc = GetProcAddress(GetModuleHandleA("shlwapi.dll"), "StrCmpIA");
+    str_cmp_a_fn str_cmp_a = NULL;
+    memcpy(&str_cmp_a, &str_cmp_a_proc, sizeof str_cmp_a);
+    FARPROC str_cmp_w_proc = GetProcAddress(GetModuleHandleA("shlwapi.dll"), "StrCmpIW");
+    int (WINAPI *str_cmp_w)(LPCWSTR, LPCWSTR) = NULL;
+    memcpy(&str_cmp_w, &str_cmp_w_proc, sizeof str_cmp_w);
+    check(str_cmp_a && str_cmp_a("AbC", "aBc") == 0 && str_cmp_w && str_cmp_w(L"AbC", L"aBc") == 0 &&
+          StrStrIA("Hello World", "WORLD") != NULL && StrStrIW(L"Hello World", L"WORLD") != NULL);
+    check(PathRemoveFileSpecA(trim_a) && strcmp(trim_a, "dir") == 0 &&
+          PathRemoveFileSpecW(trim_w) && same_w(trim_w, L"dir") &&
+          !PathRemoveFileSpecW(root_w) && same_w(root_w, L"\\\\server\\share\\"));
+    check(!PathFileExistsA("x86-user32-no-such-file") && !PathFileExistsW(L"x86-user32-no-such-file"));
+}
+
 int main(void) {
     printf("x86-crt: start\n");
     /* CRT startup already ran: argc/argv/_environ exist and stdout works. */
@@ -174,7 +221,8 @@ int main(void) {
     check(GetUserDefaultLocaleName(user_locale, LOCALE_NAME_MAX_LENGTH) && user_locale[0] != 0);
     puts("x86-crt: locale name ok");
     check(GetSystemMetrics(SM_CXSCREEN) == 1280 && GetSystemMetrics(SM_CYSCREEN) == 720);
-    puts("x86-crt: user32 metrics ok");
+    test_winmm_shlwapi();
+    puts("x86-crt: user32/winmm/shlwapi ok");
 
     /* A 1.5 MiB frame exceeds the old fixed 1 MiB stack. Touching each page
      * exercises the PE reserve size and Windows-style guard-page growth. */
