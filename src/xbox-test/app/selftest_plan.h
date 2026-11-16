@@ -34,6 +34,7 @@ inline const Mode* modes(size_t& count) {
         {"opengl", "play-opengl.exe", false},
         {"d3d11", "play-d3d11.exe", false},
         {"d3d12", "play-d3d12.exe", false},
+        {"dbt", nullptr, false, true},
         {"audio", nullptr, false, true},
     };
     count = sizeof(table) / sizeof(*table);

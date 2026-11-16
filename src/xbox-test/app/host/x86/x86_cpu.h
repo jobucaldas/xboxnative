@@ -107,9 +107,10 @@ struct Cpu {
         uint32_t mask; std::memcpy(&mask, buf + 28, 4);
         return mask ? mask : 0x0000ffffu;  // pre-SSE2 CPUs may leave it 0
     }();
-    Cpu(Memory& m, ThunkTable& t) : mem(m), thunks(t) {
+    Cpu(Memory& m, ThunkTable& t, bool requested = false) : mem(m), thunks(t) {
         const char* value = std::getenv("X86_DBT");
-        dbt_enabled = value && value[0] == '1' && value[1] == '\0' && mem.base() != nullptr;
+        const bool env_requested = value && value[0] == '1' && value[1] == '\0';
+        dbt_enabled = (requested || env_requested) && mem.base() != nullptr;
     }
     void clear_dbt_cache() { dbt_cache.clear(); dbt_inline_cache.fill(nullptr); dbt_unsupported.clear(); }
     std::string dbt_fallback_key(uint32_t pc, const char* reason) const {
@@ -227,10 +228,11 @@ struct Cpu {
                 dbt::RuntimeState state;
                 std::memcpy(state.reg, reg, sizeof reg);
                 if (block_ptr->uses_xmm) std::memcpy(state.xmm, xmm.r, sizeof state.xmm);
-                state.eip = eip; state.eflags = eflags; state.memory = mem.base();
+                state.eip = eip; state.eflags = eflags; state.memory = mem.base(); state.fpu = fpu;
                 uint32_t next = block_ptr->code->operator()(state);
                 std::memcpy(reg, state.reg, sizeof reg);
                 if (block_ptr->uses_xmm) std::memcpy(xmm.r, state.xmm, sizeof xmm.r);
+                fpu = state.fpu;
                 eip = next; eflags = state.eflags;
                 executed += block_ptr->guest_length; ++translated_blocks;
                 if (!block_ptr->interpreter_boundary) {

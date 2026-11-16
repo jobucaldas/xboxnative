@@ -1197,6 +1197,7 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         lp_sink(summary.c_str());
     };
     bool traceFaultContext=GetFileAttributesW((g_dir+L"\\x86trace.txt").c_str())!=INVALID_FILE_ATTRIBUTES;
+    const bool dbtRequested=GetFileAttributesW((g_dir+L"\\x86dbt.txt").c_str())!=INVALID_FILE_ATTRIBUTES;
     auto toU16=[](const std::wstring& s){return std::u16string(s.begin(),s.end());};
     static const GUID localLow={0xA520A1A4,0x1780,0x4FF6,{0xBD,0x18,0x16,0x73,0x43,0xC5,0xAF,0x16}};
     static const GUID local={0xF1B32785,0x6FBA,0x4FCF,{0x9D,0x55,0x7B,0x8E,0x7F,0x15,0x70,0x91}};
@@ -1326,7 +1327,9 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         wchar_t current[32768]{};DWORD n=GetCurrentDirectoryW(32768,current);
         if(!n||n>=32768)return fileGuard.allow(operation,u"\\__x86_guard_cwd_unavailable__");
         return fileGuard.allow(operation,guestPath,toU16(std::wstring(current,n)));
-    });
+    },dbtRequested);
+    snprintf(line,sizeof line,"x86 dbt: %s reason=%s",r.dbt_enabled?"on":"off",r.dbt_reason.empty()?"unavailable":r.dbt_reason.c_str());lp_sink(line);
+    snprintf(line,sizeof line,"x86 dbt: translated=%llu interpreted=%llu blocks",(unsigned long long)r.translated_blocks,(unsigned long long)r.interpreted_blocks);lp_sink(line);
     if(traceFaultContext&&steamstub_wrapped(path)) {
         snprintf(line,sizeof line,"PE32 SteamStub probe: .bind=1 x86SteamBridge=%s ActiveProcess=%s PEB.BeingDebugged=%u PEB.NtGlobalFlag=0x%08x",
                  steamProvider?"staged":"not-staged",steamProvider?"seeded":"not-seeded",unsigned(r.peb_being_debugged),r.peb_nt_global_flag);lp_sink(line);

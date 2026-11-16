@@ -25,6 +25,7 @@
 #include <vector>
 #include "selftest_plan.h"
 #include "../audio/probe.h"
+#include "host/x86/x86_dbt.h"
 
 namespace selftest {
 // A launcher restart that makes no progress must not loop: each fixture gets a
@@ -211,8 +212,21 @@ static bool step() {
         const selftest_plan::Mode* m = selftest_plan::find(mode);
         if (m && m->in_process) {
             q.pending.erase(q.pending.begin());
-            int code = audio_probe::run(lp_sink);
-            result(mode, code == 0 ? "PASS" : "FAIL audio-diagnostic", "diagnostic exit=" + std::to_string(code));
+            if (mode == "dbt") {
+                bool pass = false;
+                try {
+                    const std::vector<uint8_t> code = {0xB8, 42, 0, 0, 0};
+                    auto translated = x86::dbt::runtime_translate(code, 0x10000);
+                    x86::dbt::Executable executable(translated);
+                    x86::dbt::RuntimeState state;
+                    state.eip = 0x10000;
+                    pass = executable(state) == 0x10005 && state.reg[0] == 42 && state.eip == 0x10005;
+                } catch (...) { pass = false; }
+                result(mode, pass ? "PASS" : "FAIL dbt-diagnostic", "");
+            } else {
+                int code = audio_probe::run(lp_sink);
+                result(mode, code == 0 ? "PASS" : "FAIL audio-diagnostic", "diagnostic exit=" + std::to_string(code));
+            }
             continue;
         }
         std::wstring path = m ? fixture(*m) : std::wstring();

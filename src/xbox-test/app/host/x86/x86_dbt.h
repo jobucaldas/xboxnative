@@ -6,6 +6,7 @@
 #include <memory>
 #include <stdexcept>
 #include <vector>
+#include "x86_fpu.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -18,6 +19,7 @@ struct Emitter {
     std::vector<uint8_t> bytes;
     void b(uint8_t v) { bytes.push_back(v); }
     void d(uint32_t v) { for (unsigned i = 0; i != 4; ++i) b(uint8_t(v >> (i * 8))); }
+    void q(uint64_t v) { for (unsigned i = 0; i != 8; ++i) b(uint8_t(v >> (i * 8))); }
     void patch32(size_t at, int32_t v) {
         uint32_t bits; std::memcpy(&bits, &v, sizeof bits);
         for (unsigned i = 0; i != 4; ++i) bytes.at(at + i) = uint8_t(bits >> (i * 8));
@@ -39,11 +41,17 @@ struct Executable {
     explicit Executable(const std::vector<uint8_t>& code) {
         if (code.size() > size) throw std::runtime_error("translated block exceeds one page");
 #if defined(_WIN32)
-        address = VirtualAllocFromApp(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        using AllocFromApp = LPVOID(WINAPI*)(LPVOID, SIZE_T, DWORD, DWORD);
+        using ProtectFromApp = BOOL(WINAPI*)(LPVOID, SIZE_T, DWORD, PDWORD);
+        HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+        auto alloc = kernel ? reinterpret_cast<AllocFromApp>(GetProcAddress(kernel, "VirtualAllocFromApp")) : nullptr;
+        auto protect = kernel ? reinterpret_cast<ProtectFromApp>(GetProcAddress(kernel, "VirtualProtectFromApp")) : nullptr;
+        if (!alloc || !protect) throw std::runtime_error("UWP executable-memory APIs unavailable");
+        address = alloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
         if (!address) throw std::runtime_error("VirtualAllocFromApp RW failed");
         std::memcpy(address, code.data(), code.size());
         DWORD old_protection = 0;
-        if (!VirtualProtectFromApp(address, size, PAGE_EXECUTE_READ, &old_protection)) {
+        if (!protect(address, size, PAGE_EXECUTE_READ, &old_protection)) {
             VirtualFree(address, 0, MEM_RELEASE); address = nullptr;
             throw std::runtime_error("VirtualProtectFromApp RX failed");
         }
@@ -79,11 +87,142 @@ struct RuntimeState {
     uint32_t eflags = 2;
     uint8_t* memory = nullptr;
     uint32_t xmm[8][4] = {};
+    Fpu fpu;
 };
 static_assert(offsetof(RuntimeState, eip) == 32, "DBT state layout");
 static_assert(offsetof(RuntimeState, eflags) == 36, "DBT state layout");
 static_assert(offsetof(RuntimeState, memory) == 40, "DBT state layout");
 static_assert(offsetof(RuntimeState, xmm) == 48, "DBT state layout");
+
+inline uint16_t runtime_x87_u16(const uint8_t* p) {
+    return uint16_t(p[0]) | uint16_t(p[1]) << 8;
+}
+inline uint32_t runtime_x87_u32(const uint8_t* p) {
+    return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24;
+}
+inline uint64_t runtime_x87_u64(const uint8_t* p) {
+    uint64_t v = 0; for (unsigned i = 0; i != 8; ++i) v |= uint64_t(p[i]) << (i * 8); return v;
+}
+inline uint8_t runtime_x87_byte(uint64_t encoded, unsigned i) { return uint8_t(encoded >> (i * 8)); }
+
+constexpr uint32_t runtime_CF = 1u, runtime_PF = 4u, runtime_ZF = 0x40u;
+// x87 operations stay in the interpreter's architectural representation. The
+// generated block calls this leaf for each x87 instruction, so TOP, physical
+// tags, control/status words and the console's double-precision model all match
+// the Cpu interpreter rather than leaking the host x87 register stack.
+inline void runtime_x87(RuntimeState* state, uint64_t encoded, uint32_t length) {
+    uint8_t bytes[8] = {};
+    for (unsigned i = 0; i < length && i != sizeof bytes; ++i) bytes[i] = runtime_x87_byte(encoded, i);
+    const uint8_t op = bytes[0], modrm = bytes[1];
+    const unsigned mod = modrm >> 6, regno = (modrm >> 3) & 7, rm = modrm & 7;
+    size_t p = 2;
+    uint32_t ea = 0;
+    if (mod != 3) {
+        if (rm == 4) {
+            const uint8_t sib = bytes[p++];
+            const unsigned scale = sib >> 6, index = (sib >> 3) & 7, base = sib & 7;
+            if (index != 4) ea += state->reg[index] << scale;
+            if (base == 5 && mod == 0) ea += runtime_x87_u32(bytes + p), p += 4;
+            else ea += state->reg[base];
+        } else if (rm == 5 && mod == 0) ea = runtime_x87_u32(bytes + p), p += 4;
+        else ea = state->reg[rm];
+        if (mod == 1) ea += uint32_t(int32_t(int8_t(bytes[p++])));
+        else if (mod == 2) ea += runtime_x87_u32(bytes + p);
+    }
+    Fpu& fpu = state->fpu;
+    auto st = [&](int i) { return fpu.get(i); };
+    auto setst = [&](int i, Wide v) { fpu.set(i, v); };
+    auto mem = state->memory + ea;
+    auto m16 = [&]() { return runtime_x87_u16(mem); };
+    auto m32 = [&]() { uint32_t bits = runtime_x87_u32(mem); float v; std::memcpy(&v, &bits, 4); return Wide(v); };
+    auto m64 = [&]() { uint64_t bits = runtime_x87_u64(mem); double v; std::memcpy(&v, &bits, 8); return Wide(v); };
+    auto st32 = [&](Wide v) { float f = float(v); uint32_t bits; std::memcpy(&bits, &f, 4); for (unsigned i = 0; i != 4; ++i) mem[i] = uint8_t(bits >> (i * 8)); };
+    auto st64 = [&](Wide v) { double d = double(v); uint64_t bits; std::memcpy(&bits, &d, 8); for (unsigned i = 0; i != 8; ++i) mem[i] = uint8_t(bits >> (i * 8)); };
+    auto to_int = [&](Wide v) { return int64_t(fpu.round_int(v)); };
+    auto compare = [&](Wide a, Wide b) { fpu.compare(a, b); };
+    auto x87_flags = [&]() {
+        state->eflags = (state->eflags & ~uint32_t(runtime_CF | runtime_PF | runtime_ZF)) | 2u;
+        if (fpu.sw & 0x4000) state->eflags |= runtime_ZF;
+        if (fpu.sw & 0x0100) state->eflags |= runtime_CF;
+        if (fpu.sw & 0x0400) state->eflags |= runtime_PF;
+    };
+    if (mod != 3) {
+        switch (op) {
+        case 0xD8: { Wide v = m32(); switch (regno) {
+            case 0: setst(0, st(0) + v); return; case 1: setst(0, st(0) * v); return;
+            case 2: compare(st(0), v); return; case 3: compare(st(0), v); fpu.pop(); return;
+            case 4: setst(0, st(0) - v); return; case 5: setst(0, v - st(0)); return;
+            case 6: setst(0, st(0) / v); return; default: setst(0, v / st(0)); return; } }
+        case 0xDC: { Wide v = m64(); switch (regno) {
+            case 0: setst(0, st(0) + v); return; case 1: setst(0, st(0) * v); return;
+            case 2: compare(st(0), v); return; case 3: compare(st(0), v); fpu.pop(); return;
+            case 4: setst(0, st(0) - v); return; case 5: setst(0, v - st(0)); return;
+            case 6: setst(0, st(0) / v); return; default: setst(0, v / st(0)); return; } }
+        case 0xDA: case 0xDE: { Wide v = op == 0xDA ? Wide(int32_t(runtime_x87_u32(mem))) : Wide(int16_t(m16())); switch (regno) {
+            case 0: setst(0, st(0) + v); return; case 1: setst(0, st(0) * v); return;
+            case 2: compare(st(0), v); return; case 3: compare(st(0), v); fpu.pop(); return;
+            case 4: setst(0, st(0) - v); return; case 5: setst(0, v - st(0)); return;
+            case 6: setst(0, st(0) / v); return; default: setst(0, v / st(0)); return; } }
+        case 0xD9: switch (regno) {
+            case 0: fpu.push(m32()); return; case 2: st32(st(0)); return; case 3: st32(st(0)); fpu.pop(); return;
+            case 5: fpu.cw = m16(); return; case 7: for (unsigned i = 0; i != 2; ++i) mem[i] = uint8_t(fpu.cw >> (i * 8)); return;
+            default: return; }
+        case 0xDD: switch (regno) {
+            case 0: fpu.push(m64()); return; case 2: st64(st(0)); return; case 3: st64(st(0)); fpu.pop(); return;
+            case 7: for (unsigned i = 0; i != 2; ++i) mem[i] = uint8_t((fpu.status() & ~uint16_t(0x7f)) >> (i * 8)); return;
+            default: return; }
+        case 0xDB: switch (regno) {
+            case 0: fpu.push(Wide(int32_t(runtime_x87_u32(mem)))); return;
+            case 3: { int32_t v = int32_t(to_int(st(0))); for (unsigned i = 0; i != 4; ++i) mem[i] = uint8_t(uint32_t(v) >> (i * 8)); fpu.pop(); return; }
+            default: return; }
+        case 0xDF: switch (regno) {
+            case 0: fpu.push(Wide(int16_t(m16()))); return;
+            case 3: { int16_t v = int16_t(to_int(st(0))); mem[0] = uint8_t(v); mem[1] = uint8_t(uint16_t(v) >> 8); fpu.pop(); return; }
+            default: return; }
+        default: return;
+        }
+    }
+    switch (op) {
+    case 0xD8: switch (regno) {
+        case 0: setst(0, st(0) + st(rm)); return; case 1: setst(0, st(0) * st(rm)); return;
+        case 2: compare(st(0), st(rm)); return; case 3: compare(st(0), st(rm)); fpu.pop(); return;
+        case 4: setst(0, st(0) - st(rm)); return; case 5: setst(0, st(rm) - st(0)); return;
+        case 6: setst(0, st(0) / st(rm)); return; default: setst(0, st(rm) / st(0)); return; }
+    case 0xDC: switch (regno) {
+        case 0: setst(rm, st(rm) + st(0)); return; case 1: setst(rm, st(rm) * st(0)); return;
+        case 2: compare(st(rm), st(0)); return; case 3: compare(st(rm), st(0)); fpu.pop(); return;
+        case 4: setst(rm, st(0) - st(rm)); return; case 5: setst(rm, st(rm) - st(0)); return;
+        case 6: setst(rm, st(0) / st(rm)); return; default: setst(rm, st(rm) / st(0)); return; }
+    case 0xDE: switch (regno) {
+        case 0: setst(rm, st(rm) + st(0)); fpu.pop(); return; case 1: setst(rm, st(rm) * st(0)); fpu.pop(); return;
+        case 3: if (rm == 1) { compare(st(0), st(1)); fpu.pop(); fpu.pop(); } return;
+        case 4: setst(rm, st(0) - st(rm)); fpu.pop(); return; case 5: setst(rm, st(rm) - st(0)); fpu.pop(); return;
+        case 6: setst(rm, st(0) / st(rm)); fpu.pop(); return; case 7: setst(rm, st(rm) / st(0)); fpu.pop(); return;
+        default: return; }
+    case 0xDB: switch (regno) {
+        case 5: compare(st(0), st(rm)); x87_flags(); return; case 6: compare(st(0), st(rm)); x87_flags(); return;
+        case 4: if (rm == 2) fpu.sw &= ~uint16_t(0x7f); else if (rm == 3) fpu.init(); return;
+        default: return; }
+    case 0xDF: switch (regno) {
+        case 4: if (rm == 0) { state->reg[0] = (state->reg[0] & 0xffff0000u) | fpu.status(); } return;
+        case 5: compare(st(0), st(rm)); x87_flags(); fpu.pop(); return;
+        case 6: compare(st(0), st(rm)); x87_flags(); fpu.pop(); return;
+        default: return; }
+    case 0xDD: switch (regno) {
+        case 1: fpu.swap(0, rm); return; case 2: setst(rm, st(0)); return; case 3: setst(rm, st(0)); fpu.pop(); return;
+        case 4: compare(st(0), st(rm)); return; case 5: compare(st(0), st(rm)); fpu.pop(); return;
+        default: return; }
+    case 0xD9:
+        if ((modrm & 0x38) == 0) { fpu.push(st(rm)); return; }
+        if ((modrm & 0x38) == 8) { fpu.swap(0, rm); return; }
+        switch (modrm & 0x3f) {
+        case 0x20: setst(0, -st(0)); return; case 0x21: setst(0, std::fabs(st(0))); return;
+        case 0x28: fpu.push(Wide(1)); return; case 0x2e: fpu.push(Wide(0)); return;
+        case 0x3a: setst(0, std::sqrt(st(0))); return; default: return;
+        }
+    default: return;
+    }
+}
 
 struct RuntimeBlock {
     std::unique_ptr<Executable> code;
@@ -127,6 +266,9 @@ inline void runtime_sse(Emitter& out, uint8_t prefix, uint8_t op, uint8_t dst, u
 }
 inline void runtime_mov_imm(Emitter& out, uint8_t dst, uint32_t value) {
     out.rex(0, 0, dst); out.b(uint8_t(0xB8 + (dst & 7))); out.d(value);
+}
+inline void runtime_mov_imm64(Emitter& out, uint8_t dst, uint64_t value) {
+    out.rex(0, 0, dst, true); out.b(uint8_t(0xB8 + (dst & 7))); out.q(value);
 }
 inline void runtime_regop(Emitter& out, uint8_t op, uint8_t dst, uint8_t src) {
     out.rex(src, 0, dst); out.b(op); out.modrm(3, src, dst);
@@ -249,6 +391,28 @@ inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
     if (op == 0x6A) { runtime_u8(b, p); return p - start; }
     if (op == 0xC2) { runtime_u8(b, p); runtime_u8(b, p); return p - start; }
     if (op == 0xC3 || op == 0xC9) return p - start;
+    if (op >= 0xD8 && op <= 0xDF) {
+        uint8_t m = runtime_u8(b, p); unsigned group = (m >> 3) & 7;
+        bool valid = op == 0xD8 || op == 0xDC || op == 0xDE ||
+            (op == 0xD9 && (group == 0 || group == 2 || group == 3 || group == 5 || group == 7)) ||
+            (op == 0xDB && (group == 0 || group == 3)) ||
+            (op == 0xDD && (group == 0 || group == 2 || group == 3 || group == 7)) ||
+            (op == 0xDF && (group == 0 || group == 3));
+        if ((m >> 6) != 3) {
+            if (!valid) throw std::runtime_error("unsupported DBT x87 memory form");
+            RuntimeAddress a = runtime_address(b, p, m); memory_operand = true;
+            if (a.absolute) { memory_ea = a.displacement; absolute_memory = true; }
+        } else {
+            unsigned form = m & 0x3f;
+            valid = op == 0xD8 || op == 0xDC || op == 0xDE ||
+                (op == 0xD9 && (form <= 0x0f || form == 0x20 || form == 0x21 || form == 0x28 || form == 0x2e || form == 0x3a)) ||
+                (op == 0xDB && (group == 4 || group == 5 || group == 6)) ||
+                (op == 0xDD && group >= 1 && group <= 5) ||
+                (op == 0xDF && (group == 4 || group == 5 || group == 6));
+            if (!valid) throw std::runtime_error("unsupported DBT x87 form");
+        }
+        return p - start;
+    }
     if (op == 0xE8) { runtime_u32(b, p); return p - start; }
     if (op == 0x8F) {
         uint8_t m = runtime_u8(b, p);
@@ -330,6 +494,9 @@ inline bool runtime_uses_xmm(const std::vector<uint8_t>& guest) {
 inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest, uint32_t guest_pc) {
     Emitter out;
     bool uses_xmm = runtime_uses_xmm(guest);
+#if defined(_WIN32)
+    out.b(0x48); out.b(0x89); out.b(0xCF); // Windows x64 passes State* in RCX; use RDI internally.
+#endif
     out.b(0x57); out.b(0x41); out.b(0x54); out.b(0x41); out.b(0x55); out.b(0x41); out.b(0x56); // save state*, preserve R12-R14
     out.b(0x48); out.b(0x83); out.b(0xEC); out.b(uses_xmm ? 40 : 8);
     if (uses_xmm) {
@@ -342,6 +509,7 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
         for (unsigned i = 0; i != 8; ++i) runtime_load_xmm_mem(out, uint8_t(i), 7, 48 + i * 16);
     for (unsigned i : {0u, 1u, 2u, 3u, 5u, 6u, 7u, 4u}) runtime_mov_reg_mem(out, runtime_reg(i), 7, uint8_t(i * 4));
     size_t p = 0;
+    const uint8_t state_slot = uses_xmm ? 64 : 32;
     bool branch_terminated = false;
     while (p < guest.size()) {
         size_t begin = p; uint8_t prefix = 0;
@@ -360,6 +528,30 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
                 runtime_sse(out, 0x66, op2, dst, src, memory);
             }
             if (op2 == 0x70 || op2 == 0x72 || op2 == 0x73) out.b(runtime_u8(guest, p));
+        } else if (op >= 0xD8 && op <= 0xDF) {
+            uint32_t memory_ea = 0; bool memory_operand = false, absolute_memory = false;
+            const size_t len = runtime_instruction(guest, begin, memory_ea, memory_operand, absolute_memory);
+            p = begin + len;
+            out.rex(11, 0, 4, true); out.b(0x8B);
+            if (state_slot < 128) { out.modrm(1, 11, 4); out.b(0x24); out.b(state_slot); }
+            else { out.modrm(2, 11, 4); out.b(0x24); out.d(state_slot); }
+            for (unsigned i = 0; i != 8; ++i) runtime_store_reg_mem(out, 11, i * 4, runtime_reg(i));
+            out.b(0x9C); out.b(0x58); out.b(0x25); out.d(0x00000CD7); runtime_store_reg_mem(out, 11, 36, 0);
+            out.rex(11, 0, 7, true); out.b(0x89); out.modrm(3, 11, 7);
+            uint64_t encoded = 0; for (size_t i = 0; i != len; ++i) encoded |= uint64_t(guest[begin + i]) << (i * 8);
+            runtime_mov_imm64(out, 0, reinterpret_cast<uintptr_t>(&runtime_x87));
+#if defined(_WIN32)
+            out.b(0x48); out.b(0x89); out.b(0xF9); // RCX = State*
+            runtime_mov_imm64(out, 2, encoded); runtime_mov_imm(out, 8, uint32_t(len));
+#else
+            runtime_mov_imm64(out, 6, encoded); runtime_mov_imm(out, 2, uint32_t(len));
+#endif
+            out.b(0xFF); out.b(0xD0); // call RAX
+            out.rex(11, 0, 4, true); out.b(0x8B);
+            if (state_slot < 128) { out.modrm(1, 11, 4); out.b(0x24); out.b(state_slot); }
+            else { out.modrm(2, 11, 4); out.b(0x24); out.d(state_slot); }
+            for (unsigned i : {0u, 1u, 2u, 3u, 5u, 6u, 7u, 4u}) runtime_mov_reg_mem(out, runtime_reg(i), 11, uint8_t(i * 4));
+            runtime_mov_reg_mem(out, 11, 11, 36); out.b(0x41); out.b(0x53); out.b(0x9D);
         } else if (op >= 0x50 && op <= 0x57) {
             runtime_emit_guest_push_reg(out, op & 7);
         } else if (op >= 0x58 && op <= 0x5F) {
@@ -480,7 +672,7 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
         if (p <= begin) throw std::runtime_error("DBT decoder made no progress");
     }
     if (!branch_terminated) runtime_mov_imm(out, 11, guest_pc + uint32_t(p));
-    uint8_t eip_slot = uses_xmm ? 32 : 0, state_slot = uses_xmm ? 64 : 32;
+    uint8_t eip_slot = uses_xmm ? 32 : 0;
     out.b(0x44); out.b(0x89); out.b(0x5C); out.b(0x24); out.b(eip_slot);
     out.b(0x4C); out.b(0x8B); out.b(0x5C); out.b(0x24); out.b(state_slot);
     for (unsigned i = 0; i != 8; ++i) runtime_store_reg_mem(out, 11, i * 4, runtime_reg(i));

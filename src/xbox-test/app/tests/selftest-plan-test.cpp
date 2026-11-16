@@ -15,7 +15,7 @@ int main() {
     // first because it costs no launcher restart.
     size_t count = 0;
     const Mode* table = modes(count);
-    assert(count == 14);
+    assert(count == 15);
     assert(std::string(table[0].name) == "x86" && table[0].pe32);
     assert(std::string(table[1].name) == "vulkan-dzn" && !table[1].pe32);
     assert(std::string(table[2].name) == "vulkan-draw" && std::string(table[2].exe) == "play-vulkan-draw.exe" && !table[2].pe32);
@@ -29,7 +29,9 @@ int main() {
     assert(std::string(table[10].name) == "opengl" && std::string(table[10].exe) == "play-opengl.exe" && !table[10].pe32);
     assert(std::string(table[11].name) == "d3d11" && std::string(table[11].exe) == "play-d3d11.exe" && !table[11].pe32);
     assert(std::string(table[12].name) == "d3d12" && std::string(table[12].exe) == "play-d3d12.exe" && !table[12].pe32);
-    assert(std::string(table[13].name) == "audio" && table[13].exe == nullptr && !table[13].pe32 && table[13].in_process);
+    assert(std::string(table[13].name) == "dbt" && table[13].exe == nullptr && !table[13].pe32 && table[13].in_process);
+    assert(std::string(table[14].name) == "audio" && table[14].exe == nullptr && !table[14].pe32 && table[14].in_process);
+    assert(find("dbt") && find("dbt")->exe == nullptr && !find("dbt")->pe32 && find("dbt")->in_process);
     assert(find("audio") && find("audio")->exe == nullptr && !find("audio")->pe32 && find("audio")->in_process);
     assert(find("d3d9") && find("d3d9")->pe32 == false);
     assert(find("d3d9-triangle") && std::string(find("d3d9-triangle")->exe) == "play-d3d9-triangle.exe");
@@ -62,9 +64,9 @@ int main() {
     assert(unknown.size() == 2 && unknown[0] == "nope");
     // "all" expands to every fixture in canonical order, whatever else is named.
     auto all = parse_request("d3d10\nall\n");
-    assert(all.size() == 14 && all[0] == "x86" && all[7] == "d3d10"
+    assert(all.size() == 15 && all[0] == "x86" && all[7] == "d3d10"
         && all[8] == "d3d10-triangle" && all[9] == "d3d10-compile" && all[10] == "opengl"
-        && all[11] == "d3d11" && all[12] == "d3d12" && all[13] == "audio");
+        && all[11] == "d3d11" && all[12] == "d3d12" && all[13] == "dbt" && all[14] == "audio");
     assert(all[4] == "d3d9-triangle" && all[5] == "d3d9-triangle-variants");
 
     // The queue survives a launcher restart: restarts count and pending modes
