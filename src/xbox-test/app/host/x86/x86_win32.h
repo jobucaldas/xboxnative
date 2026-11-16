@@ -91,6 +91,8 @@ struct Host {
     uint32_t gl_handle_serial = 0xE0000000u, window_handle_serial = 0xD0000000u, gl_map_next = 0x70000000u;
     uint32_t vertex_array = 0, gl_array_buffer = 0, gl_element_array_buffer = 0;
     std::function<uintptr_t(bool, uint32_t, uintptr_t*)> d3d9_factory;
+    std::function<uintptr_t(const void*, uintptr_t*)> dsound_factory;
+    std::function<uintptr_t(uint32_t)> dsound_event;
     std::function<uintptr_t(uint32_t)> d3d9_window;
     ComSpace com;
     uint32_t d3d9_guest_top = 0x7D000000u;

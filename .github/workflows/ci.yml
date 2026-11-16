@@ -387,6 +387,8 @@ jobs:
         run: bash src/xbox-test/app/tests/gap-summary.sh
       - name: "x86 guest surface (mingw CRT program through the interpreter: printf, heap, TLS, VirtualAlloc)"
         run: bash src/xbox-test/app/tests/x86-guest.sh
+      - name: "DirectSound ring locks, cursors and notification crossings"
+        run: bash src/xbox-test/uwph/dsound/ring-test.sh
       - name: "x86 OpenGL thunks (WGL context, client arrays and readback via host shim)"
         run: bash src/xbox-test/app/tests/x86-gl.sh
       - name: "x86 MSVC CRT startup window mode"

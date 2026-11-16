@@ -1222,6 +1222,13 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         static HMODULE records=LoadPackagedLibrary(L"uwph-u32c.dll",0);
         static HMODULE mesa=LoadPackagedLibrary(L"runtime\\opengl32.dll",0);
         static HMODULE d3d9=LoadPackagedLibrary(L"runtime\\d3d9.dll",0);
+        static HMODULE dsound=LoadPackagedLibrary(L"runtime\\dsound.dll",0);
+        using CreateSound=HRESULT (WINAPI*)(LPCGUID,void**,LPUNKNOWN);
+        auto createSound=dsound?reinterpret_cast<CreateSound>(GetProcAddress(dsound,"DirectSoundCreate8")):nullptr;
+        host.dsound_factory=[createSound](const void* id,uintptr_t* result)->uintptr_t {
+            if(!result)return E_POINTER;*result=0;if(!createSound)return DSERR_NODRIVER;
+            void* object=nullptr;HRESULT hr=createSound(static_cast<const GUID*>(id),&object,nullptr);*result=reinterpret_cast<uintptr_t>(object);return uint32_t(hr);
+        };
         using Create9=void* (WINAPI*)(UINT);
         using Create9Ex=HRESULT (WINAPI*)(UINT,void**);
         auto create9=d3d9?reinterpret_cast<Create9>(GetProcAddress(d3d9,"Direct3DCreate9")):nullptr;

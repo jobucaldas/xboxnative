@@ -60,6 +60,8 @@ bash ../uwph/d3d10/build.sh "$out/layout/runtime"
 # no d3d9.dll. It serves the device, buffers, textures, states and drawing over
 # D3D11, and translates shader model 1-3 bytecode with the DLL below.
 bash ../uwph/d3d9/build.sh "$out/layout/runtime"
+# DirectSound 8 uses the same packaged XAudio2 engine as the launcher audio path.
+bash ../uwph/dsound/build.sh "$out/layout/runtime"
 # The shim's shader translator (src/tools/build-d3d9-translator.sh): DXUP's
 # dx9asm built from pinned source. The shim loads it by name, so it lives in the
 # runtime directory beside the shims; Play's loader serves it from there.
