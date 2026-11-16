@@ -122,7 +122,7 @@ rc32="$(dirname "$cc32")/i686-w64-mingw32-windres"
 [[ -x $rc32 ]] || { echo "build-diag-fixtures: no i686-w64-mingw32-windres" >&2; exit 1; }
 # The .rc is preprocessed, and the wrapper's preprocessor is the cross gcc.
 PATH="$(dirname "$cc32"):$PATH" "$rc32" -O coff -I "$here/x86-guest" -i "$here/x86-guest/fixture-crt.rc" -o "$work/fixture-crt.res"
-"$cc32" -O1 -Wall -Wextra -Werror "${extra[@]}" -o "$out/fixture-crt.exe" "$here/x86-guest/fixture-crt.c" "$work/fixture-crt.res"
+"$cc32" -O1 -Wall -Wextra -Werror "${extra[@]}" -o "$out/fixture-crt.exe" "$here/x86-guest/fixture-crt.c" "$work/fixture-crt.res" -luser32 -lwinmm -lshlwapi
 
 # A fixture that does not fit the package's budget is a build failure, not a
 # surprise on the console.
