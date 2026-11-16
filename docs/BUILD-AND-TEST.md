@@ -46,10 +46,12 @@ The suite needs the complete launcher runtime layout, but not a packaged MSIX or
 run all Play runtime modes from the repository root (with the launcher build prerequisites, `msiextract`, and Wine on `PATH`):
 
 ```sh
-nix shell --impure nixpkgs#msitools nixpkgs#mono -c bash -c '\
-  bash /tmp/xboxnative-cookie-integration-20261104/env.sh env PLAY_LAYOUT_ONLY=1 PLAY_MESA_RUNNER=/tmp/xbn-scripts/mesa-ucrt-step.sh bash src/xbox-test/app/build.sh && \
-  bash /tmp/xboxnative-cookie-integration-20261104/env.sh env PRUN_WINEPREFIX=/tmp/prun-play-runtime WINEPREFIX=/tmp/prun-play-runtime bash src/xbox-test/app/tests/play-runtime.sh'
+PLAY_LAYOUT_ONLY=1 bash src/xbox-test/app/build.sh
+WINEPREFIX="$HOME/.wine-play-runtime" PRUN_WINEPREFIX="$HOME/.wine-play-runtime" bash src/xbox-test/app/tests/play-runtime.sh
 ```
+
+The Mesa and FNA native builds need a UCRT-flavoured MinGW toolchain; if the default one links `msvcrt.dll`, set
+`PLAY_MESA_RUNNER` to a wrapper script that puts a UCRT toolchain first on `PATH` and runs its arguments.
 
 `PLAY_LAYOUT_ONLY=1` stops after populating `src/xbox-test/app/out/layout`; the default build still performs its normal
 certificate and MSIX packaging steps. The runtime script resolves `libgcc.a` from the installed MinGW GCC before
