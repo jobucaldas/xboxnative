@@ -10,8 +10,8 @@
 #include <random>
 #include <stdexcept>
 #include <string>
-#include <sys/mman.h>
 #include <vector>
+#include "../host/x86/x86_dbt.h"
 #include "../host/x86/x86_win32.h"
 
 #if !defined(__linux__) || !defined(__x86_64__)
@@ -39,20 +39,8 @@ static_assert(offsetof(State, eip) == EIP_OFFSET, "generated-code state layout")
 static_assert(offsetof(State, eflags) == FLAGS_OFFSET, "generated-code state layout");
 static_assert(offsetof(State, memory) == MEMORY_OFFSET, "generated-code state layout");
 
-struct Emitter {
-    std::vector<uint8_t> bytes;
-    void b(uint8_t v) { bytes.push_back(v); }
-    void d(uint32_t v) { for (unsigned i = 0; i != 4; ++i) b(uint8_t(v >> (i * 8))); }
-    void patch32(size_t at, int32_t v) {
-        uint32_t bits; std::memcpy(&bits, &v, sizeof bits);
-        for (unsigned i = 0; i != 4; ++i) bytes.at(at + i) = uint8_t(bits >> (i * 8));
-    }
-    void rex(uint8_t r = 0, uint8_t x = 0, uint8_t base = 0, bool w = false) {
-        uint8_t value = uint8_t(0x40 | (w ? 8 : 0) | ((r >> 3) << 2) | ((x >> 3) << 1) | (base >> 3));
-        if (value != 0x40) b(value);
-    }
-    void modrm(uint8_t mod, uint8_t reg, uint8_t rm) { b(uint8_t((mod << 6) | ((reg & 7) << 3) | (rm & 7))); }
-};
+using dbt::Emitter;
+using dbt::Executable;
 
 static void mov_reg_mem(Emitter& out, uint8_t dst, uint8_t base, uint8_t disp) {
     out.rex(dst, 0, base); out.b(0x8B); out.modrm(1, dst, base);
@@ -199,24 +187,6 @@ static std::vector<uint8_t> translate(const std::vector<uint8_t>& guest, uint32_
     return out.bytes;
 }
 
-struct Executable {
-    void* address = MAP_FAILED;
-    size_t size = PAGE;
-    explicit Executable(const std::vector<uint8_t>& code) {
-        address = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (address == MAP_FAILED) throw std::runtime_error("mmap RW failed");
-        if (code.size() > size) throw std::runtime_error("translated block exceeds one page");
-        std::memcpy(address, code.data(), code.size());
-        if (mprotect(address, size, PROT_READ | PROT_EXEC) != 0) {
-            munmap(address, size); address = MAP_FAILED; throw std::runtime_error("mprotect RX failed");
-        }
-        __builtin___clear_cache(static_cast<char*>(address), static_cast<char*>(address) + code.size());
-    }
-    ~Executable() { if (address != MAP_FAILED) munmap(address, size); }
-    Executable(const Executable&) = delete;
-    Executable& operator=(const Executable&) = delete;
-    uint32_t operator()(State& state) const { return reinterpret_cast<uint32_t (*)(State*)>(address)(&state); }
-};
 
 struct Machine {
     Memory memory;
