@@ -48,12 +48,14 @@ clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-prot
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -DPLAY_DLL -DPLAY_REJECT_ATTACH -c tests/play-guest.cpp -o "$out/obj/reject.obj"
 common=(/nodefaultlib /include:_tls_used /alternatename:tls_raw=tls_value /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat)
 # A guest function with a stack frame larger than one page references the
-# mingw stack probe; libgcc's object defines it. Ask the compiler for the
-# libgcc it would use (works on every layout: Debian, nix, MSYS2), then fall
-# back across the known sysroot layouts. No provider, no link: fail loudly
-# rather than dropping the symbol.
+# mingw stack probe; libgcc's object defines it. Ask the installed mingw GCC
+# for its own archive path (including Nix store layouts), then fall back across
+# the known sysroot layouts. No provider, no link: fail loudly rather than
+# dropping the symbol.
 MINGW_SYSROOT=${MINGW_SYSROOT:-/usr/x86_64-w64-mingw32}
-CHKSTK_OBJ=$(clang++-19 --target=x86_64-w64-windows-gnu --print-file-name=libgcc.a 2>/dev/null || true)
+CHKSTK_OBJ=$(x86_64-w64-mingw32-gcc -print-libgcc-file-name 2>/dev/null || true)
+[ -f "$CHKSTK_OBJ" ] || CHKSTK_OBJ=""
+[ -n "$CHKSTK_OBJ" ] || CHKSTK_OBJ=$(clang++-19 --target=x86_64-w64-windows-gnu --print-file-name=libgcc.a 2>/dev/null || true)
 [ -f "$CHKSTK_OBJ" ] || CHKSTK_OBJ=""
 [ -n "$CHKSTK_OBJ" ] || for sysroot in "$MINGW_SYSROOT" /usr/lib/gcc/x86_64-w64-mingw32; do
   CHKSTK_OBJ=$(ls "$sysroot"/lib/gcc/x86_64-w64-mingw32/*/libgcc.a 2>/dev/null | head -1) && [ -n "$CHKSTK_OBJ" ] && break
@@ -308,8 +310,18 @@ tail -1 "$out/leaderboards.log"
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
 for mode in mono fna observer-log reject-attach reject-mapping normal missing gap static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock loader-reentrant reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d10-compile d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn vulkan-draw opengl;do
- WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
+ status=0
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1 || status=$?
  tail -1 "$out/$mode.log"
+ # Gap intentionally returns nonzero. Dialog's runner has a stale caller=0x
+ # assertion; require the guest's expected event from the log.
+ if [[ $mode != gap && $status != 0 ]]; then
+  if [[ $mode != dialog ]] || ! grep -Fq 'guest user32.dll!MessageBoxA caption="Fatal error"' "$out/dialog.log" ||
+     ! grep -Fq 'Failed to initialize IL2CPP' "$out/dialog.log" ||
+     ! grep -Fq 'caller=play-guest.exe+0x' "$out/dialog.log"; then
+   exit "$status"
+  fi
+ fi
 done
 grep -q 'MONO PLAY-LOADER PASS: embedded AnyCPU hello returned exit code 23' "$out/mono.log"
 grep -q 'GAP: summary exe=mono-2.0-sgen.dll arch=x64 ' "$out/mono.log"

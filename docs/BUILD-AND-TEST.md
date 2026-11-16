@@ -40,6 +40,21 @@ on the last line.
 and `src/tools/build-msix-packaging.sh` fetch them from the pins in `deps.pin`. The build is long and memory hungry;
 the full log is `out/xn/build.log`.
 
+## Play runtime suite (Wine, no console)
+
+The suite needs the complete launcher runtime layout, but not a packaged MSIX or signing tools. Build that layout and
+run all Play runtime modes from the repository root (with the launcher build prerequisites, `msiextract`, and Wine on `PATH`):
+
+```sh
+nix shell --impure nixpkgs#msitools nixpkgs#mono -c bash -c '\
+  bash /tmp/xboxnative-cookie-integration-20261104/env.sh env PLAY_LAYOUT_ONLY=1 PLAY_MESA_RUNNER=/tmp/xbn-scripts/mesa-ucrt-step.sh bash src/xbox-test/app/build.sh && \
+  bash /tmp/xboxnative-cookie-integration-20261104/env.sh env PRUN_WINEPREFIX=/tmp/prun-play-runtime WINEPREFIX=/tmp/prun-play-runtime bash src/xbox-test/app/tests/play-runtime.sh'
+```
+
+`PLAY_LAYOUT_ONLY=1` stops after populating `src/xbox-test/app/out/layout`; the default build still performs its normal
+certificate and MSIX packaging steps. The runtime script resolves `libgcc.a` from the installed MinGW GCC before
+trying its fallback layouts.
+
 ## Console
 
 ### One-time setup
