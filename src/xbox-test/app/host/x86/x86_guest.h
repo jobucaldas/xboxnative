@@ -175,6 +175,8 @@ struct Guest {
     std::map<uint32_t, GdiDc> gdi_dcs;
     uint32_t gdi_serial=0;
     uint32_t file_serial = 0, find_serial = 0, sync_serial = 0, sync_handle_serial = 0;
+    std::map<uint32_t, bool> mm_timers;
+    uint32_t mm_timer_serial = 0;
     // Guest DLLs loaded by the process (lowercase module name -> Dll) and the
     // order they were mapped in (DllMain PROCESS_DETACH runs in reverse).
     // `dll_source` supplies DLL bytes by module name; empty = not found.
@@ -2008,27 +2010,60 @@ inline void Guest::register_all() {
     reg.add("winmm.dll", "timeBeginPeriod", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t { uint32_t period=c.arg(0);return period>=1&&period<=1000000?0u:97u; });
     reg.add("winmm.dll", "timeEndPeriod", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t { uint32_t period=c.arg(0);return period>=1&&period<=1000000?0u:97u; });
     reg.add("winmm.dll", "timeGetTime", Conv::Stdcall, 0, [tick_count](Cpu&) -> uint32_t { return tick_count(); });
+    reg.add("winmm.dll", "timeGetSystemTime", Conv::Stdcall, 2, [this, tick_count](Cpu& c) -> uint32_t {
+        uint32_t out=c.arg(0), size=c.arg(1); if(!out||size<8)return 97;
+        mem.w32(out,1); mem.w32(out+4,tick_count()); return 0; });
     reg.add("winmm.dll", "timeGetDevCaps", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         uint32_t p=c.arg(0);if(!p||c.arg(1)!=8)return 129;mem.w32(p,1);mem.w32(p+4,1000000);return 0; });
-    // No joystick or wave-output device is exposed by this host. Keep device
-    // enumeration empty and return the documented no-driver/unplugged errors.
+    // The interpreter has no asynchronous callback scheduler, so timer IDs are
+    // deterministic bookkeeping handles; callbacks are never fabricated.
+    reg.add("winmm.dll", "timeSetEvent", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
+        // Multimedia timer callbacks run on a winmm thread; the guest has no such
+        // thread here, so creating a timer that would never fire must fail (NULL),
+        // never hand back an ID the game then waits on.
+        (void)c; return 0; });
+    reg.add("winmm.dll", "timeKillEvent", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        return mm_timers.erase(c.arg(0)) ? 0u : 97u; });
+    // No joystick or wave device is exposed by this host. Keep enumeration empty
+    // and return the documented no-driver/unplugged errors for every device call.
     reg.add("winmm.dll", "joyGetNumDevs", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
     reg.add("winmm.dll", "joyGetPos", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 167; });
     reg.add("winmm.dll", "joyGetPosEx", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 167; });
     reg.add("winmm.dll", "joyGetDevCapsA", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 167; });
     reg.add("winmm.dll", "joyGetDevCapsW", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 167; });
     reg.add("winmm.dll", "waveOutGetNumDevs", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("winmm.dll", "waveInGetNumDevs", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
     reg.add("winmm.dll", "waveOutOpen", Conv::Stdcall, 6, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveInOpen", Conv::Stdcall, 6, [](Cpu&) -> uint32_t { return 6; });
     reg.add("winmm.dll", "waveOutClose", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveInClose", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 6; });
     reg.add("winmm.dll", "waveOutPrepareHeader", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
     reg.add("winmm.dll", "waveOutUnprepareHeader", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveInPrepareHeader", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveInUnprepareHeader", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
     reg.add("winmm.dll", "waveOutWrite", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveInAddBuffer", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveInStart", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveInStop", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveInReset", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 6; });
     reg.add("winmm.dll", "waveOutPause", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 6; });
     reg.add("winmm.dll", "waveOutRestart", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 6; });
     reg.add("winmm.dll", "waveOutReset", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 6; });
     reg.add("winmm.dll", "waveOutGetPosition", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveInGetPosition", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveInGetDevCapsA", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveInGetDevCapsW", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
     reg.add("winmm.dll", "waveOutGetDevCapsA", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
     reg.add("winmm.dll", "waveOutGetDevCapsW", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveOutSetVolume", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveOutMessage", Conv::Stdcall, 4, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveInMessage", Conv::Stdcall, 4, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveOutGetErrorTextA", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveOutGetErrorTextW", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveInGetErrorTextA", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveInGetErrorTextW", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "PlaySoundA", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 0; });
+    reg.add("winmm.dll", "PlaySoundW", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 0; });
     reg.add("kernel32.dll", "QueryPerformanceCounter", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t p = c.arg(0); if (p) { mem.w32(p, 1000); mem.w32(p + 4, 0); } return 1; });
     reg.add("kernel32.dll", "QueryPerformanceFrequency", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {

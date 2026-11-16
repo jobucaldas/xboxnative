@@ -120,7 +120,8 @@ static double total_weight(const struct Rec* r, int n) {
 
 static void test_winmm_shlwapi(void) {
     JOYINFO joy = {0}; JOYINFOEX joyex = {0}; JOYCAPSA joya = {0}; JOYCAPSW joyw = {0};
-    WAVEOUTCAPSA wavea = {0}; WAVEOUTCAPSW wavew = {0}; MMTIME position = {0}; TIMECAPS caps = {0};
+    WAVEOUTCAPSA wavea = {0}; WAVEOUTCAPSW wavew = {0}; WAVEINCAPSA wavein_a = {0}; WAVEINCAPSW wavein_w = {0};
+    MMTIME position = {0}; MMTIME system_time = {0}; TIMECAPS caps = {0}; char error_text[32] = {0}; wchar_t error_w[32] = {0};
     check(joyGetNumDevs() == 0 && joyGetPos(0, &joy) == JOYERR_UNPLUGGED &&
           joyGetPosEx(0, &joyex) == JOYERR_UNPLUGGED &&
           joyGetDevCapsA(0, &joya, sizeof joya) == JOYERR_UNPLUGGED &&
@@ -132,7 +133,25 @@ static void test_winmm_shlwapi(void) {
           waveOutReset(NULL) == MMSYSERR_NODRIVER && waveOutGetPosition(NULL, &position, sizeof position) == MMSYSERR_NODRIVER &&
           waveOutGetDevCapsA(0, &wavea, sizeof wavea) == MMSYSERR_NODRIVER &&
           waveOutGetDevCapsW(0, &wavew, sizeof wavew) == MMSYSERR_NODRIVER);
-    check(timeGetDevCaps(&caps, sizeof caps) == TIMERR_NOERROR && caps.wPeriodMin == 1 && caps.wPeriodMax == 1000000);
+    check(waveInGetNumDevs() == 0 && waveInOpen(NULL, WAVE_MAPPER, NULL, 0, 0, CALLBACK_NULL) == MMSYSERR_NODRIVER &&
+          waveInClose(NULL) == MMSYSERR_NODRIVER && waveInPrepareHeader(NULL, NULL, 0) == MMSYSERR_NODRIVER &&
+          waveInUnprepareHeader(NULL, NULL, 0) == MMSYSERR_NODRIVER && waveInAddBuffer(NULL, NULL, 0) == MMSYSERR_NODRIVER &&
+          waveInStart(NULL) == MMSYSERR_NODRIVER && waveInStop(NULL) == MMSYSERR_NODRIVER &&
+          waveInReset(NULL) == MMSYSERR_NODRIVER && waveInGetPosition(NULL, &position, sizeof position) == MMSYSERR_NODRIVER &&
+          waveInGetDevCapsA(0, &wavein_a, sizeof wavein_a) == MMSYSERR_NODRIVER &&
+          waveInGetDevCapsW(0, &wavein_w, sizeof wavein_w) == MMSYSERR_NODRIVER);
+    check(waveOutSetVolume(NULL, 0) == MMSYSERR_NODRIVER && waveOutMessage(NULL, 0, 0, 0) == MMSYSERR_NODRIVER &&
+          waveInMessage(NULL, 0, 0, 0) == MMSYSERR_NODRIVER &&
+          waveOutGetErrorTextA(MMSYSERR_NODRIVER, error_text, sizeof error_text) == MMSYSERR_NODRIVER &&
+          waveOutGetErrorTextW(MMSYSERR_NODRIVER, error_w, sizeof error_w / sizeof error_w[0]) == MMSYSERR_NODRIVER &&
+          waveInGetErrorTextA(MMSYSERR_NODRIVER, error_text, sizeof error_text) == MMSYSERR_NODRIVER &&
+          waveInGetErrorTextW(MMSYSERR_NODRIVER, error_w, sizeof error_w / sizeof error_w[0]) == MMSYSERR_NODRIVER &&
+          !PlaySoundA(NULL, NULL, 0) && !PlaySoundW(NULL, NULL, 0));
+    check(timeGetDevCaps(&caps, sizeof caps) == TIMERR_NOERROR && caps.wPeriodMin == 1 && caps.wPeriodMax == 1000000 &&
+          timeGetSystemTime(&system_time, sizeof system_time) == TIMERR_NOERROR && system_time.wType == TIME_MS &&
+          system_time.u.ms == timeGetTime());
+    UINT timer = timeSetEvent(1, 1, NULL, 0, TIME_ONESHOT);
+    check(timer == 0 && timeKillEvent(1) == TIMERR_NOCANDO);
     char out[128] = {0}, path[64] = "dir", a[] = "Dir/File.TXT", trim_a[] = "dir\\file";
     wchar_t wout[128] = {0}, wpath[64] = L"dir", wa[] = L"Dir\\File.TXT", trim_w[] = L"dir\\file", root_w[] = L"\\\\server\\share\\";
     check(PathCombineA(out, "dir", "file.txt") == out && strcmp(out, "dir\\file.txt") == 0 &&
