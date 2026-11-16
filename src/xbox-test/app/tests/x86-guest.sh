@@ -55,6 +55,12 @@ x86-crt: iob ok
 x86-crt: checks 94 failed 0'
 [[ $body == "$want" ]] || { echo "X86-GUEST FAIL: stdout differs"; diff <(echo "$want") <(echo "$body") || true; exit 1; }
 echo "X86-GUEST PASS: mingw CRT program (printf with doubles, heap, qsort, TLS, VirtualAlloc, strftime) ran in the interpreter to exit 42"
+"$cc32" -O1 -Wall -Wextra -Werror "${extra[@]}" -nostdlib -Wl,--entry,entry@0 -Wl,--subsystem,console -o "$tmp/fixture-user32.exe" "$here/x86-guest/fixture-user32.c" -lkernel32 -luser32
+set +e
+uout=$("$tmp/x86-guest" "$tmp/fixture-user32.exe"); urc=$?
+set -e
+[[ $urc -eq 42 ]] || { echo "X86-GUEST FAIL: user32 fixture exit $urc"; echo "$uout"; exit 1; }
+echo "X86-GUEST PASS: PE32 user32 geometry and rectangle routes"
 # The launcher's own PE32 entry point (host/x86/x86_play.h): the structured
 # result launch.h logs and launch_result.json is built from, plus the live
 # output tee and the pre-entry progress callback.
