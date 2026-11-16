@@ -266,7 +266,8 @@ rm -f "$out/msvcp140.dll"
 rm -rf "$out/runtime";mkdir -p "$out/runtime";cp out/layout/runtime/*.dll out/layout/runtime/*.json "$out/runtime/"
 cp -R out/layout/runtime/mono "$out/runtime/mono"
 cp -R out/layout/runtime/fna "$out/runtime/fna"
-bash tests/fna-smoke "$out/runtime/fna"
+mkdir -p "$out/managed"
+bash tests/fna-smoke "$out/runtime/fna" "$out/managed/FnaSmoke.exe"
 test ! -e "$out/runtime/mono/VCRUNTIME140.dll"
 test -f "$out/runtime/vcruntime140.dll"
 mkdir -p "$out/managed"
@@ -306,12 +307,17 @@ tail -1 "$out/leaderboards.log"
 # The root copy was only for this run: later modes prove what happens when a
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
-for mode in mono observer-log reject-attach reject-mapping normal missing gap static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock loader-reentrant reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d10-compile d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn vulkan-draw opengl;do
+for mode in mono fna observer-log reject-attach reject-mapping normal missing gap static-steam crash exit hang dialog wide-dialog wide-long dialog-milestone steam-api steam-client steam-forward loader-lock loader-reentrant reject-export-name reject-export-ordinal reject-export-source-forward reject-export-target-name reject-export-target-ordinal reject-export-lazy startup-lock attach-publication pending-forward-name pending-forward-ordinal pending-reject-name pending-reject-ordinal native-cxx native-vcrt native-msvcp shell-execute loader-search loader-thread loader-query loader-lifetime resource-query thread-exit thread-exit-main rwx-jit slot0 d3d11-diag d3d12-diag d3d10-diag d3d10-triangle d3d10-compile d3d9-diag d3d9-triangle d3d9-triangle-variants d3d9-textured fault-in-dll discord-sdk vulkan-dzn vulkan-draw opengl;do
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" "$mode" > "$out/$mode.log" 2>&1
  tail -1 "$out/$mode.log"
 done
 grep -q 'MONO PLAY-LOADER PASS: embedded AnyCPU hello returned exit code 23' "$out/mono.log"
 grep -q 'GAP: summary exe=mono-2.0-sgen.dll arch=x64 ' "$out/mono.log"
+grep -q 'FNA SMOKE draws=3 clear=CornflowerBlue' "$out/fna.log"
+grep -q 'FNA PLAY-LOADER PASS: FNA3D cleared/presented 3 frames and returned exit code 42' "$out/fna.log"
+grep -q 'PRUN EVENT mapping fna3d.dll' "$out/fna.log"
+grep -q 'PRUN EVENT mapping sdl3.dll' "$out/fna.log"
+grep -q 'guest DXGI CoreWindow swapchain returned hr=0x00000000' "$out/fna.log"
 grep -q 'GAP: dll=vcruntime140.dll resolved=' "$out/mono.log"
 grep -q 'GAP: summary exe=play-gap.exe arch=x64 .*stub=1 missing=1' "$out/gap.log"
 grep -q 'GAP: dll=dbghelp.dll resolved=0 routed=0 donor=0 stub=1 missing=0' "$out/gap.log"

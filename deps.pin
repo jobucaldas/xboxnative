@@ -36,6 +36,8 @@ fna  https://github.com/FNA-XNA/FNA.git  6f9735ad5b495b36581b1387824fa57f371937a
 fna-netstub  https://github.com/FNA-XNA/FNA.NetStub.git  8ccb6c8f0fd34e4369e366d1153e5247f9e72fe7
 fna-faudio  https://github.com/FNA-XNA/FAudio.git  0c423758079863fc3044ba26dd00fc89c41f469e
 fna-fna3d  https://github.com/FNA-XNA/FNA3D.git  2806acf739f9250cc67be6e3078cb5b01767844e
+fna-mojoshader  https://github.com/FNA-XNA/MojoShader.git  ad5dff84830c2863c841f4b1f4e3df78c705b383
+fna-sdl3-native  https://github.com/libsdl-org/SDL.git  f00dc919ca35b9756316e86c4777392de442f9b2  release-3.4.20
 fna-sdl2-cs  https://github.com/flibitijibibo/SDL2-CS.git  1eb20e5c690aee9a5188ba9cf06207295c51d935
 fna-sdl3-cs  https://github.com/flibitijibibo/SDL3-CS.git  9bdcf5de2af86bf764a9ca3c42821c1a099ef150
 fna-theorafile  https://github.com/FNA-XNA/Theorafile.git  3497e1a3cda1fa1ce79256f20e210fd08aec546f

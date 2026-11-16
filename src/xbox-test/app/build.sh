@@ -48,6 +48,7 @@ mkdir -p "$out/layout/runtime"
 cp "$donors"/runtime/*.dll "$donors"/runtime/SHA256SUMS "$out/layout/runtime/"
 bash "$here/../../tools/fetch-mono.sh" "$out/layout/runtime/mono"
 bash "$here/../../tools/build-fna.sh" "$out/layout/runtime/fna"
+bash "$here/../../tools/build-fna-native.sh" "$out/layout/runtime"
 # PE32 games use the pinned i686 VC110/VC120 CRT donors only when they do not
 # ship their own copies beside the executable.
 mkdir -p "$out/layout/runtime/x86"
