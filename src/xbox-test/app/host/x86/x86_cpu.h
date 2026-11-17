@@ -175,8 +175,10 @@ struct Cpu {
                 if (!block_ptr) it = dbt_cache.find(eip);
                 auto valid = [&](dbt::RuntimeBlock* block) {
                     if (!block) return false;
+                    for (const auto& page : block->page_generations)
+                        if (mem.page_generation(page.first << 12) != page.second) return false;
                     for (uint32_t i = 0; i < block->guest_length; ++i)
-                        if (mem.fetch8(eip + i) != block->guest_bytes[i]) return false;
+                        if (mem.fetch8(block->guest_pc + i) != block->guest_bytes[i]) return false;
                     return true;
                 };
                 if (block_ptr && !valid(block_ptr)) {
@@ -210,6 +212,21 @@ struct Cpu {
                             if (memory && absolute_memory &&
                                 (!mem.range_accessible(ea, 4, PROT_R) || !mem.range_accessible(ea, 4, PROT_W)))
                                 throw std::runtime_error("DBT absolute memory page is not RW");
+                            if (memory) {
+                                size_t op_at = pc;
+                                while (op_at < bytes.size() && (bytes[op_at] == 0x66 || bytes[op_at] == 0xf2 || bytes[op_at] == 0xf3 || bytes[op_at] == 0x64 || bytes[op_at] == 0x65)) ++op_at;
+                                uint8_t op = bytes[op_at], group = op_at + 1 < bytes.size() ? uint8_t((bytes[op_at + 1] >> 3) & 7) : 0;
+                                bool writes = (op >= 0xd8 && op <= 0xdf) || op == 0x89 || op == 0x8f ||
+                                    ((op <= 0x3b) && ((op & 3) == 1) && op < 0x38) ||
+                                    ((op == 0x81 || op == 0x83) && group != 7) ||
+                                    ((op == 0xf6 || op == 0xf7) && (group == 2 || group == 3)) ||
+                                    ((op == 0xfe || op == 0xff) && group < 2);
+                                if (op == 0x0f && op_at + 2 < bytes.size()) {
+                                    uint8_t op2 = bytes[op_at + 1];
+                                    writes = op2 != 0x28 && op2 != 0x58 && op2 != 0x59 && op2 != 0x6e;
+                                }
+                                if (writes) throw std::runtime_error("guest memory store uses interpreter write barrier");
+                            }
                             pc += len;
                             if (opcode == 0x74 || opcode == 0x75 || opcode == 0xC2 || opcode == 0xC3 || opcode == 0xE8) break;
                         }
@@ -217,6 +234,11 @@ struct Cpu {
                         bytes.resize(pc); dbt::RuntimeBlock block;
                         block.guest_pc = eip; block.guest_length = uint32_t(pc); block.exit_opcode = last_opcode;
                         block.interpreter_boundary = interpreter_boundary; block.uses_xmm = dbt::runtime_uses_xmm(bytes); block.guest_bytes = bytes;
+                        uint32_t first_page = eip >> 12, last_page = (eip + uint32_t(pc) - 1) >> 12;
+                        for (uint32_t page = first_page;; ++page) {
+                            block.page_generations.emplace_back(page, mem.page_generation(page << 12));
+                            if (page == last_page) break;
+                        }
                         block.code = std::make_unique<dbt::Executable>(dbt::runtime_translate(bytes, eip));
                         block_ptr = &dbt_cache.emplace(eip, std::move(block)).first->second;
                     } catch (const std::exception& ex) {

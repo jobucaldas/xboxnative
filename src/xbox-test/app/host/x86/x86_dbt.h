@@ -227,6 +227,7 @@ inline void runtime_x87(RuntimeState* state, uint64_t encoded, uint32_t length) 
 struct RuntimeBlock {
     std::unique_ptr<Executable> code;
     std::vector<uint8_t> guest_bytes;
+    std::vector<std::pair<uint32_t, uint32_t>> page_generations;
     uint32_t guest_length = 0;
     uint32_t guest_pc = 0;
     uint8_t exit_opcode = 0;

@@ -45,7 +45,14 @@ struct Memory {
     std::unique_ptr<uint8_t, ReservationDeleter> storage;
     std::vector<uint8_t*> page = std::vector<uint8_t*>(1u << 20, nullptr);
     std::vector<uint8_t> prot = std::vector<uint8_t>(1u << 20, 0);
+    std::vector<uint32_t> generation = std::vector<uint32_t>(1u << 20, 1);
     std::vector<std::unique_ptr<uint8_t[]>> blocks;
+    void touch(uint32_t addr, uint32_t size) {
+        if (!size || uint64_t(addr) + size > ADDRESS_SPACE_SIZE) return;
+        uint32_t first = addr >> 12, last = uint32_t((uint64_t(addr) + size - 1) >> 12);
+        for (uint32_t i = first;; ++i) { if (++generation[i] == 0) ++generation[i]; if (i == last) break; }
+    }
+    uint32_t page_generation(uint32_t addr) const { return generation[addr >> 12]; }
     uint32_t fault_eip = 0;  // maintained by the CPU so faults name the instruction
     explicit Memory(bool force_sparse = false) : storage(reserve(force_sparse)) {}
     Memory(Memory&&) = default;
@@ -124,6 +131,7 @@ struct Memory {
         if (storage) commit(addr, n * PAGE);
         else { blocks.emplace_back(new uint8_t[n * PAGE]()); block = blocks.back().get(); }
         for (size_t i = 0; i < n; ++i) { page[(addr >> 12) + i] = storage ? base() + addr + i * PAGE : block + i * PAGE; prot[(addr >> 12) + i] = p; }
+        touch(addr, uint32_t(n * PAGE));
     }
     // Drops a mapping made by map(): its pages become unmapped and decommitted,
     // so a later load may reuse the range as zero-filled memory.
@@ -137,12 +145,14 @@ struct Memory {
             decommit(uint32_t(run), size_t(a - run));
         }
         for (uint64_t a = addr; a < end; a += PAGE) { page[a >> 12] = nullptr; prot[a >> 12] = 0; }
+        if (end > addr) touch(addr, uint32_t(end - addr));
     }
     void protect(uint32_t addr, uint32_t size, uint8_t p) {
         if (addr % PAGE) throw std::runtime_error("x86 protect: unaligned");
         uint64_t end = (uint64_t(addr) + size + PAGE - 1) & ~uint64_t(PAGE - 1);
         for (uint64_t a = addr; a < end; a += PAGE) if (!page[a >> 12]) throw std::runtime_error("x86 protect: unmapped");
         for (uint64_t a = addr; a < end; a += PAGE) prot[a >> 12] = p;
+        if (end > addr) touch(addr, uint32_t(end - addr));
     }
     // Protection byte of the page holding `a` (0 when unmapped); VirtualQuery
     // reports this to the guest so callers that trust it stay correct.
@@ -166,7 +176,7 @@ struct Memory {
         return page[i] + (a & 4095);
     }
     uint8_t r8(uint32_t a) { return *at(a, PROT_R, FaultKind::AccessViolation); }
-    void w8(uint32_t a, uint8_t v) { *at(a, PROT_W, FaultKind::AccessViolation) = v; }
+    void w8(uint32_t a, uint8_t v) { *at(a, PROT_W, FaultKind::AccessViolation) = v; touch(a, 1); }
     uint8_t fetch8(uint32_t a) { return *at(a, PROT_X, FaultKind::ExecuteViolation); }
     uint32_t r(uint32_t a, unsigned n) {
         if (n > 1 && (a & (PAGE - 1)) + n <= PAGE) {
@@ -179,6 +189,7 @@ struct Memory {
         // Check the whole access first so a faulting store has no partial effect.
         if (n > 1 && (a & (PAGE - 1)) + n <= PAGE) {
             uint8_t* p = at(a, PROT_W, FaultKind::AccessViolation);
+            touch(a, n);
             for (unsigned i = 0; i < n; ++i) p[i] = uint8_t(v >> (8 * i));
             return;
         }
@@ -207,6 +218,7 @@ struct Memory {
             if (prot[i] & PROT_COW) prot[i] |= PROT_W;
             if (i == last) break;
         }
+        touch(dst, size);
         uint32_t done = 0;
         while (done < size) {
             uint32_t sa = src + done, da = dst + done;
@@ -223,6 +235,7 @@ struct Memory {
             if (prot[i] & PROT_COW) prot[i] |= PROT_W;
             if (i == last) break;
         }
+        touch(dst, size);
         uint32_t done = 0;
         while (done < size) {
             uint32_t a = dst + done;
@@ -253,7 +266,8 @@ struct Memory {
     }
     void write_bytes(uint32_t a, const void* src, uint32_t n) {
         for (uint32_t i = 0; i < n; ++i) at(a + i, PROT_W, FaultKind::AccessViolation);
-        for (uint32_t i = 0; i < n; ++i) w8(a + i, static_cast<const uint8_t*>(src)[i]);
+        touch(a, n);
+        for (uint32_t i = 0; i < n; ++i) *at(a + i, PROT_W, FaultKind::AccessViolation) = static_cast<const uint8_t*>(src)[i];
     }
     std::string read_cstr(uint32_t a, uint32_t max = 1u << 20) {
         std::string s; for (uint32_t i = 0; i < max; ++i) { uint8_t c = r8(a + i); if (!c) return s; s.push_back(char(c)); }
