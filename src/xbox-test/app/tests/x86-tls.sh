@@ -53,6 +53,10 @@ want=$'x86-tls: start\nx86-tls: block ok\nx86-tls: callback ok\nchecks=11\nfaile
 [[ $rc -eq 42 ]] || { echo "X86-TLS FAIL: interpreter exit $rc (want 42)"; echo "$raw"; exit 1; }
 [[ $out == "$want" ]] || { echo "X86-TLS FAIL: interpreter stdout differs"; echo "$raw"; diff <(echo "$want") <(echo "$out"); exit 1; }
 echo "X86-TLS PASS: implicit TLS block, index, and callback verified in the interpreter (exit 42)"
+set +e; dbt_raw=$(X86_DBT=1 "$tmp/x86-guest" "$tmp/fixture-tls.exe" 2>&1); dbt_rc=$?; set -e
+dbt_out=$(echo "$dbt_raw" | grep -E '^(x86-tls|checks|failed)' | tr -d '\r')
+[[ $dbt_rc -eq 42 && $dbt_out == "$want" ]] || { echo "X86-TLS FAIL: DBT implicit TLS run differs (exit $dbt_rc)"; echo "$dbt_raw"; exit 1; }
+echo "X86-TLS PASS: X86_DBT=1 implicit TLS block, index, and callback verified"
 
 # Per-thread TLS: the main thread and a CreateThread worker each increment a TLS
 # variable (their own copies, from the template), TLS callbacks get
@@ -82,6 +86,10 @@ twant=$'x86-tls-threads: start\nx86-tls-threads: per-thread ok\nchecks=16\nfaile
 [[ $trc -eq 42 ]] || { echo "X86-TLS FAIL: per-thread interpreter exit $trc (want 42)"; echo "$traw"; exit 1; }
 [[ $tout == "$twant" ]] || { echo "X86-TLS FAIL: per-thread stdout differs"; echo "$traw"; diff <(echo "$twant") <(echo "$tout"); exit 1; }
 echo "X86-TLS PASS: per-thread implicit TLS (main and worker each own a copy, template untouched), TLS callbacks DLL_THREAD_ATTACH/DETACH once on the worker, worker's LastError 0 and thread id, main's LastError kept (exit 42)"
+set +e; tdbt_raw=$(X86_DBT=1 "$tmp/x86-guest" "$tmp/fixture-tls-threads.exe" 2>&1); tdbt_rc=$?; set -e
+tdbt_out=$(echo "$tdbt_raw" | grep -E '^(x86-tls-threads|checks|failed)' | tr -d '\r' || true)
+[[ $tdbt_rc -eq 42 && $tdbt_out == "$twant" ]] || { echo "X86-TLS FAIL: DBT per-thread TLS run differs (exit $tdbt_rc)"; echo "$tdbt_raw"; exit 1; }
+echo "X86-TLS PASS: X86_DBT=1 per-thread TLS and shared-cache guest-thread run verified"
 
 if [[ ${1:-} == --wine ]]; then
   # Wine's loader does the whole implicit-TLS setup itself on the patched
