@@ -655,6 +655,7 @@ struct Guest {
     }
     uint32_t load_guest_dll(Cpu* cpu, const std::string& requested, ThunkTable& table) {
         std::string lower = module_key(requested);
+        if (host.route_trace) host.route_trace("LoadLibrary " + lower);
         auto it = dlls.find(lower);
         if (it != dlls.end()) { it->second.refs++; return it->second.image.base; }
         if (os_served(lower)) return os_module_handle(lower, table);
@@ -710,6 +711,11 @@ struct Guest {
     // MAKEINTRESOURCE form (a value below 65536 is an ordinal, as Windows
     // answers). Returns the guest address, or 0 with ERROR_PROC_NOT_FOUND.
     uint32_t get_proc_address(uint32_t module, uint32_t name_ptr, ThunkTable& table) {
+        const std::string requested = name_ptr < 0x10000u ? "#" + std::to_string(name_ptr) : str(name_ptr);
+        auto trace = [this, &requested](const std::string& dll, uint32_t address) {
+            if (host.route_trace) host.route_trace("GetProcAddress " + dll + "!" + requested +
+                " -> " + (address ? "resolved" : "missing"));
+        };
         for (auto& kv : dlls) {
             if (kv.second.image.base != module) continue;
             uint32_t a = 0;
@@ -740,6 +746,7 @@ struct Guest {
                                     });
             }
             if (!a) set_last_error(127);  // ERROR_PROC_NOT_FOUND
+            trace(kv.first, a);
             return a;
         }
         // An OS-served module: the export is a host thunk, added on demand —
@@ -747,18 +754,29 @@ struct Guest {
         // (msvcrt's __initenv and friends) answers the variable's address.
         for (auto& kv : os_modules) {
             if (kv.second != module) continue;
-            if (name_ptr >= 0x10000u) {
+            if (name_ptr < 0x10000u) {
+                auto ordinal = reg.ordinals.find({kv.first, uint16_t(name_ptr)});
+                if (ordinal != reg.ordinals.end()) {
+                    uint32_t address = os_export_addr(table, kv.first, ordinal->second);
+                    trace(kv.first, address); return address;
+                }
+            } else {
                 std::string sym = Registry::key_sym(str(name_ptr));
                 auto it = reg.map.find({kv.first, sym});
-                if (it != reg.map.end()) return os_export_addr(table, kv.first, sym);
+                if (it != reg.map.end()) {
+                    uint32_t address = os_export_addr(table, kv.first, sym);
+                    trace(kv.first, address); return address;
+                }
                 auto dt = reg.data.find({kv.first, sym});
-                if (dt != reg.data.end()) return dt->second;
+                if (dt != reg.data.end()) { trace(kv.first, dt->second); return dt->second; }
                 // Also answer the undecorated stdcall name for a decorated
                 // registry entry (a game may ask either form).
                 std::string dec = sym + "@";
                 for (auto& e : reg.map)
-                    if (e.first.first == kv.first && e.first.second.rfind(dec, 0) == 0)
-                        return os_export_addr(table, kv.first, e.first.second);
+                    if (e.first.first == kv.first && e.first.second.rfind(dec, 0) == 0) {
+                        uint32_t address = os_export_addr(table, kv.first, e.first.second);
+                        trace(kv.first, address); return address;
+                    }
             }
             set_last_error(127);  // ERROR_PROC_NOT_FOUND
             return 0;
@@ -930,7 +948,9 @@ inline void Guest::do_exit(Cpu& c, uint32_t code) {
 // ---- registration ----
 inline void Guest::register_all() {
     reg.map.clear();
+    reg.ordinals.clear();
     register_win32(reg, host);  // the stage-1 allowlist stays the base surface
+    register_xinput(reg, host);
     register_gl(reg, host);
     register_d3d9(reg, host);
     host.dsound_event=[this](uint32_t token)->uintptr_t {

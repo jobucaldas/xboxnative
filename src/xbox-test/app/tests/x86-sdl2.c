@@ -5,7 +5,7 @@
 #include <stdio.h>
 
 #ifndef SDL2TEST_INIT_MASK
-#define SDL2TEST_INIT_MASK (SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS)
+#define SDL2TEST_INIT_MASK (SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS)
 #endif
 
 static int fail(int code, const char* stage) {
@@ -17,6 +17,10 @@ static int fail(int code, const char* stage) {
 int main(void) {
     puts("SDL2TEST STEP main entered"); fflush(stdout);
     SDL_SetMainReady();
+    SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
+    SDL_SetHint(SDL_HINT_DIRECTINPUT_ENABLED, "0");
+    SDL_SetHint(SDL_HINT_XINPUT_ENABLED, "1");
     if (SDL_Init(SDL2TEST_INIT_MASK) != 0)
         return fail(10, "SDL_Init");
     puts("SDL2TEST STEP SDL_Init ok"); fflush(stdout);
@@ -55,8 +59,9 @@ int main(void) {
     }
     fflush(stdout);
 
+    SDL_PumpEvents();
+    SDL_JoystickUpdate();
     int joysticks = SDL_NumJoysticks();
-    if (joysticks < 0) return fail(24, "SDL_NumJoysticks");
     printf("SDL2TEST STEP SDL_NumJoysticks=%d\n", joysticks); fflush(stdout);
     int controllers = 0;
     for (int i = 0; i < joysticks; ++i) {
@@ -67,6 +72,7 @@ int main(void) {
             SDL_GameControllerClose(controller);
         }
     }
+    printf("SDL2TEST STEP SDL_NumGameControllers=%d\n", controllers); fflush(stdout);
 
     if (SDL_SetRenderDrawColor(renderer, 255, 32, 16, 255) != 0)
         return fail(30, "SDL_SetRenderDrawColor");

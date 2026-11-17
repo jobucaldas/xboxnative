@@ -1339,6 +1339,7 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
             else if(q.name=="SetCursor"){using Fn=HCURSOR(WINAPI*)(HCURSOR);if(p)result(reinterpret_cast<Fn>(p)((HCURSOR)q.args[0]));}
             else if(q.name=="ShowCursor"){using Fn=int(WINAPI*)(BOOL);if(p)result(reinterpret_cast<Fn>(p)(BOOL(q.args[0])));}
             else if(q.name=="ClipCursor"){using Fn=BOOL(WINAPI*)(const RECT*);RECT r{};if(q.input.size()==sizeof(r))memcpy(&r,q.input.data(),sizeof(r));if(p)result(reinterpret_cast<Fn>(p)(q.input.empty()?nullptr:&r));}
+            else if(q.name=="GetClipCursor"){using Fn=BOOL(WINAPI*)(RECT*);RECT r{};if(p){BOOL ok=reinterpret_cast<Fn>(p)(&r);bytes(&r,sizeof(r));q.result=ok;q.supported=true;}}
             else if(q.name=="GetCursorPos"){using Fn=BOOL(WINAPI*)(POINT*);POINT v{};if(p){BOOL ok=reinterpret_cast<Fn>(p)(&v);bytes(&v,sizeof(v));q.result=ok;q.supported=true;}}
             else if(q.name=="IsWindowVisible"||q.name=="IsIconic"||q.name=="SetForegroundWindow"){using Fn=BOOL(WINAPI*)(HWND);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0]));}
             else if(q.name=="GetForegroundWindow"||q.name=="GetFocus"||q.name=="GetActiveWindow"){using Fn=HWND(WINAPI*)();if(p)result(reinterpret_cast<Fn>(p)());}
@@ -1405,6 +1406,45 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
             if(q.name.compare(0,9,"glUniform")==0&&!q.input.empty()){auto p=pointer(q.name.c_str());if(!p){missing();return;}size_t pointer_arg=q.name.find("Matrix")!=std::string::npos?3u:2u;q.args[pointer_arg]=reinterpret_cast<uintptr_t>(q.input.data());q.result=x86::gl_call_generated(q.signature,p,q.args.data());return;}
             if(q.signature!=65535){auto p=pointer(q.name.c_str());if(!p){missing();return;}q.result=x86::gl_call_generated(q.signature,p,q.args.empty()?nullptr:q.args.data());return;}
             missing();
+        };
+        host.xinput_call=[](x86::Host::XInputCall& request) {
+            using Kind=x86::Host::XInputCall::Kind;
+            switch(request.kind) {
+            case Kind::GetState: {
+                XINPUT_STATE state{};request.result=xinput_core::get_state(request.index,&state);
+                if(!request.result){const auto* bytes=reinterpret_cast<const uint8_t*>(&state);request.output.assign(bytes,bytes+sizeof(state));}
+                break;
+            }
+            case Kind::GetStateEx: {
+                if(request.index>=xinput_core::slots.size()){request.result=ERROR_DEVICE_NOT_CONNECTED;break;}
+                std::lock_guard<std::mutex> lock(xinput_core::mutex);
+                const auto& slot=xinput_core::slots[request.index];
+                if(!slot.connected){request.result=ERROR_DEVICE_NOT_CONNECTED;break;}
+                const auto* bytes=reinterpret_cast<const uint8_t*>(&slot.state);request.output.assign(bytes,bytes+sizeof(slot.state));request.result=ERROR_SUCCESS;
+                break;
+            }
+            case Kind::SetState: {
+                if(request.input.size()!=sizeof(XINPUT_VIBRATION)){request.result=ERROR_INVALID_PARAMETER;break;}
+                XINPUT_VIBRATION vibration{};memcpy(&vibration,request.input.data(),sizeof(vibration));
+                request.result=xinput_core::set_state(request.index,&vibration);break;
+            }
+            case Kind::GetCapabilities: {
+                XINPUT_CAPABILITIES capabilities{};request.result=xinput_core::capabilities(request.index,request.flags,&capabilities);
+                if(!request.result){const auto* bytes=reinterpret_cast<const uint8_t*>(&capabilities);request.output.assign(bytes,bytes+sizeof(capabilities));}
+                break;
+            }
+            case Kind::Enable:xinput_core::enable(BOOL(request.flags));request.result=ERROR_SUCCESS;break;
+            case Kind::GetBatteryInformation: {
+                XINPUT_BATTERY_INFORMATION battery{};request.result=xinput_core::battery(request.index,BYTE(request.device_type),&battery);
+                if(!request.result){const auto* bytes=reinterpret_cast<const uint8_t*>(&battery);request.output.assign(bytes,bytes+sizeof(battery));}
+                break;
+            }
+            case Kind::GetKeystroke: {
+                XINPUT_STATE state{};request.result=xinput_core::get_state(request.index,&state);
+                if(!request.result)request.result=ERROR_EMPTY;
+                break;
+            }
+            }
         };
     };
     auto r=x86::run(path,c.cwd,cmdline,tee,loaded,x86::kGuestRunCap,dllSource,traceFaultContext,[&](const x86::PlayResult& mapped) {

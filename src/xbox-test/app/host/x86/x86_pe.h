@@ -26,6 +26,7 @@ struct Registry {  // (lowercase dll, lowercase symbol) -> thunk definition
     // (msvcrt's __initenv/__mb_cur_max/_iob are imported as data by mingw's
     // CRT startup; reading them is a plain memory load).
     std::map<std::pair<std::string, std::string>, uint32_t> data;
+    std::map<std::pair<std::string, uint16_t>, std::string> ordinals;
     static std::string key_sym(const std::string& name) {
         std::string l = name; for (auto& ch : l) ch = char(std::tolower((unsigned char)ch));
         return l;
@@ -35,6 +36,9 @@ struct Registry {  // (lowercase dll, lowercase symbol) -> thunk definition
     }
     void add_data(const std::string& dll, const std::string& name, uint32_t addr) {
         data[{dll, key_sym(name)}] = addr;
+    }
+    void add_ordinal(const std::string& dll, uint16_t ordinal, const std::string& name) {
+        ordinals[{dll, ordinal}] = key_sym(name);
     }
 };
 struct Image {
@@ -154,16 +158,20 @@ inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, cons
         size_t src = u32(pe.bytes, d), dst = u32(pe.bytes, d + 16); if (!src) src = dst;
         for (unsigned j = 0;; ++j) {
             uint32_t t = u32(pe.bytes, src + size_t(j) * 4); if (!t) break;
-            std::string sym = (t & 0x80000000u) ? "#" + std::to_string(t & 65535) : pe.string(t + 2);
+            const bool by_ordinal = (t & 0x80000000u) != 0;
+            const uint16_t ordinal = uint16_t(t & 65535);
+            std::string sym = by_ordinal ? "#" + std::to_string(ordinal) : pe.string(t + 2);
             ++img.imports;
             // The registry keys symbols lowercase (Windows matches export
             // names case-insensitively); the label keeps the import's casing.
             // An API-set contract name binds to the module that serves it (apiset.h);
             // the unresolved label below keeps the name the game imported.
             const std::string served = apiset::served_by(dll, sym);
-            auto dit = reg.data.find({served, Registry::key_sym(sym)});
+            auto ordinal_route = by_ordinal ? reg.ordinals.find({served, ordinal}) : reg.ordinals.end();
+            const std::string lookup = ordinal_route == reg.ordinals.end() ? sym : ordinal_route->second;
+            auto dit = reg.data.find({served, Registry::key_sym(lookup)});
             if (dit != reg.data.end()) { mem.w32(img.base + dst + j * 4, dit->second); ++img.bound; img.gap_imports.emplace_back(dll,sym,gap_summary::Outcome::routed); continue; }
-            auto it = reg.map.find({served, Registry::key_sym(sym)}); uint32_t stub;
+            auto it = reg.map.find({served, Registry::key_sym(lookup)}); uint32_t stub;
             if (it != reg.map.end()) { stub = table.add(it->second); ++img.bound; img.gap_imports.emplace_back(dll,sym,gap_summary::Outcome::routed); }
             else {
                 img.unresolved.push_back(dll + "!" + sym);

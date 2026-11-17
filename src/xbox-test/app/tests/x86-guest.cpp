@@ -105,6 +105,61 @@ static bool verify_display_routes() {
     std::fprintf(stderr,"X86-DISPLAY PASS: Win32 display route arity and 840/220/40/104-byte structures\n");
     return true;
 }
+static bool verify_xinput_routes() {
+    Memory mem; mem.map(0x1000, 0x20000, PROT_R | PROT_W); mem.map(TEB_ADDR, 0x1000, PROT_R | PROT_W);
+    ThunkTable table; Host host; Registry reg; Guest guest(mem, host, reg); guest.register_all();
+    Cpu cpu(mem, table); cpu.reg[ESP]=0x1f000; cpu.fs_base=TEB_ADDR;
+    bool saw_set=false, saw_enable=false;
+    host.xinput_call=[&](Host::XInputCall& q) {
+        q.result=q.kind==Host::XInputCall::Kind::Enable||q.index==1?0:1167;
+        if(q.result)return;
+        switch(q.kind) {
+        case Host::XInputCall::Kind::GetState:
+        case Host::XInputCall::Kind::GetStateEx:
+            q.output.resize(16);memcpy(q.output.data(),std::array<uint32_t,4>{9,0x1000,0,0}.data(),16);break;
+        case Host::XInputCall::Kind::SetState:saw_set=q.input.size()==4&&q.input[0]==0x34;break;
+        case Host::XInputCall::Kind::GetCapabilities:
+        case Host::XInputCall::Kind::GetCapabilitiesEx:q.output.resize(20);q.output[0]=1;break;
+        case Host::XInputCall::Kind::Enable:saw_enable=q.flags==1;break;
+        case Host::XInputCall::Kind::GetBatteryInformation:q.result=50;break;
+        case Host::XInputCall::Kind::GetKeystroke:q.result=4306;break;
+        }
+    };
+    auto route=[&](const char* dll,const char* name,unsigned argc)->Thunk* {
+        auto it=reg.map.find({dll,Registry::key_sym(name)});
+        return it!=reg.map.end()&&it->second.argc==argc?&it->second:nullptr;
+    };
+    for(const char* dll:{"xinput1_3.dll","xinput1_4.dll","xinput9_1_0.dll"}) {
+        if(!route(dll,"XInputGetState",2)||!route(dll,"XInputSetState",2)||!route(dll,"XInputGetCapabilities",3)||
+           !route(dll,"XInputEnable",1)||!route(dll,"XInputGetBatteryInformation",3)||!route(dll,"XInputGetKeystroke",3))return false;
+    }
+    auto args=[&](std::initializer_list<uint32_t> values) {unsigned i=0;for(auto value:values)mem.w32(cpu.reg[ESP]+4+4*i++,value);};
+    auto* get=route("xinput1_4.dll","XInputGetState",2);args({1,0x3000});
+    if(get->fn(cpu)!=0||mem.r32(0x3000)!=9||mem.r32(0x3004)!=0x1000)return false;
+    args({0,0x3000});if(get->fn(cpu)!=1167)return false;
+    auto* set=route("xinput1_4.dll","XInputSetState",2);mem.w32(0x3100,0x12340034);args({1,0x3100});
+    if(set->fn(cpu)!=0||!saw_set)return false;
+    auto* caps=route("xinput1_4.dll","XInputGetCapabilities",3);args({1,0,0x3200});
+    if(caps->fn(cpu)!=0||mem.r(0x3200,1)!=1)return false;
+    auto* enable=route("xinput1_4.dll","XInputEnable",1);args({1});if(enable->fn(cpu)!=0||!saw_enable)return false;
+    auto* battery=route("xinput1_4.dll","XInputGetBatteryInformation",3);args({1,0,0x3300});
+    if(battery->fn(cpu)!=50)return false;
+    auto* key=route("xinput1_4.dll","XInputGetKeystroke",3);args({1,0,0x3400});if(key->fn(cpu)!=4306)return false;
+    uint32_t module=guest.load_guest_dll(nullptr,"xinput1_4.dll",table);
+    uint32_t ex=guest.get_proc_address(module,100,table);
+    const Thunk* ex_thunk=table.at(ex);
+    auto ordinal=reg.ordinals.find({"xinput1_4.dll",uint16_t(100)});
+    if(!module||!ex_thunk||ex_thunk->name!="XInputGetStateEx"||ex_thunk->argc!=2||ordinal==reg.ordinals.end())return false;
+    uint32_t caps_ex=guest.get_proc_address(module,108,table);
+    const Thunk* caps_ex_thunk=table.at(caps_ex);
+    auto caps_ordinal=reg.ordinals.find({"xinput1_4.dll",uint16_t(108)});
+    if(!caps_ex_thunk||caps_ex_thunk->name!="XInputGetCapabilitiesEx"||caps_ex_thunk->argc!=4||caps_ordinal==reg.ordinals.end())return false;
+    mem.write_bytes(0x15000,"XInputGetState",15);
+    uint32_t named=guest.get_proc_address(module,0x15000,table);
+    if(!named||!table.at(named)||table.at(named)->name!="XInputGetState")return false;
+    std::fprintf(stderr,"X86-XINPUT PASS: 32-bit routes, fake connected/empty slots, LoadLibrary, GetProcAddress ordinals 100/108\n");
+    return true;
+}
 static bool verify_file_guard() {
     namespace fs = std::filesystem;
     const fs::path temp = fs::temp_directory_path() / ("x86-file-guard-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -159,6 +214,7 @@ static std::vector<uint8_t> slurp(const char* path) {
 int main(int argc, char** argv) {
     if (!verify_critical_section_routes()) { std::puts("X86-CRITICAL-SECTION FAIL: CRT forced debug-info initialization"); return 1; }
     if (!verify_display_routes()) return 1;
+    if (!verify_xinput_routes()) { std::puts("X86-XINPUT FAIL: guest route, layout, ordinal, or fake-pad contract"); return 1; }
     if (!verify_file_guard()) return 1;
     if (argc < 2) { printf("usage: x86-guest <fixture-crt.exe>\n"); return 2; }
     auto file = slurp(argv[1]);

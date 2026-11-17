@@ -2,6 +2,7 @@
 // Run the official i686 SDL2 DLL in the x86 interpreter under Wine. SDL's
 // Direct3D 9 renderer is connected to the real x64 D3D9 shim for frame readback.
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -16,6 +17,24 @@ static std::vector<uint8_t> read_file(const char* path) {
 }
 static LRESULT CALLBACK test_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     return DefWindowProcW(window, message, wparam, lparam);
+}
+static const char* xinput_kind_name(x86::Host::XInputCall::Kind kind) {
+    using Kind = x86::Host::XInputCall::Kind;
+    switch (kind) {
+    case Kind::GetState: return "XInputGetState";
+    case Kind::GetStateEx: return "XInputGetStateEx";
+    case Kind::SetState: return "XInputSetState";
+    case Kind::GetCapabilities: return "XInputGetCapabilities";
+    case Kind::GetCapabilitiesEx: return "XInputGetCapabilitiesEx";
+    case Kind::Enable: return "XInputEnable";
+    case Kind::GetBatteryInformation: return "XInputGetBatteryInformation";
+    case Kind::GetKeystroke: return "XInputGetKeystroke";
+    }
+    return "unknown";
+}
+static int metric(const std::string& text, const char* name) {
+    const auto at = text.find(name);
+    return at == std::string::npos ? -1 : std::atoi(text.c_str() + at + std::strlen(name));
 }
 
 int main(int argc, char** argv) {
@@ -64,12 +83,33 @@ int main(int argc, char** argv) {
         return std::vector<uint8_t>{};
     };
     std::string output;
+    std::vector<std::string> xinput_trace;
+    const bool fake_pad = std::getenv("SDL2TEST_NO_PAD") == nullptr;
     std::map<std::pair<uintptr_t, int>, intptr_t> window_longs;
     auto result = x86::run_image(guest, "x86-sdl2.exe", "x86-sdl2.exe",
         [&](const std::string& text) { output += text; }, nullptr,
         2'000'000'000ull, source, true, nullptr, nullptr,
         [&](x86::Host& host) {
-            host.tee = [&](const std::string& text) { output += text; };
+            host.route_trace=[&](const std::string& route) { xinput_trace.push_back(route); };
+            host.xinput_call=[&](x86::Host::XInputCall& q) {
+                xinput_trace.emplace_back(std::string(xinput_kind_name(q.kind)) +
+                    " index=" + std::to_string(q.index) + " flags=" + std::to_string(q.flags));
+                using Kind=x86::Host::XInputCall::Kind;
+                if(!fake_pad || q.index!=0){q.result=1167;return;}
+                q.result=0;
+                switch(q.kind) {
+                case Kind::GetState:case Kind::GetStateEx:
+                    q.output.assign(16,0);q.output[0]=1;break;
+                case Kind::GetCapabilities:case Kind::GetCapabilitiesEx:
+                    q.output.assign(20,0);q.output[0]=1;q.output[1]=1;
+                    q.output[4]=0x00;q.output[5]=0x10;q.output[6]=255;q.output[7]=255;
+                    q.output[8]=0xff;q.output[9]=0x7f;q.output[10]=0xff;q.output[11]=0x7f;
+                    q.output[12]=0xff;q.output[13]=0x7f;q.output[14]=0xff;q.output[15]=0x7f;break;
+                case Kind::SetState:case Kind::Enable:break;
+                case Kind::GetBatteryInformation:q.result=50;break;
+                case Kind::GetKeystroke:q.result=4306;break;
+                }
+            };
             host.register_window_class = [](const std::u16string&) { return true; };
             host.unregister_window_class = [](const std::u16string&) { return true; };
             host.create_window = [](const x86::Host::WindowCreate&) -> uintptr_t { return 1; };
@@ -99,6 +139,11 @@ int main(int argc, char** argv) {
                     std::memcpy(q.output.data(), &rect, sizeof(rect));
                     q.result = 1;
                 } else if (q.name == "GetClientRect") {
+                    x86::Host::WindowRect rect{0, 0, 96, 64};
+                    q.output.resize(16);
+                    std::memcpy(q.output.data(), &rect, sizeof(rect));
+                    q.result = 1;
+                } else if (q.name == "GetClipCursor") {
                     x86::Host::WindowRect rect{0, 0, 96, 64};
                     q.output.resize(16);
                     std::memcpy(q.output.data(), &rect, sizeof(rect));
@@ -141,6 +186,14 @@ int main(int argc, char** argv) {
         });
 
     std::fwrite(output.data(), 1, output.size(), stdout);
+    for (const auto& route : xinput_trace)
+        std::printf("SDL2TEST ROUTE %s\n", route.c_str());
+    const int joysticks = metric(output, "joysticks=");
+    const int controllers = metric(output, "controllers=");
+    const bool counts_ok = fake_pad ? joysticks >= 1 && controllers >= 1 : joysticks == 0 && controllers == 0;
+    if (!counts_ok)
+        std::printf("SDL2TEST FAIL expected=%s joysticks=%d controllers=%d\n",
+            fake_pad ? "connected-pad" : "no-pad", joysticks, controllers);
     for (const auto& unresolved : result.unresolved)
         std::printf("SDL2TEST UNRESOLVED %s\n", unresolved.c_str());
     if (!result.fault.empty())
@@ -151,6 +204,6 @@ int main(int argc, char** argv) {
 
     DestroyWindow(window);
     FreeLibrary(shim);
-    return result.loaded && result.finished && result.exit_code == 42 &&
+    return result.loaded && result.finished && result.exit_code == 42 && counts_ok &&
         output.find("SDL2TEST PASS ") != std::string::npos ? 0 : 1;
 }
