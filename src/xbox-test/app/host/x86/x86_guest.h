@@ -10,6 +10,7 @@
 // instead of being silently stubbed. That is deliberate: a milestone subset is
 // never mistaken for general Win32 support.
 #pragma once
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -19,6 +20,7 @@
 #include <random>
 #include <tuple>
 #include <string>
+#include <thread>
 #include <vector>
 #if defined(_WIN32)
 #include <windows.h>
@@ -98,8 +100,24 @@ struct GuestHeap {
 
 // ---- the guest process surface ----
 struct Guest {
+    using Clock = std::chrono::steady_clock;
     Memory& mem; Host& host; Registry& reg;
     GuestHeap heap;
+    static uint64_t steady_millis() {
+        return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count());
+    }
+    static uint64_t steady_micros() {
+        return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch()).count());
+    }
+    uint64_t tick_now() const { return host.tick_count ? host.tick_count() : steady_millis(); }
+    static void sleep_until(Clock::time_point deadline) {
+        if (Clock::now() < deadline) std::this_thread::sleep_until(deadline);
+    }
+    static uint32_t remaining_timeout(Clock::time_point deadline, uint32_t timeout) {
+        if (timeout == 0xffffffffu) return timeout;
+        auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+        return left > 0 ? uint32_t(left > 0xffffffffll ? 0xffffffffu : left) : 0u;
+    }
     std::string exe_path, cmdline;
     SteamClientRegistry steam_registry=steam_client_registry_config();
     std::map<uint32_t,bool> steam_registry_keys;
@@ -298,6 +316,29 @@ struct Guest {
         if(o.kind==SyncKind::Semaphore&&o.count){--o.count;return 0;}
         if(o.kind==SyncKind::Mutex&&(!o.owner||o.owner==tid)){uint32_t r=o.abandoned?0x80u:0u;o.abandoned=false;o.owner=tid;++o.recursion;return r;}
         if(timeout==0xffffffffu)throw Fault(FaultKind::Unsupported,c.eip,c.eip,"WaitForSingleObject: unsignaled infinite wait on handle "+std::to_string(h));
+        if(timeout) std::this_thread::sleep_for(std::chrono::milliseconds(timeout));
+        return 258u;
+    }
+    uint32_t sync_wait_multiple(Cpu& c, uint32_t count, uint32_t handles, bool wait_all, uint32_t timeout, bool allow_empty=false) {
+        if((!count&&!allow_empty)||count>64||(count&&!handles)){set_last_error(87);return 0xffffffffu;}
+        Clock::time_point deadline{};
+        if(timeout!=0xffffffffu) deadline=Clock::now()+std::chrono::milliseconds(timeout);
+        run_pending_threads(c);
+        std::vector<uint32_t> values(count); uint32_t ready_count=0, ready_index=0;
+        for(uint32_t i=0;i<count;++i){uint32_t h=mem.r32(handles+i*4);values[i]=h;
+            if(thread_ids.count(h)||thread_exit_codes.count(h)){if(!ready_count)ready_index=i;++ready_count;continue;}
+            auto it=sync_handles.find(h);if(it==sync_handles.end()){set_last_error(6);return 0xffffffffu;}
+            const auto& o=sync_objects[it->second];uint32_t tid=c.fs_base?mem.r32(c.fs_base+0x24):1u;
+            bool ready=(o.kind==SyncKind::Event&&o.signaled)||(o.kind==SyncKind::Semaphore&&o.count)||(o.kind==SyncKind::Mutex&&(!o.owner||o.owner==tid));
+            if(ready){if(!ready_count)ready_index=i;++ready_count;}
+        }
+        if(wait_all?ready_count==count:ready_count!=0){
+            if(wait_all){for(uint32_t h:values)if(sync_handles.count(h)){uint32_t r=sync_wait(c,h,0);if(r==0xffffffffu)return r;}return 0;}
+            uint32_t h=values[ready_index];if(sync_handles.count(h)){uint32_t r=sync_wait(c,h,0);if(r==0xffffffffu)return r;}
+            return ready_index;
+        }
+        if(timeout==0xffffffffu)throw Fault(FaultKind::Unsupported,c.eip,c.eip,"WaitForMultipleObjects: unsignaled infinite wait");
+        sleep_until(deadline);
         return 258u;
     }
     void abandon_mutexes(uint32_t tid) { for(auto& kv:sync_objects)if(kv.second.kind==SyncKind::Mutex&&kv.second.owner==tid){kv.second.owner=kv.second.recursion=0;kv.second.abandoned=true;} }
@@ -1309,13 +1350,16 @@ inline void Guest::register_all() {
     });
     reg.add("kernel32.dll", "ExitProcess", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { do_exit(c, c.arg(0)); return 0; });
     reg.add("kernel32.dll", "TerminateProcess", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { do_exit(c, c.arg(1)); return 1; });
-    // Yield points of the cooperative scheduler: a game that polls with Sleep
-    // (`while (!flag) Sleep(1)`) waits on a worker that only runs here, so each
-    // of these runs the pending bodies before it returns (Bugbot 4561794148).
-    reg.add("kernel32.dll", "Sleep", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
-        run_pending_threads(c); return 0; });
-    reg.add("kernel32.dll", "SleepEx", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
-        run_pending_threads(c); return 0; });  // 0: not an alertable wakeup
+    // Yield points of the cooperative scheduler: run pending bodies, then wait
+    // for the remainder of the requested real-time interval. A worker can consume
+    // part of the caller's interval while it runs (Bugbot 4561794148).
+    auto guest_sleep = [this](Cpu& c) -> uint32_t {
+        uint32_t timeout=c.arg(0); auto deadline=Clock::now()+std::chrono::milliseconds(timeout);
+        run_pending_threads(c); if(timeout) sleep_until(deadline); return 0;
+    };
+    reg.add("kernel32.dll", "Sleep", Conv::Stdcall, 1, guest_sleep);
+    reg.add("kernel32.dll", "SleepEx", Conv::Stdcall, 2, [guest_sleep](Cpu& c) -> uint32_t {
+        guest_sleep(c); return 0; });  // 0: not an alertable wakeup
     // Threads: the surface runs one guest thread per CPU, so a thread body
     // cannot run inside CreateThread — mcfgthread's creator->thread handshake
     // (__MCF_event_await_change on the new thread's `ready` flag) spins forever
@@ -1344,40 +1388,31 @@ inline void Guest::register_all() {
     // SwitchToThread: nonzero when another thread ran (MSDN), i.e. bodies were pending.
     reg.add("kernel32.dll", "SwitchToThread", Conv::Stdcall, 0, [this](Cpu& c) -> uint32_t {
         bool ran = !pending_threads.empty(); run_pending_threads(c); return ran ? 1u : 0u; });
-    // The blocking-wait surface a win32-threaded CRT startup uses (mingw 13's
-    // winpthreads/mcfgthread peers): waits run the pending thread bodies first,
-    // then succeed, as the keyed-event thunks below answer.
+    // Timed waits share the same deadline accounting as Sleep: pending guest
+    // bodies run first, and only the unconsumed part of the timeout is waited.
     reg.add("kernel32.dll", "WaitForSingleObject", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
-        uint32_t h=c.arg(0), timeout=c.arg(1); run_pending_threads(c);
+        uint32_t h=c.arg(0), timeout=c.arg(1); auto deadline=timeout==0xffffffffu?Clock::time_point{}:Clock::now()+std::chrono::milliseconds(timeout);
+        run_pending_threads(c);
         if(thread_ids.count(h)||thread_exit_codes.count(h))return 0;
         if(!sync_handles.count(h)){set_last_error(6);return 0xffffffffu;}
-        uint32_t result=sync_wait(c,h,timeout);if(result==0xffffffffu)set_last_error(6);return result; });
+        uint32_t result=sync_wait(c,h,remaining_timeout(deadline,timeout));if(result==0xffffffffu)set_last_error(6);return result; });
     reg.add("kernel32.dll", "WaitForSingleObjectEx", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
-        run_pending_threads(c); return 0; });
-    // WaitForMultipleObjects: evaluate the virtual thread/sync handles instead
-    // of reporting success for an unsignaled event. Timeouts are immediate because
-    // the cooperative guest has no virtual clock; infinite blocked waits fault clearly.
-    reg.add("kernel32.dll", "WaitForMultipleObjects", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
-        uint32_t count=c.arg(0), handles=c.arg(1), timeout=c.arg(3); bool wait_all=c.arg(2)!=0;
-        if(!count||count>64||!handles){set_last_error(87);return 0xffffffffu;}
-        run_pending_threads(c); std::vector<uint32_t> values(count); uint32_t ready_count=0, ready_index=0;
-        for(uint32_t i=0;i<count;++i){uint32_t h=mem.r32(handles+i*4);values[i]=h;
-            if(thread_ids.count(h)||thread_exit_codes.count(h)){if(!ready_count)ready_index=i;++ready_count;continue;}
-            auto it=sync_handles.find(h);if(it==sync_handles.end()){set_last_error(6);return 0xffffffffu;}
-            const auto& o=sync_objects[it->second];uint32_t tid=c.fs_base?mem.r32(c.fs_base+0x24):1u;
-            bool ready=(o.kind==SyncKind::Event&&o.signaled)||(o.kind==SyncKind::Semaphore&&o.count)||(o.kind==SyncKind::Mutex&&(!o.owner||o.owner==tid));
-            if(ready){if(!ready_count)ready_index=i;++ready_count;}
-        }
-        if(wait_all?ready_count==count:ready_count!=0){
-            if(wait_all){for(uint32_t h:values)if(sync_handles.count(h)){uint32_t r=sync_wait(c,h,0);if(r==0xffffffffu)return r;}return 0;}
-            uint32_t h=values[ready_index];if(sync_handles.count(h)){uint32_t r=sync_wait(c,h,0);if(r==0xffffffffu)return r;}
-            return ready_index;
-        }
-        if(timeout==0xffffffffu)throw Fault(FaultKind::Unsupported,c.eip,c.eip,"WaitForMultipleObjects: unsignaled infinite wait");
-        return 258u;
-    });
-    reg.add("kernel32.dll", "WaitForMultipleObjectsEx", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
-        run_pending_threads(c); return 0; });
+        uint32_t h=c.arg(0), timeout=c.arg(1); auto deadline=timeout==0xffffffffu?Clock::time_point{}:Clock::now()+std::chrono::milliseconds(timeout);
+        run_pending_threads(c);
+        if(thread_ids.count(h)||thread_exit_codes.count(h))return 0;
+        if(!sync_handles.count(h)){set_last_error(6);return 0xffffffffu;}
+        uint32_t result=sync_wait(c,h,remaining_timeout(deadline,timeout));if(result==0xffffffffu)set_last_error(6);return result; });
+    auto wait_multiple = [this](Cpu& c, uint32_t timeout, bool wait_all, bool allow_empty=false) -> uint32_t {
+        return sync_wait_multiple(c,c.arg(0),c.arg(1),wait_all,timeout,allow_empty);
+    };
+    reg.add("kernel32.dll", "WaitForMultipleObjects", Conv::Stdcall, 4, [wait_multiple](Cpu& c) -> uint32_t {
+        return wait_multiple(c,c.arg(3),c.arg(2)!=0); });
+    reg.add("kernel32.dll", "WaitForMultipleObjectsEx", Conv::Stdcall, 5, [wait_multiple](Cpu& c) -> uint32_t {
+        return wait_multiple(c,c.arg(3),c.arg(2)!=0); });
+    reg.add("user32.dll", "MsgWaitForMultipleObjects", Conv::Stdcall, 5, [wait_multiple](Cpu& c) -> uint32_t {
+        return wait_multiple(c,c.arg(3),false,true); });
+    reg.add("user32.dll", "MsgWaitForMultipleObjectsEx", Conv::Stdcall, 5, [wait_multiple](Cpu& c) -> uint32_t {
+        return wait_multiple(c,c.arg(2),(c.arg(4)&1u)!=0,true); });
     reg.add("kernel32.dll", "GetExitCodeThread", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         // A poll is a yield point: pending bodies run before the code is read.
         run_pending_threads(c);
@@ -2002,8 +2037,9 @@ inline void Guest::register_all() {
         uint32_t old = mem.r32(c.arg(0)); if (old == c.arg(2)) mem.w32(c.arg(0), c.arg(1)); return old; });
     reg.add("kernel32.dll", "InterlockedExchangeAdd", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         uint32_t old = mem.r32(c.arg(0)); mem.w32(c.arg(0), old + c.arg(1)); return old; });
-    // Time
-    auto tick_count = [this]() -> uint64_t { return host.tick_count ? host.tick_count() : 12345u; };
+    // Time: the fallback clock is monotonic too, so off-device guests observe
+    // the same elapsed real time as the scheduler and the Play host clock.
+    auto tick_count = [this]() -> uint64_t { return tick_now(); };
     reg.add("kernel32.dll", "GetTickCount", Conv::Stdcall, 0, [tick_count](Cpu&) -> uint32_t { return uint32_t(tick_count()); });
     reg.add("kernel32.dll", "GetTickCount64", Conv::Stdcall, 0, [tick_count](Cpu& c) -> uint32_t { uint64_t t=tick_count();c.reg[EDX]=uint32_t(t>>32);return uint32_t(t); });
     reg.add("winmm.dll", "waveInGetNumDevs", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
@@ -2065,7 +2101,7 @@ inline void Guest::register_all() {
     reg.add("winmm.dll", "PlaySoundA", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 0; });
     reg.add("winmm.dll", "PlaySoundW", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 0; });
     reg.add("kernel32.dll", "QueryPerformanceCounter", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
-        uint32_t p = c.arg(0); if (p) { mem.w32(p, 1000); mem.w32(p + 4, 0); } return 1; });
+        uint32_t p = c.arg(0); uint64_t t = steady_micros(); if (p) { mem.w32(p, uint32_t(t)); mem.w32(p + 4, uint32_t(t >> 32)); } return 1; });
     reg.add("kernel32.dll", "QueryPerformanceFrequency", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t p = c.arg(0); if (p) { mem.w32(p, 1000000); mem.w32(p + 4, 0); } return 1; });
     reg.add("kernel32.dll", "GetSystemTimeAsFileTime", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
