@@ -455,7 +455,7 @@ DWORD d3d10tri_entry() {
     // so the existing input layout and pixel shader stay valid and the red
     // pixel proves the compiled shader actually drew.
     static const char compileSource[]=
-        "struct Vin { float4 pos:SV_Position; float4 col:COLOR; };\n"
+        "struct Vin { float4 pos:POSITION; float4 col:COLOR; };\n"
         "struct Vout { float4 pos:SV_Position; float4 col:COLOR; };\n"
         "Vout main(Vin i) { Vout o; o.pos=i.pos; o.col=i.col; return o; }\n";
     ID3D10Blob* compiled=nullptr;ID3D10Blob* compileErrors=nullptr;
@@ -476,12 +476,21 @@ DWORD d3d10tri_entry() {
     // shader that dropped COLOR would leave the clear colour (never a pass).
     ID3D10VertexShader* compiledVs=nullptr;
     if(FAILED(device->CreateVertexShader(bits,size,&compiledVs))||!compiledVs)return 46;
-    compiled->Release();   // the shader holds its own copy now
+    ID3D10InputLayout* compiledLayout=nullptr;
+    if(FAILED(device->CreateInputLayout(elements,2,bits,size,&compiledLayout))||!compiledLayout)return 46;
+    static const char psSource[]="struct P { float4 pos:SV_Position; float4 col:COLOR; }; float4 main(P i):SV_Target { return i.col; }\n";
+    ID3D10Blob* psBlob=nullptr;ID3D10Blob* psErrors=nullptr;
+    if(FAILED(D3D10CompileShader(psSource,sizeof psSource-1,nullptr,nullptr,nullptr,"main","ps_4_0",0,&psBlob,&psErrors))||!psBlob)return 46;
+    ID3D10PixelShader* compiledPs=nullptr;
+    if(FAILED(device->CreatePixelShader(psBlob->GetBufferPointer(),psBlob->GetBufferSize(),&compiledPs))||!compiledPs)return 46;
+    psBlob->Release();if(psErrors)psErrors->Release();compiled->Release();
     device->ClearRenderTargetView(view,clear);
-    device->VSSetShader(compiledVs);
+    device->OMSetRenderTargets(1,&view,nullptr);
+    device->IASetVertexBuffers(0,1,&vertexBuffer,&stride,&offset);
+    device->IASetInputLayout(compiledLayout);device->VSSetShader(compiledVs);device->PSSetShader(compiledPs);
     device->Draw(3,0);
-    device->VSSetShader(vs);
-    compiledVs->Release();
+    device->IASetInputLayout(layout);device->VSSetShader(vs);device->PSSetShader(ps);
+    compiledPs->Release();compiledLayout->Release();compiledVs->Release();
     if(!readPixel("compiled-center",device,target,staging,32,32,pixel))return 47;
     if(!(pixel[0]>0x80&&pixel[1]<0x40&&pixel[2]<0x40))return blocked("compiled-center");   // BLOCKED
     if(!readPixel("compiled-outside",device,target,staging,4,4,pixel))return 47;
