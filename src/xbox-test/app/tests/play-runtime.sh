@@ -14,7 +14,7 @@ if [[ ! -f "$WINEPREFIX/system.reg" ]];then timeout -k 2 60 wineboot -u;fi
 out=out/play-tests
 mkdir -p "$out/obj"
 printf 'LIBRARY play-missing.dll\nEXPORTS\nDeliberatelyMissingPlayImport\n' > "$out/obj/missing.def"
-printf 'LIBRARY dbghelp.dll\nEXPORTS\nSymInitialize\n' > "$out/obj/stub.def"
+printf 'LIBRARY dbghelp.dll\nEXPORTS\nPlaySuiteGapStub\n' > "$out/obj/stub.def"
 llvm-dlltool-19 -m i386:x86-64 -d "$out/obj/missing.def" -l "$out/obj/missing.lib"
 llvm-dlltool-19 -m i386:x86-64 -d "$out/obj/stub.def" -l "$out/obj/stub.lib"
 cat > "$out/obj/forward.def" <<'DEF'

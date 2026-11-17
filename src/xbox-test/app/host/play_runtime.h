@@ -84,7 +84,7 @@ struct State {
     std::atomic<bool> crashContextReported{false};
     std::mutex eventMutex;
     LoaderMutex loaderMutex;
-    std::string last="loader not entered", result;
+    std::string last="loader not entered", result, failureReason;
     DWORD code=0;
     std::array<wxl::Carrier,16> carriers;
     std::atomic<int> mappedCount{0}, moduleCount{0};
@@ -95,7 +95,16 @@ struct State {
         { std::lock_guard<std::mutex> lock(eventMutex); last=text; }
         if(log) log(("PRUN EVENT "+text).c_str());
     }
-    std::string snapshot() { std::lock_guard<std::mutex> lock(eventMutex); return last; }
+    bool setFailureReason(const std::string& reason) {
+        { std::lock_guard<std::mutex> lock(eventMutex); if(!failureReason.empty())return false; failureReason=reason; }
+        event("launch failure reason="+reason);
+        return true;
+    }
+    std::string failure() { std::lock_guard<std::mutex> lock(eventMutex); return failureReason; }
+    std::string snapshot() {
+        std::lock_guard<std::mutex> lock(eventMutex);
+        return failureReason.empty()?last:last+" launch failure reason="+failureReason;
+    }
 };
 static State* state=nullptr; // One guest process per launcher lifetime.
 static std::atomic<State*> observed{nullptr};
@@ -235,8 +244,10 @@ static bool processModule(HMODULE h) {
 // thread exits; game code has run, so the launcher reports the end and
 // restarts to unload the rest of the guest.
 static void WINAPI exitProcess(UINT code) {
-    state->code=code; state->event("ExitProcess code="+std::to_string(code));
-    state->success=true; state->result=state->snapshot();
+    state->code=code;
+    auto failure=state->failure();
+    state->event("ExitProcess code="+std::to_string(code));
+    state->success=failure.empty(); state->result=state->snapshot();
     if(GetCurrentThreadId()==state->thread) guestThread=false;
     state->finished.store(true,std::memory_order_release);
     state->loaderMutex.abandon();
@@ -2070,7 +2081,10 @@ static std::string dialogText(LPCSTR text,size_t limit=2048) {
     return out;
 }
 static int WINAPI messageBoxA(HWND,LPCSTR text,LPCSTR caption,UINT type) {
-    state->event("guest user32.dll!MessageBoxA caption=\""+dialogText(caption)+"\" text=\""+dialogText(text)+"\" type="+std::to_string(type)+" caller="+describe((uintptr_t)_ReturnAddress()));
+    auto title=dialogText(caption), message=dialogText(text);
+    state->event("guest user32.dll!MessageBoxA caption=\""+title+"\" text=\""+message+"\" type="+std::to_string(type)+" caller="+describe((uintptr_t)_ReturnAddress()));
+    if((type&MB_ICONERROR)&&state->milestone.load(std::memory_order_acquire)>0)
+        state->setFailureReason(title+": "+message);
     return IDOK;
 }
 static int WINAPI messageBoxW(HWND,LPCWSTR text,LPCWSTR caption,UINT type) {
@@ -2189,7 +2203,8 @@ static void runImpl() {
     if(!initializePending()) return;
     char entry[128];snprintf(entry,sizeof entry,"EXE entry %s+0x%lx",state->exe->key.c_str(),state->exe->image.entry);state->event(entry);state->executed=true;
     state->code=((DWORD(WINAPI*)())(state->exe->image.base+state->exe->image.entry))();
-    state->success=true;state->event("EXE returned code="+std::to_string(state->code));
+    auto failure=state->failure();
+    state->success=failure.empty();state->event("EXE returned code="+std::to_string(state->code));
 }
 static DWORD WINAPI worker(void*) {
     guestThread=true;state->thread=GetCurrentThreadId();

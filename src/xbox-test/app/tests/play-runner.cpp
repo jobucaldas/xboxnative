@@ -611,12 +611,14 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         ok=ok&&r->finished&&r->success&&r->code==42&&api&&api->mapped&&api->initialized&&
             n&&n<1024&&api->path==std::wstring(provider,n)&&!play_runtime::named(L"steamclient64.dll");
     }
-    else if(mode=="dialog-milestone")ok=ok&&r->finished&&!r->success&&last.find("user32.dll!MessageBoxA caption=\"Fatal error\"")!=std::string::npos&&
+    else if(mode=="dialog-milestone")ok=ok&&r->finished&&!r->success&&r->code==42&&
+        r->failure()=="Fatal error: Failed to initialize IL2CPP\\nprobe \\\"quoted\\\""&&
+        last.find("launch failure reason=Fatal error: Failed to initialize IL2CPP\\nprobe \\\"quoted\\\"")!=std::string::npos&&
         r->milestone==1&&launch_status::observe(r->finished,r->success,r->milestone,true)==launch_status::Outcome::failed;
     else if(mode=="missing")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&mlp::stub_names.empty()&&last.find("mapping failed: play-missing.exe; guest initialization blocked")!=std::string::npos&&last.find("play-missing.dll!DeliberatelyMissingPlayImport")!=std::string::npos;
     else if(mode=="gap")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&mlp::stub_names.empty()&&
         last.find("mapping failed: play-gap.exe; guest initialization blocked")!=std::string::npos&&
-        last.find("MLP STUB dbghelp.dll!SymInitialize")!=std::string::npos&&
+        last.find("MLP STUB dbghelp.dll!PlaySuiteGapStub")!=std::string::npos&&
         last.find("GAP: summary exe=play-gap.exe arch=x64")!=std::string::npos&&
         last.find("stub=1 missing=1")!=std::string::npos;
     else if(mode=="failed-dependency")ok=!r->executed&&r->finished&&!r->success&&!r->worker&&
