@@ -78,11 +78,22 @@ struct Host {
         bool supported = false;
     };
     struct WindowRect { int32_t left = 0, top = 0, right = 0, bottom = 0; };
+    struct RegistryCall {
+        enum class Kind { Open, Create, Query, Set, DeleteValue, DeleteKey, EnumKey, EnumValue, Close } kind;
+        uintptr_t handle = 0, result_handle = 0;
+        uint32_t root = 0, index = 0, options = 0, access = 0, type = 0, disposition = 0;
+        bool ansi = false;
+        std::u16string subkey, name, class_name;
+        std::vector<uint8_t> data;
+        uint32_t status = 120;
+    };
     struct GlMap { uint32_t address = 0, size = 0, target = 0; uintptr_t offset = 0; bool writable = false; };
     std::string out, err;                         // captured stdout/stderr bytes
     std::function<void(const std::string&)> tee;  // optional live sink
     std::function<NlsResponse(const NlsRequest&)> nls_call;
     std::function<void(FileCall&)> file_call;     // Play's native kernel32 file layer
+    std::function<void(RegistryCall&)> registry_call; // Play's persistent guest registry
+    std::function<bool(uint8_t*, uint32_t)> random_bytes;
     std::function<bool(const char*, const std::u16string&)> destructive_file_guard;
     std::function<void(SocketCall&)> socket_call;
     std::function<uint64_t()> tick_count;          // same monotonic millisecond source for the guest tick APIs

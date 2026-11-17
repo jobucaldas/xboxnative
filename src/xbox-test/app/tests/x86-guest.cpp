@@ -175,9 +175,39 @@ int main(int argc, char** argv) {
         if(index==1){value=720;return true;}
         return false;
     };
+    std::map<std::u16string,std::map<std::u16string,std::pair<uint32_t,std::vector<uint8_t>>>> registry;
+    std::map<uintptr_t,std::u16string> registry_handles;uintptr_t registry_next=1;
+    registry[u"HKCU"]={};
+    host.registry_call=[&](Host::RegistryCall& q) {
+        auto full_path=[&](const std::u16string& base,const std::u16string& sub){return sub.empty()?base:base+u"\\"+sub;};
+        auto resolve=[&](uintptr_t handle)->std::u16string {auto it=registry_handles.find(handle);return it==registry_handles.end()?std::u16string():it->second;};
+        if(q.kind==Host::RegistryCall::Kind::Open||q.kind==Host::RegistryCall::Kind::Create){
+            std::u16string base=q.root==0x80000001u?u"HKCU":resolve(q.root);
+            std::u16string path=full_path(base,q.subkey);
+            if(q.kind==Host::RegistryCall::Kind::Open&&!registry.count(path)){q.status=2;return;}
+            bool created=!registry.count(path);if(q.kind==Host::RegistryCall::Kind::Create){std::u16string prefix;for(char16_t ch:path){prefix.push_back(ch);if(ch==u'\\')registry.emplace(prefix.substr(0,prefix.size()-1),std::map<std::u16string,std::pair<uint32_t,std::vector<uint8_t>>>{});}registry.emplace(path,std::map<std::u16string,std::pair<uint32_t,std::vector<uint8_t>>>{});}
+            if(!created&&q.kind==Host::RegistryCall::Kind::Create)q.disposition=2;else q.disposition=1;
+            q.result_handle=++registry_next;registry_handles[q.result_handle]=path;q.status=0;return;
+        }
+        std::u16string base=resolve(q.handle);if(base.empty()){q.status=6;return;}
+        if(q.kind==Host::RegistryCall::Kind::Close){q.status=registry_handles.erase(q.handle)?0:6;return;}
+        auto values=registry.find(base);if(values==registry.end()){q.status=6;return;}
+        if(q.kind==Host::RegistryCall::Kind::Set){values->second[q.name]={q.type,q.data};q.status=0;return;}
+        if(q.kind==Host::RegistryCall::Kind::Query){auto v=values->second.find(q.name);if(v==values->second.end()){q.status=2;return;}q.type=v->second.first;q.data=v->second.second;q.status=0;return;}
+        if(q.kind==Host::RegistryCall::Kind::DeleteValue){q.status=values->second.erase(q.name)?0:2;return;}
+        if(q.kind==Host::RegistryCall::Kind::DeleteKey){std::u16string path=full_path(base,q.subkey),prefix=path+u"\\";for(const auto& k:registry)if(k.first.compare(0,prefix.size(),prefix)==0){q.status=5;return;}q.status=registry.erase(path)?0:2;return;}
+        if(q.kind==Host::RegistryCall::Kind::EnumValue){if(q.index>=values->second.size()){q.status=259;return;}auto it=values->second.begin();std::advance(it,q.index);q.name=it->first;q.type=it->second.first;q.data=it->second.second;q.status=0;return;}
+        if(q.kind==Host::RegistryCall::Kind::EnumKey){std::u16string prefix=base+u"\\";std::vector<std::u16string> children;for(const auto& k:registry)if(k.first.compare(0,prefix.size(),prefix)==0){auto tail=k.first.substr(prefix.size());if(tail.find(u'\\')==std::u16string::npos)children.push_back(tail);}if(q.index>=children.size()){q.status=259;return;}q.name=children[q.index];q.status=0;return;}
+        q.status=120;
+    };
+    host.random_bytes=[](uint8_t* out,uint32_t size){for(uint32_t i=0;i<size;++i)out[i]=uint8_t(i+1);return true;};
     Guest guest(mem, host, reg);
     guest.exe_path = "fixture-crt.exe"; guest.cmdline = guest.exe_path;
     guest.register_all();
+    reg.add("msvcrt.dll","wcscmp",Conv::Cdecl,2,[&guest](Cpu& c)->uint32_t {
+        auto left=guest.wstr(c.arg(0)),right=guest.wstr(c.arg(1));
+        return left<right?uint32_t(-1):left>right?1u:0u;
+    });
     Image img = load_pe32(mem, table, reg, file);
     guest.image_base = img.base;
     guest.exe_tls = img.tls;

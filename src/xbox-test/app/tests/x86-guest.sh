@@ -109,6 +109,13 @@ set -e
 [[ $dbrc -ne 42 && "$dbout" == *"DebugBreak: guest debugger/breakpoint delivery is unavailable"* ]] || {
   echo "X86-GUEST FAIL: DebugBreak did not fail truthfully"; echo "$dbout"; exit 1; }
 echo "X86-GUEST PASS: DebugBreak reports unavailable guest debugger delivery"
+"$cc32" -O1 -Wall -Wextra -Werror "${extra[@]}" -Wl,--stack,0x300000 -o "$tmp/fixture-registry.exe" "$here/x86-guest/fixture-registry.c" -ladvapi32
+set +e
+rout=$("$tmp/x86-guest" "$tmp/fixture-registry.exe"); rrc=$?
+set -e
+[[ $rrc -eq 42 ]] && grep -q '^x86-crt: advapi32 registry/user/crypto ok$' <<<"$rout" || {
+  echo "X86-GUEST FAIL: advapi32 registry/user/crypto fixture exit $rrc"; echo "$rout"; exit 1; }
+echo "X86-GUEST PASS: advapi32 A/W registry, username, and cryptographic context routes"
 if [[ ${1:-} == --wine ]]; then
   wine="${WINE:-wine}"
   command -v "$wine" >/dev/null || [[ -x $wine ]] || { echo "X86-GUEST SKIP: wine not found (set WINE)"; exit 0; }
