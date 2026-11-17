@@ -1,6 +1,8 @@
 #include "../dxil_runtime.h"
+#include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <thread>
 
 static std::string sha(const void* data, size_t size) {
     const std::string text(static_cast<const char*>(data), size);
@@ -9,6 +11,13 @@ static std::string sha(const void* data, size_t size) {
     return {};
 }
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); return 1; } } while (0)
+struct NeverCompletingHttp {
+    bool cancelled = false;
+    dxil_runtime::wait_state get(std::chrono::milliseconds timeout) {
+        std::this_thread::sleep_for(timeout); return dxil_runtime::wait_state::pending;
+    }
+    void cancel() { cancelled = true; }
+};
 int main(int argc, char** argv) {
     CHECK(argc == 2);
     std::ifstream input(argv[1], std::ios::binary);
@@ -22,6 +31,15 @@ int main(int argc, char** argv) {
     CHECK(reason == "dll hash mismatch");
     CHECK(dxil_runtime::extract(zip, "LICENSE-MS.txt", "", extracted, digest, reason));
     CHECK(std::string(extracted.begin(), extracted.end()) == "fixture Microsoft license");
-    std::puts("PASS Mesa DXIL fixture ZIP extraction and tampered-hash rejection");
+    NeverCompletingHttp http;
+    bool launchContinues = false;
+    const auto started = std::chrono::steady_clock::now();
+    const auto state = dxil_runtime::bounded_wait([&](std::chrono::milliseconds timeout) {
+        return http.get(timeout);
+    }, [&] { http.cancel(); }, std::chrono::milliseconds(20));
+    launchContinues = true;
+    CHECK(state == dxil_runtime::wait_state::pending && http.cancelled && launchContinues);
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(500));
+    std::puts("PASS Mesa DXIL fixture ZIP extraction, tampered-hash rejection, and download timeout continuation");
     return 0;
 }
