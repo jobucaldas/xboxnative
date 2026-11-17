@@ -14,6 +14,17 @@
 #include <dsound.h>
 #pragma pop_macro("WINAPI_FAMILY")
 namespace x86 {
+// Interface IDs defined here rather than taken from dxguid/uuid: the launcher's
+// UWP link does not pull those import libraries in, so referencing IID_* symbols
+// left unresolved externals in every binary that includes this header.
+namespace dsound_iid {
+inline constexpr GUID unknown{0x00000000,0x0000,0x0000,{0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46}};
+inline constexpr GUID sound{0x279AFA83,0x4981,0x11CE,{0xA5,0x21,0x00,0x20,0xAF,0x0B,0xE5,0x60}};
+inline constexpr GUID sound8{0xC50A7E93,0xF395,0x4834,{0x9E,0xF6,0x7F,0xA9,0x9D,0xE5,0x09,0x66}};
+inline constexpr GUID buffer{0x279AFA85,0x4981,0x11CE,{0xA5,0x21,0x00,0x20,0xAF,0x0B,0xE5,0x60}};
+inline constexpr GUID buffer8{0x6825A449,0x7524,0x4D82,{0x92,0x0F,0x50,0xE3,0x6A,0xB3,0xAB,0x1E}};
+inline constexpr GUID notify{0xB0210783,0x89CD,0x11D0,{0xAF,0x08,0x00,0xA0,0xC9,0x25,0xCD,0x16}};
+}
 inline constexpr uint32_t DS_E_POINTER=0x80004003u;
 inline constexpr uint32_t DS_E_NOINTERFACE=0x80004002u;
 inline constexpr uint32_t DSERR_NODRIVER_X86=0x88780078u;
@@ -33,10 +44,10 @@ inline HRESULT dsound_qi(Proxy& proxy,Cpu& cpu) {
     GUID iid{};if(!dsound_guid(cpu,iid_address,iid))return E_POINTER;
     void* result=nullptr;HRESULT hr=static_cast<IUnknown*>(proxy.host)->QueryInterface(iid,&result);if(FAILED(hr))return hr;
     const char* iface=nullptr;
-    if(IsEqualIID(iid,IID_IUnknown))iface=strcmp(proxy.iface,"IDirectSoundNotify")==0?"IDirectSoundBuffer8":proxy.iface;
-    else if(IsEqualIID(iid,IID_IDirectSound8)||IsEqualIID(iid,IID_IDirectSound))iface="IDirectSound8";
-    else if(IsEqualIID(iid,IID_IDirectSoundBuffer8)||IsEqualIID(iid,IID_IDirectSoundBuffer))iface="IDirectSoundBuffer8";
-    else if(IsEqualIID(iid,IID_IDirectSoundNotify))iface="IDirectSoundNotify";
+    if(IsEqualIID(iid,dsound_iid::unknown))iface=strcmp(proxy.iface,"IDirectSoundNotify")==0?"IDirectSoundBuffer8":proxy.iface;
+    else if(IsEqualIID(iid,dsound_iid::sound8)||IsEqualIID(iid,dsound_iid::sound))iface="IDirectSound8";
+    else if(IsEqualIID(iid,dsound_iid::buffer8)||IsEqualIID(iid,dsound_iid::buffer))iface="IDirectSoundBuffer8";
+    else if(IsEqualIID(iid,dsound_iid::notify))iface="IDirectSoundNotify";
     if(!iface){static_cast<IUnknown*>(result)->Release();return E_NOINTERFACE;}
     cpu.mem.w32(out,dsound_wrap(*proxy.space,cpu,iface,static_cast<IUnknown*>(result)));return hr;
 }
