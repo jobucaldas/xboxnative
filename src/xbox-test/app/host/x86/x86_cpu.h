@@ -209,6 +209,8 @@ struct Cpu {
                             size_t len;
                             try { len = dbt::runtime_instruction(bytes, pc, ea, memory, absolute_memory); }
                             catch (const std::runtime_error&) { if (!pc) throw; interpreter_boundary = true; break; }
+                            if (memory && !absolute_memory)
+                                throw std::runtime_error("dynamic guest memory access stays in the fault-precise interpreter");
                             if (memory && absolute_memory &&
                                 (!mem.range_accessible(ea, 4, PROT_R) || !mem.range_accessible(ea, 4, PROT_W)))
                                 throw std::runtime_error("DBT absolute memory page is not RW");
