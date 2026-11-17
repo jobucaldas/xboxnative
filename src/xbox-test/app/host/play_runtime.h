@@ -2144,12 +2144,6 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     // Current mapper is the last incomplete module; capture it before recursion.
     for(auto& m:state->modules) if(!m->mapped) owner=m.get();
     Module* dependency=named(wide(dll));
-    // Mono's Windows runtime imports the Visual C++ runtime, which is built
-    // from the pinned Wine source and staged beside the other runtime donors.
-    if(!dependency && key=="vcruntime140.dll" && !runtimeDirectory.empty()) {
-        auto path=runtimeDirectory+L"\\vcruntime140.dll";
-        if(exists(path)) dependency=map(path);
-    }
     // A dependency whose mapping failed leaves its imports unresolved, as on
     // Windows; neither it nor the probe registry may supply an address.
     if(dependency && dependency->mappingFailed) return missing(dll,name,ordinal);
@@ -2167,22 +2161,22 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
             if(exists(path)) {dependency=map(path);if(!dependency)return missing(dll,name,ordinal);}
         }
     }
-    if(dependency) {
-        if(owner && owner!=dependency) owner->dependencies.push_back(dependency);
-        auto p=exported(*dependency,name,ordinal);
-        if(!p)return missing(dll,name,ordinal);
-        record_gap(dll,name,ordinal,gap_summary::Outcome::routed);
-        return steamApiExport(*dependency,name,p);
-    }
     // VC++ runtime DLLs the console lacks (no game copy was found above):
     // forwarded to the console's ucrtbase, as Wine's vcruntime140 does.
-    if(vcruntime_core::handles(key.c_str())) {
+    if(!dependency && vcruntime_core::handles(key.c_str())) {
         auto p=name?vcruntime_core::resolve(key.c_str(),name,&vcruntimeLookup):0;
         std::string full=key+"!"+(name?name:"#"+std::to_string(ordinal));
         if(state->log && mlp::first_report("vcrt "+full)) state->log(("VCRT ROUTE "+full+" found="+std::to_string(!!p)).c_str());
         if(!p)return missing(dll,name,ordinal);
         record_gap(dll,name,ordinal,gap_summary::Outcome::routed);
         return p;
+    }
+    if(dependency) {
+        if(owner && owner!=dependency) owner->dependencies.push_back(dependency);
+        auto p=exported(*dependency,name,ordinal);
+        if(!p)return missing(dll,name,ordinal);
+        record_gap(dll,name,ordinal,gap_summary::Outcome::routed);
+        return steamApiExport(*dependency,name,p);
     }
     return mlp::resolve(key.c_str(),name,ordinal);
 }
