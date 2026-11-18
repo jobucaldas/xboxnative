@@ -613,6 +613,7 @@ inline void register_xinput(Registry& r, Host& h) {
             };
         };
         r.add(dll, "XInputGetState", Conv::Stdcall, 2, state(Host::XInputCall::Kind::GetState));
+        r.add_ordinal(dll, 2, "XInputGetState");
         r.add(dll, "XInputGetStateEx", Conv::Stdcall, 2, state(Host::XInputCall::Kind::GetStateEx));
         if (dll != std::string("xinput9_1_0.dll")) r.add_ordinal(dll, 100, "XInputGetStateEx");
         r.add(dll, "XInputSetState", Conv::Stdcall, 2, [call](Cpu& c) -> uint32_t {
@@ -1181,5 +1182,28 @@ inline void register_ws2(Registry& r, Host& h) {
     r.add("ws2_32.dll","WSAStartup",Conv::Stdcall,2,startup);r.add("ws2_32.dll","#115",Conv::Stdcall,2,startup);
     r.add("ws2_32.dll","WSACleanup",Conv::Stdcall,0,cleanup);r.add("ws2_32.dll","#116",Conv::Stdcall,0,cleanup);
     r.add("ws2_32.dll","WSAGetLastError",Conv::Stdcall,0,last_error);r.add("ws2_32.dll","#111",Conv::Stdcall,0,last_error);
+    auto unavailable=[&r](const char* name,unsigned argc,uint32_t result){
+        r.add("ws2_32.dll",name,Conv::Stdcall,argc, [result](Cpu& c)->uint32_t { c.mem.w32(c.fs_base+0x34,10045); return result; });
+    };
+    unavailable("accept",3,uint32_t(-1));r.add_ordinal("ws2_32.dll",1,"accept");
+    unavailable("bind",3,uint32_t(-1));r.add_ordinal("ws2_32.dll",2,"bind");
+    unavailable("closesocket",1,uint32_t(-1));r.add_ordinal("ws2_32.dll",3,"closesocket");
+    unavailable("connect",3,uint32_t(-1));r.add_ordinal("ws2_32.dll",4,"connect");
+    unavailable("inet_addr",1,uint32_t(-1));r.add_ordinal("ws2_32.dll",11,"inet_addr");
+    unavailable("inet_ntoa",1,0);r.add_ordinal("ws2_32.dll",12,"inet_ntoa");
+    unavailable("listen",2,uint32_t(-1));r.add_ordinal("ws2_32.dll",13,"listen");
+    unavailable("recv",4,uint32_t(-1));r.add_ordinal("ws2_32.dll",16,"recv");
+    unavailable("recvfrom",6,uint32_t(-1));r.add_ordinal("ws2_32.dll",17,"recvfrom");
+    unavailable("send",4,uint32_t(-1));r.add_ordinal("ws2_32.dll",19,"send");
+    unavailable("sendto",6,uint32_t(-1));r.add_ordinal("ws2_32.dll",20,"sendto");
+    unavailable("shutdown",2,uint32_t(-1));r.add_ordinal("ws2_32.dll",22,"shutdown");
+    unavailable("socket",3,uint32_t(-1));r.add_ordinal("ws2_32.dll",23,"socket");
+    unavailable("gethostbyaddr",3,0);r.add_ordinal("ws2_32.dll",51,"gethostbyaddr");
+    unavailable("gethostbyname",1,0);r.add_ordinal("ws2_32.dll",52,"gethostbyname");
+    unavailable("WSAAsyncSelect",5,uint32_t(-1));r.add_ordinal("ws2_32.dll",101,"WSAAsyncSelect");
+    r.add("ws2_32.dll","htons",Conv::Stdcall,1,[](Cpu& c)->uint32_t { const uint16_t v=uint16_t(c.arg(0)); return uint32_t(uint16_t((v<<8)|(v>>8))); });
+    r.add_ordinal("ws2_32.dll",9,"htons");
+    r.add("ws2_32.dll","ntohs",Conv::Stdcall,1,[](Cpu& c)->uint32_t { const uint16_t v=uint16_t(c.arg(0)); return uint32_t(uint16_t((v<<8)|(v>>8))); });
+    r.add_ordinal("ws2_32.dll",15,"ntohs");
 }
 }
