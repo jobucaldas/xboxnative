@@ -467,6 +467,12 @@ inline void register_win32(Registry& r, Host& h) {
     unavailable("EndDialog", 2);
     unavailable("GetMonitorInfoA", 2);
     unavailable("GetMonitorInfoW", 2);
+    r.add("user32.dll", "GetRawInputDeviceList", Conv::Stdcall, 3, [count](Cpu& c) -> uint32_t {
+        count("GetRawInputDeviceList");
+        if (!c.arg(1)) { c.mem.w32(c.fs_base + 0x34, 87); return uint32_t(-1); }
+        c.mem.w32(c.arg(1), 0);  // The console has no Raw Input devices.
+        return 0;
+    });
     unavailable("GetRawInputData", 5, uint32_t(-1));
     unavailable("GetWindowLongPtrW", 2);
     unavailable("LoadStringW", 4);

@@ -17,10 +17,6 @@ static int fail(int code, const char* stage) {
 int main(void) {
     puts("SDL2TEST STEP main entered"); fflush(stdout);
     SDL_SetMainReady();
-    SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
-    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
-    SDL_SetHint(SDL_HINT_DIRECTINPUT_ENABLED, "0");
-    SDL_SetHint(SDL_HINT_XINPUT_ENABLED, "1");
     if (SDL_Init(SDL2TEST_INIT_MASK) != 0)
         return fail(10, "SDL_Init");
     puts("SDL2TEST STEP SDL_Init ok"); fflush(stdout);

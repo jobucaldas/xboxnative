@@ -26,6 +26,7 @@
 #include <windows.h>
 #endif
 #include "x86_win32.h"
+#include "x86_dinput8.h"
 #include "x86_d3d9.h"
 #include "x86_dsound.h"
 namespace x86 {
@@ -951,6 +952,7 @@ inline void Guest::register_all() {
     reg.ordinals.clear();
     register_win32(reg, host);  // the stage-1 allowlist stays the base surface
     register_xinput(reg, host);
+    register_dinput8(reg, host);
     register_gl(reg, host);
     register_d3d9(reg, host);
     host.dsound_event=[this](uint32_t token)->uintptr_t {
@@ -2477,6 +2479,10 @@ inline void Guest::register_all() {
         auto it=find_handles.find(c.arg(0));if(it==find_handles.end()){set_last_error(6);return 0;}Host::FileCall q{Host::FileCall::Kind::FindClose};q.handle=it->second;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}find_handles.erase(it);return 1; });
     reg.add("shell32.dll", "DragAcceptFiles", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 0; });
     reg.add("ole32.dll","CoCreateInstance",Conv::Stdcall,5,[this](Cpu& c)->uint32_t {
+        if (c.arg(0) && c.arg(3) && c.arg(4)) {
+            const uint32_t result = dinput8_cocreate(host.com, c);
+            if (result != 0x80040154u) return result;
+        }
         if(!c.arg(0)||!c.arg(3)||!c.arg(4)){set_last_error(87);return 0x80004003u;}
         if(c.arg(1))return 0x80040110u;
         mem.w32(c.arg(4),0);
