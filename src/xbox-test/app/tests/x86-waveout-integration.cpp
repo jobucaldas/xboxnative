@@ -9,7 +9,13 @@
 
 static volatile LONG callback_count;
 static volatile LONG callback_order;
+static volatile LONG open_before_return;
+static volatile LONG open_returned;
+static volatile LONG close_before_return;
+static volatile LONG close_returned;
+static volatile LONG callback_after_close;
 static volatile LONG window_callback_count;
+static HANDLE function_done_event;
 static HWAVEOUT window_output;
 static WAVEHDR* callback_header;
 static WAVEHDR* window_header;
@@ -19,11 +25,18 @@ static LRESULT CALLBACK wave_window(HWND, UINT message, WPARAM output, LPARAM he
         InterlockedIncrement(&window_callback_count);
     return 0;
 }
-static void CALLBACK wave_done(HWAVEOUT, UINT message, DWORD_PTR instance, DWORD_PTR header, DWORD_PTR) {
-    if (message != WOM_DONE || instance != 0x71a0u || header != reinterpret_cast<DWORD_PTR>(callback_header)) return;
+static void CALLBACK wave_done(HWAVEOUT handle, UINT message, DWORD_PTR instance, DWORD_PTR header, DWORD_PTR) {
+    if (instance != 0x71a0u) return;
+    if (InterlockedCompareExchange(&close_returned, 0, 0)) InterlockedIncrement(&callback_after_close);
+    if (message == WOM_OPEN && handle && !InterlockedCompareExchange(&open_returned, 0, 0))
+        InterlockedExchange(&open_before_return, 1);
+    if (message == WOM_CLOSE && !InterlockedCompareExchange(&close_returned, 0, 0))
+        InterlockedExchange(&close_before_return, 1);
+    if (message != WOM_DONE || header != reinterpret_cast<DWORD_PTR>(callback_header)) return;
     if ((callback_header->dwFlags & WHDR_DONE) && !(callback_header->dwFlags & WHDR_INQUEUE))
         InterlockedExchange(&callback_order, 1);
     InterlockedIncrement(&callback_count);
+    SetEvent(function_done_event);
 }
 int main() {
     WAVEOUTCAPSA caps_a{}; WAVEOUTCAPSW caps_w{};
@@ -35,10 +48,14 @@ int main() {
     if (waveOutOpen(nullptr, 0xffffffffu, &invalid_format, 0, 0, WAVE_FORMAT_QUERY) != WAVERR_BADFORMAT) return 28;
     HWAVEIN input = nullptr;
     if (waveInGetNumDevs() != 0 || waveInOpen(&input, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NODRIVER || input) return 8;
+    function_done_event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+    if (!function_done_event) return 33;
     HWAVEOUT output = nullptr;
     MMRESULT result = waveOutOpen(&output, WAVE_MAPPER, &format,
         reinterpret_cast<DWORD_PTR>(&wave_done), 0x71a0u, CALLBACK_FUNCTION);
     if (result != MMSYSERR_NOERROR || !output) { printf("X86-WAVEOUT FAIL: waveOutOpen=%u\n", result); return 10; }
+    InterlockedExchange(&open_returned, 1);
+    if (!open_before_return) return 30;
     static char samples[192000];
     WAVEHDR header{};
     header.lpData = samples;
@@ -54,12 +71,17 @@ int main() {
     Sleep(40);
     MMTIME after{}; after.wType = TIME_BYTES;
     if (waveOutGetPosition(output, &after, sizeof(after)) != MMSYSERR_NOERROR || after.u.cb <= before.u.cb) return 15;
-    if (waveOutReset(output) != MMSYSERR_NOERROR) return 16;
+    if (waveOutReset(output) != MMSYSERR_NOERROR || WaitForSingleObject(function_done_event, 5000) != WAIT_OBJECT_0) return 16;
     MMTIME reset_position{}; reset_position.wType = TIME_SAMPLES;
     if (waveOutGetPosition(output, &reset_position, sizeof(reset_position)) != MMSYSERR_NOERROR || reset_position.u.sample != 0) return 29;
     if (callback_count != 1 || callback_order != 1 || !(header.dwFlags & WHDR_DONE) || (header.dwFlags & WHDR_INQUEUE)) return 17;
     if (waveOutUnprepareHeader(output, &header, sizeof(header)) != MMSYSERR_NOERROR) return 18;
     if (waveOutReset(output) != MMSYSERR_NOERROR || waveOutClose(output) != MMSYSERR_NOERROR) return 19;
+    InterlockedExchange(&close_returned, 1);
+    if (!close_before_return) return 31;
+    Sleep(100);
+    if (callback_after_close) return 32;
+    CloseHandle(function_done_event);
     HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
     if (!event) return 20;
     output = nullptr;
