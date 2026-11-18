@@ -5,6 +5,7 @@
 // (ERROR_ACCESS_DENIED, observed on the console), so guests get this instead of the real advapi32.
 // Same signatures and Win32 error codes as advapi32 for the paths Unity PlayerPrefs uses.
 #include <windows.h>
+#include <algorithm>
 #include <map>
 #include <mutex>
 #include <string>
@@ -118,6 +119,12 @@ static bool db_del_value(const std::wstring& lk,const std::wstring& lname) {
     bool ok=sqlite3_step(st)==SQLITE_DONE;
     if(!ok) note("REGB db: delete failed"); sqlite3_finalize(st);   // single statement = implicit transaction
     return ok;
+}
+static bool db_del_key(const std::wstring& lk) {
+    if(!db_ok) return false; Txn t; if(!t.open) return false; sqlite3_stmt* st=nullptr;
+    if(sqlite3_prepare_v2(db,"DELETE FROM reg WHERE key_lc=?1",-1,&st,nullptr)!=SQLITE_OK) return false;
+    std::string a=utf8(lk); sqlite3_bind_text(st,1,a.data(),(int)a.size(),SQLITE_TRANSIENT);
+    bool ok=sqlite3_step(st)==SQLITE_DONE; sqlite3_finalize(st); return ok&&t.commit();
 }
 struct Parser {
     const std::string& s; size_t i=0; bool bad=false;
@@ -447,6 +454,54 @@ static LONG WINAPI RegDeleteValueW(HKEY h,LPCWSTR name) {
     std::lock_guard<std::mutex> g(lock); ensure();
     return delete_value(h,name?name:L"");
 }
+static std::wstring wide_key(LPCSTR s);
+static LONG delete_key(HKEY h,LPCWSTR sub) {
+    std::lock_guard<std::mutex> g(lock); ensure();
+    std::wstring base; if(!resolve_parent(h,base)) return ERROR_INVALID_HANDLE;
+    std::wstring rel; if(LONG e=split(sub,rel)) return e;
+    if(rel.empty()) return ERROR_ACCESS_DENIED;
+    const std::wstring full=base+L"\\"+lower(rel);
+    if(!keys.count(full)) return ERROR_FILE_NOT_FOUND;
+    const std::wstring prefix=full+L"\\";
+    for(const auto& key:keys) if(key.first.compare(0,prefix.size(),prefix)==0) return ERROR_ACCESS_DENIED;
+    for(const auto& handle:handles) if(handle.second==full) return ERROR_ACCESS_DENIED;
+    if(!db_del_key(full)) return ERROR_WRITE_FAULT;
+    keys.erase(full); return ERROR_SUCCESS;
+}
+static LONG WINAPI RegDeleteKeyW(HKEY h,LPCWSTR sub) { return delete_key(h,sub); }
+static LONG WINAPI RegDeleteKeyA(HKEY h,LPCSTR sub) { std::wstring w=wide_key(sub); return delete_key(h,sub?w.c_str():nullptr); }
+static LONG WINAPI RegEnumKeyExW(HKEY h,DWORD index,LPWSTR name,LPDWORD nameLen,LPDWORD reserved,LPWSTR cls,LPDWORD clsLen,PFILETIME lastWrite) {
+    std::lock_guard<std::mutex> g(lock); ensure();
+    if(reserved||!nameLen||(cls&&!clsLen)) return ERROR_INVALID_PARAMETER;
+    std::wstring base; if(!resolve_parent(h,base)) return ERROR_INVALID_HANDLE;
+    const std::wstring prefix=base+L"\\"; std::vector<std::wstring> children;
+    for(const auto& key:keys) if(key.first.compare(0,prefix.size(),prefix)==0) {
+        std::wstring tail=key.second.path.substr(key.second.path.find_last_of(L"\\")+1);
+        if(key.first.substr(prefix.size()).find(L"\\")==std::wstring::npos) children.push_back(tail);
+    }
+    std::sort(children.begin(),children.end(),[](const auto& a,const auto& b){return lower(a)<lower(b);});
+    if(index>=children.size()) return ERROR_NO_MORE_ITEMS;
+    const auto& child=children[index]; DWORD cap=*nameLen;
+    if(!name||cap<child.size()+1){*nameLen=(DWORD)child.size()+1;return ERROR_MORE_DATA;}
+    memcpy(name,child.c_str(),(child.size()+1)*sizeof(wchar_t));*nameLen=(DWORD)child.size();
+    if(cls){if(*clsLen<1){*clsLen=1;return ERROR_MORE_DATA;}cls[0]=L'\0';*clsLen=0;}
+    if(lastWrite) *lastWrite={}; return ERROR_SUCCESS;
+}
+static LONG WINAPI RegEnumKeyExA(HKEY h,DWORD index,LPSTR name,LPDWORD nameLen,LPDWORD reserved,LPSTR cls,LPDWORD clsLen,PFILETIME lastWrite) {
+    std::lock_guard<std::mutex> g(lock); ensure();
+    if(reserved||!nameLen||(cls&&!clsLen)) return ERROR_INVALID_PARAMETER;
+    std::wstring base; if(!resolve_parent(h,base)) return ERROR_INVALID_HANDLE;
+    const std::wstring prefix=base+L"\\"; std::vector<std::wstring> children;
+    for(const auto& key:keys) if(key.first.compare(0,prefix.size(),prefix)==0&&key.first.substr(prefix.size()).find(L"\\")==std::wstring::npos)
+        children.push_back(key.second.path.substr(key.second.path.find_last_of(L"\\")+1));
+    std::sort(children.begin(),children.end(),[](const auto& a,const auto& b){return lower(a)<lower(b);});
+    if(index>=children.size()) return ERROR_NO_MORE_ITEMS;
+    std::string child=utf8(children[index]);DWORD cap=*nameLen;
+    if(!name||cap<child.size()+1){*nameLen=(DWORD)child.size()+1;return ERROR_MORE_DATA;}
+    memcpy(name,child.c_str(),child.size()+1);*nameLen=(DWORD)child.size();
+    if(cls){if(*clsLen<1){*clsLen=1;return ERROR_MORE_DATA;}cls[0]='\0';*clsLen=0;}
+    if(lastWrite) *lastWrite={}; return ERROR_SUCCESS;
+}
 // No transaction can be created here (ktmw32: desktop_policy.h), so any
 // transaction handle a caller passes is not one this process issued.
 static LONG WINAPI RegCreateKeyTransactedW(HKEY,LPCWSTR,DWORD,LPWSTR,DWORD,REGSAM,const SECURITY_ATTRIBUTES*,PHKEY,LPDWORD,HANDLE,PVOID) {
@@ -478,6 +533,8 @@ static const Export exports[]={
     {"RegOpenKeyExA",(uintptr_t)&RegOpenKeyExA},{"RegCreateKeyExA",(uintptr_t)&RegCreateKeyExA},
     {"RegOpenKeyW",(uintptr_t)&RegOpenKeyW},{"RegOpenKeyA",(uintptr_t)&RegOpenKeyA},{"RegCreateKeyA",(uintptr_t)&RegCreateKeyA},
     {"RegEnumValueA",(uintptr_t)&RegEnumValueA},{"RegEnumValueW",(uintptr_t)&RegEnumValueW},
+    {"RegEnumKeyExA",(uintptr_t)&RegEnumKeyExA},{"RegEnumKeyExW",(uintptr_t)&RegEnumKeyExW},
+    {"RegDeleteKeyA",(uintptr_t)&RegDeleteKeyA},{"RegDeleteKeyW",(uintptr_t)&RegDeleteKeyW},
 };
 static uintptr_t lookup(const char* name) { for(auto& e:exports) if(!strcmp(e.name,name)) return e.address; return 0; }
 }

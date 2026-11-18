@@ -122,6 +122,10 @@ struct Guest {
     SteamClientRegistry steam_registry=steam_client_registry_config();
     std::map<uint32_t,bool> steam_registry_keys;
     uint32_t steam_registry_serial=0;
+    std::map<uint32_t,uintptr_t> registry_handles;
+    uint32_t registry_serial=0;
+    std::map<uint32_t,bool> crypto_contexts;
+    uint32_t crypto_serial=0;
     std::map<std::string, uint32_t> modules;   // lowercase module name -> guest base
     std::vector<uint32_t> atexit_fns;
     std::vector<uint8_t> iob;                  // 3 FILE structs, guest-visible
@@ -1128,31 +1132,131 @@ inline void Guest::register_all() {
         else return false;
         return true;
     };
-    auto reg_open=[this](Cpu& c,bool wide)->uint32_t {
-        std::string path;
-        if(wide){for(char16_t ch:wstr(c.arg(1)))path.push_back(char(ch));}else path=str(c.arg(1));
-        for(char& ch:path)if(ch>='A'&&ch<='Z')ch=char(ch+32);
-        if(c.arg(0)!=0x80000001u||path!="software\\valve\\steam\\activeprocess"||steam_registry.client.empty())return 2;
-        uint32_t key=0x71000000u+(++steam_registry_serial);steam_registry_keys[key]=true;mem.w32(c.arg(4),key);return 0;
+    auto registry_name=[this](Cpu& c,uint32_t p,bool wide)->std::u16string {
+        (void)c;
+        if(wide)return wstr(p);
+        std::u16string s;for(unsigned char ch:str(p))s.push_back(char16_t(ch));return s;
     };
-    auto reg_query=[this,steam_reg_value](Cpu& c,bool wide)->uint32_t {
-        if(!steam_registry_keys.count(c.arg(0)))return 6;
-        std::string name;
-        if(wide){for(char16_t ch:wstr(c.arg(1)))name.push_back(char(ch));}else name=str(c.arg(1));
-        uint32_t type=0;std::vector<uint8_t> bytes;
-        if(!steam_reg_value(name,wide,type,bytes))return 2;
-        if(c.arg(3))mem.w32(c.arg(3),type);
-        if(!c.arg(5))return 87;
-        uint32_t cap=mem.r32(c.arg(5));mem.w32(c.arg(5),uint32_t(bytes.size()));
+    auto registry_host=[this](Host::RegistryCall& q)->uint32_t {
+        if(!host.registry_call)return 120;
+        host.registry_call(q);
+        return q.status;
+    };
+    auto registry_handle=[this](uint32_t h)->uintptr_t {auto it=registry_handles.find(h);return it==registry_handles.end()?0:it->second;};
+    auto registry_open=[this,registry_name,registry_host,registry_handle](Cpu& c,bool wide,bool create)->uint32_t {
+        uint32_t out=create?c.arg(7):c.arg(4);if(!out)return 87;
+        Host::RegistryCall q{};q.kind=create?Host::RegistryCall::Kind::Create:Host::RegistryCall::Kind::Open;
+        uint32_t root=c.arg(0);q.root=root>=0x80000000u&&root<=0x80000003u?root:uint32_t(registry_handle(root));
+        if(root<0x80000000u&&!registry_handle(root))return 6;
+        q.subkey=registry_name(c,c.arg(1),wide);q.ansi=!wide;
+        if(create){if(c.arg(2)||c.arg(6))return c.arg(2)?87u:50u;q.options=c.arg(4);q.access=c.arg(5);}else{if(c.arg(2))return 87;q.options=c.arg(2);q.access=c.arg(3);}
+        uint32_t status=registry_host(q);
+        if(status){
+            if(!create&&!host.registry_call&&c.arg(0)==0x80000001u&&q.subkey==u"Software\\Valve\\Steam\\ActiveProcess"&&!steam_registry.client.empty()){
+                uint32_t key=0x71000000u+(++steam_registry_serial);steam_registry_keys[key]=true;mem.w32(out,key);return 0;
+            }
+            return status;
+        }
+        uint32_t key=0x72000000u+(++registry_serial);registry_handles[key]=q.result_handle;mem.w32(out,key);
+        if(create&&c.arg(8))mem.w32(c.arg(8),q.disposition);
+        return 0;
+    };
+    auto registry_query=[this,registry_name,registry_handle,registry_host,steam_reg_value](Cpu& c,bool wide)->uint32_t {
+        uint32_t h=c.arg(0),cap_ptr=c.arg(5);if(c.arg(2)||!cap_ptr)return 87;
+        if(steam_registry_keys.count(h)){
+            std::string name;for(char16_t ch:registry_name(c,c.arg(1),wide))name.push_back(char(ch));
+            uint32_t type=0;std::vector<uint8_t> bytes;if(!steam_reg_value(name,wide,type,bytes))return 2;
+            if(c.arg(3))mem.w32(c.arg(3),type);
+            uint32_t cap=mem.r32(cap_ptr);mem.w32(cap_ptr,uint32_t(bytes.size()));
+            if(!c.arg(4))return 0;
+            if(cap<bytes.size())return 234;
+            mem.write_bytes(c.arg(4),bytes.data(),uint32_t(bytes.size()));return 0;
+        }
+        uintptr_t native=registry_handle(h);if(!native)return 6;
+        Host::RegistryCall q{};q.kind=Host::RegistryCall::Kind::Query;q.handle=native;q.name=registry_name(c,c.arg(1),wide);q.ansi=!wide;
+        uint32_t status=registry_host(q);if(status)return status;
+        if(c.arg(3))mem.w32(c.arg(3),q.type);
+        uint32_t cap=mem.r32(cap_ptr);mem.w32(cap_ptr,uint32_t(q.data.size()));
         if(!c.arg(4))return 0;
-        if(cap<bytes.size())return 234;
-        mem.write_bytes(c.arg(4),bytes.data(),uint32_t(bytes.size()));return 0;
+        if(cap<q.data.size())return 234;
+        if(!q.data.empty())mem.write_bytes(c.arg(4),q.data.data(),uint32_t(q.data.size()));
+        return 0;
     };
-    reg.add("advapi32.dll","RegOpenKeyExA",Conv::Stdcall,5,[reg_open](Cpu& c){return reg_open(c,false);});
-    reg.add("advapi32.dll","RegOpenKeyExW",Conv::Stdcall,5,[reg_open](Cpu& c){return reg_open(c,true);});
-    reg.add("advapi32.dll","RegQueryValueExA",Conv::Stdcall,6,[reg_query](Cpu& c){return reg_query(c,false);});
-    reg.add("advapi32.dll","RegQueryValueExW",Conv::Stdcall,6,[reg_query](Cpu& c){return reg_query(c,true);});
-    reg.add("advapi32.dll","RegCloseKey",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{return steam_registry_keys.erase(c.arg(0))?0:6;});
+    auto reg_open_a=[registry_open](Cpu& c){return registry_open(c,false,false);};
+    auto reg_open_w=[registry_open](Cpu& c){return registry_open(c,true,false);};
+    auto reg_create_a=[registry_open](Cpu& c){return registry_open(c,false,true);};
+    auto reg_create_w=[registry_open](Cpu& c){return registry_open(c,true,true);};
+    reg.add("advapi32.dll","RegOpenKeyExA",Conv::Stdcall,5,[reg_open_a](Cpu& c){return reg_open_a(c);});
+    reg.add("advapi32.dll","RegOpenKeyExW",Conv::Stdcall,5,[reg_open_w](Cpu& c){return reg_open_w(c);});
+    reg.add("advapi32.dll","RegCreateKeyExA",Conv::Stdcall,9,[reg_create_a](Cpu& c){return reg_create_a(c);});
+    reg.add("advapi32.dll","RegCreateKeyExW",Conv::Stdcall,9,[reg_create_w](Cpu& c){return reg_create_w(c);});
+    reg.add("advapi32.dll","RegQueryValueExA",Conv::Stdcall,6,[registry_query](Cpu& c){return registry_query(c,false);});
+    reg.add("advapi32.dll","RegQueryValueExW",Conv::Stdcall,6,[registry_query](Cpu& c){return registry_query(c,true);});
+    auto registry_set=[registry_name,registry_handle,registry_host](Cpu& c,bool wide)->uint32_t {
+        uintptr_t native=registry_handle(c.arg(0));if(!native)return 6;if(c.arg(2))return 87;
+        uint32_t size=c.arg(5);if(size>(1u<<24)||(!c.arg(4)&&size))return 87;
+        Host::RegistryCall q{};q.kind=Host::RegistryCall::Kind::Set;q.handle=native;q.name=registry_name(c,c.arg(1),wide);q.type=c.arg(3);q.ansi=!wide;
+        if(size)q.data=c.mem.read_bytes(c.arg(4),size);
+        return registry_host(q);
+    };
+    reg.add("advapi32.dll","RegSetValueExA",Conv::Stdcall,6,[registry_set](Cpu& c){return registry_set(c,false);});
+    reg.add("advapi32.dll","RegSetValueExW",Conv::Stdcall,6,[registry_set](Cpu& c){return registry_set(c,true);});
+    auto registry_delete=[registry_name,registry_handle,registry_host](Cpu& c,bool wide,bool key)->uint32_t {
+        uintptr_t native=registry_handle(c.arg(0));if(!native)return 6;Host::RegistryCall q{};q.kind=key?Host::RegistryCall::Kind::DeleteKey:Host::RegistryCall::Kind::DeleteValue;
+        q.handle=native;q.subkey=registry_name(c,c.arg(1),wide);q.name=q.subkey;q.ansi=!wide;return registry_host(q);
+    };
+    reg.add("advapi32.dll","RegDeleteValueA",Conv::Stdcall,2,[registry_delete](Cpu& c){return registry_delete(c,false,false);});
+    reg.add("advapi32.dll","RegDeleteValueW",Conv::Stdcall,2,[registry_delete](Cpu& c){return registry_delete(c,true,false);});
+    reg.add("advapi32.dll","RegDeleteKeyA",Conv::Stdcall,2,[registry_delete](Cpu& c){return registry_delete(c,false,true);});
+    reg.add("advapi32.dll","RegDeleteKeyW",Conv::Stdcall,2,[registry_delete](Cpu& c){return registry_delete(c,true,true);});
+    auto registry_enum=[this,registry_handle,registry_host](Cpu& c,bool wide,bool value)->uint32_t {
+        uintptr_t native=registry_handle(c.arg(0));if(!native)return 6;uint32_t namep=c.arg(2),lenp=c.arg(3);if(!lenp)return 87;
+        if(c.arg(4))return 87;
+        Host::RegistryCall q{};q.kind=value?Host::RegistryCall::Kind::EnumValue:Host::RegistryCall::Kind::EnumKey;q.handle=native;q.index=c.arg(1);q.ansi=!wide;
+        uint32_t status=registry_host(q);if(status)return status;
+        uint32_t required=uint32_t(q.name.size());uint32_t cap=mem.r32(lenp);
+        if(namep&&cap<required+1){mem.w32(lenp,required+1);return 234;}
+        if(namep){if(wide){for(uint32_t i=0;i<required;++i)mem.w(namep+i*2,q.name[i],2);mem.w(namep+required*2,0,2);}else{for(uint32_t i=0;i<required;++i)mem.w8(namep+i,uint8_t(q.name[i]));mem.w8(namep+required,0);}}
+        mem.w32(lenp,required);if(c.arg(5))mem.w32(c.arg(5),q.type);
+        if(!value){if(c.arg(6))mem.w32(c.arg(6),0);if(c.arg(7))mem.w32(c.arg(7),0);return 0;}
+        if(c.arg(6)&&!c.arg(7))return 87;
+        if(c.arg(7)){uint32_t data_cap=mem.r32(c.arg(7));mem.w32(c.arg(7),uint32_t(q.data.size()));if(c.arg(6)){if(data_cap<q.data.size())return 234;if(!q.data.empty())mem.write_bytes(c.arg(6),q.data.data(),uint32_t(q.data.size()));}}
+        return 0;
+    };
+    reg.add("advapi32.dll","RegEnumKeyExA",Conv::Stdcall,8,[registry_enum](Cpu& c){return registry_enum(c,false,false);});
+    reg.add("advapi32.dll","RegEnumKeyExW",Conv::Stdcall,8,[registry_enum](Cpu& c){return registry_enum(c,true,false);});
+    reg.add("advapi32.dll","RegEnumValueA",Conv::Stdcall,8,[registry_enum](Cpu& c){return registry_enum(c,false,true);});
+    reg.add("advapi32.dll","RegEnumValueW",Conv::Stdcall,8,[registry_enum](Cpu& c){return registry_enum(c,true,true);});
+    reg.add("advapi32.dll","RegCloseKey",Conv::Stdcall,1,[this,registry_host](Cpu& c)->uint32_t {
+        uint32_t h=c.arg(0);if(steam_registry_keys.erase(h))return 0;auto it=registry_handles.find(h);if(it==registry_handles.end())return 6;
+        Host::RegistryCall q{};q.kind=Host::RegistryCall::Kind::Close;q.handle=it->second;uint32_t status=registry_host(q);if(!status)registry_handles.erase(it);return status;
+    });
+    auto get_user_name=[this](Cpu& c,bool wide)->uint32_t {
+        uint32_t out=c.arg(0),sizep=c.arg(1);if(!out||!sizep){set_last_error(87);return 0;}
+        uint32_t required=wide?7u:7u,cap=mem.r32(sizep);if(cap<required){mem.w32(sizep,required);set_last_error(122);return 0;}
+        if(wide){const char16_t player[]=u"Player";for(uint32_t i=0;i<7;++i)mem.w(out+i*2,player[i],2);}
+        else mem.write_bytes(out,"Player",7);
+        mem.w32(sizep,required);return 1;
+    };
+    reg.add("advapi32.dll","GetUserNameA",Conv::Stdcall,2,[get_user_name](Cpu& c){return get_user_name(c,false);});
+    reg.add("advapi32.dll","GetUserNameW",Conv::Stdcall,2,[get_user_name](Cpu& c){return get_user_name(c,true);});
+    auto crypt_acquire=[this](Cpu& c,bool wide)->uint32_t {
+        uint32_t out=c.arg(0),provider_type=c.arg(3),flags=c.arg(4);if(!out){set_last_error(87);return 0;}
+        if((flags&0xF0000000u)!=0xF0000000u||provider_type!=1u){set_last_error(87);return 0;}
+        (void)wide;uint32_t handle=0x73000000u+(++crypto_serial);crypto_contexts[handle]=true;mem.w32(out,handle);return 1;
+    };
+    reg.add("advapi32.dll","CryptAcquireContextA",Conv::Stdcall,5,[crypt_acquire](Cpu& c){return crypt_acquire(c,false);});
+    reg.add("advapi32.dll","CryptAcquireContextW",Conv::Stdcall,5,[crypt_acquire](Cpu& c){return crypt_acquire(c,true);});
+    reg.add("advapi32.dll","CryptGenRandom",Conv::Stdcall,3,[this](Cpu& c)->uint32_t {
+        uint32_t handle=c.arg(0),size=c.arg(1),out=c.arg(2);if(!crypto_contexts.count(handle)){set_last_error(0x80090001u);return 0;}
+        if(size>(1u<<20)||(!out&&size)){set_last_error(87);return 0;}std::vector<uint8_t> bytes(size);
+        if(size&&(!host.random_bytes||!host.random_bytes(bytes.data(),size))){set_last_error(host.random_bytes?31u:120u);return 0;}
+        if(size)mem.write_bytes(out,bytes.data(),size);
+        return 1;
+    });
+    reg.add("advapi32.dll","CryptReleaseContext",Conv::Stdcall,2,[this](Cpu& c)->uint32_t {
+        if(c.arg(1)){set_last_error(87);return 0;}if(!crypto_contexts.erase(c.arg(0))){set_last_error(0x80090001u);return 0;}return 1;
+    });
     reg.add("shell32.dll", "SHGetFolderPathW", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
 #if defined(_WIN32)
         using Fn = HRESULT (WINAPI*)(HWND, int, HANDLE, DWORD, LPWSTR);

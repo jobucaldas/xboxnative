@@ -100,6 +100,23 @@ int main(int argc,char** argv) {
       wchar_t wname[256]; DWORD wlen=256; dataLen=sizeof data;
       EXPECT(regb::RegEnumValueW(vk,0,wname,&wlen,nullptr,&type,(LPBYTE)&data,&dataLen)==0 && !wcscmp(wname,manifest) && wlen==31);
       EXPECT(regb::RegCloseKey(vk)==0); }
+    // Key enumeration returns immediate children in stable case-insensitive order; deletion refuses non-empty keys and persists empty-key removal.
+    { HKEY parent=0,a=0,sub=0,z=0; DWORD n=0; wchar_t name[32]{};
+      EXPECT(regb::RegCreateKeyW(HKEY_CURRENT_USER,L"Software\\RegistryEnum",&parent)==0);
+      EXPECT(regb::RegCreateKeyW(parent,L"zeta",&z)==0); EXPECT(regb::RegCloseKey(z)==0);
+      EXPECT(regb::RegCreateKeyW(parent,L"Alpha\\Nested",&sub)==0); EXPECT(regb::RegCloseKey(sub)==0);
+      EXPECT(regb::RegOpenKeyExW(parent,L"Alpha",0,KEY_READ,&a)==0); EXPECT(regb::RegCloseKey(a)==0);
+      n=32; EXPECT(regb::RegEnumKeyExW(parent,0,name,&n,nullptr,nullptr,nullptr,nullptr)==0 && !wcscmp(name,L"Alpha") && n==5);
+      n=32; EXPECT(regb::RegEnumKeyExW(parent,1,name,&n,nullptr,nullptr,nullptr,nullptr)==0 && !wcscmp(name,L"zeta") && n==4);
+      n=32; EXPECT(regb::RegEnumKeyExW(parent,2,name,&n,nullptr,nullptr,nullptr,nullptr)==ERROR_NO_MORE_ITEMS);
+      EXPECT(regb::RegDeleteKeyW(parent,L"Alpha")==ERROR_ACCESS_DENIED);
+      EXPECT(regb::RegOpenKeyExW(parent,L"Alpha",0,KEY_ALL_ACCESS,&a)==0);
+      EXPECT(regb::RegDeleteKeyW(a,L"Nested")==0); EXPECT(regb::RegCloseKey(a)==0);
+      EXPECT(regb::RegDeleteKeyW(parent,L"Alpha")==0); EXPECT(regb::RegDeleteKeyW(parent,L"zeta")==0);
+      EXPECT(regb::RegCloseKey(parent)==0); }
+    EXPECT(regb::RegDeleteKeyW(HKEY_CURRENT_USER,L"Software\\RegistryEnum")==0);
+    regb::init(dir,say);
+    { HKEY gone=0; EXPECT(regb::RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\RegistryEnum",0,KEY_READ,&gone)==ERROR_FILE_NOT_FOUND); }
     // The value survives a reload, so the next launch's enumeration sees the same driver entry.
     regb::init(dir,say);
     { HKEY vk=0; char name[256]; DWORD nameLen=sizeof name, type=0, data=0, dataLen=sizeof data;
