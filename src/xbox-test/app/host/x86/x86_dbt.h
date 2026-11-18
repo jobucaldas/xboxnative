@@ -6,6 +6,12 @@
 #include <memory>
 #include <stdexcept>
 #include <vector>
+#if !defined(_WIN32)
+#include <csignal>
+#include <csetjmp>
+#include <mutex>
+#include <ucontext.h>
+#endif
 #include "x86_fpu.h"
 
 #if defined(_WIN32)
@@ -224,17 +230,142 @@ inline void runtime_x87(RuntimeState* state, uint64_t encoded, uint32_t length) 
     }
 }
 
+struct InstructionMap {
+    size_t host_offset = 0;
+    uint32_t guest_eip = 0;
+    bool memory_write = false;
+    uint8_t memory_size = 0;
+};
+
 struct RuntimeBlock {
     std::unique_ptr<Executable> code;
     std::vector<uint8_t> guest_bytes;
     std::vector<std::pair<uint32_t, uint32_t>> page_generations;
+    std::vector<std::pair<uint32_t, uint32_t>> memory_generations;
+    std::vector<uint32_t> store_pages;
+    std::vector<InstructionMap> instruction_map;
     uint32_t guest_length = 0;
     uint32_t guest_pc = 0;
     uint8_t exit_opcode = 0;
+    bool may_fault = false;
     bool interpreter_boundary = false;
     bool uses_xmm = false;
     RuntimeBlock* linked_target = nullptr;
 };
+
+#if !defined(_WIN32)
+struct HostFaultContext {
+    sigjmp_buf jump;
+    RuntimeState* state = nullptr;
+    const RuntimeBlock* block = nullptr;
+    uintptr_t code_address = 0;
+    uintptr_t host_pc = 0;
+    uintptr_t fault_address = 0;
+    uintptr_t host_registers[8] = {};
+    uintptr_t host_flags = 0;
+};
+inline thread_local HostFaultContext* active_host_fault = nullptr;
+inline std::once_flag host_fault_signal_once;
+inline void host_fault_signal(int signal_number, siginfo_t* info, void* raw_context) {
+    auto* context = active_host_fault;
+    auto* ucontext = static_cast<ucontext_t*>(raw_context);
+    uintptr_t pc = uintptr_t(ucontext->uc_mcontext.gregs[REG_RIP]);
+    if (context && pc >= context->code_address && pc < context->code_address + 4096) {
+        context->host_pc = pc;
+        context->fault_address = uintptr_t(info->si_addr);
+        context->host_registers[0] = uintptr_t(ucontext->uc_mcontext.gregs[REG_RAX]);
+        context->host_registers[1] = uintptr_t(ucontext->uc_mcontext.gregs[REG_RCX]);
+        context->host_registers[2] = uintptr_t(ucontext->uc_mcontext.gregs[REG_RDX]);
+        context->host_registers[3] = uintptr_t(ucontext->uc_mcontext.gregs[REG_RSI]);
+        context->host_registers[4] = uintptr_t(ucontext->uc_mcontext.gregs[REG_RDI]);
+        context->host_registers[5] = uintptr_t(ucontext->uc_mcontext.gregs[REG_R8]);
+        context->host_registers[6] = uintptr_t(ucontext->uc_mcontext.gregs[REG_R9]);
+        context->host_registers[7] = uintptr_t(ucontext->uc_mcontext.gregs[REG_R10]);
+        context->host_flags = uintptr_t(ucontext->uc_mcontext.gregs[REG_EFL]);
+        siglongjmp(context->jump, 1);
+    }
+    std::signal(signal_number, SIG_DFL);
+    std::raise(signal_number);
+}
+inline void install_host_fault_signal() {
+    std::call_once(host_fault_signal_once, [] {
+        struct sigaction action = {};
+        action.sa_sigaction = host_fault_signal;
+        sigemptyset(&action.sa_mask);
+        action.sa_flags = SA_SIGINFO;
+        sigaction(SIGSEGV, &action, nullptr);
+    });
+}
+inline uint32_t recover_host_fault(HostFaultContext& context) {
+    context.state->reg[0] = uint32_t(context.host_registers[0]);
+    context.state->reg[1] = uint32_t(context.host_registers[1]);
+    context.state->reg[2] = uint32_t(context.host_registers[2]);
+    context.state->reg[3] = uint32_t(context.host_registers[3]);
+    context.state->reg[4] = uint32_t(context.host_registers[4]);
+    context.state->reg[5] = uint32_t(context.host_registers[5]);
+    context.state->reg[6] = uint32_t(context.host_registers[6]);
+    context.state->reg[7] = uint32_t(context.host_registers[7]);
+    context.state->eflags = uint32_t(context.host_flags);
+    size_t offset = context.host_pc - context.code_address;
+    const InstructionMap* mapping = nullptr;
+    for (const auto& candidate : context.block->instruction_map) {
+        if (candidate.host_offset > offset) break;
+        mapping = &candidate;
+    }
+    context.state->eip = mapping ? mapping->guest_eip : context.block->guest_pc;
+    return context.state->eip;
+}
+#endif
+
+#if defined(_WIN32)
+struct HostFaultContext {
+    RuntimeState* state = nullptr;
+    const RuntimeBlock* block = nullptr;
+    uintptr_t code_address = 0;
+    uintptr_t host_pc = 0;
+    uintptr_t fault_address = 0;
+    uintptr_t host_registers[8] = {};
+    uintptr_t host_flags = 0;
+};
+inline int host_fault_filter(EXCEPTION_POINTERS* exception, HostFaultContext& context) {
+    if (!exception || exception->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
+        !context.state || !context.block) return EXCEPTION_CONTINUE_SEARCH;
+    uintptr_t pc = uintptr_t(exception->ContextRecord->Rip);
+    if (pc < context.code_address || pc >= context.code_address + 4096 ||
+        exception->ExceptionRecord->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
+    context.host_pc = pc;
+    context.fault_address = uintptr_t(exception->ExceptionRecord->ExceptionInformation[1]);
+    context.host_registers[0] = uintptr_t(exception->ContextRecord->Rax);
+    context.host_registers[1] = uintptr_t(exception->ContextRecord->Rcx);
+    context.host_registers[2] = uintptr_t(exception->ContextRecord->Rdx);
+    context.host_registers[3] = uintptr_t(exception->ContextRecord->Rsi);
+    context.host_registers[4] = uintptr_t(exception->ContextRecord->Rdi);
+    context.host_registers[5] = uintptr_t(exception->ContextRecord->R8);
+    context.host_registers[6] = uintptr_t(exception->ContextRecord->R9);
+    context.host_registers[7] = uintptr_t(exception->ContextRecord->R10);
+    context.host_flags = uintptr_t(exception->ContextRecord->EFlags);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+inline uint32_t recover_host_fault(HostFaultContext& context) {
+    context.state->reg[0] = uint32_t(context.host_registers[0]);
+    context.state->reg[1] = uint32_t(context.host_registers[1]);
+    context.state->reg[2] = uint32_t(context.host_registers[2]);
+    context.state->reg[3] = uint32_t(context.host_registers[3]);
+    context.state->reg[4] = uint32_t(context.host_registers[4]);
+    context.state->reg[5] = uint32_t(context.host_registers[5]);
+    context.state->reg[6] = uint32_t(context.host_registers[6]);
+    context.state->reg[7] = uint32_t(context.host_registers[7]);
+    context.state->eflags = uint32_t(context.host_flags);
+    size_t offset = context.host_pc - context.code_address;
+    const InstructionMap* mapping = nullptr;
+    for (const auto& candidate : context.block->instruction_map) {
+        if (candidate.host_offset > offset) break;
+        mapping = &candidate;
+    }
+    context.state->eip = mapping ? mapping->guest_eip : context.block->guest_pc;
+    return context.state->eip;
+}
+#endif
 
 inline uint8_t runtime_reg(unsigned guest) {
     static constexpr uint8_t map[8] = {0, 1, 2, 6, 7, 8, 9, 10};
@@ -309,6 +440,9 @@ inline RuntimeAddress runtime_address(const std::vector<uint8_t>& b, size_t& p, 
     else if (mod == 2) a.displacement = runtime_u32(b, p);
     return a;
 }
+inline bool runtime_fixed_absolute(const RuntimeAddress& a) {
+    return a.absolute && (!a.has_sib || ((a.sib >> 3) & 7) == 4);
+}
 inline void runtime_emit_ea(Emitter& out, const RuntimeAddress& a, bool host_address = true) {
     unsigned mod = a.modrm >> 6, rm = a.modrm & 7;
     uint8_t base = a.has_sib ? uint8_t(a.sib & 7) : uint8_t(rm);
@@ -365,11 +499,12 @@ inline void runtime_emit_guest_pop_reg(Emitter& out, uint8_t guest_reg) {
 // intentionally restricted to absolute dwords; the dispatcher validates both
 // R and W before allowing them into native code.
 inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
-                                  uint32_t& memory_ea, bool& memory_operand, bool& absolute_memory) {
+                                  uint32_t& memory_ea, bool& memory_operand, bool& absolute_memory,
+                                  bool& memory_write, uint8_t& memory_size) {
     size_t p = start; uint8_t prefix = 0;
     if (p < b.size() && b[p] == 0x66) prefix = runtime_u8(b, p);
     uint8_t op = runtime_u8(b, p);
-    memory_operand = false; absolute_memory = false;
+    memory_operand = false; absolute_memory = false; memory_write = false; memory_size = 0;
     if (prefix) {
         if (prefix != 0x66 || op != 0x0F) throw std::runtime_error("unsupported DBT prefix");
         uint8_t op2 = runtime_u8(b, p);
@@ -380,7 +515,8 @@ inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
         uint8_t m = runtime_u8(b, p);
         if ((m >> 6) != 3) {
             RuntimeAddress a = runtime_address(b, p, m); memory_operand = true;
-            if (a.absolute) { memory_ea = a.displacement; absolute_memory = true; }
+            if (runtime_fixed_absolute(a)) { memory_ea = a.displacement; absolute_memory = true; }
+            memory_write = op2 == 0x7f; memory_size = 16;
         }
         if ((op2 == 0x70 || op2 == 0x72 || op2 == 0x73) && (m >> 6) != 3)
             throw std::runtime_error("unsupported DBT SSE memory form");
@@ -402,7 +538,11 @@ inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
         if ((m >> 6) != 3) {
             if (!valid) throw std::runtime_error("unsupported DBT x87 memory form");
             RuntimeAddress a = runtime_address(b, p, m); memory_operand = true;
-            if (a.absolute) { memory_ea = a.displacement; absolute_memory = true; }
+            if (runtime_fixed_absolute(a)) { memory_ea = a.displacement; absolute_memory = true; }
+            memory_write = (op == 0xd9 && (group == 2 || group == 3 || group == 7)) ||
+                (op == 0xdb && group == 3) || (op == 0xdd && (group == 2 || group == 3 || group == 7)) ||
+                (op == 0xdf && group == 3);
+            memory_size = op == 0xd8 || op == 0xd9 || op == 0xdb ? 4 : op == 0xdc || op == 0xdd ? 8 : 2;
         } else {
             unsigned form = m & 0x3f;
             valid = op == 0xD8 || op == 0xDC || op == 0xDE ||
@@ -418,7 +558,7 @@ inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
     if (op == 0x8F) {
         uint8_t m = runtime_u8(b, p);
         if (((m >> 3) & 7) != 0) throw std::runtime_error("unsupported pop group");
-        if ((m >> 6) != 3) runtime_address(b, p, m);
+        if ((m >> 6) != 3) { runtime_address(b, p, m); memory_operand = true; memory_write = true; memory_size = 4; }
         return p - start;
     }
     if (op >= 0xB8 && op <= 0xBF) { runtime_u32(b, p); return p - start; }
@@ -428,7 +568,9 @@ inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
             uint8_t m = runtime_u8(b, p);
             if ((m >> 6) != 3) {
                 RuntimeAddress a = runtime_address(b, p, m); memory_operand = true;
-                if (a.absolute) { memory_ea = a.displacement; absolute_memory = true; }
+                if (runtime_fixed_absolute(a)) { memory_ea = a.displacement; absolute_memory = true; }
+                memory_write = op2 == 0x29;
+                memory_size = 16;
             }
             return p - start;
         }
@@ -436,7 +578,8 @@ inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
             uint8_t m = runtime_u8(b, p);
             if ((m >> 6) != 3) {
                 RuntimeAddress a = runtime_address(b, p, m); memory_operand = true;
-                if (a.absolute) { memory_ea = a.displacement; absolute_memory = true; }
+                if (runtime_fixed_absolute(a)) { memory_ea = a.displacement; absolute_memory = true; }
+                memory_size = (op2 == 0xb6 || op2 == 0xbe) ? 1 : 2;
             }
             return p - start;
         }
@@ -455,7 +598,13 @@ inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
         bool unary = op == 0xF6 || op == 0xF7 || op == 0xFE || op == 0xFF;
         if ((m >> 6) != 3) {
             RuntimeAddress a = runtime_address(b, p, m); memory_operand = true;
-            if (a.absolute) { memory_ea = a.displacement; absolute_memory = true; }
+            if (runtime_fixed_absolute(a)) { memory_ea = a.displacement; absolute_memory = true; }
+            memory_size = (op == 0xf6 || op == 0xfe) ? 1 : 4;
+            memory_write = op == 0x89 ||
+                ((op <= 0x3b) && ((op & 7) == 1) && op != 0x39) ||
+                ((op == 0x81 || op == 0x83) && group != 7) ||
+                ((op == 0xf6 || op == 0xf7) && (group == 2 || group == 3)) ||
+                ((op == 0xfe || op == 0xff) && group < 2);
         }
         if (op == 0x81 || (op == 0xF7 && group == 0)) runtime_u32(b, p);
         else if (op == 0x83 || (op == 0xF6 && group == 0)) runtime_u8(b, p);
@@ -488,13 +637,14 @@ inline bool runtime_uses_xmm(const std::vector<uint8_t>& guest) {
             if (prefixed || op2 == 0x28 || op2 == 0x29 || op2 == 0x58 || op2 == 0x59)
                 return true;
         }
-        uint32_t memory_ea = 0; bool memory_operand = false, absolute_memory = false;
-        p = start + runtime_instruction(guest, start, memory_ea, memory_operand, absolute_memory);
+        uint32_t memory_ea = 0; bool memory_operand = false, absolute_memory = false, memory_write = false; uint8_t memory_size = 0;
+        p = start + runtime_instruction(guest, start, memory_ea, memory_operand, absolute_memory, memory_write, memory_size);
     }
     return false;
 }
 
-inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest, uint32_t guest_pc) {
+inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest, uint32_t guest_pc,
+                                               std::vector<InstructionMap>* instruction_map = nullptr) {
     Emitter out;
     bool uses_xmm = runtime_uses_xmm(guest);
 #if defined(_WIN32)
@@ -516,13 +666,21 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
     bool branch_terminated = false;
     while (p < guest.size()) {
         size_t begin = p; uint8_t prefix = 0;
+        const size_t map_index = instruction_map ? instruction_map->size() : 0;
+        if (instruction_map) instruction_map->push_back({out.bytes.size(), guest_pc + uint32_t(begin), false, 0});
         if (guest[p] == 0x66) prefix = runtime_u8(guest, p);
         uint8_t op = runtime_u8(guest, p);
+        auto mark_memory = [&](bool write, uint8_t size) {
+            if (instruction_map) {
+                (*instruction_map)[map_index].memory_write = write;
+                (*instruction_map)[map_index].memory_size = size;
+            }
+        };
         if (prefix) {
             if (prefix != 0x66 || op != 0x0F) throw std::runtime_error("unsupported DBT prefix");
             uint8_t op2 = runtime_u8(guest, p), m = runtime_u8(guest, p);
             bool memory = (m >> 6) != 3; RuntimeAddress a;
-            if (memory) { a = runtime_address(guest, p, m); runtime_emit_ea(out, a); }
+            if (memory) { a = runtime_address(guest, p, m); runtime_emit_ea(out, a); mark_memory(op2 == 0x7f, 16); }
             uint8_t dst = uint8_t((m >> 3) & 7), src = uint8_t(m & 7);
             if (op2 == 0x6E) runtime_sse(out, 0x66, op2, dst, runtime_reg(src), memory);
             else {
@@ -532,9 +690,10 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
             }
             if (op2 == 0x70 || op2 == 0x72 || op2 == 0x73) out.b(runtime_u8(guest, p));
         } else if (op >= 0xD8 && op <= 0xDF) {
-            uint32_t memory_ea = 0; bool memory_operand = false, absolute_memory = false;
-            const size_t len = runtime_instruction(guest, begin, memory_ea, memory_operand, absolute_memory);
+            uint32_t memory_ea = 0; bool memory_operand = false, absolute_memory = false, memory_write = false; uint8_t memory_size = 0;
+            const size_t len = runtime_instruction(guest, begin, memory_ea, memory_operand, absolute_memory, memory_write, memory_size);
             p = begin + len;
+            if (memory_operand) mark_memory(memory_write, memory_size);
             out.rex(11, 0, 4, true); out.b(0x8B);
             if (state_slot < 128) { out.modrm(1, 11, 4); out.b(0x24); out.b(state_slot); }
             else { out.modrm(2, 11, 4); out.b(0x24); out.d(state_slot); }
@@ -566,7 +725,7 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
         } else if (op == 0x8F) {
             uint8_t m = runtime_u8(guest, p); RuntimeAddress a;
             if ((m >> 3) & 7) throw std::runtime_error("unsupported pop group");
-            if ((m >> 6) != 3) { a = runtime_address(guest, p, m); runtime_emit_guest_stack_address(out); out.rex(14, 0, 11); out.b(0x8B); out.modrm(0, 14, 3); runtime_emit_guest_stack_adjust(out, false); if (!a.absolute) throw std::runtime_error("unsupported translated pop memory form"); out.rex(14, 0, 12); out.b(0x89); out.modrm(2, 14, 4); out.b(0x24); out.d(a.displacement); }
+            if ((m >> 6) != 3) { a = runtime_address(guest, p, m); runtime_emit_guest_stack_address(out); out.rex(14, 0, 11); out.b(0x8B); out.modrm(0, 14, 3); runtime_emit_guest_stack_adjust(out, false); if (!runtime_fixed_absolute(a)) throw std::runtime_error("unsupported translated pop memory form"); out.rex(14, 0, 12); out.b(0x89); out.modrm(2, 14, 4); out.b(0x24); out.d(a.displacement); }
             else { runtime_emit_guest_pop_reg(out, m & 7); }
         } else if (op == 0xC2 || op == 0xC3) {
             uint32_t cleanup = op == 0xC2 ? runtime_u8(guest, p) | (uint32_t(runtime_u8(guest, p)) << 8) : 0;
@@ -585,7 +744,7 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
             uint8_t op2 = runtime_u8(guest, p), m = runtime_u8(guest, p);
             if (op2 == 0x28 || op2 == 0x29 || op2 == 0x58 || op2 == 0x59) {
                 RuntimeAddress a; bool memory = (m >> 6) != 3;
-                if (memory) { a = runtime_address(guest, p, m); runtime_emit_ea(out, a); }
+                if (memory) { a = runtime_address(guest, p, m); runtime_emit_ea(out, a); mark_memory(op2 == 0x29, 16); }
                 runtime_sse(out, 0, op2, uint8_t((m >> 3) & 7), uint8_t(m & 7), memory);
             } else {
                 RuntimeAddress a; bool memory = (m >> 6) != 3;

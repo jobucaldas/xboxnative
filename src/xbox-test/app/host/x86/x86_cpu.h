@@ -73,11 +73,14 @@ struct Cpu {
     bool exited = false; uint32_t exit_code = 0;
     bool dbt_enabled = false;
     uint64_t translated_blocks = 0, interpreted_blocks = 0;
+    // Guest worker bodies are scheduled one at a time by Guest::run_pending_threads,
+    // so this process cache is not concurrently mutated or executed by guest threads.
     std::unordered_map<uint32_t, dbt::RuntimeBlock> dbt_cache;
     std::array<dbt::RuntimeBlock*, 4> dbt_inline_cache{};
     std::unordered_map<uint32_t, std::string> dbt_unsupported;
     std::unordered_map<std::string, uint64_t> dbt_fallbacks;
     unsigned depth = 0;
+    bool seh_dispatching = false;
     bool trace_fault_context = false;
     std::function<std::string(uint32_t)> format_eip;
     std::array<uint32_t, 12> recent_eip{};
@@ -113,6 +116,18 @@ struct Cpu {
         dbt_enabled = (requested || env_requested) && mem.base() != nullptr;
     }
     void clear_dbt_cache() { dbt_cache.clear(); dbt_inline_cache.fill(nullptr); dbt_unsupported.clear(); }
+    void invalidate_dbt_range(uint32_t addr, uint32_t size) {
+        if (!size || uint64_t(addr) + size > Memory::ADDRESS_SPACE_SIZE) { clear_dbt_cache(); return; }
+        uint32_t first = addr >> 12, last = uint32_t((uint64_t(addr) + size - 1) >> 12);
+        for (const auto& candidate : dbt_cache) {
+            for (const auto& page : candidate.second.page_generations)
+                if (page.first >= first && page.first <= last) { clear_dbt_cache(); return; }
+        }
+        for (auto it = dbt_unsupported.begin(); it != dbt_unsupported.end();) {
+            uint32_t page = it->first >> 12;
+            if (page >= first && page <= last) it = dbt_unsupported.erase(it); else ++it;
+        }
+    }
     std::string dbt_fallback_key(uint32_t pc, const char* reason) const {
         uint8_t bytes[4] = {};
         unsigned available = 0;
@@ -157,7 +172,100 @@ struct Cpu {
         reg[ESP] = saved_esp; eip = saved_eip; reg[ECX] = keep[ECX]; reg[EDX] = keep[EDX];
         return r;
     }
+    bool dispatch_seh(const Fault& fault) {
+        if (fault.kind != FaultKind::AccessViolation || seh_dispatching || !fs_base || mem.r32(fs_base) == 0xffffffffu) return false;
+        uint32_t scratch = reg[ESP] - 1024, record = scratch, context = scratch + 96, dispatcher = scratch + 820;
+        if (!mem.range_accessible(scratch, 856, PROT_W)) return false;
+        try {
+            for (uint32_t i = 0; i != 80; i += 4) mem.w32(record + i, 0);
+            mem.w32(record + 0, fault.kind == FaultKind::AccessViolation ? 0xC0000005u : 0xC000001Du);
+            mem.w32(record + 12, fault.eip); mem.w32(record + 16, 2);
+            mem.w32(record + 20, 0); mem.w32(record + 24, fault.addr);
+            for (uint32_t i = 0; i != 716; i += 4) mem.w32(context + i, 0);
+            mem.w32(context + 0, 0x00010007u);
+            mem.w32(context + 156, reg[EDI]); mem.w32(context + 160, reg[ESI]);
+            mem.w32(context + 164, reg[EBX]); mem.w32(context + 168, reg[EDX]);
+            mem.w32(context + 172, reg[ECX]); mem.w32(context + 176, reg[EAX]);
+            mem.w32(context + 180, reg[EBP]); mem.w32(context + 184, fault.eip);
+            mem.w32(context + 188, 0x1bu); mem.w32(context + 192, eflags);
+            mem.w32(context + 196, reg[ESP]); mem.w32(context + 200, 0x23u);
+            uint32_t frame = mem.r32(fs_base);
+            seh_dispatching = true;
+            for (unsigned count = 0; count != 1024 && frame != 0xffffffffu; ++count) {
+                uint32_t next = mem.r32(frame), handler = mem.r32(frame + 4);
+                if (!handler) break;
+                mem.w32(dispatcher + 0, fault.eip); mem.w32(dispatcher + 4, 0);
+                mem.w32(dispatcher + 12, frame); mem.w32(dispatcher + 20, context);
+                mem.w32(dispatcher + 24, handler);
+                uint32_t disposition = call(handler, {record, frame, context, dispatcher});
+                if (disposition == 0xffffffffu) {
+                    reg[EDI] = mem.r32(context + 156); reg[ESI] = mem.r32(context + 160);
+                    reg[EBX] = mem.r32(context + 164); reg[EDX] = mem.r32(context + 168);
+                    reg[ECX] = mem.r32(context + 172); reg[EAX] = mem.r32(context + 176);
+                    reg[EBP] = mem.r32(context + 180); eip = mem.r32(context + 184);
+                    eflags = mem.r32(context + 192); reg[ESP] = mem.r32(context + 196);
+                    seh_dispatching = false; return true;
+                }
+                if (disposition != 0) break;
+                frame = next;
+            }
+            seh_dispatching = false;
+        } catch (...) {
+            seh_dispatching = false;
+            throw;
+        }
+        return false;
+    }
     void run(uint32_t stop) {
+        for (;;) {
+            try { run_raw(stop); return; }
+            catch (const Fault& fault) { if (!dispatch_seh(fault)) throw; }
+        }
+    }
+    uint32_t execute_dbt_block(dbt::RuntimeBlock* block, dbt::RuntimeState& state) {
+#if !defined(_WIN32)
+        dbt::HostFaultContext host_fault;
+        host_fault.state = &state; host_fault.block = block;
+        host_fault.code_address = reinterpret_cast<uintptr_t>(block->code->address);
+        dbt::install_host_fault_signal();
+        dbt::active_host_fault = &host_fault;
+        if (sigsetjmp(host_fault.jump, 1) == 0) {
+            uint32_t next = block->code->operator()(state);
+            dbt::active_host_fault = nullptr;
+            return next;
+        }
+        dbt::active_host_fault = nullptr;
+        uint32_t fault_eip = dbt::recover_host_fault(host_fault);
+        std::memcpy(reg, state.reg, sizeof reg);
+        if (block->uses_xmm) std::memcpy(xmm.r, state.xmm, sizeof xmm.r);
+        fpu = state.fpu; eip = fault_eip; eflags = state.eflags;
+        mem.fault_eip = fault_eip;
+        uint32_t fault_addr = state.memory && host_fault.fault_address >= reinterpret_cast<uintptr_t>(state.memory)
+            ? uint32_t(host_fault.fault_address - reinterpret_cast<uintptr_t>(state.memory))
+            : uint32_t(host_fault.fault_address);
+        throw Fault(FaultKind::AccessViolation, fault_eip, fault_addr, "translated guest memory access fault");
+#elif defined(_MSC_VER)
+        dbt::HostFaultContext host_fault;
+        host_fault.state = &state; host_fault.block = block;
+        host_fault.code_address = reinterpret_cast<uintptr_t>(block->code->address);
+        uint32_t next = 0; bool faulted = false;
+        __try { next = block->code->operator()(state); }
+        __except (dbt::host_fault_filter(GetExceptionInformation(), host_fault)) { faulted = true; }
+        if (!faulted) return next;
+        uint32_t fault_eip = dbt::recover_host_fault(host_fault);
+        std::memcpy(reg, state.reg, sizeof reg);
+        if (block->uses_xmm) std::memcpy(xmm.r, state.xmm, sizeof xmm.r);
+        fpu = state.fpu; eip = fault_eip; eflags = state.eflags;
+        mem.fault_eip = fault_eip;
+        uint32_t fault_addr = state.memory && host_fault.fault_address >= reinterpret_cast<uintptr_t>(state.memory)
+            ? uint32_t(host_fault.fault_address - reinterpret_cast<uintptr_t>(state.memory))
+            : uint32_t(host_fault.fault_address);
+        throw Fault(FaultKind::AccessViolation, fault_eip, fault_addr, "translated guest memory access fault");
+#else
+        return block->code->operator()(state);
+#endif
+    }
+    void run_raw(uint32_t stop) {
         dbt::RuntimeBlock* chained = nullptr;
         while (!exited && eip != stop) {
             if (dbt_enabled && eip != thunks.sentinel() && !thunks.at(eip)) {
@@ -177,9 +285,31 @@ struct Cpu {
                     if (!block) return false;
                     for (const auto& page : block->page_generations)
                         if (mem.page_generation(page.first << 12) != page.second) return false;
+                    for (const auto& page : block->memory_generations)
+                        if (mem.page_generation(page.first << 12) != page.second) return false;
                     for (uint32_t i = 0; i < block->guest_length; ++i)
                         if (mem.fetch8(block->guest_pc + i) != block->guest_bytes[i]) return false;
                     return true;
+                };
+                auto translatable_range = [&](uint32_t addr, uint8_t size, uint8_t need) {
+                    uint64_t end = uint64_t(addr) + size;
+                    if (!size || end > Memory::ADDRESS_SPACE_SIZE) return false;
+                    uint32_t first = addr >> 12, last = uint32_t((end - 1) >> 12);
+                    for (uint32_t page = first;; ++page) {
+                        uint8_t protection = mem.protect_of(page << 12);
+                        if (!mem.mapped(page << 12) || !(protection & need) ||
+                            (need == PROT_W && !(protection & PROT_W))) return false;
+                        if (page == last) break;
+                    }
+                    return true;
+                };
+                auto holds_translated_code = [&](uint32_t page) {
+                    for (const auto& candidate : dbt_cache) {
+                        const auto& block = candidate.second;
+                        for (const auto& code_page : block.page_generations)
+                            if (code_page.first == page) return true;
+                    }
+                    return false;
                 };
                 if (block_ptr && !valid(block_ptr)) {
                     for (auto& candidate : dbt_cache) {
@@ -201,47 +331,58 @@ struct Cpu {
                 if (!block_ptr) {
                     try {
                         std::vector<uint8_t> bytes;
-                        size_t pc = 0; uint8_t last_opcode = 0; bool interpreter_boundary = false;
+                        std::vector<std::pair<uint32_t, uint32_t>> memory_generations;
+                        std::vector<uint32_t> store_pages;
+                        size_t pc = 0; uint8_t last_opcode = 0; bool interpreter_boundary = false, may_fault = false;
                         while (pc < 64) {
                             while (bytes.size() <= pc + 5) bytes.push_back(mem.fetch8(eip + uint32_t(bytes.size())));
-                            uint32_t ea = 0; bool memory = false, absolute_memory = false; uint8_t opcode = bytes[pc]; last_opcode = opcode;
+                            uint32_t ea = 0; bool memory = false, absolute_memory = false, memory_write = false;
+                            uint8_t memory_size = 0, opcode = bytes[pc]; last_opcode = opcode;
                             if (!pc && (opcode == 0x74 || opcode == 0x75)) throw std::runtime_error("dispatch standalone conditional branch in interpreter");
                             size_t len;
-                            try { len = dbt::runtime_instruction(bytes, pc, ea, memory, absolute_memory); }
+                            try { len = dbt::runtime_instruction(bytes, pc, ea, memory, absolute_memory, memory_write, memory_size); }
                             catch (const std::runtime_error&) { if (!pc) throw; interpreter_boundary = true; break; }
+                            if (memory) may_fault = true;
                             if (memory && !absolute_memory)
                                 throw std::runtime_error("dynamic guest memory access stays in the fault-precise interpreter");
-                            if (memory && absolute_memory &&
-                                (!mem.range_accessible(ea, 4, PROT_R) || !mem.range_accessible(ea, 4, PROT_W)))
-                                throw std::runtime_error("DBT absolute memory page is not RW");
                             if (memory) {
-                                size_t op_at = pc;
-                                while (op_at < bytes.size() && (bytes[op_at] == 0x66 || bytes[op_at] == 0xf2 || bytes[op_at] == 0xf3 || bytes[op_at] == 0x64 || bytes[op_at] == 0x65)) ++op_at;
-                                uint8_t op = bytes[op_at], group = op_at + 1 < bytes.size() ? uint8_t((bytes[op_at + 1] >> 3) & 7) : 0;
-                                bool writes = (op >= 0xd8 && op <= 0xdf) || op == 0x89 || op == 0x8f ||
-                                    ((op <= 0x3b) && ((op & 3) == 1) && op < 0x38) ||
-                                    ((op == 0x81 || op == 0x83) && group != 7) ||
-                                    ((op == 0xf6 || op == 0xf7) && (group == 2 || group == 3)) ||
-                                    ((op == 0xfe || op == 0xff) && group < 2);
-                                if (op == 0x0f && op_at + 2 < bytes.size()) {
-                                    uint8_t op2 = bytes[op_at + 1];
-                                    writes = op2 != 0x28 && op2 != 0x58 && op2 != 0x59 && op2 != 0x6e;
+                                uint8_t need = memory_write ? PROT_W : PROT_R;
+                                if (!translatable_range(ea, memory_size, need))
+                                    throw std::runtime_error(memory_write ? "DBT absolute store page is not writable" : "DBT absolute load page is not readable");
+                                uint64_t end = uint64_t(ea) + memory_size;
+                                uint32_t first = ea >> 12, last = uint32_t((end - 1) >> 12);
+                                for (uint32_t page = first;; ++page) {
+                                    if (memory_write && holds_translated_code(page))
+                                        throw std::runtime_error("DBT store targets translated code");
+                                    uint32_t generation = mem.page_generation(page << 12);
+                                    if (std::find_if(memory_generations.begin(), memory_generations.end(),
+                                                     [page](const auto& entry) { return entry.first == page; }) == memory_generations.end())
+                                        memory_generations.emplace_back(page, generation);
+                                    if (memory_write && std::find(store_pages.begin(), store_pages.end(), page) == store_pages.end())
+                                        store_pages.push_back(page);
+                                    if (page == last) break;
                                 }
-                                if (writes) throw std::runtime_error("guest memory store uses interpreter write barrier");
                             }
                             pc += len;
                             if (opcode == 0x74 || opcode == 0x75 || opcode == 0xC2 || opcode == 0xC3 || opcode == 0xE8) break;
                         }
                         if (!pc) throw std::runtime_error("DBT block has no supported instruction");
+                        uint32_t code_first_page = eip >> 12, code_last_page = (eip + uint32_t(pc) - 1) >> 12;
+                        for (uint32_t page : store_pages)
+                            if (page >= code_first_page && page <= code_last_page)
+                                throw std::runtime_error("DBT store targets translated code");
                         bytes.resize(pc); dbt::RuntimeBlock block;
                         block.guest_pc = eip; block.guest_length = uint32_t(pc); block.exit_opcode = last_opcode;
                         block.interpreter_boundary = interpreter_boundary; block.uses_xmm = dbt::runtime_uses_xmm(bytes); block.guest_bytes = bytes;
+                        block.may_fault = may_fault;
+                        block.memory_generations = std::move(memory_generations);
+                        block.store_pages = std::move(store_pages);
                         uint32_t first_page = eip >> 12, last_page = (eip + uint32_t(pc) - 1) >> 12;
                         for (uint32_t page = first_page;; ++page) {
                             block.page_generations.emplace_back(page, mem.page_generation(page << 12));
                             if (page == last_page) break;
                         }
-                        block.code = std::make_unique<dbt::Executable>(dbt::runtime_translate(bytes, eip));
+                        block.code = std::make_unique<dbt::Executable>(dbt::runtime_translate(bytes, eip, &block.instruction_map));
                         block_ptr = &dbt_cache.emplace(eip, std::move(block)).first->second;
                     } catch (const std::exception& ex) {
                         std::string key = dbt_fallback_key(eip, ex.what());
@@ -253,7 +394,7 @@ struct Cpu {
                 std::memcpy(state.reg, reg, sizeof reg);
                 if (block_ptr->uses_xmm) std::memcpy(state.xmm, xmm.r, sizeof state.xmm);
                 state.eip = eip; state.eflags = eflags; state.memory = mem.base(); state.fpu = fpu;
-                uint32_t next = block_ptr->code->operator()(state);
+                uint32_t next = block_ptr->may_fault ? execute_dbt_block(block_ptr, state) : block_ptr->code->operator()(state);
                 std::memcpy(reg, state.reg, sizeof reg);
                 if (block_ptr->uses_xmm) std::memcpy(xmm.r, state.xmm, sizeof xmm.r);
                 fpu = state.fpu;

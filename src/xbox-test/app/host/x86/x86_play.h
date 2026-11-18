@@ -392,6 +392,7 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         guest.add_module(name, img.base);
         map_thunk_page(mem, table);
         Cpu cpu(mem, table, dbt_requested);
+        guest.invalidate_dbt = [&cpu](uint32_t base, uint32_t size) { cpu.invalidate_dbt_range(base, size); };
         const char* dbt_env = std::getenv("X86_DBT");
         const bool dbt_env_requested = dbt_env && dbt_env[0] == '1' && dbt_env[1] == '\0';
         r.dbt_enabled = cpu.dbt_enabled;

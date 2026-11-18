@@ -228,7 +228,7 @@ echo "X86-DLL PASS: guest PE32 DLL chain (exe -> dll-a -> dll-b), the cycle dll-
 set +e
 negative_out=$("$tmp/x86-dll" "$tmp/fixture-dll-fail-id.exe" "$tmp"); negative_rc=$?
 set -e
-if [[ $negative_rc -ne 1 ]] || ! grep -q '^x86-dll: FIRST FAIL id=1 line=59$' <<<"$negative_out"; then
+if [[ $negative_rc -ne 1 ]] || ! grep -q '^x86-dll: FIRST FAIL id=1 line=62$' <<<"$negative_out"; then
   echo "X86-DLL FAIL: forced assertion diagnostic did not report id 1"; echo "$negative_out"; exit 1
 fi
-echo "X86-DLL DIAGNOSTIC PASS: forced check id=1 line=59 reported"
+echo "X86-DLL DIAGNOSTIC PASS: forced check id=1 line=62 reported"

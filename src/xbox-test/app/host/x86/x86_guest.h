@@ -206,6 +206,7 @@ struct Guest {
     std::map<std::string, Dll> dlls;
     std::vector<std::string> dll_order;
     DllSource dll_source;
+    std::function<void(uint32_t, uint32_t)> invalidate_dbt;
     // DllMain absolute entry addresses by module name, run by the Cpu after
     // the thunk page is mapped; the loader records them, run_dll_mains
     // dispatches. (Image::entry is already absolute: base + entry RVA.)
@@ -707,6 +708,28 @@ struct Guest {
             uint32_t base = dlls[name].image.base;
             c.call(e->second, {base, static_cast<uint32_t>(1 /*DLL_PROCESS_ATTACH*/), 0});
         }
+    }
+    bool free_library(Cpu& c, uint32_t h) {
+        if (h == image_base) return true;
+        for (auto it = dlls.begin(); it != dlls.end(); ++it) if (it->second.image.base == h) {
+            if (it->second.refs > 1) { --it->second.refs; return true; }
+            uint32_t base = it->second.image.base, size = it->second.image.size;
+            auto entry = dll_entries.find(it->first);
+            if (entry != dll_entries.end()) c.call(entry->second, {base, static_cast<uint32_t>(0 /*DLL_PROCESS_DETACH*/), 0});
+            if (invalidate_dbt) invalidate_dbt(base, size);
+            mem.unmap(base, size);
+            for (auto module = modules.begin(); module != modules.end();) {
+                if (module->second == base) module = modules.erase(module); else ++module;
+            }
+            dll_entries.erase(it->first);
+            attached.erase(it->first);
+            dll_order.erase(std::remove(dll_order.begin(), dll_order.end(), it->first), dll_order.end());
+            dlls.erase(it);
+            return true;
+        }
+        for (const auto& m : modules) if (m.second == h) return true;
+        set_last_error(126);
+        return false;
     }
     // GetProcAddress core: `name_ptr` is a string pointer or an ordinal in the
     // MAKEINTRESOURCE form (a value below 65536 is an ordinal, as Windows
@@ -1447,26 +1470,15 @@ inline void Guest::register_all() {
         for(const auto& dll:dlls) if(dll.second.image.base==module) return 1;
         set_last_error(6); return 0;
     });
-    // FreeLibrary: decrements the refcount of a module this surface loaded or
-    // tracks, and never unmaps: a real unload (refcount to zero -> unmap +
-    // DLL_PROCESS_DETACH) is not implemented, and the coverage matrix says so.
-    // An unknown handle fails with ERROR_MOD_NOT_FOUND, as Windows answers.
+    // FreeLibrary decrements a guest DLL's loader reference count. When the
+    // count reaches zero, drop the image mapping and invalidate DBT blocks whose
+    // guest code may have pointed into the unloaded image.
     reg.add("kernel32.dll", "FreeLibrary", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
-        uint32_t h = c.arg(0);
-        if (h == image_base) return 1;
-        for (auto& kv : dlls) if (kv.second.image.base == h) {
-            if (kv.second.refs > 1) kv.second.refs--;
-            return 1;
-        }
-        for (const auto& m : modules) if (m.second == h) return 1;
-        set_last_error(126);  // ERROR_MOD_NOT_FOUND
-        return 0; });
+        return free_library(c, c.arg(0)) ? 1u : 0u;
+    });
     reg.add("kernel32.dll", "FreeLibraryAndExitThread", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         if(!in_thread_body)throw Fault(FaultKind::Unsupported,c.eip,c.arg(0),"FreeLibraryAndExitThread: only guest worker-thread exit is modeled");
-        uint32_t h=c.arg(0);bool freed=h==image_base;
-        for(auto& kv:dlls)if(kv.second.image.base==h){if(kv.second.refs>1)--kv.second.refs;freed=true;break;}
-        if(!freed)for(const auto& m:modules)if(m.second==h){freed=true;break;}
-        if(!freed)set_last_error(126);
+        free_library(c, c.arg(0));
         thread_exit_code=c.arg(1);throw ThreadExit{};
     });
     reg.add("kernel32.dll", "DebugBreak", Conv::Stdcall, 0, [](Cpu& c) -> uint32_t {
