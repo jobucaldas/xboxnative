@@ -2005,6 +2005,51 @@ static void test_dbt_counter() {
     std::printf("X86-DBT PASS: integer kernel translated=%llu interpreted=%llu result=%08x\n",
                 (unsigned long long)translated.cpu.translated_blocks, (unsigned long long)translated.cpu.interpreted_blocks,
                 translated.cpu.reg[EAX]);
+    Machine store;
+    store.load({0xB8, 0x78, 0x56, 0x34, 0x12, 0x89, 0x05, 0x00, 0x00, 0x02, 0x00,
+                0x8B, 0x05, 0x00, 0x00, 0x02, 0x00});
+    store.cpu.dbt_enabled = store.mem.base() != nullptr;
+    EXPECT(store.run_to_end(17) && store.mem.r32(Machine::DATA) == 0x12345678 && store.cpu.reg[EAX] == 0x12345678,
+           "DBT writable absolute store did not round-trip");
+    EXPECT(store.cpu.translated_blocks > 0 && store.cpu.dbt_fallbacks.find("guest memory store") == store.cpu.dbt_fallbacks.end(),
+           "DBT writable absolute store fell back to the interpreter");
+    std::puts("X86-DBT PASS: writable absolute guest store translated and round-tripped");
+    Machine code_store;
+    code_store.load({0xB8, 0x78, 0x56, 0x34, 0x12, 0x89, 0x05, 0x40, 0x00, 0x01, 0x00});
+    code_store.mem.protect(Machine::CODE, Memory::PAGE, PROT_R | PROT_W | PROT_X);
+    code_store.cpu.dbt_enabled = code_store.mem.base() != nullptr;
+    EXPECT(code_store.run_to_end(11) && code_store.mem.r32(Machine::CODE + 0x40) == 0x12345678 &&
+               code_store.cpu.translated_blocks == 0 && !code_store.cpu.dbt_fallbacks.empty(),
+           "DBT store targeting translated code was not kept in the interpreter");
+    std::puts("X86-DBT PASS: stores targeting translated code fell back safely");
+    if (translated.mem.base()) {
+        Machine fault;
+        fault.load({0x8B, 0x05, 0x00, 0x00, 0x02, 0x00, 0x83, 0xC0, 1});
+        fault.cpu.dbt_enabled = true;
+        EXPECT(::mprotect(fault.mem.base() + Machine::DATA, Memory::PAGE, PROT_NONE) == 0,
+               "unable to create host-side translated fault");
+        bool recovered = false;
+        try { fault.cpu.run(0); }
+        catch (const Fault& f) {
+            recovered = f.kind == FaultKind::AccessViolation && f.eip == Machine::CODE &&
+                f.addr == Machine::DATA && fault.cpu.reg[EAX] == 0;
+        }
+        ::mprotect(fault.mem.base() + Machine::DATA, Memory::PAGE, PROT_READ | PROT_WRITE);
+        EXPECT(recovered, "translated load fault did not recover guest EIP/registers");
+        Machine store_fault;
+        store_fault.load({0xB8, 1, 0, 0, 0, 0x89, 0x05, 0x00, 0x00, 0x02, 0x00});
+        store_fault.cpu.dbt_enabled = true;
+        ::mprotect(store_fault.mem.base() + Machine::DATA, Memory::PAGE, PROT_NONE);
+        bool store_recovered = false;
+        try { store_fault.cpu.run(0); }
+        catch (const Fault& f) {
+            store_recovered = f.kind == FaultKind::AccessViolation && f.eip == Machine::CODE + 5 &&
+                f.addr == Machine::DATA && store_fault.cpu.reg[EAX] == 1;
+        }
+        ::mprotect(store_fault.mem.base() + Machine::DATA, Memory::PAGE, PROT_READ | PROT_WRITE);
+        EXPECT(store_recovered, "translated store fault did not recover guest EIP/registers");
+        if (recovered && store_recovered) std::puts("X86-DBT PASS: translated load/store faults recovered guest EIP and registers");
+    }
     if (!translated.mem.base()) return;
     int invalidation_before = failures;
     Machine patch;
@@ -2028,6 +2073,33 @@ static void test_dbt_counter() {
     EXPECT(second && patch.cpu.reg[EAX] == 4, "rewritten JIT buffer reused a stale DBT translation");
     std::puts(failures == invalidation_before ? "X86-DBT PASS: self-patching code and rewritten JIT buffer invalidated translated blocks" :
               "X86-DBT FAIL: self-patching code or rewritten JIT buffer reused a stale translation");
+}
+
+static void test_guest_seh_fault(bool dbt) {
+    Machine m;
+    m.load({0x8B, 0x05, 0x00, 0x00, 0x02, 0x00, 0xB8, 0, 0, 0, 0});
+    m.mem.map(0x40000, Memory::PAGE, PROT_R | PROT_W);
+    constexpr uint32_t frame = Machine::STACK + 0x100, handler = Machine::CODE + 0x100, recovery = Machine::CODE + 20;
+    m.mem.w32(0x40000, frame); m.mem.w32(frame, 0xffffffffu); m.mem.w32(frame + 4, handler);
+    const uint8_t recovery_code[] = {0xB8, 0x42, 0, 0, 0, 0xF4};
+    const uint8_t handler_code[] = {0x8B, 0x44, 0x24, 0x0C, 0xC7, 0x80, 0xB8, 0, 0, 0,
+                                    uint8_t(recovery), uint8_t(recovery >> 8), uint8_t(recovery >> 16), uint8_t(recovery >> 24),
+                                    0xB8, 0xFF, 0xFF, 0xFF, 0xFF, 0xC3};
+    m.mem.protect(Machine::CODE, Memory::PAGE, PROT_R | PROT_W);
+    m.mem.write_bytes(recovery, recovery_code, sizeof recovery_code);
+    m.mem.write_bytes(handler, handler_code, sizeof handler_code);
+    m.mem.protect(Machine::CODE, Memory::PAGE, PROT_R | PROT_X);
+    m.mem.protect(Machine::DATA, Memory::PAGE, PROT_W);
+    m.cpu.fs_base = 0x40000; m.cpu.dbt_enabled = dbt && m.mem.base() != nullptr;
+    bool recovered = false; uint32_t got_eip = 0, got_eax = 0, got_addr = 0; FaultKind got_kind = FaultKind::InvalidOpcode;
+    try { m.cpu.run(0); }
+    catch (const Fault& f) { got_kind = f.kind; got_eip = f.eip; got_addr = f.addr; got_eax = m.cpu.reg[EAX]; recovered = f.kind == FaultKind::Unsupported && f.eip == recovery + 5 && m.cpu.reg[EAX] == 0x42; }
+    EXPECT(recovered, "guest SEH %s did not recover: kind=%d eip=%08x addr=%08x eax=%08x", dbt ? "DBT" : "interpreter", int(got_kind), got_eip, got_addr, got_eax);
+}
+static void test_guest_seh() {
+    test_guest_seh_fault(false);
+    test_guest_seh_fault(true);
+    if (failures == 0) std::puts("X86-DBT PASS: guest SEH recovered translated and interpreted load faults");
 }
 
 struct RunResult { bool completed = false; uint32_t exit_code = 0xdead; std::string out; std::map<std::string, unsigned> calls; Image img; std::string fault; uint64_t executed = 0; };
@@ -2078,6 +2150,8 @@ int main(int argc, char** argv) {
     for (auto& s : suites) { int before = failures; s.fn(); if (failures == before) printf("%s\n", s.pass); else printf("X86-CORE FAIL: %s\n", s.name); }
     int dbt_before = failures; test_dbt_counter();
     if (failures != dbt_before) printf("X86-CORE FAIL: dbt-counter\n");
+    int seh_before = failures; test_guest_seh();
+    if (failures != seh_before) printf("X86-CORE FAIL: guest-seh\n");
     printf("(%llu hardware-compared cases)\n", (unsigned long long)alu_cases);
     int pe_before = failures; test_pe_layouts();
     if (failures == pe_before) printf("X86-CORE PASS: PE32 section alignment, page-rounded mapping, EOF zero-fill, DLL reservation, CLR rejection\n");
