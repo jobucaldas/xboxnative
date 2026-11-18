@@ -1001,7 +1001,12 @@ inline std::string Guest::format(FmtArgs a, const std::string& fmt) {
             if (neg) body = "-" + body;
             else if (plus && (conv == 'd' || conv == 'i')) body = "+" + body;
             else if (space && (conv == 'd' || conv == 'i')) body = " " + body;
-            out += guest_fmt::pad(body, width, left, zero && !left && prec < 0 ? '0' : ' ');
+            if (zero && !left && prec < 0 && width > int(body.size())) {
+                size_t prefix = !body.empty() && (body[0] == '-' || body[0] == '+' || body[0] == ' ') ? 1 : 0;
+                if (body.size() >= prefix + 2 && body[prefix] == '0' && (body[prefix + 1] == 'x' || body[prefix + 1] == 'X')) prefix += 2;
+                body.insert(prefix, size_t(width - int(body.size())), '0');
+            }
+            out += guest_fmt::pad(body, width, left, ' ');
             break; }
         case 'c': { char v = char(next()); out += guest_fmt::pad(std::string(1, v), width, left, ' '); break; }
         case 's': {

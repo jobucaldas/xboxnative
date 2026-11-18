@@ -11,6 +11,13 @@
 #include "../host/x86/x86_guest.h"
 #include "../host/x86/x86_file_guard.h"
 using namespace x86;
+static bool verify_printf_padding() {
+    Memory mem; mem.map(0x1000, 0x1000, PROT_R | PROT_W);
+    Host host; Registry reg; Guest guest(mem, host, reg);
+    mem.w32(0x1000, uint32_t(-42)); mem.w32(0x1004, 42);
+    uint32_t ap = 0x1000;
+    return guest.format_va("%05d|%#08x", ap) == "-0042|0x00002a";
+}
 static bool verify_critical_section_routes() {
     Memory mem; mem.map(0x1000, 0x20000, PROT_R | PROT_W); mem.map(TEB_ADDR, 0x1000, PROT_R | PROT_W);
     ThunkTable table; Host host; Registry reg; Guest guest(mem, host, reg); guest.register_all();
@@ -212,6 +219,7 @@ static std::vector<uint8_t> slurp(const char* path) {
     return std::vector<uint8_t>{std::istreambuf_iterator<char>(f), {}};
 }
 int main(int argc, char** argv) {
+    if (!verify_printf_padding()) { std::puts("X86-GUEST FAIL: printf sign and prefix zero padding"); return 1; }
     if (!verify_critical_section_routes()) { std::puts("X86-CRITICAL-SECTION FAIL: CRT forced debug-info initialization"); return 1; }
     if (!verify_display_routes()) return 1;
     if (!verify_xinput_routes()) { std::puts("X86-XINPUT FAIL: guest route, layout, ordinal, or fake-pad contract"); return 1; }
