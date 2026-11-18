@@ -236,7 +236,7 @@ inline Result download(Io& io,uint32_t appid,const Roots& roots,bool dry=false,K
             if(!io.inflate||!steam_client_package::zip_member(body,nullptr,io.inflate,data)||data.size()!=raw){decided(io,"fail (compressed copy did not inflate)",cloud,*path);++r.failed;continue;}
         } else data=std::move(body);
         if(io.sha1(data)!=file.sha){decided(io,"fail (SHA-1 differs from the changelist)",cloud,*path);++r.failed;continue;}
-        if(local){write_file(backup_path(roots,*path),*local);}
+        if(local&&!write_file(backup_path(roots,*path),*local)){decided(io,"fail (could not back up local copy)",cloud,*path);++r.failed;continue;}
         if(!write_file(*path,data)){decided(io,"fail (could not write)",cloud,*path);++r.failed;continue;}
         set_unix_time(*path,file.time);++r.downloaded;if(known)(*known)[cloud]=file.sha;
         decided(io,size!=raw?"downloaded (inflated)":"downloaded",cloud,*path);

@@ -140,6 +140,16 @@ int main() {
     assert(*read_file(dir/"remotenewer.json")=="theirs"&&*read_file(dir/"remotenewer.json.xboxnative-backup")=="stale");
     assert(*read_file(dir/"localnewer.json")=="mine"&&!fs::exists(dir/"gone.json"));
     assert(!fs::exists(root.parent_path()/"evil.json")&&server.downloads==2);
+    {   auto blocked=root.parent_path()/"steam-cloud-backup-failure";fs::remove_all(blocked);
+        Roots blockedRoots{{"WinAppDataLocalLow",blocked}};
+        auto save=blocked/"Ved"/"Megabonk"/"Saves"/"CloudDir"/"1"/"save.sav";
+        write_file(save,"local-only");set_unix_time(save,1600000000);fs::create_directory(save.string()+".xboxnative-backup");
+        Server newer;newer.add("save.sav","cloud-copy",1700002000);Io blockedIo=io;
+        blockedIo.service=[&](auto& m,auto& r,int& e,std::string& o){return newer.service(m,r,e,o);};
+        blockedIo.get=[&](bool,auto&,auto& path,auto&,std::string& body){body=newer.body(newer.files.at(path.substr(5)));return 200;};
+        auto failed=download(blockedIo,3405340,blockedRoots);
+        assert(failed.failed==1&&failed.downloaded==0&&read_file(save)&&*read_file(save)=="local-only");
+        fs::remove_all(blocked);}
     // Every file decision is logged with its cloud name and the local path.
     auto logged=[&](const std::string& action,const std::string& cloud,const fs::path& local){
         const std::string want="cloud: "+action+" "+cloud+" -> "+path_text(local);
