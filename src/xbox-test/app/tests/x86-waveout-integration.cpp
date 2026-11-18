@@ -141,6 +141,13 @@ using WaveOutClose = MMRESULT (WINAPI *)(HWAVEOUT);
 static HANDLE waveout_done_event;
 static WaveOutClose waveout_close;
 static volatile MMRESULT waveout_callback_close_result = MMSYSERR_ERROR;
+struct StressCallbackState { volatile LONG closed, late; };
+static void CALLBACK stress_waveout_done(HWAVEOUT, UINT message, DWORD_PTR instance, DWORD_PTR, DWORD_PTR) {
+    if (message == WOM_DONE) {
+        auto *state = reinterpret_cast<StressCallbackState *>(instance);
+        if (InterlockedCompareExchange(&state->closed, 0, 0)) InterlockedIncrement(&state->late);
+    }
+}
 static void CALLBACK close_from_waveout_done(HWAVEOUT handle, UINT message, DWORD_PTR, DWORD_PTR, DWORD_PTR) {
     if (message == WOM_DONE) {
         waveout_callback_close_result = waveout_close(handle);
@@ -180,7 +187,29 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "FAIL: close from WOM_DONE callback (result=%u)\n", waveout_callback_close_result); return 2;
     }
     CloseHandle(waveout_done_event);
-    std::puts("X64-WAVEOUT PASS: format query does not open a device; close from WOM_DONE callback");
+    constexpr unsigned stress_iterations = 100;
+    StressCallbackState stress[stress_iterations]{};
+    for (unsigned i = 0; i < stress_iterations; ++i) {
+        HWAVEOUT output = nullptr;
+        WAVEHDR header{};
+        char samples[1920]{};
+        header.lpData = samples; header.dwBufferLength = sizeof(samples);
+        if (open(&output, WAVE_MAPPER, &format, reinterpret_cast<DWORD_PTR>(&stress_waveout_done), reinterpret_cast<DWORD_PTR>(&stress[i]), CALLBACK_FUNCTION) != MMSYSERR_NOERROR ||
+            prepare(output, &header, sizeof(header)) != MMSYSERR_NOERROR ||
+            write(output, &header, sizeof(header)) != MMSYSERR_NOERROR) return 2;
+        MMRESULT result = WAVERR_STILLPLAYING;
+        for (unsigned attempt = 0; attempt < 15000 && result == WAVERR_STILLPLAYING; ++attempt) {
+            result = waveout_close(output);
+            if (result == WAVERR_STILLPLAYING) Sleep(1);
+        }
+        if (result != MMSYSERR_NOERROR) { std::fprintf(stderr, "FAIL: stress close=%u iteration=%u\n", result, i); return 2; }
+        InterlockedExchange(&stress[i].closed, 1);
+    }
+    Sleep(100);
+    for (unsigned i = 0; i < stress_iterations; ++i) if (stress[i].late) {
+        std::fprintf(stderr, "FAIL: callback after close iteration=%u\n", i); return 2;
+    }
+    std::puts("X64-WAVEOUT PASS: format query, callback close, and 100 close/completion races");
     std::ifstream f(argv[2], std::ios::binary);
     if (!f) { std::fprintf(stderr, "FAIL: cannot open guest fixture\n"); return 2; }
     std::vector<uint8_t> image{std::istreambuf_iterator<char>(f), {}};
