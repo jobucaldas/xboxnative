@@ -146,7 +146,7 @@ struct HandleStress {
     HWAVEOUT output;
     MMRESULT (WINAPI *position)(HWAVEOUT, LPMMTIME, UINT);
     MMRESULT (WINAPI *write)(HWAVEOUT, LPWAVEHDR, UINT);
-    volatile LONG *stop, *failed;
+    volatile LONG *stop, *failed, *progress;
     WAVEHDR header;
     char samples[1920];
 };
@@ -154,13 +154,17 @@ static DWORD WINAPI handle_stress_thread(void *arg) {
     auto *stress = static_cast<HandleStress *>(arg);
     while (!InterlockedCompareExchange(stress->stop, 0, 0)) {
         MMTIME time{}; time.wType = TIME_BYTES;
-        if (stress->position(stress->output, &time, sizeof(time)) != MMSYSERR_NOERROR) {
-            InterlockedExchange(stress->failed, 1); break;
+        MMRESULT positioned = stress->position(stress->output, &time, sizeof(time));
+        if (positioned == MMSYSERR_INVALHANDLE) break;
+        if (positioned != MMSYSERR_NOERROR) { InterlockedExchange(stress->failed, 1); break; }
+        if (stress->write) {
+            MMRESULT result = stress->write(stress->output, &stress->header, sizeof(stress->header));
+            if (result == MMSYSERR_INVALHANDLE) break;
+            if (result != MMSYSERR_NOERROR && result != WAVERR_STILLPLAYING) {
+                InterlockedExchange(stress->failed, 1); break;
+            }
         }
-        MMRESULT result = stress->write(stress->output, &stress->header, sizeof(stress->header));
-        if (result != MMSYSERR_NOERROR && result != WAVERR_STILLPLAYING) {
-            InterlockedExchange(stress->failed, 1); break;
-        }
+        InterlockedIncrement(stress->progress);
         Sleep(1);
     }
     return 0;
@@ -200,12 +204,12 @@ int main(int argc, char **argv) {
     format.wFormatTag = WAVE_FORMAT_PCM;
     HWAVEOUT live = nullptr;
     if (open(&live, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) return 2;
-    volatile LONG stop = 0, failed = 0;
+    volatile LONG stop = 0, failed = 0, progress = 0;
     HandleStress workers[2]{};
     HANDLE threads[2]{};
     for (unsigned i = 0; i < 2; ++i) {
         workers[i].output = live; workers[i].position = position; workers[i].write = write;
-        workers[i].stop = &stop; workers[i].failed = &failed;
+        workers[i].stop = &stop; workers[i].failed = &failed; workers[i].progress = &progress;
         workers[i].header.lpData = workers[i].samples; workers[i].header.dwBufferLength = sizeof(workers[i].samples);
         if (prepare(live, &workers[i].header, sizeof(workers[i].header)) != MMSYSERR_NOERROR) return 2;
         threads[i] = CreateThread(nullptr, 0, handle_stress_thread, &workers[i], 0, nullptr);
@@ -216,6 +220,7 @@ int main(int argc, char **argv) {
         if (open(&other, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR ||
             waveout_close(other) != MMSYSERR_NOERROR) { InterlockedExchange(&failed, 1); break; }
     }
+    if (!progress) InterlockedExchange(&failed, 1);
     InterlockedExchange(&stop, 1);
     if (WaitForMultipleObjects(2, threads, TRUE, 15000) != WAIT_OBJECT_0) return 2;
     for (auto thread : threads) CloseHandle(thread);
@@ -223,6 +228,17 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "FAIL: concurrent live handle lookups and open/close\n"); return 2;
     }
     std::puts("X64-WAVEOUT PASS: concurrent live handle lookups and 200 open/close operations");
+    HWAVEOUT same_handle = nullptr;
+    if (open(&same_handle, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) return 2;
+    volatile LONG same_stop = 0, same_failed = 0, same_progress = 0;
+    HandleStress same_worker{}; same_worker.output = same_handle; same_worker.position = position;
+    same_worker.stop = &same_stop; same_worker.failed = &same_failed; same_worker.progress = &same_progress;
+    HANDLE same_thread = CreateThread(nullptr, 0, handle_stress_thread, &same_worker, 0, nullptr);
+    if (!same_thread) return 2;
+    for (unsigned i = 0; i < 1000 && !same_progress; ++i) Sleep(1);
+    if (!same_progress || waveout_close(same_handle) != MMSYSERR_NOERROR ||
+        WaitForSingleObject(same_thread, 5000) != WAIT_OBJECT_0 || same_failed) return 2;
+    CloseHandle(same_thread);
     waveout_done_event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
     if (!waveout_done_event) { std::fprintf(stderr, "FAIL: create callback-close event\n"); return 2; }
     HWAVEOUT callback_output = nullptr;
