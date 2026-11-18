@@ -32,9 +32,13 @@ class LaunchGapLineTests(unittest.TestCase):
             'GAP: dll=user32.dll system=5 donor=0 stub=0 missing=0',
         ])
 
-    def test_pe32_fixture_exact_lines(self):
+    def test_pe32_fixture_oracle_lines(self):
         self.assertEqual(self.lines_for('gap.exe'), [
-            'GAP: dll=kernel32.dll system=2 donor=0 stub=0 missing=0',
+            'GAP: dll=api-ms-win-crt-heap-l1-1-0.dll system=0 donor=0 stub=0 missing=1',
+            'GAP: dll=kernel32.dll system=1 donor=0 stub=0 missing=0',
+            'GAP: dll=xinput1_3.dll system=0 donor=0 stub=0 missing=1',
+            'GAP: missing api-ms-win-crt-heap-l1-1-0.dll!_aligned_free',
+            'GAP: missing xinput1_3.dll!XInputGetState',
         ])
 
     def test_stub_and_missing_names_are_bounded(self):

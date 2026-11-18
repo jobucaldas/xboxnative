@@ -5,7 +5,9 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
+#include "host/x86/x86_play.h"
 namespace wine_gap {
 struct Meta { const char* dll; const char* symbol; bool win32u; };
 static const Meta catalog[] = {
@@ -15,6 +17,29 @@ struct Route { const char* dll; const char* kind; };
 static const Route routes[] = {
 #include "wine_gap_routes.h"
 };
+struct X86Routes {
+    x86::Memory memory;
+    x86::Host host;
+    x86::Registry registry;
+    x86::Guest guest;
+    X86Routes() : guest(memory, host, registry) { guest.register_all(); }
+};
+static bool x86_binds(const std::string& dll, const std::string& symbol) {
+    static X86Routes routes;
+    const std::string served = x86::apiset::served_by(dll, symbol);
+    std::string lookup = symbol;
+    if (symbol.size() > 1 && symbol[0] == '#') {
+        unsigned ordinal = unsigned(std::stoul(symbol.substr(1)));
+        auto it = routes.registry.ordinals.find({served, uint16_t(ordinal)});
+        if (it == routes.registry.ordinals.end()) return false;
+        lookup = it->second;
+    }
+    const auto key = std::make_pair(served, x86::Registry::key_sym(lookup));
+    return routes.registry.map.count(key) || routes.registry.data.count(key);
+}
+static bool x86_donor(const std::string& dll) {
+    return x86::is_vc110_vc120_dll(dll) || x86::is_d3dx9_donor_dll(dll);
+}
 struct Pe {
     std::vector<unsigned char> bytes;
     size_t sections = 0; unsigned count = 0; bool wide = false;
@@ -36,7 +61,7 @@ struct Pe {
         for (unsigned i=0; i<4096; ++i) { char c=(char)read(o+i,1); if (!c) return s; s+=c; }
         throw std::runtime_error("unterminated PE import name");
     }
-    void imports(std::set<std::pair<std::string,std::string>>& pairs) {
+    void imports(std::set<std::tuple<std::string,std::string,bool>>& pairs) {
         if (read(0,2)!=0x5a4d) throw std::runtime_error("not MZ");
         size_t nt=(size_t)read(0x3c,4); if(read(nt,4)!=0x4550) throw std::runtime_error("not PE");
         count=(unsigned)read(nt+6,2); size_t opt=nt+24; unsigned magic=(unsigned)read(opt,2);
@@ -65,7 +90,7 @@ struct Pe {
                     std::string sym;
                     if(t & (wide?(1ull<<63):(1ull<<31))) sym="#"+std::to_string(t&0xffff);
                     else { if(t>UINT32_MAX-2) throw std::runtime_error("PE name overflow"); sym=string((uint32_t)t+2); }
-                    pairs.emplace(dll,sym);
+                    pairs.emplace(dll,sym,!wide);
                 }
                 if(!terminated) throw std::runtime_error("unterminated PE thunk table");
             }
@@ -85,7 +110,7 @@ static void report(const std::wstring& root) {
     } while(FindNextFileW(h,&fd)); FindClose(h);
     try {
         if(files.empty()) throw std::runtime_error("no top-level PE files");
-        std::set<std::pair<std::string,std::string>> pairs;
+        std::set<std::tuple<std::string,std::string,bool>> pairs;
         for(auto& n:files) {
             FILE* f=_wfopen((root+L"\\"+n).c_str(),L"rb"); if(!f) throw std::runtime_error("cannot open PE");
             if(_fseeki64(f,0,SEEK_END)) { fclose(f); throw std::runtime_error("cannot size PE"); }
@@ -100,21 +125,33 @@ static void report(const std::wstring& root) {
         std::vector<std::string> gaps;
         constexpr size_t kGapLimit=64;
         for(auto& pair:pairs) {
+            const std::string& dll=std::get<0>(pair); const std::string& symbol=std::get<1>(pair);
+            const bool pe32=std::get<2>(pair);
             std::string route="unclassified";
-            for(auto& r:routes) if(pair.first==r.dll) { route=r.kind; break; }
-            if(!assets.count(pair.first) && route!="system") ++missing;
-            // The oracle's system, uwph and game routes all have an in-process
-            // provider; wine-pe is a donor, while unclassified is truly missing.
+            for(auto& r:routes) if(dll==r.dll) { route=r.kind; break; }
             size_t bucket=0;
-            if(assets.count(pair.first) || route=="system" || route=="uwph") bucket=0;
-            else if(route=="wine-pe") bucket=1;
-            else if(route=="stub") bucket=2;
-            else bucket=3;
-            ++by_dll[pair.first][bucket];
+            if(pe32) {
+                // PE32 runs through x86::Guest::register_all and its API-set
+                // resolver. Only that registry, actual game modules, and the
+                // interpreter's explicit donor allowlist can bind these imports.
+                if(x86_binds(dll,symbol) || assets.count(dll)) bucket=0;
+                else if(x86_donor(dll)) bucket=1;
+                else bucket=3;
+                if(bucket==3) ++missing;
+            } else {
+                if(!assets.count(dll) && route!="system") ++missing;
+                // The oracle's system, uwph and game routes all have an in-process
+                // provider; wine-pe is a donor, while unclassified is truly missing.
+                if(assets.count(dll) || route=="system" || route=="uwph") bucket=0;
+                else if(route=="wine-pe") bucket=1;
+                else if(route=="stub") bucket=2;
+                else bucket=3;
+            }
+            ++by_dll[dll][bucket];
             if((bucket==2 || bucket==3) && gaps.size()<kGapLimit)
-                gaps.push_back(std::string(bucket==2?"GAP: stub ":"GAP: missing ")+pair.first+"!"+pair.second);
+                gaps.push_back(std::string(bucket==2?"GAP: stub ":"GAP: missing ")+dll+"!"+symbol);
             bool found=false;
-            for(auto& row:catalog) if(pair.first==row.dll && pair.second==row.symbol) { found=true; win32u+=row.win32u; break; }
+            for(auto& row:catalog) if(dll==row.dll && symbol==row.symbol) { found=true; win32u+=row.win32u; break; }
             if(!found) ++unknown;
         }
         char b[256]; snprintf(b,sizeof b,"GAP: total=%zu missing=%u win32u=%u",pairs.size(),missing,win32u); lp_sink(b);
