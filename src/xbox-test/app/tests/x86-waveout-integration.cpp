@@ -18,6 +18,8 @@ static volatile LONG window_callback_count;
 static HANDLE function_done_event;
 static HWAVEOUT window_output;
 static WAVEHDR* callback_header;
+static WAVEHDR* reset_headers[3];
+static volatile LONG reset_done_count;
 static WAVEHDR* window_header;
 static LRESULT CALLBACK wave_window(HWND, UINT message, WPARAM output, LPARAM header) {
     if (message == WOM_DONE && output == reinterpret_cast<WPARAM>(window_output) &&
@@ -32,7 +34,11 @@ static void CALLBACK wave_done(HWAVEOUT handle, UINT message, DWORD_PTR instance
         InterlockedExchange(&open_before_return, 1);
     if (message == WOM_CLOSE && !InterlockedCompareExchange(&close_returned, 0, 0))
         InterlockedExchange(&close_before_return, 1);
-    if (message != WOM_DONE || header != reinterpret_cast<DWORD_PTR>(callback_header)) return;
+    if (message != WOM_DONE) return;
+    for (unsigned i = 0; i < 3; ++i) if (header == reinterpret_cast<DWORD_PTR>(reset_headers[i]) &&
+        (reset_headers[i]->dwFlags & WHDR_DONE) && !(reset_headers[i]->dwFlags & WHDR_INQUEUE))
+        InterlockedIncrement(&reset_done_count);
+    if (header != reinterpret_cast<DWORD_PTR>(callback_header)) return;
     if ((callback_header->dwFlags & WHDR_DONE) && !(callback_header->dwFlags & WHDR_INQUEUE))
         InterlockedExchange(&callback_order, 1);
     InterlockedIncrement(&callback_count);
@@ -81,6 +87,18 @@ int main() {
     if (!close_before_return) return 31;
     Sleep(100);
     if (callback_after_close) return 32;
+    HWAVEOUT reset_output = nullptr;
+    if (waveOutOpen(&reset_output, WAVE_MAPPER, &format, reinterpret_cast<DWORD_PTR>(&wave_done), 0x71a0u, CALLBACK_FUNCTION) != MMSYSERR_NOERROR) return 34;
+    WAVEHDR reset_buffer[3]{};
+    for (unsigned i = 0; i < 3; ++i) {
+        reset_buffer[i].lpData = samples; reset_buffer[i].dwBufferLength = sizeof(samples); reset_headers[i] = &reset_buffer[i];
+        if (waveOutPrepareHeader(reset_output, &reset_buffer[i], sizeof(WAVEHDR)) != MMSYSERR_NOERROR ||
+            waveOutWrite(reset_output, &reset_buffer[i], sizeof(WAVEHDR)) != MMSYSERR_NOERROR) return 35;
+    }
+    if (waveOutReset(reset_output) != MMSYSERR_NOERROR || reset_done_count != 3) return 36;
+    for (unsigned i = 0; i < 3; ++i) if (!(reset_buffer[i].dwFlags & WHDR_DONE) || (reset_buffer[i].dwFlags & WHDR_INQUEUE)) return 37;
+    for (unsigned i = 0; i < 3; ++i) if (waveOutUnprepareHeader(reset_output, &reset_buffer[i], sizeof(WAVEHDR)) != MMSYSERR_NOERROR) return 38;
+    if (waveOutClose(reset_output) != MMSYSERR_NOERROR) return 39;
     CloseHandle(function_done_event);
     HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
     if (!event) return 20;
