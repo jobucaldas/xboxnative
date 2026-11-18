@@ -244,7 +244,7 @@ struct Cpu {
             ? uint32_t(host_fault.fault_address - reinterpret_cast<uintptr_t>(state.memory))
             : uint32_t(host_fault.fault_address);
         throw Fault(FaultKind::AccessViolation, fault_eip, fault_addr, "translated guest memory access fault");
-#else
+#elif defined(_MSC_VER)
         dbt::HostFaultContext host_fault;
         host_fault.state = &state; host_fault.block = block;
         host_fault.code_address = reinterpret_cast<uintptr_t>(block->code->address);
@@ -261,6 +261,8 @@ struct Cpu {
             ? uint32_t(host_fault.fault_address - reinterpret_cast<uintptr_t>(state.memory))
             : uint32_t(host_fault.fault_address);
         throw Fault(FaultKind::AccessViolation, fault_eip, fault_addr, "translated guest memory access fault");
+#else
+        return block->code->operator()(state);
 #endif
     }
     void run_raw(uint32_t stop) {
@@ -331,7 +333,7 @@ struct Cpu {
                         std::vector<uint8_t> bytes;
                         std::vector<std::pair<uint32_t, uint32_t>> memory_generations;
                         std::vector<uint32_t> store_pages;
-                        size_t pc = 0; uint8_t last_opcode = 0; bool interpreter_boundary = false;
+                        size_t pc = 0; uint8_t last_opcode = 0; bool interpreter_boundary = false, may_fault = false;
                         while (pc < 64) {
                             while (bytes.size() <= pc + 5) bytes.push_back(mem.fetch8(eip + uint32_t(bytes.size())));
                             uint32_t ea = 0; bool memory = false, absolute_memory = false, memory_write = false;
@@ -340,6 +342,7 @@ struct Cpu {
                             size_t len;
                             try { len = dbt::runtime_instruction(bytes, pc, ea, memory, absolute_memory, memory_write, memory_size); }
                             catch (const std::runtime_error&) { if (!pc) throw; interpreter_boundary = true; break; }
+                            if (memory) may_fault = true;
                             if (memory && !absolute_memory)
                                 throw std::runtime_error("dynamic guest memory access stays in the fault-precise interpreter");
                             if (memory) {
@@ -371,6 +374,7 @@ struct Cpu {
                         bytes.resize(pc); dbt::RuntimeBlock block;
                         block.guest_pc = eip; block.guest_length = uint32_t(pc); block.exit_opcode = last_opcode;
                         block.interpreter_boundary = interpreter_boundary; block.uses_xmm = dbt::runtime_uses_xmm(bytes); block.guest_bytes = bytes;
+                        block.may_fault = may_fault;
                         block.memory_generations = std::move(memory_generations);
                         block.store_pages = std::move(store_pages);
                         uint32_t first_page = eip >> 12, last_page = (eip + uint32_t(pc) - 1) >> 12;
@@ -390,7 +394,7 @@ struct Cpu {
                 std::memcpy(state.reg, reg, sizeof reg);
                 if (block_ptr->uses_xmm) std::memcpy(state.xmm, xmm.r, sizeof state.xmm);
                 state.eip = eip; state.eflags = eflags; state.memory = mem.base(); state.fpu = fpu;
-                uint32_t next = execute_dbt_block(block_ptr, state);
+                uint32_t next = block_ptr->may_fault ? execute_dbt_block(block_ptr, state) : block_ptr->code->operator()(state);
                 std::memcpy(reg, state.reg, sizeof reg);
                 if (block_ptr->uses_xmm) std::memcpy(xmm.r, state.xmm, sizeof xmm.r);
                 fpu = state.fpu;
