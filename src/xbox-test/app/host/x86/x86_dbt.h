@@ -21,6 +21,8 @@
 #endif
 
 namespace x86::dbt {
+constexpr uint32_t runtime_page = 4096;
+constexpr uint8_t runtime_prot_r = 1, runtime_prot_w = 2, runtime_prot_x = 4, runtime_prot_cow = 8;
 struct Emitter {
     std::vector<uint8_t> bytes;
     void b(uint8_t v) { bytes.push_back(v); }
@@ -94,6 +96,8 @@ struct RuntimeState {
     uint8_t* memory = nullptr;
     uint32_t xmm[8][4] = {};
     Fpu fpu;
+    uint32_t fallback_eip = 0xffffffffu;
+    uint32_t exit_eip = 0xffffffffu;
 };
 static_assert(offsetof(RuntimeState, eip) == 32, "DBT state layout");
 static_assert(offsetof(RuntimeState, eflags) == 36, "DBT state layout");
@@ -376,6 +380,7 @@ inline void runtime_mov_reg_mem(Emitter& out, uint8_t dst, uint8_t base, uint8_t
     if ((base & 7) == 4) out.b(0x24);
     out.b(disp);
 }
+inline void runtime_mov_reg_mem64(Emitter& out, uint8_t dst, uint8_t base, uint8_t disp) { out.rex(dst, 0, base, true); out.b(0x8B); out.modrm(1, dst, base); if ((base & 7) == 4) out.b(0x24); out.b(disp); }
 inline void runtime_store_reg_mem(Emitter& out, uint8_t base, uint32_t disp, uint8_t src) {
     out.rex(src, 0, base); out.b(0x89); out.modrm(2, src, base);
     if ((base & 7) == 4) out.b(0x24);
@@ -471,6 +476,58 @@ inline void runtime_emit_memory_ea(Emitter& out, uint8_t op, uint8_t guest_reg, 
     runtime_emit_ea(out, a);
     uint8_t r = runtime_reg(guest_reg);
     out.rex(r, 0, 11); out.b(op); out.modrm(0, r, 3);
+}
+inline size_t runtime_jcc(Emitter& out, uint8_t condition) { out.b(0x0f); out.b(condition); size_t at = out.bytes.size(); out.d(0); return at; }
+inline size_t runtime_jmp(Emitter& out) { out.b(0xe9); size_t at = out.bytes.size(); out.d(0); return at; }
+inline void runtime_mov_reg_reg(Emitter& out, uint8_t dst, uint8_t src) { out.rex(src, 0, dst, true); out.b(0x89); out.modrm(3, src, dst); }
+inline void runtime_and_imm32(Emitter& out, uint8_t reg, uint32_t value) { out.rex(0, 0, reg); out.b(0x81); out.modrm(3, 4, reg); out.d(value); }
+inline void runtime_cmp_imm32(Emitter& out, uint8_t reg, uint32_t value) { out.rex(0, 0, reg); out.b(0x81); out.modrm(3, 7, reg); out.d(value); }
+inline void runtime_movzx_indexed(Emitter& out, uint8_t dst, uint8_t base, uint8_t index, uint8_t scale) { out.rex(dst, index, base); out.b(0x0f); out.b(0xb6); out.modrm(0, dst, 4); out.b(uint8_t((scale << 6) | ((index & 7) << 3) | (base & 7))); }
+inline void runtime_test_imm8(Emitter& out, uint8_t reg, uint8_t value) { out.rex(0, 0, reg); out.b(0xf6); out.modrm(3, 0, reg); out.b(value); }
+inline void runtime_or_indexed_imm8(Emitter& out, uint8_t base, uint8_t index, uint8_t value) { out.rex(0, index, base); out.b(0x80); out.modrm(0, 1, 4); out.b(uint8_t(((index & 7) << 3) | (base & 7))); out.b(value); }
+inline void runtime_store_reg_mem32(Emitter& out, uint8_t base, uint32_t disp, uint8_t src) { out.rex(src, 0, base); out.b(0x89); out.modrm(2, src, base); if ((base & 7) == 4) out.b(0x24); out.d(disp); }
+inline void runtime_inc_generation(Emitter& out, uint32_t* generation) {
+    if (!generation) return;
+    out.b(0x9c); runtime_mov_imm64(out, 14, reinterpret_cast<uintptr_t>(generation));
+    out.rex(0, 13, 14); out.b(0xff); out.modrm(0, 0, 4); out.b(uint8_t((2u << 6) | ((13u & 7u) << 3) | (14u & 7u)));
+    size_t nonzero = runtime_jcc(out, 0x85); out.rex(0, 13, 14); out.b(0xc7); out.modrm(0, 0, 4); out.b(uint8_t((2u << 6) | ((13u & 7u) << 3) | (14u & 7u))); out.d(1);
+    out.patch32(nonzero, int32_t(out.bytes.size() - (nonzero + 4))); out.b(0x9d);
+}
+inline void runtime_inc_generation_raw(Emitter& out, uint32_t* generation) {
+    runtime_mov_imm64(out, 14, reinterpret_cast<uintptr_t>(generation)); out.rex(0, 13, 14); out.b(0xff); out.modrm(0, 0, 4); out.b(uint8_t((2u << 6) | ((13u & 7u) << 3) | (14u & 7u)));
+    size_t nonzero = runtime_jcc(out, 0x85); out.rex(0, 13, 14); out.b(0xc7); out.modrm(0, 0, 4); out.b(uint8_t((2u << 6) | ((13u & 7u) << 3) | (14u & 7u))); out.d(1);
+    out.patch32(nonzero, int32_t(out.bytes.size() - (nonzero + 4)));
+}
+inline void runtime_emit_dynamic_store_tail(Emitter& out, const uint8_t* prot, uint32_t* generation,
+                                            uint32_t guest_eip, uint8_t state_slot, std::vector<size_t>& exit_jumps) {
+    if (!prot) return;
+    out.b(0x9c); runtime_test_imm8(out, 14, runtime_prot_x); size_t not_code = runtime_jcc(out, 0x84);
+    if (generation) runtime_inc_generation_raw(out, generation);
+    out.b(0x9d); runtime_mov_imm(out, 11, guest_eip);
+    runtime_mov_reg_mem64(out, 13, 4, state_slot); runtime_store_reg_mem32(out, 13, offsetof(RuntimeState, exit_eip), 11); exit_jumps.push_back(runtime_jmp(out));
+    size_t continue_label = out.bytes.size(); out.b(0x9d); out.patch32(not_code, int32_t(continue_label - (not_code + 4)));
+}
+inline void runtime_emit_generation_touch_page(Emitter& out, const uint8_t* prot, uint32_t* generation, uint32_t page) {
+    if (!generation || (prot && !(prot[page] & runtime_prot_x))) return;
+    runtime_mov_imm(out, 13, page); runtime_inc_generation(out, generation);
+}
+inline void runtime_emit_memory_check(Emitter& out, const uint8_t* prot, uint8_t need, uint8_t size,
+                                      uint32_t guest_eip, uint8_t state_slot, std::vector<size_t>& fallback_jumps) {
+    if (!prot) return;
+    out.b(0x9c); runtime_mov_reg_reg(out, 13, 11); runtime_regop(out, 0x29, 13, 12); runtime_mov_reg_reg(out, 14, 13);
+    runtime_and_imm32(out, 14, runtime_page - 1); runtime_cmp_imm32(out, 14, runtime_page - size); size_t cross_page = runtime_jcc(out, 0x87);
+    out.rex(0, 0, 13); out.b(0xc1); out.modrm(3, 5, 13); out.b(12); runtime_movzx_indexed(out, 14, 15, 13, 0);
+    size_t permission_fail = 0, cow_valid = 0, cow_fail = 0;
+    if (need == runtime_prot_w) {
+        runtime_test_imm8(out, 14, runtime_prot_w); cow_valid = runtime_jcc(out, 0x85); runtime_test_imm8(out, 14, runtime_prot_cow); cow_fail = runtime_jcc(out, 0x84); runtime_or_indexed_imm8(out, 15, 13, runtime_prot_w);
+    } else { runtime_test_imm8(out, 14, need); permission_fail = runtime_jcc(out, 0x84); }
+    size_t skip_fallback = runtime_jmp(out), invalid = out.bytes.size(); out.b(0x9d); runtime_mov_imm(out, 11, guest_eip);
+    runtime_mov_reg_mem64(out, 13, 4, state_slot); runtime_store_reg_mem32(out, 13, offsetof(RuntimeState, fallback_eip), 11);
+    size_t to_epilogue = runtime_jmp(out); fallback_jumps.push_back(to_epilogue); size_t valid = out.bytes.size(); out.b(0x9d);
+    out.patch32(cross_page, int32_t(invalid - (cross_page + 4))); if (permission_fail) out.patch32(permission_fail, int32_t(invalid - (permission_fail + 4)));
+    if (cow_fail) out.patch32(cow_fail, int32_t(invalid - (cow_fail + 4)));
+    out.patch32(skip_fallback, int32_t(valid - (skip_fallback + 4)));
+    if (cow_valid) out.patch32(cow_valid, int32_t(valid - (cow_valid + 4)));
 }
 inline void runtime_emit_guest_stack_address(Emitter& out) {
     out.rex(11, runtime_reg(4), 12, true); out.b(0x8D); out.modrm(0, 11, 4); out.b(uint8_t(((runtime_reg(4) & 7) << 3) | (12 & 7)));
@@ -597,9 +654,9 @@ inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
         uint8_t m = runtime_u8(b, p); unsigned group = (m >> 3) & 7;
         bool unary = op == 0xF6 || op == 0xF7 || op == 0xFE || op == 0xFF;
         if ((m >> 6) != 3) {
-            RuntimeAddress a = runtime_address(b, p, m); memory_operand = true;
+            RuntimeAddress a = runtime_address(b, p, m); memory_operand = op != 0x8d;
             if (runtime_fixed_absolute(a)) { memory_ea = a.displacement; absolute_memory = true; }
-            memory_size = (op == 0xf6 || op == 0xfe) ? 1 : 4;
+            memory_size = ((op <= 0x3b && !(op & 1)) || op == 0x84 || op == 0xf6 || op == 0xfe) ? 1 : 4;
             memory_write = op == 0x89 ||
                 ((op <= 0x3b) && ((op & 7) == 1) && op != 0x39) ||
                 ((op == 0x81 || op == 0x83) && group != 7) ||
@@ -644,14 +701,17 @@ inline bool runtime_uses_xmm(const std::vector<uint8_t>& guest) {
 }
 
 inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest, uint32_t guest_pc,
-                                               std::vector<InstructionMap>* instruction_map = nullptr) {
+                                               std::vector<InstructionMap>* instruction_map = nullptr,
+                                               const uint8_t* prot = nullptr, uint32_t* generation = nullptr) {
     Emitter out;
     bool uses_xmm = runtime_uses_xmm(guest);
 #if defined(_WIN32)
     out.b(0x48); out.b(0x89); out.b(0xCF); // Windows x64 passes State* in RCX; use RDI internally.
 #endif
-    out.b(0x57); out.b(0x41); out.b(0x54); out.b(0x41); out.b(0x55); out.b(0x41); out.b(0x56); // save state*, preserve R12-R14
+    out.b(0x57); out.b(0x41); out.b(0x54); out.b(0x41); out.b(0x55); out.b(0x41); out.b(0x56);
+    if (prot) out.b(0x41), out.b(0x57); // save state*, preserve R12-R15 when metadata checks are enabled
     out.b(0x48); out.b(0x83); out.b(0xEC); out.b(uses_xmm ? 40 : 8);
+    if (prot) runtime_mov_imm64(out, 15, reinterpret_cast<uintptr_t>(prot));
     if (uses_xmm) {
         runtime_store_xmm_mem(out, 4, 0, 6); runtime_store_xmm_mem(out, 4, 16, 7);
     }
@@ -662,7 +722,8 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
         for (unsigned i = 0; i != 8; ++i) runtime_load_xmm_mem(out, uint8_t(i), 7, 48 + i * 16);
     for (unsigned i : {0u, 1u, 2u, 3u, 5u, 6u, 7u, 4u}) runtime_mov_reg_mem(out, runtime_reg(i), 7, uint8_t(i * 4));
     size_t p = 0;
-    const uint8_t state_slot = uses_xmm ? 64 : 32;
+    const uint8_t state_slot = uint8_t((uses_xmm ? 64 : 32) + (prot ? 8 : 0));
+    std::vector<size_t> fallback_jumps, exit_jumps;
     bool branch_terminated = false;
     while (p < guest.size()) {
         size_t begin = p; uint8_t prefix = 0;
@@ -676,11 +737,31 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
                 (*instruction_map)[map_index].memory_size = size;
             }
         };
+        auto check_memory = [&](bool dynamic, bool write, uint8_t size) {
+            if (dynamic) runtime_emit_memory_check(out, prot, write ? runtime_prot_w : runtime_prot_r, size,
+                                                    guest_pc + uint32_t(begin), state_slot, fallback_jumps);
+        };
+        auto touch_static = [&](const RuntimeAddress& a, uint8_t size) {
+            if (!generation || !runtime_fixed_absolute(a)) return;
+            uint32_t first = a.displacement >> 12;
+            uint32_t last = (a.displacement + size - 1) >> 12;
+            for (uint32_t page = first;; ++page) {
+                runtime_emit_generation_touch_page(out, prot, generation, page);
+                if (page == last) break;
+            }
+        };
+        auto exit_dynamic_store = [&](bool dynamic, bool write) {
+            if (dynamic && write) runtime_emit_dynamic_store_tail(out, prot, generation,
+                                                                   guest_pc + uint32_t(p), state_slot, exit_jumps);
+        };
         if (prefix) {
             if (prefix != 0x66 || op != 0x0F) throw std::runtime_error("unsupported DBT prefix");
             uint8_t op2 = runtime_u8(guest, p), m = runtime_u8(guest, p);
             bool memory = (m >> 6) != 3; RuntimeAddress a;
-            if (memory) { a = runtime_address(guest, p, m); runtime_emit_ea(out, a); mark_memory(op2 == 0x7f, 16); }
+            if (memory) {
+                a = runtime_address(guest, p, m); runtime_emit_ea(out, a);
+                check_memory(!runtime_fixed_absolute(a), op2 == 0x7f, 16); mark_memory(op2 == 0x7f, 16);
+            }
             uint8_t dst = uint8_t((m >> 3) & 7), src = uint8_t(m & 7);
             if (op2 == 0x6E) runtime_sse(out, 0x66, op2, dst, runtime_reg(src), memory);
             else {
@@ -689,11 +770,19 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
                 runtime_sse(out, 0x66, op2, dst, src, memory);
             }
             if (op2 == 0x70 || op2 == 0x72 || op2 == 0x73) out.b(runtime_u8(guest, p));
+            if (memory && op2 == 0x7f) {
+                if (runtime_fixed_absolute(a)) touch_static(a, 16);
+                exit_dynamic_store(!runtime_fixed_absolute(a), true);
+            }
         } else if (op >= 0xD8 && op <= 0xDF) {
             uint32_t memory_ea = 0; bool memory_operand = false, absolute_memory = false, memory_write = false; uint8_t memory_size = 0;
             const size_t len = runtime_instruction(guest, begin, memory_ea, memory_operand, absolute_memory, memory_write, memory_size);
             p = begin + len;
-            if (memory_operand) mark_memory(memory_write, memory_size);
+            RuntimeAddress a;
+            if (memory_operand) {
+                size_t address_p = begin + 2; a = runtime_address(guest, address_p, guest[begin + 1]);
+                runtime_emit_ea(out, a); check_memory(!absolute_memory, memory_write, memory_size); mark_memory(memory_write, memory_size);
+            }
             out.rex(11, 0, 4, true); out.b(0x8B);
             if (state_slot < 128) { out.modrm(1, 11, 4); out.b(0x24); out.b(state_slot); }
             else { out.modrm(2, 11, 4); out.b(0x24); out.d(state_slot); }
@@ -709,6 +798,10 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
             runtime_mov_imm64(out, 6, encoded); runtime_mov_imm(out, 2, uint32_t(len));
 #endif
             out.b(0xFF); out.b(0xD0); // call RAX
+            if (memory_operand && memory_write) {
+                if (absolute_memory) touch_static(a, memory_size);
+                exit_dynamic_store(!absolute_memory, true);
+            }
             out.rex(11, 0, 4, true); out.b(0x8B);
             if (state_slot < 128) { out.modrm(1, 11, 4); out.b(0x24); out.b(state_slot); }
             else { out.modrm(2, 11, 4); out.b(0x24); out.d(state_slot); }
@@ -744,13 +837,24 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
             uint8_t op2 = runtime_u8(guest, p), m = runtime_u8(guest, p);
             if (op2 == 0x28 || op2 == 0x29 || op2 == 0x58 || op2 == 0x59) {
                 RuntimeAddress a; bool memory = (m >> 6) != 3;
-                if (memory) { a = runtime_address(guest, p, m); runtime_emit_ea(out, a); mark_memory(op2 == 0x29, 16); }
+                if (memory) {
+                    a = runtime_address(guest, p, m); runtime_emit_ea(out, a);
+                    check_memory(!runtime_fixed_absolute(a), op2 == 0x29, 16); mark_memory(op2 == 0x29, 16);
+                }
                 runtime_sse(out, 0, op2, uint8_t((m >> 3) & 7), uint8_t(m & 7), memory);
+                if (memory && op2 == 0x29) {
+                    if (runtime_fixed_absolute(a)) touch_static(a, 16);
+                    exit_dynamic_store(!runtime_fixed_absolute(a), true);
+                }
             } else {
                 RuntimeAddress a; bool memory = (m >> 6) != 3;
                 uint8_t dst = runtime_reg((m >> 3) & 7), src = memory ? 11 : runtime_reg(m & 7);
                 bool high_byte = !memory && (op2 == 0xB6 || op2 == 0xBE) && (m & 7) >= 4;
-                if (memory) { a = runtime_address(guest, p, m); runtime_emit_ea(out, a); }
+                if (memory) {
+                    a = runtime_address(guest, p, m); runtime_emit_ea(out, a);
+                    check_memory(!runtime_fixed_absolute(a), false, (op2 == 0xb6 || op2 == 0xbe) ? 1 : 2);
+                    mark_memory(false, (op2 == 0xb6 || op2 == 0xbe) ? 1 : 2);
+                }
                 if (high_byte) {
                     uint8_t source = runtime_reg((m & 7) - 4);
                     out.b(0x9C); out.rex(11, 0, source); out.b(0x8B); out.modrm(3, 11, source);
@@ -772,22 +876,36 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
                 uint8_t dst = runtime_reg(regfield); out.rex(dst, 0, 11); out.b(0x8B); out.modrm(3, dst, 3);
             } else if (op == 0x8B || op == 0x89) {
                 uint8_t reg = runtime_reg(regfield), rm = memory ? 11 : runtime_reg(rmfield);
-                if (memory) runtime_emit_ea(out, a);
+                if (memory) {
+                    runtime_emit_ea(out, a); check_memory(!runtime_fixed_absolute(a), op == 0x89, 4); mark_memory(op == 0x89, 4);
+                }
                 out.rex(reg, 0, rm);
                 out.b(op); out.modrm(memory ? 0 : 3, reg, rm);
+                if (memory && op == 0x89) {
+                    if (runtime_fixed_absolute(a)) touch_static(a, 4);
+                    exit_dynamic_store(!runtime_fixed_absolute(a), true);
+                }
             } else if (op == 0x84 || op == 0x85) {
                 if (op == 0x84) throw std::runtime_error("byte test unsupported");
                 uint8_t rm = memory ? 11 : runtime_reg(rmfield), reg = runtime_reg(regfield);
-                if (memory) runtime_emit_ea(out, a);
+                if (memory) {
+                    runtime_emit_ea(out, a); check_memory(!runtime_fixed_absolute(a), false, op == 0x84 ? 1 : 4); mark_memory(false, op == 0x84 ? 1 : 4);
+                }
                 out.rex(reg, 0, rm); out.b(op); out.modrm(memory ? 0 : 3, reg, rm);
                 out.b(0x9C); out.b(0x41); out.b(0x5B); out.b(0x41); out.b(0x81); out.b(0xE3); out.d(~uint32_t(0x10)); out.b(0x41); out.b(0x53); out.b(0x9D);
             } else {
                 uint8_t base = uint8_t(op & 0xFC);
                 uint8_t reg = runtime_reg(regfield), rm = memory ? 11 : runtime_reg(rmfield);
-                if (memory) runtime_emit_ea(out, a);
+                if (memory) {
+                    runtime_emit_ea(out, a); check_memory(!runtime_fixed_absolute(a), (op & 7) == 1, 4); mark_memory((op & 7) == 1, 4);
+                }
                 uint8_t native_op = op;
                 out.rex(reg, 0, rm);
                 out.b(native_op); out.modrm(memory ? 0 : 3, reg, rm);
+                if (memory && (op & 7) == 1) {
+                    if (runtime_fixed_absolute(a)) touch_static(a, 4);
+                    exit_dynamic_store(!runtime_fixed_absolute(a), true);
+                }
                 if (base == 0x08 || base == 0x20 || base == 0x30) {
                     out.b(0x9C); out.b(0x41); out.b(0x5B); out.b(0x41); out.b(0x81); out.b(0xE3); out.d(~uint32_t(0x10)); out.b(0x41); out.b(0x53); out.b(0x9D);
                 }
@@ -796,6 +914,7 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
             uint8_t m = runtime_u8(guest, p), group = uint8_t((m >> 3) & 7); bool memory = (m >> 6) != 3;
             RuntimeAddress a; if (memory) a = runtime_address(guest, p, m);
             if (op == 0xFF && (group == 2 || group == 4 || group == 6)) {
+                if (memory && !runtime_fixed_absolute(a)) throw std::runtime_error("dynamic indirect control transfer needs the interpreter");
                 if (memory) { runtime_emit_ea(out, a); out.rex(13, 0, 11); out.b(0x8B); out.modrm(0, 13, 3); }
                 else { uint8_t src = runtime_reg(m & 7); out.rex(13, 0, src); out.b(0x8B); out.modrm(3, 13, src); }
                 if (group == 6) { runtime_emit_guest_stack_adjust(out, true); runtime_emit_guest_stack_address(out); out.rex(13, 0, 11); out.b(0x89); out.modrm(0, 13, 3); }
@@ -803,11 +922,20 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
                 else { uint32_t return_eip = guest_pc + uint32_t(p); runtime_emit_guest_stack_adjust(out, true); runtime_emit_guest_stack_address(out); out.rex(0, 0, 11); out.b(0xC7); out.modrm(0, 0, 3); out.d(return_eip); out.rex(11, 0, 13); out.b(0x8B); out.modrm(3, 11, 13); branch_terminated = true; break; }
             } else {
             uint8_t rm = memory ? 11 : runtime_reg(m & 7);
-            if (memory) runtime_emit_ea(out, a);
-            out.rex(0, 0, rm); out.b(op); out.modrm(memory ? 0 : 3, group, rm);
+            bool memory_write = (op == 0x81 || op == 0x83) ? group != 7 :
+                (op == 0xf6 || op == 0xf7) ? (group == 2 || group == 3) :
+                (op == 0xfe || op == 0xff) && group < 2;
+            if (memory) {
+                runtime_emit_ea(out, a); check_memory(!runtime_fixed_absolute(a), memory_write, (op == 0xf6 || op == 0xfe) ? 1 : 4);
             }
+            out.rex(0, 0, rm); out.b(op); out.modrm(memory ? 0 : 3, group, rm);
             if (op == 0x81 || (op == 0xF7 && group == 0)) out.d(runtime_u32(guest, p));
             else if (op == 0x83 || (op == 0xF6 && group == 0)) out.b(runtime_u8(guest, p));
+            if (memory && memory_write) {
+                if (runtime_fixed_absolute(a)) touch_static(a, (op == 0xf6 || op == 0xfe) ? 1 : 4);
+                exit_dynamic_store(!runtime_fixed_absolute(a), true);
+            }
+            }
             if (op == 0x81 || op == 0x83) {
                 if (group == 1 || group == 4 || group == 6) {
                     out.b(0x9C); out.b(0x41); out.b(0x5B); out.b(0x41); out.b(0x81); out.b(0xE3); out.d(~uint32_t(0x10)); out.b(0x41); out.b(0x53); out.b(0x9D);
@@ -834,6 +962,11 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
         if (p <= begin) throw std::runtime_error("DBT decoder made no progress");
     }
     if (!branch_terminated) runtime_mov_imm(out, 11, guest_pc + uint32_t(p));
+    const size_t epilogue = out.bytes.size();
+    for (size_t jump : fallback_jumps)
+        out.patch32(jump, int32_t(epilogue - (jump + 4)));
+    for (size_t jump : exit_jumps)
+        out.patch32(jump, int32_t(epilogue - (jump + 4)));
     uint8_t eip_slot = uses_xmm ? 32 : 0;
     out.b(0x44); out.b(0x89); out.b(0x5C); out.b(0x24); out.b(eip_slot);
     out.b(0x4C); out.b(0x8B); out.b(0x5C); out.b(0x24); out.b(state_slot);
@@ -845,7 +978,9 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
     if (uses_xmm) {
         runtime_load_xmm_mem(out, 6, 4, 0); runtime_load_xmm_mem(out, 7, 4, 16);
     }
-    out.b(0x48); out.b(0x83); out.b(0xC4); out.b(uses_xmm ? 40 : 8); out.b(0x41); out.b(0x5E); out.b(0x41); out.b(0x5D); out.b(0x41); out.b(0x5C); out.b(0x5F);
+    out.b(0x48); out.b(0x83); out.b(0xC4); out.b(uses_xmm ? 40 : 8);
+    if (prot) { out.b(0x41); out.b(0x5F); }
+    out.b(0x41); out.b(0x5E); out.b(0x41); out.b(0x5D); out.b(0x41); out.b(0x5C); out.b(0x5F);
     out.b(0x8B); out.b(0x47); out.b(32); out.b(0xC3);
     return out.bytes;
 }

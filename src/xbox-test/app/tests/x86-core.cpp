@@ -2014,6 +2014,23 @@ static void test_dbt_counter() {
     EXPECT(store.cpu.translated_blocks > 0 && store.cpu.dbt_fallbacks.find("guest memory store") == store.cpu.dbt_fallbacks.end(),
            "DBT writable absolute store fell back to the interpreter");
     std::puts("X86-DBT PASS: writable absolute guest store translated and round-tripped");
+    const std::initializer_list<uint8_t> dynamic_code = {
+        0xB8, 0, 0, 2, 0, 0xB9, 0x78, 0x56, 0x34, 0x12,
+        0x89, 0x08, 0x8B, 0x00};
+    Machine dynamic;
+    dynamic.load(dynamic_code); dynamic.cpu.dbt_enabled = dynamic.mem.base() != nullptr;
+    EXPECT(dynamic.run_to_end(dynamic_code.size()) && dynamic.mem.r32(Machine::DATA) == 0x12345678 &&
+               dynamic.cpu.reg[EAX] == 0x12345678 && dynamic.cpu.translated_blocks > 0,
+           "DBT dynamic guest load/store did not translate and round-trip");
+    EXPECT(dynamic.cpu.dbt_fallbacks.find("guest memory store") == dynamic.cpu.dbt_fallbacks.end(),
+           "DBT dynamic writable store fell back to the interpreter");
+    Machine cow;
+    cow.load(dynamic_code); cow.mem.protect(Machine::DATA, Memory::PAGE, PROT_R | PROT_COW);
+    cow.cpu.dbt_enabled = cow.mem.base() != nullptr;
+    EXPECT(cow.run_to_end(dynamic_code.size()) && cow.mem.r32(Machine::DATA) == 0x12345678 &&
+               (cow.mem.protect_of(Machine::DATA) & PROT_W),
+           "DBT dynamic COW store did not promote and write the page");
+    std::puts("X86-DBT PASS: dynamic guest load/store and COW promotion translated safely");
     Machine code_store;
     code_store.load({0xB8, 0x78, 0x56, 0x34, 0x12, 0x89, 0x05, 0x40, 0x00, 0x01, 0x00});
     code_store.mem.protect(Machine::CODE, Memory::PAGE, PROT_R | PROT_W | PROT_X);
