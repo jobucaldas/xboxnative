@@ -393,6 +393,8 @@ jobs:
         run: bash src/xbox-test/app/tests/x86-gl.sh
       - name: "x86 gdi32 routes and host-backed user32 windows"
         run: bash src/xbox-test/app/tests/x86-gdi32.sh
+      - name: "x86 remaining user32 import contracts"
+        run: bash src/xbox-test/app/tests/x86-user32.sh
       - name: "x86 MSVC CRT startup window mode"
         run: g++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/x86-crt-startup.cpp -o "$RUNNER_TEMP/x86-crt-startup" && "$RUNNER_TEMP/x86-crt-startup"
       - name: "x86 D3DX9 math registrations and semantics"
