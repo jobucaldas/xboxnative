@@ -74,6 +74,35 @@ def summary(rows):
         sum(int(r['n_win32u']) > 0 for r in rows))
 
 
+def gap_lines(rows, limit=64):
+    """Format oracle route counts and bounded missing/stub import names."""
+    counts = {}
+    gaps = []
+    unresolved = 0
+    for row in rows:
+        route = row['console_route']
+        if route in ('system', 'uwph', 'game'):
+            bucket = 'system'
+        elif route in ('wine-pe', 'donor'):
+            bucket = 'donor'
+        elif route == 'stub':
+            bucket = 'stub'
+        else:
+            bucket = 'missing'
+        per_dll = counts.setdefault(row['dll'], {'system': 0, 'donor': 0, 'stub': 0, 'missing': 0})
+        per_dll[bucket] += 1
+        if bucket in ('missing', 'stub'):
+            unresolved += 1
+            if len(gaps) < limit:
+                gaps.append('GAP: {} {}!{}'.format(bucket, row['dll'], row['symbol']))
+    lines = ['GAP: dll={} system={} donor={} stub={} missing={}'.format(
+        dll, c['system'], c['donor'], c['stub'], c['missing']) for dll, c in sorted(counts.items())]
+    lines.extend(gaps)
+    if unresolved > len(gaps):
+        lines.append('GAP: missing-or-stubbed truncated after {} names total={}'.format(limit, unresolved))
+    return lines
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('directory', type=Path)
@@ -114,6 +143,8 @@ def main():
                 for (dll, symbol), win in sorted(existing.items()):
                     f.write('{%s, %s, %d},\n' % (json.dumps(dll), json.dumps(symbol), win))
         print(summary(rows))
+        for line in gap_lines(rows):
+            print(line)
         return 0
     except (OSError, ValueError, KeyError, TypeError, ImportError) as exc:
         print(f'wine_gap: {exc}', file=sys.stderr)

@@ -1,7 +1,11 @@
 // Static Wine diagnostic only. Reads PE32/PE32+ imports without mapping or execution.
 #pragma once
+#include <array>
+#include <map>
 #include <set>
 #include <stdexcept>
+#include <string>
+#include <vector>
 namespace wine_gap {
 struct Meta { const char* dll; const char* symbol; bool win32u; };
 static const Meta catalog[] = {
@@ -91,15 +95,39 @@ static void report(const std::wstring& root) {
             if(got!=p.bytes.size()) throw std::runtime_error("short PE read"); p.imports(pairs);
         }
         unsigned missing=0, win32u=0, unknown=0;
+        using Counts = std::array<size_t, 4>;
+        std::map<std::string, Counts> by_dll;
+        std::vector<std::string> gaps;
+        constexpr size_t kGapLimit=64;
         for(auto& pair:pairs) {
             std::string route="unclassified";
             for(auto& r:routes) if(pair.first==r.dll) { route=r.kind; break; }
             if(!assets.count(pair.first) && route!="system") ++missing;
+            // The oracle's system, uwph and game routes all have an in-process
+            // provider; wine-pe is a donor, while unclassified is truly missing.
+            size_t bucket=0;
+            if(assets.count(pair.first) || route=="system" || route=="uwph") bucket=0;
+            else if(route=="wine-pe") bucket=1;
+            else if(route=="stub") bucket=2;
+            else bucket=3;
+            ++by_dll[pair.first][bucket];
+            if((bucket==2 || bucket==3) && gaps.size()<kGapLimit)
+                gaps.push_back(std::string(bucket==2?"GAP: stub ":"GAP: missing ")+pair.first+"!"+pair.second);
             bool found=false;
             for(auto& row:catalog) if(pair.first==row.dll && pair.second==row.symbol) { found=true; win32u+=row.win32u; break; }
             if(!found) ++unknown;
         }
-        char b[200]; snprintf(b,sizeof b,"GAP: total=%zu missing=%u win32u=%u",pairs.size(),missing,win32u); lp_sink(b);
+        char b[256]; snprintf(b,sizeof b,"GAP: total=%zu missing=%u win32u=%u",pairs.size(),missing,win32u); lp_sink(b);
+        for(auto& item:by_dll) {
+            snprintf(b,sizeof b,"GAP: dll=%s system=%zu donor=%zu stub=%zu missing=%zu",item.first.c_str(),
+                item.second[0],item.second[1],item.second[2],item.second[3]); lp_sink(b);
+        }
+        for(auto& line:gaps) lp_sink(line.c_str());
+        size_t unresolved=0;
+        for(auto& item:by_dll) unresolved+=item.second[2]+item.second[3];
+        if(unresolved>gaps.size()) {
+            snprintf(b,sizeof b,"GAP: missing-or-stubbed truncated after %zu names total=%zu",kGapLimit,unresolved); lp_sink(b);
+        }
         snprintf(b,sizeof b,"GAP-METADATA: unknown=%u Wine source heuristic; win32u excludes unknowns; routes are policy, not console export evidence",unknown); lp_sink(b);
     } catch(const std::exception& e) { std::string s="GAP-ERROR: "; s+=e.what(); lp_sink(s.c_str()); }
 }
