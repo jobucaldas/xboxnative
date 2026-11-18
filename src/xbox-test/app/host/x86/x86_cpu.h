@@ -1037,8 +1037,15 @@ struct Cpu {
     }
     // bt/bts/btr/btc r/m, r|imm. `action`: 0 test, 1 set, 2 reset, 3 complement.
     void bt(const Rm& r, unsigned regno, unsigned n, unsigned action) {
-        uint32_t bit = getreg(regno, n) & (8 * n - 1);
-        bt_bit(r, bit, n, action);
+        uint32_t index = getreg(regno, n);
+        Rm target = r;
+        if (!r.isreg) {
+            int32_t signed_index = n == 2 ? int16_t(index) : int32_t(index);
+            int32_t words = signed_index / int32_t(8 * n);
+            if (signed_index < 0 && signed_index % int32_t(8 * n)) --words;
+            target.ea += uint32_t(words * int32_t(n));
+        }
+        bt_bit(target, index & (8 * n - 1), n, action);
     }
     // bt/bts/btr/btc r/m, imm8: the bit index is the immediate itself.
     void bt_imm(const Rm& r, uint32_t bit, unsigned n, unsigned action) {
