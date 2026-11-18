@@ -1037,8 +1037,15 @@ struct Cpu {
     }
     // bt/bts/btr/btc r/m, r|imm. `action`: 0 test, 1 set, 2 reset, 3 complement.
     void bt(const Rm& r, unsigned regno, unsigned n, unsigned action) {
-        uint32_t bit = getreg(regno, n) & (8 * n - 1);
-        bt_bit(r, bit, n, action);
+        uint32_t index = getreg(regno, n);
+        Rm target = r;
+        if (!r.isreg) {
+            int32_t signed_index = n == 2 ? int16_t(index) : int32_t(index);
+            int32_t words = signed_index / int32_t(8 * n);
+            if (signed_index < 0 && signed_index % int32_t(8 * n)) --words;
+            target.ea += uint32_t(words * int32_t(n));
+        }
+        bt_bit(target, index & (8 * n - 1), n, action);
     }
     // bt/bts/btr/btc r/m, imm8: the bit index is the immediate itself.
     void bt_imm(const Rm& r, uint32_t bit, unsigned n, unsigned action) {
@@ -1052,6 +1059,7 @@ struct Cpu {
         wr(r, n, v);
     }
     void shld(const Rm& r, unsigned regno, unsigned n, unsigned cnt, bool right) {
+        cnt &= 31;
         if (!cnt) return;
         unsigned bits = 8 * n; uint32_t m = mask(n);
         uint64_t dst = rd(r, n) & m, src = getreg(regno, n) & m;
@@ -1103,11 +1111,15 @@ struct Cpu {
         if (op == 0x10 || op == 0x11) {  // movss/movsd/movups/movupd
             if (op == 0x11) {
                 uint32_t v[4]; sse_reg(modrm_reg, v);
-                if (ss) mem.w32(r.ea + seg, v[0]);
+                if ((ss || sd) && r.isreg) {
+                    uint32_t keep[4]; sse_reg(r.regno, keep);
+                    keep[0] = v[0]; if (sd) keep[1] = v[1];
+                    sse_write_reg(r.regno, keep);
+                } else if (ss) mem.w32(r.ea + seg, v[0]);
                 else if (sd) mem.w64(r.ea + seg, uint64_t(v[1]) << 32 | v[0]);
                 else sse_write(r, v);
             } else if (ss || sd) {
-                uint32_t keep[4]; sse_reg(modrm_reg, keep);
+                uint32_t keep[4] = {}; if (r.isreg) sse_reg(modrm_reg, keep);
                 if (ss) keep[0] = sse_rd32(r);
                 else { uint64_t q = sse_rd64(r); keep[0] = uint32_t(q); keep[1] = uint32_t(q >> 32); }
                 sse_write_reg(modrm_reg, keep);

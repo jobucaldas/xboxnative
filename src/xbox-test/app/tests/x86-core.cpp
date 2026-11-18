@@ -765,6 +765,34 @@ static void test_sse_regressions() {
         }
     };
     bt_case(0); bt_case(4); bt_case(31);
+    // Register bit indices address a signed bit string for memory operands.
+    for (int32_t bit : {-33, -1, 0, 31, 32, 65}) {
+        uint32_t native[5] = {0x12345678u, 0x87654321u, 0xabcdef01u, 0x80000001u, 0x10203040u};
+        for (unsigned i = 0; i < 5; ++i) m.mem.w32(Machine::DATA + i * 4, native[i]);
+        unsigned char cf;
+        asm volatile("btsl %2, %1; setc %0" : "=q"(cf), "+m"(native[2]) : "r"(bit) : "cc", "memory");
+        exec(m, {0x0f, 0xab, 0x0d, 0x08, 0x00, 0x02, 0x00}, 0, uint32_t(bit), 0, false);
+        EXPECT(bool(m.cpu.eflags & CF) == bool(cf), "bts memory bit %d carry", bit);
+        for (unsigned i = 0; i < 5; ++i)
+            EXPECT(m.mem.r32(Machine::DATA + i * 4) == native[i], "bts memory bit %d word %u", bit, i);
+    }
+    // Immediate double shifts mask the count to five bits, just like CL forms.
+    for (uint8_t op : {uint8_t(0xa4), uint8_t(0xac)}) {
+        exec(m, {0x0f, op, 0xc8, 32}, 0x12345678u, 0xabcdef01u, 0, false);
+        EXPECT(m.cpu.reg[EAX] == 0x12345678u, "double shift opcode %02x count 32 must be a no-op", op);
+    }
+    // Scalar memory loads clear upper lanes; register stores preserve them.
+    for (uint8_t prefix : {uint8_t(0xf3), uint8_t(0xf2)}) {
+        const uint32_t old[4] = {1, 2, 3, 4}, source[4] = {5, 6, 7, 8};
+        m.mem.w128(Machine::DATA, source);
+        memcpy(m.cpu.xmm.r[0], old, sizeof(old));
+        exec(m, {prefix, 0x0f, 0x10, 0x05, 0x00, 0x00, 0x02, 0x00}, 0, 0, 0, false);
+        EXPECT(m.cpu.xmm.r[0][0] == 5 && m.cpu.xmm.r[0][1] == (prefix == 0xf2 ? 6u : 0u) && m.cpu.xmm.r[0][2] == 0 && m.cpu.xmm.r[0][3] == 0, "scalar memory load prefix %02x", prefix);
+        memcpy(m.cpu.xmm.r[0], source, sizeof(source));
+        memcpy(m.cpu.xmm.r[1], old, sizeof(old));
+        exec(m, {prefix, 0x0f, 0x11, 0xc1}, 0, 0, 0, false);
+        EXPECT(m.cpu.xmm.r[1][0] == 5 && m.cpu.xmm.r[1][1] == (prefix == 0xf2 ? 6u : 2u) && m.cpu.xmm.r[1][2] == 3 && m.cpu.xmm.r[1][3] == 4, "scalar register store prefix %02x", prefix);
+    }
     // movd xmm, eax zeroes the upper 96 bits; movd eax, xmm reads the low dword.
     run({0x66, 0x0F, 0x6E, 0xC0});  // movd xmm0, eax (xmm0 preset below)
     m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu}.data());
