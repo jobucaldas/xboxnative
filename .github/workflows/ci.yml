@@ -129,7 +129,7 @@ jobs:
           fi
   launcher-uwp-compile:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/apt-install
@@ -393,6 +393,10 @@ jobs:
         run: bash src/xbox-test/app/tests/x86-gl.sh
       - name: "x86 gdi32 routes and host-backed user32 windows"
         run: bash src/xbox-test/app/tests/x86-gdi32.sh
+      - name: "x86 remaining user32 import contracts"
+        run: bash src/xbox-test/app/tests/x86-user32.sh
+      - name: "x86 Winsock and XInput ordinal contracts"
+        run: bash src/xbox-test/app/tests/x86-socket-input.sh
       - name: "x86 MSVC CRT startup window mode"
         run: g++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/x86-crt-startup.cpp -o "$RUNNER_TEMP/x86-crt-startup" && "$RUNNER_TEMP/x86-crt-startup"
       - name: "x86 D3DX9 math registrations and semantics"
@@ -417,6 +421,8 @@ jobs:
         run: bash src/xbox-test/app/tests/x86-tls.sh
       - name: "x86 COM thunks (guest proxies, vtable stubs, refcounts, fault-by-name against a mock host object)"
         run: bash src/xbox-test/app/tests/x86-com.sh
+      - name: "x86 oleaut32 BSTR/VARIANT and COM proxy route contracts"
+        run: bash src/xbox-test/app/tests/x86-oleaut.sh
       - name: "x86 launch route (i686 fixture through the launcher's PE32 entry point and result mapping)"
         run: bash src/xbox-test/app/tests/x86-launch-route.sh
       - name: "x86 API-set imports (api-ms-win-crt/core names bind by the documented policy; unmapped names stay unresolved; UCRT arity table)"

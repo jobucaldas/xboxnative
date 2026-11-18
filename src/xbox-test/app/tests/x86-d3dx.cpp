@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #if defined(D3DX_DECLARATIONS_ONLY)
+#include <d3dx9core.h>
+#include <d3dx9effect.h>
 #include <d3dx9math.h>
+#include <d3dx9tex.h>
 #include <shlwapi.h>
 #include <type_traits>
 using LookAt = D3DXMATRIX* (WINAPI*)(D3DXMATRIX*,const D3DXVECTOR3*,const D3DXVECTOR3*,const D3DXVECTOR3*);
@@ -15,6 +18,14 @@ using Transform = D3DXVECTOR4* (WINAPI*)(D3DXVECTOR4*,const D3DXVECTOR3*,const D
 using TransformArray = D3DXVECTOR4* (WINAPI*)(D3DXVECTOR4*,UINT,const D3DXVECTOR3*,UINT,const D3DXMATRIX*,UINT);
 using Coord = D3DXVECTOR3* (WINAPI*)(D3DXVECTOR3*,const D3DXVECTOR3*,const D3DXMATRIX*);
 using CoordArray = D3DXVECTOR3* (WINAPI*)(D3DXVECTOR3*,UINT,const D3DXVECTOR3*,UINT,const D3DXMATRIX*,UINT);
+using CreateEffect = HRESULT (WINAPI*)(IDirect3DDevice9*,const void*,UINT,const D3DXMACRO*,ID3DXInclude*,DWORD,ID3DXEffectPool*,ID3DXEffect**,ID3DXBuffer**);
+using D3DXFontCreate = HRESULT (WINAPI*)(IDirect3DDevice9*,INT,UINT,UINT,UINT,WINBOOL,DWORD,DWORD,DWORD,DWORD,const char*,ID3DXFont**);
+using CreateTexture = HRESULT (WINAPI*)(IDirect3DDevice9*,UINT,UINT,UINT,DWORD,D3DFORMAT,D3DPOOL,IDirect3DTexture9**);
+using CreateTextureMemoryEx = HRESULT (WINAPI*)(IDirect3DDevice9*,const void*,UINT,UINT,UINT,UINT,DWORD,D3DFORMAT,D3DPOOL,DWORD,DWORD,D3DCOLOR,D3DXIMAGE_INFO*,PALETTEENTRY*,IDirect3DTexture9**);
+using FillTexture = HRESULT (WINAPI*)(IDirect3DTexture9*,LPD3DXFILL2D,void*);
+using ImageInfo = HRESULT (WINAPI*)(const void*,UINT,D3DXIMAGE_INFO*);
+using LoadSurface = HRESULT (WINAPI*)(IDirect3DSurface9*,const PALETTEENTRY*,const RECT*,IDirect3DSurface9*,const PALETTEENTRY*,const RECT*,DWORD,D3DCOLOR);
+using SaveSurface = HRESULT (WINAPI*)(const char*,D3DXIMAGE_FILEFORMAT,IDirect3DSurface9*,const PALETTEENTRY*,const RECT*);
 using FindFile = LPSTR (WINAPI*)(LPCSTR);
 using RemoveExtension = void (WINAPI*)(LPSTR);
 using RemoveFileSpec = BOOL (WINAPI*)(LPSTR);
@@ -30,6 +41,14 @@ static_assert(std::is_same<decltype(&D3DXMatrixScaling),Scale>::value && std::is
 static_assert(std::is_same<decltype(&D3DXVec3Normalize),Normalize>::value);
 static_assert(std::is_same<decltype(&D3DXVec3Transform),Transform>::value && std::is_same<decltype(&D3DXVec3TransformArray),TransformArray>::value);
 static_assert(std::is_same<decltype(&D3DXVec3TransformCoord),Coord>::value && std::is_same<decltype(&D3DXVec3TransformCoordArray),CoordArray>::value);
+static_assert(std::is_same<decltype(&D3DXCreateEffect),CreateEffect>::value);
+static_assert(std::is_same<decltype(&D3DXCreateFontA),D3DXFontCreate>::value);
+static_assert(std::is_same<decltype(&D3DXCreateTexture),CreateTexture>::value);
+static_assert(std::is_same<decltype(&D3DXCreateTextureFromFileInMemoryEx),CreateTextureMemoryEx>::value);
+static_assert(std::is_same<decltype(&D3DXFillTexture),FillTexture>::value);
+static_assert(std::is_same<decltype(&D3DXGetImageInfoFromFileInMemory),ImageInfo>::value);
+static_assert(std::is_same<decltype(&D3DXLoadSurfaceFromSurface),LoadSurface>::value);
+static_assert(std::is_same<decltype(&D3DXSaveSurfaceToFileA),SaveSurface>::value);
 #else
 #include <cstdio>
 #include <cstring>
@@ -61,6 +80,17 @@ int main(){
  CHECK(call("d3dxmatrixrotationy",{0x7500,bits(1.57079632679f)})==0x7500);CHECK(near(value(mem,0x7508),-1)&&near(value(mem,0x7520),1));
  CHECK(call("d3dxmatrixrotationyawpitchroll",{0x7600,0,bits(0),bits(1.57079632679f)})==0x7600);CHECK(near(value(mem,0x7604),1)&&near(value(mem,0x7610),-1));
  CHECK(call("d3dxmatrixmultiply",{0x7700,0x3000,0x6000})==0x7700);CHECK(near(value(mem,0x7700),1)&&near(value(mem,0x7730),6)&&near(value(mem,0x7734),8)&&near(value(mem,0x7738),10));
+ const char* gapApis[]={"d3dxcreateeffect","d3dxcreatefonta","d3dxcreatetexture","d3dxcreatetexturefromfileinmemoryex","d3dxfilltexture","d3dxgetimageinfofromfileinmemory","d3dxloadsurfacefromsurface","d3dxsavesurfacetofilea"};
+ const unsigned gapArity[]={9,12,7,15,3,3,8,5};
+ for(unsigned i=0;i<8;++i){auto it=reg.map.find({"d3dx9_36.dll",gapApis[i]});CHECK(it!=reg.map.end());if(it!=reg.map.end()){CHECK(it->second.conv==Conv::Stdcall);CHECK(it->second.argc==gapArity[i]);}}
+ CHECK(call("d3dxcreateeffect",{0,0,0,0,0,0,0,0,0})==0x80004001u);
+ CHECK(call("d3dxcreatefonta",{0,0,0,0,0,0,0,0,0,0,0,0})==0x80004001u);
+ CHECK(call("d3dxcreatetexture",{0,0,0,0,0,0,0})==0x80004001u);
+ CHECK(call("d3dxcreatetexturefromfileinmemoryex",{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0})==0x80004001u);
+ CHECK(call("d3dxfilltexture",{0,0,0})==0x80004001u);
+ CHECK(call("d3dxgetimageinfofromfileinmemory",{0,0,0})==0x80004001u);
+ CHECK(call("d3dxloadsurfacefromsurface",{0,0,0,0,0,0,0,0})==0x80004001u);
+ CHECK(call("d3dxsavesurfacetofilea",{0,0,0,0,0})==0x80004001u);
  const char* pathApis[]={"pathfindfilenamea","pathremoveextensiona","pathremovefilespeca"};const unsigned pathArity[]={1,1,1};for(unsigned i=0;i<3;++i){auto it=reg.map.find({"shlwapi.dll",pathApis[i]});CHECK(it!=reg.map.end());if(it!=reg.map.end()){CHECK(it->second.conv==Conv::Stdcall);CHECK(it->second.argc==pathArity[i]);}}
  auto pathCall=[&](const char* n,uint32_t p){mem.w32(cpu.reg[ESP]+4,p);return reg.map.at({"shlwapi.dll",n}).fn(cpu);};
  // Microsoft Learn contracts are cited beside the registrations in x86_guest.h.

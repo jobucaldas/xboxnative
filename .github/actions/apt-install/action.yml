@@ -11,12 +11,26 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    - id: package-hash
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        echo "hash=$(printf '%s\n' "$PACKAGES" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+    - id: apt-cache-restore
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/apt-archives
+        key: apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.package-hash.outputs.hash }}
     - shell: bash
       env:
         PACKAGES: ${{ inputs.packages }}
       run: |
         set -euo pipefail
 
+        archive_cache="$RUNNER_TEMP/apt-archives"
+        mkdir -p "$archive_cache/partial"
         sources_file=/etc/apt/sources.list.d/ubuntu.sources
         mirrors_file=/etc/apt/apt-mirrors.txt
 
@@ -24,6 +38,27 @@ runs:
         probe() {
             curl -fsSI --max-time 8 "$1/dists/${SUITE:-resolute}/InRelease" \
                 -o /dev/null
+        }
+
+        # GitHub-hosted runners have several Ubuntu mirrors nearby. Download a
+        # small Release file from each and select the fastest one.
+        fastest_github_mirror() {
+            local best='' best_speed=0 candidate speed
+            for candidate in \
+                https://azure.archive.ubuntu.com/ubuntu \
+                https://archive.ubuntu.com/ubuntu \
+                https://us-east-2.ec2.archive.ubuntu.com/ubuntu; do
+                speed=$(curl -fsSL --connect-timeout 3 --max-time 10 \
+                    -o /dev/null -w '%{speed_download}' \
+                    "$candidate/dists/${SUITE:-resolute}/Release") || continue
+                echo "apt-install: $candidate ${speed} B/s" >&2
+                if awk -v speed="$speed" -v best="$best_speed" \
+                    'BEGIN { exit !(speed > best) }'; then
+                    best=$candidate
+                    best_speed=$speed
+                fi
+            done
+            [ -n "$best" ] && printf '%s' "$best"
         }
 
         # Rewrite apt's mirror+file failover list to keep only the mirrors
@@ -52,18 +87,32 @@ runs:
             https://ubuntu.mirror.constant.com
         '
 
-        if [ -f "$mirrors_file" ] && [ -s "$mirrors_file" ] && \
+        picked=''
+        if [ "${GITHUB_ACTIONS:-}" = true ]; then
+            picked=$(fastest_github_mirror || true)
+        fi
+        if [ -n "$picked" ]; then
+            echo "apt-install: using fastest GitHub Actions mirror $picked" >&2
+            printf '%s\tpriority:1\n' "$picked" \
+                | sudo tee "$mirrors_file" >/dev/null
+            sudo sed -i "s|^URIs:.*|URIs: $picked|" "$sources_file"
+        elif [ -f "$mirrors_file" ] && [ -s "$mirrors_file" ] && \
             ! grep -qE $'\t' "$mirrors_file"; then
             echo "apt-install: $mirrors_file missing or malformed; leaving as is" >&2
         elif prune_mirrors && ! [ -s "$mirrors_file" ]; then
             echo "apt-install: all configured mirrors unreachable; probing fallbacks" >&2
             picked=''
-            for candidate in $fallbacks; do
-                if probe "$candidate"; then
-                    picked=$candidate
-                    break
-                fi
-            done
+            if [ "${GITHUB_ACTIONS:-}" = true ]; then
+                picked=$(fastest_github_mirror || true)
+            fi
+            if [ -z "$picked" ]; then
+                for candidate in $fallbacks; do
+                    if probe "$candidate"; then
+                        picked=$candidate
+                        break
+                    fi
+                done
+            fi
             if [ -z "$picked" ]; then
                 echo "apt-install: no Ubuntu mirror reachable; failing fast" >&2
                 exit 1
@@ -75,13 +124,21 @@ runs:
         fi
 
         export DEBIAN_FRONTEND=noninteractive
-        # The mirror list is pruned to live URIs above, so the runner's own
-        # retry=1 failover pacing is enough; a high Acquire::Retries here
-        # would spend all attempts on a dead URI before failing over.
+        # The mirror list is pruned to live URIs above, so one retry with a
+        # short timeout is enough to fail over instead of trickling.
         sudo apt-get update \
             -o Acquire::https::Timeout=20 \
-            -o Acquire::http::Timeout=20
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::Retries=1
         sudo apt-get install -y \
+            -o Dir::Cache::archives="$archive_cache" \
             -o Acquire::https::Timeout=20 \
             -o Acquire::http::Timeout=20 \
+            -o Acquire::Retries=1 \
             $PACKAGES
+        sudo chown -R "$(id -u):$(id -g)" "$archive_cache"
+    - if: steps.apt-cache-restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/apt-archives
+        key: apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.package-hash.outputs.hash }}
