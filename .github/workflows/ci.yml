@@ -364,12 +364,14 @@ jobs:
         timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
-          packages: g++-mingw-w64-x86-64 gcc-mingw-w64-i686 llvm lld
+          packages: g++-mingw-w64-x86-64 gcc-mingw-w64-i686 llvm lld python3-pefile
       # The console self-test's fixtures must build from source at package time
       # and stay small; the script fails on either. Running them is the console's
       # job (LocalState\selftest.txt).
       - name: build the console self-test fixtures
         run: bash src/xbox-test/app/tests/build-diag-fixtures.sh "$RUNNER_TEMP/diag"
+      - name: per-game GAP lines from x64 and PE32 import tables
+        run: bash src/xbox-test/app/tests/launch-gap-fixtures.sh "$RUNNER_TEMP/diag"
   x86-core:
     runs-on: ubuntu-latest
     steps:

@@ -22,10 +22,12 @@ CSV includes the explicit Nt and win32u syscall lists.
 `--catalog src/xbox-test/app/wine_gap_catalog.h` exports Wine metadata for the launcher.
 Repeated runs merge catalogs by DLL/symbol when supporting multiple games. The launcher scans
 actual installed top-level PEs on every Play, even when the mapper rejects PE32.
-It reports `GAP-METADATA: unknown=N` for imports absent from that catalog. Unknown
-imports contribute to total/missing; their win32u needs are unknown. Regenerate
-metadata when game binaries or Wine change; do not interpret unknown=0 as proof
-of complete semantic coverage. The checked-in catalog is Wine 11.0 source data.
+`launch_probe.log` includes one `GAP: dll=... system=... donor=... stub=... missing=...`
+line per imported DLL and names up to 64 missing or stubbed imports. `GAP-METADATA: unknown=N`
+counts imports absent from the Wine catalog. Unknown imports contribute
+to total/missing; their win32u needs are unknown. Regenerate metadata when game
+binaries or Wine change; do not interpret unknown=0 as proof of complete semantic
+coverage. The checked-in catalog is Wine 11.0 source data.
 
 The regex graph is a prioritization aid. It misses indirect calls, preprocessor
 variants, generated functions, runtime DLL loads and dependencies outside its
