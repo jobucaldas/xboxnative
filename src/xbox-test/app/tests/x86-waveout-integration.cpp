@@ -142,6 +142,29 @@ static HANDLE waveout_done_event;
 static WaveOutClose waveout_close;
 static volatile MMRESULT waveout_callback_close_result = MMSYSERR_ERROR;
 struct StressCallbackState { volatile LONG closed, late; };
+struct HandleStress {
+    HWAVEOUT output;
+    MMRESULT (WINAPI *position)(HWAVEOUT, LPMMTIME, UINT);
+    MMRESULT (WINAPI *write)(HWAVEOUT, LPWAVEHDR, UINT);
+    volatile LONG *stop, *failed;
+    WAVEHDR header;
+    char samples[1920];
+};
+static DWORD WINAPI handle_stress_thread(void *arg) {
+    auto *stress = static_cast<HandleStress *>(arg);
+    while (!InterlockedCompareExchange(stress->stop, 0, 0)) {
+        MMTIME time{}; time.wType = TIME_BYTES;
+        if (stress->position(stress->output, &time, sizeof(time)) != MMSYSERR_NOERROR) {
+            InterlockedExchange(stress->failed, 1); break;
+        }
+        MMRESULT result = stress->write(stress->output, &stress->header, sizeof(stress->header));
+        if (result != MMSYSERR_NOERROR && result != WAVERR_STILLPLAYING) {
+            InterlockedExchange(stress->failed, 1); break;
+        }
+        Sleep(1);
+    }
+    return 0;
+}
 static void CALLBACK stress_waveout_done(HWAVEOUT, UINT message, DWORD_PTR instance, DWORD_PTR, DWORD_PTR) {
     if (message == WOM_DONE) {
         auto *state = reinterpret_cast<StressCallbackState *>(instance);
@@ -163,7 +186,9 @@ int main(int argc, char **argv) {
     waveout_close = reinterpret_cast<WaveOutClose>(shim_export(shim, "XbnWaveOutClose"));
     auto prepare = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT, LPWAVEHDR, UINT)>(shim_export(shim, "XbnWaveOutPrepareHeader"));
     auto write = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT, LPWAVEHDR, UINT)>(shim_export(shim, "XbnWaveOutWrite"));
-    if (!open || !waveout_close || !prepare || !write) { std::fprintf(stderr, "FAIL: internal waveOut exports missing\n"); return 2; }
+    auto position = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT, LPMMTIME, UINT)>(shim_export(shim, "XbnWaveOutGetPosition"));
+    auto reset = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT)>(shim_export(shim, "XbnWaveOutReset"));
+    if (!open || !waveout_close || !prepare || !write || !position || !reset) { std::fprintf(stderr, "FAIL: internal waveOut exports missing\n"); return 2; }
     WAVEFORMATEX format{WAVE_FORMAT_PCM, 2, 48000, 192000, 4, 16, 0};
     if (open(nullptr, 0xffffffffu, &format, 0, 0, WAVE_FORMAT_QUERY) != MMSYSERR_NOERROR) {
         std::fprintf(stderr, "FAIL: x64 WAVE_FORMAT_QUERY rejected a null handle or device id\n"); return 2;
@@ -173,6 +198,31 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "FAIL: x64 WAVE_FORMAT_QUERY accepted an invalid format\n"); return 2;
     }
     format.wFormatTag = WAVE_FORMAT_PCM;
+    HWAVEOUT live = nullptr;
+    if (open(&live, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) return 2;
+    volatile LONG stop = 0, failed = 0;
+    HandleStress workers[2]{};
+    HANDLE threads[2]{};
+    for (unsigned i = 0; i < 2; ++i) {
+        workers[i].output = live; workers[i].position = position; workers[i].write = write;
+        workers[i].stop = &stop; workers[i].failed = &failed;
+        workers[i].header.lpData = workers[i].samples; workers[i].header.dwBufferLength = sizeof(workers[i].samples);
+        if (prepare(live, &workers[i].header, sizeof(workers[i].header)) != MMSYSERR_NOERROR) return 2;
+        threads[i] = CreateThread(nullptr, 0, handle_stress_thread, &workers[i], 0, nullptr);
+        if (!threads[i]) return 2;
+    }
+    for (unsigned i = 0; i < 200; ++i) {
+        HWAVEOUT other = nullptr;
+        if (open(&other, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR ||
+            waveout_close(other) != MMSYSERR_NOERROR) { InterlockedExchange(&failed, 1); break; }
+    }
+    InterlockedExchange(&stop, 1);
+    if (WaitForMultipleObjects(2, threads, TRUE, 15000) != WAIT_OBJECT_0) return 2;
+    for (auto thread : threads) CloseHandle(thread);
+    if (failed || reset(live) != MMSYSERR_NOERROR || waveout_close(live) != MMSYSERR_NOERROR) {
+        std::fprintf(stderr, "FAIL: concurrent live handle lookups and open/close\n"); return 2;
+    }
+    std::puts("X64-WAVEOUT PASS: concurrent live handle lookups and 200 open/close operations");
     waveout_done_event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
     if (!waveout_done_event) { std::fprintf(stderr, "FAIL: create callback-close event\n"); return 2; }
     HWAVEOUT callback_output = nullptr;
