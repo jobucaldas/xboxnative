@@ -6,3 +6,25 @@ EXPORTS
     GetDeviceID @7
     DirectSoundCreate8 @11
     DirectSoundCaptureEnumerateW
+    waveOutGetNumDevs=XbnWaveOutGetNumDevs
+    waveOutGetDevCapsA=XbnWaveOutGetDevCapsA
+    waveOutGetDevCapsW=XbnWaveOutGetDevCapsW
+    waveOutOpen=XbnWaveOutOpen
+    waveOutPrepareHeader=XbnWaveOutPrepareHeader
+    waveOutUnprepareHeader=XbnWaveOutUnprepareHeader
+    waveOutWrite=XbnWaveOutWrite
+    waveOutReset=XbnWaveOutReset
+    waveOutClose=XbnWaveOutClose
+    waveOutGetPosition=XbnWaveOutGetPosition
+    waveInOpen=XbnWaveInOpen
+    waveInClose=XbnWaveInClose
+    waveInPrepareHeader=XbnWaveInPrepareHeader
+    waveInUnprepareHeader=XbnWaveInUnprepareHeader
+    waveInAddBuffer=XbnWaveInAddBuffer
+    waveInReset=XbnWaveInReset
+    waveInGetNumDevs=XbnWaveInGetNumDevs
+    waveInGetDevCapsA=XbnWaveInGetDevCapsA
+    waveInGetDevCapsW=XbnWaveInGetDevCapsW
+    waveInGetPosition=XbnWaveInGetPosition
+    waveInStart=XbnWaveInStart
+    waveInStop=XbnWaveInStop
