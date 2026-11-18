@@ -672,7 +672,6 @@ inline void register_win32(Registry& r, Host& h) {
     unavailable_stdcall("kernel32.dll", "ReadConsoleW", 5);
     unavailable_stdcall("kernel32.dll", "UnmapViewOfFile", 1);
     unavailable_stdcall("sensapi.dll", "IsNetworkAlive", 1);
-    unavailable_stdcall("shlwapi.dll", "PathIsDirectoryA", 1);
 }
 inline void register_xinput(Registry& r, Host& h) {
     constexpr uint32_t error_bad_arguments = 160;

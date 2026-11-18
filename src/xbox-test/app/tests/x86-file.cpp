@@ -70,7 +70,7 @@ int main() {
     case Host::FileCall::Kind::Write:q.error=120;break;
     case Host::FileCall::Kind::Size:q.value=0xfffffff0u;q.args[1]=3;q.succeeded=true;break;
     case Host::FileCall::Kind::Time:q.data.assign(24,0x5a);q.succeeded=true;break;
-    case Host::FileCall::Kind::AttributesA:if(q.operation==Host::FileCall::Operation::CreateDirectoryA){CHECK(q.path_a=="folder");q.succeeded=true;}else{q.value=0x20;q.succeeded=true;}break;
+    case Host::FileCall::Kind::AttributesA:if(q.operation==Host::FileCall::Operation::CreateDirectoryA){CHECK(q.path_a=="folder");q.succeeded=true;}else if(q.path_a=="missing"){q.error=2;}else{q.value=q.path_a=="directory"?0x10:0x20;q.succeeded=true;}break;
     case Host::FileCall::Kind::Seek:q.value=8;q.args[1]=1;q.succeeded=true;break;
     case Host::FileCall::Kind::SeekEx:CHECK(q.handle==native_handle);CHECK(uint64_t(q.distance)==0x8877665544332211ull);if(q.method!=2){q.error=87;break;}q.position=int64_t(0x123456789abcdef0ull);q.succeeded=true;break;
     case Host::FileCall::Kind::End:q.succeeded=true;break;
@@ -141,6 +141,7 @@ int main() {
     CHECK(call("coinitializeex",{0,0})==0x80010106u&&call("coinitializeex",{0,0x40})==0x80070057u);
     call("couninitialize",{});CHECK(g.com_apartments[55].second==1);call("couninitialize",{});CHECK(g.com_apartments.count(55)==0);
     CHECK(call("coinitializeex",{0,0})==0);call("couninitialize",{});CHECK(g.com_apartments.count(55)==0);
+    cpu.fs_base=g.cur_teb;auto path_dir_a=reg.map.find({"shlwapi.dll","pathisdirectorya"});CHECK(path_dir_a!=reg.map.end());if(path_dir_a!=reg.map.end()){CHECK(path_dir_a->second.conv==Conv::Stdcall&&path_dir_a->second.argc==1);uint32_t directory=g.put_str("directory"),file=g.put_str("file"),missing=g.put_str("missing");mem.w32(cpu.reg[ESP]+4,directory);CHECK(path_dir_a->second.fn(cpu)==1);mem.w32(cpu.reg[ESP]+4,file);CHECK(path_dir_a->second.fn(cpu)==0);mem.w32(cpu.reg[ESP]+4,missing);CHECK(path_dir_a->second.fn(cpu)==0);refuse=true;mem.w32(cpu.reg[ESP]+4,directory);CHECK(path_dir_a->second.fn(cpu)==0&&g.last_error()==5);refuse=false;}
     std::printf("x86-file: %d checks, %d failures\n",checks,failures);return failures?1:0;
 }
 #endif
