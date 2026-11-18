@@ -196,7 +196,7 @@ inline bool load_impl(Image& image, const wchar_t* path, Log log, Carrier carrie
         if ((s.Characteristics&IMAGE_SCN_MEM_EXECUTE) && h.AddressOfEntryPoint>=s.VirtualAddress && h.AddressOfEntryPoint-s.VirtualAddress<n) entryCode=true;
     }
     if (!entryCode) return fail("WXL FAIL entry outside code");
-    if (!mapped && (configDir.VirtualAddress || configDir.Size)) {
+    if ((configDir.VirtualAddress || configDir.Size) && config==LoadConfig::inert_wine) {
         bool inert=false;
         for (unsigned i=0;i<nt->FileHeader.NumberOfSections;i++) {
             auto s=sections[i];
