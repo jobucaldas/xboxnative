@@ -388,6 +388,57 @@ static void randomized_sse_differential() {
     std::printf("X86-DBT PASS: SSE2 DBT differential families matched interpreter (5000 cases per family)\n");
 }
 
+static void extended_sse_differential() {
+    std::mt19937 rng(0x45585453u); uint8_t data[3 * PAGE]; uint64_t cases = 0;
+    auto one = [&](std::vector<uint8_t> code, bool memory) {
+        uint32_t regs[8] = {}; uint32_t xmm[8][4];
+        for (uint32_t& r : regs) r = rng();
+        for (auto& row : xmm) for (uint32_t& r : row) r = rng();
+        for (uint8_t& b : data) b = uint8_t(rng());
+        if (memory) { regs[EAX] = DATA + 0x200; regs[ECX] = 0; }
+        runtime_compare(code, 1, rng, regs, 2u | (rng() & FLAG_MASK), data, cases, FLAG_MASK, xmm);
+    };
+    for (unsigned n = 0; n != 5000; ++n) {
+        unsigned dst = rng() & 7, src = rng() & 7;
+        one({0x0f, 0x10, uint8_t(0xc0 | (dst << 3) | src)}, false);
+        one({0x0f, 0x10, uint8_t((dst << 3) | 4), 0x20}, true);
+        one({0x0f, 0x28, uint8_t(0xc0 | (dst << 3) | src)}, false);
+        one({0x0f, 0x28, uint8_t((dst << 3) | 4), 0x20}, true);
+    }
+    for (unsigned n = 0; n != 5000; ++n) {
+        unsigned dst = rng() & 7, src = rng() & 7;
+        one({0x0f, 0x11, uint8_t(0xc0 | (dst << 3) | src)}, false);
+        one({0x0f, 0x11, uint8_t((dst << 3) | 4), 0x20}, true);
+        one({0x0f, 0x29, uint8_t(0xc0 | (dst << 3) | src)}, false);
+        one({0x0f, 0x29, uint8_t((dst << 3) | 4), 0x20}, true);
+    }
+    for (uint8_t prefix : {uint8_t(0xf2), uint8_t(0xf3)}) {
+        for (unsigned n = 0; n != 5000; ++n) {
+            unsigned dst = rng() & 7, src = rng() & 7;
+            one({prefix, 0x0f, 0x10, uint8_t(0xc0 | (dst << 3) | src)}, false);
+            one({prefix, 0x0f, 0x10, uint8_t((dst << 3) | 4), 0x20}, true);
+            one({prefix, 0x0f, 0x58, uint8_t(0xc0 | (dst << 3) | src)}, false);
+            one({prefix, 0x0f, 0x59, uint8_t((dst << 3) | 4), 0x20}, true);
+        }
+    }
+    for (unsigned n = 0; n != 5000; ++n) {
+        unsigned xmm_src = rng() & 7, gp_dst = rng() & 7;
+        one({0x66, 0x0f, 0x7e, uint8_t(0xc0 | (xmm_src << 3) | gp_dst)}, false);
+        one({0x66, 0x0f, 0x7e, uint8_t((xmm_src << 3) | 4), 0x20}, true);
+    }
+    for (uint8_t prefix : {uint8_t(0), uint8_t(0x66)}) {
+        for (unsigned n = 0; n != 5000; ++n) {
+            unsigned dst = rng() & 7, src = rng() & 7;
+            std::vector<uint8_t> reg = {0x0f, 0xc6, uint8_t(0xc0 | (dst << 3) | src), uint8_t(rng())};
+            std::vector<uint8_t> mem = {0x0f, 0xc6, uint8_t((dst << 3) | 4), 0x20, uint8_t(rng())};
+            if (prefix) { reg.insert(reg.begin(), prefix); mem.insert(mem.begin(), prefix); }
+            one(reg, false);
+            one(mem, true);
+        }
+    }
+    std::printf("X86-DBT PASS: extended SSE/x87 opcode families matched interpreter (5000 cases per family)\n");
+}
+
 static void partial_block_differential() {
     static RuntimeMachine translated, interpreted;
     std::mt19937 rng(0x50415254u);
@@ -568,7 +619,7 @@ static void x87_differential() {
     auto set64 = [](uint8_t* p, uint64_t value) {
         for (unsigned i = 0; i != 8; ++i) p[i] = uint8_t(value >> (i * 8));
     };
-    for (unsigned n = 0; n != 5000; ++n) {
+    for (unsigned n = 0; n != 50000; ++n) {
         uint32_t regs[8] = {};
         for (uint32_t& r : regs) r = rng();
         for (uint8_t& b : data) b = uint8_t(rng());
@@ -626,7 +677,7 @@ static void x87_differential() {
         }
         runtime_compare(code, 1, rng, regs, 2u | (rng() & FLAG_MASK), data, cases, FLAG_MASK, nullptr, &fpu);
     }
-    std::printf("X86-DBT PASS: x87 differential matched interpreter on %llu randomized cases\n",
+    std::printf("X86-DBT PASS: x87 differential matched interpreter on 5000 cases per family (%llu total)\n",
                 (unsigned long long)cases);
 }
 
@@ -678,6 +729,7 @@ int main(int argc, char** argv) {
         int rc = differential_test(executable);
         if (rc) return rc;
         randomized_sse_differential();
+        extended_sse_differential();
         x87_differential();
         partial_block_differential();
         randomized_runtime_differential();

@@ -267,11 +267,18 @@ struct Cpu {
     }
     void run_raw(uint32_t stop) {
         dbt::RuntimeBlock* chained = nullptr;
+        bool state_live = false, state_xmm_live = false;
         dbt::RuntimeState state;
+        auto sync_state = [&] {
+            std::memcpy(reg, state.reg, sizeof reg);
+            if (state_xmm_live) std::memcpy(xmm.r, state.xmm, sizeof xmm.r);
+            fpu = state.fpu; state_live = false; state_xmm_live = false;
+        };
         while (!exited && eip != stop) {
             if (dbt_enabled && eip != thunks.sentinel() && !thunks.at(eip)) {
                 auto unsupported_it = dbt_unsupported.find(eip);
                 if (unsupported_it != dbt_unsupported.end()) {
+                    if (state_live) sync_state();
                     ++dbt_fallbacks[unsupported_it->second]; ++interpreted_blocks; step(); continue;
                 }
                 dbt::RuntimeBlock* block_ptr = chained && chained->guest_pc == eip ? chained : nullptr;
@@ -391,44 +398,67 @@ struct Cpu {
                         block_ptr = &dbt_cache.emplace(eip, std::move(block)).first->second;
                     } catch (const std::exception& ex) {
                         std::string key = dbt_fallback_key(eip, ex.what());
-                        dbt_unsupported.emplace(eip, key); ++dbt_fallbacks[key]; ++interpreted_blocks; step(); continue;
+                        dbt_unsupported.emplace(eip, key);
+                        if (state_live) sync_state();
+                        ++dbt_fallbacks[key]; ++interpreted_blocks; step(); continue;
                     }
                 }
-                if (executed + block_ptr->guest_length > limit) { ++interpreted_blocks; step(); continue; }
+                if (executed + block_ptr->guest_length > limit) {
+                    if (state_live) sync_state();
+                    ++interpreted_blocks; step(); continue;
+                }
                 state.fallback_eip = 0xffffffffu; state.exit_eip = 0xffffffffu;
-                std::memcpy(state.reg, reg, sizeof reg);
-                if (block_ptr->uses_xmm) std::memcpy(state.xmm, xmm.r, sizeof state.xmm);
-                state.eip = eip; state.eflags = eflags; state.memory = mem.base(); state.fpu = fpu;
+                if (!state_live) {
+                    std::memcpy(state.reg, reg, sizeof reg);
+                    if (block_ptr->uses_xmm) {
+                        std::memcpy(state.xmm, xmm.r, sizeof state.xmm);
+                        state_xmm_live = true;
+                    }
+                    state.eip = eip; state.eflags = eflags; state.memory = mem.base(); state.fpu = fpu;
+                } else if (block_ptr->uses_xmm && !state_xmm_live) {
+                    std::memcpy(state.xmm, xmm.r, sizeof state.xmm);
+                    state_xmm_live = true;
+                }
                 uint32_t next = block_ptr->may_fault ? execute_dbt_block(block_ptr, state) : block_ptr->code->operator()(state);
                 const uint32_t fallback_eip = state.fallback_eip;
                 const uint32_t exit_eip = state.exit_eip;
-                std::memcpy(reg, state.reg, sizeof reg);
-                if (block_ptr->uses_xmm) std::memcpy(xmm.r, state.xmm, sizeof xmm.r);
-                fpu = state.fpu;
                 eip = next; eflags = state.eflags;
+                if (block_ptr->uses_xmm) state_xmm_live = true;
                 ++translated_blocks;
                 if (fallback_eip != 0xffffffffu) {
+                    sync_state();
                     executed += fallback_eip - block_ptr->guest_pc;
                     ++interpreted_blocks;
                     step();
                     continue;
                 }
                 if (exit_eip != 0xffffffffu) {
+                    sync_state();
                     executed += exit_eip - block_ptr->guest_pc;
                     continue;
                 }
                 executed += block_ptr->guest_length;
+                chained = nullptr;
                 if (!block_ptr->interpreter_boundary) {
                     bool indirect = block_ptr->exit_opcode == 0xC2 || block_ptr->exit_opcode == 0xC3 || block_ptr->exit_opcode == 0xFF || block_ptr->exit_opcode == 0x8F;
                     auto successor = dbt_cache.find(next);
                     if (successor != dbt_cache.end()) {
-                        if (indirect) dbt_inline_cache[next & 3] = &successor->second;
-                        else block_ptr->linked_target = &successor->second;
+                        if (indirect) {
+                            dbt_inline_cache[next & 3] = &successor->second;
+                            if (valid(&successor->second)) chained = &successor->second;
+                        } else {
+                            block_ptr->linked_target = &successor->second;
+                            if (valid(block_ptr->linked_target)) chained = block_ptr->linked_target;
+                        }
                     }
-                    if (block_ptr->linked_target && block_ptr->linked_target->guest_pc == next && valid(block_ptr->linked_target)) chained = block_ptr->linked_target;
+                }
+                if (chained) state_live = true;
+                else {
+                    sync_state();
                 }
                 continue;
             }
+            if (state_live) sync_state();
             ++interpreted_blocks; step();
         }
     }
