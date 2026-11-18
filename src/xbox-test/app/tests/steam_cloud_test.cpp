@@ -306,6 +306,10 @@ int main() {
         // The player picks: the cloud copy, or this console's.
         auto useCloud=download(kio,1,kroots,false,&known,Prefer::Cloud);
         assert(useCloud.downloaded==1&&*read_file(kdir/"save.json")=="pc again");
+        put("other.json","xbox-only progress",1900000000);
+        auto keepCloud=upload(kio,1,kroots,saveRules,"Xbox",0,&known,Prefer::Cloud);
+        assert(keepCloud.uploaded==0&&*read_file(kdir/"other.json")=="xbox-only progress");
+        fs::remove(kdir/"other.json");
         put("save.json","xbox wins",1900000000);ks.add("save.json","pc later",1700000000);
         auto keepXbox=upload(kio,1,kroots,saveRules,"Xbox",0,&known,Prefer::Local);
         assert(keepXbox.uploaded==1&&ks.files.at(ks.prefix+"save.json").data=="xbox wins");

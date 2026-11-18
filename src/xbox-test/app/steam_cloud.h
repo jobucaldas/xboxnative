@@ -274,6 +274,7 @@ inline Result upload(Io& io,uint32_t appid,const Roots& roots,const std::vector<
             if(!safe_relative(sub)) return;
             std::string cloudName=rule.root==kRemoteRoot?sub:"%"+rule.root+"%"+(rule.path.empty()?"":rule.path+"/")+sub;
             auto data=read_file(entry.path());if(!data) return;
+            if(prefer==Prefer::Cloud){decided(io,"keep-local (the player chose the cloud copy)",cloudName,entry.path());++r.kept;return;}
             uint64_t time=unix_time(entry.path());
             if(quietSeconds&&time+quietSeconds>now){++r.busy;return;}
             auto found=remote.find(cloudName);
