@@ -239,6 +239,30 @@ int main(int argc, char **argv) {
     if (!same_progress || waveout_close(same_handle) != MMSYSERR_NOERROR ||
         WaitForSingleObject(same_thread, 5000) != WAIT_OBJECT_0 || same_failed) return 2;
     CloseHandle(same_thread);
+    for (unsigned i = 0; i < 100; ++i) {
+        HWAVEOUT racing = nullptr;
+        WAVEHDR racing_header{}; char racing_samples[1920]{};
+        if (open(&racing, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) return 2;
+        racing_header.lpData = racing_samples; racing_header.dwBufferLength = sizeof(racing_samples);
+        if (prepare(racing, &racing_header, sizeof(racing_header)) != MMSYSERR_NOERROR) return 2;
+        volatile LONG racing_stop = 0, racing_failed = 0, racing_progress = 0;
+        HandleStress writer{}; writer.output = racing; writer.position = position; writer.write = write;
+        writer.stop = &racing_stop; writer.failed = &racing_failed; writer.progress = &racing_progress; writer.header = racing_header;
+        memcpy(writer.samples, racing_samples, sizeof(writer.samples)); writer.header.lpData = writer.samples;
+        HANDLE writer_thread = CreateThread(nullptr, 0, handle_stress_thread, &writer, 0, nullptr);
+        if (!writer_thread) return 2;
+        for (unsigned wait = 0; wait < 1000 && !racing_progress; ++wait) Sleep(1);
+        if (!racing_progress) return 2;
+        MMRESULT close_result = waveout_close(racing);
+        if (close_result == WAVERR_STILLPLAYING) {
+            InterlockedExchange(&racing_stop, 1);
+            if (WaitForSingleObject(writer_thread, 5000) != WAIT_OBJECT_0 || reset(racing) != MMSYSERR_NOERROR ||
+                waveout_close(racing) != MMSYSERR_NOERROR) return 2;
+        } else if (close_result != MMSYSERR_NOERROR) return 2;
+        InterlockedExchange(&racing_stop, 1);
+        if (WaitForSingleObject(writer_thread, 5000) != WAIT_OBJECT_0 || racing_failed) return 2;
+        CloseHandle(writer_thread);
+    }
     waveout_done_event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
     if (!waveout_done_event) { std::fprintf(stderr, "FAIL: create callback-close event\n"); return 2; }
     HWAVEOUT callback_output = nullptr;
