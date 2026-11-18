@@ -264,8 +264,8 @@ inline DllSource make_vc110_vc120_source(const DllReader& game, const DllReader&
         return bytes;
     };
 }
-// One loaded DLL: the mapped image plus the LoadLibrary refcount. A real
-// unload (refcount to zero -> unmap) is not implemented; FreeLibrary says so.
+// One loaded DLL: the mapped image plus the LoadLibrary refcount. Guest
+// FreeLibrary unmaps the image when this count reaches zero.
 struct Dll {
     Image image;
     unsigned refs = 1;

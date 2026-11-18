@@ -13,6 +13,7 @@ typedef unsigned short u16;
 u32 __stdcall LoadLibraryA(const char *name);
 u32 __stdcall GetProcAddress(u32 module, const char *name);
 u32 __stdcall FreeLibrary(u32 module);
+void __stdcall FreeLibraryAndExitThread(u32 module, u32 code);
 u32 __stdcall GetModuleHandleA(const char *name);
 u32 __stdcall GetModuleHandleW(const u16 *name);
 /* Real Windows prototype (winbase.h): 3 parameters — flags, name, out. */
@@ -44,6 +45,8 @@ u32 __stdcall second_fn(void);
 
 /* forward declarations for the thread-body check */
 static u32 __stdcall thread_body(void *param);
+static u32 __stdcall thread_free_leaf(void *param);
+static u32 exit_leaf;
 
 static u32 first_failed_id = 0, first_failed_line = 0;
 static void record_check(u32 id, u32 line, u32 cond) {
@@ -81,7 +84,7 @@ int fixture_main(void) {
     /* 9. LoadLibraryA of a loaded module returns the same base. */
     u32 h2 = LoadLibraryA("dll-b.dll");
     ok(h2 == hb);
-    /* 10. FreeLibrary succeeds and the module stays usable (no real unmap). */
+    /* 10. FreeLibrary drops only the extra LoadLibrary reference. */
     ok(FreeLibrary(h2) != 0);
     ok(GetProcAddress(hb, "dllb_value") != 0);
     /* 11. An unknown module fails with 0. */
@@ -287,8 +290,7 @@ int fixture_main(void) {
      * name => the exe's base; FROM_ADDRESS (0x4) => the module containing
      * the address (tested with an address inside dll-b's image, its entry
      * pointer slot); UNCHANGED_REFCOUNT (0x2) and PIN (0x1) succeed the
-     * same way (refcounting is not observable here — FreeLibrary never
-     * unmaps); a miss writes NULL and returns 0. Every failure path leaves
+     * same way; a miss writes NULL and returns 0. Every failure path leaves
      * *phModule NULL, as Windows documents. */
     {
         u32 hmain = 0;
@@ -363,6 +365,28 @@ int fixture_main(void) {
         u32 (__stdcall *leaf_fn)(void) = (u32 (__stdcall *)(void))GetProcAddress(hleaf, "leaf_marker");
         ok(leaf_fn != 0);
         if (leaf_fn) ok(leaf_fn() == 1);
+        ok(FreeLibrary(hleaf) != 0);
+        ok(GetProcAddress(hleaf, "leaf_marker") == 0);
+        u32 hleaf2 = LoadLibraryA("dll-leaf.dll");
+        ok(hleaf2 != 0);
+        if (hleaf2) {
+            u32 (__stdcall *leaf_fn2)(void) = (u32 (__stdcall *)(void))GetProcAddress(hleaf2, "leaf_marker");
+            ok(leaf_fn2 != 0);
+            if (leaf_fn2) ok(leaf_fn2() == 1);
+            exit_leaf = hleaf2;
+            u32 exit_thread = CreateThread(0, 0, (u32)(u32 (__stdcall *)(void *))thread_free_leaf, 0, 0, 0);
+            u32 exit_code = 0;
+            ok(exit_thread != 0 && WaitForSingleObject(exit_thread, 0) == 0);
+            ok(GetExitCodeThread(exit_thread, &exit_code) != 0 && exit_code == 88);
+            ok(GetProcAddress(hleaf2, "leaf_marker") == 0);
+            u32 hleaf3 = LoadLibraryA("dll-leaf.dll");
+            ok(hleaf3 != 0);
+            if (hleaf3) {
+                u32 (__stdcall *leaf_fn3)(void) = (u32 (__stdcall *)(void))GetProcAddress(hleaf3, "leaf_marker");
+                ok(leaf_fn3 != 0);
+                if (leaf_fn3) ok(leaf_fn3() == 1);
+            }
+        }
     }
 
     /* Success stays 42; failures encode the first check's line and unique id. */
@@ -377,4 +401,10 @@ static u32 __stdcall thread_body(void *param) {
     (void)param;
     ExitThread(77);
     return 41;  /* unreachable if ExitThread ends only this thread */
+}
+
+static u32 __stdcall thread_free_leaf(void *param) {
+    (void)param;
+    FreeLibraryAndExitThread(exit_leaf, 88);
+    return 0;
 }
