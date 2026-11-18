@@ -42,6 +42,16 @@ void WINAPI entry(void) {
     if(FAILED(IDirect3DDevice9_GetCreationParameters(device,&creation.params))||creation.guard!=0x12345678||
        creation.params.hFocusWindow!=(HWND)1||creation.params.DeviceType!=D3DDEVTYPE_HAL||
        creation.params.BehaviorFlags!=D3DCREATE_HARDWARE_VERTEXPROCESSING)ExitProcess(59);
+    IDirect3DTexture9 *device_resource=0;
+    if(FAILED(IDirect3DDevice9_CreateTexture(device,2,2,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&device_resource,0))||!device_resource)ExitProcess(62);
+    IDirect3DDevice9_Release(device);
+    device=0;
+    if(FAILED(IDirect3DTexture9_GetDevice(device_resource,&device))||!device)ExitProcess(60);
+    creation.guard=0x12345678;
+    if(FAILED(IDirect3DDevice9_GetCreationParameters(device,&creation.params))||creation.guard!=0x12345678||
+       creation.params.hFocusWindow!=(HWND)1||creation.params.DeviceType!=D3DDEVTYPE_HAL||
+       creation.params.BehaviorFlags!=D3DCREATE_HARDWARE_VERTEXPROCESSING)ExitProcess(61);
+    IDirect3DTexture9_Release(device_resource);
     HMODULE d3dx=LoadLibraryA("d3dx9_43.dll");
     if(!d3dx)ExitProcess(41);
     union { FARPROC raw; D3DXCreateTextureFn fn; } create_texture_p={GetProcAddress(d3dx,"D3DXCreateTexture")};

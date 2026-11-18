@@ -63,7 +63,11 @@ struct ComSpace {
     // fault by name when called.
     struct Slot { unsigned argc; Marshaller fn; };
     struct Iface { unsigned slots = 0; uint32_t vtable = 0; std::map<unsigned, Slot> methods; };
+    // Some host D3D9 resources keep only a weak device pointer; this reference
+    // keeps GetDevice valid until it recreates a guest device proxy.
+    struct D3D9DeviceMetadata { uint32_t focus_window = 0; std::function<void()> host_release; };
     std::map<std::string, Iface> ifaces;
+    std::unordered_map<void*, D3D9DeviceMetadata> d3d9_focus_windows;
 
     void interface_(const char* iface, unsigned slots) { ifaces[iface] = Iface{slots, 0, {}}; }
     void method(const char* iface, unsigned slot, unsigned argc, Marshaller fn) { ifaces[iface].methods[slot] = Slot{argc, std::move(fn)}; }
@@ -195,6 +199,8 @@ struct ComSpace {
         torn_down = true;
         for (auto& [guest, p] : proxies) if (p.host_release) p.host_release();
         proxies.clear();
+        for (auto& [host, metadata] : d3d9_focus_windows) if (metadata.host_release) metadata.host_release();
+        d3d9_focus_windows.clear();
     }
 
     static constexpr uint32_t VTABLE_BASE = 0x7F000000, VTABLE_REGION = 0x00100000;
