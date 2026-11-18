@@ -24,6 +24,7 @@
 #include "ui_canvas.h"
 #include "ui_font.h"
 #include "ui_guide.h"
+#include "guest_overlay_input.h"
 
 namespace guest_overlay {
 enum Item { Resume, Quit, ForceQuit, Fps, ItemCount };
@@ -795,17 +796,10 @@ inline unsigned long long blockedReads=0;
 using GamepadRead=int32_t(__stdcall*)(void*,winrt::Windows::Gaming::Input::GamepadReading*);
 using RawRead=int32_t(__stdcall*)(void*,uint32_t,bool*,uint32_t,int32_t*,uint32_t,double*,uint64_t*);
 inline GamepadRead realGamepadRead=nullptr;inline RawRead realRawRead=nullptr;
-// Raw axes have per-axis rest values (sticks 0.5, triggers 0). The last raw
-// sample that was itself at rest (no button down, every axis within 0.1 of 0
-// or 0.5) is replayed while blocked; judged from the same sample, so no
-// other thread's reading can mark a moving stick as rest.
+// Raw axes have a fixed Gamepad order: four centered thumbstick axes, then
+// two zero-rest triggers. The last sample judged at rest from those same axes
+// is replayed while blocked, so a held stick can never become the rest sample.
 inline std::mutex rawM;inline std::vector<double> rawAxes;
-inline double rest_value(double v){return v<0.25?0.0:0.5;}
-inline bool at_rest(uint32_t nb,const bool* b,uint32_t na,const double* ax) {
-    for(uint32_t i=0;b&&i<nb;++i)if(b[i])return false;
-    for(uint32_t i=0;i<na;++i){double d=ax[i]-rest_value(ax[i]);if(d<-0.1||d>0.1)return false;}
-    return true;
-}
 inline bool pad_owned_by_overlay(){
     return guest_watchdog::overlay_owns_pad(inputBlocked.load(std::memory_order_acquire),
                                             guestDead.load(std::memory_order_acquire),false);
@@ -818,13 +812,13 @@ inline int32_t __stdcall gamepad_read(void* self,winrt::Windows::Gaming::Input::
 }
 inline int32_t __stdcall raw_read(void* self,uint32_t nb,bool* b,uint32_t ns,int32_t* sw,uint32_t na,double* ax,uint64_t* ts) {
     int32_t hr=realRawRead(self,nb,b,ns,sw,na,ax,ts);
-    if(hr>=0&&ax&&!blocking()&&at_rest(nb,b,na,ax)){std::lock_guard<std::mutex> l(rawM);rawAxes.assign(ax,ax+na);}
+    if(hr>=0&&ax&&!blocking()&&guest_overlay_input::at_rest(nb,b,na,ax)){std::lock_guard<std::mutex> l(rawM);rawAxes.assign(ax,ax+na);}
     if(hr>=0&&blocking()) {
         for(uint32_t i=0;b&&i<nb;++i)b[i]=false;
         for(uint32_t i=0;sw&&i<ns;++i)sw[i]=0;   // GameControllerSwitchPosition::Center
         std::lock_guard<std::mutex> l(rawM);
         // No rest sample yet: snap each axis to its nearer rest (trigger 0, stick 0.5).
-        if(ax)for(uint32_t i=0;i<na;++i)ax[i]=rawAxes.size()==na?rawAxes[i]:rest_value(ax[i]);
+        if(ax)for(uint32_t i=0;i<na;++i)ax[i]=rawAxes.size()==na?rawAxes[i]:guest_overlay_input::neutral_axis(i);
         ++blockedReads;
     }
     return hr;
