@@ -78,6 +78,8 @@ jobs:
           bash src/xbox-test/app/tests/http-concurrent-state.sh
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_achievements_test.cpp -o /tmp/steam-achievements-test
           /tmp/steam-achievements-test
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_auth_test.cpp -o /tmp/steam-auth-test
+          /tmp/steam-auth-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_presence_test.cpp -o /tmp/steam-presence-test
           /tmp/steam-presence-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror src/xbox-test/app/tests/steam_leaderboards_test.cpp -o /tmp/steam-leaderboards-test

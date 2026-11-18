@@ -71,6 +71,7 @@ static void lp_sink(const char* s) {
 #include "steam_client_package.h"
 #include "steam_token_store.h"
 #include "steam_genuine.h"
+#include "steam_auth.h"
 
 static void lp_publish(int gen,uint32_t appid,const std::string& result,bool ok,int mapped,int total,const char* status,bool terminal);
 struct LpCtx { std::wstring root, installRoot, args, cwd; std::vector<std::wstring> names; int gen = 0; uint32_t appid = 0; int mapped = 0; unsigned resolved = 0, stubbed = 0; std::string firstMissing, failName, fault; bool ok = false, timedOut = false; };
@@ -850,6 +851,68 @@ static void achievements_sync(uint32_t appid,bool store) {
     // (ui_unlocks.h); the hook receives the schema and the merged earned set.
     if(ok)guide_achievements_prepared(appid,*schema,steam_achievements::parse_earned(steam_achievements::read(saves/"achievements.json").value_or("{}")));
 }
+// ---- Auth-session tickets while the guest runs (steam_auth.h).
+// The provider owns ticket generation. This bridge only forwards the exact
+// bytes returned to the game over the launcher's signed-in CM session.
+static void presence_push(const JobMsg& m);
+struct AuthKeeper {
+    std::mutex m;
+    uint32_t appid = 0;
+    std::shared_ptr<CmSession> session;
+    bool warned = false;
+    steam_auth::Bridge bridge;
+};
+static AuthKeeper g_auth;
+static void auth_ticket_issue(uint32_t handle,const std::string& bytes) {
+    std::shared_ptr<CmSession> session = user_session();
+    uint32_t appid = 0; bool warn = false;
+    {
+        std::lock_guard<std::mutex> l(g_auth.m);
+        appid = g_auth.appid;
+        if(!session || !session->up || session->anon) {
+            if(appid && !g_auth.warned) { g_auth.warned = true; warn = true; }
+        }
+    }
+    if(!session || !session->up || session->anon) {
+        if(warn) lp_sink("STEAM auth tickets: no signed-in CM session; ticket not registered");
+        return;
+    }
+    steam_auth::Io io;
+    io.send = [session](uint32_t emsg,const std::string& body){
+        if(session->up) session->send_raw(emsg,body,0,"");
+    };
+    {
+        std::lock_guard<std::mutex> l(g_auth.m);
+        if(!g_auth.appid) return;
+        if(g_auth.session != session) {
+            g_auth.session = session;
+            g_auth.bridge.start(g_auth.appid,io);
+            session->set_push(presence_push);
+        }
+    }
+    g_auth.bridge.issue(handle,bytes);
+}
+static void auth_ticket_cancel(uint32_t handle) {
+    {
+        std::lock_guard<std::mutex> l(g_auth.m);
+        if(!g_auth.appid) return;
+    }
+    // The bridge retains the session's active CRC map until this cancellation.
+    g_auth.bridge.cancel(handle);
+}
+static void auth_start(uint32_t appid) {
+    {
+        std::lock_guard<std::mutex> l(g_auth.m);
+        g_auth.appid = appid; g_auth.session.reset(); g_auth.warned = false; g_auth.bridge.reset();
+    }
+    play_runtime::set_auth_ticket_tap({[](uint32_t handle,const std::string& bytes){auth_ticket_issue(handle,bytes);},
+                                       [](uint32_t handle){auth_ticket_cancel(handle);}});
+}
+static void auth_end() {
+    play_runtime::set_auth_ticket_tap({});
+    std::lock_guard<std::mutex> l(g_auth.m);
+    g_auth.appid = 0; g_auth.session.reset(); g_auth.warned = false; g_auth.bridge.reset();
+}
 // ---- Presence while the guest runs (steam_presence.h).
 // Steam drops "in game" and rich presence when the CM session that sent them
 // ends, and the launcher reconnects by itself after a network drop. The keeper
@@ -894,6 +957,11 @@ static void presence_tap_clear() {
 // self-check below, or another client starting a game. Runs on the CM reader
 // thread, so it never blocks: the tap's lock is only taken to read state.
 static void presence_push(const JobMsg& m) {
+    if(m.emsg==steam_auth::ClientAuthListAck) {
+        std::lock_guard<std::mutex> l(g_auth.m);
+        if(g_auth.appid) g_auth.bridge.ack(m.body);
+        return;
+    }
     if(m.emsg==steam_presence::ClientPlayingSessionState) {
         auto ps = steam_presence::parse_playing_state(m.body);
         bool started = false, stopped = false;
@@ -1027,6 +1095,7 @@ static void final_sync(uint32_t appid,const std::wstring& gameRoot) {
     lp_sink("STEAM sync: game ended; uploading saves and achievements");
     try{cloud_sync(appid,gameRoot,true,0);}catch(...){lp_sink("STEAM cloud upload: exception");}
     try{achievements_sync(appid,true);}catch(...){lp_sink("STEAM achievements store: exception");}
+    try{auth_end();}catch(...){}
     try{presence_end();}catch(...){}
     try{leaderboard_end();}catch(...){}
 }
@@ -1507,6 +1576,7 @@ static void lp_run_impl(LpCtx& c) {
     if(steamProvider) {
         try{cloud_sync(c.appid,c.root,false,0);}catch(...){lp_sink("STEAM cloud download: exception");}
         try{achievements_sync(c.appid,false);}catch(...){lp_sink("STEAM achievements: exception");}
+        try{auth_start(c.appid);}catch(...){lp_sink("STEAM auth tickets: bridge did not start");}
         try{presence_start(c.appid);}catch(...){lp_sink("STEAM presence: keeper did not start");}
         try{leaderboard_start(c.appid);}catch(...){lp_sink("STEAM leaderboards: bridge did not start");}
     }

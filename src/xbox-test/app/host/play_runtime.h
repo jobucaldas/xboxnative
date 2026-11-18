@@ -516,6 +516,54 @@ static uintptr_t exported(Module& module,const char* name,WORD ordinal) {
     }
     return result;
 }
+// ---- Auth-session tickets the game receives from the Steam API provider.
+// The provider still creates and returns the ticket; this tap observes the
+// exact bytes after the provider has copied them into the game's buffer.
+struct AuthTicketTap {
+    std::function<void(uint32_t,const std::string&)> issue;
+    std::function<void(uint32_t)> cancel;
+};
+static std::mutex authTicketMutex;
+static AuthTicketTap authTicket;
+static void set_auth_ticket_tap(AuthTicketTap tap) {
+    std::lock_guard<std::mutex> lock(authTicketMutex);
+    authTicket=std::move(tap);
+}
+static void authTicketIssue(uint32_t handle,const std::string& bytes) {
+    AuthTicketTap tap; {std::lock_guard<std::mutex> lock(authTicketMutex);tap=authTicket;}
+    if(tap.issue)tap.issue(handle,bytes);
+}
+static void authTicketCancel(uint32_t handle) {
+    AuthTicketTap tap; {std::lock_guard<std::mutex> lock(authTicketMutex);tap=authTicket;}
+    if(tap.cancel)tap.cancel(handle);
+}
+static std::atomic<uintptr_t> authTicketRealGet{0}, authTicketRealCancel{0};
+static uintptr_t authTicketHook(const char* name,uintptr_t real) {
+    if(!real) return 0;
+    if(!strcmp(name,"SteamAPI_ISteamUser_GetAuthSessionTicket")) {
+        using Fn=uint32_t(*)(void*,void*,int,uint32_t*,const void*);
+        authTicketRealGet.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,void* ticket,int max,uint32_t* size,const void* identity)->uint32_t {
+            auto inner=(Fn)authTicketRealGet.load(std::memory_order_acquire);
+            uint32_t handle=inner?inner(self,ticket,max,size,identity):0;
+            if(handle&&ticket&&size&&max>=0&&*size<=uint32_t(max))
+                authTicketIssue(handle,std::string((const char*)ticket,*size));
+            return handle;
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamUser_CancelAuthTicket")) {
+        using Fn=void(*)(void*,uint32_t);
+        authTicketRealCancel.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint32_t handle){
+            auto inner=(Fn)authTicketRealCancel.load(std::memory_order_acquire);
+            if(inner)inner(self,handle);
+            if(handle)authTicketCancel(handle);
+        };
+        return (uintptr_t)hook;
+    }
+    return 0;
+}
 // ---- Rich presence the game sets through the Steam API provider
 // (steam_presence.h). gbe_fork keeps the key/value set in memory and sends it
 // only to its own LAN peers, so the launcher's Steam session never sees it and
@@ -833,6 +881,11 @@ static uintptr_t steamApiExport(Module& module,const char* name,uintptr_t addres
     // The provider image is the only image whose exports reach here, so it is
     // the one to ask for a leaderboard handle's name later.
     if(&module!=leaderboardModule.load(std::memory_order_acquire))set_leaderboard_provider(&module);
+    if(auto hook=authTicketHook(name,address)) {
+        if(state->log&&mlp::first_report(std::string("steam auth tickets ")+name))
+            state->log((std::string("STEAM auth tickets: ")+name+" observed; tickets are registered by the launcher").c_str());
+        return hook;
+    }
     if(auto hook=richPresenceHook(name,address)) {
         if(state->log&&mlp::first_report(std::string("steam rich presence ")+name))
             state->log((std::string("STEAM rich presence: ")+name+" observed; the set is uploaded to Steam by the launcher").c_str());
@@ -2306,6 +2359,7 @@ static bool start(const std::wstring& root,const std::wstring& exe,const std::ws
 // client or ownership ticket can never reach the next game.
 static void reset_launch_config() {
     steamProvider.clear();steamClient.clear();steamClientSigned.clear();appTicket.clear();emulatedCreate=nullptr;
+    set_auth_ticket_tap({});
     set_rich_presence_tap({});
     set_leaderboard_tap({});
     set_leaderboard_provider(nullptr);   // the image may be unloaded with the launch
