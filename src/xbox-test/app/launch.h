@@ -575,7 +575,7 @@ static bool cloud_sync(uint32_t appid,const std::wstring& gameRoot,bool upload,u
     if(text.empty()||!vdf_parse(text,root))lp_sink("STEAM cloud: no app info; Auto-Cloud rules unknown (API files still sync)");
     else {
         const Vdf* app=root.get("appinfo");if(!app)app=&root;
-        rules=steam_cloud::rules(*app);
+        rules=steam_cloud::rules(*app,session->steamid);
         if(rules.empty())lp_sink("STEAM cloud: app has no Auto-Cloud save rules (files saved through the Steam API still sync)");
     }
     {std::lock_guard<std::mutex> lock(g_cloudRulesM);g_cloudRules=rules;}

@@ -107,8 +107,11 @@ int main() {
     assert(safe_relative("Ved/Megabonk/a.json")&&!safe_relative("../x")&&!safe_relative("a/../b")&&
            !safe_relative("/abs")&&!safe_relative("C:x")&&!safe_relative(""));
     Vdf app;assert(vdf_parse("\"appinfo\"{\"ufs\"{\"savefiles\"{\"0\"{\"root\" \"WinAppDataLocalLow\" \"path\" \"Ved/Megabonk/Saves/CloudDir\" \"pattern\" \"*.json\" \"recursive\" \"1\"}\"1\"{\"root\" \"MacAppSupport\" \"path\" \"x\"}}}}",app));
-    auto saveRules=rules(*app.get("appinfo"));
+    auto saveRules=rules(*app.get("appinfo"),0);
     assert(saveRules.size()==1&&saveRules[0].pattern=="*.json"&&saveRules[0].recursive);
+    Vdf accountApp;assert(vdf_parse("\"appinfo\"{\"ufs\"{\"savefiles\"{\"0\"{\"root\" \"WinAppDataLocalLow\" \"path\" \"Saves/{64BitSteamID}/{Steam3AccountID}/{64BitSteamID}\"}}}}",accountApp));
+    auto accountRules=rules(*accountApp.get("appinfo"),0x123456780000002Aull);
+    assert(accountRules.size()==1&&accountRules[0].path=="Saves/1311768464867721258/42/1311768464867721258");
 
     auto root=fs::temp_directory_path()/"steam-cloud-test";fs::remove_all(root);
     Roots roots{{"WinAppDataLocalLow",root}};
@@ -238,7 +241,7 @@ int main() {
 
     // ---- appinfo rule paths use '\\'; cloud names use '/'
     {   Vdf winApp;assert(vdf_parse("\"appinfo\"{\"ufs\"{\"savefiles\"{\"0\"{\"root\" \"WinAppDataLocalLow\" \"path\" \"TheGameBakers\\\\Haven\" \"pattern\" \"*\" \"recursive\" \"1\"}}}}",winApp));
-        auto haven=rules(*winApp.get("appinfo"));
+        auto haven=rules(*winApp.get("appinfo"),0);
         assert(haven.size()==1&&haven[0].path=="TheGameBakers/Haven"&&haven[0].recursive);
     }
 
