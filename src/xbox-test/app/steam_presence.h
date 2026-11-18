@@ -210,6 +210,7 @@ struct RichPresence {
         coalescer.touch(now);
     }
     void clear(double now) { if (!kv.empty()) { kv.clear(); coalescer.touch(now); } }
+    bool needs_upload(bool new_session) const { return new_session || coalescer.dirty; }
     void reset(uint32_t app) { appid = app; kv.clear(); coalescer = Coalescer{}; }
 };
 } // namespace steam_presence
