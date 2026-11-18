@@ -62,6 +62,10 @@ inline bool ntdll_crt(const char* name) {
     if (name[0] >= 'a' && name[0] <= 'z') return true;
     return name[0] == '_' && ((name[1] >= 'a' && name[1] <= 'z') || (name[1] >= '0' && name[1] <= '9'));
 }
+#ifdef SYSX_NATIVE_TEST
+using ProcResolver = FARPROC (*)(HMODULE, LPCSTR);
+inline ProcResolver proc_resolver = nullptr;
+#endif
 inline uintptr_t resolve(const char* dll, const char* name) {
     if (!dll || !name) return 0;
     bool matched = !_stricmp(dll, "ntdll.dll") && ntdll_crt(name);
@@ -83,7 +87,12 @@ inline uintptr_t resolve(const char* dll, const char* name) {
     for (auto& library : libraries) if (!_stricmp(dll, library.name)) {
         if (!library.module)
             library.module = LoadLibraryExW(library.wide, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-        return library.module ? reinterpret_cast<uintptr_t>(GetProcAddress(library.module, name)) : 0;
+#ifdef SYSX_NATIVE_TEST
+        auto lookup = proc_resolver ? proc_resolver : GetProcAddress;
+#else
+        auto lookup = GetProcAddress;
+#endif
+        return library.module ? reinterpret_cast<uintptr_t>(lookup(library.module, name)) : 0;
     }
     return 0;
 }

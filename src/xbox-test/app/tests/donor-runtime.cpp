@@ -32,6 +32,11 @@ static HMODULE WINAPI hostPackaged(LPCWSTR name,DWORD) {
 }
 #define VirtualProtectFromApp hostProtect
 #define LoadPackagedLibrary hostPackaged
+#include <winrt/base.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include "../dxil_runtime.h"
+static std::wstring g_dir;
 #include "../host/wxl_mapper.h"
 #include "../host/mlp_probe.h"
 #include "../donors/probe.h"

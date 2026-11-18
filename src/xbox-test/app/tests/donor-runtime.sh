@@ -42,7 +42,7 @@ for kind in guest missing;do
  done
 python3 -I donors/inspect.py --donor-dir "$root/out/wine-donors" --output "$out/obj/donor_imports.generated.h"
 bash ../uwph/host/build-sqlite-lib.sh "$out/obj/sqlite3.lib"
-UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/runner.exe" tests/donor-runtime.cpp -- /MT /O2 "/I$out/obj" /I../uwph/host/third_party/sqlite
+UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/runner.exe" tests/donor-runtime.cpp vendor/zlib/adler32.c vendor/zlib/crc32.c vendor/zlib/inffast.c vendor/zlib/inflate.c vendor/zlib/inftrees.c vendor/zlib/zutil.c -- /MT /O2 "/I$out/obj" /I../uwph/host/third_party/sqlite
 cp out/layout/donors/*.dll "$out/donors/"
 cp out/layout/uwph-u32c.dll "$out/"
 # Probe and guest each have a 30-second wait. Keep both gates intact and

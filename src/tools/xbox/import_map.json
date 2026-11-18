@@ -113,7 +113,7 @@
     },
     "dbghelp.dll": {
       "class": "system",
-      "reason": "The existing sysx_native allowlist returns the exact System32 DbgHelp exports; SymInitialize, SymFromAddr, SymLoadModuleEx and SymRegisterFunctionEntryCallback64 are behavior-tested off-device."
+      "reason": "Route through the sysx_native System32 allowlist; dbghelp.dll and these exports are native-export-unverified on Xbox UWP. Off-device behavior tests do not prove console availability; a missing module/export returns zero, fails closed without a placeholder or crash, and console verification remains pending."
     },
     "hostfxr.dll": {
       "class": "stub",
@@ -250,7 +250,7 @@
     },
     "wininet.dll": {
       "class": "system",
-      "reason": "The existing sysx_native allowlist returns the exact System32 URL, handle, and HTTP exports; URL parsing, loopback requests, headers, and handle lifecycle are behavior-tested off-device."
+      "reason": "Route through the sysx_native System32 allowlist; wininet.dll may be absent or may not expose these exports on Xbox UWP. Off-device URL/HTTP behavior tests do not prove console availability; a missing module/export returns zero, fails closed without a placeholder or crash, and console verification remains pending."
     },
     "winmm.dll": {
       "class": "stub",

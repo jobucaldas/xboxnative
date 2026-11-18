@@ -109,6 +109,13 @@ class WineSourceTests(unittest.TestCase):
         # The oracle records item 40's policy, before item 45 donor routing.
         # Preserve exact-byte classification proof against that immutable policy.
         mapping = json.loads((Path(__file__).parent / 'fixtures/wgap-import-map.json').read_text())['dlls']
+        # The immutable oracle includes this PR's cheap-tail route decisions.
+        oracle_routes = {
+            'dbghelp.dll': 'system', 'setupapi.dll': 'donor',
+            'shlwapi.dll': 'system', 'psapi.dll': 'donor', 'wininet.dll': 'system',
+        }
+        for dll, route in oracle_routes.items():
+            mapping.setdefault(dll, {})['class'] = route
         rows = gap.classify(gap.scan(paths), mapping, {p.name.lower() for p in paths}, self.graph)
         output = io.StringIO(newline='')
         writer = csv.DictWriter(output, gap.FIELDS)
