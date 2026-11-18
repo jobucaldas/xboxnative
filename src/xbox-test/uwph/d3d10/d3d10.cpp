@@ -1291,7 +1291,7 @@ HRESULT createSwapChain(ID3D11Device* device,DXGI_SWAP_CHAIN_DESC* desc,IDXGISwa
     if(SUCCEEDED(hr))hr=adapter->GetParent(__uuidof(IDXGIFactory),reinterpret_cast<void**>(&factory));
     if(adapter)adapter->Release();
     if(FAILED(hr))return hr;
-    hr=factory->CreateSwapChain(device,desc,swapchain);
+    hr=d3dshim::createSwapChain(factory,device,desc,swapchain);
     factory->Release();
     return hr;
 }
