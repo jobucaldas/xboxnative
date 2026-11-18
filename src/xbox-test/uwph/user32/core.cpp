@@ -769,7 +769,7 @@ static_assert(sizeof(CursorIconDirEntry2)==14,"CURSORICONDIRENTRY layout");
 // not a backend-dependent call, so it is implemented for real rather than stubbed.
 extern "C" int WINAPI c_LookupIconIdFromDirectoryEx(BYTE* xdir,BOOL isIcon,int width,int height,UINT flags){
  auto dir=(const CursorIconDir2*)xdir;
- if(!dir||dir->idReserved||!(dir->idType&3))return 0;
+ if(!dir||dir->idReserved||!(dir->idType&3)||!dir->idCount)return 0;
  int depth=(flags&LR_MONOCHROME)?1:32; // no real display depth in this module: assume 32bpp (modern default), not fabricated per-mode detail.
  if(!width)width=32; if(!height)height=32; // this API always implies LR_DEFAULTSIZE; no real SM_CXICON/SM_CXCURSOR here, so 32x32 (Windows' common default).
  int n=dir->idCount,best=-1;
