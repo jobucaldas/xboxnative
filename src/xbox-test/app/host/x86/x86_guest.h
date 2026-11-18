@@ -2197,8 +2197,11 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "VirtualAlloc", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
         uint32_t want = (c.arg(1) + 0xfffu) & ~0xfffu; if (!want) want = 0x1000;
         uint32_t p = virtual_top; virtual_top += want;
-        mem.map(p, want, PROT_R | PROT_W); virtual_alloc[p] = want;
-        if (c.arg(3) & 0x40) { auto z = std::vector<uint8_t>(want, 0); mem.write_bytes(p, z.data(), want); }
+        uint32_t prot = c.arg(3);
+        uint8_t access = (prot & 0x01) ? 0 : PROT_R;
+        if (prot & (0x04 | 0x08 | 0x40 | 0x80)) access |= PROT_W;
+        if (prot & (0x10 | 0x20 | 0x40 | 0x80)) access |= PROT_X;
+        mem.map(p, want, access); virtual_alloc[p] = want;
         return p; });
     reg.add("kernel32.dll", "VirtualFree", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
         auto it = virtual_alloc.find(c.arg(0)); if (it == virtual_alloc.end()) return 0;

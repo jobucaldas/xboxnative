@@ -288,6 +288,10 @@ int main(void) {
     MEMORY_BASIC_INFORMATION mbi;
     check(VirtualQuery(va, &mbi, sizeof mbi) == sizeof mbi);
     VirtualFree(va, 0, MEM_RELEASE);
+    va = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    check(va != NULL);
+    check(VirtualQuery(va, &mbi, sizeof mbi) == sizeof mbi && mbi.Protect == PAGE_EXECUTE_READWRITE);
+    VirtualFree(va, 0, MEM_RELEASE);
     check(GetModuleHandleA(NULL) != NULL);
     /* FreeLibrary of the image handle succeeds; an unknown handle fails with
      * ERROR_MOD_NOT_FOUND, as Windows and Wine answer. IsDBCSLeadByteEx is
