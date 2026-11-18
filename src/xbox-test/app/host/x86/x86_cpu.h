@@ -267,6 +267,7 @@ struct Cpu {
     }
     void run_raw(uint32_t stop) {
         dbt::RuntimeBlock* chained = nullptr;
+        dbt::RuntimeState state;
         while (!exited && eip != stop) {
             if (dbt_enabled && eip != thunks.sentinel() && !thunks.at(eip)) {
                 auto unsupported_it = dbt_unsupported.find(eip);
@@ -334,6 +335,7 @@ struct Cpu {
                         std::vector<std::pair<uint32_t, uint32_t>> memory_generations;
                         std::vector<uint32_t> store_pages;
                         size_t pc = 0; uint8_t last_opcode = 0; bool interpreter_boundary = false, may_fault = false;
+                        bool needs_prot = false, needs_generation = false;
                         while (pc < 64) {
                             while (bytes.size() <= pc + 5) bytes.push_back(mem.fetch8(eip + uint32_t(bytes.size())));
                             uint32_t ea = 0; bool memory = false, absolute_memory = false, memory_write = false;
@@ -342,10 +344,10 @@ struct Cpu {
                             size_t len;
                             try { len = dbt::runtime_instruction(bytes, pc, ea, memory, absolute_memory, memory_write, memory_size); }
                             catch (const std::runtime_error&) { if (!pc) throw; interpreter_boundary = true; break; }
-                            if (memory) may_fault = true;
-                            if (memory && !absolute_memory)
-                                throw std::runtime_error("dynamic guest memory access stays in the fault-precise interpreter");
-                            if (memory) {
+                            if (memory && !absolute_memory) needs_prot = true;
+                            if (memory && memory_write) needs_generation = true;
+                            if (memory && absolute_memory) may_fault = true;
+                            if (memory && absolute_memory) {
                                 uint8_t need = memory_write ? PROT_W : PROT_R;
                                 if (!translatable_range(ea, memory_size, need))
                                     throw std::runtime_error(memory_write ? "DBT absolute store page is not writable" : "DBT absolute load page is not readable");
@@ -382,7 +384,10 @@ struct Cpu {
                             block.page_generations.emplace_back(page, mem.page_generation(page << 12));
                             if (page == last_page) break;
                         }
-                        block.code = std::make_unique<dbt::Executable>(dbt::runtime_translate(bytes, eip, &block.instruction_map));
+                        auto native = dbt::runtime_translate(bytes, eip, &block.instruction_map,
+                                                              needs_prot ? mem.prot.data() : nullptr,
+                                                              needs_generation ? mem.generation.data() : nullptr);
+                        block.code = std::make_unique<dbt::Executable>(native);
                         block_ptr = &dbt_cache.emplace(eip, std::move(block)).first->second;
                     } catch (const std::exception& ex) {
                         std::string key = dbt_fallback_key(eip, ex.what());
@@ -390,16 +395,29 @@ struct Cpu {
                     }
                 }
                 if (executed + block_ptr->guest_length > limit) { ++interpreted_blocks; step(); continue; }
-                dbt::RuntimeState state;
+                state.fallback_eip = 0xffffffffu; state.exit_eip = 0xffffffffu;
                 std::memcpy(state.reg, reg, sizeof reg);
                 if (block_ptr->uses_xmm) std::memcpy(state.xmm, xmm.r, sizeof state.xmm);
                 state.eip = eip; state.eflags = eflags; state.memory = mem.base(); state.fpu = fpu;
                 uint32_t next = block_ptr->may_fault ? execute_dbt_block(block_ptr, state) : block_ptr->code->operator()(state);
+                const uint32_t fallback_eip = state.fallback_eip;
+                const uint32_t exit_eip = state.exit_eip;
                 std::memcpy(reg, state.reg, sizeof reg);
                 if (block_ptr->uses_xmm) std::memcpy(xmm.r, state.xmm, sizeof xmm.r);
                 fpu = state.fpu;
                 eip = next; eflags = state.eflags;
-                executed += block_ptr->guest_length; ++translated_blocks;
+                ++translated_blocks;
+                if (fallback_eip != 0xffffffffu) {
+                    executed += fallback_eip - block_ptr->guest_pc;
+                    ++interpreted_blocks;
+                    step();
+                    continue;
+                }
+                if (exit_eip != 0xffffffffu) {
+                    executed += exit_eip - block_ptr->guest_pc;
+                    continue;
+                }
+                executed += block_ptr->guest_length;
                 if (!block_ptr->interpreter_boundary) {
                     bool indirect = block_ptr->exit_opcode == 0xC2 || block_ptr->exit_opcode == 0xC3 || block_ptr->exit_opcode == 0xFF || block_ptr->exit_opcode == 0x8F;
                     auto successor = dbt_cache.find(next);
