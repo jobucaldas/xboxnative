@@ -2005,6 +2005,29 @@ static void test_dbt_counter() {
     std::printf("X86-DBT PASS: integer kernel translated=%llu interpreted=%llu result=%08x\n",
                 (unsigned long long)translated.cpu.translated_blocks, (unsigned long long)translated.cpu.interpreted_blocks,
                 translated.cpu.reg[EAX]);
+    if (!translated.mem.base()) return;
+    int invalidation_before = failures;
+    Machine patch;
+    patch.load({0xB8, 1, 0, 0, 0}); patch.cpu.dbt_enabled = true;
+    EXPECT(patch.run_to_end(5) && patch.cpu.reg[EAX] == 1, "self-patching setup did not execute initial translation");
+    patch.mem.protect(Machine::CODE, Memory::PAGE, PROT_R | PROT_W);
+    uint32_t patched = 2; patch.mem.write_bytes(Machine::CODE + 1, &patched, 4);
+    patch.mem.protect(Machine::CODE, Memory::PAGE, PROT_R | PROT_X);
+    patch.cpu.eip = Machine::CODE; patch.cpu.exited = false;
+    EXPECT(patch.run_to_end(5) && patch.cpu.reg[EAX] == 2, "self-patched code reused a stale DBT translation");
+    uint8_t jit[] = {0xB8, 3, 0, 0, 0, 0xF4};
+    patch.mem.write_bytes(Machine::DATA, jit, sizeof jit); patch.mem.protect(Machine::DATA, Memory::PAGE, PROT_R | PROT_X);
+    patch.cpu.eip = Machine::DATA; patch.cpu.exited = false;
+    bool first = false; try { patch.cpu.run(0); } catch (const Fault& f) { first = f.kind == FaultKind::Unsupported && f.eip == Machine::DATA + 5; }
+    EXPECT(first && patch.cpu.reg[EAX] == 3, "JIT buffer initial execution did not complete");
+    patch.mem.protect(Machine::DATA, Memory::PAGE, PROT_R | PROT_W);
+    jit[1] = 4; patch.mem.write_bytes(Machine::DATA, jit, sizeof jit);
+    patch.mem.protect(Machine::DATA, Memory::PAGE, PROT_R | PROT_X);
+    patch.cpu.eip = Machine::DATA; patch.cpu.exited = false;
+    bool second = false; try { patch.cpu.run(0); } catch (const Fault& f) { second = f.kind == FaultKind::Unsupported && f.eip == Machine::DATA + 5; }
+    EXPECT(second && patch.cpu.reg[EAX] == 4, "rewritten JIT buffer reused a stale DBT translation");
+    std::puts(failures == invalidation_before ? "X86-DBT PASS: self-patching code and rewritten JIT buffer invalidated translated blocks" :
+              "X86-DBT FAIL: self-patching code or rewritten JIT buffer reused a stale translation");
 }
 
 struct RunResult { bool completed = false; uint32_t exit_code = 0xdead; std::string out; std::map<std::string, unsigned> calls; Image img; std::string fault; uint64_t executed = 0; };

@@ -227,6 +227,7 @@ inline void runtime_x87(RuntimeState* state, uint64_t encoded, uint32_t length) 
 struct RuntimeBlock {
     std::unique_ptr<Executable> code;
     std::vector<uint8_t> guest_bytes;
+    std::vector<std::pair<uint32_t, uint32_t>> page_generations;
     uint32_t guest_length = 0;
     uint32_t guest_pc = 0;
     uint8_t exit_opcode = 0;
@@ -460,6 +461,8 @@ inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
         else if (op == 0x83 || (op == 0xF6 && group == 0)) runtime_u8(b, p);
         if (unary && group > 3 && !(op == 0xFF && (group == 4 || group == 6))) throw std::runtime_error("unsupported unary DBT group");
         if (op == 0xFE && group > 1) throw std::runtime_error("unsupported byte unary DBT group");
+        if ((op == 0xF6 || op == 0xFE) && (m >> 6) == 3 && (m & 7) >= 4)
+            throw std::runtime_error("high-byte register needs the interpreter");
         return p - start;
     }
     if (op == 0x6B) {
