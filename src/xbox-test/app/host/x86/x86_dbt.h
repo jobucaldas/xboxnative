@@ -402,7 +402,7 @@ inline void runtime_sse(Emitter& out, uint8_t prefix, uint8_t op, uint8_t dst, u
     out.b(0x0F); out.b(op); out.modrm(memory ? 0 : 3, dst, memory ? 3 : src);
 }
 inline void runtime_sse_scalar_load_preserve(Emitter& out, uint8_t dst) {
-    uint8_t scratch = dst == 6 ? 7 : 6, stack_offset = 24;
+    uint8_t scratch = dst == 6 ? 7 : 6, stack_offset = 40; // own slot above the host XMM6/XMM7 saves (0..31) and exit EIP (32)
     runtime_store_xmm_mem(out, 4, stack_offset, scratch);
     out.rex(scratch, 0, dst); out.b(0x0F); out.b(0x28); out.modrm(3, scratch, dst);
     out.rex(scratch, 0, dst); out.b(0x0F); out.b(0x12); out.modrm(3, scratch, dst);
@@ -411,7 +411,7 @@ inline void runtime_sse_scalar_load_preserve(Emitter& out, uint8_t dst) {
     runtime_load_xmm_mem(out, scratch, 4, stack_offset);
 }
 inline void runtime_sse_scalar_float_load_preserve(Emitter& out, uint8_t dst) {
-    uint8_t scratch = dst == 6 ? 7 : 6, stack_offset = 24;
+    uint8_t scratch = dst == 6 ? 7 : 6, stack_offset = 40; // own slot above the host XMM6/XMM7 saves (0..31) and exit EIP (32)
     runtime_store_xmm_mem(out, 4, stack_offset, scratch);
     out.rex(scratch, 0, dst); out.b(0x0F); out.b(0x28); out.modrm(3, scratch, dst);
     out.b(0xF3); out.rex(0, 0, 11); out.b(0x0F); out.b(0x10); out.modrm(0, dst, 3);
@@ -738,7 +738,7 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
 #endif
     out.b(0x57); out.b(0x41); out.b(0x54); out.b(0x41); out.b(0x55); out.b(0x41); out.b(0x56);
     if (prot) out.b(0x41), out.b(0x57); // save state*, preserve R12-R15 when metadata checks are enabled
-    out.b(0x48); out.b(0x83); out.b(0xEC); out.b(uses_xmm ? 40 : 8);
+    out.b(0x48); out.b(0x83); out.b(0xEC); out.b(uses_xmm ? 56 : 8);
     if (prot) runtime_mov_imm64(out, 15, reinterpret_cast<uintptr_t>(prot));
     if (uses_xmm) {
         runtime_store_xmm_mem(out, 4, 0, 6); runtime_store_xmm_mem(out, 4, 16, 7);
@@ -750,7 +750,7 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
         for (unsigned i = 0; i != 8; ++i) runtime_load_xmm_mem(out, uint8_t(i), 7, 48 + i * 16);
     for (unsigned i : {0u, 1u, 2u, 3u, 5u, 6u, 7u, 4u}) runtime_mov_reg_mem(out, runtime_reg(i), 7, uint8_t(i * 4));
     size_t p = 0;
-    const uint8_t state_slot = uint8_t((uses_xmm ? 64 : 32) + (prot ? 8 : 0));
+    const uint8_t state_slot = uint8_t((uses_xmm ? 80 : 32) + (prot ? 8 : 0));
     std::vector<size_t> fallback_jumps, exit_jumps;
     bool branch_terminated = false;
     while (p < guest.size()) {
@@ -1028,7 +1028,7 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
     if (uses_xmm) {
         runtime_load_xmm_mem(out, 6, 4, 0); runtime_load_xmm_mem(out, 7, 4, 16);
     }
-    out.b(0x48); out.b(0x83); out.b(0xC4); out.b(uses_xmm ? 40 : 8);
+    out.b(0x48); out.b(0x83); out.b(0xC4); out.b(uses_xmm ? 56 : 8);
     if (prot) { out.b(0x41); out.b(0x5F); }
     out.b(0x41); out.b(0x5E); out.b(0x41); out.b(0x5D); out.b(0x41); out.b(0x5C); out.b(0x5F);
     out.b(0x8B); out.b(0x47); out.b(32); out.b(0xC3);
