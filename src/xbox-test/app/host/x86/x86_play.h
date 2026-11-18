@@ -428,17 +428,17 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
             }
         };
         init_process(mem, cpu, img);
-        std::vector<Image*> tls_images;
+        guest.tls_images.clear();
         for (const auto& module : guest.dll_order) {
             auto it = guest.dlls.find(module);
             if (it != guest.dlls.end() && it->second.image.tls.present)
-                tls_images.push_back(&it->second.image);
+                guest.tls_images.push_back(&it->second.image);
         }
-        if (img.tls.present) tls_images.push_back(&img);
-        if (!tls_images.empty()) {
-            uint32_t slots = guest.heap.alloc(uint32_t(tls_images.size() * sizeof(uint32_t)));
-            for (size_t i = 0; i < tls_images.size(); ++i) {
-                Image& tls_image = *tls_images[i];
+        if (img.tls.present) guest.tls_images.push_back(&img);
+        if (!guest.tls_images.empty()) {
+            uint32_t slots = guest.heap.alloc(uint32_t(guest.tls_images.size() * sizeof(uint32_t)));
+            for (size_t i = 0; i < guest.tls_images.size(); ++i) {
+                Image& tls_image = *guest.tls_images[i];
                 uint32_t raw = tls_image.tls.end - tls_image.tls.start;
                 uint64_t total = uint64_t(raw) + tls_image.tls.zero_fill;
                 if (total > 16u * 1024u * 1024u) throw std::runtime_error("PE32 TLS template exceeds 16 MiB");
@@ -461,9 +461,9 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         // each image's TLS callbacks, then the executable entry point.
         if (on_loaded) on_loaded(r);
         try {
-            if (tls_images.empty()) run_entry(cpu, img);
+            if (guest.tls_images.empty()) run_entry(cpu, img);
             else {
-                for (Image* tls_image : tls_images)
+                for (Image* tls_image : guest.tls_images)
                     for (uint32_t p = tls_image->tls.callbacks; p; p += 4) {
                         uint32_t fn = mem.r32(p);
                         if (!fn) break;

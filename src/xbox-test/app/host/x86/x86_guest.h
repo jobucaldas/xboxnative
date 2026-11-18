@@ -143,6 +143,10 @@ struct Guest {
     // each new thread gets its own block) and the TEB of the running thread,
     // mirroring Cpu.fs_base for host helpers that have no Cpu.
     Image::Tls exe_tls;
+    // TLS images are ordered as the runner's main-thread slot array: loaded DLLs
+    // first, then the executable. Direct Guest harnesses leave this empty and
+    // use exe_tls as the legacy executable-only fallback.
+    std::vector<Image*> tls_images;
     uint32_t cur_teb = TEB_ADDR;
     // EncodePointer/DecodePointer (and the System variants): the security
     // cookie; VC/UCRT startup encodes every function pointer it stores and
@@ -414,9 +418,29 @@ struct Guest {
     static constexpr uint64_t kThreadBudget = 100ull * 1000 * 1000;  // instructions per thread body run
     static constexpr uint32_t kThreadRegionBase = 0x7E000000u;      // thread TEBs: above the DLL and section arenas
     struct ThreadTeb { uint32_t base, size; };
+    struct ThreadTebMapping {
+        Memory& mem;
+        ThreadTeb teb;
+        bool active = true;
+        ~ThreadTebMapping() { if (active) mem.unmap(teb.base, teb.size); }
+        void release() { if (active) { mem.unmap(teb.base, teb.size); active = false; } }
+    };
     ThreadTeb map_thread_teb(Cpu& c, uint32_t tid) {
-        uint32_t tls_bytes = exe_tls.present ? 16 + (exe_tls.end - exe_tls.start) + exe_tls.zero_fill : 0;
-        uint32_t size = Memory::PAGE + (tls_bytes + Memory::PAGE - 1) / Memory::PAGE * Memory::PAGE;
+        size_t count = tls_images.size();
+        uint64_t tls_bytes = 0;
+        if (count) {
+            tls_bytes = uint64_t(count * sizeof(uint32_t));
+            for (Image* image : tls_images) {
+                uint32_t raw = image->tls.end - image->tls.start;
+                tls_bytes += uint64_t(raw) + image->tls.zero_fill;
+            }
+        } else if (exe_tls.present) {
+            count = 1;
+            tls_bytes = sizeof(uint32_t) + (exe_tls.end - exe_tls.start) + exe_tls.zero_fill;
+        }
+        if (tls_bytes > 16u * 1024u * 1024u) throw std::runtime_error("PE32 TLS thread storage exceeds 16 MiB");
+        uint32_t tls_pages = uint32_t((tls_bytes + Memory::PAGE - 1) / Memory::PAGE);
+        uint32_t size = Memory::PAGE + tls_pages * Memory::PAGE;
         uint32_t base = kThreadRegionBase;
         while (!c.mem.free_range(base, size)) {
             base += 0x10000u;
@@ -432,23 +456,52 @@ struct Guest {
         c.mem.w32(base + 0x24, tid);                            // ClientId.UniqueThread
         c.mem.w32(base + 0x30, c.mem.r32(main + 0x30));         // ProcessEnvironmentBlock
         // LastError (0x34) and TlsSlots (0xE10..) start zeroed: this thread's own.
-        if (exe_tls.present) {
-            uint32_t slot = base + Memory::PAGE, block = slot + 16;
-            uint32_t raw = exe_tls.end - exe_tls.start;
-            c.mem.w32(slot, block);                             // ThreadLocalStoragePointer[index 0]
-            c.mem.w32(base + 0x2C, slot);
-            for (uint32_t i = 0; i < raw; ++i) c.mem.w8(block + i, c.mem.r8(exe_tls.start + i));  // template copy; the rest is zero
+        if (count) {
+            uint32_t slots = base + Memory::PAGE;
+            uint32_t block = slots + uint32_t(count * sizeof(uint32_t));
+            c.mem.w32(base + 0x2C, slots);
+            if (!tls_images.empty()) {
+                for (size_t i = 0; i < tls_images.size(); ++i) {
+                    Image& image = *tls_images[i];
+                    uint32_t raw = image.tls.end - image.tls.start;
+                    uint64_t total = uint64_t(raw) + image.tls.zero_fill;
+                    c.mem.w32(slots + uint32_t(i * sizeof(uint32_t)), block);
+                    for (uint32_t n = 0; n < raw; ++n) c.mem.w8(block + n, c.mem.r8(image.tls.start + n));
+                    for (uint32_t n = raw; n < total; ++n) c.mem.w8(block + n, 0);
+                    block += uint32_t(total);
+                }
+            } else {
+                uint32_t raw = exe_tls.end - exe_tls.start;
+                c.mem.w32(slots, block);
+                for (uint32_t n = 0; n < raw; ++n) c.mem.w8(block + n, c.mem.r8(exe_tls.start + n));
+                for (uint32_t n = raw; n < raw + exe_tls.zero_fill; ++n) c.mem.w8(block + n, 0);
+            }
         }
         return ThreadTeb{base, size};
     }
-    // The exe's TLS callbacks for `reason` (DLL_THREAD_ATTACH 2 / DLL_THREAD_DETACH 3),
+    // TLS callbacks for `reason` (DLL_THREAD_ATTACH 2 / DLL_THREAD_DETACH 3),
     // called as (image base, reason, NULL) like the loader does.
     void tls_callbacks_call(Cpu& c, uint32_t reason) {
-        if (!exe_tls.present) return;
-        for (uint32_t p = exe_tls.callbacks; p; p += 4) {
-            uint32_t fn = c.mem.r32(p);
-            if (!fn) break;
-            c.call(fn, {image_base, reason, 0});
+        if (tls_images.empty()) {
+            if (!exe_tls.present) return;
+            for (uint32_t p = exe_tls.callbacks; p; p += 4) {
+                uint32_t fn = c.mem.r32(p);
+                if (!fn) break;
+                c.call(fn, {image_base, reason, 0});
+            }
+            return;
+        }
+        auto call_image = [&](Image& image) {
+            for (uint32_t p = image.tls.callbacks; p; p += 4) {
+                uint32_t fn = c.mem.r32(p);
+                if (!fn) break;
+                c.call(fn, {image.base, reason, 0});
+            }
+        };
+        if (reason == 3) {
+            for (auto it = tls_images.rbegin(); it != tls_images.rend(); ++it) call_image(**it);
+        } else {
+            for (Image* image : tls_images) call_image(*image);
         }
     }
     // The worker's context lives exactly as long as this object: the worker's TEB
@@ -469,21 +522,41 @@ struct Guest {
         }
         ~ThreadScope() { g.cur_teb = main_teb; c.fs_base = main_fs; c.limit = main_limit; g.in_thread_body = main_in_body; }
     };
-    // Order per thread: DLL_THREAD_ATTACH callbacks, the body, DLL_THREAD_DETACH
-    // callbacks (all on the thread's own TEB), then the TEB and TLS block are
-    // unmapped, and the scope restores the main thread. ExitThread in the body
-    // ends the thread; ExitThread in a detach callback ends only that callback:
-    // the thread is already exiting and keeps its body's exit code.
+    // Thread-library notifications exclude the executable, which has no DllMain
+    // entry in dll_order. DisableThreadLibraryCalls suppresses only DllMain
+    // thread notifications; static TLS callbacks still run.
+    void dll_thread_mains(Cpu& c, uint32_t reason) {
+        if (reason == 3) {
+            for (auto it = dll_order.rbegin(); it != dll_order.rend(); ++it) {
+                auto dll = dlls.find(*it);
+                auto entry = dll_entries.find(*it);
+                if (dll == dlls.end() || dll->second.disable_thread_library_calls || entry == dll_entries.end()) continue;
+                c.call(entry->second, {dll->second.image.base, reason, 0});
+            }
+        } else {
+            for (const auto& name : dll_order) {
+                auto dll = dlls.find(name);
+                auto entry = dll_entries.find(name);
+                if (dll == dlls.end() || dll->second.disable_thread_library_calls || entry == dll_entries.end()) continue;
+                c.call(entry->second, {dll->second.image.base, reason, 0});
+            }
+        }
+    }
+    // Order per thread: TLS callbacks and DllMain DLL_THREAD_ATTACH, the body,
+    // then reverse-order DllMain and TLS DLL_THREAD_DETACH on the same TEB. The
+    // TEB and all blocks in its mapping are unmapped after notifications.
     void run_pending_threads(Cpu& c) {
         while (!pending_threads.empty()) {
             auto t = pending_threads.front(); pending_threads.erase(pending_threads.begin());
             auto id = thread_ids.find(std::get<0>(t));
             ThreadTeb th = map_thread_teb(c, id != thread_ids.end() ? id->second : 0);
+            ThreadTebMapping mapping{c.mem, th};
             ThreadScope scope(*this, c, th.base, kThreadBudget);
             uint32_t saved_regs[8]; std::memcpy(saved_regs, c.reg, sizeof saved_regs);
             uint32_t saved_eip = c.eip, code = 0;
             try {
                 tls_callbacks_call(c, 2);  // DLL_THREAD_ATTACH
+                dll_thread_mains(c, 2);
                 code = c.call(std::get<1>(t), {std::get<2>(t)});
             }
             catch (const ThreadExit&) {
@@ -506,10 +579,13 @@ struct Guest {
             thread_exit_codes[std::get<0>(t)] = code;
             // DLL_THREAD_DETACH on the thread's own TEB, before its memory goes.
             std::memcpy(saved_regs, c.reg, sizeof saved_regs); saved_eip = c.eip;
-            try { tls_callbacks_call(c, 3); }
+            try {
+                dll_thread_mains(c, 3);
+                tls_callbacks_call(c, 3);
+            }
             catch (const ThreadExit&) { std::memcpy(c.reg, saved_regs, sizeof saved_regs); c.eip = saved_eip; }
             abandon_mutexes(id != thread_ids.end() ? id->second : 0);
-            c.mem.unmap(th.base, th.size);
+            mapping.release();
         }
     }
     // Guest DLL loading (stage 3). `run_dll_mains` runs each loaded DLL's
@@ -1486,8 +1562,15 @@ inline void Guest::register_all() {
         std::string n = str(c.arg(0)); if (n.empty()) return image_base;
         return module_by_name(n, c.thunks); });
     reg.add("kernel32.dll", "DisableThreadLibraryCalls", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
-        uint32_t module=c.arg(0); if(module==image_base||modules.end()!=std::find_if(modules.begin(),modules.end(),[module](const auto& entry){return entry.second==module;})) return 1;
-        for(const auto& dll:dlls) if(dll.second.image.base==module) return 1;
+        uint32_t module = c.arg(0);
+        if (module == image_base) return 1;
+        for (auto& dll : dlls) {
+            if (dll.second.image.base == module) {
+                dll.second.disable_thread_library_calls = true;
+                return 1;
+            }
+        }
+        if (modules.end() != std::find_if(modules.begin(), modules.end(), [module](const auto& entry) { return entry.second == module; })) return 1;
         set_last_error(6); return 0;
     });
     // FreeLibrary decrements a guest DLL's loader reference count. When the
@@ -1596,16 +1679,25 @@ inline void Guest::register_all() {
     // the guest's first blocking wait (keyed event / single object), with the
     // TEB TLS slots and SEH chain saved and restored around it: a real thread
     // has its own, and the synchronous model shares one TEB.
-    reg.add("kernel32.dll", "CreateThread", Conv::Stdcall, 6, [this](Cpu& c) -> uint32_t {
+    auto queue_guest_thread = [this](uint32_t start, uint32_t param, uint32_t thread_id_ptr) -> uint32_t {
         uint32_t handle = 0x60000000u + ++thread_serial;
         // lpThreadId receives the thread identifier (MSDN CreateThread; a DWORD
         // that identifies the thread while it lives). It must be nonzero and
         // unique among threads, and GetThreadId answers the same value.
         uint32_t id = 0x2000u + 4u * thread_serial;
         thread_ids[handle] = id;
-        pending_threads.push_back({handle, c.arg(2), c.arg(3)});
-        if (c.arg(5)) mem.w32(c.arg(5), id);
-        return handle; });
+        pending_threads.push_back({handle, start, param});
+        if (thread_id_ptr) mem.w32(thread_id_ptr, id);
+        return handle;
+    };
+    reg.add("kernel32.dll", "CreateThread", Conv::Stdcall, 6, [queue_guest_thread](Cpu& c) -> uint32_t {
+        return queue_guest_thread(c.arg(2), c.arg(3), c.arg(5));
+    });
+    // The MSVCRT entry point has the same cooperative worker semantics as
+    // CreateThread, but uses the cdecl CRT calling convention.
+    reg.add("msvcrt.dll", "_beginthreadex", Conv::Cdecl, 6, [queue_guest_thread](Cpu& c) -> uint32_t {
+        return queue_guest_thread(c.arg(2), c.arg(3), c.arg(5));
+    });
     // ExitThread ends only the calling thread (winbase.h: "Ends the calling
     // thread"): a body that calls it is unwound to run_pending_threads (the
     // ThreadExit exception) and the process keeps going (Bugbot 4559267305) —

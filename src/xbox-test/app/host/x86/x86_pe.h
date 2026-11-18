@@ -298,6 +298,7 @@ inline DllSource make_d3dx9_source(const DllReader& game, const DllReader& runti
 struct Dll {
     Image image;
     unsigned refs = 1;
+    bool disable_thread_library_calls = false;
     std::string host_name;  // as the guest asked for it, for GetProcAddress diagnostics
 };
 // Normalizes a forward string's module part for a module-table lookup: Windows
