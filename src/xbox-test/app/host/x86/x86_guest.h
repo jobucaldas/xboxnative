@@ -1275,6 +1275,77 @@ inline void Guest::register_all() {
         return 0x80004001u;  // E_NOTIMPL: no native Shell API on the off-device host
 #endif
     });
+    auto shell_path_w=[this](Cpu& c)->uint32_t {
+#if defined(_WIN32)
+        if(!c.arg(1))return 0;static HMODULE shell=LoadLibraryExW(L"shell32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);auto fn=shell?GetProcAddress(shell,"SHGetSpecialFolderPathW"):nullptr;if(!fn)return 0;
+        using Fn=BOOL(WINAPI*)(HWND,LPWSTR,int,BOOL);std::vector<wchar_t> path(260);if(!reinterpret_cast<Fn>(fn)(nullptr,path.data(),int(c.arg(2)),c.arg(3)))return 0;size_t n=0;while(n<path.size()&&path[n])++n;for(size_t i=0;i<n;++i)mem.w(c.arg(1)+uint32_t(i*2),uint16_t(path[i]),2);mem.w(c.arg(1)+uint32_t(n*2),0,2);return 1;
+#else
+        (void)c;return 0;
+#endif
+    };
+    reg.add("shell32.dll","SHGetSpecialFolderPathW",Conv::Stdcall,4,[shell_path_w](Cpu& c)->uint32_t { return shell_path_w(c); });
+    reg.add("shell32.dll","SHGetSpecialFolderPathA",Conv::Stdcall,4,[this](Cpu& c)->uint32_t {
+#if defined(_WIN32)
+        if(!c.arg(1))return 0;static HMODULE shell=LoadLibraryExW(L"shell32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);auto fn=shell?GetProcAddress(shell,"SHGetSpecialFolderPathA"):nullptr;if(!fn)return 0;
+        using Fn=BOOL(WINAPI*)(HWND,LPSTR,int,BOOL);char path[260]{};if(!reinterpret_cast<Fn>(fn)(nullptr,path,int(c.arg(2)),c.arg(3)))return 0;mem.write_bytes(c.arg(1),path,uint32_t(std::strlen(path)+1));return 1;
+#else
+        (void)c;return 0;
+#endif
+    });
+    reg.add("shell32.dll","SHGetFolderPathA",Conv::Stdcall,5,[this](Cpu& c)->uint32_t {
+#if defined(_WIN32)
+        if(!c.arg(4)||c.arg(2))return 0x80004003u;static HMODULE shell=LoadLibraryExW(L"shell32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);auto fn=shell?GetProcAddress(shell,"SHGetFolderPathA"):nullptr;if(!fn)return 0x80004001u;using Fn=HRESULT(WINAPI*)(HWND,int,HANDLE,DWORD,LPSTR);char path[260]{};HRESULT hr=reinterpret_cast<Fn>(fn)(nullptr,int(c.arg(1)),nullptr,c.arg(3),path);if(SUCCEEDED(hr))mem.write_bytes(c.arg(4),path,uint32_t(std::strlen(path)+1));return uint32_t(hr);
+#else
+        (void)c;return 0x80004001u;
+#endif
+    });
+    reg.add("shell32.dll","SHGetKnownFolderPath",Conv::Stdcall,4,[this](Cpu& c)->uint32_t {
+        if(!c.arg(3)){set_last_error(87);return 0x80004003u;}mem.w32(c.arg(3),0);
+#if defined(_WIN32)
+        if(!c.arg(0))return 0x80070057u;GUID id{};auto bytes=mem.read_bytes(c.arg(0),16);std::memcpy(&id,bytes.data(),16);static HMODULE shell=LoadLibraryExW(L"shell32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);auto fn=shell?GetProcAddress(shell,"SHGetKnownFolderPath"):nullptr;static HMODULE ole=LoadLibraryExW(L"ole32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);auto free_fn=ole?GetProcAddress(ole,"CoTaskMemFree"):nullptr;if(!fn||!free_fn)return 0x80004001u;using Fn=HRESULT(WINAPI*)(const GUID&,DWORD,HANDLE,LPWSTR*);using FreeFn=void(WINAPI*)(LPVOID);LPWSTR path=nullptr;HRESULT hr=reinterpret_cast<Fn>(fn)(id,c.arg(1),nullptr,reinterpret_cast<LPWSTR*>(&path));if(FAILED(hr)||!path)return uint32_t(hr);std::u16string value;for(size_t i=0;path[i];++i)value.push_back(char16_t(path[i]));uint32_t guest=put_wstr(value);reinterpret_cast<FreeFn>(free_fn)(path);mem.w32(c.arg(3),guest);return uint32_t(hr);
+#else
+        (void)c;return 0x80004001u;
+#endif
+    });
+    auto shell_create_directory=[this](Cpu& c,bool wide)->uint32_t {
+        if(!c.arg(1)){set_last_error(87);return 87;}
+        std::u16string path=wide?wstr(c.arg(1)):std::u16string();std::string narrow=wide?std::string():str(c.arg(1));std::u16string guard_path=path;if(!wide)for(unsigned char ch:narrow)guard_path.push_back(char16_t(ch));if(!host.destructive_file_guard||!host.destructive_file_guard("SHCreateDirectoryEx",guard_path)){set_last_error(5);return 5;}
+        Host::FileCall q{wide?Host::FileCall::Kind::CreateDirectoryW:Host::FileCall::Kind::AttributesA};if(wide)q.path_w=path;else{q.operation=Host::FileCall::Operation::CreateDirectoryA;q.path_a=narrow;}if(!host.file_call){set_last_error(120);return 120;}host.file_call(q);if(!q.succeeded){set_last_error(q.error?q.error:120);return q.error?q.error:120;}return q.error;
+    };
+    reg.add("shell32.dll","SHCreateDirectoryExA",Conv::Stdcall,3,[shell_create_directory](Cpu& c){return shell_create_directory(c,false);});
+    reg.add("shell32.dll","SHCreateDirectoryExW",Conv::Stdcall,3,[shell_create_directory](Cpu& c){return shell_create_directory(c,true);});
+    auto shell_execute=[this](Cpu& c,bool wide)->uint32_t { if(!c.arg(2))return 0; (void)wide;return 31; };
+    reg.add("shell32.dll","ShellExecuteA",Conv::Stdcall,6,[shell_execute](Cpu& c){return shell_execute(c,false);});
+    reg.add("shell32.dll","ShellExecuteW",Conv::Stdcall,6,[shell_execute](Cpu& c){return shell_execute(c,true);});
+    reg.add("shell32.dll","CommandLineToArgvW",Conv::Stdcall,2,[this](Cpu& c)->uint32_t {
+        if(!c.arg(0)||!c.arg(1)){set_last_error(87);return 0;}std::u16string input=wstr(c.arg(0));std::vector<std::u16string> args;size_t i=0;
+        while(i<input.size()){while(i<input.size()&&(input[i]==u' '||input[i]==u'\t'))++i;if(i==input.size())break;std::u16string arg;bool quoted=false;
+            while(i<input.size()){if(input[i]==u'\\'){size_t start=i;while(i<input.size()&&input[i]==u'\\')++i;size_t slashes=i-start;if(i<input.size()&&input[i]==u'"'){arg.append(slashes/2,u'\\');if(slashes%2){arg.push_back(u'"');++i;}else quoted=!quoted,++i;}else arg.append(slashes,u'\\');continue;}if(input[i]==u'"'){quoted=!quoted;++i;continue;}if(!quoted&&(input[i]==u' '||input[i]==u'\t'))break;arg.push_back(input[i++]);}args.push_back(std::move(arg));while(i<input.size()&&(input[i]==u' '||input[i]==u'\t'))++i;
+        }
+        uint64_t bytes=uint64_t(args.size())*4;for(const auto& arg:args)bytes+=uint64_t(arg.size()+1)*2;if(bytes>0x7fffffffu){set_last_error(8);return 0;}uint32_t base=heap.alloc(uint32_t(bytes?bytes:4)),strings=base+uint32_t(args.size()*4);for(size_t n=0;n<args.size();++n){uint32_t p=strings;for(size_t j=0;j<n;++j)p+=uint32_t((args[j].size()+1)*2);mem.w32(base+uint32_t(n*4),p);for(size_t j=0;j<args[n].size();++j)mem.w(p+uint32_t(j*2),args[n][j],2);mem.w(p+uint32_t(args[n].size()*2),0,2);}mem.w32(c.arg(1),uint32_t(args.size()));return base;
+    });
+    auto shell_file_operation=[this](Cpu& c,bool wide)->uint32_t {
+        uint32_t op=c.arg(0);if(!op){set_last_error(87);return 87;}uint32_t func=mem.r32(op+4),from=mem.r32(op+8),to=mem.r32(op+12);if(!from){set_last_error(87);return 87;}if(func<1||func>4){set_last_error(120);return 120;}mem.w32(op+20,0);
+        auto check_list=[&](uint32_t p)->bool {
+            uint32_t cursor=p;
+            for(unsigned item=0;item<4096;++item){
+                std::u16string value;
+                if(wide){
+                    for(unsigned i=0;i<1u<<20;++i){uint16_t ch=uint16_t(mem.r(cursor+i*2,2));if(!ch)break;value.push_back(char16_t(ch));}
+                    cursor+=uint32_t((value.size()+1)*2);
+                }else{
+                    for(unsigned i=0;i<1u<<20;++i){uint8_t ch=mem.r8(cursor+i);if(!ch)break;value.push_back(char16_t(ch));}
+                    cursor+=uint32_t(value.size()+1);
+                }
+                if(value.empty())return true;
+                if(!host.destructive_file_guard||!host.destructive_file_guard("SHFileOperation",value))return false;
+            }
+            return false;
+        };
+        if(!check_list(from)||(to&&!check_list(to))){mem.w32(op+20,1);set_last_error(5);return 5;}set_last_error(120);return 120;
+    };
+    reg.add("shell32.dll","SHFileOperationA",Conv::Stdcall,1,[shell_file_operation](Cpu& c){return shell_file_operation(c,false);});
+    reg.add("shell32.dll","SHFileOperationW",Conv::Stdcall,1,[shell_file_operation](Cpu& c){return shell_file_operation(c,true);});
 
     // kernel32: process, error, memory, sync, TLS
     reg.add("kernel32.dll", "GetLastError", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return last_error(); });
