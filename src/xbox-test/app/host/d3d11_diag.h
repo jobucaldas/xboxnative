@@ -151,6 +151,7 @@ inline bool flushTrace(std::atomic<bool>* gate=nullptr) {
 // swap-chain hooks (guest_overlay.h) are audited by the same test's DXGI
 // section, which derives its expectations from the same vtable layout.
 static_assert(CheckFeatureSupport==33&&CreateDeferredContext==27&&CreateSamplerState==23,"ID3D11Device slot layout");
+static_assert(ContextRelease==2&&ClearState==110,"ID3D11DeviceContext reset/release slots");
 
 // The Context1 slot is derived, not restated: if FinishCommandList ever moves,
 // ClearView moves with it and kSlots must grow to cover it.
@@ -330,18 +331,31 @@ inline ContextState& stateOf(void* self) {
     }
     return orphanState;
 }
+inline void clearTrackedState(ContextState& s) {
+    s.topology.store(0,std::memory_order_relaxed);s.shaders.store(0,std::memory_order_relaxed);
+    s.rtFormat.store(0,std::memory_order_relaxed);
+    s.rtWidth.store(0,std::memory_order_relaxed);s.rtHeight.store(0,std::memory_order_relaxed);s.dsFormat.store(0,std::memory_order_relaxed);
+    s.gsHash.store(0,std::memory_order_relaxed);s.psHash.store(0,std::memory_order_relaxed);
+    s.srvState.store(0,std::memory_order_relaxed);
+    for(size_t i=0;i<kFormatCache;++i)s.formatView[i].store(nullptr,std::memory_order_relaxed);
+}
 // A context created at an address an earlier one used must not inherit its
 // state: patchContext resets the entry (a new context has no topology and no
 // shaders bound).
 inline void resetContext(void* self) {
     ContextState& s=stateOf(self);
-    s.topology.store(0,std::memory_order_relaxed);s.shaders.store(0,std::memory_order_relaxed);
-    s.rtFormat.store(0,std::memory_order_relaxed);
-    s.rtWidth.store(0,std::memory_order_relaxed);s.rtHeight.store(0,std::memory_order_relaxed);s.dsFormat.store(0,std::memory_order_relaxed);
+    clearTrackedState(s);
     s.contextId.store(s.deferred.load(std::memory_order_relaxed)?deferredContextSerial.fetch_add(1,std::memory_order_relaxed)+1:0,std::memory_order_relaxed);
-    s.gsHash.store(0,std::memory_order_relaxed);s.psHash.store(0,std::memory_order_relaxed);
-    s.srvState.store(0,std::memory_order_relaxed);s.pendingDeepDraws.clear();s.pendingDeepDrawsCapped=false;
-    for(size_t i=0;i<kFormatCache;++i)s.formatView[i].store(nullptr,std::memory_order_relaxed);
+    s.pendingDeepDraws.clear();s.pendingDeepDrawsCapped=false;
+}
+inline void forgetContext(void* self) {
+    for(auto& s:contextStates) if(s.context.load(std::memory_order_acquire)==self) {
+        clearTrackedState(s);
+        s.deferred.store(0,std::memory_order_relaxed);s.contextId.store(0,std::memory_order_relaxed);
+        {std::lock_guard<std::mutex> lock(reportM);s.pendingDeepDraws.clear();s.pendingDeepDrawsCapped=false;}
+        s.context.store(nullptr,std::memory_order_release);
+        return;
+    }
 }
 // ---- device health
 // The guest's device may be removed under memory or timeout pressure (Slime
@@ -1479,6 +1493,18 @@ static HRESULT STDMETHODCALLTYPE createPredicate(DevicePtr self,const D3D11_QUER
 // calls that say what the guest draws. The draw hooks only count: they call
 // the original entry with the arguments they were given and return its result.
 inline bool patchContext(ID3D11DeviceContext* context);
+static ULONG STDMETHODCALLTYPE contextRelease(void* self) {
+    using Fn=ULONG(STDMETHODCALLTYPE*)(void*);
+    auto call=reinterpret_cast<Fn>(original(self,ContextRelease));if(!call)return 0;
+    ULONG refs=call(self);
+    if(!refs)forgetContext(self);
+    return refs;
+}
+static void STDMETHODCALLTYPE contextClearState(DevicePtr self) {
+    using Fn=void(STDMETHODCALLTYPE*)(DevicePtr);
+    auto call=reinterpret_cast<Fn>(original(self,ClearState));if(!call)return;
+    call(self);clearTrackedState(stateOf(self));
+}
 static HRESULT STDMETHODCALLTYPE contextMap(DevicePtr self,ID3D11Resource* r,UINT subresource,D3D11_MAP type,UINT flags,D3D11_MAPPED_SUBRESOURCE* mapped) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT,D3D11_MAP,UINT,D3D11_MAPPED_SUBRESOURCE*);
     auto call=reinterpret_cast<Fn>(original(self,ContextMap));if(!call)return E_FAIL;
@@ -1963,6 +1989,7 @@ static HRESULT STDMETHODCALLTYPE contextFinishCommandList(DevicePtr self,BOOL re
     if(SUCCEEDED(hr)){
         traceCommand("FinishCommandList","restore=%u",restore!=0);
         commandLists.fetch_add(1,std::memory_order_relaxed);if(list&&*list)noteFinishedCommandList(self,*list);
+        if(!restore)clearTrackedState(stateOf(self));
     }
     D3D11_DIAG_FAILED("FinishCommandList",fmt("%d",restore!=0),fmt("restore=%d",restore!=0));
     return hr;
@@ -1973,7 +2000,9 @@ static void STDMETHODCALLTYPE contextExecuteCommandList(DevicePtr self,ID3D11Com
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11CommandList*,BOOL);
     auto call=reinterpret_cast<Fn>(original(self,ExecuteCommandList));if(!call)return;
     executedLists.fetch_add(1,std::memory_order_relaxed);call(self,list,restore);
-    traceCommand("ExecuteCommandList","restore=%u",restore!=0);noteExecutedCommandList(list,restore);tick();
+    traceCommand("ExecuteCommandList","restore=%u",restore!=0);noteExecutedCommandList(list,restore);
+    if(!restore)clearTrackedState(stateOf(self));
+    tick();
 }
 static HRESULT STDMETHODCALLTYPE createDeferredContext(DevicePtr self,UINT flags,ID3D11DeviceContext** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11DeviceContext**);
@@ -1991,6 +2020,7 @@ static HRESULT STDMETHODCALLTYPE createDeferredContext1(DevicePtr self,UINT flag
 }
 inline const Patch* contextPatches(size_t& count){
     static const Patch table[]={
+        {ContextRelease,(void*)&contextRelease},{ClearState,(void*)&contextClearState},
         {ContextMap,(void*)&contextMap},{Unmap,(void*)&contextUnmap},{DrawIndexed,(void*)&contextDrawIndexed},{Draw,(void*)&contextDraw},
         {DrawIndexedInstanced,(void*)&contextDrawIndexedInstanced},{DrawInstanced,(void*)&contextDrawInstanced},
         {DrawAuto,(void*)&contextDrawAuto},{DrawIndexedInstancedIndirect,(void*)&contextDrawIndexedInstancedIndirect},
