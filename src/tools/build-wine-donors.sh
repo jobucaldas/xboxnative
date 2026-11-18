@@ -3,7 +3,7 @@
 # build-wine-donors.sh [outdir] [--dry-run]
 # Builds the Wine "donor" PE DLLs (avrt, dinput8, hid, psapi, setupapi, shcore, version) from the pinned Wine source tarball
 # (`wine-src` in deps.pin, SHA-256 verified) with mingw-w64. Only those DLLs and the import libraries they need are built.
-# Also builds VC110/VC120 CRT donors for PE32 games into <outdir>/runtime/x86/ and Wine's C++ runtime DLLs
+# Also builds VC110/VC120 CRT and D3DX9 donors for PE32 games into <outdir>/runtime/x86/ and Wine's C++ runtime DLLs
 # (msvcp140 family, concrt140) into <outdir>/runtime/: launcher Play maps them for
 # games that do not ship their own copy, as an installed VC++ redistributable serves them on Windows.
 # d3dcompiler_47 goes into <outdir>/graphics/: the HLSL compiler xgameFinal.exe statically imports (D3DCompile,
@@ -22,6 +22,8 @@ DLLS=(avrt dinput8 hid psapi setupapi shcore version)
 GRAPHICS=(d3dcompiler_47)
 RUNTIME=(vcruntime140 msvcp140 msvcp140_1 msvcp140_2 msvcp140_atomic_wait msvcp140_codecvt_ids concrt140)
 RUNTIME_X86=(msvcr110 msvcp110 msvcr120 msvcp120)
+D3DX9_X86=(d3dx9_24 d3dx9_25 d3dx9_26 d3dx9_27 d3dx9_28 d3dx9_29 d3dx9_30 d3dx9_31 d3dx9_32 d3dx9_33 d3dx9_34 d3dx9_35 d3dx9_36 d3dx9_37 d3dx9_38 d3dx9_39 d3dx9_40 d3dx9_41 d3dx9_42 d3dx9_43)
+D3DX9_DEPS_X86=(d3dcompiler_47 d3dxof ucrtbase)
 read -r _ url sha < <(grep -E '^wine-src[[:space:]]' "$root/deps.pin") || { echo "wine-src missing from deps.pin" >&2; exit 2; }
 patchfile=$root/patches/wine-src/0001-pe-rodata.patch
 patch3file=$root/patches/wine-src/0003-donor-critical-section-flags.patch
@@ -31,7 +33,7 @@ read -r patch3sha _ < <(sha256sum "$patch3file")
 read -r recipe _ < <(sha256sum "$patchfile" "$root/patches/wine-src/0002-d3dcompiler-static-vkd3d.patch" "$patch3file" "${BASH_SOURCE[0]}" | sha256sum)
 base=$root/third_party/wine-donors-build; work=$base/${sha:0:16}-${recipe:0:16}   # source and recipe changes invalidate the tree
 tar=$work/$(basename "$url")
-echo "wine-src url=$url sha256=$sha out=$out dlls=${DLLS[*]} runtime=${RUNTIME[*]} runtime-x86=${RUNTIME_X86[*]}"
+echo "wine-src url=$url sha256=$sha out=$out dlls=${DLLS[*]} runtime=${RUNTIME[*]} runtime-x86=${RUNTIME_X86[*]} d3dx9-x86=${D3DX9_X86[*]} d3dx9-deps-x86=${D3DX9_DEPS_X86[*]}"
 (( dry )) && exit 0
 for t in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc make flex bison curl xz sha256sum patch; do
   command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 2; }
@@ -66,10 +68,10 @@ bld32=$work/build-i386; mkdir -p "$bld32"; cd "$bld32"
   --without-freetype --without-dbus --without-udev --without-hal --without-gphoto --without-gnutls \
   --without-krb5 --without-netapi --without-opencl --without-unwind --without-gettext --without-gettextpo \
   >configure.log 2>&1 && touch "$bld32/.configured"; } || { tail -20 configure.log >&2; exit 1; }
-targets32=(); for d in "${RUNTIME_X86[@]}"; do targets32+=("dlls/$d/all"); done
+targets32=(); for d in "${RUNTIME_X86[@]}" "${D3DX9_X86[@]}" "${D3DX9_DEPS_X86[@]}"; do targets32+=("dlls/$d/all"); done
 make -j"${JOBS:-$(nproc)}" "${targets32[@]}" >make.log 2>&1 || { tail -30 make.log >&2; exit 1; }
 cd "$bld"
-for d in "${RUNTIME_X86[@]}"; do cp "$bld32/dlls/$d/i386-windows/$d.dll" "$out/runtime/x86/$d.dll"; done
+for d in "${RUNTIME_X86[@]}" "${D3DX9_X86[@]}" "${D3DX9_DEPS_X86[@]}"; do cp "$bld32/dlls/$d/i386-windows/$d.dll" "$out/runtime/x86/$d.dll"; done
 ( cd "$out" && sha256sum -- *.dll >SHA256SUMS )
 ( cd "$out/graphics" && sha256sum -- *.dll >SHA256SUMS )
 ( cd "$out/runtime" && sha256sum -- *.dll >SHA256SUMS )

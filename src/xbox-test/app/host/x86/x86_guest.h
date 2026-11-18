@@ -693,6 +693,26 @@ struct Guest {
         if (cpu) run_new_dll_mains(*cpu);
         return base;
     }
+    uint32_t resolve_delay_loaded(Cpu& c) {
+        const uint32_t base=c.arg(0), descriptor=c.arg(1), thunk=c.arg(4);
+        const Image* owner=nullptr;
+        for(const auto& entry:dlls)if(entry.second.image.base==base){owner=&entry.second.image;break;}
+        auto inside=[&](uint32_t address,uint32_t size) {
+            return owner&&address>=owner->base&&size<=owner->size-(address-owner->base);
+        };
+        if(!inside(descriptor,32)||!inside(thunk,4))return 0;
+        const uint32_t name_rva=mem.r32(descriptor+4),iat_rva=mem.r32(descriptor+12),int_rva=mem.r32(descriptor+16);
+        if(!inside(base+name_rva,1)||!iat_rva||!int_rva||thunk<base+iat_rva)return 0;
+        const uint32_t index=(thunk-(base+iat_rva))/4;
+        const uint32_t entry=base+int_rva+index*4;
+        if(!inside(entry,4))return 0;
+        const uint32_t imported=mem.r32(entry);
+        const std::string delayed_name=(imported&0x80000000u)?"#"+std::to_string(imported&0xffffu):str(base+imported+2);
+        if(host.route_trace)host.route_trace("ResolveDelayLoadedAPI module="+str(base+name_rva)+"!"+delayed_name);
+        uint32_t module=load_guest_dll(&c,str(base+name_rva),c.thunks);
+        if(!module)return 0;
+        return get_proc_address(module,imported&0x80000000u?imported&0xffffu:base+imported+2,c.thunks);
+    }
     // Runs DllMain(DLL_PROCESS_ATTACH) for every module of `dll_order` that has
     // an entry and has not been attached yet, in load order (dependencies
     // first). `attached` marks the dispatch so a later LoadLibrary of a
@@ -2944,6 +2964,9 @@ inline void Guest::register_all() {
         return put_str("C"); });
     // Stage 3: guest DLL loading. `table` is captured so a LoadLibrary from
     // guest code can add thunks for the new module's imports.
+    reg.add("kernel32.dll", "ResolveDelayLoadedAPI", Conv::Stdcall, 6, [this](Cpu& c) -> uint32_t {
+        return resolve_delay_loaded(c);
+    });
     reg.add("kernel32.dll", "GetProcAddress", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         uint32_t module = c.arg(0), name = c.arg(1);
         if (!module || !name) { set_last_error(126); return 0; }

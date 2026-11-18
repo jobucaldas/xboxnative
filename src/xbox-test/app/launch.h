@@ -1170,16 +1170,18 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         if(packageDir.empty())return std::vector<uint8_t>{};
         std::wstring leaf(name.begin(),name.end()); return readPe32Dll(packageDir+L"\\runtime\\x86\\"+leaf);
     };
-    x86::DllSource vcSource=x86::make_vc110_vc120_source(gameDlls,runtimeDlls,[&](const std::string& name,const char* origin) {
+    auto donorOrigin=[&](const std::string& name,const char* origin) {
         snprintf(line,sizeof line,"x86 donor: %s from %s",name.c_str(),origin); lp_sink(line);
-    });
+    };
+    x86::DllSource vcSource=x86::make_vc110_vc120_source(gameDlls,runtimeDlls,donorOrigin);
+    x86::DllSource d3dxSource=x86::make_d3dx9_source(gameDlls,runtimeDlls,vcSource,donorOrigin);
     auto stagedSteam=[&](const std::string& name) {
         const std::wstring p=provider_dir(c.appid)+L"\\"+std::wstring(name.begin(),name.end());
         return readPe32Dll(p);
     };
-    x86::DllSource dllSource=x86::make_steam_dll_source(gameDlls,stagedSteam,vcSource,steamProvider,steamstub);
+    x86::DllSource dllSource=x86::make_steam_dll_source(gameDlls,stagedSteam,d3dxSource,steamProvider,steamstub);
     x86::DllLoadObserver donorGaps=[&](const std::string& dll,const std::vector<std::string>& unresolved) {
-        if(!x86::is_vc110_vc120_dll(dll))return;
+        if(!x86::is_vc110_vc120_dll(dll)&&!x86::is_d3dx9_donor_dll(dll))return;
         std::string kernel,other; unsigned kernelCount=0,otherCount=0,kernelMore=0,otherMore=0;
         for(const auto& item:unresolved) {
             bool isKernel=item.rfind("kernel32.dll!",0)==0;
