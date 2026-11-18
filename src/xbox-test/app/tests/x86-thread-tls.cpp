@@ -25,7 +25,8 @@ int main(int argc, char** argv) {
         return std::vector<uint8_t>{std::istreambuf_iterator<char>(f), {}};
     };
     PlayResult result = run_image(slurp(argv[1]), "fixture-thread-tls.exe", "fixture-thread-tls.exe",
-                                  nullptr, nullptr, 500ull * 1000 * 1000, source);
+                                  [](const std::string& text) { std::printf("%s", text.c_str()); },
+                                  nullptr, 500ull * 1000 * 1000, source);
     if (!result.fault.empty()) {
         std::printf("x86-thread-tls: fault kind=%s %s\n", result.fault_kind.c_str(), result.fault.c_str());
         return 1;
