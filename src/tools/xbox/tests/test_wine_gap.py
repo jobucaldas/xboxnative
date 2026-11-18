@@ -68,6 +68,28 @@ class GapTests(unittest.TestCase):
         self.assertTrue(old <= actual)
         self.assertGreater(len(actual), len(old))
 
+    def test_cheap_tail_routes_cover_every_imported_symbol(self):
+        mapping = json.loads((Path(__file__).parents[1] / 'import_map.json').read_text())['dlls']
+        expected = {
+            'dbghelp.dll': ('system', {'SymFromAddr', 'SymInitialize', 'SymLoadModuleEx',
+                                      'SymRegisterFunctionEntryCallback64'}),
+            'setupapi.dll': ('wine-pe', {'SetupDiDestroyDeviceInfoList', 'SetupDiEnumDeviceInfo',
+                                         'SetupDiEnumDeviceInterfaces', 'SetupDiGetClassDevsA',
+                                         'SetupDiGetDeviceInterfaceDetailW'}),
+            'shlwapi.dll': ('system', {'PathCanonicalizeW', 'SHDeleteKeyW'}),
+            'psapi.dll': ('wine-pe', {'GetModuleFileNameExW'}),
+            'wininet.dll': ('system', {'HttpOpenRequestA', 'HttpQueryInfoA', 'HttpSendRequestA',
+                                       'InternetCloseHandle', 'InternetConnectA',
+                                       'InternetCrackUrlA', 'InternetOpenA'}),
+        }
+        with (COVERAGE / 'megabonk-imports-vs-wine.csv').open(newline='') as stream:
+            rows = list(csv.DictReader(stream))
+        for dll, (route, symbols) in expected.items():
+            self.assertEqual(mapping[dll]['class'], route)
+            actual = {row['symbol']: row['console_route'] for row in rows if row['dll'] == dll}
+            self.assertEqual(set(actual), symbols)
+            self.assertEqual(set(actual.values()), {'system'} if route == 'system' else {'donor'})
+
 
 class WineSourceTests(unittest.TestCase):
     @classmethod
