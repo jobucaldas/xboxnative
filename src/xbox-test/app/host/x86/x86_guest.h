@@ -2610,6 +2610,9 @@ inline void Guest::register_all() {
         return 0x80004001u;
 #endif
     });
+    reg.add("ole32.dll","CoSetProxyBlanket",Conv::Stdcall,8,[](Cpu&) -> uint32_t {
+        return 0x80004001u; // E_NOTIMPL: the x86 guest has no proxy manager
+    });
     reg.add("ole32.dll","CoInitialize",Conv::Stdcall,1,[com_init](Cpu& c)->uint32_t { return com_init(c.arg(0),2); });
     reg.add("ole32.dll","CoInitializeEx",Conv::Stdcall,2,[com_init](Cpu& c)->uint32_t {
         uint32_t flags=c.arg(1);if(flags&~0xEu)return 0x80070057u;return com_init(c.arg(0),flags&2u);
@@ -2641,6 +2644,32 @@ inline void Guest::register_all() {
         uint32_t address=c.arg(0);if(!address){set_last_error(87);return 0x80004003u;}uint16_t vt=uint16_t(mem.r(address,2));if(vt&0x4000u)return 0x80004001u;
         const uint16_t supported[]={0,1,2,3,4,5,6,7,10,11,16,17,18,19,20,21,22,23,25};for(uint16_t value:supported)if(vt==value){mem.w(address,0,2);return 0;}return 0x80004001u;
     });
+    reg.add("oleaut32.dll","SysAllocString",Conv::Stdcall,1,[this](Cpu& c)->uint32_t {
+        if(!c.arg(0))return 0;
+        const auto text=wstr(c.arg(0));const uint64_t bytes=uint64_t(text.size())*2;
+        if(bytes>0x7ffffff0u)return 0;
+        const uint32_t base=heap.alloc(uint32_t(bytes+6));mem.w32(base,uint32_t(bytes));
+        for(size_t i=0;i<text.size();++i)mem.w(base+4+uint32_t(i*2),text[i],2);
+        mem.w(base+4+uint32_t(bytes),0,2);return base+4;
+    });
+    reg.add_ordinal("oleaut32.dll",2,"SysAllocString");
+    reg.add("oleaut32.dll","SysFreeString",Conv::Stdcall,1,[this](Cpu& c)->uint32_t {
+        const uint32_t bstr=c.arg(0);if(bstr&&bstr>=4&&heap.size_of(bstr-4))heap.release(bstr-4);return 0;
+    });
+    reg.add_ordinal("oleaut32.dll",6,"SysFreeString");
+    reg.add("oleaut32.dll","VariantInit",Conv::Stdcall,1,[this](Cpu& c)->uint32_t {
+        if(!c.arg(0))return 0;
+        for(unsigned i=0;i<16;++i)mem.w8(c.arg(0)+i,0);
+        return 0;
+    });
+    reg.add_ordinal("oleaut32.dll",8,"VariantInit");
+    reg.add("oleaut32.dll","VariantClear",Conv::Stdcall,1,[this](Cpu& c)->uint32_t {
+        const uint32_t address=c.arg(0);if(!address)return 0x80070057u;const uint16_t vt=uint16_t(mem.r(address,2));
+        if(vt==0){for(unsigned i=0;i<16;++i)mem.w8(address+i,0);return 0;}
+        if(vt==8){const uint32_t bstr=mem.r32(address+8);if(bstr&&bstr>=4&&heap.size_of(bstr-4))heap.release(bstr-4);for(unsigned i=0;i<16;++i)mem.w8(address+i,0);return 0;}
+        return 0x80004001u;
+    });
+    reg.add_ordinal("oleaut32.dll",9,"VariantClear");
     reg.add("kernel32.dll", "DeleteFileA", Conv::Stdcall, 1, [this,guard_file,narrow_path](Cpu& c) -> uint32_t {
         if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::AttributesA};q.operation=Host::FileCall::Operation::DeleteA;q.path_a=str(c.arg(0));
         if(!guard_file("DeleteFileA",narrow_path(q.path_a)))return 0;
