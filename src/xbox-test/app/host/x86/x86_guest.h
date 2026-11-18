@@ -2004,8 +2004,8 @@ inline void Guest::register_all() {
             if (response.result && response.output.size() == 20) copy_out(p, response.output.data(), 20);
             return response.result;
         }
-        mem.w32(p, cp == 65001 ? 65001u : 0u); mem.w32(p + 4, 1); mem.w8(p + 8, '?'); mem.w8(p + 9, 0);
-        for (int i = 10; i < 20; ++i) mem.w8(p + uint32_t(i), 0);
+        mem.w32(p, cp == 65001 ? 4u : 1u); mem.w8(p + 4, '?'); mem.w8(p + 5, 0);
+        for (int i = 6; i < 18; ++i) mem.w8(p + uint32_t(i), 0);
         return 1; });
     reg.add("kernel32.dll", "MultiByteToWideChar", Conv::Stdcall, 6, [this, nls_input](Cpu& c) -> uint32_t {
         uint32_t cp = c.arg(0), flags = c.arg(1), src = c.arg(2), dst = c.arg(4), cap = c.arg(5);

@@ -11,6 +11,19 @@
 #include "../host/x86/x86_guest.h"
 #include "../host/x86/x86_file_guard.h"
 using namespace x86;
+static bool verify_cpinfo_layout() {
+    Memory mem; mem.map(0x1000, 0x2000, PROT_R | PROT_W);
+    Host host; Registry reg; Guest guest(mem, host, reg); guest.register_all();
+    ThunkTable thunks; Cpu cpu(mem, thunks); cpu.reg[ESP] = 0x2000;
+    auto it = reg.map.find({"kernel32.dll", "getcpinfo"});
+    if (it == reg.map.end()) return false;
+    for (uint32_t cp : {1252u, 65001u}) {
+        mem.w32(cpu.reg[ESP] + 4, cp); mem.w32(cpu.reg[ESP] + 8, 0x1000);
+        if (!it->second.fn(cpu) || mem.r32(0x1000) != (cp == 65001 ? 4u : 1u) ||
+            mem.r(0x1004, 2) != '?' || mem.r(0x1006, 2) != 0) return false;
+    }
+    return true;
+}
 static bool verify_printf_padding() {
     Memory mem; mem.map(0x1000, 0x1000, PROT_R | PROT_W);
     Host host; Registry reg; Guest guest(mem, host, reg);
@@ -219,6 +232,7 @@ static std::vector<uint8_t> slurp(const char* path) {
     return std::vector<uint8_t>{std::istreambuf_iterator<char>(f), {}};
 }
 int main(int argc, char** argv) {
+    if (!verify_cpinfo_layout()) { std::puts("X86-GUEST FAIL: GetCPInfo layout"); return 1; }
     if (!verify_printf_padding()) { std::puts("X86-GUEST FAIL: printf sign and prefix zero padding"); return 1; }
     if (!verify_critical_section_routes()) { std::puts("X86-CRITICAL-SECTION FAIL: CRT forced debug-info initialization"); return 1; }
     if (!verify_display_routes()) return 1;
