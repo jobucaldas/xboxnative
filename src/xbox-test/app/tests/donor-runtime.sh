@@ -18,7 +18,7 @@ for donor in hid psapi setupapi version shcore avrt;do
  case "$donor" in
   hid) symbols=(HidD_GetHidGuid DeliberatelyAbsentDonorExport);;
   psapi) symbols=(GetModuleFileNameExW);;
-  setupapi) symbols=(SetupDiCreateDeviceInfoList SetupDiDestroyDeviceInfoList SetupDiEnumDeviceInfo SetupDiEnumDeviceInterfaces);;
+  setupapi) symbols=(SetupDiCreateDeviceInfoList SetupDiDestroyDeviceInfoList SetupDiEnumDeviceInfo SetupDiEnumDeviceInterfaces SetupDiGetClassDevsA SetupDiGetDeviceInterfaceDetailW);;
   version) symbols=(GetFileVersionInfoSizeW GetFileVersionInfoW VerQueryValueW);;
   shcore) symbols=(CommandLineToArgvW);;
   avrt) symbols=(AvSetMmThreadCharacteristicsW);;
@@ -42,7 +42,7 @@ for kind in guest missing;do
  done
 python3 -I donors/inspect.py --donor-dir "$root/out/wine-donors" --output "$out/obj/donor_imports.generated.h"
 bash ../uwph/host/build-sqlite-lib.sh "$out/obj/sqlite3.lib"
-UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/runner.exe" tests/donor-runtime.cpp -- /MT /O2 "/I$out/obj" /I../uwph/host/third_party/sqlite
+UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/runner.exe" tests/donor-runtime.cpp vendor/zlib/adler32.c vendor/zlib/crc32.c vendor/zlib/inffast.c vendor/zlib/inflate.c vendor/zlib/inftrees.c vendor/zlib/zutil.c -- /MT /O2 "/I$out/obj" /I../uwph/host/third_party/sqlite
 cp out/layout/donors/*.dll "$out/donors/"
 cp out/layout/uwph-u32c.dll "$out/"
 # Probe and guest each have a 30-second wait. Keep both gates intact and
@@ -56,7 +56,7 @@ for mode in normal missing disabled;do
  grep -Fx 'DWPE RUN psapi.dll initialized=1 missing=0 behavior=1' "$out/$mode.log"
  grep -Fx 'DONOR-COM PASS: CoCreateInstance(CLSID_DirectInput8) served by the dinput8 donor; keyboard device created' "$out/$mode.log"
  if [[ $mode == normal ]];then
-  grep -Fx 'DONOR-GUEST PASS: actual Play runtime; 11 verified donor IAT slots; behavior exit=42; owned fixture only' "$out/$mode.log"
+  grep -Fx 'DONOR-GUEST PASS: actual Play runtime; 13 verified donor IAT slots; behavior exit=42; owned fixture only' "$out/$mode.log"
  else
   grep -Fx "DONOR-GUEST PASS mode=$mode: rejected before guest initialization; no placeholders" "$out/$mode.log"
  fi

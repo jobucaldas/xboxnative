@@ -31,6 +31,12 @@ extern "C" DWORD donor_guest_entry() {
     SP_DEVICE_INTERFACE_DATA interfaceData{};interfaceData.cbSize=sizeof interfaceData;SetLastError(0);
     if(SetupDiEnumDeviceInterfaces(set,nullptr,&interfaceClass,0,&interfaceData)||GetLastError()!=ERROR_NO_MORE_ITEMS)return 2;
     if(!SetupDiDestroyDeviceInfoList(set))return 2;
+    HDEVINFO all=SetupDiGetClassDevsA(nullptr,nullptr,nullptr,DIGCF_ALLCLASSES);
+    if(all==INVALID_HANDLE_VALUE)return 2;
+    DWORD required=0;SetLastError(0);
+    if(SetupDiGetDeviceInterfaceDetailW(all,nullptr,nullptr,0,&required,nullptr)||
+       GetLastError()!=ERROR_INVALID_PARAMETER)return 2;
+    if(!SetupDiDestroyDeviceInfoList(all))return 2;
     int count=0;auto argv=CommandLineToArgvW(L"\"alpha beta\" tail",&count);
     if(!argv)return 3;
     bool parsed=count==2;

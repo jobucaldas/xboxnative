@@ -68,6 +68,28 @@ class GapTests(unittest.TestCase):
         self.assertTrue(old <= actual)
         self.assertGreater(len(actual), len(old))
 
+    def test_cheap_tail_routes_cover_every_imported_symbol(self):
+        mapping = json.loads((Path(__file__).parents[1] / 'import_map.json').read_text())['dlls']
+        expected = {
+            'dbghelp.dll': ('system', {'SymFromAddr', 'SymInitialize', 'SymLoadModuleEx',
+                                      'SymRegisterFunctionEntryCallback64'}),
+            'setupapi.dll': ('wine-pe', {'SetupDiDestroyDeviceInfoList', 'SetupDiEnumDeviceInfo',
+                                         'SetupDiEnumDeviceInterfaces', 'SetupDiGetClassDevsA',
+                                         'SetupDiGetDeviceInterfaceDetailW'}),
+            'shlwapi.dll': ('system', {'PathCanonicalizeW', 'SHDeleteKeyW'}),
+            'psapi.dll': ('wine-pe', {'GetModuleFileNameExW'}),
+            'wininet.dll': ('system', {'HttpOpenRequestA', 'HttpQueryInfoA', 'HttpSendRequestA',
+                                       'InternetCloseHandle', 'InternetConnectA',
+                                       'InternetCrackUrlA', 'InternetOpenA'}),
+        }
+        with (COVERAGE / 'megabonk-imports-vs-wine.csv').open(newline='') as stream:
+            rows = list(csv.DictReader(stream))
+        for dll, (route, symbols) in expected.items():
+            self.assertEqual(mapping[dll]['class'], route)
+            actual = {row['symbol']: row['console_route'] for row in rows if row['dll'] == dll}
+            self.assertEqual(set(actual), symbols)
+            self.assertEqual(set(actual.values()), {'system'} if route == 'system' else {'donor'})
+
 
 class WineSourceTests(unittest.TestCase):
     @classmethod
@@ -87,6 +109,13 @@ class WineSourceTests(unittest.TestCase):
         # The oracle records item 40's policy, before item 45 donor routing.
         # Preserve exact-byte classification proof against that immutable policy.
         mapping = json.loads((Path(__file__).parent / 'fixtures/wgap-import-map.json').read_text())['dlls']
+        # The immutable oracle includes this PR's cheap-tail route decisions.
+        oracle_routes = {
+            'dbghelp.dll': 'system', 'setupapi.dll': 'donor',
+            'shlwapi.dll': 'system', 'psapi.dll': 'donor', 'wininet.dll': 'system',
+        }
+        for dll, route in oracle_routes.items():
+            mapping.setdefault(dll, {})['class'] = route
         rows = gap.classify(gap.scan(paths), mapping, {p.name.lower() for p in paths}, self.graph)
         output = io.StringIO(newline='')
         writer = csv.DictWriter(output, gap.FIELDS)

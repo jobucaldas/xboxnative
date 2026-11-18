@@ -14,6 +14,12 @@ static void discovery_log(const char* message) {
     ++discovered;
     if (strstr(message, "available=0")) ++unavailable;
 }
+#ifdef SYSX_NATIVE_TEST
+static FARPROC hide_one_export(HMODULE module, LPCSTR name) {
+    if (!strcmp(name, "SymLoadModuleEx")) return nullptr;
+    return GetProcAddress(module, name);
+}
+#endif
 PVOID CALLBACK no_function_entry(HANDLE, DWORD64, ULONG64) { return nullptr; }
 int main(int argc, char** argv) {
     sysx_native::discover(discovery_log);
@@ -29,6 +35,16 @@ int main(int argc, char** argv) {
     CHECK(!sysx_native::resolve("kernel32.dll", "_vsnprintf"));
     CHECK(!sysx_native::resolve("dbghelp.dll", "syminitialize"));
     CHECK(!sysx_native::resolve("dbghelp.dll", "SymEnumSymbols"));
+#ifdef SYSX_NATIVE_TEST
+    sysx_native::proc_resolver = hide_one_export;
+    CHECK(!sysx_native::resolve("dbghelp.dll", "SymLoadModuleEx"));
+    CHECK(!sysx_native::resolve("dbghelp.dll", "SymLoadModuleEx"));
+    discovered = unavailable = 0;
+    sysx_native::discover(discovery_log);
+    CHECK(discovered == std::size(sysx_native::allowed) && unavailable == 1);
+    sysx_native::proc_resolver = nullptr;
+    std::puts("SYSX NATIVE FAIL-CLOSED PASS: simulated missing export returned zero; one unavailable log; no placeholder");
+#endif
     auto init = api<decltype(&SymInitialize)>("DBGHELP.DLL", "SymInitialize");
     auto load = api<decltype(&SymLoadModuleEx)>("dbghelp.dll", "SymLoadModuleEx");
     auto from = api<decltype(&SymFromAddr)>("dbghelp.dll", "SymFromAddr");

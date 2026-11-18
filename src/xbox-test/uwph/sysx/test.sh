@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 work=$(mktemp -d)
 server_pid=
 trap 'if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi; rm -rf "$work"' EXIT
-x86_64-w64-mingw32-g++ -std=c++17 -O2 -static native-test.cpp -o "$work/native-test.exe"
+x86_64-w64-mingw32-g++ -std=c++17 -O2 -static -DSYSX_NATIVE_TEST native-test.cpp -o "$work/native-test.exe"
 python3 - "$work/port" <<'PY' &
 import http.server, pathlib, sys
 class Handler(http.server.BaseHTTPRequestHandler):

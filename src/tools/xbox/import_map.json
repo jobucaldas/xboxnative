@@ -112,8 +112,8 @@
       "reason": "Managed-runtime hosting gap (research/MONO-DOTNET-COVERAGE.md): no owned game imports it today; a .NET Core game would need hostfxr/hostpolicy/coreclr served by Wine PE donors built from pinned source. Classified so a gap report names it instead of leaving it unclassified."
     },
     "dbghelp.dll": {
-      "class": "stub",
-      "reason": "GameAssembly directly imports SymInitialize/SymFromAddr despite the import-routing policy table crash-handler-only claim; planned clean-failure symbolization stubs need validation."
+      "class": "system",
+      "reason": "Route through the sysx_native System32 allowlist; dbghelp.dll and these exports are native-export-unverified on Xbox UWP. Off-device behavior tests do not prove console availability; a missing module/export returns zero, fails closed without a placeholder or crash, and console verification remains pending."
     },
     "hostfxr.dll": {
       "class": "stub",
@@ -209,8 +209,8 @@
       ]
     },
     "shlwapi.dll": {
-      "class": "stub",
-      "reason": "Named x64 ABI failure/empty adapters in entry-stubs.dll for the three-image probe; runtime tolerance remains unverified."
+      "class": "system",
+      "reason": "The existing pe_tail route returns the exact System32 PathCanonicalizeW and SHDeleteKeyW exports; both paths and registry deletion behavior are tested off-device."
     },
     "ucrtbase.dll": {
       "class": "system",
@@ -247,6 +247,10 @@
     "winhttp.dll": {
       "class": "system",
       "reason": "Provisional native WinHTTP/compositor-query route from the import-routing policy table; validate exact exports on console."
+    },
+    "wininet.dll": {
+      "class": "system",
+      "reason": "Route through the sysx_native System32 allowlist; wininet.dll may be absent or may not expose these exports on Xbox UWP. Off-device URL/HTTP behavior tests do not prove console availability; a missing module/export returns zero, fails closed without a placeholder or crash, and console verification remains pending."
     },
     "winmm.dll": {
       "class": "stub",

@@ -32,6 +32,11 @@ static HMODULE WINAPI hostPackaged(LPCWSTR name,DWORD) {
 }
 #define VirtualProtectFromApp hostProtect
 #define LoadPackagedLibrary hostPackaged
+#include <winrt/base.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include "../dxil_runtime.h"
+static std::wstring g_dir;
 #include "../host/wxl_mapper.h"
 #include "../host/mlp_probe.h"
 #include "../donors/probe.h"
@@ -44,7 +49,7 @@ static bool donorIat(wxl::Image& image) {
     auto nt=(IMAGE_NT_HEADERS64*)(image.base+((IMAGE_DOS_HEADER*)image.base)->e_lfanew);
     auto dir=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     auto d=(IMAGE_IMPORT_DESCRIPTOR*)(image.base+dir.VirtualAddress);
-    const std::map<std::string,unsigned> expected={{"hid.dll",1},{"psapi.dll",1},{"setupapi.dll",4},
+    const std::map<std::string,unsigned> expected={{"hid.dll",1},{"psapi.dll",1},{"setupapi.dll",6},
         {"version.dll",3},{"shcore.dll",1},{"avrt.dll",1}};
     std::map<std::string,unsigned> seen;
     for(;d->Name;++d) {
@@ -202,6 +207,6 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int) {
     if(WaitForSingleObject(r->worker,30000)!=WAIT_OBJECT_0)ExitProcess(10);
     if(!r->finished.load()||!r->executed.load()||!r->success||r->code!=42||!mlp::stub_names.empty()||!donorIat(r->exe->image))ExitProcess(11);
     if(address!=donor_pe::exported("hid.dll","HidD_GetHidGuid",0))ExitProcess(12);
-    puts("DONOR-GUEST PASS: actual Play runtime; 11 verified donor IAT slots; behavior exit=42; owned fixture only");
+    puts("DONOR-GUEST PASS: actual Play runtime; 13 verified donor IAT slots; behavior exit=42; owned fixture only");
     fflush(stdout);ExitProcess(0);
 }
