@@ -1111,11 +1111,15 @@ struct Cpu {
         if (op == 0x10 || op == 0x11) {  // movss/movsd/movups/movupd
             if (op == 0x11) {
                 uint32_t v[4]; sse_reg(modrm_reg, v);
-                if (ss) mem.w32(r.ea + seg, v[0]);
+                if ((ss || sd) && r.isreg) {
+                    uint32_t keep[4]; sse_reg(r.regno, keep);
+                    keep[0] = v[0]; if (sd) keep[1] = v[1];
+                    sse_write_reg(r.regno, keep);
+                } else if (ss) mem.w32(r.ea + seg, v[0]);
                 else if (sd) mem.w64(r.ea + seg, uint64_t(v[1]) << 32 | v[0]);
                 else sse_write(r, v);
             } else if (ss || sd) {
-                uint32_t keep[4]; sse_reg(modrm_reg, keep);
+                uint32_t keep[4] = {}; if (r.isreg) sse_reg(modrm_reg, keep);
                 if (ss) keep[0] = sse_rd32(r);
                 else { uint64_t q = sse_rd64(r); keep[0] = uint32_t(q); keep[1] = uint32_t(q >> 32); }
                 sse_write_reg(modrm_reg, keep);
