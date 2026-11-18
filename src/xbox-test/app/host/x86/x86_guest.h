@@ -2803,6 +2803,18 @@ inline void Guest::register_all() {
     auto transform = [vec](const char* name,unsigned argc,bool coord,bool array){vec(name,argc,[coord,array](Cpu& c,uint32_t o,auto rd,auto fp,auto wr){uint32_t in=c.arg(array?2:1),mp=c.arg(array?4:2),count=array?c.arg(5):1,os=array?c.arg(1):12,is=array?c.arg(3):12;auto m=rd(mp,16);for(uint32_t n=0;n<count;++n){auto v=rd(in+n*is,3);float q[4]={0,0,0,0};for(int j=0;j<4;++j)q[j]=v[0]*m[j]+v[1]*m[4+j]+v[2]*m[8+j]+m[12+j];if(coord){float d=q[3];for(int j=0;j<3;++j)q[j]/=d;wr(o+n*os,q,3);}else wr(o+n*os,q,4);(void)fp;}});};
     transform("D3DXVec3Transform",3,false,false); transform("D3DXVec3TransformArray",6,false,true);
     transform("D3DXVec3TransformCoord",3,true,false); transform("D3DXVec3TransformCoordArray",6,true,true);
+    // These D3DX operations need a native D3D9 resource or shader compiler. Keep
+    // their exports resolvable, but report the documented failure rather than
+    // claiming to have created or modified a host resource.
+    auto d3dx_notimpl = [](Cpu&) -> uint32_t { return 0x80004001u; }; // E_NOTIMPL
+    reg.add("d3dx9_36.dll", "D3DXCreateEffect", Conv::Stdcall, 9, d3dx_notimpl);
+    reg.add("d3dx9_36.dll", "D3DXCreateFontA", Conv::Stdcall, 12, d3dx_notimpl);
+    reg.add("d3dx9_36.dll", "D3DXCreateTexture", Conv::Stdcall, 7, d3dx_notimpl);
+    reg.add("d3dx9_36.dll", "D3DXCreateTextureFromFileInMemoryEx", Conv::Stdcall, 15, d3dx_notimpl);
+    reg.add("d3dx9_36.dll", "D3DXFillTexture", Conv::Stdcall, 3, d3dx_notimpl);
+    reg.add("d3dx9_36.dll", "D3DXGetImageInfoFromFileInMemory", Conv::Stdcall, 3, d3dx_notimpl);
+    reg.add("d3dx9_36.dll", "D3DXLoadSurfaceFromSurface", Conv::Stdcall, 8, d3dx_notimpl);
+    reg.add("d3dx9_36.dll", "D3DXSaveSurfaceToFileA", Conv::Stdcall, 5, d3dx_notimpl);
     // Shlwapi contracts: filename lookup returns a pointer into the input; remove-extension is void; remove-file-spec returns nonzero only when something was removed. See https://learn.microsoft.com/en-us/windows/win32/api/shlwapi/nf-shlwapi-pathfindfilenamea, https://learn.microsoft.com/en-us/windows/win32/api/shlwapi/nf-shlwapi-pathremoveextensiona, and https://learn.microsoft.com/en-us/windows/win32/api/shlwapi/nf-shlwapi-pathremovefilespeca.
     reg.add("shlwapi.dll","PathFindFileNameA",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{uint32_t p=c.arg(0);if(!p)return 0;std::string s=str(p);size_t i=s.find_last_of("\\\\/:");return p+(i==std::string::npos?0:uint32_t(i+1));});
     reg.add("shlwapi.dll","PathRemoveExtensionA",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{uint32_t p=c.arg(0);if(!p)return 0;std::string s=str(p);size_t start=s.find_last_of("\\\\/:"),dot=s.find_last_of('.');if(dot!=std::string::npos&&(start==std::string::npos||dot>start))mem.w8(p+uint32_t(dot),0);return 0;});
