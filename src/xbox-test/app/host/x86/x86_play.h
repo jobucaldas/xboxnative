@@ -464,6 +464,7 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
             if (guest.tls_images.empty()) run_entry(cpu, img);
             else {
                 for (Image* tls_image : guest.tls_images)
+                    if (tls_image) // a DllMain may have unloaded it
                     for (uint32_t p = tls_image->tls.callbacks; p; p += 4) {
                         uint32_t fn = mem.r32(p);
                         if (!fn) break;
