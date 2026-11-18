@@ -16,7 +16,7 @@ i686-w64-mingw32-dlltool -m i386 -d "$out/xinput.def" -l "$out/libxinput.a"
 i686-w64-mingw32-dlltool -m i386 -d "$out/crtheap.def" -l "$out/libcrtheap.a"
 "$cc32" -O1 -Wall -Wextra -Werror -ffreestanding -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables \
   -mno-sse -mno-mmx -mno-80387 -nostdlib -Wl,--entry,_gap_start@0 -Wl,--subsystem,console -Wl,--dynamicbase \
-  -Wl,--no-seh -Wl,--image-base,0x400000 -o "$out/gap.exe" "$here/x86-fixture/gap.c" \
+  -Wl,--no-seh -Wl,--image-base,0x400000 -o "$out/gap.exe" "$here/x86-fixture/gap-pe32.c" \
   -L"$out" -lxinput -lcrtheap -lkernel32
 GAP_FIXTURE_DIR="$out" python3 -I "$here/../../../tools/xbox/tests/test_gap_lines.py"
 "${CXX:-c++}" -std=c++17 -O1 -Wall -Wextra \

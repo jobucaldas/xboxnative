@@ -2,6 +2,7 @@
 #pragma once
 #include <array>
 #include <map>
+#include <memory>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -17,6 +18,10 @@ struct Route { const char* dll; const char* kind; };
 static const Route routes[] = {
 #include "wine_gap_routes.h"
 };
+struct RouteOverride { const char* dll; const char* symbol; const char* kind; };
+static const RouteOverride route_overrides[] = {
+#include "wine_gap_overrides.h"
+};
 struct X86Routes {
     x86::Memory memory;
     x86::Host host;
@@ -24,18 +29,22 @@ struct X86Routes {
     x86::Guest guest;
     X86Routes() : guest(memory, host, registry) { guest.register_all(); }
 };
-static bool x86_binds(const std::string& dll, const std::string& symbol) {
-    static X86Routes routes;
+static bool x86_binds(const x86::Registry& registry, const std::string& dll, const std::string& symbol) {
     const std::string served = x86::apiset::served_by(dll, symbol);
     std::string lookup = symbol;
     if (symbol.size() > 1 && symbol[0] == '#') {
         unsigned ordinal = unsigned(std::stoul(symbol.substr(1)));
-        auto it = routes.registry.ordinals.find({served, uint16_t(ordinal)});
-        if (it == routes.registry.ordinals.end()) return false;
+        auto it = registry.ordinals.find({served, uint16_t(ordinal)});
+        if (it == registry.ordinals.end()) return false;
         lookup = it->second;
     }
     const auto key = std::make_pair(served, x86::Registry::key_sym(lookup));
-    return routes.registry.map.count(key) || routes.registry.data.count(key);
+    return registry.map.count(key) || registry.data.count(key);
+}
+static std::string route_for_symbol(const std::string& dll, const std::string& symbol, const std::string& fallback) {
+    for(const auto& override:route_overrides)
+        if(dll==override.dll && symbol==override.symbol) return override.kind;
+    return fallback;
 }
 static bool x86_donor(const std::string& dll) {
     return x86::is_vc110_vc120_dll(dll) || x86::is_d3dx9_donor_dll(dll);
@@ -120,6 +129,8 @@ static void report(const std::wstring& root) {
             if(got!=p.bytes.size()) throw std::runtime_error("short PE read"); p.imports(pairs);
         }
         unsigned missing=0, win32u=0, unknown=0;
+        std::unique_ptr<X86Routes> x86_routes;
+        for(const auto& pair:pairs) if(std::get<2>(pair)) { x86_routes.reset(new X86Routes); break; }
         using Counts = std::array<size_t, 4>;
         std::map<std::string, Counts> by_dll;
         std::vector<std::string> gaps;
@@ -134,11 +145,12 @@ static void report(const std::wstring& root) {
                 // PE32 runs through x86::Guest::register_all and its API-set
                 // resolver. Only that registry, actual game modules, and the
                 // interpreter's explicit donor allowlist can bind these imports.
-                if(x86_binds(dll,symbol) || assets.count(dll)) bucket=0;
+                if((x86_routes && x86_binds(x86_routes->registry,dll,symbol)) || assets.count(dll)) bucket=0;
                 else if(x86_donor(dll)) bucket=1;
                 else bucket=3;
                 if(bucket==3) ++missing;
             } else {
+                if(!assets.count(dll)) route=route_for_symbol(dll,symbol,route);
                 if(!assets.count(dll) && route!="system") ++missing;
                 // The oracle's system, uwph and game routes all have an in-process
                 // provider; wine-pe is a donor, while unclassified is truly missing.

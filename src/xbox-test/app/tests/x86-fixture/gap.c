@@ -1,15 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
- * Owned-free i686 (PE32) fixture for the launcher's gap list. It imports one
- * x86-registry export and one absent API-set CRT export, keeps both by storing
- * their addresses in a volatile global, and never calls either. */
+ * Owned-free i686 (PE32) fixture for the x86 launch route. It imports one
+ * kernel32 export that the x86 surface does not register (GetSystemFirmwareTable,
+ * sysinfoapi.h), keeps the import by storing its address in a volatile global,
+ * and never calls it. A run must exit 0 and name exactly that import as an
+ * unresolved one. */
 #include <windows.h>
-
-__declspec(dllimport) DWORD __cdecl XInputGetState(DWORD, void*);
-__declspec(dllimport) void __cdecl _aligned_free(void*);
 void* volatile gap_keep;
-
 void WINAPI gap_start(void) {
-    gap_keep = (void*)&XInputGetState;
-    gap_keep = (void*)&_aligned_free;
+    gap_keep = (void*)&GetSystemFirmwareTable;
     ExitProcess(0u);
 }

@@ -47,7 +47,20 @@ void lp_sink(const char* line) { lines.emplace_back(line); }
 
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 3) return 2;
+    if (wine_gap::route_for_symbol("shell32.dll", "SHGetSpecialFolderPathW", "stub") != "uwph" ||
+        wine_gap::route_for_symbol("winmm.dll", "joyGetPos", "stub") != "uwph" ||
+        wine_gap::route_for_symbol("winmm.dll", "timeGetTime", "stub") != "stub") {
+        std::fprintf(stderr, "per-export GAP route override regression\n");
+        return 1;
+    }
     wine_gap::report(std::wstring(argv[1], argv[1] + std::char_traits<char>::length(argv[1])));
+    // report() probes x86 routes; a fresh guest reservation must remain available
+    // after the probe has returned rather than being held by process-lifetime state.
+    x86::Memory after_probe;
+    if (!after_probe.base()) {
+        std::fprintf(stderr, "x86 route probe retained or exhausted the guest reservation\n");
+        return 1;
+    }
     if (argc == 3 && std::string(argv[2]) == "--assert-fixture") {
         const std::vector<std::string> expected = {
             "GAP: dll=xinput1_3.dll system=1 donor=0 stub=0 missing=0",

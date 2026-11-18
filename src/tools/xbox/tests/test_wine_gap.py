@@ -19,9 +19,28 @@ ROOT = Path(__file__).resolve().parents[4]
 GAME_DIR = Path(os.environ.get('MEGABONK_DIR', ROOT / 'megabonk-from-console'))
 WINE_SRC = Path(os.environ.get('WINE_SOURCE', ROOT / 'third_party/wine'))
 COVERAGE = ROOT / 'research/wine-coverage'
+MAP = json.loads((Path(__file__).parents[1] / 'import_map.json').read_text())['dlls']
 
 
 class GapTests(unittest.TestCase):
+    def test_export_overrides_are_used_by_gap_routes(self):
+        self.assertEqual(gap.route_for('shell32.dll', 'SHGetSpecialFolderPathW', MAP, set()), 'uwph')
+        self.assertEqual(gap.route_for('winmm.dll', 'joyGetPos', MAP, set()), 'uwph')
+        self.assertEqual(gap.route_for('winmm.dll', 'timeGetTime', MAP, set()), 'stub')
+        rows = [
+            {'dll': 'shell32.dll', 'symbol': 'SHGetSpecialFolderPathW',
+             'console_route': gap.route_for('shell32.dll', 'SHGetSpecialFolderPathW', MAP, set())},
+            {'dll': 'winmm.dll', 'symbol': 'joyGetPos',
+             'console_route': gap.route_for('winmm.dll', 'joyGetPos', MAP, set())},
+            {'dll': 'winmm.dll', 'symbol': 'timeGetTime',
+             'console_route': gap.route_for('winmm.dll', 'timeGetTime', MAP, set())},
+        ]
+        self.assertEqual(gap.gap_lines(rows), [
+            'GAP: dll=shell32.dll system=1 donor=0 stub=0 missing=0',
+            'GAP: dll=winmm.dll system=1 donor=0 stub=1 missing=0',
+            'GAP: stub winmm.dll!timeGetTime',
+        ])
+
     def test_summary_counts_imports_not_syscalls(self):
         rows = [dict(console_route=r, n_win32u=n) for r, n in
                 [('system', 9), ('game', 0), ('stub', 3), ('uwph', 0), ('unclassified', 0)]]

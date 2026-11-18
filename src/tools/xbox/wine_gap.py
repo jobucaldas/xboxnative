@@ -38,6 +38,16 @@ def scan(paths):
     return sorted(pairs)
 
 
+def route_for(dll, sym, mapping, assets):
+    if dll in assets:
+        return 'game'
+    entry = mapping.get(dll, {})
+    for override in entry.get('overrides', []):
+        if sym in override.get('exports', []):
+            return override['class']
+    return entry.get('class', 'unclassified')
+
+
 def classify(pairs, mapping, assets, graph):
     rows = []
     for dll, sym in pairs:
@@ -62,7 +72,7 @@ def classify(pairs, mapping, assets, graph):
                 verdict = 'GRAPH_UNRESOLVED'
             else:
                 verdict = 'PE_PURE'
-        route = 'game' if dll in assets else mapping.get(dll, {}).get('class', 'unclassified')
+        route = route_for(dll, sym, mapping, assets)
         rows.append(dict(zip(FIELDS, (dll, sym, route, cls, idll, cname or '', verdict,
             len(nt), len(win), int(unix), ';'.join(nt), ';'.join(win)))))
     return rows
