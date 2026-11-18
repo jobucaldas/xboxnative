@@ -5,7 +5,9 @@
 // handful of kernel32 calls and two cdecl msvcrt calls, one of which calls back
 // into guest code. Generated thunks for the wider surface come later (see plan).
 #pragma once
+#include <chrono>
 #include <functional>
+#include <thread>
 #include "x86_pe.h"
 #include "x86_gl_generated.h"
 #include "x86com.h"
@@ -84,6 +86,7 @@ struct Host {
         uint32_t result = 1167; // ERROR_DEVICE_NOT_CONNECTED until a host explicitly supplies the slot
     };
     struct WindowRect { int32_t left = 0, top = 0, right = 0, bottom = 0; };
+    struct Timer { uint32_t hwnd = 0, id = 0, interval = 1, proc = 0; uint64_t due = 0; bool pending = false; };
     struct RegistryCall {
         enum class Kind { Open, Create, Query, Set, DeleteValue, DeleteKey, EnumKey, EnumValue, Close } kind;
         uintptr_t handle = 0, result_handle = 0;
@@ -127,6 +130,8 @@ struct Host {
     std::map<uint32_t, std::u16string> window_class_atoms;
     std::map<std::pair<uint32_t, std::u16string>, uint32_t> window_properties;
     std::map<uint32_t, GlMap> gl_maps;
+    std::vector<Timer> timers;
+    uint32_t next_timer_id = 1;
     uint32_t window_class_serial = 0xC000u, gl_handle_serial = 0xE0000000u, window_handle_serial = 0xD0000000u, user_handle_serial = 0xC0000000u, gl_map_next = 0x70000000u;
     uint32_t vertex_array = 0, gl_array_buffer = 0, gl_element_array_buffer = 0;
     std::function<uintptr_t(bool, uint32_t, uintptr_t*)> d3d9_factory;
@@ -364,6 +369,47 @@ inline void register_win32(Registry& r, Host& h) {
         }
         return q;
     };
+    auto timer_now = [&h]() -> uint64_t {
+        if (h.tick_count) return h.tick_count();
+        return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    };
+    auto post_window_message = [&h, native_window](uint32_t guest_hwnd, uint32_t message, uint32_t wp, uint32_t lp) {
+        Host::WindowCall q{}; q.name = "PostMessageW"; q.args[0] = native_window(guest_hwnd);
+        q.args[1] = message; q.args[2] = wp; q.args[3] = lp;
+        if (h.window_call) h.window_call(q);
+        return q.supported && q.result;
+    };
+    auto pump_timers = [&h, timer_now, native_window, post_window_message]() {
+        const uint64_t now = timer_now();
+        for (auto& timer : h.timers) {
+            if (timer.hwnd && !native_window(timer.hwnd)) { timer.pending = false; continue; }
+            if (!timer.pending && now >= timer.due && post_window_message(timer.hwnd, 0x0113u, timer.id, timer.proc)) {
+                timer.pending = true;
+                timer.due = now + timer.interval;
+            }
+        }
+    };
+    auto set_timer = [&h, native_window, timer_now](Cpu& c) -> uint32_t {
+        const uint32_t hwnd = c.arg(0); uint32_t id = c.arg(1);
+        if (hwnd && !native_window(hwnd)) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
+        if (!hwnd || !id) {
+            do { id = h.next_timer_id++; if (!h.next_timer_id) h.next_timer_id = 1; }
+            while (!id || std::any_of(h.timers.begin(), h.timers.end(), [hwnd, id](const auto& timer) { return timer.hwnd == hwnd && timer.id == id; }));
+        }
+        const uint32_t interval = std::max(1u, c.arg(2));
+        auto it = std::find_if(h.timers.begin(), h.timers.end(), [hwnd, id](const auto& timer) { return timer.hwnd == hwnd && timer.id == id; });
+        if (it == h.timers.end()) h.timers.push_back({hwnd, id, interval, c.arg(3), timer_now() + interval, false});
+        else { it->interval = interval; it->proc = c.arg(3); it->due = timer_now() + interval; }
+        return id;
+    };
+    auto kill_timer = [&h, native_window](Cpu& c) -> uint32_t {
+        const uint32_t hwnd = c.arg(0); const uint32_t id = c.arg(1);
+        if (hwnd && !native_window(hwnd)) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
+        const auto old = h.timers.size();
+        h.timers.erase(std::remove_if(h.timers.begin(), h.timers.end(), [hwnd, id](const auto& timer) { return timer.hwnd == hwnd && timer.id == id; }), h.timers.end());
+        return h.timers.size() != old;
+    };
     auto guest_rect = [](Cpu& c, uint32_t address) { return c.mem.read_bytes(address, 16); };
     auto guest_point = [](Cpu& c, uint32_t address) { return c.mem.read_bytes(address, 8); };
     auto read_window_wstr = [](Cpu& c, uint32_t address) { std::u16string s; for(uint32_t i=0;i<32768;++i){uint16_t ch=uint16_t(c.mem.r(address+i*2,2));if(!ch)return s;s.push_back(char16_t(ch));}throw Fault(FaultKind::AccessViolation,c.eip,address,"unterminated guest UTF-16 string"); };
@@ -372,7 +418,7 @@ inline void register_win32(Registry& r, Host& h) {
     };
     auto window_route = [&](const char* name, unsigned argc, const char* native_name = nullptr) {
         if (registered(name)) return;
-        r.add("user32.dll", name, Conv::Stdcall, argc, [&h, count, native_window, guest_window, user_handle, call_window, guest_rect, guest_point, call_wndproc, read_window_wstr, name, native_name, argc](Cpu& c) -> uint32_t {
+        r.add("user32.dll", name, Conv::Stdcall, argc, [&h, count, native_window, guest_window, user_handle, call_window, guest_rect, guest_point, call_wndproc, read_window_wstr, pump_timers, timer_now, name, native_name, argc](Cpu& c) -> uint32_t {
             count(name);
             const bool first_hwnd = !strcmp(name,"ShowWindow")||!strcmp(name,"UpdateWindow")||!strcmp(name,"SetWindowPos")||!strcmp(name,"MoveWindow")||!strcmp(name,"GetClientRect")||!strcmp(name,"GetWindowRect")||!strcmp(name,"ClientToScreen")||!strcmp(name,"ScreenToClient")||!strcmp(name,"SetWindowTextA")||!strcmp(name,"SetWindowTextW")||!strcmp(name,"GetWindowLongA")||!strcmp(name,"GetWindowLongW")||!strcmp(name,"SetWindowLongA")||!strcmp(name,"SetWindowLongW")||!strcmp(name,"IsWindowVisible")||!strcmp(name,"IsIconic")||!strcmp(name,"SetFocus")||!strcmp(name,"SetForegroundWindow")||!strcmp(name,"PostMessageA")||!strcmp(name,"PostMessageW")||!strcmp(name,"SendMessageA")||!strcmp(name,"SendMessageW")||!strcmp(name,"DefWindowProcA")||!strcmp(name,"DefWindowProcW");
             const uint32_t token = argc&&first_hwnd ? c.arg(0) : 0; uintptr_t hwnd = native_window(token);
@@ -405,17 +451,42 @@ inline void register_win32(Registry& r, Host& h) {
             if (!strcmp(name,"PeekMessageA") || !strcmp(name,"PeekMessageW") || !strcmp(name,"GetMessageA") || !strcmp(name,"GetMessageW")) {
                 const bool get = name[0]=='G'; const uint32_t out=c.arg(0), filter=c.arg(1); uintptr_t native_filter=native_window(filter);
                 if(filter&&!native_filter)return uint32_t(-1);
-                const size_t size=32; auto q=call_window(c,name,{uintptr_t(out),native_filter,c.arg(2),c.arg(3),get?0u:c.arg(4)}, {},size);
+                const size_t size=32; Host::WindowCall q{};
+                if (get && h.window_call) {
+                    const char* peek_name = !strcmp(name,"GetMessageA") ? "PeekMessageA" : "PeekMessageW";
+                    for (;;) {
+                        pump_timers();
+                        q = Host::WindowCall{}; q.name = peek_name; q.args[0] = out; q.args[1] = native_filter;
+                        q.args[2] = c.arg(2); q.args[3] = c.arg(3); q.args[4] = 0; q.output.resize(size);
+                        h.window_call(q);
+                        if (!q.supported) break;
+                        if (q.result) {
+                            q = call_window(c,name,{uintptr_t(out),native_filter,c.arg(2),c.arg(3),1u},{},size);
+                            break;
+                        }
+                        if (h.timers.empty()) { q = call_window(c,name,{uintptr_t(out),native_filter,c.arg(2),c.arg(3),0u},{},size); break; }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                    if (!q.supported) q = call_window(c,name,{uintptr_t(out),native_filter,c.arg(2),c.arg(3),0u},{},size);
+                } else {
+                    pump_timers();
+                    q = call_window(c,name,{uintptr_t(out),native_filter,c.arg(2),c.arg(3),get?0u:c.arg(4)}, {},size);
+                }
                 if(q.supported && q.result && q.output.size()>=size) {
                     uintptr_t native_hwnd=0;uint32_t guest_hwnd=0;memcpy(&native_hwnd,q.output.data(),sizeof(native_hwnd));
                     for(const auto& item:h.window_handles)if(item.second==native_hwnd){guest_hwnd=item.first;break;}
                     std::vector<uint8_t> guest(28);memcpy(guest.data(),&guest_hwnd,4);memcpy(guest.data()+4,q.output.data()+8,24);c.mem.write_bytes(out,guest.data(),uint32_t(guest.size()));
+                    const uint32_t message=c.mem.r32(out+4), id=c.mem.r32(out+8), proc=c.mem.r32(out+12);
+                    if ((get || (c.arg(4)&1)) && message==0x0113u)
+                        for(auto& timer:h.timers)if(timer.hwnd==guest_hwnd&&timer.id==id&&timer.proc==proc){timer.pending=false;break;}
+                    if (get && message==0x0012u) return 0;
                 }
                 return uint32_t(q.result);
             }
             if (!strcmp(name,"DispatchMessageA") || !strcmp(name,"DispatchMessageW")) {
                 const uint32_t address=c.arg(0), w=c.mem.r32(address), msg=c.mem.r32(address+4), wp=c.mem.r32(address+8), lp=c.mem.r32(address+12);
                 if(msg==0x0012u)return 0;
+                if(msg==0x0113u && lp) { c.call(lp,{w,msg,wp,uint32_t(timer_now())}); return 0; }
                 return call_wndproc(c,w,msg,wp,lp);
             }
             if (!strcmp(name,"TranslateMessage")) {
@@ -461,6 +532,9 @@ inline void register_win32(Registry& r, Host& h) {
     window_route("PeekMessageA",5); window_route("PeekMessageW",5); window_route("GetMessageA",4); window_route("GetMessageW",4);
     window_route("TranslateMessage",1); window_route("DispatchMessageA",1); window_route("DispatchMessageW",1); window_route("PostQuitMessage",1);
     window_route("PostMessageA",4); window_route("PostMessageW",4); window_route("SendMessageA",4); window_route("SendMessageW",4); window_route("DefWindowProcA",4); window_route("DefWindowProcW",4);
+    r.add("user32.dll", "SetTimer", Conv::Stdcall, 4, [count, set_timer](Cpu& c) -> uint32_t { count("SetTimer"); return set_timer(c); });
+    r.add("user32.dll", "SetCoalescableTimer", Conv::Stdcall, 5, [count, set_timer](Cpu& c) -> uint32_t { count("SetCoalescableTimer"); return set_timer(c); });
+    r.add("user32.dll", "KillTimer", Conv::Stdcall, 2, [count, kill_timer](Cpu& c) -> uint32_t { count("KillTimer"); return kill_timer(c); });
     // Other frequent user32 imports in the ranked gap reports. These remain
     // explicit unsupported results until their input/output contracts can be
     // backed by the UWP record layer.
@@ -518,12 +592,10 @@ inline void register_win32(Registry& r, Host& h) {
     unavailable("GetSubMenu", 2);
     unavailable("IsDlgButtonChecked", 2);
     unavailable("IsWindowEnabled", 1);
-    unavailable("KillTimer", 2);
     unavailable("LoadMenuA", 2);
     unavailable("PostThreadMessageA", 4);
     unavailable("SendDlgItemMessageA", 5);
     unavailable("SetDlgItemTextA", 3);
-    unavailable("SetTimer", 4);
     r.add("user32.dll", "SetRect", Conv::Stdcall, 5, [count](Cpu& c) -> uint32_t {
         count("SetRect"); const uint32_t rect = c.arg(0); if (!rect) return 0;
         c.mem.w32(rect, c.arg(1)); c.mem.w32(rect + 4, c.arg(2));
@@ -694,6 +766,24 @@ inline void register_gl(Registry& r, Host& h) {
         const std::string bytes = c.mem.read_cstr(address, 32768);
         return std::u16string(bytes.begin(), bytes.end());
     };
+    auto dialog_route = [&r, &h, count, read_astr](const char* name, uint32_t result) {
+        r.add("user32.dll", name, Conv::Stdcall, 5, [&h, count, read_astr, name, result](Cpu& c) -> uint32_t {
+            count(name); c.mem.w32(c.fs_base + 0x34, 120);
+            auto& logged = h.calls[std::string("unsupported:") + name];
+            if (!logged++) {
+                const uint32_t template_arg = c.arg(1);
+                std::string template_name;
+                if (!template_arg) template_name = "<null>";
+                else if (template_arg <= 0xffffu) template_name = "#" + std::to_string(template_arg);
+                else { const auto value = read_astr(c, template_arg); template_name.assign(value.begin(), value.end()); }
+                const std::string line = std::string("x86 user32 dialog unsupported: ") + name + " template=" + template_name + "\n";
+                h.err += line; if (h.tee) h.tee(line);
+            }
+            return result;
+        });
+    };
+    dialog_route("CreateDialogParamA", 0);
+    dialog_route("DialogBoxParamA", uint32_t(-1));
     auto map_window = [&h](uintptr_t native) {
         if (!native) return uint32_t(0);
         if (++h.window_handle_serial < 0xD0000000u) h.window_handle_serial = 0xD0000000u;
@@ -795,7 +885,9 @@ inline void register_gl(Registry& r, Host& h) {
     r.add("user32.dll", "DestroyWindow", Conv::Stdcall, 1, [&h, count](Cpu& c) -> uint32_t {
         count("DestroyWindow"); uint32_t token = c.arg(0); auto it = h.window_handles.find(token);
         if (it == h.window_handles.end() || !h.destroy_window || !h.destroy_window(it->second)) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
-        h.window_handles.erase(it); h.window_procs.erase(token); h.window_longs.erase(token); return 1;
+        h.window_handles.erase(it); h.window_procs.erase(token); h.window_longs.erase(token);
+        h.timers.erase(std::remove_if(h.timers.begin(), h.timers.end(), [token](const auto& timer) { return timer.hwnd == token; }), h.timers.end());
+        return 1;
     });
     auto get_window_long = [&h, count, window](Cpu& c, bool pointer) -> uint32_t {
         count(pointer ? "GetWindowLongPtrW" : "GetWindowLongW"); uint32_t token = c.arg(0); uintptr_t native = window(token);
