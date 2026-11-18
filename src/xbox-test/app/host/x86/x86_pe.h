@@ -272,6 +272,27 @@ inline DllSource make_vc110_vc120_source(const DllReader& game, const DllReader&
         return bytes;
     };
 }
+inline bool is_d3dx9_dll(const std::string& name) {
+    std::string lower=name; for(auto& c:lower)if(c>='A'&&c<='Z')c+=32;
+    if(lower.size()!=12||lower.rfind("d3dx9_",0)!=0||lower.substr(8)!=".dll")return false;
+    unsigned version=unsigned(lower[6]-'0')*10u+unsigned(lower[7]-'0');
+    return version>=24&&version<=43;
+}
+inline bool is_d3dx9_donor_dll(const std::string& name) {
+    std::string lower=name; for(auto& c:lower)if(c>='A'&&c<='Z')c+=32;
+    return is_d3dx9_dll(lower)||lower=="d3dcompiler_47.dll"||lower=="d3dxof.dll"||lower=="ucrtbase.dll";
+}
+inline DllSource make_d3dx9_source(const DllReader& game, const DllReader& runtime,
+                                   const DllSource& fallback, const DllOriginLogger& log = nullptr) {
+    return [game,runtime,fallback,log](const std::string& name) {
+        if(!is_d3dx9_donor_dll(name))return fallback?fallback(name):std::vector<uint8_t>{};
+        auto bytes=game?game(name):std::vector<uint8_t>{};
+        const char* origin="game dir";
+        if(bytes.empty()) { bytes=runtime?runtime(name):std::vector<uint8_t>{}; origin="runtime"; }
+        if(!bytes.empty()&&log)log(name,origin);
+        return bytes;
+    };
+}
 // One loaded DLL: the mapped image plus the LoadLibrary refcount. Guest
 // FreeLibrary unmaps the image when this count reaches zero.
 struct Dll {

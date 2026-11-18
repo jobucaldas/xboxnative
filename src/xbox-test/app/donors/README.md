@@ -1,7 +1,8 @@
 # Wine PE donor experiment
 
-The launcher builds six donor DLLs (`avrt`, `dinput8`, `hid`, `setupapi`,
-`shcore`, `version`) from the `wine-src` source archive in `deps.pin`, using
+The launcher builds the x64 donor DLLs (`avrt`, `dinput8`, `hid`, `setupapi`,
+`shcore`, `version`) and the PE32 D3DX9 family (`d3dx9_24` through `d3dx9_43`)
+from the `wine-src` source archive in `deps.pin`, using
 `src/tools/build-wine-donors.sh`. The tracked `patches/wine-src/0001-pe-rodata.patch`
 corrects PE constant-data section flags for GNU MinGW builds; it does not alter
 load-config fields or remove security requirements. No DLLs are committed or copied from a system Wine

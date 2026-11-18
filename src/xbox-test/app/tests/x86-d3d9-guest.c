@@ -4,6 +4,29 @@
 #include <windows.h>
 #include <d3d9.h>
 
+typedef struct D3DXImageInfoX {
+    UINT Width, Height, Depth, MipLevels;
+    D3DFORMAT Format;
+    D3DRESOURCETYPE ResourceType;
+    UINT ImageFileFormat;
+} D3DXImageInfoX;
+typedef HRESULT (WINAPI *D3DXCreateTextureFn)(IDirect3DDevice9*,UINT,UINT,UINT,DWORD,D3DFORMAT,D3DPOOL,IDirect3DTexture9**);
+typedef HRESULT (WINAPI *D3DXCreateTextureFromMemoryFn)(IDirect3DDevice9*,const void*,UINT,UINT,UINT,UINT,DWORD,D3DFORMAT,D3DPOOL,DWORD,DWORD,D3DCOLOR,D3DXImageInfoX*,PALETTEENTRY*,IDirect3DTexture9**);
+typedef HRESULT (WINAPI *D3DXGetImageInfoFn)(const void*,UINT,D3DXImageInfoX*);
+typedef HRESULT (WINAPI *D3DXLoadSurfaceFn)(IDirect3DSurface9*,const PALETTEENTRY*,const RECT*,IDirect3DSurface9*,const PALETTEENTRY*,const RECT*,DWORD,D3DCOLOR);
+
+static const BYTE dds_1x1[] = {
+    68,68,83,32,124,0,0,0,7,16,8,0,1,0,0,0,
+    1,0,0,0,4,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,32,0,0,0,
+    65,0,0,0,0,0,0,0,32,0,0,0,0,0,255,0,
+    0,255,0,0,255,0,0,0,0,0,0,255,0,16,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    51,34,17,255,
+};
+
 void WINAPI entry(void) {
     IDirect3D9 *d3d=Direct3DCreate9(D3D_SDK_VERSION);
     if(!d3d)ExitProcess(11);
@@ -14,8 +37,38 @@ void WINAPI entry(void) {
     IDirect3DDevice9 *device=0;
     HRESULT device_hr=IDirect3D9_CreateDevice(d3d,0,D3DDEVTYPE_HAL,(HWND)1,D3DCREATE_HARDWARE_VERTEXPROCESSING,&pp,&device);
     if(FAILED(device_hr)||!device)ExitProcess((UINT)device_hr);
-    void *unbridged=0;
-    (void)IDirect3DDevice9_GetDirect3D(device,(IDirect3D9**)&unbridged);
+    HMODULE d3dx=LoadLibraryA("d3dx9_43.dll");
+    if(!d3dx)ExitProcess(41);
+    union { FARPROC raw; D3DXCreateTextureFn fn; } create_texture_p={GetProcAddress(d3dx,"D3DXCreateTexture")};
+    union { FARPROC raw; D3DXCreateTextureFromMemoryFn fn; } create_texture_memory_p={GetProcAddress(d3dx,"D3DXCreateTextureFromFileInMemoryEx")};
+    union { FARPROC raw; D3DXGetImageInfoFn fn; } get_image_info_p={GetProcAddress(d3dx,"D3DXGetImageInfoFromFileInMemory")};
+    union { FARPROC raw; D3DXLoadSurfaceFn fn; } load_surface_p={GetProcAddress(d3dx,"D3DXLoadSurfaceFromSurface")};
+    D3DXCreateTextureFn create_texture=create_texture_p.fn;
+    D3DXCreateTextureFromMemoryFn create_texture_memory=create_texture_memory_p.fn;
+    D3DXGetImageInfoFn get_image_info=get_image_info_p.fn;
+    D3DXLoadSurfaceFn load_surface=load_surface_p.fn;
+    if(!create_texture||!create_texture_memory||!get_image_info||!load_surface)ExitProcess(42);
+    IDirect3DTexture9 *created=0;
+    if(FAILED(create_texture(device,2,2,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&created))||!created)ExitProcess(43);
+    IDirect3DSurface9 *created_surface=0;
+    if(FAILED(IDirect3DTexture9_GetSurfaceLevel(created,0,&created_surface))||!created_surface)ExitProcess(44);
+    D3DXImageInfoX image_info={0};
+    if(FAILED(get_image_info(dds_1x1,sizeof(dds_1x1),&image_info))||image_info.Width!=1||image_info.Height!=1)ExitProcess(45);
+    IDirect3DTexture9 *loaded=0;
+    HRESULT loaded_hr=create_texture_memory(device,dds_1x1,sizeof(dds_1x1),0xffffffffu,0xffffffffu,0xffffffffu,0,D3DFMT_UNKNOWN,D3DPOOL_MANAGED,1,1,0,&image_info,0,&loaded); if(FAILED(loaded_hr)||!loaded)ExitProcess(FAILED(loaded_hr)?(UINT)loaded_hr:46);
+    IDirect3DSurface9 *loaded_surface=0;
+    if(FAILED(IDirect3DTexture9_GetSurfaceLevel(loaded,0,&loaded_surface))||!loaded_surface)ExitProcess(47);
+    if(FAILED(load_surface(created_surface,0,0,loaded_surface,0,0,1,0)))ExitProcess(48);
+    D3DLOCKED_RECT d3dx_locked={0};
+    if(FAILED(IDirect3DSurface9_LockRect(created_surface,&d3dx_locked,0,D3DLOCK_READONLY))||!d3dx_locked.pBits)ExitProcess(49);
+    DWORD d3dx_pixel=*(const DWORD*)d3dx_locked.pBits;
+    IDirect3DSurface9_UnlockRect(created_surface);
+    if((d3dx_pixel&0x00ffffffu)!=0x00112233u)ExitProcess(50);
+    volatile HRESULT unsupported_hr=IDirect3DSurface9_GetDC(created_surface,0);
+    if(unsupported_hr==S_OK)ExitProcess(51);
+    IDirect3DSurface9_Release(loaded_surface);IDirect3DTexture9_Release(loaded);
+    IDirect3DSurface9_Release(created_surface);IDirect3DTexture9_Release(created);
+    (void)IDirect3DDevice9_TestCooperativeLevel(device);
     if(FAILED(IDirect3DDevice9_Clear(device,0,0,D3DCLEAR_TARGET,0xFF123456,1.0f,0)))ExitProcess(13);
     IDirect3DTexture9 *texture=0;
     if(FAILED(IDirect3DDevice9_CreateTexture(device,2,2,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&texture,0))||!texture)ExitProcess(24);
@@ -77,6 +130,6 @@ void WINAPI entry(void) {
     if(FAILED(IDirect3DDevice9_Present(device,0,0,0,0)))ExitProcess(18);
     IDirect3DSurface9_Release(readback);IDirect3DSurface9_Release(back);
     IDirect3DVertexBuffer9_Release(vertex_buffer);IDirect3DIndexBuffer9_Release(index_buffer);IDirect3DTexture9_Release(texture);
-    IDirect3DDevice9_Release(device);IDirect3D9_Release(d3d);
+    IDirect3DDevice9_Release(device);IDirect3D9_Release(d3d);FreeLibrary(d3dx);
     ExitProcess(0);
 }

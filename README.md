@@ -77,7 +77,7 @@ compressed copies are inflated and SHA-1 checked. The game's page shows the clou
 (not available while a game is running). Each file decision is logged in `launch_probe.log` with its cloud name and
 local path.
 
-Wine-built donor DLLs (avrt, hid, setupapi, shcore, version) are never committed. Build them from the pinned Wine 10.0 source
+Wine-built donor DLLs (avrt, hid, setupapi, shcore, version, and the PE32 d3dx9_24 through d3dx9_43 family) are never committed. Build them from the pinned Wine 10.0 source
 (needs mingw-w64, flex, bison; about a minute):
 ```sh
 bash src/tools/build-wine-donors.sh          # -> out/wine-donors/*.dll + SHA256SUMS + SOURCE.txt (git-ignored)

@@ -4,6 +4,8 @@
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
 here="$root/src/xbox-test/app/tests"
+donors=${1:-$root/out/wine-donors/runtime/x86}
+[[ -f $donors/d3dx9_43.dll ]] || { echo "x86-d3d9: missing d3dx9_43.dll donor; build src/tools/build-wine-donors.sh first" >&2; exit 1; }
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/x86-d3d9.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 cc32=${I686_CC:-$(command -v i686-w64-mingw32-gcc || true)}
@@ -31,5 +33,5 @@ mkdir -p "$prefix"
   cd "$tmp"
   WINEPREFIX="$prefix" PRUN_WINEPREFIX="$prefix" WINEDEBUG=-all \
     WINEDLLOVERRIDES='winedbg.exe=d;d3d9=n' timeout -k 2 180 wine "$tmp/x86-d3d9.exe" \
-      "$tmp/x86-d3d9-guest.exe" "$tmp/d3d9.dll"
+      "$tmp/x86-d3d9-guest.exe" "$tmp/d3d9.dll" "$donors"
 )
