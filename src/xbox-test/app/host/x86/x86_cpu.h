@@ -373,7 +373,7 @@ struct Cpu {
                                 }
                             }
                             pc += len;
-                            if (opcode == 0x74 || opcode == 0x75 || opcode == 0xC2 || opcode == 0xC3 || opcode == 0xE8) break;
+                            if (opcode == 0x74 || opcode == 0x75 || opcode == 0xC2 || opcode == 0xC3 || opcode == 0xE8 || opcode == 0xE9 || opcode == 0xEB) break;
                         }
                         if (!pc) throw std::runtime_error("DBT block has no supported instruction");
                         uint32_t code_first_page = eip >> 12, code_last_page = (eip + uint32_t(pc) - 1) >> 12;
