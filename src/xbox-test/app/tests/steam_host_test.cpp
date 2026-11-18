@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 using namespace steam_host;
+static_assert(ClientInterfaceSlots == 42);
 
 struct FakeClient {
     // What the fake answers. `connect_after` is how many connect calls return 0
