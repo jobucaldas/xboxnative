@@ -22,13 +22,14 @@ static bool wscontains(const wchar_t* haystack,const wchar_t* needle){
  for(;*haystack;++haystack){const wchar_t* h=haystack;const wchar_t* n=needle;while(*n&&*h==*n){++h;++n;}if(!*n)return true;}
  return !*needle;
 }
-static int checks,failures,created,destroyed;static LPARAM sizedParam;
+static int checks,failures,created,destroyed,sizeMessages,moveMessages;static LPARAM sizedParam;
 static void check_result(bool ok,const char* expression){++checks;if(!ok){++failures;OutputDebugStringA(expression);}}
 #define check(...) check_result((__VA_ARGS__),"U32C CHECK FAIL " #__VA_ARGS__)
 static LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM p){
  if(m==WM_NCCREATE){auto c=(CREATESTRUCTW*)p;check(c->lpCreateParams==(void*)0x12345678);SetWindowLongPtrW(h,GWLP_USERDATA,(LONG_PTR)0x1234567887654321ULL);++created;}
  if(m==WM_NCDESTROY)++destroyed;
- if(m==WM_SIZE)sizedParam=p;
+ if(m==WM_SIZE){sizedParam=p;++sizeMessages;}
+ if(m==WM_MOVE)++moveMessages;
  return DefWindowProcW(h,m,w,p);
 }static LRESULT CALLBACK ansiProc(HWND h,UINT m,WPARAM w,LPARAM p){return DefWindowProcA(h,m,w,p);}
 
@@ -69,7 +70,7 @@ extern "C" DWORD WINAPI u32c_entry(){
  // fixture and then the gate). Every counter below and every class this PE
  // registers is module/process state, so it is reset here instead of assumed
  // fresh; the classes are also unregistered where they are registered.
- checks=failures=created=destroyed=0;sizedParam=0;
+ checks=failures=created=destroyed=sizeMessages=moveMessages=0;sizedParam=0;
  rejectedDestroyed=rejectedCreated=0;
  OutputDebugStringA(anchor);
  WNDCLASSEXW wc={};wc.cbSize=sizeof(wc);wc.lpfnWndProc=proc;wc.lpszClassName=L"U32cClass";wc.cbWndExtra=16;wc.cbClsExtra=8;
@@ -119,7 +120,8 @@ extern "C" DWORD WINAPI u32c_entry(){
   RECT fr={};check(framed&&GetClientRect(framed,&fr)&&fr.right==1280&&fr.bottom==720);
   POINT fp={0,0};check(ClientToScreen(framed,&fp)&&fp.x==10-want.left&&fp.y==20-want.top);check(ScreenToClient(framed,&fp)&&!fp.x&&!fp.y);
   check(GetWindowRect(framed,&fr)&&fr.left==10&&fr.top==20&&fr.right-fr.left==want.right-want.left);
-  sizedParam=0;check(SetWindowPos(framed,0,0,0,want.right-want.left+100,want.bottom-want.top,SWP_NOMOVE|SWP_NOZORDER)&&sizedParam==MAKELPARAM(1380,720));
+  sizedParam=0;sizeMessages=moveMessages=0;check(SetWindowPos(framed,0,0,0,want.right-want.left+100,want.bottom-want.top,SWP_NOMOVE|SWP_NOZORDER)&&sizedParam==MAKELPARAM(1380,720)&&sizeMessages==1);
+  check(ShowWindow(framed,SW_SHOW)==FALSE&&sizeMessages==2&&moveMessages==1);
   check(DestroyWindow(framed));}
  check(UnregisterClassW(wc.lpszClassName,0));check(!CreateWindowExW(0,MAKEINTATOM(a),0,0,0,0,1,1,0,0,0,0));
  wc.lpszClassName=L"U32cReject";wc.lpfnWndProc=reject;check(RegisterClassExW(&wc)!=0);check(!CreateWindowExW(0,wc.lpszClassName,0,0,0,0,1,1,0,0,0,0));check(rejectedDestroyed==1&&rejectedCreated==0);check(UnregisterClassW(wc.lpszClassName,0));

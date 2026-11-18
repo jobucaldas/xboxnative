@@ -649,8 +649,7 @@ extern "C" BOOL WINAPI c_SetWindowPos(HWND h,HWND,int x,int y,int cx,int cy,UINT
  // No z-order tracking (insertAfter ignored), same limitation as EnumWindows.
  if(moved&&w->alive)w->proc(h,WM_MOVE,0,MAKELPARAM(nx,ny));
  if(sized&&w->alive)w->proc(h,WM_SIZE,SIZE_RESTORED,MAKELPARAM(clientWidth(w),clientHeight(w)));
- if(moved||sized)w->needSize=false;
- else if((flags&SWP_SHOWWINDOW)&&w->alive)sendInitialSizeMove(h,w);
+ if((flags&SWP_SHOWWINDOW)&&w->needSize&&w->alive)sendInitialSizeMove(h,w);
  return TRUE;
 }
 extern "C" BOOL WINAPI c_ValidateRect(HWND h,const RECT*){std::lock_guard<std::recursive_mutex> l(mutex);return window(h)!=nullptr;} // no invalid-region tracking: nothing to validate, trivially honest.
