@@ -11,6 +11,20 @@
 #include "../host/x86/x86_guest.h"
 #include "../host/x86/x86_file_guard.h"
 using namespace x86;
+static bool verify_conversion_terminators() {
+    Memory mem; mem.map(0x1000, 0x2000, PROT_R | PROT_W);
+    Host host; Registry reg; Guest guest(mem, host, reg); guest.register_all();
+    ThunkTable thunks; Cpu cpu(mem, thunks); cpu.reg[ESP] = 0x2000;
+    mem.w8(0x1000, 'A'); mem.w8(0x1001, 0);
+    auto mb = reg.map.find({"kernel32.dll", "multibytetowidechar"});
+    auto wc = reg.map.find({"kernel32.dll", "widechartomultibyte"});
+    if (mb == reg.map.end() || wc == reg.map.end()) return false;
+    auto args = [&](std::initializer_list<uint32_t> values) { unsigned i=0; for (auto v: values) mem.w32(cpu.reg[ESP]+4+4*i++,v); };
+    args({1252,0,0x1000,0xffffffffu,0x1100,2});
+    if (mb->second.fn(cpu) != 2 || mem.r(0x1100,2) != 'A' || mem.r(0x1102,2) != 0) return false;
+    args({1252,0,0x1100,0xffffffffu,0x1200,2,0,0});
+    return wc->second.fn(cpu) == 2 && mem.r(0x1200,2) == 'A';
+}
 static bool verify_cpinfo_layout() {
     Memory mem; mem.map(0x1000, 0x2000, PROT_R | PROT_W);
     Host host; Registry reg; Guest guest(mem, host, reg); guest.register_all();
@@ -232,6 +246,7 @@ static std::vector<uint8_t> slurp(const char* path) {
     return std::vector<uint8_t>{std::istreambuf_iterator<char>(f), {}};
 }
 int main(int argc, char** argv) {
+    if (!verify_conversion_terminators()) { std::puts("X86-GUEST FAIL: conversion terminator counts"); return 1; }
     if (!verify_cpinfo_layout()) { std::puts("X86-GUEST FAIL: GetCPInfo layout"); return 1; }
     if (!verify_printf_padding()) { std::puts("X86-GUEST FAIL: printf sign and prefix zero padding"); return 1; }
     if (!verify_critical_section_routes()) { std::puts("X86-CRITICAL-SECTION FAIL: CRT forced debug-info initialization"); return 1; }

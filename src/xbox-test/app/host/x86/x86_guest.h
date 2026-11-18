@@ -2020,11 +2020,11 @@ inline void Guest::register_all() {
         }
         (void)cp; std::string s = uint32_t(n) == 0xFFFFFFFFu ? str(src) : std::string();
         if (uint32_t(n) != 0xFFFFFFFFu) { auto b = mem.read_bytes(src, uint32_t(n)); s.assign(b.begin(), b.end()); }
-        if (!dst || !cap) return uint32_t(s.size() + 1);
-        uint32_t put = uint32_t(s.size()) < cap ? uint32_t(s.size()) : cap - 1;
-        for (uint32_t i = 0; i < put; ++i) { mem.w8(dst + i * 2, uint8_t(s[i])); mem.w8(dst + i * 2 + 1, 0); }
-        if (put < cap) { mem.w8(dst + put * 2, 0); mem.w8(dst + put * 2 + 1, 0); }
-        return put; });
+        if (n == -1) s.push_back('\0');
+        if (!cap) return uint32_t(s.size());
+        if (!dst || cap < s.size()) { set_last_error(dst ? 122 : 87); return 0; }
+        for (uint32_t i = 0; i < s.size(); ++i) { mem.w8(dst + i * 2, uint8_t(s[i])); mem.w8(dst + i * 2 + 1, 0); }
+        return uint32_t(s.size()); });
     auto nls_output = [this](Host::NlsRequest& request, uint32_t output_ptr, uint32_t expected_bytes) {
         if (!host.nls_call) { set_last_error(87); return 0u; }
         Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error);
@@ -2157,10 +2157,11 @@ inline void Guest::register_all() {
         std::string s;
         if (uint32_t(n) == 0xFFFFFFFFu) { for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(i * 2 + src, 2)); if (!w) break; s.push_back(char(w & 0xff)); } }
         else for (uint32_t i = 0; i < uint32_t(n); ++i) s.push_back(char(mem.r(src + i * 2, 2) & 0xff));
-        if (!dst || !cap) return uint32_t(s.size() + 1);
-        uint32_t put = uint32_t(s.size()) < cap ? uint32_t(s.size()) : cap - 1;
-        mem.write_bytes(dst, s.data(), put); if (put < cap) mem.w8(dst + put, 0);
-        return put; });
+        if (n == -1) s.push_back('\0');
+        if (!cap) return uint32_t(s.size());
+        if (!dst || cap < s.size()) { set_last_error(dst ? 122 : 87); return 0; }
+        mem.write_bytes(dst, s.data(), uint32_t(s.size()));
+        return uint32_t(s.size()); });
     // Heap
     reg.add("kernel32.dll", "GetProcessHeap", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0x50000000u; });
     reg.add("kernel32.dll", "HeapCreate", Conv::Stdcall, 3, [this](Cpu&) -> uint32_t {
