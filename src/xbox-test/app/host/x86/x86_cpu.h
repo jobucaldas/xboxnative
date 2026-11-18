@@ -1059,6 +1059,7 @@ struct Cpu {
         wr(r, n, v);
     }
     void shld(const Rm& r, unsigned regno, unsigned n, unsigned cnt, bool right) {
+        cnt &= 31;
         if (!cnt) return;
         unsigned bits = 8 * n; uint32_t m = mask(n);
         uint64_t dst = rd(r, n) & m, src = getreg(regno, n) & m;

@@ -776,6 +776,11 @@ static void test_sse_regressions() {
         for (unsigned i = 0; i < 5; ++i)
             EXPECT(m.mem.r32(Machine::DATA + i * 4) == native[i], "bts memory bit %d word %u", bit, i);
     }
+    // Immediate double shifts mask the count to five bits, just like CL forms.
+    for (uint8_t op : {uint8_t(0xa4), uint8_t(0xac)}) {
+        exec(m, {0x0f, op, 0xc8, 32}, 0x12345678u, 0xabcdef01u, 0, false);
+        EXPECT(m.cpu.reg[EAX] == 0x12345678u, "double shift opcode %02x count 32 must be a no-op", op);
+    }
     // movd xmm, eax zeroes the upper 96 bits; movd eax, xmm reads the low dword.
     run({0x66, 0x0F, 0x6E, 0xC0});  // movd xmm0, eax (xmm0 preset below)
     m.mem.w128(Machine::DATA, std::array<uint32_t, 4>{0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu}.data());
