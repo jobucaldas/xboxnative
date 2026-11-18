@@ -171,7 +171,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install registry test toolchain
-        timeout-minutes: 15
+        timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
           packages: gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 gcc-mingw-w64-i686 wine64 wine lld
@@ -265,7 +265,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install cross compiler and Wine
-        timeout-minutes: 15
+        timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
           packages: gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 llvm lld wine64
@@ -278,7 +278,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install PE inspection tools
-        timeout-minutes: 15
+        timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
           packages: gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 llvm lld
@@ -289,7 +289,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install cross compiler, PE tools and Wine
-        timeout-minutes: 15
+        timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
           packages: g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 llvm lld wine64 wine
@@ -309,7 +309,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install cross compiler and PE tools
-        timeout-minutes: 15
+        timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
           packages: g++-mingw-w64-x86-64 llvm lld
@@ -323,7 +323,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install cross compiler and PE tools
-        timeout-minutes: 15
+        timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
           packages: g++-mingw-w64-x86-64 llvm lld wine64
@@ -359,7 +359,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install cross compilers and PE tools
-        timeout-minutes: 15
+        timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
           packages: g++-mingw-w64-x86-64 gcc-mingw-w64-i686 llvm lld
@@ -373,7 +373,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install i686 cross compiler
-        timeout-minutes: 15
+        timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
           packages: gcc-mingw-w64-i686 g++-mingw-w64-i686 wine wine64 mono-devel
