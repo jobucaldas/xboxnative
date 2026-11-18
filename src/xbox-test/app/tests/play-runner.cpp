@@ -52,6 +52,7 @@ static std::wstring g_dir;
 #include "../steam_leaderboards.h"
 #include "../steam_persona.h"
 #include "../launch_target.h"
+extern "C" int play_runner_pe32(const wchar_t* stateRoot,const wchar_t* gameRoot,const wchar_t* exe,unsigned long* exitCode);
 // OFF-DEVICE stand-in for the application's CoreWindow (game mode only). Play's
 // unchanged factory adapter still validates every guest HWND; only its final
 // CreateSwapChainForCoreWindow step presents to a native Wine window instead.
@@ -318,6 +319,17 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     wchar_t path[32768];GetModuleFileNameW(nullptr,path,32768);std::wstring root=path;root.resize(root.find_last_of(L"\\/"));
     g_dir=root;
     regb::init(root,logline); // guest registry: <runner dir>\registry.sqlite
+    if(std::string(args)=="game32") {
+        wchar_t gameRoot[32768];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_ROOT",gameRoot,32768);
+        if(!n||n>=32768)return 2;
+        std::wstring install(gameRoot,n),exe=L"play-x86-fixture.exe";
+        wchar_t value[260];DWORD e=GetEnvironmentVariableW(L"PRUN_GAME_EXE",value,260);
+        if(e&&e<260)exe.assign(value,e);
+        unsigned long exitCode=0;
+        if(play_runner_pe32(root.c_str(),install.c_str(),exe.c_str(),&exitCode)!=0) {logline("GAME32 PLAY-LOADER FAIL: launcher PE32 route did not finish");return 1;}
+        const std::string message="GAME32 PLAY-LOADER COMPLETE: launcher PE32 route returned exit code "+std::to_string(exitCode);
+        logline(message.c_str());return 0;
+    }
     if(std::string(args)=="mono"||std::string(args)=="fna") {
         const bool fna=std::string(args)=="fna";
         if(!donor_pe::probe(logline)) {
