@@ -327,6 +327,26 @@ inline void register_win32(Registry& r, Host& h) {
             return result;
         });
     };
+    auto unavailable_cdecl = [&r, &h, count](const char* dll, const char* name, unsigned argc, uint32_t result = 0) {
+        if (r.map.count({dll, Registry::key_sym(name)})) return;
+        r.add(dll, name, Conv::Cdecl, argc, [&h, count, name, result](Cpu& c) -> uint32_t {
+            count(name);
+            c.mem.w32(c.fs_base + 0x34, 120);  // ERROR_CALL_NOT_IMPLEMENTED: no host record operation
+            auto& logged = h.calls[std::string("unsupported:") + name];
+            if (!logged++) { const std::string line = std::string("x86 unsupported: ") + name + "\n"; h.err += line; if (h.tee) h.tee(line); }
+            return result;
+        });
+    };
+    auto unavailable_stdcall = [&r, &h, count](const char* dll, const char* name, unsigned argc, uint32_t result = 0) {
+        if (r.map.count({dll, Registry::key_sym(name)})) return;
+        r.add(dll, name, Conv::Stdcall, argc, [&h, count, name, result](Cpu& c) -> uint32_t {
+            count(name);
+            c.mem.w32(c.fs_base + 0x34, 120);  // ERROR_CALL_NOT_IMPLEMENTED: no host record operation
+            auto& logged = h.calls[std::string("unsupported:") + name];
+            if (!logged++) { const std::string line = std::string("x86 unsupported: ") + name + "\n"; h.err += line; if (h.tee) h.tee(line); }
+            return result;
+        });
+    };
     auto native_window = [&h](uint32_t token) -> uintptr_t {
         if (!token) return 0;
         auto it = h.window_handles.find(token); return it == h.window_handles.end() ? 0 : it->second;
@@ -481,6 +501,35 @@ inline void register_win32(Registry& r, Host& h) {
     unavailable("MonitorFromWindow", 2);
     unavailable("MsgWaitForMultipleObjectsEx", 5, uint32_t(-1));
     unavailable("OffsetRect", 3);
+    unavailable("BeginPaint", 2);
+    unavailable("CheckDlgButton", 3);
+    unavailable("CheckMenuItem", 3);
+    unavailable("CheckRadioButton", 4);
+    unavailable("CreateDialogParamA", 5);
+    unavailable("DestroyMenu", 1);
+    unavailable("DialogBoxParamA", 5, uint32_t(-1));
+    unavailable("EnableWindow", 2);
+    unavailable("EndPaint", 2);
+    unavailable("FindWindowA", 2);
+    unavailable("GetDlgCtrlID", 1);
+    unavailable("GetDlgItemTextA", 4);
+    unavailable("GetLastActivePopup", 1);
+    unavailable("GetMenuState", 3);
+    unavailable("GetSubMenu", 2);
+    unavailable("IsDlgButtonChecked", 2);
+    unavailable("IsWindowEnabled", 1);
+    unavailable("KillTimer", 2);
+    unavailable("LoadMenuA", 2);
+    unavailable("PostThreadMessageA", 4);
+    unavailable("SendDlgItemMessageA", 5);
+    unavailable("SetDlgItemTextA", 3);
+    unavailable("SetTimer", 4);
+    r.add("user32.dll", "SetRect", Conv::Stdcall, 5, [count](Cpu& c) -> uint32_t {
+        count("SetRect"); const uint32_t rect = c.arg(0); if (!rect) return 0;
+        c.mem.w32(rect, c.arg(1)); c.mem.w32(rect + 4, c.arg(2));
+        c.mem.w32(rect + 8, c.arg(3)); c.mem.w32(rect + 12, c.arg(4)); return 1;
+    });
+    unavailable_cdecl("user32.dll", "wsprintfA", 2);
     auto message_box = [&r, &h, count](const char* name, bool wide) {
         r.add("user32.dll", name, Conv::Stdcall, 4, [&h, count, name, wide](Cpu& c) -> uint32_t {
             count(name);
@@ -536,6 +585,15 @@ inline void register_win32(Registry& r, Host& h) {
                 swap(root, child); root = child; } };
         if (n > 1) { for (uint32_t i = n / 2; i-- > 0;) sift(i, n); for (uint32_t e = n - 1; e > 0; --e) { swap(0, e); sift(0, e); } }
         return 0; });
+    unavailable_stdcall("gdi32.dll", "GetGlyphOutlineA", 6);
+    unavailable_stdcall("imm32.dll", "ImmAssociateContext", 2);
+    unavailable_stdcall("kernel32.dll", "GetDiskFreeSpaceA", 5);
+    unavailable_stdcall("kernel32.dll", "GetOverlappedResult", 4);
+    unavailable_stdcall("kernel32.dll", "OpenProcess", 3);
+    unavailable_stdcall("kernel32.dll", "ReadConsoleW", 5);
+    unavailable_stdcall("kernel32.dll", "UnmapViewOfFile", 1);
+    unavailable_stdcall("sensapi.dll", "IsNetworkAlive", 1);
+    unavailable_stdcall("shlwapi.dll", "PathIsDirectoryA", 1);
 }
 inline void register_xinput(Registry& r, Host& h) {
     constexpr uint32_t error_bad_arguments = 160;
