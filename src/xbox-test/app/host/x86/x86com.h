@@ -52,6 +52,7 @@ struct Proxy {
     const char* iface = "";   // for fault names and QI identity
     unsigned guest_refs = 1;  // the reference the guest was handed
     unsigned slots = 0;
+    uint32_t d3d9_focus_window = 0; // original PE32 handle, not the translated host HWND
     ComSpace* space = nullptr;
     std::function<void()> host_release;  // drops the host object's one reference
 };

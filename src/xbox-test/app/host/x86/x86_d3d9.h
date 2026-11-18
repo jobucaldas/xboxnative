@@ -143,7 +143,7 @@ inline void register_d3d9_com(ComSpace& s, Host& h) {
         D3DPRESENT_PARAMETERS pp{};if(FAILED(d3d9_present_parameters(h,c,c.arg(5),pp)))return E_POINTER;
         IDirect3DDevice9* object=nullptr;HWND focus=reinterpret_cast<HWND>(h.d3d9_window?h.d3d9_window(c.arg(3)):(c.arg(3)?0:0));HRESULT hr=d3d9(p)->CreateDevice(c.arg(1),D3DDEVTYPE(c.arg(2)),focus,c.arg(4),&pp,&object);
         d3d9_write_present_parameters(c,c.arg(5),pp);
-        if(SUCCEEDED(hr)&&object)c.mem.w32(c.arg(6),d3d9_wrap(s,c,"IDirect3DDevice9",object));else if(c.arg(6))c.mem.w32(c.arg(6),0);
+        if(SUCCEEDED(hr)&&object){uint32_t guest=d3d9_wrap(s,c,"IDirect3DDevice9",object);s.by_guest(guest).d3d9_focus_window=c.arg(3);c.mem.w32(c.arg(6),guest);}else if(c.arg(6))c.mem.w32(c.arg(6),0);
         return uint32_t(hr);
     });};
     create_device("IDirect3D9");create_device("IDirect3D9Ex");
@@ -155,7 +155,7 @@ inline void register_d3d9_com(ComSpace& s, Host& h) {
     method("IDirect3DDevice9",6,2,[dev,&s,&h](Proxy& p,Cpu& c)->uint32_t {if(h.route_trace)h.route_trace("D3D9 Device GetDirect3D");if(!c.arg(1))return E_POINTER;IDirect3D9* x=nullptr;HRESULT hr=dev(p)->GetDirect3D(&x);if(SUCCEEDED(hr))c.mem.w32(c.arg(1),d3d9_wrap(s,c,"IDirect3D9",x));else c.mem.w32(c.arg(1),0);return uint32_t(hr);});
     method("IDirect3DDevice9",7,2,[dev,&h](Proxy& p,Cpu& c)->uint32_t {if(h.route_trace)h.route_trace("D3D9 Device GetDeviceCaps");if(!c.arg(1))return E_POINTER;D3DCAPS9 x{};HRESULT hr=dev(p)->GetDeviceCaps(&x);if(SUCCEEDED(hr))c.mem.write_bytes(c.arg(1),&x,sizeof(x));return uint32_t(hr);});
     method("IDirect3DDevice9",8,3,[dev,&h](Proxy& p,Cpu& c)->uint32_t {if(h.route_trace)h.route_trace("D3D9 Device GetDisplayMode");if(!c.arg(2))return E_POINTER;D3DDISPLAYMODE x{};HRESULT hr=dev(p)->GetDisplayMode(c.arg(1),&x);if(SUCCEEDED(hr))c.mem.write_bytes(c.arg(2),&x,sizeof(x));return uint32_t(hr);});
-    method("IDirect3DDevice9",9,2,[dev,&h](Proxy& p,Cpu& c)->uint32_t {if(h.route_trace)h.route_trace("D3D9 Device GetCreationParameters");if(!c.arg(1))return E_POINTER;D3DDEVICE_CREATION_PARAMETERS x{};HRESULT hr=dev(p)->GetCreationParameters(&x);if(SUCCEEDED(hr))c.mem.write_bytes(c.arg(1),&x,sizeof(x));return uint32_t(hr);});
+    method("IDirect3DDevice9",9,2,[dev,&h](Proxy& p,Cpu& c)->uint32_t {if(h.route_trace)h.route_trace("D3D9 Device GetCreationParameters");if(!c.arg(1))return E_POINTER;D3DDEVICE_CREATION_PARAMETERS x{};HRESULT hr=dev(p)->GetCreationParameters(&x);if(SUCCEEDED(hr)){uint32_t a=c.arg(1);c.mem.w32(a,x.AdapterOrdinal);c.mem.w32(a+4,uint32_t(x.DeviceType));c.mem.w32(a+8,p.d3d9_focus_window);c.mem.w32(a+12,x.BehaviorFlags);}return uint32_t(hr);});
     method("IDirect3DDevice9",10,4,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(3))return E_POINTER;auto* bitmap=static_cast<IDirect3DSurface9*>(s.by_guest(c.arg(3)).host);return uint32_t(dev(p)->SetCursorProperties(c.arg(1),c.arg(2),bitmap));});
     method("IDirect3DDevice9",11,4,[dev](Proxy& p,Cpu& c)->uint32_t {dev(p)->SetCursorPosition(int32_t(c.arg(1)),int32_t(c.arg(2)),c.arg(3));return 0;});
     method("IDirect3DDevice9",12,2,[dev](Proxy& p,Cpu& c){return uint32_t(dev(p)->ShowCursor(c.arg(1)!=0));});

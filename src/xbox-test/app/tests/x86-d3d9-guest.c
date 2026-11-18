@@ -37,6 +37,11 @@ void WINAPI entry(void) {
     IDirect3DDevice9 *device=0;
     HRESULT device_hr=IDirect3D9_CreateDevice(d3d,0,D3DDEVTYPE_HAL,(HWND)1,D3DCREATE_HARDWARE_VERTEXPROCESSING,&pp,&device);
     if(FAILED(device_hr)||!device)ExitProcess((UINT)device_hr);
+    struct { D3DDEVICE_CREATION_PARAMETERS params; DWORD guard; } creation={0};
+    creation.guard=0x12345678;
+    if(FAILED(IDirect3DDevice9_GetCreationParameters(device,&creation.params))||creation.guard!=0x12345678||
+       creation.params.hFocusWindow!=(HWND)1||creation.params.DeviceType!=D3DDEVTYPE_HAL||
+       creation.params.BehaviorFlags!=D3DCREATE_HARDWARE_VERTEXPROCESSING)ExitProcess(59);
     HMODULE d3dx=LoadLibraryA("d3dx9_43.dll");
     if(!d3dx)ExitProcess(41);
     union { FARPROC raw; D3DXCreateTextureFn fn; } create_texture_p={GetProcAddress(d3dx,"D3DXCreateTexture")};
