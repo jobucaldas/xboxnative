@@ -1330,7 +1330,7 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
             if(!result)return E_POINTER;*result=0;if(!createSound)return DSERR_NODRIVER;
             void* object=nullptr;HRESULT hr=createSound(static_cast<const GUID*>(id),&object,nullptr);*result=reinterpret_cast<uintptr_t>(object);return uint32_t(hr);
         };
-        host.dsound_export=[dsound](const char* name)->uintptr_t {return dsound&&name?reinterpret_cast<uintptr_t>(GetProcAddress(dsound,name)):0;};
+        host.dsound_export=[](const char* name)->uintptr_t {return dsound&&name?reinterpret_cast<uintptr_t>(GetProcAddress(dsound,name)):0;};
         using Create9=void* (WINAPI*)(UINT);
         using Create9Ex=HRESULT (WINAPI*)(UINT,void**);
         auto create9=d3d9?reinterpret_cast<Create9>(GetProcAddress(d3d9,"Direct3DCreate9")):nullptr;

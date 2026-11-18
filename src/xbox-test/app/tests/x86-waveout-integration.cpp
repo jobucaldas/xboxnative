@@ -30,6 +30,9 @@ int main() {
     if (waveOutGetNumDevs() != 1 || waveOutGetDevCapsA(WAVE_MAPPER, &caps_a, sizeof(caps_a)) != MMSYSERR_NOERROR ||
         waveOutGetDevCapsW(WAVE_MAPPER, &caps_w, sizeof(caps_w)) != MMSYSERR_NOERROR) return 9;
     WAVEFORMATEX format{WAVE_FORMAT_PCM, 2, 48000, 192000, 4, 16, 0};
+    if (waveOutOpen(nullptr, 0xffffffffu, &format, 0, 0, WAVE_FORMAT_QUERY) != MMSYSERR_NOERROR) return 27;
+    WAVEFORMATEX invalid_format = format; invalid_format.wFormatTag = 3;
+    if (waveOutOpen(nullptr, 0xffffffffu, &invalid_format, 0, 0, WAVE_FORMAT_QUERY) != WAVERR_BADFORMAT) return 28;
     HWAVEIN input = nullptr;
     if (waveInGetNumDevs() != 0 || waveInOpen(&input, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NODRIVER || input) return 8;
     HWAVEOUT output = nullptr;
@@ -52,6 +55,8 @@ int main() {
     MMTIME after{}; after.wType = TIME_BYTES;
     if (waveOutGetPosition(output, &after, sizeof(after)) != MMSYSERR_NOERROR || after.u.cb <= before.u.cb) return 15;
     if (waveOutReset(output) != MMSYSERR_NOERROR) return 16;
+    MMTIME reset_position{}; reset_position.wType = TIME_SAMPLES;
+    if (waveOutGetPosition(output, &reset_position, sizeof(reset_position)) != MMSYSERR_NOERROR || reset_position.u.sample != 0) return 29;
     if (callback_count != 1 || callback_order != 1 || !(header.dwFlags & WHDR_DONE) || (header.dwFlags & WHDR_INQUEUE)) return 17;
     if (waveOutUnprepareHeader(output, &header, sizeof(header)) != MMSYSERR_NOERROR) return 18;
     if (waveOutReset(output) != MMSYSERR_NOERROR || waveOutClose(output) != MMSYSERR_NOERROR) return 19;
@@ -80,7 +85,7 @@ int main() {
         waveOutReset(output) != MMSYSERR_NOERROR || window_callback_count != 1 ||
         waveOutUnprepareHeader(output, &window_buffer, sizeof(window_buffer)) != MMSYSERR_NOERROR ||
         waveOutClose(output) != MMSYSERR_NOERROR) return 26;
-    puts("X86-WAVEOUT PASS: function, event, and window callbacks; WHDR_DONE ordering, advancing position, reset flush, close semantics");
+    puts("X86-WAVEOUT PASS: function, event, and window callbacks; query validation, reset position, WHDR_DONE ordering and close semantics");
     return 0;
 }
 #else
@@ -110,11 +115,50 @@ static uintptr_t shim_export(HMODULE module, const char *name) {
     return 0;
 }
 
+using WaveOutClose = MMRESULT (WINAPI *)(HWAVEOUT);
+static HANDLE waveout_done_event;
+static WaveOutClose waveout_close;
+static volatile MMRESULT waveout_callback_close_result = MMSYSERR_ERROR;
+static void CALLBACK close_from_waveout_done(HWAVEOUT handle, UINT message, DWORD_PTR, DWORD_PTR, DWORD_PTR) {
+    if (message == WOM_DONE) {
+        waveout_callback_close_result = waveout_close(handle);
+        SetEvent(waveout_done_event);
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc != 3) { std::fprintf(stderr, "usage: x86-waveout-integration <dsound.dll> <guest.exe>\n"); return 2; }
     HMODULE shim = LoadLibraryA(argv[1]);
     if (!shim) { std::fprintf(stderr, "FAIL: LoadLibrary dsound shim: %lu\n", GetLastError()); return 2; }
-    if (!shim_export(shim, "XbnWaveOutOpen")) { std::fprintf(stderr, "FAIL: internal waveOutOpen export missing\n"); return 2; }
+    auto open = reinterpret_cast<MMRESULT (WINAPI *)(LPHWAVEOUT, UINT, LPCWAVEFORMATEX, DWORD_PTR, DWORD_PTR, DWORD)>(shim_export(shim, "XbnWaveOutOpen"));
+    waveout_close = reinterpret_cast<WaveOutClose>(shim_export(shim, "XbnWaveOutClose"));
+    auto prepare = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT, LPWAVEHDR, UINT)>(shim_export(shim, "XbnWaveOutPrepareHeader"));
+    auto write = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT, LPWAVEHDR, UINT)>(shim_export(shim, "XbnWaveOutWrite"));
+    if (!open || !waveout_close || !prepare || !write) { std::fprintf(stderr, "FAIL: internal waveOut exports missing\n"); return 2; }
+    WAVEFORMATEX format{WAVE_FORMAT_PCM, 2, 48000, 192000, 4, 16, 0};
+    if (open(nullptr, 0xffffffffu, &format, 0, 0, WAVE_FORMAT_QUERY) != MMSYSERR_NOERROR) {
+        std::fprintf(stderr, "FAIL: x64 WAVE_FORMAT_QUERY rejected a null handle or device id\n"); return 2;
+    }
+    format.wFormatTag = 3;
+    if (open(nullptr, 0xffffffffu, &format, 0, 0, WAVE_FORMAT_QUERY) != WAVERR_BADFORMAT) {
+        std::fprintf(stderr, "FAIL: x64 WAVE_FORMAT_QUERY accepted an invalid format\n"); return 2;
+    }
+    format.wFormatTag = WAVE_FORMAT_PCM;
+    waveout_done_event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+    if (!waveout_done_event) { std::fprintf(stderr, "FAIL: create callback-close event\n"); return 2; }
+    HWAVEOUT callback_output = nullptr;
+    WAVEHDR callback_header{};
+    char callback_samples[48000]{};
+    callback_header.lpData = callback_samples;
+    callback_header.dwBufferLength = sizeof(callback_samples);
+    if (open(&callback_output, WAVE_MAPPER, &format, reinterpret_cast<DWORD_PTR>(&close_from_waveout_done), 0, CALLBACK_FUNCTION) != MMSYSERR_NOERROR ||
+        prepare(callback_output, &callback_header, sizeof(callback_header)) != MMSYSERR_NOERROR ||
+        write(callback_output, &callback_header, sizeof(callback_header)) != MMSYSERR_NOERROR ||
+        WaitForSingleObject(waveout_done_event, 15000) != WAIT_OBJECT_0 || waveout_callback_close_result != MMSYSERR_NOERROR) {
+        std::fprintf(stderr, "FAIL: close from WOM_DONE callback (result=%u)\n", waveout_callback_close_result); return 2;
+    }
+    CloseHandle(waveout_done_event);
+    std::puts("X64-WAVEOUT PASS: format query does not open a device; close from WOM_DONE callback");
     std::ifstream f(argv[2], std::ios::binary);
     if (!f) { std::fprintf(stderr, "FAIL: cannot open guest fixture\n"); return 2; }
     std::vector<uint8_t> image{std::istreambuf_iterator<char>(f), {}};

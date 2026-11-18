@@ -121,7 +121,7 @@ inline void register_waveout(Registry& r,Host& h){
     auto caps_a=[&h](Cpu& c)->uint32_t{using Fn=MMRESULT(WINAPI*)(UINT_PTR,LPWAVEOUTCAPSA,UINT);auto fn=waveout_export<Fn>(h,"XbnWaveOutGetDevCapsA");if(!fn)return MMSYSERR_NODRIVER;if(!c.arg(1))return MMSYSERR_INVALPARAM;UINT_PTR id=c.arg(0);WAVEOUTCAPSA caps{};MMRESULT result=fn(id,&caps,c.arg(2));if(result==MMSYSERR_NOERROR)c.mem.write_bytes(c.arg(1),&caps,sizeof(caps));return result;};
     auto caps_w=[&h](Cpu& c)->uint32_t{using Fn=MMRESULT(WINAPI*)(UINT_PTR,LPWAVEOUTCAPSW,UINT);auto fn=waveout_export<Fn>(h,"XbnWaveOutGetDevCapsW");if(!fn)return MMSYSERR_NODRIVER;if(!c.arg(1))return MMSYSERR_INVALPARAM;UINT_PTR id=c.arg(0);WAVEOUTCAPSW caps{};MMRESULT result=fn(id,&caps,c.arg(2));if(result==MMSYSERR_NOERROR)c.mem.write_bytes(c.arg(1),&caps,sizeof(caps));return result;};
     r.add("winmm.dll","waveOutGetDevCapsA",Conv::Stdcall,3,caps_a);r.add("winmm.dll","waveOutGetDevCapsW",Conv::Stdcall,3,caps_w);
-    r.add("winmm.dll","waveOutOpen",Conv::Stdcall,6,[&h](Cpu& c)->uint32_t{using Fn=MMRESULT(WINAPI*)(LPHWAVEOUT,UINT,LPCWAVEFORMATEX,DWORD_PTR,DWORD_PTR,DWORD);auto fn=waveout_export<Fn>(h,"XbnWaveOutOpen");if(!fn)return MMSYSERR_NODRIVER;if(!c.arg(0)||!c.arg(2))return MMSYSERR_INVALPARAM;WAVEFORMATEX format{};auto raw=c.mem.read_bytes(c.arg(2),sizeof(format));memcpy(&format,raw.data(),sizeof(format));HWAVEOUT native=nullptr;MMRESULT result=fn(&native,c.arg(1),&format,0,0,CALLBACK_NULL);if(result!=MMSYSERR_NOERROR)return result;uint32_t token=0xA0000000u|(++x86_wave_serial()&0x0fffffffu);c.mem.w32(c.arg(0),token);X86WaveOutput output{};output.host=&h;output.native=native;output.callback=c.arg(3);output.instance=c.arg(4);output.flags=c.arg(5);auto [stored,inserted]=x86_wave_outputs().emplace(token,std::move(output));(void)inserted;waveout_notify(token,stored->second,c,WOM_OPEN,0);return MMSYSERR_NOERROR;});
+    r.add("winmm.dll","waveOutOpen",Conv::Stdcall,6,[&h](Cpu& c)->uint32_t{using Fn=MMRESULT(WINAPI*)(LPHWAVEOUT,UINT,LPCWAVEFORMATEX,DWORD_PTR,DWORD_PTR,DWORD);auto fn=waveout_export<Fn>(h,"XbnWaveOutOpen");if(!fn)return MMSYSERR_NODRIVER;if(!c.arg(2))return MMSYSERR_INVALPARAM;WAVEFORMATEX format{};auto raw=c.mem.read_bytes(c.arg(2),sizeof(format));memcpy(&format,raw.data(),sizeof(format));if(c.arg(5)&WAVE_FORMAT_QUERY)return fn(nullptr,c.arg(1),&format,c.arg(3),c.arg(4),c.arg(5));if(!c.arg(0))return MMSYSERR_INVALPARAM;HWAVEOUT native=nullptr;MMRESULT result=fn(&native,c.arg(1),&format,0,0,CALLBACK_NULL);if(result!=MMSYSERR_NOERROR)return result;uint32_t token=0xA0000000u|(++x86_wave_serial()&0x0fffffffu);c.mem.w32(c.arg(0),token);X86WaveOutput output{};output.host=&h;output.native=native;output.callback=c.arg(3);output.instance=c.arg(4);output.flags=c.arg(5);auto [stored,inserted]=x86_wave_outputs().emplace(token,std::move(output));(void)inserted;waveout_notify(token,stored->second,c,WOM_OPEN,0);return MMSYSERR_NOERROR;});
     r.add("winmm.dll","waveOutPrepareHeader",Conv::Stdcall,3,[&h](Cpu& c)->uint32_t{using Fn=MMRESULT(WINAPI*)(HWAVEOUT,LPWAVEHDR,UINT);auto fn=waveout_export<Fn>(h,"XbnWaveOutPrepareHeader");auto out=x86_wave_outputs().find(c.arg(0));if(!fn||out==x86_wave_outputs().end())return MMSYSERR_INVALHANDLE;uint32_t guest=c.arg(1);if(!guest||c.arg(2)<32)return MMSYSERR_INVALPARAM;auto& header=out->second.headers[guest];header.host.lpData=nullptr;header.host.dwBufferLength=c.mem.r32(guest+4);header.host.dwBytesRecorded=c.mem.r32(guest+8);header.host.dwUser=c.mem.r32(guest+12);header.host.dwFlags=c.mem.r32(guest+16);header.host.dwLoops=c.mem.r32(guest+20);header.host.lpNext=nullptr;header.host.reserved=c.mem.r32(guest+28);MMRESULT result=fn(out->second.native,&header.host,sizeof(header.host));c.mem.w32(guest+16,header.host.dwFlags);return result;});
     r.add("winmm.dll","waveOutWrite",Conv::Stdcall,3,[&h](Cpu& c)->uint32_t{using Fn=MMRESULT(WINAPI*)(HWAVEOUT,LPWAVEHDR,UINT);auto fn=waveout_export<Fn>(h,"XbnWaveOutWrite");auto out=x86_wave_outputs().find(c.arg(0));if(!fn||out==x86_wave_outputs().end())return MMSYSERR_INVALHANDLE;uint32_t guest=c.arg(1);if(!guest||c.arg(2)<32)return MMSYSERR_INVALPARAM;auto it=out->second.headers.find(guest);if(it==out->second.headers.end())return WAVERR_UNPREPARED;auto& header=it->second;uint32_t data=c.mem.r32(guest),length=c.mem.r32(guest+4);if(!data||!length)return MMSYSERR_INVALPARAM;header.bytes=c.mem.read_bytes(data,length);header.host.lpData=reinterpret_cast<LPSTR>(header.bytes.data());header.host.dwBufferLength=length;header.host.dwFlags=c.mem.r32(guest+16);MMRESULT result=fn(out->second.native,&header.host,sizeof(header.host));if(result==MMSYSERR_NOERROR){header.notified=false;out->second.order.push_back(guest);c.mem.w32(guest+16,header.host.dwFlags);}return result;});
     r.add("winmm.dll","waveOutUnprepareHeader",Conv::Stdcall,3,[&h](Cpu& c)->uint32_t{using Fn=MMRESULT(WINAPI*)(HWAVEOUT,LPWAVEHDR,UINT);auto fn=waveout_export<Fn>(h,"XbnWaveOutUnprepareHeader");auto out=x86_wave_outputs().find(c.arg(0));if(!fn||out==x86_wave_outputs().end())return MMSYSERR_INVALHANDLE;if(!c.arg(1)||c.arg(2)<32)return MMSYSERR_INVALPARAM;auto it=out->second.headers.find(c.arg(1));if(it==out->second.headers.end())return WAVERR_UNPREPARED;MMRESULT result=fn(out->second.native,&it->second.host,sizeof(WAVEHDR));if(result==MMSYSERR_NOERROR){c.mem.w32(c.arg(1)+16,it->second.host.dwFlags);out->second.headers.erase(it);}return result;});
@@ -175,5 +175,42 @@ inline void register_dsound(Registry& r,Host& h) {
 }
 }
 #else
-namespace x86 { inline void register_dsound(Registry&,Host&) {} }
+namespace x86 {
+inline void register_dsound(Registry& r,Host&) {
+    auto no_driver=[](Cpu&)->uint32_t{return 6u;};
+    r.add("winmm.dll","waveOutGetNumDevs",Conv::Stdcall,0,[](Cpu&)->uint32_t{return 0;});
+    r.add("winmm.dll","waveOutOpen",Conv::Stdcall,6,no_driver);
+    r.add("winmm.dll","waveOutClose",Conv::Stdcall,1,no_driver);
+    r.add("winmm.dll","waveOutPrepareHeader",Conv::Stdcall,3,no_driver);
+    r.add("winmm.dll","waveOutUnprepareHeader",Conv::Stdcall,3,no_driver);
+    r.add("winmm.dll","waveOutWrite",Conv::Stdcall,3,no_driver);
+    r.add("winmm.dll","waveOutGetPosition",Conv::Stdcall,3,no_driver);
+    r.add("winmm.dll","waveOutReset",Conv::Stdcall,1,no_driver);
+    r.add("winmm.dll","waveOutGetDevCapsA",Conv::Stdcall,3,no_driver);
+    r.add("winmm.dll","waveOutGetDevCapsW",Conv::Stdcall,3,no_driver);
+    r.add("winmm.dll","waveOutPause",Conv::Stdcall,1,no_driver);
+    r.add("winmm.dll","waveOutRestart",Conv::Stdcall,1,no_driver);
+    r.add("winmm.dll","waveOutSetVolume",Conv::Stdcall,2,no_driver);
+    r.add("winmm.dll","waveOutMessage",Conv::Stdcall,4,no_driver);
+    r.add("winmm.dll","waveInGetNumDevs",Conv::Stdcall,0,[](Cpu&)->uint32_t{return 0;});
+    r.add("winmm.dll","waveInOpen",Conv::Stdcall,6,no_driver);
+    r.add("winmm.dll","waveInClose",Conv::Stdcall,1,no_driver);
+    r.add("winmm.dll","waveInPrepareHeader",Conv::Stdcall,3,no_driver);
+    r.add("winmm.dll","waveInUnprepareHeader",Conv::Stdcall,3,no_driver);
+    r.add("winmm.dll","waveInAddBuffer",Conv::Stdcall,3,no_driver);
+    r.add("winmm.dll","waveInGetPosition",Conv::Stdcall,3,no_driver);
+    r.add("winmm.dll","waveInGetDevCapsA",Conv::Stdcall,3,no_driver);
+    r.add("winmm.dll","waveInGetDevCapsW",Conv::Stdcall,3,no_driver);
+    r.add("winmm.dll","waveInStart",Conv::Stdcall,1,no_driver);
+    r.add("winmm.dll","waveInStop",Conv::Stdcall,1,no_driver);
+    r.add("winmm.dll","waveInReset",Conv::Stdcall,1,no_driver);
+    r.add("winmm.dll","waveInMessage",Conv::Stdcall,4,no_driver);
+    r.add("winmm.dll","waveOutGetErrorTextA",Conv::Stdcall,3,no_driver);
+    r.add("winmm.dll","waveOutGetErrorTextW",Conv::Stdcall,3,no_driver);
+    r.add("winmm.dll","waveInGetErrorTextA",Conv::Stdcall,3,no_driver);
+    r.add("winmm.dll","waveInGetErrorTextW",Conv::Stdcall,3,no_driver);
+    r.add("winmm.dll","PlaySoundA",Conv::Stdcall,3,[](Cpu&)->uint32_t{return 0;});
+    r.add("winmm.dll","PlaySoundW",Conv::Stdcall,3,[](Cpu&)->uint32_t{return 0;});
+}
+}
 #endif

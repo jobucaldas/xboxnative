@@ -56,6 +56,13 @@ private:
     WaveOutput *owner_;
 };
 using WaveOutProc = void (CALLBACK *)(HWAVEOUT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR);
+struct WaveOutCallbackTask { WaveOutProc callback; HWAVEOUT handle; UINT message; DWORD_PTR instance, header; };
+static DWORD WINAPI waveout_callback_thread(void *context) {
+    auto *task = static_cast<WaveOutCallbackTask *>(context);
+    task->callback(task->handle, task->message, task->instance, task->header, 0);
+    HeapFree(GetProcessHeap(), 0, task);
+    return 0;
+}
 struct WaveOutput {
     HWAVEOUT handle = nullptr;
     WAVEFORMATEX format{};
@@ -69,8 +76,15 @@ struct WaveOutput {
     WaveOutput *next = nullptr;
     void notify(UINT message, WAVEHDR *header) {
         if ((flags & CALLBACK_TYPEMASK) == CALLBACK_FUNCTION) {
-            reinterpret_cast<WaveOutProc>(callback)(handle, message, instance,
-                reinterpret_cast<DWORD_PTR>(header), 0);
+            auto *task = static_cast<WaveOutCallbackTask *>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(WaveOutCallbackTask)));
+            if (!task) return;
+            task->callback = reinterpret_cast<WaveOutProc>(callback);
+            task->handle = handle;
+            task->message = message;
+            task->instance = instance;
+            task->header = reinterpret_cast<DWORD_PTR>(header);
+            if (!QueueUserWorkItem(waveout_callback_thread, task, WT_EXECUTEDEFAULT))
+                HeapFree(GetProcessHeap(), 0, task);
         } else if ((flags & CALLBACK_TYPEMASK) == CALLBACK_EVENT) {
             SetEvent(reinterpret_cast<HANDLE>(callback));
         } else if ((flags & CALLBACK_TYPEMASK) == CALLBACK_WINDOW) {
@@ -331,12 +345,12 @@ static HRESULT create_device(LPCGUID id,LPDIRECTSOUND8 *out,IUnknown *outer){if(
 extern "C" __declspec(dllexport) UINT WINAPI XbnWaveOutGetNumDevs(){return SUCCEEDED(ensure_engine())?1:0;}
 extern "C" __declspec(dllexport) MMRESULT WINAPI XbnWaveOutGetDevCapsA(UINT_PTR id,LPWAVEOUTCAPSA caps,UINT size){if(!caps||size<sizeof(*caps))return MMSYSERR_INVALPARAM;if(id!=WAVE_MAPPER&&id!=0)return MMSYSERR_BADDEVICEID;memset(caps,0,sizeof(*caps));caps->wMid=1;caps->wPid=1;caps->vDriverVersion=1;{const char name[]="XAudio2 default output";for(unsigned i=0;i<sizeof(name);++i)caps->szPname[i]=name[i];}caps->dwFormats=0x000FFFFFu;caps->wChannels=2;caps->dwSupport=WAVECAPS_SAMPLEACCURATE;return SUCCEEDED(ensure_engine())?MMSYSERR_NOERROR:MMSYSERR_NODRIVER;}
 extern "C" __declspec(dllexport) MMRESULT WINAPI XbnWaveOutGetDevCapsW(UINT_PTR id,LPWAVEOUTCAPSW caps,UINT size){if(!caps||size<sizeof(*caps))return MMSYSERR_INVALPARAM;if(id!=WAVE_MAPPER&&id!=0)return MMSYSERR_BADDEVICEID;memset(caps,0,sizeof(*caps));caps->wMid=1;caps->wPid=1;caps->vDriverVersion=1;static const WCHAR name[]=L"XAudio2 default output";memcpy(caps->szPname,name,sizeof(name));caps->dwFormats=0x000FFFFFu;caps->wChannels=2;caps->dwSupport=WAVECAPS_SAMPLEACCURATE;return SUCCEEDED(ensure_engine())?MMSYSERR_NOERROR:MMSYSERR_NODRIVER;}
-extern "C" __declspec(dllexport) MMRESULT WINAPI XbnWaveOutOpen(LPHWAVEOUT out,UINT id,LPCWAVEFORMATEX format,DWORD_PTR callback,DWORD_PTR instance,DWORD flags){if(!out||!format)return MMSYSERR_INVALPARAM;*out=nullptr;if(id!=WAVE_MAPPER&&id!=0)return MMSYSERR_BADDEVICEID;if(!wave_callback_valid(callback,flags))return MMSYSERR_INVALPARAM;if(!valid_format(format))return WAVERR_BADFORMAT;HRESULT hr=ensure_engine();if(FAILED(hr))return MMSYSERR_NODRIVER;void *mem=HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(WaveOutput));if(!mem)return MMSYSERR_NOMEM;auto *w=new(mem)WaveOutput;w->handle=reinterpret_cast<HWAVEOUT>(w);w->format=*format;w->callback=callback;w->instance=instance;w->flags=flags;hr=engine->CreateSourceVoice(&w->voice,format,0,XAUDIO2_DEFAULT_FREQ_RATIO,&w->events);if(FAILED(hr)){w->~WaveOutput();HeapFree(GetProcessHeap(),0,w);return MMSYSERR_NODRIVER;}w->next=wave_outputs;wave_outputs=w;*out=w->handle;w->notify(WOM_OPEN,nullptr);return MMSYSERR_NOERROR;}
+extern "C" __declspec(dllexport) MMRESULT WINAPI XbnWaveOutOpen(LPHWAVEOUT out,UINT id,LPCWAVEFORMATEX format,DWORD_PTR callback,DWORD_PTR instance,DWORD flags){if(!format)return MMSYSERR_INVALPARAM;if(!valid_format(format))return WAVERR_BADFORMAT;if(flags&WAVE_FORMAT_QUERY)return MMSYSERR_NOERROR;if(!out)return MMSYSERR_INVALPARAM;*out=nullptr;if(id!=WAVE_MAPPER&&id!=0)return MMSYSERR_BADDEVICEID;if(!wave_callback_valid(callback,flags))return MMSYSERR_INVALPARAM;HRESULT hr=ensure_engine();if(FAILED(hr))return MMSYSERR_NODRIVER;void *mem=HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(WaveOutput));if(!mem)return MMSYSERR_NOMEM;auto *w=new(mem)WaveOutput;w->handle=reinterpret_cast<HWAVEOUT>(w);w->format=*format;w->callback=callback;w->instance=instance;w->flags=flags;hr=engine->CreateSourceVoice(&w->voice,format,0,XAUDIO2_DEFAULT_FREQ_RATIO,&w->events);if(FAILED(hr)){w->~WaveOutput();HeapFree(GetProcessHeap(),0,w);return MMSYSERR_NODRIVER;}w->next=wave_outputs;wave_outputs=w;*out=w->handle;w->notify(WOM_OPEN,nullptr);return MMSYSERR_NOERROR;}
 extern "C" __declspec(dllexport) MMRESULT WINAPI XbnWaveOutPrepareHeader(HWAVEOUT handle,LPWAVEHDR header,UINT size){if(!valid_wave_handle(handle))return MMSYSERR_INVALHANDLE;if(!header||size<sizeof(*header))return MMSYSERR_INVALPARAM;if(header->dwFlags&WHDR_PREPARED)return MMSYSERR_NOERROR;header->dwFlags=(header->dwFlags&~WHDR_DONE)|WHDR_PREPARED;header->dwBytesRecorded=0;return MMSYSERR_NOERROR;}
 extern "C" __declspec(dllexport) MMRESULT WINAPI XbnWaveOutUnprepareHeader(HWAVEOUT handle,LPWAVEHDR header,UINT size){if(!valid_wave_handle(handle))return MMSYSERR_INVALHANDLE;if(!header||size<sizeof(*header))return MMSYSERR_INVALPARAM;if(!(header->dwFlags&WHDR_PREPARED))return WAVERR_UNPREPARED;if(header->dwFlags&WHDR_INQUEUE)return WAVERR_STILLPLAYING;header->dwFlags&=~(WHDR_PREPARED|WHDR_DONE);return MMSYSERR_NOERROR;}
 extern "C" __declspec(dllexport) MMRESULT WINAPI XbnWaveOutWrite(HWAVEOUT handle,LPWAVEHDR header,UINT size){if(!valid_wave_handle(handle))return MMSYSERR_INVALHANDLE;if(!header||size<sizeof(*header))return MMSYSERR_INVALPARAM;if(!(header->dwFlags&WHDR_PREPARED))return WAVERR_UNPREPARED;if(header->dwFlags&WHDR_INQUEUE)return WAVERR_STILLPLAYING;WaveOutput* wave=wave_output(handle);if(!header->lpData||!header->dwBufferLength||header->dwBufferLength%wave->format.nBlockAlign)return MMSYSERR_INVALPARAM;XAUDIO2_BUFFER buffer{};buffer.AudioBytes=header->dwBufferLength;buffer.pAudioData=reinterpret_cast<const BYTE*>(header->lpData);buffer.pContext=header;DWORD old_flags=header->dwFlags;header->dwFlags=(old_flags&~WHDR_DONE)|WHDR_PREPARED|WHDR_INQUEUE;HRESULT hr=wave->voice->SubmitSourceBuffer(&buffer);if(FAILED(hr)){header->dwFlags=old_flags;return MMSYSERR_ERROR;}hr=wave->voice->Start(0);if(FAILED(hr)){wave->voice->FlushSourceBuffers();return MMSYSERR_ERROR;}return MMSYSERR_NOERROR;}
 extern "C" __declspec(dllexport) MMRESULT WINAPI XbnWaveOutGetPosition(HWAVEOUT handle,LPMMTIME time,UINT size){WaveOutput* wave=wave_output(handle);if(!wave)return MMSYSERR_INVALHANDLE;if(!time||size<sizeof(*time))return MMSYSERR_INVALPARAM;uint64_t samples=wave->played_samples();switch(time->wType){case TIME_BYTES:time->u.cb=DWORD(samples*wave->format.nBlockAlign);break;case TIME_SAMPLES:time->u.sample=DWORD(samples);break;case TIME_MS:time->u.ms=DWORD(samples*1000/wave->format.nSamplesPerSec);break;default:time->wType=TIME_BYTES;time->u.cb=DWORD(samples*wave->format.nBlockAlign);break;}return MMSYSERR_NOERROR;}
-extern "C" __declspec(dllexport) MMRESULT WINAPI XbnWaveOutReset(HWAVEOUT handle){WaveOutput* wave=wave_output(handle);if(!wave)return MMSYSERR_INVALHANDLE;wave->voice->Stop(0);wave->voice->FlushSourceBuffers();for(unsigned i=0;i<1000;++i){XAUDIO2_VOICE_STATE state{};wave->voice->GetState(&state,0);if(!state.BuffersQueued)return MMSYSERR_NOERROR;Sleep(1);}return MMSYSERR_ERROR;}
+extern "C" __declspec(dllexport) MMRESULT WINAPI XbnWaveOutReset(HWAVEOUT handle){WaveOutput* wave=wave_output(handle);if(!wave)return MMSYSERR_INVALHANDLE;wave->voice->Stop(0);wave->voice->FlushSourceBuffers();for(unsigned i=0;i<1000;++i){XAUDIO2_VOICE_STATE state{};wave->voice->GetState(&state,0);if(!state.BuffersQueued){wave->samples_start=state.SamplesPlayed;return MMSYSERR_NOERROR;}Sleep(1);}return MMSYSERR_ERROR;}
 extern "C" __declspec(dllexport) MMRESULT WINAPI XbnWaveOutClose(HWAVEOUT handle){WaveOutput* wave=wave_output(handle);if(!wave)return MMSYSERR_INVALHANDLE;XAUDIO2_VOICE_STATE state{};wave->voice->GetState(&state,0);if(state.BuffersQueued)return WAVERR_STILLPLAYING;wave->notify(WOM_CLOSE,nullptr);if(wave_outputs==wave)wave_outputs=wave->next;else{WaveOutput *previous=wave_outputs;while(previous&&previous->next!=wave)previous=previous->next;if(previous)previous->next=wave->next;}wave->closed=true;wave->voice->DestroyVoice();wave->~WaveOutput();HeapFree(GetProcessHeap(),0,wave);return MMSYSERR_NOERROR;}
 extern "C" __declspec(dllexport) UINT WINAPI XbnWaveInGetNumDevs(){wavein_unsupported();return 0;}
 extern "C" __declspec(dllexport) MMRESULT WINAPI XbnWaveInGetDevCapsA(UINT_PTR,LPWAVEINCAPSA,UINT){wavein_unsupported();return MMSYSERR_NODRIVER;}
