@@ -402,7 +402,7 @@ inline void runtime_sse(Emitter& out, uint8_t prefix, uint8_t op, uint8_t dst, u
     out.b(0x0F); out.b(op); out.modrm(memory ? 0 : 3, dst, memory ? 3 : src);
 }
 inline void runtime_sse_scalar_load_preserve(Emitter& out, uint8_t dst) {
-    uint8_t scratch = dst == 6 ? 7 : 6, stack_offset = scratch == 6 ? 0 : 16;
+    uint8_t scratch = dst == 6 ? 7 : 6, stack_offset = 24;
     runtime_store_xmm_mem(out, 4, stack_offset, scratch);
     out.rex(scratch, 0, dst); out.b(0x0F); out.b(0x28); out.modrm(3, scratch, dst);
     out.rex(scratch, 0, dst); out.b(0x0F); out.b(0x12); out.modrm(3, scratch, dst);
@@ -411,7 +411,7 @@ inline void runtime_sse_scalar_load_preserve(Emitter& out, uint8_t dst) {
     runtime_load_xmm_mem(out, scratch, 4, stack_offset);
 }
 inline void runtime_sse_scalar_float_load_preserve(Emitter& out, uint8_t dst) {
-    uint8_t scratch = dst == 6 ? 7 : 6, stack_offset = scratch == 6 ? 0 : 16;
+    uint8_t scratch = dst == 6 ? 7 : 6, stack_offset = 24;
     runtime_store_xmm_mem(out, 4, stack_offset, scratch);
     out.rex(scratch, 0, dst); out.b(0x0F); out.b(0x28); out.modrm(3, scratch, dst);
     out.b(0xF3); out.rex(0, 0, 11); out.b(0x0F); out.b(0x10); out.modrm(0, dst, 3);
