@@ -401,23 +401,23 @@ inline void runtime_sse(Emitter& out, uint8_t prefix, uint8_t op, uint8_t dst, u
     out.rex(0, 0, memory ? 11 : src);
     out.b(0x0F); out.b(op); out.modrm(memory ? 0 : 3, dst, memory ? 3 : src);
 }
-inline void runtime_sse_scalar_load_preserve(Emitter& out, uint8_t dst, uint32_t state_stack_offset) {
-    uint8_t scratch = dst == 6 ? 7 : 6;
+inline void runtime_sse_scalar_load_preserve(Emitter& out, uint8_t dst) {
+    uint8_t scratch = dst == 6 ? 7 : 6, stack_offset = scratch == 6 ? 0 : 16;
+    runtime_store_xmm_mem(out, 4, stack_offset, scratch);
     out.rex(scratch, 0, dst); out.b(0x0F); out.b(0x28); out.modrm(3, scratch, dst);
     out.rex(scratch, 0, dst); out.b(0x0F); out.b(0x12); out.modrm(3, scratch, dst);
     out.b(0xF2); out.rex(0, 0, 11); out.b(0x0F); out.b(0x10); out.modrm(0, dst, 3);
     out.rex(dst, 0, scratch); out.b(0x0F); out.b(0x16); out.modrm(3, dst, scratch);
-    runtime_mov_reg_mem64(out, 11, 4, uint8_t(state_stack_offset));
-    runtime_load_xmm_mem(out, scratch, 11, 48 + scratch * 16);
+    runtime_load_xmm_mem(out, scratch, 4, stack_offset);
 }
-inline void runtime_sse_scalar_float_load_preserve(Emitter& out, uint8_t dst, uint32_t state_stack_offset) {
-    uint8_t scratch = dst == 6 ? 7 : 6;
+inline void runtime_sse_scalar_float_load_preserve(Emitter& out, uint8_t dst) {
+    uint8_t scratch = dst == 6 ? 7 : 6, stack_offset = scratch == 6 ? 0 : 16;
+    runtime_store_xmm_mem(out, 4, stack_offset, scratch);
     out.rex(scratch, 0, dst); out.b(0x0F); out.b(0x28); out.modrm(3, scratch, dst);
     out.b(0xF3); out.rex(0, 0, 11); out.b(0x0F); out.b(0x10); out.modrm(0, dst, 3);
     out.b(0xF3); out.rex(scratch, 0, dst); out.b(0x0F); out.b(0x10); out.modrm(3, scratch, dst);
     out.rex(dst, 0, scratch); out.b(0x0F); out.b(0x28); out.modrm(3, dst, scratch);
-    runtime_mov_reg_mem64(out, 11, 4, uint8_t(state_stack_offset));
-    runtime_load_xmm_mem(out, scratch, 11, 48 + scratch * 16);
+    runtime_load_xmm_mem(out, scratch, 4, stack_offset);
 }
 inline void runtime_mov_imm(Emitter& out, uint8_t dst, uint32_t value) {
     out.rex(0, 0, dst); out.b(uint8_t(0xB8 + (dst & 7))); out.d(value);
@@ -810,9 +810,9 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
                 if ((op2 == 0x70 || op2 == 0x72 || op2 == 0x73) && memory)
                     throw std::runtime_error("unsupported DBT SSE memory form");
                 if (prefix == 0xf2 && op2 == 0x10 && memory)
-                    runtime_sse_scalar_load_preserve(out, dst, prot ? 72 : 64);
+                    runtime_sse_scalar_load_preserve(out, dst);
                 else if (prefix == 0xf3 && op2 == 0x10 && memory)
-                    runtime_sse_scalar_float_load_preserve(out, dst, prot ? 72 : 64);
+                    runtime_sse_scalar_float_load_preserve(out, dst);
                 else
                     runtime_sse(out, prefix, op2, dst, op2 == 0x6e ? runtime_reg(src) : src, memory);
                 if (op2 == 0x70 || op2 == 0x72 || op2 == 0x73 || op2 == 0xc6) out.b(runtime_u8(guest, p));

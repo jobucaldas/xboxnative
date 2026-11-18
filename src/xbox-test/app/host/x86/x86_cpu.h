@@ -222,7 +222,7 @@ struct Cpu {
             catch (const Fault& fault) { if (!dispatch_seh(fault)) throw; }
         }
     }
-    uint32_t execute_dbt_block(dbt::RuntimeBlock* block, dbt::RuntimeState& state) {
+    uint32_t execute_dbt_block(dbt::RuntimeBlock* block, dbt::RuntimeState& state, bool xmm_live) {
 #if !defined(_WIN32)
         dbt::HostFaultContext host_fault;
         host_fault.state = &state; host_fault.block = block;
@@ -237,7 +237,7 @@ struct Cpu {
         dbt::active_host_fault = nullptr;
         uint32_t fault_eip = dbt::recover_host_fault(host_fault);
         std::memcpy(reg, state.reg, sizeof reg);
-        if (block->uses_xmm) std::memcpy(xmm.r, state.xmm, sizeof xmm.r);
+        if (xmm_live) std::memcpy(xmm.r, state.xmm, sizeof xmm.r);
         fpu = state.fpu; eip = fault_eip; eflags = state.eflags;
         mem.fault_eip = fault_eip;
         uint32_t fault_addr = state.memory && host_fault.fault_address >= reinterpret_cast<uintptr_t>(state.memory)
@@ -254,7 +254,7 @@ struct Cpu {
         if (!faulted) return next;
         uint32_t fault_eip = dbt::recover_host_fault(host_fault);
         std::memcpy(reg, state.reg, sizeof reg);
-        if (block->uses_xmm) std::memcpy(xmm.r, state.xmm, sizeof xmm.r);
+        if (xmm_live) std::memcpy(xmm.r, state.xmm, sizeof xmm.r);
         fpu = state.fpu; eip = fault_eip; eflags = state.eflags;
         mem.fault_eip = fault_eip;
         uint32_t fault_addr = state.memory && host_fault.fault_address >= reinterpret_cast<uintptr_t>(state.memory)
@@ -419,7 +419,7 @@ struct Cpu {
                     std::memcpy(state.xmm, xmm.r, sizeof state.xmm);
                     state_xmm_live = true;
                 }
-                uint32_t next = block_ptr->may_fault ? execute_dbt_block(block_ptr, state) : block_ptr->code->operator()(state);
+                uint32_t next = block_ptr->may_fault ? execute_dbt_block(block_ptr, state, state_xmm_live) : block_ptr->code->operator()(state);
                 const uint32_t fallback_eip = state.fallback_eip;
                 const uint32_t exit_eip = state.exit_eip;
                 eip = next; eflags = state.eflags;
@@ -461,6 +461,7 @@ struct Cpu {
             if (state_live) sync_state();
             ++interpreted_blocks; step();
         }
+        if (state_live) sync_state();
     }
 
     // --- interpreter ---
