@@ -28,7 +28,7 @@ int main() {
     // exact ticket bytes the provider returned to the game.
     assert(cm.messages[0].emsg == ClientRegisterAuthTicketWithCM);
     auto registered = pb_parse(cm.messages[0].body);
-    assert(pb_get(registered, 1) && pb_get(registered, 1)->u == 1);
+    assert(pb_get(registered, 1) && pb_get(registered, 1)->u == SteamClientProtocolVersion);
     assert(pb_get(registered, 3) && pb_get(registered, 3)->s == ticket);
 
     // The auth-list mirror carries the CRC and ticket, as SteamKit's
@@ -36,6 +36,7 @@ int main() {
     assert(cm.messages[1].emsg == ClientAuthList);
     auto list = pb_parse(cm.messages[1].body);
     assert(pb_get(list, 5) && pb_get(list, 5)->u == appid);
+    assert(pb_get(list, 6) && pb_get(list, 6)->u == 1);
     assert(pb_get(list, 4));
     auto item = pb_parse(pb_get(list, 4)->s);
     assert(pb_get(item, 4) && pb_get(item, 4)->wt == 1 && pb_get(item, 4)->u == appid);
@@ -48,12 +49,32 @@ int main() {
     std::string unknown_ack; pb_u(unknown_ack, 1, 0xdeadbeefu);
     assert(bridge.ack(unknown_ack) == 0);
 
+    // A new CM re-registers the active ticket and mirrors it with a new sequence.
+    bridge.start(appid, {[&](uint32_t emsg, const std::string& body) { cm.send(emsg, body); }, {}});
+    assert(cm.messages.size() == 4 && cm.messages[2].emsg == ClientRegisterAuthTicketWithCM);
+    auto rebound = pb_parse(cm.messages[3].body);
+    assert(pb_get(rebound, 6) && pb_get(rebound, 6)->u == 2);
+    assert(pb_get(rebound, 4));
+
     // Cancel removes the ticket from the next auth list and never sends it again.
     assert(bridge.cancel(handle));
-    assert(cm.messages.size() == 3 && cm.messages.back().emsg == ClientAuthList);
+    assert(cm.messages.size() == 5 && cm.messages.back().emsg == ClientAuthList);
     auto canceled = pb_parse(cm.messages.back().body);
     assert(pb_get(canceled, 5) && pb_get(canceled, 5)->u == appid);
+    assert(pb_get(canceled, 6) && pb_get(canceled, 6)->u == 3);
     assert(!pb_get(canceled, 4));
-    puts("STEAM-AUTH PASS: 5502 registration, CRC/GC token shape, auth-list ack, and cancellation");
+
+    // Ending a live bridge sends the final empty list before clearing local state.
+    Bridge ending;
+    ending.start(appid, {[&](uint32_t emsg, const std::string& body) { cm.send(emsg, body); }, {}});
+    assert(ending.issue(handle, ticket));
+    size_t before_end = cm.messages.size();
+    assert(ending.end());
+    assert(cm.messages.size() == before_end + 1 && cm.messages.back().emsg == ClientAuthList);
+    auto ended = pb_parse(cm.messages.back().body);
+    assert(pb_get(ended, 5) && pb_get(ended, 5)->u == appid);
+    assert(pb_get(ended, 6) && pb_get(ended, 6)->u == 2);
+    assert(!pb_get(ended, 4));
+    puts("STEAM-AUTH PASS: protocol, sequence, reconnect replay, ack, cancellation, and shutdown");
     return 0;
 }

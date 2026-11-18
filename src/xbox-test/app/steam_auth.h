@@ -50,12 +50,12 @@ inline uint64_t gc_token(const std::string& bytes) {
 
 inline std::string register_body(const std::string& ticket) {
     std::string body;
-    pb_u(body, 1, 1); // CMsgClientRegisterAuthTicketWithCM.protocol_version
+    pb_u(body, 1, SteamClientProtocolVersion); // CMsgClientRegisterAuthTicketWithCM.protocol_version
     pb_s(body, 3, ticket);
     return body;
 }
 
-inline std::string auth_list_body(uint32_t appid, const std::vector<Ticket>& tickets) {
+inline std::string auth_list_body(uint32_t appid, const std::vector<Ticket>& tickets, uint32_t sequence) {
     std::string body;
     pb_u(body, 1, 0); // tokens_left; the provider has no CM token pool
     for (const auto& ticket : tickets) {
@@ -66,6 +66,7 @@ inline std::string auth_list_body(uint32_t appid, const std::vector<Ticket>& tic
         pb_s(body, 4, item);        // CMsgClientAuthList.tickets
     }
     pb_u(body, 5, appid); // keep the app in the list after the last ticket is canceled
+    pb_u(body, 6, sequence); // message_sequence; Steam rejects repeated list numbers
     return body;
 }
 
@@ -76,38 +77,60 @@ struct Bridge {
     std::map<uint32_t, Ticket> active_;
     std::map<uint32_t, uint32_t> handles_by_crc_;
     std::map<uint32_t, bool> acknowledged_;
+    uint32_t message_sequence_ = 0;
 
     void reset() {
         std::lock_guard<std::mutex> lock(m);
-        appid_ = 0; io_ = {}; active_.clear(); handles_by_crc_.clear(); acknowledged_.clear();
+        appid_ = 0; io_ = {}; active_.clear(); handles_by_crc_.clear(); acknowledged_.clear(); message_sequence_ = 0;
     }
     void start(uint32_t appid, Io io) {
-        std::lock_guard<std::mutex> lock(m);
-        appid_ = appid; io_ = std::move(io); active_.clear(); handles_by_crc_.clear(); acknowledged_.clear();
+        Io bound; std::vector<Ticket> list; uint32_t sequence = 0;
+        {
+            std::lock_guard<std::mutex> lock(m);
+            appid_ = appid; io_ = std::move(io); bound = io_;
+            for (const auto& entry : active_) list.push_back(entry.second);
+            if (!list.empty()) sequence = ++message_sequence_;
+        }
+        // Steam forgets ticket registrations with the old CM connection.
+        for (const auto& ticket : list) bound.send(ClientRegisterAuthTicketWithCM, register_body(ticket.bytes));
+        if (!list.empty()) bound.send(ClientAuthList, auth_list_body(appid, list, sequence));
     }
     bool issue(uint32_t handle, const std::string& bytes) {
         if (!handle || bytes.empty()) return false;
-        Ticket ticket; Io io; std::vector<Ticket> list;
+        Ticket ticket; Io io; std::vector<Ticket> list; uint32_t sequence = 0;
         {   std::lock_guard<std::mutex> lock(m);
             if (!appid_ || !io_.send) return false;
             ticket = {handle, appid_, crc32(bytes), gc_token(bytes), bytes};
             active_[handle] = ticket; handles_by_crc_[ticket.crc] = handle; acknowledged_[handle] = false;
             io = io_;
             for (const auto& entry : active_) list.push_back(entry.second);
+            sequence = ++message_sequence_;
         }
         io.send(ClientRegisterAuthTicketWithCM, register_body(ticket.bytes));
-        io.send(ClientAuthList, auth_list_body(ticket.appid, list));
+        io.send(ClientAuthList, auth_list_body(ticket.appid, list, sequence));
         return true;
     }
     bool cancel(uint32_t handle) {
-        Io io; uint32_t appid = 0; std::vector<Ticket> list;
+        Io io; uint32_t appid = 0; std::vector<Ticket> list; uint32_t sequence = 0;
         {   std::lock_guard<std::mutex> lock(m);
             auto it = active_.find(handle); if (it == active_.end() || !io_.send) return false;
             handles_by_crc_.erase(it->second.crc); acknowledged_.erase(handle); active_.erase(it);
             appid = appid_; io = io_;
             for (const auto& entry : active_) list.push_back(entry.second);
+            sequence = ++message_sequence_;
         }
-        io.send(ClientAuthList, auth_list_body(appid, list));
+        io.send(ClientAuthList, auth_list_body(appid, list, sequence));
+        return true;
+    }
+    bool end() {
+        Io io; uint32_t appid = 0, sequence = 0;
+        {
+            std::lock_guard<std::mutex> lock(m);
+            if (appid_ && io_.send) { io = io_; appid = appid_; sequence = ++message_sequence_; }
+            appid_ = 0; io_ = {}; active_.clear(); handles_by_crc_.clear(); acknowledged_.clear();
+        }
+        if (!appid) return false;
+        io.send(ClientAuthList, auth_list_body(appid, {}, sequence));
         return true;
     }
     unsigned ack(const std::string& body) {

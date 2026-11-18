@@ -162,7 +162,7 @@ static std::shared_ptr<CmSession> cm_logon(const std::string& refresh, int& eres
         catch (...) { logf("cm: connect to %s failed (exception)", servers[i].host.c_str()); err = "connect failed"; continue; }
         s->up = true; { auto self = s; std::thread([self] { init_apartment(apartment_type::multi_threaded); self->reader(); }).detach(); }
         std::string body;
-        pb_u(body, 1, 65580); pb_u(body, 3, 0); if (!anon) pb_s(body, 6, "english"); pb_u(body, 7, 20); pb_u(body, 33, 2);
+        pb_u(body, 1, SteamClientProtocolVersion); pb_u(body, 3, 0); if (!anon) pb_s(body, 6, "english"); pb_u(body, 7, 20); pb_u(body, 33, 2);
         if (anon) pb_s(body, 80, "anonymous");
         if (!anon) { pb_u(body, 8, 1); pb_u(body, 102, 1); pb_s(body, 108, refresh); }
         { std::string h; pb_fixed64(h, 1, sid); pb_u(h, 2, 0); pb_fixed64(h, 10, UINT64_MAX); pb_fixed64(h, 11, UINT64_MAX);

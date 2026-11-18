@@ -860,57 +860,67 @@ struct AuthKeeper {
     uint32_t appid = 0;
     std::shared_ptr<CmSession> session;
     bool warned = false;
+    std::atomic<unsigned> gen{0};
     steam_auth::Bridge bridge;
 };
 static AuthKeeper g_auth;
-static void auth_ticket_issue(uint32_t handle,const std::string& bytes) {
-    std::shared_ptr<CmSession> session = user_session();
-    uint32_t appid = 0; bool warn = false;
-    {
-        std::lock_guard<std::mutex> l(g_auth.m);
-        appid = g_auth.appid;
-        if(!session || !session->up || session->anon) {
-            if(appid && !g_auth.warned) { g_auth.warned = true; warn = true; }
-        }
-    }
-    if(!session || !session->up || session->anon) {
-        if(warn) lp_sink("STEAM auth tickets: no signed-in CM session; ticket not registered");
-        return;
-    }
+static bool auth_bind_locked(const std::shared_ptr<CmSession>& session) {
+    if(!session || !session->up || session->anon || !g_auth.appid || g_auth.session == session) return false;
     steam_auth::Io io;
     io.send = [session](uint32_t emsg,const std::string& body){
         if(session->up) session->send_raw(emsg,body,0,"");
     };
+    g_auth.session = session;
+    g_auth.bridge.start(g_auth.appid,std::move(io));
+    session->set_push(presence_push);
+    return true;
+}
+static void auth_ticket_issue(uint32_t handle,const std::string& bytes) {
+    std::shared_ptr<CmSession> session = user_session();
+    bool warn = false;
     {
         std::lock_guard<std::mutex> l(g_auth.m);
         if(!g_auth.appid) return;
-        if(g_auth.session != session) {
-            g_auth.session = session;
-            g_auth.bridge.start(g_auth.appid,io);
-            session->set_push(presence_push);
+        if(!session || !session->up || session->anon) {
+            if(!g_auth.warned) { g_auth.warned = true; warn = true; }
+        } else {
+            auth_bind_locked(session);
+            g_auth.bridge.issue(handle,bytes);
         }
     }
-    g_auth.bridge.issue(handle,bytes);
+    if(warn) lp_sink("STEAM auth tickets: no signed-in CM session; ticket not registered");
 }
 static void auth_ticket_cancel(uint32_t handle) {
-    {
-        std::lock_guard<std::mutex> l(g_auth.m);
-        if(!g_auth.appid) return;
-    }
-    // The bridge retains the session's active CRC map until this cancellation.
+    std::lock_guard<std::mutex> l(g_auth.m);
+    if(!g_auth.appid) return;
     g_auth.bridge.cancel(handle);
 }
 static void auth_start(uint32_t appid) {
+    unsigned gen;
     {
         std::lock_guard<std::mutex> l(g_auth.m);
+        gen = ++g_auth.gen;
         g_auth.appid = appid; g_auth.session.reset(); g_auth.warned = false; g_auth.bridge.reset();
     }
     play_runtime::set_auth_ticket_tap({[](uint32_t handle,const std::string& bytes){auth_ticket_issue(handle,bytes);},
                                        [](uint32_t handle){auth_ticket_cancel(handle);}});
+    // A reconnect must replay tickets even when the game does not issue another one.
+    std::thread([gen]{
+        init_apartment(apartment_type::multi_threaded);
+        while(g_auth.gen.load() == gen) {
+            Sleep(500);
+            auto session = user_session();
+            std::lock_guard<std::mutex> l(g_auth.m);
+            if(g_auth.gen.load() != gen || !g_auth.appid) break;
+            auth_bind_locked(session);
+        }
+    }).detach();
 }
 static void auth_end() {
     play_runtime::set_auth_ticket_tap({});
     std::lock_guard<std::mutex> l(g_auth.m);
+    ++g_auth.gen;
+    g_auth.bridge.end();
     g_auth.appid = 0; g_auth.session.reset(); g_auth.warned = false; g_auth.bridge.reset();
 }
 // ---- Presence while the guest runs (steam_presence.h).
