@@ -136,6 +136,7 @@ runs:
             -o Acquire::http::Timeout=20 \
             -o Acquire::Retries=1 \
             $PACKAGES
+        sudo chown -R "$(id -u):$(id -g)" "$archive_cache"
     - if: steps.apt-cache-restore.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:
