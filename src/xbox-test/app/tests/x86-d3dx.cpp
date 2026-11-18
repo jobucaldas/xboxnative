@@ -81,11 +81,11 @@ int main(){
  CHECK(call("d3dxmatrixrotationyawpitchroll",{0x7600,0,bits(0),bits(1.57079632679f)})==0x7600);CHECK(near(value(mem,0x7604),1)&&near(value(mem,0x7610),-1));
  CHECK(call("d3dxmatrixmultiply",{0x7700,0x3000,0x6000})==0x7700);CHECK(near(value(mem,0x7700),1)&&near(value(mem,0x7730),6)&&near(value(mem,0x7734),8)&&near(value(mem,0x7738),10));
  const char* gapApis[]={"d3dxcreateeffect","d3dxcreatefonta","d3dxcreatetexture","d3dxcreatetexturefromfileinmemoryex","d3dxfilltexture","d3dxgetimageinfofromfileinmemory","d3dxloadsurfacefromsurface","d3dxsavesurfacetofilea"};
- const unsigned gapArity[]={9,12,7,15,3,3,8,5};
+ const unsigned gapArity[]={9,12,8,15,3,3,8,5};
  for(unsigned i=0;i<8;++i){auto it=reg.map.find({"d3dx9_36.dll",gapApis[i]});CHECK(it!=reg.map.end());if(it!=reg.map.end()){CHECK(it->second.conv==Conv::Stdcall);CHECK(it->second.argc==gapArity[i]);}}
  CHECK(call("d3dxcreateeffect",{0,0,0,0,0,0,0,0,0})==0x80004001u);
  CHECK(call("d3dxcreatefonta",{0,0,0,0,0,0,0,0,0,0,0,0})==0x80004001u);
- CHECK(call("d3dxcreatetexture",{0,0,0,0,0,0,0})==0x80004001u);
+ CHECK(call("d3dxcreatetexture",{0,0,0,0,0,0,0,0})==0x80004001u);
  CHECK(call("d3dxcreatetexturefromfileinmemoryex",{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0})==0x80004001u);
  CHECK(call("d3dxfilltexture",{0,0,0})==0x80004001u);
  CHECK(call("d3dxgetimageinfofromfileinmemory",{0,0,0})==0x80004001u);
