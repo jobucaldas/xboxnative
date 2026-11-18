@@ -123,6 +123,14 @@ extern "C" DWORD WINAPI u32c_entry(){
   sizedParam=0;sizeMessages=moveMessages=0;check(SetWindowPos(framed,0,0,0,want.right-want.left+100,want.bottom-want.top,SWP_NOMOVE|SWP_NOZORDER)&&sizedParam==MAKELPARAM(1380,720)&&sizeMessages==1);
   check(ShowWindow(framed,SW_SHOW)==FALSE&&sizeMessages==2&&moveMessages==1);
   check(DestroyWindow(framed));}
+ {HWND first=CreateWindowExW(0,MAKEINTATOM(a),L"first active",WS_VISIBLE,0,0,100,80,0,0,0,(void*)0x12345678);
+  HWND next=CreateWindowExW(0,MAKEINTATOM(a),L"next visible",WS_VISIBLE,0,0,100,80,0,0,0,(void*)0x12345678);
+  check(first&&next);check(GetForegroundWindow()==first);check(DestroyWindow(first));check(GetForegroundWindow()==next&&GetActiveWindow()==next&&GetFocus()==next);
+  check(ShowWindow(next,SW_HIDE)&&!GetForegroundWindow());
+  HWND shown=CreateWindowExW(0,MAKEINTATOM(a),L"shown by pos",0,0,0,100,80,0,0,0,(void*)0x12345678);
+  check(shown&&!GetForegroundWindow());
+  check(SetWindowPos(shown,0,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_SHOWWINDOW));
+  check(GetForegroundWindow()==shown&&GetActiveWindow()==shown&&GetFocus()==shown);check(DestroyWindow(next)&&DestroyWindow(shown));}
  check(UnregisterClassW(wc.lpszClassName,0));check(!CreateWindowExW(0,MAKEINTATOM(a),0,0,0,0,1,1,0,0,0,0));
  wc.lpszClassName=L"U32cReject";wc.lpfnWndProc=reject;check(RegisterClassExW(&wc)!=0);check(!CreateWindowExW(0,wc.lpszClassName,0,0,0,0,1,1,0,0,0,0));check(rejectedDestroyed==1&&rejectedCreated==0);check(UnregisterClassW(wc.lpszClassName,0));
  {USEROBJECTFLAGS flags{};DWORD n=0;WCHAR station[16]{};HWINSTA ws=GetProcessWindowStation();
