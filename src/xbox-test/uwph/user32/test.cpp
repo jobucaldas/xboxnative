@@ -130,6 +130,8 @@ extern "C" DWORD WINAPI u32c_entry(){
   check(GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()),UOI_FLAGS,&flags,sizeof flags,&n)&&!(flags.dwFlags&WSF_VISIBLE));
   check(!GetUserObjectInformationW((HANDLE)h,UOI_FLAGS,&flags,sizeof flags,&n)&&GetLastError()==ERROR_INVALID_HANDLE);}
  HMONITOR monitor=MonitorFromWindow(h,MONITOR_DEFAULTTOPRIMARY);MONITORINFO mi={sizeof(mi)};check(GetMonitorInfoW(monitor,&mi)&&mi.rcMonitor.right==1920);check(GetSystemMetrics(SM_CMONITORS)==1);check(IsWindow(GetDesktopWindow()));
+ {RECT onScreen={0,0,1,1},offScreen={3000,3000,3100,3100};HMONITOR fromRect=MonitorFromRect(&onScreen,0);check(fromRect==monitor&&!MonitorFromRect(&offScreen,0));MONITORINFOEXA info{};info.cbSize=sizeof(info);check(GetMonitorInfoA(fromRect,&info)&&info.rcMonitor.right==1920&&!lstrcmpA(info.szDevice,"\\\\.\\DISPLAY1"));}
+ check(AllowSetForegroundWindow(ASFW_ANY));
  // item 44: input/cursor/focus
  WNDCLASSEXW wc2={};wc2.cbSize=sizeof(wc2);wc2.lpfnWndProc=proc;wc2.lpszClassName=L"U32cItem44";
  check(RegisterClassExW(&wc2)!=0);HWND h2=CreateWindowExW(0,wc2.lpszClassName,L"focus",WS_VISIBLE,0,0,10,10,0,0,0,(void*)0x12345678);check(h2!=0);
