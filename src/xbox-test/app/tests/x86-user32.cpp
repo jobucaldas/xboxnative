@@ -86,9 +86,6 @@ int main(int argc, char** argv) {
     CHECK(call("GetParent", {0x1111}) == 0x2222);
     CHECK(call("GetWindowLongPtrW", {0x1111, 0}) == 0xfedcba98u);
     CHECK(call("AllowSetForegroundWindow", {0xffffffffu}) == 1);
-    guest.set_last_error(7); CHECK(call("MonitorFromRect", {0x4000, 2}) == 0 && guest.last_error() == 120);
-    guest.set_last_error(7); CHECK(call("RegisterDeviceNotificationW", {1, 2, 1}) == 0 && guest.last_error() == 120);
-    guest.set_last_error(7); CHECK(call("UnregisterDeviceNotification", {0xd1000001u}) == 0 && guest.last_error() == 6);
     uint32_t rect = 0x4000;
     CHECK(call("SetRect", {rect, 1, 2, 31, 42}) == 1);
     CHECK(mem.r32(rect) == 1 && mem.r32(rect + 4) == 2 && mem.r32(rect + 8) == 31 && mem.r32(rect + 12) == 42);

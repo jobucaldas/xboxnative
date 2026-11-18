@@ -259,8 +259,8 @@ inline void register_win32(Registry& r, Host& h) {
     r.add("user32.dll", "MonitorFromPoint", Conv::Stdcall, 3, [count](Cpu&) -> uint32_t {
         count("MonitorFromPoint"); return 0xCE000001u;
     });
-    r.add("user32.dll", "MonitorFromRect", Conv::Stdcall, 2, [count](Cpu& c) -> uint32_t {
-        count("MonitorFromRect"); c.mem.w32(c.fs_base + 0x34, 120); return 0;
+    r.add("user32.dll", "MonitorFromRect", Conv::Stdcall, 2, [count](Cpu&) -> uint32_t {
+        count("MonitorFromRect"); return 0xCE000001u;
     });
     r.add("user32.dll", "MapVirtualKeyW", Conv::Stdcall, 2, [count](Cpu& c) -> uint32_t {
         count("MapVirtualKeyW"); uint32_t code = c.arg(0), type = c.arg(1);
@@ -882,10 +882,12 @@ inline void register_gl(Registry& r, Host& h) {
         return token;
     });
     r.add("user32.dll", "RegisterDeviceNotificationW", Conv::Stdcall, 3, [count](Cpu& c) -> uint32_t {
-        count("RegisterDeviceNotificationW"); c.mem.w32(c.fs_base + 0x34, 120); return 0;
+        count("RegisterDeviceNotificationW");
+        return c.arg(0) && c.arg(1) ? 0xD1000001u : 0;
     });
     r.add("user32.dll", "UnregisterDeviceNotification", Conv::Stdcall, 1, [count](Cpu& c) -> uint32_t {
-        count("UnregisterDeviceNotification"); c.mem.w32(c.fs_base + 0x34, 6); return 0;
+        count("UnregisterDeviceNotification");
+        return c.arg(0) == 0xD1000001u;
     });
     r.add("user32.dll", "DestroyWindow", Conv::Stdcall, 1, [&h, count](Cpu& c) -> uint32_t {
         count("DestroyWindow"); uint32_t token = c.arg(0); auto it = h.window_handles.find(token);
