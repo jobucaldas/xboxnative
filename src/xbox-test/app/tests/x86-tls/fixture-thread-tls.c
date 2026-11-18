@@ -89,14 +89,14 @@ void WINAPI fixture_thread_tls_start(void) {
     out("x86-thread-tls: per-thread exe+DLL TLS and notifications ok\n");
     char result[64];
     result[0] = 'c'; result[1] = 'h'; result[2] = 'e'; result[3] = 'c'; result[4] = 'k'; result[5] = 's'; result[6] = '=';
-    u32 n = (u32)checks, digits = 0, divisor = 1;
+    u32 n = (u32)checks, divisor = 1, pos = 7;
     while (n / divisor >= 10) divisor *= 10;
-    do { result[7 + digits++] = (char)('0' + (n / divisor) % 10); divisor /= 10; } while (divisor);
-    result[7 + digits++] = '\n'; result[7 + digits++] = 'f'; result[7 + digits++] = 'a'; result[7 + digits++] = 'i'; result[7 + digits++] = 'l'; result[7 + digits++] = 'e'; result[7 + digits++] = 'd'; result[7 + digits++] = '=';
-    n = (u32)failures; digits = 0; divisor = 1;
+    do { result[pos++] = (char)('0' + (n / divisor) % 10); divisor /= 10; } while (divisor);
+    result[pos++] = '\n'; result[pos++] = 'f'; result[pos++] = 'a'; result[pos++] = 'i'; result[pos++] = 'l'; result[pos++] = 'e'; result[pos++] = 'd'; result[pos++] = '=';
+    n = (u32)failures; divisor = 1;
     while (n / divisor >= 10) divisor *= 10;
-    do { result[15 + digits++] = (char)('0' + (n / divisor) % 10); divisor /= 10; } while (divisor);
-    result[15 + digits++] = '\n'; result[15 + digits] = 0;
+    do { result[pos++] = (char)('0' + (n / divisor) % 10); divisor /= 10; } while (divisor);
+    result[pos++] = '\n'; result[pos] = 0;
     out(result);
     ExitProcess(failures ? 100 + (u32)failures : 42);
 }
