@@ -77,6 +77,12 @@ struct Host {
         uintptr_t result = 0;
         bool supported = false;
     };
+    struct XInputCall {
+        enum class Kind { GetState, GetStateEx, SetState, GetCapabilities, GetCapabilitiesEx, Enable, GetBatteryInformation, GetKeystroke } kind;
+        uint32_t index = 0, flags = 0, device_type = 0, reserved = 0;
+        std::vector<uint8_t> input, output;
+        uint32_t result = 1167; // ERROR_DEVICE_NOT_CONNECTED until a host explicitly supplies the slot
+    };
     struct WindowRect { int32_t left = 0, top = 0, right = 0, bottom = 0; };
     struct RegistryCall {
         enum class Kind { Open, Create, Query, Set, DeleteValue, DeleteKey, EnumKey, EnumValue, Close } kind;
@@ -112,6 +118,8 @@ struct Host {
     std::function<uintptr_t(uintptr_t)> get_dc;
     std::function<bool(uintptr_t, uintptr_t)> release_dc;
     std::function<void(WindowCall&)> window_call;
+    std::function<void(XInputCall&)> xinput_call;
+    std::function<void(const std::string&)> route_trace;
     std::map<uint32_t, uintptr_t> window_handles, dc_handles, gl_contexts, user_handles;
     std::map<std::u16string, uint32_t> window_class_procs;
     std::map<uint32_t, uint32_t> window_procs;
@@ -401,6 +409,7 @@ inline void register_win32(Registry& r, Host& h) {
             else if(!strcmp(name,"ClientToScreen")||!strcmp(name,"ScreenToClient")){out_size=8;output_address=uint32_t(a[1]);bytes=guest_point(c,output_address);}
             else if(!strcmp(name,"AdjustWindowRect")||!strcmp(name,"AdjustWindowRectEx")){out_size=16;output_address=uint32_t(a[0]);bytes=guest_rect(c,output_address);a[0]=0;}
             else if(!strcmp(name,"GetCursorPos")){out_size=8;output_address=uint32_t(a[0]);a[0]=0;}
+            else if(!strcmp(name,"GetClipCursor")){out_size=16;output_address=uint32_t(a[0]);a[0]=0;}
             else if(!strcmp(name,"ClipCursor")){if(a[0])bytes=guest_rect(c,uint32_t(a[0]));a[0]=0;}
             else if(!strcmp(name,"SetWindowTextA")||!strcmp(name,"SetWindowTextW")) {
                 if(a[1]) { if(!strcmp(name,"SetWindowTextW")){auto s=read_window_wstr(c,uint32_t(a[1]));bytes.resize((s.size()+1)*2);memcpy(bytes.data(),s.data(),s.size()*2);}else{auto s=c.mem.read_cstr(uint32_t(a[1]),32768);bytes.assign(s.begin(),s.end());bytes.push_back(0);} }
@@ -417,9 +426,18 @@ inline void register_win32(Registry& r, Host& h) {
     window_route("GetClientRect",2); window_route("GetWindowRect",2); window_route("AdjustWindowRect",3); window_route("AdjustWindowRectEx",4);
     window_route("ClientToScreen",2); window_route("ScreenToClient",2); window_route("SetWindowTextA",2); window_route("SetWindowTextW",2);
     window_route("GetWindowLongA",2); window_route("GetWindowLongW",2); window_route("SetWindowLongA",3); window_route("SetWindowLongW",3);
-    window_route("LoadCursorA",2); window_route("LoadCursorW",2); window_route("SetCursor",1); window_route("ShowCursor",1); window_route("ClipCursor",1); window_route("GetCursorPos",1);
+    window_route("LoadCursorA",2); window_route("LoadCursorW",2); window_route("SetCursor",1); window_route("ShowCursor",1); window_route("ClipCursor",1); window_route("GetCursorPos",1); window_route("GetClipCursor",1);
     window_route("LoadIconA",2); window_route("LoadIconW",2); window_route("GetForegroundWindow",0); window_route("SetForegroundWindow",1);
     window_route("SetFocus",1); window_route("GetFocus",0); window_route("GetActiveWindow",0); window_route("IsWindowVisible",1); window_route("IsIconic",1);
+    r.add("user32.dll", "PtInRect", Conv::Stdcall, 3, [count](Cpu& c) -> uint32_t {
+        const uint32_t rect = c.arg(0);
+        if (!rect) return 0;
+        const int32_t left = int32_t(c.mem.r32(rect)), top = int32_t(c.mem.r32(rect + 4));
+        const int32_t right = int32_t(c.mem.r32(rect + 8)), bottom = int32_t(c.mem.r32(rect + 12));
+        count("PtInRect");
+        const int32_t x = int32_t(c.arg(1)), y = int32_t(c.arg(2));
+        return x >= left && x < right && y >= top && y < bottom;
+    });
     window_route("PeekMessageA",5); window_route("PeekMessageW",5); window_route("GetMessageA",4); window_route("GetMessageW",4);
     window_route("TranslateMessage",1); window_route("DispatchMessageA",1); window_route("DispatchMessageW",1); window_route("PostQuitMessage",1);
     window_route("PostMessageA",4); window_route("PostMessageW",4); window_route("SendMessageA",4); window_route("SendMessageW",4); window_route("DefWindowProcA",4); window_route("DefWindowProcW",4);
@@ -449,6 +467,12 @@ inline void register_win32(Registry& r, Host& h) {
     unavailable("EndDialog", 2);
     unavailable("GetMonitorInfoA", 2);
     unavailable("GetMonitorInfoW", 2);
+    r.add("user32.dll", "GetRawInputDeviceList", Conv::Stdcall, 3, [count](Cpu& c) -> uint32_t {
+        count("GetRawInputDeviceList");
+        if (!c.arg(1)) { c.mem.w32(c.fs_base + 0x34, 87); return uint32_t(-1); }
+        c.mem.w32(c.arg(1), 0);  // The console has no Raw Input devices.
+        return 0;
+    });
     unavailable("GetRawInputData", 5, uint32_t(-1));
     unavailable("GetWindowLongPtrW", 2);
     unavailable("LoadStringW", 4);
@@ -512,6 +536,66 @@ inline void register_win32(Registry& r, Host& h) {
                 swap(root, child); root = child; } };
         if (n > 1) { for (uint32_t i = n / 2; i-- > 0;) sift(i, n); for (uint32_t e = n - 1; e > 0; --e) { swap(0, e); sift(0, e); } }
         return 0; });
+}
+inline void register_xinput(Registry& r, Host& h) {
+    constexpr uint32_t error_bad_arguments = 160;
+    const char* dlls[] = {"xinput1_3.dll", "xinput1_4.dll", "xinput9_1_0.dll"};
+    auto call = [&h](Host::XInputCall& request) {
+        if (h.xinput_call) h.xinput_call(request);
+    };
+    for (const char* dll : dlls) {
+        auto state = [call](Host::XInputCall::Kind kind) {
+            return [kind, call](Cpu& c) -> uint32_t {
+                const uint32_t output = c.arg(1);
+                if (!output) return 160;
+                Host::XInputCall request{}; request.kind = kind; request.index = c.arg(0);
+                call(request);
+                if (!request.result && request.output.size() == 16) c.mem.write_bytes(output, request.output.data(), 16);
+                return request.result;
+            };
+        };
+        r.add(dll, "XInputGetState", Conv::Stdcall, 2, state(Host::XInputCall::Kind::GetState));
+        r.add(dll, "XInputGetStateEx", Conv::Stdcall, 2, state(Host::XInputCall::Kind::GetStateEx));
+        if (dll != std::string("xinput9_1_0.dll")) r.add_ordinal(dll, 100, "XInputGetStateEx");
+        r.add(dll, "XInputSetState", Conv::Stdcall, 2, [call](Cpu& c) -> uint32_t {
+            if (!c.arg(1)) return error_bad_arguments;
+            Host::XInputCall request{}; request.kind = Host::XInputCall::Kind::SetState; request.index = c.arg(0);
+            request.input = c.mem.read_bytes(c.arg(1), 4); call(request); return request.result;
+        });
+        r.add(dll, "XInputGetCapabilities", Conv::Stdcall, 3, [call](Cpu& c) -> uint32_t {
+            if (!c.arg(2)) return error_bad_arguments;
+            Host::XInputCall request{}; request.kind = Host::XInputCall::Kind::GetCapabilities;
+            request.index = c.arg(0); request.flags = c.arg(1); call(request);
+            if (!request.result && request.output.size() == 20) c.mem.write_bytes(c.arg(2), request.output.data(), 20);
+            return request.result;
+        });
+        r.add(dll, "XInputGetCapabilitiesEx", Conv::Stdcall, 4, [call](Cpu& c) -> uint32_t {
+            if (!c.arg(3)) return error_bad_arguments;
+            Host::XInputCall request{}; request.kind = Host::XInputCall::Kind::GetCapabilitiesEx;
+            request.index = c.arg(1); request.flags = c.arg(2); call(request);
+            if (!request.result && request.output.size() == 20) c.mem.write_bytes(c.arg(3), request.output.data(), 20);
+            return request.result;
+        });
+        if (dll != std::string("xinput9_1_0.dll")) r.add_ordinal(dll, 108, "XInputGetCapabilitiesEx");
+        r.add(dll, "XInputEnable", Conv::Stdcall, 1, [call](Cpu& c) -> uint32_t {
+            Host::XInputCall request{}; request.kind = Host::XInputCall::Kind::Enable; request.flags = c.arg(0);
+            call(request); return request.result;
+        });
+        r.add(dll, "XInputGetBatteryInformation", Conv::Stdcall, 3, [call](Cpu& c) -> uint32_t {
+            if (!c.arg(2)) return error_bad_arguments;
+            Host::XInputCall request{}; request.kind = Host::XInputCall::Kind::GetBatteryInformation;
+            request.index = c.arg(0); request.device_type = c.arg(1); call(request);
+            if (!request.result && request.output.size() == 2) c.mem.write_bytes(c.arg(2), request.output.data(), 2);
+            return request.result;
+        });
+        r.add(dll, "XInputGetKeystroke", Conv::Stdcall, 3, [call](Cpu& c) -> uint32_t {
+            if (!c.arg(2)) return error_bad_arguments;
+            Host::XInputCall request{}; request.kind = Host::XInputCall::Kind::GetKeystroke;
+            request.index = c.arg(0); request.flags = c.arg(1); call(request);
+            if (!request.result && request.output.size() == 8) c.mem.write_bytes(c.arg(2), request.output.data(), 8);
+            return request.result;
+        });
+    }
 }
 inline void register_gl(Registry& r, Host& h) {
     auto count = [&h](const std::string& name) { ++h.calls[name]; };
@@ -640,6 +724,14 @@ inline void register_gl(Registry& r, Host& h) {
         uint32_t token = map_window(h.create_window(q));
         if (token) { h.window_procs[token] = h.window_class_procs[q.class_name]; h.window_longs[token][-4] = h.window_procs[token]; }
         return token;
+    });
+    r.add("user32.dll", "RegisterDeviceNotificationW", Conv::Stdcall, 3, [count](Cpu& c) -> uint32_t {
+        count("RegisterDeviceNotificationW");
+        return c.arg(0) && c.arg(1) ? 0xD1000001u : 0;
+    });
+    r.add("user32.dll", "UnregisterDeviceNotification", Conv::Stdcall, 1, [count](Cpu& c) -> uint32_t {
+        count("UnregisterDeviceNotification");
+        return c.arg(0) == 0xD1000001u;
     });
     r.add("user32.dll", "DestroyWindow", Conv::Stdcall, 1, [&h, count](Cpu& c) -> uint32_t {
         count("DestroyWindow"); uint32_t token = c.arg(0); auto it = h.window_handles.find(token);

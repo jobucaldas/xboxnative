@@ -18,7 +18,7 @@ sdl="$tmp/sdl/SDL2"
 [[ -f $sdl/lib/x86/SDL2.dll && -f $sdl/lib/x86/SDL2.lib ]] || {
   echo "x86-sdl2: pinned SDL2 i686 DLL or import library missing" >&2; exit 1;
 }
-init_mask=${SDL2_INIT_MASK:-0x6030}
+init_mask=${SDL2_INIT_MASK:-0x6230}
 "$cc32" -O1 -Wall -Wextra -Werror "${extra[@]}" -DSDL2TEST_INIT_MASK="$init_mask" \
   -I"$sdl/include" -L"$sdl/lib/x86" -Wl,--stack,0x300000 \
   -o "$tmp/x86-sdl2-guest.exe" "$here/x86-sdl2.c" -lSDL2
@@ -39,7 +39,7 @@ done
 x86_64-w64-mingw32-g++ -std=c++17 -D_GLIBCXX_HAS_GTHREADS=0 "${thread_flags[@]}" \
   -O1 -mno-red-zone -Wall -Wextra -Wno-cast-function-type -Wno-misleading-indentation -static \
   "$here/x86-sdl2.cpp" -o "$tmp/x86-sdl2.exe" -lws2_32 -luser32 \
-  "${thread_lib_flags[@]}" -lkernel32
+  "${thread_lib_flags[@]}" -lkernel32 -luuid -ldxguid
 
 prefix=${PRUN_WINEPREFIX:-${WINEPREFIX:-/tmp/xbn-x86-sdl2-wine}}
 mkdir -p "$prefix"
