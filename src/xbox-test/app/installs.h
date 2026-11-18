@@ -274,7 +274,7 @@ inline bool older_than_days(const FILETIME& ft, double days) {
 // name is relative to the state root ("storecache\123.json" for the cache). An appinfo
 // cache is kept for an installed game: Play reads it to pick the game's launch option.
 inline bool leftover_kind(const std::string& name, const std::set<uint32_t>& installed) {
-    if (name == "boot.prev.log" || name == "launch_probe.previous.log" || name == "frametimes.csv") return true;
+    if (name == "launch_probe.previous.log" || name == "frametimes.csv") return true;
     if (name.compare(0, 7, "appinfo") != 0) return false;
     std::string d = name.substr(8); if (d.size() <= 4 || d.compare(d.size() - 4, 4, ".vdf") != 0) return false;
     d.resize(d.size() - 4);
