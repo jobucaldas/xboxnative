@@ -8,6 +8,9 @@
 #include <string>
 #include <vector>
 
+// ---------------------------------------------------------------- Steam client protocol
+constexpr uint32_t SteamClientProtocolVersion = 65580;
+
 // ---------------------------------------------------------------- minimal protobuf
 inline void pb_varint(std::string& o, uint64_t v) { while (v >= 0x80) { o += (char)(v | 0x80); v >>= 7; } o += (char)v; }
 inline void pb_u(std::string& o, int f, uint64_t v) { pb_varint(o, (uint64_t)f << 3); pb_varint(o, v); }
