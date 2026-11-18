@@ -62,6 +62,7 @@ __attribute__((used)) static TlsDir tls_dir = {
 
 static u32 worker(void* unused) {
     (void)unused;
+    check(((*(u32*)(fs_dword(0x2c)) | *(u32*)(fs_dword(0x2c) + 4)) & 15) == 0); // both blocks 16-byte aligned
     check(exe_tls() == 30);
     set_exe_tls(exe_tls() + 1);
     check(exe_tls() == 31);

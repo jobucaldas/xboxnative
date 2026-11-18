@@ -429,14 +429,15 @@ struct Guest {
         size_t count = tls_images.size();
         uint64_t tls_bytes = 0;
         if (count) {
-            tls_bytes = uint64_t(count * sizeof(uint32_t));
+            tls_bytes = uint64_t(count * sizeof(uint32_t)) + 15;
             for (Image* image : tls_images) {
+                if (!image) continue;
                 uint32_t raw = image->tls.end - image->tls.start;
-                tls_bytes += uint64_t(raw) + image->tls.zero_fill;
+                tls_bytes += ((uint64_t(raw) + image->tls.zero_fill + 15) & ~uint64_t(15));
             }
         } else if (exe_tls.present) {
             count = 1;
-            tls_bytes = sizeof(uint32_t) + (exe_tls.end - exe_tls.start) + exe_tls.zero_fill;
+            tls_bytes = sizeof(uint32_t) + 15 + (exe_tls.end - exe_tls.start) + exe_tls.zero_fill;
         }
         if (tls_bytes > 16u * 1024u * 1024u) throw std::runtime_error("PE32 TLS thread storage exceeds 16 MiB");
         uint32_t tls_pages = uint32_t((tls_bytes + Memory::PAGE - 1) / Memory::PAGE);
@@ -458,17 +459,19 @@ struct Guest {
         // LastError (0x34) and TlsSlots (0xE10..) start zeroed: this thread's own.
         if (count) {
             uint32_t slots = base + Memory::PAGE;
-            uint32_t block = slots + uint32_t(count * sizeof(uint32_t));
+            // Each block starts 16-byte aligned, as the Windows loader's heap blocks are.
+            uint32_t block = (slots + uint32_t(count * sizeof(uint32_t)) + 15u) & ~15u;
             c.mem.w32(base + 0x2C, slots);
             if (!tls_images.empty()) {
                 for (size_t i = 0; i < tls_images.size(); ++i) {
+                    if (!tls_images[i]) continue; // unloaded DLL: its slot stays NULL
                     Image& image = *tls_images[i];
                     uint32_t raw = image.tls.end - image.tls.start;
                     uint64_t total = uint64_t(raw) + image.tls.zero_fill;
                     c.mem.w32(slots + uint32_t(i * sizeof(uint32_t)), block);
                     for (uint32_t n = 0; n < raw; ++n) c.mem.w8(block + n, c.mem.r8(image.tls.start + n));
                     for (uint32_t n = raw; n < total; ++n) c.mem.w8(block + n, 0);
-                    block += uint32_t(total);
+                    block += uint32_t((total + 15) & ~uint64_t(15));
                 }
             } else {
                 uint32_t raw = exe_tls.end - exe_tls.start;
@@ -499,9 +502,9 @@ struct Guest {
             }
         };
         if (reason == 3) {
-            for (auto it = tls_images.rbegin(); it != tls_images.rend(); ++it) call_image(**it);
+            for (auto it = tls_images.rbegin(); it != tls_images.rend(); ++it) if (*it) call_image(**it);
         } else {
-            for (Image* image : tls_images) call_image(*image);
+            for (Image* image : tls_images) if (image) call_image(*image);
         }
     }
     // The worker's context lives exactly as long as this object: the worker's TEB
@@ -814,6 +817,8 @@ struct Guest {
             if (entry != dll_entries.end()) c.call(entry->second, {base, static_cast<uint32_t>(0 /*DLL_PROCESS_DETACH*/), 0});
             if (invalidate_dbt) invalidate_dbt(base, size);
             mem.unmap(base, size);
+            // Keep slot indices stable; a NULL entry means the DLL is gone.
+            std::replace(tls_images.begin(), tls_images.end(), &it->second.image, static_cast<Image*>(nullptr));
             for (auto module = modules.begin(); module != modules.end();) {
                 if (module->second == base) module = modules.erase(module); else ++module;
             }
