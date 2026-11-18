@@ -2478,35 +2478,85 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll","FindClose",Conv::Stdcall,1,[this](Cpu& c)->uint32_t {
         auto it=find_handles.find(c.arg(0));if(it==find_handles.end()){set_last_error(6);return 0;}Host::FileCall q{Host::FileCall::Kind::FindClose};q.handle=it->second;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}find_handles.erase(it);return 1; });
     reg.add("shell32.dll", "DragAcceptFiles", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 0; });
-    reg.add("ole32.dll","CoCreateInstance",Conv::Stdcall,5,[this](Cpu& c)->uint32_t {
+    auto guid_read=[this](uint32_t address,uint8_t* bytes)->bool {
+        if(!address)return false;
+        auto value=mem.read_bytes(address,16);std::memcpy(bytes,value.data(),16);return true;
+    };
+    auto guid_equal=[](const uint8_t* left,const uint8_t* right)->bool { return std::memcmp(left,right,16)==0; };
+    auto guid_parse=[](const std::u16string& text,uint8_t* out)->bool {
+        auto hex=[](char16_t c)->int { if(c>=u'0'&&c<=u'9')return int(c-u'0');if(c>=u'a'&&c<=u'f')return int(c-u'a'+10);if(c>=u'A'&&c<=u'F')return int(c-u'A'+10);return -1; };
+        size_t at=0;if(text.size()==38&&text.front()==u'{'&&text.back()==u'}')at=1;else if(text.size()!=36)return false;
+        const unsigned groups[]={8,4,4,4,12};size_t pos=at;unsigned byte=0;
+        for(unsigned group=0;group<5;++group){if(group&&text[pos++]!=u'-')return false;for(unsigned i=0;i<groups[group];i+=2){int high=hex(text[pos++]),low=hex(text[pos++]);if(high<0||low<0)return false;out[byte++]=uint8_t((high<<4)|low);}}
+        if((at==1&&pos!=text.size()-1)||(!at&&pos!=text.size()))return false;
+        uint8_t swap=out[0];out[0]=out[3];out[3]=swap;swap=out[1];out[1]=out[2];out[2]=swap;
+        swap=out[4];out[4]=out[5];out[5]=swap;swap=out[6];out[6]=out[7];out[7]=swap;
+        return true;
+    };
+    auto guid_string=[](const uint8_t* bytes)->std::u16string {
+        uint32_t d1=uint32_t(bytes[0])|uint32_t(bytes[1])<<8|uint32_t(bytes[2])<<16|uint32_t(bytes[3])<<24;
+        uint16_t d2=uint16_t(bytes[4])|uint16_t(bytes[5])<<8,d3=uint16_t(bytes[6])|uint16_t(bytes[7])<<8;
+        char text[39];std::snprintf(text,sizeof(text),"{%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}",d1,d2,d3,bytes[8],bytes[9],bytes[10],bytes[11],bytes[12],bytes[13],bytes[14],bytes[15]);
+        std::u16string result;for(unsigned i=0;i<38;++i)result.push_back(char16_t(uint8_t(text[i])));return result;
+    };
+    auto com_init=[this](uint32_t value,uint32_t model)->uint32_t {
+        if(value)return 0x80070057u;
+        uint32_t tid=mem.r32(cur_teb+0x24);if(!tid)tid=1;auto it=com_apartments.find(tid);
+        if(it!=com_apartments.end()){if(it->second.first!=model)return 0x80010106u;++it->second.second;return 1;}com_apartments[tid]={model,1};return 0;
+    };
+    reg.add("ole32.dll","CoCreateInstance",Conv::Stdcall,5,[this,guid_read,guid_equal](Cpu& c)->uint32_t {
+        // DirectInput8 (#340) first: SDL2's default joystick path creates it.
         if (c.arg(0) && c.arg(3) && c.arg(4)) {
             const uint32_t result = dinput8_cocreate(host.com, c);
             if (result != 0x80040154u) return result;
         }
-        if(!c.arg(0)||!c.arg(3)||!c.arg(4)){set_last_error(87);return 0x80004003u;}
-        if(c.arg(1))return 0x80040110u;
-        mem.w32(c.arg(4),0);
-        return 0x80040154u;
+        static const uint8_t clsid_sound8[]={0x3f,0xcc,0x01,0x39,0xb5,0x84,0xa4,0x4f,0xba,0x35,0xaa,0x81,0x72,0xb8,0xa0,0x9b};
+        static const uint8_t clsid_sound[]={0x46,0xd9,0xd4,0x47,0xe8,0x62,0xcf,0x11,0x93,0xbc,0x44,0x45,0x53,0x54,0x00,0x00};
+        static const uint8_t iid_unknown[]={0,0,0,0,0,0,0,0,0xc0,0,0,0,0,0,0,0x46};
+        static const uint8_t iid_sound[]={0x83,0xfa,0x9a,0x27,0x81,0x49,0xce,0x11,0xa5,0x21,0,0x20,0xaf,0x0b,0xe5,0x60};
+        static const uint8_t iid_sound8[]={0x93,0x7e,0x0a,0xc5,0x95,0xf3,0x34,0x48,0x9e,0xf6,0x7f,0xa9,0x9d,0xe5,0x09,0x66};
+        if(!c.arg(4)||!c.arg(3)||!c.arg(0)){set_last_error(87);return 0x80004003u;}mem.w32(c.arg(4),0);if(c.arg(1))return 0x80040110u;
+        uint8_t clsid[16],iid[16];if(!guid_read(c.arg(0),clsid)||!guid_read(c.arg(3),iid))return 0x80004003u;
+        if(!guid_equal(clsid,clsid_sound8)&&!guid_equal(clsid,clsid_sound))return 0x80040154u;
+        if(!guid_equal(iid,iid_unknown)&&!guid_equal(iid,iid_sound)&&!guid_equal(iid,iid_sound8))return 0x80004002u;
+#if defined(_WIN32)
+        if(!host.dsound_factory)return 0x80004001u;uintptr_t result=0;uint32_t hr=uint32_t(host.dsound_factory(nullptr,&result));
+        if((hr&0x80000000u)||!result)return (hr&0x80000000u)?hr:0x80004001u;
+        uint32_t guest=dsound_wrap(host.com,c,"IDirectSound8",reinterpret_cast<IUnknown*>(result));if(!guest)return 0x80004001u;c.mem.w32(c.arg(4),guest);return hr;
+#else
+        return 0x80004001u;
+#endif
     });
-    reg.add("ole32.dll","CoInitialize",Conv::Stdcall,1,[this](Cpu& c)->uint32_t {
-        if(c.arg(0)) return 0x80070057u;
-        uint32_t tid=mem.r32(cur_teb+0x24);if(!tid)tid=1;
-        auto it=com_apartments.find(tid);
-        if(it!=com_apartments.end()){if(it->second.first!=2)return 0x80010106u;++it->second.second;return 1;}
-        com_apartments[tid]={2,1};return 0;
-    });
-    reg.add("ole32.dll","CoInitializeEx",Conv::Stdcall,2,[this](Cpu& c)->uint32_t {
-        if(c.arg(0)) return 0x80070057u;
-        uint32_t flags=c.arg(1);if(flags&~0xEu)return 0x80070057u;
-        uint32_t model=flags&2u,tid=mem.r32(cur_teb+0x24);if(!tid)tid=1;
-        auto it=com_apartments.find(tid);
-        if(it!=com_apartments.end()){if(it->second.first!=model)return 0x80010106u;++it->second.second;return 1;}
-        com_apartments[tid]={model,1};return 0;
+    reg.add("ole32.dll","CoInitialize",Conv::Stdcall,1,[com_init](Cpu& c)->uint32_t { return com_init(c.arg(0),2); });
+    reg.add("ole32.dll","CoInitializeEx",Conv::Stdcall,2,[com_init](Cpu& c)->uint32_t {
+        uint32_t flags=c.arg(1);if(flags&~0xEu)return 0x80070057u;return com_init(c.arg(0),flags&2u);
     });
     reg.add("ole32.dll","CoUninitialize",Conv::Stdcall,0,[this](Cpu&)->uint32_t {
-        uint32_t tid=mem.r32(cur_teb+0x24);if(!tid)tid=1;auto it=com_apartments.find(tid);
-        if(it!=com_apartments.end()&&!--it->second.second)com_apartments.erase(it);
-        return 0;
+        uint32_t tid=mem.r32(cur_teb+0x24);if(!tid)tid=1;auto it=com_apartments.find(tid);if(it!=com_apartments.end()&&!--it->second.second)com_apartments.erase(it);return 0;
+    });
+    reg.add("ole32.dll","OleInitialize",Conv::Stdcall,1,[com_init](Cpu& c)->uint32_t { return com_init(c.arg(0),2); });
+    reg.add("ole32.dll","OleUninitialize",Conv::Stdcall,0,[this](Cpu&)->uint32_t {
+        uint32_t tid=mem.r32(cur_teb+0x24);if(!tid)tid=1;auto it=com_apartments.find(tid);if(it!=com_apartments.end()&&!--it->second.second)com_apartments.erase(it);return 0;
+    });
+    reg.add("ole32.dll","CoTaskMemAlloc",Conv::Stdcall,1,[this](Cpu& c)->uint32_t { return heap.alloc(c.arg(0)); });
+    reg.add("ole32.dll","CoTaskMemFree",Conv::Stdcall,1,[this](Cpu& c)->uint32_t { if(c.arg(0)&&heap.size_of(c.arg(0)))heap.release(c.arg(0));return 0; });
+    reg.add("ole32.dll","CoTaskMemRealloc",Conv::Stdcall,2,[this](Cpu& c)->uint32_t {
+        uint32_t old=c.arg(0),size=c.arg(1);if(!old)return size?heap.alloc(size):0;if(!heap.size_of(old))return 0;if(!size){heap.release(old);return 0;}return heap.realloc(old,size);
+    });
+    reg.add("ole32.dll","CoCreateGuid",Conv::Stdcall,1,[this](Cpu& c)->uint32_t {
+        if(!c.arg(0)){set_last_error(87);return 0x80004003u;}uint8_t bytes[16]{};if(!host.random_bytes||!host.random_bytes(bytes,16))return 0x80004001u;bytes[6]=uint8_t((bytes[6]&0x0f)|0x40);bytes[8]=uint8_t((bytes[8]&0x3f)|0x80);mem.write_bytes(c.arg(0),bytes,16);return 0;
+    });
+    reg.add("ole32.dll","StringFromGUID2",Conv::Stdcall,3,[this,guid_read,guid_string](Cpu& c)->uint32_t {
+        if(!c.arg(0)||!c.arg(1)||c.arg(2)<39){set_last_error(87);return 0;}uint8_t bytes[16];if(!guid_read(c.arg(0),bytes))return 0;auto text=guid_string(bytes);for(size_t i=0;i<text.size();++i)mem.w(c.arg(1)+uint32_t(i*2),text[i],2);mem.w(c.arg(1)+uint32_t(text.size()*2),0,2);return uint32_t(text.size()+1);
+    });
+    auto guid_from_string=[this,guid_parse](Cpu& c)->uint32_t {
+        if(!c.arg(0)||!c.arg(1)){set_last_error(87);return 0x80004003u;}uint8_t bytes[16];if(!guid_parse(wstr(c.arg(0)),bytes))return 0x800401f3u;mem.write_bytes(c.arg(1),bytes,16);return 0;
+    };
+    reg.add("ole32.dll","CLSIDFromString",Conv::Stdcall,2,guid_from_string);
+    reg.add("ole32.dll","IIDFromString",Conv::Stdcall,2,guid_from_string);
+    reg.add("ole32.dll","PropVariantClear",Conv::Stdcall,1,[this](Cpu& c)->uint32_t {
+        uint32_t address=c.arg(0);if(!address){set_last_error(87);return 0x80004003u;}uint16_t vt=uint16_t(mem.r(address,2));if(vt&0x4000u)return 0x80004001u;
+        const uint16_t supported[]={0,1,2,3,4,5,6,7,10,11,16,17,18,19,20,21,22,23,25};for(uint16_t value:supported)if(vt==value){mem.w(address,0,2);return 0;}return 0x80004001u;
     });
     reg.add("kernel32.dll", "DeleteFileA", Conv::Stdcall, 1, [this,guard_file,narrow_path](Cpu& c) -> uint32_t {
         if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::AttributesA};q.operation=Host::FileCall::Operation::DeleteA;q.path_a=str(c.arg(0));
