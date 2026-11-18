@@ -11,12 +11,25 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    - id: package-hash
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        echo "hash=$(printf '%s\n' "$PACKAGES" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/apt-archives
+        key: apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.package-hash.outputs.hash }}
     - shell: bash
       env:
         PACKAGES: ${{ inputs.packages }}
       run: |
         set -euo pipefail
 
+        archive_cache="$RUNNER_TEMP/apt-archives"
+        mkdir -p "$archive_cache/partial"
         sources_file=/etc/apt/sources.list.d/ubuntu.sources
         mirrors_file=/etc/apt/apt-mirrors.txt
 
@@ -75,13 +88,15 @@ runs:
         fi
 
         export DEBIAN_FRONTEND=noninteractive
-        # The mirror list is pruned to live URIs above, so the runner's own
-        # retry=1 failover pacing is enough; a high Acquire::Retries here
-        # would spend all attempts on a dead URI before failing over.
+        # The mirror list is pruned to live URIs above, so one retry with a
+        # short timeout is enough to fail over instead of trickling.
         sudo apt-get update \
             -o Acquire::https::Timeout=20 \
-            -o Acquire::http::Timeout=20
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::Retries=1
         sudo apt-get install -y \
+            -o Dir::Cache::archives="$archive_cache" \
             -o Acquire::https::Timeout=20 \
             -o Acquire::http::Timeout=20 \
+            -o Acquire::Retries=1 \
             $PACKAGES
