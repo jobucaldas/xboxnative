@@ -11,6 +11,15 @@
 #include "../host/x86/x86_guest.h"
 #include "../host/x86/x86_file_guard.h"
 using namespace x86;
+static bool verify_system_info() {
+    Memory mem; mem.map(0x1000, 0x2000, PROT_R | PROT_W);
+    Host host; Registry reg; Guest guest(mem, host, reg); guest.register_all();
+    ThunkTable thunks; Cpu cpu(mem, thunks); cpu.reg[ESP] = 0x2000;
+    auto it = reg.map.find({"kernel32.dll", "getsysteminfo"});
+    if (it == reg.map.end()) return false;
+    mem.w32(cpu.reg[ESP] + 4, 0x1000); it->second.fn(cpu);
+    return mem.r32(0x1018) == 586 && mem.r32(0x101c) == 65536;
+}
 static bool verify_conversion_terminators() {
     Memory mem; mem.map(0x1000, 0x2000, PROT_R | PROT_W);
     Host host; Registry reg; Guest guest(mem, host, reg); guest.register_all();
@@ -246,6 +255,7 @@ static std::vector<uint8_t> slurp(const char* path) {
     return std::vector<uint8_t>{std::istreambuf_iterator<char>(f), {}};
 }
 int main(int argc, char** argv) {
+    if (!verify_system_info()) { std::puts("X86-GUEST FAIL: system info layout"); return 1; }
     if (!verify_conversion_terminators()) { std::puts("X86-GUEST FAIL: conversion terminator counts"); return 1; }
     if (!verify_cpinfo_layout()) { std::puts("X86-GUEST FAIL: GetCPInfo layout"); return 1; }
     if (!verify_printf_padding()) { std::puts("X86-GUEST FAIL: printf sign and prefix zero padding"); return 1; }
