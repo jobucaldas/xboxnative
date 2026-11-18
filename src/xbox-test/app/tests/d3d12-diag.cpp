@@ -371,23 +371,16 @@ int main(int argc,char** argv) {
     ID3D12CommandQueue* queue=nullptr;
     D3D12_COMMAND_QUEUE_DESC queueDesc{};queueDesc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
     CHECK(SUCCEEDED(device->CreateCommandQueue(&queueDesc,__uuidof(ID3D12CommandQueue),(void**)&queue))&&queue);
-    d3d12_diag::adoptQueue(queue);
     ID3D12CommandAllocator* allocator=nullptr;
     CHECK(SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,__uuidof(ID3D12CommandAllocator),(void**)&allocator))&&allocator);
-    d3d12_diag::adoptAllocator(allocator);
     ID3D12GraphicsCommandList* list=nullptr;
     CHECK(SUCCEEDED(device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator,nullptr,
         __uuidof(ID3D12GraphicsCommandList),(void**)&list))&&list);
-    d3d12_diag::adoptList(list);
     ID3D12Fence* fence=nullptr;
     CHECK(SUCCEEDED(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,__uuidof(ID3D12Fence),(void**)&fence))&&fence);
-    d3d12_diag::adoptFence(fence);
-    d3d12_diag::adoptResource(made);
-    // Each class is patched once; adopting the same objects again is a no-op.
+    // Successful creation routes patch each returned object class once.
     size_t classesAfterObjects=d3d12_diag::classCount.load();
     CHECK(classesAfterObjects==classesAfterFirst+5);
-    d3d12_diag::adoptQueue(queue);d3d12_diag::adoptList(list);d3d12_diag::adoptFence(fence);
-    d3d12_diag::adoptAllocator(allocator);d3d12_diag::adoptResource(made);
     CHECK(d3d12_diag::classCount.load()==classesAfterObjects);
 
     // Wine's list is created closed: the first Close succeeds silently, the

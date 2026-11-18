@@ -9,4 +9,5 @@
 #include <cstddef>
 static_assert(sizeof(ID3D12DeviceVtbl)/sizeof(void*)==44,"ID3D12Device has 44 methods (slots 0-43)");
 static_assert(offsetof(ID3D12Device2Vtbl,CreatePipelineState)/sizeof(void*)==47,"ID3D12Device2::CreatePipelineState is slot 47");
+static_assert(offsetof(ID3D12GraphicsCommandListVtbl,ExecuteIndirect)/sizeof(void*)==59,"ID3D12GraphicsCommandList::ExecuteIndirect is slot 59");
 int main() { return 0; }

@@ -75,7 +75,7 @@ enum ListSlot {ListClose=9,ListReset,ListClearState,ListDrawInstanced,ListDrawIn
     ListIASetIndexBuffer,ListIASetVertexBuffers,ListSOSetTargets,ListOMSetRenderTargets,
     ListClearDepthStencilView,ListClearRenderTargetView,ListClearUnorderedAccessViewUint,
     ListClearUnorderedAccessViewFloat,ListDiscardResource,ListBeginQuery,ListEndQuery,
-    ListResolveQueryData,ListSetPredication,ListExecuteIndirect};
+    ListResolveQueryData,ListSetPredication,ListSetMarker,ListBeginEvent,ListEndEvent,ListExecuteIndirect};
 enum FenceSlot {FenceGetCompletedValue=8,FenceSetEventOnCompletion,FenceSignal};
 enum ResourceSlot {ResourceMap=8,ResourceUnmap,ResourceGetDesc,ResourceGetGPUVirtualAddress};
 enum AllocatorSlot {AllocatorReset=8};
@@ -86,7 +86,7 @@ constexpr int createPipelineStateStreamSlot=47;
 static_assert(CreateCommandQueue==8&&CheckFeatureSupport==13&&CreateFence==36&&GetAdapterLuid==43,"ID3D12Device slot layout");
 static_assert(createPipelineStateStreamSlot==47,"ID3D12Device2 CreatePipelineState slot");
 static_assert(QueueExecuteCommandLists==10&&QueueSignal==14&&QueueWait==15,"ID3D12CommandQueue slot layout");
-static_assert(ListClose==9&&ListResourceBarrier==26&&ListOMSetRenderTargets==46&&ListExecuteIndirect==56,"ID3D12GraphicsCommandList slot layout");
+static_assert(ListClose==9&&ListResourceBarrier==26&&ListOMSetRenderTargets==46&&ListExecuteIndirect==59,"ID3D12GraphicsCommandList slot layout");
 static_assert(FenceSetEventOnCompletion==9&&FenceSignal==10,"ID3D12Fence slot layout");
 static_assert(ResourceMap==8&&AllocatorReset==8,"ID3D12Resource/ID3D12CommandAllocator slot layout");
 
@@ -413,9 +413,15 @@ inline void flushTrace() {
 #define D3D12_DIAG_FAILED(name,key,text) do{if(FAILED(hr))report(false,std::string(name)+" "+hex(hr)+" "+(key),std::string(name)+" hr="+hex(hr)+" "+(text));}while(0)
 
 using DevicePtr=void*;
+inline void adoptQueue(ID3D12CommandQueue* queue);
+inline void adoptList(ID3D12GraphicsCommandList* list);
+inline void adoptFence(ID3D12Fence* fence);
+inline void adoptAllocator(ID3D12CommandAllocator* allocator);
+inline void adoptResource(ID3D12Resource* resource);
 static HRESULT STDMETHODCALLTYPE createCommandQueue(DevicePtr self,const D3D12_COMMAND_QUEUE_DESC* d,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_COMMAND_QUEUE_DESC*,REFIID,void**);
     D3D12_DIAG_HOOK(Fn,CreateCommandQueue)HRESULT hr=call(self,d,id,out); traceEnd(traceAt,hr);
+    if(SUCCEEDED(hr)&&out&&*out)adoptQueue(static_cast<ID3D12CommandQueue*>(*out));
     if(d)D3D12_DIAG_FAILED("CreateCommandQueue",fmt("%d/%d/%d/%d",int(d->Type),int(d->Priority),int(d->Flags),int(d->NodeMask)),
         fmt("type=%d priority=%d flags=0x%x node=%u",int(d->Type),d->Priority,d->Flags,d->NodeMask));
     else D3D12_DIAG_FAILED("CreateCommandQueue","null","desc=null");
@@ -424,6 +430,7 @@ static HRESULT STDMETHODCALLTYPE createCommandQueue(DevicePtr self,const D3D12_C
 static HRESULT STDMETHODCALLTYPE createCommandAllocator(DevicePtr self,D3D12_COMMAND_LIST_TYPE type,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,D3D12_COMMAND_LIST_TYPE,REFIID,void**);
     D3D12_DIAG_HOOK(Fn,CreateCommandAllocator)HRESULT hr=call(self,type,id,out); traceEnd(traceAt,hr);
+    if(SUCCEEDED(hr)&&out&&*out)adoptAllocator(static_cast<ID3D12CommandAllocator*>(*out));
     D3D12_DIAG_FAILED("CreateCommandAllocator",fmt("%d",int(type)),fmt("type=%d",int(type)));
     return hr;
 }
@@ -431,6 +438,7 @@ static HRESULT STDMETHODCALLTYPE createCommandList(DevicePtr self,UINT node,D3D1
         ID3D12PipelineState* state,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,D3D12_COMMAND_LIST_TYPE,ID3D12CommandAllocator*,ID3D12PipelineState*,REFIID,void**);
     D3D12_DIAG_HOOK(Fn,CreateCommandList)HRESULT hr=call(self,node,type,allocator,state,id,out); traceEnd(traceAt,hr);
+    if(SUCCEEDED(hr)&&out&&*out)adoptList(static_cast<ID3D12GraphicsCommandList*>(*out));
     D3D12_DIAG_FAILED("CreateCommandList",fmt("%d/%d/%d/%d",int(type),node,allocator!=nullptr,state!=nullptr),
         fmt("type=%d node=%u allocator=%d state=%d",int(type),node,allocator!=nullptr,state!=nullptr));
     return hr;
@@ -954,6 +962,7 @@ static HRESULT STDMETHODCALLTYPE createCommittedResource(DevicePtr self,const D3
         const D3D12_RESOURCE_DESC* d,D3D12_RESOURCE_STATES state,const D3D12_CLEAR_VALUE* clear,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_HEAP_PROPERTIES*,D3D12_HEAP_FLAGS,const D3D12_RESOURCE_DESC*,D3D12_RESOURCE_STATES,const D3D12_CLEAR_VALUE*,REFIID,void**);
     D3D12_DIAG_HOOK(Fn,CreateCommittedResource)HRESULT hr=call(self,heap,heapFlags,d,state,clear,id,out); traceEnd(traceAt,hr);
+    if(SUCCEEDED(hr)&&out&&*out)adoptResource(static_cast<ID3D12Resource*>(*out));
     if(FAILED(hr)) {
         D3D12_DIAG_FAILED("CreateCommittedResource",resourceKey(d)+fmt("/%d/%x",int(state),heapFlags),
             fmt("heap=%s heapflags=0x%x state=%s(%d) %s",heap?heapText(heap->Type).c_str():"null",heapFlags,
@@ -974,6 +983,7 @@ static HRESULT STDMETHODCALLTYPE createPlacedResource(DevicePtr self,ID3D12Heap*
         D3D12_RESOURCE_STATES state,const D3D12_CLEAR_VALUE* clear,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,ID3D12Heap*,UINT64,const D3D12_RESOURCE_DESC*,D3D12_RESOURCE_STATES,const D3D12_CLEAR_VALUE*,REFIID,void**);
     D3D12_DIAG_HOOK(Fn,CreatePlacedResource)HRESULT hr=call(self,heap,offset,d,state,clear,id,out); traceEnd(traceAt,hr);
+    if(SUCCEEDED(hr)&&out&&*out)adoptResource(static_cast<ID3D12Resource*>(*out));
     if(FAILED(hr))D3D12_DIAG_FAILED("CreatePlacedResource",resourceKey(d)+fmt("/%d",int(state)),
         fmt("heap=%d offset=%llu state=%s(%d) %s",heap!=nullptr,(unsigned long long)offset,resourceStateName(state),int(state),resourceDescText(d).c_str()));
     return hr;
@@ -982,6 +992,7 @@ static HRESULT STDMETHODCALLTYPE createReservedResource(DevicePtr self,const D3D
         const D3D12_CLEAR_VALUE* clear,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,const D3D12_RESOURCE_DESC*,D3D12_RESOURCE_STATES,const D3D12_CLEAR_VALUE*,REFIID,void**);
     D3D12_DIAG_HOOK(Fn,CreateReservedResource)HRESULT hr=call(self,d,state,clear,id,out); traceEnd(traceAt,hr);
+    if(SUCCEEDED(hr)&&out&&*out)adoptResource(static_cast<ID3D12Resource*>(*out));
     if(FAILED(hr))D3D12_DIAG_FAILED("CreateReservedResource",resourceKey(d)+fmt("/%d",int(state)),
         fmt("state=%s(%d) %s",resourceStateName(state),int(state),resourceDescText(d).c_str()));
     return hr;
@@ -989,6 +1000,7 @@ static HRESULT STDMETHODCALLTYPE createReservedResource(DevicePtr self,const D3D
 static HRESULT STDMETHODCALLTYPE createFence(DevicePtr self,UINT64 value,D3D12_FENCE_FLAGS flags,REFIID id,void** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT64,D3D12_FENCE_FLAGS,REFIID,void**);
     D3D12_DIAG_HOOK(Fn,CreateFence)HRESULT hr=call(self,value,flags,id,out); traceEnd(traceAt,hr);
+    if(SUCCEEDED(hr)&&out&&*out)adoptFence(static_cast<ID3D12Fence*>(*out));
     D3D12_DIAG_FAILED("CreateFence",fmt("%x",flags),fmt("value=%llu flags=0x%x",(unsigned long long)value,flags));
     return hr;
 }
