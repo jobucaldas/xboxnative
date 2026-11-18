@@ -1,15 +1,57 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Focused guest user32 contract test for the remaining 411370 imports.
 #include <cstdio>
+#include <cstring>
+#include <fstream>
 #include <initializer_list>
+#include <iterator>
 #include <string>
-#include "../host/x86/x86_guest.h"
+#include <vector>
+#include "../host/x86/x86_play.h"
 using namespace x86;
 
 static int checks, failures;
 #define CHECK(value) do { ++checks; if (!(value)) { ++failures; std::printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #value); } } while (0)
 
-int main() {
+struct Posted { uintptr_t hwnd; uint32_t message, wp, lp, time; int32_t x, y; };
+static bool run_timer_guest(const std::vector<uint8_t>& file, std::string& failure) {
+    std::vector<Posted> queue;
+    auto result = x86::run_image(file, "x86-user32.exe", "x86-user32.exe", nullptr, nullptr, 20'000'000, nullptr, false, nullptr, nullptr,
+        [&queue](x86::Host& host) {
+            host.register_window_class = [](const std::u16string& name) { return name == u"X86TimerWindow"; };
+            host.create_window = [](const x86::Host::WindowCreate& q) -> uintptr_t {
+                return q.class_name == u"X86TimerWindow" ? uintptr_t(0x1234) : 0;
+            };
+            host.destroy_window = [](uintptr_t hwnd) { return hwnd == 0x1234; };
+            host.window_call = [&queue](x86::Host::WindowCall& q) {
+                if (q.name == "PostMessageA" || q.name == "PostMessageW") {
+                    queue.push_back({q.args[0], uint32_t(q.args[1]), uint32_t(q.args[2]), uint32_t(q.args[3]), 0, 0, 0});
+                    q.result = 1; q.supported = true; return;
+                }
+                if (q.name == "PeekMessageA" || q.name == "PeekMessageW" || q.name == "GetMessageA" || q.name == "GetMessageW") {
+                    const uintptr_t filter = q.args[1]; const uint32_t first = uint32_t(q.args[2]), last = uint32_t(q.args[3]);
+                    auto it = std::find_if(queue.begin(), queue.end(), [filter, first, last](const Posted& message) {
+                        return (message.message == 0x0012u || !filter || message.hwnd == filter) && ((!first && !last) || (message.message >= first && message.message <= last));
+                    });
+                    q.result = it == queue.end() ? 0 : 1; q.supported = true;
+                    if (it != queue.end()) { q.output.resize(sizeof(Posted)); std::memcpy(q.output.data(), &*it, sizeof(Posted)); if (q.args[4] & 1) queue.erase(it); }
+                    return;
+                }
+                if (q.name == "PostQuitMessage") {
+                    queue.push_back({0, 0x0012u, uint32_t(q.args[0]), 0, 0, 0, 0}); q.result = 0; q.supported = true; return;
+                }
+                q.result = 0; q.supported = true;
+            };
+        });
+    if (!result.loaded || !result.finished || result.exit_code || !result.unresolved.empty()) {
+        failure = "loaded=" + std::to_string(result.loaded) + " finished=" + std::to_string(result.finished) +
+            " exit=" + std::to_string(result.exit_code) + " fault=" + result.fault + " unresolved=" + std::to_string(result.unresolved.size());
+        return false;
+    }
+    return true;
+}
+
+int main(int argc, char** argv) {
     Memory mem; mem.map(0x1000, 0x30000, PROT_R | PROT_W); mem.map(TEB_ADDR, 0x1000, PROT_R | PROT_W);
     ThunkTable table; Host host; Registry reg; Guest guest(mem, host, reg); guest.cur_teb = 0x1000; guest.register_all();
     Cpu cpu(mem, table); cpu.reg[ESP] = 0x2f000; cpu.fs_base = guest.cur_teb;
@@ -38,8 +80,16 @@ int main() {
     CHECK(mem.r32(rect) == 1 && mem.r32(rect + 4) == 2 && mem.r32(rect + 8) == 31 && mem.r32(rect + 12) == 42);
     guest.set_last_error(7); CHECK(call("BeginPaint", {0, 0}) == 0 && guest.last_error() == 120);
     CHECK(call("DialogBoxParamA", {0, 0, 0, 0, 0}) == uint32_t(-1) && guest.last_error() == 120);
-    CHECK(call("SetTimer", {0, 1, 16, 0}) == 0 && guest.last_error() == 120);
+    CHECK(call("SetTimer", {0, 1, 16, 0}) == 1);
+    CHECK(call("KillTimer", {0, 1}) == 1);
     CHECK(call("wsprintfA", {0, 0}) == 0 && guest.last_error() == 120);
     CHECK(host.calls["unsupported:BeginPaint"] == 1 && host.calls["unsupported:DialogBoxParamA"] == 1);
+    if (argc > 1) {
+        std::ifstream in(argv[1], std::ios::binary);
+        std::vector<uint8_t> file{std::istreambuf_iterator<char>(in), {}};
+        std::string failure;
+        CHECK(!file.empty() && run_timer_guest(file, failure));
+        if (!failure.empty()) std::printf("FAIL timer guest: %s\n", failure.c_str());
+    }
     std::printf("x86-user32: %d checks, %d failures\n", checks, failures); return failures ? 1 : 0;
 }
