@@ -32,7 +32,7 @@ static int checks, failures;
 static const std::set<std::string> kMsvcrtOnly = {
     "_amsg_exit", "_free", "_fstat", "_fstati64", "__getmainargs", "__lc_codepage", "_lock",
     "_malloc", "__p__commode", "__p___initenv", "__p__iob", "__p___mb_cur_max", "__set_app_type",
-    "_unlock", "__wgetmainargs"};
+    "_unlock", "__wgetmainargs", "_beginthreadex"};
 
 // Served names that must stay unresolved for ABI/layout reasons, including lconv.
 static const std::set<std::string> kServedAbiSensitive = {"time", "_filelengthi64", "_lseeki64", "localeconv"};
