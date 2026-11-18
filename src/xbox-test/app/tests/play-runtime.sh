@@ -289,7 +289,13 @@ lld-link-19 /nodefaultlib /include:play_init_relocation /subsystem:windows,6.02 
 lld-link-19 /nodefaultlib /include:play_init_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /dll /noentry /out:"$out/play-init-child.dll" "$out/obj/init-child.obj"
 lld-link-19 "${common[@]}" /include:play_init_relocation /dll /entry:peer_entry /implib:"$out/obj/play-init-peer.lib" /out:"$out/play-init-peer.dll" "$out/obj/init-peer.obj" "$out/obj/play-init-parent.lib" "$MINGW_SYSROOT"/lib/libkernel32.a
 lld-link-19 /nodefaultlib /include:play_init_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /entry:loader_init_entry /out:"$out/play-init-order.exe" "$out/obj/init-exe.obj" "$out/obj/play-init-parent.lib" "$out/obj/play-init-peer.lib" "$MINGW_SYSROOT"/lib/libkernel32.a
-UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --out "$out/play-runner.exe" host/tls_slot0.cpp tests/play-runner.cpp vendor/zlib/adler32.c vendor/zlib/crc32.c vendor/zlib/inffast.c vendor/zlib/inflate.c vendor/zlib/inftrees.c vendor/zlib/zutil.c -- /MT /O2 /Iout/obj /I../uwph/host/third_party/sqlite
+cc32="${I686_CC:-$(command -v i686-w64-mingw32-gcc || true)}"
+if [[ -z $cc32 ]]; then cc32=$(ls -d /nix/store/*-i686-w64-mingw32-gcc-wrapper-*/bin/i686-w64-mingw32-gcc 2>/dev/null | head -n1 || true); fi
+[[ -n $cc32 ]] || { echo "play-runtime: no i686-w64-mingw32-gcc (set I686_CC)" >&2; exit 1; }
+"$cc32" -O1 -Wall -Wextra -Werror -ffreestanding -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables \
+ -mno-sse -mno-mmx -mno-80387 -nostdlib -Wl,--entry,_fixture_start@0 -Wl,--subsystem,console -Wl,--dynamicbase \
+ -Wl,--no-seh -Wl,--image-base,0x400000 -o "$out/play-x86-fixture.exe" tests/x86-fixture/fixture.c -lkernel32 -lmsvcrt
+UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --link-arg bcrypt.lib --out "$out/play-runner.exe" host/tls_slot0.cpp tests/play-runner.cpp tests/play-runner-launch.cpp qrcodegen.cpp vendor/lzma/LzmaDec.c vendor/zstd/zstddeclib.c vendor/zlib/adler32.c vendor/zlib/crc32.c vendor/zlib/inffast.c vendor/zlib/inflate.c vendor/zlib/inftrees.c vendor/zlib/zutil.c -- /MT /O2 /Iout/obj /I../uwph/host/third_party/sqlite /I../../../out/ui-assets
 # Use the exact packaged carriers from the launcher build.
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
 # Owned stand-in so steam-client proves refusal of a present root client DLL.
@@ -341,6 +347,10 @@ for mode in mono fna observer-log reject-attach reject-mapping normal missing ga
   fi
  fi
 done
+env -u X86_DBT PRUN_GAME_ROOT=$(winepath -w "$out") PRUN_GAME_EXE=play-x86-fixture.exe \
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" game32 > "$out/game32.log" 2>&1
+grep -Fq 'GAME32 PLAY-LOADER COMPLETE: launcher PE32 route returned exit code 42' "$out/game32.log"
+grep -Fq 'PE32 OUT play-x86-fixture.exe: x86-fixture: start' "$out/launcher-game-events.log"
 grep -q 'MONO PLAY-LOADER PASS: embedded AnyCPU hello returned exit code 23' "$out/mono.log"
 grep -q 'GAP: summary exe=mono-2.0-sgen.dll arch=x64 ' "$out/mono.log"
 grep -q 'FNA PINVOKE SDL3 version=' "$out/fna.log"
