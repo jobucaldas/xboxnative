@@ -666,7 +666,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
 inline bool run(const wchar_t* path, Log log, Image* mapped=nullptr, Resolver resolve=nullptr, LoadConfig config=LoadConfig::reject) {
     if (mapped) return load(*mapped,path,log,{},resolve,true,config);
     Image image;
-    if (!load(image,path,log,{},resolve)) return false;
+    if (!load(image,path,log,{},resolve,false,config)) return false;
     if (image.dll) return true;
     char msg[200];
     DWORD result=((DWORD(WINAPI*)())(image.base+image.entry))();
