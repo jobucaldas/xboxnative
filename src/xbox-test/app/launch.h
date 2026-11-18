@@ -1041,11 +1041,15 @@ static void presence_start(uint32_t appid) {
                 if(g_presence.gen.load() != gen || !g_presence.appid || g_presence.ended) break;
                 auto now = user_session();
                 if(!now || !now->up) continue;              // reconnecting
+                const bool newSession = now != g_presence.session;
+                if(newSession) {                           // subscribe even while Steam blocks this game
+                    g_presence.session = now;
+                    now->set_push(presence_push);
+                }
                 if(g_presence.blocked) continue;
                 appid = g_presence.appid;
-                if(now != g_presence.session) {             // a new session: Steam forgot the game
-                    g_presence.session = now; send = full = true;
-                    now->set_push(presence_push);
+                if(newSession) {                            // a new session: Steam forgot the game
+                    send = full = true;
                     richUpdate = g_presence.rp.needs_upload(true);
                     if(g_presence.rp.coalescer.dirty) g_presence.rp.coalescer.sent();
                     kv = g_presence.rp.kv;
@@ -1679,8 +1683,11 @@ static void lp_run_impl(LpCtx& c) {
     mlp::report_kernel();
 }
 static bool lp_run_seh(LpCtx* c) {     // no C++ objects with destructors in this frame: SEH guard so a probe bug cannot take the launcher down
-    __try { lp_run_impl(*c); return true; }
-    __except (play_runtime::state?play_runtime::filter(GetExceptionInformation()):EXCEPTION_EXECUTE_HANDLER) { return false; }
+    bool noFault = true;
+    __try { lp_run_impl(*c); }
+    __except (play_runtime::state?play_runtime::filter(GetExceptionInformation()):EXCEPTION_EXECUTE_HANDLER) { noFault = false; }
+    if(g_finalSync) try { g_finalSync(); } catch(...) {}
+    return noFault;
 }
 // Cached appinfo (the downloader writes it); read only, no network on this path.
 static bool load_appinfo(uint32_t appid,Vdf& root,const Vdf*& app) {
