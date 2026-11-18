@@ -71,12 +71,22 @@ int main() {
     if (result != MMSYSERR_NOERROR || !(header.dwFlags & WHDR_PREPARED)) return 11;
     result = waveOutWrite(output, &header, sizeof(header));
     if (result != MMSYSERR_NOERROR || !(header.dwFlags & WHDR_INQUEUE)) return 12;
+    MMRESULT volume_result = waveOutSetVolume(output, 0x12345678u);
+    if (volume_result != MMSYSERR_NOERROR) { printf("X86-WAVEOUT volume set failed: %u\n", volume_result); return 40; }
+    if (waveOutMessage(output, 0, 0, 0) != MMSYSERR_NOTSUPPORTED) return 45;
+    DWORD volume = 0;
+    if (waveOutGetVolume(output, &volume) != MMSYSERR_NOERROR || volume != 0x12345678u) return 41;
     if (waveOutClose(output) != WAVERR_STILLPLAYING) return 13;
-    MMTIME before{}; before.wType = TIME_BYTES;
-    if (waveOutGetPosition(output, &before, sizeof(before)) != MMSYSERR_NOERROR) return 14;
+    if (waveOutPause(output) != MMSYSERR_NOERROR) return 42;
+    MMTIME paused_before{}; paused_before.wType = TIME_BYTES;
+    if (waveOutGetPosition(output, &paused_before, sizeof(paused_before)) != MMSYSERR_NOERROR) return 14;
+    Sleep(40);
+    MMTIME paused_after{}; paused_after.wType = TIME_BYTES;
+    if (waveOutGetPosition(output, &paused_after, sizeof(paused_after)) != MMSYSERR_NOERROR || paused_after.u.cb != paused_before.u.cb) return 43;
+    if (waveOutRestart(output) != MMSYSERR_NOERROR) return 44;
     Sleep(40);
     MMTIME after{}; after.wType = TIME_BYTES;
-    if (waveOutGetPosition(output, &after, sizeof(after)) != MMSYSERR_NOERROR || after.u.cb <= before.u.cb) return 15;
+    if (waveOutGetPosition(output, &after, sizeof(after)) != MMSYSERR_NOERROR || after.u.cb <= paused_after.u.cb) return 15;
     if (waveOutReset(output) != MMSYSERR_NOERROR || WaitForSingleObject(function_done_event, 5000) != WAIT_OBJECT_0) return 16;
     MMTIME reset_position{}; reset_position.wType = TIME_SAMPLES;
     if (waveOutGetPosition(output, &reset_position, sizeof(reset_position)) != MMSYSERR_NOERROR || reset_position.u.sample != 0) return 29;
@@ -221,7 +231,9 @@ int main(int argc, char **argv) {
     }
     format.wFormatTag = WAVE_FORMAT_PCM;
     HWAVEOUT live = nullptr;
-    if (open(&live, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) return 2;
+    MMRESULT live_result = open(&live, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL);
+    if (live_result == MMSYSERR_NODRIVER) { std::puts("X64-WAVEOUT SKIP: no audio device"); return 0; }
+    if (live_result != MMSYSERR_NOERROR) return 2;
     volatile LONG stop = 0, failed = 0, progress = 0;
     HandleStress workers[2]{};
     HANDLE threads[2]{};
@@ -246,6 +258,22 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "FAIL: concurrent live handle lookups and open/close\n"); return 2;
     }
     std::puts("X64-WAVEOUT PASS: concurrent live handle lookups and 200 open/close operations");
+    HWAVEOUT reset_race = nullptr;
+    if (open(&reset_race, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) return 2;
+    volatile LONG reset_stop = 0, reset_failed = 0, reset_progress = 0;
+    HandleStress reset_worker{}; reset_worker.output = reset_race; reset_worker.position = position; reset_worker.write = write;
+    reset_worker.stop = &reset_stop; reset_worker.failed = &reset_failed; reset_worker.progress = &reset_progress;
+    reset_worker.header.lpData = reset_worker.samples; reset_worker.header.dwBufferLength = sizeof(reset_worker.samples);
+    if (prepare(reset_race, &reset_worker.header, sizeof(reset_worker.header)) != MMSYSERR_NOERROR) return 2;
+    HANDLE reset_thread = CreateThread(nullptr, 0, handle_stress_thread, &reset_worker, 0, nullptr);
+    if (!reset_thread) return 2;
+    for (unsigned wait = 0; wait < 1000 && !reset_progress; ++wait) Sleep(1);
+    if (!reset_progress) return 2;
+    for (unsigned i = 0; i < 50; ++i) if (reset(reset_race) != MMSYSERR_NOERROR) return 2;
+    InterlockedExchange(&reset_stop, 1);
+    if (WaitForSingleObject(reset_thread, 5000) != WAIT_OBJECT_0 || reset_failed ||
+        reset(reset_race) != MMSYSERR_NOERROR || waveout_close(reset_race) != MMSYSERR_NOERROR) return 2;
+    CloseHandle(reset_thread);
     HWAVEOUT same_handle = nullptr;
     if (open(&same_handle, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) return 2;
     volatile LONG same_stop = 0, same_failed = 0, same_progress = 0;

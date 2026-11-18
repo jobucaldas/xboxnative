@@ -15,9 +15,9 @@ link /dll /noentry /nodefaultlib /subsystem:windows,6.02 /appcontainer /dynamicb
     /def:"$here/dsound.def" /out:"$out/dsound.dll" "$work/dsound.obj" /libpath:"$mingw_lib" libkernel32.a libuuid.a
 rwx=$(llvm-readobj --sections "$out/dsound.dll" | awk '/Name: \./{n=$2;w=0;x=0} /IMAGE_SCN_MEM_WRITE/{w=1} /IMAGE_SCN_MEM_EXECUTE/{x=1} /^ *\]$/{if(w&&x)print n}')
 [[ -z $rwx ]] || { echo "dsound.dll has writable code section(s): $rwx" >&2; exit 1; }
-for name in DirectSoundCreate DirectSoundCreate8 DirectSoundEnumerateA DirectSoundEnumerateW GetDeviceID waveOutGetNumDevs waveOutGetDevCapsA waveOutGetDevCapsW waveOutOpen waveOutPrepareHeader waveOutWrite waveOutUnprepareHeader waveOutReset waveOutClose waveOutGetPosition waveInGetNumDevs waveInGetDevCapsA waveInGetDevCapsW waveInGetPosition waveInOpen waveInClose waveInPrepareHeader waveInUnprepareHeader waveInAddBuffer waveInReset waveInStart waveInStop; do
-    llvm-readobj --coff-exports "$out/dsound.dll" | grep -q "Name: ${name}$" || { echo "dsound.dll does not export $name" >&2; exit 1; }
+for name in DirectSoundCreate DirectSoundCreate8 DirectSoundEnumerateA DirectSoundEnumerateW GetDeviceID waveOutGetNumDevs waveOutGetDevCapsA waveOutGetDevCapsW waveOutOpen waveOutPrepareHeader waveOutWrite waveOutUnprepareHeader waveOutReset waveOutClose waveOutGetPosition waveOutPause waveOutRestart waveOutSetVolume waveOutGetVolume waveInGetNumDevs waveInGetDevCapsA waveInGetDevCapsW waveInGetPosition waveInOpen waveInClose waveInPrepareHeader waveInUnprepareHeader waveInAddBuffer waveInReset waveInStart waveInStop; do
+    llvm-readobj --coff-exports "$out/dsound.dll" | grep "Name: ${name}$" >/dev/null || { echo "dsound.dll does not export $name" >&2; exit 1; }
 done
 for ordinal in 1 2 3 7 11; do
-    llvm-readobj --coff-exports "$out/dsound.dll" | grep -q "Ordinal: $ordinal$" || { echo "dsound.dll does not export ordinal $ordinal" >&2; exit 1; }
+    llvm-readobj --coff-exports "$out/dsound.dll" | grep "Ordinal: $ordinal$" >/dev/null || { echo "dsound.dll does not export ordinal $ordinal" >&2; exit 1; }
 done

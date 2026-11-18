@@ -2160,12 +2160,14 @@ static int WINAPI messageBoxW(HWND,LPCWSTR text,LPCWSTR caption,UINT type) {
     return 0;
 }
 static uintptr_t vcruntimeLookup(const char* dll,const char* name) {return resolve(dll,name,0);}
+static MMRESULT WINAPI unsupportedWaveOut() { return MMSYSERR_NOTSUPPORTED; }
 static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     std::string key=lower(dll);
     if(name&&key=="winmm.dll") {
         static HMODULE audio=LoadPackagedLibrary(L"runtime\\dsound.dll",0);
-        static const char* const exports[]={"waveOutGetNumDevs","waveOutGetDevCapsA","waveOutGetDevCapsW","waveOutOpen","waveOutPrepareHeader","waveOutUnprepareHeader","waveOutWrite","waveOutGetPosition","waveOutReset","waveOutClose","waveInGetNumDevs","waveInGetDevCapsA","waveInGetDevCapsW","waveInGetPosition","waveInOpen","waveInClose","waveInPrepareHeader","waveInUnprepareHeader","waveInAddBuffer","waveInStart","waveInStop","waveInReset"};
+        static const char* const exports[]={"waveOutGetNumDevs","waveOutGetDevCapsA","waveOutGetDevCapsW","waveOutOpen","waveOutPrepareHeader","waveOutUnprepareHeader","waveOutWrite","waveOutGetPosition","waveOutReset","waveOutClose","waveOutPause","waveOutRestart","waveOutSetVolume","waveOutGetVolume","waveInGetNumDevs","waveInGetDevCapsA","waveInGetDevCapsW","waveInGetPosition","waveInOpen","waveInClose","waveInPrepareHeader","waveInUnprepareHeader","waveInAddBuffer","waveInStart","waveInStop","waveInReset"};
         for(const char* export_name:exports)if(!strcmp(name,export_name)){std::string implementation="Xbn";implementation+=export_name;return audio?reinterpret_cast<uintptr_t>(GetProcAddress(audio,implementation.c_str())):0;}
+        if(!strncmp(name,"waveOut",7))return reinterpret_cast<uintptr_t>(&unsupportedWaveOut);
     }
     if(key=="kernelbase.dll") key="kernel32.dll";
     // Process creation binds Play's refusal before any native lookup, for static,

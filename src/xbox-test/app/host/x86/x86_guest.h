@@ -2392,13 +2392,10 @@ inline void Guest::register_all() {
     reg.add("winmm.dll", "joyGetPosEx", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 167; });
     reg.add("winmm.dll", "joyGetDevCapsA", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 167; });
     reg.add("winmm.dll", "joyGetDevCapsW", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 167; });
-    reg.add("winmm.dll", "waveOutPause", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 6; });
-    reg.add("winmm.dll", "waveOutRestart", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 6; });
-    reg.add("winmm.dll", "waveOutSetVolume", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 6; });
-    reg.add("winmm.dll", "waveOutMessage", Conv::Stdcall, 4, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveOutMessage", Conv::Stdcall, 4, [](Cpu&) -> uint32_t { return MMSYSERR_NOTSUPPORTED; });
     reg.add("winmm.dll", "waveInMessage", Conv::Stdcall, 4, [](Cpu&) -> uint32_t { return 6; });
-    reg.add("winmm.dll", "waveOutGetErrorTextA", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
-    reg.add("winmm.dll", "waveOutGetErrorTextW", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
+    reg.add("winmm.dll", "waveOutGetErrorTextA", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return MMSYSERR_NOTSUPPORTED; });
+    reg.add("winmm.dll", "waveOutGetErrorTextW", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return MMSYSERR_NOTSUPPORTED; });
     reg.add("winmm.dll", "waveInGetErrorTextA", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
     reg.add("winmm.dll", "waveInGetErrorTextW", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 6; });
     reg.add("winmm.dll", "PlaySoundA", Conv::Stdcall, 3, [](Cpu&) -> uint32_t { return 0; });

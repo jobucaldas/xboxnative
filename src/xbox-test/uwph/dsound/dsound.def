@@ -16,6 +16,10 @@ EXPORTS
     waveOutReset=XbnWaveOutReset
     waveOutClose=XbnWaveOutClose
     waveOutGetPosition=XbnWaveOutGetPosition
+    waveOutPause=XbnWaveOutPause
+    waveOutRestart=XbnWaveOutRestart
+    waveOutSetVolume=XbnWaveOutSetVolume
+    waveOutGetVolume=XbnWaveOutGetVolume
     waveInOpen=XbnWaveInOpen
     waveInClose=XbnWaveInClose
     waveInPrepareHeader=XbnWaveInPrepareHeader
