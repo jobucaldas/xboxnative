@@ -710,29 +710,37 @@ inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
     throw std::runtime_error("unsupported DBT opcode");
 }
 
-inline bool runtime_uses_xmm(const std::vector<uint8_t>& guest) {
+inline uint8_t runtime_xmm_mask(const std::vector<uint8_t>& guest) {
+    uint8_t mask = 0;
     size_t p = 0;
     while (p < guest.size()) {
-        size_t start = p;
+        size_t start = p, modrm_at = guest.size();
         bool prefixed = guest[p] == 0x66 || guest[p] == 0xf2 || guest[p] == 0xf3;
         if (prefixed) ++p;
-        if (p + 1 < guest.size() && guest[p] == 0x0F) {
+        if (p < guest.size() && guest[p] == 0x0F && p + 2 < guest.size()) {
             uint8_t op2 = guest[p + 1];
             if (prefixed || op2 == 0x10 || op2 == 0x11 || op2 == 0x28 || op2 == 0x29 ||
                 op2 == 0x58 || op2 == 0x59 || op2 == 0xc6)
-                return true;
+                modrm_at = p + 2;
         }
         uint32_t memory_ea = 0; bool memory_operand = false, absolute_memory = false, memory_write = false; uint8_t memory_size = 0;
         p = start + runtime_instruction(guest, start, memory_ea, memory_operand, absolute_memory, memory_write, memory_size);
+        if (modrm_at < guest.size()) {
+            uint8_t modrm = guest[modrm_at];
+            mask |= uint8_t(1u << ((modrm >> 3) & 7));
+            if ((modrm >> 6) == 3) mask |= uint8_t(1u << (modrm & 7));
+        }
     }
-    return false;
+    return mask;
 }
+inline bool runtime_uses_xmm(const std::vector<uint8_t>& guest) { return runtime_xmm_mask(guest) != 0; }
 
 inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest, uint32_t guest_pc,
                                                std::vector<InstructionMap>* instruction_map = nullptr,
                                                const uint8_t* prot = nullptr, uint32_t* generation = nullptr) {
     Emitter out;
-    bool uses_xmm = runtime_uses_xmm(guest);
+    const uint8_t xmm_mask = runtime_xmm_mask(guest);
+    bool uses_xmm = xmm_mask != 0;
 #if defined(_WIN32)
     out.b(0x48); out.b(0x89); out.b(0xCF); // Windows x64 passes State* in RCX; use RDI internally.
 #endif
@@ -740,14 +748,13 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
     if (prot) out.b(0x41), out.b(0x57); // save state*, preserve R12-R15 when metadata checks are enabled
     out.b(0x48); out.b(0x83); out.b(0xEC); out.b(uses_xmm ? 56 : 8);
     if (prot) runtime_mov_imm64(out, 15, reinterpret_cast<uintptr_t>(prot));
-    if (uses_xmm) {
-        runtime_store_xmm_mem(out, 4, 0, 6); runtime_store_xmm_mem(out, 4, 16, 7);
-    }
+    if (xmm_mask & 0x40) runtime_store_xmm_mem(out, 4, 0, 6);
+    if (xmm_mask & 0x80) runtime_store_xmm_mem(out, 4, 16, 7);
     runtime_mov_reg_mem(out, 11, 7, 36);
     out.b(0x41); out.b(0x53); out.b(0x9D);
     out.rex(12, 0, 7, true); out.b(0x8B); out.modrm(1, 12, 7); out.b(40);
-    if (uses_xmm)
-        for (unsigned i = 0; i != 8; ++i) runtime_load_xmm_mem(out, uint8_t(i), 7, 48 + i * 16);
+    for (unsigned i = 0; i != 8; ++i)
+        if (xmm_mask & (1u << i)) runtime_load_xmm_mem(out, uint8_t(i), 7, 48 + i * 16);
     for (unsigned i : {0u, 1u, 2u, 3u, 5u, 6u, 7u, 4u}) runtime_mov_reg_mem(out, runtime_reg(i), 7, uint8_t(i * 4));
     size_t p = 0;
     const uint8_t state_slot = uint8_t((uses_xmm ? 80 : 32) + (prot ? 8 : 0));
@@ -1021,13 +1028,12 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
     out.b(0x44); out.b(0x89); out.b(0x5C); out.b(0x24); out.b(eip_slot);
     out.b(0x4C); out.b(0x8B); out.b(0x5C); out.b(0x24); out.b(state_slot);
     for (unsigned i = 0; i != 8; ++i) runtime_store_reg_mem(out, 11, i * 4, runtime_reg(i));
-    if (uses_xmm)
-        for (unsigned i = 0; i != 8; ++i) runtime_store_xmm_mem(out, 11, 48 + i * 16, uint8_t(i));
+    for (unsigned i = 0; i != 8; ++i)
+        if (xmm_mask & (1u << i)) runtime_store_xmm_mem(out, 11, 48 + i * 16, uint8_t(i));
     out.b(0x9C); out.b(0x58); out.b(0x25); out.d(0x00000CD7); runtime_store_reg_mem(out, 11, 36, 0);
     out.b(0xFC); out.b(0x8B); out.b(0x44); out.b(0x24); out.b(eip_slot); runtime_store_reg_mem(out, 11, 32, 0);
-    if (uses_xmm) {
-        runtime_load_xmm_mem(out, 6, 4, 0); runtime_load_xmm_mem(out, 7, 4, 16);
-    }
+    if (xmm_mask & 0x40) runtime_load_xmm_mem(out, 6, 4, 0);
+    if (xmm_mask & 0x80) runtime_load_xmm_mem(out, 7, 4, 16);
     out.b(0x48); out.b(0x83); out.b(0xC4); out.b(uses_xmm ? 56 : 8);
     if (prot) { out.b(0x41); out.b(0x5F); }
     out.b(0x41); out.b(0x5E); out.b(0x41); out.b(0x5D); out.b(0x41); out.b(0x5C); out.b(0x5F);
