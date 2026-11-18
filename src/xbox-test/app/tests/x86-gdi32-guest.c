@@ -110,7 +110,8 @@ void WINAPI entry(void) {
     if (GetWindowLongPtrW(window,GWL_STYLE)!=WS_OVERLAPPEDWINDOW) fail(202);
     if (LoadStringW(NULL,1,(LPWSTR)&rect,sizeof(rect))) fail(203);
     if (MapWindowPoints(window,NULL,&point,1)) fail(21);  /* MonitorFrom* are real display routes (#319) */
-    if (MsgWaitForMultipleObjectsEx(0,NULL,0,0,0) != WAIT_FAILED || OffsetRect(&rect,0,0)) fail(22);
+    /* Real waits since #330: no handles and a zero timeout times out, as on Windows. */
+    if (MsgWaitForMultipleObjectsEx(0,NULL,0,0,0) != WAIT_TIMEOUT || OffsetRect(&rect,0,0)) fail(22);
     PostQuitMessage(0);
     if (GetLastError() != ERROR_CALL_NOT_IMPLEMENTED) fail(15);
     if (MessageBoxA(window,"route test","title",MB_OK) != IDOK ||
