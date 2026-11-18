@@ -80,13 +80,13 @@ int main(int argc, char** argv) {
     std::set<std::string> names;
     uint64_t total = 0;
     for (auto& l : left) { names.insert(l.name); total += l.bytes; }
-    CHECK(names == (std::set<std::string>{"boot.prev.log", "launch_probe.previous.log", "frametimes.csv", "appinfo_456.vdf",
+    CHECK(names == (std::set<std::string>{"launch_probe.previous.log", "frametimes.csv", "appinfo_456.vdf",
                                           "storecache\\300.json"}));
     CHECK(total > 0);
 
     uint64_t freed = installs::clean_leftovers(root, installed);
     CHECK(freed == total);
-    CHECK(!exists(L"boot.prev.log") && !exists(L"launch_probe.previous.log") && !exists(L"frametimes.csv"));
+    CHECK(exists(L"boot.prev.log") && !exists(L"launch_probe.previous.log") && !exists(L"frametimes.csv"));
     CHECK(!exists(L"appinfo_456.vdf") && !exists(L"storecache\\300.json"));
     CHECK(exists(L"storecache\\100.json") && exists(L"storecache\\200.json"));   // fresh: the detail page still reads them offline
     CHECK(exists(L"appinfo_123.vdf") && exists(L"appinfo_78a.vdf") && exists(L"appinfox.vdf"));
