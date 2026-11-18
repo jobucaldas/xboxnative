@@ -57,6 +57,8 @@ using CreateDeviceAndSwapChain=HRESULT(WINAPI*)(IDXGIAdapter*,D3D10_DRIVER_TYPE,
 using CreateBlob=HRESULT(WINAPI*)(SIZE_T,ID3D10Blob**);
 using CompileShader=HRESULT(WINAPI*)(const char*,SIZE_T,const char*,const D3D10_SHADER_MACRO*,ID3D10Include*,
     const char*,const char*,UINT,ID3D10Blob**,ID3D10Blob**);
+using ReflectShader=HRESULT(WINAPI*)(const void*,SIZE_T,ID3D10ShaderReflection**);
+using CoreCreateDevice=HRESULT(WINAPI*)(IDXGIFactory*,IDXGIAdapter*,UINT,D3D_FEATURE_LEVEL,ID3D10Device**);
 using EnableAll=HRESULT(WINAPI*)(D3D10_STATE_BLOCK_MASK*);
 using CreateStateBlock=HRESULT(WINAPI*)(ID3D10Device*,D3D10_STATE_BLOCK_MASK*,ID3D10StateBlock**);
 using GetSetting=WINBOOL(WINAPI*)(D3D10_STATE_BLOCK_MASK*,D3D10_DEVICE_STATE_TYPES,UINT);
@@ -90,18 +92,21 @@ extern "C" DWORD WINAPI d3d10_test_entry() {
     auto createDeviceAndSwapChain=(CreateDeviceAndSwapChain)GetProcAddress(module,"D3D10CreateDeviceAndSwapChain");
     auto createBlob=(CreateBlob)GetProcAddress(module,"D3D10CreateBlob");
     auto compileShader=(CompileShader)GetProcAddress(module,"D3D10CompileShader");
+    auto reflectShader=(ReflectShader)GetProcAddress(module,"D3D10ReflectShader");
+    auto coreCreateDevice=(CoreCreateDevice)GetProcAddress(module,"D3D10CoreCreateDevice");
     auto enableAll=(EnableAll)GetProcAddress(module,"D3D10StateBlockMaskEnableAll");
     auto createStateBlock=(CreateStateBlock)GetProcAddress(module,"D3D10CreateStateBlock");
     auto getSetting=(GetSetting)GetProcAddress(module,"D3D10StateBlockMaskGetSetting");
     auto enableCapture=(EnableCapture)GetProcAddress(module,"D3D10StateBlockMaskEnableCapture");
     auto vertexProfile=(const char*(WINAPI*)(ID3D10Device*))GetProcAddress(module,"D3D10GetVertexShaderProfile");
     auto registerLayers=(HRESULT(WINAPI*)(void))GetProcAddress(module,"D3D10RegisterLayers");
-    CHECK(createDevice&&createDevice1&&createDeviceAndSwapChain&&createBlob&&compileShader);
-    CHECK(enableAll&&createStateBlock&&getSetting&&enableCapture&&vertexProfile&&registerLayers);
-    if(!createDevice||!createDevice1||!createDeviceAndSwapChain||!createBlob||!compileShader||
-       !enableAll||!createStateBlock||!getSetting||!enableCapture||!vertexProfile||!registerLayers) {
+    CHECK(createDevice&&createDevice1&&createDeviceAndSwapChain&&createBlob&&compileShader&&reflectShader);
+    CHECK(coreCreateDevice&&enableAll&&createStateBlock&&getSetting&&enableCapture&&vertexProfile&&registerLayers);
+    if(!createDevice||!createDevice1||!createDeviceAndSwapChain||!createBlob||!compileShader||!reflectShader||
+       !coreCreateDevice||!enableAll||!createStateBlock||!getSetting||!enableCapture||!vertexProfile||!registerLayers) {
         static const char* const all[]={"D3D10CreateDevice","D3D10CreateDevice1","D3D10CreateDeviceAndSwapChain",
-            "D3D10CreateDeviceAndSwapChain1","D3D10CreateBlob","D3D10CompileShader","D3D10StateBlockMaskEnableAll",
+            "D3D10CreateDeviceAndSwapChain1","D3D10CreateBlob","D3D10CompileShader","D3D10ReflectShader",
+            "D3D10CoreCreateDevice","D3D10StateBlockMaskEnableAll",
             "D3D10CreateStateBlock","D3D10StateBlockMaskGetSetting","D3D10StateBlockMaskEnableCapture",
             "D3D10GetVertexShaderProfile","D3D10RegisterLayers"};
         for(auto name:all) {
@@ -118,6 +123,24 @@ extern "C" DWORD WINAPI d3d10_test_entry() {
     CHECK_HR(createDevice(nullptr,D3D10_DRIVER_TYPE_HARDWARE,nullptr,0,D3D10_SDK_VERSION,&device));
     CHECK(device!=nullptr);
     if(!device){outNum("RESULT checks=",checks);outNum("RESULT failures=",failures);return 1;}
+
+    // The console has neither rasterizer module; both legacy software driver
+    // requests deliberately take the logged WARP fallback instead.
+    ID3D10Device* reference=nullptr;
+    CHECK_HR(createDevice(nullptr,D3D10_DRIVER_TYPE_REFERENCE,nullptr,0,D3D10_SDK_VERSION,&reference));
+    CHECK(reference!=nullptr);
+    if(reference)reference->Release();
+    ID3D10Device* software=nullptr;
+    CHECK_HR(createDevice(nullptr,D3D10_DRIVER_TYPE_SOFTWARE,nullptr,0,D3D10_SDK_VERSION,&software));
+    CHECK(software!=nullptr);
+    if(software)software->Release();
+
+    // D3D10CoreCreateDevice is the internal entry point used by d3d10core.dll;
+    // it must produce the same wrapped device instead of being a stub.
+    ID3D10Device* core=nullptr;
+    CHECK_HR(coreCreateDevice(nullptr,nullptr,0,D3D_FEATURE_LEVEL_10_0,&core));
+    CHECK(core!=nullptr);
+    if(core)core->Release();
 
     // A D3D10 device runs D3D10 shaders, so the shim asks for 10_0 first.
     ID3D10Device1* one=nullptr;
@@ -362,9 +385,10 @@ extern "C" DWORD WINAPI d3d10_test_entry() {
     }
     CHECK(vertexProfile&&!strcmp(vertexProfile(device),"vs_4_0"));
     CHECK_HR_IS(registerLayers(),E_NOTIMPL);
-    const char source[]="float4 main(float4 p : POSITION) : SV_POSITION { return p; }";
+    const char source[]="cbuffer Globals : register(b0) { float4 tint; } "
+        "float4 main(float4 p : POSITION) : SV_POSITION { return p + tint; }";
     ID3D10Blob* code=nullptr;ID3D10Blob* errors=nullptr;
-    HRESULT compiled=compileShader(source,sizeof source,"shader.hlsl",nullptr,nullptr,"main","vs_4_0",
+    HRESULT compiled=compileShader(source,sizeof source-1,"shader.hlsl",nullptr,nullptr,"main","vs_4_0",
         D3D10_SHADER_ENABLE_STRICTNESS,&code,&errors);
     if(FAILED(compiled)) {
         // The shader compiler is a separate DLL; report it rather than hide it.
@@ -372,6 +396,39 @@ extern "C" DWORD WINAPI d3d10_test_entry() {
         if(errors)out((const char*)errors->GetBufferPointer());
     } else {
         CHECK(code&&code->GetBufferSize()>0);
+        ID3D10ShaderReflection* reflection=nullptr;
+        CHECK_HR(reflectShader(code->GetBufferPointer(),code->GetBufferSize(),&reflection));
+        CHECK(reflection!=nullptr);
+        if(reflection) {
+            D3D10_SHADER_DESC shaderDesc{};
+            CHECK_HR(reflection->GetDesc(&shaderDesc));
+            CHECK(shaderDesc.ConstantBuffers==1&&shaderDesc.InputParameters==1&&shaderDesc.OutputParameters==1);
+            D3D10_SIGNATURE_PARAMETER_DESC inputDesc{},outputDesc{};
+            CHECK_HR(reflection->GetInputParameterDesc(0,&inputDesc));
+            CHECK_HR(reflection->GetOutputParameterDesc(0,&outputDesc));
+            CHECK(inputDesc.SemanticName&&outputDesc.SemanticName&&inputDesc.SemanticIndex==0&&outputDesc.SemanticIndex==0);
+            ID3D10ShaderReflectionConstantBuffer* constants=reflection->GetConstantBufferByIndex(0);
+            CHECK(constants!=nullptr);
+            if(constants) {
+                D3D10_SHADER_BUFFER_DESC bufferDesc{};
+                CHECK_HR(constants->GetDesc(&bufferDesc));
+                CHECK(bufferDesc.Variables==1);
+                ID3D10ShaderReflectionVariable* variable=constants->GetVariableByIndex(0);
+                CHECK(variable!=nullptr);
+                if(variable) {
+                    D3D10_SHADER_VARIABLE_DESC variableDesc{};
+                    CHECK_HR(variable->GetDesc(&variableDesc));
+                    ID3D10ShaderReflectionType* type=variable->GetType();
+                    CHECK(type!=nullptr);
+                    if(type) {
+                        D3D10_SHADER_TYPE_DESC typeDesc{};
+                        CHECK_HR(type->GetDesc(&typeDesc));
+                        CHECK(typeDesc.Rows==1&&typeDesc.Columns==4);
+                    }
+                }
+            }
+            reflection->Release();
+        }
     }
     if(code)code->Release();
     if(errors)errors->Release();
@@ -399,6 +456,16 @@ extern "C" DWORD WINAPI d3d10_test_entry() {
             chain.SampleDesc.Count=1;chain.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
             chain.BufferCount=2;chain.OutputWindow=window;chain.Windowed=TRUE;
             chain.SwapEffect=DXGI_SWAP_EFFECT_DISCARD;
+            ID3D10Device* refusedDevice=nullptr;IDXGISwapChain* refusedSwapchain=nullptr;
+            chain.Windowed=FALSE;
+            CHECK_HR_IS(createDeviceAndSwapChain(nullptr,D3D10_DRIVER_TYPE_HARDWARE,nullptr,0,D3D10_SDK_VERSION,
+                &chain,&refusedSwapchain,&refusedDevice),DXGI_ERROR_UNSUPPORTED);
+            CHECK(!refusedDevice&&!refusedSwapchain);
+            chain.Windowed=TRUE;chain.SampleDesc.Count=4;
+            CHECK_HR_IS(createDeviceAndSwapChain(nullptr,D3D10_DRIVER_TYPE_HARDWARE,nullptr,0,D3D10_SDK_VERSION,
+                &chain,&refusedSwapchain,&refusedDevice),DXGI_ERROR_UNSUPPORTED);
+            CHECK(!refusedDevice&&!refusedSwapchain);
+            chain.SampleDesc.Count=1;
             ID3D10Device* chained=nullptr;IDXGISwapChain* swapchain=nullptr;
             CHECK_HR(createDeviceAndSwapChain(nullptr,D3D10_DRIVER_TYPE_HARDWARE,nullptr,0,D3D10_SDK_VERSION,
                 &chain,&swapchain,&chained));
