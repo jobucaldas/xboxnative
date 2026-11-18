@@ -464,7 +464,7 @@ inline void register_win32(Registry& r, Host& h) {
                             q = call_window(c,name,{uintptr_t(out),native_filter,c.arg(2),c.arg(3),1u},{},size);
                             break;
                         }
-                        if (h.timers.empty()) return 0;
+                        if (h.timers.empty()) { q = call_window(c,name,{uintptr_t(out),native_filter,c.arg(2),c.arg(3),0u},{},size); break; }
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     }
                     if (!q.supported) q = call_window(c,name,{uintptr_t(out),native_filter,c.arg(2),c.arg(3),0u},{},size);
