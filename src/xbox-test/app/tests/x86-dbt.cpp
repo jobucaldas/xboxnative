@@ -388,6 +388,57 @@ static void randomized_sse_differential() {
     std::printf("X86-DBT PASS: SSE2 DBT differential families matched interpreter (5000 cases per family)\n");
 }
 
+static void extended_sse_differential() {
+    std::mt19937 rng(0x45585453u); uint8_t data[3 * PAGE]; uint64_t cases = 0;
+    auto one = [&](std::vector<uint8_t> code, bool memory) {
+        uint32_t regs[8] = {}; uint32_t xmm[8][4];
+        for (uint32_t& r : regs) r = rng();
+        for (auto& row : xmm) for (uint32_t& r : row) r = rng();
+        for (uint8_t& b : data) b = uint8_t(rng());
+        if (memory) { regs[EAX] = DATA + 0x200; regs[ECX] = 0; }
+        runtime_compare(code, 1, rng, regs, 2u | (rng() & FLAG_MASK), data, cases, FLAG_MASK, xmm);
+    };
+    for (unsigned n = 0; n != 5000; ++n) {
+        unsigned dst = rng() & 7, src = rng() & 7;
+        one({0x0f, 0x10, uint8_t(0xc0 | (dst << 3) | src)}, false);
+        one({0x0f, 0x10, uint8_t((dst << 3) | 4), 0x20}, true);
+        one({0x0f, 0x28, uint8_t(0xc0 | (dst << 3) | src)}, false);
+        one({0x0f, 0x28, uint8_t((dst << 3) | 4), 0x20}, true);
+    }
+    for (unsigned n = 0; n != 5000; ++n) {
+        unsigned dst = rng() & 7, src = rng() & 7;
+        one({0x0f, 0x11, uint8_t(0xc0 | (dst << 3) | src)}, false);
+        one({0x0f, 0x11, uint8_t((dst << 3) | 4), 0x20}, true);
+        one({0x0f, 0x29, uint8_t(0xc0 | (dst << 3) | src)}, false);
+        one({0x0f, 0x29, uint8_t((dst << 3) | 4), 0x20}, true);
+    }
+    for (uint8_t prefix : {uint8_t(0xf2), uint8_t(0xf3)}) {
+        for (unsigned n = 0; n != 5000; ++n) {
+            unsigned dst = rng() & 7, src = rng() & 7;
+            one({prefix, 0x0f, 0x10, uint8_t(0xc0 | (dst << 3) | src)}, false);
+            one({prefix, 0x0f, 0x10, uint8_t((dst << 3) | 4), 0x20}, true);
+            one({prefix, 0x0f, 0x58, uint8_t(0xc0 | (dst << 3) | src)}, false);
+            one({prefix, 0x0f, 0x59, uint8_t((dst << 3) | 4), 0x20}, true);
+        }
+    }
+    for (unsigned n = 0; n != 5000; ++n) {
+        unsigned xmm_src = rng() & 7, gp_dst = rng() & 7;
+        one({0x66, 0x0f, 0x7e, uint8_t(0xc0 | (xmm_src << 3) | gp_dst)}, false);
+        one({0x66, 0x0f, 0x7e, uint8_t((xmm_src << 3) | 4), 0x20}, true);
+    }
+    for (uint8_t prefix : {uint8_t(0), uint8_t(0x66)}) {
+        for (unsigned n = 0; n != 5000; ++n) {
+            unsigned dst = rng() & 7, src = rng() & 7;
+            std::vector<uint8_t> reg = {0x0f, 0xc6, uint8_t(0xc0 | (dst << 3) | src), uint8_t(rng())};
+            std::vector<uint8_t> mem = {0x0f, 0xc6, uint8_t((dst << 3) | 4), 0x20, uint8_t(rng())};
+            if (prefix) { reg.insert(reg.begin(), prefix); mem.insert(mem.begin(), prefix); }
+            one(reg, false);
+            one(mem, true);
+        }
+    }
+    std::printf("X86-DBT PASS: extended SSE/x87 opcode families matched interpreter (5000 cases per family)\n");
+}
+
 static void partial_block_differential() {
     static RuntimeMachine translated, interpreted;
     std::mt19937 rng(0x50415254u);
@@ -408,6 +459,79 @@ static void partial_block_differential() {
         }
     }
     std::printf("X86-DBT PASS: partial blocks resumed after one interpreter instruction (5000 cases)\n");
+}
+
+static bool same_fpu(const Fpu& a, const Fpu& b) {
+    return !std::memcmp(a.st, b.st, sizeof a.st) && !std::memcmp(a.empty, b.empty, sizeof a.empty) &&
+        a.top == b.top && a.cw == b.cw && a.sw == b.sw;
+}
+static void scalar_load_preserves_live_scratch() {
+    std::mt19937 rng(0x5343414cu); uint8_t data[3 * PAGE] = {}; uint64_t cases = 0;
+    for (uint8_t prefix : {uint8_t(0xf2), uint8_t(0xf3)}) {
+        uint32_t regs[8] = {}, xmm[8][4] = {}; regs[EAX] = 0xa5a5c3c3u;
+        std::memset(xmm[6], 0x5a, sizeof xmm[6]);
+        std::vector<uint8_t> code = {0x66, 0x0f, 0x6e, 0xf0, prefix, 0x0f, 0x10, 0x0d,
+                                     uint8_t(DATA + 0x200), uint8_t((DATA + 0x200) >> 8),
+                                     uint8_t((DATA + 0x200) >> 16), uint8_t((DATA + 0x200) >> 24),
+                                     0x66, 0x0f, 0x7e, 0xf0};
+        runtime_compare(code, 3, rng, regs, 2, data, cases, FLAG_MASK, xmm);
+    }
+    std::puts("X86-DBT PASS: scalar movsd/movss loads preserve live scratch XMM state");
+}
+static void chained_state_differential() {
+    RuntimeMachine translated, interpreted;
+    std::vector<uint8_t> code = {0x66, 0x0f, 0x6e, 0xf0, 0xb8, 1, 0, 0, 0, 0x39, 0xc0, 0x74, 0,
+                                 0xd9, 0x05, uint8_t(DATA + 0x100), uint8_t((DATA + 0x100) >> 8),
+                                 uint8_t((DATA + 0x100) >> 16), uint8_t((DATA + 0x100) >> 24),
+                                 0xbb, 2, 0, 0, 0, 0x39, 0xdb, 0x74, 0,
+                                 0xb9, 3, 0, 0, 0, 0x39, 0xc9, 0x74, 0};
+    const uint32_t block_b = CODE + 13, stop = CODE + 28, stop2 = stop + 9;
+    translated.load(code); interpreted.load(code); translated.memory.w32(DATA + 0x100, 0x40400000u);
+    interpreted.memory.w32(DATA + 0x100, 0x40400000u);
+    translated.cpu.reg[EAX] = interpreted.cpu.reg[EAX] = 0x13579bdfu;
+    translated.cpu.reg[ESP] = interpreted.cpu.reg[ESP] = DATA + 0x1800;
+    translated.cpu.xmm.r[6][0] = interpreted.cpu.xmm.r[6][0] = 0xfeedfaceu;
+    translated.cpu.fpu = interpreted.cpu.fpu = Fpu{};
+    translated.cpu.dbt_enabled = true; interpreted.cpu.dbt_enabled = false;
+    translated.cpu.eip = stop; translated.cpu.run(stop2);
+    translated.cpu.eip = block_b; translated.cpu.run(stop2);
+    std::memset(translated.cpu.reg, 0, sizeof translated.cpu.reg);
+    translated.cpu.reg[EAX] = 0x13579bdfu; translated.cpu.reg[ESP] = DATA + 0x1800;
+    std::memset(translated.cpu.xmm.r, 0, sizeof translated.cpu.xmm.r);
+    translated.cpu.xmm.r[6][0] = 0xfeedfaceu; translated.cpu.fpu = Fpu{}; translated.cpu.eflags = 2;
+    translated.cpu.eip = interpreted.cpu.eip = CODE;
+    translated.cpu.run(stop); interpreted.cpu.run(stop);
+    if (std::memcmp(translated.cpu.reg, interpreted.cpu.reg, sizeof translated.cpu.reg) ||
+        std::memcmp(translated.cpu.xmm.r, interpreted.cpu.xmm.r, sizeof translated.cpu.xmm.r) ||
+        !same_fpu(translated.cpu.fpu, interpreted.cpu.fpu) || translated.cpu.eip != interpreted.cpu.eip)
+        throw std::runtime_error("chained DBT state was not synchronized at stop");
+    std::puts("X86-DBT PASS: chained stop synchronized GPR, XMM and x87 state");
+}
+static void chained_fault_preserves_xmm() {
+    RuntimeMachine translated, interpreted;
+    const uint32_t fault_ea = DATA + 0x200;
+    std::vector<uint8_t> code = {0x66, 0x0f, 0x6e, 0xf0, 0x39, 0xc0, 0x74, 0,
+                                 0x8b, 0x05, uint8_t(fault_ea), uint8_t(fault_ea >> 8),
+                                 uint8_t(fault_ea >> 16), uint8_t(fault_ea >> 24), 0xf4};
+    const uint32_t block_b = CODE + 8, stop = block_b + 6;
+    translated.load(code); interpreted.load(code);
+    translated.cpu.reg[EAX] = interpreted.cpu.reg[EAX] = 0x2468ace0u;
+    std::memset(translated.cpu.xmm.r, 0x33, sizeof translated.cpu.xmm.r);
+    std::memcpy(interpreted.cpu.xmm.r, translated.cpu.xmm.r, sizeof translated.cpu.xmm.r);
+    translated.cpu.dbt_enabled = true; interpreted.cpu.dbt_enabled = false;
+    translated.cpu.eip = block_b; translated.cpu.run(stop);
+    if (::mprotect(translated.memory.base() + DATA, PAGE, PROT_NONE) != 0)
+        throw std::runtime_error("could not make the cached fault page inaccessible");
+    interpreted.memory.protect(DATA, PAGE, 0);
+    translated.cpu.reg[EAX] = 0x2468ace0u; translated.cpu.eflags = 2;
+    translated.cpu.eip = interpreted.cpu.eip = CODE;
+    bool translated_fault = false, interpreted_fault = false;
+    try { translated.cpu.run(stop); } catch (const Fault& f) { translated_fault = f.kind == FaultKind::AccessViolation; }
+    try { interpreted.cpu.run(stop); } catch (const Fault& f) { interpreted_fault = f.kind == FaultKind::AccessViolation; }
+    if (!translated_fault || !interpreted_fault ||
+        std::memcmp(translated.cpu.xmm.r, interpreted.cpu.xmm.r, sizeof translated.cpu.xmm.r))
+        throw std::runtime_error("non-XMM host fault lost XMM state from an earlier chained block");
+    std::puts("X86-DBT PASS: non-XMM host fault preserved earlier chained XMM state");
 }
 
 static void randomized_runtime_differential() {
@@ -568,7 +692,7 @@ static void x87_differential() {
     auto set64 = [](uint8_t* p, uint64_t value) {
         for (unsigned i = 0; i != 8; ++i) p[i] = uint8_t(value >> (i * 8));
     };
-    for (unsigned n = 0; n != 5000; ++n) {
+    for (unsigned n = 0; n != 50000; ++n) {
         uint32_t regs[8] = {};
         for (uint32_t& r : regs) r = rng();
         for (uint8_t& b : data) b = uint8_t(rng());
@@ -626,7 +750,7 @@ static void x87_differential() {
         }
         runtime_compare(code, 1, rng, regs, 2u | (rng() & FLAG_MASK), data, cases, FLAG_MASK, nullptr, &fpu);
     }
-    std::printf("X86-DBT PASS: x87 differential matched interpreter on %llu randomized cases\n",
+    std::printf("X86-DBT PASS: x87 differential matched interpreter on 5000 cases per family (%llu total)\n",
                 (unsigned long long)cases);
 }
 
@@ -678,8 +802,12 @@ int main(int argc, char** argv) {
         int rc = differential_test(executable);
         if (rc) return rc;
         randomized_sse_differential();
+        extended_sse_differential();
         x87_differential();
         partial_block_differential();
+        scalar_load_preserves_live_scratch();
+        chained_state_differential();
+        chained_fault_preserves_xmm();
         randomized_runtime_differential();
         return 0;
     } catch (const std::exception& e) {
