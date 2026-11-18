@@ -1423,6 +1423,8 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
             else if(q.name=="GetClipCursor"){using Fn=BOOL(WINAPI*)(RECT*);RECT r{};if(p){BOOL ok=reinterpret_cast<Fn>(p)(&r);bytes(&r,sizeof(r));q.result=ok;q.supported=true;}}
             else if(q.name=="GetCursorPos"){using Fn=BOOL(WINAPI*)(POINT*);POINT v{};if(p){BOOL ok=reinterpret_cast<Fn>(p)(&v);bytes(&v,sizeof(v));q.result=ok;q.supported=true;}}
             else if(q.name=="IsWindowVisible"||q.name=="IsIconic"||q.name=="SetForegroundWindow"){using Fn=BOOL(WINAPI*)(HWND);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0]));}
+            else if(q.name=="GetParent"){using Fn=HWND(WINAPI*)(HWND);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0]));}
+            else if(q.name=="AllowSetForegroundWindow"){using Fn=BOOL(WINAPI*)(DWORD);if(p)result(reinterpret_cast<Fn>(p)(DWORD(q.args[0])));}
             else if(q.name=="GetForegroundWindow"||q.name=="GetFocus"||q.name=="GetActiveWindow"){using Fn=HWND(WINAPI*)();if(p)result(reinterpret_cast<Fn>(p)());}
             else if(q.name=="SetFocus"){using Fn=HWND(WINAPI*)(HWND);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0]));}
             else if(q.name=="PostMessageA"||q.name=="PostMessageW"){using Fn=BOOL(WINAPI*)(HWND,UINT,WPARAM,LPARAM);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0],UINT(q.args[1]),WPARAM(q.args[2]),LPARAM(q.args[3])));}

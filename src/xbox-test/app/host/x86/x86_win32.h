@@ -420,13 +420,16 @@ inline void register_win32(Registry& r, Host& h) {
         if (registered(name)) return;
         r.add("user32.dll", name, Conv::Stdcall, argc, [&h, count, native_window, guest_window, user_handle, call_window, guest_rect, guest_point, call_wndproc, read_window_wstr, pump_timers, timer_now, name, native_name, argc](Cpu& c) -> uint32_t {
             count(name);
-            const bool first_hwnd = !strcmp(name,"ShowWindow")||!strcmp(name,"UpdateWindow")||!strcmp(name,"SetWindowPos")||!strcmp(name,"MoveWindow")||!strcmp(name,"GetClientRect")||!strcmp(name,"GetWindowRect")||!strcmp(name,"ClientToScreen")||!strcmp(name,"ScreenToClient")||!strcmp(name,"SetWindowTextA")||!strcmp(name,"SetWindowTextW")||!strcmp(name,"GetWindowLongA")||!strcmp(name,"GetWindowLongW")||!strcmp(name,"SetWindowLongA")||!strcmp(name,"SetWindowLongW")||!strcmp(name,"IsWindowVisible")||!strcmp(name,"IsIconic")||!strcmp(name,"SetFocus")||!strcmp(name,"SetForegroundWindow")||!strcmp(name,"PostMessageA")||!strcmp(name,"PostMessageW")||!strcmp(name,"SendMessageA")||!strcmp(name,"SendMessageW")||!strcmp(name,"DefWindowProcA")||!strcmp(name,"DefWindowProcW");
+            const bool first_hwnd = !strcmp(name,"ShowWindow")||!strcmp(name,"UpdateWindow")||!strcmp(name,"SetWindowPos")||!strcmp(name,"MoveWindow")||!strcmp(name,"GetClientRect")||!strcmp(name,"GetWindowRect")||!strcmp(name,"ClientToScreen")||!strcmp(name,"ScreenToClient")||!strcmp(name,"SetWindowTextA")||!strcmp(name,"SetWindowTextW")||!strcmp(name,"GetWindowLongA")||!strcmp(name,"GetWindowLongW")||!strcmp(name,"SetWindowLongA")||!strcmp(name,"SetWindowLongW")||!strcmp(name,"IsWindowVisible")||!strcmp(name,"IsIconic")||!strcmp(name,"GetParent")||!strcmp(name,"SetFocus")||!strcmp(name,"SetForegroundWindow")||!strcmp(name,"PostMessageA")||!strcmp(name,"PostMessageW")||!strcmp(name,"SendMessageA")||!strcmp(name,"SendMessageW")||!strcmp(name,"DefWindowProcA")||!strcmp(name,"DefWindowProcW");
             const uint32_t token = argc&&first_hwnd ? c.arg(0) : 0; uintptr_t hwnd = native_window(token);
             auto bad_window = [&]() { c.mem.w32(c.fs_base + 0x34, 6); return uint32_t(0); };
             if (token && !hwnd) return bad_window();
             if (!strcmp(name,"GetWindowLongA") || !strcmp(name,"GetWindowLongW")) {
                 int32_t index=int32_t(c.arg(1));auto& values=h.window_longs[token];if(index==-4||index==-21){auto it=values.find(index);return it==values.end()?0u:it->second;}
                 auto q=call_window(c,name,{hwnd,uintptr_t(index)});return uint32_t(q.result);
+            }
+            if (!strcmp(name,"GetParent")) {
+                auto q=call_window(c,name,{hwnd});return q.supported?guest_window(q.result):0;
             }
             if (!strcmp(name,"SetWindowLongA") || !strcmp(name,"SetWindowLongW")) {
                 int32_t index=int32_t(c.arg(1));auto& values=h.window_longs[token];if(index==-4||index==-21){uint32_t old=values[index];values[index]=c.arg(2);if(index==-4)h.window_procs[token]=c.arg(2);return old;}
@@ -516,7 +519,7 @@ inline void register_win32(Registry& r, Host& h) {
     window_route("ShowWindow",2); window_route("UpdateWindow",1); window_route("SetWindowPos",7); window_route("MoveWindow",6);
     window_route("GetClientRect",2); window_route("GetWindowRect",2); window_route("AdjustWindowRect",3); window_route("AdjustWindowRectEx",4);
     window_route("ClientToScreen",2); window_route("ScreenToClient",2); window_route("SetWindowTextA",2); window_route("SetWindowTextW",2);
-    window_route("GetWindowLongA",2); window_route("GetWindowLongW",2); window_route("SetWindowLongA",3); window_route("SetWindowLongW",3);
+    window_route("GetWindowLongA",2); window_route("GetWindowLongW",2); window_route("GetWindowLongPtrW",2); window_route("GetParent",1); window_route("SetWindowLongA",3); window_route("SetWindowLongW",3);
     window_route("LoadCursorA",2); window_route("LoadCursorW",2); window_route("SetCursor",1); window_route("ShowCursor",1); window_route("ClipCursor",1); window_route("GetCursorPos",1); window_route("GetClipCursor",1);
     window_route("LoadIconA",2); window_route("LoadIconW",2); window_route("GetForegroundWindow",0); window_route("SetForegroundWindow",1);
     window_route("SetFocus",1); window_route("GetFocus",0); window_route("GetActiveWindow",0); window_route("IsWindowVisible",1); window_route("IsIconic",1);
@@ -551,11 +554,15 @@ inline void register_win32(Registry& r, Host& h) {
     unavailable("MapVirtualKeyA", 2);
     unavailable("MapVirtualKeyW", 2);
     unavailable("GetWindowThreadProcessId", 2);
-    unavailable("GetParent", 1);
     unavailable("GetDesktopWindow", 0);
     unavailable("GetDlgItem", 2);
     unavailable("IsWindow", 1);
-    unavailable("AllowSetForegroundWindow", 1);
+    r.add("user32.dll", "AllowSetForegroundWindow", Conv::Stdcall, 1, [&h, count](Cpu& c) -> uint32_t {
+        count("AllowSetForegroundWindow"); Host::WindowCall q{}; q.name="AllowSetForegroundWindow"; q.args[0]=c.arg(0);
+        if (h.window_call) h.window_call(q);
+        if (!q.supported) c.mem.w32(c.fs_base + 0x34, 120);
+        return q.supported ? uint32_t(q.result) : 0;
+    });
     unavailable("CallNextHookEx", 4);
     unavailable("DialogBoxParamW", 5, uint32_t(-1));
     unavailable("EndDialog", 2);
