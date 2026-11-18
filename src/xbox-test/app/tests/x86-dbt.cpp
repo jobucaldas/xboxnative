@@ -338,6 +338,41 @@ static void runtime_compare(const std::vector<uint8_t>& code, unsigned instructi
     }
     ++translated_cases;
 }
+static void direct_jump_differential() {
+    std::mt19937 rng(0x4A4D5021u); uint8_t data[3 * PAGE] = {}; uint64_t cases = 0;
+    const uint32_t regs[8] = {};
+    runtime_compare({0xEB, 0x05, 0xB8, 1, 0, 0, 0, 0xB8, 2, 0, 0, 0}, 1, rng, regs, 2, data, cases);
+    runtime_compare({0xB8, 1, 0, 0, 0, 0xEB, 0xF9, 0xB8, 2, 0, 0, 0}, 2, rng, regs, 2, data, cases);
+    runtime_compare({0xE9, 0x05, 0, 0, 0, 0xB8, 1, 0, 0, 0, 0xB8, 2, 0, 0, 0}, 1, rng, regs, 2, data, cases);
+    runtime_compare({0xB8, 1, 0, 0, 0, 0xE9, 0xF6, 0xff, 0xff, 0xff, 0xB8, 2, 0, 0, 0}, 2, rng, regs, 2, data, cases);
+
+    auto run = [](const std::vector<uint8_t>& code, uint32_t stop, uint32_t expected_eax,
+                  const char* failure) {
+        RuntimeMachine translated, interpreted;
+        translated.load(code); interpreted.load(code);
+        translated.cpu.dbt_enabled = true; interpreted.cpu.dbt_enabled = false;
+        translated.cpu.run(stop); interpreted.cpu.run(stop);
+        if (translated.cpu.reg[EAX] != expected_eax ||
+            std::memcmp(translated.cpu.reg, interpreted.cpu.reg, sizeof translated.cpu.reg) ||
+            translated.cpu.eip != interpreted.cpu.eip || translated.cpu.eflags != interpreted.cpu.eflags ||
+            translated.cpu.translated_blocks < 2 || translated.cpu.interpreted_blocks != 0)
+            throw std::runtime_error(failure);
+    };
+    run({0xEB, 0x02, 0x90, 0x90, 0xB8, 0x2a, 0, 0, 0, 0xF4}, CODE + 9, 42,
+        "forward jmp target was not translated by the DBT dispatcher");
+    {
+        RuntimeMachine m; m.load({0xEB, 0x05, 0xB8, 1, 0, 0, 0, 0xB8, 0x2a, 0, 0, 0, 0xF4});
+        m.cpu.dbt_enabled = true; m.cpu.run(CODE + 12);
+        auto block = m.cpu.dbt_cache.find(CODE);
+        if (block == m.cpu.dbt_cache.end() || block->second.guest_length != 2)
+            throw std::runtime_error("jmp did not end the collected DBT block");
+    }
+    run({0xB9, 3, 0, 0, 0, 0x83, 0xE9, 1, 0x75, 0x02, 0xEB, 0x02, 0xEB, 0xF7, 0xF4}, CODE + 14, 0,
+        "jcc+jmp loop differed from the interpreter");
+    std::printf("X86-DBT PASS: direct rel8/rel32 forward/backward block exits, block-start jmp, late target and jcc+jmp loop matched interpreter (%llu cases)\n",
+                static_cast<unsigned long long>(cases));
+}
+
 static void randomized_sse_differential() {
     std::mt19937 rng(0x53534532u); uint8_t data[3 * PAGE]; uint64_t cases = 0;
     auto one = [&](const std::vector<uint8_t>& code, bool memory = false) {
@@ -801,6 +836,7 @@ int main(int argc, char** argv) {
         Executable executable(translate(program, CODE, DATA));
         int rc = differential_test(executable);
         if (rc) return rc;
+        direct_jump_differential();
         randomized_sse_differential();
         extended_sse_differential();
         x87_differential();

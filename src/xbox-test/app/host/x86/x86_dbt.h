@@ -635,7 +635,8 @@ inline size_t runtime_instruction(const std::vector<uint8_t>& b, size_t start,
         }
         return p - start;
     }
-    if (op == 0xE8) { runtime_u32(b, p); return p - start; }
+    if (op == 0xE8 || op == 0xE9) { runtime_u32(b, p); return p - start; }
+    if (op == 0xEB) { runtime_u8(b, p); return p - start; }
     if (op == 0x8F) {
         uint8_t m = runtime_u8(b, p);
         if (((m >> 3) & 7) != 0) throw std::runtime_error("unsupported pop group");
@@ -1013,6 +1014,11 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
             runtime_mov_imm(out, 11, fallthrough); out.b(0xE9); size_t skip = out.bytes.size(); out.d(0);
             size_t taken = out.bytes.size(); runtime_mov_imm(out, 11, target); size_t end = out.bytes.size();
             out.patch32(branch, int32_t(taken - (branch + 4))); out.patch32(skip, int32_t(end - (skip + 4)));
+            branch_terminated = true;
+            break;
+        } else if (op == 0xEB || op == 0xE9) {
+            int32_t rel = op == 0xEB ? int32_t(int8_t(runtime_u8(guest, p))) : int32_t(runtime_u32(guest, p));
+            runtime_mov_imm(out, 11, guest_pc + uint32_t(p) + uint32_t(rel));
             branch_terminated = true;
             break;
         } else throw std::runtime_error("unsupported DBT opcode");
