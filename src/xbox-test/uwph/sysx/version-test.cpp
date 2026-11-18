@@ -10,10 +10,10 @@ static const Route routes[] = {
 #include "../../app/host/mlp_routes.h"
 };
 int main() {
-    bool system = false;
+    bool winePe = false;
     for (const auto& route : routes)
-        if (!_stricmp(route.dll, "version.dll")) system = !strcmp(route.kind, "system");
-    CHECK(system);
+        if (!_stricmp(route.dll, "version.dll")) winePe = !strcmp(route.kind, "wine-pe");
+    CHECK(winePe);
     HMODULE module = LoadLibraryExW(L"version.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     CHECK(module);
     auto size = reinterpret_cast<decltype(&GetFileVersionInfoSizeA)>(GetProcAddress(module, "GetFileVersionInfoSizeA"));
