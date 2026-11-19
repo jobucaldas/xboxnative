@@ -2047,6 +2047,15 @@ static void test_dbt_counter() {
     EXPECT(translated.cpu.translated_blocks > 0, "DBT integer kernel executed no translated blocks");
     EXPECT(translated.cpu.executed == interpreted.cpu.executed, "DBT counts %llu instructions, interpreter counts %llu",
            (unsigned long long)translated.cpu.executed, (unsigned long long)interpreted.cpu.executed);
+    // High-byte byte-register forms (AH..BH) must not reach the 32-bit host map; they stay in the interpreter.
+    const std::initializer_list<uint8_t> high_byte = {0xB8, 0x34, 0x12, 0, 0, 0xF6, 0xDC, 0xFE, 0xC0, 0xFE, 0xC4};
+    Machine high_translated; high_translated.load(high_byte); high_translated.cpu.dbt_enabled = high_translated.mem.base() != nullptr;
+    EXPECT(high_translated.run_to_end(high_byte.size()), "DBT high-byte kernel did not finish");
+    Machine high_interpreted; high_interpreted.load(high_byte); high_interpreted.cpu.dbt_enabled = false;
+    EXPECT(high_interpreted.run_to_end(high_byte.size()), "interpreter high-byte kernel did not finish");
+    EXPECT(high_interpreted.cpu.reg[EAX] == 0xEF35u, "interpreter AH/AL result %08x != 0000ef35", high_interpreted.cpu.reg[EAX]);
+    EXPECT(high_translated.cpu.reg[EAX] == high_interpreted.cpu.reg[EAX] && high_translated.cpu.eflags == high_interpreted.cpu.eflags,
+           "DBT high-byte result differs: translated=%08x interpreted=%08x", high_translated.cpu.reg[EAX], high_interpreted.cpu.reg[EAX]);
     std::printf("X86-DBT PASS: integer kernel translated=%llu interpreted=%llu result=%08x\n",
                 (unsigned long long)translated.cpu.translated_blocks, (unsigned long long)translated.cpu.interpreted_blocks,
                 translated.cpu.reg[EAX]);
