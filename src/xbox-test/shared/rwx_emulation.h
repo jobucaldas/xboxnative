@@ -199,18 +199,17 @@ inline BOOL WINAPI protect(LPVOID p, SIZE_T n, DWORD protection, PDWORD old) {
 inline BOOL WINAPI release(LPVOID p, SIZE_T n, DWORD type) {
     auto& s = state();
     if (!s.stats.live.load(std::memory_order_relaxed)) return VirtualFree(p, n, type);
-    Region* pending = nullptr;
+    bool pending = false;
     {
         Guard g(&s.lock);
         if (type & MEM_RELEASE) {
             for (auto& r : s.regions)
                 if (r.pages && !r.freeing && r.allocationBase == (uintptr_t)p) {
-                    // Reserve the table entry before dropping the lock. A
-                    // fault handler then ignores this region, while another
-                    // allocation cannot mistake it for a live range.
+                    // Reserve the table entries before dropping the lock. A
+                    // fault handler then ignores these regions, while another
+                    // allocation cannot mistake them for live ranges.
                     r.freeing = true;
-                    pending = &r;
-                    break;
+                    pending = true;
                 }
         }
     }
@@ -221,9 +220,12 @@ inline BOOL WINAPI release(LPVOID p, SIZE_T n, DWORD type) {
     const DWORD error = GetLastError();
     {
         Guard g(&s.lock);
-        if (pending && pending->freeing) {
-            if (ok) forget(*pending);
-            else pending->freeing = false;
+        if (pending) {
+            for (auto& r : s.regions)
+                if (r.pages && r.freeing && r.allocationBase == (uintptr_t)p) {
+                    if (ok) forget(r);
+                    else r.freeing = false;
+                }
         } else if (ok && (type & MEM_DECOMMIT) && n) {
             mark((uintptr_t)p, up((uintptr_t)p + n), Native);
         }
@@ -286,12 +288,14 @@ inline bool emulateSamePageStore(EXCEPTION_POINTERS* ep, uintptr_t faultAddress)
         (uint32_t(code[at + 2]) << 16) |
         (uint32_t(code[at + 3]) << 24));
     at += 4;
-    const uintptr_t target = (uintptr_t)((intptr_t)(ip + at) + displacement);
     const size_t width = opcode == 0xc6 ? 1 : operand16 ? 2 : rexW ? 8 : 4;
-    if (target != faultAddress || down(target) != down(ip) || target + width < target ||
-        target + width > down(ip) + pageSize) return false;
     const size_t immediate = at;
     at += width == 8 ? 4 : width;
+    // RIP-relative operands are relative to the next instruction, which
+    // starts after the immediate, not after the displacement.
+    const uintptr_t target = (uintptr_t)((intptr_t)(ip + at) + displacement);
+    if (target != faultAddress || down(target) != down(ip) || target + width < target ||
+        target + width > down(ip) + pageSize) return false;
     if (target < ip + at && target + width > ip) return false;
 
     DWORD old = 0;
