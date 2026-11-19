@@ -14,17 +14,25 @@ inline std::u16string normalize(std::u16string path, const std::u16string& cwd) 
         if (c >= u'A' && c <= u'Z') c = char16_t(c + (u'a' - u'A'));
     }
     if (path.rfind(u"\\\\?\\unc\\", 0) == 0) path = u"\\\\" + path.substr(8);
-    else if (path.rfind(u"\\\\?\\", 0) == 0) path.erase(0, 4);
+    else if (path.rfind(u"\\\\?\\", 0) == 0 || path.rfind(u"\\\\.\\", 0) == 0) path.erase(0, 4);
     std::u16string base = cwd;
     for (auto& c : base) {
         if (c == u'/') c = u'\\';
         if (c >= u'A' && c <= u'Z') c = char16_t(c + (u'a' - u'A'));
     }
     if (base.rfind(u"\\\\?\\unc\\", 0) == 0) base = u"\\\\" + base.substr(8);
-    else if (base.rfind(u"\\\\?\\", 0) == 0) base.erase(0, 4);
+    else if (base.rfind(u"\\\\?\\", 0) == 0 || base.rfind(u"\\\\.\\", 0) == 0) base.erase(0, 4);
     if (path.empty()) return {};
+    // Drive-relative "C:name" resolves against the cwd when it is on the same drive.
+    if (path.size() >= 2 && path[1] == u':' && (path.size() == 2 || path[2] != u'\\') && base.size() >= 2 &&
+        base[1] == u':' && base[0] == path[0]) {
+        const auto rest = path.substr(2);
+        path = base + (base.back() == u'\\' || rest.empty() ? u"" : u"\\") + rest;
+    }
     if (path.size() < 2 || path[1] != u':') {
         if (path.rfind(u"\\\\", 0) == 0) {
+            // UNC or device-style name: already absolute, keep it as is.
+        } else if (path[0] == u'\\') {
             const auto drive = base.size() >= 2 && base[1] == u':' ? base.substr(0, 2) : std::u16string();
             path = drive + path;
         } else path = base + (base.empty() || base.back() == u'\\' ? u"" : u"\\") + path;
@@ -40,7 +48,11 @@ inline std::u16string normalize(std::u16string path, const std::u16string& cwd) 
         if (end == std::u16string::npos) end = path.size();
         auto part = path.substr(start, end - start);
         if (part == u"..") { if (!parts.empty() && parts.back() != u"..") parts.pop_back(); }
-        else if (!part.empty() && part != u".") parts.push_back(std::move(part));
+        else {
+            // Win32 drops trailing periods and spaces from each component; "." and "" vanish.
+            while (!part.empty() && (part.back() == u'.' || part.back() == u' ')) part.pop_back();
+            if (!part.empty()) parts.push_back(std::move(part));
+        }
         start = end;
     }
     std::u16string out = prefix;
