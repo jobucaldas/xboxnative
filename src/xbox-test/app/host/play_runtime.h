@@ -261,8 +261,14 @@ static void WINAPI rtlExit(LONG code) { exitProcess(UINT(code)); }
 static LPWSTR WINAPI commandW() { return state->command.data(); }
 static LPSTR WINAPI commandA() { return state->commandA.data(); }
 static HMODULE WINAPI moduleW(LPCWSTR name) {
-    if(name)if(auto input=xinput_core::find_module(basename(name).c_str(),false))return input;
-    if(name)if(auto gl=opengl32_core::find_module(basename(name).c_str(),false))return gl;
+    if(name) {
+        const std::string key=basename(name);
+        if(auto input=xinput_core::find_module(key.c_str(),false))return input;
+        if(auto gl=opengl32_core::find_module(key.c_str(),false))return gl;
+        // Never fall through to Wine's host OpenGL module. Play owns this
+        // name, but GetModuleHandle must remain NULL until the guest loads it.
+        if(!_stricmp(key.c_str(),"opengl32.dll"))return nullptr;
+    }
     if(!name) {
         if(state->exe)return (HMODULE)state->exe->image.base;
         using Fn=HMODULE(WINAPI*)(LPCWSTR); auto fn=(Fn)kernel_tail::native("GetModuleHandleW");
