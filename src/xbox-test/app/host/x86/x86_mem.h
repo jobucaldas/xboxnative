@@ -26,7 +26,7 @@ namespace x86 {
 enum : uint8_t { PROT_R = 1, PROT_W = 2, PROT_X = 4, PROT_COW = 8 };
 enum class FaultKind { AccessViolation, ExecuteViolation, DivideError, InvalidOpcode, Unsupported, Breakpoint, InstructionLimit, BadThunk, UnresolvedImport };
 struct Fault : std::runtime_error {
-    FaultKind kind; uint32_t eip, addr;
+    FaultKind kind; uint32_t eip, addr; bool write = false;
     Fault(FaultKind k, uint32_t e, uint32_t a, const std::string& m) : std::runtime_error(m), kind(k), eip(e), addr(a) {}
 };
 struct Memory {
@@ -107,9 +107,9 @@ struct Memory {
         stack_reserve_base=reserve_base;stack_limit=committed_limit;stack_teb_limit=teb_limit;
         stack_guard=committed_limit>reserve_base?committed_limit-PAGE:0;
     }
-    [[noreturn]] void fail(FaultKind k, uint32_t a, const char* what) const {
+    [[noreturn]] void fail(FaultKind k, uint32_t a, const char* what, bool write = false) const {
         char b[96]; snprintf(b, sizeof b, "%s at 0x%08x (eip 0x%08x)", what, a, fault_eip);
-        throw Fault(k, fault_eip, a, b);
+        Fault f(k, fault_eip, a, b); f.write = write; throw f;
     }
     bool mapped(uint32_t a) const { return page[a >> 12] != nullptr; }
     // True when [addr, addr+size) is entirely unmapped (a load may map there).
@@ -165,14 +165,14 @@ struct Memory {
             w32(stack_teb_limit,stack_limit);
             stack_guard=stack_limit>stack_reserve_base?stack_limit-PAGE:0;
         }
-        if (!page[i]) fail(k, a, k == FaultKind::ExecuteViolation ? "execute violation" : (need & PROT_W) ? "write access violation" : "read access violation");
+        if (!page[i]) fail(k, a, k == FaultKind::ExecuteViolation ? "execute violation" : (need & PROT_W) ? "write access violation" : "read access violation", (need & PROT_W) != 0);
         // Copy-on-write for image pages: Windows maps image sections
         // copy-on-write, so a guest write to a read-only image page (mingw's
         // runtime pseudo-relocator memcpy into .text after its VirtualQuery
         // check) promotes the page instead of faulting. Only pages mapped
         // with PROT_COW promote; the interpreter's own W^X code pages do not.
         if (!(prot[i] & need) && need == PROT_W && (prot[i] & PROT_COW)) prot[i] |= PROT_W;
-        if (!(prot[i] & need)) fail(k, a, k == FaultKind::ExecuteViolation ? "execute violation" : (need & PROT_W) ? "write access violation" : "read access violation");
+        if (!(prot[i] & need)) fail(k, a, k == FaultKind::ExecuteViolation ? "execute violation" : (need & PROT_W) ? "write access violation" : "read access violation", (need & PROT_W) != 0);
         return page[i] + (a & 4095);
     }
     uint8_t r8(uint32_t a) { return *at(a, PROT_R, FaultKind::AccessViolation); }

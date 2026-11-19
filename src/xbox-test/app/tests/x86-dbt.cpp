@@ -93,7 +93,7 @@ static std::vector<uint8_t> translate(const std::vector<uint8_t>& guest, uint32_
     out.rex(11, 0, 7, true); out.b(0x8B); out.modrm(1, 11, 7); out.b(MEMORY_OFFSET); // R11 = memory base
     for (unsigned i : {0u, 1u, 2u, 3u, 5u, 6u, 7u, 4u}) mov_reg_mem(out, host_reg[i], 7, uint8_t(i * 4));
 
-    size_t pc = 0;
+    size_t pc = 0; bool branched = false;
     while (pc < guest.size()) {
         const uint8_t op = read8(guest, pc);
         if (op >= 0xB8 && op <= 0xBF) {
@@ -161,13 +161,13 @@ static std::vector<uint8_t> translate(const std::vector<uint8_t>& guest, uint32_
             size_t end = out.bytes.size();
             out.patch32(to_taken, int32_t(taken - (to_taken + 4)));
             out.patch32(to_end, int32_t(end - (to_end + 4)));
-            break;
+            branched = true; break;
         } else {
             char message[80]; std::snprintf(message, sizeof message, "unsupported guest opcode %02x at +%zx", op, pc - 1);
             throw std::runtime_error(message);
         }
     }
-    if (pc == guest.size()) mov_imm(out, 11, guest_pc + uint32_t(pc));
+    if (pc == guest.size() && !branched) mov_imm(out, 11, guest_pc + uint32_t(pc));
 
     // The selected EIP is in R11D. Save architectural state without allowing
     // the host ABI's extra flags or callee-saved register rules to leak in.
@@ -828,6 +828,41 @@ static int benchmark() {
 }
 }
 
+// inc bl must hit guest BL (host RSI low byte, which needs a REX prefix), not DH.
+static void byte_register_unary_differential() {
+    RuntimeMachine translated, interpreted;
+    const std::vector<uint8_t> code = {0xBB, 0x11, 0, 0, 0, 0xFE, 0xC3, 0xF4};
+    translated.load(code); interpreted.load(code);
+    translated.cpu.dbt_enabled = true; interpreted.cpu.dbt_enabled = false;
+    translated.cpu.run(CODE + 7); interpreted.cpu.run(CODE + 7);
+    if (translated.cpu.reg[EBX] != 0x12 || std::memcmp(translated.cpu.reg, interpreted.cpu.reg, sizeof translated.cpu.reg) ||
+        translated.cpu.interpreted_blocks != 0)
+        throw std::runtime_error("inc bl differed from the interpreter");
+    std::printf("X86-DBT PASS: byte-register inc bl matched the interpreter\n");
+}
+
+// A faulting cvtss2si must not leave the guest MXCSR on the host.
+static void faulted_sse_convert_restores_host_mxcsr() {
+    RuntimeMachine m;
+    m.load({0xF3, 0x0F, 0x2D, 0x05, 0x00, 0x00, 0x00, 0x70, 0xF4});
+    m.cpu.mxcsr = 0x3f80 | 0x2000;  // guest rounds toward +infinity
+    const uint32_t host = _mm_getcsr();
+    bool faulted = false;
+    try { m.cpu.run(CODE + 8); } catch (const Fault&) { faulted = true; }
+    if (!faulted || _mm_getcsr() != host) throw std::runtime_error("faulting cvtss2si leaked guest MXCSR to the host");
+    std::printf("X86-DBT PASS: faulting cvtss2si restored the host MXCSR\n");
+}
+
+// SEH access-violation records need the read/write bit: a guest store fault is a write.
+static void fault_reports_write_access() {
+    RuntimeMachine m;
+    bool store_is_write = false, load_is_read = false;
+    try { m.memory.w32(0x70000000, 1); } catch (const Fault& f) { store_is_write = f.write; }
+    try { m.memory.r32(0x70000000); } catch (const Fault& f) { load_is_read = !f.write; }
+    if (!store_is_write || !load_is_read) throw std::runtime_error("unmapped store fault was not reported as a write");
+    std::printf("X86-DBT PASS: unmapped store fault reports write access, load reports read\n");
+}
+
 int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::strcmp(argv[1], "--bench") == 0) return benchmark();
@@ -845,6 +880,9 @@ int main(int argc, char** argv) {
         chained_state_differential();
         chained_fault_preserves_xmm();
         randomized_runtime_differential();
+        byte_register_unary_differential();
+        faulted_sse_convert_restores_host_mxcsr();
+        fault_reports_write_access();
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "X86-DBT FAIL: %s\n", e.what()); return 1;
