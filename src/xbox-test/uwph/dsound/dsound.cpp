@@ -110,7 +110,7 @@ struct WaveOutput {
     bool paused = false;
     DWORD volume = 0xffffffffu;
     uint64_t paused_samples = 0;
-    WaveOutstandingHeader *outstanding = nullptr;
+    WaveOutstandingHeader *outstanding = nullptr, *outstanding_tail = nullptr;
     SRWLOCK outstanding_lock = SRWLOCK_INIT;
     SRWLOCK submission_lock = SRWLOCK_INIT;
     bool resetting = false;
@@ -165,6 +165,7 @@ struct WaveOutput {
         if (!*link) { ReleaseSRWLockExclusive(&outstanding_lock); return; }
         WaveOutstandingHeader *entry = *link;
         *link = entry->next;
+        if (entry == outstanding_tail) { outstanding_tail = nullptr; for(auto *tail=outstanding;tail;tail=tail->next) outstanding_tail=tail; }
         ReleaseSRWLockExclusive(&outstanding_lock);
         HeapFree(GetProcessHeap(), 0, entry);
         InterlockedExchange(reinterpret_cast<volatile LONG*>(&header->dwFlags),
@@ -452,10 +453,10 @@ extern "C" __declspec(dllexport) MMRESULT WINAPI XbnWaveOutWrite(HWAVEOUT handle
     AcquireSRWLockExclusive(&wave->submission_lock);
     if(wave->resetting){ReleaseSRWLockExclusive(&wave->submission_lock);HeapFree(GetProcessHeap(),0,entry);return WAVERR_STILLPLAYING;}
     header->dwFlags=(old_flags&~WHDR_DONE)|WHDR_PREPARED|WHDR_INQUEUE;
-    AcquireSRWLockExclusive(&wave->outstanding_lock);entry->next=wave->outstanding;wave->outstanding=entry;ReleaseSRWLockExclusive(&wave->outstanding_lock);
+    AcquireSRWLockExclusive(&wave->outstanding_lock);entry->next=nullptr;if(wave->outstanding_tail)wave->outstanding_tail->next=entry;else wave->outstanding=entry;wave->outstanding_tail=entry;ReleaseSRWLockExclusive(&wave->outstanding_lock);
     HRESULT hr=wave->voice->SubmitSourceBuffer(&buffer);
     if(FAILED(hr)){
-        AcquireSRWLockExclusive(&wave->outstanding_lock);WaveOutstandingHeader **link=&wave->outstanding;while(*link&&*link!=entry)link=&(*link)->next;if(*link)*link=entry->next;ReleaseSRWLockExclusive(&wave->outstanding_lock);
+        AcquireSRWLockExclusive(&wave->outstanding_lock);WaveOutstandingHeader **link=&wave->outstanding;while(*link&&*link!=entry)link=&(*link)->next;if(*link)*link=entry->next;if(entry==wave->outstanding_tail){wave->outstanding_tail=nullptr;for(auto *tail=wave->outstanding;tail;tail=tail->next)wave->outstanding_tail=tail;}ReleaseSRWLockExclusive(&wave->outstanding_lock);
         HeapFree(GetProcessHeap(),0,entry);header->dwFlags=old_flags;ReleaseSRWLockExclusive(&wave->submission_lock);return MMSYSERR_ERROR;
     }
     if(!wave->paused)hr=wave->voice->Start(0);

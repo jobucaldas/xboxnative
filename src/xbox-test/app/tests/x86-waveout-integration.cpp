@@ -20,12 +20,19 @@ static HWAVEOUT window_output;
 static WAVEHDR* callback_header;
 static WAVEHDR* reset_headers[3];
 static volatile LONG reset_done_count;
+static volatile LONG reset_order[3];
+static volatile LONG close_on_done;
+static volatile MMRESULT close_done_result = MMSYSERR_ERROR;
+static volatile LONG drain_done;
 static WAVEHDR* window_header;
 static LRESULT CALLBACK wave_window(HWND, UINT message, WPARAM output, LPARAM header) {
     if (message == WOM_DONE && output == reinterpret_cast<WPARAM>(window_output) &&
         header == reinterpret_cast<LPARAM>(window_header) && (window_header->dwFlags & WHDR_DONE))
         InterlockedIncrement(&window_callback_count);
     return 0;
+}
+static void CALLBACK drain_wave_done(HWAVEOUT, UINT message, DWORD_PTR, DWORD_PTR, DWORD_PTR) {
+    if (message == WOM_DONE) InterlockedIncrement(&drain_done);
 }
 static void CALLBACK wave_done(HWAVEOUT handle, UINT message, DWORD_PTR instance, DWORD_PTR header, DWORD_PTR) {
     if (instance != 0x71a0u) return;
@@ -35,9 +42,14 @@ static void CALLBACK wave_done(HWAVEOUT handle, UINT message, DWORD_PTR instance
     if (message == WOM_CLOSE && !InterlockedCompareExchange(&close_returned, 0, 0))
         InterlockedExchange(&close_before_return, 1);
     if (message != WOM_DONE) return;
+    if (InterlockedCompareExchange(&close_on_done, 0, 0)) {
+        close_done_result = waveOutClose(handle); return;
+    }
     for (unsigned i = 0; i < 3; ++i) if (header == reinterpret_cast<DWORD_PTR>(reset_headers[i]) &&
-        (reset_headers[i]->dwFlags & WHDR_DONE) && !(reset_headers[i]->dwFlags & WHDR_INQUEUE))
-        InterlockedIncrement(&reset_done_count);
+        (reset_headers[i]->dwFlags & WHDR_DONE) && !(reset_headers[i]->dwFlags & WHDR_INQUEUE)) {
+        LONG order = InterlockedIncrement(&reset_done_count) - 1;
+        if (order < 3) reset_order[order] = LONG(i);
+    }
     if (header != reinterpret_cast<DWORD_PTR>(callback_header)) return;
     if ((callback_header->dwFlags & WHDR_DONE) && !(callback_header->dwFlags & WHDR_INQUEUE))
         InterlockedExchange(&callback_order, 1);
@@ -45,10 +57,29 @@ static void CALLBACK wave_done(HWAVEOUT handle, UINT message, DWORD_PTR instance
     SetEvent(function_done_event);
 }
 int main() {
-    WAVEOUTCAPSA caps_a{}; WAVEOUTCAPSW caps_w{};
-    if (waveOutGetNumDevs() != 1 || waveOutGetDevCapsA(WAVE_MAPPER, &caps_a, sizeof(caps_a)) != MMSYSERR_NOERROR ||
-        waveOutGetDevCapsW(WAVE_MAPPER, &caps_w, sizeof(caps_w)) != MMSYSERR_NOERROR) return 9;
+    WAVEOUTCAPSA caps_a{}; WAVEOUTCAPSW caps_w{}; UINT devices = waveOutGetNumDevs();
     WAVEFORMATEX format{WAVE_FORMAT_PCM, 2, 48000, 192000, 4, 16, 0};
+    if (devices == 0) {
+        HWAVEOUT no_output = nullptr; WAVEHDR no_header{}; MMTIME no_time{}; DWORD no_volume = 0;
+        if (waveOutGetDevCapsA(WAVE_MAPPER, &caps_a, sizeof(caps_a)) != MMSYSERR_NODRIVER ||
+            waveOutGetDevCapsW(WAVE_MAPPER, &caps_w, sizeof(caps_w)) != MMSYSERR_NODRIVER ||
+            waveOutOpen(nullptr, WAVE_MAPPER, &format, 0, 0, WAVE_FORMAT_QUERY) != MMSYSERR_NOERROR ||
+            waveOutOpen(&no_output, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NODRIVER || no_output ||
+            waveOutPrepareHeader(nullptr, &no_header, sizeof(no_header)) != MMSYSERR_INVALHANDLE ||
+            waveOutUnprepareHeader(nullptr, &no_header, sizeof(no_header)) != MMSYSERR_INVALHANDLE ||
+            waveOutWrite(nullptr, &no_header, sizeof(no_header)) != MMSYSERR_INVALHANDLE ||
+            waveOutGetPosition(nullptr, &no_time, sizeof(no_time)) != MMSYSERR_INVALHANDLE ||
+            waveOutReset(nullptr) != MMSYSERR_INVALHANDLE || waveOutPause(nullptr) != MMSYSERR_INVALHANDLE ||
+            waveOutRestart(nullptr) != MMSYSERR_INVALHANDLE || waveOutSetVolume(nullptr, 0) != MMSYSERR_INVALHANDLE ||
+            waveOutGetVolume(nullptr, &no_volume) != MMSYSERR_INVALHANDLE || waveOutClose(nullptr) != MMSYSERR_INVALHANDLE ||
+            waveOutMessage(nullptr, 0, 0, 0) != MMSYSERR_NODRIVER ||
+            waveOutGetErrorTextA(0, nullptr, 0) != MMSYSERR_NODRIVER || waveOutGetErrorTextW(0, nullptr, 0) != MMSYSERR_NODRIVER) return 48;
+        WAVEFORMATEX invalid_format = format; invalid_format.wFormatTag = 3;
+        if (waveOutOpen(nullptr, WAVE_MAPPER, &invalid_format, 0, 0, WAVE_FORMAT_QUERY) != WAVERR_BADFORMAT) return 49;
+        puts("X86-WAVEOUT PASS: no-device format query and PE32 NODRIVER/INVALHANDLE contract"); return 0;
+    }
+    if (devices != 1 || waveOutGetDevCapsA(WAVE_MAPPER, &caps_a, sizeof(caps_a)) != MMSYSERR_NOERROR ||
+        waveOutGetDevCapsW(WAVE_MAPPER, &caps_w, sizeof(caps_w)) != MMSYSERR_NOERROR) return 9;
     if (waveOutOpen(nullptr, 0xffffffffu, &format, 0, 0, WAVE_FORMAT_QUERY) != MMSYSERR_NOERROR) return 27;
     WAVEFORMATEX invalid_format = format; invalid_format.wFormatTag = 3;
     if (waveOutOpen(nullptr, 0xffffffffu, &invalid_format, 0, 0, WAVE_FORMAT_QUERY) != WAVERR_BADFORMAT) return 28;
@@ -99,6 +130,21 @@ int main() {
     if (!close_before_return) return 31;
     Sleep(100);
     if (callback_after_close) return 32;
+    HWAVEOUT callback_close_output = nullptr; WAVEHDR callback_close_header{}; char callback_close_samples[1920]{};
+    callback_close_header.lpData = callback_close_samples; callback_close_header.dwBufferLength = sizeof(callback_close_samples);
+    if (waveOutOpen(&callback_close_output, WAVE_MAPPER, &format, reinterpret_cast<DWORD_PTR>(&wave_done), 0x71a0u, CALLBACK_FUNCTION) != MMSYSERR_NOERROR ||
+        waveOutPrepareHeader(callback_close_output, &callback_close_header, sizeof(callback_close_header)) != MMSYSERR_NOERROR) return 46;
+    InterlockedExchange(&close_on_done, 1); close_done_result = MMSYSERR_ERROR;
+    if (waveOutWrite(callback_close_output, &callback_close_header, sizeof(callback_close_header)) != MMSYSERR_NOERROR ||
+        waveOutReset(callback_close_output) != MMSYSERR_NOERROR || close_done_result != MMSYSERR_NOERROR) return 47;
+    InterlockedExchange(&close_on_done, 0);
+    HWAVEOUT drain_output = nullptr; WAVEHDR drain_header{}; char drain_samples[1920]{};
+    drain_header.lpData = drain_samples; drain_header.dwBufferLength = sizeof(drain_samples); drain_done = 0;
+    if (waveOutOpen(&drain_output, WAVE_MAPPER, &format, reinterpret_cast<DWORD_PTR>(&drain_wave_done), 0, CALLBACK_FUNCTION) != MMSYSERR_NOERROR ||
+        waveOutPrepareHeader(drain_output, &drain_header, sizeof(drain_header)) != MMSYSERR_NOERROR ||
+        waveOutWrite(drain_output, &drain_header, sizeof(drain_header)) != MMSYSERR_NOERROR) return 50;
+    Sleep(1000);
+    if (waveOutClose(drain_output) != MMSYSERR_NOERROR || drain_done != 1) return 51;
     HWAVEOUT reset_output = nullptr;
     if (waveOutOpen(&reset_output, WAVE_MAPPER, &format, reinterpret_cast<DWORD_PTR>(&wave_done), 0x71a0u, CALLBACK_FUNCTION) != MMSYSERR_NOERROR) return 34;
     WAVEHDR reset_buffer[3]{};
@@ -107,7 +153,8 @@ int main() {
         if (waveOutPrepareHeader(reset_output, &reset_buffer[i], sizeof(WAVEHDR)) != MMSYSERR_NOERROR ||
             waveOutWrite(reset_output, &reset_buffer[i], sizeof(WAVEHDR)) != MMSYSERR_NOERROR) return 35;
     }
-    if (waveOutReset(reset_output) != MMSYSERR_NOERROR || reset_done_count != 3) return 36;
+    if (waveOutReset(reset_output) != MMSYSERR_NOERROR || reset_done_count != 3 ||
+        reset_order[0] != 0 || reset_order[1] != 1 || reset_order[2] != 2) return 36;
     for (unsigned i = 0; i < 3; ++i) if (!(reset_buffer[i].dwFlags & WHDR_DONE) || (reset_buffer[i].dwFlags & WHDR_INQUEUE)) return 37;
     for (unsigned i = 0; i < 3; ++i) if (waveOutUnprepareHeader(reset_output, &reset_buffer[i], sizeof(WAVEHDR)) != MMSYSERR_NOERROR) return 38;
     if (waveOutClose(reset_output) != MMSYSERR_NOERROR) return 39;
@@ -117,12 +164,14 @@ int main() {
     output = nullptr;
     if (waveOutOpen(&output, WAVE_MAPPER, &format, reinterpret_cast<DWORD_PTR>(event), 0, CALLBACK_EVENT) != MMSYSERR_NOERROR ||
         WaitForSingleObject(event, 0) != WAIT_OBJECT_0 || !ResetEvent(event)) return 21;
-    WAVEHDR event_header{}; event_header.lpData = samples; event_header.dwBufferLength = sizeof(samples);
+    WAVEHDR event_header{}; event_header.lpData = samples; event_header.dwBufferLength = sizeof(samples); MMTIME event_time{}; event_time.wType = TIME_BYTES;
     if (waveOutPrepareHeader(output, &event_header, sizeof(event_header)) != MMSYSERR_NOERROR ||
         waveOutWrite(output, &event_header, sizeof(event_header)) != MMSYSERR_NOERROR ||
-        waveOutReset(output) != MMSYSERR_NOERROR || WaitForSingleObject(event, 0) != WAIT_OBJECT_0 ||
-        !(event_header.dwFlags & WHDR_DONE) || waveOutUnprepareHeader(output, &event_header, sizeof(event_header)) != MMSYSERR_NOERROR ||
-        waveOutClose(output) != MMSYSERR_NOERROR || WaitForSingleObject(event, 0) != WAIT_OBJECT_0) return 22;
+        WaitForSingleObject(event, 5000) != WAIT_OBJECT_0 ||
+        waveOutGetPosition(output, &event_time, sizeof(event_time)) != MMSYSERR_NOERROR || !(event_header.dwFlags & WHDR_DONE) ||
+        waveOutReset(output) != MMSYSERR_NOERROR || !(event_header.dwFlags & WHDR_DONE) ||
+        waveOutUnprepareHeader(output, &event_header, sizeof(event_header)) != MMSYSERR_NOERROR ||
+        waveOutClose(output) != MMSYSERR_NOERROR) return 22;
     WNDCLASSEXA window_class{}; window_class.cbSize = sizeof(window_class); window_class.lpfnWndProc = wave_window;
     window_class.lpszClassName = "WaveOutFixtureWindow";
     if (!RegisterClassExA(&window_class)) return 23;
@@ -217,13 +266,22 @@ int main(int argc, char **argv) {
     if (argc != 3) { std::fprintf(stderr, "usage: x86-waveout-integration <dsound.dll> <guest.exe>\n"); return 2; }
     HMODULE shim = LoadLibraryA(argv[1]);
     if (!shim) { std::fprintf(stderr, "FAIL: LoadLibrary dsound shim: %lu\n", GetLastError()); return 2; }
+    auto count = reinterpret_cast<UINT (WINAPI *)()>(shim_export(shim, "XbnWaveOutGetNumDevs"));
+    auto caps_a = reinterpret_cast<MMRESULT (WINAPI *)(UINT_PTR, LPWAVEOUTCAPSA, UINT)>(shim_export(shim, "XbnWaveOutGetDevCapsA"));
+    auto caps_w = reinterpret_cast<MMRESULT (WINAPI *)(UINT_PTR, LPWAVEOUTCAPSW, UINT)>(shim_export(shim, "XbnWaveOutGetDevCapsW"));
     auto open = reinterpret_cast<MMRESULT (WINAPI *)(LPHWAVEOUT, UINT, LPCWAVEFORMATEX, DWORD_PTR, DWORD_PTR, DWORD)>(shim_export(shim, "XbnWaveOutOpen"));
     waveout_close = reinterpret_cast<WaveOutClose>(shim_export(shim, "XbnWaveOutClose"));
     auto prepare = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT, LPWAVEHDR, UINT)>(shim_export(shim, "XbnWaveOutPrepareHeader"));
+    auto unprepare = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT, LPWAVEHDR, UINT)>(shim_export(shim, "XbnWaveOutUnprepareHeader"));
     auto write = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT, LPWAVEHDR, UINT)>(shim_export(shim, "XbnWaveOutWrite"));
     auto position = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT, LPMMTIME, UINT)>(shim_export(shim, "XbnWaveOutGetPosition"));
     auto reset = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT)>(shim_export(shim, "XbnWaveOutReset"));
-    if (!open || !waveout_close || !prepare || !write || !position || !reset) { std::fprintf(stderr, "FAIL: internal waveOut exports missing\n"); return 2; }
+    auto pause = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT)>(shim_export(shim, "XbnWaveOutPause"));
+    auto restart = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT)>(shim_export(shim, "XbnWaveOutRestart"));
+    auto set_volume = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT, DWORD)>(shim_export(shim, "XbnWaveOutSetVolume"));
+    auto get_volume = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT, LPDWORD)>(shim_export(shim, "XbnWaveOutGetVolume"));
+    if (!count || !caps_a || !caps_w || !open || !waveout_close || !prepare || !unprepare || !write || !position || !reset ||
+        !pause || !restart || !set_volume || !get_volume) { std::fprintf(stderr, "FAIL: internal waveOut exports missing\n"); return 2; }
     WAVEFORMATEX format{WAVE_FORMAT_PCM, 2, 48000, 192000, 4, 16, 0};
     if (open(nullptr, 0xffffffffu, &format, 0, 0, WAVE_FORMAT_QUERY) != MMSYSERR_NOERROR) {
         std::fprintf(stderr, "FAIL: x64 WAVE_FORMAT_QUERY rejected a null handle or device id\n"); return 2;
@@ -235,19 +293,27 @@ int main(int argc, char **argv) {
     format.wFormatTag = WAVE_FORMAT_PCM;
     HWAVEOUT live = nullptr;
     MMRESULT live_result = open(&live, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL);
-    if (std::getenv("XBN_EXPECT_NO_AUDIO")) {
-        auto count = reinterpret_cast<UINT (WINAPI *)()>(shim_export(shim, "XbnWaveOutGetNumDevs"));
-        if (live_result != MMSYSERR_NODRIVER || live || !count || count() != 0 ||
-            open(&live, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NODRIVER || live) {
-            std::fprintf(stderr, "FAIL: no-audio contract (open=%u)\n", live_result); return 2;
-        }
-        std::puts("X64-WAVEOUT PASS: unavailable audio returns NODRIVER without a handle"); return 0;
+    if (live_result != MMSYSERR_NOERROR && live_result != MMSYSERR_NODRIVER) {
+        std::fprintf(stderr, "FAIL: audio open=%u\n", live_result); return 2;
     }
-    if (live_result != MMSYSERR_NOERROR) { std::fprintf(stderr, "FAIL: audio open=%u\n", live_result); return 2; }
-    auto pause = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT)>(shim_export(shim, "XbnWaveOutPause"));
-    auto restart = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT)>(shim_export(shim, "XbnWaveOutRestart"));
-    auto set_volume = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT, DWORD)>(shim_export(shim, "XbnWaveOutSetVolume"));
-    if (!pause || !restart || !set_volume) return 2;
+    if (live_result == MMSYSERR_NODRIVER) {
+        WAVEOUTCAPSA no_device_caps_a{}; WAVEOUTCAPSW no_device_caps_w{}; MMTIME no_device_time{}; DWORD no_device_volume = 0;
+        WAVEHDR no_device_header{};
+        if (count() != 0 || live || caps_a(WAVE_MAPPER, &no_device_caps_a, sizeof(no_device_caps_a)) != MMSYSERR_NODRIVER ||
+            caps_w(WAVE_MAPPER, &no_device_caps_w, sizeof(no_device_caps_w)) != MMSYSERR_NODRIVER ||
+            prepare(nullptr, &no_device_header, sizeof(no_device_header)) != MMSYSERR_INVALHANDLE ||
+            unprepare(nullptr, &no_device_header, sizeof(no_device_header)) != MMSYSERR_INVALHANDLE ||
+            write(nullptr, &no_device_header, sizeof(no_device_header)) != MMSYSERR_INVALHANDLE ||
+            position(nullptr, &no_device_time, sizeof(no_device_time)) != MMSYSERR_INVALHANDLE ||
+            reset(nullptr) != MMSYSERR_INVALHANDLE || pause(nullptr) != MMSYSERR_INVALHANDLE ||
+            restart(nullptr) != MMSYSERR_INVALHANDLE || set_volume(nullptr, 0) != MMSYSERR_INVALHANDLE ||
+            get_volume(nullptr, &no_device_volume) != MMSYSERR_INVALHANDLE || waveout_close(nullptr) != MMSYSERR_INVALHANDLE) {
+            std::fprintf(stderr, "FAIL: no-device waveOut contract (open=%u)\n", live_result); return 2;
+        }
+        std::puts("X64-WAVEOUT PASS: format query and no-device NODRIVER/INVALHANDLE contract");
+        std::puts("SKIP device playback: no audio device");
+    }
+    if (live_result == MMSYSERR_NOERROR) {
     HWAVEOUT mono = nullptr;
     WAVEFORMATEX mono_format{WAVE_FORMAT_PCM, 1, 48000, 96000, 2, 16, 0};
     if (open(&mono, WAVE_MAPPER, &mono_format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR ||
@@ -385,6 +451,7 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "FAIL: callback after close iteration=%u\n", i); return 2;
     }
     std::puts("X64-WAVEOUT PASS: format query, callback close, and 100 close/completion races");
+    }
     std::ifstream f(argv[2], std::ios::binary);
     if (!f) { std::fprintf(stderr, "FAIL: cannot open guest fixture\n"); return 2; }
     std::vector<uint8_t> image{std::istreambuf_iterator<char>(f), {}};
