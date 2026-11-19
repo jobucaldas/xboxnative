@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <vector>
 #include "../host/x86/x86_play.h"
@@ -23,7 +24,39 @@ static void adapter_draw_elements(uint32_t mode, int32_t count, uint32_t type, c
 static void adapter_get_integer(uint32_t pname, void* data) { adapter_output_ok = pname == 0x0BA2u && data != nullptr; if (data) static_cast<int32_t*>(data)[0] = 321; }
 static uint32_t adapter_create_shader(uint32_t type) { adapter_return_ok = type == 0x8B31u; return 7; }
 
+static bool verify_gl_host_errors_and_sizes() {
+    x86::Memory mem; mem.map(0x1000, 0x30000, x86::PROT_R | x86::PROT_W); mem.map(x86::TEB_ADDR, 0x1000, x86::PROT_R | x86::PROT_W);
+    x86::ThunkTable table; x86::Host host; x86::Registry registry; x86::register_gl(registry, host);
+    x86::Cpu cpu(mem, table); cpu.reg[x86::ESP] = 0x2f000; cpu.fs_base = x86::TEB_ADDR;
+    bool packed = false, matrix = false;
+    host.gl_call = [&](x86::Host::GlCall& q) {
+        if (q.name == "glTexImage2D") { packed = q.input.size() == 2 && q.input[0] == 0x12 && q.input[1] == 0x34; return; }
+        if (q.name == "glUniformMatrix2x3fv") { matrix = q.input.size() == 48; return; }
+        if (q.name == "glClear") { q.gap = true; q.last_error = 5; }
+    };
+    auto route = [&](const char* name) -> x86::Thunk* {
+        auto it = registry.map.find({"opengl32.dll", x86::Registry::key_sym(name)});
+        return it == registry.map.end() ? nullptr : &it->second;
+    };
+    auto args = [&](std::initializer_list<uint32_t> values) {
+        unsigned slot = 0; for (uint32_t value : values) mem.w32(cpu.reg[x86::ESP] + 4 + 4 * slot++, value);
+    };
+    for (unsigned i = 0; i < 48; ++i) mem.w8(0x5000 + i, uint8_t(i));
+    auto tex = route("glTexImage2D");
+    if (!tex) return false;
+    mem.w8(0x4000, 0x12); mem.w8(0x4001, 0x34);
+    args({0x0DE1, 0, 0, 1, 1, 0, 0x1907, 0x8363, 0x4000}); tex->fn(cpu);
+    auto uniform = route("glUniformMatrix2x3fv");
+    if (!uniform) return false;
+    args({1, 2, 0, 0x5000}); uniform->fn(cpu);
+    auto clear = route("glClear");
+    if (!clear) return false;
+    mem.w32(cpu.fs_base + 0x34, 777); args({0x4000}); clear->fn(cpu);
+    return packed && matrix && mem.r32(cpu.fs_base + 0x34) == 5;
+}
+
 int main(int argc, char** argv) {
+    if (!verify_gl_host_errors_and_sizes()) { std::fprintf(stderr, "X86-GL FAIL host error or packed/matrix marshalling\n"); return 1; }
     if (argc != 2) { std::fprintf(stderr, "usage: x86-gl <fixture.exe>\n"); return 2; }
     auto signature = [](const char* name) -> unsigned short { for (unsigned i = 0; i < sizeof(x86::kGlExports) / sizeof(x86::kGlExports[0]); ++i) if (std::strcmp(x86::kGlExports[i].name, name) == 0) return x86::kGlSignatureIds[i]; return 65535; };
     float color[] = {0.25f, 0.5f, 0.75f, 1.0f}; uintptr_t color_words[4]{};

@@ -65,6 +65,7 @@ struct Host {
         std::vector<int32_t> shader_lengths;
         std::vector<uint8_t> input, output;
         uintptr_t result = 0;
+        uint32_t last_error = 0;
         bool gap = false;
     };
     struct WindowCreate {
@@ -746,7 +747,11 @@ inline void register_gl(Registry& r, Host& h) {
         bool unsupported = false;
         for (GlArgKind kind : q.arg_kinds) unsupported = unsupported || kind == GlArgKind::Unsupported;
         if (!h.gl_call || unsupported || q.gap) { c.mem.w32(c.fs_base + 0x34, 120); q.gap = true; }
-        else h.gl_call(q);
+        else {
+            h.gl_call(q);
+            if (q.last_error) c.mem.w32(c.fs_base + 0x34, q.last_error);
+            else if (q.gap) c.mem.w32(c.fs_base + 0x34, 120);
+        }
         if (q.gap) {
             const std::string line = "x86 GL gap: " + q.name + " (unsupported host dispatch or marshalling)\n";
             h.err += line;
@@ -980,9 +985,11 @@ inline void register_gl(Registry& r, Host& h) {
         q.args[0] = dc(uint32_t(q.args[0])); q.args[1] = context(uint32_t(q.args[1]));
         return call(c, q) ? uint32_t(q.result) : 0;
     });
-    r.add("opengl32.dll", "wglGetCurrentContext", Conv::Stdcall, 0, [&h, count](Cpu&) -> uint32_t {
-        count("wglGetCurrentContext"); if (!h.gl_call) return 0;
+    r.add("opengl32.dll", "wglGetCurrentContext", Conv::Stdcall, 0, [&h, count](Cpu& c) -> uint32_t {
+        count("wglGetCurrentContext"); if (!h.gl_call) { c.mem.w32(c.fs_base + 0x34, 120); return 0; }
         Host::GlCall q{}; q.name = "wglGetCurrentContext"; h.gl_call(q);
+        if (q.last_error) c.mem.w32(c.fs_base + 0x34, q.last_error);
+        else if (q.gap) c.mem.w32(c.fs_base + 0x34, 120);
         for (const auto& item : h.gl_contexts) if (item.second == q.result) return item.first;
         return 0;
     });
@@ -1127,7 +1134,7 @@ inline void register_gl(Registry& r, Host& h) {
                 const uint32_t row_pixels = h.unpack_row_length ? h.unpack_row_length : width;
                 const uint64_t raw_row = uint64_t(row_pixels) * pixel_bytes;
                 const uint32_t alignment = h.unpack_alignment;
-                if (width > 16384 || height > 16384 || !components || !component_size || row_pixels < width ||
+                if (width > 16384 || height > 16384 || !components || (!packed_size && !component_size) || row_pixels < width ||
                     (alignment != 1 && alignment != 2 && alignment != 4 && alignment != 8)) {
                     q.gap = true; call(c, q); return 0;
                 }
@@ -1149,11 +1156,13 @@ inline void register_gl(Registry& r, Host& h) {
             }
             if (name.size() >= 16 && name.compare(0, 9, "glUniform") == 0 && name.find("Matrix") != std::string::npos && name.back() == 'v') {
                 const size_t matrix = name.find("Matrix") + 6;
-                const uint32_t dimension = matrix < name.size() && name[matrix] >= '2' && name[matrix] <= '4' ? uint32_t(name[matrix] - '0') : 0u;
+                const uint32_t rows = matrix < name.size() && name[matrix] >= '2' && name[matrix] <= '4' ? uint32_t(name[matrix] - '0') : 0u;
+                const bool rectangular = matrix + 1 < name.size() && name[matrix + 1] == 'x';
+                const uint32_t columns = rectangular && matrix + 2 < name.size() && name[matrix + 2] >= '2' && name[matrix + 2] <= '4' ? uint32_t(name[matrix + 2] - '0') : rows;
                 const uint32_t count = uint32_t(q.args[1]), source = uint32_t(q.args[3]);
                 const uint32_t scalar_size = name.find("dv") != std::string::npos ? 8u : 4u;
-                uint64_t bytes = uint64_t(count) * dimension * dimension * scalar_size;
-                if (!dimension || (count && !source) || count > (1u << 20) || bytes > (1u << 26)) { q.gap = true; call(c, q); return 0; }
+                uint64_t bytes = uint64_t(count) * rows * columns * scalar_size;
+                if (!rows || !columns || (count && !source) || count > (1u << 20) || bytes > (1u << 26)) { q.gap = true; call(c, q); return 0; }
                 if (bytes) q.input = c.mem.read_bytes(source, uint32_t(bytes));
                 q.args[3] = 0;
             }
@@ -1262,8 +1271,11 @@ inline void register_gl(Registry& r, Host& h) {
         });
     }
     // WGL entry points also participate in GetProcAddress dispatch.
-    r.add("opengl32.dll", "wglGetCurrentDC", Conv::Stdcall, 0, [&h, count](Cpu&) -> uint32_t {
-        count("wglGetCurrentDC"); if (!h.gl_call) return 0; Host::GlCall q{}; q.name = "wglGetCurrentDC"; h.gl_call(q);
+    r.add("opengl32.dll", "wglGetCurrentDC", Conv::Stdcall, 0, [&h, count](Cpu& c) -> uint32_t {
+        count("wglGetCurrentDC"); if (!h.gl_call) { c.mem.w32(c.fs_base + 0x34, 120); return 0; }
+        Host::GlCall q{}; q.name = "wglGetCurrentDC"; h.gl_call(q);
+        if (q.last_error) c.mem.w32(c.fs_base + 0x34, q.last_error);
+        else if (q.gap) c.mem.w32(c.fs_base + 0x34, 120);
         for (const auto& item : h.dc_handles) if (item.second == q.result) return item.first;
         return 0;
     });

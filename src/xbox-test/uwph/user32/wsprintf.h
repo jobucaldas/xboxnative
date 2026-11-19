@@ -49,15 +49,15 @@ template<class C> static void emit_field(std::basic_string<C>& out,const std::ba
 }
 template<class C> static std::basic_string<C> integer_field(uint64_t value,bool negative,unsigned base,bool upper,
         unsigned width,int precision,bool left,bool zero,bool alternate) {
-    char rev[65]; unsigned n=0;
+    std::string rev; rev.reserve(65);
     const char* digits=upper?"0123456789ABCDEF":"0123456789abcdef";
-    do { rev[n++]=digits[value%base]; value/=base; } while(value&&n<sizeof rev);
-    while(n<static_cast<unsigned>(std::max(precision,1))) rev[n++]='0';
+    do { rev.push_back(digits[value%base]); value/=base; } while(value);
+    while(rev.size()<static_cast<size_t>(std::max(precision,1))) rev.push_back('0');
     std::string prefix;
     if(negative) prefix.push_back('-');
     if(alternate&&base==16) prefix.append(upper?"0X":"0x");
     std::string body;
-    while(n) body.push_back(rev[--n]);
+    while(!rev.empty()) { body.push_back(rev.back()); rev.pop_back(); }
     size_t pad=width>prefix.size()+body.size()?width-prefix.size()-body.size():0;
     std::basic_string<C> out;
     auto add=[&](char c){out.push_back(static_cast<C>(c));};
@@ -84,13 +84,16 @@ template<class C> static int format(C* dst,const C* fmt,va_list args,bool wide) 
         }
         unsigned width=number(fmt);
         int precision=-1;
-        if(ascii(*fmt)=='.') { ++fmt; precision=static_cast<int>(number(fmt)); if(precision==0)precision=1; }
+        if(ascii(*fmt)=='.') { ++fmt; precision=static_cast<int>(number(fmt)); }
         char length=0;
-        if(ascii(*fmt)=='h'||ascii(*fmt)=='l'||ascii(*fmt)=='I')length=ascii(*fmt++);
+        if(ascii(*fmt)=='h'||ascii(*fmt)=='l'||ascii(*fmt)=='I') {
+            length=ascii(*fmt++);
+            if(length=='I'&&ascii(fmt[0])=='6'&&ascii(fmt[1])=='4')fmt+=2;
+        }
         char type=ascii(*fmt); if(*fmt)++fmt;
-        if((length=='h'&&!std::strchr("cCdusS",type))||
-           (length=='l'&&!std::strchr("cCdiuxXsS",type))||
-           (length=='I'&&!std::strchr("xX",type)))continue;
+        if((length=='h'&&!std::strchr("cCdiouxXsS",type))||
+           (length=='l'&&!std::strchr("cCdiouxXsS",type))||
+           (length=='I'&&!std::strchr("diuoxX",type)))continue;
         if(type=='c'||type=='C') {
             int ch=va_arg(args,int);
             if((length=='h'||length=='l')&&ch==0)continue;
@@ -124,8 +127,8 @@ template<class C> static int format(C* dst,const C* fmt,va_list args,bool wide) 
         }
         bool signed_type=type=='d'||type=='i';
         bool hex=type=='x'||type=='X'||type=='p';
-        if(signed_type||type=='u'||hex) {
-            uint64_t value=0; bool negative=false; unsigned base=hex?16:10;
+        if(signed_type||type=='u'||type=='o'||hex) {
+            uint64_t value=0; bool negative=false; unsigned base=hex?16:type=='o'?8:10;
             if(type=='p') value=reinterpret_cast<uintptr_t>(va_arg(args,void*));
             else if(signed_type) {
                 int64_t signed_value=length=='h'?static_cast<short>(va_arg(args,int)):

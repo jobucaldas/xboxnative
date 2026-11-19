@@ -1323,6 +1323,12 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         static HMODULE records=LoadPackagedLibrary(L"uwph-u32c.dll",0);
         static HMODULE mesa=LoadPackagedLibrary(L"runtime\\opengl32.dll",0);
         static HMODULE d3d9=LoadPackagedLibrary(L"runtime\\d3d9.dll",0);
+        using GetMetrics=int(WINAPI*)(int);
+        auto get_metrics=records?reinterpret_cast<GetMetrics>(GetProcAddress(records,"GetSystemMetrics")):nullptr;
+        host.system_metrics=[get_metrics](int index,int& value) {
+            if(!get_metrics)return false;
+            value=get_metrics(index);return true;
+        };
         static HMODULE dsound=LoadPackagedLibrary(L"runtime\\dsound.dll",0);
         using CreateSound=HRESULT (WINAPI*)(LPCGUID,void**,LPUNKNOWN);
         auto createSound=dsound?reinterpret_cast<CreateSound>(GetProcAddress(dsound,"DirectSoundCreate8")):nullptr;
@@ -1439,6 +1445,8 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
             return p;
         };
         host.gl_call=[proc](x86::Host::GlCall& q) {
+            SetLastError(ERROR_SUCCESS);
+            struct ErrorCapture { x86::Host::GlCall& call; ~ErrorCapture() { call.last_error=GetLastError(); } } capture{q};
             auto missing=[&](){SetLastError(ERROR_PROC_NOT_FOUND);q.result=0;q.gap=true;};
             auto pointer=[&](const char* name){return proc(name);};
             auto float_arg=[&](size_t index){uint32_t bits=uint32_t(q.args[index]);float value=0;memcpy(&value,&bits,sizeof(value));return value;};
