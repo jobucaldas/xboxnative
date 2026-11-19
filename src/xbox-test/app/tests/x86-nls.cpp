@@ -42,19 +42,20 @@ int main() {
         return entry(name).fn(cpu);
     };
     uint32_t bytes = 0x1100, wide = 0x1200, out = 0x1300, used = 0x1400, default_char = 0x1500;
-    mem.w8(bytes, 0x82); mem.w8(bytes + 1, 0xA0); mem.w8(default_char, '?');
+    mem.w8(bytes, 0x82); mem.w8(bytes + 1, 0xA0); mem.w8(default_char, '?'); mem.w8(default_char + 1, '!');
     uint32_t seen_mb_flags = 0, seen_wc_flags = 0;
     bool saw_default_char = false, saw_used_default = false;
     bool saw_string_type_input = false, saw_map_locale = false, saw_compare_inputs = false;
     host.nls_call = [&](const Host::NlsRequest& request) {
         if (request.operation == Host::NlsOperation::MultiByteToWideChar) seen_mb_flags = request.flags;
         if (request.operation == Host::NlsOperation::WideCharToMultiByte) {
-            seen_wc_flags = request.flags; saw_default_char = request.default_char.size() == 1 && request.default_char[0] == '?';
+            seen_wc_flags = request.flags; saw_default_char = request.default_char.size() == 2 && request.default_char[0] == '?' && request.default_char[1] == '!';
             saw_used_default = request.wants_used_default;
         }
         Host::NlsResponse response{};
         if (request.operation == Host::NlsOperation::IsValidCodePage) {
             response.result = request.code_page == 932 || request.code_page == 65001;
+            response.last_error = response.result ? 1234 : 87;
             return response;
         }
         if (request.operation == Host::NlsOperation::GetCPInfo) {
@@ -122,8 +123,9 @@ int main() {
     const char16_t locale_text[] = u"en-US";
     for (uint32_t i = 0; i < 6; ++i) { mem.w8(locale_name + i * 2, uint8_t(locale_text[i])); mem.w8(locale_name + i * 2 + 1, uint8_t(locale_text[i] >> 8)); }
     mem.w32(wide2, uint32_t('C') | (uint32_t('D') << 16)); mem.w32(wide2 + 4, 0);
+    guest.set_last_error(5678);
     CHECK(invoke("getstringtypea", {0x409, 1, bytes, 2, out}) == 1);
-    CHECK(mem.r8(out) == 0x11 && guest.last_error() == 1234);
+    CHECK(mem.r8(out) == 0x11 && guest.last_error() == 5678);
     CHECK(invoke("getstringtypew", {1, wide, 2, out}) == 1);
     CHECK(mem.r8(out + 2) == 0x33);
     CHECK(invoke("getstringtypeexw", {0x409, 1, wide, 2, out}) == 1);
@@ -134,9 +136,15 @@ int main() {
     CHECK(invoke("comparestringex", {locale_name, 0, wide, 2, wide2, 2, 0, 0, 0}) == 3);
     CHECK(invoke("foldstringw", {0, wide, 2, out, 4}) == 2);
     CHECK(saw_string_type_input && saw_map_locale && saw_compare_inputs);
+    guest.set_last_error(2468);
     CHECK(invoke("isvalidcodepage", {932}) == 1);
+    CHECK(guest.last_error() == 2468);
+    CHECK(invoke("isvalidcodepage", {42}) == 0);
+    CHECK(guest.last_error() == 87);
+    guest.set_last_error(2468);
     CHECK(invoke("getcpinfo", {932, out}) == 1);
     CHECK(mem.r32(out) == 2 && mem.r8(out + 6) == 0x81 && mem.r8(out + 9) == 0xFC);
+    CHECK(guest.last_error() == 2468);
     CHECK(invoke("multibytetowidechar", {932, 8, bytes, 2, 0, 0}) == 1);
     CHECK(invoke("multibytetowidechar", {932, 8, bytes, uint32_t(-1), wide, 2}) == 2);
     CHECK(mem.r(wide, 2) == 0x3042 && mem.r(wide + 2, 2) == 0);

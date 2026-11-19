@@ -1990,7 +1990,7 @@ inline void Guest::register_all() {
         uint32_t cp = c.arg(0);
         if (host.nls_call) {
             Host::NlsRequest request{}; request.operation = Host::NlsOperation::IsValidCodePage; request.code_page = cp;
-            Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error); return response.result;
+            Host::NlsResponse response = host.nls_call(request); if (!response.result) set_last_error(response.last_error); return response.result;
         }
         return cp == 20127 || cp == 28591 ? 1u : 0u;
     });
@@ -2000,7 +2000,7 @@ inline void Guest::register_all() {
         uint32_t cp = c.arg(0), p = c.arg(1); if (!p) { set_last_error(87); return 0; }
         if (host.nls_call) {
             Host::NlsRequest request{}; request.operation = Host::NlsOperation::GetCPInfo; request.code_page = cp;
-            Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error);
+            Host::NlsResponse response = host.nls_call(request); if (!response.result) set_last_error(response.last_error);
             if (response.result && response.output.size() == 20) copy_out(p, response.output.data(), 20);
             return response.result;
         }
@@ -2014,7 +2014,7 @@ inline void Guest::register_all() {
             Host::NlsRequest request{}; request.operation = Host::NlsOperation::MultiByteToWideChar;
             request.code_page = cp; request.flags = flags; request.output_null = dst == 0; request.output_capacity = cap;
             nls_input(src, n, 1, request);
-            Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error);
+            Host::NlsResponse response = host.nls_call(request); if (!response.result) set_last_error(response.last_error);
             if (response.result && dst && cap && response.output.size() == size_t(response.result) * 2) copy_out(dst, response.output.data(), uint32_t(response.output.size()));
             return response.result;
         }
@@ -2027,13 +2027,13 @@ inline void Guest::register_all() {
         return uint32_t(s.size()); });
     auto nls_output = [this](Host::NlsRequest& request, uint32_t output_ptr, uint32_t expected_bytes) {
         if (!host.nls_call) { set_last_error(87); return 0u; }
-        Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error);
+        Host::NlsResponse response = host.nls_call(request); if (!response.result) set_last_error(response.last_error);
         const uint32_t bytes = expected_bytes == 0xFFFFFFFFu ? response.result * 2 : expected_bytes;
         if (response.result && output_ptr && response.output.size() == bytes)
             copy_out(output_ptr, response.output.data(), bytes);
         return response.result;
     };
-    auto get_locale_info=[this](Cpu& c,Host::NlsOperation op)->uint32_t { Host::NlsRequest request{};request.operation=op;request.locale=c.arg(0);request.type=c.arg(1);request.output_capacity=c.arg(3);request.output_null=c.arg(2)==0;if(op==Host::NlsOperation::GetLocaleInfoEx){request.locale_name_null=c.arg(0)==0;if(!request.locale_name_null)request.locale_name=wstr(c.arg(0));}if(!host.nls_call){set_last_error(120);return 0;}Host::NlsResponse response=host.nls_call(request);set_last_error(response.last_error);uint32_t unit=op==Host::NlsOperation::GetLocaleInfoA?1u:2u;if(response.result&&c.arg(2)&&response.output.size()==size_t(response.result)*unit)copy_out(c.arg(2),response.output.data(),uint32_t(response.output.size()));return response.result;};
+    auto get_locale_info=[this](Cpu& c,Host::NlsOperation op)->uint32_t { Host::NlsRequest request{};request.operation=op;request.locale=c.arg(0);request.type=c.arg(1);request.output_capacity=c.arg(3);request.output_null=c.arg(2)==0;if(op==Host::NlsOperation::GetLocaleInfoEx){request.locale_name_null=c.arg(0)==0;if(!request.locale_name_null)request.locale_name=wstr(c.arg(0));}if(!host.nls_call){set_last_error(120);return 0;}Host::NlsResponse response=host.nls_call(request);if (!response.result) set_last_error(response.last_error);uint32_t unit=op==Host::NlsOperation::GetLocaleInfoA?1u:2u;if(response.result&&c.arg(2)&&response.output.size()==size_t(response.result)*unit)copy_out(c.arg(2),response.output.data(),uint32_t(response.output.size()));return response.result;};
     reg.add("kernel32.dll","GetLocaleInfoA",Conv::Stdcall,4,[get_locale_info](Cpu& c){return get_locale_info(c,Host::NlsOperation::GetLocaleInfoA);});
     reg.add("kernel32.dll","GetLocaleInfoW",Conv::Stdcall,4,[get_locale_info](Cpu& c){return get_locale_info(c,Host::NlsOperation::GetLocaleInfoW);});
     reg.add("kernel32.dll","GetLocaleInfoEx",Conv::Stdcall,4,[get_locale_info](Cpu& c){return get_locale_info(c,Host::NlsOperation::GetLocaleInfoEx);});
@@ -2057,7 +2057,7 @@ inline void Guest::register_all() {
         if(!host.nls_call){set_last_error(120);return 0;}
         Host::NlsRequest request{};request.operation=Host::NlsOperation::GetUserDefaultLocaleName;
         request.output_capacity=capacity;request.output_null=false;
-        Host::NlsResponse response=host.nls_call(request);set_last_error(response.last_error);
+        Host::NlsResponse response=host.nls_call(request);if (!response.result) set_last_error(response.last_error);
         if(response.result&&!response.output.empty()&&response.output.size()<=size_t(capacity)*2)
             copy_out(output,response.output.data(),uint32_t(response.output.size()));
         else if(response.result){set_last_error(87);return 0;}
@@ -2148,8 +2148,13 @@ inline void Guest::register_all() {
             Host::NlsRequest request{}; request.operation = Host::NlsOperation::WideCharToMultiByte;
             request.code_page = cp; request.flags = flags; request.output_null = dst == 0; request.output_capacity = cap; request.wants_used_default = used != 0;
             nls_input(src, n, 2, request);
-            if (def) request.default_char = mem.read_bytes(def, 1);
-            Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error);
+            if (def) {
+                Host::NlsRequest cpInfo{}; cpInfo.operation = Host::NlsOperation::GetCPInfo; cpInfo.code_page = cp;
+                Host::NlsResponse info = host.nls_call(cpInfo);
+                uint32_t defaultCharBytes = info.result && info.output.size() == 20 && info.output[0] == 2 ? 2u : 1u;
+                request.default_char = mem.read_bytes(def, defaultCharBytes);
+            }
+            Host::NlsResponse response = host.nls_call(request); if (!response.result) set_last_error(response.last_error);
             if (response.result && dst && cap && response.output.size() == response.result) copy_out(dst, response.output.data(), response.result);
             if (used) mem.w32(used, response.used_default ? 1u : 0u);
             return response.result;
