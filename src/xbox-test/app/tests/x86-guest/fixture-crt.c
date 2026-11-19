@@ -89,6 +89,9 @@ static void test_resources(void) {
     int wide_length = LoadStringW(NULL, 7, wide, 32), wide_equal = wide_length == 12 && wide[12] == 0;
     for (int i = 0; i < 12 && wide_equal; ++i) wide_equal = wide[i] == L"Pug resource"[i];
     check(wide_equal);
+    wchar_t* resource_text = NULL;
+    check(LoadStringW(NULL, 7, (wchar_t*)&resource_text, 0) == 12 && resource_text && same_w(resource_text, L"Pug resource"));
+    check(LoadStringA(NULL, 0, text, sizeof text) == 9 && strcmp(text, "Zero slot") == 0);
     struct enum_state state = {0, 1, 0};
     int enum_a_result = EnumResourceNamesA(NULL, RT_RCDATA, enum_resource_a, (LONG_PTR)&state);
     check(enum_a_result && state.count == 4 && state.valid);
@@ -245,7 +248,8 @@ int main(void) {
     check(loc_q && strcmp(loc_q, "C") == 0 && loc_c && strcmp(loc_c, "C") == 0 && loc_bad == NULL);
     puts("x86-crt: strings ok");
     WCHAR user_locale[LOCALE_NAME_MAX_LENGTH] = {0};
-    check(GetUserDefaultLocaleName(user_locale, LOCALE_NAME_MAX_LENGTH) && user_locale[0] != 0);
+    int locale_length = GetUserDefaultLocaleName(user_locale, LOCALE_NAME_MAX_LENGTH);
+    check(locale_length > 1 && user_locale[0] != 0);
     puts("x86-crt: locale name ok");
     check(GetSystemMetrics(SM_CXSCREEN) == 1280 && GetSystemMetrics(SM_CYSCREEN) == 720);
     test_winmm_shlwapi();
