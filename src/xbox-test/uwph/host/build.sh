@@ -17,6 +17,11 @@ case "${2:-uwph}" in
   reg) manifest=AppxManifest.Reg.xml; lane_flags=() ;;
   *) echo "usage: $0 [OUTDIR] [uwph|wxl|hid|mlp|tls|swc|reg]" >&2; exit 2 ;;
 esac
+if [[ ${2:-uwph} == mlp ]]; then
+  donor_dir="${WINE_DONOR_ROOT:-$root/out/wine-donors}"
+  bash "$root/src/tools/build-wine-donors.sh" "$donor_dir"
+  cp "$donor_dir"/{avrt,dinput8,hid,psapi,setupapi,shcore,version}.dll "$out/layout/"
+fi
 bash fetch-sqlite.sh
 # SQLite amalgamation (public domain, pinned+checksummed by fetch-sqlite.sh) as a static lib linked into k32.exe: backs the uwph registry (reg_builtin.h).
 SQL_DEFS=(/DSQLITE_THREADSAFE=1 /DSQLITE_OMIT_LOAD_EXTENSION /DSQLITE_OMIT_SHARED_CACHE /DSQLITE_TEMP_STORE=3 /DSQLITE_DEFAULT_MEMSTATUS=0 /DSQLITE_OMIT_DEPRECATED)
