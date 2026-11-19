@@ -47,7 +47,14 @@ struct Io {
 };
 struct Rule { std::string root, path, pattern; bool recursive=false; };
 // appinfo "ufs" -> "savefiles" rules (Windows roots only).
-inline std::vector<Rule> rules(const Vdf& appinfo) {
+inline void expand_account_tokens(std::string& path,uint64_t steamid) {
+    const std::pair<const char*,std::string> tokens[]={
+        {"{64BitSteamID}",std::to_string(steamid)},
+        {"{Steam3AccountID}",std::to_string(uint32_t(steamid))}
+    };
+    for(auto& [token,value]:tokens) for(size_t at=0;(at=path.find(token,at))!=std::string::npos;at+=value.size()) path.replace(at,strlen(token),value);
+}
+inline std::vector<Rule> rules(const Vdf& appinfo,uint64_t steamid) {
     std::vector<Rule> out;
     const Vdf* files=appinfo.at({"ufs","savefiles"});
     if(!files||!files->obj) return out;
@@ -55,6 +62,7 @@ inline std::vector<Rule> rules(const Vdf& appinfo) {
         Rule r{rule.str({"root"}),rule.str({"path"}),rule.str({"pattern"},"*"),rule.str({"recursive"})=="1"};
         // appinfo writes Windows separators ("TheGameBakers\\Haven"); cloud names use '/'.
         for(auto& c:r.path) if(c=='\\') c='/';
+        expand_account_tokens(r.path,steamid);
         while(!r.path.empty()&&r.path.back()=='/') r.path.pop_back();
         while(!r.path.empty()&&r.path.front()=='/') r.path.erase(0,1);
         if(r.root.rfind("Win",0)==0||r.root=="GameInstall") out.push_back(r);
@@ -238,7 +246,7 @@ inline Result download(Io& io,uint32_t appid,const Roots& roots,bool dry=false,K
             if(!io.inflate||!steam_client_package::zip_member(body,nullptr,io.inflate,data)||data.size()!=raw){decided(io,"fail (compressed copy did not inflate)",cloud,*path);++r.failed;continue;}
         } else data=std::move(body);
         if(io.sha1(data)!=file.sha){decided(io,"fail (SHA-1 differs from the changelist)",cloud,*path);++r.failed;continue;}
-        if(local){write_file(backup_path(roots,*path),*local);}
+        if(local&&!write_file(backup_path(roots,*path),*local)){decided(io,"fail (could not back up local copy)",cloud,*path);++r.failed;continue;}
         if(!write_file(*path,data)){decided(io,"fail (could not write)",cloud,*path);++r.failed;continue;}
         set_unix_time(*path,file.time);++r.downloaded;if(known)(*known)[cloud]=file.sha;
         decided(io,size!=raw?"downloaded (inflated)":"downloaded",cloud,*path);

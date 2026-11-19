@@ -409,6 +409,7 @@ extern "C" DWORD WINAPI u32c_entry(){
  CDir cdir{0,2,2,{{16,16,1,1,0,201},{64,64,1,1,0,202}}};
  check(LookupIconIdFromDirectoryEx((BYTE*)&cdir,FALSE,20,20,0)==201);
  check(LookupIconIdFromDirectoryEx((BYTE*)&cdir,FALSE,100,100,0)==202);
+ CDir emptyCursor{0,2,0,{}};check(LookupIconIdFromDirectoryEx((BYTE*)&emptyCursor,FALSE,20,20,0)==0);
  Dir bad{1,1,1,{{16,16,0,0,1,32,0,1}}};check(LookupIconIdFromDirectoryEx((BYTE*)&bad,TRUE,16,16,0)==0); // idReserved!=0: invalid directory.
  check(DestroyWindow(h2));check(UnregisterClassW(wc2.lpszClassName,0));
  if(failures){OutputDebugStringA("U32C TEST FAILED");return 1;}OutputDebugStringA("U32C TEST PASS class/long/property/geometry/lifecycle");return 42;

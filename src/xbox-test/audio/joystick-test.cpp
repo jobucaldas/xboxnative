@@ -23,6 +23,7 @@ static_assert(joy_routes::joyerr_parms == JOYERR_PARMS, "JOYERR_PARMS value");
 static int checks, failures;
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; std::printf("FAIL line %d: %s\n", __LINE__, #x); } } while (0)
 int main() {
+    CHECK(audio_routes::import_count == 48);
     const char* names[] = {"joyConfigChanged", "joyGetDevCapsA", "joyGetDevCapsW", "joyGetNumDevs", "joyGetPos",
                            "joyGetPosEx", "joyGetThreshold", "joyReleaseCapture", "joySetCapture", "joySetThreshold"};
     for (auto name : names) CHECK(joy_routes::resolve(name) != 0);

@@ -402,7 +402,8 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
     else layout[0]=0;
     if(layout[0]) return fail(layout);
     for (unsigned d : {IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR})
-        if(!mapped && h.DataDirectory[d].Size) {
+        if(!mapped && h.DataDirectory[d].Size &&
+           (d!=IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT || config!=LoadConfig::inert_wine)) {
             auto directory=h.DataDirectory[d];
             const char* name=d==IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT?"delay import":"COM descriptor";
             char why[160]; snprintf(why,sizeof why,"WXL FAIL unsupported runtime directory: %s RVA 0x%08lx Size 0x%08lx in executable mode",name,directory.VirtualAddress,directory.Size); return fail(why);
@@ -666,7 +667,7 @@ inline bool load(Image& image, const wchar_t* path, Log log, Carrier carrier={},
 inline bool run(const wchar_t* path, Log log, Image* mapped=nullptr, Resolver resolve=nullptr, LoadConfig config=LoadConfig::reject) {
     if (mapped) return load(*mapped,path,log,{},resolve,true,config);
     Image image;
-    if (!load(image,path,log,{},resolve)) return false;
+    if (!load(image,path,log,{},resolve,false,config)) return false;
     if (image.dll) return true;
     char msg[200];
     DWORD result=((DWORD(WINAPI*)())(image.base+image.entry))();

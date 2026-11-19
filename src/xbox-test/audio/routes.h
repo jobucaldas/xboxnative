@@ -30,6 +30,8 @@ static const char* const com_symbols[]={
     "CoCreateInstance","CoInitialize","CoSetProxyBlanket","PropVariantClear",
     "PropVariantCopy","RoGetAgileReference","StringFromGUID2"
 };
+constexpr unsigned com_count=sizeof(com_symbols)/sizeof(com_symbols[0]);
+constexpr unsigned import_count=wave_count+com_count;
 inline uintptr_t native(const char* name) {
     // Retain the module while mapped IATs contain its addresses.
     static HMODULE module=LoadLibraryExW(L"winmm.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -74,6 +76,6 @@ inline void discover(void (*log)(const char*)) {
         bool found=ole&&GetProcAddress(ole,name);com_missing+=!found;
         snprintf(line,sizeof line,"AUD ROUTE ole32.dll!%s native=%u",name,unsigned(found));log(line);
     }
-    snprintf(line,sizeof line,"AUD IMPORTS total=37 resolved=%u missing=%u",37-missing-com_missing,missing+com_missing);log(line);
+    snprintf(line,sizeof line,"AUD IMPORTS total=%u resolved=%u missing=%u",import_count,import_count-missing-com_missing,missing+com_missing);log(line);
 }
 }

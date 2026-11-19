@@ -175,8 +175,9 @@ static void wait(HANDLE worker,DWORD ms) {
     auto dispatch=user<LRESULT(WINAPI*)(const HostMsg*)>("DispatchMessageW");
     ULONGLONG start=GetTickCount64(),end=start+ms;
     for(;;) {
-        ULONGLONG now=GetTickCount64();if(now>=end)return;
+        ULONGLONG now=GetTickCount64();
         drivePad(now-start);
+        if(now>=end)return;
         DWORD left=DWORD(std::min<ULONGLONG>(end-now,100));
         if(msgWait(worker?1:0,worker?&worker:nullptr,FALSE,left,allInput)==WAIT_OBJECT_0&&worker)return;
         HostMsg m;while(peek(&m,nullptr,0,0,1/*PM_REMOVE*/))dispatch(&m);
@@ -375,6 +376,14 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         play_graphics::configure(&host_surface::token,host_surface::present,logline);
         host_surface::schedulePad(logline);
         logline("HOST SURFACE native Wine window stands in for the CoreWindow (off-device only)");
+    }
+    if(std::string(args)=="pad-end") {
+        if(!host_surface::create()) {logline("HOST SURFACE FAIL native Wine window unavailable");return 3;}
+        host_surface::schedulePad(logline);
+        host_surface::wait(nullptr,1000);
+        bool pressed=!host_surface::presses.empty()&&host_surface::presses.front().pressed;
+        printf("PLAY-PAD-END press=%d\n",pressed);fflush(stdout);
+        ExitProcess(pressed?0:1);
     }
     // The D3D10, D3D12 and D3D9 fixtures create a swap chain on a guest HWND,
     // which the launcher always maps to its CoreWindow. Give them the same

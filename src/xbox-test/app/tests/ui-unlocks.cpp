@@ -42,14 +42,14 @@ int main() {
         check(!v.unlocked && !v.hidden && v.earned.empty(), "locked view: not unlocked, no date");
         check(v.name == "Get a Win" && v.description == "Win one match", "locked view: display name and description");
         // earned now
-        v = to_view(a, Earned{true, 1794225600u});
+        v = to_view(a, Earned{true, 1794225600u, {}});
         check(v.unlocked && v.earned == "Nov 9, 2026", "earned view: unlocked with the UTC date");
         // hidden while locked shows the masked texts; unlocked shows the real ones
         auto h = ach("ACH_SECRET", "Real Name", "Real description", "", "", true);
         v = to_view(h, Earned{});
         check(v.name == "Hidden achievement" && v.description == "Details are hidden until unlocked",
               "hidden+locked view: masked texts");
-        v = to_view(h, Earned{true, 0});
+        v = to_view(h, Earned{true, 0, {}});
         check(v.name == "Real Name" && v.description == "Real description" && v.unlocked,
               "hidden+earned view: real texts revealed");
         // empty display falls back to the internal name
@@ -63,7 +63,7 @@ int main() {
         s.achievements = {ach("A1", "First", "d1", "", "", false),
                           ach("A2", "Second", "d2", "", "", true),
                           ach("A3", "Third", "d3", "", "", false)};
-        std::map<std::string, Earned> earned{{"A1", {true, 1767225600u}}, {"A3", {true, 1794225600u}}};
+        std::map<std::string, Earned> earned{{"A1", {true, 1767225600u, {}}}, {"A3", {true, 1794225600u, {}}}};
         auto views = build_views(s, earned);
         check(views.size() == 3, "build_views: one row per schema achievement");
         check(views[0].unlocked && views[0].earned == "Jan 1, 2026", "build_views: A1 unlocked");
@@ -74,15 +74,15 @@ int main() {
 
     // ---- earned-set diff (the unlock poller's core) ----
     {
-        std::map<std::string, Earned> before{{"A1", {true, 100u}}, {"A2", {false, 0}}};
-        std::map<std::string, Earned> now{{"A1", {true, 100u}}, {"A2", {true, 555u}}, {"A3", {true, 556u}}};
+        std::map<std::string, Earned> before{{"A1", {true, 100u, {}}}, {"A2", {false, 0, {}}}};
+        std::map<std::string, Earned> now{{"A1", {true, 100u, {}}}, {"A2", {true, 555u, {}}}, {"A3", {true, 556u, {}}}};
         auto fresh = newly_earned(before, now);
         check(fresh.size() == 2 && fresh[0] == "A2" && fresh[1] == "A3",
               "newly_earned: A2 unearned->earned and the new A3, not A1");
         check(newly_earned(now, now).empty(), "newly_earned: no diff against itself");
         check(newly_earned(before, before).empty(), "newly_earned: no diff when nothing changed");
         // a timestamp-only change is not a new unlock
-        std::map<std::string, Earned> retimed{{"A1", {true, 999u}}, {"A2", {false, 0}}};
+        std::map<std::string, Earned> retimed{{"A1", {true, 999u, {}}}, {"A2", {false, 0, {}}}};
         check(newly_earned(before, retimed).empty(), "newly_earned: earned_time drift alone is not an unlock");
     }
 

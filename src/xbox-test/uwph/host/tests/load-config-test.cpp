@@ -20,11 +20,11 @@ static BOOL WINAPI counted_free(LPVOID address, SIZE_T size, DWORD type) {
 #endif
 #include CONFIG_TEST_MAPPER
 static unsigned entries, allocations, validated;
-#ifdef CONFIG_TEST_MAPPED
+#ifdef CONFIG_TEST_TLS
 static unsigned tlsIndexCalls, tlsRejected;
 #endif
 static void log_line(const char* s) {
-#ifdef CONFIG_TEST_MAPPED
+#ifdef CONFIG_TEST_TLS
     if (!strcmp(s,"WXL FAIL TLS write into inert load configuration")) ++tlsRejected;
 #endif
     if (!strcmp(s,"CONFIG attach")) ++entries;
@@ -172,6 +172,7 @@ int main(int argc,char** argv) {
     assert(!load_file(writeCase(0x58,2,"delay-cookie"),wxl::LoadConfig::inert_wine,true,fixtureResolve));
     assert(entries==0 && allocations==1 && validated==1);
     puts("WINE-CONFIG-MAPPER PASS: mapped delay write into inert record rejected and allocation released");
+#ifdef CONFIG_TEST_TLS
     // Exercise the separate TLS preparation API with an owned pre-protection
     // view. In-memory headers are mutable, so neither a forged writable section
     // nor removal of the copied directory may invalidate the file-byte policy.
@@ -204,6 +205,9 @@ int main(int argc,char** argv) {
         assert(releases-beforeReleases==1);
     }
     puts("WINE-CONFIG-MAPPER PASS: TLS index overlap rejected with mutable headers and allocation released");
+#endif
+    // The mapped host path deliberately retains TLS metadata without preparing
+    // native TLS state; preparation is exercised by the non-mapped loader path.
 #endif
     // A relocation ending exactly at the record is outside it; the fixture pads there.
     assert(!memcmp(original.data()+configOffset-8,"\0\0\0\0\0\0\0\0",8));

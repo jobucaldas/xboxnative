@@ -42,7 +42,7 @@ int main() {
 
     auto root=fs::temp_directory_path()/"steam-ach-test";fs::remove_all(root);
     auto settings=root/"steam_settings",saves=root/"saves"/"480";
-    write(saves/"achievements.json","{\"ACH_2\": {\"earned\": true, \"earned_time\": 50}}");   // earned offline earlier
+    write(saves/"achievements.json","{\"ACH_2\": {\"earned\": true, \"earned_time\": 50, \"progress\": 3, \"max_progress\": 10}}");   // earned offline earlier
     write(saves/"stats"/"kills",std::string("\x09\0\0\0",4));                                 // local progress 9 > 5
     assert(prepare(*parsed,u,settings,saves));
     auto defs=*read(settings/"achievements.json");
@@ -50,6 +50,8 @@ int main() {
     assert(read(settings/"stats.json")->find("\"type\":\"float\"")!=std::string::npos);
     auto earned=parse_earned(*read(saves/"achievements.json"));
     assert(earned["ACH_0"].earned&&earned["ACH_0"].time==1000&&earned["ACH_2"].earned&&earned["ACH_2"].time==50&&!earned.count("ACH_1"));
+    auto seeded=*read(saves/"achievements.json");
+    assert(seeded.find("\"progress\": 3")!=std::string::npos&&seeded.find("\"max_progress\": 10")!=std::string::npos);
     assert(*read(saves/"stats"/"kills")==std::string("\x09\0\0\0",4));   // larger local progress kept
 
     // gbe then earns ACH_1 and kills reaches 12: store ORs bits 0|1|2 and sends kills.

@@ -102,7 +102,7 @@ inline UserStats fetch(Io& io,uint32_t appid,uint64_t steamid) {
 inline std::string json_escape(const std::string& s) {
     std::string o;for(unsigned char c:s){if(c=='"'||c=='\\'){o+='\\';o+=char(c);}else if(c<0x20){char b[8];snprintf(b,sizeof b,"\\u%04x",c);o+=b;}else o+=char(c);}return o;
 }
-struct Earned { bool earned=false; uint32_t time=0; };
+struct Earned { bool earned=false; uint32_t time=0; std::map<std::string,std::string> extra; };
 // Parses {"NAME":{"earned":true,"earned_time":123,...},...}; other values skipped.
 struct JsonReader {
     const std::string& j; size_t i=0;
@@ -155,9 +155,12 @@ inline std::map<std::string,Earned> parse_earned(const std::string& text) {
         if(r.eat('{')) {
             if(!r.eat('}')) for(;;) {
                 std::string key,raw;
-                if(!r.string(key)||!r.eat(':')||!r.value(raw)) return out;
+                if(!r.string(key)||!r.eat(':')) return out;
+                r.ws();size_t start=r.i;
+                if(!r.value(raw)) return out;
                 if(key=="earned") e.earned=raw=="true";
                 else if(key=="earned_time") e.time=uint32_t(strtoul(raw.c_str(),nullptr,10));
+                else e.extra[key]=text.substr(start,r.i-start);
                 if(r.eat(',')) continue;
                 if(!r.eat('}')) return out;
                 break;
@@ -188,7 +191,9 @@ inline bool prepare(const Schema& s,const UserStats& u,const fs::path& settings,
     for(auto& x:s.achievements){auto it=u.unlocks.find(x.block);if(it==u.unlocks.end()||!it->second[x.bit])continue;
         auto& e=earned[x.name];if(!e.earned){e.earned=true;e.time=it->second[x.bit];}}
     std::string out="{\n";bool first=true;
-    for(auto& [name,e]:earned){out+=std::string(first?"":",\n")+"  \""+json_escape(name)+"\": {\"earned\": "+(e.earned?"true":"false")+", \"earned_time\": "+std::to_string(e.time)+"}";first=false;}
+    for(auto& [name,e]:earned){out+=std::string(first?"":",\n")+"  \""+json_escape(name)+"\": {\"earned\": "+(e.earned?"true":"false")+", \"earned_time\": "+std::to_string(e.time);
+        for(auto& [key,value]:e.extra)out+=", \""+json_escape(key)+"\": "+value;
+        out+="}";first=false;}
     out+="\n}\n";
     if(!write(saves/"achievements.json",out)) return false;
     for(auto& x:s.stats){auto it=u.values.find(x.id);if(it==u.values.end())continue;

@@ -298,6 +298,9 @@ if [[ -z $cc32 ]]; then cc32=$(ls -d /nix/store/*-i686-w64-mingw32-gcc-wrapper-*
 UWP_OBJ_DIR="$out/obj/runner" "$CB/scripts/build.sh" --uwp --link-arg "$out/obj/sqlite3.lib" --link-arg bcrypt.lib --out "$out/play-runner.exe" host/tls_slot0.cpp tests/play-runner.cpp tests/play-runner-launch.cpp qrcodegen.cpp vendor/lzma/LzmaDec.c vendor/zstd/zstddeclib.c vendor/zlib/adler32.c vendor/zlib/crc32.c vendor/zlib/inffast.c vendor/zlib/inflate.c vendor/zlib/inftrees.c vendor/zlib/zutil.c -- /MT /O2 /Iout/obj /I../uwph/host/third_party/sqlite /I../../../out/ui-assets
 # Use the exact packaged carriers from the launcher build.
 cp out/layout/play-tls-*.dll out/layout/uwph-u32c.dll "$out/"
+# A scheduled press exactly at the run boundary must publish before wait returns.
+PRUN_GAME_PAD=a@1 WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 5 wine "$out/play-runner.exe" pad-end > "$out/pad-end.log" 2>&1
+grep -q 'PLAY-PAD-END press=1' "$out/pad-end.log"
 # Owned stand-in so steam-client proves refusal of a present root client DLL.
 cp "$out/play-dependency.dll" "$out/steamclient64.dll"
 # Steam leaderboards run on their own: the provider stand-in is staged as the

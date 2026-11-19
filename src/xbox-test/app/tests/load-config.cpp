@@ -3,4 +3,5 @@
 // mapped-only loads that Play may later prepare for executable guest code.
 #define CONFIG_TEST_MAPPER "../../../app/host/wxl_mapper.h"
 #define CONFIG_TEST_MAPPED 1
+#define CONFIG_TEST_TLS 1
 #include "../../uwph/host/tests/load-config-test.cpp"

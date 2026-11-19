@@ -284,6 +284,13 @@ int main(int argc,char** argv) {
     assert(rngCalls>=1 && rngCalls<=8 && resolutions>1 && observations==3);
     puts("MSVC-COOKIE owned static CRT complement, TLS-before-entry and exception/unwind passed");
     const auto explicitMode=wxl::LoadConfig::msvc_x64_cookie;
+    { wchar_t wide[4096];
+      assert(MultiByteToWideChar(CP_UTF8,0,largeTlsPath.c_str(),-1,wide,4096)); reset();
+      assert(!wxl::run(wide,log_line,nullptr,resolve,explicitMode));
+      assert(lastLog=="WXL FAIL explicit MSVC trusted TLS metadata/provider");
+      assert(allocations==1 && releases==1 && rngCalls==1 && resolutions>1);
+      puts("MSVC-COOKIE PASS: executable run forwards explicit load-config policy before TLS preparation");
+    }
     { auto f=original; f.sections()[0].PointerToRawData=DWORD(f.bytes.size());
       auto path=f.save(argv[2],9999); wchar_t wide[4096];
       assert(MultiByteToWideChar(CP_UTF8,0,path.c_str(),-1,wide,4096)); reset(); wxl::Image image;
