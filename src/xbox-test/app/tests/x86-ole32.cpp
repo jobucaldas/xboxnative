@@ -36,9 +36,9 @@ int main() {
 
     uint32_t guid = 0x4000, text = 0x4100, parsed = 0x4200;
     CHECK(call("CoCreateGuid", {guid}) == 0);
-    CHECK(mem.r8(guid + 6) == 0x47 && mem.r8(guid + 8) == 0x89);
+    CHECK(mem.r8(guid + 6) == 0x07 && mem.r8(guid + 7) == 0x48 && mem.r8(guid + 8) == 0x89);
     CHECK(call("StringFromGUID2", {guid, text, 39}) == 39);
-    CHECK(guest.wstr(text) == u"{04030201-0605-0847-890a-0b0c0d0e0f10}");
+    CHECK(guest.wstr(text) == u"{04030201-0605-4807-890A-0B0C0D0E0F10}");
     uint32_t input = guest.put_wstr(guest.wstr(text));
     CHECK(call("CLSIDFromString", {input, parsed}) == 0);
     for (unsigned i = 0; i < 16; ++i) CHECK(mem.r8(guid + i) == mem.r8(parsed + i));
