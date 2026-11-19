@@ -109,7 +109,7 @@ inline void register_d3d9_com(ComSpace& s, Host& h) {
     s.interface_("IDirect3DTexture9",22);
     s.interface_("IDirect3DSwapChain9",10);
     s.interface_("IDirect3DStateBlock9",7);
-    s.interface_("IDirect3DVertexDeclaration9",6);
+    s.interface_("IDirect3DVertexDeclaration9",5);
     s.interface_("IDirect3DVertexShader9",5);
     s.interface_("IDirect3DPixelShader9",5);
     auto method=[&](const char* iface,unsigned slot,unsigned argc,Marshaller fn){
@@ -194,7 +194,7 @@ inline void register_d3d9_com(ComSpace& s, Host& h) {
     method("IDirect3DDevice9",76,2,[dev](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1))return E_POINTER;RECT x{};HRESULT hr=dev(p)->GetScissorRect(&x);if(SUCCEEDED(hr))c.mem.write_bytes(c.arg(1),&x,sizeof(x));return uint32_t(hr);});
     method("IDirect3DDevice9",79,2,[dev](Proxy& p,Cpu& c){return uint32_t(dev(p)->SetNPatchMode(d3d9_float_slot(c,1)));});
     method("IDirect3DDevice9",82,7,[dev](Proxy& p,Cpu& c){return uint32_t(dev(p)->DrawIndexedPrimitive(D3DPRIMITIVETYPE(c.arg(1)),int32_t(c.arg(2)),c.arg(3),c.arg(4),c.arg(5),c.arg(6)));});
-    method("IDirect3DDevice9",84,9,[dev](Proxy& p,Cpu& c)->uint32_t {uint32_t pc=c.arg(4),format=c.arg(6),stride=c.arg(8);uint64_t indices=d3d9_up_index_count(D3DPRIMITIVETYPE(c.arg(1)),pc);uint64_t index_bytes=indices*(format==D3DFMT_INDEX16?2:format==D3DFMT_INDEX32?4:0),vertex_bytes=uint64_t(c.arg(3))*stride;if(!stride||!index_bytes||index_bytes>D3D9_GUEST_SIZE||vertex_bytes>D3D9_GUEST_SIZE)return D3DERR_INVALIDCALL;auto ib=c.mem.read_bytes(c.arg(5),uint32_t(index_bytes));auto vb=c.mem.read_bytes(c.arg(7),uint32_t(vertex_bytes));return uint32_t(dev(p)->DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE(c.arg(1)),c.arg(2),c.arg(3),pc,ib.data(),D3DFORMAT(format),vb.data(),stride));});
+    method("IDirect3DDevice9",84,9,[dev](Proxy& p,Cpu& c)->uint32_t {uint32_t pc=c.arg(4),format=c.arg(6),stride=c.arg(8);uint64_t indices=d3d9_up_index_count(D3DPRIMITIVETYPE(c.arg(1)),pc);uint64_t index_bytes=indices*(format==D3DFMT_INDEX16?2:format==D3DFMT_INDEX32?4:0),vertex_bytes=(uint64_t(c.arg(2))+c.arg(3))*stride;if(!stride||!index_bytes||index_bytes>D3D9_GUEST_SIZE||vertex_bytes>D3D9_GUEST_SIZE)return D3DERR_INVALIDCALL;auto ib=c.mem.read_bytes(c.arg(5),uint32_t(index_bytes));auto vb=c.mem.read_bytes(c.arg(7),uint32_t(vertex_bytes));return uint32_t(dev(p)->DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE(c.arg(1)),c.arg(2),c.arg(3),pc,ib.data(),D3DFORMAT(format),vb.data(),stride));});
     method("IDirect3DDevice9",86,3,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1)||!c.arg(2))return E_POINTER;std::vector<D3DVERTEXELEMENT9> elements;for(unsigned i=0;i<65;++i){auto x=d3d9_read_struct<D3DVERTEXELEMENT9>(c,c.arg(1)+i*sizeof(D3DVERTEXELEMENT9));elements.push_back(x);if(x.Stream==0xFF)break;}if(elements.empty()||elements.back().Stream!=0xFF)return D3DERR_INVALIDCALL;IDirect3DVertexDeclaration9* x=nullptr;HRESULT hr=dev(p)->CreateVertexDeclaration(elements.data(),&x);if(SUCCEEDED(hr))c.mem.w32(c.arg(2),d3d9_wrap(s,c,"IDirect3DVertexDeclaration9",x));else c.mem.w32(c.arg(2),0);return uint32_t(hr);});
     method("IDirect3DDevice9",87,2,[dev,&s](Proxy& p,Cpu& c)->uint32_t {auto* x=c.arg(1)?static_cast<IDirect3DVertexDeclaration9*>(s.by_guest(c.arg(1)).host):nullptr;return uint32_t(dev(p)->SetVertexDeclaration(x));});
     method("IDirect3DDevice9",96,4,[dev](Proxy& p,Cpu& c)->uint32_t {uint32_t n=c.arg(3);if(n>256)return D3DERR_INVALIDCALL;auto b=c.mem.read_bytes(c.arg(2),n*16);return uint32_t(dev(p)->SetVertexShaderConstantI(c.arg(1),reinterpret_cast<const int*>(b.data()),n));});
@@ -219,11 +219,11 @@ inline void register_d3d9_com(ComSpace& s, Host& h) {
     method("IDirect3DDevice9",81,4,[dev](Proxy& p,Cpu& c){return uint32_t(dev(p)->DrawPrimitive(D3DPRIMITIVETYPE(c.arg(1)),c.arg(2),c.arg(3)));});
     method("IDirect3DDevice9",83,5,[dev](Proxy& p,Cpu& c)->uint32_t {uint32_t primitive_count=c.arg(2),stride=c.arg(4);uint64_t vertices=primitive_count;if(c.arg(1)==D3DPT_TRIANGLELIST)vertices*=3;else if(c.arg(1)==D3DPT_TRIANGLESTRIP||c.arg(1)==D3DPT_TRIANGLEFAN)vertices+=2;else if(c.arg(1)==D3DPT_LINELIST)vertices*=2;else if(c.arg(1)==D3DPT_LINESTRIP)vertices+=1;uint64_t bytes=vertices*stride;if(!stride||bytes>D3D9_GUEST_SIZE)return D3DERR_INVALIDCALL;auto data=c.mem.read_bytes(c.arg(3),uint32_t(bytes));return uint32_t(dev(p)->DrawPrimitiveUP(D3DPRIMITIVETYPE(c.arg(1)),primitive_count,data.data(),stride));});
     method("IDirect3DDevice9",89,2,[dev](Proxy& p,Cpu& c){return uint32_t(dev(p)->SetFVF(c.arg(1)));});
-    method("IDirect3DDevice9",91,3,[dev,&s](Proxy& p,Cpu& c)->uint32_t {IDirect3DVertexShader9* x=nullptr;uint32_t n=d3d9_shader_bytes(c,c.arg(1));auto b=c.mem.read_bytes(c.arg(1),n);HRESULT hr=dev(p)->CreateVertexShader(reinterpret_cast<const DWORD*>(b.data()),&x);if(SUCCEEDED(hr)&&c.arg(2))c.mem.w32(c.arg(2),d3d9_wrap(s,c,"IDirect3DVertexShader9",x));return uint32_t(hr);});
+    method("IDirect3DDevice9",91,3,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;IDirect3DVertexShader9* x=nullptr;uint32_t n=d3d9_shader_bytes(c,c.arg(1));auto b=c.mem.read_bytes(c.arg(1),n);HRESULT hr=dev(p)->CreateVertexShader(reinterpret_cast<const DWORD*>(b.data()),&x);if(SUCCEEDED(hr)&&c.arg(2))c.mem.w32(c.arg(2),d3d9_wrap(s,c,"IDirect3DVertexShader9",x));return uint32_t(hr);});
     method("IDirect3DDevice9",92,2,[dev,&s](Proxy& p,Cpu& c)->uint32_t {auto* x=c.arg(1)?static_cast<IDirect3DVertexShader9*>(s.by_guest(c.arg(1)).host):nullptr;return uint32_t(dev(p)->SetVertexShader(x));});
     method("IDirect3DDevice9",94,4,[dev](Proxy& p,Cpu& c)->uint32_t {uint32_t n=c.arg(3);if(n>256)return D3DERR_INVALIDCALL;auto bits=c.mem.read_bytes(c.arg(2),n*16);return uint32_t(dev(p)->SetVertexShaderConstantF(c.arg(1),reinterpret_cast<const float*>(bits.data()),n));});
     method("IDirect3DDevice9",100,5,[dev,&s](Proxy& p,Cpu& c)->uint32_t {auto* x=c.arg(2)?static_cast<IDirect3DVertexBuffer9*>(s.by_guest(c.arg(2)).host):nullptr;return uint32_t(dev(p)->SetStreamSource(c.arg(1),x,c.arg(3),c.arg(4)));});
-    method("IDirect3DDevice9",106,3,[dev,&s](Proxy& p,Cpu& c)->uint32_t {IDirect3DPixelShader9* x=nullptr;uint32_t n=d3d9_shader_bytes(c,c.arg(1));auto b=c.mem.read_bytes(c.arg(1),n);HRESULT hr=dev(p)->CreatePixelShader(reinterpret_cast<const DWORD*>(b.data()),&x);if(SUCCEEDED(hr)&&c.arg(2))c.mem.w32(c.arg(2),d3d9_wrap(s,c,"IDirect3DPixelShader9",x));return uint32_t(hr);});
+    method("IDirect3DDevice9",106,3,[dev,&s](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;IDirect3DPixelShader9* x=nullptr;uint32_t n=d3d9_shader_bytes(c,c.arg(1));auto b=c.mem.read_bytes(c.arg(1),n);HRESULT hr=dev(p)->CreatePixelShader(reinterpret_cast<const DWORD*>(b.data()),&x);if(SUCCEEDED(hr)&&c.arg(2))c.mem.w32(c.arg(2),d3d9_wrap(s,c,"IDirect3DPixelShader9",x));return uint32_t(hr);});
     method("IDirect3DDevice9",107,2,[dev,&s](Proxy& p,Cpu& c)->uint32_t {auto* x=c.arg(1)?static_cast<IDirect3DPixelShader9*>(s.by_guest(c.arg(1)).host):nullptr;return uint32_t(dev(p)->SetPixelShader(x));});
     auto register_resource = [&](const char* iface, auto resource_of) {
         method(iface,3,2,[&s,resource_of](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1))return E_POINTER;IDirect3DDevice9* x=nullptr;HRESULT hr=resource_of(static_cast<IUnknown*>(p.host))->GetDevice(&x);if(SUCCEEDED(hr)){bool live=s.has_proxy_for(x);uint32_t guest=d3d9_wrap(s,c,"IDirect3DDevice9",x);auto focus=s.d3d9_focus_windows.find(x);if(focus!=s.d3d9_focus_windows.end()){s.by_guest(guest).d3d9_focus_window=focus->second.focus_window;if(!live&&focus->second.host_release){focus->second.host_release();focus->second.host_release={};}}c.mem.w32(c.arg(1),guest);}else c.mem.w32(c.arg(1),0);return uint32_t(hr);});
@@ -271,9 +271,9 @@ inline void register_d3d9_com(ComSpace& s, Host& h) {
     static constexpr unsigned buffer_arities[]={3,1,1,2,5,4,2,2,1,1,1,5,1,2};
     static constexpr unsigned shader_arities[]={3,1,1,2,3};
     static constexpr unsigned texture_arities[]={3,1,1,2,5,4,2,2,1,1,1,2,1,1,2,1,1,3,3,5,2,2};
-    static constexpr unsigned swapchain_arities[]={3,1,1,6,2,4,3,3,2,2};
+    static constexpr unsigned swapchain_arities[]={3,1,1,6,2,4,2,2,2,2};
     static constexpr unsigned stateblock_arities[]={3,1,1,2,1,1,1};
-    static constexpr unsigned declaration_arities[]={3,1,1,2,2,2};
+    static constexpr unsigned declaration_arities[]={3,1,1,2,3};
     d3d9_register_gaps(s,h,"IDirect3D9",d3d9_arities);
     d3d9_register_gaps(s,h,"IDirect3D9Ex",d3d9ex_arities);
     d3d9_register_gaps(s,h,"IDirect3DDevice9",device_arities);
