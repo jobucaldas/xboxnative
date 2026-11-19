@@ -494,6 +494,31 @@ extern "C" DWORD WINAPI d3d10_test_entry() {
             DestroyWindow(window);
         }
     }
+    // Rebinding a prefix of constant-buffer slots keeps the later slots bound
+    // (and referenced); only OM/SO target lists replace the whole set.
+    {
+        D3D10_BUFFER_DESC cbDesc{};cbDesc.ByteWidth=16;cbDesc.Usage=D3D10_USAGE_DEFAULT;cbDesc.BindFlags=D3D10_BIND_CONSTANT_BUFFER;
+        ID3D10Buffer *first=nullptr,*second=nullptr,*third=nullptr;
+        CHECK_HR(device->CreateBuffer(&cbDesc,nullptr,&first));
+        CHECK_HR(device->CreateBuffer(&cbDesc,nullptr,&second));
+        CHECK_HR(device->CreateBuffer(&cbDesc,nullptr,&third));
+        if(first&&second&&third) {
+            ID3D10Buffer* pair[2]={first,second};
+            device->VSSetConstantBuffers(0,2,pair);
+            ULONG bound=second->AddRef();second->Release();
+            device->VSSetConstantBuffers(0,1,&third);
+            ULONG after=second->AddRef();second->Release();
+            CHECK(after==bound);
+            ID3D10Buffer* got=nullptr;
+            device->VSGetConstantBuffers(1,1,&got);
+            CHECK(got==second);
+            if(got)got->Release();
+        }
+        device->ClearState();
+        if(first)first->Release();
+        if(second)second->Release();
+        if(third)third->Release();
+    }
     device->ClearState();
     device->Flush();
     device->Release();

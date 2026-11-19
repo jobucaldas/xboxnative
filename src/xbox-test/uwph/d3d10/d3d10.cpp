@@ -696,7 +696,7 @@ struct Device : d3dshim::Base, ID3D10Device1 {
         ID3D11RenderTargetView* list[D3D10_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
         UINT n=unwrap(values,count,list);
         auto depthView=behind<ID3D11DepthStencilView>(depth);
-        renderTargets.setRange(0,n,reinterpret_cast<IUnknown* const*>(list));
+        renderTargets.setAll(n,reinterpret_cast<IUnknown* const*>(list));
         depthStencilView.set(0,depthView);
         context()->OMSetRenderTargets(n,list,depthView);
     }
@@ -711,7 +711,7 @@ struct Device : d3dshim::Base, ID3D10Device1 {
     void STDMETHODCALLTYPE SOSetTargets(UINT count,ID3D10Buffer* const* values,const UINT* offsets) override {
         ID3D11Buffer* list[D3D10_SO_BUFFER_SLOT_COUNT]{};
         UINT n=unwrap(values,count,list);
-        streamOutput.setRange(0,n,reinterpret_cast<IUnknown* const*>(list));
+        streamOutput.setAll(n,reinterpret_cast<IUnknown* const*>(list));
         for(UINT i=0;i<D3D10_SO_BUFFER_SLOT_COUNT;++i)
             streamOutputOffsets[i]=i<n&&offsets?offsets[i]:0;
         context()->SOSetTargets(n,list,streamOutputOffsets);
@@ -922,6 +922,7 @@ struct Device : d3dshim::Base, ID3D10Device1 {
         inputLayout.clear();indexBuffer.clear();depthStencilState.clear();blendState.clear();
         rasterizerState.clear();depthStencilView.clear();predicate.clear();
         vertexBuffers.clear();renderTargets.clear();streamOutput.clear();
+        for(UINT& offset:streamOutputOffsets)offset=0;
     }
     void STDMETHODCALLTYPE Flush() override { context()->Flush(); }
 

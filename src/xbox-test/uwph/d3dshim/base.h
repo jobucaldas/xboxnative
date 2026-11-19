@@ -124,9 +124,16 @@ template<unsigned N> struct Held {
         objects[index]=object;
         if(object)object->AddRef();
     }
+    // Replaces only [start, start+count): constant buffers, views, samplers
+    // and vertex buffers keep the slots after the range bound.
     void setRange(unsigned start,unsigned count,IUnknown* const* list) {
         for(unsigned i=0;i<count;++i)set(start+i,list?list[i]:nullptr);
-        for(unsigned i=start+count;i<N;++i)set(i,nullptr);
+    }
+    // Replaces the whole set: OMSetRenderTargets / SOSetTargets unbind every
+    // slot past the ones given.
+    void setAll(unsigned count,IUnknown* const* list) {
+        setRange(0,count,list);
+        for(unsigned i=count;i<N;++i)set(i,nullptr);
     }
     void clear() { for(unsigned i=0;i<N;++i)set(i,nullptr); }
 };
