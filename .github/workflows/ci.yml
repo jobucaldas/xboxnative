@@ -188,6 +188,8 @@ jobs:
         run: bash src/xbox-test/uwph/host/run-reg-killtest.sh
       - name: Inert Wine config opt-in and active-config rejection
         run: bash src/xbox-test/uwph/host/tests/run-load-config.sh
+      - name: Host MLP wine-pe donor route contract
+        run: bash src/xbox-test/uwph/host/test-mlp-wine-pe.sh
       - name: Launcher mapped-image load-config rejection
         run: bash src/xbox-test/app/tests/load-config.sh
       - name: PE32+ unwind registration accepts sorted ranges and rejects corrupt tables

@@ -20,6 +20,7 @@ struct Summary { unsigned resolved=0, stubbed=0; std::string first="none"; };
 static std::map<std::string, Summary> summaries;
 static std::map<std::string, wxl::Image*> assets;
 static std::map<std::string, HMODULE> systems;
+static std::map<std::string, HMODULE> donors;
 static wxl::Log log;
 static uintptr_t asset_export(wxl::Image& image, const char* name, WORD ordinal) {
     auto nt=(IMAGE_NT_HEADERS64*)(image.base+((IMAGE_DOS_HEADER*)image.base)->e_lfanew);
@@ -60,6 +61,15 @@ static uintptr_t native_kernel(const char* name,std::string& provider) {
     }
     return 0;
 }
+static uintptr_t donor_export(const std::string& key, const char* name, WORD ordinal) {
+    auto it=donors.find(key);
+    if(it==donors.end()) {
+        std::wstring wide(key.begin(),key.end());
+        it=donors.emplace(key,LoadPackagedLibrary(wide.c_str(),0)).first;
+    }
+    if(!it->second) return 0;
+    return (uintptr_t)GetProcAddress(it->second,name ? name : MAKEINTRESOURCEA(ordinal));
+}
 static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     std::string key=dll; for(auto& c:key) if(c>='A' && c<='Z') c+=32;
     std::string symbol=name ? name : "#"+std::to_string(ordinal);
@@ -67,7 +77,10 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
     for(auto& route:routes) if(key==route.dll) kind=route.kind;
     uintptr_t address=0;
     std::string provider=kind; bool named_stub=false;
-    if(!strcmp(kind,"system")) {
+    if(!strcmp(kind,"wine-pe")) {
+        address=donor_export(key,name,ordinal);
+        if(address) provider="wine-pe:"+key;
+    } else if(!strcmp(kind,"system")) {
         auto it=systems.find(key);
         if(it==systems.end()) {
             std::wstring wide(key.begin(),key.end());
