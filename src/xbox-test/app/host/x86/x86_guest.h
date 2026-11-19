@@ -320,7 +320,10 @@ struct Guest {
         auto it=sync_handles.find(h); if(it==sync_handles.end())return 0xffffffffu; auto& o=sync_objects[it->second];
         uint32_t tid=c.fs_base?c.mem.r32(c.fs_base+0x24):1u;
 #if defined(_WIN32)
-        if(o.kind==SyncKind::Event&&o.native_event){DWORD waited=WaitForSingleObject(reinterpret_cast<HANDLE>(o.native_event),timeout);if(waited==WAIT_OBJECT_0){o.signaled=o.manual;return 0;}if(waited==WAIT_TIMEOUT)return 258u;return 0xffffffffu;}
+        if(o.kind==SyncKind::Event&&o.native_event){
+            if(host.dsound_wait){uint32_t waited=host.dsound_wait(c,h,timeout);if(waited!=Host::DSOUND_WAIT_UNHANDLED){if(waited==WAIT_OBJECT_0){o.signaled=o.manual;return 0;}if(waited==WAIT_TIMEOUT)return 258u;return 0xffffffffu;}}
+            DWORD waited=WaitForSingleObject(reinterpret_cast<HANDLE>(o.native_event),timeout);if(waited==WAIT_OBJECT_0){o.signaled=o.manual;return 0;}if(waited==WAIT_TIMEOUT)return 258u;return 0xffffffffu;
+        }
 #endif
         if(o.kind==SyncKind::Event&&o.signaled){if(!o.manual)o.signaled=false;return 0;}
         if(o.kind==SyncKind::Semaphore&&o.count){--o.count;return 0;}

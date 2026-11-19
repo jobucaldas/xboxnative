@@ -22,6 +22,7 @@ static WAVEHDR* reset_headers[3];
 static volatile LONG reset_done_count;
 static volatile LONG reset_order[3];
 static volatile LONG close_on_done;
+static volatile LONG close_done_closed;
 static volatile MMRESULT close_done_result = MMSYSERR_ERROR;
 static volatile LONG drain_done;
 static WAVEHDR* window_header;
@@ -41,6 +42,8 @@ static void CALLBACK wave_done(HWAVEOUT handle, UINT message, DWORD_PTR instance
         InterlockedExchange(&open_before_return, 1);
     if (message == WOM_CLOSE && !InterlockedCompareExchange(&close_returned, 0, 0))
         InterlockedExchange(&close_before_return, 1);
+    if (message == WOM_CLOSE && InterlockedCompareExchange(&close_on_done, 0, 0))
+        InterlockedExchange(&close_done_closed, 1);
     if (message != WOM_DONE) return;
     if (InterlockedCompareExchange(&close_on_done, 0, 0)) {
         close_done_result = waveOutClose(handle); return;
@@ -134,9 +137,9 @@ int main() {
     callback_close_header.lpData = callback_close_samples; callback_close_header.dwBufferLength = sizeof(callback_close_samples);
     if (waveOutOpen(&callback_close_output, WAVE_MAPPER, &format, reinterpret_cast<DWORD_PTR>(&wave_done), 0x71a0u, CALLBACK_FUNCTION) != MMSYSERR_NOERROR ||
         waveOutPrepareHeader(callback_close_output, &callback_close_header, sizeof(callback_close_header)) != MMSYSERR_NOERROR) return 46;
-    InterlockedExchange(&close_on_done, 1); close_done_result = MMSYSERR_ERROR;
+    InterlockedExchange(&close_on_done, 1); close_done_closed = 0; close_done_result = MMSYSERR_ERROR;
     if (waveOutWrite(callback_close_output, &callback_close_header, sizeof(callback_close_header)) != MMSYSERR_NOERROR ||
-        waveOutReset(callback_close_output) != MMSYSERR_NOERROR || close_done_result != MMSYSERR_NOERROR) return 47;
+        waveOutReset(callback_close_output) != MMSYSERR_NOERROR || close_done_result != WAVERR_STILLPLAYING || !close_done_closed) return 47;
     InterlockedExchange(&close_on_done, 0);
     HWAVEOUT drain_output = nullptr; WAVEHDR drain_header{}; char drain_samples[1920]{};
     drain_header.lpData = drain_samples; drain_header.dwBufferLength = sizeof(drain_samples); drain_done = 0;
@@ -167,8 +170,8 @@ int main() {
     WAVEHDR event_header{}; event_header.lpData = samples; event_header.dwBufferLength = sizeof(samples); MMTIME event_time{}; event_time.wType = TIME_BYTES;
     if (waveOutPrepareHeader(output, &event_header, sizeof(event_header)) != MMSYSERR_NOERROR ||
         waveOutWrite(output, &event_header, sizeof(event_header)) != MMSYSERR_NOERROR ||
-        WaitForSingleObject(event, 5000) != WAIT_OBJECT_0 ||
-        waveOutGetPosition(output, &event_time, sizeof(event_time)) != MMSYSERR_NOERROR || !(event_header.dwFlags & WHDR_DONE) ||
+        WaitForSingleObject(event, 5000) != WAIT_OBJECT_0 || !(event_header.dwFlags & WHDR_DONE) ||
+        waveOutGetPosition(output, &event_time, sizeof(event_time)) != MMSYSERR_NOERROR ||
         waveOutReset(output) != MMSYSERR_NOERROR || !(event_header.dwFlags & WHDR_DONE) ||
         waveOutUnprepareHeader(output, &event_header, sizeof(event_header)) != MMSYSERR_NOERROR ||
         waveOutClose(output) != MMSYSERR_NOERROR) return 22;
