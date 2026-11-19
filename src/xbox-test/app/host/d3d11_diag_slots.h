@@ -24,7 +24,7 @@ enum DeviceSlot {
 // ---- ID3D11DeviceContext (ID3D11DeviceChild's 3 come first). Only the ones
 // the draw summary reads are named.
 enum ContextSlot {
-    PSSetShaderResources=8,PSSetShader=9,DrawIndexed=12,Draw=13,Map=14,Unmap=15,DrawIndexedInstanced=20,DrawInstanced=21,
+    ContextRelease=2,PSSetShaderResources=8,PSSetShader=9,DrawIndexed=12,Draw=13,Map=14,Unmap=15,DrawIndexedInstanced=20,DrawInstanced=21,
     GSSetShader=23,IASetPrimitiveTopology=24,VSSetShaderResources=25,SetPredication=30,GSSetShaderResources=31,
     OMSetRenderTargets=33,OMSetRenderTargetsAndUnorderedAccessViews=34,SOSetTargets=37,DrawAuto=38,
     DrawIndexedInstancedIndirect=39,DrawInstancedIndirect=40,Dispatch=41,DispatchIndirect=42,
@@ -36,7 +36,7 @@ enum ContextSlot {
     // through it shows clears=0 in the summary. It is the 18th Context1
     // method, so it sits 18 slots past FinishCommandList (the last base one):
     // 114 + 18 = 132.
-    Context1ClearView=132
+    ClearState=110,Context1ClearView=132
 };
 
 }  // namespace d3d11_diag

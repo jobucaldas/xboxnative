@@ -43,6 +43,14 @@ static ID3D11Device* make(ID3D11DeviceContext** context=nullptr) {
     }
     return nullptr;
 }
+static DWORD WINAPI concurrentContextChurn(void* arg) {
+    auto* device=static_cast<ID3D11Device*>(arg);
+    for(unsigned i=0;i<32;++i) {
+        ID3D11DeviceContext* churn=nullptr;
+        if(SUCCEEDED(device->CreateDeferredContext(0,&churn))&&churn)churn->Release();
+    }
+    return 0;
+}
 // The draw summary on the real immediate context: the counters follow the
 // topology and shaders set on that context, and a render target set is
 // described once by format and size. Results are untouched (draws with no
@@ -52,6 +60,13 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     d3d11_diag::configure(sinkLine);
     d3d11_diag::adopt(device);
     CHECK(count("diagnostics on")==1);
+    size_t contextPatchCount=0;const d3d11_diag::Patch* contextPatchTable=d3d11_diag::contextPatches(contextPatchCount);
+    bool releaseHook=false,clearStateHook=false;
+    for(size_t i=0;i<contextPatchCount;++i) {
+        if(contextPatchTable[i].slot==d3d11_diag::ContextRelease)releaseHook=contextPatchTable[i].hook==(void*)&d3d11_diag::contextRelease;
+        if(contextPatchTable[i].slot==d3d11_diag::ClearState)clearStateHook=contextPatchTable[i].hook==(void*)&d3d11_diag::contextClearState;
+    }
+    CHECK(releaseHook&&clearStateHook);
     D3D11_TEXTURE2D_DESC target{};target.Width=64;target.Height=64;target.MipLevels=1;target.ArraySize=1;
     target.Format=DXGI_FORMAT_R8G8B8A8_UNORM;target.SampleDesc.Count=1;target.Usage=D3D11_USAGE_DEFAULT;target.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
     ID3D11Texture2D* targetTexture=nullptr;ID3D11RenderTargetView* rtv=nullptr;
@@ -343,6 +358,7 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         deferred->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         deferred->Draw(3,0);
         CHECK(d3d11_diag::draws[1][0][0].load()==beforeDeferred+1);
+        d3d11_diag::stateOf(deferred).shaders.store(3);
         CHECK(d3d11_diag::deferredContexts.load()>=1);
         // The draw happened on a deferred context: the by-context split must
         // say so, or a replayed terrain pass is indistinguishable from an
@@ -351,12 +367,41 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
         ID3D11CommandList* list=nullptr;
         if(SUCCEEDED(deferred->FinishCommandList(FALSE,&list))&&list) {
             CHECK(d3d11_diag::commandLists.load()>=1);
+            CHECK(d3d11_diag::stateOf(deferred).topology.load()==0&&d3d11_diag::stateOf(deferred).shaders.load()==0);
+            d3d11_diag::stateOf(context).shaders.store(3);
             context->ExecuteCommandList(list,FALSE);
             CHECK(d3d11_diag::executedLists.load()>=1);
+            CHECK(d3d11_diag::stateOf(context).topology.load()==0&&d3d11_diag::stateOf(context).shaders.load()==0);
             list->Release();
         }
         deferred->Release();
     }
+    size_t activeContexts=0;
+    for(auto& state:d3d11_diag::contextStates)if(state.context.load())++activeContexts;
+    for(unsigned i=0;i<d3d11_diag::kMaxContexts+4;++i) {
+        ID3D11DeviceContext* churn=nullptr;
+        CHECK(SUCCEEDED(device->CreateDeferredContext(0,&churn))&&churn);
+        if(churn) {
+            CHECK(d3d11_diag::stateOf(churn).context.load()==churn);
+            churn->Release();
+        }
+    }
+    size_t activeAfterChurn=0;
+    for(auto& state:d3d11_diag::contextStates)if(state.context.load())++activeAfterChurn;
+    CHECK(activeAfterChurn==activeContexts);
+    HANDLE contextChurn[2]={CreateThread(nullptr,0,concurrentContextChurn,device,0,nullptr),
+        CreateThread(nullptr,0,concurrentContextChurn,device,0,nullptr)};
+    CHECK(contextChurn[0]&&contextChurn[1]);
+    for(HANDLE worker:contextChurn)if(worker){WaitForSingleObject(worker,INFINITE);CloseHandle(worker);}
+    size_t activeAfterConcurrentChurn=0;
+    for(auto& state:d3d11_diag::contextStates)if(state.context.load())++activeAfterConcurrentChurn;
+    CHECK(activeAfterConcurrentChurn==activeContexts);
+    // ClearState must drop the diagnostic pipeline along with D3D's bindings.
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+    auto& resetState=d3d11_diag::stateOf(context);
+    resetState.shaders.store(3);resetState.srvState.store(3);resetState.rtFormat.store(DXGI_FORMAT_R8G8B8A8_UNORM);
+    context->ClearState();
+    CHECK(resetState.topology.load()==0&&resetState.shaders.load()==0&&resetState.srvState.load()==0&&resetState.rtFormat.load()==0);
     // A resource bound as a target and then sampled: the read-while-bound
     // hazard the runtime fixes by silently unbinding the SRV. The bind must be
     // counted, or a black layer that samples its own target has no trace.
@@ -373,6 +418,8 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     d3d11_diag::noteSwapChain(1920,1080,DXGI_FORMAT_R8G8B8A8_UNORM,2);
     // Force the next window: the print path is the one the timer uses.
     d3d11_diag::summaryNext.store(0);
+    context->OMSetRenderTargets(1,&rtv,nullptr);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context->Draw(3,0);
     CHECK(count("draw summary 1/7: last topology=4(trianglelist)")==1);
     CHECK(count("draw summary 1/7: Draw calls=")==1);
