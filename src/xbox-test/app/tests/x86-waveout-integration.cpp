@@ -169,11 +169,18 @@ int main() {
         WaitForSingleObject(event, 0) != WAIT_OBJECT_0 || !ResetEvent(event)) return 21;
     WAVEHDR event_header{}; event_header.lpData = samples; event_header.dwBufferLength = sizeof(samples); MMTIME event_time{}; event_time.wType = TIME_BYTES;
     if (waveOutPrepareHeader(output, &event_header, sizeof(event_header)) != MMSYSERR_NOERROR ||
-        waveOutWrite(output, &event_header, sizeof(event_header)) != MMSYSERR_NOERROR ||
+        waveOutWrite(output, &event_header, sizeof(event_header)) != MMSYSERR_NOERROR) return 22;
+    Sleep(1000);
+    if (waveOutGetPosition(output, &event_time, sizeof(event_time)) != MMSYSERR_NOERROR ||
         WaitForSingleObject(event, 5000) != WAIT_OBJECT_0 || !(event_header.dwFlags & WHDR_DONE) ||
-        waveOutGetPosition(output, &event_time, sizeof(event_time)) != MMSYSERR_NOERROR ||
         waveOutReset(output) != MMSYSERR_NOERROR || !(event_header.dwFlags & WHDR_DONE) ||
-        waveOutUnprepareHeader(output, &event_header, sizeof(event_header)) != MMSYSERR_NOERROR ||
+        waveOutUnprepareHeader(output, &event_header, sizeof(event_header)) != MMSYSERR_NOERROR) return 22;
+    char followup_samples[48000]{}; WAVEHDR followup_header{}; followup_header.lpData = followup_samples; followup_header.dwBufferLength = sizeof(followup_samples);
+    if (waveOutPrepareHeader(output, &followup_header, sizeof(followup_header)) != MMSYSERR_NOERROR ||
+        waveOutWrite(output, &followup_header, sizeof(followup_header)) != MMSYSERR_NOERROR ||
+        WaitForSingleObject(event, 0) != WAIT_TIMEOUT || WaitForSingleObject(event, 5000) != WAIT_OBJECT_0 ||
+        !(followup_header.dwFlags & WHDR_DONE) || waveOutReset(output) != MMSYSERR_NOERROR ||
+        waveOutUnprepareHeader(output, &followup_header, sizeof(followup_header)) != MMSYSERR_NOERROR ||
         waveOutClose(output) != MMSYSERR_NOERROR) return 22;
     WNDCLASSEXA window_class{}; window_class.cbSize = sizeof(window_class); window_class.lpfnWndProc = wave_window;
     window_class.lpszClassName = "WaveOutFixtureWindow";

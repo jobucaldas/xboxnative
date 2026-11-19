@@ -125,7 +125,10 @@ inline uint32_t waveout_wait(Host& host,Cpu& c,uint32_t callback,uint32_t timeou
     for(auto& [token,output]:x86_wave_outputs()){
         if((output.flags&CALLBACK_TYPEMASK)!=CALLBACK_EVENT||uint32_t(output.callback)!=callback||!output.native_event)continue;
         uintptr_t guest_event=host.dsound_event?host.dsound_event(callback):0;
-        if(guest_event&&WaitForSingleObject(reinterpret_cast<HANDLE>(guest_event),0)==WAIT_OBJECT_0)return WAIT_OBJECT_0;
+        if(guest_event&&WaitForSingleObject(reinterpret_cast<HANDLE>(guest_event),0)==WAIT_OBJECT_0){
+            WaitForSingleObject(output.native_event,0);
+            return WAIT_OBJECT_0;
+        }
         DWORD waited=WaitForSingleObject(output.native_event,timeout);
         if(waited==WAIT_OBJECT_0){waveout_process(token,output,c);if(guest_event)WaitForSingleObject(reinterpret_cast<HANDLE>(guest_event),0);}
         return waited;
