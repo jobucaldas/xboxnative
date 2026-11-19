@@ -903,7 +903,10 @@ static bool cancel_queued(uint32_t appid) {   // A on the detail page: drop a jo
     std::lock_guard<std::mutex> l(g_dqm);
     auto it = std::find(g_dq.begin(), g_dq.end(), appid);
     if (it != g_dq.end()) { g_dq.erase(it); return true; }
-    if (g_fsDownloading) g_dqCancel.insert(appid);   // popped, but download_app has not reset g_dl.cancel yet
+    // A popped job consumes this token before download_app starts. Once the
+    // current job is already running, the caller sets g_dl.cancel directly;
+    // leaving a token behind would cancel the next reinstall of this app.
+    if (g_fsDownloading && !(g_dl.appid == appid && g_dl.state == 1)) g_dqCancel.insert(appid);
     return false;
 }
 static bool take_queued_cancel(uint32_t appid) { std::lock_guard<std::mutex> l(g_dqm); return g_dqCancel.erase(appid) != 0; }
