@@ -2045,6 +2045,8 @@ static void test_dbt_counter() {
            "DBT result differs: translated=%08x/%08x interpreted=%08x/%08x", translated.cpu.reg[EAX], translated.cpu.eflags,
            interpreted.cpu.reg[EAX], interpreted.cpu.eflags);
     EXPECT(translated.cpu.translated_blocks > 0, "DBT integer kernel executed no translated blocks");
+    EXPECT(translated.cpu.executed == interpreted.cpu.executed, "DBT counts %llu instructions, interpreter counts %llu",
+           (unsigned long long)translated.cpu.executed, (unsigned long long)interpreted.cpu.executed);
     std::printf("X86-DBT PASS: integer kernel translated=%llu interpreted=%llu result=%08x\n",
                 (unsigned long long)translated.cpu.translated_blocks, (unsigned long long)translated.cpu.interpreted_blocks,
                 translated.cpu.reg[EAX]);
