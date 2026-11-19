@@ -24,6 +24,11 @@ int main() {
     CHECK(std::strcmp(a,"A B -12 34 56 ab AB")==0);
     CHECK(play_wsprintf::wsprintfA(a,"%hd %hu %ld %li %lu %lx %lX %Ix %IX",-2,65535u,-3L,4L,5UL,0xabUL,0xabUL,0x123456789abcdef0ULL,0x123456789abcdef0ULL)==55);
     CHECK(std::strcmp(a,"-2 65535 -3 4 5 ab AB 123456789abcdef0 123456789ABCDEF0")==0);
+    CHECK(play_wsprintf::wsprintfA(a,"%hi %hx %hX %o %Id %Iu %I64d %I64u",-2,0xabu,0xabu,0755u,int64_t(-3),uint64_t(4),int64_t(-5),uint64_t(6))==22);
+    CHECK(std::strcmp(a,"-2 ab AB 755 -3 4 -5 6")==0);
+    CHECK(play_wsprintf::wsprintfA(a,"%.0s|%d","ignored",7)==2);
+    CHECK(std::strcmp(a,"|7")==0);
+    CHECK(play_wsprintf::wsprintfA(a,"%.2048x",0xabu)==1023&&a[1023]=='\0');
     CHECK(play_wsprintf::wsprintfA(a,"%p",reinterpret_cast<void*>(0x1234))==6);
     CHECK(std::strcmp(a,"0x1234")==0);
     CHECK(play_wsprintf::wsprintfA(a,"%.5x|%.4d|%.0u",0xabu,-2,0u)==13);
