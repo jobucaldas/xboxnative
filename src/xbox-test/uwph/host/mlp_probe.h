@@ -103,7 +103,7 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
         else if(!address) {address=native_kernel(name,provider);}
     }
     if(auto core=user32_core::resolve(dll,name)) {address=core;provider="uwph:u32c-record";named_stub=false;}
-    if(!address&&name&&key!="kernel32.dll") {
+    if(!address&&name&&key!="kernel32.dll"&&strcmp(kind,"wine-pe")) {
         address=pe_tail::resolve(key.c_str(),name);
         if(address)provider="system:pe-tail";
     }
