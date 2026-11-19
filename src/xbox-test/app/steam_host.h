@@ -33,6 +33,8 @@ namespace steam_host {
 
 // The interface version the client's own launcher asks for.
 inline constexpr const char* ClientInterface = "SteamClient021";
+// SteamClient020/021 append GetISteamRemotePlay and DestroyAllInterfaces.
+inline constexpr size_t ClientInterfaceSlots = 42;
 
 // Names the client resolves from the host module before it will connect. The
 // first is the version probe (without it the client logs "no bootstrapper

@@ -19,6 +19,7 @@
 #include "d3d12_diag.h"
 #include "../../uwph/vcruntime/route.h"
 #include "steam_app_ticket.h"
+#include "../steam_host.h"
 #include "redact.h"
 #include "../../shared/rwx_emulation.h"
 #include "../../shared/vulkan_driver_registry.h"
@@ -1427,7 +1428,7 @@ static void* clientGenericInterface(ClientWrapper* w,uintptr_t user,uintptr_t pi
 template<size_t... I> static std::array<void*,sizeof...(I)> clientTable(std::index_sequence<I...>) {
     return {{(I==12?(void*)&clientGenericInterface:(void*)&clientForward<I>)...}};
 }
-static auto clientVtable=clientTable(std::make_index_sequence<40>());
+static auto clientVtable=clientTable(std::make_index_sequence<steam_host::ClientInterfaceSlots>());
 using ClientCreate=void*(*)(const char*,int*);
 static ClientCreate emulatedCreate;
 static void* clientCreateInterface(const char* version,int* result) {
