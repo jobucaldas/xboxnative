@@ -44,6 +44,10 @@ void WINAPI entry(void) {
        creation.params.BehaviorFlags!=D3DCREATE_HARDWARE_VERTEXPROCESSING)ExitProcess(59);
     IDirect3DTexture9 *device_resource=0;
     if(FAILED(IDirect3DDevice9_CreateTexture(device,2,2,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&device_resource,0))||!device_resource)ExitProcess(62);
+    /* D3DX-style: GetDevice while the original device is still held, then let it go. */
+    IDirect3DDevice9 *peek=0;
+    if(FAILED(IDirect3DTexture9_GetDevice(device_resource,&peek))||!peek)ExitProcess(63);
+    IDirect3DDevice9_Release(peek);
     IDirect3DDevice9_Release(device);
     device=0;
     if(FAILED(IDirect3DTexture9_GetDevice(device_resource,&device))||!device)ExitProcess(60);

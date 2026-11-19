@@ -194,6 +194,11 @@ struct ComSpace {
     // `torn_down` makes the release idempotent and turns every later use of a
     // live proxy into a loud fault rather than a double release.
     ~ComSpace() { destroy_all(); }
+    // True while some guest proxy still wraps this host object.
+    bool has_proxy_for(const void* host) const {
+        for (const auto& entry : proxies) if (entry.second.host == host) return true;
+        return false;
+    }
     void destroy_all() {
         if (torn_down) return;
         torn_down = true;
