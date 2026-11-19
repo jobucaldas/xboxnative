@@ -126,6 +126,7 @@ template<unsigned N> struct Held {
     }
     void setRange(unsigned start,unsigned count,IUnknown* const* list) {
         for(unsigned i=0;i<count;++i)set(start+i,list?list[i]:nullptr);
+        for(unsigned i=start+count;i<N;++i)set(i,nullptr);
     }
     void clear() { for(unsigned i=0;i<N;++i)set(i,nullptr); }
 };
@@ -249,6 +250,7 @@ template<class T> inline T* wrap(ID3D11DeviceChild* object) {
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void** out) override { \
         if(!out)return E_POINTER; \
         *out=nullptr; \
+        if(IsEqualGUID(id,__uuidof(IUnknown))){*out=static_cast<IUnknown*>(this);AddRef();return S_OK;} \
         if(IsEqualGUID(id,d3dshim::baseId)){*out=static_cast<d3dshim::Base*>(this);return S_OK;} \
         for(unsigned i=0;i<interfaceCount;++i) \
             if(IsEqualGUID(id,*interfaceIds[i])){*out=static_cast<IUnknown*>(this);AddRef();return S_OK;} \

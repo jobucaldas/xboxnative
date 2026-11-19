@@ -1422,10 +1422,12 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
             auto wrapper=static_cast<Surface*>(surface);
             if(!wrapper->rtv)return D3DERR_INVALIDCALL;
             renderTarget.set(0,surface);
-            context()->OMSetRenderTargets(1,&wrapper->rtv,nullptr);
+            auto depth=depthStencil.objects[0]?static_cast<Surface*>(depthStencil.objects[0])->dsv:nullptr;
+            context()->OMSetRenderTargets(1,&wrapper->rtv,depth);
         } else {
             renderTarget.set(0,nullptr);
-            context()->OMSetRenderTargets(0,nullptr,nullptr);
+            auto depth=depthStencil.objects[0]?static_cast<Surface*>(depthStencil.objects[0])->dsv:nullptr;
+            context()->OMSetRenderTargets(0,nullptr,depth);
         }
         return D3D_OK;
     }
@@ -2763,11 +2765,36 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     // ResizeBuffers path of its own, so a fresh chain is the honest
     // implementation.
     HRESULT rebuildSwapChain(D3DPRESENT_PARAMETERS* parameters) {
-        if(swapChain){swapChain->Release();swapChain=nullptr;}
-        renderTarget.clear();depthStencil.clear();
-        HRESULT hr=createSwapChain(parameters);
-        if(FAILED(hr))return hr;
-        present=*parameters;
+        D3DPRESENT_PARAMETERS candidate=*parameters;
+        if(candidate.BackBufferFormat==D3DFMT_UNKNOWN&&!candidate.Windowed)return D3DERR_INVALIDCALL;
+        if(candidate.BackBufferFormat!=D3DFMT_UNKNOWN&&dxgiFormat(candidate.BackBufferFormat)==DXGI_FORMAT_UNKNOWN)return D3DERR_INVALIDCALL;
+        if(!candidate.BackBufferWidth)candidate.BackBufferWidth=1920;
+        if(!candidate.BackBufferHeight)candidate.BackBufferHeight=1080;
+        // Keep the old chain alive until the replacement has been built. Reset
+        // must leave it usable when the new parameters are rejected.
+        SwapChain* oldChain=swapChain;
+        IUnknown* oldTarget=renderTarget.objects[0];
+        IUnknown* oldDepth=depthStencil.objects[0];
+        if(oldTarget)oldTarget->AddRef();
+        if(oldDepth)oldDepth->AddRef();
+        swapChain=nullptr;renderTarget.clear();depthStencil.clear();
+        HRESULT hr=createSwapChain(&candidate);
+        if(FAILED(hr)) {
+            if(swapChain){swapChain->Release();swapChain=nullptr;}
+            renderTarget.clear();depthStencil.clear();
+            swapChain=oldChain;
+            renderTarget.set(0,oldTarget);depthStencil.set(0,oldDepth);
+            auto target=oldTarget?static_cast<Surface*>(oldTarget)->rtv:nullptr;
+            auto depth=oldDepth?static_cast<Surface*>(oldDepth)->dsv:nullptr;
+            context()->OMSetRenderTargets(target?1:0,target?&target:nullptr,depth);
+            if(oldTarget)oldTarget->Release();
+            if(oldDepth)oldDepth->Release();
+            return hr;
+        }
+        if(oldChain)oldChain->Release();
+        if(oldTarget)oldTarget->Release();
+        if(oldDepth)oldDepth->Release();
+        *parameters=candidate;present=candidate;
         return D3D_OK;
     }
     HRESULT createSwapChain(D3DPRESENT_PARAMETERS* parameters) {
@@ -2777,6 +2804,8 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
             // This adapter reports X8R8G8B8 (GetAdapterDisplayMode).
             parameters->BackBufferFormat=D3DFMT_X8R8G8B8;
         }
+        if(!parameters->BackBufferWidth)parameters->BackBufferWidth=1920;
+        if(!parameters->BackBufferHeight)parameters->BackBufferHeight=1080;
         DXGI_SWAP_CHAIN_DESC desc{};
         desc.BufferDesc.Width=parameters->BackBufferWidth;
         desc.BufferDesc.Height=parameters->BackBufferHeight;
