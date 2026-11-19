@@ -70,12 +70,14 @@ int main(int argc,char** argv) {
  feed.key(VK_CAPITAL,0x3A,false,true);feed.key(VK_CAPITAL,0x3A,false,false);next();next();CHECK(!(state(VK_CAPITAL)&1));
 
  // Focus wins over the presenting window.
- CHECK(setFocus(child)==nullptr);CHECK(feed.key('Z',0x2C,false,true));m=next();CHECK(m.hwnd==child);
+ setFocus(child);CHECK(feed.target()==child);CHECK(feed.key('Z',0x2C,false,true));m=next();CHECK(m.hwnd==child);
  feed.key('Z',0x2C,false,false);next();setFocus(nullptr);
 
- // Mouse: DIPs scale to the 1280x720 client area; the cursor is in screen space.
+ // Mouse: the presenting top-level receives pointer messages even when a child owns keyboard focus.
  POINT cursor{};
+ setFocus(child);CHECK(feed.target()==child);
  CHECK(feed.pointer(960,540,1920,1080,0));m=next();CHECK(m.message==WM_MOUSEMOVE&&m.hwnd==game&&m.lParam==MAKELPARAM(640,360)&&m.wParam==0);
+ setFocus(nullptr);
  CHECK(a.get_cursor(&cursor)&&cursor.x==740&&cursor.y==410);
  CHECK(feed.pointer(0,0,1920,1080,corewindow_input::Left));
  m=next();CHECK(m.message==WM_LBUTTONDOWN&&m.wParam==MK_LBUTTON&&m.lParam==MAKELPARAM(0,0));
@@ -97,7 +99,13 @@ int main(int argc,char** argv) {
  CHECK((state('W')&0x8000)&&(async(VK_RBUTTON)&0x8000)&&(state(VK_SHIFT)&0x8000));
  feed.release_all();
  CHECK(!(state('W')&0x8000)&&!(async(VK_RBUTTON)&0x8000)&&!(state(VK_SHIFT)&0x8000)&&!(state(VK_LSHIFT)&0x8000));
- CHECK(empty());
+ bool keyUp=false,shiftUp=false,buttonUp=false;
+ while(peek(&m,nullptr,0,0,PM_REMOVE)) {if(m.hwnd!=game)continue;
+  if(m.message==WM_KEYUP&&m.wParam=='W')keyUp=true;
+  if(m.message==WM_KEYUP&&m.wParam==VK_SHIFT)shiftUp=true;
+  if(m.message==WM_RBUTTONUP)buttonUp=true;
+ }
+ CHECK(keyUp&&shiftUp&&buttonUp);
  // A destroyed presenting window stops delivery without failing the feed.
  CHECK(api<decltype(&DestroyWindow)>("DestroyWindow")(game));while(!empty()){}
  CHECK(feed.target()==nullptr);CHECK(feed.key('A',0x1E,false,true));CHECK(empty());CHECK(!feed.pointer(1,1,2,2,0));

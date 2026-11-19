@@ -58,6 +58,11 @@ struct Feed {
         if(HWND h=api.foreground())return h;
         return fallback&&api.is_window(fallback)?fallback:nullptr;
     }
+    HWND mouse_target() const {
+        if(!api.complete())return nullptr;
+        if(fallback&&api.is_window(fallback))return fallback;
+        return api.foreground();
+    }
 
     void set(unsigned vk,bool pressed) {
         if(vk>=down.size()||down[vk]==pressed)return;
@@ -109,7 +114,7 @@ struct Feed {
     // (ClipCursor applies) and the guest window gets the same messages.
     bool pointer_screen(POINT screen,unsigned pressed) {
         if(!api.complete()||!api.set_cursor(screen.x,screen.y))return false;
-        HWND window=target();
+        HWND window=mouse_target();
         POINT client{};
         if(!window||!api.get_cursor(&client)||!api.to_client(window,&client))return false;
         emit(window,client,pressed);
@@ -118,7 +123,7 @@ struct Feed {
 
     // Wheel at the current cursor (SendInput), as wheel() does.
     bool wheel_here(int delta,bool horizontal) {
-        HWND window=target();
+        HWND window=mouse_target();
         POINT screen{};
         if(!window||!api.get_cursor(&screen))return false;
         WPARAM state=MAKEWPARAM(WORD(modifiers()|buttons),WORD(SHORT(std::clamp(delta,-32768,32767))));
@@ -159,10 +164,31 @@ struct Feed {
     // Focus loss or the launcher menu: nothing may stay held in the guest.
     void release_all() {
         if(!api.key)return;
+        const auto held=down;
+        // Key-ups go where the key-downs went: the live key target.
+        HWND window=target();
         for(unsigned vk=0;vk<down.size();++vk)set(vk,false);
+        if(window)for(unsigned vk=0;vk<held.size();++vk)if(held[vk]) {
+            if(vk==VK_LSHIFT||vk==VK_RSHIFT||vk==VK_LCONTROL||vk==VK_RCONTROL||vk==VK_LMENU||vk==VK_RMENU)continue;
+            const bool alt=held[VK_MENU],ctrl=held[VK_CONTROL];
+            const bool system=(alt&&!ctrl)||vk==VK_F10||(vk==VK_MENU&&!ctrl);
+            DWORD bits=(1u<<30)|(1u<<31);if(alt&&system)bits|=1u<<29;
+            api.post(window,system?WM_SYSKEYUP:WM_KEYUP,vk,LPARAM(bits));
+        }
+        // Mouse button-ups go where live mouse input goes.
+        window=mouse_target();
+        POINT client{};bool haveClient=window&&api.get_cursor(&client)&&api.to_client(window,&client);
         const int keys[]={VK_LBUTTON,VK_RBUTTON,VK_MBUTTON,VK_XBUTTON1,VK_XBUTTON2};
         const unsigned flags[]={Left,Right,Middle,X1,X2};
-        for(unsigned i=0;i<5;++i)if(buttons&flags[i])api.key(keys[i],FALSE);
+        const UINT ups[]={WM_LBUTTONUP,WM_RBUTTONUP,WM_MBUTTONUP,WM_XBUTTONUP,WM_XBUTTONUP};
+        for(unsigned i=0;i<5;++i)if(buttons&flags[i]) {
+            buttons&=~flags[i];api.key(keys[i],FALSE);
+            if(window&&haveClient) {
+                WPARAM state=modifiers()|buttons;
+                if(i>=3)state|=WPARAM(i==3?XBUTTON1:XBUTTON2)<<16;
+                api.post(window,ups[i],state,MAKELPARAM(client.x,client.y));
+            }
+        }
         buttons=0;
     }
 
@@ -173,7 +199,7 @@ private:
     // DIPs scale to the guest client area; the record cursor applies ClipCursor.
     bool place(double x,double y,double width,double height,POINT& client,HWND& window) {
         if(!std::isfinite(x)||!std::isfinite(y)||!(width>0)||!(height>0))return false;
-        window=target();
+        window=mouse_target();
         RECT rect{};
         if(!window||!api.client_rect(window,&rect))return false;
         const double cx=std::clamp(x/width,0.0,1.0)*(rect.right-rect.left);
