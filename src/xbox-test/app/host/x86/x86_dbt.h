@@ -829,16 +829,24 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
 #else
             runtime_mov_imm64(out, 6, encoded); runtime_mov_imm(out, 2, uint32_t(len));
 #endif
+            // The helper may clobber every caller-saved XMM: keep live guest XMM in RuntimeState across it.
+            for (unsigned i = 0; i != 8; ++i)
+                if (xmm_mask & (1u << i)) runtime_store_xmm_mem(out, 11, 48 + i * 16, uint8_t(i));
+            out.b(0x48); out.b(0x83); out.b(0xEC); out.b(32); // Windows shadow space, so the helper cannot overwrite spilled XMM6/7
             out.b(0xFF); out.b(0xD0); // call RAX
+            out.b(0x48); out.b(0x83); out.b(0xC4); out.b(32);
+            out.rex(11, 0, 4, true); out.b(0x8B);
+            if (state_slot < 128) { out.modrm(1, 11, 4); out.b(0x24); out.b(state_slot); }
+            else { out.modrm(2, 11, 4); out.b(0x24); out.d(state_slot); }
+            for (unsigned i = 0; i != 8; ++i)
+                if (xmm_mask & (1u << i)) runtime_load_xmm_mem(out, uint8_t(i), 11, 48 + i * 16);
+            for (unsigned i : {0u, 1u, 2u, 3u, 5u, 6u, 7u, 4u}) runtime_mov_reg_mem(out, runtime_reg(i), 11, uint8_t(i * 4));
+            runtime_mov_reg_mem(out, 11, 11, 36); out.b(0x41); out.b(0x53); out.b(0x9D);
+            // Exit only after the guest GPRs are reloaded: the epilogue stores the host registers back to RuntimeState.
             if (memory_operand && memory_write) {
                 if (absolute_memory) touch_static(a, memory_size);
                 exit_dynamic_store(!absolute_memory, true);
             }
-            out.rex(11, 0, 4, true); out.b(0x8B);
-            if (state_slot < 128) { out.modrm(1, 11, 4); out.b(0x24); out.b(state_slot); }
-            else { out.modrm(2, 11, 4); out.b(0x24); out.d(state_slot); }
-            for (unsigned i : {0u, 1u, 2u, 3u, 5u, 6u, 7u, 4u}) runtime_mov_reg_mem(out, runtime_reg(i), 11, uint8_t(i * 4));
-            runtime_mov_reg_mem(out, 11, 11, 36); out.b(0x41); out.b(0x53); out.b(0x9D);
         } else if (op >= 0x50 && op <= 0x57) {
             runtime_emit_guest_push_reg(out, op & 7);
         } else if (op >= 0x58 && op <= 0x5F) {
@@ -850,7 +858,7 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
         } else if (op == 0x8F) {
             uint8_t m = runtime_u8(guest, p); RuntimeAddress a;
             if ((m >> 3) & 7) throw std::runtime_error("unsupported pop group");
-            if ((m >> 6) != 3) { a = runtime_address(guest, p, m); runtime_emit_guest_stack_address(out); out.rex(14, 0, 11); out.b(0x8B); out.modrm(0, 14, 3); runtime_emit_guest_stack_adjust(out, false); if (!runtime_fixed_absolute(a)) throw std::runtime_error("unsupported translated pop memory form"); out.rex(14, 0, 12); out.b(0x89); out.modrm(2, 14, 4); out.b(0x24); out.d(a.displacement); }
+            if ((m >> 6) != 3) { a = runtime_address(guest, p, m); runtime_emit_guest_stack_address(out); out.rex(14, 0, 11); out.b(0x8B); out.modrm(0, 14, 3); runtime_emit_guest_stack_adjust(out, false); if (!runtime_fixed_absolute(a)) throw std::runtime_error("unsupported translated pop memory form"); out.rex(14, 0, 12); out.b(0x89); out.modrm(2, 14, 4); out.b(0x24); out.d(a.displacement); touch_static(a, 4); }
             else { runtime_emit_guest_pop_reg(out, m & 7); }
         } else if (op == 0xC2 || op == 0xC3) {
             uint32_t cleanup = op == 0xC2 ? runtime_u8(guest, p) | (uint32_t(runtime_u8(guest, p)) << 8) : 0;
@@ -932,12 +940,12 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
                 uint8_t base = uint8_t(op & 0xFC);
                 uint8_t reg = runtime_reg(regfield), rm = memory ? 11 : runtime_reg(rmfield);
                 if (memory) {
-                    runtime_emit_ea(out, a); check_memory(!runtime_fixed_absolute(a), (op & 7) == 1, 4); mark_memory((op & 7) == 1, 4);
+                    runtime_emit_ea(out, a); check_memory(!runtime_fixed_absolute(a), (op & 7) == 1 && op != 0x39, 4); mark_memory((op & 7) == 1 && op != 0x39, 4);
                 }
                 uint8_t native_op = op;
                 out.rex(reg, 0, rm);
                 out.b(native_op); out.modrm(memory ? 0 : 3, reg, rm);
-                if (memory && (op & 7) == 1) {
+                if (memory && (op & 7) == 1 && op != 0x39) {
                     if (runtime_fixed_absolute(a)) touch_static(a, 4);
                     exit_dynamic_store(!runtime_fixed_absolute(a), true);
                 }
@@ -963,6 +971,7 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
             if (memory) {
                 runtime_emit_ea(out, a); check_memory(!runtime_fixed_absolute(a), memory_write, (op == 0xf6 || op == 0xfe) ? 1 : 4);
             }
+            if (!memory && (op == 0xf6 || op == 0xfe) && rm == 6) out.b(0x40); // guest BL lives in host RSI: REX selects SIL, not DH
             out.rex(0, 0, rm); out.b(op); out.modrm(memory ? 0 : 3, group, rm);
             if (op == 0x81 || (op == 0xF7 && group == 0)) out.d(runtime_u32(guest, p));
             else if (op == 0x83 || (op == 0xF6 && group == 0)) out.b(runtime_u8(guest, p));

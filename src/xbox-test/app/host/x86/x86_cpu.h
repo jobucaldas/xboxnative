@@ -180,7 +180,7 @@ struct Cpu {
             for (uint32_t i = 0; i != 80; i += 4) mem.w32(record + i, 0);
             mem.w32(record + 0, fault.kind == FaultKind::AccessViolation ? 0xC0000005u : 0xC000001Du);
             mem.w32(record + 12, fault.eip); mem.w32(record + 16, 2);
-            mem.w32(record + 20, 0); mem.w32(record + 24, fault.addr);
+            mem.w32(record + 20, fault.write ? 1 : 0); mem.w32(record + 24, fault.addr);
             for (uint32_t i = 0; i != 716; i += 4) mem.w32(context + i, 0);
             mem.w32(context + 0, 0x00010007u);
             mem.w32(context + 156, reg[EDI]); mem.w32(context + 160, reg[ESI]);
@@ -217,9 +217,11 @@ struct Cpu {
         return false;
     }
     void run(uint32_t stop) {
+        const uint32_t host_csr = _mm_getcsr();
         for (;;) {
             try { run_raw(stop); return; }
-            catch (const Fault& fault) { if (!dispatch_seh(fault)) throw; }
+            // sse_host_begin() leaves the guest MXCSR on the host when an SSE convert faults mid-way.
+            catch (const Fault& fault) { _mm_setcsr(host_csr); if (!dispatch_seh(fault)) throw; }
         }
     }
     uint32_t execute_dbt_block(dbt::RuntimeBlock* block, dbt::RuntimeState& state, bool xmm_live) {
