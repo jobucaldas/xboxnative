@@ -647,9 +647,12 @@ extern "C" BOOL WINAPI c_SetWindowPos(HWND h,HWND,int x,int y,int cx,int cy,UINT
  if(flags&SWP_SHOWWINDOW)w->style|=WS_VISIBLE;
  if(flags&SWP_HIDEWINDOW)w->style&=~WS_VISIBLE;
  // No z-order tracking (insertAfter ignored), same limitation as EnumWindows.
- if(moved&&w->alive)w->proc(h,WM_MOVE,0,MAKELPARAM(nx,ny));
- if(sized&&w->alive)w->proc(h,WM_SIZE,SIZE_RESTORED,MAKELPARAM(clientWidth(w),clientHeight(w)));
- if((flags&SWP_SHOWWINDOW)&&w->needSize&&w->alive)sendInitialSizeMove(h,w);
+ // The first show of a never-sized window gets one initial size/move pair;
+ // don't also send the geometry-change pair in the same call.
+ const bool initial=(flags&SWP_SHOWWINDOW)&&w->needSize;
+ if(!initial&&moved&&w->alive)w->proc(h,WM_MOVE,0,MAKELPARAM(nx,ny));
+ if(!initial&&sized&&w->alive)w->proc(h,WM_SIZE,SIZE_RESTORED,MAKELPARAM(clientWidth(w),clientHeight(w)));
+ if(initial&&w->alive)sendInitialSizeMove(h,w);
  if(flags&SWP_HIDEWINDOW&&foregroundWindow==h){foregroundWindow=activeWindow=focusWindow=nullptr;for(auto& candidate:windows)if(candidate->alive){activateFirst((HWND)candidate.get(),candidate.get());if(foregroundWindow)break;}}
  if((flags&SWP_SHOWWINDOW)&&!(flags&SWP_NOACTIVATE)&&w->alive)activateFirst(h,w);
  return TRUE;

@@ -165,7 +165,8 @@ struct Feed {
     void release_all() {
         if(!api.key)return;
         const auto held=down;
-        HWND window=api.complete()&&fallback&&api.is_window(fallback)?fallback:target();
+        // Key-ups go where the key-downs went: the live key target.
+        HWND window=target();
         for(unsigned vk=0;vk<down.size();++vk)set(vk,false);
         if(window)for(unsigned vk=0;vk<held.size();++vk)if(held[vk]) {
             if(vk==VK_LSHIFT||vk==VK_RSHIFT||vk==VK_LCONTROL||vk==VK_RCONTROL||vk==VK_LMENU||vk==VK_RMENU)continue;
@@ -174,6 +175,8 @@ struct Feed {
             DWORD bits=(1u<<30)|(1u<<31);if(alt&&system)bits|=1u<<29;
             api.post(window,system?WM_SYSKEYUP:WM_KEYUP,vk,LPARAM(bits));
         }
+        // Mouse button-ups go where live mouse input goes.
+        window=mouse_target();
         POINT client{};bool haveClient=window&&api.get_cursor(&client)&&api.to_client(window,&client);
         const int keys[]={VK_LBUTTON,VK_RBUTTON,VK_MBUTTON,VK_XBUTTON1,VK_XBUTTON2};
         const unsigned flags[]={Left,Right,Middle,X1,X2};
