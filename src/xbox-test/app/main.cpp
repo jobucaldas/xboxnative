@@ -1232,6 +1232,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     int m_guestEndGen=0;
     corewindow_input::Shared m_input; // keyboard/mouse to the guest: the record DLL's one feed, shared with guest SendInput
     bool m_inputLogged=false;
+    winrt::event_token m_windowActivatedToken{}, m_windowClosedToken{};
+    winrt::event_token m_acceleratorToken{};
+    winrt::event_token m_pointerMovedToken{}, m_pointerPressedToken{}, m_pointerReleasedToken{}, m_pointerWheelToken{};
+    winrt::event_token m_backRequestedToken{};
+    bool m_windowEventsAttached=false;
     winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::UI::Popups::IUICommand> m_guestDialog{nullptr};
     inline static App* graphicsApp=nullptr;
     bool m_closed = false;
@@ -2760,25 +2765,52 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             (p.IsXButton2Pressed()?corewindow_input::X2:0));
         if(fed)e.Handled(true);
     }
-    void SetWindow(CoreWindow const& w) { m_window = w; w.Activated([this](auto&&, WindowActivatedEventArgs const& e) { bool active=e.WindowActivationState()!=CoreWindowActivationState::Deactivated; xinput_core::set_active(active); if(!active){m_input.release_all();m_keyScript.clear();} }); w.Closed([this](auto&&, auto&&) { m_closed = true; g_quit = true; logf("window closed"); });
-        // Every key, including Alt and F10 (which never raise KeyDown), arrives here.
-        w.Dispatcher().AcceleratorKeyActivated([this](auto&&, AcceleratorKeyEventArgs const& e) {
-            auto type=e.EventType();
-            bool down=type==CoreAcceleratorKeyEventType::KeyDown||type==CoreAcceleratorKeyEventType::SystemKeyDown;
-            bool up=type==CoreAcceleratorKeyEventType::KeyUp||type==CoreAcceleratorKeyEventType::SystemKeyUp;
-            if((!down&&!up)||!guest_input())return;
-            auto k=e.KeyStatus();
-            if(m_input.key(unsigned(e.VirtualKey()),k.ScanCode,k.IsExtendedKey,down,k.RepeatCount))e.Handled(true);
-        });
-        w.PointerMoved([this](auto&&, PointerEventArgs const& e){pointer_event(e,false);});
-        w.PointerPressed([this](auto&&, PointerEventArgs const& e){pointer_event(e,false);});
-        w.PointerReleased([this](auto&&, PointerEventArgs const& e){pointer_event(e,false);});
-        w.PointerWheelChanged([this](auto&&, PointerEventArgs const& e){pointer_event(e,true);});
-        // B on Xbox raises a system back request; unhandled, the shell sends the
-        // app to Home. B belongs to the launcher UI and the running game.
-        SystemNavigationManager::GetForCurrentView().BackRequested([](auto&&, BackRequestedEventArgs const& e) { e.Handled(true); }); logf("SetWindow bounds=%.0fx%.0f", w.Bounds().Width, w.Bounds().Height); }
+    void revoke_window_events() noexcept {
+        if(!m_windowEventsAttached)return;
+        auto revoke=[&](auto&& f) {
+            try { f(); } catch (...) { logf("window event revocation failed"); }
+        };
+        revoke([&] { SystemNavigationManager::GetForCurrentView().BackRequested(m_backRequestedToken); });
+        revoke([&] { m_window.Dispatcher().AcceleratorKeyActivated(m_acceleratorToken); });
+        revoke([&] { m_window.PointerWheelChanged(m_pointerWheelToken); });
+        revoke([&] { m_window.PointerReleased(m_pointerReleasedToken); });
+        revoke([&] { m_window.PointerPressed(m_pointerPressedToken); });
+        revoke([&] { m_window.PointerMoved(m_pointerMovedToken); });
+        revoke([&] { m_window.Closed(m_windowClosedToken); });
+        revoke([&] { m_window.Activated(m_windowActivatedToken); });
+        m_windowEventsAttached=false;
+    }
+    void SetWindow(CoreWindow const& w) {
+        m_window = w;
+        m_windowEventsAttached=true;
+        try {
+            m_windowActivatedToken=w.Activated([this](auto&&, WindowActivatedEventArgs const& e) { bool active=e.WindowActivationState()!=CoreWindowActivationState::Deactivated; xinput_core::set_active(active); if(!active){m_input.release_all();m_keyScript.clear();} });
+            m_windowClosedToken=w.Closed([this](auto&&, auto&&) { m_closed = true; g_quit = true; logf("window closed"); });
+            // Every key, including Alt and F10 (which never raise KeyDown), arrives here.
+            m_acceleratorToken=w.Dispatcher().AcceleratorKeyActivated([this](auto&&, AcceleratorKeyEventArgs const& e) {
+                auto type=e.EventType();
+                bool down=type==CoreAcceleratorKeyEventType::KeyDown||type==CoreAcceleratorKeyEventType::SystemKeyDown;
+                bool up=type==CoreAcceleratorKeyEventType::KeyUp||type==CoreAcceleratorKeyEventType::SystemKeyUp;
+                if((!down&&!up)||!guest_input())return;
+                auto k=e.KeyStatus();
+                if(m_input.key(unsigned(e.VirtualKey()),k.ScanCode,k.IsExtendedKey,down,k.RepeatCount))e.Handled(true);
+            });
+            m_pointerMovedToken=w.PointerMoved([this](auto&&, PointerEventArgs const& e){pointer_event(e,false);});
+            m_pointerPressedToken=w.PointerPressed([this](auto&&, PointerEventArgs const& e){pointer_event(e,false);});
+            m_pointerReleasedToken=w.PointerReleased([this](auto&&, PointerEventArgs const& e){pointer_event(e,false);});
+            m_pointerWheelToken=w.PointerWheelChanged([this](auto&&, PointerEventArgs const& e){pointer_event(e,true);});
+            // B on Xbox raises a system back request; unhandled, the shell sends the
+            // app to Home. B belongs to the launcher UI and the running game.
+            m_backRequestedToken=SystemNavigationManager::GetForCurrentView().BackRequested([](auto&&, BackRequestedEventArgs const& e) { e.Handled(true); });
+        } catch (...) {
+            revoke_window_events();
+            throw;
+        }
+        logf("SetWindow bounds=%.0fx%.0f", w.Bounds().Width, w.Bounds().Height);
+    }
     void Load(hstring const&) {}
-    void Uninitialize() { logf("Uninitialize"); }
+    void Uninitialize() { revoke_window_events(); m_input.release_all(); logf("Uninitialize"); }
+    ~App() { revoke_window_events(); m_input.release_all(); }
 
     void PollGuestControllers() {
         scripted_key_tick();
