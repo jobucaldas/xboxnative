@@ -170,6 +170,7 @@ static bool stage_valve_runtime_package(const std::string& manifest, const char*
     if(present) return true;
     std::string zip;
     if(cloud_http(false,true,pkg::host,std::string("/client/")+entry.file,{},{},zip)!=200||sha256_hex(zip)!=entry.sha256) return false;
+    DeleteFileW(stamp.c_str()); // rewritten only after every member is stored; a partial store must not look cached
     auto inflater=[](const char* data,size_t size,size_t expected,std::string& out){
         out.resize(expected); z_stream z{}; if(inflateInit2(&z,-15)!=Z_OK) return false;
         z.next_in=(Bytef*)data; z.avail_in=(uInt)size; z.next_out=(Bytef*)&out[0]; z.avail_out=(uInt)expected;
@@ -208,7 +209,7 @@ static std::wstring valve_client() {
             std::string rel=pkg::misc_runtime_files[i];std::replace(rel.begin(),rel.end(),'/','\\');
             if(read_bytes(dir+L"\\"+widen(rel)).empty()) return false;
         }
-        return read_bytes(dir+L"\\codecs.sha256").size()==64&&read_bytes(dir+L"\\misc.sha256").size()==64&&pkg::valve_signature_block(read_bytes(dll));
+        return read_bytes(stamp).size()==64&&read_bytes(dir+L"\\codecs.sha256").size()==64&&read_bytes(dir+L"\\misc.sha256").size()==64&&pkg::valve_signature_block(read_bytes(dll));
     };
     std::string text; pkg::Entry e;
     if(cloud_http(false,true,pkg::host,pkg::manifest_path,{},{},text)!=200||!pkg::manifest_entry(text,e)) {
@@ -224,6 +225,7 @@ static std::wstring valve_client() {
     std::string zip;
     if(cloud_http(false,true,pkg::host,std::string("/client/")+e.file,{},{},zip)!=200){lp_sink("STEAM client: package download failed");return {};}
     if(sha256_hex(zip)!=e.sha256){lp_sink("STEAM client: package SHA-256 differs from Valve's manifest; discarded");return {};}
+    DeleteFileW(stamp.c_str()); // rewritten only after every member is stored; a partial store must not look cached
     auto inflater=[](const char* data,size_t size,size_t expected,std::string& out){
         out.resize(expected); z_stream z{}; if(inflateInit2(&z,-15)!=Z_OK) return false;
         z.next_in=(Bytef*)data; z.avail_in=(uInt)size; z.next_out=(Bytef*)&out[0]; z.avail_out=(uInt)expected;
@@ -366,6 +368,7 @@ static bool genuine_steam_call(const std::wstring& dll,const std::string& token,
     }
 
     if(oldDirSize&&oldDirSize<2048)SetCurrentDirectoryW(oldDir);
+    if(!ok)SetEnvironmentVariableW(L"SteamPath",nullptr);
     genuine_set_dll_directory(nullptr);
     if(ok){g_genuineSteamModule=c.module;g_genuineSteamLiveApi=c.api;g_genuineSteamUser=c.user;g_genuineSteamPipe=c.pipe;return true;}
     genuine_steam_cleanup(&c);genuine_steam_free(c.module);return false;
@@ -1194,6 +1197,7 @@ static void dump_thread_stacks() {
 // and remain behind the launch-time ownership gate.
 static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& exe) {
     char line[512];
+    regb::init(g_dir,lp_sink); // guest registry (PlayerPrefs) for the PE32 route too: LocalState\registry.sqlite
     x86::set_steam_client_registry(0,"");
     const bool steamstub=steamstub_wrapped(path);
     const bool steamProvider=stage_steam_provider_x86(c.appid,path);
@@ -1381,7 +1385,7 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         auto destroy_window=records?reinterpret_cast<DestroyWindow>(GetProcAddress(records,"DestroyWindow")):nullptr;
         host.register_window_class=[register_class](const std::u16string& name){
             if(!register_class||name.empty())return false;std::wstring wide(name.begin(),name.end());GlWndClassExW wc{};wc.cbSize=sizeof(wc);
-            wc.lpfnWndProc=[](HWND,UINT,WPARAM,LPARAM)->LRESULT{return 0;};wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=wide.c_str();
+            wc.lpfnWndProc=[](HWND h,UINT m,WPARAM w,LPARAM l)->LRESULT{auto def=records?reinterpret_cast<LRESULT(WINAPI*)(HWND,UINT,WPARAM,LPARAM)>(GetProcAddress(records,"DefWindowProcW")):nullptr;return def?def(h,m,w,l):0;};wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=wide.c_str();
             return register_class(&wc)!=0||GetLastError()==ERROR_CLASS_ALREADY_EXISTS;
         };
         host.unregister_window_class=[unregister_class](const std::u16string& name){
@@ -1491,10 +1495,10 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
                 reinterpret_cast<GetData>(get_data)(unsigned(q.args[0]),offset,size,q.output.data());return;
             }
             if(q.name=="x86GlUnmapBuffer") {
-                using PutData=void(APIENTRY*)(unsigned,intptr_t,intptr_t,const void*);using Unmap=unsigned(APIENTRY*)(unsigned);
-                auto put=pointer("glBufferSubData"),unmap=pointer("glUnmapBuffer");if(!put||!unmap){missing();return;}
+                using PutData=void(APIENTRY*)(unsigned,intptr_t,intptr_t,const void*);
+                auto put=pointer("glBufferSubData");if(!put){missing();return;}
                 if(!q.input.empty())reinterpret_cast<PutData>(put)(unsigned(q.args[0]),intptr_t(q.args[1]),intptr_t(q.input.size()),q.input.data());
-                q.result=reinterpret_cast<Unmap>(unmap)(unsigned(q.args[0]));return;
+                q.result=1;return; // GL_TRUE: glMapBuffer never host-mapped the buffer, so the copy-back above is the whole unmap
             }
             if(q.name=="glGetError"){using Fn=unsigned(APIENTRY*)();auto p=pointer(q.name.c_str());q.result=p?reinterpret_cast<Fn>(p)():0;return;}
             if(q.name=="glTexImage2D"){using Fn=void(APIENTRY*)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*);auto p=pointer(q.name.c_str());if(!p){missing();return;}reinterpret_cast<Fn>(p)(unsigned(q.args[0]),int(q.args[1]),int(q.args[2]),int(q.args[3]),int(q.args[4]),int(q.args[5]),unsigned(q.args[6]),unsigned(q.args[7]),q.input.empty()?nullptr:q.input.data());return;}
@@ -1550,10 +1554,10 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         gap_summary::Binder imports;
         for(const auto& item:mapped.gap_imports)
             imports.record(std::get<0>(item),std::get<1>(item),std::get<2>(item));
-        for(const auto& line:imports.report(std::string(exe.begin(),exe.end()),"x86").lines) lp_sink(line.c_str());
+        for(const auto& line:imports.report(play_runtime::narrow(exe),"x86").lines) lp_sink(line.c_str());
     },donorGaps,configureX86Gl,[&fileGuard,toU16](const char* operation,const std::u16string& guestPath){
         wchar_t current[32768]{};DWORD n=GetCurrentDirectoryW(32768,current);
-        if(!n||n>=32768)return fileGuard.allow(operation,u"\\__x86_guard_cwd_unavailable__");
+        if(!n||n>=32768)return false;
         return fileGuard.allow(operation,guestPath,toU16(std::wstring(current,n)));
     },dbtRequested);
     snprintf(line,sizeof line,"x86 dbt: %s reason=%s",r.dbt_enabled?"on":"off",r.dbt_reason.empty()?"unavailable":r.dbt_reason.c_str());lp_sink(line);
@@ -1596,6 +1600,9 @@ static void lp_run_managed(LpCtx& c,const std::wstring& path,const std::wstring&
     if(!c.args.empty())args.push_back(play_runtime::narrow(c.args));
     snprintf(line,sizeof line,"PRUN CLR engine=Mono-x64 exe=%s",play_runtime::narrow(exe).c_str());lp_sink(line);
     const std::wstring monoPath=package+L"\\runtime\\mono\\mono-2.0-sgen.dll";
+    // Mono imports version.dll from the Wine donor: probe and wire it before mapping, as the native path does.
+    if(!donor_pe::probe(lp_sink)) {c.failName="Wine donor initialization/behavior";lp_sink("DWPE FAIL donor behavior gate; no game code executed");return;}
+    mlp::donor_resolve=donor_pe::exported;
     auto mono=play_runtime::map_managed_runtime(package,monoPath,lp_sink);
     if(!mono){c.failName="Mono: Play loader could not map mono-2.0-sgen.dll";return;}
     auto r=mono_host::run(runtime,assembly,args,[&]{
