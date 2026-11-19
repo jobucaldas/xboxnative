@@ -803,6 +803,11 @@ struct Guest {
         for (const auto& name : dll_order) {
             if (attached[name]) continue;
             attached[name] = true;
+            // A runtime LoadLibrary gets the same TLS-callback-then-DllMain
+            // order as the loader path (run_dll_mains).
+            auto dll = dlls.find(name);
+            if (dll != dlls.end() && dll->second.image.tls.present)
+                tls_callbacks_call_image(c, dll->second.image, 1 /*DLL_PROCESS_ATTACH*/);
             auto e = dll_entries.find(name);
             if (e == dll_entries.end()) continue;
             uint32_t base = dlls[name].image.base;
