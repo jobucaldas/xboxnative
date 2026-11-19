@@ -35,7 +35,7 @@ static bool audit_d3d9_device_slots() {
             return false;
         }
     }
-    static constexpr unsigned surface_arities[]={3,1,1,2,5,4,2,2,1,1,1,4,2,4,1,2,2};
+    static constexpr unsigned surface_arities[]={3,1,1,2,5,4,2,2,1,1,1,3,2,4,1,2,2};
     static constexpr unsigned texture_arities[]={3,1,1,2,5,4,2,2,1,1,1,2,1,1,2,1,1,3,3,5,2,2};
     auto audit_interface=[&](const char* name,const unsigned* arities,size_t count) {
         const auto& iface=host.com.by_name(name);

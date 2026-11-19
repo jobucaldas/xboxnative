@@ -1001,7 +1001,12 @@ inline std::string Guest::format(FmtArgs a, const std::string& fmt) {
             if (neg) body = "-" + body;
             else if (plus && (conv == 'd' || conv == 'i')) body = "+" + body;
             else if (space && (conv == 'd' || conv == 'i')) body = " " + body;
-            out += guest_fmt::pad(body, width, left, zero && !left && prec < 0 ? '0' : ' ');
+            if (zero && !left && prec < 0 && width > int(body.size())) {
+                size_t prefix = !body.empty() && (body[0] == '-' || body[0] == '+' || body[0] == ' ') ? 1 : 0;
+                if (body.size() >= prefix + 2 && body[prefix] == '0' && (body[prefix + 1] == 'x' || body[prefix + 1] == 'X')) prefix += 2;
+                body.insert(prefix, size_t(width - int(body.size())), '0');
+            }
+            out += guest_fmt::pad(body, width, left, ' ');
             break; }
         case 'c': { char v = char(next()); out += guest_fmt::pad(std::string(1, v), width, left, ' '); break; }
         case 's': {
@@ -1999,8 +2004,8 @@ inline void Guest::register_all() {
             if (response.result && response.output.size() == 20) copy_out(p, response.output.data(), 20);
             return response.result;
         }
-        mem.w32(p, cp == 65001 ? 65001u : 0u); mem.w32(p + 4, 1); mem.w8(p + 8, '?'); mem.w8(p + 9, 0);
-        for (int i = 10; i < 20; ++i) mem.w8(p + uint32_t(i), 0);
+        mem.w32(p, cp == 65001 ? 4u : 1u); mem.w8(p + 4, '?'); mem.w8(p + 5, 0);
+        for (int i = 6; i < 18; ++i) mem.w8(p + uint32_t(i), 0);
         return 1; });
     reg.add("kernel32.dll", "MultiByteToWideChar", Conv::Stdcall, 6, [this, nls_input](Cpu& c) -> uint32_t {
         uint32_t cp = c.arg(0), flags = c.arg(1), src = c.arg(2), dst = c.arg(4), cap = c.arg(5);
@@ -2015,11 +2020,11 @@ inline void Guest::register_all() {
         }
         (void)cp; std::string s = uint32_t(n) == 0xFFFFFFFFu ? str(src) : std::string();
         if (uint32_t(n) != 0xFFFFFFFFu) { auto b = mem.read_bytes(src, uint32_t(n)); s.assign(b.begin(), b.end()); }
-        if (!dst || !cap) return uint32_t(s.size() + 1);
-        uint32_t put = uint32_t(s.size()) < cap ? uint32_t(s.size()) : cap - 1;
-        for (uint32_t i = 0; i < put; ++i) { mem.w8(dst + i * 2, uint8_t(s[i])); mem.w8(dst + i * 2 + 1, 0); }
-        if (put < cap) { mem.w8(dst + put * 2, 0); mem.w8(dst + put * 2 + 1, 0); }
-        return put; });
+        if (n == -1) s.push_back('\0');
+        if (!cap) return uint32_t(s.size());
+        if (!dst || cap < s.size()) { set_last_error(dst ? 122 : 87); return 0; }
+        for (uint32_t i = 0; i < s.size(); ++i) { mem.w8(dst + i * 2, uint8_t(s[i])); mem.w8(dst + i * 2 + 1, 0); }
+        return uint32_t(s.size()); });
     auto nls_output = [this](Host::NlsRequest& request, uint32_t output_ptr, uint32_t expected_bytes) {
         if (!host.nls_call) { set_last_error(87); return 0u; }
         Host::NlsResponse response = host.nls_call(request); set_last_error(response.last_error);
@@ -2152,10 +2157,11 @@ inline void Guest::register_all() {
         std::string s;
         if (uint32_t(n) == 0xFFFFFFFFu) { for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(i * 2 + src, 2)); if (!w) break; s.push_back(char(w & 0xff)); } }
         else for (uint32_t i = 0; i < uint32_t(n); ++i) s.push_back(char(mem.r(src + i * 2, 2) & 0xff));
-        if (!dst || !cap) return uint32_t(s.size() + 1);
-        uint32_t put = uint32_t(s.size()) < cap ? uint32_t(s.size()) : cap - 1;
-        mem.write_bytes(dst, s.data(), put); if (put < cap) mem.w8(dst + put, 0);
-        return put; });
+        if (n == -1) s.push_back('\0');
+        if (!cap) return uint32_t(s.size());
+        if (!dst || cap < s.size()) { set_last_error(dst ? 122 : 87); return 0; }
+        mem.write_bytes(dst, s.data(), uint32_t(s.size()));
+        return uint32_t(s.size()); });
     // Heap
     reg.add("kernel32.dll", "GetProcessHeap", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0x50000000u; });
     reg.add("kernel32.dll", "HeapCreate", Conv::Stdcall, 3, [this](Cpu&) -> uint32_t {
@@ -2197,8 +2203,11 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "VirtualAlloc", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
         uint32_t want = (c.arg(1) + 0xfffu) & ~0xfffu; if (!want) want = 0x1000;
         uint32_t p = virtual_top; virtual_top += want;
-        mem.map(p, want, PROT_R | PROT_W); virtual_alloc[p] = want;
-        if (c.arg(3) & 0x40) { auto z = std::vector<uint8_t>(want, 0); mem.write_bytes(p, z.data(), want); }
+        uint32_t prot = c.arg(3);
+        uint8_t access = (prot & 0x01) ? 0 : PROT_R;
+        if (prot & (0x04 | 0x08 | 0x40 | 0x80)) access |= PROT_W;
+        if (prot & (0x10 | 0x20 | 0x40 | 0x80)) access |= PROT_X;
+        mem.map(p, want, access); virtual_alloc[p] = want;
         return p; });
     reg.add("kernel32.dll", "VirtualFree", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
         auto it = virtual_alloc.find(c.arg(0)); if (it == virtual_alloc.end()) return 0;
@@ -2463,7 +2472,7 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetSystemInfo", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t p = c.arg(0); if (!p) return 0;
         mem.w32(p + 0, 0); mem.w32(p + 4, 4096); mem.w32(p + 8, 0x10000); mem.w32(p + 12, 0x7FFE0000u);
-        mem.w32(p + 16, 1); mem.w32(p + 20, 1); mem.w32(p + 24, 0); mem.w32(p + 28, 0x10000); mem.w32(p + 32, 9);
+        mem.w32(p + 16, 1); mem.w32(p + 20, 1); mem.w32(p + 24, 586); mem.w32(p + 28, 0x10000); mem.w32(p + 32, 9);
         return 0; });
     auto profile_text = [this](uint32_t file, bool wide, std::string& text) { uint32_t error=0;if(!profile_file(file,wide,text,false,error)){set_last_error(error?error:2);return false;}set_last_error(0);return true; };
     auto narrow = [this](uint32_t p){auto w=wstr(p);return std::string(w.begin(),w.end());};

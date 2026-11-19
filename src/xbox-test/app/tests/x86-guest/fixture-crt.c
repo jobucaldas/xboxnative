@@ -151,9 +151,13 @@ static void test_winmm_shlwapi(void) {
           waveInGetErrorTextA(MMSYSERR_NODRIVER, error_text, sizeof error_text) == MMSYSERR_NODRIVER &&
           waveInGetErrorTextW(MMSYSERR_NODRIVER, error_w, sizeof error_w / sizeof error_w[0]) == MMSYSERR_NODRIVER &&
           !PlaySoundA(NULL, NULL, 0) && !PlaySoundW(NULL, NULL, 0));
-    check(timeGetDevCaps(&caps, sizeof caps) == TIMERR_NOERROR && caps.wPeriodMin == 1 && caps.wPeriodMax == 1000000 &&
-          timeGetSystemTime(&system_time, sizeof system_time) == TIMERR_NOERROR && system_time.wType == TIME_MS &&
-          system_time.u.ms == timeGetTime());
+    DWORD tick_before = timeGetTime();
+    MMRESULT time_caps_result = timeGetDevCaps(&caps, sizeof caps);
+    MMRESULT system_time_result = timeGetSystemTime(&system_time, sizeof system_time);
+    DWORD tick_after = timeGetTime();
+    check(time_caps_result == TIMERR_NOERROR && caps.wPeriodMin == 1 && caps.wPeriodMax == 1000000 &&
+          system_time_result == TIMERR_NOERROR && system_time.wType == TIME_MS &&
+          (DWORD)(system_time.u.ms - tick_before) <= (DWORD)(tick_after - tick_before));
     UINT timer = timeSetEvent(1, 1, NULL, 0, TIME_ONESHOT);
     check(timer == 0 && timeKillEvent(1) == TIMERR_NOCANDO);
     char out[128] = {0}, path[64] = "dir", a[] = "Dir/File.TXT", trim_a[] = "dir\\file";
@@ -287,6 +291,10 @@ int main(void) {
     check(VirtualProtect(va, 65536, PAGE_READONLY, &old) != 0);
     MEMORY_BASIC_INFORMATION mbi;
     check(VirtualQuery(va, &mbi, sizeof mbi) == sizeof mbi);
+    VirtualFree(va, 0, MEM_RELEASE);
+    va = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    check(va != NULL);
+    check(VirtualQuery(va, &mbi, sizeof mbi) == sizeof mbi && mbi.Protect == PAGE_EXECUTE_READWRITE);
     VirtualFree(va, 0, MEM_RELEASE);
     check(GetModuleHandleA(NULL) != NULL);
     /* FreeLibrary of the image handle succeeds; an unknown handle fails with
