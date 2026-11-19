@@ -111,9 +111,10 @@ static void test_coalescer() {
     assert(!rp.coalescer.dirty);
     rp.set("a", "1", 5.0); rp.set("b", "2", 5.0);
     rp.clear(6.0);
-    assert(rp.kv.empty() && rp.coalescer.dirty);
+    assert(rp.kv.empty() && rp.coalescer.dirty && rp.needs_upload(false));
     rp.coalescer.sent(); rp.clear(7.0);
-    assert(!rp.coalescer.dirty);       // clearing an empty set changes nothing
+    assert(!rp.coalescer.dirty && !rp.needs_upload(false)); // clearing an empty set changes nothing
+    assert(rp.needs_upload(true));     // a reconnect uploads even an empty set
     puts("PRESENCE-COALESCE-OK: bursts upload once, unchanged values and empty clears do not");
 }
 

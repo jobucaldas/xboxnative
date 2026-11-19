@@ -211,9 +211,11 @@ inline Result download(Io& io,uint32_t appid,const Roots& roots,bool dry=false,K
         if(local&&!known&&unix_time(*path)>=file.time){decided(io,"keep-local (newer here; uploads after play)",cloud,*path);++r.kept;continue;}
         if(local&&known) {
             auto base=known->find(cloud);const bool synced=base!=known->end();
-            if(prefer==Prefer::Local){decided(io,"keep-local (the player chose this console's copy)",cloud,*path);++r.kept;continue;}
-            if(prefer==Prefer::Auto&&synced&&base->second==file.sha){decided(io,"keep-local (changed here since the last sync; uploads after play)",cloud,*path);++r.kept;continue;}
-            if(prefer==Prefer::Auto&&synced&&base->second!=io.sha1(*local)){decided(io,"conflict (changed here and in the cloud since the last sync)",cloud,*path);++r.conflict;continue;}
+            const auto localSha=io.sha1(*local);
+            const bool conflict=synced&&base->second!=file.sha&&base->second!=localSha;
+            if(conflict&&prefer==Prefer::Local){decided(io,"keep-local (the player chose this console's copy)",cloud,*path);++r.kept;continue;}
+            if(conflict&&prefer==Prefer::Auto){decided(io,"conflict (changed here and in the cloud since the last sync)",cloud,*path);++r.conflict;continue;}
+            if(synced&&base->second==file.sha){decided(io,"keep-local (changed here since the last sync; uploads after play)",cloud,*path);++r.kept;continue;}
             // Only the cloud changed, or this console never synced the file: the cloud copy wins.
         }
         if(dry){decided(io,"newer-in-cloud",cloud,*path);++r.newer;continue;}
@@ -278,12 +280,17 @@ inline Result upload(Io& io,uint32_t appid,const Roots& roots,const std::vector<
             if(quietSeconds&&time+quietSeconds>now){++r.busy;return;}
             auto found=remote.find(cloudName);
             if(found!=remote.end()&&found->second->persist==0) {
-                if(io.sha1(*data)==found->second->sha){if(known)(*known)[cloudName]=found->second->sha;++r.unchanged;return;}
+                const auto localSha=io.sha1(*data);
+                if(localSha==found->second->sha){if(known)(*known)[cloudName]=found->second->sha;++r.unchanged;return;}
                 if(!known&&time<found->second->time){decided(io,"keep-cloud (newer there)",cloudName,entry.path());++r.kept;return;} // remote is newer: keep it
-                if(known&&prefer!=Prefer::Local) {
+                if(known) {
                     auto base=known->find(cloudName);
                     if(base==known->end()){decided(io,"hold (never synced on this console; the cloud copy is not replaced)",cloudName,entry.path());++r.conflict;return;}
-                    if(base->second!=found->second->sha){decided(io,"conflict (the cloud copy changed since the last sync)",cloudName,entry.path());++r.conflict;return;}
+                    if(base->second!=found->second->sha) {
+                        if(base->second==localSha){decided(io,"keep-cloud (only the cloud copy changed)",cloudName,entry.path());++r.kept;return;}
+                        if(prefer==Prefer::Cloud){decided(io,"keep-cloud (the player chose the cloud copy)",cloudName,entry.path());++r.kept;return;}
+                        if(prefer!=Prefer::Local){decided(io,"conflict (the cloud copy changed since the last sync)",cloudName,entry.path());++r.conflict;return;}
+                    }
                 }
             }
             pending.push_back({cloudName,entry.path(),*data,time});

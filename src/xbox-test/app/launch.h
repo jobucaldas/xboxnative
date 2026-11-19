@@ -942,13 +942,13 @@ struct PresenceKeeper {
 static PresenceKeeper g_presence;
 // `full` carries the game state (a new session: Steam forgot it); a coalesced
 // rich-presence change only uploads the key set.
-static void presence_send(std::shared_ptr<CmSession> s,uint32_t appid,const std::map<std::string,std::string>& kv,bool full) {
+static void presence_send(std::shared_ptr<CmSession> s,uint32_t appid,const std::map<std::string,std::string>& kv,bool full,bool richUpdate) {
     if(!s||!s->up||!appid) return;
     if(full) {
         s->send_raw(steam_presence::ClientChangeStatus,steam_presence::change_status_body(),0,"");
         s->send_raw(steam_presence::ClientGamesPlayedWithDataBlob,steam_presence::games_played_body(appid),0,"");
     }
-    if(!kv.empty()) s->send_raw(steam_presence::ClientRichPresenceUpload,
+    if(richUpdate) s->send_raw(steam_presence::ClientRichPresenceUpload,
         steam_presence::rich_presence_upload_body(kv),0,"",appid);
 }
 // The game's SetRichPresence/ClearRichPresence, observed from the game's thread
@@ -1036,19 +1036,25 @@ static void presence_start(uint32_t appid) {
         unsigned uploads = 0;
         while(g_presence.gen.load() == gen) {
             Sleep(500);
-            std::shared_ptr<CmSession> session; std::map<std::string,std::string> kv; uint32_t appid = 0; bool send = false, full = false;
+            std::shared_ptr<CmSession> session; std::map<std::string,std::string> kv; uint32_t appid = 0; bool send = false, full = false, richUpdate = false;
             {   std::lock_guard<std::mutex> l(g_presence.m);
                 if(g_presence.gen.load() != gen || !g_presence.appid || g_presence.ended) break;
                 auto now = user_session();
                 if(!now || !now->up) continue;              // reconnecting
+                const bool newSession = now != g_presence.session;
+                if(newSession) {                           // subscribe even while Steam blocks this game
+                    g_presence.session = now;
+                    now->set_push(presence_push);
+                }
                 if(g_presence.blocked) continue;
                 appid = g_presence.appid;
-                if(now != g_presence.session) {             // a new session: Steam forgot the game
-                    g_presence.session = now; send = full = true;
-                    now->set_push(presence_push);
+                if(newSession) {                            // a new session: Steam forgot the game
+                    send = full = true;
+                    richUpdate = g_presence.rp.needs_upload(true);
                     if(g_presence.rp.coalescer.dirty) g_presence.rp.coalescer.sent();
                     kv = g_presence.rp.kv;
                 } else if(g_presence.rp.coalescer.ready(now_s())) {
+                    richUpdate = g_presence.rp.needs_upload(false);
                     g_presence.rp.coalescer.sent(); send = true; kv = g_presence.rp.kv;
                 }
                 session = now;
@@ -1062,8 +1068,8 @@ static void presence_start(uint32_t appid) {
                                                              steam_persona::request_body(waiting));
             } catch(...) {}
             if(!send) continue;
-            try { presence_send(session,appid,kv,full); } catch(...) { continue; }
-            if(kv.empty()) continue;
+            try { presence_send(session,appid,kv,full,richUpdate); } catch(...) { continue; }
+            if(!richUpdate) continue;
             char line[120];snprintf(line,sizeof line,"STEAM presence: rich presence uploaded (%zu keys, #%u)",kv.size(),++uploads);lp_sink(line);
         }
     }).detach();
@@ -1676,9 +1682,14 @@ static void lp_run_impl(LpCtx& c) {
     }
     mlp::report_kernel();
 }
+// C++ try/catch cannot share a frame with SEH __try, so the final sync gets its own.
+static void lp_final_sync() { if(g_finalSync) try { g_finalSync(); } catch(...) {} }
 static bool lp_run_seh(LpCtx* c) {     // no C++ objects with destructors in this frame: SEH guard so a probe bug cannot take the launcher down
-    __try { lp_run_impl(*c); return true; }
-    __except (play_runtime::state?play_runtime::filter(GetExceptionInformation()):EXCEPTION_EXECUTE_HANDLER) { return false; }
+    bool noFault = true;
+    __try { lp_run_impl(*c); }
+    __except (play_runtime::state?play_runtime::filter(GetExceptionInformation()):EXCEPTION_EXECUTE_HANDLER) { noFault = false; }
+    lp_final_sync();
+    return noFault;
 }
 // Cached appinfo (the downloader writes it); read only, no network on this path.
 static bool load_appinfo(uint32_t appid,Vdf& root,const Vdf*& app) {

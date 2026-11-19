@@ -299,6 +299,12 @@ int main() {
         // Only the cloud changed: downloaded even though the local file looks newer.
         ks.add("save.json","played on pc",1700000000);set_unix_time(kdir/"save.json",1900000000);
         auto pull=download(kio,1,kroots,false,&known);assert(pull.downloaded==1&&*read_file(kdir/"save.json")=="played on pc");
+        put("cloud-only.json","local baseline",1800000000);
+        ks.add("cloud-only.json","cloud update",1700000000);
+        known[ks.prefix+"cloud-only.json"]=sha1("local baseline");
+        auto localPickCloudOnly=download(kio,1,kroots,false,&known,Prefer::Local);
+        assert(localPickCloudOnly.downloaded==1&&*read_file(kdir/"cloud-only.json")=="cloud update");
+        fs::remove(kdir/"cloud-only.json");ks.files.erase(ks.prefix+"cloud-only.json");known.erase(ks.prefix+"cloud-only.json");
         // Both changed: conflict, nothing moves either way.
         ks.add("save.json","pc again",1700000000);put("save.json","xbox again",1900000000);
         auto c1=download(kio,1,kroots,false,&known);auto c2=upload(kio,1,kroots,saveRules,"Xbox",0,&known);
@@ -306,6 +312,10 @@ int main() {
         // The player picks: the cloud copy, or this console's.
         auto useCloud=download(kio,1,kroots,false,&known,Prefer::Cloud);
         assert(useCloud.downloaded==1&&*read_file(kdir/"save.json")=="pc again");
+        put("other.json","xbox-only progress",1900000000);
+        auto keepCloud=upload(kio,1,kroots,saveRules,"Xbox",0,&known,Prefer::Cloud);
+        assert(keepCloud.uploaded==1&&ks.files.at(ks.prefix+"other.json").data=="xbox-only progress");
+        fs::remove(kdir/"other.json");ks.files.erase(ks.prefix+"other.json");ks.uploads.clear();
         put("save.json","xbox wins",1900000000);ks.add("save.json","pc later",1700000000);
         auto keepXbox=upload(kio,1,kroots,saveRules,"Xbox",0,&known,Prefer::Local);
         assert(keepXbox.uploaded==1&&ks.files.at(ks.prefix+"save.json").data=="xbox wins");
