@@ -1490,6 +1490,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     InstallInfo m_dInst; double m_dInstT = -10;
     bool m_dBroken = false;   // the install marker's payload is missing/empty (draw_detail re-checks; A reinstalls)
     std::vector<storage_roots::Choice> m_roots; size_t m_rootSel = 0;   // install locations of the detail page (X cycles them before Install)
+    std::string m_rootKeep;       // selected root survives a refresh even when the drive disappears
+    bool m_rootUnavailable = false;
     bool m_rootsProbed = false;   // the sidebar widget probed the roots once on the library
     // Launch-option picker (launch_picker.h): a game with several run options
     // asks before Play instead of picking one silently.
@@ -1534,16 +1536,28 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     std::string remembered_option(uint32_t id) {   // LocalState\launch_choice_<appid>.txt beside the install marker
         std::string text; return read_file_s(g_dir + L"\\" + widen(launch_picker::remember_name(id)), text) ? launch_picker::parse_remember(text) : std::string();
     }
-    void remember_option(uint32_t id, const std::string& executable) {
-        if (executable.empty()) return;
-        write_text(g_dir + L"\\" + widen(launch_picker::remember_name(id)), launch_picker::format_remember(executable));
+    void remember_option(uint32_t id, const std::string& identity) {
+        if (identity.empty()) return;
+        write_text(g_dir + L"\\" + widen(launch_picker::remember_name(id)), launch_picker::format_remember(identity));
     }
     // The options Play may offer for a game, in preference order. appinfo is
     // the downloader's cache; without it there is nothing to ask.
     std::vector<launch_target::Choice> launch_options(uint32_t id) {
         Vdf info; const Vdf* app = nullptr;
         if (!load_appinfo(id, info, app)) return {};
-        return launch_target::choices(launch_target::entries(*app));
+        const InstallInfo install = read_install(id);
+        const std::wstring root = install.installed ? install.folder : std::wstring();
+        launch_target::PeArch pe_arch = [root](const std::string& executable) {
+            if (root.empty()) return int(launch_target::archUnknown);
+            std::string rel;
+            if (!launch_target::relative_path(executable, rel)) return int(launch_target::archUnknown);
+            switch (pe_machine(root + L"\\" + widen(rel))) {
+                case IMAGE_FILE_MACHINE_AMD64: return int(launch_target::arch64);
+                case IMAGE_FILE_MACHINE_I386: return int(launch_target::arch32);
+                default: return int(launch_target::archUnknown);
+            }
+        };
+        return launch_target::choices(launch_target::entries(*app), pe_arch);
     }
     // A: Play. One runnable option (or none: the largest .exe fallback) starts
     // directly; several open the picker.
@@ -1562,10 +1576,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     void detail_picker_a(const char* via) {   // A: start the highlighted option
         if (launch_picker::press_a(m_pick) != launch_picker::Press::start) { logf("detail: launch option refused appid=%u: %s (%s)", m_dApp, m_pick.note.c_str(), via); return; }
         std::string exe = launch_picker::started(m_pick);
+        std::string identity;
+        if (const auto* row = launch_picker::current(m_pick)) identity = launch_target::choice_key(*row);
         launch_picker::close(m_pick);
-        remember_option(m_dApp, exe);
+        remember_option(m_dApp, identity);
         logf("detail: Play pressed appid=%u option=\"%s\" (%s)", m_dApp, exe.c_str(), via);
-        if (std::string why = start_launch(m_dApp, m_dName, m_dInst.dir, via, &exe); !why.empty()) m_dNote = why;
+        if (std::string why = start_launch(m_dApp, m_dName, m_dInst.dir, via, &identity); !why.empty()) m_dNote = why;
     }
     std::string game_name(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return g->name; return id == 480 ? "Spacewar" : id == 3405340 ? "Megabonk" : id == 1007 ? "Steamworks SDK Redist" : ""; }
     bool owned(uint32_t id) { std::lock_guard<std::mutex> l(g_gm); for (auto& g : g_games) if (g->appid == id) return true; return false; }
@@ -1576,7 +1592,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         m_sortOpen = false; m_sortFocus = 0; m_hdrFocus = -1; m_filtersOpen = false; m_filtersFocus = 0; m_searchOpen = false;
         // After a restart that unloaded a failed game, its page says why (this session's launches show in the launch panel).
         if (g_launch.phase == 0) { std::string why = launch_report::failure(read_bytes(g_dir + L"\\launch_result.json"), id); if (!why.empty()) m_dNote = "Last launch failed: " + why; }
-        m_roots.clear(); m_rootSel = 0; refresh_roots("detail open");
+        m_roots.clear(); m_rootSel = 0; m_rootKeep.clear(); m_rootUnavailable = false; refresh_roots("detail open");
         m_optApp = 0;   // a fresh page: the run-option count is read again (a download may have cached appinfo)
         auto si = std::make_shared<StoreInfo>(); si->appid = id; si->want_depot = !read_install(id).installed; m_dSi = si; std::thread(store_worker, si).detach();
         { InstallInfo ii = read_install(id); if (ii.installed && !g_demo) cloud_async(id, ii.folder, false); }   // status line: what the cloud holds
@@ -1612,17 +1628,22 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     bool dl_is_mine() { return g_dl.appid == m_dApp && g_dl.state == 1; }
     bool deleting_mine() { return g_del.appid == m_dApp && g_del.state == 1; }
     void refresh_roots(const char* via) {   // internal + every usable extra drive; keeps the pick when its drive is still there
-        std::string keep = m_rootSel < m_roots.size() ? m_roots[m_rootSel].root : chosen_install_root(m_dApp);
+        std::string keep = !m_rootKeep.empty() ? m_rootKeep : m_rootSel < m_roots.size() ? m_roots[m_rootSel].root : chosen_install_root(m_dApp);
+        m_rootKeep = keep;
         std::vector<std::string> note; m_roots = installs::list_roots(g_dir, &note);
         std::string report = storage_report::write(g_dir, m_roots, installed_appids());   // WinRT figures + LocalState\storage_report.txt
-        m_rootSel = storage_roots::index_of(m_roots, keep);
+        m_rootUnavailable = !keep.empty() && storage_roots::index_of(m_roots, keep) == 0 &&
+            (m_roots.empty() || m_roots[0].root != keep);
+        m_rootSel = m_rootUnavailable ? 0 : storage_roots::index_of(m_roots, keep);
         std::string l; for (auto& c : m_roots) l += (l.empty() ? "" : "; ") + storage_roots::label_capacity(c);
         logf("storage: %s: %s", via, l.c_str()); for (auto& n : note) logf("storage: %s", n.c_str());
         for (auto& line : storage_report::log_lines(report)) logf("storage: %s", line.c_str());
     }
     void detail_storage(const char* via) {      // X (not installed): next install location
         if (m_dInst.installed || g_demo || dl_is_mine() || is_queued(m_dApp)) return;
-        refresh_roots("refresh"); m_rootSel = storage_roots::cycle(m_rootSel, m_roots.size(), 1); m_dNote.clear();
+        refresh_roots("refresh"); m_rootSel = storage_roots::cycle(m_rootSel, m_roots.size(), 1);
+        if (m_rootSel < m_roots.size()) { m_rootKeep = m_roots[m_rootSel].root; m_rootUnavailable = false; }
+        m_dNote.clear();
         logf("detail: install location appid=%u -> %s (%s)", m_dApp, storage_roots::label_capacity(m_roots[m_rootSel]).c_str(), via);
     }
     // ---- Item D10: the game options popup (detail cog, Menu on detail and
@@ -1871,6 +1892,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             if (g_demo) { m_dNote = "Demo list: installing is disabled."; return; }
             if (deleting_now()) { m_dNote = "Wait for the delete to finish."; return; }
             refresh_roots("reinstall");
+            if (m_rootUnavailable) { m_dNote = "The selected install drive is not connected."; return; }
             const storage_roots::Choice& where = m_roots[m_rootSel];
             if (where.freeBytes < (64ull << 20)) { m_dNote = storage_roots::refusal_text(where, m_roots, m_rootSel); return; }
             set_install_root(m_dApp, where.root);
@@ -1908,6 +1930,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (g_demo) { m_dNote = "Demo list: installing is disabled."; return; }
         if (deleting_now()) { m_dNote = "Wait for the delete to finish."; return; }
         refresh_roots("install");
+        if (m_rootUnavailable) { m_dNote = "The selected install drive is not connected."; return; }
         const storage_roots::Choice& where = m_roots[m_rootSel];
         if (where.freeBytes < (64ull << 20)) {
             m_dNote = storage_roots::refusal_text(where, m_roots, m_rootSel);

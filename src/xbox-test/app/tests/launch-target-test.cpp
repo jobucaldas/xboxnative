@@ -104,8 +104,9 @@ int main() {
     // remembered option is kept when it is still offered; a missing one falls
     // back to the first row.
     assert(preselect(rows,"")==0);
-    assert(preselect(rows,"x86\\Hades.exe")==1);   // a 32-bit option is runnable and remembered
+    assert(preselect(rows,"x86\\Hades.exe")==1);   // an old executable-only record remains readable
     assert(preselect(rows,"x64\\Hades.exe")==0);
+    assert(preselect(rows,choice_key(rows[1]))==1);   // new records distinguish the full option
     assert(preselect(rows,"gone.exe")==0);
     assert(preselect({},"")==0);
     Vdf two64;
@@ -196,13 +197,14 @@ int main() {
     assert(!s.open && s.rows.empty() && s.sel == 0);
     assert(press_a(s) == Press::none);
 
-    // Remembered choice file: one executable line, nothing else accepted.
+    // Remembered choice files identify the full Steam option, not just its
+    // executable (two options may launch the same binary with different args).
     assert(remember_name(1145360) == "launch_choice_1145360.txt");
-    assert(parse_remember(format_remember("x64\\Hades.exe")) == "x64\\Hades.exe");
+    assert(parse_remember(format_remember("x64\\Hades.exe\t-dx11\tx64")) == "x64\\Hades.exe\t-dx11\tx64");
     assert(parse_remember("x64\\Hades.exe\r\n") == "x64\\Hades.exe");
     assert(parse_remember("") .empty() && parse_remember("\n").empty() && parse_remember(std::string(300, 'a')).empty());
-    assert(parse_remember("x64\\Hades.exe\nsecond") == "x64\\Hades.exe");
-    assert(parse_remember(std::string("a\tb")).empty() && parse_remember(std::string("a\0b", 3)).empty());
+    assert(parse_remember("x64\\Hades.exe\t-dx11\tx64\nsecond") == "x64\\Hades.exe\t-dx11\tx64");
+    assert(parse_remember(std::string("a\0b", 3)).empty());
 
     // The rows own their entries: they stay valid after the appinfo buffer
     // (and the vector `entries()` parsed it into) is gone, as on the console
