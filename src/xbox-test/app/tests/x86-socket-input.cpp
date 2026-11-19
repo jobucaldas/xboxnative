@@ -34,6 +34,7 @@ int main() {
     CHECK(call("ws2_32.dll", "inet_ntoa", {0}) == 0 && guest.last_error() == 10045);
     auto xinput = reg.ordinals.at({"xinput1_3.dll", 2}); CHECK(xinput == Registry::key_sym("XInputGetState"));
     CHECK(reg.ordinals.count({"xinput1_3.dll", 3}) == 1 && reg.ordinals.count({"xinput1_3.dll", 4}) == 1 && reg.ordinals.count({"xinput1_3.dll", 5}) == 1 && reg.ordinals.count({"xinput1_3.dll", 7}) == 1 && reg.ordinals.count({"xinput1_3.dll", 8}) == 1);
+    CHECK(reg.ordinals.count({"xinput9_1_0.dll", 3}) == 0 && reg.ordinals.count({"xinput9_1_0.dll", 4}) == 0 && reg.ordinals.count({"xinput9_1_0.dll", 5}) == 0 && reg.ordinals.count({"xinput9_1_0.dll", 7}) == 0 && reg.ordinals.count({"xinput9_1_0.dll", 8}) == 0);
     mem.w32(cpu.reg[ESP] + 4, 1); mem.w32(cpu.reg[ESP] + 8, 0x4000); CHECK(reg.map.at({"xinput1_3.dll", xinput}).fn(cpu) == 1167 && xinput_called);
     std::printf("x86-socket-input: %d checks, %d failures\n", checks, failures); return failures ? 1 : 0;
 }

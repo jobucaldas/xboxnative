@@ -739,8 +739,10 @@ inline void register_xinput(Registry& r, Host& h) {
             if (!request.result && request.output.size() == 8) c.mem.write_bytes(c.arg(2), request.output.data(), 8);
             return request.result;
         });
-        r.add_ordinal(dll, 3, "XInputSetState"); r.add_ordinal(dll, 4, "XInputGetCapabilities"); r.add_ordinal(dll, 5, "XInputEnable");
-        r.add_ordinal(dll, 7, "XInputGetBatteryInformation"); r.add_ordinal(dll, 8, "XInputGetKeystroke");
+        if (dll != std::string("xinput9_1_0.dll")) {
+            r.add_ordinal(dll, 3, "XInputSetState"); r.add_ordinal(dll, 4, "XInputGetCapabilities"); r.add_ordinal(dll, 5, "XInputEnable");
+            r.add_ordinal(dll, 7, "XInputGetBatteryInformation"); r.add_ordinal(dll, 8, "XInputGetKeystroke");
+        }
     }
 }
 inline void register_gl(Registry& r, Host& h) {
