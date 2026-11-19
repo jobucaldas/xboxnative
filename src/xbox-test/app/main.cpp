@@ -2198,9 +2198,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         double presentSilence=0;
         if(QueryPerformanceCounter(&now)&&QueryPerformanceFrequency(&freq)&&freq.QuadPart>0) {
             const uint64_t last=guest_overlay::lastPresentTick.load(std::memory_order_acquire);
-            presentSilence=last&&uint64_t(now.QuadPart)>=last?
-                double(uint64_t(now.QuadPart)-last)/double(freq.QuadPart):
-                guest_watchdog::kSilenceSeconds+1;
+            // A present stamped after `now` was read is skew, not silence: count it as fresh, as evaluate() does.
+            presentSilence=!last?guest_watchdog::kSilenceSeconds+1:
+                uint64_t(now.QuadPart)>=last?double(uint64_t(now.QuadPart)-last)/double(freq.QuadPart):0;
         }
         if(!guest_watchdog::should_force_quit(finished,now_s()-m_quitRequestedAt,presentSilence))return;
         if(runtime->finished.load(std::memory_order_acquire))return;
@@ -2751,7 +2751,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         d3d11_diag::set_deep_draw = [] {
             FILE* file=_wfopen((g_dir+L"\\d3d11deep.txt").c_str(),L"rb");
             if(!file)return false;
-            char text[256]{};size_t bytes=fread(text,1,sizeof(text)-1,file);fclose(file);text[bytes]='\\0';
+            char text[256]{};size_t bytes=fread(text,1,sizeof(text)-1,file);fclose(file);text[bytes]='\0';
             unsigned limit=0;const char* option=strstr(text,"shaderdump=");
             if(option){char* end=nullptr;unsigned long parsed=strtoul(option+11,&end,10);if(end!=option+11)limit=static_cast<unsigned>(std::min<unsigned long>(parsed,32));}
             d3d11_diag::shaderDumpLimit.store(limit,std::memory_order_release);
