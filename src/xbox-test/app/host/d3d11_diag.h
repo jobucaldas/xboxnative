@@ -1277,7 +1277,7 @@ static HRESULT STDMETHODCALLTYPE createBuffer(DevicePtr self,const D3D11_BUFFER_
     // them at creation the counts are visible here; a zero index/vertex count
     // is a draw that submits no work, which is what a silently missing layer
     // looks like when the submission is indirect.
-    if(SUCCEEDED(hr)&&d&&out&&*out) {
+    if(SUCCEEDED(hr)&&d&&out&&*out&&deepDraw()) {
         std::lock_guard<std::mutex> lock(reportM);bufferCpuWritten[*out]=init&&init->pSysMem;
     }
     if(SUCCEEDED(hr)&&d&&(d->MiscFlags&D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS)) {
@@ -1515,7 +1515,7 @@ static HRESULT STDMETHODCALLTYPE contextMap(DevicePtr self,ID3D11Resource* r,UIN
     int indirect=indirectIndex(r);
     HRESULT hr=call(self,r,subresource,type,flags,mapped);
     if(SUCCEEDED(hr))traceCommand("Map","subresource=%u type=%d flags=0x%x",subresource,int(type),flags);
-    if(SUCCEEDED(hr)&&type!=D3D11_MAP_READ&&type!=D3D11_MAP_READ_WRITE)noteBufferWrite(r);
+    if(SUCCEEDED(hr)&&type!=D3D11_MAP_READ&&type!=D3D11_MAP_READ_WRITE&&deepDraw())noteBufferWrite(r);
     if(SUCCEEDED(hr)&&indirect>=0&&mapped&&mapped->pData&&
             (type==D3D11_MAP_WRITE||type==D3D11_MAP_WRITE_DISCARD||type==D3D11_MAP_WRITE_NO_OVERWRITE))
         indirectMapped[indirect].store(mapped->pData,std::memory_order_relaxed);
@@ -1695,8 +1695,9 @@ static void STDMETHODCALLTYPE contextSetShaderResources(DevicePtr self,UINT star
     srvSets[Stage].fetch_add(1,std::memory_order_relaxed);
     if(!views||!count)srvNulls[Stage].fetch_add(1,std::memory_order_relaxed);
     else for(UINT i=0;i<count;++i) if(!views[i]){srvNulls[Stage].fetch_add(1,std::memory_order_relaxed);break;}
+    bool feedbackCounted=false;   // srvFeedbackSets counts bind calls: once per call, not per slot
     if(views&&count)for(UINT i=0;i<count;++i)if(views[i]) {
-        if(wasRenderTarget(views[i]))srvFeedbackSets.fetch_add(1,std::memory_order_relaxed);
+        if(!feedbackCounted&&wasRenderTarget(views[i])) {srvFeedbackSets.fetch_add(1,std::memory_order_relaxed);feedbackCounted=true;}
         if(deepDraw()) {
             ID3D11Resource* resource=nullptr;views[i]->GetResource(&resource);
             if(resource) {
@@ -1958,7 +1959,7 @@ static void STDMETHODCALLTYPE contextSetPredication(DevicePtr self,ID3D11Predica
 static void STDMETHODCALLTYPE contextUpdateSubresource(DevicePtr self,ID3D11Resource* resource,UINT subresource,const D3D11_BOX* box,const void* data,UINT rowPitch,UINT depthPitch) {
     using Fn=void(STDMETHODCALLTYPE*)(DevicePtr,ID3D11Resource*,UINT,const D3D11_BOX*,const void*,UINT,UINT);
     auto call=reinterpret_cast<Fn>(original(self,UpdateSubresource));if(!call)return;
-    if(data)noteBufferWrite(resource);
+    if(data&&deepDraw())noteBufferWrite(resource);
     if(data&&isIndirectBuffer(resource)) {
         // The source is only as large as the buffer it fills (or the box it
         // fills), so read no more than that.

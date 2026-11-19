@@ -133,8 +133,9 @@ inline bool moveReplace(const std::wstring& from, const std::wstring& to) {
 }
 template <typename Async>
 inline wait_state wait_for_download(Async const& operation, std::chrono::steady_clock::time_point deadline) {
-    const auto remaining = deadline - std::chrono::steady_clock::now();
-    if (remaining <= std::chrono::steady_clock::duration::zero()) { operation.Cancel(); return wait_state::pending; }
+    auto remaining = deadline - std::chrono::steady_clock::now();
+    // An expired deadline still polls once (zero timeout): a finished operation completes, it is not a timeout.
+    if (remaining < std::chrono::steady_clock::duration::zero()) remaining = std::chrono::steady_clock::duration::zero();
     return bounded_wait([&](std::chrono::milliseconds timeout) {
         const auto status = operation.wait_for(std::chrono::duration_cast<winrt::Windows::Foundation::TimeSpan>(timeout));
         if (status == winrt::Windows::Foundation::AsyncStatus::Completed) return wait_state::completed;
@@ -143,13 +144,14 @@ inline wait_state wait_for_download(Async const& operation, std::chrono::steady_
 }
 inline bool ensure(const std::wstring& localState, const std::function<void(const char*)>& log) {
     static std::atomic<bool> downloadFailed{false};
-    if (downloadFailed.load(std::memory_order_acquire)) return false;
     const std::wstring dir = localState + L"\\dxil", dll = dir + L"\\dxil.dll", license = dir + L"\\LICENSE-MS.txt";
     std::vector<uint8_t> cached;
     if (readFile(dll, cached) && sha256(cached.data(), cached.size()) == kDllSha256 && GetFileAttributesW(license.c_str()) != INVALID_FILE_ATTRIBUTES) {
         if (!exposeDirectory(dir)) { log("dxil: download failed DLL search path; Mesa pipelines may fail PSO creation"); return false; }
         log("dxil: cached"); return true;
     }
+    // The latch only stops repeat downloads; a cache that is already on disk is still used above.
+    if (downloadFailed.load(std::memory_order_acquire)) return false;
     CreateDirectoryW(dir.c_str(), nullptr);
     auto fail = [&](const std::string& reason) {
         downloadFailed.store(true, std::memory_order_release);

@@ -111,6 +111,7 @@ static State* state=nullptr; // One guest process per launcher lifetime.
 static std::atomic<State*> observed{nullptr};
 static thread_local bool guestThread=false;
 static thread_local unsigned mappingImports=0;
+static thread_local unsigned forwardedLookups=0;
 // Only the current dynamic lookup's export chain contributes pending work.
 // Historic dependencies (including retained failures) must not poison lookups
 // that reach only already initialized images. Nested callback lookups restore
@@ -149,7 +150,7 @@ static void stopMissing(const std::string& name,uintptr_t caller=0) {
     RaiseException(missingException,EXCEPTION_NONCONTINUABLE,0,nullptr);
 }
 static void record_gap(const char* dll,const char* name,WORD ordinal,gap_summary::Outcome outcome,bool onlyIfAbsent=false) {
-    if(!mappingImports)return;
+    if(!mappingImports||forwardedLookups)return;
     std::string key=lower(dll),symbol=name?name:"#"+std::to_string(ordinal);
     if(onlyIfAbsent) mlp::launch_gap.record_if_absent(key,symbol,outcome);
     else mlp::launch_gap.record(key,symbol,outcome);
@@ -2147,7 +2148,7 @@ static std::string dialogText(LPCSTR text,size_t limit=2048) {
 static int WINAPI messageBoxA(HWND,LPCSTR text,LPCSTR caption,UINT type) {
     auto title=dialogText(caption), message=dialogText(text);
     state->event("guest user32.dll!MessageBoxA caption=\""+title+"\" text=\""+message+"\" type="+std::to_string(type)+" caller="+describe((uintptr_t)_ReturnAddress()));
-    if((type&MB_ICONERROR)&&state->milestone.load(std::memory_order_acquire)>0)
+    if((type&MB_ICONMASK)==MB_ICONERROR&&state->milestone.load(std::memory_order_acquire)>0)
         state->setFailureReason(title+": "+message);
     return IDOK;
 }
@@ -2170,7 +2171,11 @@ static int WINAPI messageBoxW(HWND,LPCWSTR text,LPCWSTR caption,UINT type) {
     stopMissing("user32.dll!MessageBoxW caption=\""+title+"\" text=\""+message+"\" type="+std::to_string(type),(uintptr_t)_ReturnAddress());
     return 0;
 }
-static uintptr_t vcruntimeLookup(const char* dll,const char* name) {return resolve(dll,name,0);}
+static uintptr_t vcruntimeLookup(const char* dll,const char* name) {
+    // The console's answer behind a forwarded VC runtime import is not a guest import of its own.
+    struct Forwarded {Forwarded(){++forwardedLookups;} ~Forwarded(){--forwardedLookups;}} forwarded;
+    return resolve(dll,name,0);
+}
 static MMRESULT WINAPI unsupportedWaveOut() { return MMSYSERR_NOTSUPPORTED; }
 static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     std::string key=lower(dll);
@@ -2186,7 +2191,7 @@ static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     if(processCreation(name) && (key=="kernel32.dll" || key.find("api-ms-win-core-")==0)) {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return processExport(name);}
     if(shellLaunch(name) && key=="shell32.dll") {record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return shellExport(name);}
     if(name && key=="shell32.dll" && !strcmp(name,"ExtractIconExW")) {
-        if(auto p=pe_tail::resolve(dll,name)) {record_gap(dll,name,ordinal,gap_summary::Outcome::resolved);return p;}
+        if(auto p=pe_tail::resolve(key.c_str(),name)) {record_gap(dll,name,ordinal,gap_summary::Outcome::resolved);return p;}
         record_gap(dll,name,ordinal,gap_summary::Outcome::routed);return (uintptr_t)&extractIconExW;
     }
     // Folder CSIDLs answer as the guest's known-folder route does (uwph/shell32).
@@ -2332,6 +2337,8 @@ static FARPROC managed_export(HMODULE module,const char* name) {
 // other libraries retain Mono's normal OS-loader fallback behavior.
 static void* managed_pinvoke(const char* library,const char* symbol) {
     if(!state||!library)return nullptr;
+    // Mapping mutates state->modules and state->order; hold the loader lock for the whole lookup (recursive).
+    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
     auto key=basename(wide(library));
     if(key.find('.')==std::string::npos)key+=".dll";
     if(key!="sdl3.dll"&&key!="fna3d.dll"&&key!="faudio.dll"&&key!="libtheorafile.dll")return nullptr;
@@ -2343,7 +2350,6 @@ static void* managed_pinvoke(const char* library,const char* symbol) {
     }
     if(!module||module->mappingFailed||!module->mapped||!initializePending())return nullptr;
     if(!symbol)return module;
-    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
     if(state->log)state->log((std::string("mono pinvoke: ")+key+"!"+symbol+" -> runtime/"+module->key).c_str());
     return (void*)exported(*module,symbol,0);
 }
