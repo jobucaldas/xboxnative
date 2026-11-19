@@ -1442,6 +1442,7 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         auto proc=[](const char* name)->uintptr_t {
             uintptr_t p=play_runtime::openglExport(name);
             if(!p&&mesa){p=reinterpret_cast<uintptr_t>(GetProcAddress(mesa,name));if(!p){using GetProc=PROC(WINAPI*)(LPCSTR);auto get=reinterpret_cast<GetProc>(GetProcAddress(mesa,"wglGetProcAddress"));if(get)p=reinterpret_cast<uintptr_t>(get(name));}}
+            if(p) SetLastError(ERROR_SUCCESS); // a failed GetProcAddress before the wgl fallback must not leak into the guest
             return p;
         };
         host.gl_call=[proc](x86::Host::GlCall& q) {
