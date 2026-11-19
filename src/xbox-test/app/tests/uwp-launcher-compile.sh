@@ -29,7 +29,7 @@ while IFS= read -r line; do
       header=${header%>}
       if [[ ! -e "$cppwinrt/$header" && -f "$cppwinrt/${header,,}" ]]; then
         mkdir -p "$out/obj/winrt"
-        ln -s "$cppwinrt/${header,,}" "$out/obj/winrt/$header"
+        ln -sf "$cppwinrt/${header,,}" "$out/obj/winrt/$header"
       fi
       ;;
   esac
