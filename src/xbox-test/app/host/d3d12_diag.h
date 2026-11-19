@@ -297,7 +297,7 @@ inline ShaderContainerInfo inspectShaderContainer(const void* code,SIZE_T length
             if(programBytes<24||programBytes>size||bitcodeOffset>size-8||bitcodeSize>size-8-bitcodeOffset){bad=true;continue;}
             const uint32_t version=read32(payload);result.modelKind=(version>>16)&0xffff;
             result.modelMajor=(version>>4)&0xf;result.modelMinor=version&0xf;result.hasModel=true;
-        } else if(!memcmp(bytes+offset,"VERS",4)) {
+        } else if(!memcmp(bytes+offset,"VERS",4)) {   // DFCC_CompilerVersion, not the validator version
             if(size<4){bad=true;continue;} result.validatorMajor=read16(payload);result.validatorMinor=read16(payload+2);result.hasValidator=true;
         } else if(!memcmp(bytes+offset,"PSV0",4)) {
             if(size<4){bad=true;continue;} result.psvRuntimeBytes=read32(payload);result.hasPsv=true;
@@ -312,7 +312,7 @@ inline std::string shaderStageText(const char* stage,const void* code,SIZE_T len
     if(info.malformed)return text+" digest="+(info.digestKnown?(info.digestZero?"zero":"set"):"unknown");
     if(info.hasModel)text+=fmt(" sm%u.%u kind=%s",info.modelMajor,info.modelMinor,shaderKindName(info.modelKind));
     if(info.digestKnown)text+=std::string(" digest=")+(info.digestZero?"zero":"set");
-    if(info.hasValidator)text+=fmt(" validator=%u.%u",info.validatorMajor,info.validatorMinor);
+    if(info.hasValidator)text+=fmt(" compiler=%u.%u",info.validatorMajor,info.validatorMinor);
     else if(info.hasPsv)text+=fmt(" validator=psv%u",info.psvRuntimeBytes);
     return text;
 }

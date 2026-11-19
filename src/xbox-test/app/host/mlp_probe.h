@@ -159,7 +159,8 @@ static uintptr_t resolve(const char* dll, const char* name, WORD ordinal) {
             reinterpret_cast<dwmapi_core::IsWindow>(user32_core::resolve("user32.dll","IsWindow")),
             reinterpret_cast<dwmapi_core::WindowRect>(user32_core::resolve("user32.dll","GetWindowRect")),
             reinterpret_cast<dwmapi_core::WindowLong>(user32_core::resolve("user32.dll","GetWindowLongPtrW")));
-        if(address) outcome=gap_summary::Outcome::routed;
+        // A name the override refuses is cleared: it must not keep the system address or report resolved.
+        outcome=address?gap_summary::Outcome::routed:gap_summary::Outcome::missing;
     }
     // Desktop process policies and services (AppPolicy*, ktmw32): before the
     // system loader, whose answers describe the UWP host package.

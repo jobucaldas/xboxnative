@@ -374,7 +374,11 @@ inline std::atomic<unsigned> deviceLostReports{0};   // transitions seen (remova
 // state at removal instead of the caller's error hiding the reason.
 inline void noteFailure(HRESULT hr) {
     ID3D11Device* device=healthDevice.load(std::memory_order_relaxed);
-    if(!device)return;
+    // Diagnostics off leaves no device, but the overlay's ring can still hold entries: a lost-device error flushes it.
+    if(!device) {
+        if(hr==DXGI_ERROR_DEVICE_REMOVED||hr==DXGI_ERROR_DEVICE_HUNG||hr==DXGI_ERROR_DEVICE_RESET) flushTrace(&traceFlushLogged);
+        return;
+    }
     static constexpr HRESULT lost[]={DXGI_ERROR_DEVICE_REMOVED,DXGI_ERROR_DEVICE_HUNG,
         DXGI_ERROR_DEVICE_RESET,DXGI_ERROR_DRIVER_INTERNAL_ERROR};
     HRESULT reason=device->GetDeviceRemovedReason();
