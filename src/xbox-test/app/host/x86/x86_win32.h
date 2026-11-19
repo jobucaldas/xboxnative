@@ -136,7 +136,10 @@ struct Host {
     uint32_t vertex_array = 0, gl_array_buffer = 0, gl_element_array_buffer = 0;
     std::function<uintptr_t(bool, uint32_t, uintptr_t*)> d3d9_factory;
     std::function<uintptr_t(const void*, uintptr_t*)> dsound_factory;
+    std::function<uintptr_t(const char*)> dsound_export;
     std::function<uintptr_t(uint32_t)> dsound_event;
+    static constexpr uint32_t DSOUND_WAIT_UNHANDLED = 0xfffffffeu;
+    std::function<uint32_t(Cpu&, uint32_t, uint32_t)> dsound_wait;
     std::function<uintptr_t(uint32_t)> d3d9_window;
     ComSpace com;
     uint32_t d3d9_guest_top = 0x7D000000u;

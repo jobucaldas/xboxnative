@@ -381,7 +381,7 @@ jobs:
         timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
-          packages: gcc-mingw-w64-i686 g++-mingw-w64-i686 wine wine64 mono-devel
+          packages: gcc-mingw-w64-i686 g++-mingw-w64-i686 gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 wine wine64 mono-devel llvm lld
       - name: embedded Mono AnyCPU host and exit code
         run: bash src/xbox-test/app/tests/mono-host.sh
       - name: x86 execution core (hardware-compared ALU, faults, thunks, owned i686 fixture)
@@ -392,6 +392,8 @@ jobs:
         run: bash src/xbox-test/app/tests/gap-summary.sh
       - name: "x86 guest surface (mingw CRT program through the interpreter: printf, heap, TLS, VirtualAlloc)"
         run: bash src/xbox-test/app/tests/x86-guest.sh
+      - name: x86 waveOut callbacks, format query, reset position and callback close
+        run: bash src/xbox-test/app/tests/x86-waveout-integration.sh
       - name: "DirectSound ring locks, cursors and notification crossings"
         run: bash src/xbox-test/uwph/dsound/ring-test.sh
       - name: "x86 OpenGL thunks (WGL context, client arrays and readback via host shim)"
