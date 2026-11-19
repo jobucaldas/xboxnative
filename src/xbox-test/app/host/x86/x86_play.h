@@ -214,7 +214,7 @@ inline void install_nls_host(Host& host) {
             break;
         }
         case Host::NlsOperation::GetUserDefaultLocaleName: {
-            using LocaleNameFn=BOOL(WINAPI*)(LPWSTR,int);
+            using LocaleNameFn=int(WINAPI*)(LPWSTR,int);
             static HMODULE base=LoadLibraryExW(L"kernelbase.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
             static HMODULE k32=LoadLibraryExW(L"kernel32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
             FARPROC proc=base?GetProcAddress(base,"GetUserDefaultLocaleName"):nullptr;
@@ -223,12 +223,13 @@ inline void install_nls_host(Host& host) {
             const uint32_t capacity=std::min(request.output_capacity,85u);
             std::vector<wchar_t> output(request.output_null?0:capacity);
             SetLastError(ERROR_SUCCESS);
-            response.result=reinterpret_cast<LocaleNameFn>(proc)(output.empty()?nullptr:output.data(),int(capacity))?1u:0u;
+            response.result=reinterpret_cast<LocaleNameFn>(proc)(output.empty()?nullptr:output.data(),int(capacity));
             if(response.result&&!output.empty()) {
                 size_t length=0;while(length<output.size()&&output[length])++length;
                 if(length<output.size()) {
                     const auto* bytes=reinterpret_cast<const uint8_t*>(output.data());
                     response.output.assign(bytes,bytes+(length+1)*sizeof(wchar_t));
+                    response.result=uint32_t(length+1);
                 } else response.result=0;
             }
             break;
@@ -471,19 +472,13 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
                 r.translated_blocks = cpu.translated_blocks; r.interpreted_blocks = cpu.interpreted_blocks;
                 r.peb_being_debugged=mem.r8(PEB_ADDR+2);r.peb_nt_global_flag=mem.r32(PEB_ADDR+0x68);return r; }
         }
-        // TLS blocks are per loaded image. DLL_PROCESS_ATTACH runs first, then
-        // each image's TLS callbacks, then the executable entry point.
+        // DLL TLS callbacks and DllMain have run above; run the executable's
+        // process-attach callback, then its entry point.
         if (on_loaded) on_loaded(r);
         try {
             if (guest.tls_images.empty()) run_entry(cpu, img);
             else {
-                for (Image* tls_image : guest.tls_images)
-                    if (tls_image) // a DllMain may have unloaded it
-                    for (uint32_t p = tls_image->tls.callbacks; p; p += 4) {
-                        uint32_t fn = mem.r32(p);
-                        if (!fn) break;
-                        cpu.call(fn, {tls_image->base, 1, 0});
-                    }
+                if (img.tls.present) guest.tls_callbacks_call_image(cpu, img, 1 /*DLL_PROCESS_ATTACH*/);
                 uint32_t result = cpu.call(img.entry, {PEB_ADDR});
                 if (!cpu.exited) { cpu.exited = true; cpu.exit_code = result; }
             }

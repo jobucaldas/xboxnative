@@ -482,29 +482,28 @@ struct Guest {
         }
         return ThreadTeb{base, size};
     }
+    // TLS callbacks for one image, called as (image base, reason, NULL) like
+    // the loader does. Process attach uses this before that image's DllMain.
+    void tls_callbacks_call_image(Cpu& c, Image& image, uint32_t reason) {
+        for (uint32_t p = image.tls.callbacks; p; p += 4) {
+            uint32_t fn = c.mem.r32(p);
+            if (!fn) break;
+            c.call(fn, {image.base, reason, 0});
+        }
+    }
     // TLS callbacks for `reason` (DLL_THREAD_ATTACH 2 / DLL_THREAD_DETACH 3),
     // called as (image base, reason, NULL) like the loader does.
     void tls_callbacks_call(Cpu& c, uint32_t reason) {
         if (tls_images.empty()) {
             if (!exe_tls.present) return;
-            for (uint32_t p = exe_tls.callbacks; p; p += 4) {
-                uint32_t fn = c.mem.r32(p);
-                if (!fn) break;
-                c.call(fn, {image_base, reason, 0});
-            }
+            Image image{}; image.base = image_base; image.tls = exe_tls;
+            tls_callbacks_call_image(c, image, reason);
             return;
         }
-        auto call_image = [&](Image& image) {
-            for (uint32_t p = image.tls.callbacks; p; p += 4) {
-                uint32_t fn = c.mem.r32(p);
-                if (!fn) break;
-                c.call(fn, {image.base, reason, 0});
-            }
-        };
         if (reason == 3) {
-            for (auto it = tls_images.rbegin(); it != tls_images.rend(); ++it) if (*it) call_image(**it);
+            for (auto it = tls_images.rbegin(); it != tls_images.rend(); ++it) if (*it) tls_callbacks_call_image(c, **it, reason);
         } else {
-            for (Image* image : tls_images) if (image) call_image(*image);
+            for (Image* image : tls_images) if (image) tls_callbacks_call_image(c, *image, reason);
         }
     }
     // The worker's context lives exactly as long as this object: the worker's TEB
@@ -514,16 +513,16 @@ struct Guest {
     // no worker TEB is ever left active.
     struct ThreadScope {
         Guest& g; Cpu& c;
-        uint32_t main_teb, main_fs; uint64_t main_limit; bool main_in_body;
+        uint32_t main_teb, main_fs, main_stack_teb_limit; uint64_t main_limit; bool main_in_body;
         ThreadScope(Guest& gg, Cpu& cc, uint32_t teb, uint64_t budget)
-            : g(gg), c(cc), main_teb(gg.cur_teb), main_fs(cc.fs_base), main_limit(cc.limit), main_in_body(gg.in_thread_body) {
-            g.cur_teb = teb; c.fs_base = teb; g.in_thread_body = true;
+            : g(gg), c(cc), main_teb(gg.cur_teb), main_fs(cc.fs_base), main_stack_teb_limit(cc.mem.stack_teb_limit), main_limit(cc.limit), main_in_body(gg.in_thread_body) {
+            g.cur_teb = teb; c.fs_base = teb; c.mem.stack_teb_limit = teb + 0x08; g.in_thread_body = true;
             // Each body gets `budget` instructions per run. The interpreter is
             // single-threaded, so a body that never returns (a worker that waits on
             // the main thread) must fail the run by name instead of hanging the host.
             if (c.executed + budget < c.limit) c.limit = c.executed + budget;
         }
-        ~ThreadScope() { g.cur_teb = main_teb; c.fs_base = main_fs; c.limit = main_limit; g.in_thread_body = main_in_body; }
+        ~ThreadScope() { g.cur_teb = main_teb; c.fs_base = main_fs; c.mem.stack_teb_limit = main_stack_teb_limit; c.mem.w32(main_teb + 0x08, c.mem.stack_limit); c.limit = main_limit; g.in_thread_body = main_in_body; }
     };
     // Thread-library notifications exclude the executable, which has no DllMain
     // entry in dll_order. DisableThreadLibraryCalls suppresses only DllMain
@@ -592,18 +591,20 @@ struct Guest {
         }
     }
     // Guest DLL loading (stage 3). `run_dll_mains` runs each loaded DLL's
-    // DllMain(DLL_PROCESS_ATTACH) in load order, like the Windows loader, and
-    // is called by the runner after init_process. A DLL without DllMain is
-    // skipped; a DllMain that faults propagates (never silently ignored).
+    // TLS callbacks and DllMain(DLL_PROCESS_ATTACH) in load order, like the
+    // Windows loader, and is called by the runner after init_process. A DLL
+    // without DllMain is skipped; a callback or DllMain fault propagates.
     void run_dll_mains(Cpu& c, uint32_t reason) {
         (void)reason;  // only DLL_PROCESS_ATTACH (1) is dispatched today
         for (const auto& name : dll_order) {
             if (attached[name]) continue;
             attached[name] = true;
+            auto dll = dlls.find(name);
+            if (dll == dlls.end()) continue;
+            if (dll->second.image.tls.present) tls_callbacks_call_image(c, dll->second.image, 1 /*DLL_PROCESS_ATTACH*/);
             auto e = dll_entries.find(name);
             if (e == dll_entries.end()) continue;
-            uint32_t base = dlls[name].image.base;
-            c.call(e->second, {base, static_cast<uint32_t>(1 /*DLL_PROCESS_ATTACH*/), 0});
+            c.call(e->second, {dll->second.image.base, static_cast<uint32_t>(1 /*DLL_PROCESS_ATTACH*/), 0});
         }
     }
     // LoadLibrary core: maps `file` as a guest DLL (or bumps the refcount of a
@@ -802,6 +803,11 @@ struct Guest {
         for (const auto& name : dll_order) {
             if (attached[name]) continue;
             attached[name] = true;
+            // A runtime LoadLibrary gets the same TLS-callback-then-DllMain
+            // order as the loader path (run_dll_mains).
+            auto dll = dlls.find(name);
+            if (dll != dlls.end() && dll->second.image.tls.present)
+                tls_callbacks_call_image(c, dll->second.image, 1 /*DLL_PROCESS_ATTACH*/);
             auto e = dll_entries.find(name);
             if (e == dll_entries.end()) continue;
             uint32_t base = dlls[name].image.base;
@@ -1275,7 +1281,7 @@ inline void Guest::register_all() {
     auto steam_reg_value=[this](std::string name,bool wide,uint32_t& type,std::vector<uint8_t>& bytes) {
         for(char& ch:name){if(wide&&ch>='A'&&ch<='Z')ch=char(ch+32);else if(!wide&&ch>='A'&&ch<='Z')ch=char(ch+32);}
         auto dword=[&](uint32_t value){type=4;bytes.resize(4);memcpy(bytes.data(),&value,4);};
-        auto text=[&](const std::string& value){type=1;if(wide){bytes.resize((value.size()+1)*2);for(size_t i=0;i<value.size();++i){bytes[i*2]=uint8_t(value[i]);bytes[i*2+1]=0;}}else bytes.assign(value.begin(),value.end());bytes.resize(bytes.size()+(wide?2:1),0);};
+        auto text=[&](const std::string& value){type=1;if(wide){bytes.resize(value.size()*2+2,0);for(size_t i=0;i<value.size();++i){bytes[i*2]=uint8_t(value[i]);bytes[i*2+1]=0;}}else{bytes.assign(value.begin(),value.end());bytes.push_back(0);}};
         if(name=="pid")dword(0x1000);
         else if(name=="activeuser")dword(steam_registry.account);
         else if(name=="steamclientdll")text(steam_registry.client);
@@ -1417,8 +1423,12 @@ inline void Guest::register_all() {
         std::vector<wchar_t> path(260);
         HRESULT hr = fn(nullptr, int(c.arg(1)), nullptr, c.arg(3), path.data());
         if (SUCCEEDED(hr)) {
-            for (size_t i = 0; i < path.size() && path[i]; ++i) mem.w(c.arg(4) + uint32_t(i * 2), uint16_t(path[i]), 2);
-            mem.w(c.arg(4) + uint32_t(path.size() * 2 - 2), 0, 2);
+            size_t length = 0;
+            while (length < path.size() && path[length]) {
+                mem.w(c.arg(4) + uint32_t(length * 2), uint16_t(path[length]), 2);
+                ++length;
+            }
+            if (length < path.size()) mem.w(c.arg(4) + uint32_t(length * 2), 0, 2);
         }
         return uint32_t(hr);
 #else
@@ -1628,7 +1638,7 @@ inline void Guest::register_all() {
             path.empty() ? nullptr : path.data(), c.arg(3) ? &part : nullptr);
         if (result && result < cap && out) {
             for (uint32_t i = 0; i <= result; ++i) mem.w(out + i * 2, uint16_t(path[i]), 2);
-            if (c.arg(3)) mem.w32(c.arg(3), out + uint32_t(part - path.data()) * 2);
+            if (c.arg(3)) mem.w32(c.arg(3), part ? out + uint32_t(part - path.data()) * 2 : 0);
         }
         return result;
 #else
@@ -2600,9 +2610,11 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll","FreeResource",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{return resource_handles.erase(c.arg(0))?0u:1u;});
     for(bool wide:{false,true}){std::string name=wide?"LoadStringW":"LoadStringA";reg.add("user32.dll",name,Conv::Stdcall,4,[this,resource_data,wide](Cpu& c)->uint32_t{
         uint32_t module=c.arg(0)?c.arg(0):image_base,id=c.arg(1),buffer=c.arg(2),capacity=c.arg(3);bool known=module==image_base;for(const auto& dll:dlls)if(dll.second.image.base==module)known=true;
-        if(!known||!id||id>0xffff||!buffer||!capacity){set_last_error(87);return 0;}
+        if(!known||id>0xffff||!buffer){set_last_error(87);return 0;}
         uint32_t data=0,size=0,error=0,block=id/16+1;if(!resource_data(module,6,block,false,0,false,data,size,error)){set_last_error(error);return 0;}
-        uint32_t offset=0;for(uint32_t i=0;i<16;++i){if(offset>=size){set_last_error(1814);return 0;}uint32_t length=uint32_t(mem.r(data+offset,2));offset+=2;if(i==id%16){uint32_t copied=std::min<uint32_t>(length,capacity-1);for(uint32_t j=0;j<copied;++j){uint16_t ch=uint16_t(mem.r(data+offset+j*2,2));if(wide)mem.w(buffer+j*2,ch,2);else mem.w8(buffer+j,uint8_t(ch<=0xff?ch:'?'));}if(wide)mem.w(buffer+copied*2,0,2);else mem.w8(buffer+copied,0);set_last_error(0);return copied;}offset+=length*2;}
+        uint32_t offset=0;for(uint32_t i=0;i<16;++i){if(offset>=size){set_last_error(1814);return 0;}uint32_t length=uint32_t(mem.r(data+offset,2));offset+=2;if(i==id%16){
+            if(!capacity){if(!wide){set_last_error(87);return 0;}mem.w32(buffer,data+offset);set_last_error(0);return length;}
+            uint32_t copied=std::min<uint32_t>(length,capacity-1);for(uint32_t j=0;j<copied;++j){uint16_t ch=uint16_t(mem.r(data+offset+j*2,2));if(wide)mem.w(buffer+j*2,ch,2);else mem.w8(buffer+j,uint8_t(ch<=0xff?ch:'?'));}if(wide)mem.w(buffer+copied*2,0,2);else mem.w8(buffer+copied,0);set_last_error(0);return copied;}offset+=length*2;}
         return 0;
     });}
     // GUI launcher guests have no attached console. Console-title APIs therefore

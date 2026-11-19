@@ -9,5 +9,6 @@
 "Beta" RCDATA { 0x22222222L }
 STRINGTABLE
 BEGIN
+    0 "Zero slot"
     7 "Pug resource"
 END

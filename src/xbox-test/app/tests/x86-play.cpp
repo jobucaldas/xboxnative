@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
             host.nls_call=[](const x86::Host::NlsRequest& request) {
                 x86::Host::NlsResponse response{};
                 if(request.operation==x86::Host::NlsOperation::GetUserDefaultLocaleName&&request.output_capacity==85u&&!request.output_null) {
-                    response.result=1;response.output={'e',0,'n',0,'-',0,'U',0,'S',0,0,0};
+                    response.result=6;response.output={'e',0,'n',0,'-',0,'U',0,'S',0,0,0};
                 }
                 return response;
             };
