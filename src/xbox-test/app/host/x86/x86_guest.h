@@ -2955,7 +2955,7 @@ inline void Guest::register_all() {
     auto d3dx_notimpl = [](Cpu&) -> uint32_t { return 0x80004001u; }; // E_NOTIMPL
     reg.add("d3dx9_36.dll", "D3DXCreateEffect", Conv::Stdcall, 9, d3dx_notimpl);
     reg.add("d3dx9_36.dll", "D3DXCreateFontA", Conv::Stdcall, 12, d3dx_notimpl);
-    reg.add("d3dx9_36.dll", "D3DXCreateTexture", Conv::Stdcall, 7, d3dx_notimpl);
+    reg.add("d3dx9_36.dll", "D3DXCreateTexture", Conv::Stdcall, 8, d3dx_notimpl);
     reg.add("d3dx9_36.dll", "D3DXCreateTextureFromFileInMemoryEx", Conv::Stdcall, 15, d3dx_notimpl);
     reg.add("d3dx9_36.dll", "D3DXFillTexture", Conv::Stdcall, 3, d3dx_notimpl);
     reg.add("d3dx9_36.dll", "D3DXGetImageInfoFromFileInMemory", Conv::Stdcall, 3, d3dx_notimpl);
