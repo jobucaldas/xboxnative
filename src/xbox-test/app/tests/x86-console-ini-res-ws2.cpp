@@ -6,7 +6,7 @@ static int checks, failures;
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; std::printf("FAIL %s:%d %s\n",__FILE__,__LINE__,#x); } } while (0)
 int main() {
     Memory mem;mem.map(0x1000,0x30000,PROT_R|PROT_W);mem.map(0x400000,0x3000,PROT_R|PROT_W);
-    ThunkTable th;Host host;Registry reg;Guest g(mem,host,reg);g.cur_teb=0x1000;g.image_base=0x400000;g.register_all();Cpu cpu(mem,th);cpu.reg[ESP]=0x2f000;
+    ThunkTable th;Host host;Registry reg;Guest g(mem,host,reg);g.cur_teb=0x1000;g.image_base=0x400000;g.register_all();Cpu cpu(mem,th);cpu.reg[ESP]=0x2f000;cpu.fs_base=g.cur_teb;
     auto call=[&](const char* dll,const char* name,std::initializer_list<uint32_t> args){unsigned i=0;for(uint32_t v:args)mem.w32(cpu.reg[ESP]+4+4*i++,v);return reg.map.at({dll,name}).fn(cpu);};
     const char* console[]={"setconsoletitlea","setconsoletitlew","getconsoletitlea","getconsoletitlew","allocconsole","freeconsole","attachconsole"};
     for(unsigned i=0;i<7;++i)CHECK(reg.map.count({"kernel32.dll",console[i]})==1);
