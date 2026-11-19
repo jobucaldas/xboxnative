@@ -180,12 +180,14 @@ inline void register_win32(Registry& r, Host& h) {
             if (fn) { width = fn(0); height = fn(1); }
         }
 #endif
-        uint32_t rect = c.reg[ESP] - 64, clip = c.arg(1), callback = c.arg(2);
+        uint32_t clip = c.arg(1), callback = c.arg(2), data = c.arg(3);
         if (clip && (int32_t(c.mem.r32(clip + 8)) <= 0 || int32_t(c.mem.r32(clip + 12)) <= 0)) return 1;
+        c.reg[ESP] -= 64; const uint32_t rect = c.reg[ESP];  // the RECT stays above the callback frame, as in Win32
         c.mem.w32(rect, 0); c.mem.w32(rect + 4, 0);
         c.mem.w32(rect + 8, uint32_t(width)); c.mem.w32(rect + 12, uint32_t(height));
-        if (callback && !c.call(callback, {monitor, 0, rect, c.arg(3)})) return 0;
-        return 1;
+        const bool ok = !callback || c.call(callback, {monitor, 0, rect, data});
+        c.reg[ESP] += 64;
+        return ok ? 1 : 0;
     });
     auto enum_display_settings = [&h](Cpu& c) -> uint32_t {
         if (c.arg(0)) {
@@ -404,7 +406,7 @@ inline void register_win32(Registry& r, Host& h) {
         const uint32_t interval = std::max(1u, c.arg(2));
         auto it = std::find_if(h.timers.begin(), h.timers.end(), [hwnd, id](const auto& timer) { return timer.hwnd == hwnd && timer.id == id; });
         if (it == h.timers.end()) h.timers.push_back({hwnd, id, interval, c.arg(3), timer_now() + interval, false});
-        else { it->interval = interval; it->proc = c.arg(3); it->due = timer_now() + interval; }
+        else { it->interval = interval; it->proc = c.arg(3); it->due = timer_now() + interval; it->pending = false; }
         return id;
     };
     auto kill_timer = [&h, native_window](Cpu& c) -> uint32_t {
@@ -456,7 +458,7 @@ inline void register_win32(Registry& r, Host& h) {
                 auto q=call_window(c,name,{hwnd,c.arg(1),c.arg(2),c.arg(3)}); return uint32_t(q.result);
             }
             if (!strcmp(name,"PeekMessageA") || !strcmp(name,"PeekMessageW") || !strcmp(name,"GetMessageA") || !strcmp(name,"GetMessageW")) {
-                const bool get = name[0]=='G'; const uint32_t out=c.arg(0), filter=c.arg(1); uintptr_t native_filter=native_window(filter);
+                const bool get = name[0]=='G'; const uint32_t out=c.arg(0), filter=c.arg(1); uintptr_t native_filter=filter==0xFFFFFFFFu?static_cast<uintptr_t>(-1):native_window(filter);
                 if(filter&&!native_filter)return uint32_t(-1);
                 const size_t size=32; Host::WindowCall q{};
                 if (get && h.window_call) {
@@ -479,7 +481,8 @@ inline void register_win32(Registry& r, Host& h) {
                     pump_timers();
                     q = call_window(c,name,{uintptr_t(out),native_filter,c.arg(2),c.arg(3),get?0u:c.arg(4)}, {},size);
                 }
-                if(q.supported && q.result && q.output.size()>=size) {
+                const bool quit=get&&q.supported&&!q.result&&q.output.size()>=size&&[&]{uint32_t m=0;memcpy(&m,q.output.data()+8,4);return m==0x0012u;}();
+                if(q.supported && (q.result || quit) && q.output.size()>=size) {
                     uintptr_t native_hwnd=0;uint32_t guest_hwnd=0;memcpy(&native_hwnd,q.output.data(),sizeof(native_hwnd));
                     for(const auto& item:h.window_handles)if(item.second==native_hwnd){guest_hwnd=item.first;break;}
                     std::vector<uint8_t> guest(28);memcpy(guest.data(),&guest_hwnd,4);memcpy(guest.data()+4,q.output.data()+8,24);c.mem.write_bytes(out,guest.data(),uint32_t(guest.size()));
@@ -501,7 +504,7 @@ inline void register_win32(Registry& r, Host& h) {
             }
             uintptr_t a[8]{}; for(unsigned i=0;i<argc;++i) a[i]=c.arg(i);
             if(first_hwnd) a[0]=hwnd;
-            if(!strcmp(name,"SetWindowPos")&&a[1]){uintptr_t after=native_window(uint32_t(a[1]));if(!after)return bad_window();a[1]=after;}
+            if(!strcmp(name,"SetWindowPos")&&a[1]){const uint32_t after_token=uint32_t(a[1]);if(after_token==1u||after_token==0xFFFFFFFFu||after_token==0xFFFFFFFEu)a[1]=uintptr_t(int32_t(after_token));else{uintptr_t after=native_window(after_token);if(!after)return bad_window();a[1]=after;}}
             std::vector<uint8_t> bytes; size_t out_size=0; uint32_t output_address=0;
             if(!strcmp(name,"GetClientRect")||!strcmp(name,"GetWindowRect")){out_size=16;output_address=uint32_t(a[1]);}
             else if(!strcmp(name,"ClientToScreen")||!strcmp(name,"ScreenToClient")){out_size=8;output_address=uint32_t(a[1]);bytes=guest_point(c,output_address);}
@@ -668,7 +671,7 @@ inline void register_win32(Registry& r, Host& h) {
                 swap(root, child); root = child; } };
         if (n > 1) { for (uint32_t i = n / 2; i-- > 0;) sift(i, n); for (uint32_t e = n - 1; e > 0; --e) { swap(0, e); sift(0, e); } }
         return 0; });
-    unavailable_stdcall("gdi32.dll", "GetGlyphOutlineA", 6);
+    unavailable_stdcall("gdi32.dll", "GetGlyphOutlineA", 7, uint32_t(-1));
     unavailable_stdcall("imm32.dll", "ImmAssociateContext", 2);
     unavailable_stdcall("kernel32.dll", "GetDiskFreeSpaceA", 5);
     unavailable_stdcall("kernel32.dll", "GetOverlappedResult", 4);
@@ -736,6 +739,8 @@ inline void register_xinput(Registry& r, Host& h) {
             if (!request.result && request.output.size() == 8) c.mem.write_bytes(c.arg(2), request.output.data(), 8);
             return request.result;
         });
+        r.add_ordinal(dll, 3, "XInputSetState"); r.add_ordinal(dll, 4, "XInputGetCapabilities"); r.add_ordinal(dll, 5, "XInputEnable");
+        r.add_ordinal(dll, 7, "XInputGetBatteryInformation"); r.add_ordinal(dll, 8, "XInputGetKeystroke");
     }
 }
 inline void register_gl(Registry& r, Host& h) {
@@ -836,7 +841,7 @@ inline void register_gl(Registry& r, Host& h) {
         Host::WindowCreate q{};
         q.ex_style = c.arg(0); q.class_name = read_class_a(c, c.arg(1)); if (c.arg(2)) { auto title = read_astr(c, c.arg(2)); q.title.assign(title.begin(), title.end()); }
         q.style = c.arg(3); q.x = c.arg(4); q.y = c.arg(5); q.width = c.arg(6); q.height = c.arg(7);
-        q.parent = c.arg(8) == 0xfffffffdu ? uintptr_t(c.arg(8)) : c.arg(8) ? window(c.arg(8)) : 0; q.menu = c.arg(9); q.instance = c.arg(10);
+        q.parent = c.arg(8) == 0xfffffffdu ? uintptr_t(int32_t(c.arg(8))) : c.arg(8) ? window(c.arg(8)) : 0; q.menu = c.arg(9); q.instance = c.arg(10);
         if ((c.arg(8) && c.arg(8) != 0xfffffffdu && !q.parent) || !q.class_name.size()) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
         uint32_t token = map_window(h.create_window(q));
         if (token) { h.window_procs[token] = h.window_class_procs[q.class_name]; h.window_longs[token][-4] = h.window_procs[token]; }
@@ -882,7 +887,7 @@ inline void register_gl(Registry& r, Host& h) {
         Host::WindowCreate q{};
         q.ex_style = c.arg(0); q.class_name = read_class_w(c, c.arg(1)); if (c.arg(2)) q.title = read_wstr(c, c.arg(2));
         q.style = c.arg(3); q.x = c.arg(4); q.y = c.arg(5); q.width = c.arg(6); q.height = c.arg(7);
-        q.parent = c.arg(8) == 0xfffffffdu ? uintptr_t(c.arg(8)) : c.arg(8) ? window(c.arg(8)) : 0; q.menu = c.arg(9); q.instance = c.arg(10);
+        q.parent = c.arg(8) == 0xfffffffdu ? uintptr_t(int32_t(c.arg(8))) : c.arg(8) ? window(c.arg(8)) : 0; q.menu = c.arg(9); q.instance = c.arg(10);
         if ((c.arg(8) && c.arg(8) != 0xfffffffdu && !q.parent) || !q.class_name.size()) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
         uint32_t token = map_window(h.create_window(q));
         if (token) { h.window_procs[token] = h.window_class_procs[q.class_name]; h.window_longs[token][-4] = h.window_procs[token]; }
@@ -905,11 +910,13 @@ inline void register_gl(Registry& r, Host& h) {
     });
     auto get_window_long = [&h, count, window](Cpu& c, bool pointer) -> uint32_t {
         count(pointer ? "GetWindowLongPtrW" : "GetWindowLongW"); uint32_t token = c.arg(0); uintptr_t native = window(token);
+        if (native && (int32_t(c.arg(1)) == -4 || int32_t(c.arg(1)) == -21)) { auto& values = h.window_longs[token]; auto it = values.find(int32_t(c.arg(1))); return it == values.end() ? 0u : it->second; }
         if (!native || !h.get_window_long) { c.mem.w32(c.fs_base + 0x34, native ? 120 : 6); return 0; }
         return uint32_t(h.get_window_long(native, int32_t(c.arg(1)), pointer));
     };
     auto set_window_long = [&h, count, window](Cpu& c, bool pointer) -> uint32_t {
         count("SetWindowLongPtrW"); uint32_t token = c.arg(0); uintptr_t native = window(token);
+        if (native && (int32_t(c.arg(1)) == -4 || int32_t(c.arg(1)) == -21)) { const int32_t index = int32_t(c.arg(1)); auto& values = h.window_longs[token]; uint32_t old = values[index]; values[index] = c.arg(2); if (index == -4) h.window_procs[token] = c.arg(2); return old; }
         if (!native || !h.set_window_long) { c.mem.w32(c.fs_base + 0x34, native ? 120 : 6); return 0; }
         return uint32_t(h.set_window_long(native, int32_t(c.arg(1)), int32_t(c.arg(2)), pointer));
     };
@@ -1313,7 +1320,7 @@ inline void register_ws2(Registry& r, Host& h) {
     unavailable("socket",3,uint32_t(-1));r.add_ordinal("ws2_32.dll",23,"socket");
     unavailable("gethostbyaddr",3,0);r.add_ordinal("ws2_32.dll",51,"gethostbyaddr");
     unavailable("gethostbyname",1,0);r.add_ordinal("ws2_32.dll",52,"gethostbyname");
-    unavailable("WSAAsyncSelect",5,uint32_t(-1));r.add_ordinal("ws2_32.dll",101,"WSAAsyncSelect");
+    unavailable("WSAAsyncSelect",4,uint32_t(-1));r.add_ordinal("ws2_32.dll",101,"WSAAsyncSelect");
     r.add("ws2_32.dll","htons",Conv::Stdcall,1,[](Cpu& c)->uint32_t { const uint16_t v=uint16_t(c.arg(0)); return uint32_t(uint16_t((v<<8)|(v>>8))); });
     r.add_ordinal("ws2_32.dll",9,"htons");
     r.add("ws2_32.dll","ntohs",Conv::Stdcall,1,[](Cpu& c)->uint32_t { const uint16_t v=uint16_t(c.arg(0)); return uint32_t(uint16_t((v<<8)|(v>>8))); });
