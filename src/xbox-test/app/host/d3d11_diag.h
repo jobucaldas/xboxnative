@@ -2089,7 +2089,8 @@ static HRESULT STDMETHODCALLTYPE checkFormatSupport(DevicePtr self,DXGI_FORMAT f
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,DXGI_FORMAT,UINT*);
     D3D11_DIAG_HOOK(Fn,CheckFormatSupport)HRESULT hr=call(self,format,support);
     UINT bits=SUCCEEDED(hr)&&support?*support:0;
-    if(FAILED(hr)||!bits)D3D11_DIAG_FAILED("CheckFormatSupport",fmt("%d/%x",int(format),bits),fmt("fmt=%s support=0x%x UNSUPPORTED",formatText(format).c_str(),bits));
+    if(FAILED(hr)) D3D11_DIAG_FAILED("CheckFormatSupport",fmt("%d/%x",int(format),bits),fmt("fmt=%s support=0x%x UNSUPPORTED",formatText(format).c_str(),bits));
+    else if(!bits) report(0,fmt("CheckFormatSupport %d/%x",int(format),bits),fmt("CheckFormatSupport fmt=%s support=0x%x UNSUPPORTED",formatText(format).c_str(),bits));
     else report(1,fmt("CheckFormatSupport %d/%x",int(format),bits),fmt("CheckFormatSupport fmt=%s support=0x%x [%s]",formatText(format).c_str(),bits,supportText(bits).c_str()));
     return hr;
 }
@@ -2097,7 +2098,8 @@ static HRESULT STDMETHODCALLTYPE checkMultisampleQualityLevels(DevicePtr self,DX
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,DXGI_FORMAT,UINT,UINT*);
     D3D11_DIAG_HOOK(Fn,CheckMultisampleQualityLevels)HRESULT hr=call(self,format,samples,levels);
     UINT n=SUCCEEDED(hr)&&levels?*levels:0;
-    if(FAILED(hr)||!n)D3D11_DIAG_FAILED("CheckMultisampleQualityLevels",fmt("%d/%u",int(format),samples),fmt("fmt=%s samples=%u levels=%u UNSUPPORTED",formatText(format).c_str(),samples,n));
+    if(FAILED(hr)) D3D11_DIAG_FAILED("CheckMultisampleQualityLevels",fmt("%d/%u",int(format),samples),fmt("fmt=%s samples=%u levels=%u UNSUPPORTED",formatText(format).c_str(),samples,n));
+    else if(!n) report(0,fmt("CheckMultisampleQualityLevels %d/%u",int(format),samples),fmt("CheckMultisampleQualityLevels fmt=%s samples=%u levels=%u UNSUPPORTED",formatText(format).c_str(),samples,n));
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE checkFeatureSupport(DevicePtr self,D3D11_FEATURE feature,void* data,UINT size) {
