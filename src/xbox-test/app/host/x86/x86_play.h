@@ -27,6 +27,16 @@
 #include "../../../uwph/kernel32/route.h"
 #endif
 namespace x86 {
+inline bool play_capture_nls_output(Host::NlsResponse& response, const void* output, size_t output_bytes,
+                                    size_t required_bytes, bool output_null, uint32_t capacity) {
+    if (!response.result || output_null || !capacity) return true;
+    if (required_bytes > output_bytes || (required_bytes && !output)) return false;
+    if (required_bytes) {
+        const auto* bytes = static_cast<const uint8_t*>(output);
+        response.output.assign(bytes, bytes + required_bytes);
+    }
+    return true;
+}
 #if defined(_WIN32)
 inline void play_locale_call(Host::LocaleCall& q) {
     SYSTEMTIME st{}; if(q.has_system_time) memcpy(&st,q.system_time,sizeof(st));
@@ -252,8 +262,12 @@ inline void install_nls_host(Host& host) {
                     reinterpret_cast<InfoW>(proc)(request.locale,request.type,output_w.empty()?nullptr:output_w.data(),int(request.output_capacity)));
             }
             if(response.result&&!request.output_null) {
-                if(ansi)response.output.assign(output_a.begin(),output_a.begin()+response.result);
-                else {const auto* bytes=reinterpret_cast<const uint8_t*>(output_w.data());response.output.assign(bytes,bytes+size_t(response.result)*sizeof(wchar_t));}
+                const size_t unit=ansi?sizeof(char):sizeof(wchar_t);
+                const size_t available=ansi?output_a.size():output_w.size()*sizeof(wchar_t);
+                const void* output=ansi?static_cast<const void*>(output_a.data()):static_cast<const void*>(output_w.data());
+                if(!play_capture_nls_output(response,output,available,size_t(response.result)*unit,false,request.output_capacity)) {
+                    response.result=0;response.last_error=ERROR_INSUFFICIENT_BUFFER;
+                }
             }
             break;
         }
