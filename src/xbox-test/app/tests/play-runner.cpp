@@ -776,7 +776,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         if(mode=="crashctx-on") {
             std::string pattern;char byte[3];for(unsigned i=0;i<0x40;++i){snprintf(byte,sizeof byte,"%02x",0xa0+i);pattern+=byte;}
             auto memory=crashContextLog.find("CRASHCTX mem RCX=0x");
-            auto addressEnd=memory==std::string::npos?memory:crashContextLog.find(' ',memory);
+            auto addressEnd=memory==std::string::npos?memory:crashContextLog.find(' ',memory+sizeof("CRASHCTX mem RCX=0x")-1);
             ok=ok&&memory!=std::string::npos&&addressEnd!=std::string::npos&&
                 crashContextLog.compare(addressEnd+1,pattern.size(),pattern)==0&&
                 crashContextLog.find("CRASHCTX code RIP=0x")!=std::string::npos&&

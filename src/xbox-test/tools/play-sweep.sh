@@ -124,11 +124,14 @@ for app in "${unique[@]}"; do
   # Ask the guest to close over the launcher cmd.txt channel. This is harmless if
   # play-test already observed a terminal result; it never uses force-stop.
   printf 'gquit\n' > "$tmp/cmd.txt"
-  bash "$DP/put-file.sh" "$full" '\LocalState' "$tmp/cmd.txt" >/dev/null || { echo "could not send gquit for $app; stopping sweep" >&2; exit 1; }
+  # put-file.sh exits 0 for any HTTP answer, so only a 2xx status line proves the quit was accepted.
+  gquit_reply=$(bash "$DP/put-file.sh" "$full" '\LocalState' "$tmp/cmd.txt" 2>/dev/null) || gquit_reply=""
+  [[ $gquit_reply =~ \ HTTP\ 2[0-9][0-9]($|[[:space:]]) ]] || { echo "could not send gquit for $app; stopping sweep" >&2; exit 1; }
   fetch_logs() {
     rm -f "$raw/boot.log" "$raw/launch_probe.log" "$raw/launch_request.json" "$raw/launch_result.json"
     for file in boot.log launch_probe.log launch_request.json launch_result.json; do
-      bash "$DP/get-file.sh" "$full" '\LocalState' "$file" "$raw/$file" >/dev/null 2>&1 || true
+      # get-file.sh keeps the error body on a non-2xx answer; drop it so it is never read as evidence.
+      bash "$DP/get-file.sh" "$full" '\LocalState' "$file" "$raw/$file" >/dev/null 2>&1 || rm -f "$raw/$file"
     done
   }
   [[ -s "$raw/boot.log" ]] || fetch_logs
