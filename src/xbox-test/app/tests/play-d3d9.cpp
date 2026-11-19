@@ -39,8 +39,9 @@ DWORD d3d9_entry() {
     if(d3d9->GetAdapterCount()!=1)return 15;
 
     D3DPRESENT_PARAMETERS present{};
-    present.BackBufferWidth=640;present.BackBufferHeight=480;
-    present.BackBufferFormat=D3DFMT_X8R8G8B8;present.BackBufferCount=1;
+    // Zero dimensions and UNKNOWN format are the documented windowed defaults.
+    present.BackBufferWidth=0;present.BackBufferHeight=0;
+    present.BackBufferFormat=D3DFMT_UNKNOWN;present.BackBufferCount=1;
     present.MultiSampleType=D3DMULTISAMPLE_NONE;
     present.SwapEffect=D3DSWAPEFFECT_DISCARD;present.hDeviceWindow=window;present.Windowed=TRUE;
     present.EnableAutoDepthStencil=TRUE;present.AutoDepthStencilFormat=D3DFMT_D24S8;
@@ -51,25 +52,30 @@ DWORD d3d9_entry() {
         &present,nullptr,&device);
     if(FAILED(hr)||!device)return 16;
 
+    // An invalid Reset must not destroy the still-usable old chain.
+    D3DPRESENT_PARAMETERS invalid=present;
+    invalid.BackBufferFormat=D3DFMT_UNKNOWN;invalid.Windowed=FALSE;
+    if(device->Reset(&invalid)!=D3DERR_INVALIDCALL)return 17;
+
     // The swap chain's back buffer is the device's render target 0, as on
     // Windows; the auto depth-stencil surface exists too.
     IDirect3DSurface9* backBuffer=nullptr;
-    if(FAILED(device->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,&backBuffer))||!backBuffer)return 17;
+    if(FAILED(device->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,&backBuffer))||!backBuffer)return 18;
     IDirect3DSurface9* depth=nullptr;
-    if(FAILED(device->GetDepthStencilSurface(&depth))||!depth)return 18;
+    if(FAILED(device->GetDepthStencilSurface(&depth))||!depth)return 19;
 
     D3DVIEWPORT9 viewport{0,0,640,480,0.0f,1.0f};
     device->SetViewport(&viewport);
-    if(FAILED(device->BeginScene()))return 19;
+    if(FAILED(device->BeginScene()))return 20;
     if(FAILED(device->Clear(0,nullptr,D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER|D3DCLEAR_STENCIL,
-        0xff204060,1.0f,0)))return 20;
-    if(FAILED(device->EndScene()))return 21;
+        0xff204060,1.0f,0)))return 21;
+    if(FAILED(device->EndScene()))return 22;
 
     // Three frames, as a game's first frames: the CoreWindow adapter presents
     // each one.
     for(unsigned i=0;i<3;++i) {
         hr=device->Present(nullptr,nullptr,nullptr,nullptr);
-        if(hr==D3DERR_DEVICELOST)return 22;
+        if(FAILED(hr))return 23;
     }
 
     // Everything the fixture made goes away before it returns: Wine never

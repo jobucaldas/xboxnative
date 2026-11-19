@@ -89,20 +89,6 @@ D3D11_DEPTH_STENCIL_VIEW_DESC depthStencilViewDesc(const D3D10_DEPTH_STENCIL_VIE
     memcpy(&out.Texture1D,&in.Texture1D,sizeof in.Texture1D);
     return out;
 }
-D3D11_BLEND_DESC1 blendDesc1(const D3D10_BLEND_DESC1& in) {
-    D3D11_BLEND_DESC1 out{};
-    out.AlphaToCoverageEnable=in.AlphaToCoverageEnable;
-    out.IndependentBlendEnable=in.IndependentBlendEnable;
-    for(unsigned i=0;i<D3D10_SIMULTANEOUS_RENDER_TARGET_COUNT;++i) {
-        auto& rt=out.RenderTarget[i];auto& src=in.RenderTarget[i];
-        rt.BlendEnable=src.BlendEnable;rt.LogicOpEnable=FALSE;
-        rt.SrcBlend=D3D11_BLEND(src.SrcBlend);rt.DestBlend=D3D11_BLEND(src.DestBlend);
-        rt.BlendOp=D3D11_BLEND_OP(src.BlendOp);rt.SrcBlendAlpha=D3D11_BLEND(src.SrcBlendAlpha);
-        rt.DestBlendAlpha=D3D11_BLEND(src.DestBlendAlpha);rt.BlendOpAlpha=D3D11_BLEND_OP(src.BlendOpAlpha);
-        rt.LogicOp=D3D11_LOGIC_OP(0);rt.RenderTargetWriteMask=src.RenderTargetWriteMask;
-    }
-    return out;
-}
 // D3D10_VIEWPORT holds integer corners; D3D11_VIEWPORT holds floats.
 void viewport(D3D11_VIEWPORT& out,const D3D10_VIEWPORT& in) {
     out.TopLeftX=FLOAT(in.TopLeftX);out.TopLeftY=FLOAT(in.TopLeftY);
@@ -296,6 +282,11 @@ template<class I> struct Resource : Child<I> {
         return this->inner?static_cast<ID3D11Resource*>(this->inner)->GetEvictionPriority():0;
     }
 };
+template<class T,class Inner,class Guest> inline void adopt(Inner*,Guest**);
+inline void adopt(ID3D11Buffer*,ID3D10Buffer**);
+inline void adopt(ID3D11Texture1D*,ID3D10Texture1D**);
+inline void adopt(ID3D11Texture2D*,ID3D10Texture2D**);
+inline void adopt(ID3D11Texture3D*,ID3D10Texture3D**);
 template<class I> struct View : Child<I> {
     void STDMETHODCALLTYPE GetResource(ID3D10Resource** out) override {
         if(!out)return;
@@ -304,9 +295,21 @@ template<class I> struct View : Child<I> {
         ID3D11Resource* resource=nullptr;
         static_cast<ID3D11View*>(this->inner)->GetResource(&resource);
         if(!resource)return;
-        auto wrapper=d3dshim::wrap<ID3D10Resource>(resource);
+        D3D11_RESOURCE_DIMENSION type{};resource->GetType(&type);
+        if(type==D3D11_RESOURCE_DIMENSION_BUFFER) {
+            ID3D11Buffer* buffer=nullptr;resource->QueryInterface(__uuidof(ID3D11Buffer),reinterpret_cast<void**>(&buffer));
+            ID3D10Buffer* wrapper=nullptr;adopt(buffer,&wrapper);*out=wrapper;
+        } else if(type==D3D11_RESOURCE_DIMENSION_TEXTURE1D) {
+            ID3D11Texture1D* texture=nullptr;resource->QueryInterface(__uuidof(ID3D11Texture1D),reinterpret_cast<void**>(&texture));
+            ID3D10Texture1D* wrapper=nullptr;adopt(texture,&wrapper);*out=wrapper;
+        } else if(type==D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+            ID3D11Texture2D* texture=nullptr;resource->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&texture));
+            ID3D10Texture2D* wrapper=nullptr;adopt(texture,&wrapper);*out=wrapper;
+        } else if(type==D3D11_RESOURCE_DIMENSION_TEXTURE3D) {
+            ID3D11Texture3D* texture=nullptr;resource->QueryInterface(__uuidof(ID3D11Texture3D),reinterpret_cast<void**>(&texture));
+            ID3D10Texture3D* wrapper=nullptr;adopt(texture,&wrapper);*out=wrapper;
+        }
         resource->Release();
-        if(wrapper){wrapper->AddRef();*out=wrapper;}
     }
 };
 template<class I> struct Asynchronous : Child<I> {
@@ -532,6 +535,9 @@ template<class T,class Inner,class Guest> inline void adopt(Inner* object,Guest*
     *out=static_cast<Guest*>(wrapper->self);
 }
 inline void adopt(ID3D11Buffer* o,ID3D10Buffer** out) { adopt<Buffer>(o,out); }
+inline void adopt(ID3D11Texture1D* o,ID3D10Texture1D** out) { adopt<Texture1D>(o,out); }
+inline void adopt(ID3D11Texture2D* o,ID3D10Texture2D** out) { adopt<Texture2D>(o,out); }
+inline void adopt(ID3D11Texture3D* o,ID3D10Texture3D** out) { adopt<Texture3D>(o,out); }
 inline void adopt(ID3D11ShaderResourceView* o,ID3D10ShaderResourceView** out) { adopt<ShaderResourceView>(o,out); }
 inline void adopt(ID3D11SamplerState* o,ID3D10SamplerState** out) { adopt<SamplerState>(o,out); }
 inline void adopt(ID3D11VertexShader* o,ID3D10VertexShader** out) { adopt<VertexShader>(o,out); }
@@ -567,6 +573,7 @@ struct Device : d3dshim::Base, ID3D10Device1 {
     d3dshim::Held<D3D10_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> vertexBuffers;
     d3dshim::Held<D3D10_SIMULTANEOUS_RENDER_TARGET_COUNT> renderTargets;
     d3dshim::Held<D3D10_SO_BUFFER_SLOT_COUNT> streamOutput;
+    UINT streamOutputOffsets[D3D10_SO_BUFFER_SLOT_COUNT]{};
     Multithread* multithreadObject=nullptr;
     Device() { self=static_cast<ID3D10Device1*>(this); }
     ~Device() {
@@ -689,7 +696,7 @@ struct Device : d3dshim::Base, ID3D10Device1 {
         ID3D11RenderTargetView* list[D3D10_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
         UINT n=unwrap(values,count,list);
         auto depthView=behind<ID3D11DepthStencilView>(depth);
-        renderTargets.setRange(0,n,reinterpret_cast<IUnknown* const*>(list));
+        renderTargets.setAll(n,reinterpret_cast<IUnknown* const*>(list));
         depthStencilView.set(0,depthView);
         context()->OMSetRenderTargets(n,list,depthView);
     }
@@ -704,8 +711,10 @@ struct Device : d3dshim::Base, ID3D10Device1 {
     void STDMETHODCALLTYPE SOSetTargets(UINT count,ID3D10Buffer* const* values,const UINT* offsets) override {
         ID3D11Buffer* list[D3D10_SO_BUFFER_SLOT_COUNT]{};
         UINT n=unwrap(values,count,list);
-        streamOutput.setRange(0,n,reinterpret_cast<IUnknown* const*>(list));
-        context()->SOSetTargets(n,list,offsets);
+        streamOutput.setAll(n,reinterpret_cast<IUnknown* const*>(list));
+        for(UINT i=0;i<D3D10_SO_BUFFER_SLOT_COUNT;++i)
+            streamOutputOffsets[i]=i<n&&offsets?offsets[i]:0;
+        context()->SOSetTargets(n,list,streamOutputOffsets);
     }
     void STDMETHODCALLTYPE RSSetState(ID3D10RasterizerState* state) override {
         auto object=behind<ID3D11RasterizerState>(state);
@@ -871,16 +880,9 @@ struct Device : d3dshim::Base, ID3D10Device1 {
         ID3D11Buffer* got[4]{};
         UINT n=count>4?4:count;
         context()->SOGetTargets(n,got);
-        for(UINT i=0;i<n;++i)adopt(got[i],&out[i]);
-        // D3D11 keeps the stream-output offsets on the buffer's own descriptor,
-        // so they are read back from there rather than from the context.
-        for(UINT i=0;i<n;++i)if(offsets){
-            offsets[i]=0;
-            if(got[i]) {
-                D3D11_BUFFER_DESC desc{};
-                got[i]->GetDesc(&desc);
-                offsets[i]=desc.StructureByteStride;
-            }
+        for(UINT i=0;i<n;++i) {
+            adopt(got[i],&out[i]);
+            if(offsets)offsets[i]=streamOutputOffsets[i];
         }
     }
     void STDMETHODCALLTYPE RSGetState(ID3D10RasterizerState** out) override {
@@ -888,10 +890,11 @@ struct Device : d3dshim::Base, ID3D10Device1 {
     }
     void STDMETHODCALLTYPE RSGetViewports(UINT* count,D3D10_VIEWPORT* out) override {
         if(!count)return;
-        D3D11_VIEWPORT got[D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
         UINT n=*count>D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE?D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE:*count;
+        if(!out){context()->RSGetViewports(&n,nullptr);*count=n;return;}
+        D3D11_VIEWPORT got[D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
         context()->RSGetViewports(&n,got);
-        if(out)for(UINT i=0;i<n;++i)viewport(out[i],got[i]);
+        for(UINT i=0;i<n;++i)viewport(out[i],got[i]);
         *count=n;
     }
     void STDMETHODCALLTYPE RSGetScissorRects(UINT* count,D3D10_RECT* out) override {
@@ -919,6 +922,7 @@ struct Device : d3dshim::Base, ID3D10Device1 {
         inputLayout.clear();indexBuffer.clear();depthStencilState.clear();blendState.clear();
         rasterizerState.clear();depthStencilView.clear();predicate.clear();
         vertexBuffers.clear();renderTargets.clear();streamOutput.clear();
+        for(UINT& offset:streamOutputOffsets)offset=0;
     }
     void STDMETHODCALLTYPE Flush() override { context()->Flush(); }
 
@@ -1117,9 +1121,18 @@ struct Device : d3dshim::Base, ID3D10Device1 {
         if(!out)return E_POINTER;
         *out=nullptr;
         if(!desc)return E_INVALIDARG;
-        D3D11_BLEND_DESC1 converted=blendDesc1(*desc);
+        D3D11_BLEND_DESC converted{};
+        converted.AlphaToCoverageEnable=desc->AlphaToCoverageEnable;
+        converted.IndependentBlendEnable=desc->IndependentBlendEnable;
+        for(unsigned i=0;i<D3D10_SIMULTANEOUS_RENDER_TARGET_COUNT;++i) {
+            auto& dst=converted.RenderTarget[i];auto& src=desc->RenderTarget[i];
+            dst.BlendEnable=src.BlendEnable;dst.SrcBlend=D3D11_BLEND(src.SrcBlend);dst.DestBlend=D3D11_BLEND(src.DestBlend);
+            dst.BlendOp=D3D11_BLEND_OP(src.BlendOp);dst.SrcBlendAlpha=D3D11_BLEND(src.SrcBlendAlpha);
+            dst.DestBlendAlpha=D3D11_BLEND(src.DestBlendAlpha);dst.BlendOpAlpha=D3D11_BLEND_OP(src.BlendOpAlpha);
+            dst.RenderTargetWriteMask=src.RenderTargetWriteMask;
+        }
         ID3D11BlendState* object=nullptr;
-        HRESULT hr=device()->CreateBlendState(reinterpret_cast<const D3D11_BLEND_DESC*>(&converted),&object);
+        HRESULT hr=device()->CreateBlendState(&converted,&object);
         if(FAILED(hr))return hr;
         auto wrapper=d3dshim::create<BlendState>();
         if(!wrapper){object->Release();return E_OUTOFMEMORY;}
@@ -1267,7 +1280,7 @@ HRESULT createDevice(IDXGIAdapter* adapter,D3D10_DRIVER_TYPE type,UINT flags,
     auto device=d3dshim::create<Device>();
     if(!device)return E_OUTOFMEMORY;
     const D3D_FEATURE_LEVEL levels[]={featureLevel(level)};
-    HRESULT hr=device->host.create(adapter,driverType(type),levels,1,createFlags(flags));
+    HRESULT hr=device->host.create(adapter,adapter?D3D_DRIVER_TYPE_UNKNOWN:driverType(type),levels,1,createFlags(flags));
     if(FAILED(hr)){d3dshim::destroy(device);return hr;}
     device->creationFlags=flags;
     *out=device;
