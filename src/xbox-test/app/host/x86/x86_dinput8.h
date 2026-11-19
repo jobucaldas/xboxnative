@@ -71,7 +71,7 @@ inline void register_dinput8_com(ComSpace& space) {
             return DINPUT8_DEVICENOTREG;
         });
         method(iface, 9, 6, [](Proxy&, Cpu&) { return DINPUT8_UNSUPPORTED; });
-        method(iface, 10, 6, [](Proxy&, Cpu&) { return DINPUT8_UNSUPPORTED; });
+        method(iface, 10, 5, [](Proxy&, Cpu&) { return DINPUT8_UNSUPPORTED; });
     }
 }
 inline uint32_t dinput8_create(ComSpace& space, Cpu& cpu, uint32_t iid_address, uint32_t out_address, uint32_t outer) {

@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include "../host/x86/x86_play.h"
+#include "../host/x86/x86_dinput8.h"
 
 static std::vector<uint8_t> read_file(const char* path) {
     HANDLE file=CreateFileA(path,GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
@@ -54,6 +55,23 @@ static bool audit_d3d9_device_slots() {
     };
     if(!audit_interface("IDirect3DSurface9",surface_arities,sizeof(surface_arities)/sizeof(surface_arities[0]))||
        !audit_interface("IDirect3DTexture9",texture_arities,sizeof(texture_arities)/sizeof(texture_arities[0])))return false;
+    // IDirect3DSwapChain9 and IDirect3DVertexDeclaration9 slot order from d3d9.h.
+    static constexpr unsigned swapchain_arities[]={3,1,1,6,2,4,2,2,2,2};
+    static constexpr unsigned declaration_arities[]={3,1,1,2,3};
+    if(!audit_interface("IDirect3DSwapChain9",swapchain_arities,sizeof(swapchain_arities)/sizeof(swapchain_arities[0]))||
+       !audit_interface("IDirect3DVertexDeclaration9",declaration_arities,sizeof(declaration_arities)/sizeof(declaration_arities[0])))return false;
+    // IDirectInput8A slot order from dinput.h (ConfigureDevices is this + 4 params).
+    x86::register_dinput8_com(host.com);
+    static constexpr unsigned dinput8_arities[]={3,1,1,4,5,2,3,3,4,6,5};
+    const auto& dinput=host.com.by_name("IDirectInput8A");
+    if(dinput.slots!=sizeof(dinput8_arities)/sizeof(dinput8_arities[0]))return false;
+    for(unsigned slot=3;slot<dinput.slots;++slot) {
+        auto method=dinput.methods.find(slot);
+        if(method==dinput.methods.end()||method->second.argc!=dinput8_arities[slot]) {
+            std::fprintf(stderr,"D3D9 slot audit: IDirectInput8A slot=%u expected argc=%u actual=%u\n",slot,dinput8_arities[slot],method==dinput.methods.end()?0:method->second.argc);
+            return false;
+        }
+    }
     return true;
 }
 static std::wstring wide(const char* value) {
