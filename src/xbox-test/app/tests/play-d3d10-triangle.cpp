@@ -329,7 +329,7 @@ DWORD d3d10tri_entry() {
         p=text(p," needed=");emit(number(p,unsigned(nativeStats.PrimitivesStorageNeeded)),line);
     }
     if(d3d11Stats)d3d11Stats->Release();if(d3d11Context)d3d11Context->Release();if(d3d11Device)d3d11Device->Release();
-    if(!soAnswered||soQueryFailed){logSoStats(stats);logSoStage("stats",false);soStats->Release();return 52;}
+    if(!soAnswered||soQueryFailed){logSoStats(stats);logSoStage("stats",false);soStats->Release();return 37;}
     soStats->Release();
     logSoStats(stats);
     // The GS expands one point to one triangle: one primitive written, one
@@ -338,7 +338,7 @@ DWORD d3d10tri_entry() {
     logSoStage("stats",true);
     device->CopyResource(soStaging,soTarget);
     void* mappedSo=nullptr;
-    if(FAILED(soStaging->Map(D3D10_MAP_READ,0,&mappedSo))||!mappedSo){logSoStage("capture",false);return 53;}
+    if(FAILED(soStaging->Map(D3D10_MAP_READ,0,&mappedSo))||!mappedSo){logSoStage("capture",false);return 55;}
     // The GS wrote the three expanded vertices, each POSITION then COLOR: top
     // (0,+0.4), bottom-right (+0.4,-0.4), bottom-left (-0.4,-0.4), all green.
     static const float expected[3][8]={
