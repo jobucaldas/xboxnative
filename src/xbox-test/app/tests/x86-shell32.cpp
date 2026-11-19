@@ -44,13 +44,13 @@ int main() {
     uint32_t dirw = guest.put_wstr(u"owned\\new"); CHECK(call("SHCreateDirectoryExW", {0, dirw, 0}) == 0 && guarded == u"owned\\new");
     allow = false; CHECK(call("SHCreateDirectoryExA", {0, file, 0}) == 5 && guarded == u"missing-association"); allow = true;
 
-    uint32_t op = 0x5000, source = guest.put_str("owned.dat"); mem.w32(op + 4, 3); mem.w32(op + 8, source); mem.w32(op + 12, 0); mem.w32(op + 20, 0xdeadbeefu);
-    CHECK(call("SHFileOperationA", {op}) == 120 && mem.r32(op + 20) == 0 && guarded == u"owned.dat");
+    uint32_t op = 0x5000, source = guest.put_str("owned.dat"); mem.w32(op + 4, 3); mem.w32(op + 8, source); mem.w32(op + 12, 0); mem.w32(op + 18, 0xdeadbeefu);
+    CHECK(call("SHFileOperationA", {op}) == 120 && mem.r32(op + 18) == 0 && guarded == u"owned.dat");
     const char multi[] = "owned.dat\0outside.dat\0"; for (unsigned i = 0; i < sizeof(multi); ++i) mem.w8(0x5100 + i, uint8_t(multi[i]));
     mem.w32(op + 8, 0x5100); allow = true;
     CHECK(call("SHFileOperationA", {op}) == 120 && guarded == u"outside.dat");
-    uint32_t outside = guest.put_wstr(u"outside.dat"); mem.w32(op + 8, outside); mem.w32(op + 20, 0); allow = false;
-    CHECK(call("SHFileOperationW", {op}) == 5 && mem.r32(op + 20) == 1 && guarded == u"outside.dat");
+    uint32_t outside = guest.put_wstr(u"outside.dat"); mem.w32(op + 8, outside); mem.w32(op + 18, 0); allow = false;
+    CHECK(call("SHFileOperationW", {op}) == 5 && mem.r32(op + 18) == 1 && guarded == u"outside.dat");
     CHECK(call("SHFileOperationW", {0}) == 87);
 
     std::printf("x86-shell32: %d checks, %d failures\n", checks, failures); return failures ? 1 : 0;
