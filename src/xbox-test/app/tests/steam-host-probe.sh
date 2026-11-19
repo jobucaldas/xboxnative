@@ -23,9 +23,12 @@ if [[ $# != 0 ]]; then
 fi
 out="$(mktemp -d /tmp/steam-host-probe.XXXXXX)"
 keep="${STEAM_HOST_PROBE_KEEP:-0}"
+# A config.vdf that already exists belongs to the user; only remove one this run creates.
+config_preexisting=0
+if [[ -e "$client_dir/config/config.vdf" ]]; then config_preexisting=1; fi
 cleanup() {
     # The probe writes the refresh-token store into the client tree and removes it only on a normal exit.
-    if [[ ${#probe_args[@]} != 0 ]]; then
+    if [[ ${#probe_args[@]} != 0 && $config_preexisting == 0 ]]; then
         rm -f "$client_dir/config/config.vdf"
         rmdir "$client_dir/config" 2>/dev/null || true
     fi
