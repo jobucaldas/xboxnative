@@ -20,13 +20,7 @@ static BOOL WINAPI counted_free(LPVOID address, SIZE_T size, DWORD type) {
 #endif
 #include CONFIG_TEST_MAPPER
 static unsigned entries, allocations, validated;
-#ifdef CONFIG_TEST_MAPPED
-static unsigned tlsIndexCalls, tlsRejected;
-#endif
 static void log_line(const char* s) {
-#ifdef CONFIG_TEST_MAPPED
-    if (!strcmp(s,"WXL FAIL TLS write into inert load configuration")) ++tlsRejected;
-#endif
     if (!strcmp(s,"CONFIG attach")) ++entries;
     if (strstr(s,"VirtualAllocFromApp initial")) ++allocations;
     if (strstr(s,"inert Wine load configuration validated")) ++validated;
@@ -172,38 +166,8 @@ int main(int argc,char** argv) {
     assert(!load_file(writeCase(0x58,2,"delay-cookie"),wxl::LoadConfig::inert_wine,true,fixtureResolve));
     assert(entries==0 && allocations==1 && validated==1);
     puts("WINE-CONFIG-MAPPER PASS: mapped delay write into inert record rejected and allocation released");
-    // Exercise the separate TLS preparation API with an owned pre-protection
-    // view. In-memory headers are mutable, so neither a forged writable section
-    // nor removal of the copied directory may invalidate the file-byte policy.
-    for(long field : {0x58L,-2L}) {
-        entries=allocations=validated=tlsIndexCalls=tlsRejected=0;
-        unsigned beforeReleases=releases;
-        {
-            wchar_t wide[4096];
-            assert(MultiByteToWideChar(CP_UTF8,0,argv[1],-1,wide,4096));
-            wxl::Image image;
-            assert(wxl::load(image,wide,log_line,{},nullptr,true,wxl::LoadConfig::inert_wine));
-            assert(image.protect(0,image.size,PAGE_READWRITE,log_line));
-            auto copied=(IMAGE_NT_HEADERS64*)(image.base+ntOffset);
-            IMAGE_FIRST_SECTION(copied)[sectionIndex].Characteristics|=IMAGE_SCN_MEM_WRITE;
-            copied->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG]={};
-            DWORD tlsRva=DWORD(image.size-sizeof(IMAGE_TLS_DIRECTORY64));
-            assert(tlsRva>dir.VirtualAddress+dir.Size);
-            auto tls=(IMAGE_TLS_DIRECTORY64*)(image.base+tlsRva);
-            *tls={};
-            tls->StartAddressOfRawData=tls->EndAddressOfRawData=(uintptr_t)tls;
-            tls->AddressOfIndex=(uintptr_t)(image.base+size_t(long(dir.VirtualAddress)+field));
-            copied->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS]={tlsRva,sizeof(*tls)};
-            wxl::Carrier carrier{+[]()->DWORD { ++tlsIndexCalls; return 7; },
-                                 +[]()->BYTE* { static BYTE block[8]; return block; },8};
-            assert(!wxl::prepareTls(image,log_line,carrier));
-            assert(tlsRejected==1 && tlsIndexCalls==0);
-            assert(!memcmp(image.base+dir.VirtualAddress,original.data()+configOffset,dir.Size));
-            assert(entries==0 && allocations==1 && validated==1);
-        }
-        assert(releases-beforeReleases==1);
-    }
-    puts("WINE-CONFIG-MAPPER PASS: TLS index overlap rejected with mutable headers and allocation released");
+    // The mapped host path deliberately retains TLS metadata without preparing
+    // native TLS state; preparation is exercised by the non-mapped loader path.
 #endif
     // A relocation ending exactly at the record is outside it; the fixture pads there.
     assert(!memcmp(original.data()+configOffset-8,"\0\0\0\0\0\0\0\0",8));

@@ -182,7 +182,7 @@ inline bool load_impl(Image& image, const wchar_t* path, Log log, Carrier carrie
     for (unsigned d : {IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR})
         if (!mapped && h.DataDirectory[d].Size) return fail("WXL FAIL unsupported runtime directory");
     auto configDir=h.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG];
-    if (!mapped && (configDir.VirtualAddress || configDir.Size) && config!=LoadConfig::inert_wine)
+    if ((configDir.VirtualAddress || configDir.Size) && config!=LoadConfig::inert_wine)
         return fail("WXL FAIL unsupported runtime directory");
     auto sections=(const IMAGE_SECTION_HEADER*)(file.data()+secOff);
     // The inert record is validated from file bytes, so no loader write may alter it.
