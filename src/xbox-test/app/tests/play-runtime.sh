@@ -358,8 +358,8 @@ grep -q 'FNA SMOKE draws=3 clear=CornflowerBlue' "$out/fna.log"
 grep -q 'FNA PLAY-LOADER PASS: FNA3D cleared/presented 3 frames and returned exit code 42' "$out/fna.log"
 grep -q 'PRUN EVENT mapping fna3d.dll' "$out/fna.log"
 grep -q 'PRUN EVENT mapping sdl3.dll' "$out/fna.log"
-grep -q 'mono pinvoke: SDL3' "$out/fna.log"
-grep -q 'mono pinvoke: FNA3D' "$out/fna.log"
+grep -q 'mono pinvoke: sdl3.dll!' "$out/fna.log"
+grep -q 'mono pinvoke: fna3d.dll!' "$out/fna.log"
 grep -q 'guest DXGI CoreWindow swapchain returned hr=0x00000000' "$out/fna.log"
 grep -q 'GAP: dll=vcruntime140.dll resolved=' "$out/mono.log"
 grep -q 'GAP: summary exe=play-gap.exe arch=x64 .*missing=1' "$out/gap.log"
@@ -725,3 +725,4 @@ if ((${#product_failures[@]})); then
  printf '  %s\n' "${product_failures[@]}"
  exit 1
 fi
+if ((${#mode_failures[@]})); then exit 1; fi
