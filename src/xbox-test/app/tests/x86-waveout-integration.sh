@@ -20,7 +20,7 @@ mkdir -p "$WINEPREFIX"
 shim="$tmp/dsound"
 bash "$root/src/xbox-test/uwph/dsound/build.sh" "$shim"
 cp "$shim/dsound.dll" "$tmp/waveout-shim.dll"
-"$cc32" -std=c++17 -O1 -Wall -Wextra -Werror "${extra[@]}" -DX86_WAVEOUT_GUEST \
+"$cc32" -std=c++17 -O1 -Wall -Wextra -Werror -static -static-libgcc -Wl,--no-seh "${extra[@]}" -DX86_WAVEOUT_GUEST \
   "$here/x86-waveout-integration.cpp" -o "$tmp/waveout-fixture.exe" -lwinmm
 "$cc64" -std=c++17 -O1 -mno-red-zone -Wall -Wextra -Werror -Wno-error=cast-function-type \
   -Wno-error=misleading-indentation -Wno-error=unused-parameter -Wno-error=sign-compare \
