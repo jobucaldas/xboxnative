@@ -1682,11 +1682,13 @@ static void lp_run_impl(LpCtx& c) {
     }
     mlp::report_kernel();
 }
+// C++ try/catch cannot share a frame with SEH __try, so the final sync gets its own.
+static void lp_final_sync() { if(g_finalSync) try { g_finalSync(); } catch(...) {} }
 static bool lp_run_seh(LpCtx* c) {     // no C++ objects with destructors in this frame: SEH guard so a probe bug cannot take the launcher down
     bool noFault = true;
     __try { lp_run_impl(*c); }
     __except (play_runtime::state?play_runtime::filter(GetExceptionInformation()):EXCEPTION_EXECUTE_HANDLER) { noFault = false; }
-    if(g_finalSync) try { g_finalSync(); } catch(...) {}
+    lp_final_sync();
     return noFault;
 }
 // Cached appinfo (the downloader writes it); read only, no network on this path.
