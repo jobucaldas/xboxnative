@@ -135,16 +135,19 @@ inline DWORD WINAPI watchdog(LPVOID) {
 inline int enter(HANDLE file, DWORD size, DWORD done, bool cancelable) {
     Table& t = table();
     int index = -1;
+    bool start = false;
     EnterCriticalSection(&t.lock);
     for (int i = 0; i < 32 && index < 0; ++i) if (!t.slots[i].used) index = i;
     if (index >= 0) {
         t.slots[index] = Slot{true, cancelable, false, false, this_thread(), file, size, done, GetTickCount64()};
-        if (!t.started) {
-            HANDLE thread = CreateThread(nullptr, 0, watchdog, nullptr, 0, nullptr);
-            if (thread) { CloseHandle(thread); t.started = true; }
-        }
+        if (!t.started) { t.started = true; start = true; }
     }
     LeaveCriticalSection(&t.lock);
+    if (start) {
+        HANDLE thread = CreateThread(nullptr, 0, watchdog, nullptr, 0, nullptr);
+        if (thread) CloseHandle(thread);
+        else { EnterCriticalSection(&t.lock); t.started = false; LeaveCriticalSection(&t.lock); }
+    }
     return index;
 }
 inline void leave(int index) {
