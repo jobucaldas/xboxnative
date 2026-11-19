@@ -43,6 +43,14 @@ static ID3D11Device* make(ID3D11DeviceContext** context=nullptr) {
     }
     return nullptr;
 }
+static DWORD WINAPI concurrentContextChurn(void* arg) {
+    auto* device=static_cast<ID3D11Device*>(arg);
+    for(unsigned i=0;i<32;++i) {
+        ID3D11DeviceContext* churn=nullptr;
+        if(SUCCEEDED(device->CreateDeferredContext(0,&churn))&&churn)churn->Release();
+    }
+    return 0;
+}
 // The draw summary on the real immediate context: the counters follow the
 // topology and shaders set on that context, and a render target set is
 // described once by format and size. Results are untouched (draws with no
@@ -381,6 +389,13 @@ static int drawSummary(ID3D11Device* device,ID3D11DeviceContext* context) {
     size_t activeAfterChurn=0;
     for(auto& state:d3d11_diag::contextStates)if(state.context.load())++activeAfterChurn;
     CHECK(activeAfterChurn==activeContexts);
+    HANDLE contextChurn[2]={CreateThread(nullptr,0,concurrentContextChurn,device,0,nullptr),
+        CreateThread(nullptr,0,concurrentContextChurn,device,0,nullptr)};
+    CHECK(contextChurn[0]&&contextChurn[1]);
+    for(HANDLE worker:contextChurn)if(worker){WaitForSingleObject(worker,INFINITE);CloseHandle(worker);}
+    size_t activeAfterConcurrentChurn=0;
+    for(auto& state:d3d11_diag::contextStates)if(state.context.load())++activeAfterConcurrentChurn;
+    CHECK(activeAfterConcurrentChurn==activeContexts);
     // ClearState must drop the diagnostic pipeline along with D3D's bindings.
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
     auto& resetState=d3d11_diag::stateOf(context);

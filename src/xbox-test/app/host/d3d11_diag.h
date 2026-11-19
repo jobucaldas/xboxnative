@@ -319,6 +319,7 @@ inline bool deepReplayCapped=false;
 inline std::atomic<unsigned> deferredContextSerial{0},deepCommandListSerial{0};
 constexpr size_t kMaxContexts=32;
 inline ContextState contextStates[kMaxContexts];
+inline std::mutex contextLifecycleM;             // serializes slot binding with final Release/forget
 inline ContextState orphanState;                 // past kMaxContexts: counted, not bucketed by context
 inline std::atomic<unsigned> lastTopology{0};    // last topology any context set, for the summary line
 inline ContextState& stateOf(void* self) {
@@ -1492,10 +1493,11 @@ static HRESULT STDMETHODCALLTYPE createPredicate(DevicePtr self,const D3D11_QUER
 // driver restrictions (NO_OVERWRITE on non-buffers, staging use), plus the
 // calls that say what the guest draws. The draw hooks only count: they call
 // the original entry with the arguments they were given and return its result.
-inline bool patchContext(ID3D11DeviceContext* context);
+inline bool patchContext(ID3D11DeviceContext* context,bool deferred=false);
 static ULONG STDMETHODCALLTYPE contextRelease(void* self) {
     using Fn=ULONG(STDMETHODCALLTYPE*)(void*);
     auto call=reinterpret_cast<Fn>(original(self,ContextRelease));if(!call)return 0;
+    std::lock_guard<std::mutex> lock(contextLifecycleM);
     ULONG refs=call(self);
     if(!refs)forgetContext(self);
     return refs;
@@ -2007,14 +2009,14 @@ static void STDMETHODCALLTYPE contextExecuteCommandList(DevicePtr self,ID3D11Com
 static HRESULT STDMETHODCALLTYPE createDeferredContext(DevicePtr self,UINT flags,ID3D11DeviceContext** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11DeviceContext**);
     D3D11_DIAG_HOOK(Fn,CreateDeferredContext)HRESULT hr=call(self,flags,out);
-    if(SUCCEEDED(hr)&&out&&*out){deferredContexts.fetch_add(1,std::memory_order_relaxed);stateOf(*out).deferred.store(1,std::memory_order_relaxed);patchContext(*out);}
+    if(SUCCEEDED(hr)&&out&&*out){deferredContexts.fetch_add(1,std::memory_order_relaxed);patchContext(*out,true);}
     D3D11_DIAG_FAILED("CreateDeferredContext",fmt("%x",flags),fmt("flags=0x%x",flags));
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE createDeferredContext1(DevicePtr self,UINT flags,ID3D11DeviceContext1** out) {
     using Fn=HRESULT(STDMETHODCALLTYPE*)(DevicePtr,UINT,ID3D11DeviceContext1**);
     D3D11_DIAG_HOOK(Fn,CreateDeferredContext1)HRESULT hr=call(self,flags,out);
-    if(SUCCEEDED(hr)&&out&&*out){deferredContexts.fetch_add(1,std::memory_order_relaxed);stateOf(*out).deferred.store(1,std::memory_order_relaxed);patchContext(*out);}
+    if(SUCCEEDED(hr)&&out&&*out){deferredContexts.fetch_add(1,std::memory_order_relaxed);patchContext(*out,true);}
     D3D11_DIAG_FAILED("CreateDeferredContext1",fmt("%x",flags),fmt("flags=0x%x",flags));
     return hr;
 }
@@ -2050,9 +2052,11 @@ inline const Patch* context1Patches(size_t& count){
     static const Patch table[]={{Context1ClearView,(void*)&context1ClearView}};
     count=sizeof table/sizeof *table;return table;
 }
-inline bool patchContext(ID3D11DeviceContext* context) {
+inline bool patchContext(ID3D11DeviceContext* context,bool deferred) {
     if(!context||!contextSeen.load(std::memory_order_acquire))return false;
     void** vtable=*reinterpret_cast<void***>(context);
+    std::unique_lock<std::mutex> lifecycle(contextLifecycleM);
+    if(deferred)stateOf(context).deferred.store(1,std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(patchM);
         bool known=false;
@@ -2062,6 +2066,7 @@ inline bool patchContext(ID3D11DeviceContext* context) {
     resetContext(context);
     size_t count=0;const Patch* patches=contextPatches(count);
     if(!patchClass(vtable,patches,count))return false;
+    lifecycle.unlock();
     // ID3D11DeviceContext1's vtable continues ID3D11DeviceContext's, so the
     // ClearView slot exists only on a context that answers the 11.1 QI.
     ID3D11DeviceContext1* context1=nullptr;
