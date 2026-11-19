@@ -2,6 +2,7 @@
 #pragma once
 #include <windows.h>
 #include <cstdint>
+#include <atomic>
 #include <map>
 #include <mutex>
 // Multimedia timers (timeSetEvent/timeKillEvent) for consoles whose winmm
@@ -13,6 +14,7 @@ using Callback = void (CALLBACK*)(UINT id, UINT msg, DWORD_PTR user, DWORD_PTR, 
 constexpr UINT periodic = 0x0001, eventSet = 0x0010, eventPulse = 0x0020;
 constexpr UINT noError = 0, invalidParameter = 11 /*MMSYSERR_INVALPARAM*/;
 struct Timer { UINT id; Callback callback; DWORD_PTR user; UINT flags; PTP_TIMER pool; bool killedInCallback = false; };
+inline std::atomic<unsigned> liveCount{0};
 // The timer whose callback is running on this thread: Windows allows
 // timeKillEvent from inside that callback, where waiting for it would deadlock.
 inline thread_local Timer* running = nullptr;
@@ -36,10 +38,19 @@ inline VOID CALLBACK fire(PTP_CALLBACK_INSTANCE, PVOID context, PTP_TIMER) {
     running = t;
     signal(t);
     running = nullptr;
-    if (t->killedInCallback) { delete t; return; }   // killed from its own callback: the pool timer is closed
+    if (t->killedInCallback) { --liveCount; delete t; return; }   // killed from its own callback: the pool timer is closed
     if (!(t->flags & periodic)) {   // a one-shot id is spent once it fires
-        std::lock_guard<std::mutex> lock(mutex);
-        timers.erase(t->id);   // the Timer stays allocated: its pool timer may still be referenced
+        bool retired = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            auto it = timers.find(t->id);
+            if (it != timers.end() && it->second == t) { timers.erase(it); retired = true; }
+        }
+        if (retired) {
+            SetThreadpoolTimer(t->pool, nullptr, 0, 0);
+            CloseThreadpoolTimer(t->pool);
+            --liveCount; delete t;
+        }
     }
 }
 inline UINT WINAPI set_event(UINT delay, UINT, Callback callback, DWORD_PTR user, UINT flags) {
@@ -51,11 +62,14 @@ inline UINT WINAPI set_event(UINT delay, UINT, Callback callback, DWORD_PTR user
         std::lock_guard<std::mutex> lock(mutex);
         do t->id = nextId++; while (!t->id || timers.count(t->id));
         timers[t->id] = t;
+        ++liveCount;
     }
     LARGE_INTEGER due; due.QuadPart = -LONGLONG(delay) * 10000;
     FILETIME start; start.dwLowDateTime = due.LowPart; start.dwHighDateTime = DWORD(due.HighPart);
+    // A one-shot can fire and free `t` on a pool thread before this returns.
+    const UINT id = t->id;
     SetThreadpoolTimer(t->pool, &start, (flags & periodic) ? delay : 0, 0);
-    return t->id;
+    return id;
 }
 inline UINT WINAPI kill_event(UINT id) {
     Timer* t = nullptr;
@@ -75,7 +89,7 @@ inline UINT WINAPI kill_event(UINT id) {
     }
     WaitForThreadpoolTimerCallbacks(t->pool, TRUE);
     CloseThreadpoolTimer(t->pool);
-    delete t;
+    --liveCount; delete t;
     return noError;
 }
 }

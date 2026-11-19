@@ -22,6 +22,7 @@ int main() {
     Sleep(100);
     CHECK(once != 0 && ticks == 2);
     CHECK(mm_timer::kill_event(once) == mm_timer::invalidParameter);   // spent after firing
+    CHECK(mm_timer::liveCount.load() == 0);
     // timeKillEvent from inside the timer's own callback (allowed on Windows).
     static std::atomic<UINT> self{0}; static std::atomic<int> selfTicks{0}; static std::atomic<UINT> selfKill{99};
     self = mm_timer::set_event(10, 1, [](UINT id, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR) {
