@@ -144,7 +144,7 @@ struct Host {
     std::function<uintptr_t(uint32_t)> d3d9_window;
     ComSpace com;
     uint32_t d3d9_guest_top = 0x7D000000u;
-    std::map<uint32_t, std::tuple<void*, uint32_t, uint32_t>> d3d9_locks;
+    std::map<std::pair<uint32_t, uint32_t>, std::tuple<void*, uint32_t, uint32_t>> d3d9_locks;
     int32_t vertex_size = 0, vertex_stride = 0;
     uint32_t vertex_type = 0;
     uint32_t unpack_alignment = 4, unpack_row_length = 0, unpack_skip_rows = 0, unpack_skip_pixels = 0;
@@ -1156,11 +1156,13 @@ inline void register_gl(Registry& r, Host& h) {
                 if (dst) q.input = c.mem.read_bytes(dst, uint32_t(bytes));
                 q.args[8] = 0;
             }
-            if (name.size() >= 10 && name.compare(0, 9, "glUniform") == 0 && name.find("Matrix") == std::string::npos && name.back() == 'v') {
-                const size_t suffix = name.size() - 3;
-                const uint32_t components = suffix < name.size() && name[suffix] >= '1' && name[suffix] <= '4' ? uint32_t(name[suffix] - '0') : 0u;
+            // Vendor aliases (glUniform4fvARB, glUniform4uivEXT) take the core name's arguments.
+            const std::string core = name.size() > 3 && (name.compare(name.size() - 3, 3, "ARB") == 0 || name.compare(name.size() - 3, 3, "EXT") == 0) ? name.substr(0, name.size() - 3) : name;
+            if (core.size() >= 10 && core.compare(0, 9, "glUniform") == 0 && core.find("Matrix") == std::string::npos && core.back() == 'v') {
+                // The component count is the digit right after "glUniform", not the last digit ("glUniform4uiv").
+                const uint32_t components = core[9] >= '1' && core[9] <= '4' ? uint32_t(core[9] - '0') : 0u;
                 const uint32_t count = uint32_t(q.args[1]), source = uint32_t(q.args[2]);
-                const uint32_t scalar_size = name.find("dv") != std::string::npos || name.find("i64") != std::string::npos ? 8u : 4u;
+                const uint32_t scalar_size = core.find("dv") != std::string::npos || core.find("i64") != std::string::npos ? 8u : 4u;
                 uint64_t bytes = uint64_t(count) * components * scalar_size;
                 if (!components || (count && !source) || count > (1u << 20) || bytes > (1u << 26)) { q.gap = true; call(c, q); return 0; }
                 if (bytes) q.input = c.mem.read_bytes(source, uint32_t(bytes));
