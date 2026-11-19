@@ -2013,6 +2013,21 @@ static void test_pe_layouts() {
     std::string reason;
     try { (void)load_pe32(mem, table, reg, managed); } catch (const std::exception& e) { reason = e.what(); }
     EXPECT(reason == "managed (CLR) image: needs a .NET runtime host", "CLR image rejection reason: '%s'", reason.c_str());
+    auto low_section_alignment = pe_layout_fixture(0x200, 0x200, 0x1200);
+    Memory low_section_mem; ThunkTable low_section_table; Registry low_section_reg; Host low_section_host;
+    register_win32(low_section_reg, low_section_host);
+    try {
+        Image low_image = load_pe32(low_section_mem, low_section_table, low_section_reg, low_section_alignment);
+        EXPECT(low_image.size == 0x2000, "PE32 /ALIGN:512 image maps with page-rounded protections");
+    } catch (const std::exception& e) { EXPECT(false, "PE32 /ALIGN:512 image protection failed: %s", e.what()); }
+    put32(low_section_alignment, 0x80 + 24 + 224 + 8, 0);
+    put32(low_section_alignment, 0x80 + 24 + 224 + 16, 0);
+    Memory empty_section_mem; ThunkTable empty_section_table; Registry empty_section_reg; Host empty_section_host;
+    register_win32(empty_section_reg, empty_section_host);
+    try {
+        Image empty_image = load_pe32(empty_section_mem, empty_section_table, empty_section_reg, low_section_alignment);
+        EXPECT(empty_image.size == 0x2000, "empty PE32 section does not request protection for an extra page");
+    } catch (const std::exception& e) { EXPECT(false, "empty PE32 section protection failed: %s", e.what()); }
 }
 static void test_dbt_counter() {
     const char* enabled = std::getenv("X86_DBT");

@@ -8,7 +8,7 @@
 #include <iterator>
 #include <filesystem>
 #include <chrono>
-#include "../host/x86/x86_guest.h"
+#include "../host/x86/x86_play.h"
 #include "../host/x86/x86_file_guard.h"
 using namespace x86;
 static bool verify_system_info() {
@@ -203,6 +203,64 @@ static bool verify_xinput_routes() {
     std::fprintf(stderr,"X86-XINPUT PASS: 32-bit routes, fake connected/empty slots, LoadLibrary, GetProcAddress ordinals 100/108\n");
     return true;
 }
+static bool verify_guest_bugbot_routes() {
+    Memory mem; mem.map(0x1000, 0x20000, PROT_R | PROT_W); mem.map(TEB_ADDR, 0x1000, PROT_R | PROT_W);
+    ThunkTable table; Host host; Registry reg; Guest guest(mem, host, reg); guest.register_all();
+    Cpu cpu(mem, table); cpu.reg[ESP] = 0x1f000; cpu.fs_base = TEB_ADDR;
+    auto args = [&](std::initializer_list<uint32_t> values) {
+        unsigned i=0; for(uint32_t value:values) mem.w32(cpu.reg[ESP]+4+4*i++,value);
+    };
+    auto route = [&](const char* name) -> Thunk* {
+        auto it=reg.map.find({"kernel32.dll",Registry::key_sym(name)});
+        return it==reg.map.end()?nullptr:&it->second;
+    };
+    Thunk* set_heap=route("HeapSetInformation"); Thunk* query_heap=route("HeapQueryInformation");
+    if(!set_heap||!query_heap)return false;
+    args({0,1,0,0}); if(set_heap->fn(cpu)!=1){std::fprintf(stderr,"guest-route: NULL HeapSetInformation failed\n");return false;}
+    args({0,0,0x3000,4,0x3004});
+    if(query_heap->fn(cpu)!=1||mem.r32(0x3000)!=2||mem.r32(0x3004)!=4)return false;
+
+    host.nls_call=[](const Host::NlsRequest& request) {
+        Host::NlsResponse response{};
+        if(request.operation==Host::NlsOperation::LCMapStringW&&(request.flags&0x400u)) {
+            response.result=3; response.output={0x41,0x00,0x00};
+        }
+        return response;
+    };
+    mem.w(0x4000,'A',2); mem.w32(0x5000,0xccccccccu);
+    args({0x0409,0x400,0x4000,1,0x5000,3});
+    Thunk* map=route("LCMapStringW");
+    if(!map||map->fn(cpu)!=3||mem.r8(0x5000)!=0x41||mem.r8(0x5001)!=0||mem.r8(0x5002)!=0||mem.r8(0x5003)!=0xcc)return false;
+
+    mem.write_bytes(0x6000,"folder",7); bool created=false, find_closed=false;
+    host.file_call=[&](Host::FileCall& call) {
+        if(call.operation==Host::FileCall::Operation::CreateDirectoryA) {
+            created=call.path_a=="folder"; call.succeeded=true;
+        } else if(call.kind==Host::FileCall::Kind::FindClose) {
+            find_closed=call.handle==77; call.succeeded=true;
+        }
+    };
+    args({0x6000,0x7000}); Thunk* create_dir=route("CreateDirectoryA");
+    if(!create_dir||create_dir->fn(cpu)!=1||!created)return false;
+    guest.find_handles[0x51000001]=77; args({0x51000001}); Thunk* close=route("CloseHandle");
+    if(!close||close->fn(cpu)!=1||!find_closed||guest.find_handles.count(0x51000001))return false;
+
+    Thunk* find_resource_ex=route("FindResourceExW"); Thunk* load_resource=route("LoadResource"); Thunk* lock_resource=route("LockResource");
+    if(!find_resource_ex||find_resource_ex->argc!=4||!load_resource||!lock_resource)return false;
+    guest.image_base=0x400000; guest.resource_handles[0x74000001]={0x400000,0x8000,4};
+    args({0x400000,0x74000001});
+    if(load_resource->fn(cpu)!=0x74000001)return false;
+    args({0x74000001});
+    if(lock_resource->fn(cpu)!=0x8000)return false;
+    std::fprintf(stderr,"X86-GUEST-ROUTES PASS: NULL heaps, sort-key bytes, security attributes, find CloseHandle, and resource handles\n");
+    return true;
+}
+static bool verify_nls_size_query_capture() {
+    Host::NlsResponse response{}; response.result=5;
+    if(!play_capture_nls_output(response,nullptr,0,10,false,0)||response.result!=5||!response.output.empty())return false;
+    std::fprintf(stderr,"X86-NLS PASS: zero-capacity size query does not read host output\n");
+    return true;
+}
 static bool verify_file_guard() {
     namespace fs = std::filesystem;
     const fs::path temp = fs::temp_directory_path() / ("x86-file-guard-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -262,6 +320,8 @@ int main(int argc, char** argv) {
     if (!verify_critical_section_routes()) { std::puts("X86-CRITICAL-SECTION FAIL: CRT forced debug-info initialization"); return 1; }
     if (!verify_display_routes()) return 1;
     if (!verify_xinput_routes()) { std::puts("X86-XINPUT FAIL: guest route, layout, ordinal, or fake-pad contract"); return 1; }
+    if (!verify_guest_bugbot_routes()) { std::puts("X86-GUEST-ROUTES FAIL: heap, NLS, directory, find-handle, or resource contract"); return 1; }
+    if (!verify_nls_size_query_capture()) { std::puts("X86-NLS FAIL: size-query output capture"); return 1; }
     if (!verify_file_guard()) return 1;
     if (argc < 2) { printf("usage: x86-guest <fixture-crt.exe>\n"); return 2; }
     auto file = slurp(argv[1]);

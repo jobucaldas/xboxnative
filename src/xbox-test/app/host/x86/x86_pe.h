@@ -211,7 +211,11 @@ inline Image load_pe32(Memory& mem, ThunkTable& table, const Registry& reg, cons
     for (size_t i = 0; i < ns; ++i) {
         size_t s = secs + 40 * i; uint32_t va = u32(pe.bytes, s + 12), vs = std::max(u32(pe.bytes, s + 8), u32(pe.bytes, s + 16)), ch = u32(pe.bytes, s + 36);
         uint8_t p = PROT_R | PROT_COW | ((ch & 0x80000000u) ? PROT_W : 0) | ((ch & 0x20000000u) ? PROT_X : 0);
-        mem.protect(img.base + va, vs, p);
+        if (vs) {
+            const uint32_t section_start = (img.base + va) & ~(Memory::PAGE - 1);
+            const uint64_t section_end = (uint64_t(img.base) + va + vs + Memory::PAGE - 1) & ~uint64_t(Memory::PAGE - 1);
+            mem.protect(section_start, uint32_t(section_end - section_start), p);
+        }
     }
     // TLS directory (data dir 9): the callback list a static CRT (mingw's
     // mcfgthread) initializes its globals from. The pointer fields inside the

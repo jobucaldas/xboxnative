@@ -2028,7 +2028,8 @@ inline void Guest::register_all() {
     auto nls_output = [this](Host::NlsRequest& request, uint32_t output_ptr, uint32_t expected_bytes) {
         if (!host.nls_call) { set_last_error(87); return 0u; }
         Host::NlsResponse response = host.nls_call(request); if (!response.result) set_last_error(response.last_error);
-        const uint32_t bytes = expected_bytes == 0xFFFFFFFFu ? response.result * 2 : expected_bytes;
+        const bool sort_key = (request.operation == Host::NlsOperation::LCMapStringW || request.operation == Host::NlsOperation::LCMapStringEx) && (request.flags & 0x400u);
+        const uint32_t bytes = expected_bytes == 0xFFFFFFFFu ? response.result * (sort_key ? 1u : 2u) : expected_bytes;
         if (response.result && output_ptr && response.output.size() == bytes)
             copy_out(output_ptr, response.output.data(), bytes);
         return response.result;
@@ -2182,7 +2183,7 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "HeapSize", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { return heap.size_of(c.arg(2)); });
     reg.add("kernel32.dll", "HeapSetInformation", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
         uint32_t h = c.arg(0), info = c.arg(1), buffer = c.arg(2), size = c.arg(3);
-        if ((h != 0x50000000u && !heap_handles.count(h)) ||
+        if ((h && h != 0x50000000u && !heap_handles.count(h)) ||
             (info == 0 && (!buffer || size != 4)) ||
             (info == 1 && (buffer || size != 0)) || info > 1) { set_last_error(87); return 0; }
         if (info == 0) {
@@ -2193,7 +2194,7 @@ inline void Guest::register_all() {
     });
     reg.add("kernel32.dll", "HeapQueryInformation", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
         uint32_t h = c.arg(0), info = c.arg(1), buffer = c.arg(2), size = c.arg(3), returned = c.arg(4);
-        if ((h != 0x50000000u && !heap_handles.count(h)) || info != 0 || !buffer || size < 4) {
+        if ((h && h != 0x50000000u && !heap_handles.count(h)) || info != 0 || !buffer || size < 4) {
             set_last_error(87); return 0;
         }
         mem.w32(buffer, 2);  // HEAP_COMPATIBILITY_INFORMATION: LFH enabled
@@ -2650,7 +2651,7 @@ inline void Guest::register_all() {
     };
     // Simple file operations preserve the native kernel32 result and last error.
     reg.add("kernel32.dll", "CreateDirectoryA", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
-        if(!c.arg(0)||c.arg(1)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::AttributesA};q.operation=Host::FileCall::Operation::CreateDirectoryA;q.path_a=str(c.arg(0));
+        if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::AttributesA};q.operation=Host::FileCall::Operation::CreateDirectoryA;q.path_a=str(c.arg(0));
         if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
     reg.add("kernel32.dll", "CreateDirectoryW", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         if(!c.arg(0)||c.arg(1)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::CreateDirectoryW};q.path_w=wstr(c.arg(0));if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
@@ -2935,6 +2936,7 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "FlushFileBuffers", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "CloseHandle", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         auto it=file_handles.find(c.arg(0));if(it!=file_handles.end()){Host::FileCall q{Host::FileCall::Kind::Close};q.handle=it->second;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}file_handles.erase(it);return 1;}
+        auto find=find_handles.find(c.arg(0));if(find!=find_handles.end()){Host::FileCall q{Host::FileCall::Kind::FindClose};q.handle=find->second;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}find_handles.erase(find);return 1;}
         close_sync(c.arg(0));return 1; });
     reg.add("kernel32.dll", "SetHandleCount", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t { return c.arg(0); });
 
