@@ -13,6 +13,13 @@ static DWORD testLoaderSearch() {
     for(wchar_t* p=executable;*p;++p)if(*p==L'\\'||*p==L'/')slash=p;
     if(!slash)return 93;
     slash[1]=0;
+    static wchar_t system[32768],systemModule[32768];
+    DWORD systemLength=GetSystemDirectoryW(system,32768);
+    if(!systemLength||systemLength>=32768)return 134;
+    wsprintfW(systemModule,L"%s\\ntdll.dll",system);
+    HMODULE systemImage=LoadLibraryExW(systemModule,nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);
+    if(!systemImage)return 135;
+    if(!FreeLibrary(systemImage))return 136;
     const wchar_t suffix[]=L"loader-search";
     size_t end=0;while(executable[end])++end;
     for(size_t i=0;i<sizeof(suffix)/sizeof(*suffix);++i)executable[end+i]=suffix[i];
