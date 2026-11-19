@@ -66,8 +66,10 @@ inline UINT WINAPI set_event(UINT delay, UINT, Callback callback, DWORD_PTR user
     }
     LARGE_INTEGER due; due.QuadPart = -LONGLONG(delay) * 10000;
     FILETIME start; start.dwLowDateTime = due.LowPart; start.dwHighDateTime = DWORD(due.HighPart);
+    // A one-shot can fire and free `t` on a pool thread before this returns.
+    const UINT id = t->id;
     SetThreadpoolTimer(t->pool, &start, (flags & periodic) ? delay : 0, 0);
-    return t->id;
+    return id;
 }
 inline UINT WINAPI kill_event(UINT id) {
     Timer* t = nullptr;
