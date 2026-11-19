@@ -15,7 +15,7 @@ has "exe name narrowed with narrow()" 'imports.report(play_runtime::narrow(exe),
 lacks "cwd failure uses dummy guest path" '__x86_guard_cwd_unavailable__'
 has "cwd failure denies" 'if(!n||n>=32768)return false;'
 lacks "window class proc returns 0" '[](HWND,UINT,WPARAM,LPARAM)->LRESULT{return 0;}'
-has "window class proc defers to DefWindowProcW" 'return DefWindowProcW(h,m,w,l);'
+has "window class proc defers to uwph DefWindowProcW" 'GetProcAddress(records,"DefWindowProcW")'
 lacks "unmap calls host glUnmapBuffer" 'unmap=pointer("glUnmapBuffer")'
 has "unmap returns GL_TRUE after copy-back" 'q.result=1;return; // GL_TRUE'
 has "cached client requires completed stamp" 'return read_bytes(stamp).size()==64&&'

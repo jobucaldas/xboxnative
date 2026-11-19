@@ -1379,7 +1379,7 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         auto destroy_window=records?reinterpret_cast<DestroyWindow>(GetProcAddress(records,"DestroyWindow")):nullptr;
         host.register_window_class=[register_class](const std::u16string& name){
             if(!register_class||name.empty())return false;std::wstring wide(name.begin(),name.end());GlWndClassExW wc{};wc.cbSize=sizeof(wc);
-            wc.lpfnWndProc=[](HWND h,UINT m,WPARAM w,LPARAM l)->LRESULT{return DefWindowProcW(h,m,w,l);};wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=wide.c_str();
+            wc.lpfnWndProc=[](HWND h,UINT m,WPARAM w,LPARAM l)->LRESULT{auto def=records?reinterpret_cast<LRESULT(WINAPI*)(HWND,UINT,WPARAM,LPARAM)>(GetProcAddress(records,"DefWindowProcW")):nullptr;return def?def(h,m,w,l):0;};wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=wide.c_str();
             return register_class(&wc)!=0||GetLastError()==ERROR_CLASS_ALREADY_EXISTS;
         };
         host.unregister_window_class=[unregister_class](const std::u16string& name){
