@@ -74,7 +74,7 @@ static void probe_audio_endpoints(Log log, bool winrtReady) {
     auto getBuffer=base?reinterpret_cast<WindowsGetStringRawBufferFn>(GetProcAddress(base,"WindowsGetStringRawBuffer")):nullptr;
     HRESULT hr=base&&createString&&deleteString&&getFactory&&getBuffer&&winrtReady?S_OK:E_NOTIMPL;
     HSTRING className=nullptr,endpoint=nullptr;void* factory=nullptr;
-    if(SUCCEEDED(hr))hr=createString(L"Windows.Media.Devices.MediaDevice",34,&className);
+    if(SUCCEEDED(hr))hr=createString(L"Windows.Media.Devices.MediaDevice",33,&className);
     if(SUCCEEDED(hr))hr=getFactory(className,iidMediaDeviceStatics,&factory);
     char line[192];aud_format(line,sizeof line,"AUD STAGE MediaDevice.GetDefaultAudioRenderId factory_hr=0x%08lx",(unsigned long)hr);log(line);
     HRESULT idHr=hr;
@@ -89,6 +89,7 @@ static void probe_audio_endpoints(Log log, bool winrtReady) {
     auto activate=mmdev?reinterpret_cast<ActivateAudioInterfaceAsyncFn>(GetProcAddress(mmdev,"ActivateAudioInterfaceAsync")):nullptr;
     HRESULT activateHr=endpointId&&endpointLength&&activate?S_OK:FAILED(idHr)?idHr:E_NOTIMPL;
     HRESULT completionHr=E_PENDING, activationHr=E_PENDING;
+    bool completionTimedOut=false;
     void* handlerMemory=HeapAlloc(GetProcessHeap(),0,sizeof(ActivationHandler));
     ActivationHandler* handler=handlerMemory?new(handlerMemory) ActivationHandler:nullptr;
     if(SUCCEEDED(activateHr)&&handler&&handler->ready) {
@@ -97,14 +98,15 @@ static void probe_audio_endpoints(Log log, bool winrtReady) {
         if(SUCCEEDED(activateHr)) {
             if(WaitForSingleObject(handler->ready,5000)==WAIT_OBJECT_0) {
                 completionHr=handler->callHr;activationHr=handler->activationHr;
-            } else completionHr=HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+            } else { completionHr=HRESULT_FROM_WIN32(ERROR_TIMEOUT); completionTimedOut=true; }
         }
         if(operation)operation->Release();
     } else if(SUCCEEDED(activateHr)) activateHr=E_OUTOFMEMORY;
     aud_format(line,sizeof line,"AUD STAGE ActivateAudioInterfaceAsync hr=0x%08lx completion_hr=0x%08lx activation_hr=0x%08lx",(unsigned long)activateHr,(unsigned long)completionHr,(unsigned long)activationHr);log(line);
-    if(handler)handler->Release();
+    // A timed-out activation may still complete on mmdevapi's worker: keep the handler and that module alive.
+    if(handler&&!completionTimedOut)handler->Release();
     if(endpoint&&deleteString)deleteString(endpoint);if(className&&deleteString)deleteString(className);
-    if(factory)reinterpret_cast<IUnknown*>(factory)->Release();if(mmdev)FreeLibrary(mmdev);if(base)FreeLibrary(base);
+    if(factory)reinterpret_cast<IUnknown*>(factory)->Release();if(mmdev&&!completionTimedOut)FreeLibrary(mmdev);if(base)FreeLibrary(base);
     IMMDeviceEnumerator* enumerator=nullptr;
     HRESULT enumHr=CoCreateInstance(reinterpret_cast<const GUID&>(clsidMmDeviceEnumerator),nullptr,CLSCTX_INPROC_SERVER,
                                     reinterpret_cast<const GUID&>(iidMmDeviceEnumerator),reinterpret_cast<void**>(&enumerator));

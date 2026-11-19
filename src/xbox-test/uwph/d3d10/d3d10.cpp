@@ -191,17 +191,22 @@ Compiler compiler;
 // Some D3D11-on-D3D12 drivers accept GenerateMips but leave the lower
 // subresources untouched. Keep the native path for every other format and
 // dimension, but make the common 32-bit 2D path deterministic for D3D10 games.
-bool generateMipsRgba8(ID3D11Device* device,ID3D11DeviceContext* context,ID3D11Resource* resource) {
+// Fills the view's mip range [topMip, topMip+mipCount) for its slices; UINT(-1) means "to the end".
+bool generateMipsRgba8(ID3D11Device* device,ID3D11DeviceContext* context,ID3D11Resource* resource,
+                       UINT topMip,UINT mipCount,UINT firstSlice,UINT sliceCount) {
     if(!device||!context||!resource)return false;
     D3D11_RESOURCE_DIMENSION type{};resource->GetType(&type);
     if(type!=D3D11_RESOURCE_DIMENSION_TEXTURE2D)return false;
     auto texture=static_cast<ID3D11Texture2D*>(resource);D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);
     if(desc.MipLevels<2||desc.Format!=DXGI_FORMAT_R8G8B8A8_UNORM)return false;
+    if(topMip>=desc.MipLevels||firstSlice>=desc.ArraySize)return false;
+    const UINT endMip=mipCount>desc.MipLevels-topMip?desc.MipLevels:topMip+mipCount;
+    const UINT endSlice=sliceCount>desc.ArraySize-firstSlice?desc.ArraySize:firstSlice+sliceCount;
     D3D11_TEXTURE2D_DESC staging=desc;staging.MipLevels=1;staging.ArraySize=1;staging.Usage=D3D11_USAGE_STAGING;
     staging.BindFlags=0;staging.CPUAccessFlags=D3D11_CPU_ACCESS_READ;staging.MiscFlags=0;
     ID3D11Texture2D* readback=nullptr;if(FAILED(device->CreateTexture2D(&staging,nullptr,&readback)))return false;
     unsigned char* pixels=(unsigned char*)HeapAlloc(GetProcessHeap(),0,desc.Width*desc.Height*4);bool ok=pixels!=nullptr;
-    for(UINT array=0;ok&&array<desc.ArraySize;++array) for(UINT mip=1;ok&&mip<desc.MipLevels;++mip) {
+    for(UINT array=firstSlice;ok&&array<endSlice;++array) for(UINT mip=topMip+1;ok&&mip<endMip;++mip) {
         UINT srcW=desc.Width>>(mip-1),srcH=desc.Height>>(mip-1);
         UINT dstW=desc.Width>>mip,dstH=desc.Height>>mip;
         if(!srcW)srcW=1;if(!srcH)srcH=1;if(!dstW)dstW=1;if(!dstH)dstH=1;
@@ -210,8 +215,12 @@ bool generateMipsRgba8(ID3D11Device* device,ID3D11DeviceContext* context,ID3D11R
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if(FAILED(context->Map(readback,0,D3D11_MAP_READ,0,&mapped))){ok=false;break;}
         for(UINT y=0;y<dstH;++y) for(UINT x=0;x<dstW;++x) {
-            const unsigned char* a=(const unsigned char*)mapped.pData+(y*2)*mapped.RowPitch+(x*2)*4;
-            const unsigned char* b=a+4;const unsigned char* c=a+mapped.RowPitch;const unsigned char* d=c+4;
+            // A 1-wide or 1-high source has no second column or row: repeat the edge instead of reading past it.
+            const UINT x1=x*2+1<srcW?x*2+1:srcW-1,y1=y*2+1<srcH?y*2+1:srcH-1;
+            const unsigned char* row0=(const unsigned char*)mapped.pData+(y*2)*mapped.RowPitch;
+            const unsigned char* row1=(const unsigned char*)mapped.pData+y1*mapped.RowPitch;
+            const unsigned char* a=row0+(x*2)*4;const unsigned char* b=row0+x1*4;
+            const unsigned char* c=row1+(x*2)*4;const unsigned char* d=row1+x1*4;
             for(UINT channel=0;channel<4;++channel)pixels[(y*dstW+x)*4+channel]=(unsigned char)((a[channel]+b[channel]+c[channel]+d[channel]+2)/4);
         }
         context->Unmap(readback,0);
@@ -766,8 +775,15 @@ struct Device : d3dshim::Base, ID3D10Device1 {
         auto inner=behind<ID3D11ShaderResourceView>(view);
         context()->GenerateMips(inner);
         if(inner) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC srv{};inner->GetDesc(&srv);
+            UINT topMip=0,mipCount=UINT(-1),firstSlice=0,sliceCount=UINT(-1);
+            if(srv.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D) {topMip=srv.Texture2D.MostDetailedMip;mipCount=srv.Texture2D.MipLevels;}
+            else if(srv.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2DARRAY) {
+                topMip=srv.Texture2DArray.MostDetailedMip;mipCount=srv.Texture2DArray.MipLevels;
+                firstSlice=srv.Texture2DArray.FirstArraySlice;sliceCount=srv.Texture2DArray.ArraySize;
+            }
             ID3D11Resource* resource=nullptr;inner->GetResource(&resource);
-            generateMipsRgba8(device(),context(),resource);
+            generateMipsRgba8(device(),context(),resource,topMip,mipCount,firstSlice,sliceCount);
             if(resource)resource->Release();
         }
     }

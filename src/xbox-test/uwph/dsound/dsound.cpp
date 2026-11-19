@@ -306,8 +306,8 @@ public:
         if(FAILED(ensure_engine())||!engine||!master)return DSERR_NODRIVER;
         if(!voice_){HRESULT hr=engine->CreateSourceVoice(&voice_,&format_,0,XAUDIO2_DEFAULT_FREQ_RATIO,&voice_callback_);if(SUCCEEDED(hr)&&!voice_)hr=E_FAIL;if(FAILED(hr))return DSERR_NODRIVER;apply_controls();}
         if(playing_)voice_->Stop(0);
-        voice_->FlushSourceBuffers();
-        XAUDIO2_BUFFER b{};b.AudioBytes=byte_count_;b.pAudioData=data_;b.PlayBegin=play_cursor_/block_align_;b.PlayLength=byte_count_/block_align_-b.PlayBegin;
+        InterlockedIncrement(&generation_);voice_->FlushSourceBuffers();
+        XAUDIO2_BUFFER b{};b.AudioBytes=byte_count_;b.pAudioData=data_;b.pContext=reinterpret_cast<void*>(static_cast<uintptr_t>(generation_));b.PlayBegin=play_cursor_/block_align_;b.PlayLength=byte_count_/block_align_-b.PlayBegin;
         looping_=(flags&DSBPLAY_LOOPING)!=0;if(looping_){b.LoopBegin=0;b.LoopLength=byte_count_/block_align_;b.LoopCount=XAUDIO2_LOOP_INFINITE;}
         HRESULT hr=voice_->SubmitSourceBuffer(&b);if(FAILED(hr))return hr;
         XAUDIO2_VOICE_STATE state{};voice_->GetState(&state,0);start_samples_=state.SamplesPlayed;
@@ -316,7 +316,7 @@ public:
     }
     HRESULT STDMETHODCALLTYPE SetCurrentPosition(DWORD position) override {
         if(primary_||!byte_count_||position>=byte_count_||position%block_align_)return DSERR_INVALIDPARAM;
-        bool restart=playing_;if(restart){voice_->Stop(0);voice_->FlushSourceBuffers();playing_=false;}
+        bool restart=playing_;if(restart){voice_->Stop(0);InterlockedIncrement(&generation_);voice_->FlushSourceBuffers();playing_=false;}
         play_cursor_=position;if(restart)return Play(0,0,looping_?DSBPLAY_LOOPING:0);return S_OK;
     }
     HRESULT STDMETHODCALLTYPE SetFormat(LPCWAVEFORMATEX format) override {
@@ -372,7 +372,7 @@ public:
         }
         last_notify_samples_=played;
     }
-    void callback_end(){playing_=false;signal_stop();}
+    void callback_end(void* context){if(reinterpret_cast<uintptr_t>(context)!=static_cast<uintptr_t>(generation_))return;playing_=false;signal_stop();}
     void callback_error(){playing_=false;}
     bool is_primary()const{return primary_;}
     DWORD bytes()const{return byte_count_;}
@@ -383,13 +383,14 @@ private:
     void apply_pan(){if(!voice_)return;float left=pan_>0?1.0f-float(pan_)/DSBPAN_RIGHT:1.0f;float right=pan_<0?1.0f+float(pan_)/-DSBPAN_LEFT:1.0f;if(format_.nChannels==1){float matrix[2]={left,right};voice_->SetOutputMatrix(master,1,2,matrix,0);}else{float matrix[4]={left,0.0f,0.0f,right};voice_->SetOutputMatrix(master,2,2,matrix,0);}}
     void signal_stop(){for(DWORD i=0;i<notification_count_;++i)if(notifications_[i].offset==DSBPN_OFFSETSTOP)SetEvent(notifications_[i].event);}
     bool primary_;DWORD flags_,byte_count_;LONG refs_;WAVEFORMATEX format_{};DWORD block_align_;uint8_t *data_=nullptr;
+    volatile LONG generation_=0;   // bumped before every flush: stale OnBufferEnd callbacks carry an old value
     DWORD play_cursor_,frequency_;LONG volume_,pan_;bool looping_,playing_,locked_;DWORD lock_offset_,lock_bytes_;
     IXAudio2SourceVoice *voice_;VoiceEvents voice_callback_;DWORD start_cursor_;uint64_t start_samples_,last_notify_samples_;
     struct Note{DWORD offset;HANDLE event;};Note notifications_[64]{};DWORD notification_count_;
 };
 
 void VoiceEvents::OnVoiceProcessingPassStart(UINT32){owner_->callback_pass();}
-void VoiceEvents::OnBufferEnd(void*){owner_->callback_end();}
+void VoiceEvents::OnBufferEnd(void* context){owner_->callback_end(context);}
 void VoiceEvents::OnLoopEnd(void*){owner_->callback_pass();}
 void VoiceEvents::OnVoiceError(void*,HRESULT){owner_->callback_error();}
 
