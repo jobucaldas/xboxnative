@@ -2767,18 +2767,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     }
     void revoke_window_events() noexcept {
         if(!m_windowEventsAttached)return;
-        try {
-            SystemNavigationManager::GetForCurrentView().BackRequested(m_backRequestedToken);
-            m_window.Dispatcher().AcceleratorKeyActivated(m_acceleratorToken);
-            m_window.PointerWheelChanged(m_pointerWheelToken);
-            m_window.PointerReleased(m_pointerReleasedToken);
-            m_window.PointerPressed(m_pointerPressedToken);
-            m_window.PointerMoved(m_pointerMovedToken);
-            m_window.Closed(m_windowClosedToken);
-            m_window.Activated(m_windowActivatedToken);
-        } catch (...) {
-            logf("window event revocation failed");
-        }
+        auto revoke=[&](auto&& f) {
+            try { f(); } catch (...) { logf("window event revocation failed"); }
+        };
+        revoke([&] { SystemNavigationManager::GetForCurrentView().BackRequested(m_backRequestedToken); });
+        revoke([&] { m_window.Dispatcher().AcceleratorKeyActivated(m_acceleratorToken); });
+        revoke([&] { m_window.PointerWheelChanged(m_pointerWheelToken); });
+        revoke([&] { m_window.PointerReleased(m_pointerReleasedToken); });
+        revoke([&] { m_window.PointerPressed(m_pointerPressedToken); });
+        revoke([&] { m_window.PointerMoved(m_pointerMovedToken); });
+        revoke([&] { m_window.Closed(m_windowClosedToken); });
+        revoke([&] { m_window.Activated(m_windowActivatedToken); });
         m_windowEventsAttached=false;
     }
     void SetWindow(CoreWindow const& w) {
