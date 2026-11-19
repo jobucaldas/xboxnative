@@ -68,7 +68,15 @@ fi
 grep -q "^revision = $dxtag\$" "$src/subprojects/DirectX-Headers.wrap" || { echo "Mesa wrap and deps.pin disagree on DirectX-Headers" >&2; exit 1; }
 dx=$src/subprojects/DirectX-Headers-1.0
 if [[ ! -d $dx/.git ]]; then
-  rm -rf "$dx"; git clone -q --depth 1 --branch "$dxtag" "$dxurl" "$dx"
+  rm -rf "$dx"
+  if [[ $dxrev =~ ^[0-9a-f]{40}$ ]]; then
+    git init -q "$dx"
+    git -C "$dx" remote add origin "$dxurl"
+    git -C "$dx" fetch -q --depth 1 origin "$dxrev"
+    git -C "$dx" checkout -q --detach FETCH_HEAD
+  else
+    git clone -q --depth 1 --branch "$dxtag" "$dxurl" "$dx"
+  fi
 fi
 head=$(git -C "$dx" rev-parse HEAD)
 [[ $dxrev =~ ^[0-9a-f]{40}$ && $head == "$dxrev" ]] || { echo "DirectX-Headers $dxtag is $head, deps.pin pins $dxrev" >&2; exit 1; }

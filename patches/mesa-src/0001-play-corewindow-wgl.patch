@@ -152,7 +152,7 @@ diff -ruN a/src/gallium/targets/wgl/wgl.c b/src/gallium/targets/wgl/wgl.c
        debug_get_option("GALLIUM_DRIVER", ""),
 +#endif
  #ifdef GALLIUM_D3D12
-       sw_only ? "" : "d3d12",
+       "",
  #endif
 diff -ruN a/src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer.cpp b/src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer.cpp
 --- a/src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer.cpp	2026-11-08 16:24:36.782193740 -0300

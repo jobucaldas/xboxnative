@@ -5,10 +5,10 @@
 // non-English language depot, no low-violence depot, and when the app ships a
 // 64-bit Windows build its 32-bit builds are skipped (they usually carry the
 // same file paths, so fetching both doubles the size and the two overwrite
-// each other). Depots shared from another app (depotfromapp: typically the
-// Steamworks redistributable installers for DirectX/VC++) are skipped too: the
-// Steam client keeps them under that other app, and Play never runs those
-// installers. No Win32 here: tests/depot_select_test.cpp runs it natively.
+// each other). Depots shared from another app (depotfromapp) are retained:
+// Steam also uses that field for game content shared by editions or related
+// apps, and the downloader must not drop files the selected app needs. No
+// Win32 here: tests/depot_select_test.cpp runs it natively.
 #pragma once
 #include <cstdint>
 #include <string>
@@ -41,7 +41,6 @@ inline std::vector<Depot> choose(const std::vector<Depot>& all, std::vector<Skip
     for (auto& d : all) {
         if (!d.oslist.empty() && !has_word(d.oslist, "windows")) { skip(d, "os=" + d.oslist); continue; }
         if (d.dlc) { skip(d, "DLC depot"); continue; }
-        if (!d.sharedFrom.empty()) { skip(d, "shared from app " + d.sharedFrom + " (redistributable)"); continue; }
         if (d.gid.empty()) { skip(d, "no public manifest"); continue; }
         if (!d.language.empty() && d.language != "english") { skip(d, "language=" + d.language); continue; }
         if (d.lowviolence) { skip(d, "low-violence depot"); continue; }

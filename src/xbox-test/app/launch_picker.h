@@ -90,7 +90,7 @@ inline std::string parse_remember(const std::string& text) {
     size_t end = text.find_first_of("\r\n");
     std::string v = text.substr(0, end);
     if (v.empty() || v.size() > 260) return std::string();
-    for (unsigned char c : v) if (c < 32 || c == 127) return std::string();
+    for (unsigned char c : v) if ((c < 32 && c != '\t') || c == 127) return std::string();
     return v;
 }
 

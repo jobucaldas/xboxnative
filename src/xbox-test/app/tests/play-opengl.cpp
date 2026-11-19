@@ -195,6 +195,8 @@ int opengl_entry() {
     // SDL3's SDL_GL_LoadLibrary: by name, so Play serves the runtime copy (Mesa).
     HMODULE gl = LoadLibraryW(L"opengl32.dll");
     if (!gl) return fail(11, "LoadLibraryW(opengl32.dll)", GetLastError());
+    // GetModuleHandle must see the module the guest just loaded (a mapped Mesa image).
+    if (GetModuleHandleW(L"opengl32.dll") != gl) return fail(12, "GetModuleHandleW(opengl32.dll)", GetLastError());
     auto choosePixelFormat = (PFN_ChoosePixelFormat)(uintptr_t)GetProcAddress(gl, "wglChoosePixelFormat");
     auto setPixelFormat = (PFN_SetPixelFormat)(uintptr_t)GetProcAddress(gl, "wglSetPixelFormat");
     auto getPixelFormat = (PFN_GetPixelFormat)(uintptr_t)GetProcAddress(gl, "wglGetPixelFormat");

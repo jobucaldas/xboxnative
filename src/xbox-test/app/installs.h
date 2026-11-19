@@ -127,6 +127,10 @@ inline void remove_tree(const std::wstring& dir, Progress& p, const std::atomic<
 // folder is touched. Returns false (nothing removed) when the marker cannot be deleted.
 inline bool remove_install(const std::wstring& root, uint32_t appid, const std::string& dir, bool keepFiles, Progress& p, const std::atomic<bool>* stop = nullptr, const std::string& gameRoot = std::string()) {
     if (!keepFiles && !game_library::deletable_installdir(dir)) { p.failed++; return false; }
+    // The marker is local, but the payload may be on a removable drive. Do
+    // not delete the only record of that install when the drive is absent:
+    // reconnecting it must still let the launcher find and remove the game.
+    if (!gameRoot.empty() && GetFileAttributesW(ascii(gameRoot).c_str()) == INVALID_FILE_ATTRIBUTES) { p.failed++; return false; }
     if (!DeleteFileW(marker_path(root, appid).c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) { p.failed++; return false; }
     if (keepFiles) return true;
     const std::wstring folder = folder_of(root, gameRoot, dir); const DWORD a = GetFileAttributesW(folder.c_str());

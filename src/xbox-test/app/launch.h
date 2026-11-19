@@ -1743,7 +1743,8 @@ static LaunchTarget pick_target(uint32_t appid, const std::wstring& root, const 
         auto order=launch_target::ranked(options,pe_arch);
         if(wanted) {   // the picker's row: only that option, never a silent fallback to another
             const launch_target::Entry* only=nullptr;
-            for(auto e:order) if(e->executable==*wanted) { only=e; break; }
+            for(auto e:order) if(launch_target::entry_key(*e)==*wanted ||
+                                  (wanted->find('\t')==std::string::npos && e->executable==*wanted)) { only=e; break; }
             order.clear();
             if(only) order.push_back(only);
             else t.why="the chosen Steam launch option is no longer in the app's appinfo; ";
@@ -1862,8 +1863,8 @@ static bool cancel_launch(const char* via) {
 }
 
 // Entry: called on the render thread; returns immediately (work happens on a worker thread).
-// option (the picker's choice, an appinfo executable) starts that launch option
-// instead of the preferred one; nullptr picks the preferred option as before.
+// option (the picker's full appinfo identity) starts that launch option instead
+// of the preferred one; nullptr picks the preferred option as before.
 // Returns why Play was refused, or empty when the launch started: the detail
 // page shows that reason, since a refusal leaves no launch panel to show it.
 static std::string start_launch(uint32_t appid, const std::string& name, const std::string& dir, const char* via, const std::string* option=nullptr) {

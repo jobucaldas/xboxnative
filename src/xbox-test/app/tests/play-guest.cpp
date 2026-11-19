@@ -123,6 +123,28 @@ static int testRwxJit(){
     *(volatile BYTE*)(p+3*4096)=1;
     if(!VirtualQuery(p+3*4096,&mbi,sizeof mbi)||mbi.Protect!=PAGE_READWRITE)return 84;
     if(!VirtualQuery(p,&mbi,sizeof mbi)||mbi.Protect!=PAGE_EXECUTE_READWRITE||mbi.RegionSize!=3*4096)return 85;
+    // A RIP-relative store whose instruction and destination share an RX page
+    // must be emulated; flipping the page to RW would make the retry fetch DEP.
+    BYTE* self=(BYTE*)VirtualAlloc(nullptr,4096,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);
+    if(!self)return 104;
+    BYTE* target=self+64;
+    self[0]=0xc7; self[1]=0x05;
+    LONG disp=(LONG)((intptr_t)target-(intptr_t)(self+10));   // RIP after the imm32
+    for(int i=0;i<4;++i)self[2+i]=(BYTE)((unsigned)disp>>(8*i));
+    self[6]=0x7b; self[7]=0; self[8]=0; self[9]=0; self[10]=0xc3;
+    *(DWORD*)target=0;
+    ((DWORD(*)())self)();
+    if(*(DWORD*)target!=123)return 105;
+    if(!VirtualFree(self,0,MEM_RELEASE))return 106;
+    // Releasing a reservation forgets every RWX commit in it, not only the first:
+    // a later plain RW commit at a freed RWX address must query as RW.
+    BYTE* d=(BYTE*)VirtualAlloc(nullptr,65536,MEM_RESERVE,PAGE_READWRITE);
+    if(!d)return 107;
+    if(!VirtualAlloc(d,4096,MEM_COMMIT,PAGE_EXECUTE_READWRITE)||!VirtualAlloc(d+8192,4096,MEM_COMMIT,PAGE_EXECUTE_READWRITE))return 108;
+    if(!VirtualFree(d,0,MEM_RELEASE))return 109;
+    if(!VirtualAlloc(d,65536,MEM_RESERVE,PAGE_READWRITE)||!VirtualAlloc(d+8192,4096,MEM_COMMIT,PAGE_READWRITE))return 110;
+    if(!VirtualQuery(d+8192,&mbi,sizeof mbi)||mbi.Protect!=PAGE_READWRITE)return 111;
+    if(!VirtualFree(d,0,MEM_RELEASE))return 112;
     // A stub and a write that both straddle a page boundary: each page flips
     // on its own fault, in both directions, twice.
     BYTE* q=(BYTE*)VirtualAlloc(nullptr,2*4096,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);

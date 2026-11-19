@@ -46,6 +46,8 @@ if op == 'launch':
     if code('launch') == '200' and cfg['app'] != 'dead' and not cfg.get('running'):
         cfg.update(running=True, pid=cfg.get('pid', 1000) + 1000, gen=0)
         (st / 'boot.log').write_text('library: owned=3\n')
+        if cfg.get('queued'):
+            boot_append('download queued: appid %d' % cfg['appid'])
     save(); sys.exit(7 if code('launch') == '000' else 0)
 if op == 'put':
     data = Path(a[2]).read_text()
@@ -58,6 +60,13 @@ if op == 'put':
         command = data.strip()
         boot_append('cmd.txt: consumed file; queued 1 SYNTHETIC command(s)')
         boot_append("cmd.txt SYNTHETIC command: '%s' (screen=2)" % command)
+        if command.startswith('open') and cfg.get('queued'):
+            cfg['queue_opened'] = True
+            save(); sys.exit(0)
+        if command == 'press' and cfg.get('queued') and not cfg.get('queue_finished'):
+            boot_append('download queued: cancelled by test')
+            cfg['bad_press'] = True
+            save(); sys.exit(0)
         if command == 'press' and cfg.get('picker'):
             boot_append('detail: Play opens the launch-option picker appid=%d options=2 selected=0 (cmd.txt)' % cfg['appid'])
             save(); sys.exit(0)
@@ -90,6 +99,12 @@ if op == 'get':
     if fname == cfg.get('get_fail') and cfg.get('pending'):   # link drops mid-attempt
         Path(out).write_text('{"Reason":"transport"}')   # curl without -f keeps error bodies
         print('get HTTP 000 bytes=0 file=' + out); save(); sys.exit(1)
+    if fname == 'boot.log' and cfg.get('queued') and cfg.get('queue_opened') and not cfg.get('queue_finished'):
+        cfg['queue_polls'] = cfg.get('queue_polls', 0) + 1
+        if cfg['queue_polls'] >= 3:
+            boot_append('dl: ===== start appid %d (session: user) =====' % cfg['appid'])
+            boot_append("dl: ===== DONE appid %d 'game' -> game : 4 files, 1024 bytes, SHA1-verified, 1 s =====" % cfg['appid'])
+            cfg['installed'] = True; cfg['queue_finished'] = True
     if fname == 'boot.log' and cfg.get('pending'):
         cfg['delay'] -= 1
         if cfg['delay'] <= 0: finish(cfg.pop('pending'))
@@ -219,6 +234,14 @@ class PlayRunnerTransportTest(unittest.TestCase):
         self.assertEqual(rc, 0, log)
         self.assertIn('GUEST COMPLETED: launch: RESULT attempt=2000:1 ok=1', log)
         self.assertIn('dl: ===== DONE appid %d ' % APP, log)
+
+    def test_queued_download_is_waited_for_not_cancelled(self):
+        # A queued job has no `dl: start` line yet. The first press must wait
+        # until it becomes active and finishes instead of cancelling the queue.
+        rc, log = self.run_play(timeout_s=600, queued=True)
+        self.assertEqual(rc, 0, log)
+        self.assertNotIn('cancelled by test', log)
+        self.assertIn('GUEST COMPLETED: launch: RESULT attempt=2000:1 ok=1', log)
 
     def test_redacted_boot_excerpt_verifies_consumed_upload_and_picker(self):
         rc, log = self.run_play(timeout_s=600, picker=True)

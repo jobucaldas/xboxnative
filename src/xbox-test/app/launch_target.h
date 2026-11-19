@@ -117,12 +117,21 @@ inline std::vector<Choice> choices(const std::vector<Entry>& all, const PeArch& 
 }
 // The row to start on: the remembered option when it is still offered and
 // runnable, else the first runnable one (64-bit rows come first), else the first.
+inline std::string entry_key(const Entry& e) {
+    return e.executable + "\t" + e.arguments + "\t" + e.workingdir;
+}
+inline std::string choice_key(const Choice& c) { return entry_key(c.entry); }
 inline int preselect(const std::vector<Choice>& list, const std::string& remembered) {
     int firstSelectable = -1;
     for (size_t i = 0; i < list.size(); i++) {
         if (!list[i].selectable) continue;
         if (firstSelectable < 0) firstSelectable = (int)i;
-        if (!remembered.empty() && list[i].entry.executable == remembered) return (int)i;
+        // New records identify the complete Steam option. The executable-only
+        // form remains readable for choices written by older launcher builds.
+        if (!remembered.empty() &&
+            (choice_key(list[i]) == remembered ||
+             (remembered.find('\t') == std::string::npos && list[i].entry.executable == remembered)))
+            return (int)i;
     }
     return firstSelectable >= 0 ? firstSelectable : 0;
 }

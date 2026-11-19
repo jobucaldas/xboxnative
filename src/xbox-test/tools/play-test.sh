@@ -115,10 +115,10 @@ while [ $SECONDS -lt $end ]; do
   # or Play when it is already installed), then again once the download this press
   # started is done. A download already running (PT_NOKILL kept the session) is
   # waited for, never cancelled by a stray press.
-  dl_last=$(printf '%s\n' "$session" | grep -E "dl: ===== start appid $app |dl: ===== DONE appid $app " | tail -1)
+  dl_last=$(printf '%s\n' "$session" | grep -E "download queued: appid $app|dl: ===== start appid $app |dl: ===== DONE appid $app " | tail -1)
   if [ "$pressed" -eq 0 ]; then
     case "$dl_last" in
-      *"start appid $app "*) : ;;   # pressing A now would cancel that download
+      *"download queued: appid $app"*|*"start appid $app "*) : ;;   # queued/running: waiting avoids a one-shot cancel
       *) press_mark=$(printf '%s\n' "$session" | wc -l); cmd "press"; pressed=1; sleep 1; shot 2-after-press ;;
     esac
   elif [ "$pressed" -eq 1 ] && printf '%s\n' "$after" | grep -q "dl: ===== DONE appid $app "; then

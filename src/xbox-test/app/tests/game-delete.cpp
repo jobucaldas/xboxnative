@@ -114,6 +114,10 @@ int main(int argc, char** argv) {
         CHECK(sawExt);
         installs::Progress pu; CHECK(installs::remove_install(root, 900, "usbgame", false, pu, nullptr, extn));
         CHECK(!exists(L"dl_900.done") && GetFileAttributesW((ext + L"\\usbgame").c_str()) == INVALID_FILE_ATTRIBUTES);
+        put(L"dl_903.done", "app 903 build 1 files 1 bytes 1 root Z:\\xbn-usb-gone installdir gone\\n");
+        installs::Progress pmissing;
+        CHECK(!installs::remove_install(root, 903, "gone", false, pmissing, nullptr, "Z:\\xbn-usb-gone"));
+        CHECK(exists(L"dl_903.done") && pmissing.failed == 1);
         CHECK(exists(L"alpha\\own.bin") && GetFileAttributesW((ext + L"\\alpha\\keep.bin").c_str()) != INVALID_FILE_ATTRIBUTES);   // same-named folders on the other root untouched
         // unfinished download on the extra root: removed there, record names the root
         CHECK(installs::begin_partial(root, 910, "half", extn)); CreateDirectoryW((ext + L"\\half").c_str(), nullptr);

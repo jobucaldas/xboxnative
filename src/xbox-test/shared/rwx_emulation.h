@@ -44,9 +44,10 @@ constexpr size_t maxRegions = 1024;
 struct Region {
     uintptr_t base = 0, end = 0, allocationBase = 0;
     unsigned char* pages = nullptr;   // one state byte per page of [base,end)
+    bool freeing = false;              // VirtualFree is outside the table lock
 };
 struct Stats {
-    std::atomic<unsigned> regions{0}, executeFlips{0}, writeFlips{0}, failures{0}, retries{0}, live{0}, exhausted{0};
+    std::atomic<unsigned> regions{0}, executeFlips{0}, writeFlips{0}, failures{0}, retries{0}, emulatedStores{0}, live{0}, exhausted{0};
 };
 // Plain-old-data state: constant-initialised, so the fault handler never runs
 // a static initialiser, allocates or takes a CRT lock.
@@ -73,7 +74,7 @@ inline void note(const char* text) { if (auto n = state().notify) n(text); }
 
 // Caller holds the lock.
 inline Region* find(uintptr_t address) {
-    for (auto& r : state().regions) if (r.pages && address >= r.base && address < r.end) return &r;
+    for (auto& r : state().regions) if (r.pages && !r.freeing && address >= r.base && address < r.end) return &r;
     return nullptr;
 }
 inline void forget(Region& r) {
@@ -83,7 +84,7 @@ inline void forget(Region& r) {
 // Caller holds the lock. Marks [from,to) as `value` in every region it touches.
 inline void mark(uintptr_t from, uintptr_t to, unsigned char value) {
     for (auto& r : state().regions) {
-        if (!r.pages || to <= r.base || from >= r.end) continue;
+        if (!r.pages || r.freeing || to <= r.base || from >= r.end) continue;
         for (uintptr_t a = from > r.base ? down(from) : r.base; a < to && a < r.end; a += pageSize) r.pages[(a - r.base) / pageSize] = value;
     }
 }
@@ -97,7 +98,7 @@ inline bool track(uintptr_t from, uintptr_t to) {
     uintptr_t base = from, end = to;
     unsigned overlaps = 0;
     for (auto& r : s.regions) {
-        if (!r.pages || to <= r.base || from >= r.end) continue;
+        if (!r.pages || r.freeing || to <= r.base || from >= r.end) continue;
         ++overlaps;
         if (r.base < base) base = r.base;
         if (r.end > end) end = r.end;
@@ -117,7 +118,7 @@ inline bool track(uintptr_t from, uintptr_t to) {
     if (!slot) for (auto& r : s.regions) if (!r.pages) { slot = &r; break; }
     if (!slot) { HeapFree(GetProcessHeap(), 0, pages); ++s.stats.exhausted; return false; }
     for (auto& r : s.regions) {   // carry over the state of what was tracked
-        if (!r.pages || to <= r.base || from >= r.end) continue;
+        if (!r.pages || r.freeing || to <= r.base || from >= r.end) continue;
         for (uintptr_t a = r.base; a < r.end; a += pageSize) pages[(a - base) / pageSize] = r.pages[(a - r.base) / pageSize];
     }
     for (uintptr_t a = from; a < to; a += pageSize) pages[(a - base) / pageSize] = Writable;
@@ -198,17 +199,36 @@ inline BOOL WINAPI protect(LPVOID p, SIZE_T n, DWORD protection, PDWORD old) {
 inline BOOL WINAPI release(LPVOID p, SIZE_T n, DWORD type) {
     auto& s = state();
     if (!s.stats.live.load(std::memory_order_relaxed)) return VirtualFree(p, n, type);
-    // Free and forget under one lock: another thread's allocation may be given
-    // the same address the instant VirtualFree returns, and must not meet this
-    // thread's stale region.
-    Guard g(&s.lock);
+    bool pending = false;
+    {
+        Guard g(&s.lock);
+        if (type & MEM_RELEASE) {
+            for (auto& r : s.regions)
+                if (r.pages && !r.freeing && r.allocationBase == (uintptr_t)p) {
+                    // Reserve the table entries before dropping the lock. A
+                    // fault handler then ignores these regions, while another
+                    // allocation cannot mistake them for live ranges.
+                    r.freeing = true;
+                    pending = true;
+                }
+        }
+    }
+    // VirtualFree may wait on the suspended owner of a page-fault path. Never
+    // hold the bookkeeping lock across it: a GC can free while that owner is
+    // unable to run and release the lock.
     BOOL ok = VirtualFree(p, n, type);
-    if (!ok) return ok;
     const DWORD error = GetLastError();
-    if (type & MEM_RELEASE) {
-        for (auto& r : s.regions) if (r.pages && r.allocationBase == (uintptr_t)p) forget(r);
-    } else if ((type & MEM_DECOMMIT) && n) {
-        mark((uintptr_t)p, up((uintptr_t)p + n), Native);
+    {
+        Guard g(&s.lock);
+        if (pending) {
+            for (auto& r : s.regions)
+                if (r.pages && r.freeing && r.allocationBase == (uintptr_t)p) {
+                    if (ok) forget(r);
+                    else r.freeing = false;
+                }
+        } else if (ok && (type & MEM_DECOMMIT) && n) {
+            mark((uintptr_t)p, up((uintptr_t)p + n), Native);
+        }
     }
     SetLastError(error);
     return ok;
@@ -238,6 +258,65 @@ inline SIZE_T WINAPI query(LPCVOID address, PMEMORY_BASIC_INFORMATION mbi, SIZE_
     return got;
 }
 
+// A store whose instruction and destination share an executable page cannot be
+// retried after changing the page to RW: fetching the instruction immediately
+// faults DEP. Emulate the small, compiler/JIT-common RIP-relative immediate
+// store while the page is temporarily writable, then resume after it. Unknown
+// same-page stores are rejected rather than entering an unbounded flip loop.
+inline bool emulateSamePageStore(EXCEPTION_POINTERS* ep, uintptr_t faultAddress) {
+#ifdef _WIN64
+    CONTEXT* context = ep->ContextRecord;
+    const uintptr_t ip = (uintptr_t)context->Rip;
+    if (down(ip) != down(faultAddress)) return false;
+    const unsigned char* code = (const unsigned char*)ip;
+    size_t at = 0;
+    bool operand16 = false, rexW = false;
+    for (;;) {
+        const unsigned char b = code[at];
+        if (b == 0x66) { operand16 = true; ++at; continue; }
+        if (b >= 0x40 && b <= 0x4f) { rexW = (b & 8) != 0; ++at; continue; }
+        break;
+    }
+    const unsigned char opcode = code[at++];
+    if (opcode != 0xc6 && opcode != 0xc7) return false;
+    const unsigned char modrm = code[at++];
+    // Only ModRM /0 with RIP-relative addressing is safe to decode here.
+    if ((modrm & 0xc7) != 0x05) return false;
+    const int32_t displacement = (int32_t)(
+        (uint32_t(code[at])      ) |
+        (uint32_t(code[at + 1]) << 8) |
+        (uint32_t(code[at + 2]) << 16) |
+        (uint32_t(code[at + 3]) << 24));
+    at += 4;
+    const size_t width = opcode == 0xc6 ? 1 : operand16 ? 2 : rexW ? 8 : 4;
+    const size_t immediate = at;
+    at += width == 8 ? 4 : width;
+    // RIP-relative operands are relative to the next instruction, which
+    // starts after the immediate, not after the displacement.
+    const uintptr_t target = (uintptr_t)((intptr_t)(ip + at) + displacement);
+    if (target != faultAddress || down(target) != down(ip) || target + width < target ||
+        target + width > down(ip) + pageSize) return false;
+    if (target < ip + at && target + width > ip) return false;
+
+    DWORD old = 0;
+    if (!VirtualProtectFromApp((void*)down(ip), pageSize, PAGE_READWRITE, &old)) return false;
+    uint64_t value = 0;
+    for (size_t i = 0; i < (width == 8 ? 4 : width); ++i)
+        value |= uint64_t(code[immediate + i]) << (i * 8);
+    if (width == 8 && (value & 0x80000000u)) value |= 0xffffffff00000000ull;
+    volatile unsigned char* destination = (volatile unsigned char*)target;
+    for (size_t i = 0; i < width; ++i) destination[i] = (unsigned char)(value >> (i * 8));
+    DWORD ignored = 0;
+    if (!VirtualProtectFromApp((void*)down(ip), pageSize, PAGE_EXECUTE_READ, &ignored)) return false;
+    context->Rip = ip + at;
+    ++state().stats.emulatedStores;
+    return true;
+#else
+    (void)ep; (void)faultAddress;
+    return false;
+#endif
+}
+
 // First-chance access violation: flip the faulting page and resume, or ignore.
 // No allocation, logging or CRT locks here (a log lock may be held by the very
 // thread that faulted).
@@ -254,6 +333,13 @@ inline LONG fault(EXCEPTION_POINTERS* ep) {
     if (!r) return EXCEPTION_CONTINUE_SEARCH;
     unsigned char& page = r->pages[(down(address) - r->base) / pageSize];
     if (page == Native) return EXCEPTION_CONTINUE_SEARCH;
+#ifdef _WIN64
+    if (kind == 1 && page == Executable && down((uintptr_t)ep->ContextRecord->Rip) == down(address)) {
+        if (emulateSamePageStore(ep, address)) return EXCEPTION_CONTINUE_EXECUTION;
+        ++s.stats.failures;
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+#endif
     if (page == want) {
         // Another thread flipped it between the fault and now: retry, but never
         // spin forever on a fault the flip cannot resolve.
