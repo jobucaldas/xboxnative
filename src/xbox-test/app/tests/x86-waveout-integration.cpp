@@ -73,7 +73,9 @@ int main() {
     if (result != MMSYSERR_NOERROR || !(header.dwFlags & WHDR_INQUEUE)) return 12;
     MMRESULT volume_result = waveOutSetVolume(output, 0x12345678u);
     if (volume_result != MMSYSERR_NOERROR) { printf("X86-WAVEOUT volume set failed: %u\n", volume_result); return 40; }
-    if (waveOutMessage(output, 0, 0, 0) != MMSYSERR_NOTSUPPORTED) return 45;
+    if (waveOutMessage(output, 0, 0, 0) != MMSYSERR_NODRIVER ||
+        waveOutGetErrorTextA(0, nullptr, 0) != MMSYSERR_NODRIVER ||
+        waveOutGetErrorTextW(0, nullptr, 0) != MMSYSERR_NODRIVER) return 45;
     DWORD volume = 0;
     if (waveOutGetVolume(output, &volume) != MMSYSERR_NOERROR || volume != 0x12345678u) return 41;
     if (waveOutClose(output) != WAVERR_STILLPLAYING) return 13;
@@ -142,6 +144,7 @@ int main() {
 #include <winsock2.h>
 #include <windows.h>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <vector>
@@ -232,8 +235,44 @@ int main(int argc, char **argv) {
     format.wFormatTag = WAVE_FORMAT_PCM;
     HWAVEOUT live = nullptr;
     MMRESULT live_result = open(&live, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL);
-    if (live_result == MMSYSERR_NODRIVER) { std::puts("X64-WAVEOUT SKIP: no audio device"); return 0; }
-    if (live_result != MMSYSERR_NOERROR) return 2;
+    if (std::getenv("XBN_EXPECT_NO_AUDIO")) {
+        auto count = reinterpret_cast<UINT (WINAPI *)()>(shim_export(shim, "XbnWaveOutGetNumDevs"));
+        if (live_result != MMSYSERR_NODRIVER || live || !count || count() != 0 ||
+            open(&live, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NODRIVER || live) {
+            std::fprintf(stderr, "FAIL: no-audio contract (open=%u)\n", live_result); return 2;
+        }
+        std::puts("X64-WAVEOUT PASS: unavailable audio returns NODRIVER without a handle"); return 0;
+    }
+    if (live_result != MMSYSERR_NOERROR) { std::fprintf(stderr, "FAIL: audio open=%u\n", live_result); return 2; }
+    auto pause = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT)>(shim_export(shim, "XbnWaveOutPause"));
+    auto restart = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT)>(shim_export(shim, "XbnWaveOutRestart"));
+    auto set_volume = reinterpret_cast<MMRESULT (WINAPI *)(HWAVEOUT, DWORD)>(shim_export(shim, "XbnWaveOutSetVolume"));
+    if (!pause || !restart || !set_volume) return 2;
+    HWAVEOUT mono = nullptr;
+    WAVEFORMATEX mono_format{WAVE_FORMAT_PCM, 1, 48000, 96000, 2, 16, 0};
+    if (open(&mono, WAVE_MAPPER, &mono_format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR ||
+        set_volume(mono, 0x12345678u) != MMSYSERR_NOERROR || waveout_close(mono) != MMSYSERR_NOERROR) {
+        std::fprintf(stderr, "FAIL: mono volume\n"); return 2;
+    }
+    char paused_samples[19200]{};
+    WAVEHDR paused_header[2]{};
+    for (auto &header : paused_header) {
+        header.lpData = paused_samples; header.dwBufferLength = sizeof(paused_samples);
+        if (prepare(live, &header, sizeof(header)) != MMSYSERR_NOERROR) return 2;
+    }
+    if (pause(live) != MMSYSERR_NOERROR) return 2;
+    for (unsigned i = 0; i < 2; ++i) {
+        if (write(live, &paused_header[i], sizeof(WAVEHDR)) != MMSYSERR_NOERROR) return 2;
+        Sleep(200);
+        if (!(paused_header[i].dwFlags & WHDR_INQUEUE) || (paused_header[i].dwFlags & WHDR_DONE)) {
+            std::fprintf(stderr, "FAIL: paused write played (pass %u)\n", i); return 2;
+        }
+        if (i == 0 && reset(live) != MMSYSERR_NOERROR) return 2;
+    }
+    if (restart(live) != MMSYSERR_NOERROR) return 2;
+    for (unsigned i = 0; i < 500 && !(paused_header[1].dwFlags & WHDR_DONE); ++i) Sleep(1);
+    if (!(paused_header[1].dwFlags & WHDR_DONE)) { std::fprintf(stderr, "FAIL: restart did not play queued buffer\n"); return 2; }
+    std::puts("X64-WAVEOUT PASS: mono volume and pause across write/reset/restart");
     volatile LONG stop = 0, failed = 0, progress = 0;
     HandleStress workers[2]{};
     HANDLE threads[2]{};
