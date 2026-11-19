@@ -17,7 +17,8 @@ runs:
         PACKAGES: ${{ inputs.packages }}
       run: |
         set -euo pipefail
-        echo "hash=$(printf '%s\n' "$PACKAGES" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+        # The Ubuntu codename is part of the key: runner.os is only "Linux", and 24.04 and 26.04 debs differ.
+        echo "hash=$({ printf '%s\n' "$PACKAGES"; . /etc/os-release; echo "$VERSION_CODENAME"; } | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
     - id: apt-cache-restore
       uses: actions/cache/restore@v4
       with:

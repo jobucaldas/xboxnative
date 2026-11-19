@@ -9,5 +9,6 @@ x86_64-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Werror -static \
   "$root/src/xbox-test/app/tests/wine-donor-critical-section.cpp" -o "$work/wine-donor-critical-section.exe"
 (
   cd "$donors"
-  WINEDEBUG=-all timeout 45s wine "$work/wine-donor-critical-section.exe"
+  # msvcp140 is a Wine builtin: "=n" forces the rebuilt donor from the directory above, never the builtin.
+  WINEDEBUG=-all WINEDLLOVERRIDES='msvcp140=n' timeout 45s wine "$work/wine-donor-critical-section.exe"
 )

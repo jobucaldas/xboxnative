@@ -23,7 +23,15 @@ if [[ $# != 0 ]]; then
 fi
 out="$(mktemp -d /tmp/steam-host-probe.XXXXXX)"
 keep="${STEAM_HOST_PROBE_KEEP:-0}"
+# A config.vdf that already exists belongs to the user; only remove one this run creates.
+config_preexisting=0
+if [[ -e "$client_dir/config/config.vdf" ]]; then config_preexisting=1; fi
 cleanup() {
+    # The probe writes the refresh-token store into the client tree and removes it only on a normal exit.
+    if [[ ${#probe_args[@]} != 0 && $config_preexisting == 0 ]]; then
+        rm -f "$client_dir/config/config.vdf"
+        rmdir "$client_dir/config" 2>/dev/null || true
+    fi
     if [[ "$keep" == 1 ]]; then
         printf 'STEAM-HOST-PROBE files retained in %s\n' "$out"
     else
@@ -47,6 +55,6 @@ bash "$env_script" env PRUN_WINEPREFIX="$prefix" WINEPREFIX="$prefix" WINEDEBUG=
 status=$?
 set -e
 if [[ $status == 0 ]]; then
-    printf '%s\n' 'STEAM-HOST-PROBE completed; inspect logs/ for Valve client diagnostics.'
+    printf 'STEAM-HOST-PROBE completed; inspect %s/logs for Valve client diagnostics.\n' "$client_dir"
 fi
 exit "$status"

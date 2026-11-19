@@ -22,7 +22,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 BASE_NEEDS = ['bash', 'git', 'python3']
-JOB_EXTRA_NEEDS = {'offline-checks': ['node', 'c++']}
+JOB_EXTRA_NEEDS = {'offline-checks': ['node', 'c++'],
+                   # dtolnay/rust-toolchain and cargo install xwin; CLANG_CL=clang-cl-19 in the step.
+                   'launcher-uwp-compile': ['cargo', 'clang-cl-19']}
 APT_COMMANDS = {
     'gcc-mingw-w64-x86-64': 'x86_64-w64-mingw32-gcc',
     'g++-mingw-w64-x86-64': 'x86_64-w64-mingw32-g++',
