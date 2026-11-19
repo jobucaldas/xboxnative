@@ -255,6 +255,66 @@ static bool verify_guest_bugbot_routes() {
     std::fprintf(stderr,"X86-GUEST-ROUTES PASS: NULL heaps, sort-key bytes, security attributes, find CloseHandle, and resource handles\n");
     return true;
 }
+static bool verify_guest_bugbot_chunk() {
+    Memory mem; mem.map(0x1000, 0x40000, PROT_R | PROT_W); mem.map(TEB_ADDR, 0x1000, PROT_R | PROT_W);
+    ThunkTable table; Host host; Registry reg; Guest guest(mem, host, reg); guest.register_all();
+    Cpu cpu(mem, table); cpu.reg[ESP] = 0x3f000; cpu.fs_base = TEB_ADDR; mem.w32(TEB_ADDR + 0x24, 1);
+    auto args = [&](std::initializer_list<uint32_t> values) { unsigned i=0; for (uint32_t value : values) mem.w32(cpu.reg[ESP] + 4 + 4*i++, value); };
+    auto route = [&](const char* dll, const char* name) -> Thunk* {
+        auto it=reg.map.find({dll,Registry::key_sym(name)}); return it==reg.map.end()?nullptr:&it->second;
+    };
+    auto bad_a=route("kernel32.dll","IsBadStringPtrA"), bad_w=route("kernel32.dll","IsBadStringPtrW");
+    if(!bad_a||!bad_w) return false;
+    mem.w8(0x2000,'A'); mem.w8(0x2001,'B'); args({0x2000,2}); if(bad_a->fn(cpu)!=0) return false;
+    mem.w(0x2100,'A',2); args({0x2100,1}); if(bad_w->fn(cpu)!=0) return false;
+    args({0x50000,1}); if(bad_a->fn(cpu)!=1) return false;
+
+    guest.sync_objects[1].kind=Guest::SyncKind::Mutex; guest.sync_objects[1].abandoned=true;
+    guest.sync_handles[0x70000001u]=1; guest.sync_objects[1].refs=1; mem.w32(0x3000,0x70000001u);
+    auto wait=route("kernel32.dll","WaitForMultipleObjects"); if(!wait) return false;
+    args({1,0x3000,0,0}); if(wait->fn(cpu)!=0x80u) return false;
+    guest.sync_objects[1].abandoned=true; args({1,0x3000,1,0}); if(wait->fn(cpu)!=0x80u) return false;
+    guest.sync_objects[1].abandoned=true; mem.w32(0x3000,0x71000000u); mem.w32(0x3004,0x70000001u);
+    guest.sync_objects[2].kind=Guest::SyncKind::Event; guest.sync_objects[2].signaled=false; guest.sync_handles[0x71000000u]=2; guest.sync_objects[2].refs=1;
+    args({2,0x3000,0,0}); if(wait->fn(cpu)!=0x81u) return false;
+
+    auto fls_alloc=route("kernel32.dll","FlsAlloc"), tls_free=route("kernel32.dll","TlsFree"), fls_get=route("kernel32.dll","FlsGetValue");
+    auto tls_alloc=route("kernel32.dll","TlsAlloc"); if(!fls_alloc||!tls_free||!fls_get||!tls_alloc) return false;
+    args({0}); uint32_t fls=fls_alloc->fn(cpu); args({fls}); if(tls_free->fn(cpu)!=1) return false;
+    args({fls}); if(fls_get->fn(cpu)!=0||guest.last_error()!=87) return false;
+    args({}); if(tls_alloc->fn(cpu)!=fls) return false;
+
+    host.dc_handles[0x90000001u]=1;
+    auto set_bk=route("gdi32.dll","SetBkMode"), set_text=route("gdi32.dll","SetTextColor"), set_color=route("gdi32.dll","SetBkColor");
+    if(!set_bk||!set_text||!set_color) return false;
+    args({0x90000001u,1}); if(set_bk->fn(cpu)!=2) return false;
+    args({0x90000001u,0x123456u}); if(set_text->fn(cpu)!=0) return false;
+    args({0x90000001u,0x654321u}); if(set_color->fn(cpu)!=0x00ffffffu) return false;
+
+    auto create_bitmap=route("gdi32.dll","CreateBitmap"), get_object=route("gdi32.dll","GetObjectA"), delete_object=route("gdi32.dll","DeleteObject");
+    auto create_dc=route("gdi32.dll","CreateCompatibleDC"), select=route("gdi32.dll","SelectObject"), bitblt=route("gdi32.dll","BitBlt"), get_dibits=route("gdi32.dll","GetDIBits");
+    if(!create_bitmap||!get_object||!delete_object||!create_dc||!select||!bitblt||!get_dibits) return false;
+    mem.w8(0x5000,1); mem.w8(0x5001,2); mem.w8(0x5002,3); mem.w8(0x5003,4);
+    args({9,2,1,1,0x5000}); uint32_t rows=create_bitmap->fn(cpu); if(!rows) return false;
+    args({rows,24,0x6000}); if(get_object->fn(cpu)!=24) return false; uint32_t row_bits=mem.r32(0x6000+20);
+    if(mem.r8(row_bits)!=1||mem.r8(row_bits+1)!=2||mem.r8(row_bits+4)!=3||mem.r8(row_bits+5)!=4) return false;
+    if(delete_object->fn(cpu)!=1) return false;
+    args({9,2,1,1,0}); uint32_t reused=create_bitmap->fn(cpu); args({reused,24,0x6000});
+    if(get_object->fn(cpu)!=24||mem.r32(0x6000+20)!=row_bits) return false;
+
+    mem.w32(0x7000,1); mem.w32(0x7004,2); mem.w32(0x7008,3); mem.w32(0x700c,4);
+    args({4,1,1,32,0x7000}); uint32_t bitmap=create_bitmap->fn(cpu); args({0}); uint32_t dc=create_dc->fn(cpu); args({dc,bitmap}); if(!select->fn(cpu)) return false;
+    args({dc,1,0,3,1,dc,0,0,0x00cc0020u}); if(bitblt->fn(cpu)!=1) return false;
+    args({bitmap,24,0x6000}); get_object->fn(cpu); uint32_t overlap_bits=mem.r32(0x6000+20);
+    if(mem.r32(overlap_bits)!=1||mem.r32(overlap_bits+4)!=1||mem.r32(overlap_bits+8)!=2||mem.r32(overlap_bits+12)!=3) return false;
+
+    mem.w32(0x8000,40); mem.w32(0x8000+14,0); mem.w32(0x8000+16,0);
+    args({dc,bitmap,0,0,0,0x8000,0}); if(get_dibits->fn(cpu)!=0||mem.r(0x8000+14,2)!=32||mem.r32(0x8000+16)!=3) return false;
+    args({dc,bitmap,0,1,0x9000,0x8000,0}); if(get_dibits->fn(cpu)!=1||mem.r32(0x8000+16)!=3) return false;
+    std::fprintf(stderr, "X86-GUEST-BUGBOT PASS: string bounds, abandoned waits, TLS/FLS ownership, GDI state, blits, and bitmap formats\n");
+    return true;
+}
+
 static bool verify_nls_size_query_capture() {
     Host::NlsResponse response{}; response.result=5;
     if(!play_capture_nls_output(response,nullptr,0,10,false,0)||response.result!=5||!response.output.empty())return false;
@@ -321,6 +381,7 @@ int main(int argc, char** argv) {
     if (!verify_display_routes()) return 1;
     if (!verify_xinput_routes()) { std::puts("X86-XINPUT FAIL: guest route, layout, ordinal, or fake-pad contract"); return 1; }
     if (!verify_guest_bugbot_routes()) { std::puts("X86-GUEST-ROUTES FAIL: heap, NLS, directory, find-handle, or resource contract"); return 1; }
+    if (!verify_guest_bugbot_chunk()) { std::puts("X86-GUEST-BUGBOT FAIL: string bounds, waits, TLS/FLS, or GDI contract"); return 1; }
     if (!verify_nls_size_query_capture()) { std::puts("X86-NLS FAIL: size-query output capture"); return 1; }
     if (!verify_file_guard()) return 1;
     if (argc < 2) { printf("usage: x86-guest <fixture-crt.exe>\n"); return 2; }

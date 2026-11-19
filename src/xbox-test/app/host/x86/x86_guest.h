@@ -200,6 +200,7 @@ struct Guest {
     struct GdiDc { uint32_t bitmap=0, brush=0, pen=0, font=0, bk_color=0x00ffffffu, text_color=0; int bk_mode=2; };
     std::map<uint32_t, GdiObject> gdi_objects;
     std::map<uint32_t, GdiDc> gdi_dcs;
+    std::map<uint32_t, GdiDc> gdi_window_dcs;
     uint32_t gdi_serial=0;
     uint32_t file_serial = 0, find_serial = 0, sync_serial = 0, sync_handle_serial = 0;
     std::map<uint32_t, bool> mm_timers;
@@ -343,8 +344,8 @@ struct Guest {
             if(ready){if(!ready_count)ready_index=i;++ready_count;}
         }
         if(wait_all?ready_count==count:ready_count!=0){
-            if(wait_all){for(uint32_t h:values)if(sync_handles.count(h)){uint32_t r=sync_wait(c,h,0);if(r==0xffffffffu)return r;}return 0;}
-            uint32_t h=values[ready_index];if(sync_handles.count(h)){uint32_t r=sync_wait(c,h,0);if(r==0xffffffffu)return r;}
+            if(wait_all){bool abandoned=false;for(uint32_t h:values)if(sync_handles.count(h)){uint32_t r=sync_wait(c,h,0);if(r==0xffffffffu)return r;if(r==0x80u)abandoned=true;}return abandoned?0x80u:0u;}
+            uint32_t h=values[ready_index];if(sync_handles.count(h)){uint32_t r=sync_wait(c,h,0);if(r==0xffffffffu)return r;if(r==0x80u)return 0x80u+ready_index;}
             return ready_index;
         }
         if(timeout==0xffffffffu)throw Fault(FaultKind::Unsupported,c.eip,c.eip,"WaitForMultipleObjects: unsignaled infinite wait");
@@ -1117,7 +1118,14 @@ inline void Guest::register_all() {
         if (uint64_t(pitch)*h>0x4000000u) { set_last_error(87); return 0; }
         uint32_t handle=gdi_handle(), bits=heap.alloc(pitch*h);
         std::vector<uint8_t> zero(size_t(pitch)*h,0); mem.write_bytes(bits,zero.data(),uint32_t(zero.size()));
-        if (c.arg(4)) mem.write_bytes(bits,c.mem.read_bytes(c.arg(4),uint32_t(zero.size())).data(),uint32_t(zero.size()));
+        if (c.arg(4)) {
+            uint32_t input_pitch=uint32_t(((uint64_t(w)*bpp+15)/16)*2);
+            for (uint32_t y=0;y<h;++y) {
+                uint32_t copy=std::min(input_pitch,pitch);
+                auto row=c.mem.read_bytes(c.arg(4)+y*input_pitch,copy);
+                c.mem.write_bytes(bits+y*pitch,row.data(),copy);
+            }
+        }
         gdi_objects[handle]=GdiObject{1,w,h,bits,bpp,0,false,false,pitch}; return handle;
     });
     reg.add("gdi32.dll", "CreateDIBSection", Conv::Stdcall, 6, [this,make_bitmap](Cpu& c) -> uint32_t {
@@ -1129,8 +1137,8 @@ inline void Guest::register_all() {
         if(h&&c.arg(3)) c.mem.w32(c.arg(3),gdi_objects[h].bits);
         return h;
     });
-    reg.add("gdi32.dll", "DeleteObject", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { auto i=gdi_objects.find(c.arg(0));if(i==gdi_objects.end()){set_last_error(6);return 0;}if(i->second.stock)return 1;for(auto& d:gdi_dcs)if(d.second.bitmap==c.arg(0)||d.second.brush==c.arg(0)||d.second.pen==c.arg(0)||d.second.font==c.arg(0)){set_last_error(170);return 0;}gdi_objects.erase(i);return 1; });
-    reg.add("gdi32.dll", "SelectObject", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { auto d=gdi_dcs.find(c.arg(0));auto o=gdi_objects.find(c.arg(1));if(d==gdi_dcs.end()||o==gdi_objects.end()){set_last_error(6);return 0;}if(o->second.kind==1){uint32_t old=d->second.bitmap;d->second.bitmap=c.arg(1);return old;}if(o->second.kind==2){uint32_t old=d->second.brush;d->second.brush=c.arg(1);return old;}if(o->second.kind==4){uint32_t old=d->second.pen;d->second.pen=c.arg(1);return old;}if(o->second.kind==3){uint32_t old=d->second.font;d->second.font=c.arg(1);return old;}set_last_error(6);return 0; });
+    reg.add("gdi32.dll", "DeleteObject", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { auto i=gdi_objects.find(c.arg(0));if(i==gdi_objects.end()){set_last_error(6);return 0;}if(i->second.stock)return 1;for(auto& d:gdi_dcs)if(d.second.bitmap==c.arg(0)||d.second.brush==c.arg(0)||d.second.pen==c.arg(0)||d.second.font==c.arg(0)){set_last_error(170);return 0;}for(auto& d:gdi_window_dcs)if(d.second.bitmap==c.arg(0)||d.second.brush==c.arg(0)||d.second.pen==c.arg(0)||d.second.font==c.arg(0)){set_last_error(170);return 0;}if(i->second.bits)heap.release(i->second.bits);gdi_objects.erase(i);return 1; });
+    reg.add("gdi32.dll", "SelectObject", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { GdiDc* d=nullptr;auto dc=gdi_dcs.find(c.arg(0));if(dc!=gdi_dcs.end())d=&dc->second;else if(host.dc_handles.count(c.arg(0)))d=&gdi_window_dcs[c.arg(0)];auto o=gdi_objects.find(c.arg(1));if(!d||o==gdi_objects.end()){set_last_error(6);return 0;}if(o->second.kind==1){uint32_t old=d->bitmap;d->bitmap=c.arg(1);return old;}if(o->second.kind==2){uint32_t old=d->brush;d->brush=c.arg(1);return old;}if(o->second.kind==4){uint32_t old=d->pen;d->pen=c.arg(1);return old;}if(o->second.kind==3){uint32_t old=d->font;d->font=c.arg(1);return old;}set_last_error(6);return 0; });
     auto get_object=[this](Cpu& c)->uint32_t { auto i=gdi_objects.find(c.arg(0));if(i==gdi_objects.end())return 0;auto& o=i->second;uint32_t size=o.kind==1?24u:o.kind==2?12u:0u;if(!size)return 0;if(c.arg(1)<size)return 0;if(!c.arg(2))return size;uint32_t p=c.arg(2);if(o.kind==1){c.mem.w32(p,0);c.mem.w32(p+4,o.width);c.mem.w32(p+8,o.height);c.mem.w32(p+12,o.pitch?o.pitch:o.width*4);c.mem.w(p+16,1,2);c.mem.w(p+18,uint16_t(o.bpp),2);c.mem.w32(p+20,o.bits);}else{c.mem.w32(p,0);c.mem.w32(p+4,o.color);c.mem.w32(p+8,0);}return size; };
     reg.add("gdi32.dll", "GetObjectA", Conv::Stdcall, 3, [get_object](Cpu& c){return get_object(c);});
     reg.add("gdi32.dll", "GetObjectW", Conv::Stdcall, 3, [get_object](Cpu& c){return get_object(c);});
@@ -1138,10 +1146,11 @@ inline void Guest::register_all() {
         auto i=gdi_objects.find(c.arg(1)); uint32_t info=c.arg(5), bits=c.arg(4), start=c.arg(2), lines=c.arg(3);
         if (i==gdi_objects.end() || i->second.kind!=1 || !info || c.arg(6)>1 || start>i->second.height) { set_last_error(87); return 0; }
         auto& o=i->second; if (start+lines>o.height) lines=o.height-start;
-        uint32_t requested_bpp=c.mem.r(info+14,2);
-        c.mem.w32(info+4,o.width); c.mem.w32(info+8,o.top_down?-int32_t(o.height):int32_t(o.height)); c.mem.w(info+12,1,2); c.mem.w(info+14,uint16_t(requested_bpp?requested_bpp:o.bpp),2); c.mem.w32(info+16,requested_bpp?0:3);
+        uint32_t requested_bpp=c.mem.r(info+14,2), requested_compression=c.mem.r32(info+16);
+        bool bitfields=requested_compression==3 || (!requested_bpp && o.bpp==32);
+        c.mem.w32(info+4,o.width); c.mem.w32(info+8,o.top_down?-int32_t(o.height):int32_t(o.height)); c.mem.w(info+12,1,2); c.mem.w(info+14,uint16_t(requested_bpp?requested_bpp:o.bpp),2); c.mem.w32(info+16,bitfields?3:0);
         if (!bits || !lines) {
-            if (!requested_bpp && o.bpp==32) { c.mem.w32(info+40,0x00ff0000); c.mem.w32(info+44,0x0000ff00); c.mem.w32(info+48,0x000000ff); }
+            if (bitfields && o.bpp==32) { c.mem.w32(info+40,0x00ff0000); c.mem.w32(info+44,0x0000ff00); c.mem.w32(info+48,0x000000ff); }
             return lines;
         }
         if (o.bpp!=32 || requested_bpp!=32) { set_last_error(87); return 0; }
@@ -1217,11 +1226,30 @@ inline void Guest::register_all() {
     reg.add("gdi32.dll", "GetStockObject", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { int32_t n=int32_t(c.arg(0));if(!(n>=0&&n<=8)&&!(n>=10&&n<=14)&&n!=16&&n!=17)return 0;uint32_t h=0x73001000u+uint32_t(n);if(!gdi_objects.count(h)){uint32_t kind=n<=5?2u:n<=8?4u:3u,color=n==0?0x00ffffffu:n==4||n==7?0u:0u;gdi_objects[h]=GdiObject{kind,0,0,0,0,color,true,true};}return h; });
     reg.add("gdi32.dll", "CreateSolidBrush", Conv::Stdcall, 1, [this,gdi_handle](Cpu& c) -> uint32_t { uint32_t h=gdi_handle();gdi_objects[h]=GdiObject{2,0,0,0,0,c.arg(0),true};return h; });
     reg.add("gdi32.dll", "CreatePen", Conv::Stdcall, 3, [this,gdi_handle](Cpu& c) -> uint32_t { uint32_t h=gdi_handle();gdi_objects[h]=GdiObject{4,0,0,0,0,c.arg(2),true};return h; });
-    reg.add("gdi32.dll", "SetBkMode", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { auto d=gdi_dcs.find(c.arg(0));if(d==gdi_dcs.end()){set_last_error(6);return 0;}int old=d->second.bk_mode;d->second.bk_mode=int32_t(c.arg(1));return uint32_t(old); });
-    reg.add("gdi32.dll", "SetTextColor", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { auto d=gdi_dcs.find(c.arg(0));if(d==gdi_dcs.end()){set_last_error(6);return 0xffffffffu;}uint32_t old=d->second.text_color;d->second.text_color=c.arg(1);return old; });
-    reg.add("gdi32.dll", "SetBkColor", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { auto d=gdi_dcs.find(c.arg(0));if(d==gdi_dcs.end()){set_last_error(6);return 0xffffffffu;}uint32_t old=d->second.bk_color;d->second.bk_color=c.arg(1);return old; });
+    auto get_gdi_dc=[this](uint32_t h)->GdiDc* { auto d=gdi_dcs.find(h);if(d!=gdi_dcs.end())return &d->second;if(host.dc_handles.count(h))return &gdi_window_dcs[h];return nullptr; };
+    reg.add("gdi32.dll", "SetBkMode", Conv::Stdcall, 2, [this,get_gdi_dc](Cpu& c) -> uint32_t { auto d=get_gdi_dc(c.arg(0));if(!d){set_last_error(6);return 0;}int old=d->bk_mode;d->bk_mode=int32_t(c.arg(1));return uint32_t(old); });
+    reg.add("gdi32.dll", "SetTextColor", Conv::Stdcall, 2, [this,get_gdi_dc](Cpu& c) -> uint32_t { auto d=get_gdi_dc(c.arg(0));if(!d){set_last_error(6);return 0xffffffffu;}uint32_t old=d->text_color;d->text_color=c.arg(1);return old; });
+    reg.add("gdi32.dll", "SetBkColor", Conv::Stdcall, 2, [this,get_gdi_dc](Cpu& c) -> uint32_t { auto d=get_gdi_dc(c.arg(0));if(!d){set_last_error(6);return 0xffffffffu;}uint32_t old=d->bk_color;d->bk_color=c.arg(1);return old; });
     reg.add("gdi32.dll", "GdiFlush", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 1; });
-    auto blit=[this](Cpu& c,bool stretch)->uint32_t { uint32_t dst=c.arg(0),src=c.arg(5);auto d=gdi_dcs.find(dst),s=gdi_dcs.find(src);if(d==gdi_dcs.end()||s==gdi_dcs.end()||!d->second.bitmap||!s->second.bitmap||c.arg(stretch?10:8)!=0x00cc0020u){set_last_error(120);return 0;}auto& db=gdi_objects[d->second.bitmap];auto& sb=gdi_objects[s->second.bitmap];if(db.bpp!=32||sb.bpp!=32){set_last_error(120);return 0;}int32_t x=int32_t(c.arg(1)),y=int32_t(c.arg(2)),w=int32_t(c.arg(3)),h=int32_t(c.arg(4)),sx=int32_t(c.arg(6)),sy=int32_t(c.arg(7)),sw=stretch?int32_t(c.arg(8)):w,sh=stretch?int32_t(c.arg(9)):h;if(w<=0||h<=0||sw<=0||sh<=0||w>16384||h>16384||sw>16384||sh>16384){set_last_error(87);return 0;}for(int32_t yy=0;yy<h;++yy)for(int32_t xx=0;xx<w;++xx){int32_t dx=x+xx,dy=y+yy,px=sx+xx*sw/w,py=sy+yy*sh/h;if(dx<0||dy<0||px<0||py<0||uint32_t(dx)>=db.width||uint32_t(dy)>=db.height||uint32_t(px)>=sb.width||uint32_t(py)>=sb.height)continue;uint32_t dr=db.bits+((db.top_down?uint32_t(dy):db.height-1-uint32_t(dy))*db.width+uint32_t(dx))*4,sr=sb.bits+((sb.top_down?uint32_t(py):sb.height-1-uint32_t(py))*sb.width+uint32_t(px))*4;c.mem.w32(dr,c.mem.r32(sr));}return 1;};
+    auto blit=[this](Cpu& c,bool stretch)->uint32_t {
+        uint32_t dst=c.arg(0),src=c.arg(5);auto d=gdi_dcs.find(dst),s=gdi_dcs.find(src);
+        if(d==gdi_dcs.end()||s==gdi_dcs.end()||!d->second.bitmap||!s->second.bitmap||c.arg(stretch?10:8)!=0x00cc0020u){set_last_error(120);return 0;}
+        auto& db=gdi_objects[d->second.bitmap];auto& sb=gdi_objects[s->second.bitmap];if(db.bpp!=32||sb.bpp!=32){set_last_error(120);return 0;}
+        int32_t x=int32_t(c.arg(1)),y=int32_t(c.arg(2)),w=int32_t(c.arg(3)),h=int32_t(c.arg(4)),sx=int32_t(c.arg(6)),sy=int32_t(c.arg(7)),sw=stretch?int32_t(c.arg(8)):w,sh=stretch?int32_t(c.arg(9)):h;
+        if(w<=0||h<=0||sw<=0||sh<=0||w>16384||h>16384||sw>16384||sh>16384){set_last_error(87);return 0;}
+        std::vector<uint8_t> snapshot;
+        if(d->second.bitmap==s->second.bitmap) snapshot=c.mem.read_bytes(sb.bits,sb.pitch*sb.height);
+        for(int32_t yy=0;yy<h;++yy)for(int32_t xx=0;xx<w;++xx){
+            int32_t dx=x+xx,dy=y+yy,px=sx+xx*sw/w,py=sy+yy*sh/h;
+            if(dx<0||dy<0||px<0||py<0||uint32_t(dx)>=db.width||uint32_t(dy)>=db.height||uint32_t(px)>=sb.width||uint32_t(py)>=sb.height)continue;
+            uint32_t doff=(db.top_down?uint32_t(dy):db.height-1-uint32_t(dy))*db.pitch+uint32_t(dx)*4;
+            uint32_t soff=(sb.top_down?uint32_t(py):sb.height-1-uint32_t(py))*sb.pitch+uint32_t(px)*4;
+            uint32_t dr=db.bits+doff,value=0;
+            if(snapshot.empty()) value=c.mem.r32(sb.bits+soff); else std::memcpy(&value,snapshot.data()+soff,4);
+            c.mem.w32(dr,value);
+        }
+        return 1;
+    };
     reg.add("gdi32.dll", "BitBlt", Conv::Stdcall, 9, [blit](Cpu& c){return blit(c,false);});
     reg.add("gdi32.dll", "StretchBlt", Conv::Stdcall, 11, [blit](Cpu& c){return blit(c,true);});
     auto unsupported_gdi=[this](Cpu&) { set_last_error(120); return uint32_t(0); };
@@ -2080,7 +2108,7 @@ inline void Guest::register_all() {
             for (uint32_t i = 0; i < limit; ++i)
                 if (!(wide ? mem.r(p + i * 2, 2) : mem.r8(p + i))) return 0;
         } catch (const Fault&) { return 1; }
-        return 1;
+        return 0;
     };
     reg.add("kernel32.dll", "IsBadStringPtrA", Conv::Stdcall, 2, [is_bad_string_ptr](Cpu& c) { return is_bad_string_ptr(c, false); });
     reg.add("kernel32.dll", "IsBadStringPtrW", Conv::Stdcall, 2, [is_bad_string_ptr](Cpu& c) { return is_bad_string_ptr(c, true); });
@@ -2341,7 +2369,7 @@ inline void Guest::register_all() {
         set_last_error(8); return 0xFFFFFFFFu; });
     reg.add("kernel32.dll", "TlsFree", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t i = c.arg(0); if (i == 0 || i >= 64 || !(tls_used >> i & 1)) { set_last_error(87); return 0; }
-        tls_used &= ~(uint64_t(1) << i); mem.w32(c.fs_base + 0xE10 + i * 4, 0); return 1; });
+        tls_used &= ~(uint64_t(1) << i); fls_callbacks.erase(i); mem.w32(c.fs_base + 0xE10 + i * 4, 0); return 1; });
     reg.add("kernel32.dll", "TlsGetValue", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t i = c.arg(0); if (i >= 64) { set_last_error(87); return 0; }
         set_last_error(0); return mem.r32(c.fs_base + 0xE10 + i * 4); });
