@@ -290,16 +290,6 @@ inline void register_win32(Registry& r, Host& h) {
         }
         return 0;
     });
-    r.add("user32.dll", "LoadCursorW", Conv::Stdcall, 2, [count](Cpu& c) -> uint32_t {
-        count("LoadCursorW"); (void)c;
-#if defined(_WIN32)
-        using Fn = HCURSOR (WINAPI*)(HINSTANCE, LPCWSTR);
-        static HMODULE user = LoadLibraryExW(L"user32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-        auto fn = user ? reinterpret_cast<Fn>(GetProcAddress(user, "LoadCursorW")) : nullptr;
-        if (fn) return uint32_t(reinterpret_cast<uintptr_t>(fn(reinterpret_cast<HINSTANCE>(uintptr_t(c.arg(0))), reinterpret_cast<LPCWSTR>(uintptr_t(c.arg(1))))));
-#endif
-        return 0xCE000002u;
-    });
     r.add("user32.dll", "GetKeyState", Conv::Stdcall, 1, [count](Cpu& c) -> uint32_t {
         count("GetKeyState"); (void)c;
 #if defined(_WIN32)
