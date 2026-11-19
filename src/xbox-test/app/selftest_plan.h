@@ -169,6 +169,10 @@ inline std::string verdict(const std::string& mode, bool finished, bool executed
     // The D3D10 drawing fixture blocks the same way: every pass ran but the
     // pixels (or streamed vertices) did not read back as drawn.
     if (mode == "d3d10-triangle" && code == 43) return "BLOCKED pixel-readback";
+    // 52 stream-out stats and 53 captured vertices are the same platform-limit
+    // BLOCKED outcome; 37 (query never answered) and 55 (staging Map failed)
+    // are step failures and stay FAIL.
+    if (mode == "d3d10-triangle" && (code == 52 || code == 53)) return "BLOCKED stream-out";
     // The compile fixture: the compile step's own codes name where it stopped
     // (44 compile failed, 45 not DXBC, 46-48 create layout/buffer/shader,
     // 47/49/50 readback), 43 is the same BLOCKED readback.

@@ -255,7 +255,7 @@ DWORD d3d_entry() {
     context->Unmap(staging,0);
     if(!haloInsideGreen){
         OutputDebugStringA("PLAY-D3D11 GS-HALO FAIL black-readback\n");
-        return 50;
+        return 59;
     }
     OutputDebugStringA("PLAY-D3D11 GS-HALO PASS\n");
 
@@ -263,7 +263,8 @@ DWORD d3d_entry() {
     // Games pick MSAA through CheckMultisampleQualityLevels and resolve with
     // ResolveSubresource; if the layer answers the quality probe but drops the
     // resolve, the pixels stay black exactly there. No shader: the cleared
-    // colour is the evidence. Exit 50-54 name the step; 54 is BLOCKED (never
+    // colour is the evidence. Exit 50-54 name the MSAA step (59 is the Halo GS
+    // black readback above); 54 is BLOCKED (never
     // a pass): the calls ran but the resolved pixel is not the clear colour.
     // Wine's GL d3d11 faults (a page fault in its own code) on a 4x MSAA
     // clear/resolve and on the stream-out staging readback — Wine limitations,

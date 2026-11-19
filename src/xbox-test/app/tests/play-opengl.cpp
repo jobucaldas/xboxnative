@@ -876,8 +876,9 @@ int opengl_entry() {
     attachTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, resolveTex, 0);
     if (checkFbo(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
         return stageFailure("msaa-resolve-readback", 24, "resolve-framebuffer-incomplete");
-    bindFbo(0x8CA8, msaaFbo); bindFbo(0x8CA9, resolveFbo);
+    bindFbo(0x8CA8, msaaFbo); bindFbo(0x8CA9, msaaFbo);
     glViewport(0, 0, 32, 32); glClearColor(0.25f, 0.5f, 0.75f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);
+    bindFbo(0x8CA9, resolveFbo);
     blitFbo(0, 0, 32, 32, 0, 0, 32, 32, GL_COLOR_BUFFER_BIT, GL_NEAREST);
     bindFbo(GL_FRAMEBUFFER, resolveFbo); glFinish();
     unsigned char resolved[4] = {0,0,0,0}; glReadPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, resolved);

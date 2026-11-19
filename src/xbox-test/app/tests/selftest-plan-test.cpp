@@ -90,6 +90,10 @@ int main() {
     assert(verdict("d3d10", true, true, 42) == "PASS");
     assert(verdict("d3d10-triangle", true, true, 42) == "PASS");
     assert(verdict("d3d10-triangle", true, true, 43) == "BLOCKED pixel-readback");
+    assert(verdict("d3d10-triangle", true, true, 52) == "BLOCKED stream-out");
+    assert(verdict("d3d10-triangle", true, true, 53) == "BLOCKED stream-out");
+    assert(verdict("d3d10-triangle", true, true, 37) == "FAIL exit-37");
+    assert(verdict("d3d10-triangle", true, true, 55) == "FAIL exit-55");
     assert(verdict("d3d10-triangle", true, true, 44) == "FAIL exit-44");
     assert(verdict("d3d10-compile", true, true, 42) == "PASS");
     assert(verdict("d3d10-compile", true, true, 43) == "BLOCKED pixel-readback");
