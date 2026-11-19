@@ -60,7 +60,7 @@ if op == 'put':
         command = data.strip()
         boot_append('cmd.txt: consumed file; queued 1 SYNTHETIC command(s)')
         boot_append("cmd.txt SYNTHETIC command: '%s' (screen=2)" % command)
-        if command == 'open' and cfg.get('queued'):
+        if command.startswith('open') and cfg.get('queued'):
             cfg['queue_opened'] = True
             save(); sys.exit(0)
         if command == 'press' and cfg.get('queued') and not cfg.get('queue_finished'):
