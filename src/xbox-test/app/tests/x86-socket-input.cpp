@@ -14,7 +14,7 @@ int main() {
     bool xinput_called = false; host.xinput_call = [&](Host::XInputCall& q) { xinput_called = q.kind == Host::XInputCall::Kind::GetState && q.index == 1; q.result = 1167; };
     guest.register_all(); Cpu cpu(mem, table); cpu.reg[ESP] = 0x2f000; cpu.fs_base = guest.cur_teb;
     struct Route { unsigned ordinal; const char* name; unsigned argc; } routes[] = {
-        {1,"accept",3}, {101,"WSAAsyncSelect",5}, {11,"inet_addr",1}, {12,"inet_ntoa",1}, {13,"listen",2},
+        {1,"accept",3}, {101,"WSAAsyncSelect",4}, {11,"inet_addr",1}, {12,"inet_ntoa",1}, {13,"listen",2},
         {15,"ntohs",1}, {16,"recv",4}, {17,"recvfrom",6}, {19,"send",4}, {2,"bind",3}, {20,"sendto",6},
         {22,"shutdown",2}, {23,"socket",3}, {3,"closesocket",1}, {4,"connect",3}, {51,"gethostbyaddr",3},
         {52,"gethostbyname",1}, {9,"htons",1},
@@ -33,6 +33,8 @@ int main() {
     CHECK(call("ws2_32.dll", "socket", {2, 1, 6}) == uint32_t(-1) && guest.last_error() == 10045);
     CHECK(call("ws2_32.dll", "inet_ntoa", {0}) == 0 && guest.last_error() == 10045);
     auto xinput = reg.ordinals.at({"xinput1_3.dll", 2}); CHECK(xinput == Registry::key_sym("XInputGetState"));
+    CHECK(reg.ordinals.count({"xinput1_3.dll", 3}) == 1 && reg.ordinals.count({"xinput1_3.dll", 4}) == 1 && reg.ordinals.count({"xinput1_3.dll", 5}) == 1 && reg.ordinals.count({"xinput1_3.dll", 7}) == 1 && reg.ordinals.count({"xinput1_3.dll", 8}) == 1);
+    CHECK(reg.ordinals.count({"xinput9_1_0.dll", 3}) == 0 && reg.ordinals.count({"xinput9_1_0.dll", 4}) == 0 && reg.ordinals.count({"xinput9_1_0.dll", 5}) == 0 && reg.ordinals.count({"xinput9_1_0.dll", 7}) == 0 && reg.ordinals.count({"xinput9_1_0.dll", 8}) == 0);
     mem.w32(cpu.reg[ESP] + 4, 1); mem.w32(cpu.reg[ESP] + 8, 0x4000); CHECK(reg.map.at({"xinput1_3.dll", xinput}).fn(cpu) == 1167 && xinput_called);
     std::printf("x86-socket-input: %d checks, %d failures\n", checks, failures); return failures ? 1 : 0;
 }

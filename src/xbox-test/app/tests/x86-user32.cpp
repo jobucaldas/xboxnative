@@ -79,6 +79,9 @@ int main(int argc, char** argv) {
     host.window_call = [](Host::WindowCall& q) {
         if (q.name == "GetParent") { CHECK(q.args[0] == 0xaaaa); q.result = 0xbbbb; q.supported = true; }
         else if (q.name == "AllowSetForegroundWindow") { CHECK(q.args[0] == 0xffffffffu); q.result = 1; q.supported = true; }
+        else if (q.name == "PeekMessageW") { q.result = 1; q.supported = true; }
+        else if (q.name == "GetMessageW") { q.result = 0; q.supported = true; q.output.assign(32, 0); q.output[8] = 0x12; }  // WM_QUIT: returns 0 but fills MSG
+        else if (q.name == "SetWindowPos") { CHECK(q.args[1] == uintptr_t(-1)); q.result = 1; q.supported = true; }
     };
     host.get_window_long = [](uintptr_t hwnd, int index, bool pointer) -> intptr_t {
         CHECK(hwnd == 0xaaaa && index == 0 && pointer); return intptr_t(uint32_t(0xfedcba98u));
@@ -95,6 +98,10 @@ int main(int argc, char** argv) {
     CHECK(call("KillTimer", {0, 1}) == 1);
     CHECK(call("wsprintfA", {0, 0}) == 0 && guest.last_error() == 120);
     CHECK(host.calls["unsupported:BeginPaint"] == 1 && host.calls["unsupported:DialogBoxParamA"] == 1);
+    CHECK(call("GetMessageW", {0x4100, 0, 0, 0}) == 0 && mem.r32(0x4100 + 4) == 0x12);
+    CHECK(call("SetWindowPos", {0x1111, 0xffffffffu, 0, 0, 0, 0, 0}) == 1);
+    CHECK(call("SetWindowLongPtrW", {0x1111, uint32_t(-4), 0x4321}) == 0 && call("GetWindowLongPtrW", {0x1111, uint32_t(-4)}) == 0x4321);
+    CHECK(reg.map.at({"gdi32.dll", Registry::key_sym("GetGlyphOutlineA")}).argc == 7);
     if (argc > 1) {
         std::ifstream in(argv[1], std::ios::binary);
         std::vector<uint8_t> file{std::istreambuf_iterator<char>(in), {}};
