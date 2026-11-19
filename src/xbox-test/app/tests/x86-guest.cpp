@@ -255,6 +255,78 @@ static bool verify_guest_bugbot_routes() {
     std::fprintf(stderr,"X86-GUEST-ROUTES PASS: NULL heaps, sort-key bytes, security attributes, find CloseHandle, and resource handles\n");
     return true;
 }
+static bool verify_guest_bugbot_b2_routes() {
+    Memory mem; mem.map(0x1000, 0x20000, PROT_R | PROT_W); mem.map(TEB_ADDR, 0x1000, PROT_R | PROT_W);
+    ThunkTable table; Host host; Registry reg; Guest guest(mem, host, reg); guest.register_all();
+    Cpu cpu(mem, table); cpu.reg[ESP] = 0x1f000; cpu.fs_base = TEB_ADDR;
+    auto args = [&](std::initializer_list<uint32_t> values) {
+        unsigned i=0; for(uint32_t value:values) mem.w32(cpu.reg[ESP]+4+4*i++,value);
+    };
+    auto route = [&](const char* dll, const char* name) -> Thunk* {
+        auto it=reg.map.find({dll,Registry::key_sym(name)});
+        return it==reg.map.end()?nullptr:&it->second;
+    };
+    auto text8 = [&](uint32_t p) { std::string s; for(uint32_t i=0;mem.r8(p+i);++i) s.push_back(char(mem.r8(p+i))); return s; };
+    auto fail = [](const char* what) { std::fprintf(stderr,"X86-GUEST-B2 FAIL: %s\n",what); return false; };
+
+    for(uint32_t i=0;i<16;++i) mem.w8(0x7000+i,'A');
+    args({0x7000,16});
+    if(route("kernel32.dll","IsBadStringPtrA")->fn(cpu)!=0) return fail("IsBadStringPtrA readable run without a terminator");
+
+    mem.write_bytes(0x7100,"C:foo",6);
+    args({0x7100});
+    if(route("shlwapi.dll","PathIsRelativeA")->fn(cpu)!=0) return fail("PathIsRelativeA treats C:foo as relative");
+
+    mem.write_bytes(0x7200,"C:\\dir",7); mem.write_bytes(0x7300,"D:\\other",9);
+    args({0x7200,0x7300});
+    if(route("shlwapi.dll","PathAppendA")->fn(cpu)!=1||text8(0x7200)!="D:\\other") return fail("PathAppendA kept the destination for an absolute suffix");
+
+    host.random_bytes=[](uint8_t* bytes,auto n){for(decltype(n) i=0;i<n;++i)bytes[i]=0xff;return true;};
+    args({0x7400});
+    if(route("ole32.dll","CoCreateGuid")->fn(cpu)!=0||mem.r8(0x7407)!=0x4f||mem.r8(0x7408)!=0xbf) return fail("CoCreateGuid version nibble or variant byte");
+    args({0x7400,0x7500,39});
+    if(route("ole32.dll","StringFromGUID2")->fn(cpu)!=39||guest.wstr(0x7500)!=u"{FFFFFFFF-FFFF-4FFF-BFFF-FFFFFFFFFFFF}") return fail("StringFromGUID2 is not uppercase or misplaces the version");
+
+    mem.w32(0x7600+4,1); mem.w32(0x7600+8,0x7700); mem.w32(0x7600+12,0);
+    mem.w32(0x7700,0); mem.w32(0x7600+18,0xffffffffu); mem.w32(0x7600+22,0x1234);
+    args({0x7600});
+    route("shell32.dll","SHFileOperationW")->fn(cpu);
+    if(mem.r32(0x7600+18)!=0||mem.r32(0x7600+22)!=0x1234) return fail("SHFILEOPSTRUCT abort flag is not at packed offset 18");
+
+    args({0,1,0,0}); uint32_t manual_event=route("kernel32.dll","CreateEventA")->fn(cpu);
+    args({0,1,1,0}); uint32_t signaled_event=route("kernel32.dll","CreateEventA")->fn(cpu);
+    mem.w32(0x7800,manual_event); mem.w32(0x7804,signaled_event);
+    args({2,0x7800,1,0,0xff});
+    if(route("user32.dll","MsgWaitForMultipleObjects")->fn(cpu)!=258) return fail("MsgWaitForMultipleObjects ignored fWaitAll");
+    args({2,0x7800,0,0,0xff});
+    if(route("user32.dll","MsgWaitForMultipleObjects")->fn(cpu)!=1) return fail("MsgWaitForMultipleObjects wait-any control");
+    args({0,0x7800,0,0,1});
+    if(route("user32.dll","MsgWaitForMultipleObjectsEx")->fn(cpu)!=258) return fail("empty MWMO_WAITALL returned without waiting");
+
+    mem.w32(TEB_ADDR+0x24,7);
+    args({0,1,0}); uint32_t mutex=route("kernel32.dll","CreateMutexA")->fn(cpu);
+    guest.abandon_mutexes(7);
+    mem.w32(0x7808,mutex); args({1,0x7808,0,0});
+    if(route("kernel32.dll","WaitForMultipleObjects")->fn(cpu)!=0x80u) return fail("WaitForMultipleObjects dropped WAIT_ABANDONED_0");
+
+    args({0x72000222u});
+    uint32_t bits=guest.heap.alloc(16);
+    guest.gdi_objects[0x72000222u]=Guest::GdiObject{1,4,4,bits,32,0,false,false,16};
+    if(route("gdi32.dll","DeleteObject")->fn(cpu)!=1||guest.heap.alloc(16)!=bits) return fail("DeleteObject leaked the DIB pixel buffer");
+
+    guest.gdi_objects[0x72000111u]=Guest::GdiObject{1,4,2,0,32,0,false,false,16};
+    args({0,0x72000111u,0,2,0,0x7900,0});
+    route("gdi32.dll","GetDIBits")->fn(cpu);
+    route("gdi32.dll","GetDIBits")->fn(cpu);
+    if(mem.r32(0x7900+16)!=3||mem.r32(0x7900+40)!=0x00ff0000u) return fail("GetDIBits requery dropped BI_BITFIELDS masks");
+
+    auto put16=[&](uint32_t p,const char16_t* s){for(size_t i=0;;++i){mem.w(p+uint32_t(i*2),s[i],2);if(!s[i])break;}};
+    put16(0x7b00,u"x \"b\"\"c\" d");
+    args({0x7b00,0x7c00});
+    uint32_t argv=route("shell32.dll","CommandLineToArgvW")->fn(cpu);
+    if(!argv||mem.r32(0x7c00)!=3||guest.wstr(mem.r32(argv))!=u"x"||guest.wstr(mem.r32(argv+4))!=u"b\"c"||mem.r32(argv+12)!=0) return fail("CommandLineToArgvW argv terminator or doubled quotes");
+    return true;
+}
 static bool verify_nls_size_query_capture() {
     Host::NlsResponse response{}; response.result=5;
     if(!play_capture_nls_output(response,nullptr,0,10,false,0)||response.result!=5||!response.output.empty())return false;
@@ -321,6 +393,7 @@ int main(int argc, char** argv) {
     if (!verify_display_routes()) return 1;
     if (!verify_xinput_routes()) { std::puts("X86-XINPUT FAIL: guest route, layout, ordinal, or fake-pad contract"); return 1; }
     if (!verify_guest_bugbot_routes()) { std::puts("X86-GUEST-ROUTES FAIL: heap, NLS, directory, find-handle, or resource contract"); return 1; }
+    if (!verify_guest_bugbot_b2_routes()) { std::puts("X86-GUEST-B2 FAIL: see stderr for the failing route"); return 1; }
     if (!verify_nls_size_query_capture()) { std::puts("X86-NLS FAIL: size-query output capture"); return 1; }
     if (!verify_file_guard()) return 1;
     if (argc < 2) { printf("usage: x86-guest <fixture-crt.exe>\n"); return 2; }

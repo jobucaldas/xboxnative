@@ -345,9 +345,9 @@ struct Guest {
             bool ready=(o.kind==SyncKind::Event&&o.signaled)||(o.kind==SyncKind::Semaphore&&o.count)||(o.kind==SyncKind::Mutex&&(!o.owner||o.owner==tid));
             if(ready){if(!ready_count)ready_index=i;++ready_count;}
         }
-        if(wait_all?ready_count==count:ready_count!=0){
-            if(wait_all){for(uint32_t h:values)if(sync_handles.count(h)){uint32_t r=sync_wait(c,h,0);if(r==0xffffffffu)return r;}return 0;}
-            uint32_t h=values[ready_index];if(sync_handles.count(h)){uint32_t r=sync_wait(c,h,0);if(r==0xffffffffu)return r;}
+        if(wait_all?(count&&ready_count==count):ready_count!=0){
+            if(wait_all){uint32_t abandoned=0;for(uint32_t h:values)if(sync_handles.count(h)){uint32_t r=sync_wait(c,h,0);if(r==0xffffffffu)return r;if(r==0x80u)abandoned=0x80u;}return abandoned;}
+            uint32_t h=values[ready_index];if(sync_handles.count(h)){uint32_t r=sync_wait(c,h,0);if(r==0xffffffffu)return r;if(r==0x80u)return 0x80u+ready_index;}
             return ready_index;
         }
         if(timeout==0xffffffffu)throw Fault(FaultKind::Unsupported,c.eip,c.eip,"WaitForMultipleObjects: unsignaled infinite wait");
@@ -1138,7 +1138,7 @@ inline void Guest::register_all() {
         if(h&&c.arg(3)) c.mem.w32(c.arg(3),gdi_objects[h].bits);
         return h;
     });
-    reg.add("gdi32.dll", "DeleteObject", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { auto i=gdi_objects.find(c.arg(0));if(i==gdi_objects.end()){set_last_error(6);return 0;}if(i->second.stock)return 1;for(auto& d:gdi_dcs)if(d.second.bitmap==c.arg(0)||d.second.brush==c.arg(0)||d.second.pen==c.arg(0)||d.second.font==c.arg(0)){set_last_error(170);return 0;}gdi_objects.erase(i);return 1; });
+    reg.add("gdi32.dll", "DeleteObject", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { auto i=gdi_objects.find(c.arg(0));if(i==gdi_objects.end()){set_last_error(6);return 0;}if(i->second.stock)return 1;for(auto& d:gdi_dcs)if(d.second.bitmap==c.arg(0)||d.second.brush==c.arg(0)||d.second.pen==c.arg(0)||d.second.font==c.arg(0)){set_last_error(170);return 0;}if(i->second.bits)heap.release(i->second.bits);gdi_objects.erase(i);return 1; });
     reg.add("gdi32.dll", "SelectObject", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { auto d=gdi_dcs.find(c.arg(0));auto o=gdi_objects.find(c.arg(1));if(d==gdi_dcs.end()||o==gdi_objects.end()){set_last_error(6);return 0;}if(o->second.kind==1){uint32_t old=d->second.bitmap;d->second.bitmap=c.arg(1);return old;}if(o->second.kind==2){uint32_t old=d->second.brush;d->second.brush=c.arg(1);return old;}if(o->second.kind==4){uint32_t old=d->second.pen;d->second.pen=c.arg(1);return old;}if(o->second.kind==3){uint32_t old=d->second.font;d->second.font=c.arg(1);return old;}set_last_error(6);return 0; });
     auto get_object=[this](Cpu& c)->uint32_t { auto i=gdi_objects.find(c.arg(0));if(i==gdi_objects.end())return 0;auto& o=i->second;uint32_t size=o.kind==1?24u:o.kind==2?12u:0u;if(!size)return 0;if(c.arg(1)<size)return 0;if(!c.arg(2))return size;uint32_t p=c.arg(2);if(o.kind==1){c.mem.w32(p,0);c.mem.w32(p+4,o.width);c.mem.w32(p+8,o.height);c.mem.w32(p+12,o.pitch?o.pitch:o.width*4);c.mem.w(p+16,1,2);c.mem.w(p+18,uint16_t(o.bpp),2);c.mem.w32(p+20,o.bits);}else{c.mem.w32(p,0);c.mem.w32(p+4,o.color);c.mem.w32(p+8,0);}return size; };
     reg.add("gdi32.dll", "GetObjectA", Conv::Stdcall, 3, [get_object](Cpu& c){return get_object(c);});
@@ -1147,10 +1147,11 @@ inline void Guest::register_all() {
         auto i=gdi_objects.find(c.arg(1)); uint32_t info=c.arg(5), bits=c.arg(4), start=c.arg(2), lines=c.arg(3);
         if (i==gdi_objects.end() || i->second.kind!=1 || !info || c.arg(6)>1 || start>i->second.height) { set_last_error(87); return 0; }
         auto& o=i->second; if (start+lines>o.height) lines=o.height-start;
-        uint32_t requested_bpp=c.mem.r(info+14,2);
-        c.mem.w32(info+4,o.width); c.mem.w32(info+8,o.top_down?-int32_t(o.height):int32_t(o.height)); c.mem.w(info+12,1,2); c.mem.w(info+14,uint16_t(requested_bpp?requested_bpp:o.bpp),2); c.mem.w32(info+16,requested_bpp?0:3);
+        uint32_t requested_bpp=c.mem.r(info+14,2), requested_compression=c.mem.r32(info+16);
+        const bool bitfields=!requested_bpp||requested_compression==3;  // a requery of BI_BITFIELDS keeps the masks
+        c.mem.w32(info+4,o.width); c.mem.w32(info+8,o.top_down?-int32_t(o.height):int32_t(o.height)); c.mem.w(info+12,1,2); c.mem.w(info+14,uint16_t(requested_bpp?requested_bpp:o.bpp),2); c.mem.w32(info+16,bitfields?3:0);
         if (!bits || !lines) {
-            if (!requested_bpp && o.bpp==32) { c.mem.w32(info+40,0x00ff0000); c.mem.w32(info+44,0x0000ff00); c.mem.w32(info+48,0x000000ff); }
+            if (bitfields && o.bpp==32) { c.mem.w32(info+40,0x00ff0000); c.mem.w32(info+44,0x0000ff00); c.mem.w32(info+48,0x000000ff); }
             return lines;
         }
         if (o.bpp!=32 || requested_bpp!=32) { set_last_error(87); return 0; }
@@ -1484,12 +1485,12 @@ inline void Guest::register_all() {
     reg.add("shell32.dll","CommandLineToArgvW",Conv::Stdcall,2,[this](Cpu& c)->uint32_t {
         if(!c.arg(0)||!c.arg(1)){set_last_error(87);return 0;}std::u16string input=wstr(c.arg(0));std::vector<std::u16string> args;size_t i=0;
         while(i<input.size()){while(i<input.size()&&(input[i]==u' '||input[i]==u'\t'))++i;if(i==input.size())break;std::u16string arg;bool quoted=false;
-            while(i<input.size()){if(input[i]==u'\\'){size_t start=i;while(i<input.size()&&input[i]==u'\\')++i;size_t slashes=i-start;if(i<input.size()&&input[i]==u'"'){arg.append(slashes/2,u'\\');if(slashes%2){arg.push_back(u'"');++i;}else quoted=!quoted,++i;}else arg.append(slashes,u'\\');continue;}if(input[i]==u'"'){quoted=!quoted;++i;continue;}if(!quoted&&(input[i]==u' '||input[i]==u'\t'))break;arg.push_back(input[i++]);}args.push_back(std::move(arg));while(i<input.size()&&(input[i]==u' '||input[i]==u'\t'))++i;
+            while(i<input.size()){if(input[i]==u'\\'){size_t start=i;while(i<input.size()&&input[i]==u'\\')++i;size_t slashes=i-start;if(i<input.size()&&input[i]==u'"'){arg.append(slashes/2,u'\\');if(slashes%2){arg.push_back(u'"');++i;}else quoted=!quoted,++i;}else arg.append(slashes,u'\\');continue;}if(input[i]==u'"'){if(quoted&&i+1<input.size()&&input[i+1]==u'"'){arg.push_back(u'"');i+=2;continue;}quoted=!quoted;++i;continue;}if(!quoted&&(input[i]==u' '||input[i]==u'\t'))break;arg.push_back(input[i++]);}args.push_back(std::move(arg));while(i<input.size()&&(input[i]==u' '||input[i]==u'\t'))++i;
         }
-        uint64_t bytes=uint64_t(args.size())*4;for(const auto& arg:args)bytes+=uint64_t(arg.size()+1)*2;if(bytes>0x7fffffffu){set_last_error(8);return 0;}uint32_t base=heap.alloc(uint32_t(bytes?bytes:4)),strings=base+uint32_t(args.size()*4);for(size_t n=0;n<args.size();++n){uint32_t p=strings;for(size_t j=0;j<n;++j)p+=uint32_t((args[j].size()+1)*2);mem.w32(base+uint32_t(n*4),p);for(size_t j=0;j<args[n].size();++j)mem.w(p+uint32_t(j*2),args[n][j],2);mem.w(p+uint32_t(args[n].size()*2),0,2);}mem.w32(c.arg(1),uint32_t(args.size()));return base;
+        uint64_t bytes=uint64_t(args.size()+1)*4;for(const auto& arg:args)bytes+=uint64_t(arg.size()+1)*2;if(bytes>0x7fffffffu){set_last_error(8);return 0;}uint32_t base=heap.alloc(uint32_t(bytes?bytes:4)),strings=base+uint32_t((args.size()+1)*4);for(size_t n=0;n<args.size();++n){uint32_t p=strings;for(size_t j=0;j<n;++j)p+=uint32_t((args[j].size()+1)*2);mem.w32(base+uint32_t(n*4),p);for(size_t j=0;j<args[n].size();++j)mem.w(p+uint32_t(j*2),args[n][j],2);mem.w(p+uint32_t(args[n].size()*2),0,2);}mem.w32(base+uint32_t(args.size()*4),0);mem.w32(c.arg(1),uint32_t(args.size()));return base;
     });
     auto shell_file_operation=[this](Cpu& c,bool wide)->uint32_t {
-        uint32_t op=c.arg(0);if(!op){set_last_error(87);return 87;}uint32_t func=mem.r32(op+4),from=mem.r32(op+8),to=mem.r32(op+12);if(!from){set_last_error(87);return 87;}if(func<1||func>4){set_last_error(120);return 120;}mem.w32(op+20,0);
+        uint32_t op=c.arg(0);if(!op){set_last_error(87);return 87;}uint32_t func=mem.r32(op+4),from=mem.r32(op+8),to=mem.r32(op+12);if(!from){set_last_error(87);return 87;}if(func<1||func>4){set_last_error(120);return 120;}mem.w32(op+18,0);
         auto check_list=[&](uint32_t p)->bool {
             uint32_t cursor=p;
             for(unsigned item=0;item<4096;++item){
@@ -1506,7 +1507,7 @@ inline void Guest::register_all() {
             }
             return false;
         };
-        if(!check_list(from)||(to&&!check_list(to))){mem.w32(op+20,1);set_last_error(5);return 5;}set_last_error(120);return 120;
+        if(!check_list(from)||(to&&!check_list(to))){mem.w32(op+18,1);set_last_error(5);return 5;}set_last_error(120);return 120;
     };
     reg.add("shell32.dll","SHFileOperationA",Conv::Stdcall,1,[shell_file_operation](Cpu& c){return shell_file_operation(c,false);});
     reg.add("shell32.dll","SHFileOperationW",Conv::Stdcall,1,[shell_file_operation](Cpu& c){return shell_file_operation(c,true);});
@@ -1754,7 +1755,7 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "WaitForMultipleObjectsEx", Conv::Stdcall, 5, [wait_multiple](Cpu& c) -> uint32_t {
         return wait_multiple(c,c.arg(3),c.arg(2)!=0); });
     reg.add("user32.dll", "MsgWaitForMultipleObjects", Conv::Stdcall, 5, [wait_multiple](Cpu& c) -> uint32_t {
-        return wait_multiple(c,c.arg(3),false,true); });
+        return wait_multiple(c,c.arg(3),c.arg(2)!=0,true); });
     reg.add("user32.dll", "MsgWaitForMultipleObjectsEx", Conv::Stdcall, 5, [wait_multiple](Cpu& c) -> uint32_t {
         return wait_multiple(c,c.arg(2),(c.arg(4)&1u)!=0,true); });
     reg.add("kernel32.dll", "GetExitCodeThread", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
@@ -2093,7 +2094,7 @@ inline void Guest::register_all() {
             for (uint32_t i = 0; i < limit; ++i)
                 if (!(wide ? mem.r(p + i * 2, 2) : mem.r8(p + i))) return 0;
         } catch (const Fault&) { return 1; }
-        return 1;
+        return 0;
     };
     reg.add("kernel32.dll", "IsBadStringPtrA", Conv::Stdcall, 2, [is_bad_string_ptr](Cpu& c) { return is_bad_string_ptr(c, false); });
     reg.add("kernel32.dll", "IsBadStringPtrW", Conv::Stdcall, 2, [is_bad_string_ptr](Cpu& c) { return is_bad_string_ptr(c, true); });
@@ -2353,7 +2354,7 @@ inline void Guest::register_all() {
             mem.w32(c.fs_base + 0xE10 + i * 4, 0); return i; }
         set_last_error(8); return 0xFFFFFFFFu; });
     reg.add("kernel32.dll", "TlsFree", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
-        uint32_t i = c.arg(0); if (i == 0 || i >= 64 || !(tls_used >> i & 1)) { set_last_error(87); return 0; }
+        uint32_t i = c.arg(0); if (i == 0 || i >= 64 || !(tls_used >> i & 1) || fls_callbacks.count(i)) { set_last_error(87); return 0; }
         tls_used &= ~(uint64_t(1) << i); mem.w32(c.fs_base + 0xE10 + i * 4, 0); return 1; });
     reg.add("kernel32.dll", "TlsGetValue", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t i = c.arg(0); if (i >= 64) { set_last_error(87); return 0; }
@@ -2700,7 +2701,7 @@ inline void Guest::register_all() {
     auto guid_string=[](const uint8_t* bytes)->std::u16string {
         uint32_t d1=uint32_t(bytes[0])|uint32_t(bytes[1])<<8|uint32_t(bytes[2])<<16|uint32_t(bytes[3])<<24;
         uint16_t d2=uint16_t(bytes[4])|uint16_t(bytes[5])<<8,d3=uint16_t(bytes[6])|uint16_t(bytes[7])<<8;
-        char text[39];std::snprintf(text,sizeof(text),"{%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}",d1,d2,d3,bytes[8],bytes[9],bytes[10],bytes[11],bytes[12],bytes[13],bytes[14],bytes[15]);
+        char text[39];std::snprintf(text,sizeof(text),"{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",d1,d2,d3,bytes[8],bytes[9],bytes[10],bytes[11],bytes[12],bytes[13],bytes[14],bytes[15]);
         std::u16string result;for(unsigned i=0;i<38;++i)result.push_back(char16_t(uint8_t(text[i])));return result;
     };
     auto com_init=[this](uint32_t value,uint32_t model)->uint32_t {
@@ -2751,7 +2752,7 @@ inline void Guest::register_all() {
         uint32_t old=c.arg(0),size=c.arg(1);if(!old)return size?heap.alloc(size):0;if(!heap.size_of(old))return 0;if(!size){heap.release(old);return 0;}return heap.realloc(old,size);
     });
     reg.add("ole32.dll","CoCreateGuid",Conv::Stdcall,1,[this](Cpu& c)->uint32_t {
-        if(!c.arg(0)){set_last_error(87);return 0x80004003u;}uint8_t bytes[16]{};if(!host.random_bytes||!host.random_bytes(bytes,16))return 0x80004001u;bytes[6]=uint8_t((bytes[6]&0x0f)|0x40);bytes[8]=uint8_t((bytes[8]&0x3f)|0x80);mem.write_bytes(c.arg(0),bytes,16);return 0;
+        if(!c.arg(0)){set_last_error(87);return 0x80004003u;}uint8_t bytes[16]{};if(!host.random_bytes||!host.random_bytes(bytes,16))return 0x80004001u;bytes[7]=uint8_t((bytes[7]&0x0f)|0x40);bytes[8]=uint8_t((bytes[8]&0x3f)|0x80);mem.write_bytes(c.arg(0),bytes,16);return 0;
     });
     reg.add("ole32.dll","StringFromGUID2",Conv::Stdcall,3,[this,guid_read,guid_string](Cpu& c)->uint32_t {
         if(!c.arg(0)||!c.arg(1)||c.arg(2)<39){set_last_error(87);return 0;}uint8_t bytes[16];if(!guid_read(c.arg(0),bytes))return 0;auto text=guid_string(bytes);for(size_t i=0;i<text.size();++i)mem.w(c.arg(1)+uint32_t(i*2),text[i],2);mem.w(c.arg(1)+uint32_t(text.size()*2),0,2);return uint32_t(text.size()+1);
@@ -3011,8 +3012,8 @@ inline void Guest::register_all() {
         });
         reg.add("shlwapi.dll","PathAppend"+suffix,Conv::Stdcall,2,[this,wide,write_a,write_w](Cpu& c)->uint32_t {
             uint32_t dst=c.arg(0);if(!dst)return 0;
-            if(wide) {std::u16string base=wstr(dst),leaf=wstr(c.arg(1));if(!base.empty()&&!leaf.empty()&&base.back()!=u'\\'&&base.back()!=u'/')base.push_back(u'\\');base+=leaf;write_w(dst,base);}
-            else {std::string base=str(dst),leaf=str(c.arg(1));if(!base.empty()&&!leaf.empty()&&base.back()!='\\'&&base.back()!='/')base.push_back('\\');base+=leaf;write_a(dst,base);}
+            if(wide) {std::u16string base=wstr(dst),leaf=wstr(c.arg(1));const bool absolute=(!leaf.empty()&&(leaf[0]==u'\\'||leaf[0]==u'/'))||(leaf.size()>1&&leaf[1]==u':');if(absolute)base=leaf;else{if(!base.empty()&&!leaf.empty()&&base.back()!=u'\\'&&base.back()!=u'/')base.push_back(u'\\');base+=leaf;}write_w(dst,base);}
+            else {std::string base=str(dst),leaf=str(c.arg(1));const bool absolute=(!leaf.empty()&&(leaf[0]=='\\'||leaf[0]=='/'))||(leaf.size()>1&&leaf[1]==':');if(absolute)base=leaf;else{if(!base.empty()&&!leaf.empty()&&base.back()!='\\'&&base.back()!='/')base.push_back('\\');base+=leaf;}write_a(dst,base);}
             return 1;
         });
         reg.add("shlwapi.dll","PathFindFileName"+suffix,Conv::Stdcall,1,[this,wide](Cpu& c)->uint32_t {
@@ -3026,8 +3027,8 @@ inline void Guest::register_all() {
             auto s=str(p);size_t slash=s.find_last_of("\\\\/"),dot=s.find_last_of('.');return p+uint32_t(dot!=std::string::npos&&(slash==std::string::npos||dot>slash)?dot:s.size());
         });
         reg.add("shlwapi.dll","PathIsRelative"+suffix,Conv::Stdcall,1,[this,wide](Cpu& c)->uint32_t {
-            if(wide){auto s=wstr(c.arg(0));return s.empty()||((s[0]!=u'\\'&&s[0]!=u'/')&&!(s.size()>2&&s[1]==u':'&&(s[2]==u'\\'||s[2]==u'/')));}
-            auto s=str(c.arg(0));return s.empty()||((s[0]!='\\'&&s[0]!='/')&&!(s.size()>2&&s[1]==':'&&(s[2]=='\\'||s[2]=='/')));
+            if(wide){auto s=wstr(c.arg(0));return s.empty()||((s[0]!=u'\\'&&s[0]!=u'/')&&!(s.size()>1&&s[1]==u':'));}
+            auto s=str(c.arg(0));return s.empty()||((s[0]!='\\'&&s[0]!='/')&&!(s.size()>1&&s[1]==':'));
         });
         reg.add("shlwapi.dll","StrCmpI"+suffix,Conv::Stdcall,2,[this,wide](Cpu& c)->uint32_t {
             if(wide){auto a=wstr(c.arg(0)),b=wstr(c.arg(1));for(auto& ch:a)if(ch>=u'A'&&ch<=u'Z')ch+=u'a'-u'A';for(auto& ch:b)if(ch>=u'A'&&ch<=u'Z')ch+=u'a'-u'A';return a<b?uint32_t(-1):a>b?1u:0u;}
