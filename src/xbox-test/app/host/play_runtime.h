@@ -2173,7 +2173,8 @@ static int WINAPI messageBoxW(HWND,LPCWSTR text,LPCWSTR caption,UINT type) {
 }
 static uintptr_t vcruntimeLookup(const char* dll,const char* name) {
     // The console's answer behind a forwarded VC runtime import is not a guest import of its own.
-    struct Forwarded {Forwarded(){++forwardedLookups;} ~Forwarded(){--forwardedLookups;}} forwarded;
+    // mlp::resolve also records into launch_gap while collecting, so the scope mutes that too.
+    struct Forwarded {bool outer=gap_summary::collecting;Forwarded(){++forwardedLookups;gap_summary::collecting=false;} ~Forwarded(){--forwardedLookups;gap_summary::collecting=outer;}} forwarded;
     return resolve(dll,name,0);
 }
 static MMRESULT WINAPI unsupportedWaveOut() { return MMSYSERR_NOTSUPPORTED; }
@@ -2337,11 +2338,11 @@ static FARPROC managed_export(HMODULE module,const char* name) {
 // other libraries retain Mono's normal OS-loader fallback behavior.
 static void* managed_pinvoke(const char* library,const char* symbol) {
     if(!state||!library)return nullptr;
-    // Mapping mutates state->modules and state->order; hold the loader lock for the whole lookup (recursive).
-    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
     auto key=basename(wide(library));
     if(key.find('.')==std::string::npos)key+=".dll";
     if(key!="sdl3.dll"&&key!="fna3d.dll"&&key!="faudio.dll"&&key!="libtheorafile.dll")return nullptr;
+    // Mapping mutates state->modules and state->order; hold the loader lock for the whole lookup (recursive).
+    std::lock_guard<LoaderMutex> lock(state->loaderMutex);
     auto module=named(wide(key.c_str()));
     if(!module) {
         auto path=runtimeDirectory+L"\\"+wide(key.c_str());
