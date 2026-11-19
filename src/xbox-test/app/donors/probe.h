@@ -150,7 +150,7 @@ static bool behavior(const std::string& label,wxl::Image& image,const std::wstri
     }
     if(label=="psapi.dll") {
         using GetModuleFileNameEx=DWORD(WINAPI*)(HANDLE,HMODULE,LPWSTR,DWORD);
-        auto get=(GetModuleFileNameEx)resolve("kernelbase.dll","K32GetModuleFileNameExW",0);
+        auto get=(GetModuleFileNameEx)image.symbol("GetModuleFileNameExW");
         WCHAR value[2048]{};
         return get&&get(GetCurrentProcess(),GetModuleHandleW(nullptr),value,2048)>0&&value[0];
     }

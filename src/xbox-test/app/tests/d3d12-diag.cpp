@@ -279,7 +279,7 @@ int main(int argc,char** argv) {
     const std::vector<unsigned char> rich=makeRichDxilContainer(false);
     std::string richText=d3d12_diag::shaderStageText("VS",rich.data(),rich.size());
     CHECK(richText.find("VS:dxil sm6.0")!=std::string::npos&&richText.find("digest=zero")!=std::string::npos&&
-        richText.find("validator=1.8")!=std::string::npos);
+        richText.find("compiler=1.8")!=std::string::npos);
     const std::vector<unsigned char> signedRich=makeRichDxilContainer(true);
     CHECK(d3d12_diag::shaderStageText("PS",signedRich.data(),signedRich.size()).find("digest=set")!=std::string::npos);
     std::vector<unsigned char> truncatedRich=rich;truncatedRich.resize(60);
@@ -489,7 +489,7 @@ int main(int argc,char** argv) {
         const std::vector<unsigned char> richTrace=makeRichDxilContainer(false);
         D3D12_GRAPHICS_PIPELINE_STATE_DESC richState{};richState.VS={richTrace.data(),richTrace.size()};
         CHECK(call(d3d12_diag::CreateGraphicsPipelineState,&richState,__uuidof(ID3D12PipelineState),&out)==E_INVALIDARG);
-        if(traceMode)CHECK(count("pso-shaders VS:dxil sm6.0 kind=vs digest=zero validator=1.8")==1);
+        if(traceMode)CHECK(count("pso-shaders VS:dxil sm6.0 kind=vs digest=zero compiler=1.8")==1);
         D3D12_GRAPHICS_PIPELINE_STATE_DESC truncatedState=richState;truncatedState.VS={truncatedRich.data(),truncatedRich.size()};
         CHECK(call(d3d12_diag::CreateGraphicsPipelineState,&truncatedState,__uuidof(ID3D12PipelineState),&out)==E_INVALIDARG);
         if(traceMode)CHECK(count("pso-shaders VS:malformed digest=zero")==1);

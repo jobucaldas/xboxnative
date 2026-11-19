@@ -496,7 +496,10 @@ static LONG WINAPI RegEnumKeyExA(HKEY h,DWORD index,LPSTR name,LPDWORD nameLen,L
         children.push_back(key.second.path.substr(key.second.path.find_last_of(L"\\")+1));
     std::sort(children.begin(),children.end(),[](const auto& a,const auto& b){return lower(a)<lower(b);});
     if(index>=children.size()) return ERROR_NO_MORE_ITEMS;
-    std::string child=utf8(children[index]);DWORD cap=*nameLen;
+    const int chars=WideCharToMultiByte(CP_ACP,0,children[index].c_str(),-1,nullptr,0,nullptr,nullptr);
+    std::vector<char> ansi(chars>0?chars:1,'\0');
+    if(chars>0) WideCharToMultiByte(CP_ACP,0,children[index].c_str(),-1,ansi.data(),chars,nullptr,nullptr);
+    std::string child(ansi.data());DWORD cap=*nameLen;
     if(!name||cap<child.size()+1){*nameLen=(DWORD)child.size()+1;return ERROR_MORE_DATA;}
     memcpy(name,child.c_str(),child.size()+1);*nameLen=(DWORD)child.size();
     if(cls){if(*clsLen<1){*clsLen=1;return ERROR_MORE_DATA;}cls[0]='\0';*clsLen=0;}

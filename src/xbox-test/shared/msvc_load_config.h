@@ -372,7 +372,7 @@ inline bool validate(const File& f,Plan& result,bool play=false,std::string* fai
         if(!ended) { snprintf(detail,sizeof detail,"%s import directory RVA 0x%x Size 0x%x has no full zero terminator",delay?"delay":"ordinary",dir.rva,dir.size); return reject(detail); }
         return true;
     };
-    if(!imports(f.imports,false) || !imports(f.delay,true)) return reject("ordinary or delay import validation failed without a specific rejection");
+    if(!imports(f.imports,false) || !imports(f.delay,true)) return false;   // imports() already recorded its specific reject()
     std::sort(iatRanges.begin(),iatRanges.end(),[](Span a,Span b){return a.rva<b.rva;});
     for(size_t i=1;i<iatRanges.size();++i) if(overlaps(iatRanges[i-1],iatRanges[i])) { snprintf(detail,sizeof detail,"eager IAT spans at RVA 0x%zx+0x%zx and 0x%zx+0x%zx overlap",iatRanges[i-1].rva,iatRanges[i-1].size,iatRanges[i].rva,iatRanges[i].size); return reject(detail); }
     // Lazy delay IATs may be relocated, but never alias each other or a bound IAT.
