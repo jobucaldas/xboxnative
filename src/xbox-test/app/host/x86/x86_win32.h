@@ -1292,7 +1292,8 @@ inline void register_ws2(Registry& r, Host& h) {
         return uint32_t(q.result);
     };
     auto cleanup=[&h](Cpu&)->uint32_t{Host::SocketCall q{};q.kind=Host::SocketCall::Kind::Cleanup;if(h.socket_call)h.socket_call(q);return uint32_t(q.result);};
-    auto last_error=[&h](Cpu&)->uint32_t{Host::SocketCall q{};q.kind=Host::SocketCall::Kind::LastError;if(h.socket_call)h.socket_call(q);return uint32_t(q.result);};
+    // Winsock errors live in the thread's last-error slot, the same one the failing routes write (unsupported stubs too).
+    auto last_error=[](Cpu& c)->uint32_t{return c.mem.r32(c.fs_base+0x34);};
     r.add("ws2_32.dll","WSAStartup",Conv::Stdcall,2,startup);r.add("ws2_32.dll","#115",Conv::Stdcall,2,startup);
     r.add("ws2_32.dll","WSACleanup",Conv::Stdcall,0,cleanup);r.add("ws2_32.dll","#116",Conv::Stdcall,0,cleanup);
     r.add("ws2_32.dll","WSAGetLastError",Conv::Stdcall,0,last_error);r.add("ws2_32.dll","#111",Conv::Stdcall,0,last_error);
