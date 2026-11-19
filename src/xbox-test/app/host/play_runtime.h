@@ -371,6 +371,7 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     // resolve() can honor the same order for the graph being mapped.
     // Guarded by loaderMutex; loadExW holds it across mapping.
     Module* m=nullptr;
+    bool systemPath=systemDirectoryPath(requested);
     {std::lock_guard<LoaderMutex> lock(state->loaderMutex);
      // While this load maps, its dependencies resolve from the file's own
      // directory first when the flags say to (LOAD_WITH_ALTERED_SEARCH_PATH
@@ -386,7 +387,7 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
                  auto slash=p.find_last_of(L"\\/");
                  return slash==std::wstring::npos?std::wstring():p.substr(0,slash);}():std::wstring()};
      m=named(requested);
-     if(!m && !apiSetName(requested) && !systemDirectoryPath(requested)) {
+     if(!m && !apiSetName(requested) && !systemPath) {
          // Flags that only steer where the file is searched (Mono/Unity pass
          // LOAD_WITH_ALTERED_SEARCH_PATH or the SEARCH_* set for plugins) do not
          // change what is loaded; anything else is refused below, as before.
@@ -444,10 +445,19 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
     // No console opengl32.dll: serve Play's WGL state surface, not a host DLL.
     if(auto gl=opengl32_core::find_module(key.c_str(),true))return gl;
     // Restrict fallback to documented system DLL search, never desktop paths.
-    if(flags&~(LOAD_LIBRARY_SEARCH_SYSTEM32|LOAD_LIBRARY_REQUIRE_SIGNED_TARGET)) {
+    // An absolute System32 path may carry LOAD_WITH_ALTERED_SEARCH_PATH;
+    // Windows still resolves that path as an OS module, but the native fallback
+    // cannot combine that flag with LOAD_LIBRARY_SEARCH_SYSTEM32.
+    DWORD fallbackFlags=flags|LOAD_LIBRARY_SEARCH_SYSTEM32;
+    if(systemPath) {
+        if(flags&~(LOAD_WITH_ALTERED_SEARCH_PATH|LOAD_LIBRARY_SEARCH_SYSTEM32|LOAD_LIBRARY_REQUIRE_SIGNED_TARGET)) {
+            SetLastError(ERROR_NOT_SUPPORTED);return nullptr;
+        }
+        fallbackFlags&=~LOAD_WITH_ALTERED_SEARCH_PATH;
+    } else if(flags&~(LOAD_LIBRARY_SEARCH_SYSTEM32|LOAD_LIBRARY_REQUIRE_SIGNED_TARGET)) {
         SetLastError(ERROR_NOT_SUPPORTED);return nullptr;
     }
-    auto result=LoadLibraryExW(requested.c_str(),nullptr,flags|LOAD_LIBRARY_SEARCH_SYSTEM32);
+    auto result=LoadLibraryExW(requested.c_str(),nullptr,fallbackFlags);
     if(!result) {DWORD error=GetLastError();state->event("LoadLibrary failed name="+narrow(requested)+" error="+std::to_string(error));SetLastError(error);}
     else audioBackendLoaded(key);
     return result;
