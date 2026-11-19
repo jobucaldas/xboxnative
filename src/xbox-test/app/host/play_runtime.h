@@ -76,6 +76,7 @@ struct State {
     std::atomic<bool> faulted{false};
     std::atomic<int> milestone{0};
     std::atomic<DWORD> thread{0};
+    std::atomic<unsigned> guestThreads{0};
     std::atomic<DWORD> firstChanceCode{0};
     std::atomic<uintptr_t> firstChanceAddress{0};
     std::atomic<unsigned> firstChanceCount{0};
@@ -1579,12 +1580,14 @@ static bool initializeReentrant(Module& module) {
 struct ThreadStart { LPTHREAD_START_ROUTINE function;void* arg; };
 static DWORD WINAPI child(void* data) {
     auto p=(ThreadStart*)data;auto function=p->function;auto arg=p->arg;delete p;guestThread=true;
+    state->guestThreads.fetch_add(1,std::memory_order_acq_rel);
     DWORD code=0;
     __try {
         if(!attachGuestThread()) RaiseException(missingException,EXCEPTION_NONCONTINUABLE,0,nullptr);
         code=function(arg);
         detachGuestThread();
     } __except(filter(GetExceptionInformation())) {code=state->code;}
+    state->guestThreads.fetch_sub(1,std::memory_order_acq_rel);
     guestThread=false;return code;
 }
 static HANDLE WINAPI createThread(LPSECURITY_ATTRIBUTES a,SIZE_T stack,LPTHREAD_START_ROUTINE entry,LPVOID arg,DWORD flags,LPDWORD id) {
@@ -1824,7 +1827,11 @@ template<bool Msvcrt> static void __cdecl crtExit(int code) {
     HMODULE crt=crtModule(Msvcrt);
     auto cleanup=crt?(Cleanup)GetProcAddress(crt,"_cexit"):nullptr;
     if(state) state->event("guest CRT exit("+std::to_string(code)+")");
-    if(cleanup) cleanup();
+    // _cexit is process-wide in the host UCRT. Do not run it while another
+    // guest thread is alive: its atexit list and stdio state are shared with
+    // the launcher and with that thread. The last guest thread may perform
+    // the normal exit-time cleanup before Play contains the process exit.
+    if(cleanup && (!state || state->guestThreads.load(std::memory_order_acquire) <= 1)) cleanup();
     exitProcess(UINT(code));
 }
 static void __cdecl crtQuickExit(int code) {
@@ -2267,8 +2274,11 @@ static void runImpl() {
 }
 static DWORD WINAPI worker(void*) {
     guestThread=true;state->thread=GetCurrentThreadId();
+    state->guestThreads.fetch_add(1,std::memory_order_acq_rel);
     __try {runImpl();} __except(filter(GetExceptionInformation())) {}
-    state->result=state->snapshot();state->finished=true;guestThread=false;return state->code;
+    state->result=state->snapshot();state->finished=true;
+    state->guestThreads.fetch_sub(1,std::memory_order_acq_rel);
+    guestThread=false;return state->code;
 }
 // gdi32's pixel-format and SwapBuffers entry points forward to the wgl* exports of whichever opengl32.dll the guest
 // has mapped (Mesa from the runtime directory, or one the game ships). None mapped: Play's failing stubs answer.

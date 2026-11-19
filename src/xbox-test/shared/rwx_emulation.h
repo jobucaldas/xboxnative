@@ -44,6 +44,7 @@ constexpr size_t maxRegions = 1024;
 struct Region {
     uintptr_t base = 0, end = 0, allocationBase = 0;
     unsigned char* pages = nullptr;   // one state byte per page of [base,end)
+    bool freeing = false;              // VirtualFree is outside the table lock
 };
 struct Stats {
     std::atomic<unsigned> regions{0}, executeFlips{0}, writeFlips{0}, failures{0}, retries{0}, live{0}, exhausted{0};
@@ -73,7 +74,7 @@ inline void note(const char* text) { if (auto n = state().notify) n(text); }
 
 // Caller holds the lock.
 inline Region* find(uintptr_t address) {
-    for (auto& r : state().regions) if (r.pages && address >= r.base && address < r.end) return &r;
+    for (auto& r : state().regions) if (r.pages && !r.freeing && address >= r.base && address < r.end) return &r;
     return nullptr;
 }
 inline void forget(Region& r) {
@@ -83,7 +84,7 @@ inline void forget(Region& r) {
 // Caller holds the lock. Marks [from,to) as `value` in every region it touches.
 inline void mark(uintptr_t from, uintptr_t to, unsigned char value) {
     for (auto& r : state().regions) {
-        if (!r.pages || to <= r.base || from >= r.end) continue;
+        if (!r.pages || r.freeing || to <= r.base || from >= r.end) continue;
         for (uintptr_t a = from > r.base ? down(from) : r.base; a < to && a < r.end; a += pageSize) r.pages[(a - r.base) / pageSize] = value;
     }
 }
@@ -97,7 +98,7 @@ inline bool track(uintptr_t from, uintptr_t to) {
     uintptr_t base = from, end = to;
     unsigned overlaps = 0;
     for (auto& r : s.regions) {
-        if (!r.pages || to <= r.base || from >= r.end) continue;
+        if (!r.pages || r.freeing || to <= r.base || from >= r.end) continue;
         ++overlaps;
         if (r.base < base) base = r.base;
         if (r.end > end) end = r.end;
@@ -117,7 +118,7 @@ inline bool track(uintptr_t from, uintptr_t to) {
     if (!slot) for (auto& r : s.regions) if (!r.pages) { slot = &r; break; }
     if (!slot) { HeapFree(GetProcessHeap(), 0, pages); ++s.stats.exhausted; return false; }
     for (auto& r : s.regions) {   // carry over the state of what was tracked
-        if (!r.pages || to <= r.base || from >= r.end) continue;
+        if (!r.pages || r.freeing || to <= r.base || from >= r.end) continue;
         for (uintptr_t a = r.base; a < r.end; a += pageSize) pages[(a - base) / pageSize] = r.pages[(a - r.base) / pageSize];
     }
     for (uintptr_t a = from; a < to; a += pageSize) pages[(a - base) / pageSize] = Writable;
@@ -198,17 +199,34 @@ inline BOOL WINAPI protect(LPVOID p, SIZE_T n, DWORD protection, PDWORD old) {
 inline BOOL WINAPI release(LPVOID p, SIZE_T n, DWORD type) {
     auto& s = state();
     if (!s.stats.live.load(std::memory_order_relaxed)) return VirtualFree(p, n, type);
-    // Free and forget under one lock: another thread's allocation may be given
-    // the same address the instant VirtualFree returns, and must not meet this
-    // thread's stale region.
-    Guard g(&s.lock);
+    Region* pending = nullptr;
+    {
+        Guard g(&s.lock);
+        if (type & MEM_RELEASE) {
+            for (auto& r : s.regions)
+                if (r.pages && !r.freeing && r.allocationBase == (uintptr_t)p) {
+                    // Reserve the table entry before dropping the lock. A
+                    // fault handler then ignores this region, while another
+                    // allocation cannot mistake it for a live range.
+                    r.freeing = true;
+                    pending = &r;
+                    break;
+                }
+        }
+    }
+    // VirtualFree may wait on the suspended owner of a page-fault path. Never
+    // hold the bookkeeping lock across it: a GC can free while that owner is
+    // unable to run and release the lock.
     BOOL ok = VirtualFree(p, n, type);
-    if (!ok) return ok;
     const DWORD error = GetLastError();
-    if (type & MEM_RELEASE) {
-        for (auto& r : s.regions) if (r.pages && r.allocationBase == (uintptr_t)p) forget(r);
-    } else if ((type & MEM_DECOMMIT) && n) {
-        mark((uintptr_t)p, up((uintptr_t)p + n), Native);
+    {
+        Guard g(&s.lock);
+        if (pending && pending->freeing) {
+            if (ok) forget(*pending);
+            else pending->freeing = false;
+        } else if (ok && (type & MEM_DECOMMIT) && n) {
+            mark((uintptr_t)p, up((uintptr_t)p + n), Native);
+        }
     }
     SetLastError(error);
     return ok;
