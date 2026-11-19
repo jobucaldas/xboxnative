@@ -268,7 +268,10 @@ static HMODULE WINAPI moduleW(LPCWSTR name) {
         if(auto gl=opengl32_core::find_module(key.c_str(),false))return gl;
         // Never fall through to Wine's host OpenGL module. Play owns this
         // name, but GetModuleHandle must remain NULL until the guest loads it.
-        if(!_stricmp(key.c_str(),"opengl32.dll"))return nullptr;
+        if(!_stricmp(key.c_str(),"opengl32.dll")) {
+            if(auto m=named(name)) return (HMODULE)m->image.base;
+            return nullptr;
+        }
     }
     if(!name) {
         if(state->exe)return (HMODULE)state->exe->image.base;
