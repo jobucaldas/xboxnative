@@ -1597,13 +1597,13 @@ static void lp_run_managed(LpCtx& c,const std::wstring& path,const std::wstring&
     std::string runtime=play_runtime::narrow(package+L"\\runtime\\mono");
     std::string assembly=play_runtime::narrow(path);
     std::vector<std::string> args;
-    if(!c.args.empty())args.push_back(play_runtime::narrow(c.args));
+    for(const auto& token:play_runtime::command_line_tokens(c.args))args.push_back(play_runtime::narrow(token));
     snprintf(line,sizeof line,"PRUN CLR engine=Mono-x64 exe=%s",play_runtime::narrow(exe).c_str());lp_sink(line);
     const std::wstring monoPath=package+L"\\runtime\\mono\\mono-2.0-sgen.dll";
     // Mono imports version.dll from the Wine donor: probe and wire it before mapping, as the native path does.
     if(!donor_pe::probe(lp_sink)) {c.failName="Wine donor initialization/behavior";lp_sink("DWPE FAIL donor behavior gate; no game code executed");return;}
     mlp::donor_resolve=donor_pe::exported;
-    auto mono=play_runtime::map_managed_runtime(package,monoPath,lp_sink);
+    auto mono=play_runtime::map_managed_runtime(package,monoPath,path,c.args,c.cwd,lp_sink);
     if(!mono){c.failName="Mono: Play loader could not map mono-2.0-sgen.dll";return;}
     auto r=mono_host::run(runtime,assembly,args,[&]{
         g_launch.loaderStarted=now_s();g_launch.pe32Executed=true;

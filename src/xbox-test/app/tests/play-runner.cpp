@@ -344,7 +344,7 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         }
         const auto assembly=root+(fna?L"\\managed\\FnaSmoke.exe":L"\\managed\\Hello.exe");
         const auto runtime=root+L"\\runtime\\mono";
-        const auto module=play_runtime::map_managed_runtime(root,runtime+L"\\mono-2.0-sgen.dll",logline);
+        const auto module=play_runtime::map_managed_runtime(root,runtime+L"\\mono-2.0-sgen.dll",assembly,L"",L"",logline);
         if(!module){logline("MONO PLAY-LOADER FAIL: Mono image mapping failed");return 1;}
         auto result=mono_host::run(play_runtime::narrow(runtime),play_runtime::narrow(assembly),{}, {},
             [module](const char* name){return (void*)play_runtime::managed_export(module,name);},

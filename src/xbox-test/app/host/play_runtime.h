@@ -407,12 +407,6 @@ static HMODULE WINAPI loadExW(LPCWSTR name,HANDLE file,DWORD flags) {
              LOAD_LIBRARY_SEARCH_APPLICATION_DIR|LOAD_LIBRARY_SEARCH_USER_DIRS|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
          auto p=guestLibraryPath(requested,!(flags&~searchOnly));
          if(exists(p)) {
-             const wchar_t* dxilDriver=key=="opengl32.dll"?L"\\opengl32.dll":L"\\vulkan_dzn.dll";
-             if((key=="opengl32.dll"||key=="vulkan_dzn.dll") && !runtimeDirectory.empty() &&
-                _wcsicmp(p.c_str(),(runtimeDirectory+dxilDriver).c_str())==0) {
-                 dxil_runtime::ensure(g_dir,[](const char* line){state->event(line);});
-                 set_dxil_directory(g_dir+L"\\dxil");
-             }
              if(flags&~searchOnly) {
                  state->event("LoadLibrary refused name="+narrow(requested)+" flags="+std::to_string(flags)+": unsupported load flags");
                  SetLastError(ERROR_NOT_SUPPORTED);return nullptr;
@@ -2317,15 +2311,58 @@ static uintptr_t openglExport(const char* name) {
     ExportLookup lookup;
     return (uintptr_t)lookup.finish(exported(*m,name,0));
 }
+// The DXIL validator is fetched before any guest image maps: static imports of Mesa or vulkan_dzn never reach
+// loadExW, and the transfer must not run under loaderMutex, where it would stall guest LoadLibrary/GetProcAddress.
+static void prepare_dxil() {
+    if(!runtimeDirectory.empty()&&(exists(runtimeDirectory+L"\\opengl32.dll")||exists(runtimeDirectory+L"\\vulkan_dzn.dll"))) {
+        dxil_runtime::ensure(g_dir,[](const char* line){state->event(line);});
+        set_dxil_directory(g_dir+L"\\dxil");
+    }
+}
+// Splits a launch-option string into arguments with CommandLineToArgvW's rules,
+// as the x86 guest's shell32 route does. The launcher cannot call the real one:
+// on the console its shell32 entry is a stub.
+static std::vector<std::wstring> command_line_tokens(const std::wstring& input) {
+    std::vector<std::wstring> args;size_t i=0;
+    while(i<input.size()) {
+        while(i<input.size()&&(input[i]==L' '||input[i]==L'\t'))++i;
+        if(i==input.size())break;
+        std::wstring arg;bool quoted=false;
+        while(i<input.size()) {
+            if(input[i]==L'\\') {
+                size_t start=i;while(i<input.size()&&input[i]==L'\\')++i;
+                size_t slashes=i-start;
+                if(i<input.size()&&input[i]==L'"') {
+                    arg.append(slashes/2,L'\\');
+                    if(slashes%2) {arg.push_back(L'"');++i;}
+                    else {quoted=!quoted;++i;}
+                } else arg.append(slashes,L'\\');
+                continue;
+            }
+            if(input[i]==L'"') {
+                if(quoted&&i+1<input.size()&&input[i+1]==L'"') {arg.push_back(L'"');i+=2;continue;}
+                quoted=!quoted;++i;continue;
+            }
+            if(!quoted&&(input[i]==L' '||input[i]==L'\t'))break;
+            arg.push_back(input[i++]);
+        }
+        args.push_back(std::move(arg));
+    }
+    return args;
+}
 // cwd (optional) is the guest's working directory, as a Steam launch option's
-// workingdir names it; empty means the executable's own directory.
+// workingdir names it; empty means the executable's own directory. args is the
+// raw launch-option string: it becomes the guest command line and Main's argv.
 // Managed runtimes are host dependencies, not game executables, but they still
 // use the same PE mapper and import resolver as game DLLs. Keep their mapped
 // state alive for the process because Mono may retain native callbacks.
-static HMODULE map_managed_runtime(const std::wstring& packageRoot,const std::wstring& runtimePath,wxl::Log log) {
+static HMODULE map_managed_runtime(const std::wstring& packageRoot,const std::wstring& runtimePath,const std::wstring& exePath,const std::wstring& args,const std::wstring& cwd,wxl::Log log) {
     if(state) return nullptr;
     clearVulkanDriverFiles();
-    state=new State();state->root=packageRoot;state->cwd=packageRoot;state->log=log;
+    auto exeSlash=exePath.find_last_of(L"\\/");
+    auto exeDir=exeSlash==std::wstring::npos?packageRoot:exePath.substr(0,exeSlash);
+    state=new State();state->root=packageRoot;state->cwd=cwd.empty()?exeDir:cwd;state->log=log;
+    state->command=L"\""+exePath+L"\" "+args;state->commandA=narrow(state->command);
     observed.store(state,std::memory_order_release);mlp::log=log;wxl::logger=log;
     xinput_core::note=[](const char* text){if(mlp::log)mlp::log(text);};
     mlp::missingResolver=missing;mlp::assets.clear();mlp::summaries.clear();mlp::launch_gap=gap_summary::Binder{};
@@ -2336,7 +2373,11 @@ static HMODULE map_managed_runtime(const std::wstring& packageRoot,const std::ws
     using AddVeh=PVOID(WINAPI*)(ULONG,LONG(CALLBACK*)(EXCEPTION_POINTERS*));
     auto addVeh=(AddVeh)kernel_tail::native("AddVectoredExceptionHandler");
     if(addVeh)state->veh=addVeh(1,vectored);
+    // The guest's current directory is its own folder, not the launcher's (runImpl does the same for PE games).
+    using SetDir=BOOL(WINAPI*)(LPCWSTR);auto setDir=(SetDir)kernel_tail::native("SetCurrentDirectoryW");
+    if(!setDir || !setDir(state->cwd.c_str())) {state->event("SetCurrentDirectoryW failed error="+std::to_string(GetLastError()));return nullptr;}
     set_runtime_directory(packageRoot+L"\\runtime");
+    prepare_dxil();
     auto slash=runtimePath.find_last_of(L"\\/");
     if(slash!=std::wstring::npos) alteredLoadDir()=runtimePath.substr(0,slash);
     auto module=map(runtimePath,"mono-2.0-sgen.dll");
@@ -2383,6 +2424,7 @@ static bool start(const std::wstring& root,const std::wstring& exe,const std::ws
     mlp::log=log;wxl::logger=log;
     xinput_core::note=[](const char* text){if(mlp::log)mlp::log(text);};mlp::missingResolver=missing;mlp::assets.clear();mlp::summaries.clear();mlp::launch_gap=gap_summary::Binder{};
     gdi32_core::gl_lookup.store(&openglExport);
+    prepare_dxil();
     state->exe=map(root+L"\\"+exe);if(!state->exe) {
         auto name=basename(exe);if(state->log) for(const auto& line:mlp::launch_gap.report(name,"x64").lines) state->log(line.c_str());
         state->result=state->snapshot();state->finished=true;return true;
