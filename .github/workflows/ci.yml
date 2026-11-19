@@ -40,6 +40,7 @@ jobs:
           bash src/xbox-test/app/tests/d3d12-sm-cap.sh
           bash src/xbox-test/app/tests/launch-status.sh
           bash src/xbox-test/app/tests/launch-target.sh
+          bash src/xbox-test/app/tests/launch-bugbot-guards.sh
           bash src/xbox-test/app/tests/guest-overlay-input.sh
           bash src/xbox-test/app/tests/corewindow-lifetime-test.sh
           bash src/xbox-test/app/tests/extract-icon-test.sh
