@@ -12,6 +12,15 @@
 #include "x86_gl_generated.h"
 #include "x86com.h"
 namespace x86 {
+// Host-side D3D11 creation request: the bridge fills the inputs, the host
+// factory fills the out pointers (host COM references the bridge then wraps).
+struct D3D11CreateArgs {
+    uint32_t driver = 0, flags = 0, sdk = 0;
+    std::vector<uint32_t> levels;
+    const void* swapchain_desc = nullptr;   // host DXGI_SWAP_CHAIN_DESC, or null for CreateDevice
+    void* swapchain = nullptr; void* device = nullptr; void* context = nullptr;
+    uint32_t feature_level = 0;
+};
 struct Host {
     enum class NlsOperation { IsValidCodePage, GetCPInfo, MultiByteToWideChar, WideCharToMultiByte,
         GetStringTypeA, GetStringTypeW, GetStringTypeExW, GetLocaleInfoA, GetLocaleInfoW, GetLocaleInfoEx, GetUserDefaultLocaleName,
@@ -144,6 +153,7 @@ struct Host {
     static constexpr uint32_t DSOUND_WAIT_UNHANDLED = 0xfffffffeu;
     std::function<uint32_t(Cpu&, uint32_t, uint32_t)> dsound_wait;
     std::function<uintptr_t(uint32_t)> d3d9_window;
+    std::function<uint32_t(D3D11CreateArgs&)> d3d11_create;   // empty: the bridge reports a D3D11 gap
     ComSpace com;
     uint32_t d3d9_guest_top = 0x7D000000u;
     std::map<std::pair<uint32_t, uint32_t>, std::tuple<void*, uint32_t, uint32_t>> d3d9_locks;

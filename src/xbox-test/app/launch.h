@@ -1362,6 +1362,21 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         // passed through: Play's validated DXGI factory maps user32 record
         // windows onto the CoreWindow when the shim creates its chain.
         host.d3d9_window=[&host](uint32_t hwnd)->uintptr_t{auto it=host.window_handles.find(hwnd);return it!=host.window_handles.end()?it->second:uintptr_t(hwnd);};
+        // The 32-bit guest's D3D11 calls take the 64-bit route: the system d3d11 device
+        // (createDevice), adopted by the CoreWindow factory, and a chain built through
+        // that factory's HWND path, which Play redirects to the app's CoreWindow.
+        host.d3d11_create=[](x86::D3D11CreateArgs& a)->uint32_t {
+            ID3D11Device* device=nullptr; ID3D11DeviceContext* context=nullptr; IDXGISwapChain* chain=nullptr;
+            D3D_FEATURE_LEVEL level=D3D_FEATURE_LEVEL_9_1;
+            const D3D_FEATURE_LEVEL* levels=reinterpret_cast<const D3D_FEATURE_LEVEL*>(a.levels.data());
+            UINT count=UINT(a.levels.size());
+            HRESULT hr=a.swapchain_desc
+                ? play_runtime::createDeviceAndSwapChain(nullptr,D3D_DRIVER_TYPE(a.driver),nullptr,a.flags,levels,count,a.sdk,
+                      static_cast<const DXGI_SWAP_CHAIN_DESC*>(a.swapchain_desc),&chain,&device,&level,&context)
+                : play_runtime::createDevice(nullptr,D3D_DRIVER_TYPE(a.driver),nullptr,a.flags,levels,count,a.sdk,&device,&level,&context);
+            a.swapchain=chain; a.device=device; a.context=context; a.feature_level=uint32_t(level);
+            return uint32_t(hr);
+        };
         using GetDc=HDC(WINAPI*)(HWND);using ReleaseDc=int(WINAPI*)(HWND,HDC);using GetClientRect=BOOL(WINAPI*)(HWND,RECT*);using MapWindowPoint=BOOL(WINAPI*)(HWND,POINT*);
         auto client_to_screen=records?reinterpret_cast<MapWindowPoint>(GetProcAddress(records,"ClientToScreen")):nullptr;
         auto screen_to_client=records?reinterpret_cast<MapWindowPoint>(GetProcAddress(records,"ScreenToClient")):nullptr;
