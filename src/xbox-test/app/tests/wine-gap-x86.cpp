@@ -64,8 +64,8 @@ int main(int argc, char** argv) {
     if (argc == 3 && std::string(argv[2]) == "--assert-fixture") {
         const std::vector<std::string> expected = {
             "GAP: dll=xinput1_3.dll system=1 donor=0 stub=0 missing=0",
-            "GAP: dll=api-ms-win-crt-heap-l1-1-0.dll system=0 donor=0 stub=0 missing=1",
-            "GAP: missing api-ms-win-crt-heap-l1-1-0.dll!_aligned_free",
+            // The api-ms-win-crt sets resolve to the i386 ucrtbase donor.
+            "GAP: dll=api-ms-win-crt-heap-l1-1-0.dll system=0 donor=1 stub=0 missing=0",
         };
         for (const auto& want : expected) {
             bool found = false;

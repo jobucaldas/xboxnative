@@ -243,6 +243,12 @@ inline std::string served_by(const std::string& dll, const std::string& sym) {
     if (ucrt_contract(dll)) return (declared(sym) && ucrt_compatible(sym)) ? "msvcrt.dll" : dll;
     return dll;
 }
+// The module the loader maps for an API-set import that no host surface serves:
+// every Universal CRT contract name loads the ucrtbase donor (runtime/x86), so the
+// CRT's state is one module. Other names keep their own name.
+inline std::string donor_module(const std::string& dll) {
+    return ucrt_contract(dll) ? "ucrtbase.dll" : dll;
+}
 
 } // namespace apiset
 } // namespace x86

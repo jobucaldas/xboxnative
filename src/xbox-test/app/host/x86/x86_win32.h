@@ -924,6 +924,10 @@ inline void register_gl(Registry& r, Host& h) {
         count("RegisterDeviceNotificationW");
         return c.arg(0) && c.arg(1) ? 0xD1000001u : 0;
     });
+    r.add("user32.dll", "RegisterDeviceNotificationA", Conv::Stdcall, 3, [count](Cpu& c) -> uint32_t {
+        count("RegisterDeviceNotificationA");
+        return c.arg(0) && c.arg(1) ? 0xD1000001u : 0;
+    });
     r.add("user32.dll", "UnregisterDeviceNotification", Conv::Stdcall, 1, [count](Cpu& c) -> uint32_t {
         count("UnregisterDeviceNotification");
         return c.arg(0) == 0xD1000001u;

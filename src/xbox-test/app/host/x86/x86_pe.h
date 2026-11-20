@@ -265,10 +265,22 @@ inline bool is_vc110_vc120_dll(const std::string& name) {
     std::string lower=name; for(auto& c:lower)if(c>='A'&&c<='Z')c+=32;
     return lower=="msvcr110.dll"||lower=="msvcp110.dll"||lower=="msvcr120.dll"||lower=="msvcp120.dll";
 }
+// The VC++ 2015+ runtime (vcruntime140, msvcp140, concrt140) as Wine's i386 donors. The
+// api-ms-win-crt-*-l1-1-0 contract names are not files; they map to ucrtbase (apiset.h).
+// vcruntime140_1 is x64-only (no i386 build in Wine 10), so it is not a donor here.
+inline bool is_vc2015_dll(const std::string& name) {
+    std::string lower=name; for(auto& c:lower)if(c>='A'&&c<='Z')c+=32;
+    return lower=="vcruntime140.dll"||lower=="msvcp140.dll"||lower=="concrt140.dll";
+}
+// Modules served from the runtime/x86 donor directory: VC++ 110/120/2015+ and Wine's version.dll.
+inline bool is_x86_runtime_dll(const std::string& name) {
+    std::string lower=name; for(auto& c:lower)if(c>='A'&&c<='Z')c+=32;
+    return is_vc110_vc120_dll(lower)||is_vc2015_dll(lower)||lower=="version.dll";
+}
 inline DllSource make_vc110_vc120_source(const DllReader& game, const DllReader& runtime,
                                          const DllOriginLogger& log = nullptr) {
     return [game,runtime,log](const std::string& name) {
-        if(!is_vc110_vc120_dll(name))return std::vector<uint8_t>{};
+        if(!is_x86_runtime_dll(name))return std::vector<uint8_t>{};
         auto bytes=game?game(name):std::vector<uint8_t>{};
         const char* origin="game dir";
         if(bytes.empty()) { bytes=runtime?runtime(name):std::vector<uint8_t>{}; origin="runtime"; }
@@ -418,19 +430,34 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
     // bindings (rebinding from the guest image would shadow host thunks).
     size_t nt = u32(flat, 0x3c), opt = nt + 24;
     uint32_t imp = u32(flat, opt + 96 + 8);
+    // One CRT per image: when any Universal CRT or VC++ 2015 import is a gap, every API-set CRT
+    // import goes to the ucrtbase donor. Mixing the registry's msvcrt answers with the donor's
+    // would split FILE*, heap and locale state between two CRTs (fopen from one, fwrite from the
+    // other; _strdup's block freed by the other heap). With no such gap the registry keeps them all.
+    bool crt_donor = false;
+    for (const auto& gap : img.unresolved) {
+        const size_t bang = gap.find('!');
+        if (bang == std::string::npos) continue;
+        const std::string gap_dll = gap.substr(0, bang);
+        if (apiset::ucrt_contract(gap_dll) || is_vc2015_dll(gap_dll)) { crt_donor = true; break; }
+    }
     if (imp) for (size_t d = imp;; d += 20) {
         uint32_t name = u32(flat, d + 12);
         if (!name) break;
         std::string dll = pe_str(flat, name);
         for (auto& c : dll) if (c >= 'A' && c <= 'Z') c += 32;
-        auto known = loaded.find(dll);
+        // An API-set CRT name maps to the ucrtbase donor's module (one state for all of them).
+        const std::string module = apiset::donor_module(dll);
+        const bool aliased = module != dll;
+        if (aliased && !crt_donor) continue;  // the registry serves every CRT import of this image
+        auto known = loaded.find(module);
         if (known == loaded.end()) {
-            std::vector<uint8_t> bytes = source ? source(dll) : std::vector<uint8_t>{};
+            std::vector<uint8_t> bytes = source ? source(module) : std::vector<uint8_t>{};
             if (bytes.empty()) continue;  // stays unresolved; the stub faults by name
-            Dll dep = load_dll(mem, table, reg, bytes, source, loaded, depth + 1, order, os_resolve, dll, observe);
-            known = loaded.find(dll);  // load_dll reserved the slot (cycles reuse it)
-            known->second.host_name = dll;
-            if (order) order->push_back(dll);  // load order: DllMain runs in reverse at detach
+            Dll dep = load_dll(mem, table, reg, bytes, source, loaded, depth + 1, order, os_resolve, module, observe);
+            known = loaded.find(module);  // load_dll reserved the slot (cycles reuse it)
+            known->second.host_name = module;
+            if (order) order->push_back(module);  // load order: DllMain runs in reverse at detach
         } else known->second.refs++;
         // Rebind this dependency's IAT: ordinal or name -> export guest address.
         // load_pe32 already applied section protections, so the IAT pages are

@@ -1270,7 +1270,7 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
     };
     x86::DllSource dllSource=x86::make_steam_dll_source(gameDlls,stagedSteam,d3dxSource,steamProvider,steamstub);
     x86::DllLoadObserver donorGaps=[&](const std::string& dll,const std::vector<std::string>& unresolved) {
-        if(!x86::is_vc110_vc120_dll(dll)&&!x86::is_d3dx9_donor_dll(dll))return;
+        if(!x86::is_x86_runtime_dll(dll)&&!x86::is_d3dx9_donor_dll(dll))return;
         std::string kernel,other; unsigned kernelCount=0,otherCount=0,kernelMore=0,otherMore=0;
         for(const auto& item:unresolved) {
             bool isKernel=item.rfind("kernel32.dll!",0)==0;
