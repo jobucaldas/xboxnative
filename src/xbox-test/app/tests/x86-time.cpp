@@ -59,6 +59,12 @@ int main() {
     CHECK(call("kernel32.dll","createdirectorya",{dir,0})==1);
     CHECK(call("kernel32.dll","deletefilea",{del})==1&&call("kernel32.dll","deletefilew",{delw})==1);
     CHECK(calls==7);
+    // GetSystemTimePreciseAsFileTime writes the same modelled FILETIME as GetSystemTimeAsFileTime; one CPU means processor 0.
+    mem.w32(0x3200, 0); mem.w32(0x3204, 0);
+    call("kernel32.dll", "getsystemtimepreciseasfiletime", {0x3200});
+    CHECK(mem.r(0x3200, 4) == 0x80000000u && mem.r(0x3204, 4) == 0x01D00000u);
+    CHECK(call("kernel32.dll", "getcurrentprocessornumber", {}) == 0);
+    CHECK(call("kernel32.dll", "flushprocesswritebuffers", {}) == 0);
     std::printf("x86-time: %d checks, %d failures\n",checks,failures);return failures?1:0;
 }
 #endif

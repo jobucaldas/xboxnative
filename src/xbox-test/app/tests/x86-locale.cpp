@@ -46,6 +46,85 @@ int main() {
     CHECK(call("getusergeoid",{16})==0xFFFFFFFFu);CHECK(g.last_error()==1);
     host.nls_call={};
     CHECK(call("getusergeoid",{16})==0xFFFFFFFFu);CHECK(g.last_error()==120);CHECK(geo==2);
+    // LocaleNameToLCID / IsValidLocaleName forward the name (and flags) to the host; no host means ERROR_CALL_NOT_IMPLEMENTED.
+    uint32_t en_us = g.put_wstr(u"en-US");
+    unsigned locale_calls = 0;
+    host.nls_call = [&](const Host::NlsRequest& q) {
+        ++locale_calls; Host::NlsResponse r{};
+        if (q.operation == Host::NlsOperation::LocaleNameToLCID) { CHECK(q.flags == 0x20); CHECK(q.locale_name == u"en-US"); r.result = 0x409; return r; }
+        CHECK(q.operation == Host::NlsOperation::IsValidLocaleName); CHECK(q.locale_name == u"en-US"); r.result = 1; return r; };
+    CHECK(call("localenametolcid", {en_us, 0x20}) == 0x409);
+    CHECK(call("isvalidlocalename", {en_us}) == 1);
+    CHECK(locale_calls == 2);
+    host.nls_call = {};
+    g.set_last_error(0);CHECK(call("localenametolcid", {en_us, 0}) == 0);CHECK(g.last_error() == 120);
+    CHECK(call("isvalidlocalename", {en_us}) == 0);
+    // LCMapStringA: one byte per output character (unit 1), copied back from the host's bytes.
+    host.nls_call = [&](const Host::NlsRequest& q) {
+        Host::NlsResponse r{};
+        CHECK(q.operation == Host::NlsOperation::LCMapStringA); CHECK(q.locale == 0x409); CHECK(q.flags == 0x200);
+        CHECK(q.input.size() == 2 && q.input[0] == 'a' && q.input[1] == 'b');
+        r.result = 2; r.output = {'A', 'B'}; return r; };
+    mem.write_bytes(0x3000, "ab", 2);
+    CHECK(call("lcmapstringa", {0x409, 0x200, 0x3000, 2, 0x3100, 8}) == 2);CHECK(mem.r(0x3100, 1) == 'A' && mem.r(0x3101, 1) == 'B');
+    // CompareStringA: both strings travel as bytes; CSTR_LESS (1) is returned unchanged.
+    host.nls_call = [&](const Host::NlsRequest& q) {
+        Host::NlsResponse r{};
+        CHECK(q.operation == Host::NlsOperation::CompareStringA); CHECK(q.locale == 0x409); CHECK(q.flags == 0);
+        CHECK(q.input.size() == 3 && q.input[2] == 'c'); CHECK(q.input2.size() == 3 && q.input2[2] == 'd');
+        r.result = 1; return r; };
+    mem.write_bytes(0x3000, "abc", 3); mem.write_bytes(0x3010, "abd", 3);
+    CHECK(call("comparestringa", {0x409, 0, 0x3000, 3, 0x3010, 3}) == 1);
+    // lstrcmpiA: CompareStringA(LOCALE_USER_DEFAULT, NORM_IGNORECASE) on NUL-terminated input, minus 2.
+    host.nls_call = [&](const Host::NlsRequest& q) {
+        Host::NlsResponse r{};
+        CHECK(q.operation == Host::NlsOperation::CompareStringA); CHECK(q.locale == 0x400); CHECK(q.flags == 1);
+        CHECK(q.input.size() == 4 && q.input[3] == 0 && q.input2.size() == 4);
+        r.result = 2; return r; };
+    mem.write_bytes(0x3020, "Abc", 4); mem.write_bytes(0x3030, "abc", 4);
+    CHECK(call("lstrcmpia", {0x3020, 0x3030}) == 0);
+    host.nls_call = [&](const Host::NlsRequest&) { Host::NlsResponse r{}; r.result = 3; return r; };
+    CHECK(call("lstrcmpia", {0x3020, 0x3030}) == 1);
+    host.nls_call = [&](const Host::NlsRequest&) { Host::NlsResponse r{}; r.last_error = 87; return r; };
+    g.set_last_error(0);CHECK(call("lstrcmpia", {0x3020, 0x3030}) == 0);CHECK(g.last_error() == 87);
+    // GetStringTypeExA is the same host operation as GetStringTypeA: one WORD of type bits per input byte.
+    host.nls_call = [&](const Host::NlsRequest& q) {
+        Host::NlsResponse r{};
+        CHECK(q.operation == Host::NlsOperation::GetStringTypeA); CHECK(q.locale == 0x409); CHECK(q.type == 1);
+        r.result = 1; r.output = {0x01, 0x00, 0x02, 0x00}; return r; };
+    mem.write_bytes(0x3040, "ab", 2);
+    CHECK(call("getstringtypeexa", {0x409, 1, 0x3040, 2, 0x3100}) == 1);CHECK(mem.r(0x3100, 2) == 1 && mem.r(0x3102, 2) == 2);
+    host.nls_call = {};
+    // HeapValidate: NULL validates the heap; an address that is not a live allocation fails with ERROR_INVALID_ADDRESS.
+    CHECK(call("heapvalidate", {0x1, 0, 0}) == 1);
+    g.set_last_error(0);CHECK(call("heapvalidate", {0x1, 0, 0x3000}) == 0);CHECK(g.last_error() == 487);
+    CHECK(call("heapwalk", {0x1, 0}) == 0);CHECK(g.last_error() == 120);
+    CHECK(call("heapcompact", {0x1, 0}) == 0);CHECK(g.last_error() == 120);
+    // IsBadReadPtr: FALSE over mapped pages (0x1000..0x31000 in this harness), TRUE across an unmapped page.
+    CHECK(call("isbadreadptr", {0x3000, 16}) == 0);CHECK(call("isbadreadptr", {0x3000, 0}) == 0);
+    CHECK(call("isbadreadptr", {0x40000, 4}) == 1);CHECK(call("isbadreadptr", {0x30ff8, 16}) == 1);
+    // EnumSystemLocalesEx: the user's default locale is passed once to the guest callback as a NUL-terminated UTF-16 string.
+    mem.map(0x50000, 0x1000, PROT_R | PROT_W | PROT_X);
+    // callback: inc [0x330c]; store [esp+4] (the name) at 0x3300; return TRUE (ret 12)
+    const std::vector<uint8_t> enum_true{0xFF,0x05,0x0C,0x33,0x00,0x00, 0x8B,0x44,0x24,0x04, 0xA3,0x00,0x33,0x00,0x00, 0xB8,0x01,0x00,0x00,0x00, 0xC2,0x0C,0x00};
+    // callback: inc [0x330c]; return FALSE (ret 12)
+    const std::vector<uint8_t> enum_false{0xFF,0x05,0x0C,0x33,0x00,0x00, 0x31,0xC0, 0xC2,0x0C,0x00};
+    mem.write_bytes(0x50000, enum_true.data(), enum_true.size());
+    mem.write_bytes(0x50100, enum_false.data(), enum_false.size());
+    unsigned enum_host_calls = 0;
+    host.nls_call = [&](const Host::NlsRequest& q) {
+        ++enum_host_calls; Host::NlsResponse r{};
+        CHECK(q.operation == Host::NlsOperation::GetUserDefaultLocaleName);
+        r.result = 6; r.output.assign({'e',0,'n',0,'-',0,'U',0,'S',0,0,0}); return r; };
+    mem.w32(0x330c, 0);
+    CHECK(call("enumsystemlocalesex", {0x50000, 0x10, 0x1234, 0}) == 1);
+    CHECK(mem.r32(0x330c) == 1 && enum_host_calls == 1);
+    const uint32_t enum_name = mem.r32(0x3300);
+    CHECK(mem.r(enum_name, 2) == 'e' && mem.r(enum_name + 2, 2) == 'n' && mem.r(enum_name + 8, 2) == 'S' && mem.r(enum_name + 10, 2) == 0);
+    mem.w32(0x330c, 0);
+    CHECK(call("enumsystemlocalesex", {0x50100, 0, 0, 0}) == 1);CHECK(mem.r32(0x330c) == 1);
+    g.set_last_error(0);CHECK(call("enumsystemlocalesex", {0, 0, 0, 0}) == 0);CHECK(g.last_error() == 87);
+    host.nls_call = {};
     std::printf("x86-locale: %d checks, %d failures\n",checks,failures);return failures?1:0;
 }
 #endif

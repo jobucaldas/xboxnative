@@ -109,5 +109,26 @@ int main(int argc, char** argv) {
         CHECK(!file.empty() && run_timer_guest(file, failure));
         if (!failure.empty()) std::printf("FAIL timer guest: %s\n", failure.c_str());
     }
+    // LoadImageA: bitmaps and LR_LOADFROMFILE are not served; unknown types and unknown modules fail truthfully.
+    static unsigned g_stub_calls = 0;
+    g_stub_calls = 0;
+    reg.add("user32.dll", "LoadCursorA", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { ++g_stub_calls; return 0x7777; });
+    guest.set_last_error(0); CHECK(call("LoadImageA", {0, 32512, 0, 0, 0, 0}) == 0); CHECK(guest.last_error() == 1813);
+    guest.set_last_error(0); CHECK(call("LoadImageA", {0, 32512, 5, 0, 0, 0}) == 0); CHECK(guest.last_error() == 87);
+    guest.set_last_error(0); CHECK(call("LoadImageA", {0, 32512, 2, 0, 0, 0x10}) == 0); CHECK(guest.last_error() == 87);
+    guest.set_last_error(0); CHECK(call("LoadImageA", {0x1234, 0x5000, 1, 0, 0, 0}) == 0); CHECK(guest.last_error() == 1813);
+    CHECK(g_stub_calls == 0);
+    // Stock cursor (hinst NULL, ordinal name) forwards to LoadCursorA and returns its handle.
+    CHECK(call("LoadImageA", {0, 32512, 2, 0, 0, 0}) == 0x7777); CHECK(g_stub_calls == 1);
+    // LoadImageA with LR_LOADFROMFILE: the file is checked through host.file_call (GetFileAttributesA's route).
+    mem.write_bytes(0x22000, "exists.ico", 11); mem.write_bytes(0x22020, "missing.ico", 12); mem.write_bytes(0x22040, "exists.bmp", 11);
+    host.file_call = [&](Host::FileCall& q) { const bool found = q.path_a == "exists.ico" || q.path_a == "exists.bmp"; q.succeeded = found; q.error = found ? 0 : 2; };
+    reg.add("user32.dll", "LoadIconA", Conv::Stdcall, 2, [](Cpu& c) -> uint32_t { return c.arg(0) == 0 && c.arg(1) == 32512 ? 0x5555 : 0x4444; });
+    guest.set_last_error(0); CHECK(call("LoadImageA", {0, 0x22000, 1, 0, 0, 0x10}) == 0x5555);
+    guest.set_last_error(0); CHECK(call("LoadImageA", {0, 0x22020, 1, 0, 0, 0x10}) == 0); CHECK(guest.last_error() == 2);
+    guest.set_last_error(0); CHECK(call("LoadImageA", {0, 0x22040, 0, 0, 0, 0x10}) == 0); CHECK(guest.last_error() == 120);
+    guest.set_last_error(0); CHECK(call("LoadImageA", {0, 32512, 1, 0, 0, 0x10}) == 0); CHECK(guest.last_error() == 87);
+    host.file_call = {};
+    guest.set_last_error(0); CHECK(call("LoadImageA", {0, 0x22000, 1, 0, 0, 0x10}) == 0); CHECK(guest.last_error() == 120);
     std::printf("x86-user32: %d checks, %d failures\n", checks, failures); return failures ? 1 : 0;
 }
