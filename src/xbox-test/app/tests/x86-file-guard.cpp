@@ -5,6 +5,7 @@
 #include <cstdio>
 static int checks, failures;
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #x); } } while (0)
+using x86_file_guard::ambiguous;
 static std::u16string u(const char* s) { std::u16string r; while (*s) r.push_back(char16_t(*s++)); return r; }
 
 int main() {
@@ -16,13 +17,18 @@ int main() {
     // Win32 drops trailing periods and spaces from components.
     CHECK(!local.allow("delete", u("C:\\Game\\LocalState.\\save.dat")));
     CHECK(!local.allow("delete", u("C:\\Game\\LocalState \\save.dat")));
-    // ".. " and "..\x20." strip to the parent (Win32 strips trailing spaces and dots), so they escape to LocalState's sibling.
+    // Dots-and-spaces-only names other than "." and ".." are refused: they could escape to LocalState's sibling.
     CHECK(!local.allow("create", u("C:\\Game\\Other\\.. \\LocalState\\save.dat")));
     CHECK(!local.allow("create", u("C:\\Game\\Other\\..\x20.\\LocalState\\save.dat")));
-    CHECK(x86_file_guard::normalize(u("C:\\Game\\Other\\.. \\LocalState"), {}) == u("c:\\game\\localstate"));
-    // "..." has no safe meaning (dropped or parent), so the guard refuses it.
+    CHECK(!local.allow("create", u("C:\\Game\\Other\\. .\\LocalState\\save.dat")));
+    CHECK(!local.allow("create", u("C:\\Game\\Other\\ ..\\LocalState\\save.dat")));
     CHECK(!local.allow("delete", u("C:\\Game\\Other\\...\\LocalState\\save.dat")));
     CHECK(!local.allow("delete", u("C:\\Game\\Other\\...\\..\\LocalState\\save.dat")));
+    CHECK(ambiguous(u("C:\\Game\\Other\\.. \\LocalState")) && ambiguous(u("a\\. .\\b")) && ambiguous(u("a\\ ..\\b")));
+    CHECK(!ambiguous(u("C:\\Game\\a.\\.\\..\\b")) && !ambiguous(u("C:\\Game\\LocalState \\save")));
+    // Ordinary trailing dots and spaces on real names are still stripped; "." and ".." keep their meaning.
+    CHECK(x86_file_guard::normalize(u("C:\\Game\\LocalState. \\x"), {}) == u("c:\\game\\localstate\\x"));
+    CHECK(x86_file_guard::normalize(u("C:\\Game\\Other\\..\\LocalState\\x"), {}) == u("c:\\game\\localstate\\x"));
     // A rooted name is on the cwd drive.
     CHECK(!local.allow("create", u("\\Game\\LocalState\\save.dat")));
     // Ordinary cwd-relative files stay allowed.
