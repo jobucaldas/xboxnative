@@ -21,7 +21,7 @@ out=${out:-$root/out/wine-donors}
 DLLS=(avrt dinput8 hid psapi setupapi shcore version)
 GRAPHICS=(d3dcompiler_47)
 RUNTIME=(vcruntime140 msvcp140 msvcp140_1 msvcp140_2 msvcp140_atomic_wait msvcp140_codecvt_ids concrt140)
-RUNTIME_X86=(msvcr110 msvcp110 msvcr120 msvcp120)
+RUNTIME_X86=(msvcr110 msvcp110 msvcr120 msvcp120 vcruntime140 msvcp140 concrt140 version)
 D3DX9_X86=(d3dx9_24 d3dx9_25 d3dx9_26 d3dx9_27 d3dx9_28 d3dx9_29 d3dx9_30 d3dx9_31 d3dx9_32 d3dx9_33 d3dx9_34 d3dx9_35 d3dx9_36 d3dx9_37 d3dx9_38 d3dx9_39 d3dx9_40 d3dx9_41 d3dx9_42 d3dx9_43)
 D3DX9_DEPS_X86=(d3dcompiler_47 d3dxof ucrtbase)
 read -r _ url sha < <(grep -E '^wine-src[[:space:]]' "$root/deps.pin") || { echo "wine-src missing from deps.pin" >&2; exit 2; }

@@ -265,10 +265,22 @@ inline bool is_vc110_vc120_dll(const std::string& name) {
     std::string lower=name; for(auto& c:lower)if(c>='A'&&c<='Z')c+=32;
     return lower=="msvcr110.dll"||lower=="msvcp110.dll"||lower=="msvcr120.dll"||lower=="msvcp120.dll";
 }
+// The VC++ 2015+ runtime (vcruntime140, msvcp140, concrt140) as Wine's i386 donors. The
+// api-ms-win-crt-*-l1-1-0 contract names are not files; they map to ucrtbase (apiset.h).
+// vcruntime140_1 is x64-only (no i386 build in Wine 10), so it is not a donor here.
+inline bool is_vc2015_dll(const std::string& name) {
+    std::string lower=name; for(auto& c:lower)if(c>='A'&&c<='Z')c+=32;
+    return lower=="vcruntime140.dll"||lower=="msvcp140.dll"||lower=="concrt140.dll";
+}
+// Modules served from the runtime/x86 donor directory: VC++ 110/120/2015+ and Wine's version.dll.
+inline bool is_x86_runtime_dll(const std::string& name) {
+    std::string lower=name; for(auto& c:lower)if(c>='A'&&c<='Z')c+=32;
+    return is_vc110_vc120_dll(lower)||is_vc2015_dll(lower)||lower=="version.dll";
+}
 inline DllSource make_vc110_vc120_source(const DllReader& game, const DllReader& runtime,
                                          const DllOriginLogger& log = nullptr) {
     return [game,runtime,log](const std::string& name) {
-        if(!is_vc110_vc120_dll(name))return std::vector<uint8_t>{};
+        if(!is_x86_runtime_dll(name))return std::vector<uint8_t>{};
         auto bytes=game?game(name):std::vector<uint8_t>{};
         const char* origin="game dir";
         if(bytes.empty()) { bytes=runtime?runtime(name):std::vector<uint8_t>{}; origin="runtime"; }
@@ -423,14 +435,17 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
         if (!name) break;
         std::string dll = pe_str(flat, name);
         for (auto& c : dll) if (c >= 'A' && c <= 'Z') c += 32;
-        auto known = loaded.find(dll);
+        // An API-set CRT name maps to the ucrtbase donor's module (one state for all of them).
+        const std::string module = apiset::donor_module(dll);
+        const bool aliased = module != dll;
+        auto known = loaded.find(module);
         if (known == loaded.end()) {
-            std::vector<uint8_t> bytes = source ? source(dll) : std::vector<uint8_t>{};
+            std::vector<uint8_t> bytes = source ? source(module) : std::vector<uint8_t>{};
             if (bytes.empty()) continue;  // stays unresolved; the stub faults by name
-            Dll dep = load_dll(mem, table, reg, bytes, source, loaded, depth + 1, order, os_resolve, dll, observe);
-            known = loaded.find(dll);  // load_dll reserved the slot (cycles reuse it)
-            known->second.host_name = dll;
-            if (order) order->push_back(dll);  // load order: DllMain runs in reverse at detach
+            Dll dep = load_dll(mem, table, reg, bytes, source, loaded, depth + 1, order, os_resolve, module, observe);
+            known = loaded.find(module);  // load_dll reserved the slot (cycles reuse it)
+            known->second.host_name = module;
+            if (order) order->push_back(module);  // load order: DllMain runs in reverse at detach
         } else known->second.refs++;
         // Rebind this dependency's IAT: ordinal or name -> export guest address.
         // load_pe32 already applied section protections, so the IAT pages are
@@ -461,7 +476,9 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
                 for (auto& ch : sym) if (ch >= 'A' && ch <= 'Z') ch += 32;
                 addr = dll_export_addr(known->second, sym, loaded, os_resolve);
             }
-            if (addr) {
+            // An aliased CRT import keeps a registry binding (msvcrt's surface): only a gap is rebound.
+            const bool gap_slot = std::find(img.unresolved.begin(), img.unresolved.end(), label) != img.unresolved.end();
+            if (addr && (!aliased || gap_slot)) {
                 uint32_t slot = img.base + dst + j * 4;
                 mem.protect(slot & ~4095u, 4096, PROT_R | PROT_W);
                 mem.w32(slot, addr); ++img.bound;

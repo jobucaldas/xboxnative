@@ -47,7 +47,7 @@ static std::string route_for_symbol(const std::string& dll, const std::string& s
     return fallback;
 }
 static bool x86_donor(const std::string& dll) {
-    return x86::is_vc110_vc120_dll(dll) || x86::is_d3dx9_donor_dll(dll);
+    return x86::is_x86_runtime_dll(dll) || x86::is_d3dx9_donor_dll(dll) || x86::apiset::donor_module(dll) != dll;
 }
 struct Pe {
     std::vector<unsigned char> bytes;

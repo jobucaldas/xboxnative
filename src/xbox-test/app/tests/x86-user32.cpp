@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
         {"AllowSetForegroundWindow", 1, Conv::Stdcall}, {"BeginPaint", 2, Conv::Stdcall}, {"CheckDlgButton", 3, Conv::Stdcall}, {"CheckMenuItem", 3, Conv::Stdcall},
         {"CheckRadioButton", 4, Conv::Stdcall}, {"CreateDialogParamA", 5, Conv::Stdcall}, {"DestroyMenu", 1, Conv::Stdcall},
         {"DialogBoxParamA", 5, Conv::Stdcall}, {"EnableWindow", 2, Conv::Stdcall}, {"EndPaint", 2, Conv::Stdcall},
-        {"FindWindowA", 2, Conv::Stdcall}, {"GetDlgCtrlID", 1, Conv::Stdcall}, {"GetDlgItemTextA", 4, Conv::Stdcall}, {"GetParent", 1, Conv::Stdcall}, {"GetWindowLongPtrW", 2, Conv::Stdcall}, {"MonitorFromRect", 2, Conv::Stdcall}, {"RegisterDeviceNotificationW", 3, Conv::Stdcall}, {"UnregisterDeviceNotification", 1, Conv::Stdcall},
+        {"FindWindowA", 2, Conv::Stdcall}, {"GetDlgCtrlID", 1, Conv::Stdcall}, {"GetDlgItemTextA", 4, Conv::Stdcall}, {"GetParent", 1, Conv::Stdcall}, {"GetWindowLongPtrW", 2, Conv::Stdcall}, {"MonitorFromRect", 2, Conv::Stdcall}, {"RegisterDeviceNotificationA", 3, Conv::Stdcall}, {"RegisterDeviceNotificationW", 3, Conv::Stdcall}, {"UnregisterDeviceNotification", 1, Conv::Stdcall},
         {"GetLastActivePopup", 1, Conv::Stdcall}, {"GetMenuState", 3, Conv::Stdcall}, {"GetSubMenu", 2, Conv::Stdcall},
         {"IsDlgButtonChecked", 2, Conv::Stdcall}, {"IsWindowEnabled", 1, Conv::Stdcall}, {"KillTimer", 2, Conv::Stdcall},
         {"LoadMenuA", 2, Conv::Stdcall}, {"PostThreadMessageA", 4, Conv::Stdcall}, {"SendDlgItemMessageA", 5, Conv::Stdcall},

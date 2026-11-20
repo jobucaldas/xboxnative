@@ -58,6 +58,14 @@ int main(int argc, char** argv) {
     CHECK(apiset::served_by(crt_time, "time") == crt_time);
     CHECK(apiset::served_by(crt_time, "TIME") == crt_time);  // case-insensitive, as the binder
     CHECK(apiset::served_by(crt_locale, "localeconv") == crt_locale);
+    // Undeclared CRT names load the ucrtbase donor; declared ones keep the msvcrt surface.
+    const std::string crt_runtime = "api-ms-win-crt-runtime-l1-1-0.dll";
+    CHECK(apiset::served_by(crt_runtime, "_initterm") == "msvcrt.dll");
+    CHECK(apiset::served_by(crt_runtime, "_c_exit") == crt_runtime);
+    CHECK(apiset::donor_module(crt_runtime) == "ucrtbase.dll");
+    CHECK(apiset::donor_module("kernel32.dll") == "kernel32.dll");
+    CHECK(is_x86_runtime_dll("msvcp140.dll") && is_x86_runtime_dll("VCRUNTIME140.DLL") && is_x86_runtime_dll("version.dll"));
+    CHECK(!is_x86_runtime_dll("vcruntime140_1.dll") && !is_x86_runtime_dll("kernel32.dll"));
 
     // 2. Registry against the header table.
     Memory mem; ThunkTable table; Host host; Registry reg;
