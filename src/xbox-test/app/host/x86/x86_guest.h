@@ -1490,9 +1490,13 @@ inline void Guest::register_all() {
     reg.add("shell32.dll","ShellExecuteW",Conv::Stdcall,6,[shell_execute](Cpu& c){return shell_execute(c,true);});
     reg.add("shell32.dll","CommandLineToArgvW",Conv::Stdcall,2,[this](Cpu& c)->uint32_t {
         if(!c.arg(0)||!c.arg(1)){set_last_error(87);return 0;}std::u16string input=wstr(c.arg(0));std::vector<std::u16string> args;size_t i=0;
+        // argv[0]: a leading quote runs to the next quote; otherwise to the first space or tab, quotes literal; leading whitespace gives "".
+        std::u16string program;
+        if(!input.empty()&&input[0]==u'"'){i=1;while(i<input.size()&&input[i]!=u'"')program.push_back(input[i++]);if(i<input.size())++i;}
+        else while(i<input.size()&&input[i]!=u' '&&input[i]!=u'\t')program.push_back(input[i++]);
+        args.push_back(program);
         while(i<input.size()){while(i<input.size()&&(input[i]==u' '||input[i]==u'\t'))++i;if(i==input.size())break;std::u16string arg;bool quoted=false;
-            while(i<input.size()){if(args.empty()){if(input[i]==u'"'){quoted=!quoted;++i;continue;}if(!quoted&&(input[i]==u' '||input[i]==u'\t'))break;arg.push_back(input[i++]);continue;}  // argv[0]: quotes toggle, backslashes literal
-                if(input[i]==u'\\'){size_t start=i;while(i<input.size()&&input[i]==u'\\')++i;size_t slashes=i-start;if(i<input.size()&&input[i]==u'"'){arg.append(slashes/2,u'\\');if(slashes%2){arg.push_back(u'"');++i;}else quoted=!quoted,++i;}else arg.append(slashes,u'\\');continue;}if(input[i]==u'"'){if(quoted&&i+1<input.size()&&input[i+1]==u'"'){arg.push_back(u'"');i+=2;continue;}quoted=!quoted;++i;continue;}if(!quoted&&(input[i]==u' '||input[i]==u'\t'))break;arg.push_back(input[i++]);}args.push_back(std::move(arg));while(i<input.size()&&(input[i]==u' '||input[i]==u'\t'))++i;
+            while(i<input.size()){if(input[i]==u'\\'){size_t start=i;while(i<input.size()&&input[i]==u'\\')++i;size_t slashes=i-start;if(i<input.size()&&input[i]==u'"'){arg.append(slashes/2,u'\\');if(slashes%2){arg.push_back(u'"');++i;}else quoted=!quoted,++i;}else arg.append(slashes,u'\\');continue;}if(input[i]==u'"'){if(quoted&&i+1<input.size()&&input[i+1]==u'"'){arg.push_back(u'"');i+=2;continue;}quoted=!quoted;++i;continue;}if(!quoted&&(input[i]==u' '||input[i]==u'\t'))break;arg.push_back(input[i++]);}args.push_back(std::move(arg));while(i<input.size()&&(input[i]==u' '||input[i]==u'\t'))++i;
         }
         uint64_t bytes=uint64_t(args.size()+1)*4;for(const auto& arg:args)bytes+=uint64_t(arg.size()+1)*2;if(bytes>0x7fffffffu){set_last_error(8);return 0;}uint32_t base=heap.alloc(uint32_t(bytes?bytes:4)),strings=base+uint32_t((args.size()+1)*4);for(size_t n=0;n<args.size();++n){uint32_t p=strings;for(size_t j=0;j<n;++j)p+=uint32_t((args[j].size()+1)*2);mem.w32(base+uint32_t(n*4),p);for(size_t j=0;j<args[n].size();++j)mem.w(p+uint32_t(j*2),args[n][j],2);mem.w(p+uint32_t(args[n].size()*2),0,2);}mem.w32(base+uint32_t(args.size()*4),0);mem.w32(c.arg(1),uint32_t(args.size()));return base;
     });

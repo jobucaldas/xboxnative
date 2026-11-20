@@ -34,11 +34,15 @@ int main() {
         CHECK(guest.wstr(mem.r32(argv)) == u"game.exe"); CHECK(guest.wstr(mem.r32(argv + 4)) == u"alpha beta");
         CHECK(guest.wstr(mem.r32(argv + 8)) == u"tail\\"); call("CommandLineToArgvW", {0, 0x4000});
     }
-    // argv[0] ends at the unquoted space, quotes only toggle, backslashes stay literal; argv is NULL-terminated.
-    uint32_t program = guest.put_wstr(u"C:\\x\\\"sp ace\" z");
-    uint32_t pargv = call("CommandLineToArgvW", {program, 0x4000});
-    CHECK(pargv != 0 && mem.r32(0x4000) == 2);
-    if (pargv) { CHECK(guest.wstr(mem.r32(pargv)) == u"C:\\x\\sp ace"); CHECK(guest.wstr(mem.r32(pargv + 4)) == u"z"); CHECK(mem.r32(pargv + 8) == 0); call("CommandLineToArgvW", {0, 0x4000}); }
+    // argv[0]: a leading quote ends at the next quote; otherwise at the first space or tab (quotes literal); argv is NULL-terminated.
+    auto parse = [&](const std::u16string& line) { std::vector<std::u16string> out; uint32_t av = call("CommandLineToArgvW", {guest.put_wstr(line), 0x4000});
+        if (av) { for (uint32_t k = 0; k < mem.r32(0x4000); ++k) out.push_back(guest.wstr(mem.r32(av + 4 * k))); CHECK(mem.r32(av + 4 * mem.r32(0x4000)) == 0); }
+        call("CommandLineToArgvW", {0, 0x4000}); return out; };
+    CHECK((parse(u"C:\\x\\\"sp ace\" z") == std::vector<std::u16string>{u"C:\\x\\\"sp", u"ace z"}));
+    CHECK((parse(u"\"C:\\a b\\x.exe\" arg") == std::vector<std::u16string>{u"C:\\a b\\x.exe", u"arg"}));
+    CHECK((parse(u"\"a\"b c") == std::vector<std::u16string>{u"a", u"b", u"c"}));
+    CHECK((parse(u"a\"b c") == std::vector<std::u16string>{u"a\"b", u"c"}));
+    CHECK((parse(u" x") == std::vector<std::u16string>{u"", u"x"}));
     uint32_t file = guest.put_str("missing-association"); CHECK(call("ShellExecuteA", {0, 0, file, 0, 0, 1}) == 31); CHECK(call("ShellExecuteW", {0, 0, command, 0, 0, 1}) == 31); CHECK(call("ShellExecuteW", {0, 0, 0, 0, 0, 1}) == 0);
 
     CHECK(call("SHGetSpecialFolderPathW", {0, 0x4100, 5, 0}) == 0); CHECK(call("SHGetSpecialFolderPathA", {0, 0x4200, 5, 0}) == 0);
