@@ -2187,7 +2187,8 @@ static uintptr_t vcruntimeLookup(const char* dll,const char* name) {
     struct Forwarded {bool outer=gap_summary::collecting;Forwarded(){++forwardedLookups;gap_summary::collecting=false;} ~Forwarded(){--forwardedLookups;gap_summary::collecting=outer;}} forwarded;
     return resolve(dll,name,0);
 }
-static MMRESULT WINAPI unsupportedWaveOut() { return MMSYSERR_NOTSUPPORTED; }
+// UINT/8 rather than MMRESULT/MMSYSERR_NOTSUPPORTED: play-runner includes this header without mmsystem.h.
+static UINT WINAPI unsupportedWaveOut() { return 8u; } // MMSYSERR_NOTSUPPORTED
 static uintptr_t resolve(const char* dll,const char* name,WORD ordinal) {
     std::string key=lower(dll);
     if(name&&key=="winmm.dll") {
