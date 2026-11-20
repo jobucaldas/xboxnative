@@ -394,9 +394,11 @@ inline void register_win32(Registry& r, Host& h) {
     // is empty, so posted messages keep their order. Filters follow GetMessage: a NULL or (HWND)-1
     // hwnd admits thread messages, any window excludes them, and a range admits WM_TIMER only if
     // it contains 0x113 (both bounds 0 means no range).
-    auto thread_timer_message = [&h, timer_now](Host::WindowCall& q, uint32_t filter, uint32_t min_msg, uint32_t max_msg) {
-        if (filter && filter != 0xFFFFFFFFu) return false;
-        if ((min_msg || max_msg) && (0x0113u < min_msg || 0x0113u > max_msg)) return false;
+    auto thread_timer_admitted = [](uint32_t filter, uint32_t min_msg, uint32_t max_msg) {
+        return (!filter || filter == 0xFFFFFFFFu) && (!(min_msg || max_msg) || (min_msg <= 0x0113u && 0x0113u <= max_msg));
+    };
+    auto thread_timer_message = [&h, timer_now, thread_timer_admitted](Host::WindowCall& q, uint32_t filter, uint32_t min_msg, uint32_t max_msg) {
+        if (!thread_timer_admitted(filter, min_msg, max_msg)) return false;
         for (const auto& timer : h.timers) {
             if (timer.hwnd || !timer.pending) continue;
             q.output.assign(32, 0);
@@ -435,7 +437,7 @@ inline void register_win32(Registry& r, Host& h) {
     };
     auto window_route = [&](const char* name, unsigned argc, const char* native_name = nullptr) {
         if (registered(name)) return;
-        r.add("user32.dll", name, Conv::Stdcall, argc, [&h, count, native_window, guest_window, user_handle, call_window, guest_rect, guest_point, call_wndproc, read_window_wstr, pump_timers, thread_timer_message, timer_now, name, native_name, argc](Cpu& c) -> uint32_t {
+        r.add("user32.dll", name, Conv::Stdcall, argc, [&h, count, native_window, guest_window, user_handle, call_window, guest_rect, guest_point, call_wndproc, read_window_wstr, pump_timers, thread_timer_message, thread_timer_admitted, timer_now, name, native_name, argc](Cpu& c) -> uint32_t {
             count(name);
             const bool first_hwnd = !strcmp(name,"ShowWindow")||!strcmp(name,"UpdateWindow")||!strcmp(name,"SetWindowPos")||!strcmp(name,"MoveWindow")||!strcmp(name,"GetClientRect")||!strcmp(name,"GetWindowRect")||!strcmp(name,"ClientToScreen")||!strcmp(name,"ScreenToClient")||!strcmp(name,"SetWindowTextA")||!strcmp(name,"SetWindowTextW")||!strcmp(name,"GetWindowLongA")||!strcmp(name,"GetWindowLongW")||!strcmp(name,"SetWindowLongA")||!strcmp(name,"SetWindowLongW")||!strcmp(name,"IsWindowVisible")||!strcmp(name,"IsIconic")||!strcmp(name,"GetParent")||!strcmp(name,"SetFocus")||!strcmp(name,"SetForegroundWindow")||!strcmp(name,"PostMessageA")||!strcmp(name,"PostMessageW")||!strcmp(name,"SendMessageA")||!strcmp(name,"SendMessageW")||!strcmp(name,"DefWindowProcA")||!strcmp(name,"DefWindowProcW");
             const uint32_t token = argc&&first_hwnd ? c.arg(0) : 0; uintptr_t hwnd = native_window(token);
@@ -472,7 +474,11 @@ inline void register_win32(Registry& r, Host& h) {
                 const bool get = name[0]=='G'; const uint32_t out=c.arg(0), filter=c.arg(1); uintptr_t native_filter=filter==0xFFFFFFFFu?static_cast<uintptr_t>(-1):native_window(filter);
                 if(filter&&!native_filter)return uint32_t(-1);
                 const size_t size=32; Host::WindowCall q{};
-                if (get && h.window_call) {
+                // Poll only for timers this call can deliver: a window timer, or a thread timer the
+                // caller's filter admits. Otherwise the call is a native GetMessage, as with no timers.
+                const bool poll_timers = h.timers.empty() || std::any_of(h.timers.begin(), h.timers.end(),
+                    [&](const auto& timer) { return timer.hwnd || thread_timer_admitted(filter, c.arg(2), c.arg(3)); });
+                if (get && h.window_call && poll_timers) {
                     const char* peek_name = !strcmp(name,"GetMessageA") ? "PeekMessageA" : "PeekMessageW";
                     for (;;) {
                         pump_timers();
@@ -480,6 +486,12 @@ inline void register_win32(Registry& r, Host& h) {
                         q.args[2] = c.arg(2); q.args[3] = c.arg(3); q.args[4] = 0; q.output.resize(size);
                         h.window_call(q);
                         if (!q.supported) break;
+                        // A filtered peek cannot see WM_QUIT: look for it on the whole queue each pass.
+                        if (!q.result && filter) {
+                            Host::WindowCall quit{}; quit.name = peek_name; quit.args[0] = out; quit.args[1] = 0; quit.args[2] = 0x0012u; quit.args[3] = 0x0012u; quit.args[4] = 1u; quit.output.resize(size);
+                            h.window_call(quit);
+                            if (quit.supported && quit.result) { q = quit; break; }
+                        }
                         if (!q.result && thread_timer_message(q, filter, c.arg(2), c.arg(3))) break;
                         if (q.result) {
                             q = call_window(c,name,{uintptr_t(out),native_filter,c.arg(2),c.arg(3),1u},{},size);
