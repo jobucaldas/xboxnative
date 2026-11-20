@@ -385,9 +385,6 @@ jobs:
   wine-diag-suites:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      WINEPREFIX: ${{ runner.temp }}/wine-prefix
-      PRUN_WINEPREFIX: ${{ runner.temp }}/wine-prefix
     steps:
       - uses: actions/checkout@v4
       - name: install cross compiler and Wine
@@ -396,7 +393,10 @@ jobs:
         with:
           packages: g++-mingw-w64-x86-64 wine wine64
       - name: create the Wine prefix
-        run: mkdir -p "$WINEPREFIX"
+        run: |
+          mkdir -p "$RUNNER_TEMP/wine-prefix"
+          echo "WINEPREFIX=$RUNNER_TEMP/wine-prefix" >> "$GITHUB_ENV"
+          echo "PRUN_WINEPREFIX=$RUNNER_TEMP/wine-prefix" >> "$GITHUB_ENV"
       # Off-device Wine contracts, never the console. The timer test opens no
       # audio device; the D3D diagnostics create a native device under Wine.
       - name: multimedia timer regression
