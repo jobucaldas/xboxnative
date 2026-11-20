@@ -147,7 +147,7 @@ static std::string describe(uintptr_t);
 static void stopMissing(const std::string& name,uintptr_t caller=0) {
     std::string text="missing import hit: "+name;
     if(caller){char b[64];snprintf(b,sizeof b," caller=0x%llx ",(unsigned long long)caller);text+=b;text+=describe(caller);}
-    state->event(text);
+    if(state) state->event(text);
     RaiseException(missingException,EXCEPTION_NONCONTINUABLE,0,nullptr);
 }
 static void record_gap(const char* dll,const char* name,WORD ordinal,gap_summary::Outcome outcome,bool onlyIfAbsent=false) {
@@ -1899,10 +1899,12 @@ static HWND WINAPI createWindow(DWORD ex,LPCWSTR cls,LPCWSTR title,DWORD style,i
     if(window)state->milestone=1;return window;
 }
 static std::string hex32(unsigned long long v){char b[20];snprintf(b,sizeof b,"%x",unsigned(v));return b;}
+// Null-safe state logging: the 32-bit host calls these routes with no State.
+static void note(const std::string& text) { if(state) state->event(text); }
 static HRESULT WINAPI createDevice(IDXGIAdapter* adapter,D3D_DRIVER_TYPE type,HMODULE software,UINT flags,const D3D_FEATURE_LEVEL* levels,UINT count,UINT version,ID3D11Device** device,D3D_FEATURE_LEVEL* level,ID3D11DeviceContext** context) {
     using Fn=decltype(&createDevice);
     auto fn=(Fn)mlp::resolve("d3d11.dll","D3D11CreateDevice",0);
-    state->event("guest D3D11CreateDevice caller="+describe((uintptr_t)_ReturnAddress()));
+    note("guest D3D11CreateDevice caller="+describe((uintptr_t)_ReturnAddress()));
     if(!fn) {stopMissing("d3d11.dll!D3D11CreateDevice");return E_NOINTERFACE;}
     // Adapters from the guest factory are wrappers (virtual console output);
     // the native device needs the real adapter.
@@ -1910,17 +1912,17 @@ static HRESULT WINAPI createDevice(IDXGIAdapter* adapter,D3D_DRIVER_TYPE type,HM
     // What the guest asked for (feature levels in its order) and what it got.
     {std::string asked="guest D3D11CreateDevice request type="+std::to_string(int(type))+" flags=0x"+hex32(flags)+" adapter="+(adapter?"given":"default")+" levels=[";
      for(UINT i=0;levels&&i<count&&i<8;++i)asked+=(i?",0x":"0x")+hex32(levels[i]);
-     state->event(asked+(levels?"]":"default]"));}
+     note(asked+(levels?"]":"default]"));}
     HRESULT hr=fn(real?real:adapter,type,software,flags,levels,count,version,device,level,context);
     if(real)real->Release();
-    char b[160];snprintf(b,sizeof b,"guest D3D11CreateDevice returned hr=0x%08lx device=%p",(unsigned long)hr,device?*device:nullptr);state->event(b);
-    if(level){snprintf(b,sizeof b,"guest D3D11CreateDevice feature level got=0x%x",unsigned(*level));state->event(b);}
+    char b[160];snprintf(b,sizeof b,"guest D3D11CreateDevice returned hr=0x%08lx device=%p",(unsigned long)hr,device?*device:nullptr);note(b);
+    if(level){snprintf(b,sizeof b,"guest D3D11CreateDevice feature level got=0x%x",unsigned(*level));note(b);}
     if(SUCCEEDED(hr)&&device&&*device){
         // Failed D3D11 calls are logged through the probe sink (not as the
         // run's "last event"), once per distinct call.
         d3d11_diag::configure([](const char* text){if(state&&state->log)state->log((std::string("PRUN D3D11 ")+text).c_str());});
         d3d11_diag::adopt(*device);
-        play_graphics::adopt_device(*device);state->milestone=2;}return hr;
+        play_graphics::adopt_device(*device);if(state)state->milestone=2;}return hr;
 }
 // The other D3D11 device entry a guest imports: the same device route as
 // createDevice above (a device made by this call must get the adoption,

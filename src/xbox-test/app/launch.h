@@ -1333,7 +1333,6 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         static HMODULE records=LoadPackagedLibrary(L"uwph-u32c.dll",0);
         static HMODULE mesa=LoadPackagedLibrary(L"runtime\\opengl32.dll",0);
         static HMODULE d3d9=LoadPackagedLibrary(L"runtime\\d3d9.dll",0);
-        static HMODULE d3d11=LoadPackagedLibrary(L"runtime\\d3d11.dll",0);
         using GetMetrics=int(WINAPI*)(int);
         auto get_metrics=records?reinterpret_cast<GetMetrics>(GetProcAddress(records,"GetSystemMetrics")):nullptr;
         host.system_metrics=[get_metrics](int index,int& value) {
@@ -1363,20 +1362,20 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         // passed through: Play's validated DXGI factory maps user32 record
         // windows onto the CoreWindow when the shim creates its chain.
         host.d3d9_window=[&host](uint32_t hwnd)->uintptr_t{auto it=host.window_handles.find(hwnd);return it!=host.window_handles.end()?it->second:uintptr_t(hwnd);};
-        // The packaged runtime must ship runtime\d3d11.dll; without it the guest
-        // gets the "x86 D3D11 gap" line and E_NOTIMPL, never a silent success.
-        using Create11Chain=HRESULT(WINAPI*)(void*,UINT,HMODULE,UINT,const UINT*,UINT,UINT,const void*,void**,void**,UINT*,void**);
-        using Create11=HRESULT(WINAPI*)(void*,UINT,HMODULE,UINT,const UINT*,UINT,UINT,void**,UINT*,void**);
-        auto create11chain=d3d11?reinterpret_cast<Create11Chain>(GetProcAddress(d3d11,"D3D11CreateDeviceAndSwapChain")):nullptr;
-        auto create11=d3d11?reinterpret_cast<Create11>(GetProcAddress(d3d11,"D3D11CreateDevice")):nullptr;
-        host.d3d11_create=[create11chain,create11](x86::D3D11CreateArgs& a)->uint32_t {
-            const UINT* levels=a.levels.empty()?nullptr:reinterpret_cast<const UINT*>(a.levels.data());
-            if(!a.swapchain_desc){
-                if(!create11)return uint32_t(E_NOTIMPL);
-                return uint32_t(create11(nullptr,a.driver,nullptr,a.flags,levels,UINT(a.levels.size()),a.sdk,&a.device,&a.feature_level,&a.context));
-            }
-            if(!create11chain)return uint32_t(E_NOTIMPL);
-            return uint32_t(create11chain(nullptr,a.driver,nullptr,a.flags,levels,UINT(a.levels.size()),a.sdk,a.swapchain_desc,&a.swapchain,&a.device,&a.feature_level,&a.context));
+        // The 32-bit guest's D3D11 calls take the 64-bit route: the system d3d11 device
+        // (createDevice), adopted by the CoreWindow factory, and a chain built through
+        // that factory's HWND path, which Play redirects to the app's CoreWindow.
+        host.d3d11_create=[](x86::D3D11CreateArgs& a)->uint32_t {
+            ID3D11Device* device=nullptr; ID3D11DeviceContext* context=nullptr; IDXGISwapChain* chain=nullptr;
+            D3D_FEATURE_LEVEL level=D3D_FEATURE_LEVEL_9_1;
+            const D3D_FEATURE_LEVEL* levels=reinterpret_cast<const D3D_FEATURE_LEVEL*>(a.levels.data());
+            UINT count=UINT(a.levels.size());
+            HRESULT hr=a.swapchain_desc
+                ? play_runtime::createDeviceAndSwapChain(nullptr,D3D_DRIVER_TYPE(a.driver),nullptr,a.flags,levels,count,a.sdk,
+                      static_cast<const DXGI_SWAP_CHAIN_DESC*>(a.swapchain_desc),&chain,&device,&level,&context)
+                : play_runtime::createDevice(nullptr,D3D_DRIVER_TYPE(a.driver),nullptr,a.flags,levels,count,a.sdk,&device,&level,&context);
+            a.swapchain=chain; a.device=device; a.context=context; a.feature_level=uint32_t(level);
+            return uint32_t(hr);
         };
         using GetDc=HDC(WINAPI*)(HWND);using ReleaseDc=int(WINAPI*)(HWND,HDC);using GetClientRect=BOOL(WINAPI*)(HWND,RECT*);using MapWindowPoint=BOOL(WINAPI*)(HWND,POINT*);
         auto client_to_screen=records?reinterpret_cast<MapWindowPoint>(GetProcAddress(records,"ClientToScreen")):nullptr;

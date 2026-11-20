@@ -7,6 +7,50 @@
 #include <cstdio>
 #include <cstring>
 #include "../host/x86/x86_play.h"
+// The bridged argument counts equal the SDK's, proven at build time by
+// x86-d3d11-slots.cpp (ARGC on each vtbl member, 32-bit slots, plus this).
+static_assert(x86::kD3D11SwapChainArgc[8]==3,"kD3D11SwapChainArgc[8] argc");
+static_assert(x86::kD3D11SwapChainArgc[9]==4,"kD3D11SwapChainArgc[9] argc");
+static_assert(x86::kD3D11SwapChainArgc[12]==2,"kD3D11SwapChainArgc[12] argc");
+static_assert(x86::kD3D11SwapChainArgc[13]==6,"kD3D11SwapChainArgc[13] argc");
+static_assert(x86::kD3D11DeviceArgc[3]==4,"kD3D11DeviceArgc[3] argc");
+static_assert(x86::kD3D11DeviceArgc[5]==4,"kD3D11DeviceArgc[5] argc");
+static_assert(x86::kD3D11DeviceArgc[7]==4,"kD3D11DeviceArgc[7] argc");
+static_assert(x86::kD3D11DeviceArgc[9]==4,"kD3D11DeviceArgc[9] argc");
+static_assert(x86::kD3D11DeviceArgc[11]==6,"kD3D11DeviceArgc[11] argc");
+static_assert(x86::kD3D11DeviceArgc[12]==5,"kD3D11DeviceArgc[12] argc");
+static_assert(x86::kD3D11DeviceArgc[15]==5,"kD3D11DeviceArgc[15] argc");
+static_assert(x86::kD3D11DeviceArgc[20]==3,"kD3D11DeviceArgc[20] argc");
+static_assert(x86::kD3D11DeviceArgc[21]==3,"kD3D11DeviceArgc[21] argc");
+static_assert(x86::kD3D11DeviceArgc[22]==3,"kD3D11DeviceArgc[22] argc");
+static_assert(x86::kD3D11DeviceArgc[23]==3,"kD3D11DeviceArgc[23] argc");
+static_assert(x86::kD3D11DeviceArgc[29]==3,"kD3D11DeviceArgc[29] argc");
+static_assert(x86::kD3D11DeviceArgc[37]==1,"kD3D11DeviceArgc[37] argc");
+static_assert(x86::kD3D11DeviceArgc[40]==2,"kD3D11DeviceArgc[40] argc");
+static_assert(x86::kD3D11ContextArgc[7]==4,"kD3D11ContextArgc[7] argc");
+static_assert(x86::kD3D11ContextArgc[8]==4,"kD3D11ContextArgc[8] argc");
+static_assert(x86::kD3D11ContextArgc[9]==4,"kD3D11ContextArgc[9] argc");
+static_assert(x86::kD3D11ContextArgc[10]==4,"kD3D11ContextArgc[10] argc");
+static_assert(x86::kD3D11ContextArgc[11]==4,"kD3D11ContextArgc[11] argc");
+static_assert(x86::kD3D11ContextArgc[12]==4,"kD3D11ContextArgc[12] argc");
+static_assert(x86::kD3D11ContextArgc[13]==3,"kD3D11ContextArgc[13] argc");
+static_assert(x86::kD3D11ContextArgc[14]==6,"kD3D11ContextArgc[14] argc");
+static_assert(x86::kD3D11ContextArgc[15]==3,"kD3D11ContextArgc[15] argc");
+static_assert(x86::kD3D11ContextArgc[16]==4,"kD3D11ContextArgc[16] argc");
+static_assert(x86::kD3D11ContextArgc[17]==2,"kD3D11ContextArgc[17] argc");
+static_assert(x86::kD3D11ContextArgc[18]==6,"kD3D11ContextArgc[18] argc");
+static_assert(x86::kD3D11ContextArgc[19]==4,"kD3D11ContextArgc[19] argc");
+static_assert(x86::kD3D11ContextArgc[24]==2,"kD3D11ContextArgc[24] argc");
+static_assert(x86::kD3D11ContextArgc[33]==4,"kD3D11ContextArgc[33] argc");
+static_assert(x86::kD3D11ContextArgc[35]==4,"kD3D11ContextArgc[35] argc");
+static_assert(x86::kD3D11ContextArgc[36]==3,"kD3D11ContextArgc[36] argc");
+static_assert(x86::kD3D11ContextArgc[43]==2,"kD3D11ContextArgc[43] argc");
+static_assert(x86::kD3D11ContextArgc[44]==3,"kD3D11ContextArgc[44] argc");
+static_assert(x86::kD3D11ContextArgc[45]==3,"kD3D11ContextArgc[45] argc");
+static_assert(x86::kD3D11ContextArgc[48]==7,"kD3D11ContextArgc[48] argc");
+static_assert(x86::kD3D11ContextArgc[50]==3,"kD3D11ContextArgc[50] argc");
+static_assert(x86::kD3D11ContextArgc[110]==1,"kD3D11ContextArgc[110] argc");
+static_assert(x86::kD3D11ContextArgc[114]==3,"kD3D11ContextArgc[114] argc");
 
 template<size_t N> static bool audit_iface(const x86::ComSpace& s, const char* iface, const char* const (&names)[N], const unsigned (&argc)[N]) {
     const auto& record = s.by_name(iface);
