@@ -82,6 +82,38 @@ int main(){
  CHECK(call("closehandle",{e2})==1);CHECK(call("closehandle",{opened})==1);CHECK(call("setevent",{opened})==0);
  CHECK(call("closehandle",{ew})==1);CHECK(call("closehandle",{ew2})==1);CHECK(call("closehandle",{other})==1);
  CHECK(call("closehandle",{automatic})==1);CHECK(call("closehandle",{mutex})==1);CHECK(call("closehandle",{sem2})==1);CHECK(call("closehandle",{sem})==1);CHECK(call("waitforsingleobject",{0x1234,0})==0xffffffffu);
+ // Thread pool, InitOnce and wait routes. Guest callbacks are hand-assembled in an RWX page: each bumps a counter.
+ mem.map(0x31000,0x1000,PROT_R|PROT_W|PROT_X);
+ auto code=[&](uint32_t at,std::initializer_list<uint8_t> bytes){for(uint8_t b:bytes)mem.w8(at++,b);};
+ auto ntcall=[&](const char* n,std::initializer_list<uint32_t> a){unsigned i=0;for(uint32_t v:a)mem.w32(cpu.reg[ESP]+4+4*i++,v);return reg.map.at({"ntdll.dll",n}).fn(cpu);};
+ auto body=[&](uint32_t at,uint32_t arg,uint32_t thunk){code(at,{0x68});mem.w32(at+1,arg);code(at+5,{0xb8});mem.w32(at+6,thunk);code(at+10,{0xff,0xd0,0x31,0xc0,0xc2,0x04,0x00});};
+ const uint32_t workCb=0x31000,timerCb=0x31010,initCb=0x31020,waitCb=0x31040,workCount=0x31800,timerCount=0x31804,initCount=0x31808,waitCount=0x31828;
+ code(workCb,{0xff,0x05,0x00,0x18,0x03,0x00,0xc3});code(timerCb,{0xff,0x05,0x04,0x18,0x03,0x00,0xc3});code(waitCb,{0xff,0x05,0x28,0x18,0x03,0x00,0xc3});
+ code(initCb,{0x8b,0x44,0x24,0x0c,0xc7,0x00,0x34,0x12,0x00,0x00,0xff,0x05,0x08,0x18,0x03,0x00,0xb8,0x01,0x00,0x00,0x00,0xc3});
+ uint32_t work=call("createthreadpoolwork",{workCb,0,0});CHECK(work!=0);
+ for(int i=0;i<3;++i)call("submitthreadpoolwork",{work});
+ CHECK(mem.r32(workCount)==0);call("waitforthreadpoolworkcallbacks",{work,0});CHECK(mem.r32(workCount)==3);
+ uint32_t cancelled=call("createthreadpoolwork",{workCb,0,0});call("submitthreadpoolwork",{cancelled});call("waitforthreadpoolworkcallbacks",{cancelled,1});CHECK(mem.r32(workCount)==3);call("closethreadpoolwork",{cancelled});call("closethreadpoolwork",{work});
+ uint32_t timer=call("createthreadpooltimer",{timerCb,0,0});CHECK(timer!=0);
+ int64_t due=-1000000;mem.w32(0x31830,uint32_t(uint64_t(due)));mem.w32(0x31834,uint32_t(uint64_t(due)>>32));call("setthreadpooltimer",{timer,0x31830,0,0});
+ call("sleep",{0});CHECK(mem.r32(timerCount)==0);call("sleep",{150});CHECK(mem.r32(timerCount)==1);call("sleep",{50});CHECK(mem.r32(timerCount)==1);call("closethreadpooltimer",{timer});
+ uint32_t gate=call("createeventexw",{0,0,0,0});CHECK(gate!=0);
+ uint32_t waiter=call("createthreadpoolwait",{waitCb,0,0});CHECK(waiter!=0);call("setthreadpoolwait",{waiter,gate,0});
+ call("sleep",{0});CHECK(mem.r32(waitCount)==0);call("setevent",{gate});call("sleep",{0});CHECK(mem.r32(waitCount)==1);call("closethreadpoolwait",{waiter});call("closehandle",{gate});
+ CHECK(call("initonceexecuteonce",{0x3180c,initCb,7,0x31814})==1);CHECK(mem.r32(initCount)==1);CHECK(mem.r32(0x31814)==0x1234);
+ mem.w32(0x31814,0);CHECK(call("initonceexecuteonce",{0x3180c,initCb,7,0x31814})==1);CHECK(mem.r32(initCount)==1);CHECK(mem.r32(0x31814)==0x1234);
+ uint32_t manualEvent=call("createeventexw",{0,0,3,0});CHECK(manualEvent!=0);CHECK(call("waitforsingleobject",{manualEvent,0})==0);CHECK(call("waitforsingleobject",{manualEvent,0})==0);call("closehandle",{manualEvent});
+ uint32_t autoEvent=call("createeventexw",{0,0,2,0});CHECK(call("waitforsingleobject",{autoEvent,0})==0);CHECK(call("waitforsingleobject",{autoEvent,0})==258);call("closehandle",{autoEvent});
+ uint32_t wsem=call("createsemaphoreexw",{0,1,2,0,0,0});CHECK(wsem!=0);CHECK(call("waitforsingleobject",{wsem,0})==0);CHECK(call("waitforsingleobject",{wsem,0})==258);call("closehandle",{wsem});CHECK(call("createsemaphoreexw",{0,3,2,0,0,0})==0);
+ const uint32_t addr=0x31820,cmp=0x31824,timeoutNow=0x31838;mem.w32(addr,5);mem.w32(cmp,5);
+ int64_t relative=-100000;mem.w32(timeoutNow,uint32_t(uint64_t(relative)));mem.w32(timeoutNow+4,uint32_t(uint64_t(relative)>>32));
+ CHECK(ntcall("rtlwaitonaddress",{addr,cmp,4,timeoutNow})==0x102);
+ mem.w32(addr,6);CHECK(ntcall("rtlwaitonaddress",{addr,cmp,4,timeoutNow})==0);mem.w32(addr,5);
+ body(0x31050,addr,th.add(reg.map.at({"ntdll.dll","rtlwakeaddresssingle"})));call("createthread",{0,0,0x31050,0,0,0});CHECK(ntcall("rtlwaitonaddress",{addr,cmp,4,0})==0);
+ const uint32_t lock=0x31840,cv=0x31850;cpu.fs_base=0x1000;call("initializesrwlock",{lock});call("acquiresrwlockexclusive",{lock});
+ CHECK(call("sleepconditionvariablesrw",{cv,lock,10,0})==0);CHECK(call("getlasterror",{})==1460);call("releasesrwlockexclusive",{lock});
+ body(0x31070,cv,th.add(reg.map.at({"kernel32.dll","wakeconditionvariable"})));call("createthread",{0,0,0x31070,0,0,0});
+ call("acquiresrwlockexclusive",{lock});CHECK(call("sleepconditionvariablesrw",{cv,lock,0xffffffffu,0})==1);call("releasesrwlockexclusive",{lock});
  std::printf("x86-sync: %d checks, %d failures\n",checks,failures);return failures?1:0;
 }
 #endif
