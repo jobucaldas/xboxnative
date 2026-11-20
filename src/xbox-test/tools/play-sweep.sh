@@ -85,7 +85,15 @@ mkdir -p "$outdir"
 csv="$outdir/results.csv"
 printf 'appid,name,arch,terminal_result,exit_code,first_failure,gap_summary,frames_reached,elapsed\n' > "$csv"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/play-sweep.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT
+capped=0
+# The launcher reads dlmax.txt only when a download starts, so a sweep that never downloads
+# leaves its cap (0) behind. On exit, overwrite it with -1, which the launcher treats as no cap.
+clear_cap() {
+  [[ $capped -eq 1 ]] || return 0
+  mkdir -p "$tmp/cap"; printf '%s\n' -1 > "$tmp/cap/dlmax.txt"
+  bash "$DP/put-file.sh" "$full" '\LocalState' "$tmp/cap/dlmax.txt" >/dev/null 2>&1 || true
+}
+trap 'clear_cap; rm -rf "$tmp"' EXIT
 active_guest() {
   local logfile=$1
   python3 -I - "$logfile" <<'PY'
@@ -113,6 +121,7 @@ for app in "${unique[@]}"; do
   preflight || exit 1
   raw="$tmp/$app"; mkdir -p "$raw"
   start=$SECONDS
+  capped=1
   set +e
   # PT_MAXMB=0 makes play-test refuse any download, so a sweep never installs a game
   # unless --allow-install asked for it.
