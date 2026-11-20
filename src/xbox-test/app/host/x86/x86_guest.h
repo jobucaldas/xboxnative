@@ -1991,7 +1991,7 @@ inline void Guest::register_all() {
         if(!host.locale_call){set_last_error(120);return 0;}
         host.locale_call(q);
         if(!q.succeeded){set_last_error(q.error?q.error:87);return 0;}
-        if(q.result>0&&c.arg(4)){if(q.data.size()!=size_t(q.result)*2){set_last_error(87);return 0;}mem.write_bytes(c.arg(4),q.data.data(),uint32_t(q.data.size()));}
+        if(q.result>0&&c.arg(4)&&q.buffer_chars>0){if(q.data.size()!=size_t(q.result)*2){set_last_error(87);return 0;}mem.write_bytes(c.arg(4),q.data.data(),uint32_t(q.data.size()));}
         return uint32_t(q.result);
     };
     reg.add("kernel32.dll", "GetTimeFormatW", Conv::Stdcall, 6, [format_locale](Cpu& c) -> uint32_t { return format_locale(false,c); });

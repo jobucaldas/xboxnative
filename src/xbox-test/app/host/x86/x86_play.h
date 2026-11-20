@@ -41,7 +41,7 @@ inline bool play_capture_nls_output(Host::NlsResponse& response, const void* out
 inline void play_locale_call(Host::LocaleCall& q) {
     SYSTEMTIME st{}; if(q.has_system_time) memcpy(&st,q.system_time,sizeof(st));
     std::wstring fmt; if(q.has_format) fmt.assign(q.format.begin(),q.format.end());
-    std::vector<wchar_t> out(q.buffer_chars>0?size_t(q.buffer_chars):(q.has_output_buffer?1u:0u));
+    std::vector<wchar_t> out(q.buffer_chars>0?size_t(q.buffer_chars):0);
     wchar_t locale_name[LOCALE_NAME_MAX_LENGTH]{};
     SetLastError(ERROR_SUCCESS);
     if(!LCIDToLocaleName(q.locale,locale_name,LOCALE_NAME_MAX_LENGTH,0)){q.error=GetLastError();q.succeeded=false;q.result=0;return;}
@@ -50,7 +50,7 @@ inline void play_locale_call(Host::LocaleCall& q) {
     int n=q.date?GetDateFormatEx(locale_name,q.flags,q.has_system_time?&st:nullptr,q.has_format?fmt.c_str():nullptr,output,q.buffer_chars,nullptr)
                 :GetTimeFormatEx(locale_name,q.flags,q.has_system_time?&st:nullptr,q.has_format?fmt.c_str():nullptr,output,q.buffer_chars);
     q.result=n; q.succeeded=n!=0; q.error=q.succeeded?0:GetLastError();
-    if(q.succeeded&&!out.empty()){q.data.resize(size_t(n)*sizeof(wchar_t));memcpy(q.data.data(),out.data(),q.data.size());}
+    if(q.succeeded&&output){q.data.resize(size_t(n)*sizeof(wchar_t));memcpy(q.data.data(),out.data(),q.data.size());}
 }
 inline void play_socket_call(Host::SocketCall& q) {
     using StartupFn=int (WSAAPI*)(WORD,LPWSADATA);using CleanupFn=int (WSAAPI*)();using LastErrorFn=int (WSAAPI*)();
