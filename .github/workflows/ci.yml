@@ -146,7 +146,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/apt-install
         with:
-          packages: clang-19 lld-19
+          packages: clang-19 lld-19 llvm-19 binutils-mingw-w64-x86-64 g++-mingw-w64-x86-64 wine wine64
       - uses: dtolnay/rust-toolchain@1.90.0
       - uses: actions/cache@v4
         with:
@@ -178,6 +178,18 @@ jobs:
           fi
       - name: Compile launcher with the UWP header partition
         run: CLANG_CL=clang-cl-19 bash src/xbox-test/app/tests/uwp-launcher-compile.sh
+      # The user32 feed suites load the UWP-partition uwph-u32c.dll that build.sh
+      # links with this same toolchain, so they run in this job.
+      - name: Put the LLVM 19 tools on PATH for the user32 build
+        run: echo "/usr/lib/llvm-19/bin" >> "$GITHUB_PATH"
+      - name: Build the user32 record DLL with the UWP toolchain
+        run: bash src/xbox-test/uwph/user32/build.sh
+      - name: user32 CoreWindow feed and CreateWindow size under Wine
+        run: |
+          mkdir -p "$RUNNER_TEMP/wine-prefix"
+          export WINEPREFIX="$RUNNER_TEMP/wine-prefix" PRUN_WINEPREFIX="$RUNNER_TEMP/wine-prefix"
+          bash src/xbox-test/uwph/user32/corewindow-feed-test.sh
+          bash src/xbox-test/uwph/user32/create-size-test.sh
   registry-persistence:
     runs-on: ubuntu-latest
     steps:
@@ -368,6 +380,27 @@ jobs:
       # must be DEFAULT + SRV with no CPU access or misc flags.
       - name: D3D9 managed texture descriptor regression
         run: x86_64-w64-mingw32-g++ -std=c++17 -fsyntax-only src/xbox-test/uwph/d3d9/test.cpp
+  wine-diag-suites:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: install cross compiler and Wine
+        timeout-minutes: 30
+        uses: ./.github/actions/apt-install
+        with:
+          packages: g++-mingw-w64-x86-64 wine wine64
+      - name: create the Wine prefix
+        run: |
+          mkdir -p "$RUNNER_TEMP/wine-prefix"
+          echo "WINEPREFIX=$RUNNER_TEMP/wine-prefix" >> "$GITHUB_ENV"
+          echo "PRUN_WINEPREFIX=$RUNNER_TEMP/wine-prefix" >> "$GITHUB_ENV"
+          echo "WINEDLLOVERRIDES=winedbg.exe=d" >> "$GITHUB_ENV"
+      # Off-device Wine contracts, never the console. The timer test opens no
+      # audio device. The D3D diagnostics are not wired yet: on this runner the
+      # d3d11 default mode takes an unhandled page fault inside the test exe.
+      - name: multimedia timer regression
+        run: bash src/xbox-test/audio/timer-test.sh
   diag-fixtures:
     runs-on: ubuntu-latest
     steps:
