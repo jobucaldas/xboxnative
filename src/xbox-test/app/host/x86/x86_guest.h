@@ -1122,7 +1122,7 @@ inline void Guest::register_all() {
     reg.add("gdi32.dll", "CreateBitmap", Conv::Stdcall, 5, [this,gdi_handle](Cpu& c) -> uint32_t {
         uint32_t w=c.arg(0), h=c.arg(1), planes=c.arg(2), bpp=c.arg(3);
         if (!w || !h || w>16384 || h>16384 || planes!=1 || !(bpp==1 || bpp==4 || bpp==8 || bpp==16 || bpp==24 || bpp==32) || uint64_t(w)*bpp>0x7ffffff0u) { set_last_error(87); return 0; }
-        uint32_t pitch=uint32_t(((uint64_t(w)*bpp+31)/32)*4);
+        uint32_t pitch=uint32_t(((uint64_t(w)*bpp+15)/16)*2);  // CreateBitmap scanlines are WORD aligned
         if (uint64_t(pitch)*h>0x4000000u) { set_last_error(87); return 0; }
         uint32_t handle=gdi_handle(), bits=heap.alloc(pitch*h);
         std::vector<uint8_t> zero(size_t(pitch)*h,0); mem.write_bytes(bits,zero.data(),uint32_t(zero.size()));
@@ -1231,7 +1231,7 @@ inline void Guest::register_all() {
     reg.add("gdi32.dll", "SetTextColor", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { auto d=gdi_dcs.find(c.arg(0));if(d==gdi_dcs.end()){set_last_error(6);return 0xffffffffu;}uint32_t old=d->second.text_color;d->second.text_color=c.arg(1);return old; });
     reg.add("gdi32.dll", "SetBkColor", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { auto d=gdi_dcs.find(c.arg(0));if(d==gdi_dcs.end()){set_last_error(6);return 0xffffffffu;}uint32_t old=d->second.bk_color;d->second.bk_color=c.arg(1);return old; });
     reg.add("gdi32.dll", "GdiFlush", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 1; });
-    auto blit=[this](Cpu& c,bool stretch)->uint32_t { uint32_t dst=c.arg(0),src=c.arg(5);auto d=gdi_dcs.find(dst),s=gdi_dcs.find(src);if(d==gdi_dcs.end()||s==gdi_dcs.end()||!d->second.bitmap||!s->second.bitmap||c.arg(stretch?10:8)!=0x00cc0020u){set_last_error(120);return 0;}auto& db=gdi_objects[d->second.bitmap];auto& sb=gdi_objects[s->second.bitmap];if(db.bpp!=32||sb.bpp!=32){set_last_error(120);return 0;}int32_t x=int32_t(c.arg(1)),y=int32_t(c.arg(2)),w=int32_t(c.arg(3)),h=int32_t(c.arg(4)),sx=int32_t(c.arg(6)),sy=int32_t(c.arg(7)),sw=stretch?int32_t(c.arg(8)):w,sh=stretch?int32_t(c.arg(9)):h;if(w<=0||h<=0||sw<=0||sh<=0||w>16384||h>16384||sw>16384||sh>16384){set_last_error(87);return 0;}for(int32_t yy=0;yy<h;++yy)for(int32_t xx=0;xx<w;++xx){int32_t dx=x+xx,dy=y+yy,px=sx+xx*sw/w,py=sy+yy*sh/h;if(dx<0||dy<0||px<0||py<0||uint32_t(dx)>=db.width||uint32_t(dy)>=db.height||uint32_t(px)>=sb.width||uint32_t(py)>=sb.height)continue;uint32_t dr=db.bits+((db.top_down?uint32_t(dy):db.height-1-uint32_t(dy))*db.width+uint32_t(dx))*4,sr=sb.bits+((sb.top_down?uint32_t(py):sb.height-1-uint32_t(py))*sb.width+uint32_t(px))*4;c.mem.w32(dr,c.mem.r32(sr));}return 1;};
+    auto blit=[this](Cpu& c,bool stretch)->uint32_t { uint32_t dst=c.arg(0),src=c.arg(5);auto d=gdi_dcs.find(dst),s=gdi_dcs.find(src);if(d==gdi_dcs.end()||s==gdi_dcs.end()||!d->second.bitmap||!s->second.bitmap||c.arg(stretch?10:8)!=0x00cc0020u){set_last_error(120);return 0;}auto& db=gdi_objects[d->second.bitmap];auto& sb=gdi_objects[s->second.bitmap];if(db.bpp!=32||sb.bpp!=32){set_last_error(120);return 0;}int32_t x=int32_t(c.arg(1)),y=int32_t(c.arg(2)),w=int32_t(c.arg(3)),h=int32_t(c.arg(4)),sx=int32_t(c.arg(6)),sy=int32_t(c.arg(7)),sw=stretch?int32_t(c.arg(8)):w,sh=stretch?int32_t(c.arg(9)):h;if(w<=0||h<=0||sw<=0||sh<=0||w>16384||h>16384||sw>16384||sh>16384){set_last_error(87);return 0;}std::vector<std::pair<uint32_t,uint32_t>> writes;writes.reserve(size_t(w)*h);for(int32_t yy=0;yy<h;++yy)for(int32_t xx=0;xx<w;++xx){int32_t dx=x+xx,dy=y+yy,px=sx+xx*sw/w,py=sy+yy*sh/h;if(dx<0||dy<0||px<0||py<0||uint32_t(dx)>=db.width||uint32_t(dy)>=db.height||uint32_t(px)>=sb.width||uint32_t(py)>=sb.height)continue;uint32_t dr=db.bits+((db.top_down?uint32_t(dy):db.height-1-uint32_t(dy))*db.width+uint32_t(dx))*4,sr=sb.bits+((sb.top_down?uint32_t(py):sb.height-1-uint32_t(py))*sb.width+uint32_t(px))*4;writes.push_back({dr,c.mem.r32(sr)});}for(auto& wr:writes)c.mem.w32(wr.first,wr.second);  /* GDI copies are memmove-like: read every source pixel before writing */return 1;};
     reg.add("gdi32.dll", "BitBlt", Conv::Stdcall, 9, [blit](Cpu& c){return blit(c,false);});
     reg.add("gdi32.dll", "StretchBlt", Conv::Stdcall, 11, [blit](Cpu& c){return blit(c,true);});
     auto unsupported_gdi=[this](Cpu&) { set_last_error(120); return uint32_t(0); };
@@ -1313,7 +1313,7 @@ inline void Guest::register_all() {
         if(create){if(c.arg(2)||c.arg(6))return c.arg(2)?87u:50u;q.options=c.arg(4);q.access=c.arg(5);}else{if(c.arg(2))return 87;q.options=c.arg(2);q.access=c.arg(3);}
         uint32_t status=registry_host(q);
         if(status){
-            if(!create&&!host.registry_call&&c.arg(0)==0x80000001u&&q.subkey==u"Software\\Valve\\Steam\\ActiveProcess"&&!steam_registry.client.empty()){
+            if(!create&&c.arg(0)==0x80000001u&&q.subkey==u"Software\\Valve\\Steam\\ActiveProcess"&&!steam_registry.client.empty()){
                 uint32_t key=0x71000000u+(++steam_registry_serial);steam_registry_keys[key]=true;mem.w32(out,key);return 0;
             }
             return status;
@@ -1475,7 +1475,13 @@ inline void Guest::register_all() {
     auto shell_create_directory=[this](Cpu& c,bool wide)->uint32_t {
         if(!c.arg(1)){set_last_error(87);return 87;}
         std::u16string path=wide?wstr(c.arg(1)):std::u16string();std::string narrow=wide?std::string():str(c.arg(1));std::u16string guard_path=path;if(!wide)for(unsigned char ch:narrow)guard_path.push_back(char16_t(ch));if(!host.destructive_file_guard||!host.destructive_file_guard("SHCreateDirectoryEx",guard_path)){set_last_error(5);return 5;}
-        Host::FileCall q{wide?Host::FileCall::Kind::CreateDirectoryW:Host::FileCall::Kind::AttributesA};if(wide)q.path_w=path;else{q.operation=Host::FileCall::Operation::CreateDirectoryA;q.path_a=narrow;}if(!host.file_call){set_last_error(120);return 120;}host.file_call(q);if(!q.succeeded){set_last_error(q.error?q.error:120);return q.error?q.error:120;}return q.error;
+        if(!host.file_call){set_last_error(120);return 120;}
+        // SHCreateDirectoryEx creates missing intermediate folders too; only the final folder's result is returned.
+        auto ch=[&](size_t i)->char16_t{return wide?path[i]:char16_t(static_cast<unsigned char>(narrow[i]));};
+        auto make=[&](size_t len){Host::FileCall q{wide?Host::FileCall::Kind::CreateDirectoryW:Host::FileCall::Kind::AttributesA};if(wide)q.path_w=path.substr(0,len);else{q.operation=Host::FileCall::Operation::CreateDirectoryA;q.path_a=narrow.substr(0,len);}host.file_call(q);return q;};
+        const size_t n=wide?path.size():narrow.size();
+        for(size_t i=1;i<n;++i)if((ch(i)==u'\\'||ch(i)==u'/')&&ch(i-1)!=u':')make(i);
+        Host::FileCall q=make(n);if(!q.succeeded){set_last_error(q.error?q.error:120);return q.error?q.error:120;}return q.error;
     };
     reg.add("shell32.dll","SHCreateDirectoryExA",Conv::Stdcall,3,[shell_create_directory](Cpu& c){return shell_create_directory(c,false);});
     reg.add("shell32.dll","SHCreateDirectoryExW",Conv::Stdcall,3,[shell_create_directory](Cpu& c){return shell_create_directory(c,true);});
@@ -1484,6 +1490,11 @@ inline void Guest::register_all() {
     reg.add("shell32.dll","ShellExecuteW",Conv::Stdcall,6,[shell_execute](Cpu& c){return shell_execute(c,true);});
     reg.add("shell32.dll","CommandLineToArgvW",Conv::Stdcall,2,[this](Cpu& c)->uint32_t {
         if(!c.arg(0)||!c.arg(1)){set_last_error(87);return 0;}std::u16string input=wstr(c.arg(0));std::vector<std::u16string> args;size_t i=0;
+        // argv[0]: a leading quote runs to the next quote; otherwise to the first space or tab, quotes literal; leading whitespace gives "".
+        std::u16string program;
+        if(!input.empty()&&input[0]==u'"'){i=1;while(i<input.size()&&input[i]!=u'"')program.push_back(input[i++]);if(i<input.size())++i;}
+        else while(i<input.size()&&input[i]!=u' '&&input[i]!=u'\t')program.push_back(input[i++]);
+        args.push_back(program);
         while(i<input.size()){while(i<input.size()&&(input[i]==u' '||input[i]==u'\t'))++i;if(i==input.size())break;std::u16string arg;bool quoted=false;
             while(i<input.size()){if(input[i]==u'\\'){size_t start=i;while(i<input.size()&&input[i]==u'\\')++i;size_t slashes=i-start;if(i<input.size()&&input[i]==u'"'){arg.append(slashes/2,u'\\');if(slashes%2){arg.push_back(u'"');++i;}else quoted=!quoted,++i;}else arg.append(slashes,u'\\');continue;}if(input[i]==u'"'){if(quoted&&i+1<input.size()&&input[i+1]==u'"'){arg.push_back(u'"');i+=2;continue;}quoted=!quoted;++i;continue;}if(!quoted&&(input[i]==u' '||input[i]==u'\t'))break;arg.push_back(input[i++]);}args.push_back(std::move(arg));while(i<input.size()&&(input[i]==u' '||input[i]==u'\t'))++i;
         }
@@ -1827,6 +1838,8 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetFileInformationByHandle", Conv::Stdcall, 2, [this](Cpu&) -> uint32_t { set_last_error(6); return 0; });
     reg.add("kernel32.dll", "K32EnumProcessModules", Conv::Stdcall, 4, [this](Cpu&) -> uint32_t { set_last_error(6); return 0; });
     reg.add("kernel32.dll", "GetLogicalProcessorInformationEx", Conv::Stdcall, 3, [this](Cpu&) -> uint32_t { set_last_error(122); return 0; });
+    // Documented: a found module gains a reference like LoadLibrary unless UNCHANGED_REFCOUNT (0x2); PIN (0x1) keeps it loaded.
+    auto pin_module=[this](uint32_t base,uint32_t flags){if(base==image_base)return;for(auto& kv:dlls)if(kv.second.image.base==base){if(!(flags&2))kv.second.refs++;if(flags&1)kv.second.refs=0x7fffffffu;return;}};  // shortcut: pin is a huge refcount, FreeLibrary only decrements
     // BOOL GetModuleHandleExW(DWORD dwFlags, LPCWSTR lpModuleName, HMODULE *phModule)
     // (libsrc/winbase.h): three parameters — flags, name, out handle. The
     // documented flag contract (Bugbot 4559749437): NULL name means the main
@@ -1835,7 +1848,7 @@ inline void Guest::register_all() {
     // UNCHANGED_REFCOUNT (0x2) and PIN (0x1) only affect refcounting, which
     // this surface's FreeLibrary never unmaps anyway. A lookup that misses
     // writes NULL and fails, as Windows does.
-    reg.add("kernel32.dll", "GetModuleHandleExW", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+    reg.add("kernel32.dll", "GetModuleHandleExW", Conv::Stdcall, 3, [this,pin_module](Cpu& c) -> uint32_t {
         uint32_t flags = c.arg(0), p = c.arg(1), out = c.arg(2);
         uint32_t base = 0;
         if (flags & 4) {  // FROM_ADDRESS: find the module containing the address
@@ -1850,17 +1863,19 @@ inline void Guest::register_all() {
             for (uint32_t i = 0;; ++i) { uint16_t w = uint16_t(mem.r(p + i * 2, 2)); if (!w) break; n.push_back(char(w & 0xff)); }
             base = module_by_name(n, c.thunks);
         }
+        if (base) pin_module(base, flags);
         if (out) mem.w32(out, base);
         if (!base) set_last_error(126);  // ERROR_MOD_NOT_FOUND, as Windows answers
         return base ? 1 : 0;
     });
-    reg.add("kernel32.dll", "GetModuleHandleExA", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+    reg.add("kernel32.dll", "GetModuleHandleExA", Conv::Stdcall, 3, [this,pin_module](Cpu& c) -> uint32_t {
         uint32_t flags=c.arg(0), p=c.arg(1), out=c.arg(2), base=0;
         if(flags&4){
             if(p>=image_base&&p<image_base+0x1000000u)base=image_base;
             else for(const auto& kv:dlls)if(p>=kv.second.image.base&&p<kv.second.image.base+kv.second.image.size){base=kv.second.image.base;break;}
         }else if(!p)base=image_base;
         else base=module_by_name(str(p),c.thunks);
+        if(base)pin_module(base,flags);
         if(out)mem.w32(out,base);
         if(!base)set_last_error(126);
         return base?1u:0u;
@@ -2512,8 +2527,8 @@ inline void Guest::register_all() {
             uint32_t secp=c.arg(0),keyp=c.arg(1),fallback=c.arg(2),file=c.arg(3);std::string sec=wide?narrow(secp):str(secp),key=wide?narrow(keyp):str(keyp),contents;
             if(!profile_text(file,wide,contents))return fallback;
             std::string v=profile_value(contents,sec,key,"");if(v.empty())return fallback;
-            char* end=nullptr;unsigned long n=std::strtoul(v.c_str(),&end,0);
-            return end==v.c_str()?fallback:uint32_t(n);
+            char* end=nullptr;long n=std::strtol(v.c_str(),&end,10);  // decimal only: no hex or octal prefixes
+            return end==v.c_str()?fallback:n<0?0u:uint32_t(n);
         });
         std::string write="WritePrivateProfileString";write+=wide?"W":"A";
         reg.add("kernel32.dll",write,Conv::Stdcall,4,[profile_write,wide](Cpu& c)->uint32_t{return profile_write(c,wide);});
@@ -2977,19 +2992,14 @@ inline void Guest::register_all() {
     auto write_a = [this](uint32_t dst, const std::string& text) { for (size_t i=0;i<=text.size();++i) mem.w8(dst+uint32_t(i),i<text.size()?uint8_t(text[i]):0); };
     auto write_w = [this](uint32_t dst, const std::u16string& text) { for (size_t i=0;i<=text.size();++i) mem.w(dst+uint32_t(i*2),i<text.size()?uint16_t(text[i]):0,2); };
     auto path_file_exists_a = [this](Cpu& c)->uint32_t {
-#if defined(_WIN32)
-        std::string path=str(c.arg(0)); return !path.empty()&&::GetFileAttributesA(path.c_str())!=INVALID_FILE_ATTRIBUTES;
-#else
-        (void)c; return 0;
-#endif
+        Host::FileCall q{Host::FileCall::Kind::AttributesA}; q.path_a=str(c.arg(0));  // same guest file mapping as GetFileAttributesA
+        return !q.path_a.empty()&&call_file(q);
     };
     auto path_file_exists_w = [this](Cpu& c)->uint32_t {
-#if defined(_WIN32)
-        std::u16string path=wstr(c.arg(0)); std::wstring native(path.begin(),path.end());
-        return !native.empty()&&::GetFileAttributesW(native.c_str())!=INVALID_FILE_ATTRIBUTES;
-#else
-        (void)c; return 0;
-#endif
+        // shortcut: non-ASCII paths are refused as GetFileAttributesW's narrow route does; upgrade when file_call takes wide paths
+        std::string narrow; for(char16_t ch:wstr(c.arg(0))){if(ch>0x7f)return 0;narrow.push_back(char(ch));}
+        Host::FileCall q{Host::FileCall::Kind::AttributesA}; q.path_a=narrow;
+        return !narrow.empty()&&call_file(q);
     };
     reg.add("shlwapi.dll","PathFileExistsA",Conv::Stdcall,1,path_file_exists_a);
     reg.add("shlwapi.dll","PathFileExistsW",Conv::Stdcall,1,path_file_exists_w);

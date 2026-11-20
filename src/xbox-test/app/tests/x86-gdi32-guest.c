@@ -40,8 +40,13 @@ void WINAPI entry(void) {
     if (!old_src || !old_dst || !BitBlt(dst, 0, 0, 2, 2, src, 0, 0, SRCCOPY)) fail(4);
     if (BitBlt(window_dc,0,0,2,2,src,0,0,SRCCOPY)) fail(4); // no GDI window presenter: never claim success
     if (((DWORD *)dst_bits)[0] != 0x00112233 || ((DWORD *)dst_bits)[1] != 0x00445566) fail(5);
+    { /* overlapping SRCCOPY on one bitmap: the source is read before the destination is written */
+        DWORD px[4] = {1,2,3,4}, out[4] = {0}; HBITMAP strip = CreateBitmap(4,1,1,32,px); HDC sdc = CreateCompatibleDC(NULL);
+        BITMAPINFO info = {0}; info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); info.bmiHeader.biWidth = 4; info.bmiHeader.biHeight = 1; info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32;
+        if (!strip || !sdc || !SelectObject(sdc, strip) || !BitBlt(sdc,1,0,3,1,sdc,0,0,SRCCOPY) || GetDIBits(sdc,strip,0,1,out,&info,DIB_RGB_COLORS) != 1 || out[1] != 1 || out[2] != 2 || out[3] != 3) fail(27);
+    }
     BITMAP bm = {0}; if (GetObjectA(db, sizeof(bm), &bm) != sizeof(bm) || bm.bmWidth != 2 || bm.bmHeight != 2) fail(6);
-    BYTE mask_bits[8] = {0x80,0,0,0,0x40,0,0,0};
+    BYTE mask_bits[4] = {0x80,0,0x40,0};  /* 8-wide 1bpp rows are WORD aligned: 2 bytes each */
     HBITMAP mask = CreateBitmap(8, 2, 1, 1, mask_bits);
     BITMAP mask_bm = {0};
     if (!mask) fail(17);
@@ -52,7 +57,7 @@ void WINAPI entry(void) {
     if (GetObjectA(mask, sizeof(mask_bm), &mask_bm) != sizeof(mask_bm)) fail(18);
     if (mask_bm.bmWidth != 8) fail(21);
     if (mask_bm.bmHeight != 2) fail(22);
-    if (mask_bm.bmWidthBytes != 4) fail(23);
+    if (mask_bm.bmWidthBytes != 2) fail(23);  /* MSDN CreateBitmap: scanlines must be word aligned */
     if (mask_bm.bmPlanes != 1) fail(24);
     if (mask_bm.bmBitsPixel != 1) fail(25);
     if (!DeleteObject(mask)) fail(20);
