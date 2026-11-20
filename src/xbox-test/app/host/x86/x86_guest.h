@@ -3037,6 +3037,99 @@ inline void Guest::register_all() {
         return 0;
 #endif
     });
+    // Remaining file family. Destructive or creating calls cross guard_file on every path they write or delete;
+    // read-only queries do not. Links are refused with ERROR_NOT_SUPPORTED after the new name passes the guard.
+    reg.add("kernel32.dll", "GetFileSizeEx", Conv::Stdcall, 2, [this,native_file](Cpu& c) -> uint32_t {
+        if(!c.arg(1)){set_last_error(87);return 0;}
+        Host::FileCall q{Host::FileCall::Kind::Size};if(!native_file(c.arg(0),q))return 0;q.args[0]=1;
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}
+        mem.w32(c.arg(1),uint32_t(q.value));mem.w32(c.arg(1)+4,q.args[1]);set_last_error(0);return 1; });
+    reg.add("kernel32.dll", "SetFileTime", Conv::Stdcall, 4, [this,native_file](Cpu& c) -> uint32_t {
+        Host::FileCall q{Host::FileCall::Kind::SetTime};if(!native_file(c.arg(0),q))return 0;
+        for(unsigned i=0;i<3;++i){q.args[i]=c.arg(i+1)!=0;if(c.arg(i+1)){auto b=mem.read_bytes(c.arg(i+1),8);q.data.insert(q.data.end(),b.begin(),b.end());}else q.data.insert(q.data.end(),8,0);}
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}set_last_error(0);return 1; });
+    reg.add("kernel32.dll", "SetFileAttributesW", Conv::Stdcall, 2, [this,guard_file](Cpu& c) -> uint32_t {
+        if(!c.arg(0)){set_last_error(87);return 0;}Host::FileCall q{Host::FileCall::Kind::SetAttributesW};q.path_w=wstr(c.arg(0));q.args[0]=c.arg(1);
+        if(!guard_file("SetFileAttributesW",q.path_w))return 0;
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    reg.add("kernel32.dll", "GetFileAttributesExA", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+        if(!c.arg(0)||!c.arg(2)||c.arg(1)){set_last_error(87);return 0;}
+        Host::FileCall q{Host::FileCall::Kind::AttributesA};q.path_a=str(c.arg(0));q.args[0]=c.arg(1);q.args[1]=1;
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}
+        mem.write_bytes(c.arg(2),q.data.data(),uint32_t(q.data.size()));set_last_error(0);return 1; });
+    reg.add("kernel32.dll", "CopyFileA", Conv::Stdcall, 3, [this,guard_file,narrow_path](Cpu& c) -> uint32_t {
+        if(!c.arg(0)||!c.arg(1)){set_last_error(87);return 0;}
+        Host::FileCall q{Host::FileCall::Kind::Copy};q.operation=Host::FileCall::Operation::CopyFileA;q.path_a=str(c.arg(0));q.path2_a=str(c.arg(1));q.args[0]=c.arg(2)!=0;
+        if(!guard_file("CopyFileA",narrow_path(q.path2_a)))return 0;
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    reg.add("kernel32.dll", "CopyFileW", Conv::Stdcall, 3, [this,guard_file](Cpu& c) -> uint32_t {
+        if(!c.arg(0)||!c.arg(1)){set_last_error(87);return 0;}
+        Host::FileCall q{Host::FileCall::Kind::Copy};q.operation=Host::FileCall::Operation::CopyFileW;q.path_w=wstr(c.arg(0));q.path2_w=wstr(c.arg(1));q.args[0]=c.arg(2)!=0;
+        if(!guard_file("CopyFileW",q.path2_w))return 0;
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    reg.add("kernel32.dll", "MoveFileA", Conv::Stdcall, 2, [this,guard_file,narrow_path](Cpu& c) -> uint32_t {
+        if(!c.arg(0)||!c.arg(1)){set_last_error(87);return 0;}
+        Host::FileCall q{Host::FileCall::Kind::Move};q.operation=Host::FileCall::Operation::MoveFileA;q.path_a=str(c.arg(0));q.path2_a=str(c.arg(1));
+        if(!guard_file("MoveFileA",narrow_path(q.path_a))||!guard_file("MoveFileA",narrow_path(q.path2_a)))return 0;
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    reg.add("kernel32.dll", "MoveFileExA", Conv::Stdcall, 3, [this,guard_file,narrow_path](Cpu& c) -> uint32_t {
+        if(!c.arg(0)||!c.arg(1)){set_last_error(87);return 0;}
+        Host::FileCall q{Host::FileCall::Kind::Move};q.operation=Host::FileCall::Operation::MoveFileExA;q.path_a=str(c.arg(0));q.path2_a=str(c.arg(1));q.args[0]=c.arg(2);
+        if(!guard_file("MoveFileExA",narrow_path(q.path_a))||!guard_file("MoveFileExA",narrow_path(q.path2_a)))return 0;
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    reg.add("kernel32.dll", "MoveFileExW", Conv::Stdcall, 3, [this,guard_file](Cpu& c) -> uint32_t {
+        if(!c.arg(0)||!c.arg(1)){set_last_error(87);return 0;}
+        Host::FileCall q{Host::FileCall::Kind::Move};q.operation=Host::FileCall::Operation::MoveFileExW;q.path_w=wstr(c.arg(0));q.path2_w=wstr(c.arg(1));q.args[0]=c.arg(2);
+        if(!guard_file("MoveFileExW",q.path_w)||!guard_file("MoveFileExW",q.path2_w))return 0;
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}return 1; });
+    for(bool lock:{true,false}){reg.add("kernel32.dll", lock?"LockFile":"UnlockFile", Conv::Stdcall, 5, [this,native_file,lock](Cpu& c) -> uint32_t {
+        Host::FileCall q{lock?Host::FileCall::Kind::Lock:Host::FileCall::Kind::Unlock};if(!native_file(c.arg(0),q))return 0;
+        q.args[0]=c.arg(1);q.args[1]=c.arg(2);q.args[2]=c.arg(3);q.args[3]=c.arg(4);
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}set_last_error(0);return 1; });}
+    reg.add("kernel32.dll", "GetTempPathW", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        if(!c.arg(1)&&c.arg(0)){set_last_error(87);return 0;}
+        Host::FileCall q{Host::FileCall::Kind::TempPathW};q.args[0]=c.arg(0);
+        if(!call_file(q)||!q.value){set_last_error(q.error?q.error:120);return 0;}
+        if(q.value<c.arg(0)){mem.write_bytes(c.arg(1),q.data.data(),uint32_t(q.data.size()));mem.w(c.arg(1)+uint32_t(q.data.size()),0,2);}
+        set_last_error(0);return uint32_t(q.value); });
+    reg.add("kernel32.dll", "GetTempFileNameW", Conv::Stdcall, 4, [this,guard_file](Cpu& c) -> uint32_t {
+        if(!c.arg(0)||!c.arg(1)||!c.arg(3)){set_last_error(87);return 0;}
+        Host::FileCall q{Host::FileCall::Kind::TempFileNameW};q.path_w=wstr(c.arg(0));q.path2_w=wstr(c.arg(1));q.args[0]=c.arg(2);
+        if(!guard_file("GetTempFileNameW",q.path_w+u"\\"+q.path2_w))return 0;
+        if(!call_file(q)||!q.value){set_last_error(q.error?q.error:120);return 0;}
+        mem.write_bytes(c.arg(3),q.data.data(),uint32_t(q.data.size()));mem.w(c.arg(3)+uint32_t(q.data.size()),0,2);
+        set_last_error(0);return uint32_t(q.value); });
+    reg.add("kernel32.dll", "GetDiskFreeSpaceW", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
+        if(!c.arg(0)){set_last_error(87);return 0;}
+        Host::FileCall q{Host::FileCall::Kind::DiskFreeW};q.path_w=wstr(c.arg(0));
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}
+        for(unsigned i=0;i<4;++i)if(c.arg(i+1))mem.w32(c.arg(i+1),q.args[i]);
+        set_last_error(0);return 1; });
+    for(bool wide:{false,true}){std::string name=wide?"GetDiskFreeSpaceExW":"GetDiskFreeSpaceExA";reg.add("kernel32.dll", name, Conv::Stdcall, 4, [this,wide](Cpu& c) -> uint32_t {
+        if(!c.arg(0)){set_last_error(87);return 0;}
+        Host::FileCall q{wide?Host::FileCall::Kind::DiskFreeExW:Host::FileCall::Kind::DiskFreeExA};if(wide)q.path_w=wstr(c.arg(0));else q.path_a=str(c.arg(0));
+        if(!call_file(q)||q.data.size()<24){set_last_error(q.error?q.error:120);return 0;}
+        for(unsigned i=0;i<3;++i)if(c.arg(i+1))mem.write_bytes(c.arg(i+1),q.data.data()+8*i,8);
+        set_last_error(0);return 1; });}
+    reg.add("kernel32.dll", "GetDriveTypeW", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        if(!c.arg(0))return 0;  // DRIVE_UNKNOWN
+        Host::FileCall q{Host::FileCall::Kind::DriveTypeW};q.path_w=wstr(c.arg(0));
+        if(!call_file(q))return 0;
+        return uint32_t(q.value); });
+    for(bool wide:{false,true}){
+        reg.add("kernel32.dll", wide?"CreateHardLinkW":"CreateHardLinkA", Conv::Stdcall, 3, [this,guard_file,narrow_path,wide](Cpu& c) -> uint32_t {
+            if(!c.arg(0)||!c.arg(1)){set_last_error(87);return 0;}
+            const bool allowed=wide?guard_file("CreateHardLinkW",wstr(c.arg(0))):guard_file("CreateHardLinkA",narrow_path(str(c.arg(0))));
+            if(!allowed)return 0;
+            set_last_error(50);return 0; });  // ERROR_NOT_SUPPORTED: the sandbox does not create hard links
+        reg.add("kernel32.dll", wide?"CreateSymbolicLinkW":"CreateSymbolicLinkA", Conv::Stdcall, 3, [this,guard_file,narrow_path,wide](Cpu& c) -> uint32_t {
+            if(!c.arg(0)||!c.arg(1)){set_last_error(87);return 0;}
+            const bool allowed=wide?guard_file("CreateSymbolicLinkW",wstr(c.arg(0))):guard_file("CreateSymbolicLinkA",narrow_path(str(c.arg(0))));
+            if(!allowed)return 0;
+            set_last_error(50);return 0; });  // ERROR_NOT_SUPPORTED: the sandbox does not create symbolic links
+    }
+    // A GUI guest has no console, so no handle is a console I/O handle.
+    reg.add("kernel32.dll", "VerifyConsoleIoHandle", Conv::Stdcall, 1, [this](Cpu&) -> uint32_t { set_last_error(6); return 0; });
     reg.add("kernel32.dll", "SetFilePointer", Conv::Stdcall, 4, [this,native_file](Cpu& c) -> uint32_t {
         Host::FileCall q{Host::FileCall::Kind::Seek};if(!native_file(c.arg(0),q))return 0xffffffffu;
         q.args[0]=c.arg(1);q.args[1]=c.arg(2)?mem.r32(c.arg(2)):0;q.args[2]=c.arg(3);q.args[3]=c.arg(2)!=0;
