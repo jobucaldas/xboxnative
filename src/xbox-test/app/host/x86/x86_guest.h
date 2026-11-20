@@ -1104,6 +1104,13 @@ inline void Guest::register_all() {
     // interpreter memory; only memory-DC SRCCOPY is implemented. Window DC
     // presentation and text rasterization have no host backend and fail closed.
     auto gdi_handle = [this]() { return 0x72000000u + ++gdi_serial; };
+    // The stock objects a DC starts with (1x1 bitmap, white brush, black pen, system font).
+    auto stock_gdi = [this]() {
+        if(!gdi_objects.count(0x73000001u)){uint32_t bits=heap.alloc(4);mem.w32(bits,0);gdi_objects[0x73000001u]=GdiObject{1,1,1,bits,32,0,true,true};}
+        if(!gdi_objects.count(0x73001000u))gdi_objects[0x73001000u]=GdiObject{2,0,0,0,0,0x00ffffffu,true,true};
+        if(!gdi_objects.count(0x7300100du))gdi_objects[0x7300100du]=GdiObject{3,0,0,0,0,0,true,true};
+        if(!gdi_objects.count(0x73001007u))gdi_objects[0x73001007u]=GdiObject{4,0,0,0,0,0,true,true};
+    };
     auto make_bitmap = [this, gdi_handle](uint32_t w, uint32_t h, uint32_t bpp, bool top_down) -> uint32_t {
         if (!w || !h || w > 16384 || h > 16384 || bpp != 32 || uint64_t(w) * h * 4 > 0x4000000u) { set_last_error(87); return 0; }
         uint32_t handle = gdi_handle(), bits = heap.alloc(w * h * 4);
@@ -1116,7 +1123,7 @@ inline void Guest::register_all() {
         if(index==8||index==10) { if(host.system_metrics&&host.system_metrics(index==8?0:1,value))return uint32_t(value); set_last_error(120);return 0; }
         switch(index) { case 12:return 32; case 14:return 1; case 88: case 90:return 96; case 116:return 60; case 38:return 0; default:set_last_error(120);return 0; }
     });
-    reg.add("gdi32.dll", "CreateCompatibleDC", Conv::Stdcall, 1, [this,gdi_handle](Cpu& c) -> uint32_t { if(c.arg(0)&&!gdi_dcs.count(c.arg(0))&&!host.dc_handles.count(c.arg(0))){set_last_error(6);return 0;}uint32_t h=gdi_handle();if(!gdi_objects.count(0x73000001u)){uint32_t bits=heap.alloc(4);mem.w32(bits,0);gdi_objects[0x73000001u]=GdiObject{1,1,1,bits,32,0,true,true};}if(!gdi_objects.count(0x73001000u))gdi_objects[0x73001000u]=GdiObject{2,0,0,0,0,0x00ffffffu,true,true};if(!gdi_objects.count(0x7300100du))gdi_objects[0x7300100du]=GdiObject{3,0,0,0,0,0,true,true};if(!gdi_objects.count(0x73001007u))gdi_objects[0x73001007u]=GdiObject{4,0,0,0,0,0,true,true};GdiDc dc{};dc.bitmap=0x73000001u;dc.brush=0x73001000u;dc.pen=0x73001007u;dc.font=0x7300100du;gdi_dcs[h]=dc;return h; });
+    reg.add("gdi32.dll", "CreateCompatibleDC", Conv::Stdcall, 1, [this,gdi_handle,stock_gdi](Cpu& c) -> uint32_t { if(c.arg(0)&&!gdi_dcs.count(c.arg(0))&&!host.dc_handles.count(c.arg(0))){set_last_error(6);return 0;}uint32_t h=gdi_handle();stock_gdi();GdiDc dc{};dc.bitmap=0x73000001u;dc.brush=0x73001000u;dc.pen=0x73001007u;dc.font=0x7300100du;gdi_dcs[h]=dc;return h; });
     reg.add("gdi32.dll", "DeleteDC", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { return gdi_dcs.erase(c.arg(0))?1u:(set_last_error(6),0u); });
     reg.add("gdi32.dll", "CreateCompatibleBitmap", Conv::Stdcall, 3, [this,make_bitmap](Cpu& c) -> uint32_t { return make_bitmap(c.arg(1),c.arg(2),32,true); });
     reg.add("gdi32.dll", "CreateBitmap", Conv::Stdcall, 5, [this,gdi_handle](Cpu& c) -> uint32_t {
@@ -1231,6 +1238,15 @@ inline void Guest::register_all() {
     reg.add("gdi32.dll", "SetTextColor", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { auto d=gdi_dcs.find(c.arg(0));if(d==gdi_dcs.end()){set_last_error(6);return 0xffffffffu;}uint32_t old=d->second.text_color;d->second.text_color=c.arg(1);return old; });
     reg.add("gdi32.dll", "SetBkColor", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { auto d=gdi_dcs.find(c.arg(0));if(d==gdi_dcs.end()){set_last_error(6);return 0xffffffffu;}uint32_t old=d->second.bk_color;d->second.bk_color=c.arg(1);return old; });
     reg.add("gdi32.dll", "GdiFlush", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 1; });
+    // A window DC from GetDC takes the same GDI state calls as a memory DC: it gets a gdi_dcs
+    // entry with the stock brush, pen and font, and no bitmap, so a blit into it still fails
+    // closed (120). ReleaseDC erases the entry. BeginPaint is unavailable on this surface.
+    {
+        auto& getdc=reg.map.at({"user32.dll","getdc"});
+        getdc.fn=[this,stock_gdi,inner=getdc.fn](Cpu& c)->uint32_t{uint32_t dc=inner(c);if(dc){stock_gdi();GdiDc window{};window.brush=0x73001000u;window.pen=0x73001007u;window.font=0x7300100du;gdi_dcs[dc]=window;}return dc;};
+        auto& releasedc=reg.map.at({"user32.dll","releasedc"});
+        releasedc.fn=[this,inner=releasedc.fn](Cpu& c)->uint32_t{uint32_t dc=c.arg(1);uint32_t ok=inner(c);if(ok)gdi_dcs.erase(dc);return ok;};
+    }
     auto blit=[this](Cpu& c,bool stretch)->uint32_t { uint32_t dst=c.arg(0),src=c.arg(5);auto d=gdi_dcs.find(dst),s=gdi_dcs.find(src);if(d==gdi_dcs.end()||s==gdi_dcs.end()||!d->second.bitmap||!s->second.bitmap||c.arg(stretch?10:8)!=0x00cc0020u){set_last_error(120);return 0;}auto& db=gdi_objects[d->second.bitmap];auto& sb=gdi_objects[s->second.bitmap];if(db.bpp!=32||sb.bpp!=32){set_last_error(120);return 0;}int32_t x=int32_t(c.arg(1)),y=int32_t(c.arg(2)),w=int32_t(c.arg(3)),h=int32_t(c.arg(4)),sx=int32_t(c.arg(6)),sy=int32_t(c.arg(7)),sw=stretch?int32_t(c.arg(8)):w,sh=stretch?int32_t(c.arg(9)):h;if(w<=0||h<=0||sw<=0||sh<=0||w>16384||h>16384||sw>16384||sh>16384){set_last_error(87);return 0;}std::vector<std::pair<uint32_t,uint32_t>> writes;writes.reserve(size_t(w)*h);for(int32_t yy=0;yy<h;++yy)for(int32_t xx=0;xx<w;++xx){int32_t dx=x+xx,dy=y+yy,px=sx+xx*sw/w,py=sy+yy*sh/h;if(dx<0||dy<0||px<0||py<0||uint32_t(dx)>=db.width||uint32_t(dy)>=db.height||uint32_t(px)>=sb.width||uint32_t(py)>=sb.height)continue;uint32_t dr=db.bits+((db.top_down?uint32_t(dy):db.height-1-uint32_t(dy))*db.width+uint32_t(dx))*4,sr=sb.bits+((sb.top_down?uint32_t(py):sb.height-1-uint32_t(py))*sb.width+uint32_t(px))*4;writes.push_back({dr,c.mem.r32(sr)});}for(auto& wr:writes)c.mem.w32(wr.first,wr.second);  /* GDI copies are memmove-like: read every source pixel before writing */return 1;};
     reg.add("gdi32.dll", "BitBlt", Conv::Stdcall, 9, [blit](Cpu& c){return blit(c,false);});
     reg.add("gdi32.dll", "StretchBlt", Conv::Stdcall, 11, [blit](Cpu& c){return blit(c,true);});

@@ -11,3 +11,5 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/x86-gdi32.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
   -o "$tmp/x86-gdi32.exe" "$here/x86-gdi32-guest.c" -lkernel32 -luser32 -lgdi32
 "${CXX:-c++}" -std=c++17 -O2 -mno-red-zone -Wall -Wextra -Werror "$here/x86-gdi32.cpp" -o "$tmp/x86-gdi32"
 "$tmp/x86-gdi32" "$tmp/x86-gdi32.exe"
+"${CXX:-c++}" -std=c++17 -O2 -Wall -Wextra -Werror "$here/x86-gdi-window-dc.cpp" -o "$tmp/x86-gdi-window-dc"
+"$tmp/x86-gdi-window-dc"
