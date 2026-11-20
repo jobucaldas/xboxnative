@@ -708,7 +708,7 @@ inline void register_xinput(Registry& r, Host& h) {
             if (!c.arg(3)) return error_bad_arguments;
             Host::XInputCall request{}; request.kind = Host::XInputCall::Kind::GetCapabilitiesEx;
             request.index = c.arg(1); request.flags = c.arg(2); call(request);
-            if (!request.result && request.output.size() == 20) c.mem.write_bytes(c.arg(3), request.output.data(), 20);
+            if (!request.result && request.output.size() == 32) c.mem.write_bytes(c.arg(3), request.output.data(), 32);
             return request.result;
         });
         if (dll != std::string("xinput9_1_0.dll")) r.add_ordinal(dll, 108, "XInputGetCapabilitiesEx");
