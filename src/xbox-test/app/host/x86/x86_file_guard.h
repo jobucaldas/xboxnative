@@ -47,9 +47,12 @@ inline std::u16string normalize(std::u16string path, const std::u16string& cwd) 
         size_t end = path.find(u'\\', start);
         if (end == std::u16string::npos) end = path.size();
         auto part = path.substr(start, end - start);
-        if (part == u"..") { if (!parts.empty() && parts.back() != u"..") parts.pop_back(); }
-        else {
-            // Win32 drops trailing periods and spaces from each component; "." and "" vanish.
+        // Trailing spaces and periods are stripped first, so ".. " and "..\x20." are the parent.
+        // Dots-only names with three or more dots are refused by allow() before normalize sees them.
+        const bool dots_only = part.find_first_not_of(u". ") == std::u16string::npos && part.find(u'.') != std::u16string::npos;
+        if (dots_only) {
+            if (std::count(part.begin(), part.end(), u'.') == 2 && !parts.empty() && parts.back() != u"..") parts.pop_back();
+        } else {
             while (!part.empty() && (part.back() == u'.' || part.back() == u' ')) part.pop_back();
             if (!part.empty()) parts.push_back(std::move(part));
         }
@@ -67,6 +70,18 @@ inline bool inside(const std::u16string& path, const std::u16string& root) {
     return path.size() > root.size() && path.compare(0, root.size(), root) == 0 &&
            (root.back() == u'\\' || path[root.size()] == u'\\');
 }
+// A component of only dots and spaces with three or more dots (e.g. "...") has no safe
+// meaning here: Win32 may drop it or treat it as a parent. The guard refuses such paths.
+inline bool ambiguous(const std::u16string& path) {
+    for (size_t start = 0; start <= path.size();) {
+        size_t end = path.find_first_of(u"\\/", start);
+        if (end == std::u16string::npos) end = path.size();
+        const auto part = path.substr(start, end - start);
+        if (part.find_first_not_of(u". ") == std::u16string::npos && std::count(part.begin(), part.end(), u'.') >= 3) return true;
+        start = end + 1;
+    }
+    return false;
+}
 class Policy {
 public:
     using Log = std::function<void(const std::string&)>;
@@ -78,10 +93,11 @@ public:
     }
     bool allow(const char* operation, const std::u16string& path, const std::u16string& current = {}) {
         const auto full = normalize(path, current.empty() ? cwd_ : current);
-        bool protectedPath = false;
+        const bool ambiguous_path = ambiguous(path);
+        bool protectedPath = ambiguous_path;
         for (const auto& root : protectedRoots_) protectedPath = protectedPath || inside(full, root);
         if (!protectedPath) return true;
-        for (const auto& root : allowedRoots_) if (inside(full, root)) return true;
+        if (!ambiguous_path) for (const auto& root : allowedRoots_) if (inside(full, root)) return true;
         if (logged_.insert(full).second && log_) {
             std::string op = operation ? operation : "file operation";
             log_("x86 file guard: refused " + op + " <redacted path>");

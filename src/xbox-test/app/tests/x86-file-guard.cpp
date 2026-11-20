@@ -16,6 +16,13 @@ int main() {
     // Win32 drops trailing periods and spaces from components.
     CHECK(!local.allow("delete", u("C:\\Game\\LocalState.\\save.dat")));
     CHECK(!local.allow("delete", u("C:\\Game\\LocalState \\save.dat")));
+    // ".. " and "..\x20." strip to the parent (Win32 strips trailing spaces and dots), so they escape to LocalState's sibling.
+    CHECK(!local.allow("create", u("C:\\Game\\Other\\.. \\LocalState\\save.dat")));
+    CHECK(!local.allow("create", u("C:\\Game\\Other\\..\x20.\\LocalState\\save.dat")));
+    CHECK(x86_file_guard::normalize(u("C:\\Game\\Other\\.. \\LocalState"), {}) == u("c:\\game\\localstate"));
+    // "..." has no safe meaning (dropped or parent), so the guard refuses it.
+    CHECK(!local.allow("delete", u("C:\\Game\\Other\\...\\LocalState\\save.dat")));
+    CHECK(!local.allow("delete", u("C:\\Game\\Other\\...\\..\\LocalState\\save.dat")));
     // A rooted name is on the cwd drive.
     CHECK(!local.allow("create", u("\\Game\\LocalState\\save.dat")));
     // Ordinary cwd-relative files stay allowed.
