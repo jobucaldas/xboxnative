@@ -192,6 +192,21 @@ struct Guest {
     std::map<uint32_t, uint32_t> sync_handles;        // guest handle -> object id
     std::map<uint32_t, SyncObject> sync_objects;
     std::map<std::u16string, uint32_t> sync_names;    // names are case-sensitive (Win32)
+    // Thread pool objects (work, timer, wait) are synthetic handles. Each queued
+    // callback is a run with its own instance handle, kept in pool_runs until it
+    // returns; pool_queue holds the instances that have not run yet, in order.
+    enum class PoolKind { Work, Timer, Wait };
+    struct PoolObject { PoolKind kind = PoolKind::Work; uint32_t callback = 0, context = 0, event = 0, period = 0; bool armed = false, has_due = false; uint64_t due = 0; };
+    struct PoolRun { uint32_t owner = 0, result = 0, free_module = 0; };
+    std::map<uint32_t, PoolObject> pool_objects;
+    std::map<uint32_t, PoolRun> pool_runs;
+    std::vector<uint32_t> pool_queue;
+    uint32_t pool_serial = 0, pool_run_serial = 0;
+    // Waiters on a key (a condition variable or an address) and the wakes not yet
+    // consumed by one of them: a wake with no waiter is lost, as on Windows.
+    struct WakeQueue { uint32_t waiters = 0, wakes = 0; };
+    std::map<uint32_t, WakeQueue> condition_queues, address_queues;
+    std::map<uint32_t, uint32_t> init_once_context;  // INIT_ONCE word -> context of its completed init
     std::map<uint32_t, uint64_t> file_handles;         // guest handle -> Play host HANDLE
     std::map<int32_t, uint32_t> std_handles{{-10, Host::H_STDIN}, {-11, Host::H_STDOUT}, {-12, Host::H_STDERR}};
     std::map<uint32_t, uint64_t> find_handles;         // guest search handle -> native find HANDLE
@@ -551,6 +566,7 @@ struct Guest {
     // then reverse-order DllMain and TLS DLL_THREAD_DETACH on the same TEB. The
     // TEB and all blocks in its mapping are unmapped after notifications.
     void run_pending_threads(Cpu& c) {
+        fire_due_pool(c); run_pool_work(c);
         while (!pending_threads.empty()) {
             auto t = pending_threads.front(); pending_threads.erase(pending_threads.begin());
             auto id = thread_ids.find(std::get<0>(t));
@@ -592,6 +608,97 @@ struct Guest {
             abandon_mutexes(id != thread_ids.end() ? id->second : 0);
             mapping.release();
         }
+        run_pool_work(c);
+    }
+    // Thread pool model: a submitted work item, a due timer or a signaled wait
+    // queues one run. run_pool_work executes queued runs on the calling thread's
+    // TEB at each yield point (run_pending_threads, Sleep) and at every
+    // WaitForThreadpool*Callbacks or Close call, so a callback runs after the call
+    // that queued it and before any wait on it returns. Windows runs them on pool
+    // threads; this single-threaded guest has no second thread to run them on.
+    uint32_t create_pool(PoolKind kind, uint32_t callback, uint32_t context) {
+        if (!callback) { set_last_error(87); return 0; }
+        uint32_t h = 0x5C000000u + ++pool_serial;
+        PoolObject o; o.kind = kind; o.callback = callback; o.context = context;
+        pool_objects[h] = o;
+        return h;
+    }
+    uint32_t queue_pool_run(uint32_t owner, uint32_t result) {
+        uint32_t run = 0x58000000u + ++pool_run_serial;
+        pool_runs[run] = PoolRun{owner, result, 0};
+        pool_queue.push_back(run);
+        return run;
+    }
+    void run_pool_work(Cpu& c) {
+        while (!pool_queue.empty()) {
+            uint32_t run = pool_queue.front(); pool_queue.erase(pool_queue.begin());
+            uint32_t owner = pool_runs[run].owner, result = pool_runs[run].result;
+            PoolObject o = pool_objects[owner];
+            // Callback signatures: (instance, context, object) for work and timers;
+            // a wait callback also receives the WAIT_OBJECT_0 or WAIT_TIMEOUT result.
+            if (o.kind == PoolKind::Wait) c.call(o.callback, {run, o.context, owner, result});
+            else c.call(o.callback, {run, o.context, owner});
+            uint32_t free_module = pool_runs[run].free_module;
+            pool_runs.erase(run);
+            if (free_module) free_library(c, free_module);
+        }
+    }
+    // WaitForThreadpool*Callbacks and Close*: cancel drops this object's queued
+    // runs (cancelPending); otherwise the queued runs run now. A run already on the
+    // stack has finished by the time the calling code can ask.
+    void wait_pool(Cpu& c, uint32_t owner, bool cancel) {
+        if (!cancel) { run_pool_work(c); return; }
+        for (auto it = pool_queue.begin(); it != pool_queue.end();) {
+            if (pool_runs[*it].owner == owner) { pool_runs.erase(*it); it = pool_queue.erase(it); }
+            else ++it;
+        }
+    }
+    // Armed timers fire once their due tick passes (a period re-arms them); a wait
+    // fires when its handle is signaled (consumed, as a wait would) or its timeout passes.
+    void fire_due_pool(Cpu& c) {
+        uint64_t now = tick_now();
+        for (auto& kv : pool_objects) {
+            PoolObject& o = kv.second;
+            if (!o.armed) continue;
+            if (o.kind == PoolKind::Timer && o.due <= now) {
+                queue_pool_run(kv.first, 0);
+                if (o.period) o.due = now + o.period; else o.armed = false;
+            } else if (o.kind == PoolKind::Wait) {
+                if (sync_wait(c, o.event, 0) == 0) { queue_pool_run(kv.first, 0); o.armed = false; }
+                else if (o.has_due && o.due <= now) { queue_pool_run(kv.first, 258u); o.armed = false; }
+            }
+        }
+    }
+    uint64_t read_filetime(uint32_t p) const { return uint64_t(mem.r32(p)) | uint64_t(mem.r32(p + 4)) << 32; }
+    // The tick a FILETIME-style time falls due at: a negative value is a relative
+    // interval in 100 ns units, a positive one an absolute system time (1601 epoch).
+    uint64_t due_tick(uint64_t ft) const {
+        if (int64_t(ft) < 0) return tick_now() + uint64_t(-int64_t(ft) / 10000);
+        uint64_t unix_ft = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()) * 10000u + 116444736000000000ull;
+        return tick_now() + (ft > unix_ft ? (ft - unix_ft) / 10000u : 0u);
+    }
+    // Blocks the single guest thread on a wait queue. The bodies run first, since
+    // they are the only thing that can wake it; `done` (optional) ends the wait
+    // without a wake. Returns false on timeout, and throws for an infinite wait
+    // that nothing can end.
+    bool queue_wait(Cpu& c, std::map<uint32_t, WakeQueue>& queues, uint32_t key, uint32_t timeout, const char* what, const std::function<bool()>& done) {
+        Clock::time_point deadline{};
+        if (timeout != 0xffffffffu) deadline = Clock::now() + std::chrono::milliseconds(timeout);
+        WakeQueue& q = queues[key];
+        ++q.waiters;
+        run_pending_threads(c);
+        bool woken = done && done();
+        if (!woken && q.wakes > 0) { --q.wakes; woken = true; }
+        if (!woken && timeout == 0xffffffffu) { --q.waiters; throw Fault(FaultKind::Unsupported, c.eip, key, std::string(what) + ": unsignaled infinite wait"); }
+        if (!woken) sleep_until(deadline);
+        --q.waiters;
+        return woken;
+    }
+    // A wake reaches only the waiters present now: with none, it is lost.
+    void queue_wake(std::map<uint32_t, WakeQueue>& queues, uint32_t key, bool all) {
+        auto it = queues.find(key);
+        if (it == queues.end() || it->second.waiters <= it->second.wakes) return;
+        it->second.wakes = all ? it->second.waiters : it->second.wakes + 1;
     }
     // Guest DLL loading (stage 3). `run_dll_mains` runs each loaded DLL's
     // TLS callbacks and DllMain(DLL_PROCESS_ATTACH) in load order, like the
@@ -1570,6 +1677,10 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll","CreateEventW",Conv::Stdcall,4,[this](Cpu& c)->uint32_t{return create_sync(SyncKind::Event,c.arg(3),true,c.arg(1)!=0,c.arg(2)!=0,0,0,0);});
     reg.add("kernel32.dll","CreateMutexA",Conv::Stdcall,3,[this,sync_current_thread](Cpu& c)->uint32_t{return create_sync(SyncKind::Mutex,c.arg(2),false,false,false,0,0,c.arg(1)?sync_current_thread(c):0);});
     reg.add("kernel32.dll","CreateSemaphoreA",Conv::Stdcall,4,[this](Cpu& c)->uint32_t{int32_t initial=int32_t(c.arg(1)),maximum=int32_t(c.arg(2));if(initial<0||maximum<=0||initial>maximum){set_last_error(87);return 0;}return create_sync(SyncKind::Semaphore,c.arg(3),false,false,false,initial,maximum,0);});
+    // CreateEventExW(attributes, name, flags, access): CREATE_EVENT_MANUAL_RESET 1, CREATE_EVENT_INITIAL_SET 2.
+    reg.add("kernel32.dll","CreateEventExW",Conv::Stdcall,4,[this](Cpu& c)->uint32_t{return create_sync(SyncKind::Event,c.arg(1),true,(c.arg(2)&1u)!=0,(c.arg(2)&2u)!=0,0,0,0);});
+    // CreateSemaphoreExW(attributes, initial, maximum, name, flags, access): the flags are reserved and must be zero.
+    reg.add("kernel32.dll","CreateSemaphoreExW",Conv::Stdcall,6,[this](Cpu& c)->uint32_t{int32_t initial=int32_t(c.arg(1)),maximum=int32_t(c.arg(2));if(c.arg(4)||initial<0||maximum<=0||initial>maximum){set_last_error(87);return 0;}return create_sync(SyncKind::Semaphore,c.arg(3),true,false,false,initial,maximum,0);});
     reg.add("kernel32.dll","SetEvent",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Event){set_last_error(6);return 0;}auto& o=sync_objects[h->second];o.signaled=true;
 #if defined(_WIN32)
         if(o.native_event)SetEvent(reinterpret_cast<HANDLE>(o.native_event));
@@ -1720,7 +1831,7 @@ inline void Guest::register_all() {
     // part of the caller's interval while it runs (Bugbot 4561794148).
     auto guest_sleep = [this](Cpu& c) -> uint32_t {
         uint32_t timeout=c.arg(0); auto deadline=Clock::now()+std::chrono::milliseconds(timeout);
-        run_pending_threads(c); if(timeout) sleep_until(deadline); return 0;
+        run_pending_threads(c); if(timeout) sleep_until(deadline); run_pending_threads(c); return 0;  // the second run fires timers due during the sleep
     };
     reg.add("kernel32.dll", "Sleep", Conv::Stdcall, 1, guest_sleep);
     reg.add("kernel32.dll", "SleepEx", Conv::Stdcall, 2, [guest_sleep](Cpu& c) -> uint32_t {
@@ -1814,10 +1925,48 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "InitializeConditionVariable", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         if (c.arg(0)) mem.w32(c.arg(0), 0);
         return 1; });
-    reg.add("kernel32.dll", "WakeConditionVariable", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
-    reg.add("kernel32.dll", "WakeAllConditionVariable", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
+    // A wake reaches only SleepConditionVariableSRW waiters (queue_wake); the CS sleep above has none to wake.
+    reg.add("kernel32.dll", "WakeConditionVariable", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { queue_wake(condition_queues, c.arg(0), false); return 0; });
+    reg.add("kernel32.dll", "WakeAllConditionVariable", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { queue_wake(condition_queues, c.arg(0), true); return 0; });
     reg.add("kernel32.dll", "SleepConditionVariableCS", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
         run_pending_threads(c); return 1; });  // nonzero: woken, not timed out
+    // Thread pool (threadpoolapiset.h): the objects are created here, their runs are
+    // queued by Submit and by the timer and wait firing in fire_due_pool.
+    reg.add("kernel32.dll", "CreateThreadpoolWork", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { return create_pool(PoolKind::Work, c.arg(0), c.arg(1)); });
+    reg.add("kernel32.dll", "SubmitThreadpoolWork", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        auto it = pool_objects.find(c.arg(0)); if (it != pool_objects.end() && it->second.kind == PoolKind::Work) queue_pool_run(c.arg(0), 0); return 0; });
+    reg.add("kernel32.dll", "WaitForThreadpoolWorkCallbacks", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { wait_pool(c, c.arg(0), c.arg(1) != 0); return 0; });
+    reg.add("kernel32.dll", "CloseThreadpoolWork", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { wait_pool(c, c.arg(0), false); pool_objects.erase(c.arg(0)); return 0; });
+    reg.add("kernel32.dll", "CreateThreadpoolTimer", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { return create_pool(PoolKind::Timer, c.arg(0), c.arg(1)); });
+    reg.add("kernel32.dll", "SetThreadpoolTimer", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
+        auto it = pool_objects.find(c.arg(0)); if (it == pool_objects.end() || it->second.kind != PoolKind::Timer) return 0;
+        PoolObject& o = it->second; o.armed = c.arg(1) != 0;  // a NULL due time disarms the timer
+        if (o.armed) { o.has_due = true; o.due = due_tick(read_filetime(c.arg(1))); o.period = c.arg(2); }
+        return 0; });
+    reg.add("kernel32.dll", "WaitForThreadpoolTimerCallbacks", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { wait_pool(c, c.arg(0), c.arg(1) != 0); return 0; });
+    reg.add("kernel32.dll", "CloseThreadpoolTimer", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { wait_pool(c, c.arg(0), false); pool_objects.erase(c.arg(0)); return 0; });
+    reg.add("kernel32.dll", "CreateThreadpoolWait", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { return create_pool(PoolKind::Wait, c.arg(0), c.arg(1)); });
+    reg.add("kernel32.dll", "SetThreadpoolWait", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+        auto it = pool_objects.find(c.arg(0)); if (it == pool_objects.end() || it->second.kind != PoolKind::Wait) return 0;
+        PoolObject& o = it->second; o.event = c.arg(1); o.armed = o.event != 0;  // a NULL handle disarms the wait
+        o.has_due = c.arg(2) != 0; if (o.has_due) o.due = due_tick(read_filetime(c.arg(2)));
+        return 0; });
+    reg.add("kernel32.dll", "CloseThreadpoolWait", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { wait_pool(c, c.arg(0), false); pool_objects.erase(c.arg(0)); return 0; });
+    reg.add("kernel32.dll", "FreeLibraryWhenCallbackReturns", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        auto it = pool_runs.find(c.arg(0)); if (it != pool_runs.end()) it->second.free_module = c.arg(1); return 0; });
+    // InitOnceExecuteOnce(once, fn, parameter, context): the first call runs fn(once, parameter, &context);
+    // TRUE completes it and later calls return TRUE with the stored context. FALSE leaves it open for a retry.
+    reg.add("kernel32.dll", "InitOnceExecuteOnce", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
+        const uint32_t once = c.arg(0), fn = c.arg(1), parameter = c.arg(2), context_out = c.arg(3);
+        auto done = init_once_context.find(once);
+        if (done != init_once_context.end()) { if (context_out) mem.w32(context_out, done->second); return 1; }
+        c.reg[ESP] -= 4; const uint32_t slot = c.reg[ESP]; mem.w32(slot, 0);
+        uint32_t ok = c.call(fn, {once, parameter, slot});
+        uint32_t context = mem.r32(slot); c.reg[ESP] += 4;
+        if (!ok) return 0;
+        init_once_context[once] = context;
+        if (context_out) mem.w32(context_out, context);
+        return 1; });
     // GetTimeZoneInformation: UTC surface — bias 0, no standard/daylight names,
     // TIME_ZONE_ID_UNKNOWN (0), as a system set to UTC answers.
     reg.add("kernel32.dll", "GetTimeZoneInformation", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
@@ -2457,6 +2606,30 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "TryAcquireSRWLockShared", Conv::Stdcall, 1, [acquire_srw](Cpu& c) -> uint32_t { return acquire_srw(c, true, true); });
     reg.add("kernel32.dll", "ReleaseSRWLockExclusive", Conv::Stdcall, 1, [release_srw](Cpu& c) -> uint32_t { return release_srw(c, false); });
     reg.add("kernel32.dll", "ReleaseSRWLockShared", Conv::Stdcall, 1, [release_srw](Cpu& c) -> uint32_t { return release_srw(c, true); });
+    // SleepConditionVariableSRW(cv, lock, timeout, flags): the lock is released for the wait and taken
+    // again after it, shared when CONDITION_VARIABLE_LOCKMODE_SHARED (1) is set. The bodies run while it
+    // is released, so one can take the lock or wake the variable. Timeout returns 0 with ERROR_TIMEOUT.
+    reg.add("kernel32.dll", "SleepConditionVariableSRW", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
+        const uint32_t cv = c.arg(0), lock = c.arg(1), timeout = c.arg(2), tid = mem.r32(c.fs_base + 0x24);
+        const bool shared = (c.arg(3) & 1u) != 0;
+        auto held = srw_locks.find(lock);
+        if (held == srw_locks.end()) throw Fault(FaultKind::Unsupported, c.eip, lock, "SleepConditionVariableSRW: the SRW lock is not held");
+        if (shared) {
+            auto reader = held->second.readers.find(tid);
+            if (reader == held->second.readers.end()) throw Fault(FaultKind::Unsupported, c.eip, lock, "SleepConditionVariableSRW: the shared SRW lock is not held");
+            if (!--reader->second) held->second.readers.erase(reader);
+        } else {
+            if (held->second.writer != tid) throw Fault(FaultKind::Unsupported, c.eip, lock, "SleepConditionVariableSRW: the exclusive SRW lock is not held");
+            held->second.writer = 0;
+        }
+        if (!held->second.writer && held->second.readers.empty()) { mem.w32(lock, 0); srw_locks.erase(held); }
+        bool woken = queue_wait(c, condition_queues, cv, timeout, "SleepConditionVariableSRW", nullptr);
+        SrwObject& again = srw_locks[lock];
+        if (again.writer || (!shared && !again.readers.empty())) throw Fault(FaultKind::Unsupported, c.eip, lock, "SleepConditionVariableSRW: SRW lock contention would block in the single-thread interpreter");
+        if (shared) ++again.readers[tid]; else again.writer = tid;
+        mem.w32(lock, 1);
+        if (!woken) { set_last_error(1460); return 0; }  // ERROR_TIMEOUT
+        return 1; });
     // OpenEventA opens a same-process named event; process/session namespaces and ACLs are outside this guest.
     reg.add("kernel32.dll", "OpenEventA", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { return open_sync(SyncKind::Event,c.arg(2),false); });
     reg.add("kernel32.dll", "OpenEventW", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { return open_sync(SyncKind::Event,c.arg(2),true); });
@@ -3617,6 +3790,18 @@ inline void Guest::register_all() {
     reg.add("ntdll.dll", "NtQueryInformationFile", Conv::Stdcall, 5, [](Cpu&) -> uint32_t { return 0xC0000008u; });  // invalid handle
     reg.add("ntdll.dll", "NtRaiseHardError", Conv::Stdcall, 6, [this](Cpu& c) -> uint32_t { do_exit(c, 3); return 0; });
     reg.add("ntdll.dll", "RtlDllShutdownInProgress", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
+    // RtlWaitOnAddress(address, compare, size, timeout): STATUS_SUCCESS once the bytes differ from compare or a
+    // wake arrives, STATUS_TIMEOUT (0x102) when the timeout passes first. size is 1, 2, 4 or 8; timeout is a
+    // LARGE_INTEGER in 100 ns units (negative relative, positive absolute), NULL waits forever.
+    reg.add("ntdll.dll", "RtlWaitOnAddress", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
+        const uint32_t address = c.arg(0), compare = c.arg(1), size = c.arg(2), timeout_ptr = c.arg(3);
+        if (size != 1 && size != 2 && size != 4 && size != 8) return 0xC000000Du;  // STATUS_INVALID_PARAMETER
+        uint32_t timeout = 0xffffffffu;
+        if (timeout_ptr) { uint64_t ms = due_tick(read_filetime(timeout_ptr)) - tick_now(); timeout = ms >= 0xfffffffeu ? 0xfffffffeu : uint32_t(ms); }
+        auto differs = [this, address, compare, size]() { return mem.read_bytes(address, size) != mem.read_bytes(compare, size); };
+        return queue_wait(c, address_queues, address, timeout, "RtlWaitOnAddress", differs) ? 0u : 0x102u; });
+    reg.add("ntdll.dll", "RtlWakeAddressSingle", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { queue_wake(address_queues, c.arg(0), false); return 0; });
+    reg.add("ntdll.dll", "RtlWakeAddressAll", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { queue_wake(address_queues, c.arg(0), true); return 0; });
     // Wine-built CRT donors use Wine's private debug ABI, not a Windows ntdll
     // API. Keep every channel disabled: no host logging is fabricated, and the
     // header's -1 tells Wine's debug macros not to format a line.
