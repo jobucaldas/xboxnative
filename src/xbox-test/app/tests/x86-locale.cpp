@@ -29,6 +29,10 @@ int main() {
     const uint16_t st[]={2024,6,15,0,17,42,0,0};mem.write_bytes(0x3000,st,sizeof(st));uint32_t fmt=g.put_wstr(u"HH:mm");
     g.set_last_error(55);CHECK(call("gettimeformatw",{0x0409,0,0x3000,fmt,0x3100,16})==6);CHECK(mem.r(0x3100,2)==u'1'&&mem.r(0x310a,2)==0);CHECK(g.last_error()==55);
     CHECK(call("getdateformatw",{0x0409,0,0x3000,fmt,0x3200,16})==0);CHECK(g.last_error()==87);CHECK(calls==2);
+    // Size query (cchTime 0, lpTimeStr non-null): the host returns the required
+    // length and no characters, and the guest must leave lpTimeStr untouched.
+    host.locale_call=[&](Host::LocaleCall& q){CHECK(q.buffer_chars==0);q.data.clear();q.result=6;q.succeeded=true;};
+    mem.w(0x3300,0xAAAA,2);CHECK(call("gettimeformatw",{0x0409,0,0x3000,fmt,0x3300,0})==6);CHECK(mem.r(0x3300,2)==0xAAAA);
     host.locale_call={};
     CHECK(reg.map.at({"kernel32.dll","gettimeformatw"}).fn(cpu)==0);CHECK(g.last_error()==120);
     std::printf("x86-locale: %d checks, %d failures\n",checks,failures);return failures?1:0;
