@@ -34,6 +34,7 @@ struct Host {
         uint16_t version = 0;
         std::vector<uint8_t> data;
         int result = 0;
+        uint32_t last_error = 0;  // host Winsock error on failure; written to the guest TEB like other host routes
     };
     struct FileCall {
         enum class Kind { CreateA, CreateW, Close, Read, Write, Size, Time, AttributesA, Seek, SeekEx, End, TimeConvert, TimeLocal, CreateDirectoryW, RemoveDirectoryA, RemoveDirectoryW, GetCurrentDirectoryA, GetCurrentDirectoryW, SetCurrentDirectoryA, SetCurrentDirectoryW, FindFirstA, FindFirstW, FindFirstExA, FindFirstExW, FindNextA, FindNextW, FindClose } kind;
@@ -1289,9 +1290,10 @@ inline void register_ws2(Registry& r, Host& h) {
         Host::SocketCall q{};q.kind=Host::SocketCall::Kind::Startup;q.version=uint16_t(c.arg(0));
         if(!h.socket_call){c.mem.w32(c.fs_base+0x34,10093);return 10093;}h.socket_call(q);
         if(q.result==0){if(q.data.size()!=400)throw Fault(FaultKind::AccessViolation,c.eip,c.arg(1),"WSAStartup host returned malformed WSADATA");c.mem.write_bytes(c.arg(1),q.data.data(),400);}
+        if(q.result&&q.last_error)c.mem.w32(c.fs_base+0x34,q.last_error);
         return uint32_t(q.result);
     };
-    auto cleanup=[&h](Cpu&)->uint32_t{Host::SocketCall q{};q.kind=Host::SocketCall::Kind::Cleanup;if(h.socket_call)h.socket_call(q);return uint32_t(q.result);};
+    auto cleanup=[&h](Cpu& c)->uint32_t{Host::SocketCall q{};q.kind=Host::SocketCall::Kind::Cleanup;if(h.socket_call)h.socket_call(q);if(q.result&&q.last_error)c.mem.w32(c.fs_base+0x34,q.last_error);return uint32_t(q.result);};
     // Winsock errors live in the thread's last-error slot, the same one the failing routes write (unsupported stubs too).
     auto last_error=[](Cpu& c)->uint32_t{return c.mem.r32(c.fs_base+0x34);};
     r.add("ws2_32.dll","WSAStartup",Conv::Stdcall,2,startup);r.add("ws2_32.dll","#115",Conv::Stdcall,2,startup);

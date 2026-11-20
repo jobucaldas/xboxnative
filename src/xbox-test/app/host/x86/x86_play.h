@@ -58,11 +58,11 @@ inline void play_socket_call(Host::SocketCall& q) {
     auto startup=module?reinterpret_cast<StartupFn>(GetProcAddress(module,"WSAStartup")):nullptr;
     auto cleanup=module?reinterpret_cast<CleanupFn>(GetProcAddress(module,"WSACleanup")):nullptr;
     auto last=module?reinterpret_cast<LastErrorFn>(GetProcAddress(module,"WSAGetLastError")):nullptr;
-    if(q.kind==Host::SocketCall::Kind::Startup){if(!startup){q.result=10091;return;}WSADATA native{};q.result=startup(q.version,&native);if(q.result)return;
+    if(q.kind==Host::SocketCall::Kind::Startup){if(!startup){q.result=10091;q.last_error=10091;return;}WSADATA native{};q.result=startup(q.version,&native);if(q.result){q.last_error=uint32_t(q.result);return;}
         q.data.assign(400,0);memcpy(q.data.data(),&native.wVersion,2);memcpy(q.data.data()+2,&native.wHighVersion,2);
         memcpy(q.data.data()+4,native.szDescription,std::min<size_t>(257,sizeof(native.szDescription)));memcpy(q.data.data()+261,native.szSystemStatus,std::min<size_t>(129,sizeof(native.szSystemStatus)));
         memcpy(q.data.data()+390,&native.iMaxSockets,2);memcpy(q.data.data()+392,&native.iMaxUdpDg,2);return;}
-    if(q.kind==Host::SocketCall::Kind::Cleanup){q.result=cleanup?cleanup():-1;return;}q.result=last?last():10093;
+    if(q.kind==Host::SocketCall::Kind::Cleanup){q.result=cleanup?cleanup():-1;if(q.result)q.last_error=last?uint32_t(last()):0;return;}q.result=last?last():10093;
 }
 inline void play_file_call(Host::FileCall& q) {
     auto failed=[&](){q.error=GetLastError();};
