@@ -26,6 +26,7 @@
 #include <windows.h>
 #endif
 #include "x86_win32.h"
+#include "x86_version.h"
 #include "x86_dinput8.h"
 #include "x86_d3d9.h"
 #include "x86_dsound.h"
@@ -208,6 +209,7 @@ struct Guest {
     std::map<uint32_t, WakeQueue> condition_queues, address_queues;
     std::map<uint32_t, uint32_t> init_once_context;  // INIT_ONCE word -> context of its completed init
     std::map<uint32_t, uint64_t> file_handles;         // guest handle -> Play host HANDLE
+    std::map<uint32_t, uint32_t> version_text;         // VerQueryValueA text block address -> narrow copy in the guest heap
     std::map<int32_t, uint32_t> std_handles{{-10, Host::H_STDIN}, {-11, Host::H_STDOUT}, {-12, Host::H_STDERR}};
     std::map<uint32_t, uint64_t> find_handles;         // guest search handle -> native find HANDLE
     std::map<uint32_t, std::pair<uint32_t, uint32_t>> com_apartments; // guest thread id -> model, init count
@@ -3303,6 +3305,68 @@ inline void Guest::register_all() {
     }
     // A GUI guest has no console, so no handle is a console I/O handle.
     reg.add("kernel32.dll", "VerifyConsoleIoHandle", Conv::Stdcall, 1, [this](Cpu&) -> uint32_t { set_last_error(6); return 0; });
+    // Version info. The VS_VERSION_INFO block is the file's RT_VERSION resource, read through the host file layer.
+    // Read-only, so no guard_file, like the other query routes (GetFileAttributesA, CreateFile reads).
+    auto version_block=[this](uint32_t namep,bool wide,std::vector<uint8_t>& block,uint32_t& error)->bool{
+        constexpr uint32_t kMaxImage=64u*1024u*1024u;
+        if(!namep){error=87;return false;}
+        Host::FileCall open{Host::FileCall::Kind::CreateW};
+        if(wide)open.path_w=wstr(namep);else{std::string path=str(namep);open.path_w.assign(path.begin(),path.end());}
+        open.args[0]=0x80000000u;open.args[1]=3;open.args[2]=3;open.args[3]=0x80;
+        if(!call_file(open)){error=open.error?open.error:120;return false;}
+        const uint64_t handle=open.value;std::vector<uint8_t> image;bool ok=false;
+        Host::FileCall size{Host::FileCall::Kind::Size};size.handle=handle;
+        if(call_file(size)&&size.args[1]==0&&size.value<=kMaxImage){
+            Host::FileCall read{Host::FileCall::Kind::Read};read.handle=handle;read.args[0]=uint32_t(size.value);
+            ok=call_file(read)&&read.args[1]==size.value;if(ok)image=read.data;else error=read.error?read.error:5;
+        }else error=size.error?size.error:223;  // ERROR_FILE_TOO_LARGE
+        Host::FileCall close{Host::FileCall::Kind::Close};close.handle=handle;if(!call_file(close)&&ok){ok=false;error=close.error?close.error:5;}
+        if(!ok)return false;
+        uint32_t offset=0,length=0,why=0;
+        if(!x86_version::find_version_resource(image,offset,length,why)){error=why;return false;}
+        block.assign(image.begin()+offset,image.begin()+offset+length);return true;};
+    auto get_version=[this,version_block](uint32_t namep,bool wide,uint32_t len,uint32_t data)->uint32_t{
+        std::vector<uint8_t> block;uint32_t error=0;
+        if(!version_block(namep,wide,block,error)){set_last_error(error);return 0;}
+        if(!data||len<block.size()){set_last_error(122);return 0;}  // ERROR_INSUFFICIENT_BUFFER
+        mem.write_bytes(data,block.data(),uint32_t(block.size()));set_last_error(0);return 1;};
+    auto query_value=[this](uint32_t blockp,uint32_t subp,uint32_t out,uint32_t lenp,bool wide)->uint32_t{
+        if(!blockp||!subp||!out){set_last_error(87);return 0;}
+        const uint32_t total=mem.r(blockp,2);
+        if(total<6){set_last_error(87);return 0;}
+        const std::vector<uint8_t> block=mem.read_bytes(blockp,total);
+        std::u16string sub;
+        if(wide)sub=wstr(subp);else{for(unsigned char ch:str(subp))sub.push_back(char16_t(ch));}
+        size_t value=0;uint32_t value_len=0;bool text=false;
+        if(!x86_version::query(block,sub,value,value_len,text)){set_last_error(1813);return 0;}
+        uint32_t address=blockp+uint32_t(value);
+        if(!wide&&text){
+            // ANSI callers get a narrow copy in the guest heap; the UTF-16 block itself is never rewritten.
+            auto it=version_text.find(address);
+            if(it==version_text.end()){
+                std::string narrow;for(uint32_t i=0;i<value_len;++i){uint16_t ch=uint16_t(mem.r(address+2*i,2));narrow.push_back(ch<=0xff?char(ch):'?');}
+                uint32_t copy=heap.alloc(uint32_t(narrow.size()));mem.write_bytes(copy,narrow.data(),uint32_t(narrow.size()));
+                it=version_text.emplace(address,copy).first;
+            }
+            address=it->second;
+        }
+        mem.w32(out,address);if(lenp)mem.w32(lenp,value_len);set_last_error(0);return 1;};
+    for(bool wide:{false,true}){
+        reg.add("kernel32.dll", wide?"GetFileVersionInfoSizeW":"GetFileVersionInfoSizeA", Conv::Stdcall, 2, [version_block,wide,this](Cpu& c) -> uint32_t {
+            std::vector<uint8_t> block;uint32_t error=0;
+            if(!version_block(c.arg(0),wide,block,error)){set_last_error(error);return 0;}
+            if(c.arg(1)){mem.w32(c.arg(1),0);}set_last_error(0);return uint32_t(block.size()); });
+        reg.add("kernel32.dll", wide?"GetFileVersionInfoSizeExW":"GetFileVersionInfoSizeExA", Conv::Stdcall, 3, [version_block,wide,this](Cpu& c) -> uint32_t {
+            std::vector<uint8_t> block;uint32_t error=0;
+            if(!version_block(c.arg(1),wide,block,error)){set_last_error(error);return 0;}
+            if(c.arg(2)){mem.w32(c.arg(2),0);}set_last_error(0);return uint32_t(block.size()); });
+        reg.add("kernel32.dll", wide?"GetFileVersionInfoW":"GetFileVersionInfoA", Conv::Stdcall, 4, [get_version,wide](Cpu& c) -> uint32_t {
+            return get_version(c.arg(0),wide,c.arg(2),c.arg(3)); });
+        reg.add("kernel32.dll", wide?"GetFileVersionInfoExW":"GetFileVersionInfoExA", Conv::Stdcall, 5, [get_version,wide](Cpu& c) -> uint32_t {
+            return get_version(c.arg(1),wide,c.arg(3),c.arg(4)); });
+        reg.add("kernel32.dll", wide?"VerQueryValueW":"VerQueryValueA", Conv::Stdcall, 4, [query_value,wide](Cpu& c) -> uint32_t {
+            return query_value(c.arg(0),c.arg(1),c.arg(2),c.arg(3),wide); });
+    }
     reg.add("kernel32.dll", "SetFilePointer", Conv::Stdcall, 4, [this,native_file](Cpu& c) -> uint32_t {
         Host::FileCall q{Host::FileCall::Kind::Seek};if(!native_file(c.arg(0),q))return 0xffffffffu;
         q.args[0]=c.arg(1);q.args[1]=c.arg(2)?mem.r32(c.arg(2)):0;q.args[2]=c.arg(3);q.args[3]=c.arg(2)!=0;
