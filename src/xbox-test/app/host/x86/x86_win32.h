@@ -34,6 +34,7 @@ struct Host {
         uint16_t version = 0;
         std::vector<uint8_t> data;
         int result = 0;
+        uint32_t last_error = 0;  // host Winsock error on failure; written to the guest TEB like other host routes
     };
     struct FileCall {
         enum class Kind { CreateA, CreateW, Close, Read, Write, Size, Time, AttributesA, Seek, SeekEx, End, TimeConvert, TimeLocal, CreateDirectoryW, RemoveDirectoryA, RemoveDirectoryW, GetCurrentDirectoryA, GetCurrentDirectoryW, SetCurrentDirectoryA, SetCurrentDirectoryW, FindFirstA, FindFirstW, FindFirstExA, FindFirstExW, FindNextA, FindNextW, FindClose } kind;
@@ -144,7 +145,7 @@ struct Host {
     std::function<uintptr_t(uint32_t)> d3d9_window;
     ComSpace com;
     uint32_t d3d9_guest_top = 0x7D000000u;
-    std::map<uint32_t, std::tuple<void*, uint32_t, uint32_t>> d3d9_locks;
+    std::map<std::pair<uint32_t, uint32_t>, std::tuple<void*, uint32_t, uint32_t>> d3d9_locks;
     int32_t vertex_size = 0, vertex_stride = 0;
     uint32_t vertex_type = 0;
     uint32_t unpack_alignment = 4, unpack_row_length = 0, unpack_skip_rows = 0, unpack_skip_pixels = 0;
@@ -289,16 +290,6 @@ inline void register_win32(Registry& r, Host& h) {
             if (code == 0x20) return code;
         }
         return 0;
-    });
-    r.add("user32.dll", "LoadCursorW", Conv::Stdcall, 2, [count](Cpu& c) -> uint32_t {
-        count("LoadCursorW"); (void)c;
-#if defined(_WIN32)
-        using Fn = HCURSOR (WINAPI*)(HINSTANCE, LPCWSTR);
-        static HMODULE user = LoadLibraryExW(L"user32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-        auto fn = user ? reinterpret_cast<Fn>(GetProcAddress(user, "LoadCursorW")) : nullptr;
-        if (fn) return uint32_t(reinterpret_cast<uintptr_t>(fn(reinterpret_cast<HINSTANCE>(uintptr_t(c.arg(0))), reinterpret_cast<LPCWSTR>(uintptr_t(c.arg(1))))));
-#endif
-        return 0xCE000002u;
     });
     r.add("user32.dll", "GetKeyState", Conv::Stdcall, 1, [count](Cpu& c) -> uint32_t {
         count("GetKeyState"); (void)c;
@@ -1156,11 +1147,13 @@ inline void register_gl(Registry& r, Host& h) {
                 if (dst) q.input = c.mem.read_bytes(dst, uint32_t(bytes));
                 q.args[8] = 0;
             }
-            if (name.size() >= 10 && name.compare(0, 9, "glUniform") == 0 && name.find("Matrix") == std::string::npos && name.back() == 'v') {
-                const size_t suffix = name.size() - 3;
-                const uint32_t components = suffix < name.size() && name[suffix] >= '1' && name[suffix] <= '4' ? uint32_t(name[suffix] - '0') : 0u;
+            // Vendor aliases (glUniform4fvARB, glUniform4uivEXT) take the core name's arguments.
+            const std::string core = name.size() > 3 && (name.compare(name.size() - 3, 3, "ARB") == 0 || name.compare(name.size() - 3, 3, "EXT") == 0) ? name.substr(0, name.size() - 3) : name;
+            if (core.size() >= 10 && core.compare(0, 9, "glUniform") == 0 && core.find("Matrix") == std::string::npos && core.back() == 'v') {
+                // The component count is the digit right after "glUniform", not the last digit ("glUniform4uiv").
+                const uint32_t components = core[9] >= '1' && core[9] <= '4' ? uint32_t(core[9] - '0') : 0u;
                 const uint32_t count = uint32_t(q.args[1]), source = uint32_t(q.args[2]);
-                const uint32_t scalar_size = name.find("dv") != std::string::npos || name.find("i64") != std::string::npos ? 8u : 4u;
+                const uint32_t scalar_size = core.find("dv") != std::string::npos || core.find("i64") != std::string::npos ? 8u : 4u;
                 uint64_t bytes = uint64_t(count) * components * scalar_size;
                 if (!components || (count && !source) || count > (1u << 20) || bytes > (1u << 26)) { q.gap = true; call(c, q); return 0; }
                 if (bytes) q.input = c.mem.read_bytes(source, uint32_t(bytes));
@@ -1297,10 +1290,12 @@ inline void register_ws2(Registry& r, Host& h) {
         Host::SocketCall q{};q.kind=Host::SocketCall::Kind::Startup;q.version=uint16_t(c.arg(0));
         if(!h.socket_call){c.mem.w32(c.fs_base+0x34,10093);return 10093;}h.socket_call(q);
         if(q.result==0){if(q.data.size()!=400)throw Fault(FaultKind::AccessViolation,c.eip,c.arg(1),"WSAStartup host returned malformed WSADATA");c.mem.write_bytes(c.arg(1),q.data.data(),400);}
+        if(q.result&&q.last_error)c.mem.w32(c.fs_base+0x34,q.last_error);
         return uint32_t(q.result);
     };
-    auto cleanup=[&h](Cpu&)->uint32_t{Host::SocketCall q{};q.kind=Host::SocketCall::Kind::Cleanup;if(h.socket_call)h.socket_call(q);return uint32_t(q.result);};
-    auto last_error=[&h](Cpu&)->uint32_t{Host::SocketCall q{};q.kind=Host::SocketCall::Kind::LastError;if(h.socket_call)h.socket_call(q);return uint32_t(q.result);};
+    auto cleanup=[&h](Cpu& c)->uint32_t{Host::SocketCall q{};q.kind=Host::SocketCall::Kind::Cleanup;if(h.socket_call)h.socket_call(q);if(q.result&&q.last_error)c.mem.w32(c.fs_base+0x34,q.last_error);return uint32_t(q.result);};
+    // Winsock errors live in the thread's last-error slot, the same one the failing routes write (unsupported stubs too).
+    auto last_error=[](Cpu& c)->uint32_t{return c.mem.r32(c.fs_base+0x34);};
     r.add("ws2_32.dll","WSAStartup",Conv::Stdcall,2,startup);r.add("ws2_32.dll","#115",Conv::Stdcall,2,startup);
     r.add("ws2_32.dll","WSACleanup",Conv::Stdcall,0,cleanup);r.add("ws2_32.dll","#116",Conv::Stdcall,0,cleanup);
     r.add("ws2_32.dll","WSAGetLastError",Conv::Stdcall,0,last_error);r.add("ws2_32.dll","#111",Conv::Stdcall,0,last_error);

@@ -14,17 +14,25 @@ inline std::u16string normalize(std::u16string path, const std::u16string& cwd) 
         if (c >= u'A' && c <= u'Z') c = char16_t(c + (u'a' - u'A'));
     }
     if (path.rfind(u"\\\\?\\unc\\", 0) == 0) path = u"\\\\" + path.substr(8);
-    else if (path.rfind(u"\\\\?\\", 0) == 0) path.erase(0, 4);
+    else if (path.rfind(u"\\\\?\\", 0) == 0 || path.rfind(u"\\\\.\\", 0) == 0) path.erase(0, 4);
     std::u16string base = cwd;
     for (auto& c : base) {
         if (c == u'/') c = u'\\';
         if (c >= u'A' && c <= u'Z') c = char16_t(c + (u'a' - u'A'));
     }
     if (base.rfind(u"\\\\?\\unc\\", 0) == 0) base = u"\\\\" + base.substr(8);
-    else if (base.rfind(u"\\\\?\\", 0) == 0) base.erase(0, 4);
+    else if (base.rfind(u"\\\\?\\", 0) == 0 || base.rfind(u"\\\\.\\", 0) == 0) base.erase(0, 4);
     if (path.empty()) return {};
+    // Drive-relative "C:name" resolves against the cwd when it is on the same drive.
+    if (path.size() >= 2 && path[1] == u':' && (path.size() == 2 || path[2] != u'\\') && base.size() >= 2 &&
+        base[1] == u':' && base[0] == path[0]) {
+        const auto rest = path.substr(2);
+        path = base + (base.back() == u'\\' || rest.empty() ? u"" : u"\\") + rest;
+    }
     if (path.size() < 2 || path[1] != u':') {
         if (path.rfind(u"\\\\", 0) == 0) {
+            // UNC or device-style name: already absolute, keep it as is.
+        } else if (path[0] == u'\\') {
             const auto drive = base.size() >= 2 && base[1] == u':' ? base.substr(0, 2) : std::u16string();
             path = drive + path;
         } else path = base + (base.empty() || base.back() == u'\\' ? u"" : u"\\") + path;
@@ -39,8 +47,12 @@ inline std::u16string normalize(std::u16string path, const std::u16string& cwd) 
         size_t end = path.find(u'\\', start);
         if (end == std::u16string::npos) end = path.size();
         auto part = path.substr(start, end - start);
+        // Only the exact names "." and ".." are special. Any other dots-and-spaces-only name is refused by allow().
         if (part == u"..") { if (!parts.empty() && parts.back() != u"..") parts.pop_back(); }
-        else if (!part.empty() && part != u".") parts.push_back(std::move(part));
+        else {
+            while (!part.empty() && (part.back() == u'.' || part.back() == u' ')) part.pop_back();
+            if (!part.empty()) parts.push_back(std::move(part));
+        }
         start = end;
     }
     std::u16string out = prefix;
@@ -55,6 +67,19 @@ inline bool inside(const std::u16string& path, const std::u16string& root) {
     return path.size() > root.size() && path.compare(0, root.size(), root) == 0 &&
            (root.back() == u'\\' || path[root.size()] == u'\\');
 }
+// A component made only of dots and spaces is accepted only as exactly "." or "..".
+// Anything else (".. ", ". .", "...", " ..", "..\x20.") has no safe single meaning
+// across Win32 trailing-strip rules, so the guard refuses the whole path.
+inline bool ambiguous(const std::u16string& path) {
+    for (size_t start = 0; start <= path.size();) {
+        size_t end = path.find_first_of(u"\\/", start);
+        if (end == std::u16string::npos) end = path.size();
+        const auto part = path.substr(start, end - start);
+        if (!part.empty() && part.find_first_not_of(u". ") == std::u16string::npos && part != u"." && part != u"..") return true;
+        start = end + 1;
+    }
+    return false;
+}
 class Policy {
 public:
     using Log = std::function<void(const std::string&)>;
@@ -66,10 +91,11 @@ public:
     }
     bool allow(const char* operation, const std::u16string& path, const std::u16string& current = {}) {
         const auto full = normalize(path, current.empty() ? cwd_ : current);
-        bool protectedPath = false;
+        const bool ambiguous_path = ambiguous(path);
+        bool protectedPath = ambiguous_path;
         for (const auto& root : protectedRoots_) protectedPath = protectedPath || inside(full, root);
         if (!protectedPath) return true;
-        for (const auto& root : allowedRoots_) if (inside(full, root)) return true;
+        if (!ambiguous_path) for (const auto& root : allowedRoots_) if (inside(full, root)) return true;
         if (logged_.insert(full).second && log_) {
             std::string op = operation ? operation : "file operation";
             log_("x86 file guard: refused " + op + " <redacted path>");

@@ -144,7 +144,7 @@ static bool verify_display_routes() {
     args({0x41}); if(!check(key_state->fn(cpu)==0,"GetKeyState neutral key state")) return false;
     Thunk* load_cursor=route("LoadCursorW",2);
     if(!check(load_cursor!=nullptr,"LoadCursorW argc=2")) return false;
-    args({0,0x7f00}); if(!check(load_cursor->fn(cpu)==0xce000002u,"LoadCursorW standard cursor resource")) return false;
+    args({0,0x7f00}); if(!check(load_cursor->fn(cpu)==0u,"LoadCursorW without a host cursor returns NULL, not a token SetCursor rejects")) return false;
     std::fprintf(stderr,"X86-DISPLAY PASS: Win32 display route arity and 840/220/40/104-byte structures\n");
     return true;
 }

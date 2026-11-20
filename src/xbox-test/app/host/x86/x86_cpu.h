@@ -405,7 +405,7 @@ struct Cpu {
                         ++dbt_fallbacks[key]; ++interpreted_blocks; step(); continue;
                     }
                 }
-                if (executed + block_ptr->guest_length > limit) {
+                if (executed + block_ptr->instruction_map.size() > limit) {
                     if (state_live) sync_state();
                     ++interpreted_blocks; step(); continue;
                 }
@@ -429,17 +429,17 @@ struct Cpu {
                 ++translated_blocks;
                 if (fallback_eip != 0xffffffffu) {
                     sync_state();
-                    executed += fallback_eip - block_ptr->guest_pc;
+                    for (const auto& m : block_ptr->instruction_map) executed += m.guest_eip < fallback_eip;
                     ++interpreted_blocks;
                     step();
                     continue;
                 }
                 if (exit_eip != 0xffffffffu) {
                     sync_state();
-                    executed += exit_eip - block_ptr->guest_pc;
+                    for (const auto& m : block_ptr->instruction_map) executed += m.guest_eip < exit_eip;
                     continue;
                 }
-                executed += block_ptr->guest_length;
+                executed += block_ptr->instruction_map.size();
                 chained = nullptr;
                 if (!block_ptr->interpreter_boundary) {
                     bool indirect = block_ptr->exit_opcode == 0xC2 || block_ptr->exit_opcode == 0xC3 || block_ptr->exit_opcode == 0xFF || block_ptr->exit_opcode == 0x8F;

@@ -29,9 +29,11 @@ static bool verify_gl_host_errors_and_sizes() {
     x86::ThunkTable table; x86::Host host; x86::Registry registry; x86::register_gl(registry, host);
     x86::Cpu cpu(mem, table); cpu.reg[x86::ESP] = 0x2f000; cpu.fs_base = x86::TEB_ADDR;
     bool packed = false, matrix = false;
+    unsigned vectors = 0;
     host.gl_call = [&](x86::Host::GlCall& q) {
         if (q.name == "glTexImage2D") { packed = q.input.size() == 2 && q.input[0] == 0x12 && q.input[1] == 0x34; return; }
         if (q.name == "glUniformMatrix2x3fv") { matrix = q.input.size() == 48; return; }
+        if (q.name == "glUniform4uiv" || q.name == "glUniform4fvARB") { vectors += q.input.size() == 16; return; }
         if (q.name == "glClear") { q.gap = true; q.last_error = 5; }
     };
     auto route = [&](const char* name) -> x86::Thunk* {
@@ -49,10 +51,15 @@ static bool verify_gl_host_errors_and_sizes() {
     auto uniform = route("glUniformMatrix2x3fv");
     if (!uniform) return false;
     args({1, 2, 0, 0x5000}); uniform->fn(cpu);
+    for (const char* vector : {"glUniform4uiv", "glUniform4fvARB"}) {
+        auto v = route(vector);
+        if (!v) return false;
+        args({3, 1, 0x5000}); v->fn(cpu);
+    }
     auto clear = route("glClear");
     if (!clear) return false;
     mem.w32(cpu.fs_base + 0x34, 777); args({0x4000}); clear->fn(cpu);
-    return packed && matrix && mem.r32(cpu.fs_base + 0x34) == 5;
+    return packed && matrix && vectors == 2 && mem.r32(cpu.fs_base + 0x34) == 5;
 }
 
 int main(int argc, char** argv) {
