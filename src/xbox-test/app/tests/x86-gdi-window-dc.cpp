@@ -31,11 +31,27 @@ int main() {
     g.set_last_error(0);
     CHECK(call("gdi32.dll","bitblt",{dc,0,0,1,1,dc,0,0,0x00cc0020u})==0);
     CHECK(g.last_error()==120);
+    // Bitmaps go only into memory DCs: selecting the stock bitmap into the window DC fails (0, 6)
+    // and leaves it unchanged, so the blit above still fails closed.
+    g.set_last_error(0);
+    CHECK(call("gdi32.dll","selectobject",{dc,0x73000001u})==0);
+    CHECK(g.last_error()==6);
+    CHECK(call("gdi32.dll","bitblt",{dc,0,0,1,1,dc,0,0,0x00cc0020u})==0);
+    CHECK(g.last_error()==120);
+    // DeleteDC is not for a GetDC DC: it fails (0, 6) and the DC stays usable until ReleaseDC.
+    g.set_last_error(0);
+    CHECK(call("gdi32.dll","deletedc",{dc})==0);
+    CHECK(g.last_error()==6);
+    CHECK(call("gdi32.dll","setbkmode",{dc,1})==1);
     // ReleaseDC ends the DC: later state calls fail with 6.
     CHECK(call("user32.dll","releasedc",{0,dc})==1);
     g.set_last_error(0);
     CHECK(call("gdi32.dll","setbkmode",{dc,2})==0);
     CHECK(g.last_error()==6);
+    // A memory DC still goes away with DeleteDC.
+    uint32_t mem_dc=call("gdi32.dll","createcompatibledc",{0});
+    CHECK(mem_dc!=0);
+    CHECK(call("gdi32.dll","deletedc",{mem_dc})==1);
     std::printf("x86-gdi-window-dc: %d checks, %d failures\n",checks,failures);
     return failures?1:0;
 }

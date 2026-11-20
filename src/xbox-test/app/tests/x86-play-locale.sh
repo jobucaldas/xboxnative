@@ -15,5 +15,6 @@ extra=()
 for d in /nix/store/*-mcfgthread-x86_64-w64-mingw32-*-dev/include; do [[ -d $d ]] && extra+=("-I$d"); done
 for d in /nix/store/*-mcfgthread-x86_64-w64-mingw32-*/lib; do [[ -d $d ]] && extra+=("-L$d"); done
 "$cxx" -std=c++17 -O2 -static "${extra[@]}" "$here/x86-play-locale.cpp" -o "$tmp/x86-play-locale.exe"
-export WINEPREFIX="${XBN_WINEPREFIX:-$HOME/.cache/xbn-wine/x86-play-locale}" WINEDEBUG=-all
+export WINEPREFIX="${WINEPREFIX:-${XBN_WINEPREFIX:-$HOME/.cache/xbn-wine/x86-play-locale}}" WINEDEBUG=-all
+mkdir -p "$WINEPREFIX"
 "$wine" "$tmp/x86-play-locale.exe"

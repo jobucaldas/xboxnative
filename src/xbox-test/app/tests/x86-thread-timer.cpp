@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// SetTimer(NULL, ...) thread timers: due timers reach GetMessage as WM_TIMER with
-// hwnd NULL, wParam the timer id and lParam the TimerProc, and DispatchMessage
-// calls the TimerProc. Drives the registered thunks directly with a mocked clock.
+// SetTimer(NULL, ...) thread timers: due timers reach GetMessage/PeekMessage as WM_TIMER with
+// hwnd NULL, wParam the timer id and lParam the TimerProc, and DispatchMessage calls the TimerProc.
+// Filters follow GetMessage: a window hwnd or a range without 0x113 excludes them; PM_NOREMOVE
+// leaves them pending and PM_REMOVE delivers them. Drives the registered thunks with a mocked clock.
 #include <cstdio>
 #include "../host/x86/x86_guest.h"
 using namespace x86;
@@ -13,11 +14,12 @@ int main() {
     const uint8_t stub[]={0xFF,0x05,0x00,0x36,0x00,0x00,0xC3};mem.write_bytes(0x40000,stub,sizeof stub);
     uint64_t now=0;unsigned peeks=0;
     host.tick_count=[&]{return now;};
+    host.window_handles[0x1000]=0x2000;   // a real window for the window-filter case
     host.window_call=[&](Host::WindowCall& q) {
-        if(q.name=="PeekMessageA"||q.name=="PeekMessageW") {
+        if(q.name=="PeekMessageA"||q.name=="PeekMessageW"||q.name=="GetMessageA"||q.name=="GetMessageW") {
             // Each peek advances the clock, so the timer comes due while the loop runs.
             ++peeks; now+=4; q.supported=true; q.result=0;
-            if(peeks>200){ // origin/main never fires the timer: stop the loop with WM_QUIT
+            if(peeks>200){ // no delivery: stop the loop with WM_QUIT
                 q.output.assign(32,0); uint32_t quit=0x0012u; memcpy(q.output.data()+8,&quit,4); q.result=1;
             }
         } else q.supported=false;
@@ -28,15 +30,27 @@ int main() {
     // SetTimer(NULL, ignored, 10, proc): the id is generated and nonzero.
     uint32_t id=call("user32.dll","settimer",{0,0,10,0x40000u});
     CHECK(id!=0);
-    // GetMessage(&msg, NULL, 0, 0) returns the WM_TIMER once it is due.
     const uint32_t msg=0x3000;
-    uint32_t r=call("user32.dll","getmessagea",{msg,0,0,0});
-    CHECK(r==1);
+    now=20;   // the timer is due
+    // A window filter does not admit a thread timer: GetMessage keeps looking and the loop ends at WM_QUIT.
+    peeks=0;
+    CHECK(call("user32.dll","getmessagea",{msg,0x1000,0,0})==0);
+    CHECK(mem.r32(msg+4)==0x0012u);
+    // A message range without WM_TIMER (0x113) does not admit it either.
+    peeks=0;
+    CHECK(call("user32.dll","getmessagea",{msg,0,0x100,0x101})==0);
+    CHECK(mem.r32(msg+4)==0x0012u);
+    // PM_NOREMOVE reports the timer and leaves it pending.
+    peeks=0;
+    CHECK(call("user32.dll","peekmessagea",{msg,0,0,0,0})==1);
     CHECK(mem.r32(msg)==0);                   // hwnd NULL
     CHECK(mem.r32(msg+4)==0x0113u);           // WM_TIMER
     CHECK(mem.r32(msg+8)==id);                // wParam: timer id
     CHECK(mem.r32(msg+12)==0x40000u);         // lParam: TimerProc
-    // DispatchMessage calls the TimerProc with (NULL, WM_TIMER, id, time).
+    // PM_REMOVE delivers the same timer, and DispatchMessage calls the TimerProc.
+    CHECK(call("user32.dll","peekmessagea",{msg,0,0,0,1})==1);
+    CHECK(mem.r32(msg+4)==0x0113u);
+    CHECK(mem.r32(msg+8)==id);
     CHECK(call("user32.dll","dispatchmessagea",{msg})==0);
     CHECK(mem.r32(0x3600)==1);
     std::printf("x86-thread-timer: %d checks, %d failures\n",checks,failures);

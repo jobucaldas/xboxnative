@@ -391,8 +391,12 @@ inline void register_win32(Registry& r, Host& h) {
     };
     // Due thread timers reach the calling thread's queue as WM_TIMER with hwnd NULL, wParam the
     // timer id and lParam the TimerProc. GetMessage/PeekMessage use it only when the native queue
-    // is empty, so posted messages keep their order.
-    auto thread_timer_message = [&h, timer_now](Host::WindowCall& q) {
+    // is empty, so posted messages keep their order. Filters follow GetMessage: a NULL or (HWND)-1
+    // hwnd admits thread messages, any window excludes them, and a range admits WM_TIMER only if
+    // it contains 0x113 (both bounds 0 means no range).
+    auto thread_timer_message = [&h, timer_now](Host::WindowCall& q, uint32_t filter, uint32_t min_msg, uint32_t max_msg) {
+        if (filter && filter != 0xFFFFFFFFu) return false;
+        if ((min_msg || max_msg) && (0x0113u < min_msg || 0x0113u > max_msg)) return false;
         for (const auto& timer : h.timers) {
             if (timer.hwnd || !timer.pending) continue;
             q.output.assign(32, 0);
@@ -476,7 +480,7 @@ inline void register_win32(Registry& r, Host& h) {
                         q.args[2] = c.arg(2); q.args[3] = c.arg(3); q.args[4] = 0; q.output.resize(size);
                         h.window_call(q);
                         if (!q.supported) break;
-                        if (!q.result && thread_timer_message(q)) break;
+                        if (!q.result && thread_timer_message(q, filter, c.arg(2), c.arg(3))) break;
                         if (q.result) {
                             q = call_window(c,name,{uintptr_t(out),native_filter,c.arg(2),c.arg(3),1u},{},size);
                             break;
@@ -488,7 +492,7 @@ inline void register_win32(Registry& r, Host& h) {
                 } else {
                     pump_timers();
                     q = call_window(c,name,{uintptr_t(out),native_filter,c.arg(2),c.arg(3),get?0u:c.arg(4)}, {},size);
-                    if (q.supported && !q.result) thread_timer_message(q);
+                    if (q.supported && !q.result) thread_timer_message(q, filter, c.arg(2), c.arg(3));
                 }
                 const bool quit=get&&q.supported&&!q.result&&q.output.size()>=size&&[&]{uint32_t m=0;memcpy(&m,q.output.data()+8,4);return m==0x0012u;}();
                 if(q.supported && (q.result || quit) && q.output.size()>=size) {
