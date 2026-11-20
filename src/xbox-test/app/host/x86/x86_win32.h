@@ -38,9 +38,9 @@ struct Host {
         uint32_t last_error = 0;  // host Winsock error on failure; written to the guest TEB like other host routes
     };
     struct FileCall {
-        enum class Kind { CreateA, CreateW, Close, Read, Write, Size, Time, AttributesA, Seek, SeekEx, End, TimeConvert, TimeLocal, CreateDirectoryW, RemoveDirectoryA, RemoveDirectoryW, GetCurrentDirectoryA, GetCurrentDirectoryW, SetCurrentDirectoryA, SetCurrentDirectoryW, FindFirstA, FindFirstW, FindFirstExA, FindFirstExW, FindNextA, FindNextW, FindClose } kind;
-        enum class Operation { None, CreateDirectoryA, DeleteA, DeleteW, SystemToFileTime, SystemToTzLocal } operation = Operation::None;
-        std::string path_a; std::u16string path_w;
+        enum class Kind { CreateA, CreateW, Close, Read, Write, Size, Time, AttributesA, Seek, SeekEx, End, TimeConvert, TimeLocal, CreateDirectoryW, RemoveDirectoryA, RemoveDirectoryW, GetCurrentDirectoryA, GetCurrentDirectoryW, SetCurrentDirectoryA, SetCurrentDirectoryW, FindFirstA, FindFirstW, FindFirstExA, FindFirstExW, FindNextA, FindNextW, FindClose, SetTime, SetAttributesW, Copy, Move, Lock, Unlock, TempPathW, TempFileNameW, DiskFreeW, DiskFreeExA, DiskFreeExW, DriveTypeW } kind;
+        enum class Operation { None, CreateDirectoryA, DeleteA, DeleteW, SystemToFileTime, SystemToTzLocal, CopyFileA, CopyFileW, MoveFileA, MoveFileExA, MoveFileExW } operation = Operation::None;
+        std::string path_a, path2_a; std::u16string path_w, path2_w;
         uint64_t handle = 0, template_handle = 0, value = 0; int64_t distance = 0, position = 0; uint32_t method = 0, args[5]{}, error = 0; bool succeeded = false;
         std::vector<uint8_t> data;
         explicit FileCall(Kind k) : kind(k) {}
