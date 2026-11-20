@@ -185,11 +185,9 @@ jobs:
       - name: Build the user32 record DLL with the UWP toolchain
         run: bash src/xbox-test/uwph/user32/build.sh
       - name: user32 CoreWindow feed and CreateWindow size under Wine
-        env:
-          WINEPREFIX: ${{ runner.temp }}/wine-prefix
-          PRUN_WINEPREFIX: ${{ runner.temp }}/wine-prefix
         run: |
-          mkdir -p "$WINEPREFIX"
+          mkdir -p "$RUNNER_TEMP/wine-prefix"
+          export WINEPREFIX="$RUNNER_TEMP/wine-prefix" PRUN_WINEPREFIX="$RUNNER_TEMP/wine-prefix"
           bash src/xbox-test/uwph/user32/corewindow-feed-test.sh
           bash src/xbox-test/uwph/user32/create-size-test.sh
   registry-persistence:
@@ -397,6 +395,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/wine-prefix"
           echo "WINEPREFIX=$RUNNER_TEMP/wine-prefix" >> "$GITHUB_ENV"
           echo "PRUN_WINEPREFIX=$RUNNER_TEMP/wine-prefix" >> "$GITHUB_ENV"
+          echo "WINEDLLOVERRIDES=winedbg.exe=d" >> "$GITHUB_ENV"
       # Off-device Wine contracts, never the console. The timer test opens no
       # audio device. The D3D diagnostics need a device: the runner has no GPU,
       # so they run under Xvfb with Mesa's software GL (llvmpipe) and lavapipe.
