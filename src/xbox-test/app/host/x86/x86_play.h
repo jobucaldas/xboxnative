@@ -234,6 +234,18 @@ inline void install_nls_host(Host& host) {
             }
             break;
         }
+        case Host::NlsOperation::GetUserGeoID: {
+            // GEOCLASS is forwarded in request.type; the host's own answer is returned, so a
+            // missing export surfaces as ERROR_CALL_NOT_IMPLEMENTED and the guest gets GEOID_NOT_AVAILABLE.
+            using GeoIdFn=int(WINAPI*)(int);
+            static HMODULE base=LoadLibraryExW(L"kernelbase.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+            static HMODULE k32=LoadLibraryExW(L"kernel32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+            FARPROC proc=base?GetProcAddress(base,"GetUserGeoID"):nullptr;
+            if(!proc&&k32)proc=GetProcAddress(k32,"GetUserGeoID");
+            if(!proc){response.last_error=ERROR_CALL_NOT_IMPLEMENTED;return response;}
+            response.result=uint32_t(reinterpret_cast<GeoIdFn>(proc)(int(request.type)));
+            break;
+        }
         case Host::NlsOperation::GetLocaleInfoA:
         case Host::NlsOperation::GetLocaleInfoW:
         case Host::NlsOperation::GetLocaleInfoEx: {

@@ -35,6 +35,17 @@ int main() {
     mem.w(0x3300,0xAAAA,2);CHECK(call("gettimeformatw",{0x0409,0,0x3000,fmt,0x3300,0})==6);CHECK(mem.r(0x3300,2)==0xAAAA);
     host.locale_call={};
     CHECK(reg.map.at({"kernel32.dll","gettimeformatw"}).fn(cpu)==0);CHECK(g.last_error()==120);
+    // GetUserGeoID: GEOCLASS is forwarded to the host; a host answer is returned as-is, and no host
+    // identifier (result 0) or no host route is GEOID_NOT_AVAILABLE (0xFFFFFFFF) per MS docs.
+    auto geo_it=reg.map.find({"kernel32.dll","getusergeoid"});CHECK(geo_it!=reg.map.end());
+    if(geo_it!=reg.map.end()){CHECK(geo_it->second.conv==Conv::Stdcall);CHECK(geo_it->second.argc==1);}
+    unsigned geo=0;
+    host.nls_call=[&](const Host::NlsRequest& q){++geo;CHECK(q.operation==Host::NlsOperation::GetUserGeoID);CHECK(q.type==16);Host::NlsResponse r{};r.result=244;return r;};
+    g.set_last_error(55);CHECK(call("getusergeoid",{16})==244);CHECK(g.last_error()==55);
+    host.nls_call=[&](const Host::NlsRequest&){++geo;Host::NlsResponse r{};r.result=0;r.last_error=1;return r;};
+    CHECK(call("getusergeoid",{16})==0xFFFFFFFFu);CHECK(g.last_error()==1);
+    host.nls_call={};
+    CHECK(call("getusergeoid",{16})==0xFFFFFFFFu);CHECK(g.last_error()==120);CHECK(geo==2);
     std::printf("x86-locale: %d checks, %d failures\n",checks,failures);return failures?1:0;
 }
 #endif

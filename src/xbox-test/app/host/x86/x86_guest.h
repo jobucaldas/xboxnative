@@ -2109,6 +2109,15 @@ inline void Guest::register_all() {
         else if(response.result){set_last_error(87);return 0;}
         return response.result;
     });
+    // GetUserGeoID(GEOCLASS): "If no geographical location identifier has been set for the user, the function
+    // returns GEOID_NOT_AVAILABLE" (MS docs, nf-winnls-getusergeoid). A missing host route gets the same value, last error 120.
+    reg.add("kernel32.dll","GetUserGeoID",Conv::Stdcall,1,[this](Cpu& c)->uint32_t {
+        constexpr uint32_t kGeoIdNotAvailable=0xFFFFFFFFu;
+        if(!host.nls_call){set_last_error(120);return kGeoIdNotAvailable;}
+        Host::NlsRequest request{};request.operation=Host::NlsOperation::GetUserGeoID;request.type=c.arg(0);
+        Host::NlsResponse response=host.nls_call(request);if (!response.result) set_last_error(response.last_error);
+        return response.result?response.result:kGeoIdNotAvailable;
+    });
     // Guest calls are serialized by the interpreter, matching the existing Interlocked* routes.
     auto slist_init=[this](Cpu& c)->uint32_t {uint32_t h=c.arg(0);mem.w32(h,0);mem.w32(h+4,0);return 0;};
     auto slist_push=[this](Cpu& c)->uint32_t {uint32_t h=c.arg(0),entry=c.arg(1),old=mem.r32(h);mem.w32(entry,old);uint32_t depth=uint32_t(mem.r(h+4,2)),seq=uint32_t(mem.r(h+6,2));mem.w32(h,entry);mem.w(h+4,depth==0xffff?depth:depth+1,2);mem.w(h+6,(seq+1)&0xffff,2);return old;};
