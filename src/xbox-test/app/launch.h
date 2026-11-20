@@ -1536,6 +1536,13 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
                 if(!request.result){const auto* bytes=reinterpret_cast<const uint8_t*>(&capabilities);request.output.assign(bytes,bytes+sizeof(capabilities));}
                 break;
             }
+            case Kind::GetCapabilitiesEx: {
+                // XINPUT_CAPABILITIESEX is 32 bytes: XINPUT_CAPABILITIES, then VendorId, ProductId, VersionNumber, unk1 and unk2.
+                // The emulated pad has no hardware identity, so the trailing 12 bytes stay zero.
+                XINPUT_CAPABILITIES capabilities{};request.result=xinput_core::capabilities(request.index,request.flags,&capabilities);
+                if(!request.result){const auto* bytes=reinterpret_cast<const uint8_t*>(&capabilities);request.output.assign(bytes,bytes+sizeof(capabilities));request.output.resize(32,0);}
+                break;
+            }
             case Kind::Enable:xinput_core::enable(BOOL(request.flags));request.result=ERROR_SUCCESS;break;
             case Kind::GetBatteryInformation: {
                 XINPUT_BATTERY_INFORMATION battery{};request.result=xinput_core::battery(request.index,BYTE(request.device_type),&battery);

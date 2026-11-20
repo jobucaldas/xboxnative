@@ -437,11 +437,11 @@ static bool download_app(CmSession& cm, uint32_t appid, bool startCancelled = fa
     { storage_roots::Space sp = installs::space_of(spaceRoot);
       if (sp.ok) {
         logf("dl: %s", storage_roots::space_line("install root", gameRoot.empty() ? std::string("LocalState") : gameRoot, sp).c_str());
-        { // test guard: LocalState\dlmax.txt = size cap in MB (0 = dry run: report size only); one-shot, consumed when read
+        { // test guard: LocalState\dlmax.txt = size cap in MB (0 = dry run: report size only, negative = no cap); one-shot, consumed when read
           std::wstring gp = g_dir + L"\\dlmax.txt"; FILE* gf = _wfopen(gp.c_str(), L"rb");
           if (gf) { char gb[32] = {}; fread(gb, 1, sizeof gb - 1, gf); fclose(gf); DeleteFileW(gp.c_str()); double cap = atof(gb);
             logf("dl: dlmax.txt (test guard, consumed) cap=%.0f MB need=%.1f MB", cap, total / 1048576.0);
-            if (total / 1048576.0 > cap || cap <= 0) { char b[160]; snprintf(b, sizeof b, "Test guard: %.1f MB exceeds cap %.0f MB (dlmax.txt) - nothing downloaded", total / 1048576.0, cap); return fail(b); } } }
+            if (cap >= 0 && (total / 1048576.0 > cap || cap <= 0)) { char b[160]; snprintf(b, sizeof b, "Test guard: %.1f MB exceeds cap %.0f MB (dlmax.txt) - nothing downloaded", total / 1048576.0, cap); return fail(b); } } }
         if (!storage_roots::has_room(sp.available, need)) {
           char b[200]; snprintf(b, sizeof b, "Not enough free space on %s: need %.0f MB, %s", gameRoot.empty() ? "the internal drive" : gameRoot.substr(0, 2).c_str(), need / 1048576.0, storage_roots::space_text(sp).c_str());
           return fail(b);

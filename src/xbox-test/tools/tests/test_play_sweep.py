@@ -55,6 +55,18 @@ class PlaySweepInstallGuardTest(unittest.TestCase):
         self.assertIn("(downloads up to 500 MB)", self.plan("--allow-install", "500").stdout)
         self.assertEqual(self.plan("--allow-install", "0").returncode, 2)
 
+    def test_sweep_clears_its_download_cap_on_exit(self):
+        text = self.SWEEP.read_text()
+        self.assertIn("trap 'clear_cap; rm -rf \"$tmp\"' EXIT", text)
+        self.assertIn("printf '%s\\n' -1 > \"$tmp/cap/dlmax.txt\"", text)
+        self.assertIn("'\\LocalState' \"$tmp/cap/dlmax.txt\"", text)
+        # Only a sweep that already uploaded a cap clears one.
+        self.assertLess(text.index("capped=1"), text.index("PT_MAXMB=$maxmb timeout"))
+
+    def test_launcher_treats_negative_cap_as_no_cap(self):
+        steamdl = (HERE.parent.parent / "app" / "steamdl.h").read_text()
+        self.assertIn("if (cap >= 0 && (total / 1048576.0 > cap || cap <= 0))", steamdl)
+
 
 if __name__ == "__main__":
     unittest.main()
