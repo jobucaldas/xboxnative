@@ -430,6 +430,17 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
     // bindings (rebinding from the guest image would shadow host thunks).
     size_t nt = u32(flat, 0x3c), opt = nt + 24;
     uint32_t imp = u32(flat, opt + 96 + 8);
+    // One CRT per image: when any Universal CRT or VC++ 2015 import is a gap, every API-set CRT
+    // import goes to the ucrtbase donor. Mixing the registry's msvcrt answers with the donor's
+    // would split FILE*, heap and locale state between two CRTs (fopen from one, fwrite from the
+    // other; _strdup's block freed by the other heap). With no such gap the registry keeps them all.
+    bool crt_donor = false;
+    for (const auto& gap : img.unresolved) {
+        const size_t bang = gap.find('!');
+        if (bang == std::string::npos) continue;
+        const std::string gap_dll = gap.substr(0, bang);
+        if (apiset::ucrt_contract(gap_dll) || is_vc2015_dll(gap_dll)) { crt_donor = true; break; }
+    }
     if (imp) for (size_t d = imp;; d += 20) {
         uint32_t name = u32(flat, d + 12);
         if (!name) break;
@@ -438,6 +449,7 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
         // An API-set CRT name maps to the ucrtbase donor's module (one state for all of them).
         const std::string module = apiset::donor_module(dll);
         const bool aliased = module != dll;
+        if (aliased && !crt_donor) continue;  // the registry serves every CRT import of this image
         auto known = loaded.find(module);
         if (known == loaded.end()) {
             std::vector<uint8_t> bytes = source ? source(module) : std::vector<uint8_t>{};
@@ -476,9 +488,7 @@ inline Dll load_dll(Memory& mem, ThunkTable& table, const Registry& reg, const s
                 for (auto& ch : sym) if (ch >= 'A' && ch <= 'Z') ch += 32;
                 addr = dll_export_addr(known->second, sym, loaded, os_resolve);
             }
-            // An aliased CRT import keeps a registry binding (msvcrt's surface): only a gap is rebound.
-            const bool gap_slot = std::find(img.unresolved.begin(), img.unresolved.end(), label) != img.unresolved.end();
-            if (addr && (!aliased || gap_slot)) {
+            if (addr) {
                 uint32_t slot = img.base + dst + j * 4;
                 mem.protect(slot & ~4095u, 4096, PROT_R | PROT_W);
                 mem.w32(slot, addr); ++img.bound;
