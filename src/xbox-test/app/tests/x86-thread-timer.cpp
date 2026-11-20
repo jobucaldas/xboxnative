@@ -17,7 +17,7 @@ int main() {
     host.tick_count=[&]{return now;};
     host.window_handles[0x1000]=0x2000;   // a real window for the window-filter case
     // Model: PostQuitMessage sets the quit flag. GetMessage returns WM_QUIT whatever its filter;
-    // PeekMessage returns it only with a NULL or (HWND)-1 filter. Retrieving it clears the flag.
+    // PeekMessage returns it only with a NULL or (HWND)-1 filter and a range that admits it. Retrieving it clears the flag.
     auto quit_out=[](Host::WindowCall& q){q.output.assign(32,0);uint32_t quit=0x0012u;memcpy(q.output.data()+8,&quit,4);q.supported=true;q.result=1;};
     host.window_call=[&](Host::WindowCall& q) {
         if(q.name=="PostQuitMessage"){quit_posted=true;q.supported=true;q.result=0;return;}
@@ -25,7 +25,8 @@ int main() {
         if(!peek&&!get){q.supported=false;return;}
         ++calls; now+=4; q.supported=true; q.result=0;
         const bool thread_filter=q.args[1]==0||q.args[1]==uintptr_t(-1);
-        if(quit_posted&&(get||thread_filter)){quit_posted=false;quit_out(q);return;}
+        const bool quit_in_range=(q.args[2]==0&&q.args[3]==0)||(q.args[2]<=0x12u&&0x12u<=q.args[3]);
+        if(quit_posted&&(get||(thread_filter&&quit_in_range))){quit_posted=false;quit_out(q);return;}
         if(calls>200){ // guard: a regression that never returns is reported, not hung
             guard_hit=true;quit_out(q);
         }
@@ -63,6 +64,14 @@ int main() {
     CHECK(mem.r32(msg+8)==id);
     CHECK(call("user32.dll","dispatchmessagea",{msg})==0);
     CHECK(mem.r32(0x3600)==1);
+    // A NULL-hwnd range filter that admits WM_TIMER but not WM_QUIT polls for a not-yet-due
+    // thread timer; WM_QUIT must still end GetMessage.
+    CHECK(call("user32.dll","settimer",{0,0,1000,0x40000u})!=0);
+    calls=0;
+    call("user32.dll","postquitmessage",{0});
+    CHECK(call("user32.dll","getmessagea",{msg,0,0x113,0x113})==0);
+    CHECK(mem.r32(msg+4)==0x0012u);
+    CHECK(!guard_hit);
     std::printf("x86-thread-timer: %d checks, %d failures\n",checks,failures);
     return failures?1:0;
 }

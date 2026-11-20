@@ -486,8 +486,8 @@ inline void register_win32(Registry& r, Host& h) {
                         q.args[2] = c.arg(2); q.args[3] = c.arg(3); q.args[4] = 0; q.output.resize(size);
                         h.window_call(q);
                         if (!q.supported) break;
-                        // A filtered peek cannot see WM_QUIT: look for it on the whole queue each pass.
-                        if (!q.result && filter) {
+                        // A filtered peek (window or message range) cannot see WM_QUIT: look for it on the whole queue each pass.
+                        if (!q.result && (filter || c.arg(2) || c.arg(3))) {
                             Host::WindowCall quit{}; quit.name = peek_name; quit.args[0] = out; quit.args[1] = 0; quit.args[2] = 0x0012u; quit.args[3] = 0x0012u; quit.args[4] = 1u; quit.output.resize(size);
                             h.window_call(quit);
                             if (quit.supported && quit.result) { q = quit; break; }
