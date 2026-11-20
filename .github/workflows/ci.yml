@@ -391,20 +391,21 @@ jobs:
         timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
-          packages: g++-mingw-w64-x86-64 wine wine64
+          packages: g++-mingw-w64-x86-64 wine wine64 xvfb libgl1-mesa-dri mesa-vulkan-drivers
       - name: create the Wine prefix
         run: |
           mkdir -p "$RUNNER_TEMP/wine-prefix"
           echo "WINEPREFIX=$RUNNER_TEMP/wine-prefix" >> "$GITHUB_ENV"
           echo "PRUN_WINEPREFIX=$RUNNER_TEMP/wine-prefix" >> "$GITHUB_ENV"
       # Off-device Wine contracts, never the console. The timer test opens no
-      # audio device; the D3D diagnostics create a native device under Wine.
+      # audio device. The D3D diagnostics need a device: the runner has no GPU,
+      # so they run under Xvfb with Mesa's software GL (llvmpipe) and lavapipe.
       - name: multimedia timer regression
         run: bash src/xbox-test/audio/timer-test.sh
       - name: D3D11 diagnostics contracts on a native d3d11 device
-        run: bash src/xbox-test/app/tests/d3d11-diag.sh
+        run: xvfb-run -a bash src/xbox-test/app/tests/d3d11-diag.sh
       - name: D3D12 diagnostics contracts on a native d3d12 device
-        run: bash src/xbox-test/app/tests/d3d12-diag.sh
+        run: xvfb-run -a bash src/xbox-test/app/tests/d3d12-diag.sh
   diag-fixtures:
     runs-on: ubuntu-latest
     steps:
