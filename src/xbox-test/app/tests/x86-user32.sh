@@ -10,3 +10,5 @@ cc32="${I686_CC:-$(command -v i686-w64-mingw32-gcc || true)}"
   -o "$tmp/x86-user32-guest.exe" "$here/x86-user32-guest.c" -lkernel32 -luser32
 "${CXX:-c++}" -std=c++17 -O1 -mno-red-zone -Wall -Wextra -Werror "$here/x86-user32.cpp" -o "$tmp/x86-user32"
 "$tmp/x86-user32" "$tmp/x86-user32-guest.exe"
+"${CXX:-c++}" -std=c++17 -O2 -Wall -Wextra -Werror "$here/x86-thread-timer.cpp" -o "$tmp/x86-thread-timer"
+"$tmp/x86-thread-timer"

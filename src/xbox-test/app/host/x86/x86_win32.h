@@ -381,11 +381,27 @@ inline void register_win32(Registry& r, Host& h) {
         const uint64_t now = timer_now();
         for (auto& timer : h.timers) {
             if (timer.hwnd && !native_window(timer.hwnd)) { timer.pending = false; continue; }
-            if (!timer.pending && now >= timer.due && post_window_message(timer.hwnd, 0x0113u, timer.id, timer.proc)) {
+            // A NULL-hwnd (thread) timer has no window to post to: it is pending until
+            // GetMessage/PeekMessage hands it out (thread_timer_message).
+            if (!timer.pending && now >= timer.due && (!timer.hwnd || post_window_message(timer.hwnd, 0x0113u, timer.id, timer.proc))) {
                 timer.pending = true;
                 timer.due = now + timer.interval;
             }
         }
+    };
+    // Due thread timers reach the calling thread's queue as WM_TIMER with hwnd NULL, wParam the
+    // timer id and lParam the TimerProc. GetMessage/PeekMessage use it only when the native queue
+    // is empty, so posted messages keep their order.
+    auto thread_timer_message = [&h, timer_now](Host::WindowCall& q) {
+        for (const auto& timer : h.timers) {
+            if (timer.hwnd || !timer.pending) continue;
+            q.output.assign(32, 0);
+            const uint32_t fields[6] = {0x0113u, timer.id, timer.proc, uint32_t(timer_now()), 0, 0};
+            memcpy(q.output.data() + 8, fields, sizeof(fields));
+            q.supported = true; q.result = 1;
+            return true;
+        }
+        return false;
     };
     auto set_timer = [&h, native_window, timer_now](Cpu& c) -> uint32_t {
         const uint32_t hwnd = c.arg(0); uint32_t id = c.arg(1);
@@ -415,7 +431,7 @@ inline void register_win32(Registry& r, Host& h) {
     };
     auto window_route = [&](const char* name, unsigned argc, const char* native_name = nullptr) {
         if (registered(name)) return;
-        r.add("user32.dll", name, Conv::Stdcall, argc, [&h, count, native_window, guest_window, user_handle, call_window, guest_rect, guest_point, call_wndproc, read_window_wstr, pump_timers, timer_now, name, native_name, argc](Cpu& c) -> uint32_t {
+        r.add("user32.dll", name, Conv::Stdcall, argc, [&h, count, native_window, guest_window, user_handle, call_window, guest_rect, guest_point, call_wndproc, read_window_wstr, pump_timers, thread_timer_message, timer_now, name, native_name, argc](Cpu& c) -> uint32_t {
             count(name);
             const bool first_hwnd = !strcmp(name,"ShowWindow")||!strcmp(name,"UpdateWindow")||!strcmp(name,"SetWindowPos")||!strcmp(name,"MoveWindow")||!strcmp(name,"GetClientRect")||!strcmp(name,"GetWindowRect")||!strcmp(name,"ClientToScreen")||!strcmp(name,"ScreenToClient")||!strcmp(name,"SetWindowTextA")||!strcmp(name,"SetWindowTextW")||!strcmp(name,"GetWindowLongA")||!strcmp(name,"GetWindowLongW")||!strcmp(name,"SetWindowLongA")||!strcmp(name,"SetWindowLongW")||!strcmp(name,"IsWindowVisible")||!strcmp(name,"IsIconic")||!strcmp(name,"GetParent")||!strcmp(name,"SetFocus")||!strcmp(name,"SetForegroundWindow")||!strcmp(name,"PostMessageA")||!strcmp(name,"PostMessageW")||!strcmp(name,"SendMessageA")||!strcmp(name,"SendMessageW")||!strcmp(name,"DefWindowProcA")||!strcmp(name,"DefWindowProcW");
             const uint32_t token = argc&&first_hwnd ? c.arg(0) : 0; uintptr_t hwnd = native_window(token);
@@ -460,6 +476,7 @@ inline void register_win32(Registry& r, Host& h) {
                         q.args[2] = c.arg(2); q.args[3] = c.arg(3); q.args[4] = 0; q.output.resize(size);
                         h.window_call(q);
                         if (!q.supported) break;
+                        if (!q.result && thread_timer_message(q)) break;
                         if (q.result) {
                             q = call_window(c,name,{uintptr_t(out),native_filter,c.arg(2),c.arg(3),1u},{},size);
                             break;
@@ -471,6 +488,7 @@ inline void register_win32(Registry& r, Host& h) {
                 } else {
                     pump_timers();
                     q = call_window(c,name,{uintptr_t(out),native_filter,c.arg(2),c.arg(3),get?0u:c.arg(4)}, {},size);
+                    if (q.supported && !q.result) thread_timer_message(q);
                 }
                 const bool quit=get&&q.supported&&!q.result&&q.output.size()>=size&&[&]{uint32_t m=0;memcpy(&m,q.output.data()+8,4);return m==0x0012u;}();
                 if(q.supported && (q.result || quit) && q.output.size()>=size) {
