@@ -67,6 +67,7 @@ jobs:
           /tmp/x86-console-ini-res-ws2-test
           python3 -I src/xbox-test/app/tests/launch-result-test.py
           python3 -I src/xbox-test/app/tests/wine-probe-test.py
+          python3 -I src/xbox-test/app/tests/fna-driver-test.py
           python3 -I src/xbox-test/tools/tests/test_play_test_transport.py
           python3 -I src/xbox-test/tools/tests/test_play_sweep.py
           python3 -I src/xbox-test/tools/tests/test_xn.py
