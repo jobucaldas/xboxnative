@@ -29,6 +29,7 @@
 #include "x86_version.h"
 #include "x86_dinput8.h"
 #include "x86_d3d9.h"
+#include "x86_d3d11.h"
 #include "x86_dsound.h"
 namespace x86 {
 // Loaded guest DLLs, shared between the loader and the Guest surface. Kept in
@@ -1202,6 +1203,7 @@ inline void Guest::register_all() {
     register_dinput8(reg, host);
     register_gl(reg, host);
     register_d3d9(reg, host);
+    register_d3d11(reg, host);
     host.dsound_event=[this](uint32_t token)->uintptr_t {
         auto handle=sync_handles.find(token);if(handle==sync_handles.end())return 0;
         auto object=sync_objects.find(handle->second);if(object==sync_objects.end()||object->second.kind!=SyncKind::Event)return 0;
