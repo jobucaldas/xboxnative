@@ -2710,11 +2710,11 @@ inline void Guest::register_all() {
     reg.add("user32.dll","LoadImageA",Conv::Stdcall,6,[this,resource_data](Cpu& c)->uint32_t{
         constexpr uint32_t kImageBitmap=0,kImageIcon=1,kImageCursor=2,kLrLoadFromFile=0x10,kIdcArrow=32512;
         const uint32_t module=c.arg(0),name=c.arg(1),type=c.arg(2),load=c.arg(5);
-        auto outcome=[&](const char* what,uint32_t error){std::fprintf(stderr,"x86 user32 LoadImageA type=%u load=0x%x outcome=%s\n",type,load,what);set_last_error(error);return uint32_t(0);};
+        auto outcome=[&](const char* what,uint32_t error){{char line[128];std::snprintf(line,sizeof line,"x86 user32 LoadImageA type=%u load=0x%x outcome=%s\n",type,load,what);host.err+=line;if(host.tee)host.tee(line);}set_last_error(error);return uint32_t(0);};
         auto forward=[&](const char* what,uint32_t hinst,uint32_t ident)->uint32_t{
             auto it=reg.map.find({"user32.dll",Registry::key_sym(type==kImageCursor?"LoadCursorA":"LoadIconA")});
             if(it==reg.map.end())return outcome("no-route",120);
-            std::fprintf(stderr,"x86 user32 LoadImageA type=%u load=0x%x outcome=%s\n",type,load,what);
+            {char line[128];std::snprintf(line,sizeof line,"x86 user32 LoadImageA type=%u load=0x%x outcome=%s\n",type,load,what);host.err+=line;if(host.tee)host.tee(line);}
             c.mem.w32(c.reg[ESP]+4,hinst);c.mem.w32(c.reg[ESP]+8,ident);
             return it->second.fn(c);
         };
