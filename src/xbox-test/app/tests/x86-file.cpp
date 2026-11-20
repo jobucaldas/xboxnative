@@ -63,11 +63,11 @@ int main() {
     for(unsigned i=0;i<31;++i){auto it=reg.map.find({i>=28?"ole32.dll":"kernel32.dll",names[i]});CHECK(it!=reg.map.end());if(it!=reg.map.end()){CHECK(it->second.conv==Conv::Stdcall);CHECK(it->second.argc==arity[i]);}}
     uint64_t native_handle=0x123456789ull;unsigned calls=0;
     // Launches always install a destructive-file policy; a missing one fails closed (checked below).
-    bool refuse=false;host.destructive_file_guard=[&](const char*,const std::u16string&){return !refuse;};
+    bool refuse=false,write_ok=false;host.destructive_file_guard=[&](const char*,const std::u16string&){return !refuse;};
     host.file_call=[&](Host::FileCall& q){++calls;switch(q.kind){
     case Host::FileCall::Kind::CreateW:CHECK(q.path_w==u"save.dat");CHECK(q.args[0]==0x80000000u);q.value=native_handle;q.succeeded=true;break;
     case Host::FileCall::Kind::Read:q.data={'o','k'};q.args[1]=2;q.succeeded=true;break;
-    case Host::FileCall::Kind::Write:q.error=120;break;
+    case Host::FileCall::Kind::Write:if(!write_ok){q.error=120;break;}CHECK(q.handle==native_handle+1);q.args[0]=uint32_t(q.data.size());q.succeeded=true;break;
     case Host::FileCall::Kind::Size:q.value=0xfffffff0u;q.args[1]=3;q.succeeded=true;break;
     case Host::FileCall::Kind::Time:q.data.assign(24,0x5a);q.succeeded=true;break;
     case Host::FileCall::Kind::AttributesA:if(q.operation==Host::FileCall::Operation::CreateDirectoryA){CHECK(q.path_a=="folder");q.succeeded=true;}else if(q.path_a=="missing"){q.error=2;}else{q.value=q.path_a=="directory"?0x10:0x20;q.succeeded=true;if(q.args[1])q.data.assign(36,0x5b);}break;
@@ -76,7 +76,7 @@ int main() {
     case Host::FileCall::Kind::End:q.succeeded=true;break;
     case Host::FileCall::Kind::TimeConvert:q.data.assign(16,0x36);q.succeeded=true;break;
     case Host::FileCall::Kind::TimeLocal:q.data.assign(8,0x47);q.succeeded=true;break;
-    case Host::FileCall::Kind::Close:CHECK(q.handle==native_handle);q.succeeded=true;break;
+    case Host::FileCall::Kind::Close:CHECK(q.handle==native_handle||q.handle==native_handle+1);q.succeeded=true;break;
     case Host::FileCall::Kind::CreateA:CHECK(q.path_a=="save.dat");q.value=native_handle+1;q.error=183;q.succeeded=true;break;
     case Host::FileCall::Kind::CreateDirectoryW:CHECK(q.path_w==u"folder");q.succeeded=true;break;
     case Host::FileCall::Kind::RemoveDirectoryA:CHECK(q.path_a=="folder");q.succeeded=true;break;
@@ -192,6 +192,23 @@ int main() {
     CHECK(kcall("gettempfilenamew",{tmpw,pfxw,0,0x3c80})==0x1234&&mem.r8(0x3c80+28)=='p'&&mem.r8(0x3c80+30)==0&&g.last_error()==0);
     refuse=true;CHECK(kcall("gettempfilenamew",{tmpw,pfxw,0,0x3c80})==0&&g.last_error()==5);refuse=false;
     CHECK(kcall("gettempfilenamew",{tmpw,pfxw,0,0})==0&&g.last_error()==87);
+    uint32_t tmpa=g.put_str("tmp\\"),pfxa=g.put_str("pfx");
+    CHECK(kcall("gettempfilenamea",{tmpa,pfxa,0,0x3c80})==0x1234&&mem.r8(0x3c80+14)=='p'&&mem.r8(0x3c80+15)==0&&g.last_error()==0);
+    refuse=true;CHECK(kcall("gettempfilenamea",{tmpa,pfxa,0,0x3c80})==0&&g.last_error()==5);refuse=false;
+    // Legacy OpenFile/LZOpenFileA: OF_READ opens without a guard, OF_WRITE and OF_READWRITE go through it; the HFILE is a guest handle.
+    uint32_t save_a=g.put_str("save.dat"),ofs=0x3d00;
+    const uint32_t h1=kcall("openfile",{save_a,ofs,0});
+    CHECK(h1!=0xffffffffu&&(h1&0xf0000000u)==0x50000000u&&mem.r8(ofs)==136&&mem.r8(ofs+8)=='s'&&mem.r8(ofs+16)==0);
+    refuse=true;CHECK(kcall("openfile",{save_a,ofs,1})==0xffffffffu&&g.last_error()==5);refuse=false;
+    const uint32_t h2=kcall("lzopenfilea",{save_a,ofs,2});
+    CHECK(h2!=0xffffffffu&&h2!=h1);
+    CHECK(kcall("openfile",{0,ofs,0})==0xffffffffu&&g.last_error()==87);
+    // _lclose and LZClose release guest handles; LZCopy writes the source bytes through the host write, else fails with -1.
+    CHECK(kcall("lzcopy",{h2,0x1})==0xffffffffu&&g.last_error()==6);
+    CHECK(kcall("lzcopy",{h2,h2})==0xffffffffu&&g.last_error()==120);
+    write_ok=true;CHECK(kcall("lzcopy",{h2,h2})==2&&g.last_error()==0);write_ok=false;
+    CHECK(kcall("lzclose",{h2})==0&&kcall("_lclose",{h2})==0xffffffffu&&g.last_error()==6);
+    CHECK(kcall("_lclose",{h1})==0&&kcall("_lclose",{h1})==0xffffffffu);
     uint32_t c_w=g.put_wstr(u"C:\\"),z_w=g.put_wstr(u"Z:\\"),c_a=g.put_str("C:\\"),z_a=g.put_str("Z:\\");
     CHECK(kcall("getdiskfreespacew",{c_w,0x3c90,0x3c94,0x3c98,0x3c9c})==1&&mem.r32(0x3c90)==8&&mem.r32(0x3c94)==512&&mem.r32(0x3c98)==100&&mem.r32(0x3c9c)==200);
     CHECK(kcall("getdiskfreespacew",{z_w,0x3c90,0,0,0})==0&&g.last_error()==21);
