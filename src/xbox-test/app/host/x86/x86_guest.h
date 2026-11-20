@@ -1544,6 +1544,8 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "SetLastError", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { set_last_error(c.arg(0)); return 0; });
     reg.add("kernel32.dll", "GetCurrentProcess", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0xFFFFFFFFu; });
     reg.add("kernel32.dll", "GetCurrentProcessId", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0x1000; });
+    // Guest calls are serialized by the interpreter, so there are no buffered writes to flush.
+    reg.add("kernel32.dll", "FlushProcessWriteBuffers", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
     reg.add("kernel32.dll", "GetCurrentThread", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0xFFFFFFFEu; });
     // The thread id lives in the running thread's TEB (ClientId.UniqueThread).
     reg.add("kernel32.dll", "GetCurrentThreadId", Conv::Stdcall, 0, [](Cpu& c) -> uint32_t { return c.mem.r32(c.fs_base + 0x24); });
@@ -1823,6 +1825,7 @@ inline void Guest::register_all() {
         return 0; });
     reg.add("kernel32.dll", "GetCurrentProcessorNumberEx", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t p = c.arg(0); if (p) { mem.w(p, 0, 2); mem.w(p + 2, 0, 2); } return 0; });
+    reg.add("kernel32.dll", "GetCurrentProcessorNumber", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
     // Thread affinity/priority: one CPU, normal priority, affinity mask 1.
     // BOOL GetProcessAffinityMask(HANDLE, PDWORD, PDWORD): process and system
     // masks are the 2nd/3rd parameters (winbase.h), not the handle.
@@ -2074,7 +2077,7 @@ inline void Guest::register_all() {
         if (!host.nls_call) { set_last_error(87); return 0u; }
         Host::NlsResponse response = host.nls_call(request); if (!response.result) set_last_error(response.last_error);
         const bool sort_key = (request.operation == Host::NlsOperation::LCMapStringW || request.operation == Host::NlsOperation::LCMapStringEx) && (request.flags & 0x400u);
-        const uint32_t bytes = expected_bytes == 0xFFFFFFFFu ? response.result * (sort_key ? 1u : 2u) : expected_bytes;
+        const uint32_t bytes = expected_bytes == 0xFFFFFFFFu ? response.result * (sort_key || request.operation == Host::NlsOperation::LCMapStringA ? 1u : 2u) : expected_bytes;
         if (response.result && output_ptr && response.output.size() == bytes)
             copy_out(output_ptr, response.output.data(), bytes);
         return response.result;
@@ -2097,6 +2100,23 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll","GetUserDefaultLCID",Conv::Stdcall,0,[get_lcid](Cpu& c)->uint32_t{return get_lcid(c,"GetUserDefaultLCID");});
     reg.add("kernel32.dll","GetSystemDefaultLCID",Conv::Stdcall,0,[get_lcid](Cpu& c)->uint32_t{return get_lcid(c,"GetSystemDefaultLCID");});
     reg.add("kernel32.dll","GetThreadLocale",Conv::Stdcall,0,[get_lcid](Cpu& c)->uint32_t{return get_lcid(c,"GetThreadLocale");});
+    // EnumSystemLocalesEx(proc, flags, lParam, reserved): the host's full locale list is not exposed through NLS, so only the
+    // user's default locale is enumerated. The name is placed on the guest stack above the callback frame, as EnumDisplayMonitors
+    // does for its RECT; the callback runs with Cpu::call and enumeration stops when it returns FALSE.
+    reg.add("kernel32.dll","EnumSystemLocalesEx",Conv::Stdcall,4,[this](Cpu& c)->uint32_t {
+        const uint32_t callback=c.arg(0),flags=c.arg(1),lparam=c.arg(2);
+        if(!callback){set_last_error(87);return 0;}
+        if(!host.nls_call){set_last_error(120);return 0;}
+        Host::NlsRequest request{};request.operation=Host::NlsOperation::GetUserDefaultLocaleName;request.output_capacity=85;request.output_null=false;
+        Host::NlsResponse response=host.nls_call(request);if(!response.result){set_last_error(response.last_error);return 0;}
+        if(response.output.size()<2||response.output.size()>170){set_last_error(87);return 0;}
+        c.reg[ESP]-=192;const uint32_t name=c.reg[ESP];
+        copy_out(name,response.output.data(),uint32_t(response.output.size()));c.mem.w(name+uint32_t(response.output.size()),0,2);
+        const uint32_t names[]={name};
+        for(uint32_t locale:names){if(!c.call(callback,{locale,flags,lparam}))break;}
+        c.reg[ESP]+=192;
+        return 1;
+    });
     reg.add("kernel32.dll","GetUserDefaultLocaleName",Conv::Stdcall,2,[this](Cpu& c)->uint32_t {
         const uint32_t output=c.arg(0),capacity=c.arg(1);
         if(!output||!capacity){set_last_error(87);return 0;}
@@ -2160,6 +2180,51 @@ inline void Guest::register_all() {
         const uint32_t chars = request.input_length == -1 ? uint32_t(request.input.size() / 2) : uint32_t(request.input_length);
         request.output_capacity = chars;
         return nls_output(request, c.arg(4), chars * 2);
+    });
+    reg.add("kernel32.dll", "GetStringTypeExA", Conv::Stdcall, 5, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::GetStringTypeA;
+        request.locale = c.arg(0); request.type = c.arg(1); request.output_null = c.arg(4) == 0;
+        nls_input(c.arg(2), int32_t(c.arg(3)), 1, request);
+        const uint32_t chars = request.input_length == -1 ? uint32_t(request.input.size()) : uint32_t(request.input_length);
+        request.output_capacity = chars;
+        return nls_output(request, c.arg(4), chars * 2);
+    });
+    reg.add("kernel32.dll", "LocaleNameToLCID", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        if (!host.nls_call) { set_last_error(120); return 0; }
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::LocaleNameToLCID; request.flags = c.arg(1);
+        request.locale_name_null = c.arg(0) == 0; if (!request.locale_name_null) request.locale_name = wstr(c.arg(0));
+        Host::NlsResponse response = host.nls_call(request); if (!response.result) set_last_error(response.last_error);
+        return response.result;
+    });
+    reg.add("kernel32.dll", "IsValidLocaleName", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        if (!host.nls_call) { set_last_error(120); return 0; }
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::IsValidLocaleName;
+        request.locale_name_null = c.arg(0) == 0; if (!request.locale_name_null) request.locale_name = wstr(c.arg(0));
+        Host::NlsResponse response = host.nls_call(request); if (!response.result) set_last_error(response.last_error);
+        return response.result;
+    });
+    reg.add("kernel32.dll", "LCMapStringA", Conv::Stdcall, 6, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::LCMapStringA;
+        request.locale = c.arg(0); request.flags = c.arg(1); request.output_capacity = c.arg(5); request.output_null = c.arg(4) == 0;
+        nls_input(c.arg(2), int32_t(c.arg(3)), 1, request);
+        return nls_output(request, c.arg(4), 0xFFFFFFFFu);
+    });
+    reg.add("kernel32.dll", "CompareStringA", Conv::Stdcall, 6, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::CompareStringA;
+        request.locale = c.arg(0); request.flags = c.arg(1); nls_input(c.arg(2), int32_t(c.arg(3)), 1, request);
+        Host::NlsRequest second{}; nls_input(c.arg(4), int32_t(c.arg(5)), 1, second);
+        request.input2 = std::move(second.input); request.input2_null = second.input_null; request.input2_length = second.input_length;
+        return nls_output(request, 0, 0);
+    });
+    // lstrcmpiA = CompareStringA(LOCALE_USER_DEFAULT, NORM_IGNORECASE) - 2 on NUL-terminated input; 0 on failure.
+    reg.add("kernel32.dll", "lstrcmpiA", Conv::Stdcall, 2, [this, nls_input](Cpu& c) -> uint32_t {
+        Host::NlsRequest request{}; request.operation = Host::NlsOperation::CompareStringA;
+        request.locale = 0x400; request.flags = 1; nls_input(c.arg(0), -1, 1, request);
+        Host::NlsRequest second{}; nls_input(c.arg(1), -1, 1, second);
+        request.input2 = std::move(second.input); request.input2_null = second.input_null; request.input2_length = second.input_length;
+        if (!host.nls_call) { set_last_error(120); return 0; }
+        Host::NlsResponse response = host.nls_call(request); if (!response.result) { set_last_error(response.last_error); return 0; }
+        return uint32_t(int32_t(response.result) - 2);
     });
     reg.add("kernel32.dll", "LCMapStringW", Conv::Stdcall, 6, [this, nls_input, nls_output](Cpu& c) -> uint32_t {
         Host::NlsRequest request{}; request.operation = Host::NlsOperation::LCMapStringW;
@@ -2235,6 +2300,19 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "HeapFree", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { heap.release(c.arg(2)); return 1; });
     reg.add("kernel32.dll", "HeapReAlloc", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t { return heap.realloc(c.arg(2), c.arg(3)); });
     reg.add("kernel32.dll", "HeapSize", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t { return heap.size_of(c.arg(2)); });
+    // Guest heap keeps no walkable block list: a NULL block validates the heap, an address must be a live allocation.
+    reg.add("kernel32.dll", "HeapValidate", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+        if (!c.arg(2) || heap.size_of(c.arg(2))) return 1;
+        set_last_error(487); return 0; });
+    reg.add("kernel32.dll", "HeapWalk", Conv::Stdcall, 2, [this](Cpu&) -> uint32_t { set_last_error(120); return 0; });
+    reg.add("kernel32.dll", "HeapCompact", Conv::Stdcall, 2, [this](Cpu&) -> uint32_t { set_last_error(120); return 0; });
+    // FALSE when every page of [lp, lp+ucb) is mapped; no per-page protection is modelled.
+    reg.add("kernel32.dll", "IsBadReadPtr", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        const uint64_t start = c.arg(0), size = c.arg(1);
+        if (!size) return 0;
+        if (start + size > 0x100000000ull) return 1;
+        for (uint64_t a = start & ~0xfffull; a < start + size; a += 0x1000) if (!mem.mapped(uint32_t(a))) return 1;
+        return 0; });
     reg.add("kernel32.dll", "HeapSetInformation", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
         uint32_t h = c.arg(0), info = c.arg(1), buffer = c.arg(2), size = c.arg(3);
         if ((h && h != 0x50000000u && !heap_handles.count(h)) ||
@@ -2475,6 +2553,8 @@ inline void Guest::register_all() {
         uint32_t p = c.arg(0); if (p) { mem.w32(p, 1000000); mem.w32(p + 4, 0); } return 1; });
     reg.add("kernel32.dll", "GetSystemTimeAsFileTime", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         uint32_t p = c.arg(0); if (p) { mem.w32(p, 0x80000000u); mem.w32(p + 4, 0x01D00000u); } return 0; });
+    reg.add("kernel32.dll", "GetSystemTimePreciseAsFileTime", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        uint32_t p = c.arg(0); if (p) { mem.w32(p, 0x80000000u); mem.w32(p + 4, 0x01D00000u); } return 0; });
     reg.add("bcrypt.dll", "BCryptGenRandom", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
         uint32_t out = c.arg(1), size = c.arg(2);
         if (c.arg(0) || c.arg(3) != 2 || size > (1u << 20) || (!out && size)) return 0xC000000Du; // STATUS_INVALID_PARAMETER
@@ -2622,6 +2702,39 @@ inline void Guest::register_all() {
         reg.add("kernel32.dll",name,Conv::Stdcall,4,[enum_resource_names,wide](Cpu& c)->uint32_t{return enum_resource_names(c,wide);});
     }
     for(bool wide:{false,true})for(bool extended:{false,true}){std::string name=extended?"FindResourceEx":"FindResource";name+=wide?"W":"A";reg.add("kernel32.dll",name,Conv::Stdcall,extended?4:3,[find_resource,wide,extended](Cpu& c)->uint32_t{return find_resource(c,wide,extended);});}
+    // LoadImageA(hinst, name, type, cx, cy, fuLoad). Bitmaps from a module are not served (no bitmap-from-resource path in GDI).
+    // LR_LOADFROMFILE checks the file through the guest file mapping (GetFileAttributesA's route): a missing file fails with
+    // ERROR_FILE_NOT_FOUND; an existing ICON/CURSOR file gets the stock handle (IDI_APPLICATION/IDC_ARROW share ordinal 32512);
+    // an existing BITMAP file fails with ERROR_CALL_NOT_IMPLEMENTED. ICON/CURSOR from a module forward to LoadIconA/LoadCursorA,
+    // the handle an app icon gets, after the module name is checked.
+    reg.add("user32.dll","LoadImageA",Conv::Stdcall,6,[this,resource_data](Cpu& c)->uint32_t{
+        constexpr uint32_t kImageBitmap=0,kImageIcon=1,kImageCursor=2,kLrLoadFromFile=0x10,kIdcArrow=32512;
+        const uint32_t module=c.arg(0),name=c.arg(1),type=c.arg(2),load=c.arg(5);
+        auto outcome=[&](const char* what,uint32_t error){{char line[128];std::snprintf(line,sizeof line,"x86 user32 LoadImageA type=%u load=0x%x outcome=%s\n",type,load,what);host.err+=line;if(host.tee)host.tee(line);}set_last_error(error);return uint32_t(0);};
+        auto forward=[&](const char* what,uint32_t hinst,uint32_t ident)->uint32_t{
+            auto it=reg.map.find({"user32.dll",Registry::key_sym(type==kImageCursor?"LoadCursorA":"LoadIconA")});
+            if(it==reg.map.end())return outcome("no-route",120);
+            {char line[128];std::snprintf(line,sizeof line,"x86 user32 LoadImageA type=%u load=0x%x outcome=%s\n",type,load,what);host.err+=line;if(host.tee)host.tee(line);}
+            c.mem.w32(c.reg[ESP]+4,hinst);c.mem.w32(c.reg[ESP]+8,ident);
+            return it->second.fn(c);
+        };
+        if(type!=kImageBitmap&&type!=kImageIcon&&type!=kImageCursor)return outcome("invalid-type",87);
+        if(load&kLrLoadFromFile){
+            if(name<=0xffffu)return outcome("file-name-invalid",87);
+            Host::FileCall q{Host::FileCall::Kind::AttributesA};q.path_a=str(name);
+            if(!call_file(q))return outcome("file-not-found",q.error?q.error:2);
+            if(type==kImageBitmap)return outcome("file-bitmap-unsupported",120);
+            return forward("file-stock",0,kIdcArrow);
+        }
+        if(type==kImageBitmap)return outcome("bitmap-unsupported",1813);
+        if(module||name>0xffffu){
+            const uint32_t base=module?module:image_base;bool known=base==image_base;for(const auto& dll:dlls)if(dll.second.image.base==base)known=true;
+            if(!base||!known)return outcome("module-unknown",1813);
+            uint32_t data=0,size=0,error=0;
+            if(!resource_data(base,type==kImageCursor?12u:14u,name,false,0,false,data,size,error))return outcome("resource-missing",error);
+        }
+        return forward("forwarded",module,name);
+    });
     reg.add("kernel32.dll","LoadResource",Conv::Stdcall,2,[this](Cpu& c)->uint32_t{auto it=resource_handles.find(c.arg(1));if(it==resource_handles.end()||it->second.module!=(c.arg(0)?c.arg(0):image_base)){set_last_error(1814);return 0;}return c.arg(1);});
     reg.add("kernel32.dll","LockResource",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto it=resource_handles.find(c.arg(0));return it==resource_handles.end()?0:it->second.data;});
     reg.add("kernel32.dll","SizeofResource",Conv::Stdcall,2,[this](Cpu& c)->uint32_t{auto it=resource_handles.find(c.arg(1));if(it==resource_handles.end()||it->second.module!=(c.arg(0)?c.arg(0):image_base)){set_last_error(1814);return 0;}return it->second.size;});

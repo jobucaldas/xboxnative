@@ -144,6 +144,13 @@ struct PlayResult {
 // interpreted work, so no real session reaches it.
 inline constexpr uint64_t kGuestRunCap = 1000ull * 1000 * 1000 * 1000;
 #if defined(_WIN32)
+inline FARPROC nls_kernel_proc(const char* name) {
+    static HMODULE base = LoadLibraryExW(L"kernelbase.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    static HMODULE k32 = LoadLibraryExW(L"kernel32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    FARPROC proc = base ? GetProcAddress(base, name) : nullptr;
+    if (!proc && k32) proc = GetProcAddress(k32, name);
+    return proc;
+}
 inline void install_nls_host(Host& host) {
     host.nls_call = [](const Host::NlsRequest& request) -> Host::NlsResponse {
         Host::NlsResponse response{};
@@ -244,6 +251,43 @@ inline void install_nls_host(Host& host) {
             if(!proc&&k32)proc=GetProcAddress(k32,"GetUserGeoID");
             if(!proc){response.last_error=ERROR_CALL_NOT_IMPLEMENTED;return response;}
             response.result=uint32_t(reinterpret_cast<GeoIdFn>(proc)(int(request.type)));
+            break;
+        }
+        case Host::NlsOperation::LocaleNameToLCID: {
+            using LcidFn = uint32_t(WINAPI*)(LPCWSTR, DWORD);
+            FARPROC proc = nls_kernel_proc("LocaleNameToLCID");
+            if (!proc) { response.last_error = ERROR_CALL_NOT_IMPLEMENTED; return response; }
+            std::vector<wchar_t> locale(request.locale_name.begin(), request.locale_name.end()); locale.push_back(0);
+            response.result = reinterpret_cast<LcidFn>(proc)(request.locale_name_null ? nullptr : locale.data(), request.flags);
+            break;
+        }
+        case Host::NlsOperation::IsValidLocaleName: {
+            using ValidFn = int(WINAPI*)(LPCWSTR);
+            FARPROC proc = nls_kernel_proc("IsValidLocaleName");
+            if (!proc) { response.last_error = ERROR_CALL_NOT_IMPLEMENTED; return response; }
+            std::vector<wchar_t> locale(request.locale_name.begin(), request.locale_name.end()); locale.push_back(0);
+            response.result = uint32_t(reinterpret_cast<ValidFn>(proc)(request.locale_name_null ? nullptr : locale.data()));
+            break;
+        }
+        case Host::NlsOperation::LCMapStringA: {
+            using MapA = int(WINAPI*)(LCID, DWORD, LPCSTR, int, LPSTR, int);
+            FARPROC proc = nls_kernel_proc("LCMapStringA");
+            if (!proc) { response.last_error = ERROR_CALL_NOT_IMPLEMENTED; return response; }
+            std::vector<char> output(request.output_null ? 0 : request.output_capacity);
+            const char* input = request.input_null ? nullptr : reinterpret_cast<const char*>(request.input.data());
+            response.result = uint32_t(reinterpret_cast<MapA>(proc)(request.locale, request.flags, input, request.input_length,
+                output.empty() ? nullptr : output.data(), int(request.output_capacity)));
+            if (response.result && !request.output_null && response.result <= output.size())
+                response.output.assign(output.data(), output.data() + response.result);
+            break;
+        }
+        case Host::NlsOperation::CompareStringA: {
+            using CmpA = int(WINAPI*)(LCID, DWORD, LPCSTR, int, LPCSTR, int);
+            FARPROC proc = nls_kernel_proc("CompareStringA");
+            if (!proc) { response.last_error = ERROR_CALL_NOT_IMPLEMENTED; return response; }
+            const char* a = request.input_null ? nullptr : reinterpret_cast<const char*>(request.input.data());
+            const char* b = request.input2_null ? nullptr : reinterpret_cast<const char*>(request.input2.data());
+            response.result = uint32_t(reinterpret_cast<CmpA>(proc)(request.locale, request.flags, a, request.input_length, b, request.input2_length));
             break;
         }
         case Host::NlsOperation::GetLocaleInfoA:
