@@ -2375,14 +2375,14 @@ static HMODULE map_managed_runtime(const std::wstring& packageRoot,const std::ws
     if(addVeh)state->veh=addVeh(1,vectored);
     // The guest's current directory is its own folder, not the launcher's (runImpl does the same for PE games).
     using SetDir=BOOL(WINAPI*)(LPCWSTR);auto setDir=(SetDir)kernel_tail::native("SetCurrentDirectoryW");
-    if(!setDir || !setDir(state->cwd.c_str())) {state->event("SetCurrentDirectoryW failed error="+std::to_string(GetLastError()));return nullptr;}
+    if(!setDir || !setDir(state->cwd.c_str())) {state->event("SetCurrentDirectoryW failed error="+std::to_string(GetLastError()));state->result=state->snapshot();state->finished=true;return nullptr;}
     set_runtime_directory(packageRoot+L"\\runtime");
     prepare_dxil();
     auto slash=runtimePath.find_last_of(L"\\/");
     if(slash!=std::wstring::npos) alteredLoadDir()=runtimePath.substr(0,slash);
     auto module=map(runtimePath,"mono-2.0-sgen.dll");
     alteredLoadDir().clear();
-    if(!module || !initializePending()) return nullptr;
+    if(!module || !initializePending()) {state->result=state->snapshot();state->finished=true;return nullptr;}
     for(const auto& line:mlp::launch_gap.report(module->key,"x64").lines) if(log) log(line.c_str());
     module->pinned=true;
     return (HMODULE)module->image.base;
