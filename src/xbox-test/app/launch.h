@@ -67,6 +67,7 @@ static void lp_sink(const char* s) {
 #include "dxil_runtime.h"
 #include "host/play_runtime.h"
 #include "host/mono_host.h"
+#include "host/fna_driver.h"
 #include "../uwph/shell32/folder_chain.h"
 #include "steam_client_package.h"
 #include "steam_token_store.h"
@@ -1620,7 +1621,8 @@ static void lp_run_managed(LpCtx& c,const std::wstring& path,const std::wstring&
     std::string assembly=play_runtime::narrow(path);
     std::vector<std::string> args;
     for(const auto& token:play_runtime::command_line_tokens(c.args))args.push_back(play_runtime::narrow(token));
-    snprintf(line,sizeof line,"PRUN CLR engine=Mono-x64 exe=%s",play_runtime::narrow(exe).c_str());lp_sink(line);
+    fna_driver::ForceD3D11 fnaDriver; // FNA3D_FORCE_DRIVER=D3D11 unless already set; restored on every return
+    snprintf(line,sizeof line,"PRUN CLR engine=Mono-x64 exe=%s fna3d=%s",play_runtime::narrow(exe).c_str(),fna_driver::current().c_str());lp_sink(line);
     const std::wstring monoPath=package+L"\\runtime\\mono\\mono-2.0-sgen.dll";
     // Mono imports version.dll from the Wine donor: probe and wire it before mapping, as the native path does.
     if(!donor_pe::probe(lp_sink)) {c.failName="Wine donor initialization/behavior";lp_sink("DWPE FAIL donor behavior gate; no game code executed");return;}
