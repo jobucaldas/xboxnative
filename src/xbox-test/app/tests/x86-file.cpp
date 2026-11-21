@@ -66,15 +66,16 @@ int main() {
     bool refuse=false,write_ok=false;
     std::string last_guard_op; std::u16string last_guard_path;
     host.destructive_file_guard=[&](const char* op,const std::u16string& p){last_guard_op=op?op:"";last_guard_path=p;return !refuse;};
-    std::u16string last_createw_path,last_deleted_w; uint32_t last_createw_share=0; unsigned close_count=0;
+    std::u16string last_createw_path,last_deleted_w; uint32_t last_createw_access=0,last_createw_share=0; unsigned close_count=0,createw_count=0;
+    std::string mock_cwd="root";
     std::vector<std::vector<uint8_t>> read_chunks; size_t read_idx=0;
     std::vector<uint8_t> written_bytes;
     host.file_call=[&](Host::FileCall& q){++calls;switch(q.kind){
     case Host::FileCall::Kind::CreateW:
-        last_createw_path=q.path_w;last_createw_share=q.args[1];
-        if(q.path_w==u"out.dat"){q.value=native_handle+1;q.succeeded=true;}
-        else if(q.path_w==u"c\u20ac.dat"){q.value=native_handle+1;q.succeeded=true;}
-        else{CHECK(q.path_w==u"save.dat");if(calls==1)CHECK(q.args[0]==0x80000000u);q.value=native_handle;q.succeeded=true;}
+        ++createw_count;last_createw_path=q.path_w;last_createw_access=q.args[0];last_createw_share=q.args[1];
+        if(q.path_w==u"root\\out.dat"||q.path_w==u"out.dat"){q.value=native_handle+1;q.succeeded=true;}
+        else if(q.path_w==u"root\\c\u20ac.dat"||q.path_w==u"c\u20ac.dat"){q.value=native_handle+1;q.succeeded=true;}
+        else{CHECK(q.path_w==u"save.dat"||q.path_w==u"root\\save.dat");if(calls==1)CHECK(q.args[0]==0x80000000u);q.value=native_handle;q.succeeded=true;}
         break;
     case Host::FileCall::Kind::Read:
         if(!read_chunks.empty()){
@@ -97,7 +98,7 @@ int main() {
     case Host::FileCall::Kind::CreateDirectoryW:CHECK(q.path_w==u"folder");q.succeeded=true;break;
     case Host::FileCall::Kind::RemoveDirectoryA:CHECK(q.path_a=="folder");q.succeeded=true;break;
     case Host::FileCall::Kind::RemoveDirectoryW:CHECK(q.path_w==u"folder");q.succeeded=true;break;
-    case Host::FileCall::Kind::GetCurrentDirectoryA:q.data.assign({'r','o','o','t',0});q.value=4;q.succeeded=true;break;
+    case Host::FileCall::Kind::GetCurrentDirectoryA:q.data.assign(mock_cwd.begin(),mock_cwd.end());q.data.push_back(0);q.value=uint32_t(mock_cwd.size());q.succeeded=true;break;
     case Host::FileCall::Kind::GetCurrentDirectoryW:q.data.assign(10,0);q.data[0]='r';q.data[2]='o';q.data[4]='o';q.data[6]='t';q.value=4;q.succeeded=true;break;
     case Host::FileCall::Kind::SetCurrentDirectoryA:CHECK(q.path_a=="folder");q.succeeded=true;break;
     case Host::FileCall::Kind::SetCurrentDirectoryW:CHECK(q.path_w==u"folder");q.succeeded=true;break;
@@ -217,36 +218,47 @@ int main() {
     CHECK(kcall("gettempfilenamea",{tmpa,pfxa,0,0x3c80})==0x1234&&mem.r8(0x3c80+14)=='p'&&mem.r8(0x3c80+15)==0&&g.last_error()==0);
     CHECK(last_guard_op=="GetTempFileNameA"&&last_guard_path==u"tmp\\pfx0000.TMP");
     CHECK(kcall("gettempfilenamea",{tmpa,bad_pfxa,0,0x3c80})==0&&g.last_error()==123);
-    // CP1252 0x80 (Euro sign U+20AC) decodes and re-encodes consistently in GetTempFileNameA.
+    // CP1252 0x80 (Euro sign U+20AC) decodes and re-encodes consistently in GetTempFileNameA; >=260-byte paths fail instead of truncating.
     uint32_t euro_dir=g.put_str("d\x80\\"),euro_pfx=g.put_str("\x80z");
     CHECK(kcall("gettempfilenamea",{euro_dir,euro_pfx,0,0x3c80})==0x1234&&g.last_error()==0);
     CHECK(last_guard_path==u"d\u20ac\\\u20acz0000.TMP"&&mem.r8(0x3c80+1)==0x80&&mem.r8(0x3c80+3)==0x80);
+    uint32_t long_dir=g.put_str(std::string(255,'a')+"\\"); last_deleted_w.clear();
+    CHECK(kcall("gettempfilenamea",{long_dir,pfxa,0,0x3c80})==0&&g.last_error()==111&&!last_deleted_w.empty());
     refuse=true;CHECK(kcall("gettempfilenamea",{tmpa,pfxa,0,0x3c80})==0&&g.last_error()==5);refuse=false;
-    // Legacy OpenFile/LZOpenFileA: single CP_ACP decode shared by guard and CreateW, plus OF_PARSE/OF_EXIST/OF_DELETE/OF_REOPEN/share flags.
+    // Legacy OpenFile/LZOpenFileA: resolves relative paths against cwd, single CP_ACP decode shared by guard and CreateW, OF_PARSE/OF_EXIST/OF_DELETE/OF_REOPEN/OF_CREATE/share flags.
     uint32_t save_a=g.put_str("save.dat"),out_a=g.put_str("out.dat"),euro_a=g.put_str("c\x80.dat"),ofs=0x3d00;
     const uint32_t h1=kcall("openfile",{save_a,ofs,0x10u});  // OF_READ | OF_SHARE_EXCLUSIVE
-    CHECK(h1!=0xffffffffu&&(h1&0xf0000000u)==0x50000000u&&last_createw_path==u"save.dat"&&last_createw_share==0u&&mem.r8(ofs)==136&&mem.r8(ofs+8)=='s'&&mem.r8(ofs+16)==0);
+    CHECK(h1!=0xffffffffu&&(h1&0xf0000000u)==0x50000000u&&last_createw_path==u"root\\save.dat"&&last_createw_share==0u&&mem.r8(ofs)==136&&mem.r8(ofs+1)==1&&mem.r8(ofs+8)=='r'&&mem.r8(ofs+21)==0);
     refuse=true;CHECK(kcall("openfile",{out_a,ofs,1})==0xffffffffu&&g.last_error()==5);refuse=false;
-    // CP1252 parity: both guard and CreateW receive u"c\u20ac.dat".
+    // OF_CREATE alone requests GENERIC_READ|GENERIC_WRITE (0xC0000000).
+    const uint32_t hcreate=kcall("openfile",{out_a,ofs,0x1000u});
+    CHECK(hcreate!=0xffffffffu&&last_createw_access==0xC0000000u);
+    CHECK(kcall("_lclose",{hcreate})==0);
+    // CP1252 parity: both guard and CreateW receive u"root\\c\u20ac.dat".
     const uint32_t heuro=kcall("openfile",{euro_a,ofs,1});
-    CHECK(heuro!=0xffffffffu&&last_guard_path==u"c\u20ac.dat"&&last_createw_path==u"c\u20ac.dat");
+    CHECK(heuro!=0xffffffffu&&last_guard_path==u"root\\c\u20ac.dat"&&last_createw_path==u"root\\c\u20ac.dat");
     CHECK(kcall("_lclose",{heuro})==0);
-    // OF_PARSE fills OFSTRUCT without opening; OF_EXIST opens and closes immediately; OF_DELETE guards and deletes; OF_REOPEN reuses OFSTRUCT.szPathName.
-    const unsigned calls_before_parse=calls;
-    CHECK(kcall("openfile",{save_a,ofs,0x0100u})==0&&calls==calls_before_parse&&mem.r8(ofs+8)=='s');
-    const unsigned closes_before_exist=close_count;
-    CHECK(kcall("openfile",{save_a,ofs,0x4000u})==0&&close_count==closes_before_exist+1);
+    // OF_PARSE stores resolved path without calling CreateW; OF_REOPEN keeps the parsed path even after cwd changes and rejects unterminated szPathName.
+    const unsigned opens_before_parse=createw_count;
+    CHECK(kcall("openfile",{save_a,ofs,0x0100u})==0&&createw_count==opens_before_parse&&mem.r8(ofs+1)==1&&mem.r8(ofs+8)=='r');
+    mock_cwd="other";
     const uint32_t hreopen=kcall("openfile",{0,ofs,0x8000u});
-    CHECK(hreopen!=0xffffffffu&&last_createw_path==u"save.dat");
+    CHECK(hreopen!=0xffffffffu&&last_createw_path==u"root\\save.dat");
     CHECK(kcall("_lclose",{hreopen})==0);
+    mock_cwd="root";
+    for(uint32_t i=0;i<128;++i)mem.w8(ofs+8+i,'x');
+    CHECK(kcall("openfile",{0,ofs,0x8000u})==0xffffffffu&&g.last_error()==87);
+    // OF_EXIST probes, closes handle immediately, and returns TRUE (1).
+    const unsigned closes_before_exist=close_count;
+    CHECK(kcall("openfile",{save_a,ofs,0x4000u})==1&&close_count==closes_before_exist+1);
     refuse=true;CHECK(kcall("openfile",{save_a,ofs,0x0200u})==0xffffffffu&&g.last_error()==5);refuse=false;
     last_deleted_w.clear();
-    CHECK(kcall("openfile",{save_a,ofs,0x0200u})==0&&last_deleted_w==u"save.dat");
+    CHECK(kcall("openfile",{save_a,ofs,0x0200u})==0&&last_deleted_w==u"root\\save.dat");
     CHECK(kcall("openfile",{save_a,ofs,0x0400u})==0xffffffffu&&g.last_error()==50);  // OF_VERIFY unsupported
     const uint32_t h2=kcall("lzopenfilea",{out_a,ofs,2});
     CHECK(h2!=0xffffffffu&&h2!=h1);
     CHECK(kcall("openfile",{0,ofs,0})==0xffffffffu&&g.last_error()==87);
-    // LZCopy: distinct LZERROR_* codes, multi-chunk streaming, write errors, and split-header SZDD rejection (-8).
+    // LZCopy: distinct LZERROR_* codes, multi-chunk streaming, write errors, and split-header SZDD/KWAJ rejection (-8).
     CHECK(kcall("lzcopy",{0x1,h2})==0xffffffffu&&g.last_error()==6);   // LZERROR_BADINHANDLE (-1)
     CHECK(kcall("lzcopy",{h1,0x1})==0xfffffffeu&&g.last_error()==6);   // LZERROR_BADOUTHANDLE (-2)
     read_chunks={{'h','e','l','l','o',' '},{'w','o','r','l','d','!'}}; read_idx=0; written_bytes.clear();
@@ -254,6 +266,8 @@ int main() {
     read_idx=0; written_bytes.clear(); write_ok=true;
     CHECK(kcall("lzcopy",{h1,h2})==12&&g.last_error()==0&&written_bytes.size()==12&&std::memcmp(written_bytes.data(),"hello world!",12)==0);
     read_chunks={{'S','Z','D','D'},{0x88,0xF0,0x27,0x33,'x'}}; read_idx=0; written_bytes.clear();
+    CHECK(kcall("lzcopy",{h1,h2})==0xfffffff8u&&g.last_error()==50&&written_bytes.empty());  // LZERROR_UNKNOWNALG (-8)
+    read_chunks={{'K','W','A','J'},{0x88,0xF0,0x27,0xD1,'y'}}; read_idx=0; written_bytes.clear();
     CHECK(kcall("lzcopy",{h1,h2})==0xfffffff8u&&g.last_error()==50&&written_bytes.empty());  // LZERROR_UNKNOWNALG (-8)
     read_chunks.clear(); write_ok=false;
     CHECK(kcall("lzclose",{h2})==0&&kcall("_lclose",{h2})==0xffffffffu&&g.last_error()==6);

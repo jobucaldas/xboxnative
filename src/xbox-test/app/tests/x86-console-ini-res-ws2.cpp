@@ -31,9 +31,12 @@ int main() {
     CHECK(call("kernel32.dll","writeconsolea",{Host::H_STDOUT,msg,2,nread,0})==1&&mem.r32(nread)==2);
     CHECK(host.out.size()>=2&&host.out.compare(host.out.size()-2,2,"hi")==0);
     // Child processes are refused (ERROR_ACCESS_DENIED) with only the executable token logged (arguments redacted).
-    uint32_t cmd=g.put_wstr(u"cmd.exe /c secret_token");
+    uint32_t cmd=g.put_wstr(u"cmd.exe /c secret_token"),cmd_unterm=g.put_wstr(u"\"unterm.exe --pw=topsecret");
     CHECK(call("kernel32.dll","createprocessw",{0,cmd,0,0,0,0,0,0,0,0})==0&&g.last_error()==5);
     CHECK(host.err.find("CreateProcessW refused")!=std::string::npos&&host.err.find("cmd.exe")!=std::string::npos&&host.err.find("secret_token")==std::string::npos);
+    host.err.clear();
+    CHECK(call("kernel32.dll","createprocessw",{0,cmd_unterm,0,0,0,0,0,0,0,0})==0&&g.last_error()==5);
+    CHECK(host.err.find("CreateProcessW refused")!=std::string::npos&&host.err.find("topsecret")==std::string::npos&&host.err.find("unterm.exe")==std::string::npos);
     CHECK(call("kernel32.dll","createprocessw",{0,0,0,0,0,0,0,0,0,0})==0&&g.last_error()==87);
     CHECK(call("kernel32.dll","getexitcodeprocess",{0xffffffffu,nread})==1&&mem.r32(nread)==259&&g.last_error()==0);
     CHECK(call("kernel32.dll","getexitcodeprocess",{0x10,nread})==0&&g.last_error()==6);

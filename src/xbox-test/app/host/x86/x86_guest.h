@@ -2976,7 +2976,7 @@ inline void Guest::register_all() {
             image = raw.substr(pos);
         } else if (pos < raw.size() && raw[pos] == u'"') {
             const size_t end = raw.find(u'"', pos + 1);
-            image = end == std::u16string::npos ? raw.substr(pos + 1) : raw.substr(pos + 1, end - pos - 1);
+            if (end != std::u16string::npos) image = raw.substr(pos + 1, end - pos - 1);
         } else {
             size_t end = pos;
             while (end < raw.size() && raw[end] != u' ' && raw[end] != u'\t') ++end;
@@ -2984,7 +2984,8 @@ inline void Guest::register_all() {
         }
         std::string exe;
         for (char16_t ch : image) exe.push_back(ch >= 0x20 && ch < 0x7f ? char(ch) : '?');
-        emit(2, "x86: CreateProcessW refused, no child processes in the sandbox: " + exe + "\n");
+        emit(2, exe.empty() ? "x86: CreateProcessW refused, no child processes in the sandbox\n"
+                            : "x86: CreateProcessW refused, no child processes in the sandbox: " + exe + "\n");
         set_last_error(5); return 0; });
     reg.add("kernel32.dll", "CreatePipe", Conv::Stdcall, 4, [this](Cpu&) -> uint32_t { set_last_error(50); return 0; });  // ERROR_NOT_SUPPORTED: no anonymous pipe route
     // The current-process pseudo handle (GetCurrentProcess) is still running; any other handle names no process here.
@@ -3400,9 +3401,12 @@ inline void Guest::register_all() {
         std::u16string out_w(units,u'\0');
         if(units)std::memcpy(out_w.data(),q.data.data(),size_t(units)*2);
         const std::string out_a=encode_ansi(out_w);
-        const uint32_t fit=uint32_t(std::min<size_t>(out_a.size(),259));
-        if(fit)mem.write_bytes(c.arg(3),out_a.data(),fit);
-        mem.w8(c.arg(3)+fit,0);
+        if(out_a.size()>=260){
+            if(c.arg(2)==0){Host::FileCall del{Host::FileCall::Kind::AttributesA};del.operation=Host::FileCall::Operation::DeleteW;del.path_w=out_w;call_file(del);}
+            set_last_error(111);return 0;  // ERROR_BUFFER_OVERFLOW
+        }
+        if(!out_a.empty())mem.write_bytes(c.arg(3),out_a.data(),uint32_t(out_a.size()));
+        mem.w8(c.arg(3)+uint32_t(out_a.size()),0);
         set_last_error(0);return uint32_t(q.value); });
     reg.add("kernel32.dll", "GetDiskFreeSpaceW", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
         if(!c.arg(0)){set_last_error(87);return 0;}
@@ -3572,7 +3576,7 @@ inline void Guest::register_all() {
         auto it=file_handles.find(c.arg(0));if(it!=file_handles.end()){Host::FileCall q{Host::FileCall::Kind::Close};q.handle=it->second;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}file_handles.erase(it);return 1;}
         auto find=find_handles.find(c.arg(0));if(find!=find_handles.end()){Host::FileCall q{Host::FileCall::Kind::FindClose};q.handle=find->second;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}find_handles.erase(find);return 1;}
         close_sync(c.arg(0));return 1; });
-    // Legacy OpenFile/LZOpenFileA decode the ANSI path once via CP_ACP so both the file guard and the host call see the exact same wide path.
+    // Legacy OpenFile/LZOpenFileA resolve relative paths against cwd for OFSTRUCT/OF_REOPEN and decode once via CP_ACP so guard and host see the exact same wide path.
     auto open_legacy=[this,guard_file,decode_ansi](const char* op,uint32_t namep,uint32_t ofp,uint32_t style)->uint32_t{
         const bool reopen=(style&0x8000u)!=0;
         if(!ofp||(!reopen&&!namep)){set_last_error(87);return 0xffffffffu;}
@@ -3581,13 +3585,34 @@ inline void Guest::register_all() {
         if(rw==3u||(share_bits>0x40u)){set_last_error(87);mem.w(ofp+2,87,2);return 0xffffffffu;}
         // Reject unsupported interactive/verify modes rather than silently opening.
         if(style&(0x0400u|0x0800u|0x2000u)){set_last_error(50);mem.w(ofp+2,50,2);return 0xffffffffu;}
-        const std::string path=reopen?str(ofp+8):str(namep);
-        if(path.empty()){set_last_error(87);mem.w(ofp+2,87,2);return 0xffffffffu;}
+        std::string path;
+        if(reopen){
+            const auto raw=mem.read_bytes(ofp+8,128);
+            const auto nul=std::find(raw.begin(),raw.end(),uint8_t(0));
+            if(nul==raw.end()||nul==raw.begin()){set_last_error(87);mem.w(ofp+2,87,2);return 0xffffffffu;}
+            path.assign(raw.begin(),nul);
+        }else{
+            path=str(namep);
+            if(path.empty()){set_last_error(87);mem.w(ofp+2,87,2);return 0xffffffffu;}
+            const bool rooted=(path.size()>=2&&path[1]==':')||path[0]=='\\'||path[0]=='/';
+            if(!rooted){
+                Host::FileCall cwd{Host::FileCall::Kind::GetCurrentDirectoryA};cwd.args[0]=260;
+                if(call_file(cwd)&&cwd.value>0&&!cwd.data.empty()){
+                    const size_t n=std::min<size_t>(cwd.data.size(),cwd.value);
+                    std::string base(reinterpret_cast<const char*>(cwd.data.data()),n);
+                    while(!base.empty()&&base.back()=='\0')base.pop_back();
+                    if(!base.empty()){
+                        const bool sep=base.back()=='\\'||base.back()=='/';
+                        path=base+(sep?"":"\\")+path;
+                    }
+                }
+            }
+        }
+        if(path.size()>=128){set_last_error(206);mem.w(ofp+2,206,2);return 0xffffffffu;}  // ERROR_FILENAME_EXCED_RANGE
         // OFSTRUCT: cBytes, fFixedDisk, nErrCode, Reserved1, Reserved2, szPathName[128]
-        const std::string shown=path.substr(0,127);
-        mem.w8(ofp,136);mem.w(ofp+2,0,2);
-        for(size_t i=0;i<shown.size();++i)mem.w8(ofp+8+uint32_t(i),uint8_t(shown[i]));
-        mem.w8(ofp+8+uint32_t(shown.size()),0);
+        mem.w8(ofp,136);mem.w8(ofp+1,1);mem.w(ofp+2,0,2);mem.w32(ofp+4,0);
+        mem.write_bytes(ofp+8,path.data(),uint32_t(path.size()));
+        mem.w8(ofp+8+uint32_t(path.size()),0);
         if(style&0x0100u){set_last_error(0);return 0;}  // OF_PARSE: fill OFSTRUCT only
         const std::u16string wide_path=decode_ansi(path);
         if(style&0x0200u){  // OF_DELETE
@@ -3598,15 +3623,15 @@ inline void Guest::register_all() {
         }
         const bool create=(style&0x1000u)!=0,exist=(style&0x4000u)!=0;
         const bool writes=(rw!=0)||create;
-        const uint32_t access=rw==0?0x80000000u:rw==1?0x40000000u:0xC0000000u;
+        const uint32_t access=create?0xC0000000u:(rw==0?0x80000000u:rw==1?0x40000000u:0xC0000000u);
         const uint32_t share=share_bits==0x10u?0u:share_bits==0x20u?1u:share_bits==0x30u?2u:3u;
         if(writes&&!guard_file(op,wide_path)){mem.w(ofp+2,5,2);return 0xffffffffu;}
         Host::FileCall q{Host::FileCall::Kind::CreateW};q.path_w=wide_path;
         q.args[0]=access;q.args[1]=share;q.args[2]=create?2u:3u;q.args[3]=0x80;
         if(!call_file(q)||q.value==UINT64_MAX){const uint32_t error=q.error?q.error:120;set_last_error(error);mem.w(ofp+2,error,2);return 0xffffffffu;}
-        if(exist){  // OF_EXIST: probe without leaking an open handle
+        if(exist){  // OF_EXIST: probe without leaking an open handle; return TRUE (1)
             Host::FileCall cl{Host::FileCall::Kind::Close};cl.handle=q.value;call_file(cl);
-            set_last_error(0);return 0;
+            set_last_error(0);return 1;
         }
         set_last_error(0);return add_file_handle(q.value); };
     reg.add("kernel32.dll", "OpenFile", Conv::Stdcall, 3, [open_legacy](Cpu& c) -> uint32_t { return open_legacy("OpenFile",c.arg(0),c.arg(1),c.arg(2)); });
@@ -3627,7 +3652,7 @@ inline void Guest::register_all() {
         auto dst=file_handles.find(c.arg(1));
         if(dst==file_handles.end()){set_last_error(6);return 0xfffffffeu;}  // LZERROR_BADOUTHANDLE (-2)
         static const uint8_t szdd[8]={'S','Z','D','D',0x88,0xF0,0x27,0x33};
-        static const uint8_t kwaj[8]={'K','W','A','J',0x88,0xF0,0x27,0x33};
+        static const uint8_t kwaj[8]={'K','W','A','J',0x88,0xF0,0x27,0xD1};
         bool checked=false; std::vector<uint8_t> head; uint64_t total=0;
         auto flush=[&](const std::vector<uint8_t>& buf)->bool{
             if(buf.empty())return true;
