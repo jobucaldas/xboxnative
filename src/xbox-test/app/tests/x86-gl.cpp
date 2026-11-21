@@ -127,6 +127,7 @@ static bool verify_gl_pointer_returns() {
         }
         if (q.name == "glBindBuffer" || q.name == "glBindBufferARB") {
             if (q.name == "glBindBufferARB") saw_bind_arb = true;
+            if (q.args[1] == 999u) { q.rejected = true; return; }
             host_bound[uint32_t(q.args[0])] = uint32_t(q.args[1]);
             if (q.args[0] == 0x8893u) host_vao_element[host_vao] = uint32_t(q.args[1]);
             return;
@@ -135,13 +136,22 @@ static bool verify_gl_pointer_returns() {
             host_vao = uint32_t(q.args[0]); host_bound[0x8893u] = host_vao_element[host_vao];
             return;
         }
+        if (q.name == "glVertexArrayElementBuffer") {
+            const uint32_t vao = uint32_t(q.args[0]), buf = uint32_t(q.args[1]);
+            if (!vao) { q.rejected = true; return; }
+            host_vao_element[vao] = buf;
+            if (host_vao == vao) host_bound[0x8893u] = buf;
+            return;
+        }
         if (q.name == "glDeleteVertexArrays") {
             if (host_vao == 2u) { host_vao = 0; host_bound[0x8893u] = host_vao_element[0]; }
             return;
         }
         if (q.name == "glBindBufferBase" || q.name == "glBindBufferRange" || q.name == "glBindBufferOffsetEXT") {
             ++host_range_calls;
-            if (q.args[1] >= 4u) { q.rejected = true; return; } // GL_INVALID_VALUE: index out of range
+            const bool bad_range = q.name == "glBindBufferRange" && q.args[2] && (int32_t(q.args[3]) < 0 || int32_t(q.args[4]) <= 0);
+            const bool bad_offset = q.name == "glBindBufferOffsetEXT" && q.args[2] && int32_t(q.args[3]) < 0;
+            if (q.args[1] >= 4u || bad_range || bad_offset) { q.rejected = true; return; } // GL_INVALID_VALUE
             host_bound[uint32_t(q.args[0])] = uint32_t(q.args[2]);
             return;
         }
@@ -192,11 +202,12 @@ static bool verify_gl_pointer_returns() {
     auto unmap_arb = route("glUnmapBufferARB");
     auto bind_vao = route("glBindVertexArray");
     auto del_vao = route("glDeleteVertexArrays");
+    auto vao_elem = route("glVertexArrayElementBuffer");
     auto bind_base = route("glBindBufferBase");
     auto bind_range = route("glBindBufferRange");
     auto bind_offset = route("glBindBufferOffsetEXT");
     if (!get_string || !get_stringi || !bind_buf || !bind_arb || !del_arb || !map_core || !map_arb || !map_range || !unmap_core || !unmap_arb ||
-        !bind_vao || !del_vao || !bind_base || !bind_range || !bind_offset) return false;
+        !bind_vao || !del_vao || !vao_elem || !bind_base || !bind_range || !bind_offset) return false;
 
     // glGetString returns valid read-only guest string, cached across repeated calls without leaking.
     args({0x1F02u}); uint32_t ver_addr = get_string->fn(cpu);
@@ -235,11 +246,11 @@ static bool verify_gl_pointer_returns() {
 
     // Reject mapping with no buffer bound (buffer 0) and invalid access enums without calling host.
     args({0x8892u, 0x88BAu});
-    if (map_arb->fn(cpu) != 0 || !host.gl_maps.empty()) return false;
+    if (map_arb->fn(cpu) != 0 || !host.gl_ctx().maps.empty()) return false;
     args({0x8892u, 10u}); bind_buf->fn(cpu);
     for (uint32_t bad_access : {0u, 0x1234u, 0x88B7u, 0x88BBu}) {
         args({0x8892u, bad_access});
-        if (map_arb->fn(cpu) != 0 || map_core->fn(cpu) != 0 || !host.gl_maps.empty()) return false;
+        if (map_arb->fn(cpu) != 0 || map_core->fn(cpu) != 0 || !host.gl_ctx().maps.empty()) return false;
     }
     args({0x8892u, 0u, 4u, 0u}); if (map_range->fn(cpu) != 0) return false;
     args({0x8892u, 0u, 4u, 0x0042u}); if (map_range->fn(cpu) != 0) return false;
@@ -248,11 +259,11 @@ static bool verify_gl_pointer_returns() {
     for (uint32_t bad_flags : {0x0001u | 0x0004u, 0x0001u | 0x0008u, 0x0001u | 0x0020u, 0x0001u | 0x0010u, 0x0001u | 0x0002u | 0x0004u}) {
         args({0x8892u, 0u, 4u, bad_flags}); if (map_range->fn(cpu) != 0) return false;
     }
-    if (rejected_map_called_host || !host.gl_maps.empty()) return false;
+    if (rejected_map_called_host || !host.gl_ctx().maps.empty()) return false;
     // WRITE with FLUSH_EXPLICIT is a valid combination.
     args({0x8892u, 0u, 4u, 0x0002u | 0x0010u}); uint32_t addr_flush = map_range->fn(cpu);
     if (!addr_flush) return false;
-    args({0x8892u}); if (unmap_arb->fn(cpu) != 1u || !host.gl_maps.empty()) return false;
+    args({0x8892u}); if (unmap_arb->fn(cpu) != 1u || !host.gl_ctx().maps.empty()) return false;
 
     // Cross-target buffer identity: map A (10) on ARRAY_BUFFER, map B (20) on ELEMENT_ARRAY_BUFFER,
     // then bind B (20) to ARRAY_BUFFER via glBindBufferARB and unmap -> must upload B's bytes into B.
@@ -273,7 +284,7 @@ static bool verify_gl_pointer_returns() {
     // Unmap A via ELEMENT_ARRAY_BUFFER -> uploads A's bytes into A.
     args({0x8893u, 10u}); bind_buf->fn(cpu);
     args({0x8893u});
-    if (unmap_core->fn(cpu) != 1u || mem.mapped(addr_a) || !host.gl_maps.empty()) return false;
+    if (unmap_core->fn(cpu) != 1u || mem.mapped(addr_a) || !host.gl_ctx().maps.empty()) return false;
     if (host_buffers[10u] != std::vector<uint8_t>({0x55, 0x22, 0x33, 0x99})) return false;
     if (!saw_bind_arb) return false;
 
@@ -285,7 +296,7 @@ static bool verify_gl_pointer_returns() {
     mem.w8(addr_ro, 0xFF);
     host_bound[0x8892u] = 20u; // simulate host/guest binding desync
     args({0x8892u});
-    if (unmap_arb->fn(cpu) != 0u || !binding_mismatch || !mem.mapped(addr_ro) || host.gl_maps.count(10u) != 1) return false;
+    if (unmap_arb->fn(cpu) != 0u || !binding_mismatch || !mem.mapped(addr_ro) || host.gl_ctx().maps.count(10u) != 1) return false;
     binding_mismatch = false;
     host_bound[0x8892u] = 10u; // restore matching host binding -> read-only unmap now succeeds cleanly
     args({0x8892u});
@@ -293,7 +304,7 @@ static bool verify_gl_pointer_returns() {
     if (host_buffers[10u] != std::vector<uint8_t>({0x55, 0x22, 0x33, 0x99})) return false;
 
     // Verify all OpenGL 4.6 buffer binding query pnames, including GL_TEXTURE_BUFFER (0x8C2A -> 0x8C2A, not 0x8C2D)
-    // and GL_PARAMETER_BUFFER (0x80EE -> 0x80EF), plus fail-closed behavior on unknown targets.
+    // and GL_PARAMETER_BUFFER (0x80EE -> 0x80EF), plus fail-closed behavior on unknown targets and GlErrorQueue FIFO.
     if (x86::gl_buffer_binding_pname(0x8C2Au) != 0x8C2Au || x86::gl_buffer_binding_pname(0x80EEu) != 0x80EFu ||
         x86::gl_buffer_binding_pname(0xDEADu) != 0u) return false;
     if (!x86::gl_is_indexed_buffer_target(0x8A11u) || !x86::gl_is_indexed_buffer_target(0x8C8Eu) ||
@@ -310,6 +321,17 @@ static bool verify_gl_pointer_returns() {
     if (x86::gl_verify_host_binding(fake_get_int, x86::gl_buffer_binding_pname(0xDEADu), 1u)) return false;
     if (!x86::gl_verify_host_binding(fake_get_int, 0x85B5u, 0u)) return false; // VAO 0 matches
     if (x86::gl_verify_host_binding([](uint32_t, int*) {}, 0x85B5u, 0u)) return false; // unwritten out-param fails closed
+    {
+        x86::GlErrorQueue eq;
+        std::vector<uint32_t> drv = {0x0501u, 0x0502u};
+        auto pop_drv = [&]() -> uint32_t { if (drv.empty()) return 0u; uint32_t e = drv.front(); drv.erase(drv.begin()); return e; };
+        eq.stash(1u, pop_drv);
+        if (!drv.empty()) return false;
+        if (eq.pop(2u, pop_drv) != 0u) return false; // other context does not see ctx 1's stashed errors
+        if (eq.pop(1u, pop_drv) != 0x0501u || eq.pop(1u, pop_drv) != 0x0502u || eq.pop(1u, pop_drv) != 0u) return false;
+        drv = {0x0500u}; eq.stash(1u, pop_drv); eq.erase(1u);
+        if (eq.pop(1u, pop_drv) != 0u) return false;
+    }
 
     // Copy-back upload error on unmap returns GL_FALSE (0) and still cleans up guest scratch map.
     args({0x8892u, 30u}); bind_arb->fn(cpu);
@@ -317,7 +339,7 @@ static bool verify_gl_pointer_returns() {
     if (!addr_err || mem.r8(addr_err) != 0xE1) return false;
     mem.w8(addr_err, 0xF1);
     args({0x8892u});
-    if (unmap_arb->fn(cpu) != 0u || mem.mapped(addr_err) || !host.gl_maps.empty()) return false;
+    if (unmap_arb->fn(cpu) != 0u || mem.mapped(addr_err) || !host.gl_ctx().maps.empty()) return false;
 
     // glDeleteBuffersARB unbinds and cleans up any active mapping for deleted buffer IDs.
     args({0x8892u, 40u}); bind_arb->fn(cpu);
@@ -325,7 +347,12 @@ static bool verify_gl_pointer_returns() {
     if (!addr_del || !mem.mapped(addr_del)) return false;
     mem.w32(0x6100, 40u);
     args({1u, 0x6100u}); del_arb->fn(cpu);
-    if (mem.mapped(addr_del) || !host.gl_maps.empty() || host.gl_bound_buffers.count(0x8892u)) return false;
+    if (mem.mapped(addr_del) || !host.gl_ctx().maps.empty() || host.gl_ctx().bound_buffers.count(0x8892u)) return false;
+
+    // Rejected glBindBuffer leaves the prior shadow binding intact.
+    args({0x8892u, 10u}); bind_buf->fn(cpu);
+    args({0x8892u, 999u}); bind_buf->fn(cpu);
+    if (host.gl_ctx().bound_buffers[0x8892u] != 10u) return false;
 
     // GL_ELEMENT_ARRAY_BUFFER is VAO-local: vao1 -> 50, vao2 -> 60; each unmap must upload its own VAO's buffer.
     args({0x8893u, 0u}); bind_buf->fn(cpu);
@@ -343,25 +370,34 @@ static bool verify_gl_pointer_returns() {
     if (host_buffers[60u][0] != 0xC2 || host_buffers[50u][0] != 0x51) return false;
     args({1u}); bind_vao->fn(cpu);
     args({0x8893u}); if (unmap_arb->fn(cpu) != 1u) return false;
-    if (host_buffers[50u][0] != 0xC1 || host_buffers[60u][0] != 0xC2 || !host.gl_maps.empty()) return false;
+    if (host_buffers[50u][0] != 0xC1 || host_buffers[60u][0] != 0xC2 || !host.gl_ctx().maps.empty()) return false;
     // Deleting the active VAO resets the active VAO and drops its element binding.
     args({2u}); bind_vao->fn(cpu);
     mem.w32(0x6100, 2u); args({1u, 0x6100u}); del_vao->fn(cpu);
-    if (host.gl_bound_vao != 0 || host.gl_vao_element_buffers.count(2u) || host.gl_vao_element_buffers.count(1u) != 1) return false;
+    if (host.gl_ctx().bound_vao != 0 || host.gl_ctx().vao_element_buffers.count(2u) || host.gl_ctx().vao_element_buffers.count(1u) != 1) return false;
     args({0x8893u, 0x88BAu}); if (map_arb->fn(cpu) != 0) return false;
-    args({1u}); bind_vao->fn(cpu); args({0u}); bind_vao->fn(cpu);
+    // DSA glVertexArrayElementBuffer updates both inactive and active VAOs.
+    args({1u, 60u}); vao_elem->fn(cpu);
+    args({1u}); bind_vao->fn(cpu);
+    args({0x8893u, 0x88B8u}); uint32_t addr_dsa = map_arb->fn(cpu);
+    if (!addr_dsa || mem.r8(addr_dsa) != 0xC2) return false;
+    args({0x8893u}); if (unmap_arb->fn(cpu) != 1u) return false;
+    args({1u, 50u}); vao_elem->fn(cpu);
+    args({0x8893u, 0x88B8u}); addr_dsa = map_arb->fn(cpu);
+    if (!addr_dsa || mem.r8(addr_dsa) != 0xC1) return false;
+    args({0x8893u}); if (unmap_arb->fn(cpu) != 1u) return false;
+    args({0u}); bind_vao->fn(cpu);
 
-    // Rejected or invalid indexed binds must leave the previous binding intact so unmap still targets it.
+    // Rejected or invalid indexed binds are forwarded to host (raising GL_INVALID_VALUE) and leave shadow intact.
     args({0x8A11u, 70u}); bind_buf->fn(cpu);
     host_range_calls = 0;
     args({0x8A11u, 99u, 80u, 0u, 4u}); bind_range->fn(cpu);       // host rejects: index out of range
     args({0x8A11u, 99u, 80u}); bind_base->fn(cpu);                // host rejects: index out of range
     args({0x8A11u, 99u, 80u, 0u}); bind_offset->fn(cpu);          // host rejects: index out of range
-    if (host_range_calls != 3) return false;
-    args({0x8A11u, 0u, 80u, 0u, 0u}); bind_range->fn(cpu);        // size <= 0: not forwarded
-    args({0x8A11u, 0u, 80u, 0xFFFFFFFCu, 4u}); bind_range->fn(cpu); // offset < 0: not forwarded
-    args({0x8A11u, 0u, 80u, 0xFFFFFFFCu}); bind_offset->fn(cpu);  // offset < 0: not forwarded
-    if (host_range_calls != 3) return false;
+    args({0x8A11u, 0u, 80u, 0u, 0u}); bind_range->fn(cpu);        // host rejects: size <= 0
+    args({0x8A11u, 0u, 80u, 0xFFFFFFFCu, 4u}); bind_range->fn(cpu); // host rejects: offset < 0
+    args({0x8A11u, 0u, 80u, 0xFFFFFFFCu}); bind_offset->fn(cpu);  // host rejects: offset < 0
+    if (host_range_calls != 6) return false;
     args({0x8A11u, 0x88BAu}); uint32_t addr_r = map_arb->fn(cpu);
     if (!addr_r || mem.r8(addr_r) != 0x71) return false;
     mem.w8(addr_r, 0xD1);
@@ -371,7 +407,7 @@ static bool verify_gl_pointer_returns() {
     args({0x8A11u, 0u, 80u, 0u, 4u}); bind_range->fn(cpu);
     args({0x8A11u, 0x88BAu}); addr_r = map_arb->fn(cpu);
     if (!addr_r || mem.r8(addr_r) != 0x81) return false;
-    args({0x8A11u}); if (unmap_arb->fn(cpu) != 1u || binding_mismatch || host.gl_bound_buffers[0x8A11u] != 80u) return false;
+    args({0x8A11u}); if (unmap_arb->fn(cpu) != 1u || binding_mismatch || host.gl_ctx().bound_buffers[0x8A11u] != 80u) return false;
 
     // Unbridged pointer-returning GL calls and void** output-pointer calls must fail closed
     // without calling host.gl_call or returning a truncated host pointer.
@@ -425,22 +461,37 @@ int main(int argc, char** argv) {
     const uintptr_t host_window = uintptr_t(0x34567890u);
     const uintptr_t host_dc = uintptr_t(0x1234567887654321ull);
     const uintptr_t host_context = uintptr_t(0x23456789abcdef01ull);
+    const uintptr_t host_context2 = uintptr_t(0x23456789abcdef02ull);
+    int contexts_created = 0;
     bool got_class = false, got_window = false, got_class_a = false, got_window_a = false, got_dc = false, got_context = false, destroyed_window = false;
     bool cleared = false, vertex_enabled = false, drew = false, drew_elements = false, buffer_drew = false, read_pixel = false;
     bool texture_uploaded = false, shader_created = false, shader_source_set = false, shader_compiled = false, buffer_uploaded = false, texture_generated = false;
     bool saw_float = false, saw_scalar = false, saw_pointer = false, saw_double = false, saw_int64 = false, saw_output_pointer = false, map_unmapped = false, map_arb_cross_a = false, map_arb_cross_b = false, map_arb_upload_err = false, saw_bind_buffer_arb = false;
     bool saw_get_string = false, saw_get_stringi = false, blocked_escaped = false;
-    bool saw_vao_switch = false, saw_indexed_reject = false, saw_tbo_map = false, saw_pbo_map = false;
-    std::map<uint32_t, uint32_t> bound_buffers;
-    std::map<uint32_t, uint32_t> vao_element_buffers;
-    uint32_t current_vao = 0;
-    uint32_t host_gl_error = 0;
+    bool saw_vao_switch = false, saw_dsa_vao = false, saw_indexed_reject = false, saw_rejected_bind_buf = false, saw_preserved_err_after_unmap = false, saw_ctx2_isolation = false, saw_tbo_map = false, saw_pbo_map = false;
+    struct ShimCtx {
+        std::map<uint32_t, uint32_t> bound_buffers;
+        std::map<uint32_t, uint32_t> vao_element_buffers;
+        uint32_t current_vao = 0;
+        uint32_t host_gl_error = 0;
+    };
+    std::map<uintptr_t, ShimCtx> shim_ctxs;
+    uintptr_t active_host_ctx = 0;
+    x86::GlErrorQueue shim_errors;
+    std::vector<uint8_t> buf70_bytes = {0x71, 0x72, 0x73, 0x74};
+    auto active_ctx = [&]() -> ShimCtx& { return shim_ctxs[active_host_ctx]; };
     auto shim_get_int = [&](uint32_t pname, int* out) {
-        if (pname == 0x85B5u) { *out = int(current_vao); return; }
-        for (const auto& kv : bound_buffers) {
+        auto& s = active_ctx();
+        if (pname == 0x85B5u) { *out = int(s.current_vao); return; }
+        for (const auto& kv : s.bound_buffers) {
             if (x86::gl_buffer_binding_pname(kv.first) == pname) { *out = int(kv.second); return; }
         }
         *out = 0;
+    };
+    auto host_get_err = [&]() -> uint32_t {
+        uint32_t e = active_ctx().host_gl_error;
+        active_ctx().host_gl_error = 0;
+        return e;
     };
     for (const auto& item : x86::kGlExports) if (std::strcmp(item.name, "glVertexPointer") == 0)
         saw_pointer = x86::kGlArgs[item.first_arg + item.arg_count - 1].kind == x86::GlArgKind::Pointer;
@@ -479,33 +530,66 @@ int main(int argc, char** argv) {
         }
         if (q.name == "ChoosePixelFormat") { if (q.args.size() != 1 || q.args[0] != host_dc || q.input.size() != 40) return; q.result = 1; return; }
         if (q.name == "SetPixelFormat") { if (q.args.size() != 2 || q.args[0] != host_dc || q.args[1] != 1 || q.input.size() != 40) return; q.result = 1; return; }
-        if (q.name == "wglCreateContext") { if (q.args.size() == 1 && q.args[0] == host_dc) q.result = host_context; return; }
+        if (q.name == "wglCreateContext") {
+            if (q.args.size() == 1 && q.args[0] == host_dc) {
+                q.result = (++contexts_created == 1) ? host_context : host_context2;
+            }
+            return;
+        }
         if (q.name == "wglMakeCurrent") {
-            if (q.args.size() == 2 && q.args[0] == host_dc && q.args[1] == host_context) { got_context = true; q.result = 1; }
-            else q.result = q.args.size() == 2 && q.args[0] == 0 && q.args[1] == 0;
+            if (q.args.size() == 2 && q.args[0] == host_dc && (q.args[1] == host_context || q.args[1] == host_context2)) {
+                active_host_ctx = q.args[1]; got_context = true; q.result = 1;
+            } else if (q.args.size() == 2 && q.args[0] == 0 && q.args[1] == 0) {
+                active_host_ctx = 0; q.result = 1;
+            } else {
+                q.result = 0;
+            }
             return;
         }
         if (q.name == "glBindBuffer" || q.name == "glBindBufferARB") {
             if (q.name == "glBindBufferARB") saw_bind_buffer_arb = true;
             if (q.args.size() == 2) {
-                bound_buffers[uint32_t(q.args[0])] = uint32_t(q.args[1]);
-                if (q.args[0] == 0x8893u) vao_element_buffers[current_vao] = uint32_t(q.args[1]);
+                const uint32_t target = uint32_t(q.args[0]), buffer = uint32_t(q.args[1]);
+                auto& s = active_ctx();
+                if (buffer == 999u) {
+                    if (!s.host_gl_error) s.host_gl_error = 0x0502u; // GL_INVALID_OPERATION
+                    saw_rejected_bind_buf = true;
+                } else {
+                    s.bound_buffers[target] = buffer;
+                    if (target == 0x8893u) s.vao_element_buffers[s.current_vao] = buffer;
+                }
+                if (!x86::gl_verify_host_binding(shim_get_int, x86::gl_buffer_binding_pname(target), buffer)) {
+                    q.rejected = true; q.result = 0;
+                }
             }
             return;
         }
         if (q.name == "glBindVertexArray") {
             const uint32_t vao = uint32_t(q.args[0]);
-            current_vao = vao;
-            bound_buffers[0x8893u] = vao_element_buffers[vao];
+            auto& s = active_ctx();
+            s.current_vao = vao;
+            s.bound_buffers[0x8893u] = s.vao_element_buffers[vao];
             if (!x86::gl_verify_host_binding(shim_get_int, 0x85B5u, vao)) { q.rejected = true; q.result = 0; }
             if (vao == 1u) saw_vao_switch = true;
+            return;
+        }
+        if (q.name == "glVertexArrayElementBuffer") {
+            const uint32_t vao = uint32_t(q.args[0]), buffer = uint32_t(q.args[1]);
+            auto& s = active_ctx();
+            s.vao_element_buffers[vao] = buffer;
+            if (s.current_vao == vao) s.bound_buffers[0x8893u] = buffer;
+            if (!vao || !x86::gl_verify_host_binding([&](uint32_t pn, int* out) {
+                *out = pn == 0x8895u ? int(s.vao_element_buffers[vao]) : 0;
+            }, 0x8895u, buffer)) { q.rejected = true; q.result = 0; }
+            saw_dsa_vao = true;
             return;
         }
         if (q.name == "glDeleteVertexArrays") {
             if (!q.pointers.empty() && q.pointers[0].bytes.size() >= 4) {
                 uint32_t id = 0; std::memcpy(&id, q.pointers[0].bytes.data(), 4);
-                vao_element_buffers.erase(id);
-                if (current_vao == id) { current_vao = 0; bound_buffers[0x8893u] = vao_element_buffers[0]; }
+                auto& s = active_ctx();
+                s.vao_element_buffers.erase(id);
+                if (s.current_vao == id) { s.current_vao = 0; s.bound_buffers[0x8893u] = s.vao_element_buffers[0]; }
             }
             return;
         }
@@ -513,17 +597,20 @@ int main(int argc, char** argv) {
             const uint32_t target = uint32_t(q.args[0]);
             const uint32_t index = uint32_t(q.args[1]);
             const uint32_t buffer = uint32_t(q.args[2]);
-            if (index >= 4u) {
-                if (!host_gl_error) host_gl_error = 0x0501u; // GL_INVALID_VALUE (preserved, not drained!)
+            auto& s = active_ctx();
+            const bool bad_range = q.name == "glBindBufferRange" && q.args.size() >= 5 && buffer != 0u &&
+                (int32_t(q.args[3]) < 0 || int32_t(q.args[4]) <= 0);
+            if (index >= 4u || bad_range) {
+                if (!s.host_gl_error) s.host_gl_error = 0x0501u; // GL_INVALID_VALUE (preserved, not drained!)
                 saw_indexed_reject = true;
             } else {
-                bound_buffers[target] = buffer;
+                s.bound_buffers[target] = buffer;
             }
             const uint32_t pname = x86::gl_is_indexed_buffer_target(target) ? x86::gl_buffer_binding_pname(target) : 0u;
             if (!x86::gl_verify_host_binding(shim_get_int, pname, buffer)) { q.rejected = true; q.result = 0; }
             return;
         }
-        if (q.name == "glGetError") { q.result = host_gl_error; host_gl_error = 0; return; }
+        if (q.name == "glGetError") { q.result = shim_errors.pop(active_host_ctx, host_get_err); return; }
         if (q.name == "glClearColor") {
             saw_float = q.arg_kinds.size() == 4 && std::all_of(q.arg_kinds.begin(), q.arg_kinds.end(), [](x86::GlArgKind kind) { return kind == x86::GlArgKind::Float; });
             cleared = q.args.size() == 4 && q.args[0] == 0 && q.args[1] == 0 && q.args[2] == 0 && q.args[3] == 0x3f800000u;
@@ -548,7 +635,8 @@ int main(int argc, char** argv) {
             else if (buf == 20u && q.args[1] == 0x88BAu) q.output = {0xA1, 0xA2, 0xA3, 0xA4};
             else if (buf == 30u && q.args[1] == 0x88B9u) q.output = {0xE1, 0xE2, 0xE3, 0xE4};
             else if (buf == 40u && q.args[1] == 0x88B8u) q.output = {0x41, 0x42, 0x43, 0x44};
-            else if (buf == 70u && q.args[1] == 0x88B8u) { q.output = {0x71, 0x72, 0x73, 0x74}; if (target == 0x8C2Au) saw_tbo_map = true; }
+            else if (buf == 50u && q.args[1] == 0x88B8u) q.output = {0x51, 0x52, 0x53, 0x54};
+            else if (buf == 70u && (q.args[1] == 0x88B8u || q.args[1] == 0x88BAu)) { q.output = buf70_bytes; if (target == 0x8C2Au) saw_tbo_map = true; }
             else if (buf == 80u && q.args[1] == 0x88B8u) { q.output = {0x81, 0x82, 0x83, 0x84}; if (target == 0x80EEu) saw_pbo_map = true; }
             return;
         }
@@ -557,9 +645,12 @@ int main(int argc, char** argv) {
             if (q.args.size() != 2 || !x86::gl_verify_host_binding(shim_get_int, x86::gl_buffer_binding_pname(target), q.buffer)) { q.rejected = true; q.result = 0; return; }
             const uint32_t buf = q.buffer;
             if (q.input.empty()) { q.result = 1; return; }
+            shim_errors.stash(active_host_ctx, host_get_err);
             if (buf == 10u && q.input == std::vector<uint8_t>({0x7f, 2, 3, 4})) { map_unmapped = true; q.result = 1; return; }
             if (buf == 20u && target == 0x8892u && q.input == std::vector<uint8_t>({0xB1, 0xA2, 0xA3, 0xB4})) { map_arb_cross_b = true; q.result = 1; return; }
             if (buf == 10u && target == 0x8892u && q.input == std::vector<uint8_t>({0x55, 0x22, 0x33, 0x99})) { map_arb_cross_a = true; q.result = 1; return; }
+            if (buf == 10u && active_host_ctx == host_context && target == 0x8892u && q.input == std::vector<uint8_t>({0xCC, 0x22, 0x33, 0x44})) { saw_ctx2_isolation = true; q.result = 1; return; }
+            if (buf == 70u && target == 0x8A11u && q.input == std::vector<uint8_t>({0x79, 0x72, 0x73, 0x74})) { buf70_bytes = q.input; saw_preserved_err_after_unmap = true; q.result = 1; return; }
             if (buf == 30u && q.input == std::vector<uint8_t>({0xF1, 0xE2, 0xE3, 0xE4})) { map_arb_upload_err = true; q.result = 0; return; }
             q.result = 0; return;
         }
@@ -580,7 +671,17 @@ int main(int argc, char** argv) {
             return;
         }
         if (q.name == "SwapBuffers") { q.result = q.args.size() == 1 && q.args[0] == host_dc; return; }
-        if (q.name == "wglDeleteContext") { q.result = q.args.size() == 1 && q.args[0] == host_context; return; }
+        if (q.name == "wglDeleteContext") {
+            if (q.args.size() == 1 && (q.args[0] == host_context || q.args[0] == host_context2)) {
+                shim_ctxs.erase(q.args[0]);
+                shim_errors.erase(q.args[0]);
+                if (active_host_ctx == q.args[0]) active_host_ctx = 0;
+                q.result = 1;
+            } else {
+                q.result = 0;
+            }
+            return;
+        }
     };
     std::string tee_log;
     auto result = x86::run_image(file, "x86-gl.exe", "x86-gl.exe", [&](const std::string& line) { tee_log += line; }, nullptr, 20'000'000, nullptr, false,
@@ -591,10 +692,10 @@ int main(int argc, char** argv) {
         tee_log.find("x86 GL gap: glMapNamedBuffer") != std::string::npos &&
         tee_log.find("x86 GL gap: glGetPointerv") != std::string::npos;
     if (!result.loaded || !result.finished || result.exit_code != 0 || !got_class || !got_window || !got_class_a || !got_window_a || !got_dc || !got_context || !drew || !drew_elements || !buffer_drew || !read_pixel || !destroyed_window || !texture_uploaded || !shader_created || !shader_source_set || !shader_compiled || !buffer_uploaded || !texture_generated ||
-        !saw_float || !saw_scalar || !saw_pointer || !saw_double || !saw_int64 || !saw_output_pointer || !map_unmapped || !map_arb_cross_a || !map_arb_cross_b || !map_arb_upload_err || !saw_bind_buffer_arb || !saw_get_string || !saw_get_stringi || !saw_vao_switch || !saw_indexed_reject || !saw_tbo_map || !saw_pbo_map || blocked_escaped || !gaps_logged ||
+        !saw_float || !saw_scalar || !saw_pointer || !saw_double || !saw_int64 || !saw_output_pointer || !map_unmapped || !map_arb_cross_a || !map_arb_cross_b || !map_arb_upload_err || !saw_bind_buffer_arb || !saw_get_string || !saw_get_stringi || !saw_vao_switch || !saw_dsa_vao || !saw_indexed_reject || !saw_rejected_bind_buf || !saw_preserved_err_after_unmap || !saw_ctx2_isolation || !saw_tbo_map || !saw_pbo_map || blocked_escaped || !gaps_logged ||
         !adapter_float_ok || !adapter_double_ok || !adapter_int64_ok || !adapter_pointer_ok || !adapter_output_ok || !adapter_return_ok || !adapter_ptr_return_ok) {
-        std::fprintf(stderr, "X86-GL FAIL loaded=%d finished=%d exit=%u fault=%s class=%d window=%d dc=%d context=%d draw=%d read=%d destroy=%d tex=%d shader=%d/%d/%d buffer=%d output=%d strings=%d/%d map_arb=%d/%d/%d bind_arb=%d vao=%d idx_rej=%d tbo=%d pbo=%d gaps=%d escaped=%d adapters=%d/%d/%d/%d\n",
-            result.loaded, result.finished, result.exit_code, result.fault.c_str(), got_class, got_window, got_dc, got_context, drew, read_pixel, destroyed_window, texture_uploaded, shader_created, shader_source_set, shader_compiled, buffer_uploaded, saw_output_pointer, saw_get_string, saw_get_stringi, map_arb_cross_a, map_arb_cross_b, map_arb_upload_err, saw_bind_buffer_arb, saw_vao_switch, saw_indexed_reject, saw_tbo_map, saw_pbo_map, gaps_logged, blocked_escaped, adapter_float_ok, adapter_double_ok, adapter_int64_ok, adapter_ptr_return_ok);
+        std::fprintf(stderr, "X86-GL FAIL loaded=%d finished=%d exit=%u fault=%s class=%d window=%d dc=%d context=%d draw=%d read=%d destroy=%d tex=%d shader=%d/%d/%d buffer=%d output=%d strings=%d/%d map_arb=%d/%d/%d bind_arb=%d vao=%d dsa=%d idx_rej=%d bind_rej=%d err_keep=%d ctx2=%d tbo=%d pbo=%d gaps=%d escaped=%d adapters=%d/%d/%d/%d\n",
+            result.loaded, result.finished, result.exit_code, result.fault.c_str(), got_class, got_window, got_dc, got_context, drew, read_pixel, destroyed_window, texture_uploaded, shader_created, shader_source_set, shader_compiled, buffer_uploaded, saw_output_pointer, saw_get_string, saw_get_stringi, map_arb_cross_a, map_arb_cross_b, map_arb_upload_err, saw_bind_buffer_arb, saw_vao_switch, saw_dsa_vao, saw_indexed_reject, saw_rejected_bind_buf, saw_preserved_err_after_unmap, saw_ctx2_isolation, saw_tbo_map, saw_pbo_map, gaps_logged, blocked_escaped, adapter_float_ok, adapter_double_ok, adapter_int64_ok, adapter_ptr_return_ok);
         return 1;
     }
     std::puts("X86-GL PASS: PE32 WGL context, guest-memory triangle array, pointer-return marshalling, and readback pixel");

@@ -1471,7 +1471,8 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
             if(p) SetLastError(ERROR_SUCCESS); // a failed GetProcAddress before the wgl fallback must not leak into the guest
             return p;
         };
-        host.gl_call=[proc](x86::Host::GlCall& q) {
+        auto gl_errors=std::make_shared<x86::GlErrorQueue>();
+        host.gl_call=[proc,gl_errors](x86::Host::GlCall& q) {
             SetLastError(ERROR_SUCCESS);
             struct ErrorCapture { x86::Host::GlCall& call; ~ErrorCapture() { call.last_error=GetLastError(); } } capture{q};
             auto missing=[&](){SetLastError(ERROR_PROC_NOT_FOUND);q.result=0;q.gap=true;};
@@ -1486,7 +1487,11 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
                 else {using Fn=BOOL(WINAPI*)(HDC);q.result=reinterpret_cast<Fn>(p)(reinterpret_cast<HDC>(q.args[0]));}return;
             }
             if(q.name=="wglCreateContext"){using Fn=HGLRC(WINAPI*)(HDC);auto p=pointer(q.name.c_str());q.result=p?reinterpret_cast<uintptr_t>(reinterpret_cast<Fn>(p)(reinterpret_cast<HDC>(q.args[0]))):0;return;}
-            if(q.name=="wglDeleteContext"){using Fn=BOOL(WINAPI*)(HGLRC);auto p=pointer(q.name.c_str());q.result=p&&reinterpret_cast<Fn>(p)(reinterpret_cast<HGLRC>(q.args[0]));return;}
+            auto cur_ctx=[&]()->uintptr_t{
+                using Fn=HGLRC(WINAPI*)();auto p=pointer("wglGetCurrentContext");
+                return p?reinterpret_cast<uintptr_t>(reinterpret_cast<Fn>(p)()):0;
+            };
+            if(q.name=="wglDeleteContext"){using Fn=BOOL(WINAPI*)(HGLRC);auto p=pointer(q.name.c_str());q.result=p&&reinterpret_cast<Fn>(p)(reinterpret_cast<HGLRC>(q.args[0]));if(q.result)gl_errors->erase(uintptr_t(q.args[0]));return;}
             if(q.name=="wglMakeCurrent"){using Fn=BOOL(WINAPI*)(HDC,HGLRC);auto p=pointer(q.name.c_str());q.result=p&&reinterpret_cast<Fn>(p)(reinterpret_cast<HDC>(q.args[0]),reinterpret_cast<HGLRC>(q.args[1]));return;}
             if(q.name=="wglGetCurrentContext"){using Fn=HGLRC(WINAPI*)();auto p=pointer(q.name.c_str());q.result=p?reinterpret_cast<uintptr_t>(reinterpret_cast<Fn>(p)()):0;return;}
             if(q.name=="wglGetCurrentDC"){using Fn=HDC(WINAPI*)();auto p=pointer(q.name.c_str());q.result=p?reinterpret_cast<uintptr_t>(reinterpret_cast<Fn>(p)()):0;return;}
@@ -1494,7 +1499,17 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
             if(q.name=="glClear"){using Fn=void(APIENTRY*)(unsigned);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(unsigned(q.args[0]));else missing();return;}
             if(q.name=="glViewport"){using Fn=void(APIENTRY*)(int,int,int,int);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(int(q.args[0]),int(q.args[1]),int(q.args[2]),int(q.args[3]));else missing();return;}
             if(q.name=="glEnableClientState"){using Fn=void(APIENTRY*)(unsigned);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(unsigned(q.args[0]));else missing();return;}
-            if(q.name=="glBindBuffer"||q.name=="glBindBufferARB"){using Fn=void(APIENTRY*)(unsigned,unsigned);auto p=pointer(q.name.c_str());if(!p)p=pointer(q.name=="glBindBufferARB"?"glBindBuffer":"glBindBufferARB");if(p)reinterpret_cast<Fn>(p)(unsigned(q.args[0]),unsigned(q.args[1]));else missing();return;}
+            if(q.name=="glBindBuffer"||q.name=="glBindBufferARB"){
+                using Fn=void(APIENTRY*)(unsigned,unsigned);
+                auto p=pointer(q.name.c_str());if(!p)p=pointer(q.name=="glBindBufferARB"?"glBindBuffer":"glBindBufferARB");
+                auto gi=pointer("glGetIntegerv");
+                if(!p||!gi||q.args.size()<2){missing();return;}
+                const unsigned target=unsigned(q.args[0]),expected=unsigned(q.args[1]);
+                reinterpret_cast<Fn>(p)(target,expected);
+                auto get_int=reinterpret_cast<void(APIENTRY*)(unsigned,int*)>(gi);
+                if(!x86::gl_verify_host_binding(get_int,x86::gl_buffer_binding_pname(target),expected)){q.rejected=true;q.result=0;}
+                return;
+            }
             if(q.name=="glVertexPointer"){using Fn=void(APIENTRY*)(int,unsigned,int,const void*);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(int(q.args[0]),unsigned(q.args[1]),int(q.args[2]),reinterpret_cast<const void*>(uintptr_t(q.args[3])));else missing();return;}
             if(q.name=="glDrawArrays"){using Vertex=void(APIENTRY*)(int,unsigned,int,const void*);using Draw=void(APIENTRY*)(unsigned,int,int);auto vp=pointer("glVertexPointer"),dp=pointer(q.name.c_str());if(!dp){missing();return;}if(!q.input.empty()){if(!vp){missing();return;}reinterpret_cast<Vertex>(vp)(int(q.args[3]),unsigned(q.args[4]),0,q.input.data());}reinterpret_cast<Draw>(dp)(unsigned(q.args[0]),int(q.args[1]),int(q.args[2]));return;}
             if(q.name=="x86GlDrawElementsClient"){using Vertex=void(APIENTRY*)(int,unsigned,int,const void*);using Draw=void(APIENTRY*)(unsigned,int,int);auto vp=pointer("glVertexPointer"),dp=pointer("glDrawArrays");if(!vp||!dp){missing();return;}reinterpret_cast<Vertex>(vp)(int(q.args[2]),unsigned(q.args[3]),0,q.input.data());reinterpret_cast<Draw>(dp)(unsigned(q.args[0]),0,int(q.args[1]));return;}
@@ -1519,6 +1534,15 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
                 auto get_int=reinterpret_cast<void(APIENTRY*)(unsigned,int*)>(gi);
                 return x86::gl_verify_host_binding(get_int,x86::gl_buffer_binding_pname(target),expected);
             };
+            if(q.name=="glVertexArrayElementBuffer") {
+                auto p=pointer(q.name.c_str());auto gva=pointer("glGetVertexArrayiv");
+                if(!p||!gva||q.signature==65535||q.args.size()<2){missing();return;}
+                const unsigned vao=unsigned(q.args[0]),expected=unsigned(q.args[1]);
+                q.result=x86::gl_call_generated(q.signature,p,q.args.data());
+                auto get_va=reinterpret_cast<void(APIENTRY*)(unsigned,unsigned,int*)>(gva);
+                if(!vao||!x86::gl_verify_host_binding([&](uint32_t pn,int* out){get_va(vao,pn,out);},0x8895u,expected)){q.rejected=true;q.result=0;}
+                return;
+            }
             if(q.name=="glBindBufferBase"||q.name=="glBindBufferBaseEXT"||q.name=="glBindBufferRange"||q.name=="glBindBufferRangeEXT"||q.name=="glBindBufferOffsetEXT"||q.name=="glBindVertexArray"||q.name=="glBindVertexArrayAPPLE") {
                 // Verify the host binding via glGetIntegerv rather than glGetError so pending and newly raised
                 // GL errors remain intact for the guest's own glGetError() calls.
@@ -1554,13 +1578,13 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
                 if(!binding_matches(unsigned(q.args[0]),q.buffer)){q.rejected=true;q.result=0;return;}
                 if(!q.input.empty()) {
                     auto err_fn=reinterpret_cast<GetErr>(get_err);
-                    for(unsigned drain=0;drain<16&&err_fn()!=0;++drain){}
+                    gl_errors->stash(cur_ctx(),err_fn);
                     reinterpret_cast<PutData>(put)(unsigned(q.args[0]),intptr_t(q.args[1]),intptr_t(q.input.size()),q.input.data());
                     if(err_fn()!=0){q.result=0;return;}
                 }
                 q.result=1;return; // GL_TRUE: glMapBuffer never host-mapped the buffer, so the copy-back above is the whole unmap
             }
-            if(q.name=="glGetError"){using Fn=unsigned(APIENTRY*)();auto p=pointer(q.name.c_str());q.result=p?reinterpret_cast<Fn>(p)():0;return;}
+            if(q.name=="glGetError"){using Fn=unsigned(APIENTRY*)();auto p=pointer(q.name.c_str());q.result=p?gl_errors->pop(cur_ctx(),reinterpret_cast<Fn>(p)):0;return;}
             if(q.name=="glTexImage2D"){using Fn=void(APIENTRY*)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*);auto p=pointer(q.name.c_str());if(!p){missing();return;}reinterpret_cast<Fn>(p)(unsigned(q.args[0]),int(q.args[1]),int(q.args[2]),int(q.args[3]),int(q.args[4]),int(q.args[5]),unsigned(q.args[6]),unsigned(q.args[7]),q.input.empty()?nullptr:q.input.data());return;}
             if(q.name=="glCreateShader"){using Fn=unsigned(APIENTRY*)(unsigned);auto p=pointer(q.name.c_str());if(p)q.result=reinterpret_cast<Fn>(p)(unsigned(q.args[0]));else missing();return;}
             if(q.name=="glShaderSource"){using Fn=void(APIENTRY*)(unsigned,int,const char*const*,const int*);auto p=pointer(q.name.c_str());if(!p||q.shader_sources.empty()){missing();return;}std::vector<const char*> sources; sources.reserve(q.shader_sources.size());for(const auto& source:q.shader_sources)sources.push_back(reinterpret_cast<const char*>(source.data()));const int* lengths=q.shader_lengths.empty()?nullptr:q.shader_lengths.data();reinterpret_cast<Fn>(p)(unsigned(q.args[0]),int(sources.size()),sources.data(),lengths);return;}

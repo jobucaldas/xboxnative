@@ -52,6 +52,31 @@ inline bool gl_verify_host_binding(GetIntegerv&& get_integerv, uint32_t pname, u
     get_integerv(pname, &bound);
     return uint32_t(bound) == expected;
 }
+// Preserves pending host GL errors across internal error-checked calls (such as glBufferSubData
+// during writable unmap) so guest glGetError() sees every prior error in FIFO order per context.
+struct GlErrorQueue {
+    std::map<uintptr_t, std::vector<uint32_t>> pending;
+    template <class GetErr>
+    void stash(uintptr_t ctx, GetErr&& get_error) {
+        auto& q = pending[ctx];
+        for (unsigned i = 0; i < 16; ++i) {
+            const uint32_t err = get_error();
+            if (!err) break;
+            if (q.size() < 64) q.push_back(err);
+        }
+    }
+    template <class GetErr>
+    uint32_t pop(uintptr_t ctx, GetErr&& get_error) {
+        auto it = pending.find(ctx);
+        if (it != pending.end() && !it->second.empty()) {
+            const uint32_t err = it->second.front();
+            it->second.erase(it->second.begin());
+            return err;
+        }
+        return get_error();
+    }
+    void erase(uintptr_t ctx) { pending.erase(ctx); }
+};
 struct Host {
     enum class NlsOperation { IsValidCodePage, GetCPInfo, MultiByteToWideChar, WideCharToMultiByte,
         GetStringTypeA, GetStringTypeW, GetStringTypeExW, GetLocaleInfoA, GetLocaleInfoW, GetLocaleInfoEx, GetUserDefaultLocaleName,
@@ -175,16 +200,22 @@ struct Host {
     std::map<uint32_t, std::map<int32_t, uint32_t>> window_longs;
     std::map<uint32_t, std::u16string> window_class_atoms;
     std::map<std::pair<uint32_t, std::u16string>, uint32_t> window_properties;
-    std::map<uint32_t, uint32_t> gl_bound_buffers;
-    std::map<uint32_t, uint32_t> gl_vao_element_buffers;
-    uint32_t gl_bound_vao = 0;
-    std::map<uint32_t, GlMap> gl_maps;
+    struct GlContextState {
+        std::map<uint32_t, uint32_t> bound_buffers;
+        std::map<uint32_t, uint32_t> vao_element_buffers;
+        uint32_t bound_vao = 0;
+        uint32_t array_buffer = 0, element_array_buffer = 0;
+        std::map<uint32_t, GlMap> maps;
+    };
+    std::map<uint32_t, GlContextState> gl_context_states;
+    uint32_t gl_current_context = 0;
+    GlContextState& gl_ctx() { return gl_context_states[gl_current_context]; }
     std::map<std::string, uint32_t> gl_strings;
     std::vector<Timer> timers;
     uint32_t next_timer_id = 1;
     uint32_t window_class_serial = 0xC000u, gl_handle_serial = 0xE0000000u, window_handle_serial = 0xD0000000u, user_handle_serial = 0xC0000000u, gl_map_next = 0x70000000u;
     uint32_t gl_string_cursor = 0, gl_string_end = 0, gl_string_next = 0x76000000u;
-    uint32_t vertex_array = 0, gl_array_buffer = 0, gl_element_array_buffer = 0;
+    uint32_t vertex_array = 0;
     std::function<uintptr_t(bool, uint32_t, uintptr_t*)> d3d9_factory;
     std::function<uintptr_t(const void*, uintptr_t*)> dsound_factory;
     std::function<uintptr_t(const char*)> dsound_export;
@@ -1063,18 +1094,31 @@ inline void register_gl(Registry& r, Host& h) {
         q.args[0] = dc(uint32_t(q.args[0])); return call(c, q) ? alloc_handle(h.gl_contexts, q.result) : 0;
     });
     r.add("opengl32.dll", "wglDeleteContext", Conv::Stdcall, 1, [&h, context, call, count](Cpu& c) -> uint32_t {
-        count("wglDeleteContext"); Host::GlCall q{}; q.name = "wglDeleteContext"; q.args = {c.arg(0)};
+        count("wglDeleteContext"); const uint32_t guest_ctx = c.arg(0);
+        Host::GlCall q{}; q.name = "wglDeleteContext"; q.args = {guest_ctx};
         if (!context(q.args[0])) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
         q.args[0] = context(uint32_t(q.args[0])); if (!call(c, q)) return 0;
-        if (q.result) h.gl_contexts.erase(c.arg(0));
+        if (q.result) {
+            auto state_it = h.gl_context_states.find(guest_ctx);
+            if (state_it != h.gl_context_states.end()) {
+                for (const auto& entry : state_it->second.maps)
+                    if (c.mem.mapped(entry.second.address)) c.mem.unmap(entry.second.address, entry.second.size);
+                h.gl_context_states.erase(state_it);
+            }
+            if (h.gl_current_context == guest_ctx) h.gl_current_context = 0;
+            h.gl_contexts.erase(guest_ctx);
+        }
         return uint32_t(q.result);
     });
-    r.add("opengl32.dll", "wglMakeCurrent", Conv::Stdcall, 2, [dc, context, call, count](Cpu& c) -> uint32_t {
-        count("wglMakeCurrent"); Host::GlCall q{}; q.name = "wglMakeCurrent"; q.args = {c.arg(0), c.arg(1)};
+    r.add("opengl32.dll", "wglMakeCurrent", Conv::Stdcall, 2, [&h, dc, context, call, count](Cpu& c) -> uint32_t {
+        count("wglMakeCurrent"); const uint32_t guest_ctx = c.arg(1);
+        Host::GlCall q{}; q.name = "wglMakeCurrent"; q.args = {c.arg(0), guest_ctx};
         if (q.args[0] && !dc(q.args[0])) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
         if (q.args[1] && !context(q.args[1])) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
         q.args[0] = dc(uint32_t(q.args[0])); q.args[1] = context(uint32_t(q.args[1]));
-        return call(c, q) ? uint32_t(q.result) : 0;
+        if (!call(c, q)) return 0;
+        if (q.result) h.gl_current_context = guest_ctx;
+        return uint32_t(q.result);
     });
     r.add("opengl32.dll", "wglGetCurrentContext", Conv::Stdcall, 0, [&h, count](Cpu& c) -> uint32_t {
         count("wglGetCurrentContext"); if (!h.gl_call) { c.mem.w32(c.fs_base + 0x34, 120); return 0; }
@@ -1162,16 +1206,18 @@ inline void register_gl(Registry& r, Host& h) {
                 return guest_str;
             }
             auto bound_buffer = [&h](uint32_t target) -> uint32_t {
-                auto it = h.gl_bound_buffers.find(target);
-                return it == h.gl_bound_buffers.end() ? 0u : it->second;
+                auto& ctx = h.gl_ctx();
+                auto it = ctx.bound_buffers.find(target);
+                return it == ctx.bound_buffers.end() ? 0u : it->second;
             };
             // GL_ELEMENT_ARRAY_BUFFER binding is VAO state: switching VAOs swaps the shadow binding.
             auto switch_vao = [&h](uint32_t vao) {
-                h.gl_bound_vao = vao;
-                auto it = h.gl_vao_element_buffers.find(vao);
-                h.gl_element_array_buffer = it == h.gl_vao_element_buffers.end() ? 0u : it->second;
-                if (h.gl_element_array_buffer) h.gl_bound_buffers[0x8893u] = h.gl_element_array_buffer;
-                else h.gl_bound_buffers.erase(0x8893u);
+                auto& ctx = h.gl_ctx();
+                ctx.bound_vao = vao;
+                auto it = ctx.vao_element_buffers.find(vao);
+                ctx.element_array_buffer = it == ctx.vao_element_buffers.end() ? 0u : it->second;
+                if (ctx.element_array_buffer) ctx.bound_buffers[0x8893u] = ctx.element_array_buffer;
+                else ctx.bound_buffers.erase(0x8893u);
             };
             if (name == "glMapBufferRange" || name == "glMapBuffer" || name == "glMapBufferARB") {
                 const uint32_t target = uint32_t(q.args[0]);
@@ -1179,13 +1225,14 @@ inline void register_gl(Registry& r, Host& h) {
                 const int32_t range_offset = is_range ? int32_t(q.args[1]) : 0;
                 const uint32_t size = is_range ? uint32_t(q.args[2]) : 0;
                 const uint32_t access = uint32_t(q.args[is_range ? 3 : 1]);
+                auto& ctx = h.gl_ctx();
                 const uint32_t buffer = bound_buffer(target);
                 const bool access_ok = is_range
                     ? ((access & 0x3u) != 0 && (access & ~0x3Fu) == 0 &&
                        !((access & 0x1u) && (access & 0x2Cu)) &&  // READ excludes INVALIDATE_RANGE/BUFFER and UNSYNCHRONIZED
                        !((access & 0x10u) && !(access & 0x2u)))   // FLUSH_EXPLICIT requires WRITE
                     : (access == 0x88B8u || access == 0x88B9u || access == 0x88BAu);
-                if (!buffer || !access_ok || h.gl_maps.count(buffer) ||
+                if (!buffer || !access_ok || ctx.maps.count(buffer) ||
                     (is_range && (range_offset < 0 || !size || size > (1u << 26)))) {
                     c.mem.w32(c.fs_base + 0x34, 87); return 0;
                 }
@@ -1204,20 +1251,21 @@ inline void register_gl(Registry& r, Host& h) {
                 c.mem.write_bytes(address, q.output.data(), map_size);
                 const uintptr_t offset = is_range ? uintptr_t(range_offset) : 0;
                 const bool writable = is_range ? (access & 0x2u) != 0 : access != 0x88B8u;
-                h.gl_maps[buffer] = {address, map_size, buffer, offset, writable};
+                ctx.maps[buffer] = {address, map_size, buffer, offset, writable};
                 h.gl_map_next = address + uint32_t((map_size + Memory::PAGE - 1) & ~(size_t(Memory::PAGE - 1)));
                 return address;
             }
             if (name == "glUnmapBuffer" || name == "glUnmapBufferARB") {
                 const uint32_t target = uint32_t(q.args[0]);
+                auto& ctx = h.gl_ctx();
                 const uint32_t buffer = bound_buffer(target);
-                auto it = buffer ? h.gl_maps.find(buffer) : h.gl_maps.end();
-                if (it == h.gl_maps.end()) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
+                auto it = buffer ? ctx.maps.find(buffer) : ctx.maps.end();
+                if (it == ctx.maps.end()) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
                 Host::GlCall unmap{}; unmap.name = "x86GlUnmapBuffer"; unmap.args = {target, it->second.offset}; unmap.buffer = buffer;
                 if (it->second.writable) unmap.input = c.mem.read_bytes(it->second.address, it->second.size);
                 bool ok = call(c, unmap) && !unmap.gap && unmap.result != 0;
                 if (unmap.rejected) { c.mem.w32(c.fs_base + 0x34, 87); return 0; } // host binding mismatch: keep outstanding map intact
-                c.mem.unmap(it->second.address, it->second.size); h.gl_maps.erase(it);
+                c.mem.unmap(it->second.address, it->second.size); ctx.maps.erase(it);
                 return ok ? 1u : 0u;
             }
             if (return_kind == GlReturnKind::Pointer || has_unsupported_arg) {
@@ -1226,48 +1274,58 @@ inline void register_gl(Registry& r, Host& h) {
                 q.gap = true; call(c, q); return 0;
             }
             if ((name == "glBindBuffer" || name == "glBindBufferARB") && q.args.size() == 2) {
-                if (!call(c, q) || q.gap) return 0;
+                if (!call(c, q) || q.gap || q.rejected) return 0;
                 const uint32_t target = uint32_t(q.args[0]), buffer = uint32_t(q.args[1]);
-                if (buffer) h.gl_bound_buffers[target] = buffer;
-                else h.gl_bound_buffers.erase(target);
-                if (target == 0x8892u) h.gl_array_buffer = buffer;
+                auto& ctx = h.gl_ctx();
+                if (buffer) ctx.bound_buffers[target] = buffer;
+                else ctx.bound_buffers.erase(target);
+                if (target == 0x8892u) ctx.array_buffer = buffer;
                 else if (target == 0x8893u) {
-                    h.gl_element_array_buffer = buffer;
-                    if (buffer) h.gl_vao_element_buffers[h.gl_bound_vao] = buffer;
-                    else h.gl_vao_element_buffers.erase(h.gl_bound_vao);
+                    ctx.element_array_buffer = buffer;
+                    if (buffer) ctx.vao_element_buffers[ctx.bound_vao] = buffer;
+                    else ctx.vao_element_buffers.erase(ctx.bound_vao);
                 }
                 return uint32_t(q.result);
             }
             if ((name == "glBindVertexArray" || name == "glBindVertexArrayAPPLE") && q.args.size() == 1) {
-                if (!call(c, q) || q.gap) return 0;
-                if (!q.rejected) switch_vao(uint32_t(q.args[0]));
+                if (!call(c, q) || q.gap || q.rejected) return 0;
+                switch_vao(uint32_t(q.args[0]));
+                return uint32_t(q.result);
+            }
+            if (name == "glVertexArrayElementBuffer" && q.args.size() == 2) {
+                if (!call(c, q) || q.gap || q.rejected) return 0;
+                const uint32_t vao = uint32_t(q.args[0]), buffer = uint32_t(q.args[1]);
+                auto& ctx = h.gl_ctx();
+                if (buffer) ctx.vao_element_buffers[vao] = buffer;
+                else ctx.vao_element_buffers.erase(vao);
+                if (ctx.bound_vao == vao) {
+                    ctx.element_array_buffer = buffer;
+                    if (buffer) ctx.bound_buffers[0x8893u] = buffer;
+                    else ctx.bound_buffers.erase(0x8893u);
+                }
                 return uint32_t(q.result);
             }
             if ((name == "glBindBufferBase" || name == "glBindBufferBaseEXT" || name == "glBindBufferRange" ||
                  name == "glBindBufferRangeEXT" || name == "glBindBufferOffsetEXT") && q.args.size() >= 3) {
-                const bool is_range = name == "glBindBufferRange" || name == "glBindBufferRangeEXT";
-                const bool is_offset = name == "glBindBufferOffsetEXT";
-                if (q.args[2] && ((is_range && (q.args.size() < 5 || int32_t(q.args[3]) < 0 || int32_t(q.args[4]) <= 0)) ||
-                                  (is_offset && (q.args.size() < 4 || int32_t(q.args[3]) < 0)))) {
-                    c.mem.w32(c.fs_base + 0x34, 87); return 0; // invalid range: not forwarded, shadow binding untouched
-                }
-                if (!call(c, q) || q.gap) return 0;
-                if (q.rejected) return 0; // host raised a GL error: the previous binding is still current
+                // Always forward to host so invalid ranges/indices raise GL_INVALID_VALUE for glGetError().
+                if (!call(c, q) || q.gap || q.rejected) return 0;
                 const uint32_t target = uint32_t(q.args[0]), buffer = uint32_t(q.args[2]);
-                if (buffer) h.gl_bound_buffers[target] = buffer;
-                else h.gl_bound_buffers.erase(target);
+                auto& ctx = h.gl_ctx();
+                if (buffer) ctx.bound_buffers[target] = buffer;
+                else ctx.bound_buffers.erase(target);
                 return uint32_t(q.result);
             }
             if (name == "glVertexPointer") {
                 h.vertex_size = int32_t(q.args[0]); h.vertex_type = q.args[1]; h.vertex_stride = int32_t(q.args[2]); h.vertex_array = q.args[3];
-                h.vertex_buffer_backed = h.gl_array_buffer != 0;
+                h.vertex_buffer_backed = h.gl_ctx().array_buffer != 0;
                 if (h.vertex_buffer_backed) call(c, q);
                 return 0;
             }
             if (name == "glDrawElements") {
                 const uint32_t count = uint32_t(q.args[1]), type = uint32_t(q.args[2]);
-                if (h.vertex_buffer_backed && h.gl_element_array_buffer) return call(c, q) ? uint32_t(q.result) : 0;
-                if (h.vertex_buffer_backed || h.gl_element_array_buffer) { q.gap = true; call(c, q); return 0; }
+                auto& ctx = h.gl_ctx();
+                if (h.vertex_buffer_backed && ctx.element_array_buffer) return call(c, q) ? uint32_t(q.result) : 0;
+                if (h.vertex_buffer_backed || ctx.element_array_buffer) { q.gap = true; call(c, q); return 0; }
                 if (!h.vertex_array || h.vertex_type != 0x1406u || h.vertex_size < 2 || h.vertex_size > 4 || h.vertex_stride < 0 || count > (1u << 20))
                     throw Fault(FaultKind::Unsupported, c.eip, uint32_t(q.args[3]), "x86 GL client indexed-array format is unsupported");
                 const uint32_t index_width = type == 0x1401u ? 1u : type == 0x1403u ? 2u : type == 0x1405u ? 4u : 0u;
@@ -1472,32 +1530,34 @@ inline void register_gl(Registry& r, Host& h) {
             }
             if (!call(c, q)) return 0;
             if (!q.gap && (name == "glDeleteBuffers" || name == "glDeleteBuffersARB") && !q.pointers.empty()) {
+                auto& ctx = h.gl_ctx();
                 const auto& bytes = q.pointers[0].bytes;
                 for (size_t off = 0; off + 4 <= bytes.size(); off += 4) {
                     uint32_t id = 0; std::memcpy(&id, bytes.data() + off, 4);
                     if (!id) continue;
-                    for (auto it = h.gl_bound_buffers.begin(); it != h.gl_bound_buffers.end(); ) {
-                        if (it->second == id) it = h.gl_bound_buffers.erase(it);
+                    for (auto it = ctx.bound_buffers.begin(); it != ctx.bound_buffers.end(); ) {
+                        if (it->second == id) it = ctx.bound_buffers.erase(it);
                         else ++it;
                     }
-                    if (h.gl_array_buffer == id) h.gl_array_buffer = 0;
-                    if (h.gl_element_array_buffer == id) h.gl_element_array_buffer = 0;
-                    auto vao_it = h.gl_vao_element_buffers.find(h.gl_bound_vao);
-                    if (vao_it != h.gl_vao_element_buffers.end() && vao_it->second == id) h.gl_vao_element_buffers.erase(vao_it);
-                    auto map_it = h.gl_maps.find(id);
-                    if (map_it != h.gl_maps.end()) {
+                    if (ctx.array_buffer == id) ctx.array_buffer = 0;
+                    if (ctx.element_array_buffer == id) ctx.element_array_buffer = 0;
+                    auto vao_it = ctx.vao_element_buffers.find(ctx.bound_vao);
+                    if (vao_it != ctx.vao_element_buffers.end() && vao_it->second == id) ctx.vao_element_buffers.erase(vao_it);
+                    auto map_it = ctx.maps.find(id);
+                    if (map_it != ctx.maps.end()) {
                         c.mem.unmap(map_it->second.address, map_it->second.size);
-                        h.gl_maps.erase(map_it);
+                        ctx.maps.erase(map_it);
                     }
                 }
             }
             if (!q.gap && (name == "glDeleteVertexArrays" || name == "glDeleteVertexArraysAPPLE") && !q.pointers.empty()) {
+                auto& ctx = h.gl_ctx();
                 const auto& bytes = q.pointers[0].bytes;
                 for (size_t off = 0; off + 4 <= bytes.size(); off += 4) {
                     uint32_t id = 0; std::memcpy(&id, bytes.data() + off, 4);
                     if (!id) continue;
-                    h.gl_vao_element_buffers.erase(id);
-                    if (h.gl_bound_vao == id) switch_vao(0);
+                    ctx.vao_element_buffers.erase(id);
+                    if (ctx.bound_vao == id) switch_vao(0);
                 }
             }
             if (!q.gap && !q.output.empty() && output_dst) c.mem.write_bytes(output_dst, q.output.data(), uint32_t(q.output.size()));

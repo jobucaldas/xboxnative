@@ -18,10 +18,13 @@ grep -Fq 'if(q.name=="glMapBufferRange"||q.name=="glMapBuffer"||q.name=="glMapBu
 grep -Fq 'if(!p)p=pointer(q.name=="glBindBufferARB"?"glBindBuffer":"glBindBufferARB");' "$root/src/xbox-test/app/launch.h"
 grep -Fq 'if(err_fn()!=0){q.result=0;return;}' "$root/src/xbox-test/app/launch.h"
 grep -Fq 'q.return_kind!=x86::GlReturnKind::Pointer' "$root/src/xbox-test/app/launch.h"
-# Indexed/VAO binds verify host bindings via glGetIntegerv (never draining glGetError),
-# and map/unmap verify the host's real binding for both writable and read-only unmaps.
+# Indexed/VAO/DSA/BindBuffer verify host bindings via glGetIntegerv/glGetVertexArrayiv (never draining glGetError),
+# writable unmaps stash pending GL errors via GlErrorQueue, and map/unmap verify the host's real binding.
 grep -Fq 'x86::gl_verify_host_binding(get_int,x86::gl_buffer_binding_pname(target),expected)' "$root/src/xbox-test/app/launch.h"
 grep -Fq 'if(!x86::gl_verify_host_binding(get_int,pname,expected)){q.rejected=true;q.result=0;}' "$root/src/xbox-test/app/launch.h"
+grep -Fq 'if(q.name=="glVertexArrayElementBuffer")' "$root/src/xbox-test/app/launch.h"
+grep -Fq 'gl_errors->stash(cur_ctx(),err_fn);' "$root/src/xbox-test/app/launch.h"
+grep -Fq 'gl_errors->pop(cur_ctx(),reinterpret_cast<Fn>(p))' "$root/src/xbox-test/app/launch.h"
 grep -Fq 'if(!binding_matches(unsigned(q.args[0]),q.buffer)){q.rejected=true;q.result=0;return;}' "$root/src/xbox-test/app/launch.h"
 ! grep -Fq '0x8C2D' "$root/src/xbox-test/app/launch.h"
 "$cc32" -O1 -Wall -Wextra -Werror -Wno-cast-function-type -nostdlib -Wl,--entry,entry@0 -Wl,--subsystem,console \
