@@ -21,6 +21,37 @@ struct D3D11CreateArgs {
     void* swapchain = nullptr; void* device = nullptr; void* context = nullptr;
     uint32_t feature_level = 0;
 };
+// Maps each OpenGL 4.6 buffer binding target to its glGetIntegerv binding query enum (0 if unknown).
+inline uint32_t gl_buffer_binding_pname(uint32_t target) {
+    switch (target) {
+        case 0x8892u: return 0x8894u; // GL_ARRAY_BUFFER -> GL_ARRAY_BUFFER_BINDING
+        case 0x8893u: return 0x8895u; // GL_ELEMENT_ARRAY_BUFFER -> GL_ELEMENT_ARRAY_BUFFER_BINDING
+        case 0x88EBu: return 0x88EDu; // GL_PIXEL_PACK_BUFFER -> GL_PIXEL_PACK_BUFFER_BINDING
+        case 0x88ECu: return 0x88EFu; // GL_PIXEL_UNPACK_BUFFER -> GL_PIXEL_UNPACK_BUFFER_BINDING
+        case 0x8A11u: return 0x8A28u; // GL_UNIFORM_BUFFER -> GL_UNIFORM_BUFFER_BINDING
+        case 0x8C8Eu: return 0x8C8Fu; // GL_TRANSFORM_FEEDBACK_BUFFER -> GL_TRANSFORM_FEEDBACK_BUFFER_BINDING
+        case 0x8F36u: return 0x8F36u; // GL_COPY_READ_BUFFER -> GL_COPY_READ_BUFFER_BINDING
+        case 0x8F37u: return 0x8F37u; // GL_COPY_WRITE_BUFFER -> GL_COPY_WRITE_BUFFER_BINDING
+        case 0x8C2Au: return 0x8C2Au; // GL_TEXTURE_BUFFER -> GL_TEXTURE_BUFFER_BINDING
+        case 0x8F3Fu: return 0x8F43u; // GL_DRAW_INDIRECT_BUFFER -> GL_DRAW_INDIRECT_BUFFER_BINDING
+        case 0x92C0u: return 0x92C1u; // GL_ATOMIC_COUNTER_BUFFER -> GL_ATOMIC_COUNTER_BUFFER_BINDING
+        case 0x90D2u: return 0x90D3u; // GL_SHADER_STORAGE_BUFFER -> GL_SHADER_STORAGE_BUFFER_BINDING
+        case 0x90EEu: return 0x90EFu; // GL_DISPATCH_INDIRECT_BUFFER -> GL_DISPATCH_INDIRECT_BUFFER_BINDING
+        case 0x9192u: return 0x9193u; // GL_QUERY_BUFFER -> GL_QUERY_BUFFER_BINDING
+        case 0x80EEu: return 0x80EFu; // GL_PARAMETER_BUFFER -> GL_PARAMETER_BUFFER_BINDING
+        default: return 0u;
+    }
+}
+inline bool gl_is_indexed_buffer_target(uint32_t target) {
+    return target == 0x8A11u || target == 0x8C8Eu || target == 0x90D2u || target == 0x92C0u;
+}
+template <class GetIntegerv>
+inline bool gl_verify_host_binding(GetIntegerv&& get_integerv, uint32_t pname, uint32_t expected) {
+    if (!pname) return false;
+    int bound = expected ? 0 : 1;
+    get_integerv(pname, &bound);
+    return uint32_t(bound) == expected;
+}
 struct Host {
     enum class NlsOperation { IsValidCodePage, GetCPInfo, MultiByteToWideChar, WideCharToMultiByte,
         GetStringTypeA, GetStringTypeW, GetStringTypeExW, GetLocaleInfoA, GetLocaleInfoW, GetLocaleInfoEx, GetUserDefaultLocaleName,
@@ -1185,6 +1216,7 @@ inline void register_gl(Registry& r, Host& h) {
                 Host::GlCall unmap{}; unmap.name = "x86GlUnmapBuffer"; unmap.args = {target, it->second.offset}; unmap.buffer = buffer;
                 if (it->second.writable) unmap.input = c.mem.read_bytes(it->second.address, it->second.size);
                 bool ok = call(c, unmap) && !unmap.gap && unmap.result != 0;
+                if (unmap.rejected) { c.mem.w32(c.fs_base + 0x34, 87); return 0; } // host binding mismatch: keep outstanding map intact
                 c.mem.unmap(it->second.address, it->second.size); h.gl_maps.erase(it);
                 return ok ? 1u : 0u;
             }

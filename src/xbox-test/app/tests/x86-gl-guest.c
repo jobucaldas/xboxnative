@@ -55,6 +55,11 @@ void WINAPI entry(void) {
     typedef void *(APIENTRY *MapNamedBufferFn)(GLuint, GLenum);
     typedef void (APIENTRY *GetPointervFn)(GLenum, void **);
     typedef void (APIENTRY *BindBuffer)(GLenum, GLuint);
+    typedef void (APIENTRY *BindBufferBaseFn)(GLenum, GLuint, GLuint);
+    typedef void (APIENTRY *BindBufferRangeFn)(GLenum, GLuint, GLuint, long, long);
+    typedef void (APIENTRY *BindVertexArrayFn)(GLuint);
+    typedef void (APIENTRY *DeleteVertexArraysFn)(GLsizei, const GLuint *);
+    typedef GLenum (APIENTRY *GetErrorFn)(void);
     typedef void (APIENTRY *BufferData)(GLenum, long, const GLvoid *, GLenum);
     typedef void (APIENTRY *GenTextures)(GLsizei, GLuint *);
     typedef void (APIENTRY *TexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const GLvoid *);
@@ -82,13 +87,18 @@ void WINAPI entry(void) {
     GetPointervFn get_pointerv = (GetPointervFn)wglGetProcAddress("glGetPointerv");
     BindBuffer bind_buffer = (BindBuffer)wglGetProcAddress("glBindBuffer");
     BindBuffer bind_buffer_arb = (BindBuffer)wglGetProcAddress("glBindBufferARB");
+    BindBufferBaseFn bind_buffer_base = (BindBufferBaseFn)wglGetProcAddress("glBindBufferBase");
+    BindBufferRangeFn bind_buffer_range = (BindBufferRangeFn)wglGetProcAddress("glBindBufferRange");
+    BindVertexArrayFn bind_vao = (BindVertexArrayFn)wglGetProcAddress("glBindVertexArray");
+    DeleteVertexArraysFn delete_vaos = (DeleteVertexArraysFn)wglGetProcAddress("glDeleteVertexArrays");
+    GetErrorFn get_error = (GetErrorFn)wglGetProcAddress("glGetError");
     BufferData buffer_data = (BufferData)wglGetProcAddress("glBufferData");
     GenTextures gen_textures = (GenTextures)wglGetProcAddress("glGenTextures");
     TexImage2D tex_image = (TexImage2D)wglGetProcAddress("glTexImage2D");
     CreateShader create_shader = (CreateShader)wglGetProcAddress("glCreateShader");
     ShaderSource shader_source = (ShaderSource)wglGetProcAddress("glShaderSource");
     CompileShader compile_shader = (CompileShader)wglGetProcAddress("glCompileShader");
-    if (!clear_color || !clear || !enable || !vertex || !draw || !draw_elements || !read || !clear_depth || !get_integer || !uniform_handle || !get_string || !get_stringi || !map_buffer_arb || !map_range || !unmap_buffer || !unmap_buffer_arb || !fence_sync || !map_named_buffer || !get_pointerv || !bind_buffer || !bind_buffer_arb || !buffer_data || !gen_textures || !tex_image || !create_shader || !shader_source || !compile_shader) fail(14);
+    if (!clear_color || !clear || !enable || !vertex || !draw || !draw_elements || !read || !clear_depth || !get_integer || !uniform_handle || !get_string || !get_stringi || !map_buffer_arb || !map_range || !unmap_buffer || !unmap_buffer_arb || !fence_sync || !map_named_buffer || !get_pointerv || !bind_buffer || !bind_buffer_arb || !bind_buffer_base || !bind_buffer_range || !bind_vao || !delete_vaos || !get_error || !buffer_data || !gen_textures || !tex_image || !create_shader || !shader_source || !compile_shader) fail(14);
 
     const char *ver1 = (const char *)get_string(GL_VERSION);
     const char *ver2 = (const char *)get_string(GL_VERSION);
@@ -156,6 +166,40 @@ void WINAPI entry(void) {
     mapped_err[0] = 0xF1;
     if (unmap_buffer_arb(0x8892u) != 0) fail(38);
     bind_buffer(0x8892u, 0);
+
+    // Per-VAO GL_ELEMENT_ARRAY_BUFFER switching and active-VAO deletion reset.
+    bind_vao(1);
+    bind_buffer(0x8893u, 40);
+    bind_vao(2);
+    bind_buffer(0x8893u, 50);
+    bind_vao(1);
+    unsigned char *mapped_v1 = (unsigned char *)map_buffer_arb(0x8893u, 0x88B8u);
+    if (!mapped_v1 || mapped_v1[0] != 0x41 || mapped_v1[3] != 0x44) fail(40);
+    if (!unmap_buffer(0x8893u)) fail(41);
+    bind_vao(2);
+    GLuint vao2 = 2;
+    delete_vaos(1, &vao2);
+    if (map_buffer_arb(0x8893u, 0x88B8u) != NULL) fail(42);
+
+    // Rejected indexed binds leave the prior shadow binding intact and preserve the host GL error.
+    bind_buffer_base(0x8A11u, 0, 70);
+    bind_buffer_range(0x8A11u, 0, 80, 0, 0); // invalid size <= 0
+    bind_buffer_base(0x8A11u, 99, 80);       // out-of-range index -> GL_INVALID_VALUE (0x0501)
+    if (get_error() != 0x0501u) fail(43);
+    if (get_error() != 0u) fail(44);
+    unsigned char *mapped_ubo = (unsigned char *)map_buffer_arb(0x8A11u, 0x88B8u);
+    if (!mapped_ubo || mapped_ubo[0] != 0x71 || mapped_ubo[3] != 0x74) fail(45);
+    if (!unmap_buffer(0x8A11u)) fail(46);
+
+    // GL_TEXTURE_BUFFER (0x8C2A) and GL_PARAMETER_BUFFER (0x80EE) generic bindings map/unmap cleanly.
+    bind_buffer(0x8C2Au, 70);
+    unsigned char *mapped_tbo = (unsigned char *)map_buffer_arb(0x8C2Au, 0x88B8u);
+    if (!mapped_tbo || mapped_tbo[0] != 0x71) fail(47);
+    if (!unmap_buffer(0x8C2Au)) fail(48);
+    bind_buffer(0x80EEu, 80);
+    unsigned char *mapped_pbo = (unsigned char *)map_buffer_arb(0x80EEu, 0x88B8u);
+    if (!mapped_pbo || mapped_pbo[0] != 0x81) fail(49);
+    if (!unmap_buffer(0x80EEu)) fail(50);
 
     SetLastError(0);
     if (fence_sync(0x9117u, 0) != NULL || GetLastError() != 120u) fail(30);
