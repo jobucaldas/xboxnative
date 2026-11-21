@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
     for (const auto& u : r.unresolved) printf("play: unresolved %s\n", u.c_str());
     if (!r.fault.empty()) printf("play: fault kind=%s eip=0x%08x %s\n", r.fault_kind.c_str(), r.fault_eip, r.fault.c_str());
     printf("play: instructions=%llu\n", (unsigned long long)r.instructions);
-    if (!r.finished || r.exit_code != 42 || !r.fault.empty() || !r.unresolved.empty()) return 1;
+    if (!r.finished || r.exit_code != 42 || !r.fault.empty() || !r.unresolved.empty() || r.imports != r.bound) return 1;
     printf("play: cxxrt ran to exit 42, all imports bound\n");
     return 0;
 }
