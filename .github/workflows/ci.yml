@@ -429,6 +429,8 @@ jobs:
           packages: gcc-mingw-w64-i686 g++-mingw-w64-i686 gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 wine wine64 mono-devel llvm lld
       - name: embedded Mono AnyCPU host and exit code
         run: bash src/xbox-test/app/tests/mono-host.sh
+      - name: FNA3D driver pin on the Win32 environment API (Wine)
+        run: bash src/xbox-test/app/tests/fna-driver.sh --wine
       - name: x86 execution core (hardware-compared ALU, faults, thunks, owned i686 fixture)
         run: bash src/xbox-test/app/tests/x86-core.sh
       - name: x86 dynamic binary translation spike (randomized interpreter comparison)

@@ -24,7 +24,8 @@ has "failed genuine probe clears SteamPath" 'if(!ok)SetEnvironmentVariableW(L"St
 count "PE32 route initialises registry" 'regb::init(g_dir,lp_sink); // guest registry (PlayerPrefs) for the PE32 route too' 1
 count "managed route probes Wine donor" 'if(!donor_pe::probe(lp_sink))' 2
 count "managed route wires donor resolver" 'mlp::donor_resolve=donor_pe::exported;' 2
-count "managed route pins FNA3D to D3D11 via RAII" 'fna_driver::ForceD3D11 fnaDriver;' 1
+count "managed route pins FNA3D to D3D11 via RAII" 'fna_driver::Scope fnaDriver;' 1
+count "SEH wrapper releases the FNA3D pin after __except" 'fna_driver::release_all();' 1
 has "managed route logs the effective FNA3D driver" 'fna3d=%s'
 has "launch.h includes the FNA driver helper" '#include "host/fna_driver.h"'
 
