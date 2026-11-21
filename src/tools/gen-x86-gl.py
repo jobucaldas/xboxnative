@@ -13,6 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "src/tools/x86-gl-manifest.json"
 DEFAULT_OUTPUT = ROOT / "src/xbox-test/app/host/x86/x86_gl_generated.h"
 WIDE_TYPES = {"GLdouble", "GLclampd", "GLint64", "GLuint64", "GLint64EXT", "GLuint64EXT"}
+INTPTR_TYPES = {"GLintptr", "GLsizeiptr", "GLintptrARB", "GLsizeiptrARB", "GLvdpauSurfaceNV"}
 FLOAT_TYPES = {"GLfloat", "GLclampf"}
 SCALAR_ALIASES = {"GLhandleARB"}
 
@@ -82,7 +83,7 @@ def generate(data, manifest):
             pointer = explicit_pointer or "*" in type_declarations.get(ptype, "")
             const = "const" in text.split("*")[0]
             wide = ptype in WIDE_TYPES and not pointer
-            kind = "Pointer" if pointer else "Float" if ptype in FLOAT_TYPES else "Double" if ptype in WIDE_TYPES and ptype in {"GLdouble", "GLclampd"} else "Int64" if wide else "Scalar" if ptype in type_declarations or ptype in SCALAR_ALIASES else "Unsupported"
+            kind = "Pointer" if pointer else "Float" if ptype in FLOAT_TYPES else "Double" if ptype in WIDE_TYPES and ptype in {"GLdouble", "GLclampd"} else "Int64" if wide else "IntPtr" if ptype in INTPTR_TYPES else "Scalar" if ptype in type_declarations or ptype in SCALAR_ALIASES else "Unsupported"
             if explicit_pointer and not const:
                 kind = "Unsupported" if text.count("*") > 1 else "OutputPointer"
             arg_slots = 2 if wide else 1
@@ -109,7 +110,7 @@ def generate(data, manifest):
         return_type_node = proto.find("ptype")
         return_type = return_type_node.text if return_type_node is not None and return_type_node.text else "void"
         return_pointer = "*" in "".join(proto.itertext()) or "*" in type_declarations.get(return_type, "")
-        return_kind = "Pointer" if return_pointer else "Void" if return_type == "void" else "Float" if return_type in FLOAT_TYPES else "Double" if return_type in {"GLdouble", "GLclampd"} else "Int64" if return_type in WIDE_TYPES else "Scalar"
+        return_kind = "Pointer" if return_pointer else "Void" if return_type == "void" else "Float" if return_type in FLOAT_TYPES else "Double" if return_type in {"GLdouble", "GLclampd"} else "Int64" if return_type in WIDE_TYPES else "IntPtr" if return_type in INTPTR_TYPES else "Scalar"
         return_kinds.append(f"GlReturnKind::{return_kind}")
         shape = (return_kind, tuple(kinds))
         if "Unsupported" in kinds:
@@ -127,11 +128,11 @@ def generate(data, manifest):
             raise ValueError(f"{name}: manifest arity {expected_slots} does not match registry stack slots {actual}")
     if not rows:
         raise ValueError("pinned gl.xml yielded no GL commands")
-    cpp_types = {"Scalar": "uint32_t", "Float": "float", "Double": "double", "Int64": "uint64_t", "Pointer": "void*", "OutputPointer": "void*"}
+    cpp_types = {"Scalar": "uint32_t", "IntPtr": "intptr_t", "Float": "float", "Double": "double", "Int64": "uint64_t", "Pointer": "void*", "OutputPointer": "void*"}
     adapters = []
     for signature_id, (return_kind, kinds) in enumerate(signatures):
         argument_types = [cpp_types[kind] for kind in kinds]
-        return_type = {"Void": "void", "Pointer": "void*", "Float": "float", "Double": "double", "Int64": "uint64_t", "Scalar": "uint32_t"}[return_kind]
+        return_type = {"Void": "void", "Pointer": "void*", "Float": "float", "Double": "double", "Int64": "uint64_t", "IntPtr": "intptr_t", "Scalar": "uint32_t"}[return_kind]
         slot = 0
         arguments = []
         for kind in kinds:
@@ -141,6 +142,8 @@ def generate(data, manifest):
                 arguments.append(f"gl_arg_double(a[{slot}], a[{slot + 1}])")
             elif kind == "Int64":
                 arguments.append(f"gl_arg_u64(a[{slot}], a[{slot + 1}])")
+            elif kind == "IntPtr":
+                arguments.append(f"intptr_t(int32_t(a[{slot}]))")
             elif kind in {"Pointer", "OutputPointer"}:
                 arguments.append(f"reinterpret_cast<void*>(a[{slot}])")
             else:
@@ -160,8 +163,8 @@ def generate(data, manifest):
 #include <cstring>
 #include <type_traits>
 namespace x86 {
-enum class GlArgKind : unsigned char { Scalar, Float, Double, Int64, Pointer, OutputPointer, Unsupported };
-enum class GlReturnKind : unsigned char { Void, Scalar, Float, Double, Int64, Pointer };
+enum class GlArgKind : unsigned char { Scalar, IntPtr, Float, Double, Int64, Pointer, OutputPointer, Unsupported };
+enum class GlReturnKind : unsigned char { Void, Scalar, IntPtr, Float, Double, Int64, Pointer };
 struct GlArg { const char* name; GlArgKind kind; unsigned slots; const char* length; };
 struct GlExport { const char* name; unsigned argc; unsigned first_arg; unsigned arg_count; };
 inline float gl_arg_float(uintptr_t word) { uint32_t bits = uint32_t(word); float value; std::memcpy(&value, &bits, sizeof(value)); return value; }

@@ -16,10 +16,13 @@ static std::vector<uint8_t> read_file(const char* path) {
     return std::vector<uint8_t>{std::istreambuf_iterator<char>(stream), {}};
 }
 
-static bool adapter_float_ok, adapter_double_ok, adapter_int64_ok, adapter_pointer_ok, adapter_output_ok, adapter_return_ok, adapter_ptr_return_ok;
+static bool adapter_float_ok, adapter_double_ok, adapter_int64_ok, adapter_intptr_ok, adapter_pointer_ok, adapter_output_ok, adapter_return_ok, adapter_ptr_return_ok;
 static void adapter_clear_color(float r, float g, float b, float a) { adapter_float_ok = r == 0.25f && g == 0.5f && b == 0.75f && a == 1.0f; }
 static void adapter_clear_depth(double value) { adapter_double_ok = value == 0.625; }
 static void adapter_uniform_handle(uint32_t location, uint64_t handle) { adapter_int64_ok = location == 3 && handle == 0x12345678abcdef01ull; }
+static void adapter_bind_buffer_range(uint32_t target, uint32_t index, uint32_t buffer, intptr_t offset, intptr_t size) {
+    adapter_intptr_ok = target == 0x8A11u && index == 2u && buffer == 70u && offset == intptr_t(-16) && size == intptr_t(-4);
+}
 static void adapter_draw_elements(uint32_t mode, int32_t count, uint32_t type, const void* indices) { adapter_pointer_ok = mode == 4 && count == 3 && type == 0x1403u && indices == reinterpret_cast<const void*>(uintptr_t(0x1234)); }
 static void adapter_get_integer(uint32_t pname, void* data) { adapter_output_ok = pname == 0x0BA2u && data != nullptr; if (data) static_cast<int32_t*>(data)[0] = 321; }
 static uint32_t adapter_create_shader(uint32_t type) { adapter_return_ok = type == 0x8B31u; return 7; }
@@ -443,6 +446,8 @@ int main(int argc, char** argv) {
     x86::gl_call_generated(signature("glClearDepth"), reinterpret_cast<uintptr_t>(&adapter_clear_depth), depth_words);
     uintptr_t handle_words[3] = {3, 0xabcdef01u, 0x12345678u};
     x86::gl_call_generated(signature("glUniformHandleui64ARB"), reinterpret_cast<uintptr_t>(&adapter_uniform_handle), handle_words);
+    uintptr_t range_words[5] = {0x8A11u, 2u, 70u, uint32_t(-16), uint32_t(-4)};
+    x86::gl_call_generated(signature("glBindBufferRange"), reinterpret_cast<uintptr_t>(&adapter_bind_buffer_range), range_words);
     uintptr_t pointer_words[4] = {4, 3, 0x1403u, 0x1234u};
     x86::gl_call_generated(signature("glDrawElements"), reinterpret_cast<uintptr_t>(&adapter_draw_elements), pointer_words);
     int32_t output_value = 0; uintptr_t output_words[2] = {0x0BA2u, reinterpret_cast<uintptr_t>(&output_value)};
@@ -693,9 +698,9 @@ int main(int argc, char** argv) {
         tee_log.find("x86 GL gap: glGetPointerv") != std::string::npos;
     if (!result.loaded || !result.finished || result.exit_code != 0 || !got_class || !got_window || !got_class_a || !got_window_a || !got_dc || !got_context || !drew || !drew_elements || !buffer_drew || !read_pixel || !destroyed_window || !texture_uploaded || !shader_created || !shader_source_set || !shader_compiled || !buffer_uploaded || !texture_generated ||
         !saw_float || !saw_scalar || !saw_pointer || !saw_double || !saw_int64 || !saw_output_pointer || !map_unmapped || !map_arb_cross_a || !map_arb_cross_b || !map_arb_upload_err || !saw_bind_buffer_arb || !saw_get_string || !saw_get_stringi || !saw_vao_switch || !saw_dsa_vao || !saw_indexed_reject || !saw_rejected_bind_buf || !saw_preserved_err_after_unmap || !saw_ctx2_isolation || !saw_tbo_map || !saw_pbo_map || blocked_escaped || !gaps_logged ||
-        !adapter_float_ok || !adapter_double_ok || !adapter_int64_ok || !adapter_pointer_ok || !adapter_output_ok || !adapter_return_ok || !adapter_ptr_return_ok) {
-        std::fprintf(stderr, "X86-GL FAIL loaded=%d finished=%d exit=%u fault=%s class=%d window=%d dc=%d context=%d draw=%d read=%d destroy=%d tex=%d shader=%d/%d/%d buffer=%d output=%d strings=%d/%d map_arb=%d/%d/%d bind_arb=%d vao=%d dsa=%d idx_rej=%d bind_rej=%d err_keep=%d ctx2=%d tbo=%d pbo=%d gaps=%d escaped=%d adapters=%d/%d/%d/%d\n",
-            result.loaded, result.finished, result.exit_code, result.fault.c_str(), got_class, got_window, got_dc, got_context, drew, read_pixel, destroyed_window, texture_uploaded, shader_created, shader_source_set, shader_compiled, buffer_uploaded, saw_output_pointer, saw_get_string, saw_get_stringi, map_arb_cross_a, map_arb_cross_b, map_arb_upload_err, saw_bind_buffer_arb, saw_vao_switch, saw_dsa_vao, saw_indexed_reject, saw_rejected_bind_buf, saw_preserved_err_after_unmap, saw_ctx2_isolation, saw_tbo_map, saw_pbo_map, gaps_logged, blocked_escaped, adapter_float_ok, adapter_double_ok, adapter_int64_ok, adapter_ptr_return_ok);
+        !adapter_float_ok || !adapter_double_ok || !adapter_int64_ok || !adapter_intptr_ok || !adapter_pointer_ok || !adapter_output_ok || !adapter_return_ok || !adapter_ptr_return_ok) {
+        std::fprintf(stderr, "X86-GL FAIL loaded=%d finished=%d exit=%u fault=%s class=%d window=%d dc=%d context=%d draw=%d read=%d destroy=%d tex=%d shader=%d/%d/%d buffer=%d output=%d strings=%d/%d map_arb=%d/%d/%d bind_arb=%d vao=%d dsa=%d idx_rej=%d bind_rej=%d err_keep=%d ctx2=%d tbo=%d pbo=%d gaps=%d escaped=%d adapters=%d/%d/%d/%d/%d\n",
+            result.loaded, result.finished, result.exit_code, result.fault.c_str(), got_class, got_window, got_dc, got_context, drew, read_pixel, destroyed_window, texture_uploaded, shader_created, shader_source_set, shader_compiled, buffer_uploaded, saw_output_pointer, saw_get_string, saw_get_stringi, map_arb_cross_a, map_arb_cross_b, map_arb_upload_err, saw_bind_buffer_arb, saw_vao_switch, saw_dsa_vao, saw_indexed_reject, saw_rejected_bind_buf, saw_preserved_err_after_unmap, saw_ctx2_isolation, saw_tbo_map, saw_pbo_map, gaps_logged, blocked_escaped, adapter_float_ok, adapter_double_ok, adapter_int64_ok, adapter_intptr_ok, adapter_ptr_return_ok);
         return 1;
     }
     std::puts("X86-GL PASS: PE32 WGL context, guest-memory triangle array, pointer-return marshalling, and readback pixel");

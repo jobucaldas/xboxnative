@@ -5,8 +5,8 @@
 #include <cstring>
 #include <type_traits>
 namespace x86 {
-enum class GlArgKind : unsigned char { Scalar, Float, Double, Int64, Pointer, OutputPointer, Unsupported };
-enum class GlReturnKind : unsigned char { Void, Scalar, Float, Double, Int64, Pointer };
+enum class GlArgKind : unsigned char { Scalar, IntPtr, Float, Double, Int64, Pointer, OutputPointer, Unsupported };
+enum class GlReturnKind : unsigned char { Void, Scalar, IntPtr, Float, Double, Int64, Pointer };
 struct GlArg { const char* name; GlArgKind kind; unsigned slots; const char* length; };
 struct GlExport { const char* name; unsigned argc; unsigned first_arg; unsigned arg_count; };
 inline float gl_arg_float(uintptr_t word) { uint32_t bits = uint32_t(word); float value; std::memcpy(&value, &bits, sizeof(value)); return value; }
@@ -73,17 +73,17 @@ inline constexpr GlArg kGlArgs[] = {
     {"target", GlArgKind::Scalar, 1, ""},
     {"index", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"target", GlArgKind::Scalar, 1, ""},
     {"index", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"target", GlArgKind::Scalar, 1, ""},
     {"index", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"target", GlArgKind::Scalar, 1, ""},
     {"first", GlArgKind::Scalar, 1, ""},
     {"count", GlArgKind::Scalar, 1, ""},
@@ -165,7 +165,7 @@ inline constexpr GlArg kGlArgs[] = {
     {"array", GlArgKind::Scalar, 1, ""},
     {"bindingindex", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
     {"first", GlArgKind::Scalar, 1, ""},
     {"count", GlArgKind::Scalar, 1, ""},
@@ -308,37 +308,37 @@ inline constexpr GlArg kGlArgs[] = {
     {"mask", GlArgKind::Scalar, 1, ""},
     {"filter", GlArgKind::Scalar, 1, ""},
     {"target", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"data", GlArgKind::Pointer, 1, "size"},
     {"usage", GlArgKind::Scalar, 1, ""},
     {"target", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"data", GlArgKind::Pointer, 1, "size"},
     {"usage", GlArgKind::Scalar, 1, ""},
     {"target", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"commit", GlArgKind::Scalar, 1, ""},
     {"target", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"data", GlArgKind::Pointer, 1, "size"},
     {"flags", GlArgKind::Scalar, 1, ""},
     {"target", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"clientBuffer", GlArgKind::Pointer, 1, ""},
     {"flags", GlArgKind::Scalar, 1, ""},
     {"target", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"memory", GlArgKind::Scalar, 1, ""},
     {"offset", GlArgKind::Int64, 2, ""},
     {"target", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"data", GlArgKind::Pointer, 1, "size"},
     {"target", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"data", GlArgKind::Pointer, 1, "size"},
     {"list", GlArgKind::Scalar, 1, ""},
     {"n", GlArgKind::Scalar, 1, ""},
@@ -366,8 +366,8 @@ inline constexpr GlArg kGlArgs[] = {
     {"data", GlArgKind::Pointer, 1, "COMPSIZE(format,type)"},
     {"target", GlArgKind::Scalar, 1, ""},
     {"internalformat", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"format", GlArgKind::Scalar, 1, ""},
     {"type", GlArgKind::Scalar, 1, ""},
     {"data", GlArgKind::Pointer, 1, "COMPSIZE(format,type)"},
@@ -411,15 +411,15 @@ inline constexpr GlArg kGlArgs[] = {
     {"data", GlArgKind::Pointer, 1, "COMPSIZE(format,type)"},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"internalformat", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"format", GlArgKind::Scalar, 1, ""},
     {"type", GlArgKind::Scalar, 1, ""},
     {"data", GlArgKind::Pointer, 1, "COMPSIZE(format,type)"},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"internalformat", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"format", GlArgKind::Scalar, 1, ""},
     {"type", GlArgKind::Scalar, 1, ""},
     {"data", GlArgKind::Pointer, 1, "COMPSIZE(format,type)"},
@@ -903,9 +903,9 @@ inline constexpr GlArg kGlArgs[] = {
     {"params", GlArgKind::Pointer, 1, "COMPSIZE(pname)"},
     {"readTarget", GlArgKind::Scalar, 1, ""},
     {"writeTarget", GlArgKind::Scalar, 1, ""},
-    {"readOffset", GlArgKind::Scalar, 1, ""},
-    {"writeOffset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"readOffset", GlArgKind::IntPtr, 1, ""},
+    {"writeOffset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"target", GlArgKind::Scalar, 1, ""},
     {"start", GlArgKind::Scalar, 1, ""},
     {"x", GlArgKind::Scalar, 1, ""},
@@ -1003,9 +1003,9 @@ inline constexpr GlArg kGlArgs[] = {
     {"height", GlArgKind::Scalar, 1, ""},
     {"readBuffer", GlArgKind::Scalar, 1, ""},
     {"writeBuffer", GlArgKind::Scalar, 1, ""},
-    {"readOffset", GlArgKind::Scalar, 1, ""},
-    {"writeOffset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"readOffset", GlArgKind::IntPtr, 1, ""},
+    {"writeOffset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"x", GlArgKind::Scalar, 1, ""},
     {"y", GlArgKind::Scalar, 1, ""},
     {"width", GlArgKind::Scalar, 1, ""},
@@ -1319,7 +1319,7 @@ inline constexpr GlArg kGlArgs[] = {
     {"group_size_x", GlArgKind::Scalar, 1, ""},
     {"group_size_y", GlArgKind::Scalar, 1, ""},
     {"group_size_z", GlArgKind::Scalar, 1, ""},
-    {"indirect", GlArgKind::Scalar, 1, ""},
+    {"indirect", GlArgKind::IntPtr, 1, ""},
     {"mode", GlArgKind::Scalar, 1, ""},
     {"first", GlArgKind::Scalar, 1, ""},
     {"count", GlArgKind::Scalar, 1, ""},
@@ -1399,7 +1399,7 @@ inline constexpr GlArg kGlArgs[] = {
     {"num_groups_x", GlArgKind::Scalar, 1, ""},
     {"num_groups_y", GlArgKind::Scalar, 1, ""},
     {"num_groups_z", GlArgKind::Scalar, 1, ""},
-    {"indirect", GlArgKind::Scalar, 1, ""},
+    {"indirect", GlArgKind::IntPtr, 1, ""},
     {"width", GlArgKind::Scalar, 1, ""},
     {"height", GlArgKind::Scalar, 1, ""},
     {"format", GlArgKind::Scalar, 1, ""},
@@ -1502,14 +1502,14 @@ inline constexpr GlArg kGlArgs[] = {
     {"condition", GlArgKind::Scalar, 1, ""},
     {"flags", GlArgKind::Scalar, 1, ""},
     {"target", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"length", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"length", GlArgKind::IntPtr, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"length", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"length", GlArgKind::IntPtr, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"length", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"length", GlArgKind::IntPtr, 1, ""},
     {"type", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
     {"pointer", GlArgKind::Pointer, 1, "COMPSIZE(type,stride)"},
@@ -1779,12 +1779,12 @@ inline constexpr GlArg kGlArgs[] = {
     {"pname", GlArgKind::Scalar, 1, ""},
     {"params", GlArgKind::Unsupported, 1, "1"},
     {"target", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"data", GlArgKind::OutputPointer, 1, "size"},
     {"target", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"data", GlArgKind::OutputPointer, 1, "size"},
     {"plane", GlArgKind::Scalar, 1, ""},
     {"equation", GlArgKind::OutputPointer, 1, "4"},
@@ -2108,12 +2108,12 @@ inline constexpr GlArg kGlArgs[] = {
     {"pname", GlArgKind::Scalar, 1, ""},
     {"params", GlArgKind::Unsupported, 1, "1"},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"data", GlArgKind::OutputPointer, 1, "size"},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"data", GlArgKind::OutputPointer, 1, "COMPSIZE(size)"},
     {"framebuffer", GlArgKind::Scalar, 1, ""},
     {"attachment", GlArgKind::Scalar, 1, ""},
@@ -2289,19 +2289,19 @@ inline constexpr GlArg kGlArgs[] = {
     {"id", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"id", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"id", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"id", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"target", GlArgKind::Scalar, 1, ""},
     {"index", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
@@ -2875,7 +2875,7 @@ inline constexpr GlArg kGlArgs[] = {
     {"handleType", GlArgKind::Scalar, 1, ""},
     {"name", GlArgKind::Pointer, 1, ""},
     {"external_sync_type", GlArgKind::Scalar, 1, ""},
-    {"external_sync", GlArgKind::Scalar, 1, ""},
+    {"external_sync", GlArgKind::IntPtr, 1, ""},
     {"flags", GlArgKind::Scalar, 1, ""},
     {"func", GlArgKind::Scalar, 1, ""},
     {"ref", GlArgKind::Float, 1, ""},
@@ -2909,8 +2909,8 @@ inline constexpr GlArg kGlArgs[] = {
     {"pointer", GlArgKind::Pointer, 1, "COMPSIZE(format,stride)"},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"length", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"length", GlArgKind::IntPtr, 1, ""},
     {"target", GlArgKind::Scalar, 1, ""},
     {"numAttachments", GlArgKind::Scalar, 1, ""},
     {"attachments", GlArgKind::Pointer, 1, "numAttachments"},
@@ -3056,8 +3056,8 @@ inline constexpr GlArg kGlArgs[] = {
     {"target", GlArgKind::Scalar, 1, ""},
     {"access", GlArgKind::Scalar, 1, ""},
     {"target", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"length", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"length", GlArgKind::IntPtr, 1, ""},
     {"access", GlArgKind::Scalar, 1, ""},
     {"un", GlArgKind::Scalar, 1, ""},
     {"u1", GlArgKind::Double, 2, ""},
@@ -3082,12 +3082,12 @@ inline constexpr GlArg kGlArgs[] = {
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"access", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"length", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"length", GlArgKind::IntPtr, 1, ""},
     {"access", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"length", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"length", GlArgKind::IntPtr, 1, ""},
     {"access", GlArgKind::Scalar, 1, ""},
     {"face", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
@@ -3206,12 +3206,12 @@ inline constexpr GlArg kGlArgs[] = {
     {"stride", GlArgKind::Scalar, 1, ""},
     {"mode", GlArgKind::Scalar, 1, ""},
     {"indirect", GlArgKind::Pointer, 1, ""},
-    {"drawcount", GlArgKind::Scalar, 1, ""},
+    {"drawcount", GlArgKind::IntPtr, 1, ""},
     {"maxdrawcount", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
     {"mode", GlArgKind::Scalar, 1, ""},
     {"indirect", GlArgKind::Pointer, 1, ""},
-    {"drawcount", GlArgKind::Scalar, 1, ""},
+    {"drawcount", GlArgKind::IntPtr, 1, ""},
     {"maxdrawcount", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
     {"mode", GlArgKind::Scalar, 1, ""},
@@ -3238,20 +3238,20 @@ inline constexpr GlArg kGlArgs[] = {
     {"mode", GlArgKind::Scalar, 1, ""},
     {"type", GlArgKind::Scalar, 1, ""},
     {"indirect", GlArgKind::Pointer, 1, ""},
-    {"drawcount", GlArgKind::Scalar, 1, ""},
+    {"drawcount", GlArgKind::IntPtr, 1, ""},
     {"maxdrawcount", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
     {"mode", GlArgKind::Scalar, 1, ""},
     {"type", GlArgKind::Scalar, 1, ""},
     {"indirect", GlArgKind::Pointer, 1, ""},
-    {"drawcount", GlArgKind::Scalar, 1, ""},
+    {"drawcount", GlArgKind::IntPtr, 1, ""},
     {"maxdrawcount", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
-    {"indirect", GlArgKind::Scalar, 1, ""},
-    {"drawcount", GlArgKind::Scalar, 1, ""},
+    {"indirect", GlArgKind::IntPtr, 1, ""},
+    {"drawcount", GlArgKind::IntPtr, 1, ""},
     {"maxdrawcount", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
-    {"indirect", GlArgKind::Scalar, 1, ""},
+    {"indirect", GlArgKind::IntPtr, 1, ""},
     {"drawcount", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
     {"texunit", GlArgKind::Scalar, 1, ""},
@@ -3591,51 +3591,51 @@ inline constexpr GlArg kGlArgs[] = {
     {"type", GlArgKind::Scalar, 1, ""},
     {"pixels", GlArgKind::Pointer, 1, "COMPSIZE(format,type,width,height,depth)"},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"data", GlArgKind::Pointer, 1, "size"},
     {"usage", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"data", GlArgKind::Pointer, 1, "COMPSIZE(size)"},
     {"usage", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"commit", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"commit", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"data", GlArgKind::Pointer, 1, "size"},
     {"flags", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"data", GlArgKind::Pointer, 1, "size"},
     {"flags", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"clientBuffer", GlArgKind::Pointer, 1, ""},
     {"flags", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"memory", GlArgKind::Scalar, 1, ""},
     {"offset", GlArgKind::Int64, 2, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"data", GlArgKind::Pointer, 1, "size"},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"data", GlArgKind::Pointer, 1, "COMPSIZE(size)"},
     {"readBuffer", GlArgKind::Scalar, 1, ""},
     {"writeBuffer", GlArgKind::Scalar, 1, ""},
-    {"readOffset", GlArgKind::Scalar, 1, ""},
-    {"writeOffset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"readOffset", GlArgKind::IntPtr, 1, ""},
+    {"writeOffset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"framebuffer", GlArgKind::Scalar, 1, ""},
     {"buf", GlArgKind::Scalar, 1, ""},
     {"framebuffer", GlArgKind::Scalar, 1, ""},
@@ -4911,8 +4911,8 @@ inline constexpr GlArg kGlArgs[] = {
     {"target", GlArgKind::Scalar, 1, ""},
     {"internalformat", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"s", GlArgKind::Double, 2, ""},
     {"v", GlArgKind::Pointer, 1, "1"},
     {"s", GlArgKind::Float, 1, ""},
@@ -5252,14 +5252,14 @@ inline constexpr GlArg kGlArgs[] = {
     {"texture", GlArgKind::Scalar, 1, ""},
     {"internalformat", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"texture", GlArgKind::Scalar, 1, ""},
     {"target", GlArgKind::Scalar, 1, ""},
     {"internalformat", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"texture", GlArgKind::Scalar, 1, ""},
     {"target", GlArgKind::Scalar, 1, ""},
     {"level", GlArgKind::Scalar, 1, ""},
@@ -5518,8 +5518,8 @@ inline constexpr GlArg kGlArgs[] = {
     {"xfb", GlArgKind::Scalar, 1, ""},
     {"index", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"size", GlArgKind::IntPtr, 1, ""},
     {"program", GlArgKind::Scalar, 1, ""},
     {"count", GlArgKind::Scalar, 1, ""},
     {"varyings", GlArgKind::Pointer, 1, "count"},
@@ -5974,7 +5974,7 @@ inline constexpr GlArg kGlArgs[] = {
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"bindingindex", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"bindingindex", GlArgKind::Scalar, 1, ""},
@@ -5984,47 +5984,47 @@ inline constexpr GlArg kGlArgs[] = {
     {"size", GlArgKind::Scalar, 1, ""},
     {"type", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"type", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"type", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"texunit", GlArgKind::Scalar, 1, ""},
     {"size", GlArgKind::Scalar, 1, ""},
     {"type", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"type", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
-    {"vaobj", GlArgKind::Scalar, 1, ""},
-    {"buffer", GlArgKind::Scalar, 1, ""},
-    {"size", GlArgKind::Scalar, 1, ""},
-    {"type", GlArgKind::Scalar, 1, ""},
-    {"stride", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"size", GlArgKind::Scalar, 1, ""},
     {"type", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
+    {"vaobj", GlArgKind::Scalar, 1, ""},
+    {"buffer", GlArgKind::Scalar, 1, ""},
+    {"size", GlArgKind::Scalar, 1, ""},
+    {"type", GlArgKind::Scalar, 1, ""},
+    {"stride", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"attribindex", GlArgKind::Scalar, 1, ""},
     {"bindingindex", GlArgKind::Scalar, 1, ""},
@@ -6048,7 +6048,7 @@ inline constexpr GlArg kGlArgs[] = {
     {"size", GlArgKind::Scalar, 1, ""},
     {"type", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"attribindex", GlArgKind::Scalar, 1, ""},
     {"size", GlArgKind::Scalar, 1, ""},
@@ -6060,7 +6060,7 @@ inline constexpr GlArg kGlArgs[] = {
     {"size", GlArgKind::Scalar, 1, ""},
     {"type", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"index", GlArgKind::Scalar, 1, ""},
@@ -6068,14 +6068,14 @@ inline constexpr GlArg kGlArgs[] = {
     {"type", GlArgKind::Scalar, 1, ""},
     {"normalized", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"bindingindex", GlArgKind::Scalar, 1, ""},
     {"divisor", GlArgKind::Scalar, 1, ""},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"bindingindex", GlArgKind::Scalar, 1, ""},
     {"buffer", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"first", GlArgKind::Scalar, 1, ""},
@@ -6088,7 +6088,7 @@ inline constexpr GlArg kGlArgs[] = {
     {"size", GlArgKind::Scalar, 1, ""},
     {"type", GlArgKind::Scalar, 1, ""},
     {"stride", GlArgKind::Scalar, 1, ""},
-    {"offset", GlArgKind::Scalar, 1, ""},
+    {"offset", GlArgKind::IntPtr, 1, ""},
     {"index", GlArgKind::Scalar, 1, ""},
     {"x", GlArgKind::Double, 2, ""},
     {"index", GlArgKind::Scalar, 1, ""},
@@ -8644,128 +8644,128 @@ inline constexpr unsigned short kGlSignatureIds[] = {
     0, 1, 2, 3, 3, 2, 2, 2, 0, 2, 4, 4, 2, 2, 3, 3,
     2, 3, 3, 3, 5, 2, 2, 6, 7, 7, 3, 3, 5, 5, 8, 9,
     9, 10, 11, 7, 7, 10, 3, 3, 12, 12, 7, 13, 13, 5, 14, 3,
-    2, 2, 3, 3, 3, 7, 15, 3, 3, 3, 13, 7, 3, 2, 8, 16,
-    2, 5, 17, 18, 17, 19, 17, 5, 17, 5, 17, 7, 20, 21, 21, 2,
-    2, 3, 3, 5, 5, 3, 3, 3, 8, 8, 9, 9, 5, 5, 22, 22,
-    23, 22, 23, 24, 24, 8, 24, 25, 26, 10, 10, 2, 7, 14, 14, 13,
-    13, 3, 3, 2, 21, 27, 28, 29, 7, 7, 7, 21, 8, 8, 30, 31,
-    31, 27, 27, 28, 28, 32, 10, 10, 10, 2, 27, 33, 2, 2, 2, 34,
-    3, 35, 5, 17, 18, 17, 19, 17, 5, 17, 5, 17, 5, 17, 5, 17,
-    5, 17, 8, 17, 36, 17, 21, 17, 8, 17, 8, 17, 8, 17, 8, 17,
-    8, 17, 8, 9, 9, 3, 3, 35, 3, 35, 10, 27, 37, 37, 37, 37,
-    7, 7, 2, 2, 38, 39, 40, 41, 39, 41, 42, 28, 28, 39, 39, 40,
-    40, 28, 28, 40, 40, 33, 33, 39, 40, 41, 28, 39, 40, 41, 33, 42,
-    37, 37, 28, 28, 43, 43, 7, 7, 5, 5, 7, 7, 9, 9, 9, 9,
-    9, 9, 44, 44, 45, 46, 47, 12, 47, 22, 9, 9, 12, 12, 46, 46,
-    44, 44, 46, 46, 47, 47, 46, 47, 44, 12, 46, 47, 47, 22, 48, 48,
-    48, 49, 49, 48, 50, 48, 48, 14, 14, 51, 52, 52, 53, 50, 48, 48,
-    2, 48, 48, 2, 54, 54, 55, 55, 37, 37, 35, 35, 35, 35, 3, 35,
-    35, 2, 2, 35, 35, 35, 35, 35, 35, 35, 35, 35, 2, 17, 35, 35,
-    35, 35, 2, 56, 2, 2, 56, 7, 7, 57, 57, 58, 3, 3, 2, 2,
-    3, 3, 3, 2, 3, 3, 3, 2, 2, 3, 5, 44, 2, 5, 5, 35,
-    8, 8, 9, 8, 2, 35, 35, 10, 25, 7, 25, 25, 59, 59, 60, 25,
-    5, 2, 27, 37, 61, 37, 3, 5, 5, 8, 62, 62, 2, 35, 7, 17,
+    2, 2, 3, 3, 3, 7, 15, 3, 3, 3, 13, 7, 3, 2, 16, 17,
+    2, 5, 18, 19, 18, 20, 18, 5, 18, 5, 18, 7, 21, 22, 22, 2,
+    2, 3, 3, 5, 5, 3, 3, 3, 23, 23, 24, 24, 5, 5, 25, 25,
+    26, 25, 26, 27, 27, 28, 27, 29, 30, 31, 31, 2, 7, 14, 14, 13,
+    13, 3, 3, 2, 22, 32, 33, 34, 7, 7, 7, 22, 23, 23, 35, 36,
+    36, 32, 32, 33, 33, 37, 10, 10, 10, 2, 32, 38, 2, 2, 2, 39,
+    3, 40, 5, 18, 19, 18, 20, 18, 5, 18, 5, 18, 5, 18, 5, 18,
+    5, 18, 23, 18, 41, 18, 22, 18, 23, 18, 23, 18, 23, 18, 23, 18,
+    23, 18, 23, 24, 24, 3, 3, 40, 3, 40, 10, 32, 42, 42, 42, 42,
+    7, 7, 2, 2, 43, 44, 45, 46, 44, 46, 47, 48, 48, 44, 44, 45,
+    45, 48, 48, 45, 45, 38, 38, 44, 45, 46, 48, 44, 45, 46, 38, 47,
+    42, 42, 48, 48, 49, 49, 7, 7, 5, 5, 7, 7, 50, 24, 24, 24,
+    24, 24, 51, 51, 52, 53, 54, 12, 54, 25, 50, 24, 12, 12, 53, 53,
+    51, 51, 53, 53, 54, 54, 53, 54, 51, 12, 53, 54, 54, 25, 55, 55,
+    55, 56, 56, 55, 57, 55, 55, 14, 14, 58, 59, 59, 60, 57, 55, 55,
+    2, 55, 55, 2, 61, 61, 62, 62, 42, 42, 40, 40, 40, 40, 3, 40,
+    40, 2, 2, 40, 40, 40, 40, 40, 40, 40, 40, 40, 2, 18, 40, 40,
+    40, 40, 2, 63, 2, 2, 63, 7, 7, 64, 64, 65, 3, 3, 2, 2,
+    3, 3, 3, 2, 3, 3, 3, 2, 2, 3, 5, 51, 66, 5, 5, 40,
+    23, 23, 24, 23, 2, 40, 40, 10, 67, 7, 67, 67, 68, 68, 69, 67,
+    5, 66, 32, 42, 70, 42, 3, 5, 5, 23, 71, 71, 2, 40, 7, 18,
     2, 2, 3, 3, 3, 2, 3, 3, 3, 2, 2, 3, 6, 6, 6, 2,
-    2, 3, 6, 6, 6, 30, 17, 31, 17, 56, 17, 58, 17, 5, 9, 2,
-    3, 6, 5, 50, 63, 6, 6, 5, 5, 5, 7, 7, 30, 30, 17, 17,
-    31, 31, 17, 17, 0, 35, 3, 35, 3, 7, 6, 5, 3, 8, 8, 10,
-    12, 8, 9, 9, 9, 9, 44, 44, 8, 9, 9, 9, 9, 2, 64, 48,
-    48, 48, 48, 14, 48, 48, 48, 48, 48, 48, 48, 48, 48, 65, 48, 48,
-    48, 48, 14, 2, 2, 3, 2, 3, 66, 67, 67, 68, 68, 69, 67, 67,
-    70, 66, 70, 71, 72, 72, 51, 51, 50, 50, 48, 50, 50, 50, 65535, 65535,
-    66, 66, 48, 66, 66, 50, 50, 50, 50, 66, 50, 50, 66, 66, 73, 66,
-    66, 50, 50, 50, 50, 74, 74, 50, 50, 50, 48, 49, 50, 50, 50, 48,
-    51, 51, 51, 72, 66, 66, 50, 50, 49, 49, 14, 69, 69, 50, 50, 50,
-    50, 75, 72, 50, 48, 50, 50, 48, 69, 69, 50, 50, 50, 50, 50, 50,
-    50, 50, 50, 50, 50, 50, 50, 50, 69, 69, 50, 50, 50, 50, 66, 66,
-    66, 66, 66, 76, 69, 69, 66, 66, 66, 66, 50, 50, 50, 50, 65535, 65535,
-    66, 66, 66, 66, 50, 50, 66, 66, 66, 66, 66, 66, 50, 50, 77, 78,
-    70, 70, 50, 50, 79, 48, 48, 48, 50, 50, 65535, 65535, 65535, 65535, 80, 81,
-    50, 50, 72, 66, 50, 50, 72, 72, 50, 50, 52, 52, 52, 68, 82, 66,
-    50, 50, 50, 8, 8, 8, 8, 66, 50, 50, 50, 50, 50, 50, 50, 50,
-    50, 50, 50, 50, 50, 50, 50, 50, 50, 83, 83, 72, 72, 72, 72, 50,
-    84, 63, 52, 52, 85, 50, 50, 50, 50, 50, 69, 66, 66, 50, 50, 50,
-    50, 50, 50, 86, 76, 76, 66, 69, 66, 69, 50, 66, 50, 66, 50, 66,
-    50, 66, 87, 88, 67, 67, 66, 66, 50, 51, 13, 89, 51, 51, 13, 50,
-    50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 48, 50, 50, 50, 65535, 66,
-    66, 66, 50, 65535, 65535, 50, 50, 50, 50, 50, 50, 50, 50, 65535, 65535, 50,
-    50, 50, 50, 50, 50, 69, 69, 66, 66, 69, 69, 76, 76, 66, 66, 66,
-    66, 66, 66, 76, 76, 50, 50, 50, 50, 50, 50, 48, 48, 90, 90, 76,
-    76, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 3, 8, 8, 91, 92,
-    93, 5, 50, 7, 94, 0, 2, 3, 7, 10, 30, 17, 31, 17, 2, 17,
-    2, 17, 2, 17, 6, 5, 35, 7, 2, 5, 7, 7, 95, 95, 3, 46,
-    14, 14, 14, 13, 13, 14, 14, 96, 14, 14, 51, 14, 14, 14, 14, 14,
-    14, 14, 14, 14, 14, 14, 97, 14, 14, 96, 14, 13, 14, 10, 0, 35,
-    3, 35, 43, 7, 5, 7, 3, 31, 2, 2, 2, 6, 17, 17, 2, 17,
-    17, 17, 17, 3, 2, 98, 99, 98, 98, 100, 101, 102, 103, 63, 63, 104,
-    57, 105, 106, 107, 63, 63, 104, 104, 43, 7, 5, 7, 108, 10, 35, 35,
-    35, 2, 35, 35, 35, 35, 2, 35, 35, 35, 35, 108, 2, 2, 109, 110,
-    111, 112, 111, 112, 2, 2, 2, 2, 7, 31, 31, 5, 5, 17, 17, 17,
-    17, 17, 17, 113, 113, 114, 115, 115, 116, 117, 116, 118, 119, 119, 8, 5,
-    8, 120, 120, 35, 35, 0, 0, 35, 35, 3, 3, 35, 35, 3, 3, 35,
-    35, 57, 57, 35, 35, 105, 105, 35, 35, 5, 5, 35, 35, 5, 5, 35,
-    35, 111, 111, 35, 35, 112, 112, 35, 35, 8, 8, 35, 35, 8, 8, 35,
-    35, 109, 109, 35, 35, 110, 110, 35, 35, 9, 9, 35, 35, 9, 9, 35,
-    35, 5, 7, 5, 7, 5, 7, 5, 7, 27, 121, 10, 8, 10, 122, 10,
-    121, 10, 8, 10, 40, 41, 33, 10, 10, 121, 10, 8, 10, 5, 39, 41,
-    42, 24, 24, 8, 8, 24, 24, 25, 26, 10, 10, 9, 3, 7, 5, 5,
-    3, 8, 8, 10, 8, 9, 9, 44, 8, 9, 9, 9, 123, 10, 124, 10,
-    12, 10, 12, 10, 27, 27, 27, 27, 8, 8, 9, 44, 9, 125, 3, 5,
-    17, 18, 17, 19, 17, 5, 17, 5, 17, 3, 35, 7, 10, 10, 126, 64,
-    31, 35, 3, 6, 7, 7, 7, 0, 3, 0, 3, 43, 7, 5, 7, 58,
-    0, 0, 0, 35, 35, 35, 3, 35, 31, 3, 58, 19, 19, 58, 17, 6,
-    6, 6, 6, 6, 6, 127, 2, 62, 62, 24, 128, 7, 129, 7, 10, 128,
-    7, 129, 7, 10, 5, 5, 5, 10, 130, 130, 10, 10, 43, 43, 10, 10,
-    5, 131, 10, 5, 10, 10, 5, 131, 10, 5, 10, 10, 132, 132, 10, 10,
-    133, 133, 10, 10, 8, 134, 10, 8, 10, 10, 8, 134, 10, 8, 10, 10,
-    135, 135, 10, 10, 136, 136, 10, 10, 9, 137, 10, 9, 10, 10, 9, 137,
-    10, 9, 10, 10, 128, 128, 10, 10, 129, 129, 10, 10, 44, 138, 10, 44,
-    10, 10, 44, 138, 10, 44, 10, 10, 131, 10, 27, 27, 27, 27, 27, 27,
-    27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27,
-    27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 2, 2,
-    2, 2, 2, 10, 35, 6, 2, 3, 56, 17, 58, 17, 3, 17, 3, 17,
-    18, 17, 19, 17, 5, 17, 5, 17, 36, 17, 21, 17, 8, 17, 8, 17,
-    3, 2, 139, 140, 140, 36, 54, 21, 54, 8, 54, 8, 54, 141, 6, 14,
-    8, 8, 9, 9, 2, 2, 2, 2, 6, 36, 21, 142, 142, 142, 3, 2,
-    7, 7, 43, 7, 5, 7, 18, 19, 8, 7, 9, 35, 5, 5, 17, 17,
-    18, 18, 17, 17, 19, 19, 17, 17, 5, 5, 17, 17, 5, 5, 17, 17,
-    5, 5, 17, 17, 5, 5, 17, 17, 5, 5, 17, 17, 3, 35, 10, 10,
-    48, 7, 143, 143, 7, 7, 2, 116, 5, 8, 9, 38, 38, 5, 3, 2,
-    144, 145, 145, 3, 5, 8, 2, 3, 5, 8, 44, 5, 17, 18, 17, 19,
-    17, 5, 17, 5, 17, 7, 5, 5, 5, 9, 30, 17, 31, 17, 2, 17,
-    2, 17, 56, 17, 58, 17, 3, 17, 3, 17, 18, 17, 19, 17, 5, 17,
-    5, 17, 36, 17, 21, 17, 8, 17, 8, 17, 3, 35, 3, 35, 3, 35,
-    3, 35, 10, 27, 43, 7, 5, 7, 130, 7, 43, 7, 5, 7, 39, 40,
-    44, 41, 41, 12, 47, 7, 7, 7, 7, 43, 7, 5, 7, 8, 8, 9,
-    9, 44, 44, 44, 12, 146, 147, 148, 148, 149, 28, 28, 40, 40, 33, 33,
-    6, 5, 8, 9, 44, 40, 41, 33, 2, 3, 2, 47, 7, 10, 7, 10,
-    43, 121, 7, 10, 5, 8, 7, 10, 5, 8, 9, 9, 44, 44, 12, 44,
-    12, 12, 46, 146, 147, 148, 148, 149, 28, 39, 40, 41, 33, 42, 46, 5,
-    9, 24, 24, 18, 19, 120, 7, 0, 0, 7, 7, 3, 150, 7, 3, 7,
-    7, 3, 150, 7, 3, 7, 7, 57, 7, 105, 105, 7, 7, 5, 151, 7,
-    5, 7, 7, 5, 151, 7, 5, 7, 7, 111, 7, 112, 112, 7, 7, 8,
-    152, 7, 8, 7, 7, 8, 152, 7, 8, 7, 7, 109, 7, 110, 110, 7,
-    7, 9, 153, 7, 9, 7, 7, 9, 153, 7, 9, 7, 7, 5, 5, 150,
+    2, 3, 6, 6, 6, 35, 18, 36, 18, 63, 18, 65, 18, 5, 24, 2,
+    3, 6, 5, 57, 72, 6, 6, 73, 73, 73, 7, 7, 35, 35, 18, 18,
+    36, 36, 18, 18, 0, 40, 3, 40, 3, 7, 6, 5, 3, 23, 23, 10,
+    12, 23, 24, 24, 24, 24, 51, 51, 23, 24, 24, 24, 24, 2, 74, 55,
+    55, 55, 55, 14, 55, 55, 55, 55, 55, 55, 55, 55, 55, 75, 55, 55,
+    55, 55, 14, 2, 2, 3, 2, 3, 76, 77, 77, 78, 78, 79, 77, 77,
+    80, 76, 80, 81, 82, 82, 58, 58, 57, 57, 55, 57, 57, 57, 65535, 65535,
+    83, 83, 55, 76, 76, 57, 57, 57, 57, 76, 57, 57, 76, 76, 84, 76,
+    76, 57, 57, 57, 57, 85, 85, 57, 57, 57, 55, 56, 57, 57, 57, 55,
+    58, 58, 58, 82, 76, 76, 57, 57, 56, 56, 14, 79, 79, 57, 57, 57,
+    57, 86, 82, 57, 55, 57, 57, 55, 79, 79, 57, 57, 57, 57, 57, 57,
+    57, 57, 57, 57, 57, 57, 57, 57, 79, 79, 57, 57, 57, 57, 76, 76,
+    76, 76, 76, 87, 79, 79, 76, 76, 76, 76, 57, 57, 57, 57, 65535, 65535,
+    83, 83, 76, 76, 57, 57, 76, 76, 76, 76, 76, 76, 57, 57, 88, 89,
+    80, 80, 57, 57, 90, 55, 55, 55, 57, 57, 65535, 65535, 65535, 65535, 91, 92,
+    57, 57, 82, 76, 57, 57, 82, 82, 57, 57, 59, 59, 59, 78, 93, 76,
+    57, 57, 57, 8, 8, 8, 8, 76, 57, 57, 57, 57, 57, 57, 57, 57,
+    57, 57, 57, 57, 57, 57, 57, 57, 57, 94, 94, 82, 82, 82, 82, 57,
+    95, 72, 59, 59, 96, 57, 57, 57, 57, 57, 79, 76, 76, 57, 57, 57,
+    57, 57, 57, 97, 87, 87, 76, 79, 76, 79, 57, 76, 57, 76, 57, 76,
+    57, 76, 98, 99, 77, 77, 76, 76, 57, 58, 13, 100, 58, 58, 101, 57,
+    57, 57, 57, 57, 57, 57, 57, 57, 57, 57, 55, 57, 57, 57, 65535, 76,
+    76, 76, 57, 65535, 65535, 57, 57, 57, 57, 57, 57, 57, 57, 65535, 65535, 57,
+    57, 57, 57, 57, 57, 79, 79, 76, 76, 79, 79, 87, 87, 76, 76, 76,
+    76, 76, 76, 87, 87, 57, 57, 57, 57, 57, 57, 55, 55, 102, 102, 87,
+    87, 76, 76, 76, 76, 76, 76, 76, 76, 76, 76, 3, 23, 23, 103, 104,
+    105, 5, 57, 7, 106, 0, 2, 3, 7, 10, 35, 18, 36, 18, 2, 18,
+    2, 18, 2, 18, 6, 5, 40, 7, 2, 73, 7, 7, 107, 107, 3, 53,
+    14, 14, 14, 13, 13, 14, 14, 108, 14, 14, 58, 14, 14, 14, 14, 14,
+    14, 14, 14, 14, 14, 14, 109, 14, 14, 108, 14, 13, 14, 10, 0, 40,
+    3, 40, 49, 7, 5, 7, 3, 36, 2, 2, 2, 6, 18, 18, 2, 18,
+    18, 18, 18, 3, 2, 110, 111, 110, 110, 112, 113, 114, 115, 72, 72, 116,
+    64, 117, 118, 119, 72, 72, 116, 116, 49, 7, 5, 7, 120, 10, 40, 40,
+    40, 2, 40, 40, 40, 40, 2, 40, 40, 40, 40, 120, 2, 2, 121, 122,
+    123, 124, 123, 124, 2, 2, 2, 2, 7, 36, 36, 5, 5, 18, 18, 18,
+    18, 18, 18, 125, 125, 126, 127, 127, 128, 129, 128, 130, 131, 131, 132, 133,
+    23, 134, 134, 40, 40, 0, 0, 40, 40, 3, 3, 40, 40, 3, 3, 40,
+    40, 64, 64, 40, 40, 117, 117, 40, 40, 5, 5, 40, 40, 5, 5, 40,
+    40, 123, 123, 40, 40, 124, 124, 40, 40, 23, 23, 40, 40, 23, 23, 40,
+    40, 121, 121, 40, 40, 122, 122, 40, 40, 24, 24, 40, 40, 24, 24, 40,
+    40, 5, 7, 5, 7, 5, 7, 5, 7, 32, 135, 10, 23, 10, 136, 10,
+    135, 10, 23, 10, 45, 46, 38, 10, 10, 135, 10, 23, 10, 5, 44, 46,
+    47, 27, 27, 28, 28, 27, 27, 29, 30, 31, 31, 50, 3, 7, 5, 5,
+    3, 23, 23, 10, 23, 24, 24, 51, 23, 24, 24, 24, 137, 10, 138, 10,
+    12, 10, 12, 10, 32, 32, 32, 32, 23, 23, 24, 51, 24, 139, 3, 5,
+    18, 19, 18, 20, 18, 5, 18, 5, 18, 3, 40, 7, 10, 10, 140, 74,
+    36, 40, 3, 6, 7, 7, 7, 0, 3, 0, 3, 49, 7, 5, 7, 65,
+    0, 0, 0, 40, 40, 40, 3, 40, 36, 3, 65, 20, 20, 65, 18, 6,
+    6, 6, 6, 6, 6, 141, 2, 71, 71, 142, 143, 7, 144, 7, 10, 143,
+    7, 144, 7, 10, 5, 5, 5, 10, 145, 145, 10, 10, 49, 49, 10, 10,
+    5, 146, 10, 5, 10, 10, 5, 146, 10, 5, 10, 10, 147, 147, 10, 10,
+    148, 148, 10, 10, 23, 149, 10, 23, 10, 10, 23, 149, 10, 23, 10, 10,
+    150, 150, 10, 10, 151, 151, 10, 10, 24, 152, 10, 24, 10, 10, 24, 152,
+    10, 24, 10, 10, 143, 143, 10, 10, 144, 144, 10, 10, 51, 153, 10, 51,
+    10, 10, 51, 153, 10, 51, 10, 10, 146, 10, 32, 32, 32, 32, 32, 32,
+    32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32,
+    32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 2, 2,
+    2, 2, 2, 10, 40, 6, 2, 3, 63, 18, 65, 18, 3, 18, 3, 18,
+    19, 18, 20, 18, 5, 18, 5, 18, 41, 18, 22, 18, 23, 18, 23, 18,
+    3, 2, 154, 155, 155, 41, 61, 22, 61, 23, 61, 23, 61, 156, 6, 14,
+    23, 23, 24, 24, 2, 2, 2, 2, 6, 41, 22, 157, 157, 157, 3, 2,
+    7, 7, 49, 7, 5, 7, 19, 20, 23, 7, 24, 40, 5, 5, 18, 18,
+    19, 19, 18, 18, 20, 20, 18, 18, 5, 5, 18, 18, 5, 5, 18, 18,
+    5, 5, 18, 18, 5, 5, 18, 18, 5, 5, 18, 18, 3, 40, 10, 10,
+    55, 7, 158, 158, 7, 7, 2, 128, 5, 23, 24, 43, 43, 5, 3, 2,
+    159, 160, 160, 3, 5, 23, 2, 3, 5, 23, 51, 5, 18, 19, 18, 20,
+    18, 5, 18, 5, 18, 7, 5, 5, 5, 9, 35, 18, 36, 18, 2, 18,
+    2, 18, 63, 18, 65, 18, 3, 18, 3, 18, 19, 18, 20, 18, 5, 18,
+    5, 18, 41, 18, 22, 18, 23, 18, 23, 18, 3, 40, 3, 40, 3, 40,
+    3, 40, 10, 32, 49, 7, 5, 7, 145, 7, 49, 7, 5, 7, 44, 45,
+    51, 46, 46, 12, 54, 7, 7, 7, 7, 49, 7, 5, 7, 23, 23, 24,
+    24, 51, 51, 51, 12, 161, 162, 163, 163, 164, 48, 48, 45, 45, 38, 38,
+    6, 5, 23, 9, 165, 45, 46, 38, 2, 3, 2, 54, 7, 10, 7, 10,
+    49, 135, 7, 10, 5, 23, 7, 10, 5, 23, 24, 24, 51, 51, 12, 51,
+    12, 12, 53, 161, 162, 163, 163, 164, 48, 44, 45, 46, 38, 47, 53, 5,
+    9, 142, 142, 19, 20, 134, 7, 0, 0, 7, 7, 3, 166, 7, 3, 7,
+    7, 3, 166, 7, 3, 7, 7, 64, 7, 117, 117, 7, 7, 5, 167, 7,
+    5, 7, 7, 5, 167, 7, 5, 7, 7, 123, 7, 124, 124, 7, 7, 23,
+    168, 7, 23, 7, 7, 23, 168, 7, 23, 7, 7, 121, 7, 122, 122, 7,
+    7, 24, 169, 7, 24, 7, 7, 24, 169, 7, 24, 7, 7, 5, 5, 166,
     7, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
     10, 10, 10, 10, 10, 10, 7, 6, 14, 14, 14, 14, 2, 2, 5, 5,
-    3, 2, 2, 2, 2, 10, 35, 35, 35, 35, 35, 35, 35, 35, 56, 17,
-    58, 17, 3, 17, 3, 17, 18, 17, 19, 17, 5, 17, 5, 17, 36, 17,
-    21, 17, 8, 17, 8, 17, 5, 44, 9, 9, 9, 5, 44, 8, 3, 9,
-    9, 12, 9, 44, 44, 5, 5, 44, 9, 12, 9, 12, 46, 5, 9, 11,
-    44, 120, 120, 35, 35, 0, 0, 35, 35, 3, 3, 35, 35, 57, 57, 35,
-    35, 105, 105, 35, 35, 5, 5, 35, 35, 111, 111, 35, 35, 112, 112, 35,
-    35, 8, 8, 35, 35, 35, 35, 35, 35, 35, 35, 9, 9, 35, 35, 35,
-    35, 35, 35, 35, 35, 109, 109, 35, 35, 110, 110, 35, 35, 35, 35, 9,
-    9, 35, 35, 35, 35, 35, 35, 35, 35, 3, 3, 3, 9, 3, 3, 35,
-    35, 3, 3, 35, 35, 5, 5, 35, 35, 5, 5, 35, 35, 8, 8, 35,
-    35, 8, 8, 35, 35, 35, 35, 9, 9, 35, 35, 35, 35, 35, 35, 9,
-    9, 35, 35, 35, 35, 8, 27, 27, 120, 120, 35, 35, 150, 35, 57, 57,
-    35, 35, 111, 111, 35, 35, 109, 109, 35, 35, 8, 27, 27, 8, 10, 8,
-    10, 8, 10, 8, 10, 37, 37, 3, 2, 3, 35, 3, 35, 3, 35, 10,
-    27, 10, 31, 17, 8, 7, 110, 35, 144, 154, 10, 35, 35, 35, 35, 35,
-    35, 35, 35, 56, 56, 17, 17, 58, 58, 17, 17, 3, 3, 17, 17, 3,
-    3, 17, 17, 18, 18, 17, 17, 19, 19, 17, 17, 5, 5, 17, 17, 5,
-    5, 17, 17, 7, 44
+    3, 2, 2, 2, 2, 10, 40, 40, 40, 40, 40, 40, 40, 40, 63, 18,
+    65, 18, 3, 18, 3, 18, 19, 18, 20, 18, 5, 18, 5, 18, 41, 18,
+    22, 18, 23, 18, 23, 18, 5, 51, 24, 24, 170, 5, 171, 8, 3, 172,
+    172, 173, 172, 171, 171, 5, 5, 51, 24, 173, 24, 173, 174, 5, 170, 11,
+    171, 134, 134, 40, 40, 0, 0, 40, 40, 3, 3, 40, 40, 64, 64, 40,
+    40, 117, 117, 40, 40, 5, 5, 40, 40, 123, 123, 40, 40, 124, 124, 40,
+    40, 23, 23, 40, 40, 40, 40, 40, 40, 40, 40, 24, 24, 40, 40, 40,
+    40, 40, 40, 40, 40, 121, 121, 40, 40, 122, 122, 40, 40, 40, 40, 24,
+    24, 40, 40, 40, 40, 40, 40, 40, 40, 3, 3, 3, 24, 3, 3, 40,
+    40, 3, 3, 40, 40, 5, 5, 40, 40, 5, 5, 40, 40, 23, 23, 40,
+    40, 23, 23, 40, 40, 40, 40, 24, 24, 40, 40, 40, 40, 40, 40, 24,
+    24, 40, 40, 40, 40, 23, 32, 32, 134, 134, 40, 40, 166, 40, 64, 64,
+    40, 40, 123, 123, 40, 40, 121, 121, 40, 40, 23, 32, 32, 23, 10, 23,
+    10, 23, 10, 23, 10, 42, 42, 3, 2, 3, 40, 3, 40, 3, 40, 10,
+    32, 10, 36, 18, 23, 7, 122, 40, 159, 175, 10, 40, 40, 40, 40, 40,
+    40, 40, 40, 63, 63, 18, 18, 65, 65, 18, 18, 3, 3, 18, 18, 3,
+    3, 18, 18, 19, 19, 18, 18, 20, 20, 18, 18, 5, 5, 18, 18, 5,
+    5, 18, 18, 7, 51
 };
 inline constexpr GlReturnKind kGlReturnKinds[] = {
     GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
@@ -8859,7 +8859,7 @@ inline constexpr GlReturnKind kGlReturnKinds[] = {
     GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Int64, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
     GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
     GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Int64, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
-    GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::IntPtr, GlReturnKind::Void,
     GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
     GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
     GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
@@ -9443,153 +9443,174 @@ inline uintptr_t gl_call_shape_4(uintptr_t p, const uintptr_t* a) { (void)a; usi
 inline uintptr_t gl_call_shape_5(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2])); return 0; }
 inline uintptr_t gl_call_shape_6(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(); return 0; }
 inline uintptr_t gl_call_shape_7(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2])); return 0; }
-inline uintptr_t gl_call_shape_8(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3])); return 0; }
-inline uintptr_t gl_call_shape_9(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4])); return 0; }
+inline uintptr_t gl_call_shape_8(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, intptr_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), intptr_t(int32_t(a[3]))); return 0; }
+inline uintptr_t gl_call_shape_9(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, intptr_t, intptr_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), intptr_t(int32_t(a[3])), intptr_t(int32_t(a[4]))); return 0; }
 inline uintptr_t gl_call_shape_10(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3])); return 0; }
 inline uintptr_t gl_call_shape_11(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, void*, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
 inline uintptr_t gl_call_shape_12(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6])); return 0; }
 inline uintptr_t gl_call_shape_13(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]))); }
 inline uintptr_t gl_call_shape_14(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]))); }
 inline uintptr_t gl_call_shape_15(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]))); }
-inline uintptr_t gl_call_shape_16(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
-inline uintptr_t gl_call_shape_17(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0])); return 0; }
-inline uintptr_t gl_call_shape_18(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_double(a[0], a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5])); return 0; }
-inline uintptr_t gl_call_shape_19(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_float(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2])); return 0; }
-inline uintptr_t gl_call_shape_20(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float, float, float, float, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5]), reinterpret_cast<void*>(a[6])); return 0; }
-inline uintptr_t gl_call_shape_21(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_float(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3])); return 0; }
-inline uintptr_t gl_call_shape_22(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8]), uint32_t(a[9])); return 0; }
-inline uintptr_t gl_call_shape_23(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8]), uint32_t(a[9]), uint32_t(a[10]), uint32_t(a[11])); return 0; }
-inline uintptr_t gl_call_shape_24(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3])); return 0; }
-inline uintptr_t gl_call_shape_25(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), uint32_t(a[4])); return 0; }
-inline uintptr_t gl_call_shape_26(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_u64(a[3], a[4])); return 0; }
-inline uintptr_t gl_call_shape_27(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
-inline uintptr_t gl_call_shape_28(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), reinterpret_cast<void*>(a[6])); return 0; }
-inline uintptr_t gl_call_shape_29(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2]), uint32_t(a[3])); return 0; }
-inline uintptr_t gl_call_shape_30(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_double(a[0], a[1])); return 0; }
-inline uintptr_t gl_call_shape_31(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_float(a[0])); return 0; }
-inline uintptr_t gl_call_shape_32(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, float, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_float(a[3]), uint32_t(a[4])); return 0; }
-inline uintptr_t gl_call_shape_33(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8]), uint32_t(a[9]), reinterpret_cast<void*>(a[10])); return 0; }
-inline uintptr_t gl_call_shape_34(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(void*, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(reinterpret_cast<void*>(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3]))); }
-inline uintptr_t gl_call_shape_35(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1])); return 0; }
-inline uintptr_t gl_call_shape_36(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_double(a[0], a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5]), gl_arg_double(a[6], a[7])); return 0; }
-inline uintptr_t gl_call_shape_37(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
-inline uintptr_t gl_call_shape_38(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), reinterpret_cast<void*>(a[3])); return 0; }
-inline uintptr_t gl_call_shape_39(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), reinterpret_cast<void*>(a[7])); return 0; }
-inline uintptr_t gl_call_shape_40(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), reinterpret_cast<void*>(a[8])); return 0; }
-inline uintptr_t gl_call_shape_41(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8]), reinterpret_cast<void*>(a[9])); return 0; }
-inline uintptr_t gl_call_shape_42(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8]), uint32_t(a[9]), uint32_t(a[10]), reinterpret_cast<void*>(a[11])); return 0; }
-inline uintptr_t gl_call_shape_43(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2])); return 0; }
-inline uintptr_t gl_call_shape_44(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5])); return 0; }
-inline uintptr_t gl_call_shape_45(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8]), uint32_t(a[9]), uint32_t(a[10]), uint32_t(a[11]), uint32_t(a[12]), uint32_t(a[13]), uint32_t(a[14])); return 0; }
-inline uintptr_t gl_call_shape_46(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7])); return 0; }
-inline uintptr_t gl_call_shape_47(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8])); return 0; }
-inline uintptr_t gl_call_shape_48(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1])); return 0; }
-inline uintptr_t gl_call_shape_49(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn()); }
-inline uintptr_t gl_call_shape_50(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2])); return 0; }
-inline uintptr_t gl_call_shape_51(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]))); }
-inline uintptr_t gl_call_shape_52(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]))); }
-inline uintptr_t gl_call_shape_53(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void*(*)(void*, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(reinterpret_cast<void*>(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]))); }
-inline uintptr_t gl_call_shape_54(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0]), reinterpret_cast<void*>(a[1])); return 0; }
-inline uintptr_t gl_call_shape_55(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4]), uint32_t(a[5])); return 0; }
-inline uintptr_t gl_call_shape_56(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_double(a[0], a[1]), gl_arg_double(a[2], a[3])); return 0; }
-inline uintptr_t gl_call_shape_57(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4])); return 0; }
-inline uintptr_t gl_call_shape_58(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_float(a[0]), gl_arg_float(a[1])); return 0; }
-inline uintptr_t gl_call_shape_59(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, void*, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), uint32_t(a[4]), uint32_t(a[5])); return 0; }
-inline uintptr_t gl_call_shape_60(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, void*, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6])); return 0; }
-inline uintptr_t gl_call_shape_61(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), reinterpret_cast<void*>(a[5]), uint32_t(a[6])); return 0; }
-inline uintptr_t gl_call_shape_62(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), reinterpret_cast<void*>(a[2])); return 0; }
-inline uintptr_t gl_call_shape_63(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void*(*)(uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]))); }
-inline uintptr_t gl_call_shape_64(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(double, double, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_double(a[0], a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5]), gl_arg_double(a[6], a[7]), gl_arg_double(a[8], a[9]), gl_arg_double(a[10], a[11])); return 0; }
-inline uintptr_t gl_call_shape_65(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]))); }
-inline uintptr_t gl_call_shape_66(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3])); return 0; }
-inline uintptr_t gl_call_shape_67(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, void*, void*, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4]), reinterpret_cast<void*>(a[5]), reinterpret_cast<void*>(a[6])); return 0; }
-inline uintptr_t gl_call_shape_68(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
-inline uintptr_t gl_call_shape_69(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
-inline uintptr_t gl_call_shape_70(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
-inline uintptr_t gl_call_shape_71(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
-inline uintptr_t gl_call_shape_72(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), reinterpret_cast<void*>(a[3])); return 0; }
-inline uintptr_t gl_call_shape_73(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8]), reinterpret_cast<void*>(a[9])); return 0; }
-inline uintptr_t gl_call_shape_74(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint32_t, uint32_t, void*, void*, void*, void*, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4]), reinterpret_cast<void*>(a[5]), reinterpret_cast<void*>(a[6]), reinterpret_cast<void*>(a[7]))); }
-inline uintptr_t gl_call_shape_75(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint64_t(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]))); }
-inline uintptr_t gl_call_shape_76(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
-inline uintptr_t gl_call_shape_77(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
-inline uintptr_t gl_call_shape_78(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3])); return 0; }
-inline uintptr_t gl_call_shape_79(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), reinterpret_cast<void*>(a[3])); return 0; }
-inline uintptr_t gl_call_shape_80(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0])); return 0; }
-inline uintptr_t gl_call_shape_81(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
-inline uintptr_t gl_call_shape_82(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, void*, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4]), uint32_t(a[5]), reinterpret_cast<void*>(a[6]), reinterpret_cast<void*>(a[7])); return 0; }
-inline uintptr_t gl_call_shape_83(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, void*, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
-inline uintptr_t gl_call_shape_84(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void*(*)(uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]))); }
-inline uintptr_t gl_call_shape_85(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*, uint32_t, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
-inline uintptr_t gl_call_shape_86(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint64_t(*)(uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]))); }
-inline uintptr_t gl_call_shape_87(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint64_t(*)(uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]))); }
-inline uintptr_t gl_call_shape_88(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8]), uint32_t(a[9]), uint32_t(a[10]), reinterpret_cast<void*>(a[11])); return 0; }
-inline uintptr_t gl_call_shape_89(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), reinterpret_cast<void*>(a[3])); return 0; }
-inline uintptr_t gl_call_shape_90(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, void*, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4]), uint32_t(a[5]), reinterpret_cast<void*>(a[6]), reinterpret_cast<void*>(a[7])); return 0; }
-inline uintptr_t gl_call_shape_91(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), uint32_t(a[3]), uint32_t(a[4])); return 0; }
-inline uintptr_t gl_call_shape_92(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
-inline uintptr_t gl_call_shape_93(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
-inline uintptr_t gl_call_shape_94(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void*(*)(uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]))); }
-inline uintptr_t gl_call_shape_95(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6])); return 0; }
-inline uintptr_t gl_call_shape_96(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(gl_arg_u64(a[0], a[1]))); }
-inline uintptr_t gl_call_shape_97(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(reinterpret_cast<void*>(a[0]))); }
-inline uintptr_t gl_call_shape_98(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_u64(a[0], a[1])); return 0; }
-inline uintptr_t gl_call_shape_99(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint64_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_u64(a[0], a[1]), uint32_t(a[2])); return 0; }
-inline uintptr_t gl_call_shape_100(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), uint32_t(a[5]), uint32_t(a[6]), reinterpret_cast<void*>(a[7])); return 0; }
-inline uintptr_t gl_call_shape_101(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), uint32_t(a[3]), uint32_t(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
-inline uintptr_t gl_call_shape_102(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, uint32_t, uint32_t, double, double, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), uint32_t(a[5]), uint32_t(a[6]), gl_arg_double(a[7], a[8]), gl_arg_double(a[9], a[10]), uint32_t(a[11]), uint32_t(a[12]), reinterpret_cast<void*>(a[13])); return 0; }
-inline uintptr_t gl_call_shape_103(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, uint32_t, uint32_t, float, float, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), uint32_t(a[3]), uint32_t(a[4]), gl_arg_float(a[5]), gl_arg_float(a[6]), uint32_t(a[7]), uint32_t(a[8]), reinterpret_cast<void*>(a[9])); return 0; }
-inline uintptr_t gl_call_shape_104(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void*(*)(uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]))); }
-inline uintptr_t gl_call_shape_105(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2])); return 0; }
-inline uintptr_t gl_call_shape_106(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, uint32_t, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), uint32_t(a[5]), gl_arg_double(a[6], a[7]), gl_arg_double(a[8], a[9])); return 0; }
-inline uintptr_t gl_call_shape_107(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, uint32_t, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), uint32_t(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5])); return 0; }
-inline uintptr_t gl_call_shape_108(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), gl_arg_double(a[5], a[6]), gl_arg_double(a[7], a[8]), gl_arg_double(a[9], a[10]), gl_arg_double(a[11], a[12])); return 0; }
-inline uintptr_t gl_call_shape_109(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), gl_arg_double(a[5], a[6]), gl_arg_double(a[7], a[8])); return 0; }
-inline uintptr_t gl_call_shape_110(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4])); return 0; }
-inline uintptr_t gl_call_shape_111(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), gl_arg_double(a[5], a[6])); return 0; }
-inline uintptr_t gl_call_shape_112(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3])); return 0; }
-inline uintptr_t gl_call_shape_113(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3])); return 0; }
-inline uintptr_t gl_call_shape_114(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), uint32_t(a[3])); return 0; }
-inline uintptr_t gl_call_shape_115(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4])); return 0; }
-inline uintptr_t gl_call_shape_116(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), uint32_t(a[4])); return 0; }
-inline uintptr_t gl_call_shape_117(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, void*, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), uint32_t(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
-inline uintptr_t gl_call_shape_118(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), uint32_t(a[4])); return 0; }
-inline uintptr_t gl_call_shape_119(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5])); return 0; }
-inline uintptr_t gl_call_shape_120(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2])); return 0; }
-inline uintptr_t gl_call_shape_121(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_float(a[3])); return 0; }
-inline uintptr_t gl_call_shape_122(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_double(a[3], a[4])); return 0; }
-inline uintptr_t gl_call_shape_123(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_double(a[3], a[4]), gl_arg_double(a[5], a[6]), gl_arg_double(a[7], a[8]), gl_arg_double(a[9], a[10])); return 0; }
-inline uintptr_t gl_call_shape_124(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5]), gl_arg_float(a[6])); return 0; }
-inline uintptr_t gl_call_shape_125(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
-inline uintptr_t gl_call_shape_126(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2])); return 0; }
-inline uintptr_t gl_call_shape_127(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(float, float, float, float, float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_float(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5]), gl_arg_float(a[6]), gl_arg_float(a[7])); return 0; }
-inline uintptr_t gl_call_shape_128(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5]), gl_arg_double(a[6], a[7]), gl_arg_double(a[8], a[9])); return 0; }
-inline uintptr_t gl_call_shape_129(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5])); return 0; }
-inline uintptr_t gl_call_shape_130(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_double(a[2], a[3])); return 0; }
-inline uintptr_t gl_call_shape_131(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3])); return 0; }
-inline uintptr_t gl_call_shape_132(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5])); return 0; }
-inline uintptr_t gl_call_shape_133(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3])); return 0; }
-inline uintptr_t gl_call_shape_134(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3]), gl_arg_u64(a[4], a[5])); return 0; }
-inline uintptr_t gl_call_shape_135(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5]), gl_arg_double(a[6], a[7])); return 0; }
-inline uintptr_t gl_call_shape_136(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4])); return 0; }
-inline uintptr_t gl_call_shape_137(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3]), gl_arg_u64(a[4], a[5]), gl_arg_u64(a[6], a[7])); return 0; }
-inline uintptr_t gl_call_shape_138(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3]), gl_arg_u64(a[4], a[5]), gl_arg_u64(a[6], a[7]), gl_arg_u64(a[8], a[9])); return 0; }
-inline uintptr_t gl_call_shape_139(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), reinterpret_cast<void*>(a[6])); return 0; }
-inline uintptr_t gl_call_shape_140(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), reinterpret_cast<void*>(a[7])); return 0; }
-inline uintptr_t gl_call_shape_141(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]))); }
-inline uintptr_t gl_call_shape_142(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(float, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_float(a[0]), uint32_t(a[1])); return 0; }
-inline uintptr_t gl_call_shape_143(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), reinterpret_cast<void*>(a[6]), reinterpret_cast<void*>(a[7])); return 0; }
-inline uintptr_t gl_call_shape_144(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
-inline uintptr_t gl_call_shape_145(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
-inline uintptr_t gl_call_shape_146(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), gl_arg_u64(a[5], a[6])); return 0; }
-inline uintptr_t gl_call_shape_147(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), gl_arg_u64(a[6], a[7])); return 0; }
-inline uintptr_t gl_call_shape_148(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), gl_arg_u64(a[7], a[8])); return 0; }
-inline uintptr_t gl_call_shape_149(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), gl_arg_u64(a[8], a[9])); return 0; }
-inline uintptr_t gl_call_shape_150(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2])); return 0; }
-inline uintptr_t gl_call_shape_151(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), gl_arg_u64(a[3], a[4])); return 0; }
-inline uintptr_t gl_call_shape_152(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), gl_arg_u64(a[3], a[4]), gl_arg_u64(a[5], a[6])); return 0; }
-inline uintptr_t gl_call_shape_153(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), gl_arg_u64(a[3], a[4]), gl_arg_u64(a[5], a[6]), gl_arg_u64(a[7], a[8])); return 0; }
-inline uintptr_t gl_call_shape_154(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3])); return 0; }
+inline uintptr_t gl_call_shape_16(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, intptr_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), intptr_t(int32_t(a[2])), uint32_t(a[3])); return 0; }
+inline uintptr_t gl_call_shape_17(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
+inline uintptr_t gl_call_shape_18(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0])); return 0; }
+inline uintptr_t gl_call_shape_19(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_double(a[0], a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5])); return 0; }
+inline uintptr_t gl_call_shape_20(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_float(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2])); return 0; }
+inline uintptr_t gl_call_shape_21(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float, float, float, float, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5]), reinterpret_cast<void*>(a[6])); return 0; }
+inline uintptr_t gl_call_shape_22(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_float(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3])); return 0; }
+inline uintptr_t gl_call_shape_23(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3])); return 0; }
+inline uintptr_t gl_call_shape_24(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4])); return 0; }
+inline uintptr_t gl_call_shape_25(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8]), uint32_t(a[9])); return 0; }
+inline uintptr_t gl_call_shape_26(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8]), uint32_t(a[9]), uint32_t(a[10]), uint32_t(a[11])); return 0; }
+inline uintptr_t gl_call_shape_27(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, intptr_t, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), intptr_t(int32_t(a[1])), reinterpret_cast<void*>(a[2]), uint32_t(a[3])); return 0; }
+inline uintptr_t gl_call_shape_28(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, intptr_t, intptr_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), intptr_t(int32_t(a[1])), intptr_t(int32_t(a[2])), uint32_t(a[3])); return 0; }
+inline uintptr_t gl_call_shape_29(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, intptr_t, intptr_t, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), intptr_t(int32_t(a[1])), intptr_t(int32_t(a[2])), reinterpret_cast<void*>(a[3]), uint32_t(a[4])); return 0; }
+inline uintptr_t gl_call_shape_30(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, intptr_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), intptr_t(int32_t(a[1])), uint32_t(a[2]), gl_arg_u64(a[3], a[4])); return 0; }
+inline uintptr_t gl_call_shape_31(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, intptr_t, intptr_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), intptr_t(int32_t(a[1])), intptr_t(int32_t(a[2])), reinterpret_cast<void*>(a[3])); return 0; }
+inline uintptr_t gl_call_shape_32(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
+inline uintptr_t gl_call_shape_33(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, intptr_t, intptr_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), intptr_t(int32_t(a[2])), intptr_t(int32_t(a[3])), uint32_t(a[4]), uint32_t(a[5]), reinterpret_cast<void*>(a[6])); return 0; }
+inline uintptr_t gl_call_shape_34(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2]), uint32_t(a[3])); return 0; }
+inline uintptr_t gl_call_shape_35(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_double(a[0], a[1])); return 0; }
+inline uintptr_t gl_call_shape_36(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_float(a[0])); return 0; }
+inline uintptr_t gl_call_shape_37(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, float, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_float(a[3]), uint32_t(a[4])); return 0; }
+inline uintptr_t gl_call_shape_38(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8]), uint32_t(a[9]), reinterpret_cast<void*>(a[10])); return 0; }
+inline uintptr_t gl_call_shape_39(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(void*, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(reinterpret_cast<void*>(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3]))); }
+inline uintptr_t gl_call_shape_40(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1])); return 0; }
+inline uintptr_t gl_call_shape_41(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_double(a[0], a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5]), gl_arg_double(a[6], a[7])); return 0; }
+inline uintptr_t gl_call_shape_42(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
+inline uintptr_t gl_call_shape_43(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), reinterpret_cast<void*>(a[3])); return 0; }
+inline uintptr_t gl_call_shape_44(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), reinterpret_cast<void*>(a[7])); return 0; }
+inline uintptr_t gl_call_shape_45(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), reinterpret_cast<void*>(a[8])); return 0; }
+inline uintptr_t gl_call_shape_46(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8]), reinterpret_cast<void*>(a[9])); return 0; }
+inline uintptr_t gl_call_shape_47(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8]), uint32_t(a[9]), uint32_t(a[10]), reinterpret_cast<void*>(a[11])); return 0; }
+inline uintptr_t gl_call_shape_48(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), reinterpret_cast<void*>(a[6])); return 0; }
+inline uintptr_t gl_call_shape_49(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2])); return 0; }
+inline uintptr_t gl_call_shape_50(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, intptr_t, intptr_t, intptr_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), intptr_t(int32_t(a[2])), intptr_t(int32_t(a[3])), intptr_t(int32_t(a[4]))); return 0; }
+inline uintptr_t gl_call_shape_51(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5])); return 0; }
+inline uintptr_t gl_call_shape_52(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8]), uint32_t(a[9]), uint32_t(a[10]), uint32_t(a[11]), uint32_t(a[12]), uint32_t(a[13]), uint32_t(a[14])); return 0; }
+inline uintptr_t gl_call_shape_53(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7])); return 0; }
+inline uintptr_t gl_call_shape_54(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8])); return 0; }
+inline uintptr_t gl_call_shape_55(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1])); return 0; }
+inline uintptr_t gl_call_shape_56(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn()); }
+inline uintptr_t gl_call_shape_57(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2])); return 0; }
+inline uintptr_t gl_call_shape_58(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]))); }
+inline uintptr_t gl_call_shape_59(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]))); }
+inline uintptr_t gl_call_shape_60(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void*(*)(void*, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(reinterpret_cast<void*>(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]))); }
+inline uintptr_t gl_call_shape_61(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0]), reinterpret_cast<void*>(a[1])); return 0; }
+inline uintptr_t gl_call_shape_62(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4]), uint32_t(a[5])); return 0; }
+inline uintptr_t gl_call_shape_63(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_double(a[0], a[1]), gl_arg_double(a[2], a[3])); return 0; }
+inline uintptr_t gl_call_shape_64(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4])); return 0; }
+inline uintptr_t gl_call_shape_65(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_float(a[0]), gl_arg_float(a[1])); return 0; }
+inline uintptr_t gl_call_shape_66(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(intptr_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(intptr_t(int32_t(a[0]))); return 0; }
+inline uintptr_t gl_call_shape_67(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), uint32_t(a[4])); return 0; }
+inline uintptr_t gl_call_shape_68(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, void*, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), uint32_t(a[4]), uint32_t(a[5])); return 0; }
+inline uintptr_t gl_call_shape_69(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, void*, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6])); return 0; }
+inline uintptr_t gl_call_shape_70(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), reinterpret_cast<void*>(a[5]), uint32_t(a[6])); return 0; }
+inline uintptr_t gl_call_shape_71(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), reinterpret_cast<void*>(a[2])); return 0; }
+inline uintptr_t gl_call_shape_72(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void*(*)(uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]))); }
+inline uintptr_t gl_call_shape_73(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, intptr_t, intptr_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), intptr_t(int32_t(a[1])), intptr_t(int32_t(a[2]))); return 0; }
+inline uintptr_t gl_call_shape_74(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(double, double, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_double(a[0], a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5]), gl_arg_double(a[6], a[7]), gl_arg_double(a[8], a[9]), gl_arg_double(a[10], a[11])); return 0; }
+inline uintptr_t gl_call_shape_75(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]))); }
+inline uintptr_t gl_call_shape_76(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3])); return 0; }
+inline uintptr_t gl_call_shape_77(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, void*, void*, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4]), reinterpret_cast<void*>(a[5]), reinterpret_cast<void*>(a[6])); return 0; }
+inline uintptr_t gl_call_shape_78(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
+inline uintptr_t gl_call_shape_79(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
+inline uintptr_t gl_call_shape_80(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
+inline uintptr_t gl_call_shape_81(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
+inline uintptr_t gl_call_shape_82(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), reinterpret_cast<void*>(a[3])); return 0; }
+inline uintptr_t gl_call_shape_83(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, intptr_t, intptr_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), intptr_t(int32_t(a[1])), intptr_t(int32_t(a[2])), reinterpret_cast<void*>(a[3])); return 0; }
+inline uintptr_t gl_call_shape_84(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8]), reinterpret_cast<void*>(a[9])); return 0; }
+inline uintptr_t gl_call_shape_85(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint32_t, uint32_t, void*, void*, void*, void*, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4]), reinterpret_cast<void*>(a[5]), reinterpret_cast<void*>(a[6]), reinterpret_cast<void*>(a[7]))); }
+inline uintptr_t gl_call_shape_86(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint64_t(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]))); }
+inline uintptr_t gl_call_shape_87(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
+inline uintptr_t gl_call_shape_88(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
+inline uintptr_t gl_call_shape_89(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3])); return 0; }
+inline uintptr_t gl_call_shape_90(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), reinterpret_cast<void*>(a[3])); return 0; }
+inline uintptr_t gl_call_shape_91(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0])); return 0; }
+inline uintptr_t gl_call_shape_92(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
+inline uintptr_t gl_call_shape_93(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, void*, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4]), uint32_t(a[5]), reinterpret_cast<void*>(a[6]), reinterpret_cast<void*>(a[7])); return 0; }
+inline uintptr_t gl_call_shape_94(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, void*, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
+inline uintptr_t gl_call_shape_95(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void*(*)(uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]))); }
+inline uintptr_t gl_call_shape_96(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*, uint32_t, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0]), uint32_t(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
+inline uintptr_t gl_call_shape_97(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint64_t(*)(uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]))); }
+inline uintptr_t gl_call_shape_98(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint64_t(*)(uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]))); }
+inline uintptr_t gl_call_shape_99(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), uint32_t(a[8]), uint32_t(a[9]), uint32_t(a[10]), reinterpret_cast<void*>(a[11])); return 0; }
+inline uintptr_t gl_call_shape_100(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), reinterpret_cast<void*>(a[3])); return 0; }
+inline uintptr_t gl_call_shape_101(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = intptr_t(*)(uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]))); }
+inline uintptr_t gl_call_shape_102(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, void*, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4]), uint32_t(a[5]), reinterpret_cast<void*>(a[6]), reinterpret_cast<void*>(a[7])); return 0; }
+inline uintptr_t gl_call_shape_103(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), uint32_t(a[3]), uint32_t(a[4])); return 0; }
+inline uintptr_t gl_call_shape_104(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
+inline uintptr_t gl_call_shape_105(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
+inline uintptr_t gl_call_shape_106(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void*(*)(uint32_t, intptr_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), intptr_t(int32_t(a[1])), uint32_t(a[2]))); }
+inline uintptr_t gl_call_shape_107(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6])); return 0; }
+inline uintptr_t gl_call_shape_108(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(gl_arg_u64(a[0], a[1]))); }
+inline uintptr_t gl_call_shape_109(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(reinterpret_cast<void*>(a[0]))); }
+inline uintptr_t gl_call_shape_110(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_u64(a[0], a[1])); return 0; }
+inline uintptr_t gl_call_shape_111(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint64_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_u64(a[0], a[1]), uint32_t(a[2])); return 0; }
+inline uintptr_t gl_call_shape_112(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), uint32_t(a[5]), uint32_t(a[6]), reinterpret_cast<void*>(a[7])); return 0; }
+inline uintptr_t gl_call_shape_113(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), uint32_t(a[3]), uint32_t(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
+inline uintptr_t gl_call_shape_114(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, uint32_t, uint32_t, double, double, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), uint32_t(a[5]), uint32_t(a[6]), gl_arg_double(a[7], a[8]), gl_arg_double(a[9], a[10]), uint32_t(a[11]), uint32_t(a[12]), reinterpret_cast<void*>(a[13])); return 0; }
+inline uintptr_t gl_call_shape_115(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, uint32_t, uint32_t, float, float, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), uint32_t(a[3]), uint32_t(a[4]), gl_arg_float(a[5]), gl_arg_float(a[6]), uint32_t(a[7]), uint32_t(a[8]), reinterpret_cast<void*>(a[9])); return 0; }
+inline uintptr_t gl_call_shape_116(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void*(*)(uint32_t, intptr_t, intptr_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), intptr_t(int32_t(a[1])), intptr_t(int32_t(a[2])), uint32_t(a[3]))); }
+inline uintptr_t gl_call_shape_117(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2])); return 0; }
+inline uintptr_t gl_call_shape_118(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, uint32_t, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), uint32_t(a[5]), gl_arg_double(a[6], a[7]), gl_arg_double(a[8], a[9])); return 0; }
+inline uintptr_t gl_call_shape_119(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, uint32_t, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), uint32_t(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5])); return 0; }
+inline uintptr_t gl_call_shape_120(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), gl_arg_double(a[5], a[6]), gl_arg_double(a[7], a[8]), gl_arg_double(a[9], a[10]), gl_arg_double(a[11], a[12])); return 0; }
+inline uintptr_t gl_call_shape_121(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), gl_arg_double(a[5], a[6]), gl_arg_double(a[7], a[8])); return 0; }
+inline uintptr_t gl_call_shape_122(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4])); return 0; }
+inline uintptr_t gl_call_shape_123(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), gl_arg_double(a[5], a[6])); return 0; }
+inline uintptr_t gl_call_shape_124(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3])); return 0; }
+inline uintptr_t gl_call_shape_125(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3])); return 0; }
+inline uintptr_t gl_call_shape_126(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), uint32_t(a[3])); return 0; }
+inline uintptr_t gl_call_shape_127(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, intptr_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), intptr_t(int32_t(a[2])), uint32_t(a[3]), uint32_t(a[4])); return 0; }
+inline uintptr_t gl_call_shape_128(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), uint32_t(a[4])); return 0; }
+inline uintptr_t gl_call_shape_129(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, void*, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), uint32_t(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
+inline uintptr_t gl_call_shape_130(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), uint32_t(a[4])); return 0; }
+inline uintptr_t gl_call_shape_131(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, intptr_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), intptr_t(int32_t(a[3])), uint32_t(a[4]), uint32_t(a[5])); return 0; }
+inline uintptr_t gl_call_shape_132(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(intptr_t, intptr_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(intptr_t(int32_t(a[0])), intptr_t(int32_t(a[1])), uint32_t(a[2]), uint32_t(a[3])); return 0; }
+inline uintptr_t gl_call_shape_133(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(intptr_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(intptr_t(int32_t(a[0])), uint32_t(a[1]), uint32_t(a[2])); return 0; }
+inline uintptr_t gl_call_shape_134(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2])); return 0; }
+inline uintptr_t gl_call_shape_135(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_float(a[3])); return 0; }
+inline uintptr_t gl_call_shape_136(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_double(a[3], a[4])); return 0; }
+inline uintptr_t gl_call_shape_137(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_double(a[3], a[4]), gl_arg_double(a[5], a[6]), gl_arg_double(a[7], a[8]), gl_arg_double(a[9], a[10])); return 0; }
+inline uintptr_t gl_call_shape_138(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5]), gl_arg_float(a[6])); return 0; }
+inline uintptr_t gl_call_shape_139(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
+inline uintptr_t gl_call_shape_140(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2])); return 0; }
+inline uintptr_t gl_call_shape_141(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(float, float, float, float, float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_float(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5]), gl_arg_float(a[6]), gl_arg_float(a[7])); return 0; }
+inline uintptr_t gl_call_shape_142(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3])); return 0; }
+inline uintptr_t gl_call_shape_143(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5]), gl_arg_double(a[6], a[7]), gl_arg_double(a[8], a[9])); return 0; }
+inline uintptr_t gl_call_shape_144(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5])); return 0; }
+inline uintptr_t gl_call_shape_145(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_double(a[2], a[3])); return 0; }
+inline uintptr_t gl_call_shape_146(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3])); return 0; }
+inline uintptr_t gl_call_shape_147(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5])); return 0; }
+inline uintptr_t gl_call_shape_148(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3])); return 0; }
+inline uintptr_t gl_call_shape_149(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3]), gl_arg_u64(a[4], a[5])); return 0; }
+inline uintptr_t gl_call_shape_150(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5]), gl_arg_double(a[6], a[7])); return 0; }
+inline uintptr_t gl_call_shape_151(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4])); return 0; }
+inline uintptr_t gl_call_shape_152(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3]), gl_arg_u64(a[4], a[5]), gl_arg_u64(a[6], a[7])); return 0; }
+inline uintptr_t gl_call_shape_153(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3]), gl_arg_u64(a[4], a[5]), gl_arg_u64(a[6], a[7]), gl_arg_u64(a[8], a[9])); return 0; }
+inline uintptr_t gl_call_shape_154(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), reinterpret_cast<void*>(a[6])); return 0; }
+inline uintptr_t gl_call_shape_155(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), reinterpret_cast<void*>(a[7])); return 0; }
+inline uintptr_t gl_call_shape_156(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]))); }
+inline uintptr_t gl_call_shape_157(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(float, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_float(a[0]), uint32_t(a[1])); return 0; }
+inline uintptr_t gl_call_shape_158(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), reinterpret_cast<void*>(a[6]), reinterpret_cast<void*>(a[7])); return 0; }
+inline uintptr_t gl_call_shape_159(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
+inline uintptr_t gl_call_shape_160(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
+inline uintptr_t gl_call_shape_161(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), gl_arg_u64(a[5], a[6])); return 0; }
+inline uintptr_t gl_call_shape_162(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), gl_arg_u64(a[6], a[7])); return 0; }
+inline uintptr_t gl_call_shape_163(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), gl_arg_u64(a[7], a[8])); return 0; }
+inline uintptr_t gl_call_shape_164(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), gl_arg_u64(a[8], a[9])); return 0; }
+inline uintptr_t gl_call_shape_165(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, intptr_t, intptr_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), intptr_t(int32_t(a[4])), intptr_t(int32_t(a[5]))); return 0; }
+inline uintptr_t gl_call_shape_166(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2])); return 0; }
+inline uintptr_t gl_call_shape_167(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), gl_arg_u64(a[3], a[4])); return 0; }
+inline uintptr_t gl_call_shape_168(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), gl_arg_u64(a[3], a[4]), gl_arg_u64(a[5], a[6])); return 0; }
+inline uintptr_t gl_call_shape_169(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), gl_arg_u64(a[3], a[4]), gl_arg_u64(a[5], a[6]), gl_arg_u64(a[7], a[8])); return 0; }
+inline uintptr_t gl_call_shape_170(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, intptr_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), intptr_t(int32_t(a[3])), uint32_t(a[4])); return 0; }
+inline uintptr_t gl_call_shape_171(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, intptr_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), intptr_t(int32_t(a[5]))); return 0; }
+inline uintptr_t gl_call_shape_172(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, intptr_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), intptr_t(int32_t(a[4]))); return 0; }
+inline uintptr_t gl_call_shape_173(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, intptr_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), intptr_t(int32_t(a[6]))); return 0; }
+inline uintptr_t gl_call_shape_174(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, intptr_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), intptr_t(int32_t(a[7]))); return 0; }
+inline uintptr_t gl_call_shape_175(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3])); return 0; }
 inline uintptr_t gl_call_generated(unsigned short signature, uintptr_t p, const uintptr_t* a) { switch (signature) {
         case 0: return gl_call_shape_0(p, a);
         case 1: return gl_call_shape_1(p, a);
@@ -9746,5 +9767,26 @@ inline uintptr_t gl_call_generated(unsigned short signature, uintptr_t p, const 
         case 152: return gl_call_shape_152(p, a);
         case 153: return gl_call_shape_153(p, a);
         case 154: return gl_call_shape_154(p, a);
+        case 155: return gl_call_shape_155(p, a);
+        case 156: return gl_call_shape_156(p, a);
+        case 157: return gl_call_shape_157(p, a);
+        case 158: return gl_call_shape_158(p, a);
+        case 159: return gl_call_shape_159(p, a);
+        case 160: return gl_call_shape_160(p, a);
+        case 161: return gl_call_shape_161(p, a);
+        case 162: return gl_call_shape_162(p, a);
+        case 163: return gl_call_shape_163(p, a);
+        case 164: return gl_call_shape_164(p, a);
+        case 165: return gl_call_shape_165(p, a);
+        case 166: return gl_call_shape_166(p, a);
+        case 167: return gl_call_shape_167(p, a);
+        case 168: return gl_call_shape_168(p, a);
+        case 169: return gl_call_shape_169(p, a);
+        case 170: return gl_call_shape_170(p, a);
+        case 171: return gl_call_shape_171(p, a);
+        case 172: return gl_call_shape_172(p, a);
+        case 173: return gl_call_shape_173(p, a);
+        case 174: return gl_call_shape_174(p, a);
+        case 175: return gl_call_shape_175(p, a);
         default: return 0; } }
 }
