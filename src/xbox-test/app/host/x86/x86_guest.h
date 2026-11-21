@@ -210,6 +210,7 @@ struct Guest {
     std::map<uint32_t, WakeQueue> condition_queues, address_queues;
     std::map<uint32_t, uint32_t> init_once_context;  // INIT_ONCE word -> context of its completed init
     std::map<uint32_t, uint64_t> file_handles;         // guest handle -> Play host HANDLE
+    uint32_t error_mode = 0;                           // SetErrorMode: the process error mode, returned as the previous mode
     std::map<uint32_t, uint32_t> version_text;         // VerQueryValueA text block address -> narrow copy in the guest heap
     std::map<int32_t, uint32_t> std_handles{{-10, Host::H_STDIN}, {-11, Host::H_STDOUT}, {-12, Host::H_STDERR}};
     std::map<uint32_t, uint64_t> find_handles;         // guest search handle -> native find HANDLE
@@ -2106,6 +2107,15 @@ inline void Guest::register_all() {
         emit(handle == Host::H_STDOUT ? 1 : 2, s);
         if (written) mem.w32(written, n);
         return 1; });
+    // ANSI form of the same stdout/stderr path; the guest's bytes are written as they are.
+    reg.add("kernel32.dll", "WriteConsoleA", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
+        uint32_t handle = c.arg(0), buf = c.arg(1), n = c.arg(2), written = c.arg(3);
+        if (handle != Host::H_STDOUT && handle != Host::H_STDERR) { set_last_error(6); return 0; }
+        if (n > (1u << 24) || (n && !buf)) { set_last_error(87); return 0; }
+        auto bytes = n ? mem.read_bytes(buf, n) : std::vector<uint8_t>{};
+        emit(handle == Host::H_STDOUT ? 1 : 2, std::string(bytes.begin(), bytes.end()));
+        if (written) mem.w32(written, n);
+        return 1; });
     reg.add("kernel32.dll", "SetUnhandledExceptionFilter", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
     reg.add("kernel32.dll", "UnhandledExceptionFilter", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 1; });
     reg.add("kernel32.dll", "RaiseException", Conv::Stdcall, 4, [](Cpu& c) -> uint32_t {
@@ -2952,6 +2962,45 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetConsoleOutputCP", Conv::Stdcall, 0, no_console);
     reg.add("kernel32.dll", "GetConsoleMode", Conv::Stdcall, 2, no_console);
     reg.add("kernel32.dll", "SetConsoleMode", Conv::Stdcall, 2, no_console);
+    reg.add("kernel32.dll", "ReadConsoleA", Conv::Stdcall, 5, no_console);
+    reg.add("kernel32.dll", "ReadConsoleInputA", Conv::Stdcall, 4, no_console);
+    reg.add("kernel32.dll", "ReadConsoleInputW", Conv::Stdcall, 4, no_console);
+    reg.add("kernel32.dll", "PeekConsoleInputA", Conv::Stdcall, 4, no_console);
+    reg.add("kernel32.dll", "GetNumberOfConsoleInputEvents", Conv::Stdcall, 2, no_console);
+    // No child processes in the sandbox: the launch is refused with ERROR_ACCESS_DENIED and only the executable token is logged (arguments may carry secrets).
+    reg.add("kernel32.dll", "CreateProcessW", Conv::Stdcall, 10, [this](Cpu& c) -> uint32_t {
+        if (!c.arg(0) && !c.arg(1)) { set_last_error(87); return 0; }
+        std::u16string raw = c.arg(0) ? wstr(c.arg(0)) : wstr(c.arg(1));
+        size_t pos = 0;
+        while (pos < raw.size() && (raw[pos] == u' ' || raw[pos] == u'\t')) ++pos;
+        std::u16string image;
+        if (c.arg(0)) {
+            image = raw.substr(pos);
+        } else if (pos < raw.size() && raw[pos] == u'"') {
+            const size_t end = raw.find(u'"', pos + 1);
+            if (end != std::u16string::npos) image = raw.substr(pos + 1, end - pos - 1);
+        } else {
+            size_t end = pos;
+            while (end < raw.size() && raw[end] != u' ' && raw[end] != u'\t') ++end;
+            image = raw.substr(pos, end - pos);
+        }
+        std::string exe;
+        for (char16_t ch : image) exe.push_back(ch >= 0x20 && ch < 0x7f ? char(ch) : '?');
+        emit(2, exe.empty() ? "x86: CreateProcessW refused, no child processes in the sandbox\n"
+                            : "x86: CreateProcessW refused, no child processes in the sandbox: " + exe + "\n");
+        set_last_error(5); return 0; });
+    reg.add("kernel32.dll", "CreatePipe", Conv::Stdcall, 4, [this](Cpu&) -> uint32_t { set_last_error(50); return 0; });  // ERROR_NOT_SUPPORTED: no anonymous pipe route
+    // The current-process pseudo handle (GetCurrentProcess) is still running; any other handle names no process here.
+    reg.add("kernel32.dll", "GetExitCodeProcess", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        if (!c.arg(1)) { set_last_error(87); return 0; }
+        if (c.arg(0) != 0xFFFFFFFFu) { set_last_error(6); return 0; }
+        mem.w32(c.arg(1), 259u); set_last_error(0); return 1; });  // STILL_ACTIVE
+    reg.add("kernel32.dll", "Beep", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 1; });  // no sound device: TRUE, no output
+    reg.add("kernel32.dll", "SetErrorMode", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        const uint32_t previous = error_mode; error_mode = c.arg(0); return previous; });
+    // DelayLoadFailureHook raises a noncontinuable exception on Windows/Wine; fail closed here.
+    reg.add("kernel32.dll", "DelayLoadFailureHook", Conv::Stdcall, 2, [](Cpu& c) -> uint32_t {
+        throw Fault(FaultKind::Unsupported, c.eip, 0xC06D007Eu, "DelayLoadFailureHook: unresolved delay-load import"); });
     // The guest has no attached debugger. Windows reports FALSE and discards
     // OutputDebugString calls when no debugger is present.
     reg.add("kernel32.dll", "IsDebuggerPresent", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
@@ -2965,6 +3014,60 @@ inline void Guest::register_all() {
         set_last_error(5); return false;  // ERROR_ACCESS_DENIED; missing policy fails closed
     };
     auto narrow_path = [](const std::string& path) { std::u16string out; out.reserve(path.size()); for (unsigned char c : path) out.push_back(char16_t(c)); return out; };
+    auto cp1252_hi = []() -> const uint16_t* {
+        static const uint16_t tbl[32] = {
+            0x20AC,0x0081,0x201A,0x0192,0x201E,0x2026,0x2020,0x2021,
+            0x02C6,0x2030,0x0160,0x2039,0x0152,0x008D,0x017D,0x008F,
+            0x0090,0x2018,0x2019,0x201C,0x201D,0x2022,0x2013,0x2014,
+            0x02DC,0x2122,0x0161,0x203A,0x0153,0x009D,0x017E,0x0178};
+        return tbl;
+    };
+    auto decode_ansi = [this, cp1252_hi](const std::string& s) -> std::u16string {
+        if (s.empty()) return {};
+        if (host.nls_call) {
+            Host::NlsRequest req{}; req.operation = Host::NlsOperation::MultiByteToWideChar; req.code_page = 0;  // CP_ACP
+            req.input.assign(s.begin(), s.end()); req.input_length = int32_t(s.size());
+            req.output_null = true; req.output_capacity = 0;
+            Host::NlsResponse probe = host.nls_call(req);
+            if (probe.result > 0) {
+                req.output_null = false; req.output_capacity = probe.result;
+                Host::NlsResponse conv = host.nls_call(req);
+                if (conv.result > 0 && conv.output.size() == size_t(conv.result) * 2) {
+                    std::u16string out(conv.result, u'\0');
+                    std::memcpy(out.data(), conv.output.data(), conv.output.size());
+                    return out;
+                }
+            }
+        }
+        const uint16_t* hi = cp1252_hi();
+        std::u16string out; out.reserve(s.size());
+        for (unsigned char ch : s) out.push_back(ch >= 0x80 && ch <= 0x9F ? char16_t(hi[ch - 0x80]) : char16_t(ch));
+        return out;
+    };
+    auto encode_ansi = [this, cp1252_hi](const std::u16string& w) -> std::string {
+        if (w.empty()) return {};
+        if (host.nls_call) {
+            Host::NlsRequest req{}; req.operation = Host::NlsOperation::WideCharToMultiByte; req.code_page = 0;  // CP_ACP
+            req.input.resize(w.size() * 2); std::memcpy(req.input.data(), w.data(), req.input.size());
+            req.input_length = int32_t(w.size()); req.output_null = true; req.output_capacity = 0;
+            Host::NlsResponse probe = host.nls_call(req);
+            if (probe.result > 0) {
+                req.output_null = false; req.output_capacity = probe.result;
+                Host::NlsResponse conv = host.nls_call(req);
+                if (conv.result > 0 && conv.output.size() == conv.result)
+                    return std::string(conv.output.begin(), conv.output.end());
+            }
+        }
+        const uint16_t* hi = cp1252_hi();
+        std::string out; out.reserve(w.size());
+        for (char16_t ch : w) {
+            if (ch < 0x80 || (ch >= 0xA0 && ch <= 0xFF)) { out.push_back(char(ch)); continue; }
+            char mapped = '?';
+            for (int i = 0; i < 32; ++i) if (hi[i] == uint16_t(ch)) { mapped = char(0x80 + i); break; }
+            out.push_back(mapped);
+        }
+        return out;
+    };
     auto native_file = [this](uint32_t h, Host::FileCall& call) {
         auto it=file_handles.find(h); if(it==file_handles.end()){set_last_error(6);return false;}
         call.handle=it->second; return true;
@@ -3269,12 +3372,43 @@ inline void Guest::register_all() {
         if(!call_file(q)||!q.value){set_last_error(q.error?q.error:120);return 0;}
         if(q.value<c.arg(0)){mem.write_bytes(c.arg(1),q.data.data(),uint32_t(q.data.size()));mem.w(c.arg(1)+uint32_t(q.data.size()),0,2);}
         set_last_error(0);return uint32_t(q.value); });
-    reg.add("kernel32.dll", "GetTempFileNameW", Conv::Stdcall, 4, [this,guard_file](Cpu& c) -> uint32_t {
+    auto temp_file_target = [](const std::u16string& dir, const std::u16string& pfx, std::u16string& pfx3, std::u16string& target) -> bool {
+        if (dir.empty()) return false;
+        for (char16_t ch : pfx) if (ch == u'\\' || ch == u'/' || ch == u':') return false;
+        pfx3 = pfx.substr(0, 3);
+        const bool sep = dir.back() == u'\\' || dir.back() == u'/';
+        target = dir + (sep ? u"" : u"\\") + pfx3 + u"0000.TMP";
+        return true;
+    };
+    reg.add("kernel32.dll", "GetTempFileNameW", Conv::Stdcall, 4, [this,guard_file,temp_file_target](Cpu& c) -> uint32_t {
         if(!c.arg(0)||!c.arg(1)||!c.arg(3)){set_last_error(87);return 0;}
-        Host::FileCall q{Host::FileCall::Kind::TempFileNameW};q.path_w=wstr(c.arg(0));q.path2_w=wstr(c.arg(1));q.args[0]=c.arg(2);
-        if(!guard_file("GetTempFileNameW",q.path_w+u"\\"+q.path2_w))return 0;
+        Host::FileCall q{Host::FileCall::Kind::TempFileNameW};q.path_w=wstr(c.arg(0));
+        std::u16string pfx3,target;
+        if(!temp_file_target(q.path_w,wstr(c.arg(1)),pfx3,target)){set_last_error(123);return 0;}
+        q.path2_w=pfx3;q.args[0]=c.arg(2);
+        if(!guard_file("GetTempFileNameW",target))return 0;
         if(!call_file(q)||!q.value){set_last_error(q.error?q.error:120);return 0;}
         mem.write_bytes(c.arg(3),q.data.data(),uint32_t(q.data.size()));mem.w(c.arg(3)+uint32_t(q.data.size()),0,2);
+        set_last_error(0);return uint32_t(q.value); });
+    // ANSI form of GetTempFileNameW: decodes via CP_ACP, guards the effective target, and encodes the result back to ANSI.
+    reg.add("kernel32.dll", "GetTempFileNameA", Conv::Stdcall, 4, [this,guard_file,decode_ansi,encode_ansi,temp_file_target](Cpu& c) -> uint32_t {
+        if(!c.arg(0)||!c.arg(1)||!c.arg(3)){set_last_error(87);return 0;}
+        Host::FileCall q{Host::FileCall::Kind::TempFileNameW};q.path_w=decode_ansi(str(c.arg(0)));
+        std::u16string pfx3,target;
+        if(!temp_file_target(q.path_w,decode_ansi(str(c.arg(1))),pfx3,target)){set_last_error(123);return 0;}
+        q.path2_w=pfx3;q.args[0]=c.arg(2);
+        if(!guard_file("GetTempFileNameA",target))return 0;
+        if(!call_file(q)||!q.value){set_last_error(q.error?q.error:120);return 0;}
+        const uint32_t units=uint32_t(q.data.size()/2);
+        std::u16string out_w(units,u'\0');
+        if(units)std::memcpy(out_w.data(),q.data.data(),size_t(units)*2);
+        const std::string out_a=encode_ansi(out_w);
+        if(out_a.size()>=260){
+            if(c.arg(2)==0){Host::FileCall del{Host::FileCall::Kind::AttributesA};del.operation=Host::FileCall::Operation::DeleteW;del.path_w=out_w;call_file(del);}
+            set_last_error(111);return 0;  // ERROR_BUFFER_OVERFLOW
+        }
+        if(!out_a.empty())mem.write_bytes(c.arg(3),out_a.data(),uint32_t(out_a.size()));
+        mem.w8(c.arg(3)+uint32_t(out_a.size()),0);
         set_last_error(0);return uint32_t(q.value); });
     reg.add("kernel32.dll", "GetDiskFreeSpaceW", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
         if(!c.arg(0)){set_last_error(87);return 0;}
@@ -3369,6 +3503,37 @@ inline void Guest::register_all() {
         reg.add("kernel32.dll", wide?"VerQueryValueW":"VerQueryValueA", Conv::Stdcall, 4, [query_value,wide](Cpu& c) -> uint32_t {
             return query_value(c.arg(0),c.arg(1),c.arg(2),c.arg(3),wide); });
     }
+    // VerFindFile does no lookup: the file is taken as absent from the current, app and Windows directories (no
+    // VFF_CURNEDEST or VFF_FILEINUSE). Shared files (VFFF_ISSHAREDFILE) target System32; private files target the app directory.
+    for(bool wide:{false,true}){
+        reg.add("kernel32.dll", wide?"VerFindFileW":"VerFindFileA", Conv::Stdcall, 8, [this,wide,decode_ansi,encode_ansi](Cpu& c) -> uint32_t {
+            auto put=[this,wide,encode_ansi](uint32_t out,uint32_t lenp,const std::u16string& text)->uint32_t{
+                const uint32_t cap=mem.r32(lenp);
+                if(wide){
+                    const uint32_t need=uint32_t(text.size())+1;
+                    const uint32_t flags=cap<need?4u:0u;  // VFF_BUFFTOOSMALL
+                    if(out&&cap){
+                        const uint32_t fit=std::min(cap-1,uint32_t(text.size()));
+                        for(uint32_t i=0;i<fit;++i)mem.w(out+2*i,text[i],2);
+                        mem.w(out+2*fit,0,2);}
+                    mem.w32(lenp,need);return flags;
+                }
+                const std::string narrow=encode_ansi(text);
+                const uint32_t need=uint32_t(narrow.size())+1;
+                const uint32_t flags=cap<need?4u:0u;  // VFF_BUFFTOOSMALL
+                if(out&&cap){
+                    const uint32_t fit=std::min(cap-1,uint32_t(narrow.size()));
+                    if(fit)mem.write_bytes(out,narrow.data(),fit);
+                    mem.w8(out+fit,0);}
+                mem.w32(lenp,need);return flags;};
+            const bool shared=(c.arg(0)&1u)!=0;  // VFFF_ISSHAREDFILE
+            const std::u16string dest=shared?std::u16string(u"C:\\Windows\\System32")
+                :(c.arg(3)?(wide?wstr(c.arg(3)):decode_ansi(str(c.arg(3)))):std::u16string());
+            uint32_t flags=0;
+            if(c.arg(6)&&c.arg(7))flags|=put(c.arg(6),c.arg(7),dest);
+            if(c.arg(4)&&c.arg(5))flags|=put(c.arg(4),c.arg(5),std::u16string());
+            return flags; });
+    }
     reg.add("kernel32.dll", "SetFilePointer", Conv::Stdcall, 4, [this,native_file](Cpu& c) -> uint32_t {
         Host::FileCall q{Host::FileCall::Kind::Seek};if(!native_file(c.arg(0),q))return 0xffffffffu;
         q.args[0]=c.arg(1);q.args[1]=c.arg(2)?mem.r32(c.arg(2)):0;q.args[2]=c.arg(3);q.args[3]=c.arg(2)!=0;
@@ -3413,6 +3578,128 @@ inline void Guest::register_all() {
         auto it=file_handles.find(c.arg(0));if(it!=file_handles.end()){Host::FileCall q{Host::FileCall::Kind::Close};q.handle=it->second;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}file_handles.erase(it);return 1;}
         auto find=find_handles.find(c.arg(0));if(find!=find_handles.end()){Host::FileCall q{Host::FileCall::Kind::FindClose};q.handle=find->second;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}find_handles.erase(find);return 1;}
         close_sync(c.arg(0));return 1; });
+    // Legacy OpenFile/LZOpenFileA resolve relative paths against cwd for OFSTRUCT/OF_REOPEN and decode once via CP_ACP so guard and host see the exact same wide path.
+    auto open_legacy=[this,guard_file,decode_ansi](const char* op,uint32_t namep,uint32_t ofp,uint32_t style)->uint32_t{
+        const bool reopen=(style&0x8000u)!=0;
+        if(!ofp||(!reopen&&!namep)){set_last_error(87);return 0xffffffffu;}
+        const uint32_t rw=style&3u;
+        const uint32_t share_bits=style&0x70u;
+        if(rw==3u||(share_bits>0x40u)){set_last_error(87);mem.w(ofp+2,87,2);return 0xffffffffu;}
+        // Reject unsupported interactive/verify modes rather than silently opening.
+        if(style&(0x0400u|0x0800u|0x2000u)){set_last_error(50);mem.w(ofp+2,50,2);return 0xffffffffu;}
+        std::string path;
+        if(reopen){
+            const auto raw=mem.read_bytes(ofp+8,128);
+            const auto nul=std::find(raw.begin(),raw.end(),uint8_t(0));
+            if(nul==raw.end()||nul==raw.begin()){set_last_error(87);mem.w(ofp+2,87,2);return 0xffffffffu;}
+            path.assign(raw.begin(),nul);
+        }else{
+            path=str(namep);
+            if(path.empty()){set_last_error(87);mem.w(ofp+2,87,2);return 0xffffffffu;}
+            auto is_sep=[](char ch){return ch=='\\'||ch=='/';};
+            const bool has_drive=path.size()>=2&&((path[0]>='A'&&path[0]<='Z')||(path[0]>='a'&&path[0]<='z'))&&path[1]==':';
+            const bool drive_abs=has_drive&&path.size()>=3&&is_sep(path[2]);
+            const bool unc=path.size()>=2&&is_sep(path[0])&&is_sep(path[1]);
+            if(!drive_abs&&!unc){
+                Host::FileCall cwd{Host::FileCall::Kind::GetCurrentDirectoryA};cwd.args[0]=260;
+                if(!call_file(cwd)||cwd.value==0){
+                    const uint32_t error=cwd.error?cwd.error:120;
+                    set_last_error(error);mem.w(ofp+2,error,2);return 0xffffffffu;
+                }
+                if(cwd.value>=260){set_last_error(206);mem.w(ofp+2,206,2);return 0xffffffffu;}
+                const size_t n=std::min<size_t>(cwd.data.size(),cwd.value);
+                std::string base(reinterpret_cast<const char*>(cwd.data.data()),n);
+                while(!base.empty()&&base.back()=='\0')base.pop_back();
+                if(base.empty()){set_last_error(120);mem.w(ofp+2,120,2);return 0xffffffffu;}
+                const bool base_has_drive=base.size()>=2&&((base[0]>='A'&&base[0]<='Z')||(base[0]>='a'&&base[0]<='z'))&&base[1]==':';
+                if(has_drive){  // Drive-relative (e.g. C:foo)
+                    auto lower=[](char ch){return ch>='A'&&ch<='Z'?char(ch-'A'+'a'):ch;};
+                    if(!base_has_drive||lower(base[0])!=lower(path[0])){
+                        set_last_error(50);mem.w(ofp+2,50,2);return 0xffffffffu;
+                    }
+                    const std::string tail=path.substr(2);
+                    path=base+(is_sep(base.back())?"":"\\")+tail;
+                }else if(is_sep(path[0])){  // Root-relative (e.g. \foo)
+                    if(!base_has_drive){set_last_error(50);mem.w(ofp+2,50,2);return 0xffffffffu;}
+                    path=base.substr(0,2)+path;
+                }else{
+                    path=base+(is_sep(base.back())?"":"\\")+path;
+                }
+            }
+        }
+        if(path.size()>=128){set_last_error(206);mem.w(ofp+2,206,2);return 0xffffffffu;}  // ERROR_FILENAME_EXCED_RANGE
+        // OFSTRUCT: cBytes, fFixedDisk, nErrCode, Reserved1, Reserved2, szPathName[128]
+        mem.w8(ofp,136);mem.w8(ofp+1,1);mem.w(ofp+2,0,2);mem.w32(ofp+4,0);
+        mem.write_bytes(ofp+8,path.data(),uint32_t(path.size()));
+        mem.w8(ofp+8+uint32_t(path.size()),0);
+        if(style&0x0100u){set_last_error(0);return 0;}  // OF_PARSE: fill OFSTRUCT only
+        const std::u16string wide_path=decode_ansi(path);
+        if(style&0x0200u){  // OF_DELETE
+            if(!guard_file(op,wide_path)){mem.w(ofp+2,5,2);return 0xffffffffu;}
+            Host::FileCall q{Host::FileCall::Kind::AttributesA};q.operation=Host::FileCall::Operation::DeleteW;q.path_w=wide_path;
+            if(!call_file(q)){const uint32_t error=q.error?q.error:120;set_last_error(error);mem.w(ofp+2,error,2);return 0xffffffffu;}
+            set_last_error(0);return 0;
+        }
+        const bool create=(style&0x1000u)!=0,exist=(style&0x4000u)!=0;
+        const bool writes=(rw!=0)||create;
+        const uint32_t access=create?0xC0000000u:(rw==0?0x80000000u:rw==1?0x40000000u:0xC0000000u);
+        const uint32_t share=share_bits==0x10u?0u:share_bits==0x20u?1u:share_bits==0x30u?2u:3u;
+        if(writes&&!guard_file(op,wide_path)){mem.w(ofp+2,5,2);return 0xffffffffu;}
+        Host::FileCall q{Host::FileCall::Kind::CreateW};q.path_w=wide_path;
+        q.args[0]=access;q.args[1]=share;q.args[2]=create?2u:3u;q.args[3]=0x80;
+        if(!call_file(q)||q.value==UINT64_MAX){const uint32_t error=q.error?q.error:120;set_last_error(error);mem.w(ofp+2,error,2);return 0xffffffffu;}
+        if(exist){  // OF_EXIST: probe without leaking an open handle; return TRUE (1)
+            Host::FileCall cl{Host::FileCall::Kind::Close};cl.handle=q.value;call_file(cl);
+            set_last_error(0);return 1;
+        }
+        set_last_error(0);return add_file_handle(q.value); };
+    reg.add("kernel32.dll", "OpenFile", Conv::Stdcall, 3, [open_legacy](Cpu& c) -> uint32_t { return open_legacy("OpenFile",c.arg(0),c.arg(1),c.arg(2)); });
+    reg.add("kernel32.dll", "LZOpenFileA", Conv::Stdcall, 3, [open_legacy](Cpu& c) -> uint32_t { return open_legacy("LZOpenFileA",c.arg(0),c.arg(1),c.arg(2)); });
+    // _lclose and LZClose close a guest file handle through the CloseHandle host call.
+    auto lclose=[this](uint32_t h)->uint32_t{
+        auto it=file_handles.find(h);
+        if(it==file_handles.end()){set_last_error(6);return 0xffffffffu;}  // HFILE_ERROR
+        Host::FileCall q{Host::FileCall::Kind::Close};q.handle=it->second;
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0xffffffffu;}
+        file_handles.erase(it);return 0; };
+    reg.add("kernel32.dll", "_lclose", Conv::Stdcall, 1, [lclose](Cpu& c) -> uint32_t { return lclose(c.arg(0)); });
+    reg.add("kernel32.dll", "LZClose", Conv::Stdcall, 1, [lclose](Cpu& c) -> uint32_t { lclose(c.arg(0)); return 0; });
+    // Uncompressed LZCopy: streams chunks until EOF, refuses LZSS-compressed streams with LZERROR_UNKNOWNALG (-8), and returns distinct LZERROR_* codes.
+    reg.add("kernel32.dll", "LZCopy", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        auto src=file_handles.find(c.arg(0));
+        if(src==file_handles.end()){set_last_error(6);return 0xffffffffu;}  // LZERROR_BADINHANDLE (-1)
+        auto dst=file_handles.find(c.arg(1));
+        if(dst==file_handles.end()){set_last_error(6);return 0xfffffffeu;}  // LZERROR_BADOUTHANDLE (-2)
+        static const uint8_t szdd[8]={'S','Z','D','D',0x88,0xF0,0x27,0x33};
+        static const uint8_t kwaj[8]={'K','W','A','J',0x88,0xF0,0x27,0xD1};
+        bool checked=false; std::vector<uint8_t> head; uint64_t total=0;
+        auto flush=[&](const std::vector<uint8_t>& buf)->bool{
+            if(buf.empty())return true;
+            if(total+buf.size()>0x7fffffffu){set_last_error(112);return false;}
+            Host::FileCall w{Host::FileCall::Kind::Write};w.handle=dst->second;w.data=buf;
+            if(!call_file(w)||w.args[0]!=buf.size()){set_last_error(w.error?w.error:120);return false;}
+            total+=buf.size();return true;};
+        for(;;){
+            Host::FileCall r{Host::FileCall::Kind::Read};r.handle=src->second;r.args[0]=65536u;
+            if(!call_file(r)){set_last_error(r.error?r.error:120);return 0xfffffffdu;}  // LZERROR_READ (-3)
+            if(r.data.empty())break;
+            if(!checked){
+                head.insert(head.end(),r.data.begin(),r.data.end());
+                if(head.size()<8)continue;
+                checked=true;
+                if(std::memcmp(head.data(),szdd,8)==0||std::memcmp(head.data(),kwaj,8)==0){
+                    set_last_error(50);return 0xfffffff8u;  // LZERROR_UNKNOWNALG (-8)
+                }
+                if(!flush(head))return 0xfffffffcu;  // LZERROR_WRITE (-4)
+                head.clear();
+                continue;
+            }
+            if(!flush(r.data))return 0xfffffffcu;  // LZERROR_WRITE (-4)
+        }
+        if(!checked&&!head.empty()){
+            if(!flush(head))return 0xfffffffcu;  // LZERROR_WRITE (-4)
+        }
+        set_last_error(0);return uint32_t(total); });
     reg.add("kernel32.dll", "SetHandleCount", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t { return c.arg(0); });
 
     // d3dx9_36 math: D3DX uses row-major matrices and row-vector transforms.
@@ -3719,6 +4006,18 @@ inline void Guest::register_all() {
         return uint32_t(format_va_to(c.arg(1), c.arg(2), c.arg(0), -1, true)); });
     reg.add("msvcrt.dll", "_vsnprintf", Conv::Cdecl, 4, [this](Cpu& c) -> uint32_t {
         return uint32_t(format_va_to(c.arg(2), c.arg(3), c.arg(0), int(c.arg(1)), true)); });
+    // ntdll's _vsnprintf writes min(len, cap) bytes, appends NUL only when len < cap, and returns len when len <= cap else -1.
+    reg.add("ntdll.dll", "_vsnprintf", Conv::Cdecl, 4, [this](Cpu& c) -> uint32_t {
+        const uint32_t dst = c.arg(0), cap = c.arg(1);
+        uint32_t ap = c.arg(3);
+        const std::string s = format_va(str(c.arg(2)), ap);
+        if (!dst && !cap) return uint32_t(s.size());
+        if (!dst) return 0xffffffffu;
+        const uint32_t put = uint32_t(std::min<size_t>(s.size(), cap));
+        if (put) mem.write_bytes(dst, s.data(), put);
+        if (s.size() < cap) { mem.w8(dst + put, 0); return uint32_t(s.size()); }
+        if (s.size() == cap) return uint32_t(s.size());
+        return 0xffffffffu; });
     reg.add("msvcrt.dll", "puts", Conv::Cdecl, 1, [this](Cpu& c) -> uint32_t {
         std::string s = str(c.arg(0)); emit(1, s + "\n"); return uint32_t(s.size() + 1); });
     reg.add("msvcrt.dll", "fputs", Conv::Cdecl, 2, [this](Cpu& c) -> uint32_t {
@@ -3961,6 +4260,34 @@ inline void Guest::register_all() {
         return queue_wait(c, address_queues, address, timeout, "RtlWaitOnAddress", differs) ? 0u : 0x102u; });
     reg.add("ntdll.dll", "RtlWakeAddressSingle", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { queue_wake(address_queues, c.arg(0), false); return 0; });
     reg.add("ntdll.dll", "RtlWakeAddressAll", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { queue_wake(address_queues, c.arg(0), true); return 0; });
+    // RTL_BITMAP is { SizeOfBitMap, Buffer }; bit i is bit i%32 of the DWORD at Buffer + 4*(i/32). Pure guest memory.
+    reg.add("ntdll.dll", "RtlInitializeBitMap", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+        if (!c.arg(0)) return 0;
+        mem.w32(c.arg(0), c.arg(2)); mem.w32(c.arg(0) + 4, c.arg(1)); return 0; });
+    // Whole-range test: FALSE when the range is empty or leaves the bitmap (matching Windows/Wine ntdll).
+    auto bits_all=[this](uint32_t map,uint32_t start,uint32_t len,uint32_t want)->uint32_t{
+        if (!map || !len || start + len < start || start + len > mem.r32(map)) return 0;
+        const uint32_t buf = mem.r32(map + 4);
+        for (uint32_t i = start; i < start + len; ++i)
+            if (((mem.r32(buf + 4 * (i / 32)) >> (i % 32)) & 1u) != want) return 0;
+        return 1; };
+    reg.add("ntdll.dll", "RtlAreBitsClear", Conv::Stdcall, 3, [bits_all](Cpu& c) -> uint32_t { return bits_all(c.arg(0), c.arg(1), c.arg(2), 0); });
+    reg.add("ntdll.dll", "RtlAreBitsSet", Conv::Stdcall, 3, [bits_all](Cpu& c) -> uint32_t { return bits_all(c.arg(0), c.arg(1), c.arg(2), 1); });
+    reg.add("ntdll.dll", "RtlSetBits", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+        const uint32_t map = c.arg(0), start = c.arg(1), len = c.arg(2);
+        if (!map || start + len < start || start + len > mem.r32(map)) return 0;  // out of range: nothing is set
+        const uint32_t buf = mem.r32(map + 4);
+        for (uint32_t i = start; i < start + len; ++i) {
+            const uint32_t a = buf + 4 * (i / 32);
+            mem.w32(a, mem.r32(a) | (1u << (i % 32))); }
+        return 0; });
+    // FILETIME-style 100 ns ticks since 1601 to seconds since 1970; FALSE when the result does not fit a ULONG.
+    reg.add("ntdll.dll", "RtlTimeToSecondsSince1970", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        if (!c.arg(0) || !c.arg(1)) return 0;
+        const uint64_t ticks = uint64_t(mem.r32(c.arg(0))) | (uint64_t(mem.r32(c.arg(0) + 4)) << 32);
+        const uint64_t secs = ticks / 10000000u;
+        if (secs < 11644473600ull || secs - 11644473600ull > 0xffffffffull) return 0;
+        mem.w32(c.arg(1), uint32_t(secs - 11644473600ull)); return 1; });
     // Wine-built CRT donors use Wine's private debug ABI, not a Windows ntdll
     // API. Keep every channel disabled: no host logging is fabricated, and the
     // header's -1 tells Wine's debug macros not to format a line.

@@ -65,6 +65,13 @@ int main() {
     CHECK(mem.r(0x3200, 4) == 0x80000000u && mem.r(0x3204, 4) == 0x01D00000u);
     CHECK(call("kernel32.dll", "getcurrentprocessornumber", {}) == 0);
     CHECK(call("kernel32.dll", "flushprocesswritebuffers", {}) == 0);
+    // RtlTimeToSecondsSince1970: 100 ns ticks since 1601 (LARGE_INTEGER by pointer) to seconds since 1970; 1970-01-01 is 11644473600 s after 1601.
+    mem.w32(0x3220, 0xd53e8000u); mem.w32(0x3224, 0x019db1deu);  // 116444736000000000 ticks = 1970-01-01T00:00:00Z
+    CHECK(call("ntdll.dll", "rtltimetosecondssince1970", {0x3220, 0x3228}) == 1 && mem.r32(0x3228) == 0);
+    mem.w32(0x3220, 0xd53e8000u + 10000000u); mem.w32(0x3224, 0x019db1deu);
+    CHECK(call("ntdll.dll", "rtltimetosecondssince1970", {0x3220, 0x3228}) == 1 && mem.r32(0x3228) == 1);
+    mem.w32(0x3220, 0u); mem.w32(0x3224, 0u);
+    CHECK(call("ntdll.dll", "rtltimetosecondssince1970", {0x3220, 0x3228}) == 0);
     std::printf("x86-time: %d checks, %d failures\n",checks,failures);return failures?1:0;
 }
 #endif
