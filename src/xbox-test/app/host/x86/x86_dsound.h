@@ -146,6 +146,23 @@ inline uint32_t waveout_close_output(uint32_t token,Cpu& c){
 }
 inline void register_waveout(Registry& r,Host& h){
     h.dsound_wait=[&h](Cpu& c,uint32_t callback,uint32_t timeout)->uint32_t{return waveout_wait(h,c,callback,timeout);};
+    h.dsound_aux_event=[](uint32_t callback)->uintptr_t{
+        for(auto& [token,output]:x86_wave_outputs()){
+            (void)token;
+            if((output.flags&CALLBACK_TYPEMASK)==CALLBACK_EVENT&&uint32_t(output.callback)==callback&&output.native_event)
+                return reinterpret_cast<uintptr_t>(output.native_event);
+        }
+        return 0;
+    };
+    h.dsound_aux_process=[&h](Cpu& c,uint32_t callback){
+        for(auto& [token,output]:x86_wave_outputs()){
+            if((output.flags&CALLBACK_TYPEMASK)!=CALLBACK_EVENT||uint32_t(output.callback)!=callback||!output.native_event)continue;
+            waveout_process(token,output,c);
+            uintptr_t guest_event=h.dsound_event?h.dsound_event(callback):0;
+            if(guest_event)SetEvent(reinterpret_cast<HANDLE>(guest_event));
+            break;
+        }
+    };
     r.add("winmm.dll","waveOutGetNumDevs",Conv::Stdcall,0,[&h](Cpu&)->uint32_t{using Fn=UINT(WINAPI*)();auto fn=waveout_export<Fn>(h,"XbnWaveOutGetNumDevs");return fn?fn():0;});
     auto caps_a=[&h](Cpu& c)->uint32_t{using Fn=MMRESULT(WINAPI*)(UINT_PTR,LPWAVEOUTCAPSA,UINT);auto fn=waveout_export<Fn>(h,"XbnWaveOutGetDevCapsA");if(!fn)return MMSYSERR_NODRIVER;if(!c.arg(1))return MMSYSERR_INVALPARAM;UINT_PTR id=c.arg(0);WAVEOUTCAPSA caps{};MMRESULT result=fn(id,&caps,c.arg(2));if(result==MMSYSERR_NOERROR)c.mem.write_bytes(c.arg(1),&caps,sizeof(caps));return result;};
     auto caps_w=[&h](Cpu& c)->uint32_t{using Fn=MMRESULT(WINAPI*)(UINT_PTR,LPWAVEOUTCAPSW,UINT);auto fn=waveout_export<Fn>(h,"XbnWaveOutGetDevCapsW");if(!fn)return MMSYSERR_NODRIVER;if(!c.arg(1))return MMSYSERR_INVALPARAM;UINT_PTR id=c.arg(0);WAVEOUTCAPSW caps{};MMRESULT result=fn(id,&caps,c.arg(2));if(result==MMSYSERR_NOERROR)c.mem.write_bytes(c.arg(1),&caps,sizeof(caps));return result;};

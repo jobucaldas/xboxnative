@@ -7,5 +7,5 @@ if [[ -z $cc32 ]]; then cc32=$(ls -d /nix/store/*-i686-w64-mingw32-gcc-wrapper-*
 [[ -n $cc32 ]] || { echo "x86-sync: no i686-w64-mingw32-g++ (set I686_CXX)" >&2; exit 1; }
 "$cc32" -std=c++17 -Wall -Wextra -Werror -DSYNC_DECLARATIONS_ONLY -fsyntax-only "$here/x86-sync.cpp"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/x86-sync.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
-"${CXX:-c++}" -std=c++17 -O2 -Wall -Wextra -Werror "$here/x86-sync.cpp" -o "$tmp/x86-sync"
+"${CXX:-c++}" -std=c++17 -O2 -pthread -Wall -Wextra -Werror "$here/x86-sync.cpp" -o "$tmp/x86-sync"
 "$tmp/x86-sync"
