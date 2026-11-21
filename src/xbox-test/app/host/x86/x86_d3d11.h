@@ -12,6 +12,9 @@
 #pragma once
 #include <algorithm>
 #include <cstring>
+#include <map>
+#include <memory>
+#include <set>
 #include <string>
 #include <vector>
 #include "x86com.h"
@@ -71,6 +74,8 @@ template<class T> inline bool d3d11_objects(ComSpace& s, Cpu& c, uint32_t array,
 // Writes a created object's guest proxy to `out`; a null out drops the host reference.
 template<class T> inline uint32_t d3d11_out(ComSpace& s, Cpu& c, uint32_t out, const char* iface, HRESULT hr, T* object) {
     if (!out) { if (object) object->Release(); return uint32_t(hr); }
+    // A bad guest pointer faults here, before a proxy takes the host reference, so nothing leaks.
+    try { c.mem.w32(out, 0); } catch (...) { if (object) object->Release(); throw; }
     c.mem.w32(out, SUCCEEDED(hr) && object ? d3d9_wrap(s, c, iface, object) : 0);
     return uint32_t(hr);
 }
@@ -87,8 +92,39 @@ inline uint32_t d3d11_mip_rows(const D3D11_TEXTURE2D_DESC& d, uint32_t level) {
     uint32_t h = std::max<uint32_t>(1, d.Height >> level);
     return d3d11_is_bc(d.Format) ? (h + 3) / 4 : h;
 }
-// Bytes of one subresource: buffers are ByteWidth, 2D textures are pitch * rows of that mip.
-// 0 means unsupported, out of range, or larger than the guest scratch window.
+// Bits per element of an uncompressed format; 0 for BC (sized per block), planar/video and unknown formats.
+inline uint32_t d3d11_format_bits(DXGI_FORMAT f) {
+    const unsigned v = unsigned(f);
+    if (v >= 1 && v <= 4) return 128;
+    if (v >= 5 && v <= 8) return 96;
+    if (v >= 9 && v <= 22) return 64;
+    if (v >= 23 && v <= 47) return 32;
+    if (v >= 48 && v <= 59) return 16;
+    if (v >= 60 && v <= 65) return 8;
+    if (v == 66) return 1;
+    if (v == 67 || (v >= 87 && v <= 93)) return 32;
+    if (v == 85 || v == 86 || v == 115) return 16;
+    return 0;
+}
+// Bytes of one row of `width` texels. BC formats are 4x4 blocks of 8 bytes (BC1, BC4) or 16 (the rest),
+// so a row is ceil(width / 4) blocks; the packed 4:2:2 formats hold two texels per 4 bytes. 0 is unsupported.
+inline uint64_t d3d11_row_bytes(DXGI_FORMAT f, uint32_t width) {
+    const unsigned v = unsigned(f);
+    if (!width) return 0;
+    if (d3d11_is_bc(f)) return uint64_t((width + 3) / 4) * (((v >= 70 && v <= 72) || (v >= 79 && v <= 81)) ? 8 : 16);
+    if (v == 68 || v == 69) return uint64_t((width + 1) / 2) * 4;
+    const uint32_t bits = d3d11_format_bits(f);
+    return bits ? (uint64_t(bits) * width + 7) / 8 : 0;
+}
+// The bytes an image copy touches: every row but the last spans a pitch, the last only its texels.
+// 0 is invalid: no rows, a pitch smaller than a row, no pitch for several rows, or past the guest window.
+inline uint64_t d3d11_image_span(uint64_t row_bytes, uint32_t rows, uint32_t pitch) {
+    if (!row_bytes || !rows || (pitch && pitch < row_bytes) || (rows > 1 && !pitch)) return 0;
+    uint64_t span = uint64_t(rows - 1) * pitch + row_bytes;
+    return span > D3D9_GUEST_SIZE ? 0 : span;
+}
+// Bytes of one subresource: buffers are ByteWidth, 2D textures are the image span of that mip at the
+// given pitch. 0 means unsupported, out of range, a bad pitch, or larger than the guest scratch window.
 inline uint32_t d3d11_subresource_bytes(ID3D11Resource* r, uint32_t sub, uint32_t row_pitch) {
     D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN; r->GetType(&dim);
     if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) { D3D11_BUFFER_DESC d{}; static_cast<ID3D11Buffer*>(r)->GetDesc(&d); return d.ByteWidth; }
@@ -96,15 +132,29 @@ inline uint32_t d3d11_subresource_bytes(ID3D11Resource* r, uint32_t sub, uint32_
         D3D11_TEXTURE2D_DESC d{}; static_cast<ID3D11Texture2D*>(r)->GetDesc(&d);
         uint32_t mips = d.MipLevels ? d.MipLevels : 1;
         if (mips > 15 || sub >= uint64_t(mips) * d.ArraySize) return 0;
-        uint64_t bytes = uint64_t(row_pitch) * d3d11_mip_rows(d, sub % mips);
-        return bytes > D3D9_GUEST_SIZE ? 0 : uint32_t(bytes);
+        uint32_t level = sub % mips;
+        return uint32_t(d3d11_image_span(d3d11_row_bytes(d.Format, std::max<uint32_t>(1, d.Width >> level)), d3d11_mip_rows(d, level), row_pitch));
     }
     return 0;
 }
+// True when the CPU may read the resource back: a staging resource with read access.
+inline bool d3d11_cpu_readable(ID3D11Resource* r) {
+    D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN; r->GetType(&dim);
+    D3D11_USAGE usage = D3D11_USAGE_DEFAULT; UINT access = 0;
+    if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) { D3D11_BUFFER_DESC d{}; static_cast<ID3D11Buffer*>(r)->GetDesc(&d); usage = d.Usage; access = d.CPUAccessFlags; }
+    else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) { D3D11_TEXTURE2D_DESC d{}; static_cast<ID3D11Texture2D*>(r)->GetDesc(&d); usage = d.Usage; access = d.CPUAccessFlags; }
+    return usage == D3D11_USAGE_STAGING && (access & D3D11_CPU_ACCESS_READ);
+}
 // Guest bytes an UpdateSubresource reads: the whole subresource, or the box of it.
-// -1 is an invalid box, pitch or subresource; 0 is an empty box (a no-op in D3D11).
+// -1 is an invalid box, pitch or subresource; -2 an unsupported format; 0 is an empty box (a no-op in D3D11).
 inline int64_t d3d11_update_bytes(ID3D11Resource* r, uint32_t sub, const D3D11_BOX* box, uint32_t row_pitch) {
-    if (!box) { uint32_t n = d3d11_subresource_bytes(r, sub, row_pitch); return n ? int64_t(n) : -1; }
+    if (!box) {
+        uint32_t n = d3d11_subresource_bytes(r, sub, row_pitch);
+        if (n) return int64_t(n);
+        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN; r->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) { D3D11_TEXTURE2D_DESC d{}; static_cast<ID3D11Texture2D*>(r)->GetDesc(&d); if (!d3d11_row_bytes(d.Format, std::max<uint32_t>(1, d.Width))) return -2; }
+        return -1;
+    }
     if (box->left > box->right || box->top > box->bottom || box->front > box->back) return -1;
     D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN; r->GetType(&dim);
     uint32_t width = 0, height = 1, level = 0; const D3D11_TEXTURE2D_DESC* tex = nullptr; D3D11_TEXTURE2D_DESC d{};
@@ -121,12 +171,16 @@ inline int64_t d3d11_update_bytes(ID3D11Resource* r, uint32_t sub, const D3D11_B
     if (box->left == box->right || box->top == box->bottom || box->front == box->back) return 0;
     if (!tex) return int64_t(box->right - box->left);
     uint32_t rows = d3d11_is_bc(d.Format) ? (box->bottom - box->top + 3) / 4 : box->bottom - box->top;
-    uint64_t bytes = uint64_t(row_pitch) * rows;
-    return (!row_pitch || bytes > D3D9_GUEST_SIZE) ? -1 : int64_t(bytes);
+    uint64_t row_bytes = d3d11_row_bytes(d.Format, box->right - box->left);
+    if (!row_bytes) return -2;
+    uint64_t span = d3d11_image_span(row_bytes, rows, row_pitch);
+    return span ? int64_t(span) : -1;
 }
 // CreateTexture2D initial data: pInitialData is MipLevels * ArraySize guest D3D11_SUBRESOURCE_DATA
 // entries of 12 bytes ({pSysMem, SysMemPitch, SysMemSlicePitch}), mip-major within each array slice.
-// MipLevels 0 is the full chain down to 1x1. The total stays inside the guest scratch window.
+// MipLevels 0 is the full chain down to 1x1. Each entry reads its image span (the last row only its
+// texels) and the total stays inside the guest scratch window. A format with no row size (planar and
+// video formats) answers the gap HRESULT.
 inline HRESULT d3d11_read_texture_init(Cpu& c, uint32_t guest, const D3D11_TEXTURE2D_DESC& desc,
                                        std::vector<std::vector<uint8_t>>& bytes, std::vector<D3D11_SUBRESOURCE_DATA>& subs) {
     if (!desc.Width || !desc.Height || !desc.ArraySize || desc.ArraySize > 2048 || desc.MipLevels > 15) return E_INVALIDARG;
@@ -137,9 +191,12 @@ inline HRESULT d3d11_read_texture_init(Cpu& c, uint32_t guest, const D3D11_TEXTU
     uint64_t total = 0;
     for (uint32_t i = 0; i < count; ++i) {
         uint32_t entry = guest + 12 * i, at = c.mem.r32(entry), pitch = c.mem.r32(entry + 4);
-        uint64_t size = uint64_t(pitch) * d3d11_mip_rows(desc, i % mips);
+        uint32_t level = i % mips;
+        uint64_t row_bytes = d3d11_row_bytes(desc.Format, std::max<uint32_t>(1, desc.Width >> level));
+        if (!row_bytes) return HRESULT(D3D11_GAP_HRESULT);
+        uint64_t size = d3d11_image_span(row_bytes, d3d11_mip_rows(desc, level), pitch);
         total += size;
-        if (!at || !pitch || total > D3D9_GUEST_SIZE) return E_INVALIDARG;
+        if (!at || !size || total > D3D9_GUEST_SIZE) return E_INVALIDARG;
         bytes[i] = c.mem.read_bytes(at, uint32_t(size));
         subs[i].pSysMem = bytes[i].data(); subs[i].SysMemPitch = pitch; subs[i].SysMemSlicePitch = c.mem.r32(entry + 8);
     }
@@ -166,6 +223,56 @@ inline void d3d11_write_swapchain_desc(Cpu& c, uint32_t guest, const DXGI_SWAP_C
         d.SampleDesc.Count, d.SampleDesc.Quality, d.BufferUsage, d.BufferCount, guest_window,
         uint32_t(d.Windowed), uint32_t(d.SwapEffect), d.Flags};
     for (unsigned i = 0; i < 15; ++i) c.mem.w32(guest + i * 4, v[i]);
+}
+
+// Map state per (host resource, subresource). Guest memory is a bump window that never frees, so each
+// subresource keeps one scratch range (grown only when a bigger map needs it) and a dropped resource
+// hands its range back for reuse. The shadow is host RAM: what the guest last wrote, so a WRITE or
+// NO_OVERWRITE map seeds its scratch from it (never reading the host's possibly write-combined memory)
+// and Unmap copies back only the bytes that differ from it, leaving earlier data and GPU-owned bytes alone.
+struct D3d11MapState {
+    struct Entry {
+        uint32_t scratch = 0, capacity = 0, size = 0, mode = 0; void* host = nullptr; bool active = false;
+        std::vector<uint8_t> shadow; bool shadow_valid = false;
+    };
+    std::map<std::pair<void*, uint32_t>, Entry> entries;
+    std::set<void*> hooked;                                    // resources whose proxy release drops their entries
+    std::vector<std::pair<uint32_t, uint32_t>> free_scratch;   // {guest address, capacity} no resource owns
+    uint32_t acquire(Host& h, Cpu& c, Entry& e, uint32_t size) {
+        if (e.scratch && e.capacity >= size) return e.scratch;
+        size_t best = free_scratch.size();
+        for (size_t i = 0; i < free_scratch.size(); ++i)
+            if (free_scratch[i].second >= size && (best == free_scratch.size() || free_scratch[i].second < free_scratch[best].second)) best = i;
+        uint32_t at = 0, capacity = size;
+        if (best != free_scratch.size()) { at = free_scratch[best].first; capacity = free_scratch[best].second; free_scratch.erase(free_scratch.begin() + best); }
+        else at = d3d9_guest_buffer(h, c, size);
+        if (e.scratch) free_scratch.push_back({e.scratch, e.capacity});
+        e.scratch = at; e.capacity = capacity;
+        return at;
+    }
+    // The guest no longer holds the resource: its scratch ranges go back to the free list.
+    void drop(void* resource) {
+        hooked.erase(resource);
+        for (auto it = entries.lower_bound({resource, 0}); it != entries.end() && it->first.first == resource; it = entries.erase(it))
+            if (it->second.scratch) free_scratch.push_back({it->second.scratch, it->second.capacity});
+    }
+    // The host copy changed behind the shadow (an update or a copy), so the shadow no longer says what is there.
+    void invalidate(void* resource) {
+        for (auto it = entries.lower_bound({resource, 0}); it != entries.end() && it->first.first == resource; ++it) it->second.shadow_valid = false;
+    }
+};
+// Like d3d11_out for a buffer or texture: also drops the resource's map state when its proxy is released.
+template<class T> inline uint32_t d3d11_out_resource(const std::shared_ptr<D3d11MapState>& maps, ComSpace& s, Cpu& c, uint32_t out, const char* iface, HRESULT hr, T* object) {
+    uint32_t result = d3d11_out(s, c, out, iface, hr, object);
+    if (!out || FAILED(hr) || !object) return result;
+    uint32_t guest = c.mem.r32(out);
+    if (!guest) return result;
+    Proxy& p = s.by_guest(guest);
+    if (maps->hooked.insert(p.host).second) {
+        auto previous = p.host_release;
+        p.host_release = [maps, host = p.host, previous]() { maps->drop(host); if (previous) previous(); };
+    }
+    return result;
 }
 
 template<size_t N> inline void d3d11_iface(ComSpace& s, Host& h, const char* iface, const char* const (&names)[N], const unsigned (&argc)[N]) {
@@ -228,20 +335,21 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
     d3d11_iface(s, h, "ID3D11RasterizerState", kD3D11StateNames, kD3D11StateArgc);
     d3d11_iface(s, h, "ID3D11DepthStencilState", kD3D11StateNames, kD3D11StateArgc);
     d3d11_iface(s, h, "ID3D11SamplerState", kD3D11StateNames, kD3D11StateArgc);
+    const auto maps = std::make_shared<D3d11MapState>();
 
     // ---- IDXGISwapChain
     s.method("IDXGISwapChain", 8, 3, [&h](Proxy& p, Cpu& c) -> uint32_t {
         if (h.route_trace) h.route_trace("D3D11 SwapChain Present");
         return uint32_t(d3d11_as<IDXGISwapChain>(p.host)->Present(c.arg(1), c.arg(2)));
     });
-    s.method("IDXGISwapChain", 9, 4, [&s](Proxy& p, Cpu& c) -> uint32_t {
+    s.method("IDXGISwapChain", 9, 4, [&s, maps](Proxy& p, Cpu& c) -> uint32_t {
         if (!c.arg(2) || !c.arg(3)) return uint32_t(E_POINTER);
         GUID iid = d3d9_read_struct<GUID>(c, c.arg(2));
         void* raw = nullptr;
         HRESULT hr = d3d11_as<IDXGISwapChain>(p.host)->GetBuffer(c.arg(1), iid, &raw);
         IUnknown* object = static_cast<IUnknown*>(raw);
         if (SUCCEEDED(hr) && !IsEqualGUID(iid, __uuidof(ID3D11Texture2D))) { object->Release(); object = nullptr; hr = E_NOINTERFACE; }
-        return d3d11_out(s, c, c.arg(3), "ID3D11Texture2D", hr, object);
+        return d3d11_out_resource(maps, s, c, c.arg(3), "ID3D11Texture2D", hr, object);
     });
     s.method("IDXGISwapChain", 12, 2, [&h](Proxy& p, Cpu& c) -> uint32_t {
         if (!c.arg(1)) return uint32_t(E_POINTER);
@@ -258,10 +366,16 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
         if (c.arg(2)) return d3d11_unbridged(h, p, "SetFullscreenState target output");
         return uint32_t(d3d11_as<IDXGISwapChain>(p.host)->SetFullscreenState(c.arg(1), nullptr));
     });
-    s.method("IDXGISwapChain", 11, 3, [](Proxy& p, Cpu& c) -> uint32_t {
-        BOOL fullscreen = FALSE;
-        HRESULT hr = d3d11_as<IDXGISwapChain>(p.host)->GetFullscreenState(c.arg(1) ? &fullscreen : nullptr, nullptr);
-        if (SUCCEEDED(hr)) { if (c.arg(1)) c.mem.w32(c.arg(1), uint32_t(fullscreen)); if (c.arg(2)) c.mem.w32(c.arg(2), 0); }
+    // Windowed answers S_OK with a null target. Fullscreen has a real output that cannot cross, so a
+    // caller that asked for it gets the gap (with the BOOL still written); a BOOL-only query is fine.
+    s.method("IDXGISwapChain", 11, 3, [&h](Proxy& p, Cpu& c) -> uint32_t {
+        BOOL fullscreen = FALSE; IDXGIOutput* target = nullptr;
+        HRESULT hr = d3d11_as<IDXGISwapChain>(p.host)->GetFullscreenState(&fullscreen, c.arg(2) ? &target : nullptr);
+        if (target) target->Release();
+        if (FAILED(hr)) return uint32_t(hr);
+        if (c.arg(1)) c.mem.w32(c.arg(1), uint32_t(fullscreen));
+        if (c.arg(2)) c.mem.w32(c.arg(2), 0);
+        if (c.arg(2) && fullscreen) return d3d11_unbridged(h, p, "GetFullscreenState target output");
         return uint32_t(hr);
     });
     s.method("IDXGISwapChain", 14, 2, [](Proxy& p, Cpu& c) -> uint32_t {
@@ -271,52 +385,55 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
     });
 
     // ---- ID3D11Device creation (the 2D game set) and feature queries
-    s.method("ID3D11Device", 3, 4, [&s](Proxy& p, Cpu& c) -> uint32_t {
-        if (!c.arg(1) || !c.arg(3)) return uint32_t(E_POINTER);
+    // A null output pointer is D3D11's validation-only call: the host checks the arguments and answers
+    // S_FALSE when they are valid, so each creation passes its null output straight through.
+    s.method("ID3D11Device", 3, 4, [&s, maps](Proxy& p, Cpu& c) -> uint32_t {
+        if (!c.arg(1)) return uint32_t(E_POINTER);
         D3D11_BUFFER_DESC desc = d3d9_read_struct<D3D11_BUFFER_DESC>(c, c.arg(1));
         if (desc.ByteWidth > D3D9_GUEST_SIZE) return uint32_t(E_INVALIDARG);
         std::vector<uint8_t> init; D3D11_SUBRESOURCE_DATA sub{};
         if (c.arg(2)) { init = c.mem.read_bytes(c.mem.r32(c.arg(2)), desc.ByteWidth); sub.pSysMem = init.data(); }
         ID3D11Buffer* x = nullptr;
-        HRESULT hr = d3d11_device(p)->CreateBuffer(&desc, c.arg(2) ? &sub : nullptr, &x);
-        return d3d11_out(s, c, c.arg(3), "ID3D11Buffer", hr, x);
+        HRESULT hr = d3d11_device(p)->CreateBuffer(&desc, c.arg(2) ? &sub : nullptr, c.arg(3) ? &x : nullptr);
+        return d3d11_out_resource(maps, s, c, c.arg(3), "ID3D11Buffer", hr, x);
     });
-    s.method("ID3D11Device", 5, 4, [&s](Proxy& p, Cpu& c) -> uint32_t {
-        if (!c.arg(1) || !c.arg(3)) return uint32_t(E_POINTER);
+    s.method("ID3D11Device", 5, 4, [&s, &h, maps](Proxy& p, Cpu& c) -> uint32_t {
+        if (!c.arg(1)) return uint32_t(E_POINTER);
         D3D11_TEXTURE2D_DESC desc = d3d9_read_struct<D3D11_TEXTURE2D_DESC>(c, c.arg(1));
         std::vector<std::vector<uint8_t>> init; std::vector<D3D11_SUBRESOURCE_DATA> subs;
-        if (c.arg(2)) { HRESULT bad = d3d11_read_texture_init(c, c.arg(2), desc, init, subs); if (FAILED(bad)) return uint32_t(bad); }
+        if (c.arg(2)) {
+            HRESULT bad = d3d11_read_texture_init(c, c.arg(2), desc, init, subs);
+            if (bad == HRESULT(D3D11_GAP_HRESULT)) return d3d11_unbridged(h, p, "CreateTexture2D initial data format");
+            if (FAILED(bad)) return uint32_t(bad);
+        }
         ID3D11Texture2D* x = nullptr;
-        HRESULT hr = d3d11_device(p)->CreateTexture2D(&desc, c.arg(2) ? subs.data() : nullptr, &x);
-        return d3d11_out(s, c, c.arg(3), "ID3D11Texture2D", hr, x);
+        HRESULT hr = d3d11_device(p)->CreateTexture2D(&desc, c.arg(2) ? subs.data() : nullptr, c.arg(3) ? &x : nullptr);
+        return d3d11_out_resource(maps, s, c, c.arg(3), "ID3D11Texture2D", hr, x);
     });
     s.method("ID3D11Device", 7, 4, [&s](Proxy& p, Cpu& c) -> uint32_t {
-        if (!c.arg(3)) return uint32_t(E_POINTER);
         D3D11_SHADER_RESOURCE_VIEW_DESC desc{}; D3D11_SHADER_RESOURCE_VIEW_DESC* dp = nullptr;
         if (c.arg(2)) { desc = d3d9_read_struct<D3D11_SHADER_RESOURCE_VIEW_DESC>(c, c.arg(2)); dp = &desc; }
         ID3D11ShaderResourceView* x = nullptr;
-        HRESULT hr = d3d11_device(p)->CreateShaderResourceView(d3d11_obj<ID3D11Resource>(s, c.arg(1)), dp, &x);
+        HRESULT hr = d3d11_device(p)->CreateShaderResourceView(d3d11_obj<ID3D11Resource>(s, c.arg(1)), dp, c.arg(3) ? &x : nullptr);
         return d3d11_out(s, c, c.arg(3), "ID3D11ShaderResourceView", hr, x);
     });
     s.method("ID3D11Device", 9, 4, [&s](Proxy& p, Cpu& c) -> uint32_t {
-        if (!c.arg(3)) return uint32_t(E_POINTER);
         D3D11_RENDER_TARGET_VIEW_DESC desc{}; D3D11_RENDER_TARGET_VIEW_DESC* dp = nullptr;
         if (c.arg(2)) { desc = d3d9_read_struct<D3D11_RENDER_TARGET_VIEW_DESC>(c, c.arg(2)); dp = &desc; }
         ID3D11RenderTargetView* x = nullptr;
-        HRESULT hr = d3d11_device(p)->CreateRenderTargetView(d3d11_obj<ID3D11Resource>(s, c.arg(1)), dp, &x);
+        HRESULT hr = d3d11_device(p)->CreateRenderTargetView(d3d11_obj<ID3D11Resource>(s, c.arg(1)), dp, c.arg(3) ? &x : nullptr);
         return d3d11_out(s, c, c.arg(3), "ID3D11RenderTargetView", hr, x);
     });
     s.method("ID3D11Device", 10, 4, [&s](Proxy& p, Cpu& c) -> uint32_t {
-        if (!c.arg(3)) return uint32_t(E_POINTER);
         D3D11_DEPTH_STENCIL_VIEW_DESC desc{}; D3D11_DEPTH_STENCIL_VIEW_DESC* dp = nullptr;
         if (c.arg(2)) { desc = d3d9_read_struct<D3D11_DEPTH_STENCIL_VIEW_DESC>(c, c.arg(2)); dp = &desc; }
         ID3D11DepthStencilView* x = nullptr;
-        HRESULT hr = d3d11_device(p)->CreateDepthStencilView(d3d11_obj<ID3D11Resource>(s, c.arg(1)), dp, &x);
+        HRESULT hr = d3d11_device(p)->CreateDepthStencilView(d3d11_obj<ID3D11Resource>(s, c.arg(1)), dp, c.arg(3) ? &x : nullptr);
         return d3d11_out(s, c, c.arg(3), "ID3D11DepthStencilView", hr, x);
     });
     s.method("ID3D11Device", 11, 6, [&s](Proxy& p, Cpu& c) -> uint32_t {
         // D3D11_INPUT_ELEMENT_DESC is 28 bytes in PE32 (SemanticName is a guest pointer).
-        if (!c.arg(5) || !c.arg(1) || !c.arg(3) || !c.arg(2) || c.arg(2) > 32 || !c.arg(4)) return uint32_t(E_INVALIDARG);
+        if (!c.arg(1) || !c.arg(3) || !c.arg(2) || c.arg(2) > 32 || !c.arg(4)) return uint32_t(E_INVALIDARG);
         uint32_t n = c.arg(2);
         std::vector<std::string> names(n);
         std::vector<D3D11_INPUT_ELEMENT_DESC> elements(n);
@@ -331,53 +448,53 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
         }
         std::vector<uint8_t> code = c.mem.read_bytes(c.arg(3), c.arg(4));
         ID3D11InputLayout* x = nullptr;
-        HRESULT hr = d3d11_device(p)->CreateInputLayout(elements.data(), n, code.data(), c.arg(4), &x);
+        HRESULT hr = d3d11_device(p)->CreateInputLayout(elements.data(), n, code.data(), c.arg(4), c.arg(5) ? &x : nullptr);
         return d3d11_out(s, c, c.arg(5), "ID3D11InputLayout", hr, x);
     });
     s.method("ID3D11Device", 12, 5, [&s, &h](Proxy& p, Cpu& c) -> uint32_t {
-        if (!c.arg(4) || !c.arg(1) || !c.arg(2)) return uint32_t(E_POINTER);
+        if (!c.arg(1) || !c.arg(2)) return uint32_t(E_POINTER);
         if (c.arg(3)) return d3d11_unbridged(h, p, "CreateVertexShader class linkage");
         std::vector<uint8_t> code = c.mem.read_bytes(c.arg(1), c.arg(2));
         ID3D11VertexShader* x = nullptr;
-        HRESULT hr = d3d11_device(p)->CreateVertexShader(code.data(), c.arg(2), nullptr, &x);
+        HRESULT hr = d3d11_device(p)->CreateVertexShader(code.data(), c.arg(2), nullptr, c.arg(4) ? &x : nullptr);
         return d3d11_out(s, c, c.arg(4), "ID3D11VertexShader", hr, x);
     });
     s.method("ID3D11Device", 15, 5, [&s, &h](Proxy& p, Cpu& c) -> uint32_t {
-        if (!c.arg(4) || !c.arg(1) || !c.arg(2)) return uint32_t(E_POINTER);
+        if (!c.arg(1) || !c.arg(2)) return uint32_t(E_POINTER);
         if (c.arg(3)) return d3d11_unbridged(h, p, "CreatePixelShader class linkage");
         std::vector<uint8_t> code = c.mem.read_bytes(c.arg(1), c.arg(2));
         ID3D11PixelShader* x = nullptr;
-        HRESULT hr = d3d11_device(p)->CreatePixelShader(code.data(), c.arg(2), nullptr, &x);
+        HRESULT hr = d3d11_device(p)->CreatePixelShader(code.data(), c.arg(2), nullptr, c.arg(4) ? &x : nullptr);
         return d3d11_out(s, c, c.arg(4), "ID3D11PixelShader", hr, x);
     });
     s.method("ID3D11Device", 20, 3, [&s](Proxy& p, Cpu& c) -> uint32_t {
-        if (!c.arg(1) || !c.arg(2)) return uint32_t(E_POINTER);
+        if (!c.arg(1)) return uint32_t(E_POINTER);
         D3D11_BLEND_DESC d = d3d9_read_struct<D3D11_BLEND_DESC>(c, c.arg(1));
-        ID3D11BlendState* x = nullptr; HRESULT hr = d3d11_device(p)->CreateBlendState(&d, &x);
+        ID3D11BlendState* x = nullptr; HRESULT hr = d3d11_device(p)->CreateBlendState(&d, c.arg(2) ? &x : nullptr);
         return d3d11_out(s, c, c.arg(2), "ID3D11BlendState", hr, x);
     });
     s.method("ID3D11Device", 21, 3, [&s](Proxy& p, Cpu& c) -> uint32_t {
-        if (!c.arg(1) || !c.arg(2)) return uint32_t(E_POINTER);
+        if (!c.arg(1)) return uint32_t(E_POINTER);
         D3D11_DEPTH_STENCIL_DESC d = d3d9_read_struct<D3D11_DEPTH_STENCIL_DESC>(c, c.arg(1));
-        ID3D11DepthStencilState* x = nullptr; HRESULT hr = d3d11_device(p)->CreateDepthStencilState(&d, &x);
+        ID3D11DepthStencilState* x = nullptr; HRESULT hr = d3d11_device(p)->CreateDepthStencilState(&d, c.arg(2) ? &x : nullptr);
         return d3d11_out(s, c, c.arg(2), "ID3D11DepthStencilState", hr, x);
     });
     s.method("ID3D11Device", 22, 3, [&s](Proxy& p, Cpu& c) -> uint32_t {
-        if (!c.arg(1) || !c.arg(2)) return uint32_t(E_POINTER);
+        if (!c.arg(1)) return uint32_t(E_POINTER);
         D3D11_RASTERIZER_DESC d = d3d9_read_struct<D3D11_RASTERIZER_DESC>(c, c.arg(1));
-        ID3D11RasterizerState* x = nullptr; HRESULT hr = d3d11_device(p)->CreateRasterizerState(&d, &x);
+        ID3D11RasterizerState* x = nullptr; HRESULT hr = d3d11_device(p)->CreateRasterizerState(&d, c.arg(2) ? &x : nullptr);
         return d3d11_out(s, c, c.arg(2), "ID3D11RasterizerState", hr, x);
     });
     s.method("ID3D11Device", 23, 3, [&s](Proxy& p, Cpu& c) -> uint32_t {
-        if (!c.arg(1) || !c.arg(2)) return uint32_t(E_POINTER);
+        if (!c.arg(1)) return uint32_t(E_POINTER);
         D3D11_SAMPLER_DESC d = d3d9_read_struct<D3D11_SAMPLER_DESC>(c, c.arg(1));
-        ID3D11SamplerState* x = nullptr; HRESULT hr = d3d11_device(p)->CreateSamplerState(&d, &x);
+        ID3D11SamplerState* x = nullptr; HRESULT hr = d3d11_device(p)->CreateSamplerState(&d, c.arg(2) ? &x : nullptr);
         return d3d11_out(s, c, c.arg(2), "ID3D11SamplerState", hr, x);
     });
     s.method("ID3D11Device", 24, 3, [&s](Proxy& p, Cpu& c) -> uint32_t {
-        if (!c.arg(1) || !c.arg(2)) return uint32_t(E_POINTER);
+        if (!c.arg(1)) return uint32_t(E_POINTER);
         D3D11_QUERY_DESC desc = d3d9_read_struct<D3D11_QUERY_DESC>(c, c.arg(1));
-        ID3D11Query* x = nullptr; HRESULT hr = d3d11_device(p)->CreateQuery(&desc, &x);
+        ID3D11Query* x = nullptr; HRESULT hr = d3d11_device(p)->CreateQuery(&desc, c.arg(2) ? &x : nullptr);
         return d3d11_out(s, c, c.arg(2), "ID3D11Query", hr, x);
     });
     s.method("ID3D11Device", 29, 3, [](Proxy& p, Cpu& c) -> uint32_t {
@@ -421,6 +538,14 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
         c.mem.write_bytes(c.arg(1), &d, sizeof d); return 0;
     });
 
+    // ---- ID3D11Query: GetDataSize (a byte count, returned as is) and GetDesc (two DWORDs)
+    s.method("ID3D11Query", 7, 1, [](Proxy& p, Cpu&) -> uint32_t { return d3d11_as<ID3D11Query>(p.host)->GetDataSize(); });
+    s.method("ID3D11Query", 8, 2, [](Proxy& p, Cpu& c) -> uint32_t {
+        if (!c.arg(1)) return uint32_t(E_POINTER);
+        D3D11_QUERY_DESC d{}; d3d11_as<ID3D11Query>(p.host)->GetDesc(&d);
+        c.mem.write_bytes(c.arg(1), &d, sizeof d); return 0;
+    });
+
     // ---- ID3D11DeviceContext: the draw path (state binds, uploads, clears, draws)
     s.method("ID3D11DeviceContext", 7, 4, [&s](Proxy& p, Cpu& c) -> uint32_t {
         std::vector<ID3D11Buffer*> buffers;
@@ -452,38 +577,71 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
     });
     s.method("ID3D11DeviceContext", 12, 4, [](Proxy& p, Cpu& c) -> uint32_t { d3d11_context(p)->DrawIndexed(c.arg(1), c.arg(2), int32_t(c.arg(3))); return 0; });
     s.method("ID3D11DeviceContext", 13, 3, [](Proxy& p, Cpu& c) -> uint32_t { d3d11_context(p)->Draw(c.arg(1), c.arg(2)); return 0; });
-    s.method("ID3D11DeviceContext", 14, 6, [&s, &h](Proxy& p, Cpu& c) -> uint32_t {
+    // Map direction follows the mode, and the host's memory is read only when the guest may read it:
+    //   READ, READ_WRITE   host -> scratch now; READ_WRITE copies the whole scratch back on Unmap.
+    //   WRITE_DISCARD      scratch zeroed (contents are undefined); the whole scratch is copied back.
+    //   WRITE_NO_OVERWRITE scratch seeded from the shadow of the last write, never from the host; Unmap
+    //                      copies back only the bytes the guest changed, so earlier data and bytes the GPU
+    //                      may still read are untouched. With no shadow to seed from it is a named gap.
+    //   WRITE              the same, and a staging resource the CPU can read is seeded from the host instead.
+    // The scratch is one guest range per subresource, reused by every map. The guest's output struct is
+    // probed before the host Map, and a failure after it unmaps again, so the host is never left mapped.
+    s.method("ID3D11DeviceContext", 14, 6, [&s, &h, maps](Proxy& p, Cpu& c) -> uint32_t {
         if (!c.arg(1) || !c.arg(5)) return uint32_t(E_POINTER);
-        ID3D11Resource* resource = d3d11_obj<ID3D11Resource>(s, c.arg(1));
+        Proxy& rp = s.by_guest(c.arg(1));
+        ID3D11Resource* resource = d3d11_as<ID3D11Resource>(rp.host);
+        const uint32_t sub = c.arg(2), mode = c.arg(3);
+        if (mode < D3D11_MAP_READ || mode > D3D11_MAP_WRITE_NO_OVERWRITE) return uint32_t(E_INVALIDARG);
+        { const uint8_t zero[12] = {}; c.mem.write_bytes(c.arg(5), zero, sizeof zero); }
+        D3d11MapState::Entry& e = maps->entries[{rp.host, sub}];
+        if (e.active) return 0x887A0001u;   // DXGI_ERROR_INVALID_CALL: already mapped
+        const bool diff = mode == D3D11_MAP_WRITE || mode == D3D11_MAP_WRITE_NO_OVERWRITE;
+        bool seed_from_host = false;
+        if (mode == D3D11_MAP_WRITE_NO_OVERWRITE && !e.shadow_valid) return d3d11_unbridged(h, p, "Map WRITE_NO_OVERWRITE without a prior write to seed from");
+        if (mode == D3D11_MAP_WRITE && !e.shadow_valid) {
+            if (!d3d11_cpu_readable(resource)) return d3d11_unbridged(h, p, "Map WRITE without a prior write to seed from");
+            seed_from_host = true;
+        }
         D3D11_MAPPED_SUBRESOURCE m{};
-        HRESULT hr = d3d11_context(p)->Map(resource, c.arg(2), D3D11_MAP(c.arg(3)), c.arg(4), &m);
+        HRESULT hr = d3d11_context(p)->Map(resource, sub, D3D11_MAP(mode), c.arg(4), &m);
         if (FAILED(hr)) return uint32_t(hr);
-        uint32_t size = d3d11_subresource_bytes(resource, c.arg(2), m.RowPitch);
-        if (!size || !m.pData) { d3d11_context(p)->Unmap(resource, c.arg(2)); return d3d11_unbridged(h, p, "Map resource type"); }
-        uint32_t at = d3d9_guest_buffer(h, c, size);
-        // The mode is the lock record. READ and READ_WRITE copy host -> guest here (the scratch is
-        // otherwise fresh and zeroed), so a write-only map never reads the host's possibly
-        // write-combined memory. WRITE modes and READ_WRITE keep the host pointer, which makes
-        // Unmap copy guest -> host; READ records a null host pointer, so Unmap writes nothing back.
-        // A WRITE/NO_OVERWRITE map therefore writes back the whole scratch, zeros where the guest
-        // stored nothing; only DISCARD (contents undefined) is exact for partial writes.
-        const uint32_t mode = c.arg(3);
-        if (mode == D3D11_MAP_READ || mode == D3D11_MAP_READ_WRITE) c.mem.write_bytes(at, m.pData, size);
-        h.d3d9_locks[{c.arg(1), c.arg(2)}] = {mode == D3D11_MAP_READ ? nullptr : m.pData, size, at};
-        c.mem.w32(c.arg(5), at); c.mem.w32(c.arg(5) + 4, m.RowPitch); c.mem.w32(c.arg(5) + 8, m.DepthPitch);
+        try {
+            uint32_t size = d3d11_subresource_bytes(resource, sub, m.RowPitch);
+            if (!size || !m.pData) { d3d11_context(p)->Unmap(resource, sub); return d3d11_unbridged(h, p, "Map resource type"); }
+            if (diff && e.shadow_valid && e.shadow.size() != size) { d3d11_context(p)->Unmap(resource, sub); return d3d11_unbridged(h, p, "Map size changed since the last write"); }
+            uint32_t at = maps->acquire(h, c, e, size);
+            if (mode == D3D11_MAP_READ || mode == D3D11_MAP_READ_WRITE) c.mem.write_bytes(at, m.pData, size);
+            else if (mode == D3D11_MAP_WRITE_DISCARD) { std::vector<uint8_t> zeros(size); c.mem.write_bytes(at, zeros.data(), size); }
+            else {
+                if (seed_from_host) { e.shadow.assign(static_cast<uint8_t*>(m.pData), static_cast<uint8_t*>(m.pData) + size); e.shadow_valid = true; }
+                c.mem.write_bytes(at, e.shadow.data(), size);
+            }
+            c.mem.w32(c.arg(5), at); c.mem.w32(c.arg(5) + 4, m.RowPitch); c.mem.w32(c.arg(5) + 8, m.DepthPitch);
+            e.active = true; e.host = m.pData; e.size = size; e.mode = mode;
+        } catch (...) { e.active = false; d3d11_context(p)->Unmap(resource, sub); throw; }
         return uint32_t(hr);
     });
-    s.method("ID3D11DeviceContext", 15, 3, [&s, &h](Proxy& p, Cpu& c) -> uint32_t {
-        // Copy the guest scratch back to the mapped host memory before the host Unmap.
-        auto it = h.d3d9_locks.find({c.arg(1), c.arg(2)});
-        if (it != h.d3d9_locks.end()) {
-            if (std::get<0>(it->second) && std::get<1>(it->second)) {
-                auto bytes = c.mem.read_bytes(std::get<2>(it->second), std::get<1>(it->second));
-                memcpy(std::get<0>(it->second), bytes.data(), bytes.size());
-            }
-            h.d3d9_locks.erase(it);
+    // Unmap writes back through the mode's rule before the host Unmap; one with no active map is a no-op.
+    s.method("ID3D11DeviceContext", 15, 3, [&s, maps](Proxy& p, Cpu& c) -> uint32_t {
+        if (!c.arg(1)) return 0;
+        Proxy& rp = s.by_guest(c.arg(1));
+        auto it = maps->entries.find({rp.host, c.arg(2)});
+        if (it == maps->entries.end() || !it->second.active) return 0;
+        D3d11MapState::Entry& e = it->second;
+        if (e.mode != D3D11_MAP_READ) {
+            std::vector<uint8_t> bytes = c.mem.read_bytes(e.scratch, e.size);
+            uint8_t* host = static_cast<uint8_t*>(e.host);
+            if (e.mode == D3D11_MAP_WRITE || e.mode == D3D11_MAP_WRITE_NO_OVERWRITE) {
+                for (size_t i = 0; i < bytes.size();) {
+                    if (bytes[i] == e.shadow[i]) { ++i; continue; }
+                    size_t j = i; while (j < bytes.size() && bytes[j] != e.shadow[j]) ++j;
+                    memcpy(host + i, bytes.data() + i, j - i); i = j;
+                }
+            } else memcpy(host, bytes.data(), bytes.size());
+            e.shadow = std::move(bytes); e.shadow_valid = true;
         }
-        if (c.arg(1)) d3d11_context(p)->Unmap(d3d11_obj<ID3D11Resource>(s, c.arg(1)), c.arg(2));
+        e.active = false;
+        d3d11_as<ID3D11DeviceContext>(p.host)->Unmap(d3d11_as<ID3D11Resource>(rp.host), c.arg(2));
         return 0;
     });
     s.method("ID3D11DeviceContext", 17, 2, [&s](Proxy& p, Cpu& c) -> uint32_t { d3d11_context(p)->IASetInputLayout(d3d11_obj<ID3D11InputLayout>(s, c.arg(1))); return 0; });
@@ -525,15 +683,17 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
         for (uint32_t i = 0; i < c.arg(1); ++i) rects[i] = d3d9_read_struct<RECT>(c, c.arg(2) + i * sizeof(D3D11_RECT));
         d3d11_context(p)->RSSetScissorRects(c.arg(1), rects.data()); return 0;
     });
-    s.method("ID3D11DeviceContext", 48, 7, [&s](Proxy& p, Cpu& c) -> uint32_t {
+    s.method("ID3D11DeviceContext", 48, 7, [&s, &h, maps](Proxy& p, Cpu& c) -> uint32_t {
         ID3D11Resource* dst = d3d11_obj<ID3D11Resource>(s, c.arg(1));
         D3D11_BOX box{}; const D3D11_BOX* region = nullptr;
         if (c.arg(3)) { box = d3d9_read_struct<D3D11_BOX>(c, c.arg(3)); region = &box; }
         int64_t size = dst && c.arg(4) ? d3d11_update_bytes(dst, c.arg(2), region, c.arg(5)) : -1;
+        if (size == -2) return d3d11_unbridged(h, p, "UpdateSubresource format");
         if (size < 0) return uint32_t(E_INVALIDARG);
         if (size == 0) return 0;
         std::vector<uint8_t> data = c.mem.read_bytes(c.arg(4), uint32_t(size));
-        d3d11_context(p)->UpdateSubresource(dst, c.arg(2), region, data.data(), c.arg(5), c.arg(6)); return 0;
+        d3d11_context(p)->UpdateSubresource(dst, c.arg(2), region, data.data(), c.arg(5), c.arg(6));
+        maps->invalidate(s.by_guest(c.arg(1)).host); return 0;
     });
     s.method("ID3D11DeviceContext", 50, 3, [&s](Proxy& p, Cpu& c) -> uint32_t {
         if (!c.arg(2)) return uint32_t(E_POINTER);
@@ -590,30 +750,33 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
         if (hr == S_OK && !data.empty()) c.mem.write_bytes(c.arg(2), data.data(), uint32_t(data.size()));
         return uint32_t(hr);
     });
-    s.method("ID3D11DeviceContext", 46, 9, [&s](Proxy& p, Cpu& c) -> uint32_t {
+    s.method("ID3D11DeviceContext", 46, 9, [&s, maps](Proxy& p, Cpu& c) -> uint32_t {
         ID3D11Resource* dst = d3d11_obj<ID3D11Resource>(s, c.arg(1));
         ID3D11Resource* src = d3d11_obj<ID3D11Resource>(s, c.arg(6));
         if (!dst || !src) return uint32_t(E_POINTER);
         D3D11_BOX box{}; const D3D11_BOX* region = nullptr;
         if (c.arg(8)) { box = d3d9_read_struct<D3D11_BOX>(c, c.arg(8)); region = &box; }
-        d3d11_context(p)->CopySubresourceRegion(dst, c.arg(2), c.arg(3), c.arg(4), c.arg(5), src, c.arg(7), region); return 0;
+        d3d11_context(p)->CopySubresourceRegion(dst, c.arg(2), c.arg(3), c.arg(4), c.arg(5), src, c.arg(7), region);
+        maps->invalidate(s.by_guest(c.arg(1)).host); return 0;
     });
-    s.method("ID3D11DeviceContext", 47, 3, [&s](Proxy& p, Cpu& c) -> uint32_t {
+    s.method("ID3D11DeviceContext", 47, 3, [&s, maps](Proxy& p, Cpu& c) -> uint32_t {
         ID3D11Resource* dst = d3d11_obj<ID3D11Resource>(s, c.arg(1));
         ID3D11Resource* src = d3d11_obj<ID3D11Resource>(s, c.arg(2));
         if (!dst || !src) return uint32_t(E_POINTER);
-        d3d11_context(p)->CopyResource(dst, src); return 0;
+        d3d11_context(p)->CopyResource(dst, src);
+        maps->invalidate(s.by_guest(c.arg(1)).host); return 0;
     });
     s.method("ID3D11DeviceContext", 54, 2, [&s](Proxy& p, Cpu& c) -> uint32_t {
         ID3D11ShaderResourceView* view = d3d11_obj<ID3D11ShaderResourceView>(s, c.arg(1));
         if (!view) return uint32_t(E_POINTER);
         d3d11_context(p)->GenerateMips(view); return 0;
     });
-    s.method("ID3D11DeviceContext", 57, 6, [&s](Proxy& p, Cpu& c) -> uint32_t {
+    s.method("ID3D11DeviceContext", 57, 6, [&s, maps](Proxy& p, Cpu& c) -> uint32_t {
         ID3D11Resource* dst = d3d11_obj<ID3D11Resource>(s, c.arg(1));
         ID3D11Resource* src = d3d11_obj<ID3D11Resource>(s, c.arg(3));
         if (!dst || !src) return uint32_t(E_POINTER);
-        d3d11_context(p)->ResolveSubresource(dst, c.arg(2), src, c.arg(4), DXGI_FORMAT(c.arg(5))); return 0;
+        d3d11_context(p)->ResolveSubresource(dst, c.arg(2), src, c.arg(4), DXGI_FORMAT(c.arg(5)));
+        maps->invalidate(s.by_guest(c.arg(1)).host); return 0;
     });
     s.method("ID3D11DeviceContext", 110, 1, [](Proxy& p, Cpu&) -> uint32_t { d3d11_context(p)->ClearState(); return 0; });
     s.method("ID3D11DeviceContext", 111, 1, [](Proxy& p, Cpu&) -> uint32_t { d3d11_context(p)->Flush(); return 0; });

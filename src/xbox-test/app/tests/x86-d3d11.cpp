@@ -139,7 +139,7 @@ static uint32_t fbits(float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; }
 struct Fake {
     void** vtbl = nullptr; int id = 0; int refs = 1;
     D3D11_BUFFER_DESC buf{}; D3D11_TEXTURE2D_DESC tex{};
-    D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+    D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN; D3D11_QUERY_DESC qdesc{};
     std::vector<uint8_t> mem; uint32_t row_pitch = 0;   // what Map hands out
 };
 static std::deque<Fake> g_pool;
@@ -148,7 +148,8 @@ static void* vt_ctx[std::size(x86::kD3D11ContextNames)];
 static void* vt_swap[std::size(x86::kD3D11SwapChainNames)];
 static void* vt_buf[std::size(x86::kD3D11ResourceNames)];
 static void* vt_tex[std::size(x86::kD3D11ResourceNames)];
-static void* vt_view[std::size(x86::kD3D11ViewNames)];   // views and queries: AddRef/Release only
+static void* vt_view[std::size(x86::kD3D11ViewNames)];   // views: AddRef/Release only
+static void* vt_query[std::size(x86::kD3D11QueryNames)];
 static Fake* make(void** vt) { g_pool.emplace_back(); Fake* f = &g_pool.back(); f->vtbl = vt; f->id = int(g_pool.size()); return f; }
 static int idof(const void* p) { return p ? static_cast<const Fake*>(p)->id : 0; }
 static std::string boxs(const D3D11_BOX* b) { return b ? F("%u,%u,%u,%u,%u,%u", b->left, b->top, b->front, b->right, b->bottom, b->back) : "null"; }
@@ -156,10 +157,19 @@ static std::string boxs(const D3D11_BOX* b) { return b ? F("%u,%u,%u,%u,%u,%u", 
 static ULONG f_AddRef(Fake* f) { return ULONG(++f->refs); }
 static ULONG f_Release(Fake* f) { return ULONG(--f->refs); }
 static void f_trap() { g_log.push_back("TRAP"); }
-// Hands a created object to the bridge the way COM does: one reference, owned by the caller.
-template<class T> static HRESULT give(HRESULT hr, Fake* f, T** out) { *out = SUCCEEDED(hr) ? reinterpret_cast<T*>(f) : nullptr; return hr; }
+// Hands a created object to the bridge the way COM does: one reference, owned by the caller. A null
+// output is D3D11's validation-only call: nothing is handed out and a valid call answers S_FALSE.
+template<class T> static HRESULT give(HRESULT hr, Fake* f, T** out) {
+    if (!out) return FAILED(hr) ? hr : S_FALSE;
+    *out = SUCCEEDED(hr) ? reinterpret_cast<T*>(f) : nullptr; return hr;
+}
 
 // ID3D11Device
+static HRESULT d_CreateBuffer(Fake*, const D3D11_BUFFER_DESC* d, const D3D11_SUBRESOURCE_DATA* init, ID3D11Buffer** out) {
+    LOGF("CreateBuffer bytes=%u usage=%u init=%s", d->ByteWidth, unsigned(d->Usage), init ? "ptr" : "null");
+    Fake* b = make(vt_buf); b->dim = D3D11_RESOURCE_DIMENSION_BUFFER; b->buf = *d; b->mem.assign(d->ByteWidth, 0); b->row_pitch = d->ByteWidth;
+    return give(take_hr(), b, out);
+}
 static HRESULT d_CreateTexture2D(Fake*, const D3D11_TEXTURE2D_DESC* d, const D3D11_SUBRESOURCE_DATA* init, ID3D11Texture2D** out) {
     std::string s = init ? "" : " init=null";
     if (init) {
@@ -176,7 +186,8 @@ static HRESULT d_CreateDepthStencilView(Fake*, ID3D11Resource* r, const D3D11_DE
     return give(take_hr(), make(vt_view), out);
 }
 static HRESULT d_CreateQuery(Fake*, const D3D11_QUERY_DESC* d, ID3D11Query** out) {
-    LOGF("CreateQuery q=%u misc=%u", unsigned(d->Query), d->MiscFlags); return give(take_hr(), make(vt_view), out);
+    LOGF("CreateQuery q=%u misc=%u", unsigned(d->Query), d->MiscFlags);
+    Fake* q = make(vt_query); q->qdesc = *d; return give(take_hr(), q, out);
 }
 static HRESULT d_CheckMultisampleQualityLevels(Fake*, DXGI_FORMAT f, UINT count, UINT* levels) {
     LOGF("CheckMultisampleQualityLevels fmt=%u count=%u", unsigned(f), count);
@@ -185,6 +196,10 @@ static HRESULT d_CheckMultisampleQualityLevels(Fake*, DXGI_FORMAT f, UINT count,
 static UINT d_GetCreationFlags(Fake*) { return 0x22; }
 static HRESULT d_GetDeviceRemovedReason(Fake*) { return HRESULT(0x887A0005u); }   // DXGI_ERROR_DEVICE_REMOVED
 
+// ID3D11Query
+static UINT q_GetDataSize(Fake* f) { return f->qdesc.Query == D3D11_QUERY_TIMESTAMP_DISJOINT ? 16 : 8; }
+static void q_GetDesc(Fake* f, D3D11_QUERY_DESC* d) { *d = f->qdesc; }
+
 // ID3D11Buffer / ID3D11Texture2D
 static void r_GetType(Fake* f, D3D11_RESOURCE_DIMENSION* d) { *d = f->dim; }
 static void r_GetDescBuffer(Fake* f, D3D11_BUFFER_DESC* d) { *d = f->buf; }
@@ -192,9 +207,12 @@ static void r_GetDescTexture(Fake* f, D3D11_TEXTURE2D_DESC* d) { *d = f->tex; }
 
 // IDXGISwapChain
 static HRESULT s_SetFullscreenState(Fake*, BOOL fs, IDXGIOutput* target) { LOGF("SetFullscreenState fs=%d target=%d", int(fs), idof(target)); return take_hr(); }
+static BOOL g_fullscreen = FALSE;   // what the fake swap chain reports; fullscreen hands out an output
+static Fake* g_output = nullptr;    // the last output handed out
 static HRESULT s_GetFullscreenState(Fake*, BOOL* fs, IDXGIOutput** target) {
     LOGF("GetFullscreenState fs=%s target=%s", fs ? "ptr" : "null", target ? "ptr" : "null");
-    if (fs) *fs = TRUE;
+    if (fs) *fs = g_fullscreen;
+    if (target && g_fullscreen) { g_output = make(vt_view); *target = reinterpret_cast<IDXGIOutput*>(g_output); }
     return S_OK;
 }
 static HRESULT s_ResizeTarget(Fake*, const DXGI_MODE_DESC* m) {
@@ -254,7 +272,9 @@ template<size_t N> static void put(void* (&vt)[N], const char* const (&names)[N]
 }
 #define FN(f) reinterpret_cast<void*>(&f)
 static void init_fakes() {
-    fill(vt_dev); fill(vt_ctx); fill(vt_swap); fill(vt_buf); fill(vt_tex); fill(vt_view);
+    fill(vt_dev); fill(vt_ctx); fill(vt_swap); fill(vt_buf); fill(vt_tex); fill(vt_view); fill(vt_query);
+    put(vt_query, x86::kD3D11QueryNames, "GetDataSize", FN(q_GetDataSize)); put(vt_query, x86::kD3D11QueryNames, "GetDesc", FN(q_GetDesc));
+    put(vt_dev, x86::kD3D11DeviceNames, "CreateBuffer", FN(d_CreateBuffer));
     const auto& dn = x86::kD3D11DeviceNames; const auto& cn = x86::kD3D11ContextNames;
     const auto& sn = x86::kD3D11SwapChainNames; const auto& rn = x86::kD3D11ResourceNames;
     put(vt_dev, dn, "CreateTexture2D", FN(d_CreateTexture2D)); put(vt_dev, dn, "CreateDepthStencilView", FN(d_CreateDepthStencilView));
@@ -331,7 +351,11 @@ static void test_routes() {
     bc->tex.Width = 16; bc->tex.Height = 16; bc->tex.MipLevels = 1; bc->tex.ArraySize = 1; bc->tex.Format = DXGI_FORMAT_BC3_UNORM; bc->tex.SampleDesc.Count = 1;
     bc->mem.assign(1024, 0xAA); bc->row_pitch = 64;
     const uint32_t buf_g = e.proxy("ID3D11Buffer", buf), tex_g = e.proxy("ID3D11Texture2D", tex), bc_g = e.proxy("ID3D11Texture2D", bc);
-    Fake* dsv = make(vt_view); Fake* rtv = make(vt_view); Fake* srv = make(vt_view); Fake* srv2 = make(vt_view); Fake* smp = make(vt_view); Fake* qry = make(vt_view);
+    Fake* nv = make(vt_tex); nv->dim = D3D11_RESOURCE_DIMENSION_TEXTURE2D;    // a planar video format has no row size to bridge
+    nv->tex.Width = 16; nv->tex.Height = 16; nv->tex.MipLevels = 1; nv->tex.ArraySize = 1; nv->tex.Format = DXGI_FORMAT(103); nv->tex.SampleDesc.Count = 1;
+    const uint32_t nv_g = e.proxy("ID3D11Texture2D", nv);
+    Fake* dsv = make(vt_view); Fake* rtv = make(vt_view); Fake* srv = make(vt_view); Fake* srv2 = make(vt_view); Fake* smp = make(vt_view);
+    Fake* qry = make(vt_query); qry->qdesc.Query = D3D11_QUERY_OCCLUSION;
     const uint32_t dsv_g = e.proxy("ID3D11DepthStencilView", dsv), rtv_g = e.proxy("ID3D11RenderTargetView", rtv);
     const uint32_t srv_g = e.proxy("ID3D11ShaderResourceView", srv), srv2_g = e.proxy("ID3D11ShaderResourceView", srv2);
     const uint32_t smp_g = e.proxy("ID3D11SamplerState", smp), qry_g = e.proxy("ID3D11Query", qry);
@@ -343,7 +367,14 @@ static void test_routes() {
     EXPECT(std::string(e.iface_of(out)) == "ID3D11DepthStencilView", "DSV proxy is %s", e.iface_of(out));
     r = e.call("ID3D11Device", 10, {dev_g, tex_g, 0, out});
     HR(r, S_OK); LOG(F("CreateDepthStencilView res=%d desc=null", tex->id));
-    r = e.call("ID3D11Device", 10, {dev_g, tex_g, 0, 0}); HR(r, E_POINTER); LOG();
+    r = e.call("ID3D11Device", 10, {dev_g, tex_g, 0, 0}); HR(r, S_FALSE);   // validation-only: a null output reaches the host
+    LOG(F("CreateDepthStencilView res=%d desc=null", tex->id));
+    {   // a bad guest output pointer faults before a proxy takes the host object, which is released, not leaked
+        const unsigned live = e.host.com.live();
+        EXPECT(faults([&] { e.call("ID3D11Device", 10, {dev_g, tex_g, 0, 0xDEAD0000u}); }), "a bad output pointer faults");
+        LOG(F("CreateDepthStencilView res=%d desc=null", tex->id));
+        EXPECT(g_pool.back().refs == 0 && e.host.com.live() == live, "bad output pointer leaked: refs=%d live %u -> %u", g_pool.back().refs, live, e.host.com.live());
+    }
     e.mem.w32(out, 0x1234); g_hr = E_INVALIDARG;
     r = e.call("ID3D11Device", 10, {dev_g, tex_g, 0, out});
     HR(r, E_INVALIDARG); LOG(F("CreateDepthStencilView res=%d desc=null", tex->id)); EXPECT(e.mem.r32(out) == 0, "failed create leaves a null out");
@@ -388,11 +419,20 @@ static void test_routes() {
         r = create_tex(8, 8, 2, 1, 77, s, 0); HR(r, S_OK); LOG("CreateTexture2D 8x8 mips=2 arr=1 fmt=77" + subs_log(s));
         EXPECT(faults([&] { create_tex(8, 8, 2, 1, 77, s, 1); }), "BC3 data is read to its last block row"); g_log.clear();
     }
-    {   // BC1 6x6: ceil(6/4) = 2 block rows. BC7 1x1: one row, never zero.
-        std::vector<std::pair<uint32_t, uint32_t>> s = {{16, 32}};
-        r = create_tex(6, 6, 1, 1, 71, s, 0); HR(r, S_OK); LOG("CreateTexture2D 6x6 mips=1 arr=1 fmt=71" + subs_log(s));
-        std::vector<std::pair<uint32_t, uint32_t>> one = {{16, 16}};
-        r = create_tex(1, 1, 1, 1, 98, one, 0); HR(r, S_OK); LOG("CreateTexture2D 1x1 mips=1 arr=1 fmt=98" + subs_log(one));
+    {   // BC mips below 4x4 still take one whole block: an 8x8 base is 8, 4, 2, 1 wide
+        std::vector<std::pair<uint32_t, uint32_t>> s = {{32, 64}, {16, 16}, {16, 16}, {16, 16}};
+        r = create_tex(8, 8, 4, 1, 77, s, 0); HR(r, S_OK); LOG("CreateTexture2D 8x8 mips=4 arr=1 fmt=77" + subs_log(s));
+        EXPECT(faults([&] { create_tex(8, 8, 4, 1, 77, s, 1); }), "the 1x1 BC3 mip is a whole block"); g_log.clear();
+        std::vector<std::pair<uint32_t, uint32_t>> b = {{16, 32}, {8, 8}, {8, 8}, {8, 8}};   // BC1 blocks are 8 bytes
+        r = create_tex(8, 8, 4, 1, 71, b, 0); HR(r, S_OK); LOG("CreateTexture2D 8x8 mips=4 arr=1 fmt=71" + subs_log(b));
+        EXPECT(faults([&] { create_tex(8, 8, 4, 1, 71, b, 1); }), "the 1x1 BC1 mip is a whole block"); g_log.clear();
+    }
+    {   // the last row spans only its texels: 8x8 BC3 at a 64-byte pitch is (2 - 1) * 64 + 32 = 96 bytes, not 128
+        std::vector<std::pair<uint32_t, uint32_t>> s = {{64, 96}};
+        r = create_tex(8, 8, 1, 1, 77, s, 0); HR(r, S_OK); LOG("CreateTexture2D 8x8 mips=1 arr=1 fmt=77" + subs_log(s));
+        EXPECT(faults([&] { create_tex(8, 8, 1, 1, 77, s, 1); }), "the last block row's bytes are read"); g_log.clear();
+        std::vector<std::pair<uint32_t, uint32_t>> rgba = {{64, 96}};   // 8x2 RGBA8 at a 64-byte pitch: 64 + 32
+        r = create_tex(8, 2, 1, 1, 28, rgba, 0); HR(r, S_OK); LOG("CreateTexture2D 8x2 mips=1 arr=1 fmt=28" + subs_log(rgba));
     }
     {   // one subresource still works, and no data still reaches the host as null
         std::vector<std::pair<uint32_t, uint32_t>> s = {{16, 64}};
@@ -407,8 +447,14 @@ static void test_routes() {
         r = e.call("ID3D11Device", 5, {dev_g, tex_desc(4, 4, 1, 2049, 28), e.words({good, 16, 0}), out}); HR(r, E_INVALIDARG);   // 2049 slices
         r = e.call("ID3D11Device", 5, {dev_g, tex_desc(0, 4, 1, 1, 28), e.words({good, 16, 0}), out}); HR(r, E_INVALIDARG);   // empty
         r = e.call("ID3D11Device", 5, {dev_g, tex_desc(4096, 4096, 1, 1, 28), e.words({good, 16384, 0}), out}); HR(r, E_INVALIDARG);   // 64 MiB > guest window
-        r = e.call("ID3D11Device", 5, {dev_g, tex_desc(4, 4, 1, 1, 28), 0, 0}); HR(r, E_POINTER);
+        r = e.call("ID3D11Device", 5, {dev_g, tex_desc(4, 4, 1, 1, 28), e.words({good, 8, 0}), out}); HR(r, E_INVALIDARG);   // pitch 8 < the 16-byte row
+        r = e.call("ID3D11Device", 5, {dev_g, tex_desc(8, 8, 1, 1, 77), e.words({good, 16, 0}), out}); HR(r, E_INVALIDARG);   // BC3 pitch 16 < the 32-byte block row
+        g_gaps.clear(); r = e.call("ID3D11Device", 5, {dev_g, tex_desc(4, 4, 1, 1, 103), e.words({good, 16, 0}), out});   // NV12 is planar
+        HR(r, x86::D3D11_GAP_HRESULT);
+        EXPECT(g_gaps.size() == 1 && g_gaps[0] == "x86 D3D11 gap: ID3D11Device::CreateTexture2D initial data format", "gap line %s", g_gaps.empty() ? "(none)" : g_gaps[0].c_str());
         LOG();
+        r = e.call("ID3D11Device", 5, {dev_g, tex_desc(4, 4, 1, 1, 28), 0, 0}); HR(r, S_FALSE);   // validation-only
+        LOG("CreateTexture2D 4x4 mips=1 arr=1 fmt=28 init=null");
         std::vector<std::pair<uint32_t, uint32_t>> s = {{16, 64}};
         e.mem.w32(out, 0x1234); g_hr = E_OUTOFMEMORY; r = create_tex(4, 4, 1, 1, 28, s, 0);
         HR(r, E_OUTOFMEMORY); LOG("CreateTexture2D 4x4 mips=1 arr=1 fmt=28" + subs_log(s)); EXPECT(e.mem.r32(out) == 0, "failed create leaves a null out");
@@ -433,6 +479,14 @@ static void test_routes() {
     HR(r, S_OK); LOG(F("UpdateSubresource dst=%d sub=0 box=0,0,0,8,8,1 rp=32 dp=0 first=119", bc->id));
     EXPECT(faults([&] { update(bc_g, 0, {0, 0, 0, 8, 8, 1}, 64, 32, 1); }), "BC box reads ceil(rows / 4) block rows"); g_log.clear();
     r = update(bc_g, 0, {}, 256, 64, 0); HR(r, S_OK); LOG(F("UpdateSubresource dst=%d sub=0 box=null rp=64 dp=0 first=119", bc->id));
+    r = update(bc_g, 0, {0, 0, 0, 8, 8, 1}, 96, 64, 0);   // the last block row is 32 of the 64 pitch bytes: (2 - 1) * 64 + 32
+    HR(r, S_OK); LOG(F("UpdateSubresource dst=%d sub=0 box=0,0,0,8,8,1 rp=64 dp=0 first=119", bc->id));
+    EXPECT(faults([&] { update(bc_g, 0, {0, 0, 0, 8, 8, 1}, 96, 64, 1); }), "the last block row's bytes are read"); g_log.clear();
+    r = update(tex_g, 0, {0, 0, 0, 8, 2, 1}, 96, 64, 0);   // 8x2 RGBA8 at a 64-byte pitch: 64 + 32
+    HR(r, S_OK); LOG(F("UpdateSubresource dst=%d sub=0 box=0,0,0,8,2,1 rp=64 dp=0 first=119", tex->id));
+    EXPECT(faults([&] { update(tex_g, 0, {0, 0, 0, 8, 2, 1}, 96, 64, 1); }), "the last row's texels are read"); g_log.clear();
+    r = update(tex_g, 0, {0, 0, 0, 8, 1, 1}, 32, 0, 0);   // one row ignores the pitch
+    HR(r, S_OK); LOG(F("UpdateSubresource dst=%d sub=0 box=0,0,0,8,1,1 rp=0 dp=0 first=119", tex->id));
     r = update(buf_g, 0, {8, 0, 0, 8, 1, 1}, 16, 0, 0); HR(r, S_OK); LOG();   // empty box: nothing to copy
     const std::vector<std::vector<uint32_t>> bad_buffer_boxes = {
         {24, 0, 0, 8, 1, 1}, {0, 1, 0, 8, 0, 1}, {0, 0, 1, 8, 1, 0}, {0, 0, 0, 65, 1, 1}, {0, 0, 0, 8, 2, 1}, {0, 0, 0, 8, 1, 2}};
@@ -445,49 +499,153 @@ static void test_routes() {
     r = update(tex_g, 0, {0, 0, 0, 4, 4, 1}, 64, 0, 0); HR(r, E_INVALIDARG);                 // no pitch
     r = update(tex_g, 0, {0, 0, 0, 16, 16, 1}, 64, 0xFFFFFFFFu, 0); HR(r, E_INVALIDARG);     // pitch * rows beyond the window
     r = update(tex_g, 0, {}, 64, 0x10000000u, 0); HR(r, E_INVALIDARG);                       // 16 rows * 256 MiB overflows 32 bits
+    r = update(bc_g, 0, {0, 0, 0, 8, 8, 1}, 64, 16, 0); HR(r, E_INVALIDARG);                 // BC3 block row is 32 bytes, pitch 16
+    r = update(tex_g, 0, {0, 0, 0, 8, 8, 1}, 64, 16, 0); HR(r, E_INVALIDARG);                // 8 RGBA8 texels are 32 bytes, pitch 16
+    r = update(tex_g, 0, {}, 64, 32, 0); HR(r, E_INVALIDARG);                                // a 16-texel row is 64 bytes
+    g_gaps.clear(); r = update(nv_g, 0, {}, 64, 16, 0); HR(r, x86::D3D11_GAP_HRESULT);       // planar format: a named gap
+    r = update(nv_g, 0, {0, 0, 0, 8, 8, 1}, 64, 16, 0); HR(r, x86::D3D11_GAP_HRESULT);
+    EXPECT(g_gaps.size() == 2 && g_gaps[0] == "x86 D3D11 gap: ID3D11DeviceContext::UpdateSubresource format", "gap line %s", g_gaps.empty() ? "(none)" : g_gaps[0].c_str());
     r = e.call("ID3D11DeviceContext", 48, {ctx_g, buf_g, 0, 0, 0, 0, 0}); HR(r, E_INVALIDARG);   // no source
     r = e.call("ID3D11DeviceContext", 48, {ctx_g, 0, 0, 0, e.alloc(16), 0, 0}); HR(r, E_INVALIDARG);   // no destination
     LOG();
 
-    // ---- Map / Unmap direction (slots 14 and 15)
-    struct Mode { uint32_t mode; bool guest_sees_host, host_gets_guest; const char* name; };
-    const Mode modes[] = {{1, true, false, "READ"}, {2, false, true, "WRITE"}, {3, true, true, "READ_WRITE"}, {4, false, true, "WRITE_DISCARD"}, {5, false, true, "WRITE_NO_OVERWRITE"}};
-    for (const Mode& m : modes) {
+    // ---- Map / Unmap (slots 14 and 15): direction, shadow, scratch reuse, rollback
+    auto map = [&](uint32_t res_g, uint32_t sub, uint32_t mode, uint32_t out_ptr) { return e.call("ID3D11DeviceContext", 14, {ctx_g, res_g, sub, mode, 0, out_ptr}); };
+    auto unmap = [&](uint32_t res_g, uint32_t sub) { return e.call("ID3D11DeviceContext", 15, {ctx_g, res_g, sub}); };
+    auto mlog = [&](Fake* f, uint32_t sub, uint32_t mode) { return F("Map res=%d sub=%u mode=%u flags=0", f->id, sub, mode); };
+    auto ulog = [&](Fake* f, uint32_t sub) { return F("Unmap res=%d sub=%u", f->id, sub); };
+    auto put_guest = [&](uint32_t at, uint32_t from, uint32_t n, uint8_t v) { std::vector<uint8_t> w(n, v); e.mem.write_bytes(at + from, w.data(), n); };
+    auto guest_is = [&](uint32_t at, uint32_t from, uint32_t n, uint8_t v) { for (uint32_t i = from; i < from + n; ++i) if (e.mem.r8(at + i) != v) return false; return true; };
+    auto host_is = [&](Fake* f, uint32_t from, uint32_t n, uint8_t v) { for (uint32_t i = from; i < from + n; ++i) if (f->mem[i] != v) return false; return true; };
+    auto create_buffer = [&](uint32_t bytes, uint32_t usage, uint32_t access) {
+        uint32_t o = e.alloc(4);
+        uint32_t hr = e.call("ID3D11Device", 3, {dev_g, e.words({bytes, usage, D3D11_BIND_VERTEX_BUFFER, access, 0, 0}), 0, o});
+        HR(hr, S_OK); LOG(F("CreateBuffer bytes=%u usage=%u init=null", bytes, usage));
+        return std::make_pair(e.mem.r32(o), &g_pool.back());
+    };
+    const std::string no_nooverwrite = "x86 D3D11 gap: ID3D11DeviceContext::Map WRITE_NO_OVERWRITE without a prior write to seed from";
+    const std::string no_write = "x86 D3D11 gap: ID3D11DeviceContext::Map WRITE without a prior write to seed from";
+    uint32_t mapped = e.alloc(12), at = 0;
+    {   // READ: host -> guest, and Unmap writes nothing back
         std::fill(buf->mem.begin(), buf->mem.end(), uint8_t(0xAA));
-        uint32_t mapped = e.alloc(12);
-        r = e.call("ID3D11DeviceContext", 14, {ctx_g, buf_g, 0, m.mode, 0, mapped});
-        HR(r, S_OK); LOG(F("Map res=%d sub=0 mode=%u flags=0", buf->id, m.mode));
-        uint32_t at = e.mem.r32(mapped);
-        EXPECT(e.mem.r32(mapped + 4) == 64 && e.mem.r32(mapped + 8) == 0, "%s pitches %u/%u", m.name, e.mem.r32(mapped + 4), e.mem.r32(mapped + 8));
-        EXPECT((e.mem.r8(at) == 0xAA) == m.guest_sees_host, "%s: guest sees host byte 0x%02x", m.name, e.mem.r8(at));
-        EXPECT(e.host.d3d9_locks.size() == 1 && (std::get<0>(e.host.d3d9_locks.begin()->second) != nullptr) == m.host_gets_guest, "%s lock record", m.name);
-        std::vector<uint8_t> w(64, 0x55); e.mem.write_bytes(at, w.data(), 64);
-        r = e.call("ID3D11DeviceContext", 15, {ctx_g, buf_g, 0}); LOG(F("Unmap res=%d sub=0", buf->id));
-        EXPECT((buf->mem[0] == 0x55 && buf->mem[63] == 0x55) == m.host_gets_guest && (buf->mem[0] == 0xAA || m.host_gets_guest), "%s: host byte 0x%02x after Unmap", m.name, buf->mem[0]);
-        EXPECT(e.host.d3d9_locks.empty(), "%s: Unmap drops the lock", m.name);
+        r = map(buf_g, 0, D3D11_MAP_READ, mapped); HR(r, S_OK); LOG(mlog(buf, 0, 1)); at = e.mem.r32(mapped);
+        EXPECT(e.mem.r32(mapped + 4) == 64 && e.mem.r32(mapped + 8) == 0, "pitches %u/%u", e.mem.r32(mapped + 4), e.mem.r32(mapped + 8));
+        EXPECT(guest_is(at, 0, 64, 0xAA), "READ: the guest sees the host bytes");
+        put_guest(at, 0, 64, 0x55); r = unmap(buf_g, 0); LOG(ulog(buf, 0));
+        EXPECT(host_is(buf, 0, 64, 0xAA), "READ: Unmap writes nothing back");
+        // READ_WRITE: host -> guest, then the whole scratch goes back
+        r = map(buf_g, 0, D3D11_MAP_READ_WRITE, mapped); HR(r, S_OK); LOG(mlog(buf, 0, 3)); at = e.mem.r32(mapped);
+        EXPECT(guest_is(at, 0, 64, 0xAA), "READ_WRITE: the guest sees the host bytes");
+        put_guest(at, 0, 64, 0x55); r = unmap(buf_g, 0); LOG(ulog(buf, 0));
+        EXPECT(host_is(buf, 0, 64, 0x55), "READ_WRITE: Unmap writes the scratch back");
+    }
+    {   // WRITE_DISCARD: the reused scratch is zeroed, not stale and not host bytes; the whole scratch goes back
+        std::fill(buf->mem.begin(), buf->mem.end(), uint8_t(0xAA));
+        r = map(buf_g, 0, D3D11_MAP_WRITE_DISCARD, mapped); HR(r, S_OK); LOG(mlog(buf, 0, 4)); at = e.mem.r32(mapped);
+        EXPECT(guest_is(at, 0, 64, 0x00), "WRITE_DISCARD: the scratch is zeroed");
+        put_guest(at, 0, 32, 0x11); r = unmap(buf_g, 0); LOG(ulog(buf, 0));
+        EXPECT(host_is(buf, 0, 32, 0x11) && host_is(buf, 32, 32, 0x00), "WRITE_DISCARD: Unmap writes the scratch back");
+        // WRITE_NO_OVERWRITE: seeded from what the guest last wrote, never from the host. Bytes 0..31 now
+        // hold 0x99, as if another owner changed them; only the span the guest writes may reach the host.
+        std::fill(buf->mem.begin(), buf->mem.begin() + 32, uint8_t(0x99));
+        r = map(buf_g, 0, D3D11_MAP_WRITE_NO_OVERWRITE, mapped); HR(r, S_OK); LOG(mlog(buf, 0, 5)); at = e.mem.r32(mapped);
+        EXPECT(guest_is(at, 0, 32, 0x11) && guest_is(at, 32, 32, 0x00), "WRITE_NO_OVERWRITE: the scratch is the shadow, not the host");
+        put_guest(at, 32, 32, 0x22); r = unmap(buf_g, 0); LOG(ulog(buf, 0));
+        EXPECT(host_is(buf, 0, 32, 0x99) && host_is(buf, 32, 32, 0x22), "WRITE_NO_OVERWRITE: bytes the guest did not touch are untouched (host %02x %02x)", buf->mem[0], buf->mem[32]);
+        // a second append: only the one byte the guest changes is copied, not the whole shadow
+        buf->mem[40] = 0x77;
+        r = map(buf_g, 0, D3D11_MAP_WRITE_NO_OVERWRITE, mapped); HR(r, S_OK); LOG(mlog(buf, 0, 5)); at = e.mem.r32(mapped);
+        EXPECT(guest_is(at, 0, 32, 0x11) && guest_is(at, 32, 32, 0x22), "the shadow keeps the guest's earlier writes");
+        put_guest(at, 5, 1, 0x33); r = unmap(buf_g, 0); LOG(ulog(buf, 0));
+        EXPECT(buf->mem[5] == 0x33 && buf->mem[40] == 0x77 && buf->mem[0] == 0x99 && buf->mem[32] == 0x22, "only the dirty byte is copied (host 5=%02x 40=%02x 0=%02x)", buf->mem[5], buf->mem[40], buf->mem[0]);
+        // WRITE with a shadow takes the same path
+        r = map(buf_g, 0, D3D11_MAP_WRITE, mapped); HR(r, S_OK); LOG(mlog(buf, 0, 2)); at = e.mem.r32(mapped);
+        EXPECT(guest_is(at, 5, 1, 0x33), "WRITE: the scratch is the shadow");
+        put_guest(at, 10, 2, 0x44); r = unmap(buf_g, 0); LOG(ulog(buf, 0));
+        EXPECT(host_is(buf, 10, 2, 0x44) && buf->mem[40] == 0x77 && buf->mem[0] == 0x99, "WRITE: only the dirty span is copied");
+        // a host-side update makes the shadow stale: WRITE_NO_OVERWRITE and WRITE fail closed, DISCARD starts over
+        r = update(buf_g, 0, {}, 64, 0, 0); HR(r, S_OK); LOG(F("UpdateSubresource dst=%d sub=0 box=null rp=0 dp=0 first=119", buf->id));
+        g_gaps.clear();
+        r = map(buf_g, 0, D3D11_MAP_WRITE_NO_OVERWRITE, mapped); HR(r, x86::D3D11_GAP_HRESULT);
+        r = map(buf_g, 0, D3D11_MAP_WRITE, mapped); HR(r, x86::D3D11_GAP_HRESULT);
+        LOG(); EXPECT(g_gaps.size() == 2 && g_gaps[0] == no_nooverwrite && g_gaps[1] == no_write, "gap lines (%zu)", g_gaps.size());
+        r = map(buf_g, 0, D3D11_MAP_WRITE_DISCARD, mapped); HR(r, S_OK); LOG(mlog(buf, 0, 4)); r = unmap(buf_g, 0); LOG(ulog(buf, 0));
+    }
+    {   // no shadow and no way to read the host: a fresh dynamic buffer fails closed instead of zeroing unknown bytes
+        auto fresh = create_buffer(64, D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
+        g_gaps.clear();
+        r = map(fresh.first, 0, D3D11_MAP_WRITE_NO_OVERWRITE, mapped); HR(r, x86::D3D11_GAP_HRESULT);
+        r = map(fresh.first, 0, D3D11_MAP_WRITE, mapped); HR(r, x86::D3D11_GAP_HRESULT);
+        LOG(); EXPECT(g_gaps.size() == 2 && g_gaps[0] == no_nooverwrite && g_gaps[1] == no_write, "gap lines (%zu)", g_gaps.size());
+        // a staging buffer the CPU can read seeds WRITE from the host, then copies back only what changed
+        auto stg = create_buffer(32, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE);
+        std::fill(stg.second->mem.begin(), stg.second->mem.end(), uint8_t(0xBB));
+        r = map(stg.first, 0, D3D11_MAP_WRITE, mapped); HR(r, S_OK); LOG(mlog(stg.second, 0, 2)); at = e.mem.r32(mapped);
+        EXPECT(guest_is(at, 0, 32, 0xBB), "staging WRITE: seeded from the host");
+        put_guest(at, 3, 1, 0xCC); stg.second->mem[10] = 0xEE; r = unmap(stg.first, 0); LOG(ulog(stg.second, 0));
+        EXPECT(stg.second->mem[3] == 0xCC && stg.second->mem[10] == 0xEE && stg.second->mem[0] == 0xBB, "staging WRITE: only the dirty byte is copied");
+    }
+    {   // one active map per subresource, an Unmap with none is a no-op, and failures never leave the host mapped
+        r = map(buf_g, 0, D3D11_MAP_WRITE_DISCARD, mapped); HR(r, S_OK); LOG(mlog(buf, 0, 4));
+        r = map(buf_g, 0, D3D11_MAP_WRITE_DISCARD, mapped); HR(r, 0x887A0001u); LOG();   // DXGI_ERROR_INVALID_CALL, host not asked
+        r = unmap(buf_g, 0); LOG(ulog(buf, 0));
+        r = unmap(buf_g, 0); HR(r, S_OK); LOG();
+        g_hr = HRESULT(0x887A000Au); r = map(buf_g, 0, D3D11_MAP_WRITE_DISCARD, mapped);   // DXGI_ERROR_WAS_STILL_DRAWING
+        HR(r, 0x887A000Au); LOG(mlog(buf, 0, 4)); r = unmap(buf_g, 0); LOG();
+        EXPECT(faults([&] { map(buf_g, 0, D3D11_MAP_WRITE_DISCARD, 0xDEAD0000u); }), "a bad output pointer faults");   // probed before the host Map
+        LOG();
+        r = map(buf_g, 0, D3D11_MAP_WRITE_DISCARD, 0); HR(r, E_POINTER);
+        r = map(buf_g, 0, 0, mapped); HR(r, E_INVALIDARG); r = map(buf_g, 0, 6, mapped); HR(r, E_INVALIDARG); LOG();   // not a D3D11_MAP
+        Fake* huge = make(vt_buf); huge->dim = D3D11_RESOURCE_DIMENSION_BUFFER; huge->buf.ByteWidth = 0x1000001; huge->buf.Usage = D3D11_USAGE_DYNAMIC; huge->mem.assign(1, 0);
+        const uint32_t huge_g = e.proxy("ID3D11Buffer", huge);   // one byte past the guest scratch window: marshalling fails after the host Map
+        EXPECT(faults([&] { map(huge_g, 0, D3D11_MAP_WRITE_DISCARD, mapped); }), "a map the scratch window cannot hold fails");
+        LOG(mlog(huge, 0, 4), ulog(huge, 0));   // the host Map is undone
+        r = unmap(huge_g, 0); LOG();
     }
     {   // a texture hands out its row pitch, and a BC mip is block rows (4 * 64 = 256 bytes), not texel rows
-        uint32_t mapped = e.alloc(12);
-        r = e.call("ID3D11DeviceContext", 14, {ctx_g, tex_g, 0, 3, 0, mapped}); HR(r, S_OK);
-        LOG(F("Map res=%d sub=0 mode=3 flags=0", tex->id));
+        r = map(tex_g, 0, D3D11_MAP_READ_WRITE, mapped); HR(r, S_OK); LOG(mlog(tex, 0, 3));
         EXPECT(e.mem.r32(mapped + 4) == 64 && e.mem.r8(e.mem.r32(mapped)) == 0xAA, "texture map pitch %u", e.mem.r32(mapped + 4));
-        r = e.call("ID3D11DeviceContext", 15, {ctx_g, tex_g, 0}); LOG(F("Unmap res=%d sub=0", tex->id));
+        r = unmap(tex_g, 0); LOG(ulog(tex, 0));
         std::fill(bc->mem.begin(), bc->mem.end(), uint8_t(0xAA));
-        r = e.call("ID3D11DeviceContext", 14, {ctx_g, bc_g, 0, 4, 0, mapped}); HR(r, S_OK);
-        LOG(F("Map res=%d sub=0 mode=4 flags=0", bc->id));
-        std::vector<uint8_t> w(256, 0x55); e.mem.write_bytes(e.mem.r32(mapped), w.data(), 256);
-        r = e.call("ID3D11DeviceContext", 15, {ctx_g, bc_g, 0}); LOG(F("Unmap res=%d sub=0", bc->id));
-        EXPECT(bc->mem[0] == 0x55 && bc->mem[255] == 0x55 && bc->mem[256] == 0xAA && bc->mem[1023] == 0xAA, "BC map copies exactly 256 bytes");
-        g_hr = HRESULT(0x887A000Au); r = e.call("ID3D11DeviceContext", 14, {ctx_g, buf_g, 0, 4, 0x100, mapped});   // DXGI_ERROR_WAS_STILL_DRAWING
-        HR(r, 0x887A000Au); LOG(F("Map res=%d sub=0 mode=4 flags=256", buf->id)); EXPECT(e.host.d3d9_locks.empty(), "a failed Map leaves no lock");
-        r = e.call("ID3D11DeviceContext", 14, {ctx_g, buf_g, 0, 4, 0, 0}); HR(r, E_POINTER); LOG();
+        r = map(bc_g, 0, D3D11_MAP_WRITE_DISCARD, mapped); HR(r, S_OK); LOG(mlog(bc, 0, 4));
+        put_guest(e.mem.r32(mapped), 0, 256, 0x55); r = unmap(bc_g, 0); LOG(ulog(bc, 0));
+        EXPECT(host_is(bc, 0, 256, 0x55) && host_is(bc, 256, 768, 0xAA), "BC map copies exactly 256 bytes");
+    }
+    {   // the scratch is reused: 300 maps of a 64 KiB buffer take one range, and a released buffer hands it on
+        auto big = create_buffer(65536, D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
+        r = map(big.first, 0, D3D11_MAP_WRITE_DISCARD, mapped); HR(r, S_OK); r = unmap(big.first, 0);
+        const uint32_t top = e.host.d3d9_guest_top; g_log.clear();
+        bool all_ok = true;
+        for (unsigned i = 0; i < 300; ++i) {
+            if (map(big.first, 0, D3D11_MAP_WRITE_DISCARD, mapped) != 0) { all_ok = false; break; }
+            put_guest(e.mem.r32(mapped), 0, 1, uint8_t(i + 1)); unmap(big.first, 0);
+            all_ok = all_ok && big.second->mem[0] == uint8_t(i + 1);
+        }
+        EXPECT(all_ok, "300 maps of one buffer all copy back");
+        EXPECT(e.host.d3d9_guest_top == top, "the scratch window grew by %u bytes over 300 maps", e.host.d3d9_guest_top - top);
+        EXPECT(g_log.size() == 600, "host calls %zu", g_log.size()); g_log.clear();
+        e.host.com.guest_release(e.host.com.by_guest(big.first));   // the proxy dies: its scratch goes back to the free list
+        auto next = create_buffer(65536, D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
+        r = map(next.first, 0, D3D11_MAP_WRITE_DISCARD, mapped); HR(r, S_OK); r = unmap(next.first, 0); g_log.clear();
+        EXPECT(e.host.d3d9_guest_top == top, "a new buffer did not reuse the released scratch (window grew %u)", e.host.d3d9_guest_top - top);
     }
 
     // ---- Queries: CreateQuery (device 24), Begin 27, End 28, GetData 29
     r = e.call("ID3D11Device", 24, {dev_g, e.words({1, 0}), out}); HR(r, S_OK); LOG("CreateQuery q=1 misc=0");
     EXPECT(std::string(e.iface_of(out)) == "ID3D11Query", "query proxy is %s", e.iface_of(out));
-    r = e.call("ID3D11Device", 24, {dev_g, 0, out}); HR(r, E_POINTER);
-    r = e.call("ID3D11Device", 24, {dev_g, e.words({1, 0}), 0}); HR(r, E_POINTER); LOG();
+    {   // GetDataSize (slot 7) is a byte count, not a status; GetDesc (slot 8) writes the two-DWORD desc
+        const uint32_t q_g = e.mem.r32(out), d = e.alloc(8);
+        r = e.call("ID3D11Query", 7, {q_g}); HR(r, 8);
+        r = e.call("ID3D11Query", 8, {q_g, d}); HR(r, 0);
+        EXPECT(e.mem.r32(d) == D3D11_QUERY_OCCLUSION && e.mem.r32(d + 4) == 0, "query desc %u/%u", e.mem.r32(d), e.mem.r32(d + 4));
+        r = e.call("ID3D11Query", 8, {q_g, 0}); HR(r, E_POINTER);
+        r = e.call("ID3D11Device", 24, {dev_g, e.words({D3D11_QUERY_TIMESTAMP_DISJOINT, 1}), out}); HR(r, S_OK); LOG(F("CreateQuery q=%u misc=1", unsigned(D3D11_QUERY_TIMESTAMP_DISJOINT)));
+        const uint32_t t_g = e.mem.r32(out);
+        r = e.call("ID3D11Query", 7, {t_g}); HR(r, 16);
+        r = e.call("ID3D11Query", 8, {t_g, d}); EXPECT(e.mem.r32(d) == D3D11_QUERY_TIMESTAMP_DISJOINT && e.mem.r32(d + 4) == 1, "disjoint desc %u/%u", e.mem.r32(d), e.mem.r32(d + 4));
+    }
+    r = e.call("ID3D11Device", 24, {dev_g, 0, out}); HR(r, E_POINTER); LOG();
+    r = e.call("ID3D11Device", 24, {dev_g, e.words({1, 0}), 0}); HR(r, S_FALSE); LOG("CreateQuery q=1 misc=0");   // validation-only
     e.mem.w32(out, 0x1234); g_hr = E_OUTOFMEMORY; r = e.call("ID3D11Device", 24, {dev_g, e.words({0, 0}), out});
     HR(r, E_OUTOFMEMORY); LOG("CreateQuery q=0 misc=0"); EXPECT(e.mem.r32(out) == 0, "failed CreateQuery leaves a null out");
     r = e.call("ID3D11DeviceContext", 27, {ctx_g, qry_g}); LOG(F("Begin async=%d", qry->id));
@@ -559,10 +717,21 @@ static void test_routes() {
     HR(r, x86::D3D11_GAP_HRESULT); LOG();
     EXPECT(g_gaps.size() == 1 && g_gaps[0] == "x86 D3D11 gap: IDXGISwapChain::SetFullscreenState target output", "gap line %s", g_gaps.empty() ? "(none)" : g_gaps[0].c_str());
     {
-        uint32_t fs = e.words({0, 0xDEADBEEFu});
-        r = e.call("IDXGISwapChain", 11, {sw_g, fs, fs + 4}); HR(r, S_OK); LOG("GetFullscreenState fs=ptr target=null");   // the host is never asked for an output
+        uint32_t fs = e.words({0xFFFF, 0xDEADBEEFu});
+        g_fullscreen = FALSE;   // windowed: S_OK, FALSE, and a null target
+        r = e.call("IDXGISwapChain", 11, {sw_g, fs, fs + 4}); HR(r, S_OK); LOG("GetFullscreenState fs=ptr target=ptr");
+        EXPECT(e.mem.r32(fs) == 0 && e.mem.r32(fs + 4) == 0, "windowed: fullscreen %u target 0x%08x", e.mem.r32(fs), e.mem.r32(fs + 4));
+        g_fullscreen = TRUE;    // fullscreen: a BOOL-only query is fine, one that asks for the output cannot be answered
+        e.mem.w32(fs + 4, 0xDEADBEEFu);
+        r = e.call("IDXGISwapChain", 11, {sw_g, fs, 0}); HR(r, S_OK); LOG("GetFullscreenState fs=ptr target=null");
+        EXPECT(e.mem.r32(fs) == 1, "fullscreen %u", e.mem.r32(fs));
+        g_gaps.clear(); g_output = nullptr;
+        r = e.call("IDXGISwapChain", 11, {sw_g, fs, fs + 4}); HR(r, x86::D3D11_GAP_HRESULT); LOG("GetFullscreenState fs=ptr target=ptr");
+        EXPECT(g_output && g_output->refs == 0, "the host output is released (refs %d)", g_output ? g_output->refs : -1);
         EXPECT(e.mem.r32(fs) == 1 && e.mem.r32(fs + 4) == 0, "fullscreen %u target 0x%08x", e.mem.r32(fs), e.mem.r32(fs + 4));
-        r = e.call("IDXGISwapChain", 11, {sw_g, 0, 0}); HR(r, S_OK); LOG("GetFullscreenState fs=null target=null");
+        EXPECT(g_gaps.size() == 1 && g_gaps[0] == "x86 D3D11 gap: IDXGISwapChain::GetFullscreenState target output", "gap line %s", g_gaps.empty() ? "(none)" : g_gaps[0].c_str());
+        r = e.call("IDXGISwapChain", 11, {sw_g, 0, 0}); HR(r, S_OK); LOG("GetFullscreenState fs=ptr target=null");
+        g_fullscreen = FALSE;
     }
     r = e.call("IDXGISwapChain", 14, {sw_g, e.words({1280, 720, 60, 1, 28, 0, 0})}); HR(r, S_OK); LOG("ResizeTarget 1280x720 fmt=28 refresh=60/1 scanline=0 scaling=0");
     r = e.call("IDXGISwapChain", 14, {sw_g, 0}); HR(r, E_POINTER); LOG();
