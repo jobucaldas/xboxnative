@@ -254,6 +254,7 @@ struct RuntimeBlock {
     bool may_fault = false;
     bool interpreter_boundary = false;
     bool uses_xmm = false;
+    uint8_t xmm_mask = 0; // guest XMMn the block keeps in host XMMn
     RuntimeBlock* linked_target = nullptr;
 };
 
@@ -267,6 +268,8 @@ struct HostFaultContext {
     uintptr_t fault_address = 0;
     uintptr_t host_registers[8] = {};
     uintptr_t host_flags = 0;
+    uint32_t host_xmm[8][4] = {};
+    bool host_xmm_valid = false;
 };
 inline thread_local HostFaultContext* active_host_fault = nullptr;
 inline std::once_flag host_fault_signal_once;
@@ -286,6 +289,11 @@ inline void host_fault_signal(int signal_number, siginfo_t* info, void* raw_cont
         context->host_registers[6] = uintptr_t(ucontext->uc_mcontext.gregs[REG_R9]);
         context->host_registers[7] = uintptr_t(ucontext->uc_mcontext.gregs[REG_R10]);
         context->host_flags = uintptr_t(ucontext->uc_mcontext.gregs[REG_EFL]);
+        // Translated blocks keep guest XMM in host XMM0-7 and spill only on the epilogue.
+        context->host_xmm_valid = ucontext->uc_mcontext.fpregs != nullptr;
+        if (context->host_xmm_valid)
+            for (unsigned i = 0; i != 8; ++i)
+                std::memcpy(context->host_xmm[i], &ucontext->uc_mcontext.fpregs->_xmm[i], sizeof context->host_xmm[i]);
         siglongjmp(context->jump, 1);
     }
     std::signal(signal_number, SIG_DFL);
@@ -310,6 +318,10 @@ inline uint32_t recover_host_fault(HostFaultContext& context) {
     context.state->reg[6] = uint32_t(context.host_registers[6]);
     context.state->reg[7] = uint32_t(context.host_registers[7]);
     context.state->eflags = uint32_t(context.host_flags);
+    if (context.host_xmm_valid)
+        for (unsigned i = 0; i != 8; ++i)
+            if (context.block->xmm_mask & (1u << i))
+                std::memcpy(context.state->xmm[i], context.host_xmm[i], sizeof context.state->xmm[i]);
     size_t offset = context.host_pc - context.code_address;
     const InstructionMap* mapping = nullptr;
     for (const auto& candidate : context.block->instruction_map) {
@@ -330,6 +342,8 @@ struct HostFaultContext {
     uintptr_t fault_address = 0;
     uintptr_t host_registers[8] = {};
     uintptr_t host_flags = 0;
+    uint32_t host_xmm[8][4] = {};
+    bool host_xmm_valid = false;
 };
 inline int host_fault_filter(EXCEPTION_POINTERS* exception, HostFaultContext& context) {
     if (!exception || exception->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
@@ -348,6 +362,11 @@ inline int host_fault_filter(EXCEPTION_POINTERS* exception, HostFaultContext& co
     context.host_registers[6] = uintptr_t(exception->ContextRecord->R9);
     context.host_registers[7] = uintptr_t(exception->ContextRecord->R10);
     context.host_flags = uintptr_t(exception->ContextRecord->EFlags);
+    // Translated blocks keep guest XMM in host XMM0-7 and spill only on the epilogue.
+    context.host_xmm_valid = (exception->ContextRecord->ContextFlags & CONTEXT_FLOATING_POINT) == CONTEXT_FLOATING_POINT;
+    if (context.host_xmm_valid)
+        for (unsigned i = 0; i != 8; ++i)
+            std::memcpy(context.host_xmm[i], &exception->ContextRecord->FltSave.XmmRegisters[i], sizeof context.host_xmm[i]);
     return EXCEPTION_EXECUTE_HANDLER;
 }
 inline uint32_t recover_host_fault(HostFaultContext& context) {
@@ -360,6 +379,10 @@ inline uint32_t recover_host_fault(HostFaultContext& context) {
     context.state->reg[6] = uint32_t(context.host_registers[6]);
     context.state->reg[7] = uint32_t(context.host_registers[7]);
     context.state->eflags = uint32_t(context.host_flags);
+    if (context.host_xmm_valid)
+        for (unsigned i = 0; i != 8; ++i)
+            if (context.block->xmm_mask & (1u << i))
+                std::memcpy(context.state->xmm[i], context.host_xmm[i], sizeof context.state->xmm[i]);
     size_t offset = context.host_pc - context.code_address;
     const InstructionMap* mapping = nullptr;
     for (const auto& candidate : context.block->instruction_map) {
@@ -528,6 +551,15 @@ inline void runtime_emit_memory_check(Emitter& out, const uint8_t* prot, uint8_t
     if (cow_fail) out.patch32(cow_fail, int32_t(invalid - (cow_fail + 4)));
     out.patch32(skip_fallback, int32_t(valid - (skip_fallback + 4)));
     if (cow_valid) out.patch32(cow_valid, int32_t(valid - (cow_valid + 4)));
+}
+// Legacy aligned SSE memory forms #GP on a misaligned address (R11, host = guest mod 16);
+// the interpreter accepts any address, so hand that instruction to it.
+inline void runtime_emit_align16_check(Emitter& out, uint32_t guest_eip, uint8_t state_slot, std::vector<size_t>& fallback_jumps) {
+    out.b(0x9c); runtime_test_imm8(out, 11, 15); size_t aligned = runtime_jcc(out, 0x84);
+    out.b(0x9d); runtime_mov_imm(out, 11, guest_eip);
+    runtime_mov_reg_mem64(out, 13, 4, state_slot); runtime_store_reg_mem32(out, 13, offsetof(RuntimeState, fallback_eip), 11);
+    fallback_jumps.push_back(runtime_jmp(out));
+    out.patch32(aligned, int32_t(out.bytes.size() - (aligned + 4))); out.b(0x9d);
 }
 inline void runtime_emit_guest_stack_address(Emitter& out) {
     out.rex(11, runtime_reg(4), 12, true); out.b(0x8D); out.modrm(0, 11, 4); out.b(uint8_t(((runtime_reg(4) & 7) << 3) | (12 & 7)));
@@ -759,6 +791,10 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
             if (dynamic) runtime_emit_memory_check(out, prot, write ? runtime_prot_w : runtime_prot_r, size,
                                                     guest_pc + uint32_t(begin), state_slot, fallback_jumps);
         };
+        auto check_align16 = [&](const RuntimeAddress& a) {
+            if (!runtime_fixed_absolute(a) || (a.displacement & 15))
+                runtime_emit_align16_check(out, guest_pc + uint32_t(begin), state_slot, fallback_jumps);
+        };
         auto touch_static = [&](const RuntimeAddress& a, uint8_t size) {
             if (!generation || !runtime_fixed_absolute(a)) return;
             uint32_t first = a.displacement >> 12;
@@ -795,6 +831,7 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
             } else {
                 if (memory) {
                     a = runtime_address(guest, p, m); runtime_emit_ea(out, a);
+                    if (memory_size == 16 && op2 != 0x10 && op2 != 0x11 && op2 != 0x6e) check_align16(a);
                     check_memory(!runtime_fixed_absolute(a), memory_write, memory_size); mark_memory(memory_write, memory_size);
                 }
                 if ((op2 == 0x70 || op2 == 0x72 || op2 == 0x73) && memory)
@@ -881,6 +918,7 @@ inline std::vector<uint8_t> runtime_translate(const std::vector<uint8_t>& guest,
                 const bool memory_write = op2 == 0x11 || op2 == 0x29;
                 if (memory) {
                     a = runtime_address(guest, p, m); runtime_emit_ea(out, a);
+                    if (op2 != 0x10 && op2 != 0x11) check_align16(a);
                     check_memory(!runtime_fixed_absolute(a), memory_write, 16); mark_memory(memory_write, 16);
                 }
                 runtime_sse(out, 0, op2, uint8_t((m >> 3) & 7), uint8_t(m & 7), memory);

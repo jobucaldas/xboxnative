@@ -568,6 +568,76 @@ static void chained_fault_preserves_xmm() {
         throw std::runtime_error("non-XMM host fault lost XMM state from an earlier chained block");
     std::puts("X86-DBT PASS: non-XMM host fault preserved earlier chained XMM state");
 }
+// XMM written earlier in the faulting block lives only in host registers until the epilogue.
+static void mid_block_fault_recovers_xmm() {
+    RuntimeMachine translated, interpreted;
+    const uint32_t fault_ea = DATA + 0x200;
+    std::vector<uint8_t> code = {0x66, 0x0f, 0x6e, 0xc0, 0x66, 0x0f, 0x6e, 0xc9, 0x66, 0x0f, 0x6e, 0xf2,
+                                 0x8b, 0x05, uint8_t(fault_ea), uint8_t(fault_ea >> 8),
+                                 uint8_t(fault_ea >> 16), uint8_t(fault_ea >> 24), 0xf4};
+    const uint32_t stop = CODE + 18;
+    auto reset = [](Cpu& cpu) {
+        cpu.reg[EAX] = 0x11111111u; cpu.reg[ECX] = 0x22222222u; cpu.reg[EDX] = 0x66666666u;
+        std::memset(cpu.xmm.r, 0x33, sizeof cpu.xmm.r); cpu.eflags = 2; cpu.eip = CODE;
+    };
+    translated.load(code); interpreted.load(code);
+    translated.cpu.dbt_enabled = true; interpreted.cpu.dbt_enabled = false;
+    reset(translated.cpu); translated.cpu.run(stop);
+    if (::mprotect(translated.memory.base() + DATA, PAGE, PROT_NONE) != 0)
+        throw std::runtime_error("could not make the cached fault page inaccessible");
+    interpreted.memory.protect(DATA, PAGE, 0);
+    reset(translated.cpu); reset(interpreted.cpu);
+    bool translated_fault = false, interpreted_fault = false;
+    try { translated.cpu.run(stop); } catch (const Fault& f) { translated_fault = f.kind == FaultKind::AccessViolation && f.eip == CODE + 12 &&
+                                                                     std::strstr(f.what(), "translated") != nullptr; }
+    try { interpreted.cpu.run(stop); } catch (const Fault& f) { interpreted_fault = f.kind == FaultKind::AccessViolation && f.eip == CODE + 12; }
+    if (!translated_fault || !interpreted_fault ||
+        std::memcmp(translated.cpu.reg, interpreted.cpu.reg, sizeof translated.cpu.reg) ||
+        std::memcmp(translated.cpu.xmm.r, interpreted.cpu.xmm.r, sizeof translated.cpu.xmm.r) ||
+        translated.cpu.xmm.r[6][0] != 0x66666666u)
+        throw std::runtime_error("mid-block host fault lost XMM writes from the same DBT block");
+    std::puts("X86-DBT PASS: mid-block host fault recovered XMM0/1/6 written earlier in the block");
+}
+// movaps/movdqa and aligned SSE arithmetic must not #GP the host on a misaligned guest address.
+static void aligned_sse_memory_alignment() {
+    std::mt19937 rng(0x414c4e31u); static uint8_t data[3 * PAGE];
+    const std::vector<std::vector<uint8_t>> forms = {
+        {0x0f, 0x28, 0x08}, {0x0f, 0x29, 0x08}, {0x66, 0x0f, 0x28, 0x08}, {0x66, 0x0f, 0x29, 0x08},
+        {0x66, 0x0f, 0x6f, 0x08}, {0x66, 0x0f, 0x7f, 0x08}, {0x0f, 0x58, 0x08}, {0x66, 0x0f, 0xdb, 0x08}};
+    unsigned cases = 0;
+    for (const auto& form : forms) {
+        for (uint32_t offset : {0x200u, 0x204u, 0x209u}) {
+            std::vector<uint8_t> code = form; code.push_back(0xf4);
+            RuntimeMachine translated, interpreted;
+            translated.load(code); interpreted.load(code);
+            for (uint8_t& b : data) b = uint8_t(rng());
+            translated.memory.write_bytes(DATA, data, 3 * PAGE); interpreted.memory.write_bytes(DATA, data, 3 * PAGE);
+            for (auto& row : translated.cpu.xmm.r) for (uint32_t& r : row) r = rng();
+            std::memcpy(interpreted.cpu.xmm.r, translated.cpu.xmm.r, sizeof translated.cpu.xmm.r);
+            translated.cpu.reg[EAX] = interpreted.cpu.reg[EAX] = DATA + offset;
+            translated.cpu.dbt_enabled = true; interpreted.cpu.dbt_enabled = false;
+            const uint32_t stop = CODE + uint32_t(form.size());
+            translated.cpu.run(stop); interpreted.cpu.run(stop);
+            const bool misaligned = (offset & 15) != 0;
+            if (std::memcmp(translated.cpu.reg, interpreted.cpu.reg, sizeof translated.cpu.reg) ||
+                std::memcmp(translated.cpu.xmm.r, interpreted.cpu.xmm.r, sizeof translated.cpu.xmm.r) ||
+                std::memcmp(translated.memory.base() + DATA, interpreted.memory.base() + DATA, 3 * PAGE) ||
+                translated.cpu.eip != interpreted.cpu.eip || translated.cpu.translated_blocks != 1 ||
+                translated.cpu.interpreted_blocks != (misaligned ? 1u : 0u))
+                throw std::runtime_error("aligned SSE memory form differed from the interpreter");
+            ++cases;
+        }
+    }
+    // A misaligned fixed address is known at translation time: the block hands that instruction back.
+    RuntimeMachine m; const uint32_t absolute = DATA + 0x204;
+    std::vector<uint8_t> code = {0x0f, 0x28, 0x0d, uint8_t(absolute), uint8_t(absolute >> 8), uint8_t(absolute >> 16), uint8_t(absolute >> 24)};
+    dbt::Executable executable(dbt::runtime_translate(code, CODE));
+    dbt::RuntimeState state; state.eip = CODE; state.memory = m.memory.base();
+    std::memset(state.xmm, 0x44, sizeof state.xmm);
+    if (executable(state) != CODE || state.fallback_eip != CODE || state.xmm[1][0] != 0x44444444u)
+        throw std::runtime_error("misaligned absolute movaps did not fall back to the interpreter");
+    std::printf("X86-DBT PASS: movaps/movapd/movdqa/addps/pand memory forms ran natively when aligned and fell back when misaligned, fixed misaligned movaps too (%u cases)\n", cases);
+}
 
 static void randomized_runtime_differential() {
     std::mt19937 rng(0x58424454u); uint64_t address_cases = 0, alu_cases = 0;
@@ -879,6 +949,8 @@ int main(int argc, char** argv) {
         scalar_load_preserves_live_scratch();
         chained_state_differential();
         chained_fault_preserves_xmm();
+        mid_block_fault_recovers_xmm();
+        aligned_sse_memory_alignment();
         randomized_runtime_differential();
         byte_register_unary_differential();
         faulted_sse_convert_restores_host_mxcsr();

@@ -384,7 +384,7 @@ struct Cpu {
                                 throw std::runtime_error("DBT store targets translated code");
                         bytes.resize(pc); dbt::RuntimeBlock block;
                         block.guest_pc = eip; block.guest_length = uint32_t(pc); block.exit_opcode = last_opcode;
-                        block.interpreter_boundary = interpreter_boundary; block.uses_xmm = dbt::runtime_uses_xmm(bytes); block.guest_bytes = bytes;
+                        block.interpreter_boundary = interpreter_boundary; block.xmm_mask = dbt::runtime_xmm_mask(bytes); block.uses_xmm = block.xmm_mask != 0; block.guest_bytes = bytes;
                         block.may_fault = may_fault;
                         block.memory_generations = std::move(memory_generations);
                         block.store_pages = std::move(store_pages);
