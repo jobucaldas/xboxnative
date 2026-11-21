@@ -109,7 +109,7 @@ struct Host {
         std::vector<uint8_t> data;
         uint32_t status = 120;
     };
-    struct GlMap { uint32_t address = 0, size = 0, target = 0; uintptr_t offset = 0; bool writable = false; };
+    struct GlMap { uint32_t address = 0, size = 0, buffer = 0; uintptr_t offset = 0; bool writable = false; };
     std::string out, err;                         // captured stdout/stderr bytes
     std::function<void(const std::string&)> tee;  // optional live sink
     std::function<NlsResponse(const NlsRequest&)> nls_call;
@@ -142,6 +142,7 @@ struct Host {
     std::map<uint32_t, std::map<int32_t, uint32_t>> window_longs;
     std::map<uint32_t, std::u16string> window_class_atoms;
     std::map<std::pair<uint32_t, std::u16string>, uint32_t> window_properties;
+    std::map<uint32_t, uint32_t> gl_bound_buffers;
     std::map<uint32_t, GlMap> gl_maps;
     std::map<std::string, uint32_t> gl_strings;
     std::vector<Timer> timers;
@@ -1125,11 +1126,22 @@ inline void register_gl(Registry& r, Host& h) {
                 if (!guest_str) { q.gap = true; call(c, q); return 0; }
                 return guest_str;
             }
+            auto bound_buffer = [&h](uint32_t target) -> uint32_t {
+                auto it = h.gl_bound_buffers.find(target);
+                return it == h.gl_bound_buffers.end() ? 0u : it->second;
+            };
             if (name == "glMapBufferRange" || name == "glMapBuffer" || name == "glMapBufferARB") {
                 const uint32_t target = uint32_t(q.args[0]);
-                const uint32_t size = name == "glMapBufferRange" ? uint32_t(q.args[2]) : 0;
-                const uint32_t access = uint32_t(q.args[name == "glMapBufferRange" ? 3 : 1]);
-                if (h.gl_maps.count(target) || (name == "glMapBufferRange" && (!size || size > (1u << 26)))) {
+                const bool is_range = name == "glMapBufferRange";
+                const int32_t range_offset = is_range ? int32_t(q.args[1]) : 0;
+                const uint32_t size = is_range ? uint32_t(q.args[2]) : 0;
+                const uint32_t access = uint32_t(q.args[is_range ? 3 : 1]);
+                const uint32_t buffer = bound_buffer(target);
+                const bool access_ok = is_range
+                    ? ((access & 0x3u) != 0 && (access & ~0x3Fu) == 0)
+                    : (access == 0x88B8u || access == 0x88B9u || access == 0x88BAu);
+                if (!buffer || !access_ok || h.gl_maps.count(buffer) ||
+                    (is_range && (range_offset < 0 || !size || size > (1u << 26)))) {
                     c.mem.w32(c.fs_base + 0x34, 87); return 0;
                 }
                 if (!call(c, q) || q.gap || q.output.empty() || (size && q.output.size() != size) || q.output.size() > (1u << 26)) return 0;
@@ -1144,13 +1156,16 @@ inline void register_gl(Registry& r, Host& h) {
                 const uint32_t map_size = uint32_t(q.output.size());
                 c.mem.map(address, map_size, PROT_R | PROT_W);
                 c.mem.write_bytes(address, q.output.data(), map_size);
-                const uintptr_t offset = name == "glMapBufferRange" ? uintptr_t(q.args[1]) : 0;
-                h.gl_maps[target] = {address, map_size, target, offset, name == "glMapBufferRange" ? (access & 0x2u) != 0 : access != 0x88B8u};
+                const uintptr_t offset = is_range ? uintptr_t(range_offset) : 0;
+                const bool writable = is_range ? (access & 0x2u) != 0 : access != 0x88B8u;
+                h.gl_maps[buffer] = {address, map_size, buffer, offset, writable};
                 h.gl_map_next = address + uint32_t((map_size + Memory::PAGE - 1) & ~(size_t(Memory::PAGE - 1)));
                 return address;
             }
             if (name == "glUnmapBuffer" || name == "glUnmapBufferARB") {
-                const uint32_t target = uint32_t(q.args[0]); auto it = h.gl_maps.find(target);
+                const uint32_t target = uint32_t(q.args[0]);
+                const uint32_t buffer = bound_buffer(target);
+                auto it = buffer ? h.gl_maps.find(buffer) : h.gl_maps.end();
                 if (it == h.gl_maps.end()) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
                 Host::GlCall unmap{}; unmap.name = "x86GlUnmapBuffer"; unmap.args = {target, it->second.offset};
                 if (it->second.writable) unmap.input = c.mem.read_bytes(it->second.address, it->second.size);
@@ -1163,10 +1178,21 @@ inline void register_gl(Registry& r, Host& h) {
                 // fail closed instead of handing a truncated 64-bit host address to the guest.
                 q.gap = true; call(c, q); return 0;
             }
-            if ((name == "glBindBuffer" || name == "glBindBufferARB") && q.args.size() == 2 && (q.args[0] == 0x8892u || q.args[0] == 0x8893u)) {
+            if ((name == "glBindBuffer" || name == "glBindBufferARB") && q.args.size() == 2) {
                 if (!call(c, q) || q.gap) return 0;
-                if (q.args[0] == 0x8892u) h.gl_array_buffer = uint32_t(q.args[1]);
-                else h.gl_element_array_buffer = uint32_t(q.args[1]);
+                const uint32_t target = uint32_t(q.args[0]), buffer = uint32_t(q.args[1]);
+                if (buffer) h.gl_bound_buffers[target] = buffer;
+                else h.gl_bound_buffers.erase(target);
+                if (target == 0x8892u) h.gl_array_buffer = buffer;
+                else if (target == 0x8893u) h.gl_element_array_buffer = buffer;
+                return uint32_t(q.result);
+            }
+            if ((name == "glBindBufferBase" || name == "glBindBufferBaseEXT" || name == "glBindBufferRange" ||
+                 name == "glBindBufferRangeEXT" || name == "glBindBufferOffsetEXT") && q.args.size() >= 3) {
+                if (!call(c, q) || q.gap) return 0;
+                const uint32_t target = uint32_t(q.args[0]), buffer = uint32_t(q.args[2]);
+                if (buffer) h.gl_bound_buffers[target] = buffer;
+                else h.gl_bound_buffers.erase(target);
                 return uint32_t(q.result);
             }
             if (name == "glVertexPointer") {
@@ -1382,6 +1408,24 @@ inline void register_gl(Registry& r, Host& h) {
                 return uint32_t(q.result);
             }
             if (!call(c, q)) return 0;
+            if (!q.gap && (name == "glDeleteBuffers" || name == "glDeleteBuffersARB") && !q.pointers.empty()) {
+                const auto& bytes = q.pointers[0].bytes;
+                for (size_t off = 0; off + 4 <= bytes.size(); off += 4) {
+                    uint32_t id = 0; std::memcpy(&id, bytes.data() + off, 4);
+                    if (!id) continue;
+                    for (auto it = h.gl_bound_buffers.begin(); it != h.gl_bound_buffers.end(); ) {
+                        if (it->second == id) it = h.gl_bound_buffers.erase(it);
+                        else ++it;
+                    }
+                    if (h.gl_array_buffer == id) h.gl_array_buffer = 0;
+                    if (h.gl_element_array_buffer == id) h.gl_element_array_buffer = 0;
+                    auto map_it = h.gl_maps.find(id);
+                    if (map_it != h.gl_maps.end()) {
+                        c.mem.unmap(map_it->second.address, map_it->second.size);
+                        h.gl_maps.erase(map_it);
+                    }
+                }
+            }
             if (!q.gap && !q.output.empty() && output_dst) c.mem.write_bytes(output_dst, q.output.data(), uint32_t(q.output.size()));
             if (!q.gap) for (const auto& pointer_buffer : q.pointers) if (pointer_buffer.output && !pointer_buffer.bytes.empty())
                 c.mem.write_bytes(pointer_buffer.guest_address, pointer_buffer.bytes.data(), uint32_t(pointer_buffer.bytes.size()));

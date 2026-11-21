@@ -81,13 +81,14 @@ void WINAPI entry(void) {
     MapNamedBufferFn map_named_buffer = (MapNamedBufferFn)wglGetProcAddress("glMapNamedBuffer");
     GetPointervFn get_pointerv = (GetPointervFn)wglGetProcAddress("glGetPointerv");
     BindBuffer bind_buffer = (BindBuffer)wglGetProcAddress("glBindBuffer");
+    BindBuffer bind_buffer_arb = (BindBuffer)wglGetProcAddress("glBindBufferARB");
     BufferData buffer_data = (BufferData)wglGetProcAddress("glBufferData");
     GenTextures gen_textures = (GenTextures)wglGetProcAddress("glGenTextures");
     TexImage2D tex_image = (TexImage2D)wglGetProcAddress("glTexImage2D");
     CreateShader create_shader = (CreateShader)wglGetProcAddress("glCreateShader");
     ShaderSource shader_source = (ShaderSource)wglGetProcAddress("glShaderSource");
     CompileShader compile_shader = (CompileShader)wglGetProcAddress("glCompileShader");
-    if (!clear_color || !clear || !enable || !vertex || !draw || !draw_elements || !read || !clear_depth || !get_integer || !uniform_handle || !get_string || !get_stringi || !map_buffer_arb || !map_range || !unmap_buffer || !unmap_buffer_arb || !fence_sync || !map_named_buffer || !get_pointerv || !bind_buffer || !buffer_data || !gen_textures || !tex_image || !create_shader || !shader_source || !compile_shader) fail(14);
+    if (!clear_color || !clear || !enable || !vertex || !draw || !draw_elements || !read || !clear_depth || !get_integer || !uniform_handle || !get_string || !get_stringi || !map_buffer_arb || !map_range || !unmap_buffer || !unmap_buffer_arb || !fence_sync || !map_named_buffer || !get_pointerv || !bind_buffer || !bind_buffer_arb || !buffer_data || !gen_textures || !tex_image || !create_shader || !shader_source || !compile_shader) fail(14);
 
     const char *ver1 = (const char *)get_string(GL_VERSION);
     const char *ver2 = (const char *)get_string(GL_VERSION);
@@ -118,15 +119,41 @@ void WINAPI entry(void) {
     get_integer(GL_MAX_TEXTURE_SIZE, &max_texture);
     if (max_texture != 8192) fail(19);
     uniform_handle(0, 0x12345678abcdef01ull);
+
+    // Mapping with no buffer bound (0) must be rejected.
+    if (map_buffer_arb(0x8892u, 0x88BAu) != NULL) fail(33);
+    bind_buffer(0x8892u, 10);
+    // Invalid access enum must be rejected cleanly without mapping.
+    if (map_buffer_arb(0x8892u, 0x1234u) != NULL) fail(34);
     unsigned char *mapped = (unsigned char *)map_range(0x8892u, 0, 4, 0x0002u);
     if (!mapped) fail(17);
     mapped[0] = 0x7f;
     if (!unmap_buffer(0x8892u)) fail(18);
-    unsigned char *mapped_arb = (unsigned char *)map_buffer_arb(0x8892u, 0x88BAu);
-    if (!mapped_arb || mapped_arb[0] != 0x11 || mapped_arb[1] != 0x22 || mapped_arb[2] != 0x33 || mapped_arb[3] != 0x44) fail(28);
-    mapped_arb[0] = 0x55;
-    mapped_arb[3] = 0x99;
+
+    // Cross-target identity: map buffer 10 on ARRAY_BUFFER and buffer 20 on ELEMENT_ARRAY_BUFFER,
+    // then bind buffer 20 to ARRAY_BUFFER via glBindBufferARB and unmap -> must upload buffer 20's bytes.
+    unsigned char *mapped_a = (unsigned char *)map_buffer_arb(0x8892u, 0x88BAu);
+    if (!mapped_a || mapped_a[0] != 0x11 || mapped_a[3] != 0x44) fail(28);
+    mapped_a[0] = 0x55;
+    mapped_a[3] = 0x99;
+    bind_buffer_arb(0x8893u, 20);
+    unsigned char *mapped_b = (unsigned char *)map_buffer_arb(0x8893u, 0x88BAu);
+    if (!mapped_b || mapped_b[0] != 0xA1 || mapped_b[3] != 0xA4) fail(35);
+    mapped_b[0] = 0xB1;
+    mapped_b[3] = 0xB4;
+    bind_buffer_arb(0x8892u, 20);
     if (!unmap_buffer_arb(0x8892u)) fail(29);
+    bind_buffer(0x8892u, 10);
+    if (!unmap_buffer_arb(0x8892u)) fail(36);
+    bind_buffer(0x8893u, 0);
+
+    // Copy-back upload failure on unmap must return GL_FALSE (0).
+    bind_buffer_arb(0x8892u, 30);
+    unsigned char *mapped_err = (unsigned char *)map_buffer_arb(0x8892u, 0x88B9u);
+    if (!mapped_err || mapped_err[0] != 0xE1) fail(37);
+    mapped_err[0] = 0xF1;
+    if (unmap_buffer_arb(0x8892u) != 0) fail(38);
+    bind_buffer(0x8892u, 0);
 
     SetLastError(0);
     if (fence_sync(0x9117u, 0) != NULL || GetLastError() != 120u) fail(30);

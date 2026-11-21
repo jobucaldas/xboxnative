@@ -1494,7 +1494,7 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
             if(q.name=="glClear"){using Fn=void(APIENTRY*)(unsigned);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(unsigned(q.args[0]));else missing();return;}
             if(q.name=="glViewport"){using Fn=void(APIENTRY*)(int,int,int,int);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(int(q.args[0]),int(q.args[1]),int(q.args[2]),int(q.args[3]));else missing();return;}
             if(q.name=="glEnableClientState"){using Fn=void(APIENTRY*)(unsigned);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(unsigned(q.args[0]));else missing();return;}
-            if(q.name=="glBindBuffer"||q.name=="glBindBufferARB"){using Fn=void(APIENTRY*)(unsigned,unsigned);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(unsigned(q.args[0]),unsigned(q.args[1]));else missing();return;}
+            if(q.name=="glBindBuffer"||q.name=="glBindBufferARB"){using Fn=void(APIENTRY*)(unsigned,unsigned);auto p=pointer(q.name.c_str());if(!p)p=pointer(q.name=="glBindBufferARB"?"glBindBuffer":"glBindBufferARB");if(p)reinterpret_cast<Fn>(p)(unsigned(q.args[0]),unsigned(q.args[1]));else missing();return;}
             if(q.name=="glVertexPointer"){using Fn=void(APIENTRY*)(int,unsigned,int,const void*);auto p=pointer(q.name.c_str());if(p)reinterpret_cast<Fn>(p)(int(q.args[0]),unsigned(q.args[1]),int(q.args[2]),reinterpret_cast<const void*>(uintptr_t(q.args[3])));else missing();return;}
             if(q.name=="glDrawArrays"){using Vertex=void(APIENTRY*)(int,unsigned,int,const void*);using Draw=void(APIENTRY*)(unsigned,int,int);auto vp=pointer("glVertexPointer"),dp=pointer(q.name.c_str());if(!dp){missing();return;}if(!q.input.empty()){if(!vp){missing();return;}reinterpret_cast<Vertex>(vp)(int(q.args[3]),unsigned(q.args[4]),0,q.input.data());}reinterpret_cast<Draw>(dp)(unsigned(q.args[0]),int(q.args[1]),int(q.args[2]));return;}
             if(q.name=="x86GlDrawElementsClient"){using Vertex=void(APIENTRY*)(int,unsigned,int,const void*);using Draw=void(APIENTRY*)(unsigned,int,int);auto vp=pointer("glVertexPointer"),dp=pointer("glDrawArrays");if(!vp||!dp){missing();return;}reinterpret_cast<Vertex>(vp)(int(q.args[2]),unsigned(q.args[3]),0,q.input.data());reinterpret_cast<Draw>(dp)(unsigned(q.args[0]),0,int(q.args[1]));return;}
@@ -1524,9 +1524,16 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
             }
             if(q.name=="x86GlUnmapBuffer") {
                 using PutData=void(APIENTRY*)(unsigned,intptr_t,intptr_t,const void*);
+                using GetErr=unsigned(APIENTRY*)();
                 auto put=pointer("glBufferSubData");if(!put)put=pointer("glBufferSubDataARB");
-                if(!put){missing();return;}
-                if(!q.input.empty())reinterpret_cast<PutData>(put)(unsigned(q.args[0]),intptr_t(q.args[1]),intptr_t(q.input.size()),q.input.data());
+                auto get_err=pointer("glGetError");
+                if(!put||(!q.input.empty()&&!get_err)){missing();return;}
+                if(!q.input.empty()) {
+                    auto err_fn=reinterpret_cast<GetErr>(get_err);
+                    for(unsigned drain=0;drain<16&&err_fn()!=0;++drain){}
+                    reinterpret_cast<PutData>(put)(unsigned(q.args[0]),intptr_t(q.args[1]),intptr_t(q.input.size()),q.input.data());
+                    if(err_fn()!=0){q.result=0;return;}
+                }
                 q.result=1;return; // GL_TRUE: glMapBuffer never host-mapped the buffer, so the copy-back above is the whole unmap
             }
             if(q.name=="glGetError"){using Fn=unsigned(APIENTRY*)();auto p=pointer(q.name.c_str());q.result=p?reinterpret_cast<Fn>(p)():0;return;}

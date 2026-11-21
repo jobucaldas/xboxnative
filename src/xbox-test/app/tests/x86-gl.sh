@@ -15,6 +15,8 @@ grep -Fq 'if(p) SetLastError(ERROR_SUCCESS);' "$root/src/xbox-test/app/launch.h"
 # and refuse unbridged pointer-returning functions on the generated catch-all path.
 grep -Fq 'if(q.name=="glGetString"||q.name=="glGetStringi")' "$root/src/xbox-test/app/launch.h"
 grep -Fq 'if(q.name=="glMapBufferRange"||q.name=="glMapBuffer"||q.name=="glMapBufferARB")' "$root/src/xbox-test/app/launch.h"
+grep -Fq 'if(!p)p=pointer(q.name=="glBindBufferARB"?"glBindBuffer":"glBindBufferARB");' "$root/src/xbox-test/app/launch.h"
+grep -Fq 'if(err_fn()!=0){q.result=0;return;}' "$root/src/xbox-test/app/launch.h"
 grep -Fq 'q.return_kind!=x86::GlReturnKind::Pointer' "$root/src/xbox-test/app/launch.h"
 "$cc32" -O1 -Wall -Wextra -Werror -Wno-cast-function-type -nostdlib -Wl,--entry,entry@0 -Wl,--subsystem,console \
   -o "$tmp/x86-gl-guest.exe" "$here/x86-gl-guest.c" -lkernel32 -luser32 -lgdi32 -lopengl32
